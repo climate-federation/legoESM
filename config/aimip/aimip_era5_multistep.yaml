@@ -43,7 +43,7 @@ n_eval_days:  6
 # T21 -> 32 lat x 64 lon, ncol = 2048.  ~50x cheaper than T63 per dt.
 aimip_grid: "gaussian"
 n_max: 21
-nlev: 8
+n_levels: 8
 dt: 1200.0
 
 # 4 epochs, tighter early-stop.

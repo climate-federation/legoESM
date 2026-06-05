@@ -23,7 +23,7 @@ from legoesm.atmosphere.physics.radiation.integration import (
     _compute_insolation,
 )
 
-_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts" / "run"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 from run_rcemip_plane import _build_radiation_config  # type: ignore  # noqa: E402

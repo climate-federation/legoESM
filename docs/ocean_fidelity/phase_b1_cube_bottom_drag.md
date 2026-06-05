@@ -19,7 +19,7 @@
     bottom level: `du/dt |_drag = -r_eff * u / max(h_bot, 1e-10)`.
   - `H_BBL > 0` — overlap-based BBL distribution over `H_BBL` near
     the seafloor.
-* `scripts/run_ocean_test_matrix.py`: removes the
+* `scripts/matrix/run_ocean_test_matrix.py`: removes the
   `NotImplementedError` gate at the previous lines 2155-2173 — cube
   now accepts `bottom_drag_r` straight through.
 
@@ -27,7 +27,7 @@
 
 * `pytest tests/ocean/unit/test_ocean_compatibility.py
   tests/ocean/unit/test_latlon_cgrid_ocean.py`: **53 passed**, 2 skipped.
-* `scripts/run_ocean_test_matrix.py --only stommel_gyre_tracer
+* `scripts/matrix/run_ocean_test_matrix.py --only stommel_gyre_tracer
   --grid cubed_sphere --quick --days 0.1`: PASS (previously failed
   with `NotImplementedError` because the Stommel runner passes
   `bottom_drag_r = 1e-4`).

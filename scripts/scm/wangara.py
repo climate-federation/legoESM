@@ -15,7 +15,7 @@ forcing:
 
 Usage:
     JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu \\
-        .venv/bin/python scripts/run_scm_test_matrix.py wangara --hours 4
+        .venv/bin/python scripts/matrix/run_scm_test_matrix.py wangara --hours 4
 """
 
 from __future__ import annotations

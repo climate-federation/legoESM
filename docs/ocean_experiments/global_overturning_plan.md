@@ -132,7 +132,7 @@ Add `run_global_overturning()` runner:
 ### Validation (lat-lon 1 deg, 60-90 days)
 
 ```bash
-JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --grid latlon --resolution 180x360 --levels 20 --only global_overturning
 ```
 
@@ -143,7 +143,7 @@ Check: gyres, ACC, stratification, WBC, stability.
 ## Phase 4: MPAS cross-grid validation
 
 ```bash
-JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --grid mpas --resolution ico6 --levels 20 --only global_overturning
 ```
 
@@ -268,7 +268,7 @@ transformative.
 
 ### Phase 1 — Quantitative attribution via momentum budget (DONE 2026-04-27)
 
-Wrote `scripts/diagnose_drake_momentum_budget.py`.  Computed the
+Wrote `scripts/tmp/diagnose_drake_momentum_budget.py`.  Computed the
 depth-and-zonal-integrated Drake-band zonal-momentum budget from
 time-mean restart and `time_mean.npz` fields.
 
@@ -388,7 +388,7 @@ follow that pattern.
    relative norm.  Standard practice in MOM6/NEMO: budget cannot diverge
    from the integrated state by more than floating-point order-of-ops.
 
-4. **Driver script** `scripts/run_drake_momentum_budget.py`:
+4. **Driver script** `scripts/run/run_drake_momentum_budget.py`:
    - Restart from `restart_day018250.npz`.
    - Run 1 sim-year (52,560 steps at dt=600 s) with
      `step_with_diagnostics`.
@@ -442,14 +442,14 @@ barotropic-mode-noise issue spun out (see `docs/issues/`).
   4/4 at 1e-12 relative.  Existing C-grid regression suite (17 tests)
   still passes.
 - ✅ Diagnostic runner refactored: shared helper
-  `scripts/_drake_momentum_budget_runner.py` rolls
+  `scripts/run/_drake_momentum_budget_runner.py` rolls
   `tendencies_with_diagnostics + step + accumulate` into a JIT-compiled
   `lax.scan` block.  Speedup measured at **8.4× (82 min → 9.8 min) for
   a 1-yr run** with bit-equivalent science (headline number ±0 at 3
   decimals despite 1e-4 per-cell fp divergence from chaotic compounding).
 - ✅ Three runner scripts (baseline / divdamp / implicit) thinned to
   ~80 LOC each, all calling the helper.  Verification harness at
-  `scripts/verify_drake_runner_jit.py`.
+  `scripts/validate/verify_drake_runner_jit.py`.
 - ✅ Drake-band budget computed across all three configurations
   (baseline / Stage 0 / Stage 3-implicit) — see issue doc table.
 

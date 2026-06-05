@@ -62,7 +62,7 @@ def _build_model(dt: float, n_acoustic: int = None):
         nx=nx, ny=ny, nlev=nlev, dx=dx, dy=dx, dtype=jnp.float64,
     )
     theta_fn = make_wing2018_theta_ref_fn(
-        T_sfc=300.0, q_sfc=0.0224, z_t=15_000.0, Gamma=6.7e-3,
+        T_v0=300.0, q_sfc=0.0224, z_t=15_000.0, Gamma=6.7e-3,
     )
     hc = create_height_coordinate(
         n_levels=nlev, H=H, theta_ref_fn=theta_fn,
@@ -222,7 +222,7 @@ def _build_model_substep(dt: float):
     grid = create_plane_grid(nx=nx, ny=ny, nlev=nlev, dx=2_000.0, dy=2_000.0,
                              dtype=jnp.float64)
     theta_fn = make_wing2018_theta_ref_fn(
-        T_sfc=300.0, q_sfc=0.0224, z_t=15_000.0, Gamma=6.7e-3)
+        T_v0=300.0, q_sfc=0.0224, z_t=15_000.0, Gamma=6.7e-3)
     hc = create_height_coordinate(n_levels=nlev, H=33_000.0,
                                   theta_ref_fn=theta_fn)
     terrain = make_flat_plane_terrain_metric(grid, hc)

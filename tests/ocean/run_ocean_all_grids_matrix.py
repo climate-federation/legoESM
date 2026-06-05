@@ -5,7 +5,7 @@ This driver standardizes outputs under ``results/ocean/<grid_type>/...``, double
 horizontal resolution relative to baseline defaults, and runs finite-volume and
 spectral-style options where available.
 
-Canonical test cases are covered by ``scripts/run_ocean_test_matrix.py``:
+Canonical test cases are covered by ``scripts/matrix/run_ocean_test_matrix.py``:
   - rest_state, barotropic_wave, regional_gyre, baroclinic, phillips_two_layer,
     inertia_gravity_wave, lock_exchange, overflow, stommel_gyre_tracer
 """
@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Callable
 
 
-# Canonical test cases from scripts/run_ocean_test_matrix.py.
+# Canonical test cases from scripts/matrix/run_ocean_test_matrix.py.
 # These must match the RUNNERS dict in the canonical runner.
 REQUESTED_CASES = (
     "rest_state",
@@ -39,7 +39,7 @@ REQUESTED_CASES = (
     "stommel_gyre_tracer",
 )
 
-# Spectral runner (scripts/run_ocean_spectral_tests.py) covers a subset.
+# Spectral runner (scripts/run/run_ocean_spectral_tests.py) covers a subset.
 SPECTRAL_CASES = (
     "rest_state",
     "gravity_wave",
@@ -311,7 +311,7 @@ def main() -> int:
             def build_cube_cmd(dt_now: float) -> list[str]:
                 return [
                     args.python,
-                    "scripts/run_ocean_test_matrix.py",
+                    "scripts/matrix/run_ocean_test_matrix.py",
                     "--grid",
                     "cubed_sphere",
                     "--resolution",
@@ -351,7 +351,7 @@ def main() -> int:
             def build_latlon_projection_cmd(dt_now: float) -> list[str]:
                 return [
                     args.python,
-                    "scripts/run_ocean_test_matrix.py",
+                    "scripts/matrix/run_ocean_test_matrix.py",
                     "--grid",
                     "cubed_sphere",
                     "--resolution",
@@ -418,7 +418,7 @@ def main() -> int:
         def build_spectral_cmd(dt_now: float) -> list[str]:
             return [
                 args.python,
-                "scripts/run_ocean_spectral_tests.py",
+                "scripts/run/run_ocean_spectral_tests.py",
                 "--x64",
                 "--truncation",
                 str(spectral_trunc),

@@ -58,7 +58,7 @@ def _import_matrix_module():
     """Load the matrix runner module (file-based, not a package)."""
     import importlib.util
     repo_root = Path(__file__).resolve().parents[2]
-    matrix_path = repo_root / "scripts" / "run_ocean_test_matrix.py"
+    matrix_path = repo_root / "scripts" / "matrix" / "run_ocean_test_matrix.py"
     spec = importlib.util.spec_from_file_location(
         "_rom_for_omip2", matrix_path,
     )

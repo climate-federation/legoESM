@@ -75,7 +75,7 @@ class TestAtmToSurfaceConstruction:
 
     def test_all_fields_present(self):
         """AtmToSurface must have exactly 15 fields."""
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
 
         shape = (6, 4, 4)
         ones = jnp.ones(shape)
@@ -104,7 +104,7 @@ class TestAtmToSurfaceConstruction:
 
     def test_missing_has_precipitation_raises(self):
         """Omitting has_precipitation must raise TypeError, not silently succeed."""
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
 
         shape = (6, 4, 4)
         ones = jnp.ones(shape)

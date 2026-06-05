@@ -112,7 +112,7 @@ def test_spectral_rce_smoke_stable_and_conservative():
     Kessler + bulk surface). Uses the spectral wrapper with
     apply_dealias=True so any aliased high-k energy from the FD
     upwind nonlinear products is filtered each step."""
-    from scripts.run_rcemip_plane import make_rcemip_physics
+    from scripts.run.run_rcemip_plane import make_rcemip_physics
     grid, hc, tm, cfg = _build_setup()
     spec_model = SpectralPlaneCompressibleEulerModel(
         grid, hc, tm, cfg,
@@ -183,7 +183,7 @@ def test_spectral_rce_dycore_natural_conservation():
     each step. The two tests together separate ``did the fixer
     fire?`` from ``did the dycore stay close to conservative?``.
     """
-    from scripts.run_rcemip_plane import make_rcemip_physics
+    from scripts.run.run_rcemip_plane import make_rcemip_physics
     grid, hc, tm, cfg = _build_setup(fix_mass=False)
     spec_model = SpectralPlaneCompressibleEulerModel(
         grid, hc, tm, cfg,
@@ -228,7 +228,7 @@ def test_spectral_extras_off_matches_fd_plane_within_tolerance():
     spectral-then-roundtripped state must equal the direct FD state
     to FFT round-off (~1e-10) — not a "method comparison" but a
     correctness pin."""
-    from scripts.run_rcemip_plane import make_rcemip_physics
+    from scripts.run.run_rcemip_plane import make_rcemip_physics
     grid, hc, tm, cfg = _build_setup()
     fd_model = PlaneCompressibleEulerModel(grid, hc, tm, cfg)
     spec_model = SpectralPlaneCompressibleEulerModel(
@@ -271,7 +271,7 @@ def test_spectral_buoyancy_sign_consistent_with_fd():
     """Spectral plane with full extras (hyperdiff + dealias) still
     produces an UPWARD vertical-velocity response to a warm parcel —
     same sign as the FD plane and the other NH grids."""
-    from scripts.run_rcemip_plane import make_rcemip_physics
+    from scripts.run.run_rcemip_plane import make_rcemip_physics
     grid, hc, tm, cfg = _build_setup()
     spec_model = SpectralPlaneCompressibleEulerModel(
         grid, hc, tm, cfg,

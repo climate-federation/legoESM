@@ -206,9 +206,38 @@ class TestSWMPASPrecision:
         return state_new, get_policy()
 
     def test_fp32(self):
-        s, p = self._run_one_step("fp32")
-        assert s.h.data.dtype == jnp.float32
-        assert jnp.all(jnp.isfinite(s.h.data))
+        # This module forces jax_enable_x64=True for the full matrix, but x64
+        # is a global, irreversible switch — so the in-process fp32 step still
+        # sees an x64-capable backend and _fix_mass_mpas (correctly) promotes h
+        # to float64 to keep mass conserved to ~1e-12 (the fp64 mass correction
+        # is load-bearing; truncating it back to fp32 breaks
+        # test_sw_mass_conservation_anchored).  The honest "fp32 storage" check
+        # therefore needs a backend where x64 was NEVER enabled, which only a
+        # fresh subprocess can provide.
+        import subprocess, sys, textwrap, os
+        code = textwrap.dedent("""
+            import jax, jax.numpy as jnp
+            from legoesm.runtime.precision import apply_precision
+            apply_precision("fp32")
+            from legoesm.grids.voronoi import create_voronoi_mesh
+            from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+                MPASShallowWaterModel, MPASShallowWaterConfig)
+            from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
+                williamson_test2_mpas)
+            mesh = create_voronoi_mesh(3)
+            model = MPASShallowWaterModel(mesh, MPASShallowWaterConfig())
+            s = model.step(williamson_test2_mpas(mesh), 60.0)
+            assert s.h.data.dtype == jnp.float32, s.h.data.dtype
+            assert bool(jnp.all(jnp.isfinite(s.h.data)))
+            print("OK")
+        """)
+        env = os.environ.copy()
+        env.pop("JAX_ENABLE_X64", None)  # ensure x64 is OFF in the child
+        r = subprocess.run([sys.executable, "-c", code],
+                           capture_output=True, text=True, env=env, timeout=300)
+        assert r.returncode == 0 and "OK" in r.stdout, (
+            f"fp32 MPAS step did not keep float32 storage.\n"
+            f"stdout: {r.stdout}\nstderr: {r.stderr}")
 
     def test_fp64(self):
         s, p = self._run_one_step("fp64")

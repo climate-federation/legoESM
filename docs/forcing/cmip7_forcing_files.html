@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CMIP7 Forcing Files — scripts/run_amip.py</title>
+<title>CMIP7 Forcing Files — scripts/run/run_amip.py</title>
 <style>
     :root {
         --bg: #fafbfc;
@@ -498,7 +498,7 @@
 <header class="page-header">
     <div class="inner">
         <div class="eyebrow">legoESM · Forcing Analysis · CMIP7</div>
-        <h1>CMIP7 Forcing Files — <code style="background: rgba(255,255,255,0.15); color:#fff; border-color: rgba(255,255,255,0.3);">scripts/run_amip.py</code></h1>
+        <h1>CMIP7 Forcing Files — <code style="background: rgba(255,255,255,0.15); color:#fff; border-color: rgba(255,255,255,0.3);">scripts/run/run_amip.py</code></h1>
         <div class="subtitle">Expected schema derived from <code style="background: rgba(255,255,255,0.15); color:#fff; border-color: rgba(255,255,255,0.3);">legoesm.forcing.external</code> + <code style="background: rgba(255,255,255,0.15); color:#fff; border-color: rgba(255,255,255,0.3);">legoesm.forcing.amip</code> (post-<code style="background: rgba(255,255,255,0.15); color:#fff; border-color: rgba(255,255,255,0.3);">ap/fix-amip-external-forcing</code>) compared against the raw CMIP7 input4MIPs files on Levante. Includes recoverable matches, hard mismatches, and loader-code recommendations.</div>
         <div class="meta-row">
             <span class="meta-pill">📂 /work/bd1179/CMIP7_forcings_raw</span>
@@ -1101,7 +1101,7 @@
     <h2 class="section-title"><span class="section-num">§4</span>Required CLI invocation for CMIP7 today</h2>
     <p>Given the compatibility state above, only these flags point at real CMIP7 files without code changes:</p>
     <pre class="code-block"><span class="cmt"># AMIP-style CMIP7 run with loader support as of ap/fix-amip-external-forcing</span>
-scripts/run_amip.py \
+scripts/run/run_amip.py \
   <span class="flag">--forcing-path</span>  <span class="val">/work/bd1179/CMIP7_forcings_raw/sst_and_seaice/tos_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_187001-202212.nc</span> \
   <span class="flag">--sic-path</span>      <span class="val">/work/bd1179/CMIP7_forcings_raw/sst_and_seaice/siconc_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_187001-202212.nc</span> \
   <span class="flag">--sst-var</span>       <span class="val">tos</span> <span class="flag">--sst-offset</span> <span class="val">273.15</span> \
@@ -1138,7 +1138,7 @@ scripts/run_amip.py \
             Add an <code>open_forcing_dataset_mf</code> helper that accepts a list of paths or a glob and concatenates along <code>time</code> — used by ozone, per-species GHG, and large emission products.</li>
         <li><strong><code>amip.py</code> — CMIP7 SST/SIC preset.</strong>
             <code>get_amip_preset("cmip7")</code> returning <code>sst_var="tos"</code>, <code>sic_var="siconc"</code>, <code>sst_offset=273.15</code>, <code>sic_scale=0.01</code>, and recommending the <code>_bcs</code> variants when available. Avoids the 4-flag incantation above.</li>
-        <li><strong>Documentation in <code>scripts/run_amip.py</code> help strings.</strong>
+        <li><strong>Documentation in <code>scripts/run/run_amip.py</code> help strings.</strong>
             Point at the CMIP7 layout and warn that <code>--ghg-forcing external</code> and <code>--aerosol-forcing external</code> are not wired for CMIP7 yet.</li>
     </ol>
 </section>

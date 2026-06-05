@@ -243,7 +243,7 @@ def test_smooth_k1_pattern_zero_mean_and_bounded():
       theta_noise_amp [K] for unit scaling.
 
     Exercises ``build_smooth_k1_pattern`` directly (iter-208 promoted
-    the helper from scripts/run_rce_mpi_long.py to
+    the helper from scripts/run/run_rce_mpi_long.py to
     legoesm.atmosphere.idealized.rcemip_initial_conditions so this
     test imports it via the standard package path instead of loading
     the entire heavy driver module).

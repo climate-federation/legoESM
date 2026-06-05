@@ -338,7 +338,7 @@ The additional interpolation operations (4-point averages, PV computation) can l
 | `ocean/conservation_latlon.py` | **No change** | None |
 | `ocean/physics/combined.py` | Adapter for C-grid face shapes | Small |
 | `ocean/experiments/*.py` (7 files) | v-shape updates | Small each |
-| `scripts/run_ocean_test_matrix.py` | Diagnostics for staggered v | Medium |
+| `scripts/matrix/run_ocean_test_matrix.py` | Diagnostics for staggered v | Medium |
 | Tests | New C-grid operator tests, shape updates | Medium |
 
 ## References

@@ -64,7 +64,7 @@ final path.
 
 The user-facing entrypoint is:
 
-- `scripts/ml_physics_parameterization.py`
+- `scripts/run/ml_physics_parameterization.py`
 
 It performs one linear workflow:
 

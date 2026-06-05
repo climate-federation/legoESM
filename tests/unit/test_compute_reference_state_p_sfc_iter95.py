@@ -31,7 +31,6 @@ from legoesm import constants
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
     WING_GAMMA,
     WING_Q_SFC_DEFAULT,
-    WING_T_SFC_DEFAULT,
     WING_Z_T,
     make_wing2018_theta_ref_fn,
 )
@@ -39,8 +38,12 @@ from legoesm.grids.vertical import compute_reference_state
 
 
 def _wing_theta_fn():
+    # Near-equilibrium 300 K profile (matches the RCE smoke drivers, which set
+    # T_v0 = SST = 300 K; strict-RCEMIP T_v0=295 is exercised elsewhere). The
+    # surface-temp param was renamed T_sfc -> T_v0; anchors below are for this
+    # T_v0=300 profile.
     return make_wing2018_theta_ref_fn(
-        T_sfc=WING_T_SFC_DEFAULT,
+        T_v0=300.0,
         q_sfc=WING_Q_SFC_DEFAULT,
         z_t=WING_Z_T,
         Gamma=WING_GAMMA,
@@ -81,7 +84,11 @@ def test_legacy_mode_gives_too_hot_lowest_level():
     )
     T = _t_from_pi_and_theta(theta_0, exner_0)
     T_lowest = float(T[-1])
-    T_legacy_expected = 308.78
+    # T_v0=300 K equilibrium profile (matches the RCE smoke drivers): the legacy
+    # top-down BC gives 307.29 K at z=550 m. Was 308.78 K when the param was the
+    # actual surface temp; T_v0 is now the surface VIRTUAL temp, so the same 300 K
+    # gives a slightly cooler profile.
+    T_legacy_expected = 307.29
     assert abs(T_lowest - T_legacy_expected) < 0.5, (
         f"Legacy mode T_lowest expected {T_legacy_expected:.2f} K "
         f"± 0.5 K (the documented bug; see CRM_implementation.md "
@@ -104,10 +111,14 @@ def test_p_sfc_mode_matches_wing_spec():
     T = _t_from_pi_and_theta(theta_0, exner_0)
     T_lowest = float(T[-1])
     z_lowest = float(z[-1])
-    T_expected = WING_T_SFC_DEFAULT - WING_GAMMA * z_lowest
+    # T_v0=300 K equilibrium profile: virtual T_v(550)=300-Gamma*550=296.3 K,
+    # actual T = T_v / (1 + (1/eps-1)*q_v) = 293.36 K at z=550 m (q_v~0.0162). The
+    # old anchor T_sfc-Gamma*z=296.3 K lapsed the SST directly as the actual temp,
+    # before the T_sfc -> T_v0 (virtual) rename.
+    T_expected = 293.36
     assert abs(T_lowest - T_expected) < 0.5, (
-        f"p_sfc mode T_lowest expected within 0.5 K of "
-        f"T_sfc - Gamma*z = {T_expected:.2f} K at z={z_lowest:.1f} m; "
+        f"p_sfc mode T_lowest expected within 0.5 K of the canonical "
+        f"T_v0=295 profile value {T_expected:.2f} K at z={z_lowest:.1f} m; "
         f"got {T_lowest:.2f} K."
     )
 
@@ -129,7 +140,10 @@ def test_p_sfc_mode_vs_legacy_diff_at_lowest_level():
     T_legacy = float((theta_legacy * exner_legacy)[-1])
     T_psfc = float((theta_psfc * exner_psfc)[-1])
     diff = T_legacy - T_psfc
-    diff_expected = 11.97
+    # T_v0=300 K equilibrium profile: legacy-minus-fixed = 13.93 K at z=550 m
+    # (was 11.97 K under the pre-rename actual-temp param). The qualitative
+    # iter-95 result — top-down BC materially hotter than the p_sfc BC — holds.
+    diff_expected = 13.93
     assert abs(diff - diff_expected) < 0.5, (
         f"Legacy-minus-fixed diff at lowest level: expected "
         f"{diff_expected:.2f} K ± 0.5 K (the documented iter-95 "
@@ -223,7 +237,7 @@ def test_p_sfc_branch_jit_compatible():
         return (theta * exner)[-1]  # T at lowest level
 
     t_lowest = float(f(101480.0))
-    assert 295.0 < t_lowest < 298.0
+    assert 292.0 < t_lowest < 295.0  # T_v0=300 equilibrium lowest level ~293.4 K
 
 
 def test_p_sfc_branch_grad_compatible():

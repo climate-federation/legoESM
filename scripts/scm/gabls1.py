@@ -24,7 +24,7 @@ profile matching.
 
 Usage:
     JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu \\
-        .venv/bin/python scripts/run_scm_test_matrix.py gabls1
+        .venv/bin/python scripts/matrix/run_scm_test_matrix.py gabls1
 """
 
 from __future__ import annotations

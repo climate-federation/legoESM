@@ -1,4 +1,4 @@
-"""Unit tests for ``scripts/compare_rce_trajectories.py``.
+"""Unit tests for ``scripts/validate/compare_rce_trajectories.py``.
 
 iter-110: the deterministic-reproducibility check between
 ``/tmp/iter98_crm32x32_rad10d`` and ``/tmp/iter105_crm32x32_rad30d``
@@ -30,7 +30,7 @@ def _load(module_name: str, file: Path):
 
 compare_mod = _load(
     "compare_rce_trajectories",
-    REPO_ROOT / "scripts" / "compare_rce_trajectories.py",
+    REPO_ROOT / "scripts" / "validate" / "compare_rce_trajectories.py",
 )
 summary_mod = compare_mod.summary_mod
 
@@ -172,7 +172,7 @@ def test_quiet_suppresses_diff_table(tmp_path, capsys, monkeypatch):
     This test asserts the column-header row of the diff table
     (``day  dCWV_mean[mm]...``) is ABSENT, which only holds in
     quiet mode (the table prints those labels per format_diff_table
-    at scripts/compare_rce_trajectories.py:219).
+    at scripts/validate/compare_rce_trajectories.py:219).
     """
     a = _make_run(tmp_path, "a", [(0.0, 50.0), (1.0, 51.0)])
     b = _make_run(tmp_path, "b", [(0.0, 50.5), (1.0, 52.0)])

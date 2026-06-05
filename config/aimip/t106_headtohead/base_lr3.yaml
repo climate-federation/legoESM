@@ -32,7 +32,7 @@ n_train_days: 12
 n_eval_days: 6
 aimip_grid: gaussian
 n_max: 106
-nlev: 8
+n_levels: 8
 dt: 400.0
 aimip_n_epochs: 4
 aimip_patience: 2

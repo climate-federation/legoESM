@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "matrix"))  # for `import run_ocean_test_matrix`
 
 from legoesm.ocean.experiments.lock_exchange import (  # noqa: E402
     EXPERIMENT_CONFIG,

@@ -6,7 +6,7 @@
 FC-Gram spectral operator path (`ocean_pe_fc.ocean_baroclinic_
 tendencies_fc`) via the `OceanModel(..., fc_config=...)` constructor
 kwarg removes the face-edge halo amplification described below.
-`scripts/run_omip.py --grid cubed_sphere --quick` now completes the
+`scripts/run/run_omip.py --grid cubed_sphere --quick` now completes the
 30-day smoke run with `max_speed ≈ 3e-5 m/s` and `SST ≈ 19.63`,
 fully equivalent to the latlon, MPAS, and spectral grids.  The script
 enables FC by default for cubed_sphere (see `_create_setup`).
@@ -128,7 +128,7 @@ C∞-smooth extension into the halo region.  This:
 The fix is wired through `OceanModel(..., fc_config=...)`; pass an
 `FCOperatorConfig` (build with `legoesm.core.operators_fc.
 build_fc_config`) to activate.  Passing `fc_config=None` (default)
-keeps the legacy cd-grid path for back-compat.  `scripts/run_omip.py`
+keeps the legacy cd-grid path for back-compat.  `scripts/run/run_omip.py`
 builds and threads `fc_config` automatically for `--grid
 cubed_sphere`.
 

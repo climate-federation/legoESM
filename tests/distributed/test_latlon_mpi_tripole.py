@@ -285,3 +285,169 @@ class TestIssue356GradientYPartitionCut:
         all_errs = MPI.COMM_WORLD.allgather(max_err)
         assert max(all_errs) < 1e-10, (
             f"gradient_y_cgrid 3D max error across ranks: {all_errs}")
+
+
+class TestPgfYMeridionalFoldMPI:
+    """Meridional v-face PGF operators must match serial at partition cuts.
+
+    Follow-up to #357 review: the y-face PGF operators originally built the
+    padded v-face array from already-computed interior faces, which cannot
+    reconstruct the cross-partition v-face (it needs the neighbour rank's
+    adjacent CELL column).  After the cell-pad-first fix, the rank-local
+    result must equal the serial reference slice ``[s:e+1]`` on every rank.
+    """
+
+    NLEV = 4
+
+    def _cell_fields(self, seed):
+        rng = np.random.default_rng(seed)
+        # Positive partial-cell thicknesses and a density field.
+        h = jnp.asarray(
+            0.1 + np.abs(rng.standard_normal(
+                (N_LAT, N_LON, self.NLEV), dtype=np.float64)))
+        rho = jnp.asarray(
+            1025.0 + rng.standard_normal(
+                (N_LAT, N_LON, self.NLEV), dtype=np.float64))
+        is_active = jnp.ones((N_LAT, N_LON, self.NLEV), dtype=bool)
+        return h, rho, is_active
+
+    def test_density_jacobian_pgf_y_matches_serial(self, fold):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            density_jacobian_pgf_smc03_y,
+        )
+        from legoesm import constants
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        h, rho, is_active = self._cell_fields(seed=7)
+        ref = density_jacobian_pgf_smc03_y(rho, h, is_active, geom, constants.g)
+
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        s, e = layout.lat_start, layout.lat_end
+        try:
+            set_halo_backend("mpi", layout)
+            local = density_jacobian_pgf_smc03_y(
+                rho[s:e], h[s:e], is_active[s:e], band, constants.g)
+        finally:
+            set_halo_backend("local")
+
+        max_err = float(jnp.max(jnp.abs(local - ref[s:e + 1])))
+        all_errs = MPI.COMM_WORLD.allgather(max_err)
+        assert max(all_errs) < 1e-9, (
+            f"density_jacobian_pgf_smc03_y max error across ranks: {all_errs}")
+
+    def test_partial_cell_pgf_correction_y_matches_serial(self, fold):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            partial_cell_pgf_correction_y,
+        )
+        from legoesm import constants
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        rng = np.random.default_rng(11)
+        centroid = jnp.asarray(
+            np.abs(rng.standard_normal((N_LAT, N_LON, self.NLEV))))
+        rho_prime = jnp.asarray(
+            rng.standard_normal((N_LAT, N_LON, self.NLEV)))
+        ref = partial_cell_pgf_correction_y(
+            centroid, rho_prime, geom, constants.g)
+
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        s, e = layout.lat_start, layout.lat_end
+        try:
+            set_halo_backend("mpi", layout)
+            local = partial_cell_pgf_correction_y(
+                centroid[s:e], rho_prime[s:e], band, constants.g)
+        finally:
+            set_halo_backend("local")
+
+        max_err = float(jnp.max(jnp.abs(local - ref[s:e + 1])))
+        all_errs = MPI.COMM_WORLD.allgather(max_err)
+        assert max(all_errs) < 1e-9, (
+            f"partial_cell_pgf_correction_y max error across ranks: {all_errs}")
+
+
+class TestCurlVertexFoldMPI:
+    """curl_vertex_cgrid must match serial at partition cuts.
+
+    Follow-up to #357 review: with the fold active on every rank,
+    is_tripolar() routes all ranks through the tripolar curl path, which
+    halo-exchanged ``u`` but plain-jnp.pad-zeroed the ``dx_T`` metric at
+    partition cuts.  After switching dx_T to backend-aware lat padding, the
+    rank-local vorticity must equal the serial reference slice ``[s:e+1]``.
+    """
+
+    @pytest.mark.parametrize("ndim", [2, 3])
+    def test_curl_matches_serial(self, fold, ndim):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            curl_vertex_cgrid,
+        )
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        rng = np.random.default_rng(23)
+        nlev = 3
+        u_shape = (N_LAT, N_LON + 1) + ((nlev,) if ndim == 3 else ())
+        v_shape = (N_LAT + 1, N_LON) + ((nlev,) if ndim == 3 else ())
+        u = jnp.asarray(rng.standard_normal(u_shape, dtype=np.float64))
+        v = jnp.asarray(rng.standard_normal(v_shape, dtype=np.float64))
+        zeta_serial = curl_vertex_cgrid(u, v, geom)
+
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        s, e = layout.lat_start, layout.lat_end
+        try:
+            set_halo_backend("mpi", layout)
+            zeta_local = curl_vertex_cgrid(u[s:e], v[s:e + 1], band)
+        finally:
+            set_halo_backend("local")
+
+        max_err = float(jnp.max(jnp.abs(zeta_local - zeta_serial[s:e + 1])))
+        all_errs = MPI.COMM_WORLD.allgather(max_err)
+        assert max(all_errs) < 1e-9, (
+            f"curl_vertex_cgrid max error across ranks: {all_errs}")
+
+
+class TestMinCellToVfaceFoldMPI:
+    """min_cell_to_vface must match serial at partition cuts.
+
+    Follow-up to #357 review: the v-face min-rule originally hardcoded a
+    zero south row and used rank-local cells only, so the partition-cut
+    face thickness was wrong (and the south cut was forced to a wall).
+    After the cell-pad-first fix the rank-local result must equal the
+    serial reference slice ``[s:e+1]``.
+    """
+
+    @pytest.mark.parametrize("ndim", [2, 3])
+    def test_min_cell_to_vface_matches_serial(self, fold, ndim):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            min_cell_to_vface,
+        )
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        rng = np.random.default_rng(31)
+        shape = (N_LAT, N_LON) + ((3,) if ndim == 3 else ())
+        # Positive thickness field (min-rule operand).
+        f = jnp.asarray(0.1 + np.abs(rng.standard_normal(shape)))
+        ref = min_cell_to_vface(f, geom)
+
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        s, e = layout.lat_start, layout.lat_end
+        try:
+            set_halo_backend("mpi", layout)
+            local = min_cell_to_vface(f[s:e], band)
+        finally:
+            set_halo_backend("local")
+
+        max_err = float(jnp.max(jnp.abs(local - ref[s:e + 1])))
+        all_errs = MPI.COMM_WORLD.allgather(max_err)
+        assert max(all_errs) < 1e-9, (
+            f"min_cell_to_vface max error across ranks: {all_errs}")

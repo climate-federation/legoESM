@@ -1,4 +1,4 @@
-"""Smoke test for ``scripts/bench_halo_exchange.py``.
+"""Smoke test for ``scripts/bench/bench_halo_exchange.py``.
 
 iter-257: fourth script in the iter-252/254/255 untested-bench
 coverage chain. ``bench_halo_exchange.py`` is the MPI halo-exchange
@@ -16,7 +16,7 @@ from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
 )
 
 
-SCRIPT = REPO_ROOT / "scripts" / "bench_halo_exchange.py"
+SCRIPT = REPO_ROOT / "scripts" / "bench" / "bench_halo_exchange.py"
 
 
 def test_bench_halo_exchange_cubed_sphere_single_rank_smoke(tmp_path):

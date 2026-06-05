@@ -18,7 +18,7 @@ from legoesm.atmosphere.physics.microphysics.config import (
     SeifertBehengConfig,
     MorrisonConfig,
     ThompsonConfig,
-    MLEmulatorConfig,
+    MicrophysicsMLEmulatorConfig,
 )
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -816,7 +816,7 @@ class TestMLEmulator:
 
     def _make_model(self, config=None):
         if config is None:
-            config = MLEmulatorConfig()
+            config = MicrophysicsMLEmulatorConfig()
         key = jax.random.PRNGKey(config.seed)
         return MicrophysicsEmulator(
             config.n_input, config.n_hidden, config.n_layers,
@@ -825,7 +825,7 @@ class TestMLEmulator:
 
     def test_output_shapes(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        config = MLEmulatorConfig()
+        config = MicrophysicsMLEmulatorConfig()
         model = self._make_model(config)
         out = ml_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
                               config=config, model=model)
@@ -834,7 +834,7 @@ class TestMLEmulator:
 
     def test_precipitation_non_negative(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        config = MLEmulatorConfig()
+        config = MicrophysicsMLEmulatorConfig()
         model = self._make_model(config)
         out = ml_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
                               config=config, model=model)
@@ -842,7 +842,7 @@ class TestMLEmulator:
 
     def test_nonzero_tendencies(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        config = MLEmulatorConfig()
+        config = MicrophysicsMLEmulatorConfig()
         model = self._make_model(config)
         out = ml_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
                               config=config, model=model)
@@ -851,7 +851,7 @@ class TestMLEmulator:
 
     def test_finite_outputs(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        config = MLEmulatorConfig()
+        config = MicrophysicsMLEmulatorConfig()
         model = self._make_model(config)
         out = ml_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
                               config=config, model=model)
@@ -862,7 +862,7 @@ class TestMLEmulator:
 
     def test_differentiable(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        config = MLEmulatorConfig()
+        config = MicrophysicsMLEmulatorConfig()
         model = self._make_model(config)
 
         def loss(T_in):

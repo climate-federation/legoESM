@@ -1,0 +1,57 @@
+# legoESM experiment template — Williamson Test Case 2
+# Steady-state nonlinear zonal geostrophic flow (global shallow-water).
+#
+# A named, version-controlled template (lesommer model): resolve it with
+#   scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2 --output-dir ./w2
+# and override any field with -o dot.notation=value, e.g.
+#   -o grid.resolution=96 -o time.duration_hours=240
+# init writes a resolved config.yaml + run.sh (calls `legoesm run`), and the
+# run's reproducibility is captured by the driver's run_manifest.json
+# (resolved config + state_digest + git_hash); re-run with `legoesm reproduce`.
+
+experiment:
+  tier: tier1                  # research rung (idealized, no external data)
+  complexity: shallow_water    # AtmosphereComplexity rung
+  extent: global               # grids.capability extent
+  maturity: run_tested         # exercised by run_atmosphere_test_matrix.py
+  description: >
+    Williamson (1992) Test Case 2 — steady geostrophic flow; the canonical
+    shallow-water dycore accuracy/stability check. No external data needed.
+  data: []                     # idealized: no datasets to fetch
+  conservation_gates:          # the matrix PASS/FAIL gates this case asserts
+    - mass
+    - energy
+
+model:
+  name: "Williamson Test Case 2"
+  type: atmosphere_only
+
+grid:
+  type: cubed_sphere
+  resolution: 48               # C48 ~ 200 km
+  n_levels: 1
+  vertical_coord: none
+
+atmosphere:
+  dynamics: shallow_water      # canonical key -> ExperimentConfig.dycore.model_type
+  advection: centered
+  time_integrator: ssp_rk3
+  dt_seconds: 600              # 10 minutes
+  hyperdiffusion_coeff: 0.0
+
+conservation:
+  fix_mass: true
+  fix_energy: true
+
+time:
+  duration_hours: 120          # 5 days
+  output_interval_hours: 6
+
+output:
+  format: zarr
+  path: output/williamson_test2/
+
+hardware:
+  precision:
+    dynamics: float32
+  devices: auto

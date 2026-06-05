@@ -138,7 +138,7 @@ comparison and a list of any required code changes.
 
 **Effort**: 1 wk. Gates item 4.
 
-`scripts/prepare_omip_forcing.py`. Operations:
+`scripts/data/prepare_omip_forcing.py`. Operations:
 
 1. Download/locate JRA55-do v1.4+ "corrected" files (Tsujino et al. 2018, 2020).
    Variables: `uas`, `vas` (3-hourly winds); `tas`, `huss`, `psl`, `prra`,
@@ -190,7 +190,7 @@ Zarr + lazy chunked reads with local cache).
 `src/legoesm/ocean/forced_driver.py` if it grows large enough to warrant a
 module).
 
-Templated on `scripts/run_amip.py` but reversed (ocean forced by atmosphere
+Templated on `scripts/run/run_amip.py` but reversed (ocean forced by atmosphere
 instead of atmosphere forced by SST).
 
 **Per-step loop** (must be JIT-clean per CLAUDE.md):

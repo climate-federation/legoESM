@@ -42,7 +42,7 @@ def _make_grid(n=8):
 
 
 def _make_forcing(shape=(6, 8, 8)):
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     return AtmToSurface(
         sw_down=jnp.full(shape, 100.0),
         lw_down=jnp.full(shape, 200.0),

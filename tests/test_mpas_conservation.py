@@ -309,3 +309,41 @@ def check_ocean_conservation():
 if __name__ == "__main__":
     check_sw_conservation()
     check_ocean_conservation()
+
+
+def test_shared_core_mpas_fixers_signature_and_conserve():
+    """The MPAS mass/energy conservation fixers shared via
+    ``legoesm.core.conservation`` (federation dedup) take
+    ``(state_new, state_old, mesh, ...)`` and restore the energy / mass of
+    ``state_old`` after a perturbation.  The fp64 conservation accumulator keeps
+    the energy and mass budgets tight (this also pins the new signature so the
+    legacy ``(state, target, mesh)`` shape cannot silently come back)."""
+    from legoesm.core.conservation import fix_mass_mpas, fix_energy_mpas
+
+    mesh = create_voronoi_mesh(subdivision_level=2)
+    g = constants.g
+    state = williamson_test5_mpas(mesh)  # nonzero KE + topography
+    diag0 = sw_diagnostics(state, mesh, g)
+
+    bad = state._replace(
+        u=state.u.replace(data=state.u.data * 1.10),     # changes KE
+        h=state.h.replace(data=state.h.data + 5.0),      # changes mass
+    )
+
+    # Energy fixer: rescale u so E(new) matches E(state_old=state).
+    e_fixed = fix_energy_mpas(bad, state, mesh, g)
+    rel_e = abs(sw_diagnostics(e_fixed, mesh, g)["energy"] - diag0["energy"]) / diag0["energy"]
+    assert rel_e < 1e-6, f"energy not restored: rel err {rel_e:.2e}"
+
+    # Mass fixer, anchor-to-target mode.
+    m_fixed = fix_mass_mpas(bad, state, mesh, target_mass=diag0["mass"])
+    rel_m = abs(sw_diagnostics(m_fixed, mesh, g)["mass"] - diag0["mass"]) / diag0["mass"]
+    assert rel_m < 1e-10, f"mass not anchored: rel err {rel_m:.2e}"
+
+    # Mass fixer, match-previous-state mode (target_mass=None).  Tolerance is
+    # fp32-realistic: the fixer's internal mass uses the fp64 accumulator, while
+    # ``sw_diagnostics`` re-measures in the (fp32) storage dtype — that
+    # native-sum rounding, not the fixer, sets the floor here.
+    m_fixed2 = fix_mass_mpas(bad, state, mesh)
+    rel_m2 = abs(sw_diagnostics(m_fixed2, mesh, g)["mass"] - diag0["mass"]) / diag0["mass"]
+    assert rel_m2 < 1e-6, f"mass not matched to state_old: rel err {rel_m2:.2e}"

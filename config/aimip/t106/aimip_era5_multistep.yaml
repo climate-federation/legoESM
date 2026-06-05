@@ -44,7 +44,7 @@ n_eval_days:  6
 # 4 chained rollouts -> 216 step-samples per IC.
 aimip_grid: "gaussian"
 n_max: 106
-nlev: 8
+n_levels: 8
 dt: 400.0
 
 aimip_n_epochs: 4

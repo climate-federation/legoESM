@@ -10,7 +10,7 @@ equilibrium temperature (~200 K for the gray scheme).
 
 Usage:
     JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu \\
-        .venv/bin/python scripts/run_scm_test_matrix.py rce --days 50
+        .venv/bin/python scripts/matrix/run_scm_test_matrix.py rce --days 50
 
 Exits non-zero if the final state is non-finite or fails coarse RCE
 sanity checks: surface T in (240, 320) K; stratospheric T in

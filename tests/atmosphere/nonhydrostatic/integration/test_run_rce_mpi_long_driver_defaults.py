@@ -1,6 +1,6 @@
 """Regression test for the plane CRM production driver argparse defaults.
 
-iter-59 found ``scripts/run_rce_mpi_long.py`` argparse defaults still
+iter-59 found ``scripts/run/run_rce_mpi_long.py`` argparse defaults still
 shipping with ``--n-acoustic-substeps`` defaulting to ``24`` (set
 for iter-1's ``dt=1.0 s`` config) while the driver's ``--dt`` default
 is ``5.0 s`` (iter-12/14 production). The combination produces an
@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-DRIVER = REPO_ROOT / "scripts" / "run_rce_mpi_long.py"
+DRIVER = REPO_ROOT / "scripts" / "run" / "run_rce_mpi_long.py"
 
 
 def _parse_argparse_defaults(source: str) -> dict[str, object]:
@@ -359,7 +359,7 @@ def test_driver_consults_shared_halo_requirement_map():
 
 def test_driver_imports_build_smooth_k1_pattern_from_package():
     """iter-218: iter-208 moved build_smooth_k1_pattern from
-    scripts/run_rce_mpi_long.py to
+    scripts/run/run_rce_mpi_long.py to
     legoesm.atmosphere.idealized.rcemip_initial_conditions. The
     driver now imports it via the standard package path.
 

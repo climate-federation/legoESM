@@ -85,7 +85,7 @@ Full PR #261 recipe wired into `run_omip.py`:
 
 ### 7. Auto-Snapshot Generation
 
-Tripcolor + cartopy Robinson projection snapshots (`scripts/plot_mpas_omip_snapshot.py`)
+Tripcolor + cartopy Robinson projection snapshots (`scripts/plot/plot_mpas_omip_snapshot.py`)
 are auto-generated alongside each 30-day restart checkpoint.
 
 Layout (2×3): Surface speed | SSH | SST | Zonal-mean T(lat,z) | SSS | Deep T
@@ -265,7 +265,7 @@ OMIP spin-up approach.
 Just add the CLI flags to the launch command:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 nohup .venv/bin/python scripts/run_omip.py \
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 nohup .venv/bin/python scripts/run/run_omip.py \
   --grid mpas --resolution ico5 --nlev 20 --days 36500 --dt 1200 \
   --H-max 5500 --H-min 10 \
   --bathymetry data/bathymetry/etopo_1deg.nc --smoothing-passes 2 \
@@ -355,7 +355,7 @@ CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 nohup .venv/bin/python scripts/run_omip.
 ### How to Restart the ico6 Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 nohup .venv/bin/python scripts/run_omip.py \
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 nohup .venv/bin/python scripts/run/run_omip.py \
   --grid mpas --resolution ico6 --nlev 20 --days 40150 --dt 1200 \
   --H-max 5500 --H-min 10 \
   --bathymetry data/bathymetry/etopo_1deg.nc --smoothing-passes 2 \
@@ -374,7 +374,7 @@ CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 nohup .venv/bin/python scripts/run_omip.
 ### How to Generate Snapshots
 
 ```bash
-bash scripts/gen_yearly_snapshots.sh results/mpas_jra55_etopo_100yr_ico6/mpas/ico6 6
+bash scripts/run/gen_yearly_snapshots.sh results/mpas_jra55_etopo_100yr_ico6/mpas/ico6 6
 ```
 
 ### Performance Optimization Needed for ico6

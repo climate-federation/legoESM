@@ -29,7 +29,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load_script_module(module_name: str, relative_path: str):
-    path = REPO_ROOT / relative_path
+    if relative_path.startswith(("src/legoesm/", "legoesm/")):
+        # carve-aware: ml/ may live in a uv-workspace member (packages/legoesm-ml).
+        from tests.legoesm_paths import legoesm_source_path
+
+        path = legoesm_source_path(relative_path)
+    else:
+        path = REPO_ROOT / relative_path
     spec = importlib.util.spec_from_file_location(module_name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

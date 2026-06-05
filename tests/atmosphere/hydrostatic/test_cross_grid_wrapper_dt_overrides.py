@@ -1,7 +1,7 @@
 """Pin the hard-coded dt overrides in cross-grid wrapper scripts.
 
-``scripts/run_amip_cross_grid.sh`` (iter-32) and
-``scripts/run_rce_cross_grid.sh`` carry per-grid DT_OVERRIDE values
+``scripts/run/run_amip_cross_grid.sh`` (iter-32) and
+``scripts/run/run_rce_cross_grid.sh`` carry per-grid DT_OVERRIDE values
 in a colon-delimited GRID_TABLE. If the central
 ``legoesm.driver.rce_dt.auto_dt_rce`` ladder is later refined
 (e.g. iter-26 added the C72 measurement; a future iter could
@@ -93,7 +93,7 @@ def test_amip_cross_grid_wrapper_dt_overrides_match_ladder():
     value for the same (grid_type, resolution) — catches a future
     ladder shift that doesn't propagate to the wrapper.
     """
-    script = REPO_ROOT / "scripts" / "run_amip_cross_grid.sh"
+    script = REPO_ROOT / "scripts" / "run" / "run_amip_cross_grid.sh"
     entries = _parse_grid_table(script, expected_fields=6)
     for grid_type, N, dt_override in entries:
         if dt_override is None:
@@ -129,7 +129,7 @@ def test_rce_cross_grid_wrapper_has_no_dt_overrides():
     """The RCE wrapper (iter-7) uses a 4-field GRID_TABLE without a
     DT_OVERRIDE column. The auto-dt ladder picks dt at run_rce.py
     invocation time (iter-24 refactor). Lock this contract."""
-    script = REPO_ROOT / "scripts" / "run_rce_cross_grid.sh"
+    script = REPO_ROOT / "scripts" / "run" / "run_rce_cross_grid.sh"
     text = script.read_text()
     match = re.search(r"GRID_TABLE=\((.*?)\)", text, re.DOTALL)
     assert match, "RCE wrapper missing GRID_TABLE"

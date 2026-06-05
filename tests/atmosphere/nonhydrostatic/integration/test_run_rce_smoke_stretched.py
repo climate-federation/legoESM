@@ -1,4 +1,4 @@
-"""Smoke test for ``scripts/run_rce_smoke_stretched.py``.
+"""Smoke test for ``scripts/run/run_rce_smoke_stretched.py``.
 
 iter-271: ``run_rce_smoke_stretched.py`` is the RCE smoke harness
 for the full PR #296-#305 RCE stack on the plane CRM
@@ -22,7 +22,7 @@ from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
 )
 
 
-SCRIPT = REPO_ROOT / "scripts" / "run_rce_smoke_stretched.py"
+SCRIPT = REPO_ROOT / "scripts" / "run" / "run_rce_smoke_stretched.py"
 
 
 # Output line format (whitespace-separated):

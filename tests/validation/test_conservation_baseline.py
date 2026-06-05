@@ -3,7 +3,7 @@
 Runs a short AMIP integration and checks that mass, energy, and
 moisture budgets close properly.  The short run (5 days at C8/L5)
 serves as a smoke test; the full 365-day baseline is run via
-scripts/run_amip.py --conservation-audit.
+scripts/run/run_amip.py --conservation-audit.
 
 Tests:
 1. Dry mass conservation: relative drift < 1e-10
@@ -17,6 +17,8 @@ from __future__ import annotations
 import numpy as np
 import jax.numpy as jnp
 import pytest
+
+pytestmark = pytest.mark.tier2  # intermediate: AMIP smoke, mass+energy gates
 
 from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig, OutputConfig
 from legoesm.driver.model_driver import ModelDriver

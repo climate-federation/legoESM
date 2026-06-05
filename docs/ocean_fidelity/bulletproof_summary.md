@@ -113,7 +113,7 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python \
 
 for c in munk_gyre held_larichev neverworld2_lite isomip_plus; do
   JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python \
-    scripts/run_ocean_test_matrix.py --only "$c" --quick --days 0.1
+    scripts/matrix/run_ocean_test_matrix.py --only "$c" --quick --days 0.1
 done
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m pytest \

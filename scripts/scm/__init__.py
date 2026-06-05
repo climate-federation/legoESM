@@ -3,5 +3,5 @@
 Each submodule exposes ``add_args(parser)`` and ``run(args) -> int`` so that
 the cases can be invoked either standalone (``python -m scripts.scm.rce``-
 style is not supported because ``scripts/`` is not a package; use
-``scripts/run_scm_test_matrix.py <case>``) or via the dispatcher.
+``scripts/matrix/run_scm_test_matrix.py <case>``) or via the dispatcher.
 """

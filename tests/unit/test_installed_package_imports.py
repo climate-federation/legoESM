@@ -3,7 +3,7 @@ production-imports-from-tests anti-pattern.
 
 Background
 ----------
-Issue #188: ``scripts/run_amip.py`` (and other top-level scripts under
+Issue #188: ``scripts/run/run_amip.py`` (and other top-level scripts under
 ``scripts/``) crashed at startup with
 ``ModuleNotFoundError: No module named 'tests'`` because
 ``src/legoesm/driver/model_driver.py`` was importing Held-Suarez from
@@ -74,7 +74,13 @@ import pytest
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-PRODUCTION_ROOTS = ("src/legoesm", "scripts")
+# Carve-aware: every legoesm namespace root (src/legoesm today; also
+# packages/<member>/src/legoesm after the carve), reported repo-relative so the
+# scan + the parametrize IDs stay stable, plus scripts.
+from tests.legoesm_paths import legoesm_root_paths as _legoesm_root_paths
+PRODUCTION_ROOTS = tuple(
+    str(p.relative_to(REPO_ROOT)) for p in _legoesm_root_paths()
+) + ("scripts",)
 
 
 # Map of grandfathered production file → set of ``tests.X`` modules
@@ -109,7 +115,7 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
         "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1",
         "tests.test_cases.williamson",
     }),
-    "scripts/run_atmosphere_test_matrix.py": frozenset({
+    "scripts/matrix/run_atmosphere_test_matrix.py": frozenset({
         "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas",
         "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_2_mpas",
         "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3_mpas",
@@ -120,16 +126,16 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
         "tests.test_cases.dcmip_transport",
         "tests.test_cases.williamson",
     }),
-    "scripts/run_baroclinic_wave_benchmark.py": frozenset({
+    "scripts/run/run_baroclinic_wave_benchmark.py": frozenset({
         "tests.test_cases.baroclinic_wave",
     }),
-    "scripts/run_cpu_mpi_scaling.py": frozenset({
+    "scripts/bench/run_cpu_mpi_scaling.py": frozenset({
         "tests.test_cases.baroclinic_wave",
     }),
-    "scripts/run_levante_gpu_scaling.py": frozenset({
+    "scripts/bench/run_levante_gpu_scaling.py": frozenset({
         "tests.test_cases.baroclinic_wave",
     }),
-    "scripts/run_w2_mpas_convergence.py": frozenset({
+    "scripts/run/run_w2_mpas_convergence.py": frozenset({
         "tests.atmosphere.shallow_water.test_cases.williamson_mpas",
     }),
     "src/legoesm/atmosphere/dynamics/spectral_nh.py": frozenset({
@@ -355,7 +361,7 @@ def test_run_amip_help_starts_without_tests_on_path():
     ``run_amip.py`` and its import closure. Any stale ``tests.*``
     reference at module scope along that graph will surface here.
     """
-    script = REPO_ROOT / "scripts" / "run_amip.py"
+    script = REPO_ROOT / "scripts" / "run" / "run_amip.py"
     assert script.is_file(), f"script not found: {script}"
     result = _run_subprocess_without_repo_root(
         "import runpy, sys\n"

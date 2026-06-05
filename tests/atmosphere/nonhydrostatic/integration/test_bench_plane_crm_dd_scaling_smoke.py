@@ -1,4 +1,4 @@
-"""Smoke test for ``scripts/bench_plane_crm_dd_scaling.py``.
+"""Smoke test for ``scripts/bench/bench_plane_crm_dd_scaling.py``.
 
 iter-252: the MPI strong/weak scaling benchmark for the plane CRM
 step_halo path. Pre iter-252 it had ZERO test coverage — a silent
@@ -29,7 +29,7 @@ from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
 )
 
 
-SCRIPT = REPO_ROOT / "scripts" / "bench_plane_crm_dd_scaling.py"
+SCRIPT = REPO_ROOT / "scripts" / "bench" / "bench_plane_crm_dd_scaling.py"
 
 
 _EXPECTED_CSV_COLUMNS = 10  # mode, n_ranks, ny_global, nx_global,

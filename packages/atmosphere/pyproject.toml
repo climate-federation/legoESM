@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "legoesm-atmosphere"
+version = "0.1.0"
+description = "legoESM atmosphere component: hydrostatic/nonhydrostatic/shallow-water dynamical cores (FV3 cube, spectral, SFNO, MPAS) + physics (radiation, convection, turbulence, microphysics, gravity-wave drag)."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "Pierre Gentine" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+# Depends ONLY on the substrate (legoesm-core) — NOT on the other Earth-system
+# components, NOR on the coupler/driver/training above it.  Both invariants are
+# machine-enforced by the import-linter contracts ("Earth-system components are
+# independent of each other" + "Components must not import the coupler, driver,
+# or training"), which is what lets `pip install legoesm-atmosphere` run standalone.
+dependencies = [
+    "legoesm-core~=0.1.0",
+    "jax>=0.4.35",
+    "jaxlib>=0.4.35",
+    "numpy>=1.26",
+    "equinox>=0.11",
+]
+
+# Optional heavy feature reaching UP into the ML layer.  The BASE atmosphere
+# imports only legoesm-core (verified: `import legoesm.atmosphere` does not pull
+# ml), so the component stays standalone; this extra declares the install path
+# for the SFNO neural dynamical cores + ML physics parameterization, which import
+# the neural primitives at top level:
+#   atmosphere.dynamics.{sfno_sw,sfno_pe} and atmosphere.physics.ml_parameterization
+#   -> legoesm.ml.{sfno,normalization,channel_packing,conservation,physics.*}
+# Install with `pip install legoesm-atmosphere[ml]`.  These component->ml edges
+# are baselined in import-linter contract #3.
+[project.optional-dependencies]
+ml = ["legoesm-ml~=0.1.0"]
+
+[tool.uv.sources]
+legoesm-core = { workspace = true }
+legoesm-ml = { workspace = true }
+
+# This component PROVIDES the FV3 shallow-water barotropic dycores that the ocean
+# component's barotropic solver resolves BY NAME through
+# legoesm.registry.SW_BAROTROPIC_REGISTRY (importlib.metadata entry points — NOT a
+# static import).  Declaring them here means installing legoesm-atmosphere makes
+# the ocean reuse the SAME shallow-water dycore (zero duplication) without either
+# component importing the other.
+[project.entry-points."legoesm.sw_barotropics"]
+fv3sw = "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid:_build_fv3sw_barotropic_model"
+fv3edge = "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid:_build_fv3edge_barotropic_model"
+
+# PEP-420 namespace package: no legoesm/__init__.py; this wheel ships only
+# legoesm/atmosphere into the shared `legoesm` namespace, so it imports as legoesm.atmosphere.
+[tool.hatch.build.targets.wheel]
+packages = ["legoesm"]

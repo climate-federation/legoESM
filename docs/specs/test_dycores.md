@@ -1,6 +1,6 @@
 # Dycore Test Hardening — `test_dycores` branch
 
-Single source of truth: `scripts/run_atmosphere_test_matrix.py`.
+Single source of truth: `scripts/matrix/run_atmosphere_test_matrix.py`.
 
 | Task grid | Matrix key | Dycore impls |
 |-----------|------------|--------------|

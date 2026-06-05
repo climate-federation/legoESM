@@ -8,7 +8,7 @@ import pytest
 from legoesm.ice.sea_ice import step_sea_ice
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import SeaIceState
-from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.core.field import Field
 from legoesm import constants
 
@@ -235,8 +235,8 @@ class Test8l_ThinIceStiffStability:
         input (Q_sfc + conductive) over dt, to within a tight tolerance.
         """
         from legoesm import constants
-        from legoesm.coupler.surface_energy import surface_radiation_fluxes
-        from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+        from legoesm.core.surface_energy import surface_radiation_fluxes
+        from legoesm.core.bulk_flux import simple_bulk_fluxes
         from legoesm.thermo import saturation_mixing_ratio_ice
 
         h0, T0, a0 = 0.05, 272.5, 1.0   # thin ice, near melt
@@ -362,7 +362,7 @@ class Test8m_F2FreshwaterClosure:
                                      CONFIG, 1.0, DT)
         z = jnp.zeros(SHAPE, jnp.float64)
         zero = TileResponse(
-            T_surface=z, albedo=z, emissivity=z, z0=z, q_surface=z, shflx=z,
+            T_sfc=z, albedo=z, emissivity=z, z0=z, q_surface=z, shflx=z,
             lhflx=z, tau_x=z, tau_y=z, lw_up=z, u_ocean_sfc=z, v_ocean_sfc=z,
             co2_flux=z, freshwater_flux=z, ocean_heat_extraction=z,
             ocean_stress_x=z, ocean_stress_y=z, surface_mass_flux=z, salt_flux=z,
@@ -486,7 +486,7 @@ class Test8m_F2FreshwaterClosure:
         forcing = make_forcing(T_lowest=250.0, u_lowest=8.0, v_lowest=3.0)
         z = jnp.zeros(SHAPE, jnp.float64)
         zero = TileResponse(
-            T_surface=z, albedo=z, emissivity=z, z0=z, q_surface=z, shflx=z,
+            T_sfc=z, albedo=z, emissivity=z, z0=z, q_surface=z, shflx=z,
             lhflx=z, tau_x=z, tau_y=z, lw_up=z, u_ocean_sfc=z, v_ocean_sfc=z,
             co2_flux=z, freshwater_flux=z, ocean_heat_extraction=z,
             ocean_stress_x=z, ocean_stress_y=z, surface_mass_flux=z, salt_flux=z,
@@ -598,7 +598,7 @@ class Test8m_F2FreshwaterClosure:
 
 class Test8n_LatentSkinResolve:
     """#28: the over-ablation latent cap is fed back into the implicit skin
-    energy balance so Q_sfc, the returned T_surface, and the atmosphere latent
+    energy balance so Q_sfc, the returned T_sfc, and the atmosphere latent
     flux all use the REALIZED (capped) latent.  Guarded byte-exact no-op for
     thick / non-clamped ice; only sub-cm clamp cells shift."""
 
@@ -618,7 +618,7 @@ class Test8n_LatentSkinResolve:
             np.testing.assert_array_equal(on.h_ice.data, off.h_ice.data)
             np.testing.assert_array_equal(on.T_ice.data, off.T_ice.data)
             np.testing.assert_array_equal(ron.lhflx, roff.lhflx)
-            np.testing.assert_array_equal(ron.T_surface, roff.T_surface)
+            np.testing.assert_array_equal(ron.T_sfc, roff.T_sfc)
 
     def test_clamp_pairs_energy_and_mass(self):
         """In an over-ablation clamp cell the atmosphere latent ENERGY pairs
@@ -660,9 +660,9 @@ class Test8n_LatentSkinResolve:
             state, forcing, warm, OCEAN_U, OCEAN_V,
             CONFIG._replace(latent_skin_resolve=False), 1.0, DT)
         # Surface pinned at the melt point => the re-solve cannot move T_new.
-        assert float(jnp.max(jnp.abs(ron.T_surface - CONFIG.T_melt_surface))) < 1e-6
+        assert float(jnp.max(jnp.abs(ron.T_sfc - CONFIG.T_melt_surface))) < 1e-6
         np.testing.assert_array_equal(on.h_ice.data, off.h_ice.data)
-        np.testing.assert_array_equal(ron.T_surface, roff.T_surface)
+        np.testing.assert_array_equal(ron.T_sfc, roff.T_sfc)
         np.testing.assert_array_equal(ron.lhflx, roff.lhflx)
 
     def test_differentiable_through_clamp(self):

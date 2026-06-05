@@ -1,4 +1,4 @@
-"""Tests for ``scripts/prepare_omip_forcing.py``.
+"""Tests for ``scripts/data/prepare_omip_forcing.py``.
 
 The CLI is a thin wrapper around ``build_jra55_cache``; these tests
 focus on:
@@ -23,7 +23,7 @@ zarr = pytest.importorskip("zarr")
 
 # Load the script as a module via its file path (it lives outside
 # the importable package layout).
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "prepare_omip_forcing.py"
+_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "data" / "prepare_omip_forcing.py"
 _spec = importlib.util.spec_from_file_location("prepare_omip_forcing", _SCRIPT)
 prepare_omip_forcing = importlib.util.module_from_spec(_spec)
 sys.modules["prepare_omip_forcing"] = prepare_omip_forcing
