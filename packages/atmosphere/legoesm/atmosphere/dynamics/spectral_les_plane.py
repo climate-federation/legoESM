@@ -273,17 +273,17 @@ def advection(u, v, w, g: SpectralLESGrid):
         tf = lambda x: _truncate_from_fine(x, ny, nx)      # noqa: E731
         u_F, v_F, w_F = pf(u), pf(v), pf(w)
         omz_F, omx_F, omy_F = pf(omega_z), pf(omega_x_f), pf(omega_y_f)
-        Cu = tf(omz_F * v_F - f2c(w_F * omy_F))             # centres
-        Cv = tf(f2c(w_F * omx_F) - omz_F * u_F)
+        Cu = tf(omz_F * v_F + f2c(w_F * omy_F))             # centres
+        Cv = tf(-omz_F * u_F - f2c(w_F * omx_F))
         uf_F = jnp.pad(c2f(u_F), ((0, 0), (0, 0), (1, 1)))  # faces, 0 at walls
         vf_F = jnp.pad(c2f(v_F), ((0, 0), (0, 0), (1, 1)))
-        Cw = tf(uf_F * omy_F - vf_F * omx_F)               # faces (nz+1)
+        Cw = tf(vf_F * omx_F - uf_F * omy_F)               # faces (nz+1)
     else:
-        Cu = omega_z * v - f2c(w * omega_y_f)
-        Cv = f2c(w * omega_x_f) - omega_z * u
+        Cu = omega_z * v + f2c(w * omega_y_f)
+        Cv = -omega_z * u - f2c(w * omega_x_f)
         uf = jnp.pad(c2f(u), ((0, 0), (0, 0), (1, 1)))
         vf = jnp.pad(c2f(v), ((0, 0), (0, 0), (1, 1)))
-        Cw = uf * omega_y_f - vf * omega_x_f
+        Cw = vf * omega_x_f - uf * omega_y_f
     return Cu, Cv, Cw
 
 
