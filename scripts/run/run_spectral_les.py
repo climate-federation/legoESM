@@ -108,12 +108,33 @@ def main():
     u_bulk_target = float(jnp.mean(
         args.ustar / _KAPPA * jnp.log(jnp.clip(z, args.z0, None) / args.z0)))
 
+    # Rayleigh sponge in the top 25%: relax the resolved fluctuations toward
+    # their horizontal mean and damp w, so turbulent momentum/energy transported
+    # to the stress-free rigid lid is absorbed rather than accumulating there
+    # (standard ABL-LES; without it the half-channel piles momentum at the lid).
+    zc = g.z_c
+    z_sp = 0.75 * args.Lz
+    spc = jnp.where(zc > z_sp,
+                    0.5 * (1.0 - jnp.cos(jnp.pi * (zc - z_sp) / (args.Lz - z_sp))),
+                    0.0).astype(dtype)               # (nz,) 0→1 ramp
+    zf = g.z_f
+    spf = jnp.where(zf > z_sp,
+                    0.5 * (1.0 - jnp.cos(jnp.pi * (zf - z_sp) / (args.Lz - z_sp))),
+                    0.0).astype(dtype)
+    tau_sp = 50.0                                    # sponge timescale [s]
+    rc = (args.dt / tau_sp) * spc
+    rf = (args.dt / tau_sp) * spf
+
     @partial(jax.jit, static_argnames=("first",))
     def step(state, first=False):
         state, us = sl.step(state, g=g, dt=args.dt, u_geo=(0.0, 0.0),
                             f_cor=0.0, first=first, force=(0.0, 0.0))
-        state = state._replace(u=state.u + (u_bulk_target - jnp.mean(state.u)))
-        return state, us
+        u, v, w = state.u, state.v, state.w
+        u = u - rc * (u - u.mean((0, 1), keepdims=True))   # damp fluctuations
+        v = v - rc * (v - v.mean((0, 1), keepdims=True))
+        w = w - rf * w                                       # damp w toward 0
+        u = u + (u_bulk_target - jnp.mean(u))
+        return state._replace(u=u, v=v, w=w), us
     nsteps = int(args.hours * 3600.0 / args.dt)
     tau = args.Lz / args.ustar                              # eddy turnover [s]
     print(f"[spectral-LES neutral] {args.nx}x{args.ny}x{args.nz} "

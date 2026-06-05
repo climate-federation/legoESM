@@ -230,17 +230,23 @@ def advection(u, v, w, g: SpectralLESGrid):
     dwdx_f, dwdy_f = ddx(wd, g), ddy(wd, g)                 # faces
     omega_x_f = dvdz_f - dwdy_f                             # faces
     omega_y_f = dwdx_f - dudz_f                             # faces
-    # Centre tendencies: Cu = (ω × u)_x = ω_y w − ω_z v ; Cv = ω_z u − ω_x w.
+    # RHS advection = +(u × ω) (since u·∇u = ω×u + ∇½|u|², the ½|u|² Bernoulli
+    # term is absorbed by the pressure projection). The cross product:
+    #   (u×ω)_x = v ω_z − w ω_y ;  (u×ω)_y = w ω_x − u ω_z ;
+    #   (u×ω)_z = u ω_y − v ω_x .
+    # (The opposite sign −(u×ω) still passes the ⟨u·C⟩=0 energy test — u×ω ⊥ u —
+    #  but reverses the nonlinear transfer into an INVERSE cascade that piles
+    #  energy up and inverts the mean profile; this caught a real sign bug.)
     omega_x_c = f2c(omega_x_f)
     omega_y_c = f2c(omega_y_f)
-    Cu = omega_y_c * wc - omega_z * vd
-    Cv = omega_z * ud - omega_x_c * wc
-    # Face tendency: Cw = (ω × u)_z = ω_x v − ω_y u, with u,v averaged to faces.
+    Cu = omega_z * vd - omega_y_c * wc
+    Cv = omega_x_c * wc - omega_z * ud
+    # Face tendency: Cw = (u × ω)_z = u ω_y − v ω_x, with u,v averaged to faces.
     uf = jnp.pad(c2f(ud), ((0, 0), (0, 0), (1, 1)))         # 0 at walls
     vf = jnp.pad(c2f(vd), ((0, 0), (0, 0), (1, 1)))
     omega_x_face = jnp.pad(c2f(omega_x_c), ((0, 0), (0, 0), (1, 1)), mode="edge")
     omega_y_face = jnp.pad(c2f(omega_y_c), ((0, 0), (0, 0), (1, 1)), mode="edge")
-    Cw = omega_x_face * vf - omega_y_face * uf              # faces (nz+1)
+    Cw = uf * omega_y_face - vf * omega_x_face              # faces (nz+1)
     # de-alias the products back to the resolved grid.
     Cu, Cv = _dealias(Cu, g), _dealias(Cv, g)
     Cw = _dealias(Cw, g)
@@ -273,14 +279,24 @@ def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo):
     dvdz_f = ddz_c2f(v, dz)
     tau13_f = nu_t_f * dudz_f                               # interior faces (nz-1)
     tau23_f = nu_t_f * dvdz_f
-    # MOST neutral wall stress at the first centre level z_c[0].
+    # MOST neutral wall stress at the first centre level z_c[0], Moeng (1984)
+    # formulation: the drag uses the PLANAR-MEAN speed ⟨|u₁|⟩, not the local
+    # instantaneous |u₁|. Using the local speed makes τ_w ∝ u₁² over-respond to
+    # near-wall fluctuations, a positive feedback that pumps the resolved
+    # turbulence to ~5× its physical level. With the mean speed the stress
+    # MAGNITUDE is set by the mean wind (∝ u_*²) and only its DIRECTION follows
+    # the local wind — the standard, well-behaved ABL-LES wall model.
     u1, v1 = u[..., 0], v[..., 0]
     spd1 = jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12)
+    spd1_mean = jnp.mean(spd1)                              # planar mean ⟨|u₁|⟩
     Cd = (kappa / jnp.log(g.z_c[0] / g.cfg.z0)) ** 2
-    tau_w_x = -Cd * spd1 * u1                               # surface stress (kinematic)
-    tau_w_y = -Cd * spd1 * v1
-    u_star = (Cd ** 0.5) * jnp.sqrt(jnp.mean(spd1 ** 2))
-    # Assemble full-face stress: [wall, interior, top=0].
+    tau_w_x = -Cd * spd1_mean * u1                          # ∝ ⟨U⟩·u₁ (kinematic)
+    tau_w_y = -Cd * spd1_mean * v1
+    u_star = (Cd ** 0.5) * spd1_mean
+    # Assemble full-face momentum flux: [surface, interior, top=0]. The surface
+    # face carries the wall stress τ_w = -Cd⟨U⟩u₁ (a momentum SINK: the
+    # divergence ∂_z(flux) then decelerates the near-surface wind). Interior
+    # faces carry the down-gradient SGS flux ν_t ∂u/∂z; the rigid lid is no-flux.
     z = jnp.zeros_like(u1)[..., None]
     tau13_full = jnp.concatenate([(-tau_w_x)[..., None], tau13_f, z], axis=-1)
     tau23_full = jnp.concatenate([(-tau_w_y)[..., None], tau23_f, z], axis=-1)

@@ -139,18 +139,32 @@ a statistically steady state instead of decaying (neutral channel, 64³, RTX 509
 **1200 steps/s** — ~8× the compressible core), and the resolved-stress
 **u_*≈0.35 m/s matches the MOST target** (`validate_les_vs_oracle.py`).
 
-**Open issue (focused):** the equilibrium turbulence is ~5× too energetic
-(σ_w/u_*≈6 vs 1.25; σ_u/u_*≈16 vs 2.4) and the over-mixing flattens the log
-profile. Energy budget: steady TKE/forcing-power ⇒ a dissipation timescale of
-~16 turnovers, i.e. the SGS dissipation is ~10× too weak (raising C_s 0.16→0.25
-only cut the variance ×1.6 — a coefficient bump cannot close a 10× gap). Prime
-suspect is a factor/sign in the SGS stress-divergence (`sgs_and_wall`) or the
-staggered-grid averaging in the advection breaking exact energy conservation
-(the test residual is ⟨u·C⟩/⟨u²⟩≈5%, not machine-zero). Next: a model-energy
-budget (resolved-shear production vs SGS dissipation vs forcing power) to localise
-the missing dissipation, then the Bou-Zeid LASD coefficient + buoyancy/scalar for
-SBL/CBL. The CORE METHOD is sound (it sustains turbulence and gives the right
-surface stress); this is a closure-magnitude bug, not an architecture problem.
+**Open issue (localised to the advection):** the equilibrium turbulence is ~5×
+too energetic (σ_w/u_*≈6 vs 1.25) and the mean profile INVERTS (U highest at the
+surface, ~13 m/s, vs the correct log shape). Debugged by elimination:
+
+* The over-energy is robust to SGS magnitude (C_s 0.16→0.25 cuts variance only
+  ×1.6 — variance ~ ν_t^−0.5, not a closure-magnitude knob), to dt (0.2→0.05, no
+  change), to the wall-model form (local vs Moeng planar-mean drag), and to a
+  top Rayleigh sponge — so it is none of those.
+* **Diffusion + wall + forcing ONLY (advection disabled) gives a clean monotonic
+  log profile** (U 3.3→10.4 m/s, u_*≈0.30) — so the wall stress, the SGS vertical
+  diffusion and the mass-flux forcing are all CORRECT.
+* ⇒ the culprit is the **rotational advection on the staggered grid**: it
+  transports momentum COUNTER-gradient (piling it at the surface) and pumps the
+  resolved variance. Fixed one real sign bug there (the RHS must be +(u×ω); the
+  −(u×ω) sign still passes the ⟨u·C⟩=0 energy test because u×ω⊥u, but reverses
+  the cascade) — necessary but not sufficient.
+
+Root cause: the `f2c`/`c2f` + edge-pad approximation of the staggered advection
+does not faithfully replicate the oracle's exact `Advection_Dealias` index /
+boundary handling (`StagGridAvg` placement, the `u_pad_G[:,:,0:nz-2]` offset, the
+explicit bottom/top rows). **Next: port the oracle's staggered advection exactly**
+(it is the one piece not yet faithful), then re-validate σ_w/u_*, the log law and
+φ_m; then wire the Bou-Zeid LASD coefficient + buoyancy for SBL/CBL. The core
+method (spectral horizontal + projection + diffusion + wall) is validated and
+sustains turbulence; the remaining bug is a faithful-discretisation issue in the
+advection operator alone.
 
 ## Conclusion (compressible core)
 **Conclusion (honest).** Tuning the compressible plane dycore — surface coupling,
