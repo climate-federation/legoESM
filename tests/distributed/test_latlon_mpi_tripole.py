@@ -351,3 +351,43 @@ class TestCurlVertexFoldMPI:
         all_errs = MPI.COMM_WORLD.allgather(max_err)
         assert max(all_errs) < 1e-9, (
             f"curl_vertex_cgrid max error across ranks: {all_errs}")
+
+
+class TestMinCellToVfaceFoldMPI:
+    """min_cell_to_vface must match serial at partition cuts.
+
+    Follow-up to #357 review: the v-face min-rule originally hardcoded a
+    zero south row and used rank-local cells only, so the partition-cut
+    face thickness was wrong (and the south cut was forced to a wall).
+    After the cell-pad-first fix the rank-local result must equal the
+    serial reference slice ``[s:e+1]``.
+    """
+
+    @pytest.mark.parametrize("ndim", [2, 3])
+    def test_min_cell_to_vface_matches_serial(self, fold, ndim):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            min_cell_to_vface,
+        )
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        rng = np.random.default_rng(31)
+        shape = (N_LAT, N_LON) + ((3,) if ndim == 3 else ())
+        # Positive thickness field (min-rule operand).
+        f = jnp.asarray(0.1 + np.abs(rng.standard_normal(shape)))
+        ref = min_cell_to_vface(f, geom)
+
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        s, e = layout.lat_start, layout.lat_end
+        try:
+            set_halo_backend("mpi", layout)
+            local = min_cell_to_vface(f[s:e], band)
+        finally:
+            set_halo_backend("local")
+
+        max_err = float(jnp.max(jnp.abs(local - ref[s:e + 1])))
+        all_errs = MPI.COMM_WORLD.allgather(max_err)
+        assert max(all_errs) < 1e-9, (
+            f"min_cell_to_vface max error across ranks: {all_errs}")

@@ -291,15 +291,18 @@ def min_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     -------
     f_v : (n_lat+1, n_lon, ...) at v-faces.
     """
-    f_v_interior = jnp.minimum(f[:-1], f[1:])
-    south = jnp.zeros_like(f_v_interior[:1])
-    fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
-        f_partner = f[-1:, fold.perm_T]
+    # Cell-pad-first (PR357 Bug-2 pattern): pad the cell field so the v-face
+    # min at a partition cut sees the neighbour rank's adjacent cell (MPI
+    # halo exchange) rather than a rank-local-only / zeroed boundary row.
+    f_padded = pad_ns_zero(f)
+    f_v = jnp.minimum(f_padded[:-1], f_padded[1:])
+    from legoesm.grids.halo_latlon import zero_polar_lat_ends
+    f_v = zero_polar_lat_ends(f_v)
+    if _fold_is_local(grid):
+        f_partner = f[-1:, grid.fold.perm_T]
         north = jnp.minimum(f[-1:], f_partner)
-    else:
-        north = jnp.zeros_like(south)
-    return jnp.concatenate([south, f_v_interior, north], axis=0)
+        f_v = jnp.concatenate([f_v[:-1], north], axis=0)
+    return f_v
 
 
 # =============================================================================
