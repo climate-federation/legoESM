@@ -535,22 +535,17 @@ def barotropic_implicit_latlon_cgrid(
     u_active_3d = jnp.concatenate(
         [u_active_3d_inner, u_active_3d_inner[:, 0:1, :]], axis=1,
     )
-    v_active_3d_int = h_active_3d[:-1] * h_active_3d[1:]
-    fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
-        south_3d = jnp.zeros_like(v_active_3d_int[:1])
-        north_3d = h_active_3d[-1:] * h_active_3d[-1:, fold.perm_T, :]
+    # Cell-pad-first (PR357 Bug-2 pattern): pad the 3D cell active mask so
+    # the v-face active flag at a partition cut is the product of the two
+    # adjacent cells across the cut (MPI halo), not a zeroed wall.  The fold
+    # seam is overwritten only on the rank that owns it.
+    h_active_pad = pad_ns_zero(h_active_3d)
+    v_active_3d = h_active_pad[:-1] * h_active_pad[1:]
+    v_active_3d = _zero_polar_lat_ends(v_active_3d)
+    if _fold_is_local(grid):
+        north_3d = h_active_3d[-1:] * h_active_3d[-1:, grid.fold.perm_T, :]
         v_active_3d = jnp.concatenate(
-            [south_3d, v_active_3d_int, north_3d], axis=0,
-        )
-    else:
-        n_lon_grid = h_active_3d.shape[1]
-        nlev_g = h_active_3d.shape[2]
-        zero_row_3d = jnp.zeros(
-            (1, n_lon_grid, nlev_g), dtype=u_3d.dtype,
-        )
-        v_active_3d = jnp.concatenate(
-            [zero_row_3d, v_active_3d_int, zero_row_3d], axis=0,
+            [v_active_3d[:-1], north_3d], axis=0,
         )
     u_new_3d = (
         (u_prime + U_new[..., jnp.newaxis])
