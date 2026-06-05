@@ -452,7 +452,17 @@ def run_surface_melt(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]
 
     _save_results(outdir, tc, diag)
 
-    T_bounded = jnp.all(state.T_ice.data <= config.T_freeze_ocean + 1e-6)
+    # Surface melt clamps the skin temperature at the fresh-ice/snow TOP
+    # melt point T_melt_surface (0 C = 273.15 K) — NOT the saline basal
+    # freezing point T_freeze_ocean (271.35 K).  Under strong atmospheric
+    # warming the surface legitimately warms to T_melt_surface and parks
+    # there while excess energy converts to melt (sea_ice.py clamps T_ice
+    # to config.T_melt_surface and books the surplus as dh/dt).  The bound
+    # must therefore be T_melt_surface, matching this case's docstring
+    # ("T_ice stays <= T_freeze") and the model's surface-melt clamp; the
+    # old T_freeze_ocean bound spuriously failed a correct, energy-
+    # conserving surface-melt result (T_ice == 273.15 K exactly).
+    T_bounded = jnp.all(state.T_ice.data <= config.T_melt_surface + 1e-6)
     h_decreased = diag["h_mean"][-1] < h_init
 
     ok = bool(T_bounded and h_decreased)
