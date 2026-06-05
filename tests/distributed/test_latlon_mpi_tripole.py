@@ -309,3 +309,45 @@ class TestPgfYMeridionalFoldMPI:
         all_errs = MPI.COMM_WORLD.allgather(max_err)
         assert max(all_errs) < 1e-9, (
             f"partial_cell_pgf_correction_y max error across ranks: {all_errs}")
+
+
+class TestCurlVertexFoldMPI:
+    """curl_vertex_cgrid must match serial at partition cuts.
+
+    Follow-up to #357 review: with the fold active on every rank,
+    is_tripolar() routes all ranks through the tripolar curl path, which
+    halo-exchanged ``u`` but plain-jnp.pad-zeroed the ``dx_T`` metric at
+    partition cuts.  After switching dx_T to backend-aware lat padding, the
+    rank-local vorticity must equal the serial reference slice ``[s:e+1]``.
+    """
+
+    @pytest.mark.parametrize("ndim", [2, 3])
+    def test_curl_matches_serial(self, fold, ndim):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            curl_vertex_cgrid,
+        )
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        rng = np.random.default_rng(23)
+        nlev = 3
+        u_shape = (N_LAT, N_LON + 1) + ((nlev,) if ndim == 3 else ())
+        v_shape = (N_LAT + 1, N_LON) + ((nlev,) if ndim == 3 else ())
+        u = jnp.asarray(rng.standard_normal(u_shape, dtype=np.float64))
+        v = jnp.asarray(rng.standard_normal(v_shape, dtype=np.float64))
+        zeta_serial = curl_vertex_cgrid(u, v, geom)
+
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        s, e = layout.lat_start, layout.lat_end
+        try:
+            set_halo_backend("mpi", layout)
+            zeta_local = curl_vertex_cgrid(u[s:e], v[s:e + 1], band)
+        finally:
+            set_halo_backend("local")
+
+        max_err = float(jnp.max(jnp.abs(zeta_local - zeta_serial[s:e + 1])))
+        all_errs = MPI.COMM_WORLD.allgather(max_err)
+        assert max(all_errs) < 1e-9, (
+            f"curl_vertex_cgrid max error across ranks: {all_errs}")
