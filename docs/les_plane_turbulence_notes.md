@@ -57,3 +57,30 @@ on a 24³ CPU run — qualitatively opposite to the earlier monotonic decay.
   Cs²(z), spectra vs jax-alfa) is the next step on GPU.
 - The SBL (GABLS1) is the hardest case (weak, intermittent turbulence at
   Δ=12.5 m); expect it to need the finest grid + longest spin-up.
+
+## Performance (GPU / MPI)
+Benchmark: `scripts/bench/bench_les_plane.py` (steps/s, ns/cell/step; CPU or
+GPU). SGS-closure relative cost on a 32×32×48 CPU run (ns/cell/step):
+
+| closure        | ns/cell/step | vs static |
+|----------------|-------------:|----------:|
+| static Smag    |         3472 |     1.00× |
+| Germano dynamic|         3998 |     1.15× |
+| **LASD (Bou-Zeid)** |    4414 |     1.27× |
+
+LASD adds ~27% over the static closure — the second (4Δ) test filter, the extra
+contractions and the per-level β quintic solve. The β `lax.scan` solver is cheap
+(only `nz` levels) so the cost is dominated by the FFT-based test filters.
+
+**GPU.** The whole LES path is JIT/x64-clean and host-callback-free (FFT,
+`lax.scan`, `vmap`, `complex128`) ⇒ GPU-ready. The legoESM venv is CPU-only;
+to run on GPU: `uv pip install jax-cuda12-plugin==0.10.0` then
+`JAX_PLATFORMS=cuda` (auto-detect falls back to CPU silently).
+
+**MPI.** The dynamic closures (Germano and LASD) are **single-rank**: the
+spectral test filter, planar mean and 3×3 local average act over the LOCAL
+horizontal tile, so under a horizontal MPI decomposition they are per-rank
+(wrong — the test filter and plane average need the global field / halo
+exchange). MPI LES must use the **static** closure (`--static-sgs`), which is
+validated serial==MPI. A faithful MPI LASD needs the spectral filter +
+local average halo-exchanged (distributed FFT / haloed Imfilter) — future work.
