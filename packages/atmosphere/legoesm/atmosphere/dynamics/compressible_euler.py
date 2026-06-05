@@ -252,6 +252,26 @@ class CompressibleEulerConfig(NamedTuple):
                                           # a minor stratosphere/inversion effect).
                                           # Pair with wall_damping=False (SAM
                                           # dosmagor caps neither). Plane only.
+    smagorinsky_dynamic: bool = False
+                                          # DYNAMIC Smagorinsky (Germano 1991 /
+                                          # Lilly 1992): replace the FIXED
+                                          # smagorinsky_cs with a coefficient
+                                          # C_s(z) computed each step from the
+                                          # resolved field via a horizontal test
+                                          # filter + the Germano identity, plane-
+                                          # averaged over the homogeneous (x,y)
+                                          # directions and clipped to
+                                          # [0, smagorinsky_dynamic_cs_max]. For
+                                          # canonical homogeneous-horizontal LES
+                                          # (GABLS1, Wangara). smagorinsky_cs is
+                                          # then only the FALLBACK / initial value.
+                                          # Plane only; single-rank plane average
+                                          # (per-rank under MPI — see driver note).
+    smagorinsky_dynamic_cs_max: float = 0.4
+                                          # Stability clip on the dynamic C_s
+                                          # (typical LES C_s∈[0,0.25]; 0.4 is a
+                                          # generous backstop against the Germano
+                                          # ratio spiking where ⟨M_ijM_ij⟩→0).
     sgs_vertical_diffusion: bool = False
                                           # SGS-VERT (#81): add the VERTICAL SGS
                                           # flux ∂_z(K ∂_z φ) for u/v/θ'/tracers

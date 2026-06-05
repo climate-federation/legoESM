@@ -1210,6 +1210,127 @@ def _compute_smagorinsky_K_m_plane(
     return l_m_sq * strain_mag
 
 
+def _horizontal_box_filter_plane(field_yxz: jax.Array) -> jax.Array:
+    """Separable 3-point top-hat TEST filter over the periodic horizontal
+    (y, x) directions — the Germano dynamic-Smagorinsky test filter at width
+    ratio α=2 relative to the grid filter. Vertical is left UNfiltered (the
+    LES is homogeneous only in the horizontal, so the dynamic average + test
+    filter act in (x, y) — standard for atmospheric boundary-layer LES)."""
+    fx = (jnp.roll(field_yxz, 1, axis=1) + field_yxz
+          + jnp.roll(field_yxz, -1, axis=1)) / 3.0
+    return (jnp.roll(fx, 1, axis=0) + fx + jnp.roll(fx, -1, axis=0)) / 3.0
+
+
+def _compute_dynamic_smag_cs_plane(
+    u_yxz: jax.Array,
+    v_yxz: jax.Array,
+    w_yxz_half: jax.Array,
+    grid: PlaneGrid,
+    height_coord: HeightCoordinate,
+    cs_max: float = 0.4,
+) -> jax.Array:
+    """Dynamic Smagorinsky coefficient ``C_s(z)`` (Germano 1991; Lilly 1992).
+
+    Returns a per-LEVEL coefficient (shape ``(nlev,)``) computed from the
+    resolved field by a horizontal test filter + the Germano identity, then
+    plane-averaged over the homogeneous ``(x, y)`` directions:
+
+        L_ij = F(u_i u_j) − F(u_i) F(u_j)                       (Leonard stress)
+        M_ij = 2 Δ² [ F(|S| S_ij) − α² |F(S)| F(S_ij) ]          (α = 2)
+        C_s² = ⟨L_ij^d M_ij⟩_xy / ⟨M_ij M_ij⟩_xy ,  clipped to [0, cs_max²]
+
+    where ``F`` is the 3-point top-hat test filter, ``Δ=(dx·dy·dz)^⅓`` the grid
+    filter width, and ``L^d`` the deviatoric Leonard stress (trace removed so a
+    weakly-compressible ``S_kk≠0`` does not bias the contraction). The plane
+    average is the standard stabilisation for horizontally-homogeneous LES
+    (GABLS1, Wangara): it removes the well-known ill-conditioning of the pointwise
+    Germano ratio. ``C_s(z)`` then feeds the SAME ``(C_s·Δ)²·|S|`` operator as the
+    static path, so wall-damping / stratification cutoff / diffusion are unchanged.
+
+    Single-rank plane average: ``jnp.mean`` is over the LOCAL (y, x) tile, so
+    under a horizontal MPI decomposition this is a per-rank average (an
+    approximation). The dynamic path is intended for single-rank (GPU) LES;
+    MPI runs use the static closure (validated serial=MPI). AD/JIT-safe.
+    """
+    nlev = u_yxz.shape[-1]
+    # --- A-grid cell-centre velocities (C-grid → centre) ---
+    uc = 0.5 * (u_yxz + jnp.roll(u_yxz, -1, axis=1))
+    vc = 0.5 * (v_yxz + jnp.roll(v_yxz, -1, axis=0))
+    wc = 0.5 * (w_yxz_half[..., :-1] + w_yxz_half[..., 1:])
+
+    # --- Resolved strain S_ij at centres (centred A-grid differences) ---
+    dudx = (jnp.roll(uc, -1, axis=1) - jnp.roll(uc, 1, axis=1)) / (2.0 * grid.dx)
+    dvdx = (jnp.roll(vc, -1, axis=1) - jnp.roll(vc, 1, axis=1)) / (2.0 * grid.dx)
+    dwdx = (jnp.roll(wc, -1, axis=1) - jnp.roll(wc, 1, axis=1)) / (2.0 * grid.dx)
+    dudy = (jnp.roll(uc, -1, axis=0) - jnp.roll(uc, 1, axis=0)) / (2.0 * grid.dy)
+    dvdy = (jnp.roll(vc, -1, axis=0) - jnp.roll(vc, 1, axis=0)) / (2.0 * grid.dy)
+    dwdy = (jnp.roll(wc, -1, axis=0) - jnp.roll(wc, 1, axis=0)) / (2.0 * grid.dy)
+    dudz = _full_level_centred_d_dz(uc, height_coord)
+    dvdz = _full_level_centred_d_dz(vc, height_coord)
+    dwdz = _full_level_centred_d_dz(wc, height_coord)
+
+    S11, S22, S33 = dudx, dvdy, dwdz
+    S12 = 0.5 * (dudy + dvdx)
+    S13 = 0.5 * (dudz + dwdx)
+    S23 = 0.5 * (dvdz + dwdy)
+    Smag = jnp.sqrt(jnp.maximum(
+        2.0 * (S11 ** 2 + S22 ** 2 + S33 ** 2
+               + 2.0 * (S12 ** 2 + S13 ** 2 + S23 ** 2)),
+        1.0e-30))
+
+    F = _horizontal_box_filter_plane
+    alpha2 = 4.0  # (test/grid filter-width ratio)² = 2²
+
+    # --- Leonard stress L_ij = F(u_i u_j) − F(u_i)F(u_j) (deviatoric) ---
+    Fu, Fv, Fw = F(uc), F(vc), F(wc)
+    L11 = F(uc * uc) - Fu * Fu
+    L22 = F(vc * vc) - Fv * Fv
+    L33 = F(wc * wc) - Fw * Fw
+    L12 = F(uc * vc) - Fu * Fv
+    L13 = F(uc * wc) - Fu * Fw
+    L23 = F(vc * wc) - Fv * Fw
+    Ltr = (L11 + L22 + L33) / 3.0
+    L11d, L22d, L33d = L11 - Ltr, L22 - Ltr, L33 - Ltr
+
+    # --- M_ij = 2 Δ² [ F(|S| S_ij) − α² |F(S)| F(S_ij) ] ---
+    dz_full = height_coord.dz
+    delta = (grid.dx * grid.dy * dz_full) ** (1.0 / 3.0)   # (nlev,)
+    two_d2 = 2.0 * delta ** 2                              # (nlev,)
+    # |F(S)| from the test-filtered strain components.
+    FS11, FS22, FS33 = F(S11), F(S22), F(S33)
+    FS12, FS13, FS23 = F(S12), F(S13), F(S23)
+    FSmag = jnp.sqrt(jnp.maximum(
+        2.0 * (FS11 ** 2 + FS22 ** 2 + FS33 ** 2
+               + 2.0 * (FS12 ** 2 + FS13 ** 2 + FS23 ** 2)),
+        1.0e-30))
+
+    def m_comp(Sij, FSij):
+        return two_d2 * (F(Smag * Sij) - alpha2 * FSmag * FSij)
+    M11 = m_comp(S11, FS11)
+    M22 = m_comp(S22, FS22)
+    M33 = m_comp(S33, FS33)
+    M12 = m_comp(S12, FS12)
+    M13 = m_comp(S13, FS13)
+    M23 = m_comp(S23, FS23)
+
+    # --- Contractions L_ij M_ij and M_ij M_ij (off-diagonals ×2) ---
+    LM = (L11d * M11 + L22d * M22 + L33d * M33
+          + 2.0 * (L12 * M12 + L13 * M13 + L23 * M23))
+    MM = (M11 ** 2 + M22 ** 2 + M33 ** 2
+          + 2.0 * (M12 ** 2 + M13 ** 2 + M23 ** 2))
+
+    # --- Plane-average per level, C_s² = ⟨LM⟩/⟨MM⟩, clip to [0, cs_max²] ---
+    LM_z = jnp.mean(LM, axis=(0, 1))                       # (nlev,)
+    MM_z = jnp.mean(MM, axis=(0, 1))
+    cs_sq = LM_z / jnp.maximum(MM_z, 1.0e-30)
+    # Clip backscatter (LM<0) + the ill-conditioned ratio to [0, cs_max²]. The
+    # tiny positive floor (1e-24) keeps ``d/dx √(cs_sq)`` FINITE at the clip-to-
+    # zero boundary (√(0) has an infinite derivative ⇒ a 0·∞ NaN under AD);
+    # √1e-24 = 1e-12 is a negligible C_s floor.
+    cs_sq = jnp.clip(cs_sq, 1.0e-24, cs_max ** 2)
+    return jnp.sqrt(cs_sq)                                 # C_s(z), (nlev,)
+
+
 def _full_level_centred_d_dz(
     field_yxz: jax.Array, height_coord: HeightCoordinate
 ) -> jax.Array:
@@ -1835,8 +1956,20 @@ def plane_compressible_euler_slow_tendencies(
             n2_sgs = _sgs_brunt_vaisala_sq(
                 theta_total, state.tracers.data, height_coord,
             )
+            # DYNAMIC Smagorinsky (Germano/Lilly): replace the fixed
+            # config.smagorinsky_cs with a plane-averaged C_s(z) diagnosed from
+            # the resolved field each step. Falls back to the static scalar when
+            # the flag is off (byte-identical). The dynamic C_s(z) array then
+            # feeds the SAME (C_s·Δ)²·|S| operator (c_s broadcasts per-level).
+            if getattr(config, "smagorinsky_dynamic", False):
+                c_s_arg = _compute_dynamic_smag_cs_plane(
+                    u, v, w, grid, height_coord,
+                    cs_max=getattr(config, "smagorinsky_dynamic_cs_max", 0.4),
+                )
+            else:
+                c_s_arg = config.smagorinsky_cs
             K_m = _compute_smagorinsky_K_m_plane(
-                u, v, w, grid, height_coord, config.smagorinsky_cs,
+                u, v, w, grid, height_coord, c_s_arg,
                 n2_sgs=n2_sgs, prandtl=config.smagorinsky_prandtl,
                 wall_damping=getattr(config, "smagorinsky_wall_damping", True),
                 delta_max=getattr(config, "smagorinsky_delta_max", 1.0e30),
