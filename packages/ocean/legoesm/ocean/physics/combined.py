@@ -119,9 +119,34 @@ def make_ocean_physics(
             "in your OceanPhysicsConfig."
         )
     if config.convection.scheme != "none":
+        # Fail closed: a user-configured convective momentum viscosity cannot
+        # be honoured under KPP (KPP owns interior momentum convection for
+        # N²<0; adding enhanced_diffusion's A_v too would double-count, so it
+        # is suppressed below).  Rather than silently ignore nu_conv/nu_bg,
+        # reject the combination — the user must set nu_*=0 (let KPP own it)
+        # or pick a non-KPP vertical_mixing scheme.
+        if (config.vertical_mixing.scheme == "kpp"
+                and config.convection.scheme == "enhanced_diffusion"):
+            _ed = config.convection.enhanced_diffusion
+            if _ed.nu_conv != 0.0 or _ed.nu_bg != 0.0:
+                raise ValueError(
+                    "EnhancedDiffusionConfig convective momentum viscosity "
+                    "(nu_conv/nu_bg) cannot be combined with KPP vertical "
+                    "mixing: KPP already enhances interior momentum where "
+                    "N²<0, so applying nu_* on top would double-count and is "
+                    "suppressed. Set EnhancedDiffusionConfig(nu_conv=0.0, "
+                    "nu_bg=0.0) to let KPP own convective momentum, or choose "
+                    "a non-KPP vertical_mixing scheme."
+                )
+        # Suppress convective momentum viscosity when KPP is the vertical-
+        # mixing scheme: KPP already enhances interior momentum for N²<0,
+        # so adding enhanced_diffusion's A_v here would double-count (the
+        # A_v fields are summed below).  Mirrors the ``vmix.scheme != "kpp"``
+        # gate in compute_vertical_K_profiles (the implicit fallback path).
         fns.append(make_convection_physics(
             config.convection,
             apply_diffusion=apply_vertical_diffusion,
+            emit_momentum_viscosity=(config.vertical_mixing.scheme != "kpp"),
         ))
 
     sw_config = config.shortwave_penetration

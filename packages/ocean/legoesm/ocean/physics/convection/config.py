@@ -8,6 +8,14 @@ from typing import NamedTuple
 class EnhancedDiffusionConfig(NamedTuple):
     """Enhanced diffusion where N^2 < 0.
 
+    Mirrors Oceananigans' ``ConvectiveAdjustmentVerticalDiffusivity``:
+    large vertical diffusivity/viscosity wherever the column is
+    statically unstable (``N² < 0``), background values elsewhere.
+    Oceananigans keeps the convective **tracer diffusivity**
+    (``convective_κz`` → ``K_conv``) and **momentum viscosity**
+    (``convective_νz`` → ``nu_conv``) as *independent* parameters; this
+    config does likewise.
+
     The convective diffusivity ``K_conv`` is normally large (~1 m²/s) to
     rapidly homogenize an unstable column.  When the diffusion operator
     is applied explicitly (``apply_diffusion=True`` in
@@ -15,12 +23,34 @@ class EnhancedDiffusionConfig(NamedTuple):
     ``K · dt / dz² ≤ 0.5``.  With ``dz ≈ 10 m`` and ``dt ≈ 3600 s`` this
     forces ``K ≤ 0.014`` — three orders of magnitude below the desired
     value.  ``cfl_dt_estimate`` and ``cfl_safety`` parameterize the
-    safety cap applied internally to ``K`` along the explicit path; the
-    implicit path (``apply_diffusion=False``) bypasses the cap because
-    backward-Euler is unconditionally stable.
+    safety cap applied internally to ``K``/``A`` along the explicit path;
+    the implicit path (``apply_diffusion=False``) bypasses the cap
+    because backward-Euler is unconditionally stable.
+
+    ``nu_conv`` / ``nu_bg`` are the momentum counterparts of
+    ``K_conv`` / ``K_bg``.  Defaults are ``0`` to match Oceananigans'
+    ``convective_νz = 0`` (convective adjustment acts on tracers only by
+    default).  Set ``nu_conv > 0`` to additionally mix momentum where
+    ``N² < 0``.  Note: this differs from the pre-feature implicit path,
+    which incidentally reused the tracer ``K_conv`` as a momentum
+    viscosity; that side-effect is now opt-in and explicit via ``nu_conv``.
+
+    Scope: ``nu_conv`` / ``nu_bg`` mix momentum only on the cell-centred
+    cubed-sphere / A-grid (where u/v share the tracer stagger).  On the
+    lat-lon C-grid the convective momentum viscosity is applied to the
+    face velocities through the model's implicit (backward-Euler) vertical
+    solve, so it requires ``implicit_vertical_mixing=True``; the explicit
+    C-grid path raises rather than silently dropping it.  MPAS (edge-normal
+    velocity) applies the convective adjustment to tracers only — its
+    momentum mixing needs a TRiSK cell->edge reconstruction (follow-up).
+    When KPP is the vertical-mixing scheme, the convective momentum
+    viscosity is suppressed here (KPP already enhances interior momentum
+    for N²<0).
     """
-    K_conv: float = 1.0        # Convective diffusivity [m^2/s]
-    K_bg: float = 1e-5         # Background diffusivity [m^2/s]
+    K_conv: float = 1.0        # Convective tracer diffusivity κ [m^2/s]
+    K_bg: float = 1e-5         # Background tracer diffusivity [m^2/s]
+    nu_conv: float = 0.0       # Convective momentum viscosity ν [m^2/s]
+    nu_bg: float = 0.0         # Background momentum viscosity [m^2/s]
     smooth_transition: bool = True
     sigmoid_sharpness: float = 1e6
     cfl_dt_estimate: float = 3600.0  # Reference dt for explicit-CFL cap [s]

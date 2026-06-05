@@ -108,6 +108,22 @@ def make_mpas_ocean_physics(
             f"{conv_scheme!r}. Supported: {_supported_conv}."
         )
     apply_convection = conv_scheme == "enhanced_diffusion"
+    # MPAS convective adjustment is tracer-only: edge-normal velocity needs a
+    # TRiSK cell->edge reconstruction that the cell-centred enhanced_diffusion
+    # momentum operator does not provide, and neither the explicit nor the
+    # implicit MPAS path applies a convective edge viscosity.  Reject a
+    # nonzero convective momentum viscosity rather than silently dropping it
+    # (mirrors the C-grid explicit guard in convection/integration.py).
+    if apply_convection:
+        _ed = conv_config.enhanced_diffusion
+        if _ed.nu_conv != 0.0 or _ed.nu_bg != 0.0:
+            raise ValueError(
+                "EnhancedDiffusionConfig convective momentum viscosity "
+                "(nu_conv/nu_bg) is unsupported on MPAS: the convective "
+                "adjustment mixes tracers only (edge-normal momentum would "
+                "need a TRiSK cell->edge reconstruction). Set "
+                "EnhancedDiffusionConfig(nu_conv=0.0, nu_bg=0.0)."
+            )
 
     # Physics-level bottom drag is deprecated — use the dynamics-level
     # ``bottom_drag_r`` field on ``MPASOceanConfig`` instead.  The
@@ -299,6 +315,15 @@ def make_mpas_ocean_physics(
             # is a known approximation — the EOS choice only affects the
             # static-stability ranking, not the dycore tendencies.
             rho = compute_ocean_rho(state, z_coord, jacobian)
+            # Tracer-only on MPAS: the convective **momentum** viscosity
+            # (cfg_c.nu_conv / convective_νz) is intentionally NOT applied
+            # here.  MPAS carries edge-normal velocity (nEdges) whose
+            # vertical mixing needs a TRiSK cell->edge reconstruction; the
+            # cell-centred enhanced_diffusion momentum operator does not map
+            # onto it.  Omitting u/v takes the kernel's tracer-only branch
+            # (du/dv = None).  Convective momentum on MPAS is a separate
+            # follow-up (like its KPP edge-momentum path); nu_conv only
+            # affects the lat-lon / cubed-sphere cell-centred grids.
             c_out = enhanced_diffusion_convection(
                 state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
             )

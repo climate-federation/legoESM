@@ -203,6 +203,21 @@ class MPASOceanModel:
             _conv_cfg = getattr(self.config.physics, "convection", None)
             if _conv_cfg is not None and _conv_cfg.scheme == "enhanced_diffusion":
                 self._conv_config = _conv_cfg.enhanced_diffusion
+                # Implicit MPAS convection is tracer-only (the edge momentum
+                # solve receives no convective viscosity).  Reject a nonzero
+                # convective momentum viscosity instead of silently dropping
+                # it — consistent with the explicit MPAS guard in
+                # mpas_physics.make_mpas_ocean_physics.
+                if (self._conv_config.nu_conv != 0.0
+                        or self._conv_config.nu_bg != 0.0):
+                    raise ValueError(
+                        "EnhancedDiffusionConfig convective momentum "
+                        "viscosity (nu_conv/nu_bg) is unsupported on MPAS: "
+                        "the convective adjustment mixes tracers only (edge-"
+                        "normal momentum would need a TRiSK cell->edge "
+                        "reconstruction). Set EnhancedDiffusionConfig("
+                        "nu_conv=0.0, nu_bg=0.0)."
+                    )
 
     def check_barotropic_cfl(self, dt: float) -> float:
         """Check barotropic CFL and warn if marginal or unstable.
