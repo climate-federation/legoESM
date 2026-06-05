@@ -63,6 +63,10 @@ class SpectralLESConfig(NamedTuple):
     buoyancy: bool = False         # Boussinesq buoyancy in w (θ scalar required)
     theta_ref0: float = 290.0      # reference θ for the buoyancy term [K]
     pr_sgs: float = 1.0            # turbulent Prandtl number (K_h = ν_t / Pr)
+    nu_floor: float = 0.0          # background eddy-viscosity floor [m²/s] — keeps
+    #                                strongly-stable layers (where the dynamic SGS
+    #                                shuts off) from going fully inviscid and
+    #                                growing the 2Δ gravity-wave/KH mode (SBL).
 
 
 class SpectralLESGrid(NamedTuple):
@@ -247,14 +251,14 @@ def eddy_viscosity(u, v, w, g: SpectralLESGrid):
         wc = f2c(w)
         cs2 = lasd_cs2(u, v, wc, *S_tuple, Smag,
                        jnp.full(nz, delta, dtype=u.dtype), cs_max=g.cfg.cs_max)
-        return cs2 * (delta ** 2) * Smag                    # ν_t = C_s²·Δ²·|S|
+        return cs2 * (delta ** 2) * Smag + g.cfg.nu_floor   # ν_t = C_s²·Δ²·|S|
     l_smag = g.cfg.c_s * delta
     if g.cfg.wall_damping:
         kappa = constants.kappa_von_karman
         l_m = jnp.minimum(l_smag, kappa * g.z_c)            # (nz,)
     else:
         l_m = l_smag
-    return (l_m ** 2) * Smag                                # (ny,nx,nz)
+    return (l_m ** 2) * Smag + g.cfg.nu_floor               # (ny,nx,nz)
 
 
 # --------------------------------------------------------------------------- #
