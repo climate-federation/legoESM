@@ -2626,23 +2626,24 @@ def partial_cell_pgf_correction_y(
         bcast = (slice(None),) + (jnp.newaxis,) * (correction_interior.ndim - 1)
         correction_interior = correction_interior / dy_v_interior[bcast]
 
-    # Fold face: compute correction from fold-partner centroids
-    fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
-        centroid_partner = centroid_depth[-1:, fold.perm_T, :]
-        rho_partner = rho_prime[-1:, fold.perm_T, :]
+    # Pad-zero-first (PR357 invariant): every rank calls pad_ns_zero so the
+    # MPI sendrecv call count matches across ranks (zero at the physical
+    # pole, halo-exchange at interior partition cuts).  Only the rank that
+    # physically owns the fold seam (_fold_is_local) overwrites the north
+    # row with the fold-partner correction.
+    correction = pad_ns_zero(correction_interior)
+    if _fold_is_local(grid):
+        centroid_partner = centroid_depth[-1:, grid.fold.perm_T, :]
+        rho_partner = rho_prime[-1:, grid.fold.perm_T, :]
         face_ref_fold = jnp.minimum(centroid_depth[-1:], centroid_partner)
         excess_local = centroid_depth[-1:] - face_ref_fold
         excess_partner = centroid_partner - face_ref_fold
         correction_fold = -g * (
             rho_partner * excess_partner - rho_prime[-1:] * excess_local
         )
-        south = jnp.zeros_like(correction_interior[:1])
         correction = jnp.concatenate(
-            [south, correction_interior, correction_fold], axis=0,
+            [correction[:-1], correction_fold], axis=0,
         )
-    else:
-        correction = pad_ns_zero(correction_interior)
 
     if _tripolar_pgf:
         # Tripolar: divide by full 2D dy_v after padding.
@@ -2801,9 +2802,14 @@ def density_jacobian_pgf_smc03_y(
     )
     diff_interior = P_N - P_S
 
-    # Fold face: compute PGF from fold-partner cells
-    fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
+    # Pad-zero-first (PR357 invariant): every rank calls pad_ns_zero so the
+    # MPI sendrecv call count matches across ranks (zero at the physical
+    # pole, halo-exchange at interior partition cuts).  Only the rank that
+    # physically owns the fold seam (_fold_is_local) overwrites the north
+    # row with the fold-partner PGF.
+    diff = pad_ns_zero(diff_interior)
+    if _fold_is_local(grid):
+        fold = grid.fold
         rho_F = rho_per_cell[-1:, fold.perm_T, :]
         h_F = h_partial[-1:, fold.perm_T, :]
         z_c_F = z_centroid[-1:, fold.perm_T, :]
@@ -2818,10 +2824,7 @@ def density_jacobian_pgf_smc03_y(
             sigma[-1:], z_target_fold, g,
         )
         diff_fold = P_fold - P_local
-        south = jnp.zeros_like(diff_interior[:1])
-        diff = jnp.concatenate([south, diff_interior, diff_fold], axis=0)
-    else:
-        diff = pad_ns_zero(diff_interior)
+        diff = jnp.concatenate([diff[:-1], diff_fold], axis=0)
 
     if is_tripolar(grid):
         # Tripolar: divide by full 2D dy_v.
