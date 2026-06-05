@@ -484,15 +484,29 @@ def main():
     print(f"  final: BL depth={d['h_bl']:.1f} m  max|w|={d['max_w']:.3f}  "
           f"jet spd={d['spd_max']:.3f} @ z={d['spd_max_z']:.1f} m  "
           f"θ_sfc={d['theta_sfc']:.3f} K")
-    # Dump final mean profiles for assessment.
+    # Dump final mean profiles + resolved turbulence statistics for the oracle
+    # (Monin-Obukhov similarity) validation — see scripts/validate/validate_les_vs_oracle.py.
     z = np.asarray(hc.z_full)
+    u3 = np.asarray(state.u.data)
+    v3 = np.asarray(state.v.data)
+    w3 = np.asarray(state.w.data)[..., :-1]              # full-level w (drop top)
+    um = u3.mean(axis=(0, 1)); vm = v3.mean(axis=(0, 1)); wm = w3.mean(axis=(0, 1))
+    up, vp, wp = u3 - um, v3 - vm, w3 - wm               # resolved fluctuations
+    # Resolved second moments (planar means): variances + kinematic momentum flux.
+    uw = (up * wp).mean(axis=(0, 1))
+    vw = (vp * wp).mean(axis=(0, 1))
+    uu = (up * up).mean(axis=(0, 1))
+    vv = (vp * vp).mean(axis=(0, 1))
+    ww = (wp * wp).mean(axis=(0, 1))
+    tke = 0.5 * (uu + vv + ww)
+    # Surface friction velocity from the lowest-level resolved stress magnitude.
+    u_star = float((uw[np.argmin(z)] ** 2 + vw[np.argmin(z)] ** 2) ** 0.25)
     np.savez(args.output / "final_profiles.npz",
              z=z, theta=np.asarray(hc.theta_ref) + np.asarray(
                  state.theta_prime.data).mean(axis=(0, 1)),
-             u=np.asarray(state.u.data).mean(axis=(0, 1)),
-             v=np.asarray(state.v.data).mean(axis=(0, 1)),
-             wvar=(np.asarray(state.w.data)[..., :-1] ** 2).mean(axis=(0, 1)))
-    print(f"  profiles -> {args.output}/final_profiles.npz")
+             u=um, v=vm, wvar=ww, uu=uu, vv=vv, ww=ww, tke=tke,
+             uw=uw, vw=vw, u_star=u_star, z0=spec["z0"], case=args.case)
+    print(f"  profiles -> {args.output}/final_profiles.npz  (u*≈{u_star:.3f} m/s)")
     return 0
 
 
