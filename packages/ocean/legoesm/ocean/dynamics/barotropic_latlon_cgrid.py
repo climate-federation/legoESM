@@ -22,6 +22,7 @@ from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    _fold_is_local,
     divergence_cgrid,
     fold_vface_row,
     gradient_x_cgrid,
@@ -31,6 +32,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     pad_ns_vector_u,
     pad_ns_zero,
 )
+from legoesm.grids.halo_latlon import zero_polar_lat_ends as _zero_polar_lat_ends
 from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
 from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
@@ -202,29 +204,40 @@ def barotropic_substeps_latlon_cgrid(
         # u-face coefficient: average of adjacent cell areas
         nu_face_u = baro_alpha * 0.5 * (jnp.roll(area, 1, axis=1) + area)
         nu_face_u = jnp.concatenate([nu_face_u, nu_face_u[:, 0:1]], axis=1)
-        # v-face coefficient: average of adjacent cell areas.  Pole rows
-        # are zero (wall BC); single Pad HLO op replaces alloc-zeros +
-        # concatenate-of-three.  Cast first since pad inherits dtype
-        # from the input slice.
-        nu_face_v_interior = baro_alpha * 0.5 * (area[:-1] + area[1:])
-        nu_face_v = jnp.pad(
-            nu_face_v_interior.astype(eta.dtype), ((1, 1), (0, 0)),
-        )
+        # v-face coefficient: average of adjacent cell areas.  Cell-pad-first
+        # (PR357 Bug-2 pattern): pad the cell AREA so the v-face coefficient
+        # at a partition cut averages the neighbour rank's adjacent cell area
+        # (MPI halo exchange) rather than zero-padding a rank-local interior
+        # average.  Pole rows are zero (wall BC) via zero_polar_lat_ends.
+        area_p = pad_ns_zero(area)
+        nu_face_v = baro_alpha * 0.5 * (area_p[:-1] + area_p[1:])
+        # The north fold row stays zero, matching the pre-existing serial
+        # behaviour (flux_y = nu_face_v * grad_y * diff_v_mask is therefore
+        # zero across the seam regardless of diff_v_mask).  Enabling
+        # fold-seam barotropic diffusion (a non-zero fold-row coefficient)
+        # is a physics change that requires the gradient_y_cgrid fold fix
+        # (PR358) and a tripolar barotropic-diffusion validation case, so it
+        # is deferred to PR358 rather than introduced unvalidated here.
+        nu_face_v = _zero_polar_lat_ends(nu_face_v).astype(eta.dtype)
         # Face masks for land boundaries (zero flux at coastlines)
         diff_u_mask = mask * jnp.roll(mask, 1, axis=1)
         diff_u_mask = jnp.concatenate(
             [diff_u_mask, diff_u_mask[:, 0:1]], axis=1,
         )
-        diff_v_mask_interior = mask[:-1] * mask[1:]
-        _fold_dm = getattr(grid, "fold", None)
-        if _fold_dm is not None and _fold_dm.is_active:
-            south_dm = jnp.zeros_like(diff_v_mask_interior[:1])
-            north_dm = mask[-1:] * mask[-1:, _fold_dm.perm_T]
+        # Cell-pad-first (PR357 Bug-2 pattern): pad the cell mask so the
+        # v-face mask at a partition cut is the product of the two adjacent
+        # cells across the cut (MPI halo exchange) rather than a halo-padded
+        # interior face.  pad_ns_zero zero-pads the physical pole on every
+        # rank (consistent MPI call count); the seam is overwritten only on
+        # the rank that owns it (_fold_is_local).
+        mask_p = pad_ns_zero(mask)
+        diff_v_mask = mask_p[:-1] * mask_p[1:]
+        diff_v_mask = _zero_polar_lat_ends(diff_v_mask)
+        if _fold_is_local(grid):
+            north_dm = mask[-1:] * mask[-1:, grid.fold.perm_T]
             diff_v_mask = jnp.concatenate(
-                [south_dm, diff_v_mask_interior, north_dm], axis=0,
+                [diff_v_mask[:-1], north_dm], axis=0,
             )
-        else:
-            diff_v_mask = pad_ns_zero(diff_v_mask_interior)
 
     # Divergence damping on barotropic velocity: grad(div(u_bar)).
     # Targets the divergent mode that creates the eta checkerboard,
@@ -239,13 +252,13 @@ def barotropic_substeps_latlon_cgrid(
         div_damp_area_u = jnp.concatenate(
             [div_damp_area_u, div_damp_area_u[:, 0:1]], axis=1,
         )
-        # v-face area: average of adjacent cells.  Pole rows are zero
-        # (wall BC); single Pad HLO op replaces alloc-zeros +
-        # concatenate-of-three.
-        div_damp_area_v_int = 0.5 * (_area[:-1] + _area[1:])
-        div_damp_area_v = jnp.pad(
-            div_damp_area_v_int.astype(eta.dtype), ((1, 1), (0, 0)),
-        )
+        # v-face area: average of adjacent cells.  Cell-pad-first so the
+        # partition-cut v-face averages the neighbour rank's adjacent cell
+        # area (MPI halo); pole rows are zero (wall BC) via
+        # zero_polar_lat_ends.
+        area_p_dd = pad_ns_zero(_area)
+        div_damp_area_v = 0.5 * (area_p_dd[:-1] + area_p_dd[1:])
+        div_damp_area_v = _zero_polar_lat_ends(div_damp_area_v).astype(eta.dtype)
 
     # Cosine time filter for time-averaging (replaces box-average).
     # Cosine-bell (Hanning) window suppresses the side lobes of the box
@@ -296,16 +309,20 @@ def barotropic_substeps_latlon_cgrid(
         H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
         # Pole rows are zero (wall BC) on regular lat-lon; fold min-rule
         # on tripolar.
-        H_v_interior = jnp.minimum(H_total_c[:-1], H_total_c[1:])
-        _fold = getattr(grid, "fold", None)
-        if _fold is not None and _fold.is_active:
-            south = jnp.zeros_like(H_v_interior[:1])
+        # Cell-pad-first (PR357 Bug-2 pattern): pad the cell column thickness
+        # so the v-face min at a partition cut uses the neighbour rank's
+        # adjacent column (MPI halo exchange).  Every rank calls pad_ns_zero
+        # (consistent MPI call count — the previous direct-concat fold branch
+        # skipped it and deadlocked against the else branch); the fold seam is
+        # overwritten only on the rank that owns it.
+        H_total_pad = pad_ns_zero(H_total_c)
+        H_v = jnp.minimum(H_total_pad[:-1], H_total_pad[1:])
+        H_v = _zero_polar_lat_ends(H_v)
+        if _fold_is_local(grid):
             north = jnp.minimum(
                 H_total_c[-1:], fold_vface_row(H_total_c, grid),
             )
-            H_v = jnp.concatenate([south, H_v_interior, north], axis=0)
-        else:
-            H_v = pad_ns_zero(H_v_interior)
+            H_v = jnp.concatenate([H_v[:-1], north], axis=0)
 
         flux_u = H_u * U_bar_c * u_mask
         flux_v = H_v * V_bar_c * v_mask

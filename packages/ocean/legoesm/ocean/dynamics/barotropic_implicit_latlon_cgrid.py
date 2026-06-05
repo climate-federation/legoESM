@@ -61,11 +61,15 @@ from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    _fold_is_local,
     divergence_cgrid,
+    fold_vface_row,
     gradient_x_cgrid,
     gradient_y_cgrid,
     is_tripolar,
+    pad_ns_zero,
 )
+from legoesm.grids.halo_latlon import zero_polar_lat_ends as _zero_polar_lat_ends
 from legoesm.ocean.dynamics.eta_floor import (
     clamp_and_redistribute as _clamp_redistribute,
 )
@@ -91,8 +95,6 @@ def _depth_average_to_faces(
     columns where every cell has ``h_k > 0`` (full cells everywhere),
     the mask is 1 and the result is bit-exact unchanged.
     """
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import fold_vface_row
-
     # Use ``min(h_left, h_right)`` instead of the arithmetic mean.  This
     # is the physically correct face thickness — the partial cell is
     # the constraint on flux capacity at the face.  Identical to the
@@ -105,16 +107,17 @@ def _depth_average_to_faces(
     H_u = jnp.maximum(jnp.sum(h_u, axis=-1), min_water_col)
     U_bar = jnp.sum(u_3d * h_u, axis=-1) / H_u * u_mask
 
-    h_v_int = jnp.minimum(h_k[:-1], h_k[1:])
-    n_lon = h_k.shape[1]
-    nlev = h_k.shape[2]
-    south_row = jnp.zeros((1, n_lon, nlev), dtype=h_k.dtype)
-    # On tripolar grids, the fold face connects cell (fold_j, i) with
-    # its fold partner (fold_j, perm_T[i]).  Face thickness is the min
-    # of both sides — identical to the interior min-rule.
-    h_k_partner = fold_vface_row(h_k, grid)
-    north_row = jnp.minimum(h_k[-1:], h_k_partner)
-    h_v = jnp.concatenate([south_row, h_v_int, north_row], axis=0)
+    # Cell-pad-first (PR357 Bug-2 pattern): pad the cell thickness so the
+    # v-face min at a partition cut uses the neighbour rank's adjacent
+    # column (MPI halo).  On tripolar grids the fold face connects cell
+    # (fold_j, i) with its fold partner (fold_j, perm_T[i]); the seam is
+    # overwritten only on the rank that owns it.
+    h_k_pad = pad_ns_zero(h_k)
+    h_v = jnp.minimum(h_k_pad[:-1], h_k_pad[1:])
+    h_v = _zero_polar_lat_ends(h_v)
+    if _fold_is_local(grid):
+        north_row = jnp.minimum(h_k[-1:], fold_vface_row(h_k, grid))
+        h_v = jnp.concatenate([h_v[:-1], north_row], axis=0)
     _v_pair = jnp.sum(jnp.stack([h_v, v_3d * h_v], axis=-1), axis=-2)
     H_v = jnp.maximum(_v_pair[..., 0], min_water_col)
     V_bar = _v_pair[..., 1] / H_v * v_mask
@@ -148,19 +151,21 @@ def _h_total_at_faces(
 
     Multiplied by the *cell* mask so that dry-face transport is zero.
     """
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import fold_vface_row
-
     H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col) * mask
 
     H_u_inner = jnp.minimum(jnp.roll(H_total, 1, axis=1), H_total)
     H_u = jnp.concatenate([H_u_inner, H_u_inner[:, 0:1]], axis=1)
 
-    H_v_int = jnp.minimum(H_total[:-1], H_total[1:])
-    n_lon = H_total.shape[1]
-    south_row = jnp.zeros((1, n_lon), dtype=H_total.dtype)
-    H_total_partner = fold_vface_row(H_total, grid)
-    north_row = jnp.minimum(H_total[-1:], H_total_partner)
-    H_v = jnp.concatenate([south_row, H_v_int, north_row], axis=0)
+    # Cell-pad-first (PR357 Bug-2 pattern): pad the cell column total so the
+    # v-face min at a partition cut uses the neighbour rank's adjacent
+    # column (MPI halo); the fold seam is overwritten only on the rank that
+    # owns it.
+    H_total_pad = pad_ns_zero(H_total)
+    H_v = jnp.minimum(H_total_pad[:-1], H_total_pad[1:])
+    H_v = _zero_polar_lat_ends(H_v)
+    if _fold_is_local(grid):
+        north_row = jnp.minimum(H_total[-1:], fold_vface_row(H_total, grid))
+        H_v = jnp.concatenate([H_v[:-1], north_row], axis=0)
 
     return H_u, H_v
 
@@ -530,22 +535,17 @@ def barotropic_implicit_latlon_cgrid(
     u_active_3d = jnp.concatenate(
         [u_active_3d_inner, u_active_3d_inner[:, 0:1, :]], axis=1,
     )
-    v_active_3d_int = h_active_3d[:-1] * h_active_3d[1:]
-    fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
-        south_3d = jnp.zeros_like(v_active_3d_int[:1])
-        north_3d = h_active_3d[-1:] * h_active_3d[-1:, fold.perm_T, :]
+    # Cell-pad-first (PR357 Bug-2 pattern): pad the 3D cell active mask so
+    # the v-face active flag at a partition cut is the product of the two
+    # adjacent cells across the cut (MPI halo), not a zeroed wall.  The fold
+    # seam is overwritten only on the rank that owns it.
+    h_active_pad = pad_ns_zero(h_active_3d)
+    v_active_3d = h_active_pad[:-1] * h_active_pad[1:]
+    v_active_3d = _zero_polar_lat_ends(v_active_3d)
+    if _fold_is_local(grid):
+        north_3d = h_active_3d[-1:] * h_active_3d[-1:, grid.fold.perm_T, :]
         v_active_3d = jnp.concatenate(
-            [south_3d, v_active_3d_int, north_3d], axis=0,
-        )
-    else:
-        n_lon_grid = h_active_3d.shape[1]
-        nlev_g = h_active_3d.shape[2]
-        zero_row_3d = jnp.zeros(
-            (1, n_lon_grid, nlev_g), dtype=u_3d.dtype,
-        )
-        v_active_3d = jnp.concatenate(
-            [zero_row_3d, v_active_3d_int, zero_row_3d], axis=0,
+            [v_active_3d[:-1], north_3d], axis=0,
         )
     u_new_3d = (
         (u_prime + U_new[..., jnp.newaxis])

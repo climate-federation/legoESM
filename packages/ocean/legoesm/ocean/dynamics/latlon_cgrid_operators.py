@@ -32,6 +32,7 @@ from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type comp
 from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_zero,
     is_tripolar,
+    _fold_is_local,
     pad_ns_scalar,
     _fold_row,
     pad_ns_vector_v,
@@ -68,8 +69,10 @@ from legoesm.grids.operators_latlon_cgrid import (
 # they reduce to jnp.pad — bit-exact to the current code.
 
 
-
-
+# ``is_tripolar``, ``_fold_is_local``, ``pad_ns_scalar``, ``pad_ns_vector_v``,
+# ``cell_to_cgrid_winds`` and ``_compute_vertex_mask`` live in
+# ``legoesm.grids.operators_latlon_cgrid`` (imported above) and are
+# re-exported here for the ocean dynamics call sites.
 
 
 def fold_vface_row(cell_field: jnp.ndarray, grid) -> jnp.ndarray:
@@ -94,13 +97,9 @@ def fold_vface_row(cell_field: jnp.ndarray, grid) -> jnp.ndarray:
     partner_row : (1, n_lon, ...) — fold partner values at the fold row.
     """
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         return cell_field[-1:, fold.perm_T]
     return jnp.zeros_like(cell_field[-1:])
-
-
-
-
 
 
 def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
@@ -108,16 +107,17 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
 
     On regular lat-lon: zero-pad.
     On tripolar: south = zero, north = fold-reflected with sign flip.
+
+    Under MPI, all ranks call ``pad_ns_zero`` first (consistent MPI call
+    counts), then the northernmost rank applies the fold correction.
     """
+    padded = pad_ns_zero(interior)
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
-        south = jnp.zeros_like(interior[:1])
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         n_lon = fold.perm_T.shape[0]
         north = _fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u, n_lon)
-        return jnp.concatenate([south, interior, north], axis=0)
-    return pad_ns_zero(interior)
-
-
+        padded = jnp.concatenate([padded[:-1], north], axis=0)
+    return padded
 
 
 def pad_ns_vector_pair(
@@ -154,62 +154,50 @@ def pad_ns_vector_pair(
     (u_padded, v_padded) : each (n_lat+1, n_lon, ...)
     """
     fold = getattr(grid, "fold", None)
-    if fold is None or not fold.is_active:
+    if fold is None or not fold.is_active or fold.fold_j < 0:
         return pad_ns_zero(u_interior), pad_ns_zero(v_interior)
 
-    n_lon = fold.perm_T.shape[0]
-    south_u = jnp.zeros_like(u_interior[:1])
-    south_v = jnp.zeros_like(v_interior[:1])
+    u_padded = pad_ns_zero(u_interior)
+    v_padded = pad_ns_zero(v_interior)
 
-    # Source values at the fold partner: i-reversed last interior row
+    n_lon = fold.perm_T.shape[0]
+
     u_src = _fold_row(u_interior[-1:], fold.perm_T, 1.0, n_lon)
     v_src = _fold_row(v_interior[-1:], fold.perm_v, 1.0, n_lon)
 
-    # Check if rotation angles are available and non-trivial.
-    # cos_alpha_v has shape (n_lat+1, n_lon); the north ghost row
-    # corresponds to the last row.
     cos_alpha_v = getattr(grid, "cos_alpha_v", None)
     sin_alpha_v = getattr(grid, "sin_alpha_v", None)
 
     if cos_alpha_v is not None and sin_alpha_v is not None:
-        # Destination rotation angles at the north ghost row
-        cos_d = cos_alpha_v[-1:, :]  # (1, n_lon)
+        cos_d = cos_alpha_v[-1:, :]
         sin_d = sin_alpha_v[-1:, :]
 
-        # Source rotation angles (fold-partner's row, i-reversed)
-        cos_s_row = cos_alpha_v[-2:-1, :]  # last interior row
+        cos_s_row = cos_alpha_v[-2:-1, :]
         sin_s_row = sin_alpha_v[-2:-1, :]
         cos_s = cos_s_row[:, fold.perm_v]
         sin_s = sin_s_row[:, fold.perm_v]
 
-        # Rotation angle difference: cos(Δα) and sin(Δα)
         cos_da = cos_d * cos_s + sin_d * sin_s
         sin_da = sin_d * cos_s - cos_d * sin_s
 
-        # Broadcast for 3D fields
         if u_interior.ndim == 3:
             cos_da = cos_da[:, :, jnp.newaxis]
             sin_da = sin_da[:, :, jnp.newaxis]
 
-        # Combined fold + rotation: negate + rotate
         north_u = -cos_da * u_src - sin_da * v_src
         north_v = sin_da * u_src - cos_da * v_src
     else:
-        # No rotation angles — simple sign flip (regular lat-lon fold)
         north_u = -u_src
         north_v = -v_src
 
-    u_padded = jnp.concatenate([south_u, u_interior, north_u], axis=0)
-    v_padded = jnp.concatenate([south_v, v_interior, north_v], axis=0)
+    u_padded = jnp.concatenate([u_padded[:-1], north_u], axis=0)
+    v_padded = jnp.concatenate([v_padded[:-1], north_v], axis=0)
     return u_padded, v_padded
 
 
 # =============================================================================
 # Cell-center ↔ face interpolation (shared by atmosphere and ocean)
 # =============================================================================
-
-
-
 
 
 def interp_wface_to_center(f: jnp.ndarray) -> jnp.ndarray:
@@ -303,25 +291,23 @@ def min_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     -------
     f_v : (n_lat+1, n_lon, ...) at v-faces.
     """
-    f_v_interior = jnp.minimum(f[:-1], f[1:])
-    south = jnp.zeros_like(f_v_interior[:1])
-    fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active:
-        f_partner = f[-1:, fold.perm_T]
+    # Cell-pad-first (PR357 Bug-2 pattern): pad the cell field so the v-face
+    # min at a partition cut sees the neighbour rank's adjacent cell (MPI
+    # halo exchange) rather than a rank-local-only / zeroed boundary row.
+    f_padded = pad_ns_zero(f)
+    f_v = jnp.minimum(f_padded[:-1], f_padded[1:])
+    from legoesm.grids.halo_latlon import zero_polar_lat_ends
+    f_v = zero_polar_lat_ends(f_v)
+    if _fold_is_local(grid):
+        f_partner = f[-1:, grid.fold.perm_T]
         north = jnp.minimum(f[-1:], f_partner)
-    else:
-        north = jnp.zeros_like(south)
-    return jnp.concatenate([south, f_v_interior, north], axis=0)
-
-
+        f_v = jnp.concatenate([f_v[:-1], north], axis=0)
+    return f_v
 
 
 # =============================================================================
 # Gradient operators (scalar at cell center -> vector at faces)
 # =============================================================================
-
-
-
 
 
 # =============================================================================
@@ -350,8 +336,6 @@ def bilaplacian_cgrid(
     """
     lap_f = laplacian_cgrid(f, grid, mask=mask)
     return laplacian_cgrid(lap_f, grid, mask=mask)
-
-
 
 
 # =============================================================================
@@ -455,15 +439,9 @@ def coriolis_cgrid(
 # =============================================================================
 
 
-
 # =============================================================================
 # Vector Laplacian: grad(div) - k x grad(curl)
 # =============================================================================
-
-
-
-
-
 
 
 def recover_velocity_from_streamfunction(
@@ -2499,8 +2477,6 @@ def neumann_fill_vertex(
     return filled
 
 
-
-
 # =============================================================================
 # Utility: compute face masks from cell mask
 # =============================================================================
@@ -2624,59 +2600,55 @@ def partial_cell_pgf_correction_y(
 
     Output shape: ``(n_lat+1, n_lon, nlev)``.
     """
-    if is_tripolar(grid):
-        dy_v = grid.dy_v  # (n_lat+1, n_lon) — full 2D
-    else:
-        # Regular or Mercator: variable-dy safe.
-        dy_h = grid.dy * 0.5                              # (n_lat,)
-        dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])       # (n_lat-1,)
-
-    # Interior v-faces: between cell i and cell i+1 in latitude
-    centroid_north = centroid_depth[1:]                 # (n_lat-1, n_lon, nlev)
-    centroid_south = centroid_depth[:-1]                # (n_lat-1, n_lon, nlev)
-    rho_prime_north = rho_prime[1:]
-    rho_prime_south = rho_prime[:-1]
+    # Cell-pad-first (PR357 Bug-2 pattern; see ``_interp_to_v_points``):
+    # pad the CELL fields so the v-face at a partition cut is built from the
+    # neighbour rank's adjacent cell column (MPI halo exchange) rather than
+    # from halo-padding an already-computed interior face.  ``pad_ns_zero``
+    # halo-exchanges at interior cuts and zero-pads at the physical pole on
+    # every rank (consistent MPI call count); ``zero_polar_lat_ends`` then
+    # restores the wall BC at the physical pole only.  The fold seam is
+    # overwritten on the rank that owns it (``_fold_is_local``).
+    cd_p = pad_ns_zero(centroid_depth)                  # (n_lat+1, n_lon, nlev)
+    rp_p = pad_ns_zero(rho_prime)
+    centroid_south, centroid_north = cd_p[:-1], cd_p[1:]
+    rho_prime_south, rho_prime_north = rp_p[:-1], rp_p[1:]
 
     face_ref = jnp.minimum(centroid_north, centroid_south)
     excess_north = centroid_north - face_ref
     excess_south = centroid_south - face_ref
 
-    correction_interior = -g * (
+    correction = -g * (
         rho_prime_north * excess_north
         - rho_prime_south * excess_south
     )
 
-    _tripolar_pgf = is_tripolar(grid)
-    if not _tripolar_pgf:
-        # Regular or Mercator: divide before padding so we only divide
-        # interior rows.
-        bcast = (slice(None),) + (jnp.newaxis,) * (correction_interior.ndim - 1)
-        correction_interior = correction_interior / dy_v_interior[bcast]
+    from legoesm.grids.halo_latlon import zero_polar_lat_ends
+    correction = zero_polar_lat_ends(correction)
 
-    # Fold face: compute correction from fold-partner centroids
-    fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
-        centroid_partner = centroid_depth[-1:, fold.perm_T, :]
-        rho_partner = rho_prime[-1:, fold.perm_T, :]
+    if _fold_is_local(grid):
+        centroid_partner = centroid_depth[-1:, grid.fold.perm_T, :]
+        rho_partner = rho_prime[-1:, grid.fold.perm_T, :]
         face_ref_fold = jnp.minimum(centroid_depth[-1:], centroid_partner)
         excess_local = centroid_depth[-1:] - face_ref_fold
         excess_partner = centroid_partner - face_ref_fold
         correction_fold = -g * (
             rho_partner * excess_partner - rho_prime[-1:] * excess_local
         )
-        south = jnp.zeros_like(correction_interior[:1])
         correction = jnp.concatenate(
-            [south, correction_interior, correction_fold], axis=0,
+            [correction[:-1], correction_fold], axis=0,
         )
-    else:
-        correction = pad_ns_zero(correction_interior)
 
-    if _tripolar_pgf:
-        # Tripolar: divide by full 2D dy_v after padding.
-        return correction / dy_v[:, :, jnp.newaxis]
+    # Divide by dy_v after the v-face correction is fully formed (both paths).
+    if is_tripolar(grid):
+        return correction / grid.dy_v[:, :, jnp.newaxis]
     else:
-        # Regular or Mercator: already divided above.
-        return correction
+        # Regular or Mercator: variable-dy safe.  Pole rows are zero from
+        # zero_polar_lat_ends, so dividing them by the edge-padded dy is inert.
+        dy_h = grid.dy * 0.5                              # (n_lat,)
+        dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])       # (n_lat-1,)
+        dy_v_full = jnp.pad(dy_v_interior, (1, 1), mode="edge")
+        bcast = (slice(None),) + (jnp.newaxis,) * (correction.ndim - 1)
+        return correction / dy_v_full[bcast]
 
 
 # =============================================================================
@@ -2807,30 +2779,40 @@ def density_jacobian_pgf_smc03_y(
     z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
     sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
 
-    # North-direction interior pairs (i and i-1).
-    rho_N = rho_per_cell[1:]
-    rho_S = rho_per_cell[:-1]
-    h_N = h_partial[1:]
-    h_S = h_partial[:-1]
-    z_c_N = z_centroid[1:]
-    z_c_S = z_centroid[:-1]
-    sigma_N = sigma[1:]
-    sigma_S = sigma[:-1]
+    # Cell-pad-first (PR357 Bug-2 pattern; see ``_interp_to_v_points``): pad
+    # the CELL columns so the v-face PGF at a partition cut is built from the
+    # neighbour rank's adjacent column (MPI halo exchange) rather than from
+    # halo-padding an already-computed interior face.  ``pad_ns_zero``
+    # halo-exchanges at interior cuts and zero-pads at the physical pole on
+    # every rank (consistent MPI call count); ``zero_polar_lat_ends`` then
+    # restores the wall BC at the physical pole.  ``z_centroid``/``sigma`` are
+    # per-column quantities, so the halo-exchanged neighbour column is exact.
+    rho_p = pad_ns_zero(rho_per_cell)
+    h_p = pad_ns_zero(h_partial)
+    zc_p = pad_ns_zero(z_centroid)
+    sig_p = pad_ns_zero(sigma)
+    rho_S, rho_N = rho_p[:-1], rho_p[1:]
+    h_S, h_N = h_p[:-1], h_p[1:]
+    z_c_S, z_c_N = zc_p[:-1], zc_p[1:]
+    sigma_S, sigma_N = sig_p[:-1], sig_p[1:]
 
     # Shallower-of-centroids (Adcroft & Campin convention; see x-direction
     # operator for the rationale and the C1 bug it resolves).
-    z_target_face_int = jnp.minimum(z_c_S, z_c_N)
+    z_target_face = jnp.minimum(z_c_S, z_c_N)
     P_N = compute_pressure_at_target_smc03(
-        rho_N, h_N, z_c_N, sigma_N, z_target_face_int, g,
+        rho_N, h_N, z_c_N, sigma_N, z_target_face, g,
     )
     P_S = compute_pressure_at_target_smc03(
-        rho_S, h_S, z_c_S, sigma_S, z_target_face_int, g,
+        rho_S, h_S, z_c_S, sigma_S, z_target_face, g,
     )
-    diff_interior = P_N - P_S
+    diff = P_N - P_S  # (n_lat+1, n_lon, nlev)
 
-    # Fold face: compute PGF from fold-partner cells
-    fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
+    from legoesm.grids.halo_latlon import zero_polar_lat_ends
+    diff = zero_polar_lat_ends(diff)
+
+    # North fold seam: only the rank that owns it overwrites the north row.
+    if _fold_is_local(grid):
+        fold = grid.fold
         rho_F = rho_per_cell[-1:, fold.perm_T, :]
         h_F = h_partial[-1:, fold.perm_T, :]
         z_c_F = z_centroid[-1:, fold.perm_T, :]
@@ -2845,10 +2827,7 @@ def density_jacobian_pgf_smc03_y(
             sigma[-1:], z_target_fold, g,
         )
         diff_fold = P_fold - P_local
-        south = jnp.zeros_like(diff_interior[:1])
-        diff = jnp.concatenate([south, diff_interior, diff_fold], axis=0)
-    else:
-        diff = pad_ns_zero(diff_interior)
+        diff = jnp.concatenate([diff[:-1], diff_fold], axis=0)
 
     if is_tripolar(grid):
         # Tripolar: divide by full 2D dy_v.
@@ -2859,9 +2838,9 @@ def density_jacobian_pgf_smc03_y(
         dy_h = grid.dy * 0.5                                # (n_lat,)
         dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])         # (n_lat-1,)
         bcast = (slice(None),) + (jnp.newaxis,) * (diff.ndim - 1)
-        # diff has shape (n_lat+1, n_lon, nlev) — divide only interior rows.
-        # Pad dy_v_interior with edge values for pole rows (harmless since
-        # diff at pole rows is zero from the pad above).
+        # diff has shape (n_lat+1, n_lon, nlev).  Pad dy_v_interior with edge
+        # values for the pole rows — harmless since those rows are zeroed by
+        # zero_polar_lat_ends above.
         dy_v_full = jnp.pad(dy_v_interior, (1, 1), mode='edge')
         return diff / dy_v_full[bcast]
 

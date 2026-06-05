@@ -1153,11 +1153,12 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
 
     ``n_lat`` becomes the rank-local row count; ``total_area`` keeps the
     GLOBAL value (so area-weighted-mean denominators stay correct on every
-    rank).  The fold descriptor is activated ONLY on the rank that owns the
-    north boundary (``north_rank is None``); on all other ranks it is
-    replaced with an inactive fold so the serial ``pad_ns_*`` operators do
-    not fabricate a fold at the band's local north edge (interior cuts are
-    handled by the MPI halo exchange).  ``perm_T`` / ``perm_v`` are
+    rank).  The fold descriptor is ACTIVE on ALL ranks (so ``is_tripolar()``
+    is consistent → same MPI call counts); on non-northernmost ranks,
+    ``fold_j`` and ``cap_j`` are set to -1 as a sentinel meaning "fold
+    exists but is not locally present."  The serial ``pad_ns_*`` operators
+    check ``fold_j >= 0`` via ``_fold_is_local()`` to decide whether to
+    apply the fold permutation.  ``perm_T`` / ``perm_v`` are
     longitude-only and unaffected by latitude banding.
     """
     s, e = layout.lat_start, layout.lat_end
@@ -1170,17 +1171,17 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
 
     area_T_band = t(geom.area_T)
 
-    # Fold activation is RANK-LOCAL: the serial operators (pad_ns_scalar /
-    # pad_ns_vector_*) fold using their LAST interior row, which is only the
-    # true global fold row on the rank that owns the north boundary.  On any
-    # other rank the last row is an interior partition cut handled by the MPI
-    # halo exchange, so the band geometry there must carry an INACTIVE fold or
-    # those operators would fabricate a fold at every band's local north edge.
+    # Fold: all ranks carry an ACTIVE fold (is_tripolar() must be consistent
+    # across ranks to avoid MPI call-count mismatches — issue #356).  On
+    # non-northernmost ranks, fold_j and cap_j are set to -1 as a sentinel
+    # meaning "fold exists but is not locally present."  The serial
+    # pad_ns_* operators use _fold_is_local() (checks fold_j >= 0) to
+    # decide whether to apply the fold permutation; on non-northernmost
+    # ranks they fall through to pad_ns_zero (MPI halo exchange) instead.
     if layout.north_rank is None:
-        band_fold = geom.fold  # northernmost rank owns the global fold seam
+        band_fold = geom.fold
     else:
-        from legoesm.grids.latlon import _inactive_fold
-        band_fold = _inactive_fold(geom.n_lon)
+        band_fold = geom.fold._replace(fold_j=-1, cap_j=-1)
 
     return geom._replace(
         n_lat=layout.n_lat_local,

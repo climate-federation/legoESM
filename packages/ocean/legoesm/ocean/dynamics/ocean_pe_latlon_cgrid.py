@@ -80,6 +80,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     curl_vertex_cgrid,
     pad_ns_scalar,
     pad_ns_zero,
+    _fold_is_local,
     smagorinsky_biharmonic_tendency_cgrid,
     smagorinsky_viscosity_cgrid,
     smagorinsky_viscosity_q_cgrid,
@@ -133,17 +134,30 @@ def _interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     ----------
     f : array, shape (n_lat, n_lon, ...) at cell centers.
     grid : optional LatLonGrid or LatLonCGridGeometry.
-        When provided and a tripolar fold is active, the north-boundary
-        v-face value is computed from the fold-partner cells.
+        When provided, ``pad_ns_zero`` is used (MPI-aware halo exchange
+        fills neighbor rows at partition cuts), and the fold correction
+        is applied on the northernmost rank via ``_fold_is_local()``.
 
     Returns
     -------
     f_v : array, shape (n_lat+1, n_lon, ...) at v-points.
     """
-    f_interior = 0.5 * (f[:-1] + f[1:])  # (n_lat-1, n_lon, ...)
-    if grid is not None:
-        return pad_ns_scalar(f_interior, grid)
-    return pad_ns_zero(f_interior)
+    f_padded = pad_ns_zero(f)
+    f_v = 0.5 * (f_padded[:-1] + f_padded[1:])
+    from legoesm.grids.halo_latlon import zero_polar_lat_ends
+    f_v = zero_polar_lat_ends(f_v)
+    fold = getattr(grid, "fold", None) if grid is not None else None
+    if _fold_is_local(grid):
+        n_cols = f_v.shape[1]
+        n_lon = fold.perm_T.shape[0]
+        last_interior_vface = 0.5 * (f[-2:-1] + f[-1:])
+        if n_cols == n_lon:
+            north = last_interior_vface[:, fold.perm_T]
+        else:
+            core = last_interior_vface[:, :n_lon][:, fold.perm_T]
+            north = jnp.concatenate([core, core[:, 0:1]], axis=1)
+        f_v = jnp.concatenate([f_v[:-1], north], axis=0)
+    return f_v
 
 
 # Canonical Van Leer limiter from core (redundancy audit), aliased to the local
@@ -196,7 +210,7 @@ def _tvd_to_v_points(
     f_south = f[:-1]; f_north = f[1:]
     f_south2 = jnp.concatenate([f[:1], f[:-2]], axis=0)
     fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active:
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         f_north2 = jnp.concatenate([f[2:], f[-1:, fold.perm_T]], axis=0)
     else:
         f_north2 = jnp.concatenate([f[2:], f[-1:]], axis=0)
@@ -300,7 +314,7 @@ def _neumann_fill_cgrid(
         the last row.
     """
     fold = getattr(grid, "fold", None) if grid is not None else None
-    use_fold = fold is not None and fold.is_active
+    use_fold = fold is not None and fold.is_active and fold.fold_j >= 0
 
     m = mask
     filled = f
@@ -1264,26 +1278,34 @@ def _bc_pv_flux(
     h_sw = jnp.roll(h_k, 1, axis=1)
     h_k_active = jnp.where(h_k > 0.0, h_k, BIG_H)
     h_sw_active = jnp.where(h_sw > 0.0, h_sw, BIG_H)
-    h_vtx_interior = jnp.minimum(
-        jnp.minimum(h_k_active[:-1], h_k_active[1:]),
-        jnp.minimum(h_sw_active[:-1], h_sw_active[1:]),
-    )                                                  # (n_lat-1, n_lon, nlev)
-    h_vtx_south = jnp.minimum(h_k_active[0:1], h_sw_active[0:1])
-    # At the fold, the vertex connects 4 cells: two local (fold row)
-    # and two fold-partner cells.  Include all 4 in the min.
-    fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
+    # Cell-pad-first (PR357 Bug-2 pattern): pad the cell active-thickness
+    # over latitude so the vertex min at a partition cut includes the
+    # neighbour rank's adjacent T row (MPI halo exchange).  The pole pad
+    # value is BIG_H so a physical-pole vertex reduces to the local two-cell
+    # min (bit-identical to the previous boundary rows); interior partition
+    # cuts sendrecv the neighbour's real row instead.
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    h_k_pad = pad_with_pole_bc_lat(
+        h_k_active, halo=1, south_value=BIG_H, north_value=BIG_H,
+    )
+    h_sw_pad = pad_with_pole_bc_lat(
+        h_sw_active, halo=1, south_value=BIG_H, north_value=BIG_H,
+    )
+    h_vtx = jnp.minimum(
+        jnp.minimum(h_k_pad[:-1], h_k_pad[1:]),
+        jnp.minimum(h_sw_pad[:-1], h_sw_pad[1:]),
+    )                                                  # (n_lat+1, n_lon, nlev)
+    # At the fold, the vertex connects 4 cells: two local (fold row) and two
+    # fold-partner cells.  Overwrite the north row only on the owning rank.
+    if _fold_is_local(grid):
+        fold = grid.fold
         h_k_partner = h_k_active[-1:, fold.perm_T, :]
         h_sw_partner = h_sw_active[-1:, fold.perm_T, :]
         h_vtx_north = jnp.minimum(
             jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
             jnp.minimum(h_k_partner, h_sw_partner),
         )
-    else:
-        h_vtx_north = jnp.minimum(h_k_active[-1:], h_sw_active[-1:])
-    h_vtx = jnp.concatenate(
-        [h_vtx_south, h_vtx_interior, h_vtx_north], axis=0,
-    )  # (n_lat+1, n_lon, nlev)
+        h_vtx = jnp.concatenate([h_vtx[:-1], h_vtx_north], axis=0)
     h_vtx = jnp.concatenate(
         [h_vtx, h_vtx[:, 0:1, :]], axis=1,
     )  # (n_lat+1, n_lon+1, nlev)
@@ -1303,19 +1325,22 @@ def _bc_pv_flux(
         [Fv_at_u_core, Fv_at_u_core[:, 0:1, :]], axis=1,
     )  # (n_lat, n_lon+1, nlev)
 
-    # Average Fu to v-points (4-point; fold-reflected at north on tripolar)
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import pad_ns_vector_u
-    n_lon_loc = Fu.shape[1]   # n_lon+1
-    nlev_loc = Fu.shape[2]
-    if fold is not None and fold.is_active:
-        # Fu is u-component: sign flip across fold.
-        # pad_ns_vector_u handles the wrap-column correctly.
-        Fu_south = jnp.zeros((1, n_lon_loc, nlev_loc), dtype=u.dtype)
-        Fu_fold = pad_ns_vector_u(Fu, grid)  # adds fold-reflected row
-        Fu_ext = jnp.concatenate([Fu_south, Fu, Fu_fold[-1:]], axis=0)
-    else:
-        zero_u = jnp.zeros((1, n_lon_loc, nlev_loc), dtype=u.dtype)
-        Fu_ext = jnp.concatenate([zero_u, Fu, zero_u], axis=0)
+    # Average Fu to v-points (4-point; halo-aware over latitude, fold-
+    # reflected with u-sign at the north seam on the owning rank).
+    # Cell-pad-first / consistent MPI call count (PR357 review): every rank
+    # calls pad_ns_zero (halo at partition cuts, zero at the physical pole);
+    # only the rank owning the fold overwrites the north row with the
+    # u-sign-flipped fold partner.  The previous fold branch called
+    # pad_ns_vector_u (an MPI pad) while the else branch did a plain concat,
+    # which deadlocked across ranks under the fold-active-everywhere invariant.
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import _fold_row
+    fold_local = _fold_is_local(grid)
+    Fu_ext = pad_ns_zero(Fu)   # (n_lat+2, n_lon+1, nlev)
+    if fold_local:
+        _f = grid.fold
+        Fu_fold_row = _fold_row(
+            Fu[-1:], _f.perm_T, _f.vector_sign_u, _f.perm_T.shape[0])
+        Fu_ext = jnp.concatenate([Fu_ext[:-1], Fu_fold_row], axis=0)
     Fu_at_v = 0.25 * (Fu_ext[:-1, :-1, :] + Fu_ext[:-1, 1:, :]
                        + Fu_ext[1:, :-1, :] + Fu_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
@@ -1330,12 +1355,12 @@ def _bc_pv_flux(
     # Average total u to v-points (4-point average; fold-reflected at north
     # on tripolar).  Uses total velocity for consistency with total-velocity
     # Sadourny EC PV flux and WENO upwinding (#160).
-    if fold is not None and fold.is_active:
-        u_south = jnp.zeros_like(u[:1])
-        u_fold_row = pad_ns_vector_u(u, grid)
-        u_ext = jnp.concatenate([u_south, u, u_fold_row[-1:]], axis=0)
-    else:
-        u_ext = jnp.pad(u, ((1, 1), (0, 0), (0, 0)))
+    u_ext = pad_ns_zero(u)   # halo at cuts, zero at the physical pole
+    if fold_local:
+        _f = grid.fold
+        u_fold_row = _fold_row(
+            u[-1:], _f.perm_T, _f.vector_sign_u, _f.perm_T.shape[0])
+        u_ext = jnp.concatenate([u_ext[:-1], u_fold_row], axis=0)
     u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
 

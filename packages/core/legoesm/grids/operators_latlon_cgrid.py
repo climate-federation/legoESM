@@ -62,9 +62,30 @@ def is_tripolar(grid) -> bool:
     sentinel dispatch.  Tripolar geometries always carry a ``fold`` field
     with ``is_active=True``; regular/Mercator ``LatLonCGridGeometry`` have
     ``is_active=False``; the old ``LatLonGrid`` lacks the field entirely.
+
+    Under MPI latitude-band decomposition, ``is_tripolar`` returns True on
+    ALL ranks of a tripolar run (the fold is active on every rank, even
+    though the fold seam is physically present only on the northernmost
+    rank).  Use :func:`_fold_is_local` to test whether the fold seam is
+    locally present for fold-specific computations.
     """
     fold = getattr(grid, "fold", None)
     return fold is not None and bool(fold.is_active)
+
+
+def _fold_is_local(grid) -> bool:
+    """Return True if the tripolar fold seam is physically local to this rank.
+
+    Under MPI decomposition, ``is_tripolar(grid)`` is True on all ranks of
+    a tripolar run, but the fold seam (``fold_j >= 0``) exists only on the
+    northernmost rank.  Non-northernmost ranks carry a sentinel fold with
+    ``fold_j == -1`` and ``cap_j == -1`` to indicate "fold exists but is
+    not local."  This function checks that the fold is both active AND
+    locally present, which is the correct guard for fold-specific
+    computations (fold-partner lookups, fold-permutation padding, etc.).
+    """
+    fold = getattr(grid, "fold", None)
+    return fold is not None and bool(fold.is_active) and fold.fold_j >= 0
 
 
 def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
@@ -72,6 +93,10 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
 
     On regular lat-lon: zero-pad (wall BC).
     On tripolar (fold.is_active): south = zero, north = fold-reflected.
+
+    Under MPI, all ranks call ``pad_ns_zero`` first (ensuring consistent
+    MPI sendrecv call counts), then the northernmost rank replaces the
+    north ghost row with fold-permuted data via :func:`_fold_is_local`.
 
     Parameters
     ----------
@@ -82,9 +107,9 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
     -------
     padded : (n_lat+1, n_lon, ...)
     """
+    padded = pad_ns_zero(interior)
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
-        south = jnp.zeros_like(interior[:1])
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         # Fold: last interior row, i-reversed via perm_T.
         # Handle the wrap column: fields with n_lon+1 columns have a
         # periodic wrap at column n_lon (== column 0).  Fold the first
@@ -98,8 +123,8 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
             # n_cols == n_lon + 1 (vertex or u-face field with wrap column)
             core = last_row[:, :n_lon][:, fold.perm_T]
             north = jnp.concatenate([core, core[:, 0:1]], axis=1)
-        return jnp.concatenate([south, interior, north], axis=0)
-    return pad_ns_zero(interior)
+        padded = jnp.concatenate([padded[:-1], north], axis=0)
+    return padded
 
 
 def _fold_row(last_row, perm, sign, n_lon):
@@ -117,14 +142,17 @@ def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
 
     On regular lat-lon: zero-pad.
     On tripolar: south = zero, north = fold-reflected with sign flip.
+
+    Under MPI, all ranks call ``pad_ns_zero`` first (consistent MPI call
+    counts), then the northernmost rank applies the fold correction.
     """
+    padded = pad_ns_zero(interior)
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
-        south = jnp.zeros_like(interior[:1])
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         n_lon = fold.perm_v.shape[0]
         north = _fold_row(interior[-1:], fold.perm_v, fold.vector_sign_v, n_lon)
-        return jnp.concatenate([south, interior, north], axis=0)
-    return pad_ns_zero(interior)
+        padded = jnp.concatenate([padded[:-1], north], axis=0)
+    return padded
 
 
 def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
@@ -200,7 +228,7 @@ def cell_to_cgrid_winds(
     u_face = interp_cell_to_uface(u_cell)
     v_interior = 0.5 * (v_cell[:-1] + v_cell[1:])
     fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active:
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         v_face = pad_ns_vector_v(v_interior, grid)
     else:
         v_face = pad_ns_zero(v_interior)
@@ -569,7 +597,7 @@ def curl_vertex_cgrid(
         # Tripolar: use full 2D per-cell metrics.  On the bipolar cap,
         # metrics vary significantly in BOTH lat and lon — column-0
         # extraction is not valid.
-        A_vertex_interior = grid.area_q[1:-1]         # (n_lat-1, n_lon+1)
+        A_vertex_full = grid.area_q                    # (n_lat+1, n_lon+1)
         dx_cell = grid.dx_T                            # (n_lat, n_lon)
         # dy at each v-face edge of the circulation loop: east and west
         # edges have different dy on the distorted cap.
@@ -589,8 +617,7 @@ def curl_vertex_cgrid(
         sin_ext = pad_with_pole_bc_lat(
             sin_lat, halo=1, south_value=-1.0, north_value=1.0,
         )
-        A_vertex_all = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
-        A_vertex_interior = A_vertex_all[1:-1]
+        A_vertex_full = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
         dx_cell = R * cos_lat * dlon
         dy_edge = R * dlat
         _tripolar_curl = False
@@ -624,8 +651,15 @@ def curl_vertex_cgrid(
         u, halo=1, south_value=0.0, north_value=0.0,
     )
     if _tripolar_curl:
-        # dx_cell is 2D (n_lat, n_lon); pad lat axis, append wrap column
-        dx_pad = jnp.pad(dx_cell, ((1, 1), (0, 0)))  # (n_lat+2, n_lon)
+        # dx_cell is 2D (n_lat, n_lon); pad lat axis, append wrap column.
+        # Use the backend-aware pad so an interior MPI rank sendrecv's the
+        # neighbour band's dx_T row at a partition cut, matching the u halo
+        # above.  A plain jnp.pad would force the metric to zero at the cut
+        # and corrupt the first/last local vertex circulation (#357 review).
+        # Bit-identical to jnp.pad((1,1),(0,0)) on the local backend.
+        dx_pad = pad_with_pole_bc_lat(
+            dx_cell, halo=1, south_value=0.0, north_value=0.0,
+        )  # (n_lat+2, n_lon)
         dx_pad = jnp.concatenate([dx_pad, dx_pad[:, 0:1]], axis=1)  # (n_lat+2, n_lon+1)
         dx_south = dx_pad[:-1]  # (n_lat+1, n_lon+1)
         dx_north = dx_pad[1:]   # (n_lat+1, n_lon+1)
@@ -654,19 +688,39 @@ def curl_vertex_cgrid(
 
     circ = du_circ + dv_circ_full
 
-    # Compute vorticity only on interior rows (pole rows zero by
-    # construction; avoids 1/0 division — issue #173).
-    circ_interior = circ[1:-1]
-    if _tripolar_curl:
-        if is_3d:
-            zeta_interior = circ_interior / A_vertex_interior[:, :, jnp.newaxis]
-        else:
-            zeta_interior = circ_interior / A_vertex_interior
-    else:
-        bcast = (slice(None),) + (jnp.newaxis,) * (u.ndim - 1)
-        zeta_interior = circ_interior / A_vertex_interior[bcast]
-    # Boundary: wall BC (zero) on regular lat-lon; fold halo on tripolar.
-    zeta = pad_ns_scalar(zeta_interior, grid)
+    # Vorticity at ALL local vertex rows.  ``circ`` already spans the
+    # rank's partition cuts (u and the dx_T metric are halo-exchanged
+    # above), so every interior cut row carries the true circulation and
+    # must be divided through — not dropped and refilled from a neighbour
+    # zeta halo, which would be off by one vertex row (#357 review).  Safe
+    # division guards the real pole rows (``A_vertex == 0`` there), which
+    # are then overwritten with the wall / fold BC below.
+    safe_A = jnp.where(A_vertex_full > 0, A_vertex_full, 1.0)
+    if safe_A.ndim == 1:
+        # Regular / Mercator: A_vertex is 1D over latitude — broadcast over
+        # the longitude (and level) axes.
+        safe_A = safe_A[(slice(None),) + (jnp.newaxis,) * (circ.ndim - 1)]
+    elif is_3d:
+        # Tripolar: A_vertex is 2D (lat, lon) — add the level axis.
+        safe_A = safe_A[:, :, jnp.newaxis]
+    zeta = circ / safe_A
+
+    # Wall BC at the real pole rows only (backend-aware: interior partition
+    # cuts are left intact so the cross-cut vorticity survives).
+    from legoesm.grids.halo_latlon import zero_polar_lat_ends
+    zeta = zero_polar_lat_ends(zeta)
+
+    # Tripolar north fold: the rank that owns the seam overwrites its north
+    # pole row with the fold-permuted sub-polar vertex row (matches the
+    # pad_ns_scalar fold convention; vertex fields carry an n_lon+1 wrap
+    # column).
+    if _fold_is_local(grid):
+        fold = grid.fold
+        last = zeta[-2:-1]                              # (1, n_lon+1, ...)
+        n_lon = fold.perm_T.shape[0]
+        core = last[:, :n_lon][:, fold.perm_T]
+        north = jnp.concatenate([core, core[:, 0:1]], axis=1)
+        zeta = jnp.concatenate([zeta[:-1], north], axis=0)
 
     return zeta
 
@@ -855,6 +909,6 @@ def _compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
         [interior, interior[:, 0:1]], axis=1)  # (n_lat-1, n_lon+1)
 
     fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active:
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         return pad_ns_scalar(interior_full, grid)
     return pad_ns_zero(interior_full)
