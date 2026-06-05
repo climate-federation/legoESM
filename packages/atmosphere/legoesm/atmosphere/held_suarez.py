@@ -469,6 +469,9 @@ def held_suarez_forcing_mpas(
     state,
     mesh,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+    *,
+    phys_state=None,
+    forcing=None,
 ):
     """Compute Held-Suarez physics tendencies on an MPAS mesh.
 
@@ -480,6 +483,14 @@ def held_suarez_forcing_mpas(
         Provides latCell, latEdge.
     sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
         Vertical coordinate.
+    phys_state, forcing : optional
+        Accepted to satisfy the MPAS hydrostatic dycore's operator-split
+        ``physics_fn(state, mesh, sigma_coord, *, phys_state, forcing)``
+        calling convention (``primitive_eq_mpas.py``).  Held-Suarez is a
+        stateless Newtonian relaxation with no prognostic physics carry and
+        no external forcing, so both are ignored; the bare-tendencies return
+        (not a ``(tendencies, phys_state_out)`` tuple) leaves the dycore's
+        ``phys_state`` carry untouched.
 
     Returns
     -------
