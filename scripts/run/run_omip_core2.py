@@ -757,7 +757,7 @@ def _regrid_curv_to_points(field2d, src_lat_deg, src_lon_deg, ocean_mask,
 def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        woa_init: bool = False, woa_t=None, woa_s=None,
                        flat_bottom: bool = False, A_h=None, hyperdiff_coeff=None,
-                       div_damp_2=None, div_damp_4=None):
+                       div_damp_2=None, div_damp_4=None, baroclinic_rk3=None):
     """Build a cubed-sphere ocean (FC-Gram spectral baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -803,7 +803,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     _ovr = {k: v for k, v in (("A_h", A_h),
                               ("hyperdiff_coeff", hyperdiff_coeff),
                               ("div_damp_2", div_damp_2),
-                              ("div_damp_4", div_damp_4)) if v is not None}
+                              ("div_damp_4", div_damp_4),
+                              ("baroclinic_rk3", baroclinic_rk3)) if v is not None}
     if _ovr:
         config = config._replace(**_ovr)
         print(f"[setup] cube config override: {_ovr}")
@@ -973,6 +974,9 @@ def main() -> int:
                    help="cube 2nd-order divergence damping [m^2/s].")
     p.add_argument("--cube-divdamp4", type=float, default=None,
                    help="cube 4th-order divergence damping [m^4/s].")
+    p.add_argument("--cube-rk3", action="store_true",
+                   help="cube: 3-stage SSP-RK3 baroclinic update (vs forward-Euler) "
+                        "— the tripole cold-start fix ported to the cube OceanModel.")
     p.add_argument("--woa-init", action="store_true",
                    help="Initialise T/S from WOA18 (faithful IC) vs rest state.")
     p.add_argument("--woa-t", type=str, default="data/woa18/woa18_decav_t00_01.nc")
@@ -1208,6 +1212,7 @@ def main() -> int:
             flat_bottom=args.flat_bottom,
             A_h=args.cube_Ah, hyperdiff_coeff=args.cube_hyperdiff,
             div_damp_2=args.cube_divdamp2, div_damp_4=args.cube_divdamp4,
+            baroclinic_rk3=(True if args.cube_rk3 else None),
         )
         app_grid_type = "cubed_sphere"
     else:

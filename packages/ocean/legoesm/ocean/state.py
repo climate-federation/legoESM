@@ -154,6 +154,13 @@ class OceanConfig(NamedTuple):
     div_damp_2: float = 0.0   # 2nd-order divergence damping [m²/s] (FV discretization)
     div_damp_4: float = 0.0   # 4th-order divergence damping [m⁴/s] (FV discretization)
     physics: object = None  # OceanPhysicsConfig or None (legacy mode)
+    # Baroclinic time integrator for the explicit (slow) momentum+tracer update
+    # in OceanModel.step.  Forward-Euler (default) cannot carry a realistic WOA
+    # cold-start (violent geostrophic adjustment -> grid-scale blowup, the same
+    # gap RK3 closed for the lat-lon C-grid tripole). "rk3" wraps the baroclinic
+    # update in 3-stage SSP-RK3 (3x tendency cost); the barotropic substeps run
+    # once afterward as before.
+    baroclinic_rk3: bool = False
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
     barotropic_staggering: str = "a_grid"  # "a_grid", "c_grid" or "fv3sw"

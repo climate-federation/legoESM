@@ -389,23 +389,54 @@ class OceanModel:
         """
         state = cast_pytree(state, None, "compute")
 
-        # --- 1. Baroclinic tendencies ---
-        tend = self._compute_tendencies(state, surface_forcing)
+        if getattr(self.config, "baroclinic_rk3", False):
+            # --- 1-3. Baroclinic explicit update via 3-stage SSP-RK3 ---
+            # Forward-Euler (else branch) cannot carry a realistic WOA cold-start
+            # (violent geostrophic adjustment -> grid-scale blowup); SSP-RK3 on the
+            # slow (baroclinic) u,v,T,S update closes that gap (mirrors the lat-lon
+            # tripole RK3 fix). eta is held fixed through the stages — updated ONLY
+            # by the barotropic substeps below, exactly as the Euler path. 3x cost.
+            def _bc(st):
+                return self._compute_tendencies(st, surface_forcing)
 
-        # --- 2. Update tracers (forward Euler) ---
-        T_new = state.T.data + dt * tend.dT_dt.data
-        S_new = state.S.data + dt * tend.dS_dt.data
+            def _upd(st, k, a):  # st + a*dt*k for u,v,T,S
+                return st._replace(
+                    u=st.u.replace(data=st.u.data + a * dt * k.du_dt.data),
+                    v=st.v.replace(data=st.v.data + a * dt * k.dv_dt.data),
+                    T=st.T.replace(data=st.T.data + a * dt * k.dT_dt.data),
+                    S=st.S.replace(data=st.S.data + a * dt * k.dS_dt.data),
+                )
 
-        # --- 3. Update 3D velocity with slow tendency ---
-        u_new = state.u.data + dt * tend.du_dt.data
-        v_new = state.v.data + dt * tend.dv_dt.data
+            def _comb(sa, sb, wa, wb):  # wa*sa + wb*sb per field
+                return sa._replace(
+                    u=sa.u.replace(data=wa * sa.u.data + wb * sb.u.data),
+                    v=sa.v.replace(data=wa * sa.v.data + wb * sb.v.data),
+                    T=sa.T.replace(data=wa * sa.T.data + wb * sb.T.data),
+                    S=sa.S.replace(data=wa * sa.S.data + wb * sb.S.data),
+                )
 
-        state_mid = state._replace(
-            u=state.u.replace(data=u_new),
-            v=state.v.replace(data=v_new),
-            T=state.T.replace(data=T_new),
-            S=state.S.replace(data=S_new),
-        )
+            s1 = _upd(state, _bc(state), 1.0)
+            s2 = _comb(state, _upd(s1, _bc(s1), 1.0), 0.75, 0.25)
+            state_mid = _comb(state, _upd(s2, _bc(s2), 1.0),
+                              1.0 / 3.0, 2.0 / 3.0)
+        else:
+            # --- 1. Baroclinic tendencies ---
+            tend = self._compute_tendencies(state, surface_forcing)
+
+            # --- 2. Update tracers (forward Euler) ---
+            T_new = state.T.data + dt * tend.dT_dt.data
+            S_new = state.S.data + dt * tend.dS_dt.data
+
+            # --- 3. Update 3D velocity with slow tendency ---
+            u_new = state.u.data + dt * tend.du_dt.data
+            v_new = state.v.data + dt * tend.dv_dt.data
+
+            state_mid = state._replace(
+                u=state.u.replace(data=u_new),
+                v=state.v.replace(data=v_new),
+                T=state.T.replace(data=T_new),
+                S=state.S.replace(data=S_new),
+            )
 
         # --- 4. Barotropic substeps ---
         # eta is updated ONLY by the barotropic solver's continuity equation.
