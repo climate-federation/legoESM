@@ -20,7 +20,27 @@ applicator supports grid_type latlon/tripole/**cubed_sphere/mpas**, **NOT spectr
 (no grid-space u/v/T path — line ~317). `run_omip._create_setup(grid_type,...)` is the
 shared builder for all grids; run_omip_core2 already reuses it for latlon/tripole.
 
-### GRID-3 (cubed_sphere) EXECUTABLE ROADMAP (iter-26 — fully mapped)
+### GRID-3 (cubed_sphere) — HARNESS BUILT (iter-26), 2 blockers pinned
+**Built + committed (d4e6c90b, 26fe0d54):** `build_cubed_sphere` in run_omip_core2
+(_create_setup cube + NEMO bathy on cube cells via new `_regrid_curv_to_points` +
+WOA IC), `--grid cubed_sphere --cube-n`, cube-safe `_diag`/`_grid_lat2d_deg`,
+`compute_omip2_surface_forcing` cube branch, N-D WOA flood-fill, 3 unit tests, codex
+CLEAN on flood-fill+forcing-reshape. **Smoke 8417865 RUNS END-TO-END** (setup, flood-
+fill 650, step-0 SST 17.6 finite, 33 steps/s) then **NaN by day-1**.
+**BLOCKER 1 (codex HIGH, forcing not applied):** cube `OceanConfig(physics=None)` →
+`model.step(surface_forcing=sf)` DROPS the CORE-II forcing; the FC cube path
+(`ocean_pe_fc.py:350`) only consumes `surface_forcing` via `physics_fn`. So the day-1
+blowup is the UNFORCED cube cold-start. FIX: configure cube physics with external
+surface forcing (`SurfaceForcingConfig(scheme="external")` or wire tau/q_net into the
+FC tendency) WITHOUT disabling built-in diffusion/mixing.
+**BLOCKER 2 (dycore):** even once forced, cube `OceanModel` has the PGF-over-bathy
+instability (FC + 5-50× diffusion only delay; run_omip cube blew ~4-5d under gentle
+restoring). Real fix = SMC03 density-Jacobian PGF + duogrid halo on T,S
+(docs/ocean_experiments/cubed_sphere_pgf_stability.md). Multi-iteration dycore work.
+NEXT: fix blocker-1 (forcing), re-smoke; then blocker-2 (dycore). Could try dt/2 +
+higher diffusion as a quick CFL-vs-structural discriminator.
+
+### GRID-3 build map (reference)
 Build is plumbing-ready BUT fidelity hinges on the dycore PGF fix (below).
 - **Builder** `build_cubed_sphere` in run_omip_core2 (mirror build_latlon_bathy):
   `run_omip._create_setup("cubed_sphere", f"C{n}", nlev, H_max, ...)` → grid,z_coord,config
