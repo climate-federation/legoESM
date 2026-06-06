@@ -687,6 +687,15 @@ def plane_compressible_euler_slow_tendencies_halo(
     # closure="molecular" (DNS) and "smagorinsky" (CRM/LES) stay bit-identical
     # serial vs MPI at n_ranks==1.
     _closure = getattr(config, "turbulence_closure", "smagorinsky")
+    if _closure == "vreman":
+        # Vreman uses A-grid centred (roll-±1) gradients, which would need a
+        # halo-2 stencil to stay bit-equal to the serial kernel; like the dynamic
+        # Smagorinsky closure it is SINGLE-RANK ONLY. Guard explicitly rather than
+        # silently producing a different K_m under MPI.
+        raise NotImplementedError(
+            "turbulence_closure='vreman' is single-rank only (no MPI-halo kernel; "
+            "the dynamic closures are likewise serial-only). Run on one rank, or "
+            "use turbulence_closure='smagorinsky' under MPI.")
     _use_smag = _closure == "smagorinsky" and config.smagorinsky_cs > 0.0
     _use_mol = (_closure == "molecular"
                 and getattr(config, "molecular_viscosity", 0.0) > 0.0)
@@ -1085,8 +1094,14 @@ def slow_tendency_jit_split(
     """
     _w_hyperdiff = getattr(config, "hyperdiff_w_coeff", 0.0)
     _advection = getattr(config, "horizontal_advection_scheme", "upwind1")
+    # Any non-default eddy/DNS closure ("vreman", "molecular") has an SGS block
+    # this fast path does not implement (it only covers the no-SGS case); fall
+    # back to the eager kernel so the closure is not silently skipped. ("vreman"
+    # then hits the explicit single-rank guard there.)
+    _closure = getattr(config, "turbulence_closure", "smagorinsky")
     if (
         config.smagorinsky_cs > 0.0
+        or _closure in ("vreman", "molecular")
         or state.tracers.data.shape[-1] > 0
         or config.use_coriolis
         or _advection != "upwind1"

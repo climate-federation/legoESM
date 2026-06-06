@@ -329,6 +329,15 @@ class CompressibleEulerConfig(NamedTuple):
     molecular_prandtl: float = constants.prandtl_air  # ν/κ for the DNS heat +
                                           # scalar legs (K_h = ν/Pr). Must be >0
                                           # when the molecular closure is active.
+    vreman_c: float = 0.07                # Vreman (2004) model constant (≈2.5·C_s²)
+                                          # for turbulence_closure="vreman" — an
+                                          # OPTIONAL eddy closure that vanishes in
+                                          # resolved laminar/2-D shear and handles
+                                          # anisotropic Δx≠Δz grids. Ignored unless
+                                          # turbulence_closure="vreman". NOTE: this
+                                          # is NOT SAM-faithful (SAM uses
+                                          # Smagorinsky) — for experimentation, not
+                                          # the gSAM-match runs. K_h = K_m/smagorinsky_prandtl.
     horizontal_advection_scheme: str = "upwind1"
                                           # Horizontal advection of theta_prime, u, v, w
                                           # (and tracers) on the plane dycore. Three

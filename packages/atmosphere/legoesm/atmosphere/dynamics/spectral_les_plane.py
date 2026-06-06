@@ -41,6 +41,9 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2
+from legoesm.atmosphere.physics.turbulence.vreman import vreman_nu_t as _vreman_core
+from legoesm.timestepping.split_explicit import (
+    SplitExplicitConfig, split_explicit_step)
 
 
 # --------------------------------------------------------------------------- #
@@ -67,6 +70,43 @@ class SpectralLESConfig(NamedTuple):
     #                                strongly-stable layers (where the dynamic SGS
     #                                shuts off) from going fully inviscid and
     #                                growing the 2Δ gravity-wave/KH mode (SBL).
+    spectral_filter: bool = True   # SHARP high-wavenumber cutoff applied to the
+    #                                prognostic fields each step. In quiescent layers
+    #                                above the turbulent BL the Smagorinsky ν_t→0, so
+    #                                the forward energy cascade piles up at the 2Δx
+    #                                grid scale with nothing to dissipate it (spectral
+    #                                "thermalisation" → grid-scale w noise that grows
+    #                                with height). A SHARP cutoff (σ=1 below k_c, 0
+    #                                above) is used rather than a smooth exp filter:
+    #                                applied EVERY step, any σ<1 compounds over the
+    #                                ~10^4-10^5 steps of a run and would erode the
+    #                                resolved scales too; a sharp cutoff leaves the
+    #                                kept modes EXACTLY unchanged (σ=1, no compounding)
+    #                                and only discards the top noise band. Being a
+    #                                horizontal multiplier uniform in z, applying it
+    #                                equally to u, v, w preserves the discrete
+    #                                divergence-free condition (filtered div = σ·div
+    #                                = 0) — no re-projection needed.
+    filter_cutoff_frac: float = 0.67  # keep radial |k|/k_Nyquist ≤ frac (2/3 rule);
+    #                                   resolved turbulence lives well below this, so
+    #                                   the cutoff removes the grid-scale noise band
+    #                                   with no measurable effect on u_*/σ_w.
+    sgs_model: str = "smagorinsky"  # static-SGS closure: "smagorinsky" (Mason-capped
+    #                                 |S|-Smagorinsky) or "vreman" (Vreman 2004). Only
+    #                                 used when smagorinsky_dynamic=False. Vreman ν_t
+    #                                 VANISHES for well-resolved laminar/2D shear and
+    #                                 activates only on genuine 3D (under-resolved)
+    #                                 structure → less spurious dissipation in the
+    #                                 surface layer & quiescent air aloft, and it uses
+    #                                 the per-direction filter widths so it behaves on
+    #                                 ANISOTROPIC dx≠dz grids where Smagorinsky/LASD
+    #                                 over- or under-dissipate.
+    c_vreman: float = 0.07          # Vreman model constant (≈ 2.5·C_s²; Vreman 2004)
+    time_scheme: str = "rk3"        # "rk3" (SSP-RK3, Shu-Osher; projection each
+    #                                 stage) or "ab2" (Adams–Bashforth-2). RK3 is
+    #                                 self-starting, 3rd-order, and stable to a ~2-3×
+    #                                 larger advective CFL than AB2 → supports the
+    #                                 larger time steps a CFL-adaptive controller picks.
 
 
 class SpectralLESGrid(NamedTuple):
@@ -80,6 +120,7 @@ class SpectralLESGrid(NamedTuple):
     ky: jax.Array                  # (ny, nx//2+1) rad/m, y-wavenumber
     k2: jax.Array                  # kx²+ky²
     dealias_mask: jax.Array        # (ny, nx//2+1) 2/3 truncation mask
+    filter_mask: jax.Array         # (ny, nx//2+1) smooth high-k low-pass σ(k)
 
 
 class SpectralLESState(NamedTuple):
@@ -94,6 +135,13 @@ class SpectralLESState(NamedTuple):
 
 
 def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64) -> SpectralLESGrid:
+    # SGS constants must be non-negative or ν_t can go negative (anti-diffusion,
+    # blow-up). The shared vreman/Smagorinsky cores trust these — validate here,
+    # the single point where a config becomes a runnable grid.
+    if cfg.c_s < 0.0 or cfg.c_vreman < 0.0 or cfg.nu_floor < 0.0:
+        raise ValueError(
+            f"SGS constants must be >= 0: c_s={cfg.c_s}, c_vreman={cfg.c_vreman}, "
+            f"nu_floor={cfg.nu_floor} (negative ν_t is anti-diffusive).")
     nx, ny, nz = cfg.nx, cfg.ny, cfg.nz
     dx, dy, dz = cfg.Lx / nx, cfg.Ly / ny, cfg.Lz / nz
     z_c = (jnp.arange(nz, dtype=dtype) + 0.5) * dz
@@ -120,8 +168,26 @@ def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64) -> SpectralLESGrid:
     fold_y = jnp.minimum(iy, ny - iy)
     mask = ((fold_y[:, None] <= cut_y) & (jnp.arange(kx_1d.size)[None, :] <= cut_x)
             ).astype(dtype)
+    # Sharp high-wavenumber cutoff: keep |kx|,|ky| ≤ frac·k_Nyquist on each axis,
+    # zero above. Built from the TRUE wavenumber indices (INCLUDING the Nyquist
+    # column, where the derivative kx/ky were zeroed) so the grid-scale noise that
+    # lives at/near Nyquist is actually removed. σ∈{0,1} ⇒ kept modes unchanged
+    # (no per-step compounding) and divergence-free preserving (z-uniform).
+    if cfg.spectral_filter:
+        # RADIAL cutoff in normalised wavenumber: keep modes whose isotropic
+        # |k|/k_Nyquist ≤ frac (removes the diagonal near-Nyquist modes a per-axis
+        # box would retain — those carry the grid-scale noise in the quiescent
+        # layers). Normalise each axis by its own Nyquist index so dx≠dz/Lx≠Ly
+        # anisotropy is handled, then take the radial magnitude.
+        ix = jnp.arange(kx_1d.size)                        # 0..nx//2 (rfft x-axis)
+        kxn = (ix[None, :] / (nx // 2))                    # |kx|/kx_Nyq ∈ [0,1]
+        kyn = (jnp.minimum(iy, ny - iy)[:, None] / (ny // 2))
+        rn = jnp.sqrt(kxn ** 2 + kyn ** 2)                 # radial, corner = √2
+        fmask = (rn <= cfg.filter_cutoff_frac).astype(dtype)
+    else:
+        fmask = jnp.ones_like(k2)
     return SpectralLESGrid(cfg=cfg, dx=dx, dy=dy, dz=dz, z_c=z_c, z_f=z_f,
-                           kx=kx, ky=ky, k2=k2, dealias_mask=mask)
+                           kx=kx, ky=ky, k2=k2, dealias_mask=mask, filter_mask=fmask)
 
 
 # --------------------------------------------------------------------------- #
@@ -146,6 +212,14 @@ def ddy(f, g: SpectralLESGrid):
     ny, nx = f.shape[0], f.shape[1]
     fh = _fft(f) * (1j * g.ky[..., None])
     return _ifft(fh, ny, nx)
+
+
+def _apply_filter(f, g: SpectralLESGrid):
+    """Smooth horizontal high-wavenumber low-pass (per z-level). Multiplies the
+    rfft2 spectrum by the precomputed σ(k) mask; uniform in z ⇒ divergence-free
+    preserving when applied equally to u, v, w."""
+    ny, nx = f.shape[0], f.shape[1]
+    return _ifft(_fft(f) * g.filter_mask[..., None], ny, nx)
 
 
 def _dealias(f, g: SpectralLESGrid):
@@ -213,8 +287,10 @@ def ddz_f2c(ff, dz):
 # --------------------------------------------------------------------------- #
 # Strain rate + Smagorinsky eddy viscosity                                     #
 # --------------------------------------------------------------------------- #
-def _strain(u, v, w, g: SpectralLESGrid):
-    """Full resolved strain ``S_ij`` and ``|S|=√(2 S_ij S_ij)`` at CENTRES."""
+def _velocity_gradients(u, v, w, g: SpectralLESGrid):
+    """All nine resolved velocity gradients ``a_cd = ∂u_c/∂x_d`` at CENTRES
+    (c=component u,v,w; d=direction x,y,z). Shared by :func:`_strain` and
+    :func:`_vreman_nu_t`."""
     dz = g.dz
     dudx, dvdx, dwdx = ddx(u, g), ddx(v, g), ddx(w, g)   # dwdx at faces
     dudy, dvdy, dwdy = ddy(u, g), ddy(v, g), ddy(w, g)
@@ -222,10 +298,18 @@ def _strain(u, v, w, g: SpectralLESGrid):
     # ∂u/∂z, ∂v/∂z at faces → centre.
     dudz_f = jnp.pad(ddz_c2f(u, dz), ((0, 0), (0, 0), (1, 1)), mode="edge")
     dvdz_f = jnp.pad(ddz_c2f(v, dz), ((0, 0), (0, 0), (1, 1)), mode="edge")
-    dudz_c = f2c(dudz_f)
-    dvdz_c = f2c(dvdz_f)
-    dwdx_c = f2c(dwdx)
-    dwdy_c = f2c(dwdy)
+    return dict(
+        a11=dudx, a12=dudy, a13=f2c(dudz_f),
+        a21=dvdx, a22=dvdy, a23=f2c(dvdz_f),
+        a31=f2c(dwdx), a32=f2c(dwdy), a33=dwdz_c)
+
+
+def _strain(u, v, w, g: SpectralLESGrid):
+    """Full resolved strain ``S_ij`` and ``|S|=√(2 S_ij S_ij)`` at CENTRES."""
+    a = _velocity_gradients(u, v, w, g)
+    dudx, dudy, dudz_c = a["a11"], a["a12"], a["a13"]
+    dvdx, dvdy, dvdz_c = a["a21"], a["a22"], a["a23"]
+    dwdx_c, dwdy_c, dwdz_c = a["a31"], a["a32"], a["a33"]
     S11, S22, S33 = dudx, dvdy, dwdz_c
     S12 = 0.5 * (dudy + dvdx)
     S13 = 0.5 * (dudz_c + dwdx_c)
@@ -234,6 +318,18 @@ def _strain(u, v, w, g: SpectralLESGrid):
         2.0 * (S11 ** 2 + S22 ** 2 + S33 ** 2
                + 2.0 * (S12 ** 2 + S13 ** 2 + S23 ** 2)), 1e-30))
     return (S11, S22, S33, S12, S13, S23), Smag
+
+
+def _vreman_nu_t(u, v, w, g: SpectralLESGrid):
+    """Vreman (2004) eddy viscosity at CENTRES — computes the nine resolved
+    gradients on the spectral grid and defers the algebra to the shared
+    :func:`legoesm.atmosphere.physics.turbulence.vreman.vreman_nu_t` (the SAME
+    implementation the compressible CRM uses)."""
+    a = _velocity_gradients(u, v, w, g)
+    return _vreman_core(
+        a["a11"], a["a12"], a["a13"], a["a21"], a["a22"], a["a23"],
+        a["a31"], a["a32"], a["a33"],
+        g.dx, g.dy, g.dz, g.cfg.c_vreman, nu_floor=g.cfg.nu_floor)
 
 
 def eddy_viscosity(u, v, w, g: SpectralLESGrid):
@@ -252,6 +348,12 @@ def eddy_viscosity(u, v, w, g: SpectralLESGrid):
         cs2 = lasd_cs2(u, v, wc, *S_tuple, Smag,
                        jnp.full(nz, delta, dtype=u.dtype), cs_max=g.cfg.cs_max)
         return cs2 * (delta ** 2) * Smag + g.cfg.nu_floor   # ν_t = C_s²·Δ²·|S|
+    if g.cfg.sgs_model == "vreman":
+        return _vreman_nu_t(u, v, w, g)
+    if g.cfg.sgs_model != "smagorinsky":
+        raise ValueError(
+            f"unknown sgs_model {g.cfg.sgs_model!r}; "
+            "expected 'smagorinsky' or 'vreman'")
     l_smag = g.cfg.c_s * delta
     if g.cfg.wall_damping:
         kappa = constants.kappa_von_karman
@@ -509,29 +611,88 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
     return Ru, Rv, Rw, u_star, Rtheta
 
 
-def step(state: SpectralLESState, g: SpectralLESGrid, dt: float,
+def _surface_ustar(u, v, g: SpectralLESGrid):
+    """Surface friction velocity u_* = √Cd · ⟨|u₁|⟩ (the neutral MOST wall model,
+    same formula as :func:`sgs_and_wall`) — a cheap diagnostic recomputed from the
+    lowest-level (u, v) after a step (the shared RK integrator does not thread it
+    through)."""
+    kappa = constants.kappa_von_karman
+    u1, v1 = u[..., 0], v[..., 0]
+    Cd = (kappa / jnp.log(g.z_c[0] / g.cfg.z0)) ** 2
+    return (Cd ** 0.5) * jnp.mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12))
+
+
+def _filt_state(u, v, w, th, g):
+    """Apply the high-k cutoff to a state (no-op if disabled). Divergence-free
+    preserving (mask uniform in z); re-zeros the w walls."""
+    if not g.cfg.spectral_filter:
+        return u, v, w, th
+    u = _apply_filter(u, g)
+    v = _apply_filter(v, g)
+    w = _apply_filter(w, g).at[..., 0].set(0.0).at[..., -1].set(0.0)
+    th = None if th is None else _apply_filter(th, g)
+    return u, v, w, th
+
+
+def step(state: SpectralLESState, g: SpectralLESGrid, dt,
          u_geo, f_cor: float, first: bool = False, force=(0.0, 0.0),
          sfc_theta_flux=0.0):
-    """One Adams–Bashforth-2 step + pressure projection. ``first`` uses forward
-    Euler (no previous RHS yet). When ``state.theta`` is set, advances the
-    potential-temperature scalar (same AB2) and adds Boussinesq buoyancy to w."""
+    """One time step + pressure projection.
+
+    ``time_scheme`` selects the integrator. The RK options ("rk3"=SSP-RK3,
+    "ssp_rk34", "ssp_rk54") REUSE the shared ``timestepping.split_explicit`` SSP-RK
+    drivers (pytree-generic, AD-safe), with the incompressible pressure PROJECTION
+    supplied as the per-stage ``acoustic_update_fn`` (this core has no acoustic
+    substep). "ab2" is a self-contained Adams–Bashforth-2 fallback (``first`` uses
+    forward Euler). When ``state.theta`` is set the scalar is advanced with the same
+    scheme and Boussinesq buoyancy is added to w. A high-k spectral cutoff is applied
+    once at the end. ``dt`` may be a Python float or a JAX scalar."""
     u, v, w, th = state.u, state.v, state.w, state.theta
-    Ru, Rv, Rw, u_star, Rth = rhs(u, v, w, g, u_geo, f_cor, force=force,
-                                  theta=th, sfc_theta_flux=sfc_theta_flux)
-    if first:
-        au, av, aw = Ru, Rv, Rw
-        ath = Rth
-    else:
-        au = 1.5 * Ru - 0.5 * state.rhs_u_prev
-        av = 1.5 * Rv - 0.5 * state.rhs_v_prev
-        aw = 1.5 * Rw - 0.5 * state.rhs_w_prev
-        ath = None if Rth is None else 1.5 * Rth - 0.5 * state.rhs_theta_prev
-    u_s = u + dt * au
-    v_s = v + dt * av
-    w_s = w + dt * aw
-    w_s = w_s.at[..., 0].set(0.0).at[..., -1].set(0.0)
-    u_n, v_n, w_n = project(u_s, v_s, w_s, dt, g)
-    th_n = None if th is None else th + dt * ath
-    return SpectralLESState(u=u_n, v=v_n, w=w_n, theta=th_n,
-                            rhs_theta_prev=Rth,
-                            rhs_u_prev=Ru, rhs_v_prev=Rv, rhs_w_prev=Rw), u_star
+    if g.cfg.time_scheme == "ab2":
+        Ru, Rv, Rw, u_star, Rth = rhs(u, v, w, g, u_geo, f_cor, force=force,
+                                      theta=th, sfc_theta_flux=sfc_theta_flux)
+        if first:
+            au, av, aw, ath = Ru, Rv, Rw, Rth
+        else:
+            au = 1.5 * Ru - 0.5 * state.rhs_u_prev
+            av = 1.5 * Rv - 0.5 * state.rhs_v_prev
+            aw = 1.5 * Rw - 0.5 * state.rhs_w_prev
+            ath = None if Rth is None else 1.5 * Rth - 0.5 * state.rhs_theta_prev
+        w_s = (w + dt * aw).at[..., 0].set(0.0).at[..., -1].set(0.0)
+        u_n, v_n, w_n = project(u + dt * au, v + dt * av, w_s, dt, g)
+        th_n = None if th is None else th + dt * ath
+        u_n, v_n, w_n, th_n = _filt_state(u_n, v_n, w_n, th_n, g)
+        return SpectralLESState(u=u_n, v=v_n, w=w_n, theta=th_n,
+                                rhs_theta_prev=Rth, rhs_u_prev=Ru,
+                                rhs_v_prev=Rv, rhs_w_prev=Rw), u_star
+
+    # --- SSP-RK via the shared integrator -------------------------------------
+    # slow_fn returns the RHS packed as a state pytree (history fields zeroed so the
+    # integrator's axpy/linear-combination leave them at 0); the per-stage "fast"
+    # update is the incompressible pressure projection (no acoustic substep here).
+    def slow_fn(s):
+        Ru, Rv, Rw, _u, Rth = rhs(s.u, s.v, s.w, g, u_geo, f_cor, force=force,
+                                  theta=s.theta, sfc_theta_flux=sfc_theta_flux)
+        return SpectralLESState(
+            u=Ru, v=Rv, w=Rw, theta=Rth,
+            rhs_u_prev=jnp.zeros_like(Ru), rhs_v_prev=jnp.zeros_like(Rv),
+            rhs_w_prev=jnp.zeros_like(Rw),
+            rhs_theta_prev=None if Rth is None else jnp.zeros_like(Rth))
+
+    def proj_fn(s_slow, slow_tend, dt_sub, n_sub, cfg):    # acoustic_update_fn slot
+        wz = s_slow.w.at[..., 0].set(0.0).at[..., -1].set(0.0)
+        un, vn, wn = project(s_slow.u, s_slow.v, wz, dt_sub, g)
+        return s_slow._replace(u=un, v=vn, w=wn)           # θ untouched by projection
+
+    se_cfg = SplitExplicitConfig(n_substeps=1, outer_integrator=g.cfg.time_scheme)
+    out = split_explicit_step(state, slow_fn, proj_fn, dt, se_cfg)
+    u_n, v_n, w_n, th_n = _filt_state(out.u, out.v, out.w, out.theta, g)
+    # u_* diagnostic from the RETURNED (filtered) state so it matches what the
+    # caller sees (the filter is a horizontal low-pass; the surface-layer effect is
+    # tiny, but keep them consistent).
+    u_star = _surface_ustar(u_n, v_n, g)
+    return SpectralLESState(
+        u=u_n, v=v_n, w=w_n, theta=th_n,
+        rhs_u_prev=jnp.zeros_like(u_n), rhs_v_prev=jnp.zeros_like(v_n),
+        rhs_w_prev=jnp.zeros_like(w_n),
+        rhs_theta_prev=None if th_n is None else jnp.zeros_like(th_n)), u_star
