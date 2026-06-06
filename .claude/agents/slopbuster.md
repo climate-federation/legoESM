@@ -180,6 +180,16 @@ Check that **all model parameters** (physics tuning knobs, numerical coefficient
 
 ---
 
+## PASS 11b: Test placement and JAX-only purity
+
+1. **Tests live in `tests/` only.** Scan the whole tree for `test_*.py` / `*_test.py` and any ad-hoc test/verification scripts (`verify_*.py`, `check_*.py`, scratch `if __name__` test drivers) that sit **outside `tests/`** — repo root, `src/legoesm/`, `scripts/` root. Flag every one as **MISPLACED TEST** — move under the mirrored `tests/<component>/<tier>/` tree, never leave at root or in source. Throwaway probes go in `scripts/tmp/`, not committed as tests.
+2. **JAX numpy only — never plain numpy.** Scan all `.py` under `src/legoesm/` (and committed tests/scripts) for `import numpy` / `import numpy as np` / `from numpy import`. Flag every one as **PLAIN NUMPY** — replace with `import jax.numpy as jnp`. Plain `numpy` breaks JIT/autodiff/pytree purity and is forbidden in model code. Exempt only: genuine host-side I/O glue that never touches traced arrays (e.g. reading a `.npz` forcing file) — and even then prefer `jnp` after load.
+3. **No non-JAX Python numerics in traced paths.** Flag Python `math.*` calls, Python `for`/`while` loops over array dims, and list-comprehension array builds inside physics/dycore/scan bodies — use `jnp`, `vmap`, `lax.scan`/`fori_loop` instead.
+
+**Output:** Table with columns: `File:Line | Issue | Fix | Verdict`
+
+---
+
 ## PASS 11: Import hygiene (was Pass 8)
 
 1. `python3.14 -c "import legoesm"` — check for circular import errors.
@@ -206,7 +216,9 @@ Steps:
    a. Check if a test exercises the new branch.
    b. Verdict: PASS / WARN.
 5. For **deleted code**: verify no remaining import references it. Run `grep -r` for removed symbols.
-6. Present a review summary table.
+6. For each **new test or verification script**: REJECT if placed anywhere but under `tests/`. Test scripts belong in the mirrored `tests/<component>/<tier>/` tree — never repo root, `src/legoesm/`, or `scripts/` root.
+7. For any new/changed `.py`: REJECT `import numpy` / `import numpy as np` / `from numpy import` — use `import jax.numpy as jnp`. Also flag Python `math.*`, Python loops over array dims, and other non-JAX numerics in traced code; require `jnp`/`vmap`/`lax.scan`/`fori_loop`.
+8. Present a review summary table.
 
 ---
 
@@ -253,6 +265,9 @@ These are patterns the first audit revealed that should be checked in future pas
 
 8. **Flag script clusters that duplicate the same experiment.** During audit, look for groups of scripts that run the same experiment with near-identical setup logic (e.g., the `run_held_suarez_rrtmgp_*.py` cluster). Recommend consolidating into one script with CLI flags. Judge by reading the code, not by name similarity — a wrapper that delegates to another script is not a duplicate. Scripts that target different components, serve different roles (test matrix vs production vs benchmark), or are one-off diagnostics are not duplicates.
 9. **No test framework imports in library code.** In review mode, flag diffs that add `import pytest`, `from pytest`, `import unittest`, or `from unittest` to any file under `src/legoesm/`. In audit mode, scan for these patterns — currently the repo has zero matches, so any appearance is new slop. Do NOT flag: `assert` statements (legitimate preconditions), `if __name__` blocks (legitimate entrypoints), `argparse`, or `doctest` (lightweight and self-contained).
+11. **Tests live in `tests/` only.** Never produce or accept test/verification scripts outside the `tests/` tree (no `test_*.py` at repo root, in `src/legoesm/`, or `scripts/` root). Mirror the package tree under `tests/<component>/<tier>/`; throwaway probes go in `scripts/tmp/`.
+12. **JAX numpy only — never plain numpy, never plain Python numerics.** Forbid `import numpy`/`import numpy as np`/`from numpy import` in model code — use `import jax.numpy as jnp`. Forbid Python `math.*`, Python loops over array dims, and list-comprehension array builds in traced paths — use `jnp`/`vmap`/`lax.scan`/`fori_loop`. Plain numpy/Python control flow breaks JIT/autodiff/pytree purity. Host-side I/O glue that never touches traced arrays is the only exemption.
+
 10. **Minimize redundancy across the codebase.** (See also Pass 9 for constants specifically.) This extends beyond Pass 3 duplicates: also flag redundant helper functions, repeated constant definitions, copy-pasted boilerplate across scripts/tests, and near-identical initialization sequences. The bar: if two pieces of code share >70% logic, one should call the other or both should call a shared function.
 
 ## Resolved items (2026-03-27)
