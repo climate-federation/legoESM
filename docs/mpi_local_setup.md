@@ -49,13 +49,29 @@ Per-file results (np=2): coupler 2✓, halo 10✓, latlon_checkpoint 8✓,
 latlon_halo 11✓, latlon_polar_filter 5✓, ... (the earlier "coupler hangs"
 report was a cross-file-session artefact — the coupler passes in isolation).
 
-## Known flaky test
-`tests/distributed/test_latlon_mpi_step.py::...[False]` INTERMITTENTLY deadlocks
-under MPI (passes most runs in ~2 s; occasionally hangs until the timeout). It is
-a collective-ordering race between the mass-fixer `allreduce` and the halo
-`sendrecv` on the JAX-0.9 `mpi4jax` slow XLA:CPU path (the `[True]` and
-`mass_conserved` cases are already `skip`-ped as unimplemented for MPI). NOT the
-coupler, NOT a barrier issue (a per-test `COMM_WORLD.Barrier` was tried and did
-not help — reverted). Fixing it needs explicit mpi4jax token-dependency ordering
-so XLA cannot reorder the two collectives; tracked as a separate issue. The
-runner's hard timeout bounds it.
+## Known flaky test — precise diagnosis
+`tests/distributed/test_latlon_mpi_step.py::...test_step_matches_serial_after_gather[False]`
+INTERMITTENTLY deadlocks under MPI (passes ~5/6 runs in ~2 s; occasionally hangs).
+
+**Diagnosis (per-rank faulthandler):** when it hangs, **rank 1 completes all 3
+tests** (`1 passed, 2 skipped`) while **rank 0 is stuck on the FIRST collective of
+`[False]`** — no progress dot, and faulthandler cannot even dump rank 0's
+traceback because it is blocked in an uninterruptible C-level MPI call
+(`MPI_Sendrecv`/`Allreduce` via mpi4jax). So the two ranks issue a DIFFERENT
+sequence of collectives for the same test: a COLLECTIVE-DIVERGENCE race (a
+data-dependent collective and/or XLA async-dispatch reordering of the auto-tokened
+mpi4jax ops) on the JAX-0.9 `mpi4jax` slow XLA:CPU path. (The `[True]` and
+`mass_conserved` cases are `skip`-ped as unimplemented for MPI.)
+
+**Ruled out:** the coupler (passes 2/2); a per-test `COMM_WORLD.Barrier` fixture
+(tried, did NOT help, reverted).
+
+**Real fix (out of scope here — deprecated stack, unverifiable due to
+intermittency):** either (a) thread EXPLICIT mpi4jax tokens through the latlon
+step so the halo `sendrecv` and mass-fixer `allreduce` cannot reorder and are
+issued in identical order on every rank (and ensure no collective sits inside a
+per-rank data-dependent branch), or (b) move MPI off the deprecated
+`mpi4jax`+JAX-0.9 path once a JAX-0.10-compatible halo backend
+(`jax.lax.ppermute` over a device mesh — already noted in
+`parallel/halo_exchange.py`) is wired. Until then the per-file runner's hard
+`timeout` bounds it, and the test passes on the vast majority of runs.
