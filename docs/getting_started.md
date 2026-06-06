@@ -168,7 +168,9 @@ A few principles to internalise:
 | Differentiable training | `legoesm.training.training_driver` |
 
 All drivers are thin: read the relevant CLI script, then jump into
-`src/legoesm/driver/` to see what they call.
+the `driver/` package to see what they call. For how the grid, complexity,
+and physics bricks that these drivers assemble are chosen, see
+[docs/composability.md](composability.md).
 
 ---
 
@@ -246,6 +248,7 @@ Sea ice: `scripts/matrix/run_sea_ice_test_matrix.py` (15 standard benchmarks).
 
 ## 9. Where to go next
 
+- [docs/composability.md](composability.md) — **how the model is assembled**: instantiating each axis (grids, regional/idealized extent, the SCM/LES/CRM/shallow-water/3-D complexity ladder), a high-level package tour, and the research → operational (AMIP/OMIP/CMIP) ladder.
 - [README.md](../README.md) — feature inventory and platform matrix.
 - [SPECIFICATION.md](specs/SPECIFICATION.md) — full technical specification.
 - [docs/cmip_readiness.md](cmip_readiness.md) — CMIP production checklist.
