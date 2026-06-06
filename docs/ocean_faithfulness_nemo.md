@@ -84,7 +84,19 @@ div-damp no-effect, smoothing worse, flat no-effect) — same dead-end the 1° t
 Whack-a-mole across ALL sharp-gradient semi-enclosed basins (Med, Gulf, Japan, Okhotsk,
 Bering...) → masking removes too much ocean, not faithful. Kept as opt-in
 `--cube-mask-marginal-seas` (delays; useful only WITH the PGF fix).
-**DEFINITIVE: cube needs the SMC03 (Shchepetkin-McWilliams 2003) density-Jacobian PGF on the
+**NEW LEAD (iter-31, balanced-init failure) — FC GIBBS AT SHARP FRONTS:** cube
+geostrophic balanced-init (`_balanced_init_cube`, c7d99add) FAILED — `max|u_g|`
+saturated the 2.5 m/s clip everywhere, i.e. the geostrophic velocity from the SAME 1°
+Med front is ~100× the latlon's. Cause: the **FC (Fourier-continuation) SPECTRAL
+gradient rings (Gibbs) at the sharp 1-cell marginal-sea density front** → spurious huge
+∇p → both the rest-state PGF spike AND the balanced-init velocity blow up. The latlon
+uses a FINITE-DIFFERENCE gradient (no Gibbs) → no blowup. This reframes the cube fix:
+**not SMC03/resolution but a NON-SPECTRAL / flux-limited gradient for the PGF at sharp
+fronts** (e.g. the cd-grid FD path, or a hybrid FD-at-fronts). NEXT TEST (GPU-queued,
+8418081 C64 + a cd-grid-path `fc_config=None` run): does the FD cd-grid path survive
+the marginal seas where FC's Gibbs does not? GPU queue currently jammed (~11h).
+
+**(superseded lead) cube needs the SMC03 (Shchepetkin-McWilliams 2003) density-Jacobian PGF on the
 cube FC/cd-grid backend** (`ocean_pe_fc.py` / `ocean_pe_cdgrid.py` `_arakawa_lamb_gradient`)
 — compute the horizontal PGF as a Jacobian of (in-situ density, depth) instead of a direct
 ∇p, which removes the sharp-gradient/topography PGF error that seeds the single-cell spike.

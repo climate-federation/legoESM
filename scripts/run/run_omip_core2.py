@@ -867,7 +867,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        woa_init: bool = False, woa_t=None, woa_s=None,
                        flat_bottom: bool = False, A_h=None, hyperdiff_coeff=None,
                        div_damp_2=None, div_damp_4=None, baroclinic_rk3=None,
-                       mask_marginal_seas=False, balanced_init=False):
+                       mask_marginal_seas=False, balanced_init=False,
+                       use_fc=True):
     """Build a cubed-sphere ocean (FC-Gram spectral baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -918,8 +919,12 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     if _ovr:
         config = config._replace(**_ovr)
         print(f"[setup] cube config override: {_ovr}")
-    model = OceanModel(grid, z_coord, config,
-                       fc_config=build_fc_config(dtype=jnp.float64))
+    # FC-Gram spectral baroclinic backend by default; use_fc=False uses the
+    # cd-grid Arakawa-Lamb FINITE-DIFFERENCE path (no Fourier Gibbs at sharp
+    # marginal-sea fronts — tests the iter-31 FC-Gibbs hypothesis).
+    _fc = build_fc_config(dtype=jnp.float64) if use_fc else None
+    model = OceanModel(grid, z_coord, config, fc_config=_fc)
+    print(f"[setup] cube backend: {'FC-Gram spectral' if use_fc else 'cd-grid FD'}")
     # NEMO bathy/mask -> cube cell centres (point-target IDW; the curvilinear
     # mesh is the same faithful geometry tripole/latlon use).
     import xarray as xr
@@ -960,6 +965,9 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     if balanced_init:
         if not woa_init:
             raise ValueError("--balanced-init requires --woa-init (balances the WOA IC).")
+        if model._fc_config is None:
+            raise ValueError("cube --balanced-init needs the FC backend (uses FC "
+                             "gradients); not compatible with --cube-no-fc.")
         state = _balanced_init_cube(state, grid, z_coord, model.config,
                                     model._fc_config)
     return grid, z_coord, model, state, np.asarray(H_bathy)
@@ -1094,6 +1102,10 @@ def main() -> int:
     p.add_argument("--cube-rk3", action="store_true",
                    help="cube: 3-stage SSP-RK3 baroclinic update (vs forward-Euler) "
                         "— the tripole cold-start fix ported to the cube OceanModel.")
+    p.add_argument("--cube-no-fc", action="store_true",
+                   help="cube: use the cd-grid Arakawa-Lamb FINITE-DIFFERENCE PGF "
+                        "(no FC spectral Gibbs at sharp marginal-sea fronts) instead "
+                        "of the FC-Gram backend. Tests the iter-31 FC-Gibbs hypothesis.")
     p.add_argument("--cube-mask-marginal-seas", action="store_true",
                    help="cube: mask poorly-resolved semi-enclosed marginal seas "
                         "(Med/Black/Red/Gulf/Baltic/Hudson) to land — their sub-grid "
@@ -1337,6 +1349,7 @@ def main() -> int:
             baroclinic_rk3=(True if args.cube_rk3 else None),
             mask_marginal_seas=args.cube_mask_marginal_seas,
             balanced_init=args.balanced_init,
+            use_fc=(not args.cube_no_fc),
         )
         app_grid_type = "cubed_sphere"
     else:
