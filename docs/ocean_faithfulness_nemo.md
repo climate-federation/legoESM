@@ -37,7 +37,7 @@ improve further. Runoff feature: wired+codex+tested+validated (commits 7ecf0b88,
 |---|---|---|
 | **tripole/eORCA025 ¼°** | STABLE (corrected-IC + RK3 + stack) | **day-90 SST RMSE 1.15, corr 0.99 — EXCELLENT** |
 | **latlon 1°** | STABLE (mask-aware polar filter) | **day-90 SST RMSE 1.12, corr 0.99 — EXCELLENT** (converges 1.23→1.12) |
-| cubed_sphere | harness DONE; **RESOLUTION-LIMITED** at C32/C64 (blows <day-1) | WOA fronts imply >10 m/s jets coarse cube can't carry; needs ~C360 (¼°) + stack (expensive) — same as 1° tripole |
+| cubed_sphere | harness DONE; **RESOLUTION-CONVERGENT** (blowup step C32→6, C64→9, C128→37, ~2×/doubling) | needs ~C256 (¼°, like eORCA025) + stack; GPU-blocked + expensive |
 | mpas | untested w/ CORE-II; ico3 ~900 km RESOLUTION-LIMITED | #160 full-PV refactor (HARD, see below) + core2 builder + ¼° |
 | spectral | applicator CANNOT force it; T21 ~5.6° RESOLUTION-LIMITED | grid-space forcing path (largest gap) + core2 builder + higher res |
 
@@ -151,6 +151,14 @@ cube FC/cd-grid backend** (`ocean_pe_fc.py` / `ocean_pe_cdgrid.py` `_arakawa_lam
 The lat-lon path's `pgf_scheme="smc03"` is the reference. Large multi-iteration dycore task.
 ALL pragmatic levers exhausted (RK3 worse, viscosity/hyperdiff/div-damp no-effect, smoothing
 worse, flat no-effect, marginal-mask cascades). This is the cube's sole remaining gate.
+
+## CUBE C128 VERDICT (resolution-convergence confirmed)
+C128 (~0.7°, finer than latlon 1°) + strong CFL-viscosity + balanced-init: NaN step 37
+(vs C32 step 6, C64 step 9) — **blowup delays ~2× per resolution doubling**. Resolution
+is the cube lever (consistent w/ the universal ¼° finding); ≤0.7° insufficient. Path =
+**C256 (¼°)** single expensive run (393k cells, dt~3s) — GPU-blocked (jn2808 holds nodes).
+Balanced-init still clip-saturates at sharp fronts (max|u_g| hits clip) — needs either ¼°
+resolution (fronts carriable) or a no-clip balanced IC. Trend strongly suggests C256 works.
 
 ## UNIFYING INSIGHT (iter-34): faithful free CORE-II cold-start needs ~¼° + full stack
 Proven across grids: 1° tripole FAILED (config-exhausted) → eORCA025 ¼° SUCCEEDED;
