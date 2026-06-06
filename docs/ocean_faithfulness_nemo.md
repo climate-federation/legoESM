@@ -146,7 +146,10 @@ scope; not a quick fix. 2/5 grids (tripole, latlon) are genuinely faithful TODAY
    without re-double-counting the barotropic Coriolis) + a run_omip_core2 mpas builder + bathy.
 3. **spectral** — add a grid↔spectral CORE-II forcing path (SpectralOceanState lacks grid-space
    state); largest infra gap.
-4. **SSS runoff ungate** (both done grids): wire Dai-Trenberth runoff → ungates SSS/MLD/AMOC.
+4. **SSS runoff ungate — WIRED (iter, 7ecf0b88)**: `--runoff` loads NEMO's OWN Dai-Trenberth
+   file (river+isf+iceberg, 12 monthly) → IDW-regrid → per-step `apply_runoff_step`. Real file
+   = host target of the container symlink. Validation run `legoesm_latlon_runoff` (3mo+runoff)
+   queued → score SSS vs NEMO when done (was runoff=0-gated).
 5. **Transports** (ACC@Drake, AMOC@26N): grid metrics in scorer + NEMO grid_U/V.
 
 ## Infra (iter-19, tested + codex-reviewed)
