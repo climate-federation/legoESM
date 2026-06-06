@@ -37,15 +37,32 @@ def plume_convection(
     """
     nlev = T.shape[-1]
     shape_3d = T.shape
-    dtype = T.dtype
-    dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
+    # Carry/output dtype: promote across the state arrays *and* the config
+    # params that enter the scan carry + tendencies.  This (a) keeps the
+    # lax.scan carry dtype stable so it never promotes mid-scan, and (b) under
+    # ``jax.grad`` w.r.t. a float64 param on a float32 state lifts the whole
+    # computation to float64 so no float64→float32 downcast scatter occurs in
+    # the conservation correction or the reverse pass.  For the usual
+    # uniform-precision state with static (weakly-typed) python-float params
+    # this is just ``T.dtype``.  (Differentiability audit 2026-06 + codex.)
+    dtype = jnp.result_type(
+        T, S, cfg.epsilon, cfg.T_excess, cfg.active_sigmoid_sharpness,
+        cfg.w_plume_min, cfg.alpha_plume,
+    )
+    # Cast to the carry/output dtype: ``z_coord.dz_ref`` follows the precision
+    # *control* policy and can be float64 while the state is float32, which
+    # would otherwise reintroduce a mixed-dtype scatter at the k=0
+    # column-integral correction below (codex review).
+    dz_actual = (z_coord.dz_ref * jacobian[..., jnp.newaxis]).astype(dtype)
 
     # Detect unstable surface: rho(k=0) > rho(k=1)
     surface_unstable = rho[..., 0] > rho[..., 1]  # (6, n, n)
 
-    # Initialize plume properties at surface
-    T_plume_init = T[..., 0] + cfg.T_excess
-    S_plume_init = S[..., 0]
+    # Initialize plume properties at surface.  Cast to the state dtype so a
+    # float64-traced ``cfg.T_excess`` (under ``jax.grad``) cannot promote the
+    # scan-carry init relative to the in-loop carry (see scan_fn dtype note).
+    T_plume_init = (T[..., 0] + cfg.T_excess).astype(dtype)
+    S_plume_init = S[..., 0].astype(dtype)
 
     # Descend plume using scan over levels (starting from level 1)
     def scan_fn(carry, k):
@@ -60,8 +77,16 @@ def plume_convection(
         # unphysical sign-flip on the plume properties.  ``-expm1(-x)``
         # is monotone in [0, 1) for x>=0 and gradient-friendly.
         entrain = -jnp.expm1(-cfg.epsilon * dz_k)
-        T_plume = (1.0 - entrain) * T_plume + entrain * T[..., k]
-        S_plume = (1.0 - entrain) * S_plume + entrain * S[..., k]
+        # Pin the scan-carry dtype to the state dtype.  ``cfg.epsilon`` /
+        # ``cfg.active_sigmoid_sharpness`` feed the carry (T_plume, S_plume,
+        # active); under ``jax.grad`` w.r.t. one of these the param is a
+        # float64 tracer while the ocean state is float32, so without the
+        # cast ``entrain`` promotes the carry to float64 mid-scan and
+        # ``lax.scan`` rejects the input≠output carry dtype.  Casting keeps
+        # the carry stable in ``dtype`` and the gradient still flows through
+        # the cast.  (Differentiability audit 2026-06.)
+        T_plume = ((1.0 - entrain) * T_plume + entrain * T[..., k]).astype(dtype)
+        S_plume = ((1.0 - entrain) * S_plume + entrain * S[..., k]).astype(dtype)
 
         # Buoyancy check
         rho_plume = wright_eos(T_plume, S_plume, p_hydro[..., k])
@@ -69,7 +94,9 @@ def plume_convection(
 
         # Plume is active where it's denser than environment (sinking):
         # delta_rho > 0 means rho_plume > rho_env → plume sinks → stay active
-        active = active * jax.nn.sigmoid(delta_rho * cfg.active_sigmoid_sharpness)
+        active = (
+            active * jax.nn.sigmoid(delta_rho * cfg.active_sigmoid_sharpness)
+        ).astype(dtype)
 
         # Detrainment tendency at this level [K/s], [PSU/s].
         #
@@ -82,10 +109,16 @@ def plume_convection(
         # adversarial review iter-1, finding #2).  ``cfg.w_plume_min``
         # is used as the constant plume velocity (the minimum-floor
         # interpretation of an unresolved plume's effective speed).
+        # Cast the emitted tendencies to the state dtype as well: a
+        # float64-traced ``epsilon`` / ``w_plume_min`` / ``alpha_plume``
+        # (under ``jax.grad`` on a float32 state) would otherwise leave
+        # ``dT_k`` float64 and trigger an unsafe float64→float32 scatter at
+        # the k=0 conservation correction below.  Keeps the output dtype
+        # equal to the state dtype; the gradient still flows through the cast.
         dT_k = (cfg.w_plume_min * cfg.alpha_plume * cfg.epsilon
-                * (T_plume - T[..., k]) * active)
+                * (T_plume - T[..., k]) * active).astype(dtype)
         dS_k = (cfg.w_plume_min * cfg.alpha_plume * cfg.epsilon
-                * (S_plume - S[..., k]) * active)
+                * (S_plume - S[..., k]) * active).astype(dtype)
 
         return (T_plume, S_plume, active), (dT_k, dS_k, active)
 
