@@ -35,8 +35,16 @@ the shared `grids.polar_filter` (already used by the atmosphere C-grid) in
 - **LIMITATION (honest)**: even mask-aware, lat-lon can't be fully faithful in the
   land-locked Arctic (residual cross-pole basin coupling) — ORCA tripole stays THE faithful
   path. This is for lat-lon stability + a tropics/mid-lat/SH compare.
-- NEXT: launch latlon cold-start (`--grid latlon_bathy --polar-filter` + winning stack) →
-  verify survives past day 0.25 → score vs NEMO `--nemo-month` (seasonal).
+- **VALIDATED (8417577, iter-24): polar filter SOLVES the latlon cold-start.** 1° latlon
+  WOA cold-start + `--polar-filter` runs STABLE past day 0.25 (prior blowup point): day-1..6
+  max|u| bounded **1.6-2.0 m/s** (physical WBC), peak at **38.5°N (Gulf Stream), NOT the
+  pole**; SST ~12.6 °C / SSS ~33.97 stable, finite. The N-pole singularity is gone. Config:
+  `--grid latlon_bathy --latlon-res 180x360 --dt 300 --woa-init --partial-cell --pgf smc03
+  --adaptive-implicit-vertadv --momentum-rk3 --min-levels 2 --C-smag-lap 3.0
+  --smag-cfl-safety 0.125 --polar-filter --polar-filter-cutoff-lat 60`. Smoke = 18 days
+  (snapshots day 5/10/15).
+- NEXT: score day-15 vs NEMO `--nemo-month 1` (Jan, seasonal) for a first latlon-vs-NEMO
+  number; then a longer latlon run for equilibration (tropics/mid-lat/SH; Arctic caveated).
 
 ## CURRENT STATE (iter 22 — SEASONAL CONFOUND found)
 
