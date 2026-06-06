@@ -72,10 +72,17 @@ finite). 3 regrid unit tests; codex CLEAN.
 also blows; NOT forcing — unforced also blows, just slower). Step-by-step: smooth spin-up to
 ~0.3 m/s then single-cell 35× jump in ~6 steps. Ignites in MARGINAL SEAS (Med 34.8N/9.8E lev4,
 Persian Gulf) and, post-IC-smoothing, the EQUATOR (f→0). INSENSITIVE to A_h(10×)/hyperdiff/
-div-damp (bit-identical); WORSE with WOA-smoothing (corrupts IC). Same class as the tripole
-cold-start; the cube `OceanModel` lacks the conditioning stack (balanced-init / RK3 / smag-cfl-cap
-/ equatorial A_h-boost — all LatLonCGrid-only). **NEXT: port the cold-start conditioning to the
-cube OR mask/condition marginal-sea + equatorial cells.** Multi-iteration dycore effort.
+div-damp (bit-identical); WORSE with WOA-smoothing (corrupts IC). **RK3 ported to the cube
+(config.baroclinic_rk3, 1c402437, tested + codex-CLEAN) but made it WORSE** (3× tendency
+amplifies the unstable mode — unlike the tripole, RK3 is NOT the cube fix). The cube blowup
+is a FAST single-cell SPATIAL PGF spike at poorly-resolved marginal-sea cube cells (Med:
+the Gibraltar density contrast is sub-grid at C32 ~2.8° → huge 1-cell PGF), NOT a
+time-integration-order issue. **LEVER SPACE EXHAUSTED** (RK3 worse, viscosity/hyperdiff/
+div-damp no-effect, smoothing worse, flat no-effect) — same dead-end the 1° tripole hit.
+**NEXT (two real paths):** (a) the SMC03 density-Jacobian PGF on the cube (the right dycore
+fix; large); OR (b) marginal-sea masking/sponge (pragmatic first number, caveated like the
+latlon Arctic) — needs marginal-sea detection on the cube (6,n,n). Could also test higher
+cube resolution (C90 ~1°) to resolve marginal seas. Multi-iteration dycore effort.
 
 ## Open work toward DONE
 1. **cubed_sphere cold-start** — the gate above (port conditioning stack / marginal-sea+equator handling).
