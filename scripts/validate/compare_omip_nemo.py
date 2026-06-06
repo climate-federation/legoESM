@@ -120,12 +120,73 @@ def _load_legoesm(path):
     }
 
 
-def _load_nemo(path, tidx):
+def _nemo_record_months(ds, tdim, nt):
+    """Calendar month (1-12) of each of the ``nt`` time records, decoded from CF
+    metadata (``units`` + ``calendar``).  Returns a length-``nt`` list, or ``None``
+    if the time axis cannot be decoded (caller then falls back to a positional
+    Jan-first assumption, with a warning).  Used so ``--nemo-month`` selects by the
+    TRUE calendar month rather than blindly trusting record order."""
+    try:
+        import cftime
+    except Exception:
+        return None
+    tv = ds[tdim] if tdim in ds.variables else None
+    if tv is None:
+        return None
+    units = tv.attrs.get("units")
+    if not units:
+        return None
+    calendar = tv.attrs.get("calendar", "standard")
+    try:
+        dates = cftime.num2date(np.asarray(tv.values), units, calendar)
+        months = [int(np.atleast_1d(dates)[i].month) for i in range(nt)]
+    except Exception:
+        return None
+    return months
+
+
+def _load_nemo(path, tidx, month=None):
     import xarray as xr
     ds = xr.open_dataset(path, decode_times=False)
     tdim = "time_counter" if "time_counter" in ds["tos"].dims else None
-    sel = (lambda v: np.asarray(ds[v].isel({tdim: tidx})) if tdim
-           else np.asarray(ds[v]))
+    if month is not None:
+        # Climatological calendar-month mean: average every record whose CALENDAR
+        # month is M, giving the NYF climatological month -- the SEASONALLY-MATCHED
+        # reference for an instantaneous legoESM snapshot (whose perpetual-year date
+        # is ~day-of-run).  Without this the scorer compares a spring snapshot to the
+        # ANNUAL mean, manufacturing a hemispheric seasonal dipole that masquerades
+        # as model bias.  The record months are decoded from CF time metadata (NOT
+        # assumed Jan-first/positional ``(M-1)::12``) so a file with spin-up records,
+        # a non-January start, or dropped months still selects the correct month or
+        # fails loudly.
+        if not (1 <= month <= 12):
+            raise ValueError(f"--nemo-month must be 1..12, got {month}")
+        if tdim is None:
+            raise ValueError(f"--nemo-month set but {path} has no time dimension")
+        nt = int(ds.sizes[tdim])
+        rec_months = _nemo_record_months(ds, tdim, nt)
+        if rec_months is not None:
+            midx = [i for i in range(nt) if rec_months[i] == month]
+        else:
+            # CF time undecodable: fall back to positional stride, but ONLY if the
+            # file is whole monthly years (Jan-first contract); else refuse.
+            if nt % 12 != 0:
+                raise ValueError(
+                    f"--nemo-month: cannot decode time metadata of {path} and "
+                    f"n_time={nt} is not a multiple of 12 (not whole monthly years) "
+                    "-- refusing to guess the calendar month.")
+            print(f"[nemo-month] WARN: time metadata undecodable; assuming "
+                  f"Jan-first monthly contract (positional (M-1)::12).")
+            midx = list(range(month - 1, nt, 12))
+        if not midx:
+            raise ValueError(f"--nemo-month {month}: no matching records "
+                             f"(n_time={nt})")
+        print(f"[nemo-month] month={month}: averaging {len(midx)} records "
+              f"at indices {midx}")
+        sel = lambda v: np.asarray(ds[v].isel({tdim: midx}).mean(dim=tdim))
+    else:
+        sel = (lambda v: np.asarray(ds[v].isel({tdim: tidx})) if tdim
+               else np.asarray(ds[v]))
     sst = sel("tos"); sss = sel("sos")
     lat = np.asarray(ds["nav_lat"]); lon = np.asarray(ds["nav_lon"])
     # NEMO land/fill is already NaN here (xarray CF-decodes _FillValue=1e20), so
@@ -177,6 +238,13 @@ def main() -> int:
     p.add_argument("--nemo-gridt", type=Path, required=True)
     p.add_argument("--nemo-time-idx", type=int, default=-1,
                    help="NEMO grid_T time record (default last).")
+    p.add_argument("--nemo-month", type=int, default=None,
+                   help="Calendar month 1-12: average all records of that month "
+                        "across the file (climatological-month mean) instead of a "
+                        "single --nemo-time-idx. Use a MONTHLY grid_T file. This is "
+                        "the seasonally-matched reference for an instantaneous "
+                        "legoESM snapshot; comparing a spring snapshot to the annual "
+                        "mean fabricates a hemispheric seasonal dipole.")
     p.add_argument("--res-deg", type=float, default=1.0)
     p.add_argument("--output-dir", type=Path, default=Path("results/omip_nemo/compare"))
     p.add_argument("--freeze-clamp-C", type=float, default=None,
@@ -189,7 +257,7 @@ def main() -> int:
     out = args.output_dir; out.mkdir(parents=True, exist_ok=True)
 
     L = _load_legoesm(args.legoesm_snapshot)
-    N = _load_nemo(args.nemo_gridt, args.nemo_time_idx)
+    N = _load_nemo(args.nemo_gridt, args.nemo_time_idx, month=args.nemo_month)
     print(f"[load] legoESM {L['sst'].shape}, NEMO {N['sst'].shape} "
           f"({N['n_time']} time records)")
 

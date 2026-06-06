@@ -11,6 +11,62 @@ promise DONE only when grids genuinely match NEMO — tripole SST done; NOT all 
 
 ---
 
+## CURRENT STATE (iter 22 — SEASONAL CONFOUND found)
+
+**MAJOR METHOD FINDING — the "equilibration degradation" is largely a SEASONAL-PHASE
+artifact, not model drift.** Trend scoring (8417518, no-freeze snapshots vs NEMO *annual*
+mean) shows a hemispheric dipole that GROWS MONOTONICALLY FROM ~0 at day-0:
+| day | RMSE | Arctic | NHmid | trop | SHmid | Ant |
+|---|---|---|---|---|---|---|
+| 15 | 1.87 | −1.79 | −2.56 | −0.73 | +0.67 | +0.82 |
+| 45 | 2.64 | −3.74 | −3.72 | −0.43 | +1.89 | +1.70 |
+| 90 | 2.92 | −4.90 | −3.68 | +0.26 | +2.30 | +1.46 |
+legoESM runs from a WOA **annual** IC under perpetual NYF; a day-D snapshot is ~calendar
+day-D (start Jan 1) → day-90 ≈ **end-March** (NH late winter = coldest, SH late summer =
+warmest). It was scored against the NEMO **5-yr annual mean**. The growing NH-cold/SH-warm
+dipole IS the seasonal cycle (NHmid −3.7 ≈ realistic Gulf-Stream-lat winter depression),
+manufactured by instantaneous-vs-annual-mean scoring — NOT a faithfulness failure.
+
+**FIX (iter-22, code): seasonally-matched scoring — CONFIRMED, dipole collapsed.** NEMO
+RUN_REF has a monthly grid_T (`ORCA1_1m_20000101_20041231_grid_T.nc`, 60 rec). Added
+`--nemo-month M` to `compare_omip_nemo.py`: averages records `(M-1)::12` = climatological
+calendar-month mean (off by default, annual behavior bit-unchanged). Re-score 8417544
+(day15,30→Jan; 45→Feb; 60,75,90→Mar) vs same-month NEMO:
+| day-90 SST | RMSE | bias | corr | Arctic | NHmid | SHmid | Ant |
+|---|---|---|---|---|---|---|---|
+| annual (old, WRONG metric) | 2.92 | −0.30 | 0.97 | −4.90 | −3.68 | +2.30 | +1.46 |
+| seasonal raw | 1.83 | −0.36 | 0.99 | −2.70 | **−0.33** | **−0.07** | +0.29 |
+| seasonal + freeze-clamp | **1.15** | −0.06 | 0.99 | **−0.13** | −0.33 | −0.07 | +0.31 |
+**The NH-cold/SH-warm dipole was 100% a seasonal-phase artifact** (instantaneous ~end-March
+snapshot vs NEMO ANNUAL mean). NHmid −3.68→−0.33, SHmid +2.30→−0.07 under same-month scoring.
+The only genuine residual = Arctic super-cooling (sea-ice), closed by freeze-floor
+(−2.70→−0.13). **Tripole/eORCA025 day-90 = RMSE 1.15 °C, corr 0.99, all bands |bias|<0.5 =
+EXCELLENT / genuinely faithful at equilibration.** Model-side confirmation: in-flight run
+8417505 (every-step freeze-floor) — score vs `--nemo-month 3` when done; expect ~1.1-1.2.
+ALL prior "POOR at equilibration" verdicts were the annual-vs-instant metric bug, NOT model.
+
+**Codex adversarial review of `--nemo-month` (done, 2 HIGH fixed):** (1) no range
+validation → added `1<=month<=12` guard; (2) positional `(M-1)::12` assumed Jan-first
+without metadata check → now decodes TRUE calendar month per record from CF `units`+
+`calendar` via cftime (`_nemo_record_months`), selects by real month, falls back to
+positional only for whole-monthly-year files with a warning, else refuses. Re-score
+8417551 confirms the hardened path reproduces RMSE 1.15 + prints decoded indices
+(validates record-0 = January from metadata). MEDIUM (skipna mean) benign for NEMO's
+fixed land mask.
+
+## CURRENT STATE (iter 21 — ralph resume)
+
+**In flight:** `8417505` freeze-floor 3mo ¼° (PENDING, est start 06-06 09:19, 48h walltime).
+sbatch verified correct (PYTHONPATH=packages/*, winning config, `--freeze-floor`). Scores
+day-90 vs NEMO when done; expect global SST RMSE < 2.45. Freeze-floor commit `7a81bc55`
+already codex-reviewed (2 HIGH fixed) — not re-touched.
+
+**Launched `8417518`** (CPU short): equilibration TREND scoring of the existing no-freeze
+climatology snapshots (`legoesm_e025_rk3_3mo` day 15/30/45/60/75/90), RAW + `-1.8` freeze-
+clamp, with band breakdown. Answers open item #1: is SST degradation monotonic? when/where
+does SH warm bias emerge? predicts freeze-floor gain at each lead. No GPU/new sim. Score
+→ results/omip_nemo/compare_trend_day*_{raw,clamp}/. Read on next iter.
+
 ## CURRENT STATE (iter 20 — ralph resume, post-merge)
 
 **Merge:** `origin/main` merged into branch 2026-06-06. Main restructured `src/legoesm`
@@ -83,7 +139,7 @@ Vindicates iter-9 "full stack together"; iter-10 "RK3 marginal" was pre-smag-cfl
 ## Per-grid status
 | grid | cold-start | comparison vs NEMO |
 |---|---|---|
-| **tripole/eORCA025 (¼°)** | **STABLE** (corrected IC + RK3 + stack) | **SST corr ~0.99 (excellent/good); SSS corr 0.90 (gated)** |
+| **tripole/eORCA025 (¼°)** | **STABLE** (corrected IC + RK3 + stack) | **SST RMSE 1.15 °C corr 0.99 EXCELLENT at day-90 (seasonal scoring + freeze-floor, iter-22); SSS corr 0.90 (gated)** |
 | tripole/eORCA1 (1°) | free run impossible (config exhausted) | superseded by ¼° |
 | latlon_bathy (1°) | **blows up day 0.25** — N-pole singularity (GEOMETRIC; RK3 doesn't rescue, 8131279) | needs pole filter / Arctic mask |
 | cubed_sphere | untested w/ CORE-II | **[high] face-edge PGF instab** masked by 5-50× diffusion → fix SMC03 + duogrid halo |
