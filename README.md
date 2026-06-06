@@ -426,7 +426,7 @@ the coupler, the federation packaging, and the tiered test/experiment harness.
 - [docs/getting_started.md](docs/getting_started.md) — **Newbie onboarding guide** (start here)
 - [CHANGELOG.md](CHANGELOG.md) — Release notes / what changed
 - [SPECIFICATION.md](docs/specs/SPECIFICATION.md) — Full technical specification
-- [docs/implementation_summary.md](docs/implementation_summary.md) — Comprehensive summary of implementations and tests
+- [docs/md_files/implementation_summary.md](docs/md_files/implementation_summary.md) — Comprehensive summary of implementations and tests
 - [docs/cmip_readiness.md](docs/cmip_readiness.md) — CMIP production readiness checklist
 - [docs/amip.md](docs/amip.md) — AMIP experiment guide
 - [docs/scm.md](docs/scm.md) — Single-column model (SCM) guide

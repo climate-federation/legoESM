@@ -50,6 +50,8 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2 as _lasd_cs2
+from legoesm.atmosphere.physics.turbulence.vreman import (
+    vreman_nu_t as _vreman_nu_t_core)
 from legoesm.core.field import Field
 from legoesm.core.state import (
     PlaneNonHydrostaticState,
@@ -1237,20 +1239,9 @@ def _centre_velocities_and_strain_plane(
     diagnose ``C_s`` from byte-identical resolved strain. Centred A-grid
     differences in the horizontal; the existing full-level centred operator in
     the vertical. ``Smag = √(2 S_ij S_ij)`` (the SAM/jax-alfa convention)."""
-    uc = 0.5 * (u_yxz + jnp.roll(u_yxz, -1, axis=1))
-    vc = 0.5 * (v_yxz + jnp.roll(v_yxz, -1, axis=0))
-    wc = 0.5 * (w_yxz_half[..., :-1] + w_yxz_half[..., 1:])
-
-    dudx = (jnp.roll(uc, -1, axis=1) - jnp.roll(uc, 1, axis=1)) / (2.0 * grid.dx)
-    dvdx = (jnp.roll(vc, -1, axis=1) - jnp.roll(vc, 1, axis=1)) / (2.0 * grid.dx)
-    dwdx = (jnp.roll(wc, -1, axis=1) - jnp.roll(wc, 1, axis=1)) / (2.0 * grid.dx)
-    dudy = (jnp.roll(uc, -1, axis=0) - jnp.roll(uc, 1, axis=0)) / (2.0 * grid.dy)
-    dvdy = (jnp.roll(vc, -1, axis=0) - jnp.roll(vc, 1, axis=0)) / (2.0 * grid.dy)
-    dwdy = (jnp.roll(wc, -1, axis=0) - jnp.roll(wc, 1, axis=0)) / (2.0 * grid.dy)
-    dudz = _full_level_centred_d_dz(uc, height_coord)
-    dvdz = _full_level_centred_d_dz(vc, height_coord)
-    dwdz = _full_level_centred_d_dz(wc, height_coord)
-
+    (uc, vc, wc, dudx, dudy, dudz, dvdx, dvdy, dvdz,
+     dwdx, dwdy, dwdz) = _velocity_gradients_plane(
+        u_yxz, v_yxz, w_yxz_half, grid, height_coord)
     S11, S22, S33 = dudx, dvdy, dwdz
     S12 = 0.5 * (dudy + dvdx)
     S13 = 0.5 * (dudz + dwdx)
@@ -1260,6 +1251,46 @@ def _centre_velocities_and_strain_plane(
                + 2.0 * (S12 ** 2 + S13 ** 2 + S23 ** 2)),
         1.0e-30))
     return uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag
+
+
+def _velocity_gradients_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord):
+    """A-grid cell-centre velocities + the NINE resolved velocity gradients
+    ``a_cd = ∂u_c/∂x_d`` at cell centres (centred ``jnp.roll`` differences in the
+    horizontal, the full-level centred operator in the vertical). Shared by
+    :func:`_centre_velocities_and_strain_plane` (which symmetrises to S_ij) and the
+    Vreman closure (which needs the asymmetric tensor)."""
+    uc = 0.5 * (u_yxz + jnp.roll(u_yxz, -1, axis=1))
+    vc = 0.5 * (v_yxz + jnp.roll(v_yxz, -1, axis=0))
+    wc = 0.5 * (w_yxz_half[..., :-1] + w_yxz_half[..., 1:])
+    dudx = (jnp.roll(uc, -1, axis=1) - jnp.roll(uc, 1, axis=1)) / (2.0 * grid.dx)
+    dvdx = (jnp.roll(vc, -1, axis=1) - jnp.roll(vc, 1, axis=1)) / (2.0 * grid.dx)
+    dwdx = (jnp.roll(wc, -1, axis=1) - jnp.roll(wc, 1, axis=1)) / (2.0 * grid.dx)
+    dudy = (jnp.roll(uc, -1, axis=0) - jnp.roll(uc, 1, axis=0)) / (2.0 * grid.dy)
+    dvdy = (jnp.roll(vc, -1, axis=0) - jnp.roll(vc, 1, axis=0)) / (2.0 * grid.dy)
+    dwdy = (jnp.roll(wc, -1, axis=0) - jnp.roll(wc, 1, axis=0)) / (2.0 * grid.dy)
+    dudz = _full_level_centred_d_dz(uc, height_coord)
+    dvdz = _full_level_centred_d_dz(vc, height_coord)
+    dwdz = _full_level_centred_d_dz(wc, height_coord)
+    return uc, vc, wc, dudx, dudy, dudz, dvdx, dvdy, dvdz, dwdx, dwdy, dwdz
+
+
+def _compute_vreman_K_m_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord,
+                              c_vreman):
+    """Vreman (2004) eddy viscosity ``K_m`` at cell centres for the plane CRM —
+    OPTIONAL alternative to :func:`_compute_smagorinsky_K_m_plane` (the SAM-faithful
+    default). Computes the nine A-grid velocity gradients and defers the algebra to
+    the shared :func:`legoesm.atmosphere.physics.turbulence.vreman.vreman_nu_t`
+    (the SAME core the spectral LES uses). Per-direction filter widths
+    (Δx, Δy, Δz(z)) make it well-behaved on anisotropic grids; it is purely local
+    (no plane average) so it is MPI-safe. No N² cutoff / wall cap (Vreman already
+    vanishes in laminar/near-wall 1-D shear)."""
+    (uc, vc, wc, dudx, dudy, dudz, dvdx, dvdy, dvdz,
+     dwdx, dwdy, dwdz) = _velocity_gradients_plane(
+        u_yxz, v_yxz, w_yxz_half, grid, height_coord)
+    # a_cd = ∂u_c/∂x_d ; dz per-level (nlev,) broadcasts on the trailing axis.
+    return _vreman_nu_t_core(
+        dudx, dudy, dudz, dvdx, dvdy, dvdz, dwdx, dwdy, dwdz,
+        grid.dx, grid.dy, height_coord.dz, c_vreman)
 
 
 def _compute_dynamic_smag_cs_plane(
@@ -2000,7 +2031,8 @@ def plane_compressible_euler_slow_tendencies(
     _use_smag = _closure == "smagorinsky" and config.smagorinsky_cs > 0.0
     _use_mol = (_closure == "molecular"
                 and getattr(config, "molecular_viscosity", 0.0) > 0.0)
-    if _use_smag or _use_mol:
+    _use_vreman = _closure == "vreman" and getattr(config, "vreman_c", 0.0) > 0.0
+    if _use_smag or _use_mol or _use_vreman:
         if _use_mol:
             # DNS: CONSTANT molecular kinematic viscosity ν everywhere — no
             # eddy model, no stratification cutoff. K_h = ν / Pr for the heat
@@ -2008,6 +2040,15 @@ def plane_compressible_euler_slow_tendencies(
             # 3-D ν∇²; dx must resolve ~the Kolmogorov scale.
             K_m = jnp.full(u.shape, config.molecular_viscosity, dtype=u.dtype)
             sgs_prandtl = config.molecular_prandtl
+        elif _use_vreman:
+            # Vreman (2004) EDDY viscosity — an OPTIONAL alternative to
+            # Smagorinsky (NOT the SAM-faithful default). It vanishes for
+            # well-resolved laminar/2-D shear and uses per-direction filter
+            # widths, so it behaves on anisotropic Δx≠Δz grids. Purely local
+            # (no plane average) ⇒ MPI-safe. K_h = K_m / Pr (same Prandtl).
+            K_m = _compute_vreman_K_m_plane(
+                u, v, w, grid, height_coord, getattr(config, "vreman_c", 0.07))
+            sgs_prandtl = config.smagorinsky_prandtl
         else:
             # CRM/LES: Smagorinsky-Lilly EDDY viscosity. Full 3D strain (takes
             # half-level w so the vertical-shear components S13, S23, S33
@@ -2518,12 +2559,30 @@ def validate_plane_config(config: CompressibleEulerConfig) -> None:
             "or NaNs for Pr <= 0."
         )
     closure = getattr(config, "turbulence_closure", "smagorinsky")
-    if closure not in ("smagorinsky", "molecular", "none"):
+    if closure not in ("smagorinsky", "molecular", "none", "vreman"):
         raise ValueError(
             f"turbulence_closure={closure!r} invalid; use 'smagorinsky' "
-            "(CRM/LES eddy viscosity), 'molecular' (DNS molecular viscosity), "
+            "(CRM/LES eddy viscosity, SAM-faithful default), 'vreman' (optional "
+            "Vreman-2004 eddy viscosity), 'molecular' (DNS molecular viscosity), "
             "or 'none' (inviscid)."
         )
+    if closure == "vreman":
+        if getattr(config, "vreman_c", 0.0) <= 0.0:
+            raise ValueError(
+                f"vreman_c={getattr(config, 'vreman_c', 0.0)!r} must be > 0 for "
+                "turbulence_closure='vreman' (e.g. 0.07 ≈ 2.5·C_s²)."
+            )
+        if getattr(config, "smagorinsky_dynamic", False):
+            raise ValueError(
+                "turbulence_closure='vreman' is incompatible with "
+                "smagorinsky_dynamic=True (Vreman is an inherently static, "
+                "self-contained closure — there is no dynamic-coefficient path)."
+            )
+        if config.smagorinsky_prandtl <= 0.0:
+            raise ValueError(
+                f"smagorinsky_prandtl={config.smagorinsky_prandtl!r} must be > 0 "
+                "for turbulence_closure='vreman' (K_h = K_m / Pr)."
+            )
     if closure == "molecular":
         if getattr(config, "molecular_viscosity", 0.0) <= 0.0:
             raise ValueError(

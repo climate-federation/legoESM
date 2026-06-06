@@ -99,6 +99,14 @@ def neutral_theta_ref(z):
     return jnp.where(z > 700.0, 290.0 + 0.02 * (z - 700.0), 290.0)
 
 
+def ekman_theta_ref(z):
+    """Ekman (Andren et al. 1994) initial θ(z): neutral (well-mixed θ=273.15 K)
+    capped by an inversion above 0.6 of the domain so the wind-driven neutral BL
+    reaches a quasi-steady depth (the classic neutral Ekman-spiral test) rather
+    than growing without bound."""
+    return jnp.where(z > 600.0, 273.15 + 0.01 * (z - 600.0), 273.15)
+
+
 def wangara_theta_ref(z):
     """Wangara Day-33 initial θ(z): ~277 K mixed layer, capping inversion above
     ~1 km (simplified sounding — the convective growth is flux-driven)."""
@@ -118,6 +126,16 @@ _CASES = {
         # substep and the BL turbulence decays to laminar (max|w|~mm/s); with it
         # OFF, w' grows and sustains (the resolved eddies the LES is meant to
         # carry). See docs/les_plane_turbulence_notes.md.
+        dt=0.05, hours=1.0, log_wind=True,
+    ),
+    "ekman": dict(
+        theta_ref_fn=ekman_theta_ref,
+        f_c=1.0e-4, ug=10.0, vg=0.0, z0=0.1,
+        moist=False,
+        # Andren (1994) neutral Ekman BL: f=1e-4 (~45°N), ug=10 m/s, z0=0.1 m.
+        # 1 km domain; like the neutral case it runs with the acoustic w-damping
+        # OFF and a log-wind IC so resolved shear production starts at t=0.
+        nx=32, ny=32, nlev=64, dx=20.0, H=1000.0, dz_sfc=10.0,
         dt=0.05, hours=1.0, log_wind=True,
     ),
     "gabls1": dict(
@@ -242,7 +260,7 @@ def _apply_pbl_column(state, t, *, case, hc, z0, dt, ug, vg):
     new_u = _implicit_vertical_diffusion(u, K_iface, dz, dzc, dt, drag_sfc=drag)
     new_v = _implicit_vertical_diffusion(v, K_iface, dz, dzc, dt, drag_sfc=drag)
 
-    if case == "neutral":
+    if case in ("neutral", "ekman"):
         # Pure shear-driven ABL: ZERO surface buoyancy flux. θ' is only mixed
         # (no surface source), so turbulence is generated solely by the resolved
         # surface shear — the cleanest validation of the SGS momentum transport.
@@ -433,6 +451,77 @@ def _diagnostics(state, hc, spec):
     )
 
 
+def _resolved_profiles(state, hc, spec):
+    """Planar-mean profiles + resolved second moments (the LES turbulence
+    statistics): θ, u, v, |U|, TKE, variances, kinematic momentum fluxes and the
+    surface friction velocity. Shared by the per-frame recorder AND the final
+    dump so the profile diagnostics are computed in exactly one place."""
+    z = np.asarray(hc.z_full)                              # top-down (idx 0 = top)
+    u3 = np.asarray(state.u.data)
+    v3 = np.asarray(state.v.data)
+    w3 = np.asarray(state.w.data)[..., :-1]               # full-level w (drop top)
+    um = u3.mean(axis=(0, 1)); vm = v3.mean(axis=(0, 1)); wm = w3.mean(axis=(0, 1))
+    up, vp, wp = u3 - um, v3 - vm, w3 - wm                # resolved fluctuations
+    uw = (up * wp).mean(axis=(0, 1))
+    vw = (vp * wp).mean(axis=(0, 1))
+    uu = (up * up).mean(axis=(0, 1))
+    vv = (vp * vp).mean(axis=(0, 1))
+    ww = (wp * wp).mean(axis=(0, 1))
+    tke = 0.5 * (uu + vv + ww)
+    theta = np.asarray(hc.theta_ref) + np.asarray(
+        state.theta_prime.data).mean(axis=(0, 1))
+    spd = np.sqrt(um ** 2 + vm ** 2)
+    u_star = float((uw[np.argmin(z)] ** 2 + vw[np.argmin(z)] ** 2) ** 0.25)
+    return dict(z=z, theta=theta, u=um, v=vm, spd=spd, wvar=ww,
+                uu=uu, vv=vv, ww=ww, tke=tke, uw=uw, vw=vw,
+                u_star=u_star, z0=spec["z0"], case=spec.get("case", ""))
+
+
+def _select_height_indices(hc, H):
+    """Indices into the (top-down) vertical axis for the surface (lowest model
+    level) + four heights spanning the BL at 0.1/0.25/0.5/0.8·H. Returns
+    (indices, heights[m]) ascending in z."""
+    z = np.asarray(hc.z_full)
+    surf = int(np.argmin(z))
+    targets = np.array([0.10, 0.25, 0.50, 0.80]) * float(H)
+    idx = [surf] + [int(np.argmin(np.abs(z - t))) for t in targets]
+    # de-duplicate while preserving the surface-first, ascending order
+    seen, out = set(), []
+    for k in sorted(idx, key=lambda kk: z[kk]):
+        if k not in seen:
+            seen.add(k); out.append(k)
+    out = np.array(out, dtype=int)
+    return out, z[out]
+
+
+def _height_slices(state, hc, h_idx):
+    """Horizontal (x,y) cross-sections of w, θ, u, v at the chosen level indices.
+    Each returned array is (n_heights, ny, nx). w is averaged to full levels."""
+    w = np.asarray(state.w.data)
+    w_full = 0.5 * (w[..., :-1] + w[..., 1:])             # half -> full level
+    u = np.asarray(state.u.data)
+    v = np.asarray(state.v.data)
+    theta = np.asarray(hc.theta_ref) + np.asarray(state.theta_prime.data)
+    return dict(
+        w=np.stack([w_full[:, :, k] for k in h_idx]),
+        theta=np.stack([theta[:, :, k] for k in h_idx]),
+        u=np.stack([u[:, :, k] for k in h_idx]),
+        v=np.stack([v[:, :, k] for k in h_idx]),
+    )
+
+
+def _record_frame(state, hc, spec, args, t, frame, h_idx, h_z,
+                  snap_dir, prof_dir):
+    """Write one snapshot npz (height cross-sections) + one profile npz."""
+    t_hours = t / 3600.0
+    sl = _height_slices(state, hc, h_idx)
+    np.savez(snap_dir / f"snap_{frame:03d}.npz",
+             t_hours=t_hours, case=args.case, heights=h_z,
+             dx=args.dx, Lx=args.nx * args.dx, Ly=args.ny * args.dx, **sl)
+    prof = _resolved_profiles(state, hc, spec)
+    np.savez(prof_dir / f"prof_{frame:03d}.npz", t_hours=t_hours, **prof)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--case", choices=list(_CASES), required=True)
@@ -472,10 +561,15 @@ def main():
                         "c·(dt/n)/dx < 1 (c≈340): for dx=25 m, dt=0.5 s ⇒ n≳7.")
     p.add_argument("--hyperdiff", type=float, default=1.0e-2)
     p.add_argument("--print-every", type=int, default=200)
+    p.add_argument("--record-frames", type=int, default=20,
+                   help="Number of evenly-spaced frames to save (snapshot "
+                        "cross-sections at surface+4 heights and mean profiles) "
+                        "for the publication diagnostics. 0 disables recording.")
     p.add_argument("--output", type=Path, default=None)
     args = p.parse_args()
     # Fill unset args from the per-case defaults.
     spec = _CASES[args.case]
+    spec["case"] = args.case
     for k in ("nx", "ny", "nlev", "dx", "H", "dz_sfc", "dt", "hours"):
         if getattr(args, k) is None:
             setattr(args, k, spec[k])
@@ -491,12 +585,30 @@ def main():
     print(f"{'step':>7} {'t[h]':>6} {'max|w|':>9} {'wvar_max':>9} "
           f"{'h_bl[m]':>8} {'spd_max':>8} {'@z[m]':>7} {'th_sfc':>8}")
 
+    # Frame recorder: even spacing across the run (snapshots + profiles).
+    record = args.record_frames > 0
+    if record:
+        snap_dir = args.output / "snapshots"; snap_dir.mkdir(exist_ok=True)
+        prof_dir = args.output / "profiles"; prof_dir.mkdir(exist_ok=True)
+        h_idx, h_z = _select_height_indices(hc, args.H)
+        record_every = max(1, nsteps // args.record_frames)
+        frame = 0
+        _record_frame(state, hc, spec, args, 0.0, frame, h_idx, h_z,
+                      snap_dir, prof_dir)  # t=0 initial frame
+        frame += 1
+        print(f"  recording {args.record_frames} frames every {record_every} "
+              f"steps; heights[m]={np.round(h_z, 1)}")
+
     import time
     t0 = time.time()
     for i in range(nsteps):
         t = i * args.dt
         state = model.step(state, dt=args.dt, physics_fn=None)
         state = surf(state, jnp.asarray(t))
+        if record and (i + 1) % record_every == 0:
+            _record_frame(state, hc, spec, args, (i + 1) * args.dt, frame,
+                          h_idx, h_z, snap_dir, prof_dir)
+            frame += 1
         if (i + 1) % args.print_every == 0 or i == 0:
             d = _diagnostics(state, hc, spec)
             mw = d["max_w"]
@@ -514,27 +626,13 @@ def main():
           f"θ_sfc={d['theta_sfc']:.3f} K")
     # Dump final mean profiles + resolved turbulence statistics for the oracle
     # (Monin-Obukhov similarity) validation — see scripts/validate/validate_les_vs_oracle.py.
-    z = np.asarray(hc.z_full)
-    u3 = np.asarray(state.u.data)
-    v3 = np.asarray(state.v.data)
-    w3 = np.asarray(state.w.data)[..., :-1]              # full-level w (drop top)
-    um = u3.mean(axis=(0, 1)); vm = v3.mean(axis=(0, 1)); wm = w3.mean(axis=(0, 1))
-    up, vp, wp = u3 - um, v3 - vm, w3 - wm               # resolved fluctuations
-    # Resolved second moments (planar means): variances + kinematic momentum flux.
-    uw = (up * wp).mean(axis=(0, 1))
-    vw = (vp * wp).mean(axis=(0, 1))
-    uu = (up * up).mean(axis=(0, 1))
-    vv = (vp * vp).mean(axis=(0, 1))
-    ww = (wp * wp).mean(axis=(0, 1))
-    tke = 0.5 * (uu + vv + ww)
-    # Surface friction velocity from the lowest-level resolved stress magnitude.
-    u_star = float((uw[np.argmin(z)] ** 2 + vw[np.argmin(z)] ** 2) ** 0.25)
-    np.savez(args.output / "final_profiles.npz",
-             z=z, theta=np.asarray(hc.theta_ref) + np.asarray(
-                 state.theta_prime.data).mean(axis=(0, 1)),
-             u=um, v=vm, wvar=ww, uu=uu, vv=vv, ww=ww, tke=tke,
-             uw=uw, vw=vw, u_star=u_star, z0=spec["z0"], case=args.case)
-    print(f"  profiles -> {args.output}/final_profiles.npz  (u*≈{u_star:.3f} m/s)")
+    prof = _resolved_profiles(state, hc, spec)
+    np.savez(args.output / "final_profiles.npz", **prof)
+    if record:                                            # final-time frame too
+        _record_frame(state, hc, spec, args, nsteps * args.dt, frame,
+                      h_idx, h_z, snap_dir, prof_dir)
+    print(f"  profiles -> {args.output}/final_profiles.npz  "
+          f"(u*≈{prof['u_star']:.3f} m/s)")
     return 0
 
 

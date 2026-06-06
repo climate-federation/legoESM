@@ -30,10 +30,33 @@ master_doc = "index"
 root_doc = "index"
 
 # Only the curated pages are part of the rendered tree; the many internal logs /
-# plans under docs/ stay browsable in the repo but out of the published nav.
-exclude_patterns = ["_build", "archive/**", "planning/**", "research/**", "issues/**"]
+# plans / audits under docs/ (now collected in ``md_files/``) stay browsable in
+# the repo but out of the published nav.
+exclude_patterns = [
+    "_build",
+    "archive/**",
+    "planning/**",
+    "research/**",
+    "issues/**",
+    "md_files/**",  # internal dev notes / logs / audits
+    "specs/**",  # full LaTeX-style spec, linked explicitly from pages
+    "forcing/**",
+    "scaling/**",
+    "ocean_experiments/**",
+    "ocean_fidelity/**",
+    "ocean_long_runs/**",
+]
 
-myst_enable_extensions = ["colon_fence", "deflist"]
+myst_enable_extensions = ["colon_fence", "deflist", "fieldlist"]
+
+# MyST: don't choke on the many bare cross-page anchors in curated pages.
+myst_heading_anchors = 3
+suppress_warnings = ["myst.header", "myst.xref_missing", "toc.not_readable"]
 
 html_theme = "furo"
 html_title = "legoESM"
+html_theme_options = {
+    "source_repository": "https://github.com/gentine/legoESM",
+    "source_branch": "main",
+    "source_directory": "docs/",
+}

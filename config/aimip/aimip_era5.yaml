@@ -1,6 +1,6 @@
 # AIMIP shared base configuration.
 #
-# Loaded by ``scripts/run_aimip.py``.  Variant overlays under this
+# Loaded by ``scripts/run/run_aimip.py``.  Variant overlays under this
 # directory are merged on top of this base (dict-merge — overlay keys
 # replace base keys).  See ``config/aimip/variant_*.yaml`` and
 # ``config/aimip/aimip_suite.yaml``.

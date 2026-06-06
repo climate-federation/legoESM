@@ -113,3 +113,6 @@ _probe_*.py
 # Local OMIP/NEMO scratch: per-clone sbatch harnesses + job .out logs at repo
 # root (the tracked copies live under scripts/cluster/omip_nemo/). Never commit.
 /omip_nemo/
+
+# Sphinx documentation build output
+docs/_build/

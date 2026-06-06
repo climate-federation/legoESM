@@ -39,6 +39,10 @@ import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
+from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import les_record  # noqa: E402
 
 _KAPPA = constants.kappa_von_karman
 
@@ -47,7 +51,8 @@ def build(args, dtype):
     cfg = sl.SpectralLESConfig(
         nx=args.nx, ny=args.ny, nz=args.nz, Lx=args.Lx, Ly=args.Ly, Lz=args.Lz,
         z0=args.z0, c_s=args.cs, wall_damping=True, dealias=True,
-        smagorinsky_dynamic=args.dynamic)
+        smagorinsky_dynamic=args.dynamic, nu_floor=args.nu_floor,
+        sgs_model=args.sgs_model, time_scheme=args.time_scheme)
     g = sl.make_grid(cfg, dtype=dtype)
     # Log-law mean IC (shear from t=0) + divergence-free small perturbations.
     z = g.z_c
@@ -96,8 +101,28 @@ def main():
     p.add_argument("--f32", action="store_true")
     p.add_argument("--dynamic", action="store_true", help="Bou-Zeid LASD scale-dependent dynamic C_s(x,y,z)")
     p.add_argument("--ic-amp", type=float, default=0.05, help="IC perturbation as fraction of bulk wind")
+    p.add_argument("--nu-floor", type=float, default=0.0,
+                   help="background eddy-viscosity floor [m²/s] — damps residual "
+                        "high-k energy in the quiescent layer above the BL where "
+                        "the Smagorinsky ν_t vanishes.")
     p.add_argument("--tau-bulk", type=float, default=100.0, help="bulk-relax timescale [s]")
+    p.add_argument("--sgs-model", choices=["smagorinsky", "vreman"],
+                   default="smagorinsky", help="static SGS closure (ignored if --dynamic)")
+    p.add_argument("--time-scheme", choices=["rk3", "ab2"], default="rk3")
+    p.add_argument("--adaptive-dt", action="store_true",
+                   help="CFL-adaptive dt (recomputed every --dt-recompute steps)")
+    p.add_argument("--cfl", type=float, default=1.0, help="advective CFL target (RK3 stable ~1.4)")
+    p.add_argument("--dt-max", type=float, default=2.0, help="cap on the adaptive dt [s]")
+    p.add_argument("--max-wind", type=float, default=20.0,
+                   help="conservative max resolved speed [m/s] for the static-CFL dt")
+    p.add_argument("--dt-recompute", type=int, default=25,
+                   help="steps between adaptive-dt recomputations")
     p.add_argument("--print-every", type=int, default=1000)
+    p.add_argument("--record-frames", type=int, default=20,
+                   help="evenly-spaced frames (snapshots + profiles) for the "
+                        "publication diagnostics; 0 disables.")
+    p.add_argument("--case-label", type=str, default="ekman",
+                   help="case name stored in the frames (plot title).")
     p.add_argument("--output", type=Path, default=Path("results/spectral_neutral"))
     args = p.parse_args()
     dtype = jnp.float32 if args.f32 else jnp.float64
@@ -140,35 +165,75 @@ def main():
     gain = 1.0 / args.tau_bulk
 
     @partial(jax.jit, static_argnames=("first",))
-    def step(state, fx, first=False):
-        state, us = sl.step(state, g=g, dt=args.dt, u_geo=(0.0, 0.0),
+    def step(state, fx, dt, first=False):
+        state, us = sl.step(state, g=g, dt=dt, u_geo=(0.0, 0.0),
                             f_cor=0.0, first=first, force=(fx, 0.0))
+        rc = (dt / tau_sp) * spc                            # sponge from the live dt
+        rf = (dt / tau_sp) * spf
         u, v, w = state.u, state.v, state.w
         u = u - rc * (u - u.mean((0, 1), keepdims=True))   # sponge: damp fluctuations
         v = v - rc * (v - v.mean((0, 1), keepdims=True))
         w = w - rf * w                                       # sponge: damp w toward 0
         fx = fx + gain * (u_bulk_target - jnp.mean(u))      # slow integral control
         return state._replace(u=u, v=v, w=w), fx, us
-    nsteps = int(args.hours * 3600.0 / args.dt)
     tau = args.Lz / args.ustar                              # eddy turnover [s]
     print(f"[spectral-LES neutral] {args.nx}x{args.ny}x{args.nz} "
-          f"L=({args.Lx},{args.Ly},{args.Lz}) m  u*_tar={args.ustar}  dt={args.dt}s "
-          f"steps={nsteps}  turnover~{tau:.0f}s  dtype={dtype.__name__}")
+          f"L=({args.Lx},{args.Ly},{args.Lz}) m  u*_tar={args.ustar}  "
+          f"{args.time_scheme} sgs={'LASD' if args.dynamic else args.sgs_model}  "
+          f"dt={'adaptive cfl='+str(args.cfl) if args.adaptive_dt else args.dt}  "
+          f"turnover~{tau:.0f}s  dtype={dtype.__name__}")
+    rec = args.record_frames > 0
+    zc_np = np.asarray(g.z_c)
+    theta_const = np.full((args.ny, args.nx, args.nz), 290.0, np.float32)
+    if rec:
+        h_idx, h_z = les_record.select_heights(zc_np, args.Lz)
+        frame = 0
+
+        def _save(t_hours):
+            nonlocal frame
+            les_record.record_frame(
+                args.output, frame, t_hours, args.case_label, zc_np,
+                np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
+                theta_const, args.Lx, args.Ly, h_idx, h_z, args.z0)
+            frame += 1
+        print(f"  recording {args.record_frames} frames; heights[m]={np.round(h_z,1)}")
+
     fx = fx0
-    st, fx, us = step(st, fx, first=True)
+    # STATIC trace-time CFL dt (reuses timestepping.split_explicit.select_dt): a
+    # compile-time-constant float from a conservative max wind, NOT a per-step
+    # re-pin — keeps the step scan-friendly / reverse-differentiable (see
+    # select_n_outer_split's --adaptive-dt discussion).
+    dt0 = (select_dt(g.dx, max_wind_safe=args.max_wind, cfl_safe=args.cfl,
+                     dt_cap=args.dt_max) if args.adaptive_dt else float(args.dt))
+    dt = jnp.asarray(dt0, dtype)
+    T = args.hours * 3600.0
+    print(f"  dt={dt0:.3f}s ({'static-CFL' if args.adaptive_dt else 'fixed'})")
+    st, fx, us = step(st, fx, dt, first=True)
+    if rec:
+        _save(0.0)
+    t = float(dt); i = 1
+    next_rec = T / args.record_frames if rec else jnp.inf
+    blk = max(1, args.dt_recompute)
     t0 = time.time()
-    for i in range(1, nsteps + 1):
-        st, fx, us = step(st, fx, first=False)
-        if i % args.print_every == 0:
-            wc = sl.f2c(st.w)
-            wv = float(jnp.mean(wc ** 2)); mw = float(jnp.max(jnp.abs(st.w)))
+    while t < T:
+        dth = float(dt)
+        for _ in range(blk):
+            st, fx, us = step(st, fx, dt, first=False)
+        t += blk * dth; i += blk
+        mw = float(jnp.max(jnp.abs(st.w)))
+        if not np.isfinite(mw) or mw > 1e3:
+            print(f"[BLOWUP] step {i} t={t:.0f}s max|w|={mw}"); return 1
+        if rec and t >= next_rec and frame < args.record_frames:
+            _save(t / 3600.0); next_rec += T / args.record_frames
+        if (i // blk) % max(1, args.print_every // blk) == 0:
+            wc = sl.f2c(st.w); wv = float(jnp.mean(wc ** 2))
             spd = float(jnp.mean(jnp.sqrt(st.u ** 2 + st.v ** 2)))
-            if not np.isfinite(mw) or mw > 1e3:
-                print(f"[BLOWUP] step {i} max|w|={mw}"); return 1
-            print(f"{i:7d} {i*args.dt:8.0f}s  max|w|={mw:6.3f}  wvar={wv:7.4f}  "
-                  f"u*={float(us):.3f}  <spd>={spd:5.2f}")
+            print(f"{i:7d} {t:8.0f}s dt={dth:.3f} max|w|={mw:6.3f} wvar={wv:7.4f} "
+                  f"u*={float(us):.3f} <spd>={spd:5.2f}")
     wall = time.time() - t0
-    print(f"[DONE] wall={wall:.1f}s  {nsteps/wall:.1f} steps/s")
+    if rec and frame < args.record_frames:
+        _save(t / 3600.0)
+    print(f"[DONE] wall={wall:.1f}s  {i/wall:.1f} steps/s  ({i} steps, t={t:.0f}s)")
     um, vm, uu, vv, ww, uw, vw = profiles(st, g)
     u_star_res = float((uw[0] ** 2 + vw[0] ** 2) ** 0.25)   # RESOLVED stress only
     u_star = float(us)   # TOTAL surface stress (wall model = resolved+SGS) — the
