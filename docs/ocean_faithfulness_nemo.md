@@ -129,6 +129,17 @@ The lat-lon path's `pgf_scheme="smc03"` is the reference. Large multi-iteration 
 ALL pragmatic levers exhausted (RK3 worse, viscosity/hyperdiff/div-damp no-effect, smoothing
 worse, flat no-effect, marginal-mask cascades). This is the cube's sole remaining gate.
 
+## UNIFYING INSIGHT (iter-34): faithful free CORE-II cold-start needs ~¼° + full stack
+Proven across grids: 1° tripole FAILED (config-exhausted) → eORCA025 ¼° SUCCEEDED;
+latlon 1° succeeded ONLY with the full conditioning stack (partial cells + smc03 PGF +
+balanced-init + RK3 + smag-cfl-cap + polar filter). The remaining 3 grids run at COARSE
+defaults — cube C32 (~2.8°), **mpas ico3 (~900 km, even coarser)**, **spectral T21** — and
+the WOA density fronts there imply geostrophic jets the coarse grid can't carry → cold-start
+blowup, regardless of integrator/viscosity/IC. **So cube/mpas/spectral each need BOTH ¼°-ish
+resolution AND their dynamical core's full conditioning stack ported** — a major, expensive,
+per-grid undertaking comparable to the original tripole ¼° effort. This is the true remaining
+scope; not a quick fix. 2/5 grids (tripole, latlon) are genuinely faithful TODAY.
+
 ## Open work toward DONE
 1. **cubed_sphere cold-start** — the gate above (port conditioning stack / marginal-sea+equator handling).
 2. **mpas** — #160 full-PV TRiSK refactor (remove the relative-only-PV + separate-Matsuno split
