@@ -18,7 +18,11 @@ from legoesm.driver.config import (
 )
 from legoesm.forcing.amip_config import (
     AMIPExperimentConfig,
+)
+from legoesm.forcing.amip_config import (
     config_from_dict as amip_config_from_dict,
+)
+from legoesm.forcing.amip_config import (
     config_to_dict as amip_config_to_dict,
 )
 
@@ -59,6 +63,40 @@ class TestExperimentConfigJSON:
             save_experiment_config(cfg, path)
             restored = load_experiment_config(path)
         assert cfg == restored
+
+
+class TestCheckpointConfigAutodetect:
+    """forcing.amip_config.config_from_dict must round-trip an ExperimentConfig.
+
+    Regression: an NPZ checkpoint saved from an ExperimentConfig used to load back
+    through the flat AMIP deserializer, silently dropping every non-AMIP field
+    (including the Stage-A1 master RNG ``seed``).
+    """
+
+    def test_experiment_config_seed_survives_checkpoint_serializer(self):
+        from legoesm.forcing.amip_config import (
+            config_from_dict as ckpt_from_dict,
+        )
+        from legoesm.forcing.amip_config import (
+            config_to_dict as ckpt_to_dict,
+        )
+
+        cfg = ExperimentConfig(
+            grid=GridConfig(resolution=48, nlev=40),
+            dycore=DycoreConfig(dt=300.0),
+            seed=12345,
+        )
+        restored = ckpt_from_dict(ckpt_to_dict(cfg))
+        assert isinstance(restored, ExperimentConfig)
+        assert restored.seed == 12345
+        assert restored == cfg
+
+    def test_flat_amip_dict_still_loads_as_amip(self):
+        from legoesm.forcing.amip_config import config_from_dict as ckpt_from_dict
+
+        restored = ckpt_from_dict({"resolution": 24, "nlev": 20, "days": 100})
+        assert isinstance(restored, AMIPExperimentConfig)
+        assert restored.resolution == 24
 
 
 class TestAMIPConversion:

@@ -1,0 +1,169 @@
+# legoESM testing & experiment strategy
+
+One shared, complexity-tiered strategy across every component (atmosphere, ocean,
+land, sea-ice, coupler), with pass/fail energy & mass conservation gates, machine
+profiles, and full reproducibility. This is the contract a new component plugs
+into; it is designed to expand without re-deriving plumbing.
+
+## The tier ladder (the cross-component contract)
+
+One taxonomy, used by **both** the pytest markers and the test-matrix framework,
+derived from the existing physical-complexity axis
+(`legoesm.components.complexity.ModelComplexity`) and grid-extent axis
+(`legoesm.grids.capability.EXTENTS`):
+
+| Tier | Name | Complexity / extent | Examples | Data | Conservation gate |
+|---|---|---|---|---|---|
+| **0** | unit | kernels/operators | ops, halo, PPM, EOS, thermo | none | numerical invariants |
+| **1** | research | idealized; column / shallow-water | dry dycore, SCM, Williamson, Galewsky | none | mass + energy + AAM, analytic-benchmark error |
+| **2** | intermediate | hydrostatic 3D + slab | Held-Suarez, baroclinic wave, aquaplanet, RCEMIP | synthetic | mass + energy + moisture |
+| **3** | operational | full complexity + real forcing | AMIP, OMIP, ERA5 ingest | required | full budget closure + reproducibility |
+
+Research → operational. tier ↔ template category: tier1 ↔ `1d/`,`2d/`; tier1–2 ↔
+`3d_idealized/`; tier3 ↔ `global_ocean/`,`coupled/`.
+
+## 1. pytest tiers
+
+Markers `tier0`..`tier3` (registered in `pyproject.toml`) are **opt-in
+selectors**. The default `addopts` stays `-m 'not slow'` (it does *not* tier-gate,
+so untagged tests still run). Run a rung explicitly:
+
+```bash
+.venv/bin/python -m pytest -m "tier1 and not slow"          # fast research ladder
+JAX_ENABLE_X64=1 .venv/bin/python -m pytest -m tier2        # intermediate (slow)
+```
+
+Tag a test by module: `pytestmark = pytest.mark.tier1`. The shared conservation
+gates are exposed to any pytest test via the `conservation_gate` fixture, so a
+test asserts PASS/FAIL with the *same* gates the matrix runners use:
+
+```python
+def test_mass_conserved(conservation_gate):
+    ok, notes = conservation_gate.mass_gate(True, "", mass_series, component="atmosphere")
+    assert ok, notes
+```
+
+## 2. The test-matrix framework — `legoesm.experiments.matrix`
+
+The single, component-agnostic home for the tier taxonomy, case/result types,
+conservation gates, summary reporting, and the `MatrixRunner` base. It imports
+only stdlib/numpy/`legoesm.diagnostics` — never a component — so it stays on the
+`legoesm-tools` side of the federation DAG. The per-component runners in
+`scripts/matrix/` import their component and subclass `MatrixRunner`.
+
+**Plug in a component** — declare cases, run one case, chain gates:
+
+```python
+from legoesm.experiments.matrix import MatrixRunner, MatrixCase, RunStatus, mass_gate, energy_gate
+
+class OceanMatrix(MatrixRunner):
+    component = "ocean"
+    def build_cases(self):
+        return [MatrixCase("ocean", "rest_state", "cubed_sphere", tier=1,
+                           complexity="full_3d", resolution="C24", duration_days=5)]
+    def run_case(self, case, *, quick, output_dir):
+        # integrate; compute conservation series via legoesm.diagnostics
+        ok, notes = True, ""
+        ok, notes = mass_gate(ok, notes, volume_series, component="ocean")
+        ok, notes = energy_gate(ok, notes, heat_series, component="ocean")  # routes to heat_rel_drift
+        return (RunStatus.PASS if ok else RunStatus.FAIL), notes, {}
+
+if __name__ == "__main__":
+    raise SystemExit(OceanMatrix().main())   # --tier/--grid/--only/--quick/--list/--allow-empty
+```
+
+`main()` filters, runs, records PASS/FAIL/ERROR/SKIP, writes
+`results/<component>/{summary.json,summary.txt,summary.md}`, detects PASS→FAIL
+regressions vs the prior summary, and **exits non-zero** on any FAIL/ERROR/empty
+selection (so CI gates on it directly).
+
+**Conservation gates** (`legoesm.experiments.matrix.gates`) all wrap the single
+centralized drift convention in `legoesm.diagnostics.conservation_drift`
+(`compute_relative_drift` + `apply_drift_tolerance`), with per-component
+tolerances in one `CONS_THRESH`:
+
+- `mass_gate` (ocean/sea-ice → volume), `energy_gate` (ocean → heat content),
+  `moisture_gate`, `aam_gate`, `heat_gate`, `salt_gate`
+- `benchmark_error_gate` (analytic L2/Linf), `finite_gate` (NaN/Inf crash check)
+
+Feed them the *scalar timeseries* you compute from
+`diagnostics.compute_total_energy_{nh,pe}` / `column_water_vapor` /
+`compute_atmospheric_angular_momentum`.
+
+## 3. The dycore regression suite
+
+`tests/atmosphere/dycore/regression/` holds 57 curated FV3/cubed-sphere
+regression sentinels (one per locked numerical invariant — total energy, mass,
+AAM, div-damp, cube-imprint, PPM limiter, halo, A2B, DCMIP, Williamson
+production), tier1, four marked `slow`. See its `MANIFEST.md` for the kept→invariant
+map and the coverage delta. The non-curated remainder is archived (recoverable)
+under `scripts/tmp/dycore_iter_archive/`.
+
+```bash
+JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/atmosphere/dycore/regression/ -m tier1 -o addopts=""
+```
+
+## 4. The experiment harness — templates, machines, reproducibility
+
+Layered on legoESM's **existing** reproducibility core (do not reinvent it):
+`legoesm run <config.yaml>` writes `run_manifest.json` (resolved config +
+`state_digest` + `git_hash` + jax/numpy versions + platform), and `legoesm
+reproduce <manifest> --check` does a **bit-identical** re-run. That manifest is a
+superset of the lesommer `experiment.tag`.
+
+The harness adds the *intent/ergonomics* layer:
+
+- **`config/templates/<category>/<name>.yaml`** — versioned `legoesm run` configs
+  with an `experiment:` block (tier / complexity / extent / maturity / description
+  / data / conservation_gates). `config/templates/README.md` lists them; the
+  canonical run-status table is `project_status.md`.
+- **`config/machines/*.yaml`** — per-host profiles (scheduler, `jax_platforms`,
+  precision, venv, data_root, slurm). `lego_detect_machine.py` resolves by hostname.
+- **`scripts/experiment/init_experiment.py <category/name> --name N --output-dir D
+  [-o dot.key=val ...]`** — resolves template + overrides + machine → a
+  self-contained dir (`config.yaml` runnable, `run.sh` launcher, `run.yaml`
+  intent). Strict-validates *before* writing (bad override fails fast).
+- **`scripts/experiment/validate_templates.py [--write-status]`** — loads every
+  template through the same `Config.from_yaml(...).to_experiment_config().validate_strict()`
+  path `legoesm run` uses; regenerates `project_status.md`.
+- **`scripts/experiment/fetch_data.py check|fetch <template>`** — resolves a
+  template's `experiment.data` against `config/data_catalog.yaml` + the machine
+  `data_root`; idealized templates need nothing.
+
+**Workflow:**
+
+```bash
+# idealized (no data)
+python scripts/experiment/fetch_data.py check 2d/williamson2_sw
+python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2 --output-dir ./runs/w2
+cd ./runs/w2 && bash run.sh
+
+# higher resolution + longer
+python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2hi --output-dir ./runs/w2hi \
+    -o grid.resolution=96 -o time.duration_hours=240
+
+# operational (needs data)
+python scripts/experiment/fetch_data.py fetch coupled/amip
+python scripts/experiment/init_experiment.py coupled/amip --name amip1 --output-dir ./runs/amip1
+
+# reproduce any past run from its manifest
+legoesm reproduce ./runs/w2/<output>/run_manifest.json --check
+```
+
+## Adding a component / case / template
+
+1. **New matrix cases** → add `MatrixCase`s to your `scripts/matrix/<component>` runner
+   and chain the relevant gates in `run_case`. No framework changes.
+2. **New pytest tier** → tag with `pytestmark = pytest.mark.tierN`; use the
+   `conservation_gate` fixture for pass/fail.
+3. **New template** → drop a YAML under `config/templates/<category>/` with an
+   `experiment:` block; run `validate_templates.py --write-status`.
+4. **New machine** → add `config/machines/<name>.yaml` with `hostnames` patterns.
+5. **New dataset** → add it to `config/data_catalog.yaml`.
+
+## Conventions
+
+- CPU only on Apple Silicon (`JAX_PLATFORMS=cpu`; the Metal backend is broken).
+- `JAX_ENABLE_X64=1` for scientific/conservation tests unless explicitly fp32/Metal.
+- Passing norms are necessary but **not sufficient** for cubed-sphere/halo/diffusion
+  changes — visually inspect W2 v-wind / W5 wind-speed PNGs (see CLAUDE.md).

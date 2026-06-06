@@ -1,4 +1,4 @@
-"""Regression tests for ``scripts/run_atmosphere_test_matrix.py`` family filter.
+"""Regression tests for ``scripts/matrix/run_atmosphere_test_matrix.py`` family filter.
 
 The filter previously combined an alias-to-equation-set table with a
 single ``family`` field on ``TestCase``, which meant ``--family
@@ -19,7 +19,7 @@ import pytest
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_MATRIX_PATH = _REPO_ROOT / "scripts" / "run_atmosphere_test_matrix.py"
+_MATRIX_PATH = _REPO_ROOT / "scripts" / "matrix" / "run_atmosphere_test_matrix.py"
 
 
 @pytest.fixture(scope="module")

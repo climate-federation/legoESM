@@ -13,7 +13,10 @@ from legoesm.atmosphere.idealized.held_suarez_topo import (
     held_suarez_topo_init_mpas,
     held_suarez_topo_init_spectral,
 )
-from legoesm.atmosphere.held_suarez import held_suarez_forcing
+from legoesm.atmosphere.held_suarez import (
+    held_suarez_forcing,
+    held_suarez_forcing_mpas,
+)
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.gaussian import create_gaussian_grid
 from legoesm.grids.latlon import create_latlon_grid
@@ -66,6 +69,39 @@ def test_topo_init_mpas(sigma):
     state = held_suarez_topo_init_mpas(mesh, sigma, h_0=2000.0)
     assert state.T.data.shape == (mesh.nCells, 8)
     assert bool(jnp.all(jnp.isfinite(state.T.data)))
+
+
+def test_forcing_mpas_accepts_physics_fn_kwargs(sigma):
+    """held_suarez_forcing_mpas must satisfy the MPAS hydrostatic dycore's
+    operator-split physics_fn calling convention.
+
+    Regression: ``primitive_eq_mpas`` calls its physics_fn as
+    ``physics_fn(state, mesh, sigma_coord, *, phys_state=..., forcing=...)``
+    (operator-split prognostic-physics carry).  ``held_suarez_forcing_mpas``
+    lacked those kwargs, so the icosahedral held_suarez / held_suarez_topo /
+    amip atmosphere-matrix cases errored at step 0 with
+    ``held_suarez_forcing_mpas() got an unexpected keyword argument
+    'phys_state'``.  HS is a stateless Newtonian relaxation, so the kwargs are
+    accepted and ignored and the bare-tendencies return leaves the dycore's
+    phys_state carry untouched.
+    """
+    mesh = create_voronoi_mesh(4)
+    state = held_suarez_topo_init_mpas(mesh, sigma, h_0=2000.0)
+
+    # Operator-split physics_fn convention: kwargs accepted.
+    tend = held_suarez_forcing_mpas(
+        state, mesh, sigma, phys_state=None, forcing=None)
+    for field in (tend.du_dt.data, tend.dT_dt.data, tend.dp_s_dt.data):
+        assert bool(jnp.all(jnp.isfinite(field)))
+    # Newtonian relaxation off the equilibrium profile is non-trivial.
+    assert float(jnp.max(jnp.abs(tend.dT_dt.data))) > 0.0
+
+    # The bare positional call (driver path) must still work and be identical:
+    # phys_state / forcing are inert for stateless HS.
+    tend_bare = held_suarez_forcing_mpas(state, mesh, sigma)
+    assert bool(jnp.allclose(tend.dT_dt.data, tend_bare.dT_dt.data))
+    assert bool(jnp.allclose(tend.du_dt.data, tend_bare.du_dt.data))
+    assert bool(jnp.allclose(tend.dp_s_dt.data, tend_bare.dp_s_dt.data))
 
 
 def test_topo_init_spectral(sigma):

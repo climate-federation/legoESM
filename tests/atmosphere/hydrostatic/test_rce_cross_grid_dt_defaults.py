@@ -1,4 +1,4 @@
-"""Pin the auto-dt heuristic used by ``scripts/run_rce.py``.
+"""Pin the auto-dt heuristic used by ``scripts/run/run_rce.py``.
 
 iter-24: now imports ``legoesm.driver.rce_dt.auto_dt_rce`` directly
 instead of hand-copying the production logic into a test mirror
@@ -94,7 +94,7 @@ def test_auto_dt_rce_lies_inside_cfl_envelope():
 
     Latlon is also excluded: ``auto_dt_rce`` returns the un-clamped
     ladder value, but ``run_rce.py`` runs a SECOND pole-cell-CFL
-    clamp afterwards (see scripts/run_rce.py:229-235) that drops
+    clamp afterwards (see scripts/run/run_rce.py:229-235) that drops
     the effective dt below the latlon CFL formula. Measuring the
     auto-dt ladder against the formula directly is therefore not
     meaningful for latlon — the effective dt is the clamped value.
@@ -123,7 +123,7 @@ def test_auto_dt_rce_lies_inside_cfl_envelope():
 
 def test_print_rce_auto_dt_table_script_runs():
     """Smoke: the iter-31 diagnostic table script
-    (scripts/print_rce_auto_dt_table.py) must run cleanly and print
+    (scripts/validate/print_rce_auto_dt_table.py) must run cleanly and print
     rows for every cubed_sphere row in the parametrise above.
 
     Lightweight — no JAX dycore, no run_rce.py invocation. Catches
@@ -133,7 +133,7 @@ def test_print_rce_auto_dt_table_script_runs():
     import subprocess
     import sys
     from pathlib import Path
-    script = Path(__file__).resolve().parents[3] / "scripts" / "print_rce_auto_dt_table.py"
+    script = Path(__file__).resolve().parents[3] / "scripts" / "validate" / "print_rce_auto_dt_table.py"
     result = subprocess.run(
         [sys.executable, str(script)],
         capture_output=True, text=True, timeout=30,

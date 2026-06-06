@@ -3,7 +3,7 @@ primitives in :mod:`legoesm.parallel.latlon_mpi`.
 
 The MPI-level counterpart lives in
 ``tests/distributed/test_latlon_mpi_checkpoint.py`` and is exercised
-under ``mpirun -n {2,4}`` by ``scripts/run_latlon_mpi_halo_smoke.sbatch``.
+under ``mpirun -n {2,4}`` by ``scripts/run/run_latlon_mpi_halo_smoke.sbatch``.
 
 Why serial tests for an MPI helper
 ----------------------------------

@@ -70,13 +70,18 @@ class _MockModel:
         return state._replace(T=state.T.replace(data=state.T.data + self._inc * dt / 86400.0))
 
 
-def _mock_step_unified(need_rad, T, p_s, q_v, q_c, q_r, u, v,
+def _mock_step_unified(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
                        sst, sic, lat, lon, doy, sod, dt, sw, s0, o3, aer,
                        h_dT, h_sw_sfc, h_lw_sfc, h_sw_toa, h_lw_toa, h_sw_dtoa,
                        **kw):
     tau = kw.get("tau_equator", jnp.float32(7.2))
     kwargs = _zero_physics_output(T, p_s)
     kwargs["dT_dt"] = jnp.full(T.shape, 1e-5) * tau / 7.2
+    # Inert convection: carry the conv_prog prognostic through unchanged so the
+    # scan carry's conv_prog (shape (6*N*N,)) keeps a consistent type — the
+    # scalar zero from _zero_physics_output would break scan's type invariant.
+    if "conv_prog" in PhysicsOutput._fields:
+        kwargs["conv_prog"] = conv_prog
     phys = PhysicsOutput(**kwargs)
     held = (h_dT, h_sw_sfc, h_lw_sfc, h_sw_toa, h_lw_toa, h_sw_dtoa)
     return phys, held

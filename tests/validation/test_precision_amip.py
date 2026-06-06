@@ -22,6 +22,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.tier3  # operational: fp64 AMIP precision validation
+
 from legoesm.core.precision import (
     PrecisionPolicy,
     get_module_overrides,

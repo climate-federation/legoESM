@@ -271,7 +271,7 @@ class TestBuildPaddedGrid:
     implementation used ``mode='edge'`` to pad ``lat``, producing
     duplicate values at the halo and ``A_vertex = 0`` inside
     ``curl_vertex_cgrid`` (diagnosed by
-    ``scripts/_diag_mpi_step_nans.py``).  The fix uses linear
+    ``scripts/tmp/_diag_mpi_step_nans.py``).  The fix uses linear
     extrapolation by ``dlat``.
     """
 

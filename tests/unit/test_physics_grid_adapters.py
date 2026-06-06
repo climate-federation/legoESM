@@ -20,7 +20,7 @@ import numpy.testing as npt
 import pytest
 
 from legoesm import constants
-from legoesm.driver.grid_adapters import (
+from legoesm.core.grid_adapters import (
     ColumnAdapter,
     SingleColumnGrid,
     make_adapter,

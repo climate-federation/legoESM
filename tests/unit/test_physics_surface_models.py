@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.core.field import Field
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 
 
 def make_forcing(shape, **overrides):
@@ -158,11 +158,14 @@ class TestSeaIcePhysics:
             state, cold_forcing, cold_sst, self.zeros, self.zeros,
             self.config, U_min=1.0, dt=86400.0,  # 1 day
         )
-        # Ice should grow or stay the same
-        mean_h_before = float(jnp.mean(state.h_ice.data))
-        mean_h_after = float(jnp.mean(state2.h_ice.data))
-        assert mean_h_after >= mean_h_before - 0.01, (
-            f"Ice shrank in cold conditions: {mean_h_before:.3f} -> {mean_h_after:.3f}"
+        # Ice VOLUME (h*conc) should grow or stay the same.  Under the
+        # volume-based V=h*A update (#28) the MEAN thickness h can drop as the
+        # refreezing lead averages in thin new ice, so assert on the conserved
+        # volume rather than the (misleading) mean thickness.
+        vol_before = float(jnp.mean(state.h_ice.data * state.concentration.data))
+        vol_after = float(jnp.mean(state2.h_ice.data * state2.concentration.data))
+        assert vol_after >= vol_before - 0.01, (
+            f"Ice volume shrank in cold conditions: {vol_before:.3f} -> {vol_after:.3f}"
         )
 
     def test_all_outputs_finite(self):

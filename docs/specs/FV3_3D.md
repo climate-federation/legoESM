@@ -70,7 +70,7 @@ Both compatible with the clip-helper stack:
   (iter-539).
 - Performance: +0.6% overhead vs raw jit (iter-541).
 
-See ``scripts/example_fv3_clip_helper.py`` for a runnable
+See ``scripts/run/example_fv3_clip_helper.py`` for a runnable
 end-to-end demo.
 
 ## FV3-fidelity stack (iter 356/423 update)
@@ -1512,7 +1512,7 @@ Key iterations:
     DIFFERENT goals — min_edge minimizes TOTAL noise;
     aggressive minimizes RATIO.  Both valid.
   - iter 535: example script
-    ``scripts/example_fv3_clip_helper.py`` showing end-to-
+    ``scripts/run/example_fv3_clip_helper.py`` showing end-to-
     end API.  Reproduces iter-521 values within 5%.
   - iter 536: slack sweep at C16 SBR.  slack=0.0 marginally
     best (0.7% better than slack=0.5 default).  All within
@@ -2069,7 +2069,7 @@ For users at C96 PRODUCTION (30-day climatology):
 
 
 iter 65 EMPIRICALLY tested C96 stability via
-``scripts/_iter65_c96_smoke.py``.  Findings overrode the iter-63
+``scripts/tmp/_iter65_c96_smoke.py``.  Findings overrode the iter-63
 guidance:
 
 **The matrix default ``dt=200.0`` is the limiting factor at C96, NOT
@@ -2105,7 +2105,7 @@ Recommended C96+ recipe:
 3. **Run the smoke test first**::
 
        JAX_ENABLE_X64=1 ITER65_DT=150.0 ITER65_DAYS=1.0 \
-         .venv/bin/python scripts/_iter65_c96_smoke.py
+         .venv/bin/python scripts/tmp/_iter65_c96_smoke.py
 
    Confirms stability before committing to a 30-day run.
 
@@ -2173,17 +2173,17 @@ Or via env vars (matrix sets ``A_h`` from ``LEGOESM_AH_SCALE``)::
 
     # C36 (iter 18-24, no auto needed since scale=1)
     LEGOESM_CDD_D2BG=0.0005 LEGOESM_CDD_D4BG=0.02 LEGOESM_CDD_NORD=1 \
-      python scripts/run_atmosphere_test_matrix.py --grid cubed_sphere
+      python scripts/matrix/run_atmosphere_test_matrix.py --grid cubed_sphere
 
     # C48
     LEGOESM_CDD_D2BG=0.0005 LEGOESM_CDD_D4BG=0.02 LEGOESM_CDD_NORD=1 \
     LEGOESM_AH_SCALE=2.0 \
-      python scripts/run_atmosphere_test_matrix.py --grid cubed_sphere
+      python scripts/matrix/run_atmosphere_test_matrix.py --grid cubed_sphere
 
     # C72
     LEGOESM_CDD_D2BG=0.0005 LEGOESM_CDD_D4BG=0.02 LEGOESM_CDD_NORD=1 \
     LEGOESM_AH_SCALE=10.0 \
-      python scripts/run_atmosphere_test_matrix.py --grid cubed_sphere
+      python scripts/matrix/run_atmosphere_test_matrix.py --grid cubed_sphere
 
 ### What this delivers (HS hybrid 30 day)
 

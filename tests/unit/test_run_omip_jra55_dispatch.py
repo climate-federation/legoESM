@@ -1,4 +1,4 @@
-"""Tests for the tropical-OMIP dispatch in ``scripts/run_omip.py``
+"""Tests for the tropical-OMIP dispatch in ``scripts/run/run_omip.py``
 (Item 4 Day 2).
 
 Exercises the JRA55-do forcing path:
@@ -32,7 +32,7 @@ zarr = pytest.importorskip("zarr")
 
 # Load run_omip.py as a module by file path (it lives in scripts/, not
 # under the importable package).
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "run_omip.py"
+_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "run" / "run_omip.py"
 _spec = importlib.util.spec_from_file_location("run_omip", _SCRIPT)
 run_omip = importlib.util.module_from_spec(_spec)
 sys.modules["run_omip"] = run_omip

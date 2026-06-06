@@ -478,7 +478,7 @@ exchange change.
 
 ## 8. Validation matrix and CI
 
-- Add a `cubed_sphere_cgrid` row to `scripts/run_ocean_test_matrix.py`
+- Add a `cubed_sphere_cgrid` row to `scripts/matrix/run_ocean_test_matrix.py`
   and `scripts/run_ocean_all_grids_matrix.py`.
 - Unit tests under `tests/ocean/unit/` for: edge-mask helper, metric
   continuity (§6.1), edge-parity velocity halo (§6.4), corner-cell

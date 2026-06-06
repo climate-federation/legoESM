@@ -66,3 +66,19 @@ def constant_state(small_grid) -> ShallowWaterState:
         v=Field(data=jnp.zeros(shape), name="v", dims=("face", "x", "y"), units="m/s"),
         h_s=Field(data=jnp.zeros(shape), name="h_s", dims=("face", "x", "y"), units="m"),
     )
+
+
+@pytest.fixture
+def conservation_gate():
+    """The shared matrix conservation gates, so pytest tests assert PASS/FAIL
+    with the SAME gates the test-matrix runners use (one source of truth).
+
+    Returns the ``legoesm.experiments.matrix.gates`` module:
+
+        def test_mass_conserved(conservation_gate):
+            ok, notes = conservation_gate.mass_gate(
+                True, "", mass_series, component="atmosphere")
+            assert ok, notes
+    """
+    from legoesm.experiments.matrix import gates
+    return gates

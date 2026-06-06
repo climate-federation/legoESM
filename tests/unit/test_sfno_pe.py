@@ -432,3 +432,39 @@ class TestDifferentiability:
         assert jnp.all(jnp.isfinite(grads.decoder.weight))
         assert float(jnp.max(jnp.abs(grads.encoder.weight))) > 0.0
         assert float(jnp.max(jnp.abs(grads.decoder.weight))) > 0.0
+
+
+# =============================================================================
+# Normalization config-guard contracts
+# =============================================================================
+
+class TestNormalizationGuards:
+    """Fail-fast guards on the normalization config (mirrors the U-Cast
+    emulator).  Without these, two latent traps fire silently:
+    (1) denormalizing a *tendency* with *state* stats adds the state mean to
+        d/dt; (2) ``use_normalization`` without stats silently skips
+        (de)normalization, so a normalized checkpoint runs on raw channels."""
+
+    def test_normalization_rejected_in_hybrid(self, grid_t8, sigma_coord,
+                                              sfno_config):
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=sfno_config, mode="hybrid_tendencies",
+            use_normalization=True, correct_mass=False,
+        )
+        with pytest.raises(NotImplementedError, match="hybrid_tendencies"):
+            SFNOPrimitiveEquationModel(
+                grid=grid_t8, sigma_coord=sigma_coord, config=config,
+                key=jax.random.PRNGKey(0),
+            )
+
+    def test_normalization_requires_stats(self, grid_t8, sigma_coord,
+                                          sfno_config):
+        config = SFNOPrimitiveEquationConfig(
+            sfno_config=sfno_config, mode="state_update",
+            use_normalization=True, correct_mass=False,
+        )
+        with pytest.raises(ValueError, match="requires norm_stats"):
+            SFNOPrimitiveEquationModel(
+                grid=grid_t8, sigma_coord=sigma_coord, config=config,
+                key=jax.random.PRNGKey(0),
+            )

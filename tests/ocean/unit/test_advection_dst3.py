@@ -21,8 +21,8 @@ class TestSwebyLimiter:
     """Properties of the Sweby (superbee) limiter."""
 
     def _limiter(self):
-        from legoesm.ocean.advection import _sweby_limiter
-        return _sweby_limiter
+        from legoesm.ocean.dynamics._flux_limiters import sweby_limiter
+        return sweby_limiter
 
     def test_zero_at_negative_r(self):
         psi = self._limiter()

@@ -424,21 +424,32 @@ class TestGeometrySlicing:
             np.testing.assert_allclose(
                 band.total_area, tripole_geom.total_area, rtol=0, atol=0)
 
-    def test_fold_active_only_on_north_band(self, tripole_geom):
-        """The sliced band geometry carries an ACTIVE fold ONLY on the rank
-        that owns the north boundary; interior ranks get an inactive fold so
-        serial pad_ns_* don't fabricate a fold at the band's local north edge
-        (codex #353 finding 1)."""
+    def test_fold_active_on_all_ranks_local_only_on_north(self, tripole_geom):
+        """is_tripolar() must be consistent across all ranks (issue #356).
+
+        Under MPI, divergent is_tripolar() results cause different code
+        paths and MPI call counts → MPI_ERR_TRUNCATE.  The fix: fold is
+        ACTIVE on all ranks, with fold_j=-1 as a sentinel on non-
+        northernmost ranks meaning "fold exists but is not local."
+        The _fold_is_local() helper checks fold_j >= 0.
+        """
         n_ranks = 3
         for r in range(n_ranks):
             layout = make_latlon_band_layout(
                 r, n_ranks, N_LAT, N_LON, fold=tripole_geom.fold)
             band = slice_cgrid_geometry_to_band(tripole_geom, layout)
+            assert band.fold.is_active, (
+                f"rank {r}: fold must be active on ALL ranks (issue #356)")
             if layout.north_rank is None:
-                assert band.fold.is_active, f"rank {r} owns north → fold active"
+                assert band.fold.fold_j >= 0, (
+                    f"rank {r} owns north → fold_j must be >= 0")
+                assert band.fold.cap_j >= 0, (
+                    f"rank {r} owns north → cap_j must be >= 0")
             else:
-                assert not band.fold.is_active, (
-                    f"rank {r} is interior → fold MUST be inactive")
+                assert band.fold.fold_j == -1, (
+                    f"rank {r} is interior → fold_j must be -1 sentinel")
+                assert band.fold.cap_j == -1, (
+                    f"rank {r} is interior → cap_j must be -1 sentinel")
 
 
 class TestZcoordSlicing:

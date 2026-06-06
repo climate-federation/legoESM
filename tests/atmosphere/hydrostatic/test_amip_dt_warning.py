@@ -1,6 +1,6 @@
 """iter-36 AMIP dt-safety warning regression.
 
-When ``scripts/run_amip.py`` is invoked with ``--dt`` > 2× the
+When ``scripts/run/run_amip.py`` is invoked with ``--dt`` > 2× the
 iter-13/iter-26 cross-grid ladder for the (grid_type, resolution)
 combination, it should print a WARNING to stderr pointing the
 operator at CRM_implementation.md. The warning was added in iter-36
@@ -25,7 +25,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCRIPT = REPO_ROOT / "scripts" / "run_amip.py"
+SCRIPT = REPO_ROOT / "scripts" / "run" / "run_amip.py"
 
 
 def _run_amip_dryrun(*extra_args):

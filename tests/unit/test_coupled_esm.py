@@ -127,7 +127,7 @@ class TestSlabEnergyConservation(unittest.TestCase):
         from legoesm.ocean.simple_ocean import (
             SimpleOceanConfig, _slab_step, init_slab_state,
         )
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
 
         shape = (6, 4, 4)
         cfg = SimpleOceanConfig(mode="slab", h_mix=50.0)

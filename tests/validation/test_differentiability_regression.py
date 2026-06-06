@@ -208,7 +208,7 @@ class TestCouplerDifferentiability:
         from legoesm.coupler.coupler import (
             make_coupler, SurfaceState, init_surface_state,
         )
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         from legoesm.coupler.config import CouplerConfig, TileConfig
         from legoesm.land.config import LandConfig
         from legoesm.ice.config import SeaIceConfig
@@ -261,7 +261,7 @@ class TestCouplerDifferentiability:
 
         def loss(sst):
             _, response = step_fn(sfc, atm, tile, sst, ocean_u, ocean_v, dt=300.0)
-            return jnp.mean(response.T_surface ** 2)
+            return jnp.mean(response.T_sfc ** 2)
 
         grads = jax.grad(loss)(ocean_sst)
         assert jnp.all(jnp.isfinite(grads))

@@ -6,13 +6,13 @@ sea-ice concentration (SIC) from observational datasets.
 ## Quick start: CMIP6 AMIP deck
 
 For a complete CMIP6-protocol AMIP run (transient GHG, ozone, solar, aerosol,
-volcanic), use `scripts/run_amip_cmip6_deck.py` instead of `run_amip.py`
+volcanic), use `scripts/run/run_amip_cmip6_deck.py` instead of `run_amip.py`
 directly.  The deck driver auto-generates synthetic CMIP6-shape forcing files
 (or consumes real ones if dropped under `forcing_amip/` with the canonical
 names) and pins the canonical RRTMG + Sundqvist + Kessler + SBM + Louis stack:
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_amip_cmip6_deck.py \
+JAX_ENABLE_X64=1 python scripts/run/run_amip_cmip6_deck.py \
     --resolution 16 --days 30 --output results/amip_deck_test
 ```
 
@@ -30,11 +30,11 @@ The `forcing_amip/` directory expects six files following the CMIP6 schemas:
 To regenerate (or seed) the synthetic deck:
 
 ```bash
-python scripts/generate_amip_forcing.py --out forcing_amip \
+python scripts/data/generate_amip_forcing.py --out forcing_amip \
     --start-year 1979 --end-year 2014
 # Optional: interannually-varying ozone (exercises the loader's
 # non-cyclic dispatch instead of the 12-month climatology):
-python scripts/generate_amip_forcing.py --out forcing_amip \
+python scripts/data/generate_amip_forcing.py --out forcing_amip \
     --start-year 1979 --end-year 2014 \
     --component ozone --ozone-interannual
 ```
@@ -42,14 +42,14 @@ python scripts/generate_amip_forcing.py --out forcing_amip \
 To validate a finished run:
 
 ```bash
-python scripts/validate_amip_run.py results/amip_deck_test
+python scripts/validate/validate_amip_run.py results/amip_deck_test
 ```
 
 To run the deck across every supported (grid, discretization)
 combination as a smoke test:
 
 ```bash
-python scripts/smoke_test_amip_all_grids.py --days 1
+python scripts/validate/smoke_test_amip_all_grids.py --days 1
 # All 8 cases pass on legoESM main:
 #   cubed_sphere/{centered,finite_volume,cdgrid}
 #   latlon/{centered,finite_volume,latlon_cgrid}
@@ -62,7 +62,7 @@ of how this infrastructure was built.
 
 ## Overview
 
-The AMIP driver (`scripts/run_amip.py`) couples:
+The AMIP driver (`scripts/run/run_amip.py`) couples:
 
 - **Dynamics**: Hydrostatic primitive equations on cubed-sphere (centered)
 - **Radiation**: Selectable via `--radiation {gray,rrtmg}`
@@ -91,7 +91,7 @@ The Frierson (2006) gray two-stream scheme:
 - Fast, stable, well-tested; suitable for idealized experiments
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_amip.py \
+JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
     --radiation gray \
     --dataset cobe --forcing-path /path/to/COBE-SST2.nc \
     --days 30 --resolution 16 --dt 600
@@ -108,7 +108,7 @@ RRTMGP correlated-k radiation (Pincus et al. 2019):
 - Analytical ozone profile with latitude dependence
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_amip.py \
+JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
     --radiation rrtmg \
     --dataset cobe --forcing-path /path/to/COBE-SST2.nc \
     --days 30 --resolution 16 --dt 600 \
@@ -188,7 +188,7 @@ Variable names depend on the dataset preset.
 ### Gray radiation (default, fast)
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_amip.py \
+JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
     --dataset cobe \
     --forcing-path /path/to/MODEL.SST.COBE-SST2.nc \
     --days 30 --resolution 16 --dt 600
@@ -197,7 +197,7 @@ JAX_ENABLE_X64=1 python scripts/run_amip.py \
 ### RRTMG radiation with checkpointing
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_amip.py \
+JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
     --radiation rrtmg \
     --dataset hadisst \
     --forcing-path /path/to/HadISST_sst.nc \
@@ -210,7 +210,7 @@ JAX_ENABLE_X64=1 python scripts/run_amip.py \
 ### RRTMG with doubled CO2
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_amip.py \
+JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
     --radiation rrtmg \
     --dataset cobe \
     --forcing-path /path/to/COBE-SST2.nc \
@@ -221,7 +221,7 @@ JAX_ENABLE_X64=1 python scripts/run_amip.py \
 ### Full-physics RRTMG with clouds and diurnal cycle
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_amip.py \
+JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
     --radiation rrtmg \
     --dataset cobe \
     --forcing-path /path/to/COBE-SST2.nc \
@@ -239,7 +239,7 @@ JAX_ENABLE_X64=1 python scripts/run_amip.py \
 ### Production 10-year AMIP
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_amip.py \
+JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
     --radiation rrtmg \
     --dataset cobe --forcing-path /path/to/COBE-SST2.nc \
     --days 3650 --resolution 48 --nlev 40 --dt 450 \
@@ -259,7 +259,7 @@ clouds, Kessler microphysics, and monthly-mean diagnostics.
 ### Restart from checkpoint
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_amip.py \
+JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
     --restart-from results/amip_rrtmg_1yr/checkpoint_day_0030.npz \
     --forcing-path /path/to/HadISST_sst.nc \
     --days 365

@@ -15,14 +15,14 @@ Canonical state of CRM rollout — built, broken, next. Each iteration appends d
 | Plane CRM acoustic substeps (SI) | `compressible_euler.py:acoustic_substeps_semi_implicit`, `compressible_euler_plane.py:plane_acoustic_substeps_semi_implicit` | Built. Substep KW78 placement algebraically correct but inert (F2); R9 outer-step variant no longer on critical path (F10 + iter-12 dt=5 s PASS) |
 | 2-D pencil MPI layout + halo exchange | `src/legoesm/parallel/plane_mpi.py` | Built, AD-safe (iter-4 + iter-5) |
 | MPI-aware reductions for RCE | `src/legoesm/atmosphere/dynamics/rce_mpi.py` | Built (iter-4 R7 — full DD mass fixer) |
-| 30-day production driver | `scripts/run_rce_mpi_long.py`, `scripts/run_rce_30day.sh` | DD path wired via ``--use-dd`` (iter-5); legacy rank-0-broadcast retained as F8-stable default. Real MPI scaling F9-platform-blocked on macOS Python 3.13 |
-| Multi-grid RCE driver | `scripts/run_rce.py`, `scripts/run_rce_cross_grid.sh` | Built for `cubed_sphere`, `latlon`, `voronoi`, `gaussian`. 30-day production validated for {C24, C48, C72, V4, LL32, T21} (iter-12 + iter-15 + iter-26); C96 stays at 2-day nightly per iter-22 wall-time decision |
-| Bare-dycore stability diagnostic | `scripts/diag_bare_dycore_stability.py` | Built (iter-1) with `--implicit-buoyancy` / `--vertical-theta-diffusion` / `--advection` switches |
+| 30-day production driver | `scripts/run/run_rce_mpi_long.py`, `scripts/run/run_rce_30day.sh` | DD path wired via ``--use-dd`` (iter-5); legacy rank-0-broadcast retained as F8-stable default. Real MPI scaling F9-platform-blocked on macOS Python 3.13 |
+| Multi-grid RCE driver | `scripts/run/run_rce.py`, `scripts/run/run_rce_cross_grid.sh` | Built for `cubed_sphere`, `latlon`, `voronoi`, `gaussian`. 30-day production validated for {C24, C48, C72, V4, LL32, T21} (iter-12 + iter-15 + iter-26); C96 stays at 2-day nightly per iter-22 wall-time decision |
+| Bare-dycore stability diagnostic | `scripts/tmp/diag_bare_dycore_stability.py` | Built (iter-1) with `--implicit-buoyancy` / `--vertical-theta-diffusion` / `--advection` switches |
 | Auto-dt ladder | `src/legoesm/driver/rce_dt.py` | Built (iter-24). 5-tier per-grid ladder + N>96 hard refusal (iter-21). Anchored by 5 measurement layers (iter-28/29/34/36/51) |
 | Radiation-schedule helper | `src/legoesm/driver/physics_schedule.py` | Built (iter-42). Single source of truth for the ``rad_call_every_steps`` arithmetic; 24 unit tests (iter-42 + iter-43 NaN/inf/sys.maxsize hardening) |
 | Shared hydrostatic RCE assertion helpers | `tests/atmosphere/hydrostatic/_rce_helpers.py` | Built (iter-46; promoted to dedicated module iter-78). 6 helpers (5 pure + 1 subprocess) shared across C48/C72/C96/V4/LL32/T21 nightlies. 45 unit tests in `tests/atmosphere/hydrostatic/test_rce_helpers_unit.py` (refreshed iter-131; iter-52 + iter-66 + iter-83 + iter-85 + later iterations added cases) |
 | Shared plane CRM assertion helpers | `tests/atmosphere/nonhydrostatic/integration/_plane_crm_helpers.py` | Built (iter-79; ``_read_log`` added iter-84). 2 pure helpers (``_parse_rad_call_count`` iter-40/54 + ``_read_log`` iter-84). 18 unit tests |
-| Production driver CLI input validation | `scripts/run_rce_mpi_long.py:main` + `scripts/run_rce.py:main` | Built (iter-65-75). Defense-in-depth across BOTH drivers via auto-detected guards on every float / int / positive-int / range / Kelvin arg from `vars(args)` (iter-67/68/69/70/74) + post-derivation `total_steps >= 1` (iter-75). `--sst-init` positive-Kelvin layer (iter-74) only on `run_rce.py` — plane-CRM driver hardcodes `T_SFC_K`. 13 + 29 parametric regression tests |
+| Production driver CLI input validation | `scripts/run/run_rce_mpi_long.py:main` + `scripts/run/run_rce.py:main` | Built (iter-65-75). Defense-in-depth across BOTH drivers via auto-detected guards on every float / int / positive-int / range / Kelvin arg from `vars(args)` (iter-67/68/69/70/74) + post-derivation `total_steps >= 1` (iter-75). `--sst-init` positive-Kelvin layer (iter-74) only on `run_rce.py` — plane-CRM driver hardcodes `T_SFC_K`. 13 + 29 parametric regression tests |
 
 ---
 
@@ -37,13 +37,13 @@ Canonical state of CRM rollout — built, broken, next. Each iteration appends d
      structural slow nightly + iter-39 with-rad symmetric coverage).
      Full 30-day plane CRM wall-time-gated (~8 days single-rank).
 2. **Reach radiative-convective equilibrium**:
-   * **CWV plateau range**: Wing 2018 RCEMIP1 multi-model band at SST = 300 K (Wing et al. 2018, *Geoscientific Model Development* 11(2):793–813, doi:10.5194/gmd-11-793-2018; Fig. 5b PWV at SST = 300 K shows inter-model spread ~45–60 mm). Code gate: `scripts/summarize_rce_trajectory.py:DEFAULT_CWV_RANGE_MM = (35, 65)` (Wing band 45–60 mm + 10 mm lower-bound margin to absorb the IC dip — iter-98 IC = 49.94 mm so a +-5 mm symmetric band would touch the lower edge — plus 5 mm upper-bound tolerance for the iter-98 day-4 overshoot to 57.18 mm).
+   * **CWV plateau range**: Wing 2018 RCEMIP1 multi-model band at SST = 300 K (Wing et al. 2018, *Geoscientific Model Development* 11(2):793–813, doi:10.5194/gmd-11-793-2018; Fig. 5b PWV at SST = 300 K shows inter-model spread ~45–60 mm). Code gate: `scripts/validate/summarize_rce_trajectory.py:DEFAULT_CWV_RANGE_MM = (35, 65)` (Wing band 45–60 mm + 10 mm lower-bound margin to absorb the IC dip — iter-98 IC = 49.94 mm so a +-5 mm symmetric band would touch the lower edge — plus 5 mm upper-bound tolerance for the iter-98 day-4 overshoot to 57.18 mm).
    * **Precip plateau**: ~3 mm/day (Wing 2018 mean).
    * **MSE drift**: split into TWO numbers to remove the iter-104 Codex MEDIUM confusion between the production DOD requirement and the spinup-window gate:
      - **Final 30-day DOD requirement**: < 1 % over last 10 days of the 30-day window (production target; gates the *equilibrated* run).
      - **10-day summarizer stability gate** (`DEFAULT_MSE_RELATIVE_DRIFT = 0.05`, 5 %): the practical spinup check the in-flight evaluator uses to catch dycore blow-ups while convection is still developing. A 1 % gate at 10 days would false-FAIL pre-equilibration trajectories like iter-98 (0.6 % over 10 days IS already inside both windows, but a noisier transient could exceed 1 %). The 5 % gate is the stability check; the 1 % gate is the *equilibration* check applied at end-of-30-day.
    * Status: ✓ hydrostatic 30-day (iter-12 measured 4/4 grids + iter-50/51 added V4 + LL32 + T21 nightly regression). Plane CRM **10-day** PASS at 32×32×30 + radiation (iter-98, CWV 49.94 → 57.18 mm peak → 56.55 mm settled; MSE drift 0.6 %; first precip onset at day 10; `--evaluate` verdict: PASS). Full 30-day plane CRM in flight (iter-105). The 30 ± 5 mm number on this line pre-iter-107 was a stale estimate from an early hydrostatic-family extrapolation — Wing 2018 RCEMIP1 at SST = 300 K is the canonical reference.
-3. **Reproduce on each supported grid type** via `scripts/run_rce_cross_grid.sh` (cubed-sphere, latlon, voronoi, gaussian). Currently only *plane* CRM has explicit CRM physics; cubed-sphere/latlon/voronoi/gaussian use hydrostatic dycore in RCE mode and cross-grid wrapper validates they converge to similar CWV / precip / MSE.
+3. **Reproduce on each supported grid type** via `scripts/run/run_rce_cross_grid.sh` (cubed-sphere, latlon, voronoi, gaussian). Currently only *plane* CRM has explicit CRM physics; cubed-sphere/latlon/voronoi/gaussian use hydrostatic dycore in RCE mode and cross-grid wrapper validates they converge to similar CWV / precip / MSE.
    * Status: ✓ 30-day production-scale PASS on C24/C48/C72, V4, LL32, T21 (iter-12 + iter-15 + iter-26 + iter-50/51). C96 covered by 10-day (iter-22/73; 30-day wall-time-gated).
 4. **Scale with MPI**:
    * **Strong scaling**: 30-day-clock-time on 12 ranks ≤ 1.5× of 1-rank time / 12 (efficiency ≥ 67 %).
@@ -85,7 +85,7 @@ Tested simultaneously: max|w| @ step 100 = 480 m/s (worse than baseline). WENO5 
 
 ### F4. Production 30-day driver does not actually use MPI DD
 
-`scripts/run_rce_mpi_long.py` calls `model.step(state, ...)` on **rank 0** inside `if rank == 0:`, then `_broadcast_state(state, comm, root=0)` to every rank. Dycore + physics run replicated; only reductions (`global_sum_mpi` via `compute_total_water_mass_plane_mpi`, etc.) genuinely MPI. **Net**: 12 ranks ≈ 1 rank speed (overhead dominates). Strong/weak scaling: not achievable until `model.step_halo(...)` path taken on multi-rank.
+`scripts/run/run_rce_mpi_long.py` calls `model.step(state, ...)` on **rank 0** inside `if rank == 0:`, then `_broadcast_state(state, comm, root=0)` to every rank. Dycore + physics run replicated; only reductions (`global_sum_mpi` via `compute_total_water_mass_plane_mpi`, etc.) genuinely MPI. **Net**: 12 ranks ≈ 1 rank speed (overhead dominates). Strong/weak scaling: not achievable until `model.step_halo(...)` path taken on multi-rank.
 
 ### F5. Halo-aware slow tendency lacks production features
 
@@ -209,8 +209,8 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 ### 2026-05-26 — iter 1 (this entry)
 
 **Changes**
-* `scripts/run_rce_mpi_long.py`: added `--implicit-buoyancy` flag, wired through `CompressibleEulerConfig.implicit_buoyancy`. Hard-fails if `--implicit-buoyancy` set without `--semi-implicit-acoustic`.
-* `scripts/run_rce_30day.sh`: reduced default `DT` from 6.0 s → 1.0 s (6.0 s default untested; 2.0 s reproducibly blows up; 1.0 s reproduces F1 stable). Added `--semi-implicit-acoustic` and `--acoustic-off-centering 0.1` to launch line. Exposed `N_ACOUSTIC`, `ADVECTION` env vars. Documented dt-stability ladder in script header.
+* `scripts/run/run_rce_mpi_long.py`: added `--implicit-buoyancy` flag, wired through `CompressibleEulerConfig.implicit_buoyancy`. Hard-fails if `--implicit-buoyancy` set without `--semi-implicit-acoustic`.
+* `scripts/run/run_rce_30day.sh`: reduced default `DT` from 6.0 s → 1.0 s (6.0 s default untested; 2.0 s reproducibly blows up; 1.0 s reproduces F1 stable). Added `--semi-implicit-acoustic` and `--acoustic-off-centering 0.1` to launch line. Exposed `N_ACOUSTIC`, `ADVECTION` env vars. Documented dt-stability ladder in script header.
 * `CRM_implementation.md` created with state + roadmap + findings.
 
 **Measurements**
@@ -322,7 +322,7 @@ Both remain multi-day compute or follow-on-PR scope.
 ### 2026-05-27 — iter 238..262 (cross-grid CRM smoke + state.py cherry-pick + 7-script untested-bench chain + helper extraction)
 
 8 iterations covering the cross-grid CRM test surface lift:
-* iter-238: first test coverage for `scripts/run_rcemip_long.py`.
+* iter-238: first test coverage for `scripts/run/run_rcemip_long.py`.
   Parametrised 1-step dry-RCE smoke covering 4 grid choices. 3
   PASS + 1 SKIP (plane_spectral on Metal collection error).
 * iter-239: Codex iter-238 round-1 HIGH — `--days 0.0001 + --dt 10`
@@ -632,7 +632,7 @@ only. Added the missing piece:
   cfl_safe=0.4) -> int`. Pure Python int. Trace-time. Reusable.
   Examples: iter-183 → 8; steady opt-down (max_wind=1) → 1;
   LES dx=500/dt=0.5 → 1.
-* `scripts/run_rce_mpi_long.py`: `--n-outer-split N|auto`
+* `scripts/run/run_rce_mpi_long.py`: `--n-outer-split N|auto`
   (default `'1'` = preserves iter-183 bit-equal),
   `--max-wind-safe FLOAT` (default 300 m/s = iter-223 F11
   ceiling + 33% margin), `--cfl-safe FLOAT` (default 0.4 =
@@ -896,7 +896,7 @@ Day 18.13/30 (60.4 %).
 ### 2026-05-27 — iter 150 (MPI DD path verified exercisable on macOS — F9 still scaling-blocked)
 
 User asked "is MPI running for this case?". Answer: NO — iter-105
-was launched as ``python scripts/run_rce_mpi_long.py ...`` (single-
+was launched as ``python scripts/run/run_rce_mpi_long.py ...`` (single-
 process), not ``mpirun -np N python ...``. The driver script is
 *named* ``run_rce_mpi_long.py`` but the MPI code path only fires
 when invoked under mpirun (Get_size() > 1). Single-rank invocation
@@ -1212,7 +1212,7 @@ extends the 30-day wrapper, all driven by the iter-98 success.
 **iter-99..101 — 30-day wrapper + summarizer integration** (commits
 `8b2d36ab`, `cc5533d6`, `d740019f`):
 * iter-99: drop ``exec`` from ``run_rce_30day.sh`` mpirun line +
-  append a post-run ``scripts/summarize_rce_trajectory.py``
+  append a post-run ``scripts/validate/summarize_rce_trajectory.py``
   invocation. Writes ``trajectory.csv`` per production run.
 * iter-100: Codex review of iter-98/99 flagged 4 MEDIUM + 2 LOW —
   anchored ``snap_day_(\d{4})\.npz`` regex (no stray-file
@@ -1271,7 +1271,7 @@ utility — max |d cwv_mean| = 0 across days 0-3).
 
 **iter-110..111 — trajectory diff utility** (commits
 `94f73913`, `e16cdc55`):
-* iter-110: new ``scripts/compare_rce_trajectories.py`` — reads
+* iter-110: new ``scripts/validate/compare_rce_trajectories.py`` — reads
   two run output dirs via ``collect_trajectory`` + prints
   per-day delta table for CWV (mean/max), MSE, T_sfc, qc/qr_sfc
   max, wind. iter-98 vs iter-105 bit-equal through day 3 +
@@ -1345,10 +1345,10 @@ utility — max |d cwv_mean| = 0 across days 0-3).
   ``test_dod_doc_code_consistency`` tests = 85 new regression
   tests across the iter 99..120 chain (verified by Codex iter-122
   audit; iter-121's "87" was a 2-test over-count).
-* Tools added: ``scripts/summarize_rce_trajectory.py``,
-  ``scripts/compare_rce_trajectories.py``.
+* Tools added: ``scripts/validate/summarize_rce_trajectory.py``,
+  ``scripts/validate/compare_rce_trajectories.py``.
 * Wrapper integration: ``EVALUATE_DOD`` env var (0/1/final) +
-  ``ALLOW_SUMMARY_FAILURE`` (0/1) on ``scripts/run_rce_30day.sh``.
+  ``ALLOW_SUMMARY_FAILURE`` (0/1) on ``scripts/run/run_rce_30day.sh``.
 * iter-105 30-day in flight; DOD ``--final-dod`` verdict
   available once snapshots[≥30] land.
 
@@ -1361,7 +1361,7 @@ compare + 6 distinct exit codes + doc/code consistency lock.
 
 **Code change** (commit `93fd0ba8`):
 
-* `scripts/summarize_rce_trajectory.py` (new, 158 lines): reads
+* `scripts/validate/summarize_rce_trajectory.py` (new, 158 lines): reads
   every `<out_dir>/snapshots/snap_day_NNNN.npz` written by
   `run_rce_mpi_long.py:save_snapshot_2d`, optionally folds in
   matching `<out_dir>/profiles/prof_day_NNNN.npz`
@@ -1464,7 +1464,7 @@ perturbation means convection has to wait for noise growth. 30-day
   Tab A1 value `p_sfc=101480.0`. Post-fix T(z=550 m) = 296.81 K
   (within 0.5 K of Wing spec).
 
-* **Bug 2** (`scripts/run_rce_mpi_long.py`): `fix_moist_mass_plane`
+* **Bug 2** (`scripts/run/run_rce_mpi_long.py`): `fix_moist_mass_plane`
   was rescaling total water back to IC every outer step. Correct
   for gravity-wave smokes; FATAL for RCE spinup (surface flux
   must net-add moisture until precip balances). Pre-fix evidence:
@@ -1629,13 +1629,13 @@ full-component passes that landed 0 HIGH + 0 MEDIUM outstanding
   prior findings rolled in.
 
 **Driver defaults regression backstop (iter-58..iter-64)**:
-``scripts/run_rce_30day.sh`` defaults refreshed from stale
+``scripts/run/run_rce_30day.sh`` defaults refreshed from stale
 dt=1.0 / N_ACOUSTIC=24 (iter-1 F1 ladder, pre-F10) to the
 iter-14 / iter-38 production-measured dt=5.0 / N_ACOUSTIC=12.
 ``tests/atmosphere/nonhydrostatic/integration/test_run_rce_30day_wrapper_defaults.py``
 locks every env-var default (including PYBIN per iter-64 + the
 hardcoded snapshot / log cadence flags per iter-61 Codex MEDIUM).
-iter-59 ALSO refreshes ``scripts/run_rce_mpi_long.py`` argparse
+iter-59 ALSO refreshes ``scripts/run/run_rce_mpi_long.py`` argparse
 defaults (the driver itself, distinct from the wrapper) and
 lands an AST-walk regression test that catches future drift in
 the argparse ``default=`` literals at import time. iter-60
@@ -1664,8 +1664,8 @@ on); narrowed to ``isnan`` only.
 
 **Production driver CLI input validation (iter-65..iter-75)** —
 defense-in-depth across BOTH plane-CRM driver
-(``scripts/run_rce_mpi_long.py``) and hydrostatic driver
-(``scripts/run_rce.py``) — landed via 13 + 29 parametric tests.
+(``scripts/run/run_rce_mpi_long.py``) and hydrostatic driver
+(``scripts/run/run_rce.py``) — landed via 13 + 29 parametric tests.
 **iter-65** converts the physics-schedule ``ValueError`` from
 ``--rad-call-interval-s NaN`` into a clean ``SystemExit`` with
 the ``error: <flag> rejected: <reason>`` marker (Codex iter-55
@@ -1681,7 +1681,7 @@ remaining layers (with which driver carries each):
    ``--acoustic-off-centering ∈ [0, 1)``. iter-70 Codex caught
    6 HIGH range-guard gaps in iter-67/68/69, all fixed.
 4. **Positive-Kelvin sst-init** guard (iter-74) — only on
-   ``scripts/run_rce.py`` (the plane CRM driver has no
+   ``scripts/run/run_rce.py`` (the plane CRM driver has no
    ``--sst-init`` argument; ``T_SFC_K`` is hardcoded). Codex
    caught 1 HIGH + 2 MEDIUM + 1 LOW in iter-71/72/73 all fixed.
 5. **Post-derivation ``total_steps >= 1`` guard** (iter-75) —
@@ -1692,7 +1692,7 @@ remaining layers (with which driver carries each):
    ZERO steps, not one).
 
 iter-71/72 mirror the layer-1/2/3/4 pattern onto
-``scripts/run_rce.py`` with 10 parametric test cases. iter-73
+``scripts/run/run_rce.py`` with 10 parametric test cases. iter-73
 lands the C96 10-day nightly (production wall-time-gated for
 30-day) + fixes a ``--qv-noise-amp`` argparse regression.
 **iter-74** raises the C96 nightly's pytest-timeout from 4800
@@ -1754,7 +1754,7 @@ and git log. One-line summary per iter below:
 | 28 | Cross-grid plotter Metal pin (`JAX_PLATFORMS=cpu` for `run_atmosphere_test_matrix.py --cross-grid-plots-only`) + new structural test `test_auto_dt_rce_lies_inside_cfl_envelope` asserts every empirical ladder value ≤ 2x gravity-wave CFL. |
 | 29 | Empirical `dt ∝ dx²` scaling identified (α=2.0 fit over C24/C48/C72/C96). New `empirical_dt_dx2(dx_min)` diagnostic + `test_ladder_matches_empirical_dt_dx2_fit` (30% tolerance). 3 layers of regression coverage now. |
 | 30 | CFL advisory print in `run_rce.py` now shows BOTH gravity-wave + dx² fit bounds. Try/except ImportError guard preserved per Codex iter-22..24 HIGH. |
-| 31 | Auto-dt diagnostic table script (`scripts/print_rce_auto_dt_table.py`) + smoke test. Shows per-grid ladder + CFL + dx² fit + their ratios. |
+| 31 | Auto-dt diagnostic table script (`scripts/validate/print_rce_auto_dt_table.py`) + smoke test. Shows per-grid ladder + CFL + dx² fit + their ratios. |
 | 32 | AMIP cross-grid wrapper at iter-7 + iter-13 parity (macOS Bash 3.2 compat + dt=150 for C48/T42 AMIP rows). |
 | 33 | Codex iter-31/32 HIGH (voronoi V6 AMIP dt=600 BLOWUP risk → pin dt=60) + 2 MEDIUM (table refresh, K-anchor drift acknowledged). |
 | 34 | `test_cross_grid_wrapper_dt_overrides.py` regression: parses AMIP wrapper GRID_TABLE, asserts each dt override sits within 0.5× — 2.0× of central ladder. |

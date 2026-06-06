@@ -7,10 +7,10 @@ together with a sha256 manifest pinned to the upstream commit hash.
 
 Usage
 -----
-After ``scripts/setup_jax_scm_oracle.sh`` populates ``.venv-jax-scm/``
+After ``scripts/data/setup_jax_scm_oracle.sh`` populates ``.venv-jax-scm/``
 with the upstream package::
 
-    .venv-jax-scm/bin/python scripts/run_scm_test_matrix.py oracle \\
+    .venv-jax-scm/bin/python scripts/matrix/run_scm_test_matrix.py oracle \\
         [--cases gabls1 andren1994 wangara]
 
 Each case writes a single NetCDF to ``tests/validation/scm_oracle/``.

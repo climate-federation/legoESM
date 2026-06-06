@@ -1,5 +1,5 @@
 """Unit tests for the cross-grid comparison helpers in
-``scripts/run_atmosphere_test_matrix.py``.
+``scripts/matrix/run_atmosphere_test_matrix.py``.
 
 These pin the iter-1..10 helpers (``_area_weighted_mean``,
 ``_zonal_mean_at_final_time``, ``_zonal_mean_climatology``,
@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 # Make the script importable as a module without invoking ``main()``.
-_SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
+_SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts" / "matrix"
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
@@ -1205,10 +1205,10 @@ class TestOzoneProfileOverrides:
 # ---------------------------------------------------------------------------
 
 class TestAmipToMatrixFormat:
-    """Tests for ``scripts/_amip_to_matrix_format.py`` (iter-42).
+    """Tests for ``scripts/run/_amip_to_matrix_format.py`` (iter-42).
 
     The iter-41 ``run_amip_cross_grid.sh`` wrapper invokes
-    ``scripts/run_amip.py`` per grid; ``run_amip.py`` writes
+    ``scripts/run/run_amip.py`` per grid; ``run_amip.py`` writes
     ``timeseries.npz`` + a free-form ``results.txt``, but the
     matrix-runner cross-grid plot collector requires
     ``mean_timeseries.csv`` + a key:value ``results.txt``.  The
@@ -1835,14 +1835,11 @@ class TestHeldSuarezInitConsistency:
         # missing module + ``FileNotFoundError`` for missing mesh
         # data file are legitimate skips; everything else is a real
         # bug we want to surface.
-        try:
-            from legoesm.grids.mpas import create_mpas_mesh
-        except ImportError:
-            pytest.skip("MPAS mesh module unavailable")
-        try:
-            mesh = create_mpas_mesh(level=2)
-        except FileNotFoundError:
-            pytest.skip("MPAS level-2 mesh data file unavailable")
+        # Level-1 Voronoi (42 cells) — procedural, no data file; restores
+        # the MPAS held_suarez init coverage previously dead-skipped via a
+        # nonexistent legoesm.grids.mpas import.
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        mesh = create_voronoi_mesh(subdivision_level=1)
         s_mpas = hs_module.held_suarez_init_mpas(mesh, sigma)
         assert float(jnp.max(jnp.abs(s_mpas.u.data))) == 0.0
 
@@ -1908,14 +1905,11 @@ class TestHeldSuarezInitConsistency:
 
         # MPAS.
         # iter-48 codex LOW: only catch legitimate-skip exceptions.
-        try:
-            from legoesm.grids.mpas import create_mpas_mesh
-        except ImportError:
-            pytest.skip("MPAS mesh module unavailable; cube/latlon coverage suffices")
-        try:
-            mesh = create_mpas_mesh(level=2)
-        except FileNotFoundError:
-            pytest.skip("MPAS level-2 mesh data file unavailable")
+        # Level-1 Voronoi (42 cells) — procedural, no data file; restores
+        # the MPAS held_suarez init coverage previously dead-skipped via a
+        # nonexistent legoesm.grids.mpas import.
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        mesh = create_voronoi_mesh(subdivision_level=1)
         s_mpas = hs_module.held_suarez_init_mpas(mesh, sigma)
         p_s_mpas = jnp.asarray(s_mpas.p_s.data)
         assert abs(float(jnp.min(p_s_mpas)) - p_ref) < 1e-6
@@ -1960,14 +1954,11 @@ class TestHeldSuarezInitConsistency:
 
         # MPAS.
         # iter-48 codex LOW: legitimate-skip-only catches.
-        try:
-            from legoesm.grids.mpas import create_mpas_mesh
-        except ImportError:
-            pytest.skip("MPAS mesh module unavailable")
-        try:
-            mesh = create_mpas_mesh(level=2)
-        except FileNotFoundError:
-            pytest.skip("MPAS level-2 mesh data file unavailable")
+        # Level-1 Voronoi (42 cells) — procedural, no data file; restores
+        # the MPAS held_suarez init coverage previously dead-skipped via a
+        # nonexistent legoesm.grids.mpas import.
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        mesh = create_voronoi_mesh(subdivision_level=1)
         s_mpas = hs_module.held_suarez_init_mpas(mesh, sigma)
         mean_T_mpas = float(jnp.mean(s_mpas.T.data))
         assert abs(mean_T_mpas - 300.0) < 0.2, (
@@ -3216,7 +3207,7 @@ class TestCliResolutionPerGridDispatch:
         pytest.skip(
             "iter-95 smoke test: invoke "
             "``JAX_ENABLE_X64=1 .venv/bin/python "
-            "scripts/run_atmosphere_test_matrix.py "
+            "scripts/matrix/run_atmosphere_test_matrix.py "
             "--only sw --quick --resolution 16`` to verify; "
             "expected 12/12 PASS (4 grids × 3 SW cases) since "
             "iter-95.  Inline pytest-driven runs would require "
@@ -3530,7 +3521,7 @@ class TestAtmosphereMatrixAllRunnersThreadDiag:
 
 class TestRunAmipFiniteCheck:
     """iter-100: closes the iter-98 deferred gap that
-    ``scripts/run_amip.py`` had ZERO finiteness checks
+    ``scripts/run/run_amip.py`` had ZERO finiteness checks
     (``grep -c isfinite`` = 0 in 450 lines).  A NaN-producing
     AMIP run would silently complete and print "Complete." while
     writing garbage to the output directory.
@@ -3550,7 +3541,7 @@ class TestRunAmipFiniteCheck:
         import importlib
         import sys
         from pathlib import Path
-        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts" / "run"
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
         return importlib.import_module("run_amip")
@@ -3733,7 +3724,7 @@ class TestRunRceExitCodeOnBlowup:
         """
         import re
         from pathlib import Path
-        path = Path(__file__).resolve().parent.parent / "scripts" / "run_rce.py"
+        path = Path(__file__).resolve().parent.parent / "scripts" / "run" / "run_rce.py"
         text = path.read_text()
         # Strip line comments + triple-quoted strings.
         text_no_strings = re.sub(r'""".*?"""', "", text, flags=re.DOTALL)
@@ -3760,7 +3751,7 @@ class TestRunRceExitCodeOnBlowup:
         uses ``sys.exit``).
         """
         from pathlib import Path
-        path = Path(__file__).resolve().parent.parent / "scripts" / "run_rce.py"
+        path = Path(__file__).resolve().parent.parent / "scripts" / "run" / "run_rce.py"
         text = path.read_text()
         # Strip docstrings.
         import re
@@ -3778,7 +3769,7 @@ class TestRunRceExitCodeOnBlowup:
         still open.
         """
         from pathlib import Path
-        path = Path(__file__).resolve().parent.parent / "scripts" / "run_rce_cross_grid.sh"
+        path = Path(__file__).resolve().parent.parent / "scripts" / "run" / "run_rce_cross_grid.sh"
         text = path.read_text()
         # Pre-iter-101 comment claimed run_rce.py "does not
         # currently exit non-zero on FAIL" — that statement must
@@ -3817,7 +3808,7 @@ class TestRunAmipFiniteCheckSpectralFields:
         import importlib
         import sys
         from pathlib import Path
-        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts" / "run"
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
         return importlib.import_module("run_amip")
@@ -3943,7 +3934,7 @@ class TestCliResolutionValidation:
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
             [".venv/bin/python",
-             "scripts/run_atmosphere_test_matrix.py",
+             "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--quick", "--resolution", "0",
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
@@ -3969,7 +3960,7 @@ class TestCliResolutionValidation:
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
             [".venv/bin/python",
-             "scripts/run_atmosphere_test_matrix.py",
+             "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--quick", "--resolution", "-16",
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
@@ -3995,7 +3986,7 @@ class TestCliResolutionValidation:
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
             [".venv/bin/python",
-             "scripts/run_atmosphere_test_matrix.py",
+             "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--quick", "--resolution", "0.5",
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
@@ -4026,7 +4017,7 @@ class TestCliResolutionValidation:
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
             [".venv/bin/python",
-             "scripts/run_atmosphere_test_matrix.py",
+             "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--quick", "--resolution", "-0.5",
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
@@ -4047,7 +4038,7 @@ class TestCliResolutionValidation:
         for bad in (".5", "1.", "1e3", "inf", "nan"):
             result = subprocess.run(
                 [".venv/bin/python",
-                 "scripts/run_atmosphere_test_matrix.py",
+                 "scripts/matrix/run_atmosphere_test_matrix.py",
                  "--only", "sw", "--quick", "--resolution", bad,
                  "--no-cross-grid-plots"],
                 cwd=str(repo_root),
@@ -4074,7 +4065,7 @@ class TestCliResolutionValidation:
         from importlib import import_module
         import sys
         from pathlib import Path
-        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts" / "run"
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
         m = import_module("run_atmosphere_test_matrix")
@@ -4216,8 +4207,8 @@ class TestStatusToExitCode:
     """iter-109 (codex iter-104 MEDIUM-8): centralized
     status-to-exit-code helper.  Pre-iter-109, three other
     user-facing ``ModelDriver`` wrappers (src/legoesm/cli.py,
-    scripts/run_held_suarez_rrtmgp_allgrids.py,
-    scripts/run_held_suarez_icos_0p5deg.py) logged the run
+    scripts/run/run_held_suarez_rrtmgp_allgrids.py,
+    scripts/run/run_held_suarez_icos_0p5deg.py) logged the run
     status string but exited 0 even when status indicated
     BLOWUP.
 
@@ -4268,29 +4259,29 @@ class TestModelDriverWrappersUseStatusHelper:
         )
 
     def test_held_suarez_rrtmgp_allgrids_uses_helper(self):
-        text = self._read("scripts/run_held_suarez_rrtmgp_allgrids.py")
+        text = self._read("scripts/run/run_held_suarez_rrtmgp_allgrids.py")
         assert "status_to_exit_code" in text, (
             "iter-109: "
-            "``scripts/run_held_suarez_rrtmgp_allgrids.py`` "
+            "``scripts/run/run_held_suarez_rrtmgp_allgrids.py`` "
             "must use ``status_to_exit_code``."
         )
         assert "sys.exit(main())" in text, (
             "iter-109: "
-            "``scripts/run_held_suarez_rrtmgp_allgrids.py`` "
+            "``scripts/run/run_held_suarez_rrtmgp_allgrids.py`` "
             "must propagate ``main()``'s return value to "
             "``sys.exit`` so wrappers can detect failure."
         )
 
     def test_held_suarez_icos_0p5deg_uses_helper(self):
-        text = self._read("scripts/run_held_suarez_icos_0p5deg.py")
+        text = self._read("scripts/run/run_held_suarez_icos_0p5deg.py")
         assert "status_to_exit_code" in text, (
             "iter-109: "
-            "``scripts/run_held_suarez_icos_0p5deg.py`` "
+            "``scripts/run/run_held_suarez_icos_0p5deg.py`` "
             "must use ``status_to_exit_code``."
         )
         assert "sys.exit(main())" in text, (
             "iter-109: "
-            "``scripts/run_held_suarez_icos_0p5deg.py`` "
+            "``scripts/run/run_held_suarez_icos_0p5deg.py`` "
             "must propagate ``main()``'s return value."
         )
 
@@ -4478,7 +4469,7 @@ class TestSharedCliResolution:
         shared dispatch helper.
         """
         from pathlib import Path
-        path = Path(__file__).resolve().parent.parent / "scripts" / "run_omip.py"
+        path = Path(__file__).resolve().parent.parent / "scripts" / "run" / "run_omip.py"
         text = path.read_text()
         assert "validate_cli_resolution" in text, (
             "iter-115: ``run_omip.py`` must use the shared "
@@ -4513,7 +4504,7 @@ class TestSpectralW2L2Norm:
         import importlib
         import sys
         from pathlib import Path
-        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts" / "run"
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
         return importlib.import_module("run_atmosphere_test_matrix")
@@ -4557,7 +4548,7 @@ class TestSpectralW2L2Norm:
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
             [".venv/bin/python",
-             "scripts/run_atmosphere_test_matrix.py",
+             "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--test", "williamson2",
              "--grid", "spectral",
              "--quick", "--resolution", "16",
@@ -4610,7 +4601,7 @@ class TestHeldSuarezMassDriftTolerance:
         import importlib
         import sys
         from pathlib import Path
-        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts" / "run"
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
         return importlib.import_module("run_atmosphere_test_matrix")
@@ -4832,7 +4823,7 @@ class TestHeldSuarezMassDriftTolerance:
         and gate on mass_drift, not just status.
         """
         from pathlib import Path
-        path = Path(__file__).resolve().parent.parent / "scripts" / "run_held_suarez_rrtmgp_allgrids.py"
+        path = Path(__file__).resolve().parent.parent / "scripts" / "run" / "run_held_suarez_rrtmgp_allgrids.py"
         text = path.read_text()
         assert "_compute_driver_mass" in text, (
             "iter-121: ``run_held_suarez_rrtmgp_allgrids.py`` "
@@ -4868,7 +4859,7 @@ class TestHeldSuarezMassDriftTolerance:
         import sys
         from pathlib import Path
         from types import SimpleNamespace
-        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts" / "run"
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
         m = importlib.import_module("run_held_suarez_rrtmgp_allgrids")
@@ -4908,7 +4899,7 @@ class TestHeldSuarezMassDriftTolerance:
         import importlib
         import sys
         from pathlib import Path
-        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts" / "run"
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
         m = importlib.import_module("run_held_suarez_rrtmgp_4grids")
@@ -4966,7 +4957,7 @@ class TestHeldSuarezMassDriftTolerance:
         from pathlib import Path
         from types import SimpleNamespace
         import jax.numpy as jnp
-        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts" / "run"
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
         m = importlib.import_module("run_held_suarez_rrtmgp_allgrids")
@@ -4991,7 +4982,7 @@ class TestHeldSuarezMassDriftTolerance:
         finiteness/non-blown-up.
         """
         from pathlib import Path
-        path = Path(__file__).resolve().parent.parent / "scripts" / "run_held_suarez_rrtmgp_4grids.py"
+        path = Path(__file__).resolve().parent.parent / "scripts" / "run" / "run_held_suarez_rrtmgp_4grids.py"
         text = path.read_text()
         assert "HS_RRTMGP_MASS_DRIFT_TOL" in text, (
             "iter-119: ``run_held_suarez_rrtmgp_4grids.py`` "
@@ -5026,7 +5017,7 @@ class TestHeldSuarezMassDriftTolerance:
 
         Run manually:
             JAX_ENABLE_X64=1 .venv/bin/python \\
-                scripts/run_atmosphere_test_matrix.py \\
+                scripts/matrix/run_atmosphere_test_matrix.py \\
                 --only hydro --test held_suarez \\
                 --quick --resolution 16
         """

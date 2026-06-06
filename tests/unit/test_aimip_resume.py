@@ -2,7 +2,7 @@
 
 Validates ``find_latest_epoch_checkpoint`` and ``maybe_resume_model``
 in ``legoesm.training.neural_gcm_spectral`` -- the two functions that
-back ``scripts/run_aimip.py --resume`` for chained-resubmission SLURM
+back ``scripts/run/run_aimip.py --resume`` for chained-resubmission SLURM
 training.
 
 These helpers underpin the per-variant continue-from-walltime-kill

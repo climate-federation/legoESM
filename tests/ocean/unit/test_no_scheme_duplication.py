@@ -22,8 +22,9 @@ import pathlib
 
 import pytest
 
-ROOT = pathlib.Path(__file__).resolve().parents[3]
-DYN = ROOT / "src" / "legoesm" / "ocean" / "dynamics"
+from tests.legoesm_paths import legoesm_source_path
+
+DYN = legoesm_source_path("ocean/dynamics")
 
 # Files that previously held duplicated logic and now should delegate
 # to the common modules.

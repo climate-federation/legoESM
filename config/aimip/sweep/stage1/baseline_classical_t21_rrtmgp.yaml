@@ -52,7 +52,7 @@ n_eval_days:  6
 
 aimip_grid: "gaussian"
 n_max: 21
-nlev: 8
+n_levels: 8
 dt: 1200.0
 
 aimip_n_epochs: 4

@@ -25,7 +25,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-DRIVER = REPO_ROOT / "scripts" / "run_rcemip_long.py"
+DRIVER = REPO_ROOT / "scripts" / "run" / "run_rcemip_long.py"
 
 
 # Prefixes that conceptually mean "cubed-sphere-strict" in this

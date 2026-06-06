@@ -35,7 +35,7 @@ restart capabilities the bulletproof claim needs:
   the loaded data and the template's ``Field`` metadata. Round-trip is
   ``np.array_equal`` exact across all prognostic fields.
 
-Plus ``scripts/run_ocean_test_matrix.py`` gains an ``--emit-diagnostics``
+Plus ``scripts/matrix/run_ocean_test_matrix.py`` gains an ``--emit-diagnostics``
 CLI flag (semantics: comma-separated subset of ``rpe`` / ``energy`` /
 ``tracer``). Wiring the per-runner emission into every existing runner
 is a mechanical follow-up; the CLI flag is in place so callers can

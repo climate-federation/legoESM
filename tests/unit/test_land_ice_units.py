@@ -14,7 +14,7 @@ from legoesm.ice.state import SeaIceState
 from legoesm.coupler.lake.two_layer_lake import step_lake
 from legoesm.coupler.lake.config import LakeConfig
 from legoesm.coupler.lake.state import LakeState
-from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.core.field import Field
 from legoesm import constants
 
@@ -94,7 +94,7 @@ class Test13d_ConstantsCrossCheck:
 
 
 class Test13e_CouplingInterface:
-    def test_land_T_surface_matches(self):
+    def test_land_T_sfc_matches(self):
         state = LandState(
             T_soil=_field(285.0, "T_soil", "K"),
             W_bucket=_field(50.0, "W_bucket", "kg/m2"),
@@ -102,8 +102,8 @@ class Test13e_CouplingInterface:
             snow_age=_field(0.0, "snow_age", "s"),
         )
         new_state, resp, _ = step_land(state, make_forcing(), LandConfig(), 1.0, DT)
-        # T_surface in response should equal updated T_soil
-        assert jnp.allclose(resp.T_surface, new_state.T_soil.data, atol=1e-10)
+        # T_sfc in response should equal updated T_soil
+        assert jnp.allclose(resp.T_sfc, new_state.T_soil.data, atol=1e-10)
 
 
 class Test13f_ConsistentSignConventions:

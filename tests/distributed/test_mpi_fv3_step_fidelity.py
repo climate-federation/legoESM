@@ -110,13 +110,21 @@ def _run_pe_pair_and_assert(rank, size, ref_model, dist_model,
 
     from legoesm.parallel.comm import build_comm_topology
     topology = build_comm_topology(rank, size)
+    # Precision-aware tolerance.  fv3_faithful iter-14: u/v are now padded with
+    # the rotation-aware ``pad_halo_vector_4d`` (so the cube panel-seam imprint
+    # does NOT return under MPI).  That vector halo does a geographic
+    # rotate->pack->exchange->rotate round-trip whose float32 op-order differs
+    # from the single-device pad at the ~1e-6 rounding level (scalar T/ln(ps)
+    # halo stays bit-for-bit).  In x64 the MPI step is bit-for-bit vs single-rank
+    # (1e-10); in float32 the difference is rounding, not the imprint.
+    _tol = 1e-10 if jax.config.jax_enable_x64 else 5e-5
     for field_name in ("T", "u_d", "v_d", "p_s"):
         ref_arr = np.asarray(getattr(ref_state, field_name).data)
         dist_arr = np.asarray(getattr(dist_state, field_name).data)
         for f in topology.local_face_ids:
             np.testing.assert_allclose(
                 dist_arr[f], ref_arr[f],
-                atol=1e-10, rtol=1e-10,
+                atol=_tol, rtol=_tol,
                 err_msg=(
                     f"FV3 PE 3D step diverges from single-rank "
                     f"reference on rank {rank} owned face {f}, "

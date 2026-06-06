@@ -21,7 +21,7 @@ from legoesm.atmosphere.physics.convection.mass_flux import (
     stratosphere_mass_flux_gate,
 )
 from legoesm.atmosphere.physics.convection.config import (
-    SBMConfig, DCAConfig, KuoConfig, MassFluxConfig, EDMFConfig,
+    SBMConfig, DCAConfig, KuoConfig, MassFluxConfig, ConvectiveEDMFConfig,
 )
 from legoesm.atmosphere.physics.thermodynamics import compute_cape, compute_moist_adiabat
 from legoesm.thermo import saturation_mixing_ratio
@@ -81,7 +81,7 @@ def _call_scheme(name, T, q_v, p_full, p_half, dt=300.0):
     elif name == "edmf":
         a_u = 0.1 * jnp.ones(ncol)
         out, _ = edmf_convection(T, q_v, p_full, p_half, a_u, dt,
-                                  config=EDMFConfig())
+                                  config=ConvectiveEDMFConfig())
         return out
     else:
         raise ValueError(f"Unknown scheme: {name}")
@@ -285,7 +285,7 @@ def test_edmf_updraft_area_bounds():
     ncol = T.shape[0]
     a_u = 0.1 * jnp.ones(ncol)
     _, a_u_new = edmf_convection(T, q_v, p_full, p_half, a_u, 300.0,
-                                  config=EDMFConfig())
+                                  config=ConvectiveEDMFConfig())
     assert float(jnp.min(a_u_new)) >= -1e-10, (
         f"a_u_new has negative values: {float(jnp.min(a_u_new)):.2e}"
     )
@@ -686,10 +686,10 @@ def test_edmf_a_u_grows_under_high_cape():
     a_u0 = jnp.zeros(ncol)
 
     _, a_hi = edmf_convection(
-        T_hi, q_hi, p_full, p_half, a_u0, 300.0, EDMFConfig(),
+        T_hi, q_hi, p_full, p_half, a_u0, 300.0, ConvectiveEDMFConfig(),
     )
     _, a_lo = edmf_convection(
-        T_lo, q_lo, p_full, p_half, a_u0, 300.0, EDMFConfig(),
+        T_lo, q_lo, p_full, p_half, a_u0, 300.0, ConvectiveEDMFConfig(),
     )
 
     mean_hi = float(jnp.mean(a_hi))
@@ -744,7 +744,7 @@ def test_no_cloud_water_in_dry_column(scheme):
         )
     else:
         out, _ = edmf_convection(
-            T, q_v, p_full, p_half, 0.1 * jnp.ones(ncol), 300.0, EDMFConfig(),
+            T, q_v, p_full, p_half, 0.1 * jnp.ones(ncol), 300.0, ConvectiveEDMFConfig(),
         )
 
     dp = p_half[:, 1:] - p_half[:, :-1]

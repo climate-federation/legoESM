@@ -13,7 +13,7 @@ $ARGUMENTS
 Run the atmosphere test matrix in quick mode first for fast feedback:
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_atmosphere_test_matrix.py --quick --output results/atmosphere
+JAX_ENABLE_X64=1 python scripts/matrix/run_atmosphere_test_matrix.py --quick --output results/atmosphere
 ```
 
 If the user requests a full run or specific subset, use the appropriate flags:
@@ -28,7 +28,7 @@ If the user requests a full run or specific subset, use the appropriate flags:
 Run the ocean test matrix:
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --quick --output results/ocean
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py --quick --output results/ocean
 ```
 
 Flags:
@@ -41,7 +41,7 @@ Flags:
 Run the sea ice test matrix:
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_sea_ice_test_matrix.py --quick --output results/sea_ice
+JAX_ENABLE_X64=1 python scripts/matrix/run_sea_ice_test_matrix.py --quick --output results/sea_ice
 ```
 
 Flags:
@@ -252,4 +252,4 @@ Format the report as a markdown summary printed to stdout. Also save it to `resu
 - If only atmosphere or only ocean is requested via arguments, skip the other
 - When generating fix prompts, be specific about file paths and line numbers
 - Conservation thresholds: mass < 0.1%, energy < 5% (atmosphere), volume/heat/salt < 1% (ocean), volume < 5% (sea ice ITD remap)
-- Sea ice matrix: `JAX_ENABLE_X64=1 python scripts/run_sea_ice_test_matrix.py --quick --output results/sea_ice`
+- Sea ice matrix: `JAX_ENABLE_X64=1 python scripts/matrix/run_sea_ice_test_matrix.py --quick --output results/sea_ice`

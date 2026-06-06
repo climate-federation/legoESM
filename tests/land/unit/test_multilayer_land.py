@@ -596,7 +596,7 @@ class TestMultilayerLandStep(unittest.TestCase):
 
     def _make_forcing(self, ncol):
         """Create simple atmospheric forcing."""
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         return AtmToSurface(
             sw_down=jnp.full(ncol, 300.0),
             lw_down=jnp.full(ncol, 350.0),
@@ -636,7 +636,7 @@ class TestMultilayerLandStep(unittest.TestCase):
         self.assertEqual(new_state.theta_soil.shape, (ncol, nlayers))
         self.assertEqual(new_state.psi_soil.shape, (ncol, nlayers))
         self.assertEqual(new_state.runoff_surface.shape, (ncol,))
-        self.assertEqual(response.T_surface.shape, (ncol,))
+        self.assertEqual(response.T_sfc.shape, (ncol,))
         self.assertEqual(response.shflx.shape, (ncol,))
 
     def test_surface_temperature_responds(self):
@@ -721,7 +721,7 @@ class TestMultilayerLandStep(unittest.TestCase):
         from legoesm.land.multilayer_land import (
             step_multilayer_land, init_multilayer_land_state,
         )
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         config = MultiLayerLandConfig()
         ncol = 4
         state = init_multilayer_land_state(ncol, config, T_init=280.0, theta_init=0.2)
@@ -759,7 +759,7 @@ class TestMultilayerLandStep(unittest.TestCase):
             step_multilayer_land, init_multilayer_land_state,
         )
         from legoesm.land.richards import RichardsConfig
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         from legoesm import constants
 
         config = MultiLayerLandConfig(
@@ -820,7 +820,7 @@ class TestMultilayerLandStep(unittest.TestCase):
         from legoesm.land.multilayer_land import (
             step_multilayer_land, init_multilayer_land_state,
         )
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         from legoesm.thermo import saturation_mixing_ratio
         from legoesm.land.carbon.stomata import StomataConfig
 
@@ -855,7 +855,7 @@ class TestMultilayerLandStep(unittest.TestCase):
         )
 
         # The returned q_surface should be LESS than fully saturated
-        T_sfc = response.T_surface
+        T_sfc = response.T_sfc
         q_sat = saturation_mixing_ratio(T_sfc, forcing.p_surface)
 
         # q_surface should be strictly less than q_sat (stomata limiting)

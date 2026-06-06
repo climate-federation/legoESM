@@ -250,7 +250,7 @@ class TestBarotropicWave:
             state_chunk = state._replace(
                 eta=Field(data=eta, name="eta", dims=("nCells",), units="m"),
             )
-            eta, u_bar = barotropic_substeps_mpas(
+            eta, u_bar, _Hu = barotropic_substeps_mpas(
                 state_chunk, mesh, z_coord, config,
                 dt_baro=dt_baro, n_substeps=n_sub,
             )

@@ -21,7 +21,7 @@ from legoesm.ice.itd import (
     aggregate_state,
     distribute_to_categories,
 )
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 
@@ -88,9 +88,12 @@ class TestSeaIceComponent:
         assert jnp.all(jnp.isfinite(conc)), "concentration contains non-finite values"
         assert jnp.all(jnp.isfinite(T)), "T_ice contains non-finite values"
 
-        # Ice should have grown from initial thickness
-        assert jnp.all(h > h_init), (
-            f"Ice should have grown: min h = {jnp.min(h).item():.4f}"
+        # Ice VOLUME (h*conc) should have grown (cold => net freezing).  Under
+        # the volume-based V=h*A update (#28) the MEAN thickness h can DROP as
+        # the refreezing lead averages in thin new ice, so assert on the
+        # conserved volume rather than the (misleading) mean thickness.
+        assert jnp.all(h * conc > h_init * conc_init), (
+            f"Ice volume should have grown: min V = {jnp.min(h * conc).item():.4f}"
         )
         # Concentration should have increased
         assert jnp.all(conc > conc_init), (
@@ -137,9 +140,12 @@ class TestSeaIceComponent:
         assert jnp.all(h >= 0.0), (
             f"Negative ice thickness: min h = {jnp.min(h).item():.6f}"
         )
-        # Ice should have decreased from 1.0 m
-        assert jnp.all(h < 1.0), (
-            f"Ice should have melted: max h = {jnp.max(h).item():.4f}"
+        # Ice VOLUME (h*conc) should have decreased (warm => net melting).
+        # Under the volume-based V=h*A update (#28) melt retreats floe AREA at
+        # ~constant thickness (lateral convention), so the mean thickness h can
+        # stay flat (h ≈ 1.0) while the conserved volume h*conc falls.
+        assert jnp.all(h * conc < 1.0 * 0.9), (
+            f"Ice volume should have melted: max V = {jnp.max(h * conc).item():.4f}"
         )
         # Concentration should have decreased from 0.9
         assert jnp.all(conc < 0.9), (

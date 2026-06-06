@@ -207,3 +207,33 @@ def compute_error_norms(
     linf = jnp.max(jnp.abs(err)) / jnp.max(jnp.abs(ref))
 
     return {"l1": float(l1), "l2": float(l2), "linf": float(linf)}
+
+
+def williamson2_cdgrid_initial_condition(
+    cdgrid, u_0: float = 38.61068276698372, h_0: float = 29400.0 / constants.g
+):
+    """Williamson TC2 initial condition on the cubed-sphere C-D grid.
+
+    Steady solid-body rotation in geostrophic balance: height at cell centres,
+    velocity at D-grid corners (grid-aligned via the corner rotation angle).
+    Side-effect-free shared helper (no global jax.config mutation) used by both
+    ``test_williamson2_cdgrid`` and the Stage-A2 Williamson Experiment rung.
+    """
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterState,
+    )
+
+    g = constants.g
+    omega = constants.Omega
+    R = cdgrid.radius
+
+    lat_c = cdgrid.base.lat  # (6, n, n)
+    h = h_0 - (R * omega * u_0 + 0.5 * u_0 ** 2) * jnp.sin(lat_c) ** 2 / g
+
+    lat_corner = cdgrid.lat_corner
+    u_geo = u_0 * jnp.cos(lat_corner)
+    u_d = u_geo * cdgrid.cos_angle_corner
+    v_d = -u_geo * cdgrid.sin_angle_corner
+
+    h_s = jnp.zeros_like(h)
+    return CDGridShallowWaterState(h=h, u_d=u_d, v_d=v_d, h_s=h_s)

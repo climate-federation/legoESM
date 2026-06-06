@@ -20,7 +20,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "run"))
 import run_rcemip_plane as rcp  # noqa: E402
 
 from legoesm.atmosphere.physics.radiation.integration import (  # noqa: E402
@@ -113,7 +113,7 @@ def test_gate_script_sets_gate_latitude_and_insolation():
     """RAD-8 guard: the GATE driver must place the plane at 8.5°N and use the
     latitude daily-mean insolation ('off'), not the RCEMIP preset."""
     repo = Path(__file__).resolve().parents[2]
-    src = (repo / "scripts" / "run_gate_plane.py").read_text()
+    src = (repo / "scripts" / "run" / "run_gate_plane.py").read_text()
     assert "lat0=8.5" in src, "GATE grid must be at 8.5°N (GATE_IDEAL latitude)"
     assert 'insolation="off"' in src, "GATE must use latitude daily-mean insol"
 
@@ -151,11 +151,11 @@ def test_sam_faithful_crm_drivers_pin_sst():
     hook). GATE/RCE/RCE-MPI are the SAM-comparison targets; a regression here
     un-faithfuls the surface LW boundary."""
     repo = Path(__file__).resolve().parents[2]
-    plane = (repo / "scripts" / "run_rcemip_plane.py").read_text()
+    plane = (repo / "scripts" / "run" / "run_rcemip_plane.py").read_text()
     # the single-node path routes both builders through the SST helper
     assert "_plane_radiation_physics_with_sst" in plane
     assert plane.count("_plane_radiation_physics_with_sst(") >= 3  # def + 2 uses
-    mpi = (repo / "scripts" / "run_rce_mpi_long.py").read_text()
+    mpi = (repo / "scripts" / "run" / "run_rce_mpi_long.py").read_text()
     assert "set_T_sfc_override" in mpi and "T_SFC_K" in mpi
 
 

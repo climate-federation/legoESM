@@ -5,7 +5,7 @@
 Script written and smoke-tested on CPU. Ready for GPU production runs.
 
 **Branch:** `dhruv/weno-core`
-**Script:** `scripts/run_silvestri_baroclinic_jet.py` (~480 LOC)
+**Script:** `scripts/run/run_silvestri_baroclinic_jet.py` (~480 LOC)
 
 ### Smoke test results (20x20, 10 days, CPU)
 
@@ -20,13 +20,13 @@ WENO5 retains ~38% more eddy KE than centered+Smagorinsky — expected ILES beha
 
 ```bash
 # Eddy-permitting (1/4 deg, ~20 min on GPU)
-JAX_ENABLE_X64=1 python scripts/run_silvestri_baroclinic_jet.py \
+JAX_ENABLE_X64=1 python scripts/run/run_silvestri_baroclinic_jet.py \
     --resolution 80x80 --days 200 --dt 300 \
     --schemes centered,leith,weno5,weno5_leith \
     --output-dir results/ocean/silvestri_jet_quarter --plot
 
 # Paper resolution (1/8 deg, ~hours on GPU)
-JAX_ENABLE_X64=1 python scripts/run_silvestri_baroclinic_jet.py \
+JAX_ENABLE_X64=1 python scripts/run/run_silvestri_baroclinic_jet.py \
     --resolution 160x160 --days 1000 --dt 300 \
     --schemes centered,leith,weno5,weno5_leith \
     --output-dir results/ocean/silvestri_jet_eighth --plot
@@ -112,7 +112,7 @@ Create model with scheme-specific config, run time loop, collect diagnostics (to
 
 ### CLI
 ```
-python scripts/run_silvestri_baroclinic_jet.py \
+python scripts/run/run_silvestri_baroclinic_jet.py \
     --schemes centered,weno5 \
     --resolution 20x20 \
     --days 200 --dt 600 \

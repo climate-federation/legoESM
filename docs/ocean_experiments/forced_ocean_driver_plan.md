@@ -12,7 +12,7 @@ built **already exists**.
 
 ## 1. What already exists (recon summary)
 
-`scripts/run_omip.py` — **783 LOC of working OMIP-style driver** for
+`scripts/run/run_omip.py` — **783 LOC of working OMIP-style driver** for
 *all four ocean grids* (cubed-sphere, lat-lon, MPAS, spectral). It already
 provides:
 
@@ -81,7 +81,7 @@ def jra55_to_freshwater(
     )
 ```
 
-**Effort**: ½ day. Lives in `scripts/run_omip.py` or a thin
+**Effort**: ½ day. Lives in `scripts/run/run_omip.py` or a thin
 `src/legoesm/ocean/driver_glue.py` if it grows.
 
 ### Gap B — Replace "restoring-only" forcing with "bulk-flux + sponge + SSS-restoring" mode

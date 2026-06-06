@@ -2,7 +2,7 @@
 
 iter-108: ``CRM_implementation.md`` ``Definition of done`` section
 quotes the DOD criterion 2 thresholds (CWV Wing 2018 plateau range,
-MSE drift bound, plateau-window length) that ``scripts/summarize_rce_trajectory.py``
+MSE drift bound, plateau-window length) that ``scripts/validate/summarize_rce_trajectory.py``
 ``evaluate_rce_quality`` actually gates against. If the two ever drift
 apart — for example, the doc is updated but the code is not, or
 vice-versa — production runs gate against one set of numbers while
@@ -29,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def _load_summarizer_module():
     """Load the summarizer module the same way the integration tests
     do — by path. Lives under ``scripts/`` which is not on sys.path."""
-    path = REPO_ROOT / "scripts" / "summarize_rce_trajectory.py"
+    path = REPO_ROOT / "scripts" / "validate" / "summarize_rce_trajectory.py"
     spec = importlib.util.spec_from_file_location(
         "summarize_rce_trajectory_for_consistency", path,
     )
@@ -151,7 +151,7 @@ def _scrape_driver_argparse_default(flag: str) -> str | int | float:
     """Scrape ``--<flag>``'s argparse default literal from
     run_rce_mpi_long.py. Helper for the parametrized
     preamble-claim consistency tests below."""
-    driver_text = (REPO_ROOT / "scripts" / "run_rce_mpi_long.py").read_text()
+    driver_text = (REPO_ROOT / "scripts" / "run" / "run_rce_mpi_long.py").read_text()
     pat = (
         rf'p\.add_argument\("--{flag}",\s*type=(int|float),'
         rf'\s*default=([0-9.eE_+-]+)'
@@ -225,7 +225,7 @@ def test_dod_quotes_driver_production_grid_size():
     leave the doc claim stale until a human noticed.
     """
     dod = _read_dod_section()
-    driver_text = (REPO_ROOT / "scripts" / "run_rce_mpi_long.py").read_text()
+    driver_text = (REPO_ROOT / "scripts" / "run" / "run_rce_mpi_long.py").read_text()
     # Scrape ``--nx`` and ``--ny`` defaults from argparse calls.
     nx_m = re.search(
         r'p\.add_argument\("--nx",\s*type=int,\s*default=(\d+)',
@@ -260,7 +260,7 @@ def test_dod_quotes_wrapper_default_ranks():
     line, then asserts criterion 2's text references the same N.
     """
     dod = _read_dod_section()
-    wrapper_text = (REPO_ROOT / "scripts" / "run_rce_30day.sh").read_text()
+    wrapper_text = (REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh").read_text()
     m = re.search(r'^RANKS="\$\{RANKS:-(\d+)\}"', wrapper_text, re.MULTILINE)
     assert m, "wrapper missing RANKS env default"
     ranks = int(m.group(1))

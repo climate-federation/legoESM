@@ -57,12 +57,15 @@
 \newcommand{\Ro}{\mathrm{Ro}}
 
 % =============================================================================
+% Document version tracks the package MAJOR.MINOR (single-sourced in the root
+% pyproject.toml [project].version; see the README "Versioning" section).
+\newcommand{\legoesmversion}{0.1}
 \title{
   \vspace{-1cm}
-  \includegraphics[width=0.35\textwidth]{../legoESM.png}\\[12pt]
+  \includegraphics[width=0.35\textwidth]{assets/legoESM.png}\\[12pt]
   \textbf{legoESM Scientific Guide}\\[6pt]
   {\Large A Fully Differentiable Earth System Model in JAX}\\[6pt]
-  {\large Version 5.1 --- May 2026}
+  {\large Version \legoesmversion{} --- June 2026}
 }
 \author{legoESM Development Team}
 \date{}
@@ -155,6 +158,125 @@ Throughout this document:
   \item SI units are used unless otherwise noted;
   \item $f = 2\Omega\sin\phi$ is the Coriolis parameter.
 \end{itemize}
+
+
+% #############################################################################
+\chapter{Software Architecture and Package Federation}
+\label{ch:architecture}
+% #############################################################################
+
+The scientific content of the following chapters maps onto a concrete software
+structure: legoESM is a \emph{federation} of independently-installable Python
+packages that all share one import namespace.  This chapter documents that
+structure --- one subsection (``subchapter'') per package --- so the equations
+of later chapters can be located in code.
+
+\section{Design: one namespace, independently-installable members}
+\label{sec:arch-federation}
+
+legoESM is a \texttt{uv} workspace of eight distribution packages laid out under
+\texttt{packages/<member>/legoesm/<subpkg>/}.  All members ship into a single
+\texttt{legoesm} PEP-420 \emph{namespace package}, so user code always writes
+\texttt{import legoesm.<subpkg>} regardless of which wheel provides it.  The
+design goal is that each Earth-system component can be installed and run on its
+own---\texttt{pip install legoesm-ocean} yields a working ocean model---while a
+single meta-package \texttt{legoesm} pulls the whole stack.
+
+The members obey a strict one-way \textbf{dependency DAG}, enforced in CI by
+\texttt{import-linter} contracts (\texttt{lint-imports}):
+\[
+  \underbrace{\texttt{core}}_{\text{substrate}}
+  \;\prec\;
+  \underbrace{\{\texttt{atmosphere},\,\texttt{ocean},\,\texttt{land},\,\texttt{ice}\}}_{\text{components}}
+  \;\prec\;
+  \underbrace{\{\texttt{coupler},\,\texttt{ml},\,\texttt{tools}\}}_{\text{orchestration}}.
+\]
+Components depend \emph{only} on \texttt{legoesm-core} and never on one another
+or on the coupler; shared physics (e.g.\ the FV3 shallow-water barotropic
+solver reused by the ocean) is exposed through the substrate or via
+\texttt{importlib.metadata} entry points (\texttt{legoesm.sw\_barotropics}), not
+direct cross-component imports.
+
+\section{The substrate: \texttt{legoesm-core}}
+\label{sec:arch-core}
+
+\texttt{legoesm-core} ships the subpackages \texttt{core} (fields, operators,
+state, conservation accumulators, EOS), \texttt{grids} (cubed-sphere, lat-lon,
+Gaussian/spectral, MPAS/Voronoi, vertical coordinates, and the grid+complexity
+\emph{capability matrix}; Chapter~\ref{ch:grids}), \texttt{runtime}
+(device/precision/backend bootstrap), \texttt{parallel} (halo exchange and
+reductions; Chapter on parallelism), \texttt{io}, \texttt{timestepping}
+(RK integrators), and \texttt{components} (the complexity-ladder taxonomy and
+component protocols), together with the loose modules \texttt{constants},
+\texttt{thermo}, \texttt{registry}, and \texttt{surface\_albedo}.  It imports
+nothing above itself.
+
+\section{Earth-system components}
+\label{sec:arch-components}
+
+\subsection{\texttt{legoesm-atmosphere}}
+The \texttt{atmosphere} subpackage: all atmospheric dynamical cores
+(Chapter~\ref{ch:dynamics})---cubed-sphere C-D grid, spectral, lat-lon
+finite-volume and C-grid, MPAS/Voronoi, and SFNO---the physics parameterisation
+packages (radiation, convection, microphysics, boundary layer, clouds,
+gravity-wave drag), and the dycore-free single-column model (SCM).
+
+\subsection{\texttt{legoesm-ocean}}
+The \texttt{ocean} subpackage: the 3-D split-explicit Boussinesq ocean
+(baroclinic/barotropic on cubed-sphere, lat-lon C-grid, and MPAS), vertical and
+lateral mixing (KPP, GM-Redi, tidal), bottom drag and surface forcing,
+biogeochemistry, the idealized-experiment suite, the centennial spin-up library,
+and the peer-comparison fidelity harness.
+
+\subsection{\texttt{legoesm-land}}
+The \texttt{land} subpackage: slab (bucket-hydrology) and multi-layer
+(Richards-equation, Johansen-thermal) land, the DALEC carbon cycle, snow, and
+PFT-weighted parameter providers.
+
+\subsection{\texttt{legoesm-ice}}
+The \texttt{ice} subpackage: thermodynamic slab and EVP/mEVP dynamic sea ice
+with the multi-category ice-thickness distribution and optional snow/brine/
+ridging/pond physics.
+
+\section{Orchestration: coupler, ML, and tools}
+\label{sec:arch-orchestration}
+
+\subsection{\texttt{legoesm-coupler}}
+The \texttt{coupler} subpackage (tile-based surface coupling, bulk-flux and
+surface-energy closure; Chapter~\ref{ch:coupling}) and the \texttt{driver}
+subpackage (\texttt{ModelDriver} for atmosphere-only AMIP, \texttt{CoupledESMDriver}
+for full coupling, \texttt{EarthSystemDriver} for arbitrary compositions, plus
+the reproducibility \emph{run manifest}).
+
+\subsection{\texttt{legoesm-ml}}
+The \texttt{ml} (SFNO blocks, spectral convolutions, conservation-aware losses),
+\texttt{training} (differentiable training driver, ERA5 ingestion, S2S
+workflows), and \texttt{da} (variational 4D-Var on \texttt{jax.grad} through the
+compiled segment kernel) subpackages.
+
+\subsection{\texttt{legoesm-tools}}
+The \texttt{forcing} (GHG/ozone/aerosol/SST/runoff loaders), \texttt{diagnostics}
+(energy/mass budgets, column integrals, and the conservation PASS/FAIL
+\emph{gates}), \texttt{experiments} (including the shared component-agnostic
+\emph{test-matrix framework}, \texttt{experiments.matrix}), and
+\texttt{visualization} subpackages.
+
+\section{Reproducibility, scripts, and experiments}
+\label{sec:arch-reproducibility}
+
+Runnable code lives in bucketed directories under \texttt{scripts/}:
+\texttt{run/} (production drivers), \texttt{matrix/} (the complexity-tiered
+test-matrix runners), \texttt{experiment/} (the template/provenance harness:
+\texttt{init\_experiment}, \texttt{validate\_templates}, \texttt{fetch\_data},
+\texttt{lego\_detect\_machine}), and \texttt{bench/}, \texttt{plot/},
+\texttt{validate/}, \texttt{data/}.  Experiments are versioned, tier-annotated
+YAML \emph{templates} (\texttt{config/templates/}) resolved into a runnable
+directory; every run writes a \texttt{run\_manifest.json} (resolved config,
+state digest, git commit, and library versions) so that
+\texttt{legoesm reproduce} can re-execute it bit-for-bit.  Tests carry
+complexity-tier markers \texttt{tier0}--\texttt{tier3} (research $\to$
+operational) and assert conservation through the same gates as the matrix
+runners.
 
 
 % #############################################################################

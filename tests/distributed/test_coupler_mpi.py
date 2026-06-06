@@ -17,7 +17,7 @@ MPI = pytest.importorskip("mpi4py.MPI")
 from legoesm import constants
 from legoesm.coupler.config import CouplerConfig, TileConfig
 from legoesm.coupler.coupler import init_surface_state, make_coupler
-from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm
+from legoesm.core.coupling_fields import AtmToSurface, SurfaceToAtm
 from legoesm.coupler.lake.config import LakeConfig
 from legoesm.grids.halo import set_halo_backend
 from legoesm.ice.config import SeaIceConfig

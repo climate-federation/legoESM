@@ -126,7 +126,7 @@ Two new test files. Both must follow CLAUDE.md rules: `from legoesm import const
 
 1. Run the full ocean test matrix:
    ```bash
-   JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py
+   JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py
    ```
    This is slow — run in background, check periodically. Confirm zero regressions in equirectangular-grid paths (DST-3, Eady, ACC channel, etc.).
 

@@ -1,4 +1,4 @@
-"""Smoke test for the GATE_IDEAL plane run (``scripts/run_gate_plane.py``).
+"""Smoke test for the GATE_IDEAL plane run (``scripts/run/run_gate_plane.py``).
 
 Assembles SAM's GATE_IDEAL case (sounding + large-scale forcing + SST) on the
 plane CRM and integrates a few steps through the full physics stack (oceflx +
@@ -18,7 +18,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts" / "run"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 

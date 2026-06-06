@@ -1,10 +1,10 @@
-"""Unit tests for ``scripts/summarize_rce_trajectory.py``.
+"""Unit tests for ``scripts/validate/summarize_rce_trajectory.py``.
 
 iter-98: a tool tracking per-day RCE diagnostics is only useful if its
 field extraction matches ``run_rce_mpi_long.py``'s snapshot writer.
 These tests build synthetic ``snap_day_*.npz`` + ``prof_day_*.npz``
 files with the exact key set the production driver writes (verified
-against ``scripts/run_rce_mpi_long.py:save_snapshot_2d`` and
+against ``scripts/run/run_rce_mpi_long.py:save_snapshot_2d`` and
 ``save_profile``) and assert that:
 
 1. Every column in the printed table + the CSV is finite and tracks
@@ -32,6 +32,7 @@ import pytest
 _SCRIPT = (
     Path(__file__).resolve().parents[4]
     / "scripts"
+    / "validate"
     / "summarize_rce_trajectory.py"
 )
 _spec = importlib.util.spec_from_file_location(
@@ -127,7 +128,7 @@ def test_snapshot_key_contract_matches_driver():
     in lockstep, surfacing the contract drift."""
     driver_path = (
         Path(__file__).resolve().parents[4]
-        / "scripts" / "run_rce_mpi_long.py"
+        / "scripts" / "run" / "run_rce_mpi_long.py"
     )
     text = driver_path.read_text()
     for key in SNAP_KEYS:
@@ -142,7 +143,7 @@ def test_profile_key_contract_matches_driver():
     ``qc``, ``qr``, ``cloud_fraction``, ``w_variance``."""
     driver_path = (
         Path(__file__).resolve().parents[4]
-        / "scripts" / "run_rce_mpi_long.py"
+        / "scripts" / "run" / "run_rce_mpi_long.py"
     )
     text = driver_path.read_text()
     for key in ("qc", "qr", "cloud_fraction", "w_variance"):
@@ -805,7 +806,7 @@ def test_evaluate_and_final_dod_mutually_exclusive_exit_code(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path),
             "--evaluate",
             "--final-dod",
@@ -1069,7 +1070,7 @@ def test_no_plateau_check_folds_insufficient_into_pass(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path),
             "--evaluate", "--no-plateau-check",
         ],
@@ -1119,7 +1120,7 @@ def test_no_plateau_check_still_fails_on_blowup(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path),
             "--evaluate", "--no-plateau-check",
         ],
@@ -1149,7 +1150,7 @@ def test_no_plateau_check_rejected_with_final_dod(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path),
             "--final-dod", "--no-plateau-check",
         ],
@@ -1174,7 +1175,7 @@ def test_summarize_quiet_suppresses_table(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path),
             "--quiet",
         ],
@@ -1211,7 +1212,7 @@ def test_quiet_with_evaluate_still_prints_verdict(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path),
             "--quiet", "--evaluate",
         ],
@@ -1243,7 +1244,7 @@ def test_quiet_with_no_plateau_check_prints_stability_verdict(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path),
             "--quiet", "--evaluate", "--no-plateau-check",
         ],
@@ -1338,7 +1339,7 @@ def test_check_log_max_w_passes_on_quiet_run(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path), "--check-log-max-w", "--quiet",
         ],
         capture_output=True, text=True, check=False,
@@ -1359,7 +1360,7 @@ def test_check_log_max_w_fails_on_blowup(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path), "--check-log-max-w", "--quiet",
         ],
         capture_output=True, text=True, check=False,
@@ -1414,7 +1415,7 @@ def test_check_log_max_w_fails_on_missing_log(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path), "--check-log-max-w", "--quiet",
         ],
         capture_output=True, text=True, check=False,
@@ -1484,7 +1485,7 @@ def test_final_dod_cli_emits_dod_final_label_on_pass(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path), "--final-dod", "--quiet",
         ],
         capture_output=True, text=True, check=False,
@@ -1525,7 +1526,7 @@ def test_final_dod_cli_exits_dod_fail_on_runaway_evaporation(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path), "--final-dod", "--quiet",
         ],
         capture_output=True, text=True, check=False,
@@ -1558,7 +1559,7 @@ def test_final_dod_cli_exits_insufficient_on_short_run(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path), "--final-dod", "--quiet",
         ],
         capture_output=True, text=True, check=False,
@@ -1598,7 +1599,7 @@ def test_combined_final_dod_and_check_log_max_w_passes_30day(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path),
             "--final-dod", "--check-log-max-w", "--quiet",
         ],
@@ -1644,7 +1645,7 @@ def test_combined_evaluate_and_check_log_max_w(tmp_path):
         [
             sys.executable,
             str(Path(__file__).resolve().parents[4]
-                / "scripts" / "summarize_rce_trajectory.py"),
+                / "scripts" / "validate" / "summarize_rce_trajectory.py"),
             str(tmp_path),
             "--evaluate", "--check-log-max-w", "--quiet",
         ],
@@ -1712,7 +1713,7 @@ def test_parse_log_max_w_handles_utf8_content(tmp_path):
 
 # iter-154: parse_log_max_w robustness against corrupt rows. The
 # implementation has two distinct "skip + keep going" branches at
-# scripts/summarize_rce_trajectory.py:504 (column-count mismatch)
+# scripts/validate/summarize_rce_trajectory.py:504 (column-count mismatch)
 # and 508 (non-numeric float parse). Both surface in real runs:
 # - col-count mismatch when an MPI rank crash truncates a row mid-
 #   write (the driver appends row-at-a-time but flushes after each
