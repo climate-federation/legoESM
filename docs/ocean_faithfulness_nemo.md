@@ -84,7 +84,20 @@ div-damp no-effect, smoothing worse, flat no-effect) — same dead-end the 1° t
 Whack-a-mole across ALL sharp-gradient semi-enclosed basins (Med, Gulf, Japan, Okhotsk,
 Bering...) → masking removes too much ocean, not faithful. Kept as opt-in
 `--cube-mask-marginal-seas` (delays; useful only WITH the PGF fix).
-**NEW LEAD (iter-31, balanced-init failure) — FC GIBBS AT SHARP FRONTS:** cube
+**DEFINITIVE (iter-32): cube cold-start needs the FULL conditioning stack ported to the
+A-grid.** cd-grid FD PGF (8418136) ALSO blows at the marginal seas (Red Sea/Persian Gulf,
+step 6-12) → the FC-Gibbs lead below is WRONG; BOTH gradient ops fail. C64 higher-res
+(8418081) ALSO blows (step 9) → resolution alone insufficient. The marginal-sea blowup is
+the real sharp-front violent geostrophic adjustment, identical mechanism whatever the
+gradient/resolution. KEY: lat-lon 1° survives the SAME Med because it has partial cells +
+smc03 PGF + balanced-init + RK3 + smag-cfl-cap + polar filter; the cube A-grid `OceanModel`
+has NONE of these. **Cube faithful path = port the entire conditioning stack to the cube
+A-grid (partial cells, smc03 PGF, working balanced-init, smag-cfl viscosity cap) — a major
+multi-iteration dycore project** (the C-grid stack took ~20 iters to build). Individually
+each cube lever failed (RK3 worse, balanced-init clip-saturates, masking cascades); they
+are needed TOGETHER + likely ~C90 resolution. This is the cube's true scope.
+
+**(WRONG lead, kept for record) FC GIBBS AT SHARP FRONTS:** cube
 geostrophic balanced-init (`_balanced_init_cube`, c7d99add) FAILED — `max|u_g|`
 saturated the 2.5 m/s clip everywhere, i.e. the geostrophic velocity from the SAME 1°
 Med front is ~100× the latlon's. Cause: the **FC (Fourier-continuation) SPECTRAL
