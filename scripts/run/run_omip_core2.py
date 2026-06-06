@@ -878,7 +878,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        flat_bottom: bool = False, A_h=None, hyperdiff_coeff=None,
                        div_damp_2=None, div_damp_4=None, baroclinic_rk3=None,
                        mask_marginal_seas=False, balanced_init=False,
-                       use_fc=True, dt=30.0, balanced_max_speed=1.5):
+                       use_fc=True, dt=30.0, balanced_max_speed=1.5,
+                       velocity_ceiling=None):
     """Build a cubed-sphere ocean (FC-Gram spectral baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -939,7 +940,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                               ("hyperdiff_coeff", hyperdiff_coeff),
                               ("div_damp_2", div_damp_2),
                               ("div_damp_4", div_damp_4),
-                              ("baroclinic_rk3", baroclinic_rk3)) if v is not None}
+                              ("baroclinic_rk3", baroclinic_rk3),
+                              ("velocity_ceiling", velocity_ceiling)) if v is not None}
     if _ovr:
         config = config._replace(**_ovr)
         print(f"[setup] cube config override: {_ovr}")
@@ -1198,6 +1200,9 @@ def main() -> int:
     p.add_argument("--cube-rk3", action="store_true",
                    help="cube: 3-stage SSP-RK3 baroclinic update (vs forward-Euler) "
                         "— the tripole cold-start fix ported to the cube OceanModel.")
+    p.add_argument("--cube-velocity-ceiling", type=float, default=None,
+                   help="cube: clip |u|,|v| to this [m/s] each step -- bounds the sub-grid "
+                        "marginal-sea jet spikes (caveated open-ocean run).")
     p.add_argument("--cube-bal-maxspeed", type=float, default=1.5,
                    help="cube balanced-init geostrophic velocity clip [m/s]. High "
                         "(e.g. 10) = effectively unclipped (trust the balance — a "
@@ -1455,6 +1460,7 @@ def main() -> int:
             balanced_init=args.balanced_init,
             use_fc=(not args.cube_no_fc), dt=args.dt,
             balanced_max_speed=args.cube_bal_maxspeed,
+            velocity_ceiling=args.cube_velocity_ceiling,
         )
         app_grid_type = "cubed_sphere"
     else:

@@ -478,6 +478,24 @@ class OceanModel:
                 state_new, state, self.grid, self.z_coord, self.config,
             )
 
+        # --- 5b. Velocity ceiling (STATIC config gate) ---
+        # Pragmatic stabiliser for the quasi-uniform cube: marginal seas
+        # (Med/Aegean/Gulf) are sub-grid even at 1/4deg (the ORCA tripole refines
+        # coasts, the cube cannot) -> their sharp WOA fronts spin up uncarriable
+        # >10 m/s jets that blow the cold-start. Clipping |u|,|v| to a physical
+        # ceiling bounds those spikes (open ocean |u|<ceiling is untouched), so the
+        # run is stable for a CAVEATED open-ocean comparison (the capped marginal-sea
+        # cells are non-physical -- like the lat-lon Arctic caveat). Documented band-aid
+        # (docs/ocean_experiments/cubed_sphere_pgf_stability.md: clipping prevents NaN).
+        if self.config.velocity_ceiling > 0.0:
+            vmax = self.config.velocity_ceiling
+            state_new = state_new._replace(
+                u=state_new.u.replace(
+                    data=jnp.clip(state_new.u.data, -vmax, vmax)),
+                v=state_new.v.replace(
+                    data=jnp.clip(state_new.v.data, -vmax, vmax)),
+            )
+
         # ``allow_downcast=True`` is required here so the output state
         # matches the user-provided input dtype.  Without it the
         # ``cast_pytree(..., "compute")`` upcast at the top of ``step``

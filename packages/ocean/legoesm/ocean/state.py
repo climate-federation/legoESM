@@ -161,6 +161,10 @@ class OceanConfig(NamedTuple):
     # update in 3-stage SSP-RK3 (3x tendency cost); the barotropic substeps run
     # once afterward as before.
     baroclinic_rk3: bool = False
+    # Per-step velocity ceiling [m/s] (0 = off). Pragmatic stabiliser for the
+    # quasi-uniform cube: sub-grid marginal-sea fronts spin up uncarriable jets;
+    # clipping |u|,|v| bounds them (open ocean untouched) for a caveated comparison.
+    velocity_ceiling: float = 0.0
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
     barotropic_staggering: str = "a_grid"  # "a_grid", "c_grid" or "fv3sw"
