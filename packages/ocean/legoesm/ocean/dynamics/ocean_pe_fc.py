@@ -31,6 +31,7 @@ from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
+    OceanPartialCellCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
 )
@@ -40,6 +41,26 @@ from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     vertical_advection_ocean as _vertical_advection_ocean,
 )
+
+
+def _extrapolate_below_seafloor(field, z_coord):
+    """Fill below-seafloor (inactive) cells of a per-column field with the
+    deepest ACTIVE value of that column (constant downward extrapolation).
+
+    Active cells are a surface-down prefix (``k <= bottom_level``), so the
+    inactive cells are the suffix below the seafloor.  Filling them with the
+    deepest-active value gives the FC horizontal stencils a smooth,
+    physically-defined value at the seafloor step, so an active cell adjacent
+    to a shallower column cannot import a stale/poison rock-cell value
+    (tracer or, via the EOS, density).  This is the FC-idiomatic analogue of
+    the cd-grid ``fill_land_cells`` rock fill, extended per level.
+
+    Dry columns (``bottom_level == -1``) become a constant column; they are
+    removed by the 2D land mask downstream.
+    """
+    bl = jnp.maximum(z_coord.bottom_level, 0)[..., jnp.newaxis]   # (..., 1)
+    deepest = jnp.take_along_axis(field, bl, axis=-1)             # (..., 1)
+    return jnp.where(z_coord.is_active, field, deepest)
 
 
 def ocean_baroclinic_tendencies_fc(
@@ -89,15 +110,52 @@ def ocean_baroclinic_tendencies_fc(
         eta_safe, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
     )
 
+    # Partial-cell below-seafloor mask (3D). With an
+    # ``OceanPartialCellCoordinate`` the deepest active level per column is
+    # ``bottom_level`` and cells beneath it carry ``h_partial = 0``; gate
+    # them out so their (non-thickness-weighted) momentum/tracer tendencies
+    # cannot inject spurious flow.  For a pure ``OceanZStarCoordinate`` every
+    # wet column is full-depth, so ``active_3d`` is all-ones and the cube path
+    # stays BIT-EXACT (the 2D land mask still handles dry columns).
+    is_partial = isinstance(z_coord, OceanPartialCellCoordinate)
+    if is_partial:
+        active_3d = z_coord.is_active.astype(u.dtype)
+        # Hold below-seafloor velocities at zero at the source so every
+        # downstream operator (KE, vorticity, divergence, advection) sees an
+        # inert dead zone rather than stale IC values.
+        u = u * active_3d
+        v = v * active_3d
+        # Extrapolate T,S into the rock so the EOS density and the FC
+        # horizontal tracer stencils cannot import a stale below-seafloor
+        # value into an active cell next to a shallower column.  After this,
+        # NO inactive value can contaminate an active-cell tendency.  Residual
+        # partial-cell inaccuracies that remain (and are the iter-2 smc03 +
+        # wet-face scope, NOT garbage): (i) the centred-PGF hydrostatic
+        # inconsistency at the partial bottom cell; (ii) the FC mass-flux /
+        # vertical-advection seafloor-step treatment (bounded — same class as
+        # the existing FC coastline handling; u,v are zero in the rock and
+        # w -> 0 at the seafloor).
+        T = _extrapolate_below_seafloor(T, z_coord)
+        S = _extrapolate_below_seafloor(S, z_coord)
+    else:
+        active_3d = jnp.ones_like(mask_3d)
+
     # --- 2. Density from EOS ---
+    # Pass the partial-cell-aware thickness (``h_actual``) so the hydrostatic
+    # integral uses the true bottom-cell thickness; for z* this equals
+    # ``dz_ref * J`` exactly, preserving the legacy result.
     p_hydro = compute_hydrostatic_pressure(
         jnp.full_like(T, rho_0), eta_safe, z_coord.dz_ref, J, rho_0, g,
+        h_actual=h_k,
     )
     rho = wright_eos(T, S, p_hydro)
     rho_prime = rho - rho_0
 
     # --- 3. Baroclinic pressure gradient ---
-    dz_actual = z_coord.dz_ref * J[..., jnp.newaxis]
+    # ``h_k`` is the partial-cell-aware layer thickness (== ``dz_ref * J`` for
+    # z*); below-seafloor cells have ``h_k = 0`` so they add nothing to the
+    # hydrostatic-pressure cumulative sum.
+    dz_actual = h_k
     dp_layer = rho_prime * g * dz_actual
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer
@@ -403,21 +461,34 @@ def ocean_baroclinic_tendencies_fc(
             du_dt = du_dt - r_eff_u * u * drag_factor
             dv_dt = dv_dt - r_eff_v * v * drag_factor
         else:
-            # Single-cell drag at the bottom level only. h_k bottom is
-            # ``h_k[..., -1]``; we add ``-r_eff * u / h_bot`` to that
-            # level via a one-hot mask along the level axis.
-            h_bot = jnp.maximum(h_k[..., -1:], 1e-10)
-            nlev_local = u.shape[-1]
-            bot_onehot = jnp.zeros_like(h_k)
-            bot_onehot = bot_onehot.at[..., -1].set(1.0)
+            # Single-cell drag at the deepest ACTIVE level. For pure z* this
+            # is level -1; for partial cells the seafloor sits at the
+            # per-column ``bottom_level`` (level -1 there is below the
+            # seafloor with h=0, so drag must target ``bottom_level`` or it
+            # silently vanishes on every partial column).
+            if is_partial:
+                nlev_local = u.shape[-1]
+                k_idx = jnp.arange(nlev_local, dtype=z_coord.bottom_level.dtype)
+                bot_onehot = (
+                    k_idx == z_coord.bottom_level[..., jnp.newaxis]
+                ).astype(h_k.dtype)
+                h_bot = jnp.maximum(
+                    jnp.sum(h_k * bot_onehot, axis=-1, keepdims=True), 1e-10,
+                )
+            else:
+                h_bot = jnp.maximum(h_k[..., -1:], 1e-10)
+                bot_onehot = jnp.zeros_like(h_k)
+                bot_onehot = bot_onehot.at[..., -1].set(1.0)
             du_dt = du_dt - r_eff_u * u * bot_onehot / h_bot
             dv_dt = dv_dt - r_eff_v * v * bot_onehot / h_bot
 
-    # --- 12. Land masking ---
-    du_dt = du_dt * mask_3d
-    dv_dt = dv_dt * mask_3d
-    dT_dt = dT_dt * mask_3d
-    dS_dt = dS_dt * mask_3d
+    # --- 12. Land + below-seafloor masking ---
+    # ``active_3d`` is all-ones for z* (bit-exact) and zeros the
+    # below-seafloor partial cells otherwise.
+    du_dt = du_dt * mask_3d * active_3d
+    dv_dt = dv_dt * mask_3d * active_3d
+    dT_dt = dT_dt * mask_3d * active_3d
+    dS_dt = dS_dt * mask_3d * active_3d
 
     # --- 13. Free-surface tendency ---
     deta_dt = -jnp.sum(flux_div_k, axis=-1) * mask

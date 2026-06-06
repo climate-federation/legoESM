@@ -879,7 +879,7 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        div_damp_2=None, div_damp_4=None, baroclinic_rk3=None,
                        mask_marginal_seas=False, balanced_init=False,
                        use_fc=True, dt=30.0, balanced_max_speed=1.5,
-                       velocity_ceiling=None):
+                       velocity_ceiling=None, partial_cell=False):
     """Build a cubed-sphere ocean (FC-Gram spectral baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -945,14 +945,10 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     if _ovr:
         config = config._replace(**_ovr)
         print(f"[setup] cube config override: {_ovr}")
-    # FC-Gram spectral baroclinic backend by default; use_fc=False uses the
-    # cd-grid Arakawa-Lamb FINITE-DIFFERENCE path (no Fourier Gibbs at sharp
-    # marginal-sea fronts — tests the iter-31 FC-Gibbs hypothesis).
-    _fc = build_fc_config(dtype=jnp.float64) if use_fc else None
-    model = OceanModel(grid, z_coord, config, fc_config=_fc)
-    print(f"[setup] cube backend: {'FC-Gram spectral' if use_fc else 'cd-grid FD'}")
     # NEMO bathy/mask -> cube cell centres (point-target IDW; the curvilinear
-    # mesh is the same faithful geometry tripole/latlon use).
+    # mesh is the same faithful geometry tripole/latlon use).  Built BEFORE the
+    # model so partial cells can fold H_bathy into the vertical coordinate that
+    # the model stores and steps with.
     import xarray as xr
     e_mask, e_H = read_mesh_mask_bathy(mesh_path)
     ds = xr.open_dataset(mesh_path)
@@ -972,6 +968,28 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     print(f"[setup] cubed_sphere C{n}: ocean cells {int(land_mask.sum())}/"
           f"{land_mask.size}, H_bathy [{H_bathy[land_mask>0.5].min():.0f},"
           f"{H_bathy.max():.0f}] m")
+    # Partial bottom cells: fold the regridded bathymetry into the vertical
+    # coordinate (Adcroft-Hill-Marshall 1997 / Adcroft-Campin 2004) instead of
+    # the default pure-z* uniform stretch.  Reuses the canonical
+    # ``make_partial_cell`` (thin-cell snap; defaults are cube-safe — no
+    # bathy smoothing, min_levels=1).  Prerequisite for the smc03 PGF.
+    if partial_cell:
+        if not use_fc:
+            raise ValueError(
+                "cube --partial-cell currently requires the FC backend; the "
+                "cd-grid (--cube-no-fc) partial-cell substrate is not wired "
+                "yet (its PGF still reads z_coord.dz_ref)."
+            )
+        z_coord, H_bathy, land_mask = make_partial_cell(
+            z_coord, H_bathy, land_mask,
+        )
+    # FC-Gram spectral baroclinic backend by default; use_fc=False uses the
+    # cd-grid Arakawa-Lamb FINITE-DIFFERENCE path (no Fourier Gibbs at sharp
+    # marginal-sea fronts — tests the iter-31 FC-Gibbs hypothesis).
+    _fc = build_fc_config(dtype=jnp.float64) if use_fc else None
+    model = OceanModel(grid, z_coord, config, fc_config=_fc)
+    print(f"[setup] cube backend: {'FC-Gram spectral' if use_fc else 'cd-grid FD'}"
+          f"{' + partial cells' if partial_cell else ''}")
     state = rest_state_ocean(grid, z_coord, H_max=H_max)
     state = state._replace(
         land_mask=state.land_mask.replace(data=jnp.asarray(land_mask)),
@@ -1236,10 +1254,13 @@ def main() -> int:
     p.add_argument("--partial-cell", action="store_true",
                    help="Use OceanPartialCellCoordinate (z-level + partial bottom "
                         "steps, NEMO-faithful) with thin-cell snapping, instead of "
-                        "the plain sigma-like z* coord from _create_setup. Activates "
-                        "the Adcroft/SMC03 partial-cell PGF correction (gated off for "
-                        "plain z*) and matches NEMO's vertical coordinate. Fixes the "
-                        "spurious equatorial-bottom PGF cold-start blowup (job 8106208).")
+                        "the plain sigma-like z* coord from _create_setup. For "
+                        "tripole/latlon this activates the Adcroft/SMC03 partial-cell "
+                        "PGF correction; for the cube (FC backend) it builds the "
+                        "partial-cell substrate (true bottom-cell thickness + "
+                        "below-seafloor masking) — prerequisite for the cube smc03 "
+                        "PGF. Matches NEMO's vertical coordinate. Fixes the spurious "
+                        "equatorial-bottom PGF cold-start blowup (job 8106208).")
     p.add_argument("--pgf-scheme", type=str, default=None, choices=[None, "adcroft", "smc03"],
                    help="Override tripole PGF scheme (default: run_omip's adcroft).")
     p.add_argument("--A-h", type=float, default=None, help="Override Laplacian viscosity [m2/s].")
@@ -1461,6 +1482,7 @@ def main() -> int:
             use_fc=(not args.cube_no_fc), dt=args.dt,
             balanced_max_speed=args.cube_bal_maxspeed,
             velocity_ceiling=args.cube_velocity_ceiling,
+            partial_cell=args.partial_cell,
         )
         app_grid_type = "cubed_sphere"
     else:

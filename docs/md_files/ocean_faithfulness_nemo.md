@@ -37,7 +37,7 @@ improve further. Runoff feature: wired+codex+tested+validated (commits 7ecf0b88,
 |---|---|---|
 | **tripole/eORCA025 ¼°** | STABLE (corrected-IC + RK3 + stack) | **day-90 SST RMSE 1.15, corr 0.99 — EXCELLENT** |
 | **latlon 1°** | STABLE (mask-aware polar filter) | **day-90 SST RMSE 1.12, corr 0.99 — EXCELLENT** (converges 1.23→1.12) |
-| cubed_sphere | harness DONE; **RESOLUTION-CONVERGENT** (blowup step C32→6, C64→9, C128→37, ~2×/doubling) | needs ~C256 (¼°, like eORCA025) + stack; GPU-blocked + expensive |
+| cubed_sphere | **PARTIAL CELLS now ON (FC)** → C32 cold-start step 11→~130 (~12×, smooth ramp); was full-z* before | next = smc03 PGF on cube A-grid (residual surface coastal front), then ~C256 ¼° |
 | mpas | untested w/ CORE-II; ico3 ~900 km RESOLUTION-LIMITED | #160 full-PV refactor (HARD, see below) + core2 builder + ¼° |
 | spectral | applicator CANNOT force it; T21 ~5.6° RESOLUTION-LIMITED | grid-space forcing path (largest gap) + core2 builder + higher res |
 
@@ -83,6 +83,25 @@ until GPU + the ¼° mpas builder exist.
   coordinate/unit bug fixes (scorer double-rad2deg, WOA lat/lon mismatch, NEMO mask, _idx_t +3h).
 
 ## GRID-3 cubed_sphere — harness COMPLETE; cold-start is the gate
+**BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
+partial-cell support** — `ocean_pe_fc.py`/`ocean_pe_cdgrid.py` hardcoded `z_coord.dz_ref`
+and the builder never built a partial coord, so the cube ran **full z\* (sigma-like uniform
+stretch) on real NEMO bathy** — the seafloor entered ONLY via the 2D land mask. ALL prior
+"lever exhausted" cube verdicts below were on that crippled substrate. FIX: added the
+partial-cell substrate to the FC backend (`ocean_pe_fc.py`: `h_actual=h_k`, `dz_actual=h_k`,
+3D `is_active` below-seafloor gating of velocities+tendencies, partial-aware single-cell
+bottom drag at `bottom_level`) + wired `--partial-cell` into `build_cubed_sphere` via the
+canonical `make_partial_cell` (bathy now built before the model so the coord folds it in).
+z\* path **bit-exact** (10/10 existing cube-FC tests pass; 4/4 new leaf tests:
+flat-bottom bit-exact, below-seafloor zero, sloped-bottom changes result, AD-finite).
+**EMPIRICAL (C32 cold-start, dt=30, woa-init, job 8419062):** z\* NaN @ **step 11**;
+partial cells **finite to step ~121, smooth ramp** (max|u| 0.27→3.6 m/s over 120 steps),
+blowup @ step ~132→NaN 143. **~12× delay + smooth physical spin-up** — partial cells are a
+MAJOR cold-start stabilizer ON THEIR OWN (fixed the deep-bottom staircase PGF). Residual
+seed moved to a SURFACE coastal front (43.6N/295E lev2, NW-Atlantic shelf), NOT the deep
+bottom → that is the smc03-PGF target. NEXT (iter 2): smc03 density-Jacobian PGF on the cube
+A-grid (`pgf_smc03_cube.py`, reuse grid-neutral `pgf_smc03.py` kernels) + FC dispatch +
+`OceanConfig.pgf_scheme`. The cd-grid (`--cube-no-fc`) substrate is still TODO (guarded).
 **Built (d4e6c90b, 26fe0d54, 233c9cf0, 0852f97c):** `build_cubed_sphere` in run_omip_core2
 (`_create_setup` cube FC-Gram backend + fv3sw barotropic; NEMO eORCA1 bathy→cube cells via new
 `_regrid_curv_to_points` IDW; WOA IC via grid-agnostic `compute_woa_3d` with N-D flood-fill;
