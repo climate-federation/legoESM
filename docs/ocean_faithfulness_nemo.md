@@ -84,6 +84,18 @@ div-damp no-effect, smoothing worse, flat no-effect) — same dead-end the 1° t
 Whack-a-mole across ALL sharp-gradient semi-enclosed basins (Med, Gulf, Japan, Okhotsk,
 Bering...) → masking removes too much ocean, not faithful. Kept as opt-in
 `--cube-mask-marginal-seas` (delays; useful only WITH the PGF fix).
+**iter-33 — REAL BUG FOUND + FIXED (viscosity gap):** ocean_pe_fc gates ALL core viscosity
+(A_h/A_v/hyperdiff on u,v) behind `if physics_fn is None`. The cube's external-forcing
+physics (physics_fn set) ran with NEAR-ZERO momentum viscosity (default harmonic A_h=1e4,
+enforce_cfl=False) — that's why earlier OceanConfig.A_h overrides were bit-identical (wrong,
+skipped field). FIX (2c253db9): build_cubed_sphere configures the PHYSICS harmonic with a
+STRONG CFL-CAPPED A_h (1e9, enforce_cfl=True, cfl_dt_estimate=dt) = cube smag-cfl-cap analogue.
+Spike 11.6→8.4 m/s (~28%) but INSUFFICIENT alone; dt=10 delays; balanced-init+viscosity also
+blows (the cube `_balanced_init_cube` is low-quality: max|u_g| clip-saturates 2.5 m/s
+everywhere, deep/equatorial level-of-no-motion reference wrong). NEXT: fix the cube
+balanced-init quality (correct LNM at depth + equator) THEN combine with the now-working
+viscosity; add partial cells + smc03 PGF. The viscosity gap fix is the first real stack piece.
+
 **DEFINITIVE (iter-32): cube cold-start needs the FULL conditioning stack ported to the
 A-grid.** cd-grid FD PGF (8418136) ALSO blows at the marginal seas (Red Sea/Persian Gulf,
 step 6-12) → the FC-Gibbs lead below is WRONG; BOTH gradient ops fail. C64 higher-res
