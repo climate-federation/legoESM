@@ -85,6 +85,26 @@ def _wstats(a, b, area):
             "bias": bias, "rmse": rmse, "corr": corr}
 
 
+def _band_breakdown(fieldL, fieldN, area, tgt_lat):
+    """Per-latitude-band area-weighted stats, to localise where a global RMSE
+    comes from (Southern Ocean vs tropics vs Arctic etc.). ``area`` already
+    carries the ocean mask (0 on land/outside). Returns {band: stats}."""
+    bands = {
+        "antarctic_S_of_45S": (-90.0, -45.0),
+        "SH_midlat_45S_23S": (-45.0, -23.0),
+        "tropics_23S_23N": (-23.0, 23.0),
+        "NH_midlat_23N_45N": (23.0, 45.0),
+        "arctic_N_of_45N": (45.0, 90.0),
+    }
+    lat2d = tgt_lat[:, None] * np.ones((1, area.shape[1]))
+    out = {}
+    for name, (lo, hi) in bands.items():
+        m = (lat2d >= lo) & (lat2d < hi)
+        a = area * m
+        out[name] = _wstats(fieldL, fieldN, a) if a.sum() > 0 else None
+    return out
+
+
 def _load_legoesm(path):
     s = np.load(path)
     # lat_T/lon_T are written by run_omip_core2._save_snapshot ALREADY IN DEGREES
@@ -194,6 +214,12 @@ def main() -> int:
     sss = _wstats(sssL, sssN, area)
     print(f"[SST] {sst}")
     print(f"[SSS] {sss}  (GATED: runoff=0, informational)")
+    sst_bands = _band_breakdown(sstL, sstN, area, tgt_lat)
+    print("[SST bands]")
+    for bn, bs in sst_bands.items():
+        if bs is not None:
+            print(f"   {bn:22s} rmse={bs['rmse']:.2f} bias={bs['bias']:+.2f} "
+                  f"corr={bs['corr']:.3f}")
 
     def _verdict(rmse, exc, good):
         return ("excellent" if rmse < exc else "good" if rmse < good else "poor")
@@ -204,6 +230,7 @@ def main() -> int:
         "nemo_gridt": str(args.nemo_gridt), "nemo_time_idx": args.nemo_time_idx,
         "n_ocean_cells": int(ocean.sum()),
         "SST": sst, "SST_verdict": sst_v,
+        "SST_bands": sst_bands,
         "SSS_gated_runoff0": sss,
         "tolerances": _TOL,
     }

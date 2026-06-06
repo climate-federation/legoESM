@@ -11,18 +11,49 @@ promise DONE only when grids genuinely match NEMO — tripole SST done; NOT all 
 
 ---
 
-## CURRENT STATE (iter 18)
+## CURRENT STATE (iter 20 — ralph resume, post-merge)
 
-**FAITHFUL TRIPOLE SST MATCH ACHIEVED.** legoESM ¼° eORCA025 reproduces NEMO ORCA1
-(CORE-II) SST with **corr ~0.99**. Trustworthy run 8131128 (the solve config below)
-completed 12 d stable, physical max|u| 0.67→0.47 m/s. vs NEMO yr-2:
-- day-4 (8132087): SST bias −0.61, **RMSE 1.49 °C, corr 0.991 → EXCELLENT**
-- day-12 (8134991): SST bias −0.60, **RMSE 1.76 °C, corr 0.987 → GOOD**
-- SSS corr ~0.90, RMSE ~1.1, bias +0.06 (excellent pattern, runoff-gated).
+**Merge:** `origin/main` merged into branch 2026-06-06. Main restructured `src/legoesm`
+→ `packages/<pkg>/legoesm` (PEP420 namespace) + brought the **#356 tripole-MPI deadlock
+fix** (fold active on all ranks + `fold_j=-1` sentinel, gated `_fold_is_local`) which
+SUPERSEDED my branch's `_inactive_fold` fold approach. **sbatch now needs
+`PYTHONPATH=$(ls -d packages/*/)`** (else jn2808's old `src/legoesm` shadows my code);
+scorer → `scripts/validate/compare_omip_nemo.py`; this doc → `docs/`. See memory
+[[omip-postmerge-packages-layout]].
 
-Pattern corr stays ~0.99; RMSE drifts up as the model settles into its OWN equilibrium
-(two cores under one forcing diverge in detail). **Definitive corrected+RK3 3-month
-climatology run = 8135049** (glab1, snap/15 d) → equilibrated SST/SSS + spun-up transports.
+**TRIPOLE SST: GOOD at short lead, DEGRADES at equilibration.** ¼° eORCA025 vs NEMO yr-5:
+- day-4 (8132087): RMSE 1.49 °C, corr 0.991 → EXCELLENT
+- day-12 (8134991): RMSE 1.76 °C, corr 0.987 → GOOD
+- **day-90 (8417489, equilibrated climatology run 8135049): RMSE 2.92 °C, bias −0.30,
+  corr 0.966 → POOR.** Global-mean bias IMPROVES (−0.6→−0.3) but pattern RMSE WORSENS and
+  corr drops → regional errors grow as the model settles into its OWN climate. NOT yet
+  "excellent" at equilibration — this is the open faithfulness gap.
+- SSS corr ~0.89, RMSE ~1.18, bias +0.09 (runoff-gated, informational).
+
+**Band breakdown (8417490) localises the 2.9 °C — hemispheric DIPOLE:**
+| band | RMSE | bias | | band | RMSE | bias |
+|---|---|---|---|---|---|---|
+| Arctic >45N | 5.49 | **−4.90** | | tropics | 1.37 | +0.26 |
+| NH-mid 23-45N | 4.56 | **−3.68** | | SH-mid 23-45S | 2.40 | +2.30 |
+| | | | | Antarctic <45S | 1.72 | +1.46 |
+NH too COLD (Arctic/midlat), SH too WARM. NH dominates global RMSE.
+
+**FIX #1 — freezing-point floor (iter-20, DONE+tested, run launched).** Arctic −4.9
+diagnosed as **missing sea-ice/freezing process**: legoESM ocean has no freezing, so
+exposed Arctic water super-cools below seawater freezing (−1.8 °C) — unphysical; NEMO's
+LIM ice caps SST. Scorer freeze-clamp `−1.8` (8417491) PROVED it: global RMSE **2.92→2.45
+(poor→good)**, bias −0.30→0.00, Arctic 5.49→**2.86**. Implemented model-side as gated
+`config.freeze_floor` (sea-ice thermodynamic surrogate, same `jnp.maximum(T,T_freeze)` clamp
+as `simple_ocean.py`): `LatLonCGridOceanConfig.{freeze_floor,freeze_floor_temp_c}`,
+`LatLonCGridOceanModel._apply_freeze_floor` in `step()` (static-bool gated), runner
+`--freeze-floor`. 4 unit tests pass (8417498). Flooring EVERY step (vs only at scoring)
+should beat the diagnostic — **run 8417505** (¼° 3mo + `--freeze-floor`, winning config;
+codex-reviewed surface-only clamp, both step + scan paths). Committed 3a632fad. Score
+day-90 vs NEMO when done; expect global SST RMSE < 2.45 (floor every step beats end-only).
+
+**STILL OPEN after freeze-floor:** NH-midlat −3.68 (WBC cold bias, resolution/heat-transport
+— NOT a freezing cell, unfixed by floor); SH warm +1.5..+2.3 (Southern Ocean too warm —
+mixing / convection / AABW / WOA IC). Next diagnoses.
 
 ### THE SOLVE (winning config)
 ```

@@ -693,6 +693,14 @@ def build_omip2_scan_block_fn(
                     q_net=sf.q_net * ramp, sw_down=sf.sw_down * ramp,
                 )
             st = model._step_impl(st, dt, surface_forcing=sf)
+            # The scan body calls ``_step_impl`` directly (no nested JIT), so it
+            # bypasses ``model.step``'s post-step freezing-point floor.  Re-apply
+            # it here under the same STATIC config gate so ``--scan-block`` and
+            # the default Python loop are physically identical (issue #354 +
+            # freeze_floor). ``_step_impl`` returns a plain state here
+            # (outer_integrator='forward_euler'; scan does not support ab2).
+            if getattr(model.config, "freeze_floor", False):
+                st = model._apply_freeze_floor(st)
             return (st, step + 1), None
 
         (state, _), _ = lax.scan(_body, (state, step0), idx_t_block)

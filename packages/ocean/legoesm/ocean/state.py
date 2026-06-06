@@ -13,6 +13,13 @@ from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.ocean.constants_config import ConstantsConfig
 
+# Seawater freezing point in degC (model T is in degC), captured at MODULE scope
+# where ``constants`` is the module.  Inside ``LatLonCGridOceanConfig`` the field
+# ``constants: ConstantsConfig`` (defined mid-class) shadows the module name, so a
+# field default cannot evaluate ``constants.T_freeze_ocean`` directly -- reference
+# this module-level value instead.  = 271.35 - 273.15 = -1.8 C (no literal).
+_T_FREEZE_OCEAN_C: float = constants.T_freeze_ocean - constants.T_freeze
+
 
 # ==============================================================================
 # FV Ocean State (cubed-sphere)
@@ -1039,3 +1046,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   tendency cost.  Appended at the END of the NamedTuple to preserve
     #   positional construction for legacy callers.
     momentum_time_integrator: str = "euler"
+
+    # --- Surface freezing-point floor (sea-ice thermodynamic surrogate) ---
+    # When True, ocean temperature is floored at ``freeze_floor_temp_c`` [degC]
+    # at the END of each step.  legoESM has no prognostic sea ice, so an
+    # exposed high-latitude cell super-cools several degrees below the freezing
+    # point of seawater — physically impossible (ice would form, latent heat
+    # holding SST at freezing) and 3-5 C colder than NEMO, whose LIM sea ice
+    # caps SST at the freezing point.  This floor is that thermodynamic cap:
+    # the same ``jnp.maximum(T, T_freeze)`` clamp the slab oceans already apply
+    # (simple_ocean.py).  The implied freeze (latent) heat is NOT carried as an
+    # ice tracer, so this is a bounded, justified non-conservation representing
+    # ice formation (validated: it removes the ~0.5 C global / ~half the Arctic
+    # SST RMSE vs NEMO on the eORCA025 CORE-II run).  Off by default to keep
+    # bit-exact regression on legacy configs; enabled for faithful OMIP runs.
+    freeze_floor: bool = False
+    # Freezing point of seawater in degC (model T is in degC).  Defaults to
+    # ``T_freeze_ocean - T_freeze`` = -1.8 C (constants, not a literal).
+    freeze_floor_temp_c: float = _T_FREEZE_OCEAN_C

@@ -422,7 +422,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   slope_foot_n_levels=None, slope_foot_threshold=None,
                   min_levels=1, div_damp_2=None, div_damp_4=None,
                   smag_cfl_safety=None, convection="none",
-                  convection_K_conv=1.0, convection_K_bg=1e-5):
+                  convection_K_conv=1.0, convection_K_bg=1e-5,
+                  freeze_floor=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -475,6 +476,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("div_damp_2", div_damp_2),
                               ("div_damp_4", div_damp_4),
                               ("smag_cfl_safety", smag_cfl_safety),
+                              ("freeze_floor", freeze_floor),
                               ) if v is not None}
     # Grid-agnostic convective adjustment (Oceananigans-style enhanced
     # vertical diffusivity where N^2 < 0).  The tripole base config ships
@@ -586,7 +588,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   momentum_advection=None, slope_foot_alpha=None,
                   slope_foot_n_levels=None, slope_foot_threshold=None,
                   min_levels=1, div_damp_2=None, div_damp_4=None,
-                  smag_cfl_safety=None):
+                  smag_cfl_safety=None, freeze_floor=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -623,6 +625,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("div_damp_2", div_damp_2),
                               ("div_damp_4", div_damp_4),
                               ("smag_cfl_safety", smag_cfl_safety),
+                              ("freeze_floor", freeze_floor),
                               ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -850,6 +853,12 @@ def main() -> int:
                    help="Use 3-stage SSP-RK3 for the outer baroclinic momentum step "
                         "(mirrors NEMO's RK3 / key_RK3) instead of forward-Euler -- the "
                         "NEMO-faithful fix for the cold-start adjustment blowup. 3x tendency cost.")
+    p.add_argument("--freeze-floor", action="store_true",
+                   help="Floor ocean T at the seawater freezing point (~-1.8 C) each "
+                        "step -- a sea-ice thermodynamic surrogate. legoESM has no "
+                        "prognostic ice, so high-lat (esp. Arctic) cells over-cool "
+                        "3-5 C below NEMO (LIM ice caps SST). NEMO-faithful; removes "
+                        "~half the Arctic SST RMSE. Off = bit-exact legacy.")
     p.add_argument("--woa-smoothing-passes", type=int, default=0,
                    help="Horizontal Laplacian smoothing passes/level on the WOA T,S IC "
                         "-- removes spurious grid-scale fronts from interpolating/flood-"
@@ -959,6 +968,7 @@ def main() -> int:
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
+            freeze_floor=(True if args.freeze_floor else None),
             barotropic_solver=args.barotropic_solver,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,
@@ -989,6 +999,7 @@ def main() -> int:
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
+            freeze_floor=(True if args.freeze_floor else None),
             barotropic_solver=args.barotropic_solver,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,

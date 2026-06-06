@@ -2112,12 +2112,52 @@ class LatLonCGridOceanModel:
             # afterward (Veros core/thermodynamics.py + core/external/
             # solve_stream.py), so it is unconditionally stable in the vertical
             # and compatible with convective adjustment — no convection guard.
-            return self._ab2_step(
+            new_state = self._ab2_step(
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge)
-        return self._step_impl(state, dt, freshwater=freshwater,
-                               surface_forcing=surface_forcing,
-                               sponge=sponge)
+        else:
+            new_state = self._step_impl(state, dt, freshwater=freshwater,
+                                        surface_forcing=surface_forcing,
+                                        sponge=sponge)
+        # Feature-gated on a STATIC config bool (CLAUDE.md feature-gating
+        # exception): a Python ``if`` selects the branch at trace time, so
+        # the freeze-floor clamp is only traced when enabled — no jnp.where
+        # double-trace, bit-exact for legacy configs.
+        if self.config.freeze_floor:
+            new_state = self._apply_freeze_floor(new_state)
+        return new_state
+
+    def _apply_freeze_floor(self, state: LatLonCGridOceanState
+                            ) -> LatLonCGridOceanState:
+        """Floor the SURFACE ocean temperature at the seawater freezing point.
+
+        Sea-ice thermodynamic surrogate (``config.freeze_floor``): an exposed
+        surface ocean cell cannot super-cool below the freezing point of
+        seawater — the excess heat loss physically goes into ice formation
+        (latent heat), which holds SST at freezing.  legoESM carries no
+        prognostic ice, so without this cap the high-latitude (esp. Arctic)
+        surface over-cools 3-5 C below NEMO (whose LIM sea ice caps SST).  This
+        is the same ``jnp.maximum(T, T_freeze)`` clamp the slab oceans apply
+        (``simple_ocean.py``).
+
+        SURFACE-ONLY (top cell, k=0): sea ice caps the SST.  The freezing point
+        of seawater is depth-dependent (pressure lowers it) and subsurface water
+        is in any case above -1.8 C, so a full-column constant floor could mask
+        a genuine deep cold anomaly or inject deep heat — clamp only the top
+        cell.  Land cells (T=0) are above freezing, so ``maximum`` is a no-op
+        there (no wet mask needed).
+
+        CONSERVATION: this is an intentional, bounded NON-conservative heat
+        source (the latent heat of the ice that would have formed) — it is NOT
+        seen by the conservation fixer (which runs earlier in the step).  Heat
+        conservation is therefore deliberately relaxed when ``freeze_floor`` is
+        enabled, representing sea-ice formation; off by default so legacy /
+        conserving runs are unaffected.
+        """
+        T = state.T.data
+        T_sfc_floored = jnp.maximum(T[..., 0], self.config.freeze_floor_temp_c)
+        T_floored = T.at[..., 0].set(T_sfc_floored)
+        return state._replace(T=state.T.replace(data=T_floored))
 
     def _ab2_step(self, state: LatLonCGridOceanState, dt: float,
                   freshwater=None, surface_forcing=None, sponge=None,
