@@ -1002,7 +1002,8 @@ _RUNOFF_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/
               "runoff-icb_DaiTrenberth_Depoorter.nc")
 
 
-def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path):
+def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
+                        land_mask=None, spread_passes=2):
     """Load NEMO's Dai-Trenberth runoff (the SAME file NEMO ORCA1 uses) and regrid
     each climatological month onto the model grid. Total freshwater = rivers
     (sorunoff) + ice-shelf melt (sornfisf) + icebergs (Icb_flux) [kg/m²/s, +INTO
@@ -1025,14 +1026,33 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path):
     annual = total.sum(axis=0)
     src_valid = annual > 0.0
     out = np.zeros((12,) + tuple(np.asarray(lat2d_deg).shape), dtype=np.float64)
+    is_cubed = (np.asarray(lat2d_deg).ndim == 3)
+    ocean = None
+    if land_mask is not None:
+        ocean = np.asarray(land_mask) > 0.5
     for m in range(12):
         # k=4 (NOT k=1: _regrid_curv_to_points assumes 2-D kNN -> k=1 crashes, codex HIGH)
         Rm, _ = _regrid_curv_to_points(
             total[m], src_lat, src_lon, src_valid,
             lat2d_deg, lon2d_deg, k=4, max_deg=2.0)
-        out[m] = np.maximum(Rm, 0.0)
+        Rm = np.maximum(Rm, 0.0)
+        # COASTAL SPREAD (codex conservation flag + SSS-quality): the NN/IDW
+        # regrid concentrates each river in ~1 model cell -> over-fresh spots that
+        # hurt SSS. Spread over a coastal band via ocean-masked averaging, then
+        # renormalise to preserve the per-month ocean SUM (sum-conserving; exact
+        # area-weighted conservation needs the eORCA1 cell areas, a further refinement).
+        if ocean is not None and spread_passes > 0:
+            s0 = float((Rm * ocean).sum())
+            for _ in range(int(spread_passes)):
+                sm = np.asarray(_laplacian_smooth_2d(Rm, 1, is_cubed=is_cubed))
+                Rm = np.where(ocean, sm, 0.0)
+            s1 = float((Rm * ocean).sum())
+            if s1 > 0.0:
+                Rm = Rm * (s0 / s1)        # restore the ocean sum
+        out[m] = Rm
     print(f"[setup] runoff: Dai-Trenberth (river+isf+icb) from {int(src_valid.sum())} "
-          f"discharge cells, 12 months, max {out.max():.2e} kg/m^2/s")
+          f"discharge cells, 12 months, {spread_passes} spread passes, "
+          f"max {out.max():.2e} kg/m^2/s")
     return out
 
 
@@ -1493,7 +1513,9 @@ def main() -> int:
             raise ValueError("--runoff: apply_runoff_step is for the lat-lon C-grid "
                              "family (tripole/latlon); cube runoff not wired yet.")
         from legoesm.ocean.coupler.runoff_apply import apply_runoff_step  # noqa: F401
-        runoff_monthly = load_runoff_monthly(grid, app_grid_type, lat2d, lon2d, args.mesh)
+        runoff_monthly = load_runoff_monthly(
+            grid, app_grid_type, lat2d, lon2d, args.mesh,
+            land_mask=np.asarray(state.land_mask.data), spread_passes=2)
     # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
     # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
     # would corrupt the comparison invisibly.

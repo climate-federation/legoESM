@@ -51,3 +51,25 @@ def test_load_runoff_monthly_latlon():
     assert R_m.sum() > 0.0                 # real discharge present
     # seasonality: not every month identical (climatological variation)
     assert not np.allclose(R_m[0], R_m[6])
+
+
+@pytest.mark.skipif(not os.path.exists(R._RUNOFF_NC),
+                    reason="NEMO runoff file not present on host")
+def test_coastal_spread_conserves_sum_and_reduces_peak():
+    """The coastal-spread option preserves the per-month ocean SUM (sum-conserving)
+    while reducing the over-concentrated peak (better SSS)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    n_lat, n_lon = 90, 180
+    grid = create_latlon_grid(n_lat, n_lon)
+    lon2d, lat2d = np.meshgrid(np.rad2deg(np.asarray(grid.lon)),
+                               np.rad2deg(np.asarray(grid.lat)))
+    land = np.ones((n_lat, n_lon))  # all ocean (isolate the spread operator)
+    R0 = R.load_runoff_monthly(grid, "latlon", lat2d, lon2d, None,
+                               land_mask=land, spread_passes=0)
+    R2 = R.load_runoff_monthly(grid, "latlon", lat2d, lon2d, None,
+                               land_mask=land, spread_passes=3)
+    # sum conserved per month (renormalised) to ~1e-6 relative
+    s0 = R0.sum(axis=(1, 2)); s2 = R2.sum(axis=(1, 2))
+    assert np.allclose(s0, s2, rtol=1e-5), (s0, s2)
+    # peak reduced (spread smears the concentrated river mouths)
+    assert R2.max() < R0.max()
