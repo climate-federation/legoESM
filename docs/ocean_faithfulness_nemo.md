@@ -152,6 +152,17 @@ The lat-lon path's `pgf_scheme="smc03"` is the reference. Large multi-iteration 
 ALL pragmatic levers exhausted (RK3 worse, viscosity/hyperdiff/div-damp no-effect, smoothing
 worse, flat no-effect, marginal-mask cascades). This is the cube's sole remaining gate.
 
+## CUBE C256 (¼°) VERDICT — resolution alone INSUFFICIENT (definitive)
+C256 (~0.35°, ¼°-class like eORCA025) + viscosity + woa-init (no balanced): blew up EARLIER
+(step 15-30) than C128 (step 37), at the Aegean/Med marginal sea — sub-grid even at ¼° on a
+cube. **The resolution trend BROKE → resolution alone does NOT solve the cube.** The eORCA025
+tripole works at ¼° ONLY because it has the FULL stack (partial cells + smc03 PGF +
+balanced-init + RK3 + smag-cfl-cap); the cube A-grid has ONLY the viscosity cap. C256-woa-only
+blew faster than C128+balanced → the stack pieces matter. **DEFINITIVE: faithful cube = ¼° AND
+the full conditioning stack ported to the A-grid** (partial cells, smc03 PGF, working no-clip
+balanced-init, RK3) — a major multi-piece dycore port + expensive ¼° GPU runs. Not achievable
+quickly. Viscosity-gap fix + balanced-init are 2 of ~5 stack pieces done.
+
 ## CUBE C128 VERDICT (resolution-convergence confirmed)
 C128 (~0.7°, finer than latlon 1°) + strong CFL-viscosity + balanced-init: NaN step 37
 (vs C32 step 6, C64 step 9) — **blowup delays ~2× per resolution doubling**. Resolution
