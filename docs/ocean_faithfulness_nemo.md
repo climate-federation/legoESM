@@ -28,6 +28,18 @@ bottom_drag="none")` + rebuilds the FC OceanModel → CORE-II tau/q_net now appl
 step 2880 (day-1) as the unforced run → the blowup is STRUCTURAL dycore (PGF-over-
 bathy), independent of forcing/CFL.** Harness is complete+correct; the cube-vs-NEMO
 number is gated ONLY by the dycore.
+**Blocker-2 trajectory (iter-27 fine-diag 8417882/83/84):** step-by-step (C32, dt=30,
+external forcing): steps 1-5 SMOOTH physical spin-up (max|u| 0.07→0.33 m/s), then
+**step-6 IGNITION 0.33→11.6, step-7 407, step-8 NaN** — a fast localised grid-scale mode
+(u-specific; v normal at step 6). IC-INDEPENDENT: rest-state AND WOA-init both NaN at the
+same step. Forced cube ignites ~step 6; UNFORCED cube (physics=None) survived to ~day-1 →
+the CORE-II forcing just SEEDS the grid-scale instability faster (not a forcing-magnitude
+bug — external scheme `du=-tau/(rho·dz)` is correct). So it's the cube DYNAMICS. OPEN
+QUESTION before the SMC03 work: is the FC-Gram backend ACTUALLY active in build_cubed_sphere
+(the rebuilt `OceanModel(..., fc_config=build_fc_config())`)? The doc says FC makes cube
+stable 30 d — a step-6 explosion looks like the NON-FC cd-grid face-edge mode. VERIFY FC is
+on (print/inspect model backend); if off, fix the wiring; if on, the A-grid + bulk-forcing
+face-edge mode needs the dycore fix below.
 **Blocker-2 (dycore = the gate):** cube `OceanModel` PGF-over-bathy instability. FIX =
 SMC03 density-Jacobian PGF + duogrid halo on T,S (docs/ocean_experiments/
 cubed_sphere_pgf_stability.md). Substantial multi-iteration dycore effort (cf. tripole
