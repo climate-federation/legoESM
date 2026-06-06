@@ -868,7 +868,7 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        flat_bottom: bool = False, A_h=None, hyperdiff_coeff=None,
                        div_damp_2=None, div_damp_4=None, baroclinic_rk3=None,
                        mask_marginal_seas=False, balanced_init=False,
-                       use_fc=True):
+                       use_fc=True, dt=30.0):
     """Build a cubed-sphere ocean (FC-Gram spectral baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -894,14 +894,28 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     from legoesm.ocean.physics.combined import OceanPhysicsConfig
     from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
     from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
-    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.lateral_mixing.config import (
+        LateralMixingConfig, HarmonicConfig,
+    )
     from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
     from legoesm.ocean.dynamics.ocean_model import OceanModel
     from legoesm.core.operators_fc import build_fc_config
+    # CRITICAL (iter-33): with external-forcing physics the FC dynamics-core viscosity
+    # branch (ocean_pe_fc `if physics_fn is None`) is SKIPPED — ALL momentum/tracer
+    # mixing must come from physics_fn. The default HarmonicConfig A_h=1e4 +
+    # enforce_cfl=False is ~4 orders too weak -> near-zero lateral momentum viscosity
+    # -> the sharp marginal-sea front jet blows up. Use a STRONG CFL-CAPPED harmonic
+    # (the cube analogue of the lat-lon smag-cfl-cap): A_h high, capped per cell at the
+    # diffusive-CFL limit A_h*dt/dx^2 <= cfl_safety/4 -> maximal stable viscosity.
+    # cfl_dt_estimate=dt so the cap matches the actual timestep.
+    _harm_Ah = A_h if A_h is not None else 1.0e9
     phys = OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="kpp"),
-        lateral_mixing=LateralMixingConfig(scheme="harmonic"),
+        lateral_mixing=LateralMixingConfig(
+            scheme="harmonic",
+            harmonic=HarmonicConfig(A_h=_harm_Ah, K_h=1.0e3, enforce_cfl=True,
+                                    cfl_dt_estimate=float(dt), cfl_safety=0.20)),
         surface_forcing=SurfaceForcingConfig(scheme="external"),
         bottom_drag=BottomDragConfig(scheme="none"),  # drag via model config, not physics
         convection=OceanConvectionConfig(scheme="enhanced_diffusion"),
@@ -1349,7 +1363,7 @@ def main() -> int:
             baroclinic_rk3=(True if args.cube_rk3 else None),
             mask_marginal_seas=args.cube_mask_marginal_seas,
             balanced_init=args.balanced_init,
-            use_fc=(not args.cube_no_fc),
+            use_fc=(not args.cube_no_fc), dt=args.dt,
         )
         app_grid_type = "cubed_sphere"
     else:
