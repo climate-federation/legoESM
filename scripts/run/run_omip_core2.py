@@ -207,6 +207,9 @@ def smooth_woa_ts(state, grid, passes):
     regime is the natural conditioning."""
     from legoesm.ocean.bathymetry import _laplacian_smooth_2d
     mask = np.asarray(state.land_mask.data) > 0.5
+    # Cube horizontal fields are (6, n, n) -> _laplacian_smooth_2d needs the
+    # cube-topology stencil (cross-face neighbours); 2-D grids are (n_lat, n_lon).
+    is_cubed = (mask.ndim == 3)
     T = np.array(state.T.data, dtype=np.float64)
     S = np.array(state.S.data, dtype=np.float64)
     nlev = T.shape[-1]
@@ -215,7 +218,7 @@ def smooth_woa_ts(state, grid, passes):
             orig_k = arr[..., k].copy()
             cur = arr[..., k]
             for _ in range(int(passes)):
-                sm = np.asarray(_laplacian_smooth_2d(cur, 1, is_cubed=False))
+                sm = np.asarray(_laplacian_smooth_2d(cur, 1, is_cubed=is_cubed))
                 cur = np.where(mask, sm, orig_k)
             arr[..., k] = cur
     print(f"[setup] WOA T,S horizontal smoothing: {passes} Laplacian passes/level "
@@ -753,7 +756,8 @@ def _regrid_curv_to_points(field2d, src_lat_deg, src_lon_deg, ocean_mask,
 
 def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        woa_init: bool = False, woa_t=None, woa_s=None,
-                       flat_bottom: bool = False):
+                       flat_bottom: bool = False, A_h=None, hyperdiff_coeff=None,
+                       div_damp_2=None, div_damp_4=None):
     """Build a cubed-sphere ocean (FC-Gram spectral baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -793,6 +797,16 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
         shortwave_penetration=None,
     )
     config = config._replace(physics=phys)
+    # Optional momentum-dissipation overrides (debug the wind-stress-driven
+    # grid-scale momentum instability on the cube A/CD-grid: the doc's FC-stable
+    # cube was tested under thermal restoring only, NOT wind tau).
+    _ovr = {k: v for k, v in (("A_h", A_h),
+                              ("hyperdiff_coeff", hyperdiff_coeff),
+                              ("div_damp_2", div_damp_2),
+                              ("div_damp_4", div_damp_4)) if v is not None}
+    if _ovr:
+        config = config._replace(**_ovr)
+        print(f"[setup] cube config override: {_ovr}")
     model = OceanModel(grid, z_coord, config,
                        fc_config=build_fc_config(dtype=jnp.float64))
     # NEMO bathy/mask -> cube cell centres (point-target IDW; the curvilinear
@@ -865,7 +879,16 @@ def _diag(state, lat2d=None, lon2d=None) -> dict:
     # The umax-location pin-point below only makes sense for the 2-D-mappable
     # C-grid case, so skip it (keep max_speed + finite, which are shape-agnostic)
     # when the field is the cube layout or the coord arrays don't match.
-    if lat2d is not None and has_u and u.ndim == 3:
+    if lat2d is not None and has_u and u.ndim == 4 and np.asarray(lat2d).ndim == 3:
+        # Cube A-grid: u (6, n, n, nlev) collocated with T -> lat2d (6, n, n).
+        fu, ju, iu, ku = (int(x) for x in
+                          np.unravel_index(np.nanargmax(au), au.shape))
+        lat2d = np.asarray(lat2d)
+        umax_lat = round(float(lat2d[fu, ju, iu]), 1)
+        umax_lev = ku
+        if lon2d is not None:
+            umax_lon = round(float(np.asarray(lon2d)[fu, ju, iu]), 1)
+    elif lat2d is not None and has_u and u.ndim == 3:
         ju, iu, ku = (int(x) for x in
                       np.unravel_index(np.nanargmax(au), au.shape))
         lat2d = np.asarray(lat2d)
@@ -942,6 +965,14 @@ def main() -> int:
                    help="lat-lon resolution NxM for --grid latlon_bathy.")
     p.add_argument("--cube-n", type=int, default=48,
                    help="cubed-sphere face resolution n (C-n) for --grid cubed_sphere.")
+    p.add_argument("--cube-Ah", type=float, default=None,
+                   help="cube horizontal viscosity A_h override [m^2/s].")
+    p.add_argument("--cube-hyperdiff", type=float, default=None,
+                   help="cube biharmonic hyperdiffusion coeff override.")
+    p.add_argument("--cube-divdamp2", type=float, default=None,
+                   help="cube 2nd-order divergence damping [m^2/s].")
+    p.add_argument("--cube-divdamp4", type=float, default=None,
+                   help="cube 4th-order divergence damping [m^4/s].")
     p.add_argument("--woa-init", action="store_true",
                    help="Initialise T/S from WOA18 (faithful IC) vs rest state.")
     p.add_argument("--woa-t", type=str, default="data/woa18/woa18_decav_t00_01.nc")
@@ -1175,6 +1206,8 @@ def main() -> int:
             args.nlev, args.H_max, args.mesh, n=args.cube_n,
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             flat_bottom=args.flat_bottom,
+            A_h=args.cube_Ah, hyperdiff_coeff=args.cube_hyperdiff,
+            div_damp_2=args.cube_divdamp2, div_damp_4=args.cube_divdamp4,
         )
         app_grid_type = "cubed_sphere"
     else:
