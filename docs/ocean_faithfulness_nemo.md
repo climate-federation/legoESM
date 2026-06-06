@@ -21,9 +21,10 @@ the shared `grids.polar_filter` (already used by the atmosphere C-grid) in
 - **MASK-AWARE** (key): a naive zonal FFT smears continental zeros into ocean + couples
   basins across land — exactly why NEMO uses ORCA tripole. Land is filled with the per-lat
   ocean zonal mean before the FFT, restored after.
-- **Conservation EXACT**: discarding land-position filtered values perturbs the ocean-only
-  mean, so the per-lat ocean zonal mean is restored post-filter (`filt += zmean-filt_mean`)
-  → tracer mass exactly conserved; u/eta keep zonal-mean flow/volume.
+- **Conservation**: per-lat WET-CELL zonal mean restored post-filter (`filt += zmean-
+  filt_mean`) → eta row-volume / zonal-mean u exact; tracer content exact only for zonally-
+  uniform thickness, approximate under partial cells/z* (stability filter, not flux op).
+  (Codex HIGH-1: original "exactly conserved" claim corrected.)
 - Staggering handled: T,S cell (mask_c); v v-face (is_v_face mask, n_lat+1); u u-face
   periodic (filter `u[:,:-1]`, re-append col0); eta 2D. Shim grid carries lat_v/cos_lat_v
   built via the now-PUBLIC `compute_v_face_coords` (promoted from `_`-private per rules).
@@ -31,7 +32,7 @@ the shared `grids.polar_filter` (already used by the atmosphere C-grid) in
   (off by default, bit-exact legacy). Runner: `--polar-filter[-cutoff-lat/-max-wave-speed/
   -safety]`. Tests: `tests/ocean/unit/test_polar_filter_ocean.py` 7/7 (conservation, land
   restore, high-k poleward damp, equatorward passband, u-wrap, shapes, step gating);
-  freeze_floor regression 4/4. Codex review in progress.
+  freeze_floor regression 4/4. Codex review: 2 HIGH fixed, round-2 CLEAN. Commit acde1c6d.
 - **LIMITATION (honest)**: even mask-aware, lat-lon can't be fully faithful in the
   land-locked Arctic (residual cross-pole basin coupling) — ORCA tripole stays THE faithful
   path. This is for lat-lon stability + a tropics/mid-lat/SH compare.
@@ -43,8 +44,12 @@ the shared `grids.polar_filter` (already used by the atmosphere C-grid) in
   --adaptive-implicit-vertadv --momentum-rk3 --min-levels 2 --C-smag-lap 3.0
   --smag-cfl-safety 0.125 --polar-filter --polar-filter-cutoff-lat 60`. Smoke = 18 days
   (snapshots day 5/10/15).
-- NEXT: score day-15 vs NEMO `--nemo-month 1` (Jan, seasonal) for a first latlon-vs-NEMO
-  number; then a longer latlon run for equilibration (tropics/mid-lat/SH; Arctic caveated).
+- **latlon vs NEMO (8417586, seasonal Jan `--nemo-month 1`): EXCELLENT at day-15.** raw
+  RMSE **1.31 °C, corr 0.99**, all bands |bias|<1.1 (Arc −0.19, NHmid −0.15, trop −0.50,
+  SHmid −1.02, Ant +0.01); +freeze-clamp 1.26. day-10 RMSE 1.36. Second grid matches NEMO.
+  CAVEAT: day-15 is near the WOA IC (early); equilibration test (day-90, like tripole)
+  needs the longer run — launched **8417589 (3mo latlon + freeze-floor)**. The Arctic
+  cross-pole-coupling caveat may grow over equilibration; watch it at day-90.
 
 ## CURRENT STATE (iter 22 — SEASONAL CONFOUND found)
 
