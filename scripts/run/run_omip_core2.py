@@ -588,7 +588,10 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   momentum_advection=None, slope_foot_alpha=None,
                   slope_foot_n_levels=None, slope_foot_threshold=None,
                   min_levels=1, div_damp_2=None, div_damp_4=None,
-                  smag_cfl_safety=None, freeze_floor=None):
+                  smag_cfl_safety=None, freeze_floor=None,
+                  use_polar_filter=None, polar_filter_cutoff_lat_deg=None,
+                  polar_filter_max_wave_speed=None,
+                  polar_filter_safety_factor=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -626,6 +629,13 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("div_damp_4", div_damp_4),
                               ("smag_cfl_safety", smag_cfl_safety),
                               ("freeze_floor", freeze_floor),
+                              ("use_polar_filter", use_polar_filter),
+                              ("polar_filter_cutoff_lat_deg",
+                               polar_filter_cutoff_lat_deg),
+                              ("polar_filter_max_wave_speed",
+                               polar_filter_max_wave_speed),
+                              ("polar_filter_safety_factor",
+                               polar_filter_safety_factor),
                               ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -859,6 +869,21 @@ def main() -> int:
                         "prognostic ice, so high-lat (esp. Arctic) cells over-cool "
                         "3-5 C below NEMO (LIM ice caps SST). NEMO-faithful; removes "
                         "~half the Arctic SST RMSE. Off = bit-exact legacy.")
+    p.add_argument("--polar-filter", action="store_true",
+                   help="Enable the mask-aware Fourier polar filter (lat-lon grid only): "
+                        "truncate the zonal modes exceeding the per-latitude CFL near the "
+                        "converging-meridian poles, where a global lat-lon ocean otherwise "
+                        "blows up ~day 0.25. Mask-aware (land filled with ocean zonal mean "
+                        "before the FFT, restored after) so continents are not smeared into "
+                        "ocean; tracer-conservative (k=0 mode kept). NOTE: lat-lon stays "
+                        "imperfect in the land-locked Arctic -- ORCA tripole is the faithful "
+                        "path; this is for lat-lon stability + a tropics/mid-lat/SH compare.")
+    p.add_argument("--polar-filter-cutoff-lat", type=float, default=None,
+                   help="Latitude (deg) poleward of which the polar filter acts (default 60).")
+    p.add_argument("--polar-filter-max-wave-speed", type=float, default=None,
+                   help="Max wave speed [m/s] setting the CFL wavenumber cap (default 300).")
+    p.add_argument("--polar-filter-safety", type=float, default=None,
+                   help="Fraction of the CFL wavenumber kept, <1 for margin (default 0.85).")
     p.add_argument("--woa-smoothing-passes", type=int, default=0,
                    help="Horizontal Laplacian smoothing passes/level on the WOA T,S IC "
                         "-- removes spurious grid-scale fronts from interpolating/flood-"
@@ -1013,6 +1038,10 @@ def main() -> int:
             min_levels=args.min_levels,
             div_damp_2=args.div_damp_2, div_damp_4=args.div_damp_4,
             smag_cfl_safety=args.smag_cfl_safety,
+            use_polar_filter=(True if args.polar_filter else None),
+            polar_filter_cutoff_lat_deg=args.polar_filter_cutoff_lat,
+            polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
+            polar_filter_safety_factor=args.polar_filter_safety,
         )
         app_grid_type = "latlon"
 

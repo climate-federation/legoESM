@@ -11,6 +11,33 @@ promise DONE only when grids genuinely match NEMO — tripole SST done; NOT all 
 
 ---
 
+## CURRENT STATE (iter 23 — latlon polar filter: 2nd grid started)
+
+**Mask-aware Fourier polar filter for the lat-lon C-grid ocean (code, tested 7/7).**
+latlon_bathy blows up ~day 0.25 (N-pole singularity: dx=R·dlon·cos(lat)→0, CFL). Reused
+the shared `grids.polar_filter` (already used by the atmosphere C-grid) in
+`LatLonCGridOceanModel._apply_polar_filter` (static `config.use_polar_filter` gate, end of
+`step()`): truncates zonal modes above the per-lat CFL cap poleward of `cutoff_lat` (60°).
+- **MASK-AWARE** (key): a naive zonal FFT smears continental zeros into ocean + couples
+  basins across land — exactly why NEMO uses ORCA tripole. Land is filled with the per-lat
+  ocean zonal mean before the FFT, restored after.
+- **Conservation EXACT**: discarding land-position filtered values perturbs the ocean-only
+  mean, so the per-lat ocean zonal mean is restored post-filter (`filt += zmean-filt_mean`)
+  → tracer mass exactly conserved; u/eta keep zonal-mean flow/volume.
+- Staggering handled: T,S cell (mask_c); v v-face (is_v_face mask, n_lat+1); u u-face
+  periodic (filter `u[:,:-1]`, re-append col0); eta 2D. Shim grid carries lat_v/cos_lat_v
+  built via the now-PUBLIC `compute_v_face_coords` (promoted from `_`-private per rules).
+- Config: `use_polar_filter`, `polar_filter_{cutoff_lat_deg,max_wave_speed,safety_factor}`
+  (off by default, bit-exact legacy). Runner: `--polar-filter[-cutoff-lat/-max-wave-speed/
+  -safety]`. Tests: `tests/ocean/unit/test_polar_filter_ocean.py` 7/7 (conservation, land
+  restore, high-k poleward damp, equatorward passband, u-wrap, shapes, step gating);
+  freeze_floor regression 4/4. Codex review in progress.
+- **LIMITATION (honest)**: even mask-aware, lat-lon can't be fully faithful in the
+  land-locked Arctic (residual cross-pole basin coupling) — ORCA tripole stays THE faithful
+  path. This is for lat-lon stability + a tropics/mid-lat/SH compare.
+- NEXT: launch latlon cold-start (`--grid latlon_bathy --polar-filter` + winning stack) →
+  verify survives past day 0.25 → score vs NEMO `--nemo-month` (seasonal).
+
 ## CURRENT STATE (iter 22 — SEASONAL CONFOUND found)
 
 **MAJOR METHOD FINDING — the "equilibration degradation" is largely a SEASONAL-PHASE
@@ -141,7 +168,7 @@ Vindicates iter-9 "full stack together"; iter-10 "RK3 marginal" was pre-smag-cfl
 |---|---|---|
 | **tripole/eORCA025 (¼°)** | **STABLE** (corrected IC + RK3 + stack) | **SST RMSE 1.15 °C corr 0.99 EXCELLENT at day-90 (seasonal scoring + freeze-floor, iter-22); SSS corr 0.90 (gated)** |
 | tripole/eORCA1 (1°) | free run impossible (config exhausted) | superseded by ¼° |
-| latlon_bathy (1°) | **blows up day 0.25** — N-pole singularity (GEOMETRIC; RK3 doesn't rescue, 8131279) | needs pole filter / Arctic mask |
+| latlon_bathy (1°) | **mask-aware polar filter implemented + tested (iter-23)**; cold-start run pending | `--polar-filter`; Arctic caveated (cross-pole coupling) |
 | cubed_sphere | untested w/ CORE-II | **[high] face-edge PGF instab** masked by 5-50× diffusion → fix SMC03 + duogrid halo |
 | mpas | untested w/ CORE-II | **[high] split-Coriolis (#160):** f zeroed in PV flux → MOM6 full-PV q=(f+ζ)/h |
 | spectral | applicator gap TOTAL | SpectralOceanState has no grid-space u/v/T/masks → spectral forcing path |

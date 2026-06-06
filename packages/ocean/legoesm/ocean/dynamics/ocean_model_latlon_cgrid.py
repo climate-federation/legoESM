@@ -26,7 +26,16 @@ import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.precision import cast_pytree
-from legoesm.grids.latlon import LatLonGrid, ensure_geometry
+from legoesm.grids.latlon import (
+    LatLonGrid,
+    compute_v_face_coords,
+    ensure_geometry,
+)
+from legoesm.grids.polar_filter import (
+    compute_polar_filter_mask,
+    fourier_filter,
+    fourier_filter_3d,
+)
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     OceanPartialCellCoordinate,
@@ -2123,9 +2132,140 @@ class LatLonCGridOceanModel:
         # exception): a Python ``if`` selects the branch at trace time, so
         # the freeze-floor clamp is only traced when enabled — no jnp.where
         # double-trace, bit-exact for legacy configs.
+        # Fourier polar filter (STATIC config-bool gate): truncate the zonal modes
+        # that exceed the per-latitude CFL near the converging-meridian poles.
+        # After the prognostic update so it damps whatever the step produced, and
+        # BEFORE the freeze floor so the surface temperature cap is the final word
+        # (the zonal filter can otherwise pull a surface cell back below freezing).
+        if self.config.use_polar_filter:
+            new_state = self._apply_polar_filter(new_state, dt)
         if self.config.freeze_floor:
             new_state = self._apply_freeze_floor(new_state)
         return new_state
+
+    def _apply_polar_filter(self, state: LatLonCGridOceanState, dt: float
+                            ) -> LatLonCGridOceanState:
+        """Apply the mask-aware Fourier polar filter to the prognostic fields.
+
+        A global lat-lon ocean has ``dx = R*dlon*cos(lat) -> 0`` at the poles, so
+        explicit advection/metric terms violate CFL poleward and the cold-start
+        blows up (~day 0.25) regardless of the time integrator.  The shared
+        ``grids.polar_filter`` (already used by the atmosphere C-grid) truncates,
+        at each latitude poleward of ``polar_filter_cutoff_lat_deg``, the zonal
+        Fourier wavenumbers above the CFL cap ``k_max = sf*sqrt(3)*R*cos(lat)/
+        (c_max*dt)``.
+
+        MASK-AWARE: a naive zonal FFT over a basin with continents would smear
+        land zeros into adjacent ocean and couple basins across land.  So for each
+        field, land cells are first filled with the per-latitude (per-level) OCEAN
+        zonal mean, the filter is applied, and land cells are then restored to
+        their original value.
+
+        CONSERVATION: the ``k=0`` (zonal-mean) mode is never truncated, so the
+        filter preserves the zonal mean of the *filled* field; but discarding the
+        filtered values that landed on land positions perturbs the OCEAN-only zonal
+        mean, so we add back the per-latitude ocean-mean deficit, restoring the
+        exact per-latitude WET-CELL zonal MEAN.  Because cell area is constant in
+        longitude within a row, for ``eta`` this conserves the per-row ocean volume
+        exactly, and for ``u`` it preserves the zonal-mean flow (no spurious net
+        zonal current).  For ``T``/``S`` it conserves the per-row, per-level
+        unweighted wet-cell mean, which equals the area·thickness-weighted tracer
+        content EXACTLY only where the layer thickness is zonally uniform (full
+        cells, rigid lid); under partial cells / z* ``eta`` the per-row content is
+        conserved only approximately (residual bounded by the partial-cell/z*
+        thickness fraction).  This is a stability filter, not a flux operator, and
+        runs after the conservation fixer; the residual is small and acceptable.
+
+        Vertical masking: 2D ``land_mask``/``u_mask``/``v_mask`` are used at every
+        level (not the partial-cell 3D wet mask).  Below-seafloor slots are inert
+        in the dynamics, so filtering them is harmless for the prognostic update;
+        if a future diagnostic reads those slots, switch to ``compute_face_masks_3d``.
+
+        Dynamical caveat: filtering prognostic ``u``/``v``/``eta`` every step is a
+        standard polar-filter practice but the latitude-dependent zonal filter does
+        not commute with meridional differencing, so it can perturb discrete
+        geostrophic balance poleward of the cutoff.  This is validated by the
+        cold-start run + a visual/noise check, not asserted a priori.
+
+        Staggering:
+          * ``T``, ``S`` cell-centered (n_lat, n_lon, nlev) -> cell mask, land_mask
+          * ``v`` v-face       (n_lat+1, n_lon, nlev)        -> v-face mask, v_mask
+          * ``u`` u-face       (n_lat, n_lon+1, nlev)        -> cell mask on the
+            periodic interior ``u[:, :-1]`` (last col == first), then re-wrapped
+          * ``eta`` 2D cell-centered (n_lat, n_lon)          -> cell mask, land_mask
+
+        LIMITATION: even mask-aware, a lat-lon grid cannot be fully faithful in
+        the land-locked Arctic (residual cross-pole basin coupling); the faithful
+        OMIP path uses the ORCA tripole.  This keeps the lat-lon grid STABLE and
+        good for a tropics/mid-lat/SH comparison.
+        """
+        cfg = self.config
+        # The model's ``self.grid`` is a ``LatLonCGridGeometry`` (per-stagger
+        # metrics); it carries the 1D ``lat``/``cos_lat``/``dlat`` but NOT the
+        # v-face ``lat_v``/``cos_lat_v`` that ``compute_polar_filter_mask`` reads.
+        # Build a minimal duck-typed grid for the filter from the geometry's own
+        # arrays (so the mask latitudes match the actual model grid), deriving
+        # the v-face coords with the shared ``compute_v_face_coords``.
+        from types import SimpleNamespace
+        dlat = float(self.grid.dlat)
+        if dlat == 0.0:
+            raise ValueError(
+                "use_polar_filter requires a regular lat-lon grid (scalar dlat); "
+                "self.grid.dlat==0 indicates a tripolar/curvilinear grid, which "
+                "uses the ORCA fold for pole handling, not the Fourier filter.")
+        lat_v, cos_lat_v = compute_v_face_coords(self.grid.lat, dlat)
+        pf_grid = SimpleNamespace(
+            radius=self.grid.radius, n_lon=self.grid.n_lon,
+            lat=self.grid.lat, cos_lat=self.grid.cos_lat,
+            lat_v=lat_v, cos_lat_v=cos_lat_v)
+        kw = dict(
+            dt=dt,
+            max_wave_speed=cfg.polar_filter_max_wave_speed,
+            cutoff_lat_deg=cfg.polar_filter_cutoff_lat_deg,
+            safety_factor=cfg.polar_filter_safety_factor,
+        )
+        mask_c = compute_polar_filter_mask(pf_grid, is_v_face=False, **kw)
+        mask_v = compute_polar_filter_mask(pf_grid, is_v_face=True, **kw)
+
+        def _masked_filter_3d(data, wet2d, fmask):
+            # wet2d: (n_lat_f, n_lon_f) wet=1/land=0 on the field's stagger.
+            wet = wet2d[:, :, None]
+            ocean_cnt = jnp.maximum(jnp.sum(wet, axis=1, keepdims=True), 1.0)
+            zmean = jnp.sum(data * wet, axis=1, keepdims=True) / ocean_cnt
+            filled = jnp.where(wet > 0.0, data, zmean)
+            filt = fourier_filter_3d(filled, self.grid, fmask)
+            # restore exact per-latitude ocean zonal mean (conservation)
+            filt_mean = jnp.sum(filt * wet, axis=1, keepdims=True) / ocean_cnt
+            filt = filt + (zmean - filt_mean)
+            return jnp.where(wet > 0.0, filt, data)
+
+        def _masked_filter_2d(data, wet2d, fmask):
+            wet = wet2d
+            ocean_cnt = jnp.maximum(jnp.sum(wet, axis=1, keepdims=True), 1.0)
+            zmean = jnp.sum(data * wet, axis=1, keepdims=True) / ocean_cnt
+            filled = jnp.where(wet > 0.0, data, zmean)
+            filt = fourier_filter(filled, self.grid, fmask)
+            filt_mean = jnp.sum(filt * wet, axis=1, keepdims=True) / ocean_cnt
+            filt = filt + (zmean - filt_mean)
+            return jnp.where(wet > 0.0, filt, data)
+
+        land = state.land_mask.data    # (n_lat, n_lon) 1=ocean
+        u_mask = state.u_mask.data     # (n_lat, n_lon+1)
+        v_mask = state.v_mask.data     # (n_lat+1, n_lon)
+
+        T = _masked_filter_3d(state.T.data, land, mask_c)
+        S = _masked_filter_3d(state.S.data, land, mask_c)
+        v = _masked_filter_3d(state.v.data, v_mask, mask_v)
+        # u-face is periodic with a duplicated wrap column (u[:, n_lon] == u[:, 0]);
+        # filter the n_lon-wide interior with the cell mask, then re-append col 0.
+        u_int = _masked_filter_3d(state.u.data[:, :-1], u_mask[:, :-1], mask_c)
+        u = jnp.concatenate([u_int, u_int[:, 0:1]], axis=1)
+        eta = _masked_filter_2d(state.eta.data, land, mask_c)
+
+        return state._replace(
+            T=state.T.replace(data=T), S=state.S.replace(data=S),
+            u=state.u.replace(data=u), v=state.v.replace(data=v),
+            eta=state.eta.replace(data=eta))
 
     def _apply_freeze_floor(self, state: LatLonCGridOceanState
                             ) -> LatLonCGridOceanState:

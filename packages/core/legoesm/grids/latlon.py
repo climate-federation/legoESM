@@ -181,7 +181,7 @@ def create_latlon_grid(
     )
 
 
-def _compute_v_face_coords(
+def compute_v_face_coords(
     lat: jax.Array, dlat: float,
 ) -> tuple[jax.Array, jax.Array]:
     """Compute ``(lat_v, cos_lat_v)`` at the v-face (lat-interface).
@@ -269,7 +269,7 @@ def _build_uniform_latlon_grid_from_axes(
     cos_lat = jnp.maximum(jnp.abs(jnp.cos(lat)), 1e-10)
     sin_lat = jnp.sin(lat)
 
-    lat_v, cos_lat_v = _compute_v_face_coords(lat, dlat)
+    lat_v, cos_lat_v = compute_v_face_coords(lat, dlat)
 
     # Coriolis parameter
     f = 2.0 * omega * sin_lat[:, None] * jnp.ones((1, n_lon))
@@ -411,7 +411,7 @@ def create_regional_latlon_grid(
 
     cos_lat = jnp.maximum(jnp.cos(lat), 1e-10)
     sin_lat = jnp.sin(lat)
-    lat_v, cos_lat_v = _compute_v_face_coords(lat, dlat)
+    lat_v, cos_lat_v = compute_v_face_coords(lat, dlat)
 
     f = 2.0 * omega * sin_lat[:, None] * jnp.ones((1, nx))
 

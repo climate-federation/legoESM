@@ -1064,3 +1064,29 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Freezing point of seawater in degC (model T is in degC).  Defaults to
     # ``T_freeze_ocean - T_freeze`` = -1.8 C (constants, not a literal).
     freeze_floor_temp_c: float = _T_FREEZE_OCEAN_C
+    # --- Fourier polar filter (lat-lon pole CFL stabiliser) ----------------
+    # A global lat-lon ocean has converging meridians: dx = R*dlon*cos(lat) -> 0
+    # at the poles, so explicit advection/metric terms violate CFL near the pole
+    # and the cold-start blows up (~day 0.25) regardless of integrator.  When
+    # enabled, ``LatLonCGridOceanModel`` truncates the zonal Fourier modes that
+    # exceed the per-latitude CFL limit poleward of the cutoff (the existing
+    # ``grids.polar_filter``, already used by the atmosphere C-grid).  The filter
+    # is MASK-AWARE: land cells are filled with the per-latitude ocean zonal mean
+    # before the FFT and restored afterward, so continental zeros are not smeared
+    # into adjacent ocean (a naive zonal FFT would couple basins across land).
+    # The per-latitude WET-CELL zonal mean is restored after filtering: conserves
+    # the per-row ocean volume (eta) / zonal-mean flow (u) exactly, and tracer
+    # content exactly only where layer thickness is zonally uniform (approximately
+    # under partial cells / z*; a stability filter, not a flux operator).
+    # Off by default (bit-exact for tripole/regression configs).  NOTE: even
+    # mask-aware, a lat-lon grid cannot be fully faithful in the land-locked
+    # Arctic (basins still couple weakly across the pole) — that is why the
+    # faithful OMIP path uses the ORCA tripole; this is for the lat-lon grid's
+    # own stability + a tropics/mid-lat/SH comparison.
+    use_polar_filter: bool = False
+    polar_filter_cutoff_lat_deg: float = 60.0
+    # Max wave speed [m/s] setting the per-latitude CFL wavenumber cap (external
+    # gravity wave ~200-300 m/s; larger -> more aggressive truncation).
+    polar_filter_max_wave_speed: float = 300.0
+    # Fraction of the theoretical CFL wavenumber kept (<1 for margin).
+    polar_filter_safety_factor: float = 0.85
