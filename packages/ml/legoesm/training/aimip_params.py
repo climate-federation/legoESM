@@ -62,7 +62,6 @@ _TIEDTKE_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("tiedtke_tau_M_u_relax", 600.0, 14400.0, "sigmoid"),
     ParamConstraint("tiedtke_tau_MC_proxy", 1800.0, 28800.0, "sigmoid"),
     ParamConstraint("tiedtke_cape_threshold", 10.0, 500.0, "sigmoid"),
-    ParamConstraint("tiedtke_precip_efficiency", 0.2, 0.95, "sigmoid"),
     ParamConstraint("tiedtke_downdraft_alpha", 0.05, 0.6, "sigmoid"),
     ParamConstraint("tiedtke_downdraft_RH_min", 0.1, 0.6, "sigmoid"),
     # Extended: entrainment / detrainment + closure knobs (audit pass).
@@ -319,7 +318,6 @@ class AIMIPClassicalParams(eqx.Module):
             tau_M_u_relax=d["tiedtke_tau_M_u_relax"],
             tau_MC_proxy=d["tiedtke_tau_MC_proxy"],
             cape_threshold=d["tiedtke_cape_threshold"],
-            precip_efficiency=d["tiedtke_precip_efficiency"],
             downdraft_alpha=d["tiedtke_downdraft_alpha"],
             downdraft_RH_min=d["tiedtke_downdraft_RH_min"],
             epsilon_deep=d["tiedtke_epsilon_deep"],
@@ -483,7 +481,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         "tiedtke_tau_M_u_relax": float(t.tau_M_u_relax),
         "tiedtke_tau_MC_proxy": float(t.tau_MC_proxy),
         "tiedtke_cape_threshold": float(t.cape_threshold),
-        "tiedtke_precip_efficiency": float(t.precip_efficiency),
         "tiedtke_downdraft_alpha": float(t.downdraft_alpha),
         "tiedtke_downdraft_RH_min": float(t.downdraft_RH_min),
         "tiedtke_epsilon_deep": float(t.epsilon_deep),

@@ -432,8 +432,6 @@ class TiedtkeConfig(NamedTuple):
     smooth_trigger_sharpness : float
         Sigmoid sharpness on the buoyancy / RH soft triggers (default
         0.02).
-    precip_efficiency : float
-        Fraction of detrained condensate that precipitates (default 0.5).
     tau_M_u_relax : float
         Implicit-Euler relaxation timescale [s] for the profile carry
         ``M_u`` toward its diagnosed equilibrium (default 1800.0).
@@ -467,7 +465,6 @@ class TiedtkeConfig(NamedTuple):
     cmt_c_u: float = 0.7
     cmt_c_d: float = 0.7
     smooth_trigger_sharpness: float = 0.02
-    precip_efficiency: float = 0.5
     tau_M_u_relax: float = 1800.0
     parcel_dT: float = 0.5
     parcel_dq: float = 1.0e-3
@@ -534,7 +531,7 @@ class BechtoldConfig(NamedTuple):
     enable_downdraft, downdraft_alpha, downdraft_RH_min : as Tiedtke.
     enable_cmt, cmt_c_u, cmt_c_d : as Tiedtke.
     cape_threshold, cape_sharpness, smooth_trigger_sharpness,
-    precip_efficiency, parcel_dT, parcel_dq, tau_M_u_relax,
+    parcel_dT, parcel_dq, tau_M_u_relax,
     cloud_depth_deep, cloud_depth_shallow_max, depth_split_sharpness :
         as Tiedtke.
     """
@@ -566,7 +563,6 @@ class BechtoldConfig(NamedTuple):
     cape_threshold: float = 70.0
     cape_sharpness: float = 0.1
     smooth_trigger_sharpness: float = 0.02
-    precip_efficiency: float = 0.55
     parcel_dT: float = 0.5
     parcel_dq: float = 1.0e-3
     tau_M_u_relax: float = 1800.0

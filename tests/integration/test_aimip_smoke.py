@@ -80,7 +80,7 @@ def test_aimip_classical_params_to_tiedtke_preserves_defaults():
     canon = TiedtkeConfig()
     for field in (
         "tau_M_u_relax", "tau_MC_proxy", "cape_threshold",
-        "precip_efficiency", "downdraft_alpha", "downdraft_RH_min",
+        "downdraft_alpha", "downdraft_RH_min",
     ):
         assert math.isclose(
             float(getattr(cfg, field)),
