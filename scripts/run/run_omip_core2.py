@@ -721,7 +721,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
 
 
 def _balanced_init_cube(state, grid, z_coord, config, fc_config,
-                        taper_lat_deg=8.0, max_speed=2.5, with_ssh=True):
+                        taper_lat_deg=12.0, max_speed=1.5, ref_depth_m=1000.0,
+                        with_ssh=True):
     """Geostrophic/thermal-wind balanced cold-start for the cube A-grid OceanModel.
 
     The cube WOA cold-start blows up as a violent geostrophic adjustment: from REST
@@ -783,6 +784,15 @@ def _balanced_init_cube(state, grid, z_coord, config, fc_config,
     inv_f = f / (f * f + f_eps * f_eps)
     u_g = -inv_f / rho_0 * dpy
     v_g = +inv_f / rho_0 * dpx
+    # DEPTH TAPER (surface intensification): real geostrophic flow decays with
+    # depth; more importantly the LNM p_ref develops a SPURIOUS horizontal gradient
+    # at the bathymetry steps (FC gradient of the masked p_ref jumps across the
+    # active/inactive boundary -> huge deep u_g, the lev-15 equatorial blowup). Taper
+    # u_g,v_g by exp(-z/ref_depth) so deep spurious velocity -> 0 (physical + robust).
+    z_cen = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref     # (nlev,)
+    depth_taper = jnp.exp(-z_cen / ref_depth_m)[None, None, None, :]
+    u_g = u_g * depth_taper
+    v_g = v_g * depth_taper
     u_g = jnp.clip(u_g, -max_speed, max_speed) * mask3d
     v_g = jnp.clip(v_g, -max_speed, max_speed) * mask3d
 
@@ -868,7 +878,7 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        flat_bottom: bool = False, A_h=None, hyperdiff_coeff=None,
                        div_damp_2=None, div_damp_4=None, baroclinic_rk3=None,
                        mask_marginal_seas=False, balanced_init=False,
-                       use_fc=True, dt=30.0):
+                       use_fc=True, dt=30.0, balanced_max_speed=1.5):
     """Build a cubed-sphere ocean (FC-Gram spectral baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -983,7 +993,7 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
             raise ValueError("cube --balanced-init needs the FC backend (uses FC "
                              "gradients); not compatible with --cube-no-fc.")
         state = _balanced_init_cube(state, grid, z_coord, model.config,
-                                    model._fc_config)
+                                    model._fc_config, max_speed=balanced_max_speed)
     return grid, z_coord, model, state, np.asarray(H_bathy)
 
 
@@ -1116,6 +1126,10 @@ def main() -> int:
     p.add_argument("--cube-rk3", action="store_true",
                    help="cube: 3-stage SSP-RK3 baroclinic update (vs forward-Euler) "
                         "— the tripole cold-start fix ported to the cube OceanModel.")
+    p.add_argument("--cube-bal-maxspeed", type=float, default=1.5,
+                   help="cube balanced-init geostrophic velocity clip [m/s]. High "
+                        "(e.g. 10) = effectively unclipped (trust the balance — a "
+                        "clip breaks geostrophic balance and seeds adjustment).")
     p.add_argument("--cube-no-fc", action="store_true",
                    help="cube: use the cd-grid Arakawa-Lamb FINITE-DIFFERENCE PGF "
                         "(no FC spectral Gibbs at sharp marginal-sea fronts) instead "
@@ -1364,6 +1378,7 @@ def main() -> int:
             mask_marginal_seas=args.cube_mask_marginal_seas,
             balanced_init=args.balanced_init,
             use_fc=(not args.cube_no_fc), dt=args.dt,
+            balanced_max_speed=args.cube_bal_maxspeed,
         )
         app_grid_type = "cubed_sphere"
     else:
