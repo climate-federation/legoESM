@@ -46,13 +46,13 @@ from legoesm.ocean.physics.combined import make_ocean_physics
 
 OCEAN_DISCRETIZATIONS = ["cdgrid"]
 
-# Legacy discretization name mapping
+# Legacy discretization name mapping.  The Fourier-continuation A-grid backend
+# ("fc_gram"/"fc_gram_cgrid") has been REMOVED — all cubed-sphere ocean
+# discretizations are the FV3 C-D grid (the atmosphere-matching staggering).
 _LEGACY_DISCRETIZATION_MAP = {
     "centered": "cdgrid",
     "finite_volume": "cdgrid",
     "fv": "cdgrid",
-    "fc_gram": "cdgrid",
-    "fc_gram_cgrid": "cdgrid",
 }
 
 
@@ -72,9 +72,9 @@ class OceanModel:
     config : OceanConfig, optional
         Model configuration. Defaults to OceanConfig().
     discretization : str, optional
-        Horizontal discretization. Only "cdgrid" is supported.
-        Legacy names ("centered", "finite_volume", "fc_gram",
-        "fc_gram_cgrid") are accepted with a deprecation warning.
+        Horizontal discretization. Only "cdgrid" (FV3 C-D grid) is supported.
+        Legacy names ("centered", "finite_volume", "fv") are accepted with a
+        deprecation warning.
 
     Example
     -------
@@ -91,7 +91,6 @@ class OceanModel:
         z_coord: OceanZStarCoordinate,
         config: OceanConfig | None = None,
         discretization: str = "cdgrid",
-        fc_config=None,
         cdgrid=None,
     ):
         # Map legacy discretization names with deprecation warning
@@ -125,17 +124,6 @@ class OceanModel:
             self._cdgrid = cdgrid
         else:
             self._cdgrid = create_cubed_sphere_cdgrid(grid)
-
-        # FC-Gram spectral baroclinic-tendency backend (optional).
-        # When ``fc_config`` is provided, the baroclinic tendencies are
-        # computed by ``ocean_baroclinic_tendencies_fc`` using FC-Gram
-        # spectral horizontal operators on each cube face — eliminating
-        # the face-edge halo amplification that the default A-L
-        # cd-grid path exhibits under horizontal density gradients
-        # (see docs/ocean_experiments/cubed_sphere_pgf_stability.md).
-        # Required to make cubed-sphere OMIP integrations survive
-        # multi-day WOA restoring at ~5° resolution.
-        self._fc_config = fc_config
 
         # FV3-faithful barotropic: route the free-surface mode through the
         # validated cube shallow-water core (vector-invariant absolute-vorticity
@@ -342,20 +330,7 @@ class OceanModel:
         return self._compute_tendencies(state, surface_forcing)
 
     def _compute_tendencies(self, state: OceanState, surface_forcing=None):
-        """Compute baroclinic tendencies on the configured backend."""
-        if self._fc_config is not None:
-            # FC-Gram spectral operators on each cube face — used to
-            # bypass the cd-grid A-L face-edge halo instability under
-            # horizontal density gradients (cubed-sphere OMIP fix).
-            from legoesm.ocean.dynamics.ocean_pe_fc import (
-                ocean_baroclinic_tendencies_fc,
-            )
-            return ocean_baroclinic_tendencies_fc(
-                state, self.grid, self.z_coord,
-                self._fc_config, self.config,
-                physics_fn=self._physics_fn,
-                surface_forcing=surface_forcing,
-            )
+        """Compute baroclinic tendencies on the C-D grid backend."""
         return ocean_baroclinic_tendencies_cdgrid(
             state, self.grid, self.z_coord,
             self._cdgrid, self.config,

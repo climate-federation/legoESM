@@ -827,7 +827,7 @@ def slide_ocean_dycores():
             "Lat-lon C-grid (FV, Sadourny EC vector-invariant; MOM6-style slow-forcing split): ocean_pe_latlon_cgrid.py",
             "Cubed-sphere C-D (Boussinesq, Lin 2004 + Griffies 2004): ocean_pe_cdgrid.py",
             "MPAS Voronoi (TRiSK, Ringler 2010): ocean_pe_mpas.py",
-            "Spectral + FC-Gram: spectral_ocean_pe.py, ocean_pe_fc.py",
+            "Spectral: spectral_ocean_pe.py",
             "Learned ocean (SFNO): sfno_ocean.py — packed PE state ↔ tensors via channel_packing",
             "Shared baroclinic helpers (ocean_tendency_common): EOS-pressure iteration, tracer sponge, freshwater virtual-salt, implicit bottom drag",
             "Shared barotropic helpers (barotropic_common): cosine / box filter, BEBT eta blend, MAXVEL clip",

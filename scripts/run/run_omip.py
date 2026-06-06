@@ -429,7 +429,10 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.ocean.dynamics.ocean_model import OceanModel
         from legoesm.ocean.state import OceanConfig
-        from legoesm.core.operators_fc import build_fc_config
+        # Register the FV3 shallow-water barotropic core provider (fv3sw/fv3edge)
+        # so the cube ocean can use the FV3-faithful C-D barotropic solver below
+        # instead of the forbidden a_grid solver (never-A-grid directive).
+        import legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid  # noqa: F401
 
         grid = create_cubed_sphere(params["n"])
         # Cubed-sphere OMIP-stability tuning.
@@ -470,22 +473,19 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             barotropic_diffusion_alpha=0.3,
             use_conservation_fixer=True,
             physics=None,
+            # FV3-faithful C-D barotropic (vector-invariant absolute-vorticity
+            # flux + RK3 + div-damp/hyperdiff); replaces the a_grid solver whose
+            # computational pressure mode grows a ~40% non-zonal eta artifact
+            # (a_grid forbidden by the never-A-grid / FV3-faithfulness directive).
+            barotropic_staggering="fv3sw",
         )
-        # FC-Gram spectral baroclinic-tendency backend.  The default
-        # cd-grid A-L 4-pt corner stencil amplifies halo-interp errors
-        # at face boundaries by O(dx); under a slowly developing
-        # horizontal density gradient (rest-state + WOA restoring)
-        # this drives an exponentially growing PGF instability that
-        # blew up cubed_sphere OMIP at ~4-5 days even with the tuned
-        # diffusion defaults above.  FC-Gram operators evaluate
-        # gradients spectrally on each cube face with smooth Fourier-
-        # continuation extension into the halo region, so the
-        # face-edge artifact effectively vanishes.  Combined with the
-        # A_h/K_h floors above this lets cubed_sphere reach the 30-day
-        # quick smoke target and beyond.  See
-        # docs/ocean_experiments/cubed_sphere_pgf_stability.md.
-        fc_cfg = build_fc_config(dtype=jnp.float64)
-        model = OceanModel(grid, z_coord, config, fc_config=fc_cfg)
+        # FV3 C-D grid baroclinic backend (the only cube ocean backend; the
+        # deprecated FC-Gram A-grid spectral backend was removed).  The
+        # cd-grid A-L corner stencil's face-edge halo amplification under
+        # horizontal density gradients is the documented cube cold-start gate;
+        # the structural fix (partial cells + SMC03 density-Jacobian PGF on the
+        # C-D grid) is tracked in docs/md_files/ocean_faithfulness_nemo.md.
+        model = OceanModel(grid, z_coord, config)
         return grid, z_coord, config, model, "cube"
 
     elif grid_type == "latlon":

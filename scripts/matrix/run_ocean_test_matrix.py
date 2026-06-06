@@ -2264,8 +2264,7 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
                         A_h: float | None = None,
                         A_v: float | None = None,
                         bottom_drag_r: float | None = None,
-                        cube_use_fc: bool | None = None,
-                        cube_fc_light_diffusion: bool = False):
+                        cube_light_diffusion: bool = False):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -2292,16 +2291,6 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
         nlev = DEFAULT_NLEV
     if H_max is None:
         H_max = DEFAULT_H_MAX
-    if cube_use_fc is None:
-        # Default the cubed-sphere ocean to the FC-Gram spectral
-        # baroclinic-tendency backend, which removes the face-edge PGF
-        # instability documented in
-        # docs/ocean_experiments/cubed_sphere_pgf_stability.md (RESOLVED
-        # 2026-05-20) and which scripts/run/run_omip.py already enables by
-        # default for cubed_sphere.  Without it the rest_state +
-        # barotropic_wave cube cases NaN around physical day 1-2 while
-        # latlon/MPAS stay stable.  Non-cube grids are unaffected.
-        cube_use_fc = (tc.grid_type == "cubed_sphere")
     from legoesm.ocean.vertical import create_ocean_z_star
 
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=H_max)
@@ -2314,68 +2303,41 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
 
         n = params["n"]
         grid = create_cubed_sphere(n)
-        if cube_use_fc:
-            # Cubed-sphere ocean uses the FC-Gram spectral baroclinic
-            # tendency backend + raised face-edge dissipation (per
-            # scripts/run/run_omip.py and docs/ocean_experiments/
-            # cubed_sphere_pgf_stability.md). The default A-L cd-grid
-            # path exhibits exponential PGF instability at face
-            # boundaries under any horizontal density gradient
-            # (lock_exchange, phillips_two_layer, overflow,
-            # geostrophic_adjustment, stommel_gyre_tracer all
-            # NaN/blow up). FC-Gram operators evaluate gradients
-            # spectrally on each face with smooth Fourier-continuation
-            # extension into the halo, so the face-edge artifact
-            # vanishes. Used only by density-gradient tests because
-            # the raised K_h overdamps small-amplitude wave tests
-            # (barotropic_wave initial amplitude 0.1 m would decay
-            # to 0.04 m under K_h=5e6).
-            kw = dict(
-                n_barotropic_substeps=60,
-                barotropic_diffusion_alpha=0.3,
-                use_conservation_fixer=True,
-                physics=physics,
-                # FV3-faithful barotropic: route the free-surface mode through
-                # the validated cube SW core (vector-invariant absolute-vorticity
-                # flux + RK3 + div-damp/hyperdiff).  Replaces the A-grid solver,
-                # whose computational pressure mode grew a 40% non-zonal
-                # geostrophic_adjustment eta artifact (a_grid forbidden by the
-                # never-A-grid / FV3-faithfulness directive).  Ocean-tuned SW
-                # barotropic damping (OceanConfig default div_damp_factor=120)
-                # so phillips_two_layer matches latlon/mpas without over-damping
-                # barotropic_wave / geostrophic_adjustment.
-                barotropic_staggering="fv3sw",
-            )
-            if cube_fc_light_diffusion:
-                # Wave tests (barotropic_wave, inertia_gravity_wave) carry
-                # NO horizontal density gradient, so they do not excite the
-                # face-edge baroclinic-PGF instability that the raised
-                # A_h=5e5 / K_h=5e6 exists to suppress.  The FC-Gram
-                # spectral gradient alone removes the eta-gradient face
-                # artifact that NaN'd the legacy A-L path.  Keep light
-                # lateral diffusion so the small-amplitude wave is not
-                # over-damped (raised K_h decays barotropic_wave 0.1 m ->
-                # 0.04 m; codex iter-8 flagged the coupling).  A_h/K_h fall
-                # back to the caller value / OceanConfig default.
-                if A_h is not None:
-                    kw["A_h"] = A_h
-            elif A_h is None:
-                kw["A_h"] = 5.0e5
-                kw["K_h"] = 5.0e6
-            else:
-                kw["A_h"] = max(A_h, 5.0e5)
-                kw["K_h"] = 5.0e6
-        else:
-            kw = dict(n_barotropic_substeps=30, physics=physics)
+        # Cubed-sphere ocean: FV3 C-D grid backend (the deprecated FC-Gram
+        # A-grid was removed) + raised face-edge dissipation + FV3-faithful
+        # fv3sw barotropic.  The cd-grid A-L corner stencil's face-edge PGF
+        # amplification under horizontal density gradients is the documented
+        # cube cold-start gate (lock_exchange, phillips_two_layer, overflow,
+        # geostrophic_adjustment, stommel_gyre_tracer); raised A_h/K_h delay
+        # it for the matrix smoke.  ``cube_light_diffusion`` keeps lateral
+        # diffusion light for wave tests (barotropic_wave / inertia_gravity_
+        # wave carry no density gradient; K_h=5e6 would decay a 0.1 m wave to
+        # 0.04 m).  The a_grid barotropic is forbidden by the never-A-grid /
+        # FV3-faithfulness directive — use fv3sw (vector-invariant absolute-
+        # vorticity flux + RK3 + div-damp/hyperdiff).
+        kw = dict(
+            n_barotropic_substeps=60,
+            barotropic_diffusion_alpha=0.3,
+            use_conservation_fixer=True,
+            physics=physics,
+            barotropic_staggering="fv3sw",
+        )
+        if cube_light_diffusion:
             if A_h is not None:
                 kw["A_h"] = A_h
+        elif A_h is None:
+            kw["A_h"] = 5.0e5
+            kw["K_h"] = 5.0e6
+        else:
+            kw["A_h"] = max(A_h, 5.0e5)
+            kw["K_h"] = 5.0e6
         if A_v is not None:
             kw["A_v"] = A_v
         # Phase B.1 of the bulletproof-ocean validation plan added
         # ``bottom_drag_r`` / ``bottom_drag_bg_velocity`` /
         # ``bottom_drag_bbl_thickness`` to ``OceanConfig`` (mirroring
         # ``LatLonCGridOceanConfig``); the cube tendency
-        # ``ocean_pe_fc.ocean_baroclinic_tendencies_fc`` now applies
+        # the cd-grid backend ``ocean_baroclinic_tendencies_cdgrid`` applies
         # linear / quadratic-with-floor / distributed-BBL drag the
         # same way the lat-lon C-grid does. The previous gate that
         # raised ``NotImplementedError`` for ``bottom_drag_r > 0`` is
@@ -2383,12 +2345,7 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
         if bottom_drag_r is not None:
             kw["bottom_drag_r"] = bottom_drag_r
         config = OceanConfig(**kw)
-        if cube_use_fc:
-            from legoesm.core.operators_fc import build_fc_config
-            fc_cfg = build_fc_config(dtype=jnp.float64)
-            model = OceanModel(grid, z_coord, config, fc_config=fc_cfg)
-        else:
-            model = OceanModel(grid, z_coord, config)
+        model = OceanModel(grid, z_coord, config)
         coord_kind = "cube"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -3546,7 +3503,7 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
     # raised A_h/K_h (no density gradient here, so the heavy diffusion only
     # over-damps the small-amplitude wave — codex iter-8).
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, cube_fc_light_diffusion=True))
+        _create_ocean_setup(tc, cube_light_diffusion=True))
     state = _create_rest_state(tc, grid, z_coord)
     state = _add_barotropic_wave_perturbation(
         state, tc.grid_type, grid, z_coord)
@@ -4343,9 +4300,8 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
     """Geostrophic adjustment: meridional temperature front relaxation."""
     # Density-gradient initial condition triggers the cube cd-grid PGF
     # face-edge instability; use FC-Gram backend for cube only.
-    cube_use_fc = (tc.grid_type == "cubed_sphere")
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, cube_use_fc=cube_use_fc))
+        _create_ocean_setup(tc))
     state = _create_rest_state(tc, grid, z_coord)
     state = _add_baroclinic_perturbation(
         state, tc.grid_type, grid, z_coord)
@@ -4565,9 +4521,8 @@ def _add_phillips_perturbation(state, grid_type: str, grid, z_coord):
 def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
                            ) -> tuple[str, float, str]:
     """Phillips two-layer baroclinic test with zonal-mean relaxation."""
-    cube_use_fc = (tc.grid_type == "cubed_sphere")
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, nlev=2, H_max=3500.0, cube_use_fc=cube_use_fc))
+        _create_ocean_setup(tc, nlev=2, H_max=3500.0))
     state = _create_rest_state(tc, grid, z_coord, H_max=3500.0)
     state = _add_phillips_perturbation(state, tc.grid_type, grid, z_coord)
 
@@ -4952,7 +4907,7 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
     # dissipation (amp_ratio 0.008), so routing IGW through the new
     # cube-default FC backend would strictly worsen it.  Opt out.
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, nlev=2, H_max=H_max, cube_use_fc=False))
+        _create_ocean_setup(tc, nlev=2, H_max=H_max))
     state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
     state = _init_inertia_gravity_wave(state, tc.grid_type, grid, z_coord)
 
@@ -5946,10 +5901,8 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     """
     H_max = 2000.0
     nlev = 20
-    cube_use_fc = (tc.grid_type == "cubed_sphere")
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, nlev=nlev, H_max=H_max,
-                            cube_use_fc=cube_use_fc))
+        _create_ocean_setup(tc, nlev=nlev, H_max=H_max))
     state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
     state = _init_overflow(state, tc.grid_type, grid, z_coord)
 

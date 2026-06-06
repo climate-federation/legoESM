@@ -86,6 +86,9 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.ocean.dynamics.ocean_model import OceanModel
         from legoesm.ocean.state import OceanConfig
+        # Register the FV3 SW barotropic provider (fv3sw) — the cube uses the
+        # FV3-faithful C-D barotropic, not the forbidden a_grid (never-A-grid).
+        import legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid  # noqa: F401
 
         # iter-175 parity with iter-174 monolithic fix:
         # cubed_sphere ``OceanConfig`` does not expose
@@ -114,7 +117,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
 
         n = params["n"]
         grid = create_cubed_sphere(n)
-        kw = dict(n_barotropic_substeps=30, physics=physics)
+        kw = dict(n_barotropic_substeps=30, physics=physics,
+                  barotropic_staggering="fv3sw")
         if A_h is not None:
             kw["A_h"] = A_h
         if A_v is not None:

@@ -720,95 +720,6 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
     return grid, z_coord, model, state, np.asarray(H_bathy)
 
 
-def _balanced_init_cube(state, grid, z_coord, config, fc_config,
-                        taper_lat_deg=12.0, max_speed=1.5, ref_depth_m=1000.0,
-                        with_ssh=True):
-    """Geostrophic/thermal-wind balanced cold-start for the cube A-grid OceanModel.
-
-    The cube WOA cold-start blows up as a violent geostrophic adjustment: from REST
-    (u=0, eta=0) the unbalanced baroclinic PGF at sharp marginal-sea density fronts
-    accelerates a single cell explosively (diagnosed iters 26-30; RK3/viscosity/
-    smoothing/masking all fail). This puts the flow in balance at t=0 (same idea as
-    the lat-lon `apply_balanced_init`, but on the cube A-grid via FC gradients):
-      1. p' from the dycore's own EOS+hydrostatic block (matches ocean_pe_fc).
-      2. level-of-no-motion: p_ref = p' - p'(deepest active level).
-      3. geostrophic velocity in the GRID-LOCAL (i,j) frame (the cube momentum
-         frame): u_g = -1/(rho0 f) dp_ref/dy, v_g = +1/(rho0 f) dp_ref/dx, with f
-         regularised near the equator (1/f -> f/(f^2+f_eps^2), f_eps=2Omega sin taper)
-         and clipped to +-max_speed. A-grid -> assigned directly to cell centres.
-      4. (with_ssh) eta = -p'_bottom/(rho0 g), area-demeaned, so the total PGF
-         -(1/rho0) grad(p' + rho0 g eta) = -(1/rho0) grad(p_ref) balances u_g.
-    Pure IC change."""
-    from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
-    from legoesm.ocean.vertical import (
-        compute_ocean_jacobian, compute_layer_thickness,
-    )
-    from legoesm.grids.halo import pad_halo_4d
-    from legoesm.core.operators_fc_3d import fc_gradient_x_3d, fc_gradient_y_3d
-    from legoesm import constants
-
-    T = np.asarray(state.T.data); S = np.asarray(state.S.data)
-    T = jnp.asarray(T); S = jnp.asarray(S)
-    mask = state.land_mask.data
-    H_bathy = state.H_bathy.data
-    eta = state.eta.data
-    g = float(config.g); rho_0 = float(config.rho_0)
-    mask3d = mask[..., None]
-
-    # p' (mirror ocean_pe_fc): Jacobian, EOS, baroclinic pressure anomaly.
-    eta_safe = eta * mask
-    J = compute_ocean_jacobian(eta_safe, H_bathy, z_coord,
-                               min_water_column_m=config.min_water_column_m)
-    p_hydro = compute_hydrostatic_pressure(
-        jnp.full_like(T, rho_0), eta_safe, z_coord.dz_ref, J, rho_0, g)
-    rho_prime = wright_eos(T, S, p_hydro) - rho_0
-    dz_actual = z_coord.dz_ref * J[..., None]
-    dp_layer = rho_prime * g * dz_actual
-    p_prime = jnp.cumsum(dp_layer, axis=-1) - 0.5 * dp_layer
-
-    # level-of-no-motion: deepest ACTIVE level (full cells: z_cen < H_bathy).
-    z_cen = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref     # (nlev,)
-    active = (mask3d > 0.5) & (z_cen[None, None, None, :] < H_bathy[..., None])
-    very_neg = jnp.where(active, p_prime, -jnp.inf)
-    p_bot = jnp.max(very_neg, axis=-1, keepdims=True)            # (6,n,n,1)
-    p_bot = jnp.where(jnp.isfinite(p_bot), p_bot, 0.0)
-    p_ref = jnp.where(active, p_prime - p_bot, 0.0)
-
-    # grid-local gradients via FC operators.
-    pad = pad_halo_4d(p_ref, halo=1, interp_offsets=grid.halo_interp_offsets)
-    dpx = fc_gradient_x_3d(p_ref, grid, fc_config, padded=pad)
-    dpy = fc_gradient_y_3d(p_ref, grid, fc_config, padded=pad)
-
-    f = grid.f[..., None]                                         # (6,n,n,1)
-    f_eps = 2.0 * float(constants.Omega) * np.sin(np.deg2rad(taper_lat_deg))
-    inv_f = f / (f * f + f_eps * f_eps)
-    u_g = -inv_f / rho_0 * dpy
-    v_g = +inv_f / rho_0 * dpx
-    # DEPTH TAPER (surface intensification): real geostrophic flow decays with
-    # depth; more importantly the LNM p_ref develops a SPURIOUS horizontal gradient
-    # at the bathymetry steps (FC gradient of the masked p_ref jumps across the
-    # active/inactive boundary -> huge deep u_g, the lev-15 equatorial blowup). Taper
-    # u_g,v_g by exp(-z/ref_depth) so deep spurious velocity -> 0 (physical + robust).
-    z_cen = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref     # (nlev,)
-    depth_taper = jnp.exp(-z_cen / ref_depth_m)[None, None, None, :]
-    u_g = u_g * depth_taper
-    v_g = v_g * depth_taper
-    u_g = jnp.clip(u_g, -max_speed, max_speed) * mask3d
-    v_g = jnp.clip(v_g, -max_speed, max_speed) * mask3d
-
-    new = state._replace(u=state.u.replace(data=u_g),
-                         v=state.v.replace(data=v_g))
-    if with_ssh:
-        eta_bal = jnp.where(mask > 0.5, -p_bot[..., 0] / (rho_0 * g), 0.0)
-        area = grid.area * mask
-        eta_mean = jnp.sum(eta_bal * area) / jnp.maximum(jnp.sum(area), 1.0)
-        eta_bal = jnp.where(mask > 0.5, eta_bal - eta_mean, 0.0)
-        new = new._replace(eta=new.eta.replace(data=eta_bal))
-    print(f"[setup] cube balanced-init: geostrophic IC, max|u_g|="
-          f"{float(jnp.max(jnp.abs(u_g))):.2f} m/s, taper {taper_lat_deg} deg")
-    return new
-
-
 def _apply_marginal_sea_mask(land_mask, lat_deg, lon_deg):
     """Set to LAND the poorly-resolved semi-enclosed marginal seas, whose narrow
     sills (e.g. Gibraltar) are sub-grid at coarse cube resolution -> a sharp 1-cell
@@ -877,10 +788,9 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        woa_init: bool = False, woa_t=None, woa_s=None,
                        flat_bottom: bool = False, A_h=None, hyperdiff_coeff=None,
                        div_damp_2=None, div_damp_4=None, baroclinic_rk3=None,
-                       mask_marginal_seas=False, balanced_init=False,
-                       use_fc=True, dt=30.0, balanced_max_speed=1.5,
+                       mask_marginal_seas=False, dt=30.0,
                        velocity_ceiling=None, partial_cell=False):
-    """Build a cubed-sphere ocean (FC-Gram spectral baroclinic backend) with NEMO's
+    """Build a cubed-sphere ocean (FV3 C-D grid baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
     fv3sw barotropic + face-edge-stability A_h/K_h) and the OMIP-2 applicator
@@ -911,9 +821,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
     from legoesm.ocean.dynamics.ocean_model import OceanModel
-    from legoesm.core.operators_fc import build_fc_config
-    # CRITICAL (iter-33): with external-forcing physics the FC dynamics-core viscosity
-    # branch (ocean_pe_fc `if physics_fn is None`) is SKIPPED — ALL momentum/tracer
+    # CRITICAL (iter-33): with external-forcing physics the dynamics-core viscosity
+    # branch (`if physics_fn is None`) is SKIPPED — ALL momentum/tracer
     # mixing must come from physics_fn. The default HarmonicConfig A_h=1e4 +
     # enforce_cfl=False is ~4 orders too weak -> near-zero lateral momentum viscosity
     # -> the sharp marginal-sea front jet blows up. Use a STRONG CFL-CAPPED harmonic
@@ -979,12 +888,10 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
         z_coord, H_bathy, land_mask = make_partial_cell(
             z_coord, H_bathy, land_mask,
         )
-    # FC-Gram spectral baroclinic backend by default; use_fc=False uses the
-    # cd-grid Arakawa-Lamb FINITE-DIFFERENCE path (no Fourier Gibbs at sharp
-    # marginal-sea fronts — tests the iter-31 FC-Gibbs hypothesis).
-    _fc = build_fc_config(dtype=jnp.float64) if use_fc else None
-    model = OceanModel(grid, z_coord, config, fc_config=_fc)
-    print(f"[setup] cube backend: {'FC-Gram spectral' if use_fc else 'cd-grid FD'}"
+    # FV3 C-D grid baroclinic backend (the only cube ocean backend; the
+    # deprecated FC-Gram A-grid was removed).
+    model = OceanModel(grid, z_coord, config)
+    print(f"[setup] cube backend: cd-grid (FV3 C-D)"
           f"{' + partial cells' if partial_cell else ''}")
     state = rest_state_ocean(grid, z_coord, H_max=H_max)
     state = state._replace(
@@ -1002,14 +909,6 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                     dims=state.S.dims, units=state.S.units),
         )
         print(f"[setup] cube T/S initialised from WOA18 ({Path(woa_t).name})")
-    if balanced_init:
-        if not woa_init:
-            raise ValueError("--balanced-init requires --woa-init (balances the WOA IC).")
-        if model._fc_config is None:
-            raise ValueError("cube --balanced-init needs the FC backend (uses FC "
-                             "gradients); not compatible with --cube-no-fc.")
-        state = _balanced_init_cube(state, grid, z_coord, model.config,
-                                    model._fc_config, max_speed=balanced_max_speed)
     return grid, z_coord, model, state, np.asarray(H_bathy)
 
 
@@ -1197,8 +1096,8 @@ def main() -> int:
     p.add_argument("--grid", type=str, default="tripole",
                    choices=["tripole", "latlon_bathy", "cubed_sphere"],
                    help="tripole (eORCA1 same-grid), latlon_bathy (regular lat-lon + "
-                        "NEMO bathy + smc03 + polar filter), or cubed_sphere (FC-Gram "
-                        "backend + NEMO bathy on cube cells; grid 3, dycore WIP).")
+                        "NEMO bathy + smc03 + polar filter), or cubed_sphere (FV3 C-D "
+                        "grid + NEMO bathy on cube cells; grid 3, dycore WIP).")
     p.add_argument("--latlon-res", type=str, default="180x360",
                    help="lat-lon resolution NxM for --grid latlon_bathy.")
     p.add_argument("--cube-n", type=int, default=48,
@@ -1217,14 +1116,6 @@ def main() -> int:
     p.add_argument("--cube-velocity-ceiling", type=float, default=None,
                    help="cube: clip |u|,|v| to this [m/s] each step -- bounds the sub-grid "
                         "marginal-sea jet spikes (caveated open-ocean run).")
-    p.add_argument("--cube-bal-maxspeed", type=float, default=1.5,
-                   help="cube balanced-init geostrophic velocity clip [m/s]. High "
-                        "(e.g. 10) = effectively unclipped (trust the balance — a "
-                        "clip breaks geostrophic balance and seeds adjustment).")
-    p.add_argument("--cube-no-fc", action="store_true",
-                   help="cube: use the cd-grid Arakawa-Lamb FINITE-DIFFERENCE PGF "
-                        "(no FC spectral Gibbs at sharp marginal-sea fronts) instead "
-                        "of the FC-Gram backend. Tests the iter-31 FC-Gibbs hypothesis.")
     p.add_argument("--cube-mask-marginal-seas", action="store_true",
                    help="cube: mask poorly-resolved semi-enclosed marginal seas "
                         "(Med/Black/Red/Gulf/Baltic/Hudson) to land — their sub-grid "
@@ -1474,9 +1365,7 @@ def main() -> int:
             div_damp_2=args.cube_divdamp2, div_damp_4=args.cube_divdamp4,
             baroclinic_rk3=(True if args.cube_rk3 else None),
             mask_marginal_seas=args.cube_mask_marginal_seas,
-            balanced_init=args.balanced_init,
-            use_fc=(not args.cube_no_fc), dt=args.dt,
-            balanced_max_speed=args.cube_bal_maxspeed,
+            dt=args.dt,
             velocity_ceiling=args.cube_velocity_ceiling,
             partial_cell=args.partial_cell,
         )
@@ -1519,9 +1408,15 @@ def main() -> int:
             raise ValueError("--woa-smoothing-passes requires --woa-init.")
         state = smooth_woa_ts(state, grid, args.woa_smoothing_passes)
 
-    # NOTE: cubed_sphere applies its OWN balanced-init inside build_cubed_sphere
-    # (cube A-grid via FC gradients); the lat-lon C-grid apply_balanced_init below
-    # is for tripole/latlon only.
+    # apply_balanced_init is the lat-lon C-grid geostrophic cold-start (tripole/
+    # latlon).  The cube's FC-gradient balanced-init was removed with the FC
+    # A-grid backend; a C-D grid cube balanced-init is future work.
+    if args.balanced_init and args.grid == "cubed_sphere":
+        raise ValueError(
+            "--balanced-init is not available for cubed_sphere: the cube "
+            "FC-gradient balanced-init was removed with the deprecated FC A-grid "
+            "backend. A C-D grid cube balanced-init is future work."
+        )
     if args.balanced_init and args.grid != "cubed_sphere":
         if not args.woa_init:
             raise ValueError("--balanced-init requires --woa-init (it balances the WOA IC).")

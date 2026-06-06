@@ -237,8 +237,9 @@ def main() -> int:
     parser.add_argument(
         "--cube-discretizations",
         type=str,
-        default="finite_volume,fc_gram",
-        help="Comma-separated cubed-sphere discretizations.",
+        default="cdgrid",
+        help="Comma-separated cubed-sphere discretizations (only 'cdgrid', "
+             "the FV3 C-D grid, is supported; the FC-Gram A-grid was removed).",
     )
 
     parser.add_argument("--spectral-base-truncation", type=int, default=8)

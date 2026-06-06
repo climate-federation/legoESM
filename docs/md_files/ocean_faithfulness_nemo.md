@@ -108,11 +108,36 @@ workaround.** All prior cube work (partial cells, smc03 plan) was on the depreca
   z* path BIT-EXACT (h_actual=None). Removed the `build_cubed_sphere` cd-grid-partial guard.
   5 leaf tests (flat bit-exact, below-seafloor zero + Σh=H, sloped differs, T/S-poison
   isolation, AD-finite).
-**NEXT:** cd-grid `--cube-no-fc --partial-cell` cold-start smoke (does the C-D grid + partial
-cells delay/fix the A-L face-edge blowup like FC's step-11→130?) → then smc03 PGF on the
-C-D Arakawa-Lamb corner gradient (reuse grid-neutral `pgf_smc03.py` kernels; the gradient
-lives at D-grid corners from 4 cell-centre pressures evaluated at a corner-common reference
-depth = min of the 4 centroids) → switch `build_cubed_sphere` default to `use_fc=False`.
+**A-GRID REMOVED (user directive "if A grid is not used anymore, remove it; codex-validate"):**
+deleted `ocean_pe_fc.py` + the FC operator toolkit `operators_fc.py`/`operators_fc_3d.py`/
+`fc_gram.py` (used ONLY by the A-grid backend + its FC balanced-init — nothing in
+atmos/coupler/barotropic/RCE/spectral uses them) + 6 FC-only test files. `OceanModel` no
+longer takes `fc_config`; `_compute_tendencies` always → `ocean_baroclinic_tendencies_cdgrid`;
+`fc_gram`/`fc_gram_cgrid` dropped from the legacy-name map (now raise). Runners
+(`run_omip_core2`/`run_omip`/`run_ocean_test_matrix`) build the cube on cd-grid only;
+`build_cubed_sphere` no longer has `use_fc`; cube `--balanced-init` (FC-gradient) removed →
+raises (C-D cube balanced-init is future work). `halo.py` mock-patch list, deck doc,
+inline-import audit, coupler/fv3edge tests updated. **The cube ocean is now exclusively C-D
+grid** — the "never A-grid / FV3-faithfulness" directive is now enforced by deletion, not just
+deprecation. Codex adversarial review of the deletion: CLEAN (no remaining live FC imports/
+calls; dispatch correct; `fc_gram` raises). Import-health job confirmed all 4 modules gone +
+`fc_gram` raises + cd-grid is sole backend.
+**Barotropic also de-A-gridded (codex follow-on):** the cube OMIP `OceanConfig` defaulted to the
+forbidden `a_grid` barotropic (the ~40%-non-zonal-eta computational mode). Set
+`barotropic_staggering="fv3sw"` (FV3-faithful C-D barotropic) on the cube paths: `run_omip.
+_create_setup` (→ also `build_cubed_sphere`), modular `scripts/ocean_test_matrix/setup.py`,
+and coupler `component_factory` FULL_3D — each with the SW-core provider import so fv3sw
+registers. **Remaining a_grid follow-ups (deferred):** `cs_regional` single-panel (fv3sw on a
+panel unverified), the global `OceanConfig.barotropic_staggering="a_grid"` default (broad blast
+radius — non-cube grids), stale FC doc refs (SPECIFICATION.md/scaling.md/HTML/
+cubed_sphere_pgf_stability.md), the strict C-face wet/rock mass-flux closure (codex HIGH), and a
+pre-existing inline-import-budget drift (latlon/mpas/reductions, unrelated to this work).
+**NEXT:** cd-grid `--partial-cell` cold-start smoke (does C-D + partial cells delay/fix the
+A-L face-edge blowup like FC's step-11→130?) → strict C-face wet/rock mass-flux closure
+(codex HIGH; coastline + seafloor faces, cross-seam is_active halo) → smc03 PGF on the C-D
+Arakawa-Lamb corner gradient (reuse grid-neutral `pgf_smc03.py`; gradient at D-grid corners
+from the 4 cell-centre pressures evaluated at a corner-common reference depth = min of the 4
+centroids).
 
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO

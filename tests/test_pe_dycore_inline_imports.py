@@ -74,7 +74,6 @@ INLINE_IMPORT_BUDGET = {
     _OCEAN_DYN / "ocean_pe_latlon_cgrid.py": 9,
     _OCEAN_DYN / "ocean_pe_cdgrid.py": 0,
     _OCEAN_DYN / "ocean_pe_mpas.py": 2,
-    _OCEAN_DYN / "ocean_pe_fc.py": 0,
     _OCEAN_DYN / "spectral_ocean_pe.py": 0,
     _OCEAN_DYN / "ocean_model.py": 2,
     _OCEAN_DYN / "ocean_model_latlon_cgrid.py": 22,

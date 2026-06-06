@@ -867,7 +867,12 @@ def resolve_model_complexity(level, *, grid_type: str = "cubed_sphere"):
                 f"Lat-lon and MPAS full ocean use their grid-specific "
                 f"models/configs — build them explicitly."
             )
-        ocean_config = OceanConfig()
+        # Full-3D cube ocean uses the FV3 C-D grid (the only cube backend) with
+        # the FV3-faithful fv3sw barotropic — NOT the default a_grid barotropic
+        # (forbidden by the never-A-grid / FV3-faithfulness directive).  Import
+        # the SW core provider so its registry entry exists before construction.
+        import legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid  # noqa: F401
+        ocean_config = OceanConfig(barotropic_staggering="fv3sw")
     else:
         ocean_config = rungs.ocean  # simple rung — grid-agnostic, factory resolves
     return ModelComplexitySpec(

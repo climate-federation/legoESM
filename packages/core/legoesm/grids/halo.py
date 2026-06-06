@@ -2893,9 +2893,9 @@ def monotone_halo_clip_context(slack: float = 0.5):
 
     Notes
     -----
-    Implementation: 6 ``unittest.mock.patch`` targets:
-    * scalar halo: 4 sites (compressible_euler_cdgrid,
-      operators_3d, operators_cdgrid, operators_fc).
+    Implementation: ``unittest.mock.patch`` targets:
+    * scalar halo: 3 sites (compressible_euler_cdgrid,
+      operators_3d, operators_cdgrid).
     * vector halo: 2 sites (operators_cdgrid, operators_3d).
 
     May not catch every halo call site in the dycore (e.g.,
@@ -2911,7 +2911,6 @@ def monotone_halo_clip_context(slack: float = 0.5):
         "_pad_halo_4d_module",
         "legoesm.core.operators_3d.pad_halo_4d",
         "legoesm.core.operators_cdgrid.pad_halo_4d",
-        "legoesm.core.operators_fc.pad_halo_4d",
         # FV3_3D iter 527: PE-side import aliases.
         "legoesm.atmosphere.dynamics.primitive_eq_cdgrid."
         "_pad_halo_4d",

@@ -1357,8 +1357,8 @@ def test_lake_q_surface_uses_updated_temperature():
     assert jnp.allclose(resp.q_surface, q_expected, rtol=1e-5)
 
 
-def test_coupler_with_3d_ocean_fc_gram():
-    """Coupler receives SST from FC-Gram ocean model (integration test)."""
+def test_coupler_with_3d_ocean_cdgrid():
+    """Coupler receives SST from the cube C-D grid ocean model (integration test)."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.ocean.vertical import create_ocean_z_star
     from legoesm.ocean.init import rest_state_ocean
@@ -1372,13 +1372,13 @@ def test_coupler_with_3d_ocean_fc_gram():
         H_max=4000.0,
     )
 
-    # Step ocean with FC-Gram
+    # Step ocean on the FV3 C-D grid (the only cube ocean backend)
     ocean_config = OceanConfig(
         use_conservation_fixer=False,
         A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0, hyperdiff_coeff=0.0,
     )
     ocean_model = OceanModel(
-        grid, z_coord, config=ocean_config, discretization="fc_gram",
+        grid, z_coord, config=ocean_config, discretization="cdgrid",
     )
     ocean_state_new = ocean_model.step(ocean_state, 60.0)
 
