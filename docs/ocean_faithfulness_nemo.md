@@ -79,10 +79,18 @@ is a FAST single-cell SPATIAL PGF spike at poorly-resolved marginal-sea cube cel
 the Gibraltar density contrast is sub-grid at C32 ~2.8° → huge 1-cell PGF), NOT a
 time-integration-order issue. **LEVER SPACE EXHAUSTED** (RK3 worse, viscosity/hyperdiff/
 div-damp no-effect, smoothing worse, flat no-effect) — same dead-end the 1° tripole hit.
-**NEXT (two real paths):** (a) the SMC03 density-Jacobian PGF on the cube (the right dycore
-fix; large); OR (b) marginal-sea masking/sponge (pragmatic first number, caveated like the
-latlon Arctic) — needs marginal-sea detection on the cube (6,n,n). Could also test higher
-cube resolution (C90 ~1°) to resolve marginal seas. Multi-iteration dycore effort.
+**Marginal-sea masking TRIED (a07b8e20) — DEAD END:** masking the Med delayed the blowup
+(step 6→10) but it re-ignited at the next semi-enclosed basin (Gulf of Mexico 21N/268.6E).
+Whack-a-mole across ALL sharp-gradient semi-enclosed basins (Med, Gulf, Japan, Okhotsk,
+Bering...) → masking removes too much ocean, not faithful. Kept as opt-in
+`--cube-mask-marginal-seas` (delays; useful only WITH the PGF fix).
+**DEFINITIVE: cube needs the SMC03 (Shchepetkin-McWilliams 2003) density-Jacobian PGF on the
+cube FC/cd-grid backend** (`ocean_pe_fc.py` / `ocean_pe_cdgrid.py` `_arakawa_lamb_gradient`)
+— compute the horizontal PGF as a Jacobian of (in-situ density, depth) instead of a direct
+∇p, which removes the sharp-gradient/topography PGF error that seeds the single-cell spike.
+The lat-lon path's `pgf_scheme="smc03"` is the reference. Large multi-iteration dycore task.
+ALL pragmatic levers exhausted (RK3 worse, viscosity/hyperdiff/div-damp no-effect, smoothing
+worse, flat no-effect, marginal-mask cascades). This is the cube's sole remaining gate.
 
 ## Open work toward DONE
 1. **cubed_sphere cold-start** — the gate above (port conditioning stack / marginal-sea+equator handling).
