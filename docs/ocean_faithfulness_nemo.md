@@ -20,7 +20,21 @@ applicator supports grid_type latlon/tripole/**cubed_sphere/mpas**, **NOT spectr
 (no grid-space u/v/T path — line ~317). `run_omip._create_setup(grid_type,...)` is the
 shared builder for all grids; run_omip_core2 already reuses it for latlon/tripole.
 
-### GRID-3 (cubed_sphere) — HARNESS BUILT (iter-26), 2 blockers pinned
+### GRID-3 (cubed_sphere) — HARNESS COMPLETE (iter-27); dycore is the SOLE gate
+**Blocker-1 FIXED (233c9cf0):** build_cubed_sphere now sets
+`OceanPhysicsConfig(surface_forcing="external", shortwave_penetration=None,
+bottom_drag="none")` + rebuilds the FC OceanModel → CORE-II tau/q_net now applied
+(was silently dropped by physics=None). **Forced smoke 8417875 still NaN at the SAME
+step 2880 (day-1) as the unforced run → the blowup is STRUCTURAL dycore (PGF-over-
+bathy), independent of forcing/CFL.** Harness is complete+correct; the cube-vs-NEMO
+number is gated ONLY by the dycore.
+**Blocker-2 (dycore = the gate):** cube `OceanModel` PGF-over-bathy instability. FIX =
+SMC03 density-Jacobian PGF + duogrid halo on T,S (docs/ocean_experiments/
+cubed_sphere_pgf_stability.md). Substantial multi-iteration dycore effort (cf. tripole
+cold-start ~20 iters). NEXT: read that doc; add finer diag (every ~0.1 day) to localize
+the day-1 blowup cell; implement the density-Jacobian PGF + T,S duogrid halo.
+
+### (historical) GRID-3 — HARNESS BUILT (iter-26), 2 blockers pinned
 **Built + committed (d4e6c90b, 26fe0d54):** `build_cubed_sphere` in run_omip_core2
 (_create_setup cube + NEMO bathy on cube cells via new `_regrid_curv_to_points` +
 WOA IC), `--grid cubed_sphere --cube-n`, cube-safe `_diag`/`_grid_lat2d_deg`,
