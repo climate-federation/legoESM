@@ -1017,24 +1017,35 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path):
     for v in ("sorunoff", "sornfisf", "Icb_flux"):
         if v in ds:
             total = total + np.nan_to_num(np.asarray(ds[v].values, dtype=np.float64))
-    # source ocean mask = any cell with runoff anywhere in the year OR finite coords;
-    # use all finite cells (runoff is 0 on land/open-ocean, IDW just spreads to coast).
-    src_ocean = np.isfinite(src_lat) & np.isfinite(src_lon)
+    # SOURCE = the DISCHARGE cells only (annual runoff > 0): a coastal river-mouth
+    # field is sparse, so IDW from ALL cells (incl. zeros) would dilute the discharge
+    # to ~0. Routing only from nonzero cells spreads each river to the nearest model
+    # coastal cells (codex HIGH). Approximately freshwater-conserving (places the
+    # discharge density at the coast); exact area-integral conservation is a refinement.
+    annual = total.sum(axis=0)
+    src_valid = annual > 0.0
     out = np.zeros((12,) + tuple(np.asarray(lat2d_deg).shape), dtype=np.float64)
     for m in range(12):
+        # k=4 (NOT k=1: _regrid_curv_to_points assumes 2-D kNN -> k=1 crashes, codex HIGH)
         Rm, _ = _regrid_curv_to_points(
-            total[m], src_lat, src_lon, src_ocean,
-            lat2d_deg, lon2d_deg, k=1, max_deg=2.0)
+            total[m], src_lat, src_lon, src_valid,
+            lat2d_deg, lon2d_deg, k=4, max_deg=2.0)
         out[m] = np.maximum(Rm, 0.0)
-    print(f"[setup] runoff: Dai-Trenberth (river+isf+icb) regridded, "
-          f"12 months, max {out.max():.2e} kg/m^2/s")
+    print(f"[setup] runoff: Dai-Trenberth (river+isf+icb) from {int(src_valid.sum())} "
+          f"discharge cells, 12 months, max {out.max():.2e} kg/m^2/s")
     return out
 
 
+# noleap calendar month lengths (NEMO/OMIP convention) + cumulative day bounds.
+_MONTH_DAYS = np.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
+_MONTH_CUM = np.cumsum(_MONTH_DAYS)  # [31,59,...,365]
+
+
 def _runoff_month_idx(step: int, dt: float) -> int:
-    """Climatological month 0-11 for the perpetual-year model time (365-day)."""
+    """Climatological calendar month 0-11 for the perpetual-year model time, using
+    NEMO's NOLEAP month lengths (not equal 365/12 bins; codex MEDIUM)."""
     day = (step * dt / _SEC_PER_DAY) % 365.0
-    return min(11, int(day / 365.0 * 12.0))
+    return int(np.searchsorted(_MONTH_CUM, day, side="right"))
 
 
 def _idx_t(step: int, dt: float, n_rec: int) -> int:
