@@ -34,6 +34,7 @@ from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
+    extrapolate_below_seafloor,
 )
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
 from legoesm.ocean.physics.mixing import vertical_diffusion
@@ -41,26 +42,6 @@ from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     vertical_advection_ocean as _vertical_advection_ocean,
 )
-
-
-def _extrapolate_below_seafloor(field, z_coord):
-    """Fill below-seafloor (inactive) cells of a per-column field with the
-    deepest ACTIVE value of that column (constant downward extrapolation).
-
-    Active cells are a surface-down prefix (``k <= bottom_level``), so the
-    inactive cells are the suffix below the seafloor.  Filling them with the
-    deepest-active value gives the FC horizontal stencils a smooth,
-    physically-defined value at the seafloor step, so an active cell adjacent
-    to a shallower column cannot import a stale/poison rock-cell value
-    (tracer or, via the EOS, density).  This is the FC-idiomatic analogue of
-    the cd-grid ``fill_land_cells`` rock fill, extended per level.
-
-    Dry columns (``bottom_level == -1``) become a constant column; they are
-    removed by the 2D land mask downstream.
-    """
-    bl = jnp.maximum(z_coord.bottom_level, 0)[..., jnp.newaxis]   # (..., 1)
-    deepest = jnp.take_along_axis(field, bl, axis=-1)             # (..., 1)
-    return jnp.where(z_coord.is_active, field, deepest)
 
 
 def ocean_baroclinic_tendencies_fc(
@@ -135,8 +116,8 @@ def ocean_baroclinic_tendencies_fc(
         # vertical-advection seafloor-step treatment (bounded — same class as
         # the existing FC coastline handling; u,v are zero in the rock and
         # w -> 0 at the seafloor).
-        T = _extrapolate_below_seafloor(T, z_coord)
-        S = _extrapolate_below_seafloor(S, z_coord)
+        T = extrapolate_below_seafloor(T, z_coord)
+        S = extrapolate_below_seafloor(S, z_coord)
     else:
         active_3d = jnp.ones_like(mask_3d)
 

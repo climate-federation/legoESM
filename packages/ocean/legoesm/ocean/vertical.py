@@ -421,6 +421,42 @@ def create_partial_cell_coordinate(
     )
 
 
+def extrapolate_below_seafloor(
+    field: jnp.ndarray,
+    z_coord: OceanPartialCellCoordinate,
+) -> jnp.ndarray:
+    """Fill below-seafloor (inactive) cells of a per-column field with the
+    deepest ACTIVE value of that column (constant downward extrapolation).
+
+    Active cells are a surface-down prefix (``k <= bottom_level``), so the
+    inactive cells are the suffix below the seafloor.  Filling them with the
+    deepest-active value gives the horizontal stencils (FC spectral or C-D
+    Arakawa-Lamb) a smooth, physically-defined value at the seafloor step, so
+    an active cell adjacent to a shallower column cannot import a stale/poison
+    rock-cell value (a tracer or, via the EOS, density).  This is the
+    per-level analogue of the cd-grid ``fill_land_cells`` horizontal rock
+    fill, and is grid-neutral (touches only the trailing level axis).
+
+    Dry columns (``bottom_level == -1``) become a constant column; they are
+    removed by the 2D land mask downstream.
+
+    Parameters
+    ----------
+    field : array, shape (..., nlev)
+        Per-column field (e.g. T or S) to extrapolate below the seafloor.
+    z_coord : OceanPartialCellCoordinate
+        Provides ``bottom_level`` (deepest active level) and ``is_active``.
+
+    Returns
+    -------
+    array, same shape as ``field``, with below-seafloor cells filled by the
+    deepest active value of their column.
+    """
+    bl = jnp.maximum(z_coord.bottom_level, 0)[..., jnp.newaxis]   # (..., 1)
+    deepest = jnp.take_along_axis(field, bl, axis=-1)             # (..., 1)
+    return jnp.where(z_coord.is_active, field, deepest)
+
+
 def compute_centroid_depth(
     eta: jnp.ndarray,
     H_bathy: jnp.ndarray,

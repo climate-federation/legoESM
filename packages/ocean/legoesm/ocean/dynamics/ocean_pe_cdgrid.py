@@ -44,8 +44,10 @@ from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
+    OceanPartialCellCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
+    extrapolate_below_seafloor,
 )
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
 from legoesm.ocean.dynamics.ocean_tendency_common import (
@@ -122,6 +124,39 @@ def ocean_baroclinic_tendencies_cdgrid(
         min_water_column_m=config.min_water_column_m,
     )
 
+    # --- 1b. Partial-cell below-seafloor handling (C-D grid) ---
+    # With an ``OceanPartialCellCoordinate`` the deepest active level per
+    # column is ``bottom_level``; cells beneath it carry ``h_partial = 0`` and
+    # must be inert.  Mirror the FC backend: hold below-seafloor velocities at
+    # zero at the source (so the D-grid conversion, vorticity, KE, divergence
+    # and tracer advection all see a dead zone rather than stale IC values),
+    # and extrapolate T,S into the rock so the EOS density and the Arakawa-Lamb
+    # horizontal stencils cannot import a below-seafloor value into an active
+    # cell next to a shallower column.  For a pure ``OceanZStarCoordinate``
+    # every wet column is full-depth, so this branch is skipped and the legacy
+    # cd-grid path stays BIT-EXACT (the 2D land mask still removes dry columns).
+    is_partial = isinstance(z_coord, OceanPartialCellCoordinate)
+    if is_partial:
+        active_3d = z_coord.is_active.astype(u_a.dtype)
+        u_a = u_a * active_3d
+        v_a = v_a * active_3d
+        T = extrapolate_below_seafloor(T, z_coord)
+        S = extrapolate_below_seafloor(S, z_coord)
+        # KNOWN LIMITATION (conservation): zeroing the A-cell velocity does not
+        # *strictly* close the C-grid face between an active cell and a
+        # below-seafloor cell — the dgrid→cgrid averaging can leave a small
+        # nonzero face velocity, so ``cgrid_mass_flux_divergence`` /
+        # ``cgrid_tracer_advection_fct`` carry a small spurious flux across the
+        # seafloor step (the final ``active_3d`` tendency gate keeps the
+        # below-seafloor cell inert, so the leak only perturbs the active
+        # neighbour's η/w/tracer at O(coastline-error)).  This is the SAME
+        # fidelity as the backend's existing horizontal coastline treatment
+        # (land u_a is likewise only zeroed, not face-closed).  A strict C-face
+        # wet/rock mask (face active iff BOTH adjacent A-cells active, with a
+        # cross-seam ``is_active`` halo) is the next conservation upgrade and
+        # closes coastline + seafloor faces together; tracked in
+        # docs/md_files/ocean_faithfulness_nemo.md.
+
     # --- 2. Density from EOS + 3. Baroclinic pressure anomaly ---
     # Reference Jacobian (J=1, eta=0): the barotropic solver handles
     # -g*grad(eta) and using the actual J here would double-count the
@@ -137,9 +172,16 @@ def ocean_baroclinic_tendencies_cdgrid(
     # (instead of nlev separate exchanges under the prior vmap).
     fill_TS = lambda field: fill_land_cells(field, mask, grid)
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    # Partial cells: pass the per-cell thickness ``h_k`` (== ``dz_ref`` for
+    # z*) so the hydrostatic EOS pressure and the baroclinic-anomaly cumsum
+    # integrate to each cell's TRUE centroid depth (below-seafloor cells have
+    # ``h_k = 0`` and contribute nothing).  ``h_actual=None`` keeps the legacy
+    # z* path bit-exact.
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask, fill_TS, eos_fn, z_coord.dz_ref, rho_0, g,
         n_iter=2, hi_precision_pressure=True,
+        h_actual=(h_k if is_partial else None),
+        is_active_3d=(active_3d if is_partial else None),
     )
 
     # --- 4. Convert to D-grid ---
@@ -374,11 +416,20 @@ def ocean_baroclinic_tendencies_cdgrid(
         dT_dt = dT_dt + phys.dT_dt.data
         dS_dt = dS_dt + phys.dS_dt.data
 
-    # --- 18. Land masking ---
+    # --- 18. Land masking (+ partial-cell below-seafloor gating) ---
     du_dt = du_dt * mask_3d
     dv_dt = dv_dt * mask_3d
     dT_dt = dT_dt * mask_3d
     dS_dt = dS_dt * mask_3d
+    if is_partial:
+        # Zero below-seafloor tendencies so the rock stays inert (the
+        # extrapolation-fill kept active cells uncontaminated; this keeps the
+        # dead cells from accumulating spurious tendencies through the
+        # vertical operators / corner interpolation).
+        du_dt = du_dt * active_3d
+        dv_dt = dv_dt * active_3d
+        dT_dt = dT_dt * active_3d
+        dS_dt = dS_dt * active_3d
 
     # --- 19. Free-surface tendency ---
     deta_dt = -jnp.sum(flux_div_k, axis=-1) * mask

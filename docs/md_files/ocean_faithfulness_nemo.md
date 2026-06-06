@@ -37,7 +37,7 @@ improve further. Runoff feature: wired+codex+tested+validated (commits 7ecf0b88,
 |---|---|---|
 | **tripole/eORCA025 ¼°** | STABLE (corrected-IC + RK3 + stack) | **day-90 SST RMSE 1.15, corr 0.99 — EXCELLENT** |
 | **latlon 1°** | STABLE (mask-aware polar filter) | **day-90 SST RMSE 1.12, corr 0.99 — EXCELLENT** (converges 1.23→1.12) |
-| cubed_sphere | **PARTIAL CELLS now ON (FC)** → C32 cold-start step 11→~130 (~12×, smooth ramp); was full-z* before | next = smc03 PGF on cube A-grid (residual surface coastal front), then ~C256 ¼° |
+| cubed_sphere | **PIVOT to C-D grid** (atmosphere-matching FV3; FC A-grid DEPRECATED). Partial cells now on BOTH backends (FC + cd-grid). | cd-grid cold-start smoke → smc03 PGF on C-D AL corner gradient → switch default to cd-grid → ~C256 ¼° |
 | mpas | untested w/ CORE-II; ico3 ~900 km RESOLUTION-LIMITED | #160 full-PV refactor (HARD, see below) + core2 builder + ¼° |
 | spectral | applicator CANNOT force it; T21 ~5.6° RESOLUTION-LIMITED | grid-space forcing path (largest gap) + core2 builder + higher res |
 
@@ -82,7 +82,39 @@ until GPU + the ¼° mpas builder exist.
   adaptive-implicit vertadv (NEMO ln_zad_Aimp), partial-cell smc03 PGF, RK3; pipeline
   coordinate/unit bug fixes (scorer double-rad2deg, WOA lat/lon mismatch, NEMO mask, _idx_t +3h).
 
-## GRID-3 cubed_sphere — harness COMPLETE; cold-start is the gate
+## GRID-3 cubed_sphere — C-D GRID PIVOT (2026-06-06, user directive)
+**Directive:** "for the atmosphere we aimed to stay on C or C-D grid; change carefully,
+atmosphere as reference." CONFIRMED by code: the legoESM atmosphere cube is a UNIFIED
+**FV3-style C-D grid** (Lin 2004 — D-grid corner winds prognostic, C-grid edge velocities
+for transport, vorticity-from-circulation to avoid the Hollingsworth-Kallberg instability
+that plagues COLLOCATED A-grid solvers; shared `operators_cdgrid` for atmos+ocean).
+**The ocean cube FC-Gram A-grid backend is DEPRECATED** — `OceanModel` maps `fc_gram`,
+`fc_gram_cgrid`, `centered`, `finite_volume`, `fv` → `cdgrid` with a DeprecationWarning;
+"all cubed-sphere ocean discretizations map to the C-D grid implementation" (ocean_model.py
+OCEAN_DISCRETIZATIONS=["cdgrid"]). The FC path only runs when `fc_config is not None`,
+documented as a WORKAROUND for "the cd-grid A-L face-edge halo instability under horizontal
+density gradients". **So the faithful cube path = the C-D grid (cd-grid backend); the real
+job = FIX that A-L face-edge instability (smc03 PGF + partial cells), NOT keep the A-grid
+workaround.** All prior cube work (partial cells, smc03 plan) was on the deprecated FC A-grid.
+
+**Shipped this iter (C-D pivot, codex-review pending):**
+- REVERTED the half-built FC A-grid smc03 (wrong grid).
+- Promoted `extrapolate_below_seafloor` FC-private → public `legoesm.ocean.vertical`
+  (grid-neutral; shared by FC + cd-grid; no duplication).
+- **Partial-cell substrate on the cd-grid (C-D) backend** (`ocean_pe_cdgrid.py`):
+  `is_partial` branch gates below-seafloor u/v at source + extrapolates T/S into rock;
+  passes `h_actual=h_k` + `is_active_3d` to the (already partial-ready) shared
+  `iterate_eos_and_pressure_anomaly`; gates tendencies `*active_3d` at land-mask step.
+  z* path BIT-EXACT (h_actual=None). Removed the `build_cubed_sphere` cd-grid-partial guard.
+  5 leaf tests (flat bit-exact, below-seafloor zero + Σh=H, sloped differs, T/S-poison
+  isolation, AD-finite).
+**NEXT:** cd-grid `--cube-no-fc --partial-cell` cold-start smoke (does the C-D grid + partial
+cells delay/fix the A-L face-edge blowup like FC's step-11→130?) → then smc03 PGF on the
+C-D Arakawa-Lamb corner gradient (reuse grid-neutral `pgf_smc03.py` kernels; the gradient
+lives at D-grid corners from 4 cell-centre pressures evaluated at a corner-common reference
+depth = min of the 4 centroids) → switch `build_cubed_sphere` default to `use_fc=False`.
+
+## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
 partial-cell support** — `ocean_pe_fc.py`/`ocean_pe_cdgrid.py` hardcoded `z_coord.dz_ref`
 and the builder never built a partial coord, so the cube ran **full z\* (sigma-like uniform

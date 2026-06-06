@@ -972,14 +972,10 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     # coordinate (Adcroft-Hill-Marshall 1997 / Adcroft-Campin 2004) instead of
     # the default pure-z* uniform stretch.  Reuses the canonical
     # ``make_partial_cell`` (thin-cell snap; defaults are cube-safe — no
-    # bathy smoothing, min_levels=1).  Prerequisite for the smc03 PGF.
+    # bathy smoothing, min_levels=1).  Prerequisite for the smc03 PGF.  Both
+    # backends now carry the partial-cell substrate: the FC A-grid (deprecated)
+    # and the C-D grid (cd-grid, atmosphere-matching, the faithful target).
     if partial_cell:
-        if not use_fc:
-            raise ValueError(
-                "cube --partial-cell currently requires the FC backend; the "
-                "cd-grid (--cube-no-fc) partial-cell substrate is not wired "
-                "yet (its PGF still reads z_coord.dz_ref)."
-            )
         z_coord, H_bathy, land_mask = make_partial_cell(
             z_coord, H_bathy, land_mask,
         )
