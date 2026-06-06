@@ -39,6 +39,17 @@ restoring). Real fix = SMC03 density-Jacobian PGF + duogrid halo on T,S
 (docs/ocean_experiments/cubed_sphere_pgf_stability.md). Multi-iteration dycore work.
 NEXT: fix blocker-1 (forcing), re-smoke; then blocker-2 (dycore). Could try dt/2 +
 higher diffusion as a quick CFL-vs-structural discriminator.
+**Blocker-1 fix recipe (scoped):** `SurfaceForcingConfig(scheme="external")` EXISTS and
+applies provided tau/q_net in the atmosphere convention (ocean=-tau) — exactly what
+`compute_omip2_surface_forcing` returns. In `build_cubed_sphere`: build
+`OceanPhysicsConfig(surface_forcing=SurfaceForcingConfig(scheme="external"),
+vertical_mixing=..., shortwave_penetration=ShortwavePenetrationConfig(water_type="II"),
+...)`, `config=config._replace(physics=phys)`, rebuild
+`model=OceanModel(grid,z_coord,config, fc_config=build_fc_config(dtype=float64))`. WATCH:
+q_net from compute_omip2_surface_forcing INCLUDES sw; verify the cube external scheme +
+shortwave_penetration don't DOUBLE-COUNT sw (the latlon dynamics-core subtracts
+penetrating sw from q_net — confirm the external physics path does the same). Even with
+forcing applied, expect blocker-2 (dycore) to still blow up → the dycore fix is the gate.
 
 ### GRID-3 build map (reference)
 Build is plumbing-ready BUT fidelity hinges on the dycore PGF fix (below).
