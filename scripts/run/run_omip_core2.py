@@ -768,6 +768,33 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
         "cubed_sphere", f"C{n}", nlev, H_max, physics_preset="full",
         water_type="II",
     )
+    # _create_setup builds the cube with physics=None (face-edge stability), so
+    # model.step(surface_forcing=sf) would DROP the CORE-II forcing (the FC cube
+    # path applies surface forcing only via physics_fn). Configure EXTERNAL surface
+    # forcing so the coupler-provided tau/q_net are applied (atmosphere convention,
+    # ocean reaction = -tau -- exactly what compute_omip2_surface_forcing returns).
+    # compute_omip2_surface_forcing folds shortwave INTO q_net, and the external
+    # scheme deposits the FULL q_net in the surface layer, so DISABLE shortwave
+    # penetration (=None) to avoid double-counting solar.
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+    from legoesm.ocean.dynamics.ocean_model import OceanModel
+    from legoesm.core.operators_fc import build_fc_config
+    phys = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(scheme="kpp"),
+        lateral_mixing=LateralMixingConfig(scheme="harmonic"),
+        surface_forcing=SurfaceForcingConfig(scheme="external"),
+        bottom_drag=BottomDragConfig(scheme="none"),  # drag via model config, not physics
+        convection=OceanConvectionConfig(scheme="enhanced_diffusion"),
+        shortwave_penetration=None,
+    )
+    config = config._replace(physics=phys)
+    model = OceanModel(grid, z_coord, config,
+                       fc_config=build_fc_config(dtype=jnp.float64))
     # NEMO bathy/mask -> cube cell centres (point-target IDW; the curvilinear
     # mesh is the same faithful geometry tripole/latlon use).
     import xarray as xr
