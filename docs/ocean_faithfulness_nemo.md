@@ -78,6 +78,12 @@ the shared `grids.polar_filter` (already used by the atmosphere C-grid) in
   CAVEAT: day-15 is near the WOA IC (early); equilibration test (day-90, like tripole)
   needs the longer run — launched **8417589 (3mo latlon + freeze-floor)**. The Arctic
   cross-pole-coupling caveat may grow over equilibration; watch it at day-90.
+- **EQUILIBRATION CONFIRMED (8417829, iter-25): latlon HOLDS EXCELLENT.** day 30/45/60/90 vs
+  seasonal NEMO: RMSE 1.23/1.21/1.21/**1.12**, corr 0.99 throughout; day-90 all bands
+  |bias|<0.65 (Arc −0.23 — caveat did NOT blow up; freeze-floor+filter hold it). RMSE
+  CONVERGES (1.23→1.12), not degrades. raw==clamp (model-side freeze-floor active). **latlon
+  is now a genuinely faithful 2nd grid — day-90 1.12 °C, marginally better than tripole 1.15.
+  GRID 2 DONE.**
 
 ## CURRENT STATE (iter 22 — SEASONAL CONFOUND found)
 
@@ -209,7 +215,7 @@ Vindicates iter-9 "full stack together"; iter-10 "RK3 marginal" was pre-smag-cfl
 |---|---|---|
 | **tripole/eORCA025 (¼°)** | **STABLE** (corrected IC + RK3 + stack) | **SST RMSE 1.15 °C corr 0.99 EXCELLENT at day-90 (seasonal scoring + freeze-floor, iter-22); SSS corr 0.90 (gated)** |
 | tripole/eORCA1 (1°) | free run impossible (config exhausted) | superseded by ¼° |
-| latlon_bathy (1°) | **mask-aware polar filter implemented + tested (iter-23)**; cold-start run pending | `--polar-filter`; Arctic caveated (cross-pole coupling) |
+| **latlon_bathy (1°)** | **STABLE** (mask-aware polar filter, iter-23/24) | **day-90 SST RMSE 1.12 °C, corr 0.99, all bands |bias|<0.65 = EXCELLENT (8417829); RMSE converges 1.23→1.12 over 3mo** |
 | cubed_sphere | untested w/ CORE-II | **[high] face-edge PGF instab** masked by 5-50× diffusion → fix SMC03 + duogrid halo |
 | mpas | untested w/ CORE-II | **[high] split-Coriolis (#160):** f zeroed in PV flux → MOM6 full-PV q=(f+ζ)/h |
 | spectral | applicator gap TOTAL | SpectralOceanState has no grid-space u/v/T/masks → spectral forcing path |
