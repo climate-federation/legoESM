@@ -1,0 +1,83 @@
+# Developers
+
+How legoESM is organized and the invariants every change must preserve. The full
+contributor guide is [`CONTRIBUTING.md`](https://github.com/gentine/legoESM/blob/main/CONTRIBUTING.md)
+(the same working rules live in `CLAUDE.md` for AI-assisted work).
+
+## Setup
+
+```bash
+git clone https://github.com/gentine/legoESM
+cd legoESM
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+.venv/bin/python -m pytest tests/
+```
+
+Scientific tests must enable 64-bit floats (spectral cores + conservation checks
+rely on it); on Apple Silicon run on CPU:
+
+```bash
+JAX_ENABLE_X64=1 .venv/bin/python -m pytest <target>
+JAX_PLATFORMS=cpu .venv/bin/python -m pytest <target>   # Apple Silicon
+```
+
+## The non-negotiables
+
+Every change must preserve these invariants (see `CONTRIBUTING.md` for the long form):
+
+1. **Differentiability.** End-to-end `jax.grad` through the coupled model is the
+   defining feature — never break autodiff, JIT, or pytree structure. Use
+   `jnp.where`/`lax.cond`/`lax.scan`/`fori_loop` on traced values, not Python
+   control flow. Implicit solves are differentiated via the implicit-function
+   theorem, never by backprop through an unbounded loop.
+2. **Conservation.** Mass is a hard constraint; energy and momentum are conserved
+   wherever the scheme permits. Flux-form coupling conserves by construction. New
+   exchanged quantities get a global-budget test.
+3. **A direct unit test per new `.py`, same PR.** For a physics scheme, test the
+   leaf tendency function — not just an integration smoke test through a factory.
+4. **Shared utilities, never re-derived.** Constants live in `legoesm.constants`,
+   saturation thermodynamics in `legoesm.thermo`, losses in `ml/loss.py`, etc.
+   Re-deriving them is how silent divergences creep in.
+
+## Layered architecture
+
+Each Earth-system component depends only on `core` (plus truly-shared bricks),
+never on another component or on the coupler/driver. That one-way dependency is
+exactly what lets `pip install legoesm-ocean` run standalone:
+
+```
+core (substrate)  <  {atmosphere, ocean, land, ice}  <  coupler  <  driver
+```
+
+The import-boundary contracts in `pyproject.toml` enforce this.
+
+## Repository layout
+
+| Path | Contents |
+|------|----------|
+| `packages/<pkg>/legoesm/` | Source, federation namespace — `atmosphere`, `core`, `coupler`, `ice`, `land`, `ml`, `ocean`, `tools`. |
+| `tests/` | Mirrors the package tree (`tests/<component>/<tier>/…`); curated dycore regressions in `tests/atmosphere/dycore/regression/`. |
+| `scripts/` | Bucketed: `run/`, `matrix/`, `bench/`, `plot/`, `validate/`, `data/`, `experiment/`, `cluster/`; throwaway probes in `scripts/tmp/`. |
+| `config/` | YAML experiment configs + templates. |
+| `docs/` | This site (curated pages) plus [`docs/md_files/`](md_files/README.md) for internal notes/logs/audits. |
+
+## Testing & validation
+
+- **Tiered strategy** — research → operational rungs with conservation gates:
+  see [Testing strategy](TESTING.md).
+- **Dycore benchmarks** — Williamson, Galewsky, Jablonowski-Williamson, DCMIP,
+  Held-Suarez: see [Dycore validation catalog](dycore_validation_catalog.md).
+- **Physics parameterizations** — [Physics parameterization tests](PHYSICS_PARAMETERIZATION_TESTS.md).
+- **Distributed/MPI invariants** — [Distributed architecture](DISTRIBUTED_ARCHITECTURE.md).
+- **Performance** — [Real-hardware scaling](REAL_HARDWARE_SCALING.md).
+
+**Visual verification is mandatory for spatial/grid artifacts.** Passing norms are
+necessary but not sufficient for cubed-sphere ops, halo exchange, and diffusion —
+inspect the W2 v-wind / W5 wind-speed PNGs against baselines.
+
+## Internal development notes
+
+Working notes, plans, audits, and review trackers live in
+[`docs/md_files/`](md_files/README.md). They are referenced from code by **basename**
+(e.g. `see fv3_faithful.md`) so comments survive the move out of the published nav.

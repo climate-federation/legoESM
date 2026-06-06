@@ -2525,7 +2525,7 @@ legoESM/
 │   ├── REAL_HARDWARE_SCALING.md            # Multi-GPU/MPI scaling guide
 │   ├── amip.md                             # AMIP experiment guide (CLI, radiation, diagnostics)
 │   ├── cmip_readiness.md                   # CMIP readiness checklist (all components)
-│   ├── implementation_summary.md           # Comprehensive summary of all implementations
+│   ├── md_files/implementation_summary.md  # Comprehensive summary of all implementations
 │   └── legoesm_documentation.tex           # LaTeX technical documentation (equations)
 │
 └── notebooks/                              # Jupyter notebooks
