@@ -115,26 +115,57 @@ def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):
     if bad.any():
         from scipy.spatial import cKDTree
         valid = m2 & ~bad
-        jj, ii = np.where(valid)
-        jb, ib = np.where(bad)
         # Multi-donor INVERSE-DISTANCE blend (k=8) instead of a wholesale
         # nearest-COLUMN copy.  A single-donor copy leaves a 1-cell T/S step
         # at EVERY depth (incl. the deep k15) along the flood-fill seam; from
         # rest that step is a spurious baroclinic-PGF seed that vertadv pumps
         # to the surface -> the Brazil-Malvinas-region cold-start runaway
         # (mechanism workflow wshsnjjm3).  Blending the 8 nearest valid
-        # columns by inverse index-distance smooths the seam.
-        kdt = cKDTree(np.c_[jj, ii])
-        K = int(min(8, len(jj)))
-        dist, idx = kdt.query(np.c_[jb, ib], k=K)
-        if K == 1:
-            dist = dist[:, None]; idx = idx[:, None]
-        w = 1.0 / np.maximum(dist, 1e-6)              # (n_bad, K)
-        w = w / w.sum(axis=1, keepdims=True)
-        T_don = T_woa[jj[idx], ii[idx], :]            # (n_bad, K, nlev)
-        S_don = S_woa[jj[idx], ii[idx], :]
-        T_woa[jb, ib, :] = np.einsum("nk,nkl->nl", w, T_don)
-        S_woa[jb, ib, :] = np.einsum("nk,nkl->nl", w, S_don)
+        # columns by inverse distance smooths the seam.
+        nlev = T_woa.shape[-1]
+        if land_mask.ndim == 2:
+            # 2-D structured grid (latlon/tripole): index-distance kNN (UNCHANGED
+            # — keeps the validated tripole/latlon IC bit-for-bit).
+            jj, ii = np.where(valid)
+            jb, ib = np.where(bad)
+            kdt = cKDTree(np.c_[jj, ii])
+            K = int(min(8, len(jj)))
+            dist, idx = kdt.query(np.c_[jb, ib], k=K)
+            if K == 1:
+                dist = dist[:, None]; idx = idx[:, None]
+            w = 1.0 / np.maximum(dist, 1e-6)          # (n_bad, K)
+            w = w / w.sum(axis=1, keepdims=True)
+            T_don = T_woa[jj[idx], ii[idx], :]        # (n_bad, K, nlev)
+            S_don = S_woa[jj[idx], ii[idx], :]
+            T_woa[jb, ib, :] = np.einsum("nk,nkl->nl", w, T_don)
+            S_woa[jb, ib, :] = np.einsum("nk,nkl->nl", w, S_don)
+        else:
+            # N-D horizontal layout (cube (6,n,n)): index distance is meaningless
+            # across faces, so use GREAT-CIRCLE distance on the grid's own
+            # lat/lon (radians) between valid and bad columns. Flatten the
+            # horizontal dims; donors are the nearest valid columns by chord.
+            horiz = bad.shape
+            Tf = T_woa.reshape(-1, nlev); Sf = S_woa.reshape(-1, nlev)
+            vflat = valid.ravel(); bflat = bad.ravel()
+            latr = np.asarray(grid.lat).ravel()
+            lonr = np.asarray(grid.lon).ravel()
+            cl = np.cos(latr)
+            xyz = np.stack([cl * np.cos(lonr), cl * np.sin(lonr),
+                            np.sin(latr)], axis=-1)
+            vidx = np.where(vflat)[0]                  # global flat idx of valids
+            kdt = cKDTree(xyz[vidx])
+            K = int(min(8, vidx.size))
+            dist, idx = kdt.query(xyz[bflat], k=K)
+            if K == 1:
+                dist = dist[:, None]; idx = idx[:, None]
+            w = 1.0 / np.maximum(dist, 1e-9)
+            w = w / w.sum(axis=1, keepdims=True)
+            T_don = Tf[vidx[idx], :]                   # (n_bad, K, nlev)
+            S_don = Sf[vidx[idx], :]
+            Tf[bflat] = np.einsum("nk,nkl->nl", w, T_don)
+            Sf[bflat] = np.einsum("nk,nkl->nl", w, S_don)
+            T_woa = Tf.reshape(*horiz, nlev)
+            S_woa = Sf.reshape(*horiz, nlev)
         print(f"[setup] flood-filled {int(bad.sum())} NEMO-ocean cells "
               f"lacking WOA data (S<1) via inverse-distance blend of {K} "
               f"nearest valid columns (smooths the seam)")

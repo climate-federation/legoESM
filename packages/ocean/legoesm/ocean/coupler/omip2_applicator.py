@@ -509,6 +509,19 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
             forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
         )
         forc = {k: v.reshape(shp) for k, v in forc.items()}
+    elif grid_type == "cubed_sphere":
+        # Cube cell centres carry geographic lat/lon (6, n, n) in radians;
+        # nearest-neighbour sample the forcing per cell (same as tripole, but the
+        # cube T grid is grid.lat/grid.lon, not grid.lat_T/lon_T). Downstream
+        # air_sea_fluxes + q_net are elementwise so the (6, n, n) layout flows
+        # through unchanged.
+        lat_pts = np.degrees(np.asarray(grid.lat))
+        lon_pts = np.degrees(np.asarray(grid.lon))
+        shp = lat_pts.shape
+        forc = _sample_forcing_points(
+            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
+        )
+        forc = {k: v.reshape(shp) for k, v in forc.items()}
     else:
         raise NotImplementedError(
             f"compute_omip2_surface_forcing does not support grid_type={grid_type!r}"
