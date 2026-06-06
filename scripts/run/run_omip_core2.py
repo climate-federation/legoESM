@@ -720,6 +720,36 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
     return grid, z_coord, model, state, np.asarray(H_bathy)
 
 
+def _apply_marginal_sea_mask(land_mask, lat_deg, lon_deg):
+    """Set to LAND the poorly-resolved semi-enclosed marginal seas, whose narrow
+    sills (e.g. Gibraltar) are sub-grid at coarse cube resolution -> a sharp 1-cell
+    WOA density contrast -> an explosive cold-start PGF spike (the cube ignition
+    sites). Mirrors the lat-lon Arctic caveat: these basins are excluded from the
+    comparison so the open-ocean dynamics can run. ``lat_deg``/``lon_deg`` match
+    ``land_mask`` shape; lon normalised to [0, 360)."""
+    lat = np.asarray(lat_deg)
+    lon = np.asarray(lon_deg) % 360.0
+    out = np.asarray(land_mask, dtype=np.float64).copy()
+    # (lat0, lat1, lon0, lon1) deg, lon in [0,360); lon0>lon1 means wrap over 0.
+    boxes = [
+        (30.0, 47.0, 353.0, 360.0),  # W Mediterranean (lon wrap part)
+        (30.0, 47.0, 0.0, 37.0),     # Mediterranean (main)
+        (40.0, 48.0, 27.0, 42.0),    # Black Sea
+        (12.0, 30.0, 32.0, 44.0),    # Red Sea
+        (23.0, 31.0, 47.0, 57.0),    # Persian Gulf
+        (53.0, 66.0, 10.0, 30.0),    # Baltic
+        (51.0, 64.0, 265.0, 285.0),  # Hudson Bay
+    ]
+    n_before = int(out.sum())
+    for lat0, lat1, lon0, lon1 in boxes:
+        in_lat = (lat >= lat0) & (lat <= lat1)
+        in_lon = (lon >= lon0) & (lon <= lon1)
+        out = np.where(in_lat & in_lon, 0.0, out)
+    print(f"[setup] marginal-sea mask: {n_before - int(out.sum())} cells -> land "
+          f"(Med/Black/Red/Gulf/Baltic/Hudson; sub-grid sills, caveated)")
+    return out
+
+
 def _regrid_curv_to_points(field2d, src_lat_deg, src_lon_deg, ocean_mask,
                            tgt_lat_deg, tgt_lon_deg, k=4, max_deg=3.0):
     """IDW-regrid a curvilinear 2-D field (ocean cells only) onto ARBITRARY target
@@ -757,7 +787,8 @@ def _regrid_curv_to_points(field2d, src_lat_deg, src_lon_deg, ocean_mask,
 def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        woa_init: bool = False, woa_t=None, woa_s=None,
                        flat_bottom: bool = False, A_h=None, hyperdiff_coeff=None,
-                       div_damp_2=None, div_damp_4=None, baroclinic_rk3=None):
+                       div_damp_2=None, div_damp_4=None, baroclinic_rk3=None,
+                       mask_marginal_seas=False):
     """Build a cubed-sphere ocean (FC-Gram spectral baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -822,6 +853,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     H_cs, ocean_cs = _regrid_curv_to_points(
         e_H, src_lat, src_lon, e_mask, tgt_lat, tgt_lon, max_deg=3.0)
     land_mask = (ocean_cs > 0.5).astype(np.float64)
+    if mask_marginal_seas:
+        land_mask = _apply_marginal_sea_mask(land_mask, tgt_lat, tgt_lon)
     H_bathy = np.where(land_mask > 0.5, np.maximum(H_cs, 50.0), 0.0)
     if flat_bottom:
         H_bathy = np.where(land_mask > 0.5, H_max, 0.0)
@@ -977,6 +1010,11 @@ def main() -> int:
     p.add_argument("--cube-rk3", action="store_true",
                    help="cube: 3-stage SSP-RK3 baroclinic update (vs forward-Euler) "
                         "— the tripole cold-start fix ported to the cube OceanModel.")
+    p.add_argument("--cube-mask-marginal-seas", action="store_true",
+                   help="cube: mask poorly-resolved semi-enclosed marginal seas "
+                        "(Med/Black/Red/Gulf/Baltic/Hudson) to land — their sub-grid "
+                        "sills seed the cold-start PGF blowup (caveated, like the "
+                        "latlon Arctic).")
     p.add_argument("--woa-init", action="store_true",
                    help="Initialise T/S from WOA18 (faithful IC) vs rest state.")
     p.add_argument("--woa-t", type=str, default="data/woa18/woa18_decav_t00_01.nc")
@@ -1213,6 +1251,7 @@ def main() -> int:
             A_h=args.cube_Ah, hyperdiff_coeff=args.cube_hyperdiff,
             div_damp_2=args.cube_divdamp2, div_damp_4=args.cube_divdamp4,
             baroclinic_rk3=(True if args.cube_rk3 else None),
+            mask_marginal_seas=args.cube_mask_marginal_seas,
         )
         app_grid_type = "cubed_sphere"
     else:
