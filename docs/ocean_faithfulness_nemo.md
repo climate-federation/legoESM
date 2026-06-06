@@ -38,8 +38,23 @@ improve further. Runoff feature: wired+codex+tested+validated (commits 7ecf0b88,
 | **tripole/eORCA025 ¼°** | STABLE (corrected-IC + RK3 + stack) | **day-90 SST RMSE 1.15, corr 0.99 — EXCELLENT** |
 | **latlon 1°** | STABLE (mask-aware polar filter) | **day-90 SST RMSE 1.12, corr 0.99 — EXCELLENT** (converges 1.23→1.12) |
 | cubed_sphere | harness DONE; **RESOLUTION-LIMITED** at C32/C64 (blows <day-1) | WOA fronts imply >10 m/s jets coarse cube can't carry; needs ~C360 (¼°) + stack (expensive) — same as 1° tripole |
-| mpas | untested w/ CORE-II | #160 split-Coriolis (relative-only PV); needs MOM6-style refactor + builder |
-| spectral | applicator CANNOT force it | SpectralOceanState has no grid-space u/v/T → needs a spectral forcing path (largest gap) |
+| mpas | untested w/ CORE-II; ico3 ~900 km RESOLUTION-LIMITED | #160 full-PV refactor (HARD, see below) + core2 builder + ¼° |
+| spectral | applicator CANNOT force it; T21 ~5.6° RESOLUTION-LIMITED | grid-space forcing path (largest gap) + core2 builder + higher res |
+
+### mpas #160 roadmap (mapped iter — implementation is HARD, deferred)
+Three sites handle planetary f (all `mesh.fEdge`/`fVertex`): (1) PV flux `ocean_pe_mpas.py:466`
+uses `zero_f` → q=ζ/h (relative only), paired with full u_3d; (2) `_forward_backward_coriolis_mpas_3d`
+(`ocean_model_mpas.py:56`, called ~549) applies f to the PERTURBATION u'=u−ū (Matsuno);
+(3) `barotropic_mpas.py:273` applies online f·v_t(ū) to the DEPTH-MEAN each substep. `F_slow_u`
+EXCLUDES depth-mean f. **#103** (commit 3e12e4ec): full PV froze the depth-mean f across 30
+barotropic substeps → near-inertial (τ~1/f) instability → the current split was the fix.
+**#160 (full PV q=(f+ζ)/h, drop the Matsuno) is HARD because in the energy-conserving TRiSK
+flux the planetary-f and relative-ζ are ENTANGLED** — you cannot cleanly subtract the
+depth-mean Coriolis from F_slow to keep the barotropic online-f without double-count or
+re-freezing (the MOM6-style slow-forcing refactor). Config gate `full_pv_coriolis` would go in
+`mpas_config.py` after `pv_alpha`. CORRECTNESS hinges on a #103 near-inertial GPU regression
+test (currently blocked) on a resolution-limited grid → NOT safe to implement blind. Defer
+until GPU + the ¼° mpas builder exist.
 
 ## DONE grids (1 & 2) — winning configs
 **Both** use run_omip_core2 + `--woa-init --partial-cell --pgf-scheme smc03
