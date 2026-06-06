@@ -959,8 +959,20 @@ def activate_spmd_halo_backend(mesh, n: int = 0, nlev: int = 1) -> None:
         Number of vertical levels.
     """
     global _spmd_mesh, _use_ppermute
-    _spmd_mesh = mesh
     from legoesm.grids import halo
+    # The SPMD exchange kernels hard-code AVERAGE corner fill at the 4 cube
+    # corners (3-face junctions); they do NOT honor the non-default
+    # ``_corner_fill_mode`` the serial/mpi4jax paths apply. Reject non-avg modes
+    # so SPMD never silently produces wrong corner cells (codex review). Checked
+    # FIRST, before any global mutation, so a raise leaves state untouched.
+    cfm = halo.get_corner_fill_mode()
+    if cfm != "avg":
+        raise NotImplementedError(
+            f"SPMD halo backend supports only corner_fill_mode='avg', not "
+            f"'{cfm}': the 4 cube-corner cells would silently mismatch the "
+            f"serial path. Call set_corner_fill_mode('avg'), or use the mpi4jax "
+            f"backend for non-avg corner fills.")
+    _spmd_mesh = mesh
     halo._halo_backend = "spmd"
     halo._spmd_mesh = mesh
 
