@@ -997,6 +997,46 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     return grid, z_coord, model, state, np.asarray(H_bathy)
 
 
+_RUNOFF_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
+              "INPUTS/orca1_inputs/data_repository/input_fields/"
+              "runoff-icb_DaiTrenberth_Depoorter.nc")
+
+
+def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path):
+    """Load NEMO's Dai-Trenberth runoff (the SAME file NEMO ORCA1 uses) and regrid
+    each climatological month onto the model grid. Total freshwater = rivers
+    (sorunoff) + ice-shelf melt (sornfisf) + icebergs (Icb_flux) [kg/m²/s, +INTO
+    ocean]. Returns (12, *lat2d_deg.shape). Ungates the SSS comparison (runoff=0
+    made SSS only informational). Curvilinear -> model grid via the same IDW used
+    for bathy; eORCA1 nav_lat/lon are the runoff file's own coords."""
+    import xarray as xr
+    ds = xr.open_dataset(_RUNOFF_NC, decode_times=False)
+    src_lat = _squeeze2d(ds["nav_lat"].values)
+    src_lon = _squeeze2d(ds["nav_lon"].values)
+    total = np.zeros_like(np.asarray(ds["sorunoff"].values), dtype=np.float64)
+    for v in ("sorunoff", "sornfisf", "Icb_flux"):
+        if v in ds:
+            total = total + np.nan_to_num(np.asarray(ds[v].values, dtype=np.float64))
+    # source ocean mask = any cell with runoff anywhere in the year OR finite coords;
+    # use all finite cells (runoff is 0 on land/open-ocean, IDW just spreads to coast).
+    src_ocean = np.isfinite(src_lat) & np.isfinite(src_lon)
+    out = np.zeros((12,) + tuple(np.asarray(lat2d_deg).shape), dtype=np.float64)
+    for m in range(12):
+        Rm, _ = _regrid_curv_to_points(
+            total[m], src_lat, src_lon, src_ocean,
+            lat2d_deg, lon2d_deg, k=1, max_deg=2.0)
+        out[m] = np.maximum(Rm, 0.0)
+    print(f"[setup] runoff: Dai-Trenberth (river+isf+icb) regridded, "
+          f"12 months, max {out.max():.2e} kg/m^2/s")
+    return out
+
+
+def _runoff_month_idx(step: int, dt: float) -> int:
+    """Climatological month 0-11 for the perpetual-year model time (365-day)."""
+    day = (step * dt / _SEC_PER_DAY) % 365.0
+    return min(11, int(day / 365.0 * 12.0))
+
+
 def _idx_t(step: int, dt: float, n_rec: int) -> int:
     """Nearest 6-hourly CORE-II record for the current model time (perpetual yr)."""
     t = (step * dt) % _YEAR_S
@@ -1239,6 +1279,10 @@ def main() -> int:
                    help="Max wave speed [m/s] setting the CFL wavenumber cap (default 300).")
     p.add_argument("--polar-filter-safety", type=float, default=None,
                    help="Fraction of the CFL wavenumber kept, <1 for margin (default 0.85).")
+    p.add_argument("--runoff", action="store_true",
+                   help="Apply NEMO's Dai-Trenberth river+ice-shelf+iceberg runoff "
+                        "(the SAME file ORCA1 uses) as a per-step freshwater/virtual-salt "
+                        "flux -> ungates the SSS comparison (tripole/latlon only).")
     p.add_argument("--woa-smoothing-passes", type=int, default=0,
                    help="Horizontal Laplacian smoothing passes/level on the WOA T,S IC "
                         "-- removes spurious grid-scale fronts from interpolating/flood-"
@@ -1432,6 +1476,13 @@ def main() -> int:
         )
 
     lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)
+    runoff_monthly = None
+    if args.runoff:
+        if app_grid_type == "cubed_sphere":
+            raise ValueError("--runoff: apply_runoff_step is for the lat-lon C-grid "
+                             "family (tripole/latlon); cube runoff not wired yet.")
+        from legoesm.ocean.coupler.runoff_apply import apply_runoff_step  # noqa: F401
+        runoff_monthly = load_runoff_monthly(grid, app_grid_type, lat2d, lon2d, args.mesh)
     # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
     # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
     # would corrupt the comparison invisibly.
@@ -1590,6 +1641,11 @@ def main() -> int:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
                              q_net=sf.q_net * ramp, sw_down=sf.sw_down * ramp)
         state = model.step(state, dt, surface_forcing=sf)
+        if runoff_monthly is not None:
+            from legoesm.ocean.coupler.runoff_apply import apply_runoff_step
+            state = apply_runoff_step(
+                state, R_kg_m2_s=runoff_monthly[_runoff_month_idx(step, dt)],
+                z_coord=z_coord, dt=dt)
         if nudge_tau_s > 0 and (nudge_release_s <= 0 or step * dt < nudge_release_s):
             a = dt / nudge_tau_s
             Tn = np.asarray(state.T.data)
