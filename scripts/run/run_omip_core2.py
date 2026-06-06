@@ -1011,6 +1011,7 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     made SSS only informational). Curvilinear -> model grid via the same IDW used
     for bathy; eORCA1 nav_lat/lon are the runoff file's own coords."""
     import xarray as xr
+    from legoesm.ocean.bathymetry import _laplacian_smooth_2d
     ds = xr.open_dataset(_RUNOFF_NC, decode_times=False)
     src_lat = _squeeze2d(ds["nav_lat"].values)
     src_lon = _squeeze2d(ds["nav_lon"].values)
