@@ -955,6 +955,16 @@ def parse_args():
     p.add_argument("--dz-sfc", type=float, default=50.0,
                    help="Surface-layer thickness [m] for stretched vertical "
                         "coordinate. RCEMIP1 standard = 50 m.")
+    p.add_argument("--snapshot-days", type=float, default=0.0,
+                   help="Save surface + 4-level-field npz every N SIM-DAYS "
+                        "(precip, CWV, column-max w, condensate/w/qv/MSE at 4 "
+                        "heights) via rce_snapshot. 0 = off.")
+    p.add_argument("--snapshot3d-days", type=str, default="",
+                   help="Comma-separated sim-days at which to dump the FULL 3D "
+                        "condensate + MSE (+w,T) volume for 3D rendering, e.g. "
+                        "'15,30,45,60'. Empty = off.")
+    p.add_argument("--snapshot-heights", type=str, default="1000,5000,9000,12000",
+                   help="Comma-separated heights [m] for the 4-level snapshots.")
     p.add_argument("--output", type=Path, default=Path("results/rcemip_plane"))
     return p.parse_args()
 
@@ -1178,6 +1188,21 @@ def main():
     if args.snapshot_every > 0:
         snap_dir.mkdir(parents=True, exist_ok=True)
 
+    # Additive 3D/surface snapshot saver (separate module; see rce_snapshot.py).
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import rce_snapshot  # noqa: E402
+    _snap_heights = tuple(float(x) for x in args.snapshot_heights.split(","))
+    _surf_every = (int(round(args.snapshot_days * 86400.0 / args.dt))
+                   if args.snapshot_days > 0 else 0)
+    _snap3d_steps = set()
+    if args.snapshot3d_days.strip():
+        for _d in args.snapshot3d_days.split(","):
+            _snap3d_steps.add(int(round(float(_d) * 86400.0 / args.dt)))
+    if _surf_every or _snap3d_steps:
+        print(f"  RCE snapshots: surface/levels every {_surf_every} steps "
+              f"({args.snapshot_days} d); 3D dumps at steps "
+              f"{sorted(_snap3d_steps)} (days {args.snapshot3d_days})")
+
     print("\nstep    t [s]    max|w|     min(theta')   max(theta')   "
           "max(q_v)   d(mass)")
 
@@ -1225,6 +1250,16 @@ def main():
             _emit_profile_npz(
                 snap_dir, i + 1, (i + 1) * args.dt, state, hc,
             )
+        # Surface + 4-level field snapshots (rce_snapshot) and full-3D viz dumps.
+        if _surf_every and (i + 1) % _surf_every == 0:
+            rce_snapshot.save_surface_levels(
+                args.output, i + 1, (i + 1) * args.dt, state, grid, hc,
+                heights_m=_snap_heights)
+        if (i + 1) in _snap3d_steps:
+            rce_snapshot.save_3d(
+                args.output, i + 1, (i + 1) * args.dt, state, grid, hc)
+            print(f"  [3D snapshot dumped @ day {(i+1)*args.dt/86400:.1f}]",
+                  flush=True)
 
     if args.snapshot_every > 0:
         _render_profile_evolution_png(
