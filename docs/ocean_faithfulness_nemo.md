@@ -29,7 +29,7 @@ genuinely match — currently **2 of 5** (tripole, latlon). NOT done.
 |---|---|---|
 | **tripole/eORCA025 ¼°** | STABLE (corrected-IC + RK3 + stack) | **day-90 SST RMSE 1.15, corr 0.99 — EXCELLENT** |
 | **latlon 1°** | STABLE (mask-aware polar filter) | **day-90 SST RMSE 1.12, corr 0.99 — EXCELLENT** (converges 1.23→1.12) |
-| cubed_sphere | harness DONE, blows up <day-1 | WOA-cold-start PGF (marginal seas+equator) — needs conditioning stack |
+| cubed_sphere | harness DONE; **RESOLUTION-LIMITED** at C32/C64 (blows <day-1) | WOA fronts imply >10 m/s jets coarse cube can't carry; needs ~C360 (¼°) + stack (expensive) — same as 1° tripole |
 | mpas | untested w/ CORE-II | #160 split-Coriolis (relative-only PV); needs MOM6-style refactor + builder |
 | spectral | applicator CANNOT force it | SpectralOceanState has no grid-space u/v/T → needs a spectral forcing path (largest gap) |
 
