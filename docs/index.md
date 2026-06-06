@@ -89,6 +89,11 @@ Grids are shared between components: lat-lon FV, spectral Gaussian, cubed-sphere
 (FV3-faithful), MPAS/Voronoi (TRiSK), and SFNO all feed both the atmosphere and the
 ocean.
 
+See [Composability & architecture](composability.md) for how to instantiate each
+axis (grids, regional/idealized extent, the SCM/LES/CRM/shallow-water/3-D complexity
+ladder), a high-level tour of the packages, and the research → operational
+(AMIP/OMIP/CMIP) progression.
+
 (capability-taxonomy)=
 ## Capability taxonomy
 
