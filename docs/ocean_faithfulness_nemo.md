@@ -11,6 +11,34 @@ promise DONE only when grids genuinely match NEMO — tripole SST done; NOT all 
 
 ---
 
+## GRID 3-5 SCOPING (iter-25, investigated — each a real multi-iter effort)
+
+**Faithful CORE-II path = `run_omip_core2.py`** (applies the OMIP-2 bulk forcing NEMO uses,
+via `omip2_applicator.apply_omip2_surface_forcing`). `run_omip.py` is a SEPARATE runner
+using SST/SSS RESTORING (Haney) — NOT faithful, do not use for the NEMO match. The
+applicator supports grid_type latlon/tripole/**cubed_sphere/mpas**, **NOT spectral**
+(no grid-space u/v/T path — line ~317). `run_omip._create_setup(grid_type,...)` is the
+shared builder for all grids; run_omip_core2 already reuses it for latlon/tripole.
+
+- **cubed_sphere**: PGF face-edge instability is MITIGATED (not cleanly fixed) by the
+  **FC-Gram spectral baroclinic backend** (`ocean_pe_fc.py`, `build_fc_config`, default in
+  run_omip.py) — BUT only together with **5-50× elevated A_h/K_h floors** (5e5/5e6). Uses
+  `OceanModel` (cd-grid, NOT LatLonCGridOceanModel → no freeze_floor/polar_filter), and
+  `_create_setup` builds it with NO realistic bathymetry. To get an EXCELLENT NEMO match
+  needs: realistic bathy + reduce the 5-50× diffusion (reintroduces instability → needs the
+  real SMC03-density-Jacobian-PGF + duogrid-halo-on-T,S fix per
+  `docs/ocean_experiments/cubed_sphere_pgf_stability.md`) + WOA IC + a core2 builder. NOT a
+  quick win.
+- **mpas (#160 split-Coriolis)**: ocean uses relative-only PV (`zero_f`,
+  `ocean_pe_mpas.py:466,473,476`) + separate Matsuno Coriolis; atmosphere uses full
+  `(f+ζ)/h`. The split avoids #103 depth-mean-Coriolis double-counting; the documented clean
+  fix needs a MOM6-style slow-forcing refactor (full PV in the TRiSK flux + remove the
+  separate Coriolis without re-double-counting the barotropic mode). Plus a core2 mpas
+  builder + bathy. Big.
+- **spectral**: `SpectralOceanState` has no grid-space u/v/T/masks → the applicator cannot
+  force it (line ~317). Needs a whole spectral forcing path (grid↔spectral transform of the
+  CORE-II flux). Fundamental infra gap; largest effort.
+
 ## CURRENT STATE (iter 23 — latlon polar filter: 2nd grid started)
 
 **Mask-aware Fourier polar filter for the lat-lon C-grid ocean (code, tested 7/7).**
