@@ -24,6 +24,14 @@ genuinely match — currently **2 of 5** (tripole, latlon). NOT done.
   MUST be scored vs the same-month NEMO climatology, not the annual mean (else a fake
   NH-cold/SH-warm seasonal dipole appears). Day→month (365d): 30→Jan,45→Feb,60/90→Mar.
 
+## SSS RUNOFF RESULT (validated)
+latlon+runoff (8418473) day-90 vs NEMO Mar: SST RMSE **1.11** corr 0.995 (runoff barely
+touches SST). SSS **improved by runoff**: RMSE 1.89→**1.79**, corr 0.692→**0.730**, bias
+−0.06→−0.10 (rivers freshen coasts). Net positive + stable (runoff doesn't destabilise).
+SSS still > good-tol (<1.0) → needs coastal-SPREADING + area-CONSERVATION of the runoff
+(current k=4 IDW from discharge cells is too concentrated; codex conservation flag) to
+improve further. Runoff feature: wired+codex+tested+validated (commits 7ecf0b88,5c1f21bd,b9e44703).
+
 ## Per-grid status
 | grid | cold-start | vs NEMO (seasonal) |
 |---|---|---|
