@@ -134,6 +134,51 @@ def select_n_outer_split(
     return max(1, int(math.ceil(raw)))
 
 
+def select_dt(
+    dx: float,
+    max_wind_safe: float = 30.0,
+    cfl_safe: float = 0.8,
+    dt_cap: float = 1.0e30,
+) -> float:
+    """Trace-time STATIC CFL time step ``dt = cfl_safe·dx / max_wind_safe`` for a
+    single-rate integrator (e.g. the incompressible spectral LES core, which has no
+    acoustic substep so the only constraint is the advective CFL).
+
+    This is the differentiable / scan-friendly counterpart of
+    :func:`select_n_outer_split`: like FV3's ``n_split`` it is chosen ONCE at
+    startup from a CONSERVATIVE max wind (a Python float, a compile-time constant
+    from JAX's perspective), NOT a per-step ``float(dt)`` re-pin. Mid-run adaptive
+    dt-shrinkage is deliberately avoided here because it requires host
+    synchronisation every step and breaks ``lax.scan`` / reverse-mode AD through a
+    segment (see the ``--adaptive-dt`` discussion in :func:`select_n_outer_split`).
+    SSP-RK3's linear-advection stability limit is ≈1.7; ``cfl_safe≈0.8`` keeps a
+    ~2× margin.
+
+    Parameters
+    ----------
+    dx : float
+        Grid spacing [m].
+    max_wind_safe : float, default 30.0
+        Conservative upper bound on the max resolved speed over the run [m/s].
+    cfl_safe : float, default 0.8
+        Target advective CFL (0 < cfl ≤ 1.7 for RK3; use ≤1.0 with margin).
+    dt_cap : float, default 1e30
+        Hard upper bound on the returned dt [s] (e.g. an output-cadence limit).
+
+    Returns
+    -------
+    dt : float
+        Static time step [s]; a Python float (use as a compile-time constant).
+    """
+    if dx <= 0.0:
+        raise ValueError(f"select_dt: dx={dx} must be > 0.")
+    if max_wind_safe <= 0.0:
+        raise ValueError(f"select_dt: max_wind_safe={max_wind_safe} must be > 0.")
+    if not (0.0 < cfl_safe <= 1.7):
+        raise ValueError(f"select_dt: cfl_safe={cfl_safe} must be in (0, 1.7].")
+    return min(cfl_safe * dx / max_wind_safe, dt_cap)
+
+
 def split_explicit_step(
     state: State,
     slow_tendency_fn: Callable[[State], State],

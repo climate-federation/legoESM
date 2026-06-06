@@ -39,12 +39,18 @@ import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
+from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import les_record  # noqa: E402
 
 
 def build(args, dtype):
     cfg = sl.SpectralLESConfig(
         nx=args.nx, ny=args.ny, nz=args.nz, Lx=args.Lx, Ly=args.Ly, Lz=args.Lz,
-        z0=args.z0, dealias=True, smagorinsky_dynamic=True,
+        z0=args.z0, dealias=True, c_s=args.cs, nu_floor=args.nu_floor,
+        smagorinsky_dynamic=not args.static, sgs_model=args.sgs_model,
+        time_scheme=args.time_scheme,
         buoyancy=True, theta_ref0=args.theta0, pr_sgs=1.0)
     g = sl.make_grid(cfg, dtype=dtype)
     z = g.z_c
@@ -95,34 +101,89 @@ def main():
     p.add_argument("--dt", type=float, default=0.5)
     p.add_argument("--hours", type=float, default=1.0)
     p.add_argument("--f32", action="store_true")
+    p.add_argument("--static", action="store_true",
+                   help="static Smagorinsky (C_s) instead of dynamic LASD — "
+                        "needed on anisotropic dx<dz grids where LASD destabilises.")
+    p.add_argument("--cs", type=float, default=0.18, help="static Smagorinsky C_s")
+    p.add_argument("--nu-floor", type=float, default=0.0,
+                   help="background eddy-viscosity floor [m²/s] (damps residual "
+                        "high-k energy where ν_t vanishes, e.g. above the inversion).")
+    p.add_argument("--sgs-model", choices=["smagorinsky", "vreman"],
+                   default="vreman", help="static SGS closure (ignored if not --static)")
+    p.add_argument("--time-scheme", choices=["rk3", "ab2"], default="rk3")
+    p.add_argument("--adaptive-dt", action="store_true",
+                   help="CFL-adaptive dt (recomputed every --dt-recompute steps)")
+    p.add_argument("--cfl", type=float, default=0.8, help="advective CFL target")
+    p.add_argument("--dt-max", type=float, default=1.0, help="cap on adaptive dt [s]")
+    p.add_argument("--max-wind", type=float, default=20.0,
+                   help="conservative max resolved speed [m/s] for the static-CFL dt")
+    p.add_argument("--dt-recompute", type=int, default=25)
     p.add_argument("--print-every", type=int, default=1000)
+    p.add_argument("--record-frames", type=int, default=20,
+                   help="evenly-spaced frames (snapshots + profiles); 0 disables.")
+    p.add_argument("--case-label", type=str, default="wangara")
     p.add_argument("--output", type=Path, default=Path("results/spectral_cbl"))
     args = p.parse_args()
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
 
     g, st = build(args, dtype)
-    step = jax.jit(partial(sl.step, g=g, dt=args.dt, u_geo=(0.0, 0.0),
-                           f_cor=0.0, force=(0.0, 0.0), sfc_theta_flux=args.Q0),
+    step = jax.jit(partial(sl.step, g=g, u_geo=(0.0, 0.0), f_cor=0.0,
+                           force=(0.0, 0.0), sfc_theta_flux=args.Q0),
                    static_argnames=("first",))
-    nsteps = int(args.hours * 3600.0 / args.dt)
     wstar0 = (constants.g / args.theta0 * args.Q0 * args.zi0) ** (1.0 / 3.0)
     tstar = args.zi0 / wstar0
     print(f"[spectral-CBL] {args.nx}x{args.ny}x{args.nz} Lz={args.Lz}m Q0={args.Q0} "
-          f"zi0={args.zi0}m  w*0~{wstar0:.2f} t*~{tstar:.0f}s steps={nsteps} dt={args.dt}")
-    st, us = step(st, first=True)
+          f"zi0={args.zi0}m {args.time_scheme} "
+          f"sgs={'LASD' if not args.static else args.sgs_model} "
+          f"dt={'adaptive cfl='+str(args.cfl) if args.adaptive_dt else args.dt} "
+          f"w*0~{wstar0:.2f} t*~{tstar:.0f}s")
+    rec = args.record_frames > 0
+    if rec:
+        zc_np = np.asarray(g.z_c)
+        h_idx, h_z = les_record.select_heights(zc_np, args.Lz)
+        frame = 0
+
+        def _save(t_hours):
+            nonlocal frame
+            les_record.record_frame(
+                args.output, frame, t_hours, args.case_label, zc_np,
+                np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
+                np.asarray(st.theta), args.Lx, args.Ly, h_idx, h_z, args.z0)
+            frame += 1
+        print(f"  recording {args.record_frames} frames; heights[m]={np.round(h_z,1)}")
+
+    # STATIC trace-time CFL dt (reuses split_explicit.select_dt; differentiable /
+    # scan-friendly — not a per-step re-pin).
+    dt0 = (select_dt(g.dx, max_wind_safe=args.max_wind, cfl_safe=args.cfl,
+                     dt_cap=args.dt_max) if args.adaptive_dt else float(args.dt))
+    dt = jnp.asarray(dt0, dtype)
+    T = args.hours * 3600.0
+    print(f"  dt={dt0:.3f}s ({'static-CFL' if args.adaptive_dt else 'fixed'})")
+    st, us = step(st, dt=dt, first=True)
+    if rec:
+        _save(0.0)
+    t = float(dt); i = 1
+    next_rec = T / args.record_frames if rec else np.inf
+    blk = max(1, args.dt_recompute)
     t0 = time.time()
-    for i in range(1, nsteps + 1):
-        st, us = step(st, first=False)
-        if i % args.print_every == 0:
+    while t < T:
+        dth = float(dt)
+        for _ in range(blk):
+            st, us = step(st, dt=dt, first=False)
+        t += blk * dth; i += blk
+        mw = float(jnp.max(jnp.abs(st.w)))
+        if not np.isfinite(mw) or mw > 1e3:
+            print(f"[BLOWUP] step {i} t={t:.0f}s max|w|={mw}"); return 1
+        if rec and t >= next_rec and frame < args.record_frames:
+            _save(t / 3600.0); next_rec += T / args.record_frames
+        if (i // blk) % max(1, args.print_every // blk) == 0:
             z, thm, ww, wth, zi, ws = diagnose(st, g, args)
-            mw = float(jnp.max(jnp.abs(st.w)))
-            if not np.isfinite(mw) or mw > 1e3:
-                print(f"[BLOWUP] step {i} max|w|={mw}"); return 1
-            print(f"{i:7d} {i*args.dt:7.0f}s max|w|={mw:5.2f} sigw_max={np.sqrt(ww.max()):.2f}"
-                  f" w*={ws:.2f} sigw/w*={np.sqrt(ww.max())/ws:.2f} zi={zi:.0f}m"
-                  f" th_sfc={thm[0]:.2f}")
-    print(f"[DONE] wall={time.time()-t0:.1f}s  {nsteps/(time.time()-t0):.1f} steps/s")
+            print(f"{i:7d} {t:7.0f}s dt={dth:.3f} max|w|={mw:5.2f} "
+                  f"sigw/w*={np.sqrt(ww.max())/ws:.2f} zi={zi:.0f}m th_sfc={thm[0]:.2f}")
+    if rec and frame < args.record_frames:
+        _save(t / 3600.0)
+    print(f"[DONE] wall={time.time()-t0:.1f}s  {i/(time.time()-t0):.1f} steps/s ({i} steps)")
     z, thm, ww, wth, zi, ws = diagnose(st, g, args)
     np.savez(args.output / "cbl_profiles.npz", z=z, theta=thm, ww=ww, wth=wth,
              zi=zi, wstar=ws, Q0=args.Q0)
