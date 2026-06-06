@@ -318,7 +318,6 @@ def flux_form_vertical_tracer_advection_dst3(
 
     # --- First-order upwind flux ---
     T_upwind = jnp.where(w_int > 0.0, T_below, T_above)
-    F_upwind = w_int * T_upwind
 
     # --- CFL at each interface ---
     h_below = h_k[..., 1:]

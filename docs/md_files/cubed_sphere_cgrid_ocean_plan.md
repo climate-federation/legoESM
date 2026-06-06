@@ -4,7 +4,7 @@ Status: planning, post-review v3 — APPROVED WITH MINOR CHANGES (2026-04-29)
 Owner: Dhruv
 Reviewers: ocean-model-expert, dycore-expert (2026-04-29, two passes)
 Related: issue #214 (ocean grid-agnostic refactoring, Phase 1+2 landed),
-`docs/issues/cubed_sphere_edge_artifacts.md`, `docs/ocean_grid_staggering.md`.
+`cubed_sphere_edge_artifacts.md`, `ocean_grid_staggering.md`.
 
 ## 1. Goal
 
@@ -31,7 +31,7 @@ shares Phase 3's GM/Redi blocker, but is otherwise independent.
 ## 3. Why C-grid, not C-D grid
 
 The current C-D grid cubed-sphere ocean has three known structural
-issues (see `docs/issues/cubed_sphere_edge_artifacts.md` and
+issues (see `cubed_sphere_edge_artifacts.md` and
 `project_cubesphere_ocean_instability.md`):
 
 1. Float64 required for the baroclinic PGF — the Arakawa-Lamb 4-point

@@ -4,11 +4,11 @@ Latitude-band decomposition: each MPI rank owns a contiguous band of
 latitude rows; every rank owns all longitudes (no decomposition in the
 periodic direction).
 
-Stage 0 (this file) provides the halo-exchange and padded-grid
-machinery only.  The per-step driver ``make_latlon_mpi_step`` is a
-stub that raises ``NotImplementedError`` — Stage 1 will wire it
-against the existing serial C-grid step in
-:mod:`legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid`.
+This file provides the halo-exchange and padded-grid machinery
+together with the per-step driver ``make_latlon_mpi_step``, which is
+fully implemented: it delegates to the existing serial C-grid step in
+:mod:`legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid` via the
+backend-aware MPI halo path.
 
 Conventions
 -----------
@@ -42,17 +42,16 @@ Conventions
 
 Status
 ------
-Stage 0 (DONE):
+Halo-exchange and padded-grid machinery (DONE):
     LatLonBandLayout, make_latlon_band_layout, exchange_halo_latlon,
     scatter_state_latlon, gather_state_latlon, pad_state_halos,
     strip_halos, build_padded_grid.
 
-Stage 1 (TODO — explicit NotImplementedError):
-    make_latlon_mpi_step — wrap
+Per-step driver (DONE):
+    make_latlon_mpi_step — wraps
     ``cgrid_latlon_hydrostatic_tendencies`` and the RK driver inside a
-    pad → step → strip cycle.  Must also make the pole-wall BC
-    (``v=0`` at the global lat boundaries) rank-aware so interior cuts
-    are NOT zeroed.
+    pad → step → strip cycle.  The pole-wall BC (``v=0`` at the global
+    lat boundaries) is rank-aware so interior cuts are NOT zeroed.
 """
 
 from __future__ import annotations

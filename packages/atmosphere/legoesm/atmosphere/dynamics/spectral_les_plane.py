@@ -13,7 +13,7 @@ Why this core (vs the compressible plane dycore)
 The compressible plane dycore needs acoustic off-centring + biharmonic hyperdiff
 for stability; that numerical dissipation caps the effective Reynolds number
 below the turbulence-sustaining threshold, so resolved ABL turbulence laminarises
-(``docs/les_plane_turbulence_notes.md``). A pseudo-spectral incompressible solver
+(``les_plane_turbulence_notes.md``). A pseudo-spectral incompressible solver
 has NO acoustic mode and NO numerical hyperdiffusion — the ONLY dissipation is
 the physical SGS model — so the effective Re is high and turbulence sustains,
 exactly as in the oracle. This module is the faithful path to a quantitative

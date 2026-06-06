@@ -350,14 +350,6 @@ def barotropic_substeps_latlon_cgrid(
         V_at_u = 0.25 * (V_bar_c[:-1] + V_bar_c[1:] + V_west[:-1] + V_west[1:])
         V_at_u = jnp.concatenate([V_at_u, V_at_u[:, 0:1]], axis=1)
 
-        # Average U to v-points for Coriolis.  Pole rows are zero
-        # (wall BC on regular lat-lon) or fold-reflected (tripolar).
-        U_at_v_interior = 0.25 * (
-            U_bar_c[:-1, :-1] + U_bar_c[:-1, 1:]
-            + U_bar_c[1:, :-1] + U_bar_c[1:, 1:]
-        )
-        U_at_v = pad_ns_vector_u(U_at_v_interior, grid)
-
         # Forward-backward Coriolis (Matsuno) + PGF + slow forcing
         U_bar_new = (U_bar_c + dt_s * (
             f_u * V_at_u - g * deta_dx + F_slow_u

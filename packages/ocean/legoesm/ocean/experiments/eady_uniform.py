@@ -335,7 +335,6 @@ def _set_linear_shear_latlon(state, grid, z_coord, config):
     for i in range(n_lat):
         u_data[i, :, :] = U_baroclinic[np.newaxis, :] * envelope[i]
 
-    mask = np.asarray(state.land_mask.data)
     if hasattr(state, 'u_mask') and state.u_mask is not None:
         u_mask = np.asarray(state.u_mask.data)
     else:

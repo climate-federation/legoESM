@@ -1047,7 +1047,6 @@ def load_training_data(
     import numpy as np
     from legoesm.training.era5_to_state import (
         _open_era5_zarr, _resolve_var, ERA5Slice,
-        regrid_latlon_to_gaussian, regrid_2d_to_gaussian,
     )
     era5_config = TrainingERA5Config(dt_hours=6)
 
@@ -1100,7 +1099,6 @@ def load_training_data(
         )
     rollout_stride = rollout_hours // era5_dt_hours          # snapshot units between IC and target
     snapshots_per_day = 24 // era5_dt_hours                  # 4 at 6h cadence
-    ic_stride_units = 1                                      # one snapshot between consecutive ICs
 
     # GenCast-style multi-step autoregressive supervision: when
     # ``loss_config.multi_step_hours`` is non-empty, load one target
@@ -1183,9 +1181,6 @@ def load_training_data(
         phis_era5 = ds[phis_var].values.astype(np.float32)
     else:
         phis_era5 = np.zeros((len(lat), len(lon)), dtype=np.float32)
-    phis_gauss = regrid_2d_to_gaussian(phis_era5, lat, lon, grid)
-
-    sigma_full = np.asarray(sigma.sigma_full)
 
     def _load_one_snapshot(time_idx):
         """Load one ERA5 snapshot and regrid to model grid."""

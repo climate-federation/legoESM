@@ -39,7 +39,6 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.core.field import Field
 
 
 # ==============================================================================

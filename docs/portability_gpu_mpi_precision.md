@@ -26,12 +26,12 @@ tolerance (per the 147+47 precision tests).
 ## MPI
 
 Works via a user-space MPICH + a dedicated `.venv-mpi` (JAX 0.9.2 + mpi4jax;
-the main JAX 0.10 venv can't host mpi4jax). See `docs/mpi_local_setup.md`.
+the main JAX 0.10 venv can't host mpi4jax). See `docs/md_files/mpi_local_setup.md`.
 Run the suite with `bash scripts/experiment/run_mpi_tests.sh 2` (each file in its
 own `mpirun`). Verified serial==MPI for the halo exchange and the latlon dycore
 step; coupler 2/2. One known intermittent flake (`test_latlon_mpi_step`, a
 collective-ordering race on the deprecated JAX-0.9 mpi4jax path) — diagnosed +
-bounded in `docs/mpi_local_setup.md`.
+bounded in `docs/md_files/mpi_local_setup.md`.
 
 ## How to reproduce
 ```bash

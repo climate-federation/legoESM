@@ -1282,7 +1282,7 @@ def _pad_halo_local(
         # eliminating) edge artifacts in the Arakawa-Lamb gradient.
         # Full visual elimination of edge artifacts also requires the
         # boundary_fix option in fv3_sw_tendencies (see iteration 15 in
-        # docs/cubed_sphere_edge_artifacts.md).
+        # cubed_sphere_edge_artifacts.md).
         flat_offsets = interp_offsets.reshape(-1)
         n_int = int(n)
         strip_base = jnp.repeat(jnp.arange(24) * n_int, n_int)  # (24*n,)

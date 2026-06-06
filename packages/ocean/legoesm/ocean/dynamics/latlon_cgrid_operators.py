@@ -2003,8 +2003,6 @@ def smagorinsky_biharmonic_tendency_cgrid(
         Biharmonic dissipative tendencies.  Caller subtracts these:
         du/dt -= tend_u, dv/dt -= tend_v.
     """
-    is_3d = u.ndim == 3
-
     # --- 1. Compute strain of the INPUT velocity ---
     D_T, D_S = strain_rate_cgrid(
         u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)

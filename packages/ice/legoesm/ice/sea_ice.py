@@ -45,12 +45,11 @@ from legoesm.ice.itd import (
 from legoesm.ice.snow import (
     accumulate_snowfall,
     combined_conductance,
-    combined_conductive_flux,
     consume_from_snow_then_ice,
     consume_sublimation_from_snow_then_ice,
     snow_ice_flooding,
 )
-from legoesm.ice.brine import update_salinity_and_salt_flux, PSU_TO_KG_PER_KG
+from legoesm.ice.brine import update_salinity_and_salt_flux
 from legoesm.ice.ridging import apply_ridging
 from legoesm.ice.shortwave import compute_ice_sw
 from legoesm.ice.ponds import step_ponds
@@ -2260,12 +2259,6 @@ def _step_dynamic_v2(
             )
             pond_area, pond_depth = _pond_area_depth_from_volume(
                 jnp.maximum(pond_thick, 0.0) * conc, conc, config)
-
-    # Snapshot post-transport for coupler bookkeeping.
-    if is_multicat:
-        h_agg_pt, _, _ = aggregate_state(h, T_ice, conc)
-    else:
-        h_agg_pt = h
 
     # Multi-category aggregate-area invariant: independent per-category
     # advection (and overfilled restarts) do not guarantee ``sum_k a_k <= 1``;

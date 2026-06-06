@@ -77,7 +77,6 @@ def differentiable_rollout(
     """
     n_segments = config.n_days
     seg_steps = config.segment_steps
-    save_interval = config.save_every_n_segments
 
     def _one_segment(carry, seg_idx):
         """Execute one segment and optionally save state."""

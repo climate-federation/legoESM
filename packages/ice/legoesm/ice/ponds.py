@@ -22,8 +22,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm import constants
-
 
 def step_ponds(
     pond_area: jnp.ndarray,

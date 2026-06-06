@@ -1332,7 +1332,7 @@ def cell_centre_angles_from_4edge(cdgrid):
     using cell-centre angles instead introduces an O(dx) v_north
     residual on Williamson 2 (~0.39 m/s); the 4-edge mean reduces
     this to ~0.008 m/s at t=0 (47x improvement, see iter-25/26 of
-    docs/fv3_fortran_fidelity_review.md).
+    fv3_fortran_fidelity_review.md).
 
     Iter-528: extracted from the matrix's inline `extract_fn` so any
     diagnostic code that converts D-grid winds to geographic on the

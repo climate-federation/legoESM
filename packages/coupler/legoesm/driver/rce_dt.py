@@ -44,10 +44,6 @@ hide the per-measurement provenance. The reference function
 """
 from __future__ import annotations
 
-from legoesm.core.cfl import (
-    estimate_min_dx_cubed_sphere, estimate_min_dx_gaussian,
-)
-
 
 # Empirical anchor (iter-12 C24 measurement): dt=600 s at dx≈240753 m.
 # Other points (C48 dt=150, C72 dt=75, C96 dt=37) all sit on the same

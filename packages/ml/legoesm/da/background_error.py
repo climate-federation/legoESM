@@ -94,7 +94,6 @@ class DiffusionB:
         Applied on the flattened column representation.
         """
         ncol = self.grid.grid_n_columns
-        shape_2d = self.grid.grid_shape_2d
 
         # Handle multi-level fields
         if field_flat.ndim == 1 and field_flat.size > ncol:

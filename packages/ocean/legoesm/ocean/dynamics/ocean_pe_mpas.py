@@ -731,7 +731,6 @@ def mpas_ocean_baroclinic_tendencies(
     h_safe = jnp.maximum(h_k, 1e-10)  # (nCells, nlev)
     tracer_stack = jnp.stack([T_3d, S_3d], axis=-1)  # (nCells, nlev, 2)
     nCells_t, nlev_t, n_tracers = tracer_stack.shape
-    tracer_flat = tracer_stack.reshape(nCells_t, nlev_t * n_tracers)
 
     # Horizontal tracer diffusion: K_h * lap(T,S) per layer.  edge_mask is
     # (nEdges,) and broadcasts across the trailing axis via [:, None].

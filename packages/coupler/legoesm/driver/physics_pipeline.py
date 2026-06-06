@@ -91,8 +91,8 @@ class PhysicsPipeline:
         convection_config,
         radiation_fn,
         T_ice=constants.T_freeze_ocean,
-        C_H=0.0044,
-        C_E=0.0044,
+        C_H=None,
+        C_E=None,
         albedo_ice=0.65,
         albedo_ocean=0.06,
         emissivity_ice=0.95,
@@ -117,6 +117,17 @@ class PhysicsPipeline:
         self.convection_config = convection_config
         self.radiation_fn = radiation_fn
         self.T_ice = T_ice
+        # Resolve the surface exchange coefficients to the canonical
+        # ``ExperimentConfig`` defaults when not supplied, so the single
+        # source of truth lives in the config schema (the sole caller
+        # ``build_physics_pipeline`` always passes explicit values).
+        if C_H is None or C_E is None:
+            from legoesm.driver.config import ExperimentConfig
+            _defaults = ExperimentConfig._field_defaults
+            if C_H is None:
+                C_H = _defaults["C_H"]
+            if C_E is None:
+                C_E = _defaults["C_E"]
         self.C_H = C_H
         self.C_E = C_E
         self.albedo_ice = albedo_ice

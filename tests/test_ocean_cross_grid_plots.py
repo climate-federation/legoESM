@@ -3661,7 +3661,7 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         doc = (Path(__file__).resolve().parent.parent
-               / "docs" / "ocean_experiments_reference.md")
+               / "docs" / "md_files" / "ocean_experiments_reference.md")
         text = doc.read_text()
         # Find the geostrophic_adjustment validation thresholds
         # section.

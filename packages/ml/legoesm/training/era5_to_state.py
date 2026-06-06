@@ -326,7 +326,6 @@ def era5_to_spectral_carry(
     phis_jax = jnp.asarray(phis_ll)
 
     # Build HydrostaticState
-    nlev = T_model.shape[-1]
     dims_3d = ("lat", "lon", "level")
     dims_2d = ("lat", "lon")
 

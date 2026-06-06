@@ -413,12 +413,10 @@ def spectral_ocean_tendencies(
     vert_u_oc2 = _ocean_oc2[..., 2]
     vert_v_oc2 = _ocean_oc2[..., 3]
     KE_oc2 = _ocean_oc2[..., 4]
-    hu_oc2 = hu_oc2_pre   # cached from iter-77 pre-batch
     A_vor_dmu = _ocean_dmu[..., 0]
     B_vor_dmu = _ocean_dmu[..., 1]
     vert_u_dmu = _ocean_dmu[..., 2]
     vert_v_dmu = _ocean_dmu[..., 3]
-    hv_dmu = hv_dmu_pre   # cached from iter-77 pre-batch
 
     flux_vor_div = im_over_a[:, jnp.newaxis] * A_vor_oc2 - one_over_a * B_vor_dmu
     flux_vor_curl = im_over_a[:, jnp.newaxis] * B_vor_oc2 + one_over_a * A_vor_dmu

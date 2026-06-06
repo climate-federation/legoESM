@@ -106,15 +106,6 @@ def _config_to_dict_any(config) -> dict:
     return config_to_dict(config)
 
 
-def config_to_dict(config) -> dict:
-    """Public alias — serialize any config type to a dict.
-
-    Kept for backward compatibility with code that imports
-    ``config_to_dict`` from this module.
-    """
-    return _config_to_dict_any(config)
-
-
 def compute_config_hash(config) -> str:
     """SHA-256 of the JSON-serialized *config*."""
     text = json.dumps(_config_to_dict_any(config), sort_keys=True)

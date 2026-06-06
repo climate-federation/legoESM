@@ -26,7 +26,6 @@ from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 
-from legoesm import constants
 from legoesm.driver.config import ExperimentConfig, DycoreConfig
 
 logger = logging.getLogger("legoesm.driver.factory")

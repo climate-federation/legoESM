@@ -619,7 +619,6 @@ class DiagnosticCollector:
                 'u': np.asarray(state.u.data),
                 'q_v': np.asarray(q_v) * 1000.0,
             }, lat_deg_grid)
-            ebudget = self.energy_tracker
             self.monthly_accum.add_scalar(doy, year, {
                 'T_atm': mean_T,
                 'T_low': mean_T_low,
@@ -878,8 +877,6 @@ class DiagnosticCollector:
 
         if not self.times:
             return  # nothing to flush
-
-        sigma = np.asarray(self.sigma_full)
 
         # Save current batch
         np.savez(

@@ -25,7 +25,6 @@ import jax.numpy as jnp
 from legoesm.land.surface_params import (
     PARAM_BOUNDS,
     PARAM_NAMES,
-    N_PARAMS,
     LandSurfaceParams,
     array_to_params,
     bounds_arrays,

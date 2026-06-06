@@ -110,6 +110,7 @@ def _omip2_ic(grid, z_coord, T_path, S_path):
 
 def _write_omip2_outputs(tmp: Path, T, S, lat, lon, depth):
     """Write a representative Omon + SImon snapshot bundle."""
+    from legoesm import constants
     from legoesm.io.cmor_output import CFWriter
     writer = CFWriter(
         output_dir=str(tmp / "cmor"),
@@ -140,7 +141,7 @@ def _write_omip2_outputs(tmp: Path, T, S, lat, lon, depth):
 
     # --- 2D surface ocean: tos (K), sos, zos, mlotst, hfds, tauuo,
     # tauvo — synthesize realistic 2D fields from the IC.
-    tos = T[..., 0] + 273.15            # surface T → K for CMIP6 tos
+    tos = T[..., 0] + constants.T_freeze  # surface T → K for CMIP6 tos
     sos = S[..., 0]                     # surface S
     zos = 0.1 * np.sin(np.radians(np.degrees(np.linspace(-90, 90, T.shape[0]))))[:, None]
     zos = np.broadcast_to(zos, (T.shape[0], T.shape[1]))
@@ -165,7 +166,7 @@ def _write_omip2_outputs(tmp: Path, T, S, lat, lon, depth):
     sithick = np.where(siconc > 1.0, 1.5, 0.0)
     siu = np.zeros_like(siconc)
     siv = np.zeros_like(siconc)
-    sitemptop = np.where(siconc > 1.0, 263.0, 273.15)
+    sitemptop = np.where(siconc > 1.0, 263.0, constants.T_freeze)
     for name, data in [
         ("siconc", siconc), ("sithick", sithick),
         ("siu", siu), ("siv", siv), ("sitemptop", sitemptop),
