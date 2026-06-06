@@ -686,6 +686,95 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
     return grid, z_coord, model, state, np.asarray(H_bathy)
 
 
+def _regrid_curv_to_points(field2d, src_lat_deg, src_lon_deg, ocean_mask,
+                           tgt_lat_deg, tgt_lon_deg, k=4, max_deg=3.0):
+    """IDW-regrid a curvilinear 2-D field (ocean cells only) onto ARBITRARY target
+    points (any shape, e.g. cube (6,n,n)) using great-circle (chord) kNN. Mirrors
+    ``compare_omip_nemo.regrid_curv_to_latlon`` but for point targets (that one
+    meshgrids 1-D axes, so it can't take cube cell centres). Returns (values,
+    ocean_flag) with the target's shape; ocean_flag=0 where the nearest source
+    ocean cell is farther than ``max_deg``."""
+    from scipy.spatial import cKDTree
+
+    def _xyz(lat_r, lon_r):
+        cl = np.cos(lat_r)
+        return np.stack([cl * np.cos(lon_r), cl * np.sin(lon_r),
+                         np.sin(lat_r)], axis=-1)
+
+    m = np.asarray(ocean_mask).ravel() > 0.5
+    if not m.any():
+        raise ValueError("no ocean source cells")
+    src_xyz = _xyz(np.deg2rad(np.asarray(src_lat_deg).ravel()[m]),
+                   np.deg2rad(np.asarray(src_lon_deg).ravel()[m]))
+    vals = np.asarray(field2d, dtype=np.float64).ravel()[m]
+    tshape = np.asarray(tgt_lat_deg).shape
+    tgt_xyz = _xyz(np.deg2rad(np.asarray(tgt_lat_deg).ravel()),
+                   np.deg2rad(np.asarray(tgt_lon_deg).ravel()))
+    tree = cKDTree(src_xyz)
+    d, idx = tree.query(tgt_xyz, k=k)
+    d = np.maximum(d, 1e-12)
+    w = (1.0 / d) / (1.0 / d).sum(axis=1, keepdims=True)
+    out = (vals[idx] * w).sum(axis=1).reshape(tshape)
+    chord = 2.0 * np.sin(np.deg2rad(max_deg) / 2.0)
+    ocean = (d[:, 0].reshape(tshape) < chord).astype(np.float64)
+    return out, ocean
+
+
+def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
+                       woa_init: bool = False, woa_t=None, woa_s=None,
+                       flat_bottom: bool = False):
+    """Build a cubed-sphere ocean (FC-Gram spectral baroclinic backend) with NEMO's
+    OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
+    faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
+    fv3sw barotropic + face-edge-stability A_h/K_h) and the OMIP-2 applicator
+    (grid_type='cubed_sphere'). NOTE: the cube OceanModel still has the documented
+    PGF-over-bathy instability (docs/ocean_experiments/cubed_sphere_pgf_stability.md)
+    that FC + elevated diffusion only delay; this builder is the harness to drive
+    the dycore fix, not a finished faithful path."""
+    from scripts.run import run_omip
+    from legoesm.ocean.init import rest_state_ocean
+    grid, z_coord, config, model, _ = run_omip._create_setup(
+        "cubed_sphere", f"C{n}", nlev, H_max, physics_preset="full",
+        water_type="II",
+    )
+    # NEMO bathy/mask -> cube cell centres (point-target IDW; the curvilinear
+    # mesh is the same faithful geometry tripole/latlon use).
+    import xarray as xr
+    e_mask, e_H = read_mesh_mask_bathy(mesh_path)
+    ds = xr.open_dataset(mesh_path)
+    src_lat = _squeeze2d(ds["gphit"].values)
+    src_lon = _squeeze2d(ds["glamt"].values)
+    tgt_lat = np.rad2deg(np.asarray(grid.lat))   # (6, n, n)
+    tgt_lon = np.rad2deg(np.asarray(grid.lon))
+    H_cs, ocean_cs = _regrid_curv_to_points(
+        e_H, src_lat, src_lon, e_mask, tgt_lat, tgt_lon, max_deg=3.0)
+    land_mask = (ocean_cs > 0.5).astype(np.float64)
+    H_bathy = np.where(land_mask > 0.5, np.maximum(H_cs, 50.0), 0.0)
+    if flat_bottom:
+        H_bathy = np.where(land_mask > 0.5, H_max, 0.0)
+        print("[setup] FLAT BOTTOM (cube; topography removed)")
+    print(f"[setup] cubed_sphere C{n}: ocean cells {int(land_mask.sum())}/"
+          f"{land_mask.size}, H_bathy [{H_bathy[land_mask>0.5].min():.0f},"
+          f"{H_bathy.max():.0f}] m")
+    state = rest_state_ocean(grid, z_coord, H_max=H_max)
+    state = state._replace(
+        land_mask=state.land_mask.replace(data=jnp.asarray(land_mask)),
+        H_bathy=state.H_bathy.replace(data=jnp.asarray(H_bathy)),
+    )
+    if woa_init:
+        from legoesm.core.field import Field
+        T_woa, S_woa = compute_woa_3d(grid, z_coord, woa_t, woa_s,
+                                      H_bathy, land_mask)
+        state = state._replace(
+            T=Field(jnp.asarray(T_woa), name=state.T.name,
+                    dims=state.T.dims, units=state.T.units),
+            S=Field(jnp.asarray(S_woa), name=state.S.name,
+                    dims=state.S.dims, units=state.S.units),
+        )
+        print(f"[setup] cube T/S initialised from WOA18 ({Path(woa_t).name})")
+    return grid, z_coord, model, state, np.asarray(H_bathy)
+
+
 def _idx_t(step: int, dt: float, n_rec: int) -> int:
     """Nearest 6-hourly CORE-II record for the current model time (perpetual yr)."""
     t = (step * dt) % _YEAR_S
@@ -714,7 +803,11 @@ def _diag(state, lat2d=None, lon2d=None) -> dict:
     max_speed = float(np.nanmax(au)) if has_u else float("nan")
     umax_lat = umax_lon = float("nan")
     umax_lev = -1
-    if lat2d is not None and has_u:
+    # Cube u is 4-D (6, n, n, nlev); the C-grid u is 3-D (n_lat, n_lon+1, nlev).
+    # The umax-location pin-point below only makes sense for the 2-D-mappable
+    # C-grid case, so skip it (keep max_speed + finite, which are shape-agnostic)
+    # when the field is the cube layout or the coord arrays don't match.
+    if lat2d is not None and has_u and u.ndim == 3:
         ju, iu, ku = (int(x) for x in
                       np.unravel_index(np.nanargmax(au), au.shape))
         lat2d = np.asarray(lat2d)
@@ -745,7 +838,12 @@ def _diag(state, lat2d=None, lon2d=None) -> dict:
 
 
 def _grid_lat2d_deg(grid, grid_type):
-    """2-D (lat, lon) in degrees for snapshots/scoring, for either grid type."""
+    """Lat/lon in degrees for snapshots/scoring, per grid type. Cube returns the
+    (6,n,n) per-face arrays as-is (the scorer flattens source points), tripole the
+    2-D curvilinear T arrays, regular lat-lon the meshgridded 2-D axes."""
+    if grid_type == "cubed_sphere":
+        return (np.rad2deg(np.asarray(grid.lat)),
+                np.rad2deg(np.asarray(grid.lon)))
     if grid_type == "tripole":
         return (np.rad2deg(np.asarray(grid.lat_T)),
                 np.rad2deg(np.asarray(grid.lon_T)))
@@ -778,12 +876,14 @@ def main() -> int:
     p.add_argument("--H-max", type=float, default=5500.0)
     p.add_argument("--mesh", type=str, default=_MESH)
     p.add_argument("--grid", type=str, default="tripole",
-                   choices=["tripole", "latlon_bathy"],
-                   help="tripole (eORCA1, ideal same-grid but cold-start-unstable) "
-                        "or latlon_bathy (regular lat-lon + NEMO bathy + smc03; the "
-                        "documented-stable production config).")
+                   choices=["tripole", "latlon_bathy", "cubed_sphere"],
+                   help="tripole (eORCA1 same-grid), latlon_bathy (regular lat-lon + "
+                        "NEMO bathy + smc03 + polar filter), or cubed_sphere (FC-Gram "
+                        "backend + NEMO bathy on cube cells; grid 3, dycore WIP).")
     p.add_argument("--latlon-res", type=str, default="180x360",
                    help="lat-lon resolution NxM for --grid latlon_bathy.")
+    p.add_argument("--cube-n", type=int, default=48,
+                   help="cubed-sphere face resolution n (C-n) for --grid cubed_sphere.")
     p.add_argument("--woa-init", action="store_true",
                    help="Initialise T/S from WOA18 (faithful IC) vs rest state.")
     p.add_argument("--woa-t", type=str, default="data/woa18/woa18_decav_t00_01.nc")
@@ -1012,6 +1112,13 @@ def main() -> int:
             convection_K_bg=args.convection_K_bg,
         )
         app_grid_type = "tripole"
+    elif args.grid == "cubed_sphere":
+        grid, z_coord, model, state, H_bathy = build_cubed_sphere(
+            args.nlev, args.H_max, args.mesh, n=args.cube_n,
+            woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
+            flat_bottom=args.flat_bottom,
+        )
+        app_grid_type = "cubed_sphere"
     else:
         _nlat, _nlon = (int(x) for x in args.latlon_res.split("x"))
         grid, z_coord, model, state, H_bathy = build_latlon_bathy(

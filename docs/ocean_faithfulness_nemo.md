@@ -20,6 +20,30 @@ applicator supports grid_type latlon/tripole/**cubed_sphere/mpas**, **NOT spectr
 (no grid-space u/v/T path — line ~317). `run_omip._create_setup(grid_type,...)` is the
 shared builder for all grids; run_omip_core2 already reuses it for latlon/tripole.
 
+### GRID-3 (cubed_sphere) EXECUTABLE ROADMAP (iter-26 — fully mapped)
+Build is plumbing-ready BUT fidelity hinges on the dycore PGF fix (below).
+- **Builder** `build_cubed_sphere` in run_omip_core2 (mirror build_latlon_bathy):
+  `run_omip._create_setup("cubed_sphere", f"C{n}", nlev, H_max, ...)` → grid,z_coord,config
+  (FC backend, A_h=5e5/K_h=5e6, fv3sw barotropic), model=OceanModel(grid,z,config,fc_config).
+  Cube state: OceanState u,v,T,S (6,n,n,nlev) A-grid; eta,H_bathy,land_mask (6,n,n).
+  NEMO bathy→cube: inline cKDTree-IDW on flattened cube `grid.lat/lon` (rad,(6,n,n))
+  (regrid_curv_to_latlon is meshgrid/1D-only → need point-target variant). `rest_state_ocean`
+  does NOT take bathy override → set via `state._replace(land_mask=state.land_mask.replace(
+  data=...), H_bathy=...)`. WOA: `compute_woa_3d` (grid-agnostic) → T/S.
+- **main()**: add `cubed_sphere` choice + branch, `app_grid_type="cubed_sphere"` (applicator
+  already supports it, reads grid.lat/lon rad, forcing (6,n,n) at cell centres, step matches).
+- **diag/snapshot cube-safe**: `_diag` unravels max|u| into 3 dims → cube u is 4D (6,n,n,nlev),
+  guard by ndim (skip umax-loc for cube, keep max_speed+finite). `_grid_lat2d_deg` cube branch
+  → grid.lat/lon (6,n,n) deg. Scorer is ALREADY grid-agnostic (flattens source) — no change.
+- **BLOCKER = dycore**: cube `OceanModel` PGF-over-bathy instability. run_omip cube blows up
+  ~4-5 d even WITHOUT bathy under gentle restoring; CORE-II bulk + realistic bathy is worse.
+  FC-Gram backend + 5-50× A_h/K_h only DELAY it and over-smooth (kills fidelity). The real
+  fix (per docs/ocean_experiments/cubed_sphere_pgf_stability.md): SMC03 density-Jacobian PGF
+  + duogrid halo on T,S so the face-edge halo error stops feeding the PGF. Multi-iteration
+  dycore effort (cf. tripole cold-start ~20 iters). NO freeze_floor/polar_filter on OceanModel
+  (those are LatLonCGridOceanModel-only).
+
+## Per-grid detail (older)
 - **cubed_sphere**: PGF face-edge instability is MITIGATED (not cleanly fixed) by the
   **FC-Gram spectral baroclinic backend** (`ocean_pe_fc.py`, `build_fc_config`, default in
   run_omip.py) — BUT only together with **5-50× elevated A_h/K_h floors** (5e5/5e6). Uses
