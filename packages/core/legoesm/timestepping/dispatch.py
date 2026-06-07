@@ -4,7 +4,7 @@ import jax
 
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step, ssp_rk3_step_scan
 from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
-from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
+from legoesm.timestepping.ssp_rk54 import ssp_rk54_step, ssp_rk54_step_scan
 
 
 def _rk4_step(state, tendency_fn, dt):
@@ -50,6 +50,12 @@ _INTEGRATORS = {
     "ssp_rk34": ssp_rk34_step, "ssp34": ssp_rk34_step, "rk34": ssp_rk34_step,
     "ssp_rk54": ssp_rk54_step, "ssp54": ssp_rk54_step,
     "ssp45": ssp_rk54_step, "rk54": ssp_rk54_step,
+    # Scan-folded SSP-RK54: identical scheme, tendency compiled ONCE.
+    # For gather-heavy unstructured (MPAS/TRiSK) tendencies the inlined
+    # 5-stage form blows past an XLA-CPU op-count threshold (~8x slower
+    # than its nominal 5-eval cost); the scan body avoids it.
+    "ssp_rk54_scan": ssp_rk54_step_scan, "ssp54_scan": ssp_rk54_step_scan,
+    "rk54_scan": ssp_rk54_step_scan,
     "rk4": _rk4_step, "runge_kutta_4": _rk4_step,
 }
 

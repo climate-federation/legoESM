@@ -187,6 +187,108 @@ def ssp_rk54_step(
     return u5
 
 
+# -- Generalized Shu-Osher coefficient matrices (rows i = stage 1..5,
+#    cols k = source stage 0..4).  Row 0 unused (u^0 = state).  These encode
+#    EXACTLY the same scheme as ``ssp_rk54_step`` above:
+#        u^i = sum_k A[i,k] u^k + dt * sum_k B[i,k] F(u^k)
+# Used by the scan-folded variant so XLA compiles the (gather-heavy) tendency
+# ONCE instead of inlining it five times.  See ``ssp_rk54_step_scan``.
+_SHU_OSHER_A = (
+    (0.0, 0.0, 0.0, 0.0, 0.0),
+    (1.0, 0.0, 0.0, 0.0, 0.0),
+    (_a20, _a21, 0.0, 0.0, 0.0),
+    (_a30, 0.0, _a32, 0.0, 0.0),
+    (_a40, 0.0, 0.0, _a43, 0.0),
+    (0.0, 0.0, _a52, _a53, _a54),
+)
+_SHU_OSHER_B = (
+    (0.0, 0.0, 0.0, 0.0, 0.0),
+    (_b10, 0.0, 0.0, 0.0, 0.0),
+    (0.0, _b21, 0.0, 0.0, 0.0),
+    (0.0, 0.0, _b32, 0.0, 0.0),
+    (0.0, 0.0, 0.0, _b43, 0.0),
+    (0.0, 0.0, 0.0, _b53, _b54),
+)
+
+
+def ssp_rk54_step_scan(
+    state: State,
+    tendency_fn: Callable[[State], State],
+    dt: float,
+) -> State:
+    """SSP-RK(5,4) step, scan-folded so the tendency compiles ONCE.
+
+    Numerically identical scheme to :func:`ssp_rk54_step` (same Spiteri-Ruuth
+    Shu-Osher coefficients), but the five stages are evaluated inside a
+    ``jax.lax.scan`` rather than inlined.  The inlined form forces XLA to emit
+    five separate copies of ``tendency_fn``; for a gather-heavy unstructured
+    (MPAS/TRiSK) tendency the resulting graph crosses an XLA-CPU op-count
+    threshold that de-vectorizes the gathers, making the inlined step ~8x
+    slower than its nominal 5-evaluation cost.  Compiling the stage body once
+    avoids that blowup while preserving the scheme's stability region.
+
+    The stage states ``u^0..u^5`` and tendencies ``F(u^0)..F(u^4)`` are carried
+    as leading-axis stacks; stage ``i`` reads only ``k < i`` slots (the upper
+    Shu-Osher coefficients are zero), so the constant-initialised unused slots
+    never contaminate the result.
+
+    Because the per-stage update is summed over the stage axis (vs the explicit
+    two-term combinations of the inlined form), floating-point rounding differs
+    at the ~1e-9 relative level — far below the scheme's truncation error.
+    """
+    dtype = _state_inexact_dtype(state)
+    dt_t = _cast_scalar(dt, dtype)
+    A = jnp.asarray(_SHU_OSHER_A)
+    B = jnp.asarray(_SHU_OSHER_B)
+    if dtype is not None:
+        A = A.astype(dtype)
+        B = B.astype(dtype)
+
+    leaves0, treedef = jax.tree.flatten(state)
+    # Promote every dynamic leaf to a concrete array and require inexact
+    # (float/complex) dtype.  The Shu-Osher carry slots are allocated at a
+    # FIXED dtype per leaf, so — unlike the inlined form's per-op promotion —
+    # an integer leaf would be silently advanced in integer arithmetic.  SSP
+    # RK on a non-inexact prognostic field is meaningless, so reject it loudly
+    # rather than degrade (also handles Python-scalar leaves via asarray).
+    arr0 = [jnp.asarray(l) for l in leaves0]
+    for a in arr0:
+        if not jnp.issubdtype(a.dtype, jnp.inexact):
+            raise TypeError(
+                "ssp_rk54_step_scan requires inexact (float/complex) state "
+                f"leaves; got dtype {a.dtype}.  Cast the state to floating "
+                "point before integrating.")
+    # U[leaf]: stack (6, *leaf) of stage states u^0..u^5; F[leaf]: (5, *leaf).
+    # u^0 := state; stages 1..5 overwritten before they are ever read.
+    U = [jnp.broadcast_to(a, (6,) + a.shape) for a in arr0]
+    F = [jnp.zeros((5,) + a.shape, a.dtype) for a in arr0]
+
+    def body(carry, i):
+        U, F = carry
+        prev = jax.tree.unflatten(treedef, [u[i - 1] for u in U])
+        Fi, Fi_def = jax.tree.flatten(tendency_fn(prev))
+        # Tendency must share the state's pytree structure, else the leaf
+        # zip below would mis-align fields (e.g. a None/non-None mismatch).
+        # The inlined form's tree.map raises on this; preserve that contract.
+        if Fi_def != treedef:
+            raise ValueError(
+                "ssp_rk54_step_scan: tendency_fn output structure does not "
+                f"match the state structure.\n  state:    {treedef}\n  "
+                f"tendency: {Fi_def}")
+        F = [f.at[i - 1].set(fi) for f, fi in zip(F, Fi)]
+        a_row = A[i]               # (5,) weights over stages k = 0..4
+        b_row = B[i]
+        U_new = []
+        for u, f in zip(U, F):
+            comb = (jnp.tensordot(a_row, u[:5], axes=(0, 0))
+                    + dt_t * jnp.tensordot(b_row, f, axes=(0, 0)))
+            U_new.append(u.at[i].set(comb))
+        return (U_new, F), None
+
+    (U, _), _ = jax.lax.scan(body, (U, F), jnp.arange(1, 6))
+    return jax.tree.unflatten(treedef, [u[5] for u in U])
+
+
 def integrate_scan(
     state: State,
     tendency_fn: Callable[[State], State],
