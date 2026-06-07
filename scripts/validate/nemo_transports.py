@@ -61,6 +61,7 @@ def nemo_amoc_at_latitude(grid_v_path, domain_cfg_path, *, target_lat=26.5,
     e1v = _sq2(dc["e1v"].values)                          # (y, x)
     gphiv = _sq2(dc["gphiv"].values)                      # (y, x)
     glamv = _sq2(dc["glamv"].values)                      # (y, x)
+    depthv = np.asarray(dV["depthv"].values).ravel()      # (z,) positive down
 
     voe3 = np.nan_to_num(voe3, nan=0.0)
 
@@ -80,11 +81,19 @@ def nemo_amoc_at_latitude(grid_v_path, domain_cfg_path, *, target_lat=26.5,
     with np.errstate(invalid="ignore"):
         lat_y = np.nansum(gphiv * atl, axis=1) / np.maximum(atl.sum(axis=1), 1)
     j = int(np.argmin(np.abs(lat_y - target_lat)))
-    # AMOC = −min_z ψ at the target row — MATCHES the model-side convention
-    # (ocean.spinup.compute_amoc_from_state returns -nanmin of the ψ profile);
-    # the upper-cell northward Atlantic transport makes ψ negative there.
-    amoc = float(-np.nanmin(psi[:, j]))
-    return {"amoc_Sv": amoc, "row_lat_deg": float(lat_y[j]), "j": j}
+    # SIGN-AGNOSTIC peak overturning: reference ψ to the surface (removes any
+    # net barotropic throughflow offset so ψ_surface = 0), then take the
+    # largest-magnitude excursion in the UPPER-MID column (depth < 3000 m, to
+    # exclude the deep AABW cell).  This reports the physical AMOC strength
+    # regardless of the ψ sign convention — NEMO's ψ here is positive-peaked
+    # whereas the legoESM moc_streamfunction is negative-peaked (same formula,
+    # opposite vo/cumsum orientation), so a fixed -min/+max would disagree.
+    prof = psi[:, j] - psi[0, j]
+    upper = depthv < 3000.0
+    seg = prof[upper] if np.any(upper) else prof
+    amoc = float(abs(seg[int(np.nanargmax(np.abs(seg)))]))
+    return {"amoc_Sv": amoc, "row_lat_deg": float(lat_y[j]),
+            "j": j, "depth_of_max_m": float(depthv[upper][int(np.nanargmax(np.abs(seg)))])}
 
 
 def main() -> int:
