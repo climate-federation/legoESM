@@ -106,9 +106,53 @@ def _config_to_dict_any(config) -> dict:
     return config_to_dict(config)
 
 
-def compute_config_hash(config) -> str:
-    """SHA-256 of the JSON-serialized *config*."""
-    text = json.dumps(_config_to_dict_any(config), sort_keys=True)
+# ---------------------------------------------------------------------------
+# Config-kind dispatch (atmosphere ExperimentConfig vs ocean runtime configs).
+# The ocean runtime configs are arbitrarily-nested NamedTuples with no bespoke
+# (grid/dycore/output) codec, so they use the recursive tagged codec in
+# ``legoesm.ocean.config``.  ``config_kind`` is recorded in the manifest so a
+# reader rebuilds with the matching deserializer; it defaults to "atmosphere"
+# for manifests written before this field existed (back-compat).
+# ---------------------------------------------------------------------------
+
+def detect_config_kind(config) -> str:
+    """Classify *config* as ``"ocean"`` or ``"atmosphere"`` for codec dispatch.
+
+    Module-name based (no import side effects): every ocean runtime config
+    NamedTuple (``LatLonCGridOceanConfig`` / ``OceanConfig`` /
+    ``SpectralOceanConfig`` / ``MPASOceanConfig``) lives under ``legoesm.ocean``,
+    while ``ExperimentConfig`` / ``AMIPExperimentConfig`` do not — so an
+    atmosphere manifest never triggers an ocean import.
+    """
+    module = type(config).__module__ or ""
+    if module == "legoesm.ocean" or module.startswith("legoesm.ocean."):
+        return "ocean"
+    return "atmosphere"
+
+
+def _serialize_config(config, kind: str) -> dict:
+    if kind == "ocean":
+        from legoesm.ocean.config import ocean_config_to_dict
+        return ocean_config_to_dict(config)
+    return _config_to_dict_any(config)
+
+
+def _deserialize_config(resolved: dict, kind: str):
+    if kind == "ocean":
+        from legoesm.ocean.config import ocean_config_from_dict
+        return ocean_config_from_dict(resolved)
+    from legoesm.driver.config import experiment_config_from_dict
+    return experiment_config_from_dict(resolved)
+
+
+def compute_config_hash(config, kind: str | None = None) -> str:
+    """SHA-256 of the JSON-serialized *config* (kind-aware).
+
+    Atmosphere configs keep the exact pre-existing serialization
+    (``_config_to_dict_any``) so previously-recorded hashes are unchanged.
+    """
+    kind = kind or detect_config_kind(config)
+    text = json.dumps(_serialize_config(config, kind), sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -297,20 +341,28 @@ def build_run_manifest(
     dataset_provenance: list | None = None,
     model_weights_provenance=None,
     state_digest: str | None = None,
+    config_kind: str | None = None,
 ) -> dict:
     """Assemble the run-manifest dict (pure; does no I/O).
 
     Parameters
     ----------
     config
-        An ``ExperimentConfig`` (canonical) or legacy ``AMIPExperimentConfig`` —
-        serialized into ``[config].resolved_config`` so the run can be rebuilt.
+        An ``ExperimentConfig`` (canonical), legacy ``AMIPExperimentConfig``, or
+        an ocean runtime config (``LatLonCGridOceanConfig`` / ``OceanConfig`` /
+        ``SpectralOceanConfig``) — serialized into ``[config].resolved_config``
+        so the run can be rebuilt.
     command_line
         The invoking command; defaults to ``" ".join(sys.argv)``.
     state_digest
         Filled after N steps by the reproduce/checkpoint path; ``None`` at start.
+    config_kind
+        ``"atmosphere"`` or ``"ocean"`` — selects the (de)serializer.  Defaults
+        to auto-detection from the config type.
     """
     from legoesm._version import __version__
+
+    kind = config_kind or detect_config_kind(config)
 
     raw = {
         "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
@@ -330,8 +382,9 @@ def build_run_manifest(
             "patches": list(patches) if patches else [],
         },
         "config": {
-            "resolved_config": _config_to_dict_any(config),
-            "config_hash": compute_config_hash(config),
+            "config_kind": kind,
+            "resolved_config": _serialize_config(config, kind),
+            "config_hash": compute_config_hash(config, kind),
         },
         "result": {
             "state_digest": state_digest,
@@ -443,10 +496,12 @@ def validate_run_manifest(manifest: dict) -> None:
     if not isinstance(resolved, dict) or not resolved:
         raise ValueError("run manifest [config].resolved_config missing or empty")
     # Reconstructability + integrity: the resolved config must rebuild and its
-    # hash must match what was recorded.
-    from legoesm.driver.config import experiment_config_from_dict
-    rebuilt = experiment_config_from_dict(resolved)
-    if compute_config_hash(rebuilt) != config_hash:
+    # hash must match what was recorded.  ``config_kind`` selects the codec;
+    # it defaults to "atmosphere" so manifests written before the field existed
+    # still validate (back-compat).
+    kind = config.get("config_kind", "atmosphere")
+    rebuilt = _deserialize_config(resolved, kind)
+    if compute_config_hash(rebuilt, kind) != config_hash:
         raise ValueError(
             "run manifest config_hash does not match its resolved_config "
             "(corrupt or tampered provenance)"
