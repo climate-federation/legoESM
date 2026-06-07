@@ -36,6 +36,7 @@ from legoesm.core.operators_cdgrid import (
     cgrid_mass_flux_divergence,
     cgrid_tracer_advection_fct,
     cgrid_wet_face_masks,
+    cgrid_corner_min,
     _arakawa_lamb_gradient,
     _interp_center_to_corner,
     _extrapolate_boundary_corners,
@@ -48,6 +49,7 @@ from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
+    compute_centroid_depth,
     extrapolate_below_seafloor,
 )
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
@@ -271,6 +273,63 @@ def ocean_baroclinic_tendencies_cdgrid(
     # Downcast PGF results back to working precision
     dp_dx = dp_dx.astype(T.dtype)
     dp_dy_perp = dp_dy_perp.astype(T.dtype)
+
+    # --- 10b. Adcroft-Campin partial-cell PGF correction (cd-grid AL corners) ---
+    if is_partial:
+        # On partial-cell topography the 4 cells around a D-grid corner sit at
+        # DIFFERENT geometric centroid depths, so the plain AL gradient of
+        # p_prime (which differences them at the same level index k) carries a
+        # residual partial-cell PGF error → spurious bottom-trapped flow (the
+        # cd-grid cube cold-start blowup seeds at the deepest level).  Adcroft &
+        # Campin (2004): shift each cell's baroclinic pressure to a corner-common
+        # reference depth z_ref = min of the 4 centroids before differencing,
+        # p_eff = p' − g·rho'·(centroid − z_ref).  Because _arakawa_lamb_gradient
+        # is LINEAR and z_ref is constant across a corner's 4 cells, the
+        # correction to add to (dp_dx, dp_dy_perp) decomposes EXACTLY into
+        # existing-operator calls:
+        #   corr = −AL_grad(g·rho'·centroid) + z_ref_corner · AL_grad(g·rho').
+        # The z* path is bit-exact because the ``is_partial`` gate skips this
+        # branch entirely (z* never enters here).  Analytically corr also →0 for
+        # a z* coord — every cell at level k shares one centroid depth so
+        # AL_grad(g·rho'·centroid)=centroid·AL_grad(g·rho')=z_ref·AL_grad(g·rho')
+        # — but that analytic identity is NOT relied on for bit-exactness (FP
+        # reassociation of fill(g·rho·c) vs c·fill(g·rho) would break it if the
+        # branch were ever forced on uniform centroids).  Mirrors the proven
+        # latlon adcroft path
+        # (ocean_pe_latlon_cgrid.py:1139).  centroid + rho_prime use the eta=0 /
+        # J=1 reference (matching p_prime) so the correction is eta-independent.
+        centroid0 = compute_centroid_depth(
+            jnp.zeros_like(eta), H_bathy, z_coord,
+            min_water_column_m=config.min_water_column_m,
+        )
+        # Measure the centroid as an ANOMALY from the full-column reference
+        # centroid (cumsum(dz_ref) − 0.5·dz_ref, the depth a FULL cell at level
+        # k sits at).  Subtracting this per-level constant leaves the Adcroft
+        # correction analytically unchanged (it cancels between the two terms
+        # — see corr below), but makes it IDENTICALLY zero (not just FP-zero) on
+        # full/flat columns where centroid0 == cref exactly: cent_anom ≡ 0 and
+        # z_ref_anom = corner_min(cent_anom) ≡ 0, so corr ≡ 0 term-by-term →
+        # the flat-bottom partial path stays BIT-EXACT vs z* (avoids the
+        # fill(g·rho·c)-vs-c·fill(g·rho) FP reassociation).
+        cref = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
+        cent_anom = centroid0 - cref
+        g_rho = fill_land_cells(g * rho_prime, mask, grid)
+        g_rho_cent = fill_land_cells(g * rho_prime * cent_anom, mask, grid)
+        z_ref_corner = cgrid_corner_min(cent_anom, cdgrid)
+        n_f_c, n_i_c, n_j_c, nlev_c = g_rho.shape
+        _gr_flat = jnp.stack([g_rho, g_rho_cent], axis=-1).reshape(
+            n_f_c, n_i_c, n_j_c, nlev_c * 2)
+        _dgr_dx_flat, _dgr_dy_flat = _arakawa_lamb_gradient(_gr_flat, cdgrid)
+        _dgr_dx = _dgr_dx_flat.reshape(
+            _dgr_dx_flat.shape[0], _dgr_dx_flat.shape[1],
+            _dgr_dx_flat.shape[2], nlev_c, 2)
+        _dgr_dy = _dgr_dy_flat.reshape(
+            _dgr_dy_flat.shape[0], _dgr_dy_flat.shape[1],
+            _dgr_dy_flat.shape[2], nlev_c, 2)
+        corr_dx = (-_dgr_dx[..., 1] + z_ref_corner * _dgr_dx[..., 0]).astype(T.dtype)
+        corr_dy = (-_dgr_dy[..., 1] + z_ref_corner * _dgr_dy[..., 0]).astype(T.dtype)
+        dp_dx = dp_dx + corr_dx
+        dp_dy_perp = dp_dy_perp + corr_dy
 
     # --- 11. Vorticity + divergence at corners (batched) ---
     # Batch the (zeta, div_v) center-to-corner interpolation: both are

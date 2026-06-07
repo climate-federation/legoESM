@@ -1054,6 +1054,33 @@ def _interp_center_to_corner(field, cdgrid, padded=None):
                     + f_pad[:, :-1, 1:, :] + f_pad[:, 1:, 1:, :])
 
 
+def cgrid_corner_min(field, cdgrid, padded=None):
+    """Cell-centre → D-grid corner via 4-point MIN (not average).
+
+    Returns, at each D-grid corner, the minimum of the four surrounding
+    cell-centre values — using the SAME four cells and halo convention as
+    :func:`_interp_center_to_corner` and the default branch of
+    :func:`_arakawa_lamb_gradient` (``B_pad[:-1,:-1]``, ``[1:,:-1]``,
+    ``[:-1,1:]``, ``[1:,1:]``), so a corner value here is co-located with that
+    operator's gradient output.  Halo-correct across cube seams (duogrid pad).
+
+    Used by the Adcroft-Campin partial-cell PGF correction on the cd-grid: the
+    corner-common reference depth is the shallowest (minimum) of the four
+    surrounding cell centroid depths.  Shape (6, n, n[, nlev]) → (6, n+1, n+1
+    [, nlev]).
+    """
+    f_pad = padded if padded is not None else _pad_halo_auto(field, cdgrid)
+    if field.ndim == 3:
+        return jnp.minimum(
+            jnp.minimum(f_pad[:, :-1, :-1], f_pad[:, 1:, :-1]),
+            jnp.minimum(f_pad[:, :-1, 1:], f_pad[:, 1:, 1:]),
+        )
+    return jnp.minimum(
+        jnp.minimum(f_pad[:, :-1, :-1, :], f_pad[:, 1:, :-1, :]),
+        jnp.minimum(f_pad[:, :-1, 1:, :], f_pad[:, 1:, 1:, :]),
+    )
+
+
 def _interp_center_to_corner_a2b_ord4(field, cdgrid):
     """iter-971: 4th-order A→B cc→corner (FV3 a2b_ord4 a2b_edge.F90:50-330 duogrid path).
 

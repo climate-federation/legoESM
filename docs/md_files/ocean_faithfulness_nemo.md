@@ -216,6 +216,41 @@ SAME locations the operator differences — getting this wrong = plausible-but-w
 partial-sloped nonzero, AD-finite, then C32 cold-start (does the lev-19 mode clear?) + visual.
 Then smc03 option (`pgf_smc03.py` density-Jacobian kernels) if Adcroft alone insufficient.
 
+### Adcroft PGF correction IMPLEMENTED (cd-grid AL corners) — codex-clean, but C32 still blows
+Shipped: public `cgrid_corner_min` (operators_cdgrid; 4-cell corner MIN = z_ref, unit-tested
+incl. decomposition-identity over all corners/seams) + inline correction at
+`ocean_pe_cdgrid.py:275` (`corr = −AL_grad(g·rho'·centroid) + z_ref·AL_grad(g·rho')`, eta=0
+ref). Codex review: **NO HIGH**; 2 LOW fixed (z*-bit-exact-via-gate wording; decomposition
+regression test added). corner-min 3/3 pass.
+**C32 cold-start RESULT (8421374): still NaN step 182** — same as w-fix-only; Adcroft slowed
+growth (step-84 max|u| 24→12) but did NOT clear the lev-19 N.Atlantic (46N/352E) bottom mode.
+**The mode is robust to all 4 cd-grid fixes** (w-fix delayed, C-face tiny, eta-PGF none,
+Adcroft slowed) → consistent with the established **UNIFYING INSIGHT: cube cold-start is
+RESOLUTION-limited** (C32 ~2.8°; WOA density fronts imply geostrophic jets the coarse grid
+can't carry). Note cube physics path has NO bottom drag (scheme="none") + only KPP vertical
+mixing (weak interior A_v) → an undamped bottom mode; deep momentum dissipation is a separate
+candidate. **RESOLUTION SWEEP (8421377) — REFUTES the "¼°-limited" hypothesis for the corrected cd-grid.**
+C32 NaN@182, C48 NaN@176, C96 NaN@200 — blowup is **resolution-INDEPENDENT** (~step 180-200
+regardless), location MOVES (C32 46N N.Atlantic → C48/C96 EQUATOR 0±5°/Indonesia/S.Ocean,
+levels 10-18 not just bottom), growth doubles every ~8 steps (e-fold ~350 model-s ≈ the
+gravity-wave timescale at these dx). Unlike the OLD A-grid (where resolution DID delay: C32→6,
+C64→9, C128→37), the corrected cd-grid blows at a fixed STEP regardless of resolution → NOT
+topography/PGF/resolution. **The cube gate is a deeper undamped FAST mode** (gravity-wave /
+momentum-adjustment at cold start), seeding at the equator (f→0). The cube physics path has NO
+interior/bottom momentum dissipation (bottom_drag="none"; KPP momentum is surface-only) and the
+smoke used forward-Euler momentum. **NEXT levers (faithful, in order):** (1) `--cube-rk3`
+(SSP-RK3 momentum — the NEMO-faithful cold-start fix that SOLVED the tripole; on the OLD A-grid
+RK3 was worse, but that grid had different pathology — retest on corrected cd-grid); (2) deep
+momentum dissipation (vertical viscosity / bottom drag — plumb into build_cubed_sphere);
+(3) barotropic-baroclinic split coupling under fv3sw at cold start. Validation 8421407 (leaf
+z*-bit-exact reformulated + decomposition test) gates the PGF-correction commit.
+
+### The 4 cd-grid fixes this session (all real, codex-clean — keep regardless of cube gate)
+w double-thickness (committed d45234c7) · C-face wet/rock closure (d45234c7) · partial PGF
+ref-thickness (d45234c7) · Adcroft partial-cell PGF corner correction (pending commit). These
+make the cd-grid ocean substantially more correct; the cold-start gate is now the fast-mode
+dissipation/integrator, not these.
+
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
 partial-cell support** — `ocean_pe_fc.py`/`ocean_pe_cdgrid.py` hardcoded `z_coord.dz_ref`

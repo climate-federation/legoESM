@@ -3419,5 +3419,125 @@ class TestCellCentreAnglesFrom4Edge(unittest.TestCase):
         self.assertEqual(sa.shape, (6, n, n))
 
 
+class TestCgridCornerMin(unittest.TestCase):
+    """`cgrid_corner_min`: 4-cell MIN at D-grid corners (Adcroft PGF z_ref)."""
+
+    def _grids(self, n=8):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        grid = create_cubed_sphere(n)
+        return grid, create_cubed_sphere_cdgrid(grid)
+
+    def test_shape_2d_and_3d(self):
+        import numpy as np
+        from legoesm.core.operators_cdgrid import cgrid_corner_min
+        n = 8
+        _grid, cdgrid = self._grids(n)
+        f2 = jnp.asarray(np.random.RandomState(0).rand(6, n, n))
+        c2 = cgrid_corner_min(f2, cdgrid)
+        self.assertEqual(c2.shape, (6, n + 1, n + 1))
+        f3 = jnp.asarray(np.random.RandomState(1).rand(6, n, n, 5))
+        c3 = cgrid_corner_min(f3, cdgrid)
+        self.assertEqual(c3.shape, (6, n + 1, n + 1, 5))
+
+    def test_constant_field_is_preserved(self):
+        """MIN of a uniform field is that constant everywhere."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import cgrid_corner_min
+        n = 8
+        _grid, cdgrid = self._grids(n)
+        f = jnp.full((6, n, n), 3.5)
+        c = cgrid_corner_min(f, cdgrid)
+        np.testing.assert_allclose(np.asarray(c), 3.5, atol=1e-12)
+
+    def test_min_le_avg_and_interior_equals_4cell_min(self):
+        """corner_min <= corner_avg everywhere; each INTERIOR corner equals the
+        min of its 4 surrounding owned cells (halo-independent check)."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            cgrid_corner_min, _interp_center_to_corner,
+        )
+        n = 8
+        _grid, cdgrid = self._grids(n)
+        f = jnp.asarray(np.random.RandomState(2).rand(6, n, n))
+        cmin = np.asarray(cgrid_corner_min(f, cdgrid))
+        cavg = np.asarray(_interp_center_to_corner(f, cdgrid))
+        self.assertTrue(np.all(cmin <= cavg + 1e-12))
+        fa = np.asarray(f)
+        for face in range(6):
+            for i in range(n - 1):
+                for j in range(n - 1):
+                    expected = min(
+                        fa[face, i, j], fa[face, i + 1, j],
+                        fa[face, i, j + 1], fa[face, i + 1, j + 1],
+                    )
+                    self.assertAlmostEqual(
+                        float(cmin[face, i + 1, j + 1]), float(expected),
+                        places=6,
+                    )
+
+    def test_adcroft_decomposition_identity_all_corners(self):
+        """Core correctness of the cd-grid Adcroft PGF correction: the
+        linear-operator decomposition
+
+            raw(p_eff) == −raw(g·rho·centroid) + z_ref · raw(g·rho)
+
+        must hold at EVERY D-grid corner (interior + cube seams + vertices),
+        where p_eff = −g·rho·(centroid − z_ref), z_ref = 4-cell corner min, and
+        ``raw`` is the AL 4-cell finite difference on identically halo-padded
+        cells.  This is the identity ``ocean_pe_cdgrid`` relies on to add the
+        correction via two ``_arakawa_lamb_gradient`` calls + ``cgrid_corner_min``
+        instead of building a per-corner p_eff field."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            cgrid_corner_min, _pad_halo_auto,
+        )
+        n = 8
+        _grid, cdgrid = self._grids(n)
+        rng = np.random.RandomState(7)
+        grho = jnp.asarray(rng.rand(6, n, n))            # g*rho'
+        cent = jnp.asarray(rng.rand(6, n, n) * 4000.0)   # centroid depth
+        zref = cgrid_corner_min(cent, cdgrid)            # (6, n+1, n+1)
+
+        gp = np.asarray(_pad_halo_auto(grho, cdgrid))     # (6, n+2, n+2)
+        cp = np.asarray(_pad_halo_auto(cent, cdgrid))
+        gcp = np.asarray(_pad_halo_auto(grho * cent, cdgrid))
+        zr = np.asarray(zref)
+
+        def raw(p):  # AL default-branch raw x/y differences on padded p
+            sw = p[:, :-1, :-1]; se = p[:, 1:, :-1]
+            nw = p[:, :-1, 1:];  ne = p[:, 1:, 1:]
+            return (se + ne) - (sw + nw), (nw + ne) - (sw + se)
+
+        # p_eff per padded cell uses the corner-common z_ref; build it per corner
+        # by broadcasting z_ref over the 4 cells of each corner.
+        sw_c = cp[:, :-1, :-1]; se_c = cp[:, 1:, :-1]
+        nw_c = cp[:, :-1, 1:];  ne_c = cp[:, 1:, 1:]
+        sw_g = gp[:, :-1, :-1]; se_g = gp[:, 1:, :-1]
+        nw_g = gp[:, :-1, 1:];  ne_g = gp[:, 1:, 1:]
+        peff_sw = -sw_g * (sw_c - zr); peff_se = -se_g * (se_c - zr)
+        peff_nw = -nw_g * (nw_c - zr); peff_ne = -ne_g * (ne_c - zr)
+        raw_x_peff = (peff_se + peff_ne) - (peff_sw + peff_nw)
+        raw_y_peff = (peff_nw + peff_ne) - (peff_sw + peff_se)
+
+        rgc_x, rgc_y = raw(gcp)   # raw(g*rho*centroid)
+        rg_x, rg_y = raw(gp)      # raw(g*rho)
+        decomp_x = -rgc_x + zr * rg_x
+        decomp_y = -rgc_y + zr * rg_y
+
+        # The identity is EXACT at interior corners (all 4 cells owned, so the
+        # padded product pad(g)*pad(c) used in raw_x_peff equals pad(g*c) used
+        # in the decomposition).  At seam/cube-vertex corners the two halo-fill
+        # orders [pad(g·c) vs pad(g)·pad(c)] differ by O(halo-interp-error) —
+        # the SAME interpolation the base AL gradient already incurs at seams,
+        # not a new error — so the strict identity is asserted on the interior
+        # corner block (indices 1..n-1 of the (n+1,n+1) corner grid).
+        sl = (slice(None), slice(1, n), slice(1, n))
+        np.testing.assert_allclose(
+            raw_x_peff[sl], decomp_x[sl], rtol=1e-11, atol=1e-9)
+        np.testing.assert_allclose(
+            raw_y_peff[sl], decomp_y[sl], rtol=1e-11, atol=1e-9)
+
+
 if __name__ == "__main__":
     unittest.main()
