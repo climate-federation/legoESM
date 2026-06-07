@@ -389,6 +389,65 @@ class TestSOMFull:
 
 
 # =============================================================================
+# Analytic exactness (pins the receiver-merge moment formulas)
+# =============================================================================
+
+class TestSOMExactness:
+    """SOM must translate a sub-grid-quadratic tracer EXACTLY under uniform flow.
+
+    The {2xi, 6xi^2 - 1/2} moment basis carries each cell's 0th/1st/2nd moment
+    exactly, so a globally-quadratic field advected by a uniform Courant number
+    is reproduced to machine precision at every interior cell.  Fluxes are
+    extracted from the original field, so only the periodic seam cell (cell 0,
+    which receives the wrapped far edge) is polluted; cells 1..n-1 are exact.
+
+    This is the decisive check that the receiver-merge second moment
+    (``sxx_new``) needs NO first-moment-displacement term: the exact merged
+    second moment, derived from the reconstruction basis, contains only the
+    ``5*alf*alf1*(sx_cell - fp_sx)`` coupling and the ``d0`` terms already
+    present.  A spurious ``d1 = sign*(alf^2*sx_cell - alf1^2*fp_sx)`` term
+    would break this test.
+    """
+
+    def test_som_quadratic_advection_is_exact(self):
+        from legoesm.ocean.advection_som import _som_x_sweep, IX, IXX
+        n_lat, n_lon, nlev = 1, 16, 1
+        alpha = 0.3                       # uniform eastward Courant number
+        a0, a1, a2 = 5.0, 0.3, -0.05      # global T(x) = a0 + a1*x + a2*x^2
+
+        j = jnp.arange(n_lon, dtype=jnp.float64)
+
+        def moments_for(c0, c1, c2):
+            # cell-mean and {2xi, 6xi^2-1/2} moments of c0 + c1*x + c2*x^2
+            sm = c0 + c1 * j + c2 * j ** 2 + c2 / 12.0
+            sx = (c1 + 2.0 * c2 * j) / 2.0
+            sxx = jnp.full_like(j, c2 / 6.0)
+            mom = jnp.zeros((n_lon, 9), dtype=jnp.float64)
+            mom = mom.at[:, IX].set(sx).at[:, IXX].set(sxx)
+            return sm, mom
+
+        sm0, mom0 = moments_for(a0, a1, a2)
+        sm_o = sm0.reshape(n_lat, n_lon, nlev)
+        mom = mom0.reshape(n_lat, n_lon, nlev, 9)
+        vol = jnp.ones((n_lat, n_lon, nlev))
+        vf = jnp.full((n_lat, n_lon, nlev), alpha)   # uniform eastward flux
+
+        sm_new, mom_new, vol_new = _som_x_sweep(sm_o, mom, vf, vol)
+
+        # Exact translation by alpha: T(x - alpha) -> shifted global coeffs
+        b0 = a0 - a1 * alpha + a2 * alpha ** 2
+        b1 = a1 - 2.0 * a2 * alpha
+        b2 = a2
+        sm_exp, mom_exp = moments_for(b0, b1, b2)
+
+        sl = slice(1, n_lon)             # interior cells (cell 0 wraps -> skip)
+        assert jnp.allclose(sm_new[0, sl, 0], sm_exp[sl], atol=1e-10), "0th moment"
+        assert jnp.allclose(mom_new[0, sl, 0, IX], mom_exp[sl, IX], atol=1e-10), "1st moment"
+        assert jnp.allclose(mom_new[0, sl, 0, IXX], mom_exp[sl, IXX], atol=1e-10), "2nd moment"
+        assert jnp.allclose(vol_new, vol, atol=1e-12), "uniform flow preserves volume"
+
+
+# =============================================================================
 # Moment permutation
 # =============================================================================
 

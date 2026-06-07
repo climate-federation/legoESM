@@ -411,23 +411,13 @@ def barotropic_implicit_mpas(
     # as an open issue.
 
     # ----- Step 6: time-averaged transport for tracer flux --------------
-    # Same partial-cell H_e convention as step 1 — use min-rule so the
-    # tracer-flux divergence matches the η evolution exactly.
-    if partial_cells:
-        h_k_new = compute_layer_thickness(
-            eta_new, H_bathy, z_coord,
-            min_water_column_m=config.min_water_column_m,
-        )
-        H_e_new = _edge_H_min_rule(h_k_new, mesh, min_water_col).astype(eta_dtype)
-    else:
-        H_total_new = jnp.maximum(eta_new + H_bathy, min_water_col)
-        H_e_new = _edge_avg(H_total_new, mesh)
     # Use H_e_old consistently so that div(Hu_avg) = (eta_old - eta_new)/dt
     # exactly — required for flux-form tracer conservation.  The Helmholtz
     # solve used H_e_old throughout, so the transport average must too.
-    # Using H_e_new here introduced theta * div((H_e_new - H_e_old) * u_new)
-    # error that broke salt conservation on partial cells (shallow cells
-    # lost 0.003 PSU in 30 days).
+    # Recomputing an end-of-step edge thickness and using it here instead
+    # introduced a theta * div((H_e_new - H_e_old) * u_new) error that broke
+    # salt conservation on partial cells (shallow cells lost 0.003 PSU in
+    # 30 days), so no end-of-step H_e is formed.
     Hu_avg = H_e_old * (
         (1.0 - theta_eta) * u_bar_old + theta_eta * u_bar_new
     ) * edge_mask

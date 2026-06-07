@@ -235,7 +235,16 @@ class AIMIPClassicalParams(eqx.Module):
         spatial_init_std: float = 0.0,
         spatial_seed: int = 0,
     ) -> "AIMIPClassicalParams":
-        """Initialize all knobs at their canonical scheme defaults.
+        """Initialize all knobs at (or just inside) their canonical defaults.
+
+        Edge-of-range knobs whose canonical default sits within
+        ``sigmoid_margin`` (5% of the range) of a bound are interiorized to
+        that margin, so the initial inverse-sigmoid gradient is non-trivial and
+        the optimizer can actually move them (a default exactly at a bound maps
+        to a saturated logit with ~0 gradient).  Example: ``gray_sfc_emissivity``
+        canonical 1.0 initializes at 0.975.  Mid-range knobs initialize exactly
+        at their canonical default.  This trades a small physical perturbation
+        at the edges for trainability — see the ``sigmoid_margin`` note below.
 
         Parameters
         ----------
@@ -281,7 +290,7 @@ class AIMIPClassicalParams(eqx.Module):
                 c.max_val - margin, max(c.min_val + margin, default),
             )
             raw[c.name] = jnp.asarray(
-                range_to_sigmoid(default, c.min_val, c.max_val),
+                range_to_sigmoid(default_clamped, c.min_val, c.max_val),
                 dtype=param_dtype,
             )
         spatial = None
