@@ -147,8 +147,12 @@ def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):
             horiz = bad.shape
             Tf = T_woa.reshape(-1, nlev); Sf = S_woa.reshape(-1, nlev)
             vflat = valid.ravel(); bflat = bad.ravel()
-            latr = np.asarray(grid.lat).ravel()
-            lonr = np.asarray(grid.lon).ravel()
+            # Cube exposes .lat/.lon; MPAS VoronoiMesh exposes .latCell/.lonCell
+            # (radians).  Same grid-type dispatch as init_ocean_from_woa.
+            latr = np.asarray(getattr(grid, "lat",
+                                      getattr(grid, "latCell", None))).ravel()
+            lonr = np.asarray(getattr(grid, "lon",
+                                      getattr(grid, "lonCell", None))).ravel()
             cl = np.cos(latr)
             xyz = np.stack([cl * np.cos(lonr), cl * np.sin(lonr),
                             np.sin(latr)], axis=-1)
@@ -190,7 +194,14 @@ def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):
     else:
         dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
         z_cen = np.cumsum(dz) - 0.5 * dz                  # (nlev,) cell-centre depths
-        below = z_cen[None, None, :] > np.asarray(H_bathy)[..., None]
+        # Broadcast z_cen against ANY horizontal layout: cube H_bathy is (6,n,n)
+        # (ndim 3), MPAS is (nCells,) (ndim 1).  reshape z_cen to (1,...,1,nlev)
+        # so z_cen[...] > H_bathy[...,None] gives (*horiz, nlev) for both — the
+        # old (None,None,:) hardcoded a 2-D horizontal and mis-broadcast on the
+        # 1-D MPAS layout (silent IC corruption).
+        Hb = np.asarray(H_bathy)
+        z_cen_b = z_cen.reshape((1,) * Hb.ndim + (-1,))
+        below = z_cen_b > Hb[..., None]
     T_woa = np.where(below, T_fill, T_woa)
     S_woa = np.where(below, S_fill, S_woa)
     m3 = m2[..., None]
@@ -951,6 +962,107 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     return grid, z_coord, model, state, np.asarray(H_bathy)
 
 
+def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
+                     lloyd_iterations: int = 20, woa_init: bool = False,
+                     woa_t=None, woa_s=None, flat_bottom: bool = False,
+                     A_h=None, B_h=None, K_bih=None, C_smag_lap=None,
+                     pgf_scheme=None, bottom_drag_r=None,
+                     bottom_drag_bbl_thickness=None, bottom_drag_bg_velocity=None,
+                     partial_cell=False, n_barotropic_substeps=None,
+                     barotropic_solver=None):
+    """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
+    comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
+    (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
+    barotropic + bottom drag + Smagorinsky), then switches surface forcing to the
+    faithful EXTERNAL contract (CORE-II tau/q_net via ``model.step(surface_forcing
+    =compute_omip2_surface_forcing(...))``), regrids NEMO eORCA1 bathymetry onto
+    the Voronoi cell centres, and (optionally) folds partial cells + WOA IC.
+
+    Unlike the cube (parked, fixed C-resolution), the Voronoi mesh resolution is
+    a FREE parameter (``level``: nCells = 10*4^level + 2 → ico5 ~230 km, ico6
+    ~115 km ≈ ORCA1, ico7 ~58 km), so MPAS is not inherently resolution-limited.
+    Returns ``(mesh, z_coord, model, state, H_bathy)`` — same tuple as the other
+    builders.
+    """
+    from scripts.run import run_omip
+    from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+    from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
+    from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+    from legoesm.core.field import Field
+
+    mesh, z_coord, config, _model0, _ = run_omip._create_setup(
+        "mpas", f"ico{level}", nlev, H_max,
+        physics_preset="full", water_type="II",
+    )
+    # Faithful EXTERNAL surface-forcing contract: the CORE-II tau/q_net from
+    # compute_omip2_surface_forcing is deposited by mpas_physics (it negates +
+    # edge-projects tau and does Jerlov SW penetration), so q_net already folds
+    # shortwave in → disable shortwave_penetration to avoid double-counting solar
+    # (mirrors build_cubed_sphere).
+    phys = config.physics._replace(
+        surface_forcing=SurfaceForcingConfig(scheme="external"),
+        shortwave_penetration=None,
+    )
+    config = config._replace(physics=phys)
+    _ovr = {k: v for k, v in (("A_h", A_h), ("B_h", B_h), ("K_bih", K_bih),
+                              ("C_smag_lap", C_smag_lap), ("pgf_scheme", pgf_scheme),
+                              ("bottom_drag_r", bottom_drag_r),
+                              ("bottom_drag_bbl_thickness", bottom_drag_bbl_thickness),
+                              ("bottom_drag_bg_velocity", bottom_drag_bg_velocity),
+                              ("n_barotropic_substeps", n_barotropic_substeps),
+                              ("barotropic_solver", barotropic_solver))
+            if v is not None}
+    if _ovr:
+        config = config._replace(**_ovr)
+        print(f"[setup] mpas config override: {_ovr}")
+
+    # NEMO eORCA1 bathy/mask -> Voronoi cell centres (point-target IDW, the same
+    # faithful geometry tripole/latlon/cube use).
+    import xarray as xr
+    e_mask, e_H = read_mesh_mask_bathy(mesh_path)
+    ds = xr.open_dataset(mesh_path)
+    src_lat = _squeeze2d(ds["gphit"].values)
+    src_lon = _squeeze2d(ds["glamt"].values)
+    tgt_lat = np.rad2deg(np.asarray(mesh.latCell))   # (nCells,)
+    tgt_lon = np.rad2deg(np.asarray(mesh.lonCell))
+    H_pts, ocean_pts = _regrid_curv_to_points(
+        e_H, src_lat, src_lon, e_mask, tgt_lat, tgt_lon, max_deg=3.0)
+    land_mask = (ocean_pts > 0.5).astype(np.float64)
+    H_bathy = np.where(land_mask > 0.5, np.maximum(H_pts, 50.0), 0.0)
+    if flat_bottom:
+        H_bathy = np.where(land_mask > 0.5, H_max, 0.0)
+        print("[setup] FLAT BOTTOM (mpas; topography removed)")
+    print(f"[setup] mpas ico{level}: ocean cells {int(land_mask.sum())}/"
+          f"{land_mask.size}, H_bathy [{H_bathy[land_mask>0.5].min():.0f},"
+          f"{H_bathy.max():.0f}] m")
+    if partial_cell:
+        # min_levels=1 only: the make_partial_cell min_levels>1 path assumes a
+        # 2-D leading axis; MPAS cells are 1-D (nCells,).
+        z_coord, H_bathy, land_mask = make_partial_cell(z_coord, H_bathy, land_mask)
+
+    model = MPASOceanModel(mesh, z_coord, config)
+    print(f"[setup] mpas backend: Voronoi (TRiSK)"
+          f"{' + partial cells' if partial_cell else ''}")
+    state = rest_state_mpas_ocean(mesh, z_coord, H_max=H_max)
+    state = state._replace(
+        land_mask=state.land_mask.replace(data=jnp.asarray(land_mask)),
+        H_bathy=state.H_bathy.replace(data=jnp.asarray(H_bathy)),
+    )
+    if woa_init:
+        T_woa, S_woa = compute_woa_3d(mesh, z_coord, woa_t, woa_s,
+                                      H_bathy, land_mask)
+        assert np.asarray(T_woa).shape == tuple(state.T.data.shape), (
+            f"WOA shape {np.asarray(T_woa).shape} != state.T {state.T.data.shape}")
+        state = state._replace(
+            T=Field(jnp.asarray(T_woa), name=state.T.name,
+                    dims=state.T.dims, units=state.T.units),
+            S=Field(jnp.asarray(S_woa), name=state.S.name,
+                    dims=state.S.dims, units=state.S.units),
+        )
+        print(f"[setup] mpas T/S initialised from WOA18 ({Path(woa_t).name})")
+    return mesh, z_coord, model, state, np.asarray(H_bathy)
+
+
 _RUNOFF_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
               "INPUTS/orca1_inputs/data_repository/input_fields/"
               "runoff-icb_DaiTrenberth_Depoorter.nc")
@@ -1044,7 +1156,9 @@ def _diag(state, lat2d=None, lon2d=None) -> dict:
     T = np.asarray(state.T.data)[..., 0]
     S = np.asarray(state.S.data)[..., 0]
     u = np.asarray(state.u.data)            # (nlat, nlon+1, nlev)
-    v = np.asarray(state.v.data)
+    # MPAS has no separate v field (u is edge-normal on (nEdges, nlev)).
+    has_v = getattr(state, "v", None) is not None
+    v = np.asarray(state.v.data) if has_v else None
     m = np.asarray(state.land_mask.data) > 0.5
     au = np.abs(u)
     has_u = bool(au.size and np.isfinite(au).any())
@@ -1082,15 +1196,17 @@ def _diag(state, lat2d=None, lon2d=None) -> dict:
         "mean_sst_C": float(np.nanmean(T[m])) if m.any() else float("nan"),
         "mean_sss": float(np.nanmean(S[m])) if m.any() else float("nan"),
         "max_abs_u": max_speed,
-        "max_abs_v": float(np.nanmax(np.abs(v))) if v.size else 0.0,
+        "max_abs_v": (float(np.nanmax(np.abs(v))) if (v is not None and v.size)
+                      else 0.0),
         "umax_lat": umax_lat,
         "umax_lon": umax_lon,
         "umax_lev": umax_lev,
         # Guard ALL prognostic fields -- a blowup that goes non-finite first in
         # S or v (not just T/u) must still trip the ABORT, else a NaN state is
-        # silently snapshotted.
+        # silently snapshotted.  (MPAS has no v; skip it there.)
         "finite": bool(np.isfinite(T).all() and np.isfinite(S).all()
-                       and np.isfinite(u).all() and np.isfinite(v).all()),
+                       and np.isfinite(u).all()
+                       and (v is None or np.isfinite(v).all())),
     }
 
 
@@ -1101,6 +1217,10 @@ def _grid_lat2d_deg(grid, grid_type):
     if grid_type == "cubed_sphere":
         return (np.rad2deg(np.asarray(grid.lat)),
                 np.rad2deg(np.asarray(grid.lon)))
+    if grid_type == "mpas":
+        # Voronoi cell centres: 1-D (nCells,); the scorer flattens any source.
+        return (np.rad2deg(np.asarray(grid.latCell)),
+                np.rad2deg(np.asarray(grid.lonCell)))
     if grid_type == "tripole":
         return (np.rad2deg(np.asarray(grid.lat_T)),
                 np.rad2deg(np.asarray(grid.lon_T)))
@@ -1112,13 +1232,16 @@ def _grid_lat2d_deg(grid, grid_type):
 
 def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d):
     out_dir.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        out_dir / f"snapshot_{tag}.npz",
+    save_kw = dict(
         T=np.asarray(state.T.data), S=np.asarray(state.S.data),
-        u=np.asarray(state.u.data), v=np.asarray(state.v.data),
+        u=np.asarray(state.u.data),
         land_mask=np.asarray(state.land_mask.data),
         lat_T=np.asarray(lat2d), lon_T=np.asarray(lon2d),
     )
+    # MPAS has no separate v field; the scorer reads T/S/land_mask/lat_T/lon_T only.
+    if getattr(state, "v", None) is not None:
+        save_kw["v"] = np.asarray(state.v.data)
+    np.savez_compressed(out_dir / f"snapshot_{tag}.npz", **save_kw)
 
 
 def main() -> int:
@@ -1133,14 +1256,21 @@ def main() -> int:
     p.add_argument("--H-max", type=float, default=5500.0)
     p.add_argument("--mesh", type=str, default=_MESH)
     p.add_argument("--grid", type=str, default="tripole",
-                   choices=["tripole", "latlon_bathy", "cubed_sphere"],
+                   choices=["tripole", "latlon_bathy", "cubed_sphere", "mpas"],
                    help="tripole (eORCA1 same-grid), latlon_bathy (regular lat-lon + "
-                        "NEMO bathy + smc03 + polar filter), or cubed_sphere (FV3 C-D "
-                        "grid + NEMO bathy on cube cells; grid 3, dycore WIP).")
+                        "NEMO bathy + smc03 + polar filter), cubed_sphere (FV3 C-D "
+                        "grid + NEMO bathy on cube cells; parked, resolution-limited), "
+                        "or mpas (icosahedral Voronoi + NEMO bathy; resolution free via "
+                        "--mpas-level).")
     p.add_argument("--latlon-res", type=str, default="180x360",
                    help="lat-lon resolution NxM for --grid latlon_bathy.")
     p.add_argument("--cube-n", type=int, default=48,
                    help="cubed-sphere face resolution n (C-n) for --grid cubed_sphere.")
+    p.add_argument("--mpas-level", type=int, default=6,
+                   help="MPAS Voronoi subdivision level (nCells=10*4^level+2): "
+                        "5~230km, 6~115km (~ORCA1), 7~58km. For --grid mpas.")
+    p.add_argument("--mpas-lloyd", type=int, default=20,
+                   help="MPAS Lloyd-relaxation iterations at mesh build. For --grid mpas.")
     p.add_argument("--cube-Ah", type=float, default=None,
                    help="cube horizontal viscosity A_h override [m^2/s].")
     p.add_argument("--cube-hyperdiff", type=float, default=None,
@@ -1448,6 +1578,14 @@ def main() -> int:
             smc03_bottom_2nd_order=(True if args.cube_smc03_bottom_2nd else None),
         )
         app_grid_type = "cubed_sphere"
+    elif args.grid == "mpas":
+        grid, z_coord, model, state, H_bathy = build_mpas_ocean(
+            args.nlev, args.H_max, args.mesh,
+            level=args.mpas_level, lloyd_iterations=args.mpas_lloyd,
+            woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
+            flat_bottom=args.flat_bottom, partial_cell=args.partial_cell,
+        )
+        app_grid_type = "mpas"
     else:
         _nlat, _nlon = (int(x) for x in args.latlon_res.split("x"))
         grid, z_coord, model, state, H_bathy = build_latlon_bathy(
@@ -1495,7 +1633,13 @@ def main() -> int:
             "FC-gradient balanced-init was removed with the deprecated FC A-grid "
             "backend. A C-D grid cube balanced-init is future work."
         )
-    if args.balanced_init and args.grid != "cubed_sphere":
+    if args.balanced_init and args.grid == "mpas":
+        raise ValueError(
+            "--balanced-init is not available for mpas: apply_balanced_init uses "
+            "lat-lon C-grid gradient operators; an MPAS TRiSK geostrophic init is "
+            "future work."
+        )
+    if args.balanced_init and args.grid not in ("cubed_sphere", "mpas"):
         if not args.woa_init:
             raise ValueError("--balanced-init requires --woa-init (it balances the WOA IC).")
         state = apply_balanced_init(
@@ -1507,9 +1651,9 @@ def main() -> int:
     lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)
     runoff_monthly = None
     if args.runoff:
-        if app_grid_type == "cubed_sphere":
+        if app_grid_type in ("cubed_sphere", "mpas"):
             raise ValueError("--runoff: apply_runoff_step is for the lat-lon C-grid "
-                             "family (tripole/latlon); cube runoff not wired yet.")
+                             "family (tripole/latlon); cube/mpas runoff not wired yet.")
         from legoesm.ocean.coupler.runoff_apply import apply_runoff_step  # noqa: F401
         runoff_monthly = load_runoff_monthly(
             grid, app_grid_type, lat2d, lon2d, args.mesh,
@@ -1691,12 +1835,15 @@ def main() -> int:
             )
         if drag_tau_s > 0 and step * dt < drag_days_s:
             df = float(np.exp(-dt / drag_tau_s))   # Rayleigh decay factor
-            state = state._replace(
-                u=Field(jnp.asarray(np.asarray(state.u.data) * df),
-                        name=state.u.name, dims=state.u.dims, units=state.u.units),
-                v=Field(jnp.asarray(np.asarray(state.v.data) * df),
-                        name=state.v.name, dims=state.v.dims, units=state.v.units),
-            )
+            _upd = {"u": Field(jnp.asarray(np.asarray(state.u.data) * df),
+                               name=state.u.name, dims=state.u.dims,
+                               units=state.u.units)}
+            # MPAS has no separate v field (u is edge-normal).
+            if getattr(state, "v", None) is not None:
+                _upd["v"] = Field(jnp.asarray(np.asarray(state.v.data) * df),
+                                  name=state.v.name, dims=state.v.dims,
+                                  units=state.v.units)
+            state = state._replace(**_upd)
         if step % diag_every == 0 or step == n_steps:
             state = jax.block_until_ready(state)
             d = _diag(state, lat2d, lon2d)

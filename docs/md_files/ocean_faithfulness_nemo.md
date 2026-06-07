@@ -621,6 +621,43 @@ state; largest infra gap). Both are ALSO coarse-resolution-limited for a free co
 near-term GENUINE progress is INFRASTRUCTURE (the comparison pipeline for each) + the same ¼° need.
 NEXT: scope + build the mpas run_omip_core2 builder (the most-supported remaining grid).
 
+### MPAS BUILDER — scoped + STAGE-A implementation (8423666)
+Scoping workflow (4 read-only agents): MPAS is the tractable pivot. KEY: `run_omip._create_setup
+("mpas", f"ico{level}", ...)` ALREADY returns a fully-wired MPASOceanModel (KPP + GM/Redi + smc03
+PGF + implicit-CN barotropic + bottom drag + Smagorinsky — the full stack the cube LACKED).
+`MPASOceanConfig` has C_smag/C_smag_lap/bottom_drag_r/BBL/B_h/K_bih. `apply_omip2_surface_forcing`
+already supports mpas (cell-centred tau, edge-projected internally). **Resolution is a FREE PARAMETER**
+(`create_voronoi_mesh(level)`, nCells=10·4^level+2: ico5 ~230 km, **ico6 ~115 km ≈ ORCA1**, ico7
+~58 km) → MPAS is NOT inherently resolution-limited like the cube. Implemented:
+- **`build_mpas_ocean`** (`run_omip_core2.py`): reuses `_create_setup` → switches surface forcing to
+  EXTERNAL (faithful contract) + shortwave_penetration=None → regrids NEMO eORCA1 bathy onto Voronoi
+  cell centres (`_regrid_curv_to_points` to `mesh.latCell/lonCell`) → optional partial cells
+  (min_levels=1; 1-D safe) + WOA IC → `(mesh,z_coord,model,state,H_bathy)`. `_ovr` for
+  A_h/B_h/K_bih/C_smag_lap/pgf/drag/substeps/barotropic_solver.
+- **`compute_omip2_surface_forcing` mpas branch** (omip2_applicator.py, pure additive elif before the
+  NotImplementedError; clone of cube with latCell/lonCell, 1-D, no reshape — the load-bearing piece,
+  since the faithful loop uses compute_omip2 not apply_omip2). NO shared-kernel edits.
+- py_compile OK. **STAGE A smoke (8423666)**: build ico3 + forcing branch + 3 steps, partial off/on →
+  finite? (proves build + forcing + step E2E before the dispatcher/diag-guards/WOA-fix for STAGE B.)
+**Remaining for STAGE B (next iter):** CLI `--grid mpas`/`--mpas-level` + dispatcher elif + `_diag`/
+`_save_snapshot`/`_grid_lat2d_deg` mpas guards (no `v` field; latCell/lonCell) + `compute_woa_3d`
+1-D fix (lat→latCell + H_bathy.ndim broadcast — plan's HIGH-severity silent bug) + applicator unit
+test + codex. Then ico5 smoke → ico6 (~ORCA1) run → score vs NEMO.
+
+### STAGE A PASSED + STAGE B wired (8423667)
+**STAGE A (8423666): MPAS CORE-II pipeline works E2E.** build_mpas_ocean (partial off/on) → ico3
+530/642 ocean cells, bathy [50,5948]m, partial snap (20 cells); the new `compute_omip2_surface_forcing`
+mpas branch → finite (nCells,) tau/q_net; `model.step(external)` 3 steps stable, |u| ramps gently
+0.05→0.14 m/s (off) / 0.03→0.09 (partial). **No cube-style blowup** — Voronoi + the full stack
+(Smagorinsky + bottom drag) behaves.
+**STAGE B wired (this iter):** CLI `--grid mpas`/`--mpas-level`/`--mpas-lloyd`; dispatcher elif;
+`_diag`/`_save_snapshot`/`_grid_lat2d_deg` mpas guards (no v field; latCell/lonCell); `compute_woa_3d`
+1-D fixes (lat→latCell fallback + the HIGH-severity `z_cen` broadcast → `reshape((1,)*ndim+(-1,))`,
+cube bit-exact); balanced-init/runoff/spinup-drag guarded for mpas; applicator unit test added. py_compile
+OK. **Job 8423667**: pytest + ico5 (~230 km) rest+partial (the cube-killer stability test) + woa+partial
+driver smokes (10 days). Commit the full builder after this validates via main(); then codex review +
+ico6 (~ORCA1) run + score vs NEMO.
+
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
 partial-cell support** — `ocean_pe_fc.py`/`ocean_pe_cdgrid.py` hardcoded `z_coord.dz_ref`

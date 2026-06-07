@@ -522,6 +522,16 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
             forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
         )
         forc = {k: v.reshape(shp) for k, v in forc.items()}
+    elif grid_type in ("mpas", "mpas_regional"):
+        # MPAS Voronoi cell centres carry geographic latCell/lonCell (nCells,)
+        # in radians; nearest-neighbour sample the forcing per cell.  The state
+        # is already cell-centred 1-D, so no reshape is needed — downstream
+        # air_sea_fluxes + q_net are elementwise and flow through unchanged.  The
+        # returned tau is cell-centred atmospheric-convention stress; the MPAS
+        # physics negates + edge-projects it internally (mpas_physics external).
+        lat_pts = np.degrees(np.asarray(grid.latCell))
+        lon_pts = np.degrees(np.asarray(grid.lonCell))
+        forc = _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts)
     else:
         raise NotImplementedError(
             f"compute_omip2_surface_forcing does not support grid_type={grid_type!r}"

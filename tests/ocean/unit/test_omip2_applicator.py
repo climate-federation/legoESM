@@ -281,3 +281,34 @@ def test_applicator_on_cube_and_mpas(grid_type, res):
               if grid_type == "cubed_sphere"
               else np.asarray(state.T.data)[:, 0])
     assert (T_top != T0_top).any()
+
+
+def test_compute_omip2_surface_forcing_mpas():
+    """compute_omip2_surface_forcing MPAS branch (the LIVE branch the faithful
+    run loop uses): cell-centred (nCells,) finite tau/q_net, eastward stress for
+    an eastward wind.  Guards the new elif added for the MPAS NEMO comparison."""
+    from legoesm.ocean.coupler import compute_omip2_surface_forcing
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+    mesh = create_voronoi_mesh(2, lloyd_iterations=2)   # 162 cells, tiny
+    z = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    state = rest_state_mpas_ocean(mesh, z, H_max=4000.0)
+    forcing = _uniform_wind_forcing(u_east=8.0)
+    sf = compute_omip2_surface_forcing(
+        state, forcing=forcing, idx_t=0, grid=mesh, grid_type="mpas")
+    n = mesh.nCells
+    for name, f in (("tau_x", sf.tau_x), ("tau_y", sf.tau_y),
+                    ("q_net", sf.q_net), ("sw_down", sf.sw_down)):
+        arr = np.asarray(f)
+        assert arr.shape == (n,), f"{name} shape {arr.shape} != ({n},)"
+        assert np.all(np.isfinite(arr)), f"{name} non-finite"
+    # tau_x is a definite nonzero zonal stress for a zonal wind...
+    assert abs(float(np.mean(np.asarray(sf.tau_x)))) > 1e-3
+    # ...and it tracks the wind DIRECTION (convention-agnostic): reversing the
+    # wind reverses tau_x.
+    sf_rev = compute_omip2_surface_forcing(
+        state, forcing=_uniform_wind_forcing(u_east=-8.0), idx_t=0,
+        grid=mesh, grid_type="mpas")
+    assert (float(np.mean(np.asarray(sf.tau_x)))
+            * float(np.mean(np.asarray(sf_rev.tau_x)))) < 0.0
