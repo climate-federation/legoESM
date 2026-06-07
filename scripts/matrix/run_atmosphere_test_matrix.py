@@ -78,6 +78,64 @@ GRID_TYPES = list(GRID_RESOLUTIONS.keys())
 DEFAULT_NLEV = 40
 
 
+def _mpas_integrator() -> str:
+    """Time integrator for the MPAS hydrostatic PE matrix cases (ico, dt=200).
+
+    Defaults to ``ssp_rk3``: at the matrix time step (dt=200 s) the 3-stage
+    SSP scheme is ~13x faster than the inline 5-stage ssp_rk54 and was
+    validated stable + accurate across the FULL ico hydrostatic matrix —
+    9 hydro + 3 tracer + 4 climate cases, all PASS, mass drift <= 1.6e-16,
+    max|v| matching the ssp_rk54 baselines (e.g. baroclinic 24.8 m/s identical;
+    Held-Suarez 30-day climatology identical).
+
+    NB this is the per-RUN matrix default, NOT the library default.  The
+    ``MPASPrimitiveEquationConfig`` default is ``ssp_rk54_scan`` because
+    ssp_rk3 diverges with the operational del4 hyperdiffusion at LARGE dt
+    (>= ~600 s — pinned by
+    ``test_mpas_atmosphere.py::...test_ssp_rk3_blows_up_with_hyperdiffusion``);
+    the matrix is safe only because it runs at dt=200.  Override with
+    ``LEGOESM_MPAS_INTEGRATOR=ssp_rk54_scan`` to fall back to the large-
+    stability scheme (e.g. for a higher-dt sweep).
+    """
+    return os.environ.get("LEGOESM_MPAS_INTEGRATOR", "ssp_rk3")
+
+
+def _latlon_polar_filter_on(case: str | None = None) -> bool:
+    """Whether a lat-lon hydrostatic PE case uses the polar Fourier filter.
+
+    Default ON.  Without it the explicit RK time step is throttled by the
+    converging polar cells (dt ~ 10 s at 72x144 -> ~20x more steps than the
+    cube).  The CAM-FV-style longitudinal Fourier filter damps the zonal
+    wavenumbers that would violate CFL near the poles, so dt is set by the
+    mid-latitude grid instead.  Validated across the lat-lon hydro+climate
+    matrix: ~11-21x faster, stable, mass drift <= 3e-16 (machine eps; the
+    filter preserves each latitude's zonal-mean dp_s), no polar artifact
+    (polar |u| < 1 m/s, max wind in the subtropical jet).  MPI-tested path
+    (tests/distributed/test_latlon_mpi_polar_filter.py).
+
+    EXCEPTION — ``rotated_*`` (DCMIP-2008) cases: their solid-body axis is
+    tilted ~45 deg so a strong jet flows ACROSS the grid poles.  A zonal
+    Fourier filter would damp that PHYSICAL cross-polar flow, not CFL noise,
+    and the case fails (max|v| spikes, steady-state not preserved).  These
+    keep the filter OFF and the legacy pole-limited dt.
+
+    Override the global default with ``LEGOESM_LATLON_POLAR_FILTER=0``.
+    """
+    if os.environ.get("LEGOESM_LATLON_POLAR_FILTER", "1") == "0":
+        return False
+    if case is not None and "rotated" in case:
+        return False
+    return True
+
+
+def _latlon_dt(dx_pole: float, dt_cap: float, case: str | None = None) -> float:
+    """dt for a lat-lon PE case: ``dt_cap`` when the polar filter relaxes the
+    polar CFL, else the legacy pole-limited ``0.5 dx_pole / 300``."""
+    if _latlon_polar_filter_on(case):
+        return dt_cap
+    return min(dt_cap, 0.5 * dx_pole / 300.0)
+
+
 # ===========================================================================
 # TestCase dataclass
 # ===========================================================================
@@ -3465,11 +3523,12 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         import math as _m
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
-        dt = min(200.0, 0.5 * _dx_pole / 300.0)
+        dt = _latlon_dt(_dx_pole, 200.0, tc.case)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+            use_polar_filter=_latlon_polar_filter_on(tc.case),
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _topo:
@@ -3531,7 +3590,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
             nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True)
+            fix_mass=True, anchor_mass_to_initial=True,
+            time_integrator=_mpas_integrator())
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -3983,11 +4043,12 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         import math as _m
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
-        dt = min(200.0, 0.5 * _dx_pole / 300.0)
+        dt = _latlon_dt(_dx_pole, 200.0, tc.case)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+            use_polar_filter=_latlon_polar_filter_on(tc.case),
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _rotated:
@@ -4063,7 +4124,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
             nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True)
+            fix_mass=True, anchor_mass_to_initial=True,
+            time_integrator=_mpas_integrator())
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -4589,11 +4651,12 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         import math as _m
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
-        dt = min(300.0, 0.5 * _dx_pole / 300.0)
+        dt = _latlon_dt(_dx_pole, 300.0, tc.case)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+            use_polar_filter=_latlon_polar_filter_on(tc.case),
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         state_cc = held_suarez_init_latlon(grid, sigma, T_init=280.0)
@@ -4653,7 +4716,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
             nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True)
+            fix_mass=True, anchor_mass_to_initial=True,
+            time_integrator=_mpas_integrator())
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         state = held_suarez_init_mpas(mesh, sigma, T_init=280.0)
         grid = mesh

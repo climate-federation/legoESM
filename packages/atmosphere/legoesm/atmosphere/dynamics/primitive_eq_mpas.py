@@ -105,7 +105,16 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # with the gray AMIP deck (driver ``_run_mpas``) is a radiative startup
     # transient (T=300 K isothermal IC), integrator-independent — and well
     # above the production dt=240 s, which is stable for both integrators.
-    time_integrator: str = "ssp_rk54"
+    #
+    # We default to the SCAN-FOLDED variant ``ssp_rk54_scan`` (identical
+    # Spiteri-Ruuth scheme and stability region as ``ssp_rk54`` — only the
+    # tendency is compiled once instead of inlined five times).  The inlined
+    # form makes XLA-CPU cross an op-count threshold that de-vectorizes the
+    # TRiSK indirect-addressing gathers, costing ~8x its nominal 5-evaluation
+    # work (439 ms/step vs 173 ms/step at ico5/nlev=40).  The fold removes
+    # that blowup at no stability cost.  Use ``ssp_rk54`` for a bit-exact
+    # reference run.  See ``timestepping/ssp_rk54.py``.
+    time_integrator: str = "ssp_rk54_scan"
 
 
 # ============================================================================

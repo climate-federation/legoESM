@@ -71,6 +71,8 @@ data = [
     "fsspec>=2024.2",
 ]
 metal = ["jax-metal"]
+# Interactive configuration wizard (scripts/experiment/wizard.py, `legoesm wizard`).
+wizard = ["questionary>=2.0"]
 mpi = [
     "mpi4py>=4.1,<5",
     "mpi4jax>=0.8,<0.9",
@@ -90,7 +92,7 @@ dev = [
 ]
 docs = ["sphinx", "myst-parser", "furo"]
 all = [
-    "legoesm[ml,mesh,viz,data,dev,docs]",
+    "legoesm[ml,mesh,viz,data,dev,docs,wizard]",
 ]
 
 [project.scripts]

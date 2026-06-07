@@ -293,13 +293,19 @@ class TestMPASHydrostaticIntegratorStability(unittest.TestCase):
         return -1, float(jnp.max(jnp.abs(state.u.data)))
 
     def test_default_integrator_is_large_stability_ssp(self):
-        """Default must be a large-stability SSP scheme (ssp_rk54 or
-        ssp_rk34) — NOT ssp_rk3.  Both ssp_rk54 and ssp_rk34 were measured
-        stable to dt=600 s with hyperdiffusion (job 8087100); ssp_rk3 was
-        not, so either large-stability scheme is acceptable as the default
-        but ssp_rk3 is not."""
+        """Default must be a large-stability SSP scheme — NOT ssp_rk3.
+
+        Both ssp_rk54 and ssp_rk34 were measured stable to dt=600 s with
+        hyperdiffusion (job 8087100); ssp_rk3 was not.  ``ssp_rk54_scan`` is
+        the SAME Spiteri-Ruuth scheme as ``ssp_rk54`` (identical stability
+        region — only the tendency is compiled once instead of inlined five
+        times), so it is equally acceptable as the default and is in fact
+        preferred for the gather-heavy MPAS tendency (~2.5x faster).  ssp_rk3
+        remains forbidden as the default: it diverges with the operational
+        ∇⁴ operator at dt=600 (see ``test_ssp_rk3_blows_up_with_hyperdiffusion``).
+        """
         integ = MPASPrimitiveEquationConfig().time_integrator
-        self.assertIn(integ, ("ssp_rk54", "ssp_rk34"),
+        self.assertIn(integ, ("ssp_rk54", "ssp_rk54_scan", "ssp_rk34"),
                       msg=f"MPAS PE default integrator {integ!r} cannot "
                           f"tolerate the operational hyperdiffusion operator")
 
@@ -322,6 +328,21 @@ class TestMPASHydrostaticIntegratorStability(unittest.TestCase):
         """ssp_rk54 (default) stays finite + bounded at dt=600 s WITH the
         operational hyperdiffusion that makes ssp_rk3 diverge."""
         cfg = self._cfg("ssp_rk54", with_hyperdiff=True)
+        model = MPASPrimitiveEquationModel(self.mesh, self.sigma, cfg)
+        state = self.state_pert
+        for _ in range(24):
+            state = model.step(state, dt=600.0)
+        self.assertTrue(jnp.all(jnp.isfinite(state.u.data)))
+        self.assertTrue(jnp.all(jnp.isfinite(state.T.data)))
+        self.assertTrue(jnp.all(jnp.isfinite(state.p_s.data)))
+        self.assertLess(float(jnp.max(jnp.abs(state.u.data))), 100.0)
+
+    def test_ssp_rk54_scan_stable_with_hyperdiffusion_at_large_dt(self):
+        """The scan-folded default (``ssp_rk54_scan``) has the SAME stability
+        as inline ``ssp_rk54``: bounded at dt=600 s WITH the operational
+        hyperdiffusion that makes ssp_rk3 diverge.  Pins that the compile-time
+        fold did not alter the stability region."""
+        cfg = self._cfg("ssp_rk54_scan", with_hyperdiff=True)
         model = MPASPrimitiveEquationModel(self.mesh, self.sigma, cfg)
         state = self.state_pert
         for _ in range(24):

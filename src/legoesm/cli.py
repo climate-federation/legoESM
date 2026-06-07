@@ -80,6 +80,13 @@ def main():
         help="Output directory for the rerun (default: a fresh temp dir)",
     )
 
+    # --- wizard command ---
+    subparsers.add_parser(
+        "wizard",
+        help="Interactive wizard to configure and launch a run "
+             "(needs the 'wizard' extra: pip install 'legoesm[wizard]')",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -94,6 +101,29 @@ def main():
         cmd_benchmark(args)
     elif args.command == "reproduce":
         cmd_reproduce(args)
+    elif args.command == "wizard":
+        cmd_wizard(args)
+
+
+def cmd_wizard(args):
+    """Launch the interactive configuration wizard.
+
+    The wizard lives under ``scripts/experiment/`` (tooling, not installed
+    source), so it is imported by path here — mirroring the ``cmd_test`` /
+    ``init_experiment`` convention of inserting the repo dir onto ``sys.path``.
+    """
+    import pathlib
+    exp_dir = pathlib.Path(__file__).parent.parent.parent / "scripts" / "experiment"
+    if not exp_dir.is_dir():
+        logger.error(
+            "Cannot find scripts/experiment/ (run from a source checkout to use "
+            "the wizard)."
+        )
+        sys.exit(1)
+    if str(exp_dir) not in sys.path:
+        sys.path.insert(0, str(exp_dir))
+    import wizard
+    sys.exit(wizard.main())
 
 
 def cmd_run(args):
