@@ -241,6 +241,24 @@ steps/s (max|u|~0.5 m/s, finite, rc=0); SST 18.5°C / SSS 34.4. So MPAS now matc
 SSS (0.85) AND **ACC (146 vs 159, ~8%)** — only AMOC remains equilibration-gated (needs the multi-decade
 run). transports.txt: amoc26N_Sv 3.6739, acc_drake_Sv 146.0682.
 
+### 5-YEAR MPAS RESULT (8426097, COMPLETED 4h33m rc=0) — multi-year stable + SST-faithful; AMOC/SSS drift
+MPAS ico6, 5 model-years, full faithful stack (WOA+partial-cell+freeze-floor+runoff). 262,800 steps.
+- **STABLE all 5 years** — max|u| grows slowly 0.45→1.14 m/s (physical), finite throughout, no blowup.
+  Strengthens the faithfulness claim FAR beyond the 90-day window: the pole-free Voronoi + full
+  dissipation stack rides a 5-yr free CORE-II integration cleanly (the cube's nemesis).
+- **SST sustained good** — year-5 vs NEMO ANNUAL mean: RMSE 2.27 C, bias +0.34, **corr 0.976**
+  (verdict "good"). Bands: tropics 1.58, SH-mid 1.94, NH-mid 3.84, arctic 2.26, antarctic 2.36.
+  (Higher than the day-90 0.84 partly because day-90 used seasonally-matched `--nemo-month 3` vs this
+  annual-mean scoring + genuine multi-year drift.)
+- **AMOC@26N = 44.95 Sv** (developed -4.63@d90 → 3.67@1yr → 44.95@5yr) — OVERSHOOT vs NEMO 17.74.
+  Likely spin-up transient + the OLD CENTERED edge-thickness overcount (this run launched BEFORE the
+  min-rule AMOC fix). Re-diagnose with min-rule on the next long run + integrate longer to confirm the
+  equilibrium; a too-strong overturning would point to GM/Redi eddy transport or convection tuning.
+- **SSS fresh drift** — mean 35→31 over 5 yr (RMSE 7.9, bias −4.2 vs NEMO 34.5; score GATED informational).
+  A multi-year FRESHWATER IMBALANCE (P−E+runoff with no salt restoring slowly freshens the global mean).
+  Day-90 SSS was fine (0.85); the drift is a long-integration issue → **fix = weak SSS restoring**
+  (`apply_sss_restoring_step_mpas` EXISTS, was not enabled) or a freshwater-flux balance. NEXT bounded step.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
