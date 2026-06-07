@@ -1025,9 +1025,21 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
     src_lon = _squeeze2d(ds["glamt"].values)
     tgt_lat = np.rad2deg(np.asarray(mesh.latCell))   # (nCells,)
     tgt_lon = np.rad2deg(np.asarray(mesh.lonCell))
-    H_pts, ocean_pts = _regrid_curv_to_points(
+    H_pts, _ = _regrid_curv_to_points(
         e_H, src_lat, src_lon, e_mask, tgt_lat, tgt_lon, max_deg=3.0)
-    land_mask = (ocean_pts > 0.5).astype(np.float64)
+    # Land/sea by the NEAREST NEMO source cell's ACTUAL mask (exact NN over ALL
+    # source cells), NOT _regrid_curv_to_points' ocean_flag (which wets any
+    # target within max_deg of an OCEAN cell -> over-wets coastlines at fine ico
+    # resolution, borrowing bathy onto continental cells and contaminating the
+    # score).  IDW (H_pts) is used only for the depth of cells classified wet.
+    from scipy.spatial import cKDTree as _cKDTree
+    def _xyz_deg(latd, lond):
+        lr = np.deg2rad(np.asarray(latd).ravel())
+        orr = np.deg2rad(np.asarray(lond).ravel())
+        cl = np.cos(lr)
+        return np.stack([cl * np.cos(orr), cl * np.sin(orr), np.sin(lr)], axis=-1)
+    _, _nn = _cKDTree(_xyz_deg(src_lat, src_lon)).query(_xyz_deg(tgt_lat, tgt_lon), k=1)
+    land_mask = (np.asarray(e_mask).ravel()[_nn] > 0.5).astype(np.float64)
     H_bathy = np.where(land_mask > 0.5, np.maximum(H_pts, 50.0), 0.0)
     if flat_bottom:
         H_bathy = np.where(land_mask > 0.5, H_max, 0.0)
@@ -1622,6 +1634,11 @@ def main() -> int:
     if args.woa_smoothing_passes and args.woa_smoothing_passes > 0:
         if not args.woa_init:
             raise ValueError("--woa-smoothing-passes requires --woa-init.")
+        if args.grid == "mpas":
+            raise ValueError(
+                "--woa-smoothing-passes is not available for mpas: smooth_woa_ts "
+                "uses the structured 2-D _laplacian_smooth_2d; a Voronoi "
+                "connectivity smoother (cellsOnCell) is future work.")
         state = smooth_woa_ts(state, grid, args.woa_smoothing_passes)
 
     # apply_balanced_init is the lat-lon C-grid geostrophic cold-start (tripole/
