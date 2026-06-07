@@ -1847,6 +1847,7 @@ def main() -> int:
             total_days=float(total_days),
             output_path=str(args.output),
             forcing="core2_nyf",
+            forcing_path=str(args.forcing_path or ""),
             woa_init=bool(args.woa_init),
             woa_t=str(args.woa_t or ""),
             woa_s=str(args.woa_s or ""),

@@ -351,6 +351,7 @@ class OceanRunRecord(NamedTuple):
     total_days: float = 0.0
     output_path: str = ""
     forcing: str = ""
+    forcing_path: str = ""   # resolved CORE-II NYF store dir (data identity)
     woa_init: bool = False
     woa_t: str = ""
     woa_s: str = ""

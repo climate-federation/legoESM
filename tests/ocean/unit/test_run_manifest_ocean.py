@@ -128,6 +128,8 @@ def test_run_record_hash_distinguishes_run_controls():
         _run_record(grid="latlon_bathy"),
         _run_record(output_path="output/other"),
         _run_record(nlev=20),
+        _run_record(forcing_path="/data/other/core2"),
+        _run_record(woa_init=True),
     ):
         assert compute_config_hash(changed, "ocean") != compute_config_hash(
             base, "ocean"

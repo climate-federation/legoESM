@@ -203,17 +203,19 @@ def main(argv: list[str] | None = None) -> int:
 
     # Ocean bundles launch from the repo root (the runner is repo-relative), so a
     # relative output.path would write under the repo root and collide across
-    # bundles. Anchor ocean outputs to <bundle>/output (absolute) unless the user
-    # set an absolute output.path explicitly. ``out_subdir`` is where the run
+    # bundles. Resolve a relative output.path UNDER the bundle (preserving the
+    # template's subdir, e.g. output/omip_latlon/ -> <bundle>/output/omip_latlon)
+    # and leave an absolute path untouched. ``out_subdir`` is where the run
     # manifest lands, used for the reproduce hint below.
     out_subdir = out / "output"
     if not is_atm:
         op = cfg.get("output.path")
-        if not (isinstance(op, str) and Path(op).is_absolute()):
-            out_subdir = (out / "output").resolve()
-            cfg.set("output.path", str(out_subdir))
-        else:
+        if isinstance(op, str) and Path(op).is_absolute():
             out_subdir = Path(op)
+        else:
+            rel = op if (isinstance(op, str) and op) else "output"
+            out_subdir = (out / rel).resolve()
+            cfg.set("output.path", str(out_subdir))
 
     cfg.to_yaml(str(out / "config.yaml"))
     # Ocean runs need 64-bit (omip is x64 throughout); atmosphere keeps its
