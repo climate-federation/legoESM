@@ -11,7 +11,7 @@ commit messages; `OMIP_faithful.md`. Memories: [[omip-faithful-project]], [[omip
 |---|---|---|
 | **tripole eORCA025 ¼°** | **FAITHFUL** | **1.15** corr 0.99 |
 | **latlon 1°** | **FAITHFUL** | **1.12** corr 0.99 |
-| **mpas ico6 ~115 km** | **FAITHFUL** (iter-~50) | **0.84** corr 0.997 (best) |
+| **mpas ico6 ~115 km** | **FAITHFUL** (iter-~50) | **SST 0.84** corr 0.997, **SSS 0.85** corr 0.94 (best) |
 | cubed_sphere | **PARKED** — free CORE-II cold-start resolution-limited at C32–C96; all correct numerics committed; needs ¼°+full-stack (future) | n/a (blows at cold-start) |
 | spectral | **NOT-MEANINGFUL** — global SH basis can't represent ORCA1 coastlines (Gibbs ringing; model self-declares unsupported #99; bathy builder refuses real geometry; T21 can't resolve Drake) | n/a (by construction) |
 **"All 5 grids match ORCA1" is impossible BY CONSTRUCTION (spectral).** Achievable maximum =
@@ -40,8 +40,9 @@ All use run_omip_core2 + `--woa-init --partial-cell --pgf-scheme smc03 --adaptiv
   --smag-cfl-safety 0.125 --polar-filter --polar-filter-cutoff-lat 60`.
 - **mpas**: `--grid mpas --mpas-level 6 --dt 600 --woa-init --partial-cell --freeze-floor`
   (`_create_setup` mpas defaults: KPP + GM/Redi + smc03/adcroft PGF + implicit-CN barotropic + bottom
-  drag + Smagorinsky). ico6 (~115 km ≈ ORCA1), 90-day, SST RMSE **0.84** (arctic 0.80 w/ freeze-floor;
-  all bands 0.63-1.15). SSS RMSE 1.01 (runoff-gated; runoff not yet wired to mpas).
+  drag + Smagorinsky). ico6 (~115 km ≈ ORCA1), 90-day, **SST RMSE 0.84** (arctic 0.80 w/ freeze-floor;
+  bands 0.63-1.15), **SSS RMSE 0.85** corr 0.94 WITH `--runoff` (Dai-Trenberth via
+  `apply_runoff_step_mpas`; SSS 1.01→0.85). Best-matching grid in BOTH SST and SSS.
 
 ### Key shipped features (tested + codex-clean)
 - **Seasonally-matched scoring** `--nemo-month` — exposed that prior "equilibration POOR" verdicts were
@@ -65,7 +66,7 @@ resolution-limited like the cube. Wiring: `compute_omip2_surface_forcing` mpas b
 ico6 free CORE-II cold-start STABLE (max|u|~0.5 m/s) — the cube's nemesis runs cleanly on pole-free
 Voronoi + the full dissipation stack. Codex-reviewed (HIGH land/sea mask + HIGH freeze_floor-wrong-class
 fixed). Tests: applicator mpas branch + 3 freeze-floor leaf tests.
-**TODO mpas (future, incremental):** wire runoff (SSS 1.01→better); transports; scan-path forcing (perf
+**TODO mpas (future, incremental):** runoff DONE (SSS 1.01→0.85, commit 1b4ae6b2); transports; scan-path forcing (perf
 at ico7); generic config-override flags (currently uses _create_setup defaults).
 
 ## Cube (parked) — free CORE-II cold-start is resolution/discretization-limited (~12 iters, exhausted)
