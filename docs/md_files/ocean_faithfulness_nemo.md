@@ -673,6 +673,21 @@ the multi-file feature running. **ico6 (~115 km ≈ ORCA1) 90-day WOA+partial+CO
 seasonally-matched protocol). If the score is competitive (SST RMSE ~1, like tripole/latlon) → MPAS is
 the 3rd genuinely-faithful grid.
 
+### CODEX REVIEW (MPAS builder) — 1 HIGH + 3 MED; HIGH fixed, re-run ico6 (8423671)
+Clean: latCell/lonCell rad→deg, forcing 1-D shapes, compute_woa_3d broadcast (cube bit-exact),
+Field.replace, v-guards. Findings:
+- **HIGH FIXED** — `_regrid_curv_to_points` classifies a target wet if within max_deg(3°) of any
+  OCEAN source cell → over-wets coastal cells at fine ico (3°≈3 cells inland at ico6), borrowing
+  bathy onto land → contaminates the score. Fixed in build_mpas_ocean: **land/sea by nearest NEMO
+  source cell's ACTUAL mask** (cKDTree NN over ALL cells); IDW only for wet-cell depth. Cube's shared
+  `_regrid_curv_to_points` untouched. Committed; **ico6 RE-RUN (8423671)** with the clean mask (the
+  stale 8423669 had the over-wet bug).
+- **MED FIXED** — `--woa-smoothing-passes` now raises for mpas (structured 2-D smoother is invalid on
+  1-D cells).
+- **MED DEFERRED (rationale)** — `--mpas-lloyd` ignored (_create_setup uses 50, a good default);
+  generic `--A-h/--bottom-drag-r/...` not wired to mpas (the _create_setup mpas defaults are
+  validated-good; the generic flags are latlon-tuned and would MISAPPLY — safer ignored than wrong).
+
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
 partial-cell support** — `ocean_pe_fc.py`/`ocean_pe_cdgrid.py` hardcoded `z_coord.dz_ref`
