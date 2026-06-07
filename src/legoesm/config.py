@@ -274,6 +274,41 @@ class Config:
 
         return experiment_config_from_dict(canonical)
 
+    # ------------------------------------------------------------------
+    # Uniform experiment-adapter protocol (shared with
+    # ``legoesm.ocean.config.OceanExperimentConfig``; consumed by
+    # ``init_experiment`` / ``validate_templates`` via
+    # ``legoesm.experiment_registry``).
+    # ------------------------------------------------------------------
+    def get_meta(self) -> dict:
+        """Return the ``experiment:`` metadata block (or empty dict)."""
+        return self.get("experiment") or {}
+
+    def signature(self) -> str:
+        """Deterministic signature of the RESOLVED ExperimentConfig.
+
+        Used to detect overrides that don't change the run (a typo or a
+        non-runtime dot-path). If the config is unresolvable the exception text
+        is folded in so before/after still differ (a no-op is only flagged when
+        the resolved config is byte-identical).
+        """
+        try:
+            return repr(self.to_experiment_config())
+        except Exception as exc:  # noqa: BLE001
+            return f"<unresolvable: {type(exc).__name__}: {exc}>"
+
+    def validate_strict(self) -> None:
+        """Strict-validate through the canonical ``ExperimentConfig`` path."""
+        self.to_experiment_config().validate_strict()
+
+    def run_command(self, config_path: str = "config.yaml") -> str:
+        """Launcher command for the generated ``run.sh`` (atmosphere runner).
+
+        ``legoesm run`` is a cwd-independent installed CLI, so the run.sh can
+        ``cd`` into the bundle dir and pass the bundle-relative ``config.yaml``.
+        """
+        return f"legoesm run {config_path}"
+
     def __repr__(self) -> str:
         return f"Config({self._data})"
 

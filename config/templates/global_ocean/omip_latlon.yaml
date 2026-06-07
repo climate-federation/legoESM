@@ -1,0 +1,46 @@
+# legoESM experiment template — OMIP-style global lat-lon C-grid ocean.
+#
+# Forced ocean-only run (CORE-II / JRA55-do surface forcing) on the lat-lon
+# C-grid finite-volume primitive-equation core.  The config validates without
+# the forcing dataset present; fetch `jra55_do` before an end-to-end run.
+experiment:
+  tier: tier3
+  complexity: primitive_equation
+  extent: global
+  maturity: init_only        # validates + constructs; needs forcing data to RUN
+  description: >
+    OMIP-style forced global ocean: lat-lon C-grid finite-volume hydrostatic
+    primitive equations, Wright (1997) EOS, implicit vertical mixing, smc03
+    partial-cell pressure gradient, implicit-CN barotropic solver. Requires
+    external JRA55-do surface forcing (fetch first).
+  data: [jra55_do]
+  conservation_gates: [volume, heat, salt]
+model:
+  name: "OMIP-latlon"
+  type: ocean_only
+grid:
+  type: latlon_cgrid
+  n_lat: 180
+  n_lon: 360
+  nlev: 30
+ocean:
+  A_h: 30000.0                # lateral viscosity [m^2/s]
+  A_h_lat_scaling: true       # cos(lat) scaling for uniform grid Reynolds number
+  K_h: 600.0                  # lateral tracer diffusivity [m^2/s]
+  bottom_drag_r: 0.0025       # linear bottom drag
+  eos: wright
+  pgf_scheme: smc03           # density-Jacobian PGF over partial cells
+  barotropic_solver: implicit_cn
+  implicit_vertical_mixing: true
+  tracer_advection: tvd
+  momentum_advection: vector_invariant
+time:
+  dt_seconds: 1800            # 30 min
+  duration_days: 365          # 1 year
+  output_interval_days: 30
+forcing:
+  dataset: jra55_do
+  path: ""
+output:
+  format: zarr
+  path: output/omip_latlon/

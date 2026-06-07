@@ -46,20 +46,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lego_detect_machine import resolve_machine  # noqa: E402
 
 
-def _config_signature(cfg) -> str:
-    """Deterministic signature of the RESOLVED ExperimentConfig.
-
-    Used to detect overrides that don't actually change the run. NamedTuple
-    ``repr`` is stable; if an override leaves the config unresolvable, the
-    exception text is folded in so before/after still differ (a no-op is only
-    flagged when the resolved config is byte-identical).
-    """
-    try:
-        return repr(cfg.to_experiment_config())
-    except Exception as exc:  # noqa: BLE001
-        return f"<unresolvable: {type(exc).__name__}: {exc}>"
-
-
 def _coerce(value: str) -> Any:
     """Coerce a CLI override string to bool/int/float/None/str (in that order)."""
     low = value.strip().lower()
@@ -161,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="machine profile name (default: auto-detect by hostname)")
     args = p.parse_args(argv)
 
-    from legoesm.config import Config
+    from legoesm import experiment_registry
 
     template_path = _template_path(args.template)
     overrides = _parse_overrides(args.override)
@@ -173,24 +159,29 @@ def main(argv: list[str] | None = None) -> int:
     else:
         machine = resolve_machine()
 
-    cfg = Config.from_yaml(str(template_path))
+    # Mode-aware adapter dispatch (atmosphere Config / ocean OceanExperimentConfig
+    # / future land+ice) via the registry — the meta-package's single extensible
+    # entry point. The adapter implements the uniform protocol used below.
+    mode, cfg = experiment_registry.load_adapter(str(template_path))
+    is_atm = experiment_registry.is_atmosphere_mode(mode)
 
     # Machine-derived default precision, only if the user did not override it.
-    if not any(k == "hardware.precision.dynamics" for k, _ in overrides):
+    # Atmosphere-only knob (ocean runs are x64 throughout, set on the runner).
+    if is_atm and not any(k == "hardware.precision.dynamics" for k, _ in overrides):
         if machine.get("precision"):
             cfg.set("hardware.precision.dynamics", machine["precision"])
 
     # Apply overrides one at a time, asserting each actually changes the
     # RESOLVED config (codex review HIGH): a typo or non-runtime dot-path
     # (e.g. -o grid.resoluton=96) is preserved verbatim in config.yaml but
-    # ignored by to_experiment_config, so it would silently no-op while being
-    # recorded as applied. Comparing the canonical config signature before/after
+    # ignored by the runtime mapping, so it would silently no-op while being
+    # recorded as applied. Comparing the resolved-config signature before/after
     # each set catches that.
     no_ops: list[str] = []
     for key, value in overrides:
-        before = _config_signature(cfg)
+        before = cfg.signature()
         cfg.set(key, value)
-        if _config_signature(cfg) == before:
+        if cfg.signature() == before:
             no_ops.append(f"{key}={value!r}")
     if no_ops:
         raise SystemExit(
@@ -201,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Strict-validate BEFORE writing anything (fail fast, no half-built dir).
     try:
-        cfg.to_experiment_config().validate_strict()
+        cfg.validate_strict()
     except Exception as exc:  # noqa: BLE001
         raise SystemExit(f"ERROR: resolved config is invalid: {type(exc).__name__}: {exc}")
 
@@ -211,10 +202,23 @@ def main(argv: list[str] | None = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     cfg.to_yaml(str(out / "config.yaml"))
-    (out / "run.sh").write_text(render_run_sh(machine, run_cmd="legoesm run config.yaml"))
+    # Ocean runs need 64-bit (omip is x64 throughout); atmosphere keeps its
+    # template-/machine-driven precision (x32 default).  The atmosphere CLI is
+    # cwd-independent (cd into the bundle, relative config.yaml); the ocean
+    # runner is a repo-root-relative script, so launch from the repo root and
+    # pass the bundle's config.yaml by absolute path.
+    if is_atm:
+        run_cmd = cfg.run_command("config.yaml")
+        workdir = None
+    else:
+        run_cmd = cfg.run_command(str((out / "config.yaml").resolve()))
+        workdir = str(_REPO_ROOT)
+    (out / "run.sh").write_text(
+        render_run_sh(machine, run_cmd=run_cmd, enable_x64=not is_atm, workdir=workdir)
+    )
     (out / "run.sh").chmod(0o755)
 
-    meta = cfg.get("experiment") or {}
+    meta = cfg.get_meta()
     run_yaml = {
         "experiment": {
             "name": args.name,

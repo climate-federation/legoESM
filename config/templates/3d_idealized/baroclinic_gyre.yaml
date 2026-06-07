@@ -1,0 +1,42 @@
+# legoESM experiment template — idealized baroclinic wind-driven gyre (ocean).
+#
+# Closed rectangular lat-lon C-grid basin with idealized double-gyre wind
+# stress; the classic mid-latitude western-boundary-current spin-up benchmark.
+# No external data — fully idealized.
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: regional
+  maturity: structurally_validated
+  description: >
+    Idealized baroclinic double-gyre: closed lat-lon C-grid basin, linear EOS,
+    explicit-substep barotropic solver, TVD tracer advection. Western-boundary-
+    current spin-up benchmark; no external forcing data required.
+  data: []
+  conservation_gates: [volume, heat, salt]
+model:
+  name: "baroclinic-gyre"
+  type: ocean_only
+grid:
+  type: latlon_cgrid
+  n_lat: 60
+  n_lon: 40
+  nlev: 15
+ocean:
+  A_h: 5000.0
+  K_h: 100.0
+  bottom_drag_r: 0.0
+  eos: linear
+  eos_linear:
+    alpha_T: 2.0e-4
+    beta_S: 0.0
+  barotropic_solver: explicit_substep
+  tracer_advection: tvd
+  momentum_advection: vector_invariant
+time:
+  dt_seconds: 1200            # 20 min
+  duration_days: 3650         # 10 years (spin-up)
+  output_interval_days: 90
+output:
+  format: zarr
+  path: output/baroclinic_gyre/
