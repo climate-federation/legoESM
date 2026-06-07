@@ -262,12 +262,110 @@ class OceanExperimentConfig:
         except Exception as exc:  # noqa: BLE001
             return f"<unresolvable: {type(exc).__name__}: {exc}>"
 
-    def run_command(self) -> str:
-        """Launcher command for the generated ``run.sh`` (ocean runner)."""
-        return "python scripts/run/run_omip_core2.py --config config.yaml"
+    def run_command(self, config_path: str = "config.yaml") -> str:
+        """Launcher command for the generated ``run.sh`` (ocean runner).
+
+        ``run_omip_core2.py`` is a repo-root-relative script (it also resolves
+        mesh/forcing paths relative to the repo), so the run.sh launches from the
+        repo root and ``config_path`` should be an absolute path to the bundle's
+        ``config.yaml`` (init_experiment passes that with ``workdir=repo_root``).
+        """
+        return f"python scripts/run/run_omip_core2.py --config {config_path}"
 
     def __repr__(self) -> str:
         return f"OceanExperimentConfig({self._data})"
+
+
+# ======================================================================
+# Run-manifest codec for ocean runtime configs (#376 Phase 4)
+# ======================================================================
+# The atmosphere ExperimentConfig has a bespoke (grid/dycore/output) codec in
+# ``legoesm.driver.config``; the ocean runtime configs are arbitrarily-nested
+# NamedTuples (``LatLonCGridOceanConfig`` -> ``constants: ConstantsConfig``,
+# optional ``eos_linear``/``gm_redi``/``physics`` pipelines).  This recursive
+# codec serializes any of them to a JSON-safe dict and rebuilds it exactly, so
+# ``run_manifest.json`` can capture + reconstruct an ocean config and the
+# ``config_hash`` round-trips.
+#
+# Each NamedTuple level records its own qualified type (``__type__``) so
+# reconstruction never has to infer types from field annotations (the ocean
+# configs annotate optional sub-configs as ``object``, which carries no type).
+
+
+def _is_namedtuple(obj) -> bool:
+    return (
+        isinstance(obj, tuple)
+        and hasattr(obj, "_fields")
+        and hasattr(obj, "_asdict")
+    )
+
+
+def ocean_config_to_dict(cfg) -> dict:
+    """Recursively serialize an ocean runtime config NamedTuple to a tagged dict.
+
+    Every NamedTuple level is tagged with ``__type__`` = ``"module:QualName"``;
+    nested NamedTuples / lists / dicts recurse; scalars and ``None`` pass through
+    (NumPy scalars are normalized later by the manifest's ``_json_safe``).
+    """
+    return _encode_config(cfg)
+
+
+def _encode_config(obj):
+    if _is_namedtuple(obj):
+        out = {"__type__": f"{type(obj).__module__}:{type(obj).__qualname__}"}
+        for key, val in obj._asdict().items():
+            out[key] = _encode_config(val)
+        return out
+    if isinstance(obj, dict):
+        return {k: _encode_config(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_encode_config(v) for v in obj]
+    return obj
+
+
+def ocean_config_from_dict(d: dict):
+    """Reconstruct an ocean runtime config from :func:`ocean_config_to_dict`.
+
+    Unknown fields are dropped (forward-compat: an older manifest with a since-
+    removed field still loads); missing fields fall back to the NamedTuple
+    default.  Only ``legoesm.*`` types may be reconstructed (a manifest cannot
+    coax this into importing arbitrary modules).
+    """
+    return _decode_config(d)
+
+
+def _resolve_config_type(tag: str):
+    if ":" not in tag:
+        raise ValueError(f"malformed config __type__ tag: {tag!r}")
+    module_path, qualname = tag.split(":", 1)
+    if not (module_path == "legoesm" or module_path.startswith("legoesm.")):
+        raise ValueError(
+            f"refusing to reconstruct non-legoesm config type {tag!r} "
+            "(run-manifest type allowlist)"
+        )
+    import importlib
+
+    obj = importlib.import_module(module_path)
+    for part in qualname.split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
+def _decode_config(obj):
+    if isinstance(obj, dict) and "__type__" in obj:
+        cls = _resolve_config_type(obj["__type__"])
+        known = set(cls._fields)
+        fields = {
+            k: _decode_config(v)
+            for k, v in obj.items()
+            if k != "__type__" and k in known
+        }
+        return cls(**fields)
+    if isinstance(obj, dict):
+        return {k: _decode_config(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_decode_config(v) for v in obj]
+    return obj
 
 
 def _deep_merge(base: dict, override: dict) -> None:

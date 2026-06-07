@@ -29,6 +29,34 @@ datasets:
     marker: .complete        # write this sentinel after a verified manual stage
     credentials: "JRA55-do registration (https://climate.mri-jma.go.jp/)"
 
+  eorca1_mesh:
+    target: ocean/eorca1/mesh_mask.nc
+    description: >
+      eORCA1.2 tripole mesh_mask (grid metrics glamt/e1t..., tmask, fold
+      descriptor) for the OMIP tripole ocean (run_omip_core2.py --grid tripole).
+    url: ""                   # NEMO/ESGF distribution; see credentials
+    min_bytes: 10485760       # 10 MiB floor: reject empty/truncated mesh
+    credentials: "NEMO eORCA1 mesh_mask (Zenodo / institutional NEMO config)"
+
+  woa18:
+    target: ocean/woa18/
+    description: >
+      World Ocean Atlas 2018 objectively-analyzed temperature + salinity
+      climatology, used for the WOA cold-start IC (run_omip_core2.py --woa-init
+      --woa-t/--woa-s).
+    url: ""                   # NCEI public; per-variable NetCDF files
+    marker: .complete
+    credentials: "Public (NCEI: https://www.ncei.noaa.gov/products/world-ocean-atlas)"
+
+  core2_nyf:
+    target: ocean/core2/nyf.zarr
+    description: >
+      CORE-II Normal-Year Forcing (Large & Yeager 2009) as a 6-hourly Zarr
+      store — the surface forcing for the OMIP normal-year ocean spin-up.
+    url: ""                   # derived/regridded store; stage locally
+    marker: .zmetadata        # zarr consolidated metadata = store-complete sentinel
+    credentials: "Derived from CORE-II NYF (GFDL/NCAR); build the Zarr locally"
+
   era5_wb2:
     target: era5/wb2.zarr
     description: "ERA5 (WeatherBench2 1440x721 6h) for AMIP/ERA5-ingest tiers."

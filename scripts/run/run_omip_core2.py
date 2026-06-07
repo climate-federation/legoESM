@@ -1257,6 +1257,23 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d):
     np.savez_compressed(out_dir / f"snapshot_{tag}.npz", **save_kw)
 
 
+def _record_final_state_digest(manifest_path, state) -> None:
+    """Record the final ocean state digest into the run manifest (#376 Phase 4).
+
+    Best-effort: a digest/record failure must not fail an otherwise-complete run.
+    Gives ``legoesm reproduce --check`` a reference to compare a rerun against.
+    """
+    if manifest_path is None:
+        return
+    try:
+        from legoesm.driver.restart import pytree_state_digest, record_state_digest
+        digest = pytree_state_digest(state)
+        record_state_digest(manifest_path, digest)
+        print(f"[done] recorded state_digest {digest[:16]}... in {manifest_path}")
+    except Exception as exc:  # noqa: BLE001 — provenance is best-effort
+        print(f"[warn] state_digest not recorded: {type(exc).__name__}: {exc}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1468,6 +1485,14 @@ def main() -> int:
                         "at steep continental slopes (NEMO/ROMS smooth for this). "
                         "Requires --partial-cell. 0=off.")
     p.add_argument("--output", type=str, default="results/omip_nemo/legoesm_tripole")
+    p.add_argument("--config", type=str, default=None,
+                   help="Ocean experiment YAML (legoesm.ocean.config."
+                        "OceanExperimentConfig). Its ocean.* fields are applied "
+                        "onto the built config (lat-lon C-grid grids only) and a "
+                        "run_manifest.json (resolved config + config_hash + final "
+                        "state_digest) is written under --output for "
+                        "`legoesm reproduce`. The mesh/grid still come from "
+                        "--grid/--mesh. See issue #376.")
     p.add_argument("--diag-every-days", type=float, default=30.0)
     p.add_argument("--scan-block", type=int, default=0,
                    help="Issue #354: wrap the time loop in jax.lax.scan, "
@@ -1633,6 +1658,34 @@ def main() -> int:
         )
         app_grid_type = "latlon"
 
+    # --config (#376 Phase 4): apply the ocean YAML's explicit ocean.* fields
+    # onto the built config and rebuild the model (same path the flag overrides
+    # above use). The mesh/grid come from --grid/--mesh; the YAML drives the
+    # physics/numerics knobs. Only the lat-lon C-grid model (tripole /
+    # latlon_bathy) is wired for YAML overrides.
+    if args.config:
+        from legoesm.ocean.config import OceanExperimentConfig
+        _adapter = OceanExperimentConfig.from_yaml(args.config)
+        _adapter.validate_strict()
+        _explicit = dict(_adapter.get("ocean") or {})
+        if _explicit:
+            if args.grid not in ("tripole", "latlon_bathy"):
+                raise ValueError(
+                    f"--config ocean.* overrides are only supported for the "
+                    f"lat-lon C-grid model (grid=tripole|latlon_bathy), not "
+                    f"grid={args.grid!r}. Remove the ocean: section or pick a "
+                    f"lat-lon grid."
+                )
+            from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+                LatLonCGridOceanModel,
+            )
+            _yaml_cfg = _adapter.to_ocean_config()
+            _ovr = {k: getattr(_yaml_cfg, k) for k in _explicit}
+            model = LatLonCGridOceanModel(
+                grid, z_coord, model.config._replace(**_ovr)
+            )
+            print(f"[setup] --config {args.config} override: {sorted(_ovr)}")
+
     if args.woa_smoothing_passes and args.woa_smoothing_passes > 0:
         if not args.woa_init:
             raise ValueError("--woa-smoothing-passes requires --woa-init.")
@@ -1723,6 +1776,22 @@ def main() -> int:
     # Progress time-series CSV, flushed each diag -> observable mid-run even when
     # stdout is pipe-buffered, and a record for post-hoc analysis.
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Run manifest (#376 Phase 4): capture the resolved ocean config + provenance
+    # at run start so the run is reconstructible and `legoesm reproduce` has a
+    # reference. Always written (config_kind="ocean"); best-effort so a
+    # provenance-write failure never aborts a long integration.
+    manifest_path = None
+    try:
+        from legoesm.driver.restart import write_run_manifest
+        manifest_path = write_run_manifest(
+            out_dir, model.config, config_kind="ocean",
+            runner_tag="run_omip_core2",
+        )
+        print(f"[setup] wrote run manifest {manifest_path}")
+    except Exception as _exc:  # noqa: BLE001 — provenance is best-effort
+        print(f"[warn] run manifest not written: {type(_exc).__name__}: {_exc}")
+
     _csv_cols = ["step", "day", "mean_sst_C", "mean_sss", "max_abs_u",
                  "max_abs_v", "umax_lat", "umax_lon", "umax_lev", "steps_per_s"]
     _csv = open(out_dir / "diag_timeseries.csv", "w")
@@ -1812,6 +1881,7 @@ def main() -> int:
                 print(f"[snapshot] year {yr} saved", flush=True)
         state = jax.block_until_ready(state)
         _save_snapshot(out_dir, "final", state, lat2d, lon2d)
+        _record_final_state_digest(manifest_path, state)
         _csv.close()
         rate = n_steps / (time.time() - t_wall)
         print(f"[done] {n_steps} steps @ {rate:.2f} steps/s (scan); "
@@ -1894,6 +1964,7 @@ def main() -> int:
 
     state = jax.block_until_ready(state)
     _save_snapshot(out_dir, "final", state, lat2d, lon2d)
+    _record_final_state_digest(manifest_path, state)
     _csv.close()
     rate = n_steps / (time.time() - t_wall)
     print(f"[done] {n_steps} steps @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")

@@ -204,6 +204,28 @@ def cmd_reproduce(args):
 
         manifest = read_run_manifest(args.manifest)
         validate_run_manifest(manifest)
+
+        # The reproduce rerun is wired for the atmosphere driver (ModelDriver).
+        # An ocean manifest still validates (resolved_config reconstructs +
+        # config_hash matches, checked above); its bit-identical rerun goes
+        # through the ocean runner, not ModelDriver — say so plainly rather than
+        # crashing in experiment_config_from_dict on ocean fields (#376).
+        kind = manifest["config"].get("config_kind", "atmosphere")
+        if kind != "atmosphere":
+            logger.info(
+                f"legoESM v{__version__} | manifest {args.manifest} VALIDATED "
+                f"(config_kind={kind}; resolved_config reconstructs and "
+                f"config_hash matches)."
+            )
+            logger.warning(
+                "`legoesm reproduce` rerun supports the atmosphere driver only. "
+                f"Re-run this {kind} manifest with its runner — e.g. "
+                "`python scripts/run/run_omip_core2.py --config <config.yaml> "
+                "--output <dir>` — then compare result.state_digest against the "
+                "reference manifest."
+            )
+            return
+
         config = experiment_config_from_dict(manifest["config"]["resolved_config"])
 
         logger.info(f"legoESM v{__version__} | Reproducing run from {args.manifest}")

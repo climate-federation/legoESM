@@ -12,8 +12,8 @@ experiment:
     OMIP-style forced global ocean: lat-lon C-grid finite-volume hydrostatic
     primitive equations, Wright (1997) EOS, implicit vertical mixing, smc03
     partial-cell pressure gradient, implicit-CN barotropic solver. Requires
-    external JRA55-do surface forcing (fetch first).
-  data: [jra55_do]
+    external CORE-II normal-year surface forcing + WOA18 IC (fetch first).
+  data: [core2_nyf, woa18]
   conservation_gates: [volume, heat, salt]
 model:
   name: "OMIP-latlon"
@@ -39,7 +39,7 @@ time:
   duration_days: 365          # 1 year
   output_interval_days: 30
 forcing:
-  dataset: jra55_do
+  dataset: core2_nyf
   path: ""
 output:
   format: zarr
