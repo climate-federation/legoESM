@@ -179,6 +179,10 @@ def test_run_control_overrides_not_noops():
         ("grid.n_lat", 200),
         ("grid.n_lon", 400),
         ("time.duration_days", 999),
+        ("forcing.path", "/data/ocean/core2"),
+        ("init.woa_init", True),
+        ("init.woa_t", "/data/woa/t.nc"),
+        ("init.woa_s", "/data/woa/s.nc"),
     ):
         cfg = OceanExperimentConfig()
         sig0 = cfg.signature()

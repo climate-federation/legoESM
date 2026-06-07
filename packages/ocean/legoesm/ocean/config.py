@@ -273,6 +273,10 @@ class OceanExperimentConfig:
             # / ``-o grid.n_lat=`` is not mis-flagged as a no-op by
             # init_experiment.  Advisory-only fields (forcing.dataset) are
             # deliberately excluded — overriding them really is a no-op.
+            # Must mirror EXACTLY the fields resolve_ocean_run_controls consumes,
+            # so every documented override (-o forcing.path=, -o init.woa_init=,
+            # WOA paths, grid/time/output) registers as a real change instead of
+            # being rejected as a no-op by init_experiment.
             return repr((
                 self.to_ocean_config(),
                 self.get("time.dt_seconds"),
@@ -281,6 +285,10 @@ class OceanExperimentConfig:
                 self.get("grid.nlev"),
                 self.get("grid.n_lat"),
                 self.get("grid.n_lon"),
+                self.get("init.woa_init"),
+                self.get("init.woa_t"),
+                self.get("init.woa_s"),
+                self.get("forcing.path"),
             ))
         except Exception as exc:  # noqa: BLE001
             return f"<unresolvable: {type(exc).__name__}: {exc}>"
