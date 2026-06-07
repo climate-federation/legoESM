@@ -133,6 +133,20 @@ the cube ¼°). The AMOC diagnostic (`_amoc26n_diag` in-run + `scripts/validate/
 committed + correct; a meaningful AMOC match requires an equilibrated run. Multi-year MPAS run launched
 to show AMOC DEVELOPMENT + multi-year stability. ACC@Drake is also wind-driven-but-multi-year — same gate.
 
+### CODEX adversarial review of the cube-¼° + mpas-#160 parked conclusions (iter-~51) — BOTH CONFIRMED
+- **CUBE: confirm parked.** Codex (code-grounded): the cold-start gate is the BAROCLINIC partial-cell
+  PGF residual (the stratified-rest-over-bathy test has exact zero horizontal PGF yet blows at the
+  bottom level ~step 180 → the motion is generated in the 3D `dp_dx/rho_0` path, ocean_pe_cdgrid:566).
+  The barotropic solver only sees `eta`/`g∇η`; an implicit-CN barotropic damps gravity-wave CFL + null
+  modes but CANNOT remove the depth-local baroclinic PGF acceleration injected every PE step → the
+  MPAS-winning implicit-CN lever is NOT the cube unblock. Real fix = stronger shared-PGF residual
+  removal OR ¼° (both major). Optional 1-shot falsification: `pgf_scheme="zero"` / homogeneous T/S over
+  the same bathy → stable ⇒ PGF confirmed (already implied by the stratified-rest blowup).
+- **mpas #160: confirm parked.** The relative-PV + split-Matsuno-Coriolis is internally consistent,
+  stable, matches NEMO SST/SSS. #160 (full PV q=(f+ζ)/h) is a TRiSK energy/enstrophy-invariant /
+  elegance refactor with NO demonstrated SST/SSS-fidelity payoff; park unless a dynamic metric (energy
+  drift, barotropic-Rossby phase, near-inertial spectrum) fails.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
