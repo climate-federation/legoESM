@@ -793,7 +793,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        pgf_scheme=None, bottom_drag_r=None,
                        bottom_drag_bbl_thickness=None,
                        bottom_drag_bg_velocity=None,
-                       harmonic_cfl_safety=None):
+                       harmonic_cfl_safety=None,
+                       bathy_smoothing_passes=0):
     """Build a cubed-sphere ocean (FV3 C-D grid baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -892,6 +893,26 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     print(f"[setup] cubed_sphere C{n}: ocean cells {int(land_mask.sum())}/"
           f"{land_mask.size}, H_bathy [{H_bathy[land_mask>0.5].min():.0f},"
           f"{H_bathy.max():.0f}] m")
+    # Bathymetry smoothing (cube-aware): the cube cold-start blowup is a spurious
+    # partial-cell PGF residual at the steepest sub-grid topography (the under-
+    # resolved Mediterranean at C32), forcing a basin-scale mode that no faithful
+    # viscosity can damp (the grid-scale diffusive-CFL caps A_h below what a
+    # 2-3-cell basin mode needs).  The residual scales with the bathymetric slope
+    # (r-factor |H_i-H_j|/(H_i+H_j)), so a few Laplacian passes over the OCEAN
+    # cells (land held fixed, seam-correct via is_cubed=True) shrink it directly —
+    # the proven NEMO/ROMS technique for exactly this seed.
+    if bathy_smoothing_passes and bathy_smoothing_passes > 0:
+        from legoesm.ocean.bathymetry import _laplacian_smooth_2d, _r_factor_max
+        ocean = land_mask > 0.5
+        r_before = float(_r_factor_max(H_bathy, land_mask))
+        H_s = H_bathy.copy()
+        for _ in range(int(bathy_smoothing_passes)):
+            H_sm = np.asarray(_laplacian_smooth_2d(H_s, 1, is_cubed=True))
+            H_s = np.where(ocean, H_sm, H_bathy)
+        H_bathy = np.where(ocean, np.maximum(H_s, 50.0), H_bathy)
+        r_after = float(_r_factor_max(H_bathy, land_mask))
+        print(f"[setup] cube bathymetry smoothing: {bathy_smoothing_passes} "
+              f"Laplacian passes, max r-factor {r_before:.3f} -> {r_after:.3f}")
     # Partial bottom cells: fold the regridded bathymetry into the vertical
     # coordinate (Adcroft-Hill-Marshall 1997 / Adcroft-Campin 2004) instead of
     # the default pure-z* uniform stretch.  Reuses the canonical
@@ -1142,6 +1163,11 @@ def main() -> int:
                    help="cube harmonic-viscosity diffusive-CFL cap safety (default 0.20; "
                         "A_h*dt/dx^2 <= safety/4). Raise toward ~1.0 for the maximal "
                         "stable isotropic ceiling — the upper bound on flow-adaptive Smag.")
+    p.add_argument("--cube-bathy-smoothing", type=int, default=0,
+                   help="cube: N Laplacian smoothing passes over the ocean bathymetry "
+                        "(cube-seam-aware), reducing the r-factor / per-cell slope that "
+                        "seeds the partial-cell PGF cold-start blowup at under-resolved "
+                        "marginal seas. Proven NEMO/ROMS technique.")
     p.add_argument("--cube-divdamp2", type=float, default=None,
                    help="cube 2nd-order divergence damping [m^2/s].")
     p.add_argument("--cube-divdamp4", type=float, default=None,
@@ -1409,6 +1435,7 @@ def main() -> int:
             bottom_drag_bbl_thickness=args.cube_bbl_thickness,
             bottom_drag_bg_velocity=args.cube_bottom_drag_bg_vel,
             harmonic_cfl_safety=args.cube_harmonic_cfl_safety,
+            bathy_smoothing_passes=args.cube_bathy_smoothing,
         )
         app_grid_type = "cubed_sphere"
     else:

@@ -514,6 +514,59 @@ curved-EOS error / under-resolution, and the faithful options narrow to (a) the 
 full all-grid re-validation, or (b) accept the cube is C32-Med-limited.** Verify-first before the big
 operator.
 
+### DISCRIMINATOR RESULT (8423315) — mis-designed; but CORRECTED analysis = viscosity-CFL is the wall
+cfl_safety {0.5, 1.0} (+drag) all NaN, **bit-identical** (28.06844… at step 140) → the cap was NOT
+binding: A_h=1e9 sat BELOW the cfl cap, so varying the cap changed nothing. The real knob is A_h.
+**Scaling analysis (the key result):** the C32 Med mode is **basin-scale** (~2-3 cells, L≈7.5e5 m,
+e-fold ~240 s). Harmonic ∇² damps at A_h/L²; to beat the growth needs **A_h ≳ 2.3e9**. But the
+GRID-scale diffusive CFL (A_h·dt/dx² ≤ ¼) caps A_h at **~7.5e8 at dt30** — 3× too small. The basin
+mode is only 2-3× the grid scale, so **NO scale-selective viscosity (harmonic / biharmonic / Smag,
+all capped at the same ceiling) can damp it at dt30 while staying grid-scale-stable.** This explains
+why biharmonic (8421978), bottom drag (8423310), and max-harmonic ALL failed at the same onset.
+**The cap ∝ 1/dt**, so smaller dt raises it: at dt5 the cap ≈ 4.5e9 > 2.3e9. And Smag is
+flow-adaptive → concentrates the huge viscosity ONLY at the blowup cell (interior physical) → the
+faithful version. **CORRECTED discriminator (8423419): max-stable harmonic (A_h=1e11 so the cap
+binds) across dt {30,10,5}.** If small-dt bounds the rest mode → build Smag + run the cube at smaller
+dt (faithful, expensive); if even dt5+max-visc fails → the PGF residual is the gate → add the
+improved bottom-slope reconstruction as a GATED `pgf_smc03` option (zero blast radius: proven grids
+bit-exact by default, cube opts in — the CLAUDE.md "oracle numerics as selectable option" pattern).
+
+### dt-DISCRIMINATOR (8423419) — invalid (A_h knob mis-wired) but confirms the viscosity wall
+A_h=1e11 NaN'd at **step 0** all 3 dt: `--cube-Ah` feeds the **uncapped dynamics-core** `config.A_h`
+(`laplacian_viscosity_3d`, ocean_pe_cdgrid:588), not just the capped physics harmonic, so 1e11
+instantly violates the diffusive CFL. (Architectural debt: the cube applies TWO lateral viscosities —
+uncapped dynamics `config.A_h` + capped physics `_harm_Ah` — both `--cube-Ah` cranks; logged.)
+Net: **viscosity is conclusively the wrong tool** — biharmonic, bottom drag, harmonic-cap, and
+A_h-crank ALL fail; the basin mode (2-3 cells) needs A_h≳2.3e9 but the grid CFL caps it ~3× lower at
+faithful dt, and reaching it needs unphysical viscosity that smears the circulation. Confirms the
+audit synth ("can't viscously fix a PGF force").
+
+### PIVOT (this iter): attack the PGF RESIDUAL via bathymetry smoothing (8423421)
+The residual ∝ bathymetric slope (r-factor |H_i−H_j|/(H_i+H_j)). **Wired cube-seam-aware Laplacian
+bathy smoothing** (`--cube-bathy-smoothing N`; `_laplacian_smooth_2d(...,is_cubed=True)` over ocean
+cells, land fixed, r-factor reported) into `build_cubed_sphere` — the proven NEMO/ROMS technique for
+exactly this seed (the latlon/tripole partial-cell builder already smooths; the cube path didn't).
+Sweep {2,5,10,20} passes on rest+topo+no-forcing+smc03+RK3: how many passes bound the rest mode?
+Cheap, faithful (NEMO smooths its own bathy), zero blast radius (cube-only builder arg). If it works
+→ cube unblocked at a stated geometry cost (report r-factor before/after). If even 20 passes fail →
+the gate is intrinsic → gated-`pgf_smc03` reconstruction (expensive) OR redirect effort to
+mpas/spectral (breadth; both still untouched).
+
+### BATHY-SMOOTHING RESULT (8423421) — whack-a-mole; but confirms source-residual reduction works
+{2,5,10,20} passes: global max r-factor barely moves (0.992→0.991 — floored by coastline 50m-vs-deep
+steps smoothing can't remove without erasing the coast). BUT the seed **moves off the Med** (→ S.
+Ocean −40/283, S.Atlantic −46/306, Indonesian −17/111, lev16-18 continental slopes) and onset
+**delays** (140 → 210-280, sm5 best). So local slope reduction DOES shrink the residual where applied
+— but there is always a next-steepest slope ⇒ whack-a-mole, same as marginal-sea masking. Symptom
+treatments now ALL exhausted (viscosity/drag/smoothing). Smoothing kept as a correct proven capability
+(committed) but it does not gate the cube.
+**ROOT CAUSE confirmed + LOCKED: the shared `pgf_smc03` curved-EOS one-sided-bottom-slope residual at
+ubiquitous steep topography, undamped (basin mode, viscosity-CFL-capped).** Only source-level
+reduction can win → **NEXT: gated `pgf_smc03` bottom-slope fix** (seafloor-bounded two-sided slope,
+curved-EOS-consistent; new selectable option so proven latlon/tripole/MPAS stay bit-exact by default,
+cube opts in). The synth flagged this as the real fix; implement + verify it shrinks the cd-grid rest
+residual ≫ smoothing AND leaves proven grids bit-exact.
+
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
 partial-cell support** — `ocean_pe_fc.py`/`ocean_pe_cdgrid.py` hardcoded `z_coord.dz_ref`
