@@ -27,6 +27,14 @@ inline reference.
 from __future__ import annotations
 
 import jax
+# The equivalence assertions below pin scan-vs-inline agreement to rtol=1e-9 —
+# the re-association drift is ~1e-9 only in float64.  Under the default x64-off
+# config (and the documented ``pytest tests/`` runner, which does NOT export
+# JAX_ENABLE_X64=1) the same state is float32 and the drift is ~2e-7, turning
+# these tests red.  Enable x64 at import so the asserted tolerance matches the
+# docstring's float64 framing, regardless of the runner — mirroring the sibling
+# ``tests/timestepping/test_leapfrog_ab2.py``.
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -137,25 +145,143 @@ def test_dispatch_lookup():
         np.testing.assert_array_equal(np.asarray(la), np.asarray(lb))
 
 
-def test_dtype_preservation():
-    """Mixed-precision state: scan body must not up/down-cast leaves."""
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_homogeneous_precision_matches_inline(dtype):
+    """Per-precision: scan preserves the state dtype AND matches the inline
+    scheme.
+
+    Pins that the fixed-dtype carry slots neither up- nor down-cast a
+    homogeneous-precision state — the precision every production consumer feeds
+    in after ``cast_pytree``.  (Earlier this test fed a *mixed* f32/f64 state
+    and asserted the scan dtypes in isolation, which pinned the divergent
+    behaviour instead of catching it; mixed precision is now rejected outright,
+    see ``test_rejects_heterogeneous_precision_state``.)
+    """
+    rtol = 1e-9 if dtype is np.float64 else 1e-5
     state = {
-        "u_f32": jnp.asarray(np.ones((4, 8), dtype=np.float32)),
-        "u_f64": jnp.asarray(np.ones((4, 8), dtype=np.float64)),
+        "a": jnp.asarray(np.ones((4, 8), dtype=dtype)),
+        "b": jnp.asarray(2.0 * np.ones((4, 8), dtype=dtype)),
     }
 
     def tend(s):
-        return {k: -0.1 * v for k, v in s.items()}
+        return {"a": -0.1 * s["a"] + 1e-3 * s["b"], "b": -0.2 * s["b"]}
 
-    out = ssp_rk54_step_scan(state, tend, 1.0)
-    assert out["u_f32"].dtype == jnp.float32, (
-        f"scan SSP54 upcast float32 -> {out['u_f32'].dtype}")
-    # The f64 leaf only stays f64 when x64 is enabled; otherwise JAX truncates
-    # every float64 literal to float32, so the assertion would be testing the
-    # environment, not the integrator (codex review MINOR).
-    if jax.config.jax_enable_x64:
-        assert out["u_f64"].dtype == jnp.float64, (
-            f"scan SSP54 downcast float64 -> {out['u_f64'].dtype}")
+    out_scan = ssp_rk54_step_scan(state, tend, 1.0)
+    out_inline = ssp_rk54_step(state, tend, 1.0)
+    for k in state:
+        assert out_scan[k].dtype == jnp.dtype(dtype), (
+            f"scan SSP54 changed {k} dtype -> {out_scan[k].dtype}")
+        np.testing.assert_allclose(
+            np.asarray(out_scan[k]), np.asarray(out_inline[k]),
+            rtol=rtol, atol=0.0,
+            err_msg=f"scan vs inline diverged for {k} at {dtype}")
+
+
+def test_mixed_precision_matches_inline():
+    """A state mixing float32 and float64 leaves matches the inline scheme.
+
+    This is the real production shape: an MPAS state carries f64 prognostics
+    alongside f32 tracers.  The inline form promotes each leaf to
+    ``result_type(leaf, dt)`` (the f32 tracer -> f64 here, since dt follows the
+    f64 first leaf); the scan fold must do the same — NOT silently down-cast the
+    f64 stage combination back into an f32 slot (which both diverges and emits a
+    deprecated-narrowing-cast FutureWarning).  Pins scan==inline in BOTH value
+    and dtype for the mixed state (workflow review MAJOR).
+    """
+    import warnings
+    state = {
+        "p_f64": jnp.asarray(np.ones((4,), dtype=np.float64)),   # first leaf
+        "q_f32": jnp.asarray(np.ones((4,), dtype=np.float32)),
+    }
+
+    def tend(s):
+        return {"p_f64": -0.1 * s["p_f64"], "q_f32": -0.2 * s["q_f32"]}
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)  # no narrowing-cast ride
+        out_scan = ssp_rk54_step_scan(state, tend, 1.0)
+    out_inline = ssp_rk54_step(state, tend, 1.0)
+    for k in state:
+        assert out_scan[k].dtype == out_inline[k].dtype, (
+            f"{k}: scan dtype {out_scan[k].dtype} != inline {out_inline[k].dtype}")
+        np.testing.assert_allclose(
+            np.asarray(out_scan[k]), np.asarray(out_inline[k]),
+            rtol=1e-9, atol=0.0,
+            err_msg=f"scan vs inline diverged for mixed-precision leaf {k}")
+
+
+def test_rejects_higher_precision_tendency():
+    """A tendency leaf wider than its float32 state slot is rejected, not
+    silently narrowed (workflow review MAJOR)."""
+    state = {"u": jnp.asarray(np.ones((4,), dtype=np.float32))}
+
+    def tend(s):
+        # float64 tendency for a float32 state -> would narrow in the carry.
+        return {"u": jnp.asarray(np.full((4,), -0.1, dtype=np.float64))}
+
+    with pytest.raises(TypeError, match="precision"):
+        ssp_rk54_step_scan(state, tend, 1.0)
+
+
+def test_scalar_python_tendency_leaf():
+    """A weakly-typed Python-scalar tendency leaf is accepted, matching inline.
+
+    The inline form and the carry ``.set`` both coerce Python scalars, so the
+    new dtype guard must read the leaf through ``jnp.result_type(fi, ...)``
+    rather than ``fi.dtype`` (a Python ``float`` has no ``.dtype``) — codex
+    review P2: ``ssp_rk54_step_scan({'y': 1.0}, lambda s: {'y': -0.7}, 0.1)``
+    used to raise ``AttributeError``.
+    """
+    state = {"y": jnp.asarray(np.array([1.0]))}
+
+    def tend(s):
+        return {"y": -0.7}  # constant Python float: no .dtype, weakly typed
+
+    out_scan = ssp_rk54_step_scan(state, tend, 0.1)
+    out_inline = ssp_rk54_step(state, tend, 0.1)
+    assert np.isfinite(float(out_scan["y"][0])), "scalar-tendency scan non-finite"
+    np.testing.assert_allclose(
+        np.asarray(out_scan["y"]), np.asarray(out_inline["y"]),
+        rtol=1e-9, atol=0.0,
+        err_msg="scalar-tendency scan diverged from inline")
+
+
+def _coupled_tend(s):
+    """Tendency coupling u and T (module scope so the grad test does not
+    rebuild a closure each trace)."""
+    c = jnp.mean(s["T"])
+    return {"u": 1e-3 * s["u"] + 1e-6 * c,
+            "T": 5e-4 * (s["T"] - 300.0) + 1e-6 * s["u"]}
+
+
+def test_grad_through_scan_matches_inline():
+    """Reverse-mode AD through the scan fold matches the inline scheme.
+
+    The scan variant is the production MPAS PE default integrator, so training
+    runs ``jax.grad`` through this ``lax.scan`` body.  A future edit that breaks
+    reverse-mode AD (a stray ``stop_gradient``, a control-flow change XLA cannot
+    reverse-differentiate) would leave every forward-equivalence test green
+    while silently zeroing or corrupting the gradient — exactly the 'never break
+    autodiff' regression CLAUDE.md forbids.  Pin grad-equivalence + finiteness,
+    including under jit (the production path is jitted).
+    """
+    def loss(scale, stepper):
+        s = {"u": scale * jnp.ones((4, 6)),
+             "T": 300.0 + scale * jnp.ones((4, 6))}
+        for _ in range(3):
+            s = stepper(s, _coupled_tend, 100.0)
+        return jnp.sum(s["u"] ** 2) + jnp.sum(s["T"] ** 2)
+
+    g_scan = float(jax.grad(loss)(1.3, ssp_rk54_step_scan))
+    g_inline = float(jax.grad(loss)(1.3, ssp_rk54_step))
+    assert np.isfinite(g_scan), "grad through scan fold is non-finite"
+    np.testing.assert_allclose(
+        g_scan, g_inline, rtol=1e-9, atol=0.0,
+        err_msg="grad through scan fold diverged from the inline scheme")
+    # Production differentiates a jitted step; ensure jit(grad(...)) is finite.
+    g_jit = float(jax.jit(jax.grad(loss, argnums=0), static_argnums=(1,))(
+        1.3, ssp_rk54_step_scan))
+    assert np.isfinite(g_jit), "jit(grad) through scan fold is non-finite"
 
 
 def test_rejects_integer_state_leaf():

@@ -309,6 +309,24 @@ class TestMPASHydrostaticIntegratorStability(unittest.TestCase):
                       msg=f"MPAS PE default integrator {integ!r} cannot "
                           f"tolerate the operational hyperdiffusion operator")
 
+    def test_default_integrator_is_exactly_scan_fold(self):
+        """The default must be the SCAN-folded variant specifically.
+
+        The membership test above also accepts inline ``ssp_rk54`` because the
+        two are the identical scheme — but they are NOT equivalent in cost: the
+        inline form de-vectorizes the gather-heavy TRiSK tendency on XLA-CPU
+        (~2.5x slower; the 30-50x slowdown this branch fixes).  A merge or edit
+        that silently reverts the default to inline ``ssp_rk54`` would pass
+        every equivalence/stability/AD test while losing the perf win, so pin
+        the exact value (cf. the aimip_312 'merge silently reverts the targeted
+        fix' failure mode).
+        """
+        self.assertEqual(
+            MPASPrimitiveEquationConfig().time_integrator, "ssp_rk54_scan",
+            msg="MPAS PE default reverted off the scan-folded integrator — the "
+                "gather-heavy TRiSK perf fix is lost (inline ssp_rk54 is ~2.5x "
+                "slower despite being the same scheme).")
+
     def test_both_stable_without_dissipation(self):
         """Zero dissipation: BOTH integrators stay bounded at dt=600 s.
 

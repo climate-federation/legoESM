@@ -72,13 +72,25 @@ def sigma():
     return create_sigma_coordinate(NLEV)
 
 
-@pytest.fixture
-def config():
+@pytest.fixture(params=["ssp_rk3", "ssp_rk54_scan"])
+def config(request):
+    """MPAS PE config, parametrized over the integrators that ship under MPI.
+
+    ``ssp_rk54_scan`` is the production library default (what direct MPAS
+    construction selects), and it evaluates the TRiSK tendency — including the
+    mpi4jax ``sendrecv`` halo exchange — INSIDE ``lax.scan``.  That ordered-
+    effect-through-scan path is structurally different from the inline
+    ``ssp_rk3``, so the serial-vs-MPI equivalence and mass-conservation tests
+    run under BOTH.  (Both currently fail on the out-of-range mpi4jax-0.9 /
+    jax-0.10 stack — see the mpi-stack-version memory — so this guard turns
+    green only once that env is repaired; it is the committed pin for the
+    shipped production path until then.)
+    """
     return MPASPrimitiveEquationConfig(
         nu_del4=0.0,
         nu_del4_ps=0.0,
         fix_mass=True,
-        time_integrator="ssp_rk3",
+        time_integrator=request.param,
     )
 
 
