@@ -139,6 +139,26 @@ class PhysicsPipeline:
         self.rad_update_steps = 1
         self.micro_fn = micro_fn
         self.micro_config = micro_config
+        # ``dynamic_albedo`` is advertised (docstring + AMIP config) as
+        # "temperature/zenith-dependent albedo", but ``compute_radiation_core``
+        # never reads it — the surface albedo is always the static
+        # ``blend_surface_property(sic, albedo_ice, albedo_ocean)``.  Silently
+        # storing the flag turns it into a no-op: a user who enables it gets
+        # the constant 0.06/0.65 albedo with no error.  Until the zenith
+        # albedo is wired into the radiation surface boundary (see
+        # ``legoesm.surface_albedo.ocean_albedo`` / coupler
+        # ``ocean_albedo_config``), fail loudly rather than silently ignore.
+        if dynamic_albedo:
+            raise NotImplementedError(
+                "dynamic_albedo=True is not wired into PhysicsPipeline "
+                "radiation: compute_radiation_core uses a static surface "
+                "albedo blend and never reads this flag, so enabling it would "
+                "silently be a no-op (constant ocean/ice albedo). For a "
+                "zenith/temperature-dependent ocean albedo, run the coupled "
+                "driver with CouplerConfig.ocean_albedo_config(method='zenith') "
+                "(legoesm.surface_albedo.ocean_albedo). Leave dynamic_albedo "
+                "False here."
+            )
         self.dynamic_albedo = dynamic_albedo
         self.turbulence_fn = turbulence_fn
         self.turbulence_config = turbulence_config
@@ -564,7 +584,9 @@ class PhysicsPipeline:
                                q_c=None, q_r=None,
                                q_i=None, N_c=None, N_i=None,
                                cloud_scheme="none",
-                               u=None, v=None, dt=None, T_land=None):
+                               u=None, v=None, dt=None, T_land=None,
+                               sfc_albedo_override=None,
+                               sfc_T_override=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
@@ -595,6 +617,21 @@ class PhysicsPipeline:
             T_sfc = self._blend_land(T_sfc, T_land)
             albedo = self._blend_land(albedo, self.albedo_land)
             emissivity = self._blend_land(emissivity, self.emissivity_land)
+
+        # --- Coupler-provided dynamic surface overrides ---
+        # In a coupled run the ocean/sea-ice/land tile models compute dynamic
+        # surface albedo (temperature/zenith/snow-dependent) and skin
+        # temperature and the coupler tile-blends them into a single field.
+        # When threaded back as a per-segment traced forcing (NOT a closure
+        # const → no recompile; mirrors the SST/SIC feedback), these REPLACE
+        # the static internal blend above so the radiation actually sees the
+        # ice-albedo feedback / zenith ocean albedo / snow brightening and the
+        # ice/land prognostic skin temperature.  ``None`` (AMIP / standalone /
+        # uncoupled) leaves the static blend untouched ⇒ byte-identical.
+        if sfc_albedo_override is not None:
+            albedo = sfc_albedo_override
+        if sfc_T_override is not None:
+            T_sfc = sfc_T_override
 
         p_full = p_s[..., None] * self.sigma_full
         p_half = p_s[..., None] * self.sigma_half
@@ -779,7 +816,9 @@ class PhysicsPipeline:
                          ghg_vmr_override=None,
                          T_land=None,
                          q_i=None, q_s=None, q_g=None,
-                         N_c=None, N_r=None, N_i=None):
+                         N_c=None, N_r=None, N_i=None,
+                         sfc_albedo_override=None,
+                         sfc_T_override=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -790,7 +829,8 @@ class PhysicsPipeline:
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                  C_H, C_E, albedo_ice, albedo_ocean,
                  ghg_vmr_override, T_land,
-                 q_i, q_s, q_g, N_c, N_r, N_i) = args
+                 q_i, q_s, q_g, N_c, N_r, N_i,
+                 sfc_albedo_override, sfc_T_override) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new) = \
@@ -804,6 +844,8 @@ class PhysicsPipeline:
                         q_c=q_c, q_i=q_i, N_c=N_c, N_i=N_i,
                         cloud_scheme=pipeline._cloud_scheme,
                         u=u, v=v, dt=dt, T_land=T_land,
+                        sfc_albedo_override=sfc_albedo_override,
+                        sfc_T_override=sfc_T_override,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -835,7 +877,8 @@ class PhysicsPipeline:
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                  C_H, C_E, albedo_ice, albedo_ocean,
                  ghg_vmr_override, T_land,
-                 q_i, q_s, q_g, N_c, N_r, N_i) = args
+                 q_i, q_s, q_g, N_c, N_r, N_i,
+                 sfc_albedo_override, sfc_T_override) = args
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
@@ -865,7 +908,8 @@ class PhysicsPipeline:
                     tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                     C_H, C_E, albedo_ice, albedo_ocean,
                     ghg_vmr_override, T_land,
-                    q_i, q_s, q_g, N_c, N_r, N_i)
+                    q_i, q_s, q_g, N_c, N_r, N_i,
+                    sfc_albedo_override, sfc_T_override)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch

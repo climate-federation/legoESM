@@ -88,6 +88,10 @@ class CoupledESMDriver:
         # 5. Override SST source: slab ocean instead of file
         self._override_sst()
 
+        # 6. Optionally feed the coupler's dynamic surface albedo / skin
+        #    temperature back to the atmosphere's radiation (opt-in).
+        self._override_sfc()
+
         logger.info("CoupledESM: all components initialized")
         logger.info(f"  ocean_mode={self.coupled_cfg.ocean_mode}, "
                     f"land_mode={self.coupled_cfg.land_mode}, "
@@ -316,6 +320,51 @@ class CoupledESMDriver:
         self._atm.get_sst_sic = _coupled_get_sst_sic
         logger.info("  SST override: atmosphere reads SST from slab ocean")
 
+    def _override_sfc(self):
+        """Feed the coupler's tile-blended dynamic surface albedo + skin
+        temperature back to the atmosphere radiation each segment.
+
+        Gated on ``CoupledConfig.couple_surface_radiation`` (default False ⇒
+        no-op, existing coupled runs byte-identical).  When enabled, the
+        sea-ice albedo feedback / zenith ocean albedo / snow brightening and
+        the prognostic ice/land skin temperature — otherwise silently dropped
+        — replace the atmosphere's frozen surface-property scalars.
+
+        Returns grid-shaped arrays on EVERY segment (a static-blend seed
+        before the first coupler step) so the ``SegmentForcing`` pytree
+        structure is stable across the run — ``model_driver`` compiles the
+        segment kernel once.
+        """
+        if not getattr(self.coupled_cfg, "couple_surface_radiation", False):
+            return
+
+        from legoesm.forcing.surface_utils import (
+            blend_surface_property, blend_surface_temperature,
+        )
+
+        def _seed_blend(day):
+            # Same static blend the atmosphere radiation would use, as
+            # grid-shaped arrays — used only until the first sfc_response.
+            sst, sic = self._atm.get_sst_sic(day)
+            acfg = self.atm_config
+            alb = blend_surface_property(
+                sic, getattr(acfg, "albedo_ice", 0.65),
+                getattr(acfg, "albedo_ocean", 0.06),
+            )
+            T = blend_surface_temperature(sst, sic, acfg.T_ice)
+            return alb, T
+
+        def _coupled_get_sfc_override(day):
+            r = self._last_sfc_response
+            if r is None or getattr(r, "albedo", None) is None:
+                return _seed_blend(day)
+            return r.albedo, r.T_sfc
+
+        self._atm.get_sfc_override = _coupled_get_sfc_override
+        logger.info(
+            "  Surface-radiation feedback: dynamic albedo + skin T -> radiation"
+        )
+
     # ==================================================================
     # Coupling step
     # ==================================================================
@@ -346,14 +395,32 @@ class CoupledESMDriver:
         acfg = self.atm_config
         sst, sic = self._atm.get_sst_sic(day)
         from legoesm.forcing.surface_utils import blend_surface_property
-        albedo_eff = blend_surface_property(
-            sic,
-            getattr(acfg, 'albedo_ice', 0.6),
-            getattr(acfg, 'albedo_ocean', 0.06),
+        # When the dynamic surface-radiation feedback is active, radiation
+        # produced the held net fluxes using the coupler's blended albedo AND
+        # skin temperature (the value _last_sfc_response held when this
+        # segment's forcing was packed — still current here, since
+        # _step_surface updates it only after this call).  Invert sw_down AND
+        # lw_down with the SAME albedo / T_sfc so the reconstructed gross
+        # fluxes stay consistent; otherwise the frozen-scalar de-blend biases
+        # the surface forcing.  Falls back to the static blend when the
+        # feedback is off or before the first coupler step.
+        _resp = self._last_sfc_response
+        _dyn_sfc = (
+            getattr(self.coupled_cfg, "couple_surface_radiation", False)
+            and _resp is not None
+            and getattr(_resp, "albedo", None) is not None
         )
+        if _dyn_sfc:
+            albedo_eff = _resp.albedo
+            T_sfc = _resp.T_sfc
+        else:
+            albedo_eff = blend_surface_property(
+                sic,
+                getattr(acfg, 'albedo_ice', 0.6),
+                getattr(acfg, 'albedo_ocean', 0.06),
+            )
+            T_sfc = blend_surface_temperature(sst, sic, acfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
-
-        T_sfc = blend_surface_temperature(sst, sic, acfg.T_ice)
         # Surface emissivity comes from the coupler config (per-tile
         # ocean/ice/land emissivity is blended via tile fractions
         # downstream).  The 0.96 broad-spectrum default lives in the

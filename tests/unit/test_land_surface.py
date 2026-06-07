@@ -177,6 +177,50 @@ class TestRadiationCoreLand:
         assert not jnp.array_equal(T_land_new, T_land)
 
 
+class TestRadiationCoreSurfaceOverride:
+    """Cluster-A feedback: a coupler-provided tile-blended surface albedo /
+    skin temperature must OVERRIDE the static internal blend in
+    compute_radiation_core (and be byte-identical when not provided)."""
+
+    def _call(self, pipe, **extra):
+        T, p_s, q_v, sst, sic, lat, lon, u, v = _rad_inputs()
+        return pipe.compute_radiation_core(
+            T, p_s, q_v, sst, sic, lat, lon, 1.0, 0.0,
+            jnp.zeros(0), constants.S_0, None, None,
+            u=u, v=v, dt=600.0, T_land=None, **extra,
+        )
+
+    def test_none_override_byte_identical(self):
+        """Explicit None overrides reproduce the no-override path exactly."""
+        pipe, _ = _pipeline(land=False)
+        base = self._call(pipe)
+        out = self._call(pipe, sfc_albedo_override=None, sfc_T_override=None)
+        for b, o in zip(base, out):
+            if b is None:
+                assert o is None
+            else:
+                assert jnp.array_equal(b, o)
+
+    def test_albedo_override_changes_sw_net(self):
+        """A brighter coupler albedo reflects more SW ⇒ less surface net SW."""
+        pipe, _ = _pipeline(land=False)
+        shape_2d = (6, N_CS, N_CS)
+        base = self._call(pipe)                          # ocean albedo 0.06
+        out = self._call(pipe, sfc_albedo_override=jnp.full(shape_2d, 0.6))
+        # sw_net_sfc is tuple index 1.  Brighter surface ⇒ lower net SW.
+        assert not jnp.allclose(base[1], out[1])
+        assert bool(jnp.all(out[1] <= base[1] + 1e-9))
+
+    def test_T_override_changes_lw_net(self):
+        """A colder coupler skin temperature changes surface net LW."""
+        pipe, _ = _pipeline(land=False)
+        shape_2d = (6, N_CS, N_CS)
+        base = self._call(pipe)                          # T_sfc ≈ sst 290 K
+        out = self._call(pipe, sfc_T_override=jnp.full(shape_2d, 230.0))
+        # lw_net_sfc is tuple index 2.
+        assert not jnp.allclose(base[2], out[2])
+
+
 # ---------------------------------------------------------------------------
 # Land-sea-mask loader
 # ---------------------------------------------------------------------------
@@ -247,6 +291,57 @@ class TestStepUnifiedLand:
         assert jnp.all(jnp.isfinite(T_land_new))
         # Land tile active → the slab skin temperature must evolve.
         assert not jnp.array_equal(T_land_new, T_land)
+
+    def test_jitted_step_unified_threads_sfc_override(self):
+        """step_unified threads the coupler-provided surface albedo / skin
+        temperature override all the way into compute_radiation_core — the
+        Cluster-A dynamic surface → radiation feedback."""
+        pipe, _ = _pipeline(land=False)
+        step_fn = pipe.build_step_unified(static_need_rad=True)
+        ad = pipe.adapter
+        shape_2d = ad.shape_2d
+        shape_3d = (*shape_2d, NLEV)
+
+        T = jnp.full(shape_3d, 270.0)
+        p_s = jnp.full(shape_2d, 1.0e5)
+        q_v = jnp.full(shape_3d, 0.003)
+        q_c = jnp.zeros(shape_3d)
+        q_r = jnp.zeros(shape_3d)
+        u = jnp.full(shape_3d, 3.0)
+        v = jnp.zeros(shape_3d)
+        sst = jnp.full(shape_2d, 290.0)
+        sic = jnp.zeros(shape_2d)
+        lat = jnp.full(shape_2d, 0.4)
+        lon = jnp.full(shape_2d, 1.0)
+        held_3d = jnp.zeros(shape_3d)
+        held_2d = jnp.zeros(shape_2d)
+        o3 = jnp.zeros((ad.ncol, NLEV))
+        aerosol = jnp.zeros((ad.ncol, NLEV))
+
+        def _run(**extra):
+            return step_fn(
+                jnp.bool_(True),
+                T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,)), u, v,
+                sst, sic, lat, lon, 100.0, 43200.0, 600.0,
+                jnp.array([]), constants.S_0, o3, aerosol,
+                held_3d, held_2d, held_2d, held_2d, held_2d, held_2d,
+                T_land=None, **extra,
+            )
+
+        _, base_held, _ = _run()
+        # held tuple: (dT_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
+        #              sw_down_toa).  A much brighter coupler albedo lowers
+        # surface net SW.
+        _, alb_held, _ = _run(sfc_albedo_override=jnp.full(shape_2d, 0.6))
+        assert not jnp.allclose(base_held[1], alb_held[1])
+        assert bool(jnp.all(alb_held[1] <= base_held[1] + 1e-9))
+        # A much colder coupler skin temperature changes surface net LW.
+        _, T_held, _ = _run(sfc_T_override=jnp.full(shape_2d, 230.0))
+        assert not jnp.allclose(base_held[2], T_held[2])
+        # Override = None reproduces the baseline exactly (byte-identical).
+        _, none_held, _ = _run(sfc_albedo_override=None, sfc_T_override=None)
+        for b, n in zip(base_held, none_held):
+            assert jnp.array_equal(b, n)
 
 
 if __name__ == "__main__":

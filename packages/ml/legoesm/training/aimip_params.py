@@ -677,6 +677,19 @@ def make_aimip_classical_spectral_physics(
             rrtmgp_cfg = rrtmgp_cfg._replace(
                 sfc_albedo=spatial_fields_col["sfc_albedo"],
             )
+        # Derive the RRTMGP cloud gate from the selected cloud scheme.
+        # ``include_clouds`` and ``cloud_scheme`` are independent knobs;
+        # ``to_rrtmgp_config`` leaves ``include_clouds`` at its False default,
+        # so without this a default AIMIP run (cloud_scheme='xu_randall')
+        # would build cloud optics that the RRTMGP solver SILENTLY discards
+        # → clear-sky radiation and a dead gradient through the trained
+        # Xu-Randall cloud knobs (the cloud_config below exists precisely to
+        # make cloud-radiation coupling trainable end-to-end).  Mirrors
+        # ``physics_pipeline._build_rrtmgp_radiation_fn`` and is required by
+        # the ``make_radiation_physics`` gate-consistency check.
+        rrtmgp_cfg = rrtmgp_cfg._replace(
+            include_clouds=(cloud_scheme != "none"),
+        )
         rad_cfg = RadiationConfig(
             scheme="rrtmgp",
             rrtmgp=rrtmgp_cfg,

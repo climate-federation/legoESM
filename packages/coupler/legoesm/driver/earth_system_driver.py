@@ -127,20 +127,35 @@ class EarthSystemDriver:
 
         # Reconstruct gross downward fluxes from net fluxes.
         # sw_net = sw_down * (1 - albedo) → sw_down = sw_net / (1 - albedo)
-        # Use the atmosphere's effective surface albedo for reconstruction.
+        # lw_net = eps * lw_down - eps * sigma * T_sfc^4
+        #        → lw_down = (lw_net + eps * sigma * T_sfc^4) / eps
+        # The surface feedback (_segment_hook) feeds the coupler's blended
+        # dynamic albedo / skin temperature back to radiation, so radiation
+        # produced these held net fluxes with THOSE values (the response held
+        # when the next segment's forcing was packed — still current here,
+        # since _step_coupler updates _last_sfc_response only after this call).
+        # Invert with the same albedo / T_sfc for a consistent gross flux;
+        # fall back to the static blend before the first coupler step.
         cfg = self.config
         sst, sic = self._atm.get_sst_sic(day)
         from legoesm.forcing.surface_utils import blend_surface_property
-        albedo_eff = blend_surface_property(
-            sic,
-            getattr(cfg, 'albedo_ice', 0.6),
-            getattr(cfg, 'albedo_ocean', 0.06),
+        # _last_sfc_response is only set after the first coupler step; this
+        # reconstruction runs before it on segment 0.
+        _resp = getattr(self, "_last_sfc_response", None)
+        _dyn_sfc = (
+            _resp is not None and getattr(_resp, "albedo", None) is not None
         )
+        if _dyn_sfc:
+            albedo_eff = _resp.albedo
+            T_sfc = _resp.T_sfc
+        else:
+            albedo_eff = blend_surface_property(
+                sic,
+                getattr(cfg, 'albedo_ice', 0.6),
+                getattr(cfg, 'albedo_ocean', 0.06),
+            )
+            T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
-
-        # lw_net = eps * lw_down - eps * sigma * T_sfc^4
-        # lw_down = (lw_net + eps * sigma * T_sfc^4) / eps
-        T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
         # Surface emissivity from canonical constants, blended ocean/ice over sea-ice
         # fraction (same blend as albedo above) — not a magic 0.96 literal.
         eps_sfc = blend_surface_property(
@@ -217,14 +232,26 @@ class EarthSystemDriver:
 
         sfc_response = self._step_coupler(day, dt_segment)
 
-        # Feed surface response back: update atmosphere's land surface
-        # temperature override if available.  This is the primary feedback
-        # mechanism — the coupler's blended T_sfc influences the next
-        # atmosphere segment's boundary layer computation.
-        if hasattr(driver, '_sfc_T_override'):
-            driver._sfc_T_override = sfc_response.T_sfc
-        # Store last surface response for diagnostics
+        # Store the latest surface response and feed the coupler's blended
+        # dynamic surface albedo + skin temperature back to the atmosphere's
+        # radiation for the next segment.
+        #
+        # This replaces the long-dead ``driver._sfc_T_override`` write: that
+        # attribute was never defined or read by ModelDriver (``hasattr`` was
+        # permanently False), so the surface feedback silently never happened —
+        # radiation kept using the frozen config albedo / skin temperature.
+        # The real channel is ``ModelDriver.get_sfc_override``, which threads
+        # the (albedo, T_sfc) pair into radiation as a traced SegmentForcing
+        # (no recompile, AD-safe — mirrors the SST/SIC feedback).
         self._last_sfc_response = sfc_response
+
+        def _get_sfc_override(day, _self=self):
+            r = _self._last_sfc_response
+            if r is None or getattr(r, "albedo", None) is None:
+                return None, None
+            return r.albedo, r.T_sfc
+
+        driver.get_sfc_override = _get_sfc_override
 
     def run(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run the coupled integration.
