@@ -102,9 +102,7 @@ from legoesm.ocean.advection import (
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
-    vertical_advection_ocean as _vertical_advection_ocean,
     flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
-    flux_form_vertical_tracer_advection_tvd as _flux_form_vertical_advection_tvd,
     compute_centroid_depth,
 )
 
@@ -2345,7 +2343,7 @@ def _bc_horizontal_momentum_advection_flux_form(
             "Use 'vector_invariant' on tripolar, or extend this substage."
         )
     scheme = getattr(config, "momentum_flux_scheme", "upwind")
-    n_lon = u.shape[1] - 1
+    u.shape[1] - 1
 
     # --- FV metrics (mirror divergence_cgrid) ---
     dy_u = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]            # (n_lat,1,1)
@@ -2506,9 +2504,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     eta_floor = min_water_col - H_bathy
     eta_safe = jnp.maximum(eta, eta_floor) * mask
 
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
-    nlev = z_coord.n_levels
 
     # --- Stages 1-3: geometry (J, h_k) + density (rho_prime) + baroclinic
     # pressure anomaly (p_prime_filled). ---

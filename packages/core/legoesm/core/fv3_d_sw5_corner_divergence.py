@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.grids.halo import pad_halo
 
 
 def _cell_centre_winds(u_d, v_d):
@@ -90,7 +89,6 @@ def fv3_d_sw5_corner_divergence(u_d, v_d, cdgrid):
     to iter-761+.
     """
     _EPS = 1e-20
-    n = cdgrid.base.n
 
     # Fortran `ua, va` — A-grid cell-centre winds.
     u_cc, v_cc = _cell_centre_winds(u_d, v_d)        # (6, n, n)

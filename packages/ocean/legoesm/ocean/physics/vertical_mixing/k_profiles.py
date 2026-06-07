@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from typing import Tuple
 
-import jax
 import jax.numpy as jnp
 
 from legoesm.ocean.constants_config import ConstantsConfig
@@ -80,7 +79,6 @@ def compute_vertical_K_profiles(
         interior interfaces, in m²/s.
     """
     T = state.T.data
-    S = state.S.data
     nlev = T.shape[-1]
     interface_shape = T.shape[:-1] + (nlev - 1,)
     dtype = T.dtype

@@ -1070,7 +1070,7 @@ def _compute_smagorinsky_K_m_plane(
     K_m : jax.Array
         Eddy viscosity at cell centres, shape ``(ny, nx, nlev)``.
     """
-    nlev = u_yxz.shape[-1]
+    u_yxz.shape[-1]
 
     # --- Horizontal C-grid gradients ---
     # u at x-face → ∂u/∂x = (u[..., j, i+1] - u[..., j, i]) / dx at cell centre.
@@ -1293,7 +1293,7 @@ def _compute_dynamic_smag_cs_plane(
     approximation). The dynamic path is intended for single-rank (GPU) LES;
     MPI runs use the static closure (validated serial=MPI). AD/JIT-safe.
     """
-    nlev = u_yxz.shape[-1]
+    u_yxz.shape[-1]
     uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag = (
         _centre_velocities_and_strain_plane(
             u_yxz, v_yxz, w_yxz_half, grid, height_coord))
@@ -1382,7 +1382,7 @@ def _compute_scale_dependent_dynamic_smag_cs_plane(
     (plane-mean β + spectral filter over the LOCAL tile); MPI uses the static
     closure, like the Germano path.
     """
-    nlev = u_yxz.shape[-1]
+    u_yxz.shape[-1]
     uc, vc, wc, S11, S22, S33, S12, S13, S23, S = (
         _centre_velocities_and_strain_plane(
             u_yxz, v_yxz, w_yxz_half, grid, height_coord))

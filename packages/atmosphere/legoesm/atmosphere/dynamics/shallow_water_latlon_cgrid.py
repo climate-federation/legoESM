@@ -41,7 +41,6 @@ from legoesm.grids.operators_latlon_cgrid import (
     vector_laplacian_cgrid,
     interp_cell_to_uface,
     interp_cell_to_vface,
-    cell_to_cgrid_winds,
 )
 from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
 from legoesm.grids.latlon import LatLonGrid
@@ -118,8 +117,6 @@ def absolute_vorticity_coriolis(
     cor_u, cor_v : same shapes as u, v
     """
     is_3d = u.ndim == 3
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
 
     # --- Relative vorticity at vertices (via the B2 operator interface) ---
     zeta = latlon_cgrid_operators(grid).vorticity(u, v)  # (n_lat+1, n_lon+1[, nlev])

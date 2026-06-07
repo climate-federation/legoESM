@@ -72,15 +72,12 @@ from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
-    compute_cape,
-    compute_moist_adiabat,
     moist_adiabat_lapse_rate,
 )
 
 from legoesm.atmosphere.physics.convection._triggers import (
     smooth_level_indicator,
     smooth_lowest_crossing_index,
-    smooth_step,
 )
 
 __all__ = (
@@ -553,8 +550,6 @@ def entraining_detraining_plume(
     )
 
     g = constants.g
-    c_pd = constants.c_pd
-    L_v = constants.L_v
 
     def step(carry, layer_inputs):
         (T_u_prev, q_u_prev, q_c_u_prev, M_u_raw_prev,
@@ -839,7 +834,7 @@ def cmt_gregory_1997(
     du_dt, dv_dt : jax.Array, shape (ncol, nlev)
         Convective momentum tendencies [m/s²].
     """
-    nlev = u_env.shape[-1]
+    u_env.shape[-1]
 
     # Layer pressure thickness; with surface-last convention dp > 0.
     dp = p_half[:, 1:] - p_half[:, :-1]

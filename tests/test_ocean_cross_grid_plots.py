@@ -1058,7 +1058,7 @@ class TestOceanCliResolutionPerGridDispatch:
 
         The actual dispatch literals (``f"C{N}"`` etc.) now
         live in
-        ``src/legoesm/driver/cli_resolution.py:expand_cli_resolution``
+        ``cli_resolution.py:expand_cli_resolution``
         — see ``TestSharedCliResolution`` for the
         behavior-level tests of that helper.
         """
@@ -2019,7 +2019,7 @@ class TestIter123OceanDriftTolerance:
             "scripts/matrix/run_ocean_test_matrix.py",
             "scripts/ocean_test_matrix/timeloop.py",
             "scripts/ocean_test_matrix/experiments.py",
-            "src/legoesm/diagnostics/conservation_drift.py",
+            "legoesm/diagnostics/conservation_drift.py",
         ):
             text = _read_repo_or_legoesm(repo, rel)
             # An actual op="lt_zero" call would look like

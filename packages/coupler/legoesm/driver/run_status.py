@@ -4,8 +4,8 @@ process exit codes.
 iter-109 (codex iter-104 MEDIUM-8): centralizes the
 status-string-to-exit-code mapping so all user-facing CLI
 wrappers (``src/legoesm/cli.py``,
-``scripts/run_held_suarez_rrtmgp_allgrids.py``,
-``scripts/run_held_suarez_icos_0p5deg.py``, etc.) can share a
+``scripts/run/run_held_suarez_rrtmgp_allgrids.py``,
+``scripts/run/run_held_suarez_icos_0p5deg.py``, etc.) can share a
 single contract.
 
 The driver returns a string status (see ``ModelDriver.run``):

@@ -153,7 +153,7 @@ def _build_kinked_grid(n: int, ng: int, ext_lon, ext_lat):
     -------
     kik_lon, kik_lat : np.ndarray, shape (6, n + 2*ng, n + 2*ng)
     """
-    n_ext = n + 2 * ng
+    n + 2 * ng
     kik_lon = ext_lon.copy()
     kik_lat = ext_lat.copy()
 
@@ -1268,7 +1268,6 @@ def ext_vector_dgrid(
     """
     from legoesm.grids.halo import pad_halo
 
-    n = duogrid.n
     h = halo
 
     # Step 1: Convert covariant → geographic (lat/lon).

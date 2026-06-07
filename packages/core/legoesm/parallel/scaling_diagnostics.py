@@ -327,7 +327,6 @@ def collect_hardware_info() -> HardwareInfo:
 
     # Total memory
     try:
-        import resource
         # getrlimit is per-process; use /proc/meminfo on Linux
         if os.path.exists("/proc/meminfo"):
             with open("/proc/meminfo") as f:
@@ -474,45 +473,6 @@ def make_instrumented_step(step_fn, harness: DiagnosticHarness,
     return instrumented
 
 
-def make_phase_instrumented_step(
-    dycore_fn, physics_fn, halo_fn, reduction_fn,
-    harness: DiagnosticHarness,
-):
-    """Create a step function with separate dycore/physics/halo/reduction phases.
-
-    This is the most detailed instrumentation — each computational phase
-    is timed separately.  Requires decomposing the step into these phases,
-    which may not always be trivial.
-
-    Use ``make_instrumented_step`` for simpler whole-step timing.
-    """
-    import jax
-
-    def instrumented(state, dt):
-        harness.start_step()
-
-        with harness.phase("halo_exchange"):
-            state = halo_fn(state)
-            jax.block_until_ready(jax.tree.leaves(state))
-
-        with harness.phase("dycore"):
-            state = dycore_fn(state, dt)
-            jax.block_until_ready(jax.tree.leaves(state))
-
-        with harness.phase("physics"):
-            state = physics_fn(state, dt)
-            jax.block_until_ready(jax.tree.leaves(state))
-
-        with harness.phase("reductions"):
-            state = reduction_fn(state)
-            jax.block_until_ready(jax.tree.leaves(state))
-
-        harness.end_step()
-        return state
-
-    return instrumented
-
-
 # ======================================================================
 # Roofline model data collection
 # ======================================================================
@@ -638,7 +598,7 @@ def profile_halo_exchange(
                 out = fn(data)
                 jax.block_until_ready(jax.tree.leaves(out))
                 per_exchange_us.append((time.perf_counter_ns() - t0) / 1_000.0)
-            t_total_ns = time.perf_counter_ns() - t_total_start
+            time.perf_counter_ns() - t_total_start
 
             mean_us = sum(per_exchange_us) / len(per_exchange_us)
             sorted_us = sorted(per_exchange_us)

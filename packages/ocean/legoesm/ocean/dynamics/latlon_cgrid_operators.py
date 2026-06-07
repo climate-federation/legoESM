@@ -566,83 +566,6 @@ def vertex_area_cgrid(grid: LatLonGrid) -> jnp.ndarray:
     return jnp.broadcast_to(A_lat[:, jnp.newaxis], (grid.n_lat + 1, grid.n_lon + 1))
 
 
-def vector_laplacian_cgrid(
-    u: jnp.ndarray,
-    v: jnp.ndarray,
-    grid: LatLonGrid,
-    *,
-    mask: jnp.ndarray | None = None,
-    u_mask: jnp.ndarray | None = None,
-    v_mask: jnp.ndarray | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Vector Laplacian on the C-grid: grad(div) - k x grad(curl).
-
-    Operates directly on face velocities without cell-center detour.
-    This is the rectangular-grid analog of TRiSK's vector_laplacian_del2.
-
-    Parameters
-    ----------
-    u : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
-    v : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
-    grid : LatLonGrid
-    mask : (n_lat, n_lon) cell-center land mask, optional
-    u_mask : (n_lat, n_lon+1) u-face mask, optional
-    v_mask : (n_lat+1, n_lon) v-face mask, optional
-
-    Returns
-    -------
-    vlap_u : same shape as u
-    vlap_v : same shape as v
-    """
-    # Native 2D and 3D — all underlying operators (``divergence_cgrid``,
-    # ``gradient_*_cgrid``, ``curl_vertex_cgrid``, ``_gradient_curl_to_*``)
-    # natively support 3D inputs.  Masks remain 2D and broadcast over
-    # the trailing level axis when present.
-    is_3d = u.ndim == 3
-
-    def _bcast(m, like):
-        # Broadcast 2D ``m`` over trailing axes of ``like``.
-        return m[..., jnp.newaxis] if is_3d else m
-
-    # Apply face masks before computing div and curl
-    u_eff = u if u_mask is None else u * _bcast(u_mask, u)
-    v_eff = v if v_mask is None else v * _bcast(v_mask, v)
-
-    # 1. Divergence at cell centers
-    div = divergence_cgrid(u_eff, v_eff, grid)
-    if mask is not None:
-        div = div * _bcast(mask, div)
-
-    # 2. grad(div) at faces
-    grad_div_u = gradient_x_cgrid(div, grid)  # (n_lat, n_lon+1[, nlev])
-    grad_div_v = gradient_y_cgrid(div, grid)  # (n_lat+1, n_lon[, nlev])
-
-    # 3. Curl at vertices
-    zeta = curl_vertex_cgrid(u_eff, v_eff, grid)  # (n_lat+1, n_lon+1[, nlev])
-
-    # Mask curl at land-adjacent vertices
-    if mask is not None:
-        vmask = _compute_vertex_mask(mask, grid=grid)
-        zeta = zeta * _bcast(vmask, zeta)
-
-    # 4. Tangential gradient of curl at faces
-    grad_curl_u = _gradient_curl_to_u(zeta, grid)
-    grad_curl_v = _gradient_curl_to_v(zeta, grid)
-
-    # 5. Vector Laplacian = grad(div) - curl(curl).  curl(curl F) =
-    # k × ∇ζ = (-∂ζ/∂y, +∂ζ/∂x).  Signs verified via bump tests.
-    vlap_u = grad_div_u - grad_curl_u
-    vlap_v = grad_div_v + grad_curl_v
-
-    # Apply face masks to output
-    if u_mask is not None:
-        vlap_u = vlap_u * _bcast(u_mask, vlap_u)
-    if v_mask is not None:
-        vlap_v = vlap_v * _bcast(v_mask, vlap_v)
-
-    return vlap_u, vlap_v
-
-
 def vector_laplacian_dissipation_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,
@@ -1695,8 +1618,7 @@ def stress_divergence_cgrid(
         # tend_v from D_S: per-face dy_v * (sq[:, j+1] - sq[:, j])
         dsq_zonal = stress_q[:, 1:] - stress_q[:, :-1]
         # Per-face: east edge dy and west edge dy
-        dy_v_east = dy_v_2d
-        dy_v_west = jnp.roll(dy_v_2d, 1, axis=1)
+        jnp.roll(dy_v_2d, 1, axis=1)
         # Adjoint of (v_east*dy_east - v_west*dy_west): same dy weighting
         tend_v_DS = _bcast(dy_v_2d) * dsq_zonal
 

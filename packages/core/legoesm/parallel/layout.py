@@ -221,7 +221,7 @@ def scatter(global_array: jax.Array, layout) -> jax.Array:
         return global_array
 
     own = layout.ownership
-    trailing = global_array.shape[3:]  # everything after (6, n, n)
+    global_array.shape[3:]  # everything after (6, n, n)
 
     if not layout.is_tiled:
         # Face-only: extract owned faces.
@@ -295,7 +295,7 @@ def gather(local_array: jax.Array, layout, root_only: bool = False) -> jax.Array
     # (e.g., I/O).  This saves (N-1)/N bandwidth vs allgather.
     _gather_fn = mpi4jax.allgather
     if root_only:
-        rank = comm.Get_rank()
+        comm.Get_rank()
         try:
             _gather_fn = lambda x, comm: mpi4jax.gather(x, root=0, comm=comm)
         except AttributeError:
@@ -311,7 +311,7 @@ def gather(local_array: jax.Array, layout, root_only: bool = False) -> jax.Array
             return jnp.zeros((6,) + (n,) * 2 + trailing, dtype=local_array.dtype)
         # all_data shape: (n_ranks, n_local_faces, n, n, ...)
         # Flatten to (6, n, n, ...) since total faces = 6.
-        n_local = local_array.shape[0]
+        local_array.shape[0]
         return all_data.reshape((6,) + (n,) * 2 + trailing)
     else:
         # Tiled: each rank has (1, n_tile, n_tile, ...).

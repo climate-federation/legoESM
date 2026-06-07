@@ -1658,7 +1658,7 @@ def train_neural_gcm_spectral(
     resume_from_dir : str | Path | None
         If set, scan this directory for the highest-numbered
         ``epoch_NNNN.eqx`` checkpoint and continue training from the
-        next epoch.  Used by ``scripts/run_aimip.py --resume`` for
+        next epoch.  Used by ``scripts/run/run_aimip.py --resume`` for
         chained-resubmission SLURM jobs.
 
     Returns (trained_sfno, loss_history).
@@ -1726,7 +1726,6 @@ def train_sfno_full_spectral(
     """
     from legoesm.atmosphere.dynamics.sfno_pe import (
         SFNOPrimitiveEquationConfig,
-        SFNOPrimitiveEquationModel,
     )
 
     grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")

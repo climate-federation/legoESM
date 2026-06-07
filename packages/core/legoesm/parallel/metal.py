@@ -20,7 +20,7 @@ from typing import NamedTuple
 
 import jax
 
-from legoesm.runtime.backend import get_backend, metal_fell_back_to_cpu
+from legoesm.runtime.backend import get_backend
 
 
 class MetalConfig(NamedTuple):

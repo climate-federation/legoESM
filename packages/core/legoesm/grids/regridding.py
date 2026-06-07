@@ -17,7 +17,6 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import numpy as np
-import jax
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere import CubedSphereGrid
@@ -243,7 +242,7 @@ def regrid_scalar(
     """
     # Flatten spatial dimensions
     spatial_size = regrid_weights.src_flat_size
-    trailing_shape = field.shape[len(field.shape) - (field.size // spatial_size):]
+    field.shape[len(field.shape) - (field.size // spatial_size):]
 
     # Handle different source shapes
     if field.size == spatial_size:

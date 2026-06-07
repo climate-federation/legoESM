@@ -18,7 +18,6 @@ from typing import NamedTuple
 import numpy as np
 import jax.numpy as jnp
 
-from legoesm import constants
 from legoesm.ml.data.era5_loader import (
     ERA5Config,
     WB2_ERA5_ZARR,
@@ -135,7 +134,6 @@ def ensure_local_cache(
     -------
     Path to the local Zarr store.
     """
-    import xarray as xr
 
     cache_path = Path(cache_dir) / "era5_training_cache.zarr"
     if cache_path.exists():
@@ -442,58 +440,6 @@ def era5_to_cubedsphere_carry(
         held_lw_up_toa=jnp.zeros(shape_2d),
         held_sw_down_toa=jnp.zeros(shape_2d),
         step_index=0,
-    )
-
-
-def era5_sst_to_forcing(
-    era5: ERA5Slice,
-    grid,
-    day_of_year: float = 1.0,
-    seconds_of_day: float = 0.0,
-    s_0: float = constants.S_0,
-):
-    """Extract SST/SIC forcing from ERA5 for SegmentForcing.
-
-    Parameters
-    ----------
-    era5 : ERA5Slice
-    grid : GaussianGrid or CubedSphereGrid
-    day_of_year, seconds_of_day : float
-    s_0 : float — solar constant
-
-    Returns
-    -------
-    SegmentForcing
-    """
-    from legoesm.driver.compiled_segments import pack_forcing
-
-    # SST from skin temperature, SIC = 0 (ERA5 skin temp approximation)
-    if hasattr(grid, 'n_lat'):
-        # Gaussian grid
-        sst = jnp.asarray(regrid_2d_to_gaussian(
-            era5.sst, era5.lat, era5.lon, grid,
-        ))
-        sic = jnp.zeros_like(sst)
-        n_plev = era5.T.shape[-1]
-        o3_shape = (*sst.shape, n_plev)
-    else:
-        # Cubed-sphere: use cached regridding weights
-        from legoesm.grids.regridding import regrid_scalar
-        weights = _get_cs_weights(era5.T.shape[1], grid)
-        sst = regrid_scalar(jnp.asarray(era5.sst.ravel()), weights)
-        sic = jnp.zeros_like(sst)
-        n_plev = era5.T.shape[-1]
-        o3_shape = (*sst.shape, n_plev)
-
-    return pack_forcing(
-        sst=sst,
-        sic=sic,
-        day_of_year=day_of_year,
-        seconds_of_day=seconds_of_day,
-        solar_weights=jnp.ones(14),  # uniform solar weights (gray radiation)
-        s_0=s_0,
-        o3_vmr=jnp.zeros(o3_shape),  # no ozone forcing for training
-        aerosol_od=jnp.zeros_like(sst),
     )
 
 

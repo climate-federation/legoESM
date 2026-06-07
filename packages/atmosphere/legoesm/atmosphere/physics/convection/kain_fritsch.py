@@ -47,7 +47,6 @@ from legoesm.atmosphere.physics.convection.mass_flux import (
 )
 from legoesm.atmosphere.physics.convection._triggers import (
     cape_trigger,
-    smooth_level_indicator,
     smooth_step,
 )
 from legoesm.atmosphere.physics.convection._plume import (

@@ -29,7 +29,6 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.grids.halo import (
-    pad_halo,
     compute_padded_angle,
     compute_padded_half_metrics,
     compute_halo_interp_offsets,
@@ -880,74 +879,6 @@ def _compute_exact_cell_areas(n: int, radius: float) -> jax.Array:
         all_areas.append(radius**2 * (e1 + e2))
 
     return jnp.stack(all_areas, axis=0)
-
-
-def _compute_grid_spacing(
-    lon: jax.Array, lat: jax.Array, n: int, radius: float
-) -> tuple[jax.Array, jax.Array]:
-    """Compute grid spacing dx, dy as great-circle distances.
-
-    Uses central differences of cell center positions with proper
-    inter-face halo exchange (no jnp.roll).
-    """
-    # Convert to Cartesian for accurate distance computation
-    cos_lat = jnp.cos(lat)
-    x = cos_lat * jnp.cos(lon)
-    y = cos_lat * jnp.sin(lon)
-    z = jnp.sin(lat)
-
-    # Pad with halo data from neighboring faces
-    x_pad = pad_halo(x)  # (6, n+2, n+2)
-    y_pad = pad_halo(y)
-    z_pad = pad_halo(z)
-
-    # dx: distance between (i+1,j) and (i-1,j)
-    # In padded coords: axis=1 shift +1 = [:, 2:, 1:-1], shift -1 = [:, :-2, 1:-1]
-    dx_vec = jnp.sqrt(
-        (x_pad[:, 2:, 1:-1] - x_pad[:, :-2, 1:-1])**2 +
-        (y_pad[:, 2:, 1:-1] - y_pad[:, :-2, 1:-1])**2 +
-        (z_pad[:, 2:, 1:-1] - z_pad[:, :-2, 1:-1])**2
-    )
-    # Chord to arc length: 2*R*arcsin(chord/(2*R))
-    # For unit sphere, chord = dx_vec, arc = 2*arcsin(chord/2)
-    dx = radius * 2.0 * jnp.arcsin(jnp.clip(dx_vec / 2.0, 0.0, 1.0))
-
-    # dy: distance between (i,j+1) and (i,j-1)
-    dy_vec = jnp.sqrt(
-        (x_pad[:, 1:-1, 2:] - x_pad[:, 1:-1, :-2])**2 +
-        (y_pad[:, 1:-1, 2:] - y_pad[:, 1:-1, :-2])**2 +
-        (z_pad[:, 1:-1, 2:] - z_pad[:, 1:-1, :-2])**2
-    )
-    dy = radius * 2.0 * jnp.arcsin(jnp.clip(dy_vec / 2.0, 0.0, 1.0))
-
-    return dx, dy
-
-
-def _compute_grid_angle(lon: jax.Array, lat: jax.Array, n: int) -> jax.Array:
-    """Compute the angle between the grid x-axis and geographic east.
-
-    This is needed to rotate wind vectors between geographic (u_east, v_north)
-    and grid-aligned (u_grid, v_grid) coordinates.
-
-    Uses proper inter-face halo exchange instead of jnp.roll.
-    """
-    # Pad lon and lat with neighbor data
-    lon_pad = pad_halo(lon)  # (6, n+2, n+2)
-    lat_pad = pad_halo(lat)
-
-    # Centered difference of lon/lat along x-axis (axis=1)
-    dlon_dx = lon_pad[:, 2:, 1:-1] - lon_pad[:, :-2, 1:-1]
-    dlat_dx = lat_pad[:, 2:, 1:-1] - lat_pad[:, :-2, 1:-1]
-
-    # Handle longitude wrapping
-    dlon_dx = jnp.where(dlon_dx > jnp.pi, dlon_dx - 2 * jnp.pi, dlon_dx)
-    dlon_dx = jnp.where(dlon_dx < -jnp.pi, dlon_dx + 2 * jnp.pi, dlon_dx)
-
-    cos_lat = jnp.cos(lat)
-    # Angle of grid x-axis relative to east
-    angle = jnp.arctan2(dlat_dx, dlon_dx * cos_lat)
-
-    return angle
 
 
 def lonlat_to_cartesian(
@@ -2004,7 +1935,7 @@ def gnomonic_ed(im: int) -> tuple[jax.Array, jax.Array]:
     #   mirror_latlon( (lon[0,0], lat[0,0]),  (lon[im,im], lat[im,im]),
     #                  (lon[0,i-1], lat[0,i-1]), (lon[i-1, 0], lat[i-1, 0]) )
     # Vectorize over i ∈ [1, im-1] (0-indexed)
-    i_idx = jnp.arange(1, im, dtype=jnp.float64)
+    jnp.arange(1, im, dtype=jnp.float64)
     # Reference: SW corner (already at lon[0,0], lat[0,0]) and NE corner
     # (already at lon[im,im], lat[im,im]).  But these are not yet set
     # — lon[im,im] = lat[im,im] are from the W/E edge assignments.
@@ -2041,9 +1972,6 @@ def gnomonic_ed(im: int) -> tuple[jax.Array, jax.Array]:
     pp2_j0 = -y_s_full * rsq3 / safe_x_s
     pp3_j0 = -z_s_full * rsq3 / safe_x_s
     # 4 corners: latlon2xyz directly
-    x_corners_w = x_w_full  # (im+1,) — W edge i=0 has all j
-    y_corners_w = y_w_full
-    z_corners_w = z_w_full
     # FV3 uses raw latlon2xyz for corners but the same projection is needed
     # for j=0 and j=im endpoints too.  For interior points, we use the
     # projection.  For the corners, latlon2xyz gives the position on the
@@ -3185,7 +3113,6 @@ def add_rankine_vortex(
     u_new, v_new : jax.Array
         D-grid winds with vortex added.
     """
-    pi = jnp.pi
 
     def _tangential_wind_at(p2_lon, p2_lat):
         """Compute vortex contributions (utmp, vtmp) at point p2."""

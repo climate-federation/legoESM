@@ -57,7 +57,6 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import compute_layer_thickness
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     curl_vertex_cgrid,

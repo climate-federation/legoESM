@@ -13,7 +13,9 @@ which are saved to disk for use in 4D-Var via GenBETransform.
 Model: spectral primitive equation (Gaussian grid) with full physics via
 ModelDriver — gray radiation (Frierson et al. 2006), Rayleigh friction in
 the planetary boundary layer, and analytical SST boundary condition.
-ERA5 data: local Zarr cache downloaded via ``scripts/download_era5.py``.
+ERA5 data: a local Zarr cache of ERA5 pressure-level fields. The
+``--era5`` flag points at this Zarr store; see ``era5_to_state.py`` for
+the lat-lon-to-grid ingestion path that consumes it.
 
 Vertical levels: the ``--nlev`` flag sets the forecast model's vertical
 resolution.  20 levels is a reasonable minimum for testing; production runs
@@ -21,8 +23,7 @@ should use 37+ to match ERA5 pressure-level spacing.
 
 Usage
 -----
-# First download ERA5 if needed:
-python scripts/download_era5.py --years 2019 2020 --out /data/era5
+# Requires a local ERA5 Zarr cache at the path passed to ``--era5``.
 
 # Generate NMC samples and fit GEN_BE:
 JAX_ENABLE_X64=1 python -m legoesm.da.generate_nmc \\
@@ -80,7 +81,7 @@ import jax.numpy as jnp
 
 class NMCConfig(NamedTuple):
     """Configuration for NMC background error generation."""
-    era5_zarr_path: str               # Local ERA5 Zarr (from download_era5.py)
+    era5_zarr_path: str               # Local ERA5 Zarr cache (see era5_to_state.py)
     output_path: str                  # Base path for output (no extension)
     date_start: str                   # Verification range start "YYYY-MM-DD"
     date_end: str                     # Verification range end
@@ -863,7 +864,7 @@ def parse_args():
     )
     p.add_argument(
         "--era5", required=True, metavar="ZARR_PATH",
-        help="Local ERA5 Zarr store (produced by download_era5.py)",
+        help="Local ERA5 Zarr store (see era5_to_state.py for ingestion)",
     )
     p.add_argument(
         "--output", required=True, metavar="BASE_PATH",

@@ -173,31 +173,6 @@ def _select_snapshots(
     return dataset[list(variables)].sel({config.time_name: list(times)})
 
 
-def _daily_flux(
-    dataset: xr.Dataset,
-    when: np.datetime64,
-    *,
-    config: PreparationConfig,
-) -> xr.Dataset:
-    start = when + np.timedelta64(1, "h")
-    end = when + np.timedelta64(1, "D")
-    hourly = dataset[[config.sw_down_variable, config.lw_down_variable]].sel(
-        {config.time_name: slice(start, end)}
-    )
-    if hourly.sizes.get(config.time_name, 0) != 24:
-        raise ValueError(
-            f"Expected 24 hourly radiation samples for day starting {when}, got "
-            f"{hourly.sizes.get(config.time_name, 0)}"
-        )
-    daily = (hourly.sum(config.time_name) / 86400.0).rename(
-        {
-            config.sw_down_variable: "sw_down",
-            config.lw_down_variable: "lw_down",
-        }
-    )
-    return daily.expand_dims({config.time_name: [when]})
-
-
 def _daily_flux_series(
     dataset: xr.Dataset,
     start_time: np.datetime64,
@@ -223,10 +198,6 @@ def _daily_flux_series(
         }
     )
     return daily.assign_coords({config.time_name: _daily_times(start_time, forecast_days)})
-
-
-def _concat_slices(slices: list[xr.Dataset], *, time_name: str) -> xr.Dataset:
-    return xr.concat(slices, dim=time_name)
 
 
 def prepare_neuralgcm_case(

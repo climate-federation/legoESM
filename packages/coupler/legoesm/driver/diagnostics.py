@@ -8,7 +8,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-import jax
 import jax.numpy as jnp
 
 from legoesm.diagnostics.column_integrals import column_water_vapor
@@ -1305,54 +1304,6 @@ class EnsembleDiagnosticCollector:
             'spread_u': spread.get('u', 0.0),
             'spread_ps': spread.get('p_s', 0.0),
         }
-
-    def save_member_checkpoint(
-        self,
-        full_carry,
-        step: int,
-        day: float,
-        output_dir,
-        config,
-    ) -> None:
-        """Save per-member checkpoints for the full ensemble.
-
-        Each member is saved as a separate checkpoint file:
-        ``ensemble_member_NNN_day_DDDD.npz``.
-        """
-        from legoesm.driver.restart import save_restart
-        from legoesm.core.field import Field
-        from legoesm.core.state import HydrostaticState
-
-        output_dir = Path(output_dir)
-        n = self.n_members
-
-        for m in range(n):
-            # Extract single member from batched carry
-            member_carry = jax.tree.map(lambda x: x[m], full_carry)
-
-            # Build a minimal state for save_restart
-            dims_3d = ("face", "x", "y", "level")
-            dims_2d = ("face", "x", "y")
-            member_state = HydrostaticState(
-                u=Field(member_carry.u, name="u", dims=dims_3d, units="m/s"),
-                v=Field(member_carry.v, name="v", dims=dims_3d, units="m/s"),
-                T=Field(member_carry.T, name="T", dims=dims_3d, units="K"),
-                p_s=Field(member_carry.p_s, name="p_s", dims=dims_2d, units="Pa"),
-                phis=Field(member_carry.phis, name="phis", dims=dims_2d, units="m2/s2"),
-            )
-
-            elapsed = day - config.start_day
-            path = output_dir / f"ensemble_member_{m:03d}_day_{int(elapsed):04d}.npz"
-            save_restart(
-                path=path,
-                state=member_state,
-                q_v=member_carry.q_v,
-                step=step,
-                day=day,
-                config=config,
-                q_c=member_carry.q_c,
-                q_r=member_carry.q_r,
-            )
 
     def save(self, output_dir) -> None:
         """Save ensemble diagnostics alongside base diagnostics."""

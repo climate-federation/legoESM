@@ -10,7 +10,6 @@ native grid layout and ``(ncol, nlev)`` column format is handled by a
 """
 from __future__ import annotations
 
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -18,18 +17,8 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
 from legoesm.forcing.surface_utils import blend_surface_temperature
-from legoesm.core.grid_adapters import ColumnAdapter, make_adapter
+from legoesm.core.grid_adapters import make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
-
-
-class HeldRadiation(NamedTuple):
-    """Held radiation tendencies for sub-cycling."""
-    dT_dt_rad: jax.Array
-    sw_net_sfc: jax.Array
-    lw_net_sfc: jax.Array
-    sw_up_toa: jax.Array
-    lw_up_toa: jax.Array
-    sw_down_toa: jax.Array
 
 
 class PhysicsPipeline:
@@ -739,7 +728,7 @@ class PhysicsPipeline:
         Returns a function ``step_unified(need_rad, T, p_s, q_v, q_c, q_r,
         conv_prog, u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
         solar_weights, s_0, o3_vmr, aerosol_od, held, ..., T_land) ->
-        (PhysicsOutput, HeldRadiation, T_land_new)``.
+        (PhysicsOutput, held tuple, T_land_new)``.
 
         ``T_land`` is the slab-land skin temperature carried through the
         radiation sub-cycle; it is advanced on radiation steps and held

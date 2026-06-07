@@ -702,7 +702,7 @@ def create_hybrid_coordinate(
     p_half_ref = (A_half + B_half) * p_ref
     p_full_ref = (A_full + B_full) * p_ref
     p_half_ref_safe = jnp.clip(p_half_ref, 1e-10, None)
-    p_full_ref_safe = jnp.clip(p_full_ref, 1e-10, None)
+    jnp.clip(p_full_ref, 1e-10, None)
 
     ln_ratio_ref = jnp.log(p_half_ref_safe[1:] / p_half_ref_safe[:-1])
     # Exact Simmons-Burridge (1981) alpha:
@@ -1123,7 +1123,7 @@ def compute_dz_L32() -> tuple[jax.Array, jax.Array]:
         Total height = sum(dz).
     """
     km = 32
-    k0, k1, k2 = 2, 21, 8
+    _k0, k1, k2 = 2, 21, 8
     z1, z2 = 10.0e3, 30.0e3
     dz0_init = 75.0
 
@@ -1307,7 +1307,7 @@ def hydro_eq(
     t0 = 300.0
     a0 = (t1 - t0) / z1 * 0.5
     c0 = t0 / a0
-    ptop = float(ak[0])
+    float(ak[0])
 
     # Surface pressure
     if mountain:
@@ -1491,7 +1491,7 @@ def p_var_core(
     if cappa is None:
         cappa = constants.kappa
 
-    km = delp.shape[-1]
+    delp.shape[-1]
     # pe[k] = ptop + Σ_{j<k} delp[j] for k = 0..km; using cumulative sum
     cumsum = jnp.cumsum(delp, axis=-1)
     pe = jnp.concatenate(
@@ -1616,7 +1616,7 @@ def mount_waves(
     # If no True, ks = 0 (FV3 default)
     first_true = jnp.argmax(cond)
     any_true = jnp.any(cond)
-    ks_level = jnp.where(any_true, first_true, 0)  # 0-indexed: this is k_python - 1
+    jnp.where(any_true, first_true, 0)  # 0-indexed: this is k_python - 1
     # FV3: ks = k_fortran - 1 = (k_python + 1) - 1 = k_python
     # k_python where condition is met = first_true + 1 (because we sliced from index 1)
     # Actually we used pe1[1:] so first_true index 0 corresponds to k_python=1 (FV3 k=2);
@@ -1795,7 +1795,7 @@ def compute_dz_var(
     # FV3 lines 1976-1980: ze[0]=ztop, ze[km]=0; rebuild bottom-up
     # ze[k] = ze[k+1] + dz[k] for k = km-1..1 (0-indexed); ze[0] = ztop
     cumsum_rev = jnp.cumsum(dz[::-1])[::-1]
-    ze1 = jnp.concatenate([cumsum_rev, jnp.asarray([0.0])])
+    jnp.concatenate([cumsum_rev, jnp.asarray([0.0])])
     # FV3 line 1976 sets ze(1) = ztop AFTER building ze from dz; this
     # may not match the dz sum exactly.  Then FV3 rescales dz:
     #   dz(k) = dz(k) * (ztop/ze(1))   FV3 line 1983
@@ -2057,7 +2057,7 @@ def compute_geopotential_hybrid(
     p_full = pressure_from_hybrid(coord, p_s, full=True)   # (..., nlev)
 
     p_half_safe = jnp.clip(p_half, 1e-10, None)
-    p_full_safe = jnp.clip(p_full, 1e-10, None)
+    jnp.clip(p_full, 1e-10, None)
 
     # Log ratios and exact Simmons-Burridge alpha — spatially dependent
     ln_ratio = jnp.log(p_half_safe[..., 1:] / p_half_safe[..., :-1])  # (..., nlev)
@@ -2414,7 +2414,7 @@ def compute_reference_state(
     p_0 = constants.p_ref
 
     theta_0 = theta_ref_fn(z)
-    n = z.shape[0]
+    z.shape[0]
     dz_vals = jnp.diff(z)  # (n-1,) — negative since z decreasing
     integrand = -g / (c_p * theta_0)  # (n,)
     integrand_avg = 0.5 * (integrand[:-1] + integrand[1:])  # (n-1,)

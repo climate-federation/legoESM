@@ -6,7 +6,7 @@ a few eddy turnovers). This is the clean validation case against the jax-alfa
 oracle's physical target — the log law, ``φ_m→1`` and the resolved-variance
 similarity that any faithful ABL LES must reproduce. Unlike the compressible
 plane dycore, this core SUSTAINS the resolved turbulence
-(``docs/les_plane_turbulence_notes.md``).
+(``les_plane_turbulence_notes.md``).
 
 Saves ``final_profiles.npz`` (mean U, resolved uu/vv/ww/tke, uw/vw flux, u_*) in
 the SAME format as ``run_les_plane.py`` so

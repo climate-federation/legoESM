@@ -26,7 +26,6 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.field import Field
 from legoesm.core.state import MPASHydrostaticState
 # NOTE: the MPAS dynamics live in the atmosphere component (a layer ABOVE this
 # shared-substrate ``parallel`` package).  Importing them here would make
@@ -48,7 +47,6 @@ from legoesm.parallel.voronoi_partition import (
 from legoesm.parallel.halo_exchange_voronoi import VoronoiHaloExchange
 from legoesm.parallel.reductions import (
     _require_mpi_stack,
-    global_sum_mpi,
     batch_allreduce_mpi,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
@@ -130,15 +128,6 @@ def make_voronoi_partition_layout(
 # ============================================================================
 # Scatter / gather
 # ============================================================================
-
-def scatter_voronoi_field(
-    global_field: jnp.ndarray,
-    partition: VoronoiPartition,
-    entity: str = "cell",
-) -> jnp.ndarray:
-    """Extract rank-local (owned + halo) portion of a global field."""
-    return scatter_to_local(global_field, partition, entity)
-
 
 def scatter_state_voronoi(
     global_state: MPASHydrostaticState,

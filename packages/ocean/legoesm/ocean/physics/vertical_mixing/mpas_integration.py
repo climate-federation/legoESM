@@ -21,12 +21,10 @@ from __future__ import annotations
 
 from typing import Callable
 
-import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.core.field import Field
-from legoesm.core.state import MPASOceanState, MPASOceanTendencies
+from legoesm.core.state import MPASOceanState
 from legoesm.ocean.eos import (
     compute_ocean_rho,
     rho_0 as _RHO_0,

@@ -936,7 +936,7 @@ def pad_halo_4d(
             return level_slice
 
         # Transpose to (nlev, 6, n+2h, n+2h), vmap, transpose back
-        nlev = padded.shape[3]
+        padded.shape[3]
         padded_t = jnp.transpose(padded, (3, 0, 1, 2))  # (nlev, 6, ...)
         padded_t = jax.vmap(_remap_level)(padded_t)
         padded = jnp.transpose(padded_t, (1, 2, 3, 0))
@@ -955,7 +955,7 @@ def _pad_halo_local_4d(
     which yields shape ``(24*n, nlev)`` when data is ``(6, n, n, nlev)``.
     """
     n = data.shape[1]
-    nlev = data.shape[3]
+    data.shape[3]
     tables = _get_halo_tables_h1(n)
     src_f, src_i, src_j, dst_f, dst_i, dst_j = tables
 
@@ -1022,7 +1022,7 @@ def _pad_halo_local_h2_4d(
       runtime cost is dominated by the interpolation itself.
     """
     n = data.shape[1]
-    nlev = data.shape[3]
+    data.shape[3]
     # Single Pad HLO op replaces alloc-zeros + scatter.
     padded = jnp.pad(data, ((0, 0), (2, 2), (2, 2), (0, 0)))
 
@@ -1366,7 +1366,7 @@ def _pad_halo_local_h2(
                 # Interior is at [2:-2, 2:-2], so:
                 #   WEST halo positions: i=1 (depth=0), i=0 (depth=1)
                 #   EAST halo positions: i=n+2 (depth=0), i=n+3 (depth=1)
-                pos = 1 - depth  # WEST: depth0→1, depth1→0
+                1 - depth  # WEST: depth0→1, depth1→0
                 if edge == WEST:
                     padded = padded.at[face, 1 - depth, 2:-2].set(strip)
                 elif edge == EAST:

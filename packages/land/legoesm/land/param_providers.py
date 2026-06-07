@@ -30,7 +30,6 @@ from legoesm.land.surface_params import (
     bounds_arrays,
     clm5_pft_table,
     default_land_surface_params,
-    N_PFT_CLM5,
 )
 
 

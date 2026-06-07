@@ -93,7 +93,7 @@ class GaussianGrid(NamedTuple):
     truncation with n_sh spectral coefficients and n_lat latitude points:
 
     - Each Legendre matrix (Pnm, Hnm, Pnm_oc2, Dnm) takes ~8 * n_lat * n_sh bytes
-      (float64). Plus their weighted versions (wPnm, wHnm, wPnm_oc2, wDnm), which
+      (float64). Plus their weighted versions (wPnm, wPnm_oc2, wDnm), which
       are also ~8 * n_lat * n_sh bytes each.
 
     - Total: ~8 * n_lat * n_sh * 8 = ~64 * n_lat * n_sh bytes per grid.
@@ -127,7 +127,6 @@ class GaussianGrid(NamedTuple):
     Pnm_oc2: jax.Array      # P_n^m / cos^2(lat), (n_lat, n_sh)
     Dnm: jax.Array           # dP_n^m/dmu = -Hnm/cos^2(lat), (n_lat, n_sh)
     wPnm: jax.Array         # weights * Pnm (precomputed for SH analysis), (n_lat, n_sh)
-    wHnm: jax.Array         # weights * Hnm (precomputed), (n_lat, n_sh)
     wPnm_oc2: jax.Array     # weights * Pnm_oc2 (precomputed), (n_lat, n_sh)
     wDnm: jax.Array         # weights * Dnm (precomputed), (n_lat, n_sh)
     n_sh: int               # Number of spectral coefficients
@@ -354,7 +353,6 @@ def create_gaussian_grid(
     # Precompute weighted Legendre matrices (avoid recomputing every SH analysis)
     w_col = w_gauss[:, None]  # (n_lat, 1)
     wPnm_np = Pnm_np * w_col
-    wHnm_np = Hnm_np * w_col
     wPnm_oc2_np = Pnm_oc2_np * w_col
     wDnm_np = Dnm_np * w_col
 
@@ -376,7 +374,6 @@ def create_gaussian_grid(
         Pnm_oc2=_to_jax(Pnm_oc2_np, np.float64),
         Dnm=_to_jax(Dnm_np, np.float64),
         wPnm=_to_jax(wPnm_np, np.float64),
-        wHnm=_to_jax(wHnm_np, np.float64),
         wPnm_oc2=_to_jax(wPnm_oc2_np, np.float64),
         wDnm=_to_jax(wDnm_np, np.float64),
         n_sh=n_sh,
@@ -519,10 +516,8 @@ def sh_analysis(grid: GaussianGrid, field_grid: jax.Array) -> jax.Array:
     coeffs : complex array, shape (n_sh,)
         Spectral coefficients for m >= 0.
     """
-    n_lat = grid.n_lat
     n_lon = grid.n_lon
     n_max = grid.n_max
-    n_sh = grid.n_sh
 
     # 1. FFT in longitude -> Fourier coefficients for each latitude
     # rfft gives m = 0, 1, ..., n_lon/2   (shape: n_lat x (n_lon//2 + 1))
@@ -636,34 +631,6 @@ def sh_analysis_dmu(grid: GaussianGrid, field_grid: jax.Array) -> jax.Array:
     f_m_gathered = f_m[:, grid.ms]
 
     coeffs = 2.0 * jnp.pi * jnp.sum(grid.wDnm * f_m_gathered, axis=0)
-    return coeffs
-
-
-def sh_analysis_H(grid: GaussianGrid, field_grid: jax.Array) -> jax.Array:
-    """Forward SH transform using derivative Legendre polynomials Hnm.
-
-    Same as sh_analysis but uses grid.Hnm instead of grid.Pnm. This is
-    used for computing spectral divergence and curl of (u*cos_lat, v*cos_lat).
-
-    Parameters
-    ----------
-    grid : GaussianGrid
-    field_grid : array, shape (n_lat, n_lon)
-
-    Returns
-    -------
-    coeffs : complex array, shape (n_sh,)
-    """
-    n_max = grid.n_max
-    n_sh = grid.n_sh
-
-    f_hat_lon = jnp.fft.rfft(field_grid, axis=1) / grid.n_lon
-    f_m = f_hat_lon[:, :n_max + 1]
-
-    f_m_gathered = f_m[:, grid.ms]
-
-    coeffs = 2.0 * jnp.pi * jnp.sum(grid.wHnm * f_m_gathered, axis=0)
-
     return coeffs
 
 
@@ -785,13 +752,6 @@ def _sh_synthesis_H(grid: GaussianGrid, coeffs: jax.Array) -> jax.Array:
 def spectral_laplacian(grid: GaussianGrid, coeffs: jax.Array) -> jax.Array:
     """Apply spectral Laplacian: multiply by -n(n+1)/a^2."""
     return grid.lap * coeffs
-
-
-def spectral_inverse_laplacian(
-    grid: GaussianGrid, coeffs: jax.Array,
-) -> jax.Array:
-    """Apply inverse Laplacian (n=0 mode stays zero)."""
-    return grid.ilap * coeffs
 
 
 def spectral_hyperdiffusion(

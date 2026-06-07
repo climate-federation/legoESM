@@ -375,8 +375,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--output", type=Path,
-        default=Path("docs/ocean_fidelity/initial_comparison.md"),
-        help="markdown report path",
+        default=Path(f"docs/ocean_fidelity/initial_comparison_{_git_sha()}.md"),
+        help="markdown report path (default: hash-suffixed under "
+             "docs/ocean_fidelity/)",
     )
     return p
 

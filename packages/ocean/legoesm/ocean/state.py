@@ -225,82 +225,6 @@ class SpectralOceanConfig(NamedTuple):
 
 
 # ==============================================================================
-# Lat-Lon FV Ocean State
-# ==============================================================================
-
-class LatLonOceanState(NamedTuple):
-    """State for the lat-lon finite-volume ocean primitive equations.
-
-    3D fields: shape (n_lat, n_lon, nlev).
-    2D fields: shape (n_lat, n_lon).
-
-    Fields
-    ------
-    u : Field
-        Zonal velocity [m/s]. Prognostic. Shape (n_lat, n_lon, nlev).
-    v : Field
-        Meridional velocity [m/s]. Prognostic. Shape (n_lat, n_lon, nlev).
-    T : Field
-        Potential temperature [degC]. Prognostic. Shape (n_lat, n_lon, nlev).
-    S : Field
-        Salinity [PSU]. Prognostic. Shape (n_lat, n_lon, nlev).
-    eta : Field
-        Sea surface height [m]. Prognostic. Shape (n_lat, n_lon).
-    H_bathy : Field
-        Bathymetry depth [m]. Static (positive downward). Shape (n_lat, n_lon).
-    land_mask : Field
-        Ocean mask. Static. 1=ocean, 0=land. Shape (n_lat, n_lon).
-    """
-    u: Field
-    v: Field
-    T: Field
-    S: Field
-    eta: Field
-    H_bathy: Field
-    land_mask: Field
-
-
-class LatLonOceanTendencies(NamedTuple):
-    """Tendencies for the lat-lon ocean primitive equations."""
-    du_dt: Field
-    dv_dt: Field
-    dT_dt: Field
-    dS_dt: Field
-    deta_dt: Field
-    dH_bathy_dt: Field
-    dland_mask_dt: Field
-
-
-class LatLonOceanConfig(NamedTuple):
-    """Configuration for the lat-lon FV ocean model."""
-    g: float = constants.g
-    rho_0: float = constants.rho_ocean
-    A_h: float = 1.0e4           # Horizontal viscosity [m^2/s]
-    K_h: float = 0.0           # Horizontal tracer diffusivity [m^2/s]
-    A_v: float = 1.0e-3          # Vertical viscosity [m^2/s]
-    K_v: float = 1.0e-4          # Vertical tracer diffusivity [m^2/s]
-    n_barotropic_substeps: int = 30
-    hyperdiff_coeff: float = 0.0
-    use_conservation_fixer: bool = False
-    fix_volume: bool = True
-    fix_heat: bool = True
-    fix_salt: bool = True
-    barotropic_diffusion_alpha: float = 0.0
-    barotropic_diffusion_dt_ref: float = 60.0
-    enable_runtime_checks: bool = False
-    min_water_column_m: float = 0.5
-    max_abs_eta_m: float = 1.0e4
-    temperature_min_c: float = -5.0
-    temperature_max_c: float = 45.0
-    salinity_min_psu: float = 0.0
-    salinity_max_psu: float = 50.0
-    differentiable_barotropic: bool = False
-    physics: object = None
-    eos: str = "wright"
-    eos_linear: object = None
-
-
-# ==============================================================================
 # Lat-Lon C-Grid FV Ocean State
 # ==============================================================================
 
@@ -389,50 +313,6 @@ class LatLonCGridOceanState(NamedTuple):
     dpsi_prev: object = None
     dpsin: object = None
     dpsin_prev: object = None
-
-
-class LatLonCGridOceanDiagnostics(NamedTuple):
-    """Diagnostic fields for debugging ocean dynamics on lat-lon C-grid.
-
-    These fields are computed during tendency calculation for analysis purposes
-    but are not part of the prognostic state.
-
-    Fields
-    ------
-    w : Field
-        Vertical velocity at half levels [m/s]. Shape (n_lat, n_lon, nlev+1).
-    w_half_ref : Field
-        Reference vertical velocity in z* coordinates [m/s]. Shape (n_lat, n_lon, nlev+1).
-    flux_div_k : Field
-        Horizontal flux divergence per layer [m/s]. Shape (n_lat, n_lon, nlev).
-    dT_dt_total : Field
-        Total temperature tendency [degC/s]. Shape (n_lat, n_lon, nlev).
-    dT_dt_hadv : Field
-        Horizontal advection tendency [degC/s]. Shape (n_lat, n_lon, nlev).
-    dT_dt_vadv : Field
-        Vertical advection tendency [degC/s]. Shape (n_lat, n_lon, nlev).
-    dT_dt_hdiff : Field
-        Horizontal diffusion tendency [degC/s]. Shape (n_lat, n_lon, nlev).
-    dT_dt_vdiff : Field
-        Vertical diffusion tendency [degC/s]. Shape (n_lat, n_lon, nlev).
-    dT_dt_physics : Field
-        Physics tendency [degC/s]. Shape (n_lat, n_lon, nlev).
-    wind_stress_x : Field
-        Zonal wind stress applied [Pa]. Shape (n_lat, n_lon).
-    wind_stress_y : Field
-        Meridional wind stress applied [Pa]. Shape (n_lat, n_lon).
-    """
-    w: Field
-    w_half_ref: Field
-    flux_div_k: Field
-    dT_dt_total: Field
-    dT_dt_hadv: Field
-    dT_dt_vadv: Field
-    dT_dt_hdiff: Field
-    dT_dt_vdiff: Field
-    dT_dt_physics: Field
-    wind_stress_x: Field
-    wind_stress_y: Field
 
 
 class SurfaceTracerForcing(NamedTuple):
@@ -643,9 +523,6 @@ class LatLonCGridOceanConfig(NamedTuple):
             barotropic_solver="implicit", eos="wright",
             physics=OceanPhysicsConfig(...),  # KPP/TKE + GM/Redi
         )
-
-    Same parameter set as LatLonOceanConfig; kept separate since operator
-    semantics differ (compact stencils vs centered).
 
     Section headers below mark the contiguous top run of fields. The trailing
     fields (from ``n_barotropic_substeps`` on) are kept in *chronological*

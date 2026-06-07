@@ -26,7 +26,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Dict, Tuple
 
 from legoesm import constants
 from legoesm.constants import g, Omega
@@ -244,7 +244,7 @@ def _set_uniform_stratification(state, z_coord, config, grid):
     z_full = np.asarray(z_coord.z_full_ref)
     nlev = len(z_full)
     T_data = np.array(state.T.data, dtype=np.float64)
-    n_lat, n_lon = T_data.shape[0], T_data.shape[1]
+    n_lat, _n_lon = T_data.shape[0], T_data.shape[1]
 
     lat_rad = np.asarray(grid.lat)
     lat_deg = np.degrees(lat_rad)
@@ -318,7 +318,7 @@ def _set_linear_shear_latlon(state, grid, z_coord, config):
     """
     z_full = np.asarray(z_coord.z_full_ref)
     dz = np.asarray(z_coord.dz_ref)
-    nlev = len(z_full)
+    len(z_full)
 
     # Purely baroclinic: remove depth-mean, don't put it into eta
     U_profile = config.Lambda * z_full
@@ -461,11 +461,11 @@ def create_forcings(grid_type: str, grid, config: EadyUniformConfig = None):
     from legoesm.ocean.physics.combined import OceanPhysicsConfig
     from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
     from legoesm.ocean.physics.vertical_mixing.config import (
-        VerticalMixingConfig, ConstantVerticalMixingConfig,
+        VerticalMixingConfig,
     )
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
     from legoesm.ocean.physics.bottom_drag.config import (
-        BottomDragConfig, LinearDragConfig,
+        BottomDragConfig,
     )
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 

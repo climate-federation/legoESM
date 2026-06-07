@@ -37,7 +37,6 @@ from legoesm.parallel.reductions import global_sum_mpi
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_analysis,
-    sh_synthesis,
     sh_analysis_3d,
     sh_synthesis_3d,
     sh_analysis_oc2_3d,

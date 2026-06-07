@@ -70,10 +70,6 @@ if TYPE_CHECKING:
     # component, which blocks component independence (see import-linter contracts).
 
 from legoesm.grids.halo_latlon import (
-    pad_halo_latlon,
-    pad_halo_latlon_3d,
-    pad_halo_latlon_vector,
-    pad_halo_latlon_vector_3d,
     _fold_pole_rows,
     _fold_pole_rows_3d,
 )
@@ -1385,17 +1381,6 @@ def pole_v_bc_for_layout(layout: LatLonBandLayout) -> tuple[bool, bool]:
     Used to set ``CGridLatLonPrimitiveEquationConfig.pole_v_bc``.
     """
     return (layout.south_rank is None, layout.north_rank is None)
-
-
-def slice_latlon_state_to_band(state, layout: LatLonBandLayout):
-    """Slice a global ``CGridLatLonHydrostaticState`` to a rank-local band.
-
-    Thin alias for :func:`scatter_state_latlon` exposed at the
-    function level with a name that mirrors
-    :func:`slice_latlon_grid_to_band` — same convention for callers
-    who slice the grid + state at ModelDriver setup time.
-    """
-    return scatter_state_latlon(state, layout)
 
 
 def build_padded_grid(grid, layout: LatLonBandLayout, halo: int = 1):

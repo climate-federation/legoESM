@@ -191,7 +191,7 @@ def _compute_sin_cos_sg(n, padded_supergrid_lon, padded_supergrid_lat):
     sin_sg : jax.Array, shape (6, n, n, 9)
     cos_sg : jax.Array, shape (6, n, n, 9)
     """
-    dalpha = jnp.pi / (2 * n)
+    jnp.pi / (2 * n)
 
     # Supergrid: 2n+3 positions per axis.
     # Index mapping (0-based):
@@ -277,17 +277,6 @@ def _compute_sin_cos_sg(n, padded_supergrid_lon, padded_supergrid_lat):
     sin_sg = jnp.sqrt(jnp.maximum(1.0 - cos_sg ** 2, 0.0))
 
     return sin_sg, cos_sg
-
-
-def _supergrid_quad_area(px, py, pz, i0, j0, i1, j1, i2, j2, i3, j3, radius):
-    """Spherical area of a quadrilateral from 4 supergrid points via cross-product."""
-    # Diagonal vectors
-    d1x = px[i2, j2] - px[i0, j0]; d1y = py[i2, j2] - py[i0, j0]; d1z = pz[i2, j2] - pz[i0, j0]
-    d2x = px[i3, j3] - px[i1, j1]; d2y = py[i3, j3] - py[i1, j1]; d2z = pz[i3, j3] - pz[i1, j1]
-    cx = d1y * d2z - d1z * d2y
-    cy = d1z * d2x - d1x * d2z
-    cz = d1x * d2y - d1y * d2x
-    return 0.5 * jnp.sqrt(cx**2 + cy**2 + cz**2) * radius**2
 
 
 def _compute_supergrid_metrics(n, supergrid_lon, supergrid_lat, radius):

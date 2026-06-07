@@ -275,8 +275,8 @@ def _build_test_matrix() -> list[TestCase]:
             "hydrostatic", "rossby_haurwitz_6_0", g, res[g], "hybrid",
             14.0, 2.0, {}))
         # Wedi-Smolarkiewicz 2009 small-planet Held-Suarez (X=125).
-        # The IC + grid factories are in place at
-        # ``src/legoesm/atmosphere/idealized/small_planet.py``; matrix
+        # The IC + grid factories are in place in
+        # ``small_planet.py``; matrix
         # runner wiring is deferred to M1.b because the existing
         # ``run_held_suarez`` builds grids with default Earth radius.
 
@@ -2222,7 +2222,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # drops from ~0.16 (iter-893) to ~0.114 (iter-1030); W5 day-5
         # speed at iter-1030 is 45 m/s (best W5 stability across the
         # 1009/1021/1030 calibration sweep).  Pinned by
-        # ``tests/test_iter1002_w2_target_met.py``.
+        # ``test_iter1002_w2_target_met.py`` (archived under
+        # scripts/tmp/dycore_iter_archive/).
         # new_test_dycores iter-8: factored to the canonical
         # ``iter1009_dual_target_config(n)`` helper in
         # ``shallow_water_fv3_cdgrid``.  Removes a 6-line inline
@@ -2367,7 +2368,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # differ from edge-averaged angles by O(dx), creating a
             # 0.39 m/s v_north residual for Williamson 2; the 4-edge
             # mean reduces this to 0.008 m/s at t=0 (47x improvement;
-            # see iter-25/26 of docs/fv3_fortran_fidelity_review.md).
+            # see iter-25/26 of fv3_fortran_fidelity_review.md).
             u_cc = 0.5 * (np.asarray(s.u_d, dtype=np.float64)[:, :, :-1]
                           + np.asarray(s.u_d, dtype=np.float64)[:, :, 1:])
             v_cc = 0.5 * (np.asarray(s.v_d, dtype=np.float64)[:, :-1, :]
@@ -3286,7 +3287,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     nlev = DEFAULT_NLEV
     # When tc.case == "held_suarez_topo" we swap the init for the
     # topography-aware version (forcing function is unchanged — see
-    # ``src/legoesm/atmosphere/idealized/held_suarez_topo.py``).
+    # ``held_suarez_topo.py``).
     _topo = tc.case == "held_suarez_topo"
     _topo_h0 = float(tc.run_kwargs.get("h_0", 2000.0)) if _topo else 0.0
 
@@ -5651,12 +5652,12 @@ RUNNERS: dict[str, Callable] = {
 }
 
 CATEGORY_RUNNER_HINTS: dict[str, str] = {
-    "shallow_water": "scripts/atmosphere/run_shallow_water_tests.py",
-    "hydrostatic": "scripts/atmosphere/run_hydrostatic_tests.py",
-    "nonhydrostatic": "scripts/atmosphere/run_nonhydrostatic_tests.py",
-    "rce": "scripts/atmosphere/run_rce_tests.py",
-    "aquaplanet": "scripts/atmosphere/run_aquaplanet_tests.py",
-    "ocean": "scripts/ocean/run_ocean_category_tests.py",
+    "shallow_water": "scripts/matrix/run_atmosphere_test_matrix.py --category shallow_water",
+    "hydrostatic": "scripts/matrix/run_atmosphere_test_matrix.py --category hydrostatic",
+    "nonhydrostatic": "scripts/matrix/run_atmosphere_test_matrix.py --category nonhydrostatic",
+    "rce": "scripts/matrix/run_atmosphere_test_matrix.py --category rce",
+    "aquaplanet": "scripts/matrix/run_atmosphere_test_matrix.py --category aquaplanet",
+    "ocean": "scripts/matrix/run_ocean_test_matrix.py",
 }
 
 

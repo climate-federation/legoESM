@@ -58,7 +58,7 @@ def par_profile(
     PAR : array
         PAR at each level [W/m^2], shape (..., nlev).
     """
-    nlev = z_full_ref.shape[0]
+    z_full_ref.shape[0]
 
     # Total attenuation per layer: (k_w + k_chl * P) * dz
     atten = (cfg.k_w_atten + cfg.k_chl_atten * jnp.clip(Phyto, 0.0, None)) * dz_ref

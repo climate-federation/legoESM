@@ -40,39 +40,12 @@ benchmark; the acceptance bar in legoESM's long-term diagnostics is
 
 from __future__ import annotations
 
-from typing import Callable, Optional
 
 import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
 from legoesm.ocean.eos import make_eos_fn
-
-
-def _flatten_cells_and_volumes(area, h_k, mask):
-    """Return flat (rho-broadcast, vol) tensors over wet cells.
-
-    Accepts any leading horizontal shape:
-
-    * lat-lon:        area (n_lat, n_lon), mask (n_lat, n_lon),
-                      h_k (n_lat, n_lon, n_z)
-    * MPAS:           area (nCells,), mask (nCells,), h_k (nCells, n_z)
-    * cubed-sphere:   area (6, n, n), mask (6, n, n), h_k (6, n, n, n_z)
-
-    Volumes on dry cells are zeroed out so the sort step naturally
-    pushes them to the bottom of the stack without contributing to
-    the integral.
-    """
-    area_np = np.asarray(area, dtype=np.float64)
-    mask_np = np.asarray(mask, dtype=np.float64)
-    h_np = np.asarray(h_k, dtype=np.float64)
-    n_z = h_np.shape[-1]
-    # Broadcast area * mask -> per-cell horizontal weight.
-    horiz = (area_np * mask_np)
-    # vol[..., k] = horiz * h[..., k] * mask
-    vol = horiz[..., None] * h_np
-    # Flatten: shape (Ncells * n_z,)
-    return vol.reshape(-1), n_z
 
 
 def compute_rpe(state, z_coord, *, grid_type: str, grid,

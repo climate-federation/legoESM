@@ -46,10 +46,6 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import (
-    saturation_mixing_ratio as _q_sat,
-    saturation_mixing_ratio_dT as _dqsat_dT,
-)
 from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput

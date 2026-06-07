@@ -35,7 +35,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm import constants
 from legoesm.grids.vertical import (
     HeightCoordinate, compute_reference_state,
 )

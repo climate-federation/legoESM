@@ -42,7 +42,6 @@ from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.core.operators_voronoi import (
     apvm_correction_3d,
     biharmonic_vorticity_del4_3d,
-    bilaplacian_cell_3d,
     divergence_cell_3d,
     gradient_edge_3d,
     curl_vertex_3d,
@@ -55,7 +54,6 @@ from legoesm.core.operators_voronoi import (
     leith_biharmonic_3d,
     vector_laplacian_del2_3d,
     vector_laplacian_del4_3d,
-    vertex_thickness_3d,
 )
 from legoesm.ocean.dynamics.mpas_partial_cell_helpers import (
     compute_max_level_edge_bot,
@@ -74,7 +72,6 @@ from legoesm.ocean.vertical import (
     compute_layer_thickness,
     compute_ocean_jacobian,
     diagnose_w_from_flux_div,
-    vertical_advection_ocean,
     flux_form_vertical_momentum_advection,
 )
 from legoesm.ocean.freshwater import (

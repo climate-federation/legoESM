@@ -18,7 +18,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm import constants
 
 
 def interp_pressure_to_sigma(
@@ -48,39 +47,6 @@ def interp_pressure_to_sigma(
     """
     # Target pressures: p_target[k] = sigma[k] * p_s
     p_target = p_s[..., None] * sigma_full  # (..., n_model_lev)
-    return _interp_in_logp(field_plev, plev_Pa, p_target)
-
-
-def interp_pressure_to_hybrid(
-    field_plev: jax.Array,
-    plev_Pa: jax.Array,
-    p_s: jax.Array,
-    A_full: jax.Array,
-    B_full: jax.Array,
-    p_ref: float = constants.p_ref,
-) -> jax.Array:
-    """Interpolate a 3D field from pressure levels to hybrid levels.
-
-    Parameters
-    ----------
-    field_plev : array, shape (..., n_plev)
-        Field on pressure levels.
-    plev_Pa : array, shape (n_plev,)
-        Pressure levels in Pa, **ascending**.
-    p_s : array, shape (...)
-        Surface pressure in Pa.
-    A_full, B_full : array, shape (n_model_lev,)
-        Hybrid coordinate coefficients at full levels.
-    p_ref : float
-        Reference pressure [Pa].
-
-    Returns
-    -------
-    array, shape (..., n_model_lev)
-        Field interpolated to hybrid levels.
-    """
-    # p(k) = A(k) * p_ref + B(k) * p_s
-    p_target = A_full * p_ref + B_full * p_s[..., None]  # (..., n_model_lev)
     return _interp_in_logp(field_plev, plev_Pa, p_target)
 
 
@@ -140,42 +106,3 @@ def _interp_in_logp(
     alpha = jnp.clip(alpha, 0.0, 1.0)
 
     return f_lo + alpha * (f_hi - f_lo)
-
-
-def compute_model_pressures_sigma(
-    p_s: jax.Array,
-    sigma_full: jax.Array,
-) -> jax.Array:
-    """Compute pressure at model sigma levels.
-
-    Parameters
-    ----------
-    p_s : (...,) — surface pressure [Pa]
-    sigma_full : (nlev,) — sigma values
-
-    Returns
-    -------
-    (..., nlev) — pressure at each level [Pa]
-    """
-    return p_s[..., None] * sigma_full
-
-
-def compute_model_pressures_hybrid(
-    p_s: jax.Array,
-    A_full: jax.Array,
-    B_full: jax.Array,
-    p_ref: float = constants.p_ref,
-) -> jax.Array:
-    """Compute pressure at model hybrid levels.
-
-    Parameters
-    ----------
-    p_s : (...,) — surface pressure [Pa]
-    A_full, B_full : (nlev,) — hybrid coefficients
-    p_ref : float — reference pressure [Pa]
-
-    Returns
-    -------
-    (..., nlev) — pressure at each level [Pa]
-    """
-    return A_full * p_ref + B_full * p_s[..., None]

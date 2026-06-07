@@ -76,29 +76,6 @@ def _copy_array(arr: jax.Array) -> jax.Array:
     return jnp.asarray(np.asarray(jax.device_get(arr)).copy())
 
 
-def take_teacher_dataset(dataset: PhysicsTeacherDataset, idx) -> PhysicsTeacherDataset:
-    """Take a subset of teacher samples along the leading sample axis."""
-    columns = PhysicsColumnBatch(
-        **{
-            field: getattr(dataset.columns, field)[idx]
-            for field in PhysicsColumnBatch._fields
-        },
-    )
-    return PhysicsTeacherDataset(
-        columns=columns,
-        Km=dataset.Km[idx],
-        Kh=dataset.Kh[idx],
-        M_eq=dataset.M_eq[idx],
-        dq_v_dt_micro=dataset.dq_v_dt_micro[idx],
-        dq_c_dt_micro=dataset.dq_c_dt_micro[idx],
-        dq_r_dt_micro=dataset.dq_r_dt_micro[idx],
-        precip_micro=dataset.precip_micro[idx],
-        rain_survival_fraction=dataset.rain_survival_fraction[idx],
-        sample_days=dataset.sample_days,
-        microphysics_scheme=dataset.microphysics_scheme,
-    )
-
-
 def capture_physics_teacher_snapshot(
     driver,
     day_tag: float,

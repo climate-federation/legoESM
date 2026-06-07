@@ -11,7 +11,6 @@ multi-day loss computation.
 
 from __future__ import annotations
 
-from functools import partial
 from typing import NamedTuple
 
 import jax
@@ -20,8 +19,6 @@ import jax.numpy as jnp
 from legoesm.driver.compiled_segments import (
     SegmentCarry,
     SegmentForcing,
-    build_segment_fn,
-    pack_forcing,
 )
 
 
@@ -118,40 +115,3 @@ def single_day_rollout(
     """
     steps_per_day = int(86400 / dt)
     return run_segment_fn(initial_carry, steps_per_day, forcing)
-
-
-def make_rollout_loss_fn(
-    run_segment_fn,
-    loss_fn,
-    config: RolloutConfig,
-    forcing: SegmentForcing,
-):
-    """Create a differentiable loss function for training.
-
-    Returns a function ``loss(params, initial_carry, targets) -> scalar``
-    that can be differentiated with ``jax.grad`` or
-    ``eqx.filter_value_and_grad``.
-
-    Parameters
-    ----------
-    run_segment_fn : callable
-        Compiled segment function.
-    loss_fn : callable
-        Loss function: ``loss(predicted_carry, target, config) -> scalar``.
-    config : RolloutConfig
-        Rollout configuration.
-    forcing : SegmentForcing
-        External forcing for the rollout period.
-
-    Returns
-    -------
-    callable
-        ``loss(initial_carry, target_carry) -> scalar``
-    """
-    def _loss(initial_carry, target_carry):
-        output = differentiable_rollout(
-            initial_carry, forcing, run_segment_fn, config,
-        )
-        return loss_fn(output.final_carry, target_carry)
-
-    return _loss

@@ -553,7 +553,7 @@ def ppm_to_u_points(
     # Actually simpler: after PPM on (n_lat, n_lon+4, nlev), we get n_lon+3 edges.
     # Remove the outermost edges (fully in halo): keep inner n_lon+1 edges.
     # These correspond to faces 0..n_lon in the original grid.
-    q_face_edges = q_hat[:, 1:-1, :]  # (n_lat, n_lon+1, nlev) — interior edges
+    q_hat[:, 1:-1, :]  # (n_lat, n_lon+1, nlev) — interior edges
 
     # For each edge, the left cell's right-edge is the edge value approached from left,
     # and the right cell's left-edge is approached from right.
@@ -806,7 +806,6 @@ def fct_tracer_advection(
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
         _upwind_to_u_points, _upwind_to_v_points,
     )
-    from legoesm.ocean.vertical import flux_form_vertical_tracer_advection
 
     eps = 1e-30
 
@@ -864,7 +863,7 @@ def fct_tracer_advection(
     # Total tendencies for Zalesak bounds
     dq_low = -(div_h_low + vert_div_low) / jnp.maximum(h_k, eps)
     dq_hi_h = divergence_cgrid(flux_u_hi, flux_v_hi, grid)
-    dq_hi = -(dq_hi_h + vert_div_hi) / jnp.maximum(h_k, eps)
+    -(dq_hi_h + vert_div_hi) / jnp.maximum(h_k, eps)
 
     # --- Step 3: True sign-split Zalesak (1979) limiter (issue #212) ---
     # Anti-diffusive face fluxes:

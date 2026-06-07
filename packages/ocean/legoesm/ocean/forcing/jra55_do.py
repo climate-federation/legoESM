@@ -33,7 +33,6 @@ synthetic climatology so the matrix smoke runs need no external data.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, Optional
 

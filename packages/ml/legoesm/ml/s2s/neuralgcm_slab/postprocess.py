@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -78,15 +77,6 @@ def _window_sequence(windows: Sequence[LeadTimeWindow] | Mapping[str, tuple[int,
 def _window_map(windows: Sequence[LeadTimeWindow] | Mapping[str, tuple[int, int]]) -> dict[str, tuple[int, int]]:
     sequence = _window_sequence(windows)
     return {window.name: (window.start_day, window.end_day) for window in sequence}
-
-
-def _headline_lookup(fields: Sequence[HeadlineField] = HEADLINE_FIELDS) -> dict[str, HeadlineField]:
-    return {field.name: field for field in fields}
-
-
-def _headline_from_label(label: str, fields: Sequence[HeadlineField] = HEADLINE_FIELDS) -> HeadlineField:
-    lookup = {FIELD_LABELS[field.name]: field for field in fields}
-    return lookup[label]
 
 
 def _field_label(field: HeadlineField) -> str:

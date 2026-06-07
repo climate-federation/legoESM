@@ -54,15 +54,10 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from legoesm import constants
-from legoesm.constants import g
 from legoesm.core.field import Field
-
-
-_G_EARTH = g
 
 
 @dataclass
@@ -193,7 +188,7 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
         lon_1d = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lon, lat = np.meshgrid(lon_1d, lat_1d, indexing='xy')
     else:  # cubed_sphere
-        lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
         lon = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
 
     T_cold = config.T_cold
@@ -274,73 +269,6 @@ def create_domain_config(config: LockExchangeConfig = None) -> Dict[str, Any]:
         "description": "Density-driven gravity current with vertical temperature front",
         "reference": "Petersen et al. (2015) lock exchange test case",
     }
-
-
-def compute_reference_potential_energy(state, grid_type: str, grid, z_coord,
-                                     config: LockExchangeConfig) -> float:
-    """Compute Reference Potential Energy (RPE) for mixing quantification.
-
-    RPE measures the potential energy that would remain if all water parcels
-    were adiabatically rearranged to minimize potential energy. Changes in RPE
-    indicate irreversible mixing processes.
-
-    Parameters
-    ----------
-    state : OceanState
-        Ocean state
-    grid_type : str
-        Grid type
-    grid : Grid
-        Grid object
-    z_coord : OceanZCoordinate
-        Vertical coordinate
-    config : LockExchangeConfig
-        Configuration parameters
-
-    Returns
-    -------
-    float
-        Reference potential energy [J]
-
-    Notes
-    -----
-    This is a simplified approximation that computes potential energy
-    using linearized equation of state. For full RPE calculation,
-    density sorting would be required.
-    """
-
-    # Get temperature and area fields
-    if grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_synthesis_3d
-        T = np.asarray(sh_synthesis_3d(grid, state.T_hat.data), dtype=np.float64)
-        S = np.asarray(sh_synthesis_3d(grid, state.S_hat.data), dtype=np.float64)
-        area = np.asarray(grid.area, dtype=np.float64)
-    elif grid_type == "mpas":
-        T = np.asarray(state.T.data, dtype=np.float64)
-        S = np.asarray(state.S.data, dtype=np.float64)
-        area = np.asarray(grid.areaCell, dtype=np.float64)
-    else:
-        T = np.asarray(state.T.data, dtype=np.float64)
-        S = np.asarray(state.S.data, dtype=np.float64)
-        area = np.asarray(grid.area, dtype=np.float64)
-
-    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
-    dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
-
-    # Linearized equation of state for density
-    rho0 = config.rho_reference
-    alpha_T = config.alpha_T
-    T_ref = config.T_reference
-    rho = rho0 * (1.0 - alpha_T * (T - T_ref))
-
-    # Compute potential energy: PE = g * ∫∫∫ ρ(x,y,z) * z * dV
-    spatial_shape = T.shape[:-1]
-    area_bc = area.reshape(spatial_shape)
-    pe = 0.0
-    for k in range(len(z_full)):
-        pe += float(np.nansum(rho[..., k] * z_full[k] * dz[k] * area_bc))
-
-    return _G_EARTH * pe
 
 
 def compute_mixing_metrics(diagnostics: Dict[str, list], pe_initial: float,
