@@ -35,6 +35,7 @@ from legoesm.core.operators_cdgrid import (
     cgrid_divergence,
     cgrid_mass_flux_divergence,
     cgrid_tracer_advection_fct,
+    cgrid_wet_face_masks,
     _arakawa_lamb_gradient,
     _interp_center_to_corner,
     _extrapolate_boundary_corners,
@@ -172,15 +173,22 @@ def ocean_baroclinic_tendencies_cdgrid(
     # (instead of nlev separate exchanges under the prior vmap).
     fill_TS = lambda field: fill_land_cells(field, mask, grid)
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
-    # Partial cells: pass the per-cell thickness ``h_k`` (== ``dz_ref`` for
-    # z*) so the hydrostatic EOS pressure and the baroclinic-anomaly cumsum
-    # integrate to each cell's TRUE centroid depth (below-seafloor cells have
-    # ``h_k = 0`` and contribute nothing).  ``h_actual=None`` keeps the legacy
-    # z* path bit-exact.
+    # Partial cells: pass the eta-INDEPENDENT reference thickness
+    # ``z_coord.h_partial`` (Σ_k = H_bathy per column) as ``h_actual`` so the
+    # hydrostatic EOS pressure and baroclinic-anomaly cumsum integrate to each
+    # cell's TRUE *reference* centroid depth, accounting for the partial bottom
+    # cell.  Must NOT pass the eta-stretched ``h_k`` here: the J=1/eta=0
+    # reference-pressure contract above (#109) reserves the free-surface
+    # ``-g·grad(eta)`` for the barotropic solver, so an eta-dependent thickness
+    # would reintroduce SSH into the baroclinic pressure and double-count the
+    # barotropic forcing.  Matches the proven latlon C-grid backend
+    # (ocean_pe_latlon_cgrid.py).  Below-seafloor cells carry ``h_partial = 0``
+    # and contribute nothing.  ``h_actual=None`` keeps the legacy z* path
+    # bit-exact.
     rho, rho_prime, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask, fill_TS, eos_fn, z_coord.dz_ref, rho_0, g,
         n_iter=2, hi_precision_pressure=True,
-        h_actual=(h_k if is_partial else None),
+        h_actual=(z_coord.h_partial if is_partial else None),
         is_active_3d=(active_3d if is_partial else None),
     )
 
@@ -189,13 +197,38 @@ def ocean_baroclinic_tendencies_cdgrid(
 
     # --- 5. C-grid velocities for mass transport ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
+    if is_partial:
+        # Strict wet/rock C-face closure (codex HIGH): zeroing the A-cell
+        # velocity does not by itself close the C-face between an active cell
+        # and a below-seafloor (or coastline) cell — the d->c average can leave
+        # a small nonzero face velocity, so the mass-flux divergence (w), the
+        # velocity divergence, and the tracer advection (all consume u_c/v_c)
+        # carry a spurious flux across the seafloor step.  Mask each C-face to
+        # wet iff BOTH adjacent A-cells are wet (land_mask AND above seafloor),
+        # halo-correctly across cube seams.  This is the conservation upgrade
+        # tracked in docs/md_files/ocean_faithfulness_nemo.md and closes the
+        # coastline + seafloor faces together.  z* path (is_partial False)
+        # stays bit-exact (no masking).
+        wet_cc_3d = mask_3d * active_3d
+        mask_uc, mask_vc = cgrid_wet_face_masks(wet_cc_3d, cdgrid)
+        u_c = u_c * mask_uc
+        v_c = v_c * mask_vc
 
     # --- 6. Flux divergence for vertical velocity ---
-    # Use cell-centre for flux divergence (cell-centre h_k and velocities)
+    # Use cell-centre for flux divergence (cell-centre h_k and velocities).
+    # ``cgrid_mass_flux_divergence`` reconstructs h at the faces and returns the
+    # THICKNESS-WEIGHTED divergence ∇·(h_k u_k) [m/s] (it is passed ``h_k``).
+    # ``diagnose_w_from_flux_div`` must therefore be told ``thickness_weighted=
+    # True`` so it cumsums ∇·(h u) DIRECTLY; the default (False) would multiply
+    # by ``dz_ref`` a SECOND time, inflating w by a factor ~layer-thickness
+    # (tens–hundreds of m) → a huge spurious vertical velocity → vertical
+    # advection blowup (seeds at the deepest level where the bottom-up cumsum is
+    # largest).  Matches the proven latlon C-grid (ocean_pe_latlon_cgrid.py:911)
+    # and mpas (ocean_pe_mpas.py:266) backends, which both pass the flag.
     flux_div_k = cgrid_mass_flux_divergence(
         h_k, u_c, v_c, cdgrid,
     )
-    w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
+    w = _diagnose_w_from_flux_div(flux_div_k, z_coord, thickness_weighted=True)
 
     # --- 7. Velocity divergence for skew-symmetric correction ---
     div_v = cgrid_divergence(u_c, v_c, cdgrid)

@@ -511,6 +511,45 @@ def cgrid_divergence(u_c, v_c, cdgrid):
     return (net_x + net_y) / area
 
 
+def cgrid_wet_face_masks(wet_cc, cdgrid):
+    """C-grid face wet/dry masks from a cell-centre wet mask.
+
+    A C-grid face is wet iff BOTH adjacent cell centres are wet, so the
+    flux-form mass/tracer divergence carries ZERO transport across a wet/dry
+    interface (coastline OR partial-cell seafloor step).  This STRICTLY closes
+    the face, rather than relying on a zeroed cell-centre velocity that the
+    d->c average can leave nonzero at the interface (the documented
+    ocean_pe_cdgrid seafloor/coastline leak).  Halo-correct across cube-face
+    seams: it uses the same duogrid halo (``_pad_halo_auto``) as the
+    gradient/divergence operators, so a face on a panel edge sees the true
+    neighbouring-panel wet state, not a zero-padded ghost.
+
+    Multiply ``u_c`` by ``mask_u`` and ``v_c`` by ``mask_v`` BEFORE the mass
+    flux divergence, the velocity divergence, and the tracer advection — all
+    three consume the C-grid velocities, so one masking point closes every
+    flux.
+
+    Parameters
+    ----------
+    wet_cc : array, shape (6, n, n) or (6, n, n, nlev)
+        Cell-centre wet mask (1.0 wet, 0.0 dry).  For a partial-cell column
+        pass ``land_mask * is_active`` so both coastline and below-seafloor
+        cells are dry.
+    cdgrid : cubed-sphere C-D grid.
+
+    Returns
+    -------
+    mask_u : array, shape (6, n+1, n[, nlev])  -- x-face (u-point) wet mask
+    mask_v : array, shape (6, n, n+1[, nlev])  -- y-face (v-point) wet mask
+    """
+    wet_pad = _pad_halo_auto(wet_cc, cdgrid)  # halo=1, duogrid-synced
+    # x-faces between padded cells (i-1, i); y-faces between (j-1, j).
+    # Same index convention as ``cgrid_gradient_2d``.
+    mask_u = wet_pad[:, 1:, 1:-1] * wet_pad[:, :-1, 1:-1]
+    mask_v = wet_pad[:, 1:-1, 1:] * wet_pad[:, 1:-1, :-1]
+    return mask_u, mask_v
+
+
 # ==============================================================================
 # C-grid compact gradient (cell centre → edge midpoints)
 # ==============================================================================

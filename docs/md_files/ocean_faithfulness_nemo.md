@@ -139,6 +139,56 @@ Arakawa-Lamb corner gradient (reuse grid-neutral `pgf_smc03.py`; gradient at D-g
 from the 4 cell-centre pressures evaluated at a corner-common reference depth = min of the 4
 centroids).
 
+### CODEX REVIEW of cd-grid partial-cell (f5a09943) — 3 findings, #1 FIXED this iter
+1. **HIGH FIXED** `ocean_pe_cdgrid.py:183`: passed eta-STRETCHED `h_k` as `h_actual` to
+   `iterate_eos_and_pressure_anomaly`, violating the J=1/eta=0 reference-pressure contract
+   (#109) — reintroduced SSH into the baroclinic pressure → double-counted the barotropic
+   `-g∇η`. This is itself a spurious cold-start PGF error (the class that seeds cube blowup).
+   FIX: pass eta-INDEPENDENT `z_coord.h_partial` (Σ_k=H_bathy), matching the PROVEN latlon
+   C-grid backend (`ocean_pe_latlon_cgrid.py:870`). z* path stays bit-exact (is_partial→None).
+2. **HIGH OPEN** `:435` deta_dt sums flux_div over the unclosed wet/rock C-face → small mass
+   leak across seafloor steps = the documented "strict C-face wet/rock closure" next upgrade
+   (face active iff BOTH adjacent A-cells active + cross-seam is_active halo). Multi-step.
+3. **MEDIUM DEFERRED** `vertical.py:756` `vertical_advection_ocean` uses `dz_half_ref*J` —
+   wrong at partial bottom. SHARED routine (latlon/tripole use it too, both match NEMO well)
+   → fixing risks perturbing validated grids for small bottom-cell impact; logged debt.
+**Experiments running:** 8421080 = baseline cd-grid cold-start (OLD h_k code, z* vs partial);
+8421082 = cd-grid partial leaf tests + cold-start WITH the #1 PGF fix (does removing the
+spurious eta-PGF delay/fix the marginal-sea blowup?).
+
+### C-D CUBE COLD-START — empirical (C32, dt30, woa-init) + ROOT-CAUSE FOUND
+**Baseline (8421080):** cd-grid **z\*** NaN step ~12 (surface marginal-sea spike, Persian
+Gulf lev4 65 m/s — same as deprecated FC z* step 11). cd-grid **partial cells** = smooth
+physical ramp to step ~52 (max|u|~2.5 m/s) then EXPONENTIAL growth (doubling ~8 steps)
+**seeding at lev 19 = the BOTTOM level** (46N/352E N.Atlantic), NaN step 140. ~12× delay vs
+z*, mirrors FC-partial (~132). The bottom-level seed pointed straight at the partial-cell
+bottom treatment.
+**#1 eta-PGF fix (8421082): BIT-IDENTICAL cold-start to baseline** (step132 654.11 both) —
+eta≈0 at cold start so h_k≈h_partial; #1 is correct for long (eta≠0) runs, NOT the gate.
+**#2 C-face wet/rock closure (8421084): cold-start nearly unchanged** (step132 636 vs 654) —
+the seafloor/coastline mass leak is real but SMALL; correct, not the gate.
+**ROOT CAUSE (found by backend cross-check) = vertical-velocity DOUBLE-THICKNESS bug.**
+`cgrid_mass_flux_divergence(h_k,...)` returns the THICKNESS-WEIGHTED `∇·(h u)` [m/s], but the
+cd-grid called `diagnose_w_from_flux_div(flux_div_k, z_coord)` WITHOUT `thickness_weighted=
+True` → it multiplied by `dz_ref` a SECOND time → w inflated by ~layer-thickness (10–200 m) →
+huge spurious vertical advection, worst where the bottom-up cumsum is largest = the deepest
+level (lev 19) = exactly the observed seed. The PROVEN latlon (`ocean_pe_latlon_cgrid.py:911`)
+and mpas (`ocean_pe_mpas.py:266`) BOTH pass `thickness_weighted=True`; only the cd-grid
+omitted it — which is why the cube alone was unstable while latlon/tripole match NEMO.
+FIX applied at `ocean_pe_cdgrid.py:222`. (z* path also fixed; w-unit tests call the function
+directly with default args → unaffected. Leaf tests 5/5.)
+
+### Fixes shipped this iter (codex-reviewed)
+- **#1** `ocean_pe_cdgrid.py` PGF h_actual = eta-independent `z_coord.h_partial` (was eta-
+  stretched h_k). codex: OK (matches latlon, z* bit-exact).
+- **#2** NEW `cgrid_wet_face_masks` (`operators_cdgrid.py`) + cd-grid partial wiring: strict
+  wet/rock C-face closure (face wet iff both adjacent A-cells wet, halo-correct). codex: all
+  HARD checks OK (slicing/halo/bit-exact/no-double-mask); 2 MED follow-ups: (a) tracer-FCT
+  duogrid seam flux sync [pre-existing], (b) zeta/KE use unmasked u_d/v_d while div_v masked
+  [O(coastline-err), the D-grid is already source-zeroed below seafloor].
+- **w-fix** `ocean_pe_cdgrid.py:222` add `thickness_weighted=True` (THE cold-start root cause).
+**Testing combined #1+#2+w-fix:** 8421125 (z* + partial, --years 0.0015 ≈ 30× past old NaN).
+
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
 partial-cell support** — `ocean_pe_fc.py`/`ocean_pe_cdgrid.py` hardcoded `z_coord.dz_ref`
