@@ -44,6 +44,7 @@ from legoesm.core.operators_cdgrid import (
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.ocean.eos import make_eos_fn
+from legoesm.ocean.dynamics.pgf_smc03 import reconstruct_harmonic_slopes
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     OceanPartialCellCoordinate,
@@ -69,6 +70,33 @@ from legoesm.ocean.vertical import (
 from legoesm.ocean.dynamics.barotropic import fill_land_cells
 from legoesm.ocean.physics.mixing import laplacian_viscosity_3d, vertical_diffusion
 from legoesm.grids.halo import pad_halo_4d
+
+
+# ==============================================================================
+# Helpers
+# ==============================================================================
+
+def _fill_inactive_per_level(
+    field: jnp.ndarray, wet_3d: jnp.ndarray, grid: CubedSphereGrid,
+) -> jnp.ndarray:
+    """Per-level wet/rock Neumann fill of a ``(6, n, n, nlev)`` field.
+
+    ``wet_3d`` is the 3-D wet mask (1 wet, 0 land-or-below-seafloor).  For each
+    vertical level this fills every inactive cell (coastline land AND
+    below-seafloor rock) from its ACTIVE same-level neighbours by ``vmap``-ing
+    the 2-D :func:`fill_land_cells` over the level axis.  Unlike a single
+    ``fill_land_cells(field, mask2d)`` call (which only sees the 2-D coastline
+    mask, broadcast across all levels), this closes the wet/rock SEAFLOOR-STEP
+    jump so the AL corner gradient never differences an active cell against a
+    raw below-seafloor value — the cd-grid analogue of the lat-lon wet/rock
+    FACE mask.  AD-safe (``fill_land_cells`` safe-divides via
+    ``maximum(count, 1)``).  Per-level halos are issued ``nlev`` times rather
+    than as one 4-D exchange; fine on a single device, an MPI follow-up.
+    """
+    fld = jnp.moveaxis(field, -1, 0)      # (nlev, 6, n, n)
+    wet = jnp.moveaxis(wet_3d, -1, 0)
+    out = jax.vmap(fill_land_cells, in_axes=(0, 0, None))(fld, wet, grid)
+    return jnp.moveaxis(out, 0, -1)
 
 
 # ==============================================================================
@@ -274,62 +302,143 @@ def ocean_baroclinic_tendencies_cdgrid(
     dp_dx = dp_dx.astype(T.dtype)
     dp_dy_perp = dp_dy_perp.astype(T.dtype)
 
-    # --- 10b. Adcroft-Campin partial-cell PGF correction (cd-grid AL corners) ---
+    # --- 10b. Partial-cell horizontal PGF correction (cd-grid AL corners) ---
+    # On partial-cell topography the 4 cells around a D-grid corner sit at
+    # DIFFERENT geometric centroid depths, so the plain AL gradient of p_prime
+    # (section 10, differenced at the same level index k) carries a residual
+    # partial-cell PGF error → spurious bottom-trapped flow.  VERIFIED to seed
+    # the cd-grid cube cold-start blowup: a vertically-STRATIFIED rest column
+    # over the real bathy with ZERO forcing (exact PGF must be 0, ∇_h ρ=0 at
+    # constant z) blows up at the bottom level ~step 180 — the canonical
+    # Adcroft-Campin partial-cell rest test.  Two schemes (config.pgf_scheme),
+    # BOTH gated on ``is_partial`` so the pure-z* path is bit-exact (z* never
+    # enters this branch).  Both decompose the corner gradient EXACTLY into
+    # existing-operator calls because ``_arakawa_lamb_gradient`` is LINEAR and
+    # the corner reference depth z_ref is constant across a corner's 4 cells.
+    # z_ref uses the eta=0 / J=1 reference centroid (matching p_prime → the
+    # correction is eta-independent) measured as an ANOMALY from the full-column
+    # reference centroid ``cref`` (cumsum(dz_ref) − 0.5·dz_ref) so it is
+    # IDENTICALLY zero on full/flat columns (cent_anom ≡ 0 → z_ref ≡ 0): the
+    # flat-bottom partial path stays bit-exact vs z* and the smc03 quadratic
+    # ``z_ref²`` term cannot amplify FP noise there.
+    #   "adcroft": Adcroft & Campin 2004 LINEAR depth shift
+    #              p_eff = p' − g·rho'·(centroid − z_ref) ADDED to dp:
+    #              corr = −AL_grad(g·rho'·centroid) + z_ref·AL_grad(g·rho').
+    #              Leaves a 2nd-order residual for a stratified column (the
+    #              spurious bottom PGF above) → not faithful on the cube.
+    #   "smc03"  : full Shchepetkin & McWilliams 2003 density-Jacobian PGF
+    #              REPLACING dp — see below.  Matches the proven latlon/tripole.
     if is_partial:
-        # On partial-cell topography the 4 cells around a D-grid corner sit at
-        # DIFFERENT geometric centroid depths, so the plain AL gradient of
-        # p_prime (which differences them at the same level index k) carries a
-        # residual partial-cell PGF error → spurious bottom-trapped flow (the
-        # cd-grid cube cold-start blowup seeds at the deepest level).  Adcroft &
-        # Campin (2004): shift each cell's baroclinic pressure to a corner-common
-        # reference depth z_ref = min of the 4 centroids before differencing,
-        # p_eff = p' − g·rho'·(centroid − z_ref).  Because _arakawa_lamb_gradient
-        # is LINEAR and z_ref is constant across a corner's 4 cells, the
-        # correction to add to (dp_dx, dp_dy_perp) decomposes EXACTLY into
-        # existing-operator calls:
-        #   corr = −AL_grad(g·rho'·centroid) + z_ref_corner · AL_grad(g·rho').
-        # The z* path is bit-exact because the ``is_partial`` gate skips this
-        # branch entirely (z* never enters here).  Analytically corr also →0 for
-        # a z* coord — every cell at level k shares one centroid depth so
-        # AL_grad(g·rho'·centroid)=centroid·AL_grad(g·rho')=z_ref·AL_grad(g·rho')
-        # — but that analytic identity is NOT relied on for bit-exactness (FP
-        # reassociation of fill(g·rho·c) vs c·fill(g·rho) would break it if the
-        # branch were ever forced on uniform centroids).  Mirrors the proven
-        # latlon adcroft path
-        # (ocean_pe_latlon_cgrid.py:1139).  centroid + rho_prime use the eta=0 /
-        # J=1 reference (matching p_prime) so the correction is eta-independent.
-        centroid0 = compute_centroid_depth(
-            jnp.zeros_like(eta), H_bathy, z_coord,
-            min_water_column_m=config.min_water_column_m,
-        )
-        # Measure the centroid as an ANOMALY from the full-column reference
-        # centroid (cumsum(dz_ref) − 0.5·dz_ref, the depth a FULL cell at level
-        # k sits at).  Subtracting this per-level constant leaves the Adcroft
-        # correction analytically unchanged (it cancels between the two terms
-        # — see corr below), but makes it IDENTICALLY zero (not just FP-zero) on
-        # full/flat columns where centroid0 == cref exactly: cent_anom ≡ 0 and
-        # z_ref_anom = corner_min(cent_anom) ≡ 0, so corr ≡ 0 term-by-term →
-        # the flat-bottom partial path stays BIT-EXACT vs z* (avoids the
-        # fill(g·rho·c)-vs-c·fill(g·rho) FP reassociation).
+        pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
+        if pgf_scheme not in ("adcroft", "smc03"):
+            # Static config value -> validate at fn entry (a typo must fail loudly,
+            # not silently fall back to adcroft and disable the faithful scheme).
+            raise ValueError(
+                f"Unknown cd-grid pgf_scheme {pgf_scheme!r}; "
+                "expected 'adcroft' or 'smc03'.")
         cref = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
-        cent_anom = centroid0 - cref
-        g_rho = fill_land_cells(g * rho_prime, mask, grid)
-        g_rho_cent = fill_land_cells(g * rho_prime * cent_anom, mask, grid)
-        z_ref_corner = cgrid_corner_min(cent_anom, cdgrid)
-        n_f_c, n_i_c, n_j_c, nlev_c = g_rho.shape
-        _gr_flat = jnp.stack([g_rho, g_rho_cent], axis=-1).reshape(
-            n_f_c, n_i_c, n_j_c, nlev_c * 2)
-        _dgr_dx_flat, _dgr_dy_flat = _arakawa_lamb_gradient(_gr_flat, cdgrid)
-        _dgr_dx = _dgr_dx_flat.reshape(
-            _dgr_dx_flat.shape[0], _dgr_dx_flat.shape[1],
-            _dgr_dx_flat.shape[2], nlev_c, 2)
-        _dgr_dy = _dgr_dy_flat.reshape(
-            _dgr_dy_flat.shape[0], _dgr_dy_flat.shape[1],
-            _dgr_dy_flat.shape[2], nlev_c, 2)
-        corr_dx = (-_dgr_dx[..., 1] + z_ref_corner * _dgr_dx[..., 0]).astype(T.dtype)
-        corr_dy = (-_dgr_dy[..., 1] + z_ref_corner * _dgr_dy[..., 0]).astype(T.dtype)
-        dp_dx = dp_dx + corr_dx
-        dp_dy_perp = dp_dy_perp + corr_dy
+        if pgf_scheme == "smc03":
+            # S&M03 density-Jacobian PGF on the AL corners.  Per-cell geometry
+            # from the partial thicknesses (kernel convention z_c = z_top + h/2,
+            # positive down, eta=0).  rho_prime is the baroclinic anomaly already
+            # extrapolated into the rock (section 1b) and sigma=0 below seafloor,
+            # so the AL stencil never imports a raw below-seafloor density.
+            h_part = z_coord.h_partial
+            z_top = jnp.cumsum(h_part, axis=-1) - h_part
+            z_c = z_top + 0.5 * h_part
+            sigma = reconstruct_harmonic_slopes(rho_prime, z_c, active_3d)
+            cell_dP = g * h_part * rho_prime
+            P_top = jnp.cumsum(cell_dP, axis=-1) - cell_dP
+            cent_anom = z_c - cref
+            # Wet-aware corner reference (codex HIGH): exclude below-seafloor
+            # (inactive) cells from the corner-min so z_ref is set by an ACTIVE
+            # cell only.  Active cells at level k share the z* cell-top and have
+            # cent_anom <= 0 (full cells 0, partial-bottom cells negative), so a
+            # BOUNDED positive sentinel (max|cent_anom|+1, ~H_bathy scale) makes
+            # inactive cells never the min while staying finite — the z_ref^2
+            # term in the decomposition then cannot overflow (a large sentinel
+            # leaks huge values through the AL halo / corner->centre average).
+            # All-rock corners take the sentinel but carry no active neighbour
+            # (sigma=0 -> c=0 there) and are gated to zero at section 18.
+            _sent = jnp.max(jnp.abs(cent_anom)) + 1.0
+            _ca_active = jnp.where(active_3d > 0.5, cent_anom, _sent)
+            z_ref_corner = cgrid_corner_min(_ca_active, cdgrid)
+            # The in-cell-k pressure reconstruction
+            #   P_k(z) = P_top_k + g·(z − z_top)·[rho' + 0.5·σ·(z + z_top − 2 z_c)]
+            # is QUADRATIC in z; rewrite in the centroid anomaly ẑ = z − cref as
+            #   P_k = a + b·ẑ + c·ẑ²
+            # so the corner gradient at the corner-common z_ref decomposes into
+            #   dp = AL_grad(a) + z_ref·AL_grad(b) + z_ref²·AL_grad(c).
+            # For a horizontally-uniform stratification a,b become horizontally
+            # uniform among the active cells (shifted-centroid columns reconstruct
+            # ρ identically — the S&M03 harmonic-slope property), so AL_grad → 0
+            # and the rest-state PGF vanishes (the Adcroft linear shift does not
+            # achieve this for stratified columns).  Evaluating P_k in-cell (not
+            # via the argmax-enclosing-cell of compute_pressure_at_target_smc03)
+            # is what makes the polynomial decomposition exact; z_ref = corner-min
+            # of the 4 cent_anom keeps the target inside every cell's range
+            # (the shallower-centroid convention; avoids the asymmetric seafloor
+            # clamp documented for the latlon midpoint target).
+            a_p = (P_top + g * (cref - z_top)
+                   * (rho_prime + 0.5 * sigma * (cref + z_top - 2.0 * z_c)))
+            b_p = g * (rho_prime + sigma * (cref - z_c))
+            c_p = 0.5 * g * sigma
+            # Wet/rock HORIZONTAL closure of the polynomial coefficients before
+            # the AL gradient: fill EVERY inactive cell (coastline land AND
+            # below-seafloor rock) at each level from its active same-level
+            # neighbours, using the 3-D wet mask ``wet_cc_3d`` (= mask·active_3d,
+            # built for the C-face closure in §5).  This is what removes the
+            # seafloor-STEP PGF: a corner straddling an active/rock step would
+            # otherwise difference a's reconstruction against a raw rock value,
+            # leaving a spurious bottom-trapped PGF (the cd-grid analogue of the
+            # lat-lon wet/rock FACE mask).  The coefficients are filled (NOT a
+            # large sentinel — that overflowed via the z_ref^2 term), so on a
+            # horizontally-uniform stratification the filled inactive cells match
+            # their active neighbours and AL_grad(a,b,c) → 0 across the step.
+            a_f = _fill_inactive_per_level(a_p, wet_cc_3d, grid)
+            b_f = _fill_inactive_per_level(b_p, wet_cc_3d, grid)
+            c_f = _fill_inactive_per_level(c_p, wet_cc_3d, grid)
+            n_f_s, n_i_s, n_j_s, nlev_s = a_f.shape
+            _abc_flat = jnp.stack([a_f, b_f, c_f], axis=-1).reshape(
+                n_f_s, n_i_s, n_j_s, nlev_s * 3)
+            _dabc_dx_flat, _dabc_dy_flat = _arakawa_lamb_gradient(_abc_flat, cdgrid)
+            _dabc_dx = _dabc_dx_flat.reshape(
+                _dabc_dx_flat.shape[0], _dabc_dx_flat.shape[1],
+                _dabc_dx_flat.shape[2], nlev_s, 3)
+            _dabc_dy = _dabc_dy_flat.reshape(
+                _dabc_dy_flat.shape[0], _dabc_dy_flat.shape[1],
+                _dabc_dy_flat.shape[2], nlev_s, 3)
+            zr = z_ref_corner
+            dp_dx = (_dabc_dx[..., 0] + zr * _dabc_dx[..., 1]
+                     + zr * zr * _dabc_dx[..., 2]).astype(T.dtype)
+            dp_dy_perp = (_dabc_dy[..., 0] + zr * _dabc_dy[..., 1]
+                          + zr * zr * _dabc_dy[..., 2]).astype(T.dtype)
+        else:
+            # Adcroft & Campin 2004 linear depth-shift correction ADDED to the
+            # section-10 plain AL gradient.  Mirrors the latlon adcroft path
+            # (ocean_pe_latlon_cgrid.py:1139).
+            centroid0 = compute_centroid_depth(
+                jnp.zeros_like(eta), H_bathy, z_coord,
+                min_water_column_m=config.min_water_column_m,
+            )
+            cent_anom = centroid0 - cref
+            g_rho = fill_land_cells(g * rho_prime, mask, grid)
+            g_rho_cent = fill_land_cells(g * rho_prime * cent_anom, mask, grid)
+            z_ref_corner = cgrid_corner_min(cent_anom, cdgrid)
+            n_f_c, n_i_c, n_j_c, nlev_c = g_rho.shape
+            _gr_flat = jnp.stack([g_rho, g_rho_cent], axis=-1).reshape(
+                n_f_c, n_i_c, n_j_c, nlev_c * 2)
+            _dgr_dx_flat, _dgr_dy_flat = _arakawa_lamb_gradient(_gr_flat, cdgrid)
+            _dgr_dx = _dgr_dx_flat.reshape(
+                _dgr_dx_flat.shape[0], _dgr_dx_flat.shape[1],
+                _dgr_dx_flat.shape[2], nlev_c, 2)
+            _dgr_dy = _dgr_dy_flat.reshape(
+                _dgr_dy_flat.shape[0], _dgr_dy_flat.shape[1],
+                _dgr_dy_flat.shape[2], nlev_c, 2)
+            corr_dx = (-_dgr_dx[..., 1] + z_ref_corner * _dgr_dx[..., 0]).astype(T.dtype)
+            corr_dy = (-_dgr_dy[..., 1] + z_ref_corner * _dgr_dy[..., 0]).astype(T.dtype)
+            dp_dx = dp_dx + corr_dx
+            dp_dy_perp = dp_dy_perp + corr_dy
 
     # --- 11. Vorticity + divergence at corners (batched) ---
     # Batch the (zeta, div_v) center-to-corner interpolation: both are

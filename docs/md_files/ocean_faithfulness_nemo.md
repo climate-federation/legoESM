@@ -245,11 +245,138 @@ momentum dissipation (vertical viscosity / bottom drag — plumb into build_cube
 (3) barotropic-baroclinic split coupling under fv3sw at cold start. Validation 8421407 (leaf
 z*-bit-exact reformulated + decomposition test) gates the PGF-correction commit.
 
-### The 4 cd-grid fixes this session (all real, codex-clean — keep regardless of cube gate)
-w double-thickness (committed d45234c7) · C-face wet/rock closure (d45234c7) · partial PGF
-ref-thickness (d45234c7) · Adcroft partial-cell PGF corner correction (pending commit). These
-make the cd-grid ocean substantially more correct; the cold-start gate is now the fast-mode
-dissipation/integrator, not these.
+### The 4 cd-grid fixes this session (all real, codex-clean, COMMITTED)
+w double-thickness (d45234c7) · C-face wet/rock closure (d45234c7) · partial PGF ref-thickness
+(d45234c7) · Adcroft partial-cell PGF corner correction (0bdfc496, 9/9 tests). These make the
+cd-grid ocean substantially more correct; the cold-start gate is the fast-mode dissipation, not
+these.
+
+### CUBE COLD-START — lever results (corrected cd-grid stack, C32, dt30, woa, partial)
+- forward-Euler: NaN step 182 · RK3 (8421408): NaN step **210** (delayed ~15%, NOT solved →
+  not an integration-order problem) · resolution C48/C96 (8421377): **resolution-independent**
+  (~180-200) · Adcroft PGF (8421374): slowed growth, NaN 182. **All levers fail** → undamped
+  GRID-SCALE fast mode (doubling ~8 steps ≈ gravity-wave timescale), equator-seeding.
+- Hypotheses: (i) barotropic fast external-gravity-wave mode under fv3sw split (harmonic
+  baroclinic A_h can't damp the barotropic); (ii) missing scale-selective dissipation
+  (biharmonic/Smagorinsky) — the cube external-physics path applies ONLY a fixed CFL-capped
+  harmonic A_h (~1.6e8 at C32), bypassing the dycore biharmonic/smag that stabilises the proven
+  tripole/latlon (`--C-smag-lap 3.0`). NOTE: estimated harmonic damping timescale at grid scale
+  ~60s < growth ~350s, so harmonic SHOULD damp a baroclinic grid mode → suggests the mode is
+  BAROTROPIC (not reached by baroclinic A_h).
+- **Mechanism discriminator (8421411): DECISIVE.** ARM A rest-state IC (uniform T/S, NO fronts)
+  → blows within ~30 steps (FASTER than WOA's 182) ⇒ the fast mode is **INTRINSIC** (barotropic/
+  numerical over topography+wind forcing), NOT the WOA-front baroclinic adjustment (rules out
+  PGF/front cause; caveat: confirm rest_state_ocean partial-cell setup isn't itself the artifact).
+  ARM B WOA + **velocity-cap 3 m/s → STABLE to step 308+** (max|u| PEGGED at 3.0, SST/SSS evolve)
+  = first cube cold-start that completes. Band-aid only (clips momentum at the unstable cells →
+  NOT faithful), but proves the integrator runs once the spike is bounded.
+- **CONCLUSION:** cube cold-start = an intrinsic undamped GRID-SCALE fast mode; faithful fix =
+  proper SCALE-SELECTIVE dissipation, not a clip. `LateralMixingConfig` supports harmonic/
+  **biharmonic** (B_h_momentum, CFL-capped)/gm_redi; the cube external-physics path uses harmonic
+  ONLY. **NEXT LEVER (faithful, the tripole smag-cap analogue): enable biharmonic momentum on the
+  cd-grid** in `build_cubed_sphere` (verify `biharmonic_lateral_mixing` supports the cdgrid grid;
+  add a leaf test) + retest cold-start. If the mode survives biharmonic too → it is BAROTROPIC
+  (fv3sw split): target the barotropic div-damp/time-filter / the wind-stress→cd-grid-momentum
+  projection. Velocity-cap remains an opt-in fallback to obtain a (non-faithful) completable run.
+
+### CUBE COLD-START iter (2026-06-07) — ROADMAP CORRECTED + seed-isolation job
+Code-map of the cd-grid dissipation surface (5-agent workflow) overturns two doc assumptions:
+- **Biharmonic momentum is ALREADY wired** on the cd-grid — `--cube-hyperdiff B` →
+  `config.hyperdiff_coeff` → `hyperdiffusion_3d` (`ocean_pe_cdgrid.py:494`), applied to the
+  FULL 3D cell-centre velocity (barotropic component INCLUDED), NOT gated by physics_fn
+  (the "if A_h>0 or hyperdiff_coeff>0" branch at :459 always runs). The "next lever = enable
+  biharmonic" was already implemented; only the OLD FC A-grid tested it (bit-identical). NOT
+  yet tested on the corrected cd-grid. No CFL cap on this path → must pick B below the explicit
+  ∇⁴ CFL (~6e18 at C32/dt30) by hand.
+- **fv3sw barotropic ALREADY has full FV3 dissipation** — div-damp (`barotropic_sw_div_damp_factor=120`,
+  ocean-tuned vs atmos 8×), SSP-RK3 time integrator, adaptive Smagorinsky (`dddmp`), vorticity
+  damp (`barotropic_sw_damp_v=0.030`); `barotropic_substeps_fv3sw` (`barotropic_cgrid.py:314`) →
+  FV3 SW core (`shallow_water_fv3_cdgrid.py`). So "barotropic missing div-damp" is FALSE; the
+  barotropic solver is well-conditioned. (`div_damp_2/4` OceanConfig fields are NOT consumed on
+  the cube — dead knobs there; only latlon/mpas barotropic use `barotropic_div_damp`.)
+- **Wind-stress→cube projection = HIGH checkerboard risk** (`external.py:94-127`,
+  `omip2_applicator.py:363`): CORE-II tau sampled NEAREST-NEIGHBOUR to cube cell centres, applied
+  AT centres with NO spatial smoothing, top-layer only; the cd-grid then projects this cell-centre
+  forcing to D-grid corners. ARM A (rest+partial-topo+wind) blew <step 30 — FAR faster than WOA's
+  182 → wind injection is the prime intrinsic-seed suspect.
+**Job 8421758 — DECISIVE.** Seed isolation (`--forcing-ramp-days 100000`⇒forcing≈0):
+| ARM | setup | result |
+|---|---|---|
+| 1 | rest + FLAT + no-forcing | **STABLE** — max\|u\| 0.005→0.022 m/s over 700 steps (clean) |
+| 2 | rest + FLAT + wind | **STABLE** — max\|u\|~0.02 m/s bounded |
+| 3 | rest + partial-TOPO + no-forcing | **BLOWS** NaN~182, seed lev19(bottom) 46N/352E→lev14 Gibraltar |
+| 4/5 | WOA + biharmonic 1e18/1e17 | **BLOW** ~145 (same seed) |
+**CONCLUSION (locks the cube gate):** the seed is **TOPOGRAPHY at rest**, NOT wind (flat+wind
+stable), NOT pure numerics (flat stable), NOT baroclinic fronts (ARM3 has no WOA). Biharmonic
+momentum does NOT damp it (can't fix a PGF error). `rest_state_ocean` = horizontally-UNIFORM but
+vertically-STRATIFIED column (exp T 2→20°C) → exact horizontal PGF MUST be 0 (∇_h ρ=0 at constant
+z); ARM3 blows ⇒ the **cd-grid partial-cell horizontal PGF error** over real bathy is the gate,
+bottom-intensified, ≫ tripole's smc03 rest-test (1e-6 m/s²). The section-10b Adcroft-Campin
+correction is the LINEAR depth shift → leaves a 2nd-order residual for stratified columns. KEY:
+**both proven grids use `--pgf-scheme smc03`, NOT adcroft** (line 60); the cd-grid ONLY has
+Adcroft. **FIX = port the smc03 (Shchepetkin-McWilliams 2003 density-Jacobian) PGF to the cd-grid
+AL corners** (reuse grid-neutral `pgf_smc03.py`; latlon ref `ocean_pe_latlon_cgrid.py:1097-1144`).
+This RETIRES the "intrinsic fast mode / needs full stack" framing — the cube gate is a single,
+classic partial-cell PGF problem. Validation gate = stratified-rest step-1 PGF→~0 (ARM3 becomes
+stable). All prior cube levers (RK3, resolution, viscosity, biharmonic, velocity-cap, wind) were
+chasing a PGF error.
+
+**smc03 PGF PORTED to the cd-grid (this iter) — IMPLEMENTED, validation pending (job 8421811).**
+`ocean_pe_cdgrid.py` §10b now branches on `config.pgf_scheme`: `"smc03"` REPLACES the corner PGF
+with the S&M03 density-Jacobian; `"adcroft"` (default) keeps the linear correction. The smc03
+in-cell-k pressure reconstruction `P_k(z)=P_top+g(z−z_top)[ρ'+0.5σ(z+z_top−2z_c)]` is QUADRATIC in
+z; in the centroid anomaly ẑ=z−cref it is `a+bẑ+cẑ²`, so the AL-corner gradient decomposes EXACTLY
+(AL_grad linear, z_ref=`cgrid_corner_min(cent_anom)` corner-constant) into
+`AL_grad(a)+z_ref·AL_grad(b)+z_ref²·AL_grad(c)` — the proven Adcroft linear decomposition extended
+by one order (reuses `cgrid_corner_min`+batched `_arakawa_lamb_gradient`+`reconstruct_harmonic_slopes`).
+`a=P_top+g(cref−z_top)(ρ'+0.5σ(cref+z_top−2z_c))`, `b=g(ρ'+σ(cref−z_c))`, `c=0.5gσ`. Rest cancels:
+horizontally-uniform stratification → a,b uniform among active cells → AL_grad=0. Gated `is_partial`
+(z* bit-exact). New leaf tests: linear-ρ rest PGF→~0 ≫ adcroft residual (canonical), z* gated-off,
+AD-finite. CLI `--cube-pgf-scheme smc03`; config default "adcroft" (preserves flat-bit-exact test).
+
+**Codex round-1 (8421811): algebra/decomposition/units/sign/AD/gating ALL confirmed correct.**
+2 findings fixed: (HIGH) `cgrid_corner_min` included below-seafloor cells → z_ref could be pinned by
+a rock cell → made z_ref **wet-aware** (bounded sentinel `max|cent_anom|+1`; corner-min over active
+only). (LOW) unknown `pgf_scheme` → `raise ValueError`. **AD fixed** (8421864 passes
+`test_smc03_partial_path_differentiable`). **smc03 cancels the partial-bottom-centroid PGF** — new
+ALL-WET-partial canonical test (`..._rest_pgf_vanishes`) machine-zero, ≫ adcroft residual.
+**EMPIRICAL GATE (8421864): smc03 alone is NOT enough.** rest+topo+no-forcing still NaN @182 (seed
+back at **lev19 bottom 46N/352.6E N.Atlantic** = steep topo = seafloor STEPS), and
+`test_smc03_beats_adcroft_on_stepped_bathy` FAILED (smc03 4.40e-7 > adcroft 2.51e-7) — the real gate
+is the **seafloor-STEP PGF** (active/rock corners), not the partial-bottom centroid. The earlier
+"wet/rock closure added" claim was DOC-ahead-of-code: the code only filled the 2-D coastline mask.
+
+**WET/ROCK CLOSURE NOW IMPLEMENTED (this iter, validation 8421971).** New module helper
+`_fill_inactive_per_level(field, wet_3d, grid)` = per-level `jax.vmap` of the 2-D `fill_land_cells`
+over the level axis with the 3-D wet mask `wet_cc_3d`(=`mask·active_3d`, reused from the §5 C-face
+closure): fills EVERY inactive cell (coastline AND below-seafloor rock) at each level from active
+same-level neighbours, so the smc03 a,b,c the AL corner gradient differences carry no wet/rock step
+jump (cd-grid analogue of the latlon wet/rock FACE mask). Coefficients filled (NOT a large sentinel —
+that overflowed via z_ref²). AD-safe (`fill_land_cells` safe-divides via `maximum(count,1)`). z*
+untouched (whole branch gated `is_partial`). **Codex round-2 (this iter): CLEAN** except 1 MEDIUM —
+the fill pads via `grid.halo_interp_offsets` while the AL gradient pads via `_pad_halo_auto(cdgrid)`
+(prefers `cdgrid.base.duogrid`). MOOT for the current cube path: `base.duogrid is None` (the T/S
+duogrid-halo upgrade is tracked future work, run_omip:456) so both fall back to the SAME
+`halo_interp_offsets`; AND it is the EXISTING cd-grid convention (base `p_prime` :251 + adcroft both
+`fill_land_cells(...,grid)`). FOLLOW-UP: when the T/S-duogrid upgrade lands, make the fill
+duogrid-aware too. PERF debt: per-level fill issues nlev halos (single-GPU fine, MPI 4-D follow-up).
+
+**RESULT (8421971): closure cuts the rest PGF ~30× — seafloor-step PGF SOLVED globally; gate
+localizes to the MEDITERRANEAN.** Leaf **9/9 pass** (incl. `test_smc03_beats_adcroft_on_stepped_bathy`
+now smc03<adcroft). rest+topo+no-forcing: step-14 max|u| 0.12→**0.0095**, step-84 13.5→**0.37 m/s**
+(broad bottom N.Atlantic mode GONE) — but a residual ignites ~step 140 at **lev14 mid-depth
+40.7N/4.2E = NW Med** → NaN ~220. WOA: same, seed lev11 46.2N/7.4E (Ligurian/Med) → NaN ~210.
+**Both rest & WOA now seed at the single under-resolved Med basin** (C32 ~2.8°, ~2-3 cells, Gibraltar
+sill + deep basin walls), not the global bottom. The closure resolved the GLOBAL seafloor-step PGF;
+the last holdout is the steepest marginal sea — the classic sub-grid Med problem (extensively
+documented in the FC-A-grid history below). **NEXT LEVER (faithful): lateral dissipation.** The cube
+external-physics path runs ONLY a CFL-capped harmonic A_h=1e9 (`--cube-Ah`); it LACKS the
+scale-selective biharmonic/Smagorinsky that stabilises the proven tripole/latlon (`--C-smag-lap 3.0`).
+Biharmonic is wired on the cd-grid (`--cube-hyperdiff`→`hyperdiffusion_3d`, full 3-D velocity, no CFL
+cap → pick B<∇⁴CFL~6e18 at C32/dt30 by hand). Earlier biharmonic (8421758 arms 4/5: 1e18/1e17) blew
+~145 — but that was with the 30×-LARGER PGF error; retest on the now-much-smaller residual. Sweep
+job: rest+topo+no-forcing+smc03(closure)+`--cube-hyperdiff` {1e17,1e18,5e18} (+RK3) → does any keep
+the Med mode bounded past ~300?
 
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO

@@ -167,6 +167,19 @@ class OceanConfig(NamedTuple):
     velocity_ceiling: float = 0.0
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
+    # Partial-cell horizontal pressure-gradient scheme on the cd-grid AL
+    # corners (only active with an OceanPartialCellCoordinate; pure-z* runs
+    # ignore it and stay bit-exact).  ``"adcroft"``: Adcroft & Campin 2004
+    # LINEAR depth-shift correction added to the plain AL gradient of p'.
+    # ``"smc03"``: full Shchepetkin & McWilliams 2003 density-Jacobian PGF
+    # (harmonic-mean monotonized slope reconstruction).  The linear Adcroft
+    # correction leaves a 2nd-order residual for a vertically-stratified
+    # rest column over partial topography (the spurious bottom-trapped PGF
+    # that seeds the cube cold-start blowup); smc03 reconstructs ρ(z) so
+    # adjacent shifted-centroid columns evaluate pressure identically and
+    # the rest-state PGF vanishes.  Mirrors the proven latlon/tripole path
+    # (which default to "smc03").
+    pgf_scheme: str = "adcroft"
     barotropic_staggering: str = "a_grid"  # "a_grid", "c_grid" or "fv3sw"
     # Damping for the "fv3sw" barotropic (the validated cube SW core).  The
     # atmosphere-calibrated iter1009 preset (div_damp_factor=8) is too weak for

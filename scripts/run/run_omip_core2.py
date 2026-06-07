@@ -789,7 +789,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        flat_bottom: bool = False, A_h=None, hyperdiff_coeff=None,
                        div_damp_2=None, div_damp_4=None, baroclinic_rk3=None,
                        mask_marginal_seas=False, dt=30.0,
-                       velocity_ceiling=None, partial_cell=False):
+                       velocity_ceiling=None, partial_cell=False,
+                       pgf_scheme=None):
     """Build a cubed-sphere ocean (FV3 C-D grid baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -850,7 +851,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                               ("div_damp_2", div_damp_2),
                               ("div_damp_4", div_damp_4),
                               ("baroclinic_rk3", baroclinic_rk3),
-                              ("velocity_ceiling", velocity_ceiling)) if v is not None}
+                              ("velocity_ceiling", velocity_ceiling),
+                              ("pgf_scheme", pgf_scheme)) if v is not None}
     if _ovr:
         config = config._replace(**_ovr)
         print(f"[setup] cube config override: {_ovr}")
@@ -1106,6 +1108,11 @@ def main() -> int:
                    help="cube horizontal viscosity A_h override [m^2/s].")
     p.add_argument("--cube-hyperdiff", type=float, default=None,
                    help="cube biharmonic hyperdiffusion coeff override.")
+    p.add_argument("--cube-pgf-scheme", type=str, default=None,
+                   choices=[None, "adcroft", "smc03"],
+                   help="cube partial-cell PGF scheme on the cd-grid AL corners "
+                        "(adcroft=linear shift [default]; smc03=density-Jacobian, "
+                        "the faithful path that passes the stratified-rest test).")
     p.add_argument("--cube-divdamp2", type=float, default=None,
                    help="cube 2nd-order divergence damping [m^2/s].")
     p.add_argument("--cube-divdamp4", type=float, default=None,
@@ -1368,6 +1375,7 @@ def main() -> int:
             dt=args.dt,
             velocity_ceiling=args.cube_velocity_ceiling,
             partial_cell=args.partial_cell,
+            pgf_scheme=args.cube_pgf_scheme,
         )
         app_grid_type = "cubed_sphere"
     else:

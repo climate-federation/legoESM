@@ -169,6 +169,145 @@ def test_inactive_TS_poison_does_not_reach_active_tendencies():
         )
 
 
+def _linear_rho_cfg(scheme):
+    """OceanConfig with a LINEAR EOS (rho pressure-independent) so a linear
+    T(z) profile gives an exactly-linear rho(z) — the regime where smc03's
+    harmonic-slope reconstruction is exact and the rest PGF must vanish."""
+    from legoesm.ocean.eos import LinearEOSConfig
+    return OceanConfig(A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0, hyperdiff_coeff=0.0,
+                       eos="linear", eos_linear=LinearEOSConfig(),
+                       pgf_scheme=scheme)
+
+
+def _linear_strat_rest_state(grid, zc, pc, H, dTdz=-2.0e-3):
+    """Horizontally-uniform, vertically-LINEAR density rest column on an
+    all-ocean cube with sloped bathy.  T is set linear in each cell's PARTIAL
+    centroid depth so the in-situ density field is a single linear function of
+    physical depth (rho sampled at the column-specific centroids).  The exact
+    horizontal PGF is therefore ZERO at every depth (∇_h rho|_z = 0)."""
+    st = rest_state_ocean(grid, zc, H_max=HMAX)
+    land = jnp.ones((6, N, N), dtype=st.land_mask.data.dtype)
+    h_part = np.asarray(pc.h_partial)
+    z_c = np.cumsum(h_part, axis=-1) - 0.5 * h_part        # (6,N,N,NLEV), +down
+    T_lin = 15.0 + dTdz * z_c                               # linear in depth
+    return st._replace(
+        land_mask=st.land_mask.replace(data=land),
+        H_bathy=st.H_bathy.replace(data=jnp.asarray(H)),
+        T=st.T.replace(data=jnp.asarray(T_lin, dtype=st.T.data.dtype)),
+        S=st.S.replace(data=jnp.full((6, N, N, NLEV), 35.0,
+                                     dtype=st.S.data.dtype)),
+    )
+
+
+def _allwet_partial_bathy(grid):
+    """Varying bottom-cell thickness with NO column losing a level (every column
+    keeps all NLEV active), so there are no active/inactive corners — isolates
+    the partial-bottom-centroid PGF (the smc03 cancellation) from the separate
+    wet/rock seafloor-step PGF."""
+    lat = np.asarray(grid.lat)
+    dz = HMAX / NLEV
+    # H in ((NLEV-1)·dz, HMAX]  ->  bottom partial-cell thickness in (0, dz].
+    return ((NLEV - 1) * dz + 0.5 * dz
+            + 0.49 * dz * np.sin(2.0 * lat)).astype(np.float64)
+
+
+def _maxacc_active(t, active):
+    return max(np.max(np.abs(np.asarray(t.du_dt.data)[active])),
+               np.max(np.abs(np.asarray(t.dv_dt.data)[active])))
+
+
+def test_smc03_linear_rho_rest_pgf_vanishes_and_beats_adcroft():
+    """THE canonical Adcroft-Campin partial-cell test: a vertically-linear-
+    density rest column over an ALL-WET partial bathy (varying bottom-cell
+    thickness, no level loss).  smc03 is EXACT for linear rho(z) (harmonic-slope
+    reconstruction) so the spurious rest PGF acceleration is ~machine-zero; the
+    linear Adcroft correction leaves a 2nd-order residual ∝ slope·(z_ref−z_c)²
+    — the bottom-trapped spurious PGF that seeds the cube cold-start blowup.
+    Validates --cube-pgf-scheme smc03."""
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    zc = create_ocean_z_star(n_levels=NLEV, H_max=HMAX)
+    H = _allwet_partial_bathy(grid)
+    pc = create_partial_cell_coordinate(zc, jnp.asarray(H))
+    assert np.asarray(pc.is_active).all(), (
+        "all-wet bathy must keep every cell active (no seafloor steps)")
+    st = _linear_strat_rest_state(grid, zc, pc, H)
+
+    active = np.asarray(pc.is_active)
+    t_ad = ocean_baroclinic_tendencies_cdgrid(
+        st, grid, pc, cdgrid, _linear_rho_cfg("adcroft"))
+    t_smc = ocean_baroclinic_tendencies_cdgrid(
+        st, grid, pc, cdgrid, _linear_rho_cfg("smc03"))
+    ad, smc = _maxacc_active(t_ad, active), _maxacc_active(t_smc, active)
+    assert smc < 1.0e-9, (
+        f"smc03 linear-rho rest PGF acceleration must ~vanish, got {smc:.3e} m/s^2")
+    assert ad > 20.0 * smc, (
+        f"adcroft residual ({ad:.3e}) should dwarf smc03 ({smc:.3e}) — "
+        "the spurious partial-cell PGF smc03 removes")
+
+
+def test_smc03_beats_adcroft_on_stepped_bathy():
+    """On steep bathy WITH seafloor steps (active/inactive corners) the smc03
+    PGF + wet/rock horizontal closure gives a smaller spurious rest PGF than the
+    linear Adcroft correction.  Linear rho(z); exact horizontal PGF is 0."""
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    zc = create_ocean_z_star(n_levels=NLEV, H_max=HMAX)
+    H = _sloped_bathy(grid)
+    pc = create_partial_cell_coordinate(zc, jnp.asarray(H))
+    assert (~np.asarray(pc.is_active)).any(), "stepped bathy needs inactive cells"
+    st = _linear_strat_rest_state(grid, zc, pc, H)
+
+    active = np.asarray(pc.is_active)
+    t_ad = ocean_baroclinic_tendencies_cdgrid(
+        st, grid, pc, cdgrid, _linear_rho_cfg("adcroft"))
+    t_smc = ocean_baroclinic_tendencies_cdgrid(
+        st, grid, pc, cdgrid, _linear_rho_cfg("smc03"))
+    ad, smc = _maxacc_active(t_ad, active), _maxacc_active(t_smc, active)
+    assert smc < ad, (
+        f"smc03 stepped-bathy rest PGF ({smc:.3e}) must beat adcroft ({ad:.3e})")
+
+
+def test_smc03_gated_off_on_pure_zstar():
+    """With a pure z* coord (is_partial False) the smc03 branch is skipped, so
+    pgf_scheme is inert — smc03 and adcroft give the IDENTICAL z* tendency."""
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    zc = create_ocean_z_star(n_levels=NLEV, H_max=HMAX)
+    H = jnp.full((6, N, N), HMAX, dtype=jnp.float64)
+    st = _state(grid, zc, H)                                # nonzero PGF (T pert)
+    base = _cfg()
+    t_ad = ocean_baroclinic_tendencies_cdgrid(
+        st, grid, zc, cdgrid, base._replace(pgf_scheme="adcroft"))
+    t_smc = ocean_baroclinic_tendencies_cdgrid(
+        st, grid, zc, cdgrid, base._replace(pgf_scheme="smc03"))
+    for name in _FIELDS_3D + ("deta_dt",):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(t_ad, name).data),
+            np.asarray(getattr(t_smc, name).data),
+            err_msg=f"{name}: pgf_scheme must be inert on a pure z* coord",
+        )
+
+
+def test_smc03_partial_path_differentiable():
+    """jax.grad through the cd-grid smc03 partial-cell PGF is finite."""
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    zc = create_ocean_z_star(n_levels=NLEV, H_max=HMAX)
+    H = _sloped_bathy(grid)
+    pc = create_partial_cell_coordinate(zc, jnp.asarray(H))
+    st = _state(grid, zc, jnp.asarray(H))
+    cfg = _cfg()._replace(pgf_scheme="smc03")
+
+    def loss(T_field):
+        s2 = st._replace(T=st.T.replace(data=T_field))
+        tend = ocean_baroclinic_tendencies_cdgrid(s2, grid, pc, cdgrid, cfg)
+        return jnp.sum(tend.du_dt.data ** 2 + tend.dT_dt.data ** 2)
+
+    g = jax.grad(loss)(st.T.data)
+    assert jnp.all(jnp.isfinite(g)), "gradient through smc03 partial path non-finite"
+
+
 def test_partial_cell_path_differentiable():
     """jax.grad through the C-D grid partial-cell tendency is finite."""
     grid = create_cubed_sphere(N)
