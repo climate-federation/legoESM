@@ -224,6 +224,16 @@ def cmd_reproduce(args):
                 "--output <dir>` — then compare result.state_digest against the "
                 "reference manifest."
             )
+            # --check asks for a bit-identical rerun comparison. We did NOT rerun
+            # or compare digests, so we must NOT exit 0 — a green here would let
+            # CI treat an unperformed check as a passed check. Exit non-zero.
+            if args.check:
+                logger.error(
+                    f"reproduce --check is not supported for {kind} manifests "
+                    "(no driver rerun): the digest comparison was NOT performed. "
+                    "Rerun via the component runner and compare result.state_digest."
+                )
+                sys.exit(2)
             return
 
         config = experiment_config_from_dict(manifest["config"]["resolved_config"])

@@ -259,7 +259,13 @@ def main(argv: list[str] | None = None) -> int:
     if is_atm:
         print(f"  Reproduce it:  legoesm reproduce {out}/<output>/run_manifest.json --check")
     else:
-        print(f"  Reproduce it:  legoesm reproduce {out_subdir}/run_manifest.json --check")
+        # No `--check`: ocean reproduce-rerun is not wired through the atmosphere
+        # driver, so --check would not perform a digest comparison. `reproduce`
+        # (no --check) validates the manifest; re-run via the ocean runner to
+        # compare result.state_digest.
+        print(f"  Validate it:   legoesm reproduce {out_subdir}/run_manifest.json")
+        print(f"  Reproduce it:  re-run via run_omip_core2.py --config "
+              f"{out / 'config.yaml'} and compare result.state_digest")
     return 0
 
 

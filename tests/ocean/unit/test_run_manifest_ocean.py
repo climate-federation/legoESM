@@ -151,6 +151,41 @@ def test_manifest_tamper_detected_ocean():
         validate_run_manifest(m)
 
 
+def test_reproduce_check_on_ocean_manifest_exits_nonzero(tmp_path):
+    # codex P2: `reproduce --check` on an ocean manifest must NOT return 0 (the
+    # digest comparison cannot be performed via the atmosphere driver) — a green
+    # would let CI treat an unperformed check as passed.
+    import argparse
+
+    from legoesm.cli import cmd_reproduce
+
+    write_run_manifest(tmp_path, _latlon_cfg(), config_kind="ocean")
+    args = argparse.Namespace(
+        manifest=str(tmp_path / "run_manifest.json"),
+        check=True,
+        output=str(tmp_path / "rerun"),
+    )
+    with pytest.raises(SystemExit) as exc:
+        cmd_reproduce(args)
+    assert exc.value.code == 2
+
+
+def test_reproduce_without_check_on_ocean_manifest_validates(tmp_path):
+    # Plain `reproduce` (no --check) just validates the ocean manifest and
+    # returns (no rerun); must not raise.
+    import argparse
+
+    from legoesm.cli import cmd_reproduce
+
+    write_run_manifest(tmp_path, _latlon_cfg(), config_kind="ocean")
+    args = argparse.Namespace(
+        manifest=str(tmp_path / "run_manifest.json"),
+        check=False,
+        output=str(tmp_path / "rerun"),
+    )
+    assert cmd_reproduce(args) is None  # validate-only, clean return
+
+
 def test_manifest_write_read_digest_roundtrip_ocean(tmp_path):
     cfg = _latlon_cfg()
     path = write_run_manifest(tmp_path, cfg)
