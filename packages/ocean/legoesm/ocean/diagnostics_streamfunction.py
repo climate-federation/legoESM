@@ -79,10 +79,21 @@ def moc_streamfunction(v, h_partial, eta, H_bathy, mask, grid):
         else:
             lat_v = np.linspace(-np.pi / 2, np.pi / 2, n_lat_v)
     cos_lat_v = np.cos(np.asarray(lat_v))
-    # Longitudinal spacing: prefer ``grid.dlon`` (correct on regional
-    # grids); fall back to the global 2π/n_lon.
+    # Longitudinal spacing: prefer ``grid.dlon`` (correct on regional grids);
+    # fall back to the global 2π/n_lon.  TRIPOLE sets ``dlon = 0.0`` as a
+    # sentinel and instead exposes the per-v-face physical width ``grid.dx_v``
+    # [m] (curvilinear) — use it so tripole AMOC is not identically zero.  The
+    # regular lat-lon / test path (dlon != 0) is bit-unchanged.
     dlon = getattr(grid, "dlon", 2.0 * np.pi / n_lon)
-    dx_v = R * dlon * cos_lat_v[:, None]                        # (n_lat+1, 1)
+    dx_v_metric = getattr(grid, "dx_v", None)
+    if (not dlon) and dx_v_metric is not None and np.asarray(dx_v_metric).size > 1:
+        dx_v = np.asarray(dx_v_metric)                         # (n_lat+1, n_lon) [m]
+        if dx_v.ndim == 1:
+            dx_v = dx_v[:, None]
+    else:
+        if not dlon:
+            dlon = 2.0 * np.pi / n_lon
+        dx_v = R * dlon * cos_lat_v[:, None]                   # (n_lat+1, 1)
 
     h_v = np.zeros_like(v)                                      # (n_lat+1, n_lon, nlev)
     h_v[1:-1] = 0.5 * (h_partial[:-1] + h_partial[1:])

@@ -12,7 +12,7 @@ commit messages; `OMIP_faithful.md`. Memories: [[omip-faithful-project]], [[omip
 | **tripole eORCA025 ¼°** | **FAITHFUL** | **1.15** corr 0.99 |
 | **latlon 1°** | **FAITHFUL** | **1.12** corr 0.99 |
 | **mpas ico6 ~115 km** | **FAITHFUL** (iter-~50) | **SST 0.84** corr 0.997, **SSS 0.85** corr 0.94 (best) |
-| cubed_sphere | **PARKED** — free CORE-II cold-start resolution-limited at C32–C96; all correct numerics committed; needs ¼°+full-stack (future) | n/a (blows at cold-start) |
+| cubed_sphere | **PARKED** — cold-start mode-1 PGF residual NOT resolution-fixable (C256 ¼° blows too, at a cube EDGE near the equator); all correct numerics committed | n/a (blows at cold-start) |
 | spectral | **NOT-MEANINGFUL** — global SH basis can't represent ORCA1 coastlines (Gibbs ringing; model self-declares unsupported #99; bathy builder refuses real geometry; T21 can't resolve Drake) | n/a (by construction) |
 **"All 5 grids match ORCA1" is impossible BY CONSTRUCTION (spectral).** Achievable maximum =
 the geometry-representing grids; 3/4 of those are faithful, cube needs a major ¼° effort.
@@ -120,6 +120,100 @@ sides) — the minimal first number (~10-20 Sv). (2) AMOC@26N latlon. (3) ACC@Dr
 existing helper). (5) MPAS ACC — the ONLY new numerics (edge-based ψ_bt on Voronoi; codex-review +
 analytic check; DEFER if time-boxed). 26N & Drake are both FOLD-FREE (no tripole-cap handling). Gotchas:
 basin lon-window (Med/Pacific leakage), ψ sign reconciliation legoESM(+=clockwise) vs NEMO.
+
+### AMOC@26N RESULT (iter-~51) — diagnostic ✓, NEMO ✓ 17.74 Sv; model day-90 UN-SPUN-UP
+Implemented + codex-reviewed (2 HIGH + 1 MED fixed: tripole dx_v zero-AMOC, NEMO time-mean order,
+sign — then a SIGN-AGNOSTIC surface-referenced upper-mid peak since NEMO ψ is +peaked vs the model's
+−peaked). **NEMO AMOC@26N = 17.74 Sv** (robust reader) = spot-on RAPID obs (~17) → the NEMO reference
++ the diagnostic are CORRECT. **Model MPAS day-90 AMOC = −4.63 Sv = un-spun-up** — the deep overturning
+needs DECADES to establish; a 90-day cold-start has none (SST/SSS equilibrate in days, the AMOC does
+not; NEMO's 17.74 is from a 5-yr-equilibrated RUN_REF). **KEY: the day-90 protocol validates SST/SSS
+but NOT transports — transports are EQUILIBRATION-GATED** (need multi-decade runs, compute-heavy, like
+the cube ¼°). The AMOC diagnostic (`_amoc26n_diag` in-run + `scripts/validate/nemo_transports.py`) is
+committed + correct; a meaningful AMOC match requires an equilibrated run. Multi-year MPAS run launched
+to show AMOC DEVELOPMENT + multi-year stability. ACC@Drake is also wind-driven-but-multi-year — same gate.
+
+### CODEX adversarial review of the cube-¼° + mpas-#160 parked conclusions (iter-~51) — BOTH CONFIRMED
+- **CUBE: confirm parked.** Codex (code-grounded): the cold-start gate is the BAROCLINIC partial-cell
+  PGF residual (the stratified-rest-over-bathy test has exact zero horizontal PGF yet blows at the
+  bottom level ~step 180 → the motion is generated in the 3D `dp_dx/rho_0` path, ocean_pe_cdgrid:566).
+  The barotropic solver only sees `eta`/`g∇η`; an implicit-CN barotropic damps gravity-wave CFL + null
+  modes but CANNOT remove the depth-local baroclinic PGF acceleration injected every PE step → the
+  MPAS-winning implicit-CN lever is NOT the cube unblock. Real fix = stronger shared-PGF residual
+  removal OR ¼° (both major). Optional 1-shot falsification: `pgf_scheme="zero"` / homogeneous T/S over
+  the same bathy → stable ⇒ PGF confirmed (already implied by the stratified-rest blowup).
+- **mpas #160: confirm parked.** The relative-PV + split-Matsuno-Coriolis is internally consistent,
+  stable, matches NEMO SST/SSS. #160 (full PV q=(f+ζ)/h) is a TRiSK energy/enstrophy-invariant /
+  elegance refactor with NO demonstrated SST/SSS-fidelity payoff; park unless a dynamic metric (energy
+  drift, barotropic-Rossby phase, near-inertial spectrum) fails.
+
+### PGF-ZERO FALSIFICATION (8426611) — REFUTES "PGF is the SOLE cause"; a 2nd mode exists
+Cube rest+topo+no-forcing+RK3, C32: **smc03 control blows step 210** (Med lev14, known); **zero-PGF
+(`--cube-pgf-scheme zero`, ALL pressure force removed) STILL blows — delayed to step ~420, seed moves
+to 20.9N/277E lev17.** A rest state with NO PGF has NO horizontal momentum force (Coriolis·v / adv·u /
+KE all vanish from rest) yet still blows ⇒ **a SECOND cold-start instability source exists, independent
+of the baroclinic PGF** (slower; candidate = the barotropic `g∇η` / partial-cell bathy / eta-floor
+treatment, or a cube-metric artifact). Removing the dominant baroclinic PGF (smc03, blows 210) reveals
+the slower 2nd mode (blows 420). **This OVERTURNS the earlier "baroclinic-PGF-is-the-sole-cause"
+conclusion (mine + codex's) and REOPENS the implicit-CN-barotropic question** for the 2nd mode. The
+cube needs BOTH the PGF fixed AND the 2nd mode addressed. Pinpoint job 8427117: zero-PGF + FLAT bottom
+(stable ⇒ 2nd mode is bathy/barotropic; blows ⇒ pure cube-metric). `pgf_scheme="zero"` is a committed
+gated diagnostic (adcroft/smc03 bit-unchanged).
+
+### PINPOINT (8427117) — cube cold-start = TWO bathymetry-driven modes; flat bottom STABLE
+zero-PGF + FLAT bottom AND adcroft + FLAT bottom: BOTH **STABLE** (max|u| ~5e-8 m/s = machine noise,
+700 steps). So the cube cold-start blowup is ENTIRELY bathymetry-driven; the core cd-grid dynamics are
+sound on simple geometry. Evidence matrix:
+- smc03 PGF + real bathy -> blows step 210 (Med)        = MODE 1 (baroclinic partial-cell PGF residual)
+- zero-PGF + real bathy  -> blows step 420 (Caribbean)  = MODE 2 (bathy-dependent, NOT the PGF)
+- any PGF + FLAT bottom   -> STABLE (machine noise)
+**Two bathy modes:** (1) baroclinic PGF residual (dominant gate, ~210; smc03/2nd-order reduced not
+killed; needs better PGF or 1/4deg); (2) a slower bathy-dependent barotropic/coupling mode (~420,
+only visible once the PGF is removed) -- almost certainly the EXPLICIT fv3sw barotropic over real bathy
+(g*grad(eta)/eta-floor). **Mode 2 REOPENS the implicit-CN-barotropic path** codex dismissed under the
+(now-refuted) sole-PGF premise. Cube needs BOTH fixed (mode 1 is the earlier/dominant gate). Sharper
+than the prior "resolution-limited": the gate is specifically the BATHYMETRY treatment (PGF+barotropic).
+
+### MODE-2 mechanism nailed (8427643) — NOT barotropic-damping-fixable; free-surface/coupling
+zero-PGF + real bathy + 5x fv3sw barotropic div-damp(600)+vort-damp(0.15): blows IDENTICALLY (step
+420, |u| 12.4 vs 12.2). So cold-start MODE 2 is bathy-driven but NOT a dampable barotropic
+divergence/vorticity mode -> it is a spurious barotropic FORCING (free-surface g*grad(eta) over the
+eta-floored/partial-cell bathy, or the baroclinic-barotropic split reconciliation), which damping
+cannot remove but an IMPLICIT-CN free-surface solve could change. **Cube cold-start fully diagnosed
+via the 3-stage falsification (zero-PGF -> flat-bottom -> crank-damping):** MODE 1 = baroclinic
+partial-cell PGF (blows 210; better PGF or 1/4deg), MODE 2 = bathy free-surface/coupling (blows 420;
+implicit-CN barotropic, NOT damping). Both bathy-driven (flat-bottom machine-noise stable -> core
+cd-grid dynamics are SOUND). Cube remains parked (both fixes major) but the path is now precise +
+evidence-based, not a vague resolution wall. New cube knobs committed: --cube-baro-divdamp/-dampv,
+--cube-pgf-scheme zero (all gated/diagnostic; faithful paths bit-unchanged).
+
+### C256 ¼° cube probe (8427650) — mode-1 is NOT resolution-fixable
+rest+topo+no-forcing, FULL corrected stack (smc03 + 2nd-order bottom slope + bathy-smooth5 + RK3),
+C256 (¼°)/nlev20/dt10: **blows step ~288**, seed `umax_lat 1.1, umax_lon 314.8, lev 13` = a **cube
+face EDGE (lon 315) right at the equator**, mid-depth, |u| 400→508 m/s in 6 steps. This REFUTES the
+prior "needs ¼° + full stack" hope: ¼° does NOT clear mode-1. Sharper diagnosis — the residual
+concentrates where (a) the AL corner gradient crosses a cube face seam AND (b) f→0 removes the
+geostrophic restraint, so any spurious/real baroclinic PGF accelerates unchecked. The 3 implicit-CN
+grids (tripole/latlon/MPAS) ride through the same WOA cold-start because their unconditionally-stable
+barotropic absorbs the fast equatorial adjustment; the cube's EXPLICIT fv3sw cannot. **Cube cold-start
+is now fully bounded: mode-1 (baroclinic PGF at cube-edge/equator, ALL resolutions) + mode-2 (bathy
+free-surface, implicit-CN). Both fixes major; cube stays parked. Honest max = the 3 faithful grids.**
+
+### NEMO ACC@Drake reference reader (iter-~52) — pairs with the AMOC reader
+Added `acc_drake_core` + `nemo_acc_drake` to `scripts/validate/nemo_transports.py` (offline, NumPy):
+SIGNED (eastward-positive) net transport through a FIXED model i-column Drake meridian section,
+depth+lat-integrated over [-65,-45] (matches model-side `acc_transport` band), from grid_U (uo,e3u) +
+domain_cfg (e2u,gphiu,glamu). Codex-reviewed (HIGH staircase + 2 MED + 2 LOW → fixed): fixed-i section
+is contiguous-by-construction (no per-row nearest-column staircase gaps), VALID because ORCA1 is a
+regular lat-lon grid in the S.Ocean — and that regularity is ASSERTED (raises if the column's circular
+lon-deviation over the band exceeds a tol), not assumed; signed (not abs, so a reversed-U bug surfaces);
+circular drake_lon. 6 synthetic unit tests (analytic transport, section pick, band exclusion, sign
+preserved, circular lon, curvilinear-REJECT) — all pass. ACC spins up in MONTHS (wind-driven, unlike
+AMOC's decades) → the 5-yr MPAS run gives a MEANINGFUL ACC match (vs AMOC's equilibration gate).
+**NEMO ACC@Drake = 159.26 Sv** (8427657; section lon −68.0, **lon-dev 0.00° → ORCA1 IS regular at
+Drake, fixed-i exact**; cross-checks the per-row 159.78; ORCA1 1° runs high vs obs ~137, normal for an
+eddy-free coarse model). **Both NEMO refs in hand: AMOC 17.74 Sv, ACC 159.26 Sv.** `nemo_transports.py
+... --grid-u X`.
 
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.

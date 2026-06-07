@@ -416,12 +416,12 @@ def ocean_baroclinic_tendencies_cdgrid(
     #              REPLACING dp — see below.  Matches the proven latlon/tripole.
     if is_partial:
         pgf_scheme = getattr(config, "pgf_scheme", "adcroft")
-        if pgf_scheme not in ("adcroft", "smc03"):
+        if pgf_scheme not in ("adcroft", "smc03", "zero"):
             # Static config value -> validate at fn entry (a typo must fail loudly,
             # not silently fall back to adcroft and disable the faithful scheme).
             raise ValueError(
                 f"Unknown cd-grid pgf_scheme {pgf_scheme!r}; "
-                "expected 'adcroft' or 'smc03'.")
+                "expected 'adcroft', 'smc03', or 'zero' (diagnostic).")
         cref = jnp.cumsum(z_coord.dz_ref) - 0.5 * z_coord.dz_ref
         if pgf_scheme == "smc03":
             # S&M03 density-Jacobian PGF on the AL corners.  Per-cell geometry
@@ -502,7 +502,7 @@ def ocean_baroclinic_tendencies_cdgrid(
                      + zr * zr * _dabc_dx[..., 2]).astype(T.dtype)
             dp_dy_perp = (_dabc_dy[..., 0] + zr * _dabc_dy[..., 1]
                           + zr * zr * _dabc_dy[..., 2]).astype(T.dtype)
-        else:
+        elif pgf_scheme == "adcroft":
             # Adcroft & Campin 2004 linear depth-shift correction ADDED to the
             # section-10 plain AL gradient.  Mirrors the latlon adcroft path
             # (ocean_pe_latlon_cgrid.py:1139).
@@ -528,6 +528,17 @@ def ocean_baroclinic_tendencies_cdgrid(
             corr_dy = (-_dgr_dy[..., 1] + z_ref_corner * _dgr_dy[..., 0]).astype(T.dtype)
             dp_dx = dp_dx + corr_dx
             dp_dy_perp = dp_dy_perp + corr_dy
+
+    # --- 10c. PGF-ZERO falsification diagnostic (config.pgf_scheme == "zero") ---
+    # Remove the horizontal pressure force ENTIRELY.  A rest state then has NO
+    # horizontal force at all, so if the cube cold-start stays stable with
+    # pgf_scheme="zero" but blows with adcroft/smc03, the partial-cell PGF
+    # residual is the SOLE cause (vs any barotropic / advective / metric term).
+    # Works for both partial and z* (zeroes the base AL gradient + any
+    # correction).  Diagnostic only — never a faithful run.
+    if getattr(config, "pgf_scheme", "adcroft") == "zero":
+        dp_dx = jnp.zeros_like(dp_dx)
+        dp_dy_perp = jnp.zeros_like(dp_dy_perp)
 
     # --- 11. Vorticity + divergence at corners (batched) ---
     # Batch the (zeta, div_v) center-to-corner interpolation: both are

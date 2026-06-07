@@ -806,7 +806,9 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        bottom_drag_bg_velocity=None,
                        harmonic_cfl_safety=None,
                        bathy_smoothing_passes=0,
-                       smc03_bottom_2nd_order=None):
+                       smc03_bottom_2nd_order=None,
+                       barotropic_sw_div_damp_factor=None,
+                       barotropic_sw_damp_v=None):
     """Build a cubed-sphere ocean (FV3 C-D grid baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -880,7 +882,11 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                               ("bottom_drag_bg_velocity",
                                bottom_drag_bg_velocity),
                               ("smc03_bottom_2nd_order",
-                               smc03_bottom_2nd_order)) if v is not None}
+                               smc03_bottom_2nd_order),
+                              ("barotropic_sw_div_damp_factor",
+                               barotropic_sw_div_damp_factor),
+                              ("barotropic_sw_damp_v",
+                               barotropic_sw_damp_v)) if v is not None}
     if _ovr:
         config = config._replace(**_ovr)
         print(f"[setup] cube config override: {_ovr}")
@@ -1243,6 +1249,36 @@ def _grid_lat2d_deg(grid, grid_type):
     return lat2d, lon2d
 
 
+def _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir):
+    """AMOC@26N [Sv] from the LIVE state (h reconstructed in-run via
+    compute_layer_thickness — the snapshot lacks eta/z_coord).  Reuses the
+    tested compute_amoc_from_state{,_mpas} (Atlantic-masked moc_streamfunction
+    -> max).  Pure NumPy at run-end (no AD/JIT/shared-kernel touch).  Prints +
+    writes a scalar file; NaN/skip is non-fatal.  RAPID obs ~17 Sv."""
+    try:
+        from legoesm.ocean.vertical import compute_layer_thickness
+        h = np.asarray(compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, z_coord))
+        if app_grid_type == "mpas":
+            from legoesm.ocean.spinup import compute_amoc_from_state_mpas
+            amoc = float(compute_amoc_from_state_mpas(
+                np.asarray(state.u.data), h, grid))
+        elif getattr(state, "v", None) is not None:
+            from legoesm.ocean.spinup import compute_amoc_from_state
+            amoc = float(compute_amoc_from_state(
+                np.asarray(state.v.data), h,
+                np.asarray(state.land_mask.data), grid))
+        else:
+            return
+        print(f"[transports] AMOC@26N = {amoc:.2f} Sv  (RAPID obs ~17; "
+              f"NEMO via scripts/validate/nemo_transports.py)")
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        (Path(out_dir) / "transports.txt").write_text(
+            f"amoc26N_Sv {amoc:.4f}\n")
+    except Exception as e:  # diagnostic must never crash the run
+        print(f"[transports] AMOC@26N diag skipped: {type(e).__name__}: {e}")
+
+
 def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d):
     out_dir.mkdir(parents=True, exist_ok=True)
     save_kw = dict(
@@ -1323,10 +1359,11 @@ def main() -> int:
     p.add_argument("--cube-hyperdiff", type=float, default=None,
                    help="cube biharmonic hyperdiffusion coeff override.")
     p.add_argument("--cube-pgf-scheme", type=str, default=None,
-                   choices=[None, "adcroft", "smc03"],
+                   choices=[None, "adcroft", "smc03", "zero"],
                    help="cube partial-cell PGF scheme on the cd-grid AL corners "
                         "(adcroft=linear shift [default]; smc03=density-Jacobian, "
-                        "the faithful path that passes the stratified-rest test).")
+                        "the faithful path; zero=DIAGNOSTIC, removes the PGF entirely "
+                        "to falsify the PGF-residual-is-the-cold-start-cause hypothesis).")
     p.add_argument("--cube-bottom-drag-r", type=float, default=None,
                    help="cube linear bottom-drag coeff r [m/s] (du/dt|drag=-r*u/h_bot "
                         "on the cd-grid cell-centre bottom level) — the proven "
@@ -1348,6 +1385,11 @@ def main() -> int:
                         "(cube-seam-aware), reducing the r-factor / per-cell slope that "
                         "seeds the partial-cell PGF cold-start blowup at under-resolved "
                         "marginal seas. Proven NEMO/ROMS technique.")
+    p.add_argument("--cube-baro-divdamp", type=float, default=None,
+                   help="cube fv3sw barotropic divergence-damping factor (default 120). "
+                        "Crank to test/damp the bathy-driven barotropic cold-start mode 2.")
+    p.add_argument("--cube-baro-dampv", type=float, default=None,
+                   help="cube fv3sw barotropic vorticity-damping coeff (default 0.030).")
     p.add_argument("--cube-smc03-bottom-2nd", action="store_true",
                    help="cube: smc03 PGF uses the 3-point 2nd-order backward bottom-cell "
                         "density slope (curvature-accurate under the pressure-dependent "
@@ -1663,6 +1705,8 @@ def main() -> int:
             harmonic_cfl_safety=args.cube_harmonic_cfl_safety,
             bathy_smoothing_passes=args.cube_bathy_smoothing,
             smc03_bottom_2nd_order=(True if args.cube_smc03_bottom_2nd else None),
+            barotropic_sw_div_damp_factor=args.cube_baro_divdamp,
+            barotropic_sw_damp_v=args.cube_baro_dampv,
         )
         app_grid_type = "cubed_sphere"
     elif args.grid == "mpas":
@@ -1951,6 +1995,7 @@ def main() -> int:
                 print(f"[snapshot] year {yr} saved", flush=True)
         state = jax.block_until_ready(state)
         _save_snapshot(out_dir, "final", state, lat2d, lon2d)
+        _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
         _record_final_state_digest(manifest_path, state)
         _csv.close()
         rate = n_steps / (time.time() - t_wall)
@@ -2034,6 +2079,7 @@ def main() -> int:
 
     state = jax.block_until_ready(state)
     _save_snapshot(out_dir, "final", state, lat2d, lon2d)
+    _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
     _record_final_state_digest(manifest_path, state)
     _csv.close()
     rate = n_steps / (time.time() - t_wall)
