@@ -15,7 +15,10 @@ from legoesm.ocean.spinup import (
 from legoesm.ocean.coupler.sss_apply import (
     apply_sss_restoring_step_mpas,
 )
-from legoesm.ocean.forcing.sss_restoring import SSSRestoringConfig
+from legoesm.ocean.forcing.sss_restoring import (
+    SSSRestoringConfig,
+    DEFAULT_OMIP2_REGIONS,
+)
 
 
 # ==============================================================================
@@ -423,6 +426,28 @@ class TestApplySSSRestoringMPAS:
         assert np.allclose(S_new[..., 1], 35.5)
         assert np.allclose(S_new[..., 2], 35.5)
         assert np.all(S_new[..., 0] < 35.5)
+
+    def test_default_omip2_regions_on_1d_mesh(self):
+        """The DEFAULT_OMIP2_REGIONS lat/lon masks (used by run_omip_core2
+        --sss-restore) must work on a 1-D Voronoi mesh (the region-mask builder
+        is elementwise, so it broadcasts over (nCells,)) and still freshen a
+        salty bias toward the target."""
+        mesh = _FakeMeshTwoBasins()
+        state = _FakeMPASState(n_cells=mesh.nCells, S_init=35.5)
+        out = apply_sss_restoring_step_mpas(
+            state,
+            S_target=np.full(mesh.nCells, 34.7),
+            ice_concentration=None,
+            config=SSSRestoringConfig(
+                enabled=True, tau_restore_days_default=365.0,
+                regions=DEFAULT_OMIP2_REGIONS,
+            ),
+            mesh=mesh,
+            dt=86400.0,
+        )
+        S_top_new = np.asarray(out.S.data)[..., 0]
+        assert np.all(np.isfinite(S_top_new))
+        assert np.all(S_top_new < 35.5)          # restored toward 34.7
 
     def test_land_cells_untouched(self):
         mesh = _FakeMeshTwoBasins()

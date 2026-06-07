@@ -41,6 +41,8 @@ def apply_sss_restoring_step(
     grid,
     z_coord,
     dt: float,
+    lat2d_deg: np.ndarray | None = None,
+    lon2d_deg: np.ndarray | None = None,
 ) -> object:
     """Apply one timestep of OMIP-2 SSS restoring to ``state``.
 
@@ -86,11 +88,29 @@ def apply_sss_restoring_step(
     S_arr = np.asarray(state.S.data, dtype=np.float64)
     S_top = S_arr[..., 0]
 
-    lat_deg = np.degrees(np.asarray(grid.lat))
-    lon_deg = np.degrees(np.asarray(grid.lon))
-    # Broadcast to 2D (n_lat, n_lon) for the kernel.
-    lat2d = np.broadcast_to(lat_deg[:, None], S_top.shape)
-    lon2d = np.broadcast_to(lon_deg[None, :], S_top.shape)
+    # Region masks need the TRUE per-cell lat/lon.  On a CURVILINEAR grid
+    # (tripole) ``grid.lat``/``grid.lon`` are 1-D row-mean / first-row
+    # approximations, so the OMIP regional tau masks (Nordic/Labrador/Arctic)
+    # would be misplaced in the folded north.  Prefer the caller-supplied 2-D
+    # degree coordinates (the driver computes the authoritative ones per grid);
+    # fall back to the 1-D broadcast only for a regular lat-lon grid.
+    if lat2d_deg is not None and lon2d_deg is not None:
+        _la = np.asarray(lat2d_deg, dtype=np.float64)
+        _lo = np.asarray(lon2d_deg, dtype=np.float64)
+        # Normalise semantic 1-D inputs so latitude varies by ROW and longitude
+        # by COLUMN (a bare (n_lat,) would otherwise broadcast as the trailing
+        # axis and mis-place the region masks on a square n_lat==n_lon grid).
+        if _la.ndim == 1:
+            _la = _la[:, None]
+        if _lo.ndim == 1:
+            _lo = _lo[None, :]
+        lat2d = np.broadcast_to(_la, S_top.shape)
+        lon2d = np.broadcast_to(_lo, S_top.shape)
+    else:
+        lat_deg = np.degrees(np.asarray(grid.lat))
+        lon_deg = np.degrees(np.asarray(grid.lon))
+        lat2d = np.broadcast_to(lat_deg[:, None], S_top.shape)
+        lon2d = np.broadcast_to(lon_deg[None, :], S_top.shape)
 
     if ice_concentration is None:
         ice = np.zeros_like(S_top)

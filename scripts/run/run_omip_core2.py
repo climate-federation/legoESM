@@ -1550,6 +1550,17 @@ def main() -> int:
                    help="Apply NEMO's Dai-Trenberth river+ice-shelf+iceberg runoff "
                         "(the SAME file ORCA1 uses) as a per-step freshwater/virtual-salt "
                         "flux -> ungates the SSS comparison (tripole/latlon only).")
+    p.add_argument("--sss-restore", action="store_true",
+                   help="Apply OMIP-2 weak SSS restoring toward the WOA surface "
+                        "salinity (the protocol NEMO ORCA1 uses) -> bounds the "
+                        "multi-year surface-freshwater drift (5-yr MPAS drifted "
+                        "35->31 PSU without it). Requires --woa-init. Interior tau "
+                        "via --sss-restore-tau-days; marginal seas use shorter "
+                        "built-in OMIP-2 regional taus.")
+    p.add_argument("--sss-restore-tau-days", type=float, default=365.0,
+                   help="Interior SSS-restoring timescale [days] (default 365 = "
+                        "OMIP-2 interior; regional Arctic/Med/SO use shorter "
+                        "built-in taus).")
     p.add_argument("--woa-smoothing-passes", type=int, default=0,
                    help="Horizontal Laplacian smoothing passes/level on the WOA T,S IC "
                         "-- removes spurious grid-scale fronts from interpolating/flood-"
@@ -1807,6 +1818,36 @@ def main() -> int:
             )
             print(f"[setup] --config {args.config} ocean override: {sorted(_ovr)}")
 
+    # OMIP-2 weak SSS restoring toward the WOA surface-salinity climatology (the
+    # protocol NEMO ORCA1 uses).  Bounds the multi-year surface-freshwater drift
+    # (the 5-yr MPAS run drifted 35->31 PSU without it).  Capture the target =
+    # the UNSMOOTHED WOA surface salinity BEFORE --woa-smoothing-passes damps the
+    # IC fronts (restoring must target the true climatology, not the smoothed IC).
+    sss_restore_cfg = None
+    sss_restore_target = None
+    if args.sss_restore:
+        if app_grid_type == "cubed_sphere":
+            raise ValueError("--sss-restore: not wired for the cube (parked grid).")
+        if not args.woa_init:
+            raise ValueError("--sss-restore requires --woa-init (the restoring "
+                             "target is the WOA surface-salinity climatology).")
+        if not (float(args.sss_restore_tau_days) > 0.0):
+            raise ValueError("--sss-restore-tau-days must be > 0 (0 divides by "
+                             "zero in build_region_masks; negative = anti-restoring).")
+        from legoesm.ocean.forcing.sss_restoring import SSSRestoringConfig
+        sss_restore_cfg = SSSRestoringConfig(
+            enabled=True,
+            tau_restore_days_default=float(args.sss_restore_tau_days),
+        )
+        sss_restore_target = np.asarray(
+            state.S.data, dtype=np.float64)[..., 0].copy()      # surface SSS
+        _wet = np.asarray(state.land_mask.data) > 0.5
+        print(f"[setup] SSS restoring ON: tau_default="
+              f"{args.sss_restore_tau_days:.0f} d + OMIP-2 regional masks; "
+              f"target = WOA surface SSS "
+              f"[{sss_restore_target[_wet].min():.1f},"
+              f"{sss_restore_target[_wet].max():.1f}] PSU")
+
     if args.woa_smoothing_passes and args.woa_smoothing_passes > 0:
         if not args.woa_init:
             raise ValueError("--woa-smoothing-passes requires --woa-init.")
@@ -1965,12 +2006,13 @@ def main() -> int:
                    "tracer_time_integrator", "euler")
     use_scan = (int(args.scan_block) > 0 and app_grid_type == "tripole"
                 and nudge_tau_s == 0.0 and drag_tau_s == 0.0
+                and not args.sss_restore
                 and _tti != "ab2")
     if int(args.scan_block) > 0 and not use_scan:
         why = ("AB2 tracer time integrator (None->Field carry breaks "
                "lax.scan)" if _tti == "ab2"
-               else "grid!=tripole or WOA-nudging / spin-up-drag enabled "
-                    "(those need per-step host updates)")
+               else "grid!=tripole or WOA-nudging / spin-up-drag / SSS-restoring "
+                    "enabled (those need per-step host updates)")
         print(f"[scan] --scan-block ignored: {why}.", flush=True)
     if use_scan:
         from legoesm.ocean.coupler.omip2_applicator import (
@@ -2065,6 +2107,18 @@ def main() -> int:
                 from legoesm.ocean.coupler.runoff_apply import apply_runoff_step
                 state = apply_runoff_step(
                     state, R_kg_m2_s=_R, z_coord=z_coord, dt=dt)
+        if sss_restore_cfg is not None:
+            if app_grid_type == "mpas":
+                from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step_mpas
+                state = apply_sss_restoring_step_mpas(
+                    state, S_target=sss_restore_target, ice_concentration=None,
+                    config=sss_restore_cfg, mesh=grid, dt=dt)
+            else:
+                from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step
+                state = apply_sss_restoring_step(
+                    state, S_target=sss_restore_target, ice_concentration=None,
+                    config=sss_restore_cfg, grid=grid, z_coord=z_coord, dt=dt,
+                    lat2d_deg=lat2d, lon2d_deg=lon2d)
         if nudge_tau_s > 0 and (nudge_release_s <= 0 or step * dt < nudge_release_s):
             a = dt / nudge_tau_s
             Tn = np.asarray(state.T.data)
