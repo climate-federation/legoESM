@@ -1319,10 +1319,11 @@ def main() -> int:
     p.add_argument("--cube-hyperdiff", type=float, default=None,
                    help="cube biharmonic hyperdiffusion coeff override.")
     p.add_argument("--cube-pgf-scheme", type=str, default=None,
-                   choices=[None, "adcroft", "smc03"],
+                   choices=[None, "adcroft", "smc03", "zero"],
                    help="cube partial-cell PGF scheme on the cd-grid AL corners "
                         "(adcroft=linear shift [default]; smc03=density-Jacobian, "
-                        "the faithful path that passes the stratified-rest test).")
+                        "the faithful path; zero=DIAGNOSTIC, removes the PGF entirely "
+                        "to falsify the PGF-residual-is-the-cold-start-cause hypothesis).")
     p.add_argument("--cube-bottom-drag-r", type=float, default=None,
                    help="cube linear bottom-drag coeff r [m/s] (du/dt|drag=-r*u/h_bot "
                         "on the cd-grid cell-centre bottom level) — the proven "
