@@ -590,6 +590,37 @@ the linear test to `allclose(atol=1e-11)` + added a true `test_default_off_bit_e
 ran the OLD test → 31 passed/1 failed (the over-strict assert); reformulation is algebraically
 identical so STEP2 cold-start is valid. Clean re-validation after the cold-start verdict.
 
+### 2nd-ORDER COLD-START RESULT (8423462) — does NOT fix it (mid-depth seed, not bottom)
+`bot2nd` ≈ `base1st`: onset step 182, |u|=28, same Med **lev14 = MID-DEPTH** seed, NaN ~210. The
+bottom-slope fix only touches the bottom-active cell; the seed is a mid-depth basin-wall wet/rock
+cell → the one-sided-bottom-slope was NOT the dominant residual term. Committed (`a2e803f0`) as correct
+faithful numerics (curved-EOS, the audit's recommendation; reformulated `delta+curvature`, codex-clean,
+33 tests green) but it does not gate the cube.
+
+### CUBE FREE COLD-START — DEFINITIVELY INTRACTABLE at C32–C96 (last-stand 8423615)
+C96 (~0.7°) + the FULL corrected stack (smc03 + 2nd-order + bathy-smooth-5 + RK3 + bottom drag),
+rest+topo+no-forcing: slow ramp to step168 (|u|=0.59) then **equator 2.3N/314.5 lev15** (f→0,
+mid-depth) → NaN ~340. **Resolution + every faithful fix together still blow.** The mode migrates to
+wherever an under-resolved mid-depth partial-cell PGF residual meets weak rotation (Med at C32 →
+equator/Indonesia at C96). **CONCLUSION (locked, ~8 iters): the cube free CORE-II cold-start is a
+fundamental resolution/discretization limit, not a missing knob.** Exhausted: RK3, biharmonic,
+harmonic (incl. max-CFL + A_h crank), bottom drag (linear/BBL/quadratic), bathy smoothing, eta-PGF,
+C-face closure, Adcroft + smc03 + 2nd-order bottom slope, resolution C32/48/96, marginal-sea mask,
+velocity cap (the only "completing" run — non-faithful). The cube would need either a fundamentally
+different mid-depth-wet/rock PGF (large research effort) OR ~¼° with sub-grid-strait handling +
+balanced-init (the eORCA025-tripole-scale effort). NOT a quick win. **All correct cube numerics built
+this session are committed + faithful (bottom drag, bathy smoothing, 2nd-order slope, tunable CFL) —
+they make the cd-grid more correct and are ready for a future ¼° cube push.**
+
+## PIVOT: cube parked (resolution-limited) → mpas / spectral are the path to "all grids"
+2/5 grids genuinely faithful (tripole ¼°, latlon 1°). Cube parked as resolution-limited (all faithful
+numerics committed). Remaining: **mpas** (ico3 ~900 km too coarse; needs a run_omip_core2 builder +
+bathy + finer mesh; physics array-based, barotropic has drag, partial cells exist via
+`mpas_partial_cell_helpers`) and **spectral** (T21 ~5.6°; CANNOT be CORE-II-forced — no grid-space
+state; largest infra gap). Both are ALSO coarse-resolution-limited for a free cold-start, so the
+near-term GENUINE progress is INFRASTRUCTURE (the comparison pipeline for each) + the same ¼° need.
+NEXT: scope + build the mpas run_omip_core2 builder (the most-supported remaining grid).
+
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
 partial-cell support** — `ocean_pe_fc.py`/`ocean_pe_cdgrid.py` hardcoded `z_coord.dz_ref`
