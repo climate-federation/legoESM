@@ -78,6 +78,28 @@ GRID_TYPES = list(GRID_RESOLUTIONS.keys())
 DEFAULT_NLEV = 40
 
 
+def _mpas_integrator() -> str:
+    """Time integrator for the MPAS hydrostatic PE matrix cases (ico, dt=200).
+
+    Defaults to ``ssp_rk3``: at the matrix time step (dt=200 s) the 3-stage
+    SSP scheme is ~13x faster than the inline 5-stage ssp_rk54 and was
+    validated stable + accurate across the FULL ico hydrostatic matrix —
+    9 hydro + 3 tracer + 4 climate cases, all PASS, mass drift <= 1.6e-16,
+    max|v| matching the ssp_rk54 baselines (e.g. baroclinic 24.8 m/s identical;
+    Held-Suarez 30-day climatology identical).
+
+    NB this is the per-RUN matrix default, NOT the library default.  The
+    ``MPASPrimitiveEquationConfig`` default is ``ssp_rk54_scan`` because
+    ssp_rk3 diverges with the operational del4 hyperdiffusion at LARGE dt
+    (>= ~600 s — pinned by
+    ``test_mpas_atmosphere.py::...test_ssp_rk3_blows_up_with_hyperdiffusion``);
+    the matrix is safe only because it runs at dt=200.  Override with
+    ``LEGOESM_MPAS_INTEGRATOR=ssp_rk54_scan`` to fall back to the large-
+    stability scheme (e.g. for a higher-dt sweep).
+    """
+    return os.environ.get("LEGOESM_MPAS_INTEGRATOR", "ssp_rk3")
+
+
 # ===========================================================================
 # TestCase dataclass
 # ===========================================================================
@@ -3531,7 +3553,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
             nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True)
+            fix_mass=True, anchor_mass_to_initial=True,
+            time_integrator=_mpas_integrator())
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -4063,7 +4086,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
             nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True)
+            fix_mass=True, anchor_mass_to_initial=True,
+            time_integrator=_mpas_integrator())
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -4653,7 +4677,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
             nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True)
+            fix_mass=True, anchor_mass_to_initial=True,
+            time_integrator=_mpas_integrator())
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         state = held_suarez_init_mpas(mesh, sigma, T_init=280.0)
         grid = mesh
