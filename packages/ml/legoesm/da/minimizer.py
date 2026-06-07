@@ -261,7 +261,6 @@ def minimize_cg(
     preconditioner : callable or None
         P^{-1} @ g. If None, identity preconditioning.
     """
-    n = x0.shape[0]
     f0, g0 = cost_and_grad_fn(x0)
 
     if preconditioner is not None:

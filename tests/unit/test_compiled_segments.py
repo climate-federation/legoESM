@@ -446,6 +446,8 @@ class TestBuildSegmentFn:
         result = run_segment(carry, 5, _FORCING)
 
         for field_name in SegmentCarry._fields:
+            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                continue  # optional double-moment fields: None in warm-rain carries
             arr = np.asarray(getattr(result, field_name))
             assert np.all(np.isfinite(arr)), f"{field_name} has non-finite values"
 
@@ -627,6 +629,8 @@ class TestEquivalence:
         )
 
         for field_name in SegmentCarry._fields:
+            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                continue  # optional double-moment fields: None in warm-rain carries
             compiled_arr = np.asarray(getattr(compiled_result, field_name))
             python_arr = np.asarray(getattr(python_result, field_name))
             np.testing.assert_allclose(
@@ -648,6 +652,8 @@ class TestEquivalence:
         )
 
         for field_name in SegmentCarry._fields:
+            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                continue  # optional double-moment fields: None in warm-rain carries
             compiled_arr = np.asarray(getattr(compiled_result, field_name))
             python_arr = np.asarray(getattr(python_result, field_name))
             np.testing.assert_allclose(
@@ -670,6 +676,8 @@ class TestEquivalence:
         result_3b = run_segment(result_3a, 3, _FORCING)
 
         for field_name in SegmentCarry._fields:
+            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                continue  # optional double-moment fields: None in warm-rain carries
             arr_6 = np.asarray(getattr(result_6, field_name))
             arr_3b = np.asarray(getattr(result_3b, field_name))
             np.testing.assert_allclose(
@@ -905,6 +913,8 @@ class TestRadiationSubcycle:
         jax.block_until_ready(subcycle_out.T)
 
         for field_name in SegmentCarry._fields:
+            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                continue  # optional double-moment fields: None in warm-rain carries
             a = np.asarray(getattr(legacy_out, field_name))
             b = np.asarray(getattr(subcycle_out, field_name))
             np.testing.assert_allclose(
@@ -936,6 +946,8 @@ class TestRadiationSubcycle:
         subcycle_out = run_subcycle(_copy_carry(carry_init), 7, _FORCING)
 
         for field_name in SegmentCarry._fields:
+            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                continue  # optional double-moment fields: None in warm-rain carries
             np.testing.assert_allclose(
                 np.asarray(getattr(legacy_out, field_name)),
                 np.asarray(getattr(subcycle_out, field_name)),
@@ -974,6 +986,8 @@ class TestRadiationSubcycle:
         a = run_subcycle(_copy_carry(carry_init), 5, _FORCING)
         b = run_legacy(_copy_carry(carry_init), 5, _FORCING)
         for field_name in SegmentCarry._fields:
+            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                continue  # optional double-moment fields: None in warm-rain carries
             np.testing.assert_allclose(
                 np.asarray(getattr(a, field_name)),
                 np.asarray(getattr(b, field_name)),
@@ -1049,6 +1063,8 @@ class TestRadiationSubcycle:
         # When the alignment guard is correct, build_segment_fn falls
         # back to the legacy body and the two outputs are identical.
         for field_name in SegmentCarry._fields:
+            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                continue  # optional double-moment fields: None in warm-rain carries
             np.testing.assert_allclose(
                 np.asarray(getattr(out_legacy, field_name)),
                 np.asarray(getattr(out_subcycle, field_name)),
@@ -1269,6 +1285,8 @@ class TestRadiationSubcycle:
         out_legacy = run_legacy(_copy_carry(carry_init), n_steps, _FORCING)
         out_subcycle = run_subcycle(_copy_carry(carry_init), n_steps, _FORCING)
         for field_name in SegmentCarry._fields:
+            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                continue  # optional double-moment fields: None in warm-rain carries
             np.testing.assert_allclose(
                 np.asarray(getattr(out_legacy, field_name)),
                 np.asarray(getattr(out_subcycle, field_name)),
@@ -1278,3 +1296,107 @@ class TestRadiationSubcycle:
                     f"{field_name} (rad_update_steps=12, n_steps={n_steps})"
                 ),
             )
+
+
+# ---------------------------------------------------------------------------
+# Double-moment carry (q_i / N_c / N_i) — radiation r_eff coupling
+# ---------------------------------------------------------------------------
+
+
+class TestDoubleMomentCarry:
+    """The optional q_i/N_c/N_i carry fields thread through build_segment_fn:
+    populated from a double-moment microphysics, they are (a) passed to the
+    per-step physics by keyword (so radiation gets number-aware r_eff) and
+    (b) evolved each step from PhysicsOutput.dq_i/dN_c/dN_i — while warm-rain
+    runs (fields None) are byte-unchanged (covered by TestEquivalence)."""
+
+    def _dm_mock(self, seen):
+        """step_unified mock recording the double-moment kwargs it receives and
+        emitting nonzero hydrometeor/number tendencies so the carry evolves."""
+        def _step(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+                  sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+                  solar_weights, s_0, o3_vmr, aerosol_od,
+                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa, **kwargs):
+            for _k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                seen[_k] = kwargs.get(_k)
+            s3, s2 = T.shape, p_s.shape
+            phys_out = PhysicsOutput(
+                dT_dt=jnp.zeros(s3), dq_v_dt=jnp.zeros(s3),
+                dq_c_dt=jnp.zeros(s3), dq_r_dt=jnp.zeros(s3),
+                precip=jnp.zeros(s2), sw_net_sfc=jnp.zeros(s2),
+                lw_net_sfc=jnp.zeros(s2), sw_up_toa=jnp.zeros(s2),
+                lw_up_toa=jnp.zeros(s2), sw_down_toa=jnp.zeros(s2),
+                du_dt=jnp.zeros(s3), dv_dt=jnp.zeros(s3),
+                dq_i_dt=jnp.full(s3, 1.0e-7),
+                dq_s_dt=jnp.full(s3, 2.0e-7),
+                dq_g_dt=jnp.full(s3, 3.0e-7),
+                dN_c_dt=jnp.full(s3, 2.0),
+                dN_r_dt=jnp.full(s3, 4.0),
+                dN_i_dt=jnp.full(s3, 3.0),
+                conv_prog=conv_prog,
+            )
+            held_new = (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa)
+            return phys_out, held_new, kwargs.get("T_land")
+        return _step
+
+    def test_carry_evolves_and_passes_number_to_physics(self):
+        seen = {}
+        args = _make_segment_fn_args()
+        args["step_unified"] = self._dm_mock(seen)
+        run_segment = build_segment_fn(**args)
+
+        state = _make_hydrostatic_state()
+        s3 = (N_FACES, N, N, NLEV)
+        s2 = (N_FACES, N, N)
+        nc0, nr0, ni0 = 1.0e8, 1.0e6, 5.0e3
+        qi0, qs0, qg0 = 1.0e-4, 2.0e-4, 3.0e-4
+        carry = pack_carry(
+            state, q_v=jnp.ones(s3) * 0.01, q_c=jnp.ones(s3) * 1e-3,
+            q_r=jnp.zeros(s3),
+            held_dT_rad=jnp.zeros(s3), held_sw_net_sfc=jnp.zeros(s2),
+            held_lw_net_sfc=jnp.zeros(s2), held_sw_up_toa=jnp.zeros(s2),
+            held_lw_up_toa=jnp.zeros(s2), held_sw_down_toa=jnp.zeros(s2),
+            step_index=0,
+            q_i=jnp.full(s3, qi0), q_s=jnp.full(s3, qs0), q_g=jnp.full(s3, qg0),
+            N_c=jnp.full(s3, nc0), N_r=jnp.full(s3, nr0), N_i=jnp.full(s3, ni0),
+        )
+        # The double-moment fields are real arrays in the packed carry.
+        assert carry.N_c is not None and carry.q_i is not None
+
+        n_steps = 2
+        result = run_segment(carry, n_steps, _FORCING)
+        jax.block_until_ready(result.N_c)
+
+        # (a) physics received ALL hydrometeor/number columns by keyword.
+        for _k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+            assert seen[_k] is not None, _k
+        # (b) every field evolved by n_steps * dt * its tendency (clipped >= 0).
+        nd = n_steps * DT
+        np.testing.assert_allclose(np.asarray(result.q_i), qi0 + nd * 1.0e-7, rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.q_s), qs0 + nd * 2.0e-7, rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.q_g), qg0 + nd * 3.0e-7, rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.N_c), nc0 + nd * 2.0, rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.N_r), nr0 + nd * 4.0, rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.N_i), ni0 + nd * 3.0, rtol=1e-5)
+
+    def test_warm_rain_carry_keeps_number_fields_none(self):
+        """Without q_i/N_c/N_i in pack_carry, the carry fields stay None
+        (legacy warm-rain behaviour, no extra leaves)."""
+        state = _make_hydrostatic_state()
+        s3 = (N_FACES, N, N, NLEV)
+        s2 = (N_FACES, N, N)
+        carry = pack_carry(
+            state, q_v=jnp.ones(s3) * 0.01, q_c=jnp.zeros(s3),
+            q_r=jnp.zeros(s3),
+            held_dT_rad=jnp.zeros(s3), held_sw_net_sfc=jnp.zeros(s2),
+            held_lw_net_sfc=jnp.zeros(s2), held_sw_up_toa=jnp.zeros(s2),
+            held_lw_up_toa=jnp.zeros(s2), held_sw_down_toa=jnp.zeros(s2),
+            step_index=0,
+        )
+        assert all(getattr(carry, k) is None for k in
+                   ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"))
+        # None fields contribute no pytree leaves.
+        leaves = jax.tree.leaves(carry)
+        assert all(isinstance(x, jax.Array) for x in leaves)

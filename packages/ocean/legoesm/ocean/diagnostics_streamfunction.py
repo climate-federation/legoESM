@@ -130,7 +130,7 @@ def barotropic_streamfunction(u, h_partial, mask, grid):
         Cell-centre values (the wrap column is dropped).
     """
     n_lat, n_lon_u, _ = u.shape
-    n_lon = n_lon_u - 1
+    n_lon_u - 1
     R = getattr(grid, "radius", constants.R_earth)
     # Cell-row meridional extent — prefer ``grid.dy`` (1D array,
     # Mercator-safe) but fall back to a uniform ``R * dlat`` if absent

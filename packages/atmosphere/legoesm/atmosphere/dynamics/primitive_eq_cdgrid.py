@@ -39,8 +39,6 @@ from legoesm.core.operators_3d import (
 )
 from legoesm.core.conservation import (
     zero_mean_tendency,
-    fix_mass_hydrostatic,
-    fix_mass_hydrostatic_target,
     fix_ps_mass,
     fix_ps_mass_target,
 )
@@ -49,14 +47,7 @@ from legoesm.core.operators import (
     hyperdiffusion,
     laplacian_compact,
 )
-from legoesm.parallel.cubesphere_exchange import (
-    packed_pad_halo_4d as _packed_pad_halo_4d_spmd,
-)
-from legoesm.parallel.halo_exchange import (
-    packed_pad_halo_mpi_4d as _packed_pad_halo_4d_mpi,
-)
 from legoesm.core.precision import resolve_dtype, cast_pytree
-from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -70,7 +61,6 @@ from legoesm.grids.vertical import (
     dp_from_hybrid,
     compute_geopotential,
     compute_geopotential_hybrid,
-    compute_sigma_dot,
     compute_sigma_dot_and_total,
     compute_mass_flux_hybrid,
     vertical_advection,
@@ -321,7 +311,7 @@ def fv3_hydrostatic_tendencies(
     # --- 2. Pressure at full levels ---
     if _hybrid:
         p_full = pressure_from_hybrid(sigma_coord, p_s)
-        dp = dp_from_hybrid(sigma_coord, p_s)
+        dp_from_hybrid(sigma_coord, p_s)
     else:
         p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
 
@@ -1685,7 +1675,6 @@ def cdgrid_hydrostatic_tendencies(
     dv_cc = _duv_cc[..., 1]
 
     dims_3d = ("face", "x", "y", "level")
-    dims_2d = ("face", "x", "y")
     return HydrostaticTendencies(
         du_dt=Field(data=du_cc, name="du_dt", dims=dims_3d, units="m/s^2"),
         dv_dt=Field(data=dv_cc, name="dv_dt", dims=dims_3d, units="m/s^2"),

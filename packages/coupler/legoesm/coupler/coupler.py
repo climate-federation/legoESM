@@ -20,7 +20,6 @@ from legoesm.core.precision import get_policy
 from legoesm.core.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
 from legoesm.land.multilayer_land import init_multilayer_land_state
 from legoesm.land.surface_params import reshape_params
-from legoesm.core.surface_energy import surface_radiation_fluxes
 from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
 from legoesm.core.field import Field
 from legoesm.coupler.accumulator import (

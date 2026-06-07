@@ -34,7 +34,6 @@ from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.operators import gradient_x, gradient_y
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.halo import pad_halo, pad_halo_vector
 from legoesm.grids.halo_latlon import pad_halo_latlon
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh

@@ -5,7 +5,7 @@ Task #25 root-cause: the lat-lon C-grid step at multi-rank takes >2.5h
 to JIT-compile (smokes 8063948 + 8063949 both TIMED OUT at 3h walltime
 with execution never starting).  Hypothesis: ``ssp_rk3_step`` calls
 ``tendency_fn`` THREE TIMES sequentially (see
-``src/legoesm/timestepping/ssp_rk3.py:55-64``), so XLA inlines three
+``ssp_rk3.py`` ``ssp_rk3_step``), so XLA inlines three
 full copies of the entire tendency pipeline (advection + polar filter
 + diffusion + hydrostatic + vertical advection) into a single XLA
 module.  XLA compile complexity is super-linear in op count, so

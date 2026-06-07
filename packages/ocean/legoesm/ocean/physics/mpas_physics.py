@@ -161,7 +161,6 @@ def make_mpas_ocean_physics(
         eta = state.eta.data        # (nCells,)
         H_bathy = state.H_bathy.data
         mask = state.land_mask.data  # (nCells,)
-        dtype = u_3d.dtype
 
         du_dt = jnp.zeros_like(u_3d)
         dT_dt = jnp.zeros_like(T_3d)

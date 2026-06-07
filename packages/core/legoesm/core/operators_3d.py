@@ -8,8 +8,7 @@ Provides two sets of operators:
    hyperdiffusion_3d, laplacian_compact_3d.
 
 2. **Vertical operators for height coordinates** (non-hydrostatic):
-   vertical_gradient_full_to_half, vertical_gradient_half_to_full,
-   vertical_advection_height, vertical_divergence_height.
+   vertical_advection_height.
 
 All functions operate on raw ``jax.Array`` data.
 """
@@ -19,23 +18,12 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.field import Field
-from legoesm.core.operators import (
-    gradient_x,
-    gradient_y,
-    divergence,
-)
 from legoesm.core.operators_fv import (
     fv_flux_divergence as _fv_flux_divergence_2d,
     fv_scalar_advection as _fv_scalar_advection_2d,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo_4d, pad_halo_vector_4d
-
-# legoesm.parallel.async_halo (overlapped_halo_compute[_vector]) is imported at
-# function scope in the overlapped_* operators below: core/ must not import
-# parallel/ at module top level (re-enters parallel/__init__ mid-load and breaks
-# isolated pytest of core modules; CLAUDE.md).
 
 
 def vorticity_3d(
@@ -305,250 +293,8 @@ def fv_scalar_advection_3d(
 
 
 # ==============================================================================
-# Overlapped async halo variants (interior/boundary split)
-# ==============================================================================
-
-def overlapped_gradient_3d(
-    field_3d: jax.Array,
-    grid: CubedSphereGrid,
-    masks=None,
-) -> tuple[jax.Array, jax.Array]:
-    """Gradient (dx, dy) with interior/boundary overlap for 4D fields.
-
-    Computes interior stencil with local-only halo padding, then
-    boundary stencil after full halo exchange, and merges.
-
-    Parameters
-    ----------
-    field_3d : jax.Array, shape (6, n, n, nlev)
-    grid : CubedSphereGrid
-    masks : InteriorBoundaryMasks, optional
-        Pre-computed masks from ``create_interior_boundary_masks``.
-
-    Returns
-    -------
-    (dx, dy) : tuple of jax.Array, each shape (6, n, n, nlev).
-    """
-    from legoesm.parallel.async_halo import overlapped_halo_compute
-
-    dx_grid = grid.dx
-    dy_grid = grid.dy
-
-    def _grad_stencil(f_pad):
-        """(6, n+2, n+2) -> (6, n, n, 2) packed dx/dy."""
-        gx = (f_pad[:, 2:, 1:-1] - f_pad[:, :-2, 1:-1]) / dx_grid
-        gy = (f_pad[:, 1:-1, 2:] - f_pad[:, 1:-1, :-2]) / dy_grid
-        return jnp.stack([gx, gy], axis=-1)
-
-    f_t = jnp.moveaxis(field_3d, -1, 0)  # (nlev, 6, n, n)
-    result_t = jax.vmap(
-        lambda f: overlapped_halo_compute(
-            f, _grad_stencil, halo_width=1, masks=masks,
-            interp_offsets=grid.halo_interp_offsets,
-        )
-    )(f_t)  # (nlev, 6, n, n, 2)
-    result = jnp.moveaxis(result_t, 0, -2)  # (6, n, n, nlev, 2)
-    return result[..., 0], result[..., 1]
-
-
-def overlapped_laplacian_compact_3d(
-    field_3d: jax.Array,
-    grid: CubedSphereGrid,
-    masks=None,
-) -> jax.Array:
-    """Compact Laplacian with interior/boundary overlap for 4D fields.
-
-    Parameters
-    ----------
-    field_3d : jax.Array, shape (6, n, n, nlev)
-    grid : CubedSphereGrid
-    masks : InteriorBoundaryMasks, optional
-
-    Returns
-    -------
-    jax.Array, shape (6, n, n, nlev).
-    """
-    from legoesm.parallel.async_halo import overlapped_halo_compute
-
-    hx_sq = (grid.dx / 2.0) ** 2
-    hy_sq = (grid.dy / 2.0) ** 2
-
-    def _lap_stencil(f_pad):
-        """(6, n+2, n+2) -> (6, n, n)."""
-        interior = f_pad[:, 1:-1, 1:-1]
-        d2x = (f_pad[:, 2:, 1:-1] - 2.0 * interior + f_pad[:, :-2, 1:-1]) / hx_sq
-        d2y = (f_pad[:, 1:-1, 2:] - 2.0 * interior + f_pad[:, 1:-1, :-2]) / hy_sq
-        return d2x + d2y
-
-    f_t = jnp.moveaxis(field_3d, -1, 0)
-    result_t = jax.vmap(
-        lambda f: overlapped_halo_compute(
-            f, _lap_stencil, halo_width=1, masks=masks,
-            interp_offsets=grid.halo_interp_offsets,
-        )
-    )(f_t)
-    return jnp.moveaxis(result_t, 0, -1)
-
-
-def overlapped_divergence_3d(
-    u_3d: jax.Array,
-    v_3d: jax.Array,
-    grid: CubedSphereGrid,
-    masks=None,
-) -> jax.Array:
-    """Divergence with interior/boundary overlap for 4D vector fields.
-
-    Parameters
-    ----------
-    u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
-    grid : CubedSphereGrid
-    masks : InteriorBoundaryMasks, optional
-
-    Returns
-    -------
-    jax.Array, shape (6, n, n, nlev).
-    """
-    from legoesm.parallel.async_halo import overlapped_halo_compute_vector
-
-    hy_ext = grid.hy_ext
-    hx_ext = grid.hx_ext
-    area = grid.area
-
-    def _div_stencil(u_pad, v_pad):
-        """(6, n+2, n+2) each -> (6, n, n)."""
-        fx = u_pad * hy_ext
-        fy = v_pad * hx_ext
-        dfx = fx[:, 2:, 1:-1] - fx[:, :-2, 1:-1]
-        dfy = fy[:, 1:-1, 2:] - fy[:, 1:-1, :-2]
-        return (dfx + dfy) / (2.0 * area)
-
-    u_t = jnp.moveaxis(u_3d, -1, 0)
-    v_t = jnp.moveaxis(v_3d, -1, 0)
-    # Use scalar overlap for each component packed together
-    uv_packed = jnp.stack([u_3d, v_3d], axis=-1)  # (6, n, n, nlev, 2)
-    uv_t = jnp.moveaxis(uv_packed, -2, 0)  # (nlev, 6, n, n, 2)
-
-    def _per_level(uv_k):
-        u_k, v_k = uv_k[..., 0], uv_k[..., 1]
-        return overlapped_halo_compute_vector(
-            u_k, v_k, _div_stencil,
-            grid.cos_angle, grid.sin_angle,
-            grid.cos_angle_padded, grid.sin_angle_padded,
-            halo_width=1, masks=masks,
-            interp_offsets=grid.halo_interp_offsets,
-        )
-
-    result_t = jax.vmap(_per_level)(uv_t)
-    return jnp.moveaxis(result_t, 0, -1)
-
-
-def overlapped_vorticity_3d(
-    u_3d: jax.Array,
-    v_3d: jax.Array,
-    grid: CubedSphereGrid,
-    masks=None,
-) -> jax.Array:
-    """Vorticity with interior/boundary overlap for 4D vector fields.
-
-    Parameters
-    ----------
-    u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
-    grid : CubedSphereGrid
-    masks : InteriorBoundaryMasks, optional
-
-    Returns
-    -------
-    jax.Array, shape (6, n, n, nlev).
-    """
-    from legoesm.parallel.async_halo import overlapped_halo_compute_vector
-
-    hy_ext = grid.hy_ext
-    hx_ext = grid.hx_ext
-    area = grid.area
-
-    def _vort_stencil(u_pad, v_pad):
-        """(6, n+2, n+2) each -> (6, n, n)."""
-        vort_x = v_pad * hy_ext
-        vort_y = u_pad * hx_ext
-        d_vort_x = vort_x[:, 2:, 1:-1] - vort_x[:, :-2, 1:-1]
-        d_vort_y = vort_y[:, 1:-1, 2:] - vort_y[:, 1:-1, :-2]
-        return (d_vort_x - d_vort_y) / (2.0 * area)
-
-    uv_packed = jnp.stack([u_3d, v_3d], axis=-1)
-    uv_t = jnp.moveaxis(uv_packed, -2, 0)
-
-    def _per_level(uv_k):
-        u_k, v_k = uv_k[..., 0], uv_k[..., 1]
-        return overlapped_halo_compute_vector(
-            u_k, v_k, _vort_stencil,
-            grid.cos_angle, grid.sin_angle,
-            grid.cos_angle_padded, grid.sin_angle_padded,
-            halo_width=1, masks=masks,
-            interp_offsets=grid.halo_interp_offsets,
-        )
-
-    result_t = jax.vmap(_per_level)(uv_t)
-    return jnp.moveaxis(result_t, 0, -1)
-
-
-# ==============================================================================
 # Vertical operators for height-based coordinates (non-hydrostatic)
 # ==============================================================================
-
-def vertical_gradient_full_to_half(
-    field_full: jax.Array,
-    dz: jax.Array,
-) -> jax.Array:
-    """Compute vertical gradient from full levels to half (interface) levels.
-
-    Uses centered difference: d(f)/dz*|_{k+1/2} = (f_k - f_{k+1}) / dz_avg
-
-    Maps fields at full levels (nlev) to gradients at interior
-    half levels (nlev-1). Top and bottom boundary gradients are not
-    included -- the caller handles boundary conditions.
-
-    Parameters
-    ----------
-    field_full : jax.Array
-        Field at full levels, shape (..., nlev).
-    dz : jax.Array
-        Layer thickness dz* [m], shape (nlev,). Positive.
-
-    Returns
-    -------
-    jax.Array
-        Gradient at interior half levels, shape (..., nlev-1).
-    """
-    df = field_full[..., :-1] - field_full[..., 1:]
-    dz_interface = 0.5 * (dz[:-1] + dz[1:])
-    return df / dz_interface
-
-
-def vertical_gradient_half_to_full(
-    field_half: jax.Array,
-    dz: jax.Array,
-) -> jax.Array:
-    """Compute vertical gradient from half (interface) levels to full levels.
-
-    Uses centered difference: d(f)/dz*|_k = (f_{k-1/2} - f_{k+1/2}) / dz_k
-
-    Maps fields at half levels (nlev+1) to gradients at full levels (nlev).
-
-    Parameters
-    ----------
-    field_half : jax.Array
-        Field at half (interface) levels, shape (..., nlev+1).
-    dz : jax.Array
-        Layer thickness dz* [m], shape (nlev,). Positive.
-
-    Returns
-    -------
-    jax.Array
-        Gradient at full levels, shape (..., nlev).
-    """
-    df = field_half[..., :-1] - field_half[..., 1:]
-    return df / dz
-
 
 def vertical_advection_height(
     field_full: jax.Array,
@@ -598,31 +344,3 @@ def vertical_advection_height(
     # Upwind: w* > 0 = upward => backward; w* < 0 = downward => forward
     grad = jnp.where(w_star > 0, grad_bwd, grad_fwd)
     return -w_star * grad
-
-
-def vertical_divergence_height(
-    rho_w_half: jax.Array,
-    dz: jax.Array,
-    jacobian: jax.Array,
-) -> jax.Array:
-    """Compute vertical divergence d(rho*w)/dz for continuity equation.
-
-    Computes (1/J) · d(rho*w)/dz* at full levels from flux at half levels.
-
-    Parameters
-    ----------
-    rho_w_half : jax.Array
-        Mass flux rho*w at half levels [kg/(m^2 s)], shape (6, n, n, nlev+1).
-    dz : jax.Array
-        Layer thickness dz* [m], shape (nlev,).
-    jacobian : jax.Array
-        Terrain Jacobian dz/dz*, shape (6, n, n).
-
-    Returns
-    -------
-    jax.Array
-        Vertical divergence at full levels, shape (6, n, n, nlev).
-    """
-    d_flux = rho_w_half[..., :-1] - rho_w_half[..., 1:]
-    div_z_star = d_flux / dz
-    return div_z_star / jacobian[..., None]

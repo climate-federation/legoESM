@@ -20,7 +20,7 @@ from legoesm import constants
 
 
 # Canonical AIMIP variant set.  Single source of truth — imported by
-# ``scripts/run_aimip.py`` and the ``validate_strict`` rule below.
+# ``scripts/run/run_aimip.py`` and the ``validate_strict`` rule below.
 # Empty string = not an AIMIP run (preserves backward-compat for
 # existing AMIP configs).
 AIMIP_VARIANTS: tuple[str, ...] = (
@@ -121,7 +121,7 @@ class DycoreConfig(NamedTuple):
     # The filter is lon-only FFT (``jnp.fft.rfft`` along axis -1), so
     # under lat-band MPI each rank applies it independently on its
     # own band — no MPI exchange needed for the filter itself.  See
-    # ``src/legoesm/grids/polar_filter.py`` for the algorithm and
+    # ``polar_filter.py`` for the algorithm and
     # ``CGridLatLonPrimitiveEquationConfig.use_polar_filter`` for the
     # model-side flag this propagates to.
     use_polar_filter: bool = False
@@ -297,7 +297,7 @@ class ExperimentConfig(NamedTuple):
 
     # AIMIP intercomparison variant tag.  Empty string => not an AIMIP run
     # (preserves backward compatibility for all existing AMIP configs).
-    # When set, ``scripts/run_aimip.py`` dispatches to the matching
+    # When set, ``scripts/run/run_aimip.py`` dispatches to the matching
     # training entry point and ``validate_strict`` enforces the
     # corresponding scheme prerequisites.
     aimip_variant: str = ""  # "", classical, column_nn, sfno_physics, sfno_full

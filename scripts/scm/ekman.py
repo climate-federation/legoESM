@@ -44,7 +44,7 @@ from legoesm.atmosphere.scm_forcing import SCMForcing
 
 _F_C = 1.0e-4
 _U_G = 10.0
-_THETA = 273.15
+_THETA = constants.T_freeze
 
 
 def build_scm(

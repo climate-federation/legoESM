@@ -398,7 +398,7 @@ def _laplacian_smooth_voronoi(
 
     result = arr.copy()
     nCells = arr.shape[0]
-    maxEdges = cells_on_cell.shape[0]
+    cells_on_cell.shape[0]
 
     for _ in range(passes):
         smoothed = result.copy()

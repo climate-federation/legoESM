@@ -317,46 +317,6 @@ def create_output_shardings(state, config: DeviceConfig, grid_type: str = "cubed
 
 
 # ======================================================================
-# Face-level halo exchange (for use inside shard_map)
-# ======================================================================
-
-def _face_halo_exchange(field: jax.Array) -> jax.Array:
-    """Exchange halo data between cubed-sphere faces within shard_map.
-
-    This function is designed to run *inside* a ``shard_map`` body where
-    each device holds one face (shape ``(n, n)`` or ``(n, n, nlev)``).
-    It uses ``jax.lax.ppermute`` to send boundary strips to neighbors
-    and fill ghost zones.
-
-    For the face-only case, each device's local array represents one
-    face.  The inter-face connectivity is encoded in the permutation
-    pattern passed to ppermute.
-
-    Parameters
-    ----------
-    field : jax.Array
-        Local face data, shape ``(n, n)`` or ``(n, n, nlev)``.
-
-    Returns
-    -------
-    jax.Array
-        Same shape, with boundary values updated from neighbor halos.
-
-    Notes
-    -----
-    This is a building block.  For most users, prefer
-    :func:`make_sharded_step` which handles halo exchange automatically.
-    """
-    # The actual boundary exchange for cubed-sphere is complex (axis
-    # swaps, reversals) and is already implemented in grids/halo.py.
-    # Inside shard_map with face sharding, the halo exchange uses the
-    # standard pad_halo which sees the full (6, n, n) array within
-    # the shard_map body.  No additional ppermute is needed because
-    # shard_map's in_specs/out_specs handle the data distribution.
-    return field
-
-
-# ======================================================================
 # Executable cache — compile once, reuse across steps
 # ======================================================================
 
@@ -459,18 +419,6 @@ class CompiledShardedStep:
                 state, self._config,
             )
         return self._out_sharding_cache[key]
-
-    def _raw_step(self, state, dt, physics_fn=None):
-        """Run the model step, optionally with halo exchange."""
-        if physics_fn is not None and hasattr(self._model, "step_with_physics"):
-            new_state = self._model.step_with_physics(state, dt, physics_fn)
-        else:
-            new_state = self._model.step(state, dt)
-
-        if self._halo_exchange_fn is not None:
-            new_state = self._halo_exchange_fn(new_state)
-
-        return new_state
 
     def _compile(self, state, physics_fn=None):
         """Trace and compile a new executable, returning the jitted fn."""
@@ -1270,11 +1218,11 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     )
     cellsOnCell_np = np.asarray(gm_np.cellsOnCell)       # (maxEdges, nCells)
     cellsOnEdge_np = np.asarray(gm_np.cellsOnEdge)       # (2, nEdges)
-    cellsOnVertex_np = np.asarray(gm_np.cellsOnVertex)    # (vDeg, nVerts)
+    np.asarray(gm_np.cellsOnVertex)    # (vDeg, nVerts)
     verticesOnCell_np = np.asarray(gm_np.verticesOnCell)   # (maxEdges, nCells)
     verticesOnEdge_np = np.asarray(gm_np.verticesOnEdge)   # (2, nEdges)
     maxEdges = int(gm_np.maxEdges)
-    vDeg = int(gm_np.vertexDegree)
+    int(gm_np.vertexDegree)
 
     # Contiguous-block cell ownership (matches shard layout).
     cell_owner = np.repeat(np.arange(n_dev, dtype=np.int32), cells_per)
@@ -1304,7 +1252,7 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
         owned_edges = np.arange(e_start, e_end, dtype=np.int64)
         owned_vertices = np.arange(v_start, v_end, dtype=np.int64)
         owned_cells_set = set(owned_cells.tolist())
-        owned_edges_set = set(owned_edges.tolist())
+        set(owned_edges.tolist())
 
         # ----- Halo cells: k-ring neighbours of owned cells ----- #
         halo_cells_set = _compute_halo_cells(
@@ -1343,7 +1291,7 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
         )
         halo_cells = np.array(sorted(halo_cells_set), dtype=np.int64)
         local_cells = np.concatenate([owned_cells, halo_cells])
-        local_cells_set = set(local_cells.tolist())
+        set(local_cells.tolist())
 
         # ----- Halo edges: edges where BOTH cellsOnEdge are in local_cells ----- #
         # Original Python loop over nEdges scaled poorly at MPAS resolutions
@@ -1840,8 +1788,8 @@ def make_voronoi_sharded_step(
             jax.device_put(a, rep_sharding) for a in pp_sched['recv_edge_pos']]
 
         # Log halo exchange statistics
-        total_halo_cells = sum(pp_sched['halo_cells_per_round'])
-        total_halo_edges = sum(pp_sched['halo_edges_per_round'])
+        sum(pp_sched['halo_cells_per_round'])
+        sum(pp_sched['halo_edges_per_round'])
         total_pp_bytes = sum(
             hc * (nlev + 2) + he * nlev
             for hc, he in zip(pp_sched['halo_cells_per_round'],

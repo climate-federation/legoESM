@@ -29,9 +29,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.ocean.eos import (
-    wright_eos,
     compute_buoyancy_frequency,
-    compute_hydrostatic_pressure,
     rho_0 as rho_0_ref,
 )
 from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
@@ -62,7 +60,7 @@ def _boundary_layer_depth(
     Returns shape (...) boundary layer depth [m, positive downward].
     """
     eps = _EPS
-    nlev = rho.shape[-1]
+    rho.shape[-1]
 
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
     # Depth of cell centers below surface (positive downward)
@@ -200,7 +198,7 @@ def kpp_vertical_mixing(
     VerticalMixingOutput
     """
     eps = _EPS
-    nlev = u.shape[-1]
+    u.shape[-1]
 
     # --- Friction velocity ---
     if tau_x is not None and tau_y is not None:
@@ -214,7 +212,7 @@ def kpp_vertical_mixing(
 
     # --- Surface buoyancy flux ---
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
-    dz_half0 = 0.5 * (dz_actual[..., 0] + dz_actual[..., 1])
+    0.5 * (dz_actual[..., 0] + dz_actual[..., 1])
     if B_f is None:
         # When the caller does not supply a surface buoyancy flux, set
         # B_f = 0 (no convective non-local transport).  The previous

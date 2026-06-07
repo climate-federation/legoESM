@@ -127,7 +127,6 @@ def solve_soil_thermal(
     T_new : jnp.ndarray
         Updated soil temperature [K], shape (ncol, n_layers).
     """
-    ncol, nlayers = T_soil.shape
     dz = grid.dz                  # (nlayers,)
     dz_if = grid.dz_interface     # (nlayers-1,)
 

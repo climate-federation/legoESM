@@ -71,7 +71,7 @@ Example
 
 from __future__ import annotations
 
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp

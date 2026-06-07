@@ -13,7 +13,6 @@ References
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 
@@ -38,8 +37,6 @@ def divergence_cell(u_edge, mesh):
     -------
     jax.Array, shape (nCells,)
     """
-    nCells = mesh.nCells
-    maxEdges = mesh.maxEdges
 
     # edgesOnCell: (maxEdges, nCells)
     eoc = mesh.edgesOnCell  # (maxEdges, nCells)
@@ -96,8 +93,6 @@ def curl_vertex(u_edge, mesh):
     -------
     jax.Array, shape (nVertices,)
     """
-    nVertices = mesh.nVertices
-    vertexDegree = mesh.vertexDegree
 
     eov = mesh.edgesOnVertex  # (vertexDegree, nVertices)
     sign = mesh.edgeSignOnVertex  # (vertexDegree, nVertices)
@@ -226,7 +221,6 @@ def kinetic_energy_cell(u_edge, mesh):
     -------
     jax.Array, shape (nCells,)
     """
-    nCells = mesh.nCells
     eoc = mesh.edgesOnCell  # (maxEdges, nCells)
     mask = (eoc >= 0).astype(u_edge.dtype)
     eoc_safe = jnp.maximum(eoc, 0)
@@ -463,7 +457,7 @@ def apvm_correction(q_vertex, u_edge, mesh, dt):
 
     # For each vertex, compute advective derivative from connected edges
     # u_edge * dq/ds along each edge (where s is along the edge tangent)
-    u_at_edges = u_edge[eov_safe]  # (vertexDegree, nVertices)
+    u_edge[eov_safe]  # (vertexDegree, nVertices)
 
     # q difference along each edge
     v0_of_edge = voe[0][eov_safe]  # vertex 0 of each adjacent edge

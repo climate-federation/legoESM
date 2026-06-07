@@ -83,6 +83,13 @@ class MorrisonConfig(NamedTuple):
     #     PRA=67·(qc·qr)^1.15. Faithful to the gSAM oracle.
     #   "seifert_beheng" = the legacy SB onset (k_au/x_star/onset sigmoid).
     warm_rain_scheme: str = "kk2000"
+    predict_Nc: bool = False         # SAM M2005 dopredictNc. False (SAM DEFAULT) =
+                                     # SPECIFIED constant droplet number Nc_0: the
+                                     # size distribution uses Nc_0 and cloud number is
+                                     # NOT evolved (dN_c/dt=0). True = prognostic Nc,
+                                     # which needs SAM's droplet-activation source
+                                     # (not yet ported) — leaving it False matches SAM
+                                     # and avoids the sink-only Nc<0 drift.
     # Warm rain (Seifert-Beheng knobs; consumed only when
     # warm_rain_scheme="seifert_beheng")
     k_au: float = 6e2

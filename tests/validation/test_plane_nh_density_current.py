@@ -2,8 +2,7 @@
 
 PR2d ships a heavily scaled-down CI version of the Straka et al. 1993
 density-current test. The full benchmark (Lx=51.2 km, dx=200 m,
-integrate 900 s with hyperdiffusion) lives in
-``scripts/run_plane_density_current.py`` and runs nightly (PR2e).
+integrate 900 s with hyperdiffusion) is not run in CI.
 
 Why CI is scaled down
 ---------------------

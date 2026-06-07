@@ -20,7 +20,6 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
-    HydrostaticState,
     HydrostaticTendencies,
     MPASNonHydrostaticState,
     MPASNonHydrostaticTendencies,
@@ -32,11 +31,7 @@ from legoesm.core.state import (
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
     HeightCoordinate,
-    SigmaCoordinate,
-    HybridSigmaPressureCoordinate,
     TerrainMetric,
-    pressure_from_sigma,
-    pressure_from_hybrid,
 )
 from legoesm import constants
 
@@ -324,7 +319,20 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None):
     """Extract water vapor and cloud condensate columns from state tracers.
 
     Works for any state type (HydrostaticState, SpectralHydrostaticState, etc.)
-    Returns (q_v_col, q_cloud_col, q_ice_col) all shaped (ncol, nlev).
+    Returns (q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col), each
+    shaped (ncol, nlev) (number columns ``None`` when absent).
+
+    ``n_cloud_col`` / ``n_ice_col`` are the double-moment cloud-droplet / ice
+    NUMBER columns (Morrison / Seifert-Beheng), fed to the M2005 PSD effective
+    radii in ``compute_cloud_properties`` so RRTMGP gets droplet-number-aware
+    r_eff (not a fixed constant). They are ``None`` unless the state's tracer
+    dict carries ``"N_c"`` / ``"N_i"`` — single-moment schemes and
+    specified-Nc Morrison (``dopredictNc=.false.``) leave them absent, so those
+    fall back to the constant ``config.r_eff_liq`` / ``r_eff_ice`` (unchanged
+    behaviour). UNIT NOTE: by legoESM convention ``N_c`` is per-VOLUME [#/m³]
+    and ``N_i`` per-MASS [#/kg] (see ``_warm_rain.effective_Nc`` and
+    ``morrison``); both match what ``compute_cloud_properties`` expects, so they
+    are passed RAW (no ρ rescale) — mirroring the cubed-sphere NH path.
     """
     if dtype is None:
         # Try to infer dtype from state.T or state.T_hat.  Fall back to
@@ -345,6 +353,8 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None):
     q_v_col = jnp.zeros(T_col_shape, dtype=dtype)
     q_cloud_col = None
     q_ice_col = None
+    n_cloud_col = None
+    n_ice_col = None
 
     tracers = getattr(state, "tracers", None)
     if tracers is not None:
@@ -360,8 +370,19 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None):
             _qi_raw = tracers["q_i"]
             _qi_data = _qi_raw.data if hasattr(_qi_raw, "data") else _qi_raw
             q_ice_col = jnp.maximum(_qi_data.reshape(ncol, nlev), 0.0)
+        # Double-moment NUMBER columns (Morrison / Seifert-Beheng) → M2005 PSD
+        # r_eff. N_c per-VOLUME [#/m³], N_i per-MASS [#/kg]; passed raw (see
+        # docstring UNIT NOTE). Absent ⇒ None ⇒ constant-r_eff fallback.
+        if "N_c" in tracers:
+            _nc_raw = tracers["N_c"]
+            _nc_data = _nc_raw.data if hasattr(_nc_raw, "data") else _nc_raw
+            n_cloud_col = jnp.maximum(_nc_data.reshape(ncol, nlev), 0.0)
+        if "N_i" in tracers:
+            _ni_raw = tracers["N_i"]
+            _ni_data = _ni_raw.data if hasattr(_ni_raw, "data") else _ni_raw
+            n_ice_col = jnp.maximum(_ni_data.reshape(ncol, nlev), 0.0)
 
-    return q_v_col, q_cloud_col, q_ice_col
+    return q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col
 
 
 def _get_grid_lat_lon(grid_or_mesh, shape_2d):
@@ -740,8 +761,8 @@ def _make_hydrostatic_radiation(
         insol_col = insol.reshape(ncol)
         cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
-        q_v_col, q_cloud_col, q_ice_col = _extract_tracer_columns(
-            state, ncol, nlev,
+        q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col = (
+            _extract_tracer_columns(state, ncol, nlev)
         )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
@@ -776,6 +797,10 @@ def _make_hydrostatic_radiation(
                 q_cloud_col = shard_columns(q_cloud_col, column_mesh)
             if q_ice_col is not None:
                 q_ice_col = shard_columns(q_ice_col, column_mesh)
+            if n_cloud_col is not None:
+                n_cloud_col = shard_columns(n_cloud_col, column_mesh)
+            if n_ice_col is not None:
+                n_ice_col = shard_columns(n_ice_col, column_mesh)
             if f_day_col is not None:
                 f_day_col = shard_columns(f_day_col, column_mesh)
 
@@ -791,6 +816,8 @@ def _make_hydrostatic_radiation(
             cos_sza=cos_sza_col,
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
+            n_cloud=n_cloud_col,
+            n_ice=n_ice_col,
             f_day=f_day_col,
             rrtmgp_solver=rrtmgp_solver,
             lon=lon_col,
@@ -910,14 +937,18 @@ def _make_nonhydrostatic_radiation(
             q_ice_col = jnp.clip(
                 state.tracers.data[..., 3], 0.0, None
             ).reshape(ncol, nlev)
-        # Cloud-ice NUMBER (per-mass [1/kg]) from tracer slot 8, which is
-        # N_i ONLY in the canonical 9-slot double-moment Morrison layout
-        # (q_v,q_c,q_r,q_i,q_s,q_g,N_c,N_r,N_i). Feeds the M2005 PSD ice
-        # effective radius EFFI=1.5/LAMI (RAD-1-ice). The ``> 8`` guard keeps
-        # single-moment layouts (kessler 3, thompson 7) on the constant
-        # r_eff. CAVEAT (codex iter-12): a non-Morrison ≥9-slot layout would
-        # mis-read slot 8 — a tracer-metadata/scheme key would be more robust
-        # but is deferred; today only Morrison uses 9 slots.
+        # Cloud-ice NUMBER (per-mass [1/kg]) from tracer slot 8 = N_i in the
+        # canonical 9-slot double-moment layout (q_v,q_c,q_r,q_i,q_s,q_g,
+        # N_c,N_r,N_i). ALL double-moment schemes share N_c=6 / N_i=8:
+        # morrison, seifert_beheng, thompson, ml_emulator, and p3 (p3 reuses
+        # slots 4/5 for q_rim/B_rim but keeps N_c=6/N_r=7/N_i=8, with N_i
+        # per-mass via N_i_target/ρ). Feeds the M2005 PSD ice effective radius
+        # EFFI=1.5/LAMI (RAD-1-ice). The ``> 8`` guard keeps single-moment
+        # layouts (kessler/sundqvist, 3 slots) on the constant r_eff. CAVEAT
+        # (codex iter-12): a hypothetical non-standard ≥9-slot layout that did
+        # NOT place N_i at slot 8 would mis-read it — a tracer-metadata/scheme
+        # key would be more robust but is deferred; every current 9-slot scheme
+        # honours this layout.
         n_ice_col = None
         if n_tracers > 8:
             n_ice_col = jnp.clip(
@@ -1097,13 +1128,31 @@ def _make_plane_radiation(
             q_ice_col = jnp.clip(
                 state.tracers.data[..., 3], 0.0, None,
             ).reshape(ncol, nlev)
+        # Double-moment NUMBER columns for the M2005 PSD effective radii, same
+        # layout/units/guard as the cubed-sphere NH path: N_c per-VOLUME [#/m³]
+        # at slot 6, N_i per-MASS [#/kg] at slot 8 — the canonical 9-slot layout
+        # (q_v,q_c,q_r,q_i,q_s,q_g,N_c,N_r,N_i) shared by ALL double-moment
+        # schemes (morrison, seifert_beheng, thompson, p3, ml_emulator). The
+        # ``> 8`` guard keeps single-moment layouts (kessler/sundqvist, 3 slots)
+        # on the constant r_eff. Without this, plane-CRM RRTMGP used a fixed
+        # r_eff regardless of droplet number — unfaithful to SAM's PSD reffc/EFFI.
+        n_cloud_col = None
+        n_ice_col = None
+        if n_tracers > 8:
+            n_cloud_col = jnp.clip(
+                state.tracers.data[..., 6], 0.0, None,
+            ).reshape(ncol, nlev)
+            n_ice_col = jnp.clip(
+                state.tracers.data[..., 8], 0.0, None,
+            ).reshape(ncol, nlev)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, lat=lat_col, q_v=q_v_col,
             insolation=insol_col, cos_sza=cos_sza_col,
-            q_cloud=q_cloud_col, q_ice=q_ice_col, f_day=f_day_col,
+            q_cloud=q_cloud_col, q_ice=q_ice_col,
+            n_cloud=n_cloud_col, n_ice=n_ice_col, f_day=f_day_col,
             rrtmgp_solver=rrtmgp_solver, lon=lon_col,
             ml_ozone_coefs=ml_ozone_coefs,
         )
@@ -1201,7 +1250,6 @@ def _make_mpas_nh_radiation(
 
         nlev = height_coord.n_levels
         shape_2d = (mesh.nCells,)
-        ncol = mesh.nCells
         shape_cell_3d = (mesh.nCells, nlev)
         shape_edge_3d = state.u.data.shape          # (nEdges, nlev)
         shape_w = state.w.data.shape                # (nCells, nlev+1)
@@ -1272,13 +1320,26 @@ def _make_mpas_nh_radiation(
             q_ice_col = jnp.clip(
                 state.tracers.data[..., 3], 0.0, None,
             )
+        # Double-moment NUMBER columns for the M2005 PSD effective radii (same
+        # slot layout/units/guard as the cubed-sphere NH + plane paths): N_c
+        # per-VOLUME [#/m³] slot 6, N_i per-MASS [#/kg] slot 8 — the canonical
+        # 9-slot layout shared by all double-moment schemes (morrison,
+        # seifert_beheng, thompson, p3, ml_emulator); ``> 8`` guard keeps
+        # single-moment schemes (kessler/sundqvist) on the constant r_eff.
+        # MPAS columns are already (nCells, nlev) — no reshape needed.
+        n_cloud_col = None
+        n_ice_col = None
+        if n_tracers > 8:
+            n_cloud_col = jnp.clip(state.tracers.data[..., 6], 0.0, None)
+            n_ice_col = jnp.clip(state.tracers.data[..., 8], 0.0, None)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, lat=lat_col, q_v=q_v_col,
             insolation=insol_col, cos_sza=cos_sza_col,
-            q_cloud=q_cloud_col, q_ice=q_ice_col, f_day=f_day_col,
+            q_cloud=q_cloud_col, q_ice=q_ice_col,
+            n_cloud=n_cloud_col, n_ice=n_ice_col, f_day=f_day_col,
             rrtmgp_solver=rrtmgp_solver, lon=lon_col,
             ml_ozone_coefs=ml_ozone_coefs,
         )
@@ -1433,8 +1494,8 @@ def _make_spectral_pe_radiation(
         insol_col = insol.reshape(ncol)
         cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
-        q_v_col, q_cloud_col, q_ice_col = _extract_tracer_columns(
-            state, ncol, nlev,
+        q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col = (
+            _extract_tracer_columns(state, ncol, nlev)
         )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
@@ -1450,6 +1511,8 @@ def _make_spectral_pe_radiation(
             cos_sza=cos_sza_col,
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
+            n_cloud=n_cloud_col,
+            n_ice=n_ice_col,
             f_day=f_day_col,
             rrtmgp_solver=rrtmgp_solver,
             lon=lon_col,

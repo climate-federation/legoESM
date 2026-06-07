@@ -35,7 +35,6 @@ from legoesm.core.state import (
     MPASHydrostaticTendencies,
 )
 from legoesm.grids.gaussian import (
-    sh_analysis,
     sh_analysis_3d,
     sh_analysis_oc2_3d,
     sh_analysis_dmu_3d,

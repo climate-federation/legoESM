@@ -19,13 +19,11 @@ from legoesm.core.fv_tp_2d import (
 from legoesm.core.operators_cdgrid import (
     _pad_halo_auto,
     cgrid_mass_flux_divergence,
-    _interp_center_to_corner,
     _interp_center_to_corner_a2b_ord4,
     cgrid_divergence,
     fv3_cc2c,
     fv3_d2cc,
 )
-from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.duogrid import ext_vector_dgrid
 from legoesm.grids.halo import (
     pad_halo,
@@ -997,9 +995,9 @@ def _apply_legacy_d_sw4_corner_ke_fix(
     ut_pad = jnp.pad(ut, [(0, 0), (0, 0), (1, 1)], mode='edge')   # (6, n+1, n+2)
     vt_pad = jnp.pad(vt, [(0, 0), (1, 1), (0, 0)], mode='edge')
     u_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    v_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
 
-    n = ke.shape[1] - 1
+    ke.shape[1] - 1
 
     # SW corner
     sw_value = dt6 * (
@@ -1408,7 +1406,6 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=constants.g,
 
     Bernoulli + vort flux at C-faces (same stagger → balance preserved); project SUM to D-edges.
     """
-    n = cdgrid.n
 
     # 1. d2a2c_vect (covariant)
     ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
@@ -1870,7 +1867,6 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     d_sw5 damping uses d2_bg/dddmp/d4_bg/nord. damp_v/nord_v for d_sw6 vorticity damping (FV3 vtdm4).
     div_damp LEGACY/UNUSED in FB chain.
     """
-    n = cdgrid.n
 
     # Step 1: contravariant transport velocity (FV3 d_sw1).
     # iter-947: forward OLD u_d/v_d for duogrid NEW-corrected halo via _pad_halo_uc_vc_new_via_old_delta

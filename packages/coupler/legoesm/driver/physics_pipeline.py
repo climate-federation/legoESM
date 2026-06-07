@@ -10,7 +10,6 @@ native grid layout and ``(ncol, nlev)`` column format is handled by a
 """
 from __future__ import annotations
 
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -18,18 +17,8 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
 from legoesm.forcing.surface_utils import blend_surface_temperature
-from legoesm.core.grid_adapters import ColumnAdapter, make_adapter
+from legoesm.core.grid_adapters import make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
-
-
-class HeldRadiation(NamedTuple):
-    """Held radiation tendencies for sub-cycling."""
-    dT_dt_rad: jax.Array
-    sw_net_sfc: jax.Array
-    lw_net_sfc: jax.Array
-    sw_up_toa: jax.Array
-    lw_up_toa: jax.Array
-    sw_down_toa: jax.Array
 
 
 class PhysicsPipeline:
@@ -91,8 +80,8 @@ class PhysicsPipeline:
         convection_config,
         radiation_fn,
         T_ice=constants.T_freeze_ocean,
-        C_H=0.0044,
-        C_E=0.0044,
+        C_H=None,
+        C_E=None,
         albedo_ice=0.65,
         albedo_ocean=0.06,
         emissivity_ice=0.95,
@@ -117,6 +106,17 @@ class PhysicsPipeline:
         self.convection_config = convection_config
         self.radiation_fn = radiation_fn
         self.T_ice = T_ice
+        # Resolve the surface exchange coefficients to the canonical
+        # ``ExperimentConfig`` defaults when not supplied, so the single
+        # source of truth lives in the config schema (the sole caller
+        # ``build_physics_pipeline`` always passes explicit values).
+        if C_H is None or C_E is None:
+            from legoesm.driver.config import ExperimentConfig
+            _defaults = ExperimentConfig._field_defaults
+            if C_H is None:
+                C_H = _defaults["C_H"]
+            if C_E is None:
+                C_E = _defaults["C_E"]
         self.C_H = C_H
         self.C_E = C_E
         self.albedo_ice = albedo_ice
@@ -562,6 +562,7 @@ class PhysicsPipeline:
                                albedo_ice=None, albedo_ocean=None,
                                ghg_vmr_override=None,
                                q_c=None, q_r=None,
+                               q_i=None, N_c=None, N_i=None,
                                cloud_scheme="none",
                                u=None, v=None, dt=None, T_land=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
@@ -639,7 +640,14 @@ class PhysicsPipeline:
                 q_c_col = None
             else:
                 q_c_col = ad.flatten_3d(q_c)
-            q_i_col = None
+            # Cloud ice + double-moment NUMBER columns (None for warm-rain /
+            # diagnostic-cloud runs ⇒ constant r_eff, legacy behaviour). When a
+            # double-moment scheme supplies them, they drive the M2005 PSD
+            # liquid/ice effective radii — N_c per-VOLUME [#/m³], N_i per-MASS
+            # [#/kg], passed raw (same convention as the dynamical-core paths).
+            q_i_col = None if q_i is None else ad.flatten_3d(q_i)
+            n_cloud_col = None if N_c is None else ad.flatten_3d(N_c)
+            n_ice_col = None if N_i is None else ad.flatten_3d(N_i)
             # ``compute_cloud_properties`` is parameterised on mixing
             # ratio (RH from q_v vs q_sat_mixing_ratio); leave the
             # mixing-ratio q_v here and only feed the converted
@@ -647,6 +655,7 @@ class PhysicsPipeline:
             cloud_props = compute_cloud_properties(
                 T=T_col, p_full=p_full_col, q_v=q_v_col, dp=dp_col,
                 config=cloud_config, q_cloud=q_c_col, q_ice=q_i_col,
+                n_cloud=n_cloud_col, n_ice=n_ice_col,
             )
             # ``to_rrtmg_kwargs`` builds the kwargs without
             # ``cloud_fraction`` (commit 4c9591bb, lost in AIMIP-#312
@@ -728,7 +737,7 @@ class PhysicsPipeline:
         Returns a function ``step_unified(need_rad, T, p_s, q_v, q_c, q_r,
         conv_prog, u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
         solar_weights, s_0, o3_vmr, aerosol_od, held, ..., T_land) ->
-        (PhysicsOutput, HeldRadiation, T_land_new)``.
+        (PhysicsOutput, held tuple, T_land_new)``.
 
         ``T_land`` is the slab-land skin temperature carried through the
         radiation sub-cycle; it is advanced on radiation steps and held
@@ -768,7 +777,9 @@ class PhysicsPipeline:
                          albedo_ice=pipeline.albedo_ice,
                          albedo_ocean=pipeline.albedo_ocean,
                          ghg_vmr_override=None,
-                         T_land=None):
+                         T_land=None,
+                         q_i=None, q_s=None, q_g=None,
+                         N_c=None, N_r=None, N_i=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -778,7 +789,8 @@ class PhysicsPipeline:
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                  C_H, C_E, albedo_ice, albedo_ocean,
-                 ghg_vmr_override, T_land) = args
+                 ghg_vmr_override, T_land,
+                 q_i, q_s, q_g, N_c, N_r, N_i) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new) = \
@@ -789,7 +801,7 @@ class PhysicsPipeline:
                         tau_equator=tau_equator, tau_pole=tau_pole,
                         albedo_ice=albedo_ice, albedo_ocean=albedo_ocean,
                         ghg_vmr_override=ghg_vmr_override,
-                        q_c=q_c,
+                        q_c=q_c, q_i=q_i, N_c=N_c, N_i=N_i,
                         cloud_scheme=pipeline._cloud_scheme,
                         u=u, v=v, dt=dt, T_land=T_land,
                     )
@@ -800,6 +812,7 @@ class PhysicsPipeline:
                     sw_up_toa, lw_up_toa, sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
                     C_H=C_H, C_E=C_E, T_land=T_land,
+                    q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match
@@ -821,7 +834,8 @@ class PhysicsPipeline:
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                  C_H, C_E, albedo_ice, albedo_ocean,
-                 ghg_vmr_override, T_land) = args
+                 ghg_vmr_override, T_land,
+                 q_i, q_s, q_g, N_c, N_r, N_i) = args
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
@@ -829,6 +843,7 @@ class PhysicsPipeline:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
                     C_H=C_H, C_E=C_E, T_land=T_land,
+                    q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -849,7 +864,8 @@ class PhysicsPipeline:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
                     C_H, C_E, albedo_ice, albedo_ocean,
-                    ghg_vmr_override, T_land)
+                    ghg_vmr_override, T_land,
+                    q_i, q_s, q_g, N_c, N_r, N_i)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch

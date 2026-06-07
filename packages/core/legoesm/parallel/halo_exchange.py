@@ -69,7 +69,6 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.grids.halo import (
-    CONNECTIVITY,
     WEST,
     EAST,
     SOUTH,
@@ -411,7 +410,7 @@ def _pad_halo_mpi_face_only(
     # unique neighbor instead of an O(world_size) allgather.
     from collections import defaultdict
     n = data.shape[1]
-    strip_size = halo * n
+    halo * n
     comm = MPI.COMM_WORLD
     rank = topology.rank
 
@@ -545,7 +544,7 @@ def _pad_halo_mpi_tiled(
     # Single Pad HLO op replaces alloc-zeros + scatter.
     padded = jnp.pad(data, ((0, 0), (halo, halo), (halo, halo)))
 
-    strip_size = halo * n
+    halo * n
     comm = MPI.COMM_WORLD
     rank = topology.rank
 

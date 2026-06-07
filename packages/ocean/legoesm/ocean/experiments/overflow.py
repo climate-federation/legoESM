@@ -54,15 +54,10 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from legoesm import constants
-from legoesm.constants import g
 from legoesm.core.field import Field
-
-
-_G_EARTH = g
 
 
 @dataclass
@@ -207,7 +202,7 @@ def _add_overflow_structure(state, grid_type: str, grid, z_coord,
         lon, lat = np.meshgrid(lon_1d, lat_1d, indexing='xy')
     else:  # cubed_sphere
         lat = np.asarray(grid.lat, dtype=np.float64)
-        lon = np.asarray(grid.lon, dtype=np.float64)
+        np.asarray(grid.lon, dtype=np.float64)
 
     # Convert parameters to radians
     T_cold = config.T_cold
@@ -333,64 +328,6 @@ def create_domain_config(config: OverflowConfig = None) -> Dict[str, Any]:
         "reference": "Petersen et al. (2015) overflow test case",
         "bathymetry": "variable_shelf_to_basin",
     }
-
-
-def compute_reference_potential_energy(state, grid_type: str, grid, z_coord,
-                                     config: OverflowConfig) -> float:
-    """Compute Reference Potential Energy for overflow validation.
-
-    Uses the same RPE calculation as lock_exchange experiment.
-
-    Parameters
-    ----------
-    state : OceanState
-        Ocean state
-    grid_type : str
-        Grid type
-    grid : Grid
-        Grid object
-    z_coord : OceanZCoordinate
-        Vertical coordinate
-    config : OverflowConfig
-        Configuration parameters
-
-    Returns
-    -------
-    float
-        Reference potential energy [J]
-    """
-    # Get temperature and area fields
-    if grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_synthesis_3d
-        T = np.asarray(sh_synthesis_3d(grid, state.T_hat.data), dtype=np.float64)
-        S = np.asarray(sh_synthesis_3d(grid, state.S_hat.data), dtype=np.float64)
-        area = np.asarray(grid.area, dtype=np.float64)
-    elif grid_type == "mpas":
-        T = np.asarray(state.T.data, dtype=np.float64)
-        S = np.asarray(state.S.data, dtype=np.float64)
-        area = np.asarray(grid.areaCell, dtype=np.float64)
-    else:
-        T = np.asarray(state.T.data, dtype=np.float64)
-        S = np.asarray(state.S.data, dtype=np.float64)
-        area = np.asarray(grid.area, dtype=np.float64)
-
-    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
-    dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
-
-    # Linearized equation of state
-    rho0 = config.rho_reference
-    alpha_T = config.alpha_T
-    T_ref = config.T_reference
-    rho = rho0 * (1.0 - alpha_T * (T - T_ref))
-
-    # Compute potential energy
-    spatial_shape = T.shape[:-1]
-    area_bc = area.reshape(spatial_shape)
-    pe = 0.0
-    for k in range(len(z_full)):
-        pe += float(np.nansum(rho[..., k] * z_full[k] * dz[k] * area_bc))
-
-    return _G_EARTH * pe
 
 
 def compute_overflow_metrics(diagnostics: Dict[str, list], pe_initial: float,

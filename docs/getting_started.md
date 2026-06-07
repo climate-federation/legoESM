@@ -219,7 +219,7 @@ JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py \
 
 Passing pytest is *necessary but not sufficient* on the cubed-sphere
 — edge artifacts only reliably show up in field snapshots. See
-[docs/cubed_sphere_edge_artifacts.md](cubed_sphere_edge_artifacts.md).
+[docs/cubed_sphere_edge_artifacts.md](md_files/cubed_sphere_edge_artifacts.md).
 
 Ocean: `scripts/matrix/run_ocean_test_matrix.py` (current status: 57/57
 PASS).
@@ -254,7 +254,7 @@ Sea ice: `scripts/matrix/run_sea_ice_test_matrix.py` (15 standard benchmarks).
 - [docs/cmip_readiness.md](cmip_readiness.md) — CMIP production checklist.
 - [docs/amip.md](amip.md) — AMIP workflow.
 - [docs/scm.md](scm.md) — single-column model.
-- [docs/ocean_experiments_reference.md](ocean_experiments_reference.md) — ocean testbeds.
+- [docs/ocean_experiments_reference.md](md_files/ocean_experiments_reference.md) — ocean testbeds.
 - [docs/REAL_HARDWARE_SCALING.md](REAL_HARDWARE_SCALING.md) — multi-GPU / MPI.
 - [docs/ml_physics_parameterization.md](ml_physics_parameterization.md) — joint ML / physics workflow.
 - [docs/dycore_validation_catalog.md](dycore_validation_catalog.md) — dycore validation inventory.

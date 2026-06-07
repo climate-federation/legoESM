@@ -81,7 +81,7 @@ def thomas_solve(
         dk = d[..., k]
 
         # For k=0, a[0]=0 so m=0; c_star=c/b, d_star=d/b
-        m = jnp.where(k > 0, ak / (bk - ak * c_prev), 0.0)
+        jnp.where(k > 0, ak / (bk - ak * c_prev), 0.0)
         c_star = ck / (bk - ak * c_prev + _TINY)
         d_star = (dk - ak * d_prev) / (bk - ak * c_prev + _TINY)
 

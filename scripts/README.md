@@ -10,6 +10,7 @@ Versioned templates + provenance ergonomics layered on `legoesm run` /
 
 | Script | Purpose |
 |--------|---------|
+| `experiment/wizard.py` (or `legoesm wizard`) | Interactive wizard: pick component(s), region/model type, grid, integrator, duration, precision, device, physics-vs-ML — option menus derived live from the model registries (so it versions with the model) — then emit a runnable bundle (`config.yaml`/`run.sh`/`wizard.yaml`, version-stamped) and optionally run it. Needs `pip install 'legoesm[wizard]'`. Pure logic in `wizard_core.py`. |
 | `experiment/init_experiment.py <category/name> --name N --output-dir D [-o k=v]` | Resolve a `config/templates/` template + overrides + machine profile → runnable dir (`config.yaml`, `run.sh`, `run.yaml`). Strict-validates before writing. |
 | `experiment/validate_templates.py [--write-status]` | Validate every template through `Config…validate_strict`; regenerate `project_status.md`. |
 | `experiment/lego_detect_machine.py` | Resolve the `config/machines/` profile for the current host. |

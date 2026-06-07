@@ -1072,7 +1072,7 @@ def _compute_smagorinsky_K_m_plane(
     K_m : jax.Array
         Eddy viscosity at cell centres, shape ``(ny, nx, nlev)``.
     """
-    nlev = u_yxz.shape[-1]
+    u_yxz.shape[-1]
 
     # --- Horizontal C-grid gradients ---
     # u at x-face → ∂u/∂x = (u[..., j, i+1] - u[..., j, i]) / dx at cell centre.
@@ -1324,7 +1324,7 @@ def _compute_dynamic_smag_cs_plane(
     approximation). The dynamic path is intended for single-rank (GPU) LES;
     MPI runs use the static closure (validated serial=MPI). AD/JIT-safe.
     """
-    nlev = u_yxz.shape[-1]
+    u_yxz.shape[-1]
     uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag = (
         _centre_velocities_and_strain_plane(
             u_yxz, v_yxz, w_yxz_half, grid, height_coord))
@@ -1413,7 +1413,7 @@ def _compute_scale_dependent_dynamic_smag_cs_plane(
     (plane-mean β + spectral filter over the LOCAL tile); MPI uses the static
     closure, like the Germano path.
     """
-    nlev = u_yxz.shape[-1]
+    u_yxz.shape[-1]
     uc, vc, wc, S11, S22, S33, S12, S13, S23, S = (
         _centre_velocities_and_strain_plane(
             u_yxz, v_yxz, w_yxz_half, grid, height_coord))
@@ -1698,6 +1698,30 @@ def _moisture_buoyancy_w_half(
     )
 
 
+def _acoustic_moist_buoyancy_w(state, height_coord, euler_config):
+    """Frozen SAM moist buoyancy on the w half-levels for the ACOUSTIC loop.
+
+    Returns ``B_moist`` (vapour-virtual + condensate loading, :func:`
+    _moisture_buoyancy_w_half`) evaluated ONCE from the stage-initial state, to be
+    added to w EACH acoustic substep — so the condensate-loading drag acts at the
+    SAME frequency as the dry θ' buoyancy in the substep loop. Applying it only once
+    per RK stage (the old ``slow``-tendency path) let latent-heated updrafts feel
+    the full dry warming 6×/step but the moist drag 1×/step → runaway convection
+    (max|w|→40 m/s). Returns None when moist/acoustic-moist buoyancy is off.
+
+    MPI note: the perturbation mean is a LOCAL ``jnp.mean`` (= the true domain mean
+    at n_ranks==1, so serial==halo parity holds + the halo parity tests pass). Under
+    a horizontal decomposition (n_ranks>1) it is a rank-local mean — a small
+    approximation, the same convention the dynamic-Smagorinsky plane average uses;
+    the serial / single-GPU path (the RCE driver) is exact."""
+    if not (getattr(euler_config, "moist_buoyancy", False)
+            and getattr(euler_config, "acoustic_moist_buoyancy", True)):
+        return None
+    return _moisture_buoyancy_w_half(
+        state.tracers.data, state.theta_prime.data, height_coord,
+        lambda f: jnp.mean(f, axis=(0, 1), keepdims=True))
+
+
 def plane_compressible_euler_slow_tendencies(
     state: PlaneNonHydrostaticState,
     grid: PlaneGrid,
@@ -1915,7 +1939,12 @@ def plane_compressible_euler_slow_tendencies(
     #     frozen for this RK stage. The dry θ' buoyancy lives in the
     #     acoustic substep; this adds the moist part SAM's buoyancy.f90
     #     carries. Perturbation from the SERIAL horizontal mean.
-    if config.moist_buoyancy:
+    # Apply the moist buoyancy here (once per RK stage) ONLY when the acoustic
+    # loop does NOT carry it. With acoustic_moist_buoyancy=True (default) the moist
+    # buoyancy is added INSIDE the acoustic substeps instead (consistent frequency
+    # with the dry θ' buoyancy), which fixes the convective-updraft runaway.
+    if config.moist_buoyancy and not getattr(
+            config, "acoustic_moist_buoyancy", True):
         dw_dt = dw_dt + _moisture_buoyancy_w_half(
             state.tracers.data, theta_p, height_coord,
             lambda f: jnp.mean(f, axis=(0, 1), keepdims=True),
@@ -2269,6 +2298,7 @@ def plane_acoustic_substeps(
 
     # Python-loop unroll (n_substeps is compile-time static via
     # SplitExplicitConfig). See semi-implicit variant for full rationale.
+    b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config)
     w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
     for _ in range(int(n_substeps)):
         w_final, theta_p_final, rho_p_final = _acoustic_column_kernel(
@@ -2278,6 +2308,8 @@ def plane_acoustic_substeps(
                 getattr(euler_config, "acoustic_theta_advection", "centered")
                 == "van_leer"),
         )
+        if b_moist is not None:  # frozen moist buoyancy each substep (see si_horizontal)
+            w_final = (w_final + dt_s * b_moist).at[..., 0].set(0.0).at[..., -1].set(0.0)
 
     return PlaneNonHydrostaticState(
         u=state.u,
@@ -2337,6 +2369,7 @@ def plane_acoustic_substeps_semi_implicit(
     si_w_filter_nu = float(getattr(
         euler_config, "si_w_vertical_filter_nu", 0.0,
     ))
+    b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config)
     w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
     for _ in range(int(n_substeps)):
         w_final, theta_p_final, rho_p_final = (
@@ -2351,6 +2384,8 @@ def plane_acoustic_substeps_semi_implicit(
                     == "van_leer"),
             )
         )
+        if b_moist is not None:  # frozen moist buoyancy each substep (see si_horizontal)
+            w_final = (w_final + dt_s * b_moist).at[..., 0].set(0.0).at[..., -1].set(0.0)
 
     return PlaneNonHydrostaticState(
         u=state.u,
@@ -2427,6 +2462,7 @@ def plane_acoustic_substeps_si_horizontal(
         compute_exner_perturbation,
     )
 
+    b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config)
     u_c, v_c, w_c, theta_p_c, rho_p_c = u, v, w, theta_p, rho_p
     for _ in range(int(n_substeps)):
         theta_total, rho_total = sanitize_theta_rho(
@@ -2459,6 +2495,11 @@ def plane_acoustic_substeps_si_horizontal(
                 getattr(euler_config, "acoustic_theta_advection", "centered")
                 == "van_leer"),
         )
+        # 3b. Frozen SAM moist buoyancy (vapour-virtual + condensate loading) on
+        #     w, applied EACH substep so the condensate-loading drag balances the
+        #     dry θ' buoyancy at the same frequency (fixes the updraft runaway).
+        if b_moist is not None:
+            w_new = (w_new + dt_s * b_moist).at[..., 0].set(0.0).at[..., -1].set(0.0)
 
         # 4. Horizontal mass-flux divergence (backward: uses new u, v).
         #    rho_total reflects the pre-update rho_p_c (forward-backward

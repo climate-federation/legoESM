@@ -336,7 +336,7 @@ def _build_test_matrix() -> list[TestCase]:
             "lock_exchange", g, res[g], 1.0, 0.1))
 
     # Petersen 2015 Fig. 5 channel geometry on latlon_regional (paired with
-    # the Veros lock_exchange setup under src/legoesm/ocean/fidelity/
+    # the Veros lock_exchange setup in the fidelity
     # veros_configs/lock_exchange.py): 64 km x 4 km equatorial channel
     # (f ~ 0 by construction at lat ~ 0), 1 km dx, 4 cells meridional,
     # 20 m depth with 20 levels. ``--quick`` shortens 17 h -> ~1.7 h.
@@ -3185,7 +3185,7 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
     T_drift = _compute_drift(diag.get("mean_T", []))
     # iter-131 (codex iter-130-followup MEDIUM-1): also compute
     # S_drift to gate the documented < 1e-6 contract from
-    # docs/ocean_experiments_reference.md "Rest State"
+    # ocean_experiments_reference.md "Rest State"
     # Validation Thresholds.
     S_drift = _compute_drift(diag.get("mean_S", []))
     notes = (f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}, "
@@ -3276,7 +3276,7 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
     T_drift = _compute_drift(diag.get("mean_T", []))
     # iter-131 (codex iter-130-followup MEDIUM-1): also compute
     # S_drift to gate the documented < 1e-6 contract from
-    # docs/ocean_experiments_reference.md "Rest State"
+    # ocean_experiments_reference.md "Rest State"
     # Validation Thresholds.
     S_drift = _compute_drift(diag.get("mean_S", []))
     notes = (f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}, "
@@ -3360,7 +3360,7 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
     T_drift = _compute_drift(diag.get("mean_T", []))
     # iter-131 (codex iter-130-followup MEDIUM-1): also compute
     # S_drift to gate the documented < 1e-6 contract from
-    # docs/ocean_experiments_reference.md "Rest State"
+    # ocean_experiments_reference.md "Rest State"
     # Validation Thresholds.
     S_drift = _compute_drift(diag.get("mean_S", []))
     notes = (f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}, "
@@ -3439,7 +3439,7 @@ def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: floa
     T_drift = _compute_drift(diag.get("mean_T", []))
     # iter-131 (codex iter-130-followup MEDIUM-1): also compute
     # S_drift to gate the documented < 1e-6 contract from
-    # docs/ocean_experiments_reference.md "Rest State"
+    # ocean_experiments_reference.md "Rest State"
     # Validation Thresholds.
     S_drift = _compute_drift(diag.get("mean_S", []))
     notes = (f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}, "
@@ -3524,7 +3524,7 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
         label=f"Barotropic Wave ({tc.grid_type})", total_days=days)
 
-    # iter-133 (self-review based on docs/ocean_experiments_reference.md
+    # iter-133 (self-review based on ocean_experiments_reference.md
     # "Barotropic Wave" Validation Thresholds): apply 3 documented
     # gates that pre-iter-133 were entirely uncomputed.  The
     # finite-only ``ok`` from _run_timeloop catches NaN/blowup,
@@ -3842,7 +3842,7 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
     eta_drift = (abs(eta_list[-1] - eta_list[0])
                  if len(eta_list) >= 2 else 0.0)
     notes = f"max speed={max_speed:.4f} m/s, eta drift={eta_drift:.2e}"
-    # iter-133 (self-review based on docs/ocean_experiments_reference.md
+    # iter-133 (self-review based on ocean_experiments_reference.md
     # "Barotropic Gyre" Validation Thresholds; same applies to
     # barotropic_double_gyre per the doc's "Same as barotropic_gyre"
     # callout):
@@ -4326,7 +4326,7 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
     T_drift = _compute_drift(diag.get("mean_T", []))
     # iter-132 (codex iter-131-followup MEDIUM-1): also gate
     # documented ``max_speed_final < 1.0 m/s`` per
-    # docs/ocean_experiments_reference.md "Geostrophic
+    # ocean_experiments_reference.md "Geostrophic
     # Adjustment" Validation Thresholds.  Pre-iter-132 only
     # T was gated, so a runaway-velocity bug could PASS.
     max_speed_series = diag.get("max_speed", [])
@@ -4639,7 +4639,7 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
     #     (instability develops) but not blow up.
     #   * max_eta_amplitude < 5.0 m — absolute blowup ceiling.
     # See the "Phillips Two-Layer (phillips_two_layer)" section
-    # of docs/ocean_experiments_reference.md.
+    # of ocean_experiments_reference.md.
     mean_T_series = diag.get("mean_T", [])
     max_eta_series = diag.get("max_abs_eta", [])
     n_T = len(mean_T_series)
@@ -5644,9 +5644,8 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
 
     Depth and vertical resolution come from
     ``lock_exchange.LockExchangeConfig`` so the geometry stays in lockstep
-    with the Veros peer setup under
-    ``src/legoesm/ocean/fidelity/veros_configs/lock_exchange.py`` (Petersen
-    Fig. 5: 20 m, 20 levels).
+    with the Veros peer setup in the fidelity ``veros_configs/lock_exchange.py``
+    (Petersen Fig. 5: 20 m, 20 levels).
     """
     from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
     le_config = LockExchangeConfig()
@@ -5768,7 +5767,7 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     # iter-129 (codex iter-128-followup MEDIUM-2): apply the
     # documented ``pe_rel_final < 0`` sign check to Lock Exchange
     # (see the "Lock Exchange (lock_exchange)" Validation
-    # Thresholds block in docs/ocean_experiments_reference.md;
+    # Thresholds block in ocean_experiments_reference.md;
     # iter-130 codex iter-129-followup LOW-2: removed hard-
     # coded line number to prevent doc-line drift).  Lock
     # Exchange is the canonical PE → KE conversion test;
@@ -5940,7 +5939,7 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # iter-132 (codex iter-131-followup MEDIUM-2): also gate
     # documented ``Temperature within [-200, 200] C`` blowup
     # check (see "Overflow" Validation Thresholds in
-    # docs/ocean_experiments_reference.md).
+    # ocean_experiments_reference.md).
     T_data = np.asarray(state.T.data, dtype=np.float64)
     T_min_final, T_max_final = (
         (float(np.nanmin(T_data)), float(np.nanmax(T_data)))
@@ -5956,7 +5955,7 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # decreases physically (the overflow CONVERTS PE → KE);
     # the documented sign constraint pe_rel_final < 0 is
     # asserted in the iter-128 block below (see
-    # docs/ocean_experiments_reference.md "Overflow" section;
+    # ocean_experiments_reference.md "Overflow" section;
     # iter-130 codex iter-129-followup LOW-2: removed stale
     # line number).
     ok, notes = _apply_drift_tolerance(
@@ -5975,7 +5974,7 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # (numerical mixing increasing the basin RPE), which is
     # the opposite of the expected dynamics.  See the
     # "Overflow (overflow)" Validation Thresholds block in
-    # docs/ocean_experiments_reference.md.
+    # ocean_experiments_reference.md.
     # iter-129 (codex iter-128-followup MEDIUM-1): pass
     # ``n_samples`` so a missing/single-sample PE_rel series
     # fails explicitly instead of silently passing via the
@@ -6158,7 +6157,7 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
     # a passive transport test → S_integral should be conserved.
     # iter-125 (codex iter-124-followup HIGH-1): tightened from
     # 1e-2 to 1e-3 to match the documented threshold in
-    # ``docs/ocean_experiments_reference.md`` for stommel-gyre.
+    # ``ocean_experiments_reference.md`` for stommel-gyre.
     # Empirical drift is typically 1e-6 to 1e-4 at resolutions
     # exercised by the test matrix; 1e-3 catches gross
     # conservation violations without false-failing on
@@ -6170,7 +6169,7 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
     # iter-128 (codex iter-127-followup MEDIUM-3): apply the
     # documented overshoot/undershoot < 0.1 PSU thresholds
     # (see "Stommel Gyre Tracer" Validation Thresholds in
-    # docs/ocean_experiments_reference.md).
+    # ocean_experiments_reference.md).
     # iter-129 (codex iter-128-followup LOW-1): switched from
     # ``op="le"`` (PASS at exactly 0.1) to ``op="lt"`` (strict
     # <) to match the documented strict bound.  iter-129 LOW-2:
@@ -6323,7 +6322,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Guarantee that per-case results/<case>/<grid>/<res>/ directories "
             "contain the snapshot NetCDFs and conservation CSVs that the "
             "ocean fidelity layer (tests/ocean/fidelity, "
-            "scripts/ocean_fidelity/build_fidelity_report.py) reads. "
+            "scripts/ocean_fidelity/run_comparison.py) reads. "
             "Default-off: runners only emit their full per-case diagnostics "
             "when this flag is passed or when a tier explicitly requires it."
         ))

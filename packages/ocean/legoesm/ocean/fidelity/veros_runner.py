@@ -23,11 +23,10 @@ flag.
 from __future__ import annotations
 
 import contextlib
-import dataclasses
 import os
 import pickle
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 

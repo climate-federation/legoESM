@@ -13,7 +13,7 @@ Why this core (vs the compressible plane dycore)
 The compressible plane dycore needs acoustic off-centring + biharmonic hyperdiff
 for stability; that numerical dissipation caps the effective Reynolds number
 below the turbulence-sustaining threshold, so resolved ABL turbulence laminarises
-(``docs/les_plane_turbulence_notes.md``). A pseudo-spectral incompressible solver
+(``les_plane_turbulence_notes.md``). A pseudo-spectral incompressible solver
 has NO acoustic mode and NO numerical hyperdiffusion — the ONLY dissipation is
 the physical SGS model — so the effective Re is high and turbulence sustains,
 exactly as in the oracle. This module is the faithful path to a quantitative
@@ -251,7 +251,7 @@ def _pad_to_fine(f_yxz):
 
 def _truncate_from_fine(f_fine, ny, nx):
     """Fine ``(3ny/2,3nx/2,nz)`` → coarse ``(ny,nx,nz)`` physical (+9/4 scaling)."""
-    nyf, nxf = f_fine.shape[0], f_fine.shape[1]
+    nyf, _nxf = f_fine.shape[0], f_fine.shape[1]
     nz = f_fine.shape[2]
     nyh, nxr = ny // 2, nx // 2
     fh = jnp.fft.rfft2(f_fine, axes=(0, 1))      # (nyf, nxf//2+1, nz)
@@ -423,7 +423,7 @@ def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo):
     (S11, S22, S33, S12, S13, S23), _ = _strain(u, v, w, g)
     tau11, tau22, tau33 = 2 * nu_t * S11, 2 * nu_t * S22, 2 * nu_t * S33
     tau12 = 2 * nu_t * S12
-    tau13, tau23 = 2 * nu_t * S13, 2 * nu_t * S23           # centres
+    _tau13, _tau23 = 2 * nu_t * S13, 2 * nu_t * S23           # centres
     # Horizontal divergence of the stress (spectral, exact).
     Fu = ddx(tau11, g) + ddy(tau12, g)
     Fv = ddx(tau12, g) + ddy(tau22, g)

@@ -78,6 +78,64 @@ GRID_TYPES = list(GRID_RESOLUTIONS.keys())
 DEFAULT_NLEV = 40
 
 
+def _mpas_integrator() -> str:
+    """Time integrator for the MPAS hydrostatic PE matrix cases (ico, dt=200).
+
+    Defaults to ``ssp_rk3``: at the matrix time step (dt=200 s) the 3-stage
+    SSP scheme is ~13x faster than the inline 5-stage ssp_rk54 and was
+    validated stable + accurate across the FULL ico hydrostatic matrix —
+    9 hydro + 3 tracer + 4 climate cases, all PASS, mass drift <= 1.6e-16,
+    max|v| matching the ssp_rk54 baselines (e.g. baroclinic 24.8 m/s identical;
+    Held-Suarez 30-day climatology identical).
+
+    NB this is the per-RUN matrix default, NOT the library default.  The
+    ``MPASPrimitiveEquationConfig`` default is ``ssp_rk54_scan`` because
+    ssp_rk3 diverges with the operational del4 hyperdiffusion at LARGE dt
+    (>= ~600 s — pinned by
+    ``test_mpas_atmosphere.py::...test_ssp_rk3_blows_up_with_hyperdiffusion``);
+    the matrix is safe only because it runs at dt=200.  Override with
+    ``LEGOESM_MPAS_INTEGRATOR=ssp_rk54_scan`` to fall back to the large-
+    stability scheme (e.g. for a higher-dt sweep).
+    """
+    return os.environ.get("LEGOESM_MPAS_INTEGRATOR", "ssp_rk3")
+
+
+def _latlon_polar_filter_on(case: str | None = None) -> bool:
+    """Whether a lat-lon hydrostatic PE case uses the polar Fourier filter.
+
+    Default ON.  Without it the explicit RK time step is throttled by the
+    converging polar cells (dt ~ 10 s at 72x144 -> ~20x more steps than the
+    cube).  The CAM-FV-style longitudinal Fourier filter damps the zonal
+    wavenumbers that would violate CFL near the poles, so dt is set by the
+    mid-latitude grid instead.  Validated across the lat-lon hydro+climate
+    matrix: ~11-21x faster, stable, mass drift <= 3e-16 (machine eps; the
+    filter preserves each latitude's zonal-mean dp_s), no polar artifact
+    (polar |u| < 1 m/s, max wind in the subtropical jet).  MPI-tested path
+    (tests/distributed/test_latlon_mpi_polar_filter.py).
+
+    EXCEPTION — ``rotated_*`` (DCMIP-2008) cases: their solid-body axis is
+    tilted ~45 deg so a strong jet flows ACROSS the grid poles.  A zonal
+    Fourier filter would damp that PHYSICAL cross-polar flow, not CFL noise,
+    and the case fails (max|v| spikes, steady-state not preserved).  These
+    keep the filter OFF and the legacy pole-limited dt.
+
+    Override the global default with ``LEGOESM_LATLON_POLAR_FILTER=0``.
+    """
+    if os.environ.get("LEGOESM_LATLON_POLAR_FILTER", "1") == "0":
+        return False
+    if case is not None and "rotated" in case:
+        return False
+    return True
+
+
+def _latlon_dt(dx_pole: float, dt_cap: float, case: str | None = None) -> float:
+    """dt for a lat-lon PE case: ``dt_cap`` when the polar filter relaxes the
+    polar CFL, else the legacy pole-limited ``0.5 dx_pole / 300``."""
+    if _latlon_polar_filter_on(case):
+        return dt_cap
+    return min(dt_cap, 0.5 * dx_pole / 300.0)
+
+
 # ===========================================================================
 # TestCase dataclass
 # ===========================================================================
@@ -275,8 +333,8 @@ def _build_test_matrix() -> list[TestCase]:
             "hydrostatic", "rossby_haurwitz_6_0", g, res[g], "hybrid",
             14.0, 2.0, {}))
         # Wedi-Smolarkiewicz 2009 small-planet Held-Suarez (X=125).
-        # The IC + grid factories are in place at
-        # ``src/legoesm/atmosphere/idealized/small_planet.py``; matrix
+        # The IC + grid factories are in place in
+        # ``small_planet.py``; matrix
         # runner wiring is deferred to M1.b because the existing
         # ``run_held_suarez`` builds grids with default Earth radius.
 
@@ -2222,7 +2280,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         # drops from ~0.16 (iter-893) to ~0.114 (iter-1030); W5 day-5
         # speed at iter-1030 is 45 m/s (best W5 stability across the
         # 1009/1021/1030 calibration sweep).  Pinned by
-        # ``tests/test_iter1002_w2_target_met.py``.
+        # ``test_iter1002_w2_target_met.py`` (archived under
+        # scripts/tmp/dycore_iter_archive/).
         # new_test_dycores iter-8: factored to the canonical
         # ``iter1009_dual_target_config(n)`` helper in
         # ``shallow_water_fv3_cdgrid``.  Removes a 6-line inline
@@ -2367,7 +2426,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # differ from edge-averaged angles by O(dx), creating a
             # 0.39 m/s v_north residual for Williamson 2; the 4-edge
             # mean reduces this to 0.008 m/s at t=0 (47x improvement;
-            # see iter-25/26 of docs/fv3_fortran_fidelity_review.md).
+            # see iter-25/26 of fv3_fortran_fidelity_review.md).
             u_cc = 0.5 * (np.asarray(s.u_d, dtype=np.float64)[:, :, :-1]
                           + np.asarray(s.u_d, dtype=np.float64)[:, :, 1:])
             v_cc = 0.5 * (np.asarray(s.v_d, dtype=np.float64)[:, :-1, :]
@@ -3286,7 +3345,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     nlev = DEFAULT_NLEV
     # When tc.case == "held_suarez_topo" we swap the init for the
     # topography-aware version (forcing function is unchanged — see
-    # ``src/legoesm/atmosphere/idealized/held_suarez_topo.py``).
+    # ``held_suarez_topo.py``).
     _topo = tc.case == "held_suarez_topo"
     _topo_h0 = float(tc.run_kwargs.get("h_0", 2000.0)) if _topo else 0.0
 
@@ -3464,11 +3523,12 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         import math as _m
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
-        dt = min(200.0, 0.5 * _dx_pole / 300.0)
+        dt = _latlon_dt(_dx_pole, 200.0, tc.case)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+            use_polar_filter=_latlon_polar_filter_on(tc.case),
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _topo:
@@ -3530,7 +3590,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
             nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True)
+            fix_mass=True, anchor_mass_to_initial=True,
+            time_integrator=_mpas_integrator())
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
@@ -3982,11 +4043,12 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         import math as _m
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
-        dt = min(200.0, 0.5 * _dx_pole / 300.0)
+        dt = _latlon_dt(_dx_pole, 200.0, tc.case)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+            use_polar_filter=_latlon_polar_filter_on(tc.case),
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _rotated:
@@ -4062,7 +4124,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
             nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True)
+            fix_mass=True, anchor_mass_to_initial=True,
+            time_integrator=_mpas_integrator())
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         if _rotated:
             from tests.test_cases.dcmip2008.jablonowski_rotated import (
@@ -4588,11 +4651,12 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         import math as _m
         _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
             _m.pi / 2 - grid.dlat / 2)
-        dt = min(300.0, 0.5 * _dx_pole / 300.0)
+        dt = _latlon_dt(_dx_pole, 300.0, tc.case)
         _A_h_max = 0.4 * _dx_pole**2 / dt
         ah = min(ah, _A_h_max)
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
+            use_polar_filter=_latlon_polar_filter_on(tc.case),
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         state_cc = held_suarez_init_latlon(grid, sigma, T_init=280.0)
@@ -4652,7 +4716,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
             nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
-            fix_mass=True, anchor_mass_to_initial=True)
+            fix_mass=True, anchor_mass_to_initial=True,
+            time_integrator=_mpas_integrator())
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         state = held_suarez_init_mpas(mesh, sigma, T_init=280.0)
         grid = mesh
@@ -5651,12 +5716,12 @@ RUNNERS: dict[str, Callable] = {
 }
 
 CATEGORY_RUNNER_HINTS: dict[str, str] = {
-    "shallow_water": "scripts/atmosphere/run_shallow_water_tests.py",
-    "hydrostatic": "scripts/atmosphere/run_hydrostatic_tests.py",
-    "nonhydrostatic": "scripts/atmosphere/run_nonhydrostatic_tests.py",
-    "rce": "scripts/atmosphere/run_rce_tests.py",
-    "aquaplanet": "scripts/atmosphere/run_aquaplanet_tests.py",
-    "ocean": "scripts/ocean/run_ocean_category_tests.py",
+    "shallow_water": "scripts/matrix/run_atmosphere_test_matrix.py --category shallow_water",
+    "hydrostatic": "scripts/matrix/run_atmosphere_test_matrix.py --category hydrostatic",
+    "nonhydrostatic": "scripts/matrix/run_atmosphere_test_matrix.py --category nonhydrostatic",
+    "rce": "scripts/matrix/run_atmosphere_test_matrix.py --category rce",
+    "aquaplanet": "scripts/matrix/run_atmosphere_test_matrix.py --category aquaplanet",
+    "ocean": "scripts/matrix/run_ocean_test_matrix.py",
 }
 
 

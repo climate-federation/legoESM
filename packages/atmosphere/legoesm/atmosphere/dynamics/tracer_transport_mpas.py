@@ -28,7 +28,6 @@ from typing import Callable, NamedTuple
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.field import Field
 from legoesm.core.state import TracerState
 from legoesm.core.operators_voronoi import (
     divergence_cell_3d,

@@ -14,7 +14,6 @@ import xarray as xr
 from legoesm.ml.sfno import SFNO, SFNOConfig
 from legoesm.ml.s2s.sfno_slab.data import (
     atmospheric_param_labels,
-    available_s2s_dates,
     denormalize_atmospheric_channels,
     denormalize_forcing_channels,
     forcing_channel_labels,

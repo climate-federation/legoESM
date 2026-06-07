@@ -597,7 +597,12 @@ def plane_compressible_euler_slow_tendencies_halo(
     #     from the GLOBAL horizontal mean (= SAM qv0/qn0/qp0), so it
     #     matches the serial jnp.mean at n_ranks==1 and is the true domain
     #     mean for n_ranks>1. Dry θ' buoyancy stays in the acoustic substep.
-    if config.moist_buoyancy:
+    # Gated like the serial path: when acoustic_moist_buoyancy=True (default) the
+    # moist buoyancy is added INSIDE the acoustic substeps (the shared plane
+    # wrappers), so adding it here too would DOUBLE-COUNT. (At n_ranks==1 the
+    # acoustic helper's local mean equals this global mean ⇒ serial==halo parity.)
+    if config.moist_buoyancy and not getattr(
+            config, "acoustic_moist_buoyancy", True):
         dw_dt = dw_dt + _moisture_buoyancy_w_half(
             state.tracers.data, theta_p, height_coord,
             lambda f: _global_hmean_plane(f, layout),
@@ -853,9 +858,8 @@ def _slow_tendency_phase1_jit(
     c_p = jnp.asarray(0.0, dtype=u_pad.dtype) + _c_pd_constant()
     u_int = u_pad[h:-h, h:-h, :]
     v_int = v_pad[h:-h, h:-h, :]
-    theta_p_int = theta_p_pad[h:-h, h:-h, :]
-    rho_p_int = rho_p_pad[h:-h, h:-h, :]
-    J = terrain_metric.jacobian
+    theta_p_pad[h:-h, h:-h, :]
+    rho_p_pad[h:-h, h:-h, :]
 
     # Pressure gradient.
     grad_pi_x = oh.grad_x_vlast_halo(pi_p_pad, grid, h)
@@ -921,9 +925,9 @@ def _slow_tendency_phase2_jit(
     cfg = config
     u_pad = state_pad["u_pad"]
     v_pad = state_pad["v_pad"]
-    theta_p_pad = state_pad["theta_p_pad"]
+    state_pad["theta_p_pad"]
     theta_total_pad = state_pad["theta_total_pad"]
-    rho_p_pad = state_pad["rho_p_pad"]
+    state_pad["rho_p_pad"]
     w = state_pad["w"]
     u = state_pad["u"]
     v = state_pad["v"]
@@ -1183,7 +1187,8 @@ def slow_tendency_jit_split(
     # the monolithic kernel before those legs. Kept here (not in the jitted
     # phase2) because the GLOBAL horizontal mean needs ``layout``, which the
     # phase2 signature does not carry. Skipped when moisture is off.
-    if config.moist_buoyancy:
+    if config.moist_buoyancy and not getattr(
+            config, "acoustic_moist_buoyancy", True):  # else added in acoustic loop
         b_half = _moisture_buoyancy_w_half(
             state.tracers.data, state.theta_prime.data, height_coord,
             lambda f: _global_hmean_plane(f, layout),

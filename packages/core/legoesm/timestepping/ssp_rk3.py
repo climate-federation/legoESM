@@ -80,9 +80,12 @@ def ssp_rk3_step_scan(
     copies of the full tendency pipeline (advection + polar filter +
     diffusion + hydrostatic + vertical advection) into one XLA module.
     With ``jax.lax.scan`` over a 3-iteration body XLA optimizes the
-    tendency code ONCE and loops 3×.  The math is identical
-    (bit-equivalent to ``ssp_rk3_step`` modulo scan-induced
-    associativity, which JAX's lax.scan keeps deterministic).
+    tendency code ONCE and loops 3×.  The math is identical to
+    ``ssp_rk3_step`` — numerically equivalent to ~1e-9 relative, not
+    bit-exact: XLA may fuse/associate the single compiled scan body's
+    FMAs differently from the three unrolled stages, and that choice is
+    JAX/XLA-version dependent.  (Pinned by
+    ``tests/timestepping/test_ssp_rk3_scan_bit_equivalence.py``.)
 
     Stage update arithmetic:
 

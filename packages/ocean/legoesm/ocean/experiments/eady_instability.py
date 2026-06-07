@@ -285,7 +285,7 @@ def _add_thermal_wind_latlon(state, grid, z_coord,
     n_lat, n_lon, nlev = T_data.shape
 
     # Latitude at cell centers
-    lat_rad = np.asarray(grid.lat)  # (n_lat,) radians
+    np.asarray(grid.lat)  # (n_lat,) radians
     lat_mid = np.radians(config.front_lat_center)
     f0 = 2.0 * Omega * np.sin(lat_mid)
 
@@ -298,7 +298,7 @@ def _add_thermal_wind_latlon(state, grid, z_coord,
     dTdy = (T_data[1:, :, :] - T_data[:-1, :, :]) / dy_v[:, None, None]  # (n_lat-1, n_lon, nlev)
     # Pad to (n_lat, n_lon+1, nlev) u-face shape:
     # Top/bottom rows: zero (solid wall), columns: periodic average
-    dTdy_padded = np.zeros((n_lat, nlev), dtype=np.float64)
+    np.zeros((n_lat, nlev), dtype=np.float64)
 
     # Average over longitude for zonal-mean front (simpler, avoids noise)
     dTdy_zonal = np.mean(dTdy, axis=1)  # (n_lat-1, nlev)

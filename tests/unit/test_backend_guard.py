@@ -173,7 +173,6 @@ class TestSpectralSWModelGuard:
                 Pnm_oc2=jnp.zeros((4, n_sh), dtype=jnp.float64),
                 Dnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
                 wPnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
-                wHnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
                 wPnm_oc2=jnp.zeros((4, n_sh), dtype=jnp.float64),
                 wDnm=jnp.zeros((4, n_sh), dtype=jnp.float64),
                 n_sh=n_sh,

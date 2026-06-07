@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.core import bulk_flux as _bulk
 from legoesm import constants
 
 

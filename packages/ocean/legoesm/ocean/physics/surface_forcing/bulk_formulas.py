@@ -5,26 +5,12 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.core.bulk_flux import compute_most_fluxes
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
 from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
-
-def _saturation_specific_humidity(T_K: jnp.ndarray) -> jnp.ndarray:
-    """Saturation SPECIFIC humidity at standard atmosphere pressure.
-
-    Converts the mixing ratio ``r_sat = ε e_sat / (p − e_sat)`` (kg
-    vapour / kg DRY air) to specific humidity ``q_sat = r_sat /
-    (1 + r_sat)`` (kg vapour / kg MOIST air).  ``compute_most_fluxes``
-    and ``cfg.q_a`` both use specific humidity, so feeding them the
-    mixing ratio biased the latent flux high by ``1 + r_sat`` (~3 %
-    in the tropics).  Codex iter-41 #1.
-    """
-    r_sat = saturation_mixing_ratio(T_K, jnp.full_like(T_K, constants.p_atm_std))
-    return r_sat / (1.0 + r_sat)
-
 
 def bulk_formula_surface_forcing(
     T: jnp.ndarray,
@@ -53,7 +39,7 @@ def bulk_formula_surface_forcing(
     dtype = T.dtype
 
     T_s = T[..., 0] + constants.T_freeze  # (6, n, n)
-    q_sat = _saturation_specific_humidity(T_s)
+    q_sat = saturation_specific_humidity(T_s, jnp.full_like(T_s, constants.p_atm_std))
 
     # Upward longwave from a grey surface: surface emission PLUS the
     # reflected component of the incident longwave.  An earlier form

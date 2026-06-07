@@ -1,8 +1,8 @@
 """Training loss functions for differentiable dycore rollouts.
 
 Builds on ``ml.loss`` (area_weighted_mse, spectral_loss) with
-dycore-specific additions: per-level pressure weighting, multi-day
-rollout loss, and SegmentCarry comparison.
+dycore-specific additions: per-level pressure weighting and
+SegmentCarry comparison.
 """
 
 from __future__ import annotations
@@ -276,50 +276,6 @@ def carry_mse(
         loss = loss + config.w_bias_ps * bias_ps ** 2 / ps_norm
 
     return loss
-
-
-def multi_day_loss(
-    pred_carries,
-    target_carries,
-    sigma_full: jax.Array,
-    lat_weights: jax.Array | None = None,
-    config: LossConfig = LossConfig(),
-) -> jax.Array:
-    """Multi-day rollout loss: average carry_mse over multiple lead times.
-
-    Parameters
-    ----------
-    pred_carries : pytree with leading (n_days,) dimension
-        Predicted states at each day from differentiable_rollout.
-    target_carries : pytree with leading (n_days,) dimension
-        Target states from ERA5 at corresponding days.
-    sigma_full : (nlev,)
-    lat_weights : (n_lat,) or None
-        Latitude weights forwarded to ``carry_mse``.  REQUIRED for
-        correct area-weighting of the bias-penalty term on Gaussian /
-        lat-lon grids when ``config.w_bias_* > 0``; without it the
-        bias mean is a uniform average and over-weights the poles.
-        ``None`` is acceptable for cubed-sphere (cells ~equal area).
-    config : LossConfig
-
-    Returns
-    -------
-    scalar — averaged loss across all lead times
-    """
-    # Use ``jax.vmap`` directly over the leading day axis of the carry
-    # pytrees instead of a closure-over-arange + ``tree.map(lambda x: x[i])``.
-    # The closure pattern forced JAX to retrace every call (the closure
-    # captured ``pred_carries`` / ``target_carries`` by identity); vmap
-    # with ``in_axes=0`` lets the batching machinery slice the leading
-    # axis without any Python tree walk inside the inner loop.
-    def _day_loss(pred_i, target_i):
-        return carry_mse(
-            pred_i, target_i, sigma_full,
-            lat_weights=lat_weights, config=config,
-        )
-
-    day_losses = jax.vmap(_day_loss)(pred_carries, target_carries)
-    return jnp.mean(day_losses)
 
 
 def carry_spectral_loss(

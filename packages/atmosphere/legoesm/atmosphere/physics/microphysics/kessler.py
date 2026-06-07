@@ -182,7 +182,7 @@ def kessler_microphysics(
     # the unused-tendency placeholders to f64 under x64 mode.
     _dtype = T.dtype
     z = jnp.zeros((ncol, nlev), dtype=_dtype)
-    z1 = jnp.zeros((ncol,), dtype=_dtype)
+    jnp.zeros((ncol,), dtype=_dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,

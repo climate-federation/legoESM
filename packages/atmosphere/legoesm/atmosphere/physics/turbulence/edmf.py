@@ -180,7 +180,7 @@ def edmf_turbulence(
     theta_rev = theta[:, ::-1]
     theta_v_rev = theta_v[:, ::-1]
     q_v_rev = q_v[:, ::-1]
-    rho_rev = rho[:, ::-1]
+    rho[:, ::-1]
 
     # Layer spacing from surface upward
     dz_upward = jnp.abs(jnp.diff(z_rev, axis=1))  # (ncol, nlev-1)

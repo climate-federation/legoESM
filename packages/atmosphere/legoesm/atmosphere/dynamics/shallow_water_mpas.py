@@ -28,7 +28,6 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.conservation import fix_energy_mpas, fix_mass_mpas
-from legoesm.core.field import Field
 from legoesm.core.operators_voronoi import (
     apvm_correction,
     kinetic_energy_cell,
