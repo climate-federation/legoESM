@@ -14,6 +14,7 @@ at the boundary (see ``_LEGACY_DISCRETIZATION`` below).
 from __future__ import annotations
 
 import copy
+import shlex
 import warnings
 
 import yaml
@@ -307,7 +308,7 @@ class Config:
         ``legoesm run`` is a cwd-independent installed CLI, so the run.sh can
         ``cd`` into the bundle dir and pass the bundle-relative ``config.yaml``.
         """
-        return f"legoesm run {config_path}"
+        return f"legoesm run {shlex.quote(config_path)}"
 
     def __repr__(self) -> str:
         return f"Config({self._data})"

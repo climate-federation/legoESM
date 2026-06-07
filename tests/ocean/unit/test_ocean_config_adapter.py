@@ -233,6 +233,16 @@ def test_resolve_run_controls_cli_wins_over_yaml():
     assert "dt" not in applied
 
 
+def test_run_command_quotes_paths_with_spaces():
+    # codex P2: an absolute config path with spaces/metachars must be shell-safe
+    # in the generated run.sh.
+    cfg = OceanExperimentConfig()
+    cmd = cfg.run_command("/tmp/my runs/exp 1/config.yaml")
+    assert "'/tmp/my runs/exp 1/config.yaml'" in cmd
+    # And a plain path is unquoted (shlex.quote leaves safe strings bare).
+    assert cfg.run_command("config.yaml").endswith("--config config.yaml")
+
+
 def test_yaml_roundtrip(tmp_path):
     cfg = OceanExperimentConfig.from_dict({"ocean": {"A_h": 2.0e4}})
     out = tmp_path / "out.yaml"

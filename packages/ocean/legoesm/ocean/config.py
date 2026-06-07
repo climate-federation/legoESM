@@ -49,6 +49,7 @@ The ``ocean:`` section maps directly onto the runtime NamedTuple field names
 from __future__ import annotations
 
 import copy
+import shlex
 from typing import Any, NamedTuple
 
 import yaml
@@ -282,7 +283,7 @@ class OceanExperimentConfig:
         repo root and ``config_path`` should be an absolute path to the bundle's
         ``config.yaml`` (init_experiment passes that with ``workdir=repo_root``).
         """
-        return f"python scripts/run/run_omip_core2.py --config {config_path}"
+        return f"python scripts/run/run_omip_core2.py --config {shlex.quote(config_path)}"
 
     def __repr__(self) -> str:
         return f"OceanExperimentConfig({self._data})"
