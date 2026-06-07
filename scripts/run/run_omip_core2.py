@@ -1243,6 +1243,36 @@ def _grid_lat2d_deg(grid, grid_type):
     return lat2d, lon2d
 
 
+def _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir):
+    """AMOC@26N [Sv] from the LIVE state (h reconstructed in-run via
+    compute_layer_thickness — the snapshot lacks eta/z_coord).  Reuses the
+    tested compute_amoc_from_state{,_mpas} (Atlantic-masked moc_streamfunction
+    -> max).  Pure NumPy at run-end (no AD/JIT/shared-kernel touch).  Prints +
+    writes a scalar file; NaN/skip is non-fatal.  RAPID obs ~17 Sv."""
+    try:
+        from legoesm.ocean.vertical import compute_layer_thickness
+        h = np.asarray(compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, z_coord))
+        if app_grid_type == "mpas":
+            from legoesm.ocean.spinup import compute_amoc_from_state_mpas
+            amoc = float(compute_amoc_from_state_mpas(
+                np.asarray(state.u.data), h, grid))
+        elif getattr(state, "v", None) is not None:
+            from legoesm.ocean.spinup import compute_amoc_from_state
+            amoc = float(compute_amoc_from_state(
+                np.asarray(state.v.data), h,
+                np.asarray(state.land_mask.data), grid))
+        else:
+            return
+        print(f"[transports] AMOC@26N = {amoc:.2f} Sv  (RAPID obs ~17; "
+              f"NEMO via scripts/validate/nemo_transports.py)")
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        (Path(out_dir) / "transports.txt").write_text(
+            f"amoc26N_Sv {amoc:.4f}\n")
+    except Exception as e:  # diagnostic must never crash the run
+        print(f"[transports] AMOC@26N diag skipped: {type(e).__name__}: {e}")
+
+
 def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d):
     out_dir.mkdir(parents=True, exist_ok=True)
     save_kw = dict(
@@ -1812,6 +1842,7 @@ def main() -> int:
                 print(f"[snapshot] year {yr} saved", flush=True)
         state = jax.block_until_ready(state)
         _save_snapshot(out_dir, "final", state, lat2d, lon2d)
+        _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
         _csv.close()
         rate = n_steps / (time.time() - t_wall)
         print(f"[done] {n_steps} steps @ {rate:.2f} steps/s (scan); "
@@ -1894,6 +1925,7 @@ def main() -> int:
 
     state = jax.block_until_ready(state)
     _save_snapshot(out_dir, "final", state, lat2d, lon2d)
+    _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
     _csv.close()
     rate = n_steps / (time.time() - t_wall)
     print(f"[done] {n_steps} steps @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")
