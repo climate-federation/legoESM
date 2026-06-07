@@ -11,7 +11,7 @@ commit messages; `OMIP_faithful.md`. Memories: [[omip-faithful-project]], [[omip
 |---|---|---|
 | **tripole eORCA025 ¼°** | **FAITHFUL** | **1.15** corr 0.99 |
 | **latlon 1°** | **FAITHFUL** | **1.12** corr 0.99 |
-| **mpas ico6 ~115 km** | **FAITHFUL** (iter-~50) | **SST 0.84** corr 0.997, **SSS 0.85** corr 0.94 (best) |
+| **mpas ico6 ~115 km** | **FAITHFUL** (iter-~50) | **SST 0.84** corr 0.997, **SSS 0.85** corr 0.94 (best); **ACC 146 vs NEMO 159 Sv** (1-yr) |
 | cubed_sphere | **PARKED** — cold-start mode-1 PGF residual NOT resolution-fixable (C256 ¼° blows too, at a cube EDGE near the equator); all correct numerics committed | n/a (blows at cold-start) |
 | spectral | **NOT-MEANINGFUL** — global SH basis can't represent ORCA1 coastlines (Gibbs ringing; model self-declares unsupported #99; bathy builder refuses real geometry; T21 can't resolve Drake) | n/a (by construction) |
 **"All 5 grids match ORCA1" is impossible BY CONSTRUCTION (spectral).** Achievable maximum =
@@ -230,6 +230,16 @@ boundaries where u≈0) so the MPAS AMOC binning uses the same partial-cell flux
 full-cell AMOC tests unchanged (min==centered there) + new dry-edge test. NOTE: the in-flight 5-yr MPAS
 (8426097) was launched BEFORE this wiring, so it emits AMOC (now min-rule on future runs) but no ACC; a
 follow-up MPAS run will emit ACC.
+
+### MODEL ACC@Drake RESULT (1-yr probe 8428162) — 146 Sv, CLOSE to NEMO; diag works in production
+MPAS ico6, 1 model-year, full faithful stack (WOA+partial-cell+freeze-floor+runoff): **model ACC@Drake
+= 146.07 Sv** vs **NEMO 159.26** vs obs ~137 — already in-band after only 1 year (wind-driven ACC spins
+up in months, unlike AMOC). Validates the wired `_acc_drake_diag` + `compute_acc_from_state_mpas`
+(section transport, min-rule) end-to-end in production. **AMOC@26N = 3.67 Sv** (developing — up from the
+day-90 −4.63; AMOC is decade-gated, so 1-yr is expected low vs NEMO 17.74). Run STABLE 52560 steps @ 16
+steps/s (max|u|~0.5 m/s, finite, rc=0); SST 18.5°C / SSS 34.4. So MPAS now matches NEMO on SST (0.84),
+SSS (0.85) AND **ACC (146 vs 159, ~8%)** — only AMOC remains equilibration-gated (needs the multi-decade
+run). transports.txt: amoc26N_Sv 3.6739, acc_drake_Sv 146.0682.
 
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
