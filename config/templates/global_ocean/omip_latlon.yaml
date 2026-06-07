@@ -38,8 +38,15 @@ time:
   dt_seconds: 1800            # 30 min
   duration_days: 365          # 1 year
   output_interval_days: 30
+init:
+  woa_init: true              # WOA18 cold-start IC (see experiment.data: woa18)
+  # woa_t / woa_s default to data/woa18/woa18_decav_{t,s}00_01.nc; set them to
+  # the staged WOA18 paths (data_catalog `woa18` target) if different.
 forcing:
   dataset: core2_nyf
+  # path = directory holding the staged CORE-II NYF zarr (nyf.zarr); empty uses
+  # the loader's ~/.cache/.../core2_nyf default. Point at the data_catalog
+  # `core2_nyf` target (<data_root>/ocean/core2) after fetching.
   path: ""
 output:
   format: zarr

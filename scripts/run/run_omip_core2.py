@@ -1510,6 +1510,12 @@ def main() -> int:
                         "state_digest) is written under --output for "
                         "`legoesm reproduce`. The mesh/grid still come from "
                         "--grid/--mesh. See issue #376.")
+    p.add_argument("--forcing-path", type=str, default=None,
+                   help="Directory containing the CORE-II NYF zarr (nyf.zarr) — "
+                        "passed as load_core2_nyf(cache_dir=...). Lets a "
+                        "fetch-then-run workflow point the loader at staged data "
+                        "instead of the default ~/.cache/.../core2_nyf. Set via "
+                        "--config forcing.path. See issue #376.")
     p.add_argument("--diag-every-days", type=float, default=30.0)
     p.add_argument("--scan-block", type=int, default=0,
                    help="Issue #354: wrap the time loop in jax.lax.scan, "
@@ -1773,8 +1779,13 @@ def main() -> int:
             land_mask=np.asarray(state.land_mask.data), spread_passes=_spread)
     # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
     # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
-    # would corrupt the comparison invisibly.
-    forcing = load_core2_nyf(allow_synthetic=False)
+    # would corrupt the comparison invisibly. --forcing-path (set via --config
+    # forcing.path) threads the staged data dir into the loader's cache_dir so a
+    # fetch-then-run workflow finds it (#376).
+    forcing = load_core2_nyf(
+        allow_synthetic=False,
+        cache_dir=(Path(args.forcing_path) if args.forcing_path else None),
+    )
     n_rec = int(forcing.u10.shape[0])
     print(f"[setup] grid {lat2d.shape}, forcing records {n_rec}, dt={args.dt}s")
 

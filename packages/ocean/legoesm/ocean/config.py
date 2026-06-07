@@ -402,6 +402,20 @@ def resolve_ocean_run_controls(
     if n_lat is not None and n_lon is not None:
         _maybe_set("latlon_res", f"{int(n_lat)}x{int(n_lon)}")
 
+    # Initial condition: a template that declares a WOA cold-start IC must
+    # actually enable it (else the run silently starts from rest, ignoring the
+    # declared woa18 data requirement — codex review P2).
+    woa = adapter.get("init.woa_init")
+    if woa is not None:
+        _maybe_set("woa_init", bool(woa))
+    _maybe_set("woa_t", adapter.get("init.woa_t"))
+    _maybe_set("woa_s", adapter.get("init.woa_s"))
+
+    # Forcing location: thread the staged CORE-II NYF directory into the loader's
+    # cache_dir so a "fetch data, then run" workflow finds it where it was staged
+    # (the loader otherwise looks only under ~/.cache/.../core2_nyf — codex P2).
+    _maybe_set("forcing_path", adapter.get("forcing.path") or None)
+
     return applied
 
 

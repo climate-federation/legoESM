@@ -204,10 +204,13 @@ def test_resolve_run_controls_drives_run_from_yaml():
         "grid": {"type": "latlon_cgrid", "n_lat": 180, "n_lon": 360, "nlev": 30},
         "time": {"dt_seconds": 1800, "duration_days": 730},
         "output": {"path": "output/omip_latlon/"},
+        "init": {"woa_init": True, "woa_t": "d/t.nc", "woa_s": "d/s.nc"},
+        "forcing": {"dataset": "core2_nyf", "path": "/data/ocean/core2"},
     })
     args = argparse.Namespace(
         dt=3600.0, years=5.0, output="results/default", nlev=20,
-        latlon_res="180x360",
+        latlon_res="180x360", woa_init=False, woa_t="x", woa_s="y",
+        forcing_path=None,
     )
     applied = resolve_ocean_run_controls(cfg, args, cli_given=set())
     assert args.dt == 1800.0
@@ -215,7 +218,13 @@ def test_resolve_run_controls_drives_run_from_yaml():
     assert args.output == "output/omip_latlon/"
     assert args.nlev == 30
     assert args.latlon_res == "180x360"
-    assert set(applied) == {"dt", "years", "output", "nlev", "latlon_res"}
+    assert args.woa_init is True
+    assert args.woa_t == "d/t.nc" and args.woa_s == "d/s.nc"
+    assert args.forcing_path == "/data/ocean/core2"
+    assert set(applied) == {
+        "dt", "years", "output", "nlev", "latlon_res",
+        "woa_init", "woa_t", "woa_s", "forcing_path",
+    }
 
 
 def test_resolve_run_controls_cli_wins_over_yaml():
