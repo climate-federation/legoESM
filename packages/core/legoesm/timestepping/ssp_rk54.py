@@ -258,10 +258,25 @@ def ssp_rk54_step_scan(
                 "ssp_rk54_step_scan requires inexact (float/complex) state "
                 f"leaves; got dtype {a.dtype}.  Cast the state to floating "
                 "point before integrating.")
+    # Each carry slot is allocated at the dtype the inlined form's per-leaf
+    # update PRODUCES — ``result_type(leaf, scalar)`` — NOT the bare leaf dtype.
+    # The inline step computes ``a*u + dt*b*F`` with the RK scalars (``A``/``B``
+    # /``dt``) cast to the first inexact leaf's precision ``dtype``; under
+    # standard promotion that upcasts a leaf narrower than ``dtype`` (e.g. an
+    # f32 tracer in an otherwise-f64 MPAS state -> f64).  Allocating the carry
+    # at the bare leaf dtype instead would force the f64 stage combination back
+    # into an f32 slot on every ``.set`` — silently diverging from the inline
+    # scheme AND riding a deprecated narrowing cast that a future JAX turns into
+    # a hard error.  Promoting the slot to ``result_type(leaf, dtype)`` matches
+    # the inline output exactly (verified leaf-for-leaf) and keeps a real+complex
+    # mix at one precision complex (real scalars never narrow a complex leaf).
+    acc_dtypes = [jnp.result_type(a.dtype, dtype) if dtype is not None
+                  else a.dtype for a in arr0]
     # U[leaf]: stack (6, *leaf) of stage states u^0..u^5; F[leaf]: (5, *leaf).
     # u^0 := state; stages 1..5 overwritten before they are ever read.
-    U = [jnp.broadcast_to(a, (6,) + a.shape) for a in arr0]
-    F = [jnp.zeros((5,) + a.shape, a.dtype) for a in arr0]
+    U = [jnp.broadcast_to(a.astype(acc), (6,) + a.shape)
+         for a, acc in zip(arr0, acc_dtypes)]
+    F = [jnp.zeros((5,) + a.shape, acc) for a, acc in zip(arr0, acc_dtypes)]
 
     def body(carry, i):
         U, F = carry
@@ -275,6 +290,26 @@ def ssp_rk54_step_scan(
                 "ssp_rk54_step_scan: tendency_fn output structure does not "
                 f"match the state structure.\n  state:    {treedef}\n  "
                 f"tendency: {Fi_def}")
+        # The F carry slot is promoted to ``result_type(state_leaf, dt)`` (see
+        # ``acc_dtypes`` above), which already absorbs a tendency at or below
+        # the state's precision.  A tendency leaf WIDER than that promoted slot
+        # (e.g. an f64 tendency for an all-f32 state) would still be narrowed by
+        # the scatter below — silently diverging from the inline form (which
+        # widens the whole update to f64) and riding the deprecated narrowing
+        # cast.  That case cannot be sized away without a pre-trace of the
+        # tendency, so reject it loudly, like the integer-leaf guard above
+        # (dtypes are static, so this fires at trace time, never per-step).
+        # Pass ``fi`` itself (not ``fi.dtype``) to ``result_type``: a tendency
+        # leaf may be a weakly-typed Python scalar with no ``.dtype`` — the
+        # inline form and the ``.set`` below both accept it — and a weak scalar
+        # never forces a narrowing, so it correctly passes the guard.
+        for f, fi in zip(F, Fi):
+            if jnp.result_type(fi, f.dtype) != f.dtype:
+                raise TypeError(
+                    "ssp_rk54_step_scan: tendency leaf dtype "
+                    f"{jnp.result_type(fi)} exceeds the state's compute "
+                    f"precision ({f.dtype}); the fixed-dtype scan carry would "
+                    "narrow it.  Return the tendency at the state's precision.")
         F = [f.at[i - 1].set(fi) for f, fi in zip(F, Fi)]
         a_row = A[i]               # (5,) weights over stages k = 0..4
         b_row = B[i]
