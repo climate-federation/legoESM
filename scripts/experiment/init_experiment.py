@@ -201,6 +201,20 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"ERROR: --output-dir {out} exists and is not empty")
     out.mkdir(parents=True, exist_ok=True)
 
+    # Ocean bundles launch from the repo root (the runner is repo-relative), so a
+    # relative output.path would write under the repo root and collide across
+    # bundles. Anchor ocean outputs to <bundle>/output (absolute) unless the user
+    # set an absolute output.path explicitly. ``out_subdir`` is where the run
+    # manifest lands, used for the reproduce hint below.
+    out_subdir = out / "output"
+    if not is_atm:
+        op = cfg.get("output.path")
+        if not (isinstance(op, str) and Path(op).is_absolute()):
+            out_subdir = (out / "output").resolve()
+            cfg.set("output.path", str(out_subdir))
+        else:
+            out_subdir = Path(op)
+
     cfg.to_yaml(str(out / "config.yaml"))
     # Ocean runs need 64-bit (omip is x64 throughout); atmosphere keeps its
     # template-/machine-driven precision (x32 default).  The atmosphere CLI is
@@ -242,7 +256,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    data required: {meta['data']} "
               f"(run scripts/experiment/fetch_data.py to stage)")
     print(f"  Run it:        cd {out} && bash run.sh")
-    print(f"  Reproduce it:  legoesm reproduce {out}/<output>/run_manifest.json --check")
+    if is_atm:
+        print(f"  Reproduce it:  legoesm reproduce {out}/<output>/run_manifest.json --check")
+    else:
+        print(f"  Reproduce it:  legoesm reproduce {out_subdir}/run_manifest.json --check")
     return 0
 
 

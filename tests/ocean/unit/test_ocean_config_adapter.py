@@ -243,6 +243,20 @@ def test_run_command_quotes_paths_with_spaces():
     assert cfg.run_command("config.yaml").endswith("--config config.yaml")
 
 
+def test_run_command_emits_grid_backend():
+    # codex P2: the template's grid backend must be passed to the runner
+    # (otherwise it defaults to tripole and ignores n_lat/n_lon).
+    assert "--grid latlon_bathy" in OceanExperimentConfig().run_command()
+    cube = OceanExperimentConfig.from_dict({"grid": {"type": "cubed_sphere"}})
+    assert "--grid cubed_sphere" in cube.run_command()
+
+
+def test_run_command_unsupported_grid_raises():
+    spec = OceanExperimentConfig.from_dict({"grid": {"type": "spectral"}})
+    with pytest.raises(ValueError, match="no run_omip_core2.py --grid backend"):
+        spec.run_command()
+
+
 def test_yaml_roundtrip(tmp_path):
     cfg = OceanExperimentConfig.from_dict({"ocean": {"A_h": 2.0e4}})
     out = tmp_path / "out.yaml"

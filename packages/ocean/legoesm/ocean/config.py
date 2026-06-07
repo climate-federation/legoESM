@@ -60,6 +60,16 @@ import yaml
 # cheap and does not pull the full dynamics stack at package-import time.
 _GRID_TYPES = ("latlon_cgrid", "cubed_sphere", "spectral")
 
+# Map the YAML ``grid.type`` to the ``run_omip_core2.py --grid`` backend so the
+# generated run.sh launches the grid the template describes (not the runner's
+# default 'tripole').  ``latlon_cgrid`` -> the regular lat-lon C-grid bathy path
+# (honours the template's n_lat/n_lon); ``cubed_sphere`` -> the cube path.
+# ``spectral`` has no OMIP runner backend.
+_GRID_TYPE_TO_RUNNER = {
+    "latlon_cgrid": "latlon_bathy",
+    "cubed_sphere": "cubed_sphere",
+}
+
 
 # Default ocean experiment config.  ``ocean: {}`` means "use every runtime
 # NamedTuple default" — a bare template runs an Earth-default lat-lon C-grid
@@ -282,8 +292,21 @@ class OceanExperimentConfig:
         mesh/forcing paths relative to the repo), so the run.sh launches from the
         repo root and ``config_path`` should be an absolute path to the bundle's
         ``config.yaml`` (init_experiment passes that with ``workdir=repo_root``).
+        Emits ``--grid`` mapped from ``grid.type`` so the template's grid backend
+        actually runs (the runner otherwise defaults to ``tripole``).
         """
-        return f"python scripts/run/run_omip_core2.py --config {shlex.quote(config_path)}"
+        grid_type = self.get("grid.type", "latlon_cgrid")
+        try:
+            backend = _GRID_TYPE_TO_RUNNER[grid_type]
+        except KeyError:
+            raise ValueError(
+                f"grid.type={grid_type!r} has no run_omip_core2.py --grid "
+                f"backend (supported: {sorted(_GRID_TYPE_TO_RUNNER)})"
+            )
+        return (
+            f"python scripts/run/run_omip_core2.py --grid {backend} "
+            f"--config {shlex.quote(config_path)}"
+        )
 
     def __repr__(self) -> str:
         return f"OceanExperimentConfig({self._data})"
