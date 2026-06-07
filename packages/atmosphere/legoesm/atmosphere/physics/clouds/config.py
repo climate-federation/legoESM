@@ -69,6 +69,13 @@ class CloudConfig(NamedTuple):
     gamma_xr: float = 0.49
     r_eff_liq: float = 10.0e-6
     r_eff_ice: float = 30.0e-6
+    Nc_default: float = 1.0e8        # fallback cloud-droplet number [1/m³] for the
+                                     # gamma-PSD liquid effective radius when the
+                                     # passed n_cloud is 0/garbage — e.g. SAM
+                                     # specified-Nc Morrison (dopredictNc=.false.,
+                                     # MorrisonConfig.predict_Nc=False) where the
+                                     # prognostic Nc slot stays 0. Matches Morrison
+                                     # Nc_0=1e8 so RRTMGP r_eff_liq is SAM-faithful.
     q_c_diagnostic: float = 0.2e-3
     T_freeze: float = constants.T_freeze
     T_ice_only: float = 233.15
