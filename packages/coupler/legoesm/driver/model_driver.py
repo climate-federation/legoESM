@@ -113,6 +113,13 @@ class ModelDriver:
         else:
             self.tracer_registry: TracerRegistry = make_moisture_registry()
         self.get_sst_sic = None
+        # Optional per-segment surface-property feedback hook.  A coupled
+        # driver sets this to a callable ``day -> (sfc_albedo, sfc_T)`` (each
+        # grid-shaped or None) returning the coupler's tile-blended dynamic
+        # surface albedo / skin temperature; threaded into radiation as traced
+        # SegmentForcing so the sea-ice/ocean/land albedo + skin-T feedbacks
+        # reach the atmosphere.  None (AMIP / standalone) ⇒ static blend.
+        self.get_sfc_override = None
         self.diagnostics = None
         self._phis_data = None
         self._f_land = None
@@ -3712,6 +3719,12 @@ class ModelDriver:
                     day, _phys_p_s, _phys_lat,
                 )
 
+            # Coupler-provided dynamic surface albedo / skin temperature for
+            # this segment (None unless a coupled driver wired the feedback).
+            _sfc_albedo_ovr, _sfc_T_ovr = (None, None)
+            if self.get_sfc_override is not None:
+                _sfc_albedo_ovr, _sfc_T_ovr = self.get_sfc_override(day)
+
             # Pack per-segment forcing into a SegmentForcing pytree.
             forcing = pack_forcing(
                 sst=sst, sic=sic,
@@ -3719,6 +3732,8 @@ class ModelDriver:
                 solar_weights=solar_weights, s_0=current_s_0,
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
                 ghg_vmr=ghg_vmr,
+                sfc_albedo_override=_sfc_albedo_ovr,
+                sfc_T_override=_sfc_T_ovr,
             )
 
             # Pack state into carry

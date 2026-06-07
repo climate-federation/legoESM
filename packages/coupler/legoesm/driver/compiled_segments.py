@@ -349,6 +349,15 @@ class SegmentForcing(NamedTuple):
     o3_vmr: jax.Array
     aerosol_od: jax.Array
     ghg_vmr: jax.Array  # shape (n_species,); empty (0,) when inactive
+    # Coupler-provided dynamic surface overrides — the tile-blended surface
+    # albedo / skin temperature fed back each segment by a coupled driver
+    # (see PhysicsPipeline.compute_radiation_core).  ``None`` for AMIP /
+    # standalone / uncoupled runs ⇒ the static internal albedo/T_sfc blend is
+    # used (byte-identical to the pre-feedback behaviour).  Grid-shaped, like
+    # sst/sic.  Kept None (not a (0,) placeholder) so no module-scope device op
+    # is created at import and the pytree carries no spurious empty leaf.
+    sfc_albedo_override: jax.Array | None = None
+    sfc_T_override: jax.Array | None = None
 
 
 # Canonical GHG species ordering for the ghg_vmr array.
@@ -388,6 +397,8 @@ def pack_forcing(
     sst, sic, day_of_year, seconds_of_day,
     solar_weights, s_0, o3_vmr, aerosol_od,
     ghg_vmr=None,
+    sfc_albedo_override=None,
+    sfc_T_override=None,
 ) -> SegmentForcing:
     """Pack per-segment forcing into a SegmentForcing pytree.
 
@@ -396,6 +407,11 @@ def pack_forcing(
     ghg_vmr : dict, jax.Array, or None
         GHG volume mixing ratios.  Accepts a dict (auto-converted via
         :func:`ghg_dict_to_array`), a pre-packed array, or None.
+    sfc_albedo_override, sfc_T_override : jax.Array or None
+        Coupler-provided tile-blended surface albedo / skin temperature for
+        this segment (grid-shaped, like sst/sic).  ``None`` (default) leaves
+        the radiation's static internal blend untouched — byte-identical for
+        AMIP / standalone runs.
     """
     if ghg_vmr is None:
         _ghg = jnp.zeros(0)
@@ -413,6 +429,13 @@ def pack_forcing(
         o3_vmr=jnp.asarray(o3_vmr),
         aerosol_od=jnp.asarray(aerosol_od),
         ghg_vmr=_ghg,
+        sfc_albedo_override=(
+            None if sfc_albedo_override is None
+            else jnp.asarray(sfc_albedo_override)
+        ),
+        sfc_T_override=(
+            None if sfc_T_override is None else jnp.asarray(sfc_T_override)
+        ),
     )
 
 
@@ -676,6 +699,8 @@ def build_segment_fn(
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
+                    sfc_albedo_override=forcing.sfc_albedo_override,
+                    sfc_T_override=forcing.sfc_T_override,
                     T_land=_T_land_in, **_dm_in,
                 )
                 phys_out, held_new_local = _ret[0], _ret[1]
@@ -760,6 +785,8 @@ def build_segment_fn(
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
+                    sfc_albedo_override=forcing.sfc_albedo_override,
+                    sfc_T_override=forcing.sfc_T_override,
                     T_land=carry.T_land, **_dm_in,
                 )
                 phys_out, held_new = _ret[0], _ret[1]
