@@ -34,13 +34,12 @@ import numpy as np
 from legoesm import constants
 from legoesm.grids.latlon import LatLonGrid, create_regional_latlon_grid
 from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
-from legoesm.ocean.eos import VerosNonlin2Config
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.lateral_mixing.config import (
-    GMRediConfig, HarmonicConfig, LateralMixingConfig,
+    GMRediConfig, LateralMixingConfig,
 )
 from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
 from legoesm.core.field import Field
@@ -53,7 +52,7 @@ from legoesm.ocean.physics.vertical_mixing.config import (
 from legoesm.ocean.state import (
     LatLonCGridOceanConfig, LatLonCGridOceanState, OceanSurfaceForcing,
 )
-from legoesm.ocean.vertical import OceanZStarCoordinate, create_ocean_z_star
+from legoesm.ocean.vertical import OceanZStarCoordinate
 
 
 # ---------------------------------------------------------------------------

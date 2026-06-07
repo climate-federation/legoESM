@@ -296,16 +296,3 @@ def canonical_solver_names(component: str = "atmosphere") -> list[str]:
     """Return the list of canonical solver names for a component."""
     matrix = ATMOSPHERE_MATRIX if component == "atmosphere" else OCEAN_MATRIX
     return [e.canonical_name for e in matrix]
-
-
-def print_matrix(component: str | None = None) -> None:
-    """Pretty-print the supported implementation matrix."""
-    entries = SUPPORTED_MATRIX
-    if component:
-        entries = tuple(e for e in entries if e.component == component)
-
-    header = f"{'Component':<12} {'Dynamics':<18} {'Grid':<24} {'Canonical Name':<35} {'Class'}"
-    print(header)
-    print("-" * len(header))
-    for e in entries:
-        print(f"{e.component:<12} {e.dynamics:<18} {e.grid:<24} {e.canonical_name:<35} {e.class_name}")

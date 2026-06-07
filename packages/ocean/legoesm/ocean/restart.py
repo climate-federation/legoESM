@@ -31,7 +31,7 @@ Usage::
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np

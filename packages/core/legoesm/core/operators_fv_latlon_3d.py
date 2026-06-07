@@ -217,7 +217,6 @@ def cgrid_fv_flux_divergence_latlon_3d(
     """
     R = grid.radius
     dlon = grid.dlon
-    n_lat = grid.n_lat
 
     # Pad scalar with halo=2 for PPM reconstruction (all levels at once)
     q_pad = pad_halo_latlon_3d(q_3d, halo=2)

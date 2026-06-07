@@ -148,11 +148,10 @@ def apply_continuation_1d(
         Extended (periodic) data.
     """
     d = matrices.d
-    C = matrices.C
 
     # Move target axis to last position for convenience
     f_moved = jnp.moveaxis(f, axis, -1)
-    N = f_moved.shape[-1]
+    f_moved.shape[-1]
 
     # d points from each end of the signal
     bnd_right = f_moved[..., -d:]    # (..., d)
@@ -206,7 +205,7 @@ def spectral_derivative_1d(
 
     # Wavenumbers for the extended domain
     # Physical domain length for extended signal
-    L = N_ext * dx
+    N_ext * dx
     k = 2.0 * jnp.pi * jnp.fft.rfftfreq(N_ext, d=dx)
 
     # Spectral derivative: multiply by (ik)^order

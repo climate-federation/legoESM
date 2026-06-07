@@ -17,7 +17,7 @@ internally.  This is a deliberate trade-off: the barotropic mode
 primarily resolves fast gravity waves, where mass conservation and
 stability matter more than high-order vorticity numerics. The
 ``barotropic_diffusion_alpha`` parameter damps the A-grid computational
-mode (checkerboard noise in eta).  See ``docs/ocean_grid_staggering.md``
+mode (checkerboard noise in eta).  See ``ocean_grid_staggering.md``
 for the full rationale.
 
 This parallels acoustic_substeps() in compressible_euler.py but for

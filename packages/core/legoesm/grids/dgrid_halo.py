@@ -32,14 +32,13 @@ Public entries:
   (iter-1083) — wrapper for full ``(6, ...)`` replicated state
   (canonical cubed-sphere MPI mode).
 
-Validation: ``tests/test_dgrid_halo_iter1076.py`` (27),
-``tests/test_dgrid_vector_halo_iter1078.py`` (12),
+Validation: ``test_dgrid_halo_iter1076.py`` (27),
+``test_dgrid_vector_halo_iter1078.py`` (12),
 ``tests/distributed/test_mpi_dgrid_vector_halo_iter1083.py`` (1
 strict bit-for-bit at np ∈ {2, 3, 6}).
 """
 from __future__ import annotations
 
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -163,7 +162,7 @@ def _build_dgrid_scalar_halo_table_h1(
 
                 entries.append((sf, si, sj, df, di, dj))
 
-    total = len(entries)
+    len(entries)
     arr = np.array(entries, dtype=np.int32).T  # shape (6, total)
     return tuple(arr)  # (src_f, src_i, src_j, dst_f, dst_i, dst_j)
 
@@ -473,7 +472,7 @@ def pad_halo_dgrid_vector_4d_mpi(u_d, v_d, topology):
             f"u_d.shape[0]={n_local} != len(local_face_ids)={len(topology.local_face_ids)}"
         )
     n = u_d.shape[1]
-    n_j_u, n_i_v = n + 1, n + 1
+    _n_j_u, _n_i_v = n + 1, n + 1
     if u_d.shape[1:3] != (n, n + 1) or v_d.shape[1:3] != (n + 1, n):
         raise ValueError(
             f"Expected u_d (n_local, n, n+1, nlev), v_d (n_local, n+1, n, nlev); "
@@ -635,7 +634,7 @@ def pad_halo_dgrid_vector_4d_replicated_mpi(u_d_full, v_d_full, topology):
             f"Expected 6 faces; got u {tuple(u_d_full.shape)}, "
             f"v {tuple(v_d_full.shape)}"
         )
-    n = u_d_full.shape[1]
+    u_d_full.shape[1]
     # Slice to owned faces.
     idx = jnp.asarray(list(topology.local_face_ids), dtype=jnp.int32)
     u_local = u_d_full[idx]

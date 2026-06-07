@@ -92,9 +92,6 @@ from legoesm.core.operators_fv_latlon import (
     fv_gradient_lon_3d as _fv_gradient_lon_3d,
     fv_gradient_lat_3d as _fv_gradient_lat_3d,
 )
-from legoesm.grids.halo_latlon import (
-    pad_halo_latlon_3d as _pad_halo_latlon_3d,
-)
 
 from legoesm.grids.halo_latlon import pad_halo_latlon_3d
 from legoesm import constants

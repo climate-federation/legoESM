@@ -40,7 +40,6 @@ from legoesm.atmosphere.large_scale_forcing import (
 from legoesm.atmosphere.physics._shared import (
     compute_heights_from_sigma,
     compute_layer_dz,
-    compute_rho,
 )
 from legoesm.core.state import HydrostaticState, HydrostaticTendencies
 

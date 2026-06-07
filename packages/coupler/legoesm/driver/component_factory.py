@@ -13,10 +13,10 @@ Design
   - Computes physical diffusion coefficients from grid properties.
   - Validates that the grid type is compatible with the chosen solver.
   - Returns the model instance ready for time-stepping.
-* ``create_ocean_component``, ``create_land_component``,
-  ``create_ice_component``, and ``create_coupler`` delegate to the
-  canonical component constructors in ``legoesm.ocean``,
-  ``legoesm.land``, ``legoesm.ice``, and ``legoesm.coupler``.
+* ``create_ocean_component``, ``create_land_component``, and
+  ``create_ice_component`` delegate to the canonical component
+  constructors in ``legoesm.ocean``, ``legoesm.land``, and
+  ``legoesm.ice``.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 
-from legoesm import constants
 from legoesm.driver.config import ExperimentConfig, DycoreConfig
 
 logger = logging.getLogger("legoesm.driver.factory")
@@ -875,83 +874,4 @@ def resolve_model_complexity(level, *, grid_type: str = "cubed_sphere"):
         ocean_config=ocean_config,
         land_config=rungs.land,
         ice_config=ice_complexity_config(rungs.ice),
-    )
-
-
-def create_coupler(
-    config: ExperimentConfig,
-    components: dict,
-    *,
-    coupler_config=None,
-    land_config=None,
-    ice_config=None,
-    lake_config=None,
-    lat=None,
-    grid=None,
-    land_param_provider=None,
-    land_features=None,
-):
-    """Create the surface coupler.
-
-    Delegates to ``legoesm.coupler.coupler.make_coupler``, which
-    returns a ``step_surface`` callable.
-
-    Parameters
-    ----------
-    config : ExperimentConfig
-        Experiment-level configuration (used for logging).
-    components : dict
-        Not currently used; reserved for future multi-component
-        coupling patterns.
-    coupler_config
-        A ``CouplerConfig`` instance.  If *None*, defaults to
-        ``CouplerConfig()``.
-    land_config
-        A ``LandConfig`` for the land tile.  If *None*, defaults to
-        ``LandConfig()``.
-    ice_config
-        A ``SeaIceConfig`` for the ice tile.  If *None*, defaults to
-        ``SeaIceConfig()``.
-    lake_config
-        A ``LakeConfig`` for the lake tile.  If *None*, defaults to
-        ``LakeConfig()``.
-    lat : array-like, optional
-        Latitude array [radians] (needed for carbon cycle).
-    grid : optional
-        Grid object (needed when ice dynamics or transport are enabled).
-
-    Returns
-    -------
-    step_surface : callable
-        ``(SurfaceState, AtmToSurface, TileConfig, ocean_sst, ocean_u,
-        ocean_v, dt, doy) -> (SurfaceState, SurfaceToAtm)``.
-    """
-    from legoesm.coupler.coupler import make_coupler
-    from legoesm.coupler.config import CouplerConfig
-    from legoesm.coupler.lake import LakeConfig
-    from legoesm.land import LandConfig
-    from legoesm.ice import SeaIceConfig
-
-    if coupler_config is None:
-        coupler_config = CouplerConfig()
-    if land_config is None:
-        land_config = LandConfig()
-    if ice_config is None:
-        ice_config = SeaIceConfig()
-    if lake_config is None:
-        lake_config = LakeConfig()
-
-    logger.info(
-        "Coupler: coupling_dt=%.0f s, bulk_scheme=%s",
-        coupler_config.coupling_dt, coupler_config.bulk_scheme,
-    )
-    return make_coupler(
-        coupler_config=coupler_config,
-        land_config=land_config,
-        ice_config=ice_config,
-        lake_config=lake_config,
-        lat=lat,
-        grid=grid,
-        land_param_provider=land_param_provider,
-        land_features=land_features,
     )

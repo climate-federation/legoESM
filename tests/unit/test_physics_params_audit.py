@@ -189,6 +189,42 @@ class TestConvectionAudit:
         assert "tiedtke_precip_efficiency" not in names
 
 
+class TestAIMIPDefaultsInteriorization:
+    """``from_defaults`` interiorizes edge-of-range knobs for trainability (v7).
+
+    A canonical default sitting at a sigmoid bound maps to a saturated raw
+    value whose initial gradient is ~0, freezing the knob.  ``from_defaults``
+    nudges such knobs ``sigmoid_margin`` (5%) inside the bound; mid-range knobs
+    stay exactly at their canonical default.  Regression guard: ``default_clamped``
+    was computed but not passed to ``range_to_sigmoid``, so edge knobs
+    initialized saturated/untrainable (and a default run silently used a
+    near-bound emissivity with a frozen gradient).
+    """
+
+    def test_edge_knob_interiorized_and_trainable(self):
+        from legoesm.training.aimip_params import AIMIPClassicalParams
+        params = AIMIPClassicalParams.from_defaults()
+        vals = params.as_dict()
+        # gray_sfc_emissivity: canonical 1.0 in [0.5, 1.0] -> margin 0.025 -> 0.975
+        assert abs(float(vals["gray_sfc_emissivity"]) - 0.975) < 1e-5
+        # rrtmgp_sfc_emissivity: canonical 0.98 within margin of 1.0 -> 0.975
+        assert abs(float(vals["rrtmgp_sfc_emissivity"]) - 0.975) < 1e-5
+        # raw is far from saturation -> non-trivial inverse-sigmoid gradient.
+        # logit(0.95) ~= 2.94; a saturated edge default would give ~6.9.
+        raw = float(params.raw_values["gray_sfc_emissivity"])
+        assert abs(raw) < 4.0
+
+    def test_midrange_knob_exact_canonical(self):
+        from legoesm.training.aimip_params import (
+            AIMIPClassicalParams, _canonical_scheme_defaults)
+        defaults = _canonical_scheme_defaults()
+        vals = AIMIPClassicalParams.from_defaults().as_dict()
+        # tiedtke_cape_threshold canonical 70 in [10, 500] is mid-range:
+        # the clamp is a no-op and init must equal the canonical default.
+        name = "tiedtke_cape_threshold"
+        assert abs(float(vals[name]) - defaults[name]) < 1e-4 * defaults[name]
+
+
 # ===========================================================================
 # Microphysics
 # ===========================================================================

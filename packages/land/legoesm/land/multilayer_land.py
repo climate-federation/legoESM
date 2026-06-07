@@ -120,7 +120,6 @@ def step_multilayer_land(
     # --- Root distribution and per-layer moisture stress ---
     # Compute these early so beta_soil reflects the full root zone,
     # not just the top layer.
-    theta_sat = config.hydraulics.theta_sat
     theta_r = config.hydraulics.theta_r
     z_centers = grid.z_node  # (n_layers,) depth below surface [m]
     if lp is not None:
@@ -166,7 +165,7 @@ def step_multilayer_land(
     beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac_rz
 
     # --- Stomatal conductance (if enabled) ---
-    beta, gpp_farq = compute_effective_beta(
+    beta, _ = compute_effective_beta(
         T_sfc, forcing, beta_soil, config, carbon_state, dt,
         land_params=lp,
     )
@@ -253,7 +252,7 @@ def step_multilayer_land(
         alpha = jnp.full(T_sfc.shape, albedo_land, dtype=T_sfc.dtype)
 
     # --- Radiation ---
-    sw_net, lw_net, lw_up = surface_radiation_fluxes(
+    sw_net, lw_net, _ = surface_radiation_fluxes(
         forcing.sw_down, forcing.lw_down, T_sfc, alpha,
         emissivity,
     )

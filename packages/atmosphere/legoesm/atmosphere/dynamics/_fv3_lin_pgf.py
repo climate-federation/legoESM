@@ -224,7 +224,7 @@ def fv3_lin1997_pgf_3d_cgrid(
       precision (verified by the unit test).
     """
     n = T.shape[1]
-    nlev = T.shape[-1]
+    T.shape[-1]
 
     # Build half-level fields.
     pk_half = compute_pkappa_half(p_s, coord)                  # (6, n, n, nlev+1)

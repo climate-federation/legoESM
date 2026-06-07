@@ -30,8 +30,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm import constants
-
 
 # ==============================================================================
 # Combined snow + ice conductive flux

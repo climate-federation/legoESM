@@ -8,9 +8,7 @@ per-variable monitoring and autoregressive rollout losses.
 from __future__ import annotations
 
 import jax.numpy as jnp
-import equinox as eqx
 
-from legoesm.grids.gaussian import GaussianGrid
 
 
 def area_weighted_mse(
@@ -144,51 +142,6 @@ def per_variable_mse(
     return per_channel
 
 
-def autoregressive_loss(
-    model: eqx.Module,
-    initial: jnp.ndarray,
-    targets: jnp.ndarray,
-    grid: GaussianGrid,
-    n_steps: int = 2,
-) -> jnp.ndarray:
-    """Multi-step autoregressive rollout loss.
-
-    Rolls out the model for n_steps from the initial condition and
-    computes area-weighted MSE at each step. This encourages the
-    model to produce stable multi-step predictions.
-
-    Parameters
-    ----------
-    model : eqx.Module (SFNO)
-        The SFNO model (callable: (x, grid) → y).
-    initial : array, shape (n_lat, n_lon, n_channels)
-        Initial state.
-    targets : array, shape (n_steps, n_lat, n_lon, n_channels)
-        Target states at each rollout step.
-    grid : GaussianGrid
-        Grid for area weights.
-    n_steps : int
-        Number of autoregressive steps.
-
-    Returns
-    -------
-    scalar
-        Mean area-weighted MSE across all rollout steps.
-    """
-    total_loss = jnp.float32(0.0)
-    state = initial
-
-    for step in range(n_steps):
-        pred = model(state, grid)
-        step_loss = area_weighted_mse(
-            pred, targets[step], grid.weights.astype(jnp.float32)
-        )
-        total_loss = total_loss + step_loss
-        state = pred  # Autoregressive: use prediction as next input
-
-    return total_loss / n_steps
-
-
 def weighted_mae(
     pred: jnp.ndarray,
     target: jnp.ndarray,
@@ -213,29 +166,6 @@ def weighted_mae(
     abs_err = jnp.abs(pred - target)
     w = weights[:, None, None]
     return jnp.mean(abs_err * w)
-
-
-def empirical_crps(
-    ensemble: jnp.ndarray,
-    target: jnp.ndarray,
-) -> jnp.ndarray:
-    """Empirical CRPS field for a finite ensemble.
-
-    Parameters
-    ----------
-    ensemble : array, shape (n_members, ..., n_lat, n_lon, n_channels)
-        Ensemble predictions.
-    target : array, shape (..., n_lat, n_lon, n_channels)
-        Deterministic target field.
-
-    Returns
-    -------
-    array
-        CRPS evaluated pointwise, retaining all non-ensemble dimensions.
-    """
-    obs_term = jnp.mean(jnp.abs(ensemble - target[None, ...]), axis=0)
-    pairwise = jnp.abs(ensemble[:, None, ...] - ensemble[None, :, ...])
-    return obs_term - 0.5 * jnp.mean(pairwise, axis=(0, 1))
 
 
 def almost_fair_crps(

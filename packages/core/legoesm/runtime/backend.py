@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 import os
 import warnings
-from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +46,6 @@ def _metal_is_functional() -> bool:
 
     try:
         import jax
-        import jax.numpy as jnp
         x = jax.device_put(1.0, jax.devices()[0])
         _ = float(x + x)
         _metal_healthy = True

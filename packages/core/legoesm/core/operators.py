@@ -376,15 +376,6 @@ def _is_distributed() -> bool:
     return get_halo_backend() == "mpi"
 
 
-def _get_device_config():
-    """Return the active DeviceConfig, or None."""
-    # iter-169: deferred import (CLAUDE.md "Audit lessons":
-    # avoid eager top-level cross-package imports from low-level
-    # ``core/`` modules into higher-level ``parallel/``).
-    from legoesm.parallel.mesh import get_active_config
-    return get_active_config()
-
-
 def global_mean(field: Field, grid: CubedSphereGrid) -> jax.Array:
     """Compute the area-weighted global mean of a field."""
     return global_integral(field, grid) / grid.total_area

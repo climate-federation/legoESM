@@ -35,7 +35,6 @@ from legoesm.driver.kernel_registry import (
 from legoesm.driver.physics_pipeline import (
     PhysicsPipeline,
     PhysicsOutput,
-    HeldRadiation,
     build_physics_pipeline,
 )
 from legoesm.grids.cubed_sphere import create_cubed_sphere

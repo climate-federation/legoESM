@@ -20,7 +20,6 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
-    HydrostaticState,
     HydrostaticTendencies,
     MPASNonHydrostaticState,
     MPASNonHydrostaticTendencies,
@@ -32,11 +31,7 @@ from legoesm.core.state import (
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
     HeightCoordinate,
-    SigmaCoordinate,
-    HybridSigmaPressureCoordinate,
     TerrainMetric,
-    pressure_from_sigma,
-    pressure_from_hybrid,
 )
 from legoesm import constants
 
@@ -1255,7 +1250,6 @@ def _make_mpas_nh_radiation(
 
         nlev = height_coord.n_levels
         shape_2d = (mesh.nCells,)
-        ncol = mesh.nCells
         shape_cell_3d = (mesh.nCells, nlev)
         shape_edge_3d = state.u.data.shape          # (nEdges, nlev)
         shape_w = state.w.data.shape                # (nCells, nlev+1)

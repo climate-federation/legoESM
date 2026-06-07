@@ -31,7 +31,6 @@ from legoesm.ocean.physics.shortwave_penetration import (
 from legoesm.ocean.physics.vertical_mixing.integration import make_vertical_mixing_physics
 from legoesm.ocean.physics.lateral_mixing.integration import make_lateral_mixing_physics
 from legoesm.ocean.physics.surface_forcing.integration import make_surface_forcing_physics
-from legoesm.ocean.physics.bottom_drag.integration import make_bottom_drag_physics
 from legoesm.ocean.physics.convection.integration import make_convection_physics
 
 

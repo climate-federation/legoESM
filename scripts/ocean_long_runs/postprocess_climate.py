@@ -96,6 +96,7 @@ def main() -> int:
         amoc_at_latitude, acc_transport, sst_climatology_bias,
     )
     from legoesm.ocean.forcing import load_woa_sst
+    from legoesm import constants
 
     import jax.numpy as jnp
     h_k = np.asarray(compute_layer_thickness(
@@ -133,7 +134,7 @@ def main() -> int:
     print(f"   ACC @ Drake     = {acc.transport_Sv:6.2f} Sv")
 
     # SST bias vs WOA (synthetic fallback ok for the local run).
-    sst_K = np.asarray(state.T.data)[..., 0] + 273.15
+    sst_K = np.asarray(state.T.data)[..., 0] + constants.T_freeze
     nlat = grid.n_lat
     nlon = grid.n_lon
     sst_ref, _, _ = load_woa_sst(nlat=nlat, nlon=nlon)

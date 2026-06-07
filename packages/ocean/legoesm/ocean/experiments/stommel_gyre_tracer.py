@@ -52,10 +52,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from legoesm.constants import g
 from legoesm.core.field import Field
 
 
@@ -273,81 +271,6 @@ def create_domain_config(config: StommelGyreTracerConfig = None) -> Dict[str, An
         "reference": "Hecht et al. (2000) tracer transport benchmark",
         "tracer_type": "passive_salinity_blob",
     }
-
-
-def compute_tracer_conservation_metrics(state, grid_type: str, grid,
-                                      initial_values: Dict[str, float],
-                                      config: StommelGyreTracerConfig
-                                      ) -> Dict[str, float]:
-    """Compute tracer conservation metrics for current state.
-
-    Parameters
-    ----------
-    state : OceanState
-        Current ocean state
-    grid_type : str
-        Grid type
-    grid : Grid
-        Grid object
-    initial_values : Dict[str, float]
-        Initial tracer statistics for comparison
-    config : StommelGyreTracerConfig
-        Configuration parameters
-
-    Returns
-    -------
-    Dict[str, float]
-        Tracer conservation metrics
-    """
-    metrics = {}
-
-    # Get area weights and masks
-    if grid_type == "mpas":
-        area = np.asarray(grid.areaCell, dtype=np.float64)
-    else:
-        area = np.asarray(grid.area, dtype=np.float64)
-
-    if hasattr(state, 'land_mask'):
-        mask = np.asarray(state.land_mask.data, dtype=np.float64)
-    else:
-        mask = 1.0
-
-    ocean = mask > 0.5
-
-    # Current surface salinity
-    S_sfc = np.asarray(state.S.data[..., 0], dtype=np.float64)
-
-    # Integral conservation.
-    #
-    # iter-157: migrated from inline ``abs(S - S_init) / abs(S_init)`` with
-    # ``> 1e-30`` floor (the iter-78 pathology pattern that was systematically
-    # removed from the ocean test matrix in iter-90/91/93 but missed here).
-    # Now uses the centralized helper which applies a ``DEFAULT_MIN_BASELINE
-    # = 1.0`` floor and returns NaN if any sample is non-finite.
-    S_integral = float(np.sum(S_sfc * area * mask))
-    metrics["S_integral"] = S_integral
-
-    if "S_integral" in initial_values:
-        from legoesm.diagnostics import compute_relative_drift
-        metrics["S_integral_drift"] = compute_relative_drift(
-            [initial_values["S_integral"], S_integral])
-
-    # Extrema preservation
-    S_min = float(np.min(S_sfc[ocean]))
-    S_max = float(np.max(S_sfc[ocean]))
-    metrics["S_min"] = S_min
-    metrics["S_max"] = S_max
-
-    # Check for spurious extrema
-    S_min_init = initial_values.get("S_min", S_min)
-    S_max_init = initial_values.get("S_max", S_max)
-
-    overshoot = max(0, S_max - S_max_init)
-    undershoot = max(0, S_min_init - S_min)
-    metrics["overshoot"] = overshoot
-    metrics["undershoot"] = undershoot
-
-    return metrics
 
 
 def compute_transport_metrics(diagnostics: Dict[str, list],

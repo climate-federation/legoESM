@@ -117,7 +117,7 @@ def step_land(
     beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac
 
     # --- Stomatal conductance (if enabled) ---
-    beta, gpp_farq = compute_effective_beta(
+    beta, _ = compute_effective_beta(
         T_soil, forcing, beta_soil, config, carbon_state, dt,
         land_params=lp,
     )
@@ -179,7 +179,7 @@ def step_land(
         )
 
     # Radiation
-    sw_net, lw_net, lw_up = surface_radiation_fluxes(
+    sw_net, lw_net, _ = surface_radiation_fluxes(
         forcing.sw_down, forcing.lw_down, T_soil, alpha,
         emissivity,
     )

@@ -128,8 +128,6 @@ def compute_daily_metrics(ds: xr.Dataset, *, fields: list[str] | None = None) ->
     grid = build_target_grid(int(ds.attrs["gaussian_n_max"])).grid
     weights = np.asarray(grid.weights, dtype=np.float64)
     normalized_weights = weights / np.mean(weights)
-    prediction = np.asarray(ds["prediction"].values, dtype=np.float64)
-    target = np.asarray(ds["target"].values, dtype=np.float64)
     lead_days = np.asarray(ds["lead_day"].values, dtype=np.int32)
     rows: list[dict[str, float | str | int]] = []
     for field in fields:

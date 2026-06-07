@@ -427,7 +427,7 @@ def spectral_pe_tendencies(
     p_s = jnp.exp(lnps)
     if _hybrid:
         p_full = pressure_from_hybrid(sigma_coord, p_s)
-        dp = dp_from_hybrid(sigma_coord, p_s)
+        dp_from_hybrid(sigma_coord, p_s)
     else:
         p_full = p_s[..., None] * sigma_coord.sigma_full  # (n_lat, n_lon, nlev)
 
@@ -1284,10 +1284,6 @@ class SpectralPrimitiveEquationModel:
             )
             self._si_dt_lf = dt_eff
 
-    def reset_leapfrog(self):
-        """Reset leapfrog state (next step will use Euler startup)."""
-        self._state_prev = None
-
     def _do_step(self, state, dt, tendency_fn,
                  si_data=None, sponge_factor=None):
         """Core step: explicit RK3/RK54 or semi-implicit RK3, then sponge.
@@ -1549,10 +1545,6 @@ class SpectralPrimitiveEquationModel:
     ) -> SpectralHydrostaticState:
         """Backward-compatible wrapper for step() with physics."""
         return self.step(state, dt, physics_fn=physics_fn)
-
-    def _leapfrog_step_with_physics(self, state, dt, physics_fn):
-        """Backward-compatible wrapper for _leapfrog_step() with physics."""
-        return self._leapfrog_step(state, dt, physics_fn=physics_fn)
 
     @partial(jax.jit, static_argnums=(0, 3))
     def _euler_si_jit(self, state, dt, physics_fn=None):

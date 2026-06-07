@@ -13,7 +13,6 @@ from legoesm import constants
 from legoesm.core.operators import laplacian_compact
 from legoesm.core.operators_3d import laplacian_compact_3d
 from legoesm.core.fv_tp_2d import transport_step
-from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.halo import (
     pad_halo,
     pad_halo_4d,
@@ -21,9 +20,6 @@ from legoesm.grids.halo import (
     pad_halo_vector_4d,
     synchronize_cgrid_fluxes,
 )
-# legoesm.parallel.async_halo.overlapped_halo_compute is imported at function
-# scope in _overlapped_interp_center_to_corner below: core/ must not import
-# parallel/ at module top level (CLAUDE.md isolated-pytest rule).
 
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
@@ -90,7 +86,7 @@ def _ppm_reconstruct_1d(q, *, axis: int,
     if moved:
         q = jnp.moveaxis(q, orig_axis, -1)
 
-    N = q.shape[-1]
+    q.shape[-1]
 
     # Pad with 2 ghost cells on each side (edge extrapolation)
     q_pad = jnp.pad(q, [(0, 0)] * (q.ndim - 1) + [(2, 2)], mode='edge')
@@ -1268,7 +1264,6 @@ def fv3_vorticity(u_d, v_d, cdgrid):
     """
     dx = cdgrid.dx_edge_y   # (6, n, n+1)
     dy = cdgrid.dy_edge_x   # (6, n+1, n)
-    n = cdgrid.n
 
     u_dx = u_d * dx          # (6, n, n+1)
     v_dy = v_d * dy          # (6, n+1, n)
@@ -1612,27 +1607,6 @@ def fv3_sw_tendencies(
 # ==============================================================================
 # Overlapped (async) halo variants for MPI compute-communication overlap
 # ==============================================================================
-
-def _overlapped_interp_center_to_corner(field, cdgrid, masks=None):
-    """_interp_center_to_corner with interior/boundary overlap (MPI only, 4D)."""
-    if field.ndim == 3:
-        return _interp_center_to_corner(field, cdgrid)
-
-    from legoesm.parallel.async_halo import overlapped_halo_compute
-
-    def _stencil_body(f_pad):
-        """4-point average on padded (6, n+2, n+2) field -> (6, n+1, n+1)."""
-        return 0.25 * (f_pad[:, :-1, :-1] + f_pad[:, 1:, :-1]
-                        + f_pad[:, :-1, 1:] + f_pad[:, 1:, 1:])
-
-    # Apply per-level via vmap over trailing axis
-    # overlapped_halo_compute works on 2D (6, n, n) fields
-    field_t = jnp.moveaxis(field, -1, 0)  # (nlev, 6, n, n)
-    result_t = jax.vmap(
-        lambda f: overlapped_halo_compute(f, _stencil_body, halo_width=1, masks=masks)
-    )(field_t)
-    return jnp.moveaxis(result_t, 0, -1)  # (6, n+1, n+1, nlev)
-
 
 def _overlapped_arakawa_lamb_gradient(B, cdgrid, masks=None):
     """Arakawa-Lamb gradient. Falls through to canonical 4D path (mpi4jax has no non-blocking).

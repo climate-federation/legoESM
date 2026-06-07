@@ -28,13 +28,13 @@ Usage
 Single-node SPMD (1-6 face-sharded devices on a single process,
 ``shard_map`` backend, no MPI)::
 
-    python scripts/run_levante_gpu_scaling.py --mode weak --precision float32
-    python scripts/run_levante_gpu_scaling.py --grid cubed-sphere \\
+    python scripts/bench/run_levante_gpu_scaling.py --mode weak --precision float32
+    python scripts/bench/run_levante_gpu_scaling.py --grid cubed-sphere \\
         --mode strong --precision both
 
 Multi-node via MPI -- icosahedral only (validated path)::
 
-    mpirun -np 4 python scripts/run_levante_gpu_scaling.py \\
+    mpirun -np 4 python scripts/bench/run_levante_gpu_scaling.py \\
         --grid icosahedral --mode strong --n-gpus 4
 
 The script auto-detects available GPUs when --n-gpus is not set.

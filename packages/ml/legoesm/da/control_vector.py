@@ -39,14 +39,6 @@ class ControlVectorSpec(NamedTuple):
     total_size: int
 
 
-def _get_field_data(state, name: str) -> jax.Array:
-    """Extract raw array from a state field (handles Field and plain arrays)."""
-    val = getattr(state, name)
-    if isinstance(val, Field):
-        return val.data
-    return val
-
-
 def _field_names(state) -> tuple[str, ...]:
     """Get field names from a NamedTuple state."""
     return state._fields

@@ -741,7 +741,7 @@ class TestCMIP6VolcanicBug3:
 
     def test_auto_dispatch_legacy_aod_still_works(self, tmp_path):
         """Files that carry the legacy ``aod`` variable still route through
-        :func:`_load_monthly_zonal` unchanged."""
+        :func:`_load_monthly_zonal_anchored` unchanged."""
         import netCDF4, numpy as np
         nc_path = str(tmp_path / "legacy_aod.nc")
         lat = np.linspace(-90, 90, 7)

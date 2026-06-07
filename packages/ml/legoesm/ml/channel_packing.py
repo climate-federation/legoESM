@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
     from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
 
-from legoesm.core.field import Field
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_synthesis,
@@ -89,10 +88,6 @@ class PE3DChannelSpec(NamedTuple):
     @property
     def lnps_idx(self) -> int:
         return self.n_base_vars * self.nlev
-
-    @property
-    def phis_idx(self) -> int:
-        return self.n_base_vars * self.nlev + 1
 
 
 # ============================================================================

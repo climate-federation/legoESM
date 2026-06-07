@@ -894,8 +894,8 @@ class ModelDriver:
         """Configure external forcing: solar, ozone, aerosol, GHG."""
         from legoesm.forcing.external import (
             SolarConfig, OzoneConfig, AerosolConfig, GHGConfig,
-            get_solar_forcing_at_time, get_ozone_at_time, get_aerosol_at_time,
-            get_ghg_at_time, ghg_concentrations_to_vmr,
+            get_solar_forcing_at_time,
+            get_ghg_at_time,
         )
 
         cfg = self.config
@@ -1179,7 +1179,7 @@ class ModelDriver:
                 state = kwargs.get('state', self.state)
                 jax.block_until_ready(state.u.data)
                 if self._owned_face_ids is not None and self._layout is not None:
-                    from legoesm.parallel.layout import scatter, gather
+                    from legoesm.parallel.layout import gather
                     from legoesm.core.field import Field
                     from legoesm.core.state import HydrostaticState
                     # Only rank 0 needs the full state for diagnostics,
@@ -2916,7 +2916,6 @@ class ModelDriver:
             # Diagnostics at intervals
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
                 elapsed_day = (step + 1) * DT / 86400.0
-                day = START_DAY + elapsed_day
                 T_data = self.state.T.data
                 p_s_data = self.state.p_s.data
                 u_data = self.state.u.data
@@ -3569,7 +3568,7 @@ class ModelDriver:
         """
         from legoesm.forcing.external import get_solar_forcing_at_time
         from legoesm.driver.compiled_segments import (
-            SegmentCarry, pack_carry, unpack_carry,
+            pack_carry, unpack_carry,
             compute_segment_length, build_segment_fn, pack_forcing,
         )
 
@@ -3585,7 +3584,6 @@ class ModelDriver:
         sigma_full = ctx["sigma_full"]
         dsigma = ctx["dsigma"]
         shape_2d = ctx["shape_2d"]
-        shape_3d = ctx["shape_3d"]
         current_s_0 = ctx["current_s_0"]
         solar_weights = ctx["solar_weights"]
         step_unified = ctx["step_unified"]
@@ -3999,7 +3997,6 @@ class ModelDriver:
         sigma_full = ctx["sigma_full"]
         dsigma = ctx["dsigma"]
         shape_2d = ctx["shape_2d"]
-        shape_3d = ctx["shape_3d"]
         current_s_0 = ctx["current_s_0"]
         solar_weights = ctx["solar_weights"]
         step_unified = ctx["step_unified"]

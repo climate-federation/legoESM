@@ -431,11 +431,11 @@ the coupler, the federation packaging, and the tiered test/experiment harness.
 - [docs/amip.md](docs/amip.md) — AMIP experiment guide
 - [docs/scm.md](docs/scm.md) — Single-column model (SCM) guide
 - [docs/ml_physics_parameterization.md](docs/ml_physics_parameterization.md) — Joint ML physics workflow and canonical moist run
-- [docs/slab_s2s_documentation.md](docs/slab_s2s_documentation.md) — NeuralGCM/SFNO slab-coupled S2S workflow
+- [docs/md_files/slab_s2s_documentation.md](docs/md_files/slab_s2s_documentation.md) — NeuralGCM/SFNO slab-coupled S2S workflow
 - [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md) — Multi-GPU/MPI scaling guide
-- [docs/LATLON_CGRID_MIGRATION.md](docs/LATLON_CGRID_MIGRATION.md) — Lat-lon C-grid migration notes
-- [docs/cubed_sphere_edge_artifacts.md](docs/cubed_sphere_edge_artifacts.md) — FV3-faithful cubed-sphere notes
-- [docs/ocean_experiments_reference.md](docs/ocean_experiments_reference.md) — Ocean idealized-experiment reference
+- [docs/md_files/LATLON_CGRID_MIGRATION.md](docs/md_files/LATLON_CGRID_MIGRATION.md) — Lat-lon C-grid migration notes
+- [docs/md_files/cubed_sphere_edge_artifacts.md](docs/md_files/cubed_sphere_edge_artifacts.md) — FV3-faithful cubed-sphere notes
+- [docs/md_files/ocean_experiments_reference.md](docs/md_files/ocean_experiments_reference.md) — Ocean idealized-experiment reference
 - [docs/ocean_fidelity/legoesm_vs_veros_v2.md](docs/ocean_fidelity/legoesm_vs_veros_v2.md) — legoESM ↔ Veros peer-comparison report
 
 ## Acknowledgments

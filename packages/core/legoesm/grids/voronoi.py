@@ -308,7 +308,7 @@ def _shift_near(ref_xyz, other_xyz, L_rad):
     """
     if L_rad is None or abs(L_rad - 2.0 * np.pi) < 1e-10:
         return other_xyz
-    lat_r = np.arcsin(np.clip(ref_xyz[2], -1.0, 1.0))
+    np.arcsin(np.clip(ref_xyz[2], -1.0, 1.0))
     lon_r = np.arctan2(ref_xyz[1], ref_xyz[0])
     lat_o = np.arcsin(np.clip(other_xyz[2], -1.0, 1.0))
     lon_o = np.arctan2(other_xyz[1], other_xyz[0])

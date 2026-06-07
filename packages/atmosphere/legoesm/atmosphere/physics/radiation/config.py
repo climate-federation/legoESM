@@ -57,7 +57,7 @@ class GrayRadiationConfig(NamedTuple):
         Only the downward SW beam is absorbed; reflected upward
         SW escapes directly to TOA (Frierson/Isca convention).
     S_0 : float
-        Total solar irradiance [W/m^2] (default 1360.0).
+        Total solar irradiance [W/m^2] (default constants.S_0 = 1361.0).
     sfc_albedo : float
         Surface albedo for SW (default 0.31).
     perpetual_equinox : bool
@@ -106,7 +106,7 @@ class RRTMGPConfig(NamedTuple):
     sfc_albedo : float
         Surface albedo for SW (default 0.06).
     S_0 : float
-        Total solar irradiance [W/m^2] (default 1360.86).
+        Total solar irradiance [W/m^2] (default constants.S_0 = 1361.0).
     aerosol_ssa : float
         Bulk aerosol single-scattering albedo used when aerosol optical depth
         is externally prescribed (default 0.93).

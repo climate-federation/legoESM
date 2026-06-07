@@ -321,7 +321,6 @@ def mass_flux_convection_from_closure(
 ) -> ConvectionOutput:
     """Compute mass-flux tendencies from a supplied closure state."""
     del p_half
-    dz = closure.dz
     rho = closure.rho
     z = closure.z
     T_moist = closure.T_moist

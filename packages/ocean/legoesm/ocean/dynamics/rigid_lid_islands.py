@@ -213,7 +213,7 @@ def build_rigid_lid_data(H_bathy, land_mask, u_mask, v_mask, config, grid,
     -------
     RigidLidStaticData with islands, basis functions and the coupling matrix.
     """
-    H_bathy_np = np.asarray(H_bathy)
+    np.asarray(H_bathy)
     land_np = np.asarray(land_mask)
     cell_land = land_np < 0.5
 

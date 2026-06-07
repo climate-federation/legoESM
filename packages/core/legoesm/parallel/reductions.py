@@ -170,6 +170,41 @@ def _validate_mpi_runtime_versions(
     warnings.warn(msg, RuntimeWarning, stacklevel=3)
 
 
+def mpi_stack_outside_tested_range() -> bool:
+    """``True`` if the installed jax/mpi4jax fall outside legoESM's tested MPI
+    range, so distributed *numerics* may be unreliable.
+
+    Halo exchange (point-to-point ``sendrecv``) stays bit-correct across the
+    range, but the global-allreduce path (mass fixer, ``global_sum_mpi``) can
+    drift ~1e-9 vs serial under an incompatible custom-call ABI — enough to
+    break the tight serial-vs-MPI equivalence pins.  Tests that assert that
+    equivalence use this to ``xfail`` on an incompatible upstream stack (e.g.
+    jax>=0.10.1, for which no mpi4jax release exists yet) while still REQUIRING
+    a pass once a tested stack is installed.  See
+    :func:`_validate_mpi_runtime_versions`.  Returns ``True`` if either package
+    is missing (nothing to run).
+
+    Reads the mpi4jax version from package METADATA rather than importing the
+    module: this runs at pytest-collection time (an ``xfail`` condition), and
+    importing mpi4jax would initialise the MPI stack as a side effect — which
+    can emit OpenMPI bind/runtime errors on a machine not launched under
+    ``mpirun`` (codex review P2).  ``jax`` is already imported by this module.
+    """
+    import importlib.metadata as _md
+    import importlib.util as _ilu
+    if _ilu.find_spec("mpi4jax") is None:
+        return True
+    try:
+        mpi4jax_version = _md.version("mpi4jax")
+    except _md.PackageNotFoundError:
+        return True
+    jt = _parse_version_triplet(jax.__version__)
+    mt = _parse_version_triplet(mpi4jax_version)
+    in_jax = _TESTED_JAX_MIN <= jt < _TESTED_JAX_MAX_EXCL
+    in_mpi4jax = _TESTED_MPI4JAX_MIN <= mt < _TESTED_MPI4JAX_MAX_EXCL
+    return not (in_jax and in_mpi4jax)
+
+
 def _require_mpi_stack():
     """Return (mpi4jax, MPI) or raise a clear ImportError."""
     missing = []

@@ -27,19 +27,13 @@ from legoesm.core.operators_fv import fv_flux_divergence
 from legoesm.core.operators_fv_latlon import fv_flux_divergence_latlon
 from legoesm.core.operators_voronoi import (
     divergence_cell,
-    thickness_flux,
 )
-from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh
 
 
 def _is_latlon_grid(grid) -> bool:
     return isinstance(grid, LatLonGrid)
-
-
-def _is_cubed_sphere_grid(grid) -> bool:
-    return isinstance(grid, CubedSphereGrid)
 
 
 def _is_voronoi_mesh(grid) -> bool:

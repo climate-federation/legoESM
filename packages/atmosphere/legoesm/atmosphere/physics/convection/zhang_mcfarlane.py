@@ -42,7 +42,6 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.thermodynamics import (
     parcel_profile_and_cape,
 )

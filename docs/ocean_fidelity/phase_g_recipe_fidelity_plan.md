@@ -390,7 +390,7 @@ acceptance metrics that prove it.
 
 - **Predecessor**: Phases A–F (``docs/ocean_fidelity/bulletproof_summary.md``). Phase G
   strengthens, does not replace, the bulk-metric gate.
-- **Adjacent**: ``docs/ocean_validation_improvement_plan.md`` predates the recipe
+- **Adjacent**: ``docs/md_files/ocean_validation_improvement_plan.md`` predates the recipe
   framing; it remains as historical context and is not modified here.
 - **Existing harness reused**: ``scripts/ocean_fidelity/compare_legoesm_vs_veros.py``,
   ``scripts/ocean_fidelity/compare_legoesm_cube_vs_latlon.py``, and

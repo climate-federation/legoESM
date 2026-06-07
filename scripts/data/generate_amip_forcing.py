@@ -477,7 +477,7 @@ def make_aerosol_clim(out_path: Path, *, nlat: int = 96) -> None:
     """Monthly zonal-mean AOD@550 nm climatology.
 
     Loader expects ``aod`` (time, lat); we write the simplified shape
-    that ``_load_monthly_zonal`` consumes after the multi-dim collapse.
+    that ``_load_monthly_zonal_anchored`` consumes after the multi-dim collapse.
     """
     lat = np.linspace(-89.0, 89.0, nlat)
     months = np.arange(12)
@@ -526,7 +526,7 @@ def make_volcanic(out_path: Path, start_year: int, end_year: int, *,
 
     Includes the El Chichón (1982) and Pinatubo (1991) signals as
     Gaussian-in-time stratospheric AOD bumps with a tropics-bias profile.
-    Saved with ``aod(time, lat)`` so the legacy ``_load_monthly_zonal``
+    Saved with ``aod(time, lat)`` so the legacy ``_load_monthly_zonal_anchored``
     path consumes it directly.
     """
     nyears = end_year - start_year + 1

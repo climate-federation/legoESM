@@ -36,12 +36,10 @@ SSP-RK3 tendency-sum consistency with the other physics sources).
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 import numpy as np
 
-from legoesm import constants
 from legoesm.atmosphere.large_scale_forcing import (
     subsidence_tendency_top2bottom,
 )

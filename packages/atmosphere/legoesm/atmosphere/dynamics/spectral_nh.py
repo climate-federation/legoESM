@@ -40,7 +40,6 @@ from legoesm.grids.gaussian import (
     GaussianGrid,
     create_gaussian_grid,
     sh_analysis,
-    sh_synthesis,
     sh_analysis_3d,
     sh_synthesis_3d,
     sh_analysis_oc2_3d,
@@ -833,7 +832,7 @@ class SpectralCompressibleEulerModel:
             # ``segment_sum`` + IRFFT.  3 SH syntheses → 1.  Loop 179
             # extends Loop 97.
             n_sh_a, nlev_a = s.theta_prime_hat.data.shape
-            nlev_w = s.w_hat.data.shape[-1]  # nlev + 1
+            s.w_hat.data.shape[-1]  # nlev + 1
             theta_rho_w_hat = jnp.concatenate(
                 [s.theta_prime_hat.data, s.rho_prime_hat.data, s.w_hat.data],
                 axis=-1,
@@ -858,8 +857,6 @@ class SpectralCompressibleEulerModel:
             # Convert back to spectral via the same concat trick — 3 SH
             # analyses → 1.  Slot order matches the synthesis so we can
             # slice the result back into (theta_hat, rho_hat, w_hat).
-            n_lat_a = self.grid.n_lat
-            n_lon_a = self.grid.n_lon
             theta_rho_w_new = jnp.concatenate(
                 [theta_p_new, rho_p_new, w_new], axis=-1,
             )  # (n_lat, n_lon, 2*nlev + (nlev+1))

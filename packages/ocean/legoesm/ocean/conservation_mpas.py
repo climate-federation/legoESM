@@ -47,27 +47,6 @@ def _ownership_weight(mask, owned_mask):
     return mask * owned_mask.astype(mask.dtype)
 
 
-def _ocean_area_sum_mpas(field_2d, mask, mesh, owned_mask=None):
-    """Area-weighted sum over ocean cells. MPI-aware (#177)."""
-    field_acc = cast(field_2d, _ACC_MODULE, "accumulate")
-    eff_mask = _ownership_weight(mask, owned_mask)
-    mask_acc = cast(eff_mask, _ACC_MODULE, "accumulate")
-    area_acc = cast(mesh.areaCell, _ACC_MODULE, "accumulate")
-    return global_sum_if_distributed(jnp.sum(field_acc * mask_acc * area_acc))
-
-
-def _ocean_volume_sum_mpas(field_3d, h_k, mask, mesh, owned_mask=None):
-    """Volume-weighted sum over ocean cells. MPI-aware (#177)."""
-    field_acc = cast(field_3d, _ACC_MODULE, "accumulate")
-    h_k_acc = cast(h_k, _ACC_MODULE, "accumulate")
-    eff_mask = _ownership_weight(mask, owned_mask)
-    mask_acc = cast(eff_mask, _ACC_MODULE, "accumulate")
-    area_acc = cast(mesh.areaCell, _ACC_MODULE, "accumulate")
-    return global_sum_if_distributed(jnp.sum(
-        field_acc * h_k_acc * mask_acc[:, jnp.newaxis] * area_acc[:, jnp.newaxis]
-    ))
-
-
 def _ocean_volume_sums_old_new(field_old, h_k_old, field_new, h_k_new,
                                 mask, mesh, owned_mask=None):
     """Stack the 3 (old / new / volume) volume-weighted scalar sums into

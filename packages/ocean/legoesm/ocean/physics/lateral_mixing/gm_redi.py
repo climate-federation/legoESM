@@ -136,7 +136,7 @@ def _tracer_tendency_gm_redi(
         Tapered isopycnal slopes at interfaces.
     """
     eps = _EPS
-    nlev = q.shape[-1]
+    q.shape[-1]
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
 
     # Accept ``kappa_GM`` as either a scalar or an array.  When it is a

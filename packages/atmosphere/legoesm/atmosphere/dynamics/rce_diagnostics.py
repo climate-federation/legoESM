@@ -444,7 +444,7 @@ def crm_comparison_profiles_plane(
     """Assemble the full CRM comparison bundle from a plane state.
 
     One call → every profile + bulk scalar the GATE/LBA/RCE-vs-SAM comparison
-    compares (``docs/CRM_faithful_SAM.md`` protocol). Pure composition of the
+    compares (``CRM_faithful_SAM.md`` protocol). Pure composition of the
     leaf diagnostics in this module — no new numerics.
     """
     _validate_plane_state(state, height_coord)

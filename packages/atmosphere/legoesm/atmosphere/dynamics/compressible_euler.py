@@ -1090,8 +1090,6 @@ def acoustic_substeps_semi_implicit(
     """
     g = euler_config.g
     c_p = constants.c_pd
-    R_d = constants.R_d
-    c_v = constants.c_vd
     dz = height_coord.dz
     dz_half = height_coord.dz_half
     theta_0 = height_coord.theta_ref

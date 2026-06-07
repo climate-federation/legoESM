@@ -104,7 +104,6 @@ def _build_lock_exchange_setup_class():
         @veros_routine
         def set_initial_conditions(self, state):
             vs = state.variables
-            settings = state.settings
 
             # x_mid is the basin centre in metres; vs.xt includes 2-cell
             # halos on each side but stores monotone coordinates, so this

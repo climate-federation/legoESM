@@ -14,7 +14,6 @@ from legoesm.ml.s2s.paths import NEURALGCM_SLAB_RESULTS_ROOT
 from legoesm.ml.s2s.neuralgcm_slab.campaign import (
     campaign_dir_for_year,
     case_dir_for_start,
-    checkpoint_tag,
     filter_start_times_to_year,
     generate_semimonthly_start_times,
     surface_forcing_filename,

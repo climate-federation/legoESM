@@ -36,7 +36,6 @@ def plume_convection(
     OceanConvectionOutput
     """
     nlev = T.shape[-1]
-    shape_3d = T.shape
     # Carry/output dtype: promote across the state arrays *and* the config
     # params that enter the scan carry + tendencies.  This (a) keeps the
     # lax.scan carry dtype stable so it never promotes mid-scan, and (b) under

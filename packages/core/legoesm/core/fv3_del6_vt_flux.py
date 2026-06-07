@@ -16,7 +16,6 @@ Wiring into `fv3_sw_tendencies` comes iter-754+.
 from __future__ import annotations
 
 import jax.numpy as jnp
-import jax
 
 from legoesm.grids.halo import pad_halo
 

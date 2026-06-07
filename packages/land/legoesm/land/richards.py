@@ -94,7 +94,7 @@ def solve_richards(
     -------
     RichardsOutput
     """
-    ncol, nlayers = psi.shape
+    ncol = psi.shape[0]
     dz = grid.dz                  # (nlayers,)
     dz_if = grid.dz_interface     # (nlayers-1,)
 
@@ -125,7 +125,6 @@ def solve_richards(
 
     # --- Picard iteration ---
     psi_m = psi  # iterate
-    n_iter_count = jnp.zeros(ncol)  # per-column iteration counter
 
     def picard_body(m, carry):
         psi_m, theta_m = carry

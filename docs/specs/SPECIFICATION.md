@@ -212,8 +212,8 @@
 8. [Software Engineering](#8-software-engineering)
 9. [API Design](#9-api-design)
 10. [Testing & Validation](#10-testing--validation)
-11. [Milestone Roadmap](#11-milestone-roadmap)
-12. [Repository Structure](#12-repository-structure)
+11. [Milestone Roadmap](#11-milestone-roadmap-detailed)
+12. [Repository Structure](#12-repository-structure-actual)
 
 ---
 

@@ -25,7 +25,6 @@ References
 from __future__ import annotations
 
 from pathlib import Path
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp

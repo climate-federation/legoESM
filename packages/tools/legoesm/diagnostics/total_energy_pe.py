@@ -78,12 +78,7 @@ def compute_total_energy_pe(state, grid, coord) -> tuple[jax.Array, float]:
     # phi_half[nlev] = phis (surface)
     # phi_half[k] = phi_half[k+1] + R_d · T[k] · (peln[k+1] - peln[k])
     # No moisture in adiabatic legoESM → use T directly.
-    def _phi_step(phi_above, k_top_to_bottom):
-        k = nlev - 1 - k_top_to_bottom  # k_top_to_bottom=0 → k=nlev-1
-        # ...this isn't quite right for scan; better use direct loop
-        return phi_above, None  # placeholder
-
-    # Simpler: compute phi_half via cumulative sum from surface up.
+    # Compute phi_half via cumulative sum from surface up.
     # dphi[k] = R · T[k] · (peln[k+1] - peln[k])
     dphi = constants.R_d * T * (peln[..., 1:] - peln[..., :-1])
     # phi_half[nlev] = phis ; phi_half[k] = phis + sum_{j=k}^{nlev-1} dphi[j]

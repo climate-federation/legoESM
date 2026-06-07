@@ -287,7 +287,11 @@ def _receiver_merge(sm_o, mom, fp_o, fp_mom, vol_cell, vol_flux, from_left):
     fp_sx = fp_mom[..., IX]
     fp_sxx = fp_mom[..., IXX]
 
-    d1 = sign * (alf ** 2 * sx_cell - alf1 ** 2 * fp_sx)
+    # NB: the exact second-moment merge (sxx_new below) needs no separate
+    # first-moment-displacement term — the two pieces' first moments enter
+    # only through the 5*alf*alf1*(sx_cell - fp_sx) coupling and the d0 terms.
+    # Verified by reconstructing the {2xi, 6xi^2-1/2} basis from _extract_flux
+    # (see test_som_quadratic_advection_is_exact).
 
     sm_o_new = sm_o + fp_o
 
@@ -514,7 +518,6 @@ def _som_y_sweep(sm_o, moments, vol_flux_y, vol):
     # replaces alloc-zeros + concatenate-of-three.
     fp_o_all = jnp.pad(fp_o_int, ((1, 1), (0, 0), (0, 0)))
     fp_mom_all = jnp.pad(fp_mom_int, ((1, 1), (0, 0), (0, 0), (0, 0)))
-    alpha_all = jnp.pad(alpha, ((1, 1), (0, 0), (0, 0)))
 
     # --- Step 2: Per-cell incoming/outgoing ---
     # For cell j: left face = index j, right face = index j+1
