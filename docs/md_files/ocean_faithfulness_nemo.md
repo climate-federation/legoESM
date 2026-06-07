@@ -658,6 +658,21 @@ OK. **Job 8423667**: pytest + ico5 (~230 km) rest+partial (the cube-killer stabi
 driver smokes (10 days). Commit the full builder after this validates via main(); then codex review +
 ico6 (~ORCA1) run + score vs NEMO.
 
+### STAGE B PASSED — MPAS stable; full builder COMMITTED (4647e877); ico6 run launched (8423669)
+**STAGE B (8423667): MPAS runs STABLE with CORE-II at ico5 (~230 km), 10 days, no blowup** —
+the cube-killer cold-start the cube could NOT survive:
+- rest+partial+CORE-II: max|u| 0→0.77 m/s smooth, finite.
+- WOA+partial+CORE-II: flood-fill 1068 cells, max|u| peaks 4.2 then DECAYS to 2.8, SST 17.6→17.0,
+  finite (the compute_woa_3d 1-D broadcast fix + diag/snapshot/grid_lat2d guards all work).
+- Perf 0.28 h/yr (ico6 ~1.1 h/yr). 12/13 applicator tests pass (the 1 fail was my test's wrong
+  tau_x sign assumption → fixed to a convention-agnostic wind-flip test).
+**MPAS is the viable 4th grid** (Voronoi pole-free + the full dissipation stack the cube lacked).
+Committed **4647e877** (build_mpas_ocean + forcing branch + guards + woa fix + test). Codex review of
+the multi-file feature running. **ico6 (~115 km ≈ ORCA1) 90-day WOA+partial+CORE-II run launched
+(8423669)** → day0090 snapshot → score vs NEMO March (compare_omip_nemo.py --nemo-month 3, the proven
+seasonally-matched protocol). If the score is competitive (SST RMSE ~1, like tripole/latlon) → MPAS is
+the 3rd genuinely-faithful grid.
+
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
 partial-cell support** — `ocean_pe_fc.py`/`ocean_pe_cdgrid.py` hardcoded `z_coord.dz_ref`
