@@ -93,6 +93,17 @@ class SegmentCarry(NamedTuple):
         Slab-land skin temperature [K].  ``None`` for ocean-only runs
         (the land tile is then inert).  Prognostic — advanced once per
         radiation sub-cycle by the slab surface energy balance.
+    q_i, q_s, q_g, N_c, N_r, N_i : jax.Array or None
+        Optional double-moment hydrometeors threaded so (a) the coupled /
+        SFNO-training radiation gets droplet-number-aware effective radii and
+        (b) a double-moment microphysics (Morrison / Thompson / P3 …) evolves
+        its FULL state without silent truncation. Cloud ice / snow / graupel
+        mixing ratio [kg/kg]; cloud-droplet N_c + rain N_r per-VOLUME [#/m³];
+        ice N_i per-MASS [#/kg]. Radiation r_eff uses only q_i/N_c/N_i; the
+        remaining fields complete the microphysics prognostic state. ``None``
+        for warm-rain runs (kessler / diagnostic clouds) — then byte-identical
+        to the legacy carry. Evolved each step from the matching
+        ``PhysicsOutput.dq_*_dt`` / ``dN_*_dt`` like q_c/q_r.
     """
     u: jax.Array
     v: jax.Array
@@ -117,6 +128,12 @@ class SegmentCarry(NamedTuple):
     shflx_accum: jax.Array
     lhflx_accum: jax.Array
     T_land: jax.Array = None
+    q_i: jax.Array = None
+    q_s: jax.Array = None
+    q_g: jax.Array = None
+    N_c: jax.Array = None
+    N_r: jax.Array = None
+    N_i: jax.Array = None
 
 
 def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
@@ -126,7 +143,8 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                target_moisture=None, target_mass=None,
                max_cfl=None, precip_accum=None,
                shflx_accum=None, lhflx_accum=None,
-               T_land=None):
+               T_land=None, q_i=None, q_s=None, q_g=None,
+               N_c=None, N_r=None, N_i=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
     Prognostic fields are cast to at least the precision policy's storage
@@ -188,6 +206,14 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         shflx_accum=_promote(shflx_accum, storage),
         lhflx_accum=_promote(lhflx_accum, storage),
         T_land=_promote(T_land, storage),
+        # Double-moment tracers: kept None for warm-rain runs (identical legacy
+        # carry); promoted to storage dtype only when the caller supplies them.
+        q_i=None if q_i is None else _promote(q_i, storage),
+        q_s=None if q_s is None else _promote(q_s, storage),
+        q_g=None if q_g is None else _promote(q_g, storage),
+        N_c=None if N_c is None else _promote(N_c, storage),
+        N_r=None if N_r is None else _promote(N_r, storage),
+        N_i=None if N_i is None else _promote(N_i, storage),
     )
 
 
@@ -622,6 +648,15 @@ def build_segment_fn(
                 _ofi = owned_face_ids
                 _T_land_in = (carry.T_land[_ofi]
                               if carry.T_land is not None else None)
+                # Double-moment tracers (None for warm-rain) → number-aware
+                # radiation r_eff. Passed by KEYWORD so the neural/SFNO
+                # step_unified wrappers (which parse the positional tail by
+                # length) route them through **kwargs unchanged.
+                _dm_in = {}
+                for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                    _fld = getattr(carry, _nm)
+                    if _fld is not None:
+                        _dm_in[_nm] = _fld[_ofi]
                 _ret = _step_unified(
                     need_rad,
                     T_new[_ofi], p_s_new[_ofi],
@@ -641,7 +676,7 @@ def build_segment_fn(
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
-                    T_land=_T_land_in,
+                    T_land=_T_land_in, **_dm_in,
                 )
                 phys_out, held_new_local = _ret[0], _ret[1]
                 # 3rd value = slab-land skin T (#325); legacy 2-tuple
@@ -664,6 +699,18 @@ def build_segment_fn(
                 q_r_upd = carry.q_r.at[_ofi].set(
                     jnp.maximum(carry.q_r[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
                 )
+                # Double-moment tracers (None unless populated): evolve at owned
+                # indices from the matching microphysics tendencies, clipped
+                # non-negative like q_c/q_r.
+                def _dm_upd_owned(fld, tend):
+                    return (None if fld is None else fld.at[_ofi].set(
+                        jnp.maximum(fld[_ofi] + _dt * tend, 0.0)))
+                q_i_upd = _dm_upd_owned(carry.q_i, phys_out.dq_i_dt)
+                q_s_upd = _dm_upd_owned(carry.q_s, phys_out.dq_s_dt)
+                q_g_upd = _dm_upd_owned(carry.q_g, phys_out.dq_g_dt)
+                N_c_upd = _dm_upd_owned(carry.N_c, phys_out.dN_c_dt)
+                N_r_upd = _dm_upd_owned(carry.N_r, phys_out.dN_r_dt)
+                N_i_upd = _dm_upd_owned(carry.N_i, phys_out.dN_i_dt)
                 conv_prog_upd = phys_out.conv_prog
 
                 # Held radiation: update at owned indices
@@ -692,6 +739,11 @@ def build_segment_fn(
                     if carry.T_land is not None else None
                 )
             else:
+                _dm_in = {}
+                for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                    _fld = getattr(carry, _nm)
+                    if _fld is not None:
+                        _dm_in[_nm] = _fld
                 _ret = _step_unified(
                     need_rad,
                     T_new, p_s_new,
@@ -708,7 +760,7 @@ def build_segment_fn(
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
-                    T_land=carry.T_land,
+                    T_land=carry.T_land, **_dm_in,
                 )
                 phys_out, held_new = _ret[0], _ret[1]
                 # ``step_unified`` returns a 3rd value (the slab-land skin
@@ -725,6 +777,15 @@ def build_segment_fn(
                 q_v_upd = jnp.maximum(carry.q_v + _dt * phys_out.dq_v_dt, 0.0)
                 q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
                 q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)
+                def _dm_upd(fld, tend):
+                    return (None if fld is None
+                            else jnp.maximum(fld + _dt * tend, 0.0))
+                q_i_upd = _dm_upd(carry.q_i, phys_out.dq_i_dt)
+                q_s_upd = _dm_upd(carry.q_s, phys_out.dq_s_dt)
+                q_g_upd = _dm_upd(carry.q_g, phys_out.dq_g_dt)
+                N_c_upd = _dm_upd(carry.N_c, phys_out.dN_c_dt)
+                N_r_upd = _dm_upd(carry.N_r, phys_out.dN_r_dt)
+                N_i_upd = _dm_upd(carry.N_i, phys_out.dN_i_dt)
                 conv_prog_upd = phys_out.conv_prog
 
                 # --- Accumulate precipitation ---
@@ -795,6 +856,18 @@ def build_segment_fn(
                 lhflx_accum=_match_dtype(lhflx_accum, carry.lhflx_accum),
                 T_land=(None if carry.T_land is None
                         else _match_dtype(T_land_new, carry.T_land)),
+                q_i=(None if carry.q_i is None
+                     else _match_dtype(q_i_upd, carry.q_i)),
+                q_s=(None if carry.q_s is None
+                     else _match_dtype(q_s_upd, carry.q_s)),
+                q_g=(None if carry.q_g is None
+                     else _match_dtype(q_g_upd, carry.q_g)),
+                N_c=(None if carry.N_c is None
+                     else _match_dtype(N_c_upd, carry.N_c)),
+                N_r=(None if carry.N_r is None
+                     else _match_dtype(N_r_upd, carry.N_r)),
+                N_i=(None if carry.N_i is None
+                     else _match_dtype(N_i_upd, carry.N_i)),
             )
             return new_carry, None
         return _single_step

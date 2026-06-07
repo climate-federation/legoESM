@@ -339,7 +339,10 @@ def self_collection_breakup(N_r, q_r, rho, k_sc, breakup_sharpness, D_eq):
     Parameters
     ----------
     N_r : array
-        Rain drop number concentration [1/kg].
+        Rain drop number concentration [1/m^3] (per-VOLUME; the formulas
+        ``q_r·rho/N_r`` and ``dN_r_sc ∝ N_r·q_r·rho`` use the per-volume
+        convention, matching the tracer registry units and the radiation
+        r_eff coupling). Returned number tendencies are likewise [1/(m^3 s)].
     q_r : array
         Rain mixing ratio [kg/kg].
     rho : array

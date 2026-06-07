@@ -207,6 +207,64 @@ class ModelDriver:
     def q_g(self, value):
         self.tracers["q_g"] = value
 
+    # --- Double-moment hydrometeor plumbing (shared by the compiled-segment
+    #     and per-step physics paths) -------------------------------------
+    _DOUBLE_MOMENT_TRACERS = ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")
+
+    def _double_moment_step_inputs(self) -> dict:
+        """Current ice/snow/graupel + droplet/rain/ice-number columns to feed
+        ``step_unified`` so coupled radiation gets number-aware r_eff and a
+        double-moment microphysics evolves its full state. Empty (legacy
+        warm-rain) unless the moisture registry carries these tracers."""
+        if not isinstance(self.tracers, dict):
+            return {}
+        return {k: self.tracers[k] for k in self._DOUBLE_MOMENT_TRACERS
+                if self.tracers.get(k) is not None}
+
+    def _apply_double_moment_tendencies(self, phys_out, dt) -> None:
+        """Integrate the ice/snow/graupel + number tracers one step from the
+        matching ``PhysicsOutput`` tendencies, clipped non-negative. No-op
+        unless the full-moisture registry is active (q_i present)."""
+        if not (isinstance(self.tracers, dict)
+                and self.tracer_registry.has("q_i")):
+            return
+        _upd = {
+            "q_i": phys_out.dq_i_dt, "q_s": phys_out.dq_s_dt,
+            "q_g": phys_out.dq_g_dt, "N_c": phys_out.dN_c_dt,
+            "N_r": phys_out.dN_r_dt, "N_i": phys_out.dN_i_dt,
+        }
+        for k, tend in _upd.items():
+            if self.tracers.get(k) is not None:
+                self.tracers[k] = jnp.maximum(self.tracers[k] + dt * tend, 0.0)
+
+    def _checkpoint_carry_aux(self) -> dict | None:
+        """``self._carry_aux`` augmented with the evolved double-moment tracers
+        (namespaced ``dmtr_*``) so a checkpoint persists them — otherwise a
+        restart would silently reinitialize q_i/q_s/q_g/N_c/N_r/N_i to the
+        setup zeros (the held-radiation carry_aux is round-tripped by the npz /
+        per-rank backends, so this rides the same mechanism). No-op for
+        warm-rain runs. Returns a NEW dict (does not mutate ``self._carry_aux``).
+        Only valid for FULL-LOCAL state (serial / replicated / per-rank
+        distributed); band-gathered lat-lon-MPI checkpoints must guard instead,
+        since these tracers are rank-local bands (mirrors the T_land limitation).
+        """
+        base = dict(self._carry_aux) if self._carry_aux else {}
+        dm = self._double_moment_step_inputs()
+        for k, v in dm.items():
+            base[f"dmtr_{k}"] = v
+        return base if base else None
+
+    def _restore_dm_tracers_from_carry_aux(self) -> None:
+        """Pop any ``dmtr_*`` entries restored into ``self._carry_aux`` back into
+        the tracer dict, so a double-moment restart resumes the evolved ice /
+        snow / graupel / number state rather than setup zeros."""
+        _tracers = getattr(self, "tracers", None)
+        if not (isinstance(self._carry_aux, dict)
+                and isinstance(_tracers, dict)):
+            return
+        for key in [k for k in self._carry_aux if k.startswith("dmtr_")]:
+            _tracers[key[len("dmtr_"):]] = self._carry_aux.pop(key)
+
     def setup(self) -> None:
         """Initialize grid, dycore, physics, forcing, and state."""
         # Strict validation — abort early on invalid parameters
@@ -2048,7 +2106,9 @@ class ModelDriver:
                     q_v=self.q_v,
                     q_c=self.q_c,
                     q_r=self.q_r,
-                    diag_accumulators=self._carry_aux,
+                    # Per-rank distributed: carry_aux is rank-local, so the
+                    # evolved double-moment tracers ride it safely (no gather).
+                    diag_accumulators=self._checkpoint_carry_aux(),
                 )
                 # Lightweight barrier: only needed so rank 0's metadata.json
                 # is flushed before any rank tries to load the checkpoint.
@@ -2082,6 +2142,20 @@ class ModelDriver:
                         "surface state (#325). Use the per-rank distributed "
                         "checkpoint format or run single-process for "
                         "slab-land lat-lon MPI runs."
+                    )
+                # Same banded-carry_aux limitation for double-moment tracers:
+                # q_i/q_s/q_g/N_c/N_r/N_i ride carry_aux as rank-local bands and
+                # are not gathered into the global checkpoint, so a restart would
+                # corrupt them. Fail fast rather than write an invalid restart.
+                if (isinstance(self.tracers, dict)
+                        and self.tracer_registry.has("q_i")):
+                    raise ValueError(
+                        "Lat-lon MPI checkpointing does not yet gather the "
+                        "banded double-moment tracers (q_i/q_s/q_g/N_c/N_r/N_i) "
+                        "into the global checkpoint — a restart would corrupt "
+                        "them. Use the per-rank distributed checkpoint format "
+                        "or run single-process for double-moment lat-lon MPI "
+                        "runs."
                     )
                 state_g, tracers_g = self._gather_state_for_global_checkpoint()
                 if self._mpi_rank == 0:
@@ -2121,7 +2195,9 @@ class ModelDriver:
                     config=self.config,
                     q_c=self.q_c,
                     q_r=self.q_r,
-                    carry_aux=self._carry_aux,
+                    # Replicated state: rank-0's full fields → DM tracers ride
+                    # carry_aux (same full arrays on every rank).
+                    carry_aux=self._checkpoint_carry_aux(),
                 )
                 logger.info(f"  Checkpoint: {ckpt_path.name} (rank 0)")
             from mpi4py import MPI
@@ -2151,6 +2227,21 @@ class ModelDriver:
                 "slab-land runs (or add carry_aux support to the zarr "
                 "backend)."
             )
+        # Same zarr carry_aux limitation for the evolved double-moment tracers:
+        # they ride carry_aux (dmtr_*), which zarr does not round-trip, so a
+        # zarr restart would silently reset q_i/q_s/q_g/N_c/N_r/N_i to zeros.
+        if (
+            backend == "zarr"
+            and isinstance(self.tracers, dict)
+            and self.tracer_registry.has("q_i")
+        ):
+            raise ValueError(
+                "checkpoint_format='zarr' cannot persist the prognostic "
+                "double-moment tracers (q_i/q_s/q_g/N_c/N_r/N_i) — they ride "
+                "carry_aux, which the zarr backend does not round-trip, so a "
+                "restart would silently reinitialize them. Use "
+                "checkpoint_format='npz' for double-moment runs."
+            )
 
         save_restart(
             path=ckpt_path,
@@ -2161,7 +2252,7 @@ class ModelDriver:
             config=self.config,
             q_c=self.q_c,
             q_r=self.q_r,
-            carry_aux=self._carry_aux if self._carry_aux else None,
+            carry_aux=self._checkpoint_carry_aux(),
             backend=backend,
         )
         logger.info(f"  Checkpoint: {ckpt_path.name}")
@@ -2250,6 +2341,9 @@ class ModelDriver:
                 # restart is trajectory-exact rather than silently
                 # reinitializing them (#325 restart-safety).
                 self._carry_aux = _diag_aux if _diag_aux else {}
+                # Restore evolved double-moment tracers persisted via carry_aux
+                # (per-rank distributed checkpoint is restart-exact for them).
+                self._restore_dm_tracers_from_carry_aux()
                 from legoesm.core.state import HydrostaticState
                 from legoesm.core.field import Field
                 import jax.numpy as jnp
@@ -2358,6 +2452,19 @@ class ModelDriver:
 
             self._scatter_global_state_to_bands(state_global, tracers_global)
             self._carry_aux = carry_aux if carry_aux else {}
+            # Double-moment tracers cannot be band-scattered here: carry_aux is
+            # broadcast whole to every rank, so any persisted dmtr_* would give
+            # every rank GLOBAL-shape DM state instead of its band. Fail fast
+            # (mirrors the save-side guard) rather than corrupt the restart.
+            if isinstance(self._carry_aux, dict) and any(
+                k.startswith("dmtr_") for k in self._carry_aux
+            ):
+                raise ValueError(
+                    "Lat-lon MPI restart cannot band-scatter double-moment "
+                    "tracers (q_i/q_s/q_g/N_c/N_r/N_i) from a global checkpoint "
+                    "— use the per-rank distributed checkpoint format or run "
+                    "single-process for double-moment lat-lon MPI runs."
+                )
             return step, day
 
         # Single-process path
@@ -2372,6 +2479,9 @@ class ModelDriver:
         if q_r is not None:
             self.q_r = q_r
         self._carry_aux = carry_aux if carry_aux else {}
+        # Restore evolved double-moment tracers persisted via carry_aux
+        # (serial npz is restart-exact for them).
+        self._restore_dm_tracers_from_carry_aux()
         if metadata:
             logger.info(f"  Loaded restart: step={step}, day={day}, "
                        f"digest={metadata.state_digest[:16]}...")
@@ -3628,6 +3738,15 @@ class ModelDriver:
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 T_land=T_land,
+                # Double-moment hydrometeors (None unless the moisture registry +
+                # microphysics carry them) so coupled/training radiation gets
+                # droplet-number-aware r_eff AND a double-moment scheme evolves
+                # its full state. None ⇒ legacy warm-rain carry.
+                **(
+                    {k: self.tracers.get(k)
+                     for k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}
+                    if isinstance(self.tracers, dict) else {}
+                ),
             )
 
             # Shard carry across devices for SPMD execution
@@ -3661,10 +3780,20 @@ class ModelDriver:
                 (self.state, self.q_v, self.q_c, self.q_r, conv_prog,
                  held_tuple, _, seg_precip,
                  seg_shflx, seg_lhflx) = unpack_carry(mean_carry, self._state_template)
+                _dm_carry = mean_carry
             else:
                 (self.state, self.q_v, self.q_c, self.q_r, conv_prog,
                  held_tuple, _, seg_precip,
                  seg_shflx, seg_lhflx) = unpack_carry(carry, self.state)
+                _dm_carry = carry
+            # Write evolved double-moment hydrometeors back into the registry
+            # dict (unpack_carry only returns q_v/q_c/q_r; q_i/q_s/q_g/N_c/N_r/N_i
+            # ride the carry directly). No-op for warm-rain (carry fields None).
+            if isinstance(self.tracers, dict):
+                for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                    _val = getattr(_dm_carry, _nm)
+                    if _val is not None:
+                        self.tracers[_nm] = _val
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
              held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = held_tuple
 
@@ -3921,6 +4050,9 @@ class ModelDriver:
 
         self.state = self.model.step_with_physics(self.state, DT)
 
+        # Double-moment hydrometeor inputs (None unless the registry carries
+        # them) so coupled radiation/microphysics see ice + droplet number.
+        _dm_step_in = self._double_moment_step_inputs()
         phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
             step_unified(
@@ -3935,7 +4067,7 @@ class ModelDriver:
                 held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
-                T_land=T_land,
+                T_land=T_land, **_dm_step_in,
             )
         conv_prog = phys_out.conv_prog
 
@@ -3947,6 +4079,7 @@ class ModelDriver:
         self.q_v = jnp.maximum(self.q_v + DT * phys_out.dq_v_dt, 0.0)
         self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
         self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
+        self._apply_double_moment_tendencies(phys_out, DT)
 
         if MICROPHYSICS == "none":
             p_full = self.state.p_s.data[..., None] * sigma_full
@@ -4013,6 +4146,7 @@ class ModelDriver:
                 step_unified if need_rad_py or step_unified_no_rad is None
                 else step_unified_no_rad
             )
+            _dm_step_in = self._double_moment_step_inputs()
             phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
                 _step_fn(
@@ -4027,7 +4161,7 @@ class ModelDriver:
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
-                    T_land=T_land,
+                    T_land=T_land, **_dm_step_in,
                 )
             conv_prog = phys_out.conv_prog
             if T_land is not None:
@@ -4046,19 +4180,7 @@ class ModelDriver:
             self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
 
             # Apply ice/number tracer tendencies when full registry is active
-            if self.tracer_registry.has("q_i"):
-                self.q_i = jnp.maximum(self.q_i + DT * phys_out.dq_i_dt, 0.0)
-                self.q_s = jnp.maximum(self.q_s + DT * phys_out.dq_s_dt, 0.0)
-                self.q_g = jnp.maximum(self.q_g + DT * phys_out.dq_g_dt, 0.0)
-                self.tracers["N_c"] = jnp.maximum(
-                    self.tracers["N_c"] + DT * phys_out.dN_c_dt, 0.0
-                )
-                self.tracers["N_r"] = jnp.maximum(
-                    self.tracers["N_r"] + DT * phys_out.dN_r_dt, 0.0
-                )
-                self.tracers["N_i"] = jnp.maximum(
-                    self.tracers["N_i"] + DT * phys_out.dN_i_dt, 0.0
-                )
+            self._apply_double_moment_tendencies(phys_out, DT)
 
             # Saturation adjustment
             if MICROPHYSICS == "none":
