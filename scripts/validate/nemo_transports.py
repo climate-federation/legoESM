@@ -36,9 +36,63 @@ def _sq3(a):
     return a
 
 
+def amoc_core(voe3, e1v, gphiv, glamv, depthv, *, target_lat=26.5,
+              lon_min=-75.0, lon_max=15.0):
+    """Atlantic MOC strength [Sv] at ``target_lat`` from PURE arrays (no I/O).
+
+    Parameters
+    ----------
+    voe3 : (z, y, x)  time-mean meridional volume-flux density vo*e3v [m/s·m].
+    e1v : (y, x)      v-face zonal width [m].
+    gphiv, glamv : (y, x)  v-face latitude / longitude [deg].
+    depthv : (z,)     level depths [m], positive down.
+
+    Returns a dict with ``amoc_Sv`` (sign-agnostic surface-referenced peak
+    overturning in the upper-mid column), ``row_lat_deg``, ``j``,
+    ``depth_of_max_m``.  Split out from the NetCDF reader so it is unit-testable
+    on a synthetic analytic overturning.
+    """
+    voe3 = np.nan_to_num(np.asarray(voe3, dtype=np.float64), nan=0.0)
+    e1v = np.asarray(e1v, dtype=np.float64)
+    gphiv = np.asarray(gphiv, dtype=np.float64)
+    glamv = np.asarray(glamv, dtype=np.float64)
+    depthv = np.asarray(depthv, dtype=np.float64).ravel()
+
+    lon_w = ((glamv + 180.0) % 360.0) - 180.0
+    if lon_min <= lon_max:
+        atl = (lon_w >= lon_min) & (lon_w <= lon_max)
+    else:                                                  # wrap-around band
+        atl = (lon_w >= lon_min) | (lon_w <= lon_max)
+    atl = atl.astype(np.float64)                          # (y, x)
+
+    # Zonally-integrated thickness-weighted meridional volume flux per (z, y).
+    flux = voe3 * (e1v * atl)[None, :, :]                 # (z, y, x)
+    Vx = flux.sum(axis=2)                                 # (z, y)
+    psi = -np.cumsum(Vx, axis=0) / _SV                    # (z, y) [Sv], top->down
+
+    # Atlantic-mean latitude per y-row; pick the row nearest the target.
+    with np.errstate(invalid="ignore"):
+        lat_y = np.nansum(gphiv * atl, axis=1) / np.maximum(atl.sum(axis=1), 1)
+    j = int(np.argmin(np.abs(lat_y - target_lat)))
+    # SIGN-AGNOSTIC peak overturning: reference ψ to the surface (removes any net
+    # barotropic throughflow offset so ψ_surface = 0), then take the
+    # largest-magnitude excursion in the UPPER-MID column (depth < 3000 m, to
+    # exclude the deep AABW cell).  Reports physical AMOC strength regardless of
+    # ψ sign convention — NEMO's ψ here is positive-peaked whereas the legoESM
+    # moc_streamfunction is negative-peaked (same formula, opposite vo/cumsum
+    # orientation), so a fixed -min/+max would disagree.
+    prof = psi[:, j] - psi[0, j]
+    upper = depthv < 3000.0
+    seg = prof[upper] if np.any(upper) else prof
+    kmax = int(np.nanargmax(np.abs(seg)))
+    return {"amoc_Sv": float(abs(seg[kmax])), "row_lat_deg": float(lat_y[j]),
+            "j": j,
+            "depth_of_max_m": float((depthv[upper] if np.any(upper) else depthv)[kmax])}
+
+
 def nemo_amoc_at_latitude(grid_v_path, domain_cfg_path, *, target_lat=26.5,
                           lon_min=-75.0, lon_max=15.0):
-    """Atlantic MOC max [Sv] at ``target_lat`` from NEMO grid_V + domain_cfg."""
+    """Atlantic MOC strength [Sv] at ``target_lat`` from NEMO grid_V + domain_cfg."""
     import xarray as xr
     dV = xr.open_dataset(grid_v_path, decode_times=False)
     dc = xr.open_dataset(domain_cfg_path, decode_times=False)
@@ -62,38 +116,8 @@ def nemo_amoc_at_latitude(grid_v_path, domain_cfg_path, *, target_lat=26.5,
     gphiv = _sq2(dc["gphiv"].values)                      # (y, x)
     glamv = _sq2(dc["glamv"].values)                      # (y, x)
     depthv = np.asarray(dV["depthv"].values).ravel()      # (z,) positive down
-
-    voe3 = np.nan_to_num(voe3, nan=0.0)
-
-    lon_w = ((glamv + 180.0) % 360.0) - 180.0
-    if lon_min <= lon_max:
-        atl = (lon_w >= lon_min) & (lon_w <= lon_max)
-    else:                                                  # wrap-around band
-        atl = (lon_w >= lon_min) | (lon_w <= lon_max)
-    atl = atl.astype(np.float64)                          # (y, x)
-
-    # Zonally-integrated thickness-weighted meridional volume flux per (z, y).
-    flux = voe3 * (e1v * atl)[None, :, :]                 # (z, y, x)
-    Vx = flux.sum(axis=2)                                 # (z, y)
-    psi = -np.cumsum(Vx, axis=0) / _SV                    # (z, y) [Sv], top->down
-
-    # Atlantic-mean latitude per y-row; pick the row nearest the target.
-    with np.errstate(invalid="ignore"):
-        lat_y = np.nansum(gphiv * atl, axis=1) / np.maximum(atl.sum(axis=1), 1)
-    j = int(np.argmin(np.abs(lat_y - target_lat)))
-    # SIGN-AGNOSTIC peak overturning: reference ψ to the surface (removes any
-    # net barotropic throughflow offset so ψ_surface = 0), then take the
-    # largest-magnitude excursion in the UPPER-MID column (depth < 3000 m, to
-    # exclude the deep AABW cell).  This reports the physical AMOC strength
-    # regardless of the ψ sign convention — NEMO's ψ here is positive-peaked
-    # whereas the legoESM moc_streamfunction is negative-peaked (same formula,
-    # opposite vo/cumsum orientation), so a fixed -min/+max would disagree.
-    prof = psi[:, j] - psi[0, j]
-    upper = depthv < 3000.0
-    seg = prof[upper] if np.any(upper) else prof
-    amoc = float(abs(seg[int(np.nanargmax(np.abs(seg)))]))
-    return {"amoc_Sv": amoc, "row_lat_deg": float(lat_y[j]),
-            "j": j, "depth_of_max_m": float(depthv[upper][int(np.nanargmax(np.abs(seg)))])}
+    return amoc_core(voe3, e1v, gphiv, glamv, depthv,
+                     target_lat=target_lat, lon_min=lon_min, lon_max=lon_max)
 
 
 def main() -> int:
