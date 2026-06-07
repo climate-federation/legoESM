@@ -46,20 +46,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lego_detect_machine import resolve_machine  # noqa: E402
 
 
-def _config_signature(cfg) -> str:
-    """Deterministic signature of the RESOLVED ExperimentConfig.
-
-    Used to detect overrides that don't actually change the run. NamedTuple
-    ``repr`` is stable; if an override leaves the config unresolvable, the
-    exception text is folded in so before/after still differ (a no-op is only
-    flagged when the resolved config is byte-identical).
-    """
-    try:
-        return repr(cfg.to_experiment_config())
-    except Exception as exc:  # noqa: BLE001
-        return f"<unresolvable: {type(exc).__name__}: {exc}>"
-
-
 def _coerce(value: str) -> Any:
     """Coerce a CLI override string to bool/int/float/None/str (in that order)."""
     low = value.strip().lower()
@@ -161,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="machine profile name (default: auto-detect by hostname)")
     args = p.parse_args(argv)
 
-    from legoesm.config import Config
+    from legoesm import experiment_registry
 
     template_path = _template_path(args.template)
     overrides = _parse_overrides(args.override)
@@ -173,24 +159,29 @@ def main(argv: list[str] | None = None) -> int:
     else:
         machine = resolve_machine()
 
-    cfg = Config.from_yaml(str(template_path))
+    # Mode-aware adapter dispatch (atmosphere Config / ocean OceanExperimentConfig
+    # / future land+ice) via the registry — the meta-package's single extensible
+    # entry point. The adapter implements the uniform protocol used below.
+    mode, cfg = experiment_registry.load_adapter(str(template_path))
+    is_atm = experiment_registry.is_atmosphere_mode(mode)
 
     # Machine-derived default precision, only if the user did not override it.
-    if not any(k == "hardware.precision.dynamics" for k, _ in overrides):
+    # Atmosphere-only knob (ocean runs are x64 throughout, set on the runner).
+    if is_atm and not any(k == "hardware.precision.dynamics" for k, _ in overrides):
         if machine.get("precision"):
             cfg.set("hardware.precision.dynamics", machine["precision"])
 
     # Apply overrides one at a time, asserting each actually changes the
     # RESOLVED config (codex review HIGH): a typo or non-runtime dot-path
     # (e.g. -o grid.resoluton=96) is preserved verbatim in config.yaml but
-    # ignored by to_experiment_config, so it would silently no-op while being
-    # recorded as applied. Comparing the canonical config signature before/after
+    # ignored by the runtime mapping, so it would silently no-op while being
+    # recorded as applied. Comparing the resolved-config signature before/after
     # each set catches that.
     no_ops: list[str] = []
     for key, value in overrides:
-        before = _config_signature(cfg)
+        before = cfg.signature()
         cfg.set(key, value)
-        if _config_signature(cfg) == before:
+        if cfg.signature() == before:
             no_ops.append(f"{key}={value!r}")
     if no_ops:
         raise SystemExit(
@@ -201,20 +192,58 @@ def main(argv: list[str] | None = None) -> int:
 
     # Strict-validate BEFORE writing anything (fail fast, no half-built dir).
     try:
-        cfg.to_experiment_config().validate_strict()
+        cfg.validate_strict()
     except Exception as exc:  # noqa: BLE001
         raise SystemExit(f"ERROR: resolved config is invalid: {type(exc).__name__}: {exc}")
+
+    # Also confirm the bundle has a runnable launcher BEFORE writing anything:
+    # an ocean grid with no wired runner backend (cube/spectral) must fail here,
+    # not after a half-built dir with a run.sh that dies at runtime.
+    try:
+        cfg.run_command("config.yaml")
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"ERROR: no runnable launcher for this experiment: "
+                         f"{type(exc).__name__}: {exc}")
 
     out = Path(args.output_dir)
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"ERROR: --output-dir {out} exists and is not empty")
     out.mkdir(parents=True, exist_ok=True)
 
+    # Ocean bundles launch from the repo root (the runner is repo-relative), so a
+    # relative output.path would write under the repo root and collide across
+    # bundles. Resolve a relative output.path UNDER the bundle (preserving the
+    # template's subdir, e.g. output/omip_latlon/ -> <bundle>/output/omip_latlon)
+    # and leave an absolute path untouched. ``out_subdir`` is where the run
+    # manifest lands, used for the reproduce hint below.
+    out_subdir = out / "output"
+    if not is_atm:
+        op = cfg.get("output.path")
+        if isinstance(op, str) and Path(op).is_absolute():
+            out_subdir = Path(op)
+        else:
+            rel = op if (isinstance(op, str) and op) else "output"
+            out_subdir = (out / rel).resolve()
+            cfg.set("output.path", str(out_subdir))
+
     cfg.to_yaml(str(out / "config.yaml"))
-    (out / "run.sh").write_text(render_run_sh(machine, run_cmd="legoesm run config.yaml"))
+    # Ocean runs need 64-bit (omip is x64 throughout); atmosphere keeps its
+    # template-/machine-driven precision (x32 default).  The atmosphere CLI is
+    # cwd-independent (cd into the bundle, relative config.yaml); the ocean
+    # runner is a repo-root-relative script, so launch from the repo root and
+    # pass the bundle's config.yaml by absolute path.
+    if is_atm:
+        run_cmd = cfg.run_command("config.yaml")
+        workdir = None
+    else:
+        run_cmd = cfg.run_command(str((out / "config.yaml").resolve()))
+        workdir = str(_REPO_ROOT)
+    (out / "run.sh").write_text(
+        render_run_sh(machine, run_cmd=run_cmd, enable_x64=not is_atm, workdir=workdir)
+    )
     (out / "run.sh").chmod(0o755)
 
-    meta = cfg.get("experiment") or {}
+    meta = cfg.get_meta()
     run_yaml = {
         "experiment": {
             "name": args.name,
@@ -238,7 +267,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    data required: {meta['data']} "
               f"(run scripts/experiment/fetch_data.py to stage)")
     print(f"  Run it:        cd {out} && bash run.sh")
-    print(f"  Reproduce it:  legoesm reproduce {out}/<output>/run_manifest.json --check")
+    if is_atm:
+        print(f"  Reproduce it:  legoesm reproduce {out}/<output>/run_manifest.json --check")
+    else:
+        # No `--check`: ocean reproduce-rerun is not wired through the atmosphere
+        # driver, so --check would not perform a digest comparison. `reproduce`
+        # (no --check) validates the manifest; re-run via the ocean runner to
+        # compare result.state_digest.
+        print(f"  Validate it:   legoesm reproduce {out_subdir}/run_manifest.json")
+        print(f"  Reproduce it:  re-run via run_omip_core2.py --config "
+              f"{out / 'config.yaml'} and compare result.state_digest")
     return 0
 
 

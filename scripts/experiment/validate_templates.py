@@ -92,29 +92,38 @@ def _meta_errors(meta: dict[str, Any]) -> list[str]:
 
 
 def validate_template(path: Path) -> TemplateReport:
-    """Load + resolve + strict-validate one template; never raises."""
-    from legoesm.config import Config
+    """Load + resolve + strict-validate one template; never raises.
+
+    Mode-aware: dispatches to the atmosphere or ocean YAML adapter through
+    ``legoesm.experiment_registry`` so an ocean template validates through the
+    same path ``run_omip_core2.py --config`` consumes.
+    """
+    from legoesm import experiment_registry
 
     rel = str(path.relative_to(_DEFAULT_TEMPLATES.parent))
     category = path.parent.name
     meta: dict[str, Any] = {}
     try:
-        cfg = Config.from_yaml(str(path))
-        meta = cfg.get("experiment") or {}
+        mode, cfg = experiment_registry.load_adapter(str(path))
+        meta = cfg.get_meta()
         errs = _meta_errors(meta)
-        # Resolve + strict-validate through the SAME path `legoesm run` uses.
-        ec = cfg.to_experiment_config()
-        ec.validate_strict()
+        # Resolve + strict-validate through the SAME path the runner uses.
+        cfg.validate_strict()
         # codex HIGH-1: the declared atmosphere complexity rung MUST equal the
         # resolved dycore model_type — else a 'hydrostatic' template that left
         # the canonical `atmosphere.dynamics` at its shallow_water default would
-        # validate while silently describing the wrong experiment.
+        # validate while silently describing the wrong experiment.  Ocean
+        # templates use a different complexity vocabulary, so this atmosphere-
+        # specific cross-check only applies to atmosphere modes.
         complexity = str(meta.get("complexity", ""))
-        if complexity in _ATM_RUNGS and ec.dycore.model_type != complexity:
-            errs.append(
-                f"complexity={complexity!r} but resolved dycore.model_type="
-                f"{ec.dycore.model_type!r} (set 'atmosphere.dynamics: {complexity}')"
-            )
+        if (experiment_registry.is_atmosphere_mode(mode)
+                and complexity in _ATM_RUNGS):
+            model_type = cfg.to_experiment_config().dycore.model_type
+            if model_type != complexity:
+                errs.append(
+                    f"complexity={complexity!r} but resolved dycore.model_type="
+                    f"{model_type!r} (set 'atmosphere.dynamics: {complexity}')"
+                )
         # codex MEDIUM-2: every experiment.data id must exist in the catalog.
         known = _catalog_ids()
         for ds in (meta.get("data") or []):
