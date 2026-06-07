@@ -197,10 +197,6 @@ CONCEPTS: tuple[ConceptDef, ...] = (
 )
 
 
-def _by_canonical() -> dict[str, ConceptDef]:
-    return {c.canonical: c for c in CONCEPTS}
-
-
 def ratcheted_aliases() -> dict[str, str]:
     """{alias: canonical} for every concept with ``ratchet=True`` — the set the
     deterministic naming guard forbids in new code (outside its baseline)."""

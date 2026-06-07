@@ -407,7 +407,7 @@ def ocean_baroclinic_tendencies_fc(
             # ``h_k[..., -1]``; we add ``-r_eff * u / h_bot`` to that
             # level via a one-hot mask along the level axis.
             h_bot = jnp.maximum(h_k[..., -1:], 1e-10)
-            nlev_local = u.shape[-1]
+            u.shape[-1]
             bot_onehot = jnp.zeros_like(h_k)
             bot_onehot = bot_onehot.at[..., -1].set(1.0)
             du_dt = du_dt - r_eff_u * u * bot_onehot / h_bot

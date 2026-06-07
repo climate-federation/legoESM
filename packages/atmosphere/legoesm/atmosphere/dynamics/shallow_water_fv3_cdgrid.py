@@ -877,7 +877,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
         (same contract as iter-1040+ MPI tests).
         """
         from collections import defaultdict
-        from legoesm.grids.halo import _mpi_topology, get_halo_backend
+        from legoesm.grids.halo import _mpi_topology
         from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
         try:
             import mpi4jax

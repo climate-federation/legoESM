@@ -15,8 +15,6 @@ Public API
 - ``get_ghg_for_experiment(name, year)`` : same, returned as a dict
 - ``create_experiment_config(name, **overrides)`` : build an
   ``ExperimentConfig`` from a template (canonical runtime config)
-- ``create_amip_experiment_config(name, **overrides)`` : legacy wrapper
-  returning ``AMIPExperimentConfig`` for backward compatibility
 """
 
 from __future__ import annotations
@@ -25,8 +23,6 @@ import logging
 from typing import NamedTuple
 
 import numpy as np
-
-from legoesm.forcing.amip_config import AMIPExperimentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -365,11 +361,6 @@ EXPERIMENT_TEMPLATES: dict[str, ExperimentTemplate] = {
 _DAYS_PER_YEAR = 365
 
 
-def _year_to_day(year: int, ref_year: int) -> float:
-    """Convert a calendar year to a model day relative to *ref_year*."""
-    return float((year - ref_year) * _DAYS_PER_YEAR)
-
-
 def create_experiment_config(
     name: str,
     **overrides,
@@ -381,8 +372,7 @@ def create_experiment_config(
     from the template's base values, and applies any caller-supplied
     overrides on top.
 
-    Returns the **canonical** ``ExperimentConfig``.  For the legacy
-    ``AMIPExperimentConfig`` use ``create_amip_experiment_config``.
+    Returns the **canonical** ``ExperimentConfig``.
 
     Parameters
     ----------
@@ -574,61 +564,3 @@ def create_experiment_config(
         )
 
     return cfg
-
-
-def create_amip_experiment_config(
-    name: str,
-    **overrides,
-) -> AMIPExperimentConfig:
-    """Create an :class:`AMIPExperimentConfig` from a template.
-
-    .. deprecated::
-        Use ``create_experiment_config`` which returns the canonical
-        ``ExperimentConfig``.  This legacy factory is retained only
-        for backward compatibility with old code paths.
-    """
-    import warnings
-    warnings.warn(
-        "create_amip_experiment_config is deprecated; "
-        "use create_experiment_config instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    if name not in EXPERIMENT_TEMPLATES:
-        raise ValueError(
-            f"Unknown experiment {name!r}. "
-            f"Available: {sorted(EXPERIMENT_TEMPLATES)}"
-        )
-
-    # Validate override keys.
-    valid_fields = set(AMIPExperimentConfig._fields)
-    bad = set(overrides) - valid_fields
-    if bad:
-        raise TypeError(
-            f"Invalid AMIPExperimentConfig field(s): {sorted(bad)}"
-        )
-
-    tmpl = EXPERIMENT_TEMPLATES[name]
-
-    # Total integration length in model days.
-    total_days = (tmpl.end_year - tmpl.start_year) * _DAYS_PER_YEAR
-
-    # GHG concentrations at the start of the experiment.
-    co2, ch4, n2o = ghg_at_year(name, tmpl.start_year)
-
-    # Build the config dict, starting from defaults.
-    cfg_dict: dict = {
-        "days": total_days,
-        "start_day": 0.0,
-        "co2_ppmv": co2,
-        "ch4_ppbv": ch4,
-        "n2o_ppbv": n2o,
-    }
-
-    # Apply caller overrides.
-    cfg_dict.update(overrides)
-
-    return AMIPExperimentConfig(**{
-        **AMIPExperimentConfig()._asdict(),
-        **cfg_dict,
-    })

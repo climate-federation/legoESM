@@ -16,7 +16,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm import constants
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.core.bulk_flux import compute_most_fluxes, validate_bulk_scheme
 

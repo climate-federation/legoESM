@@ -1069,7 +1069,7 @@ def morrison_microphysics(
 
     # Pin dtype to the input precision so we never silently promote
     # the unused-species placeholders to f64 under x64 mode.
-    z = jnp.zeros((ncol, nlev), dtype=T.dtype)
+    jnp.zeros((ncol, nlev), dtype=T.dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,

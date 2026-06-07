@@ -24,9 +24,7 @@ damping) and saturates near p=ptop (max damping).
 """
 from __future__ import annotations
 
-from typing import Optional
 
-import jax
 import jax.numpy as jnp
 
 from legoesm import constants

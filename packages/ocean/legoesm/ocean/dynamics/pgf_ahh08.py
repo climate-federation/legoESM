@@ -75,7 +75,6 @@ and ``latlon_cgrid_operators.py`` respectively.
 """
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from legoesm.ocean.eos import (

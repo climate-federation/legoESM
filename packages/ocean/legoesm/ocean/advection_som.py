@@ -514,7 +514,6 @@ def _som_y_sweep(sm_o, moments, vol_flux_y, vol):
     # replaces alloc-zeros + concatenate-of-three.
     fp_o_all = jnp.pad(fp_o_int, ((1, 1), (0, 0), (0, 0)))
     fp_mom_all = jnp.pad(fp_mom_int, ((1, 1), (0, 0), (0, 0), (0, 0)))
-    alpha_all = jnp.pad(alpha, ((1, 1), (0, 0), (0, 0)))
 
     # --- Step 2: Per-cell incoming/outgoing ---
     # For cell j: left face = index j, right face = index j+1

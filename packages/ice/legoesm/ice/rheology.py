@@ -43,9 +43,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.halo import pad_halo, pad_halo_vector
+from legoesm.grids.halo import pad_halo_vector
 from legoesm.grids.halo_latlon import pad_halo_vector_latlon
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh

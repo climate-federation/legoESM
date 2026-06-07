@@ -24,7 +24,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -36,7 +35,6 @@ from legoesm.atmosphere.dynamics.plane_large_scale_forcing import (
 )
 from legoesm.atmosphere.sam_case_forcing import (
     extend_sounding_to_top,
-    interp_rad_to_levels,
     interp_sounding_to_levels,
     read_sam_rad,
     read_sam_sfc,
@@ -44,8 +42,7 @@ from legoesm.atmosphere.sam_case_forcing import (
     surface_at_day,
 )
 from legoesm.grids.vertical import (
-    HeightCoordinate, create_height_coordinate,
-    create_height_coordinate_from_z_half,
+    HeightCoordinate, create_height_coordinate_from_z_half,
     create_stretched_height_coordinate,
 )
 

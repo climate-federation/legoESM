@@ -22,9 +22,9 @@ no test-matrix integration. The output directory is self-contained
 (NPZ snapshots + a JSON config dump) so it can be moved to a GPU
 machine for production runs.
 
-See ``docs/ocean_experiments/README.md`` for a 1-minute orientation
-and ``docs/ocean_experiments/dino_replication_plan.md`` for the full
-scientific configuration, decisions log, and stability investigation.
+See ``docs/md_files/ocean_experiments_reference.md`` for a 1-minute
+orientation and the full scientific configuration, decisions log, and
+stability investigation.
 """
 
 from __future__ import annotations

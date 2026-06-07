@@ -36,8 +36,6 @@ from legoesm.core.operators_voronoi import (
     # 2D operators used for surface-pressure-only fields (ln_ps, p_s).
     divergence_cell,
     gradient_edge,
-    cell_to_edge_avg,
-    # Batched 3D operators — single gather for all levels.
     divergence_cell_3d,
     gradient_edge_3d,
     kinetic_energy_cell_3d,
@@ -47,7 +45,6 @@ from legoesm.core.operators_voronoi import (
     vector_laplacian_del2_3d,
     vector_laplacian_del4_3d,
     cell_to_edge_avg_3d,
-    edge_thickness_3d,
     apvm_correction_3d,
 )
 from legoesm.grids.voronoi import VoronoiMesh
@@ -59,7 +56,6 @@ from legoesm.grids.vertical import (
     dp_from_hybrid,
     compute_geopotential,
     compute_geopotential_hybrid,
-    compute_sigma_dot,
     compute_sigma_dot_and_total,
     compute_mass_flux_hybrid,
     vertical_advection,
@@ -149,7 +145,7 @@ def mpas_hydrostatic_tendencies(
 
     R_d = constants.R_d
     kappa = constants.kappa
-    nlev = T_3d.shape[-1]
+    T_3d.shape[-1]
     p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
 
     # --- 1. Pressure at full levels ---

@@ -369,37 +369,17 @@ def _interp_2d_time(times: np.ndarray, values: np.ndarray, day: float) -> np.nda
 
 
 @lru_cache(maxsize=16)
-def _load_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load a monthly zonal-mean field from a Zarr store or NetCDF file.
+def _load_monthly_zonal_anchored(
+    path: str, varname: str,
+) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
+    """Load a monthly zonal-mean field from a Zarr store or NetCDF file,
+    also returning the first record's CF-time anchor (``first_date``) so
+    callers can map a simulation day onto the file's absolute time axis
+    when the file spans multiple years.
 
     Handles files with full lat/lon grids (e.g. Kinne aerosol files with
     dims ``(time, band, lat, lon)``) by averaging over lon and any extra
     non-(time, lat) dimensions to produce a ``(ntime, nlat)`` array.
-
-    Returns
-    -------
-    (mid_days, lat, data) where mid_days is shape (ntime,), lat is shape
-    (nlat,), and data is shape (ntime, nlat).
-
-    For a CF-anchored variant that also returns the absolute calendar
-    anchor of the first record (needed by callers that map
-    simulation-day → file-day for non-cyclic multi-year files), see
-    :func:`_load_monthly_zonal_anchored`.
-    """
-    mid_days, _first_date, lat, data = _load_monthly_zonal_anchored(
-        path, varname
-    )
-    return mid_days, lat, data
-
-
-@lru_cache(maxsize=16)
-def _load_monthly_zonal_anchored(
-    path: str, varname: str,
-) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
-    """Like :func:`_load_monthly_zonal` but also returns the first
-    record's CF-time anchor (``first_date``) so callers can map a
-    simulation day onto the file's absolute time axis when the file
-    spans multiple years.
 
     This matches the API of :func:`_load_monthly_zonal_with_levels`
     used by the ozone loader.
@@ -470,14 +450,14 @@ def _load_volcanic_cmip6(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]
        with ``dz`` in km, yielding a per-band AOD per (lat, month).
     2. Mean over the spectral-band axis to produce a representative
        single-band broadband AOD per (lat, month).  Mean — not sum —
-       matches the Kinne aerosol convention (``_load_monthly_zonal``
+       matches the Kinne aerosol convention (``_load_monthly_zonal_anchored``
        averages non-(time, lat) axes via ``np.nanmean``) and avoids the
        n-bands-dependent inflation that a raw sum over 14 SW bands
        would introduce.
 
     Returns ``(mid_days, lat, aod)`` with ``aod`` shape
     ``(ntime, nlat)`` — a drop-in replacement for
-    :func:`_load_monthly_zonal` output.
+    :func:`_load_monthly_zonal_anchored` output.
 
     For a CF-anchored variant that also returns the calendar anchor
     of the first record (needed by callers that map sim-day → file-day
@@ -567,8 +547,8 @@ def _load_volcanic_cmip6_anchored(
 
     # Collapse the spectral-band axis to a single broadband AOD BEFORE
     # returning.  We take the mean over bands (not the sum) to match the
-    # implicit Kinne aerosol convention — ``_load_monthly_zonal`` averages
-    # any non-(time, lat) axis via ``np.nanmean`` — and to avoid the
+    # implicit Kinne aerosol convention — ``_load_monthly_zonal_anchored``
+    # averages any non-(time, lat) axis via ``np.nanmean`` — and to avoid the
     # n_bands factor Codex flagged: summing 14 SW bands would inflate
     # the per-wavelength optical depth into a 14×-multiple that is not
     # physically a broadband AOD.  The value returned is therefore a
@@ -599,9 +579,9 @@ def _load_volcanic_cmip6_anchored(
 def _load_volcanic_auto(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Dispatch ``path`` to the right volcanic loader.
 
-    Returns the same ``(mid_days, lat, data)`` tuple as
-    :func:`_load_monthly_zonal` regardless of which on-disk schema the
-    file follows.  See :func:`_load_volcanic_auto_anchored` for a
+    Returns a ``(mid_days, lat, data)`` tuple (the anchor-free form of
+    :func:`_load_monthly_zonal_anchored`) regardless of which on-disk
+    schema the file follows.  See :func:`_load_volcanic_auto_anchored` for a
     variant that also returns the file's CF anchor (used by the
     multi-year non-cyclic dispatch in :func:`get_aerosol_at_time`).
     """
@@ -715,8 +695,8 @@ def _ozone_unit_factor(units: str, varname: str) -> float:
 
 @lru_cache(maxsize=16)
 def _load_monthly_zonal_with_levels(path: str, varname: str):
-    """Like ``_load_monthly_zonal`` but also returns pressure levels and a
-    CF-time anchor for multi-year files.
+    """Like ``_load_monthly_zonal_anchored`` but also returns pressure levels
+    for multi-year files.
 
     Returns
     -------

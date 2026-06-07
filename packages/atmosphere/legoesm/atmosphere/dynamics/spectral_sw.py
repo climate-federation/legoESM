@@ -34,15 +34,10 @@ from legoesm.runtime.backend import check_spectral_backend, get_backend
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_analysis,
-    sh_synthesis,
-    sh_analysis_oc2,
-    sh_analysis_dmu,
-    sh_analysis_3d,
     sh_synthesis_3d,
     sh_analysis_oc2_3d,
     sh_analysis_dmu_3d,
     uv_from_vordiv,
-    spectral_hyperdiffusion,
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
@@ -103,7 +98,7 @@ def spectral_sw_tendencies(
     # sequential ``sh_synthesis`` calls.  The 3D variant treats the
     # trailing axis as a passive batch — for SW (no level dim) the
     # trailing-axis-of-3 plays the role of nlev=3.  3 SH-syntheses → 1.
-    n_sh_t = state.vor_hat.data.shape[0]
+    state.vor_hat.data.shape[0]
     _vpp_stack = jnp.stack(
         [state.vor_hat.data, state.phi_hat.data, state.phis_hat.data],
         axis=-1,
@@ -288,7 +283,6 @@ class SpectralShallowWaterModel:
         anchor API uniform across all four SW grids.
         """
         from legoesm.grids.gaussian import sh_synthesis
-        from legoesm import constants
         phi_grid = sh_synthesis(self.grid, state.phi_hat.data)
         h_grid = phi_grid / constants.g
         return jnp.sum(

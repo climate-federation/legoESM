@@ -1086,7 +1086,7 @@ def create_latlon_geometry(
     # subsequent metric computations use the cast values so that
     # operator-inline and geometry-precomputed paths are bit-exact.
     lat_s = _c(lat_1d)
-    lon_s = _c(lon_1d)
+    _c(lon_1d)
     cos_lat_s = _c(cos_lat_1d)
     sin_lat_s = _c(sin_lat_1d)
 

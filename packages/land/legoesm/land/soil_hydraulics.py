@@ -209,22 +209,6 @@ def brooks_corey_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarra
 
 
 # ==========================================================================
-# Campbell (1974)
-# ==========================================================================
-
-def campbell_psi(theta: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
-    """Matric potential from water content."""
-    Se = jnp.clip(theta / config.theta_sat, 1e-6, 1.0)
-    return config.psi_sat * Se ** (-config.b_ch)
-
-
-def campbell_K(theta: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
-    """Hydraulic conductivity."""
-    Se = jnp.clip(theta / config.theta_sat, 1e-6, 1.0)
-    return config.K_sat * Se ** (2.0 * config.b_ch + 3.0)
-
-
-# ==========================================================================
 # Peters-Durner-Iden (2015) — capillary + adsorptive film flow
 # ==========================================================================
 

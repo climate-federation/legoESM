@@ -28,7 +28,6 @@ from legoesm.grids.vertical import (
     HeightCoordinate,
     SigmaCoordinate,
     TerrainMetric,
-    compute_sigma_dot,
     pressure_from_sigma,
     compute_sigma_dot_and_total,
     compute_pressure_velocity,
@@ -839,7 +838,7 @@ def _make_nonhydrostatic_convection(
 
         # Tracer tendencies. The non-hydrostatic state's tracer ordering
         # is documented on ``NonHydrostaticState`` in
-        # ``src/legoesm/core/state.py``:
+        # ``state.py``:
         #   moist runs → tracers[..., 0] = q_vapor,
         #                tracers[..., 1] = q_cloud,
         #                tracers[..., 2] = q_rain.

@@ -18,7 +18,7 @@ from legoesm.da.control_vector import (
     control_to_state,
     state_to_control,
 )
-from legoesm.da.cost_function import build_cost_and_grad_fn, build_cost_fn
+from legoesm.da.cost_function import build_cost_fn
 from legoesm.da.minimizer import minimize_cg, minimize_lbfgs
 from legoesm.da.preconditioning import preconditioned_cost_fn
 

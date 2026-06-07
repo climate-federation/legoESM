@@ -1,7 +1,7 @@
 """Auto-dt heuristic for the cross-grid RCE driver.
 
 Single source of truth for the per-grid-type, per-resolution dt
-ladder used by ``scripts/run_rce.py``. Lives in
+ladder used by ``scripts/run/run_rce.py``. Lives in
 ``legoesm.driver`` (not in the script) so:
 
   1. The cross-grid test suite can import + call the EXACT same
@@ -43,10 +43,6 @@ hide the per-measurement provenance. The reference function
 :func:`empirical_dt_dx2` is provided for diagnostic use only.
 """
 from __future__ import annotations
-
-from legoesm.core.cfl import (
-    estimate_min_dx_cubed_sphere, estimate_min_dx_gaussian,
-)
 
 
 # Empirical anchor (iter-12 C24 measurement): dt=600 s at dx≈240753 m.
@@ -93,8 +89,8 @@ def auto_dt_rce(grid_type: str, resolution: int) -> float:
     -------
     dt : float
         Recommended outer timestep in seconds. Pass via ``--dt`` to
-        ``scripts/run_rce.py`` (or read from
-        ``scripts.run_rce.main``'s auto-dt branch, which calls this).
+        ``scripts/run/run_rce.py`` (or read from
+        ``scripts.run.run_rce.main``'s auto-dt branch, which calls this).
 
     Raises
     ------

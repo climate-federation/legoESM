@@ -25,7 +25,7 @@ resolve_kernel(registry, name) -> callable
 from __future__ import annotations
 
 from importlib import import_module
-from typing import Any, Callable
+from typing import Callable
 
 # ---------------------------------------------------------------------------
 # Registry entries: (module_path, function_name, config_attr_on_parent)

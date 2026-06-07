@@ -38,12 +38,9 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-import jax
 import jax.numpy as jnp
 
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-    stress_divergence_cgrid,
-    strain_rate_cgrid,
     viscous_tendency_cgrid,
     _vertex_area,
 )

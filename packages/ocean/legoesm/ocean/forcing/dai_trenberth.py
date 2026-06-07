@@ -96,7 +96,7 @@ def synthetic_dai_trenberth(
     -------
     :class:`RiverRunoffData`
     """
-    n = len(_SYNTHETIC_RIVERS)
+    len(_SYNTHETIC_RIVERS)
     lats = np.array([r["lat"] for r in _SYNTHETIC_RIVERS], dtype=np.float64)
     # Normalise to [0, 360) for downstream consistency.
     lons = np.array(

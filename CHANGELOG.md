@@ -136,7 +136,7 @@ All notable changes to legoESM. Format roughly follows
 - New: this CHANGELOG.
 - Updated: [README.md](README.md),
   [docs/cmip_readiness.md](docs/cmip_readiness.md),
-  [docs/ocean_experiments_reference.md](docs/ocean_experiments_reference.md),
+  [docs/md_files/ocean_experiments_reference.md](docs/md_files/ocean_experiments_reference.md),
   [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md).
 
 ---

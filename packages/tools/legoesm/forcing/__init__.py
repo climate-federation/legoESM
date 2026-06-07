@@ -34,7 +34,6 @@ from legoesm.forcing.experiments import (
     ghg_at_year,
     get_ghg_for_experiment,
     create_experiment_config,
-    create_amip_experiment_config,
 )
 from legoesm.forcing.analytical import analytical_sst_sic
 from legoesm.forcing.time_utils import day_to_calendar
@@ -69,7 +68,6 @@ __all__ = [
     "ghg_at_year",
     "get_ghg_for_experiment",
     "create_experiment_config",
-    "create_amip_experiment_config",
     # Analytical forcing
     "analytical_sst_sic",
     # Time utilities

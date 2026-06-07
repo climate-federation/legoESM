@@ -415,10 +415,10 @@ cubed-sphere is estimated at 3–4 months.
   consortium; ORCA1 is the standard 1° benchmark.
 - **MOM6 OM4 grid files**: distributed with MOM6; tripolar with
   bipoles over Canada and Russia.
-- `docs/ocean_grid_staggering.md` — staggering trade-offs for the
+- `docs/md_files/ocean_grid_staggering.md` — staggering trade-offs for the
   C-grid path (this plan extends the lat-lon C-grid leg, not the
   cubed-sphere leg).
-- `docs/LATLON_CGRID_MIGRATION.md` — pattern this plan mirrors.
+- `docs/md_files/LATLON_CGRID_MIGRATION.md` — pattern this plan mirrors.
 
 ## Open questions for decision before Phase 0
 

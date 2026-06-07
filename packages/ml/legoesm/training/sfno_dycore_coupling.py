@@ -13,14 +13,13 @@ from __future__ import annotations
 
 from typing import Literal, TYPE_CHECKING
 
-import jax
 import jax.numpy as jnp
 import equinox as eqx
 
 if TYPE_CHECKING:
     from legoesm.grids.gaussian import GaussianGrid
 
-from legoesm.ml.sfno import SFNO, SFNOConfig
+from legoesm.ml.sfno import SFNO
 from legoesm.ml.channel_packing import PE3DChannelSpec
 from legoesm.driver.physics_pipeline import PhysicsOutput
 
@@ -97,31 +96,6 @@ class SFNOPhysics(eqx.Module):
                 reference_3d=T,
             )
         )
-
-
-def build_sfno_physics(
-    grid: "GaussianGrid",
-    nlev: int,
-    config: SFNOConfig | None = None,
-    *,
-    key: jax.Array,
-) -> SFNOPhysics:
-    """Build an SFNOPhysics from a grid and vertical resolution.
-
-    If *config* is None, a default SFNOConfig is created with channel
-    counts derived from PE3DChannelSpec(nlev) and residual_prediction
-    disabled (output = tendencies, not states).
-    """
-    spec = PE3DChannelSpec(nlev=nlev)
-    n_ch = spec.n_channels
-    if config is None:
-        config = SFNOConfig(
-            in_channels=n_ch,
-            out_channels=n_ch,
-            residual_prediction=False,
-        )
-    sfno = SFNO(config, grid, key=key)
-    return SFNOPhysics(sfno=sfno, grid=grid, nlev=nlev)
 
 
 def make_sfno_step_unified(

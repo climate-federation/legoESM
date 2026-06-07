@@ -497,18 +497,6 @@ def dino_S_star(lat_deg, cfg: DINOConfig | None = None):
     return S_star_ns + (cfg.S_star_eq - S_star_ns) * cos_factor - dip
 
 
-def _Q_sr_instantaneous(lat_deg, day_of_year, cfg: DINOConfig):
-    """Q_sr at (lat, day) per paper eq B5.
-
-    Q_sr(t, φ) = max(230 · cos(π/180 · [φ − 23.5·cos(π·(d−171)/180)]), 0)
-    """
-    decl = cfg.solar_declination_amp_deg * jnp.cos(
-        jnp.pi * (day_of_year - 171.0) / 180.0,
-    )
-    arg = jnp.pi / 180.0 * (lat_deg - decl)
-    return jnp.maximum(cfg.Q_sr_amp * jnp.cos(arg), 0.0)
-
-
 def dino_Q_sr_annual_mean(lat_deg, cfg: DINOConfig | None = None,
                           n_days: int = 360):
     """Annual-mean Q_sr(lat) by trapezoid quadrature of paper eq B5

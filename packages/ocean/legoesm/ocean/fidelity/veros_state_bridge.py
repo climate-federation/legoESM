@@ -36,11 +36,8 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.core.field import Field
-from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.fidelity.veros_runner import VerosResult
 from legoesm.ocean.state import LatLonCGridOceanState
-from legoesm.ocean.vertical import OceanZStarCoordinate
 
 
 # Veros's halo width (2 cells on each side; standard for the leapfrog +
@@ -198,10 +195,6 @@ def veros_snapshot_to_legoesm_state(
             temp.shape[1:] == expected_T[1:]
             and temp.shape[0] + 2 == expected_T[0]
         ):
-            def _pad_y_walls(a):
-                pad_north = np.zeros_like(a[:1])
-                pad_south = np.zeros_like(a[:1])
-                return np.concatenate([pad_south, a, pad_north], axis=0)
             temp = _pad_y_walls(temp)
             salt = _pad_y_walls(salt)
             u_face = _pad_y_walls(u_face)

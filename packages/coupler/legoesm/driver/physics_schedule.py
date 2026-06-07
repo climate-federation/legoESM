@@ -3,7 +3,7 @@
 Single source of truth for "how often does the radiation tick (or any
 held-tendency slow physics) fire?". Lives in ``legoesm.driver`` so:
 
-  1. ``scripts/run_rce_mpi_long.py`` and the production-scale slow
+  1. ``scripts/run/run_rce_mpi_long.py`` and the production-scale slow
      tests in ``tests/atmosphere/nonhydrostatic/integration/`` both
      import the SAME ``radiation_call_schedule`` instead of each
      reimplementing the

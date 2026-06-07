@@ -99,8 +99,6 @@ def _ridging_column_kernel(
     the pond surface; CICE convention) — conserving water, so ridges carry no
     pond and the drained volume is reported as a freshwater flux.
     """
-    n_cat = a_cat.shape[0]
-
     # Volume per category.
     V_cat = h_cat * a_cat
 

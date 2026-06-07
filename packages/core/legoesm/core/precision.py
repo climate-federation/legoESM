@@ -28,7 +28,7 @@ References
 
 from __future__ import annotations
 
-from typing import NamedTuple, Sequence
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -456,7 +456,7 @@ def compensated_sum(x: jax.Array, axis: int = 0) -> jax.Array:
         Compensated sum along the specified axis.
     """
     x = jnp.moveaxis(x, axis, 0)
-    n = x.shape[0]
+    x.shape[0]
     rest_shape = x.shape[1:]
 
     def _step(carry, xi):

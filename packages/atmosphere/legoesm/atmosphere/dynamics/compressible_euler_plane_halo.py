@@ -853,9 +853,8 @@ def _slow_tendency_phase1_jit(
     c_p = jnp.asarray(0.0, dtype=u_pad.dtype) + _c_pd_constant()
     u_int = u_pad[h:-h, h:-h, :]
     v_int = v_pad[h:-h, h:-h, :]
-    theta_p_int = theta_p_pad[h:-h, h:-h, :]
-    rho_p_int = rho_p_pad[h:-h, h:-h, :]
-    J = terrain_metric.jacobian
+    theta_p_pad[h:-h, h:-h, :]
+    rho_p_pad[h:-h, h:-h, :]
 
     # Pressure gradient.
     grad_pi_x = oh.grad_x_vlast_halo(pi_p_pad, grid, h)
@@ -921,9 +920,9 @@ def _slow_tendency_phase2_jit(
     cfg = config
     u_pad = state_pad["u_pad"]
     v_pad = state_pad["v_pad"]
-    theta_p_pad = state_pad["theta_p_pad"]
+    state_pad["theta_p_pad"]
     theta_total_pad = state_pad["theta_total_pad"]
-    rho_p_pad = state_pad["rho_p_pad"]
+    state_pad["rho_p_pad"]
     w = state_pad["w"]
     u = state_pad["u"]
     v = state_pad["v"]

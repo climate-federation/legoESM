@@ -47,7 +47,7 @@ swapping to a rigid-cavity-lid boundary is the remaining piece.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Dict
 
 import jax.numpy as jnp
 import numpy as np

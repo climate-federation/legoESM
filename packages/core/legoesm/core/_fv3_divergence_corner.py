@@ -51,7 +51,6 @@ lines 2124-2229 (subroutine ``divergence_corner``).
 """
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid

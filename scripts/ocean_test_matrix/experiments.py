@@ -63,7 +63,7 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
     T_drift = _compute_drift(diag.get("mean_T", []))
     # iter-131 (codex iter-130-followup MEDIUM-1): also compute
     # S_drift to gate the documented < 1e-6 contract from
-    # docs/ocean_experiments_reference.md "Rest State"
+    # ocean_experiments_reference.md "Rest State"
     # Validation Thresholds.
     S_drift = _compute_drift(diag.get("mean_S", []))
     notes = (f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}, "
@@ -153,7 +153,7 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
     T_drift = _compute_drift(diag.get("mean_T", []))
     # iter-131 (codex iter-130-followup MEDIUM-1): also compute
     # S_drift to gate the documented < 1e-6 contract from
-    # docs/ocean_experiments_reference.md "Rest State"
+    # ocean_experiments_reference.md "Rest State"
     # Validation Thresholds.
     S_drift = _compute_drift(diag.get("mean_S", []))
     notes = (f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}, "
@@ -236,7 +236,7 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
     T_drift = _compute_drift(diag.get("mean_T", []))
     # iter-131 (codex iter-130-followup MEDIUM-1): also compute
     # S_drift to gate the documented < 1e-6 contract from
-    # docs/ocean_experiments_reference.md "Rest State"
+    # ocean_experiments_reference.md "Rest State"
     # Validation Thresholds.
     S_drift = _compute_drift(diag.get("mean_S", []))
     notes = (f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}, "
@@ -314,7 +314,7 @@ def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: floa
     T_drift = _compute_drift(diag.get("mean_T", []))
     # iter-131 (codex iter-130-followup MEDIUM-1): also compute
     # S_drift to gate the documented < 1e-6 contract from
-    # docs/ocean_experiments_reference.md "Rest State"
+    # ocean_experiments_reference.md "Rest State"
     # Validation Thresholds.
     S_drift = _compute_drift(diag.get("mean_S", []))
     notes = (f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}, "
@@ -393,7 +393,7 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
         label=f"Barotropic Wave ({tc.grid_type})", total_days=days)
 
-    # iter-133 (self-review based on docs/ocean_experiments_reference.md
+    # iter-133 (self-review based on ocean_experiments_reference.md
     # "Barotropic Wave" Validation Thresholds): same gates as
     # monolithic.
     max_eta_series = diag.get("max_abs_eta", [])
@@ -524,7 +524,7 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
     eta_drift = (abs(eta_list[-1] - eta_list[0])
                  if len(eta_list) >= 2 else 0.0)
     notes = f"max speed={max_speed:.4f} m/s, eta drift={eta_drift:.2e}"
-    # iter-133 (self-review based on docs/ocean_experiments_reference.md
+    # iter-133 (self-review based on ocean_experiments_reference.md
     # "Barotropic Gyre" Validation Thresholds; same gates apply to
     # barotropic_double_gyre and barotropic_double_gyre_sin2 per
     # the doc's "Same as barotropic_gyre" callout).
@@ -857,7 +857,7 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
     # (no surface fluxes, no diffusion in this setup), so any
     # measurable drift is a numerical bug.  1e-8 is empirically
     # validated and tighter than the documented 1e-3 in
-    # ``docs/ocean_experiments_reference.md:419`` — see
+    # ``ocean_experiments_reference.md`` — see
     # iter-128 update of that doc.  Same gate as monolithic
     # ``run_geostrophic_adjustment`` in
     # ``scripts/matrix/run_ocean_test_matrix.py:3745``.
@@ -1009,7 +1009,7 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
     # eta_growth in [0.8,10.0], max_eta<5m).  Same gates as
     # monolithic ``run_phillips_two_layer`` — see the
     # "Phillips Two-Layer" section of
-    # docs/ocean_experiments_reference.md.
+    # ocean_experiments_reference.md.
     mean_T_series = diag.get("mean_T", [])
     max_eta_series = diag.get("max_abs_eta", [])
     n_T = len(mean_T_series)
@@ -1334,7 +1334,7 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     # iter-129 (codex iter-128-followup MEDIUM-2): apply the
     # documented ``pe_rel_final < 0`` sign check to Lock Exchange
     # (see the "Lock Exchange (lock_exchange)" Validation
-    # Thresholds block in docs/ocean_experiments_reference.md;
+    # Thresholds block in ocean_experiments_reference.md;
     # iter-130 codex iter-129-followup LOW-2: removed hard-
     # coded line number).  Same gate as monolithic
     # ``run_lock_exchange``.
@@ -1454,7 +1454,7 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # block below applies the documented sign constraint
     # ``pe_rel_final < 0`` (see the "Overflow (overflow)"
     # Validation Thresholds block in
-    # docs/ocean_experiments_reference.md; iter-130 codex
+    # ocean_experiments_reference.md; iter-130 codex
     # iter-129-followup LOW-2: removed stale line number).
     ok, notes = _apply_drift_tolerance(
         ok, notes, T_drift, 1e-2,
@@ -1788,7 +1788,7 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
     # KPP vertical mixing is only implemented for the latlon C-grid ocean.
     # Two limits converge on mpas_channel:
     #   (a) MPAS ocean physics silently drops ``vertical_mixing`` (see
-    #       src/legoesm/ocean/physics/mpas_physics.py), so the Eady surface
+    #       mpas_physics.py), so the Eady surface
     #       shear layer is unregularised.
     #   (b) The TRiSK enstrophy-conserving PV flux is only marginally stable
     #       on Eady: commit 6185e07 reports survival to day 6 at U=0.2 after

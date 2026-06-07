@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import NamedTuple, Protocol, runtime_checkable
 
-import jax
 
 from legoesm.core.field import Field
 
@@ -38,16 +37,6 @@ class ShallowWaterState(NamedTuple):
     u: Field
     v: Field
     h_s: Field
-
-
-class ShallowWaterTendencies(NamedTuple):
-    """Tendencies (time derivatives) for the shallow water equations.
-
-    Same shape as ShallowWaterState prognostic fields.
-    """
-    dh_dt: Field
-    du_dt: Field
-    dv_dt: Field
 
 
 # ==============================================================================
@@ -198,16 +187,6 @@ class TracerState(NamedTuple):
     """
     tracers: Field
     time: Field
-
-
-class TracerTendencies(NamedTuple):
-    """Tendencies for tracer transport.
-
-    Same pytree structure as TracerState so that SSP-RK3 tree_map
-    works correctly.
-    """
-    dtracers_dt: Field
-    dtime_dt: Field
 
 
 # ==============================================================================

@@ -76,22 +76,6 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
 )
 from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
 from legoesm.ocean.advection_som import som_advect_tracers
-from legoesm.ocean.advection import (
-    fct_tracer_advection,
-    ppm_to_u_points,
-    ppm_to_v_points,
-    flux_form_vertical_tracer_advection_ppm,
-    dst3_to_u_points,
-    dst3_to_v_points,
-    flux_form_vertical_tracer_advection_dst3,
-    multidim_tracer_advection,
-    weno5_to_u_points,
-    weno5_to_v_points,
-    weno7_to_u_points,
-    weno7_to_v_points,
-    flux_form_vertical_tracer_advection_weno5,
-    flux_form_vertical_tracer_advection_weno7,
-)
 from legoesm.ocean.conservation import ocean_conservation_fixer
 
 
@@ -360,9 +344,7 @@ def _forward_backward_coriolis_3d(
     -------
     u_new, v_new : updated velocities with Coriolis applied
     """
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
-    nlev = u.shape[-1]
+    u.shape[-1]
 
     u_mask_3d = u_mask[..., jnp.newaxis]
     v_mask_3d = v_mask[..., jnp.newaxis]
@@ -1672,42 +1654,6 @@ class LatLonCGridOceanModel:
                                tend.surface_tracer_forcing)
         return state_new
 
-    @staticmethod
-    def _symmetrize_fold(state, fold):
-        """Enforce fold symmetry on the fold row.
-
-        Scalars (eta, T, S) at fold-partner cells must be equal.
-        Velocity v at the fold face must be antisymmetric.
-        """
-        perm = fold.perm_T
-
-        # Scalars: average fold partners
-        eta = state.eta.data
-        eta_sym = 0.5 * (eta[-1:] + eta[-1:, perm])
-        eta = eta.at[-1].set(eta_sym[0])
-
-        T = state.T.data
-        T_sym = 0.5 * (T[-1:] + T[-1:, perm, :])
-        T = T.at[-1].set(T_sym[0])
-
-        S = state.S.data
-        S_sym = 0.5 * (S[-1:] + S[-1:, perm, :])
-        S = S.at[-1].set(S_sym[0])
-
-        # v at fold face (last v-row): antisymmetric
-        v = state.v.data
-        v_fold = v[-1:]  # (1, n_lon, nlev)
-        v_partner = v_fold[:, perm, :]
-        v_sym = 0.5 * (v_fold - v_partner)
-        v = v.at[-1].set(v_sym[0])
-
-        return state._replace(
-            eta=state.eta.replace(data=eta),
-            T=state.T.replace(data=T),
-            S=state.S.replace(data=S),
-            v=state.v.replace(data=v),
-        )
-
     def _eke_3d_step(
         self,
         state: LatLonCGridOceanState,
@@ -1963,7 +1909,7 @@ class LatLonCGridOceanModel:
         if K_v_phys is not None and A_v_phys is not None:
             # Fast path: use K profiles already computed by the physics
             # function, just add the config background floors.
-            nlev = state.T.data.shape[-1]
+            state.T.data.shape[-1]
             dtype = state.T.data.dtype
             K_v_cell = K_v_phys + jnp.asarray(self.config.K_v, dtype=dtype)
             A_v_cell = A_v_phys + jnp.asarray(self.config.A_v, dtype=dtype)
@@ -2281,7 +2227,6 @@ class LatLonCGridOceanModel:
         """Host-side runtime checks for debugging/regression hardening."""
         mask = state.land_mask.data
         wet = mask > 0.5
-        land = ~wet
 
         # Face mask consistency: u_mask/v_mask must match land_mask
         u_expected, v_expected = compute_face_masks(mask)
