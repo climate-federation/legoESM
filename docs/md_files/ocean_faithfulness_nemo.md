@@ -147,6 +147,19 @@ to show AMOC DEVELOPMENT + multi-year stability. ACC@Drake is also wind-driven-b
   elegance refactor with NO demonstrated SST/SSS-fidelity payoff; park unless a dynamic metric (energy
   drift, barotropic-Rossby phase, near-inertial spectrum) fails.
 
+### PGF-ZERO FALSIFICATION (8426611) — REFUTES "PGF is the SOLE cause"; a 2nd mode exists
+Cube rest+topo+no-forcing+RK3, C32: **smc03 control blows step 210** (Med lev14, known); **zero-PGF
+(`--cube-pgf-scheme zero`, ALL pressure force removed) STILL blows — delayed to step ~420, seed moves
+to 20.9N/277E lev17.** A rest state with NO PGF has NO horizontal momentum force (Coriolis·v / adv·u /
+KE all vanish from rest) yet still blows ⇒ **a SECOND cold-start instability source exists, independent
+of the baroclinic PGF** (slower; candidate = the barotropic `g∇η` / partial-cell bathy / eta-floor
+treatment, or a cube-metric artifact). Removing the dominant baroclinic PGF (smc03, blows 210) reveals
+the slower 2nd mode (blows 420). **This OVERTURNS the earlier "baroclinic-PGF-is-the-sole-cause"
+conclusion (mine + codex's) and REOPENS the implicit-CN-barotropic question** for the 2nd mode. The
+cube needs BOTH the PGF fixed AND the 2nd mode addressed. Pinpoint job 8427117: zero-PGF + FLAT bottom
+(stable ⇒ 2nd mode is bathy/barotropic; blows ⇒ pure cube-metric). `pgf_scheme="zero"` is a committed
+gated diagnostic (adcroft/smc03 bit-unchanged).
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
