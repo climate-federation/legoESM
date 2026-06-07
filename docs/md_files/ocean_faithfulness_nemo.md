@@ -174,6 +174,19 @@ only visible once the PGF is removed) -- almost certainly the EXPLICIT fv3sw bar
 (now-refuted) sole-PGF premise. Cube needs BOTH fixed (mode 1 is the earlier/dominant gate). Sharper
 than the prior "resolution-limited": the gate is specifically the BATHYMETRY treatment (PGF+barotropic).
 
+### MODE-2 mechanism nailed (8427643) — NOT barotropic-damping-fixable; free-surface/coupling
+zero-PGF + real bathy + 5x fv3sw barotropic div-damp(600)+vort-damp(0.15): blows IDENTICALLY (step
+420, |u| 12.4 vs 12.2). So cold-start MODE 2 is bathy-driven but NOT a dampable barotropic
+divergence/vorticity mode -> it is a spurious barotropic FORCING (free-surface g*grad(eta) over the
+eta-floored/partial-cell bathy, or the baroclinic-barotropic split reconciliation), which damping
+cannot remove but an IMPLICIT-CN free-surface solve could change. **Cube cold-start fully diagnosed
+via the 3-stage falsification (zero-PGF -> flat-bottom -> crank-damping):** MODE 1 = baroclinic
+partial-cell PGF (blows 210; better PGF or 1/4deg), MODE 2 = bathy free-surface/coupling (blows 420;
+implicit-CN barotropic, NOT damping). Both bathy-driven (flat-bottom machine-noise stable -> core
+cd-grid dynamics are SOUND). Cube remains parked (both fixes major) but the path is now precise +
+evidence-based, not a vague resolution wall. New cube knobs committed: --cube-baro-divdamp/-dampv,
+--cube-pgf-scheme zero (all gated/diagnostic; faithful paths bit-unchanged).
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
