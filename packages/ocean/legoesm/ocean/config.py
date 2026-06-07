@@ -60,14 +60,15 @@ import yaml
 # cheap and does not pull the full dynamics stack at package-import time.
 _GRID_TYPES = ("latlon_cgrid", "cubed_sphere", "spectral")
 
-# Map the YAML ``grid.type`` to the ``run_omip_core2.py --grid`` backend so the
-# generated run.sh launches the grid the template describes (not the runner's
-# default 'tripole').  ``latlon_cgrid`` -> the regular lat-lon C-grid bathy path
-# (honours the template's n_lat/n_lon); ``cubed_sphere`` -> the cube path.
-# ``spectral`` has no OMIP runner backend.
+# Map the YAML ``grid.type`` to the ``run_omip_core2.py --grid`` backend for the
+# generated run.sh.  Only ``latlon_cgrid`` is wired end-to-end through the omip
+# ``--config`` workflow: that path is the only one ``run_omip_core2.py --config``
+# applies ``ocean.*`` overrides to (the cube ocean is parked/resolution-limited
+# and spectral has no OMIP runner).  A template on any other grid therefore has
+# NO runnable bundle — ``run_command`` raises so init_experiment fails fast at
+# materialization rather than emitting a run.sh that dies at runtime.
 _GRID_TYPE_TO_RUNNER = {
     "latlon_cgrid": "latlon_bathy",
-    "cubed_sphere": "cubed_sphere",
 }
 
 
@@ -308,8 +309,11 @@ class OceanExperimentConfig:
             backend = _GRID_TYPE_TO_RUNNER[grid_type]
         except KeyError:
             raise ValueError(
-                f"grid.type={grid_type!r} has no run_omip_core2.py --grid "
-                f"backend (supported: {sorted(_GRID_TYPE_TO_RUNNER)})"
+                f"grid.type={grid_type!r} has no runnable run_omip_core2.py "
+                f"--config backend (only {sorted(_GRID_TYPE_TO_RUNNER)} is "
+                "wired end-to-end; the cube ocean is parked and spectral has no "
+                "OMIP runner). Use grid.type=latlon_cgrid, or build the run "
+                "manually."
             )
         return (
             f"python scripts/run/run_omip_core2.py --grid {backend} "

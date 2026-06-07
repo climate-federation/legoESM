@@ -260,14 +260,15 @@ def test_run_command_emits_grid_backend():
     # codex P2: the template's grid backend must be passed to the runner
     # (otherwise it defaults to tripole and ignores n_lat/n_lon).
     assert "--grid latlon_bathy" in OceanExperimentConfig().run_command()
-    cube = OceanExperimentConfig.from_dict({"grid": {"type": "cubed_sphere"}})
-    assert "--grid cubed_sphere" in cube.run_command()
 
 
 def test_run_command_unsupported_grid_raises():
-    spec = OceanExperimentConfig.from_dict({"grid": {"type": "spectral"}})
-    with pytest.raises(ValueError, match="no run_omip_core2.py --grid backend"):
-        spec.run_command()
+    # Only latlon_cgrid is wired through the omip --config runner; cube/spectral
+    # have no runnable bundle, so run_command raises (init_experiment fails fast).
+    for gt in ("cubed_sphere", "spectral"):
+        cfg = OceanExperimentConfig.from_dict({"grid": {"type": gt}})
+        with pytest.raises(ValueError, match="no runnable run_omip_core2.py"):
+            cfg.run_command()
 
 
 def test_yaml_roundtrip(tmp_path):

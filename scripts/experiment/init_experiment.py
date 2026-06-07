@@ -196,6 +196,15 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         raise SystemExit(f"ERROR: resolved config is invalid: {type(exc).__name__}: {exc}")
 
+    # Also confirm the bundle has a runnable launcher BEFORE writing anything:
+    # an ocean grid with no wired runner backend (cube/spectral) must fail here,
+    # not after a half-built dir with a run.sh that dies at runtime.
+    try:
+        cfg.run_command("config.yaml")
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"ERROR: no runnable launcher for this experiment: "
+                         f"{type(exc).__name__}: {exc}")
+
     out = Path(args.output_dir)
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"ERROR: --output-dir {out} exists and is not empty")
