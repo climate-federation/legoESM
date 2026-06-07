@@ -597,7 +597,12 @@ def plane_compressible_euler_slow_tendencies_halo(
     #     from the GLOBAL horizontal mean (= SAM qv0/qn0/qp0), so it
     #     matches the serial jnp.mean at n_ranks==1 and is the true domain
     #     mean for n_ranks>1. Dry θ' buoyancy stays in the acoustic substep.
-    if config.moist_buoyancy:
+    # Gated like the serial path: when acoustic_moist_buoyancy=True (default) the
+    # moist buoyancy is added INSIDE the acoustic substeps (the shared plane
+    # wrappers), so adding it here too would DOUBLE-COUNT. (At n_ranks==1 the
+    # acoustic helper's local mean equals this global mean ⇒ serial==halo parity.)
+    if config.moist_buoyancy and not getattr(
+            config, "acoustic_moist_buoyancy", True):
         dw_dt = dw_dt + _moisture_buoyancy_w_half(
             state.tracers.data, theta_p, height_coord,
             lambda f: _global_hmean_plane(f, layout),
@@ -1183,7 +1188,8 @@ def slow_tendency_jit_split(
     # the monolithic kernel before those legs. Kept here (not in the jitted
     # phase2) because the GLOBAL horizontal mean needs ``layout``, which the
     # phase2 signature does not carry. Skipped when moisture is off.
-    if config.moist_buoyancy:
+    if config.moist_buoyancy and not getattr(
+            config, "acoustic_moist_buoyancy", True):  # else added in acoustic loop
         b_half = _moisture_buoyancy_w_half(
             state.tracers.data, state.theta_prime.data, height_coord,
             lambda f: _global_hmean_plane(f, layout),

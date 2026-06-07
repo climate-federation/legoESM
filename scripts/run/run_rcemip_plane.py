@@ -965,6 +965,12 @@ def parse_args():
                         "'15,30,45,60'. Empty = off.")
     p.add_argument("--snapshot-heights", type=str, default="1000,5000,9000,12000",
                    help="Comma-separated heights [m] for the 4-level snapshots.")
+    p.add_argument("--checkpoint-every", type=int, default=0,
+                   help="Save a full-state checkpoint every N TIME STEPS (resumable). "
+                        "0 = off.")
+    p.add_argument("--restart", type=str, default="",
+                   help="Resume from this checkpoint npz (rce_checkpoint). Empty=fresh "
+                        "IC. Use 'latest' to auto-pick the newest in <output>/checkpoints.")
     p.add_argument("--output", type=Path, default=Path("results/rcemip_plane"))
     return p.parse_args()
 
@@ -1182,6 +1188,20 @@ def main():
         n_tracers=n_tracers, seed_kind=args.seed_kind, seed_kmax=args.seed_kmax,
         q_sfc=q_sfc_rce,
     )
+    # Optional restart from a checkpoint (resume long runs after a crash/fix).
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import rce_checkpoint  # noqa: E402
+    _start_step = 0
+    if args.restart:
+        _rpath = (rce_checkpoint.latest(args.output / "checkpoints")
+                  if args.restart == "latest" else Path(args.restart))
+        if _rpath is None:
+            print(f"  --restart {args.restart}: no checkpoint found, fresh IC.")
+        else:
+            state, _start_step, _t0 = rce_checkpoint.load(_rpath, state)
+            print(f"  RESTART from {_rpath} at step {_start_step} "
+                  f"(t={_t0:.0f}s, day {_t0/86400:.2f})")
+    _ckpt_every = args.checkpoint_every if args.checkpoint_every > 0 else 0
     mass0 = float(compute_dry_mass_plane(state, grid, hc, tm))
 
     snap_dir = args.output / "snapshots"
@@ -1220,7 +1240,7 @@ def main():
         rad_jit = None
     cached_rad_tend = None
 
-    for i in range(args.steps):
+    for i in range(_start_step, args.steps):
         if rad_jit is not None and (
             i % args.radiation_interval == 0 or cached_rad_tend is None
         ):
@@ -1236,12 +1256,24 @@ def main():
             min_th = float(jnp.min(state.theta_prime.data))
             max_th = float(jnp.max(state.theta_prime.data))
             max_qv = float(jnp.max(state.tracers.data[..., 0]))
+            max_rhop = float(jnp.max(jnp.abs(state.rho_prime.data)))
+            min_tr = float(jnp.min(state.tracers.data))
             mass = float(compute_dry_mass_plane(state, grid, hc, tm))
             rel = abs(mass - mass0) / abs(mass0)
             print(f"{i+1:5d}  {t:7.2f}  {max_w:9.3e}  {min_th:12.4e}  "
-                  f"{max_th:12.4e}  {max_qv:9.3e}  {rel:8.2e}", flush=True)
-            if not bool(jnp.all(jnp.isfinite(state.w.data))):
-                print("\nNON-FINITE STATE — aborting.")
+                  f"{max_th:12.4e}  {max_qv:9.3e}  {rel:8.2e}  "
+                  f"rho'={max_rhop:.2e} minTr={min_tr:.2e}", flush=True)
+            # Per-field NaN trace: report WHICH field fails first (the NaN may
+            # originate in a tracer/rho' and only reach w a step later).
+            _fld = {"u": state.u.data, "v": state.v.data, "w": state.w.data,
+                    "theta'": state.theta_prime.data, "rho'": state.rho_prime.data}
+            bad = [k for k, v in _fld.items() if not bool(jnp.all(jnp.isfinite(v)))]
+            _tr = state.tracers.data
+            badtr = [s for s in range(_tr.shape[-1])
+                     if not bool(jnp.all(jnp.isfinite(_tr[..., s])))]
+            if bad or badtr:
+                print(f"\nNON-FINITE in fields={bad} tracer_slots={badtr} "
+                      f"— aborting.")
                 break
         if args.snapshot_every > 0 and (i + 1) % args.snapshot_every == 0:
             _emit_surface_snapshot_png(
@@ -1259,6 +1291,11 @@ def main():
             rce_snapshot.save_3d(
                 args.output, i + 1, (i + 1) * args.dt, state, grid, hc)
             print(f"  [3D snapshot dumped @ day {(i+1)*args.dt/86400:.1f}]",
+                  flush=True)
+        if _ckpt_every and (i + 1) % _ckpt_every == 0:
+            rce_checkpoint.save(args.output / "checkpoints", i + 1,
+                                (i + 1) * args.dt, state)
+            print(f"  [checkpoint @ step {i+1}, day {(i+1)*args.dt/86400:.2f}]",
                   flush=True)
 
     if args.snapshot_every > 0:

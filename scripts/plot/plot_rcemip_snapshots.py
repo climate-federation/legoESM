@@ -47,7 +47,9 @@ def plot_frame(npz_path: Path, out_png: Path | None = None) -> Path:
     Lx, Ly = float(d["Lx"]) / 1e3, float(d["Ly"]) / 1e3
     extent = [0.0, Lx, 0.0, Ly]
     heights = np.asarray(d["heights"])
-    cond = np.asarray(d["cond_levels"]) * 1e3   # g/kg
+    # clip O(1e-12) round-off negatives in near-zero condensate to 0 (hydrometeors
+    # are physically >= 0; the CRM transport is not strictly positivity-preserving).
+    cond = np.maximum(np.asarray(d["cond_levels"]), 0.0) * 1e3   # g/kg
     w = np.asarray(d["w_levels"])
     qv = np.asarray(d["qv_levels"]) * 1e3       # g/kg
     nh = heights.shape[0]
