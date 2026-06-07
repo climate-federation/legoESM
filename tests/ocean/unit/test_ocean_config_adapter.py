@@ -169,6 +169,32 @@ def test_time_override_not_a_noop():
     assert cfg.signature() != sig0
 
 
+def test_run_control_overrides_not_noops():
+    # codex P2: overrides the runner consumes outside the runtime config
+    # (output.path, grid.nlev, grid.n_lat/n_lon, time.duration_days) must change
+    # the signature so init_experiment does not reject them as no-ops.
+    for key, value in (
+        ("output.path", "output/custom/"),
+        ("grid.nlev", 40),
+        ("grid.n_lat", 200),
+        ("grid.n_lon", 400),
+        ("time.duration_days", 999),
+    ):
+        cfg = OceanExperimentConfig()
+        sig0 = cfg.signature()
+        cfg.set(key, value)
+        assert cfg.signature() != sig0, f"{key} override wrongly a no-op"
+
+
+def test_forcing_override_is_a_noop():
+    # forcing.dataset is advisory (the omip runner always loads CORE-II NYF), so
+    # overriding it genuinely does not change the run -> stays a no-op.
+    cfg = OceanExperimentConfig()
+    sig0 = cfg.signature()
+    cfg.set("forcing.dataset", "something_else")
+    assert cfg.signature() == sig0
+
+
 def test_resolve_run_controls_drives_run_from_yaml():
     import argparse
 

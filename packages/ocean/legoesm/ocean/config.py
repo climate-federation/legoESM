@@ -256,9 +256,21 @@ class OceanExperimentConfig:
         differ (a no-op is only flagged on a byte-identical resolved config).
         """
         try:
-            # Fold in the time block too: it affects the run but lives outside
-            # the runtime NamedTuple, so dt/duration overrides are not no-ops.
-            return repr((self.to_ocean_config(), self.get("time")))
+            # Fold in EVERY field the run consumes outside the runtime NamedTuple
+            # (the run controls applied by resolve_ocean_run_controls), so a
+            # legitimate override like ``-o output.path=...`` / ``-o grid.nlev=``
+            # / ``-o grid.n_lat=`` is not mis-flagged as a no-op by
+            # init_experiment.  Advisory-only fields (forcing.dataset) are
+            # deliberately excluded — overriding them really is a no-op.
+            return repr((
+                self.to_ocean_config(),
+                self.get("time.dt_seconds"),
+                self.get("time.duration_days"),
+                self.get("output.path"),
+                self.get("grid.nlev"),
+                self.get("grid.n_lat"),
+                self.get("grid.n_lon"),
+            ))
         except Exception as exc:  # noqa: BLE001
             return f"<unresolvable: {type(exc).__name__}: {exc}>"
 
