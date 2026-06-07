@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,14 +100,32 @@ def _template_path(template: str) -> Path:
     return path
 
 
-def _render_run_sh(machine: dict[str, Any], config_rel: str) -> str:
+def render_run_sh(
+    machine: dict[str, Any],
+    *,
+    run_cmd: str,
+    enable_x64: bool = False,
+    workdir: str | None = None,
+) -> str:
+    """Render a ``run.sh`` launcher that sets the JAX env then runs ``run_cmd``.
+
+    Single source of truth for the launcher shell, shared by ``init_experiment``
+    (``run_cmd='legoesm run config.yaml'``) and the interactive ``wizard`` (which
+    routes to ``run_coupled``, the ocean/SCM matrices, the plane-LES scripts, or
+    training — none of which are ``legoesm run``).  ``enable_x64`` adds
+    ``export JAX_ENABLE_X64=1`` for 64-bit runs.  ``workdir`` overrides the launch
+    directory (default: the bundle dir, ``$(dirname "$0")``) — needed when the
+    command references repo-root-relative paths (e.g. the AIMIP suite manifest).
+    Honors the machine profile's ``jax_platforms`` / ``venv_activate`` / SLURM
+    directives just as before.
+    """
     plat = machine.get("jax_platforms", "cpu")
     venv = machine.get("venv_activate", "") or ""
     sched = machine.get("scheduler", "none")
     lines = ["#!/usr/bin/env bash", "set -euo pipefail", ""]
     if sched == "slurm":
         s = machine.get("slurm", {}) or {}
-        lines.append(f"#SBATCH --job-name=legoesm")
+        lines.append("#SBATCH --job-name=legoesm")
         if s.get("partition"):
             lines.append(f"#SBATCH --partition={s['partition']}")
         if s.get("nodes"):
@@ -118,11 +137,13 @@ def _render_run_sh(machine: dict[str, Any], config_rel: str) -> str:
         if s.get("account"):
             lines.append(f"#SBATCH --account={s['account']}")
         lines.append("")
-    lines.append('cd "$(dirname "$0")"')
+    lines.append(f"cd {shlex.quote(workdir)}" if workdir else 'cd "$(dirname "$0")"')
     if venv:
         lines.append(venv)
     lines.append(f"export JAX_PLATFORMS={plat}")
-    lines.append(f"legoesm run {config_rel}")
+    if enable_x64:
+        lines.append("export JAX_ENABLE_X64=1")
+    lines.append(run_cmd)
     lines.append("")
     return "\n".join(lines)
 
@@ -190,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     cfg.to_yaml(str(out / "config.yaml"))
-    (out / "run.sh").write_text(_render_run_sh(machine, "config.yaml"))
+    (out / "run.sh").write_text(render_run_sh(machine, run_cmd="legoesm run config.yaml"))
     (out / "run.sh").chmod(0o755)
 
     meta = cfg.get("experiment") or {}
