@@ -187,7 +187,34 @@ directly with default args → unaffected. Leaf tests 5/5.)
   duogrid seam flux sync [pre-existing], (b) zeta/KE use unmasked u_d/v_d while div_v masked
   [O(coastline-err), the D-grid is already source-zeroed below seafloor].
 - **w-fix** `ocean_pe_cdgrid.py:222` add `thickness_weighted=True` (THE cold-start root cause).
-**Testing combined #1+#2+w-fix:** 8421125 (z* + partial, --years 0.0015 ≈ 30× past old NaN).
+**COMMITTED d45234c7** (all 3 fixes; validation: leaf 5/5, diagnose_w unit 15, ocean
+regression 262 pass, cd-grid differentiability pass [AD intact]; bundled-suite SIGABRT was
+env OOM in test_differentiability_ocean — passes isolated 824s).
+**w-fix RESULT (8421125):** partial cold-start blowup delayed **140→182 (~30%)** but NOT
+solved; z* unaffected (step 14, surface horizontal spike). #1 bit-identical (eta≈0). #2 tiny
+(636 vs 654). Each fix real+correct, but the **definitive remaining cube gate** is below.
+
+### THE CUBE GATE (next): partial-cell horizontal PGF correction on the cd-grid AL corner grad
+The persistent lev-19 bottom exponential mode (partial-only; z* never reaches it) = the
+Adcroft/SMC03 partial-cell PGF correction that the proven latlon applies
+(`ocean_pe_latlon_cgrid.py:1097-1144`, default `pgf_scheme="adcroft"`, smc03 option) but the
+cd-grid LACKS — the cube's plain `_arakawa_lamb_gradient(p_prime)` differences 4 cell pressures
+at the same level index k, but on partial topography those cells sit at different centroid
+depths → residual PGF error → spurious bottom flow.
+**VERIFIED DESIGN (Adcroft via linear-operator decomposition):** `_arakawa_lamb_gradient` is
+LINEAR in its input and z_ref is constant across a corner's 4 cells, so the depth-shifted
+`p_eff = p' − g·rho'·(centroid − z_ref)` corner gradient decomposes EXACTLY into existing
+operator calls:
+  `corr = −AL_grad(g·rho'·centroid) + z_ref_corner · AL_grad(g·rho')`
+added to (dp_dx, dp_dy_perp) at `ocean_pe_cdgrid.py:273`. centroid = `compute_centroid_depth(
+eta=0, H_bathy, z_coord)` (eta=0 = J=1 reference, matches latlon line 1137). z_ref_corner =
+4-cell MIN of centroid. For z* (uniform centroid per level) the two terms cancel → **bit-exact**.
+**OPEN IMPL DETAIL (read first):** confirm the EXACT corner→cell-centre staggering + metric of
+`_arakawa_lamb_gradient` (output is (6,n,n,nlev) like KE) so `z_ref_corner` is reduced at the
+SAME locations the operator differences — getting this wrong = plausible-but-wrong PGF.
+**Validation gates:** rest-state machine-zero (uniform T/S → corr=0), z* bit-exact leaf,
+partial-sloped nonzero, AD-finite, then C32 cold-start (does the lev-19 mode clear?) + visual.
+Then smc03 option (`pgf_smc03.py` density-Jacobian kernels) if Adcroft alone insufficient.
 
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
