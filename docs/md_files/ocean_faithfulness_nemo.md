@@ -160,6 +160,20 @@ cube needs BOTH the PGF fixed AND the 2nd mode addressed. Pinpoint job 8427117: 
 (stable ⇒ 2nd mode is bathy/barotropic; blows ⇒ pure cube-metric). `pgf_scheme="zero"` is a committed
 gated diagnostic (adcroft/smc03 bit-unchanged).
 
+### PINPOINT (8427117) — cube cold-start = TWO bathymetry-driven modes; flat bottom STABLE
+zero-PGF + FLAT bottom AND adcroft + FLAT bottom: BOTH **STABLE** (max|u| ~5e-8 m/s = machine noise,
+700 steps). So the cube cold-start blowup is ENTIRELY bathymetry-driven; the core cd-grid dynamics are
+sound on simple geometry. Evidence matrix:
+- smc03 PGF + real bathy -> blows step 210 (Med)        = MODE 1 (baroclinic partial-cell PGF residual)
+- zero-PGF + real bathy  -> blows step 420 (Caribbean)  = MODE 2 (bathy-dependent, NOT the PGF)
+- any PGF + FLAT bottom   -> STABLE (machine noise)
+**Two bathy modes:** (1) baroclinic PGF residual (dominant gate, ~210; smc03/2nd-order reduced not
+killed; needs better PGF or 1/4deg); (2) a slower bathy-dependent barotropic/coupling mode (~420,
+only visible once the PGF is removed) -- almost certainly the EXPLICIT fv3sw barotropic over real bathy
+(g*grad(eta)/eta-floor). **Mode 2 REOPENS the implicit-CN-barotropic path** codex dismissed under the
+(now-refuted) sole-PGF premise. Cube needs BOTH fixed (mode 1 is the earlier/dominant gate). Sharper
+than the prior "resolution-limited": the gate is specifically the BATHYMETRY treatment (PGF+barotropic).
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
