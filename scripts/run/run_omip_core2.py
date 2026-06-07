@@ -1670,13 +1670,15 @@ def main() -> int:
     lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)
     runoff_monthly = None
     if args.runoff:
-        if app_grid_type in ("cubed_sphere", "mpas"):
-            raise ValueError("--runoff: apply_runoff_step is for the lat-lon C-grid "
-                             "family (tripole/latlon); cube/mpas runoff not wired yet.")
-        from legoesm.ocean.coupler.runoff_apply import apply_runoff_step  # noqa: F401
+        if app_grid_type == "cubed_sphere":
+            raise ValueError("--runoff: not wired for the cube (parked grid).")
+        # MPAS uses the 1-D apply_runoff_step_mpas + spread_passes=0 (the
+        # _laplacian_smooth_2d coastal-spread is structured-only; the IDW k=4
+        # regrid already spreads each river to the nearest cells).
+        _spread = 0 if app_grid_type == "mpas" else 2
         runoff_monthly = load_runoff_monthly(
             grid, app_grid_type, lat2d, lon2d, args.mesh,
-            land_mask=np.asarray(state.land_mask.data), spread_passes=2)
+            land_mask=np.asarray(state.land_mask.data), spread_passes=_spread)
     # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
     # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
     # would corrupt the comparison invisibly.
@@ -1836,10 +1838,15 @@ def main() -> int:
                              q_net=sf.q_net * ramp, sw_down=sf.sw_down * ramp)
         state = model.step(state, dt, surface_forcing=sf)
         if runoff_monthly is not None:
-            from legoesm.ocean.coupler.runoff_apply import apply_runoff_step
-            state = apply_runoff_step(
-                state, R_kg_m2_s=runoff_monthly[_runoff_month_idx(step, dt)],
-                z_coord=z_coord, dt=dt)
+            _R = runoff_monthly[_runoff_month_idx(step, dt)]
+            if app_grid_type == "mpas":
+                from legoesm.ocean.coupler.runoff_apply import apply_runoff_step_mpas
+                state = apply_runoff_step_mpas(
+                    state, R_kg_m2_s=_R, z_coord=z_coord, dt=dt)
+            else:
+                from legoesm.ocean.coupler.runoff_apply import apply_runoff_step
+                state = apply_runoff_step(
+                    state, R_kg_m2_s=_R, z_coord=z_coord, dt=dt)
         if nudge_tau_s > 0 and (nudge_release_s <= 0 or step * dt < nudge_release_s):
             a = dt / nudge_tau_s
             Tn = np.asarray(state.T.data)
