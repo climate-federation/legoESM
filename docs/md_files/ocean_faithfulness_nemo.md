@@ -12,7 +12,7 @@ commit messages; `OMIP_faithful.md`. Memories: [[omip-faithful-project]], [[omip
 | **tripole eORCA025 ¼°** | **FAITHFUL** | **1.15** corr 0.99 |
 | **latlon 1°** | **FAITHFUL** | **1.12** corr 0.99 |
 | **mpas ico6 ~115 km** | **FAITHFUL** (iter-~50) | **SST 0.84** corr 0.997, **SSS 0.85** corr 0.94 (best) |
-| cubed_sphere | **PARKED** — free CORE-II cold-start resolution-limited at C32–C96; all correct numerics committed; needs ¼°+full-stack (future) | n/a (blows at cold-start) |
+| cubed_sphere | **PARKED** — cold-start mode-1 PGF residual NOT resolution-fixable (C256 ¼° blows too, at a cube EDGE near the equator); all correct numerics committed | n/a (blows at cold-start) |
 | spectral | **NOT-MEANINGFUL** — global SH basis can't represent ORCA1 coastlines (Gibbs ringing; model self-declares unsupported #99; bathy builder refuses real geometry; T21 can't resolve Drake) | n/a (by construction) |
 **"All 5 grids match ORCA1" is impossible BY CONSTRUCTION (spectral).** Achievable maximum =
 the geometry-representing grids; 3/4 of those are faithful, cube needs a major ¼° effort.
@@ -186,6 +186,34 @@ implicit-CN barotropic, NOT damping). Both bathy-driven (flat-bottom machine-noi
 cd-grid dynamics are SOUND). Cube remains parked (both fixes major) but the path is now precise +
 evidence-based, not a vague resolution wall. New cube knobs committed: --cube-baro-divdamp/-dampv,
 --cube-pgf-scheme zero (all gated/diagnostic; faithful paths bit-unchanged).
+
+### C256 ¼° cube probe (8427650) — mode-1 is NOT resolution-fixable
+rest+topo+no-forcing, FULL corrected stack (smc03 + 2nd-order bottom slope + bathy-smooth5 + RK3),
+C256 (¼°)/nlev20/dt10: **blows step ~288**, seed `umax_lat 1.1, umax_lon 314.8, lev 13` = a **cube
+face EDGE (lon 315) right at the equator**, mid-depth, |u| 400→508 m/s in 6 steps. This REFUTES the
+prior "needs ¼° + full stack" hope: ¼° does NOT clear mode-1. Sharper diagnosis — the residual
+concentrates where (a) the AL corner gradient crosses a cube face seam AND (b) f→0 removes the
+geostrophic restraint, so any spurious/real baroclinic PGF accelerates unchecked. The 3 implicit-CN
+grids (tripole/latlon/MPAS) ride through the same WOA cold-start because their unconditionally-stable
+barotropic absorbs the fast equatorial adjustment; the cube's EXPLICIT fv3sw cannot. **Cube cold-start
+is now fully bounded: mode-1 (baroclinic PGF at cube-edge/equator, ALL resolutions) + mode-2 (bathy
+free-surface, implicit-CN). Both fixes major; cube stays parked. Honest max = the 3 faithful grids.**
+
+### NEMO ACC@Drake reference reader (iter-~52) — pairs with the AMOC reader
+Added `acc_drake_core` + `nemo_acc_drake` to `scripts/validate/nemo_transports.py` (offline, NumPy):
+SIGNED (eastward-positive) net transport through a FIXED model i-column Drake meridian section,
+depth+lat-integrated over [-65,-45] (matches model-side `acc_transport` band), from grid_U (uo,e3u) +
+domain_cfg (e2u,gphiu,glamu). Codex-reviewed (HIGH staircase + 2 MED + 2 LOW → fixed): fixed-i section
+is contiguous-by-construction (no per-row nearest-column staircase gaps), VALID because ORCA1 is a
+regular lat-lon grid in the S.Ocean — and that regularity is ASSERTED (raises if the column's circular
+lon-deviation over the band exceeds a tol), not assumed; signed (not abs, so a reversed-U bug surfaces);
+circular drake_lon. 6 synthetic unit tests (analytic transport, section pick, band exclusion, sign
+preserved, circular lon, curvilinear-REJECT) — all pass. ACC spins up in MONTHS (wind-driven, unlike
+AMOC's decades) → the 5-yr MPAS run gives a MEANINGFUL ACC match (vs AMOC's equilibration gate).
+**NEMO ACC@Drake = 159.26 Sv** (8427657; section lon −68.0, **lon-dev 0.00° → ORCA1 IS regular at
+Drake, fixed-i exact**; cross-checks the per-row 159.78; ORCA1 1° runs high vs obs ~137, normal for an
+eddy-free coarse model). **Both NEMO refs in hand: AMOC 17.74 Sv, ACC 159.26 Sv.** `nemo_transports.py
+... --grid-u X`.
 
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.

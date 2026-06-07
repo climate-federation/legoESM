@@ -1,17 +1,25 @@
-"""NEMO ORCA1 reference transports (AMOC@26N) for the OMIP-faithful comparison.
+"""NEMO ORCA1 reference transports (AMOC@26N + ACC@Drake) for OMIP faithfulness.
 
-Offline read of the NEMO ORCA1 ``grid_V`` (vo, e3v) + ``domain_cfg`` (e1v, gphiv,
-glamv) — no mesh_mask needed.  Computes the Atlantic Meridional Overturning at a
-target latitude with the SAME convention as the legoESM model-side diagnostic
-(``ocean.spinup.compute_amoc_from_state`` / ``diagnostics_streamfunction.
-moc_streamfunction``): ψ(z) = −∫_{surface}^{z} V_zonal dz' (cumsum top→down,
-negated), AMOC = −min_z ψ at the latitude row nearest the target, Atlantic-masked
-by a longitude band.  Units: Sv.  RAPID array obs ~17 Sv at 26.5 N.
+Offline read of the NEMO ORCA1 ``grid_V`` (vo, e3v) / ``grid_U`` (uo, e3u) +
+``domain_cfg`` (e1v/e2u, gphi*, glam*) — no mesh_mask needed.
+
+AMOC: the Atlantic Meridional Overturning at a target latitude with the SAME
+convention as the legoESM model-side diagnostic (``ocean.spinup.
+compute_amoc_from_state`` / ``diagnostics_streamfunction.moc_streamfunction``):
+ψ(z) = −∫_{surface}^{z} V_zonal dz' (cumsum top→down, negated), Atlantic-masked
+by a longitude band, reported as the surface-referenced upper-mid peak.  RAPID
+array obs ~17 Sv at 26.5 N.
+
+ACC: net eastward volume transport through a single Drake-Passage meridian
+section (per-row nearest-longitude U-column, depth- and latitude-integrated).
+Physically equivalent to the model-side ``diagnostics_climate.acc_transport``
+(ψ_bt max−min in the Drake band).  Obs ~137 Sv.  Units: Sv.
 
 Usage:
     python scripts/validate/nemo_transports.py \
         --grid-v .../ORCA1_1y_..._grid_V.nc \
-        --domain-cfg .../domain_cfg.nc [--target-lat 26.5]
+        --domain-cfg .../domain_cfg.nc [--target-lat 26.5] \
+        [--grid-u .../ORCA1_1y_..._grid_U.nc]   # adds ACC@Drake
 """
 from __future__ import annotations
 
@@ -90,6 +98,113 @@ def amoc_core(voe3, e1v, gphiv, glamv, depthv, *, target_lat=26.5,
             "depth_of_max_m": float((depthv[upper] if np.any(upper) else depthv)[kmax])}
 
 
+def acc_drake_core(uoe3, e2u, gphiu, glamu, *, drake_lon=-68.0,
+                   lat_south=-65.0, lat_north=-45.0, max_lon_dev_deg=5.0):
+    """Drake-passage ACC zonal volume transport [Sv] from PURE arrays (no I/O).
+
+    Net EASTWARD volume flux (SIGNED, eastward positive) through a FIXED model
+    i-column (a meridian) at the Drake-Passage longitude, summed over depth and
+    the passage latitude band.
+
+    Why a fixed column (not a per-row nearest-longitude pick): a single i-column
+    is a CONTIGUOUS section with NO staircase gap, so it measures the net zonal
+    flux exactly.  This is valid because ORCA1 is a REGULAR lat-lon grid in the
+    Southern Ocean (the tripole fold is north of ~50 N), where a constant i IS a
+    meridian.  That regularity is ASSERTED, not assumed: every band row's
+    circular longitude at the chosen column must stay within ``max_lon_dev_deg``
+    of ``drake_lon`` — otherwise the grid is curvilinear there and a fixed-i
+    section would mis-sample, so the function RAISES rather than silently report
+    a plausible-but-wrong number.
+
+    Parameters
+    ----------
+    uoe3 : (z, y, x)  time-mean zonal volume-flux density uo*e3u [m/s·m].
+    e2u : (y, x)      u-face meridional width [m].
+    gphiu, glamu : (y, x)  u-face latitude / longitude [deg].
+
+    Returns a dict with ``acc_Sv`` (SIGNED net section transport — eastward
+    positive, so a reversed U convention or wrong section surfaces as a sign
+    flip / implausible value rather than being hidden by abs), ``n_rows``,
+    ``section_lon_deg`` (mean section longitude), ``i_col`` (the fixed column),
+    ``max_lon_dev_deg`` (the regularity-check residual).  Split out from the
+    NetCDF reader so it is unit-testable on a synthetic analytic flow.
+    Physically equivalent to the model-side ``acc_transport`` (ψ_bt max−min over
+    the same Drake lat band) for the total ACC throughflow; the band default
+    ([-65,-45]) matches ``diagnostics_climate.acc_transport`` for apples-to-
+    apples comparison.  Drake obs ~137 Sv.
+    """
+    uoe3 = np.nan_to_num(np.asarray(uoe3, dtype=np.float64), nan=0.0)
+    e2u = np.asarray(e2u, dtype=np.float64)
+    gphiu = np.asarray(gphiu, dtype=np.float64)
+    glamu = np.asarray(glamu, dtype=np.float64)
+
+    # Circular longitude distance to a normalized drake_lon (so e.g. 292 == -68).
+    drake_w = ((float(drake_lon) + 180.0) % 360.0) - 180.0
+    lon_w = ((glamu + 180.0) % 360.0) - 180.0                  # (y, x) [-180,180)
+    cdist = np.abs(((lon_w - drake_w + 180.0) % 360.0) - 180.0)  # (y, x) circular
+
+    band = (gphiu >= lat_south) & (gphiu <= lat_north)         # (y, x)
+    band_rows = np.where(band.any(axis=1))[0]
+    if band_rows.size == 0:
+        return {"acc_Sv": float("nan"), "n_rows": 0, "i_col": -1,
+                "section_lon_deg": float("nan"), "max_lon_dev_deg": float("nan")}
+
+    # Fixed meridian column from the band-centre row (nearest the Drake longitude
+    # among that row's in-band cells), then the actual band rows AT that column.
+    j_mid = int(band_rows[band_rows.size // 2])
+    cd_mid = np.where(band[j_mid], cdist[j_mid], np.inf)
+    i_col = int(np.argmin(cd_mid))
+    rows = np.where(band[:, i_col])[0]
+    if rows.size == 0:                                         # degenerate column
+        return {"acc_Sv": float("nan"), "n_rows": 0, "i_col": i_col,
+                "section_lon_deg": float("nan"), "max_lon_dev_deg": float("nan")}
+
+    # Regularity assertion: the fixed column must stay near the Drake meridian
+    # over the whole band, else a constant-i section is not a meridian here.
+    max_dev = float(np.max(cdist[rows, i_col]))
+    if max_dev > max_lon_dev_deg:
+        raise ValueError(
+            f"Drake section column i={i_col} deviates {max_dev:.1f} deg from "
+            f"drake_lon={drake_w:.1f} over lat [{lat_south},{lat_north}] "
+            f"(grid not regular here) -> a fixed-i meridian section is invalid; "
+            f"a curvilinear section path with V-face connectors is required.")
+
+    # Depth-integrated zonal transport along the section: Σ_z uo*e3u * e2u.
+    Udz = uoe3[:, rows, i_col].sum(axis=0) * e2u[rows, i_col]  # (n_rows,) [m^3/s]
+    transport = float(Udz.sum())
+    return {"acc_Sv": transport / _SV, "n_rows": int(rows.size), "i_col": i_col,
+            "section_lon_deg": float(np.mean(lon_w[rows, i_col])),
+            "max_lon_dev_deg": max_dev}
+
+
+def nemo_acc_drake(grid_u_path, domain_cfg_path, *, drake_lon=-68.0,
+                   lat_south=-65.0, lat_north=-45.0):
+    """Drake-passage ACC transport [Sv] from NEMO grid_U + domain_cfg."""
+    import xarray as xr
+    dU = xr.open_dataset(grid_u_path, decode_times=False)
+    dc = xr.open_dataset(domain_cfg_path, decode_times=False)
+
+    uname = "uo" if "uo" in dU else ("uoce" if "uoce" in dU else None)
+    if uname is None:
+        raise KeyError("grid_U has neither 'uo' nor 'uoce'")
+    uo_da = dU[uname]
+    # Time-mean the TRANSPORT (uo*e3u), not uo and e3u separately (free surface).
+    if "e3u" in dU:
+        uoe3_da = uo_da * dU["e3u"]
+        if "time_counter" in uoe3_da.dims:
+            uoe3_da = uoe3_da.mean("time_counter")
+        uoe3 = _sq3(uoe3_da.values)
+    else:                                                      # static e3u_0
+        if "time_counter" in uo_da.dims:
+            uo_da = uo_da.mean("time_counter")
+        uoe3 = _sq3(uo_da.values) * _sq3(dc["e3u_0"].values)
+    e2u = _sq2(dc["e2u"].values)
+    gphiu = _sq2(dc["gphiu"].values)
+    glamu = _sq2(dc["glamu"].values)
+    return acc_drake_core(uoe3, e2u, gphiu, glamu, drake_lon=drake_lon,
+                          lat_south=lat_south, lat_north=lat_north)
+
+
 def nemo_amoc_at_latitude(grid_v_path, domain_cfg_path, *, target_lat=26.5,
                           lon_min=-75.0, lon_max=15.0):
     """Atlantic MOC strength [Sv] at ``target_lat`` from NEMO grid_V + domain_cfg."""
@@ -123,15 +238,28 @@ def nemo_amoc_at_latitude(grid_v_path, domain_cfg_path, *, target_lat=26.5,
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--grid-v", required=True)
+    p.add_argument("--grid-u", default=None,
+                   help="ORCA1 grid_U (uo,e3u) — enables ACC@Drake.")
     p.add_argument("--domain-cfg", required=True)
     p.add_argument("--target-lat", type=float, default=26.5)
     p.add_argument("--lon-min", type=float, default=-75.0)
     p.add_argument("--lon-max", type=float, default=15.0)
+    p.add_argument("--drake-lon", type=float, default=-68.0)
+    p.add_argument("--drake-lat-south", type=float, default=-65.0)
+    p.add_argument("--drake-lat-north", type=float, default=-45.0)
     a = p.parse_args()
     r = nemo_amoc_at_latitude(a.grid_v, a.domain_cfg, target_lat=a.target_lat,
                               lon_min=a.lon_min, lon_max=a.lon_max)
     print(f"[NEMO] AMOC@{a.target_lat}N (row lat {r['row_lat_deg']:.2f}, "
           f"j={r['j']}) = {r['amoc_Sv']:.2f} Sv  (RAPID obs ~17)")
+    if a.grid_u is not None:
+        ac = nemo_acc_drake(a.grid_u, a.domain_cfg, drake_lon=a.drake_lon,
+                            lat_south=a.drake_lat_south,
+                            lat_north=a.drake_lat_north)
+        print(f"[NEMO] ACC@Drake (section lon {ac['section_lon_deg']:.1f}, "
+              f"i={ac['i_col']}, {ac['n_rows']} rows, "
+              f"lon-dev {ac['max_lon_dev_deg']:.2f} deg) = {ac['acc_Sv']:.2f} Sv "
+              f"(eastward +; obs ~137)")
     return 0
 
 
