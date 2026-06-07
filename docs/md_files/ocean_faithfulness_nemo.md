@@ -378,6 +378,142 @@ cap → pick B<∇⁴CFL~6e18 at C32/dt30 by hand). Earlier biharmonic (8421758 
 job: rest+topo+no-forcing+smc03(closure)+`--cube-hyperdiff` {1e17,1e18,5e18} (+RK3) → does any keep
 the Med mode bounded past ~300?
 
+### HYPERDIFF SWEEP RESULT (8421978) — biharmonic FAILS; mode is a PGF residual, not under-damping
+rest+topo+no-forcing+smc03(closure), `--cube-hyperdiff`:
+| arm | step14 max\|u\| | step140 | NaN | seed |
+|---|---|---|---|---|
+| hd1e17 (fwd-Euler) | 0.009 | 11.7 | ~210 | lev14 40.7N/4.2E NW Med |
+| hd1e18 | 0.009 | 12.6 | ~210 | same |
+| hd4e18 | 0.009 | 15.0 | ~210 | same (larger B slightly WORSE) |
+| **hd1e18 + RK3** | 0.009 | **2.4** | **~280** | same (RK3 6× slower growth @140) |
+| WOA + hd4e18 | — | 156 | ~182 | lev11 46.2N/7.4E Ligurian/Med |
+**Biharmonic momentum does NOT damp the Med rest-mode** (bigger B no help / slightly worse) ⇒
+confirms it is a **partial-cell PGF residual, not under-damping** (you can't viscously fix a spurious
+pressure force). RK3 is the only real help (6× slower growth, NaN 210→280) but still blows. The
+rest+topo case (uniform T/S, no forcing, no fronts) has EXACT ∇_h p=0 at constant z, so the residual
+is purely numerical — at the steepest under-resolved basin (NW Med, C32 ~2-3 cells, sub-grid
+Gibraltar → isolated micro-basin), bottom/mid-depth-intensified.
+
+### DECISIVE EXPERIMENT (launched 8422335): rest-state resolution sweep under corrected stack
+Partial-cell PGF residuals scale with per-cell topo slope (dh/dx), which shrinks with resolution.
+The prior resolution sweep (8421377) is STALE — pre-closure, WOA+forcing, equator seed. Fresh
+rest+topo+no-forcing+smc03(closure)+RK3 at **C32/C48/C96** (dt 30/20/10, baseline CFL-capped A_h, NO
+biharmonic — it confounds), fixed model-time window. Reads:
+- **shrinks with res** → cube gate is RESOLUTION-limited → faithful path = C256 (¼°) + full stack
+  (matches the proven eORCA025 tripole); not a discretization bug.
+- **flat** → fundamental cd-grid partial-cell PGF/fill residual → needs a better discretization
+  (EOS-pressure-consistent wet/rock fill — see investigation below).
+### RESOLUTION SWEEP RESULT (8422335) — REFUTES "run ¼°"; mode is resolution-INVARIANT
+rest+topo+no-forcing+smc03(closure)+RK3:
+| res | dt | NaN step | NaN model-time | seed |
+|---|---|---|---|---|
+| C32 | 30 | ~280 | ~8340 s | **Med** 40.7N/4.2E lev14 |
+| C48 | 20 | ~291 | ~5820 s | equator −6.5/130.3 lev17 |
+| C96 | 10 | ~252 | ~2520 s | **equator/Indonesia** ±5/131 lev15-18 |
+Blowup STEP-count ~constant (250-290) and EARLIER in model-time at finer dx (grid-scale mode,
+growth ∝ 1/dx). Seed MOVES Med→Indonesian-throughflow as resolution exposes more steep straits.
+**Higher resolution does NOT help** (matches the OLD pre-closure sweep 8421377). The "cube needs ¼°"
+hypothesis is dead for the rest-state mode: it's not under-resolution, it's an undamped residual that
+reappears at whatever the steepest sub-grid topography is.
+
+### AUDIT RESULT (read-only workflow) — residual = SHARED pgf_smc03 curved-EOS bottom-slope error
+The synthesis agent ran a login-safe numpy check (linear vs Wright EOS) and self-corrected the
+map-agent's claim. VERIFIED facts:
+- The cd-grid AL coefficient decomposition `dp=AL(a)+z_r·AL(b)+z_r²·AL(c)` is the EXACT Taylor
+  identity for the in-cell quadratic P_k → algebraically IDENTICAL to the proven latlon "P at common
+  z_target" difference (numpy: diff=0.0, both 7.98 Pa in the in-range regime). The cd-grid port is
+  NOT the bug.
+- The residual is ENTIRELY the **one-sided (bottom-active partial cell, σ=δ_top) vs two-sided
+  (interior harmonic-mean) slope mismatch in `reconstruct_harmonic_slopes` (pgf_smc03.py:53-55,116,
+  122)**, which is nonzero ONLY for a curved/pressure-dependent EOS (Wright). LINEAR EOS → exactly 0
+  → **every existing rest test uses LinearEOSConfig → all BLIND to this**. The cube runs Wright.
+- This kernel is SHARED by latlon (SST-RMSE 1.1), tripole, MPAS. A "real" fix (seafloor-bounded
+  two-sided bottom slope) lives in pgf_smc03.py → would perturb the proven grids → FORBIDDEN blast
+  radius for a cube-only bug. z²-float32-amplification disproven (c-term coeffs tiny).
+- Zero-risk follow-ups the audit recommends: (a) add a CURVED-EOS stepped-bathy rest regression test
+  (locks the LinearEOS blind spot); (b) optional cd-grid-LOCAL float64 upcast of rho_prime/σ/a,b,c in
+  ocean_pe_cdgrid §10b (only if a resolution-INVARIANT float floor is seen — it was NOT the dominant
+  term).
+
+### THE REAL CUBE GATE (locked this iter): missing DISSIPATION STACK, not PGF, not resolution
+WHY are latlon/tripole stable with the SAME shared pgf_smc03 residual but the cube is not?
+**The cube cd-grid cold-start path LACKS the scale-selective + bottom dissipation the proven grids
+use.** Verified by grep:
+- cube cd-grid baroclinic momentum (`ocean_pe_cdgrid.py:568-605`) = constant harmonic
+  `laplacian_viscosity_3d` + constant biharmonic `hyperdiffusion_3d` ONLY. **NO Smagorinsky.**
+- bottom drag is applied ONLY in `barotropic_latlon_cgrid.py:392` + `barotropic_mpas.py`; the cube
+  (fv3sw barotropic `shallow_water_fv3_cdgrid.py` + cd-grid baroclinic) applies **NONE** —
+  `run_omip_core2.py:841` hardcodes `BottomDragConfig(scheme="none")`.
+- proven latlon/tripole WIN with `--C-smag-lap 3.0 --smag-cfl-safety 0.125` →
+  `smagorinsky_biharmonic_tendency_cgrid` (flow-adaptive, deformation-dependent, ramps where the mode
+  grows) — exactly what the cube is missing. Biharmonic 8421978 failed because it's CONSTANT, not
+  deformation-adaptive; the proven stabilizer is the flow-adaptive Smag, not fixed ∇⁴.
+**FAITHFUL NEXT LEVER = port the proven dissipation stack to the cube cd-grid:** (1) Smagorinsky
+biharmonic lateral viscosity on the 3D baroclinic momentum (cd-grid analogue of
+`smagorinsky_biharmonic_tendency_cgrid`, CFL-capped via smag_cfl_safety, applied in the
+external-physics path — NOT gated behind `physics_fn is None`); (2) bottom drag on the cd-grid
+(reuse the grid-neutral `implicit_bottom_drag_factor` from `ocean_tendency_common`; the seed is
+bottom/mid-depth-intensified → bottom drag is the most targeted, simplest first piece). Both need NEW
+cd-grid code (multi-iteration dycore work). Design investigation launched → implement next iter.
+**Cheap dead-ends ruled out this iter:** RK3 (helps, NaN 280, not enough), biharmonic (no help),
+resolution (no help), eta-PGF/C-face/Adcroft (all earlier).
+
+### BOTTOM DRAG PORTED to the cd-grid (this iter) — validation 8423310, codex review in flight
+Design workflow recommended **bottom drag FIRST** (simpler, targets the bottom/mid-depth seed, no
+dt-threading, `OceanConfig` already has the fields, smallest diff, fastest signal; Smagorinsky is the
+bigger second piece — needs a new energy-stable two-pass operator + dt-threaded CFL cap).
+**Implemented** `_bc_bottom_drag_cdgrid` (`ocean_pe_cdgrid.py`): cell-centre analogue of the proven
+latlon `_bc_bottom_drag` — linear / MOM6 quadratic-with-floor (`bottom_drag_bg_velocity`) /
+BBL-distributed (`bottom_drag_bbl_thickness`), applied at the partial-cell `bottom_level` (z*
+fallback nlev−1), NO u/v-face split (cd-grid is cell-centre). Called UNCONDITIONALLY after the
+hyperdiff block (NOT behind `physics_fn is None`) so the OMIP cube run — whose physics_fn carries no
+drag — gets it; gated `bottom_drag_r>0` → off = bit-exact. Wired `--cube-bottom-drag-r /
+--cube-bbl-thickness / --cube-bottom-drag-bg-vel` through `build_cubed_sphere` + `_ovr`. **7 leaf
+tests** added to `test_cdgrid_partial_cells.py` (rest→0, off bit-exact on z*+partial, bottom-level-
+only, z* deepest-level, dissipative ΣKE≤0, BBL-spreads, AD-finite). py_compile OK. **Job 8423310**:
+pytest + C32 rest+topo+no-forcing+smc03+RK3 drag sweep {r=1e-3/3e-3, bbl=0/500/1000} — does drag bound
+the rest Med mode past step 400 (baseline NaN ~280)? NO shared-kernel edits (pgf_smc03/eos/vertical
+untouched); blast radius = cube only (OceanConfig already had the fields).
+**Leaf tests: 16/16 PASS** (9 existing partial-cell regression + 7 new drag). **Codex review: 2 HIGH
++ 1 MED, rest CLEAN** (linear sign/units, bottom_level+z* selection, BBL normalization,
+off-bit-exact, below-seafloor masking all confirmed correct):
+- **HIGH#1 FIXED** — quadratic (DRAG_BG_VEL) branch used per-component speed (a latlon C-grid
+  face-stagger artifact); on the co-located cd grid the physical stress is the VECTOR form
+  τ=−Cd·|u|·u → `speed=√(u²+v²+u_bg²)`, one coeff both components. Linear path unaffected (no `speed`).
+- **HIGH#2 DEFERRED (gated)** — cube fv3sw barotropic applies no `implicit_bottom_drag_factor`, so the
+  depth-mean isn't the full latlon/mpas stack. Design DELIBERATELY chose explicit single-owner
+  baroclinic drag (no fv3sw substep hook; avoids double-count); the bottom-level explicit drag still
+  feeds the depth-mean via the barotropic re-derive. Implicit barotropic drag needs dt-threading
+  (the Smagorinsky piece) → fold in there IF the empirical result needs it.
+- **MED DEFERRED (gated)** — explicit single-cell drag can overshoot (sign-flip) when dt·r/h>2 on a
+  thin partial cell; mitigated by BBL (the cold-start default; the sweep's `r1e3_nobbl` arm tests the
+  unmitigated path). Robust fix = implicit form (needs dt). Gate on the sweep.
+
+### BOTTOM DRAG COLD-START RESULT (8423310) — FAILS; onset UNCHANGED ⇒ mid-depth mode
+| arm | >5 m/s onset | NaN |
+|---|---|---|
+| nodrag | step 182 (28 m/s) | 280 |
+| r=1e-3 bbl500 | step 182 (28 m/s) | 280 |
+| r=3e-3 bbl500 | step 182 (28 m/s) | ~later, still NaN |
+Bottom drag does **NOT change the onset** (all hit 28 m/s at step 182, identical to nodrag). TWO
+reasons: (1) the C32 seed is **lev14 = MID-DEPTH** (not the bottom level) — bottom drag acts only at
+`bottom_level`, missing it; (2) drag ∝ u is negligible during the PGF-driven spin-up (only bites
+once u is already huge → too late). **Bottom drag is the wrong tool for a mid-depth PGF-forced mode.**
+The unit physics is correct (16/16) and it stays as a faithful option, but it does not gate the cube.
+
+### DISCRIMINATOR (this iter): can ANY viscosity hold the Med PGF residual?
+Before building the HARD cd-grid Smagorinsky strain operator (note: the design's `dgrid_vorticity`
+suggestion is WRONG — vorticity ζ=vx−uy ≠ shear strain D_S=vx+uy; the cd-grid lacks a strain op, must
+build one, error-prone), test the CHEAP upper bound: Smag's viscosity is capped at the area/dt
+ceiling, so **MAX constant harmonic viscosity + RK3 is an upper bound on what Smag can do at the
+mode**. The cube hardcodes harmonic `cfl_safety=0.20` (~5× below the forward-Euler stable max 1.0).
+Made it tunable (`--cube-harmonic-cfl-safety`); sweep {0.20, 0.5, 1.0} (+drag). **If max harmonic
+bounds the rest mode → Smag is worth building (faithful, leaves interior quiescent). If NOT →
+viscosity fundamentally cannot hold the Med PGF residual → the gate is the shared `pgf_smc03`
+curved-EOS error / under-resolution, and the faithful options narrow to (a) the shared-PGF fix with
+full all-grid re-validation, or (b) accept the cube is C32-Med-limited.** Verify-first before the big
+operator.
+
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
 partial-cell support** — `ocean_pe_fc.py`/`ocean_pe_cdgrid.py` hardcoded `z_coord.dz_ref`

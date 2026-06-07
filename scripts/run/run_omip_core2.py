@@ -790,7 +790,10 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        div_damp_2=None, div_damp_4=None, baroclinic_rk3=None,
                        mask_marginal_seas=False, dt=30.0,
                        velocity_ceiling=None, partial_cell=False,
-                       pgf_scheme=None):
+                       pgf_scheme=None, bottom_drag_r=None,
+                       bottom_drag_bbl_thickness=None,
+                       bottom_drag_bg_velocity=None,
+                       harmonic_cfl_safety=None):
     """Build a cubed-sphere ocean (FV3 C-D grid baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -831,12 +834,17 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     # diffusive-CFL limit A_h*dt/dx^2 <= cfl_safety/4 -> maximal stable viscosity.
     # cfl_dt_estimate=dt so the cap matches the actual timestep.
     _harm_Ah = A_h if A_h is not None else 1.0e9
+    # Diffusive-CFL cap safety (A_h·dt/dx² ≤ cfl_safety/4): default 0.20 is ~5×
+    # below the forward-Euler stable max (1.0); tunable to probe whether a
+    # stronger isotropic ceiling — the upper bound on what flow-adaptive
+    # Smagorinsky could deliver at the unstable cell — holds the cold-start mode.
+    _harm_cfl = harmonic_cfl_safety if harmonic_cfl_safety is not None else 0.20
     phys = OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="kpp"),
         lateral_mixing=LateralMixingConfig(
             scheme="harmonic",
             harmonic=HarmonicConfig(A_h=_harm_Ah, K_h=1.0e3, enforce_cfl=True,
-                                    cfl_dt_estimate=float(dt), cfl_safety=0.20)),
+                                    cfl_dt_estimate=float(dt), cfl_safety=_harm_cfl)),
         surface_forcing=SurfaceForcingConfig(scheme="external"),
         bottom_drag=BottomDragConfig(scheme="none"),  # drag via model config, not physics
         convection=OceanConvectionConfig(scheme="enhanced_diffusion"),
@@ -852,7 +860,12 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                               ("div_damp_4", div_damp_4),
                               ("baroclinic_rk3", baroclinic_rk3),
                               ("velocity_ceiling", velocity_ceiling),
-                              ("pgf_scheme", pgf_scheme)) if v is not None}
+                              ("pgf_scheme", pgf_scheme),
+                              ("bottom_drag_r", bottom_drag_r),
+                              ("bottom_drag_bbl_thickness",
+                               bottom_drag_bbl_thickness),
+                              ("bottom_drag_bg_velocity",
+                               bottom_drag_bg_velocity)) if v is not None}
     if _ovr:
         config = config._replace(**_ovr)
         print(f"[setup] cube config override: {_ovr}")
@@ -1113,6 +1126,22 @@ def main() -> int:
                    help="cube partial-cell PGF scheme on the cd-grid AL corners "
                         "(adcroft=linear shift [default]; smc03=density-Jacobian, "
                         "the faithful path that passes the stratified-rest test).")
+    p.add_argument("--cube-bottom-drag-r", type=float, default=None,
+                   help="cube linear bottom-drag coeff r [m/s] (du/dt|drag=-r*u/h_bot "
+                        "on the cd-grid cell-centre bottom level) — the proven "
+                        "dissipation-stack piece the cube external-physics path lacked; "
+                        "targets the bottom/mid-depth cold-start seed.")
+    p.add_argument("--cube-bbl-thickness", type=float, default=None,
+                   help="cube bottom-boundary-layer thickness H_BBL [m] (>0 spreads the "
+                        "drag over the near-seafloor band instead of one thin partial "
+                        "cell — the cold-start thin-bottom-cell blowup fix).")
+    p.add_argument("--cube-bottom-drag-bg-vel", type=float, default=None,
+                   help="cube MOM6 DRAG_BG_VEL u_bg [m/s] (>0 -> quadratic-with-floor "
+                        "bottom drag; recovers linear r at |u|->0).")
+    p.add_argument("--cube-harmonic-cfl-safety", type=float, default=None,
+                   help="cube harmonic-viscosity diffusive-CFL cap safety (default 0.20; "
+                        "A_h*dt/dx^2 <= safety/4). Raise toward ~1.0 for the maximal "
+                        "stable isotropic ceiling — the upper bound on flow-adaptive Smag.")
     p.add_argument("--cube-divdamp2", type=float, default=None,
                    help="cube 2nd-order divergence damping [m^2/s].")
     p.add_argument("--cube-divdamp4", type=float, default=None,
@@ -1376,6 +1405,10 @@ def main() -> int:
             velocity_ceiling=args.cube_velocity_ceiling,
             partial_cell=args.partial_cell,
             pgf_scheme=args.cube_pgf_scheme,
+            bottom_drag_r=args.cube_bottom_drag_r,
+            bottom_drag_bbl_thickness=args.cube_bbl_thickness,
+            bottom_drag_bg_velocity=args.cube_bottom_drag_bg_vel,
+            harmonic_cfl_safety=args.cube_harmonic_cfl_safety,
         )
         app_grid_type = "cubed_sphere"
     else:

@@ -325,3 +325,159 @@ def test_partial_cell_path_differentiable():
 
     g = jax.grad(loss)(st.T.data)
     assert jnp.all(jnp.isfinite(g)), "gradient through partial-cell path is non-finite"
+
+
+# ---------------------------------------------------------------------------
+# Bottom drag (cd-grid cell-centre) — the proven dissipation-stack piece ported
+# to the cube cold-start path.  Drag is isolated as the difference between a run
+# WITH ``bottom_drag_r > 0`` and the same run with it off (default 0.0).
+# ---------------------------------------------------------------------------
+
+_DRAG_R = 1.0e-3   # [m/s] linear bottom-drag coefficient for the tests
+
+
+def _cfg_drag(r=_DRAG_R, bbl=0.0, bg=0.0):
+    return OceanConfig(A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0, hyperdiff_coeff=0.0,
+                       bottom_drag_r=r, bottom_drag_bbl_thickness=bbl,
+                       bottom_drag_bg_velocity=bg)
+
+
+def _with_uniform_flow(st, u0=0.1, v0=-0.05):
+    return st._replace(
+        u=st.u.replace(data=jnp.full_like(st.u.data, u0)),
+        v=st.v.replace(data=jnp.full_like(st.v.data, v0)),
+    )
+
+
+def _drag_only(st, grid, zc_or_pc, cdgrid, cfg_drag):
+    """Isolate the drag tendency = (with drag) − (without drag)."""
+    t0 = ocean_baroclinic_tendencies_cdgrid(st, grid, zc_or_pc, cdgrid, _cfg())
+    t1 = ocean_baroclinic_tendencies_cdgrid(st, grid, zc_or_pc, cdgrid, cfg_drag)
+    du = np.asarray(t1.du_dt.data) - np.asarray(t0.du_dt.data)
+    dv = np.asarray(t1.dv_dt.data) - np.asarray(t0.dv_dt.data)
+    return du, dv
+
+
+def test_bottom_drag_zero_at_rest():
+    """Drag ∝ u, so at u=v=0 it adds NOTHING (no spurious rest tendency)."""
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    zc = create_ocean_z_star(n_levels=NLEV, H_max=HMAX)
+    H = _sloped_bathy(grid)
+    pc = create_partial_cell_coordinate(zc, jnp.asarray(H))
+    st = _state(grid, zc, jnp.asarray(H))  # rest_state_ocean → u=v=0
+    du, dv = _drag_only(st, grid, pc, cdgrid, _cfg_drag())
+    assert np.max(np.abs(du)) == 0.0 and np.max(np.abs(dv)) == 0.0, (
+        "bottom drag must vanish at rest (u=0)"
+    )
+
+
+def test_bottom_drag_off_bit_exact():
+    """bottom_drag_r=0 (default) leaves the cd-grid tendency BIT-EXACT — the gate
+    adds literally nothing — on both z* and partial-cell coords."""
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    zc = create_ocean_z_star(n_levels=NLEV, H_max=HMAX)
+    H = _sloped_bathy(grid)
+    pc = create_partial_cell_coordinate(zc, jnp.asarray(H))
+    st = _with_uniform_flow(_state(grid, zc, jnp.asarray(H)))
+    for coord in (zc, pc):
+        t_a = ocean_baroclinic_tendencies_cdgrid(st, grid, coord, cdgrid, _cfg())
+        t_b = ocean_baroclinic_tendencies_cdgrid(
+            st, grid, coord, cdgrid, _cfg_drag(r=0.0))
+        for name in _FIELDS_3D + ("deta_dt",):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(t_a, name).data),
+                np.asarray(getattr(t_b, name).data),
+                err_msg=f"{name}: bottom_drag_r=0 must be bit-exact",
+            )
+
+
+def test_bottom_drag_applied_at_partial_bottom_level_only():
+    """On partial cells, drag is nonzero ONLY at each column's own seafloor
+    (``bottom_level``), opposes the flow, and is zero at every other level."""
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    zc = create_ocean_z_star(n_levels=NLEV, H_max=HMAX)
+    H = _sloped_bathy(grid)
+    pc = create_partial_cell_coordinate(zc, jnp.asarray(H))
+    st = _with_uniform_flow(_state(grid, zc, jnp.asarray(H)), u0=0.1, v0=-0.05)
+    du, dv = _drag_only(st, grid, pc, cdgrid, _cfg_drag())
+
+    lvl = np.arange(NLEV)
+    botlev = np.asarray(pc.bottom_level)                      # (6, N, N)
+    is_bot = lvl[None, None, None, :] == botlev[..., None]    # (6, N, N, NLEV)
+    assert np.max(np.abs(du[~is_bot])) < 1e-12, "drag leaked off the bottom level"
+    assert np.max(np.abs(dv[~is_bot])) < 1e-12, "drag leaked off the bottom level"
+    assert np.min(np.abs(du[is_bot])) > 0.0, "drag missing at the bottom level"
+    # Opposes the flow: u0>0 → drag_u<0; v0<0 → drag_v>0.
+    assert np.all(du[is_bot] < 0.0) and np.all(dv[is_bot] > 0.0), (
+        "bottom drag must oppose the velocity"
+    )
+
+
+def test_bottom_drag_zstar_at_deepest_level():
+    """z* (full columns): drag acts at the deepest reference level only."""
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    zc = create_ocean_z_star(n_levels=NLEV, H_max=HMAX)
+    H = jnp.full((6, N, N), HMAX, dtype=jnp.float64)
+    st = _with_uniform_flow(_state(grid, zc, H))
+    du, _ = _drag_only(st, grid, zc, cdgrid, _cfg_drag())
+    above = np.max(np.abs(du[..., :-1]))
+    bottom = np.min(np.abs(du[..., -1]))
+    assert above < 1e-12, f"z* drag leaked above the deepest level (max={above:.2e})"
+    assert bottom > 0.0, "z* drag missing at the deepest level"
+
+
+def test_bottom_drag_dissipative():
+    """Drag removes kinetic energy: Σ (u·drag_u + v·drag_v) ≤ 0."""
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    zc = create_ocean_z_star(n_levels=NLEV, H_max=HMAX)
+    H = _sloped_bathy(grid)
+    pc = create_partial_cell_coordinate(zc, jnp.asarray(H))
+    st = _with_uniform_flow(_state(grid, zc, jnp.asarray(H)))
+    du, dv = _drag_only(st, grid, pc, cdgrid, _cfg_drag())
+    u = np.asarray(st.u.data)
+    v = np.asarray(st.v.data)
+    ke_rate = np.sum(u * du + v * dv)
+    assert ke_rate <= 0.0, f"bottom drag is not dissipative: ΣKE rate={ke_rate:.3e}"
+
+
+def test_bottom_drag_bbl_spreads_above_bottom():
+    """With a BBL thickness, drag is distributed over the near-seafloor band
+    (more wet cells than the single bottom cell) — the thin-cell blowup fix."""
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    zc = create_ocean_z_star(n_levels=NLEV, H_max=HMAX)
+    H = _sloped_bathy(grid)
+    pc = create_partial_cell_coordinate(zc, jnp.asarray(H))
+    st = _with_uniform_flow(_state(grid, zc, jnp.asarray(H)))
+    active = np.asarray(pc.is_active)
+    du_single, _ = _drag_only(st, grid, pc, cdgrid, _cfg_drag())
+    du_bbl, _ = _drag_only(st, grid, pc, cdgrid, _cfg_drag(bbl=1500.0))
+    n_single = int(np.sum((np.abs(du_single) > 1e-14) & active))
+    n_bbl = int(np.sum((np.abs(du_bbl) > 1e-14) & active))
+    assert n_bbl > n_single, (
+        f"BBL must spread drag over more cells (single={n_single}, bbl={n_bbl})"
+    )
+
+
+def test_bottom_drag_differentiable():
+    """jax.grad through the cd-grid bottom-drag path is finite (safe-divide)."""
+    grid = create_cubed_sphere(N)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    zc = create_ocean_z_star(n_levels=NLEV, H_max=HMAX)
+    H = _sloped_bathy(grid)
+    pc = create_partial_cell_coordinate(zc, jnp.asarray(H))
+    st = _with_uniform_flow(_state(grid, zc, jnp.asarray(H)))
+    cfg = _cfg_drag(bbl=1500.0, bg=0.05)  # exercise BBL + quadratic-floor too
+
+    def loss(u_field):
+        s2 = st._replace(u=st.u.replace(data=u_field))
+        tend = ocean_baroclinic_tendencies_cdgrid(s2, grid, pc, cdgrid, cfg)
+        return jnp.sum(tend.du_dt.data ** 2 + tend.dv_dt.data ** 2)
+
+    g = jax.grad(loss)(st.u.data)
+    assert jnp.all(jnp.isfinite(g)), "gradient through bottom-drag path non-finite"

@@ -99,6 +99,92 @@ def _fill_inactive_per_level(
     return jnp.moveaxis(out, 0, -1)
 
 
+def _bc_bottom_drag_cdgrid(du_dt, dv_dt, u_a, v_a, h_k, z_coord, config):
+    """Bottom drag on the cd-grid cell-centre velocity.
+
+    Cell-centre analogue of the proven lat-lon ``_bc_bottom_drag``
+    (``ocean_pe_latlon_cgrid.py``): linear, MOM6 quadratic-with-floor
+    (``bottom_drag_bg_velocity`` = DRAG_BG_VEL), or BBL-distributed
+    (``bottom_drag_bbl_thickness``) drag at the partial-cell seafloor /
+    deepest level.  No u/v-face split — cd-grid velocities live at cell
+    centres, so the lat-lon face machinery collapses to a single
+    cell-centre apply.  The cube cold-start instability seeds at the
+    bottom/mid-depth over steep sub-grid topography, so bottom drag damps
+    it exactly where it grows; it is the proven dissipation-stack piece the
+    cube external-physics path was missing.
+
+    Gated by ``config.bottom_drag_r > 0`` (default 0.0) so the existing
+    cd-grid path is bit-exact when drag is off.  AD-safe: safe-divide
+    ``max(h, 1e-10)``; the bottom-level selector uses the static
+    ``bottom_level`` (constant w.r.t. the differentiated u,v).
+    """
+    r = config.bottom_drag_r
+    u_bg = config.bottom_drag_bg_velocity
+    H_BBL = config.bottom_drag_bbl_thickness
+    # MOM6 background-velocity floor (DRAG_BG_VEL): r_eff recovers the linear
+    # ``r`` at |u| → 0 and scales as quadratic Cd·|u| at |u| ≫ u_bg.
+    # u_bg = 0 → exact linear (bit-identical to the legacy single-cell form).
+    if u_bg > 0.0:
+        # Co-located cell-centre velocities → the physical quadratic bottom
+        # stress is the VECTOR form τ = -Cd·|u|·u (MOM6 BOTTOMDRAGLAW), one
+        # coefficient from the SPEED magnitude shared by both components.  The
+        # lat-lon per-component √(u²+u_bg²) form is a C-grid face-stagger
+        # artifact (u,v live on different faces there); on the co-located cd
+        # grid the vector speed is correct and damps the diagonal bottom flow a
+        # per-component coefficient would under-damp.
+        Cd_eq = r / u_bg
+        speed = jnp.sqrt(u_a * u_a + v_a * v_a + u_bg * u_bg)
+        r_eff_u = Cd_eq * speed
+        r_eff_v = Cd_eq * speed
+    else:
+        r_eff_u = r
+        r_eff_v = r
+    if H_BBL > 0.0:
+        # Distributed BBL drag (Killworth & Edwards 1999 / MOM6): spread the
+        # stress over a fixed near-seafloor thickness ``H_BBL`` instead of
+        # dumping r·u/h into a single (possibly <1 m) partial cell — the
+        # cold-start thin-bottom-cell blowup fix.  Cell-centre column form of
+        # the lat-lon ``_bbl_drag_for_face``.
+        def _bbl(vel, r_eff):
+            z_half = jnp.concatenate([
+                jnp.zeros(h_k.shape[:-1] + (1,), dtype=h_k.dtype),
+                -jnp.cumsum(h_k, axis=-1),
+            ], axis=-1)
+            z_top = z_half[..., :-1]
+            z_bot = z_half[..., 1:]
+            z_seafloor = z_half[..., -1:]
+            bbl_top = z_seafloor + H_BBL
+            overlap = jnp.maximum(
+                0.0,
+                jnp.minimum(z_top, bbl_top) - jnp.maximum(z_bot, z_seafloor),
+            )
+            h_safe = jnp.maximum(h_k, 1e-10)
+            # Effective BBL thickness: on shelves shallower than ``H_BBL`` the
+            # band cannot reach its nominal thickness; normalise by the actual
+            # total overlap (matches the lat-lon path / bbl_drag_distributed).
+            total_overlap = jnp.sum(overlap, axis=-1, keepdims=True)
+            h_bbl_eff = jnp.minimum(jnp.maximum(total_overlap, 1e-10), H_BBL)
+            return -r_eff * vel * overlap / (h_safe * h_bbl_eff)
+        drag_u = _bbl(u_a, r_eff_u)
+        drag_v = _bbl(v_a, r_eff_v)
+    else:
+        n_lev = u_a.shape[-1]
+        level_idx = jnp.arange(n_lev)
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            # Apply at each column's actual seafloor (lowest active level), so
+            # drag damps the bottom-trapped flow on shallow slopes, not only at
+            # the deepest reference level in full columns.
+            bot_lev = z_coord.bottom_level
+        else:
+            # z*: every wet column is full depth → deepest reference level.
+            bot_lev = jnp.full(u_a.shape[:-1], n_lev - 1, dtype=jnp.int32)
+        is_bot_3d = (level_idx == bot_lev[..., jnp.newaxis]).astype(u_a.dtype)
+        h_drag = jnp.maximum(h_k, 1e-10)
+        drag_u = -r_eff_u * u_a / h_drag * is_bot_3d
+        drag_v = -r_eff_v * v_a / h_drag * is_bot_3d
+    return du_dt + drag_u, dv_dt + drag_v
+
+
 # ==============================================================================
 # Main tendency function
 # ==============================================================================
@@ -608,6 +694,18 @@ def ocean_baroclinic_tendencies_cdgrid(
         vel_hyper = vel_hyper_flat.reshape(n_face_v, n_i_v, n_j_v, nlev_v, 2)
         du_dt = du_dt + vel_hyper[..., 0]
         dv_dt = dv_dt + vel_hyper[..., 1]
+
+    # --- 17a. Bottom drag (cd-grid cell-centre) ---
+    # The proven dissipation-stack piece the cube external-physics path was
+    # missing.  Runs UNCONDITIONALLY here (not behind ``physics_fn is None``) so
+    # the OMIP cube run — whose physics_fn carries no drag (BottomDragConfig
+    # scheme="none") — still gets it.  Gated by ``bottom_drag_r`` → off =
+    # bit-exact.  ``u_a``/``v_a`` are already zeroed below seafloor (partial),
+    # and the final active_3d gate keeps the rock inert.
+    if config.bottom_drag_r > 0:
+        du_dt, dv_dt = _bc_bottom_drag_cdgrid(
+            du_dt, dv_dt, u_a, v_a, h_k, z_coord, config,
+        )
 
     # --- 17b. Physics tendencies (surface forcing, bottom drag, etc.) ---
     if physics_fn is not None:
