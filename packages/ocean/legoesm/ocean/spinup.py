@@ -377,18 +377,31 @@ def compute_amoc_from_state_mpas(
     n_edges, nlev = u.shape
 
     angle = np.asarray(mesh.angleEdge, dtype=np.float64)
+    # Canonical min-rule edge thickness (shared with the MPAS dynamics) so the
+    # meridional-flux cross-section uses the SAME partial-cell flux closure as
+    # the model — never re-derived.  Local imports keep spinup import-light.
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.mpas_partial_cell_helpers import min_cell_to_edge
+
     dv = np.asarray(mesh.dvEdge, dtype=np.float64)
     sin_a = np.sin(angle)                                   # (nEdges,)
 
-    # Centred edge thickness from cellsOnEdge.
+    # Min-rule edge thickness from cellsOnEdge (MITgcm hFacZ flux closure): the
+    # shallower cell limits the flow-through area, so a partial-cell bottom step
+    # or a coastline edge (one cell dry, h=0) carries no phantom meridional flux
+    # (centred averaging would; the AMOC binning sums these edges).  Boundary
+    # edges (c2<0) keep the one-sided thickness — their u_edge≈0 (no-normal-flow
+    # BC) so the choice is immaterial there, but min_cell_to_edge's c2=-1 index
+    # would be garbage, hence the explicit interior/boundary ``where``.
     c1 = np.asarray(mesh.cellsOnEdge[0])
     c2 = np.asarray(mesh.cellsOnEdge[1])
     interior = c2 >= 0
     c1_safe = np.where(c1 >= 0, c1, 0)
     c2_safe = np.where(c2 >= 0, c2, 0)
+    h_min = np.asarray(min_cell_to_edge(jnp.asarray(h), mesh))  # (nEdges, nlev)
     h_e = np.where(
         interior[:, None],
-        0.5 * (h[c1_safe] + h[c2_safe]),
+        h_min,
         h[c1_safe],
     )                                                       # (nEdges, nlev)
 

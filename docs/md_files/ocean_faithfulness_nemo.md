@@ -223,10 +223,13 @@ SECTION-TRANSPORT — interior edges whose 2 cells straddle the Drake meridian, 
 `min_cell_to_edge`** so partial-cell bottom-steps/coastlines carry no phantom flux). Wired as
 `_acc_drake_diag` in run_omip_core2 after `_amoc26n_diag` (both run-end sites; appends `acc_drake_Sv`
 to transports.txt; non-fatal). Codex-reviewed: pass-1 HIGH (centered→min-rule) + LOW (pin partial-cell)
-fixed. Tests: 66 pass (11 MPAS-ACC incl. partial-cell min-rule + antipodal + sign; 4 latlon-ACC incl.
-2-D-lat). FOLLOW-UP: `compute_amoc_from_state_mpas` uses the SAME centered edge thickness (pre-existing,
-not this change) — migrate it to `min_cell_to_edge` too. NOTE: the in-flight 5-yr MPAS (8426097) was
-launched BEFORE this wiring, so it emits AMOC only; a follow-up MPAS run will emit ACC.
+fixed. Tests: 69 pass (MPAS-ACC incl. partial-cell min-rule + antipodal + sign; latlon-ACC incl.
+2-D-lat). **AMOC min-rule follow-up DONE:** `compute_amoc_from_state_mpas` migrated from the
+pre-existing centered edge thickness to the canonical `min_cell_to_edge` (interior edges; one-sided at
+boundaries where u≈0) so the MPAS AMOC binning uses the same partial-cell flux closure — codex-clean,
+full-cell AMOC tests unchanged (min==centered there) + new dry-edge test. NOTE: the in-flight 5-yr MPAS
+(8426097) was launched BEFORE this wiring, so it emits AMOC (now min-rule on future runs) but no ACC; a
+follow-up MPAS run will emit ACC.
 
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.

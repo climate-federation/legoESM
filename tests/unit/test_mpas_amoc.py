@@ -154,6 +154,23 @@ class TestComputeAMOCFromStateMPAS:
         )
         assert amoc <= 0.0, f"Reversed cell should give AMOC ≤ 0, got {amoc}"
 
+    def test_partial_cell_min_rule_zeros_dry_edge(self):
+        """An interior edge against a fully-DRY cell carries no meridional flux
+        (min-rule edge thickness -> 0), so AMOC at that band is zero.  A centred
+        0.5·(h_wet+0) average would leak phantom flux and give a nonzero AMOC."""
+        mesh = _FakeMesh()
+        nlev = 6
+        u = np.zeros((mesh.nEdges, nlev))
+        u[0, :3] = 0.05      # overturning cell on edge 0 (cells 0<->1)
+        u[0, 3:] = -0.05
+        h = np.full((mesh.nCells, nlev), 200.0)
+        h[1] = 0.0           # north cell of edge 0 is land (dry)
+        amoc = compute_amoc_from_state_mpas(
+            u, h, mesh, target_lat_deg=22.5, basin="global",
+            lat_band_width_deg=1.0,
+        )
+        assert abs(amoc) < 1e-9
+
     def test_target_lat_outside_grid_returns_nan(self):
         mesh = _FakeMesh()
         nlev = 4
