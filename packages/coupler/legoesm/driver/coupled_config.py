@@ -70,6 +70,16 @@ class CoupledConfig(NamedTuple):
     f_land_mode: str = "analytical"
     # Coupling
     coupling_dt: float = 3600.0
+    # Dynamic surface → radiation feedback.  When True, the coupler's
+    # tile-blended surface albedo and skin temperature (which carry the
+    # sea-ice albedo feedback, zenith ocean albedo, snow brightening, and the
+    # ice/land prognostic skin temperature) are fed back to the atmosphere's
+    # radiation each segment instead of the frozen config scalars.  Default
+    # False keeps existing coupled runs byte-identical; enable it together with
+    # the dynamic surface schemes (IceConfig.temp_dependent_albedo,
+    # OceanAlbedoConfig.method='zenith', LandConfig.snow_albedo_feedback), whose
+    # effect on radiation is otherwise silently dropped.
+    couple_surface_radiation: bool = False
 
 
 # ============================================================================

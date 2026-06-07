@@ -1595,7 +1595,14 @@ class TestCloudFraction:
         assert lw_down_sfc_cloudy > lw_down_sfc_clear
 
     def test_integration_with_sundqvist_clouds(self):
-        """Integration bridge should work with Sundqvist cloud scheme."""
+        """Integration bridge should work with Sundqvist cloud scheme.
+
+        Uses a CONSISTENT gate (``include_clouds=True`` with the active cloud
+        scheme).  Previously this built ``RadiationConfig(scheme='rrtmgp',
+        cloud_scheme='sundqvist')`` with the default ``include_clouds=False``,
+        which ran SILENTLY clear-sky — the finiteness assertion passed without
+        ever exercising the cloud coupling.  ``make_radiation_physics`` now
+        rejects that inconsistent config, so the test pins the working path."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.held_suarez import held_suarez_init
@@ -1606,6 +1613,7 @@ class TestCloudFraction:
 
         config = RadiationConfig(
             scheme="rrtmgp",
+            rrtmgp=RRTMGPConfig(include_clouds=True),
             cloud_scheme="sundqvist",
         )
         physics_fn = make_radiation_physics(config, model_type="hydrostatic")
@@ -1613,6 +1621,14 @@ class TestCloudFraction:
 
         assert tendencies.dT_dt.data.shape == (6, 4, 4, 8)
         assert jnp.all(jnp.isfinite(tendencies.dT_dt.data))
+
+        # The inconsistent gate (clouds on, include_clouds off) must be
+        # rejected, not silently run clear-sky.
+        with pytest.raises(ValueError, match="Inconsistent cloud-radiation gate"):
+            make_radiation_physics(
+                RadiationConfig(scheme="rrtmgp", cloud_scheme="sundqvist"),
+                model_type="hydrostatic",
+            )
 
     def test_cloud_none_matches_clear_sky(self):
         """cloud_scheme='none' should give identical results to no cloud config."""

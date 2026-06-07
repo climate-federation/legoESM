@@ -606,6 +606,48 @@ def _call_radiation_backend(
     return result
 
 
+def _validate_cloud_gate(radiation_config: RadiationConfig) -> None:
+    """Fail loudly on an inconsistent cloud-radiation gate.
+
+    ``RadiationConfig.cloud_scheme`` (which cloud-fraction/optics scheme runs)
+    and ``RRTMGPConfig.include_clouds`` (whether the RRTMGP solver honours the
+    cloud optics) are independent knobs with no cross-sync — ``RadiationConfig``
+    is a plain ``NamedTuple`` and ``ExperimentConfig.validate_strict`` only
+    checks membership, never consistency.  When a cloud scheme is active but
+    ``include_clouds`` is False the cloud optics are still computed and passed
+    to ``solve_columns`` (the ``cloud_scheme != "none"`` branch of
+    ``_call_radiation_backend``), then SILENTLY NULLED by the
+    ``has_clouds = include_clouds and ...`` gate in ``rrtmgp.py`` → clear-sky
+    radiation with no error/warning and a dead gradient through any trained
+    cloud knobs (e.g. AIMIP's Xu-Randall ``cloud_config``, whose whole purpose
+    is end-to-end trainable cloud-radiation coupling).
+
+    Rather than silently coerce one knob (which would blanket-enable RRTMGP
+    cloud optics on every standalone dycore path, including ones whose tracer
+    extractor would then pass partial/bare condensate and run optically inert),
+    this RAISES so the caller must make the two consistent at the config
+    source.  The coupled pipeline (``physics_pipeline._build_rrtmgp_radiation_fn``)
+    and the matrix runner already derive ``include_clouds`` from
+    ``cloud_scheme`` before constructing the config, so they never trip this;
+    direct ``RadiationConfig`` builders (AIMIP, ``combined.py``) must do the
+    same.  Only RRTMGP has the gate; gray radiation is never inconsistent.
+    """
+    if (
+        radiation_config.scheme == "rrtmgp"
+        and radiation_config.cloud_scheme != "none"
+        and not radiation_config.rrtmgp.include_clouds
+    ):
+        raise ValueError(
+            "Inconsistent cloud-radiation gate: cloud_scheme="
+            f"{radiation_config.cloud_scheme!r} is active but "
+            "RRTMGPConfig.include_clouds is False, so the computed cloud "
+            "optics would be SILENTLY discarded by the RRTMGP solver "
+            "(clear-sky radiation, no error, dead cloud gradient). Set "
+            "rrtmgp=RRTMGPConfig(include_clouds=True) to honour the clouds, "
+            "or cloud_scheme='none' for a genuine clear-sky run."
+        )
+
+
 def make_radiation_physics(
     radiation_config: RadiationConfig,
     model_type: str = "hydrostatic",
@@ -635,6 +677,11 @@ def make_radiation_physics(
     Callable
         Physics function with the correct signature for the model.
     """
+    # Cloud-radiation gate consistency — single chokepoint every standalone
+    # dycore radiation factory (incl. combined.py / AIMIP spectral_pe) passes
+    # through.  See ``_validate_cloud_gate`` for why this is required.
+    _validate_cloud_gate(radiation_config)
+
     # Load heavy/static RRTMGP optics once outside model JIT traces.
     rrtmgp_solver = None
     if radiation_config.scheme == "rrtmgp":
