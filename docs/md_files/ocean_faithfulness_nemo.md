@@ -688,6 +688,52 @@ Field.replace, v-guards. Findings:
   generic `--A-h/--bottom-drag-r/...` not wired to mpas (the _create_setup mpas defaults are
   validated-good; the generic flags are latlon-tuned and would MISAPPLY — safer ignored than wrong).
 
+### MPAS ico6 (~ORCA1) 90-DAY RUN — STABLE (8423671); scoring (8424824)
+ico6 (~115 km, 40962 cells) WOA+partial+CORE-II, clean NN land/sea mask, FULL 90 days **STABLE**:
+max|u| ~0.4-0.7 m/s throughout (no blowup), SST equilibrates 18.05→~17.6→18.0, SSS ~34.6-34.7,
+finite, ~19 steps/s (~12 min). day0030/60/90 + final snapshots saved. **The cube's nemesis — a free
+CORE-II cold-start at ~ORCA1 res — runs cleanly on MPAS Voronoi.** Scoring day-90 vs NEMO March
+(8424824, compare_omip_nemo.py --nemo-month 3).
+
+### MPAS ico6 SCORE vs NEMO March (8424824) — EXCELLENT (better than tripole/latlon)
+Raw SST RMSE 2.20 (corr 0.984) — but the GLOBAL number is dominated entirely by the **arctic**
+(RMSE 6.03, bias −3.92 = 4°C too cold); all other bands are tripole/latlon-class: antarctic 0.68,
+SH-mid 0.64, tropics 0.88, NH-mid 1.15. The arctic cold bias = the **no-sea-ice over-cool** the
+proven latlon fixed with `freeze_floor` (−1.8°C surface clamp). **With `--freeze-clamp-C -1.8`
+(2251 cells floored): SST RMSE 0.84, bias 0.03, corr 0.997, arctic 6.03→0.81 — EXCELLENT, BETTER than
+tripole (1.15) / latlon (1.12).** SSS RMSE 1.01 (runoff-gated).
+**MPAS = the 3rd genuinely-faithful grid** (Voronoi pole-free + full stack; the free CORE-II
+cold-start the cube fundamentally could not survive). **In-model freeze-floor PORTED** to
+MPASOceanModel (the latlon-identical surface clamp, gated `config.freeze_floor`, MPAS T is Celsius so
+floor=−1.8; default off → conserving runs bit-exact).
+**Codex review of the floor: 1 HIGH FIXED** — I'd added the fields to the WRONG class
+(`MPASSimpleOceanConfig`, not the `MPASOceanConfig` the model reads) → `config.freeze_floor` would
+AttributeError on every MPAS step. Moved to `MPASOceanConfig`; codex confirmed jnp import, surface
+index [...,0], Celsius units (clamp −1.8 correct), conservation ordering all clean. **In-model
+confirmation (8424826): CONFIRMED — SST RMSE 0.839, bias 0.030, corr 0.997 IN-MODEL** (arctic
+6.03→0.80; bands 0.63-1.15; stable 90 d, max|u| 0.48 m/s), identical to the clamp confirmation.
+**MPAS is officially the 3rd genuinely-faithful grid** (better than tripole 1.15 / latlon 1.12).
+Freeze-floor leaf tests added (clamps-surface / off-not-clamped / surface-only); test job 8424880.
+
+## GRID-5 spectral — NOT-MEANINGFUL for a bathymetric ORCA1 comparison (documented; scope w5jcntc51)
+Read-only scope (3 agents): SpectralOceanModel is build-complete but **fundamentally ill-posed for a
+faithful ORCA1 match**, NOT a question of effort:
+- The model's OWN `__init__` (spectral_ocean_pe.py:710-717) emits a FutureWarning declaring itself
+  **unsupported** — "land boundary handling in spectral space causes Gibbs ringing and unreliable
+  masking" (#99).
+- `rest_state_spectral_ocean` ignores custom bathy/land mask (only a smooth tanh high-lat land cap, NO
+  continents/coastlines); the spectral bathy builder (bathymetry.py:1564-1569) **hard-raises
+  NotImplementedError** on any non-flat/non-all-ocean input → NEMO eORCA1 tmask cannot even be passed.
+- A global spherical-harmonic basis cannot represent NEMO's discrete continents/coastlines/sills that
+  drive ACC/AMOC/gyres without Gibbs ringing; T21 (~5.6°) cannot even resolve Drake Passage.
+- The forcing blocker (no grid→spec forcing path) is real but SECONDARY; even fully wired it would be
+  an aquaplanet, not ORCA1.
+**Verdict: exclude spectral from the faithful comparison set.** The honest accounting is FIVE grids
+considered: **3 faithful (tripole, latlon, mpas)**, 1 parked (cube — resolution-limited free
+cold-start; all correct numerics committed), 1 not-meaningful (spectral — physically ill-posed for a
+bathymetric ocean; a global SH ocean is an aquaplanet solver, a different problem). "All grid types
+match NEMO ORCA1" cannot include spectral BY CONSTRUCTION.
+
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
 partial-cell support** — `ocean_pe_fc.py`/`ocean_pe_cdgrid.py` hardcoded `z_coord.dz_ref`

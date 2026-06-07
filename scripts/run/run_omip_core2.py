@@ -969,7 +969,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      pgf_scheme=None, bottom_drag_r=None,
                      bottom_drag_bbl_thickness=None, bottom_drag_bg_velocity=None,
                      partial_cell=False, n_barotropic_substeps=None,
-                     barotropic_solver=None):
+                     barotropic_solver=None, freeze_floor=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -1010,7 +1010,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                               ("bottom_drag_bbl_thickness", bottom_drag_bbl_thickness),
                               ("bottom_drag_bg_velocity", bottom_drag_bg_velocity),
                               ("n_barotropic_substeps", n_barotropic_substeps),
-                              ("barotropic_solver", barotropic_solver))
+                              ("barotropic_solver", barotropic_solver),
+                              ("freeze_floor", freeze_floor))
             if v is not None}
     if _ovr:
         config = config._replace(**_ovr)
@@ -1596,6 +1597,7 @@ def main() -> int:
             level=args.mpas_level, lloyd_iterations=args.mpas_lloyd,
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             flat_bottom=args.flat_bottom, partial_cell=args.partial_cell,
+            freeze_floor=(True if args.freeze_floor else None),
         )
         app_grid_type = "mpas"
     else:

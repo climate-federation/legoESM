@@ -337,6 +337,13 @@ class MPASOceanConfig(NamedTuple):
     # the recommended setting for partial-cell ETOPO runs.
     # Only meaningful with ``OceanPartialCellCoordinate``.
     vertex_thickness_alpha: float = 0.5
+    # Sea-ice thermodynamic surrogate: floor the SURFACE SST at the seawater
+    # freezing point (~-1.8 C) when ``freeze_floor`` is set.  legoESM carries no
+    # prognostic ice, so without it the Arctic over-cools ~4 C below NEMO; the
+    # floor closes that gap (the same clamp LatLonCGridOceanConfig.freeze_floor
+    # applies).  Off by default so conserving runs are bit-exact unaffected.
+    freeze_floor: bool = False
+    freeze_floor_temp_c: float = constants.T_freeze_ocean - constants.T_freeze
 
 
 class MPASSimpleOceanConfig(NamedTuple):

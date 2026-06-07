@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 # Ensure float64
 jax.config.update("jax_enable_x64", True)
@@ -1413,3 +1414,51 @@ class TestMPASTVDAdvection:
             f"TVD Var(T)={results['tvd']:.6f} should be >= "
             f"upwind Var(T)={results['upwind']:.6f}"
         )
+
+
+# ============================================================================
+# Test: freeze-floor (sea-ice surrogate)
+# ============================================================================
+
+class TestFreezeFloor:
+    """``config.freeze_floor`` floors the SURFACE SST at the seawater freezing
+    point (sea-ice thermodynamic surrogate, surface-only, applied after the
+    step) — the MPAS port of LatLonCGridOceanModel._apply_freeze_floor that
+    closes the no-ice Arctic over-cool vs NEMO."""
+
+    def _cold_surface(self, state):
+        # Set the surface (k=0) to -5 C everywhere (below the -1.8 C floor),
+        # leaving the subsurface profile intact.
+        T = state.T.data
+        return state._replace(T=state.T.replace(data=T.at[..., 0].set(-5.0)))
+
+    def test_freeze_floor_clamps_surface(self, mesh, z_coord, config, state):
+        cfg = config._replace(freeze_floor=True)
+        model = MPASOceanModel(mesh, z_coord, cfg)
+        out = model.step(self._cold_surface(state), 60.0)
+        sfc = np.asarray(out.T.data)[..., 0]
+        floor = cfg.freeze_floor_temp_c
+        assert np.all(sfc >= floor - 1e-9), (
+            f"surface T below the freeze floor: min={sfc.min():.4f} < {floor:.4f}")
+        assert np.all(np.isfinite(sfc))
+
+    def test_freeze_floor_off_does_not_clamp(self, mesh, z_coord, config, state):
+        """Default (freeze_floor=False): the cold -5 C surface is NOT clamped —
+        one 60 s step barely warms it — so the min stays well below the floor."""
+        model = MPASOceanModel(mesh, z_coord, config)  # default freeze_floor=False
+        out = model.step(self._cold_surface(state), 60.0)
+        sfc = np.asarray(out.T.data)[..., 0]
+        assert sfc.min() < config.freeze_floor_temp_c, (
+            "freeze_floor=False must NOT floor the surface (gate not bit-exact off)")
+
+    def test_freeze_floor_surface_only(self, mesh, z_coord, config, state):
+        """The floor touches ONLY the surface level; subsurface levels evolve
+        identically with the floor on vs off (the clamp is k=0 only)."""
+        st = self._cold_surface(state)
+        m_on = MPASOceanModel(mesh, z_coord, config._replace(freeze_floor=True))
+        m_off = MPASOceanModel(mesh, z_coord, config)
+        T_on = np.asarray(m_on.step(st, 60.0).T.data)
+        T_off = np.asarray(m_off.step(st, 60.0).T.data)
+        # Subsurface (k>=1) identical; only k=0 differs.
+        np.testing.assert_allclose(T_on[..., 1:], T_off[..., 1:], rtol=0, atol=0)
+        assert not np.allclose(T_on[..., 0], T_off[..., 0])

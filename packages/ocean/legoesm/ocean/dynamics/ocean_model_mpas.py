@@ -806,6 +806,20 @@ class MPASOceanModel:
                 owned_mask=owned_mask,
             )
 
+        if config.freeze_floor:
+            # Sea-ice thermodynamic surrogate (config.freeze_floor): an exposed
+            # surface ocean cell cannot super-cool below the seawater freezing
+            # point — the excess heat loss physically goes into ice latent heat,
+            # which holds SST at freezing.  legoESM carries no prognostic ice, so
+            # without this the Arctic surface over-cools ~4 C below NEMO (whose
+            # LIM ice caps SST).  SURFACE-ONLY (k=0); an intentional bounded
+            # non-conservative heat source applied AFTER the conservation fixer
+            # (matches LatLonCGridOceanModel._apply_freeze_floor).
+            T = state_new.T.data
+            T_floored = T.at[..., 0].set(
+                jnp.maximum(T[..., 0], config.freeze_floor_temp_c))
+            state_new = state_new._replace(T=state_new.T.replace(data=T_floored))
+
         return cast_pytree(state_new, None, "storage")
 
     @partial(jax.jit, static_argnums=(0,))
