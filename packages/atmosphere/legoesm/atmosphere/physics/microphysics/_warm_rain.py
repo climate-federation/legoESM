@@ -145,8 +145,15 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0, q_c=None):
     return condensation, q_sat
 
 
-def effective_Nc(N_c, Nc_0):
-    """Use config default cloud droplet number where N_c is zero.
+def effective_Nc(N_c, Nc_0, *, predict_Nc=True):
+    """Effective cloud-droplet number for the size distribution / autoconversion.
+
+    ``predict_Nc=False`` (SAM M2005 default ``dopredictNc=.false.``) returns the
+    SPECIFIED constant ``Nc_0`` EVERYWHERE — droplet number is not prognostic, so
+    the ``N_c`` field is ignored here (and must not be evolved). ``predict_Nc=True``
+    (Seifert-Beheng / prognostic Morrison) uses the prognostic ``N_c`` where
+    physical (``N_c > 1``), falling back to ``Nc_0`` for zero/garbage values — this
+    also hard-guards a negative ``N_c`` so ``x_c = q_c·ρ/N_c`` can never go < 0.
 
     Parameters
     ----------
@@ -154,8 +161,10 @@ def effective_Nc(N_c, Nc_0):
         Cloud droplet number concentration [1/m³] (Seifert-Beheng
         per-volume convention; see Notes).
     Nc_0 : float
-        Default cloud droplet number [1/m³].  Typical values:
+        Default/specified cloud droplet number [1/m³].  Typical values:
         ``1e8`` /m³ maritime, ``1e9`` /m³ continental.
+    predict_Nc : bool, default True
+        If False, return ``Nc_0`` everywhere (SAM specified-Nc).
 
     Returns
     -------
@@ -173,6 +182,8 @@ def effective_Nc(N_c, Nc_0):
     ``x_star = 2.6e-10 kg``.  The default ``Nc_0 = 1e8`` is the
     canonical maritime per-volume value.
     """
+    if not predict_Nc:
+        return Nc_0 * jnp.ones_like(N_c)
     return jnp.where(N_c > 1.0, N_c, Nc_0 * jnp.ones_like(N_c))
 
 
@@ -328,7 +339,10 @@ def self_collection_breakup(N_r, q_r, rho, k_sc, breakup_sharpness, D_eq):
     Parameters
     ----------
     N_r : array
-        Rain drop number concentration [1/kg].
+        Rain drop number concentration [1/m^3] (per-VOLUME; the formulas
+        ``q_r·rho/N_r`` and ``dN_r_sc ∝ N_r·q_r·rho`` use the per-volume
+        convention, matching the tracer registry units and the radiation
+        r_eff coupling). Returned number tendencies are likewise [1/(m^3 s)].
     q_r : array
         Rain mixing ratio [kg/kg].
     rho : array

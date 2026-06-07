@@ -286,6 +286,11 @@ def compute_cloud_properties(
         # per-mass N_i), so the #/cm³ for PGAM is N_c/1e6 and the per-MASS number
         # for LAMC is N_c/ρ. Replaces the fixed 14 µm (= SAM's CAM OCEAN fallback;
         # SAM-M2005 uses this PSD reffc by default, douse_reffc=.true.).
+        # Where the prognostic droplet number is 0/garbage (SAM specified-Nc
+        # Morrison, dopredictNc=.false., keeps the Nc slot at 0), fall back to the
+        # specified Nc_default so r_eff is the SAM constant-Nc value, not 35 um.
+        n_cloud = jnp.where(n_cloud > 1.0, n_cloud,
+                            getattr(config, "Nc_default", 1.0e8))
         rho_air = p_full / (constants.R_d * jnp.maximum(T, 1.0))
         nc_cm3 = jnp.maximum(jnp.clip(n_cloud, 0.0), 0.0) / 1.0e6
         pgam = 0.0005714 * nc_cm3 + 0.2714

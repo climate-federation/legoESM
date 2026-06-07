@@ -100,7 +100,8 @@ def morrison_microphysics(
     N_g_arg = N_g if graupel_double_moment else None
     sharpness = config.saturation_sharpness
 
-    N_c_eff = effective_Nc(N_c, config.Nc_0)
+    N_c_eff = effective_Nc(N_c, config.Nc_0,
+                           predict_Nc=getattr(config, "predict_Nc", False))
 
     # === WARM RAIN (shared Seifert-Beheng helpers) ===
     # Pass ``q_c`` so the evaporation branch (negative ``condensation``)
@@ -965,7 +966,13 @@ def morrison_microphysics(
     # same N_c) and spuriously slow autoconversion in mixed-phase cloud.
     dN_c_riming = ((riming_i + riming_s + riming_g)
                    * jnp.clip(N_c, 0.0) / jnp.clip(q_c, 1e-15))
-    dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15) - dN_c_riming
+    if getattr(config, "predict_Nc", False):
+        dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15) - dN_c_riming
+    else:
+        # SAM dopredictNc=.false.: droplet number is the specified constant Nc_0
+        # (used via N_c_eff); the prognostic field is NOT evolved, so no sink can
+        # drive it negative.
+        dN_c_dt = jnp.zeros_like(q_c)
     # Rain-number loss during evaporation (SAM NSUBR, module_mp_graupel.f90:
     # 2177-2181): NSUBR = (PRE·dt/q_r)·N_r/dt = −evap·N_r/q_r — the same
     # fraction of number removed as mass, so the mean drop size is preserved

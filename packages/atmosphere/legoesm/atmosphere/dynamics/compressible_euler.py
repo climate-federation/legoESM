@@ -433,6 +433,18 @@ class CompressibleEulerConfig(NamedTuple):
                                           # True = CRM-faithful; False = bit-exact
                                           # dry-buoyancy dycore. Plane only; no-op when
                                           # no tracers / moisture identically zero.
+    acoustic_moist_buoyancy: bool = True  # Apply the moist buoyancy INSIDE the
+                                          # acoustic substep loop (every substep,
+                                          # frozen moisture) instead of once per RK
+                                          # stage in the slow tendency. This makes the
+                                          # condensate-loading DRAG act at the same
+                                          # frequency as the dry theta' buoyancy in the
+                                          # substeps; without it (False = old path)
+                                          # latent-heated updrafts feel the dry warming
+                                          # n_substeps x per step but the moist drag
+                                          # only 1x -> resolved convection runs away
+                                          # (max|w|->40 m/s, RCE blows up ~day 2.5).
+                                          # Requires moist_buoyancy=True. Plane only.
 
 
 # ==============================================================================
