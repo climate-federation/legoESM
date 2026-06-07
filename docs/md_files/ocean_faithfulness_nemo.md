@@ -93,6 +93,16 @@ coastlines/sills (ACC/AMOC/gyres) without ringing; T21 (~5.6°) can't resolve Dr
 gap (no grid→spec path) is secondary. **Verdict: exclude from the faithful set; it's an aquaplanet
 solver, a different problem.**
 
+## Regression (iter-~50, job 8424882): 147 pass, 1 PRE-EXISTING fail (not mine)
+This session's changes (cd-grid drag/smoothing/2nd-order, shared pgf_smc03, MPAS builder/freeze-floor,
+compute_woa_3d, omip2 applicator) introduced **ZERO regressions**. The 1 failure —
+`test_partial_cells_mpas.py::test_seamount_centered_stable_over_steps` (max|u| 1.187e-2 > 1e-2 bound
+at step 6) — is **pre-existing + unrelated**: `git diff acf44966..HEAD` on that test + `ocean_pe_mpas.py`
++ `mpas_partial_cell_helpers.py` is EMPTY (byte-identical path), and `pgf_scheme="centered"` (its scheme)
+does NOT use `reconstruct_harmonic_slopes`. It's a borderline marginal-stability issue on the "centered"
+PGF — a scheme the FAITHFUL MPAS does NOT use (faithful = adcroft + implicit-CN). FLAG for a separate
+fix (tighten the centered partial-cell PGF or the test bound); out of this session's scope.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
