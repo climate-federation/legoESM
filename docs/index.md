@@ -120,6 +120,7 @@ Zenodo-linked release mints the DOI. Full details on the [References](references
 
 Home <self>
 getting_started
+wizard
 composability
 ```
 
