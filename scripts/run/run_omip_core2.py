@@ -794,7 +794,8 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                        bottom_drag_bbl_thickness=None,
                        bottom_drag_bg_velocity=None,
                        harmonic_cfl_safety=None,
-                       bathy_smoothing_passes=0):
+                       bathy_smoothing_passes=0,
+                       smc03_bottom_2nd_order=None):
     """Build a cubed-sphere ocean (FV3 C-D grid baroclinic backend) with NEMO's
     OWN eORCA1 bathymetry/land-mask regridded onto the cube cell centres, for the
     faithful CORE-II comparison. The 3rd grid; reuses run_omip._create_setup (FC +
@@ -866,7 +867,9 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
                               ("bottom_drag_bbl_thickness",
                                bottom_drag_bbl_thickness),
                               ("bottom_drag_bg_velocity",
-                               bottom_drag_bg_velocity)) if v is not None}
+                               bottom_drag_bg_velocity),
+                              ("smc03_bottom_2nd_order",
+                               smc03_bottom_2nd_order)) if v is not None}
     if _ovr:
         config = config._replace(**_ovr)
         print(f"[setup] cube config override: {_ovr}")
@@ -1168,6 +1171,12 @@ def main() -> int:
                         "(cube-seam-aware), reducing the r-factor / per-cell slope that "
                         "seeds the partial-cell PGF cold-start blowup at under-resolved "
                         "marginal seas. Proven NEMO/ROMS technique.")
+    p.add_argument("--cube-smc03-bottom-2nd", action="store_true",
+                   help="cube: smc03 PGF uses the 3-point 2nd-order backward bottom-cell "
+                        "density slope (curvature-accurate under the pressure-dependent "
+                        "EOS) instead of the O(dz)-biased one-sided slope — removes the "
+                        "bottom-cell rest PGF residual that seeds the cold-start. "
+                        "Linear-EOS bit-exact; requires --cube-pgf-scheme smc03.")
     p.add_argument("--cube-divdamp2", type=float, default=None,
                    help="cube 2nd-order divergence damping [m^2/s].")
     p.add_argument("--cube-divdamp4", type=float, default=None,
@@ -1436,6 +1445,7 @@ def main() -> int:
             bottom_drag_bg_velocity=args.cube_bottom_drag_bg_vel,
             harmonic_cfl_safety=args.cube_harmonic_cfl_safety,
             bathy_smoothing_passes=args.cube_bathy_smoothing,
+            smc03_bottom_2nd_order=(True if args.cube_smc03_bottom_2nd else None),
         )
         app_grid_type = "cubed_sphere"
     else:

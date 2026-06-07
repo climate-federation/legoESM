@@ -27,6 +27,7 @@ def reconstruct_harmonic_slopes(
     z_centroid: jnp.ndarray,
     is_active: jnp.ndarray,
     eps: float = 1e-30,
+    bottom_slope_2nd_order: bool = False,
 ) -> jnp.ndarray:
     """Per-cell harmonic-mean monotonized density slopes ``σ_k``.
 
@@ -52,8 +53,28 @@ def reconstruct_harmonic_slopes(
     Boundary handling:
     - Top cell (no neighbour above): ``σ_0 = Δρ_bot_0`` (one-sided).
     - Bottom-active cell (no active neighbour below — the partial
-      seafloor): ``σ_{bot} = Δρ_top_{bot}`` (one-sided).
+      seafloor): ``σ_{bot} = Δρ_top_{bot}`` (one-sided), OR — when
+      ``bottom_slope_2nd_order`` — a 3-point 2nd-order backward
+      derivative through the bottom three cell centroids.
     - Inactive cells (below seafloor): ``σ = 0``.
+
+    ``bottom_slope_2nd_order`` (default ``False`` → bit-exact legacy):
+    the one-sided ``Δρ_top`` estimates dρ/dz at the FACE above the bottom
+    centroid, not at the centroid ``z_k``, so it is O(Δz) biased whenever
+    ρ(z) is CURVED — which it is under a pressure-dependent EOS (Wright)
+    even for horizontally-uniform T,S.  Adjacent columns whose bottom cell
+    sits at level ``k`` (shallow, one-sided) vs interior at ``k`` (deep,
+    two-sided harmonic) then reconstruct ρ differently → a spurious
+    rest-state horizontal PGF at steep partial-cell topography (the
+    cubed-sphere cold-start seed).  The 2nd-order backward derivative
+    evaluates dρ/dz AT ``z_k`` and is EXACT (exact arithmetic) for linear
+    AND quadratic ρ, so it removes the curvature bias.  Needs the cell two
+    levels up (``k-2``) active; otherwise falls back to the one-sided
+    ``Δρ_top``.  The DEFAULT (``False``) path is BITWISE unchanged (the
+    branch is never entered), so the proven lat-lon / tripole / MPAS callers
+    — which never pass the kwarg — are exactly untouched.  With the flag ON,
+    linear ρ matches the one-sided slope only to round-off (different FP op
+    sequence), not bitwise.
 
     Parameters
     ----------
@@ -117,9 +138,37 @@ def reconstruct_harmonic_slopes(
     same_sign = (delta_top * delta_bot) > 0.0
     sigma_interior = jnp.where(same_sign, sigma_harm, 0.0)
 
+    if bottom_slope_2nd_order:
+        # 3-point 2nd-order backward dρ/dz AT the bottom centroid z_k (bottom
+        # three centroids k, k-1, k-2), written as a small CORRECTION to the
+        # one-sided Δρ_top:
+        #     σ_bot = Δρ_top + (Δρ_top − d_up)·h1/(h1+h2)
+        # with h1 = z_k−z_{k-1}, h2 = z_{k-1}−z_{k-2}, and d_up the slope of the
+        # segment one level up.  Exact for linear AND quadratic ρ(z); removes the
+        # O(Δz) curvature bias of Δρ_top under a pressure-dependent EOS.  This
+        # delta-form is well-conditioned (it adds a SMALL curvature term to the
+        # already-correct one-sided slope instead of cancelling large ρ≈1027
+        # values) and → Δρ_top exactly when the curvature vanishes.  Falls back
+        # to Δρ_top where the cell two levels up is inactive (shallow columns).
+        rho_above2 = jnp.concatenate([rho[..., :2], rho[..., :-2]], axis=-1)
+        z_above2 = jnp.concatenate([z[..., :2], z[..., :-2]], axis=-1)
+        active_above2 = jnp.concatenate(
+            [jnp.zeros_like(active_f[..., :2]), active_f[..., :-2]], axis=-1,
+        )
+        has_top2 = has_top & (active_above2 > 0.5)
+        h1 = z - z_above            # z_k - z_{k-1} > 0
+        h2 = z_above - z_above2     # z_{k-1} - z_{k-2} > 0
+        safe_h2 = jnp.where(has_top2, h2, 1.0)
+        d_up = jnp.where(has_top2, (rho_above - rho_above2) / safe_h2, 0.0)
+        safe_h12 = jnp.where(has_top2, h1 + h2, 1.0)
+        curv = jnp.where(has_top2, (delta_top - d_up) * h1 / safe_h12, 0.0)
+        bottom_slope = delta_top + curv
+    else:
+        bottom_slope = delta_top
+
     sigma = jnp.where(
         has_top & has_bot, sigma_interior,
-        jnp.where(has_top, delta_top,
+        jnp.where(has_top, bottom_slope,
                   jnp.where(has_bot, delta_bot, 0.0)),
     )
     return jnp.where(active_f > 0.5, sigma, 0.0)

@@ -135,6 +135,11 @@ class OceanConfig(NamedTuple):
     bottom_drag_r: float = 0.0
     bottom_drag_bg_velocity: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
+    # smc03 PGF: use the 3-point 2nd-order backward bottom-cell density slope
+    # (curvature-accurate under a pressure-dependent EOS) instead of the
+    # O(dz)-biased one-sided slope.  Default False keeps the proven smc03 path
+    # bit-exact; opt-in for the cubed-sphere cold-start over steep partial cells.
+    smc03_bottom_2nd_order: bool = False
     # 2-D Laplacian damping used in barotropic subcycling.
     # Per-substep coefficient is alpha * (dt_s / dt_ref) * area * laplacian(...),
     # so the damping is explicitly dt-scaled and tunable.

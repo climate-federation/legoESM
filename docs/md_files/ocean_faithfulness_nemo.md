@@ -567,6 +567,29 @@ curved-EOS-consistent; new selectable option so proven latlon/tripole/MPAS stay 
 cube opts in). The synth flagged this as the real fix; implement + verify it shrinks the cd-grid rest
 residual ≫ smoothing AND leaves proven grids bit-exact.
 
+### ROOT-CAUSE FIX IMPLEMENTED (this iter): 2nd-order bottom slope (8423462, codex in flight)
+`reconstruct_harmonic_slopes` (pgf_smc03.py) gains `bottom_slope_2nd_order` (default False →
+bit-exact). The bottom-active cell's one-sided `Δρ_top` estimates dρ/dz at the FACE above the
+centroid → O(Δz) biased whenever ρ(z) is CURVED (the pressure-dependent Wright EOS makes ρ(z) curved
+even at uniform T,S) → adjacent shallow(one-sided)/deep(two-sided) columns reconstruct ρ differently
+→ the rest-state PGF residual. The new option uses a **3-point 2nd-order backward derivative AT the
+bottom centroid** (bottom 3 cells): EXACT for linear AND quadratic ρ → captures the EOS
+compressibility curvature, kills the bias; falls back to one-sided where k−2 inactive. **Linear ρ →
+bitwise identical to legacy** (both exact) so every linear-EOS test + proven latlon/tripole/MPAS stay
+bit-exact (they never pass the kwarg). Wired `OceanConfig.smc03_bottom_2nd_order` +
+`--cube-smc03-bottom-2nd`. **4 new leaf tests** (linear bit-exact, quadratic-matches-analytic ≫
+legacy, shallow-fallback, AD-finite). py_compile OK. Job 8423462: pytest + cold-start
+{base1st, bot2nd, bot2nd+sm5, bot2nd+sm5+drag} — does it bound the rest mode (baseline NaN ~280)?
+**Codex review (shared kernel): 1 HIGH, rest CLEAN** — formula correct (exact for linear+quadratic,
+no sign error), default-off path confirmed bitwise-unchanged for proven latlon/MPAS callers, masks/AD
+safe. HIGH: my `test_linear_bit_exact` over-asserted EXACT equality of two different FP sequences
+(3-point sum vs one-sided) — algebraically equal but ~1e-13 (fp64) apart. FIXED: (a) reformulated as
+the well-conditioned `Δρ_top + (Δρ_top−d_up)·h1/(h1+h2)` (small curvature correction to the
+already-correct one-sided slope, avoids cancelling ρ≈1027) — codex's exact suggestion; (b) relaxed
+the linear test to `allclose(atol=1e-11)` + added a true `test_default_off_bit_exact`. 8423462 STEP1
+ran the OLD test → 31 passed/1 failed (the over-strict assert); reformulation is algebraically
+identical so STEP2 cold-start is valid. Clean re-validation after the cold-start verdict.
+
 ## (DEPRECATED-BACKEND HISTORY, FC A-grid) cubed_sphere — harness COMPLETE; cold-start is the gate
 **BREAKTHROUGH (2026-06-06, partial-cell substrate):** the cube backends had **NO
 partial-cell support** — `ocean_pe_fc.py`/`ocean_pe_cdgrid.py` hardcoded `z_coord.dz_ref`

@@ -432,7 +432,10 @@ def ocean_baroclinic_tendencies_cdgrid(
             h_part = z_coord.h_partial
             z_top = jnp.cumsum(h_part, axis=-1) - h_part
             z_c = z_top + 0.5 * h_part
-            sigma = reconstruct_harmonic_slopes(rho_prime, z_c, active_3d)
+            sigma = reconstruct_harmonic_slopes(
+                rho_prime, z_c, active_3d,
+                bottom_slope_2nd_order=config.smc03_bottom_2nd_order,
+            )
             cell_dP = g * h_part * rho_prime
             P_top = jnp.cumsum(cell_dP, axis=-1) - cell_dP
             cent_anom = z_c - cref
