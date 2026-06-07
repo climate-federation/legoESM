@@ -12,7 +12,11 @@ import json
 
 import pytest
 
-from legoesm.ocean.config import ocean_config_to_dict, ocean_config_from_dict
+from legoesm.ocean.config import (
+    ocean_config_to_dict,
+    ocean_config_from_dict,
+    OceanRunRecord,
+)
 from legoesm.ocean.state import (
     LatLonCGridOceanConfig,
     OceanConfig,
@@ -89,6 +93,54 @@ def test_manifest_build_validate_ocean():
     rebuilt = ocean_config_from_dict(m["config"]["resolved_config"])
     assert rebuilt == cfg
     assert compute_config_hash(rebuilt, "ocean") == m["config"]["config_hash"]
+
+
+def _run_record(**controls) -> OceanRunRecord:
+    base = dict(
+        runtime_config=_latlon_cfg(), grid="tripole", mesh="mesh.nc",
+        nlev=30, dt_seconds=1800.0, total_days=365.0,
+        output_path="output/omip", forcing="core2_nyf",
+    )
+    base.update(controls)
+    return OceanRunRecord(**base)
+
+
+def test_run_record_roundtrips_and_carries_controls():
+    rec = _run_record()
+    d = ocean_config_to_dict(rec)
+    json.dumps(d)
+    rebuilt = ocean_config_from_dict(d)
+    assert rebuilt == rec
+    assert isinstance(rebuilt.runtime_config, LatLonCGridOceanConfig)
+
+
+def test_run_record_hash_distinguishes_run_controls():
+    # The codex HIGH finding: model.config alone cannot identify the experiment.
+    # Two records with the SAME runtime_config but different dt / grid / output
+    # MUST hash differently now that controls are in the hashed payload.
+    base = _run_record()
+    assert compute_config_hash(base, "ocean") == compute_config_hash(
+        _run_record(), "ocean"
+    )
+    for changed in (
+        _run_record(dt_seconds=3600.0),
+        _run_record(total_days=730.0),
+        _run_record(grid="latlon_bathy"),
+        _run_record(output_path="output/other"),
+        _run_record(nlev=20),
+    ):
+        assert compute_config_hash(changed, "ocean") != compute_config_hash(
+            base, "ocean"
+        )
+
+
+def test_manifest_from_run_record_validates():
+    rec = _run_record()
+    m = build_run_manifest(rec, command_line="run_omip_core2.py --config x.yaml")
+    assert m["config"]["config_kind"] == "ocean"
+    validate_run_manifest(m)
+    rebuilt = ocean_config_from_dict(m["config"]["resolved_config"])
+    assert rebuilt == rec
 
 
 def test_manifest_tamper_detected_ocean():

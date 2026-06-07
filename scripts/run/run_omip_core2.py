@@ -1257,6 +1257,23 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d):
     np.savez_compressed(out_dir / f"snapshot_{tag}.npz", **save_kw)
 
 
+def _cli_flags_given(argv=None) -> set:
+    """The set of argparse ``dest`` names the user passed explicitly on the CLI.
+
+    Used so a ``--config`` template never overrides a flag the user typed:
+    ``--latlon-res`` -> ``latlon_res``.  (Conservative: ``--flag=value`` and
+    ``--flag value`` both register the flag.)
+    """
+    import sys as _sys
+    argv = _sys.argv[1:] if argv is None else argv
+    given = set()
+    for tok in argv:
+        if tok.startswith("--"):
+            name = tok[2:].split("=", 1)[0]
+            given.add(name.replace("-", "_"))
+    return given
+
+
 def _record_final_state_digest(manifest_path, state) -> None:
     """Record the final ocean state digest into the run manifest (#376 Phase 4).
 
@@ -1563,6 +1580,32 @@ def main() -> int:
     from legoesm.ocean.coupler import compute_omip2_surface_forcing
     from legoesm.core.field import Field
 
+    # --config (#376 Phase 4): a template's run controls (time/output/grid)
+    # drive the actual run BEFORE the grid/model are built, so a --config run
+    # integrates the dt/duration/grid/output the template describes — not the
+    # argparse defaults (codex review HIGH). Explicit CLI flags still win. The
+    # ocean.* physics overrides are applied AFTER the model is built (below).
+    ocean_adapter = None
+    if args.config:
+        from legoesm.ocean.config import (
+            OceanExperimentConfig, resolve_ocean_run_controls,
+        )
+        ocean_adapter = OceanExperimentConfig.from_yaml(args.config)
+        ocean_adapter.validate_strict()
+        _applied = resolve_ocean_run_controls(
+            ocean_adapter, args, _cli_flags_given()
+        )
+        if _applied:
+            print(f"[setup] --config {args.config} run controls: {_applied}")
+        # Grid backend + mesh + forcing come from --grid/--mesh, not the
+        # template (the mesh is a file, not a config field). Say so explicitly so
+        # a template's grid/forcing sections are never SILENTLY ignored.
+        _gt = ocean_adapter.get("grid.type")
+        _fc = ocean_adapter.get("forcing.dataset")
+        print(f"[setup] --config note: grid backend/mesh come from --grid="
+              f"{args.grid!r} / --mesh (template grid.type={_gt!r}, "
+              f"forcing={_fc!r} are advisory).")
+
     print(f"[setup] building {args.grid} (nlev={args.nlev}, "
           f"woa_init={args.woa_init}) ...")
     if args.grid == "tripole":
@@ -1658,16 +1701,12 @@ def main() -> int:
         )
         app_grid_type = "latlon"
 
-    # --config (#376 Phase 4): apply the ocean YAML's explicit ocean.* fields
-    # onto the built config and rebuild the model (same path the flag overrides
-    # above use). The mesh/grid come from --grid/--mesh; the YAML drives the
-    # physics/numerics knobs. Only the lat-lon C-grid model (tripole /
-    # latlon_bathy) is wired for YAML overrides.
-    if args.config:
-        from legoesm.ocean.config import OceanExperimentConfig
-        _adapter = OceanExperimentConfig.from_yaml(args.config)
-        _adapter.validate_strict()
-        _explicit = dict(_adapter.get("ocean") or {})
+    # --config (#376 Phase 4): apply the ocean YAML's explicit ocean.* physics
+    # fields onto the built config and rebuild the model (same path the flag
+    # overrides above use). Only the lat-lon C-grid model (tripole /
+    # latlon_bathy) is wired for YAML config overrides.
+    if ocean_adapter is not None:
+        _explicit = dict(ocean_adapter.get("ocean") or {})
         if _explicit:
             if args.grid not in ("tripole", "latlon_bathy"):
                 raise ValueError(
@@ -1679,12 +1718,12 @@ def main() -> int:
             from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
                 LatLonCGridOceanModel,
             )
-            _yaml_cfg = _adapter.to_ocean_config()
+            _yaml_cfg = ocean_adapter.to_ocean_config()
             _ovr = {k: getattr(_yaml_cfg, k) for k in _explicit}
             model = LatLonCGridOceanModel(
                 grid, z_coord, model.config._replace(**_ovr)
             )
-            print(f"[setup] --config {args.config} override: {sorted(_ovr)}")
+            print(f"[setup] --config {args.config} ocean override: {sorted(_ovr)}")
 
     if args.woa_smoothing_passes and args.woa_smoothing_passes > 0:
         if not args.woa_init:
@@ -1777,15 +1816,34 @@ def main() -> int:
     # stdout is pipe-buffered, and a record for post-hoc analysis.
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Run manifest (#376 Phase 4): capture the resolved ocean config + provenance
-    # at run start so the run is reconstructible and `legoesm reproduce` has a
-    # reference. Always written (config_kind="ocean"); best-effort so a
-    # provenance-write failure never aborts a long integration.
+    # Run manifest (#376 Phase 4): capture the FULL ocean experiment identity at
+    # run start so the run is reconstructible and `legoesm reproduce` has a
+    # reference. The hashed payload is an OceanRunRecord = runtime config + the
+    # run controls (dt, total days, grid, mesh, output, forcing, IC) that live
+    # OUTSIDE model.config — so two runs that differ only in dt/grid/output get
+    # distinct config_hashes (codex review HIGH). Best-effort: a provenance-write
+    # failure never aborts a long integration.
     manifest_path = None
     try:
         from legoesm.driver.restart import write_run_manifest
+        from legoesm.ocean.config import OceanRunRecord
+        run_record = OceanRunRecord(
+            runtime_config=model.config,
+            grid=str(args.grid),
+            mesh=str(args.mesh),
+            nlev=int(args.nlev),
+            dt_seconds=float(dt),
+            total_days=float(total_days),
+            output_path=str(args.output),
+            forcing="core2_nyf",
+            woa_init=bool(args.woa_init),
+            woa_t=str(args.woa_t or ""),
+            woa_s=str(args.woa_s or ""),
+            latlon_res=str(args.latlon_res),
+            smoke=bool(args.smoke),
+        )
         manifest_path = write_run_manifest(
-            out_dir, model.config, config_kind="ocean",
+            out_dir, run_record, config_kind="ocean",
             runner_tag="run_omip_core2",
         )
         print(f"[setup] wrote run manifest {manifest_path}")

@@ -49,7 +49,7 @@ The ``ocean:`` section maps directly onto the runtime NamedTuple field names
 from __future__ import annotations
 
 import copy
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -274,6 +274,99 @@ class OceanExperimentConfig:
 
     def __repr__(self) -> str:
         return f"OceanExperimentConfig({self._data})"
+
+
+# ======================================================================
+# Ocean run record — the FULL experiment identity for the run manifest (#376)
+# ======================================================================
+# ``model.config`` (the runtime NamedTuple) is necessary but NOT sufficient to
+# identify an ocean experiment: the timestep, duration, grid backend, mesh,
+# forcing, IC, and output destination all live OUTSIDE it (CLI / template
+# ``grid``/``time``/``forcing``/``output`` sections).  Two runs can share a
+# ``model.config`` yet integrate a different dt for a different number of years
+# on a different grid.  ``OceanRunRecord`` bundles the runtime config WITH those
+# run controls so the run manifest's ``config_hash`` identifies the experiment
+# that actually ran (codex review HIGH).  It is a plain NamedTuple, so the
+# recursive tagged codec below serializes + reconstructs it (and the nested
+# runtime config) with no extra codec code.
+
+
+class OceanRunRecord(NamedTuple):
+    """Full ocean experiment identity recorded in ``run_manifest.json``.
+
+    ``runtime_config`` is the runtime ocean config NamedTuple
+    (``LatLonCGridOceanConfig`` / ``OceanConfig`` / ...); the remaining fields
+    are the run controls that determine the experiment but live outside that
+    config.  Everything here is hashed into ``config.config_hash``.
+    """
+    runtime_config: object
+    grid: str = ""
+    mesh: str = ""
+    nlev: int = 0
+    dt_seconds: float = 0.0
+    total_days: float = 0.0
+    output_path: str = ""
+    forcing: str = ""
+    woa_init: bool = False
+    woa_t: str = ""
+    woa_s: str = ""
+    latlon_res: str = ""
+    smoke: bool = False
+
+
+# Run-control fields the ocean YAML can drive, mapped to the
+# ``run_omip_core2.py`` argparse ``dest`` they set.  Used by
+# :func:`resolve_ocean_run_controls` so YAML ``time``/``output``/``grid``
+# sections actually take effect (codex review HIGH: they were silently ignored).
+_YAML_RUN_CONTROLS = ("dt", "years", "output", "nlev", "latlon_res")
+
+
+def resolve_ocean_run_controls(
+    adapter: "OceanExperimentConfig",
+    args,
+    cli_given: set,
+) -> dict:
+    """Apply a YAML experiment's run controls onto a runner ``args`` namespace.
+
+    Maps the template's ``time`` / ``output`` / ``grid`` sections onto the
+    runner's ``dt`` / ``years`` / ``output`` / ``nlev`` / ``latlon_res`` so a
+    ``--config`` run integrates the dt, duration, grid shape, and output the
+    template describes — instead of the argparse defaults.  An explicitly-passed
+    CLI flag always wins over the YAML (``cli_given`` = the set of argparse
+    ``dest`` names the user passed on the command line).
+
+    Mutates *args* in place; returns a dict of the values it set (for logging).
+    Grid backend (``--grid``), mesh (``--mesh``) and forcing are NOT driven from
+    YAML here (the mesh comes from a file, not the template); the caller warns
+    about those so nothing is silently ignored.
+    """
+    applied: dict = {}
+
+    def _maybe_set(dest: str, value):
+        if value is None:
+            return
+        if dest in cli_given:
+            return  # explicit CLI flag wins
+        setattr(args, dest, value)
+        applied[dest] = value
+
+    dt = adapter.get("time.dt_seconds")
+    _maybe_set("dt", float(dt) if dt is not None else None)
+
+    dur = adapter.get("time.duration_days")
+    _maybe_set("years", (float(dur) / 365.0) if dur is not None else None)
+
+    _maybe_set("output", adapter.get("output.path"))
+
+    nlev = adapter.get("grid.nlev")
+    _maybe_set("nlev", int(nlev) if nlev is not None else None)
+
+    n_lat = adapter.get("grid.n_lat")
+    n_lon = adapter.get("grid.n_lon")
+    if n_lat is not None and n_lon is not None:
+        _maybe_set("latlon_res", f"{int(n_lat)}x{int(n_lon)}")
+
+    return applied
 
 
 # ======================================================================

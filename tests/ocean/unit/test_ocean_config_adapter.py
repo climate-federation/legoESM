@@ -169,6 +169,44 @@ def test_time_override_not_a_noop():
     assert cfg.signature() != sig0
 
 
+def test_resolve_run_controls_drives_run_from_yaml():
+    import argparse
+
+    from legoesm.ocean.config import resolve_ocean_run_controls
+
+    cfg = OceanExperimentConfig.from_dict({
+        "grid": {"type": "latlon_cgrid", "n_lat": 180, "n_lon": 360, "nlev": 30},
+        "time": {"dt_seconds": 1800, "duration_days": 730},
+        "output": {"path": "output/omip_latlon/"},
+    })
+    args = argparse.Namespace(
+        dt=3600.0, years=5.0, output="results/default", nlev=20,
+        latlon_res="180x360",
+    )
+    applied = resolve_ocean_run_controls(cfg, args, cli_given=set())
+    assert args.dt == 1800.0
+    assert args.years == 2.0          # 730 days / 365
+    assert args.output == "output/omip_latlon/"
+    assert args.nlev == 30
+    assert args.latlon_res == "180x360"
+    assert set(applied) == {"dt", "years", "output", "nlev", "latlon_res"}
+
+
+def test_resolve_run_controls_cli_wins_over_yaml():
+    import argparse
+
+    from legoesm.ocean.config import resolve_ocean_run_controls
+
+    cfg = OceanExperimentConfig.from_dict({"time": {"dt_seconds": 1800}})
+    args = argparse.Namespace(
+        dt=7200.0, years=5.0, output="x", nlev=20, latlon_res="1x1",
+    )
+    # User passed --dt explicitly -> YAML must NOT override it.
+    applied = resolve_ocean_run_controls(cfg, args, cli_given={"dt"})
+    assert args.dt == 7200.0
+    assert "dt" not in applied
+
+
 def test_yaml_roundtrip(tmp_path):
     cfg = OceanExperimentConfig.from_dict({"ocean": {"A_h": 2.0e4}})
     out = tmp_path / "out.yaml"
