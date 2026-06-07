@@ -1279,6 +1279,38 @@ def _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir):
         print(f"[transports] AMOC@26N diag skipped: {type(e).__name__}: {e}")
 
 
+def _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir):
+    """ACC@Drake [Sv] from the LIVE state (h reconstructed in-run).  Reuses the
+    tested compute_acc_from_state{,_mpas}: lat-lon/tripole via barotropic_stream
+    function+acc_transport (ψ_bt max−min in the Drake band), MPAS via the
+    edge-based section transport.  Pure NumPy at run-end; APPENDS a scalar to
+    transports.txt (the AMOC diag writes it first); NaN/skip is non-fatal.  ACC
+    spins up in months (wind-driven) so it is meaningful well before AMOC.
+    NEMO ORCA1 ref ~159 Sv (obs ~137)."""
+    try:
+        from legoesm.ocean.vertical import compute_layer_thickness
+        h = np.asarray(compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, z_coord))
+        if app_grid_type == "mpas":
+            from legoesm.ocean.spinup import compute_acc_from_state_mpas
+            acc = float(compute_acc_from_state_mpas(
+                np.asarray(state.u.data), h, grid))
+        elif getattr(state, "v", None) is not None:
+            from legoesm.ocean.spinup import compute_acc_from_state
+            acc = float(compute_acc_from_state(
+                np.asarray(state.u.data), h,
+                np.asarray(state.land_mask.data), grid))
+        else:
+            return
+        print(f"[transports] ACC@Drake = {acc:.2f} Sv  (obs ~137; NEMO ORCA1 "
+              f"~159 via scripts/validate/nemo_transports.py --grid-u)")
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        with open(Path(out_dir) / "transports.txt", "a") as fh:
+            fh.write(f"acc_drake_Sv {acc:.4f}\n")
+    except Exception as e:  # diagnostic must never crash the run
+        print(f"[transports] ACC@Drake diag skipped: {type(e).__name__}: {e}")
+
+
 def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d):
     out_dir.mkdir(parents=True, exist_ok=True)
     save_kw = dict(
@@ -1857,6 +1889,7 @@ def main() -> int:
         state = jax.block_until_ready(state)
         _save_snapshot(out_dir, "final", state, lat2d, lon2d)
         _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
+        _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
         _csv.close()
         rate = n_steps / (time.time() - t_wall)
         print(f"[done] {n_steps} steps @ {rate:.2f} steps/s (scan); "
@@ -1940,6 +1973,7 @@ def main() -> int:
     state = jax.block_until_ready(state)
     _save_snapshot(out_dir, "final", state, lat2d, lon2d)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
+    _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
     _csv.close()
     rate = n_steps / (time.time() - t_wall)
     print(f"[done] {n_steps} steps @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")

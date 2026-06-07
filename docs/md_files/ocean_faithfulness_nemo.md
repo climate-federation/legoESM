@@ -215,6 +215,19 @@ Drake, fixed-i exact**; cross-checks the per-row 159.78; ORCA1 1° runs high vs 
 eddy-free coarse model). **Both NEMO refs in hand: AMOC 17.74 Sv, ACC 159.26 Sv.** `nemo_transports.py
 ... --grid-u X`.
 
+### MODEL-SIDE ACC@Drake diagnostic wired (iter-~52) — symmetric to `_amoc26n_diag`
+`spinup.compute_acc_from_state` (latlon/tripole: `barotropic_streamfunction`+`acc_transport` ψ_bt
+max−min, Sv↔m³/s round-trip, 2-D-lat row-reduction) + `compute_acc_from_state_mpas` (Voronoi:
+SECTION-TRANSPORT — interior edges whose 2 cells straddle the Drake meridian, oriented eastward by
+`sign(d2−d1)`, antipodal-|d|<90° guarded, **min-rule edge thickness via the canonical
+`min_cell_to_edge`** so partial-cell bottom-steps/coastlines carry no phantom flux). Wired as
+`_acc_drake_diag` in run_omip_core2 after `_amoc26n_diag` (both run-end sites; appends `acc_drake_Sv`
+to transports.txt; non-fatal). Codex-reviewed: pass-1 HIGH (centered→min-rule) + LOW (pin partial-cell)
+fixed. Tests: 66 pass (11 MPAS-ACC incl. partial-cell min-rule + antipodal + sign; 4 latlon-ACC incl.
+2-D-lat). FOLLOW-UP: `compute_amoc_from_state_mpas` uses the SAME centered edge thickness (pre-existing,
+not this change) — migrate it to `min_cell_to_edge` too. NOTE: the in-flight 5-yr MPAS (8426097) was
+launched BEFORE this wiring, so it emits AMOC only; a follow-up MPAS run will emit ACC.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init

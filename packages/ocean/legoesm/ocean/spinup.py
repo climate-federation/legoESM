@@ -199,6 +199,74 @@ def compute_amoc_from_state(
     return float(-np.nanmin(profile))
 
 
+def compute_acc_from_state(
+    u_face: np.ndarray,
+    h_partial: np.ndarray,
+    land_mask: np.ndarray,
+    grid,
+    *,
+    drake_lat_south_deg: float = -65.0,
+    drake_lat_north_deg: float = -45.0,
+) -> float:
+    """ACC (Drake-Passage zonal volume transport) [Sv] from a C-grid state.
+
+    Reuses the tested
+    :func:`legoesm.ocean.diagnostics_streamfunction.barotropic_streamfunction`
+    (depth-integrated transport streamfunction ψ_bt) and
+    :func:`legoesm.ocean.diagnostics_climate.acc_transport` (max−min of ψ_bt
+    within the Drake latitude band).  The band default matches ``acc_transport``
+    and the offline NEMO reference reader (``scripts/validate/nemo_transports.
+    acc_drake_core``) for apples-to-apples comparison.  Returns NaN when the
+    band is empty on the grid.
+
+    Sibling of :func:`compute_amoc_from_state` but for the ZONAL u-faces.  ACC is
+    wind-driven and spins up in MONTHS (vs AMOC's decades), so it is meaningful
+    on much shorter integrations.
+
+    Parameters
+    ----------
+    u_face : array ``(n_lat, n_lon+1, nlev)``
+        Zonal velocity at u-faces [m/s].
+    h_partial : array ``(n_lat, n_lon, nlev)``
+        Layer thickness [m] at cell centres.
+    land_mask : array ``(n_lat, n_lon)``
+        Ocean mask (1 = ocean, 0 = land).
+    grid : LatLonGrid-like
+        Must expose ``lat`` (radians; 1-D regular or 2-D curvilinear) and the
+        metadata ``barotropic_streamfunction`` needs (``radius``, ``dy``/``dlat``).
+    drake_lat_south_deg, drake_lat_north_deg : float
+        Drake latitude band [°].
+
+    Returns
+    -------
+    acc_Sv : float
+        Drake throughflow in Sverdrups (max−min of ψ_bt over the band; nonneg
+        by construction), or NaN if the band is empty.
+    """
+    # Local import to avoid circular legoesm.ocean ← legoesm.ocean.spinup.
+    from legoesm.ocean.diagnostics_streamfunction import barotropic_streamfunction
+    from legoesm.ocean.diagnostics_climate import acc_transport
+
+    u_np = np.asarray(u_face, dtype=np.float64)
+    h_np = np.asarray(h_partial, dtype=np.float64)
+    mask_np = np.asarray(land_mask).astype(np.float64)
+
+    psi_bt_Sv = barotropic_streamfunction(u_np, h_np, mask_np, grid)
+    # ``acc_transport`` expects m³/s (it divides by 1e6); ``barotropic_stream
+    # function`` already returns Sv, so scale back up (same round-trip as
+    # scripts/ocean_long_runs/postprocess_climate.py).
+    psi_bt_m3s = psi_bt_Sv * 1.0e6
+    lat_arr = np.degrees(np.asarray(grid.lat))
+    # Reduce a 2-D curvilinear lat to a per-row representative latitude (the
+    # Drake band is in the regular Southern-Ocean part of any ORCA-like grid,
+    # where rows are near-constant-latitude, so the row mean is exact there).
+    lat_t_deg = lat_arr.mean(axis=1) if lat_arr.ndim == 2 else lat_arr
+    res = acc_transport(psi_bt_m3s, lat_t_deg,
+                        drake_lat_south=drake_lat_south_deg,
+                        drake_lat_north=drake_lat_north_deg)
+    return float(res.transport_Sv)
+
+
 # ==============================================================================
 # MPAS Voronoi-mesh AMOC
 # ==============================================================================
@@ -370,6 +438,116 @@ def compute_amoc_from_state_mpas(
     psi_m3s = -np.cumsum(F_band)
     psi_Sv = psi_m3s / 1.0e6
     return float(-np.nanmin(psi_Sv))
+
+
+def compute_acc_from_state_mpas(
+    u_edge: np.ndarray,
+    h_cell: np.ndarray,
+    mesh,
+    *,
+    drake_lon_deg: float = -68.0,
+    drake_lat_south_deg: float = -65.0,
+    drake_lat_north_deg: float = -45.0,
+) -> float:
+    """ACC (Drake throughflow) [Sv] from a Voronoi-mesh ocean state.
+
+    SECTION-TRANSPORT method.  The Drake meridian (constant longitude
+    ``drake_lon_deg``) is crossed by exactly those INTERIOR edges whose two
+    cells lie on OPPOSITE sides of the meridian and whose edge latitude is in
+    the passage band.  Each such edge is crossed once (no double counting); the
+    eastward volume transport is the orientation-corrected edge-normal flux
+    summed over those edges and depth:
+
+        ACC = Σ_section Σ_k  s_e · u_edge(k) · dvEdge · h_edge(k)
+
+    The MPAS edge normal points from ``cellsOnEdge[0]`` (c1) to ``cellsOnEdge[1]``
+    (c2), so positive ``u_edge`` is c1→c2 flow.  The orientation
+    ``s_e = sign(d2 − d1)`` (with ``d = signed circular longitude − drake_lon``)
+    is +1 when c2 is EAST of c1, making the contribution eastward-positive.
+    SIGNED (eastward +) so a reversed convention surfaces as a sign flip rather
+    than being hidden.  Edges near the ANTIPODAL meridian (where opposite
+    circular-longitude signs are a wrap artefact, not a true crossing) are
+    excluded by the ``|d| < 90°`` guard.  NaN if no section edges.  Equivalent
+    to the offline NEMO ``acc_drake_core`` section integral; wind-driven ACC
+    spins up in months -> meaningful on multi-year runs.
+
+    The edge cross-section uses the canonical MIN-RULE edge thickness
+    (``mpas_partial_cell_helpers.min_cell_to_edge`` — MITgcm hFacZ flux closure),
+    NOT a centred average: under partial cells the shallower cell limits the
+    flow-through area, so a Drake edge across a bottom step or a coastline (one
+    cell dry, h=0) carries no phantom sub-seafloor / into-land transport.
+
+    Parameters
+    ----------
+    u_edge : array ``(nEdges, nlev)`` (or ``(nEdges,)`` single-level)
+        Edge-normal velocity [m/s].
+    h_cell : array ``(nCells, nlev)`` (or ``(nCells,)``)
+        Cell-centre layer thickness [m].
+    mesh : VoronoiMesh
+        Must expose ``dvEdge``, ``cellsOnEdge`` (``[2, nEdges]``, −1 at
+        boundaries), ``lonCell`` and ``latEdge`` (radians).
+    drake_lon_deg : float
+        Drake-Passage section longitude [°] (default −68).
+    drake_lat_south_deg, drake_lat_north_deg : float
+        Passage latitude band [°].
+
+    Returns
+    -------
+    acc_Sv : float
+        Eastward Drake throughflow in Sverdrups (signed), or NaN if no edges
+        cross the section.
+    """
+    u = np.asarray(u_edge, dtype=np.float64)
+    if u.ndim == 1:
+        u = u[:, None]
+    h = np.asarray(h_cell, dtype=np.float64)
+    if h.ndim == 1:
+        h = h[:, None]
+    if u.shape[-1] != h.shape[-1]:
+        raise ValueError(
+            f"compute_acc_from_state_mpas: u_edge has {u.shape[-1]} levels "
+            f"but h_cell has {h.shape[-1]}"
+        )
+
+    # Canonical min-rule edge thickness (shared with the MPAS dynamics) so the
+    # section flux uses the SAME partial-cell flux closure as the model — never
+    # re-derived here.  Local imports keep spinup import-light and JAX-optional.
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.mpas_partial_cell_helpers import min_cell_to_edge
+
+    dv = np.asarray(mesh.dvEdge, dtype=np.float64)
+    c1 = np.asarray(mesh.cellsOnEdge[0])
+    c2 = np.asarray(mesh.cellsOnEdge[1])
+    interior = c2 >= 0
+    c1_safe = np.where(c1 >= 0, c1, 0)
+    c2_safe = np.where(c2 >= 0, c2, 0)
+    # Min-rule edge thickness min(h[c1],h[c2]); boundary edges (c2<0) index a
+    # wrong cell but are excluded from the section by ``interior`` below.
+    h_e = np.asarray(min_cell_to_edge(jnp.asarray(h), mesh))   # (nEdges, nlev)
+
+    # Signed circular longitude of each cell relative to the Drake meridian.
+    lon_cell_deg = np.degrees(np.asarray(mesh.lonCell))
+    drake_w = ((float(drake_lon_deg) + 180.0) % 360.0) - 180.0
+    d1 = ((lon_cell_deg[c1_safe] - drake_w + 180.0) % 360.0) - 180.0
+    d2 = ((lon_cell_deg[c2_safe] - drake_w + 180.0) % 360.0) - 180.0
+    # Straddle = cells on opposite sides of the meridian, NEAR it (the |d|<90
+    # guard rejects the antipodal meridian where opposite signs are a wrap
+    # artefact rather than a real crossing).
+    near = (np.abs(d1) < 90.0) & (np.abs(d2) < 90.0)
+    straddle = interior & near & ((d1 * d2) < 0.0)
+
+    lat_edge_deg = np.degrees(np.asarray(mesh.latEdge))
+    band = ((lat_edge_deg >= drake_lat_south_deg)
+            & (lat_edge_deg <= drake_lat_north_deg))
+    section = straddle & band
+    if not np.any(section):
+        return float("nan")
+
+    s_e = np.sign(d2 - d1)                                 # +1 if c2 east of c1
+    # Oriented eastward volume transport per edge per level [m³/s].
+    F = (s_e[:, None] * u * dv[:, None]) * h_e
+    transport = float(F[section, :].sum())
+    return transport / 1.0e6
 
 
 # ==============================================================================

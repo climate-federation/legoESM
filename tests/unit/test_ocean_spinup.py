@@ -16,6 +16,7 @@ from legoesm.ocean.spinup import (
     find_latest_restart,
     bryan_accelerated_dt,
     compute_amoc_from_state,
+    compute_acc_from_state,
     atlantic_basin_mask,
     _grid_lat_v_deg,
 )
@@ -504,3 +505,57 @@ class TestComputeAMOCFromState:
             compute_amoc_from_state(
                 v, h, mask, grid, basin="indian",
             )
+
+
+# ==============================================================================
+# Drake-Passage ACC from a lat-lon C-grid state
+# ==============================================================================
+
+class _FakeGrid2DLat(_FakeGrid):
+    """_FakeGrid but with a 2-D (n_lat, n_lon) ``lat`` (constant per row) to
+    exercise compute_acc_from_state's curvilinear-lat row-reduction path."""
+
+    def __init__(self, n_lat=36, n_lon=72, radius=6.371e6):
+        super().__init__(n_lat=n_lat, n_lon=n_lon, radius=radius)
+        self.lat = np.broadcast_to(
+            np.asarray(self.lat)[:, None], (n_lat, n_lon)).copy()
+
+
+class TestComputeACCFromState:
+    """compute_acc_from_state = barotropic_streamfunction + acc_transport glue
+    (Sv<->m3/s round-trip + 2-D-lat reduction).  The streamfunction/transport
+    cores are already unit-tested elsewhere; here we pin the glue."""
+
+    def _make(self, *, u0=0.1, n_lat=60, n_lon=72, nlev=8, grid_cls=_FakeGrid):
+        grid = grid_cls(n_lat=n_lat, n_lon=n_lon)
+        # uniform eastward zonal flow at u-faces (n_lat, n_lon+1, nlev)
+        u = np.full((n_lat, n_lon + 1, nlev), u0, dtype=np.float64)
+        h = np.full((n_lat, n_lon, nlev), 100.0, dtype=np.float64)
+        mask = np.ones((n_lat, n_lon), dtype=np.float64)
+        return u, h, mask, grid
+
+    def test_uniform_eastward_gives_finite_nonzero(self):
+        u, h, mask, grid = self._make(u0=0.1)
+        acc = compute_acc_from_state(u, h, mask, grid)
+        assert np.isfinite(acc)
+        assert abs(acc) > 0.0
+
+    def test_zero_flow_zero_acc(self):
+        u, h, mask, grid = self._make(u0=0.0)
+        acc = compute_acc_from_state(u, h, mask, grid)
+        assert abs(acc) < 1e-12
+
+    def test_scales_linearly_with_velocity(self):
+        u1, h, mask, grid = self._make(u0=0.05)
+        u2, _, _, _ = self._make(u0=0.10)
+        a1 = compute_acc_from_state(u1, h, mask, grid)
+        a2 = compute_acc_from_state(u2, h, mask, grid)
+        assert abs(a2 - 2.0 * a1) < 1e-9 * max(1.0, abs(a2))
+
+    def test_2d_lat_matches_1d(self):
+        """A 2-D (row-constant) lat must reduce to the same ACC as 1-D lat."""
+        u, h, mask, g1 = self._make(u0=0.1, grid_cls=_FakeGrid)
+        _, _, _, g2 = self._make(u0=0.1, grid_cls=_FakeGrid2DLat)
+        a1 = compute_acc_from_state(u, h, mask, g1)
+        a2 = compute_acc_from_state(u, h, mask, g2)
+        assert abs(a1 - a2) < 1e-9 * max(1.0, abs(a1))

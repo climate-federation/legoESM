@@ -10,6 +10,7 @@ from legoesm.core.field import Field
 from legoesm.ocean.spinup import (
     atlantic_basin_mask_mpas,
     compute_amoc_from_state_mpas,
+    compute_acc_from_state_mpas,
 )
 from legoesm.ocean.coupler.sss_apply import (
     apply_sss_restoring_step_mpas,
@@ -201,6 +202,134 @@ class TestComputeAMOCFromStateMPAS:
         h = np.zeros((mesh.nCells, 6))  # different nlev
         with pytest.raises(ValueError):
             compute_amoc_from_state_mpas(u, h, mesh)
+
+
+# ==============================================================================
+# MPAS ACC@Drake (section transport)
+# ==============================================================================
+
+class _FakeDrakeMesh:
+    """East-west cell chain across the Drake meridian (lon=-68) at lat=-55.
+
+    Cells at lon [-70, -66, -62, -58]; only edge 0 (cells 0↔1) straddles the
+    -68 meridian.  Optionally appends an ANTIPODAL edge (cells near +112, the
+    antipode of -68) carrying flow, to verify the |d|<90° wrap guard excludes it.
+    """
+
+    def __init__(self, antipodal=False):
+        lon = [-70.0, -66.0, -62.0, -58.0]
+        lat = [-55.0, -55.0, -55.0, -55.0]
+        c1 = [0, 1, 2]
+        c2 = [1, 2, 3]
+        lat_edge = [-55.0, -55.0, -55.0]
+        if antipodal:
+            # Two extra cells straddling +112° (= -68 + 180), an edge between
+            # them: opposite SIGNED circular-longitude but a wrap artefact.
+            lon += [110.0, 114.0]
+            lat += [-55.0, -55.0]
+            c1 += [4]
+            c2 += [5]
+            lat_edge += [-55.0]
+        self.nCells = len(lon)
+        self.nEdges = len(c1)
+        self.lonCell = np.deg2rad(np.array(lon))
+        self.latCell = np.deg2rad(np.array(lat))
+        self.latEdge = np.deg2rad(np.array(lat_edge))
+        self.dvEdge = np.full(self.nEdges, 1.0e5)        # 100 km edges
+        self.cellsOnEdge = np.array([c1, c2])
+
+
+class TestComputeACCFromStateMPAS:
+
+    def test_eastward_flow_positive_analytic(self):
+        """Eastward u on the one straddling edge -> +ve ACC = u·dv·Σh."""
+        mesh = _FakeDrakeMesh()
+        nlev = 4
+        u = np.full((mesh.nEdges, nlev), 0.1)            # 0.1 m/s eastward
+        h = np.full((mesh.nCells, nlev), 200.0)
+        acc = compute_acc_from_state_mpas(u, h, mesh, drake_lon_deg=-68.0)
+        # only edge 0 straddles: s_e=+1, F = 0.1·1e5·200 per level × 4 = 8e6 m³/s
+        assert abs(acc - 8.0) < 1e-9
+
+    def test_sign_preserved_westward_negative(self):
+        mesh = _FakeDrakeMesh()
+        nlev = 4
+        h = np.full((mesh.nCells, nlev), 200.0)
+        pos = compute_acc_from_state_mpas(
+            np.full((mesh.nEdges, nlev), 0.1), h, mesh, drake_lon_deg=-68.0)
+        neg = compute_acc_from_state_mpas(
+            np.full((mesh.nEdges, nlev), -0.1), h, mesh, drake_lon_deg=-68.0)
+        assert pos > 0.0 and neg < 0.0
+        assert abs(pos + neg) < 1e-9                      # equal magnitude
+
+    def test_only_straddling_edge_counts(self):
+        """Flow on non-straddling edges (both cells east of -68) is ignored."""
+        mesh = _FakeDrakeMesh()
+        nlev = 4
+        h = np.full((mesh.nCells, nlev), 200.0)
+        u_all = np.full((mesh.nEdges, nlev), 0.1)        # every edge flows
+        u_one = np.zeros((mesh.nEdges, nlev)); u_one[0] = 0.1   # only edge 0
+        acc_all = compute_acc_from_state_mpas(u_all, h, mesh, drake_lon_deg=-68.0)
+        acc_one = compute_acc_from_state_mpas(u_one, h, mesh, drake_lon_deg=-68.0)
+        assert abs(acc_all - acc_one) < 1e-9             # extras don't count
+
+    def test_antipodal_meridian_excluded(self):
+        """The |d|<90° guard rejects the antipode-of-Drake edge (wrap artefact)."""
+        mesh = _FakeDrakeMesh(antipodal=True)
+        nlev = 4
+        h = np.full((mesh.nCells, nlev), 200.0)
+        u = np.full((mesh.nEdges, nlev), 0.1)            # incl. the antipodal edge
+        acc = compute_acc_from_state_mpas(u, h, mesh, drake_lon_deg=-68.0)
+        assert abs(acc - 8.0) < 1e-9                      # antipodal edge excluded
+
+    def test_partial_cell_uses_min_rule_not_centered(self):
+        """A bottom step at the straddling edge -> min-rule cross-section (the
+        shallower cell), NOT a centred average that would count phantom area."""
+        mesh = _FakeDrakeMesh()
+        nlev = 4
+        u = np.zeros((mesh.nEdges, nlev)); u[0] = 0.1
+        h = np.full((mesh.nCells, nlev), 200.0)
+        h[1, -1] = 0.0                                # cell 1 bottom level = rock
+        acc = compute_acc_from_state_mpas(u, h, mesh, drake_lon_deg=-68.0)
+        # min(200,0)=0 at the bottom -> only 3 full levels: 0.1·1e5·200·3 = 6 Sv
+        # (a centred 0.5·(200+0) would wrongly give 7 Sv).
+        assert abs(acc - 6.0) < 1e-9
+
+    def test_coastline_dry_cell_zero_transport(self):
+        """A straddling edge against a fully-dry (land) cell carries no flux
+        (min-rule -> 0 cross-section, no phantom into-land transport)."""
+        mesh = _FakeDrakeMesh()
+        nlev = 4
+        u = np.full((mesh.nEdges, nlev), 0.1)
+        h = np.full((mesh.nCells, nlev), 200.0)
+        h[1] = 0.0                                    # cell 1 is land
+        acc = compute_acc_from_state_mpas(u, h, mesh, drake_lon_deg=-68.0)
+        assert abs(acc) < 1e-9
+
+    def test_no_section_edges_returns_nan(self):
+        mesh = _FakeDrakeMesh()
+        nlev = 4
+        u = np.full((mesh.nEdges, nlev), 0.1)
+        h = np.full((mesh.nCells, nlev), 200.0)
+        acc = compute_acc_from_state_mpas(u, h, mesh, drake_lon_deg=120.0)
+        assert np.isnan(acc)
+
+    def test_out_of_band_returns_nan(self):
+        mesh = _FakeDrakeMesh()
+        nlev = 4
+        u = np.full((mesh.nEdges, nlev), 0.1)
+        h = np.full((mesh.nCells, nlev), 200.0)
+        acc = compute_acc_from_state_mpas(
+            u, h, mesh, drake_lon_deg=-68.0,
+            drake_lat_south_deg=-30.0, drake_lat_north_deg=-20.0)
+        assert np.isnan(acc)
+
+    def test_shape_mismatch_raises(self):
+        mesh = _FakeDrakeMesh()
+        u = np.zeros((mesh.nEdges, 4))
+        h = np.zeros((mesh.nCells, 6))
+        with pytest.raises(ValueError):
+            compute_acc_from_state_mpas(u, h, mesh)
 
 
 # ==============================================================================
