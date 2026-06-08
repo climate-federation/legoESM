@@ -93,12 +93,32 @@ def _exchange_mpi(
 ) -> jnp.ndarray:
     """Perform MPI halo exchange using mpi4jax sendrecv.
 
-    Iterates over neighbor ranks, performing a blocking sendrecv for
-    each.  The send buffer is packed from ``comm.send_idx`` and the
-    received data is scattered into ``comm.recv_idx``.
+    Gathers every neighbor's send buffer from the ORIGINAL field, issues
+    one blocking sendrecv per neighbor, then scatters all received data
+    back in a SINGLE functional update.
 
     Works for fields of any shape ``(n_local, ...)`` — multi-level
     fields are handled automatically.
+
+    Why one scatter at the end (iter 3, strong-scaling fix): the previous
+    version did ``field = field.at[recv_idx].set(recv_data)`` *inside* the
+    neighbor loop.  That (a) copied the whole field once per neighbor
+    (an O(n_local) functional update × n_neighbors — e.g. a 7 MB edge
+    field copied 6× per exchange) and (b) created a false
+    read-after-write dependency: ``send_buf = field[send_idx]`` for the
+    next neighbor textually read the just-mutated ``field``, forcing XLA
+    to serialize the blocking sendrecvs even though ``send_idx`` are
+    OWNED entities that never overlap the halo ``recv_idx`` written by any
+    neighbor.  Collecting all sends from the original field and scattering
+    once removes both costs.  Measured comm overhead was 22 ms/step at
+    np=4 (18 serialized sendrecv) and 30 ms at np=8 (36) — see
+    docs/scaling/amip_mpi_scaling.md.
+
+    Correctness: ``send_idx`` ⊂ owned, ``recv_idx`` ⊂ halo (disjoint), and
+    each halo entity is owned by exactly one neighbor, so the per-neighbor
+    recv chunks are disjoint — concatenating them in neighbor order and
+    writing at ``comm.recv_idx`` (laid out in the same order) reproduces
+    the previous result exactly, order-independent.
     """
     from legoesm.parallel.reductions import (
         _mpi4jax_array_result,
@@ -112,15 +132,15 @@ def _exchange_mpi(
     TAG_BASE = entity_type * 1_000_000
 
     s_offset = 0
-    r_offset = 0
+    recv_chunks = []
 
     for i, nbr_rank in enumerate(comm.neighbor_ranks):
         s_count = comm.send_counts[i]
         r_count = comm.recv_counts[i]
 
         send_idx = comm.send_idx[s_offset:s_offset + s_count]
-        recv_idx = comm.recv_idx[r_offset:r_offset + r_count]
 
+        # Gather from the ORIGINAL field — independent of every recv.
         send_buf = field[send_idx]
 
         if field.ndim == 1:
@@ -142,12 +162,17 @@ def _exchange_mpi(
             ),
         )
 
-        field = field.at[recv_idx].set(recv_data)
-
+        recv_chunks.append(recv_data)
         s_offset += s_count
-        r_offset += r_count
 
-    return field
+    if not recv_chunks:
+        return field
+
+    # Single scatter: one whole-field copy instead of n_neighbors.
+    # comm.recv_idx is the concatenation of the per-neighbor recv indices
+    # in the same order recv_chunks was built, so a flat set lines up.
+    all_recv = jnp.concatenate(recv_chunks, axis=0)
+    return field.at[comm.recv_idx].set(all_recv)
 
 
 # ============================================================================

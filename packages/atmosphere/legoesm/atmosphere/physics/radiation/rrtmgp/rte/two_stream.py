@@ -194,6 +194,70 @@ def _compute_optimal_lw_secant(
   return c0 * trans_total + c1
 
 
+def _accumulate_over_gpoints(step_fn, n_gpt, init_val, gpoint_batch_size):
+  """Sum the per-g-point flux contributions produced by ``step_fn``.
+
+  ``step_fn(igpt, cumulative) -> cumulative + flux(igpt)`` is the shared
+  per-g-point map-reduce body of :func:`solve_lw` / :func:`solve_sw`.  The
+  g-point axis is embarrassingly parallel; only the vertical recurrence
+  *inside* ``step_fn`` is sequential.
+
+  ``gpoint_batch_size <= 0`` (default) — the memory-frugal path: a
+  ``jax.lax.scan`` over g-points with each step wrapped in
+  ``jax.checkpoint(nothing_saveable, prevent_cse=True)`` so the backward pass
+  recomputes one g-point at a time (≈1 MiB/col instead of ≈21 MiB/col, making
+  ~1° training feasible on a 24 GiB GPU under reverse-mode AD).  This is the
+  REQUIRED path for ``eqx.filter_value_and_grad`` at high resolution.
+
+  ``gpoint_batch_size > 0`` — the throughput path for FORWARD / inference:
+  process g-points in parallel blocks of ``gpoint_batch_size`` via ``jax.vmap``,
+  scanning over the blocks to bound peak memory.  The sequential g-point scan
+  launches one tiny kernel per g-point and starves the GPU (~26x slower in a
+  GPU microbench); blocking restores parallelism.  The forward result differs
+  from the scan path only by summation re-association (validated bit/ulp-close).
+  NOT for reverse-mode AD at high resolution: it holds ``gpoint_batch_size``
+  g-points' activations for the backward pass.
+  """
+  if gpoint_batch_size and gpoint_batch_size > 0:
+    bs = int(gpoint_batch_size)
+    # ``step_fn(ig, zeros)`` == flux(ig) since step_fn adds to the carry.
+    zero = jax.tree.map(jnp.zeros_like, init_val)
+    flux_fn = lambda ig: step_fn(ig, zero)
+    n_blocks = -(-n_gpt // bs)  # ceil
+
+    def block_step(carry, b):
+      igpts = b * bs + jnp.arange(bs)
+      valid = igpts < n_gpt
+      # Clamp out-of-range padding indices to a valid g-point (0) so the
+      # optics-table gathers stay in bounds, then mask their contribution.
+      igpts_safe = jnp.where(valid, igpts, 0)
+      block = jax.vmap(flux_fn)(igpts_safe)  # leaves: (bs, ...)
+      block_sum = jax.tree.map(
+          lambda f: jnp.sum(
+              jnp.where(valid.reshape((bs,) + (1,) * (f.ndim - 1)), f, 0),
+              axis=0,
+          ),
+          block,
+      )
+      new = jax.tree.map(lambda c, s: c + s.astype(c.dtype), carry, block_sum)
+      return new, None
+
+    fluxes, _ = jax.lax.scan(block_step, init_val, jnp.arange(n_blocks))
+    return fluxes
+
+  # Memory-frugal checkpointed scan (training / default).
+  def _scan_step(carry, igpt):
+    return step_fn(igpt, carry), None
+
+  _scan_step_ckpt = jax.checkpoint(
+      _scan_step,
+      prevent_cse=True,
+      policy=jax.checkpoint_policies.nothing_saveable,
+  )
+  fluxes, _ = jax.lax.scan(_scan_step_ckpt, init_val, jnp.arange(n_gpt))
+  return fluxes
+
+
 def solve_lw(
     pressure: Array,
     temperature: Array,
@@ -210,6 +274,7 @@ def solve_lw(
     aerosol_absorption_optical_depth: Array | None = None,
     use_scan: bool | None = None,
     use_optimal_angle: bool = False,
+    gpoint_batch_size: int = 0,
 ) -> dict[str, Array]:
   """Solves two-stream radiative transfer equation over the longwave spectrum.
 
@@ -383,26 +448,12 @@ def solve_lw(
   flux_keys = ['flux_up', 'flux_down', 'flux_net']
   init_val = {key: jnp.zeros_like(temperature) for key in flux_keys}
 
-  # Replace ``jax.lax.fori_loop`` with ``jax.lax.scan`` wrapping
-  # ``step_fn`` in ``jax.checkpoint(policy=nothing_saveable)`` so the
-  # backward pass recomputes per-g-point intermediates one at a time
-  # instead of materialising all 256 g-points' activations.  Memory
-  # for the per-call backward drops from ~21 MiB/col (T11 -> ~14 GiB
-  # at v7 settings) to roughly ~1 MiB/col (~0.7 GiB at T11), making
-  # T127 (~1°) feasible on a 24 GiB GPU under
-  # ``eqx.filter_value_and_grad``.  Forward semantics are identical:
-  # ``scan`` and ``fori_loop`` both iterate the same step function
-  # and accumulate the cumulative flux.
-  def _scan_step(carry, igpt):
-    return step_fn(igpt, carry), None
-
-  _scan_step_ckpt = jax.checkpoint(
-      _scan_step,
-      prevent_cse=True,
-      policy=jax.checkpoint_policies.nothing_saveable,
-  )
-  fluxes, _ = jax.lax.scan(
-      _scan_step_ckpt, init_val, jnp.arange(optics_lib.n_gpt_lw),
+  # Accumulate each g-point's flux contribution.  ``gpoint_batch_size==0``
+  # keeps the memory-frugal checkpointed scan (training); ``>0`` uses chunked
+  # ``vmap`` over the parallel g-point axis for forward throughput.  See
+  # :func:`_accumulate_over_gpoints`.
+  fluxes = _accumulate_over_gpoints(
+      step_fn, optics_lib.n_gpt_lw, init_val, gpoint_batch_size,
   )
   # There are problematic values for the fluxes at the top boundary (the top
   # halo), so fix using a quadratic polynomial to evaluate the flux at the top
@@ -430,6 +481,7 @@ def solve_sw(
     aerosol_asymmetry_factor: float = 0.70,
     solar_fraction_by_gpt: Array | None = None,
     use_scan: bool | None = None,
+    gpoint_batch_size: int = 0,
 ) -> dict[str, Array]:
   """Solves the two-stream radiative transfer equation for shortwave.
 
@@ -603,20 +655,12 @@ def solve_sw(
   fluxes_0 = {key: jnp.zeros_like(temperature) for key in flux_keys}
 
   def _compute_fluxes(_):
-    # ``fori_loop`` -> ``scan`` + per-g-point ``jax.checkpoint`` so the
-    # backward pass recomputes one g-point at a time instead of
-    # storing all 224 SW g-points' activations.  See solve_lw above
-    # for the longwave companion change.
-    def _scan_step(carry, igpt):
-      return step_fn(igpt, carry), None
-
-    _scan_step_ckpt = jax.checkpoint(
-        _scan_step,
-        prevent_cse=True,
-        policy=jax.checkpoint_policies.nothing_saveable,
-    )
-    fluxes, _ = jax.lax.scan(
-        _scan_step_ckpt, fluxes_0, jnp.arange(optics_lib.n_gpt_sw),
+    # Accumulate per-g-point flux: checkpointed scan when
+    # ``gpoint_batch_size==0`` (training), chunked ``vmap`` over the parallel
+    # g-point axis when ``>0`` (forward throughput).  See
+    # :func:`_accumulate_over_gpoints` and the solve_lw companion.
+    fluxes = _accumulate_over_gpoints(
+        step_fn, optics_lib.n_gpt_sw, fluxes_0, gpoint_batch_size,
     )
     # There are problematic values for the fluxes at the top boundary (the top
     # halo), so fix using a quadratic polynomial to evaluate the flux at the top

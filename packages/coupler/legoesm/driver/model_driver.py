@@ -2644,6 +2644,8 @@ class ModelDriver:
                     ch4_ppbv=cfg.ch4_ppbv,
                     n2o_ppbv=cfg.n2o_ppbv,
                     compute_fp32=_rrtmgp_fp32,
+                    gpoint_batch_size=getattr(
+                        cfg, "rrtmgp_gpoint_batch_size", 0),
                 ),
                 # Ozone source (default "standard" matches the bare default; a
                 # non-standard --ozone-source now flows to MPAS rrtmgp).  The

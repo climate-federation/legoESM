@@ -1049,6 +1049,7 @@ def _build_rrtmgp_radiation_fn(config):
         sfc_albedo=config.albedo_ocean,
         S_0=S_0,
         use_scan=_exp_use_scan,
+        gpoint_batch_size=getattr(config, 'rrtmgp_gpoint_batch_size', 0),
         include_clouds=(getattr(config, 'cloud_scheme', 'none') != 'none'),
     )
 

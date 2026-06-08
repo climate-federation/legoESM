@@ -303,6 +303,7 @@ def make_voronoi_mpi_step(
     layout: VoronoiPartitionLayout,
     sigma_coord,
     config=None,
+    physics_fn=None,
 ):
     """Build an MPI-parallel step function for MPAS dynamics.
 
@@ -317,6 +318,24 @@ def make_voronoi_mpi_step(
     layout : VoronoiPartitionLayout
     sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
     config : MPASPrimitiveEquationConfig, optional
+    physics_fn : callable, optional
+        Operator-split physics, called as
+        ``physics_fn(state, mesh, sigma_coord, phys_state=, forcing=)``
+        and returning ``MPASHydrostaticTendencies`` (or a
+        ``(tendencies, phys_state_out)`` tuple — the carry is ignored
+        here).  Applied ONCE on the post-dynamics state and integrated
+        forward over ``dt`` (``state += dt * tendency``), mirroring the
+        serial ``MPASPrimitiveEquationModel._step_jit`` operator-split
+        convention exactly (dynamics RK → physics → floor → fix_mass).
+        The physics is evaluated on the rank-LOCAL mesh after a fresh
+        halo exchange, so boundary-owned edges/cells see valid neighbour
+        pressure.  ``physics_fn`` must be a column-/cell-local closure
+        (e.g. Held-Suarez Newtonian relaxation) — it adds NO horizontal
+        halo coupling beyond the pre-physics exchange.  Stateful
+        operator-split carry (``phys_state``) is NOT threaded through the
+        MPI step yet; pass only stateless/additive physics here.
+        Passed in as a callable (not imported) so this core ``parallel``
+        module keeps no dependency on the atmosphere component.
 
     Returns
     -------
@@ -406,6 +425,32 @@ def make_voronoi_mpi_step(
         state_new = dispatch_integrator(
             state, _mpi_tendency_fn, dt, config.time_integrator,
         )
+
+        # Operator-split physics: evaluate ONCE on the post-dynamics state and
+        # apply forward over dt (state += dt * tendency).  Mirrors the serial
+        # ``_step_jit`` convention.  A fresh halo exchange precedes the call so
+        # boundary-owned edges see valid neighbour-cell pressure (Held-Suarez
+        # forms edge sigma from ``cellsOnEdge``).  ``phys_state``/``forcing``
+        # carry is not threaded through the MPI step — stateless physics only.
+        if physics_fn is not None:
+            state_phys_in = _exchange_mpas_state(state_new)
+            _pr = physics_fn(
+                state_phys_in, local_mesh, sigma_coord,
+                phys_state=None, forcing=None,
+            )
+            # NB ``type(... ) is tuple`` (not isinstance): the tendencies
+            # object is itself a NamedTuple, so isinstance(_pr, tuple) is
+            # always True — mirror the serial ``_step_jit`` guard exactly.
+            _pt = _pr[0] if type(_pr) is tuple else _pr
+            state_new = MPASHydrostaticState(
+                u=state_phys_in.u.replace(
+                    data=state_phys_in.u.data + dt * _pt.du_dt.data),
+                T=state_phys_in.T.replace(
+                    data=state_phys_in.T.data + dt * _pt.dT_dt.data),
+                p_s=state_phys_in.p_s.replace(
+                    data=state_phys_in.p_s.data + dt * _pt.dp_s_dt.data),
+                phis=state_new.phis,
+            )
 
         # Temperature floor
         if config.T_min > 0:

@@ -177,13 +177,19 @@ _TPU_XLA_FLAGS = {
 _NVIDIA_GPU_XLA_FLAGS = {
     "xla_gpu_cudnn_gemm_fusion_level": "3",
     # Overlap compute with collective communication (halo exchange, allreduce).
+    # NOTE: the per-collective async toggles
+    # ``xla_gpu_enable_async_all_reduce`` and
+    # ``xla_gpu_enable_async_collectives`` were REMOVED in newer XLA
+    # (JAX ≥ ~0.5 / current 0.9–0.10).  XLA aborts with an uncatchable
+    # ``LOG(FATAL) Unknown flags in XLA_FLAGS`` the instant *any* GPU
+    # backend initialises if they are present — which silently broke
+    # every production GPU run and the GPU scaling harness on this host.
+    # Async overlap for all collectives (all-reduce, ppermute-based halo
+    # exchange, all-gather) is now driven by the latency-hiding scheduler
+    # below, so dropping the two obsolete flags loses no functionality on
+    # current XLA.  Do NOT re-add them without gating on an XLA version
+    # that still accepts them.
     "xla_gpu_enable_latency_hiding_scheduler": "true",
-    "xla_gpu_enable_async_all_reduce": "true",
-    # Enable async for ALL collectives (ppermute, all-gather, etc.),
-    # not just allreduce.  Critical for icosahedral grids that use
-    # ppermute-based halo exchange — without this flag, ppermute blocks
-    # until completion, leaving the GPU idle during communication.
-    "xla_gpu_enable_async_collectives": "true",
     "xla_gpu_enable_highest_priority_async_stream": "true",
     # CUDA Graphs / command buffers — XLA can capture sequences of
     # kernel launches and replay them as a single command buffer, which
