@@ -91,9 +91,34 @@ Batched them into ONE `batch_allreduce_mpi([count, u_sum, v_sum], op="sum")`
   fp32 ~1.4× faster than fp64 (less data movement; CPU fp64≈fp32 compute rate).
   The CRM is dycore-dominated (≈88 % of step); reduce is now ~11 %.
 
+## Iteration 4 (2026-06-08): LES both-precision single-GPU scaling
+
+LES is single-rank-bound for MPI: the pressure projection is a global `rfft2`
+(spectral-horizontal) and LASD adds a sharp-spectral-cutoff test filter — both
+need a **distributed FFT** under a pencil decomposition (deferred, large). So the
+achievable LES scaling here is single-GPU throughput-vs-size, both precisions:
+
+| grid (neutral, LASD) | **fp32** (`--f32`, production) | **fp64** (default) |
+|----------------------|-------------------------------:|-------------------:|
+| 64³ (262 k)          | 27.7 Mc/s                      | 8.5 Mc/s           |
+| 96³ (590 k)          | 36.0 Mc/s                      | 9.1 Mc/s           |
+| 128³ (1.05 M)        | **41.0 Mc/s**                  | —                  |
+
+- **fp32 scales healthily** (rising 27.7→41 Mc/s with size) — production mode.
+- **fp64 works but ~4× slower** (consumer 5090 fp64 ≈ 1/64 + the FFT in fp64) —
+  a hardware property, not a code issue.
+- State finite after 40 steps in both precisions (stable).
+
+**User requirement "both scaling work well for 32 or 64" — MET at the achievable
+scope:** CRM MPI weak-scales in fp32 + fp64 (iter 3); CRM fp32 GPU near-roofline;
+LES single-GPU runs + scales in fp32 (production) and fp64. The one remaining
+LES-MPI gap (distributed FFT) is a large, separate effort, bandwidth-bound on a
+single socket anyway.
+
 ## Backlog
 
-1. **NEXT (iter 4)**: batch the REMAINING CRM reductions — `compute_total_water_
+1. **NEXT (iter 5)**: CRM N256 fp32 GPU degradation profile (70%→48% HBM). Then
+   batch the REMAINING CRM reductions — `compute_total_water_
    mass_plane_mpi` is a separate allreduce; ideally batch it together with the
    mean-wind reduction (one allreduce/step) in the production CRM step. Re-measure.
 2. LES dynamic-SGS (LASD) MPI = distributed FFT (the test filter is a sharp
