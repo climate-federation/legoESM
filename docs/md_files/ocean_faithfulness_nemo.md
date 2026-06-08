@@ -380,6 +380,21 @@ under-ices winter. Codex: HIGH (cube combined-scheme solar double-count) is a FA
 faithful path (external scheme + `shortwave_penetration=None`); defensive siconc clip + source-mask caveat
 addressed. Combined run (E−P + --ice-albedo) `mpas_ico6_5yr_emp_ice` (8433670) launched → SH-SST PNGs.
 
+### iter-B SSS-drift — FIXED: salt virtual-salt flux now global-normalized (commit 8d774d94)
+The E−P run (8432819) confirmed the drift: SSS 34.67@d90 → 34.28@d450 → 34.14@d540 (~−0.4 PSU/yr). CAUSE
+(confirmed): `normalize_freshwater` (MPAS, ON) removed the area-mean of the **eta** flux only (volume),
+but the **salt** virtual-salt flux used the **RAW** net F_fw=P−E+R → an unbalanced ∮(P−E+R) (interactive
+E from biased SST ≠ prescribed P+runoff) drifts the mean salinity even though volume is conserved.
+**FIX:** `apply_freshwater_virtual_salt_top(normalize=True)` removes the area-weighted ocean mean of the
+PHYSICAL net (P−E+R+ice, NOT restoring) over the EFFECTIVE WET mask before the closure — the SAME area-mean
+the eta path removes (volume+salt consistent). Conserves global salt: salt-mass rate = −S_ref·F_fw (h
+cancels), so ∮(−S_ref·(F_fw−F_mean)·area)=0 (Griffies). Codex confirmed the math; fixed thin-cell mask +
+restoring-exclusion. CAVEATS (documented): local jnp.sum → per-rank under MPI (shared with the eta path;
+OMIP=single-GPU); **latlon has no normalize_freshwater (MPAS-only saltnorm — immediate follow-up)**. Tests:
+4 salt-conservation unit tests + 90 ocean tests pass. **DEFINITIVE run** `mpas_ico6_5yr_full` (8435879):
+E−P + ice-albedo + salt-norm — the maximal-faithfulness config → the per-grid PNGs + SSS/AMOC/SST scores.
+8432819 (no-saltnorm) is the drift baseline for the before/after.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
