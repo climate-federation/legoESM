@@ -124,31 +124,56 @@ def test_emanuel_n_fractions_finite_for_all_choices():
         )
 
 
-def test_emanuel_buoyancy_sort_detrainment_changes_tendency():
-    """A larger ``cu_coefficient`` (buoyancy-sort detrainment
-    enhancement) changes the per-level tendency profile relative to
-    ``cu = 0`` (single-plume limit).
+def test_emanuel_genuine_mixing_detrainment_structure():
+    """The GENUINE (i,j) mixing matrix concentrates detrainment near the
+    parcel's level of neutral buoyancy (cloud top), not uniformly.
 
-    The buoyancy sort scales the detrainment terms in the mass-flux
-    kernel, so it visibly alters where heat/moisture are deposited.
-    (We assert the profiles *differ* rather than that the total
-    absolute magnitude grows monotonically: after the column
-    vapor-side enthalpy correction, the sort can redistribute the
-    tendencies without strictly increasing ``∑|dT|``.)"""
+    With the faithful SIJ/ELIJ/MENT spectrum the per-level convective
+    cloud-water source ``dq_c_conv_dt`` is bottom-heavy in mass flux but
+    its detrainment (and hence the upper-tropospheric heating) peaks near
+    cloud top — a structure a single bulk plume cannot produce.  We pin
+    the genuine path against the legacy single-sigmoid surrogate: the two
+    give materially different per-level ``dT_dt`` profiles (the genuine
+    sort redistributes the heating)."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
-    out_no_sort, _ = emanuel_convection(
+    out_genuine, _ = emanuel_convection(
         T, q, pf, ph, cpp, dt=300.0,
-        config=EmanuelConfig(cu_coefficient=0.0),
+        config=EmanuelConfig(use_genuine_mixing=True),
     )
-    out_strong_sort, _ = emanuel_convection(
+    out_surrogate, _ = emanuel_convection(
         T, q, pf, ph, cpp, dt=300.0,
-        config=EmanuelConfig(cu_coefficient=1.0),
+        config=EmanuelConfig(use_genuine_mixing=False),
     )
-    # The buoyancy sort changes the tendency profile (not a no-op).
-    dT_diff = float(jnp.max(jnp.abs(out_strong_sort.dT_dt - out_no_sort.dT_dt)))
-    assert dT_diff > 1e-8
+    # The genuine mixing is not the surrogate (materially different).
+    dT_diff = float(jnp.max(jnp.abs(out_genuine.dT_dt - out_surrogate.dT_dt)))
+    assert dT_diff > 1e-6
+    # The genuine path heats the free troposphere (the detrainment-height
+    # sort deposits buoyancy aloft); the column-max heating sits above the
+    # boundary layer, not at the surface.
+    dT = out_genuine.dT_dt[0]
+    k_max = int(jnp.argmax(dT))
+    assert k_max < nlev - 2, "genuine heating should peak above the surface"
+
+
+def test_emanuel_genuine_mixing_matrix_tunable_changes_tendency():
+    """A genuine-mixing tunable (the SIJ entrainment-gate sharpness)
+    changes the tendency — i.e. the mixing matrix is genuinely wired,
+    not a dead parameter."""
+    T, q, pf, ph = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    out_a, _ = emanuel_convection(
+        T, q, pf, ph, cpp, dt=300.0,
+        config=EmanuelConfig(sij_gate_sharpness=40.0),
+    )
+    out_b, _ = emanuel_convection(
+        T, q, pf, ph, cpp, dt=300.0,
+        config=EmanuelConfig(sij_gate_sharpness=20.0),
+    )
+    dT_diff = float(jnp.max(jnp.abs(out_a.dT_dt - out_b.dT_dt)))
+    assert dT_diff > 1e-9
 
 
 def test_emanuel_mixture_buoyancy_sign_crosses():

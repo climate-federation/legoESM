@@ -474,6 +474,63 @@ class EmanuelConfig(NamedTuple):
     epsilon_0: float = 2.0e-4
     delta_0: float = 2.0e-4
     M_b_max: float = 0.05
+    # --- GENUINE (i,j) episodic-mixing buoyancy-sort spectrum ----------
+    # Faithful port of the Fortran CONVECT v4.3c SIJ/ELIJ/MENT mixing
+    # matrix (convect43c.f lines 588-712).  When ``use_genuine_mixing``
+    # is True (default) the scheme builds the full ``(nlev, nlev)``
+    # mixing matrix — every origin level i mixes with environment air in
+    # the neutral-buoyancy fraction spectrum, each mixture's buoyancy
+    # sets its detrainment level j, and the environmental tendencies are
+    # assembled from MENT(i,j).  When False it falls back to the legacy
+    # single-sigmoid ``_mixture_buoyancy`` surrogate (kept for back-compat
+    # / ablation).  See ``_emanuel_mixing.py``.
+    use_genuine_mixing: bool = True
+    # Emanuel's effective liquid-water heat capacity CL [J/kg/K] (oracle
+    # value 2500).  This is a scheme-internal thermodynamic coefficient
+    # in CONVECT's liquid-water-static-energy formulation, distinct from
+    # the canonical ``constants.c_pw`` (4218 J/kg/K at standard
+    # conditions); kept here so the SIJ/ELIJ algebra matches the oracle
+    # term-for-term rather than monkey-patching a global constant.
+    c_l_emanuel: float = 2500.0
+    # Autoconversion threshold ELCRIT [kg/kg] and critical temperature
+    # TLCRIT [degC] for the precipitation efficiency EP (oracle .0011 /
+    # -55.0).
+    elcrit: float = 1.1e-3
+    tlcrit: float = -55.0
+    # Mixing-rate coefficient ENTP in M(i) (oracle 1.5).
+    entp: float = 1.5
+    # SIGD / SIGS — fractional area of unsaturated downdraught / fraction
+    # of precip falling outside cloud (oracle 0.05 / 0.12).  Kept as
+    # config for the downdraught bookkeeping in the orchestrator.
+    sigd: float = 0.05
+    sigs: float = 0.12
+    # Rain / snow evaporation coefficients COEFFR / COEFFS and the CU
+    # momentum-transport coefficient + BETA downdraught velocity scale
+    # (oracle 1.0 / 0.8 / 0.7 / 10.0).  Threaded for completeness of the
+    # precip-downdraught handoff; the model owns precip via q_c.
+    coeffr: float = 1.0
+    coeffs: float = 0.8
+    cu_momentum: float = 0.7
+    beta_downdraft: float = 10.0
+    # --- Smoothing sharpnesses for the discrete sort (AD-safety) -------
+    # Each replaces a hard Fortran switch with a smooth surrogate; the
+    # forward result tracks the discrete sort to a stated tolerance (see
+    # the oracle-vs-ours mixing-matrix comparison in
+    # ``.physics-validator/emanuel``).
+    # Sigmoid sharpness [1/level] for the ICB/INB cloud-layer windows.
+    level_window_sharpness: float = 6.0
+    # Sigmoid sharpness [dimensionless] for the ``0 < SIJ < 0.9``
+    # entrainment gate (oracle counts a mixture only inside this band).
+    sij_gate_sharpness: float = 40.0
+    # Upper SIJ gate (oracle 0.9).
+    sij_upper_gate: float = 0.9
+    # Magnitude floor for the SIJ denominator (oracle ``ABS(DENOM)<0.01``).
+    denom_floor: float = 0.01
+    # Offset [Pa] for the smooth max-MSE (NK) source-level selection.
+    mse_min_search_offset: float = 5.0e4
+    # Sigmoid sharpness for the saturated-mixture re-solve switch
+    # (oracle ``SIJ<0 .or. SIJ>1 .or. ALTEM>CWAT``).
+    sat_branch_sharpness: float = 100.0
 
 
 class TiedtkeConfig(NamedTuple):

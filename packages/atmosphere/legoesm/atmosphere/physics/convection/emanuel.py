@@ -57,6 +57,9 @@ from legoesm.atmosphere.physics.convection._plume import (
     compute_lcl,
     entraining_detraining_plume,
 )
+from legoesm.atmosphere.physics.convection._emanuel_mixing import (
+    emanuel_mixing_tendencies,
+)
 
 
 __all__ = ("emanuel_convection",)
@@ -306,73 +309,72 @@ def emanuel_convection(
     # See ZhangMcFarlaneConfig.M_b_max.
     M_b = jnp.clip(cbmf_new, 0.0, config.M_b_max)
 
-    # -- Standard entraining plume from cloud base ------------------------
-    eps_profile = jnp.full_like(T, config.epsilon_0)
-    dlt_profile = jnp.full_like(T, config.delta_0)
-    plume = entraining_detraining_plume(
-        T, q_v, p_full, p_half, z,
-        T_parcel, q_parcel, k_lcl_smooth,
-        eps_profile, dlt_profile, M_b,
-    )
+    if config.use_genuine_mixing:
+        # == GENUINE Emanuel (i,j) episodic-mixing buoyancy sort =========
+        # Build the full ``(nlev, nlev)`` SIJ/ELIJ/MENT mixing matrix
+        # (faithful CONVECT v4.3c port; see ``_emanuel_mixing.py``) and
+        # assemble the environmental tendencies from the detrained mass
+        # fluxes.  This REPLACES the single-sigmoid ``_mixture_buoyancy``
+        # surrogate: every origin level i forms the neutral-buoyancy
+        # mixing-fraction spectrum with environment air, each mixture's
+        # buoyancy sets its detrainment level j, and MENT(i,j) carries
+        # the detrained mass.
+        mixing = emanuel_mixing_tendencies(
+            T, q_v, p_full, p_half, M_b,
+            c_l=config.c_l_emanuel,
+            elcrit=config.elcrit,
+            tlcrit=config.tlcrit,
+            entp=config.entp,
+            level_window_sharpness=config.level_window_sharpness,
+            sij_gate_sharpness=config.sij_gate_sharpness,
+            sij_upper_gate=config.sij_upper_gate,
+            denom_floor=config.denom_floor,
+            mse_min_search_offset=config.mse_min_search_offset,
+            sat_branch_sharpness=config.sat_branch_sharpness,
+        )
+        dT_dt = mixing.dT_dt
+        dq_v_dt = mixing.dq_v_dt
+        dq_c_conv_dt = mixing.dq_c_conv_dt
+        # The genuine path delivers the in-cloud condensate source
+        # directly; the downdraft bookkeeping below reuses it as the raw
+        # cloud-water source.
+        dq_c_conv_dt_raw = dq_c_conv_dt
+    else:
+        # == Legacy single-sigmoid surrogate (ablation / back-compat) ====
+        # -- Standard entraining plume from cloud base ----------------
+        eps_profile = jnp.full_like(T, config.epsilon_0)
+        dlt_profile = jnp.full_like(T, config.delta_0)
+        plume = entraining_detraining_plume(
+            T, q_v, p_full, p_half, z,
+            T_parcel, q_parcel, k_lcl_smooth,
+            eps_profile, dlt_profile, M_b,
+        )
 
-    # -- Buoyancy-sorted ensemble (Emanuel 1991) ---------------------------
-    # Build a discrete grid of environmental mixing fractions χ_i ∈ (0,1)
-    # with N equal-weight bins.  At each level the mixed parcel's
-    # virtual-temperature buoyancy B_mix_i is computed with a genuine
-    # evaporative saturation adjustment (``_mixture_buoyancy``), so it
-    # **crosses zero** at a critical χ for dry environments — mixtures
-    # with B>0 ascend, B<0 detrain/sink.  Its smooth ascending weight is
-    # sigmoid(s · B_mix_i).  The detrainment enhancement is the fraction
-    # of the spectrum that is negatively buoyant: ≈0 deep in the cloud
-    # (undilute parcel strongly buoyant, χ_c→1) and →1 near cloud top
-    # (undilute loses buoyancy, χ_c→0).  This reproduces the
-    # buoyancy-sorting detrainment-height spread that the old
-    # ``B_mix = χ·B_u`` (sign-definite) form could not.
-    n_frac = config.n_mixing_fractions
-    fractions = jnp.linspace(
-        1.0 / (2 * n_frac), 1.0 - 1.0 / (2 * n_frac), n_frac
-    )  # environmental mixing-fraction bin midpoints χ
-    B_mix = _mixture_buoyancy(
-        T, q_v, plume.T_u, plume.q_u, plume.q_c_u, p_full, fractions,
-    )                                                    # (ncol, nlev, n_frac)
-    ascending_weight_per_frac = jax.nn.sigmoid(
-        config.smooth_trigger_sharpness * B_mix
-    )                                                    # (ncol, nlev, n_frac)
-    ascending_mean = jnp.mean(ascending_weight_per_frac, axis=-1)
-    detrained_fraction = 1.0 - ascending_mean            # negatively-buoyant share
-    # Buoyancy-sort detrainment multiplier in [1, 1 + cu].
-    sort_multiplier = 1.0 + config.cu_coefficient * detrained_fraction
+        # -- Buoyancy-sorted ensemble (smooth surrogate) --------------
+        n_frac = config.n_mixing_fractions
+        fractions = jnp.linspace(
+            1.0 / (2 * n_frac), 1.0 - 1.0 / (2 * n_frac), n_frac
+        )  # environmental mixing-fraction bin midpoints χ
+        B_mix = _mixture_buoyancy(
+            T, q_v, plume.T_u, plume.q_u, plume.q_c_u, p_full, fractions,
+        )                                                # (ncol, nlev, n_frac)
+        ascending_weight_per_frac = jax.nn.sigmoid(
+            config.smooth_trigger_sharpness * B_mix
+        )                                                # (ncol, nlev, n_frac)
+        ascending_mean = jnp.mean(ascending_weight_per_frac, axis=-1)
+        detrained_fraction = 1.0 - ascending_mean        # negatively-buoyant share
+        sort_multiplier = 1.0 + config.cu_coefficient * detrained_fraction
 
-    # Cap plume.M_u once at the source so every downstream use sees
-    # the bounded value (see ZM).
-    plume_M_u_capped = jnp.clip(plume.M_u, 0.0, config.M_b_max)
-    plume = plume._replace(M_u=plume_M_u_capped)
+        plume_M_u_capped = jnp.clip(plume.M_u, 0.0, config.M_b_max)
+        plume = plume._replace(M_u=plume_M_u_capped)
 
-    # -- Environment tendencies via the shared mass-flux kernel ------------
-    # Plume splits vapor (``plume.q_u``) and cloud water (``plume.q_c_u``)
-    # explicitly so we use the kernel's correct cloud-water source.
-    # ``sort_multiplier`` is Emanuel's per-level detrainment enhancement
-    # from the buoyancy-sorted ensemble.  Pass it through ``delta_0`` so
-    # only the detrainment terms in the kernel are scaled — multiplying
-    # the full kernel output by ``sort_multiplier`` also rescaled the
-    # delta-independent subsidence terms (compensating-subsidence drying
-    # / warming and the adiabatic ``g/c_p`` correction), which is wrong.
-    dT_dt, dq_v_dt, dq_c_conv_dt = _apply_mass_flux_kernel(
-        T, q_v, p_full,
-        plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
-        z, rho, config.delta_0 * sort_multiplier, M_u_max=config.M_b_max,
-    )
-    # Un-enhanced cloud-water source — used by the downdraft bookkeeping
-    # below.  ``dq_c_conv_dt`` from the kernel is already enhanced by
-    # ``sort_multiplier`` (since we passed ``delta_0 * sort_multiplier``);
-    # dividing by ``sort_multiplier`` reconstructs the pre-enhancement
-    # value so the downdraft column-budget bookkeeping matches the
-    # original implementation's intent (downdraft uses the basic
-    # condensate, not the buoyancy-sort-enhanced version).
-    # AD-safe floor on the divisor (1e-15) so the VJP
-    # ``-dq_c / sort_multiplier²`` cannot overflow fp32 when the
-    # buoyancy sort gives a tiny weight.  Codex iter-35 audit pattern.
-    dq_c_conv_dt_raw = dq_c_conv_dt / jnp.maximum(sort_multiplier, 1e-15)
+        dT_dt, dq_v_dt, dq_c_conv_dt = _apply_mass_flux_kernel(
+            T, q_v, p_full,
+            plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
+            z, rho, config.delta_0 * sort_multiplier, M_u_max=config.M_b_max,
+        )
+        # AD-safe floor on the divisor so the VJP cannot overflow.
+        dq_c_conv_dt_raw = dq_c_conv_dt / jnp.maximum(sort_multiplier, 1e-15)
 
     # -- Optional unsaturated-downdraft cooling ---------------------------
     # Implemented as a static Python branch (closure-time decision) so
@@ -495,10 +497,36 @@ def emanuel_convection(
     # so ``scale → 1`` and the condensate is untouched.
     net_water = jnp.sum((dq_v_dt + dq_c_conv_dt) * dp, axis=-1) / constants.g
     col_dq_c_mass = jnp.sum(dq_c_conv_dt * dp, axis=-1) / constants.g
+
+    # The correction is BIDIRECTIONAL (required by the genuine (i,j)
+    # mixing, codex-found):
+    #
+    #  * ``net_water > 0`` — the kernel created spurious condensate; remove
+    #    it by scaling ``dq_c`` DOWN (the legacy surrogate case).
+    #  * ``net_water < 0`` — convection removed MORE vapor than it produced
+    #    as in-cloud condensate (the genuine Emanuel updraught: most of the
+    #    lifted water condenses and would *precipitate* in the oracle).  In
+    #    this model the latent heat of that condensation is already in
+    #    ``dT_dt`` (vapor-side enthalpy pass below), and the condensed water
+    #    is handed to the ``q_c`` tracer for microphysics to precipitate —
+    #    so we ADD the deficit ``|net_water|`` to ``dq_c`` distributed where
+    #    vapor is actually being removed (``dq_v_dt < 0``), making
+    #    ``∫(dq_v + dq_c) dp = 0`` EXACTLY (total column water conserved).
+    #
+    # Both branches are smooth/AD-safe: the down-scale is a clipped ratio,
+    # the up-add distributes ``|net_water|`` by the (non-negative) drying
+    # weight ``max(-dq_v, 0)`` normalised over the column.
+    deficit = jnp.maximum(-net_water, 0.0)                # >0 when water left
+    drying = jnp.maximum(-dq_v_dt, 0.0)                   # where vapor removed
+    drying_col = jnp.sum(drying * dp, axis=-1) / constants.g
+    add_weight = drying / jnp.maximum(drying_col[:, None], 1e-30)  # ∫w dp/g = 1
+    dq_c_add = deficit[:, None] * add_weight              # ∫ dq_c_add dp/g = deficit
+    # Down-scale only the spurious-excess case; when net_water<0 qc_scale=1.
     qc_scale = jnp.clip(
-        1.0 - net_water / jnp.maximum(col_dq_c_mass, 1e-30), 0.0, 1.0,
+        1.0 - jnp.maximum(net_water, 0.0)
+        / jnp.maximum(col_dq_c_mass, 1e-30), 0.0, 1.0,
     )
-    dq_c_conv_dt = dq_c_conv_dt * qc_scale[:, None]
+    dq_c_conv_dt = dq_c_conv_dt * qc_scale[:, None] + dq_c_add
 
     # (2) Vapor-side enthalpy conservation (oracle ENTS pass).  Conserve
     # ``c_p·FT + L_v·FQ_v`` (vapor only) so the convective heating equals
