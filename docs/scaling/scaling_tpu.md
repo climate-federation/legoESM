@@ -1,7 +1,8 @@
 # TPU scaling — legoESM (Google Cloud TPU)
 
 Single-host Cloud TPU testing for legoESM. Status: provisioning + emulation
-validation done; real-hardware numbers pending (Phase 3).
+validation done; **single-chip v6e baseline measured** (Phase 3, see results
+below); the multi-chip 1→6 face-sharding sweep is pending an 8-chip slice.
 
 ## Scope and hard constraints
 
@@ -164,6 +165,45 @@ same scripts produce the full 1→6 curve with no changes.
 
 ## Phase 3 results
 
-_Pending real-hardware run._ Fill in SYPD / ms-step / Mcells-s for device
-counts 1, 2, 3, 6 at C48 and C96, float32. Compare the 1→6 face-sharding
-curve (the clean scaling story) against the GPU numbers in `scaling_gpu.md`.
+### Single-chip v6e baseline (ct6e-standard-1t, float32)
+
+First real-hardware run, on a single v6e chip (the 8-chip slice was
+capacity/quota-blocked). Cubed-sphere FV3, L26, float32, `backend: TPU`,
+jax 0.10.1 / Python 3.11. `Mcells/s = total_cells / step_time` where
+`total_cells` already includes levels (same definition as `scaling_gpu.md`).
+
+| res | total cells | dt (s) | ms/step | SYPD  | Mcells/s | compile |
+|-----|-------------|--------|---------|-------|----------|---------|
+| C48 | 359,424     | 210    | 4.48    | 128.4 | 80.3     | 10.5 s  |
+| C96 | 1,437,696   | 90     | 20.6    | 11.9  | 69.7     | 12.2 s  |
+
+(A C24/L10 smoke run first confirmed liveness at 7.5 Mcells/s — too small to
+fill the chip; throughput rises ~10× by C48 as the chip saturates.)
+
+**vs GPU (RTX 5090, same cubed-sphere FV3).** TPU is fp32-only, so compare to
+the GPU *fp32* figure, not the fp64 table in `scaling_gpu.md`:
+
+| res | v6e fp32 (1 chip) | RTX 5090 fp32 | ratio |
+|-----|-------------------|---------------|-------|
+| C48 | 80.3 Mcells/s     | ~299 Mcells/s | ~0.27× |
+
+A single v6e chip is ~3.7× slower than one RTX 5090 on this dycore. That is
+expected: FV3 (SSP-RK3 × PPM, elementwise + stencil + gather) is
+memory/stencil-bound and barely uses the TPU's matmul units (MXU), where the
+v6e's advantage lives. The TPU value proposition here is **multi-chip
+scaling**, not single-chip peak — 6 chips at ~linear face-sharding efficiency
+would land in RTX-5090 territory. Confirming that needs the 1→6 sweep.
+
+### 1→6 face-sharding sweep — pending 8-chip slice
+
+Still to do once a `ct6e-standard-8t` / `v6e-8` (2x4) slice is available
+(blocked so far by v6e capacity/quota). `run_bench.sh` produces it unchanged;
+fill in device counts 1, 2, 3, 6 at C48 and C96, float32, and compare the
+scaling-efficiency curve against the GPU numbers in `scaling_gpu.md`.
+
+| n_chips | C48 ms/step | C48 SYPD | C48 eff | C96 ms/step | C96 SYPD | C96 eff |
+|---------|-------------|----------|---------|-------------|----------|---------|
+| 1       | 4.48        | 128.4    | 100%    | 20.6        | 11.9     | 100%    |
+| 2       | _pending_   |          |         |             |          |         |
+| 3       | _pending_   |          |         |             |          |         |
+| 6       | _pending_   |          |         |             |          |         |
