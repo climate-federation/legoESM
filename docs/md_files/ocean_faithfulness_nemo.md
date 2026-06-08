@@ -362,19 +362,23 @@ vs the core's `config.S_ref`. **Pivoted to the in-core channel** the model alrea
   restoring**. Hypothesis: P−E closes the global budget → weak interior restoring keeps SSS faithful AND
   AMOC near NEMO 17.7. Multi-grid SST/SSS PNGs to follow.
 
-### iter-A SH/Antarctic SST WARM BIAS (user-flagged from zonal_means/SST_maps PNGs) — no sea-ice albedo
-Antarctic (S of 45S) SST runs TOO WARM vs NEMO (not near freezing): MPAS ico6 lego **5.08** vs NEMO
-**3.05** (bias **+2.03**, RMSE 2.37); ico7 (~55 km) only +0.32 (resolution helps, but ORCA1 is also ~1°).
-ROOT CAUSE: `sw_down` = **downwelling SWDN**, and the column absorbs **100%** of it (the core's
-`sw_absorbed = sw*0.94` only splits surface-vs-penetrating; total = q_net includes full sw_down) — there
-is **NO surface albedo at all**, and **no sea-ice albedo**. NEMO (interactive SI3 ice) reflects ~60-80%
-of SW under Antarctic ice → stays near freezing; we absorb all of it → warm. `freeze_floor` only caps the
-FLOOR (`max(T,−1.8)`), never warming. An SST-TRIGGERED ice albedo can't fix it (cells already +5°C → ramp
-never activates; chicken-and-egg). **FAITHFUL FIX (next):** apply albedo to sw_down weighted by NEMO's OWN
-climatological `siconc` (`ORCA1_1y_*icemod.nc` exists) → impose ice albedo where NEMO has ice (independent
-of model SST) → cuts SW → SST cools toward freezing. Reuse `core/surface_albedo.py` (`ocean_albedo`,
-`ice_albedo`) + ice-albedo constants; add a prescribed-ice-concentration loader + applicator albedo term +
-config + tests. Also adds the ~6% open-ocean albedo missing globally. Separate diff from the P−E fix.
+### iter-B SH/Antarctic SST WARM BIAS — FIXED via sea-ice SW albedo (commit 854214b0)
+User-flagged (zonal_means/SST_maps PNGs): Antarctic (S of 45S) SST too WARM vs NEMO — MPAS ico6 lego
+**5.08** vs NEMO **3.05** (bias **+2.03**); ico7 only +0.32 (res helps; ORCA1 is also ~1°). ROOT CAUSE:
+`sw_down`=downwelling SWDN absorbed **100%** — NO surface albedo at all (the cores' `sw*0.94` is a
+vertical PENETRATION split, NOT an albedo; total=q_net=100%). NEMO's SI3 ice reflects 60-80% under
+Antarctic ice → near freezing; we absorbed it all. `freeze_floor` only caps the FLOOR.
+**FIX (gated `--ice-albedo`, default off→bit-exact):** at the forcing PRODUCER,
+`sw_net = sw_down*(1 − (a_oc*(1−siconc) + a_ice*siconc))` in BOTH q_net + returned sw_down (applied ONCE;
+the 0.94 penetration split then operates on the albedoed sw_net — **codex confirmed keep-0.94**).
+`load_nemo_siconc` IDW-regrids NEMO's OWN annual `siconc` (`ORCA1_1y_*icemod.nc`; land=NaN verified) onto
+any grid — PRESCRIBED (not SST-triggered → feedback-safe, breaks the +5°C chicken-and-egg). New broadband
+constants `alpha_ocean_broadband`=0.06, `alpha_ice_broadband_cold`=0.65. SW-only is the dominant term
+(~140/280 W/m² Antarctic over-heat); turbulent/LW ice insulation = diagnostics-gated phase 2. Tests +
+E2E (ice-band SST warms less). **LIMITATION:** annual-mean siconc (no monthly icemod) over-ices summer /
+under-ices winter. Codex: HIGH (cube combined-scheme solar double-count) is a FALSE POSITIVE for the
+faithful path (external scheme + `shortwave_penetration=None`); defensive siconc clip + source-mask caveat
+addressed. Combined run (E−P + --ice-albedo) `mpas_ico6_5yr_emp_ice` (8433670) launched → SH-SST PNGs.
 
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
