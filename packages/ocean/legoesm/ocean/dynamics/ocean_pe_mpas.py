@@ -854,8 +854,15 @@ def mpas_ocean_baroclinic_tendencies(
     # from ocean_model_mpas.py:step()).  Only the virtual salt flux is
     # applied here as a tracer tendency.
     if freshwater is not None and config.freshwater_closure != "none":
+        # When ``normalize_freshwater`` is on, remove the global area-mean of the
+        # net freshwater flux so the virtual-salt closure conserves GLOBAL SALT
+        # (the same correction the free-surface eta path applies for volume in
+        # ocean_model_mpas.step) -- without it an unbalanced ∮(P-E+R) drifts the
+        # mean salinity even though volume is conserved.
         dS_dt_3d = apply_freshwater_virtual_salt_top(
             dS_dt_3d, freshwater, config.S_ref, h_k[:, 0], config.rho_0, mask,
+            area=mesh.areaCell,
+            normalize=bool(getattr(config, "normalize_freshwater", False)),
         )
 
     # ---- Real salt-mass flux (e.g. sea-ice brine rejection) ----

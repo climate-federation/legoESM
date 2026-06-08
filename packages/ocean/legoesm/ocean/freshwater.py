@@ -148,7 +148,23 @@ def virtual_salt_flux(
     jax.Array, shape (nCells,)
         Salinity tendency [PSU/s] for top layer.
     """
-    F_fw = net_freshwater_flux(fw)
+    return virtual_salt_flux_from_net(
+        net_freshwater_flux(fw), S_ref, dz_0, rho_0)
+
+
+def virtual_salt_flux_from_net(
+    F_fw: jnp.ndarray,
+    S_ref: float,
+    dz_0: jnp.ndarray,
+    rho_0: float,
+) -> jnp.ndarray:
+    """Top-layer virtual-salt tendency [PSU/s] from a PRECOMPUTED net freshwater
+    flux ``F_fw`` [kg/m²/s, +INTO ocean] (vs :func:`virtual_salt_flux`, which
+    builds the net from a ``FreshwaterForcing``).  Lets a caller normalize the
+    net (e.g. :func:`normalize_freshwater_net`) before the closure.
+
+        dS/dt = -S_ref * F_fw / (rho_0 * dz_0)
+    """
     # Guard thin cells: on partial-cell grids, dz_0 can be O(cm) at
     # shallow coastal cells.  Dividing by tiny dz produces huge dS/dt.
     # Zero the tendency where dz_0 < 1mm (same guard as prescribed
@@ -156,6 +172,34 @@ def virtual_salt_flux(
     is_wet = dz_0 > 1.0e-3
     dz_safe = jnp.maximum(dz_0, 1.0e-3)
     return jnp.where(is_wet, -S_ref * F_fw / (rho_0 * dz_safe), 0.0)
+
+
+def normalize_freshwater_net(
+    F_fw: jnp.ndarray,
+    area: jnp.ndarray,
+    mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Remove the ocean-area-weighted global mean of a freshwater flux.
+
+    Returns ``F_fw - mean(F_fw)`` so the area integral over the ``mask`` cells is
+    exactly zero.  Applied to the virtual-salt closure this CONSERVES GLOBAL SALT:
+    the salt-mass tendency per area is ``-S_ref * F_fw * 1e-3`` (the top-layer
+    thickness cancels), so ``∮(-S_ref*(F_fw - F_mean)*area) = 0`` (Griffies: a
+    redistributive surface freshwater flux changes no salt mass).  Using the SAME
+    area-mean removal that the free-surface (eta) path applies keeps volume and
+    salt normalization consistent.
+
+    The caller must pass the EFFECTIVE WET mask (ocean cells the salt flux
+    actually touches), so the mean removal matches the applied flux exactly --
+    ``apply_freshwater_virtual_salt_top`` uses ``mask * (h_top > 1e-3)``.
+
+    NOTE: single-device local ``jnp.sum`` (matching the eta normalization in
+    ``ocean_model_mpas.step``).  An MPI-sharded run would need ``global_sum_mpi``
+    over both numerator and denominator -- a shared pre-existing caveat.
+    """
+    w = area * mask
+    F_mean = jnp.sum(F_fw * w) / jnp.maximum(jnp.sum(w), 1.0e-10)
+    return F_fw - F_mean * mask
 
 
 def salt_flux_salinity_tendency(salt_flux, dz_0, rho_0: float):

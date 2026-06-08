@@ -19,6 +19,8 @@ from legoesm.ocean.freshwater import (
     net_freshwater_flux,
     freshwater_eta_tendency,
     virtual_salt_flux,
+    virtual_salt_flux_from_net,
+    normalize_freshwater_net,
     freshwater_from_coupler,
 )
 from legoesm.ocean.mpas_config import MPASOceanConfig
@@ -865,3 +867,78 @@ class TestCouplerAdapter:
         assert fw.precip.shape == (n,)
         assert jnp.allclose(fw.precip, 1e-4)
         assert jnp.allclose(fw.evap, 100.0 / constants.L_v)
+
+
+class TestFreshwaterSaltNormalization:
+    """Global-salt conservation via area-mean removal of the freshwater flux.
+
+    Without normalization an unbalanced ∮(P-E+R) drifts the global-mean salinity
+    even when volume is conserved; ``normalize_freshwater_net`` removes the
+    area-weighted ocean mean so the virtual-salt closure conserves global salt.
+    """
+
+    def test_normalize_freshwater_net_zero_area_mean(self):
+        n = 50
+        key = jax.random.PRNGKey(0)
+        F = jax.random.normal(key, (n,)) + 2.0      # nonzero-mean flux
+        area = 1.0 + jax.random.uniform(jax.random.PRNGKey(1), (n,))
+        mask = (jnp.arange(n) % 5 != 0).astype(F.dtype)   # 20% land
+        Fn = normalize_freshwater_net(F, area, mask)
+        # Area-weighted ocean integral of the normalized flux is ~0.
+        integ = float(jnp.sum(Fn * area * mask))
+        assert abs(integ) < 1e-9, f"normalized flux integral {integ} != 0"
+        # Land cells: the subtraction is masked, so the land flux is F - F_mean*0
+        # = F (untouched); only ocean cells are corrected.
+        assert jnp.allclose(Fn[mask < 0.5], F[mask < 0.5])
+
+    def test_apply_virtual_salt_normalize_conserves_global_salt(self):
+        """apply_freshwater_virtual_salt_top(normalize=True) -> the top-layer
+        salt-mass tendency integrates to ~0 over the ocean; normalize=False does
+        NOT (the budget is unbalanced)."""
+        from legoesm.ocean.dynamics.ocean_tendency_common import (
+            apply_freshwater_virtual_salt_top,
+        )
+        n, nlev = 60, 4
+        # Net freshwater = precip only -> strictly positive, nonzero global mean
+        # (the unbalanced case that drifts salinity).
+        P = 1e-4 * (1.0 + jax.random.uniform(jax.random.PRNGKey(2), (n,)))
+        fw = FreshwaterForcing(precip=P, evap=jnp.zeros(n), runoff=jnp.zeros(n),
+                               ice_fw=jnp.zeros(n), restoring=jnp.zeros(n))
+        area = 1.0 + jax.random.uniform(jax.random.PRNGKey(3), (n,))
+        mask = (jnp.arange(n) % 7 != 0).astype(P.dtype)
+        h_top = jnp.full((n,), 10.0)
+        rho_0, S_ref = 1025.0, 35.0
+
+        def salt_rate(normalize):
+            dS = jnp.zeros((n, nlev))
+            dS = apply_freshwater_virtual_salt_top(
+                dS, fw, S_ref, h_top, rho_0, mask,
+                area=area, normalize=normalize)
+            # salt-mass rate per area = dS_top * rho_0 * h_top; integrate over ocean
+            return float(jnp.sum(dS[:, 0] * rho_0 * h_top * area * mask))
+
+        r_norm = salt_rate(True)
+        r_raw = salt_rate(False)
+        assert abs(r_norm) < 1e-6, f"normalized salt rate {r_norm} != 0"
+        assert abs(r_raw) > 1e-3, f"raw salt rate {r_raw} should be nonzero"
+
+    def test_apply_virtual_salt_normalize_requires_area(self):
+        from legoesm.ocean.dynamics.ocean_tendency_common import (
+            apply_freshwater_virtual_salt_top,
+        )
+        n = 10
+        fw = zero_freshwater(n)
+        with pytest.raises(ValueError):
+            apply_freshwater_virtual_salt_top(
+                jnp.zeros((n, 3)), fw, 35.0, jnp.full((n,), 10.0), 1025.0,
+                jnp.ones(n), normalize=True)  # area=None -> error
+
+    def test_virtual_salt_flux_from_net_matches_wrapper(self):
+        n = 20
+        P = 1e-4 * jnp.ones(n)
+        fw = FreshwaterForcing(precip=P, evap=jnp.zeros(n), runoff=jnp.zeros(n),
+                               ice_fw=jnp.zeros(n), restoring=jnp.zeros(n))
+        h = jnp.full((n,), 10.0)
+        a = virtual_salt_flux(fw, 35.0, h, 1025.0)
+        b = virtual_salt_flux_from_net(net_freshwater_flux(fw), 35.0, h, 1025.0)
+        assert jnp.allclose(a, b)
