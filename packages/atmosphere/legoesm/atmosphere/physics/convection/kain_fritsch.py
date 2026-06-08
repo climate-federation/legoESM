@@ -362,7 +362,18 @@ def kain_fritsch_convection(
     # but with the USL launch state instead of ``T[:, -1]`` / ``q_v[:, -1]``.
     # The saturated-from-base path would spuriously inflate CAPE in
     # unsaturated columns (codex review-2 #2).
-    T_moist = compute_moist_adiabat(T_usl, p_full, q_v_base=q_usl)
+    #
+    # ``compute_moist_adiabat`` launches the dry leg from the surface
+    # full-level pressure ``p_full[:, -1]``, but the USL parcel lives at the
+    # USL mean pressure ``p_usl`` (~30-50 hPa above the surface, codex
+    # review-4).  To launch the SAME parcel (identical potential temperature
+    # and humidity) consistently from the surface pressure, translate
+    # ``T_usl`` to its surface-pressure dry-adiabatic equivalent
+    # ``T_usl * (p_surface / p_usl)^kappa`` — preserving theta, so the moist
+    # adiabat above the (unchanged) LCL is identical, and the dry leg now
+    # begins at the correct pressure origin.
+    T_usl_at_sfc = T_usl * (p_base / jnp.maximum(p_usl, 1.0)) ** constants.kappa
+    T_moist = compute_moist_adiabat(T_usl_at_sfc, p_full, q_v_base=q_usl)
     q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
     q_v_parcel = jnp.minimum(q_usl[:, None], q_sat_parcel)
     cape = compute_cape(
@@ -387,8 +398,13 @@ def kain_fritsch_convection(
     lcl = compute_lcl(T_parcel_lcl, q_parcel_lcl, p_usl, p_full)
     k_lcl_smooth = lcl.k_lcl_smooth
     k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(T, T_moist, sharpness=1.0)
-    # Plume launch parcel (seeded with the sub-cloud perturbation).
-    T_parcel = T_usl + config.parcel_perturb_T
+    # Plume launch parcel (seeded with the sub-cloud perturbation).  The
+    # plume integrator starts its scan from the SURFACE level, so the launch
+    # temperature must be the surface-pressure dry-adiabatic equivalent of
+    # the USL parcel (codex review-4 — same pressure-origin consistency as
+    # the CAPE parcel above), preserving theta so the moist ascent is
+    # identical above the LCL.
+    T_parcel = T_usl_at_sfc + config.parcel_perturb_T
     q_parcel = q_usl + config.parcel_perturb_q
 
     # -- The KF trigger function (the AD chokepoint) -----------------------
