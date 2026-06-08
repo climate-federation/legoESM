@@ -1,15 +1,38 @@
-"""Holtslag-Boville nonlocal K-profile turbulence scheme.
+"""Holtslag-Boville (1993) nonlocal K-profile boundary-layer turbulence.
 
-Nonlocal first-order closure with counter-gradient correction for heat
-transport. Uses a smooth bulk-Richardson PBL height diagnostic and a
-K-profile that transitions via sigmoid blending to local Ri-based
-diffusion above the boundary layer.
+Differentiable JAX port of the E3SM/CAM ``hb_diff.F90`` (``eddy_scheme =
+'HB'``) plus ``pbl_utils.F90``, validated against those Fortran sources as
+an oracle.  Faithful to the oracle block-by-block:
+
+1. Surface friction velocity, Obukhov length, and kinematic surface
+   buoyancy flux ``kbfs`` (``pbl_utils.calc_ustar`` / ``calc_obklen``).
+2. Bulk-Richardson PBL height with the ``fac*u*^2`` mechanical term, the
+   unstable surface-excess (``tlv``) correction, and the ``700*u*``
+   minimum-mechanical-mixing floor (``pblintd``).
+3. The nonlocal K-profile ``K = fak*u*-or-wm * pblh * vk * zh*(1-zh)^2``
+   with the surface-layer / outer-layer split, the convective velocity
+   scale ``wm``, the stable ``zl`` forms, and the Prandtl number
+   (``austausch_pbl``).
+4. The countergradient heat transport ``cgh = khfs*cgs*cpair`` in the
+   unstable outer layer (``austausch_pbl``), applied as ``flux =
+   -Kh*(dtheta/dz - gamma)``.
+5. The free-atmosphere local-Ri mixing-length diffusivity
+   ``kvf = ml2*sqrt(s2)*f(Ri)`` (``austausch_atm``), combined with the
+   PBL profile via ``K = max(K_pbl, kvf)``.
+
+The oracle's hard ``if`` switches (surface/outer layer, stable
+``zl<=1``/``zl>1``, unstable/stable regime, first-crossing scan) are
+replaced by smooth sigmoid blends whose sharpnesses live in
+:class:`HoltslagBovilleConfig`, so the scheme is ``jax.grad``/``jit``/
+``vmap`` safe and smooth everywhere while reproducing the oracle within a
+stated tolerance.
 
 References
 ----------
 - Holtslag, A. A. M., & Boville, B. A. (1993). Local versus nonlocal
   boundary-layer diffusion in a global climate model. J. Climate, 6,
   1825-1842.
+- E3SM ``components/eam/src/physics/cam/hb_diff.F90``, ``pbl_utils.F90``.
 """
 
 from __future__ import annotations
@@ -18,7 +41,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import HoltslagBovilleConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
@@ -26,8 +49,39 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
-    implicit_vertical_diffusion_theta,
 )
+
+_ONET = 1.0 / 3.0  # 1/3 power in the MO gradient expressions (oracle ``onet``)
+
+
+def _smooth_floor(x: jax.Array, floor: float) -> jax.Array:
+    """Smooth lower bound ``~max(x, floor)`` with a continuous gradient.
+
+    ``softplus``-style floor: ``floor + softplus(x - floor)`` so the result
+    stays ``>= floor`` and the derivative is bounded and nonzero on both
+    sides (unlike ``jnp.maximum`` which has a dead one-sided gradient and
+    unlike ``clip`` which differentiates the divide at the floor).  Used on
+    the MO arguments ``(1 - beta*zl)`` which the oracle never floors but
+    which can dip non-positive at the smooth blend edges.
+    """
+    return floor + jax.nn.softplus(x - floor)
+
+
+def _safe_cbrt(x: jax.Array, floor: float = 1.0e-12) -> jax.Array:
+    """AD-safe cube root ``x**(1/3)`` for ``x >= 0``.
+
+    ``x**(1/3)`` has an INFINITE derivative ``(1/3)x**(-2/3)`` at ``x=0``, so
+    ``jax.grad`` of any expression feeding a zero into a bare cube root
+    returns NaN (e.g. ``wstar = (max(0,kbfs)·...)**(1/3)`` at ``kbfs<=0``).
+    Flooring the argument before the power keeps both the value (~0 for tiny
+    ``x``) and the gradient finite.
+    """
+    return jnp.maximum(x, floor) ** _ONET
+
+
+def _safe_sqrt(x: jax.Array, floor: float = 1.0e-12) -> jax.Array:
+    """AD-safe square root: ``sqrt`` has infinite slope at 0, so floor first."""
+    return jnp.sqrt(jnp.maximum(x, floor))
 
 
 def holtslag_boville_turbulence(
@@ -45,7 +99,13 @@ def holtslag_boville_turbulence(
     dt: float,
     config: HoltslagBovilleConfig,
 ) -> TurbulenceOutput:
-    """Compute turbulence tendencies using Holtslag-Boville nonlocal K-profile.
+    """Holtslag-Boville nonlocal K-profile turbulence (faithful to E3SM HB).
+
+    Index convention: level 0 is the model top, level ``nlev-1`` is the
+    surface-adjacent layer (matches CAM ``k=1..pver``).  Diffusivities
+    ``K_half[k]`` live on the interface between full levels ``k`` and
+    ``k+1`` (``ncol, nlev-1``); ``K_full`` is interpolated back for
+    diagnostics.
 
     Parameters
     ----------
@@ -54,15 +114,11 @@ def holtslag_boville_turbulence(
     T : jax.Array
         Temperature at full levels [K], shape (ncol, nlev).
     q_v : jax.Array
-        Water vapor mixing ratio [kg/kg], shape (ncol, nlev).
-    p_full : jax.Array
-        Pressure at full levels [Pa], shape (ncol, nlev).
-    p_half : jax.Array
-        Pressure at half levels [Pa], shape (ncol, nlev+1).
-    z_full : jax.Array
-        Height at full levels [m], shape (ncol, nlev).
-    z_half : jax.Array
-        Height at half levels [m], shape (ncol, nlev+1).
+        Water-vapour mixing ratio [kg/kg], shape (ncol, nlev).
+    p_full, p_half : jax.Array
+        Full/half-level pressure [Pa], shapes (ncol, nlev) / (ncol, nlev+1).
+    z_full, z_half : jax.Array
+        Full/half-level height above surface [m].
     T_sfc : jax.Array
         Surface temperature [K], shape (ncol,).
     q_sfc : jax.Array
@@ -78,148 +134,85 @@ def holtslag_boville_turbulence(
     TurbulenceOutput
     """
     ncol, nlev = T.shape
+    g = constants.g
+    vk = constants.kappa_vk
+    cpair = constants.c_pd
+    # zvir = R_v/R_d - 1 = 1/epsilon - 1 (oracle ``zvir`` in calc_obklen).
+    zvir = 1.0 / constants.epsilon - 1.0
 
-    # ----- Half-level gradients (same pattern as louis.py) -----
-    dz_half = jnp.abs(z_full[:, :-1] - z_full[:, 1:])  # (ncol, nlev-1)
-    dz_half = jnp.clip(dz_half, 1.0, None)
+    # Derived oracle parameters.
+    sffrac = config.sffrac
+    betam = config.betam
+    betah = config.betah
+    betas = config.betas
+    binm = betam * sffrac
+    binh = betah * sffrac
+    fak = config.fak
+    fakn = config.fakn
+    ccon = fak * sffrac * vk
+    ricr = config.Ri_crit
 
-    du_dz = (u[:, :-1] - u[:, 1:]) / dz_half
-    dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
-    S2 = du_dz ** 2 + dv_dz ** 2 + 1e-10
-    S = jnp.sqrt(S2)
+    # ----- Virtual potential temperature theta_v (oracle thv) -----
+    # Exner Pi = (p/p_ref)^kappa ; potential temperature theta = T/Pi.
+    exner = (jnp.clip(p_full, 1.0, None) / constants.p_ref) ** constants.kappa
+    theta = T / jnp.clip(exner, 1.0e-6, None)
+    theta_v = virtual_temperature(theta, q_v)  # thv on theta (oracle uses thv=virtem(th,q))
 
-    # Virtual potential temperature
-    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
-    theta_v = virtual_temperature(T, q_v) * exner
+    thv_bot = theta_v[:, -1]            # (ncol,)  bottom full level (CAM k=pver)
+    th_bot = theta[:, -1]              # potential temp at bottom
 
-    theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
-    dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
-    N2 = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
-    Ri = N2 / S2  # (ncol, nlev-1)
+    # ----- Half-level shear, N2, Ri for the free-atmosphere K -----
+    # Interface k between full levels k and k+1 (downward), k=0..nlev-2.
+    dz_half = jnp.clip(jnp.abs(z_full[:, :-1] - z_full[:, 1:]), 1.0, None)
+    dvdz2 = (u[:, :-1] - u[:, 1:]) ** 2 + (v[:, :-1] - v[:, 1:]) ** 2
+    dvdz2 = jnp.maximum(dvdz2, 1.0e-36)
+    s2 = dvdz2 / dz_half ** 2
+    # n2 = g*2*(thv_k - thv_{k+1}) / ((thv_k+thv_{k+1})*dz)  (oracle trbintd)
+    thv_sum = theta_v[:, :-1] + theta_v[:, 1:]
+    n2 = g * 2.0 * (theta_v[:, :-1] - theta_v[:, 1:]) / (
+        jnp.clip(thv_sum, 1.0, None) * dz_half
+    )
+    Ri = n2 / s2  # (ncol, nlev-1)
 
-    # ----- Surface fluxes -----
-    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+    # ----- Surface fluxes, ustar, kinematic buoyancy flux, Obukhov -----
+    tau_x, tau_y, shflx, lhflx, ustar_raw = compute_surface_fluxes(
         u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
         T_sfc, q_sfc, rho[:, -1], config.surface,
     )
-    ustar = jnp.clip(ustar, 1e-4, None)
+    ustar = jnp.maximum(ustar_raw, config.ustar_min)
 
-    # ----- PBL height via smooth bulk-Ri -----
-    # Bulk Ri from surface at each level
-    theta_v_sfc = theta_v[:, -1]  # (ncol,)
-    z_sfc = z_full[:, -1:]  # (ncol, 1)
-    u_sfc = u[:, -1:]  # (ncol, 1)
-    v_sfc = v[:, -1:]  # (ncol, 1)
-    dz_from_sfc = jnp.abs(z_full - z_sfc) + 1.0  # (ncol, nlev)
-    dtheta_v_bulk = theta_v - theta_v_sfc[:, None]
-    # Wind shear from surface (not absolute wind)
-    dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4
-    Ri_bulk = (constants.g / jnp.clip(theta_v_sfc[:, None], 1.0, None)) * (
-        dtheta_v_bulk * dz_from_sfc / dV2
-    )  # (ncol, nlev)
+    rrho = 1.0 / jnp.clip(rho[:, -1], 1.0e-6, None)  # 1/density (oracle rrho)
+    # Kinematic surface fluxes (oracle calc_obklen).
+    khfs = shflx * rrho / cpair                    # [m K/s]
+    kqfs = lhflx / constants.L_v * rrho            # qflx*rrho, qflx=lhflx/L_v
+    kbfs = khfs + zvir * th_bot * kqfs             # surface buoyancy flux [m^2/s^3]
+    # Obukhov length: L = -thvs*u*^3 / (g*vk*(kbfs + sign(1e-10,kbfs))).
+    kbfs_signed = kbfs + jnp.sign(kbfs) * 1.0e-10 + (kbfs == 0) * 1.0e-10
+    obklen = -thv_bot * ustar ** 3 / (g * vk * kbfs_signed)
 
-    # Transition-zone weighting: peaks at Ri_crit crossing, not centroid.
-    # Sharpness moved from a hardcoded 20.0 literal to
-    # ``config.pbl_sharpness`` per the strengthened CLAUDE.md
-    # constant-discipline rule (tunable scheme parameters belong in
-    # the scheme's config NamedTuple).
-    sigma_pbl = jax.nn.sigmoid(
-        config.pbl_sharpness * (config.Ri_crit - Ri_bulk)
-    )  # (ncol, nlev)
-    w_pbl = sigma_pbl * (1.0 - sigma_pbl) + 1e-20
-    # Numerator and denominator share the level axis — fuse into one
-    # stacked reduction.
-    _h_pair = jnp.sum(jnp.stack([z_full * w_pbl, w_pbl], axis=-1), axis=1)
-    h_pbl = _h_pair[..., 0] / _h_pair[..., 1]  # (ncol,)
-    h_pbl = jnp.clip(h_pbl, 100.0, None)
-
-    # ----- K-profile inside PBL -----
-    # Km(z) = kappa * u* * z * (1 - z/h)^2
-    z_half_inner = 0.5 * (z_full[:, :-1] + z_full[:, 1:])  # (ncol, nlev-1)
-    z_norm = z_half_inner / h_pbl[:, None]  # z/h
-    z_norm_clip = jnp.clip(z_norm, 0.0, 1.0)
-    Km_profile = (
-        constants.kappa_vk * ustar[:, None] * z_half_inner * (1.0 - z_norm_clip) ** 2
-    )  # (ncol, nlev-1)
-
-    # Local Ri-based Km above PBL (Louis-style)
-    l_mix = mixing_length(z_half_inner, config.l_mix_max)
-    b_louis = config.b_louis
-    Ri_pos = jnp.maximum(Ri, 0.0)
-    f_stable = 1.0 / (
-        1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + b_louis * Ri_pos)
-    )
-    Ri_neg = jnp.minimum(Ri, 0.0)
-    f_unstable = 1.0 - 2.0 * b_louis * Ri_neg / (
-        1.0 + 3.0 * b_louis * b_louis * l_mix ** 2
-        * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz_half ** 2 + 1e-10)
-    )
-    blend_ri = jax.nn.sigmoid(config.blend_ri_sharpness * Ri)
-    f_m = (1.0 - blend_ri) * f_unstable + blend_ri * f_stable
-    Km_local = l_mix ** 2 * S * f_m  # (ncol, nlev-1)
-
-    # Smooth transition from profile (inside PBL) to local (above)
-    blend_pbl = jax.nn.sigmoid(
-        config.blend_pbl_sharpness * (z_norm - 1.0)
-    )  # 0 inside PBL, 1 above
-    Km_half = (1.0 - blend_pbl) * Km_profile + blend_pbl * Km_local
-    Kh_half = Km_half / config.Pr_t
-
-    # Interpolate to full levels for diagnostics — single concat per
-    # field instead of the previous ``zeros + 3 .at[].set`` triple
-    # scatter (XLA lowers the concat to one HLO op).
-    Km_interior = 0.5 * (Km_half[:, :-1] + Km_half[:, 1:])
-    Km_full = jnp.concatenate(
-        [Km_half[:, :1], Km_interior, Km_half[:, -1:]], axis=1,
-    )
-    Kh_interior = 0.5 * (Kh_half[:, :-1] + Kh_half[:, 1:])
-    Kh_full = jnp.concatenate(
-        [Kh_half[:, :1], Kh_interior, Kh_half[:, -1:]], axis=1,
+    # ----- HB diffusivities + countergradient (oracle pblintd + austausch_*)
+    Km_half, Kh_half, gamma_theta_half, h_pbl, wstar, wm = hb_diffusivities(
+        u, v, theta_v, z_full, z_half, p_full, s2, Ri,
+        ustar, khfs, kbfs, obklen, config,
     )
 
-    # Layer thicknesses for diffusion
-    dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])  # (ncol, nlev)
-    dz_layer = jnp.clip(dz_layer, 1.0, None)
+    # Interpolate K to full levels for diagnostics.
+    Km_full = _half_to_full(Km_half)
+    Kh_full = _half_to_full(Kh_half)
+
+    # ----- Apply implicit vertical diffusion -----
+    dz_layer = jnp.clip(jnp.abs(z_half[:, :-1] - z_half[:, 1:]), 1.0, None)
 
     sflx_u = tau_x
     sflx_v = tau_y
-    sflx_T = shflx / constants.c_pd
-    sflx_q = lhflx / constants.L_v
+    sflx_T = shflx / cpair               # [K kg/m^2/s]
+    sflx_q = lhflx / constants.L_v       # [kg/m^2/s]
 
-    # ----- Counter-gradient correction for heat (Holtslag-Boville 1993) -----
-    # Nonlocal transport term γ_h = a·(w'θ')_0 / (w_s·h)  [K/m], added to the
-    # effective temperature gradient.  ``w_s`` is a turbulent VELOCITY scale
-    # [m/s] — here the friction velocity u* (consistent with the u*-based
-    # K-profile above; a convective-w* enhancement would be a further
-    # refinement).
-    #
-    # FIX (audit i43): the previous code divided by ``Km_max`` — a
-    # DIFFUSIVITY [m²/s] — instead of a velocity, so γ_h carried units
-    # [K/m²] and was ~1/(κ·h) ≈ 60× too small for a typical 1 km PBL.  The
-    # nonlocal countergradient (the defining feature of the Holtslag-Boville
-    # scheme versus a purely local closure) was therefore effectively
-    # absent.  Dividing by u* restores the correct [K/m] units and the
-    # O(few K/km) countergradient magnitude.
-    wtheta_sfc = shflx / (rho[:, -1] * constants.c_pd)  # kinematic heat flux (ncol,)
-    # Gate to the convective (unstable) regime: the countergradient is a
-    # convective-BL feature, so it vanishes for neutral/stable surface
-    # forcing (w'θ' ≤ 0) rather than producing a spurious negative γ_h.
-    counter_grad = config.gamma_h * jnp.maximum(wtheta_sfc, 0.0) / (
-        ustar * h_pbl
-    )  # (ncol,) [K/m]
-
-    # Add counter-gradient to the effective T gradient inside PBL
-    # This is equivalent to adding Kh * gamma to the RHS of diffusion
-    # We apply it as an enhanced surface flux
-    sflx_T_enhanced = sflx_T + rho[:, -1] * jnp.mean(Kh_half, axis=1) * counter_grad
-
-    # ----- Implicit vertical diffusion -----
-    # Heat in θ-space so a dry adiabat is neutral; moisture and momentum
-    # use raw diffusion (their conserved form needs no exner conversion).
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
-    T_new = implicit_vertical_diffusion_theta(
-        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T_enhanced,
+    T_new = _diffuse_theta_with_countergradient(
+        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T,
+        gamma_theta_half,
     )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 
@@ -235,3 +228,344 @@ def holtslag_boville_turbulence(
         ustar=ustar,
         h_pbl=h_pbl,
     )
+
+
+def _half_to_full(K_half: jax.Array) -> jax.Array:
+    """Interpolate interface diffusivities to full levels (diagnostic)."""
+    interior = 0.5 * (K_half[:, :-1] + K_half[:, 1:])
+    return jnp.concatenate(
+        [K_half[:, :1], interior, K_half[:, -1:]], axis=1,
+    )
+
+
+def hb_diffusivities(
+    u, v, theta_v, z_full, z_half, p_full, s2, Ri,
+    ustar, khfs, kbfs, obklen, config: HoltslagBovilleConfig,
+):
+    """HB eddy diffusivities + countergradient (pure, prescribed-flux core).
+
+    This is the exact algorithm of the oracle ``pblintd`` + ``austausch_pbl``
+    + ``austausch_atm``, driven by PRESCRIBED kinematic surface fluxes so the
+    oracle harness can compare against it apples-to-apples (the bulk-flux
+    closure that produces ``khfs``/``kbfs``/``ustar``/``obklen`` is the
+    caller's responsibility).
+
+    Parameters
+    ----------
+    u, v : (ncol, nlev) winds [m/s], top-first.
+    theta_v : (ncol, nlev) virtual potential temperature [K].
+    z_full : (ncol, nlev) full-level height above surface [m].
+    s2 : (ncol, nlev-1) interface shear squared [1/s^2].
+    Ri : (ncol, nlev-1) interface gradient Richardson number.
+    ustar : (ncol,) friction velocity [m/s] (already floored).
+    khfs : (ncol,) kinematic surface heat flux [m K/s].
+    kbfs : (ncol,) surface kinematic buoyancy flux [m^2/s^3].
+    obklen : (ncol,) Obukhov length [m].
+    config : HoltslagBovilleConfig
+
+    Returns
+    -------
+    Km_half, Kh_half : (ncol, nlev-1) interface diffusivities [m^2/s].
+    gamma_theta_half : (ncol, nlev-1) countergradient theta gradient [K/m].
+    h_pbl : (ncol,) PBL height [m].
+    wstar : (ncol,) convective velocity scale [m/s].
+    wm : (ncol,) turbulent velocity scale for momentum [m/s].
+    """
+    g = constants.g
+    vk = constants.kappa_vk
+    sffrac = config.sffrac
+    betam = config.betam
+    betah = config.betah
+    betas = config.betas
+    binm = betam * sffrac
+    binh = betah * sffrac
+    fak = config.fak
+    fakn = config.fakn
+    ccon = fak * sffrac * vk
+    ricr = config.Ri_crit
+
+    thv_bot = theta_v[:, -1]
+
+    # Smooth unstable indicator (oracle: unstbl = kbfs>0). Sharpness s^3/m^2.
+    unstbl = jax.nn.sigmoid(config.unstable_blend_sharpness * kbfs)
+
+    # ----- PBL height (oracle pblintd), smooth -----
+    h_pbl, wstar, phiminv, phihinv, wm = _pbl_height(
+        u, v, theta_v, z_full, z_half, p_full, ustar, obklen, kbfs, unstbl,
+        thv_bot, g, vk, binm, binh, fak, ricr, config,
+    )
+
+    # ----- Eddy K profile inside the PBL (oracle austausch_pbl) -----
+    zmzp = 0.5 * (z_full[:, :-1] + z_full[:, 1:])  # (ncol, nlev-1)
+    zh = zmzp / jnp.clip(h_pbl[:, None], 1.0, None)
+    zl = zmzp / obklen[:, None]
+    zzh = zh * jnp.maximum(0.0, 1.0 - zh) ** 2
+
+    fak1 = (ustar * h_pbl * vk)[:, None]
+    fak2 = (wm * h_pbl * vk)[:, None]
+    fak3 = (fakn * wstar / jnp.clip(wm, 1.0e-6, None))[:, None]
+
+    # --- unstable surface layer (zh<sffrac) ---
+    term_arg = _smooth_floor(1.0 - betam * zl, config.arg_floor)
+    term = _safe_cbrt(term_arg)
+    pblk_sfc_u = fak1 * zzh * term
+    pr_sfc_u = term / _safe_sqrt(_smooth_floor(1.0 - betah * zl, config.arg_floor))
+
+    # --- unstable outer layer (zh>=sffrac) ---
+    pblk_out_u = fak2 * zzh
+    pr_out_u = (phiminv / jnp.clip(phihinv, 1.0e-6, None))[:, None] + (
+        ccon * fak3 / fak
+    )
+    cgs_outer = fak3 / jnp.clip((h_pbl * wm)[:, None], 1.0e-12, None)
+
+    w_outer = jax.nn.sigmoid(config.sfc_blend_sharpness * (zh - sffrac))
+    pblk_u = (1.0 - w_outer) * pblk_sfc_u + w_outer * pblk_out_u
+    pr_u = (1.0 - w_outer) * pr_sfc_u + w_outer * pr_out_u
+    cgs_u = w_outer * cgs_outer
+
+    # --- stable (kbfs<=0) ---
+    pblk_st_lo = fak1 * zzh / (1.0 + betas * zl)
+    pblk_st_hi = fak1 * zzh / (betas + zl)
+    w_zl = jax.nn.sigmoid(config.stable_blend_sharpness * (zl - 1.0))
+    pblk_s = (1.0 - w_zl) * pblk_st_lo + w_zl * pblk_st_hi
+    pr_s = jnp.ones_like(pblk_s)
+
+    w_uns = unstbl[:, None]
+    pblk = w_uns * pblk_u + (1.0 - w_uns) * pblk_s
+    pr = w_uns * pr_u + (1.0 - w_uns) * pr_s
+    cgs = w_uns * cgs_u
+
+    # Restrict the PBL profile to interfaces inside the PBL (zmzp<pblh).
+    in_pbl = jax.nn.sigmoid(config.sfc_blend_sharpness * (1.0 - zh))
+    pblk = pblk * in_pbl
+    cgs = cgs * in_pbl
+
+    # ----- Free-atmosphere local-Ri diffusivity (oracle austausch_atm) -----
+    # _safe_sqrt floors the argument so the sqrt gradient stays finite where
+    # s2 -> 0 (zero shear) or where (1 - 18*Ri) -> 0 (strongly unstable).
+    kvn = (config.ml_free ** 2) * _safe_sqrt(s2)
+    f_unstable = _safe_sqrt(
+        1.0 - config.free_ri_unstable_coeff * Ri
+    )
+    f_stable = 1.0 / (
+        1.0 + config.free_ri_stable_c1 * Ri
+        * (1.0 + config.free_ri_stable_c2 * Ri)
+    )
+    w_ri = jax.nn.sigmoid(config.stable_blend_sharpness * Ri)
+    fofri = (1.0 - w_ri) * f_unstable + w_ri * f_stable
+    kvf = jnp.maximum(config.kvf_min, kvn * fofri)
+
+    # ----- Combine: kvm = max(pblk, kvf); kvh = max(pblk/pr, kvf) -----
+    Km_half = jnp.maximum(pblk, kvf)
+    Kh_half = jnp.maximum(pblk / jnp.clip(pr, 1.0e-6, None), kvf)
+
+    # Countergradient theta gradient [K/m]: gamma = cgh/cpair = khfs*cgs.
+    gamma_theta_half = khfs[:, None] * cgs
+
+    return Km_half, Kh_half, gamma_theta_half, h_pbl, wstar, wm
+
+
+def _pbl_height(
+    u, v, theta_v, z_full, z_half, p_full, ustar, obklen, kbfs, unstbl,
+    thv_bot, g, vk, binm, binh, fak, ricr, config: HoltslagBovilleConfig,
+):
+    """Smooth bulk-Richardson PBL height (oracle pblintd).
+
+    Returns ``(h_pbl, wstar, phiminv, phihinv, wm)``.
+
+    Faithful to the oracle's two-pass scan:
+      pass 1: rino = g*(thv_k - thv_bot)*(z_k - z_bot)/(thv_bot*vvk),
+              vvk = (u_k-u_bot)^2 + (v_k-v_bot)^2 + fac*u*^2.
+      unstable surface-excess: tlv = thv_bot + kbfs*fak/(u*·phiminv),
+              pass 2 uses tlv in place of thv_bot.
+      pblh = max(interp at ricr crossing, 700*u*).
+    The hard first-crossing scan + linear interpolation is replaced by a
+    smooth lowest-crossing interpolation (sigmoid-weighted), differentiable
+    everywhere.  The search is limited to the region below ``pblmaxp`` and,
+    when no crossing is found there (well-mixed neutral / fully-mixed
+    convective columns), the PBL height defaults to the top of that search
+    region (oracle ``pblh = z(pverp-npbl)``).
+    """
+    ncol, nlev = z_full.shape
+    z_bot = z_full[:, -1:]
+    u_bot = u[:, -1:]
+    v_bot = v[:, -1:]
+    vvk = (u - u_bot) ** 2 + (v - v_bot) ** 2 + config.pblh_ustar_fac * ustar[:, None] ** 2
+    vvk = jnp.maximum(vvk, 1.0e-36)
+    dz_sfc = z_full - z_bot
+    thv_bot_c = thv_bot[:, None]
+
+    # Search region: levels with p >= pblmaxp (oracle npbl limit -- an
+    # ABSOLUTE pressure threshold, ``pref_mid(k) >= pblmaxp`` with
+    # pblmaxp = 4e4 Pa = 400 hPa, NOT relative to the surface).
+    # search_ok ~ 1 inside the allowed PBL search region, 0 above it.
+    # Top-first ordering: search_ok rises 0 -> 1 going DOWN (top to surface).
+    p_thresh = config.pblmaxp
+    # Pressure scale for the smooth region edge: a few hPa is sharp enough.
+    search_ok = jax.nn.sigmoid((p_full - p_thresh) / 1.0e3)  # (ncol, nlev)
+    # Fallback height = height at the TOP of the search region = the highest
+    # in-region level (where search_ok transitions 0 -> 1, top-first).  Weight
+    # z_full by the downward jump in search_ok, which peaks at that edge.
+    d_search = search_ok - jnp.concatenate(
+        [jnp.zeros((ncol, 1), search_ok.dtype), search_ok[:, :-1]], axis=1,
+    )
+    edge_w = jnp.maximum(d_search, 0.0) + 1.0e-20
+    z_top_search = jnp.sum(edge_w * z_full, axis=1) / jnp.sum(edge_w, axis=1)
+
+    # Pass 1 bulk Ri (rino) relative to thv_bot.
+    rino1 = g * (theta_v - thv_bot_c) * dz_sfc / (jnp.clip(thv_bot_c, 1.0, None) * vvk)
+
+    h1 = _crossing_height(
+        rino1, z_full, ricr, config.pbl_crossing_sharpness, search_ok, z_top_search,
+    )
+
+    # Unstable surface-excess correction (oracle): only where kbfs>0.
+    # phiminv = (1 - binm*pblh/L)^(1/3); arg>1 for unstable (L<0).
+    arg_phim = _smooth_floor(1.0 - binm * h1 / obklen, config.arg_floor)
+    phiminv1 = _safe_cbrt(arg_phim)
+    tlv = thv_bot + kbfs * fak / jnp.clip(ustar * phiminv1, 1.0e-6, None)
+    rino2 = g * (theta_v - tlv[:, None]) * dz_sfc / (jnp.clip(thv_bot_c, 1.0, None) * vvk)
+    h2 = _crossing_height(
+        rino2, z_full, ricr, config.pbl_crossing_sharpness, search_ok, z_top_search,
+    )
+
+    # Use pass-2 height in unstable columns, pass-1 otherwise.
+    h_pbl = unstbl * h2 + (1.0 - unstbl) * h1
+
+    # Mechanical mixing floor: pblh >= 700*u* (oracle).
+    h_pbl = jnp.maximum(h_pbl, config.pblh_mech_coeff * ustar)
+
+    # Lowest-layer ventilation floor (oracle): pblh >= zi(pver) + 50, applied
+    # unconditionally (the oracle's cloud test ``cldn(:,pver) >= 0`` is always
+    # true).  ``zi(pver)`` is the top interface of the lowest model layer =
+    # z_half[:, -2] in our top-first half-level array (z_half[:, -1] = surface).
+    h_pbl = jnp.maximum(h_pbl, z_half[:, -2] + config.cloud_pbl_floor_m)
+
+    # Velocity scales (oracle austausch_pbl / pblintd), evaluated at pblh.
+    # _safe_cbrt: the cube root of max(0,kbfs) has an infinite derivative at
+    # kbfs=0 -> NaN grad in stable columns; floor the argument first.
+    wstar = _safe_cbrt(
+        jnp.maximum(0.0, kbfs) * g * h_pbl / jnp.clip(thv_bot, 1.0, None)
+    )
+    arg_phim = _smooth_floor(1.0 - binm * h_pbl / obklen, config.arg_floor)
+    arg_phih = _smooth_floor(1.0 - binh * h_pbl / obklen, config.arg_floor)
+    phiminv = _safe_cbrt(arg_phim)
+    phihinv = _safe_sqrt(arg_phih)
+    wm = ustar * phiminv
+    return h_pbl, wstar, phiminv, phihinv, wm
+
+
+def _crossing_height(rino, z_full, ricr, sharpness, search_ok, z_top_search):
+    """Smooth lowest-crossing height where ``rino`` first reaches ``ricr``.
+
+    Mirrors the oracle linear interpolation::
+
+        pblh = z(k+1) + (ricr - rino(k+1))/(rino(k) - rino(k+1))*(z(k)-z(k+1))
+
+    but selects the LOWEST (closest-to-surface) crossing in a differentiable
+    way.  Levels are top-first (index ``nlev-1`` = surface).  We scan from
+    the surface upward: a column is "still searching" until ``rino`` first
+    reaches ``ricr``; the crossing is weighted by the product of "below at
+    the lower interface" and "at/above at the upper interface", combined
+    with a cumulative "not yet crossed below" gate so only the first
+    crossing contributes.  ``search_ok`` (per-level, top-first) limits
+    crossings to the allowed PBL region (oracle ``npbl`` limit); when no
+    crossing is found there, the height defaults to ``z_top_search`` (oracle
+    ``pblh = z(pverp-npbl)``).
+    """
+    ncol, nlev = rino.shape
+    # Reverse to surface-first ordering.
+    rino_s = rino[:, ::-1]   # (ncol, nlev), index 0 = surface
+    z_s = z_full[:, ::-1]
+    search_s = search_ok[:, ::-1]
+
+    rino_lo = rino_s[:, :-1]   # lower interface of each pair (closer to sfc)
+    rino_hi = rino_s[:, 1:]
+    z_lo = z_s[:, :-1]
+    z_hi = z_s[:, 1:]
+    # Pair is in the search region only if BOTH levels are allowed.
+    pair_ok = search_s[:, :-1] * search_s[:, 1:]
+
+    # Crossing weight: lo still below ricr AND hi at/above ricr, in-region.
+    below_lo = jax.nn.sigmoid(sharpness * (ricr - rino_lo))
+    above_hi = jax.nn.sigmoid(sharpness * (rino_hi - ricr))
+    cross_w = below_lo * above_hi * pair_ok  # (ncol, nlev-1)
+
+    # "Not yet crossed below this pair": cumulative product of below_lo over
+    # all lower pairs (surface-first), so only the FIRST crossing survives.
+    not_crossed = jnp.cumprod(
+        jnp.concatenate(
+            [jnp.ones((ncol, 1), rino.dtype), below_lo[:, :-1]], axis=1,
+        ),
+        axis=1,
+    )
+    w = cross_w * not_crossed + 1.0e-30  # (ncol, nlev-1)
+
+    # Interpolated crossing height per pair.
+    dRi = rino_hi - rino_lo
+    frac = jnp.clip(
+        (ricr - rino_lo) / jnp.where(jnp.abs(dRi) > 1.0e-12, dRi, 1.0e-12),
+        0.0, 1.0,
+    )
+    z_cross = z_lo + frac * (z_hi - z_lo)
+
+    h = jnp.sum(w * z_cross, axis=1) / jnp.sum(w, axis=1)
+
+    # Smooth "did a crossing occur in-region?" indicator from the total
+    # crossing weight (>~0.5 when a clear crossing exists).
+    total_w = jnp.sum(cross_w, axis=1)
+    has_cross = jax.nn.sigmoid(20.0 * (total_w - 0.5))
+    # No crossing -> top of the search region (oracle z(pverp-npbl)).
+    return has_cross * h + (1.0 - has_cross) * z_top_search
+
+
+def _diffuse_theta_with_countergradient(
+    T, Kh_half, rho, dz, dz_half, p_full, dt, surface_flux_T, gamma_theta_half,
+):
+    """Implicit theta diffusion with the HB nonlocal countergradient.
+
+    The countergradient enters as ``flux = -rho*Kh*(dtheta/dz - gamma)``.
+    The ``-Kh*gamma`` part is an explicit (known) flux added to the column;
+    its divergence is an explicit source applied before the implicit solve,
+    exactly as CAM treats ``cgh`` as a known countergradient flux.
+
+    Implementation: convert T->theta, add the explicit countergradient flux
+    divergence as a theta source (forward), then run the standard implicit
+    theta diffusion of the local gradient with the surface flux, and convert
+    back.  This keeps the implicit part identical to the no-cg path while
+    adding the nonlocal term consistently with the oracle.
+    """
+    p_safe = jnp.clip(p_full, 1.0, None)
+    exner = (p_safe / constants.p_ref) ** constants.kappa
+    exner_safe = jnp.clip(exner, 1.0e-6, None)
+    theta = T / exner_safe
+    exner_sfc = exner_safe[:, -1]
+
+    # Explicit countergradient flux on interfaces: F_cg = rho_half*Kh*gamma.
+    # Positive gamma (warm, unstable BL) drives an UPWARD theta flux, which
+    # warms the layers below the flux convergence -> mixes heat up against
+    # the local gradient (the defining HB nonlocal effect).
+    rho_half = 0.5 * (rho[:, :-1] + rho[:, 1:])
+    F_cg = rho_half * Kh_half * gamma_theta_half  # (ncol, nlev-1), upward +
+
+    # Flux divergence -> theta source: d(theta)/dt = -(1/rho) dF/dz.
+    # Interface k between full levels k and k+1. For full level k, the net
+    # flux convergence is (F_top - F_bot)/(rho*dz). Interior levels see two
+    # interfaces; top/bottom see one (zero-flux top, surface handled by the
+    # surface flux BC, so countergradient flux at the surface interface is 0).
+    ncol, nlev = T.shape
+    # F at interface above level k is F_cg[k-1]; below level k is F_cg[k].
+    F_above = jnp.concatenate([jnp.zeros((ncol, 1), F_cg.dtype), F_cg], axis=1)  # (ncol,nlev)
+    F_below = jnp.concatenate([F_cg, jnp.zeros((ncol, 1), F_cg.dtype)], axis=1)  # (ncol,nlev)
+    # d(theta)/dt = -(F_above - F_below)/(rho*dz)  [upward-positive flux,
+    # level 0 = top]. Flux convergence warms the layer where F decreases
+    # upward.
+    dtheta_cg = -(F_above - F_below) / (jnp.clip(rho, 1.0e-6, None) * dz)
+    theta_star = theta + dt * dtheta_cg
+
+    # Implicit local-gradient diffusion with the surface theta flux.
+    surface_flux_theta = surface_flux_T / exner_sfc
+    theta_new = implicit_vertical_diffusion(
+        theta_star, Kh_half, rho, dz, dz_half, dt, surface_flux_theta,
+    )
+    return theta_new * exner
