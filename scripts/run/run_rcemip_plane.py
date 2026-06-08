@@ -672,19 +672,25 @@ def _build_microphysics_config(
     if scheme == "none":
         return None
     valid = ("kessler", "morrison", "sundqvist",
-             "seifert_beheng", "thompson", "ml_emulator")
+             "seifert_beheng", "thompson", "p3", "ml_emulator")
     if scheme not in valid:
         raise ValueError(
             f"Unknown --microphysics: {scheme!r}; "
             f"choose from {valid + ('none',)}."
         )
-    if scheme == "morrison" and homogeneous_ice_nucleation:
+    if scheme == "morrison":
+        # The plane CRM validates against the gSAM oracle, so use the SAM
+        # M2005 flavor here (the global/GCM default is "mg" — E3SM
+        # Morrison-Gettelman). See ``resolve_morrison_flavor``.
         from legoesm.atmosphere.physics.microphysics.config import (
             MorrisonConfig,
         )
         return MicrophysicsConfig(
             scheme=scheme,
-            morrison=MorrisonConfig(homogeneous_ice_nucleation=True),
+            morrison=MorrisonConfig(
+                morrison_flavor="sam",
+                homogeneous_ice_nucleation=homogeneous_ice_nucleation,
+            ),
         )
     return MicrophysicsConfig(scheme=scheme)
 
@@ -930,7 +936,7 @@ def parse_args():
                         "(legacy, full S_0).")
     p.add_argument("--microphysics",
                    choices=["kessler", "morrison", "sundqvist",
-                            "seifert_beheng", "thompson", "ml_emulator",
+                            "seifert_beheng", "thompson", "p3", "ml_emulator",
                             "none"],
                    default="kessler",
                    help="Microphysics scheme. 'none' skips the branch.")
@@ -971,6 +977,20 @@ def parse_args():
     p.add_argument("--restart", type=str, default="",
                    help="Resume from this checkpoint npz (rce_checkpoint). Empty=fresh "
                         "IC. Use 'latest' to auto-pick the newest in <output>/checkpoints.")
+    p.add_argument("--restart-reset-condensate", action="store_true",
+                   help="On restart, keep only q_v (slot 0) and zero all "
+                        "hydrometeor mass/number. Use when switching FROM a "
+                        "single-moment scheme (kessler) TO a double-moment one "
+                        "(morrison/thompson/p3/seifert_beheng): copying bare "
+                        "condensate mass with zero number is inconsistent and "
+                        "blows up. The new scheme re-grows condensate in minutes.")
+    p.add_argument("--restart-seed-numbers", action="store_true",
+                   help="On restart into a double-moment scheme, KEEP the "
+                        "single-moment condensate mass (q_c/q_r) so updrafts "
+                        "stay loaded, and seed consistent number "
+                        "concentrations (N_r=q_r/x_r). Alternative to "
+                        "--restart-reset-condensate; avoids the unloaded-"
+                        "updraft spin-up shock that runs Thompson away.")
     p.add_argument("--output", type=Path, default=Path("results/rcemip_plane"))
     return p.parse_args()
 
@@ -1166,9 +1186,13 @@ def main():
         rad_physics_fn = None
 
     # Tracer slot count per scheme (codex iter-... MEDIUM#5):
-    #   morrison / seifert_beheng / p3: 9 slots (q_v, q_c, q_r, q_i,
-    #     q_s, q_g, N_c, N_r, N_i)
-    #   thompson: 7 slots (q_v, q_c, q_r, q_i, q_s, q_g, N_i)
+    #   morrison / seifert_beheng / p3 / thompson: 9 slots (q_v, q_c, q_r,
+    #     q_i, q_s, q_g, N_c, N_r, N_i). The slot LAYOUT is FIXED in the
+    #     microphysics integration adapter (N_i always lives at slot 8),
+    #     so thompson — even though it only PREDICTS N_i (single-moment
+    #     for the warm species) — still needs the full length-9 array to
+    #     receive its N_i tendency. Allocating 7 dropped slot 8 and the
+    #     adapter raised ValueError.
     #   kessler / sundqvist / ml_emulator / none: 3 slots (q_v, q_c, q_r)
     # The microphysics integration validates the slot count at JIT time
     # and raises ValueError if too few — but we allocate generously
@@ -1177,10 +1201,8 @@ def main():
         # slot [9] = prognostic snow number, [10] = prognostic graupel number
         # ⇒ fully double-moment M2005 (snow + graupel).
         n_tracers = 11
-    elif args.microphysics in ("seifert_beheng", "p3"):
+    elif args.microphysics in ("seifert_beheng", "p3", "thompson"):
         n_tracers = 9
-    elif args.microphysics == "thompson":
-        n_tracers = 7
     else:
         n_tracers = 3
     state = _build_rcemip_initial_state(
@@ -1198,7 +1220,9 @@ def main():
         if _rpath is None:
             print(f"  --restart {args.restart}: no checkpoint found, fresh IC.")
         else:
-            state, _start_step, _t0 = rce_checkpoint.load(_rpath, state)
+            state, _start_step, _t0 = rce_checkpoint.load(
+                _rpath, state, reset_condensate=args.restart_reset_condensate,
+                seed_numbers=args.restart_seed_numbers)
             print(f"  RESTART from {_rpath} at step {_start_step} "
                   f"(t={_t0:.0f}s, day {_t0/86400:.2f})")
     _ckpt_every = args.checkpoint_every if args.checkpoint_every > 0 else 0

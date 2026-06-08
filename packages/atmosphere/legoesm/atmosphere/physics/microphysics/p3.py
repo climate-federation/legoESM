@@ -163,11 +163,16 @@ def p3_microphysics(
     # the gating already applied to deposition, riming, rain-riming,
     # and aggregation — mirrors the same fix landed in
     # morrison.py / thompson.py.
-    N_i_target = (
+    # Cap at ``N_i_nuc_max`` (SAM 500 L⁻¹) BEFORE the ρ-divide: the bare
+    # Cooper exponential overflows fp32 at the very cold tropopause /
+    # sponge temperatures of an RCEMIP column (→ N_i = inf → NaN in
+    # tracer slot 8). ``jnp.minimum`` clamps even an inf exponential to
+    # the finite cap. Mirrors morrison.py / thompson.py.
+    N_i_target = jnp.minimum(
         config.N_i0
-        * jnp.exp(config.cooper_a * jnp.maximum(T_freeze - T, 0.0))
-        / jnp.clip(rho, 0.1)
-    )
+        * jnp.exp(config.cooper_a * jnp.maximum(T_freeze - T, 0.0)),
+        config.N_i_nuc_max,
+    ) / jnp.clip(rho, 0.1)
     dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_ice
 
     # 2. Vapour deposition on ice (subsaturated wrt ice: sublimation handled
@@ -359,6 +364,17 @@ def p3_microphysics(
     dN_r_dt = dN_r_au + dN_r_sc + dN_r_br
     # Aggregation reduces N_i (self-collection of ice particles).
     dN_i_dt = dN_i_nuc - aggregation_N
+
+    # Non-negativity floors on the prognostic number tendencies. The explicit
+    # rain self-collection / droplet-autoconversion / ice-aggregation SINKS are
+    # ∝ the current number; unbounded, one Euler step overshoots the available
+    # number, drives N negative, and self-collection then runs away (RCE
+    # restart: a number slot → −4.4e8 within ~600 steps). Cap each NET sink so
+    # the post-step number stays ≥ 0; positive sources pass through unchanged.
+    dt_floor = jnp.clip(dt, 1.0)
+    dN_c_dt = jnp.maximum(dN_c_dt, -jnp.clip(N_c, 0.0) / dt_floor)
+    dN_r_dt = jnp.maximum(dN_r_dt, -jnp.clip(N_r, 0.0) / dt_floor)
+    dN_i_dt = jnp.maximum(dN_i_dt, -jnp.clip(N_i, 0.0) / dt_floor)
 
     precipitation = precip_r + precip_i
 

@@ -77,6 +77,15 @@ class SeifertBehengConfig(NamedTuple):
 
 class MorrisonConfig(NamedTuple):
     """Configuration for Morrison double-moment (ice+liquid)."""
+    # Reference flavor. "mg" (DEFAULT, for GLOBAL/GCM runs) = E3SM/CESM
+    # Morrison-Gettelman parameter + process set (micro_mg_utils.F90). "sam" =
+    # SAM/gSAM M2005 set (the plane-CRM-vs-gSAM validation target; the plane CRM
+    # driver sets this explicitly). Resolved at scheme entry by
+    # ``resolve_morrison_flavor``: the "mg" flavor overrides ``lami_max=1/10µm``,
+    # ``snow_aggregation_eii=0.5``, ``rho_snow=250``, ``fall_b_i=1.0`` and
+    # selects ``ice_to_snow_scheme="mg_ferrier"`` (180-s Ferrier ice→snow). Warm
+    # rain (kk2000) and ice deposition (m2005) are ALREADY MG-faithful in both.
+    morrison_flavor: str = "mg"      # "mg" (global default) | "sam" (CRM)
     # Warm-rain autoconversion + accretion scheme:
     #   "kk2000" (default) = Khairoutdinov-Kogan 2000, the SAM M2005
     #     DEFAULT (IRAIN=0): PRC=1350·qc^2.47·(Nc[#/cm³])^-1.79,
@@ -386,10 +395,34 @@ class ThompsonConfig(NamedTuple):
     autoconversion_sharpness: float = 10.0  # See SB config — iter-97/99
     N_i0: float = 5e3
     cooper_a: float = 0.304
+    # SAM "limit to 500 L⁻¹" cap on Cooper-nucleated ice number. Without it
+    # the bare ``N_i0·exp(cooper_a·(T_freeze−T))`` diverges at very cold
+    # tropopause/sponge temperatures and overflows fp32 → N_i = inf/NaN.
+    # Mirrors ``MorrisonConfig.N_i_nuc_max``.
+    N_i_nuc_max: float = 5.0e5       # [1/m³] = 500 /L
     cooper_T_act: float = 265.0
     ice_sigmoid_sharpness: float = 5.0
     dep_coeff: float = 1e-3
     q_i_min_growth: float = 1e-9
+    # --- Faithful Thompson-2008 ice depositional growth + ice→snow ---
+    # Capacitance-based vapour-diffusion ice growth (Thompson et al. 2008,
+    # following Reisner et al. 1998 / the M2005 lineage) replaces the legacy
+    # ``dep_coeff·S_i·q_i·N_i^⅓`` heuristic when ``ice_growth_scheme="capacitance"``.
+    # PRCI depositional ice→snow autoconversion converts cloud ice whose
+    # depositional growth carries it ACROSS the snow-size threshold ``D_cs``
+    # into snow — the actual Thompson-2008 ice→snow mechanism, far stronger in
+    # supersaturated convective cores than the ``agg_coeff·q_i`` relaxation, so
+    # cloud ice drains to fast-falling snow instead of piling up and driving a
+    # latent-heating convective runaway.
+    ice_growth_scheme: str = "capacitance"   # "capacitance" | "heuristic"
+    # Snow microphysics: "thompson2008" = faithful bimodal-PSD snow (Field-2005
+    # moments, mass-weighted fall speed + ventilated vapour deposition, in
+    # ``_thompson_snow.py``); "bulk_qpower" = legacy capped power-law fall speed
+    # with no snow deposition.
+    snow_scheme: str = "thompson2008"        # "thompson2008" | "bulk_qpower"
+    rho_cloud_ice: float = 500.0             # cloud-ice bulk density [kg/m³]
+    ice_deposition_efficiency: float = 1.0   # EPSI tuning [-]
+    ice_snow_d_auto: float = 250.0e-6        # D_cs ice→snow size threshold [m]
     bergeron_rate: float = 1e-3
     T_center: float = 258.0
     T_width: float = 10.0
@@ -446,6 +479,9 @@ class P3Config(NamedTuple):
     # --- Ice nucleation (Cooper 1986) ---
     N_i0: float = 5e3               # Cooper base ice crystal number [1/m³]
     cooper_a: float = 0.304         # Cooper exponent
+    # SAM "limit to 500 L⁻¹" cap; bounds the Cooper exponential so cold
+    # tropopause temperatures cannot overflow fp32 (mirrors Morrison).
+    N_i_nuc_max: float = 5.0e5      # [1/m³] = 500 /L
     cooper_T_act: float = 265.0     # Activation temperature [K]
     ice_sigmoid_sharpness: float = 5.0
     # --- Ice depositional growth ---

@@ -56,6 +56,42 @@ from legoesm.atmosphere.physics.microphysics.output import (
 )
 
 
+def resolve_morrison_flavor(config: MorrisonConfig) -> MorrisonConfig:
+    """Resolve ``morrison_flavor`` into the concrete parameter set.
+
+    ``"sam"`` returns ``config`` unchanged (the SAM/gSAM M2005 defaults already
+    in ``MorrisonConfig``). ``"mg"`` overrides the parameters where E3SM/CESM
+    Morrison-Gettelman (micro_mg_utils.F90) differs from SAM:
+
+    =====================  ============  =============
+    field                  SAM           MG
+    =====================  ============  =============
+    ``lami_max``           1/1 µm        1/10 µm  (LAMMAXI; bounds ice number)
+    ``snow_aggregation_eii`` 0.1         0.5      (eii; ice→snow & snow self-agg)
+    ``rho_snow``           100 kg/m³     250      (rhosn)
+    ``fall_b_i``           0.865         1.0      (bi)
+    ``ice_to_snow_scheme`` m2005_autoconv mg_ferrier (180-s Ferrier prci)
+    =====================  ============  =============
+
+    Warm rain (``kk2000``) and ice deposition (``m2005``) are already MG-faithful
+    and unchanged. Validated against the E3SM MG reference (codex audit).
+    """
+    if config.morrison_flavor == "mg":
+        return config._replace(
+            lami_max=1.0 / 10.0e-6,
+            snow_aggregation_eii=0.5,
+            rho_snow=250.0,
+            fall_b_i=1.0,
+            ice_to_snow_scheme="mg_ferrier",
+        )
+    elif config.morrison_flavor == "sam":
+        return config
+    raise ValueError(
+        f"Unknown morrison_flavor: {config.morrison_flavor!r}; "
+        f"choose 'mg' (global default) or 'sam' (CRM)."
+    )
+
+
 def morrison_microphysics(
     T: jax.Array,
     q_v: jax.Array,
@@ -78,6 +114,9 @@ def morrison_microphysics(
     -------
     MicrophysicsOutput
     """
+    # Resolve the SAM/MG flavor into concrete parameters (static Python branch
+    # on the config string — no traced control flow).
+    config = resolve_morrison_flavor(config)
     ncol, nlev = T.shape
     q_c = hydrometeors.q_c
     q_r = hydrometeors.q_r
@@ -431,12 +470,30 @@ def morrison_microphysics(
     #    protects q_i regardless of the rate.
     if config.ice_to_snow_scheme == "m2005_autoconv":
         aggregation = ice_to_snow_m2005
+    elif config.ice_to_snow_scheme == "mg_ferrier":
+        # E3SM Morrison-Gettelman ice→snow autoconversion (micro_mg_utils.F90
+        # ``ice_autoconversion``, Ferrier 1994): a FIXED 180-s timescale
+        # conversion of the ice-PSD tail beyond D_cs — independent of
+        # instantaneous supersaturation (unlike SAM PRCI). Reuses the LAMI/N0I
+        # from the m2005 deposition block (MG flavor pairs mg_ferrier with
+        # ice_deposition_scheme="m2005").
+        #   d_rat = LAMI·DCS;  NPRCI = N0I/(LAMI·180)·exp(−d_rat);
+        #   m_ip  = (ρ_ci·π/6)/LAMI³;
+        #   PRCI  = m_ip·NPRCI·(((d_rat+3)·d_rat+6)·d_rat+6).
+        d_rat = lami_ac * dcs
+        nprci = n0i_ac / (jnp.clip(lami_ac, 1.0e-30) * 180.0) * jnp.exp(-d_rat)
+        m_ip = (config.rho_cloud_ice * jnp.pi / 6.0) / safe_pow(
+            jnp.clip(lami_ac, 1.0e-30), 3.0)
+        ferrier = m_ip * nprci * (((d_rat + 3.0) * d_rat + 6.0) * d_rat + 6.0)
+        aggregation = jnp.where(
+            (jnp.clip(q_i, 0.0) > 1.0e-14) & (T <= T_freeze), ferrier, 0.0)
     elif config.ice_to_snow_scheme == "heuristic":
         aggregation = config.agg_coeff * jnp.clip(q_i, 0.0) * f_ice
     else:
         raise ValueError(
             f"Unknown ice_to_snow_scheme: {config.ice_to_snow_scheme!r}. "
-            f"Expected 'm2005_autoconv' (SAM PRCI, default) or 'heuristic'."
+            f"Expected 'm2005_autoconv' (SAM PRCI, default), 'mg_ferrier' "
+            f"(E3SM MG), or 'heuristic'."
         )
 
     # 6. Melting near T_freeze: ice/snow -> rain (clipped to available mass)
@@ -591,8 +648,45 @@ def morrison_microphysics(
             * (config.homogeneous_freeze_T - T))
         homo_freeze_c = (homo_frac * jnp.clip(q_c, 0.0)
                          / jnp.maximum(dt, 1.0e-10))
-        homo_freeze_N = (homo_frac * jnp.clip(N_c_eff, 0.0)
-                         / jnp.clip(rho, 0.1) / jnp.maximum(dt, 1.0e-10))
+        # ICE-NUMBER source from homogeneous droplet freezing, as a RELAXATION
+        # TOWARD THE DROPLET-NUMBER TARGET — NOT a per-step rate.
+        #
+        # The mass rate ``homo_freeze_c`` self-gates (∝ q_c → 0 in clear air).
+        # The NUMBER, though, uses ``N_c_eff`` which under specified-Nc
+        # (predict_Nc=False, or zero prognostic N_c) is the CONSTANT ``Nc_0``
+        # (1e8 /m³). The original ``homo_frac·N_c_eff/ρ/dt`` form injected
+        # ~Nc_0/ρ (≈1e8 /kg) ice crystals EVERY step into any cold cloudy
+        # layer. Because specified N_c is never depleted, convective columns
+        # that keep condensing trace q_c re-froze the full Nc_0 population each
+        # step, so N_i accumulated without bound (~5e8 /kg per step) and
+        # overflowed fp32 to NaN within ~5 steps of an RCEMIP restart — even
+        # with a non-negativity floor and a LAMI cap (the cap's 1 µm ceiling
+        # permits ~1e10 /kg, far above where the deposition/fall-speed terms
+        # break down).
+        #
+        # Physically you can only freeze the droplets that EXIST: the ice
+        # number contributed by homogeneous freezing approaches the droplet
+        # concentration and then STOPS. Mirror the Cooper-nucleation
+        # relaxation form (``clip(target − N_i, 0)/dt``) so the source
+        # saturates at the per-mass droplet target instead of firing forever.
+        # Gated on cloud presence (SAM's ``IF QC3D ≥ QSMALL``).
+        # The droplet-number target is additionally capped at the ice-number
+        # ceiling ``N_i_nuc_max`` (SAM 500 /L). The specified droplet number
+        # (``Nc_0`` = 1e8 /m³, continental) is FAR above any realistic ice
+        # crystal concentration; converting it wholesale gives N_i ~ 3e8 /kg,
+        # which — though now bounded — still drives the deposition / fall-speed
+        # terms past the fp32-stable range. Capping the FROZEN ice number at
+        # the same physical ceiling Cooper nucleation already uses keeps N_i at
+        # the proven-stable ~5e6 /kg scale.
+        homo_target_N = jnp.minimum(
+            jnp.clip(N_c_eff, 0.0), config.N_i_nuc_max
+        ) / jnp.clip(rho, 0.1)
+        homo_freeze_N = jnp.where(
+            jnp.clip(q_c, 0.0) > 1.0e-14,
+            homo_frac * jnp.clip(homo_target_N - jnp.clip(N_i, 0.0), 0.0)
+            / jnp.maximum(dt, 1.0e-10),
+            0.0,
+        )
     else:
         homo_freeze_c = jnp.zeros_like(jnp.clip(q_c, 0.0))
         homo_freeze_N = jnp.zeros_like(homo_freeze_c)
@@ -986,7 +1080,10 @@ def morrison_microphysics(
     # π·ρ_ci·DCS³/6), clamped to N_i/dt (codex iter-20 B) — NOT the mean-mass
     # rate, which would over-remove number. The heuristic scheme keeps the
     # legacy mean-mass form (clip(q_i,1e-15) floor preserves the AD path).
-    if config.ice_to_snow_scheme == "m2005_autoconv":
+    if config.ice_to_snow_scheme in ("m2005_autoconv", "mg_ferrier"):
+        # DCS-sized number removal. For SAM PRCI this is exact; for the MG
+        # Ferrier prci the converted-tail mean mass → m_DCS in the small-ice
+        # (LAMI·DCS ≫ 1) limit, so cons22 is the faithful per-crystal mass.
         cons22 = (
             jnp.pi * config.rho_cloud_ice
             * config.ice_snow_d_auto ** 3 / 6.0
@@ -1002,6 +1099,21 @@ def morrison_microphysics(
     # +homo_freeze_N: cloud droplets that homogeneously freeze become ice
     # crystals (SAM NI3D += NC3D).
     dN_i_dt = dN_i_nuc - dN_i_autoconv + homo_freeze_N + sed_N_i
+
+    # === Non-negativity floor on the cloud/rain/ice NUMBER tendencies ===
+    # Each individual number sink above is bounded (evap/riming ∝ N/dt,
+    # ice autoconv clamped to N_i/dt), but their SUM — plus an inward
+    # sedimentation divergence — can still overshoot the locally
+    # available number in one explicit step and drive N negative. A
+    # negative number concentration is unphysical and poisons every
+    # PSD-derived quantity (mean mass q·ρ/N, slope λ, fall speed),
+    # cascading to NaN. Cap the NET sink so the post-step number cannot
+    # fall below zero; positive sources pass through. N_s/N_g already
+    # get the equivalent treatment via their LAMS/LAMG consistency
+    # limiters (``n_s_new``/``n_g_new``) below.
+    dN_c_dt = jnp.maximum(dN_c_dt, -jnp.clip(N_c, 0.0) / jnp.clip(dt, 1.0))
+    dN_r_dt = jnp.maximum(dN_r_dt, -jnp.clip(N_r, 0.0) / jnp.clip(dt, 1.0))
+    dN_i_dt = jnp.maximum(dN_i_dt, -jnp.clip(N_i, 0.0) / jnp.clip(dt, 1.0))
 
     # Snow NUMBER budget (double-moment snow). Number is CONSERVED across the
     # phase changes: the ice→snow autoconversion that removes dN_i_autoconv
