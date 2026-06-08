@@ -34,7 +34,7 @@ resolution per grid (L26 atmosphere, 20-level ocean).
 | grid           | size       | fp32 CPU | fp32 GPU | fp64 CPU | fp64 GPU |
 |----------------|------------|---------:|---------:|---------:|---------:|
 | lat-lon        | LL192      |    4     | **400**  |    5     |   152    |
-| tripole (eORCA)| 192×384    |    —     |   313    |    —     | ~120 est |
+| tripole (eORCA)| 192×384    |    —     |   313    |    —     |   144    |
 | MPAS Voronoi   | I6         |    4     |   252    |    4     |   200    |
 
 ---
@@ -94,7 +94,8 @@ scaling is hardware-blocked here.
   memory vs indirect gathers vs global transforms).
 - **Lat-lon fastest**; **cubed-sphere best-behaved** (cleanest saturation curve);
   **spectral GPU-hostile** (fp64-only + global FFT) → keep CPU-side.
-- **Tripole ≈ lat-lon − ~20 %** (north-fold halo + rotation overhead).
+- **Tripole ≈ lat-lon − ~20 % (fp32) / −5 % (fp64)** (north-fold halo +
+  rotation overhead; smaller relative cost in fp64 where arithmetic dominates).
 - **GPU buys 16–21× (atm) / 33–99× (ocean) at fp32**; roughly half that at fp64
   on this consumer GPU.
 - Two shipped algorithmic wins dominate the gains: **RRTMGP g-point
