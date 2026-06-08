@@ -312,3 +312,132 @@ def test_compute_omip2_surface_forcing_mpas():
         grid=mesh, grid_type="mpas")
     assert (float(np.mean(np.asarray(sf.tau_x)))
             * float(np.mean(np.asarray(sf_rev.tau_x)))) < 0.0
+
+
+def _emp_forcing(*, precip, q_air, u_east=6.0, nlat=18, nlon=36):
+    """OceanForcing isolating the freshwater budget: prescribed precip [kg/m2/s]
+    and air humidity ``q_air`` (drives evaporation via q_sfc - q_air), benign
+    radiation, steady wind to give a finite exchange coefficient."""
+    from legoesm.ocean.forcing.jra55_do import OceanForcing
+    lat = np.linspace(-89.0, 89.0, nlat)
+    lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
+
+    def fld(val):
+        return np.full((1, nlat, nlon), float(val))
+
+    return OceanForcing(
+        lon=lon, lat=lat, time_s=np.array([0.0]),
+        u10=fld(u_east), v10=fld(0.0),
+        T_air=fld(288.0), q_air=fld(q_air),
+        sw_down=fld(0.0), lw_down=fld(0.0),
+        precip=fld(precip), runoff=fld(0.0),
+    )
+
+
+def test_compute_omip2_freshwater_forcing_emp():
+    """``compute_omip2_freshwater_forcing`` builds a FreshwaterForcing with
+    P (prescribed precip), E (= -lh/L_v, interactive), and runoff, for delivery
+    via the in-core ``model.step(freshwater=...)`` channel.  Guards the OMIP-2
+    salt-budget closure (without P - E the ocean freshens under runoff alone).
+
+    Checks: (1) precip field == sampled precip and evap == -lh/L_v to fp tol;
+    (2) net P - E freshens under heavy precip / saturated air, salinifies under
+    dry air (strong evap); (3) runoff_R enters the runoff channel; (4) emp=False
+    zeroes P and E; (5) ramp scales all components.
+    """
+    import jax.numpy as jnp
+    from legoesm.ocean.coupler import compute_omip2_freshwater_forcing
+    from legoesm.ocean.coupler.omip2_applicator import (
+        _bolton_q_sat, air_sea_fluxes, _sample_forcing_latlon,
+    )
+    from legoesm.ocean.freshwater import net_freshwater_flux
+    from legoesm import constants
+    state, grid, z, _ = _rest_state_latlon()
+
+    # (1) Exactness: precip + evap == the independently reconstructed bulk path.
+    precip0 = 5.0e-5
+    forcing = _emp_forcing(precip=precip0, q_air=0.010)
+    fw = compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon")
+    P = np.asarray(fw.precip)
+    E = np.asarray(fw.evap)
+    assert P.shape == np.asarray(state.T.data)[..., 0].shape
+    assert np.isfinite(P).all() and np.isfinite(E).all()
+
+    lat_deg = np.degrees(np.asarray(grid.lat))
+    lon_deg = np.degrees(np.asarray(grid.lon))
+    forc = _sample_forcing_latlon(forcing, 0, lat_deg, lon_deg)
+    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + constants.T_freeze
+    q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)), dtype=np.float64)
+    _, _, _, lh = air_sea_fluxes(
+        u10=jnp.asarray(forc["u10"]), v10=jnp.asarray(forc["v10"]),
+        T_air_K=jnp.asarray(forc["T_air"]), q_air=jnp.asarray(forc["q_air"]),
+        T_sfc_K=jnp.asarray(T_sfc_K), q_sfc=jnp.asarray(q_sfc),
+        rho_air=constants.rho_air)
+    assert np.allclose(P, np.asarray(forc["precip"]), rtol=1e-6, atol=1e-12)
+    assert np.allclose(E, -np.asarray(lh) / float(constants.L_v),
+                       rtol=1e-6, atol=1e-12)
+
+    # (2) net = P - E: heavy precip / saturated air -> freshening (>0); dry air
+    # / no precip -> strong evap -> salinifying (<0).
+    fw_wet = compute_omip2_freshwater_forcing(
+        state, forcing=_emp_forcing(precip=2.0e-4, q_air=0.020),
+        idx_t=0, grid=grid, grid_type="latlon")
+    assert float(np.mean(np.asarray(net_freshwater_flux(fw_wet)))) > 0.0
+    fw_dry = compute_omip2_freshwater_forcing(
+        state, forcing=_emp_forcing(precip=0.0, q_air=0.001),
+        idx_t=0, grid=grid, grid_type="latlon")
+    assert float(np.mean(np.asarray(net_freshwater_flux(fw_dry)))) < 0.0
+
+    # (3) runoff_R flows into the runoff channel (additive, + into ocean).
+    R = np.full(P.shape, 1.0e-5)
+    fw_r = compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon",
+        runoff_R=R)
+    assert np.allclose(np.asarray(fw_r.runoff), R, rtol=1e-10)
+
+    # (4) emp=False zeroes P and E but keeps runoff.
+    fw_noemp = compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon",
+        runoff_R=R, emp=False)
+    assert np.all(np.asarray(fw_noemp.precip) == 0.0)
+    assert np.all(np.asarray(fw_noemp.evap) == 0.0)
+    assert np.allclose(np.asarray(fw_noemp.runoff), R, rtol=1e-10)
+
+    # (5) ramp scales every component linearly.
+    fw_half = compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon",
+        runoff_R=R, ramp=0.5)
+    assert np.allclose(np.asarray(fw_half.precip), 0.5 * P, rtol=1e-10)
+    assert np.allclose(np.asarray(fw_half.evap), 0.5 * E, rtol=1e-10)
+    assert np.allclose(np.asarray(fw_half.runoff), 0.5 * R, rtol=1e-10)
+
+
+@pytest.mark.parametrize("grid_type,res", [
+    ("cubed_sphere", "C24"),
+    ("mpas", "ico3"),
+])
+def test_compute_omip2_freshwater_forcing_grid_routing(grid_type, res):
+    """``compute_omip2_freshwater_forcing`` routes through ``_sample_omip2_forcing``
+    on the cube ((6,n,n)) and MPAS ((nCells,)) grids: shape matches the surface
+    field, fields are finite, and the net P - E sign tracks the forcing (dry air
+    -> net salinifying < 0; heavy precip -> net freshening > 0).  Guards the
+    grid-routing the run loop relies on (cube folds net onto sf.freshwater; MPAS
+    passes the FreshwaterForcing to step(freshwater=))."""
+    from legoesm.ocean.coupler import compute_omip2_freshwater_forcing
+    from legoesm.ocean.freshwater import net_freshwater_flux
+    state, grid, z, _ = _rest_state(grid_type, res)
+    surf_shape = (np.asarray(state.T.data)[..., 0].shape if grid_type == "cubed_sphere"
+                  else np.asarray(state.T.data)[:, 0].shape)
+
+    fw_dry = compute_omip2_freshwater_forcing(
+        state, forcing=_emp_forcing(precip=0.0, q_air=0.001),
+        idx_t=0, grid=grid, grid_type=grid_type)
+    fw_wet = compute_omip2_freshwater_forcing(
+        state, forcing=_emp_forcing(precip=2.0e-4, q_air=0.020),
+        idx_t=0, grid=grid, grid_type=grid_type)
+    for fw in (fw_dry, fw_wet):
+        assert np.asarray(fw.precip).shape == surf_shape
+        assert np.isfinite(np.asarray(net_freshwater_flux(fw))).all()
+    assert float(np.mean(np.asarray(net_freshwater_flux(fw_dry)))) < 0.0
+    assert float(np.mean(np.asarray(net_freshwater_flux(fw_wet)))) > 0.0

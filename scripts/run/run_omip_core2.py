@@ -1581,6 +1581,13 @@ def main() -> int:
                    help="Apply NEMO's Dai-Trenberth river+ice-shelf+iceberg runoff "
                         "(the SAME file ORCA1 uses) as a per-step freshwater/virtual-salt "
                         "flux -> ungates the SSS comparison (tripole/latlon only).")
+    p.add_argument("--no-emp", dest="emp_freshwater", action="store_false",
+                   default=True,
+                   help="DISABLE the atmospheric P - E surface freshwater flux "
+                        "(default ON).  P - E = precip + lh/L_v is the dominant "
+                        "OMIP-2 salt-budget term; ON by default so the multi-year "
+                        "salinity is faithful.  Use --no-emp only for ablation "
+                        "(reproducing the pre-fix runoff-only fresh drift).")
     p.add_argument("--sss-restore", action="store_true",
                    help="Apply OMIP-2 weak SSS restoring toward the WOA surface "
                         "salinity (the protocol NEMO ORCA1 uses) -> bounds the "
@@ -1699,7 +1706,10 @@ def main() -> int:
     from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())
     from legoesm.ocean.forcing import load_core2_nyf
-    from legoesm.ocean.coupler import compute_omip2_surface_forcing
+    from legoesm.ocean.coupler import (
+        compute_omip2_surface_forcing,
+        compute_omip2_freshwater_forcing,
+    )
     from legoesm.core.field import Field
 
     # --config (#376 Phase 4): a template's run controls (time/output/grid)
@@ -2046,6 +2056,20 @@ def main() -> int:
                     "enabled (those need per-step host updates)")
         print(f"[scan] --scan-block ignored: {why}.", flush=True)
     if use_scan:
+        # The scan path applies NONE of the host-loop salinity forcing: P - E
+        # (precip is not in the on-device stack), Dai-Trenberth runoff, or SSS
+        # restoring.  Refuse rather than silently emit a quietly-fresh result if
+        # ANY of those is requested.  P - E is ON by default, so the scan path is
+        # reachable only with --no-emp AND no --runoff/--sss-restore (a pure
+        # momentum/heat tripole perf run, issue #354).
+        if args.emp_freshwater or args.runoff or args.sss_restore:
+            raise SystemExit(
+                "[scan] --scan-block applies no surface salinity forcing "
+                "(P - E / runoff / SSS restoring are host-loop only), so it "
+                "cannot run a salinity-faithful integration.  Use the host Python "
+                "loop (omit --scan-block) for any salinity run, or drop "
+                "--runoff/--sss-restore and pass --no-emp for the momentum/heat-"
+                "only scan path.")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
@@ -2128,17 +2152,41 @@ def main() -> int:
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
                              q_net=sf.q_net * ramp, sw_down=sf.sw_down * ramp)
-        state = model.step(state, dt, surface_forcing=sf)
-        if runoff_monthly is not None:
-            _R = runoff_monthly[_runoff_month_idx(step, dt)]
-            if app_grid_type == "mpas":
-                from legoesm.ocean.coupler.runoff_apply import apply_runoff_step_mpas
-                state = apply_runoff_step_mpas(
-                    state, R_kg_m2_s=_R, z_coord=z_coord, dt=dt)
-            else:
-                from legoesm.ocean.coupler.runoff_apply import apply_runoff_step
-                state = apply_runoff_step(
-                    state, R_kg_m2_s=_R, z_coord=z_coord, dt=dt)
+        # Surface freshwater (atmospheric P - E + optional Dai-Trenberth runoff)
+        # is delivered through the IN-CORE channel
+        # ``model.step(..., freshwater=FreshwaterForcing)``: the dynamics core
+        # applies the virtual-salt tendency (``config.S_ref``) AND the eta
+        # free-surface source inside the barotropic solve, on-device + AD-safe.
+        # P - E is ON by default (--no-emp = ablation).  The CUBE's 'external'
+        # physics instead consumes ``surface_forcing.freshwater`` directly, so for
+        # the cube the NET flux is folded onto ``sf`` and no freshwater= arg is
+        # passed (single application; avoids the double-count codex flagged).
+        _R = (runoff_monthly[_runoff_month_idx(step, dt)]
+              if runoff_monthly is not None else None)
+        _want_fw = args.emp_freshwater or (_R is not None)
+        if app_grid_type == "cubed_sphere":
+            # CUBE is PARKED (cold-start blowup). Its 'external' physics applies
+            # surface_forcing.freshwater ONCE as a virtual salt with the LOCAL
+            # S_top (not config.S_ref) and NO eta free-surface source -- a
+            # lighter treatment than the latlon/MPAS freshwater= path. Acceptable
+            # for the parked grid; revisit if the cube is unparked for a
+            # salinity-faithful OMIP run.
+            if _want_fw:
+                from legoesm.ocean.freshwater import net_freshwater_flux
+                fw = compute_omip2_freshwater_forcing(
+                    state, forcing=forcing, idx_t=it, grid=grid,
+                    grid_type=app_grid_type, runoff_R=_R,
+                    emp=args.emp_freshwater, ramp=ramp)
+                sf = sf._replace(freshwater=net_freshwater_flux(fw))
+            state = model.step(state, dt, surface_forcing=sf)
+        else:
+            fw = None
+            if _want_fw:
+                fw = compute_omip2_freshwater_forcing(
+                    state, forcing=forcing, idx_t=it, grid=grid,
+                    grid_type=app_grid_type, runoff_R=_R,
+                    emp=args.emp_freshwater, ramp=ramp)
+            state = model.step(state, dt, surface_forcing=sf, freshwater=fw)
         if sss_restore_cfg is not None:
             if app_grid_type == "mpas":
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step_mpas

@@ -471,6 +471,117 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
     )
 
 
+def _sample_omip2_forcing(forcing, idx_t, grid, grid_type):
+    """Sample the CORE-II/JRA forcing channels onto the model grid for a record.
+
+    Shared by :func:`compute_omip2_surface_forcing` (momentum/heat) and
+    :func:`compute_omip2_freshwater_forcing` (P - E) so both see the SAME
+    spatially-sampled fields.  ``latlon``/``latlon_regional`` use the
+    conservative regrid onto the regular T grid; ``tripole``/``cubed_sphere``/
+    ``mpas`` use nearest-neighbour onto the (possibly 2-D / 1-D) cell centres.
+    """
+    if grid_type in ("latlon", "latlon_regional"):
+        lat_deg = np.degrees(np.asarray(grid.lat))
+        lon_deg = np.degrees(np.asarray(grid.lon))
+        return _sample_forcing_latlon(forcing, idx_t, lat_deg, lon_deg)
+    if grid_type == "tripole":
+        lat_pts = np.degrees(np.asarray(grid.lat_T))
+        lon_pts = np.degrees(np.asarray(grid.lon_T))
+        shp = lat_pts.shape
+        forc = _sample_forcing_points(
+            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
+        )
+        return {k: v.reshape(shp) for k, v in forc.items()}
+    if grid_type == "cubed_sphere":
+        lat_pts = np.degrees(np.asarray(grid.lat))
+        lon_pts = np.degrees(np.asarray(grid.lon))
+        shp = lat_pts.shape
+        forc = _sample_forcing_points(
+            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
+        )
+        return {k: v.reshape(shp) for k, v in forc.items()}
+    if grid_type in ("mpas", "mpas_regional"):
+        lat_pts = np.degrees(np.asarray(grid.latCell))
+        lon_pts = np.degrees(np.asarray(grid.lonCell))
+        return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts)
+    raise NotImplementedError(
+        f"_sample_omip2_forcing does not support grid_type={grid_type!r}"
+    )
+
+
+def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
+                                     grid, grid_type: str,
+                                     runoff_R=None,
+                                     emp: bool = True,
+                                     ramp: float = 1.0,
+                                     rho_air: float = constants.rho_air):
+    """Build a :class:`FreshwaterForcing` (P, E, runoff) for the OMIP-2 run.
+
+    Delivered to the ocean via the in-core channel
+    ``model.step(state, dt, surface_forcing=sf, freshwater=fw)`` so the surface
+    freshwater enters the SAME tested path the model uses for its own freshwater:
+    the virtual-salt tendency ``dS_top/dt = -S_ref * F_fw / (rho_0 * dz_0)`` with
+    ``config.S_ref`` AND the free-surface source ``deta/dt = F_fw/rho_0`` inside
+    the barotropic solve (NOT an operator-split post-step NumPy update, which
+    would bypass the eta solve, break AD/JIT device-residency, and double-apply
+    on the cube's 'external' physics that already consumes
+    ``surface_forcing.freshwater``).
+
+    Components (all [kg/m^2/s], + INTO ocean):
+    * ``precip`` -- prescribed CORE-II precipitation (rain+snow).
+    * ``evap``   -- INTERACTIVE evaporation, positive UP, back-derived from the
+      latent heat flux (``air_sea_fluxes`` returns ``lh`` +INTO ocean, so an
+      evaporating column has lh<0 and E = -lh/L_v >= 0).  ``net_freshwater_flux``
+      forms ``precip - evap + runoff`` => ``precip + lh/L_v + runoff``.
+    * ``runoff`` -- optional Dai-Trenberth river/ice-shelf/iceberg field.
+
+    Without P - E the ocean only sees runoff (a one-sided freshwater SOURCE) and
+    freshens ~0.3 PSU/yr -- the multi-year drift that strong SSS restoring was
+    masking by injecting net salt (-> AMOC suppression).
+
+    Parameters
+    ----------
+    emp : bool
+        When False, zero the P - E contribution (ablation / runoff-only).
+    ramp : float
+        Cold-start spin-up scale in [0, 1] applied to ALL freshwater components
+        (matches the tau/q_net ramp).
+    """
+    from legoesm.ocean.freshwater import FreshwaterForcing
+
+    forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+    # MPAS state is (nCells,) at the surface; cube/latlon/tripole are (..., 0).
+    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + float(constants.T_freeze)
+    q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)), dtype=np.float64)
+    _, _, _, lh = air_sea_fluxes(
+        u10=jnp.asarray(forc["u10"]), v10=jnp.asarray(forc["v10"]),
+        T_air_K=jnp.asarray(forc["T_air"]), q_air=jnp.asarray(forc["q_air"]),
+        T_sfc_K=jnp.asarray(T_sfc_K), q_sfc=jnp.asarray(q_sfc),
+        rho_air=jnp.asarray(rho_air),
+    )
+    L_v = float(constants.L_v)
+    if emp:
+        precip = np.asarray(forc["precip"], dtype=np.float64)
+        # E (positive up) = -lh/L_v  (lh +INTO ocean; evaporation lh<0 -> E>0).
+        evap = -np.asarray(lh, dtype=np.float64) / L_v
+    else:
+        precip = np.zeros_like(np.asarray(forc["precip"], dtype=np.float64))
+        evap = np.zeros_like(precip)
+    if runoff_R is not None:
+        runoff = np.asarray(runoff_R, dtype=np.float64)
+    else:
+        runoff = np.zeros_like(precip)
+    r = float(ramp)
+    z = jnp.zeros_like(jnp.asarray(precip))
+    return FreshwaterForcing(
+        precip=jnp.asarray(precip * r),
+        evap=jnp.asarray(evap * r),
+        runoff=jnp.asarray(runoff * r),
+        ice_fw=z,
+        restoring=z,
+    )
+
+
 def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                                   grid, grid_type: str,
                                   rho_air: float = constants.rho_air):
@@ -497,45 +608,7 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     sigma_sb = float(constants.sigma_sb)
     T_freeze = float(constants.T_freeze)
 
-    if grid_type in ("latlon", "latlon_regional"):
-        lat_deg = np.degrees(np.asarray(grid.lat))
-        lon_deg = np.degrees(np.asarray(grid.lon))
-        forc = _sample_forcing_latlon(forcing, idx_t, lat_deg, lon_deg)
-    elif grid_type == "tripole":
-        lat_pts = np.degrees(np.asarray(grid.lat_T))
-        lon_pts = np.degrees(np.asarray(grid.lon_T))
-        shp = lat_pts.shape
-        forc = _sample_forcing_points(
-            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
-        )
-        forc = {k: v.reshape(shp) for k, v in forc.items()}
-    elif grid_type == "cubed_sphere":
-        # Cube cell centres carry geographic lat/lon (6, n, n) in radians;
-        # nearest-neighbour sample the forcing per cell (same as tripole, but the
-        # cube T grid is grid.lat/grid.lon, not grid.lat_T/lon_T). Downstream
-        # air_sea_fluxes + q_net are elementwise so the (6, n, n) layout flows
-        # through unchanged.
-        lat_pts = np.degrees(np.asarray(grid.lat))
-        lon_pts = np.degrees(np.asarray(grid.lon))
-        shp = lat_pts.shape
-        forc = _sample_forcing_points(
-            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
-        )
-        forc = {k: v.reshape(shp) for k, v in forc.items()}
-    elif grid_type in ("mpas", "mpas_regional"):
-        # MPAS Voronoi cell centres carry geographic latCell/lonCell (nCells,)
-        # in radians; nearest-neighbour sample the forcing per cell.  The state
-        # is already cell-centred 1-D, so no reshape is needed — downstream
-        # air_sea_fluxes + q_net are elementwise and flow through unchanged.  The
-        # returned tau is cell-centred atmospheric-convention stress; the MPAS
-        # physics negates + edge-projects it internally (mpas_physics external).
-        lat_pts = np.degrees(np.asarray(grid.latCell))
-        lon_pts = np.degrees(np.asarray(grid.lonCell))
-        forc = _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts)
-    else:
-        raise NotImplementedError(
-            f"compute_omip2_surface_forcing does not support grid_type={grid_type!r}"
-        )
+    forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
 
     # Top-cell ocean temperature (state stored in degC) -> K.
     T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + T_freeze
@@ -552,6 +625,13 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
     q_net = (np.asarray(sh) + np.asarray(lh)
              + forc["lw_down"] - lw_up + forc["sw_down"])
+    # NOTE: the surface freshwater flux P - E is NOT returned here.  It is built
+    # by :func:`compute_omip2_freshwater_forcing` and delivered to the ocean via
+    # the in-core ``model.step(..., freshwater=FreshwaterForcing)`` channel (which
+    # applies the virtual salt with ``config.S_ref`` + the eta free-surface source
+    # in the barotropic solve).  Routing it through ``surface_forcing.freshwater``
+    # would double-apply on the cube ('external' physics consumes that field) and
+    # bypass the eta/free-surface treatment on latlon/MPAS.
     return OceanSurfaceForcing(
         tau_x=jnp.asarray(np.asarray(tau_x)),
         tau_y=jnp.asarray(np.asarray(tau_y)),
@@ -637,9 +717,18 @@ def compute_omip2_surface_forcing_jax(
     ``idx_t`` is the (possibly traced) 6-hourly CORE-II record index.  The
     spatial sample is a static nearest-neighbour gather via the fixed
     ``(nn_i, nn_j)`` map, so there is NO host roundtrip per step.
-    Bit-equivalent (to fp tolerance) to the host function: identical
-    ``air_sea_fluxes``, ``_bolton_q_sat`` and net-heat formula, identical
-    nearest-neighbour spatial sample.
+    Bit-equivalent (to fp tolerance) to the host function for tau/q_net/sw_down:
+    identical ``air_sea_fluxes``, ``_bolton_q_sat`` and net-heat formula,
+    identical nearest-neighbour spatial sample.
+
+    LIMITATION: this scan variant covers ONLY tau/q_net/sw_down; it does NOT
+    build the P - E / runoff ``FreshwaterForcing`` (its device stack omits the
+    ``precip`` channel, see :func:`build_core2_forcing_device_stack`).  The
+    faithful surface-freshwater forcing is therefore applied only on the HOST run
+    loop (``compute_omip2_freshwater_forcing`` -> ``model.step(freshwater=...)``);
+    the run driver refuses ``--scan-block`` for salinity-faithful runs until
+    precip is added to the device stack and the freshwater channel is wired into
+    the scan body.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
     sigma_sb = float(constants.sigma_sb)
@@ -735,6 +824,7 @@ def build_omip2_scan_block_fn(
 __all__ = [
     "apply_omip2_surface_fluxes",
     "compute_omip2_surface_forcing",
+    "compute_omip2_freshwater_forcing",
     "compute_omip2_surface_forcing_jax",
     "build_core2_forcing_device_stack",
     "build_omip2_scan_block_fn",

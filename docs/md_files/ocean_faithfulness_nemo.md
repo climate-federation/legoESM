@@ -319,6 +319,63 @@ plotter; used the scorer's existing maps.)
   scaling (dt~287 proportional) is marginal at ico7. Relaunched at **dt=150** (8429592) for the
   higher-res SST/SSS check vs the ico6 day-90 0.84/0.85.
 
+### iter-A (2026-06-08): SSS τ=60 + ico7 dt150 harvested → exposed the SALT-BUDGET bug
+Two completed runs harvested:
+- **5-yr MPAS τ=60** (8429375): SST RMSE **1.73**/corr 0.987; SSS RMSE **0.947**/corr 0.937
+  (FIXED from τ=365's 3.97) — but **AMOC@26N collapsed 20.46→5.71 Sv**; ACC 141.8. Stable.
+- **ico7 dt=150** (8429592, ~55 km, 90-day): SST RMSE **0.925**/corr **0.996** = EXCELLENT; SSS
+  0.933; stable. Higher-res grid is faithful (dt=300 blew; dt=150 rides).
+- **AMOC-vs-SSS-restoring tension** (NEMO RUN_REF is itself 5-yr `20000101_20041231` → apples-to-apples,
+  NEMO AMOC 17.74). τ=365 overshoots (20.46), τ=60 undershoots hard (5.71): a 4× AMOC swing from
+  restoring strength = a *symptom*, not the disease.
+
+### ROOT CAUSE (iter-A): the OMIP-2 path never applied P−E to salinity
+`run_omip_core2.py` ran `model.step(surface_forcing=compute_omip2_surface_forcing(...))` which returned
+ONLY `tau_x/tau_y/q_net/sw_down` — **`freshwater=None`**. Salinity was forced ONLY by runoff (a
+one-sided freshwater SOURCE, ~1.2 Sv global) + SSS restoring. The dominant atmospheric **E−P** (precip
+loaded but unused; evaporation never derived from `lh`) was MISSING → net fresh source ≈ 0.3 PSU/yr →
+matches the τ=365 −1.53 PSU 5-yr drift. Strong τ=60 restoring masked it by **injecting net salt** (the
+restoring is not global-mean-removed), and strong INTERIOR restoring (regional masks are shortest-τ-wins,
+so the τ=60 default dominates the Labrador/Nordic deep-convection zone) **suppressed AMOC**. So SSS-good
+and AMOC-good were mutually exclusive *only because the salt budget was open*.
+
+### FIX (iter-A, codex-reviewed → pivoted to IN-CORE channel): apply P−E surface freshwater
+First attempt populated `OceanSurfaceForcing.freshwater` + applied it post-step via `apply_runoff_step`.
+**Codex caught it** (HIGH): the cube's `scheme="external"` physics ALREADY consumes
+`surface_forcing.freshwater` → double-count; `--no-emp` wouldn't disable it; the post-step NumPy update
+also bypasses the eta free-surface solve, breaks AD/device-residency, and uses `dz_ref[0]`/local-S_top
+vs the core's `config.S_ref`. **Pivoted to the in-core channel** the model already provides:
+- New `compute_omip2_freshwater_forcing(state, forcing, idx_t, grid, grid_type, runoff_R, emp, ramp)` →
+  `FreshwaterForcing(precip=P, evap=E=−lh/L_v, runoff=R)` (`air_sea_fluxes` lh +INTO ocean → evaporating
+  lh<0 → E≥0; `net_freshwater_flux`=P−E+R). Shared `_sample_omip2_forcing` (no dup). precip units
+  verified kg/m²/s (RAIN+SNOW).
+- Run loop delivers it via **`model.step(surface_forcing=sf, freshwater=fw)`** (latlon/MPAS/tripole) →
+  the core applies the virtual salt at `config.S_ref` + the eta source in the barotropic solve, on-device
+  + AD-safe (`freshwater_closure="virtual_salt_flux"` default). Runoff moved into the SAME channel (one
+  freshwater path). CUBE folds `net_freshwater_flux(fw)` onto `surface_forcing.freshwater` (external.py
+  applies once — no double-count). `--no-emp` ablation (default ON). Scan path RAISES (precip not on its
+  device stack). Resolves codex HIGH 1/2 + MED 3/4/6/7.
+- Test: `test_compute_omip2_freshwater_forcing_emp` (P/E exactness, P−E sign, runoff channel, emp=False,
+  ramp). Validation job 8432179 (unit tests + latlon+MPAS in-core-path E2E salinity-sign check). Re-codex
+  on the revised diff pending.
+- **Decisive runs (after validation+codex clean):** MPAS ico6 5-yr + latlon 1° 5-yr, P−E + **weak τ=365
+  restoring**. Hypothesis: P−E closes the global budget → weak interior restoring keeps SSS faithful AND
+  AMOC near NEMO 17.7. Multi-grid SST/SSS PNGs to follow.
+
+### iter-A SH/Antarctic SST WARM BIAS (user-flagged from zonal_means/SST_maps PNGs) — no sea-ice albedo
+Antarctic (S of 45S) SST runs TOO WARM vs NEMO (not near freezing): MPAS ico6 lego **5.08** vs NEMO
+**3.05** (bias **+2.03**, RMSE 2.37); ico7 (~55 km) only +0.32 (resolution helps, but ORCA1 is also ~1°).
+ROOT CAUSE: `sw_down` = **downwelling SWDN**, and the column absorbs **100%** of it (the core's
+`sw_absorbed = sw*0.94` only splits surface-vs-penetrating; total = q_net includes full sw_down) — there
+is **NO surface albedo at all**, and **no sea-ice albedo**. NEMO (interactive SI3 ice) reflects ~60-80%
+of SW under Antarctic ice → stays near freezing; we absorb all of it → warm. `freeze_floor` only caps the
+FLOOR (`max(T,−1.8)`), never warming. An SST-TRIGGERED ice albedo can't fix it (cells already +5°C → ramp
+never activates; chicken-and-egg). **FAITHFUL FIX (next):** apply albedo to sw_down weighted by NEMO's OWN
+climatological `siconc` (`ORCA1_1y_*icemod.nc` exists) → impose ice albedo where NEMO has ice (independent
+of model SST) → cuts SW → SST cools toward freezing. Reuse `core/surface_albedo.py` (`ocean_albedo`,
+`ice_albedo`) + ice-albedo constants; add a prescribed-ice-concentration loader + applicator albedo term +
+config + tests. Also adds the ~6% open-ocean albedo missing globally. Separate diff from the P−E fix.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
