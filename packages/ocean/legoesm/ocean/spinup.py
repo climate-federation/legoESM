@@ -205,19 +205,25 @@ def compute_acc_from_state(
     land_mask: np.ndarray,
     grid,
     *,
+    drake_lon_deg: float = -68.0,
     drake_lat_south_deg: float = -65.0,
     drake_lat_north_deg: float = -45.0,
+    lon2d_deg: np.ndarray | None = None,
 ) -> float:
-    """ACC (Drake-Passage zonal volume transport) [Sv] from a C-grid state.
+    """ACC (Drake throughflow) [Sv] from a C-grid state — SINGLE-MERIDIAN section.
 
     Reuses the tested
     :func:`legoesm.ocean.diagnostics_streamfunction.barotropic_streamfunction`
-    (depth-integrated transport streamfunction ψ_bt) and
-    :func:`legoesm.ocean.diagnostics_climate.acc_transport` (max−min of ψ_bt
-    within the Drake latitude band).  The band default matches ``acc_transport``
-    and the offline NEMO reference reader (``scripts/validate/nemo_transports.
-    acc_drake_core``) for apples-to-apples comparison.  Returns NaN when the
-    band is empty on the grid.
+    for the depth-integrated transport streamfunction ψ_bt, then takes its
+    max−min ALONG THE DRAKE MERIDIAN over the passage latitude band.  Along a
+    single meridian ψ_bt runs monotonically from the South-America value to the
+    Antarctica value, so the max−min equals the net zonal throughflow there
+    (= ∫ u·h·dy across that meridian).  This is apples-to-apples with the NEMO
+    reader (``scripts/validate/nemo_transports.acc_drake_core``) and the MPAS
+    section (:func:`compute_acc_from_state_mpas`).  It deliberately does NOT use
+    ``diagnostics_climate.acc_transport`` (whole-Drake-band max−min over ALL
+    longitudes), which inflates the number by picking up Southern-Ocean gyre
+    extrema (latlon probe gave 212 Sv that way vs ~146-159 by section).
 
     Sibling of :func:`compute_amoc_from_state` but for the ZONAL u-faces.  ACC is
     wind-driven and spins up in MONTHS (vs AMOC's decades), so it is meaningful
@@ -232,39 +238,80 @@ def compute_acc_from_state(
     land_mask : array ``(n_lat, n_lon)``
         Ocean mask (1 = ocean, 0 = land).
     grid : LatLonGrid-like
-        Must expose ``lat`` (radians; 1-D regular or 2-D curvilinear) and the
-        metadata ``barotropic_streamfunction`` needs (``radius``, ``dy``/``dlat``).
+        Must expose ``lat``/``lon`` (radians; 1-D regular or 2-D curvilinear) and
+        the metadata ``barotropic_streamfunction`` needs (``radius``,
+        ``dy``/``dlat``).
+    drake_lon_deg : float
+        Drake-Passage section longitude [°] (default -68).
     drake_lat_south_deg, drake_lat_north_deg : float
         Drake latitude band [°].
+    lon2d_deg : array ``(n_lat, n_lon)`` or None
+        Optional caller-supplied per-cell longitude [°].  On a regular lat-lon
+        grid ``grid.lon`` (1-D) is correct; on the Drake meridian a tripole is
+        regular too, so the 1-D fallback is fine there, but a 2-D override lets a
+        folded-north section be placed exactly.
 
     Returns
     -------
     acc_Sv : float
-        Drake throughflow in Sverdrups (max−min of ψ_bt over the band; nonneg
-        by construction), or NaN if the band is empty.
+        Drake throughflow magnitude in Sverdrups, or NaN if the band is empty.
     """
     # Local import to avoid circular legoesm.ocean ← legoesm.ocean.spinup.
     from legoesm.ocean.diagnostics_streamfunction import barotropic_streamfunction
-    from legoesm.ocean.diagnostics_climate import acc_transport
 
     u_np = np.asarray(u_face, dtype=np.float64)
     h_np = np.asarray(h_partial, dtype=np.float64)
     mask_np = np.asarray(land_mask).astype(np.float64)
 
-    psi_bt_Sv = barotropic_streamfunction(u_np, h_np, mask_np, grid)
-    # ``acc_transport`` expects m³/s (it divides by 1e6); ``barotropic_stream
-    # function`` already returns Sv, so scale back up (same round-trip as
-    # scripts/ocean_long_runs/postprocess_climate.py).
-    psi_bt_m3s = psi_bt_Sv * 1.0e6
+    psi_bt_Sv = np.asarray(barotropic_streamfunction(u_np, h_np, mask_np, grid))
+    n_lat, n_lon = psi_bt_Sv.shape
+
+    # Passage latitude band (reduce a 2-D curvilinear lat to a per-row mean — the
+    # Drake band sits in the regular Southern-Ocean part of any ORCA-like grid).
     lat_arr = np.degrees(np.asarray(grid.lat))
-    # Reduce a 2-D curvilinear lat to a per-row representative latitude (the
-    # Drake band is in the regular Southern-Ocean part of any ORCA-like grid,
-    # where rows are near-constant-latitude, so the row mean is exact there).
     lat_t_deg = lat_arr.mean(axis=1) if lat_arr.ndim == 2 else lat_arr
-    res = acc_transport(psi_bt_m3s, lat_t_deg,
-                        drake_lat_south=drake_lat_south_deg,
-                        drake_lat_north=drake_lat_north_deg)
-    return float(res.transport_Sv)
+    band_rows = np.where((lat_t_deg >= drake_lat_south_deg)
+                         & (lat_t_deg <= drake_lat_north_deg))[0]
+    if band_rows.size == 0:
+        return float("nan")
+
+    # Drake meridian COLUMN.  ``psi_bt[:, i]`` is built from ``u[:, i]`` = the
+    # WEST u-face of cell i (barotropic_streamfunction min-rules h_W=roll(h,1)),
+    # i.e. the meridian at ``lon[i] - dlon/2``.  Select the column whose FACE
+    # longitude is nearest ``drake_lon`` (circular); on a curvilinear 2-D lon the
+    # Southern Ocean is ~regular so the half-cell shift is sub-cell.
+    lon_src = lon2d_deg if lon2d_deg is not None else np.degrees(np.asarray(grid.lon))
+    lon_arr = np.asarray(lon_src, dtype=np.float64)
+    lon_row = (lon_arr[int(band_rows[band_rows.size // 2])]
+               if lon_arr.ndim == 2 else lon_arr)
+    dlon_deg = float(np.degrees(getattr(grid, "dlon", 0.0) or 0.0))
+    if dlon_deg == 0.0 and np.asarray(lon_row).size > 1:
+        # Tripole sets dlon=0 as a sentinel (non-uniform spacing); estimate the
+        # LOCAL Drake-row cell spacing from lon_row so the half-cell U-face shift
+        # still applies on the curvilinear grid (regular in the S.Ocean).
+        _dl = np.diff(((np.asarray(lon_row) + 180.0) % 360.0) - 180.0)
+        _dl = ((_dl + 180.0) % 360.0) - 180.0          # circular diff
+        dlon_deg = float(np.median(np.abs(_dl)))
+    lon_face = lon_row - 0.5 * dlon_deg
+    drake_w = ((float(drake_lon_deg) + 180.0) % 360.0) - 180.0
+    lon_w = ((lon_face + 180.0) % 360.0) - 180.0
+    i_drake = int(np.argmin(np.abs(((lon_w - drake_w + 180.0) % 360.0) - 180.0)))
+
+    # Section throughflow (EASTWARD-positive, SIGNED) across the band at the Drake
+    # meridian.  ``psi_bt[j] = -cumsum_{0..j}(U_dz·dy)``, so the transport through
+    # the band rows [a..b] = Σ_{a..b} U_dz·dy = psi_bt[a-1] - psi_bt[b] (the
+    # streamfunction just SOUTH of the first band row minus just at the last; ψ
+    # south of row 0 is 0).  A ``max-min`` over the band would drop row a
+    # (~25% on a 4-row band) and lose the sign, so use the explicit endpoints —
+    # matching the signed eastward-positive convention of the NEMO reader and the
+    # MPAS section.
+    a = int(band_rows[0])
+    b = int(band_rows[-1])
+    south = float(psi_bt_Sv[a - 1, i_drake]) if a > 0 else 0.0
+    north = float(psi_bt_Sv[b, i_drake])
+    if not (np.isfinite(south) and np.isfinite(north)):
+        return float("nan")
+    return south - north
 
 
 # ==============================================================================

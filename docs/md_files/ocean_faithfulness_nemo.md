@@ -264,10 +264,15 @@ latlon 1°, 1 model-year, faithful stack: **ACC@Drake = 211.9 Sv** (vs NEMO 159,
 AMOC@26N = 1.61 Sv (un-spun-up, decade-gated). The 211 is NOT apples-to-apples: `compute_acc_from_state`
 (latlon/tripole) uses `acc_transport` = ψ_bt MAX−MIN over the whole Drake LAT band (all lons), which
 picks up Southern-Ocean gyre extrema + coarse-no-eddy overshoot, whereas the NEMO reader AND
-`compute_acc_from_state_mpas` use a SINGLE-MERIDIAN Drake section. **FOLLOW-UP: unify the latlon/tripole
-model ACC onto a Drake-meridian section** (or restrict acc_transport to the Drake longitude) for a true
-apples-to-apples latlon-vs-NEMO ACC. The MPAS section ACC (146 vs 159, ~8%) remains the clean match.
-Run stable 105k steps @ 7.7 steps/s (latlon per-step host stack is slow), SST 13.5 / SSS 33.9, finite.
+`compute_acc_from_state_mpas` use a SINGLE-MERIDIAN Drake section. The MPAS section ACC (146 vs 159, ~8%)
+remains the clean match. Run stable 105k steps @ 7.7 steps/s (latlon per-step host stack is slow),
+SST 13.5 / SSS 33.9, finite.
+**FOLLOW-UP DONE:** `compute_acc_from_state` (latlon/tripole) rewritten to the SINGLE-MERIDIAN Drake
+section (ψ_bt along the Drake column; SIGNED eastward+ via south/north endpoints, NOT whole-band
+max−min) → apples-to-apples with the NEMO reader + MPAS section. Codex 3 passes (half-cell U-face column
+shift + endpoint-not-max−min ~25% undercount + signed + tripole-dlon=0-sentinel local-spacing estimate
+— all fixed; pass-3 clean). 80 tests (gyre-exclusion + dlon-sentinel pins). The 212 above was the OLD
+whole-band number; a future latlon run emits the section ACC.
 
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.

@@ -559,3 +559,33 @@ class TestComputeACCFromState:
         a1 = compute_acc_from_state(u, h, mask, g1)
         a2 = compute_acc_from_state(u, h, mask, g2)
         assert abs(a1 - a2) < 1e-9 * max(1.0, abs(a1))
+
+    def test_drake_column_excludes_remote_flow(self):
+        """The single-meridian section method (vs whole-band max-min) must NOT
+        count zonal transport at a longitude far from the Drake meridian: flow
+        only near 90 E -> ~0 ACC at the Drake (-68) column."""
+        n_lat, n_lon, nlev = 60, 72, 4
+        grid = _FakeGrid(n_lat=n_lat, n_lon=n_lon)
+        u = np.zeros((n_lat, n_lon + 1, nlev), dtype=np.float64)
+        lon_deg = np.degrees(np.asarray(grid.lon))
+        i_far = int(np.argmin(np.abs(lon_deg - 90.0)))      # remote from -68=292
+        u[:, i_far, :] = 0.5                                 # strong remote flow
+        h = np.full((n_lat, n_lon, nlev), 100.0, dtype=np.float64)
+        mask = np.ones((n_lat, n_lon), dtype=np.float64)
+        acc = compute_acc_from_state(u, h, mask, grid, drake_lon_deg=-68.0)
+        assert abs(acc) < 1e-9       # nothing crosses the Drake meridian
+
+    def test_dlon_sentinel_estimates_spacing(self):
+        """A dlon=0 sentinel grid (tripole-style) still selects the Drake column
+        via the estimated local spacing -> remote-flow exclusion still holds and
+        the half-cell U-face shift is applied."""
+        n_lat, n_lon, nlev = 60, 72, 4
+        grid = _FakeGrid(n_lat=n_lat, n_lon=n_lon)
+        grid.dlon = 0.0                                      # tripole sentinel
+        u = np.zeros((n_lat, n_lon + 1, nlev), dtype=np.float64)
+        i_far = int(np.argmin(np.abs(np.degrees(np.asarray(grid.lon)) - 90.0)))
+        u[:, i_far, :] = 0.5
+        h = np.full((n_lat, n_lon, nlev), 100.0, dtype=np.float64)
+        mask = np.ones((n_lat, n_lon), dtype=np.float64)
+        acc = compute_acc_from_state(u, h, mask, grid, drake_lon_deg=-68.0)
+        assert abs(acc) < 1e-9
