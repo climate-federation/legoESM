@@ -332,12 +332,22 @@ def _make_hydrostatic_convection(
             w_grid_col = None
 
         # Moisture convergence for MC-consuming schemes (Tiedtke,
-        # Bechtold).  Reuses the dycore's FV-flux-divergence operator
-        # via :func:`._shared.compute_moisture_convergence`.  When the
-        # state has no q_v tracer or wind data we pass ``None`` so the
-        # leaf engages its built-in saturation-deficit proxy — Tiedtke
-        # gates the proxy on ``moisture_convergence is None`` and zero-
-        # filling silently bypasses it.
+        # Bechtold) and the canonical convergence-driven Kuo.  Reuses the
+        # dycore's FV-flux-divergence operator via
+        # :func:`._shared.compute_moisture_convergence`.  When the state
+        # has no q_v tracer or wind data we pass ``None``.
+        #
+        # The ``None`` semantics DIFFER by scheme, intentionally:
+        #   * Tiedtke/Bechtold treat ``None`` as "engage the built-in
+        #     saturation-deficit proxy" (they gate on it internally).
+        #   * Kuo treats ``None`` as ZERO SOURCE → QUIESCENT, which is the
+        #     physically-correct canonical-Kuo behavior (no resolved
+        #     large-scale convergence ⇒ nothing to converge).  So on a
+        #     state with no ``v`` (e.g. MPAS edge-normal ``u`` with
+        #     ``v is None``, or a single-column SCM) Kuo is deliberately
+        #     OFF rather than falling back to a proxy (Codex review-1
+        #     finding #2).  Wiring an edge→cell ``v`` reconstruction for
+        #     MPAS would let Kuo fire there; that is a follow-up.
         if (
             (is_mc_consumer or is_simple_mc_consumer)
             and state.tracers is not None

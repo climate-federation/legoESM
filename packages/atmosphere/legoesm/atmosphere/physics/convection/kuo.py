@@ -78,6 +78,12 @@ from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 __all__ = ("kuo_convection",)
 
 
+# Virtual-temperature coefficient ``T_v = T·(1 + _VT_COEFF·q_v − q_c)``,
+# derived from constants (``R_v/R_d − 1 = 1/ε − 1 ≈ 0.608``) rather than
+# the bare 0.608 literal the oracle hard-codes (Codex review-1 finding #6).
+_VT_COEFF = 1.0 / constants.epsilon - 1.0
+
+
 # ----------------------------------------------------------------------------
 # Thermodynamic helpers (legoesm constants + thermo; no re-derived saturation)
 # ----------------------------------------------------------------------------
@@ -109,6 +115,14 @@ def _dqsat_dT(T: jax.Array, p: jax.Array) -> jax.Array:
 
         de_sat/dT = e_sat · 17.67·243.5 / (T_c + 243.5)^2
         dq_sat/dT = ε p · de_sat/dT / (p − e_sat)^2
+
+    The constants ``17.67`` and ``243.5`` are NOT a re-derived saturation
+    formula: they are the Tetens coefficients of
+    :func:`legoesm.thermo.saturation_vapor_pressure`
+    (``611.2·exp(17.67·T_c/(T_c+243.5))``), and this routine is the exact
+    analytic ``d/dT`` of that mandated function.  Keeping them inline ties
+    the slope to the model's own ``e_sat`` curve; promoting them to
+    constants.py would risk drift from ``thermo.py`` (Codex review-1 #6).
     """
     e_sat = saturation_vapor_pressure(T)
     T_c = T - constants.T_freeze
@@ -243,7 +257,7 @@ def _parcel_ascent(
         qv_cloud = cond_gate * qsat_k + (1.0 - cond_gate) * qv1
 
         # Virtual cloud temperature with water loading.
-        tvc = t_cloud * (1.0 + 0.608 * qv_cloud - qc)
+        tvc = t_cloud * (1.0 + _VT_COEFF * qv_cloud - qc)
         buoyant = _smooth_gt((tvc - tve_k) / config.buoyancy_scale_K, sharp)
 
         # ``w_lcl`` captured at the FIRST condensing level (oracle:
@@ -367,7 +381,7 @@ def kuo_convection(
     # --- Column geometry: geopotential from the hydrostatic integral ---
     # gz_half[surface] = 0; integrate upward using env virtual temperature
     # (oracle: gzh(k) = gzh(k+1) + Rd·tve·(ph(k+1)-ph(k))/p(k)).
-    tve = T * (1.0 + 0.608 * q_v)  # (ncol, nlev)
+    tve = T * (1.0 + _VT_COEFF * q_v)  # (ncol, nlev)
     # Surface-first cumulative integral of dgz = Rd·tve·dp/p.
     dgz = constants.R_d * tve * dp / p_full  # (ncol, nlev), >0
     # gz at full levels: surface gz = 0.5·dgz_surface (half a layer up),
@@ -383,12 +397,21 @@ def kuo_convection(
     gz_s = 0.5 * (gzh_below_s + gzh_above_s)
     gz = gz_s[:, ::-1]                        # back to top->surface
 
-    # Vertical-velocity proxy for the w_lcl>0 gate.  The column physics
-    # boundary does not pass a per-level w to Kuo, so we use the sign of
-    # local convergence as the ascent proxy: positive large-scale
-    # moisture convergence ⇒ large-scale ascent ⇒ w_lcl>0.  When
-    # ``moisture_convergence is None`` this is zero everywhere and the
-    # w_lcl gate keeps the scheme off (consistent with quiescence).
+    # Vertical-velocity proxy for the oracle's ``w_lcl > 0`` gate.  The
+    # oracle reads an INDEPENDENT ``w(k)`` from its sounding and gates on
+    # its value at the LCL; the legoESM column-physics boundary does not
+    # pass a per-level ``w`` to Kuo, so we use the SIGN of the local
+    # large-scale convergence as the ascent proxy (positive moisture
+    # convergence ⇒ large-scale ascent ⇒ ``w_lcl > 0``).  This is a
+    # deliberate bridge choice (Codex review-1 finding #1): it is exact
+    # whenever convergence and resolved ascent share sign (the usual
+    # tropical convective regime, and the oracle test sounding where both
+    # are positive over the convecting layer → identical 50 active
+    # levels) and only differs in the rare cell where local convergence
+    # and vertical motion disagree.  When ``moisture_convergence is None``
+    # the proxy is zero everywhere and the gate keeps Kuo off (quiescent).
+    # A future enhancement could thread the dycore ``w`` (as Kain-Fritsch
+    # already does via ``w_grid``) to drop the proxy entirely.
     w_proxy = ptenq
 
     # --- Entraining parcel ascent (faithful oracle loop) ---
@@ -462,10 +485,16 @@ def kuo_convection(
         )
 
     # --- Convective cloud-water source for microphysics ---
-    # The heating is supplied by condensation: c_pd·dT = L_v·cond.  Only
-    # the positive (condensation) part makes cloud water.  Non-negative
-    # by construction.
-    cond_signed = dT_dt * constants.c_pd / constants.L_v
+    # The heating is supplied by condensation: ``Cps·dT = Lh·dcond`` so
+    # ``dcond = dT/dt / alpha_env`` with ``alpha_env = Lh/Cps_env`` — the
+    # SAME enthalpy factor the closure uses for ``zint`` and that the
+    # oracle uses for its surface-rain diagnostic
+    # (``rain = Σ dtdt·dp/(g·alpha_env)``).  Using the dry-constant
+    # ``c_pd/L_v`` here instead would be a ~0.5 % inconsistency with the
+    # scheme's own ``alpha_env`` (Codex review-1 finding #3).  Only the
+    # positive (condensation) part makes cloud water; non-negative by
+    # construction.
+    cond_signed = dT_dt / alpha_env
     dq_c_conv_dt = jnp.maximum(cond_signed, 0.0)
 
     # --- Preserve q_v >= 0 over one forward-Euler step ---
@@ -476,6 +505,14 @@ def kuo_convection(
     # closure stays internally proportional (heating and moistening drop
     # together), rather than clipping moisture alone and orphaning the
     # latent heat.
+    #
+    # This is a POSITIVITY LIMITER, not part of faithful Kuo.  It departs
+    # from the exact oracle closure ONLY on the (rare) step where a level
+    # would otherwise go negative — i.e. ``col_scale < 1`` — and then by a
+    # uniform column factor that preserves the heating/moistening ratio.
+    # In the oracle test case and the full 60-day RCE it does NOT bind
+    # (``col_scale == 1``); the faithful tendencies are passed through
+    # unchanged there (Codex review-1 finding #4).
     # Per level the available vapor over the step is ``q_v`` (kg/kg) and
     # the demanded drying is ``-dt·min(dq_v_dt, 0) >= 0``.  The column
     # must be scaled by ``s = min(1, min_k avail_k / demand_k)`` so the
