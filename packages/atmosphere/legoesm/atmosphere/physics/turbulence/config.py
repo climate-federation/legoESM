@@ -305,7 +305,13 @@ class HoltslagBovilleConfig(NamedTuple):
     pbl_crossing_sharpness : float
         Sigmoid sharpness [1/Ri] selecting the lowest Ri_crit crossing in
         the smooth PBL-height diagnostic (replaces the oracle's hard
-        first-crossing scan).
+        first-crossing scan).  RESIDUAL-GAP NOTE: a crossing whose upper
+        level sits exactly ON ``ricr`` (rino_hi == ricr) gets ~0.5 weight
+        rather than 1 -- the unavoidable price of a differentiable
+        approximation to the oracle's hard step.  For real columns rino
+        jumps by O(1) across the crossing so the weight is ~1 and the match
+        is exact; raise this sharpness to shrink the on-threshold residual
+        at the cost of a steeper gradient (default 100).
     sfc_blend_sharpness : float
         Sigmoid sharpness [1/(z/h)] for the surface-layer vs outer-layer
         blend at ``zh=sffrac`` (replaces oracle hard switch).
@@ -323,8 +329,12 @@ class HoltslagBovilleConfig(NamedTuple):
     unstable_kbfs_threshold : float
         Positive offset [m^2/s^3] biasing the unstable indicator so exactly
         neutral kbfs=0 maps to the STABLE branch (oracle ``unstbl = kbfs >
-        0`` is a strict inequality; default 1e-4 ~ 0.1 W/m^2 of buoyancy
-        flux).
+        0`` is a strict inequality).  Default 1e-6 (~ 1e-3 W/m^2 of buoyancy
+        flux).  Paired with ``unstable_blend_sharpness=1e7`` this gives
+        ``s*threshold = 10``, so kbfs=0 -> sigmoid(-10) ~ 5e-5 (firmly
+        stable) while any kbfs >= 2e-6 (~ 2e-3 W/m^2, negligible) ->
+        sigmoid(+10) ~ 1 (unstable) -- as close to the oracle strict ``> 0``
+        as a smooth-everywhere indicator allows.
     arg_floor : float
         Smooth floor on the ``(1-beta*zl)`` MO arguments so the cube-root
         / sqrt stay real and their gradients finite (default 0.01).
@@ -350,12 +360,12 @@ class HoltslagBovilleConfig(NamedTuple):
     free_ri_stable_c1: float = 10.0
     free_ri_stable_c2: float = 8.0
     # --- smooth-blend sharpnesses (replace oracle hard switches) ---
-    pbl_crossing_sharpness: float = 40.0
+    pbl_crossing_sharpness: float = 100.0
     sfc_blend_sharpness: float = 80.0
     cgs_gate_sharpness: float = 400.0
     stable_blend_sharpness: float = 20.0
-    unstable_blend_sharpness: float = 1.0e6
-    unstable_kbfs_threshold: float = 1.0e-5
+    unstable_blend_sharpness: float = 1.0e7
+    unstable_kbfs_threshold: float = 1.0e-6
     arg_floor: float = 0.01
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
