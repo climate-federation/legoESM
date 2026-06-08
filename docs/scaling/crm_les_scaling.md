@@ -115,10 +115,44 @@ LES single-GPU runs + scales in fp32 (production) and fp64. The one remaining
 LES-MPI gap (distributed FFT) is a large, separate effort, bandwidth-bound on a
 single socket anyway.
 
-## Backlog
+## Iteration 5 (2026-06-08): CRM N256 GPU degradation = L2-fit, not thermal
 
-1. **NEXT (iter 5)**: CRM N256 fp32 GPU degradation profile (70%→48% HBM). Then
-   batch the REMAINING CRM reductions — `compute_total_water_
+Thermal-controlled A/B (N128 measured before AND after the hot N256 run):
+
+| nx  | cells   | step ms | Mc/s | HBM % |
+|-----|--------:|--------:|-----:|------:|
+| 128 | 491 520 | 3.65 | 134.6 | 58 |
+| 192 | 1 105 920 | 8.64 | 127.9 | 55 |
+| 256 | 1 966 080 | 20.91 | 94.0 | 40 |
+| 128 (again) | 491 520 | 3.59 | **136.9** | 59 |
+
+N128 fully RECOVERS after the hot N256 run (134.6→136.9) ⇒ the N256 drop is **not
+thermal throttling** but a **real size effect**: the smooth 58→55→40 % HBM decline
+is the L2-cache-fit-loss curve — the working set spills the GPU L2 as the domain
+grows. Fixing needs horizontal **tiling/blocking** of the dycore kernel (deep
+work); impact is modest (still 40 % HBM at ~2 M cells). LEVER, low priority.
+
+## Campaign status (CRM + LES, this host)
+
+Both precisions scale well at the achievable scope (the user requirement):
+- **CRM**: MPI weak-scales fp32 (184 ms) + fp64 (254 ms) — flat; reduce overhead
+  cut ~44 % then folded to one allreduce/step; GPU fp32 near-roofline (58–70 %
+  HBM); fp64 GPU is the consumer 1/64 compute wall.
+- **LES**: single-GPU fp32 (27.7→41 Mc/s, production) + fp64 (≈9 Mc/s); stable.
+
+Remaining gaps are large or hardware-bound (same as the global campaign):
+- **LES MPI = distributed FFT** (spectral pressure projection + sharp-spectral
+  LASD test filter) — large, separate effort; bandwidth-bound on a single socket.
+- **CRM N256 L2 spill** — needs kernel tiling; modest gain.
+- **fp64 on consumer GPU** — 1/64 hardware wall; not a code issue.
+- **CPU MPI strong scaling** — single-socket memory-bandwidth-bound (global
+  campaign's finding); needs multiple sockets/nodes.
+
+## Backlog (deferred / large)
+
+1. LES distributed FFT for MPI (the LASD/spectral-pressure blocker).
+2. CRM dycore kernel tiling for L2-fit at large domains.
+3. (done) batch CRM per-step reductions — `compute_total_water_
    mass_plane_mpi` is a separate allreduce; ideally batch it together with the
    mean-wind reduction (one allreduce/step) in the production CRM step. Re-measure.
 2. LES dynamic-SGS (LASD) MPI = distributed FFT (the test filter is a sharp
