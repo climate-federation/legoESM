@@ -409,6 +409,14 @@ artifact of an OPEN budget; now E−P closes the SURFACE flux, so τ=60 should h
 provides convection preconditioning, not the restoring). TEST: `mpas_ico6_5yr_s60full` (8437538) = definitive
 + τ=60 → expect good SSS AND AMOC ~17.7. (ice-albedo SST result is independent + still the primary fix.)
 
+### iter-C BASELINE 5-yr E−P result (8432819, mpas_ico6_5yr_emp, τ=365, no ice, no saltnorm)
+E−P validated on the DYNAMICS: **AMOC@26N 24.5 Sv** (NEMO 17.7; developed STRONGLY, no collapse — vs the
+pre-E−P τ=60's 5.7), **ACC@Drake 135.8 Sv** (spot-on obs ~137), SST RMSE 1.98/corr 0.982 (Antarctic +2.0,
+no ice-albedo). **SSS RMSE 5.14 bias −2.49 (BAD)** = the τ=365 surface drift. So E−P+weak-restoring →
+good AMOC/ACC/SST, bad SSS → confirms SSS lever = restoring τ (τ=60 test in flight 8437538). AMOC 24.5 is a
++40% overshoot vs NEMO; τ=60 (WOA-pinned SSS) may moderate it. ⚠️ **MHT NH peak 4.99 PW = UNPHYSICAL**
+(obs ~1.2 PW) — likely a units/scaling BUG in the MHT diagnostic (commit 563ff8b9); FLAG for review.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
