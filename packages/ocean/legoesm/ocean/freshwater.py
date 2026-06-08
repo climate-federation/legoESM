@@ -194,12 +194,43 @@ def normalize_freshwater_net(
     ``apply_freshwater_virtual_salt_top`` uses ``mask * (h_top > 1e-3)``.
 
     NOTE: single-device local ``jnp.sum`` (matching the eta normalization in
-    ``ocean_model_mpas.step``).  An MPI-sharded run would need ``global_sum_mpi``
-    over both numerator and denominator -- a shared pre-existing caveat.
+    ``ocean_model_mpas.step``); correct for the single-GPU OMIP runs.  An
+    MPI-sharded run needs the TRUE global mean over OWNED cells only -- a plain
+    ``ocean_global_sum`` allreduce would DOUBLE-COUNT MPAS Voronoi halo cells
+    (codex), so the proper fix threads an ``owned_mask`` (cf. ``conservation_mpas``)
+    through both this helper and the eta path.  Deferred (no MPI-sharded OMIP runs
+    yet); the local sum is exact on one rank.
     """
     w = area * mask
     F_mean = jnp.sum(F_fw * w) / jnp.maximum(jnp.sum(w), 1.0e-10)
     return F_fw - F_mean * mask
+
+
+def normalized_virtual_salt_flux(
+    freshwater,
+    S_ref: float,
+    h_top: jnp.ndarray,
+    rho_0: float,
+    area: jnp.ndarray,
+    mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Top-layer virtual-salt tendency [PSU/s] with GLOBAL-SALT conservation.
+
+    Shared by the MPAS (``apply_freshwater_virtual_salt_top``) and lat-lon cores
+    so the OMIP global-freshwater correction is implemented ONCE.  Removes the
+    area-mean of the PHYSICAL freshwater (P-E+R+ice -- NOT the ``restoring``
+    channel, a local relaxation that must not be globally redistributed) over the
+    EFFECTIVE WET mask (cells the salt flux actually touches; the closure zeroes
+    ``h_top<=1mm``) so the mean removal exactly matches the applied flux.  The
+    (un-normalized) restoring channel is re-added.
+    """
+    F_phys = (freshwater.precip - freshwater.evap
+              + freshwater.runoff + freshwater.ice_fw)
+    wet = mask * (h_top > 1.0e-3).astype(mask.dtype)
+    F_phys = normalize_freshwater_net(F_phys, area, wet)
+    restoring = getattr(freshwater, "restoring", None)
+    F_fw = F_phys if restoring is None else (F_phys + restoring)
+    return virtual_salt_flux_from_net(F_fw, S_ref, h_top, rho_0)
 
 
 def salt_flux_salinity_tendency(salt_flux, dz_0, rho_0: float):

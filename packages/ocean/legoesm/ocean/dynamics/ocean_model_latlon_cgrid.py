@@ -1603,9 +1603,19 @@ class LatLonCGridOceanModel:
         # flux remains here, applied to the top layer of S.
         if freshwater is not None and self.config.freshwater_closure != "none":
             dz_0 = h_k_new[..., 0]
-            dS_fw = virtual_salt_flux(
-                freshwater, S_ref=self.config.S_ref, dz_0=dz_0, rho_0=self.config.rho_0,
-            )
+            if getattr(self.config, "normalize_freshwater", False):
+                # Global-salt-conserving virtual salt: remove the area-mean of the
+                # net freshwater (the OMIP correction) so an unbalanced ∮(P-E+R)
+                # does not drift mean salinity.  Shared with the MPAS path.
+                from legoesm.ocean.freshwater import normalized_virtual_salt_flux
+                dS_fw = normalized_virtual_salt_flux(
+                    freshwater, self.config.S_ref, dz_0, self.config.rho_0,
+                    self.grid.area, mask,
+                )
+            else:
+                dS_fw = virtual_salt_flux(
+                    freshwater, S_ref=self.config.S_ref, dz_0=dz_0, rho_0=self.config.rho_0,
+                )
             # Cast the freshwater contribution to S's dtype so the
             # scatter add does not silently widen on x64 mode (the
             # freshwater struct is built at JAX-default precision in

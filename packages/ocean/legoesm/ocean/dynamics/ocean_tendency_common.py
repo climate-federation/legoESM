@@ -41,9 +41,7 @@ import jax.numpy as jnp
 from legoesm.ocean.eos import compute_hydrostatic_pressure
 from legoesm.ocean.freshwater import (
     virtual_salt_flux,
-    virtual_salt_flux_from_net,
-    net_freshwater_flux,
-    normalize_freshwater_net,
+    normalized_virtual_salt_flux,
 )
 
 
@@ -379,21 +377,8 @@ def apply_freshwater_virtual_salt_top(
         if area is None:
             raise ValueError(
                 "apply_freshwater_virtual_salt_top: normalize=True requires `area`")
-        # Normalize only the PHYSICAL freshwater (P - E + R + ice), NOT the
-        # ``restoring`` channel: SSS restoring is a LOCAL relaxation that must not
-        # be globally redistributed (codex).  Re-add it un-normalized below.
-        F_phys = (freshwater.precip - freshwater.evap
-                  + freshwater.runoff + freshwater.ice_fw)
-        # Remove the area-mean over the EFFECTIVE WET mask (the cells the salt
-        # flux actually touches -- ``virtual_salt_flux_from_net`` zeroes
-        # dz_0<=1mm), so the mean removal EXACTLY matches the applied flux and the
-        # global salt is conserved even with thin coastal partial-top cells (codex
-        # HIGH).
-        wet = mask * (h_top > 1.0e-3).astype(mask.dtype)
-        F_phys = normalize_freshwater_net(F_phys, area, wet)
-        restoring = getattr(freshwater, "restoring", None)
-        F_fw = F_phys if restoring is None else (F_phys + restoring)
-        dS_top = virtual_salt_flux_from_net(F_fw, S_ref, h_top, rho_0)
+        dS_top = normalized_virtual_salt_flux(
+            freshwater, S_ref, h_top, rho_0, area, mask)
     else:
         dS_top = virtual_salt_flux(freshwater, S_ref, h_top, rho_0)
     # Cast the freshwater contribution to dS_dt's dtype so the scatter
