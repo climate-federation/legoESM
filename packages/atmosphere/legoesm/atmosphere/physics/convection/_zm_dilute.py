@@ -389,9 +389,20 @@ def dilute_parcel_cape(
     p_env_r2 = jnp.moveaxis(p_full[:, ::-1].astype(_dtype), 1, 0)
     T_mix_r2 = jnp.moveaxis(T_mix[:, ::-1], 1, 0)
     qs_mix_r2 = jnp.moveaxis(qs_mix[:, ::-1], 1, 0)
-    above_r2 = jnp.moveaxis(above_launch[:, ::-1].astype(_dtype), 1, 0)
+    # The oracle runs the precipitation/freezing loop ONLY for k < klaunch
+    # and initialises the launch level separately (tp(mx)=tmix(mx),
+    # qstp(mx)=q(mx)).  Use a STRICTLY-above-launch mask (excludes the
+    # launch level) for the latent-heat loop so it does not modify the
+    # launch parcel (Codex round-2 #3).  ``strict_above[k] ≈ 1`` for
+    # ``index < k_launch`` (higher altitude) and ≈ 0 at/below launch.
+    strict_above_launch = jax.nn.sigmoid(
+        4.0 * (k_launch_smooth[:, None] - 0.5 - levels[None, :])
+    )
+    strict_r2 = jnp.moveaxis(strict_above_launch[:, ::-1].astype(_dtype), 1, 0)
+    # Environmental q at the launch (for the launch-level qstp init).
+    q_env_r2 = jnp.moveaxis(q_v_env[:, ::-1].astype(_dtype), 1, 0)
 
-    lheat_inputs = (s_mix_r2, qt_mix_r2, p_env_r2, above_r2)
+    lheat_inputs = (s_mix_r2, qt_mix_r2, p_env_r2, strict_r2, q_env_r2)
 
     init_lheat = (
         jnp.zeros((ncol,), _dtype),   # xsh2o_prev
@@ -403,9 +414,15 @@ def dilute_parcel_cape(
 
     def lheat_step(carry, lin):
         xsh2o_prev, dsx_prev, dsf_prev, T_mix_p, qs_mix_p = carry
-        s_m, qt_m, p_e, abv = lin
+        s_m, qt_m, p_e, sabv, q_e = lin
 
-        # Two fixed iterations (oracle nit_lheat=2).
+        # ``sabv`` ≈ 1 STRICTLY above launch (the lheat loop region), ≈ 0
+        # at/below launch.  The launch level uses the oracle init
+        # (tp=tmix, qstp=q_env) and is excluded from the loop.
+
+        # Two fixed iterations (oracle nit_lheat=2) — computed everywhere;
+        # the ``sabv`` blend below restricts the modification to the
+        # strictly-above-launch region.
         T_mix_k = T_mix_p
         qs_mix_k = saturation_mixing_ratio(T_mix_k, p_e)
         new_q = qt_m
@@ -445,21 +462,32 @@ def dilute_parcel_cape(
             T_mix_k = _invert_entropy(new_s, p_e, new_q, T_mix_k)
             qs_mix_k = saturation_mixing_ratio(T_mix_k, p_e)
 
-        # Gate the latent-heat accumulation to levels AT/ABOVE the launch
-        # (oracle applies the loop only for ``k < klaunch`` and initialises
-        # the launch level separately — Codex review #4).  Below launch the
-        # parcel does not exist; carry the unmodified pre-launch state so
-        # ``xsh2o``/``dsx``/``dsf`` start fresh at the launch level.
-        xsh2o_k = abv * xsh2o_k + (1.0 - abv) * xsh2o_prev
-        dsx_k = abv * dsx_k + (1.0 - abv) * dsx_prev
-        dsf_k = abv * dsf_k + (1.0 - abv) * dsf_prev
-        new_q = abv * new_q + (1.0 - abv) * qt_m
-        T_mix_k = abv * T_mix_k + (1.0 - abv) * T_mix_p
+        # Restrict the latent-heat modification to STRICTLY above launch
+        # (oracle loops only ``k < klaunch``; the launch level and below are
+        # untouched — Codex round-2 #3).  Below launch AND at the launch
+        # level, the rainout/freezing accumulators carry the unmodified
+        # pre-launch state, and:
+        #   * the launch level outputs Tp = the entrained T_mix (no lheat)
+        #     and qstp = environmental launch q (oracle qstp(mx)=q(mx));
+        #   * below launch the values are inert (masked out of CAPE).
+        # ``T_mix_p`` is the entrained-only parcel T at this level
+        # (carry-in is the pre-lheat T_mix), so the at/below-launch branch
+        # uses it directly.
+        xsh2o_k = sabv * xsh2o_k + (1.0 - sabv) * xsh2o_prev
+        dsx_k = sabv * dsx_k + (1.0 - sabv) * dsx_prev
+        dsf_k = sabv * dsf_k + (1.0 - sabv) * dsf_prev
+        # new_q: above launch = qt − xsh2o (rained-out); at/below = q_env
+        # (the oracle initialises qstp(mx)=q(mx), i.e. the launch vapor).
+        new_q = sabv * new_q + (1.0 - sabv) * q_e
+        # Tp: above launch = lheat-adjusted; at/below = entrained-only T_mix.
+        T_mix_k = sabv * T_mix_k + (1.0 - sabv) * T_mix_p
         qs_mix_k = saturation_mixing_ratio(T_mix_k, p_e)
 
-        # Retained vapor (qstp): qs if super-saturated else new_q.
+        # Retained vapor (qstp): above launch = qs if super-saturated else
+        # new_q; at/below launch = q_env (oracle qstp(mx)=q(mx)).
         supersat = jax.nn.sigmoid(1.0e4 * (new_q - qs_mix_k))
-        qstp = supersat * qs_mix_k + (1.0 - supersat) * new_q
+        qstp_above = supersat * qs_mix_k + (1.0 - supersat) * new_q
+        qstp = sabv * qstp_above + (1.0 - sabv) * q_e
 
         # Pin every carry slot to the input precision: the Python-float
         # physical constants (L_f, T_freeze, c_pw) promote intermediates to
@@ -523,19 +551,19 @@ def dilute_parcel_cape(
     # ascent goes from index nlev-1 (surface/launch) toward index 0
     # (top), so the upward-cumulative sum is a reverse cumsum.
     partial_up = jnp.cumsum(dB[:, ::-1], axis=-1)[:, ::-1]  # (ncol,nlev)
-    # CAPE = max over candidate tops of the launch->top partial sum,
-    # via a smooth (log-sum-exp) maximum so the answer is differentiable.
-    # The LSE over-estimates the hard max by at most ``ln(nlev)/β``; we
-    # subtract that bias analytically so the estimator is unbiased for a
-    # column whose partial sums are well-separated (the usual case — only
-    # the top layers near the LNB are close to the max).  ``β = 0.3``
-    # 1/(J/kg) keeps the residual smearing below ~5 J/kg while remaining
-    # smooth.
-    lse_beta = jnp.asarray(0.3, dtype=_dtype)  # 1/(J/kg)
-    nlev_f = jnp.asarray(float(nlev), dtype=_dtype)
-    cape = (
-        jax.nn.logsumexp(lse_beta * partial_up, axis=-1) - jnp.log(nlev_f)
-    ) / lse_beta
+    # CAPE = max over candidate tops of the launch->top partial sum.  Only
+    # a top where ``dB`` changes sign from + to − (a buoyancy crossing, the
+    # oracle ``lelten``) can be the strict maximum of the partial sums, so
+    # the running-max over ALL partials is mathematically identical to the
+    # oracle's max-over-crossing-tops — no extra candidates are admitted.
+    # Use a differentiable soft-argmax-WEIGHTED mean (``Σ xᵢ·softmax(β xᵢ)``)
+    # rather than ``logsumexp − ln(n)/β``: the soft-argmax form has NO
+    # ln(nlev) baseline and is unbiased to first order (→ hard max as
+    # β→∞), so it does not erase marginal CAPE (Codex round-2 #1).  ``β =
+    # 0.5`` 1/(J/kg) tracks the hard max to ≲ a few J/kg.
+    sm_beta = jnp.asarray(0.5, dtype=_dtype)  # 1/(J/kg)
+    sm_w = jax.nn.softmax(sm_beta * partial_up, axis=-1)
+    cape = jnp.sum(sm_w * partial_up, axis=-1)
     cape = jnp.maximum(cape, 0.0)
 
     # Re-apply the launch mask to the reported buoyancy diagnostic (kept
