@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import warnings
 from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -1086,6 +1087,11 @@ _RUNOFF_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/
               "INPUTS/orca1_inputs/data_repository/input_fields/"
               "runoff-icb_DaiTrenberth_Depoorter.nc")
 
+# NEMO ORCA1 RUN_REF sea-ice diagnostics (SI3): annual-mean `siconc` used as the
+# prescribed sea-ice concentration for the SW-albedo surrogate (--ice-albedo).
+_SICONC_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
+              "EXP00/RUN_REF/ORCA1_1y_20000101_20041231_icemod.nc")
+
 
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
                         land_mask=None, spread_passes=2):
@@ -1139,6 +1145,48 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     print(f"[setup] runoff: Dai-Trenberth (river+isf+icb) from {int(src_valid.sum())} "
           f"discharge cells, 12 months, {spread_passes} spread passes, "
           f"max {out.max():.2e} kg/m^2/s")
+    return out
+
+
+def load_nemo_siconc(grid, grid_type, lat2d_deg, lon2d_deg, siconc_file=None,
+                     land_mask=None):
+    """Load NEMO ORCA1 sea-ice concentration and IDW-regrid onto the model grid.
+
+    Returns siconc in [0,1], shape ``lat2d_deg.shape`` ((n_lat,n_lon) for
+    latlon/tripole; (nCells,) for MPAS; (6,n,n) for the cube), for the SW-albedo
+    surrogate (``--ice-albedo``).  The available file is an ANNUAL MEAN
+    (``ORCA1_1y_*icemod.nc``), so this is a time-INVARIANT climatology -- load
+    ONCE before the time loop.  LIMITATION: an annual mean over-ices the Antarctic
+    summer (when the SST warm bias is worst) and under-ices winter; a 12-month
+    icemod climatology (if sourced later) would refine this via the
+    ``load_runoff_monthly`` monthly pattern.  Regrids from ALL NEMO ocean cells
+    (incl. ice-free siconc=0) via the same curvilinear IDW used for runoff/bathy."""
+    import xarray as xr
+    ds = xr.open_dataset(siconc_file or _SICONC_NC, decode_times=False)
+    src_lat = _squeeze2d(ds["nav_lat"].values)
+    src_lon = _squeeze2d(ds["nav_lon"].values)
+    sic = np.asarray(ds["siconc"].values, dtype=np.float64)
+    if sic.ndim == 3:                          # (time, y, x) -> annual climatology
+        with warnings.catch_warnings():        # all-NaN land columns -> NaN (kept
+            warnings.simplefilter("ignore", RuntimeWarning)  # out via src_valid below)
+            sic = np.nanmean(sic, axis=0)
+    sic = _squeeze2d(sic)
+    # Source ocean mask = finite cells.  VERIFIED for this NEMO ORCA1 icemod file:
+    # land is written as _FillValue -> NaN (108k NaN cells; e.g. the Sahara cell is
+    # NaN), so finiteness IS the land/ocean discriminator and ice-free OPEN ocean
+    # (siconc=0, finite) is correctly retained as IDW source.  PORTABILITY caveat
+    # (codex): a NEMO build that writes finite land ZEROS instead would let land
+    # cells damp coastal/ice-edge siconc -- use an explicit ocean mask then.
+    src_valid = np.isfinite(sic)
+    sic = np.clip(np.nan_to_num(sic, nan=0.0), 0.0, 1.0)
+    out, _ = _regrid_curv_to_points(
+        sic, src_lat, src_lon, src_valid, lat2d_deg, lon2d_deg, k=4, max_deg=2.0)
+    out = np.clip(out, 0.0, 1.0)
+    if land_mask is not None:
+        out = np.where(np.asarray(land_mask) > 0.5, out, 0.0)
+    print(f"[setup] sea-ice albedo: NEMO siconc (annual) regridded onto {grid_type}, "
+          f"max {float(out.max()):.2f}, ice-covered (>0.15) cell frac "
+          f"{float((out > 0.15).mean()):.3f}")
     return out
 
 
@@ -1588,6 +1636,14 @@ def main() -> int:
                         "OMIP-2 salt-budget term; ON by default so the multi-year "
                         "salinity is faithful.  Use --no-emp only for ablation "
                         "(reproducing the pre-fix runoff-only fresh drift).")
+    p.add_argument("--ice-albedo", action="store_true",
+                   help="Apply a NEMO-siconc-weighted sea-ice + open-ocean SW "
+                        "albedo to the downwelling shortwave (closes the SH/Antarctic "
+                        "warm bias: the ocean previously absorbed ~100%% of SW with "
+                        "no albedo). Prescribed (annual NEMO siconc) -> feedback-safe.")
+    p.add_argument("--siconc-file", type=str, default=None,
+                   help="Override the NEMO sea-ice-concentration file for "
+                        "--ice-albedo (default = the ORCA1 RUN_REF annual icemod.nc).")
     p.add_argument("--sss-restore", action="store_true",
                    help="Apply OMIP-2 weak SSS restoring toward the WOA surface "
                         "salinity (the protocol NEMO ORCA1 uses) -> bounds the "
@@ -1935,6 +1991,15 @@ def main() -> int:
         runoff_monthly = load_runoff_monthly(
             grid, app_grid_type, lat2d, lon2d, args.mesh,
             land_mask=np.asarray(state.land_mask.data), spread_passes=_spread)
+    # Prescribed sea-ice-concentration field for the SW-albedo surrogate
+    # (--ice-albedo). Static annual climatology -> load ONCE here. Regridded onto
+    # the model grid (same shape as lat2d), passed to compute_omip2_surface_forcing
+    # every step (no per-step recompute).
+    siconc_clim = None
+    if args.ice_albedo:
+        siconc_clim = load_nemo_siconc(
+            grid, app_grid_type, lat2d, lon2d, siconc_file=args.siconc_file,
+            land_mask=np.asarray(state.land_mask.data))
     # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
     # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
     # would corrupt the comparison invisibly. --forcing-path (set via --config
@@ -2056,20 +2121,22 @@ def main() -> int:
                     "enabled (those need per-step host updates)")
         print(f"[scan] --scan-block ignored: {why}.", flush=True)
     if use_scan:
-        # The scan path applies NONE of the host-loop salinity forcing: P - E
-        # (precip is not in the on-device stack), Dai-Trenberth runoff, or SSS
-        # restoring.  Refuse rather than silently emit a quietly-fresh result if
+        # The scan path applies NONE of the host-loop surface forcing extensions:
+        # P - E (precip is not in the on-device stack), Dai-Trenberth runoff, SSS
+        # restoring, OR the --ice-albedo SW reduction (siconc not on device).
+        # Refuse rather than silently emit a quietly-fresh / no-albedo result if
         # ANY of those is requested.  P - E is ON by default, so the scan path is
-        # reachable only with --no-emp AND no --runoff/--sss-restore (a pure
-        # momentum/heat tripole perf run, issue #354).
-        if args.emp_freshwater or args.runoff or args.sss_restore:
+        # reachable only with --no-emp AND no --runoff/--sss-restore/--ice-albedo
+        # (a pure momentum/heat tripole perf run, issue #354).
+        if (args.emp_freshwater or args.runoff or args.sss_restore
+                or args.ice_albedo):
             raise SystemExit(
-                "[scan] --scan-block applies no surface salinity forcing "
-                "(P - E / runoff / SSS restoring are host-loop only), so it "
-                "cannot run a salinity-faithful integration.  Use the host Python "
-                "loop (omit --scan-block) for any salinity run, or drop "
-                "--runoff/--sss-restore and pass --no-emp for the momentum/heat-"
-                "only scan path.")
+                "[scan] --scan-block applies no surface salinity/albedo forcing "
+                "(P - E / runoff / SSS restoring / ice-albedo are host-loop only), "
+                "so it cannot run a faithful integration.  Use the host Python "
+                "loop (omit --scan-block), or drop "
+                "--runoff/--sss-restore/--ice-albedo and pass --no-emp for the "
+                "momentum/heat-only scan path.")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
@@ -2148,6 +2215,7 @@ def main() -> int:
         sf = compute_omip2_surface_forcing(
             state, forcing=forcing, idx_t=it,
             grid=grid, grid_type=app_grid_type,
+            ice_albedo=siconc_clim,
         )
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,

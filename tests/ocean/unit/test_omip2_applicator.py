@@ -441,3 +441,62 @@ def test_compute_omip2_freshwater_forcing_grid_routing(grid_type, res):
         assert np.isfinite(np.asarray(net_freshwater_flux(fw))).all()
     assert float(np.mean(np.asarray(net_freshwater_flux(fw_dry)))) < 0.0
     assert float(np.mean(np.asarray(net_freshwater_flux(fw_wet)))) > 0.0
+
+
+def _sw_forcing(*, sw=250.0, nlat=18, nlon=36):
+    """OceanForcing with uniform downwelling shortwave (isolates the SW albedo)."""
+    from legoesm.ocean.forcing.jra55_do import OceanForcing
+    f = lambda v: np.full((1, nlat, nlon), float(v))
+    return OceanForcing(
+        lon=np.linspace(0.0, 360.0, nlon, endpoint=False),
+        lat=np.linspace(-89.0, 89.0, nlat), time_s=np.array([0.0]),
+        u10=f(4.0), v10=f(0.0), T_air=f(288.0), q_air=f(0.010),
+        sw_down=f(sw), lw_down=f(0.0), precip=f(0.0), runoff=f(0.0))
+
+
+def test_ice_albedo_reduces_sw_and_q_net():
+    """``ice_albedo`` (prescribed siconc) reduces the returned sw_down AND q_net by
+    the effective albedo a_ocean*(1-siconc)+a_ice*siconc, applied ONCE.  Checks the
+    None=identity default, the siconc=0 (open-ocean 1-a_ocean) and siconc=1
+    (1-a_ice) limits, the 0<=sw_net<=sw_down bound, and that more ice -> less SW."""
+    from legoesm.ocean.coupler import compute_omip2_surface_forcing
+    from legoesm import constants
+    state, grid, z, _ = _rest_state_latlon()
+    forcing = _sw_forcing(sw=250.0)
+    shp = np.asarray(state.T.data)[..., 0].shape
+
+    sf_none = compute_omip2_surface_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon")
+    sw_full = np.asarray(sf_none.sw_down)
+    q_full = np.asarray(sf_none.q_net)
+    assert (sw_full > 0).any()
+
+    def sf(sic):
+        return compute_omip2_surface_forcing(
+            state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon",
+            ice_albedo=np.full(shp, float(sic)))
+    a_oc = float(constants.alpha_ocean_broadband)
+    a_ice = float(constants.alpha_ice_broadband_cold)
+
+    sf0, sf1, sfh = sf(0.0), sf(1.0), sf(0.5)
+    # siconc=0 -> open-ocean albedo: sw_net = (1-a_ocean)*sw_full.
+    assert np.allclose(np.asarray(sf0.sw_down), (1.0 - a_oc) * sw_full, rtol=1e-9)
+    # siconc=1 -> sea-ice albedo: sw_net = (1-a_ice)*sw_full.
+    assert np.allclose(np.asarray(sf1.sw_down), (1.0 - a_ice) * sw_full, rtol=1e-9)
+    # siconc=0.5 -> linear blend.
+    assert np.allclose(np.asarray(sfh.sw_down),
+                       (1.0 - 0.5 * (a_oc + a_ice)) * sw_full, rtol=1e-9)
+    # q_net drops by exactly the SW reduction (other terms unchanged).
+    assert np.allclose(np.asarray(sf1.q_net) - q_full,
+                       (1.0 - a_ice) * sw_full - sw_full, rtol=1e-9, atol=1e-9)
+    # More ice -> strictly less absorbed SW; bound 0 <= sw_net <= sw_full.
+    assert float(np.asarray(sf1.sw_down).mean()) < float(np.asarray(sf0.sw_down).mean())
+    for s in (sf0, sf1, sfh):
+        sn = np.asarray(s.sw_down)
+        assert (sn >= -1e-9).all() and (sn <= sw_full + 1e-9).all()
+    # None default = NO albedo: the returned sw_down is the sampled SW unchanged
+    # (compare to the directly-sampled forcing, not a literal -- the conservative
+    # regrid produces edge-cell partial values, e.g. a 125 at the grid boundary).
+    from legoesm.ocean.coupler.omip2_applicator import _sample_omip2_forcing
+    forc = _sample_omip2_forcing(forcing, 0, grid, "latlon")
+    assert np.allclose(sw_full, np.asarray(forc["sw_down"]), rtol=1e-12)

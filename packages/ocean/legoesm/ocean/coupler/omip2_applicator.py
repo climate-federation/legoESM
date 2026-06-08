@@ -582,9 +582,34 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
     )
 
 
+def _sw_albedo_factor(sw_down, ice_albedo):
+    """Reduce downwelling SW by the effective surface albedo.
+
+    ``albedo_eff = alpha_ocean*(1-siconc) + alpha_ice*siconc`` where ``siconc``
+    (= ``ice_albedo`` arg, the prescribed sea-ice concentration in [0,1]) weights
+    open-ocean vs sea-ice broadband albedo.  Returns ``sw_down*(1-albedo_eff)``.
+    ``ice_albedo=None`` -> unchanged ``sw_down`` (bit-exact default).  This is the
+    ONLY place SW albedo is applied; the cores' 0.94 penetration/surface split is
+    a vertical-distribution split (NOT an albedo) and is left untouched, so the
+    albedoed ``sw_net`` flows once into both ``q_net`` and the penetrating SW.
+    """
+    if ice_albedo is None:
+        return sw_down
+    a_oc = float(constants.alpha_ocean_broadband)
+    a_ice = float(constants.alpha_ice_broadband_cold)
+    # Defensive clip: the loader already returns siconc in [0,1], but guard the
+    # API contract (albedo_eff in [0,1], 0<=sw_net<=sw_down) against a NaN /
+    # out-of-range caller (codex) so a bad siconc can never amplify SW.
+    sic = np.clip(np.nan_to_num(np.asarray(ice_albedo, dtype=np.float64),
+                                nan=0.0), 0.0, 1.0)
+    albedo_eff = a_oc * (1.0 - sic) + a_ice * sic
+    return np.asarray(sw_down, dtype=np.float64) * (1.0 - albedo_eff)
+
+
 def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                                   grid, grid_type: str,
-                                  rho_air: float = constants.rho_air):
+                                  rho_air: float = constants.rho_air,
+                                  ice_albedo=None):
     """Build an :class:`OceanSurfaceForcing` (tau_x, tau_y, q_net, sw_down) on
     the model grid from CORE-II / JRA55 forcing, for INTEGRATION INSIDE
     ``model.step(state, dt, surface_forcing=...)`` -- the dynamics-core
@@ -600,6 +625,12 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     * ``q_net`` is the TOTAL net surface heat flux into the ocean (turbulent +
       longwave + shortwave); the core subtracts the penetrating ``sw_down`` and
       distributes it over depth.
+
+    ``ice_albedo`` (optional, shape of the model surface field): prescribed
+    sea-ice concentration in [0,1].  When given, the downwelling SW is reduced by
+    the effective open-ocean/sea-ice albedo (see :func:`_sw_albedo_factor`) in
+    BOTH ``q_net`` and the returned ``sw_down`` -> closes the Southern-Ocean warm
+    bias (no surface albedo was applied before).  ``None`` is bit-exact default.
 
     Supports the lat-lon C-grid family (``latlon`` / ``latlon_regional`` via
     conservative regrid; ``tripole`` via nearest-neighbour on the 2-D T grid).
@@ -623,8 +654,9 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
         rho_air=jnp.asarray(rho_air),
     )
     lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
+    sw_net = _sw_albedo_factor(forc["sw_down"], ice_albedo)
     q_net = (np.asarray(sh) + np.asarray(lh)
-             + forc["lw_down"] - lw_up + forc["sw_down"])
+             + forc["lw_down"] - lw_up + sw_net)
     # NOTE: the surface freshwater flux P - E is NOT returned here.  It is built
     # by :func:`compute_omip2_freshwater_forcing` and delivered to the ocean via
     # the in-core ``model.step(..., freshwater=FreshwaterForcing)`` channel (which
@@ -636,7 +668,7 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
         tau_x=jnp.asarray(np.asarray(tau_x)),
         tau_y=jnp.asarray(np.asarray(tau_y)),
         q_net=jnp.asarray(q_net),
-        sw_down=jnp.asarray(forc["sw_down"]),
+        sw_down=jnp.asarray(np.asarray(sw_net)),
     )
 
 

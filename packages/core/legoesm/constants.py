@@ -119,6 +119,17 @@ alpha_pond_max_nir = 0.07       # Deep melt pond, near-IR band
 i0_vis = 0.70                   # Fraction of incident VIS that penetrates bare ice
 i0_nir = 0.0                    # NIR has negligible penetration
 
+# Broadband (VIS+NIR integrated) surface shortwave albedos for the coarse OMIP
+# ocean-only SW-reduction surrogate (no spectral split): the effective albedo at
+# a cell is alpha_ocean_broadband*(1-siconc) + alpha_ice_broadband_cold*siconc,
+# with siconc the prescribed sea-ice concentration.  The open-ocean value is the
+# broadband reflectance that was previously MISSING (the ocean absorbed 100% of
+# downwelling SW); the sea-ice value is the snow-free-to-snow broadband mean
+# (CICE6 / Briegleb-Light, ~mean of the cold VIS/NIR ice+snow albedos above).
+alpha_ocean_broadband = 0.06        # [-] open-ocean broadband albedo
+alpha_ice_broadband_cold = 0.65     # [-] cold (snow-covered) sea-ice broadband
+alpha_ice_broadband_warm = 0.45     # [-] melting sea-ice broadband (phase-2 blend)
+
 # ==============================================================================
 # Molecular Weights (kg/mol)
 # ==============================================================================
