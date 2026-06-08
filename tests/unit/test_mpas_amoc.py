@@ -11,6 +11,7 @@ from legoesm.ocean.spinup import (
     atlantic_basin_mask_mpas,
     compute_amoc_from_state_mpas,
     compute_acc_from_state_mpas,
+    compute_mht_from_state_mpas,
 )
 from legoesm.ocean.coupler.sss_apply import (
     apply_sss_restoring_step_mpas,
@@ -350,6 +351,57 @@ class TestComputeACCFromStateMPAS:
         h = np.zeros((mesh.nCells, 6))
         with pytest.raises(ValueError):
             compute_acc_from_state_mpas(u, h, mesh)
+
+
+# ==============================================================================
+# MPAS MHT (global meridional heat transport)
+# ==============================================================================
+
+class TestComputeMHTFromStateMPAS:
+
+    def test_northward_warm_positive(self):
+        mesh = _FakeMesh()                 # edges at 22.5/27.5/32.5 N (all NH)
+        nlev = 4
+        u = np.full((mesh.nEdges, nlev), 0.05)        # northward (angle=pi/2)
+        th = np.full((mesh.nCells, nlev), 10.0)       # 10 degC
+        h = np.full((mesh.nCells, nlev), 200.0)
+        r = compute_mht_from_state_mpas(u, th, h, mesh)
+        assert r["nh_peak_PW"] > 0.0
+        assert r["nh_peak_lat"] > 0.0
+
+    def test_sign_flips(self):
+        mesh = _FakeMesh()
+        nlev = 4
+        th = np.full((mesh.nCells, nlev), 10.0)
+        h = np.full((mesh.nCells, nlev), 200.0)
+        north = compute_mht_from_state_mpas(
+            np.full((mesh.nEdges, nlev), 0.05), th, h, mesh)
+        south = compute_mht_from_state_mpas(
+            np.full((mesh.nEdges, nlev), -0.05), th, h, mesh)
+        # _FakeMesh edges are all NH; northward warm -> NH +, southward -> NH -.
+        # (Empty lat bins pad with 0, so compare north vs south rather than
+        # asserting south's absolute sign at the padded peak.)
+        assert north["nh_peak_PW"] > 0.0
+        assert north["nh_peak_PW"] > south["nh_peak_PW"]
+        # the flow latitudes (22-33 N) carry the negative southward transport:
+        assert float(np.min(south["mht_PW"])) < 0.0
+
+    def test_zero_velocity_zero(self):
+        mesh = _FakeMesh()
+        nlev = 4
+        r = compute_mht_from_state_mpas(
+            np.zeros((mesh.nEdges, nlev)),
+            np.full((mesh.nCells, nlev), 10.0),
+            np.full((mesh.nCells, nlev), 200.0), mesh)
+        assert abs(r["nh_peak_PW"]) < 1e-12
+
+    def test_level_mismatch_raises(self):
+        mesh = _FakeMesh()
+        with pytest.raises(ValueError):
+            compute_mht_from_state_mpas(
+                np.zeros((mesh.nEdges, 4)),
+                np.zeros((mesh.nCells, 6)),
+                np.zeros((mesh.nCells, 4)), mesh)
 
 
 # ==============================================================================

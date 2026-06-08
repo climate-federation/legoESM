@@ -28,6 +28,57 @@ import numpy as np
 from legoesm import constants
 
 
+def _v_face_geometry(v, h_partial, mask, grid):
+    """Shared v-face geometry for the meridional diagnostics (MOC + MHT).
+
+    Returns ``(dx_v, h_v, v_mask, lat_v)`` for v-faces of shape ``(n_lat+1, ...)``:
+      * ``dx_v``  : zonal face width [m], shape ``(n_lat+1, n_lon)`` (tripole, from
+        ``grid.dx_v``) or ``(n_lat+1, 1)`` (regular ``R·dlon·cos(lat_v)``).
+      * ``h_v``   : centred v-face thickness [m], ``(n_lat+1, n_lon, nlev)`` (pole
+        rows zero — no flux across the cap).
+      * ``v_mask``: ``(n_lat+1, n_lon, 1)`` = ``mask[j-1]·mask[j]`` (poles zero).
+      * ``lat_v`` : v-face latitudes [rad], ``(n_lat+1,)``.
+    Factored out so ``moc_streamfunction`` and ``meridional_heat_transport`` share
+    one geometry (no duplicated v-face metric code).
+    """
+    n_lat_v, n_lon, _ = v.shape  # n_lat_v = n_lat + 1
+    R = getattr(grid, "radius", constants.R_earth)
+    lat_v = getattr(grid, "lat_v", None)
+    if lat_v is None:
+        grid_lat = getattr(grid, "lat", None)
+        grid_dlat = getattr(grid, "dlat", None)
+        if grid_lat is not None and grid_dlat is not None:
+            lat_v = np.concatenate([
+                [grid_lat[0] - 0.5 * grid_dlat],
+                grid_lat + 0.5 * grid_dlat,
+            ])
+        else:
+            lat_v = np.linspace(-np.pi / 2, np.pi / 2, n_lat_v)
+    lat_v = np.asarray(lat_v)
+    cos_lat_v = np.cos(lat_v)
+    # Longitudinal spacing: prefer ``grid.dlon``; tripole sets ``dlon=0`` sentinel
+    # and exposes the per-v-face physical width ``grid.dx_v`` [m] (curvilinear).
+    dlon = getattr(grid, "dlon", 2.0 * np.pi / n_lon)
+    dx_v_metric = getattr(grid, "dx_v", None)
+    if (not dlon) and dx_v_metric is not None and np.asarray(dx_v_metric).size > 1:
+        dx_v = np.asarray(dx_v_metric)
+        if dx_v.ndim == 1:
+            dx_v = dx_v[:, None]
+    else:
+        if not dlon:
+            dlon = 2.0 * np.pi / n_lon
+        dx_v = R * dlon * cos_lat_v[:, None]
+
+    h_v = np.zeros_like(v)
+    h_v[1:-1] = 0.5 * (h_partial[:-1] + h_partial[1:])
+
+    v_mask = np.zeros((n_lat_v, n_lon))
+    if n_lat_v >= 2:
+        v_mask[1:-1] = mask[:-1] * mask[1:]
+    v_mask = v_mask[:, :, None]
+    return dx_v, h_v, v_mask, lat_v
+
+
 def moc_streamfunction(v, h_partial, eta, H_bathy, mask, grid):
     """Eulerian-mean meridional overturning streamfunction [Sv].
 
@@ -59,50 +110,7 @@ def moc_streamfunction(v, h_partial, eta, H_bathy, mask, grid):
     psi : ndarray, shape (n_lat+1, nlev) [Sv]
     """
     del eta, H_bathy  # accepted for API symmetry
-    n_lat_v, n_lon, _ = v.shape  # n_lat_v = n_lat + 1
-    R = getattr(grid, "radius", constants.R_earth)
-    # Derive v-face latitudes from grid metadata when available so
-    # regional grids get the correct zonal face lengths.  Falls back
-    # to the legacy global ``linspace(-π/2, π/2)`` only when the
-    # grid object does not expose ``lat_v`` / ``lat`` / ``dlat``.
-    # Codex iter-36 #1.
-    lat_v = getattr(grid, "lat_v", None)
-    if lat_v is None:
-        grid_lat = getattr(grid, "lat", None)
-        grid_dlat = getattr(grid, "dlat", None)
-        if grid_lat is not None and grid_dlat is not None:
-            # Cell centres + half-cell offset → v-face latitudes.
-            lat_v = np.concatenate([
-                [grid_lat[0] - 0.5 * grid_dlat],
-                grid_lat + 0.5 * grid_dlat,
-            ])
-        else:
-            lat_v = np.linspace(-np.pi / 2, np.pi / 2, n_lat_v)
-    cos_lat_v = np.cos(np.asarray(lat_v))
-    # Longitudinal spacing: prefer ``grid.dlon`` (correct on regional grids);
-    # fall back to the global 2π/n_lon.  TRIPOLE sets ``dlon = 0.0`` as a
-    # sentinel and instead exposes the per-v-face physical width ``grid.dx_v``
-    # [m] (curvilinear) — use it so tripole AMOC is not identically zero.  The
-    # regular lat-lon / test path (dlon != 0) is bit-unchanged.
-    dlon = getattr(grid, "dlon", 2.0 * np.pi / n_lon)
-    dx_v_metric = getattr(grid, "dx_v", None)
-    if (not dlon) and dx_v_metric is not None and np.asarray(dx_v_metric).size > 1:
-        dx_v = np.asarray(dx_v_metric)                         # (n_lat+1, n_lon) [m]
-        if dx_v.ndim == 1:
-            dx_v = dx_v[:, None]
-    else:
-        if not dlon:
-            dlon = 2.0 * np.pi / n_lon
-        dx_v = R * dlon * cos_lat_v[:, None]                   # (n_lat+1, 1)
-
-    h_v = np.zeros_like(v)                                      # (n_lat+1, n_lon, nlev)
-    h_v[1:-1] = 0.5 * (h_partial[:-1] + h_partial[1:])
-    # Pole rows stay zero — no flux across the polar cap.
-
-    v_mask = np.zeros((n_lat_v, n_lon))
-    if n_lat_v >= 2:
-        v_mask[1:-1] = mask[:-1] * mask[1:]
-    v_mask = v_mask[:, :, None]                                  # (n_lat+1, n_lon, 1)
+    dx_v, h_v, v_mask, _ = _v_face_geometry(v, h_partial, mask, grid)
 
     Vh = (v * h_v * v_mask) * dx_v[:, :, None]                   # (n_lat+1, n_lon, nlev)
     V_zonal = Vh.sum(axis=1)                                     # (n_lat+1, nlev)
@@ -112,6 +120,41 @@ def moc_streamfunction(v, h_partial, eta, H_bathy, mask, grid):
     # downward gives the cumulative transport above each level.
     psi = -np.cumsum(V_zonal, axis=1) / 1.0e6                    # m^3/s → Sv
     return psi
+
+
+def meridional_heat_transport(v, theta, h_partial, mask, grid,
+                              *, rho0=constants.rho_ocean, cp=constants.c_sw):
+    """Global meridional ocean heat transport MHT(lat) [PW] on a C-grid.
+
+    MHT(j) = ρ0·cp · Σ_x Σ_z v · θ_v · h_v · dx_v   [W]   (θ_v in degC at v-faces)
+
+    Reuses the shared v-face geometry (:func:`_v_face_geometry`); θ is averaged
+    from cell centres onto the v-faces.  The full zonal integral at a latitude has
+    ~zero net mass flux, so degC is the conventional (reference-independent)
+    choice — matching the offline NEMO reader ``nemo_transports.mht_core``.
+
+    Parameters
+    ----------
+    v : ndarray ``(n_lat+1, n_lon, nlev)`` — meridional velocity at v-faces [m/s].
+    theta : ndarray ``(n_lat, n_lon, nlev)`` — potential temperature [degC].
+    h_partial, mask, grid : as in :func:`moc_streamfunction`.
+    rho0, cp : reference seawater density / heat capacity (default
+        ``constants.rho_ocean`` / ``constants.c_sw``).
+
+    Returns
+    -------
+    mht_PW : ndarray ``(n_lat+1,)`` — MHT at each v-row [PW].
+    lat_v_deg : ndarray ``(n_lat+1,)`` — v-face latitudes [°].
+    """
+    dx_v, h_v, v_mask, lat_v = _v_face_geometry(v, h_partial, mask, grid)
+    theta_v = np.zeros_like(v)
+    theta_v[1:-1] = 0.5 * (theta[:-1] + theta[1:])              # cells -> v-faces
+    Hf = (rho0 * cp) * (v * h_v * v_mask * theta_v) * dx_v[:, :, None]
+    # A masked-land NaN tracer would poison a whole row (0*NaN=NaN after v_mask);
+    # zero non-finite contributions so one land cell can't NaN the MHT curve.
+    Hf = np.nan_to_num(Hf, nan=0.0, posinf=0.0, neginf=0.0)
+    mht_W = Hf.sum(axis=(1, 2))                                 # (n_lat+1,) [W]
+    return mht_W / 1.0e15, np.degrees(lat_v)
 
 
 def barotropic_streamfunction(u, h_partial, mask, grid):

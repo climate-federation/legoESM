@@ -27,7 +27,10 @@ import argparse
 
 import numpy as np
 
-_SV = 1.0e6  # m^3/s per Sverdrup
+_SV = 1.0e6   # m^3/s per Sverdrup
+_PW = 1.0e15  # W per Petawatt
+_RHO0 = 1025.0  # reference seawater density [kg/m^3]  (legoesm.constants.rho_ocean)
+_CP = 3994.0    # specific heat of seawater [J/(kg*K)] (legoesm.constants.c_sw)
 
 
 def _sq2(a):
@@ -96,6 +99,93 @@ def amoc_core(voe3, e1v, gphiv, glamv, depthv, *, target_lat=26.5,
     return {"amoc_Sv": float(abs(seg[kmax])), "row_lat_deg": float(lat_y[j]),
             "j": j,
             "depth_of_max_m": float((depthv[upper] if np.any(upper) else depthv)[kmax])}
+
+
+def mht_core(voe3, theta_v, e1v, gphiv, *, rho0=_RHO0, cp=_CP):
+    """Global meridional ocean heat transport MHT(lat) [PW] from PURE arrays.
+
+    MHT(y) = rho0 * cp * Σ_x Σ_z (voe3 · theta_v · e1v)   [W]
+
+    with ``voe3 = vo*e3v`` the meridional volume-flux density at v-points,
+    ``theta_v`` the potential temperature [degC] averaged onto the SAME v-points,
+    and ``e1v`` the v-face zonal width.  The FULL zonal integral at a latitude has
+    ~zero net mass flux (mass conservation), so the transport is essentially
+    reference-independent and degC is the conventional choice.  Split out from the
+    NetCDF reader so it is unit-testable on a synthetic flow.  All inputs must be
+    pre-aligned onto the v-grid (same z,y,x shape; e1v/gphiv on the v-rows).
+
+    Returns a dict: ``mht_PW``/``lat_deg`` (the full curve), and the diagnostic
+    scalars ``nh_peak_PW``/``nh_peak_lat`` (max over lat>0) and ``sh_min_PW``/
+    ``sh_min_lat`` (min over lat<0).  NH peak obs ~1.8 PW (poleward), SH min
+    ~−1 PW (poleward = southward).
+    """
+    voe3 = np.nan_to_num(np.asarray(voe3, dtype=np.float64), nan=0.0)
+    theta_v = np.nan_to_num(np.asarray(theta_v, dtype=np.float64), nan=0.0)
+    e1v = np.asarray(e1v, dtype=np.float64)
+    gphiv = np.asarray(gphiv, dtype=np.float64)
+
+    # Per-(z,y,x) heat flux [W]; sum over depth and longitude -> per-y curve.
+    hf = rho0 * cp * voe3 * theta_v * e1v[None, :, :]      # (z, y, x) [W]
+    mht_PW = hf.sum(axis=(0, 2)) / _PW                     # (y,) [PW]
+    with np.errstate(invalid="ignore"):
+        lat_y = np.nanmean(gphiv, axis=1)                 # mean lat per v-row
+    fin = np.isfinite(mht_PW) & np.isfinite(lat_y)        # finite-aware peak
+    nh = (lat_y > 0.0) & fin
+    sh = (lat_y < 0.0) & fin
+    if np.any(nh):
+        nh_i = int(np.argmax(np.where(nh, mht_PW, -np.inf)))
+        nh_peak, nh_lat = float(mht_PW[nh_i]), float(lat_y[nh_i])
+    else:
+        nh_peak = nh_lat = float("nan")
+    if np.any(sh):
+        sh_i = int(np.argmin(np.where(sh, mht_PW, np.inf)))
+        sh_min, sh_lat = float(mht_PW[sh_i]), float(lat_y[sh_i])
+    else:
+        sh_min = sh_lat = float("nan")
+    return {"mht_PW": mht_PW, "lat_deg": lat_y,
+            "nh_peak_PW": nh_peak, "nh_peak_lat": nh_lat,
+            "sh_min_PW": sh_min, "sh_min_lat": sh_lat}
+
+
+def nemo_mht(grid_v_path, grid_t_path, domain_cfg_path):
+    """Global meridional ocean heat transport [PW] from NEMO grid_V + grid_T."""
+    import xarray as xr
+    dV = xr.open_dataset(grid_v_path, decode_times=False)
+    dT = xr.open_dataset(grid_t_path, decode_times=False)
+    dc = xr.open_dataset(domain_cfg_path, decode_times=False)
+
+    vname = "vo" if "vo" in dV else ("voce" if "voce" in dV else None)
+    if vname is None:
+        raise KeyError("grid_V has neither 'vo' nor 'voce'")
+    vo_da = dV[vname]
+    if "e3v" in dV:
+        voe3_da = vo_da * dV["e3v"]
+        if "time_counter" in voe3_da.dims:
+            voe3_da = voe3_da.mean("time_counter")
+        voe3 = _sq3(voe3_da.values)                        # (z, y, x) v-points
+    else:
+        if "time_counter" in vo_da.dims:
+            vo_da = vo_da.mean("time_counter")
+        voe3 = _sq3(vo_da.values) * _sq3(dc["e3v_0"].values)
+    tname = ("thetao" if "thetao" in dT else
+             ("toce" if "toce" in dT else ("votemper" if "votemper" in dT else None)))
+    if tname is None:
+        raise KeyError("grid_T has none of 'thetao'/'toce'/'votemper'")
+    t_da = dT[tname]
+    if "time_counter" in t_da.dims:
+        t_da = t_da.mean("time_counter")
+    theta_t = _sq3(t_da.values)                            # (z, y, x) T-points
+    e1v = _sq2(dc["e1v"].values)
+    gphiv = _sq2(dc["gphiv"].values)
+
+    # Average T -> the v-row BETWEEN T(j) and T(j+1): NEMO vo[j] sits north of
+    # T(j), so theta_v[j] = 0.5*(theta[j] + theta[j+1]).  Align every field onto
+    # the ny-1 interior v-rows.
+    theta_v = 0.5 * (theta_t[:, :-1, :] + theta_t[:, 1:, :])   # (z, ny-1, x)
+    voe3_a = voe3[:, :-1, :]
+    e1v_a = e1v[:-1, :]
+    gphiv_a = gphiv[:-1, :]
+    return mht_core(voe3_a, theta_v, e1v_a, gphiv_a)
 
 
 def acc_drake_core(uoe3, e2u, gphiu, glamu, *, drake_lon=-68.0,
@@ -240,6 +330,8 @@ def main() -> int:
     p.add_argument("--grid-v", required=True)
     p.add_argument("--grid-u", default=None,
                    help="ORCA1 grid_U (uo,e3u) — enables ACC@Drake.")
+    p.add_argument("--grid-t", default=None,
+                   help="ORCA1 grid_T (thetao) — enables global MHT(lat).")
     p.add_argument("--domain-cfg", required=True)
     p.add_argument("--target-lat", type=float, default=26.5)
     p.add_argument("--lon-min", type=float, default=-75.0)
@@ -260,6 +352,11 @@ def main() -> int:
               f"i={ac['i_col']}, {ac['n_rows']} rows, "
               f"lon-dev {ac['max_lon_dev_deg']:.2f} deg) = {ac['acc_Sv']:.2f} Sv "
               f"(eastward +; obs ~137)")
+    if a.grid_t is not None:
+        mh = nemo_mht(a.grid_v, a.grid_t, a.domain_cfg)
+        print(f"[NEMO] MHT NH peak = {mh['nh_peak_PW']:.2f} PW @ "
+              f"{mh['nh_peak_lat']:.1f}N, SH min = {mh['sh_min_PW']:.2f} PW @ "
+              f"{mh['sh_min_lat']:.1f}N  (NH obs ~1.8 PW)")
     return 0
 
 

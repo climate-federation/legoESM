@@ -17,6 +17,7 @@ from legoesm.ocean.spinup import (
     bryan_accelerated_dt,
     compute_amoc_from_state,
     compute_acc_from_state,
+    compute_mht_from_state,
     atlantic_basin_mask,
     _grid_lat_v_deg,
 )
@@ -589,3 +590,37 @@ class TestComputeACCFromState:
         mask = np.ones((n_lat, n_lon), dtype=np.float64)
         acc = compute_acc_from_state(u, h, mask, grid, drake_lon_deg=-68.0)
         assert abs(acc) < 1e-9
+
+
+class TestComputeMHTFromState:
+    """compute_mht_from_state (latlon/tripole) = meridional_heat_transport curve
+    reduced to NH-peak / SH-min.  Pin sign + zero (the geometry core is tested
+    via the diagnostics module)."""
+
+    def _make(self, *, v0=0.1, theta=10.0, n_lat=40, n_lon=72, nlev=6):
+        grid = _FakeGrid(n_lat=n_lat, n_lon=n_lon)
+        v = np.full((n_lat + 1, n_lon, nlev), v0, dtype=np.float64)  # v-faces
+        th = np.full((n_lat, n_lon, nlev), theta, dtype=np.float64)
+        h = np.full((n_lat, n_lon, nlev), 100.0, dtype=np.float64)
+        mask = np.ones((n_lat, n_lon), dtype=np.float64)
+        return v, th, h, mask, grid
+
+    def test_northward_warm_positive(self):
+        v, th, h, mask, grid = self._make(v0=0.1, theta=10.0)
+        r = compute_mht_from_state(v, th, h, mask, grid)
+        assert r["nh_peak_PW"] > 0.0
+        assert r["nh_peak_lat"] > 0.0
+
+    def test_sign_flips_with_velocity(self):
+        north = compute_mht_from_state(*self._make(v0=0.1, theta=10.0))
+        south = compute_mht_from_state(*self._make(v0=-0.1, theta=10.0))
+        # Northward warm -> poleward (NH +); southward warm -> SH transport
+        # negative.  (nh_peak is the NH maximum, which a uniform field pads with 0
+        # at the pole rows, so the robust sign discriminator is the SH min.)
+        assert north["nh_peak_PW"] > 0.0
+        assert south["sh_min_PW"] < 0.0
+        assert north["nh_peak_PW"] > south["nh_peak_PW"]
+
+    def test_zero_velocity_zero(self):
+        r = compute_mht_from_state(*self._make(v0=0.0, theta=10.0))
+        assert abs(r["nh_peak_PW"]) < 1e-12 and abs(r["sh_min_PW"]) < 1e-12

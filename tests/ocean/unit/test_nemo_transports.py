@@ -152,6 +152,57 @@ def test_acc_core_circular_drake_lon():
     assert abs(a["acc_Sv"] - b["acc_Sv"]) < 1e-9
 
 
+# ---------------------------------------------------------------------------
+# MHT (mht_core) — global meridional ocean heat transport
+# ---------------------------------------------------------------------------
+def _synthetic_mht(nz=4, ny=20, nx=8, vrow=0.5, theta=10.0, j_lat=30.0):
+    """(voe3, theta_v, e1v, gphiv, j): northward (vrow>0) warm (theta degC) flow
+    concentrated at the v-row nearest ``j_lat`` -> poleward heat transport there."""
+    lat = np.linspace(-60.0, 60.0, ny)
+    gphiv = np.broadcast_to(lat[:, None], (ny, nx)).copy()
+    e1v = np.full((ny, nx), 1.0e5)
+    j = int(np.argmin(np.abs(lat - j_lat)))
+    voe3 = np.zeros((nz, ny, nx))
+    voe3[:, j, :] = vrow
+    theta_v = np.full((nz, ny, nx), theta)
+    return voe3, e1v, gphiv, j, nz, nx, theta, vrow
+
+
+def test_mht_core_analytic_nh_peak():
+    voe3, e1v, gphiv, j, nz, nx, theta, vrow = _synthetic_mht()
+    theta_v = np.full_like(voe3, theta)
+    r = _nt.mht_core(voe3, theta_v, e1v, gphiv)
+    expect = _nt._RHO0 * _nt._CP * (nz * vrow) * theta * (nx * 1.0e5) / 1.0e15
+    assert abs(r["nh_peak_PW"] - expect) < 1e-9
+    assert r["nh_peak_lat"] > 0.0
+
+
+def test_mht_core_sign_on_curve():
+    """Curve at the flow row: northward warm -> +, southward warm -> -."""
+    voe3, e1v, gphiv, j, *_ = _synthetic_mht(vrow=0.5)
+    theta_v = np.full_like(voe3, 10.0)
+    pos = _nt.mht_core(voe3, theta_v, e1v, gphiv)["mht_PW"][j]
+    neg = _nt.mht_core(-voe3, theta_v, e1v, gphiv)["mht_PW"][j]
+    assert pos > 0.0 and neg < 0.0
+    assert abs(pos + neg) < 1e-12
+
+
+def test_mht_core_sh_min_captures_southward():
+    """Southward warm flow in the SH -> negative MHT captured by sh_min."""
+    voe3, e1v, gphiv, j, *_ = _synthetic_mht(vrow=-0.5, j_lat=-40.0)
+    theta_v = np.full_like(voe3, 10.0)
+    r = _nt.mht_core(voe3, theta_v, e1v, gphiv)
+    assert r["sh_min_PW"] < 0.0
+    assert r["sh_min_lat"] < 0.0
+
+
+def test_mht_core_zero_flow_zero():
+    voe3, e1v, gphiv, j, *_ = _synthetic_mht(vrow=0.0)
+    theta_v = np.full_like(voe3, 10.0)
+    r = _nt.mht_core(voe3, theta_v, e1v, gphiv)
+    assert abs(r["nh_peak_PW"]) < 1e-12 and abs(r["sh_min_PW"]) < 1e-12
+
+
 def test_acc_core_rejects_curvilinear_section():
     """On a CURVILINEAR grid (longitude shears with j so a constant i is not a
     meridian) the fixed-i section RAISES instead of silently mis-sampling."""

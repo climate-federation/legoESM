@@ -30,6 +30,8 @@ from typing import NamedTuple
 
 import numpy as np
 
+from legoesm import constants  # rho_ocean / c_sw for MHT default args
+
 
 SV = 1.0e6  # 1 Sverdrup [m³/s]
 
@@ -608,6 +610,114 @@ def compute_acc_from_state_mpas(
     F = (s_e[:, None] * u * dv[:, None]) * h_e
     transport = float(F[section, :].sum())
     return transport / 1.0e6
+
+
+def _mht_peaks(mht_PW, lat_deg):
+    """NH poleward peak + SH poleward min of an MHT(lat) curve [PW]."""
+    mht_PW = np.asarray(mht_PW, dtype=np.float64)
+    lat = np.asarray(lat_deg, dtype=np.float64)
+    fin = np.isfinite(mht_PW)                                   # ignore any NaN row
+    nh = (lat > 0.0) & fin
+    sh = (lat < 0.0) & fin
+    if np.any(nh):
+        nh_i = int(np.argmax(np.where(nh, mht_PW, -np.inf)))
+        nh_peak, nh_lat = float(mht_PW[nh_i]), float(lat[nh_i])
+    else:                                                       # no finite NH row
+        nh_peak = nh_lat = float("nan")
+    if np.any(sh):
+        sh_i = int(np.argmin(np.where(sh, mht_PW, np.inf)))
+        sh_min, sh_lat = float(mht_PW[sh_i]), float(lat[sh_i])
+    else:
+        sh_min = sh_lat = float("nan")
+    return {"nh_peak_PW": nh_peak, "nh_peak_lat": nh_lat,
+            "sh_min_PW": sh_min, "sh_min_lat": sh_lat,
+            "mht_PW": mht_PW, "lat_deg": lat}
+
+
+def compute_mht_from_state(v_face, theta, h_partial, mask, grid):
+    """Global MHT NH-peak / SH-min [PW] from a C-grid state (latlon/tripole).
+
+    Wraps the tested
+    :func:`legoesm.ocean.diagnostics_streamfunction.meridional_heat_transport`
+    (ρ0·cp·Σ v·θ_v·h_v·dx_v) and reduces the MHT(lat) curve to the NH poleward
+    peak and SH poleward min.  Sibling of :func:`compute_amoc_from_state`; uses
+    the WOA/CORE convention (degC, reference-independent at full zonal integral),
+    matching the NEMO reader ``nemo_transports.mht_core``.  NH peak obs ~1.8 PW.
+    """
+    from legoesm.ocean.diagnostics_streamfunction import meridional_heat_transport
+    mht_PW, lat_deg = meridional_heat_transport(
+        np.asarray(v_face, dtype=np.float64),
+        np.asarray(theta, dtype=np.float64),
+        np.asarray(h_partial, dtype=np.float64),
+        np.asarray(mask, dtype=np.float64), grid)
+    return _mht_peaks(mht_PW, lat_deg)
+
+
+def compute_mht_from_state_mpas(
+    u_edge: np.ndarray,
+    theta_cell: np.ndarray,
+    h_cell: np.ndarray,
+    mesh,
+    *,
+    rho0: float = constants.rho_ocean,
+    cp: float = constants.c_sw,
+    lat_bin_deg: float = 2.0,
+) -> dict:
+    """Global MHT NH-peak / SH-min [PW] from a Voronoi-mesh ocean state.
+
+    Per-edge depth-integrated MERIDIONAL heat flux
+    ``F_e = ρ0·cp · Σ_k (u_edge·sinα · dvEdge · h_e · θ_e)`` (interior edges only;
+    ``h_e`` = canonical min-rule ``min_cell_to_edge``; ``θ_e`` = centred cell→edge
+    temperature in degC), binned by ``latEdge`` into ``lat_bin_deg`` bands -> the
+    zonally-integrated MHT(lat) curve [PW].  Sibling of
+    :func:`compute_amoc_from_state_mpas` (θ-weighted, no depth-cumsum).  Reduced
+    to the NH poleward peak / SH poleward min.  Boundary edges (c2<0, u≈0 no-
+    normal-flow) are excluded.
+    """
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.mpas_partial_cell_helpers import min_cell_to_edge
+
+    u = np.asarray(u_edge, dtype=np.float64)
+    if u.ndim == 1:
+        u = u[:, None]
+    th = np.asarray(theta_cell, dtype=np.float64)
+    if th.ndim == 1:
+        th = th[:, None]
+    h = np.asarray(h_cell, dtype=np.float64)
+    if h.ndim == 1:
+        h = h[:, None]
+    if not (u.shape[-1] == th.shape[-1] == h.shape[-1]):
+        raise ValueError(
+            f"compute_mht_from_state_mpas: level mismatch u={u.shape[-1]} "
+            f"theta={th.shape[-1]} h={h.shape[-1]}")
+
+    angle = np.asarray(mesh.angleEdge, dtype=np.float64)
+    dv = np.asarray(mesh.dvEdge, dtype=np.float64)
+    sin_a = np.sin(angle)
+    c1 = np.asarray(mesh.cellsOnEdge[0])
+    c2 = np.asarray(mesh.cellsOnEdge[1])
+    interior = c2 >= 0
+    c1_safe = np.where(c1 >= 0, c1, 0)
+    c2_safe = np.where(c2 >= 0, c2, 0)
+    h_e = np.asarray(min_cell_to_edge(jnp.asarray(h), mesh))    # (nEdges, nlev)
+    theta_e = 0.5 * (th[c1_safe] + th[c2_safe])                 # (nEdges, nlev)
+    # Boundary edges (c2<0) gathered h[-1]/theta garbage; zero them BEFORE the
+    # product so a non-finite boundary value can't poison the bin (0*NaN=NaN).
+    h_e = np.where(interior[:, None], h_e, 0.0)
+    theta_e = np.where(interior[:, None], theta_e, 0.0)
+
+    F_edge = (rho0 * cp) * (u * sin_a[:, None] * dv[:, None] * h_e * theta_e)
+    F_e = np.nan_to_num(F_edge.sum(axis=1), nan=0.0,
+                        posinf=0.0, neginf=0.0) * interior      # (nEdges,) [W]
+
+    lat_edge = np.degrees(np.asarray(mesh.latEdge))
+    bins = np.arange(-80.0, 80.0 + lat_bin_deg, lat_bin_deg)
+    centers = 0.5 * (bins[:-1] + bins[1:])
+    idx = np.digitize(lat_edge, bins) - 1
+    valid = (idx >= 0) & (idx < centers.size)
+    mht_W = np.zeros(centers.size, dtype=np.float64)
+    np.add.at(mht_W, idx[valid], F_e[valid])
+    return _mht_peaks(mht_W / 1.0e15, centers)
 
 
 # ==============================================================================
