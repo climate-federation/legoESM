@@ -259,6 +259,16 @@ MPAS ico6, 5 model-years, full faithful stack (WOA+partial-cell+freeze-floor+run
   Day-90 SSS was fine (0.85); the drift is a long-integration issue → **fix = weak SSS restoring**
   (`apply_sss_restoring_step_mpas` EXISTS, was not enabled) or a freshwater-flux balance. NEXT bounded step.
 
+### latlon ACC probe (8428675, 1-yr) — METHOD MISMATCH exposed (ψ_bt-max-min vs section)
+latlon 1°, 1 model-year, faithful stack: **ACC@Drake = 211.9 Sv** (vs NEMO 159, MPAS-section 146),
+AMOC@26N = 1.61 Sv (un-spun-up, decade-gated). The 211 is NOT apples-to-apples: `compute_acc_from_state`
+(latlon/tripole) uses `acc_transport` = ψ_bt MAX−MIN over the whole Drake LAT band (all lons), which
+picks up Southern-Ocean gyre extrema + coarse-no-eddy overshoot, whereas the NEMO reader AND
+`compute_acc_from_state_mpas` use a SINGLE-MERIDIAN Drake section. **FOLLOW-UP: unify the latlon/tripole
+model ACC onto a Drake-meridian section** (or restrict acc_transport to the Drake longitude) for a true
+apples-to-apples latlon-vs-NEMO ACC. The MPAS section ACC (146 vs 159, ~8%) remains the clean match.
+Run stable 105k steps @ 7.7 steps/s (latlon per-step host stack is slow), SST 13.5 / SSS 33.9, finite.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
