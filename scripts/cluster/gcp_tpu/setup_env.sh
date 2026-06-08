@@ -8,10 +8,19 @@
 # the TPU build + libtpu.  JAX_VERSION is pinned to the version validated
 # locally (0.10.1); override if you intentionally want a different one — but
 # keep jax and the TPU jaxlib at the SAME version.
+#
+# legoESM requires Python >= 3.11, but TPU VM base images often default to an
+# older python3 (e.g. 3.10 on Ubuntu 22.04).  If your default python3 is too
+# old, point PYTHON at a newer interpreter, e.g.:
+#   sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt-get update
+#   sudo apt-get install -y python3.11 python3.11-venv python3.11-dev
+#   PYTHON=python3.11 bash scripts/cluster/gcp_tpu/setup_env.sh
 set -euo pipefail
 
 JAX_VERSION="${JAX_VERSION:-0.10.1}"
 VENV_DIR="${VENV_DIR:-.venv}"
+PYTHON="${PYTHON:-python3}"
+MIN_PY_MINOR=11  # legoESM requires-python = ">=3.11"
 
 # Resolve repo root from this script's location so it works regardless of cwd.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,9 +28,39 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO_ROOT"
 echo "Repo root: $REPO_ROOT"
 
-if [[ ! -d "$VENV_DIR" ]]; then
-  echo "Creating venv at $VENV_DIR ..."
-  python3 -m venv "$VENV_DIR"
+# Fail early with a clear message if the chosen interpreter is too old, rather
+# than letting `pip install -e .` fail deep in the run with a cryptic
+# "requires a different Python".
+if ! "$PYTHON" --version >/dev/null 2>&1; then
+  echo "ERROR: interpreter '$PYTHON' not found. Install Python >=3.${MIN_PY_MINOR}" \
+       "and re-run with PYTHON=<interpreter> (see header)." >&2
+  exit 1
+fi
+py_minor="$("$PYTHON" -c 'import sys; print(sys.version_info[1])')"
+py_major="$("$PYTHON" -c 'import sys; print(sys.version_info[0])')"
+echo "Using interpreter: $PYTHON ($("$PYTHON" --version 2>&1))"
+if (( py_major < 3 || (py_major == 3 && py_minor < MIN_PY_MINOR) )); then
+  echo "ERROR: legoESM needs Python >=3.${MIN_PY_MINOR}, but '$PYTHON' is" \
+       "${py_major}.${py_minor}. On Ubuntu 22.04 the default python3 is 3.10;" \
+       "install python3.11 and re-run with PYTHON=python3.11 (see header)." >&2
+  exit 1
+fi
+
+# Treat the venv as usable only if bin/activate actually exists -- a directory
+# left behind by a previously failed `python3 -m venv` (e.g. missing the
+# python3-venv package) would otherwise make us skip creation and then fail at
+# `source`.  Rebuild a partial venv from scratch.
+if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
+  if [[ -e "$VENV_DIR" ]]; then
+    echo "Removing incomplete venv at $VENV_DIR ..."
+    rm -rf "$VENV_DIR"
+  fi
+  echo "Creating venv at $VENV_DIR with $PYTHON ..."
+  if ! "$PYTHON" -m venv "$VENV_DIR"; then
+    echo "ERROR: '$PYTHON -m venv' failed. On Debian/Ubuntu install the venv" \
+         "package (e.g. 'sudo apt-get install -y python3.11-venv')." >&2
+    exit 1
+  fi
 fi
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"

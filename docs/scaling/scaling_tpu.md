@@ -92,6 +92,17 @@ GCP_PROJECT=my-proj TPU_ZONE=<your-v6e-zone> \
 Notes:
 - `setup_env.sh` pins `jax[tpu]==0.10.1` (the locally validated version).
   Keep jax and the TPU jaxlib at the same version.
+- **Python >= 3.11 required.** TPU VM base images often ship an older default
+  `python3` (3.10 on Ubuntu 22.04), which fails `pip install -e .` with
+  "requires a different Python". Install 3.11 and point `setup_env.sh` at it:
+  ```bash
+  sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt-get update
+  sudo apt-get install -y python3.11 python3.11-venv python3.11-dev
+  PYTHON=python3.11 bash scripts/cluster/gcp_tpu/setup_env.sh
+  ```
+  `setup_env.sh` checks the interpreter version up front and rebuilds a
+  partial/old venv from scratch, so it fails fast with a clear message rather
+  than deep in the pip run.
 - `run_bench.sh` exports `PYTHONPATH=<repo root>` because the bench driver
   imports `tests.test_cases.baroclinic_wave`; without it every run silently
   reports `FAILED: No module named 'tests'`.
