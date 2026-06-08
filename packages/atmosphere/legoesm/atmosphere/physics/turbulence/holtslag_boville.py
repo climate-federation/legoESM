@@ -54,34 +54,59 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
 _ONET = 1.0 / 3.0  # 1/3 power in the MO gradient expressions (oracle ``onet``)
 
 
-def _smooth_floor(x: jax.Array, floor: float) -> jax.Array:
-    """Smooth lower bound ``~max(x, floor)`` with a continuous gradient.
+# Power floor for the gradient only: the cube root / square root have an
+# INFINITE derivative at 0, so we floor the argument INSIDE the JVP while the
+# forward value stays the exact oracle expression ``max(x, 0)**p``.  This is
+# the key to (a) oracle fidelity -- the previous softplus floor shifted the
+# value by ~0.69 at the floor, inflating neutral MO factors 4-8% (codex
+# iter-1 finding 1) -- and (b) finite gradients in stable columns where the
+# cube-root argument is exactly 0 (codex iter-1 finding 3).
+_GRAD_FLOOR = 1.0e-6
 
-    ``softplus``-style floor: ``floor + softplus(x - floor)`` so the result
-    stays ``>= floor`` and the derivative is bounded and nonzero on both
-    sides (unlike ``jnp.maximum`` which has a dead one-sided gradient and
-    unlike ``clip`` which differentiates the divide at the floor).  Used on
-    the MO arguments ``(1 - beta*zl)`` which the oracle never floors but
-    which can dip non-positive at the smooth blend edges.
+
+@jax.custom_jvp
+def _pos_cbrt(x: jax.Array) -> jax.Array:
+    """``max(x, 0)**(1/3)`` with a finite gradient (floored only in the JVP).
+
+    Forward value is the EXACT oracle expression (so a neutral argument of 1
+    returns exactly 1, and ``wstar`` is exactly 0 for ``kbfs<=0``).  The JVP
+    floors the argument so the ``(1/3)x**(-2/3)`` slope never blows up.
     """
-    return floor + jax.nn.softplus(x - floor)
+    return jnp.maximum(x, 0.0) ** _ONET
 
 
-def _safe_cbrt(x: jax.Array, floor: float = 1.0e-12) -> jax.Array:
-    """AD-safe cube root ``x**(1/3)`` for ``x >= 0``.
-
-    ``x**(1/3)`` has an INFINITE derivative ``(1/3)x**(-2/3)`` at ``x=0``, so
-    ``jax.grad`` of any expression feeding a zero into a bare cube root
-    returns NaN (e.g. ``wstar = (max(0,kbfs)·...)**(1/3)`` at ``kbfs<=0``).
-    Flooring the argument before the power keeps both the value (~0 for tiny
-    ``x``) and the gradient finite.
-    """
-    return jnp.maximum(x, floor) ** _ONET
+@_pos_cbrt.defjvp
+def _pos_cbrt_jvp(primals, tangents):
+    (x,), (dx,) = primals, tangents
+    y = jnp.maximum(x, 0.0) ** _ONET
+    xf = jnp.maximum(x, _GRAD_FLOOR)
+    dy = (_ONET * xf ** (_ONET - 1.0)) * dx
+    return y, dy
 
 
-def _safe_sqrt(x: jax.Array, floor: float = 1.0e-12) -> jax.Array:
-    """AD-safe square root: ``sqrt`` has infinite slope at 0, so floor first."""
-    return jnp.sqrt(jnp.maximum(x, floor))
+@jax.custom_jvp
+def _pos_sqrt(x: jax.Array) -> jax.Array:
+    """``sqrt(max(x, 0))`` with a finite gradient (floored only in the JVP)."""
+    return jnp.sqrt(jnp.maximum(x, 0.0))
+
+
+@_pos_sqrt.defjvp
+def _pos_sqrt_jvp(primals, tangents):
+    (x,), (dx,) = primals, tangents
+    y = jnp.sqrt(jnp.maximum(x, 0.0))
+    xf = jnp.maximum(x, _GRAD_FLOOR)
+    dy = (0.5 / jnp.sqrt(xf)) * dx
+    return y, dy
+
+
+def _safe_cbrt(x: jax.Array) -> jax.Array:
+    """Cube root with exact forward value ``max(x,0)**(1/3)``, finite grad."""
+    return _pos_cbrt(x)
+
+
+def _safe_sqrt(x: jax.Array) -> jax.Array:
+    """Square root with exact forward value ``sqrt(max(x,0))``, finite grad."""
+    return _pos_sqrt(x)
 
 
 def holtslag_boville_turbulence(
@@ -181,7 +206,11 @@ def holtslag_boville_turbulence(
     )
     ustar = jnp.maximum(ustar_raw, config.ustar_min)
 
-    rrho = 1.0 / jnp.clip(rho[:, -1], 1.0e-6, None)  # 1/density (oracle rrho)
+    # rrho = 1/density at the bottom level.  Use the ORACLE dry-air form
+    # rrho = R_d*T_bot/p_bot (pbl_utils.calc_ustar) rather than 1/rho_moist,
+    # so khfs/kqfs/kbfs/obklen match the Fortran exactly regardless of which
+    # density the bridge supplies (codex iter-1 finding 8).
+    rrho = constants.R_d * T[:, -1] / jnp.clip(p_full[:, -1], 1.0, None)
     # Kinematic surface fluxes (oracle calc_obklen).
     khfs = shflx * rrho / cpair                    # [m K/s]
     kqfs = lhflx / constants.L_v * rrho            # qflx*rrho, qflx=lhflx/L_v
@@ -286,8 +315,13 @@ def hb_diffusivities(
 
     thv_bot = theta_v[:, -1]
 
-    # Smooth unstable indicator (oracle: unstbl = kbfs>0). Sharpness s^3/m^2.
-    unstbl = jax.nn.sigmoid(config.unstable_blend_sharpness * kbfs)
+    # Smooth unstable indicator (oracle: unstbl = kbfs>0, a hard `>`).  Bias
+    # the sigmoid by a tiny positive threshold so EXACTLY neutral kbfs=0 maps
+    # to the STABLE branch (unstbl~0), matching the oracle's strict `> 0`
+    # rather than the symmetric sigmoid's 0.5 (codex iter-1 finding 2).
+    unstbl = jax.nn.sigmoid(
+        config.unstable_blend_sharpness * (kbfs - config.unstable_kbfs_threshold)
+    )
 
     # ----- PBL height (oracle pblintd), smooth -----
     h_pbl, wstar, phiminv, phihinv, wm = _pbl_height(
@@ -306,10 +340,14 @@ def hb_diffusivities(
     fak3 = (fakn * wstar / jnp.clip(wm, 1.0e-6, None))[:, None]
 
     # --- unstable surface layer (zh<sffrac) ---
-    term_arg = _smooth_floor(1.0 - betam * zl, config.arg_floor)
-    term = _safe_cbrt(term_arg)
+    # MO gradient factors: exact oracle forms (1-betam*zl)^(1/3),
+    # sqrt(1-betah*zl). _safe_cbrt/_safe_sqrt give the EXACT forward value
+    # max(arg,0)**p (so a neutral arg=1 returns exactly 1) with a finite
+    # gradient -- no softplus value shift (codex iter-1 finding 1).
+    term = _safe_cbrt(1.0 - betam * zl)
     pblk_sfc_u = fak1 * zzh * term
-    pr_sfc_u = term / _safe_sqrt(_smooth_floor(1.0 - betah * zl, config.arg_floor))
+    pr_denom = _safe_sqrt(1.0 - betah * zl)
+    pr_sfc_u = term / jnp.clip(pr_denom, config.arg_floor, None)
 
     # --- unstable outer layer (zh>=sffrac) ---
     pblk_out_u = fak2 * zzh
@@ -324,8 +362,17 @@ def hb_diffusivities(
     cgs_u = w_outer * cgs_outer
 
     # --- stable (kbfs<=0) ---
-    pblk_st_lo = fak1 * zzh / (1.0 + betas * zl)
-    pblk_st_hi = fak1 * zzh / (betas + zl)
+    # The stable branch is evaluated for ALL columns (then blended out by
+    # 1-unstbl in unstable ones).  For unstable columns L<0 -> zl<0, so the
+    # raw denominators ``1+betas*zl`` / ``betas+zl`` can hit zero or go
+    # negative, producing inf that contaminates the VJP via 0*inf -> NaN.
+    # Floor the denominators to a positive value so the inactive branch is
+    # finite (codex iter-1 finding 7).  Oracle behaviour for the ACTIVE
+    # stable branch (zl>=0) is unchanged since the floors only bite at zl<0.
+    den_lo = jnp.maximum(1.0 + betas * zl, config.arg_floor)
+    den_hi = jnp.maximum(betas + zl, config.arg_floor)
+    pblk_st_lo = fak1 * zzh / den_lo
+    pblk_st_hi = fak1 * zzh / den_hi
     w_zl = jax.nn.sigmoid(config.stable_blend_sharpness * (zl - 1.0))
     pblk_s = (1.0 - w_zl) * pblk_st_lo + w_zl * pblk_st_hi
     pr_s = jnp.ones_like(pblk_s)
@@ -335,10 +382,18 @@ def hb_diffusivities(
     pr = w_uns * pr_u + (1.0 - w_uns) * pr_s
     cgs = w_uns * cgs_u
 
-    # Restrict the PBL profile to interfaces inside the PBL (zmzp<pblh).
+    # Restrict the PBL profile to interfaces inside the PBL.  Oracle gates
+    # pblk by ``z(k) < pblh`` and cgs(i,k) is set whenever ``z(k) < pblh``
+    # (the LOWER full level of the interface, closer to the surface), NOT by
+    # the interface midpoint zmzp (codex iter-1 finding 4).  For our
+    # interface Km_half[j] (between full levels j and j+1, top-first), the
+    # lower full level is z_full[:, 1:].
+    z_lower = z_full[:, 1:]                       # (ncol, nlev-1)
+    zh_lower = z_lower / jnp.clip(h_pbl[:, None], 1.0, None)
     in_pbl = jax.nn.sigmoid(config.sfc_blend_sharpness * (1.0 - zh))
+    in_pbl_cg = jax.nn.sigmoid(config.sfc_blend_sharpness * (1.0 - zh_lower))
     pblk = pblk * in_pbl
-    cgs = cgs * in_pbl
+    cgs = cgs * in_pbl_cg
 
     # ----- Free-atmosphere local-Ri diffusivity (oracle austausch_atm) -----
     # _safe_sqrt floors the argument so the sqrt gradient stays finite where
@@ -421,8 +476,7 @@ def _pbl_height(
 
     # Unstable surface-excess correction (oracle): only where kbfs>0.
     # phiminv = (1 - binm*pblh/L)^(1/3); arg>1 for unstable (L<0).
-    arg_phim = _smooth_floor(1.0 - binm * h1 / obklen, config.arg_floor)
-    phiminv1 = _safe_cbrt(arg_phim)
+    phiminv1 = _safe_cbrt(1.0 - binm * h1 / obklen)
     tlv = thv_bot + kbfs * fak / jnp.clip(ustar * phiminv1, 1.0e-6, None)
     rino2 = g * (theta_v - tlv[:, None]) * dz_sfc / (jnp.clip(thv_bot_c, 1.0, None) * vvk)
     h2 = _crossing_height(
@@ -447,10 +501,8 @@ def _pbl_height(
     wstar = _safe_cbrt(
         jnp.maximum(0.0, kbfs) * g * h_pbl / jnp.clip(thv_bot, 1.0, None)
     )
-    arg_phim = _smooth_floor(1.0 - binm * h_pbl / obklen, config.arg_floor)
-    arg_phih = _smooth_floor(1.0 - binh * h_pbl / obklen, config.arg_floor)
-    phiminv = _safe_cbrt(arg_phim)
-    phihinv = _safe_sqrt(arg_phih)
+    phiminv = _safe_cbrt(1.0 - binm * h_pbl / obklen)
+    phihinv = _safe_sqrt(1.0 - binh * h_pbl / obklen)
     wm = ustar * phiminv
     return h_pbl, wstar, phiminv, phihinv, wm
 
@@ -509,14 +561,18 @@ def _crossing_height(rino, z_full, ricr, sharpness, search_ok, z_top_search):
     )
     z_cross = z_lo + frac * (z_hi - z_lo)
 
-    h = jnp.sum(w * z_cross, axis=1) / jnp.sum(w, axis=1)
-
-    # Smooth "did a crossing occur in-region?" indicator from the total
-    # crossing weight (>~0.5 when a clear crossing exists).
-    total_w = jnp.sum(cross_w, axis=1)
-    has_cross = jax.nn.sigmoid(20.0 * (total_w - 0.5))
-    # No crossing -> top of the search region (oracle z(pverp-npbl)).
-    return has_cross * h + (1.0 - has_cross) * z_top_search
+    # Treat the search-region top as an EXTRA weighted candidate whose weight
+    # is the "remaining" probability that no real crossing was found,
+    # ``max(0, 1 - sum(first-crossing weights))``.  Any genuine first crossing
+    # -- even a shallow one with cross_w ~ 0.36 -- then dominates the average
+    # instead of being pulled back to the fallback by a hard 0.5 threshold
+    # (codex iter-1 finding 5).  When NO crossing exists the fallback weight
+    # is ~1 and h -> z_top_search (oracle z(pverp-npbl)).
+    w_first = cross_w * not_crossed                  # first-crossing weights
+    fallback_w = jnp.clip(1.0 - jnp.sum(w_first, axis=1), 0.0, 1.0)
+    num = jnp.sum(w * z_cross, axis=1) + fallback_w * z_top_search
+    den = jnp.sum(w, axis=1) + fallback_w
+    return num / den
 
 
 def _diffuse_theta_with_countergradient(

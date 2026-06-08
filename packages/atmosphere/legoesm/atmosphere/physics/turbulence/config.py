@@ -285,11 +285,12 @@ class HoltslagBovilleConfig(NamedTuple):
         Minimum-mechanical-mixing-depth coefficient ``h>=c*u*``
         (oracle 700).
     pblmaxp : float
-        Maximum PBL depth in pressure units [Pa]; the bulk-Ri crossing
-        search is limited to levels with ``p >= p_sfc - pblmaxp`` and the
-        no-crossing fallback height is the top of that search region
-        (oracle ``pblmaxp = 4e4`` -> PBL top no higher than ~400 hPa below
-        the surface).
+        Maximum PBL depth in pressure units [Pa].  The bulk-Ri crossing
+        search is limited to levels with ABSOLUTE pressure ``p >= pblmaxp``
+        and the no-crossing fallback height is the top of that search region
+        (oracle ``npbl`` counts levels with ``pref_mid(k) >= pblmaxp`` and
+        the fallback is ``z(pverp-npbl)``; ``pblmaxp = 4e4 Pa`` = 400 hPa,
+        an absolute threshold, NOT relative to the surface).
     cloud_pbl_floor_m : float
         Lowest-layer "marine-stratus ventilation" PBL floor [m]: the oracle
         unconditionally sets ``pblh = max(pblh, zi(pver) + 50)`` (the test
@@ -314,6 +315,11 @@ class HoltslagBovilleConfig(NamedTuple):
     unstable_blend_sharpness : float
         Sigmoid sharpness [s^3/m^2] for the unstable (kbfs>0) vs stable
         (kbfs<=0) regime blend on the surface buoyancy flux.
+    unstable_kbfs_threshold : float
+        Positive offset [m^2/s^3] biasing the unstable indicator so exactly
+        neutral kbfs=0 maps to the STABLE branch (oracle ``unstbl = kbfs >
+        0`` is a strict inequality; default 1e-4 ~ 0.1 W/m^2 of buoyancy
+        flux).
     arg_floor : float
         Smooth floor on the ``(1-beta*zl)`` MO arguments so the cube-root
         / sqrt stay real and their gradients finite (default 0.01).
@@ -343,6 +349,7 @@ class HoltslagBovilleConfig(NamedTuple):
     sfc_blend_sharpness: float = 80.0
     stable_blend_sharpness: float = 20.0
     unstable_blend_sharpness: float = 1.0e4
+    unstable_kbfs_threshold: float = 1.0e-4
     arg_floor: float = 0.01
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
