@@ -504,6 +504,28 @@ Remaining gains are **hardware-bound**, not code-bound on this host:
 - Closing the remaining single-GPU roofline gap (~30% HBM for structured grids)
   needs kernel fusion / higher arithmetic intensity — large, diminishing returns.
 
+## Iteration 19 (2026-06-08): CPU-MPI strong-scaling plateau — root cause SETTLED
+
+Tested rank-to-core binding (`mpirun --bind-to core --map-by core`) as the last
+CPU strong-scaling lever. Clean A/B, same system state, icosahedral I5 HS,
+single-thread/rank:
+
+| ranks | unbound ms | --bind-to core ms |
+|------:|-----------:|------------------:|
+| 1     | 31.86      | 72.81             |
+| 8     | 30.22      | 34.65             |
+
+Binding is WORSE at both ends (pins a rank to one core → starves its memory
+bandwidth). Unbound 1→8 speedup is **1.05×** (flat).
+
+**Definitive cause of the plateau: single-socket memory-bandwidth saturation** —
+NOT OS jitter, NOT collective latency, NOT a code bug. The icosahedral step is
+memory-bandwidth-bound; at N ranks each does 1/N the work but all N contend for
+the same DRAM bus on one socket, so aggregate bandwidth is fixed → no speedup.
+Real strong scaling needs **multiple sockets / nodes** (more aggregate bandwidth)
+— exactly what HPC clusters provide and this single node lacks. This is the
+hardware-topology gap vs SOTA, confirmed empirically.
+
 ## Backlog (campaign)
 
 1. **DONE (iter 3)**: `_exchange_mpi` one-scatter refactor — bit-identical,
