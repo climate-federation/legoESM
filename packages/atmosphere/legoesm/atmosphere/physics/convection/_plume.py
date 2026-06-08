@@ -608,7 +608,27 @@ def entraining_detraining_plume(
         Gamma_moist_per_pa = moist_adiabat_lapse_rate(T_u_ent, p_e)
         dT_dz = Gamma_moist_per_pa * (-rho_u_ent * g)
 
-        T_u = T_u_ent + dT_dz * dz
+        # Entrainment-damped moist-adiabat source.  The plume temperature
+        # obeys ``dT_u/dz = Γ_moist − ε·(T_u − T_e)``.  Integrating this
+        # linear ODE across the layer (with ``T_e`` and ``Γ_moist`` held
+        # constant) gives the entrainment relaxation ``T_u_ent`` PLUS the
+        # source contribution ``Γ·(1 − e^{−ε·dz})/ε`` — **not** ``Γ·dz``.
+        # The naive ``Γ·dz`` is correct only when ``ε·dz → 0``; for
+        # deep-convection entrainment on a coarse grid ``ε·dz ≈ 1–2``, so
+        # it over-applies the moist-adiabatic cooling by a factor
+        # ``ε·dz/(1 − e^{−ε·dz}) ≈ 1.6–2``.  That over-cooled the updraft
+        # until it lost buoyancy in the lower troposphere, leaving the
+        # free troposphere unheated — the entraining-plume schemes (ZM,
+        # KF, Emanuel, Bechtold) then collapsed to an anti-convective,
+        # super-adiabatic, ~30 K-too-cold RCE.  The damped factor reduces
+        # to ``dz`` as ``ε → 0`` (weakly-entraining behaviour preserved).
+        eps_dz = eps * dz
+        source_factor = jnp.where(
+            eps_dz > 1e-6,
+            -jnp.expm1(-eps_dz) / jnp.maximum(eps, 1e-30),
+            dz,
+        )
+        T_u = T_u_ent + dT_dz * source_factor
 
         # Condense any super-saturation into cloud water.  This is the
         # diagnostic that resolves the q-budget; the temperature

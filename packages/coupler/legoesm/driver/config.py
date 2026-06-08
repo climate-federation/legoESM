@@ -236,7 +236,7 @@ class ExperimentConfig(NamedTuple):
     # Convection / Turbulence / GWD
     convection: str = "sbm"            # sbm, dca, kuo, mass_flux, edmf, none
     turbulence: str = "none"           # smagorinsky, louis, tke, none
-    gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, none
+    gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, none
 
     # Conservation
     fix_moisture: bool = False
@@ -447,7 +447,7 @@ class ExperimentConfig(NamedTuple):
             )
         _valid_gwd = (
             "rayleigh", "lindzen", "mcfarlane", "hines",
-            "prognostic_spectral", "ml_emulator", "none",
+            "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
         )
         if self.gravity_wave_drag not in _valid_gwd:
             errors.append(

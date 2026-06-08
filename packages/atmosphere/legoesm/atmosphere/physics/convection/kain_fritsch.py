@@ -162,7 +162,27 @@ def kain_fritsch_convection(
 
     # -- CAPE gate (a secondary safety net) --------------------------------
     cape_weight = cape_trigger(cape, config.cape_threshold, config.cape_sharpness)
-    overall_weight = trigger_weight * cape_weight
+    # CAPE-based OR fallback for the dynamical trigger.  The w-trigger
+    # above is starved when there is no resolved grid-scale ascent
+    # (``w_grid = 0`` in SCM / divergence-free dycores), which otherwise
+    # leaves a strongly-unstable column in near-radiative equilibrium.
+    # Firing when undilute CAPE exceeds ``cape_or_threshold`` rescues that
+    # case.  The fallback is itself gated by the ABSENCE of resolved
+    # ascent — ``exp(-(w_grid_at_lcl / cape_or_w_ref)^2)`` is ≈1 only where
+    # ``w_grid ≈ 0`` and →0 wherever the bridge supplies a real grid-scale
+    # ``w`` — so in any 3-D run with resolved ascent the OR branch
+    # vanishes and KF uses the pure w-trigger unchanged (preserving its
+    # documented response to resolved divergence).  Set
+    # ``cape_or_threshold = inf`` to disable the fallback entirely.
+    # See KainFritschConfig.
+    w_absent = jnp.exp(
+        -(w_grid_at_lcl / jnp.maximum(config.cape_or_w_ref, 1e-30)) ** 2
+    )
+    cape_or_weight = w_absent * cape_trigger(
+        cape, config.cape_or_threshold, config.cape_or_sharpness,
+    )
+    fire_weight = jnp.maximum(trigger_weight, cape_or_weight)
+    overall_weight = fire_weight * cape_weight
 
     # -- Cloud-base mass flux closure: CAPE / cape_consumption_time --------
     # Following Kain (2004) §3 — the cloud-base mass flux is

@@ -51,6 +51,38 @@ def _make_unstable_column(nlev=20, ncol=4):
     return T, q_v, p_full, p_half
 
 
+def _make_saturated_unstable_column(nlev=20, ncol=4):
+    """Unstable column with a GENUINELY (super)saturated lower troposphere.
+
+    Identical thermal/pressure structure to ``_make_unstable_column`` but
+    with RH = 1.05 below ``sigma = 0.7`` so the boundary layer is supersaturated.
+    Saturation-clipping adjustment schemes (DCA, SBM) only condense — and hence
+    only DRY — where the parcel is at/above saturation; the subsaturated
+    (RH <= 0.95) ``_make_unstable_column`` fixture does NOT physically condense
+    under a correct moist-adiabatic pair solve, so a drying assertion against it
+    is testing the wrong premise.  (The previous DCA two-level solve dried that
+    subsaturated column only as a side effect of over-cooling the lower pair
+    member — the exact inconsistency removed by the simultaneous 2x2 enthalpy +
+    lapse solve in ``dca.py``.)
+    """
+    p_s = 1.0e5
+    sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+    sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
+    p_half = jnp.broadcast_to((sigma_half * p_s)[None, :], (ncol, nlev + 1))
+    p_full = jnp.broadcast_to((sigma_full * p_s)[None, :], (ncol, nlev))
+
+    T_sfc = 300.0
+    T = T_sfc * jnp.clip(sigma_full, 0.01, None) ** 0.19
+    T = jnp.maximum(T, 200.0)
+    T = jnp.broadcast_to(T[None, :], (ncol, nlev))
+
+    q_sat = saturation_mixing_ratio(T, p_full)
+    RH = jnp.where(sigma_full[None, :] > 0.7, 1.05, 0.5)
+    q_v = RH * q_sat
+
+    return T, q_v, p_full, p_half
+
+
 def _make_stable_column(nlev=20, ncol=4):
     """Build a strongly stable, dry isothermal column."""
     p_s = 1.0e5
@@ -606,8 +638,17 @@ def test_drying_in_unstable_column(scheme):
     without locking to a specific level (different schemes peak their
     drying at different heights: SBM/DCA in the BL, mass-flux/EDMF
     higher up via compensating subsidence).
+
+    Saturation-clipping schemes (DCA) use a (super)saturated fixture: they
+    only condense where the parcel is at/above saturation, so a drying
+    assertion against the subsaturated ``_make_unstable_column`` would test
+    a non-physical premise (it passed before only because the old DCA pair
+    solve over-cooled the lower member; see ``dca.py`` 2x2 solve).
     """
-    T, q_v, p_full, p_half = _make_unstable_column()
+    if scheme == "dca":
+        T, q_v, p_full, p_half = _make_saturated_unstable_column()
+    else:
+        T, q_v, p_full, p_half = _make_unstable_column()
     out = _call_scheme(scheme, T, q_v, p_full, p_half)
     min_dqv = float(jnp.min(out.dq_v_dt))
     assert min_dqv < -1e-10, (
@@ -797,7 +838,15 @@ def test_kuo_column_moistening_budget_matches_design():
 
     ncol, nlev = 4, 20
     p_s = 1.0e5
-    sigma_h = jnp.linspace(0.0, 1.0, nlev + 1)
+    # Keep the whole column in the troposphere (300–1000 hPa).  Kuo now
+    # multiplies its tendencies by ``stratosphere_mass_flux_gate`` (≈1
+    # below ~100 hPa, →0 above) to stop the thin upper-model layers from
+    # overheating; a column that reached p < 100 hPa would have its
+    # moistening gated down there and the exact column-budget invariant
+    # this test checks would (correctly) no longer hold.  Restricting the
+    # fixture to p ≥ 300 hPa keeps the gate ≈ 1 everywhere so the design
+    # budget is exercised cleanly.
+    sigma_h = jnp.linspace(0.3, 1.0, nlev + 1)
     sigma_f = 0.5 * (sigma_h[:-1] + sigma_h[1:])
     p_full = jnp.broadcast_to((sigma_f * p_s)[None, :], (ncol, nlev))
     p_half = jnp.broadcast_to((sigma_h * p_s)[None, :], (ncol, nlev + 1))

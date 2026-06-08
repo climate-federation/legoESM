@@ -183,6 +183,265 @@ class PrognosticSpectralConfig(NamedTuple):
     tau_decay: float = 86400.0
 
 
+class E3SMOrographicConfig(NamedTuple):
+    """Configuration for the E3SM/CAM orographic source (``gw_oro_src``).
+
+    Faithful to ``components/eam/src/physics/cam/gw_oro.F90``.
+
+    Fields
+    ------
+    sgh_default : float
+        Default subgrid orographic standard deviation [m] used when no
+        per-column ``sgh`` is supplied (default 0.0 -> no oro waves).
+        ``hdsp = 2 * sgh`` is the streamline displacement height.
+    oro_min_h : float
+        Minimum displacement height ``hdsp`` for orographic waves [m]
+        (``orohmin`` in oracle, default 10).
+    oro_min_wind : float
+        Minimum source-level wind for orographic waves [m/s]
+        (``orovmin`` in oracle, default 2).
+    """
+    sgh_default: float = 0.0
+    oro_min_h: float = 10.0
+    oro_min_wind: float = 2.0
+
+
+class E3SMFrontalConfig(NamedTuple):
+    """Configuration for the E3SM/CAM frontal source (``gw_cm_src``).
+
+    Faithful to ``components/eam/src/physics/cam/gw_front.F90``.
+
+    Fields
+    ------
+    taubgnd : float
+        Background source strength [Pa] (default 1.5e-3, CAM ``taubgnd``).
+    frontgfc : float
+        Frontogenesis-function critical threshold [K^2/(m^2 s)]
+        (default 1.0e-10, CAM ``frontgfc``).
+    c0 : float
+        Gaussian width in phase speed [m/s] (default 30.0, CAM ``c0``).
+    launch_p : float
+        Pressure [Pa] of the wave LAUNCH interface ``kbot`` (E3SM ``kbotbg``,
+        the interface nearest 500 hPa; default 5.0e4).
+    front_p : float
+        Pressure [Pa] of the frontogenesis TRIGGER level ``kfront`` (E3SM
+        ``kfront``, the level near 600 hPa where ``frontgf`` is tested;
+        default 6.0e4).  E3SM tests the trigger at ``kfront`` but launches at
+        ``kbot`` — these are NOT the same level.
+    """
+    taubgnd: float = 1.5e-3
+    frontgfc: float = 1.0e-10
+    c0: float = 30.0
+    launch_p: float = 5.0e4
+    front_p: float = 6.0e4
+
+
+class E3SMBeresConfig(NamedTuple):
+    """Configuration for the E3SM/CAM Beres (2004) convective source.
+
+    Faithful to ``components/eam/src/physics/cam/gw_convect.F90``
+    (``gw_beres_src``) and the namelist defaults in ``gw_drag.F90``.
+
+    The Beres source builds the launched phase-speed spectrum from the
+    deep-convective heating profile: the heating depth ``hdepth`` and the
+    maximum heating rate ``q0`` index an OFFLINE-generated mean-flux lookup
+    table ``mfcc(hdepth, uh, c)`` (the ``newmfspectra*.nc`` /
+    ``gw_drag_file`` netcdf, variable ``mfcc``).  That table is NOT bundled
+    with this repository, so a documented analytic stand-in spectrum is used
+    by default (``use_stand_in_table=True``); set ``mfcc_table`` to the real
+    table array to recover bit-faithfulness with E3SM (see ``gw_beres_src``).
+
+    Fields
+    ------
+    cf : float
+        Heating-rate conversion factor ``CF`` (E3SM ``gw_convect_hcf``,
+        default 20.0) used to scale the convective heating into the source
+        amplitude ``q0 = CF * max(netdt)``.
+    hdepth_scaling_factor : float
+        Tunable multiplier on the diagnosed heating depth (E3SM
+        ``hdepth_scaling_factor``, default 1.0).
+    al : float
+        Averaging length ``AL`` [m] in the source amplitude
+        ``tau0 = mfcc * q0^2 / AL`` (E3SM ``AL = 1.0e5``, default 1.0e5).
+    hdepth_min_km : float
+        Minimum heating depth [km] for a non-zero source (E3SM ``2.5``,
+        default 2.5).  Below this the column launches no convective waves.
+    z_heat_max : float
+        Maximum altitude [m] of the heating-depth search window (E3SM
+        ``20000``, default 20000.0).
+    storm_speed_min : float
+        Storm-speed floor [m/s] below which the cell speed ``CS`` is zero
+        (E3SM ``10``, default 10.0).
+    source_wind_p : float
+        Pressure [Pa] of the source-wind level ``k700`` (E3SM selects the
+        level nearest 700 hPa; default 7.0e4).  The 700 hPa winds set the
+        source direction and the storm speed.
+    maxh : int
+        Heating-depth table dimension (E3SM ``maxh = 20``); the diagnosed
+        ``hdepth`` [km] is clamped to ``[1, maxh]`` and rounded to index it.
+    maxuh : int
+        Mean-wind table half-dimension (E3SM ``maxuh = 40``); ``uh`` is
+        clamped to ``[-maxuh, maxuh]`` and rounded to index the table.
+    use_stand_in_table : bool
+        When ``True`` (default) use the documented analytic stand-in
+        spectrum (a normalized Gaussian in phase speed, peak ``mfcc_peak``,
+        width ``mfcc_c0``) so the scheme RUNS and is testable WITHOUT the
+        offline E3SM table.  This is NOT bit-faithful to Beres (2004); it
+        reproduces the ALGORITHM with a clearly-labelled placeholder table.
+        Set ``False`` and supply ``mfcc_table`` for the real lookup.
+    mfcc_peak : float
+        Peak value of the analytic stand-in ``mfcc`` spectrum
+        [kg m^-1 s^-2 per (K/s)^2 ... normalized], default 1.0e-2.  Only
+        used when ``use_stand_in_table=True``.
+    mfcc_c0 : float
+        Phase-speed width [m/s] of the analytic stand-in Gaussian
+        (default 30.0).  Only used when ``use_stand_in_table=True``.
+    mfcc_hdepth_growth : float
+        Fractional growth of the stand-in spectrum amplitude per km of
+        heating depth (default 0.05), a documented monotone surrogate for
+        the real table's deepening-convection dependence.  Only used when
+        ``use_stand_in_table=True``.
+    mfcc_uh_slope : float
+        Fractional change of the stand-in spectrum amplitude per (m/s) of the
+        heating-region mean wind ``uh`` (default 0.0 -> uh-independent).  The
+        real E3SM ``mfcc`` table depends on ``uh`` (the source spectrum tilts
+        with the background wind); the default stand-in is uh-independent for
+        simplicity, but a non-zero slope makes the stand-in exercise the
+        ``uh`` table-column lookup (used by the oracle harness to validate
+        that the ``uh_idx``/``uh_col`` mapping is correct).  Only used when
+        ``use_stand_in_table=True``.
+    """
+    cf: float = 20.0
+    hdepth_scaling_factor: float = 1.0
+    al: float = 1.0e5
+    hdepth_min_km: float = 2.5
+    z_heat_max: float = 20000.0
+    storm_speed_min: float = 10.0
+    source_wind_p: float = 7.0e4
+    maxh: int = 20
+    maxuh: int = 40
+    use_stand_in_table: bool = True
+    mfcc_peak: float = 1.0e-2
+    mfcc_c0: float = 30.0
+    mfcc_hdepth_growth: float = 0.05
+    mfcc_uh_slope: float = 0.0
+
+
+class E3SMCAMConfig(NamedTuple):
+    """Configuration for the faithful E3SM/CAM gravity-wave scheme.
+
+    Drives the ``gw_prof`` + ``gw_drag_prof`` spectral solver
+    (``components/eam/src/physics/cam/gw_common.F90``) and selects the
+    wave source(s).  All tunables match the CAM namelist / module
+    parameters; magic numbers from ``gw_common.F90`` (``dback``,
+    ``taumin``, ``umcfac``, ``ubmc2mn``, ``n2min``) are kept as named
+    fields here so no literal lives in the JAX body (repo rule).
+
+    Fields
+    ------
+    source : str
+        Wave source: ``"orographic"`` (McFarlane c=0), ``"frontal"``
+        (uniform Gaussian spectrum tied to frontogenesis), or
+        ``"convective"`` (Beres 2004 source from the deep-convective
+        heating profile).  The Beres convective source's full
+        bit-faithfulness needs an offline ``mfcc`` lookup table that is not
+        bundled with the repo; by default ``"convective"`` runs with a
+        documented analytic stand-in spectrum (see ``E3SMBeresConfig``).
+    pgwv : int
+        Half-width of the phase-speed spectrum (waves -pgwv..pgwv).
+        ``pgwv=0`` is the single-wave (orographic) path; ``pgwv>0`` the
+        full spectral path.  (default 0)
+    dc : float
+        Phase-speed bin width [m/s] (default 2.5, CAM ``dc``).
+    kwv : float
+        Effective horizontal wavenumber [1/m] (default 2*pi/1e5).
+    fcrit2 : float
+        Critical Froude number squared (default 1.0, CAM ``fcrit2``).
+    effgw : float
+        Tendency efficiency factor applied to the drag (default 0.125,
+        CAM orographic ``effgw_oro``; frontal uses ``effgw_cm``).
+    alpha_newtonian : float
+        Newtonian-cooling coefficient [1/s] used uniformly at all
+        interfaces (default 0.0 -> off; CAM uses a height profile).
+    dback : float
+        Background diffusivity [m^2/s] (``gw_common`` parameter, 0.05).
+    taumin : float
+        Minimum non-zero stress [Pa] (``gw_common`` parameter, 1e-10).
+    umcfac : float
+        Max fraction of ``|c-u|`` the wind may change per step
+        (``gw_common`` parameter, 0.5).
+    ubmc2mn : float
+        Minimum ``(u-c)^2`` [m^2/s^2] (``gw_common`` parameter, 0.01).
+    tndmax_per_day : float
+        Maximum wind tendency before efficiency [m/s/day]
+        (``gw_common`` 400 for spectral, 500 for oro-only).
+    n2min : float
+        Minimum N^2 [1/s^2] (``gw_prof`` parameter, 1e-8).
+    dttke_use_intrinsic : bool
+        KE->thermal heating form for the spectral path.  ``False`` (default)
+        matches the pinned E3SM-3.0.1 oracle ``dttke = sum_l c_l*gwut_l``
+        (gw_common.F90:727).  ``True`` uses the newer CAM/EAM-trunk
+        intrinsic-frequency form ``sum_l (c_l - ubm)*gwut_l``.
+    use_newtonian_profile : bool
+        When ``True`` use the E3SM height-dependent Newtonian-cooling
+        profile (``alpha0``/``palph`` from gw_drag.F90, interpolated to the
+        column interface pressures) in the spectral saturation/diffusivity
+        instead of the single uniform ``alpha_newtonian``.  ``False``
+        (default) keeps the uniform value so the clean oracle comparison is
+        unchanged.  E3SM uses the profile for spectral sources and a tiny
+        floor (1e-6 1/s) for orographic-only.
+    do_eddy_diffusion : bool
+        When ``True`` (spectral path only) apply the GW-induced eddy
+        diffusion of dry static energy (``gw_ediff`` + ``gw_diff_tend``,
+        gw_diffusion.F90): the ``dttdf`` heating term is added to ``dT_dt``.
+        ``False`` (default) leaves ``dT_dt`` as the KE->heat ``dttke`` term
+        only (matching the momentum-only oracle).
+    do_energy_conservation : bool
+        When ``True`` (spectral path only) apply the C.-C. Chen column
+        momentum & energy fixer (``momentum_energy_conservation``,
+        gw_common.F90) so the column total-energy budget self-closes to
+        machine precision.  ``False`` (default) leaves the raw tendencies.
+    prndl : float
+        Inverse Prandtl number for the GW eddy diffusivity (E3SM
+        ``prndl = 0.25``, gw_diffusion.F90).
+    egwd_max : float
+        Cap on the GW eddy diffusivity at interfaces [m^2/s] (E3SM
+        ``150``, gw_diffusion.F90).
+    ediff_kbot_p : float
+        Pressure [Pa] of the eddy-diffusion bottom level ``kbotbg`` (E3SM
+        selects the interface nearest 500 hPa; default 5.0e4).
+    orographic : E3SMOrographicConfig
+        Orographic source sub-config.
+    frontal : E3SMFrontalConfig
+        Frontal source sub-config.
+    beres : E3SMBeresConfig
+        Convective (Beres 2004) source sub-config.
+    """
+    source: str = "orographic"
+    pgwv: int = 0
+    dc: float = 2.5
+    kwv: float = 2.0 * math.pi / 1.0e5
+    fcrit2: float = 1.0
+    effgw: float = 0.125
+    alpha_newtonian: float = 0.0
+    dback: float = 0.05
+    taumin: float = 1.0e-10
+    umcfac: float = 0.5
+    ubmc2mn: float = 0.01
+    tndmax_per_day: float = 400.0
+    n2min: float = 1.0e-8
+    dttke_use_intrinsic: bool = False
+    use_newtonian_profile: bool = False
+    do_eddy_diffusion: bool = False
+    do_energy_conservation: bool = False
+    prndl: float = 0.25
+    egwd_max: float = 150.0
+    ediff_kbot_p: float = 5.0e4
+    orographic: E3SMOrographicConfig = E3SMOrographicConfig()
+    frontal: E3SMFrontalConfig = E3SMFrontalConfig()
+    beres: E3SMBeresConfig = E3SMBeresConfig()
+
+
 class GWDMLEmulatorConfig(NamedTuple):
     """Configuration for ML-based GWD emulator.
 
@@ -221,7 +480,8 @@ class GravityWaveDragConfig(NamedTuple):
     ------
     scheme : str
         Active GWD scheme: "rayleigh", "lindzen", "mcfarlane",
-        "hines", "prognostic_spectral", "ml_emulator", or "none".
+        "hines", "prognostic_spectral", "e3sm_cam", "ml_emulator",
+        or "none".
     rayleigh : RayleighConfig
         Configuration for Rayleigh friction scheme.
     lindzen : LindzenConfig
@@ -232,6 +492,8 @@ class GravityWaveDragConfig(NamedTuple):
         Configuration for Hines Doppler-spread scheme.
     prognostic_spectral : PrognosticSpectralConfig
         Configuration for prognostic spectral scheme.
+    e3sm_cam : E3SMCAMConfig
+        Configuration for the faithful E3SM/CAM gw_drag_prof scheme.
     ml_emulator : GWDMLEmulatorConfig
         Configuration for ML emulator scheme.
     """
@@ -241,4 +503,5 @@ class GravityWaveDragConfig(NamedTuple):
     mcfarlane: McFarlaneConfig = McFarlaneConfig()
     hines: HinesConfig = HinesConfig()
     prognostic_spectral: PrognosticSpectralConfig = PrognosticSpectralConfig()
+    e3sm_cam: E3SMCAMConfig = E3SMCAMConfig()
     ml_emulator: GWDMLEmulatorConfig = GWDMLEmulatorConfig()

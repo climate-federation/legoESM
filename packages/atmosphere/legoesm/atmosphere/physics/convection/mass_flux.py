@@ -133,19 +133,37 @@ def _compute_cape_diagnostics(
     return T_moist, cape, convective_mask
 
 
-def _compute_centered_gradients(
+def _compute_subsidence_gradients(
     T: jax.Array,
     q_v: jax.Array,
     z: jax.Array,
 ) -> Tuple[jax.Array, jax.Array]:
-    """Centered vertical gradients with zero edges via ``jnp.pad``.
+    """Upstream (upwind) vertical gradients for compensating subsidence.
 
-    Single Pad HLO op vs. allocate-zeros + scatter. Returns
-    ``(dT_dz, dq_dz)``, both shape ``(ncol, nlev)``.
+    The compensating-subsidence tendency ``(M/ρ) ∂φ/∂z`` is a vertical
+    *advection* by the environmental descent that balances the updraft
+    mass flux (environment sinks, ``w_env = −M/ρ < 0``).  Differencing
+    that advection with a **centered** stencil under the model's
+    forward-Euler step is unconditionally unstable: it neither sees nor
+    damps the 2Δz mode, so the moisture field develops a level-to-level
+    checkerboard (small, bounded negative ``q_v`` at low mass flux) that
+    diverges to NaN once the mass flux is large enough — which is why the
+    mass-flux-family schemes had to be held below an artificially tight
+    ``M_b_max`` cap, starving their convective heating and leaving the
+    free troposphere tens of K too cold and super-adiabatic.
+
+    Subsidence is downward, so the upstream cell is the one *above*
+    (lower index, higher ``z``).  The donor-cell gradient at level ``k``
+    is ``(φ[k-1] − φ[k]) / (z[k-1] − z[k])``; the model-top level (no
+    cell above) gets a zero gradient, consistent with the mass-flux
+    profile vanishing there.  This is the upstream differencing of
+    Tiedtke (1989, §5): monotone, positivity-preserving, and stable
+    under CFL ``(M/ρ)·dt/dz ≤ 1``.  Returns ``(dT_dz, dq_dz)``, both
+    shape ``(ncol, nlev)``.
     """
-    dz_centered = jnp.clip(z[:, :-2] - z[:, 2:], 1.0, None)
-    dT_dz = jnp.pad((T[:, :-2] - T[:, 2:]) / dz_centered, ((0, 0), (1, 1)))
-    dq_dz = jnp.pad((q_v[:, :-2] - q_v[:, 2:]) / dz_centered, ((0, 0), (1, 1)))
+    dz_up = jnp.clip(z[:, :-1] - z[:, 1:], 1.0, None)  # z[k-1]-z[k] > 0
+    dT_dz = jnp.pad((T[:, :-1] - T[:, 1:]) / dz_up, ((0, 0), (1, 0)))
+    dq_dz = jnp.pad((q_v[:, :-1] - q_v[:, 1:]) / dz_up, ((0, 0), (1, 0)))
     return dT_dz, dq_dz
 
 
@@ -228,7 +246,7 @@ def _apply_mass_flux_kernel(
     instantly.
     Unit check: (1/m) * (kg/m²/s) * (kg/kg) / (kg/m³) = 1/s × kg/kg.
     """
-    dT_dz, dq_dz = _compute_centered_gradients(T, q_v, z)
+    dT_dz, dq_dz = _compute_subsidence_gradients(T, q_v, z)
     rho_safe = jnp.clip(rho, 0.01, None)
 
     # Per-level mass-flux cap.  The plume integrator can yield ``M_u``

@@ -53,7 +53,9 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 from legoesm.atmosphere.physics.convection.config import KuoConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
-from legoesm.atmosphere.physics._shared import safe_divide
+from legoesm.atmosphere.physics.convection.mass_flux import (
+    stratosphere_mass_flux_gate,
+)
 
 
 def kuo_convection(
@@ -125,94 +127,90 @@ def kuo_convection(
     # ``dq_c_conv_dt = 0`` whenever MC = 0 — no spurious heating,
     # no destroyed vapor, no created cloud water.
     mc_gate = jnp.tanh(MC / jnp.clip(config.me_threshold, 1e-30, None))
-    dT_dt = (
+    # Desired relaxation heating toward the moist adiabat (Kuo closure),
+    # gated by the trigger and the MC-proportional factor.
+    desired_heating = (
         trigger[:, None] * mc_gate[:, None]
         * config.alpha_heat
         * (T_moist - T)
         / config.tau_relax_s
-    )  # (ncol, nlev)
+    )  # (ncol, nlev) [K/s]
 
-    # 6. Moistening tendency (budget-consistent with heating)
+    # 6. External moistening source (the ``(1 - alpha_heat)`` Kuo branch)
     #
-    # The column moisture excess MC is the scheme's internal source.
-    # Fraction ``alpha_heat`` becomes condensational heating — this is
-    # the cloud-water source rate handed to microphysics through
-    # ``dq_c_conv_dt`` (see step 7). Fraction ``(1 - alpha_heat)``
-    # appears as a column-distributed vapor source representing
-    # external moistening implicit in Kuo's design (surface evaporation
-    # / large-scale moisture convergence).
-    #
-    # We distribute the moistening budget proportional to the local
-    # subsaturation deficit, then normalize so the column integral
-    # exactly equals (1 - alpha_heat) * MC / tau_relax_s.
-
-    # Implied condensation rate from heating (moisture sink, kg/kg/s).
-    # This is the per-level rate at which Kuo converts vapor to cloud
-    # water by latent heat balance: c_pd * dT_dt = L_v * (-dq_v) for
-    # the condensation contribution. Microphysics receives this
-    # directly via ``dq_c_conv_dt`` so it can process the convective
-    # condensate through its full chain (autoconversion, sedimentation,
-    # evaporation) rather than the legacy assumption that all of it
-    # falls instantly to the surface.
-    implied_condensation = dT_dt * constants.c_pd / constants.L_v  # (ncol, nlev)
-
-    # Subsaturation deficit profile for distributing moistening
+    # Fraction ``(1 - alpha_heat)`` of the column moisture excess appears
+    # as a column-distributed vapor SOURCE (surface evaporation / large-
+    # scale moisture convergence implicit in Kuo's design), distributed
+    # proportional to the local subsaturation deficit and normalized so
+    # the column integral equals ``(1 - alpha_heat) * MC / tau_relax_s``.
+    # ``f = deficit / ∫(deficit·dp/g)`` has units m²/kg, so ``budget · f``
+    # is kg/(kg·s) and ``∫(dq_v · dp/g) = budget``.
     deficit = jnp.maximum(q_sat - q_v, 0.0)  # (ncol, nlev)
     deficit_integral = jnp.sum(deficit * dp, axis=1, keepdims=True) / constants.g  # (ncol, 1)
     deficit_integral_safe = jnp.maximum(deficit_integral, 1e-20)
-
-    # Moistening budget: (1 - alpha_heat) * MC / tau_relax_s [kg/m^2/s]
     moistening_budget = (
         trigger * (1.0 - config.alpha_heat) * MC / config.tau_relax_s
     )  # (ncol,)
+    dq_v_moisten = (
+        moistening_budget[:, None] * (deficit / deficit_integral_safe)
+    )  # (ncol, nlev) [kg/kg/s], >= 0
+    # Cap the per-level moistening so it cannot push a level past
+    # saturation in one step.  When the column is nearly saturated
+    # everywhere, ``deficit_integral`` collapses toward its 1e-20 floor
+    # and the ``deficit / deficit_integral`` normalisation can spike the
+    # one level that still has a sliver of deficit, injecting kilograms of
+    # vapour in a single step — the slow runaway that drove Kuo to a
+    # finite-but-growing instability and eventually NaN in long RCE.
+    # Bounding the source at ``deficit/dt`` is the physically correct
+    # resolution (the implicit moisture-convergence source fills
+    # sub-saturated air; there is nowhere to put it once saturated) and
+    # keeps ``q_v >= 0`` (the source is still non-negative).
+    dq_v_moisten = jnp.minimum(dq_v_moisten, deficit / dt)
 
-    # Distribute moistening proportional to deficit, normalized so the
-    # column integral exactly equals the budget.  With ``f = deficit /
-    # ∫(deficit·dp/g)`` (units m²/kg), ``dq_v_dt = budget · f`` has units
-    # ``kg/(m²·s) × m²/kg = kg/(kg·s)`` ✓ and ``∫(dq_v_dt · dp/g) =
-    # budget · ∫(f · dp/g) = budget · 1`` ✓.  An earlier form multiplied
-    # by an extra ``g/dp`` factor, which gave units ``m²/(kg·s)`` and
-    # under-reported the column moistening budget by a factor of
-    # ``~Σ_k g²/(dp_k · g) = nlev`` — for nlev=20 the column integral
-    # was ~500× smaller than the design intent (audit Codex finding:
-    # 'Kuo moistening-budget distribution has an extra g/dp').
-    dq_v_dt = (
-        moistening_budget[:, None]
-        * (deficit / deficit_integral_safe)
-    )  # (ncol, nlev) [kg/kg/s]
-
-    # Subtract condensation implied by heating
-    dq_v_dt = dq_v_dt - implied_condensation
-
-    # 7. Convective source for cloud water — column integral equals
-    # Kuo's design-intent condensation rate ``trigger * alpha_heat *
-    # MC / tau_relax_s`` (the gross condensation that microphysics
-    # processes), distributed per-level by the implied-condensation
-    # profile from latent heating.
+    # 7. Latent heating, condensation, and POSITIVITY.
     #
-    # Critically the target rate is *MC-gated*: it is zero whenever
-    # MC = 0, so the scheme does **not** create cloud water in
-    # undersaturated columns. (A naive ``max(implied_condensation, 0)``
-    # at every level would create cloud water in an undersaturated
-    # column whenever the smooth sigmoid trigger had any nonzero
-    # value — at the default ``smooth_trigger_sharpness`` and
-    # ``me_threshold`` the trigger is ≈0.475 at MC=0, large enough
-    # to yield a spurious ``dT_dt`` and therefore a spurious
-    # condensation rate from a column with no moisture excess.)
-    #
-    # When MC > 0 the rescaling produces the same column total as the
-    # design-intent formula and the same per-level shape as the
-    # implied-condensation profile (no underreporting of the
-    # moistening fraction).
-    local_cond = jnp.maximum(implied_condensation, 0.0)
-    col_local_cond = jnp.sum(local_cond * dp / constants.g, axis=-1, keepdims=True)
-    target_col_cond = (
-        trigger * config.alpha_heat * MC / config.tau_relax_s
-    )[:, None]
-    # AD-safe column rescaling — see sbm.py for derivation; issue #249.
-    dq_c_conv_dt = local_cond * safe_divide(
-        target_col_cond, col_local_cond, eps=1e-20,
-    )  # (ncol, nlev) [kg/kg/s]
+    # The relaxation heating is supplied by condensation: ``c_pd · dT =
+    # L_v · cond``.  The per-level vapor sink ``cond`` is therefore
+    # ``desired_heating · c_pd / L_v``.  Left unbounded (the previous
+    # implementation), this sink could remove far more vapor than the
+    # column held — in a cold RCE column where ``T_moist − T`` is tens of
+    # K, the implied condensation drove ``q_v`` to −150 g/kg, poisoning
+    # the whole profile.  We cap the *condensation* (positive sink) at
+    # the per-step available vapor ``q_v/dt + moistening`` so a single
+    # forward-Euler step keeps ``q_v >= 0`` exactly, then derive the
+    # REALIZED heating from the capped condensation so latent heating and
+    # the moisture sink stay budget-consistent (no energy injected
+    # without a matching moisture sink).  Where the closure is *cooling*
+    # (``T > T_moist``) the term is an evaporative vapor source and is
+    # passed through unchanged — it cannot drive ``q_v`` negative.
+    cond_signed = desired_heating * constants.c_pd / constants.L_v  # >0 sink, <0 source
+    pos_cond = jnp.maximum(cond_signed, 0.0)
+    neg_cond = jnp.minimum(cond_signed, 0.0)  # <= 0 (evaporative moistening)
+    max_cond = jnp.clip(q_v / dt + dq_v_moisten, 0.0, None)  # available vapor / step
+    pos_cond_lim = jnp.minimum(pos_cond, max_cond)
+    realized_cond = pos_cond_lim + neg_cond  # signed condensation actually applied
+
+    # Realized heating consistent with the realized condensation.
+    dT_dt = realized_cond * constants.L_v / constants.c_pd  # (ncol, nlev) [K/s]
+    # Net vapor tendency: external moistening minus realized condensation.
+    # Guaranteed ``q_v + dt·dq_v_dt >= 0`` by the ``max_cond`` cap above.
+    dq_v_dt = dq_v_moisten - realized_cond
+    # Convective cloud-water source handed to microphysics — only the
+    # positive (condensation) part makes cloud water; non-negative by
+    # construction.
+    dq_c_conv_dt = pos_cond_lim  # (ncol, nlev) [kg/kg/s], >= 0
+
+    # Gate the tendencies out of the stratosphere.  The thin upper-model
+    # layers (small Δp/g) amplify any residual heating into unphysical
+    # spikes — without this the top layer overflowed to NaN in long
+    # fixed-SST RCE — and convective heating/moistening is meaningless
+    # above the tropopause.  ``stratosphere_mass_flux_gate`` is ≈1 in the
+    # troposphere and →0 above ~100 hPa, matching the mass-flux schemes.
+    # Multiplying by a factor in [0, 1] preserves the q_v >= 0 guarantee.
+    strat_gate = stratosphere_mass_flux_gate(p_full)  # (ncol, nlev)
+    dT_dt = dT_dt * strat_gate
+    dq_v_dt = dq_v_dt * strat_gate
+    dq_c_conv_dt = dq_c_conv_dt * strat_gate
 
     # 8. CAPE diagnostic
     cape = compute_cape(T, T_moist, p_full, p_half)  # (ncol,)

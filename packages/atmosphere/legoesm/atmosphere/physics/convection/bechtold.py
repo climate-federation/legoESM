@@ -266,19 +266,78 @@ def bechtold_convection(
     # See ZhangMcFarlaneConfig.M_b_max.
     M_b = jnp.clip(M_b, 0.0, config.M_b_max)
 
-    # -- Per-class entrainment / detrainment profiles ----------------------
+    # -- Per-class entrainment / detrainment profiles (IFS Cy49r1) ---------
+    # Faithful to the IFS bulk-plume formulation (Part IV, Ch. 6, eqs 6.7,
+    # 6.8, 6.9; cross-checked against ecmwf-ifs/openifs cuascn/cuentr):
+    #   E = ε₀ · f_ε · (1.3 − RH) · f_scale ,   f_scale = (q_sat(T̄)/q_sat(T̄_base))³
+    #   D = δ₀ · (1.6 − RH)
+    # The deep branch — what RCE selects — is exactly the IFS deep form.
+    # IFS ties shallow detrainment to the shallow entrainment
+    # (``D_shallow = E_shallow·(1.6 − RH)``); we keep the simpler
+    # prescribed-δ₀ shallow form because the entrainment-tied variant
+    # regressed the column MSE budget on shallow-weighted columns (see the
+    # ``dlt_profile`` comment).  The (1.6 − RH) RH factor is applied to
+    # every class.
+    # The fractional rates [1/m] passed to the plume are the bracketed
+    # height factors times the per-class base rates ``ε₀``/``δ₀``.  The two
+    # physical ingredients the earlier CONSTANT profiles were missing — and
+    # the cause of the deep-plume over-dilution / cold RCE collapse — are:
+    #   (1) the RH factor ``(1.3 − RH)`` (dry environments entrain more,
+    #       moist ones less), and
+    #   (2) the vertical scaling ``f_scale = (q_sat/q_sat_base)³`` which
+    #       decays strongly with height (q_sat drops as the column cools),
+    #       so entrainment is large near cloud base and →0 aloft.
+    # Because δ₀ has no f_scale, aloft ``δ > ε`` and the mass flux turns
+    # over — reproducing the IFS bell-shaped M(z) that peaks in the lower
+    # troposphere and detrains near cloud top instead of diluting the
+    # updraught to neutral buoyancy in the lower troposphere.
+    q_sat_env = saturation_mixing_ratio(T, p_full)               # (ncol, nlev)
+    RH = jnp.clip(q_v / jnp.maximum(q_sat_env, 1e-12), 0.0, 1.3)
+    # Saturation at the lowest model level (surface-last index −1) is the
+    # IFS departure-level base for the f_scale vertical scaling.  This is
+    # the lowest-model-level convention, not the LCL/cloud-base level; the
+    # scheme launches its parcel from the PBL mean / LCL, so f_scale here
+    # decays relative to the surface, which is a deliberately slightly
+    # stronger decay than measuring it from the (higher, cooler) cloud
+    # base would give.
+    q_sat_base = q_sat_env[:, -1:]
+    f_scale = jnp.clip(q_sat_env / jnp.maximum(q_sat_base, 1e-12), 0.0, 1.0) ** 3
+    rh_entr = jnp.clip(1.3 - RH, 0.0, None)                       # eq 6.7
+    rh_detr = jnp.clip(1.6 - RH, 0.0, None)                       # eq 6.8 / 6.9
+    entr_factor = rh_entr * f_scale                              # (ncol, nlev)
+    # Per-class entrainment ε₀ (shallow carries the f_ε=2 factor in its
+    # config default); every class entrains with the same height factor
+    # ``entr_factor = (1.3 − RH)·f_scale`` so ``E_class = ε₀_class ·
+    # entr_factor`` (the deep branch — what RCE selects — is then exactly
+    # eq 6.7).
     eps_per_class = (
         deep_weight[:, None] * config.epsilon_deep
         + shallow_weight[:, None] * config.epsilon_shallow
         + midlevel_weight[:, None] * config.epsilon_midlevel
     )
+    eps_profile = eps_per_class * entr_factor
+
+    # Detrainment uses the per-class δ₀ scaled by the IFS ``(1.6 − RH)``
+    # factor for ALL classes.  The deep branch — what RCE selects — is
+    # then exactly eqs 6.7/6.8.  IFS additionally ties the *shallow*
+    # detrainment to the shallow entrainment (``D_shallow =
+    # E_shallow·(1.6 − RH)``); we keep the simpler prescribed-δ₀ shallow
+    # form here on purpose: tying shallow detrainment to its (large)
+    # entrainment regressed the column MSE budget from ~21 % to ~88 % on
+    # shallow-weighted columns because the mass-flux kernel's
+    # compensating-subsidence term does not balance that large a
+    # detrainment on coarse grids (Codex adversarial review,
+    # IFS-faithfulness iter-2/iter-3).  The shallow-branch deviation is a
+    # documented faithfulness gap; conservation takes precedence (project
+    # rule: mass/energy budgets are hard invariants).  ``dlt_profile`` is
+    # reused for the environmental detrainment kernel below so the plume
+    # mass budget and the detrained-property tendencies stay consistent.
     dlt_per_class = (
         deep_weight[:, None] * config.delta_deep
         + shallow_weight[:, None] * config.delta_shallow
         + midlevel_weight[:, None] * config.delta_midlevel
     )
-    eps_profile = jnp.broadcast_to(eps_per_class, T.shape)
-    dlt_profile = jnp.broadcast_to(dlt_per_class, T.shape)
+    dlt_profile = dlt_per_class * rh_detr
 
     plume = entraining_detraining_plume(
         T, q_v, p_full, p_half, z,
@@ -299,24 +358,30 @@ def bechtold_convection(
     M_u_new = jnp.clip(M_u_new, 0.0, config.M_b_max)
 
     # -- Environmental tendencies (using relaxed M_u) ---------------------
-    delta_0_eff = (
-        deep_weight * config.delta_deep
-        + shallow_weight * config.delta_shallow
-        + midlevel_weight * config.delta_midlevel
-    )
-    # Pass per-column blended delta_0 directly to the kernel — see
-    # tiedtke.py for the rationale.  Multiplying the kernel's full
-    # output by ``delta_0_eff / delta_deep`` would also rescale the
-    # delta-independent subsidence terms.
+    # The detrainment rate that feeds the *environmental* tendencies
+    # (heat/vapor/cloud-water detrained from the plume) MUST be the SAME
+    # height-dependent ``dlt_profile = δ₀·(1.6 − RH)`` that shaped the
+    # plume's mass budget ``dM/dz = (ε − δ)·M`` in
+    # ``entraining_detraining_plume``.  Passing the unscaled per-class δ₀
+    # here while the plume detrained at ``δ₀·(1.6 − RH)`` would account the
+    # detrained MASS and the detrained PROPERTIES with different rates — in
+    # saturated upper layers (RH clipped to 1.3) the environment would
+    # receive plume air at ``1.0·δ₀`` while the plume only shed ``0.3·δ₀``
+    # of mass, a 3.3× over-detrainment that breaks the column MSE / water
+    # bookkeeping (Codex adversarial review, IFS-faithfulness iter-1 HIGH
+    # #1).  Reusing ``dlt_profile`` keeps the plume and the kernel on one
+    # consistent detrainment.  The kernel's subsidence terms are
+    # δ-independent, so a per-level δ here only rescales the genuinely
+    # δ-proportional detrainment terms (see ``_apply_mass_flux_kernel``).
     dT_dt, dq_v_dt, _ = _apply_mass_flux_kernel(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, M_u_new,
-        z, rho, delta_0_eff[:, None], M_u_max=config.M_b_max,
+        z, rho, dlt_profile, M_u_max=config.M_b_max,
     )
     rho_safe = jnp.clip(rho, 0.01, None)
     p_gate_qc = stratosphere_mass_flux_gate(p_full)
     dq_c_conv_dt = (
-        delta_0_eff[:, None] * M_u_new * p_gate_qc * plume.q_c_u / rho_safe
+        dlt_profile * M_u_new * p_gate_qc * plume.q_c_u / rho_safe
     )
 
     # -- Optional downdraft (RH-dependent) ---------------------------------
