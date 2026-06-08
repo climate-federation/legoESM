@@ -400,6 +400,58 @@ class KainFritschConfig(NamedTuple):
     # vertical-velocity scale [m/s] at which the fallback is suppressed.
     cape_or_w_ref: float = 0.02
     M_b_max: float = 0.05
+    # --- Faithful KF-Eta (Kain 2004) trigger / closure parameters -------
+    # The default trigger is now the Fritsch-Chappell w-dependent temperature
+    # perturbation DTLCL of Kain (2004), transcribed from WRF
+    # ``module_cu_kfeta.F`` (oracle).  ``faithful_trigger=True`` selects it;
+    # ``False`` recovers the legacy linear ``T_lcl + w_thresh_scale*w -
+    # w_thresh_offset`` trigger for back-compat / existing tuning.
+    faithful_trigger: bool = True
+    # Updraft-source-layer (USL) depth [Pa] mass-weighted for the trigger
+    # parcel.  Oracle DPMIN = 5e3 Pa (~50 hPa, the canonical KF source layer).
+    usl_depth_pa: float = 5.0e3
+    # DTLCL coefficient and exponent (Kain 2004 Eq. 1: DTLCL = c * WKL^p, K).
+    dtlcl_coeff: float = 4.64
+    dtlcl_exponent: float = 0.33
+    # Reference vertical velocity for the LCL-height threshold (Kain 2004
+    # Eq. 2: WKLCL = wklcl_ref * min(ZLCL, z_ref)/z_ref) [m/s] and [m].
+    wklcl_ref: float = 0.02
+    wklcl_zref: float = 2.0e3
+    # Grid length the DTLCL formula is calibrated for [m] (Kain 2004: 25 km;
+    # WKL scales w by DX/dtlcl_ref_dx).  The SCM/idealised bridge passes its
+    # own ``w_grid`` already at-resolution, so dtlcl_dx_scale defaults to 1.
+    dtlcl_dx_scale: float = 1.0
+    # Smooth floor [m/s] on WKL inside the cube-root so the trigger's gradient
+    # w.r.t. w stays finite at WKL->0 (w^(1/3) has infinite slope at 0).  The
+    # power is evaluated as ``(WKL_plus + eps)^p - eps^p`` with WKL_plus a
+    # softplus positive-part, keeping DTLCL ~0 for WKL<=0 and C^1 everywhere.
+    wkl_floor: float = 1.0e-4
+    wkl_softplus_sharpness: float = 1.0e3
+    # Updraft-radius entrainment (Kain 2004 Eq. 5-6).  REI = 0.03/RAD per unit
+    # depth; RAD ramps 1000 m (WKL<=0) -> 2000 m (WKL>=0.1).  We map this to
+    # the bulk-plume fractional entrainment epsilon = entrain_const/RAD [1/m].
+    faithful_entrainment: bool = True
+    entrain_const: float = 0.03
+    rad_min_m: float = 1.0e3
+    rad_max_m: float = 2.0e3
+    rad_wkl_ref: float = 0.1
+    # Convective (CAPE-removal) timescale bounds [s] (oracle TIMEC clamp
+    # [1800, 3600]).  The SCM/idealised bridge does not expose the LCL/
+    # mid-trop wind that sets TIMEC=DX/VCONV, so ``cape_consumption_time``
+    # (above) is used as the operative TIMEC, clamped into these bounds.
+    timec_min_s: float = 1800.0
+    timec_max_s: float = 3600.0
+    # Target residual-CAPE fraction of the closure (oracle FABE lands near
+    # 1.05-STAB .. 0.95-STAB with STAB=0.95, i.e. ~5-10% residual; the
+    # bulk one-pass closure removes CAPE over TIMEC so this is the nominal
+    # fraction removed per call, used only for diagnostics/documentation).
+    cape_removal_fraction: float = 0.90
+    # Precipitation efficiency as a function of cloud-base height (Kain 2004
+    # / KF eta PEFCBH polynomial), used to split detrained condensate into
+    # rain vs retained cloud water.  Clamped to [pef_min, pef_max].
+    apply_precip_efficiency: bool = True
+    pef_min: float = 0.2
+    pef_max: float = 0.9
 
 
 class EmanuelConfig(NamedTuple):

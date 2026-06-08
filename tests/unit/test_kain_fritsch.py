@@ -121,8 +121,14 @@ def test_kf_trigger_off_when_w_grid_strongly_negative():
     cpp = jnp.zeros((ncol, nlev))
     w_neg = jnp.full((ncol, nlev), -10.0)
     out, _ = kain_fritsch_convection(T, q, pf, ph, w_neg, cpp, dt=300.0)
+    # Heating is suppressed to ~zero under strong subsidence.
     assert float(jnp.max(jnp.abs(out.dT_dt))) < 1e-4
-    assert float(out.convective_mask[0]) < 1e-4
+    # The faithful Fritsch-Chappell trigger (DTLCL=0 for WKL<=0) leaves a
+    # tiny residual smooth-trigger weight from the negative-but-finite LCL
+    # buoyancy margin (sigmoid never reaches exactly 0); it is still ~1e-4,
+    # i.e. strongly off.  The CAPE-OR SCM fallback is killed by the
+    # ``w_absent`` gate (exp(-(−10/0.02)^2) ≈ 0).
+    assert float(out.convective_mask[0]) < 1e-3
 
 
 def test_kf_trigger_smoothness_grad_finite_at_crossing():
