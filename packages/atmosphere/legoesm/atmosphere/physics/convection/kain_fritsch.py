@@ -34,8 +34,10 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.thermodynamics import (
-    parcel_profile_and_cape,
+    compute_cape,
+    compute_moist_adiabat,
 )
 
 from legoesm.atmosphere.physics.convection.config import KainFritschConfig
@@ -182,11 +184,15 @@ def _faithful_dtlcl(
     base = (g_wkl + eps) ** p - (g_zero + eps) ** p
     # Smooth positive part (max(base, 0)) so DTLCL is ~0 for WKL<=0, ~base
     # for WKL>>0, and C^1 at WKL=0.  ``softplus(k*x)/k`` leaves a residual
-    # ``ln(2)/k`` offset at x=0; to drive DTLCL at the WKL=0 cutoff to a
-    # genuinely negligible value (codex review-2 #1) we (a) use a large
-    # ``k`` and (b) SUBTRACT that residual ``ln(2)/k`` and re-apply a second
-    # smooth positive-part so the result is exactly 0 at base=0, non-negative
-    # everywhere, and still C^1.  Net: DTLCL(WKL=0) < 1e-3 K.
+    # ``ln(2)/k`` offset at x=0; the first stage subtracts that residual and a
+    # second smooth positive-part removes the now-negative tail, so the inner
+    # value ``sp`` is exactly 0 at base=0.  The OUTER ``softplus(k*sp)/k`` then
+    # leaves its OWN tiny ``ln(2)/k`` residual, so DTLCL at the WKL=0 cutoff is
+    # NOT exactly 0 but is negligible: ``dtlcl_coeff*ln(2)/dtlcl_pos_sharpness``
+    # ~ 3e-3 K with defaults (codex review-3 #2 — an exact-zero C^1 smooth
+    # positive part does not exist; softplus(0)=ln2>0).  3e-3 K is ~3 orders
+    # below the env-T variation across the LCL, so it does not move the
+    # firing point.
     k = config.dtlcl_pos_sharpness
     sp = (jax.nn.softplus(k * base) - jnp.log(2.0)) / k
     base_pos = jax.nn.softplus(k * sp) / k
@@ -347,14 +353,22 @@ def kain_fritsch_convection(
     # PMIX, not the surface pressure).
     p_usl = _usl_mass_weighted(p_full, p_full, p_half, config.usl_depth_pa)
 
-    # CAPE / parcel profile via the q_v-AWARE shared recipe: dry-adiabatic
-    # below the LCL, moist-adiabatic above (launch humidity = surface q_v),
-    # with virtual-temperature CAPE (codex review-2 #2).  The legacy
-    # saturated-from-base path (compute_moist_adiabat without q_v_base)
-    # lifts a SATURATED surface parcel, spuriously inflating CAPE in
-    # unsaturated columns and over-firing the closure.  ``q_v`` is always
-    # available to KF, so the saturated path is never appropriate here.
-    T_moist, cape = parcel_profile_and_cape(T, p_full, p_half, q_v=q_v)
+    # CAPE / parcel profile launched from the USL-MIXED parcel (codex
+    # review-3 #1): the oracle's ABE is the buoyant energy of the same
+    # ~50-hPa source-layer parcel that the trigger and plume use, NOT a
+    # single surface point.  We lift the USL parcel q_v-aware (dry-adiabatic
+    # below its LCL, moist-adiabatic above, launch humidity = q_usl) and
+    # compute virtual-temperature CAPE — mirroring ``parcel_profile_and_cape``
+    # but with the USL launch state instead of ``T[:, -1]`` / ``q_v[:, -1]``.
+    # The saturated-from-base path would spuriously inflate CAPE in
+    # unsaturated columns (codex review-2 #2).
+    T_moist = compute_moist_adiabat(T_usl, p_full, q_v_base=q_usl)
+    q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
+    q_v_parcel = jnp.minimum(q_usl[:, None], q_sat_parcel)
+    cape = compute_cape(
+        T, T_moist, p_full, p_half,
+        q_v_env=q_v, q_v_parcel=q_v_parcel,
+    )
 
     # -- LCL, LFC, LNB diagnostics -----------------------------------------
     # The trigger LCL is the LCL of the *unperturbed* USL-mixed parcel
