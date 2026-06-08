@@ -199,7 +199,10 @@ def _load_nemo(path, tidx, month=None):
             "n_time": int(ds.sizes.get("time_counter", 1))}
 
 
-def _plot(out_dir, tgt_lat, tgt_lon, fields, ocean):
+def _plot(out_dir, tgt_lat, tgt_lon, fields, ocean, label="legoESM"):
+    """Model | NEMO | Δ maps + zonal means.  ``label`` (e.g. the grid name) is
+    shown in the model-panel titles, the difference title, the legend, and a
+    figure suptitle so the grid is unambiguous in the saved PNGs."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -207,7 +210,7 @@ def _plot(out_dir, tgt_lat, tgt_lon, fields, ocean):
         Lm = np.where(ocean, L, np.nan); Nm = np.where(ocean, N, np.nan)
         vmin = np.nanmin([Lm, Nm]); vmax = np.nanmax([Lm, Nm])
         fig, ax = plt.subplots(1, 3, figsize=(18, 4))
-        for a, dat, ttl in [(ax[0], Lm, f"legoESM {name}"),
+        for a, dat, ttl in [(ax[0], Lm, f"{label} {name}"),
                             (ax[1], Nm, f"NEMO {name}")]:
             im = a.pcolormesh(tgt_lon, tgt_lat, dat, vmin=vmin, vmax=vmax,
                               cmap="RdYlBu_r", shading="auto")
@@ -215,7 +218,9 @@ def _plot(out_dir, tgt_lat, tgt_lon, fields, ocean):
         dmax = np.nanmax(np.abs(Lm - Nm))
         im = ax[2].pcolormesh(tgt_lon, tgt_lat, Lm - Nm, vmin=-dmax, vmax=dmax,
                               cmap="RdBu_r", shading="auto")
-        ax[2].set_title(f"{name} diff (lego-NEMO)"); plt.colorbar(im, ax=ax[2], shrink=0.8)
+        ax[2].set_title(f"{name} diff ({label}-NEMO)")
+        plt.colorbar(im, ax=ax[2], shrink=0.8)
+        fig.suptitle(f"{label} vs NEMO — {name}", fontsize=13)
         fig.tight_layout(); fig.savefig(out_dir / f"{name}_maps.png", dpi=90)
         plt.close(fig)
     # zonal means
@@ -225,8 +230,9 @@ def _plot(out_dir, tgt_lat, tgt_lon, fields, ocean):
     for a, (name, (L, N)) in zip(ax, fields.items()):
         Lz = np.nanmean(np.where(ocean, L, np.nan), axis=1)
         Nz = np.nanmean(np.where(ocean, N, np.nan), axis=1)
-        a.plot(Lz, tgt_lat, label="legoESM"); a.plot(Nz, tgt_lat, label="NEMO")
+        a.plot(Lz, tgt_lat, label=label); a.plot(Nz, tgt_lat, label="NEMO")
         a.set_title(f"zonal-mean {name}"); a.set_ylabel("lat"); a.legend()
+    fig.suptitle(f"{label} vs NEMO — zonal means", fontsize=13)
     fig.tight_layout(); fig.savefig(out_dir / "zonal_means.png", dpi=90)
     plt.close(fig)
 
@@ -247,6 +253,9 @@ def main() -> int:
                         "mean fabricates a hemispheric seasonal dipole.")
     p.add_argument("--res-deg", type=float, default=1.0)
     p.add_argument("--output-dir", type=Path, default=Path("results/omip_nemo/compare"))
+    p.add_argument("--grid-label", type=str, default="legoESM",
+                   help="Grid/run name shown in the map+zonal plot titles "
+                        "(e.g. 'MPAS ico6 5yr+SSS').")
     p.add_argument("--freeze-clamp-C", type=float, default=None,
                    help="Floor legoESM SST at this temperature [deg C] before "
                         "scoring, to mimic NEMO's sea-ice-capped surface "
@@ -303,7 +312,8 @@ def main() -> int:
         "tolerances": _TOL,
     }
     (out / "report.json").write_text(json.dumps(report, indent=2))
-    _plot(out, tgt_lat, tgt_lon, {"SST": (sstL, sstN), "SSS": (sssL, sssN)}, ocean)
+    _plot(out, tgt_lat, tgt_lon, {"SST": (sstL, sstN), "SSS": (sssL, sssN)}, ocean,
+          label=args.grid_label)
     print(f"[verdict] SST match = {sst_v} (RMSE {sst['rmse']:.3f} C, "
           f"bias {sst['bias']:.3f} C, corr {sst['corr']:.3f})")
     print(f"[done] report + plots -> {out}")
