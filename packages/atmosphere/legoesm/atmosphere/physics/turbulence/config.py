@@ -309,6 +309,11 @@ class HoltslagBovilleConfig(NamedTuple):
     sfc_blend_sharpness : float
         Sigmoid sharpness [1/(z/h)] for the surface-layer vs outer-layer
         blend at ``zh=sffrac`` (replaces oracle hard switch).
+    cgs_gate_sharpness : float
+        Sigmoid sharpness [1/(z/h)] for the countergradient in-PBL gate at
+        the lower full level (oracle ``z(k) < pblh`` is a hard step);
+        sharper than the K-profile gate so cgs matches the oracle at the
+        PBL-top interface (default 400).
     stable_blend_sharpness : float
         Sigmoid sharpness [1/(z/L)] for the stable ``zl<=1`` vs ``zl>1``
         blend (replaces oracle hard switch).
@@ -347,9 +352,10 @@ class HoltslagBovilleConfig(NamedTuple):
     # --- smooth-blend sharpnesses (replace oracle hard switches) ---
     pbl_crossing_sharpness: float = 40.0
     sfc_blend_sharpness: float = 80.0
+    cgs_gate_sharpness: float = 400.0
     stable_blend_sharpness: float = 20.0
-    unstable_blend_sharpness: float = 1.0e4
-    unstable_kbfs_threshold: float = 1.0e-4
+    unstable_blend_sharpness: float = 1.0e6
+    unstable_kbfs_threshold: float = 1.0e-5
     arg_floor: float = 0.01
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 

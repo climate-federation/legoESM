@@ -79,9 +79,13 @@ def _pos_cbrt(x: jax.Array) -> jax.Array:
 def _pos_cbrt_jvp(primals, tangents):
     (x,), (dx,) = primals, tangents
     y = jnp.maximum(x, 0.0) ** _ONET
+    # Derivative of max(x,0)**(1/3): exactly 0 for x<0 (the forward is flat),
+    # and (1/3)x**(-2/3) for x>0 with x floored to _GRAD_FLOOR so the slope
+    # near 0 stays finite (codex iter-2 finding 4: don't propagate a positive
+    # slope through the x<0 flat region).
     xf = jnp.maximum(x, _GRAD_FLOOR)
-    dy = (_ONET * xf ** (_ONET - 1.0)) * dx
-    return y, dy
+    slope = jnp.where(x > 0.0, _ONET * xf ** (_ONET - 1.0), 0.0)
+    return y, slope * dx
 
 
 @jax.custom_jvp
@@ -95,8 +99,8 @@ def _pos_sqrt_jvp(primals, tangents):
     (x,), (dx,) = primals, tangents
     y = jnp.sqrt(jnp.maximum(x, 0.0))
     xf = jnp.maximum(x, _GRAD_FLOOR)
-    dy = (0.5 / jnp.sqrt(xf)) * dx
-    return y, dy
+    slope = jnp.where(x > 0.0, 0.5 / jnp.sqrt(xf), 0.0)
+    return y, slope * dx
 
 
 def _safe_cbrt(x: jax.Array) -> jax.Array:
@@ -391,7 +395,10 @@ def hb_diffusivities(
     z_lower = z_full[:, 1:]                       # (ncol, nlev-1)
     zh_lower = z_lower / jnp.clip(h_pbl[:, None], 1.0, None)
     in_pbl = jax.nn.sigmoid(config.sfc_blend_sharpness * (1.0 - zh))
-    in_pbl_cg = jax.nn.sigmoid(config.sfc_blend_sharpness * (1.0 - zh_lower))
+    # Sharper gate for cgs (oracle ``z(k) < pblh`` is a hard step); a
+    # dedicated higher sharpness closes the ~2.5% residual at the PBL-top
+    # interface (codex iter-2 finding 3) while staying differentiable.
+    in_pbl_cg = jax.nn.sigmoid(config.cgs_gate_sharpness * (1.0 - zh_lower))
     pblk = pblk * in_pbl
     cgs = cgs * in_pbl_cg
 
@@ -538,20 +545,25 @@ def _crossing_height(rino, z_full, ricr, sharpness, search_ok, z_top_search):
     # Pair is in the search region only if BOTH levels are allowed.
     pair_ok = search_s[:, :-1] * search_s[:, 1:]
 
-    # Crossing weight: lo still below ricr AND hi at/above ricr, in-region.
-    below_lo = jax.nn.sigmoid(sharpness * (ricr - rino_lo))
-    above_hi = jax.nn.sigmoid(sharpness * (rino_hi - ricr))
-    cross_w = below_lo * above_hi * pair_ok  # (ncol, nlev-1)
-
-    # "Not yet crossed below this pair": cumulative product of below_lo over
-    # all lower pairs (surface-first), so only the FIRST crossing survives.
+    # First-crossing weight, robust to tight straddles (codex iter-2
+    # finding 1).  Define a single per-pair indicator
+    #   crossed[k] = P(rino >= ricr at the UPPER level of pair k)
+    #              = sigmoid(sharpness*(rino_hi - ricr))
+    # and the EXCLUSIVE "not yet crossed below pair k"
+    #   not_crossed[k] = prod_{j<k} (1 - crossed[j]).
+    # The first-crossing weight w[k] = not_crossed[k] * crossed[k] selects
+    # exactly the FIRST pair whose upper level reaches ricr.  Using a single
+    # indicator (no below_lo*above_hi product at the same interface) makes the
+    # weight near-unit even for a tight straddle, and collapses to the next
+    # pair correctly because crossed[k] enters not_crossed[k+1].
+    crossed = jax.nn.sigmoid(sharpness * (rino_hi - ricr)) * pair_ok
     not_crossed = jnp.cumprod(
         jnp.concatenate(
-            [jnp.ones((ncol, 1), rino.dtype), below_lo[:, :-1]], axis=1,
+            [jnp.ones((ncol, 1), rino.dtype), 1.0 - crossed[:, :-1]], axis=1,
         ),
         axis=1,
     )
-    w = cross_w * not_crossed + 1.0e-30  # (ncol, nlev-1)
+    w = not_crossed * crossed  # first-crossing weight per pair
 
     # Interpolated crossing height per pair.
     dRi = rino_hi - rino_lo
@@ -561,17 +573,13 @@ def _crossing_height(rino, z_full, ricr, sharpness, search_ok, z_top_search):
     )
     z_cross = z_lo + frac * (z_hi - z_lo)
 
-    # Treat the search-region top as an EXTRA weighted candidate whose weight
-    # is the "remaining" probability that no real crossing was found,
-    # ``max(0, 1 - sum(first-crossing weights))``.  Any genuine first crossing
-    # -- even a shallow one with cross_w ~ 0.36 -- then dominates the average
-    # instead of being pulled back to the fallback by a hard 0.5 threshold
-    # (codex iter-1 finding 5).  When NO crossing exists the fallback weight
-    # is ~1 and h -> z_top_search (oracle z(pverp-npbl)).
-    w_first = cross_w * not_crossed                  # first-crossing weights
-    fallback_w = jnp.clip(1.0 - jnp.sum(w_first, axis=1), 0.0, 1.0)
+    # Fallback weight = P(no in-region pair ever crossed) = not_crossed past
+    # the top in-region pair = prod over all pairs of (1 - crossed).  ~0 as
+    # soon as ANY in-region interface crosses, ~1 only when rino < ricr
+    # everywhere in-region -> h = z_top_search (oracle z(pverp-npbl)).
+    fallback_w = jnp.prod(1.0 - crossed, axis=1)
     num = jnp.sum(w * z_cross, axis=1) + fallback_w * z_top_search
-    den = jnp.sum(w, axis=1) + fallback_w
+    den = jnp.sum(w, axis=1) + fallback_w + 1.0e-30
     return num / den
 
 
