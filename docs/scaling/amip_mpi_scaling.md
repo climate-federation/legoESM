@@ -464,6 +464,46 @@ changed (implicit_cn already exists + is the production default) → no fidelity
 risk. Production-representative single-GPU ocean throughput: **lat-lon ~400 Mc/s
 (LL192), MPAS ~252 Mc/s (I6)** — both healthy/rising.
 
+## Iteration 15 (2026-06-08): ocean fp64 + MPI survey + hardware ceiling
+
+Ocean fp64 (implicit_cn, single GPU):
+
+| grid         | fp32 Mc/s | fp64 Mc/s | fp64 penalty |
+|--------------|----------:|----------:|-------------:|
+| latlon LL128 |    366    |    132    | 2.8×         |
+| latlon LL192 |    400    |    152    | 2.6×         |
+| MPAS I5      |    147    |     99    | 1.5×         |
+| MPAS I6      |    252    |    200    | 1.26×        |
+
+fp64 penalty is larger for lat-lon (arithmetic-heavy implicit CN solve hits the
+consumer 1/64 fp64 rate harder) than MPAS (memory/gather-bound). Net reversal:
+MPAS fp64 (200) > lat-lon fp64 (152), opposite of fp32. Pick the grid by precision.
+
+Ocean MPI: uses the generic cubed-sphere distributed layout
+(`parallel.distributed` scatter/gather/`make_layout`, tested in
+`tests/ocean/distributed/test_ocean_mpi_conservation.py`) — the SAME multi-device
+path as the atmosphere, so its multi-device scaling is hardware-blocked on this
+1-GPU host (and CPU MPI is sync-barrier-bound, iters 2–3).
+
+### Campaign status / hardware ceiling (this host: 1× RTX 5090 + 24-core CPU)
+
+Major algorithmic wins found + shipped to main:
+- **Atmosphere**: RRTMGP g-point vmap 6.1× (5.96× end-to-end), GPU XLA fatal-flag
+  fix (unblocked all GPU runs), multi-rank Held-Suarez + halo refactor (MPI),
+  full cross-grid single-GPU throughput map.
+- **Ocean**: barotropic `implicit_cn` 1.3–2.5× lever (bench corrected to
+  production), full cross-grid single-GPU map (fp32 + fp64).
+
+Remaining gains are **hardware-bound**, not code-bound on this host:
+- True multi-device strong/weak scaling (cubed-sphere face-sharding, ocean
+  cubed-sphere layout) needs ≥2 GPUs — infra exists + is tested, just can't be
+  wall-clock-benchmarked here.
+- CPU MPI strong scaling is sync-barrier/jitter-bound on a shared node (iters
+  2–3) — a non-blocking halo exchange is the only remaining CPU lever, intricate
+  under mpi4jax's blocking-only JIT API.
+- Closing the remaining single-GPU roofline gap (~30% HBM for structured grids)
+  needs kernel fusion / higher arithmetic intensity — large, diminishing returns.
+
 ## Backlog (campaign)
 
 1. **DONE (iter 3)**: `_exchange_mpi` one-scatter refactor — bit-identical,
