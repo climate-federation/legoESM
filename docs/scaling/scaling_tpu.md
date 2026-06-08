@@ -93,6 +93,32 @@ Notes:
   imports `tests.test_cases.baroclinic_wave`; without it every run silently
   reports `FAILED: No module named 'tests'`.
 
+### Cheap smoke test (v5litepod-4)
+
+Before paying for a full v5e-8 sweep, a 4-chip VM gives a fast, low-cost
+"does it run on real TPU silicon at all" check. On 4 chips the valid
+cubed-sphere device counts are **1 and 2 only** — face sharding needs a
+divisor of the 6-face layout, and neither 4 nor 8 divides 6, so a 4-chip
+slice runs face sharding on 2 of its 4 chips (the other 2 idle).
+
+```bash
+# 1. Create a cheap 4-chip Spot VM (same runtime version as v5e-8).
+GCP_PROJECT=my-proj TPU_ZONE=us-east5-a \
+  ACCELERATOR_TYPE=v5litepod-4 USE_SPOT=1 \
+  bash scripts/cluster/gcp_tpu/create_tpu_vm.sh
+
+# 2. ssh + clone + setup_env.sh as above, then:
+# 3. On the VM: cheap C24/L10 sweep over 1 -> 2 chips (few timing iters).
+bash scripts/cluster/gcp_tpu/run_smoke.sh
+
+# 4. Delete the VM.
+```
+
+`run_smoke.sh` just lowers the `run_bench.sh` defaults (`N_GPUS=2`,
+`STRONG_RESOLUTIONS=24`, `N_LEVELS=10`, short warmup/timing) and writes to
+`results/scaling_tpu_smoke/`. It is a correctness/liveness check only —
+its timing numbers are **not** a meaningful scaling benchmark.
+
 ## Phase 3 results
 
 _Pending real-hardware run._ Fill in SYPD / ms-step / Mcells-s for device

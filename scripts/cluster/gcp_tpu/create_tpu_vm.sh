@@ -15,6 +15,8 @@
 #   GCP_PROJECT=my-proj TPU_ZONE=us-east5-a ./create_tpu_vm.sh
 #   GCP_PROJECT=my-proj ACCELERATOR_TYPE=v6e-8 RUNTIME_VERSION=v2-alpha-tpuv6e \
 #       ./create_tpu_vm.sh
+#   # Cheap 4-chip smoke-test VM (same runtime as v5e-8); pair with run_smoke.sh:
+#   GCP_PROJECT=my-proj ACCELERATOR_TYPE=v5litepod-4 USE_SPOT=1 ./create_tpu_vm.sh
 set -euo pipefail
 
 GCP_PROJECT="${GCP_PROJECT:?set GCP_PROJECT to your Google Cloud project id}"
