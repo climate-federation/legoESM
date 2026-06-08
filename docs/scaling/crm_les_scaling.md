@@ -148,6 +148,37 @@ Remaining gaps are large or hardware-bound (same as the global campaign):
 - **CPU MPI strong scaling** — single-socket memory-bandwidth-bound (global
   campaign's finding); needs multiple sockets/nodes.
 
+## Iteration 7 (2026-06-08): REAL CRM strong scaling — step_halo runs EAGER (100× slow)
+
+**Correction**: iters 1–5 used `bench_mpi_scaling.py`, which computes dynamics on
+**rank 0 only** then `_bcast`s — a reduction/bcast *overhead probe*, NOT real
+domain decomposition. The genuine DD bench is `bench_plane_crm_dd_scaling.py`
+(`step_halo` path, local slabs + halo exchange, strong/weak modes).
+
+Real CRM **strong** scaling (fixed global 48×48×20, x64, CPU):
+
+| np | ms/step | vs np=1 |
+|---:|--------:|--------:|
+| 1 | 68.6 | 1.0× |
+| 2 | **7135** | **104× SLOWER** |
+
+`PlaneCompressibleEulerModel.step_halo` (line ~2794) runs **eager-mode on
+multi-rank by design** — docstring: "mpi4jax sendrecv branch not jit-safe on
+macOS shared-mem." So every op + every halo `sendrecv` dispatches eagerly with a
+host sync ⇒ the 100× blowup. **That caveat does NOT apply on this Linux+MPICH
+host**: mpi4jax `sendrecv` is JIT-safe inside `@jax.jit` here — `voronoi_mpi`'s
+`make_voronoi_mpi_step` already runs mpi4jax collectives inside a jit at scale.
+
+⇒ **The real CRM strong-scaling fix: JIT the multi-rank `step_halo`** (mpi4jax
+halo exchange inside the jit, as `make_voronoi_mpi_step` does). Single-rank
+already routes to the jit'd `step()`. Expected: the 100× eager overhead collapses.
+This is the genuine lever the campaign had been missing (wrong bench).
+
+NEXT (iter 8): JIT the multi-rank `step_halo` path. Validate bit-identical vs the
+eager path (and vs single-rank `step`, which the docstring says is bit-identical
+via `test_halo_equiv_*`); re-measure strong scaling np 1/2/4 fp32+fp64. Codex
+review (dycore/parallel-critical). This is the top CRM lever now.
+
 ## Backlog (deferred / large)
 
 1. LES distributed FFT for MPI (the LASD/spectral-pressure blocker).
