@@ -52,7 +52,7 @@ gcloud compute tpus tpu-vm create "$TPU_NAME" \
   --zone="$TPU_ZONE" \
   --accelerator-type="$ACCELERATOR_TYPE" \
   --version="$RUNTIME_VERSION" \
-  "${spot_flag[@]}"
+  ${spot_flag[@]+"${spot_flag[@]}"}
 
 echo
 echo "Created. Next steps:"
