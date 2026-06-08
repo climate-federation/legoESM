@@ -573,23 +573,51 @@ def emanuel_mixing_tendencies(
     scrit = jnp.maximum(scrit, 0.0)                        # (ncol, nlev)
     scrit_i = scrit[:, :, None]
 
-    # The trapezoidal probability weights (oracle DELP/DELM, lines 665-688)
-    # require neighbour-SIJ comparisons.  We use the documented
-    # simplification: each active mixture's probability weight is
-    # ``|SMID|`` proximity to SCRIT, mass-weighted by the detrainment-level
-    # layer thickness ``dp(j)``.  SMID = min(SIJ, SCRIT) for j>i and
-    # max(SIJ, SCRIT) for j<i.  This preserves the oracle's key property:
-    # mixtures whose neutral-buoyancy fraction is near the critical
-    # fraction carry most of the detrained mass, and the per-origin
-    # weights are renormalised to sum to one.
+    # === Trapezoidal probability weights (oracle DELP/DELM, lines 665-688)
+    # The oracle weights each active mixture by ``(DELP+DELM)·dp(j)`` where
+    # ``DELP=|SJMAX-SMID|``, ``DELM=|SJMIN-SMID|`` are built from the
+    # NEIGHBOUR mixing fractions ``SIJ(i,j±1)`` clamped to the critical
+    # fraction SCRIT.  For the physically-dominant ``j>i`` branch with a
+    # monotone-decreasing SIJ(i,·) (the deep-updraught case) this reduces
+    # exactly to the local SIJ-spread:
+    #
+    #     SMID  = min(SIJ(i,j), SCRIT)
+    #     SJMAX = min(SIJ(i,j+1), SIJ(i,j), SCRIT)
+    #     SJMIN = min(max(SIJ(i,j-1), SIJ(i,j)), SCRIT)
+    #     DELP+DELM = |SJMAX-SMID| + |SJMIN-SMID|
+    #               ≈ |SIJ(i,j+1)-SIJ(i,j)| + |SIJ(i,j-1)-SIJ(i,j)|  (clamped)
+    #
+    # i.e. the mass detrained to level j is proportional to the fraction of
+    # the mixing-fraction SPECTRUM that lands between the neighbouring
+    # neutral-buoyancy fractions — a trapezoidal density that vanishes
+    # where the spectrum is flat (SIJ≈1 deep in the cloud) and peaks where
+    # it crosses the active band near the parcel's detrainment height.
+    # This concentration is the defining feature reproduced here; we build
+    # it with array shifts over the level (j) axis.
     dp_j = dp_first[:, None, :]                            # (ncol,1,nlev) layer Δp
+
+    def shift_up_j(x):    # SIJ(i, j+1): one level higher, top edge clamps
+        return jnp.concatenate([x[:, :, 1:], x[:, :, -1:]], axis=-1)
+
+    def shift_dn_j(x):    # SIJ(i, j-1): one level lower, bottom edge clamps
+        return jnp.concatenate([x[:, :, :1], x[:, :, :-1]], axis=-1)
+
+    sij_jp1 = shift_up_j(SIJ_eff)
+    sij_jm1 = shift_dn_j(SIJ_eff)
+    # j>i branch.
     smid_up = jnp.minimum(SIJ_eff, scrit_i)
+    sjmax_up = jnp.minimum(jnp.minimum(sij_jp1, SIJ_eff), scrit_i)
+    sjmin_up = jnp.minimum(jnp.maximum(sij_jm1, SIJ_eff), scrit_i)
+    # j<i branch (oracle ELSE, lines 677-683).
     smid_dn = jnp.maximum(SIJ_eff, scrit_i)
+    sjmax_dn = jnp.maximum(sij_jp1, scrit_i)
+    sjmin_dn = jnp.maximum(jnp.maximum(sij_jm1, scrit_i), scrit_i)
     smid = j_gt_i * smid_up + (1.0 - j_gt_i) * smid_dn
-    # Weight ∝ |SMID - SCRIT| + |SMID| (a smooth, strictly-positive proxy
-    # for the (DELP+DELM) trapezoid that vanishes far from the critical
-    # fraction), times dp(j) and the active gate.
-    prob_w = (jnp.abs(smid - scrit_i) + jnp.abs(smid)) * dp_j * sij_active
+    sjmax = j_gt_i * sjmax_up + (1.0 - j_gt_i) * sjmax_dn
+    sjmin = j_gt_i * sjmin_up + (1.0 - j_gt_i) * sjmin_dn
+    delp = jnp.abs(sjmax - smid)
+    delm = jnp.abs(sjmin - smid)
+    prob_w = (delp + delm) * dp_j * sij_active
     asij = jnp.sum(prob_w, axis=-1, keepdims=True)         # ASIJ per origin i
     asij = jnp.maximum(asij, 1e-21)
     MENT = MENT_raw * prob_w / asij                        # normalised MENT
