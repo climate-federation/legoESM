@@ -73,9 +73,27 @@ Batched them into ONE `batch_allreduce_mpi([count, u_sum, v_sum], op="sum")`
   Reduce dropped from 15–20 % of the step to ~8–11 %. Codex-reviewed: clean
   (AD-safe, scalar `global_count` shape `()` restored, no scalar-guard break).
 
+## Iteration 3 (2026-06-08): CRM MPI fp32 path + both-precision weak scaling
+
+- `bench_mpi_scaling.py` was float64-only (hardcoded). Added `--precision
+  {float32,float64}` (pre-parsed before the `jax_enable_x64` config call; arrays
+  use a single `_DTYPE`). The per-step `one_step` now batches ALL FOUR per-step
+  reductions (u-sum, v-sum, owned-count, water-mass) into ONE
+  `batch_allreduce_mpi` — the iter-2 idea extended across mean-wind + mass.
+- **Both precisions weak-scale well** (per-rank 48×48×30, total ≈ flat across
+  ranks = ideal weak scaling):
+
+  | precision | np2 total | np4 total | dycore np2 | reduce np2 |
+  |-----------|----------:|----------:|-----------:|-----------:|
+  | float32 | 183.7 ms | 184.6 ms | 161.8 | 21.0 |
+  | float64 | 253.3 ms | 253.7 ms | 230.3 | 21.7 |
+
+  fp32 ~1.4× faster than fp64 (less data movement; CPU fp64≈fp32 compute rate).
+  The CRM is dycore-dominated (≈88 % of step); reduce is now ~11 %.
+
 ## Backlog
 
-1. **NEXT (iter 3)**: batch the REMAINING CRM reductions — `compute_total_water_
+1. **NEXT (iter 4)**: batch the REMAINING CRM reductions — `compute_total_water_
    mass_plane_mpi` is a separate allreduce; ideally batch it together with the
    mean-wind reduction (one allreduce/step) in the production CRM step. Re-measure.
 2. LES dynamic-SGS (LASD) MPI = distributed FFT (the test filter is a sharp

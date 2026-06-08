@@ -37,7 +37,18 @@ from legoesm.grids.plane import create_plane_grid
 from legoesm.grids.vertical import create_stretched_height_coordinate
 from legoesm.parallel.plane_mpi import make_plane_pencil_layout
 
-jax.config.update("jax_enable_x64", True)
+# Precision must be resolved BEFORE any jax array is created, so pre-parse
+# ``--precision`` from argv (argparse runs later, inside main()).  Default
+# float64 preserves the historical behaviour.
+import sys as _sys
+_PRECISION = "float64"
+if "--precision" in _sys.argv:
+    try:
+        _PRECISION = _sys.argv[_sys.argv.index("--precision") + 1]
+    except IndexError:
+        pass
+jax.config.update("jax_enable_x64", _PRECISION == "float64")
+_DTYPE = jnp.float64 if _PRECISION == "float64" else jnp.float32
 
 
 def parse_args():
@@ -50,6 +61,9 @@ def parse_args():
     p.add_argument("--n-warmup", type=int, default=3)
     p.add_argument("--n-bench", type=int, default=30)
     p.add_argument("--label", type=str, default="bench")
+    p.add_argument("--precision", choices=["float32", "float64"],
+                   default="float64",
+                   help="Array/compute precision (jax_enable_x64 set to match).")
     return p.parse_args()
 
 
@@ -83,7 +97,7 @@ def main():
 
     grid = create_plane_grid(
         nx=args.nx, ny=args.ny, nlev=args.nlev,
-        dx=args.dx, dy=args.dx, dtype=jnp.float64,
+        dx=args.dx, dy=args.dx, dtype=_DTYPE,
     )
     hc = create_stretched_height_coordinate(args.nlev, H=20_000., dz_sfc=100.)
     tm = make_flat_plane_terrain_metric(grid, hc)
@@ -95,13 +109,13 @@ def main():
         fix_mass=True, anchor_mass_to_initial=True,
     )
     model = PlaneCompressibleEulerModel(grid, hc, tm, cfg)
-    state = make_rest_state(grid, hc, dtype=jnp.float64)
+    state = make_rest_state(grid, hc, dtype=_DTYPE)
     new_tr = jnp.zeros(
-        (args.ny, args.nx, args.nlev, 3), dtype=jnp.float64,
+        (args.ny, args.nx, args.nlev, 3), dtype=_DTYPE,
     ).at[..., 0].set(0.01)
     state = state._replace(tracers=state.tracers.replace(data=new_tr))
 
-    owned_mask = jnp.zeros((args.ny, args.nx), dtype=jnp.float64)
+    owned_mask = jnp.zeros((args.ny, args.nx), dtype=_DTYPE)
     owned_mask = owned_mask.at[
         layout.iy_start:layout.iy_end,
         layout.ix_start:layout.ix_end,
