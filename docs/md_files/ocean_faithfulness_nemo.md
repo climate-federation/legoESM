@@ -416,6 +416,15 @@ no ice-albedo). **SSS RMSE 5.14 bias −2.49 (BAD)** = the τ=365 surface drift.
 good AMOC/ACC/SST, bad SSS → confirms SSS lever = restoring τ (τ=60 test in flight 8437538). AMOC 24.5 is a
 +40% overshoot vs NEMO; τ=60 (WOA-pinned SSS) may moderate it. ⚠️ **MHT NH peak 4.99 PW** vs obs ~1.8 (2.7× high). Ruled OUT the net-mass-flux×degC-reference term (~0.06 PW: ρcp·1Sv·15°C, too small). Likely the LATITUDE BINNING in `compute_mht_from_state_mpas` (`spinup.py:709-719` sums ALL edges in a 2° band → over-counts the line-integral across one latitude) OR a geometric factor (dvEdge/sinα). Secondary diagnostic (model-side only, not gating any faithfulness claim); needs careful analysis + a unit test on an analytic transport. DEFERRED, not a hand-wave fix.
 
+### iter-C DEFINITIVE 5-yr result (8435879, mpas_ico6_5yr_full: E−P + ICE-ALBEDO + salt-norm, τ=365)
+**SH WARM BIAS FIXED (ice-albedo):** Antarctic SST bias **+2.02→+1.22**, RMSE **2.38→1.55** vs the no-ice
+baseline; global SST **1.98→1.82**, bias **0.43→0.09**, corr 0.984. AMOC 23.9, ACC 136 (good). SSS 5.16
+(τ=365 drift). **VISUAL VERIFY (zonal_means.png, CLAUDE.md):** zonal-mean SST OVERLAPS NEMO at all lats and
+the far SH reaches **−2°C (freezing)** — the ice-albedo confirmed at the PATTERN level, not just RMSE. SST_
+maps Δ pale over most ocean; largest residual = NH subpolar/WBC (coarse-model Gulf-Stream/Kuroshio path,
+−1.7 NH-mid/−1.1 arctic), NOT the SH. No grid artifacts (smooth Voronoi). SSS zonal-mean ~2-3 PSU too fresh
+everywhere = the τ=365 drift (τ=60 run fixes it: live SSS 34.34 vs τ=365's 32.99). PNGs sent to user.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
