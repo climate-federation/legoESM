@@ -3,6 +3,17 @@
 Orographic GWD with smooth sigmoid activation for wave breaking,
 fully differentiable via jax.lax.scan for the vertical stress profile.
 
+.. note::
+
+   **Critical-level treatment (disclosed single-wave simplification).** Like
+   ``mcfarlane.py``, this single-wave (c = 0) scheme deposits most launched
+   momentum below the critical level by saturation breaking; residual stress
+   reaching the critical level (where ``U_proj`` reverses) is absorbed/radiated
+   rather than deposited on the opposing flow, so it slightly under-deposits at
+   a sharp critical level relative to E3SM's spectral solver.  The drag remains
+   a physically-signed, differentiable momentum sink with no spurious
+   acceleration.  See ``mcfarlane.py`` for the full discussion.
+
 References
 ----------
 - Lindzen, R. S. (1981). Turbulence and stress owing to gravity wave and
@@ -108,6 +119,22 @@ def lindzen_gwd(
     )
     tau_sat = jnp.clip(tau_sat, 1e-10, None)
 
+    # Smooth critical-level absorption gate (E3SM gw_common.F90:492
+    # ``where ubmc*(ubi_above - c) > 0``).  The orographic wave has phase
+    # speed c = 0, so a critical level is where the source-projected wind
+    # ``U_proj`` reverses sign.  ``tau_sat ~ |U_proj|^3`` is symmetric in
+    # ``U_proj`` and so does NOT by itself absorb the wave through a reversal
+    # — it merely drops to a small value near ``U = 0`` and recovers above,
+    # which is not the physical critical-level filter (codex round-1 #2).  The
+    # gate is applied to the carried-forward stress inside the scan so the
+    # propagated stress is driven to ~0 AT the critical level regardless of the
+    # saturation ratio, and the upward ``jnp.minimum`` monotonicity keeps it
+    # zero above.  ``crit_gate -> 1`` well below any critical level, so the
+    # forward path is unchanged there.
+    crit_gate = jax.nn.sigmoid(
+        config.crit_level_sharpness * (U_proj - config.crit_level_floor)
+    )
+
     # Top-down scan: propagate stress from surface upward
     # Levels: 0=top, -1=surface. Scan from surface to top (reversed).
     # Breaking occurs smoothly where tau_carry exceeds tau_sat
@@ -132,7 +159,19 @@ def lindzen_gwd(
         f_break = jax.nn.sigmoid(config.Fr_sharpness * excess)
         tau_new = tau_carry * (1.0 - f_break) + tau_sat[:, k] * f_break
         tau_new = jnp.minimum(tau_new, tau_carry)
-        drag = tau_carry - tau_new
+        drag_sat = tau_carry - tau_new
+        # Critical-level absorption (orographic c = 0).  Where the source-
+        # projected wind reverses: (a) stop propagating the stress upward via
+        # the SMOOTH ``crit_gate`` (differentiable absorption), and (b) do NOT
+        # deposit the absorbed pseudomomentum as a force on the reversed flow.
+        # The single-wave drag is rigidly along the source direction, so a HARD
+        # ``U_proj > 0`` positivity mask makes the deposited drag EXACTLY zero in
+        # any reversed layer (the smooth sigmoid alone leaves a tiny accelerating
+        # leak at weakly-negative ``U_proj``) — du/dt·u <= 0 is STRICT.
+        gate_k = crit_gate[:, k]
+        pos_mask = (U_proj[:, k] > 0.0).astype(tau_carry.dtype)
+        tau_new = tau_new * gate_k
+        drag = drag_sat * gate_k * pos_mask
         return tau_new, drag
 
     _, drag_stack = jax.lax.scan(scan_fn, tau_0, jnp.arange(nlev))
@@ -144,6 +183,22 @@ def lindzen_gwd(
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
     dz = jnp.clip(dz, 1.0, None)
     accel = -drag_all / (jnp.clip(rho * dz, 1e-10, None))
+
+    # Tendency limiters (E3SM gw_common.F90:642-643).  ``accel`` is a pure
+    # deceleration along the source direction (``drag_all >= 0``), so it always
+    # opposes the flow; cap its MAGNITUDE without touching its sign:
+    #   1. ``|du/dt| <= umcfac * |c - U_proj| / dt``  (orographic c = 0), so a
+    #      single step never reverses the wind past the (zero) phase speed; and
+    #   2. ``|du/dt| <= tndmax`` an absolute ceiling that kills the
+    #      ``stress/(rho*dz)`` blow-up where the launched stress saturates
+    #      abruptly in a thin / weak-wind surface layer.
+    # AD-safe (``jnp.minimum``/``jnp.abs`` subgradient ops; no NaN/dead grad).
+    # NOTE on conservation: a *post-flux* limiter — where it binds the column
+    # drag no longer exactly equals the stress-flux divergence, but stays a
+    # momentum SINK bounded by the launched surface stress (no source).
+    tndmax = config.tndmax_per_day / 86400.0
+    accel_cap = jnp.minimum(config.umcfac * jnp.abs(U_proj) / dt, tndmax)
+    accel = -jnp.minimum(jnp.abs(accel), accel_cap)
 
     # Project back to (du_dt, dv_dt)
     du_dt = accel * cos_a[:, None]

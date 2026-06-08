@@ -62,12 +62,38 @@ class LindzenConfig(NamedTuple):
         Critical Froude number threshold (default 1.0).
     Fr_sharpness : float
         Sigmoid sharpness for Froude number transition (default 20.0).
+    crit_level_sharpness : float
+        Sigmoid sharpness [s/m] for the smooth critical-level filter
+        (default 10.0).  The orographic wave (c = 0) is absorbed where the
+        source-projected wind ``U_proj`` reverses sign (E3SM
+        gw_common.F90:492 ``where ubmc*(ubi_above - c) > 0``); the earlier
+        ``|U_proj|^3`` saturation alone gave no explicit critical-level
+        absorption.  This smooth gate handles the differentiable absorption of
+        the carried stress; the deposited drag additionally carries a HARD
+        ``U_proj > 0`` positivity mask in the scheme body so ``du/dt*u <= 0`` is
+        enforced STRICTLY (the smooth sigmoid alone is never identically zero).
+    crit_level_floor : float
+        Wind magnitude [m/s] at which the smooth critical-level filter is
+        half-on (default 0.5).
+    tndmax_per_day : float
+        Absolute ceiling on ``|du/dt|`` [m/s/day] (default 500.0, CAM
+        ``tndmax`` for orographic-only; gw_common.F90:161).  Caps the
+        ``stress/(rho*dz)`` accelerations that blow up where the launched
+        stress saturates abruptly in a thin or weak-wind layer.
+    umcfac : float
+        Maximum fraction of ``|c - U_proj|`` (c = 0) the wind may change per
+        step (default 0.5, CAM ``umcfac``; gw_common.F90:642), so a single
+        step cannot reverse the wind past the phase speed.
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
     N_ref: float = 0.01
     critical_Fr: float = 1.0
     Fr_sharpness: float = 20.0
+    crit_level_sharpness: float = 10.0
+    crit_level_floor: float = 0.5
+    tndmax_per_day: float = 500.0
+    umcfac: float = 0.5
 
 
 class McFarlaneConfig(NamedTuple):
@@ -110,6 +136,37 @@ class McFarlaneConfig(NamedTuple):
     tau_max : float
         Upper clip on launch stress [Pa] (default 10.0).  Operationally
         protects against runaway stress in pathological columns.
+    fcrit2 : float
+        Critical Froude number squared (default 1.0, CAM ``fcrit2``).  Used in
+        the McFarlane (1987) / E3SM ``gw_oro_src`` displacement-height cap
+        ``min(h^2, fcrit2*(U/N)^2)`` (gw_oro.F90:166) so the launched
+        streamline-displacement amplitude saturates at the Fr = 1 marginal-
+        instability value rather than the raw orographic height.
+    crit_level_sharpness : float
+        Sigmoid sharpness [s/m] for the smooth critical-level filter
+        (default 10.0).  The orographic wave (phase speed ``c = 0``) is
+        absorbed where the source-projected wind ``U_proj`` reverses sign,
+        i.e. where ``U_proj`` falls below ``crit_level_floor``.  This
+        reproduces the E3SM ``where ubmc*(ubi_above - c) > 0`` critical-level
+        test (gw_common.F90:492) that the earlier ``|U_proj|`` saturation
+        stress silently dropped, letting waves transmit through and
+        accelerate a reversed jet.  Higher values approach a hard cutoff.  This
+        smooth gate handles the differentiable absorption of the carried stress;
+        the deposited drag additionally carries a HARD ``U_proj > 0`` positivity
+        mask in the scheme body so ``du/dt*u <= 0`` is enforced STRICTLY.
+    crit_level_floor : float
+        Wind magnitude [m/s] at which the smooth critical-level filter is
+        half-on (default 0.5).  Below this the source-projected wind is
+        treated as a critical level and the saturation stress is suppressed.
+    tndmax_per_day : float
+        Absolute ceiling on ``|du/dt|`` [m/s/day] (default 500.0, CAM
+        ``tndmax`` for orographic-only; gw_common.F90:161).  Caps
+        physically-implausible accelerations in thin, low-density upper
+        layers where ``stress / (rho*dz)`` blows up.
+    umcfac : float
+        Maximum fraction of ``|c - U_proj|`` the wind may change per step
+        (default 0.5, CAM ``umcfac``; gw_common.F90:642).  Prevents the
+        single-step tendency from reversing the wind past the phase speed.
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
@@ -122,6 +179,11 @@ class McFarlaneConfig(NamedTuple):
     min_wind_sharpness: float = 20.0
     softmin_sharpness: float = 50.0
     tau_max: float = 10.0
+    fcrit2: float = 1.0
+    crit_level_sharpness: float = 10.0
+    crit_level_floor: float = 0.5
+    tndmax_per_day: float = 500.0
+    umcfac: float = 0.5
 
 
 class HinesConfig(NamedTuple):
@@ -141,6 +203,16 @@ class HinesConfig(NamedTuple):
         Saturation momentum flux cap [Pa] (default 0.1).
     doppler_sharpness : float
         Sigmoid sharpness for Doppler saturation (default 50.0).
+    tndmax_per_day : float
+        Absolute ceiling on ``|du/dt|`` [m/s/day] (default 400.0, CAM
+        ``tndmax`` for spectral/non-orographic sources; gw_common.F90:158).
+        Caps the ``Fmax/(rho*dz)`` accelerations that blow up in thin,
+        low-density upper layers where a fixed momentum-flux cap is divided
+        by a tiny ``rho*dz``.
+    umcfac : float
+        Maximum fraction of the local wind magnitude the deposition may
+        remove per step (default 0.5, CAM ``umcfac``; gw_common.F90:642), so
+        the single-step drag cannot reverse the wind.
     """
     rms_gw_speed: float = 1.0
     m_star: float = 2.0 * math.pi / 2e3
@@ -149,6 +221,8 @@ class HinesConfig(NamedTuple):
     Fmax: float = 0.1
     doppler_sharpness: float = 50.0
     U_mag_floor: float = 0.1  # Wind-magnitude floor for projection [m/s]
+    tndmax_per_day: float = 400.0
+    umcfac: float = 0.5
 
 
 class PrognosticSpectralConfig(NamedTuple):
