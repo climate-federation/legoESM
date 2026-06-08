@@ -213,3 +213,33 @@ def test_grad_finite_through_full_scheme():
 
     g = jax.grad(loss)(base[2])
     assert jnp.all(jnp.isfinite(g))
+
+
+def test_grad_matches_finite_difference():
+    """AD gradient w.r.t. surface T matches a centered finite difference.
+
+    Verifies gradient CORRECTNESS (not just finiteness) where the scheme has
+    a broad, non-trivial sensitivity: the surface temperature drives the
+    bulk fluxes -> kbfs -> the whole convective K-profile + PBL height.
+    """
+    col = _build_column("convective")
+    base = [
+        jnp.array(col["u"][None, :]), jnp.array(col["v"][None, :]),
+        jnp.array(col["T"][None, :]), jnp.array(col["q"][None, :]),
+        jnp.array(col["p_mid"][None, :]), jnp.array(col["p_half"][None, :]),
+        jnp.array(col["z_mid"][None, :]), jnp.array(col["z_half"][None, :]),
+        jnp.array([col["T"][-1] + 4.0]), jnp.array([col["q"][-1] + 0.01]),
+        jnp.array((col["p_mid"] / (RAIR * col["T"]))[None, :]),
+    ]
+
+    def loss(T_sfc):
+        a = list(base); a[8] = T_sfc
+        o = holtslag_boville_turbulence(*a, 300.0, HoltslagBovilleConfig())
+        return jnp.sum(o.dT_dt ** 2) * 1e6 + jnp.sum(o.h_pbl)
+
+    T_sfc = base[8]
+    g_ad = float(jax.grad(loss)(T_sfc)[0])
+    eps = 1e-3
+    g_fd = float((loss(T_sfc + eps) - loss(T_sfc - eps)) / (2 * eps))
+    rel = abs(g_ad - g_fd) / (abs(g_fd) + 1e-8)
+    assert rel < 1e-4, f"AD grad {g_ad:.6e} vs FD {g_fd:.6e} (rel {rel:.2e})"
