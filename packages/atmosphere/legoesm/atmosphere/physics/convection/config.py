@@ -66,7 +66,14 @@ class DCAConfig(NamedTuple):
     Fields
     ------
     n_iterations : int
-        Number of adjustment iterations per call (default 1).
+        Number of bottom-to-top adjustment sweeps per call (default 3).
+        A single sweep only partially relaxes a deep column toward the
+        moist adiabat, so one call per physics step leaves the free
+        troposphere several K too cold under steady radiative cooling;
+        free-tropospheric ``mean|T - T_moist|`` falls monotonically with
+        sweeps (≈9.0/8.4/7.3/5.5 K at 1/3/5/10) with the column maximum
+        temperature unchanged (the simultaneous pair solve keeps every
+        sweep enthalpy-conserving and bounded).
     mixing_fraction : float
         Fraction of adjustment applied per iteration (default 1.0).
     cape_threshold : float
@@ -80,7 +87,7 @@ class DCAConfig(NamedTuple):
         ``lax.scan`` sweep (default 10.0).  Lifted from a hardcoded literal
         so the trigger transition width is tunable.
     """
-    n_iterations: int = 1
+    n_iterations: int = 3
     mixing_fraction: float = 1.0
     cape_threshold: float = 100.0
     cape_sharpness: float = 0.1   # sigmoid(-10)≈5e-5 at CAPE=0; 0.5 at threshold
@@ -196,6 +203,23 @@ class ZhangMcFarlaneConfig(NamedTuple):
     parcel_dq: float = 1.0e-3
     epsilon_0: float = 1.0e-3
     delta_0: float = 1.0e-3
+    # --- FAITHFUL ZM dilute-parcel CAPE (Raymond-Blyth 1992) -----------
+    # The ZM trigger and closure use the CAPE of a DILUTE entraining
+    # plume (``buoyan_dilute``/``parcel_dilute`` in zm_conv.F90), not an
+    # undilute moist adiabat.  ``dmpdz`` is the fractional entrainment
+    # rate [1/m] (E3SM/CAM default ``−1.0e-3``; NEGATIVE by the oracle's
+    # ``mp`` sign convention).  ``tiedke_add`` is the buoyancy offset [K]
+    # added at every cloud level (oracle default 0.5 K).  ``tp_fac`` ×
+    # ``parcel_tpert`` is the optional PBL temperature perturbation (both
+    # default 0).  ``pbl_top_pa`` bounds the launch-level (max-MSE)
+    # search to the PBL.  Set ``use_dilute_cape = False`` to recover the
+    # legacy undilute moist-adiabat CAPE.
+    use_dilute_cape: bool = True
+    dmpdz: float = -1.0e-3
+    tiedke_add: float = 0.5
+    tp_fac: float = 0.0
+    parcel_tpert: float = 0.0
+    pbl_top_pa: float = 7.0e4
     enable_cmt: bool = True
     cmt_c_u: float = 0.55
     cmt_c_d: float = 0.55
@@ -278,8 +302,12 @@ class KainFritschConfig(NamedTuple):
     cape_consumption_time: float = 1800.0
     parcel_perturb_T: float = 0.5
     parcel_perturb_q: float = 1.0e-3
-    epsilon_0: float = 2.0e-3
-    delta_0: float = 2.0e-3
+    # Deep-convection entrainment/detrainment (~2e-4 /m).  The earlier
+    # ``2e-3`` (shallow-cumulus range) over-diluted the single plume so it
+    # lost buoyancy in the lower troposphere and could not warm the free
+    # troposphere — see ZhangMcFarlaneConfig / EmanuelConfig.
+    epsilon_0: float = 2.0e-4
+    delta_0: float = 2.0e-4
     cloud_depth_min: float = 4000.0
     cloud_depth_sharpness: float = 1.0e-3
     enable_shallow: bool = True
@@ -287,6 +315,34 @@ class KainFritschConfig(NamedTuple):
     buoyancy_death_memory: bool = False
     cape_threshold: float = 0.0
     cape_sharpness: float = 0.1
+    # CAPE-based OR fallback for the dynamical trigger.  Kain-Fritsch fires
+    # where resolved grid-scale ascent lifts a parcel past its LCL
+    # (``T_lcl + w_thresh_scale·w_grid − w_thresh_offset > T_env``).  In a
+    # single-column model (and any dycore that does not expose a divergence
+    # operator) ``w_grid`` is zero, so the 2 K ``w_thresh_offset`` becomes a
+    # permanent suppression and the scheme never fires — leaving the column
+    # in near-radiative equilibrium.  When the undilute CAPE exceeds
+    # ``cape_or_threshold`` the trigger fires regardless of ``w_grid``.  The
+    # threshold is set to a deliberately EXTREME value (2000 J/kg, deep
+    # maritime-tropical CAPE) with a tight sigmoid so the fallback is a
+    # near-no-op for the moderate-CAPE columns of a 3-D run (≈0.007 at
+    # 1000 J/kg, 0.5 at 2000) — those columns are handled by the resolved
+    # w-trigger, and any 3-D column carrying ≳2000 J/kg essentially always
+    # has the resolved ascent to satisfy it anyway.  The branch therefore
+    # only rescues the ``w = 0`` SCM/idealised case (RCE CAPE ~ 10⁴ J/kg).
+    # Set ``cape_or_threshold = inf`` to disable and recover the pure
+    # w-trigger behaviour exactly.
+    cape_or_threshold: float = 2000.0
+    cape_or_sharpness: float = 0.005
+    # The CAPE-OR fallback is itself gated by the ABSENCE of resolved
+    # grid-scale ascent, ``exp(-(w_grid_at_lcl / cape_or_w_ref)^2)``, so it
+    # only engages where ``w_grid ≈ 0`` (SCM, or a dycore with no
+    # divergence operator).  Wherever the bridge supplies a non-negligible
+    # ``w_grid`` (any 3-D run with resolved ascent) the gate →0 and the
+    # pure w-trigger is used unchanged — so KF's documented response to
+    # resolved divergence is preserved exactly.  ``cape_or_w_ref`` is the
+    # vertical-velocity scale [m/s] at which the fallback is suppressed.
+    cape_or_w_ref: float = 0.02
     M_b_max: float = 0.05
 
 
@@ -360,8 +416,40 @@ class EmanuelConfig(NamedTuple):
     # Emanuel 1991 §3 uses a sub-cloud-layer mixing timescale of
     # several thousand seconds.  The earlier default of 100 s gave
     # M_b ~72× larger than published values and produced 28 MW/m²
-    # of column heating from a CAPE-positive sounding.
+    # of column heating from a CAPE-positive sounding.  NOTE: with the
+    # faithful prognostic DTMA closure (``alpha_closure`` / ``damp_*``)
+    # this field is no longer read by ``emanuel_convection``; it is kept
+    # for back-compat with configs/tests that set it.
     sub_cloud_relaxation: float = 7200.0
+    # --- Prognostic cloud-base mass-flux (CBMF) closure ----------------
+    # FAITHFUL to oracle convect43c.f (CONVECT v4.3c).  CBMF is a
+    # prognostic quantity relaxed each call toward the sub-cloud
+    # quasi-equilibrium:
+    #     CBMF = (1 - DAMP·dt/300)·CBMF_old + 0.1·ALPHA·DTMA   (≥0)
+    # ``alpha_closure`` (ALPHA) and ``damp_coefficient`` (DAMP) are the
+    # oracle's standard values 0.2 and 0.1 (DAMP < 1).  ``dtmax`` (DTMAX)
+    # is the maximum negative temperature perturbation [K] a lifted
+    # parcel is allowed below its LFC (oracle 0.9 K).
+    alpha_closure: float = 0.2
+    damp_coefficient: float = 0.1
+    dtmax: float = 0.9
+    # Width [levels] of the smooth cloud-base-level selector used to read
+    # the parcel buoyancy excess at the LCL for the DTMA closure.  A
+    # narrow Gaussian (≈1 level) localises the buoyancy to cloud base
+    # while staying differentiable.
+    cloud_base_index_width: float = 1.0
+    # Sharpness [1/(kg/m²/s)] of the softplus positive-part applied to the
+    # relaxed CBMF so it is ~0 when the relaxation target goes negative
+    # (stable column) without a hard ``max`` that would kill the gradient.
+    # Large because CBMF magnitudes are O(0.01-0.1) kg/m²/s.
+    cbmf_positive_sharpness: float = 1.0e3
+    # Upper bound [kg/m²/s] on the *carried* prognostic CBMF — looser than
+    # the per-step transport cap ``M_b_max`` so the closure's memory can
+    # ramp to the oracle's deep-tropical CBMF (~0.12 kg/m²/s) instead of
+    # being frozen at ``M_b_max``.  Set well above the oracle peak; the
+    # plume transport is still bounded at ``M_b_max``.  Acts only as an
+    # anti-runaway guard for a persistently violently-unstable column.
+    cbmf_carry_max: float = 0.3
     # Default-OFF.  Emanuel 1991's downdraft re-evaporates a fraction
     # of *precipitation* (rain) back to vapor in the BL.  In a model
     # without an explicit q_r tracer the implementation can only draw
@@ -373,8 +461,18 @@ class EmanuelConfig(NamedTuple):
     enable_unsaturated_downdraft: bool = False
     downdraft_efficiency: float = 0.2
     smooth_trigger_sharpness: float = 0.5
-    epsilon_0: float = 1.5e-3
-    delta_0: float = 1.5e-3
+    # Bulk-plume entrainment/detrainment for the cloud-base updraft.
+    # Deep-convection value (~2e-4 /m): in Emanuel's scheme the
+    # cloud-environment mixing is represented explicitly by the
+    # buoyancy-sorted ensemble (``n_mixing_fractions``), so the bulk
+    # ascent should be near-undilute.  The earlier ``1.5e-3`` (shallow-
+    # cumulus range) double-counted dilution — it over-entrained the
+    # bulk plume on top of the ensemble mixing, collapsing the updraft
+    # buoyancy in the lower troposphere so deep convection could not
+    # warm the free troposphere (anti-convective, super-adiabatic,
+    # ~30 K-too-cold RCE).
+    epsilon_0: float = 2.0e-4
+    delta_0: float = 2.0e-4
     M_b_max: float = 0.05
 
 
@@ -509,13 +607,21 @@ class BechtoldConfig(NamedTuple):
     Fields
     ------
     epsilon_deep, delta_deep : float
-        Deep-branch entrainment / detrainment.  Default 1.75e-3 /
-        5e-4 (Bechtold et al. 2008 calibration — deeper entrainment
-        than Tiedtke 1989).
+        Deep-branch base entrainment / detrainment [1/m].  Default
+        1.75e-3 / 0.75e-4 (IFS Cy49r1 Part IV Ch.6).  ``bechtold.py``
+        multiplies these by the IFS height factors
+        ``(1.3 − RH)·(q_sat/q_sat_base)³`` (entrainment) and
+        ``(1.6 − RH)`` (detrainment); the f_scale decay — not a small
+        constant ε — is what makes the deep plume penetrate.
     epsilon_shallow, delta_shallow : float
-        Shallow-branch (default 3e-3, 3e-3).
+        Shallow-branch base rates [1/m] (default 3.5e-3 = 2× deep ε via
+        the IFS f_ε factor, 0.75e-4).  Note: IFS ties shallow detrainment
+        to the shallow entrainment (``D_shallow = E_shallow·(1.6 − RH)``);
+        ``bechtold.py`` keeps the simpler prescribed-δ₀ shallow form for
+        conservation, so ``delta_shallow`` is the shallow detrainment
+        base directly.
     epsilon_midlevel, delta_midlevel : float
-        Mid-level branch (default 1e-4, 2e-4).
+        Mid-level branch [1/m] (default 1e-4, 2e-4).
     cape_pbl_depth : float
         PBL depth [m] for the parcel-source mass weighting (default
         500.0).
@@ -536,16 +642,21 @@ class BechtoldConfig(NamedTuple):
         as Tiedtke.
     """
     # Tiedtke-inherited / revised.
-    # Bechtold 2008 §2 calibrates ``delta_deep ≈ epsilon_deep`` for a
-    # near-neutral plume; the earlier default ``delta_deep = 5e-4`` (with
-    # ``epsilon_deep = 1.75e-3``) gives ``dM/dz ≈ +1.25e-3 M`` so the
-    # mass flux *grows* exponentially with height and peaks at the
-    # model top, not the cloud base — physically wrong.  Setting
-    # ``delta_deep = epsilon_deep`` matches the published calibration.
+    # IFS Cy49r1 base entrainment/detrainment rates [1/m] (Part IV Ch.6
+    # eqs 6.7/6.8; ecmwf-ifs/openifs).  These are the *base* fractional
+    # rates ε₀/δ₀; ``bechtold.py`` multiplies them by the IFS height
+    # factors ``(1.3 − RH)·(q_sat/q_sat_base)³`` (entrainment) and
+    # ``(1.6 − RH)`` (detrainment).  ε₀_deep = 1.75e-3, δ₀_deep = 0.75e-4
+    # are the published IFS deep values; the f_scale decay (not a smaller
+    # constant ε) is what makes the deep plume penetrate — a constant ε of
+    # 1.75e-3 over-dilutes and collapses the updraught (the cold-RCE bug),
+    # which is why this is now applied with the IFS vertical scaling rather
+    # than as a constant.  Shallow ε₀ carries the IFS f_ε = 2 factor
+    # (3.5e-3 = 2 × deep).
     epsilon_deep: float = 1.75e-3
-    delta_deep: float = 1.75e-3
-    epsilon_shallow: float = 3.0e-3
-    delta_shallow: float = 3.0e-3
+    delta_deep: float = 0.75e-4
+    epsilon_shallow: float = 3.5e-3
+    delta_shallow: float = 0.75e-4
     epsilon_midlevel: float = 1.0e-4
     delta_midlevel: float = 2.0e-4
     enable_downdraft: bool = True
@@ -558,8 +669,9 @@ class BechtoldConfig(NamedTuple):
     cmt_c_d: float = 0.7
     # The earlier ``cape_threshold = 0.0`` with ``cape_sharpness = 0.005``
     # left the closure essentially always-on (``softplus(0)/0.005 ≈ 138
-    # J/kg`` of phantom CAPE even when CAPE = 0).  Match ZM/Tiedtke at
-    # 70 J/kg, 0.02 1/(J/kg) so the trigger is meaningful.
+    # J/kg`` of phantom CAPE even when CAPE = 0).  Match ZM/Tiedtke with a
+    # meaningful 70 J/kg trigger threshold; ``cape_sharpness = 0.1``
+    # [1/(J/kg)] gives a tight CAPE sigmoid around it.
     cape_threshold: float = 70.0
     cape_sharpness: float = 0.1
     smooth_trigger_sharpness: float = 0.02

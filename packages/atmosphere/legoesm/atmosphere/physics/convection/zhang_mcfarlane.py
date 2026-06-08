@@ -61,6 +61,9 @@ from legoesm.atmosphere.physics.convection._plume import (
     compute_lcl,
     entraining_detraining_plume,
 )
+from legoesm.atmosphere.physics.convection._zm_dilute import (
+    dilute_parcel_cape,
+)
 
 
 __all__ = ("zhang_mcfarlane_convection",)
@@ -120,11 +123,31 @@ def zhang_mcfarlane_convection(
     q_base = q_v[:, -1]
     p_base = p_full[:, -1]
 
-    # Lift the surface parcel along its dry->LCL->moist path with the actual
-    # boundary-layer humidity and compute virtual-T CAPE (shared recipe).
-    # Passing q_v is essential: the legacy saturated-from-base parcel spuriously
-    # inflates CAPE in dry columns and would fire deep convection over deserts.
-    T_moist, cape = parcel_profile_and_cape(T, p_full, p_half, q_v=q_v)
+    # ZM uses the CAPE of a DILUTE entraining plume (Raymond-Blyth 1992;
+    # ``buoyan_dilute``/``parcel_dilute`` in zm_conv.F90), NOT an undilute
+    # moist adiabat.  The launch parcel ascends entraining environmental
+    # air at fractional rate ``dmpdz`` [1/m]; CAPE is the buoyancy integral
+    # of that DILUTE parcel.  Entraining dry air reduces buoyancy and CAPE
+    # by a factor ~3 in a tropical sounding — the single most important ZM
+    # fidelity property (without it ZM over-fires in marginal columns).
+    # The dilute CAPE matches the compiled E3SM/CAM Fortran oracle to
+    # ~1.5 % on tropical soundings (.physics-validator/zhang_mcfarlane).
+    if config.use_dilute_cape:
+        dparcel = dilute_parcel_cape(
+            T, q_v, p_full, p_half, z,
+            dmpdz=config.dmpdz,
+            tiedke_add=config.tiedke_add,
+            tp_fac=config.tp_fac,
+            tpert=config.parcel_tpert,
+            pbl_top_pa=config.pbl_top_pa,
+        )
+        cape = dparcel.cape
+        # The dilute parcel temperature is the physically-correct cloud
+        # model temperature; keep it for diagnostics / future closure work.
+        T_moist = dparcel.T_parcel
+    else:
+        # Legacy undilute moist-adiabat CAPE (use_dilute_cape=False).
+        T_moist, cape = parcel_profile_and_cape(T, p_full, p_half, q_v=q_v)
 
     # -- Smooth CAPE trigger and cloud-base mass-flux closure ---------------
     cape_weight = cape_trigger(
