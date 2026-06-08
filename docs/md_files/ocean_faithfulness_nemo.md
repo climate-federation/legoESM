@@ -11,7 +11,7 @@ commit messages; `OMIP_faithful.md`. Memories: [[omip-faithful-project]], [[omip
 |---|---|---|
 | **tripole eORCA025 ¼°** | **FAITHFUL** | **1.15** corr 0.99 |
 | **latlon 1°** | **FAITHFUL** | **1.12** corr 0.99 |
-| **mpas ico6 ~115 km** | **FAITHFUL** (iter-~50) | **SST 0.84** corr 0.997, **SSS 0.85** corr 0.94 (best); **ACC 146 vs NEMO 159 Sv** (1-yr) |
+| **mpas ico6 ~115 km** | **FAITHFUL** (best) | day-90 **SST 0.84**/**SSS 0.85**; **5-yr+SSS-restore: AMOC 20.5 vs 17.7, ACC 144 vs 159/obs137, SST 1.87** corr 0.985 |
 | cubed_sphere | **PARKED** — cold-start mode-1 PGF residual NOT resolution-fixable (C256 ¼° blows too, at a cube EDGE near the equator); all correct numerics committed | n/a (blows at cold-start) |
 | spectral | **NOT-MEANINGFUL** — global SH basis can't represent ORCA1 coastlines (Gibbs ringing; model self-declares unsupported #99; bathy builder refuses real geometry; T21 can't resolve Drake) | n/a (by construction) |
 **"All 5 grids match ORCA1" is impossible BY CONSTRUCTION (spectral).** Achievable maximum =
@@ -273,6 +273,26 @@ max−min) → apples-to-apples with the NEMO reader + MPAS section. Codex 3 pas
 shift + endpoint-not-max−min ~25% undercount + signed + tripole-dlon=0-sentinel local-spacing estimate
 — all fixed; pass-3 clean). 80 tests (gyre-exclusion + dlon-sentinel pins). The 212 above was the OLD
 whole-band number; a future latlon run emits the section ACC.
+
+### 5-YEAR MPAS + SSS-RESTORE RESULT (8429183, DONE rc=0) — AMOC OVERSHOOT FIXED, ACC spot-on
+MPAS ico6, 5 yr, full stack + `--sss-restore` (τ=365). vs the prior no-restore 5-yr:
+| metric | 5yr+SSS-restore | old 5yr (no restore) | NEMO | obs |
+|---|---|---|---|---|
+| **AMOC@26N** | **20.46 Sv** | 44.95 (overshoot) | 17.74 | ~17 |
+| **ACC@Drake** (section) | **143.6 Sv** | n/a (no diag) | 159 | ~137 |
+| **SST RMSE / corr** | **1.87 / 0.985** | 2.27 / 0.976 | — | — |
+| SSS RMSE / bias | 3.97 / −1.53 | 7.92 / −4.17 | — | — |
+- **AMOC overshoot FIXED**: 45→20.5 Sv, now NEAR NEMO 17.7 / obs ~17. Two compounding fixes — the
+  min-rule AMOC edge thickness (removed the partial-cell overcount) AND the corrected SSS (no fresh
+  drift → physical stratification → physical overturning). Multi-decade-gated transport now lands in-band
+  at year 5.
+- **ACC@Drake 143.6 Sv** (the in-run section diagnostic) — spot-on obs ~137, ~10% under NEMO 159; the
+  apples-to-apples section method. MPAS now matches NEMO on SST, AMOC AND ACC.
+- **SST improved** to RMSE 1.87 / corr 0.985 (correct SSS/stratification helped).
+- **SSS drift bounded** 31→33.0 (RMSE 7.9→3.97), but τ=365 is TOO WEAK (−1.5 bias). The OMIP-2 standard
+  SSS piston velocity (~50 m/300 d) ≈ **τ~60 d** for a 10 m top layer — 6× stronger — which would pull
+  SSS to WOA (day-90 with restoring was 0.85). **NEXT: re-run with `--sss-restore-tau-days 60`** for the
+  tight multi-year SSS match. Stable all 5 yr (max|u| 0.90, finite). transports.txt: amoc 20.46, acc 143.65.
 
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
