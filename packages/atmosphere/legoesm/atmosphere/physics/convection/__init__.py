@@ -24,6 +24,7 @@ Example
 """
 
 from legoesm.atmosphere.physics.convection.config import (
+    AhmedNeelinDCAConfig,
     ConvectionConfig,
     DCAConfig,
     SBMConfig,
@@ -33,7 +34,10 @@ from legoesm.atmosphere.physics.convection.config import (
 )
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
-from legoesm.atmosphere.physics.convection.dca import dca_convection
+from legoesm.atmosphere.physics.convection.dca import (
+    ahmed_neelin_dca,
+    dca_convection,
+)
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
 from legoesm.atmosphere.physics.convection.mass_flux import (
     edmf_convection,
