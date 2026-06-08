@@ -308,6 +308,17 @@ The scorer `compare_omip_nemo.py` already auto-emits `SST_maps.png`/`SSS_maps.pn
 Verdict: norms + maps agree — the faithful claim holds at the PATTERN level, not just RMSE. (No new
 plotter; used the scorer's existing maps.)
 
+### Tripole ¼° + ico7 runs (new-stack validation) — compute findings
+- **tripole eORCA025 ¼° day-90 is INFEASIBLE on the 6h short partition** (8429438, cancelled): ~30M wet
+  points -> per-step cost so high it never cleared the step-0 -> day-30 interval in 1h24m (day-90 = 103680
+  steps at dt=75). The new-stack curvilinear path (SSS-restore lon2d + section-ACC) is instead covered by
+  the 2d-lat unit tests + the MPAS/latlon production runs. A tripole transport run would need the
+  lax.scan on-device forcing path / multi-node, or a 1° eORCA1 tripole (same cost class as MPAS, but its
+  cold-start stability is unverified). Parked as a compute-scaling task, not a faithfulness gap.
+- **ico7 (~55 km) at dt=300 BLEW UP** (8429439): non-finite by day 30 — CFL, the ico6 dt=600/115km
+  scaling (dt~287 proportional) is marginal at ico7. Relaunched at **dt=150** (8429592) for the
+  higher-res SST/SSS check vs the ico6 day-90 0.84/0.85.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
