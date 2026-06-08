@@ -2,7 +2,10 @@
 
 Provides configuration NamedTuples for:
 1. Simplified Betts-Miller (SBM) — relaxation-based convection (Frierson 2007)
-2. Deep Convective Adjustment (DCA) — simplest baseline adjustment
+2. Deep Convective Adjustment (DCA) — simplest baseline adjustment.  Two
+   variants via ``DCAConfig.variant``: the Manabe-style pairwise
+   moist-adiabatic adjustment (default) and the Ahmed-Neelin-Adames (2020)
+   lower-tropospheric-buoyancy (B_L) closure (``AhmedNeelinDCAConfig``).
 3. Kuo — column moisture-excess (Kuo 1965/1974)
 4. Prognostic Mass-Flux — Arakawa-Wu type (1 prognostic var: M_c)
 5. Simplified EDMF — eddy-diffusivity mass-flux (1 prognostic var: a_u)
@@ -13,6 +16,8 @@ References
 - Frierson, D. M. W. (2007). The Dynamics of Idealized Convection
   Schemes and Their Effect on the Zonally Averaged Tropical Circulation.
   J. Atmos. Sci., 64, 1959-1976.
+- Ahmed, F., Adames, A. F., & Neelin, J. D. (2020). Deep convective
+  adjustment of temperature and moisture. J. Atmos. Sci., 77, 2163-2186.
 - Kuo, H. L. (1974). Further studies of the parameterization of the
   influence of cumulus convection on large-scale flow. J. Atmos. Sci.,
   31, 1232-1240.
@@ -60,38 +65,131 @@ class SBMConfig(NamedTuple):
     cloud_mask_sharpness: float = 5.0
 
 
-class DCAConfig(NamedTuple):
-    """Configuration for Deep Convective Adjustment.
+class AhmedNeelinDCAConfig(NamedTuple):
+    """Configuration for the Ahmed-Neelin-Adames (2020) DCA closure.
+
+    Lower-tropospheric-buoyancy (B_L) precipitation-buoyancy closure of
+    Ahmed, Adames & Neelin (2020), *Deep Convective Adjustment of
+    Temperature and Moisture*, J. Atmos. Sci. 77, 2163-2186 (hereafter
+    ANA20).  Distinct from the Manabe-style pairwise moist-adiabatic
+    adjustment (the default ``DCAConfig`` path): convection here relaxes
+    the column toward the quasi-equilibrium (QE) line ``B_L = B_c`` over a
+    convective adjustment time scale ``tau_adjust_s ≈ 2 h`` (ANA20 eq 42),
+    with a heating/moistening partition that conserves column-integrated
+    moist static energy (ANA20 eq 41, slope −1 in the q̂–T̂ plane).
+
+    Two-layer construction (ANA20 §2, Table 1):
+
+    * Boundary layer (BL): surface to ``p_bl_top_pa`` (Δp_B = 150 hPa).
+    * Lower free troposphere (LFT): ``p_bl_top_pa`` to ``p_lft_top_pa``
+      (Δp_L = 350 hPa).
+
+    Moist enthalpy ``e = T + (L_v/c_p)·q`` [K] (ANA20 after eq 6); the
+    saturation version ``e* = T + (L_v/c_p)·q*`` uses the model's own
+    saturation specific humidity (``legoesm.thermo``).  The buoyancy (eq 7):
+
+        B_L = (g·Π_L/e_L*)·[ w_b·(e_B/Π_B) + w_L·(e_L/Π_L) − e_L*/Π_L ]
+
+    where Π(p) = (p/p0)^κ is the Exner function (p0 = ``constants.p_ref``).
+    The partial derivatives of this form reproduce ANA20 eqs (16)-(17)
+    exactly (validated).
+
+    Precipitation (eq 8):  P = a·(B_L − B_c)·H(B_L − B_c), with the
+    Heaviside smoothed to a softplus for differentiability.
 
     Fields
     ------
-    n_iterations : int
-        Number of bottom-to-top adjustment sweeps per call (default 3).
-        A single sweep only partially relaxes a deep column toward the
-        moist adiabat, so one call per physics step leaves the free
-        troposphere several K too cold under steady radiative cooling;
-        free-tropospheric ``mean|T - T_moist|`` falls monotonically with
-        sweeps (≈9.0/8.4/7.3/5.5 K at 1/3/5/10) with the column maximum
-        temperature unchanged (the simultaneous pair solve keeps every
-        sweep enthalpy-conserving and bounded).
-    mixing_fraction : float
-        Fraction of adjustment applied per iteration (default 1.0).
-    cape_threshold : float
-        Minimum CAPE [J/kg] to trigger convection (default 100.0).
-        Columns with CAPE below this are not adjusted.
-    cape_sharpness : float
-        Sigmoid sharpness [1/(J/kg)] for smooth CAPE gating (default 0.02).
-    instability_blend_sharpness : float
-        Dimensionless sigmoid sharpness on the superadiabatic-instability
-        metric controlling per-pair adjustment blending inside the
-        ``lax.scan`` sweep (default 10.0).  Lifted from a hardcoded literal
-        so the trigger transition width is tunable.
+    w_b : float
+        Boundary-layer weight w_B in B_L (ANA20 Table 1, 0.52).
+    w_l : float
+        Lower-free-troposphere weight w_L = 1 − w_B (0.48).
+    a_mm_per_hr : float
+        Slope ``a`` of the P–B_L line [mm h⁻¹ (m s⁻²)⁻¹] (Table 1, 0.6).
+        Converted internally to SI mass flux [kg m⁻² s⁻¹ per m s⁻²].
+    b_c : float
+        Critical buoyancy B_c [m s⁻²] (Table 1, −1.5e-2).
+    tau_adjust_s : float
+        Convective adjustment time scale τ_c [s] (ANA20 eq 42, ≈2 h →
+        7200 s).
+    p_bl_top_pa : float
+        Pressure at the top of the boundary layer [Pa].  The BL spans
+        ``p_s`` → ``p_bl_top_pa``; Δp_B ≈ 150 hPa for ``p_s ≈ 1000 hPa``.
+        Default 8.5e4 (850 hPa).
+    p_lft_top_pa : float
+        Pressure at the top of the lower free troposphere [Pa]; the LFT
+        spans ``p_bl_top_pa`` → ``p_lft_top_pa`` (≈500 hPa).  Default 5.0e4.
+    layer_edge_width_pa : float
+        Half-width [Pa] of the smooth (sigmoid) layer-membership
+        transition at each layer edge.  A hard pressure mask kills
+        ``jax.grad`` through the BL/LFT boundaries; the sigmoid keeps the
+        layer averages differentiable.  Default 2.5e3 (25 hPa).
+    precip_heaviside_sharpness : float
+        Sharpness [(m s⁻²)⁻¹] of the softplus that smooths the eq-8
+        Heaviside ``H(B_L − B_c)``.  Large so the forward precip tracks
+        the ramp closely while keeping the gradient alive near B_c.
+        Default 5.0e2.
     """
+    w_b: float = 0.52
+    w_l: float = 0.48
+    a_mm_per_hr: float = 0.6
+    b_c: float = -1.5e-2
+    tau_adjust_s: float = 7200.0
+    p_bl_top_pa: float = 8.5e4
+    p_lft_top_pa: float = 5.0e4
+    layer_edge_width_pa: float = 2.5e3
+    precip_heaviside_sharpness: float = 5.0e2
+
+
+class DCAConfig(NamedTuple):
+    """Configuration for Deep Convective Adjustment.
+
+    Two variants are routed by the ``variant`` field:
+
+    * ``variant="manabe"`` (default): the Manabe-Smagorinsky-Strickler
+      (1965) pairwise moist-adiabatic adjustment (the historical legoESM
+      ``dca`` scheme).  Behaviour of all existing configs is unchanged.
+    * ``variant="ahmed_neelin"``: the Ahmed-Neelin-Adames (2020)
+      lower-tropospheric-buoyancy (B_L) precipitation-buoyancy closure
+      (see :class:`AhmedNeelinDCAConfig`).
+
+    Fields
+    ------
+    variant : str
+        ``"manabe"`` (default) or ``"ahmed_neelin"``.
+    n_iterations : int
+        (Manabe only) Number of bottom-to-top adjustment sweeps per call
+        (default 3).  A single sweep only partially relaxes a deep column
+        toward the moist adiabat, so one call per physics step leaves the
+        free troposphere several K too cold under steady radiative
+        cooling; free-tropospheric ``mean|T - T_moist|`` falls
+        monotonically with sweeps (≈9.0/8.4/7.3/5.5 K at 1/3/5/10) with
+        the column maximum temperature unchanged (the simultaneous pair
+        solve keeps every sweep enthalpy-conserving and bounded).
+    mixing_fraction : float
+        (Manabe only) Fraction of adjustment applied per iteration
+        (default 1.0).
+    cape_threshold : float
+        (Manabe only) Minimum CAPE [J/kg] to trigger convection (default
+        100.0).  Columns with CAPE below this are not adjusted.
+    cape_sharpness : float
+        (Manabe only) Sigmoid sharpness [1/(J/kg)] for smooth CAPE gating
+        (default 0.02).
+    instability_blend_sharpness : float
+        (Manabe only) Dimensionless sigmoid sharpness on the
+        superadiabatic-instability metric controlling per-pair adjustment
+        blending inside the ``lax.scan`` sweep (default 10.0).  Lifted
+        from a hardcoded literal so the trigger transition width is
+        tunable.
+    ahmed_neelin : AhmedNeelinDCAConfig
+        Sub-configuration for the ``variant="ahmed_neelin"`` closure.
+    """
+    variant: str = "manabe"
     n_iterations: int = 3
     mixing_fraction: float = 1.0
     cape_threshold: float = 100.0
     cape_sharpness: float = 0.1   # sigmoid(-10)≈5e-5 at CAPE=0; 0.5 at threshold
     instability_blend_sharpness: float = 10.0
+    ahmed_neelin: AhmedNeelinDCAConfig = AhmedNeelinDCAConfig()
 
 
 class KuoConfig(NamedTuple):
