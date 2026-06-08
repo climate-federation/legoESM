@@ -152,16 +152,24 @@ def remove_horizontal_mean_wind_plane_mpi(state, layout, owned_mask):
     ny, nx, _ = state.u.data.shape
     _validate_owned_mask(owned_mask, (ny, nx))
     # Deferred import — keep this module importable without mpi4jax.
-    from legoesm.parallel.reductions import global_sum_mpi
+    from legoesm.parallel.reductions import batch_allreduce_mpi
 
     mask_3d = owned_mask[:, :, None]
     u_local_sum = jnp.sum(state.u.data * mask_3d, axis=(0, 1))
     v_local_sum = jnp.sum(state.v.data * mask_3d, axis=(0, 1))
     # Global owned-cell count: same denominator for every level.
     local_count = jnp.sum(owned_mask)
-    global_count = global_sum_mpi(local_count)
-    u_global_mean = global_sum_mpi(u_local_sum) / global_count
-    v_global_mean = global_sum_mpi(v_local_sum) / global_count
+    # Batch the count + per-level u/v sums into ONE allreduce instead of
+    # three.  Each mpi4jax allreduce carries a fixed per-call cost (the
+    # dominant term on CPU — see the global campaign's reduce-overhead
+    # finding), so 3→1 cuts the per-step reduction time ~3×.  ``sum`` is
+    # AD-safe; ``batch_allreduce_mpi`` packs mixed scalar/(nz,) shapes into
+    # one flat buffer and restores them.
+    global_count, u_global_sum, v_global_sum = batch_allreduce_mpi(
+        [local_count, u_local_sum, v_local_sum], op="sum",
+    )
+    u_global_mean = u_global_sum / global_count
+    v_global_mean = v_global_sum / global_count
     new_u_data = state.u.data - u_global_mean[None, None, :]
     new_v_data = state.v.data - v_global_mean[None, None, :]
     return state._replace(
