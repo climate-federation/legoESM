@@ -395,6 +395,20 @@ OMIP=single-GPU); latlon saltnorm CLOSED (commit d44f8ff0 + wired 3ecaf68e; shar
 E−P + ice-albedo + salt-norm — the maximal-faithfulness config → the per-grid PNGs + SSS/AMOC/SST scores.
 8432819 (no-saltnorm) is the drift baseline (day-720 SSS 33.87 vs definitive day-90 34.68). latlon `latlon_2yr_full` (8436220) = the fully-faithful latlon (E-P + ice + saltnorm). MPI owned-mask normalization (Voronoi halo double-count) = documented follow-up; OMIP runs are single-GPU.
 
+### iter-C CORRECTION (matched-day comparison) — salt-norm is a NO-OP for surface SSS; lever = restoring τ
+RAN both runs to matched days: baseline (no salt-norm) and definitive (salt-norm) have IDENTICAL surface
+mean_sss at d90/180/270/360 (34.67→34.38). So the salt-norm (global area-mean removal) is a genuine NO-OP:
+CORE-II ∮(P−E+R)≈0 already (globally balanced), so the area-mean it removes is ~zero. The salt-norm is a
+CORRECT conservation SAFEGUARD (guards against any residual imbalance; keep it) but it does NOT fix the
+observed SSS decline. **Re-diagnosis:** the SSS decline is SURFACE freshening (WOA IC 34.63 relaxing under
+the surface freshwater flux) + WEAK τ=365 restoring — a surface/restoring lever, NOT a global-salt issue.
+mean_sss is the SURFACE mean; the salt-norm conserves GLOBAL (3D) salt, which decouples from surface SSS
+under stratification. **CORRECTS the earlier "salt-norm closes the SSS drift" claim.** Real SSS lever =
+restoring strength: τ=60 holds SSS near WOA. The pre-E−P τ=60 AMOC collapse (5.7 Sv) was the salt-injection
+artifact of an OPEN budget; now E−P closes the SURFACE flux, so τ=60 should hold SSS AND keep AMOC (E−P
+provides convection preconditioning, not the restoring). TEST: `mpas_ico6_5yr_s60full` (8437538) = definitive
++ τ=60 → expect good SSS AND AMOC ~17.7. (ice-albedo SST result is independent + still the primary fix.)
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
