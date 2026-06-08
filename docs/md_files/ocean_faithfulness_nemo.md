@@ -390,10 +390,10 @@ PHYSICAL net (P−E+R+ice, NOT restoring) over the EFFECTIVE WET mask before the
 the eta path removes (volume+salt consistent). Conserves global salt: salt-mass rate = −S_ref·F_fw (h
 cancels), so ∮(−S_ref·(F_fw−F_mean)·area)=0 (Griffies). Codex confirmed the math; fixed thin-cell mask +
 restoring-exclusion. CAVEATS (documented): local jnp.sum → per-rank under MPI (shared with the eta path;
-OMIP=single-GPU); **latlon has no normalize_freshwater (MPAS-only saltnorm — immediate follow-up)**. Tests:
+OMIP=single-GPU); latlon saltnorm CLOSED (commit d44f8ff0 + wired 3ecaf68e; shared `normalized_virtual_salt_flux` helper). Tests:
 4 salt-conservation unit tests + 90 ocean tests pass. **DEFINITIVE run** `mpas_ico6_5yr_full` (8435879):
 E−P + ice-albedo + salt-norm — the maximal-faithfulness config → the per-grid PNGs + SSS/AMOC/SST scores.
-8432819 (no-saltnorm) is the drift baseline for the before/after.
+8432819 (no-saltnorm) is the drift baseline (day-720 SSS 33.87 vs definitive day-90 34.68). latlon `latlon_2yr_full` (8436220) = the fully-faithful latlon (E-P + ice + saltnorm). MPI owned-mask normalization (Voronoi halo double-count) = documented follow-up; OMIP runs are single-GPU.
 
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
