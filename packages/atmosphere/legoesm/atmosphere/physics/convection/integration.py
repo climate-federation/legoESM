@@ -194,6 +194,13 @@ def _make_hydrostatic_convection(
     is_w_grid_consumer = scheme_name in ("kain_fritsch",)
     is_stochastic = scheme_name in ("bechtold",)
     is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
+    # Kuo is the canonical moisture-convergence scheme: its source IS the
+    # large-scale ∂q/∂t|dyn (``moisture_convergence``).  It is a simple
+    # leaf (no prognostic carry), so it takes MC in the catch-all path
+    # rather than the profile path.  When MC is None (no resolved
+    # large-scale ascent, e.g. single-column RCE) Kuo is correctly
+    # quiescent.
+    is_simple_mc_consumer = scheme_name in ("kuo",)
     # Static at closure-build time: avoid splitting / advancing the
     # master PRNG key when stochasticity is disabled, so the no-noise
     # path is exactly bit-identical to a no-Bechtold run apart from
@@ -291,7 +298,12 @@ def _make_hydrostatic_convection(
         # then convert to w via :func:`._shared.diagnose_grid_w_from_omega`.
         # Only the cubed-sphere and lat-lon grids ship with a divergence
         # operator we can call here; other grids fall back to zeros.
-        if is_w_grid_consumer:
+        # Kain-Fritsch consumes ``w_grid`` for its trigger; Kuo uses it
+        # for the oracle's independent ``w_lcl>0`` activation gate
+        # (faithful to ``kuo_schemes.f90``; falls back to the convergence
+        # -sign proxy when ``w_grid`` is None on grids without a usable
+        # divergence operator).
+        if is_w_grid_consumer or is_simple_mc_consumer:
             div_grid = None
             if isinstance(grid, CubedSphereGrid):
                 if state.v is not None:
@@ -319,20 +331,37 @@ def _make_hydrostatic_convection(
                     omega_grid.reshape(ncol, nlev),
                     T_col, p_full_col, q_v_col,
                 ).astype(_state_dtype)
-            else:
+            elif is_w_grid_consumer:
+                # Kain-Fritsch needs a concrete array (it reads w_grid
+                # unconditionally); zero-fill where no divergence operator.
                 w_grid_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+            else:
+                # Kuo: no resolved divergence (e.g. single-column SCM) →
+                # leave ``w_grid`` None so Kuo uses the convergence-sign
+                # proxy rather than a spurious zero-w gate.
+                w_grid_col = None
         else:
             w_grid_col = None
 
         # Moisture convergence for MC-consuming schemes (Tiedtke,
-        # Bechtold).  Reuses the dycore's FV-flux-divergence operator
-        # via :func:`._shared.compute_moisture_convergence`.  When the
-        # state has no q_v tracer or wind data we pass ``None`` so the
-        # leaf engages its built-in saturation-deficit proxy — Tiedtke
-        # gates the proxy on ``moisture_convergence is None`` and zero-
-        # filling silently bypasses it.
+        # Bechtold) and the canonical convergence-driven Kuo.  Reuses the
+        # dycore's FV-flux-divergence operator via
+        # :func:`._shared.compute_moisture_convergence`.  When the state
+        # has no q_v tracer or wind data we pass ``None``.
+        #
+        # The ``None`` semantics DIFFER by scheme, intentionally:
+        #   * Tiedtke/Bechtold treat ``None`` as "engage the built-in
+        #     saturation-deficit proxy" (they gate on it internally).
+        #   * Kuo treats ``None`` as ZERO SOURCE → QUIESCENT, which is the
+        #     physically-correct canonical-Kuo behavior (no resolved
+        #     large-scale convergence ⇒ nothing to converge).  So on a
+        #     state with no ``v`` (e.g. MPAS edge-normal ``u`` with
+        #     ``v is None``, or a single-column SCM) Kuo is deliberately
+        #     OFF rather than falling back to a proxy (Codex review-1
+        #     finding #2).  Wiring an edge→cell ``v`` reconstruction for
+        #     MPAS would let Kuo fire there; that is a follow-up.
         if (
-            is_mc_consumer
+            (is_mc_consumer or is_simple_mc_consumer)
             and state.tracers is not None
             and "q_v" in state.tracers
             and state.v is not None
@@ -479,6 +508,20 @@ def _make_hydrostatic_convection(
                 )
                 conv_prog_out = prog_new_profile
             dT_dt = conv_out.dT_dt.reshape(shape_3d)
+        elif is_simple_mc_consumer:
+            # Kuo: simple leaf that consumes the large-scale moisture
+            # convergence as its source, plus the resolved ``w_grid`` for
+            # the oracle's ``w_lcl>0`` gate (None → convergence-sign
+            # proxy).  ``mc_col`` is None on single-column grids → Kuo is
+            # quiescent (correct).
+            conv_out = conv_fn(
+                T=T_col, q_v=q_v_col,
+                p_full=p_full_col, p_half=p_half_col,
+                dt=dt, config=scheme_config,
+                moisture_convergence=mc_col,
+                w_grid=w_grid_col,
+            )
+            dT_dt = conv_out.dT_dt.reshape(shape_3d)
         else:
             conv_out = conv_fn(
                 T=T_col, q_v=q_v_col,
@@ -611,6 +654,7 @@ def _make_nonhydrostatic_convection(
     is_w_grid_consumer = scheme_name in ("kain_fritsch",)
     is_stochastic = scheme_name in ("bechtold",)
     is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
+    is_simple_mc_consumer = scheme_name in ("kuo",)
     needs_prng = is_stochastic and getattr(
         scheme_config, "enable_stochastic", False
     )
@@ -701,9 +745,12 @@ def _make_nonhydrostatic_convection(
             u_col = None
             v_col = None
 
-        # Grid-scale w for w-consuming schemes (KF).  ``state.w`` lives
-        # at half levels — interpolate to full-level centers.
-        if is_w_grid_consumer:
+        # Grid-scale w for w-consuming schemes (KF trigger; Kuo's
+        # ``w_lcl>0`` activation gate).  ``state.w`` lives at half levels
+        # — interpolate to full-level centers.  Non-hydrostatic always
+        # has a real prognostic ``w``, so Kuo uses it directly (faithful
+        # to the oracle's independent-``w`` gate).
+        if is_w_grid_consumer or is_simple_mc_consumer:
             w_data = state.w.data.reshape(ncol, nlev + 1)
             w_grid_col = 0.5 * (w_data[:, :-1] + w_data[:, 1:])
         else:
@@ -716,7 +763,7 @@ def _make_nonhydrostatic_convection(
         # carry q_v we pass ``None`` so the leaf engages its built-in
         # saturation-deficit proxy (Tiedtke gates the proxy on
         # ``moisture_convergence is None`` — zero-filling bypassed it).
-        if is_mc_consumer and n_tracers > 0:
+        if (is_mc_consumer or is_simple_mc_consumer) and n_tracers > 0:
             _compute_mc = compute_moisture_convergence
             _qv_grid_full = tracers[..., 0]   # (face, n, n, nlev)
             mc_col = _compute_mc(
@@ -825,6 +872,14 @@ def _make_nonhydrostatic_convection(
                     dt=dt, config=scheme_config,
                 )
                 conv_prog_out = prog_new_profile
+        elif is_simple_mc_consumer:
+            conv_out = conv_fn(
+                T=T_col, q_v=q_v_col,
+                p_full=p_full_col, p_half=p_half_col,
+                dt=dt, config=scheme_config,
+                moisture_convergence=mc_col,
+                w_grid=w_grid_col,
+            )
         else:
             conv_out = conv_fn(
                 T=T_col, q_v=q_v_col,
@@ -913,6 +968,7 @@ def _make_spectral_pe_convection(
     is_w_grid_consumer = scheme_name in ("kain_fritsch",)
     is_stochastic = scheme_name in ("bechtold",)
     is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
+    is_simple_mc_consumer = scheme_name in ("kuo",)
     needs_prng = is_stochastic and getattr(
         scheme_config, "enable_stochastic", False
     )
@@ -983,7 +1039,9 @@ def _make_spectral_pe_convection(
         # the KF trigger respond to dynamically-resolved low-level
         # convergence/divergence (the wedge of model behavior the
         # ``parcel_perturb_T``-only fallback is blind to).
-        if is_w_grid_consumer:
+        # Same diagnostic ``w`` also feeds Kuo's ``w_lcl>0`` activation
+        # gate (faithful to the oracle's independent ``w``).
+        if is_w_grid_consumer or is_simple_mc_consumer:
             div_grid = fields['div'].astype(_state_dtype)   # (n_lat, n_lon, nlev)
             sigma_top = sigma_coord.sigma_half[0]
             # Iter-55: share the cumsum between σ̇ and ``D_total``.
@@ -1013,7 +1071,7 @@ def _make_spectral_pe_convection(
         # the proxy on ``moisture_convergence is None`` — zero-filling
         # silently bypassed it).
         if (
-            is_mc_consumer
+            (is_mc_consumer or is_simple_mc_consumer)
             and state.tracers is not None
             and "q_v" in state.tracers
         ):
@@ -1145,6 +1203,15 @@ def _make_spectral_pe_convection(
                     dt=dt, config=scheme_config,
                 )
                 conv_prog_out = prog_new_profile
+            dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
+        elif is_simple_mc_consumer:
+            conv_out = conv_fn(
+                T=T_col, q_v=q_v_col,
+                p_full=p_full_col, p_half=p_half_col,
+                dt=dt, config=scheme_config,
+                moisture_convergence=mc_col,
+                w_grid=w_grid_col,
+            )
             dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
         else:
             conv_out = conv_fn(

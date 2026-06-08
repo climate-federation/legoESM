@@ -31,6 +31,51 @@ Eddy diffusivities:
   Km = C_K * l * sqrt(wp2)
   Kh = Km / Pr_t
 
+Fidelity vs the full CLUBB (clubb_intr.F90 + CLUBB core)
+--------------------------------------------------------
+This module is a DELIBERATELY REDUCED surrogate, NOT a port of the
+operational CLUBB used in E3SM/CAM.  It is intentionally ~300 lines versus
+CLUBB's ~10k lines of higher-order closure.  What clubb_lite approximates,
+and where it diverges from the real CLUBB, is stated precisely so callers do
+not mistake it for a faithful CLUBB:
+
+WHAT IT KEEPS (qualitatively CLUBB-like):
+  * Five prognostic second moments (wp2, thlp2, rtp2, wpthlp, wprtp) with
+    production - dissipation - diffusion budgets (the CLUBB moment set,
+    minus wp3).
+  * An assumed-PDF cloud-fraction diagnosis from the saturation deficit
+    (single Gaussian here vs CLUBB's double-Gaussian).
+  * Down-gradient eddy diffusivities ``Km = C_K*l*sqrt(wp2)``, ``Kh =
+    Km/Pr_t``.
+
+WHAT IT OMITS / SIMPLIFIES (the fidelity gap vs full CLUBB):
+  1. PDF shape: CLUBB uses an Analytic Double Gaussian (ADG1) joint PDF of
+     (w, theta_l, r_t) closing higher moments (skewness via wp3).  Here the
+     PDF is a SINGLE Gaussian in s only -> no skewness, no third moments,
+     so no proper updraft/downdraft asymmetry or cumulus-shaped clouds.
+  2. wp3 (third moment) is NOT carried -> no skewness-driven nonlocal /
+     counter-gradient transport that distinguishes CLUBB from a 2nd-order
+     down-gradient scheme.
+  3. Pressure terms / return-to-isotropy use simple linear damping
+     (C1,C4,C5/tau) instead of CLUBB's full pressure-correlation closure
+     with the C-coefficient hierarchy (C2, C6, C7, C8, C11, C14, ...).
+  4. No subgrid cloud-water (rcm) feedback into buoyancy production, no
+     SILHS sub-columns, no cloud-top radiative/evaporative entrainment
+     enhancement, no monotonic flux limiters, no implicit moment matrix
+     solve coupling all five moments (each moment is integrated with a
+     semi-implicit local dissipation here).
+  5. Length scale is the Blackadar master length, not CLUBB's
+     Lscale computed from up/down parcel buoyant-sorting integrals.
+  6. Diffusivities are diagnostic from wp2; CLUBB transports the moments
+     themselves with the closure flux ``w'x' = -K dx/dz + (PDF terms)``.
+
+NET: clubb_lite reproduces the gross structure of a moist 2nd-order TKE-like
+closure with a PDF cloud diagnosis, useful as a differentiable, cheap
+surrogate, but it does NOT reproduce CLUBB's skewness-based nonlocal
+transport, double-Gaussian cloud structure, or operational coefficient set.
+Porting full CLUBB is explicitly out of scope; use this only where a reduced
+higher-order surrogate is acceptable.
+
 References
 ----------
 - Golaz, J.-C., Larson, V. E., & Cotton, W. R. (2002). A PDF-based
@@ -38,6 +83,8 @@ References
   J. Atmos. Sci., 59, 3540-3551.
 - Larson, V. E., & Golaz, J.-C. (2005). Using assumed probability
   distribution functions for HoC. J. Atmos. Sci., 62, 3620-3649.
+- Larson, V. E. (2022). CLUBB-SILHS: A parameterization of subgrid
+  variability in the atmosphere. arXiv:1711.03675 (full-CLUBB reference).
 """
 
 from __future__ import annotations

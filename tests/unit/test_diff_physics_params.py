@@ -201,44 +201,51 @@ class TestConvectionParams:
 
         assert_param_grad_ok(loss, threshold_probe, "DCA cape_threshold")
 
-    def _supersaturated_column(self, nlev=12, ncol=2):
-        """Column with q_v > q_sat in mid-troposphere so Kuo's internal
-        MC = column-integrated max(q_v − q_sat, 0) is strictly positive.
-        This unblocks the alpha_heat / tau_relax_s AD paths."""
+    def _convergent_column(self, nlev=20, ncol=2):
+        """Conditionally-unstable tropical column WITH a positive
+        large-scale moisture-convergence profile so the canonical Kuo
+        scheme fires (the faithful source is convergence, not
+        supersaturation).  Returns ``(T, q_v, p_full, p_half, ptenq)``."""
+        import numpy as _np
         p_s = 1.0e5
-        sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+        sigma_half = jnp.linspace(0.05, 1.0, nlev + 1)
         sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
         p_half = jnp.broadcast_to((sigma_half * p_s)[None, :], (ncol, nlev + 1))
         p_full = jnp.broadcast_to((sigma_full * p_s)[None, :], (ncol, nlev))
+        z = -8000.0 * jnp.log(jnp.clip(sigma_full, 1e-3, None))
         T = jnp.broadcast_to(
-            jnp.maximum(300.0 * jnp.clip(sigma_full, 0.01, None) ** 0.19, 200.0)[None, :],
-            (ncol, nlev),
+            jnp.maximum(300.0 - 6.5e-3 * z, 200.0)[None, :], (ncol, nlev),
         )
         q_sat = saturation_mixing_ratio(T, p_full)
-        # Force supersaturation in the lower half of the column so MC > 0.
-        RH = jnp.where(sigma_full[None, :] > 0.5, 1.1, 0.5)
-        q_v = RH * q_sat
-        return T, q_v, p_full, p_half
+        RH = 0.85 * jnp.clip((sigma_full - 0.15) / 0.85, 0.0, 1.0) + 0.1
+        q_v = jnp.broadcast_to((RH * q_sat[0])[None, :], (ncol, nlev))
+        p = sigma_full * p_s
+        ptenq = (3.0e-3 / 86400.0) * jnp.exp(-((p - 850e2) / 120e2) ** 2)
+        ptenq = jnp.broadcast_to(ptenq[None, :], (ncol, nlev))
+        return T, q_v, p_full, p_half, ptenq
 
-    def test_kuo_alpha_heat(self):
-        T, q_v, p_full, p_half = self._supersaturated_column()
+    def test_kuo_entrainment(self):
+        T, q_v, p_full, p_half, ptenq = self._convergent_column()
 
-        def loss(a):
-            cfg = KuoConfig()._replace(alpha_heat=a)
-            out = kuo_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
+        def loss(e):
+            cfg = KuoConfig()._replace(entrainment=e)
+            out = kuo_convection(T, q_v, p_full, p_half, 900.0, config=cfg,
+                                 moisture_convergence=ptenq)
             return jnp.sum(out.dT_dt ** 2)
 
-        assert_param_grad_ok(loss, KuoConfig().alpha_heat, "Kuo alpha_heat")
+        assert_param_grad_ok(loss, KuoConfig().entrainment, "Kuo entrainment")
 
-    def test_kuo_tau_relax_s(self):
-        T, q_v, p_full, p_half = self._supersaturated_column()
+    def test_kuo_anthes_rh_offset(self):
+        T, q_v, p_full, p_half, ptenq = self._convergent_column()
 
-        def loss(t):
-            cfg = KuoConfig()._replace(tau_relax_s=t)
-            out = kuo_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
+        def loss(o):
+            cfg = KuoConfig(partition="anthes")._replace(anthes_rh_offset=o)
+            out = kuo_convection(T, q_v, p_full, p_half, 900.0, config=cfg,
+                                 moisture_convergence=ptenq)
             return jnp.sum(out.dT_dt ** 2)
 
-        assert_param_grad_ok(loss, KuoConfig().tau_relax_s, "Kuo tau_relax_s")
+        assert_param_grad_ok(loss, KuoConfig().anthes_rh_offset,
+                             "Kuo anthes_rh_offset")
 
 
 # ===========================================================================

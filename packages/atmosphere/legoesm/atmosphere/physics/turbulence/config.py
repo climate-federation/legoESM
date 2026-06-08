@@ -244,44 +244,129 @@ class CLUBBLiteConfig(NamedTuple):
 class HoltslagBovilleConfig(NamedTuple):
     """Configuration for Holtslag-Boville nonlocal K-profile turbulence.
 
+    Faithful to the E3SM/CAM ``hb_diff.F90`` (``eddy_scheme='HB'``) and
+    ``pbl_utils.F90`` oracle.  Default values reproduce the oracle's
+    hardcoded ``parameter`` block; see
+    ``.physics-validator/holtslag_boville/static.md`` for the block-by-block
+    map.  All transition sharpnesses replace the oracle's hard ``if``
+    switches with smooth sigmoid blends (differentiability) and default to
+    values that recover the oracle within a stated tolerance.
+
+    Oracle constants (CAM names -> here)
+    ------------------------------------
+    ricr=0.3 -> Ri_crit ; betam=15 -> betam ; betah=15 -> betah ;
+    betas=5 -> betas ; fakn=7.2 -> fakn ; fak=8.5 -> fak ;
+    sffrac=0.1 -> sffrac ; binm=betam*sffrac, binh=betah*sffrac (derived) ;
+    ml2=30^2 -> ml_free (=30 m length scale) ; zkmin=0.01 -> kvf_min ;
+    fac=100 -> pblh_ustar_fac ; ustar_min=0.01 -> ustar_min ;
+    700 -> pblh_mech_coeff ; free-atm f(Ri) coeffs (18,10,8).
+
     Fields
     ------
-    l_mix_max : float
-        Maximum mixing length [m] (default 100.0).
-    Pr_t : float
-        Turbulent Prandtl number (default 1.0).
-    gamma_h : float
-        Counter-gradient heat coefficient (default 10.0).
-    gamma_m : float
-        Counter-gradient momentum coefficient (default 0.0).
     Ri_crit : float
-        Critical Richardson number (default 0.25).
-    b_louis : float
-        Louis (1979) stability-function coefficient (default 5.0).
-        Used in both the stable branch
-        ``f_stable = 1 / (1 + 2*b_louis*Ri / sqrt(1 + 5*Ri))`` and the
-        unstable branch via the ``3*b_louis*5*l_mix^2*sqrt(|Ri|)``
-        denominator term.  Was hardcoded as ``5.0`` in the scheme body
-        prior to the audit-driven config migration.
+        Critical bulk Richardson number ``ricr`` (oracle 0.3).
+    betam, betah, betas : float
+        Monin-Obukhov gradient-function constants (oracle 15, 15, 5).
+    fakn : float
+        Constant in the turbulent Prandtl number / countergradient
+        (oracle 7.2).
+    fak : float
+        Constant in the surface temperature/humidity excess (oracle 8.5).
+    sffrac : float
+        Surface-layer fraction of the boundary layer (oracle 0.1).
+    ml_free : float
+        Free-atmosphere mixing length [m] (oracle 30 m -> ml2=900).
+    kvf_min : float
+        Floor on the free-atmosphere diffusivity ``zkmin`` [m^2/s]
+        (oracle 0.01).
+    pblh_ustar_fac : float
+        Mechanical term ``fac`` in the bulk-Ri ``vvk`` (oracle 100).
+    pblh_mech_coeff : float
+        Minimum-mechanical-mixing-depth coefficient ``h>=c*u*``
+        (oracle 700).
+    pblmaxp : float
+        Maximum PBL depth in pressure units [Pa].  The bulk-Ri crossing
+        search is limited to levels with ABSOLUTE pressure ``p >= pblmaxp``
+        and the no-crossing fallback height is the top of that search region
+        (oracle ``npbl`` counts levels with ``pref_mid(k) >= pblmaxp`` and
+        the fallback is ``z(pverp-npbl)``; ``pblmaxp = 4e4 Pa`` = 400 hPa,
+        an absolute threshold, NOT relative to the surface).
+    cloud_pbl_floor_m : float
+        Lowest-layer "marine-stratus ventilation" PBL floor [m]: the oracle
+        unconditionally sets ``pblh = max(pblh, zi(pver) + 50)`` (the test
+        ``cldn(:,pver) >= 0`` is always true), i.e. the PBL top is at least
+        the top interface of the lowest model layer plus 50 m (oracle 50).
+    ustar_min : float
+        Floor on friction velocity [m/s] (oracle 0.01).
+    free_ri_unstable_coeff : float
+        Coefficient in the unstable free-atm f(Ri)=sqrt(1-c*Ri) (oracle 18).
+    free_ri_stable_c1, free_ri_stable_c2 : float
+        Stable free-atm f(Ri)=1/(1+c1*Ri*(1+c2*Ri)) (oracle 10, 8).
+    pbl_crossing_sharpness : float
+        Sigmoid sharpness [1/Ri] selecting the lowest Ri_crit crossing in
+        the smooth PBL-height diagnostic (replaces the oracle's hard
+        first-crossing scan).  RESIDUAL-GAP NOTE: a crossing whose upper
+        level sits exactly ON ``ricr`` (rino_hi == ricr) gets ~0.5 weight
+        rather than 1 -- the unavoidable price of a differentiable
+        approximation to the oracle's hard step.  For real columns rino
+        jumps by O(1) across the crossing so the weight is ~1 and the match
+        is exact; raise this sharpness to shrink the on-threshold residual
+        at the cost of a steeper gradient (default 100).
+    sfc_blend_sharpness : float
+        Sigmoid sharpness [1/(z/h)] for the surface-layer vs outer-layer
+        blend at ``zh=sffrac`` (replaces oracle hard switch).
+    cgs_gate_sharpness : float
+        Sigmoid sharpness [1/(z/h)] for the countergradient in-PBL gate at
+        the lower full level (oracle ``z(k) < pblh`` is a hard step);
+        sharper than the K-profile gate so cgs matches the oracle at the
+        PBL-top interface (default 400).
+    stable_blend_sharpness : float
+        Sigmoid sharpness [1/(z/L)] for the stable ``zl<=1`` vs ``zl>1``
+        blend (replaces oracle hard switch).
+    unstable_blend_sharpness : float
+        Sigmoid sharpness [s^3/m^2] for the unstable (kbfs>0) vs stable
+        (kbfs<=0) regime blend on the surface buoyancy flux.
+    unstable_kbfs_threshold : float
+        Positive offset [m^2/s^3] biasing the unstable indicator so exactly
+        neutral kbfs=0 maps to the STABLE branch (oracle ``unstbl = kbfs >
+        0`` is a strict inequality).  Default 1e-6 (~ 1e-3 W/m^2 of buoyancy
+        flux).  Paired with ``unstable_blend_sharpness=1e7`` this gives
+        ``s*threshold = 10``, so kbfs=0 -> sigmoid(-10) ~ 5e-5 (firmly
+        stable) while any kbfs >= 2e-6 (~ 2e-3 W/m^2, negligible) ->
+        sigmoid(+10) ~ 1 (unstable) -- as close to the oracle strict ``> 0``
+        as a smooth-everywhere indicator allows.
+    arg_floor : float
+        Smooth floor on the ``(1-beta*zl)`` MO arguments so the cube-root
+        / sqrt stay real and their gradients finite (default 0.01).
     surface : SurfaceLayerConfig
-        Surface layer parameters.
+        Surface-layer (bulk-flux) parameters.
     """
-    l_mix_max: float = 100.0
-    Pr_t: float = 1.0
-    gamma_h: float = 10.0
-    gamma_m: float = 0.0
-    Ri_crit: float = 0.25
-    b_louis: float = 5.0
-    # Sigmoid sharpness for the Ri_crit transition-zone weighting
-    # used in the bulk-Ri PBL-height diagnostic (default 20.0 1/Ri).
-    pbl_sharpness: float = 20.0
-    # Sigmoid sharpness for stable/unstable Ri-branch blend in the
-    # local Louis Km calculation (default 100.0 1/Ri).
-    blend_ri_sharpness: float = 100.0
-    # Sigmoid sharpness for the smooth profile-to-local transition
-    # at the PBL top in the Km blend (default 10.0; sigmoid(10·1) ≈ 1
-    # one PBL-height above the top, sigmoid(10·-1) ≈ 5e-5 below).
-    blend_pbl_sharpness: float = 10.0
+    # --- oracle physical constants ---
+    Ri_crit: float = 0.3
+    betam: float = 15.0
+    betah: float = 15.0
+    betas: float = 5.0
+    fakn: float = 7.2
+    fak: float = 8.5
+    sffrac: float = 0.1
+    ml_free: float = 30.0
+    kvf_min: float = 0.01
+    pblh_ustar_fac: float = 100.0
+    pblh_mech_coeff: float = 700.0
+    pblmaxp: float = 4.0e4
+    cloud_pbl_floor_m: float = 50.0
+    ustar_min: float = 0.01
+    free_ri_unstable_coeff: float = 18.0
+    free_ri_stable_c1: float = 10.0
+    free_ri_stable_c2: float = 8.0
+    # --- smooth-blend sharpnesses (replace oracle hard switches) ---
+    pbl_crossing_sharpness: float = 100.0
+    sfc_blend_sharpness: float = 80.0
+    cgs_gate_sharpness: float = 400.0
+    stable_blend_sharpness: float = 20.0
+    unstable_blend_sharpness: float = 1.0e7
+    unstable_kbfs_threshold: float = 1.0e-6
+    arg_floor: float = 0.01
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

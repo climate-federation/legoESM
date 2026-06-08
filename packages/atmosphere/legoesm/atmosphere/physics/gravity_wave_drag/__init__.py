@@ -30,6 +30,10 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     McFarlaneConfig,
     HinesConfig,
     PrognosticSpectralConfig,
+    E3SMCAMConfig,
+    E3SMOrographicConfig,
+    E3SMFrontalConfig,
+    E3SMBeresConfig,
     GWDMLEmulatorConfig,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
@@ -39,6 +43,21 @@ from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd
 from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
 from legoesm.atmosphere.physics.gravity_wave_drag.prognostic_spectral import (
     prognostic_spectral_gwd,
+)
+from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import (
+    e3sm_cam_gwd,
+    gw_prof,
+    gw_oro_src,
+    gw_cm_src,
+    gw_beres_src,
+    build_stand_in_mfcc,
+    gw_drag_prof,
+    gw_ediff,
+    gw_diff_tridiag_coeffs,
+    gw_diff_tend,
+    gw_taucd_net,
+    momentum_energy_conservation,
+    newtonian_alpha_profile,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.ml_emulator import (
     ml_gwd,

@@ -588,13 +588,15 @@ class SingleColumnModel:
         # Schemes that *read* the previous ``conv_prog_profile`` or
         # ``conv_stoch_state`` — and therefore must not be advanced
         # with a stale stage-1 carry under multi-stage integrators.
-        # The other convection schemes (``sbm``, ``dca``, ``kuo``,
-        # ``kain_fritsch``, ``emanuel``) are diagnostic: they `del`
-        # the incoming profile and emit a fresh one each call, so RK
-        # stages may freely re-evaluate them.
+        # ``emanuel`` is prognostic: its faithful Emanuel-1991 cloud-base
+        # mass-flux (CBMF) closure reads ``conv_prog_profile[:, -1]`` and
+        # relaxes it each call, so it must NOT be re-evaluated freely by RK
+        # stages.  The remaining schemes (``sbm``, ``dca``, ``kuo``,
+        # ``kain_fritsch``) are diagnostic: they emit a fresh profile each
+        # call, so RK stages may freely re-evaluate them.
         stateful_conv_schemes = (
             "mass_flux", "edmf",
-            "zhang_mcfarlane", "tiedtke", "bechtold",
+            "zhang_mcfarlane", "tiedtke", "bechtold", "emanuel",
         )
         stateful_conv = physics_config.convection.scheme in stateful_conv_schemes
         throttled_conv = (

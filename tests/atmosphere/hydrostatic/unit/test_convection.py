@@ -960,38 +960,57 @@ class TestKuo:
         assert jnp.all(out.dq_c_conv_dt >= 0)
 
     def test_nonzero_tendencies(self):
-        """Supersaturated unstable columns should produce nonzero tendencies.
-
-        Kuo only fires when there is column moisture excess
-        (``MC > 0``). The default ``_make_unstable_columns`` builds
-        an undersaturated profile (RH ≤ 0.9), so we locally
-        supersaturate the lower troposphere here to give Kuo
-        something to convect — otherwise the scheme correctly stays
-        off (which would be a different test).
+        """Canonical Kuo fires under a positive large-scale moisture-
+        convergence source (the faithful Kuo source), producing nonzero
+        heating.  Without convergence Kuo is correctly quiescent (a
+        single column has no resolved ascent) — a different test.
         """
         T, q_v, p_full, p_half = _make_unstable_columns()
-        q_sat = saturation_mixing_ratio(T, p_full)
-        # 5% supersaturation in the lower half of the column → MC > 0.
         nlev = q_v.shape[-1]
-        moist_mask = (jnp.arange(nlev) >= nlev // 2)
-        q_v = jnp.where(moist_mask[None, :], 1.05 * q_sat, q_v)
+        # Positive convergence in the lower/mid troposphere.
+        ptenq = jnp.broadcast_to(
+            (2.0e-8 * (jnp.arange(nlev) >= nlev // 3))[None, :], q_v.shape,
+        ).astype(q_v.dtype)
         config = KuoConfig()
-        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
-        assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-6
+        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config,
+                             moisture_convergence=ptenq)
+        assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-7
+
+    def test_quiescent_without_convergence(self):
+        """No large-scale convergence → zero Kuo tendency (correct)."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0,
+                             config=KuoConfig(), moisture_convergence=None)
+        assert float(jnp.max(jnp.abs(out.dT_dt))) == 0.0
+        assert float(jnp.max(jnp.abs(out.dq_v_dt))) == 0.0
 
     def test_differentiable(self):
-        """jax.grad should work through Kuo convection."""
+        """jax.grad should work through Kuo convection (with and without
+        a convergence source)."""
         ncol, nlev = 2, 8
         T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
         config = KuoConfig()
+        ptenq = jnp.broadcast_to(
+            (2.0e-8 * (jnp.arange(nlev) >= nlev // 3))[None, :], q_v.shape,
+        ).astype(q_v.dtype)
 
         def loss(T_in):
-            out = kuo_convection(T_in, q_v, p_full, p_half, dt=300.0, config=config)
+            out = kuo_convection(T_in, q_v, p_full, p_half, dt=300.0,
+                                 config=config, moisture_convergence=ptenq)
             return jnp.sum(out.dT_dt ** 2)
 
         grad_T = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(grad_T))
         assert grad_T.shape == T.shape
+
+        # Quiescent path also has a finite (zero) gradient.
+        def loss0(T_in):
+            out = kuo_convection(T_in, q_v, p_full, p_half, dt=300.0,
+                                 config=config, moisture_convergence=None)
+            return jnp.sum(out.dT_dt ** 2) + jnp.sum(out.dq_v_dt ** 2)
+
+        grad0 = jax.grad(loss0)(T)
+        assert jnp.all(jnp.isfinite(grad0))
 
 
 # ===========================================================================

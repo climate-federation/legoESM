@@ -906,15 +906,17 @@ class TestHoltslagBoville:
         T_sfc = T[:, -1] + 10.0  # very warm surface
         q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
 
-        # With counter-gradient
-        config_cg = HoltslagBovilleConfig(gamma_h=10.0)
+        # With counter-gradient (oracle default: fakn=7.2 drives cgs via
+        # fak3 = fakn*wstar/wm; the nonlocal countergradient feature).
+        config_cg = HoltslagBovilleConfig(fakn=7.2)
         out_cg = holtslag_boville_turbulence(
             u, v, T, q_v, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt=300.0, config=config_cg,
         )
 
-        # Without counter-gradient
-        config_no_cg = HoltslagBovilleConfig(gamma_h=0.0)
+        # Without counter-gradient: fakn=0 zeroes fak3 -> cgs=0 -> no
+        # nonlocal countergradient transport (pure local K-profile).
+        config_no_cg = HoltslagBovilleConfig(fakn=0.0)
         out_no_cg = holtslag_boville_turbulence(
             u, v, T, q_v, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt=300.0, config=config_no_cg,

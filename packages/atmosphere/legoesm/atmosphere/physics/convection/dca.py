@@ -54,6 +54,9 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 from legoesm.atmosphere.physics.convection.config import DCAConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection.mass_flux import (
+    stratosphere_mass_flux_gate,
+)
 from legoesm.atmosphere.physics._shared import safe_divide
 
 
@@ -141,29 +144,38 @@ def _adjust_one_iteration(
         # Dimensionless instability: positive means superadiabatic
         instability = (actual_dTdp - gamma_m) / jnp.clip(gamma_dry, 1e-10, None)
 
-        # Smooth trigger: sigmoid with steep transition on dimensionless metric
-        blend = jax.nn.sigmoid(instability_blend_sharpness * instability) * mixing_fraction
+        # Smooth trigger: sigmoid on the dimensionless super-adiabatic
+        # metric, times the per-iteration mixing fraction, AND gated out
+        # of the stratosphere.  The pressure gate multiplies ``blend``
+        # BEFORE the thermodynamics so the thin upper-model layers (small
+        # Δp/g) are never adjusted: an ungated solve concentrated the
+        # pair's compensating heat in the top layer and spiked it to
+        # ~519 K → NaN within the first RCE day (codex adversarial review).
+        strat_gate_pair = stratosphere_mass_flux_gate(p_mid)
+        blend = (
+            jax.nn.sigmoid(instability_blend_sharpness * instability)
+            * mixing_fraction * strat_gate_pair
+        )
 
-        # Target temperature for upper level: T_target = T_below - gamma_m * dp_pair
-        T_target_upper = T_below - gamma_m * dp_pair
-
-        # Adjusted temperatures: weighted average preserving layer enthalpy
-        # Weight by layer dp for energy conservation
+        # Simultaneous two-level solve enforcing BOTH the moist-adiabatic
+        # target lapse and mass-weighted (dry) enthalpy conservation:
+        #     T_below_new − T_upper_new = gamma_m · dp_pair        (lapse)
+        #     dp_b·T_below_new + dp_u·T_upper_new
+        #         = dp_b·T_below + dp_u·T_upper                  (enthalpy)
+        # The earlier code derived ``T_target_upper`` from the OLD
+        # ``T_below`` and then moved ``T_below`` independently, so at
+        # ``blend = 1`` the achieved lapse overshot/inverted the target and
+        # dumped the compensating heat into the thin top layer (codex
+        # must-fix; the discarded ``delta_mean``/``T_new_upper`` lines were
+        # also dead code).  Solving the 2×2 system makes ``blend = 1``
+        # impose the target lapse exactly while conserving pair enthalpy.
         total_dp = dp_below + dp_upper
-        T_mean_weighted = (T_below * dp_below + T_upper * dp_upper) / total_dp
-        T_target_mean = (T_below * dp_below + T_target_upper * dp_upper) / total_dp
-
-        # Shift both layers to preserve mean while achieving target lapse rate
-        delta_mean = T_mean_weighted - T_target_mean
-        T_new_upper = T_target_upper + delta_mean
-        T_new_below = T_below + (T_mean_weighted - (T_new_upper * dp_upper + T_below * dp_below) / total_dp) * total_dp / dp_below
-
-        # Actually, simpler: preserve total enthalpy exactly
-        # T_new_below = (total_dp * T_mean_weighted - dp_upper * T_new_upper) / dp_below
-        T_new_below = (T_mean_weighted * total_dp - dp_upper * T_target_upper) / dp_below
+        enthalpy = T_below * dp_below + T_upper * dp_upper
+        T_new_upper = (enthalpy - dp_below * gamma_m * dp_pair) / total_dp
+        T_new_below = T_new_upper + gamma_m * dp_pair
 
         # Blend between original and adjusted
-        T_adj_upper = T_upper + blend * (T_target_upper - T_upper)
+        T_adj_upper = T_upper + blend * (T_new_upper - T_upper)
         T_adj_below = T_below + blend * (T_new_below - T_below)
 
         # Moisture adjustment: saturate at the new temperature
@@ -289,7 +301,14 @@ def dca_convection(
         config.cape_sharpness * (cape - config.cape_threshold)
     )  # (ncol,)
 
-    # Convert to tendencies, gated by CAPE
+    # Convert to tendencies, gated by CAPE (a per-column scalar, so it
+    # preserves the per-pair MSE balance below).  The stratosphere is
+    # already suppressed inside the sweep, where ``blend`` is multiplied
+    # by the pressure gate *per adjusting pair* (uniformly across the
+    # pair's two levels) — that keeps ``c_p·ΔT + L_v·Δq = 0`` per pair, so
+    # column MSE is conserved.  Gating the OUTPUT tendencies by the
+    # per-level pressure factor instead would break that conservation
+    # (∫ gate·[c_p·dT + L_v·dq] dp ≠ 0 for a level-varying gate).
     dT_dt = cape_gate[:, None] * (T_adj - T) / dt
     dq_v_dt = cape_gate[:, None] * (q_adj - q_v) / dt
     # Convective source for cloud water — column-conservative
