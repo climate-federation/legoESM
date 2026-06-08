@@ -124,6 +124,30 @@ warmup/timing) and writes to `results/scaling_tpu_smoke/`, running on
 whatever VM you created. It is a correctness/liveness check only — its
 timing numbers are **not** a meaningful scaling benchmark.
 
+### Single-chip baseline (ct6e-standard-1t)
+
+v6e (and v5e) 8-chip slices are frequently blocked by capacity/quota, so you
+may only be able to get a **1-chip** VM. The Compute-Engine-style machine
+type `ct6e-standard-Nt` encodes the chip count in the `Nt` suffix:
+`-1t` = 1 chip, `-4t` = 4 chips, `-8t` = 8 chips. A `ct6e-standard-1t`
+(44 vCPU / 176 GB host) is a single v6e chip.
+
+One chip means **single-device only** — no sharding, no scaling sweep (that
+needs ≥2 chips; the clean 1→6 cubed-sphere curve needs 8). But it still
+proves the cubed-sphere FV3 path runs on real v6e silicon and gives a
+single-chip SYPD baseline. Every script defaults to a multi-chip count
+(2 or 6) for the 8-chip slice, so on one chip you **must** override
+`N_GPUS=1` or the run tries to grab devices that aren't there.
+
+```bash
+# On the 1-chip VM, after setup_env.sh (prints "device count: 1"):
+N_GPUS=1 bash scripts/cluster/gcp_tpu/run_smoke.sh   # quick C24 liveness
+N_GPUS=1 bash scripts/cluster/gcp_tpu/run_bench.sh   # C48/C96 baseline
+```
+
+When an 8-chip slice (`ct6e-standard-8t` / `v6e-8`) becomes available, the
+same scripts produce the full 1→6 curve with no changes.
+
 ## Phase 3 results
 
 _Pending real-hardware run._ Fill in SYPD / ms-step / Mcells-s for device
