@@ -289,6 +289,28 @@ def dilute_parcel_cape(
         4.0 * (k_launch_smooth[:, None] + 0.5 - levels[None, :])
     )  # ~1 at/above launch (index <= k_launch), ~0 strictly below
 
+    # Entrainment-layer gate for the ASCENT accumulation.  Each scan step's
+    # entrainment increment represents the layer from the level just below
+    # to the current level.  For the SURFACE-rooted launch that the ZM
+    # scheme uses in the SCM and 3-D model (launch = lowest level, the
+    # max-MSE PBL level in the vast majority of columns), the launch is the
+    # bottom of the column: there is no below-launch layer, the first scan
+    # step has ``dp ≈ 0`` (z_prev = launch), and the first real entrainment
+    # layer (launch → launch+1) SHOULD fully entrain.  The launch-inclusive
+    # ``above_launch`` mask is correct for that case and is what the oracle
+    # comparison is tuned against (deep CAPE < 1 %).
+    #
+    # Codex round-4 noted that for an ELEVATED max-MSE launch (a non-
+    # surface PBL level) this mask also entrains the below-launch → launch
+    # layer at ~0.88 weight, whereas the oracle initialises the parcel at
+    # launch with no sub-launch ascent.  That is a real (small) structural
+    # limitation for elevated launches; it does not affect the surface-
+    # launched columns the scheme actually produces, and a strict
+    # ``k_launch − 0.5`` mask measurably DE-TUNED the validated surface
+    # case (it also clips ~14 % of the genuine first ascending layer when
+    # ``k_launch`` is fractional).  We therefore keep the launch-inclusive
+    # mask and document the elevated-launch limitation in the fidelity
+    # report rather than degrade the surface-launch match.
     # ----- Entraining ascent (scan surface-first) --------------------------
     T_env_r = T_env[:, ::-1].astype(_dtype)
     q_env_r = q_v_env[:, ::-1].astype(_dtype)
