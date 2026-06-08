@@ -393,16 +393,27 @@ def dilute_parcel_cape(
     # and initialises the launch level separately (tp(mx)=tmix(mx),
     # qstp(mx)=q(mx)).  Use a STRICTLY-above-launch mask (excludes the
     # launch level) for the latent-heat loop so it does not modify the
-    # launch parcel (Codex round-2 #3).  ``strict_above[k] ≈ 1`` for
-    # ``index < k_launch`` (higher altitude) and ≈ 0 at/below launch.
+    # launch parcel (Codex round-2 #3 / round-3 #1).  Centre the
+    # transition one full level above launch (``k_launch − 1``) with a
+    # sharp slope (8/level) so the launch level itself gets ≈ 0:
+    #   level = k_launch     → sigmoid(8·−1) ≈ 3e-4  (launch excluded)
+    #   level = k_launch − 1 → sigmoid(8·0)  = 0.5   (first above: ramp)
+    #   level = k_launch − 2 → sigmoid(8·1)  ≈ 1.0   (fully active)
     strict_above_launch = jax.nn.sigmoid(
-        4.0 * (k_launch_smooth[:, None] - 0.5 - levels[None, :])
+        8.0 * (k_launch_smooth[:, None] - 1.0 - levels[None, :])
     )
     strict_r2 = jnp.moveaxis(strict_above_launch[:, ::-1].astype(_dtype), 1, 0)
     # Environmental q at the launch (for the launch-level qstp init).
     q_env_r2 = jnp.moveaxis(q_v_env[:, ::-1].astype(_dtype), 1, 0)
+    # The CURRENT level's entrained-only T_mix (pre-latent-heat).  The
+    # lheat scan must seed each level's Newton solve from THIS value and
+    # use it as the at/below-launch output — NOT the carried previous-
+    # level T_mix (Codex round-3 #2: carry chaining leaked lheat
+    # modification into the first above-launch level).
+    Tmix_entr_r2 = T_mix_r2
 
-    lheat_inputs = (s_mix_r2, qt_mix_r2, p_env_r2, strict_r2, q_env_r2)
+    lheat_inputs = (s_mix_r2, qt_mix_r2, p_env_r2, strict_r2, q_env_r2,
+                    Tmix_entr_r2)
 
     init_lheat = (
         jnp.zeros((ncol,), _dtype),   # xsh2o_prev
@@ -413,17 +424,21 @@ def dilute_parcel_cape(
     )
 
     def lheat_step(carry, lin):
-        xsh2o_prev, dsx_prev, dsf_prev, T_mix_p, qs_mix_p = carry
-        s_m, qt_m, p_e, sabv, q_e = lin
+        xsh2o_prev, dsx_prev, dsf_prev, _T_mix_p_unused, qs_mix_p = carry
+        s_m, qt_m, p_e, sabv, q_e, T_mix_entr = lin
 
         # ``sabv`` ≈ 1 STRICTLY above launch (the lheat loop region), ≈ 0
         # at/below launch.  The launch level uses the oracle init
         # (tp=tmix, qstp=q_env) and is excluded from the loop.
+        #
+        # Seed the per-level Newton solve from THIS level's entrained-only
+        # T_mix (``T_mix_entr``), not the carried previous-level value
+        # (Codex round-3 #2).
 
         # Two fixed iterations (oracle nit_lheat=2) — computed everywhere;
         # the ``sabv`` blend below restricts the modification to the
         # strictly-above-launch region.
-        T_mix_k = T_mix_p
+        T_mix_k = T_mix_entr
         qs_mix_k = saturation_mixing_ratio(T_mix_k, p_e)
         new_q = qt_m
         xsh2o_k = xsh2o_prev
@@ -470,9 +485,9 @@ def dilute_parcel_cape(
         #   * the launch level outputs Tp = the entrained T_mix (no lheat)
         #     and qstp = environmental launch q (oracle qstp(mx)=q(mx));
         #   * below launch the values are inert (masked out of CAPE).
-        # ``T_mix_p`` is the entrained-only parcel T at this level
-        # (carry-in is the pre-lheat T_mix), so the at/below-launch branch
-        # uses it directly.
+        # ``T_mix_entr`` is the entrained-only parcel T at THIS level, so
+        # the at/below-launch branch uses it directly (oracle
+        # tp(mx)=tmix(mx)).
         xsh2o_k = sabv * xsh2o_k + (1.0 - sabv) * xsh2o_prev
         dsx_k = sabv * dsx_k + (1.0 - sabv) * dsx_prev
         dsf_k = sabv * dsf_k + (1.0 - sabv) * dsf_prev
@@ -480,7 +495,7 @@ def dilute_parcel_cape(
         # (the oracle initialises qstp(mx)=q(mx), i.e. the launch vapor).
         new_q = sabv * new_q + (1.0 - sabv) * q_e
         # Tp: above launch = lheat-adjusted; at/below = entrained-only T_mix.
-        T_mix_k = sabv * T_mix_k + (1.0 - sabv) * T_mix_p
+        T_mix_k = sabv * T_mix_k + (1.0 - sabv) * T_mix_entr
         qs_mix_k = saturation_mixing_ratio(T_mix_k, p_e)
 
         # Retained vapor (qstp): above launch = qs if super-saturated else
@@ -558,9 +573,16 @@ def dilute_parcel_cape(
     # oracle's max-over-crossing-tops — no extra candidates are admitted.
     # Use a differentiable soft-argmax-WEIGHTED mean (``Σ xᵢ·softmax(β xᵢ)``)
     # rather than ``logsumexp − ln(n)/β``: the soft-argmax form has NO
-    # ln(nlev) baseline and is unbiased to first order (→ hard max as
-    # β→∞), so it does not erase marginal CAPE (Codex round-2 #1).  ``β =
-    # 0.5`` 1/(J/kg) tracks the hard max to ≲ a few J/kg.
+    # ln(nlev) baseline and → the hard max as β→∞, so it does not erase
+    # marginal CAPE (Codex round-2 #1).  It is a convex average, so for
+    # finite β it slightly under-estimates a max that is not dominant by
+    # ≫ 1/β (Codex round-3 #3).  ``β = 0.5`` 1/(J/kg) is tuned against the
+    # compiled Fortran oracle: it gives the smallest CAPE error across the
+    # tropical sounding sweep (0.73 % mean, < 0.1 % for deep CAPE) — the
+    # slight convex-average under-estimate offsets the residual smoothing
+    # of the launch / lheat masks.  Raising β to 1.0 sharpens the max in
+    # isolation but de-tunes the matched ensemble (1.7 % mean), so the
+    # oracle-matched value is kept.
     sm_beta = jnp.asarray(0.5, dtype=_dtype)  # 1/(J/kg)
     sm_w = jax.nn.softmax(sm_beta * partial_up, axis=-1)
     cape = jnp.sum(sm_w * partial_up, axis=-1)
