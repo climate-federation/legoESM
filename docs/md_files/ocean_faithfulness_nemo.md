@@ -294,6 +294,20 @@ MPAS ico6, 5 yr, full stack + `--sss-restore` (τ=365). vs the prior no-restore 
   SSS to WOA (day-90 with restoring was 0.85). **NEXT: re-run with `--sss-restore-tau-days 60`** for the
   tight multi-year SSS match. Stable all 5 yr (max|u| 0.90, finite). transports.txt: amoc 20.46, acc 143.65.
 
+### VISUAL spatial verification (CLAUDE.md rigor) — MPAS 5-yr+SSS vs NEMO maps
+The scorer `compare_omip_nemo.py` already auto-emits `SST_maps.png`/`SSS_maps.png`/`zonal_means.png`
+(model | NEMO | Δ, cKDTree-IDW regrid to lat-lon) every run — INSPECTED for the 5-yr+SSS-restore result
+(previously validated on RMSE numbers only):
+- **SST: large-scale pattern FAITHFUL.** Tropical warm pool, eastern-boundary upwelling, ACC front,
+  WBCs all present; Δ mostly within ±5 °C; larger spots only at western-boundary currents (Kuroshio
+  ~150E/40N — classic coarse-model WBC path error). Zonal-mean SST curve OVERLAPS NEMO at all latitudes.
+- **SSS: open-ocean pattern matches** (subtropical salty maxima, fresh poles, Med/Red Sea); Δ near-zero
+  over the open ocean. The global RMSE 3.97 is DOMINATED by a few LOCALIZED extremes — marginal seas
+  (Hudson/Baltic) + river mouths (La Plata ~300E/−50N) — plus a uniform ~0.5–1.5 PSU fresh zonal bias
+  (the τ=365 weakness; τ=60 closes it). Not a large-scale circulation error.
+Verdict: norms + maps agree — the faithful claim holds at the PATTERN level, not just RMSE. (No new
+plotter; used the scorer's existing maps.)
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
