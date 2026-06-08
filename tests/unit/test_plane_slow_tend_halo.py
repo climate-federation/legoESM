@@ -337,23 +337,37 @@ def test_halo_uses_cached_f_pad():
     _eq_tendencies(out_cached, out_eager, rtol=1e-14, atol=1e-14)
 
 
-def test_halo_raises_on_jit_multirank():
-    """Codex iter-3: hard guard against JIT under multi-rank."""
+def test_halo_multirank_jit_traceable():
+    """Multi-rank slow-tendency now JIT-TRACES (the macOS-era guard is
+    removed — the ConcretizationTypeError came from
+    ``int(jnp.prod(jnp.asarray(...)))`` on static shapes, now ``math.prod``;
+    mpi4jax ``sendrecv`` is jit-safe on Linux/MPICH, as ``voronoi_mpi``
+    proves).  Eager multi-rank was ~100x slower than np=1; ``step_halo`` now
+    JITs the split-explicit core.  Trace only via ``make_jaxpr`` — executing
+    needs a real 2-rank MPI comm (covered by the distributed test)."""
+    # Skip where MPI can't load — ``mpi4py.MPI`` raises RuntimeError (not
+    # ImportError) when libmpi is absent (e.g. the GPU-only .venv), which
+    # importorskip would not catch.
+    try:
+        import mpi4jax  # noqa: F401
+        from mpi4py import MPI  # noqa: F401
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        pytest.skip(f"mpi4jax/MPI unavailable: {exc}")
     grid, hc, tm, cfg, state, _ = _setup()
-    # Fake multi-rank layout (n_ranks=2 metadata; no actual MPI here).
+    # Multi-rank layout whose LOCAL block matches the _setup state shape
+    # (ny_local=6, nx_local=8): split y across 2 ranks (ny_global=12), keep
+    # x whole. n_ranks_y>1 exercises the mpi4jax sendrecv (NS) branch.
     layout_mr = make_plane_pencil_layout(
-        rank=0, n_ranks=2, n_ranks_y=1, n_ranks_x=2,
-        ny_global=6, nx_global=8,
+        rank=0, n_ranks=2, n_ranks_y=2, n_ranks_x=1,
+        ny_global=12, nx_global=8,
     )
-
-    @jax.jit
-    def fn(s):
-        return plane_compressible_euler_slow_tendencies_halo(
+    # No longer raises the old RuntimeError guard; produces a valid jaxpr.
+    jaxpr = jax.make_jaxpr(
+        lambda s: plane_compressible_euler_slow_tendencies_halo(
             s, grid, hc, tm, cfg, layout_mr,
         )
-
-    with pytest.raises(RuntimeError, match="JIT-compiled"):
-        fn(state)
+    )(state)
+    assert jaxpr is not None
 
 
 def test_halo_jit_compilable():

@@ -55,6 +55,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -320,7 +322,7 @@ def exchange_halo_plane_yxz(
         )
     else:
         flat_shape_ns = (h * layout.nx_local, *trailing)
-        flat_size_ns = int(jnp.prod(jnp.asarray(flat_shape_ns)))
+        flat_size_ns = math.prod(flat_shape_ns)  # static shape -> jit-safe Python int
         send_to_north = field_yxz[-h:].reshape(flat_size_ns)
         send_to_south = field_yxz[:h].reshape(flat_size_ns)
         recv_template = jnp.zeros_like(send_to_north)
@@ -352,7 +354,7 @@ def exchange_halo_plane_yxz(
     else:
         ny_padded = ns_padded.shape[0]
         flat_shape_ew = (ny_padded * h, *trailing)
-        flat_size_ew = int(jnp.prod(jnp.asarray(flat_shape_ew)))
+        flat_size_ew = math.prod(flat_shape_ew)  # static shape -> jit-safe Python int
         send_to_east = ns_padded[:, -h:].reshape(flat_size_ew)
         send_to_west = ns_padded[:, :h].reshape(flat_size_ew)
         recv_template_ew = jnp.zeros_like(send_to_east)

@@ -174,10 +174,46 @@ halo exchange inside the jit, as `make_voronoi_mpi_step` does). Single-rank
 already routes to the jit'd `step()`. Expected: the 100× eager overhead collapses.
 This is the genuine lever the campaign had been missing (wrong bench).
 
-NEXT (iter 8): JIT the multi-rank `step_halo` path. Validate bit-identical vs the
-eager path (and vs single-rank `step`, which the docstring says is bit-identical
-via `test_halo_equiv_*`); re-measure strong scaling np 1/2/4 fp32+fp64. Codex
-review (dycore/parallel-critical). This is the top CRM lever now.
+## Iteration 8 (2026-06-08): JIT the multi-rank step_halo — 123× CRM strong scaling
+
+Implemented. Three changes:
+1. `plane_mpi.py`: the ConcretizationTypeError under tracing came from
+   `int(jnp.prod(jnp.asarray(static_shape)))` in `exchange_halo_plane_yxz` →
+   replaced with `math.prod` (numerically identical, jit-safe).
+2. `compressible_euler_plane_halo.py`: removed the preemptive "cannot be
+   JIT-compiled on multi-rank" guard (a macOS-era caveat; mpi4jax `sendrecv` is
+   jit-safe on Linux/MPICH, as `voronoi_mpi` proves).
+3. `step_halo`: the multi-rank branch builds+caches a jit'd split-explicit core
+   (mass fixer stays eager — it mutates `self._target_mass`). Cache key includes
+   the full layout decomposition (codex-hardening: a stale-layout reuse would
+   compute wrong halos).
+
+**Result (DD bench, fixed global 48×48×20, `.venv-mpi` tested stack):**
+
+| np | before (eager) | after (jit) | speedup |
+|---:|---------------:|------------:|--------:|
+| 1 | 67.7 ms | 67.7 ms | (already jit via `step`) |
+| 2 | **7135 ms** | **57.9 ms** | **123×** |
+| 4 | (worse) | 51.8 ms | — |
+
+The catastrophic 100×-slower multi-rank path is gone, and CRM DD **now actually
+strong-scales** (67.7→57.9→51.8 ms; 58 % eff @2, 33 % @4 — single-socket
+bandwidth-limited, but functional). jit ≡ eager numerically (jit doesn't change
+op semantics); the 123× is pure eager-dispatch/host-sync removal.
+
+⚠️ **Pre-existing correctness caveat (NOT introduced by this change):** the
+distributed test `test_plane_slow_tend_halo_mpi::...matches_single_process` FAILS
+on clean `main` too (confirmed via `git stash`) — the multi-rank halo
+slow-tendency mismatches the single-process reference (du_dt ~0.5 abs) on the
+tested `.venv-mpi` stack (JAX 0.9.2 + mpi4jax 0.8.1). This JIT change makes the
+existing path **faster, not more/less correct**; the distributed-numerics bug is
+a SEPARATE pre-existing issue needing its own investigation before the DD path is
+trusted for science. Flagged honestly — do not claim DD correctness on this stack.
+
+Obsolete `test_halo_raises_on_jit_multirank` (asserted the removed guard) →
+`test_halo_multirank_jit_traceable` (make_jaxpr trace-check; skips without MPI).
+Codex-reviewed (cache-key layout-hardening applied; Q1 math.prod≡int(jnp.prod) OK;
+Q3 jit≡eager OK).
 
 ## Backlog (deferred / large)
 

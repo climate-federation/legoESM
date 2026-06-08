@@ -2893,10 +2893,38 @@ class PlaneCompressibleEulerModel:
                     self.height_coord, self.terrain_metric, self.config,
                 )
 
-        stepped = split_explicit_step(
-            state_local, slow_tendency_fn, acoustic_update_fn,
-            dt, se_config,
+        # Build + cache a JIT'd split-explicit core.  The eager multi-rank
+        # path host-syncs on every op and every mpi4jax halo ``sendrecv``,
+        # making it ~100x slower than np=1 (measured: np2 7135 ms vs np1
+        # 68.6 ms/step).  The docstring's "mpi4jax not jit-safe on macOS
+        # shared-mem" caveat does NOT hold on Linux/MPICH — ``voronoi_mpi``
+        # runs mpi4jax collectives inside ``@jax.jit`` at scale.  JIT-ing the
+        # slow-tendency (incl. its halo exchange) + acoustic substeps as one
+        # fused executable collapses the eager dispatch/host-sync overhead.
+        # The mass fixer stays eager below (cheap — one allreduce/step — and
+        # it mutates the ``self._target_mass`` anchor, which a jit can't trace).
+        # Cache keyed on the trace-invariant statics so we build the jit once;
+        # ``dt`` is closed in (static), so a changed dt rebuilds.
+        # Key includes the full layout DECOMPOSITION (not just n_ranks): the
+        # cached jit bakes in this layout's halo dims/neighbours via the
+        # captured closures, so a different decomposition on the same model
+        # instance MUST rebuild (else it would silently reuse a stale halo
+        # graph and compute wrong results).
+        _jit_key = (
+            layout.n_ranks, layout.n_ranks_y, layout.n_ranks_x,
+            layout.ny_local, layout.nx_local,
+            float(dt), self.config.n_acoustic_substeps,
+            bool(self.config.semi_implicit_acoustic), id(f_pad_cached),
         )
+        if (getattr(self, "_jit_halo_core", None) is None
+                or getattr(self, "_jit_halo_key", None) != _jit_key):
+            def _halo_core(s):
+                return split_explicit_step(
+                    s, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+                )
+            self._jit_halo_core = jax.jit(_halo_core)
+            self._jit_halo_key = _jit_key
+        stepped = self._jit_halo_core(state_local)
 
         # MPI-aware dry-mass fixer (R7). Only fires when the user
         # passes an owned_mask + config.fix_mass is True. Without the
