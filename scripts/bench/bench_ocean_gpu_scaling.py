@@ -224,16 +224,21 @@ def main() -> int:
                    help="Override MPAS_LEVELS (comma list)")
     p.add_argument("--mpas-baro-solver",
                    choices=["explicit_substep", "implicit_cn"],
-                   default="explicit_substep",
+                   default="implicit_cn",
                    help="MPAS barotropic solver. implicit_cn solves a "
                         "Crank-Nicolson free-surface system once per "
                         "baroclinic step; explicit_substep iterates "
-                        "n_barotropic_substeps small steps (config-defined).")
+                        "n_barotropic_substeps small steps (config-defined). "
+                        "Default implicit_cn MATCHES production (run_omip.py) "
+                        "and is ~2.5x faster on GPU than the 30-substep "
+                        "explicit path, which serialises 30 barotropic updates "
+                        "(+ per-substep allreduce) per baroclinic step.")
     p.add_argument("--ll-baro-solver",
                    choices=["explicit_substep", "implicit_cn"],
-                   default="explicit_substep",
+                   default="implicit_cn",
                    help="Lat-lon C-grid barotropic solver (same options "
-                        "as --mpas-baro-solver).")
+                        "as --mpas-baro-solver).  Default implicit_cn matches "
+                        "production (run_omip.py); ~1.3x faster than explicit.")
     p.add_argument("--no-cuda-graphs", action="store_true",
                    help="Disable XLA CUDA-graphs flag (default: enabled to "
                         "fix MPAS-ocean fp32 anomaly; recognised at import "

@@ -368,7 +368,16 @@ GPU radiation kernel (`solve_columns`, 3456 cols × 26 lev, fp32):
 **6.1× faster radiation** (10.3 s → 1.68 s), bit-identical forward, training path
 (batch=0) untouched, memory-bounded. Codex-reviewed: no CRITICAL/HIGH; two MEDIUM
 verification gaps (SW carry purely additive; no Python control flow on `igpt`)
-both closed by code audit. The ~10.9 s/step RRTMGP segment (iter 7) was
+both closed by code audit.
+
+**float64 also improves** (same 3456-col GPU bench): scan 19 279 ms → batch=16
+7 696 ms = **2.5×**. Smaller than fp32's 6.1× — consumer-GPU fp64 (~1/64 rate)
+is arithmetic-bound, so parallelising g-points hides less launch overhead — and
+the memory ceiling is lower: fp64 `batch=32` OOMs (10 GiB), so **batch≈16 is the
+fp64 max** on 24 GiB vs ≈32 for fp32. Both precisions benefit; pick block size by
+precision.
+
+The ~10.9 s/step RRTMGP segment (iter 7) was
 radiation-dominated, so end-to-end RRTMGP should drop ~6× once the forward driver
 sets `gpoint_batch_size>0` (iter 10 plumbing). Remaining radiation cost is the
 genuine 224+256 g-points × 26-level recurrence + optics.
@@ -394,6 +403,66 @@ Original validation (synthetic, GPU, 3456 col × 26 lev × 256 gpt, each g-point
 1.29 ms = 26× faster**. Real RRTMGP per-g-point work is heavier ⇒ the true gain
 is larger (toward closing the ~6000× gap; also removes `prevent_cse` + checkpoint
 overhead).
+
+## Iteration 13 (2026-06-08): OCEAN single-GPU throughput baseline
+
+Atmosphere multi-rank gap reassessed: cubed-sphere already has a face-sharded
+SPMD path (`parallel/sharded_dynamics.py`, `make_sharded_step`, shard_map, ≤6
+faces + sub-face tiling, tested in `test_cubed_sphere_spmd_step.py`) — it targets
+≥2 GPUs/TPU, so its multi-device scaling can't be wall-clock-benchmarked on this
+1-GPU host (simulated CPU devices share cores). Not a code gap; hardware-blocked
+here. Atmosphere has its major wins; pivot to the ocean half.
+
+Ocean GPU throughput (`bench_ocean_gpu_scaling.py`, float32, single RTX 5090,
+explicit_substep barotropic):
+
+| grid    | size  | n_cells   | ms/step | Mcells/s |
+|---------|-------|----------:|--------:|---------:|
+| latlon  | LL32  |    40 960 |  1.36   |   30.1   |
+| latlon  | LL64  |   163 840 |  1.76   |   93.3   |
+| latlon  | LL96  |   368 640 |  1.97   |  187.0   |
+| latlon  | LL128 |   655 360 |  2.56   |  256.3   |
+| latlon  | LL192 | 1 474 560 |  4.67   | **315.6**|
+| MPAS    | I4    |    51 240 |  2.50   |   20.5   |
+| MPAS    | I5    |   204 840 |  3.43   |   59.7   |
+| MPAS    | I6    |   819 240 |  7.97   | **102.8**|
+
+Healthy curves (throughput rises with size, no decline) — both grids still below
+saturation at these sizes (small sizes are launch/dispatch-bound, like the
+atmosphere). Same structured>unstructured pattern: **lat-lon ~3× MPAS**
+(coalesced C-grid vs gather-bound Voronoi). Ocean throughput is lower than the
+atmosphere dycore (lat-lon atm HS ~1100 vs ocean ~316 Mc/s) — more work per cell
+(baroclinic + barotropic substepping + EOS).
+
+NOTE: those iter-13 numbers used the bench's `explicit_substep` default, which is
+NOT the production solver — corrected in iter 14.
+
+## Iteration 14 (2026-06-08): ocean barotropic solver — production lever found
+
+Hunted the ocean bottleneck (RRTMGP lesson). The barotropic substeps are
+GENUINELY sequential (temporal integration — unlike RRTMGP g-points, can't
+parallelise). But the algorithm choice matters: `explicit_substep` iterates
+`n_barotropic_substeps = 30` sequential small steps (+ a per-substep allreduce,
+`eta_floor.py`); `implicit_cn` solves one Crank-Nicolson free-surface system per
+baroclinic step. GPU float32:
+
+| grid         | explicit_substep | implicit_cn   | speedup |
+|--------------|-----------------:|--------------:|--------:|
+| latlon LL128 | 2.56 ms / 256    | 1.79 ms / 366 | 1.41×   |
+| latlon LL192 | 4.67 ms / 316    | 3.69 ms / 400 | 1.27×   |
+| MPAS I5      | 3.43 ms / 60     | 1.39 ms / 147 | **2.47×** |
+| MPAS I6      | 7.97 ms / 103    | 3.25 ms / 252 | **2.45×** |
+
+`implicit_cn` is 1.3–2.5× faster (MPAS most — its 30-substep + allreduce path is
+costliest) AND is the VALIDATED PRODUCTION solver: `run_omip.py` selects
+`barotropic_solver="implicit_cn"` in all three production paths. So the bench's
+`explicit_substep` default was *misrepresenting* production ocean performance.
+
+Fix: `bench_ocean_gpu_scaling.py` now defaults both `--mpas-baro-solver` and
+`--ll-baro-solver` to `implicit_cn`, matching `run_omip.py`. No production physics
+changed (implicit_cn already exists + is the production default) → no fidelity
+risk. Production-representative single-GPU ocean throughput: **lat-lon ~400 Mc/s
+(LL192), MPAS ~252 Mc/s (I6)** — both healthy/rising.
 
 ## Backlog (campaign)
 
