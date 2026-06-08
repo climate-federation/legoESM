@@ -1,11 +1,24 @@
 """Deep Convective Adjustment (DCA) scheme.
 
-The simplest convection parameterization: scans from bottom to top,
-adjusting adjacent layer pairs toward moist-adiabatic neutrality.
-Excess moisture is removed as precipitation.
+Two variants, routed by ``DCAConfig.variant``:
 
-Uses jax.lax.scan for JIT-friendliness and differentiability.
-Smooth sigmoid triggers ensure continuous gradients.
+* ``"manabe"`` (default): the Manabe-Smagorinsky-Strickler (1965)
+  pairwise moist-adiabatic adjustment.  Scans from bottom to top,
+  adjusting adjacent layer pairs toward moist-adiabatic neutrality;
+  excess moisture is removed as precipitation.  Uses ``jax.lax.scan``
+  for JIT-friendliness and differentiability with smooth sigmoid
+  triggers.
+
+* ``"ahmed_neelin"``: the Ahmed-Neelin-Adames (2020) lower-tropospheric-
+  buoyancy (B_L) precipitation-buoyancy closure (``ahmed_neelin_dca``).
+  The operative closure is the empirical eq-(8) precipitation–buoyancy
+  relation ``P = a·(B_L − B_c)+``; the implied column latent heating is
+  partitioned heating-up / drying-down along the eq-(41) direction
+  (latent cooling cancels sensible heating per level), which conserves
+  column moist static energy and drives ``B_L`` toward ``B_c``.  The
+  column relaxation time scale is emergent (the paper's nominal ≈2 h is
+  derived from observational EOF structures unavailable in-model).  See
+  :func:`ahmed_neelin_dca`.
 
 Planned: a DRY convective-adjustment mode (DCAConfig.dry=False default)
 --------------------------------------------------------------------
@@ -39,6 +52,8 @@ References
 - Manabe, S., Smagorinsky, J., & Strickler, R. F. (1965).
   Simulated climatology of a general circulation model with a
   hydrological cycle. Mon. Wea. Rev., 93, 769-798.
+- Ahmed, F., Adames, A. F., & Neelin, J. D. (2020). Deep convective
+  adjustment of temperature and moisture. J. Atmos. Sci., 77, 2163-2186.
 """
 
 from __future__ import annotations
@@ -52,7 +67,10 @@ from legoesm.atmosphere.physics.thermodynamics import (
     moist_adiabat_lapse_rate,
     compute_cape,
 )
-from legoesm.atmosphere.physics.convection.config import DCAConfig
+from legoesm.atmosphere.physics.convection.config import (
+    AhmedNeelinDCAConfig,
+    DCAConfig,
+)
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.mass_flux import (
     stratosphere_mass_flux_gate,
@@ -236,7 +254,7 @@ def _adjust_one_iteration(
     return T_new, q_new, precip_col
 
 
-def dca_convection(
+def _manabe_dca_convection(
     T: jax.Array,
     q_v: jax.Array,
     p_full: jax.Array,
@@ -244,7 +262,7 @@ def dca_convection(
     dt: float,
     config: DCAConfig = DCAConfig(),
 ) -> ConvectionOutput:
-    """Compute Deep Convective Adjustment tendencies.
+    """Compute Manabe-style Deep Convective Adjustment tendencies.
 
     Parameters
     ----------
@@ -345,3 +363,428 @@ def dca_convection(
         cape=cape,
         convective_mask=convective_mask,
     )
+
+
+# ===========================================================================
+# Ahmed-Neelin-Adames (2020) lower-tropospheric-buoyancy (B_L) closure
+# ===========================================================================
+#
+# Reference: Ahmed, Adames & Neelin (2020), J. Atmos. Sci. 77, 2163-2186
+# (ANA20).  Equation numbers below refer to that paper.
+#
+# Moist enthalpy (ANA20, after eq 6):  e = T + (L_v/c_p)·q   [K]
+#   (q is specific humidity; e* uses saturation specific humidity q*).
+# Exner function:                       Π(p) = (p/p0)^κ        [-]
+# Buoyancy (eq 7):
+#   B_L = (g·Π_L/e_L*)·[ w_b·(e_B/Π_B) + w_L·(e_L/Π_L) − e_L*/Π_L ]  [m/s²]
+# Precipitation (eq 8):  P = a·(B_L − B_c)·H(B_L − B_c)               [kg/m²/s]
+
+
+def _exner(p: jax.Array) -> jax.Array:
+    """Exner function Π(p) = (p/p_ref)^κ [-]; p_ref, κ from constants."""
+    return (p / constants.p_ref) ** constants.kappa
+
+
+def _layer_membership(
+    p_full: jax.Array,
+    p_top,
+    p_bot,
+    edge_width_pa: float,
+) -> jax.Array:
+    """Smooth (sigmoid) 0–1 membership weight for a pressure layer.
+
+    Returns ~1 for ``p_top < p < p_bot`` and ~0 outside, with sigmoid
+    transitions of half-width ``edge_width_pa`` at each edge.  A hard
+    boolean pressure mask kills ``jax.grad`` through the layer boundaries;
+    the product of two sigmoids keeps the layer averages differentiable.
+
+    Parameters
+    ----------
+    p_full : jax.Array
+        Full-level pressure [Pa], shape (ncol, nlev).
+    p_top, p_bot : float
+        Top (lower pressure) and bottom (higher pressure) of the layer
+        [Pa], with ``p_top < p_bot``.
+    edge_width_pa : float
+        Sigmoid transition half-width [Pa].
+
+    Returns
+    -------
+    jax.Array
+        Membership weight in [0, 1], shape (ncol, nlev).
+    """
+    # below_bot ≈ 1 where p <= p_bot (inside, on the high-pressure side)
+    below_bot = jax.nn.sigmoid((p_bot - p_full) / edge_width_pa)
+    # above_top ≈ 1 where p >= p_top (inside, on the low-pressure side)
+    above_top = jax.nn.sigmoid((p_full - p_top) / edge_width_pa)
+    return below_bot * above_top
+
+
+def _layer_average(
+    field: jax.Array,
+    dp: jax.Array,
+    membership: jax.Array,
+    eps: float = 1.0,
+) -> jax.Array:
+    """Mass-weighted layer average of ``field`` over a smooth layer.
+
+    ⟨X⟩ = Σ_k X_k · w_k · Δp_k / Σ_k w_k · Δp_k, where ``w_k`` is the
+    smooth layer membership and ``Δp_k`` the layer thickness [Pa].
+    AD-safe: the denominator carries the same membership so it never
+    vanishes when the layer is populated, and an ``eps`` [Pa] floor guards
+    the empty-layer limit.
+
+    Parameters
+    ----------
+    field : jax.Array
+        Field to average [arbitrary unit], shape (ncol, nlev).
+    dp : jax.Array
+        Layer thickness [Pa], shape (ncol, nlev), positive.
+    membership : jax.Array
+        Smooth 0–1 layer membership, shape (ncol, nlev).
+    eps : float
+        Denominator floor [Pa] for the empty-layer limit.
+
+    Returns
+    -------
+    jax.Array
+        Mass-weighted layer mean [same unit as field], shape (ncol,).
+    """
+    w = membership * dp
+    num = jnp.sum(field * w, axis=-1)
+    den = jnp.sum(w, axis=-1)
+    return num / jnp.clip(den, eps, None)
+
+
+def _compute_BL(
+    T: jax.Array,
+    q_v: jax.Array,
+    p_full: jax.Array,
+    dp: jax.Array,
+    cfg: AhmedNeelinDCAConfig,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Lower-tropospheric buoyancy B_L (ANA20 eq 7) and its building blocks.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K], shape (ncol, nlev).
+    q_v : jax.Array
+        Water vapor specific humidity [kg/kg], shape (ncol, nlev).
+    p_full : jax.Array
+        Full-level pressure [Pa], shape (ncol, nlev).
+    dp : jax.Array
+        Layer thickness [Pa], shape (ncol, nlev), positive.
+    cfg : AhmedNeelinDCAConfig
+        Ahmed-Neelin configuration.
+
+    Returns
+    -------
+    BL : jax.Array
+        Lower-tropospheric buoyancy [m/s²], shape (ncol,).
+    member_bl : jax.Array
+        Boundary-layer membership, shape (ncol, nlev).
+    member_lft : jax.Array
+        Lower-free-troposphere membership, shape (ncol, nlev).
+    Pi_L : jax.Array
+        LFT-averaged Exner function [-], shape (ncol,).
+    e_L_star : jax.Array
+        LFT-averaged saturation moist enthalpy [K], shape (ncol,).
+    """
+    Lv_cp = constants.L_v / constants.c_pd  # [K per (kg/kg)]
+
+    # Moist enthalpy fields (ANA20 after eq 6).  ``q_sat`` is the saturation
+    # MIXING RATIO, matching the model's ``q_v`` convention: legoESM
+    # initialises and carries ``q_v`` as a mixing ratio (it is built from
+    # ``saturation_mixing_ratio``), so e = T + (L_v/c_p)·q_v and
+    # e* = T + (L_v/c_p)·q_sat use the SAME water variable.  (ANA20 writes
+    # ``q`` loosely as "specific humidity"; at tropical q≈20 g/kg the
+    # mixing-ratio vs specific-humidity difference is ~2% in e and far
+    # smaller in B_L, but using one consistent variable avoids a spurious
+    # systematic offset between e and e* — codex review-1 finding.)
+    q_sat = saturation_mixing_ratio(T, p_full)  # [kg/kg] mixing ratio
+    e = T + Lv_cp * q_v          # [K]
+    e_star = T + Lv_cp * q_sat   # [K]
+    Pi = _exner(p_full)          # [-]
+
+    # Surface-aware layer edges.  ANA20 defines the BL as "surface → 850 hPa"
+    # (Δp_B ≈ 150 hPa).  Over high topography / low surface pressure a FIXED
+    # 850-hPa BL top can sit above the surface, leaving the BL empty and the
+    # ratios e_B/Π_B meaningless (codex review-1 finding).  We therefore
+    # clamp the BL top to stay a minimum depth below the surface pressure
+    # (``p_s − layer_floor``) and the LFT top a minimum depth below the BL
+    # top, so both layers always retain mass and degrade gracefully on a
+    # shallow column.  On a standard p_s ≈ 1000 hPa column the clamps are
+    # inactive and the edges are exactly the config 850 / 500 hPa.
+    # Surface pressure ≈ bottom interface = lowest full level + half its
+    # thickness (p_full ordered top→bottom, so index −1 is the surface
+    # layer).  Avoids changing ``_compute_BL``'s signature for all callers.
+    p_s = (p_full[:, -1:] + 0.5 * dp[:, -1:])            # (ncol, 1) [Pa]
+    layer_floor = cfg.layer_min_depth_pa                 # min layer depth [Pa]
+    p_bl_top = jnp.minimum(cfg.p_bl_top_pa, p_s - layer_floor)        # (ncol,1)
+    p_lft_top = jnp.minimum(cfg.p_lft_top_pa, p_bl_top - layer_floor)  # (ncol,1)
+    # BL high-pressure edge left open above the surface so the lowest model
+    # levels are always counted.
+    p_surface_ceiling = p_s + 10.0 * cfg.layer_edge_width_pa
+    member_bl = _layer_membership(
+        p_full, p_bl_top, p_surface_ceiling, cfg.layer_edge_width_pa,
+    )
+    member_lft = _layer_membership(
+        p_full, p_lft_top, p_bl_top, cfg.layer_edge_width_pa,
+    )
+
+    # Layer-averaged moist enthalpies and Exner functions.
+    e_B = _layer_average(e, dp, member_bl)            # [K]
+    e_L = _layer_average(e, dp, member_lft)           # [K]
+    e_L_star = _layer_average(e_star, dp, member_lft)  # [K]
+    Pi_B = _layer_average(Pi, dp, member_bl)          # [-]
+    Pi_L = _layer_average(Pi, dp, member_lft)         # [-]
+
+    # ANA20 eq (7):
+    #   B_L = (g·Π_L/e_L*)·[ w_b·(e_B/Π_B) + w_L·(e_L/Π_L) − e_L*/Π_L ]
+    bracket = (
+        cfg.w_b * (e_B / Pi_B)
+        + cfg.w_l * (e_L / Pi_L)
+        - e_L_star / Pi_L
+    )
+    BL = (constants.g * Pi_L / e_L_star) * bracket  # [m/s²]
+    return BL, member_bl, member_lft, Pi_L, e_L_star
+
+
+def _a_si(cfg: AhmedNeelinDCAConfig) -> float:
+    """Slope ``a`` of the P–B_L line in SI mass-flux units.
+
+    ANA20 Table 1 reports ``a`` in mm h⁻¹ per (m s⁻²).  Convert to
+    [kg m⁻² s⁻¹ per (m s⁻²)] using water density ρ_w = 1000 kg/m³ and
+    3600 s/h: ``a_SI = a_mm_per_hr · ρ_w / (1000 · 3600)`` since 1 mm of
+    water = 1 kg/m² (ρ_w · 1e-3 m).
+    """
+    rho_w = 1000.0  # density of liquid water [kg/m³] (math constant here)
+    # 1 mm/h of rain = (rho_w * 1e-3 m) / 3600 s = rho_w / 3.6e6 kg/m²/s
+    return cfg.a_mm_per_hr * rho_w / 3.6e6
+
+
+def _precip_from_BL(
+    BL: jax.Array,
+    cfg: AhmedNeelinDCAConfig,
+) -> jax.Array:
+    """Precipitation P = a·(B_L − B_c)·H(B_L − B_c) (ANA20 eq 8).
+
+    The Heaviside is smoothed to a softplus so the ramp is differentiable
+    at B_c:  ``softplus(s·x)/s → max(x, 0)`` as ``s → ∞``.  Output is a
+    non-negative mass flux [kg/m²/s].
+
+    Parameters
+    ----------
+    BL : jax.Array
+        Lower-tropospheric buoyancy [m/s²], shape (ncol,).
+    cfg : AhmedNeelinDCAConfig
+        Configuration (slope ``a``, critical ``B_c``, sharpness).
+
+    Returns
+    -------
+    jax.Array
+        Precipitation [kg/m²/s], shape (ncol,), >= 0.
+    """
+    s = cfg.precip_heaviside_sharpness
+    excess = jax.nn.softplus(s * (BL - cfg.b_c)) / s  # smooth max(BL-Bc, 0)
+    return _a_si(cfg) * excess
+
+
+def ahmed_neelin_dca(
+    T: jax.Array,
+    q_v: jax.Array,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    dt: float,
+    config: AhmedNeelinDCAConfig = AhmedNeelinDCAConfig(),
+) -> ConvectionOutput:
+    """Ahmed-Neelin-Adames (2020) B_L convective-adjustment tendencies.
+
+    The OPERATIVE closure is the empirical precipitation-buoyancy relation
+    eq (8) — the central result the paper validates against TRMM/ERA data
+    (Fig 3).  The column heating and drying are set so that the
+    column-integrated precipitation equals
+    ``P = a·(B_L − B_c)·H(B_L − B_c)`` (eq 8), moved along the eq-(41)
+    direction that conserves column moist static energy:
+
+    * **Precipitation (eq 8, OPERATIVE).** ``P = a·(B_L − B_c)+`` with the
+      empirical slope ``a`` (config ``a_mm_per_hr``) and critical buoyancy
+      ``B_c`` (config ``b_c``).  The Heaviside is softplus-smoothed for
+      differentiability.  The implied column latent heating is
+      ``Q̂_c = L_v·P`` (ANA20 eq 11), so ``∫ c_p·dT/dt dp/g = L_v·P``
+      holds to machine precision.
+
+    * **Adjustment direction (eq 41).** The heating is moved along the
+      second eigenvector of the linearised system (slope −1 in the
+      moist-enthalpy q̂–T̂ plane): per level the latent cooling exactly
+      cancels the sensible heating, ``L_v·dq_v/dt + c_p·dT/dt = 0``.  Hence
+      column moist static energy is conserved during the adjustment, and
+      drying coincides with warming.
+
+    * **Adjustment time scale (eqs 38-42).** The buoyancy excess relaxes
+      toward zero with an EMERGENT time scale set by eq (8) and the
+      column's own buoyancy sensitivity to the heating direction.  ANA20
+      report ``τ_c ≈ 2 h`` (eq 42); that value is itself DERIVED from
+      ``a`` together with the observational EOF vertical structures
+      (``L_{TL}``, ``L_{qL}``, …; eqs 25-27) that are not available
+      in-model, so we surface the emergent τ as a diagnostic rather than
+      imposing it.  See `config.tau_adjust_s` — it is retained for
+      reference / optional rescaling but is NOT used to set the operative
+      rate (which is eq 8).
+
+    Conventions: ``dq_v_dt < 0`` (drying), ``dT_dt > 0`` (latent heating)
+    where convecting; ``q_v`` stays non-negative (the per-step adjustment
+    is capped at the available vapor, preserving the column MSE balance).
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature at full levels [K], shape (ncol, nlev).
+    q_v : jax.Array
+        Water vapor mixing ratio [kg/kg], shape (ncol, nlev).  (legoESM
+        carries ``q_v`` as a mixing ratio; ``e`` and ``e*`` use the same
+        variable — see `_compute_BL`.)
+    p_full : jax.Array
+        Full-level pressure [Pa], shape (ncol, nlev).
+    p_half : jax.Array
+        Half-level pressure [Pa], shape (ncol, nlev+1).
+    dt : float
+        Model time step [s].
+    config : AhmedNeelinDCAConfig
+        Ahmed-Neelin configuration.
+
+    Returns
+    -------
+    ConvectionOutput
+        Convective tendencies and diagnostics.  ``cape`` carries the
+        diagnostic ``B_L`` [m/s²] (not Joules) for this scheme;
+        ``convective_mask`` is the smooth precipitating indicator.
+    """
+    ncol, nlev = T.shape
+    dp = p_half[:, 1:] - p_half[:, :-1]            # (ncol, nlev) [Pa] > 0
+    g = constants.g
+    Lv = constants.L_v
+    c_pd = constants.c_pd
+
+    # --- B_L and the OPERATIVE precipitation (ANA20 eqs 7, 8) -------------
+    BL, member_bl, member_lft, _Pi_L, _e_L_star = _compute_BL(
+        T, q_v, p_full, dp, config,
+    )                                              # BL: (ncol,) [m/s²]
+    precip = _precip_from_BL(BL, config)           # (ncol,) [kg/m²/s] >= 0  (eq 8)
+    # Implied column-integrated latent heating Q̂_c = L_v·P (ANA20 eq 11).
+    Qc_col = Lv * precip                           # (ncol,) [W/m²]
+
+    # --- Vertical structure: BL+LFT mass shape ---------------------------
+    # ``member_union`` is the union of the BL and LFT memberships (the
+    # layers that define B_L).  ``shape_k`` [1/Pa] is normalised so that
+    # Σ_k shape_k·Δp_k = 1 on a populated column; it vanishes on a
+    # degenerate all-stratosphere column.
+    member_union = member_bl + member_lft           # (ncol, nlev) [-]
+    member_mass = jnp.sum(member_union * dp, axis=-1)  # (ncol,) [Pa]
+    shape = member_union * safe_divide(
+        jnp.ones_like(member_mass), member_mass, eps=1.0,
+    )[:, None]                                       # (ncol, nlev) [1/Pa]
+
+    # --- Heating from eq (8), distributed; drying along eq (41) ----------
+    # Heating per level [K/s]:  dT_dt_k = (Q̂_c / c_p) · g · shape_k.
+    #   Σ_k c_p·dT_dt_k·Δp_k/g = Q̂_c·Σ_k shape_k·Δp_k = Q̂_c   (eq 11). ✓
+    heating_rate = (Qc_col / c_pd)[:, None] * g * shape   # (ncol, nlev) [K/s]
+    # Slope −1 in moist-enthalpy units (eq 41): per level latent cooling
+    # cancels sensible heating ⇒ column MSE conserved and
+    # ∫ L_v·dq dp/g = −∫ c_p·dT dp/g = −L_v·P exactly.
+    drying_rate = -(c_pd / Lv) * heating_rate        # (ncol, nlev) [kg/kg/s]
+
+    # --- Positivity: cap the per-step drying at the available vapor ------
+    # A single step must not drive q_v negative.  Scale the WHOLE column's
+    # heating+drying by one factor so the MSE balance (eq 41) and the
+    # latent-heating ↔ precip closure stay exact under the cap.
+    max_drying = -q_v / dt                           # (ncol, nlev) <= 0
+    frac_level = jnp.where(
+        drying_rate < max_drying,                    # would over-dry
+        safe_divide(max_drying, drying_rate, eps=1e-30, fill=1.0),
+        jnp.ones_like(drying_rate),
+    )
+    frac = jnp.min(frac_level, axis=-1, keepdims=True)  # (ncol, 1) in (0, 1]
+
+    dT_dt = heating_rate * frac                      # (ncol, nlev) [K/s]
+    dq_v_dt = drying_rate * frac                     # (ncol, nlev) [kg/kg/s]
+
+    # Diagnostic precipitation P [kg/m²/s] = column latent heating / L_v
+    # (equals eq-(8) P before the positivity cap engages).
+    precip = jnp.sum(c_pd * dT_dt * dp, axis=-1) / (g * Lv)  # (ncol,) >= 0
+
+    # Convective condensate source for the cloud-water bucket: the column
+    # net drying becomes cloud water (microphysics owns surface precip).
+    # By construction dq_v_dt <= 0, so -dq_v_dt >= 0 everywhere.
+    dq_c_conv_dt = jnp.maximum(-dq_v_dt, 0.0)        # (ncol, nlev) [kg/kg/s]
+
+    # Smooth precipitating indicator in [0, 1].
+    convective_mask = jax.nn.sigmoid(
+        config.precip_heaviside_sharpness * (BL - config.b_c)
+    )                                                # (ncol,)
+    del precip  # microphysics owns the surface precip diagnostic
+
+    return ConvectionOutput(
+        dT_dt=dT_dt,
+        dq_v_dt=dq_v_dt,
+        dq_c_conv_dt=dq_c_conv_dt,
+        cape=BL,                                     # B_L [m/s²] diagnostic
+        convective_mask=convective_mask,
+    )
+
+
+def dca_convection(
+    T: jax.Array,
+    q_v: jax.Array,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    dt: float,
+    config: DCAConfig = DCAConfig(),
+) -> ConvectionOutput:
+    """Compute Deep Convective Adjustment tendencies (variant dispatch).
+
+    Routes on ``config.variant``:
+
+    * ``"manabe"`` (default): :func:`_manabe_dca_convection` — the
+      Manabe-Smagorinsky-Strickler (1965) pairwise moist-adiabatic
+      adjustment (legacy legoESM ``dca`` behaviour, unchanged).
+    * ``"ahmed_neelin"``: :func:`ahmed_neelin_dca` — the
+      Ahmed-Neelin-Adames (2020) B_L precipitation-buoyancy closure,
+      using ``config.ahmed_neelin``.
+
+    Dispatch is on a static Python string (the config ``variant`` field),
+    so only the selected branch is traced — no ``jnp.where`` over both
+    schemes.  Unknown variants raise ``ValueError`` (no silent fallback).
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature at full levels [K], shape (ncol, nlev).
+    q_v : jax.Array
+        Water vapor specific humidity [kg/kg], shape (ncol, nlev).
+    p_full : jax.Array
+        Pressure at full levels [Pa], shape (ncol, nlev).
+    p_half : jax.Array
+        Pressure at half levels [Pa], shape (ncol, nlev+1).
+    dt : float
+        Model time step [s].
+    config : DCAConfig
+        Convection configuration (selects the variant).
+
+    Returns
+    -------
+    ConvectionOutput
+        Convective tendencies and diagnostics.
+    """
+    if config.variant == "manabe":
+        return _manabe_dca_convection(T, q_v, p_full, p_half, dt, config)
+    elif config.variant == "ahmed_neelin":
+        return ahmed_neelin_dca(
+            T, q_v, p_full, p_half, dt, config.ahmed_neelin,
+        )
+    else:
+        raise ValueError(
+            f"Unknown DCAConfig.variant: {config.variant!r}. "
+            f"Choose 'manabe' or 'ahmed_neelin'."
+        )
