@@ -150,9 +150,14 @@ def _safe_ratio(num, den, floor):
         num/den  ≈  num·den / (den² + floor²)
 
     Properties:
-      * ``|den| >> floor`` → ``num/den`` exactly (SIGN PRESERVED — for a
-        genuinely negative DENOM the ratio stays negative, unlike a
-        positive floor), so the active 0<SIJ<0.9 band is faithful.
+      * ``|den| >> floor`` → ``num/den`` to within the factor
+        ``den²/(den²+floor²)`` (≈1% damping at ``|den|=10·floor``, ≈10% at
+        ``3·floor``), SIGN PRESERVED — for a genuinely negative DENOM the
+        ratio stays negative, unlike a positive floor.  In the active
+        ``0<SIJ<0.9`` band ``|DENOM|`` is many ``floor``s (O(1e3) J/kg vs
+        floor 0.01), so the damping is negligible and the band is faithful;
+        the regularisation only bites in the singular limit the oracle's
+        guard targets.
       * ``den → 0`` → the ratio → 0 (not ``Inf``), and the lower gate
         ``σ(s·SIJ)`` rejects it just as the oracle rejects SIJ≤0.
       * smooth and bounded everywhere: ``|num·den/(den²+floor²)| ≤
@@ -270,6 +275,7 @@ def emanuel_mixing_tendencies(
     denom_floor: float,
     mse_min_search_offset: float,
     sat_branch_sharpness: float,
+    strict_index_sharpness: float = 20.0,
     nk_weight: jax.Array | None = None,
 ) -> EmanuelMixingOutput:
     """Genuine Emanuel (i,j) buoyancy-sort mixing matrix and tendencies.
@@ -534,13 +540,13 @@ def emanuel_mixing_tendencies(
 
     # Saturated-mixture re-solve (oracle lines 607-615), only for J>I:
     #   condition = (SIJ<0 or SIJ>1 or ALTEM>CWAT) and J>I.
-    # STRICT j>i (codex iter-4 #5): −0.5 offset so the sigmoid is ≈0 ON the
-    # diagonal j==i (the oracle ``J.GT.I`` excludes equality; the diagonal
-    # is the separate local-detrainment branch).  Without the offset
-    # ``σ(0)=0.5`` half-applied the re-solve / trapezoid j>i branch on the
-    # diagonal.
+    # STRICT j>i (codex iter-4 #5 / iter-5 #2): −0.5 offset AND the high
+    # ``strict_index_sharpness`` so the sigmoid is ≈0 ON the diagonal j==i
+    # (σ(−10)≈4.5e-5, not the σ(−3)≈0.047 that ``level_window_sharpness=6``
+    # would give).  The oracle ``J.GT.I`` excludes equality; the diagonal is
+    # the separate local-detrainment branch.
     j_gt_i = jax.nn.sigmoid(
-        level_window_sharpness
+        strict_index_sharpness
         * (levels[:, None, :] - levels[:, :, None] - 0.5)
     )                                                       # ~1 where j>i, ~0 at j==i
     cond_raw = (
@@ -568,9 +574,16 @@ def emanuel_mixing_tendencies(
     #       above 0.9; we centre the upper gate just below ``sij_upper``
     #       and make it sharp so it is ≈1 at SIJ≈0.73 (where the oracle
     #       still counts the mixture) and ≈0 by SIJ≈0.9.
-    #   (b) the lower gate ``SIJ > 0`` rejects negative SIJ (mixtures that
-    #       would require negative updraught fraction).
-    lower_gate = jax.nn.sigmoid(sij_gate_sharpness * SIJ_eff)
+    #   (b) the lower gate ``SIJ > 0`` rejects negative SIJ AND the
+    #       singular-denominator limit ``DENOM → 0 ⇒ SIJ → 0`` (codex
+    #       iter-5 #1: ``_safe_ratio`` maps a near-zero denominator to
+    #       ``SIJ ≈ 0``, and a sigmoid centred AT 0 gives ``σ(0)=0.5`` —
+    #       which would leak that singular mixture in at half weight).  We
+    #       therefore centre the lower gate a small ``ε`` ABOVE zero so a
+    #       mixture needs a genuinely positive updraught fraction to count:
+    #       ``σ(s·(SIJ − ε_low))`` is ≈0 at SIJ=0 and ≈1 for SIJ ≳ a few ε.
+    eps_low = 3.0 / sij_gate_sharpness                    # ~0.075 at s=40
+    lower_gate = jax.nn.sigmoid(sij_gate_sharpness * (SIJ_eff - eps_low))
     # Upper gate centred a little below ``sij_upper`` with a sharpness
     # tied to the divergence: at SIJ = sij_upper the gate is already
     # small (~σ(-2)≈0.12) and falls faster than 1/(1-SIJ) rises.
@@ -725,8 +738,10 @@ def emanuel_mixing_tendencies(
     A = MENT
     # Σ_{k<=t} A(k, j): prefix over origin axis up to and including t.
     cum_origin = jnp.cumsum(A, axis=1)                    # (ncol, t, j)
+    # STRICT integer-index masks use ``strict_index_sharpness`` (codex
+    # iter-5 #2) so ``j>t`` / ``k<t`` are ≈binary and do not leak at j==t.
     j_above_t = jax.nn.sigmoid(
-        level_window_sharpness * (levels[:, None, :] - levels[:, :, None] - 0.5)
+        strict_index_sharpness * (levels[:, None, :] - levels[:, :, None] - 0.5)
     )                                                      # (ncol, t, j) ~1 j>t
     F_up = jnp.sum(cum_origin * j_above_t, axis=-1)       # Σ_{k<=t, j>t}
     AMP1 = m_above + F_up                                 # (ncol, nlev)
@@ -735,7 +750,7 @@ def emanuel_mixing_tendencies(
     # cum_origin_from_top[:, t, k] = Σ_{j>=t} A(j, k).
     cum_origin_from_top = jnp.cumsum(A[:, ::-1], axis=1)[:, ::-1]  # (ncol, t, k)
     k_below_t = jax.nn.sigmoid(
-        level_window_sharpness * (levels[:, :, None] - levels[:, None, :] - 0.5)
+        strict_index_sharpness * (levels[:, :, None] - levels[:, None, :] - 0.5)
     )                                                      # (ncol, t, k) ~1 k<t
     AD = jnp.sum(cum_origin_from_top * k_below_t, axis=-1)  # (ncol, nlev)
 
@@ -785,7 +800,7 @@ def emanuel_mixing_tendencies(
     # diagonal/local term is the separate DO 490 ``K=I,INB`` branch with no
     # AWAT subtraction).  ``li`` is origin (k), ``lj`` target; k<j ⇔ lj−li>0.
     k_lt_i = jax.nn.sigmoid(
-        level_window_sharpness * (lj - li - 0.5)
+        strict_index_sharpness * (lj - li - 0.5)
     )                                                      # ~1 where k<j, ~0 at k==j
     # MENT(k, j), QENT(k, j) have axes (ncol, k, j).
     q_target = qf[:, None, :]

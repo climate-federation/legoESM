@@ -531,6 +531,15 @@ class EmanuelConfig(NamedTuple):
     # Sigmoid sharpness for the saturated-mixture re-solve switch
     # (oracle ``SIJ<0 .or. SIJ>1 .or. ALTEM>CWAT``).
     sat_branch_sharpness: float = 100.0
+    # Sharpness [1/level] for the STRICT integer-index inequalities
+    # (``j>i``, ``k<i``, AMP1/AD ``j>t``/``k<t``).  These compare integer
+    # level indices, so the 0.5-shifted sigmoid is evaluated at half-integer
+    # arguments; a high sharpness makes it ≈binary (σ(±10)≈4.5e-5 at the
+    # diagonal) so the strict ``J.GT.I`` / ``K=1,I-1`` Fortran bounds do not
+    # leak onto the diagonal (codex iter-5 #2).  Distinct from the FRACTIONAL
+    # ``level_window_sharpness`` (ICB/INB cloud edges), which must stay
+    # moderate to keep the cloud-top/base transition differentiable.
+    strict_index_sharpness: float = 20.0
 
 
 class TiedtkeConfig(NamedTuple):
