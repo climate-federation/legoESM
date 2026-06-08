@@ -109,8 +109,13 @@ class AhmedNeelinDCAConfig(NamedTuple):
     b_c : float
         Critical buoyancy B_c [m s⁻²] (Table 1, −1.5e-2).
     tau_adjust_s : float
-        Convective adjustment time scale τ_c [s] (ANA20 eq 42, ≈2 h →
-        7200 s).
+        Reference convective adjustment time scale τ_c [s] (ANA20 eq 42,
+        ≈2 h → 7200 s).  NOTE: the operative precipitation rate is the
+        empirical eq-(8) closure ``a·(B_L − B_c)``, NOT this τ; the paper's
+        τ_c is itself derived from ``a`` and the observational EOF vertical
+        structures (eqs 25-27) that are unavailable in-model, so the
+        column relaxation time emerges from eq (8) and is generally longer
+        than this nominal value.  Retained for reference / diagnostics.
     p_bl_top_pa : float
         Pressure at the top of the boundary layer [Pa].  The BL spans
         ``p_s`` → ``p_bl_top_pa``; Δp_B ≈ 150 hPa for ``p_s ≈ 1000 hPa``.
@@ -123,6 +128,15 @@ class AhmedNeelinDCAConfig(NamedTuple):
         transition at each layer edge.  A hard pressure mask kills
         ``jax.grad`` through the BL/LFT boundaries; the sigmoid keeps the
         layer averages differentiable.  Default 2.5e3 (25 hPa).
+    layer_min_depth_pa : float
+        Minimum depth [Pa] each of the BL and LFT layers is guaranteed to
+        retain.  Over high topography / low surface pressure a fixed
+        850/500-hPa layer top can sit above the surface, leaving the layer
+        empty and ``e_B/Π_B`` meaningless; the BL top is clamped to
+        ``p_s − layer_min_depth_pa`` and the LFT top to
+        ``p_bl_top − layer_min_depth_pa`` so both layers always have mass.
+        Inactive on a standard ``p_s ≈ 1000 hPa`` column.  Default 5.0e3
+        (50 hPa).
     precip_heaviside_sharpness : float
         Sharpness [(m s⁻²)⁻¹] of the softplus that smooths the eq-8
         Heaviside ``H(B_L − B_c)``.  Large so the forward precip tracks
@@ -137,6 +151,7 @@ class AhmedNeelinDCAConfig(NamedTuple):
     p_bl_top_pa: float = 8.5e4
     p_lft_top_pa: float = 5.0e4
     layer_edge_width_pa: float = 2.5e3
+    layer_min_depth_pa: float = 5.0e3
     precip_heaviside_sharpness: float = 5.0e2
 
 

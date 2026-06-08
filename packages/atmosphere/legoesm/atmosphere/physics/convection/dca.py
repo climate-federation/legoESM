@@ -58,10 +58,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import (
-    saturation_mixing_ratio,
-    saturation_specific_humidity,
-)
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.thermodynamics import (
     moist_adiabat_lapse_rate,
     compute_cape,
@@ -492,25 +489,44 @@ def _compute_BL(
     """
     Lv_cp = constants.L_v / constants.c_pd  # [K per (kg/kg)]
 
-    # Moist enthalpy fields (ANA20 after eq 6); e* with model saturation.
-    q_sat = saturation_specific_humidity(T, p_full)  # [kg/kg]
+    # Moist enthalpy fields (ANA20 after eq 6).  ``q_sat`` is the saturation
+    # MIXING RATIO, matching the model's ``q_v`` convention: legoESM
+    # initialises and carries ``q_v`` as a mixing ratio (it is built from
+    # ``saturation_mixing_ratio``), so e = T + (L_v/c_p)·q_v and
+    # e* = T + (L_v/c_p)·q_sat use the SAME water variable.  (ANA20 writes
+    # ``q`` loosely as "specific humidity"; at tropical q≈20 g/kg the
+    # mixing-ratio vs specific-humidity difference is ~2% in e and far
+    # smaller in B_L, but using one consistent variable avoids a spurious
+    # systematic offset between e and e* — codex review-1 finding.)
+    q_sat = saturation_mixing_ratio(T, p_full)  # [kg/kg] mixing ratio
     e = T + Lv_cp * q_v          # [K]
     e_star = T + Lv_cp * q_sat   # [K]
     Pi = _exner(p_full)          # [-]
 
-    # Smooth layer memberships.  BL: p_s → p_bl_top.  Because the surface
-    # pressure can exceed any fixed ``p_bot``, the BL's high-pressure edge
-    # is left open (p_bot set above the surface) so the lowest model
+    # Surface-aware layer edges.  ANA20 defines the BL as "surface → 850 hPa"
+    # (Δp_B ≈ 150 hPa).  Over high topography / low surface pressure a FIXED
+    # 850-hPa BL top can sit above the surface, leaving the BL empty and the
+    # ratios e_B/Π_B meaningless (codex review-1 finding).  We therefore
+    # clamp the BL top to stay a minimum depth below the surface pressure
+    # (``p_s − layer_floor``) and the LFT top a minimum depth below the BL
+    # top, so both layers always retain mass and degrade gracefully on a
+    # shallow column.  On a standard p_s ≈ 1000 hPa column the clamps are
+    # inactive and the edges are exactly the config 850 / 500 hPa.
+    # Surface pressure ≈ bottom interface = lowest full level + half its
+    # thickness (p_full ordered top→bottom, so index −1 is the surface
+    # layer).  Avoids changing ``_compute_BL``'s signature for all callers.
+    p_s = (p_full[:, -1:] + 0.5 * dp[:, -1:])            # (ncol, 1) [Pa]
+    layer_floor = cfg.layer_min_depth_pa                 # min layer depth [Pa]
+    p_bl_top = jnp.minimum(cfg.p_bl_top_pa, p_s - layer_floor)        # (ncol,1)
+    p_lft_top = jnp.minimum(cfg.p_lft_top_pa, p_bl_top - layer_floor)  # (ncol,1)
+    # BL high-pressure edge left open above the surface so the lowest model
     # levels are always counted.
-    p_surface_ceiling = (
-        jnp.max(p_full, axis=-1, keepdims=True) + 10.0 * cfg.layer_edge_width_pa
-    )
+    p_surface_ceiling = p_s + 10.0 * cfg.layer_edge_width_pa
     member_bl = _layer_membership(
-        p_full, cfg.p_bl_top_pa, p_surface_ceiling,
-        cfg.layer_edge_width_pa,
+        p_full, p_bl_top, p_surface_ceiling, cfg.layer_edge_width_pa,
     )
     member_lft = _layer_membership(
-        p_full, cfg.p_lft_top_pa, cfg.p_bl_top_pa, cfg.layer_edge_width_pa,
+        p_full, p_lft_top, p_bl_top, cfg.layer_edge_width_pa,
     )
 
     # Layer-averaged moist enthalpies and Exner functions.
@@ -581,36 +597,37 @@ def ahmed_neelin_dca(
 ) -> ConvectionOutput:
     """Ahmed-Neelin-Adames (2020) B_L convective-adjustment tendencies.
 
-    The column is relaxed toward the quasi-equilibrium (QE) line
-    ``B_L = B_c`` over the convective adjustment time scale
-    ``config.tau_adjust_s`` (ANA20 eqs 38-42), following the closure
-    structure of eqs (36), (37), (41):
+    The OPERATIVE closure is the empirical precipitation-buoyancy relation
+    eq (8) — the central result the paper validates against TRMM/ERA data
+    (Fig 3).  The column heating and drying are set so that the
+    column-integrated precipitation equals
+    ``P = a·(B_L − B_c)·H(B_L − B_c)`` (eq 8), moved along the eq-(41)
+    direction that conserves column moist static energy:
 
-    * **Adjustment direction (eq 41).** The convection moves the column
-      along the second eigenvector of the linearised system, which has
-      slope −1 in the moist-enthalpy (q̂, T̂) plane: per level the latent
-      cooling exactly cancels the sensible heating,
-      ``L_v·dq_v/dt + c_p·dT/dt = 0``.  Hence column-integrated moist
-      static energy is conserved during the adjustment, and the
-      latent-heating ↔ precipitation closure
-      ``∫ c_p·dT/dt dp/g = L_v·P`` holds to machine precision.
+    * **Precipitation (eq 8, OPERATIVE).** ``P = a·(B_L − B_c)+`` with the
+      empirical slope ``a`` (config ``a_mm_per_hr``) and critical buoyancy
+      ``B_c`` (config ``b_c``).  The Heaviside is softplus-smoothed for
+      differentiability.  The implied column latent heating is
+      ``Q̂_c = L_v·P`` (ANA20 eq 11), so ``∫ c_p·dT/dt dp/g = L_v·P``
+      holds to machine precision.
 
-    * **Adjustment rate (eqs 38-42).** The buoyancy excess
-      ``(B_L − B_c)+`` is relaxed toward zero on the time scale
-      ``τ_c = config.tau_adjust_s`` (≈ 2 h, ANA20 eq 42):
-      ``dB_L/dt = −(B_L − B_c)+ / τ_c``.  The per-level magnitude is set
-      so this column rate is achieved exactly, using the analytic
-      sensitivity of ``B_L`` to the heating/drying direction
-      (``∂B_L/∂T_k − (c_p/L_v)·∂B_L/∂q_k``) obtained by ``jax.grad``.  The
-      vertical structure is weighted by the BL+LFT mass that defines
-      ``B_L`` (ANA20 §2) so the adjustment acts on exactly the layers that
-      set the buoyancy.
+    * **Adjustment direction (eq 41).** The heating is moved along the
+      second eigenvector of the linearised system (slope −1 in the
+      moist-enthalpy q̂–T̂ plane): per level the latent cooling exactly
+      cancels the sensible heating, ``L_v·dq_v/dt + c_p·dT/dt = 0``.  Hence
+      column moist static energy is conserved during the adjustment, and
+      drying coincides with warming.
 
-    * **Precipitation (eq 8).** ``P = ∫ c_p·dT/dt dp/g / L_v`` is the
-      column latent heating expressed as a water-mass flux — equal, at
-      steady state, to the eq-(8) ramp ``a·(B_L − B_c)`` (the empirical
-      slope ``a`` and the relaxation time τ_c are mutually consistent by
-      construction; ANA20 §5b).
+    * **Adjustment time scale (eqs 38-42).** The buoyancy excess relaxes
+      toward zero with an EMERGENT time scale set by eq (8) and the
+      column's own buoyancy sensitivity to the heating direction.  ANA20
+      report ``τ_c ≈ 2 h`` (eq 42); that value is itself DERIVED from
+      ``a`` together with the observational EOF vertical structures
+      (``L_{TL}``, ``L_{qL}``, …; eqs 25-27) that are not available
+      in-model, so we surface the emergent τ as a diagnostic rather than
+      imposing it.  See `config.tau_adjust_s` — it is retained for
+      reference / optional rescaling but is NOT used to set the operative
+      rate (which is eq 8).
 
     Conventions: ``dq_v_dt < 0`` (drying), ``dT_dt > 0`` (latent heating)
     where convecting; ``q_v`` stays non-negative (the per-step adjustment
@@ -621,7 +638,9 @@ def ahmed_neelin_dca(
     T : jax.Array
         Temperature at full levels [K], shape (ncol, nlev).
     q_v : jax.Array
-        Water vapor specific humidity [kg/kg], shape (ncol, nlev).
+        Water vapor mixing ratio [kg/kg], shape (ncol, nlev).  (legoESM
+        carries ``q_v`` as a mixing ratio; ``e`` and ``e*`` use the same
+        variable — see `_compute_BL`.)
     p_full : jax.Array
         Full-level pressure [Pa], shape (ncol, nlev).
     p_half : jax.Array
@@ -643,69 +662,39 @@ def ahmed_neelin_dca(
     g = constants.g
     Lv = constants.L_v
     c_pd = constants.c_pd
-    tau = config.tau_adjust_s
 
-    # --- B_L and its sensitivity to the adjustment direction -------------
-    # ``_BL_scalar`` wraps eq (7) returning the per-column B_L summed to a
-    # scalar so ``jax.grad`` yields ∂B_L/∂T_k and ∂B_L/∂q_k (the columns
-    # are independent, so the cross terms vanish and the gradient of the
-    # sum equals the per-column gradient).
-    def _BL_scalar(Tx, qx):
-        BLx, *_ = _compute_BL(Tx, qx, p_full, dp, config)
-        return jnp.sum(BLx)
-
+    # --- B_L and the OPERATIVE precipitation (ANA20 eqs 7, 8) -------------
     BL, member_bl, member_lft, _Pi_L, _e_L_star = _compute_BL(
         T, q_v, p_full, dp, config,
     )                                              # BL: (ncol,) [m/s²]
-    dBL_dT, dBL_dq = jax.grad(_BL_scalar, argnums=(0, 1))(T, q_v)
-    # (ncol, nlev): ∂B_L/∂T_k [1/s²/K], ∂B_L/∂q_k [1/s²/(kg/kg)].
+    precip = _precip_from_BL(BL, config)           # (ncol,) [kg/m²/s] >= 0  (eq 8)
+    # Implied column-integrated latent heating Q̂_c = L_v·P (ANA20 eq 11).
+    Qc_col = Lv * precip                           # (ncol,) [W/m²]
 
     # --- Vertical structure: BL+LFT mass shape ---------------------------
-    # Normalised so the per-level magnitude is a pure shape; the actual
-    # amplitude is solved below from the target dB_L/dt.  ``member_union``
-    # is the union of the BL and LFT memberships (the layers that set B_L).
+    # ``member_union`` is the union of the BL and LFT memberships (the
+    # layers that define B_L).  ``shape_k`` [1/Pa] is normalised so that
+    # Σ_k shape_k·Δp_k = 1 on a populated column; it vanishes on a
+    # degenerate all-stratosphere column.
     member_union = member_bl + member_lft           # (ncol, nlev) [-]
     member_mass = jnp.sum(member_union * dp, axis=-1)  # (ncol,) [Pa]
-    # AD-safe normalised shape [1/Pa] with Σ_k shape_k·Δp_k = 1 on a
-    # populated column; vanishes on a degenerate all-stratosphere column.
     shape = member_union * safe_divide(
         jnp.ones_like(member_mass), member_mass, eps=1.0,
     )[:, None]                                       # (ncol, nlev) [1/Pa]
 
-    # --- Adjustment direction (eq 41, slope −1) --------------------------
-    # Per level:  dT_dt_k = A · g · shape_k        (heating, A in K/s·Pa? )
-    #             dq_v_dt_k = −(c_p/L_v) · dT_dt_k (so L_v·dq + c_p·dT = 0)
-    # ``A`` [K/s] is a per-column amplitude solved so dB_L/dt hits target.
-    # Tendency unit shape ``s_k = g·shape_k`` [1/Pa·m/s²? ] makes
-    # Σ_k c_p·dT_dt_k·Δp_k/g = c_p·A·Σ_k shape_k Δp_k = c_p·A  (so A is the
-    # column-mean heating rate [K/s]).
-    s_k = g * shape                                  # (ncol, nlev) [m/s² · 1/Pa]
-    # dB_L/dt per unit A:  S = Σ_k [∂B_L/∂T_k − (c_p/L_v)·∂B_L/∂q_k]·s_k.
-    S = jnp.sum(
-        (dBL_dT - (c_pd / Lv) * dBL_dq) * s_k, axis=-1,
-    )                                                # (ncol,) [1/s² per (K/s)]
-
-    # Target column buoyancy relaxation: dB_L/dt = −(B_L − B_c)+ / τ.
-    excess = jax.nn.softplus(
-        config.precip_heaviside_sharpness * (BL - config.b_c)
-    ) / config.precip_heaviside_sharpness            # (ncol,) smooth (BL-Bc)+
-    target_dBL_dt = -excess / tau                    # (ncol,) [1/s² ·? ] m/s²/s
-
-    # Amplitude A so that A·S = target_dBL_dt  ⇒  A = target/S.  ``S`` is
-    # negative (heating the LFT raises e_L* → lowers B_L), so A > 0
-    # (heating) when the column is supercritical.  AD-safe divide guards
-    # the marginal/degenerate ``S → 0`` column (no BL/LFT mass).
-    A = safe_divide(target_dBL_dt, S, eps=1e-12)     # (ncol,) [K/s]
-
-    heating_rate = A[:, None] * s_k                  # (ncol, nlev) [K/s]
-    # Slope −1 in moist-enthalpy units: latent cooling cancels heating per
-    # level ⇒ column MSE conserved and ∫c_p·dT dp/g = L_v·P exactly.
+    # --- Heating from eq (8), distributed; drying along eq (41) ----------
+    # Heating per level [K/s]:  dT_dt_k = (Q̂_c / c_p) · g · shape_k.
+    #   Σ_k c_p·dT_dt_k·Δp_k/g = Q̂_c·Σ_k shape_k·Δp_k = Q̂_c   (eq 11). ✓
+    heating_rate = (Qc_col / c_pd)[:, None] * g * shape   # (ncol, nlev) [K/s]
+    # Slope −1 in moist-enthalpy units (eq 41): per level latent cooling
+    # cancels sensible heating ⇒ column MSE conserved and
+    # ∫ L_v·dq dp/g = −∫ c_p·dT dp/g = −L_v·P exactly.
     drying_rate = -(c_pd / Lv) * heating_rate        # (ncol, nlev) [kg/kg/s]
 
     # --- Positivity: cap the per-step drying at the available vapor ------
-    # A single relaxation step must not drive q_v negative.  Scale the
-    # WHOLE column's heating+drying by one factor so the MSE balance
-    # (eq 41) and the latent-heating ↔ precip closure stay exact.
+    # A single step must not drive q_v negative.  Scale the WHOLE column's
+    # heating+drying by one factor so the MSE balance (eq 41) and the
+    # latent-heating ↔ precip closure stay exact under the cap.
     max_drying = -q_v / dt                           # (ncol, nlev) <= 0
     frac_level = jnp.where(
         drying_rate < max_drying,                    # would over-dry
@@ -717,7 +706,8 @@ def ahmed_neelin_dca(
     dT_dt = heating_rate * frac                      # (ncol, nlev) [K/s]
     dq_v_dt = drying_rate * frac                     # (ncol, nlev) [kg/kg/s]
 
-    # Diagnostic precipitation P [kg/m²/s] = column latent heating / L_v.
+    # Diagnostic precipitation P [kg/m²/s] = column latent heating / L_v
+    # (equals eq-(8) P before the positivity cap engages).
     precip = jnp.sum(c_pd * dT_dt * dp, axis=-1) / (g * Lv)  # (ncol,) >= 0
 
     # Convective condensate source for the cloud-water bucket: the column
