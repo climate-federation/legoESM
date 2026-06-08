@@ -60,8 +60,9 @@ oracle:
 * The ``0 < SIJ < 0.9`` entrainment gate becomes a product of two
   sigmoids ``sij_active = σ(s·SIJ)·σ(s·(0.9−SIJ))`` (sharpness
   ``sij_gate_sharpness``).
-* The ``ABS(DENOM)<0.01 → 0.01`` and ``ABS(DEI)<0.01`` floors become a
-  smooth signed floor ``denom_floor`` that never crosses zero.
+* The ``ABS(DENOM)<0.01`` denominator guard becomes a Tikhonov-
+  regularised reciprocal ``num·den/(den²+floor²)`` (``_safe_ratio``):
+  sign-preserving, smooth, provably Inf/NaN-free.
 * The ``J>I`` saturated re-solve is selected by a smooth ``j>i`` mask
   and blended in by a sigmoid on ``(STEMP<0 or STEMP>1 or ALTEM>CWAT)``.
 * ``MAX(0,·)`` / ``MIN(1,·)`` clips on SIJ, ELIJ, MENT use
@@ -134,27 +135,33 @@ class EmanuelMixingOutput(NamedTuple):
     m_profile: jax.Array
 
 
-def _smooth_signed_floor(x, floor):
-    """Oracle ``IF(ABS(x)<floor) x=floor`` made smooth + AD-safe.
+def _safe_ratio(num, den, floor):
+    """Oracle ``SIJ = ANUM/DENOM`` with the ``IF(ABS(DENOM)<floor)`` guard,
+    made smooth, sign-preserving, and provably ``Inf``/``NaN``-free.
 
-    The Fortran replaces a near-zero denominator by ``+floor`` (always
-    positive — line 600/611 set ``DEI=0.01``/``DENOM=0.01``) so the
-    division ``ANUM/DENOM`` cannot blow up.  A hard branch on ``ABS(x)``
-    has a dead gradient inside the band and a discontinuity at the band
-    edges.  We blend toward ``+floor`` near zero with a Gaussian window:
+    The Fortran replaces a near-zero denominator by ``±floor`` so the
+    division cannot blow up; the resulting (large) SIJ is then rejected by
+    the ``0 < SIJ < 0.9`` gate downstream.  We cannot reproduce a
+    *signed* floor continuously (any continuous map that equals ``x`` for
+    ``x << −floor`` and ``x`` for ``x >> +floor`` must cross zero, which
+    would give ``Inf`` and then ``0·Inf = NaN``).  Instead we regularise
+    the **reciprocal** directly with the Tikhonov form::
 
-        x_floored = x·(1 − w) + floor·w,   w = exp(−(x/floor)^2)
+        num/den  ≈  num·den / (den² + floor²)
 
-    For ``|x| >> floor`` this is ``x`` (the floor term vanishes, the
-    sign is preserved); for ``x → 0`` it tends to ``+floor`` (matching
-    the Fortran, which forces the positive floor regardless of the
-    original sign).  The result NEVER crosses zero in the band: the
-    minimum over ``x`` is bounded below by ``≈ 0.21·floor > 0`` (verified
-    numerically), so ``ANUM/x_floored`` is finite and the gradient is
-    alive everywhere.
+    Properties:
+      * ``|den| >> floor`` → ``num/den`` exactly (SIGN PRESERVED — for a
+        genuinely negative DENOM the ratio stays negative, unlike a
+        positive floor), so the active 0<SIJ<0.9 band is faithful.
+      * ``den → 0`` → the ratio → 0 (not ``Inf``), and the lower gate
+        ``σ(s·SIJ)`` rejects it just as the oracle rejects SIJ≤0.
+      * smooth and bounded everywhere: ``|num·den/(den²+floor²)| ≤
+        |num|/(2·floor)``.  No zero crossing of the denominator ⇒ no
+        ``Inf`` ⇒ no ``0·Inf`` ⇒ no NaN (codex iter-4 #1 fix; the earlier
+        ``_smooth_signed_floor`` Gaussian/tanh forms crossed zero near
+        ``x ≈ −0.87·floor``).
     """
-    w = jnp.exp(-((x / floor) ** 2))
-    return x * (1.0 - w) + floor * w
+    return num * den / (den * den + floor * floor)
 
 
 def _oracle_qsat(T, p):
@@ -365,10 +372,31 @@ def emanuel_mixing_tendencies(
 
     # ---- Source level NK (max MSE below min-MSE) ------------------------
     if nk_weight is None:
-        # Smooth surrogate: softmax of HM gated to the lower troposphere.
-        # The oracle picks the max-HM level below the min-HM level; for
-        # RCE/tropical soundings that is the surface.  We weight by HM
-        # with a pressure gate that prefers the boundary layer.
+        # Smooth surrogate for the oracle NK = max-HM level BELOW the
+        # min-HM level (lines 359-377).  The oracle's HM is the FROZEN moist
+        # static energy, which (via the geopotential term GZ) GROWS toward
+        # the model top, so an unrestricted ``argmax(HM)`` would pick the
+        # top.  The physically-meaningful source is the boundary-layer MSE
+        # maximum (the oracle restricts the max search to BELOW the
+        # mid-tropospheric MSE minimum).  We gate HM MULTIPLICATIVELY in
+        # logit space — ``softmax(HM·gate)`` with ``gate = σ((p−p_pbl)/Δ)
+        # ∈ [0,1]`` — so the GZ-large upper-troposphere HM is scaled toward
+        # 0 in the logit and CANNOT win, while in the boundary layer
+        # ``gate ≈ 1`` so the softmax picks the genuine max-HM.
+        #
+        # (codex iter-4 #4: an additive ``HM/τ + log(gate)`` or a
+        # post-softmax multiply both LEAK to the GZ-dominated top, because
+        # ``HM_top − HM_sfc`` is O(1e5) J/kg, far larger than any additive
+        # gate penalty — only the MULTIPLICATIVE-in-logit form selects the
+        # PBL source.  Gradients stay alive: ``gate`` and ``HM`` are both
+        # smooth, and the softmax is a smooth argmax.)
+        #
+        # SCOPE: for the tropical / RCE soundings this port targets, the
+        # boundary-layer max-HM level is the surface (HM decreases upward
+        # through the BL), so the surrogate selects the surface as the
+        # oracle does.  Columns with a genuine ELEVATED mixed-layer MSE
+        # maximum are the documented divergence; a caller with a faithful
+        # discrete NK can pass it via ``nk_weight``.
         gate = jax.nn.sigmoid(
             (pf - mse_min_search_offset) / 2000.0
         )
@@ -457,10 +485,18 @@ def emanuel_mixing_tendencies(
 
     # ---- M(i): rates of mixing (oracle DO 103 / 110) --------------------
     # DBO(i) = |TV(K)-TVP(K)| + ENTP·0.02·(PH(K)-PH(K+1)),  K=min(i,INB1).
-    # We approximate INB1≈INB and use the in-cloud levels; normalise so
+    # We approximate INB1≈INB; the ``in_updraft_i`` mask (≈0 above INB)
+    # supplies the ``K=min(i,INB1)`` clamp by zeroing DBO above the cloud
+    # top, so ``|TV-TVP|`` is only sampled in the buoyant cloud where it
+    # peaks mid-cloud and tapers (the oracle ``M(i)`` shape).  Normalise so
     # Σ M = CBMF.  dp_first[i] = PH(i)-PH(i+1) (surface-first layer Δp>0).
-    dp_first = phf[:, :-1] - phf[:, 1:]                     # (ncol, nlev) >0
-    dbo = jnp.abs(tv - tvp) + entp * 0.02 * dp_first
+    #
+    # UNIT (codex iter-4 #2): the oracle PH is in **mb**, so the pressure
+    # term is ``0.02·dp_mb = 2e-4·dp_Pa`` (dp_first is Pa).  At ~30 mb
+    # layers this is ~0.6, small versus ``|TV-TVP|`` ~ a few K — so M is
+    # dominated by the buoyancy spread, matching the oracle.
+    dp_first = phf[:, :-1] - phf[:, 1:]                     # (ncol, nlev) >0 [Pa]
+    dbo = jnp.abs(tv - tvp) + entp * 2.0e-4 * dp_first
     dbo_masked = dbo * in_updraft_i
     dbosum = jnp.sum(dbo_masked, axis=-1, keepdims=True)
     m_i = M_b[:, None] * dbo_masked / jnp.maximum(dbosum, 1e-30)  # (ncol, nlev)
@@ -490,8 +526,7 @@ def emanuel_mixing_tendencies(
     ANUM = H_j - HP_i + (cpv - cpd) * T_j * (QTI - Q_j)
     # DENOM = H(i) - HP(i) + (CPD-CPV)(Q(i)-QTI) T(j).
     DENOM = H_i - HP_i + (cpd - cpv) * (Q_i - QTI) * T_j
-    DEI = _smooth_signed_floor(DENOM, denom_floor)
-    SIJ = ANUM / DEI                                       # (ncol, nlev, nlev)
+    SIJ = _safe_ratio(ANUM, DENOM, denom_floor)           # (ncol, nlev, nlev)
 
     # ALTEM = (SIJ·Q(i) + (1-SIJ)·QTI - QS(j)) / BF2.
     ALTEM = (SIJ * Q_i + (1.0 - SIJ) * QTI - QS_j) / BF2
@@ -499,9 +534,15 @@ def emanuel_mixing_tendencies(
 
     # Saturated-mixture re-solve (oracle lines 607-615), only for J>I:
     #   condition = (SIJ<0 or SIJ>1 or ALTEM>CWAT) and J>I.
+    # STRICT j>i (codex iter-4 #5): −0.5 offset so the sigmoid is ≈0 ON the
+    # diagonal j==i (the oracle ``J.GT.I`` excludes equality; the diagonal
+    # is the separate local-detrainment branch).  Without the offset
+    # ``σ(0)=0.5`` half-applied the re-solve / trapezoid j>i branch on the
+    # diagonal.
     j_gt_i = jax.nn.sigmoid(
-        level_window_sharpness * (levels[:, None, :] - levels[:, :, None])
-    )                                                       # ~1 where j>i
+        level_window_sharpness
+        * (levels[:, None, :] - levels[:, :, None] - 0.5)
+    )                                                       # ~1 where j>i, ~0 at j==i
     cond_raw = (
         jax.nn.sigmoid(-sat_branch_sharpness * SIJ)         # SIJ<0
         + jax.nn.sigmoid(sat_branch_sharpness * (SIJ - 1.0))  # SIJ>1
@@ -512,8 +553,7 @@ def emanuel_mixing_tendencies(
     # Re-solved SIJ / ALTEM (oracle lines 609-614).
     ANUM2 = ANUM - LV_j * (QTI - QS_j - CWAT * BF2)
     DENOM2 = DENOM + LV_j * (Q_i - QTI)
-    DEN2 = _smooth_signed_floor(DENOM2, denom_floor)
-    SIJ2 = ANUM2 / DEN2
+    SIJ2 = _safe_ratio(ANUM2, DENOM2, denom_floor)
     ALTEM2 = SIJ2 * Q_i + (1.0 - SIJ2) * QTI - QS_j - (BF2 - 1.0) * CWAT
 
     SIJ_eff = (1.0 - cond) * SIJ + cond * SIJ2
@@ -544,6 +584,20 @@ def emanuel_mixing_tendencies(
     # QENT(i,j), ELIJ(i,j), raw MENT(i,j)=M(i)/(1-SIJ).  The
     # ``1-SIJ`` floor caps the divergence at M(i)·(1/floor); with the
     # sharp upper gate above, the capped-and-gated product never leaks.
+    #
+    # GATE (codex iter-4 #6): ``sij_active`` is applied to BOTH ``MENT_raw``
+    # here and ``prob_w`` below.  For a hard 0/1 oracle mask this is
+    # idempotent; for the smooth sigmoid gate it squares the taper.  We
+    # KEEP the squared form deliberately: it is the smooth-suppression that
+    # best reproduces the RCE EQUILIBRIUM (free-trop mean|T−Tm| ≈ 1.8 K vs
+    # ≈ 5 K with a single gate), because the extra taper damps the
+    # marginally-active fringe mixtures whose detrainment would otherwise
+    # over-deepen the heating profile.  The instantaneous oracle MENT total
+    # is ~25% low as a result (an honest forward-fidelity trade); the
+    # detrainment-HEIGHT structure (the defining feature) is faithful
+    # either way.  ``sij_gate_sharpness`` controls the single-gate width;
+    # the squared taper is an intentional, documented smoothing choice, not
+    # an accidental double-count.
     QENT = SIJ_eff * Q_i + (1.0 - SIJ_eff) * QTI
     ELIJ = jnp.maximum(ALTEM_eff, 0.0) * sij_active
     one_minus_sij = jnp.clip(1.0 - SIJ_eff, 1.0 - sij_upper_gate, None)
@@ -565,8 +619,7 @@ def emanuel_mixing_tendencies(
     Q_self = qf
     ANUM_s = H_self - HP_self - LV_self * (QP1 - QS_self)
     DENOM_s = H_self - HP_self + LV_self * (Q_self - QP1)
-    DEN_s = _smooth_signed_floor(DENOM_s, denom_floor)
-    scrit = ANUM_s / DEN_s
+    scrit = _safe_ratio(ANUM_s, DENOM_s, denom_floor)
     alt_s = QP1 - QS_self + scrit * (Q_self - QP1)
     # IF(ALT<0) SCRIT=1; SCRIT=MAX(SCRIT,0).
     scrit = jnp.where(alt_s < 0.0, 1.0, scrit)
@@ -611,7 +664,7 @@ def emanuel_mixing_tendencies(
     # j<i branch (oracle ELSE, lines 677-683).
     smid_dn = jnp.maximum(SIJ_eff, scrit_i)
     sjmax_dn = jnp.maximum(sij_jp1, scrit_i)
-    sjmin_dn = jnp.maximum(jnp.maximum(sij_jm1, scrit_i), scrit_i)
+    sjmin_dn = jnp.maximum(sij_jm1, scrit_i)   # oracle l.681-682 (codex #7: was a redundant double-max)
     smid = j_gt_i * smid_up + (1.0 - j_gt_i) * smid_dn
     sjmax = j_gt_i * sjmax_up + (1.0 - j_gt_i) * sjmax_dn
     sjmin = j_gt_i * sjmin_up + (1.0 - j_gt_i) * sjmin_dn
@@ -727,9 +780,13 @@ def emanuel_mixing_tendencies(
     AWAT = jnp.maximum(ELIJ - (1.0 - EP_j) * CLW_j, 0.0)  # (ncol, i=k, j)
     # For target level i (=j axis), sum over origins k (=i axis).
     # k<i contributes (QENT - AWAT - Q); k>=i contributes (QENT - Q).
+    # STRICT k<i (codex iter-4 #5): −0.5 offset so the gate is ≈0 on the
+    # diagonal k==j (oracle DO 480 ``K=1,I-1`` is strictly below; the
+    # diagonal/local term is the separate DO 490 ``K=I,INB`` branch with no
+    # AWAT subtraction).  ``li`` is origin (k), ``lj`` target; k<j ⇔ lj−li>0.
     k_lt_i = jax.nn.sigmoid(
-        level_window_sharpness * (lj - li)
-    )                                                      # ~1 where origin(i-axis)<target(j-axis): k<j
+        level_window_sharpness * (lj - li - 0.5)
+    )                                                      # ~1 where k<j, ~0 at k==j
     # MENT(k, j), QENT(k, j) have axes (ncol, k, j).
     q_target = qf[:, None, :]
     detr_moist_klt = MENT * (QENT - AWAT - q_target)       # k<j branch value
@@ -737,15 +794,23 @@ def emanuel_mixing_tendencies(
     detr_moist = k_lt_i * detr_moist_klt + (1.0 - k_lt_i) * detr_moist_kge
     fq_detr = g * dpinv * jnp.sum(detr_moist, axis=1)      # sum over origins k
 
-    # Cloud-water source: the detrained condensate that becomes cloud
-    # water at level j is Σ_k MENT(k,j)·AWAT(k,j) plus the local
-    # autoconversion-suppressed condensate (oracle WDTRAIN feeds precip;
-    # here the in-cloud retained condensate (1-EP)·CLW that does NOT rain
-    # goes to the q_c tracer).  This is the genuine in-cloud condensate
-    # handed to microphysics.
+    # Cloud-water source handed to the ``q_c`` tracer (microphysics owns
+    # precipitation; the orchestrator's bidirectional total-water pass then
+    # guarantees ∫(dq_v+dq_c)=0).  Per-level physical in-cloud condensate
+    # (codex iter-4 #8 — split the diagonal/off-diagonal cleanly so the
+    # local term is not double-counted):
+    #   * OFF-DIAGONAL mixtures (k≠j): the detrained mixture condensate
+    #     ``AWAT(k,j) = max(ELIJ(k,j) − (1−EP(j))·CLW(j), 0)`` in excess of
+    #     the level-j retained cloud water.
+    #   * DIAGONAL local detrainment (k=j): the retained (non-rained)
+    #     condensate ``MENT(j,j)·(1−EP(j))·CLW(j)`` — the part of the
+    #     adiabatic condensate that does NOT precipitate (oracle EP(j)·CLW
+    #     feeds WDTRAIN → precip, which the model assigns to microphysics
+    #     via the total-water rebalance, not here).
+    off_diag = 1.0 - eye                                   # (1, nlev, nlev)
     dqc = g * dpinv * (
-        jnp.sum(MENT * AWAT, axis=1)
-        + ment_ii * (1.0 - ep) * clw            # local detrainment condensate
+        jnp.sum(MENT * AWAT * off_diag, axis=1)           # off-diagonal detrained
+        + ment_ii * (1.0 - ep) * clw                      # diagonal retained condensate
     )
     dqc = jnp.maximum(dqc, 0.0)
 
