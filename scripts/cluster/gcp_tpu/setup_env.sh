@@ -1,26 +1,30 @@
 #!/usr/bin/env bash
-# Set up the legoESM Python environment ON a Cloud TPU VM.
+# Set up the legoESM Python environment ON a Cloud TPU VM, then override jax
+# with the TPU build + libtpu.
 #
-# Run this from the repo root on the TPU VM (after scp/clone):
+# The repo is a uv WORKSPACE: the federated members (legoesm-core / -atmosphere
+# / -ocean / -land / -ice / -coupler / -ml / -tools) live in-tree under
+# packages/* and resolve via [tool.uv.sources] (workspace = true).  A bare
+# `pip install -e .` therefore tries to fetch e.g. legoesm-atmosphere~=0.1.0
+# from PyPI (where it is not published) and fails.  We install with uv, which:
+#   (a) installs every workspace member editable from uv.lock (reproducible),
+#   (b) provisions a managed CPython >=3.11 when the VM's default python3 is too
+#       old (Ubuntu 22.04 ships 3.10) -- so no deadsnakes/system Python needed.
+#
+# Run from the repo root on the TPU VM (after git clone):
 #   cd ~/legoESM && bash scripts/cluster/gcp_tpu/setup_env.sh
 #
-# Installs the repo (CPU/base deps) into a venv, then overrides jaxlib with
-# the TPU build + libtpu.  JAX_VERSION is pinned to the version validated
-# locally (0.10.1); override if you intentionally want a different one — but
-# keep jax and the TPU jaxlib at the SAME version.
-#
-# legoESM requires Python >= 3.11, but TPU VM base images often default to an
-# older python3 (e.g. 3.10 on Ubuntu 22.04).  If your default python3 is too
-# old, point PYTHON at a newer interpreter, e.g.:
-#   sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt-get update
-#   sudo apt-get install -y python3.11 python3.11-venv python3.11-dev
-#   PYTHON=python3.11 bash scripts/cluster/gcp_tpu/setup_env.sh
+# Knobs (env vars):
+#   JAX_VERSION  TPU jax/jaxlib pin (default 0.10.1, the locally validated one;
+#                uv.lock pins the CPU build at 0.10.0 -- we override to the TPU
+#                build here).  Keep jax and the TPU jaxlib at the SAME version.
+#   PY_VERSION   Python to provision for the venv (default 3.11; >=3.11 required).
+#   VENV_DIR     venv location (default .venv).
 set -euo pipefail
 
 JAX_VERSION="${JAX_VERSION:-0.10.1}"
+PY_VERSION="${PY_VERSION:-3.11}"
 VENV_DIR="${VENV_DIR:-.venv}"
-PYTHON="${PYTHON:-python3}"
-MIN_PY_MINOR=11  # legoESM requires-python = ">=3.11"
 
 # Resolve repo root from this script's location so it works regardless of cwd.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,57 +32,44 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO_ROOT"
 echo "Repo root: $REPO_ROOT"
 
-# Fail early with a clear message if the chosen interpreter is too old, rather
-# than letting `pip install -e .` fail deep in the run with a cryptic
-# "requires a different Python".
-if ! "$PYTHON" --version >/dev/null 2>&1; then
-  echo "ERROR: interpreter '$PYTHON' not found. Install Python >=3.${MIN_PY_MINOR}" \
-       "and re-run with PYTHON=<interpreter> (see header)." >&2
+# 1. Ensure uv is available (the workspace installer that resolves the federated
+#    members and provisions Python).
+if ! command -v uv >/dev/null 2>&1; then
+  echo "Installing uv ..."
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  # The installer drops uv in ~/.local/bin; make it visible for this run.
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+if ! command -v uv >/dev/null 2>&1; then
+  echo "ERROR: uv is not on PATH after install. Add ~/.local/bin to PATH" \
+       "(e.g. 'export PATH=\$HOME/.local/bin:\$PATH') and re-run." >&2
   exit 1
 fi
-py_minor="$("$PYTHON" -c 'import sys; print(sys.version_info[1])')"
-py_major="$("$PYTHON" -c 'import sys; print(sys.version_info[0])')"
-echo "Using interpreter: $PYTHON ($("$PYTHON" --version 2>&1))"
-if (( py_major < 3 || (py_major == 3 && py_minor < MIN_PY_MINOR) )); then
-  echo "ERROR: legoESM needs Python >=3.${MIN_PY_MINOR}, but '$PYTHON' is" \
-       "${py_major}.${py_minor}. On Ubuntu 22.04 the default python3 is 3.10;" \
-       "install python3.11 and re-run with PYTHON=python3.11 (see header)." >&2
-  exit 1
-fi
+echo "Using uv: $(uv --version)"
 
-# Treat the venv as usable only if bin/activate actually exists -- a directory
-# left behind by a previously failed `python3 -m venv` (e.g. missing the
-# python3-venv package) would otherwise make us skip creation and then fail at
-# `source`.  Rebuild a partial venv from scratch.
-if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
-  if [[ -e "$VENV_DIR" ]]; then
-    echo "Removing incomplete venv at $VENV_DIR ..."
-    rm -rf "$VENV_DIR"
-  fi
-  echo "Creating venv at $VENV_DIR with $PYTHON ..."
-  if ! "$PYTHON" -m venv "$VENV_DIR"; then
-    echo "ERROR: '$PYTHON -m venv' failed. On Debian/Ubuntu install the venv" \
-         "package (e.g. 'sudo apt-get install -y python3.11-venv')." >&2
-    exit 1
-  fi
-fi
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
+# 2. Sync the workspace: create $VENV_DIR, install every member editable plus
+#    the locked deps, provisioning CPython $PY_VERSION if the system lacks it.
+#    uv.lock is current, so this installs from the lock (reproducible).  If uv
+#    complains the lock is out of date, re-run without UV-frozen semantics by
+#    deleting uv.lock's drift -- but normally this just works.
+echo "Syncing workspace (uv sync, python $PY_VERSION) ..."
+export UV_PROJECT_ENVIRONMENT="$VENV_DIR"
+uv sync --python "$PY_VERSION"
 
-python -m pip install -U pip wheel
-
-# Install the repo and its base dependencies (this pulls a CPU jax/jaxlib).
-echo "Installing legoESM (editable) ..."
-python -m pip install -e .
-
-# Override jax/jaxlib with the TPU build + libtpu.  This MUST come after the
-# editable install so the TPU jaxlib wins over the CPU one pulled in above.
+# 3. Override jax/jaxlib with the TPU build + libtpu.  MUST come after the sync
+#    so the TPU jaxlib wins over the CPU one from the lock.  Use `uv pip`
+#    (NOT `uv run`/`uv sync`, which would re-pin jax back to the locked CPU
+#    build and silently undo this).
 echo "Installing jax[tpu]==$JAX_VERSION ..."
-python -m pip install -U "jax[tpu]==${JAX_VERSION}" \
+uv pip install -U "jax[tpu]==${JAX_VERSION}" \
   -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
+# 4. Verify the TPU backend via the venv directly.  Do NOT use `uv run` here:
+#    it would re-sync the env to the lock and undo the jax[tpu] override above.
 echo
 echo "Verifying TPU is visible to JAX ..."
+# shellcheck disable=SC1091
+source "$VENV_DIR/bin/activate"
 python - <<'PY'
 import jax
 devs = jax.devices()
@@ -94,4 +85,5 @@ PY
 
 echo
 echo "Setup complete. Run a benchmark with:"
-echo "  bash scripts/cluster/gcp_tpu/run_bench.sh"
+echo "  N_GPUS=1 bash scripts/cluster/gcp_tpu/run_smoke.sh   # single-chip VM"
+echo "  bash scripts/cluster/gcp_tpu/run_bench.sh            # 8-chip slice"

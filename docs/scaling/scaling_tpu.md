@@ -90,19 +90,22 @@ GCP_PROJECT=my-proj TPU_ZONE=<your-v6e-zone> \
 ```
 
 Notes:
-- `setup_env.sh` pins `jax[tpu]==0.10.1` (the locally validated version).
-  Keep jax and the TPU jaxlib at the same version.
-- **Python >= 3.11 required.** TPU VM base images often ship an older default
-  `python3` (3.10 on Ubuntu 22.04), which fails `pip install -e .` with
-  "requires a different Python". Install 3.11 and point `setup_env.sh` at it:
-  ```bash
-  sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt-get update
-  sudo apt-get install -y python3.11 python3.11-venv python3.11-dev
-  PYTHON=python3.11 bash scripts/cluster/gcp_tpu/setup_env.sh
-  ```
-  `setup_env.sh` checks the interpreter version up front and rebuilds a
-  partial/old venv from scratch, so it fails fast with a clear message rather
-  than deep in the pip run.
+- **Install is via uv, not bare pip.** The repo is a uv workspace: the
+  federated members (`legoesm-core`/`-atmosphere`/`-ocean`/`-land`/`-ice`/
+  `-coupler`/`-ml`/`-tools`) live in-tree under `packages/*` and resolve via
+  `[tool.uv.sources]`. A plain `pip install -e .` tries to fetch
+  `legoesm-atmosphere~=0.1.0` from PyPI (not published there) and fails with
+  *"No matching distribution"*. `setup_env.sh` installs `uv` (if missing) and
+  runs `uv sync`, which installs every member editable from `uv.lock`.
+- **Python >= 3.11 is handled automatically.** legoESM requires Python >=3.11,
+  but TPU VM images often default to 3.10 (Ubuntu 22.04). `uv sync --python
+  3.11` provisions a managed CPython 3.11 itself, so no `deadsnakes`/system
+  Python install is needed. Override with `PY_VERSION=3.12 bash ...` if desired.
+- `setup_env.sh` pins `jax[tpu]==0.10.1` (the locally validated version) on top
+  of the sync; `uv.lock` pins the CPU build at 0.10.0, so the override swaps in
+  the TPU jaxlib + libtpu. Keep jax and the TPU jaxlib at the same version.
+  It uses `uv pip install` (not `uv run`/`uv sync`) for the override so it isn't
+  silently reverted to the locked CPU build.
 - `run_bench.sh` exports `PYTHONPATH=<repo root>` because the bench driver
   imports `tests.test_cases.baroclinic_wave`; without it every run silently
   reports `FAILED: No module named 'tests'`.
