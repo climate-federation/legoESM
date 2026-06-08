@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Cheap cubed-sphere smoke test ON a small Cloud TPU VM (v5litepod-4).
+# Cheap cubed-sphere smoke test ON a small (4-chip) Cloud TPU VM.
+#
+# Generation-agnostic: run it on whatever 4-chip slice you created
+# (v6e-4 default per docs/scaling/scaling_tpu.md, or v5litepod-4).
 #
 # Purpose: a fast, low-cost "does it run on real TPU hardware at all" check
-# before committing to a full v5e-8 scaling sweep.  This is NOT a meaningful
+# before committing to a full 8-chip scaling sweep.  This is NOT a meaningful
 # scaling benchmark — it uses tiny resolution and few timing iterations.
 #
 # On a 4-chip VM the valid cubed-sphere device counts are 1 and 2 only:
@@ -25,7 +28,7 @@ export N_WARMUP="${N_WARMUP:-2}"
 export N_TIMING="${N_TIMING:-10}"
 export OUTPUT_DIR="${OUTPUT_DIR:-results/scaling_tpu_smoke}"
 
-echo "=== TPU SMOKE TEST (v5litepod-4: cubed-sphere, float32, 2 of 4 chips) ==="
+echo "=== TPU SMOKE TEST (4-chip slice: cubed-sphere, float32, 2 of 4 chips) ==="
 echo
 
 exec bash "$SCRIPT_DIR/run_bench.sh"

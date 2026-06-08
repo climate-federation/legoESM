@@ -5,8 +5,11 @@ validation done; real-hardware numbers pending (Phase 3).
 
 ## Scope and hard constraints
 
-- **Single-host slice only** (v5e-8 / v6e-8): 8 chips in one host, pure SPMD.
-  No multi-host pods, no MPI, no `jax.distributed.initialize()`.
+- **Single-host slice only** — default **v6e-8** (Trillium, 2x4 topology);
+  v5e-8 also works. 8 chips in one host, pure SPMD. No multi-host pods, no
+  MPI, no `jax.distributed.initialize()`. v6e and v5e are both counted in
+  chips (so `-8` = 8 chips); v5p is counted in *cores* (2/chip), so a v5p
+  8-chip slice is `v5p-16` — avoid it for this single-host workload.
 - **float32 only.** TPUs have no efficient native float64, so the spectral
   dycore (x64 + complex128) is excluded. Targets are the float32-capable
   finite-volume grids — cubed-sphere FV3 first.
@@ -62,13 +65,13 @@ versions change across TPU generations — verify current values with
 `gcloud compute tpus tpu-vm versions list`.
 
 ```bash
-# 1. Create the VM (from your laptop). v5e-8 default; USE_SPOT=1 for cheap.
-GCP_PROJECT=my-proj TPU_ZONE=us-east5-a \
+# 1. Create the VM (from your laptop). v6e-8 default; USE_SPOT=1 for cheap.
+GCP_PROJECT=my-proj TPU_ZONE=<your-v6e-zone> \
   bash scripts/cluster/gcp_tpu/create_tpu_vm.sh
-#    For v6e: ACCELERATOR_TYPE=v6e-8 RUNTIME_VERSION=v2-alpha-tpuv6e ...
+#    For v5e instead: ACCELERATOR_TYPE=v5litepod-8 RUNTIME_VERSION=v2-alpha-tpuv5-lite ...
 
 # 2. SSH in.
-gcloud compute tpus tpu-vm ssh legoesm-tpu --zone=us-east5-a --project=my-proj
+gcloud compute tpus tpu-vm ssh legoesm-tpu --zone=<your-v6e-zone> --project=my-proj
 
 # 3. On the VM: get the repo. Prefer git clone — 'scp .' would drag the
 #    multi-GB .venv/.git/results along. (scp fallback if no git access:
@@ -82,7 +85,7 @@ cd ~/legoESM && bash scripts/cluster/gcp_tpu/setup_env.sh
 bash scripts/cluster/gcp_tpu/run_bench.sh
 
 # 6. Copy results back, then DELETE the VM (it bills while it exists).
-GCP_PROJECT=my-proj TPU_ZONE=us-east5-a \
+GCP_PROJECT=my-proj TPU_ZONE=<your-v6e-zone> \
   bash scripts/cluster/gcp_tpu/delete_tpu_vm.sh
 ```
 
@@ -93,19 +96,20 @@ Notes:
   imports `tests.test_cases.baroclinic_wave`; without it every run silently
   reports `FAILED: No module named 'tests'`.
 
-### Cheap smoke test (v5litepod-4)
+### Cheap smoke test (4-chip slice: v6e-4)
 
-Before paying for a full v5e-8 sweep, a 4-chip VM gives a fast, low-cost
+Before paying for a full 8-chip sweep, a 4-chip VM gives a fast, low-cost
 "does it run on real TPU silicon at all" check. On 4 chips the valid
 cubed-sphere device counts are **1 and 2 only** — face sharding needs a
 divisor of the 6-face layout, and neither 4 nor 8 divides 6, so a 4-chip
 slice runs face sharding on 2 of its 4 chips (the other 2 idle).
 
 ```bash
-# 1. Create a cheap 4-chip Spot VM (same runtime version as v5e-8).
-GCP_PROJECT=my-proj TPU_ZONE=us-east5-a \
-  ACCELERATOR_TYPE=v5litepod-4 USE_SPOT=1 \
+# 1. Create a cheap 4-chip Spot VM (v6e default; v5litepod-4 also works).
+GCP_PROJECT=my-proj TPU_ZONE=<your-v6e-zone> \
+  ACCELERATOR_TYPE=v6e-4 RUNTIME_VERSION=v2-alpha-tpuv6e USE_SPOT=1 \
   bash scripts/cluster/gcp_tpu/create_tpu_vm.sh
+#    For v5e instead: ACCELERATOR_TYPE=v5litepod-4 RUNTIME_VERSION=v2-alpha-tpuv5-lite
 
 # 2. ssh + clone + setup_env.sh as above, then:
 # 3. On the VM: cheap C24/L10 sweep over 1 -> 2 chips (few timing iters).
@@ -114,10 +118,11 @@ bash scripts/cluster/gcp_tpu/run_smoke.sh
 # 4. Delete the VM.
 ```
 
-`run_smoke.sh` just lowers the `run_bench.sh` defaults (`N_GPUS=2`,
-`STRONG_RESOLUTIONS=24`, `N_LEVELS=10`, short warmup/timing) and writes to
-`results/scaling_tpu_smoke/`. It is a correctness/liveness check only —
-its timing numbers are **not** a meaningful scaling benchmark.
+`run_smoke.sh` is generation-agnostic — it only lowers the `run_bench.sh`
+defaults (`N_GPUS=2`, `STRONG_RESOLUTIONS=24`, `N_LEVELS=10`, short
+warmup/timing) and writes to `results/scaling_tpu_smoke/`, running on
+whatever VM you created. It is a correctness/liveness check only — its
+timing numbers are **not** a meaningful scaling benchmark.
 
 ## Phase 3 results
 

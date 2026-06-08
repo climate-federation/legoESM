@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Provision a single-host Cloud TPU VM for legoESM scaling tests.
 #
-# Target (per the TPU plan): a single-host slice — v5e-8 (v5litepod-8) or
-# v6e-8 — i.e. 8 chips in ONE host, pure SPMD (no multi-host, no MPI).  The
-# cubed-sphere FV3 workload uses 6 of the 8 chips (true face sharding; 8 does
-# not divide the 6-face layout — see docs/scaling/scaling_tpu.md).
+# Target (per the TPU plan): a single-host slice — v6e-8 (default, Trillium)
+# or v5e-8 (v5litepod-8) — i.e. 8 chips in ONE host, pure SPMD (no multi-host,
+# no MPI).  The cubed-sphere FV3 workload uses 6 of the 8 chips (true face
+# sharding; 8 does not divide the 6-face layout — see
+# docs/scaling/scaling_tpu.md).
 #
 # All settings are overridable via environment variables.  ACCELERATOR_TYPE
 # and RUNTIME_VERSION change over TPU generations — verify current values:
@@ -12,20 +13,23 @@
 #   gcloud compute tpus tpu-vm versions list --zone="$TPU_ZONE"
 #
 # Usage:
-#   GCP_PROJECT=my-proj TPU_ZONE=us-east5-a ./create_tpu_vm.sh
-#   GCP_PROJECT=my-proj ACCELERATOR_TYPE=v6e-8 RUNTIME_VERSION=v2-alpha-tpuv6e \
-#       ./create_tpu_vm.sh
-#   # Cheap 4-chip smoke-test VM (same runtime as v5e-8); pair with run_smoke.sh:
-#   GCP_PROJECT=my-proj ACCELERATOR_TYPE=v5litepod-4 USE_SPOT=1 ./create_tpu_vm.sh
+#   GCP_PROJECT=my-proj TPU_ZONE=<your-v6e-zone> ./create_tpu_vm.sh
+#   # v5e instead of the v6e default:
+#   GCP_PROJECT=my-proj ACCELERATOR_TYPE=v5litepod-8 \
+#       RUNTIME_VERSION=v2-alpha-tpuv5-lite ./create_tpu_vm.sh
+#   # Cheap 4-chip smoke-test VM (pair with run_smoke.sh):
+#   GCP_PROJECT=my-proj ACCELERATOR_TYPE=v6e-4 RUNTIME_VERSION=v2-alpha-tpuv6e \
+#       USE_SPOT=1 ./create_tpu_vm.sh
 set -euo pipefail
 
 GCP_PROJECT="${GCP_PROJECT:?set GCP_PROJECT to your Google Cloud project id}"
 TPU_ZONE="${TPU_ZONE:-us-east5-a}"
 TPU_NAME="${TPU_NAME:-legoesm-tpu}"
-# v5e-8 single host.  For v6e (Trillium): ACCELERATOR_TYPE=v6e-8,
-# RUNTIME_VERSION=v2-alpha-tpuv6e.
-ACCELERATOR_TYPE="${ACCELERATOR_TYPE:-v5litepod-8}"
-RUNTIME_VERSION="${RUNTIME_VERSION:-v2-alpha-tpuv5-lite}"
+# v6e-8 (Trillium) single host by default.  For v5e: ACCELERATOR_TYPE=v5litepod-8,
+# RUNTIME_VERSION=v2-alpha-tpuv5-lite.  Runtime versions change across TPU
+# generations — verify with `gcloud compute tpus tpu-vm versions list`.
+ACCELERATOR_TYPE="${ACCELERATOR_TYPE:-v6e-8}"
+RUNTIME_VERSION="${RUNTIME_VERSION:-v2-alpha-tpuv6e}"
 # Set USE_SPOT=1 for a Spot (preemptible) VM — far cheaper, can be reclaimed.
 USE_SPOT="${USE_SPOT:-0}"
 
