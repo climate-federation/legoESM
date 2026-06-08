@@ -43,9 +43,29 @@ def _resolve_var(ds, name):
     return None
 
 
-from legoesm.training.vertical_interp import interp_pressure_to_sigma
+from legoesm.training.vertical_interp import (
+    interp_pressure_to_sigma,
+    interp_pressure_to_hybrid,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _hybrid_p_s_floor(sigma, dp_floor: float = 100.0) -> float:
+    """Minimum surface pressure that keeps all hybrid layer thicknesses >= dp_floor Pa.
+
+    The L40 hybrid coordinate develops near-zero or negative layer thicknesses
+    (dp = dA*p_ref + dB*p_s < dp_floor) when p_s << p_ref (e.g. Tibet at 56703 Pa
+    vs p_ref=100000 Pa).  This function returns the smallest p_s that keeps every
+    level's dp above dp_floor.
+    """
+    dA = np.asarray(sigma.dA)
+    dB = np.asarray(sigma.dB)
+    p_ref = float(sigma.p_ref)
+    # dp(k) = dA[k]*p_ref + dB[k]*p_s >= dp_floor
+    # → p_s >= (dp_floor - dA[k]*p_ref) / dB[k]  when dB[k] > 0
+    p_s_per_level = np.where(dB > 0, (dp_floor - dA * p_ref) / dB, 0.0)
+    return float(np.max(p_s_per_level))
 
 # Module-level cache for regridding weights (expensive to recompute)
 _CS_WEIGHT_CACHE: dict[tuple, object] = {}
@@ -379,6 +399,11 @@ def era5_to_cubedsphere_carry(
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
 
+    from legoesm.grids.vertical import HybridSigmaPressureCoordinate
+    from legoesm.grids.topography import smooth_phis_cubed_sphere
+    from legoesm import constants
+
+    _is_hybrid = isinstance(sigma, HybridSigmaPressureCoordinate)
     sigma_full = np.asarray(sigma.sigma_full)
     n_lon_era5 = era5.T.shape[1]
     weights = _get_cs_weights(n_lon_era5, grid)
@@ -386,33 +411,85 @@ def era5_to_cubedsphere_carry(
     # Regrid 3D fields
     def _regrid_3d(field_ll):
         """Regrid (n_lat, n_lon, n_plev) → (6, n, n, n_plev)."""
-        # Flatten spatial dims for regrid_scalar
         flat = field_ll.reshape(-1, field_ll.shape[-1])
         return regrid_scalar(jnp.asarray(flat), weights)
 
     T_cs = _regrid_3d(era5.T)
-    u_cs = _regrid_3d(era5.u)
-    v_cs = _regrid_3d(era5.v)
     q_cs = _regrid_3d(era5.q)
+
+    # Rotate winds from geographic (east, north) to local panel frame.
+    # ERA5 u/v are geographic; the cubed-sphere dycore expects local panel
+    # frame.  On polar faces the rotation is ±90°, which is exactly where
+    # the ~100 m/s polar-vortex jet would otherwise be placed in the wrong
+    # direction, triggering immediate numerical blowup.
+    u_cs_geo = _regrid_3d(era5.u)
+    v_cs_geo = _regrid_3d(era5.v)
+    _cos_a = jnp.asarray(grid.cos_angle)[..., None]  # (6,n,n,1)
+    _sin_a = jnp.asarray(grid.sin_angle)[..., None]
+    u_cs = _cos_a * u_cs_geo + _sin_a * v_cs_geo
+    v_cs = -_sin_a * u_cs_geo + _cos_a * v_cs_geo
 
     # Regrid 2D fields
     p_s_cs = regrid_scalar(jnp.asarray(era5.p_s.ravel()), weights)
-    phis_cs = regrid_scalar(jnp.asarray(era5.phis.ravel()), weights)
+    phis_cs_raw = regrid_scalar(jnp.asarray(era5.phis.ravel()), weights)
 
-    # Vertical interpolation
+    # Apply phis smoothing to match load_real_topography defaults.
+    # Raw ERA5 phis has steep gradients near cubed-sphere face boundaries
+    # (the northern Tibet slope sits only 3-4 cells from a polar-face edge).
+    # The Arakawa-Lamb PGF scheme amplifies face-boundary gradient errors
+    # to O(dx^-1), driving blowup in ~1-5 days even from rest.
+    phis_cs = smooth_phis_cubed_sphere(phis_cs_raw)
+
+    # Barometric p_s correction: restore hydrostatic consistency after smoothing.
+    # Lowering phis without adjusting p_s worsens the split-PGF cancellation
+    # residual over Tibet.  Use T at the lowest pressure level as a T_sfc proxy.
+    _T_sfc_cs = T_cs[..., -1]  # 1000 hPa ≈ surface temperature
+    _delta_phis = phis_cs_raw - phis_cs
+    p_s_corrected = p_s_cs * jnp.exp(_delta_phis / (constants.R_d * _T_sfc_cs))
+
+    # Enforce minimum surface pressure to prevent degenerate hybrid levels.
+    # For L40 with stretching=2.0: p_s_floor ≈ 68721 Pa (687 hPa).
+    # Simultaneously lower phis to maintain split-PGF balance.
+    if _is_hybrid:
+        p_s_floor = _hybrid_p_s_floor(sigma, dp_floor=100.0)
+        _ln_ratio = jnp.maximum(0.0, jnp.log(p_s_floor / p_s_corrected))
+        phis_cs = phis_cs - constants.R_d * _T_sfc_cs * _ln_ratio
+        p_s_cs = jnp.maximum(p_s_corrected, p_s_floor)
+    else:
+        p_s_cs = p_s_corrected
+
+    # Vertical interpolation using true hybrid pressure p(k) = A*p_ref + B*p_s.
+    # Over steep terrain (Tibet, Andes), the sigma approximation p(k) ≈ sigma*p_s
+    # misplaces upper levels by 100-180 hPa, causing ~20 K temperature errors.
     plev = jnp.asarray(era5.plev_Pa)
-    sigma_f = jnp.asarray(sigma_full)
-    T_model = interp_pressure_to_sigma(T_cs, plev, p_s_cs, sigma_f)
-    u_model = interp_pressure_to_sigma(u_cs, plev, p_s_cs, sigma_f)
-    v_model = interp_pressure_to_sigma(v_cs, plev, p_s_cs, sigma_f)
-    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING
-    # RATIO (see comment at the lat-lon path above).  Convert
-    # r = q / (1 − q) at the boundary.
-    q_specific = jnp.maximum(
-        interp_pressure_to_sigma(q_cs, plev, p_s_cs, sigma_f), 0.0,
-    )
+    if _is_hybrid:
+        _A = jnp.asarray(sigma.A_full)
+        _B = jnp.asarray(sigma.B_full)
+        _p_ref = float(sigma.p_ref)
+        def _vinterp(field_cs):
+            return interp_pressure_to_hybrid(field_cs, plev, p_s_cs, _A, _B, _p_ref)
+    else:
+        sigma_f = jnp.asarray(sigma_full)
+        def _vinterp(field_cs):
+            return interp_pressure_to_sigma(field_cs, plev, p_s_cs, sigma_f)
+
+    T_model = _vinterp(T_cs)
+    u_model = _vinterp(u_cs)
+    v_model = _vinterp(v_cs)
+    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING RATIO.
+    # Convert: r = q / (1 − q).
+    q_specific = jnp.maximum(_vinterp(q_cs), 0.0)
     q_specific = jnp.clip(q_specific, 0.0, 0.99)
     q_model = q_specific / (1.0 - q_specific)
+
+    logger.info(
+        f"  ERA5→CS IC: T=[{float(jnp.min(T_model)):.0f},{float(jnp.max(T_model)):.0f}]K "
+        f"u=[{float(jnp.min(u_model)):.0f},{float(jnp.max(u_model)):.0f}]m/s "
+        f"p_s=[{float(jnp.min(p_s_cs)):.0f},{float(jnp.max(p_s_cs)):.0f}]Pa "
+        f"phis=[{float(jnp.min(phis_cs)):.0f},{float(jnp.max(phis_cs)):.0f}]m2/s2 "
+        f"(raw phis peak={float(jnp.max(phis_cs_raw)):.0f}"
+        + (f", p_s_floor={_hybrid_p_s_floor(sigma):.0f}Pa)" if _is_hybrid else ")")
+    )
 
     dims_3d = ("face", "x", "y", "level")
     dims_2d = ("face", "x", "y")

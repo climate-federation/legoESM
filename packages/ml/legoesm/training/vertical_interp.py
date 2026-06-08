@@ -50,6 +50,37 @@ def interp_pressure_to_sigma(
     return _interp_in_logp(field_plev, plev_Pa, p_target)
 
 
+def interp_pressure_to_hybrid(
+    field_plev: jax.Array,
+    plev_Pa: jax.Array,
+    p_s: jax.Array,
+    A_full: jax.Array,
+    B_full: jax.Array,
+    p_ref: float,
+) -> jax.Array:
+    """Interpolate a 3D field from pressure levels to hybrid sigma-pressure levels.
+
+    Parameters
+    ----------
+    field_plev : array, shape (..., n_plev)
+        Field on pressure levels.
+    plev_Pa : array, shape (n_plev,)
+        Source pressure levels in Pa, **ascending**.
+    p_s : array, shape (...)
+        Surface pressure in Pa.
+    A_full, B_full : array, shape (n_model_lev,)
+        Hybrid coordinate coefficients: p(k) = A(k)*p_ref + B(k)*p_s.
+    p_ref : float
+        Reference pressure in Pa.
+
+    Returns
+    -------
+    array, shape (..., n_model_lev)
+    """
+    p_target = A_full * p_ref + p_s[..., None] * B_full
+    return _interp_in_logp(field_plev, plev_Pa, p_target)
+
+
 def _interp_in_logp(
     field_plev: jax.Array,
     plev_Pa: jax.Array,
