@@ -11,10 +11,14 @@ Two variants, routed by ``DCAConfig.variant``:
 
 * ``"ahmed_neelin"``: the Ahmed-Neelin-Adames (2020) lower-tropospheric-
   buoyancy (B_L) precipitation-buoyancy closure (``ahmed_neelin_dca``).
-  Convection relaxes the column toward the quasi-equilibrium line
-  ``B_L = B_c`` over a convective adjustment time scale (≈2 h), with a
-  heating/moistening partition that conserves column moist static
-  energy.  See :func:`ahmed_neelin_dca`.
+  The operative closure is the empirical eq-(8) precipitation–buoyancy
+  relation ``P = a·(B_L − B_c)+``; the implied column latent heating is
+  partitioned heating-up / drying-down along the eq-(41) direction
+  (latent cooling cancels sensible heating per level), which conserves
+  column moist static energy and drives ``B_L`` toward ``B_c``.  The
+  column relaxation time scale is emergent (the paper's nominal ≈2 h is
+  derived from observational EOF structures unavailable in-model).  See
+  :func:`ahmed_neelin_dca`.
 
 Planned: a DRY convective-adjustment mode (DCAConfig.dry=False default)
 --------------------------------------------------------------------

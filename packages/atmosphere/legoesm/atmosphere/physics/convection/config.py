@@ -72,11 +72,15 @@ class AhmedNeelinDCAConfig(NamedTuple):
     Ahmed, Adames & Neelin (2020), *Deep Convective Adjustment of
     Temperature and Moisture*, J. Atmos. Sci. 77, 2163-2186 (hereafter
     ANA20).  Distinct from the Manabe-style pairwise moist-adiabatic
-    adjustment (the default ``DCAConfig`` path): convection here relaxes
-    the column toward the quasi-equilibrium (QE) line ``B_L = B_c`` over a
-    convective adjustment time scale ``tau_adjust_s ≈ 2 h`` (ANA20 eq 42),
-    with a heating/moistening partition that conserves column-integrated
-    moist static energy (ANA20 eq 41, slope −1 in the q̂–T̂ plane).
+    adjustment (the default ``DCAConfig`` path): convection here is driven
+    by the empirical eq-(8) precipitation–buoyancy closure
+    ``P = a·(B_L − B_c)+``, with the implied column latent heating
+    partitioned heating-up / drying-down along the eq-(41) direction
+    (slope −1 in the q̂–T̂ plane) so column-integrated moist static energy
+    is conserved and ``B_L`` is driven toward the QE line ``B_L = B_c``.
+    The column relaxation time scale is emergent; ``tau_adjust_s`` is a
+    reference value (the paper's ≈2 h, ANA20 eq 42) and is NOT the
+    operative rate (see its field doc).
 
     Two-layer construction (ANA20 §2, Table 1):
 
