@@ -425,6 +425,21 @@ maps Δ pale over most ocean; largest residual = NH subpolar/WBC (coarse-model G
 −1.7 NH-mid/−1.1 arctic), NOT the SH. No grid artifacts (smooth Voronoi). SSS zonal-mean ~2-3 PSU too fresh
 everywhere = the τ=365 drift (τ=60 run fixes it: live SSS 34.34 vs τ=365's 32.99). PNGs sent to user.
 
+### iter-C ⚠️ TRANSPORT-BINNING OVER-COUNT (affects MHT AND possibly AMOC) — flagged, needs careful fix
+PINNED the MHT 4.99-PW bug: `compute_mht_from_state_mpas` (+ `compute_amoc_from_state_mpas`) sum the
+northward flux of ALL edges in a 2° lat-band (`spinup.py`). For a ~divergence-free flow each EDGE-ROW
+carries the full transport, so a 2° band (≈2-3 rows at ico6 ~115 km) OVER-COUNTS the single-latitude line
+integral by ~N_rows — matching the MHT 2.7× overshoot (4.99 vs obs ~1.8). **COROLLARY: the AMOC diagnostic
+uses the IDENTICAL ±1° band-sum**, so the model AMOC numbers (24.5, 23.9 Sv this session) MAY be inflated by
+~N_rows; true AMOC could be lower (~12-18). The comparison is apples-to-apples ONLY if the NEMO-side reader
+(`nemo_transports.py`) uses the same band method — NEMO is a STRUCTURED lat-lon grid where one row per
+latitude is exact, so NEMO (17.74) is likely correct while the MPAS band-sum over-counts → **the AMOC
+"overshoot" vs NEMO may be partly this artifact, not physics.** FIX (follow-up, NOT a hand-wave): a correct
+zonal integration (one-row-equivalent normalization, or the heat-flux-divergence/streamfunction-cumsum form)
++ an ANALYTIC unit test (uniform northward flow → exact transport) + re-derive ALL model AMOC/MHT numbers.
+Until then, treat the model AMOC magnitudes as UPPER BOUNDS; ACC (135-146, section method, single meridian)
+and SST/SSS are unaffected.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
