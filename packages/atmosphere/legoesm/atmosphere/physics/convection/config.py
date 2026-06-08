@@ -303,7 +303,11 @@ class KainFritschConfig(NamedTuple):
     Single-plume bulk mass-flux scheme distinguished by its
     boundary-layer trigger function: convection fires when the
     perturbed parcel temperature at the LCL exceeds the environmental
-    temperature at the LCL.  The trigger is smoothed via a sigmoid
+    temperature at the LCL.  By default (``faithful_trigger=True``) the
+    perturbation is the Fritsch-Chappell w-dependent ``DTLCL`` of Kain
+    (2004) — see the "Faithful KF-Eta" fields below; the legacy linear
+    ``w_thresh_offset/w_thresh_scale`` trigger is used only when
+    ``faithful_trigger=False``.  The trigger is smoothed via a sigmoid
     (``trigger_sharpness``) to preserve gradients.  Deep-vs-shallow
     cloud branches are blended on cloud depth.  No convective
     momentum transport — KF emits ``du_dt_conv = dv_dt_conv = None``.
@@ -311,12 +315,12 @@ class KainFritschConfig(NamedTuple):
     Fields
     ------
     w_thresh_offset : float
-        Trigger offset [K] (default 2.0; the canonical KF 1990 value).
+        LEGACY trigger offset [K] (default 2.0).  Used ONLY when
+        ``faithful_trigger=False``; the faithful trigger uses ``DTLCL``.
     w_thresh_scale : float
-        Conversion factor from ``w_grid`` [m/s] to a temperature
-        perturbation [K] in the trigger function.  Default 1.0 K per
-        m/s — the dimensionful scaling depends on resolution; users
-        with grid-scale ``w`` available should tune this.
+        LEGACY conversion factor from ``w_grid`` [m/s] to a temperature
+        perturbation [K] in the trigger function (default 1.0 K per
+        m/s).  Used ONLY when ``faithful_trigger=False``.
     trigger_sharpness : float
         Sigmoid sharpness on the trigger threshold [1/K].  Larger
         values approach a hard ``> 0`` step; smaller values broaden
@@ -349,8 +353,13 @@ class KainFritschConfig(NamedTuple):
     cape_sharpness : float
         Sigmoid sharpness on the CAPE gate [1/(J/kg)] (default 0.02).
     M_b_max : float
-        Hard upper bound on the cloud-base mass flux ``M_b`` [kg/m²/s]
-        (default 0.005 — about 1/20 of the literature peak tropical value 0.1; tighter than peak because the unbounded CAPE/tau closure can spike to ~2 kg/m²/s in a high-CAPE column and the per-layer heating ~M·(T_u−T)·δ scales linearly).
+        Hard upper bound on the *applied* cloud-base mass flux ``M_b``
+        [kg/m²/s] (default 0.05 — about 1/7 of the oracle deep-tropical
+        ``M_b≈0.33``).  The cap is a stability bound on the unbounded
+        CAPE/TIMEC closure, which can spike to ~1 kg/m²/s in a high-CAPE
+        column where the per-layer heating ~M·(T_u−T)·δ scales linearly.
+        The diagnostic carry packs the UNCAPPED closure ``M_b`` so it stays
+        responsive to the trigger above the cap.
     """
     w_thresh_offset: float = 2.0
     w_thresh_scale: float = 1.0
@@ -421,12 +430,15 @@ class KainFritschConfig(NamedTuple):
     # WKL scales w by DX/dtlcl_ref_dx).  The SCM/idealised bridge passes its
     # own ``w_grid`` already at-resolution, so dtlcl_dx_scale defaults to 1.
     dtlcl_dx_scale: float = 1.0
-    # Smooth floor [m/s] on WKL inside the cube-root so the trigger's gradient
-    # w.r.t. w stays finite at WKL->0 (w^(1/3) has infinite slope at 0).  The
-    # power is evaluated as ``(WKL_plus + eps)^p - eps^p`` with WKL_plus a
-    # softplus positive-part, keeping DTLCL ~0 for WKL<=0 and C^1 everywhere.
-    wkl_floor: float = 1.0e-4
-    wkl_softplus_sharpness: float = 1.0e3
+    # Tiny floor [m/s^(1/3) scale] inside the cube-root power so the base of
+    # ``x^p`` (p<1, infinite slope at 0) never hits exactly 0, keeping the
+    # gradient finite at WKL->0.  The DTLCL surrogate is
+    # ``coeff*softplus_pos(g(WKL)^p - g(0)^p)`` (zero at the cutoff,
+    # ~coeff*WKL^p above).  ``wkl_floor`` = 1e-8 makes the base-point term
+    # ``g(0)^p`` ~0.04 (so DTLCL within ~7% of the oracle 4.64*WKL^0.33 for
+    # tropical WKL~0.1-0.5) while staying C^1 everywhere.
+    wkl_floor: float = 1.0e-8
+    wkl_softplus_sharpness: float = 1.0e4
     # Updraft-radius entrainment (Kain 2004 Eq. 5-6).  REI = 0.03/RAD per unit
     # depth; RAD ramps 1000 m (WKL<=0) -> 2000 m (WKL>=0.1).  We map this to
     # the bulk-plume fractional entrainment epsilon = entrain_const/RAD [1/m].

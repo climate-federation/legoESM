@@ -155,25 +155,39 @@ def _faithful_dtlcl(
               = 0                                  otherwise
 
     The hard ``WKL > 1e-4`` branch and the ``WKL^0.33`` (infinite slope
-    at 0) are replaced by a smooth, C^1 surrogate so the trigger's
-    gradient w.r.t. ``w_grid`` stays finite everywhere:
+    at 0) are replaced by a smooth, C^1 surrogate that is EXACTLY zero at
+    the KF cutoff ``WKL = 0`` (so the trigger gets no artificial lift
+    there) and recovers ``dtlcl_coeff*WKL^p`` for ``WKL >> 0``:
 
-        WKL_+ = softplus(s*WKL)/s                  (smooth positive part)
-        DTLCL = dtlcl_coeff * ((WKL_+ + eps)^p - eps^p)
+        g(x)  = softplus(s*x)/s          (smooth positive part, g(0)=ln2/s)
+        DTLCL = dtlcl_coeff * softplus_pos( g(WKL)^p - g(0)^p )
 
-    which is ~0 for WKL <= 0, matches ``dtlcl_coeff*WKL^p`` for WKL >> eps,
-    and has a finite derivative ``dtlcl_coeff*p*eps^(p-1)`` at WKL = 0.
+    where ``softplus_pos(y)=softplus(k*y)/k`` is a smooth ``max(y,0)``.
+    At WKL=0, ``g(WKL)^p - g(0)^p = 0`` so DTLCL=0 (no spurious lift,
+    fixing codex review-1 #4).  For WKL<0, ``g(WKL)<g(0)`` so the argument
+    is negative and the smooth positive-part drives DTLCL->0.  The
+    base-point subtraction ``- g(0)^p`` removes the ``ln2/s`` offset that
+    the earlier ``(WKL_+ + eps)^p - eps^p`` form left at the cutoff.
     """
     z_ratio = jnp.minimum(z_lcl, config.wklcl_zref) / config.wklcl_zref
     wklcl = config.wklcl_ref * z_ratio
     wkl = w_at_lcl * config.dtlcl_dx_scale - wklcl
     s = config.wkl_softplus_sharpness
-    wkl_plus = jax.nn.softplus(s * wkl) / s
-    eps = config.wkl_floor
     p = config.dtlcl_exponent
-    dtlcl = config.dtlcl_coeff * (
-        (wkl_plus + eps) ** p - eps ** p
-    )
+    eps = config.wkl_floor  # tiny floor inside the power for AD safety at g->0
+    g_wkl = jax.nn.softplus(s * wkl) / s
+    g_zero = jnp.asarray(jnp.log(2.0) / s, dtype=wkl.dtype)  # = g(0)
+    # Power evaluated on a floored argument so the base of x^p never hits
+    # exactly 0 (where p<1 has infinite slope); the floor is far below the
+    # cutoff scale so it does not bias the firing point.
+    base = (g_wkl + eps) ** p - (g_zero + eps) ** p
+    # Smooth positive part (max(base, 0)) so DTLCL is ~0 for WKL<=0, ~base
+    # for WKL>>0, and C^1 at WKL=0.  Sharpness 50 (in units of 1/base, i.e.
+    # 1/K^p) localises the kink to a ~0.02-K-scale band around the cutoff —
+    # sharp enough to not bleed DTLCL into the WKL<0 region, smooth enough to
+    # keep a finite gradient.
+    base_pos = jax.nn.softplus(50.0 * base) / 50.0
+    dtlcl = config.dtlcl_coeff * base_pos
     return dtlcl, wkl
 
 
@@ -183,10 +197,16 @@ def _faithful_rad(
 ) -> jax.Array:
     """KF updraft radius RAD [m] (Kain 2004 Eq. 6; oracle lines 1054-1061).
 
-    1000 m for WKL<=0, 2000 m for WKL>=0.1 m/s, linear between.  Smooth
-    clamp keeps the map differentiable.
+    1000 m for WKL<=0, 2000 m for WKL>=0.1 m/s, linear between.  The oracle
+    uses a hard piecewise-linear clamp; here ``frac`` is a C^1 smooth
+    clamp of ``wkl/rad_wkl_ref`` to [0,1] (a softplus-of-softplus ramp)
+    so RAD is differentiable at both corners (codex review-1 #5).
     """
-    frac = jnp.clip(wkl / config.rad_wkl_ref, 0.0, 1.0)
+    x = wkl / config.rad_wkl_ref
+    width = 0.05  # smoothing width in units of the [0,1] ramp
+    # smooth clamp to [0,1]: softplus rising edge minus softplus at x=1.
+    lo = jax.nn.softplus(x / width) * width
+    frac = lo - jax.nn.softplus((lo - 1.0) / width) * width
     return config.rad_min_m + (config.rad_max_m - config.rad_min_m) * frac
 
 
@@ -304,25 +324,40 @@ def kain_fritsch_convection(
     p_base = p_full[:, -1]
 
     # -- Updraft source layer (USL): ~50 hPa mass-weighted parcel ----------
-    # Faithful to KF-Eta: the trigger parcel's T and q are the mass-weighted
-    # mean over the lowest ~50 hPa, NOT a single surface point.  This both
-    # follows the oracle and makes the launched parcel less extreme (a
-    # surface-point parcel over-states near-surface superheating).
+    # Faithful to KF-Eta: the trigger parcel's T, q, z AND launch pressure
+    # are the mass-weighted mean over the lowest ~50 hPa, NOT a single
+    # surface point (oracle KF_eta_PARA lines 901-911 mix T,q,z,p).  This
+    # both follows the oracle and makes the launched parcel less extreme.
     T_usl = _usl_mass_weighted(T, p_full, p_half, config.usl_depth_pa)
     q_usl = _usl_mass_weighted(q_v, p_full, p_half, config.usl_depth_pa)
     z_usl = _usl_mass_weighted(z, p_full, p_half, config.usl_depth_pa)
+    # Launch pressure = USL mean pressure (codex review-1 #1: oracle uses
+    # PMIX, not the surface pressure).
+    p_usl = _usl_mass_weighted(p_full, p_full, p_half, config.usl_depth_pa)
 
     T_moist = compute_moist_adiabat(T_base, p_full)
     cape = compute_cape(T, T_moist, p_full, p_half)
 
     # -- LCL, LFC, LNB diagnostics -----------------------------------------
-    # Parcel launched from the USL-mixed thermodynamic state plus the
-    # sub-cloud perturbations.
-    T_parcel = T_usl + config.parcel_perturb_T
-    q_parcel = q_usl + config.parcel_perturb_q
-    lcl = compute_lcl(T_parcel, q_parcel, p_base, p_full)
+    # The trigger LCL is the LCL of the *unperturbed* USL-mixed parcel
+    # (oracle computes TLCL from TMIX/QMIX, with the w-dependent DTLCL the
+    # ONLY thermal boost — the perturbation must NOT also shift the LCL or
+    # the dry-adiabatic ZLCL base would be inconsistent, codex review-1 #2).
+    # ``parcel_perturb_T/q`` are retained for the plume launch (below) where
+    # a small sub-cloud excess seeds the updraft; in faithful mode they do
+    # not move the LCL/trigger reference.
+    if config.faithful_trigger:
+        T_parcel_lcl = T_usl
+        q_parcel_lcl = q_usl
+    else:
+        T_parcel_lcl = T_usl + config.parcel_perturb_T
+        q_parcel_lcl = q_usl + config.parcel_perturb_q
+    lcl = compute_lcl(T_parcel_lcl, q_parcel_lcl, p_usl, p_full)
     k_lcl_smooth = lcl.k_lcl_smooth
     k_lfc_smooth, k_lnb_smooth = compute_lfc_lnb(T, T_moist, sharpness=1.0)
+    # Plume launch parcel (seeded with the sub-cloud perturbation).
+    T_parcel = T_usl + config.parcel_perturb_T
+    q_parcel = q_usl + config.parcel_perturb_q
 
     # -- The KF trigger function (the AD chokepoint) -----------------------
     if config.faithful_trigger:
@@ -383,7 +418,12 @@ def kain_fritsch_convection(
     cape_or_weight = w_absent * cape_trigger(
         cape, config.cape_or_threshold, config.cape_or_sharpness,
     )
-    fire_weight = jnp.maximum(trigger_weight, cape_or_weight)
+    # Smooth probabilistic OR of the two trigger weights: 1-(1-a)(1-b).
+    # Both are in (0,1), so the OR stays in (0,1) and is C^infty everywhere
+    # (codex review-1 #13: ``jnp.maximum`` has a non-smooth join at a==b;
+    # the noisy-OR form is the smooth replacement and matches ``max`` to
+    # within the product term).
+    fire_weight = trigger_weight + cape_or_weight - trigger_weight * cape_or_weight
     overall_weight = fire_weight * cape_weight
 
     # -- Cloud-base mass flux closure: CAPE / TIMEC ------------------------
@@ -404,17 +444,36 @@ def kain_fritsch_convection(
     )
     timec = jnp.maximum(timec, dt)
     rho_BL = p_full[:, -1] / (constants.R_d * jnp.maximum(T[:, -1], 1.0))
+    # The oracle drives its closure off the ENTRAINMENT-DILUTED updraft
+    # buoyant energy ABE, which is markedly smaller than the undilute
+    # surface-parcel CAPE that ``compute_cape`` returns (oracle ABE=5482 vs
+    # ours undilute=15339 on the same sounding — codex review-1 #3).  We
+    # discount the undilute CAPE by a dilution factor ``exp(-eps_mean *
+    # cloud_depth)`` (the bulk-plume buoyancy is reduced by entrainment over
+    # the cloud depth, exactly the e-folding the plume integrator applies)
+    # and remove only ``cape_removal_fraction`` of it per TIMEC (codex
+    # review-1 #9: ``cape_removal_fraction`` was previously dead config).
+    z_lcl_cd = _interpolate_at_smooth_level(z, k_lcl_smooth)
+    z_lnb_cd = _interpolate_at_smooth_level(z, k_lnb_smooth)
+    cloud_depth_cd = jnp.maximum(z_lnb_cd - z_lcl_cd, 0.0)
+    if config.faithful_entrainment:
+        eps_mean = jnp.mean(_faithful_entrainment_profile(wkl, rho, config), axis=-1)
+    else:
+        eps_mean = jnp.full((ncol,), config.epsilon_0, dtype=T.dtype)
+    dilution = jnp.exp(-eps_mean * cloud_depth_cd)
+    abe = cape * dilution
     # ``M_b_closure`` is the raw (uncapped) closure cloud-base mass flux —
     # the diagnostic packed into the carry, monotone in both the trigger
-    # weight (hence in the resolved ``w_grid``) and CAPE.  Keeping the carry
-    # on the *uncapped* value means the diagnostic stays responsive to the
-    # trigger even when the *applied* mass flux saturates at ``M_b_max``
-    # (the stability cap), so downstream diagnostics and the spectral-PE
-    # w-grid response test see the genuine closure signal.
+    # weight (hence in the resolved ``w_grid``) and the diluted ABE.  Keeping
+    # the carry on the *uncapped* value means the diagnostic stays responsive
+    # to the trigger even when the *applied* mass flux saturates at
+    # ``M_b_max`` (the stability cap), so downstream diagnostics and the
+    # spectral-PE w-grid response test see the genuine closure signal.
     M_b_closure = (
         overall_weight
+        * config.cape_removal_fraction
         * rho_BL
-        * cape
+        * abe
         / (constants.g * timec)
     )
     # Bound the *applied* M_b to a literature peak tropical value
@@ -435,9 +494,17 @@ def kain_fritsch_convection(
     if config.faithful_entrainment:
         eps_profile = _faithful_entrainment_profile(wkl, rho, config)
         dlt_profile = eps_profile
+        # Environment-detrainment mixing rate fed to the shared kernel must
+        # be the SAME RAD-based rate the plume uses, not the legacy constant
+        # ``config.delta_0`` (codex review-1 #6: plume budget and env
+        # tendencies were using inconsistent detrainment coefficients).  The
+        # kernel multiplies ``delta_0 * M * (X_u - X)`` per level, so a
+        # per-level ``(ncol, nlev)`` array broadcasts correctly.
+        kernel_delta = dlt_profile
     else:
         eps_profile = jnp.full_like(T, config.epsilon_0)
         dlt_profile = jnp.full_like(T, config.delta_0)
+        kernel_delta = config.delta_0
     plume = entraining_detraining_plume(
         T, q_v, p_full, p_half, z,
         T_parcel, q_parcel, k_lcl_smooth,
@@ -472,20 +539,42 @@ def kain_fritsch_convection(
     dT_dt_raw, dq_v_dt_raw, dq_c_conv_dt_raw = _apply_mass_flux_kernel(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
-        z, rho, config.delta_0, M_u_max=config.M_b_max,
+        z, rho, kernel_delta, M_u_max=config.M_b_max,
     )
+
+    # -- Precipitation efficiency (Kain 2004 PEFCBH) -----------------------
+    # The fraction PEFF of the detrained condensate that precipitates; the
+    # remainder (1-PEFF) is retained as suspended convective cloud water.
+    # The oracle splits the column condensate into rain (PEFF) vs detrained
+    # cloud/ice (1-PEFF).  Our convection emits ``dq_c_conv_dt`` to the
+    # microphysics chain (which itself converts cloud water to rain), so to
+    # avoid DOUBLE-counting precipitation we apply PEFF only as a *retention*
+    # scaling: convection hands the suspended fraction ``(1-PEFF)`` of its
+    # condensate to microphysics as cloud water, consistent with the column
+    # water budget (codex review-1 #12: PEFF was computed but never used).
+    if config.apply_precip_efficiency and config.faithful_trigger:
+        peff = _precip_efficiency(z_lcl_for_trigger, config)  # (ncol,)
+        cloud_retention = (1.0 - peff)[:, None]
+        dq_c_conv_dt_raw = dq_c_conv_dt_raw * cloud_retention
 
     # Apply the deep+shallow weight as a per-column scalar.
     dT_dt = dT_dt_raw * branch_weight[:, None]
     dq_v_dt = dq_v_dt_raw * branch_weight[:, None]
     dq_c_conv_dt = dq_c_conv_dt_raw * branch_weight[:, None]
 
+    # Convective mask reflects BOTH the trigger and the deep/shallow branch
+    # weight that actually scales the tendencies (codex review-1 #14: the
+    # bare ``overall_weight`` could report active convection in a column
+    # whose tendencies are zeroed because ``enable_shallow=False`` and the
+    # cloud is shallow, i.e. ``branch_weight≈0``).
+    convective_mask = overall_weight * branch_weight
+
     out = ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
         dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
-        convective_mask=overall_weight,
+        convective_mask=convective_mask,
         # KF has no convective momentum transport.
         du_dt_conv=None,
         dv_dt_conv=None,
