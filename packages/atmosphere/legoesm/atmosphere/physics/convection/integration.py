@@ -194,6 +194,13 @@ def _make_hydrostatic_convection(
     is_w_grid_consumer = scheme_name in ("kain_fritsch",)
     is_stochastic = scheme_name in ("bechtold",)
     is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
+    # Kuo is the canonical moisture-convergence scheme: its source IS the
+    # large-scale ∂q/∂t|dyn (``moisture_convergence``).  It is a simple
+    # leaf (no prognostic carry), so it takes MC in the catch-all path
+    # rather than the profile path.  When MC is None (no resolved
+    # large-scale ascent, e.g. single-column RCE) Kuo is correctly
+    # quiescent.
+    is_simple_mc_consumer = scheme_name in ("kuo",)
     # Static at closure-build time: avoid splitting / advancing the
     # master PRNG key when stochasticity is disabled, so the no-noise
     # path is exactly bit-identical to a no-Bechtold run apart from
@@ -332,7 +339,7 @@ def _make_hydrostatic_convection(
         # gates the proxy on ``moisture_convergence is None`` and zero-
         # filling silently bypasses it.
         if (
-            is_mc_consumer
+            (is_mc_consumer or is_simple_mc_consumer)
             and state.tracers is not None
             and "q_v" in state.tracers
             and state.v is not None
@@ -479,6 +486,17 @@ def _make_hydrostatic_convection(
                 )
                 conv_prog_out = prog_new_profile
             dT_dt = conv_out.dT_dt.reshape(shape_3d)
+        elif is_simple_mc_consumer:
+            # Kuo: simple leaf that consumes the large-scale moisture
+            # convergence as its source.  ``mc_col`` is None on single-
+            # column grids → Kuo is quiescent (correct).
+            conv_out = conv_fn(
+                T=T_col, q_v=q_v_col,
+                p_full=p_full_col, p_half=p_half_col,
+                dt=dt, config=scheme_config,
+                moisture_convergence=mc_col,
+            )
+            dT_dt = conv_out.dT_dt.reshape(shape_3d)
         else:
             conv_out = conv_fn(
                 T=T_col, q_v=q_v_col,
@@ -611,6 +629,7 @@ def _make_nonhydrostatic_convection(
     is_w_grid_consumer = scheme_name in ("kain_fritsch",)
     is_stochastic = scheme_name in ("bechtold",)
     is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
+    is_simple_mc_consumer = scheme_name in ("kuo",)
     needs_prng = is_stochastic and getattr(
         scheme_config, "enable_stochastic", False
     )
@@ -716,7 +735,7 @@ def _make_nonhydrostatic_convection(
         # carry q_v we pass ``None`` so the leaf engages its built-in
         # saturation-deficit proxy (Tiedtke gates the proxy on
         # ``moisture_convergence is None`` — zero-filling bypassed it).
-        if is_mc_consumer and n_tracers > 0:
+        if (is_mc_consumer or is_simple_mc_consumer) and n_tracers > 0:
             _compute_mc = compute_moisture_convergence
             _qv_grid_full = tracers[..., 0]   # (face, n, n, nlev)
             mc_col = _compute_mc(
@@ -825,6 +844,13 @@ def _make_nonhydrostatic_convection(
                     dt=dt, config=scheme_config,
                 )
                 conv_prog_out = prog_new_profile
+        elif is_simple_mc_consumer:
+            conv_out = conv_fn(
+                T=T_col, q_v=q_v_col,
+                p_full=p_full_col, p_half=p_half_col,
+                dt=dt, config=scheme_config,
+                moisture_convergence=mc_col,
+            )
         else:
             conv_out = conv_fn(
                 T=T_col, q_v=q_v_col,
@@ -913,6 +939,7 @@ def _make_spectral_pe_convection(
     is_w_grid_consumer = scheme_name in ("kain_fritsch",)
     is_stochastic = scheme_name in ("bechtold",)
     is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
+    is_simple_mc_consumer = scheme_name in ("kuo",)
     needs_prng = is_stochastic and getattr(
         scheme_config, "enable_stochastic", False
     )
@@ -1013,7 +1040,7 @@ def _make_spectral_pe_convection(
         # the proxy on ``moisture_convergence is None`` — zero-filling
         # silently bypassed it).
         if (
-            is_mc_consumer
+            (is_mc_consumer or is_simple_mc_consumer)
             and state.tracers is not None
             and "q_v" in state.tracers
         ):
@@ -1145,6 +1172,14 @@ def _make_spectral_pe_convection(
                     dt=dt, config=scheme_config,
                 )
                 conv_prog_out = prog_new_profile
+            dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
+        elif is_simple_mc_consumer:
+            conv_out = conv_fn(
+                T=T_col, q_v=q_v_col,
+                p_full=p_full_col, p_half=p_half_col,
+                dt=dt, config=scheme_config,
+                moisture_convergence=mc_col,
+            )
             dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
         else:
             conv_out = conv_fn(

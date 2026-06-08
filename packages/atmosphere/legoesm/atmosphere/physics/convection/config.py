@@ -95,29 +95,85 @@ class DCAConfig(NamedTuple):
 
 
 class KuoConfig(NamedTuple):
-    """Configuration for Kuo column moisture-excess convection.
+    """Configuration for the canonical Kuo (1965) convection scheme.
+
+    Faithful to J.-F. Mahfouf's reference Kuo implementation
+    (AJFMAHFOUF/MOIST_CONVECTION_KUO, ``src/kuo_schemes.f90``).  The
+    convective moisture/heat source is the **large-scale moisture
+    convergence** ``cvgu = Σ max(0, ∂q/∂t|dyn) dp/g`` (a bounded
+    external dynamical tendency), threaded in as ``moisture_convergence``
+    — NOT the column supersaturation.  When no large-scale convergence
+    is supplied (e.g. a pure single-column RCE), Kuo is correctly
+    quiescent: it has no source to redistribute.
+
+    Closure (Kuo-1965, the faithful default ``partition="kuo1965"``):
+
+        dt/dt = cvgu/zint · (tc − t)
+        dq/dt = −ptenq + cvgu/zint · (qvc − qv)
+        zint  = Σ (qvc − qv + (tc − t)/alpha) dp/g
+
+    over levels that are buoyant AND have positive vertical velocity at
+    the LCL (``icond==2``) AND positive local convergence
+    (``ptenq > 0``).  ``tc, qvc`` come from an entraining moist-adiabat
+    ascent (entrainment ``Eps``) with condensation removed.
+
+    The optional ``partition="anthes"`` Kuo-Anthes (1977) closure splits
+    the source between heating ``(1 − bkuo)`` and moistening ``bkuo``
+    with ``bkuo = (1 − RH_mean − rh_offset)``.
 
     Fields
     ------
-    alpha_heat : float
-        Fraction of column moisture excess going to heating vs moistening.
-    me_threshold : float
-        Minimum column moisture excess to trigger convection [kg/m^2].
-    smooth_trigger_sharpness : float
-        Sigmoid sharpness on column moisture excess trigger [1/(kg/m^2)].
-    tau_relax_s : float
-        Relaxation timescale [s].  Default 7200 (2 h).  The earlier
-        default 3600 (1 h) ate the entire column moisture excess every
-        hour, which combined with the surface-evap supply rate gave
-        ~10× too much precipitation in tropical RCE.  CCM2/CCM3 used
-        21600 (6 h); 7200 is a compromise that keeps the scheme
-        responsive to real precipitating columns without
-        over-precipitating.
+    entrainment : float
+        Fractional entrainment rate ``Eps`` for the cloud parcel
+        ascent [1/m].  Oracle value ``5.0e-5``.
+    newton_iters : int
+        Number of Newton iterations for the implicit moist-adiabat
+        temperature solve per level (oracle uses 5).
+    partition : str
+        ``"kuo1965"`` (default, faithful) or ``"anthes"`` (Kuo-Anthes
+        1977 RH-dependent heating/moistening split).
+    anthes_rh_offset : float
+        Offset in the Kuo-Anthes moistening parameter
+        ``bkuo = (1 − RH_mean − anthes_rh_offset)`` (oracle uses 0.1).
+    qv_min : float
+        Floor on in-cloud vapor / LCL detection [kg/kg] (oracle uses
+        ``1e-9``).
+    icond_sharpness : float
+        Dimensionless sigmoid sharpness for the smooth ``icond``
+        activation gates (supersaturation, buoyancy, w_lcl>0, ptenq>0).
+        Each gate argument is normalised to O(1) by the scales below
+        before the sigmoid, so a single large dimensionless sharpness
+        (default 50) makes every gate a crisp Heaviside approaching the
+        oracle's hard ``if`` switches while staying differentiable.
+    buoyancy_scale_K : float
+        Normalisation scale [K] for the buoyancy gate ``tvc − tve`` —
+        the sigmoid argument is ``(tvc − tve)/buoyancy_scale_K``.  A
+        small value (0.1 K) keeps the buoyancy threshold sharp.
+    supersat_scale : float
+        Normalisation scale [kg/kg] for the condensation gate
+        ``qv − qsat`` — argument ``(qv − qsat)/supersat_scale``.
+    ptenq_sign_floor : float
+        Division-by-zero guard [kg/kg/s] in the scale-free sign
+        ``ptenq / (|ptenq| + floor)`` feeding the ``ptenq > 0``
+        activation gate.  The oracle gate is a Heaviside on the SIGN of
+        the local convergence (on for ANY positive value, regardless of
+        magnitude); the scale-free sign makes the smooth gate ~1 across
+        the whole convergent column down to its exponential tail and ~0
+        only for clear subsidence.  1e-30 = pure numerical guard.
+    zint_floor : float
+        Safety floor [kg/m²] on the ``|zint|`` normalisation denominator
+        so the closure is finite when the convective layer is empty.
     """
-    alpha_heat: float = 0.75
-    me_threshold: float = 1e-5
-    smooth_trigger_sharpness: float = 1e4
-    tau_relax_s: float = 7200.0
+    entrainment: float = 5.0e-5
+    newton_iters: int = 5
+    partition: str = "kuo1965"
+    anthes_rh_offset: float = 0.1
+    qv_min: float = 1.0e-9
+    icond_sharpness: float = 50.0
+    buoyancy_scale_K: float = 0.1
+    supersat_scale: float = 1.0e-5
+    ptenq_sign_floor: float = 1.0e-30
+    zint_floor: float = 1.0e-12
 
 
 class MassFluxConfig(NamedTuple):
