@@ -316,3 +316,55 @@ def test_kuo_unknown_partition_raises():
         kuo_convection(T, qv, pf, ph, dt=900.0,
                        config=KuoConfig(partition="bogus"),
                        moisture_convergence=ptenq)
+
+
+# ---------------------------------------------------------------------------
+# Faithful w_lcl>0 activation gate (oracle reads independent w).
+# ---------------------------------------------------------------------------
+
+def test_kuo_w_grid_gate_suppresses_subsidence():
+    """When the resolved ``w_grid`` is supplied (the faithful oracle path
+    reads an INDEPENDENT ``w`` at LCL), a subsiding column (``w < 0``) is
+    suppressed even with positive moisture convergence — distinguishing
+    the real-``w`` gate from the convergence-sign proxy."""
+    T, qv, pf, ph, ptenq = _build_sounding()
+    cfg = KuoConfig()
+
+    w_up = jnp.full_like(qv, 0.05)     # ascent everywhere
+    w_down = jnp.full_like(qv, -0.05)  # subsidence everywhere
+
+    out_up = kuo_convection(T, qv, pf, ph, dt=900.0, config=cfg,
+                            moisture_convergence=ptenq, w_grid=w_up)
+    out_down = kuo_convection(T, qv, pf, ph, dt=900.0, config=cfg,
+                              moisture_convergence=ptenq, w_grid=w_down)
+
+    heat_up = float(jnp.sum(jnp.abs(out_up.dT_dt)))
+    heat_down = float(jnp.sum(jnp.abs(out_down.dT_dt)))
+    assert heat_up > 0.0, "ascending column should convect"
+    # Subsidence gate should strongly suppress (near-zero) the heating.
+    assert heat_down < 1e-3 * heat_up, (
+        f"subsidence not suppressed: up={heat_up:.3e} down={heat_down:.3e}"
+    )
+
+
+def test_kuo_w_grid_none_uses_convergence_proxy():
+    """With ``w_grid=None`` the gate falls back to the convergence-sign
+    proxy (still fires for positive convergence)."""
+    T, qv, pf, ph, ptenq = _build_sounding()
+    out = kuo_convection(T, qv, pf, ph, dt=900.0, config=KuoConfig(),
+                         moisture_convergence=ptenq, w_grid=None)
+    assert float(jnp.sum(jnp.abs(out.dT_dt))) > 0.0
+
+
+def test_kuo_w_grid_gradients_finite():
+    """jax.grad through the w_grid gate is finite."""
+    T, qv, pf, ph, ptenq = _build_sounding()
+    w = jnp.full_like(qv, 0.05)
+
+    def loss(w_in):
+        out = kuo_convection(T, qv, pf, ph, dt=900.0, config=KuoConfig(),
+                             moisture_convergence=ptenq, w_grid=w_in)
+        return jnp.sum(out.dT_dt ** 2)
+
+    g = jax.grad(loss)(w)
+    assert jnp.all(jnp.isfinite(g))

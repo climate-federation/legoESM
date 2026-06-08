@@ -334,6 +334,7 @@ def kuo_convection(
     dt: float,
     config: KuoConfig = KuoConfig(),
     moisture_convergence: jax.Array | None = None,
+    w_grid: jax.Array | None = None,
 ) -> ConvectionOutput:
     """Canonical Kuo (1965) convection driven by large-scale convergence.
 
@@ -357,6 +358,15 @@ def kuo_convection(
         positive = moisture inflow.  This is the canonical Kuo source
         (``ptenq``).  When ``None`` Kuo is QUIESCENT (no source to
         redistribute) — the physically correct single-column behavior.
+    w_grid : jax.Array or None
+        Resolved grid-scale vertical velocity [m/s] at full levels,
+        shape (ncol, nlev), positive = ascent.  Used for the oracle's
+        ``w_lcl > 0`` activation gate (the oracle reads an INDEPENDENT
+        ``w(k)`` there).  When ``None`` the gate falls back to the SIGN
+        of the local moisture convergence as the ascent proxy — exact
+        whenever convergence and resolved ascent share sign, and the
+        bridge derives a real ``w`` from the dycore continuity equation
+        where it can (Codex review-1/2 finding #1).
 
     Returns
     -------
@@ -397,22 +407,21 @@ def kuo_convection(
     gz_s = 0.5 * (gzh_below_s + gzh_above_s)
     gz = gz_s[:, ::-1]                        # back to top->surface
 
-    # Vertical-velocity proxy for the oracle's ``w_lcl > 0`` gate.  The
-    # oracle reads an INDEPENDENT ``w(k)`` from its sounding and gates on
-    # its value at the LCL; the legoESM column-physics boundary does not
-    # pass a per-level ``w`` to Kuo, so we use the SIGN of the local
-    # large-scale convergence as the ascent proxy (positive moisture
-    # convergence ⇒ large-scale ascent ⇒ ``w_lcl > 0``).  This is a
-    # deliberate bridge choice (Codex review-1 finding #1): it is exact
-    # whenever convergence and resolved ascent share sign (the usual
-    # tropical convective regime, and the oracle test sounding where both
-    # are positive over the convecting layer → identical 50 active
-    # levels) and only differs in the rare cell where local convergence
-    # and vertical motion disagree.  When ``moisture_convergence is None``
-    # the proxy is zero everywhere and the gate keeps Kuo off (quiescent).
-    # A future enhancement could thread the dycore ``w`` (as Kain-Fritsch
-    # already does via ``w_grid``) to drop the proxy entirely.
-    w_proxy = ptenq
+    # Vertical-velocity field for the oracle's ``w_lcl > 0`` gate.  The
+    # oracle reads an INDEPENDENT ``w(k)`` at the LCL.  When the caller
+    # supplies the resolved grid-scale ``w_grid`` (the convection bridge
+    # derives it from the dycore continuity equation, exactly as the
+    # Kain-Fritsch trigger does) we use it directly — FAITHFUL to the
+    # oracle's independent-``w`` gate (Codex review-1/2 finding #1).
+    # Otherwise we fall back to the SIGN of the local large-scale
+    # convergence as the ascent proxy (positive convergence ⇒ ascent),
+    # which is exact whenever convergence and ascent share sign (tropical
+    # convective regime).  ``moisture_convergence is None`` ⇒ proxy ≡ 0 ⇒
+    # gate off (quiescent), regardless of ``w_grid``.
+    if w_grid is not None:
+        w_proxy = w_grid
+    else:
+        w_proxy = ptenq
 
     # --- Entraining parcel ascent (faithful oracle loop) ---
     tc, qvc, icond2 = _parcel_ascent(T, q_v, p_full, gz, tve, w_proxy, config)
