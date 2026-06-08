@@ -35,8 +35,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics.thermodynamics import (
-    compute_cape,
-    compute_moist_adiabat,
+    parcel_profile_and_cape,
 )
 
 from legoesm.atmosphere.physics.convection.config import KainFritschConfig
@@ -182,11 +181,15 @@ def _faithful_dtlcl(
     # cutoff scale so it does not bias the firing point.
     base = (g_wkl + eps) ** p - (g_zero + eps) ** p
     # Smooth positive part (max(base, 0)) so DTLCL is ~0 for WKL<=0, ~base
-    # for WKL>>0, and C^1 at WKL=0.  Sharpness 50 (in units of 1/base, i.e.
-    # 1/K^p) localises the kink to a ~0.02-K-scale band around the cutoff —
-    # sharp enough to not bleed DTLCL into the WKL<0 region, smooth enough to
-    # keep a finite gradient.
-    base_pos = jax.nn.softplus(50.0 * base) / 50.0
+    # for WKL>>0, and C^1 at WKL=0.  ``softplus(k*x)/k`` leaves a residual
+    # ``ln(2)/k`` offset at x=0; to drive DTLCL at the WKL=0 cutoff to a
+    # genuinely negligible value (codex review-2 #1) we (a) use a large
+    # ``k`` and (b) SUBTRACT that residual ``ln(2)/k`` and re-apply a second
+    # smooth positive-part so the result is exactly 0 at base=0, non-negative
+    # everywhere, and still C^1.  Net: DTLCL(WKL=0) < 1e-3 K.
+    k = config.dtlcl_pos_sharpness
+    sp = (jax.nn.softplus(k * base) - jnp.log(2.0)) / k
+    base_pos = jax.nn.softplus(k * sp) / k
     dtlcl = config.dtlcl_coeff * base_pos
     return dtlcl, wkl
 
@@ -261,8 +264,17 @@ def _precip_efficiency(
     # Smooth low-CBH branch: oracle uses RCBH=0.02 for CBH<3 kft.
     low = jax.nn.sigmoid((3.0 - cbh) * 5.0)
     rcbh = low * 0.02 + (1.0 - low) * rcbh_poly
-    pefcbh = 1.0 / (1.0 + jnp.maximum(rcbh, 0.0))
-    return jnp.clip(pefcbh, config.pef_min, config.pef_max)
+    # Smooth non-negativity on RCBH and a smooth clamp of PEFCBH to
+    # [pef_min, pef_max] (codex review-2 #4: replace the hard jnp.maximum /
+    # jnp.clip so the PEFF -> cloud-water-retention path is smooth-everywhere
+    # like the RAD ramp).  ``softplus(s*x)/s`` is the smooth positive part;
+    # the double-softplus clamps to the interval without a kink.
+    s = 50.0
+    rcbh = jax.nn.softplus(s * rcbh) / s
+    pefcbh = 1.0 / (1.0 + rcbh)
+    # smooth clamp to [pef_min, pef_max]
+    above_min = config.pef_min + jax.nn.softplus(s * (pefcbh - config.pef_min)) / s
+    return config.pef_max - jax.nn.softplus(s * (config.pef_max - above_min)) / s
 
 
 def kain_fritsch_convection(
@@ -335,8 +347,14 @@ def kain_fritsch_convection(
     # PMIX, not the surface pressure).
     p_usl = _usl_mass_weighted(p_full, p_full, p_half, config.usl_depth_pa)
 
-    T_moist = compute_moist_adiabat(T_base, p_full)
-    cape = compute_cape(T, T_moist, p_full, p_half)
+    # CAPE / parcel profile via the q_v-AWARE shared recipe: dry-adiabatic
+    # below the LCL, moist-adiabatic above (launch humidity = surface q_v),
+    # with virtual-temperature CAPE (codex review-2 #2).  The legacy
+    # saturated-from-base path (compute_moist_adiabat without q_v_base)
+    # lifts a SATURATED surface parcel, spuriously inflating CAPE in
+    # unsaturated columns and over-firing the closure.  ``q_v`` is always
+    # available to KF, so the saturated path is never appropriate here.
+    T_moist, cape = parcel_profile_and_cape(T, p_full, p_half, q_v=q_v)
 
     # -- LCL, LFC, LNB diagnostics -----------------------------------------
     # The trigger LCL is the LCL of the *unperturbed* USL-mixed parcel

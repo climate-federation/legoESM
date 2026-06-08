@@ -439,9 +439,16 @@ class KainFritschConfig(NamedTuple):
     # tropical WKL~0.1-0.5) while staying C^1 everywhere.
     wkl_floor: float = 1.0e-8
     wkl_softplus_sharpness: float = 1.0e4
-    # Updraft-radius entrainment (Kain 2004 Eq. 5-6).  REI = 0.03/RAD per unit
-    # depth; RAD ramps 1000 m (WKL<=0) -> 2000 m (WKL>=0.1).  We map this to
-    # the bulk-plume fractional entrainment epsilon = entrain_const/RAD [1/m].
+    # Sharpness [1/K^p] of the outer smooth positive-part on the DTLCL base
+    # (with the ln2/k residual subtracted so DTLCL is ~0 at the WKL=0 cutoff).
+    dtlcl_pos_sharpness: float = 1.0e3
+    # Updraft-radius entrainment (Kain 2004 Eq. 5-6).  The oracle's
+    # environmental inflow MASS rate is REI = VMFLCL * DP * entrain_const/RAD
+    # with DP = rho*g*dz (Pa).  The bulk-plume needs the *fractional* rate
+    # per unit HEIGHT, epsilon = (1/M) dM/dz = rho(z)*g*entrain_const/RAD
+    # [1/m] — i.e. the rho*g factor converts the oracle's per-pressure inflow
+    # into a per-height fractional rate (see _faithful_entrainment_profile).
+    # RAD ramps 1000 m (WKL<=0) -> 2000 m (WKL>=0.1).
     faithful_entrainment: bool = True
     entrain_const: float = 0.03
     rad_min_m: float = 1.0e3
