@@ -107,16 +107,23 @@ core buys more than the bandwidth contention costs — before plateauing at np=4
 - **fp32 scales healthily** (rising 27.7→41 Mc/s) — the production GPU mode.
 - fp64 works but ~4× slower (consumer fp64 + the FFT pressure solve in fp64).
 - Stable (state finite) in both precisions.
-- **Spectral LES now runs distributed on MPI** (was single-rank-only). A
-  transpose-based slab distributed 2-D FFT (`parallel/distributed_fft.py`, AD-safe
-  all-to-all) carries the pressure projection, the spectral filter and the
-  global-mean wall model; a full `step()` matches single-rank to **1e-9** (state),
-  **1e-10** (`u_*`), and is AD-safe (np 1/2/4). Bench (global 64²×32, fp64):
-  30.3 → 30.2 → 28.6 ms/step (np 1/2/4) — correct, strong scaling flat on one
-  socket (bandwidth + the all-to-all transpose comm), so speedup needs multi-node
-  aggregate bandwidth. Still serial under MPI: the LASD dynamic-SGS test filter
-  and the 3/2-rule de-aliasing (both guarded with a clear error) — the next
-  increment.
+- **Spectral LES now runs distributed on MPI, full oracle closure** (was
+  single-rank-only). A transpose-based slab distributed 2-D FFT
+  (`parallel/distributed_fft.py`, AD-safe all-to-all) carries the pressure
+  projection, the spectral filter, the global-mean wall model AND the **LASD
+  dynamic SGS** (test filters + box3 ∂y halo). A full `step()` matches single-rank
+  to **1e-9** (state) / **1e-10** (`u_*`), `lasd_cs2` to **1e-12**, all AD-safe
+  (np 1/2/4). Scaling, dynamic LASD, both precisions:
+  - strong (global 64²×32): fp64 88.9→77.9→74.6, fp32 60.6→51.9→41.0 ms/step
+    (np 1/2/4; fp32 1.48× @4) — modest, bandwidth + all-to-all bound.
+  - weak (per-rank 32×64×32): fp64 40.3→81.2→136.3 ms — **poor BY ALGORITHM**:
+    the pressure-Poisson FFT globally couples the domain, so weak-scaling grows
+    the FFT size + the all-to-all transpose volume (the spectral communication
+    wall, unlike the CRM's flat local-stencil weak scaling).
+  Only the 3/2-rule de-aliasing stays serial-under-MPI (guarded; accuracy
+  refinement — the 2/3 mask de-aliases distributed). The spectral LES is the
+  faithful-physics path now usable across ranks; the CRM is the better-scaling
+  path.
 
 ---
 
