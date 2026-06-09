@@ -25,6 +25,15 @@ Performance of the plane **CRM** (compressible-Euler, cloud-resolving) and **LES
 - fp64 is compute-bound (consumer 5090 fp64 ≈ 1/64) — ~6× slower; hardware wall.
 - N256 drop (70→40 % HBM) is **L2-cache-fit loss** (working set spills L2),
   confirmed not thermal (N128 recovers fully after the hot N256 run).
+- **Production-mode caveat (codex iter25/26).** The numbers above use the
+  *vertical-only* acoustic substeps; the production CRM runners
+  (`run_rcemip/les/gate/lba_plane`) set `substep_horizontal_acoustic=True`
+  (horizontal acoustic split onto the substeps), which gives **15–37 % lower
+  throughput** (≈17–59 % more wall-time) and spills L2 earlier (its larger
+  per-substep working set updates u,v too):
+  fp32 production-mode N128 = 225 Mc/s · 96 % HBM, N256 = 115 Mc/s · 49 %
+  (vs vertical-only 263 / 183 Mc/s). `bench_crm_gpu_scaling.py` now defaults to
+  the production mode; pass `--vertical-only-acoustic` for the cheaper variant.
 
 ### MPI weak scaling (per-rank 48×48×30, CPU, single-thread/rank)
 

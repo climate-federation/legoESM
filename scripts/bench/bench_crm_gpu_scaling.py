@@ -33,6 +33,7 @@ N_TIMING = 30
 def _build_model(nx: int, ny: int, nlev: int, dx: float, dtype_x64: bool,
                  n_acoustic_substeps: int = 12,
                  semi_implicit_acoustic: bool = True,
+                 substep_horizontal_acoustic: bool = True,
                  fix_mass: bool = False):
     import jax.numpy as jnp
     from legoesm.atmosphere.dynamics.compressible_euler import (
@@ -52,6 +53,10 @@ def _build_model(nx: int, ny: int, nlev: int, dx: float, dtype_x64: bool,
     cfg = CompressibleEulerConfig(
         n_acoustic_substeps=n_acoustic_substeps,
         semi_implicit_acoustic=semi_implicit_acoustic,
+        # Match the PRODUCTION CRM runners (run_rcemip/les/gate/lba_plane), which
+        # split the HORIZONTAL acoustic terms onto the substeps. The vertical-only
+        # default (False) is cheaper and under-represents production cost.
+        substep_horizontal_acoustic=substep_horizontal_acoustic,
         sponge_coeff=0.05, sponge_width=5000.,
         hyperdiff_coeff=1e6, hyperdiff_rho_coeff=1e6, hyperdiff_w_coeff=1e6,
         smagorinsky_cs=0.0, use_coriolis=True,
@@ -150,6 +155,7 @@ def _acoustic_cfl(dt: float, n_acoustic_substeps: int, dx: float,
 def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
                prec: str, n_acoustic_substeps: int = 12,
                semi_implicit_acoustic: bool = True,
+               substep_horizontal_acoustic: bool = True,
                allow_unsafe_cfl: bool = False,
                repeat: int = 1) -> TimingResult:
     cfl = _acoustic_cfl(dt, n_acoustic_substeps, dx)
@@ -184,6 +190,7 @@ def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
         nx, ny, nlev, dx, prec == "float64",
         n_acoustic_substeps=n_acoustic_substeps,
         semi_implicit_acoustic=semi_implicit_acoustic,
+        substep_horizontal_acoustic=substep_horizontal_acoustic,
     )
     # Median of `repeat` timing runs reduces noise on sub-millisecond
     # cases where scan-amortization + cache warmth can dominate
@@ -251,6 +258,12 @@ def main() -> int:
                         "Requires small dt (~0.5 s at dz_sfc=100m, nsub=4). "
                         "Empirically faster on consumer GPUs where fp64 ALU "
                         "is throttled — bypasses column-Thomas serial path.")
+    p.add_argument("--vertical-only-acoustic", action="store_true",
+                   help="Use the VERTICAL-ONLY semi-implicit acoustic substeps "
+                        "(column-local). Default OFF ⇒ substep_horizontal_acoustic"
+                        "=True, matching the production CRM runners "
+                        "(run_rcemip/les/gate/lba_plane). The vertical-only mode is "
+                        "cheaper and under-represents production cost.")
     p.add_argument("--allow-unsafe-cfl", action="store_true",
                    help="Continue even when horiz CFL >0.7 or vertical CFL "
                         ">0.5 (explicit). Default = refuse (raise SystemExit).")
@@ -277,9 +290,12 @@ def main() -> int:
     print(f"Backend: {jax.default_backend().upper()}  Devices: {jax.devices()}")
     cfl = _acoustic_cfl(args.dt, args.n_acoustic_substeps, args.dx)
     acoustic = "explicit" if args.explicit_acoustic else "semi_implicit"
+    horiz = ("vertical-only"
+             if (args.vertical_only_acoustic or args.explicit_acoustic)
+             else "si_horizontal(PROD)")
     print(f"Precision: {args.precision}  nlev: {args.nlev}  "
           f"dx: {args.dx} m  dt: {args.dt} s  "
-          f"nsub: {args.n_acoustic_substeps}  acoustic: {acoustic}  "
+          f"nsub: {args.n_acoustic_substeps}  acoustic: {acoustic}/{horiz}  "
           f"horiz CFL: {cfl:.3f}")
 
     results = []
@@ -291,6 +307,12 @@ def main() -> int:
                 n, n, args.nlev, args.dx, args.dt, args.precision,
                 n_acoustic_substeps=args.n_acoustic_substeps,
                 semi_implicit_acoustic=not args.explicit_acoustic,
+                # si_horizontal requires semi_implicit; explicit acoustic can only
+                # run vertical-only. Forcing the flag True under --explicit-acoustic
+                # would drop the horizontal PG/div from the slow tendency without a
+                # substep to carry them (codex 2026-06-09).
+                substep_horizontal_acoustic=(not args.vertical_only_acoustic
+                                             and not args.explicit_acoustic),
                 allow_unsafe_cfl=args.allow_unsafe_cfl,
                 repeat=args.repeat,
             )
@@ -359,6 +381,8 @@ def main() -> int:
                 ]
                 if args.explicit_acoustic:
                     cmd.append("--explicit-acoustic")
+                if args.vertical_only_acoustic:
+                    cmd.append("--vertical-only-acoustic")
                 if args.allow_unsafe_cfl:
                     cmd.append("--allow-unsafe-cfl")
                 env = {**os.environ, **env_extra}
