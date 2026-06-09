@@ -22,6 +22,7 @@ All commands run from the repo root with `.venv/bin/python`.
 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
   tests/test_no_hardcoded_constants.py \
   tests/test_no_saturation_reimpl.py \
+  tests/test_no_formula_reimpl.py \
   tests/test_dispatch_hardening.py \
   tests/test_validate_strict_coverage.py \
   tests/test_physics_contracts.py \
@@ -31,6 +32,9 @@ JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
 What each enforces:
 - `test_no_hardcoded_constants` — no bare physical constant outside `constants.py`.
 - `test_no_saturation_reimpl` — no re-derived saturation curve outside `thermo.py`.
+- `test_no_formula_reimpl` — no canonical formula re-derived inline (registry:
+  buoyancy/Brunt-Väisälä `g/θ` debt-ratchet + Monin-Obukhov stability-fn guard;
+  extensible — add a formula = a registry entry + a self-test).
 - `test_dispatch_hardening` — no unknown-scheme `raise` guard silently deleted.
 - `test_validate_strict_coverage` — no scheme-like config field skips `validate_strict`.
 - `test_physics_contracts` — every `*/physics/*.py` is classified and every scheme
