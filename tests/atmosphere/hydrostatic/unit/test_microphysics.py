@@ -377,7 +377,7 @@ class TestSundqvist:
         dz = jnp.full((ncol, nlev), 500.0)
         h = make_zero_hydrometeors(ncol, nlev)
         # Use very high sharpness to make the sigmoid effectively a step
-        config = SundqvistConfig(RH_crit=0.8, sigmoid_sharpness=200.0)
+        config = SundqvistConfig(rh_crit=0.8, sigmoid_sharpness=200.0)
         out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, config=config)
         # Condensation should be much smaller than saturated case
         out_sat = sundqvist_microphysics(T, q_sat, h, p_full, p_half, rho, dz, dt=10.0, config=config)

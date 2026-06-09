@@ -472,7 +472,7 @@ def make_physics_params_spectral_physics(params, grid, dt):
     # Build SBM convection config with trainable timescale + RH
     sbm_cfg = SBMConfig(
         tau_c=p.get('sbm_tau_c', 7200.0),
-        RH_ref=p.get('sbm_RH_ref', 0.7),
+        rh_ref=p.get('sbm_RH_ref', 0.7),
     )
     conv_cfg = ConvectionConfig(scheme="sbm", sbm=sbm_cfg)
 

@@ -78,8 +78,8 @@ def sbm_convection(
     # forced a ``ConvertElementType`` for the implicit promotion of the
     # Python float, which is unnecessary work per convection step.
     tau_c = jnp.full((ncol,), config.tau_c, dtype=T.dtype)
-    RH_ref = jnp.full((ncol,), config.RH_ref, dtype=T.dtype)
-    CAPE_threshold = jnp.full((ncol,), config.CAPE_threshold, dtype=T.dtype)
+    RH_ref = jnp.full((ncol,), config.rh_ref, dtype=T.dtype)
+    CAPE_threshold = jnp.full((ncol,), config.cape_threshold, dtype=T.dtype)
 
     # 1. Surface temperature as parcel starting point
     T_base = T[:, -1]  # (ncol,)

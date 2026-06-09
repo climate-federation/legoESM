@@ -41,7 +41,7 @@ class KesslerConfig(NamedTuple):
 
 class SundqvistConfig(NamedTuple):
     """Configuration for Sundqvist large-scale condensation."""
-    RH_crit: float = 0.8              # Critical relative humidity
+    rh_crit: float = 0.8              # Critical relative humidity
     sigmoid_sharpness: float = 20.0   # Sharpness for smooth activation
     auto_rate: float = 1e-3           # Autoconversion rate c_0 [1/s]
     # Critical cloud water for autoconversion: P_auto = c_0·q_c·

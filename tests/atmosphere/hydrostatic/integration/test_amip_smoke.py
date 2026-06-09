@@ -106,7 +106,7 @@ def test_amip_5_steps(amip_setup):
         tau_equator=7.2, tau_pole=1.8, S_0=1360.0,
         sfc_albedo=0.06, perpetual_equinox=False,
     )
-    sbm_config = SBMConfig(tau_c=7200.0, RH_ref=0.7)
+    sbm_config = SBMConfig(tau_c=7200.0, rh_ref=0.7)
 
     sigma_full = sigma.sigma_full
     sigma_half = sigma.sigma_half

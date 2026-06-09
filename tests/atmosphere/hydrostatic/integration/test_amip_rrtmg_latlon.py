@@ -126,7 +126,7 @@ def test_amip_rrtmg_latlon_fv_steps(tmp_path):
         co2_ppmv=336.8, ch4_ppbv=1550.0, n2o_ppbv=301.0,
         sfc_emissivity=0.98, sfc_albedo=0.06, S_0=1360.0,
     )
-    sbm_cfg = SBMConfig(tau_c=7200.0, RH_ref=0.7)
+    sbm_cfg = SBMConfig(tau_c=7200.0, rh_ref=0.7)
     T_ice, albedo_ice, albedo_ocean = constants.T_freeze_ocean, 0.65, 0.06
 
     sst_means = []
