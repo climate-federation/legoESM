@@ -3068,6 +3068,29 @@ class ModelDriver:
         # feed it back next step.  None on the first step ⇒ physics initialises
         # its own state.
         _phys_state = None
+
+        # MPAS cell-partition MPI: swap the serial ``model.step`` for the
+        # halo-exchanging MPI step.  Same operator-split as the serial step
+        # (dynamics RK incl. tracer advection → physics → floors → mass fix),
+        # but each RK stage first exchanges cell/edge/tracer halos so every
+        # owned boundary cell sees fresh neighbour values, and the mass fixer
+        # sums only owned cells with a global allreduce (the model's internal
+        # fixer would double-count halo cells).  The same column-local
+        # ``physics_fn`` and the traced ``forcing`` / ``phys_state`` carry are
+        # threaded through unchanged.  Built once outside the loop.
+        _mpi_step = None
+        if self._voronoi_layout is not None:
+            from legoesm.parallel.voronoi_mpi import make_voronoi_mpi_step
+            _mpi_step = make_voronoi_mpi_step(
+                self.model, self._voronoi_layout, self.model.sigma_coord,
+                config=self.model.config, physics_fn=physics_fn,
+                return_phys_state=True,
+            )
+            logger.info(
+                "  MPAS MPI step active (rank %d/%d)",
+                self._voronoi_layout.rank, self._voronoi_layout.n_ranks,
+            )
+
         for step in range(n_steps_total):
             if _sst_forcing:
                 _force_day = START_DAY + step * DT / 86400.0
@@ -3075,10 +3098,14 @@ class ModelDriver:
                 if _fd_int != _last_force_day:
                     _forcing = {"T_sfc": _compute_T_sfc(_force_day)}
                     _last_force_day = _fd_int
-            self.state = self.model.step(
-                self.state, DT, physics_fn=physics_fn, forcing=_forcing,
-                phys_state=_phys_state)
-            _phys_state = self.model._phys_state
+            if _mpi_step is not None:
+                self.state, _phys_state = _mpi_step(
+                    self.state, DT, _forcing, _phys_state)
+            else:
+                self.state = self.model.step(
+                    self.state, DT, physics_fn=physics_fn, forcing=_forcing,
+                    phys_state=_phys_state)
+                _phys_state = self.model._phys_state
 
             # Diagnostics at intervals
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
