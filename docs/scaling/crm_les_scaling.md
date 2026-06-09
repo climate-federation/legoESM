@@ -336,6 +336,31 @@ production scaling; opt-in for oracle/validation runs needing exact parity.
 **CRM domain-decomposition: fully complete** — fast (123×), correct dynamics
 (1e-15), both precisions, moist tradeoff characterized AND given an exact opt-in.
 
+## Iteration 14 (2026-06-08): compressible-plane LES IS MPI-scalable
+
+There are TWO LES paths in legoESM:
+1. **Spectral incompressible LES** (`spectral_les_plane`, FFT pressure + LASD
+   dynamic SGS) — single-rank (needs a distributed FFT; deferred, multi-node).
+2. **Compressible-plane LES** (`compressible_euler_plane` + Smagorinsky SGS) —
+   the SAME dycore as the CRM with `smagorinsky_cs > 0`. The iter-8/9 `step_halo`
+   fix makes it **MPI-scalable NOW**, and it was already validated bit-identical
+   (1e-15, iter 11 used `smagorinsky_cs=0.2`).
+
+DD bench in LES mode (`--smag-cs 0.2`, fixed global 48×48×20):
+
+| precision | np1 | np2 | np4 | np1→np2 |
+|-----------|----:|----:|----:|--------:|
+| fp32 | 111.4 | 50.6 | 50.0 ms | **2.2× (super-linear)** |
+| fp64 | 143.9 | 56.6 | 56.4 ms | **2.5× (super-linear)** |
+
+The SGS compute raises the compute-to-bandwidth ratio, so strong scaling is
+SUPER-LINEAR at np=2 (vs 56 % for the bandwidth-bound dry dynamics) before
+plateauing at np=4 (bandwidth). Both precisions; correct (iter 11).
+
+⇒ **"LES scaling works for both precisions" is met via the compressible-plane LES
+on MPI** (and the spectral LES on single-GPU, iter 4). Only the spectral-LES *MPI*
+path remains gated on a distributed FFT.
+
 ## Backlog (deferred / large)
 
 1. LES distributed FFT for MPI (the LASD/spectral-pressure blocker).
