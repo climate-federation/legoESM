@@ -158,6 +158,17 @@ class RRTMGPConfig(NamedTuple):
     use_scan: bool | None = None
     include_clouds: bool = False
     use_optimal_angle: bool = False
+    # G-point accumulation strategy in the two-stream RTE solve.
+    #   0  -> memory-frugal checkpointed ``lax.scan`` over g-points (REQUIRED
+    #         for reverse-mode AD / training at high resolution).
+    #   >0 -> process g-points in parallel blocks of this size via ``vmap``
+    #         (the g-point axis is embarrassingly parallel; the sequential
+    #         scan launches one tiny kernel per g-point and starves the GPU,
+    #         ~26x slower in a microbench).  FORWARD/inference only — it holds
+    #         this many g-points' activations for the backward pass.  A block
+    #         of ~16-32 recovers most of the parallelism while bounding peak
+    #         memory at high resolution.  Default 0 = byte-for-byte legacy.
+    gpoint_batch_size: int = 0
     # Run the optics tables + RTE solve in float32 even when JAX x64 is on.
     # The dycore needs fp64, but radiation (a flux calculation) does not —
     # fp32 is ~2x faster on fp64-limited GPUs (e.g. RTX 8000, fp64 ≈ 1/32 of

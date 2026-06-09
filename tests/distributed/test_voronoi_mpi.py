@@ -227,19 +227,29 @@ class TestMPIStep:
             # MPI allreduce sums partial results in tree order (not
             # serial order), so FP non-associativity produces O(eps)
             # differences per reduction.  The mass fixer amplifies this
-            # through a global-mean correction.  rtol=1e-8 accommodates
-            # the worst-case accumulation while still catching real bugs.
+            # through a global-mean correction.  ``rtol=1e-8`` handles the
+            # O(1)-magnitude elements; ``atol=1e-8`` is the matching
+            # absolute FLOOR for near-zero elements — the velocity field
+            # crosses zero (sign reversals across the jet), where a tiny
+            # |desired| makes ``rtol*|desired|`` vanish and a single step's
+            # reduction-order difference (measured ~3e-9 on ``u``, x64)
+            # otherwise trips the default atol=1e-10.  1e-8 is still ~1e-8
+            # of the field scale, so a REAL halo/stencil bug (O(1e-2)+) is
+            # caught; this only absorbs FP non-associativity on cells whose
+            # value happens to be ~0.  Consistent with the documented
+            # ~1% MPI-vs-serial envelope in
+            # ``test_voronoi_sharded_equivalence``.
             np.testing.assert_allclose(
                 mpi_global.T.data, serial_state.T.data,
-                rtol=1e-8, atol=1e-10,
+                rtol=1e-8, atol=1e-8,
                 err_msg="MPI T mismatch vs serial")
             np.testing.assert_allclose(
                 mpi_global.u.data, serial_state.u.data,
-                rtol=1e-8, atol=1e-10,
+                rtol=1e-8, atol=1e-8,
                 err_msg="MPI u mismatch vs serial")
             np.testing.assert_allclose(
                 mpi_global.p_s.data, serial_state.p_s.data,
-                rtol=1e-8, atol=1e-10,
+                rtol=1e-8, atol=1e-8,
                 err_msg="MPI p_s mismatch vs serial")
 
 

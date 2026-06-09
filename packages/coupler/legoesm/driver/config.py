@@ -205,6 +205,12 @@ class ExperimentConfig(NamedTuple):
     # against the 2600s cold-compile time called out in issue #273)
     # and ``False`` on CPU.  Explicit ``True``/``False`` overrides.
     rrtmgp_use_scan: bool | None = None
+    # G-point parallelism in the RRTMGP two-stream solve (see
+    # ``RRTMGPConfig.gpoint_batch_size``).  0 = memory-frugal checkpointed scan
+    # (REQUIRED for reverse-mode AD / training).  >0 = process g-points in
+    # parallel blocks of this size via vmap — FORWARD/inference only, ~6x faster
+    # radiation on GPU; ~16-32 recovers most parallelism while bounding memory.
+    rrtmgp_gpoint_batch_size: int = 0
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
@@ -236,7 +242,7 @@ class ExperimentConfig(NamedTuple):
     # Convection / Turbulence / GWD
     convection: str = "sbm"            # sbm, dca, kuo, mass_flux, edmf, none
     turbulence: str = "none"           # smagorinsky, louis, tke, none
-    gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, none
+    gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, hines, prognostic_spectral, e3sm_cam, ml_emulator, none
 
     # Conservation
     fix_moisture: bool = False
@@ -447,7 +453,7 @@ class ExperimentConfig(NamedTuple):
             )
         _valid_gwd = (
             "rayleigh", "lindzen", "mcfarlane", "hines",
-            "prognostic_spectral", "ml_emulator", "none",
+            "prognostic_spectral", "e3sm_cam", "ml_emulator", "none",
         )
         if self.gravity_wave_drag not in _valid_gwd:
             errors.append(

@@ -483,20 +483,12 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     physics_fn = _build_physics_fn(physics_level, "icosahedral")
 
     if n_ranks > 1:
-        # Iter 38 honest-sweep: ``make_voronoi_mpi_step`` does not
-        # forward ``physics_fn`` to the per-rank step (it builds its
-        # own dycore-only step), so a multi-rank icosahedral sweep
-        # with ``--physics held_suarez`` would label the run with
-        # ``held_suarez`` but silently benchmark dycore-only —
-        # corrupting the campaign comparison.  Refuse the
-        # combination up front; users should run physics-tier
-        # sweeps single-rank or use the bare-dycore path.
-        if physics_fn is not None:
-            raise ValueError(
-                "icosahedral MPI multi-rank does not apply physics_fn; "
-                "rerun with --physics none, or run single-rank for "
-                "physics-on benchmarks."
-            )
+        # ``make_voronoi_mpi_step`` now forwards ``physics_fn`` via the
+        # operator-split path (iter: HS MPI scaling), so multi-rank
+        # icosahedral sweeps with ``--physics held_suarez`` benchmark the
+        # genuine dynamics+physics step.  Held-Suarez is column-local
+        # (Newtonian relaxation), so it adds no horizontal halo coupling
+        # beyond the dycore's exchange.
         from legoesm.parallel.voronoi_mpi import (
             make_voronoi_partition_layout,
             scatter_state_voronoi,
@@ -504,7 +496,9 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         )
         layout = make_voronoi_partition_layout(mesh, rank, n_ranks)
         state = scatter_state_voronoi(state, layout.partition)
-        step_fn = make_voronoi_mpi_step(model, layout, sigma, config)
+        step_fn = make_voronoi_mpi_step(
+            model, layout, sigma, config, physics_fn=physics_fn,
+        )
     else:
         if physics_fn is not None:
             _phys = physics_fn
@@ -729,16 +723,10 @@ def generate_sweep_cases(
     cases = []
     rank_counts = _valid_rank_counts(max_ranks, grid_type)
 
-    # Iter 39 honest-sweep: icosahedral MPI multi-rank does not apply
-    # ``physics_fn`` (``make_voronoi_mpi_step`` builds a dycore-only
-    # step), so a multi-rank icosahedral sweep with a non-trivial
-    # physics tier would label cases as "held_suarez" / etc. but
-    # silently benchmark dycore-only.  Iter 38 made the runner refuse
-    # the combination at execution time; iter 39 stops the sweep
-    # generator from emitting those (now-broken) cases in the first
-    # place.
-    if grid_type == "icosahedral" and physics != "none":
-        rank_counts = [1]
+    # icosahedral MPI multi-rank now applies ``physics_fn`` via the
+    # operator-split path in ``make_voronoi_mpi_step``, so Held-Suarez
+    # (column-local) multi-rank sweeps benchmark the genuine
+    # dynamics+physics step.  No rank-1 restriction needed.
 
     if mode in ("weak", "both"):
         for n in rank_counts:

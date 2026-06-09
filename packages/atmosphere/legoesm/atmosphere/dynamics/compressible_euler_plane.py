@@ -1698,7 +1698,7 @@ def _moisture_buoyancy_w_half(
     )
 
 
-def _acoustic_moist_buoyancy_w(state, height_coord, euler_config):
+def _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout=None):
     """Frozen SAM moist buoyancy on the w half-levels for the ACOUSTIC loop.
 
     Returns ``B_moist`` (vapour-virtual + condensate loading, :func:`
@@ -1717,9 +1717,25 @@ def _acoustic_moist_buoyancy_w(state, height_coord, euler_config):
     if not (getattr(euler_config, "moist_buoyancy", False)
             and getattr(euler_config, "acoustic_moist_buoyancy", True)):
         return None
+    # Horizontal-mean function for the SAM perturbation.  Default = rank-local
+    # ``jnp.mean`` (zero comm; exact at n_ranks==1).  Opt-in exact GLOBAL mean
+    # (one allreduce/field) when ``acoustic_moist_global_mean`` is set AND we
+    # are actually decomposed — the global cell count is known from the layout
+    # (``ny_global*nx_global``), so only the per-level SUM needs an allreduce,
+    # which ``global_sum_mpi`` carries with an AD-safe VJP.
+    if (getattr(euler_config, "acoustic_moist_global_mean", False)
+            and layout is not None and layout.n_ranks > 1):
+        from legoesm.parallel.reductions import global_sum_mpi
+        _gn = float(layout.ny_global * layout.nx_global)
+
+        def _hmean(f):
+            return global_sum_mpi(
+                jnp.sum(f, axis=(0, 1), keepdims=True)) / _gn
+    else:
+        def _hmean(f):
+            return jnp.mean(f, axis=(0, 1), keepdims=True)
     return _moisture_buoyancy_w_half(
-        state.tracers.data, state.theta_prime.data, height_coord,
-        lambda f: jnp.mean(f, axis=(0, 1), keepdims=True))
+        state.tracers.data, state.theta_prime.data, height_coord, _hmean)
 
 
 def plane_compressible_euler_slow_tendencies(
@@ -2248,6 +2264,7 @@ def plane_acoustic_substeps(
     height_coord: HeightCoordinate,
     terrain_metric: TerrainMetric,
     euler_config: CompressibleEulerConfig,
+    layout=None,
 ) -> PlaneNonHydrostaticState:
     """Run ``n_substeps`` forward-backward acoustic substeps on the plane.
 
@@ -2298,7 +2315,7 @@ def plane_acoustic_substeps(
 
     # Python-loop unroll (n_substeps is compile-time static via
     # SplitExplicitConfig). See semi-implicit variant for full rationale.
-    b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config)
+    b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout)
     w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
     for _ in range(int(n_substeps)):
         w_final, theta_p_final, rho_p_final = _acoustic_column_kernel(
@@ -2331,6 +2348,7 @@ def plane_acoustic_substeps_semi_implicit(
     height_coord: HeightCoordinate,
     terrain_metric: TerrainMetric,
     euler_config: CompressibleEulerConfig,
+    layout=None,
 ) -> PlaneNonHydrostaticState:
     """Semi-implicit acoustic substeps on the plane via per-column
     Thomas tridiagonal solve.
@@ -2369,7 +2387,7 @@ def plane_acoustic_substeps_semi_implicit(
     si_w_filter_nu = float(getattr(
         euler_config, "si_w_vertical_filter_nu", 0.0,
     ))
-    b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config)
+    b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout)
     w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
     for _ in range(int(n_substeps)):
         w_final, theta_p_final, rho_p_final = (
@@ -2408,6 +2426,7 @@ def plane_acoustic_substeps_si_horizontal(
     terrain_metric: TerrainMetric,
     euler_config: CompressibleEulerConfig,
     grid: PlaneGrid,
+    layout=None,
 ) -> PlaneNonHydrostaticState:
     """Full Skamarock-Klemp split-explicit acoustic substep on the plane.
 
@@ -2462,7 +2481,7 @@ def plane_acoustic_substeps_si_horizontal(
         compute_exner_perturbation,
     )
 
-    b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config)
+    b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout)
     u_c, v_c, w_c, theta_p_c, rho_p_c = u, v, w, theta_p, rho_p
     for _ in range(int(n_substeps)):
         theta_total, rho_total = sanitize_theta_rho(
@@ -2885,18 +2904,48 @@ class PlaneCompressibleEulerModel:
                 return plane_acoustic_substeps_semi_implicit(
                     s, slow_tend, dt_s, n_sub, cfg,
                     self.height_coord, self.terrain_metric, self.config,
+                    layout=layout,  # enables exact global moist-mean when configured
                 )
         else:
             def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
                 return plane_acoustic_substeps(
                     s, slow_tend, dt_s, n_sub, cfg,
                     self.height_coord, self.terrain_metric, self.config,
+                    layout=layout,  # enables exact global moist-mean when configured
                 )
 
-        stepped = split_explicit_step(
-            state_local, slow_tendency_fn, acoustic_update_fn,
-            dt, se_config,
+        # Build + cache a JIT'd split-explicit core.  The eager multi-rank
+        # path host-syncs on every op and every mpi4jax halo ``sendrecv``,
+        # making it ~100x slower than np=1 (measured: np2 7135 ms vs np1
+        # 68.6 ms/step).  The docstring's "mpi4jax not jit-safe on macOS
+        # shared-mem" caveat does NOT hold on Linux/MPICH — ``voronoi_mpi``
+        # runs mpi4jax collectives inside ``@jax.jit`` at scale.  JIT-ing the
+        # slow-tendency (incl. its halo exchange) + acoustic substeps as one
+        # fused executable collapses the eager dispatch/host-sync overhead.
+        # The mass fixer stays eager below (cheap — one allreduce/step — and
+        # it mutates the ``self._target_mass`` anchor, which a jit can't trace).
+        # Cache keyed on the trace-invariant statics so we build the jit once;
+        # ``dt`` is closed in (static), so a changed dt rebuilds.
+        # Key includes the full layout DECOMPOSITION (not just n_ranks): the
+        # cached jit bakes in this layout's halo dims/neighbours via the
+        # captured closures, so a different decomposition on the same model
+        # instance MUST rebuild (else it would silently reuse a stale halo
+        # graph and compute wrong results).
+        _jit_key = (
+            layout.n_ranks, layout.n_ranks_y, layout.n_ranks_x,
+            layout.ny_local, layout.nx_local,
+            float(dt), self.config.n_acoustic_substeps,
+            bool(self.config.semi_implicit_acoustic), id(f_pad_cached),
         )
+        if (getattr(self, "_jit_halo_core", None) is None
+                or getattr(self, "_jit_halo_key", None) != _jit_key):
+            def _halo_core(s):
+                return split_explicit_step(
+                    s, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+                )
+            self._jit_halo_core = jax.jit(_halo_core)
+            self._jit_halo_key = _jit_key
+        stepped = self._jit_halo_core(state_local)
 
         # MPI-aware dry-mass fixer (R7). Only fires when the user
         # passes an owned_mask + config.fix_mass is True. Without the

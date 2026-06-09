@@ -592,6 +592,11 @@ def _build_segment_benchmark(
         precision="fp64" if precision == "float64" else "fp32",
         fix_moisture=False,
         n_devices=n_gpus,
+        # Forward-only benchmark: parallelise the RRTMGP g-point axis (the
+        # sequential checkpointed scan is ~6x slower on GPU; block of 32
+        # recovers most parallelism while bounding memory).  No effect on the
+        # gray/none tiers.  Use 0 here only if benchmarking the training-AD path.
+        rrtmgp_gpoint_batch_size=32,
     )
 
     driver = ModelDriver(config)

@@ -211,12 +211,17 @@ def test_scm_swap_physics_scheme():
 
 @pytest.mark.parametrize(
     "conv_scheme",
-    ["mass_flux", "edmf", "zhang_mcfarlane", "tiedtke", "bechtold"],
+    ["mass_flux", "edmf", "zhang_mcfarlane", "tiedtke", "bechtold", "emanuel"],
 )
 def test_rk_rejects_stateful_convection(conv_scheme):
     """Profile/scalar-carrying convection schemes must be rejected
     under multi-stage integrators (they read prior conv_prog_profile
-    or conv_stoch_state)."""
+    or conv_stoch_state).
+
+    ``emanuel`` is prognostic: its faithful Emanuel-1991 cloud-base
+    mass-flux closure reads ``conv_prog_profile[:, -1]`` and relaxes it
+    between calls, so it must be rejected under RK like the other
+    carry-reading schemes."""
     cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
         convection=ConvectionConfig(scheme=conv_scheme),
@@ -233,7 +238,7 @@ def test_rk_rejects_stateful_convection(conv_scheme):
         )
 
 
-@pytest.mark.parametrize("conv_scheme", ["sbm", "kain_fritsch", "emanuel"])
+@pytest.mark.parametrize("conv_scheme", ["sbm", "kain_fritsch"])
 def test_rk_allows_diagnostic_convection(conv_scheme):
     """Diagnostic convection (``del conv_prog_profile``) is safe under
     multi-stage integrators and must NOT be rejected."""

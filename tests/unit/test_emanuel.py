@@ -124,25 +124,56 @@ def test_emanuel_n_fractions_finite_for_all_choices():
         )
 
 
-def test_emanuel_buoyancy_sort_detrainment_increases_tendency_magnitude():
-    """A larger ``cu_coefficient`` (buoyancy-sort detrainment
-    enhancement) increases the magnitude of the per-level tendencies
-    relative to ``cu = 0`` (single-plume limit)."""
+def test_emanuel_genuine_mixing_detrainment_structure():
+    """The GENUINE (i,j) mixing matrix concentrates detrainment near the
+    parcel's level of neutral buoyancy (cloud top), not uniformly.
+
+    With the faithful SIJ/ELIJ/MENT spectrum the per-level convective
+    cloud-water source ``dq_c_conv_dt`` is bottom-heavy in mass flux but
+    its detrainment (and hence the upper-tropospheric heating) peaks near
+    cloud top — a structure a single bulk plume cannot produce.  We pin
+    the genuine path against the legacy single-sigmoid surrogate: the two
+    give materially different per-level ``dT_dt`` profiles (the genuine
+    sort redistributes the heating)."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
-    out_no_sort, _ = emanuel_convection(
+    out_genuine, _ = emanuel_convection(
         T, q, pf, ph, cpp, dt=300.0,
-        config=EmanuelConfig(cu_coefficient=0.0),
+        config=EmanuelConfig(use_genuine_mixing=True),
     )
-    out_strong_sort, _ = emanuel_convection(
+    out_surrogate, _ = emanuel_convection(
         T, q, pf, ph, cpp, dt=300.0,
-        config=EmanuelConfig(cu_coefficient=1.0),
+        config=EmanuelConfig(use_genuine_mixing=False),
     )
-    # Sort-enhanced should have at least the magnitude of no-sort.
-    mag_no = float(jnp.sum(jnp.abs(out_no_sort.dT_dt)))
-    mag_yes = float(jnp.sum(jnp.abs(out_strong_sort.dT_dt)))
-    assert mag_yes >= mag_no - 1e-12
+    # The genuine mixing is not the surrogate (materially different).
+    dT_diff = float(jnp.max(jnp.abs(out_genuine.dT_dt - out_surrogate.dT_dt)))
+    assert dT_diff > 1e-6
+    # The genuine path heats the free troposphere (the detrainment-height
+    # sort deposits buoyancy aloft); the column-max heating sits above the
+    # boundary layer, not at the surface.
+    dT = out_genuine.dT_dt[0]
+    k_max = int(jnp.argmax(dT))
+    assert k_max < nlev - 2, "genuine heating should peak above the surface"
+
+
+def test_emanuel_genuine_mixing_matrix_tunable_changes_tendency():
+    """A genuine-mixing tunable (the SIJ entrainment-gate sharpness)
+    changes the tendency — i.e. the mixing matrix is genuinely wired,
+    not a dead parameter."""
+    T, q, pf, ph = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    out_a, _ = emanuel_convection(
+        T, q, pf, ph, cpp, dt=300.0,
+        config=EmanuelConfig(sij_gate_sharpness=40.0),
+    )
+    out_b, _ = emanuel_convection(
+        T, q, pf, ph, cpp, dt=300.0,
+        config=EmanuelConfig(sij_gate_sharpness=20.0),
+    )
+    dT_diff = float(jnp.max(jnp.abs(out_a.dT_dt - out_b.dT_dt)))
+    assert dT_diff > 1e-9
 
 
 def test_emanuel_mixture_buoyancy_sign_crosses():
@@ -285,22 +316,22 @@ def test_emanuel_orchestrator_one_step_finite():
 
 
 # ---------------------------------------------------------------------------
-# MSE conservation regression guard (currently expected to fail)
+# Column conservation (oracle-faithful): vapor-side enthalpy + total water
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason=(
-        "Standard mass-flux kernel does not conserve column MSE on a "
-        "closed (no-surface-flux) probe.  Currently ~99% non-conservation "
-        "residual; flagged xfail so any future kernel improvement that "
-        "closes this is detected."
-    ),
-    strict=True,
-)
-def test_emanuel_mse_conservation_within_tolerance():
-    """Column-integrated ``c_p ∫dT + L_v ∫(dq_v + dq_c_conv) dp/g`` should
-    be small relative to the heating magnitude on a CAPE-positive sounding.
-    """
+def test_emanuel_vapor_side_enthalpy_conserved():
+    """Oracle-faithful invariant (convect43c.f ENTS pass, lines 969-984):
+    the column-integrated vapor-side moist enthalpy tendency
+    ``c_p ∫dT + L_v ∫dq_v dp/g`` vanishes to machine precision.
+
+    Physically: convection condenses vapor into cloud water
+    (``dq_c_conv`` → microphysics) and the latent heat of that
+    condensation is released as convective heating, so
+    ``c_p ∫dT = L_v ∫dq_c`` and the vapor-side enthalpy is exactly
+    conserved.  The detrained-condensate term is intentionally EXCLUDED
+    from this invariant — its latent heat is already in ``dT`` — which is
+    why the older ``c_p ∫dT + L_v ∫(dq_v + dq_c)`` residual is non-zero
+    and equals the (physical) condensation heating ``L_v ∫dq_c``."""
     T, q, pf, ph = _column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
@@ -310,9 +341,29 @@ def test_emanuel_mse_conservation_within_tolerance():
     )
     dp = ph[:, 1:] - ph[:, :-1]
     H = float(jnp.sum(out.dT_dt * dp / constants.g, axis=1).mean()) * constants.c_pd
-    Q = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    C = float(jnp.sum(out.dq_c_conv_dt * dp / constants.g, axis=1).mean()) * constants.L_v
-    rel = abs(H + Q + C) / (abs(H) + abs(Q) + abs(C) + 1e-10)
-    assert rel < 0.30, (
-        f"Emanuel MSE residual {H+Q+C:.1f} W/m^2 ({rel*100:.1f}% of total)"
+    Qv = float(jnp.sum(out.dq_v_dt * dp / constants.g, axis=1).mean()) * constants.L_v
+    rel = abs(H + Qv) / (abs(H) + abs(Qv) + 1e-10)
+    assert rel < 1e-8, (
+        f"Emanuel vapor-side enthalpy residual {H+Qv:.3e} W/m^2 "
+        f"({rel:.2e} of total)"
     )
+
+
+def test_emanuel_total_water_nearly_conserved():
+    """Convection moves water from vapor to cloud condensate within the
+    column (nothing precipitates in-scheme — microphysics owns precip),
+    so ``∫(dq_v + dq_c_conv) dp/g`` should be small relative to the
+    column water flux on a CAPE-positive sounding.  The small residual
+    is the ``max(., 0)`` floor on the condensate channel."""
+    T, q, pf, ph = _column()
+    ncol, nlev = T.shape
+    cpp = jnp.zeros((ncol, nlev))
+    out, _ = emanuel_convection(
+        T=T, q_v=q, p_full=pf, p_half=ph,
+        conv_prog_profile=cpp, dt=1800.0,
+    )
+    dp = ph[:, 1:] - ph[:, :-1]
+    net = jnp.sum((out.dq_v_dt + out.dq_c_conv_dt) * dp / constants.g, axis=1)
+    flux = jnp.sum(jnp.abs(out.dq_v_dt) * dp / constants.g, axis=1)
+    rel = float(jnp.max(jnp.abs(net) / (flux + 1e-12)))
+    assert rel < 0.05, f"Emanuel total-water residual {rel*100:.1f}% of flux"

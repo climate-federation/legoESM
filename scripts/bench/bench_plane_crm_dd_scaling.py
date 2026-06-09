@@ -66,7 +66,15 @@ from legoesm.parallel.plane_mpi import (
     make_plane_pencil_grid, make_plane_pencil_layout, scatter_plane_field,
 )
 
-jax.config.update("jax_enable_x64", True)
+import sys as _sys
+_PRECISION = "float64"
+if "--precision" in _sys.argv:
+    try:
+        _PRECISION = _sys.argv[_sys.argv.index("--precision") + 1]
+    except IndexError:
+        pass
+jax.config.update("jax_enable_x64", _PRECISION == "float64")
+_DTYPE = jnp.float64 if _PRECISION == "float64" else jnp.float32
 
 
 def parse_args():
@@ -80,6 +88,9 @@ def parse_args():
     p.add_argument("--dx", type=float, default=2000.0)
     p.add_argument("--H", type=float, default=20_000.0)
     p.add_argument("--dt", type=float, default=1.0)
+    p.add_argument("--precision", choices=["float32", "float64"],
+                   default="float64",
+                   help="Array/compute precision (jax_enable_x64 set to match).")
     p.add_argument("--n-acoustic-substeps", type=int, default=12)
     p.add_argument("--warmup-steps", type=int, default=3,
                    help="JIT-warmup steps NOT counted in timing.")
@@ -146,7 +157,7 @@ def main():
     # Build global IC (deterministic on every rank).
     grid_global = create_plane_grid(
         nx=nx_global, ny=ny_global, nlev=args.nlev,
-        dx=args.dx, dy=args.dx, dtype=jnp.float64,
+        dx=args.dx, dy=args.dx, dtype=_DTYPE,
     )
     # Near-EQUILIBRIUM CRM benchmark: theta reference uses T_v0=300 K to match
     # the 300 K surface setup (NOT the strict-RCEMIP fixed 295 K). The surface-
@@ -157,7 +168,7 @@ def main():
     hc = create_height_coordinate(
         n_levels=args.nlev, H=args.H, theta_ref_fn=theta_fn,
     )
-    state_global = make_rest_state(grid_global, hc, dtype=jnp.float64)
+    state_global = make_rest_state(grid_global, hc, dtype=_DTYPE)
     # Small momentum kick so the slow tendency does real work
     # (zero state → most operators short-circuit to zero, hides the
     # advection + diffusion cost).
@@ -193,7 +204,7 @@ def main():
     grid_local = (
         make_plane_pencil_grid(
             layout, dx=args.dx, dy=args.dx, nlev=args.nlev,
-            dtype=jnp.float64,
+            dtype=_DTYPE,
         )
         if n_ranks > 1 else grid_global
     )
@@ -214,7 +225,7 @@ def main():
         grid_local, hc, terrain_local, config=cfg,
     )
     owned_mask = jnp.ones(
-        (layout.ny_local, layout.nx_local), dtype=jnp.float64,
+        (layout.ny_local, layout.nx_local), dtype=_DTYPE,
     )
 
     # Warmup (JIT compile + first MPI sync).

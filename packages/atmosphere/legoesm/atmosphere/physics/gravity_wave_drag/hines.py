@@ -168,6 +168,22 @@ def hines_gwd(
     # Convert to acceleration
     accel = -drag_all / jnp.clip(rho * dz, 1e-10, None)
 
+    # Tendency limiters (E3SM gw_common.F90:642-643).  ``drag_all >= 0`` so
+    # ``accel`` is a pure deceleration along the wind; cap its MAGNITUDE
+    # without touching its sign.  The fixed ``Fmax`` momentum-flux cap divided
+    # by a tiny ``rho*dz`` in thin, low-density upper layers produces
+    # physically-implausible accelerations (hundreds of m/s/day); ``tndmax``
+    # is the absolute ceiling, and ``umcfac*U_mag/dt`` is a LOCAL no-reversal
+    # limiter (Hines is amplitude-based with no explicit phase speed ``c``, so
+    # this is the bulk analog of E3SM's ``umcfac*|c-u|/dt``, not the literal
+    # phase-speed limiter).  AD-safe (``jnp.minimum``/``jnp.abs`` subgradient
+    # ops; no NaN/dead grad).  NOTE: a *post-flux* limiter — where it binds the
+    # column drag no longer exactly equals the stress-flux divergence, but
+    # stays a momentum SINK (no source).
+    tndmax = config.tndmax_per_day / 86400.0
+    accel_cap = jnp.minimum(config.umcfac * U_mag / dt, tndmax)
+    accel = -jnp.minimum(jnp.abs(accel), accel_cap)
+
     cos_a = u / jnp.clip(U_mag, config.U_mag_floor, None)
     sin_a = v / jnp.clip(U_mag, config.U_mag_floor, None)
     du_dt = accel * cos_a

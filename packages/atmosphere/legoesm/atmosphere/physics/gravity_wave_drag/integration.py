@@ -53,6 +53,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd
 from legoesm.atmosphere.physics.gravity_wave_drag.prognostic_spectral import (
     prognostic_spectral_gwd,
 )
+from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import e3sm_cam_gwd
 from legoesm.atmosphere.physics.gravity_wave_drag.ml_emulator import (
     ml_gwd,
     GWDEmulator,
@@ -76,6 +77,8 @@ def _get_gwd_fn(config: GravityWaveDragConfig):
         return "hines", hines_gwd, config.hines
     elif config.scheme == "prognostic_spectral":
         return "prognostic_spectral", prognostic_spectral_gwd, config.prognostic_spectral
+    elif config.scheme == "e3sm_cam":
+        return "e3sm_cam", e3sm_cam_gwd, config.e3sm_cam
     elif config.scheme == "ml_emulator":
         return "ml_emulator", ml_gwd, config.ml_emulator
     elif config.scheme == "none":
@@ -146,7 +149,21 @@ def _make_hydrostatic_gwd(
     scheme_name, gwd_fn, scheme_config = _get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
-    is_orographic = scheme_name in ("lindzen", "mcfarlane")
+    # ``e3sm_cam`` shares the orographic launch signature (accepts the
+    # optional per-column ``h_topo_col`` subgrid orographic stddev keyword);
+    # its config selects the orographic vs frontal/convective source internally.
+    #
+    # NOTE: the ``e3sm_cam`` frontal source needs a per-column frontogenesis
+    # function ``frontgf_col`` and the convective (Beres) source needs a
+    # convective heating profile ``netdt_col`` (and, for bit-faithfulness, the
+    # offline ``mfcc`` table).  This GWD factory's ``(state, grid, sigma)``
+    # signature does not currently carry those fields, so from here only the
+    # orographic source is driven; the frontal/convective sources are exercised
+    # through the public ``e3sm_cam_gwd(..., frontgf_col=, netdt_col=,
+    # mfcc_table=)`` entry point (wiring the convective-heating coupling through
+    # the physics pipeline is a separate integration task and must not reach
+    # into the convection package from here).
+    is_orographic = scheme_name in ("lindzen", "mcfarlane", "e3sm_cam")
     _ml_model_cache = [None]
 
     def physics_fn(
@@ -323,7 +340,10 @@ def _make_mpas_gwd(
     scheme_name, gwd_fn, scheme_config = _get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
-    is_orographic = scheme_name in ("lindzen", "mcfarlane")
+    # ``e3sm_cam`` shares the orographic launch signature (accepts the
+    # optional per-column ``h_topo_col`` subgrid orographic stddev keyword);
+    # its config selects the orographic vs frontal source internally.
+    is_orographic = scheme_name in ("lindzen", "mcfarlane", "e3sm_cam")
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None):
         from legoesm.grids.voronoi import reconstruct_cell_velocity

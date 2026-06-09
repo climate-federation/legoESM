@@ -331,12 +331,14 @@ class TestTurbulenceAudit:
         assert_grad_ok(lambda x: _turb_call(clubb_lite_turbulence,
             CLUBBLiteConfig()._replace(C_K=x), True), 0.4, "clubb_lite.C_K")
 
-    def test_holtslag_boville_Pr_t(self):
+    def test_holtslag_boville_fakn(self):
+        # The faithful HB scheme controls the nonlocal countergradient
+        # strength via ``fakn`` (fak3 = fakn*wstar/wm); verify grad flow.
         from legoesm.atmosphere.physics.turbulence.holtslag_boville import holtslag_boville_turbulence
         from legoesm.atmosphere.physics.turbulence.config import HoltslagBovilleConfig
         assert_grad_ok(lambda x: _turb_call(holtslag_boville_turbulence,
-            HoltslagBovilleConfig()._replace(Pr_t=x), False), 1.0,
-            "holtslag_boville.Pr_t")
+            HoltslagBovilleConfig()._replace(fakn=x), False), 7.2,
+            "holtslag_boville.fakn")
 
     def test_ysu_entrainment_coeff(self):
         from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence

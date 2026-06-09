@@ -712,6 +712,7 @@ class RRTMGP:
           aerosol_absorption_optical_depth=aerosol_od_lw_3d,
           use_scan=config.use_scan,
           use_optimal_angle=getattr(config, "use_optimal_angle", False),
+          gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
       )
 
       # --- 5. Solve SW ---
@@ -732,6 +733,7 @@ class RRTMGP:
           aerosol_asymmetry_factor=config.aerosol_g,
           solar_fraction_by_gpt=solar_weights,
           use_scan=config.use_scan,
+          gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
       )
 
       # --- 6. Compute heating rates using exact layer thickness ---

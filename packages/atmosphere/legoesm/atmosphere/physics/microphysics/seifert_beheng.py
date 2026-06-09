@@ -151,6 +151,22 @@ def seifert_beheng_microphysics(
     dN_c_dt = safe_divide(-dq_c_au * rho, x_c, eps=1e-15)
     dN_r_dt = dN_r_au + dN_r_sc + dN_r_br
 
+    # === Non-negativity floor on the NUMBER tendencies ===
+    # ``dN_c_dt`` (autoconversion droplet sink) and the rain-number
+    # self-collection sink ``dN_r_sc`` are explicit and proportional to
+    # the current number. Unbounded, a single Euler step can overshoot
+    # the available number and drive ``N_c``/``N_r`` negative; the
+    # self-collection rate then flips sign and the number runs away
+    # exponentially (observed in an RCE plane-CRM restart: ``N_r`` →
+    # −4e7 within ~400 steps, growing ~3.4x/step). A negative number is
+    # unphysical and corrupts every PSD-derived rate (mean drop mass
+    # ``x = q·ρ/N``, slope ``λ``, fall speed). Cap the NET sink so the
+    # post-step number cannot fall below zero — sources (positive
+    # tendencies) pass through unchanged. This mirrors Morrison's
+    # ``n_s_new``/``n_g_new`` consistency limiter for snow/graupel.
+    dN_c_dt = jnp.maximum(dN_c_dt, -jnp.clip(N_c, 0.0) / dt)
+    dN_r_dt = jnp.maximum(dN_r_dt, -jnp.clip(N_r, 0.0) / dt)
+
     # Precipitation now comes from the dt-limited bottom flux returned
     # by ``sedimentation_tendency`` so column water conservation holds
     # exactly when the CFL limiter fires.

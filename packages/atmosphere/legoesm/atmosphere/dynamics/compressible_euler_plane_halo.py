@@ -365,21 +365,15 @@ def plane_compressible_euler_slow_tendencies_halo(
     # _compute_smagorinsky_K_m_plane_halo above. Branches are gated
     # by Python ``if`` on static config values — no traced cost when
     # disabled.
-    # Codex iter-3: multi-rank under JIT is a known crash mode on
-    # some mpi4jax versions. Raise early so the failure is at the
-    # call site, not deep in the compiled HLO graph.
-    if layout.n_ranks > 1 and isinstance(
-        state.u.data, jax.core.Tracer,
-    ):
-        raise RuntimeError(
-            "plane_compressible_euler_slow_tendencies_halo cannot "
-            "be JIT-compiled with layout.n_ranks > 1: "
-            "packed_exchange_halo_plane_yxz uses mpi4jax sendrecv "
-            "with Python control flow that raises "
-            "ConcretizationTypeError under tracing. Call eagerly on "
-            "multi-rank, or jit the local-compute portion only and "
-            "drive halo exchange from Python."
-        )
+    # Multi-rank under JIT is now SUPPORTED on Linux/MPICH (the original
+    # ConcretizationTypeError came from ``int(jnp.prod(jnp.asarray(...)))``
+    # on static shapes in ``plane_mpi.exchange_halo_plane_yxz`` — replaced
+    # with ``math.prod`` (jit-safe).  mpi4jax ``sendrecv`` traces inside
+    # ``@jax.jit`` here exactly as ``voronoi_mpi.make_voronoi_mpi_step``
+    # does at scale.  The eager multi-rank path was ~100× slower than np=1
+    # (per-op + per-sendrecv host sync); ``step_halo`` now JITs the
+    # split-explicit core.  (The macOS shared-mem mpi4jax crash mode that
+    # motivated this guard does not occur on the Linux/MPICH stack.)
 
     h = layout.halo if hasattr(layout, "halo") else 1
 

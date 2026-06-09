@@ -116,3 +116,8 @@ _probe_*.py
 
 # Sphinx documentation build output
 docs/_build/
+
+# Local SLURM sbatch scripts and logs
+*.sbatch
+*.out
+*.err
