@@ -256,6 +256,10 @@ def distributed_pad_to_fine(f_local, *, ny_global, nx, n_ranks, comm):
         raise ValueError(
             f"3/2-rule distributed needs ny_local even, got {ny_local} "
             f"(ny_global={ny_global}, n_ranks={P}); 3ny_local/2 must be integer")
+    if nx % 2 or ny_global % 2:
+        raise ValueError(
+            f"3/2-rule needs even nx, ny_global (Nyquist-drop indexing); "
+            f"got nx={nx}, ny_global={ny_global}")
     nyf, nxf = 3 * ny_global // 2, 3 * nx // 2
     nxr = nx // 2
     # 1) local x zero-pad (x undecomposed): rfft_x → place low kx → irfft_x.

@@ -160,6 +160,13 @@ def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64,
             f"SGS constants must be >= 0: c_s={cfg.c_s}, c_vreman={cfg.c_vreman}, "
             f"nu_floor={cfg.nu_floor} (negative ν_t is anti-diffusive).")
     nx, ny, nz = cfg.nx, cfg.ny, cfg.nz
+    # The rfft Nyquist-zeroing and the 3/2-rule de-aliasing (drop the single
+    # Nyquist row/column) assume EVEN nx, ny. Odd sizes would silently use a
+    # different, wrong truncation. Validate here (codex 2026-06-09).
+    if nx % 2 or ny % 2:
+        raise ValueError(
+            f"spectral LES needs EVEN nx, ny (rfft Nyquist + 3/2-rule de-aliasing "
+            f"assume it); got nx={nx}, ny={ny}.")
     dx, dy, dz = cfg.Lx / nx, cfg.Ly / ny, cfg.Lz / nz
     z_c = (jnp.arange(nz, dtype=dtype) + 0.5) * dz
     z_f = jnp.arange(nz + 1, dtype=dtype) * dz
@@ -260,7 +267,10 @@ def _planar_mean(f, g: SpectralLESGrid, keepdims=False):
         return jnp.mean(f, axis=(0, 1), keepdims=keepdims)
     from legoesm.parallel.reductions import global_sum_mpi
     local_sum = jnp.sum(f, axis=(0, 1), keepdims=keepdims)
-    return global_sum_mpi(local_sum) / (g.layout.ny_global * g.layout.nx)
+    # Reduce over the LAYOUT's communicator (same one the distributed FFT uses) —
+    # not COMM_WORLD — so sub-communicator runs stay consistent (codex 2026-06-09).
+    return (global_sum_mpi(local_sum, comm=g.layout.comm)
+            / (g.layout.ny_global * g.layout.nx))
 
 
 def ddx(f, g: SpectralLESGrid):

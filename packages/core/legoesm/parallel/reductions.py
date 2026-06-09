@@ -241,7 +241,7 @@ def _mpi4jax_array_result(result):
     return result
 
 
-def global_sum_mpi(local_value: jax.Array) -> jax.Array:
+def global_sum_mpi(local_value: jax.Array, comm=None) -> jax.Array:
     """Compute a global sum across all MPI ranks.
 
     **Differentiable**: uses ``allreduce(SUM)`` which has full JVP and
@@ -251,17 +251,19 @@ def global_sum_mpi(local_value: jax.Array) -> jax.Array:
     ----------
     local_value : jax.Array
         Scalar (or array) local partial sum.
-
-    Returns
-    -------
-    jax.Array
-        The global sum across all processes.
+    comm : mpi4py communicator, optional
+        Communicator to reduce over. Defaults to ``MPI.COMM_WORLD``. Callers on a
+        SUB-communicator (e.g. a plane-LES layout whose distributed FFT uses
+        ``layout.comm``) MUST pass that same communicator — otherwise the reduction
+        spans the wrong rank set and can deadlock or mix unrelated ranks.
     """
     mpi4jax, MPI = _require_mpi_stack()
+    if comm is None:
+        comm = MPI.COMM_WORLD
 
     with mpi_timer("global_sum_mpi"):
         global_val = _mpi4jax_array_result(
-            mpi4jax.allreduce(local_value, op=MPI.SUM, comm=MPI.COMM_WORLD),
+            mpi4jax.allreduce(local_value, op=MPI.SUM, comm=comm),
         )
     return global_val
 

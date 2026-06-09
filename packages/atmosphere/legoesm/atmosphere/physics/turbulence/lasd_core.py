@@ -171,7 +171,10 @@ def lasd_cs2(uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag,
     else:
         from legoesm.parallel.reductions import global_sum_mpi
         _pden = layout.ny_global * layout.nx
-        pm = lambda f: global_sum_mpi(jnp.sum(f, axis=(0, 1))) / _pden  # noqa: E731
+        # Reduce over the layout's communicator (matches the distributed FFT), not
+        # COMM_WORLD — consistent on sub-communicators (codex 2026-06-09).
+        pm = lambda f: (global_sum_mpi(jnp.sum(f, axis=(0, 1)),  # noqa: E731
+                                       comm=layout.comm) / _pden)
 
     u_h, v_h, w_h = F1(uc), F1(vc), F1(wc)
     u_d, v_d, w_d = F2(uc), F2(vc), F2(wc)
