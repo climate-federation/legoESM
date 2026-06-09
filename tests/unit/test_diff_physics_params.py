@@ -392,12 +392,15 @@ class TestMicrophysicsParams:
         )
 
         def loss(a):
-            # agg_coeff is the HEURISTIC ice→snow aggregation coefficient; the
-            # default ice_to_snow_scheme is now m2005_autoconv (SAM PRCI, which
-            # ignores agg_coeff), so select the heuristic path to exercise the
-            # parameter this test is about.
+            # agg_coeff is the HEURISTIC ice→snow aggregation coefficient.  The
+            # default morrison_flavor="mg" forces ice_to_snow_scheme="mg_ferrier"
+            # in resolve_morrison_flavor (ignoring agg_coeff) AND clobbers an
+            # explicit ice_to_snow_scheme.  Use the "sam" flavor (which leaves
+            # ice_to_snow_scheme untouched) + the heuristic path so agg_coeff is
+            # the live knob this test audits.
             cfg = MorrisonConfig()._replace(
-                agg_coeff=a, ice_to_snow_scheme="heuristic")
+                agg_coeff=a, morrison_flavor="sam",
+                ice_to_snow_scheme="heuristic")
             out = morrison_microphysics(
                 T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
             )
