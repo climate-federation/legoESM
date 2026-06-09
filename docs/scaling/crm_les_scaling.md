@@ -373,3 +373,33 @@ path remains gated on a distributed FFT.
    large, multi-iteration; the spectral LES pressure solve needs it too. Deferred.
 3. CRM N256 fp32 GPU degradation (L2 / acoustic-substep) — profile.
 4. fp64 is compute-bound for both (consumer GPU); document, no code fix expected.
+
+## Iteration 16 (2026-06-09): spectral-LES MPI foundation — distributed 2-D FFT
+
+Started closing the one genuine remaining gap (spectral-LES MPI = distributed
+FFT). The spectral LES funnels the pressure solve, the sharp spectral filter and
+the LASD test filter through a global `jnp.fft.rfft2` — the sole single-rank
+blocker. Built the distributed 2-D real FFT it needs:
+`packages/core/legoesm/parallel/distributed_fft.py`.
+
+- **Slab decomposition along y** (`n_ranks_x=1`): rank owns `(ny_local, nx, nz)`.
+  `distributed_rfft2` = local rfft-x → all-to-all transpose y-slab→kx-slab →
+  local fft-y (result distributed along kx); `distributed_irfft2` reverses.
+  Slab (1-D) is minimal for a 2-D FFT — one transpose / one all-to-all.
+- **AD-safe all-to-all** (`ad_alltoall`, `custom_vjp`, comm `nondiff_argnums`):
+  an all-to-all is an orthogonal permutation ⇒ adjoint = same all-to-all of the
+  cotangent. Keeps the spectral LES end-to-end differentiable (a bare
+  `mpi4jax.alltoall` is diagnostic-only here). Complex = two real all-to-alls.
+- **kx padding**: the reduced axis `nx//2+1` is zero-padded to `P·ceil(nkx/P)`
+  before the transpose, dropped on inverse — `nx//2+1` need not divide by `P`.
+
+Validated (mpirun np=1/2/4, `.venv-mpi`): round-trip identity 1e-12; end-to-end
+∂/∂x via distributed FFT == serial `rfft2` derivative 1e-10; **grad == serial
+grad 1e-9** (custom-VJP all-to-all correct). np=4 exercises the kx-padding path.
+Codex blocked (sandbox bwrap); self-reviewed against the np=2/4 evidence.
+Residual risk: not yet under `jax.jit` (eager only) — to cover when wired in.
+
+**Remaining (next increment):** wire `distributed_fft` into `spectral_les_plane`
+(pressure Poisson `k²` solve + `_apply_filter` + LASD test filter) under a y-slab
+layout, JIT the step, validate a few-step gathered trajectory vs single-rank,
+then bench. The hard FFT primitive — the actual blocker — is now done + AD-safe.
