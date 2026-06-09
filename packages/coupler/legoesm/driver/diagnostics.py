@@ -208,6 +208,7 @@ class DiagnosticCollector:
         self.cf_writer = None
         self._spatial_monthly = None
         self._cs_regrid_weights = None  # cached cubed-sphere → lat-lon weights
+        self._voronoi_regrid_weights = None  # cached MPAS cell → lat-lon weights
         # Time axis reference is the experiment start year (CMIP6 AMIP
         # convention: ``days since <start_year>-01-01``), which makes the
         # stored time values start at zero and decode to the correct
@@ -317,14 +318,17 @@ class DiagnosticCollector:
                     tgt_nlat=self._cmip_nlat,
                     tgt_nlon=self._cmip_nlon,
                 )
-        elif grid_type in ("mpas", "voronoi"):
-            # "mpas" and "voronoi" both name the SCVT Voronoi family; reject
-            # either explicitly so an unstructured mesh never silently falls
-            # through to a no-op CMIP regrid setup.
-            raise ValueError(
-                f"CMIP output is not supported for grid_type={grid_type!r}. "
-                f"The SCVT Voronoi mesh requires unstructured-to-latlon "
-                f"regridding which is not yet implemented."
+        elif grid_type in ("mpas", "voronoi") and grid is not None:
+            # SCVT/Voronoi unstructured cells → regular lat-lon via IDW
+            # k-nearest weights (the AMIP forcing path does the inverse,
+            # lat-lon→cells, with the same KD-tree idea).  ``latCell`` /
+            # ``lonCell`` are in radians.
+            from legoesm.grids.regridding import (
+                compute_voronoi_to_latlon_weights,
+            )
+            self._voronoi_regrid_weights = compute_voronoi_to_latlon_weights(
+                np.asarray(grid.latCell), np.asarray(grid.lonCell),
+                n_lon=self._cmip_nlon, n_lat=self._cmip_nlat,
             )
 
     def set_fixed_fields(
@@ -359,6 +363,11 @@ class DiagnosticCollector:
             return apply_cubedsphere_to_latlon(
                 np.asarray(field), self._cs_regrid_weights,
             )
+        if self._voronoi_regrid_weights is not None:
+            from legoesm.grids.regridding import apply_voronoi_to_latlon
+            return apply_voronoi_to_latlon(
+                np.asarray(field).reshape(-1), self._voronoi_regrid_weights,
+            )
         # Structured grids (lat-lon / Gaussian)
         arr = np.asarray(field)
         if arr.ndim == 2:
@@ -384,6 +393,12 @@ class DiagnosticCollector:
             return apply_cubedsphere_to_latlon_3d(
                 np.asarray(field), self._cs_regrid_weights,
             )
+        if self._voronoi_regrid_weights is not None:
+            from legoesm.grids.regridding import apply_voronoi_to_latlon_3d
+            arr = np.asarray(field)
+            # Accept (nCells, nlev); reshape a flattened (nCells*nlev,) only
+            # if it carries an explicit nlev (caller passes 2-D for MPAS).
+            return apply_voronoi_to_latlon_3d(arr, self._voronoi_regrid_weights)
         arr = np.asarray(field)
         if arr.ndim == 3:
             regrid = getattr(self, '_structured_regrid', None)
