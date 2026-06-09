@@ -477,3 +477,41 @@ Only the 3/2-rule de-aliasing remains serial-under-MPI (guarded; needs a
 distributed padded FFT). Methodology note: random unphysical strain is a BAD test
 for `lasd_cs2` (quintic β-root hypersensitivity masks cutoff bugs behind the
 non-bit-identical FFT) — use smooth well-conditioned fields for the direct check.
+
+## Iteration 20 (2026-06-09): distributed spectral-LES scaling characterized (both precisions)
+
+With the full distributed spectral LES working (dynamic LASD, iter16-19), measured
+its weak + strong scaling, both precisions, via the new
+`scripts/bench/bench_spectral_les_dd_scaling.py` (dynamic-SGS, y-slab, .venv-mpi).
+
+**Strong** (global 64²×32, dynamic LASD):
+
+| precision | np1 | np2 | np4 | speedup @4 |
+|-----------|----:|----:|----:|-----------|
+| fp64 | 88.9 | 77.9 | 74.6 ms | 1.19× (~30% eff) |
+| fp32 | 60.6 | 51.9 | 41.0 ms | 1.48× (~37% eff) |
+
+**Weak** (per-rank 32×64×32):
+
+| precision | np1 | np2 | np4 |
+|-----------|----:|----:|----:|
+| fp64 | 40.3 | 81.2 | 136.3 ms |
+| fp32 | 29.5 | 51.9 | 98.7 ms |
+
+- **Both precisions run** the full oracle closure distributed; fp32 ~1.5× faster
+  and strong-scales better (the LASD test-filter FFTs add compute that partly
+  hides the bandwidth wall).
+- **Weak scaling is poor — and inherently so.** A pseudo-spectral solver has a
+  GLOBAL coupling every step (the pressure-Poisson FFT spans the whole domain),
+  so growing the domain with the rank count grows both the FFT size (O(N log N))
+  and the all-to-all TRANSPOSE volume. This is the well-known spectral-method
+  communication wall, fundamentally different from the CRM's local-stencil halo
+  (which weak-scales flat). Production spectral codes hit the same wall and lean
+  on specialized FFT libraries + fat interconnects; on a single socket the
+  all-to-all is bandwidth-bound.
+- **Strong scaling is modest** (bandwidth + all-to-all comm), best in fp32.
+
+⇒ The distributed spectral LES is FUNCTIONAL + CORRECT + AD-safe in both
+precisions; its scaling ceiling is the spectral FFT all-to-all (algorithmic), not
+a code defect. The CRM (local stencil) remains the better-scaling path; the
+spectral LES is the faithful-physics path now usable across ranks.
