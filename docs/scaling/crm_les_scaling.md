@@ -270,7 +270,30 @@ fp64-only). Real DD CRM scaling on the now-correct + fast path:
 The CRM DD path is now FAST (iter 8), CORRECT (iter 9), and scaling-characterized
 in both precisions (iter 10) — the user requirement met at the achievable scope.
 
+## Iteration 11 (2026-06-08): CRM DD full-step validation + bug scope
+
+- **Tag bug is plane-specific.** Audited the other MPI halos: lat-lon is safe (at
+  2 ranks the poles make `south_rank=None`, so each rank does ONE sendrecv to its
+  single neighbour — no same-neighbour-twice ambiguity); voronoi/icosahedral is
+  safe (tag = `rank*1000 + nbr_rank`, unique per pair; distinct RCB neighbours).
+  Only the doubly-periodic plane has the topology that triggered it.
+- **Full `step_halo` validated** (not just slow-tendency): 3 steps, acoustic
+  substeps + Smagorinsky, multi-rank gathered vs single-rank = **1e-15
+  (bit-identical)** for u/v/w/θ′/ρ′. Locked as a regression test
+  (`test_full_step_halo_matches_single_process`) guarding the iter-8 JIT + iter-9
+  tag fix.
+- **NEW separate finding (flagged, not from this work):** with NON-zero moisture
+  tracers the multi-rank full step diverges **~6e-4 over 3 steps** vs single-rank
+  (the tracer-derived `b_moist` buoyancy in the acoustic substep). The dynamics
+  halo is correct (1e-15 with zero tracers); the moist-coupling path has a
+  separate multi-rank discrepancy needing its own investigation before moist CRM
+  DD runs are trusted. (The slow-tendency `dtracers_dt` matches, so it's in the
+  acoustic-substep moist coupling, not tracer advection.)
+
 ## Backlog (deferred / large)
+
+0. **Investigate the moist-coupling multi-rank discrepancy** (acoustic-substep
+   `b_moist` from tracers, ~6e-4 divergence) — correctness gate for moist CRM DD.
 
 1. LES distributed FFT for MPI (the LASD/spectral-pressure blocker).
 2. CRM dycore kernel tiling for L2-fit at large domains.
