@@ -251,6 +251,18 @@ def _ifft(fh, g: SpectralLESGrid):
                               n_ranks=L.n_ranks, comm=L.comm)
 
 
+def _planar_mean(f, g: SpectralLESGrid, keepdims=False):
+    """Horizontal (y, x) mean. Serial: ``jnp.mean`` over axes (0,1). Under the
+    y-slab MPI layout each rank holds only a y-slab, so the true planar mean is a
+    global reduction: ``global_sum_mpi(Σ_slab) / (ny_global·nx)`` (AD-safe SUM
+    collective — keeps the wall model / buoyancy differentiable)."""
+    if g.layout is None:
+        return jnp.mean(f, axis=(0, 1), keepdims=keepdims)
+    from legoesm.parallel.reductions import global_sum_mpi
+    local_sum = jnp.sum(f, axis=(0, 1), keepdims=keepdims)
+    return global_sum_mpi(local_sum) / (g.layout.ny_global * g.layout.nx)
+
+
 def ddx(f, g: SpectralLESGrid):
     """∂/∂x via spectral (exact); Nyquist x-mode killed for a real derivative."""
     fh = _fft(f, g) * (1j * g.kx[..., None])
@@ -389,6 +401,12 @@ def eddy_viscosity(u, v, w, g: SpectralLESGrid):
     S_tuple, Smag = _strain(u, v, w, g)
     delta = (g.dx * g.dy * g.dz) ** (1.0 / 3.0)
     if g.cfg.smagorinsky_dynamic:
+        if g.layout is not None:
+            raise NotImplementedError(
+                "LASD dynamic Smagorinsky under MPI needs the test-filter / "
+                "Lagrangian planar averages distributed onto the y-slab FFT; "
+                "not yet wired. Use static smagorinsky/vreman for distributed "
+                "runs (both are y-slab-safe).")
         nz = u.shape[-1]
         wc = f2c(w)
         cs2 = lasd_cs2(u, v, wc, *S_tuple, Smag,
@@ -499,7 +517,7 @@ def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo):
     # the local wind — the standard, well-behaved ABL-LES wall model.
     u1, v1 = u[..., 0], v[..., 0]
     spd1 = jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12)
-    spd1_mean = jnp.mean(spd1)                              # planar mean ⟨|u₁|⟩
+    spd1_mean = _planar_mean(spd1, g)                       # planar mean ⟨|u₁|⟩
     Cd = (kappa / jnp.log(g.z_c[0] / g.cfg.z0)) ** 2
     tau_w_x = -Cd * spd1_mean * u1                          # ∝ ⟨U⟩·u₁ (kinematic)
     tau_w_y = -Cd * spd1_mean * v1
@@ -561,7 +579,7 @@ def buoyancy_w(theta, g: SpectralLESGrid):
     the deviation from the horizontal-mean profile drives the eddies (the mean is
     in hydrostatic balance, absorbed by the pressure)."""
     g_over_th = constants.g / g.cfg.theta_ref0
-    b_c = g_over_th * (theta - jnp.mean(theta, axis=(0, 1), keepdims=True))
+    b_c = g_over_th * (theta - _planar_mean(theta, g, keepdims=True))
     bf = jnp.pad(c2f(b_c), ((0, 0), (0, 0), (1, 1)))        # faces, 0 at walls
     return bf
 
@@ -674,7 +692,7 @@ def _surface_ustar(u, v, g: SpectralLESGrid):
     kappa = constants.kappa_von_karman
     u1, v1 = u[..., 0], v[..., 0]
     Cd = (kappa / jnp.log(g.z_c[0] / g.cfg.z0)) ** 2
-    return (Cd ** 0.5) * jnp.mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12))
+    return (Cd ** 0.5) * _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
 
 
 def _filt_state(u, v, w, th, g):
