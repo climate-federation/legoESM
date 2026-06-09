@@ -197,9 +197,13 @@ component plugs into the matrix framework.
 ## Quick Start
 
 ```bash
-# Install
+# Install — legoESM is a uv workspace of independently-installable members
+# (legoesm-core, -atmosphere, -ocean, ...), so the install path depends on your
+# tool (see "Installing" below for why, and for single-component installs):
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync --extra dev                          # with uv (resolves the workspace natively)
+# …or, pip-only (no uv) — the helper resolves the inter-member DAG locally:
+python scripts/experiment/install_federation.py --all --extras dev
 
 # Run Williamson Test Case 2 (cubed-sphere shallow water)
 legoesm test williamson --case 2 --resolution 48 --days 5
@@ -225,6 +229,44 @@ JAX_ENABLE_X64=1 python scripts/run/run_amip_cmip6_deck.py
 # Tests
 JAX_ENABLE_X64=1 pytest tests/
 ```
+
+## Installing
+
+legoESM is a [uv workspace](https://docs.astral.sh/uv/concepts/workspaces/) of
+independently-installable members (`legoesm-core`, `legoesm-atmosphere`,
+`legoesm-ocean`, `legoesm-land`, `legoesm-ice`, `legoesm-coupler`, `legoesm-ml`,
+`legoesm-tools`, and the root `legoesm` meta-package). Each member depends on the
+others as ordinary distributions (`legoesm-core~=0.1.0`, …) that resolve to the
+in-tree source **only via** `[tool.uv.sources]` (`workspace = true`).
+
+**This is why a bare `pip install legoesm` (or `pip install ./packages/atmosphere`)
+fails** with `Could not find a version that satisfies the requirement
+legoesm-core~=0.1.0 … (from versions: none)`: plain pip ignores `[tool.uv.sources]`
+and looks for the members on PyPI, where they are not published. You need either
+`uv` (which understands the workspace) or the bundled helper (which resolves the
+inter-member dependency DAG against the in-tree source instead of PyPI):
+
+```bash
+# With uv — resolves the whole workspace natively:
+uv sync --extra dev                 # full dev install
+uv pip install --package legoesm-ocean   # one component, standalone
+
+# Pip-only (no uv) — scripts/experiment/install_federation.py resolves the DAG:
+python scripts/experiment/install_federation.py --all --extras dev   # full dev install
+python scripts/experiment/install_federation.py atmosphere           # one component (editable; pulls only core)
+python scripts/experiment/install_federation.py ocean land ice       # several components
+python scripts/experiment/install_federation.py atmosphere --extras ml   # component + an extra (pulls legoesm-ml)
+python scripts/experiment/install_federation.py atmosphere --wheels  # non-editable, from a local wheelhouse
+python scripts/experiment/install_federation.py atmosphere --dry-run # just print the pip command
+```
+
+Each Earth-system component (`atmosphere`/`ocean`/`land`/`ice`) is mutually
+independent (import-linter contract #2), so any one installs standalone on top of
+`legoesm-core` and runs a single column as its cheapest gradient-check harness.
+The orchestration cluster (`coupler`/`ml`/`tools`) is a mutual cycle and installs
+together. The helper computes this closure for you from the members'
+`pyproject.toml` files. `scripts/validate/validate_federation_packaging.py` proves
+the per-member wheels build and import root-absent.
 
 ## Defining New Experiments & Scripts
 
