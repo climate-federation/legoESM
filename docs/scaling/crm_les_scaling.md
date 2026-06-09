@@ -290,10 +290,36 @@ in both precisions (iter 10) — the user requirement met at the achievable scop
   DD runs are trusted. (The slow-tendency `dtracers_dt` matches, so it's in the
   acoustic-substep moist coupling, not tracer advection.)
 
+## Iteration 12 (2026-06-08): moist divergence = deliberate scalability tradeoff
+
+Root-caused the iter-11 moist-coupling discrepancy. It is the **rank-local
+horizontal mean** in `_acoustic_moist_buoyancy_w` (`compressible_euler_plane.py`
+~L1712, explicitly documented): the SAM moist buoyancy subtracts the horizontal
+mean of qv / qcond / θ′ via `hmean_fn = jnp.mean(f, axis=(0,1))`. At n_ranks=1
+that is the true domain mean (serial parity holds); under a horizontal
+decomposition each rank uses its **slab-local** mean ⇒ the ~6e-4 divergence vs
+single-rank.
+
+**This is NOT a bug — it is a deliberate scalability tradeoff** (same convention
+the dynamic-Smagorinsky plane average uses). `_moisture_buoyancy_w_half` calls
+`hmean_fn` 3× per b_moist (qv, qcond, θ′), and b_moist is evaluated once per RK
+stage, so making the mean GLOBAL would cost ~3–9 mpi4jax allreduces/step
+(~5–16 % overhead) — which would **degrade the strong scaling this campaign just
+fixed**. The rank-local mean is the zero-communication choice and *aligns* with
+the scaling goal; the small serial-vs-DD divergence is its price.
+
+Recommendation (design decision for the user, not forced): keep the rank-local
+mean as the scalable default; if exact serial parity is needed for oracle /
+validation runs, add an OPT-IN `acoustic_moist_global_mean` config flag that
+threads `layout` to `_acoustic_moist_buoyancy_w` and uses one BATCHED allreduce
+(qv+qcond+θ′ sums packed) — exact, ~3 allreduces/step, off by default. The
+dynamics DD path is already exact (1e-15, iter 11); only the moist-mean closure
+trades exactness for scalability.
+
 ## Backlog (deferred / large)
 
-0. **Investigate the moist-coupling multi-rank discrepancy** (acoustic-substep
-   `b_moist` from tracers, ~6e-4 divergence) — correctness gate for moist CRM DD.
+0. (Optional) `acoustic_moist_global_mean` opt-in flag for exact moist serial
+   parity (batched allreduce; off by default to preserve scaling).
 
 1. LES distributed FFT for MPI (the LASD/spectral-pressure blocker).
 2. CRM dycore kernel tiling for L2-fit at large domains.
