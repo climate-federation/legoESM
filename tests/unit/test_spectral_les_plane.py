@@ -245,3 +245,65 @@ def test_step_is_differentiable():
     grad = jax.grad(loss)(u0)
     assert bool(jnp.all(jnp.isfinite(grad)))
     assert float(jnp.max(jnp.abs(grad))) > 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Coupled stable Monin–Obukhov surface layer (GABLS1 prescribed-cooling BC)     #
+# --------------------------------------------------------------------------- #
+def _neutral_ustar(spd, z1, z0):
+    kappa = sl.constants.kappa_von_karman
+    return kappa * spd / np.log(z1 / z0)
+
+
+def test_most_surface_flux_signs_and_limits():
+    """most_surface_flux: neutral ⇒ zero heat flux + neutral drag; stable cooling
+    ⇒ downward (negative) heat flux, REDUCED u_* and drag vs neutral (the
+    self-limiting SBL behaviour); strengthening the surface cooling deepens the
+    flux but the stability correction keeps u_* below neutral."""
+    z1, z0, thref, U = 2.0, 0.1, 265.0, 4.0
+    un = _neutral_ustar(U, z1, z0)
+
+    # Neutral: θ_air == T_sfc.
+    us, ths, q0, cd = sl.most_surface_flux(U, 265.0, 265.0, z1, z0, thref)
+    assert abs(float(q0)) < 1e-9
+    assert abs(float(ths)) < 1e-9
+    assert abs(float(us) - un) < 1e-6
+    assert abs(float(cd) - (un / U) ** 2) < 1e-9
+
+    # Stable: warmer air over a cooled surface ⇒ w'θ' < 0, u_* and Cd suppressed.
+    us_s, ths_s, q0_s, cd_s = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref)
+    assert float(q0_s) < 0.0                         # downward (cooling) heat flux
+    assert float(ths_s) > 0.0
+    assert float(us_s) < un                          # stability reduces u_*
+    assert float(cd_s) < (un / U) ** 2               # stability reduces drag
+    assert np.isfinite([float(us_s), float(q0_s), float(cd_s)]).all()
+
+
+def test_most_surface_flux_is_differentiable():
+    """Reverse-mode AD through the surface-layer solve (legoESM end-to-end AD
+    goal): d q0 / d T_sfc is finite and non-zero in the stable regime."""
+    def q0_of_tsfc(t_sfc):
+        return sl.most_surface_flux(4.0, 265.0, t_sfc, 2.0, 0.1, 265.0)[2]
+
+    g = jax.grad(q0_of_tsfc)(263.0)
+    assert bool(jnp.isfinite(g)) and abs(float(g)) > 0.0
+
+
+def test_most_surface_flux_reuses_shared_psi(monkeypatch):
+    """ENFORCEMENT (CLAUDE.md no-duplicate-numerics): most_surface_flux MUST use
+    the SHARED canonical stability functions ``legoesm.core.bulk_flux.psi_m/psi_h``
+    — it must not re-derive them inline. We monkeypatch the names the module
+    bound at import; if the solver truly delegates, forcing ψ≡0 collapses the
+    stable solution to the NEUTRAL log-law (despite strong stratification). A
+    re-derived inline ψ would ignore the patch and this test would fail."""
+    z1, z0, thref, U = 2.0, 0.1, 265.0, 4.0
+    # Strongly stable input — a faithful solver gives u_* well below neutral.
+    us_real = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref)[0])
+    un = _neutral_ustar(U, z1, z0)
+    assert us_real < 0.95 * un                       # stability correction active
+
+    monkeypatch.setattr(sl, "psi_m", lambda z: jnp.zeros_like(jnp.asarray(z)))
+    monkeypatch.setattr(sl, "psi_h", lambda z: jnp.zeros_like(jnp.asarray(z)))
+    us_patched = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref)[0])
+    # ψ≡0 ⇒ pure neutral log-law, regardless of the (strong) stratification.
+    assert abs(us_patched - un) < 1e-6
