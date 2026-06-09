@@ -2240,9 +2240,31 @@ class ModelDriver:
         if self.config.grid.grid_type == "mpas":
             ckpt_path = self._output_dir / f"checkpoint_day_{int(round(day)):04d}.npz"
             s = self.state
+            # Under MPAS cell-partition MPI each rank holds only its owned+halo
+            # band; gather the owned cells/edges into the GLOBAL field on rank 0
+            # so the restart chain reads a single canonical global checkpoint
+            # (mirrors the lat-lon band gather).  All ranks must participate in
+            # each gather (collective); non-root ranks then bail before I/O.
+            if self._voronoi_layout is not None:
+                from legoesm.parallel.voronoi_mpi import gather_voronoi_field
+                part = self._voronoi_layout.partition
+                u_d = gather_voronoi_field(s.u.data, part, "edge")
+                T_d = gather_voronoi_field(s.T.data, part, "cell")
+                ps_d = gather_voronoi_field(s.p_s.data, part, "cell")
+                phis_d = gather_voronoi_field(s.phis.data, part, "cell")
+                trc_d = (None if s.tracers is None else {
+                    _k: gather_voronoi_field(s.tracers[_k].data, part, "cell")
+                    for _k in s.tracers})
+                if self._mpi_rank != 0:
+                    return
+            else:
+                u_d, T_d, ps_d, phis_d = (
+                    s.u.data, s.T.data, s.p_s.data, s.phis.data)
+                trc_d = (None if s.tracers is None
+                         else {_k: s.tracers[_k].data for _k in s.tracers})
             _save = dict(
-                u=np.asarray(s.u.data), T=np.asarray(s.T.data),
-                p_s=np.asarray(s.p_s.data), phis=np.asarray(s.phis.data),
+                u=np.asarray(u_d), T=np.asarray(T_d),
+                p_s=np.asarray(ps_d), phis=np.asarray(phis_d),
                 step=np.asarray(int(step)), day=np.asarray(float(day)),
             )
             # Persist moisture tracers too (moist MPAS runs), so a chained
@@ -2250,10 +2272,10 @@ class ModelDriver:
             # colliding with u/T/p_s/phis; ``tracer_names`` lets load rebuild
             # the dict.  Dry runs (tracers=None) write neither and are
             # byte-identical to before.
-            if s.tracers is not None:
-                _save["tracer_names"] = np.asarray(sorted(s.tracers.keys()))
-                for _k in s.tracers:
-                    _save[f"trc_{_k}"] = np.asarray(s.tracers[_k].data)
+            if trc_d is not None:
+                _save["tracer_names"] = np.asarray(sorted(trc_d.keys()))
+                for _k in trc_d:
+                    _save[f"trc_{_k}"] = np.asarray(trc_d[_k])
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
             return
@@ -2453,38 +2475,73 @@ class ModelDriver:
             from legoesm.core.state import HydrostaticState
             from legoesm.core.field import Field
             d = np.load(path)
-            # Shape guard on EVERY prognostic field: the mesh built from
-            # --resolution/--nlev must match the checkpoint, else the TRiSK
-            # gathers index out of range (u) or broadcasts wrong (T/p_s/phis)
-            # — both silent.  Check all four so a corrupt/mismatched file is
-            # rejected up front instead of failing deep inside a JIT trace.
-            for _name, _ck in (("u", self.state.u.data),
-                               ("T", self.state.T.data),
-                               ("p_s", self.state.p_s.data),
-                               ("phis", self.state.phis.data)):
-                if tuple(d[_name].shape) != tuple(_ck.shape):
-                    raise ValueError(
-                        f"MPAS checkpoint {path.name} {_name}-shape "
-                        f"{tuple(d[_name].shape)} != current mesh "
-                        f"{_name}-shape {tuple(_ck.shape)}; rebuild with the "
-                        f"same --resolution/--nlev."
-                    )
+            # Under MPAS cell-partition MPI the checkpoint is GLOBAL but
+            # ``self.state`` is this rank's local (owned+halo) band, so scatter
+            # the global arrays to local cells/edges (mirror of the save-side
+            # gather).  Serial runs use the global arrays directly.  The shape
+            # guard compares against the GLOBAL mesh size under MPI, the local
+            # state otherwise.
+            _mpi = self._voronoi_layout is not None
+            if _mpi:
+                from legoesm.parallel.voronoi_partition import scatter_to_local
+                part = self._voronoi_layout.partition
+                _guard = (("u", part.nEdges_global, self.state.u.data.shape[1:]),
+                          ("T", part.nCells_global, self.state.T.data.shape[1:]),
+                          ("p_s", part.nCells_global, self.state.p_s.data.shape[1:]),
+                          ("phis", part.nCells_global,
+                           self.state.phis.data.shape[1:]))
+                for _name, _n_global, _trail in _guard:
+                    if (d[_name].shape[0] != _n_global
+                            or tuple(d[_name].shape[1:]) != tuple(_trail)):
+                        raise ValueError(
+                            f"MPAS checkpoint {path.name} {_name}-shape "
+                            f"{tuple(d[_name].shape)} != global mesh "
+                            f"({_n_global}, {tuple(_trail)}); rebuild with the "
+                            f"same --resolution/--nlev.")
+
+                def _scatter(name, entity):
+                    return scatter_to_local(jnp.asarray(d[name]), part, entity)
+                _u, _T, _ps, _phis = (_scatter("u", "edge"),
+                                      _scatter("T", "cell"),
+                                      _scatter("p_s", "cell"),
+                                      _scatter("phis", "cell"))
+            else:
+                # Shape guard on EVERY prognostic field: the mesh built from
+                # --resolution/--nlev must match the checkpoint, else the TRiSK
+                # gathers index out of range (u) or broadcast wrong (T/p_s/phis)
+                # — both silent.  Reject a corrupt/mismatched file up front.
+                for _name, _ck in (("u", self.state.u.data),
+                                   ("T", self.state.T.data),
+                                   ("p_s", self.state.p_s.data),
+                                   ("phis", self.state.phis.data)):
+                    if tuple(d[_name].shape) != tuple(_ck.shape):
+                        raise ValueError(
+                            f"MPAS checkpoint {path.name} {_name}-shape "
+                            f"{tuple(d[_name].shape)} != current mesh "
+                            f"{_name}-shape {tuple(_ck.shape)}; rebuild with the "
+                            f"same --resolution/--nlev."
+                        )
+                _u, _T, _ps, _phis = (jnp.asarray(d["u"]), jnp.asarray(d["T"]),
+                                      jnp.asarray(d["p_s"]), jnp.asarray(d["phis"]))
             self.state = HydrostaticState(
-                u=Field(data=jnp.asarray(d["u"]), name="u",
+                u=Field(data=_u, name="u",
                         dims=("nEdges", "nlev"), units="m/s"),
-                T=Field(data=jnp.asarray(d["T"]), name="T",
+                T=Field(data=_T, name="T",
                         dims=("nCells", "nlev"), units="K"),
-                p_s=Field(data=jnp.asarray(d["p_s"]), name="p_s",
+                p_s=Field(data=_ps, name="p_s",
                           dims=("nCells",), units="Pa"),
-                phis=Field(data=jnp.asarray(d["phis"]), name="phis",
+                phis=Field(data=_phis, name="phis",
                            dims=("nCells",), units="m2/s2"),
             )
             # Restore moisture tracers (moist MPAS runs); absent ⇒ dry restart.
             if "tracer_names" in d:
                 _names = [str(n) for n in d["tracer_names"]]
                 self.state = self.state._replace(tracers={
-                    _k: Field(data=jnp.asarray(d[f"trc_{_k}"]), name=_k,
-                              dims=("nCells", "nlev"), units="kg/kg")
+                    _k: Field(
+                        data=(scatter_to_local(
+                                  jnp.asarray(d[f"trc_{_k}"]), part, "cell")
+                              if _mpi else jnp.asarray(d[f"trc_{_k}"])),
+                        name=_k, dims=("nCells", "nlev"), units="kg/kg")
                     for _k in _names
                 })
             step = int(d["step"])

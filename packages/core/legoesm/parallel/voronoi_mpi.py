@@ -399,7 +399,10 @@ def make_voronoi_mpi_step(
     #     in ``_fix_mass_mpi`` shrinks from 3 scalars (mass_old, mass_new,
     #     total_area) to 2.
     _owned_area = jnp.where(owned_mask, local_mesh.areaCell, 0.0)
-    _local_total_area = float(jnp.sum(_owned_area))
+    # fp64 area sum to match the fp64 mass-budget numerator in _fix_mass_mpi
+    # (the correction is mass_diff/total_area — a fp32 denominator would
+    # silently downcast the ratio and break serial parity on fp32 runs).
+    _local_total_area = float(jnp.sum(_owned_area.astype(jnp.float64)))
     try:
         from mpi4py import MPI
         _total_area_global = MPI.COMM_WORLD.allreduce(
