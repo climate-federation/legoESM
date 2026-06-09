@@ -72,7 +72,7 @@ self-test:
 |------|----------|
 | `tests/test_no_hardcoded_constants.py` | no bare physical-constant literal (`273.15`, `9.80616`, …) outside `constants.py` — value-folded, fingerprinted per source line |
 | `tests/test_no_saturation_reimpl.py` | no re-derived saturation curve (`611.2·exp(17.67·T_c/(T_c+243.5))`) outside `thermo.py` |
-| `tests/test_no_formula_reimpl.py` | extensible registry — no canonical formula re-derived inline (buoyancy/Brunt-Väisälä `g/θ` debt-ratchet; Monin-Obukhov stability-fn guard); add a formula = one registry entry + a self-test |
+| `tests/test_no_formula_reimpl.py` | extensible registry — no canonical formula re-derived inline: buoyancy `g/θ` + E3SM `g²/(c_p·T)` N² + Exner/θ `(p/p₀)^κ` + virtual-T `0.608` (debt-ratchets) and Monin-Obukhov stability-fn (regression guard); add a formula = one registry entry + a self-test |
 | `tests/test_dispatch_hardening.py` | an existing `scheme=` factory's unknown-value `raise` is never silently deleted (76-entry grow-only baseline) |
 | `tests/test_validate_strict_coverage.py` | every scheme-like config field is membership-validated in `validate_strict` (fail-early, not at JIT) |
 | `tests/_ratchet_audit.py` | shared discovery/fold/exemption machinery for the above (no duplication) |
