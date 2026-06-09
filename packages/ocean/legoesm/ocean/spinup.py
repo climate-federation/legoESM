@@ -425,7 +425,6 @@ def compute_amoc_from_state_mpas(
         )
     n_edges, nlev = u.shape
 
-    angle = np.asarray(mesh.angleEdge, dtype=np.float64)
     # Canonical min-rule edge thickness (shared with the MPAS dynamics) so the
     # meridional-flux cross-section uses the SAME partial-cell flux closure as
     # the model — never re-derived.  Local imports keep spinup import-light.
@@ -433,7 +432,6 @@ def compute_amoc_from_state_mpas(
     from legoesm.ocean.dynamics.mpas_partial_cell_helpers import min_cell_to_edge
 
     dv = np.asarray(mesh.dvEdge, dtype=np.float64)
-    sin_a = np.sin(angle)                                   # (nEdges,)
 
     # Min-rule edge thickness from cellsOnEdge (MITgcm hFacZ flux closure): the
     # shallower cell limits the flow-through area, so a partial-cell bottom step
@@ -474,20 +472,27 @@ def compute_amoc_from_state_mpas(
             "expected one of 'atlantic', 'global'."
         )
 
-    # Per-edge per-level meridional volume flux.
-    F_edge = (u * sin_a[:, None] * dv[:, None] * edge_mask[:, None]) * h_e
-    # shape (nEdges, nlev) — [m/s · m · m] = m³/s.
-
-    # Latitude binning.
-    lat_edge_deg = np.degrees(np.asarray(mesh.latEdge))
-    band = np.abs(lat_edge_deg - target_lat_deg) <= lat_band_width_deg
-    if not np.any(band):
-        # Try a wider tolerance fallback.
-        band = np.abs(lat_edge_deg - target_lat_deg) <= lat_tol_deg
-        if not np.any(band):
-            return float("nan")
-
-    F_band = F_edge[band, :].sum(axis=0)                    # (nlev,)
+    # SECTION across the latitude circle ``target_lat`` (NOT a 2°-band sum of the
+    # northward velocity component).  The meridional transport is the FULL normal
+    # flux through edges whose two CELLS straddle the latitude (one north, one
+    # south), oriented northward by ``sign(lat_c2 - lat_c1)`` -- exactly the
+    # construction compute_acc_from_state_mpas uses for the Drake MERIDIAN.  The
+    # old ``Σ u·sinα·dvEdge·h`` over a 2°-band OVER-COUNTS the line integral by
+    # ~N_rows (the edge-rows in the band): verified vs the analytic uniform-flow
+    # transport = ×1.0 (section) but ×1.12 at ico5 (~2° rows) and ×1.84 at ico6
+    # (~1° rows) for the band-sum (resolution-dependent -> a real bug, not a
+    # convention).  ``lat_band_width_deg``/``lat_tol_deg`` are retained for the
+    # signature but no longer select a band.
+    lat_cell_deg = np.degrees(np.asarray(mesh.latCell, dtype=np.float64))
+    d1 = lat_cell_deg[c1_safe] - target_lat_deg
+    d2 = lat_cell_deg[c2_safe] - target_lat_deg
+    straddle = interior & (np.sign(d1) != np.sign(d2))
+    if not np.any(straddle):
+        return float("nan")
+    orient = np.sign(lat_cell_deg[c2_safe] - lat_cell_deg[c1_safe])  # +1 if c2 N
+    # Per-edge per-level northward volume flux through the section [m³/s].
+    F_edge = (orient[:, None] * u * dv[:, None] * edge_mask[:, None]) * h_e
+    F_band = (F_edge * straddle[:, None]).sum(axis=0)      # (nlev,)
     if not np.any(np.isfinite(F_band)):
         return float("nan")
 
@@ -691,9 +696,7 @@ def compute_mht_from_state_mpas(
             f"compute_mht_from_state_mpas: level mismatch u={u.shape[-1]} "
             f"theta={th.shape[-1]} h={h.shape[-1]}")
 
-    angle = np.asarray(mesh.angleEdge, dtype=np.float64)
     dv = np.asarray(mesh.dvEdge, dtype=np.float64)
-    sin_a = np.sin(angle)
     c1 = np.asarray(mesh.cellsOnEdge[0])
     c2 = np.asarray(mesh.cellsOnEdge[1])
     interior = c2 >= 0
@@ -706,17 +709,23 @@ def compute_mht_from_state_mpas(
     h_e = np.where(interior[:, None], h_e, 0.0)
     theta_e = np.where(interior[:, None], theta_e, 0.0)
 
-    F_edge = (rho0 * cp) * (u * sin_a[:, None] * dv[:, None] * h_e * theta_e)
-    F_e = np.nan_to_num(F_edge.sum(axis=1), nan=0.0,
-                        posinf=0.0, neginf=0.0) * interior      # (nEdges,) [W]
-
-    lat_edge = np.degrees(np.asarray(mesh.latEdge))
+    # SECTION per latitude (same fix as the AMOC): MHT(φ) = Σ over edges whose two
+    # CELLS straddle φ of the ORIENTED depth-integrated heat flux (full normal
+    # flux, NOT u·sinα over a 2°-band, which over-counts the line integral by
+    # ~N_rows -> the 5-6 PW vs obs ~1.8 PW artifact).  An edge crosses every
+    # latitude between its two cell latitudes.
+    lat_cell_deg = np.degrees(np.asarray(mesh.latCell, dtype=np.float64))
+    orient = np.sign(lat_cell_deg[c2_safe] - lat_cell_deg[c1_safe]) * interior
+    Fheat_e = (rho0 * cp) * orient * np.nan_to_num(
+        (u * dv[:, None] * h_e * theta_e).sum(axis=1),
+        nan=0.0, posinf=0.0, neginf=0.0)                       # (nEdges,) [W], oriented N
+    lo = np.minimum(lat_cell_deg[c1_safe], lat_cell_deg[c2_safe])
+    hi = np.maximum(lat_cell_deg[c1_safe], lat_cell_deg[c2_safe])
     bins = np.arange(-80.0, 80.0 + lat_bin_deg, lat_bin_deg)
     centers = 0.5 * (bins[:-1] + bins[1:])
-    idx = np.digitize(lat_edge, bins) - 1
-    valid = (idx >= 0) & (idx < centers.size)
-    mht_W = np.zeros(centers.size, dtype=np.float64)
-    np.add.at(mht_W, idx[valid], F_e[valid])
+    # edge e crosses latitude center c iff lo_e < c < hi_e.
+    cross = (lo[:, None] < centers[None, :]) & (centers[None, :] < hi[:, None])
+    mht_W = (Fheat_e[:, None] * (cross & interior[:, None])).sum(axis=0)  # (nCenters,) [W]
     return _mht_peaks(mht_W / 1.0e15, centers)
 
 
