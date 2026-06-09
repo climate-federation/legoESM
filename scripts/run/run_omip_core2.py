@@ -1091,6 +1091,14 @@ _RUNOFF_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/
 # prescribed sea-ice concentration for the SW-albedo surrogate (--ice-albedo).
 _SICONC_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
               "EXP00/RUN_REF/ORCA1_1y_20000101_20041231_icemod.nc")
+# NEMO ORCA1 RUN_REF MONTHLY ocean grid_T (`tos` = SST [degC]) -> used to give the
+# annual-mean siconc a SEASONAL cycle (--ice-albedo-seasonal): NEMO sea ice sits
+# at the freezing point, so where the monthly SST is at/below freezing NEMO has
+# ice, and where it warms above freezing the ice (and its albedo) is gone.  The
+# run wrote only an ANNUAL icemod (no monthly siconc), so the monthly SST is the
+# faithful seasonal proxy available without a NEMO re-run.
+_TOS_MONTHLY_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/"
+                   "ORCA1/EXP00/RUN_REF/ORCA1_1m_20000101_20041231_grid_T.nc")
 
 
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
@@ -1190,6 +1198,112 @@ def load_nemo_siconc(grid, grid_type, lat2d_deg, lon2d_deg, siconc_file=None,
     return out
 
 
+def _ice_presence_from_tos(tos_C, ice_edge_C: float = -1.0, ramp_C: float = 1.0):
+    """Sea-ice presence in [0,1] from SST [degC]: 1 where the surface is at/below
+    the freezing point (ice), 0 over warm open water, with a smooth tanh ramp of
+    half-width ``ramp_C`` centred at ``ice_edge_C``.  NEMO sea ice sits at the
+    freezing point, so cold SST is a faithful indicator of ice presence."""
+    return 0.5 * (1.0 - np.tanh((np.asarray(tos_C) - ice_edge_C) / ramp_C))
+
+
+def _seasonal_siconc_from_presence(annual, presence):
+    """Combine an annual-mean siconc map with a (12, *grid) ice-PRESENCE stack into
+    a (12, *grid) monthly siconc.  Per-cell MEAN-PRESERVING normalisation:
+
+        siconc(m) = clip(annual * presence(m) / mean_m presence, 0, 1)
+
+    Before the [0,1] clip the 12-month MEAN equals the annual-mean siconc, so the
+    ANNUAL albedo is CONSERVED: the ice months carry the true (elevated) winter
+    concentration and the warm months go to ~0.  This removes the spurious year-
+    round summer albedo (the NH cold-bias root cause) WITHOUT the annual SW over-
+    absorption a max-normalisation would introduce (codex MEDIUM).  Perennial-ice
+    cells (presence~const) are left ~unchanged; cells with no ice in any month
+    (mean presence -> 0) yield 0.  The clip caps cells whose reconstructed winter
+    concentration exceeds 1 (a cell that is, say, 0.4 annual but iced only 3 months
+    is ~fully iced those months)."""
+    annual = np.asarray(annual)
+    presence = np.asarray(presence)
+    mean_p = np.maximum(presence.mean(axis=0), 1.0e-6)         # per-cell mean presence
+    season = presence / mean_p[None, ...]                      # 12-mo mean = 1 (pre-clip)
+    return np.clip(annual[None, ...] * season, 0.0, 1.0)
+
+
+def load_nemo_siconc_monthly(grid, grid_type, lat2d_deg, lon2d_deg,
+                             siconc_file=None, tos_file=None, land_mask=None,
+                             ice_edge_C: float = -1.0, ramp_C: float = 1.0):
+    """Build a 12-MONTH sea-ice-concentration climatology on the model grid for the
+    SEASONAL SW-albedo surrogate (``--ice-albedo-seasonal``).
+
+    Motivation (codex HIGH; NH cold bias): the annual-MEAN ``siconc`` applied every
+    timestep keeps a high ice albedo through the summer in NH seasonal-ice zones
+    (Labrador/Greenland/Bering/Okhotsk), suppressing summer SW absorption all year
+    -> a large spurious NH cold bias.  The faithful fix is a monthly siconc.  The
+    NEMO run wrote only an annual ``siconc`` (no monthly icemod), but it DID write
+    monthly ``tos`` (SST); NEMO sea ice sits at the freezing point, so the monthly
+    SST is a faithful proxy for WHEN ice is present.
+
+    Construction (NEMO-derived, prescribed -> feedback-safe):
+      presence(m,cell) = 0.5*(1 - tanh((tos_m_C - ice_edge_C) / ramp_C))  in [0,1]
+        (->1 where the monthly SST is at/below freezing, ->0 over warm open water)
+      siconc(m,cell)   = annual_siconc(cell) * presence(m,cell) / max_m presence
+        (per-cell MAX-normalised so the coldest month keeps the annual-mean
+         concentration and the warm months go to ~0 -- captures the seasonal cycle
+         and the correct NH/SH phase WITHOUT depending on the sigmoid's absolute
+         level; perennial-ice cells keep presence~const -> siconc unchanged).
+
+    Returns ``(12, *lat2d_deg.shape)`` siconc in [0,1].  LIMITATION: this recovers
+    the SEASONALITY of NEMO's ice from its SST; a true monthly icemod climatology
+    (a NEMO re-run with the monthly ice stream actually written) would be the next
+    refinement.  ``ice_edge_C``/``ramp_C`` set the SST->ice-presence ramp [degC]."""
+    import xarray as xr
+    # Annual siconc spatial pattern, already regridded onto the model grid.
+    annual = load_nemo_siconc(grid, grid_type, lat2d_deg, lon2d_deg,
+                              siconc_file=siconc_file, land_mask=land_mask)
+    ds = xr.open_dataset(tos_file or _TOS_MONTHLY_NC, decode_times=False)
+    src_lat = _squeeze2d(ds["nav_lat"].values)
+    src_lon = _squeeze2d(ds["nav_lon"].values)
+    tos = np.asarray(ds["tos"].values, dtype=np.float64)        # (time, y, x) degC
+    if tos.ndim != 3:
+        raise ValueError(f"monthly tos expected (time,y,x), got {tos.shape}")
+    # Calendar-month climatology: average every record sharing a calendar month
+    # (NYF -> all years share the same forcing; ``tos[k::12]`` are the same month
+    # across years; a partial final year just gives some months 1 extra sample --
+    # e.g. 40 records = 3y + 4m -> months 0-3 get 4, months 4-11 get 3).
+    n_t = tos.shape[0]
+    if n_t < 12:                                                # codex LOW: a <12-record
+        raise ValueError(                                       # file can't form a 12-mo
+            f"monthly tos has only {n_t} records (<12): cannot build a calendar-"      # climatology
+            "month climatology.  Provide >=12 monthly records via --tos-monthly-file.")
+    presence_m = []
+    for m in range(12):
+        recs = tos[m::12]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            tos_m = np.nanmean(recs, axis=0)                    # (y, x) degC
+        src_valid = np.isfinite(tos_m)
+        tos_m = np.nan_to_num(tos_m, nan=10.0)                  # land/NaN -> warm (no ice)
+        tos_grid, _ = _regrid_curv_to_points(
+            tos_m, src_lat, src_lon, src_valid, lat2d_deg, lon2d_deg,
+            k=4, max_deg=2.0)
+        presence_m.append(
+            _ice_presence_from_tos(tos_grid, ice_edge_C, ramp_C))
+    presence = np.stack(presence_m, axis=0)                     # (12, *grid)
+    out = _seasonal_siconc_from_presence(annual, presence)      # (12, *grid)
+    # Summer-vs-winter contrast + annual-mean CONSERVATION diagnostic (codex MEDIUM:
+    # the 12-month mean should track the source annual siconc; the [0,1] clip is the
+    # only departure, where reconstructed winter ice saturates).
+    nh = np.asarray(lat2d_deg) > 45.0
+    if nh.any():
+        mar = out[2][nh].mean(); sep = out[8][nh].mean()
+        mean12 = out.mean(axis=0)
+        print(f"[setup] sea-ice albedo: SEASONAL NEMO siconc (12 mo via monthly SST) "
+              f"on {grid_type}; NH(>45N) mean siconc Mar={mar:.3f} Sep={sep:.3f} "
+              f"(annual={annual[nh].mean():.3f}) -- summer albedo relaxed; "
+              f"12-mo-mean vs annual (conservation) NH={mean12[nh].mean():.3f} "
+              f"global={mean12.mean():.3f} vs {annual.mean():.3f}")
+    return out
+
+
 # noleap calendar month lengths (NEMO/OMIP convention) + cumulative day bounds.
 _MONTH_DAYS = np.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
 _MONTH_CUM = np.cumsum(_MONTH_DAYS)  # [31,59,...,365]
@@ -1200,6 +1314,16 @@ def _runoff_month_idx(step: int, dt: float) -> int:
     NEMO's NOLEAP month lengths (not equal 365/12 bins; codex MEDIUM)."""
     day = (step * dt / _SEC_PER_DAY) % 365.0
     return int(np.searchsorted(_MONTH_CUM, day, side="right"))
+
+
+def _siconc_at_step(siconc, step: int, dt: float, monthly: bool):
+    """Sea-ice concentration for the current step.  ``monthly`` -> index the leading
+    12-month axis of ``siconc`` by the calendar month (same NOLEAP binning as the
+    runoff climatology); otherwise return the single annual map as-is.  ``None``
+    passes through (no ice field loaded)."""
+    if siconc is None or not monthly:
+        return siconc
+    return siconc[_runoff_month_idx(step, dt)]
 
 
 def _idx_t(step: int, dt: float, n_rec: int) -> int:
@@ -1644,6 +1768,16 @@ def main() -> int:
     p.add_argument("--siconc-file", type=str, default=None,
                    help="Override the NEMO sea-ice-concentration file for "
                         "--ice-albedo (default = the ORCA1 RUN_REF annual icemod.nc).")
+    p.add_argument("--ice-albedo-seasonal", action="store_true",
+                   help="Give the --ice-albedo siconc a 12-MONTH seasonal cycle "
+                        "(via NEMO's monthly SST, since the run wrote no monthly "
+                        "icemod): removes the spurious year-round summer albedo in "
+                        "NH seasonal-ice zones that drives the NH cold bias (codex "
+                        "HIGH). Indexed by calendar month every step. The same "
+                        "monthly siconc also gates SSS restoring (NEMO nn_sssr_ice=0).")
+    p.add_argument("--tos-monthly-file", type=str, default=None,
+                   help="Override the NEMO monthly grid_T (tos) file used to build "
+                        "the seasonal siconc (default = ORCA1 RUN_REF 1m grid_T.nc).")
     p.add_argument("--sss-restore", action="store_true",
                    help="Apply OMIP-2 weak SSS restoring toward the WOA surface "
                         "salinity (the protocol NEMO ORCA1 uses) -> bounds the "
@@ -1992,14 +2126,26 @@ def main() -> int:
             grid, app_grid_type, lat2d, lon2d, args.mesh,
             land_mask=np.asarray(state.land_mask.data), spread_passes=_spread)
     # Prescribed sea-ice-concentration field for the SW-albedo surrogate
-    # (--ice-albedo). Static annual climatology -> load ONCE here. Regridded onto
-    # the model grid (same shape as lat2d), passed to compute_omip2_surface_forcing
-    # every step (no per-step recompute).
+    # (--ice-albedo) AND the NEMO-faithful SSS-restoring ice gate (nn_sssr_ice=0:
+    # no restoring under ice).  Loaded ONCE, regridded onto the model grid; passed
+    # to compute_omip2_surface_forcing + the restoring every step (no per-step
+    # recompute).  ``--ice-albedo-seasonal`` -> a (12, *grid) monthly climatology
+    # (leading month axis indexed each step); otherwise a single annual map.  Also
+    # loaded when only --sss-restore is on, so the restoring ice gate is faithful
+    # even without the albedo.
     siconc_clim = None
-    if args.ice_albedo:
-        siconc_clim = load_nemo_siconc(
-            grid, app_grid_type, lat2d, lon2d, siconc_file=args.siconc_file,
-            land_mask=np.asarray(state.land_mask.data))
+    siconc_monthly = False
+    if args.ice_albedo or args.sss_restore:
+        if args.ice_albedo_seasonal:
+            siconc_clim = load_nemo_siconc_monthly(
+                grid, app_grid_type, lat2d, lon2d, siconc_file=args.siconc_file,
+                tos_file=args.tos_monthly_file,
+                land_mask=np.asarray(state.land_mask.data))
+            siconc_monthly = True
+        else:
+            siconc_clim = load_nemo_siconc(
+                grid, app_grid_type, lat2d, lon2d, siconc_file=args.siconc_file,
+                land_mask=np.asarray(state.land_mask.data))
     # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
     # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
     # would corrupt the comparison invisibly. --forcing-path (set via --config
@@ -2212,10 +2358,17 @@ def main() -> int:
         # dynamics-core external-tau block) -- energetically consistent, unlike
         # the operator-split applicator (which pumped the runaway). Optional
         # cold-start ramp scales the forcing fields.
+        # Sea-ice concentration for THIS step: the calendar-month slice when a
+        # seasonal (12-month) climatology was loaded, else the single annual map.
+        # Drives both the SW albedo (--ice-albedo only) and the SSS-restoring ice
+        # gate (below).  ``_sic`` may be loaded for restoring alone (when only
+        # --sss-restore is set), so the albedo is gated on --ice-albedo explicitly
+        # to keep an SSS-only run's heat budget unchanged (codex HIGH).
+        _sic = _siconc_at_step(siconc_clim, step, dt, siconc_monthly)
         sf = compute_omip2_surface_forcing(
             state, forcing=forcing, idx_t=it,
             grid=grid, grid_type=app_grid_type,
-            ice_albedo=siconc_clim,
+            ice_albedo=(_sic if args.ice_albedo else None),
         )
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
@@ -2256,15 +2409,19 @@ def main() -> int:
                     emp=args.emp_freshwater, ramp=ramp)
             state = model.step(state, dt, surface_forcing=sf, freshwater=fw)
         if sss_restore_cfg is not None:
+            # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
+            # under sea ice).  Feed the SAME prescribed siconc the albedo uses
+            # (``_sic``; None only if neither --ice-albedo nor a siconc field is
+            # available, in which case the restoring is ungated as before).
             if app_grid_type == "mpas":
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step_mpas
                 state = apply_sss_restoring_step_mpas(
-                    state, S_target=sss_restore_target, ice_concentration=None,
+                    state, S_target=sss_restore_target, ice_concentration=_sic,
                     config=sss_restore_cfg, mesh=grid, dt=dt)
             else:
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step
                 state = apply_sss_restoring_step(
-                    state, S_target=sss_restore_target, ice_concentration=None,
+                    state, S_target=sss_restore_target, ice_concentration=_sic,
                     config=sss_restore_cfg, grid=grid, z_coord=z_coord, dt=dt,
                     lat2d_deg=lat2d, lon2d_deg=lon2d)
         if nudge_tau_s > 0 and (nudge_release_s <= 0 or step * dt < nudge_release_s):
