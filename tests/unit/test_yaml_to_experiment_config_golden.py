@@ -30,6 +30,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 from legoesm.config import Config
 from legoesm.driver.config import experiment_config_to_dict
@@ -39,9 +40,31 @@ GOLDEN_DIR = Path(__file__).parent / "golden" / "yaml_to_experiment"
 _REGEN = os.environ.get("LEGOESM_REGEN_GOLDEN") == "1"
 
 
+# A run config carries at least one of these top-level sections; the loader
+# feeds it through ``to_experiment_config``.  ``config/`` also holds non-run
+# YAML — e.g. ``data_catalog.yaml`` (a top-level ``datasets:`` catalog consumed
+# by a different loader) — which does NOT translate to an ExperimentConfig and
+# would otherwise serialize to a meaningless all-defaults golden.
+_RUN_CONFIG_SECTIONS = ("grid", "dycore", "model", "atmosphere", "time")
+
+
 def _config_files() -> list[Path]:
-    """Standalone top-level configs the basic loader consumes via ``legoesm run``."""
-    return sorted((REPO_ROOT / "config").glob("*.yaml"))
+    """Standalone RUN configs the basic loader consumes via ``legoesm run``.
+
+    Filters ``config/*.yaml`` down to genuine run configs (those carrying a
+    run-config section), excluding dataset catalogs / other non-run YAML.
+    """
+    out: list[Path] = []
+    for path in sorted((REPO_ROOT / "config").glob("*.yaml")):
+        try:
+            doc = yaml.safe_load(path.read_text()) or {}
+        except yaml.YAMLError as exc:
+            # Surface a malformed run config loudly (with its path) rather
+            # than silently dropping it from golden coverage.
+            raise AssertionError(f"malformed config YAML {path}: {exc}") from exc
+        if isinstance(doc, dict) and any(s in doc for s in _RUN_CONFIG_SECTIONS):
+            out.append(path)
+    return out
 
 
 def _golden_path(config_path: Path) -> Path:

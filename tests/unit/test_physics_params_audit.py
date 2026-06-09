@@ -101,10 +101,22 @@ class TestConvectionAudit:
     def test_emanuel_cu_coefficient(self):
         from legoesm.atmosphere.physics.convection.emanuel import emanuel_convection
         from legoesm.atmosphere.physics.convection.config import EmanuelConfig
+        # ``cu_coefficient`` is the sub-cloud buoyancy-sort multiplier that
+        # scales detrainment (``delta_0 * sort_multiplier``) ONLY in the
+        # mass-flux-kernel branch.  The default ``use_genuine_mixing=True``
+        # path computes detrainment via the buoyancy-sorted mixer and never
+        # reads ``cu_coefficient`` (its gradient is then exactly zero — the
+        # parameter is simply inactive in that mode, not a wiring bug).
+        # Audit AD-reachability in the mode where the knob is live, on a
+        # destabilised column so the buoyancy sort yields a nonzero
+        # negatively-buoyant share for ``cu_coefficient`` to act on.
         T, q_v, p_full, p_half = _column()
+        T = T.at[:, -1].add(20.0)  # hot, convecting boundary layer
 
         def loss(x):
-            cfg = EmanuelConfig()._replace(cu_coefficient=x)
+            cfg = EmanuelConfig()._replace(
+                use_genuine_mixing=False, cu_coefficient=x,
+            )
             out = emanuel_convection(T, q_v, p_full, p_half,
                 jnp.zeros((_NCOL, _NLEV)), 600.0, config=cfg)[0]
             return jnp.sum(out.dT_dt ** 2)
@@ -113,7 +125,17 @@ class TestConvectionAudit:
     def test_kain_fritsch_cape_consumption_time(self):
         from legoesm.atmosphere.physics.convection.kain_fritsch import kain_fritsch_convection
         from legoesm.atmosphere.physics.convection.config import KainFritschConfig
+        # ``cape_consumption_time`` (TIMEC) sets the closure cloud-base mass
+        # flux ``M_b = rho_BL * CAPE / (g * TIMEC)``.  In a very high-CAPE
+        # column ``M_b`` saturates at the literature cap ``M_b_max`` (clip),
+        # which makes the *applied* mass flux — and hence ``dT_dt`` —
+        # TIMEC-independent (gradient exactly zero).  The default ``_column``
+        # is past that cap, so audit reachability on a moderate-CAPE column
+        # (stabilised + slightly dried) where the closure is below the cap
+        # and TIMEC genuinely flows into the tendency.
         T, q_v, p_full, p_half = _column()
+        T = T.at[:, -1].add(-2.0)   # gentler boundary-layer instability
+        q_v = q_v * 0.85            # below the M_b_max saturation regime
         A = _aux()
 
         def loss(x):
