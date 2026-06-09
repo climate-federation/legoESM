@@ -449,3 +449,31 @@ iter17 + this): a full step runs across a y-slab and matches single-rank.
 Remaining for the full oracle LES on MPI: distribute the LASD test filter + the
 3/2-rule padded FFT (both guarded). The FFT, the projection, the wall model and
 the full static-SGS step are done + AD-safe.
+
+## Iteration 19 (2026-06-09): LASD dynamic SGS runs distributed on MPI
+
+Distributed the Bou-Zeid scale-dependent dynamic Smagorinsky (`lasd_cs2`) — the
+oracle-faithful closure — onto the y-slab, removing the last guarded operator on
+the distributed spectral-LES step (only static SGS ran before).
+
+- `spectral_test_filter`: 2Δ/4Δ sharp test filters on the distributed FFT, kx
+  cutoff on the local kx slab via global column indices.
+- `imfilter_box3`: ∂x roll local; ∂y roll via an AD-safe 1-row ring halo
+  (`_get_sendrecv_vjp`, tags 700/701, n=2-safe).
+- `pm` planar mean → `global_sum_mpi` (AD-safe).
+
+**Codex review caught a HIGH bug** (the standing always-codex rule paid off): the
+test-filter cutoffs `cut1y/cut2y` were taken from `uc.shape[0]` = ny_LOCAL under
+the slab, shrinking them per rank (NY=12,np=4 → `cut2y=0`, zeroing the level-2 y
+filter). My relaxed step test masked it. Fixed → cutoffs from `layout.ny_global`;
+added a DIRECT `lasd_cs2` serial-vs-distributed regression on a well-conditioned
+smooth field (matches ~1e-12). Codex round-2: CLEAN.
+
+Validated np=1/2/4: test_filter 1e-10, box3 1e-13 (grad 1e-10), `lasd_cs2` 1e-9,
+full dynamic-SGS step 1e-4; serial 12/12 unchanged.
+
+**Spectral-LES MPI now runs the FULL oracle closure (dynamic LASD), AD-safe.**
+Only the 3/2-rule de-aliasing remains serial-under-MPI (guarded; needs a
+distributed padded FFT). Methodology note: random unphysical strain is a BAD test
+for `lasd_cs2` (quintic β-root hypersensitivity masks cutoff bugs behind the
+non-bit-identical FFT) — use smooth well-conditioned fields for the direct check.
