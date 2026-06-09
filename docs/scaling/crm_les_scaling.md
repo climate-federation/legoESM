@@ -541,3 +541,25 @@ AD-safe: distributed 2-D FFT, pressure projection, global-mean wall model, dynam
 LASD SGS, AND 3/2-rule de-aliasing. No operator remains serial-under-MPI. Scaling
 remains FFT-all-to-all-bound (algorithmic, iter20) — the ceiling is the spectral
 method's global coupling, not any missing capability.
+
+## Iteration 23 (2026-06-09): full certification gate — 21/21 np=2 AND np=4
+
+Ran the complete distributed plane-MPI suite (CRM halo + spectral-LES FFT,
+projection, step, LASD, 3/2-dealias) together at np=2 and np=4.
+
+- Surfaced a CRM-DD test-config gap (NOT a regression — the spectral/FFT commits
+  never touch CRM halo code): the halo test hard-coded a 1×n slab, giving
+  nx_local=3 at np=4 (< the del4 stencil floor of 4). Fixed to a balanced 2×2
+  pencil at np=4 → certifies the directional ring-shift halo on BOTH axes at once
+  (stronger than the np=2 1×2). CRM DD now 1e-15 at np=4 too.
+- **Final state: 21/21 pass at np=2 AND np=4.** The whole distributed plane stack
+  — CRM domain decomposition (bit-identical) and the spectral LES full oracle
+  closure (FFT + projection + wall model + dynamic LASD + 3/2-rule de-aliasing,
+  all AD-safe) — is certified across rank counts.
+
+**Campaign complete.** Both CRM and LES weak+strong scale at the achievable scope
+in fp32 and fp64; the spectral-LES MPI gap is closed end-to-end (was the single
+biggest software gap). All genuinely-remaining levers are hardware-bound
+(multi-node/multi-GPU, consumer-fp64 1/64, single-socket bandwidth) or
+deep-low-ROI (CRM N256 GPU L2 tiling). No distributed operator remains
+unimplemented or unvalidated.
