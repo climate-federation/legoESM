@@ -136,6 +136,14 @@ class ModelDriver:
         self._mpi_world_size: int | None = None
         self._owned_face_ids: jax.Array | None = None  # shape (n_local_faces,)
         self._layout = None  # DistributedLayout for scatter/gather
+        # MPAS/Voronoi cell-partition MPI: layout carries the partition
+        # (owned+halo cell/edge index maps), local mesh, and halo-exchange
+        # handle.  ``_owned_cell_ids`` is the MPAS analogue of
+        # ``_owned_face_ids`` — the diagnostics/checkpoint gather keys on it
+        # to distinguish a cell-partitioned run from cubed-sphere faces.
+        self._voronoi_layout = None
+        self._owned_cell_ids: jax.Array | None = None
+        self._grid_global = None  # global grid preserved under band/cell MPI
         self._physics_lat = None  # rank-local lat for physics
         self._physics_lon = None  # rank-local lon for physics
 
@@ -369,7 +377,37 @@ class ModelDriver:
             # mpas aliases (voronoi, icosahedral, mpas_voronoi) are normalised
             # to "mpas" at the config boundary (driver.config.normalize_grid_type).
             kwargs = {"lloyd_iterations": 50} if gc.grid_type == "mpas" else {}
-            self.grid = create_grid(gc.grid_type, gc.resolution, **kwargs)
+            global_grid = create_grid(gc.grid_type, gc.resolution, **kwargs)
+            # MPAS / Voronoi cell-partition MPI: partition the global mesh
+            # and slice this rank's (owned + halo) local mesh.  Deferred to
+            # here — not the runtime bootstrap — because the partition needs
+            # the actual mesh (geometric / METIS graph partition + halo-ring
+            # expansion).  The global mesh is preserved as ``self._grid_global``
+            # for global-cell state init and the diagnostics / checkpoint
+            # gather to rank 0 (mirrors the lat-lon band-MPI pattern, but the
+            # slice is an unstructured owned-cell index set, not a lat band).
+            if (gc.grid_type == "mpas" and self.config.distributed
+                    and self._device_config is not None
+                    and self._device_config.is_distributed):
+                from legoesm.parallel.voronoi_mpi import initialize_voronoi_mpi
+                rank, n_ranks, vlayout = initialize_voronoi_mpi(global_grid)
+                self._grid_global = global_grid
+                self._voronoi_layout = vlayout
+                self._mpi_rank = rank
+                self._mpi_world_size = n_ranks
+                self.grid = vlayout.local_mesh
+                logger.info(
+                    "  MPAS MPI: rank %d/%d owns %d cells (+%d halo), "
+                    "%d local edges of %d global",
+                    rank, n_ranks,
+                    vlayout.partition.n_owned_cells,
+                    vlayout.partition.n_local_cells
+                    - vlayout.partition.n_owned_cells,
+                    vlayout.partition.n_local_edges,
+                    vlayout.partition.nEdges_global,
+                )
+            else:
+                self.grid = global_grid
 
         if gc.vertical_coord == "hybrid":
             from legoesm.grids.vertical import make_hybrid_levels
@@ -556,12 +594,20 @@ class ModelDriver:
         # on every non-zero rank (the radiation column adapter then fails to
         # reshape size 0 into the rank-local column count).  Build the forcing
         # on the preserved GLOBAL grid so the wrapper slices exactly once.
-        # ``_grid_global`` is set only for the lat-lon-MPI case, so serial and
-        # cubed-sphere paths fall back to ``self.grid`` and are unchanged.
-        _global_grid = getattr(self, "_grid_global", None)
-        forcing_grid = _global_grid if _global_grid is not None else self.grid
-        forcing_lat = (forcing_grid.grid_lat if _global_grid is not None
-                       else self._grid_lat)
+        # This applies ONLY to the lat-lon band path, which installs that
+        # re-slicing wrapper.  MPAS cell-partition MPI also sets
+        # ``_grid_global`` but has NO such wrapper — its state, physics, and
+        # forcing all live on this rank's local (owned+halo) cells, so the
+        # forcing must be built on the LOCAL mesh (``self.grid``) to match the
+        # local state; using the global mesh there would yield an
+        # ``(nCells_global,)`` SST that mismatches the local column count.
+        # Serial and cubed-sphere paths have no ``_grid_global`` → local grid.
+        _use_global_forcing = (
+            getattr(self, "_grid_global", None) is not None
+            and cfg.grid.grid_type == "latlon"
+        )
+        forcing_grid = self._grid_global if _use_global_forcing else self.grid
+        forcing_lat = forcing_grid.grid_lat
 
         if cfg.dataset == "analytical":
             from legoesm.forcing.analytical import analytical_sst_sic
@@ -1554,6 +1600,39 @@ class ModelDriver:
             return
         if (not self._device_config.is_distributed
                 and self._device_config.n_devices <= 1):
+            return
+
+        # MPAS / Voronoi cell-partition MPI.  Like the lat-lon band, each
+        # rank already owns its local (owned+halo) mesh state directly:
+        # ``_create_grid`` sliced ``self.grid`` to ``vlayout.local_mesh`` and
+        # ``_init_state`` built the state on it, and ``_create_forcing`` built
+        # the SST function on the local cells — so there is no scatter from
+        # global and no forcing re-slice wrapper (contrast the lat-lon band,
+        # whose forcing is global + sliced).  Physics runs column-local on
+        # every local cell; halo columns are recomputed but harmless (their
+        # prognostic values are overwritten by the next step's halo exchange).
+        # The owned-cell mask gates conservation reductions and the
+        # diagnostics gather.  Set the markers and return BEFORE the
+        # cubed-sphere face path below (which assumes a leading dim of 6 and
+        # would mis-handle the 1-D ``(nCells,)`` cell layout).
+        if (self._device_config.is_distributed
+                and self._voronoi_layout is not None):
+            vlayout = self._voronoi_layout
+            self._layout = vlayout
+            self._owned_cell_ids = jnp.arange(
+                vlayout.partition.n_owned_cells)
+            self._physics_lat = self.grid.grid_lat
+            self._physics_lon = self.grid.grid_lon
+            self._mpi_rank = vlayout.rank
+            self._mpi_world_size = vlayout.n_ranks
+            logger.info(
+                "  Parallel: MPAS cell-partition MPI — rank %d/%d, "
+                "%d owned cells (+%d halo)",
+                vlayout.rank, vlayout.n_ranks,
+                vlayout.partition.n_owned_cells,
+                vlayout.partition.n_local_cells
+                - vlayout.partition.n_owned_cells,
+            )
             return
 
         # Stage 3-C: lat-lon band MPI follows a different parallel
