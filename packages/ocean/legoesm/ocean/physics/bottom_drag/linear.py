@@ -14,6 +14,34 @@ from legoesm.ocean.physics.bottom_drag.config import LinearDragConfig
 from legoesm.ocean.physics.bottom_drag.output import bottom_level_drag_output
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py and
+# docs/ai_guardrails/domain_architect_vs_syntax_engine.md).
+__physics_contract__ = {
+    "summary": (
+        "Linear bottom drag: a momentum sink applied at the deepest wet level, "
+        "du/dt = -r u / dz_bottom."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s",
+        "jacobian": "1 (z-star dimensionless)",
+        "z_coord.dz_ref": "m",
+        "cfg.r": "m/s",
+    },
+    "outputs": {"du_dt": "m/s^2", "dv_dt": "m/s^2"},
+    "sign_convention": (
+        "Drag opposes near-bottom velocity: du_dt = -r u / dz_bottom <= 0 for "
+        "u>0; non-zero only at the bottom level (zeros above)."
+    ),
+    # Momentum sink into the solid bottom — not conserved within the fluid.
+    "conserves": ["none"],
+    "differentiable": True,
+    "reference": "MITgcm bottomDragLinear; bottom stress tau = rho_0 r u, r in [m/s].",
+    "idealized_test": (
+        "u=0 -> zero drag; a constant near-bottom u spins down exponentially with "
+        "e-folding time dz_bottom / r."
+    ),
+}
+
 _EPS = float(jnp.finfo(jnp.float32).eps)
 
 

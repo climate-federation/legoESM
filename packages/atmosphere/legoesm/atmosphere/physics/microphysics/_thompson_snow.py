@@ -52,7 +52,8 @@ _LAM1 = 3.29             # gamma-mode slope factor
 _SC = 0.632              # Schmidt number
 _C_SQRD = 0.15           # snow capacitance shape factor (plates/aggregates)
 # Reference density for the (rho0/rho)^1/2 fall-speed correction.
-_RHO_NOT = 101325.0 / (287.05 * 298.0)
+# (298 K is the Thompson reference temperature; p and R_d from constants.)
+_RHO_NOT = constants.p_atm_std / (constants.R_d * 298.0)
 
 # Field et al. (2005) universal moment-relation coefficients (sa, sb), exactly
 # as in the WRF reference. ``log10(a) = Σ sa·{1,tc,p,tc·p,tc²,p²,tc²·p,tc·p²,

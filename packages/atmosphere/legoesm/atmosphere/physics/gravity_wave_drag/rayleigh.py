@@ -15,6 +15,41 @@ from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import RayleighConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
+# Machine-checked scheme contract (see tests/test_physics_contracts.py and
+# docs/ai_guardrails/domain_architect_vs_syntax_engine.md). The architect pins
+# units/signs/conservation/reference; the body must honour it.
+__physics_contract__ = {
+    "summary": (
+        "Rayleigh-friction gravity-wave drag: a linear momentum sink in the "
+        "boundary layer plus a sin^2 sponge near the model top."
+    ),
+    "inputs": {
+        "u": "m/s", "v": "m/s", "T": "K",
+        "p_full": "Pa", "p_half": "Pa", "z_full": "m", "z_half": "m",
+        "rho": "kg/m^3", "lat": "rad", "dt": "s",
+    },
+    "outputs": {
+        "du_dt": "m/s^2", "dv_dt": "m/s^2", "dT_dt": "K/s", "eps_gwd": "W/m^2",
+    },
+    "sign_convention": (
+        "Drag opposes the wind: du_dt = -k(sigma)*u (and v), so du_dt has the "
+        "opposite sign to u; eps_gwd (frictional dissipation -> heating) is "
+        "positive-definite."
+    ),
+    # Momentum is NOT conserved (a drag/sponge removes momentum to the surface /
+    # absorbs it at the top), but total ENERGY is: the kinetic energy lost by the
+    # mean flow is returned as frictional heating, dT_dt = -(u*du_dt + v*dv_dt)/c_pd
+    # (eps_gwd = column-integrated KE loss). So the conserved quantity is energy.
+    "conserves": ["energy"],
+    "differentiable": True,
+    "reference": "Held & Suarez (1994) sigma-drag profile; Rayleigh friction.",
+    "idealized_test": (
+        "rest state (u=v=0) -> zero tendency; for u>0 the boundary-layer drag is "
+        "non-positive and its magnitude ramps from 0 at sigma=sigma_b to k_max at "
+        "the surface."
+    ),
+}
+
 
 def rayleigh_gwd(
     u: jax.Array,
