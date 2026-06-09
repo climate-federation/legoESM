@@ -2902,10 +2902,24 @@ class ModelDriver:
         # (job 8113954, L4 nCells=2562): fp32 heating is float32 + finite and
         # matches fp64 to rel-diff 1.5e-3 (REAL fp32, not a no-op).  Enabled
         # only for rrtmgp -- gray ignores the rrtmgp sub-config.
-        _rrtmgp_fp32 = (cfg.radiation == "rrtmgp")
+        # ``run_amip.py`` aliases the CLI ``rrtmgp`` → ``rrtmg`` for backward
+        # compatibility, but the canonical ``RadiationConfig.scheme`` is
+        # ``"rrtmgp"`` (the only non-gray value ``make_radiation_physics`` /
+        # ``_call_radiation_backend`` recognise — line 687 pre-builds the
+        # optics ONLY for ``scheme == "rrtmgp"``).  Passing the bare alias
+        # ``"rrtmg"`` skipped the pre-build, so the RRTMGP optics tables were
+        # (re)loaded from disk INSIDE the per-step JIT — a TracerArrayConversion
+        # crash (``np.asarray`` on a traced lookup table) that broke MPAS rrtmgp
+        # both serial and under MPI, and also left ``compute_fp32`` permanently
+        # off.  Normalise the alias back to the canonical scheme here.
+        _rad_scheme = (
+            "rrtmgp" if cfg.radiation in ("rrtmg", "rrtmgp")
+            else cfg.radiation
+        )
+        _rrtmgp_fp32 = (_rad_scheme == "rrtmgp")
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
-                scheme=cfg.radiation if cfg.radiation != "none" else "none",
+                scheme=_rad_scheme if _rad_scheme != "none" else "none",
                 rrtmgp=RRTMGPConfig(
                     co2_ppmv=cfg.co2_ppmv,
                     ch4_ppbv=cfg.ch4_ppbv,
