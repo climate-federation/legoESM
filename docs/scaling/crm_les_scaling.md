@@ -403,3 +403,26 @@ Residual risk: not yet under `jax.jit` (eager only) — to cover when wired in.
 (pressure Poisson `k²` solve + `_apply_filter` + LASD test filter) under a y-slab
 layout, JIT the step, validate a few-step gathered trajectory vs single-rank,
 then bench. The hard FFT primitive — the actual blocker — is now done + AD-safe.
+
+## Iteration 17 (2026-06-09): spectral-LES pressure projection runs on MPI
+
+Wired the iter-16 distributed 2-D FFT into the spectral LES and distributed the
+**pressure projection** `project()` — the core incompressibility solve — across a
+y-slab (`SpectralLESLayout`, `n_ranks_x=1`).
+
+- `make_grid(layout=…)` slices `kx/ky/k2`/masks to each rank's kx-column slab
+  (padded to `P·ceil(nkx/P)`); `_fft`/`_ifft` dispatch serial↔distributed on the
+  grid; `project()` derives the tridiagonal shape from the spectral arrays
+  (`ny_global × nkx_local`) not the physical slab. Pointwise in wavenumber, no
+  planar means ⇒ exact.
+- Validated (mpirun np=1/2/4): distributed `project()` == serial **1e-9** (u,v,w);
+  projected velocity divergence-free **1e-9**; **grad == serial 1e-8**;
+  `jax.jit(project)` distributed finite (retires the iter-16 eager-only risk);
+  serial spectral-LES unit suite **12/12 unchanged**. 3/2-rule de-aliasing under
+  MPI raises `NotImplementedError` (needs a distributed padded FFT — follow-up).
+
+**Remaining for the full spectral-LES step on MPI:** LASD dynamic-SGS test filter
+(`lasd_core.py`, sharp spectral cutoff) onto the distributed FFT; wall-model /
+`ustar` planar means → `global_sum_mpi`; the 3/2-rule padded FFT; then a gathered
+few-step `step()` trajectory vs single-rank + a bench. The hard primitive (the
+FFT) and the hardest operator (the projection) are now done + AD-safe.
