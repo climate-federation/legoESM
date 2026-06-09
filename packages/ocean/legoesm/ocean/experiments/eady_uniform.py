@@ -50,7 +50,7 @@ class EadyUniformConfig:
     # N=1.2e-3 chosen so L_d=107km (11 grid cells at 10km),
     # λ_max≈428km (k=2 fits in 1000km domain).
     N: float = 1.2e-3
-    T_ref: float = 10.0
+    T_ref_C: float = 10.0          # reference temperature [degC]
     S_uniform: float = 35.0
 
     # Linear EOS
@@ -198,7 +198,7 @@ def _rest_state_latlon(grid, z_coord, config):
     wall_mask[-1, :] = 0.0
     return rest_state_latlon_cgrid_ocean(
         grid, z_coord, H_max=config.H_max,
-        T_water_init_C=config.T_ref, T_deep=config.T_ref,
+        T_water_init_C=config.T_ref_C, T_deep=config.T_ref_C,
         S_uniform=config.S_uniform,
         land_mask_override=wall_mask,
     )
@@ -208,7 +208,7 @@ def _rest_state_mpas(mesh, z_coord, config):
     from legoesm.ocean.init_mpas import rest_state_mpas_ocean
     state = rest_state_mpas_ocean(
         mesh, z_coord, H_max=config.H_max,
-        T_water_init_C=config.T_ref, T_deep=config.T_ref,
+        T_water_init_C=config.T_ref_C, T_deep=config.T_ref_C,
         S_uniform=config.S_uniform,
     )
     lat_deg = np.degrees(np.asarray(mesh.latCell))
@@ -231,7 +231,7 @@ def _jet_envelope(lat_deg, config):
 def _set_uniform_stratification(state, z_coord, config, grid):
     """Set T = background stratification + depth-uniform meridional gradient.
 
-    T(y,z) = T_ref + dTdz*z + dTdy * y_integrated_envelope(y)
+    T(y,z) = T_ref_C + dTdz*z + dTdy * y_integrated_envelope(y)
 
     Classical Eady: dT/dy is depth-uniform, so N² is unaffected by the
     meridional gradient and the interior PV is zero.  The instability
@@ -260,7 +260,7 @@ def _set_uniform_stratification(state, z_coord, config, grid):
 
     mask = np.asarray(state.land_mask.data)
     for k in range(nlev):
-        T_zk = config.T_ref + config.dTdz * z_full[k]
+        T_zk = config.T_ref_C + config.dTdz * z_full[k]
         T_data[:, :, k] = (T_zk + T_anomaly[:, np.newaxis]) * mask
 
     return state._replace(T=Field(jnp.array(T_data), name="T",
@@ -294,7 +294,7 @@ def _set_uniform_stratification_mpas(state, z_coord, config, mesh):
     # Depth-uniform dT/dy (classical Eady: no exp(z/D) weighting)
     mask = np.asarray(state.land_mask.data)
     for k in range(nlev):
-        T_zk = config.T_ref + config.dTdz * z_full[k]
+        T_zk = config.T_ref_C + config.dTdz * z_full[k]
         T_data[:, k] = (T_zk + T_anomaly) * mask
 
     return state._replace(T=Field(jnp.array(T_data), name="T",

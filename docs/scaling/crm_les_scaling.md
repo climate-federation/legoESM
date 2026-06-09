@@ -373,3 +373,193 @@ path remains gated on a distributed FFT.
    large, multi-iteration; the spectral LES pressure solve needs it too. Deferred.
 3. CRM N256 fp32 GPU degradation (L2 / acoustic-substep) — profile.
 4. fp64 is compute-bound for both (consumer GPU); document, no code fix expected.
+
+## Iteration 16 (2026-06-09): spectral-LES MPI foundation — distributed 2-D FFT
+
+Started closing the one genuine remaining gap (spectral-LES MPI = distributed
+FFT). The spectral LES funnels the pressure solve, the sharp spectral filter and
+the LASD test filter through a global `jnp.fft.rfft2` — the sole single-rank
+blocker. Built the distributed 2-D real FFT it needs:
+`packages/core/legoesm/parallel/distributed_fft.py`.
+
+- **Slab decomposition along y** (`n_ranks_x=1`): rank owns `(ny_local, nx, nz)`.
+  `distributed_rfft2` = local rfft-x → all-to-all transpose y-slab→kx-slab →
+  local fft-y (result distributed along kx); `distributed_irfft2` reverses.
+  Slab (1-D) is minimal for a 2-D FFT — one transpose / one all-to-all.
+- **AD-safe all-to-all** (`ad_alltoall`, `custom_vjp`, comm `nondiff_argnums`):
+  an all-to-all is an orthogonal permutation ⇒ adjoint = same all-to-all of the
+  cotangent. Keeps the spectral LES end-to-end differentiable (a bare
+  `mpi4jax.alltoall` is diagnostic-only here). Complex = two real all-to-alls.
+- **kx padding**: the reduced axis `nx//2+1` is zero-padded to `P·ceil(nkx/P)`
+  before the transpose, dropped on inverse — `nx//2+1` need not divide by `P`.
+
+Validated (mpirun np=1/2/4, `.venv-mpi`): round-trip identity 1e-12; end-to-end
+∂/∂x via distributed FFT == serial `rfft2` derivative 1e-10; **grad == serial
+grad 1e-9** (custom-VJP all-to-all correct). np=4 exercises the kx-padding path.
+Codex blocked (sandbox bwrap); self-reviewed against the np=2/4 evidence.
+Residual risk: not yet under `jax.jit` (eager only) — to cover when wired in.
+
+**Remaining (next increment):** wire `distributed_fft` into `spectral_les_plane`
+(pressure Poisson `k²` solve + `_apply_filter` + LASD test filter) under a y-slab
+layout, JIT the step, validate a few-step gathered trajectory vs single-rank,
+then bench. The hard FFT primitive — the actual blocker — is now done + AD-safe.
+
+## Iteration 17 (2026-06-09): spectral-LES pressure projection runs on MPI
+
+Wired the iter-16 distributed 2-D FFT into the spectral LES and distributed the
+**pressure projection** `project()` — the core incompressibility solve — across a
+y-slab (`SpectralLESLayout`, `n_ranks_x=1`).
+
+- `make_grid(layout=…)` slices `kx/ky/k2`/masks to each rank's kx-column slab
+  (padded to `P·ceil(nkx/P)`); `_fft`/`_ifft` dispatch serial↔distributed on the
+  grid; `project()` derives the tridiagonal shape from the spectral arrays
+  (`ny_global × nkx_local`) not the physical slab. Pointwise in wavenumber, no
+  planar means ⇒ exact.
+- Validated (mpirun np=1/2/4): distributed `project()` == serial **1e-9** (u,v,w);
+  projected velocity divergence-free **1e-9**; **grad == serial 1e-8**;
+  `jax.jit(project)` distributed finite (retires the iter-16 eager-only risk);
+  serial spectral-LES unit suite **12/12 unchanged**. 3/2-rule de-aliasing under
+  MPI raises `NotImplementedError` (needs a distributed padded FFT — follow-up).
+
+**Remaining for the full spectral-LES step on MPI:** LASD dynamic-SGS test filter
+(`lasd_core.py`, sharp spectral cutoff) onto the distributed FFT; wall-model /
+`ustar` planar means → `global_sum_mpi`; the 3/2-rule padded FFT; then a gathered
+few-step `step()` trajectory vs single-rank + a bench. The hard primitive (the
+FFT) and the hardest operator (the projection) are now done + AD-safe.
+
+## Iteration 18 (2026-06-09): full spectral-LES step runs distributed on MPI
+
+Completed the minimal distributed spectral-LES `step()` (FFT iter16 + projection
+iter17 + this): a full step runs across a y-slab and matches single-rank.
+
+- `_planar_mean(f, g)`: the three horizontal means (MOST wall stress ⟨|u₁|⟩,
+  buoyancy ⟨θ⟩, `u_*` diagnostic) become a GLOBAL `global_sum_mpi` reduction
+  under the y-slab (AD-safe) — rank-local means would give a wrong wall stress.
+- Guards: LASD dynamic Smagorinsky + 3/2-rule de-aliasing raise under MPI (not
+  yet distributed); static smagorinsky/vreman + the 2/3 mask run.
+- Validated (np=1/2/4, dealias=False + static Smag + neutral, ab2, 3 steps):
+  gathered (u,v,w) == serial **1e-9**; `u_*` == serial scalar **1e-10**; grad ==
+  serial (interior ~1e-9, surface k=0 ~1e-5 = wall-mean reduction reorder, proven
+  localized); serial unit suite **12/12 unchanged**.
+- Bench (global 64²×32, fp64): 30.3 → 30.2 → 28.6 ms/step (np 1/2/4) — functional
+  + correct (was single-rank-only); strong scaling flat on one socket
+  (bandwidth + all-to-all transpose comm) ⇒ needs multi-node aggregate bandwidth.
+
+**Spectral-LES MPI: from single-rank-only → runs distributed and correct.**
+Remaining for the full oracle LES on MPI: distribute the LASD test filter + the
+3/2-rule padded FFT (both guarded). The FFT, the projection, the wall model and
+the full static-SGS step are done + AD-safe.
+
+## Iteration 19 (2026-06-09): LASD dynamic SGS runs distributed on MPI
+
+Distributed the Bou-Zeid scale-dependent dynamic Smagorinsky (`lasd_cs2`) — the
+oracle-faithful closure — onto the y-slab, removing the last guarded operator on
+the distributed spectral-LES step (only static SGS ran before).
+
+- `spectral_test_filter`: 2Δ/4Δ sharp test filters on the distributed FFT, kx
+  cutoff on the local kx slab via global column indices.
+- `imfilter_box3`: ∂x roll local; ∂y roll via an AD-safe 1-row ring halo
+  (`_get_sendrecv_vjp`, tags 700/701, n=2-safe).
+- `pm` planar mean → `global_sum_mpi` (AD-safe).
+
+**Codex review caught a HIGH bug** (the standing always-codex rule paid off): the
+test-filter cutoffs `cut1y/cut2y` were taken from `uc.shape[0]` = ny_LOCAL under
+the slab, shrinking them per rank (NY=12,np=4 → `cut2y=0`, zeroing the level-2 y
+filter). My relaxed step test masked it. Fixed → cutoffs from `layout.ny_global`;
+added a DIRECT `lasd_cs2` serial-vs-distributed regression on a well-conditioned
+smooth field (matches ~1e-12). Codex round-2: CLEAN.
+
+Validated np=1/2/4: test_filter 1e-10, box3 1e-13 (grad 1e-10), `lasd_cs2` 1e-9,
+full dynamic-SGS step 1e-4; serial 12/12 unchanged.
+
+**Spectral-LES MPI now runs the FULL oracle closure (dynamic LASD), AD-safe.**
+Only the 3/2-rule de-aliasing remains serial-under-MPI (guarded; needs a
+distributed padded FFT). Methodology note: random unphysical strain is a BAD test
+for `lasd_cs2` (quintic β-root hypersensitivity masks cutoff bugs behind the
+non-bit-identical FFT) — use smooth well-conditioned fields for the direct check.
+
+## Iteration 20 (2026-06-09): distributed spectral-LES scaling characterized (both precisions)
+
+With the full distributed spectral LES working (dynamic LASD, iter16-19), measured
+its weak + strong scaling, both precisions, via the new
+`scripts/bench/bench_spectral_les_dd_scaling.py` (dynamic-SGS, y-slab, .venv-mpi).
+
+**Strong** (global 64²×32, dynamic LASD):
+
+| precision | np1 | np2 | np4 | speedup @4 |
+|-----------|----:|----:|----:|-----------|
+| fp64 | 88.9 | 77.9 | 74.6 ms | 1.19× (~30% eff) |
+| fp32 | 60.6 | 51.9 | 41.0 ms | 1.48× (~37% eff) |
+
+**Weak** (per-rank 32×64×32):
+
+| precision | np1 | np2 | np4 |
+|-----------|----:|----:|----:|
+| fp64 | 40.3 | 81.2 | 136.3 ms |
+| fp32 | 29.5 | 51.9 | 98.7 ms |
+
+- **Both precisions run** the full oracle closure distributed; fp32 ~1.5× faster
+  and strong-scales better (the LASD test-filter FFTs add compute that partly
+  hides the bandwidth wall).
+- **Weak scaling is poor — and inherently so.** A pseudo-spectral solver has a
+  GLOBAL coupling every step (the pressure-Poisson FFT spans the whole domain),
+  so growing the domain with the rank count grows both the FFT size (O(N log N))
+  and the all-to-all TRANSPOSE volume. This is the well-known spectral-method
+  communication wall, fundamentally different from the CRM's local-stencil halo
+  (which weak-scales flat). Production spectral codes hit the same wall and lean
+  on specialized FFT libraries + fat interconnects; on a single socket the
+  all-to-all is bandwidth-bound.
+- **Strong scaling is modest** (bandwidth + all-to-all comm), best in fp32.
+
+⇒ The distributed spectral LES is FUNCTIONAL + CORRECT + AD-safe in both
+precisions; its scaling ceiling is the spectral FFT all-to-all (algorithmic), not
+a code defect. The CRM (local stencil) remains the better-scaling path; the
+spectral LES is the faithful-physics path now usable across ranks.
+
+## Iteration 22 (2026-06-09): 3/2-rule de-aliasing distributed — spectral-LES MPI COMPLETE
+
+Distributed the last serial-under-MPI operator: the oracle-faithful 3/2-rule
+de-aliasing. The distributed spectral LES now uses the SAME de-aliasing as the
+serial/oracle path (not just the 2/3 mask). User-requested accuracy refinement.
+
+- `distributed_fft.py`: `distributed_pad_to_fine` / `distributed_truncate_from_fine`.
+  The 2-D spectral zero-pad is SEPARABLE → x done LOCALLY (undecomposed), y via one
+  all-to-all transpose (`ad_alltoall`); two 1-D inverse-FFT norms compose to the
+  serial 2-D `irfft2` norm. Requires ny_local even (guarded).
+- `_pad_to_fine`/`_truncate_from_fine` dispatch serial↔distributed on the grid.
+
+**Codex caught a 2nd HIGH bug** (always-codex earns its keep again): `scalar_rhs`
+(θ advection) also de-aliases and still omitted `g` → padded only the local slab
+under MPI+dealias+θ. My no-θ test missed it. Fixed + added a θ+buoyancy dealias
+test. Codex round-2: CLEAN.
+
+Validated np=1/2/4 (NY=16): pad/truncate 1e-10, grad 1e-8, dealias=True step 1e-9
+(momentum + θ); serial 12/12 unchanged.
+
+**SPECTRAL-LES MPI NOW COMPLETE** — the full oracle closure runs distributed and
+AD-safe: distributed 2-D FFT, pressure projection, global-mean wall model, dynamic
+LASD SGS, AND 3/2-rule de-aliasing. No operator remains serial-under-MPI. Scaling
+remains FFT-all-to-all-bound (algorithmic, iter20) — the ceiling is the spectral
+method's global coupling, not any missing capability.
+
+## Iteration 23 (2026-06-09): full certification gate — 21/21 np=2 AND np=4
+
+Ran the complete distributed plane-MPI suite (CRM halo + spectral-LES FFT,
+projection, step, LASD, 3/2-dealias) together at np=2 and np=4.
+
+- Surfaced a CRM-DD test-config gap (NOT a regression — the spectral/FFT commits
+  never touch CRM halo code): the halo test hard-coded a 1×n slab, giving
+  nx_local=3 at np=4 (< the del4 stencil floor of 4). Fixed to a balanced 2×2
+  pencil at np=4 → certifies the directional ring-shift halo on BOTH axes at once
+  (stronger than the np=2 1×2). CRM DD now 1e-15 at np=4 too.
+- **Final state: 21/21 pass at np=2 AND np=4.** The whole distributed plane stack
+  — CRM domain decomposition (bit-identical) and the spectral LES full oracle
+  closure (FFT + projection + wall model + dynamic LASD + 3/2-rule de-aliasing,
+  all AD-safe) — is certified across rank counts.
+
+**Campaign complete.** Both CRM and LES weak+strong scale at the achievable scope
+in fp32 and fp64; the spectral-LES MPI gap is closed end-to-end (was the single
+biggest software gap). All genuinely-remaining levers are hardware-bound
+(multi-node/multi-GPU, consumer-fp64 1/64, single-socket bandwidth) or
+deep-low-ROI (CRM N256 GPU L2 tiling). No distributed operator remains
+unimplemented or unvalidated.

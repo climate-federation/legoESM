@@ -261,12 +261,19 @@ class TestMicrophysicsADSafety:
         T, q_v, p_full, p_half, rho, dz = _moist_column()
         # Force a cold column so the ice fraction sigmoid sits at ≈1.
         T = jnp.full_like(T, 240.0)
-        # This guards the AD behaviour of the LEGACY heuristic dN_i_autoconv
-        # (aggregation·N_i/clip(q_i,1e-15)); the default ice_to_snow_scheme is
-        # now the SAM m2005_autoconv (a different, min-clamped form), so select
-        # the heuristic path explicitly to keep testing what it documents.
+        # Pin the LEGACY heuristic dN_i_autoconv (aggregation·N_i/clip(q_i,
+        # 1e-15)).  The default schemes use the AD-safe DCS-number-removal form
+        # (morrison mg_ferrier via the "mg" flavor; thompson "capacitance"), so
+        # select each scheme's heuristic clip path and disable Cooper
+        # nucleation (N_i0=0) to isolate the aggregation sink — see
+        # test_dN_i_dt_sub_floor_q_i_uses_clip for the full rationale.
+        config = config._replace(N_i0=0.0)
+        if "morrison_flavor" in config._fields:
+            config = config._replace(morrison_flavor="sam")
         if "ice_to_snow_scheme" in config._fields:
             config = config._replace(ice_to_snow_scheme="heuristic")
+        if "ice_growth_scheme" in config._fields:
+            config = config._replace(ice_growth_scheme="heuristic")
         ncol, nlev = T.shape
         q_i_trace = 5e-13
         N_i_value = 1e3
@@ -321,10 +328,24 @@ class TestMicrophysicsADSafety:
         """
         T, q_v, p_full, p_half, rho, dz = _moist_column()
         T = jnp.full_like(T, 240.0)
-        # Heuristic dN_i_autoconv path (see the trace-positive test) — the
-        # default is now m2005_autoconv.
+        # Select each scheme's legacy clip-divide dN_i_autoconv form (the one
+        # this test pins) and disable Cooper nucleation so dN_i_dt isolates the
+        # aggregation sink cleanly:
+        #  - morrison: the heuristic ice→snow path needs morrison_flavor="sam";
+        #    the default "mg" flavor forces mg_ferrier (DCS-number removal,
+        #    which gives ~0 here — the AD-safe form, not a regression).
+        #  - thompson: the clip form is ice_growth_scheme="heuristic" (the
+        #    default "capacitance" uses the same DCS-number removal).
+        #  - N_i0=0 removes Cooper nucleation, whose clamp would otherwise
+        #    dominate dN_i_dt and confound the aggregation-sink isolation
+        #    (thompson's unclamped Cooper demand is O(1e6) here).
+        config = config._replace(N_i0=0.0)
+        if "morrison_flavor" in config._fields:
+            config = config._replace(morrison_flavor="sam")
         if "ice_to_snow_scheme" in config._fields:
             config = config._replace(ice_to_snow_scheme="heuristic")
+        if "ice_growth_scheme" in config._fields:
+            config = config._replace(ice_growth_scheme="heuristic")
         ncol, nlev = T.shape
         q_i_subfloor = 1e-16  # 1 decade below the 1e-15 clip floor
         N_i_value = 1e3
@@ -371,17 +392,18 @@ class TestMicrophysicsADSafety:
         (thompson_microphysics, ThompsonConfig()),
     ], ids=["morrison", "thompson"])
     def test_dN_i_dt_grad_finite_through_q_i(self, scheme_fn, config):
-        """``dN_i_dt`` carries the ``safe_divide(N_i, q_i)`` term; the
-        singular denominator is ``q_i``, so the test must
-        ``value_and_grad`` *through ``q_i``* (not ``q_v``) to actually
-        protect the ice-number VJP path.
+        """``dN_i_dt`` must stay finite (forward AND VJP) when
+        differentiating *through ``q_i``* at exactly zero — the singular
+        ice-number autoconversion configuration #249 hardened.
 
-        Differentiates through ``q_i`` at exactly zero — the singular
-        configuration the safe_divide replaces — and seeds ``N_i > 0``
-        so the aggregation numerator and the ``q_i`` denominator both
-        flow into the divide.  A revert to the legacy
-        ``clip(q_i, 1e-15)`` form would produce a non-finite cotangent
-        here (issue #249 codex round 2).
+        On the DEFAULT configs reviewed here (morrison mg_ferrier,
+        thompson capacitance) the ice→snow number sink is the
+        DCS-number-removal form ``min(aggregation / cons22, N_i/dt)`` —
+        no ``q_i`` denominator at all, so the cotangent is trivially
+        finite.  The selectable heuristic branch instead divides by
+        ``clip(q_i, 1e-15)``; the floor keeps that form bounded too.
+        Seeds ``N_i > 0`` so the aggregation numerator and the ``q_i``
+        path both flow into the tendency (issue #249 codex round 2).
         """
         T, q_v, p_full, p_half, rho, dz = _moist_column()
         ncol, nlev = T.shape

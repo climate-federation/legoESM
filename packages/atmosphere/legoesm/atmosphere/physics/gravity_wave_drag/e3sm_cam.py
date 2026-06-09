@@ -260,8 +260,12 @@ def _interface_proj(ubm: jax.Array, mag_sfc: jax.Array) -> jax.Array:
 # gw_cm_src: frontal source
 # ---------------------------------------------------------------------------
 
-def _front_fav(pgwv: int, dc: float, c0: float, taubgnd: float, dtype):
+def _front_fav(pgwv: int, dc: float, c0: float, taubgnd: float, dtype,
+               dca: float = 0.1):
     """Average Gaussian over each phase-speed bin (E3SM gw_front_init).
+
+    ``dca`` is the sub-bin c-grid spacing [m/s] for the quadrature
+    (E3SM ``gw_front.F90`` ``dca``; default 0.1).
 
     Returns ``fav`` of length ``2*pgwv+1`` (index 0 = wave -pgwv).
     """
@@ -270,7 +274,6 @@ def _front_fav(pgwv: int, dc: float, c0: float, taubgnd: float, dtype):
     # cref(l) = l*dc for l = -pgwv..pgwv
     ls = jnp.arange(-pgwv, pgwv + 1)
     cref = ls.astype(dtype) * dc
-    dca = 0.1
     # Fortran nint = round half away from zero (Python round is banker's
     # rounding -> differs on exact .5 ties; codex iter-1 #8).
     n_sub = int(math.floor(dc / dca + 0.5)) - 1
@@ -300,6 +303,7 @@ def gw_cm_src(
     frontgfc: float,
     kbot: int,
     kfront: int,
+    dca: float = 0.1,
 ):
     """Frontal source (E3SM gw_cm_src).
 
@@ -335,7 +339,7 @@ def gw_cm_src(
     ubm = u * xv[:, None] + v * yv[:, None]
     ubi = _interface_proj(ubm, mag)
 
-    fav = _front_fav(pgwv, dc, c0, taubgnd, u.dtype)   # (nwav,)
+    fav = _front_fav(pgwv, dc, c0, taubgnd, u.dtype, dca)   # (nwav,)
     # E3SM gw_front.F90:169 — launch_wave = frontgf(:,kfront) > frontgfc.
     launch = gather(frontgf, kfront_i) > frontgfc      # (ncol,) tested at kfront
     tau_launch = jnp.where(launch[:, None], fav[None, :], 0.0)  # (ncol, nwav)
@@ -1350,6 +1354,7 @@ def e3sm_cam_gwd(
             u, v, frontgf_col, config.pgwv, config.dc,
             config.frontal.c0, config.frontal.taubgnd,
             config.frontal.frontgfc, kbot, kfront,
+            config.frontal.front_spectrum_dc_resolution,
         )
         orographic_only = False
         # E3SM tapers the frontal (CM) source by cos(lat) on structured grids.

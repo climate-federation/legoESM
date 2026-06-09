@@ -74,7 +74,7 @@ class HeldLarichevConfig:
 
     # Stratification + shear (matches EadyUniformConfig).
     N: float = 1.2e-3
-    T_ref: float = 10.0
+    T_ref_C: float = 10.0          # reference temperature [degC]
     S_uniform: float = 35.0
     alpha_T: float = 2.0e-4
     rho_0: float = 1024.0
@@ -107,7 +107,7 @@ def _to_eady_cfg(cfg: HeldLarichevConfig) -> EadyUniformConfig:
         lat_south=cfg.lat_south, lat_north=cfg.lat_north,
         lat_center=cfg.lat_center,
         lon_west=cfg.lon_west, lon_east=cfg.lon_east,
-        N=cfg.N, T_ref=cfg.T_ref, S_uniform=cfg.S_uniform,
+        N=cfg.N, T_ref_C=cfg.T_ref_C, S_uniform=cfg.S_uniform,
         alpha_T=cfg.alpha_T, rho_0=cfg.rho_0,
         U_surface=cfg.U_surface, jet_width_deg=cfg.jet_width_deg,
         jet_depth_scale=cfg.jet_depth_scale,

@@ -64,7 +64,7 @@ class RegionalGyreConfig:
     """
     # Background state
     T_water_init_C: float = 20.0        # Surface temperature [degC]
-    T_deep: float = 2.0            # Deep ocean temperature [degC]
+    T_deep_C: float = 2.0            # Deep ocean temperature [degC]
     scale_depth: float = 1000.0    # Temperature e-folding depth [m]
     S_uniform: float = 35.0        # Salinity [PSU]
 

@@ -297,8 +297,11 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig) -> Callable:
         # Without this cap, KPP can produce O(1-10) m²/s in deep
         # boundary layers, violating explicit-diffusion stability on
         # thin stretched-grid surface cells (dz ~ 20m, dt ~ 300s).
-        # Use 0.25 (not 0.5) for safety margin.
-        _dt_phys = 300.0  # physics timestep [s] — conservative estimate
+        # Use 0.25 (not 0.5) for safety margin.  The CFL timestep is a
+        # KPP config field (default 300 s); set it to the ocean dynamics
+        # dt so the cap matches the real explicit-diffusion stability
+        # limit instead of a buried constant (slopbuster Pass 10).
+        _dt_phys = cfg.cfl_cap_dt_s  # physics timestep [s] for CFL cap
         _dz = z_coord.dz_ref  # (nlev,)
         _dz_min_half = jnp.minimum(_dz[:-1], _dz[1:])  # (nlev-1,)
         _Av_max = 0.25 * _dz_min_half**2 / _dt_phys  # (nlev-1,)

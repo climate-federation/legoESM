@@ -37,6 +37,8 @@ from pathlib import Path
 
 import numpy as np
 
+from legoesm import constants
+
 
 def _load_history_csv(path: Path) -> list[dict]:
     if not path.exists():
@@ -252,7 +254,7 @@ def main() -> int:
                 lat_deg.size, lon_deg.size
             ):
                 # Fallback: cos(lat)-weighted nominal cell area.
-                R_e = float(getattr(grid, "radius", 6.371e6))
+                R_e = float(getattr(grid, "radius", constants.R_earth))
                 dlon_g = 2.0 * np.pi / lon_deg.size
                 dlat_g = np.pi / lat_deg.size
                 cell_area = (

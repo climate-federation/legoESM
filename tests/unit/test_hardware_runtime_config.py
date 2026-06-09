@@ -71,7 +71,9 @@ class TestApplyHardwareConfig:
             return_value=_dummy_cfg(),
         ) as create_mesh:
             apply_hardware_config(cfg)
-        create_mesh.assert_called_once_with(n_devices=3, backend="cpu")
+        create_mesh.assert_called_once_with(
+            n_devices=3, backend="cpu", allow_level_fallback=False
+        )
 
     def test_parallelism_n_devices_overrides_legacy_devices(self):
         cfg = Config.from_dict(
@@ -91,7 +93,9 @@ class TestApplyHardwareConfig:
             return_value=_dummy_cfg(),
         ) as create_mesh:
             apply_hardware_config(cfg)
-        create_mesh.assert_called_once_with(n_devices=6, backend="cpu")
+        create_mesh.assert_called_once_with(
+            n_devices=6, backend="cpu", allow_level_fallback=False
+        )
 
     def test_distributed_mode_uses_initialize_distributed(self):
         cfg = Config.from_dict(

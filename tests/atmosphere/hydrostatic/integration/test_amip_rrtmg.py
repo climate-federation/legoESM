@@ -291,7 +291,7 @@ class TestAMIPWithRRTMG:
             co2_ppmv=415.0, ch4_ppbv=1900.0, n2o_ppbv=332.0,
             sfc_emissivity=0.98, sfc_albedo=0.06, S_0=1360.0,
         )
-        sbm_cfg = SBMConfig(tau_c=7200.0, RH_ref=0.7)
+        sbm_cfg = SBMConfig(tau_c=7200.0, rh_ref=0.7)
 
         sigma_full = sigma.sigma_full
         sigma_half = sigma.sigma_half

@@ -13,7 +13,7 @@ class PrescribedForcingConfig(NamedTuple):
     tau_y: float = 0.0           # Meridional wind stress [N/m^2]
     Q_net: float = 0.0           # Net surface heat flux [W/m^2] (+ into ocean)
     E_minus_P: float = 0.0       # Evaporation minus precipitation [m/s]
-    wind_profile: str = "constant"   # "constant", "cosine_latitude", "single_gyre", "double_gyre", "double_gyre_sin2", "double_gyre_tapered", or "global_wind"
+    wind_profile: str = "constant"   # "constant", "cosine_latitude", "single_gyre", "double_gyre", "double_gyre_sin2", "double_gyre_tapered", "channel_sine", "global_wind", or "two_belt"
     tau_max: float = 0.1         # Max wind stress for wind profiles [N/m^2]
     tropical_wind_scale: float = 1.0  # Scale factor for wind stress within
                                        # ±tropical_wind_lat_deg of equator.

@@ -38,9 +38,9 @@ class SBMConfig(NamedTuple):
     ------
     tau_c : float
         Relaxation timescale [s] (default 7200 = 2 hours).
-    RH_ref : float
+    rh_ref : float
         Reference relative humidity for moisture profile (default 0.7).
-    CAPE_threshold : float
+    cape_threshold : float
         Minimum CAPE [J/kg] to trigger convection (default 70.0).
     T_min_convect : float
         Minimum temperature [K] for convection (default 200.0).
@@ -48,8 +48,8 @@ class SBMConfig(NamedTuple):
         Sigmoid sharpness for smooth trigger [1/(J/kg)] (default 0.01).
     """
     tau_c: float = 7200.0
-    RH_ref: float = 0.7
-    CAPE_threshold: float = 70.0
+    rh_ref: float = 0.7
+    cape_threshold: float = 70.0
     T_min_convect: float = 200.0
     # Default 0.1 (was 0.01).  At CAPE=0 the looser 0.01 gives
     # ``sigmoid(0.01·-70) ≈ 0.33`` (33 % activation when CAPE is zero
@@ -784,6 +784,10 @@ class EmanuelConfig(NamedTuple):
     # ``level_window_sharpness`` (ICB/INB cloud edges), which must stay
     # moderate to keep the cloud-top/base transition differentiable.
     strict_index_sharpness: float = 20.0
+    # Maximum precipitation efficiency EPMAX in the precip-efficiency EP =
+    # EPMAX·(1 − ELACRIT/CLW), clipped to [0, EPMAX] (oracle convect43c.f
+    # ``EPMAX = 0.999``).
+    precip_efficiency_max: float = 0.999
 
 
 class TiedtkeConfig(NamedTuple):

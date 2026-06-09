@@ -163,6 +163,9 @@ def main():
         v = state.v - rc * (state.v - state.v.mean((0, 1), keepdims=True))
         w = state.w - rf * state.w
         th = state.theta - rc * (state.theta - state.theta.mean((0, 1), keepdims=True))
+        # Sponge damping breaks ∇·u=0; re-project before the next step (codex
+        # physics review 2026-06-09). θ is a scalar — unaffected by projection.
+        u, v, w = sl.project(u, v, w, dt=dt, g=g)
         return state._replace(u=u, v=v, w=w, theta=th), us
     print(f"[spectral-SBL] {args.nx}x{args.ny}x{args.nz} Lz={args.Lz}m Ug={args.Ug} "
           f"f={args.fcor:.2e} Q0={args.Q0} {args.time_scheme} "

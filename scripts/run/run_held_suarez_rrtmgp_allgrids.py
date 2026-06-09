@@ -98,7 +98,7 @@ def run_grid(name: str, grid_kwargs: dict) -> dict:
         cloud_scheme="none",
         topography="flat",
         T_init=300.0,
-        RH_init=0.0,
+        rh_init=0.0,
         precision="fp64",
         held_suarez_forcing=True,
     )

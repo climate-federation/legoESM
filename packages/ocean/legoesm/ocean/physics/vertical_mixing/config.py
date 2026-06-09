@@ -141,6 +141,12 @@ class KPPConfig(NamedTuple):
     a_s: float = -28.86       # LMD94 scalar convective constant (slope = c_s)
     crossing_sharpness: float = 20.0  # Sigmoid sharpness for h_bl crossing-depth selector
     crossing_threshold: float = 0.1   # Crossing-strength threshold for h_bl blend
+    # Timestep [s] used to derive the explicit-diffusion CFL ceiling
+    # A_v_max = 0.25 * min(dz_k, dz_k+1)^2 / cfl_cap_dt_s on the MPAS path.
+    # MUST be set to the ocean dynamics dt for the cap to be correct: a
+    # value smaller than the real dt over-damps; larger risks instability.
+    # Default 300.0 preserves the historical hard-coded estimate.
+    cfl_cap_dt_s: float = 300.0
 
 
 class VerticalMixingConfig(NamedTuple):

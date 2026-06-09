@@ -242,7 +242,7 @@ def _eady_legoesm_config():
         H_max=5500.0,
         lat_south=16.0, lat_north=34.0, lat_center=25.0,
         lon_west=0.0, lon_east=10.0,
-        N=1.2e-3, T_ref=10.0, S_uniform=35.0,
+        N=1.2e-3, T_ref_C=10.0, S_uniform=35.0,
         alpha_T=_VEROS_BETA_T, rho_0=_VEROS_RHO_REF,
         U_surface=0.8, jet_width_deg=5.0, jet_depth_scale=5500.0,
         T_perturbation_K=0.1, perturbation_wavenumber=3,

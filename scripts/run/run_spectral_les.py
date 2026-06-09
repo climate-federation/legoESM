@@ -174,6 +174,9 @@ def main():
         u = u - rc * (u - u.mean((0, 1), keepdims=True))   # sponge: damp fluctuations
         v = v - rc * (v - v.mean((0, 1), keepdims=True))
         w = w - rf * w                                       # sponge: damp w toward 0
+        # The z-varying sponge damping does NOT preserve ∇·u=0; re-project so the
+        # next step starts incompressible (codex physics review 2026-06-09).
+        u, v, w = sl.project(u, v, w, dt=dt, g=g)
         fx = fx + gain * (u_bulk_target - jnp.mean(u))      # slow integral control
         return state._replace(u=u, v=v, w=w), fx, us
     tau = args.Lz / args.ustar                              # eddy turnover [s]

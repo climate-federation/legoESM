@@ -148,7 +148,7 @@ _CASES = {
     ),
     "wangara": dict(
         theta_ref_fn=wangara_theta_ref,
-        f_c=2.0 * 7.2921e-5 * float(np.sin(np.deg2rad(-34.5))),
+        f_c=2.0 * constants.Omega * float(np.sin(np.deg2rad(-34.5))),
         ug=-8.0, vg=0.0, z0=0.1,
         moist=True,
         nx=48, ny=48, nlev=50, dx=100.0, H=2500.0, dz_sfc=20.0,

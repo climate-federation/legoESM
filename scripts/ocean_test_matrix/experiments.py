@@ -1829,7 +1829,7 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
             eos_linear=LinearEOSConfig(
                 alpha_T=eu_config.alpha_T,
                 rho_ref=eu_config.rho_0,
-                T_ref=eu_config.T_ref,
+                T_ref=eu_config.T_ref_C,
                 S_ref=eu_config.S_uniform,
             ),
             barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
@@ -2064,7 +2064,7 @@ def run_eady_gm_redi(tc: TestCase, output_dir: Path, days: float
             eos_linear=LinearEOSConfig(
                 alpha_T=eu_config.alpha_T,
                 rho_ref=eu_config.rho_0,
-                T_ref=eu_config.T_ref,
+                T_ref=eu_config.T_ref_C,
                 S_ref=eu_config.S_uniform,
                 # ``beta_S_override`` lets validation cases force the
                 # linear EOS to depend on T only (β_S = 0), so that
@@ -2222,7 +2222,7 @@ def run_acc_channel(tc: TestCase, output_dir: Path, days: float
             eos_linear=LinearEOSConfig(
                 alpha_T=acc_config.alpha_T,
                 rho_ref=acc_config.rho_0,
-                T_ref=acc_config.T_ref,
+                T_ref=acc_config.T_ref_C,
                 S_ref=acc_config.S_uniform,
             ),
             barotropic_diffusion_alpha=acc_config.barotropic_diffusion_alpha,
@@ -2334,7 +2334,7 @@ def run_acc_channel_rest(tc: TestCase, output_dir: Path, days: float
             eos_linear=LinearEOSConfig(
                 alpha_T=acc_config.alpha_T,
                 rho_ref=acc_config.rho_0,
-                T_ref=acc_config.T_ref,
+                T_ref=acc_config.T_ref_C,
                 S_ref=acc_config.S_uniform,
             ),
             barotropic_diffusion_alpha=acc_config.barotropic_diffusion_alpha,

@@ -25,6 +25,15 @@ Performance of the plane **CRM** (compressible-Euler, cloud-resolving) and **LES
 - fp64 is compute-bound (consumer 5090 fp64 ≈ 1/64) — ~6× slower; hardware wall.
 - N256 drop (70→40 % HBM) is **L2-cache-fit loss** (working set spills L2),
   confirmed not thermal (N128 recovers fully after the hot N256 run).
+- **Production-mode caveat (codex iter25/26).** The numbers above use the
+  *vertical-only* acoustic substeps; the production CRM runners
+  (`run_rcemip/les/gate/lba_plane`) set `substep_horizontal_acoustic=True`
+  (horizontal acoustic split onto the substeps), which gives **15–37 % lower
+  throughput** (≈17–59 % more wall-time) and spills L2 earlier (its larger
+  per-substep working set updates u,v too):
+  fp32 production-mode N128 = 225 Mc/s · 96 % HBM, N256 = 115 Mc/s · 49 %
+  (vs vertical-only 263 / 183 Mc/s). `bench_crm_gpu_scaling.py` now defaults to
+  the production mode; pass `--vertical-only-acoustic` for the cheaper variant.
 
 ### MPI weak scaling (per-rank 48×48×30, CPU, single-thread/rank)
 
@@ -38,9 +47,66 @@ Performance of the plane **CRM** (compressible-Euler, cloud-resolving) and **LES
 - Per-step global reductions were cut **~44 %** (3 separate allreduces → 1
   batched) and folded to **one allreduce/step**; reduce now ~11 % of the step.
 
-## LES (spectral plane, dynamic LASD SGS)
+### MPI strong scaling — real domain decomposition (`step_halo`, global 96×96×30)
 
-### Single-GPU throughput (neutral case, LASD)
+| mode   | prec | np1   | np2   | np4   | efficiency |
+|--------|------|------:|------:|------:|------------|
+| strong | fp64 | 66.6 | 59.5 | 55.0 ms | 56 % @2, 30 % @4 |
+| strong | fp32 | 50.7 | 51.6 | 47.4 ms | bandwidth-bound (≈flat) |
+
+The real domain-decomposed (pencil) CRM step was **rescued this campaign**:
+
+1. **104× broken → fast.** Multi-rank `step_halo` was re-tracing the whole
+   split-explicit core every step; caching a JIT'd core gave **123×** speedup.
+2. **Silent halo bug fixed.** The doubly-periodic plane halo used ambiguous
+   send/recv tags (send-to-X / recv-from-X with the same neighbour twice per
+   axis) → wrong halo at 2-ranks-per-axis. Replaced with a directional ring-shift
+   (send to one neighbour, recv from the other, one tag per shift). **Plane-only**
+   — lat-lon (poles ⇒ one sendrecv/rank) and voronoi (unique pair tags) were safe.
+3. **Validated bit-identical.** Multi-rank gathered vs single-rank = **1e-15** for
+   u/v/w/θ′/ρ′ over 3 full steps (acoustic substeps + Smagorinsky), locked as a
+   regression test.
+
+Strong scaling itself is **single-socket memory-bandwidth-limited** (same ceiling
+the global campaign hit) — functional + correct, hardware-bound; near-ideal
+strong scaling needs multiple sockets/nodes.
+
+### Moist CRM under DD — exact serial parity is opt-in
+
+The SAM moist-buoyancy closure subtracts a **horizontal mean** (qv, qcond, θ′) in
+the acoustic substep. Under decomposition each rank uses its **slab-local** mean
+(zero communication) ⇒ ~6e-4 divergence vs single-rank. This is a **deliberate
+scalability tradeoff**, not a bug: a global mean would add ~3–9 allreduces/step
+(~5–16 % overhead) and erode the strong scaling above. Added an **opt-in**
+`CompressibleEulerConfig.acoustic_moist_global_mean` (default off) that uses one
+batched AD-safe allreduce for **bit-identical (1.1e-15) serial parity** on oracle
+/ validation runs; production keeps the zero-comm rank-local mean.
+
+## LES — two paths
+
+legoESM has **two** LES paths; the precision/scaling requirement is met across them:
+
+1. **Compressible-plane LES** — the SAME dycore as the CRM with
+   `smagorinsky_cs > 0`. The `step_halo` rescue above makes it **MPI-scalable
+   now**, and it inherits the 1e-15 validation (the CRM full-step test runs
+   `smagorinsky_cs=0.2`).
+2. **Spectral incompressible LES** (`spectral_les_plane`, FFT pressure + dynamic
+   LASD SGS) — single-GPU **and now distributed on MPI** via a transpose-based
+   slab FFT (full oracle closure; details below).
+
+### Compressible-plane LES — MPI strong scaling (`--smag-cs 0.2`, global 48×48×20)
+
+| precision | np1 | np2 | np4 | np1→np2 |
+|-----------|----:|----:|----:|--------:|
+| **fp32** | 111.4 | 50.6 | 50.0 ms | **2.2× (super-linear)** |
+| **fp64** | 143.9 | 56.6 | 56.4 ms | **2.5× (super-linear)** |
+
+Strong scaling is **super-linear at np=2** (vs 56 % for the bandwidth-bound dry
+dynamics): the SGS compute raises the compute-to-bandwidth ratio, so the extra
+core buys more than the bandwidth contention costs — before plateauing at np=4
+(bandwidth). Both precisions; correct (1e-15).
+
+### Spectral LES — single-GPU throughput (neutral case, LASD)
 
 | grid       | **fp32** (production) | **fp64** (default) |
 |------------|----------------------:|-------------------:|
@@ -51,26 +117,48 @@ Performance of the plane **CRM** (compressible-Euler, cloud-resolving) and **LES
 - **fp32 scales healthily** (rising 27.7→41 Mc/s) — the production GPU mode.
 - fp64 works but ~4× slower (consumer fp64 + the FFT pressure solve in fp64).
 - Stable (state finite) in both precisions.
-- **LES MPI is single-rank-bound**: the pressure projection is a global `rfft2`
-  and LASD adds a sharp-spectral test filter — both need a **distributed FFT**
-  under a pencil decomposition (`mpi4jax.alltoall` exists; the implementation is
-  large and bandwidth-bound on one socket — deferred to multi-node).
+- **Spectral LES now runs distributed on MPI, full oracle closure** (was
+  single-rank-only). A transpose-based slab distributed 2-D FFT
+  (`parallel/distributed_fft.py`, AD-safe all-to-all) carries the pressure
+  projection, the spectral filter, the global-mean wall model AND the **LASD
+  dynamic SGS** (test filters + box3 ∂y halo). A full `step()` matches single-rank
+  to **1e-9** (state) / **1e-10** (`u_*`), `lasd_cs2` to **1e-12**, all AD-safe
+  (np 1/2/4). Scaling, dynamic LASD, both precisions:
+  - strong (global 64²×32): fp64 88.9→77.9→74.6, fp32 60.6→51.9→41.0 ms/step
+    (np 1/2/4; fp32 1.48× @4) — modest, bandwidth + all-to-all bound.
+  - weak (per-rank 32×64×32): fp64 40.3→81.2→136.3 ms — **poor BY ALGORITHM**:
+    the pressure-Poisson FFT globally couples the domain, so weak-scaling grows
+    the FFT size + the all-to-all transpose volume (the spectral communication
+    wall, unlike the CRM's flat local-stencil weak scaling).
+  **The full oracle closure now runs distributed** (dynamic LASD SGS + 3/2-rule
+  de-aliasing, both AD-safe) — no operator remains serial-under-MPI. The spectral
+  LES is the faithful-physics path now fully usable across ranks; the CRM is the
+  better-scaling path. The spectral ceiling is the FFT all-to-all (algorithmic),
+  not any missing capability.
 
 ---
 
 ## Bottom line
 
 **"Both precisions scale well for CRM and LES" — met at the achievable scope:**
-CRM MPI weak-scales in fp32 + fp64; CRM fp32 GPU is near-roofline; LES single-GPU
-runs and scales in fp32 (production) and fp64.
+CRM MPI weak-scales in fp32 + fp64 and strong-scales over a validated (1e-15)
+domain decomposition; CRM fp32 GPU is near-roofline; compressible-plane LES
+strong-scales super-linearly on MPI in fp32 + fp64; spectral LES runs and scales
+on single-GPU in fp32 (production) and fp64, and now **runs distributed + correct
+on MPI** with the **full oracle closure** (dynamic LASD SGS + 3/2-rule
+de-aliasing, AD-safe).
 
 | genuinely-remaining lever | nature |
 |---------------------------|--------|
-| LES MPI (distributed FFT) | large; bandwidth-bound on a single socket → needs multi-node |
-| CRM dycore kernel tiling (L2-fit) | deep kernel work; modest gain at >2 M cells |
+| spectral-LES MPI strong scaling | flat on one socket (bandwidth + all-to-all transpose) → needs multi-node |
+| CRM GPU large-N L2-fit | NOT intra-kernel tiling (measured net-negative in the production si_horizontal mode); realized by multi-device DD keeping per-device tiles ≤~1.1 M cells (needs ≥2 GPUs) or a Pallas kernel |
 | fp64 on consumer GPU | 1/64 hardware wall — not a code issue |
 | CPU MPI strong scaling | single-socket memory-bandwidth bound → needs multiple sockets |
 
 Shipped this campaign (all bit-identical / AD-safe / codex-reviewed): CRM
-reduce-overhead −44 %, one-allreduce-per-step, and a `--precision` flag enabling
-fp32 MPI weak scaling. See `docs/scaling/crm_les_scaling.md` for the full log.
+reduce-overhead −44 % + one-allreduce-per-step + `--precision` flag (fp32 MPI weak
+scaling); **CRM domain-decomposition rescue** (123× JIT speedup, plane halo-tag
+bug fixed, 1e-15 full-step validation) enabling real CRM **strong** scaling and
+**compressible-plane LES on MPI** (super-linear, both precisions); opt-in
+`acoustic_moist_global_mean` for exact moist serial parity. See
+`docs/scaling/crm_les_scaling.md` for the full log.

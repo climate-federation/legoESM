@@ -43,7 +43,7 @@ from legoesm.atmosphere.scm_forcing import SCMForcing
 
 
 _LATITUDE_DEG = -34.5
-_F_C = 2.0 * 7.2921e-5 * jnp.sin(jnp.deg2rad(_LATITUDE_DEG))
+_F_C = 2.0 * constants.Omega * jnp.sin(jnp.deg2rad(_LATITUDE_DEG))
 _THETA_INIT = 277.0
 _T_START_S = 9.0 * 3600.0
 

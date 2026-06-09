@@ -421,8 +421,8 @@ class TestSBM:
         T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
         config = SBMConfig(
             tau_c=jnp.array([3600.0, 7200.0, 14400.0]),
-            RH_ref=jnp.array([0.65, 0.75, 0.85]),
-            CAPE_threshold=jnp.array([10.0, 70.0, 150.0]),
+            rh_ref=jnp.array([0.65, 0.75, 0.85]),
+            cape_threshold=jnp.array([10.0, 70.0, 150.0]),
         )
 
         out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)

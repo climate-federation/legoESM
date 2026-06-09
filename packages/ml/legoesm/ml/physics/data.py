@@ -191,7 +191,7 @@ def capture_physics_teacher_snapshot(
             dq_r_dt_micro = _copy_array(micro_out.dq_r_dt)
             precip_micro = _copy_array(micro_out.precipitation)
         else:
-            if micro_config is None or not hasattr(micro_config, "RH_crit"):
+            if micro_config is None or not hasattr(micro_config, "rh_crit"):
                 micro_config = SundqvistConfig()
             rates = diagnose_sundqvist_process_rates(
                 T=T_col,
