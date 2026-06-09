@@ -359,6 +359,25 @@ CAVEATS (honest, flagged not hidden):
 4. Annual-mean siconc (no monthly icemod) over-ices summer / under-ices winter.
 
 
+### iter-D (2026-06-09): AMOC binning fix + marginal-sea SSS + merged main + higher-res runs
+- **AMOC/MHT binning OVER-COUNT FIXED** (5720f441/da75024e): `compute_{amoc,mht}_from_state_mpas` summed
+  u·sinα over a 2° lat-band → over-counted by ~N_rows. VERIFIED ×1.84 at ico6 / ×1.12 at ico5 vs the
+  analytic uniform-flow transport. Replaced with the latitude-circle SECTION (straddling cells, full normal
+  flux, oriented) → ×1.000 exact at any res; 28 AMOC tests pass; codex-clean (per-level NaN sanitize +
+  docstrings). **CORRECTED session AMOC** (were band-sum ×1.84): τ=60 ~7.2, τ=365 ~13.0 (vs NEMO 17.7) —
+  τ=365 closest; the SSS↔AMOC trade-off is only PARTIALLY decoupled by E−P (τ=60 holds SSS but AMOC ~7.2).
+  ACC (already a section) + SST/SSS unaffected.
+- **Marginal-sea SSS restoring** (1772032f): Baltic/Black Sea/Hudson/Okhotsk few-day restoring → fix the
+  enclosed-sea FRESH bias (the user-flagged continental salinity issue; unresolved straits + runoff). 11
+  regions total. 19 sss tests pass.
+- **Merged origin/main** (134c9490, 54 commits: CRM/plane MPI perf + atmosphere physics + federation) —
+  clean, no ocean conflicts, 96 ocean tests pass post-merge.
+- **SST hemispheric gaps (Antarctic warm +1.2 / NH cold −1.7) = RESOLUTION-limited** (user-flagged). The ice
+  -albedo helped the warm SH but the two CONFLICT on a single albedo (Antarctic wants more, NH wants less).
+  ico7 90-day already showed Antarctic +0.32 / NH-mid +0.22 on resolution alone. HIGHER-RES runs launched:
+  ico7 ~55km 2yr (8440837), latlon 0.5° 1yr (8440838), + ico6 τ60+marginal-sea (8440840, salinity attribution).
+  All with the SECTION-method AMOC. tripole ¼° stays compute-infeasible.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
