@@ -606,10 +606,81 @@ def _sw_albedo_factor(sw_down, ice_albedo):
     return np.asarray(sw_down, dtype=np.float64) * (1.0 - albedo_eff)
 
 
+def _ice_surface_heat(sw_down, q_non_sw, ice_albedo, *,
+                      under_ice: bool = False, tau_ice_sw: float = 0.03):
+    """Combine SW + non-SW surface heat into ``(sw_ocean, q_net)`` [W/m², +into
+    ocean] with an optional PRESCRIBED-ICE thermodynamic boundary (codex HIGH).
+
+    Three regimes (``ice_albedo`` = prescribed siconc in [0,1], or ``None``):
+
+    * ``ice_albedo is None`` -> NO albedo (bit-exact legacy default):
+      ``sw_ocean = sw_down``; ``q_net = q_non_sw + sw_down``.
+    * ``under_ice=False`` (albedo-only surrogate): ``sw_ocean`` = open/ice albedo-
+      weighted SW (:func:`_sw_albedo_factor`); full open-ocean ``q_non_sw``.
+    * ``under_ice=True`` (prescribed-ice boundary): under sea ice almost no SW
+      reaches the ocean and the open-ocean turbulent+LW fluxes do not act on the
+      ice-covered fraction.  Per-cell ice fraction ``sic`` blends open water and
+      ice::
+
+          sw_ocean = (1-sic)·sw_down·(1-α_ocean) + sic·sw_down·τ_ice_sw
+          q_net    = sw_ocean + (1-sic)·q_non_sw
+
+      ``τ_ice_sw`` (~0.03) is the small SW transmittance through ice/snow into the
+      ocean (vs the albedo-only surrogate's ``1-α_ice=0.35``, which over-warms the
+      under-ice ocean -- the Southern-Ocean warm bias).  At ``sic=0`` this equals
+      the albedo-only open-water value, so only ice-covered cells change.  The
+      under-ice relaxation toward the freezing point is applied as a post-step
+      state nudge (:func:`under_ice_freeze_relax`), NOT here, so it needs no
+      top-layer thickness in this flux producer."""
+    q_non_sw = np.asarray(q_non_sw, dtype=np.float64)
+    if not under_ice or ice_albedo is None:
+        sw_ocean = _sw_albedo_factor(sw_down, ice_albedo)
+        return sw_ocean, q_non_sw + sw_ocean
+    a_oc = float(constants.alpha_ocean_broadband)
+    sic = np.clip(np.nan_to_num(np.asarray(ice_albedo, dtype=np.float64),
+                                nan=0.0), 0.0, 1.0)
+    swd = np.asarray(sw_down, dtype=np.float64)
+    sw_open = swd * (1.0 - a_oc)
+    sw_ice = swd * float(tau_ice_sw)
+    sw_ocean = (1.0 - sic) * sw_open + sic * sw_ice
+    q_net = sw_ocean + (1.0 - sic) * q_non_sw
+    return sw_ocean, q_net
+
+
+def under_ice_freeze_relax(T_top_C, ice_concentration, dt: float, *,
+                           tau_ice_days: float = 20.0, T_freeze_C=None):
+    """Relax the under-ice surface ocean temperature toward the freezing point
+    (prescribed-ice thermodynamic boundary; codex HIGH).  Returns the updated
+    top-cell temperature [°C].
+
+        T_top <- T_top + (dt/τ_ice)·sic·(T_freeze - T_top)
+
+    The ice-ocean interface sits at the freezing point, so under prescribed ice
+    the surface ocean is nudged toward ``T_freeze`` with timescale ``τ_ice`` (days)
+    weighted by the ice fraction ``sic``.  TWO-SIDED: it COOLS a too-warm under-ice
+    cell (the Southern-Ocean / Antarctic warm bias) and HOLDS a cold Arctic cell
+    near freezing, while ``sic=0`` open water is untouched -> leaves the seasonal-
+    albedo NH-summer warming intact.  Intentionally non-conservative for the ocean
+    alone (the missing reservoir is the prescribed ice's latent heat).  Host-loop
+    helper (NumPy; the ``--ice-thermo`` host path, NOT the lax.scan path -- scan
+    refuses it).  A convex relaxation, unconditionally stable: ``dt/τ`` is clipped
+    to <=1 so the update never overshoots ``T_freeze``."""
+    if T_freeze_C is None:
+        T_freeze_C = float(constants.T_freeze_ocean) - float(constants.T_freeze)
+    sic = np.clip(np.nan_to_num(np.asarray(ice_concentration, dtype=np.float64),
+                                nan=0.0), 0.0, 1.0)
+    tau_s = float(tau_ice_days) * 86400.0
+    alpha = np.minimum(float(dt) / max(tau_s, 1.0e-30), 1.0) * sic
+    T = np.asarray(T_top_C, dtype=np.float64)
+    return T + alpha * (float(T_freeze_C) - T)
+
+
 def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                                   grid, grid_type: str,
                                   rho_air: float = constants.rho_air,
-                                  ice_albedo=None):
+                                  ice_albedo=None,
+                                  under_ice: bool = False,
+                                  tau_ice_sw: float = 0.03):
     """Build an :class:`OceanSurfaceForcing` (tau_x, tau_y, q_net, sw_down) on
     the model grid from CORE-II / JRA55 forcing, for INTEGRATION INSIDE
     ``model.step(state, dt, surface_forcing=...)`` -- the dynamics-core
@@ -629,8 +700,15 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     ``ice_albedo`` (optional, shape of the model surface field): prescribed
     sea-ice concentration in [0,1].  When given, the downwelling SW is reduced by
     the effective open-ocean/sea-ice albedo (see :func:`_sw_albedo_factor`) in
-    BOTH ``q_net`` and the returned ``sw_down`` -> closes the Southern-Ocean warm
-    bias (no surface albedo was applied before).  ``None`` is bit-exact default.
+    BOTH ``q_net`` and the returned ``sw_down``.  ``None`` is bit-exact default.
+
+    ``under_ice`` (prescribed-ice thermodynamic boundary; default False keeps the
+    albedo-only surrogate): under sea ice, cut the SW reaching the ocean to
+    ``tau_ice_sw`` (~0.03, vs the albedo-only 0.35) and suppress the open-ocean
+    turbulent+LW fluxes by ``(1-sic)`` (see :func:`_ice_surface_heat`).  The
+    companion under-ice freezing relaxation (:func:`under_ice_freeze_relax`) is a
+    post-step state nudge.  Together they cool the over-warm under-ice Southern
+    Ocean while leaving seasonal open water to benefit from the albedo correction.
 
     Supports the lat-lon C-grid family (``latlon`` / ``latlon_regional`` via
     conservative regrid; ``tripole`` via nearest-neighbour on the 2-D T grid).
@@ -654,9 +732,13 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
         rho_air=jnp.asarray(rho_air),
     )
     lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
-    sw_net = _sw_albedo_factor(forc["sw_down"], ice_albedo)
-    q_net = (np.asarray(sh) + np.asarray(lh)
-             + forc["lw_down"] - lw_up + sw_net)
+    # Open-ocean non-SW heat flux (turbulent + net LW).  Under a prescribed-ice
+    # boundary (under_ice) ``_ice_surface_heat`` suppresses this on the ice-covered
+    # fraction and cuts the under-ice SW; otherwise it is the albedo-only surrogate.
+    q_non_sw = np.asarray(sh) + np.asarray(lh) + forc["lw_down"] - lw_up
+    sw_net, q_net = _ice_surface_heat(
+        forc["sw_down"], q_non_sw, ice_albedo,
+        under_ice=under_ice, tau_ice_sw=tau_ice_sw)
     # NOTE: the surface freshwater flux P - E is NOT returned here.  It is built
     # by :func:`compute_omip2_freshwater_forcing` and delivered to the ocean via
     # the in-core ``model.step(..., freshwater=FreshwaterForcing)`` channel (which

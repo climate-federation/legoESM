@@ -1245,11 +1245,13 @@ def load_nemo_siconc_monthly(grid, grid_type, lat2d_deg, lon2d_deg,
     Construction (NEMO-derived, prescribed -> feedback-safe):
       presence(m,cell) = 0.5*(1 - tanh((tos_m_C - ice_edge_C) / ramp_C))  in [0,1]
         (->1 where the monthly SST is at/below freezing, ->0 over warm open water)
-      siconc(m,cell)   = annual_siconc(cell) * presence(m,cell) / max_m presence
-        (per-cell MAX-normalised so the coldest month keeps the annual-mean
-         concentration and the warm months go to ~0 -- captures the seasonal cycle
-         and the correct NH/SH phase WITHOUT depending on the sigmoid's absolute
-         level; perennial-ice cells keep presence~const -> siconc unchanged).
+      siconc(m,cell)   = clip(annual_siconc(cell) * presence(m,cell)
+                              / mean_m presence, 0, 1)
+        (per-cell MEAN-PRESERVING so the 12-month mean equals the annual-mean
+         concentration: ice months carry the true winter value, warm months go to
+         ~0 -- captures the seasonal cycle and the correct NH/SH phase and conserves
+         the annual albedo; perennial-ice cells keep presence~const -> unchanged.
+         See :func:`_seasonal_siconc_from_presence`).
 
     Returns ``(12, *lat2d_deg.shape)`` siconc in [0,1].  LIMITATION: this recovers
     the SEASONALITY of NEMO's ice from its SST; a true monthly icemod climatology
@@ -1778,6 +1780,21 @@ def main() -> int:
     p.add_argument("--tos-monthly-file", type=str, default=None,
                    help="Override the NEMO monthly grid_T (tos) file used to build "
                         "the seasonal siconc (default = ORCA1 RUN_REF 1m grid_T.nc).")
+    p.add_argument("--ice-thermo", action="store_true",
+                   help="Prescribed-ice THERMODYNAMIC boundary (codex HIGH): under "
+                        "sea ice, cut SW reaching the ocean (--ice-thermo-sw-trans) "
+                        "+ suppress turbulent/LW by (1-sic) + relax the surface "
+                        "ocean toward freezing (--ice-thermo-tau-days). Two-sided -> "
+                        "cools the over-warm Southern-Ocean under-ice cells (the "
+                        ">45S warm bias) AND holds the Arctic near freezing, while "
+                        "open water keeps the seasonal-albedo NH warming. Uses the "
+                        "same prescribed siconc as --ice-albedo (implies a siconc).")
+    p.add_argument("--ice-thermo-tau-days", type=float, default=20.0,
+                   help="Under-ice freezing-relaxation timescale [days] (default 20; "
+                        "physical range 5-30).")
+    p.add_argument("--ice-thermo-sw-trans", type=float, default=0.03,
+                   help="Fraction of downwelling SW transmitted through ice into the "
+                        "ocean (default 0.03; the albedo-only surrogate implies 0.35).")
     p.add_argument("--sss-restore", action="store_true",
                    help="Apply OMIP-2 weak SSS restoring toward the WOA surface "
                         "salinity (the protocol NEMO ORCA1 uses) -> bounds the "
@@ -1892,6 +1909,14 @@ def main() -> int:
                    help="Duration [days] of the spin-up velocity-damping phase "
                         "(drag removed afterwards -> free run).")
     args = p.parse_args()
+
+    if args.ice_thermo:   # codex LOW: reject unphysical prescribed-ice params early
+        if not (0.0 <= float(args.ice_thermo_sw_trans) <= 1.0):
+            raise ValueError("--ice-thermo-sw-trans must be in [0,1] (SW fraction "
+                             f"transmitted through ice); got {args.ice_thermo_sw_trans}.")
+        if not (float(args.ice_thermo_tau_days) > 0.0):
+            raise ValueError("--ice-thermo-tau-days must be > 0 (freezing-relaxation "
+                             f"timescale [days]); got {args.ice_thermo_tau_days}.")
 
     from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())
@@ -2135,7 +2160,7 @@ def main() -> int:
     # even without the albedo.
     siconc_clim = None
     siconc_monthly = False
-    if args.ice_albedo or args.sss_restore:
+    if args.ice_albedo or args.sss_restore or args.ice_thermo:
         if args.ice_albedo_seasonal:
             siconc_clim = load_nemo_siconc_monthly(
                 grid, app_grid_type, lat2d, lon2d, siconc_file=args.siconc_file,
@@ -2275,14 +2300,14 @@ def main() -> int:
         # reachable only with --no-emp AND no --runoff/--sss-restore/--ice-albedo
         # (a pure momentum/heat tripole perf run, issue #354).
         if (args.emp_freshwater or args.runoff or args.sss_restore
-                or args.ice_albedo):
+                or args.ice_albedo or args.ice_thermo):
             raise SystemExit(
-                "[scan] --scan-block applies no surface salinity/albedo forcing "
-                "(P - E / runoff / SSS restoring / ice-albedo are host-loop only), "
-                "so it cannot run a faithful integration.  Use the host Python "
-                "loop (omit --scan-block), or drop "
-                "--runoff/--sss-restore/--ice-albedo and pass --no-emp for the "
-                "momentum/heat-only scan path.")
+                "[scan] --scan-block applies no surface salinity/albedo/ice forcing "
+                "(P - E / runoff / SSS restoring / ice-albedo / ice-thermo are "
+                "host-loop only), so it cannot run a faithful integration.  Use the "
+                "host Python loop (omit --scan-block), or drop "
+                "--runoff/--sss-restore/--ice-albedo/--ice-thermo and pass --no-emp "
+                "for the momentum/heat-only scan path.")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
@@ -2368,7 +2393,8 @@ def main() -> int:
         sf = compute_omip2_surface_forcing(
             state, forcing=forcing, idx_t=it,
             grid=grid, grid_type=app_grid_type,
-            ice_albedo=(_sic if args.ice_albedo else None),
+            ice_albedo=(_sic if (args.ice_albedo or args.ice_thermo) else None),
+            under_ice=args.ice_thermo, tau_ice_sw=args.ice_thermo_sw_trans,
         )
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
@@ -2424,6 +2450,20 @@ def main() -> int:
                     state, S_target=sss_restore_target, ice_concentration=_sic,
                     config=sss_restore_cfg, grid=grid, z_coord=z_coord, dt=dt,
                     lat2d_deg=lat2d, lon2d_deg=lon2d)
+        if args.ice_thermo and _sic is not None:
+            # Prescribed-ice freezing relaxation (the post-step half of the
+            # thermodynamic boundary; the SW cut + (1-sic) flux suppression are in
+            # compute_omip2_surface_forcing).  Nudge the under-ice surface ocean
+            # toward freezing -> cools the over-warm Southern-Ocean under-ice cells
+            # (>45S warm bias) + holds the Arctic near freezing.  Grid-agnostic
+            # top-cell update (same host-state pattern as the SSS restoring).
+            from legoesm.ocean.coupler.omip2_applicator import under_ice_freeze_relax
+            Tn = np.asarray(state.T.data).copy()   # copy: device arrays alias / are read-only
+            Tn[..., 0] = under_ice_freeze_relax(
+                Tn[..., 0], _sic, dt, tau_ice_days=args.ice_thermo_tau_days)
+            state = state._replace(
+                T=Field(jnp.asarray(Tn), name=state.T.name,
+                        dims=state.T.dims, units=state.T.units))
         if nudge_tau_s > 0 and (nudge_release_s <= 0 or step * dt < nudge_release_s):
             a = dt / nudge_tau_s
             Tn = np.asarray(state.T.data)

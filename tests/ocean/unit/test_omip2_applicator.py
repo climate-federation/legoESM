@@ -500,3 +500,66 @@ def test_ice_albedo_reduces_sw_and_q_net():
     from legoesm.ocean.coupler.omip2_applicator import _sample_omip2_forcing
     forc = _sample_omip2_forcing(forcing, 0, grid, "latlon")
     assert np.allclose(sw_full, np.asarray(forc["sw_down"]), rtol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Prescribed-ice thermodynamic boundary (--ice-thermo) — codex HIGH dual-pole
+# fix.  Pure helpers, testable without forcing/grid.
+# ---------------------------------------------------------------------------
+
+def test_ice_surface_heat_regimes():
+    from legoesm.ocean.coupler.omip2_applicator import _ice_surface_heat
+    from legoesm import constants
+    a_oc = float(constants.alpha_ocean_broadband)
+    sw = np.full((4,), 200.0)
+    qn = np.full((4,), -50.0)            # net non-SW (e.g. ocean losing heat)
+
+    # None -> legacy: no albedo, full non-SW.
+    swo, q = _ice_surface_heat(sw, qn, None)
+    assert np.allclose(swo, sw) and np.allclose(q, qn + sw)
+
+    # under_ice=False, sic given -> albedo-only surrogate (matches _sw_albedo_factor).
+    swo, q = _ice_surface_heat(sw, qn, np.full((4,), 1.0), under_ice=False)
+    a_ice = float(constants.alpha_ice_broadband_cold)
+    assert np.allclose(swo, sw * (1 - a_ice))
+    assert np.allclose(q, qn + sw * (1 - a_ice))     # full non-SW retained
+
+    # under_ice=True, sic=0 -> open water: same as albedo-only open water.
+    swo0, q0 = _ice_surface_heat(sw, qn, np.zeros((4,)), under_ice=True)
+    assert np.allclose(swo0, sw * (1 - a_oc))
+    assert np.allclose(q0, sw * (1 - a_oc) + qn)
+
+    # under_ice=True, sic=1 -> tiny SW + non-SW SUPPRESSED.
+    swo1, q1 = _ice_surface_heat(sw, qn, np.ones((4,)), under_ice=True,
+                                 tau_ice_sw=0.03)
+    assert np.allclose(swo1, sw * 0.03)
+    assert np.allclose(q1, sw * 0.03)                # (1-sic)*qn = 0
+    # Under-ice ocean gets MUCH less heat than the albedo-only surrogate would
+    # (0.35*sw + qn): this is the SH-warm-bias correction.
+    assert float(q1.mean()) < float((sw * (1 - a_ice) + qn).mean())
+
+
+def test_under_ice_freeze_relax_two_sided():
+    from legoesm.ocean.coupler.omip2_applicator import under_ice_freeze_relax
+    from legoesm import constants
+    Tf = float(constants.T_freeze_ocean) - float(constants.T_freeze)   # ~ -1.8 C
+    day = 86400.0
+
+    # sic=0 -> untouched.
+    T = np.array([3.0, -3.0, 10.0])
+    assert np.allclose(under_ice_freeze_relax(T, np.zeros(3), day), T)
+
+    # sic=1, warm cell -> COOLED toward freezing; cold (super-cooled) -> WARMED up.
+    T = np.array([3.0, -3.0])
+    out = under_ice_freeze_relax(T, np.ones(2), day, tau_ice_days=20.0)
+    assert out[0] < 3.0 and out[0] > Tf          # warm cell cooled toward Tf
+    assert out[1] > -3.0 and out[1] < Tf         # super-cooled cell warmed up to Tf
+    # Convergence: many days at sic=1 -> Tf.
+    Tc = np.array([5.0])
+    for _ in range(2000):
+        Tc = under_ice_freeze_relax(Tc, np.ones(1), day, tau_ice_days=20.0)
+    assert abs(float(Tc[0]) - Tf) < 1e-3
+    # dt >> tau -> clipped to full relaxation (no overshoot/instability).
+    big = under_ice_freeze_relax(np.array([5.0]), np.ones(1), 100 * day,
+                                 tau_ice_days=20.0)
+    assert abs(float(big[0]) - Tf) < 1e-9
