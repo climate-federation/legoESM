@@ -66,6 +66,15 @@ The import-boundary contracts in `pyproject.toml` enforce this.
 
 - **Tiered strategy** — research → operational rungs with conservation gates:
   see [Testing strategy](TESTING.md).
+- **Source-guardrail harness** — fast static tripwires (ratchet audits for
+  constants/saturation, dispatch hardening, spec-first physics contracts,
+  federation boundaries) plus LIVE editor hooks; the cheapest "verify the existing
+  code" pass. See [TESTING.md §5](TESTING.md) and
+  [`ai_guardrails/domain_architect_vs_syntax_engine.md`](ai_guardrails/domain_architect_vs_syntax_engine.md).
+  Run: `JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu pytest tests/test_no_hardcoded_constants.py tests/test_no_saturation_reimpl.py tests/test_dispatch_hardening.py tests/test_physics_contracts.py tests/test_import_boundaries.py tests/test_federation_plan.py -q`
+- **Adversarial-review agents** — Codex (`/codex:adversarial-review --wait` → fix →
+  `/codex:review --wait`, iterate to clean) and specialized subagents
+  (`physics-validator`, `lego-modularity-tester`, …). See [TESTING.md §6](TESTING.md).
 - **Dycore benchmarks** — Williamson, Galewsky, Jablonowski-Williamson, DCMIP,
   Held-Suarez: see [Dycore validation catalog](dycore_validation_catalog.md).
 - **Physics parameterizations** — [Physics parameterization tests](PHYSICS_PARAMETERIZATION_TESTS.md).

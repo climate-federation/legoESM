@@ -299,6 +299,19 @@ def morrison_microphysics(
     # M1b deposition size-split tail (cloud-ice depositional growth PAST DCS
     # that SAM routes to snow); 0 unless the m2005 block sets it.
     dep_to_snow_m1b = jnp.zeros_like(jnp.clip(q_i, 0.0))
+    # Ice-PSD slope/intercept (LAMI/N0I) and the snow-autoconversion size
+    # threshold DCS are PSD properties, independent of the deposition scheme,
+    # but the ice->snow autoconversion (m2005_autoconv / mg_ferrier) needs
+    # them.  Compute them unconditionally so aggregation works under ANY
+    # ice_deposition_scheme — the "heuristic" deposition path leaves the m2005
+    # block unexecuted, which previously left LAMI/N0I unbound and crashed the
+    # mg_ferrier autoconversion (the morrison_flavor="mg" default pairs
+    # mg_ferrier with — but does not force — m2005 deposition).
+    cons12_cbrt = (config.rho_cloud_ice * jnp.pi) ** (1.0 / 3.0)
+    dcs = config.ice_snow_d_auto
+    lami_ac = cons12_cbrt * safe_pow(
+        jnp.clip(N_i, 0.0) / jnp.maximum(q_i_eff, 1.0e-20), 1.0 / 3.0)
+    n0i_ac = jnp.clip(N_i, 0.0) * lami_ac
     if config.ice_deposition_scheme == "m2005":
         # Faithful bulk diffusional growth:
         #   PRD = EPSI·(q_v − q_sat_i)/ABI
@@ -310,7 +323,6 @@ def morrison_microphysics(
         #         dq_sat_i/dT = L_s·q_sat_i/(R_v·T²)   (Clausius–Clapeyron).
         # (q_v − q_sat_i) < 0 ⇒ SUBLIMATION (negative). Tuned by the
         # dimensionless ``ice_deposition_efficiency``.
-        cons12_cbrt = (config.rho_cloud_ice * jnp.pi) ** (1.0 / 3.0)
         dv_vap = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p_full, 1.0)
         dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)
         abi = 1.0 + dqsidt * constants.L_s / constants.c_pd
@@ -359,10 +371,6 @@ def morrison_microphysics(
         # Only POSITIVE ice supersaturation grows ice across DCS into snow;
         # self-gates on N_i (N0I∝N_i ⇒ 0 when no ice). NPRCI (snow number) is
         # dropped — legoESM single-moment snow.
-        dcs = config.ice_snow_d_auto
-        lami_ac = cons12_cbrt * safe_pow(
-            jnp.clip(N_i, 0.0) / jnp.maximum(q_i_eff, 1.0e-20), 1.0 / 3.0)
-        n0i_ac = jnp.clip(N_i, 0.0) * lami_ac
         ice_to_snow_m2005 = (
             (2.0 * jnp.pi / 3.0) * dcs ** 2 * rho * n0i_ac
             * jnp.exp(-lami_ac * dcs) * dv_vap

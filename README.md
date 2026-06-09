@@ -193,13 +193,51 @@ component plugs into the matrix framework.
 - **Ocean fidelity assessment harness** (`ocean/fidelity/`): Veros DINO / Eady adapters and cross-model comparison reports under `docs/ocean_fidelity/`
 - **Distributed tests** including MPI differentiability (`tests/distributed/test_mpi_differentiability.py`)
 - **Scaling benchmarks** (`scripts/bench/run_levante_gpu_scaling.py`, `scripts/bench/run_cpu_mpi_scaling.py`)
+- **Source-guardrail harness** (static tripwires that verify the existing source obeys the project rules): ratchet audits (`tests/test_no_hardcoded_constants.py`, `tests/test_no_saturation_reimpl.py`), dispatch hardening (`tests/test_dispatch_hardening.py`), spec-first physics contracts (`tests/test_physics_contracts.py`), federation boundaries (`tests/test_import_boundaries.py`, `tests/test_federation_plan.py`), plus LIVE editor hooks in `.claude/hooks/`. Design: [`docs/ai_guardrails/domain_architect_vs_syntax_engine.md`](docs/ai_guardrails/domain_architect_vs_syntax_engine.md)
+- **Scientific validators** (`scripts/validate/*.py`, each `python scripts/validate/<name>.py`): convection/barotropic/ocean-SCM physics, `validate_federation_packaging.py`, and `visual_regression.py` (cube-imprint/edge artifacts — inspect the PNGs)
+- **Adversarial-review agents** (user-triggered): Codex (`/codex:adversarial-review --wait` → fix → `/codex:review --wait`, iterate to clean) and specialized subagents in `.claude/agents/` (`physics-validator`, `lego-modularity-tester`, `dycore-tester`, `test-differentiability`, `test-scalability`, …)
+
+### Running the checks
+
+```bash
+# Fast static guardrails (seconds, no GPU) — verify the existing source
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu pytest \
+  tests/test_no_hardcoded_constants.py tests/test_no_saturation_reimpl.py \
+  tests/test_dispatch_hardening.py tests/test_physics_contracts.py \
+  tests/test_import_boundaries.py tests/test_federation_plan.py -q
+
+# Full unit + guardrail suite
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu pytest tests/ -q
+
+# Scientific test matrices (heavier — exercise numerics + conservation gates)
+JAX_ENABLE_X64=1 python scripts/matrix/run_atmosphere_test_matrix.py
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu python scripts/matrix/run_scm_test_matrix.py
+JAX_ENABLE_X64=1 python scripts/matrix/run_sea_ice_test_matrix.py
+JAX_ENABLE_X64=1 python scripts/matrix/check_conservation_all.py
+
+# Dycore progression (Williamson / Galewsky / Jablonowski–Williamson / Held–Suarez)
+python tests/validation/run_dycore_progression_suite.py
+
+# Federation packaging (per-member wheels build + root-absent import)
+python scripts/validate/validate_federation_packaging.py
+```
+
+> Full details — pytest tiers, the matrix framework, the guardrail harness, and the
+> review agents — are in [`docs/TESTING.md`](docs/TESTING.md). On Apple Silicon set
+> `JAX_PLATFORMS=cpu` (the Metal backend is broken); use `JAX_ENABLE_X64=1` for
+> scientific/conservation runs.
 
 ## Quick Start
 
 ```bash
-# Install
+# Install — legoESM is a uv workspace of independently-installable members
+# (legoesm-core, -atmosphere, -ocean, ...), so the install path depends on your
+# tool (see "Installing" below for why, and for single-component installs):
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync --extra dev                          # with uv (resolves the workspace natively)
+# …or, pip-only (no uv) — the helper resolves the inter-member DAG locally:
+python scripts/experiment/install_federation.py --all --extras dev
 
 # Run Williamson Test Case 2 (cubed-sphere shallow water)
 legoesm test williamson --case 2 --resolution 48 --days 5
@@ -225,6 +263,44 @@ JAX_ENABLE_X64=1 python scripts/run/run_amip_cmip6_deck.py
 # Tests
 JAX_ENABLE_X64=1 pytest tests/
 ```
+
+## Installing
+
+legoESM is a [uv workspace](https://docs.astral.sh/uv/concepts/workspaces/) of
+independently-installable members (`legoesm-core`, `legoesm-atmosphere`,
+`legoesm-ocean`, `legoesm-land`, `legoesm-ice`, `legoesm-coupler`, `legoesm-ml`,
+`legoesm-tools`, and the root `legoesm` meta-package). Each member depends on the
+others as ordinary distributions (`legoesm-core~=0.1.0`, …) that resolve to the
+in-tree source **only via** `[tool.uv.sources]` (`workspace = true`).
+
+**This is why a bare `pip install legoesm` (or `pip install ./packages/atmosphere`)
+fails** with `Could not find a version that satisfies the requirement
+legoesm-core~=0.1.0 … (from versions: none)`: plain pip ignores `[tool.uv.sources]`
+and looks for the members on PyPI, where they are not published. You need either
+`uv` (which understands the workspace) or the bundled helper (which resolves the
+inter-member dependency DAG against the in-tree source instead of PyPI):
+
+```bash
+# With uv — resolves the whole workspace natively:
+uv sync --extra dev                 # full dev install
+uv pip install --package legoesm-ocean   # one component, standalone
+
+# Pip-only (no uv) — scripts/experiment/install_federation.py resolves the DAG:
+python scripts/experiment/install_federation.py --all --extras dev   # full dev install
+python scripts/experiment/install_federation.py atmosphere           # one component (editable; pulls only core)
+python scripts/experiment/install_federation.py ocean land ice       # several components
+python scripts/experiment/install_federation.py atmosphere --extras ml   # component + an extra (pulls legoesm-ml)
+python scripts/experiment/install_federation.py atmosphere --wheels  # non-editable, from a local wheelhouse
+python scripts/experiment/install_federation.py atmosphere --dry-run # just print the pip command
+```
+
+Each Earth-system component (`atmosphere`/`ocean`/`land`/`ice`) is mutually
+independent (import-linter contract #2), so any one installs standalone on top of
+`legoesm-core` and runs a single column as its cheapest gradient-check harness.
+The orchestration cluster (`coupler`/`ml`/`tools`) is a mutual cycle and installs
+together. The helper computes this closure for you from the members'
+`pyproject.toml` files. `scripts/validate/validate_federation_packaging.py` proves
+the per-member wheels build and import root-absent.
 
 ## Defining New Experiments & Scripts
 

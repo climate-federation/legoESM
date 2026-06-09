@@ -2982,10 +2982,13 @@ class TestIter123OceanDriftTolerance:
     def test_iter133_barotropic_gyre_gates(self):
         """iter-133 self-review based on
         docs/ocean_experiments_reference.md 'Barotropic Gyre'
-        Validation Thresholds: gates max_speed_final
-        in [0.05, 0.5] m/s and eta_drift < 1e-3 m absolute.
-        Applied via _run_gyre_experiment shared runner so it
-        covers single + double + sin2 variants.
+        Validation Thresholds: gates max_speed_final with an upper
+        bound of 0.5 m/s and a lower bound defaulting to 0.05 m/s
+        (the monolithic runner may lower it per-case via
+        ``min_max_speed`` for short double-gyre / sin2 spin-ups),
+        plus eta_drift < 1e-3 m absolute. Applied via
+        _run_gyre_experiment shared runner so it covers single +
+        double + sin2 variants.
         """
         from pathlib import Path
         for rel in (
@@ -3007,7 +3010,19 @@ class TestIter123OceanDriftTolerance:
                 if not line.lstrip().startswith("#"))
             assert 'label="max_speed_final_lower"' in code
             assert 'label="max_speed_final_upper"' in code
-            assert "max_speed), 0.05" in code
+            # Lower-speed gate (label="max_speed_final_lower", op="ge"). The
+            # modular runner inlines the 0.05 m/s default; the monolithic runner
+            # feeds the gate ``lower_thresh`` (default 0.05, lowered per-case via
+            # ``min_max_speed`` for short double-gyre / sin2 spin-ups). Tie the
+            # check to the gate ACTUALLY consuming that threshold value (not just
+            # to ``lower_thresh`` being defined somewhere).
+            assert (
+                "max_speed), 0.05" in code
+                or ("max_speed), lower_thresh" in code and "lower_thresh = 0.05" in code)
+            ), (
+                f"{rel}: gyre lower-speed gate must consume the 0.05 m/s default "
+                "(inline ``max_speed), 0.05`` or ``max_speed), lower_thresh`` with "
+                "``lower_thresh = 0.05``).")
             assert "max_speed), 0.5" in code
             assert 'label="eta_drift_absolute"' in code
             assert "eta_drift), 1e-3" in code
@@ -3193,99 +3208,71 @@ class TestIter123OceanDriftTolerance:
                 f"iter-138: {rel}: barotropic_wave must NOT use "
                 f"the iter-133/134 initial-vs-final ratio.")
 
-    # ====== iter-149/150 → iter-174: cube bottom_drag_r SKIP ======
+    # ====== iter-149/150 → iter-174 → Phase B.1: cube bottom_drag_r plumbed ======
 
-    def test_iter174_cube_bottom_drag_r_raises_skip(self):
-        """iter-174 (codex iter-173 review MEDIUM-1):
-        passing ``bottom_drag_r > 0`` for cube must raise
-        ``NotImplementedError`` so the main runner converts
-        the case to ``SKIP`` (with the reason in notes)
-        instead of silently dropping the parameter and
-        producing a misleading ``PASS`` result.
+    def test_cube_bottom_drag_r_is_plumbed(self):
+        """Phase B.1 unblock (supersedes the iter-174 NotImplementedError gate):
+        the cubed-sphere cd-grid backend
+        (``ocean_baroclinic_tendencies_cdgrid``) now applies model-level linear /
+        quadratic / BBL bottom drag the same way the lat-lon C-grid does, so the
+        monolithic runner plumbs ``bottom_drag_r`` straight into the cube
+        ``OceanConfig`` instead of raising ``NotImplementedError`` and SKIPping
+        the case.
 
-        This supersedes the iter-149 ``warnings.warn``
-        approach — codex flagged the warning as
-        insufficient because cube runs without the
-        requested damping still appeared as comparable
-        cross-grid results.
-
-        Silent for ``bottom_drag_r=None`` or 0.0
-        (intentional "no drag" requests).
+        Verifies the monolithic runner: (1) the cube branch forwards
+        ``bottom_drag_r`` into ``OceanConfig``; (2) the old
+        ``bottom_drag_r > 0`` NotImplementedError gate is gone. The modular path
+        (``scripts/ocean_test_matrix/setup.py``) is held to the same contract by
+        ``test_iter175_modular_setup_cube_bottom_drag_r_plumbed`` — both runners
+        now plumb the kwarg (parity restored).
         """
+        import re
         from pathlib import Path
         text = (Path(__file__).resolve().parent.parent
                 / "scripts" / "matrix" / "run_ocean_test_matrix.py").read_text()
-        # The cube branch of _create_ocean_setup must raise
-        # NotImplementedError (caught by the main loop ->
-        # SKIP).  The old warnings.warn must be gone.
-        assert "raise NotImplementedError" in text, (
-            "iter-174: scripts/matrix/run_ocean_test_matrix.py must "
-            "raise NotImplementedError on cube + drag>0 so "
-            "the main runner converts to SKIP.")
-        # Verify the gate fires only when bottom_drag_r > 0.
-        import re
-        m = re.search(
+        # (1) bottom_drag_r is plumbed into the (cube) OceanConfig.
+        assert 'kw["bottom_drag_r"] = bottom_drag_r' in text, (
+            "Phase B.1: run_ocean_test_matrix.py must forward bottom_drag_r into "
+            "the cube OceanConfig (the cd-grid backend applies it like lat-lon).")
+        # (2) the old cube-specific bottom_drag_r>0 NotImplementedError gate is gone.
+        assert re.search(
             r"if bottom_drag_r is not None and bottom_drag_r > 0\.0:\s*\n"
             r"\s*raise NotImplementedError",
             text,
-        )
-        assert m is not None, (
-            "iter-174: NotImplementedError must be guarded by "
-            "``bottom_drag_r > 0.0`` so None/0.0 stays silent.")
-        # Verify the message mentions the cube limitation
-        # (must point users to the alternative grids).
-        # Look in the 600 chars after the raise.
-        post_raise = text.split("raise NotImplementedError", 1)[1][:600]
-        assert "latlon" in post_raise or "mpas" in post_raise, (
-            "iter-174: error message must point to alternative "
-            "grids that DO support model-level drag.")
-        # The cube branch must NOT also have a warnings.warn
-        # for the same condition (would be redundant since the
-        # raise short-circuits).  Allow warnings.warn elsewhere
-        # in the file.
-        cube_branch = text.split("OceanConfig does not expose", 1)
-        if len(cube_branch) > 1:
-            # Look in the 800 chars surrounding the cube guard
-            # for any leftover ``warnings.warn`` related to drag.
-            ctx = cube_branch[1][:800]
-            assert "warnings.warn" not in ctx, (
-                "iter-174: the iter-149 ``warnings.warn`` must be "
-                "removed from the cube + drag>0 branch — the "
-                "raise NotImplementedError supersedes it.")
+        ) is None, (
+            "Phase B.1: the cube ``bottom_drag_r > 0`` NotImplementedError gate "
+            "must be removed now that cube bottom drag is supported.")
 
-    def test_iter175_modular_setup_cube_bottom_drag_r_raises(self):
-        """iter-175 (parity check after iter-174):
-        ``scripts/ocean_test_matrix/setup.py`` must raise the
-        same ``NotImplementedError`` on cube + drag > 0 as the
-        monolithic ``scripts/matrix/run_ocean_test_matrix.py``.  The
-        modular path was previously WORSE than monolithic — it
-        silently dropped ``bottom_drag_r`` without even a
-        warning — so any user running through the modular
-        runner had no signal at all that physics fidelity was
-        being downgraded.
+    def test_iter175_modular_setup_cube_bottom_drag_r_plumbed(self):
+        """Phase B.1 parity (supersedes the iter-175 NotImplementedError gate):
+        ``scripts/ocean_test_matrix/setup.py`` (modular) must now PLUMB
+        ``bottom_drag_r`` into the cube ``OceanConfig`` exactly like the
+        monolithic ``scripts/matrix/run_ocean_test_matrix.py`` — cube bottom
+        drag is supported (the cd-grid backend applies it), so neither path may
+        SKIP via ``NotImplementedError`` (which would silently downgrade physics
+        fidelity / produce non-comparable cross-grid PASS results).
 
-        Both paths now raise ``NotImplementedError`` with a
-        message pointing to latlon/mpas.
+        Verifies the modular path matches the monolithic one: (1) bottom_drag_r
+        is forwarded into the cube OceanConfig; (2) the old bottom_drag_r>0
+        NotImplementedError gate is gone.
         """
+        import re
         from pathlib import Path
         text = (Path(__file__).resolve().parent.parent
                 / "scripts" / "ocean_test_matrix" / "setup.py").read_text()
-        # Must raise NotImplementedError for cube + drag>0.
-        import re
-        m = re.search(
+        # (1) bottom_drag_r is plumbed into the cube OceanConfig (parity).
+        assert 'kw["bottom_drag_r"] = bottom_drag_r' in text, (
+            "Phase B.1 parity: scripts/ocean_test_matrix/setup.py must forward "
+            "bottom_drag_r into the cube OceanConfig like the monolithic runner.")
+        # (2) the old cube bottom_drag_r>0 NotImplementedError gate is gone.
+        assert re.search(
             r"if bottom_drag_r is not None and bottom_drag_r > 0\.0:\s*\n"
             r"\s*raise NotImplementedError",
             text,
-        )
-        assert m is not None, (
-            "iter-175: scripts/ocean_test_matrix/setup.py must "
-            "raise NotImplementedError on cube + drag > 0 "
-            "(parity with monolithic iter-174 fix).")
-        # Message must point to alternative grids.
-        post_raise = text.split("raise NotImplementedError", 1)[1][:600]
-        assert "latlon" in post_raise or "mpas" in post_raise, (
-            "iter-175: error message must point to alternative "
-            "grids that DO support model-level drag.")
+        ) is None, (
+            "Phase B.1 parity: the modular cube ``bottom_drag_r > 0`` "
+            "NotImplementedError gate must be removed (cube bottom drag is "
+            "supported; monolithic + modular paths must agree).")
 
     def test_iter138_pe_rel_sign_uses_le_not_lt(self):
         """iter-138 (iter-137 FAIL-2) + iter-152 update:
@@ -3784,7 +3771,8 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
-        path = scripts_dir / "run_atmosphere_test_matrix.py"
+        # Scripts reorg: run_atmosphere_test_matrix.py lives in the matrix/ bucket.
+        path = scripts_dir / "matrix" / "run_atmosphere_test_matrix.py"
         text = path.read_text()
         # Strip docstrings and comments so we only inspect code.
         import re

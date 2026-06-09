@@ -199,7 +199,7 @@ def plot_inertial():
     ax.set_title("Hodograph (top level)")
     ax.grid(True, alpha=0.4)
     ax.legend()
-    metric = U0 * U0 * np.tan(np.radians(45.0)) / 6.371229e6
+    metric = U0 * U0 * np.tan(np.radians(45.0)) / constants.R_earth
     ax.text(
         0.02, 0.02,
         f"U0 = {U0}.  Spherical-metric forcing\n"

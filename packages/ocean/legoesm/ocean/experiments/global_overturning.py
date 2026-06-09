@@ -64,7 +64,7 @@ class GlobalOverturningConfig:
 
     # --- Stratification ---
     T_water_init_C: float = 20.0        # Surface temperature [degC]
-    T_deep: float = 2.0            # Abyssal temperature [degC]
+    T_deep_C: float = 2.0            # Abyssal temperature [degC]
     T_scale_depth: float = 1000.0  # Stratification e-folding depth [m]
     S_uniform: float = 35.0        # Uniform salinity [PSU] (T-only EOS)
 
@@ -92,7 +92,7 @@ class GlobalOverturningConfig:
 
     # --- EOS ---
     alpha_T: float = 2.0e-4        # Thermal expansion [1/K]
-    T_ref: float = 10.0            # Reference temperature for EOS [degC]
+    T_ref_C: float = 10.0            # Reference temperature for EOS [degC]
 
     # --- GM/Redi mesoscale eddy parameterization ---
     use_gm_redi: bool = False         # Enable GM/Redi isopycnal mixing
@@ -114,13 +114,13 @@ class GlobalOverturningConfig:
 def _add_stratification(state, z_coord, config: GlobalOverturningConfig):
     """Add exponential temperature stratification to a uniform state.
 
-    T(z) = T_deep + (T_water_init_C - T_deep) * exp(z / scale_depth)
+    T(z) = T_deep_C + (T_water_init_C - T_deep_C) * exp(z / scale_depth)
 
     where z is negative (depth below surface).
     """
     z_full = np.asarray(z_coord.z_full_ref)   # negative values
     decay = np.exp(z_full / config.T_scale_depth)
-    T_profile = config.T_deep + (config.T_water_init_C - config.T_deep) * decay
+    T_profile = config.T_deep_C + (config.T_water_init_C - config.T_deep_C) * decay
 
     T_data = np.array(state.T.data)
     for k in range(z_coord.n_levels):
@@ -291,7 +291,7 @@ def create_eos_config(config: GlobalOverturningConfig = None):
         rho_ref=constants.rho_ocean,
         alpha_T=config.alpha_T,
         beta_S=0.0,          # T-only buoyancy (Wolfe & Cessi use b = alpha*g*T)
-        T_ref=config.T_ref,
+        T_ref=config.T_ref_C,
         S_ref=config.S_uniform,
     )
 

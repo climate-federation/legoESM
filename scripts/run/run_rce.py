@@ -491,7 +491,7 @@ def main():
         tau_equator=7.2, tau_pole=1.8, S_0=1360.0,
         sfc_albedo=sfc_albedo, perpetual_equinox=True,
     )
-    sbm_config = SBMConfig(tau_c=7200.0, RH_ref=0.7)
+    sbm_config = SBMConfig(tau_c=7200.0, rh_ref=0.7)
 
     # Rayleigh friction profile (Frierson 2006: BL only, no free-atmosphere drag)
     sigma_b = 0.7

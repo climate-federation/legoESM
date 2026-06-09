@@ -74,7 +74,7 @@ def diagnose_sundqvist_process_rates(
     # partial-cloud-fraction subgrid variance is diagnosed
     # separately by :func:`legoesm.atmosphere.physics.clouds.cloud_fraction.sundqvist_cloud_fraction`
     # and is not the microphysics tendency's concern.
-    f = jax.nn.sigmoid(sharpness * (RH - config.RH_crit))
+    f = jax.nn.sigmoid(sharpness * (RH - config.rh_crit))
     condensation = (
         f * jnp.maximum(q_v - q_sat, 0.0) / dt
     )  # [kg/kg/s]
@@ -114,7 +114,7 @@ def diagnose_sundqvist_process_rates(
     # layer on the way down, and lands at the surface as the final
     # carry ``P_final``.  Sub-cloud evaporation reduces ``P_total``
     # in sub-saturated layers (``evap_mask`` peaks where ``RH < RH_crit``).
-    evap_mask = jax.nn.sigmoid(sharpness * (config.RH_crit - RH))
+    evap_mask = jax.nn.sigmoid(sharpness * (config.rh_crit - RH))
     P_flux_layer = P_auto * rho * dz
 
     def scan_fn(carry, x):

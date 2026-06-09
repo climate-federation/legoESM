@@ -55,6 +55,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -320,19 +322,29 @@ def exchange_halo_plane_yxz(
         )
     else:
         flat_shape_ns = (h * layout.nx_local, *trailing)
-        flat_size_ns = int(jnp.prod(jnp.asarray(flat_shape_ns)))
+        flat_size_ns = math.prod(flat_shape_ns)  # static shape -> jit-safe Python int
         send_to_north = field_yxz[-h:].reshape(flat_size_ns)
         send_to_south = field_yxz[:h].reshape(flat_size_ns)
         recv_template = jnp.zeros_like(send_to_north)
+        # Directional ring-shift exchange — correct AND deadlock-free even
+        # when an axis has exactly 2 ranks (north_rank == south_rank).  The
+        # old ``send-to-X & recv-from-X`` pattern paired both sendrecvs to the
+        # same neighbour under a SHARED tag, so at n_ranks==2 MPI matched the
+        # WRONG message and delivered the neighbour's opposite edge (silent
+        # halo corruption — du_dt off by ~0.5 vs single-process).
+        # Fill SOUTH halo: send my NORTH edge -> north_rank, recv <- south_rank
+        # (its north edge).  Fill NORTH halo: send my SOUTH edge -> south_rank,
+        # recv <- north_rank.  One tag per shift direction (a consistent ring
+        # shift, so send/recv pair within the SAME call across the ring).
         from_south = sendrecv(
-            send_to_south, recv_template,
-            layout.south_rank, layout.south_rank,
-            rank + _TAG_NS, layout.south_rank + _TAG_NS, comm,
+            send_to_north, recv_template,
+            layout.south_rank, layout.north_rank,
+            _TAG_NS, _TAG_NS, comm,
         )
         from_north = sendrecv(
-            send_to_north, recv_template,
-            layout.north_rank, layout.north_rank,
-            rank + _TAG_NS, layout.north_rank + _TAG_NS, comm,
+            send_to_south, recv_template,
+            layout.north_rank, layout.south_rank,
+            _TAG_NS + 1, _TAG_NS + 1, comm,
         )
         south_halo = from_south.reshape((h, layout.nx_local, *trailing))
         north_halo = from_north.reshape((h, layout.nx_local, *trailing))
@@ -352,19 +364,23 @@ def exchange_halo_plane_yxz(
     else:
         ny_padded = ns_padded.shape[0]
         flat_shape_ew = (ny_padded * h, *trailing)
-        flat_size_ew = int(jnp.prod(jnp.asarray(flat_shape_ew)))
+        flat_size_ew = math.prod(flat_shape_ew)  # static shape -> jit-safe Python int
         send_to_east = ns_padded[:, -h:].reshape(flat_size_ew)
         send_to_west = ns_padded[:, :h].reshape(flat_size_ew)
         recv_template_ew = jnp.zeros_like(send_to_east)
+        # Same directional ring-shift as the N/S stage (correct + deadlock-free
+        # at n_ranks_x == 2 where west_rank == east_rank).  Fill WEST halo:
+        # send my EAST edge -> east_rank, recv <- west_rank (its east edge).
+        # Fill EAST halo: send my WEST edge -> west_rank, recv <- east_rank.
         from_west = sendrecv(
-            send_to_west, recv_template_ew,
-            layout.west_rank, layout.west_rank,
-            rank + _TAG_EW, layout.west_rank + _TAG_EW, comm,
+            send_to_east, recv_template_ew,
+            layout.west_rank, layout.east_rank,
+            _TAG_EW, _TAG_EW, comm,
         )
         from_east = sendrecv(
-            send_to_east, recv_template_ew,
-            layout.east_rank, layout.east_rank,
-            rank + _TAG_EW, layout.east_rank + _TAG_EW, comm,
+            send_to_west, recv_template_ew,
+            layout.east_rank, layout.west_rank,
+            _TAG_EW + 1, _TAG_EW + 1, comm,
         )
         west_halo = from_west.reshape((ny_padded, h, *trailing))
         east_halo = from_east.reshape((ny_padded, h, *trailing))

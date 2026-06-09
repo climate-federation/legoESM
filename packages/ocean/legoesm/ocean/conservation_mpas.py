@@ -24,10 +24,19 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.core.precision import cast
+from legoesm.ocean.conservation import conservation_fixer_core
 from legoesm.ocean.vertical import compute_layer_thickness
 from legoesm.parallel.reductions import global_sum_if_distributed
 
 _ACC_MODULE = "ocean_diagnostics"
+
+
+def _mpas_eta_floor(eta_corrected, H_bathy, mask, min_water_column_m):
+    """MPAS minimum-water-column floor: ``where(mask > 0.5, max(eta, floor), eta)``."""
+    eta_floor = min_water_column_m - H_bathy
+    return jnp.where(
+        mask > 0.5, jnp.maximum(eta_corrected, eta_floor), eta_corrected,
+    )
 
 
 def _ownership_weight(mask, owned_mask):
@@ -197,93 +206,28 @@ def mpas_ocean_conservation_fixer(
     so halo cells are not double-counted across neighbouring ranks.
     """
     mask = state_old.land_mask.data
-    min_col = config.min_water_column_m
-
-    h_k_old = compute_layer_thickness(
-        state_old.eta.data, state_old.H_bathy.data, z_coord,
-        min_water_column_m=min_col,
-    )
 
     # All accumulations use the ``ocean_diagnostics`` accumulate dtype
     # (float64 in mixed mode, float32 in pure fp32 or on Metal). See
     # issue #167 — the previous code hard-coded float64 which crashed
-    # on backends without x64 support.
+    # on backends without x64 support.  ``owned_mask`` (when supplied)
+    # zeros out halo cells in the local sum before the global allreduce.
     eff_mask = _ownership_weight(mask, owned_mask)
     mask_acc = cast(eff_mask, _ACC_MODULE, "accumulate")
     area_acc = cast(mesh.areaCell, _ACC_MODULE, "accumulate")
     weighted_area_acc = mask_acc * area_acc
 
-    # --- Volume (eta) correction (3 sums batched into 1 allreduce) ---
-    eta_corrected = state_new.eta.data
-    if config.fix_volume:
-        eta_old_acc = cast(state_old.eta.data, _ACC_MODULE, "accumulate")
-        eta_new_acc = cast(state_new.eta.data, _ACC_MODULE, "accumulate")
-        # Three area-weighted scalar sums share the ``weighted_area_acc``
-        # weight on the same horizontal axes — stack the integrands and
-        # reduce once with ``axis=(0, 1, ...)``.
-        _vol_stack = jnp.stack(
-            [eta_old_acc, eta_new_acc, jnp.ones_like(eta_old_acc)], axis=-1,
-        ) * weighted_area_acc[..., None]
-        vol_terms = jnp.sum(_vol_stack, axis=tuple(range(eta_old_acc.ndim)))
-        vol_old, vol_new, ocean_area = global_sum_if_distributed(vol_terms)
-        eta_correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
-        eta_corrected = state_new.eta.data + eta_correction.astype(eta_corrected.dtype) * mask
-        if min_col is not None:
-            eta_floor = min_col - state_new.H_bathy.data
-            eta_corrected = jnp.where(
-                mask > 0.5, jnp.maximum(eta_corrected, eta_floor), eta_corrected,
-            )
-
-    # Recompute h_k from corrected eta for heat/salt integrals.
-    h_k_corrected = compute_layer_thickness(
-        eta_corrected, state_new.H_bathy.data, z_coord,
-        min_water_column_m=min_col,
-    )
-    h_k_old_acc = cast(h_k_old, _ACC_MODULE, "accumulate")
-    h_k_fix_acc = cast(h_k_corrected, _ACC_MODULE, "accumulate")
-
-    # --- Heat (T) correction (3 sums batched into 1 allreduce; #166) ---
-    # The 3 inner column-axis reductions also share the level axis;
-    # stack them into one ``jnp.sum(..., axis=-2)`` and then collapse
-    # the area-weighted outer sum with ``axis=0`` so the whole 3-term
-    # diagnostic costs one column reduction + one area reduction.
-    T_corrected = state_new.T.data
-    if config.fix_heat:
-        T_old_acc = cast(state_old.T.data, _ACC_MODULE, "accumulate")
-        T_new_acc = cast(state_new.T.data, _ACC_MODULE, "accumulate")
-        _heat_inner = jnp.sum(
-            jnp.stack(
-                [T_old_acc * h_k_old_acc, T_new_acc * h_k_fix_acc, h_k_fix_acc],
-                axis=-1,
-            ),
-            axis=-2,
-        )
-        heat_terms = jnp.sum(_heat_inner * weighted_area_acc[..., None], axis=0)
-        heat_old, heat_new, ocean_vol = global_sum_if_distributed(heat_terms)
-        heat_expected = heat_old + jnp.asarray(expected_dHeat, dtype=heat_old.dtype)
-        T_correction = (heat_expected - heat_new) / jnp.maximum(ocean_vol, 1.0)
-        T_corrected = state_new.T.data + T_correction.astype(T_corrected.dtype) * mask[:, jnp.newaxis]
-
-    # --- Salt (S) correction (3 sums batched into 1 allreduce) ---
-    S_corrected = state_new.S.data
-    if config.fix_salt:
-        S_old_acc = cast(state_old.S.data, _ACC_MODULE, "accumulate")
-        S_new_acc = cast(state_new.S.data, _ACC_MODULE, "accumulate")
-        _salt_inner = jnp.sum(
-            jnp.stack(
-                [S_old_acc * h_k_old_acc, S_new_acc * h_k_fix_acc, h_k_fix_acc],
-                axis=-1,
-            ),
-            axis=-2,
-        )
-        salt_terms = jnp.sum(_salt_inner * weighted_area_acc[..., None], axis=0)
-        salt_old, salt_new, ocean_vol = global_sum_if_distributed(salt_terms)
-        salt_expected = salt_old + jnp.asarray(expected_dSalt, dtype=salt_old.dtype)
-        S_correction = (salt_expected - salt_new) / jnp.maximum(ocean_vol, 1.0)
-        S_corrected = state_new.S.data + S_correction.astype(S_corrected.dtype) * mask[:, jnp.newaxis]
-
-    return state_new._replace(
-        eta=state_new.eta.replace(data=eta_corrected),
-        T=state_new.T.replace(data=T_corrected),
-        S=state_new.S.replace(data=S_corrected),
+    return conservation_fixer_core(
+        state_new,
+        state_old,
+        z_coord,
+        fix_volume=config.fix_volume,
+        fix_heat=config.fix_heat,
+        fix_salt=config.fix_salt,
+        min_water_column_m=config.min_water_column_m,
+        weighted_area_acc=weighted_area_acc,
+        reduce_fn=global_sum_if_distributed,
+        apply_eta_floor=_mpas_eta_floor,
+        expected_dHeat=expected_dHeat,
+        expected_dSalt=expected_dSalt,
     )

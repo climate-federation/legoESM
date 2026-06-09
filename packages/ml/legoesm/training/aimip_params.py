@@ -400,7 +400,7 @@ class AIMIPClassicalParams(eqx.Module):
         d = self.as_dict()
         base = SundqvistConfig()
         return base._replace(
-            RH_crit=d["sundqvist_RH_crit"],
+            rh_crit=d["sundqvist_RH_crit"],
             sigmoid_sharpness=d["sundqvist_sigmoid_sharpness"],
             auto_rate=d["sundqvist_auto_rate"],
             evap_coeff=d["sundqvist_evap_coeff"],
@@ -413,8 +413,8 @@ class AIMIPClassicalParams(eqx.Module):
         base = SBMConfig()
         return base._replace(
             tau_c=d["sbm_tau_c"],
-            RH_ref=d["sbm_RH_ref"],
-            CAPE_threshold=d["sbm_CAPE_threshold"],
+            rh_ref=d["sbm_RH_ref"],
+            cape_threshold=d["sbm_CAPE_threshold"],
             T_min_convect=d["sbm_T_min_convect"],
         )
 
@@ -542,14 +542,14 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         "gray_sw_exponent": float(g.sw_exponent),
         "gray_sfc_albedo": float(g.sfc_albedo),
         # Sundqvist microphysics
-        "sundqvist_RH_crit": float(sq.RH_crit),
+        "sundqvist_RH_crit": float(sq.rh_crit),
         "sundqvist_sigmoid_sharpness": float(sq.sigmoid_sharpness),
         "sundqvist_auto_rate": float(sq.auto_rate),
         "sundqvist_evap_coeff": float(sq.evap_coeff),
         # SBM convection
         "sbm_tau_c": float(sbm.tau_c),
-        "sbm_RH_ref": float(sbm.RH_ref),
-        "sbm_CAPE_threshold": float(sbm.CAPE_threshold),
+        "sbm_RH_ref": float(sbm.rh_ref),
+        "sbm_CAPE_threshold": float(sbm.cape_threshold),
         "sbm_T_min_convect": float(sbm.T_min_convect),
         # RRTMGP
         "rrtmgp_co2_ppmv": float(rr.co2_ppmv),

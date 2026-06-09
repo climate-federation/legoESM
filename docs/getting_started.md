@@ -38,13 +38,28 @@ Three things that make it different from a traditional ESM:
 
 ## 2. Install (5 commands)
 
+legoESM is a uv workspace of independently-installable members, so the install
+command depends on whether you have `uv` (see the README "Installing" section for
+the full why):
+
 ```bash
 git clone https://github.com/gentine/legoESM.git
 cd legoESM
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+
+# With uv (resolves the workspace natively):
+uv sync --extra dev
+
+# …or pip-only (no uv) — the helper resolves the inter-member dependency DAG:
+python scripts/experiment/install_federation.py --all --extras dev
 ```
+
+> A bare `pip install -e ".[dev]"` **fails** here (`Could not find a version that
+> satisfies the requirement legoesm-core~=0.1.0`): plain pip cannot resolve the
+> unpublished workspace members. Use `uv` or the helper above. To install just one
+> component standalone: `python scripts/experiment/install_federation.py atmosphere`
+> (or `ocean` / `land` / `ice`).
 
 Optional MPI extras (only if you want multi-node runs):
 
@@ -223,6 +238,21 @@ Passing pytest is *necessary but not sufficient* on the cubed-sphere
 
 Ocean: `scripts/matrix/run_ocean_test_matrix.py` (current status: 57/57
 PASS).
+
+Fast static guardrails (constants/saturation/dispatch/contracts/federation
+tripwires — seconds, no GPU):
+
+```bash
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+    tests/test_no_hardcoded_constants.py tests/test_no_saturation_reimpl.py \
+    tests/test_dispatch_hardening.py tests/test_physics_contracts.py \
+    tests/test_import_boundaries.py tests/test_federation_plan.py -q
+```
+
+For the full picture — pytest tiers, the matrix framework, the guardrail harness,
+the `scripts/validate/` scientific validators, and the adversarial-review agents
+(Codex `/codex:adversarial-review`, `physics-validator`, `lego-modularity-tester`,
+…) — see [docs/TESTING.md](TESTING.md).
 
 Sea ice: `scripts/matrix/run_sea_ice_test_matrix.py` (15 standard benchmarks).
 

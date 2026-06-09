@@ -88,6 +88,9 @@ def diagnose(st, g):
     spd = np.sqrt(um ** 2 + vm ** 2)
     up = u - um; vp = v - vm; wp = wc - wc.mean((0, 1))
     uw = (up * wp).mean((0, 1)); vw = (vp * wp).mean((0, 1))
+    # Resolved-stress u_* PROXY at k=1 (k=0 is wall-damped: SGS carries the
+    # near-wall stress). The authoritative surface u_* is the MOST wall value
+    # (printed at run end); this is a secondary resolved-turbulence check.
     ustar = float((uw[1] ** 2 + vw[1] ** 2) ** 0.25)
     # SBL depth: where the stress falls to 5% of its surface value.
     tau = np.sqrt(uw ** 2 + vw ** 2)
@@ -110,7 +113,14 @@ def main():
     p.add_argument("--fcor", type=float, default=1.39e-4)
     p.add_argument("--nu-floor", type=float, default=0.05, help="background eddy-viscosity floor [m2/s]")
     p.add_argument("--Q0", type=float, default=-0.005,
-                   help="surface heat flux [K m/s] (negative = cooling)")
+                   help="PRESCRIBED surface kinematic heat flux [K m/s] "
+                        "(negative = cooling); used only when --cooling-rate==0.")
+    p.add_argument("--cooling-rate", type=float, default=0.0,
+                   help="GABLS1-canonical surface COOLING rate [K/hr]: the surface "
+                        "temperature is cooled T_sfc(t)=theta0 - rate*t and the "
+                        "surface heat flux + stability-corrected drag are derived "
+                        "from the coupled stable MOST surface layer. 0 disables "
+                        "(falls back to the prescribed --Q0 flux). GABLS1 uses 0.25.")
     p.add_argument("--dt", type=float, default=0.1)
     p.add_argument("--hours", type=float, default=4.0)
     p.add_argument("--f32", action="store_true")
@@ -152,22 +162,36 @@ def main():
                     0.0).astype(dtype)
     tau_sp = 50.0
 
+    cooling = args.cooling_rate > 0.0   # GABLS1 prescribed-cooling MOST surface BC
+
     @partial(jax.jit, static_argnames=("first",))
-    def step(state, dt, first=False):
+    def step(state, dt, t_sfc, first=False):
         state, us = sl.step(state, g=g, dt=dt, u_geo=(args.Ug, 0.0),
                             f_cor=args.fcor, force=(0.0, 0.0),
-                            sfc_theta_flux=args.Q0, first=first)
+                            sfc_theta_flux=args.Q0, t_sfc=t_sfc, first=first)
         rc = (dt / tau_sp) * spc                            # sponge from live dt
         rf = (dt / tau_sp) * spf
         u = state.u - rc * (state.u - state.u.mean((0, 1), keepdims=True))
         v = state.v - rc * (state.v - state.v.mean((0, 1), keepdims=True))
         w = state.w - rf * state.w
         th = state.theta - rc * (state.theta - state.theta.mean((0, 1), keepdims=True))
+        # Sponge damping breaks ∇·u=0; re-project before the next step (codex
+        # physics review 2026-06-09). θ is a scalar — unaffected by projection.
+        u, v, w = sl.project(u, v, w, dt=dt, g=g)
         return state._replace(u=u, v=v, w=w, theta=th), us
+    sfc_bc = (f"cooling={args.cooling_rate}K/hr (MOST)" if cooling
+              else f"Q0={args.Q0}")
     print(f"[spectral-SBL] {args.nx}x{args.ny}x{args.nz} Lz={args.Lz}m Ug={args.Ug} "
-          f"f={args.fcor:.2e} Q0={args.Q0} {args.time_scheme} "
+          f"f={args.fcor:.2e} {sfc_bc} {args.time_scheme} "
           f"sgs={'LASD' if not args.static else args.sgs_model} "
           f"dt={'adaptive cfl='+str(args.cfl) if args.adaptive_dt else args.dt}")
+
+    def t_sfc_at(t_sec):
+        """Prescribed (cooled) surface temperature for the MOST BC; None disables
+        the coupled surface layer (prescribed-flux fallback)."""
+        if not cooling:
+            return None
+        return jnp.asarray(args.theta0 - args.cooling_rate * (t_sec / 3600.0), dtype)
     rec = args.record_frames > 0
     if rec:
         zc_np = np.asarray(g.z_c)
@@ -190,7 +214,7 @@ def main():
     dt = jnp.asarray(dt0, dtype)
     T = args.hours * 3600.0
     print(f"  dt={dt0:.3f}s ({'static-CFL' if args.adaptive_dt else 'fixed'})")
-    st, us = step(st, dt, first=True)
+    st, us = step(st, dt, t_sfc_at(0.0), first=True)
     if rec:
         _save(0.0)
     t = float(dt); i = 1
@@ -199,8 +223,9 @@ def main():
     t0 = time.time()
     while t < T:
         dth = float(dt)
+        ts = t_sfc_at(t)               # T_sfc held over the block (drift ~3e-4 K)
         for _ in range(blk):
-            st, us = step(st, dt, first=False)
+            st, us = step(st, dt, ts, first=False)
         t += blk * dth; i += blk
         mw = float(jnp.max(jnp.abs(st.w)))
         if not np.isfinite(mw) or mw > 1e3:
@@ -221,6 +246,14 @@ def main():
           f"(target ~0.2-0.4, >0 = not collapsed)")
     print(f"  low-level jet={jet:.2f} m/s @ {jetz:.0f} m (super-geostrophic > Ug={args.Ug})")
     print(f"  stable? θ(top)-θ(sfc)={thm[int(args.nz*0.6)]-thm[0]:+.2f} K (>0 = stable)")
+    if cooling:
+        spd1 = float(np.sqrt(um[0] ** 2 + vm[0] ** 2))
+        u_s, th_s, q0, _cd = sl.most_surface_flux(
+            spd1, float(thm[0]), float(args.theta0 - args.cooling_rate * (t / 3600.0)),
+            float(g.z_c[0]), args.z0, args.theta0)
+        print(f"  MOST surface: T_sfc={float(args.theta0 - args.cooling_rate*(t/3600.0)):.2f} K"
+              f"  w'θ'_0={float(q0):+.4f} K m/s (GABLS1 ref ~-0.012)  "
+              f"u*_MOST={float(u_s):.3f} (ref ~0.27)")
     print(f"  profiles -> {args.output}/sbl_profiles.npz")
     return 0
 

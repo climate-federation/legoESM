@@ -1,7 +1,6 @@
 {
   "C_E": 0.0044,
   "C_H": 0.0044,
-  "RH_init": 0.7,
   "S_0": 1361.0,
   "T_ice": 271.35,
   "T_init": 300.0,
@@ -89,6 +88,8 @@
   "precision": "fp32",
   "rad_update_steps": 1,
   "radiation": "gray",
+  "rh_init": 0.7,
+  "rrtmgp_gpoint_batch_size": 0,
   "rrtmgp_use_scan": null,
   "sbm_RH_ref": 0.7,
   "sbm_cape_threshold": 70.0,

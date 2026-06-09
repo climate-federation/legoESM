@@ -73,8 +73,8 @@ class LockExchangeConfig:
     spectral_land_lat_threshold: float = 90.0  # No land for spectral grid
 
     # Temperature/density front parameters
-    T_cold: float = 5.0            # Cold (dense) side temperature [°C]
-    T_warm: float = 30.0           # Warm (light) side temperature [°C]
+    T_cold_C: float = 5.0            # Cold (dense) side temperature [°C]
+    T_warm_C: float = 30.0           # Warm (light) side temperature [°C]
     S_uniform: float = 35.0        # Uniform salinity [PSU]
 
     # Front location (longitude threshold)
@@ -83,7 +83,7 @@ class LockExchangeConfig:
     # Physical parameters for RPE calculation
     rho_reference: float = constants.rho_ocean
     alpha_T: float = 2.0e-4         # Thermal expansion coefficient [1/K]
-    T_reference: float = 15.0       # Reference temperature [°C]
+    T_reference_C: float = 15.0       # Reference temperature [°C]
 
     # Validation thresholds
     max_pe_drift: float = 1e-2      # Maximum PE drift (relative)
@@ -128,8 +128,8 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init import rest_state_ocean
         state = rest_state_ocean(
             grid, z_coord,
-            T_water_init_C=config.T_reference,  # Use reference T as background
-            T_deep=config.T_reference,
+            T_water_init_C=config.T_reference_C,  # Use reference T as background
+            T_deep=config.T_reference_C,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
@@ -139,8 +139,8 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_water_init_C=config.T_reference,
-            T_deep=config.T_reference,
+            T_water_init_C=config.T_reference_C,
+            T_deep=config.T_reference_C,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
@@ -150,8 +150,8 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         state = rest_state_mpas_ocean(
             grid, z_coord,
-            T_water_init_C=config.T_reference,
-            T_deep=config.T_reference,
+            T_water_init_C=config.T_reference_C,
+            T_deep=config.T_reference_C,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
@@ -161,8 +161,8 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         state = rest_state_spectral_ocean(
             grid, z_coord,
-            T_water_init_C=config.T_reference,
-            T_deep=config.T_reference,
+            T_water_init_C=config.T_reference_C,
+            T_deep=config.T_reference_C,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.spectral_land_lat_threshold
@@ -191,8 +191,8 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
         np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
         lon = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
 
-    T_cold = config.T_cold
-    T_warm = config.T_warm
+    T_cold = config.T_cold_C
+    T_warm = config.T_warm_C
     front_lon = config.front_longitude
 
     # Wrapping-aware "west of front" test: works for any lon convention

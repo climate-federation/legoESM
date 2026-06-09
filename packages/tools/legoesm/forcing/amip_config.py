@@ -54,7 +54,7 @@ class AMIPExperimentConfig(NamedTuple):
     # Atmosphere
     hyperdiff_scale: float = 5e16
     T_init: float = 280.0
-    RH_init: float = 0.6
+    rh_init: float = 0.6
 
     # Radiation
     radiation: str = "gray"  # "gray" or "rrtmg"

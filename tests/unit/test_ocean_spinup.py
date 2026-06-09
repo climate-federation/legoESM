@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.ocean.spinup import (
     SpinupHealth,
     ConvergenceCriteria,
@@ -340,7 +341,7 @@ class TestBryanAcceleratedDt:
 class _FakeGrid:
     """Minimal LatLonGrid-like stub for moc_streamfunction + AMOC tests."""
 
-    def __init__(self, n_lat=36, n_lon=72, radius=6.371e6):
+    def __init__(self, n_lat=36, n_lon=72, radius=constants.R_earth):
         self.n_lat = n_lat
         self.n_lon = n_lon
         self.radius = radius
@@ -516,7 +517,7 @@ class _FakeGrid2DLat(_FakeGrid):
     """_FakeGrid but with a 2-D (n_lat, n_lon) ``lat`` (constant per row) to
     exercise compute_acc_from_state's curvilinear-lat row-reduction path."""
 
-    def __init__(self, n_lat=36, n_lon=72, radius=6.371e6):
+    def __init__(self, n_lat=36, n_lon=72, radius=constants.R_earth):
         super().__init__(n_lat=n_lat, n_lon=n_lon, radius=radius)
         self.lat = np.broadcast_to(
             np.asarray(self.lat)[:, None], (n_lat, n_lon)).copy()

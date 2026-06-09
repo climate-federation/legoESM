@@ -332,6 +332,7 @@ def emanuel_convection(
             mse_min_search_offset=config.mse_min_search_offset,
             sat_branch_sharpness=config.sat_branch_sharpness,
             strict_index_sharpness=config.strict_index_sharpness,
+            epmax=config.precip_efficiency_max,
         )
         dT_dt = mixing.dT_dt
         dq_v_dt = mixing.dq_v_dt

@@ -1,0 +1,21 @@
+{
+  "case": "williamson2_cubed_sphere_vwind",
+  "n_res": 8,
+  "n_steps": 5,
+  "dt": 600.0,
+  "shape": [
+    6,
+    8,
+    8
+  ],
+  "phash": [
+    17361641477348724495,
+    17361641477348724495,
+    17361641477348724495,
+    17361641477348724495,
+    4294967295,
+    18446744069414584320
+  ],
+  "edge_ratio": 1.3489801538347341,
+  "note": "tiny numeric reference for visual_regression.py --check"
+}

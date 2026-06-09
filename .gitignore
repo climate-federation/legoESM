@@ -39,9 +39,14 @@ logs/
 **/logs/
 
 # Diagnostic output folder — PNG/NetCDF dumps written by probe/plot scripts.
-# Excluded wholesale (incl. the former fv3_visual baselines): visual-regression
-# baselines are inspected from local working copies, not tracked in git.
+# Excluded wholesale (incl. the former fv3_visual baselines): full-resolution
+# visual-regression PNGs/NetCDFs are inspected from local working copies, NOT
+# tracked. EXCEPTION (see CLAUDE.md "Validation"): the *tiny deterministic
+# numeric* references under `tests/visual_baselines/` (a ~2 KB downsampled .npy +
+# a JSON hash manifest) ARE tracked — they are test fixtures consumed by
+# `scripts/validate/visual_regression.py --check`, not runtime artifacts.
 diagnostics/
+!tests/visual_baselines/
 
 # Diagnostic plots dropped at repo root by ad-hoc scripts.
 # Tracked diagnostic PNGs live under `diagnostics/` and are still

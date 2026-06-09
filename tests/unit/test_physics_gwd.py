@@ -472,9 +472,16 @@ def _gwd_config_with_active_drag(scheme):
             mcfarlane=McFarlaneConfig(h_topo=10_000.0),
         )
     if scheme == "hines":
+        # Relax the E3SM-faithful magnitude limiter (``tndmax``/``umcfac``;
+        # gw_common.F90:642) for this differentiability probe. At Fmax=100 the
+        # no-reversal cap ``accel = -min(|accel|, umcfac*U_mag/dt)`` binds at
+        # every active level, and ``jnp.minimum`` routes the gradient to the
+        # T-independent cap → d(dT/dt)/dT collapses to ~0. Lifting the cap
+        # isolates the core N(T) → drag → frictional-heating path the test means
+        # to exercise (the limiter magnitude itself is covered by its own tests).
         return GravityWaveDragConfig(
             scheme="hines",
-            hines=HinesConfig(Fmax=100.0),
+            hines=HinesConfig(Fmax=100.0, tndmax_per_day=1.0e4, umcfac=1.0e3),
         )
     return GravityWaveDragConfig(scheme=scheme)
 
@@ -510,6 +517,48 @@ def test_gwd_grad_through_T_finite_and_nonzero(scheme):
             f"{scheme}: grad through T is zero ({g}); expected non-zero "
             "since the scheme has a temperature-dependent path."
         )
+
+
+def test_hines_T_gradient_is_limiter_gated_not_missing():
+    """Documents the diagnosis behind the relaxed-limiter hines config above.
+
+    The hines heating IS a differentiable function of T (via the Brunt-Väisälä
+    frequency N(theta) → saturation amplitude → drag → frictional heating). But
+    the E3SM-faithful magnitude limiter ``accel = -min(|accel|, umcfac*U_mag/dt)``
+    is intentionally T-independent *when it binds*: ``jnp.minimum`` routes the
+    gradient to the cap, so the operational (saturated, Fmax=100) regime shows a
+    ~zero dT/dT. That is the limiter doing its job, not a missing/severed T-path.
+
+    Proof that the relaxed config exposes REAL signal (not numerical noise): the
+    cap-off gradient is many orders of magnitude larger than the cap-on one.
+    """
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import HinesConfig
+
+    state, grid, sigma = _make_sheared_state()
+    T_field = state.T
+
+    def grad_for(hines_cfg):
+        def loss(dT):
+            sp = state._replace(T=T_field.replace(data=T_field.data + dT))
+            fn = make_gwd_physics(
+                GravityWaveDragConfig(scheme="hines", hines=hines_cfg),
+                model_type="hydrostatic", dt=300.0,
+            )
+            tend, _ = fn(sp, grid, sigma)
+            return jnp.sum(tend.dT_dt.data ** 2)
+        return abs(float(jax.grad(loss)(jnp.asarray(0.0))))
+
+    capped = grad_for(HinesConfig(Fmax=100.0))  # E3SM limiter binds → ~0
+    freed = grad_for(HinesConfig(Fmax=100.0, tndmax_per_day=1.0e4, umcfac=1.0e3))
+    assert jnp.isfinite(capped) and jnp.isfinite(freed)
+    assert freed > 1e-15, (
+        f"uncapped hines T-gradient should be real signal, got {freed}"
+    )
+    assert freed > 1.0e6 * capped, (
+        f"lifting the magnitude limiter must expose a far larger T-gradient "
+        f"(capped={capped:.3e}, freed={freed:.3e}) — confirms it is the cap, "
+        f"not a missing T-path, that zeroes the operational gradient."
+    )
 
 
 @pytest.mark.parametrize("scheme", ["rayleigh", "lindzen", "mcfarlane", "hines"])

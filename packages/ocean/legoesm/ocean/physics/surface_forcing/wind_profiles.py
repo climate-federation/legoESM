@@ -33,7 +33,33 @@ def compute_wind_stress(
     -------
     tau_x, tau_y : jnp.ndarray
         Zonal and meridional wind stress [Pa], same shape as *lat*.
+
+    Raises
+    ------
+    ValueError
+        If ``cfg.wind_profile`` is not one of the supported profiles.
     """
+    # Fail fast on an unknown profile rather than silently falling through
+    # to the "constant" branch (slopbuster Pass 4: silent dispatch default
+    # masks typos).  ``wind_profile`` is a static Python config string, so
+    # this validation runs at trace time, not inside the JAX graph.
+    _VALID_WIND_PROFILES = frozenset({
+        "constant",
+        "cosine_latitude",
+        "single_gyre",
+        "double_gyre",
+        "double_gyre_sin2",
+        "double_gyre_tapered",
+        "channel_sine",
+        "global_wind",
+        "two_belt",
+    })
+    if cfg.wind_profile not in _VALID_WIND_PROFILES:
+        raise ValueError(
+            f"Unknown wind_profile {cfg.wind_profile!r}; expected one of "
+            f"{sorted(_VALID_WIND_PROFILES)}"
+        )
+
     if cfg.wind_profile == "cosine_latitude":
         lat_range = jnp.pi / 2.0  # 90 degrees
         tau_x = -cfg.tau_max * jnp.cos(jnp.pi * lat / lat_range)

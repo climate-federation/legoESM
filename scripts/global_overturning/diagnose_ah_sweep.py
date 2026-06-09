@@ -117,10 +117,10 @@ def _build_initial_state(grid, z_coord_base, H_bathy, ocean_mask, config):
     centroid = compute_centroid_depth(
         jnp.zeros_like(H_bathy), H_bathy, z_coord,
     )
-    T_per_cell = config.T_deep + (config.T_water_init_C - config.T_deep) * jnp.exp(
+    T_per_cell = config.T_deep_C + (config.T_water_init_C - config.T_deep_C) * jnp.exp(
         -centroid / config.T_scale_depth,
     )
-    T_per_cell = jnp.where(z_coord.is_active, T_per_cell, config.T_deep)
+    T_per_cell = jnp.where(z_coord.is_active, T_per_cell, config.T_deep_C)
     T_per_cell = T_per_cell * state.land_mask.data[..., jnp.newaxis]
     state = state._replace(
         T=state.T.replace(data=T_per_cell.astype(state.T.data.dtype)),
@@ -145,7 +145,7 @@ def _run_one_ah(A_h, grid, z_coord_base, H_bathy, ocean_mask, gm_redi_cfg,
         kappa_GM=800.0,
         kappa_Redi=800.0,
         T_water_init_C=20.0,
-        T_deep=2.0,
+        T_deep_C=2.0,
         T_scale_depth=1000.0,
     )
 

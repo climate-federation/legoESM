@@ -129,7 +129,7 @@ class TestConvectionParams:
         T, q_v, p_full, p_half = _unstable_column()
 
         def loss(rh):
-            cfg = SBMConfig()._replace(RH_ref=rh)
+            cfg = SBMConfig()._replace(rh_ref=rh)
             out = sbm_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
             return jnp.sum(out.dT_dt ** 2)
 
@@ -150,7 +150,7 @@ class TestConvectionParams:
 
         def loss(cape_thr):
             cfg = SBMConfig()._replace(
-                CAPE_threshold=cape_thr,
+                cape_threshold=cape_thr,
                 # Pair with a sharpness that keeps |sharpness·(CAPE −
                 # threshold)| ≲ 5 across the column so the gating
                 # sigmoid is unsaturated.
@@ -171,7 +171,7 @@ class TestConvectionParams:
                 smooth_trigger_sharpness=s,
                 # Pair with a threshold near the column's CAPE so the
                 # sigmoid argument stays O(1).
-                CAPE_threshold=2000.0,
+                cape_threshold=2000.0,
             )
             out = sbm_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
             return jnp.sum(out.dT_dt ** 2)
@@ -392,12 +392,15 @@ class TestMicrophysicsParams:
         )
 
         def loss(a):
-            # agg_coeff is the HEURISTIC ice→snow aggregation coefficient; the
-            # default ice_to_snow_scheme is now m2005_autoconv (SAM PRCI, which
-            # ignores agg_coeff), so select the heuristic path to exercise the
-            # parameter this test is about.
+            # agg_coeff is the HEURISTIC ice→snow aggregation coefficient.  The
+            # default morrison_flavor="mg" forces ice_to_snow_scheme="mg_ferrier"
+            # in resolve_morrison_flavor (ignoring agg_coeff) AND clobbers an
+            # explicit ice_to_snow_scheme.  Use the "sam" flavor (which leaves
+            # ice_to_snow_scheme untouched) + the heuristic path so agg_coeff is
+            # the live knob this test audits.
             cfg = MorrisonConfig()._replace(
-                agg_coeff=a, ice_to_snow_scheme="heuristic")
+                agg_coeff=a, morrison_flavor="sam",
+                ice_to_snow_scheme="heuristic")
             out = morrison_microphysics(
                 T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
             )

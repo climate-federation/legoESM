@@ -74,7 +74,7 @@ class ACCChannelConfig:
     # Linear EOS
     alpha_T: float = 2.0e-4
     rho_0: float = constants.rho_ocean
-    T_ref: float = 4.0              # reference T for EOS
+    T_ref_C: float = 4.0              # reference T for EOS [degC]
 
     # Wind forcing
     tau0: float = 0.1               # N/m^2, peak zonal stress

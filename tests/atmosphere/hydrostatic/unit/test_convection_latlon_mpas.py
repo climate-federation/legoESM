@@ -549,25 +549,51 @@ class TestTurbulenceGWDMPASStatus:
     can consume the resulting ``HydrostaticTendencies`` without
     additional plumbing (audit 2026-05-12 MEDIUM #10).
 
-    Turbulence remains unsupported on MPAS: every turbulence backend
-    in this package diffuses ``q_v`` (and three of them, TKE/CLUBB-
-    lite/EDMF, carry a prognostic TKE field), but
-    ``MPASPrimitiveEquationModel.step`` only consumes
-    ``(du_dt, dT_dt, dp_s_dt)`` and does not preserve ``state.tracers``
-    or thread a ``PhysicsState`` for stateful schemes.  Enabling MPAS
-    turbulence would silently drop those tendencies / state, which
-    Codex adversarial-review (2026-05-12) called out as no-ship.  The
-    factory therefore fails fast with a clear ``NotImplementedError``
-    until the MPAS step gains tracer + ``PhysicsState`` plumbing."""
+    Turbulence is now supported on MPAS (UNBLOCKED): the factory builds an
+    MPAS turbulence ``physics_fn`` (``_make_mpas_turbulence``) that reconstructs
+    cell-centered winds, runs the column backend, and projects the wind
+    tendencies back to edge-normal form — and ``MPASPrimitiveEquationModel.step``
+    now carries ``state.tracers`` and threads ``PhysicsState`` so the q_v
+    diffusion tendency and any prognostic TKE are no longer silently dropped (the
+    earlier no-ship concern). ``make_turbulence_physics(..., model_type="mpas")``
+    therefore returns a callable rather than raising. (The companion bridge tests
+    above exercise the dispatch end-to-end.)"""
 
-    def test_turbulence_mpas_raises_not_implemented(self):
+    def test_turbulence_mpas_produces_finite_nonzero_tendencies(
+        self, mpas_mesh, mpas_state, sigma_coord,
+    ):
+        """Behavioural proof that MPAS turbulence is genuinely unblocked — not a
+        stub that merely returns a callable. The bridge fn runs end-to-end on an
+        MPAS state and returns finite, non-trivial tendencies (this was a
+        deliberate ``NotImplementedError`` before the MPAS step gained tracer +
+        ``PhysicsState`` plumbing). Also checks the pipeline wiring
+        (``_wants_forcing``) so the MPAS step threads forcing and consumes the
+        returned (du/dT + q_v tracer + TKE) tendencies."""
         from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
         from legoesm.atmosphere.physics.turbulence.integration import (
             make_turbulence_physics,
         )
-        cfg = TurbulenceConfig(scheme="louis")
-        with pytest.raises(NotImplementedError, match="MPAS"):
-            make_turbulence_physics(cfg, model_type="mpas", dt=300.0)
+        turb_fn = make_turbulence_physics(
+            TurbulenceConfig(scheme="louis"), model_type="mpas", dt=300.0,
+        )
+        assert callable(turb_fn)
+        assert getattr(turb_fn, "_wants_forcing", False) is True, (
+            "MPAS turbulence physics_fn must be forcing-aware so the MPAS step "
+            "threads forcing + consumes its tracer/TKE tendencies."
+        )
+        # Invoke the bridge end-to-end (forcing defaults to None and is handled).
+        result = turb_fn(mpas_state, mpas_mesh, sigma_coord)
+        # MPAS turbulence returns ``(HydrostaticTendencies, tke_out)``.
+        tend = result[0] if isinstance(result, tuple) else result
+        assert bool(jnp.all(jnp.isfinite(tend.dT_dt.data)))
+        assert bool(jnp.all(jnp.isfinite(tend.du_dt.data)))
+        # Not a no-op stub: turbulence actually moves the column (vertical
+        # diffusion of momentum/heat from the resolved gradients).
+        moved = (
+            float(jnp.max(jnp.abs(tend.du_dt.data))) > 0.0
+            or float(jnp.max(jnp.abs(tend.dT_dt.data))) > 0.0
+        )
+        assert moved, "MPAS turbulence produced all-zero tendencies (stub?)."
 
     def test_gwd_mpas_returns_callable(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.config import (

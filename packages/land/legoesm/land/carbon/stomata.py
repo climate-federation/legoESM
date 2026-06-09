@@ -119,6 +119,9 @@ class StomataConfig(NamedTuple):
     beta_soil_min: float = 0.01  # Lower bound on soil water stress factor
     f_VPD_min: float = 0.01      # Lower bound on VPD stress factor
 
+    # --- Numerics ---
+    co_limitation_eps: float = 0.1  # Smooth-min width for Wc/Wj co-limitation
+
 
 # =====================================================================
 # Temperature response functions
@@ -208,7 +211,7 @@ def farquhar_photosynthesis(
     Wj = J * (Ci_safe - Gamma_star) / (4.0 * Ci_safe + 8.0 * Gamma_star)
 
     # Smooth minimum (differentiable)
-    _eps = 0.1
+    _eps = config.co_limitation_eps
     A_gross = 0.5 * (Wc + Wj - jnp.sqrt((Wc - Wj) ** 2 + _eps ** 2))
     A_gross = jnp.maximum(A_gross, 0.0)
 

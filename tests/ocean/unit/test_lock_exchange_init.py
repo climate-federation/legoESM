@@ -41,8 +41,8 @@ def test_config_default_H_max_is_petersen_fig5():
 
 def test_config_default_temperatures_match_petersen_fig5():
     cfg = LockExchangeConfig()
-    assert cfg.T_cold == 5.0
-    assert cfg.T_warm == 30.0
+    assert cfg.T_cold_C == 5.0
+    assert cfg.T_warm_C == 30.0
 
 
 def test_special_config_H_max_matches_dataclass():

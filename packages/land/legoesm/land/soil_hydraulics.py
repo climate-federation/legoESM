@@ -71,6 +71,8 @@ class SoilHydraulicsConfig(NamedTuple):
     sigma_cav: float = 1.0      # cavitation spread (log-normal width) [-]
     # Elastic storage near saturation
     S_s: float = 1e-4           # specific storage [1/m]
+    # Non-capillary (film) conductivity coefficient (Peters 2013)
+    c_film: float = 1.35e-8     # [m^(5/2)/s]
 
 
 # ==========================================================================
@@ -338,7 +340,7 @@ def pdi_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     # Knc = c_film * theta_r * (1 - Snc) * scale
     # Simplified: proportional to K_sat * (1 - Snc) * (theta_r/theta_sat)
     Snc = _pdi_Snc(h, config)
-    c_film = 1.35e-8  # m^(5/2)/s (Peters 2013)
+    c_film = config.c_film  # m^(5/2)/s (Peters 2013)
     ha = _pdi_ha(config)
     film_scale = ha ** (-1.5) - config.h0_pdi ** (-1.5)
     Knc = c_film * config.theta_r * jnp.clip(film_scale, 0.0, None) * (1.0 - Snc)
