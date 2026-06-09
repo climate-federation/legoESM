@@ -293,8 +293,11 @@ def compute_cloud_properties(
                             getattr(config, "Nc_default", 1.0e8))
         rho_air = p_full / (constants.R_d * jnp.maximum(T, 1.0))
         nc_cm3 = jnp.maximum(jnp.clip(n_cloud, 0.0), 0.0) / 1.0e6
-        pgam = 0.0005714 * nc_cm3 + 0.2714
-        pgam = jnp.clip(1.0 / jnp.maximum(pgam, 1.0e-12) ** 2 - 1.0, 2.0, 10.0)
+        pgam = config.martin_pgam_slope * nc_cm3 + config.martin_pgam_intercept
+        pgam = jnp.clip(
+            1.0 / jnp.maximum(pgam, 1.0e-12) ** 2 - 1.0,
+            config.pgam_min, config.pgam_max,
+        )
         cons26 = jnp.pi * constants.rho_water / 6.0
         q_c_pos = jnp.maximum(jnp.clip(q_c, 0.0), 1.0e-15)
         nc_permass = (jnp.maximum(jnp.clip(n_cloud, 0.0), 1.0e-15)

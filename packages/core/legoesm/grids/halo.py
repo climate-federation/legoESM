@@ -18,6 +18,9 @@ References
 
 from __future__ import annotations
 
+import contextlib
+import importlib
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -2850,6 +2853,45 @@ def synchronize_bgrid_ne_corner_geo(u, v, z11, z12, z21, z22, n):
     return u_sync, v_sync
 
 
+@contextlib.contextmanager
+def _swap_module_attr(target: str, new_value):
+    """Temporarily rebind the attribute named by dotted ``target``.
+
+    Behaviour-preserving stand-in for ``unittest.mock.patch(target,
+    new_value)`` so this shippable library carries no test-framework
+    dependency at runtime (slopbuster Pass 11).  Like ``mock.patch``, it
+    resolves ``target`` by importing the longest importable module prefix
+    and then walking any remaining (class/attribute) components with
+    ``getattr`` to reach the owner of the final attribute, which is
+    swapped on enter and restored on exit.  Raises the same exceptions
+    the callers already guard: ``ModuleNotFoundError`` when no module
+    prefix imports and ``AttributeError`` when an intermediate or final
+    attribute is absent.
+    """
+    parent_path, _, attr = target.rpartition(".")
+    parts = parent_path.split(".")
+    # Import the longest importable prefix (mock-style deepest module).
+    module = None
+    split = len(parts)
+    while split > 0:
+        try:
+            module = importlib.import_module(".".join(parts[:split]))
+            break
+        except ModuleNotFoundError:
+            split -= 1
+    if module is None:
+        raise ModuleNotFoundError(parent_path)
+    parent = module
+    for name in parts[split:]:  # walk class/attribute components, if any
+        parent = getattr(parent, name)  # AttributeError if absent
+    old_value = getattr(parent, attr)  # AttributeError if attr is absent
+    setattr(parent, attr, new_value)
+    try:
+        yield new_value
+    finally:
+        setattr(parent, attr, old_value)
+
+
 def monotone_halo_clip_context(slack: float = 0.5):
     """FV3_3D iter 505: context manager that monkey-patches 15
     known halo import aliases in NH/PE/SW dycore + operator
@@ -2893,7 +2935,7 @@ def monotone_halo_clip_context(slack: float = 0.5):
 
     Notes
     -----
-    Implementation: ``unittest.mock.patch`` targets:
+    Implementation: ``_swap_module_attr`` rebinds these targets:
     * scalar halo: 3 sites (compressible_euler_cdgrid,
       operators_3d, operators_cdgrid).
     * vector halo: 2 sites (operators_cdgrid, operators_3d).
@@ -2902,9 +2944,7 @@ def monotone_halo_clip_context(slack: float = 0.5):
     SPMD ``packed_pad_halo_4d`` is not patched); the 6 sites
     cover the dominant single-rank paths.
     """
-    import contextlib
     import functools
-    from unittest.mock import patch
 
     scalar_targets = [
         "legoesm.atmosphere.dynamics.compressible_euler_cdgrid."
@@ -2973,27 +3013,27 @@ def monotone_halo_clip_context(slack: float = 0.5):
     stack = contextlib.ExitStack()
     for tgt in scalar_targets:
         try:
-            stack.enter_context(patch(tgt, clipped_scalar))
+            stack.enter_context(_swap_module_attr(tgt, clipped_scalar))
         except (AttributeError, ModuleNotFoundError):
             pass
     for tgt in vector_targets:
         try:
-            stack.enter_context(patch(tgt, clipped_vector))
+            stack.enter_context(_swap_module_attr(tgt, clipped_vector))
         except (AttributeError, ModuleNotFoundError):
             pass
     for tgt in pad_halo_3d_targets:
         try:
-            stack.enter_context(patch(tgt, clipped_pad_halo_3d))
+            stack.enter_context(_swap_module_attr(tgt, clipped_pad_halo_3d))
         except (AttributeError, ModuleNotFoundError):
             pass
     for tgt in pair_h2_targets:
         try:
-            stack.enter_context(patch(tgt, clipped_pair_h2))
+            stack.enter_context(_swap_module_attr(tgt, clipped_pair_h2))
         except (AttributeError, ModuleNotFoundError):
             pass
     for tgt in pad_halo_vector_3d_targets:
         try:
-            stack.enter_context(patch(tgt, clipped_pad_halo_vector_3d))
+            stack.enter_context(_swap_module_attr(tgt, clipped_pad_halo_vector_3d))
         except (AttributeError, ModuleNotFoundError):
             pass
     return stack

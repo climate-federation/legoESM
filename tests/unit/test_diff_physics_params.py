@@ -129,7 +129,7 @@ class TestConvectionParams:
         T, q_v, p_full, p_half = _unstable_column()
 
         def loss(rh):
-            cfg = SBMConfig()._replace(RH_ref=rh)
+            cfg = SBMConfig()._replace(rh_ref=rh)
             out = sbm_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
             return jnp.sum(out.dT_dt ** 2)
 
@@ -150,7 +150,7 @@ class TestConvectionParams:
 
         def loss(cape_thr):
             cfg = SBMConfig()._replace(
-                CAPE_threshold=cape_thr,
+                cape_threshold=cape_thr,
                 # Pair with a sharpness that keeps |sharpness·(CAPE −
                 # threshold)| ≲ 5 across the column so the gating
                 # sigmoid is unsaturated.
@@ -171,7 +171,7 @@ class TestConvectionParams:
                 smooth_trigger_sharpness=s,
                 # Pair with a threshold near the column's CAPE so the
                 # sigmoid argument stays O(1).
-                CAPE_threshold=2000.0,
+                cape_threshold=2000.0,
             )
             out = sbm_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
             return jnp.sum(out.dT_dt ** 2)

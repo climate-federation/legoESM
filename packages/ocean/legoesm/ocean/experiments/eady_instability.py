@@ -16,7 +16,7 @@ Domain Configuration:
 - Rectangular ocean basin (0-120°E, 15-75°N) — channel-like regional domain
 - Solid walls on all four sides
 - Uniform depth: 5500m
-- Background stratification: T_water_init_C=20°C → T_deep=2°C, 1000m e-fold
+- Background stratification: T_water_init_C=20°C → T_deep_C=2°C, 1000m e-fold
 
 Physical Setup:
 - Meridional temperature front: tanh profile centered at 45°N,
@@ -65,7 +65,7 @@ class EadyInstabilityConfig:
 
     # Background stratification
     T_water_init_C: float = 20.0        # Surface temperature [degC]
-    T_deep: float = 2.0            # Deep ocean temperature [degC]
+    T_deep_C: float = 2.0            # Deep ocean temperature [degC]
     T_scale_depth: float = 1000.0  # Temperature e-folding depth [m]
     S_uniform: float = 35.0        # Salinity [PSU]
 
@@ -161,7 +161,7 @@ def _channel_rest_state_latlon(grid, z_coord, config: EadyInstabilityConfig):
     wall_mask[-1, :] = 0.0  # north wall
     return rest_state_latlon_cgrid_ocean(
         grid, z_coord, H_max=config.H_max,
-        T_water_init_C=config.T_water_init_C, T_deep=config.T_deep,
+        T_water_init_C=config.T_water_init_C, T_deep=config.T_deep_C,
         S_uniform=config.S_uniform,
         land_mask_override=wall_mask,
     )
@@ -177,7 +177,7 @@ def _channel_rest_state_mpas(mesh, z_coord, config: EadyInstabilityConfig):
     from legoesm.ocean.init_mpas import rest_state_mpas_ocean
     state = rest_state_mpas_ocean(
         mesh, z_coord, H_max=config.H_max,
-        T_water_init_C=config.T_water_init_C, T_deep=config.T_deep,
+        T_water_init_C=config.T_water_init_C, T_deep=config.T_deep_C,
         S_uniform=config.S_uniform,
     )
     # Land mask: cells outside target latitude band are land
@@ -194,9 +194,9 @@ def _add_stratification_and_front(state, z_coord, config: EadyInstabilityConfig)
     z_full = np.asarray(z_coord.z_full_ref)   # negative, surface first
     nlev = len(z_full)
 
-    # Background exponential profile: T(z) = T_deep + (T_s - T_d)*exp(z/scale)
+    # Background exponential profile: T(z) = T_deep_C + (T_s - T_d)*exp(z/scale)
     decay = np.exp(z_full / config.T_scale_depth)
-    T_bg = config.T_deep + (config.T_water_init_C - config.T_deep) * decay  # (nlev,)
+    T_bg = config.T_deep_C + (config.T_water_init_C - config.T_deep_C) * decay  # (nlev,)
 
     # Meridional front: tanh(lat - lat_center) * depth_decay
     T_data = np.array(state.T.data)

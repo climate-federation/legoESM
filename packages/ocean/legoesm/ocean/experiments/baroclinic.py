@@ -64,7 +64,7 @@ class BaroclinicConfig:
     """
     # Background state (inherits from rest_state)
     T_water_init_C: float = 20.0        # Surface temperature [°C]
-    T_deep: float = 2.0            # Deep ocean temperature [°C]
+    T_deep_C: float = 2.0            # Deep ocean temperature [°C]
     scale_depth: float = 1000.0    # Temperature e-folding depth [m]
     S_uniform: float = 35.0        # Salinity [PSU]
 
@@ -118,7 +118,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         state = rest_state_ocean(
             grid, z_coord,
             T_water_init_C=config.T_water_init_C,
-            T_deep=config.T_deep,
+            T_deep=config.T_deep_C,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
@@ -129,7 +129,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
             T_water_init_C=config.T_water_init_C,
-            T_deep=config.T_deep,
+            T_deep=config.T_deep_C,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
@@ -140,7 +140,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         state = rest_state_mpas_ocean(
             grid, z_coord,
             T_water_init_C=config.T_water_init_C,
-            T_deep=config.T_deep,
+            T_deep=config.T_deep_C,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
@@ -151,7 +151,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         state = rest_state_spectral_ocean(
             grid, z_coord,
             T_water_init_C=config.T_water_init_C,
-            T_deep=config.T_deep,
+            T_deep=config.T_deep_C,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.spectral_land_lat_threshold

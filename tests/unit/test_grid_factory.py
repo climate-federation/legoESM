@@ -70,8 +70,18 @@ def test_plane_is_directed_elsewhere() -> None:
 @_needs_x64
 def test_atmosphere_component_builds_on_a_factory_grid() -> None:
     """A factory-created grid feeds a real component (atmosphere dycore)."""
-    from legoesm.dycore_factory import create_dycore
+    from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    from legoesm.grids.vertical import create_sigma_coordinate
 
     grid = create_grid("cubed_sphere", 8)
-    dycore = create_dycore("cdgrid_shallow_water", grid)
+    config = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
+        dycore=DycoreConfig(
+            model_type="shallow_water", discretization="centered", dt=300.0
+        ),
+        days=1,
+    )
+    sigma = create_sigma_coordinate(5)
+    dycore = create_atmosphere_dycore(config, grid, sigma)
     assert hasattr(dycore, "step")

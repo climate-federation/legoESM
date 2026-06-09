@@ -70,7 +70,7 @@ class TestRCESetup:
         assert rad.heating_rate.shape == (ncol, NLEV)
 
         # One convection call
-        sbm_config = SBMConfig(tau_c=7200.0, RH_ref=0.7)
+        sbm_config = SBMConfig(tau_c=7200.0, rh_ref=0.7)
         conv = sbm_convection(
             T=T_col, q_v=q_v_col,
             p_full=p_full_col, p_half=p_half_col,

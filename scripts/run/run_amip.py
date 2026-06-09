@@ -513,7 +513,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         ic=args.ic,
         ic_path=args.ic_path,
         **({"T_init": args.t_init} if args.t_init is not None else {}),
-        **({"RH_init": args.rh_init} if args.rh_init is not None else {}),
+        **({"rh_init": args.rh_init} if args.rh_init is not None else {}),
     )
 
 

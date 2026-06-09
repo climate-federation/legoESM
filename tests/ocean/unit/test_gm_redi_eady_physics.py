@@ -93,7 +93,7 @@ class TestRediOnlyIsZero:
         grid, z_coord, mask, u_mask, v_mask, jacobian, T, S, config = _make_eady_setup()
 
         # Compute density from T using linear EOS: rho = rho_0 * (1 - alpha_T * (T - T_ref))
-        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref))
+        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref_C))
 
         # Redi only: kappa_GM = 0, kappa_Redi = 1000
         cfg_redi = GMRediConfig(kappa_GM=0.0, kappa_Redi=1000.0, S_max=0.01)
@@ -137,7 +137,7 @@ class TestGMOnlyFlattensIsopycnals:
 
     def test_gm_only_tendency_is_nonzero(self):
         grid, z_coord, mask, u_mask, v_mask, jacobian, T, S, config = _make_eady_setup()
-        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref))
+        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref_C))
 
         # GM only: kappa_GM = 1000, kappa_Redi = 0
         cfg_gm = GMRediConfig(kappa_GM=1000.0, kappa_Redi=0.0, S_max=0.01)
@@ -160,7 +160,7 @@ class TestGMOnlyFlattensIsopycnals:
     def test_gm_only_reduces_ape(self):
         """APE tendency = sum(dT * T * h * area) should be negative (flattening)."""
         grid, z_coord, mask, u_mask, v_mask, jacobian, T, S, config = _make_eady_setup()
-        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref))
+        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref_C))
 
         cfg_gm = GMRediConfig(kappa_GM=1000.0, kappa_Redi=0.0, S_max=0.01)
 
@@ -188,7 +188,7 @@ class TestGMOnlyFlattensIsopycnals:
     def test_gm_only_conserves_tracer(self):
         """sum(dT * h * area) should be zero (GM doesn't create/destroy tracer)."""
         grid, z_coord, mask, u_mask, v_mask, jacobian, T, S, config = _make_eady_setup()
-        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref))
+        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref_C))
 
         cfg_gm = GMRediConfig(kappa_GM=1000.0, kappa_Redi=0.0, S_max=0.01)
 
@@ -232,7 +232,7 @@ class TestTriadRediOnlyMachinePrecision:
 
     def _eady_rho(self):
         grid, z_coord, mask, u_mask, v_mask, jacobian, T, S, config = _make_eady_setup()
-        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref))
+        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref_C))
         return grid, z_coord, mask, u_mask, v_mask, jacobian, T, S, rho
 
     def test_triad_redi_only_tendency_machine_precision(self):
@@ -350,7 +350,7 @@ class TestTriadRediOnlyMachinePrecision:
         from legoesm.ocean.eos import LinearEOSConfig
         eos_lin = LinearEOSConfig(
             rho_ref=config.rho_0, alpha_T=config.alpha_T, beta_S=0.0,
-            T_ref=config.T_ref, S_ref=config.S_uniform,
+            T_ref=config.T_ref_C, S_ref=config.S_uniform,
         )
         dT_dt, dS_dt = gm_redi_tracer_tendency_latlon(
             T, S, eta, H_bathy, grid, z_coord, cfg,
@@ -375,7 +375,7 @@ class TestTriadGMOnly:
 
     def _eady_rho(self):
         grid, z_coord, mask, u_mask, v_mask, jacobian, T, S, config = _make_eady_setup()
-        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref))
+        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref_C))
         return grid, z_coord, mask, u_mask, v_mask, jacobian, T, S, rho
 
     def test_triad_gm_only_nonzero_and_reduces_ape(self):
@@ -417,7 +417,7 @@ class TestTriadDifferentiability:
 
     def test_grad_through_triad_tendency(self):
         grid, z_coord, mask, u_mask, v_mask, jacobian, T, S, config = _make_eady_setup()
-        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref))
+        rho = config.rho_0 * (1.0 - config.alpha_T * (T - config.T_ref_C))
 
         def loss(T_in):
             dT = gm_redi_tracer_tendency_triads_latlon_cgrid(

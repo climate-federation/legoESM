@@ -20,7 +20,14 @@ def _make_target(cfg: RestoringConfig, lat, dtype, kind: str):
             return (cfg.T_star_eq
                     - (cfg.T_star_eq - cfg.T_star_pole) * jnp.sin(lat) ** 2
                     ).astype(dtype)
-        return jnp.full_like(lat, cfg.T_star_eq, dtype=dtype)
+        if cfg.T_profile == "constant":
+            return jnp.full_like(lat, cfg.T_star_eq, dtype=dtype)
+        # Fail fast rather than silently treating a typo as "constant"
+        # (slopbuster Pass 4).  ``T_profile`` is a static config string.
+        raise ValueError(
+            f"Unknown T_profile {cfg.T_profile!r}; expected 'cosine' or "
+            "'constant'"
+        )
     # kind == "S"
     if cfg.S_star_array is not None:
         return jnp.asarray(cfg.S_star_array).astype(dtype)

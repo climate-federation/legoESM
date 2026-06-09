@@ -86,7 +86,7 @@ class MunkGyreConfig:
     # Stratification (rest-state defaults). Field name matches
     # RegionalGyreConfig.T_water_init_C exactly.
     T_water_init_C: float = 20.0
-    T_deep: float = 2.0
+    T_deep_C: float = 2.0          # Deep ocean temperature [degC]
     scale_depth: float = 1000.0
     S_uniform: float = 35.0
 
@@ -113,7 +113,7 @@ def _to_regional_cfg(cfg: MunkGyreConfig) -> RegionalGyreConfig:
     """Translate a ``MunkGyreConfig`` into a ``RegionalGyreConfig`` with
     a single-gyre wind profile and Munk-layer-sized viscosity."""
     return RegionalGyreConfig(
-        T_water_init_C=cfg.T_water_init_C, T_deep=cfg.T_deep,
+        T_water_init_C=cfg.T_water_init_C, T_deep_C=cfg.T_deep_C,
         scale_depth=cfg.scale_depth, S_uniform=cfg.S_uniform,
         H_max=cfg.H_max,
         lon_west=cfg.lon_west, lon_east=cfg.lon_east,

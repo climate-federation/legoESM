@@ -53,7 +53,7 @@ class GeostrophicAdjustmentConfig:
     """
     # Background state
     T_water_init_C: float = 20.0        # Surface temperature [°C]
-    T_deep: float = 2.0            # Deep ocean temperature [°C]
+    T_deep_C: float = 2.0            # Deep ocean temperature [°C]
     scale_depth: float = 1000.0    # Temperature e-folding depth [m]
     S_uniform: float = 35.0        # Salinity [PSU]
 
@@ -82,7 +82,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
     )
     bc_config = BaroclinicConfig(
         T_water_init_C=config.T_water_init_C,
-        T_deep=config.T_deep,
+        T_deep_C=config.T_deep_C,
         scale_depth=config.scale_depth,
         S_uniform=config.S_uniform,
         H_max=config.H_max,
@@ -124,7 +124,7 @@ def validate_results(final_state, diagnostics: Dict[str, list],
     )
     bc_config = BaroclinicConfig(
         T_water_init_C=config.T_water_init_C,
-        T_deep=config.T_deep,
+        T_deep_C=config.T_deep_C,
         H_max=config.H_max,
     )
     return baroclinic_validate(final_state, diagnostics, bc_config)

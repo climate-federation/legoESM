@@ -302,12 +302,18 @@ class E3SMFrontalConfig(NamedTuple):
         ``kfront``, the level near 600 hPa where ``frontgf`` is tested;
         default 6.0e4).  E3SM tests the trigger at ``kfront`` but launches at
         ``kbot`` — these are NOT the same level.
+    front_spectrum_dc_resolution : float
+        Sub-bin c-grid spacing [m/s] for the Gaussian phase-speed
+        quadrature in ``gw_front_init`` (``dca``); each phase-speed bin
+        of width ``dc`` is integrated over ``nint(dc/dca)`` sub-intervals
+        (default 0.1, E3SM ``gw_front.F90`` ``dca``).
     """
     taubgnd: float = 1.5e-3
     frontgfc: float = 1.0e-10
     c0: float = 30.0
     launch_p: float = 5.0e4
     front_p: float = 6.0e4
+    front_spectrum_dc_resolution: float = 0.1
 
 
 class E3SMBeresConfig(NamedTuple):

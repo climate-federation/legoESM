@@ -158,7 +158,7 @@ def test_translation_field_mapping_is_pinned() -> None:
     assert ec.forcing_path == "/data/era5.zarr"
     assert ec.radiation == "rrtmgp"               # radiation.scheme
     assert ec.T_init == 288.0
-    assert ec.RH_init == 0.8
+    assert ec.rh_init == 0.8
     assert ec.distributed is True
     assert ec.seed == 9                           # master RNG seed (reproducibility)
 

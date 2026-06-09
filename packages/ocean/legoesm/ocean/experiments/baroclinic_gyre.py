@@ -18,7 +18,7 @@ Domain Configuration:
 - Rectangular ocean basin (0-120°E, 15-75°N) — same as barotropic_double_gyre
 - Land boundaries on all four sides
 - Uniform depth: 5500m in ocean regions
-- Realistic background stratification: T_water_init_C=20°C → T_deep=2°C
+- Realistic background stratification: T_water_init_C=20°C → T_deep_C=2°C
 - Meridional surface temperature gradient with restoring
 
 Physical Setup:
@@ -75,7 +75,7 @@ class BaroclinicGyreConfig:
 
     # Background stratification
     T_water_init_C: float = 20.0        # Surface temperature [degC]
-    T_deep: float = 2.0            # Deep ocean temperature [degC]
+    T_deep_C: float = 2.0            # Deep ocean temperature [degC]
     T_scale_depth: float = 1000.0  # Temperature e-folding depth [m]
     S_uniform: float = 35.0        # Salinity [PSU]
 
@@ -83,7 +83,7 @@ class BaroclinicGyreConfig:
     enable_restoring: bool = False  # Enable SST restoring (disabled: can't combine with wind)
     T_restore_time: float = 30.0   # Restoring timescale [days]
     T_equator: float = 20.0        # Equatorial SST [degC] — matches T_water_init_C
-    T_pole: float = 2.0            # Polar SST [degC] — matches T_deep
+    T_pole_C: float = 2.0            # Polar SST [degC] — matches T_deep_C
     T_mid_lat: float = 45.0        # Reference latitude for gradient [degrees]
 
     # Wind forcing parameters — same as barotropic case
@@ -127,7 +127,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init import wind_driven_gyre_init
         return wind_driven_gyre_init(
             grid, z_coord, H_max=config.H_max,
-            T_water_init_C=config.T_water_init_C, T_deep=config.T_deep,
+            T_water_init_C=config.T_water_init_C, T_deep=config.T_deep_C,
             scale_depth=config.T_scale_depth, S_uniform=config.S_uniform,
             lon_west=config.lon_west, lon_east=config.lon_east,
             lat_south=config.lat_south, lat_north=config.lat_north,
@@ -168,12 +168,12 @@ def _add_stratification(state, z_coord, config: BaroclinicGyreConfig):
     actual_depths = -np.asarray(z_coord.z_full_ref)  # positive-down depth [m]
     n_levels = len(actual_depths)
 
-    # Create exponential profile: T(z) = T_deep + (T_water_init_C - T_deep) * exp(-z/scale_depth)
+    # Create exponential profile: T(z) = T_deep_C + (T_water_init_C - T_deep_C) * exp(-z/scale_depth)
     z_coord_depths = -actual_depths  # Negative for depth coordinate
 
     # Exponential decay with depth
     decay_factor = np.exp(z_coord_depths / config.T_scale_depth)
-    T_profile = config.T_deep + (config.T_water_init_C - config.T_deep) * decay_factor
+    T_profile = config.T_deep_C + (config.T_water_init_C - config.T_deep_C) * decay_factor
 
     print(f"Fixed stratification profile:")
     for k, (depth, T) in enumerate(zip(actual_depths, T_profile)):

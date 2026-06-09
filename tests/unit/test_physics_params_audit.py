@@ -288,7 +288,7 @@ class TestMicrophysicsAudit:
             q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
 
         def loss(x):
-            cfg = SundqvistConfig()._replace(RH_crit=x)
+            cfg = SundqvistConfig()._replace(rh_crit=x)
             out = sundqvist_microphysics(T, 0.9 * q_v, hydro, p_full, p_half,
                 rho, dz, 60.0, config=cfg)
             return jnp.sum(out.dT_dt ** 2)

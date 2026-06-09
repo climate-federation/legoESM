@@ -412,6 +412,7 @@ class YSUConfig(NamedTuple):
     l_mix_max: float = 100.0
     Pr_t: float = 1.0
     entrainment_coeff: float = 0.2
+    entrainment_width_frac: float = 0.3  # Gaussian entrainment width as fraction of h_pbl
     Ri_crit: float = 0.25
     pbl_smooth_sharpness: float = 20.0
     louis_b: float = 5.0

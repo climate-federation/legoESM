@@ -271,8 +271,8 @@ class PhysicsPipeline:
 
         if sbm_tau_c is not None and _conv_cfg is not None and hasattr(_conv_cfg, 'tau_c'):
             _conv_cfg = _conv_cfg._replace(tau_c=sbm_tau_c)
-        if sbm_RH_ref is not None and _conv_cfg is not None and hasattr(_conv_cfg, 'RH_ref'):
-            _conv_cfg = _conv_cfg._replace(RH_ref=sbm_RH_ref)
+        if sbm_RH_ref is not None and _conv_cfg is not None and hasattr(_conv_cfg, 'rh_ref'):
+            _conv_cfg = _conv_cfg._replace(rh_ref=sbm_RH_ref)
 
         if conv_prog is None:
             if _conv_cfg is not None and hasattr(_conv_cfg, 'M_c_init'):
@@ -1205,8 +1205,8 @@ def _resolve_convection(config):
     if scheme == "sbm":
         conv_config = SBMConfig(
             tau_c=config.sbm_tau_c,
-            RH_ref=config.sbm_RH_ref,
-            CAPE_threshold=getattr(config, 'sbm_cape_threshold', 70.0),
+            rh_ref=config.sbm_RH_ref,
+            cape_threshold=getattr(config, 'sbm_cape_threshold', 70.0),
         )
     else:
         cc = ConvectionConfig(scheme=scheme)

@@ -84,3 +84,10 @@ class CloudConfig(NamedTuple):
     # radius EFFI=1.5/LAMI, LAMI=(ρ_ci·π·N_i/q_i)^(1/3) (RAD-1-ice). Only
     # used when ``compute_cloud_properties`` is given explicit ``n_ice``.
     rho_cloud_ice: float = 500.0
+    # Martin et al. (1994) gamma-PSD spectral-shape (pgam) fit used by the
+    # M2005 liquid effective radius: PGAM = slope·Nc[cm⁻³] + intercept, then
+    # 1/PGAM² − 1 clipped to [pgam_min, pgam_max] (Morrison module_mp_mg.F90).
+    martin_pgam_slope: float = 0.0005714
+    martin_pgam_intercept: float = 0.2714
+    pgam_min: float = 2.0
+    pgam_max: float = 10.0

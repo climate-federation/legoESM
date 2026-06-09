@@ -559,7 +559,7 @@ def _a_si(cfg: AhmedNeelinDCAConfig) -> float:
     3600 s/h: ``a_SI = a_mm_per_hr · ρ_w / (1000 · 3600)`` since 1 mm of
     water = 1 kg/m² (ρ_w · 1e-3 m).
     """
-    rho_w = 1000.0  # density of liquid water [kg/m³] (math constant here)
+    rho_w = constants.rho_water  # density of liquid water [kg/m³]
     # 1 mm/h of rain = (rho_w * 1e-3 m) / 3600 s = rho_w / 3.6e6 kg/m²/s
     return cfg.a_mm_per_hr * rho_w / 3.6e6
 

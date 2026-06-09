@@ -172,9 +172,10 @@ def ysu_turbulence(
     )
     w_star = jnp.cbrt(jnp.maximum(buoyancy_flux, 1e-20))  # (ncol,)
 
-    # Gaussian envelope for entrainment: K_ent = c_ent * w* * h * exp(-((z-h)/(0.3*h))^2)
-    # Width of 0.3*h is used for robustness at GCM-typical vertical resolution
-    width = 0.3 * h_pbl[:, None]  # (ncol, 1)
+    # Gaussian envelope for entrainment: K_ent = c_ent * w* * h * exp(-((z-h)/(f*h))^2)
+    # Width fraction f (default 0.3) is used for robustness at GCM-typical
+    # vertical resolution; exposed as config.entrainment_width_frac.
+    width = config.entrainment_width_frac * h_pbl[:, None]  # (ncol, 1)
     K_ent = (
         config.entrainment_coeff * w_star[:, None] * h_pbl[:, None]
         * jnp.exp(-((z_half_inner - h_pbl[:, None]) / jnp.clip(width, 1.0, None)) ** 2)
