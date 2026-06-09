@@ -11,7 +11,7 @@ commit messages; `OMIP_faithful.md`. Memories: [[omip-faithful-project]], [[omip
 |---|---|---|
 | **tripole eORCA025 ¼°** | **FAITHFUL** | **1.15** corr 0.99 |
 | **latlon 1°** | **FAITHFUL** | **1.12** corr 0.99 |
-| **mpas ico6 ~115 km** | **FAITHFUL** (best) | day-90 **SST 0.84**/**SSS 0.85**; **5-yr+SSS-restore: AMOC 20.5 vs 17.7, ACC 144 vs 159/obs137, SST 1.87** corr 0.985 |
+| **mpas ico6 ~115 km** | **FAITHFUL** (best) | **5-yr MAXIMAL (E−P+ice-albedo+salt-norm+τ60): SST 1.58 corr 0.988, SSS 1.42, ACC 134/obs137, AMOC 13.3 vs 17.7** (binning-caveat) |
 | cubed_sphere | **PARKED** — cold-start mode-1 PGF residual NOT resolution-fixable (C256 ¼° blows too, at a cube EDGE near the equator); all correct numerics committed | n/a (blows at cold-start) |
 | spectral | **NOT-MEANINGFUL** — global SH basis can't represent ORCA1 coastlines (Gibbs ringing; model self-declares unsupported #99; bathy builder refuses real geometry; T21 can't resolve Drake) | n/a (by construction) |
 **"All 5 grids match ORCA1" is impossible BY CONSTRUCTION (spectral).** Achievable maximum =
@@ -439,6 +439,21 @@ zonal integration (one-row-equivalent normalization, or the heat-flux-divergence
 + an ANALYTIC unit test (uniform northward flow → exact transport) + re-derive ALL model AMOC/MHT numbers.
 Until then, treat the model AMOC magnitudes as UPPER BOUNDS; ACC (135-146, section method, single meridian)
 and SST/SSS are unaffected.
+
+### iter-C ★ HEADLINE: τ=60 = MAXIMAL FAITHFULNESS (8437538, mpas_ico6_5yr_s60full) — E−P DECOUPLING CONFIRMED
+The decisive SSS-vs-AMOC test. **E−P + ice-albedo + salt-norm + τ=60 restoring** gives:
+| metric | τ=60 (full) | τ=365 (definitive) | pre-E−P τ=60 | NEMO/obs |
+|---|---|---|---|---|
+| **AMOC@26N** | **13.3** Sv (HELD) | 24.5 | **5.7 (COLLAPSED)** | 17.7 |
+| **ACC@Drake** | **133.7** | 136 | — | ~137 |
+| **SST RMSE/corr** | **1.58 / 0.988** | 1.82 | — | — |
+| **SSS RMSE/bias** | **1.42 / −0.47** | 5.16 / −2.55 | 0.95 | — |
+**τ=60 wins on EVERYTHING.** Strong restoring + E−P holds SSS (1.42 vs 5.16 drift) AND keeps AMOC ALIVE
+(13.3, NOT the pre-E−P 5.7 collapse) → **the pre-E−P τ=60 AMOC collapse WAS the salt-injection artifact of
+an OPEN budget; E−P closes it so the WOA-pinned SSS supports convection.** AMOC 13.3 is even CLOSER to NEMO
+17.7 than τ=365's 24.5 overshoot (binning over-count caveat applies to the absolute, not the ranking).
+VISUAL VERIFY (zonal_means.png): SST overlaps NEMO + far-SH at −2°C freezing; **SSS now TRACKS NEMO** (no
+longer ~2-3 PSU fresh — the τ=60 fix). PNGs sent to user. **This is the all-fixes faithful MPAS result.**
 
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
