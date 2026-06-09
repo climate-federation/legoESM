@@ -743,7 +743,7 @@ class ModelDriver:
             # unless the whole physics pipeline is migrated to it too.)
             p_full_init = self.state.p_s.data[..., None] * self.sigma.sigma_full
             q_sat_init = saturation_mixing_ratio(self.state.T.data, p_full_init)
-            self.tracers["q_v"] = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
+            self.tracers["q_v"] = cfg.rh_init * q_sat_init * self.sigma.sigma_full ** 2
             self.tracers["q_v"] = jnp.minimum(self.tracers["q_v"], q_sat_init)
 
             # Fuse the two diagnostic means into one host transfer.

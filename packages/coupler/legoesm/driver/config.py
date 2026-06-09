@@ -252,7 +252,7 @@ class ExperimentConfig(NamedTuple):
 
     # Surface
     T_init: float = 300.0
-    RH_init: float = 0.7
+    rh_init: float = 0.7
     dynamic_albedo: bool = False
     carbon_cycle: str = "none"
 
@@ -677,7 +677,7 @@ class ExperimentConfig(NamedTuple):
             topo_edge_blend=amip_cfg.topo_edge_blend,
             land_mask_path=getattr(amip_cfg, 'land_mask_path', ''),
             T_init=amip_cfg.T_init,
-            RH_init=amip_cfg.RH_init,
+            rh_init=amip_cfg.rh_init,
             dynamic_albedo=amip_cfg.dynamic_albedo,
             carbon_cycle=amip_cfg.carbon_cycle,
             experiment=amip_cfg.experiment,
@@ -780,7 +780,7 @@ class ExperimentConfig(NamedTuple):
             topo_smoothing=self.topo_smoothing,
             topo_edge_blend=self.topo_edge_blend,
             T_init=self.T_init,
-            RH_init=self.RH_init,
+            rh_init=self.rh_init,
             dynamic_albedo=self.dynamic_albedo,
             carbon_cycle=self.carbon_cycle,
             experiment=self.experiment,

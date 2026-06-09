@@ -267,7 +267,7 @@ class Config:
             "forcing_path": forcing.get("path", ""),
             "radiation": radiation.get("scheme", atm.get("radiation", "gray")),
             "T_init": float(surface.get("T_init", 300.0)),
-            "RH_init": float(surface.get("RH_init", 0.7)),
+            "rh_init": float(surface.get("rh_init", surface.get("RH_init", 0.7))),
             "distributed": bool(
                 hardware.get("parallelism", {}).get("distributed", False)
             ),
