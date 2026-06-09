@@ -34,7 +34,7 @@ buoyancy-independent.
 """
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -109,6 +109,21 @@ class SpectralLESConfig(NamedTuple):
     #                                 larger time steps a CFL-adaptive controller picks.
 
 
+class SpectralLESLayout(NamedTuple):
+    """y-slab MPI decomposition for the distributed horizontal FFT.
+
+    Rank owns ``(ny_local, nx, nz)`` physically; in spectral space it owns the
+    full ``ny`` (ky) and a kx-column slab of width ``nkx_local`` (see
+    ``parallel/distributed_fft.py``). ``n_ranks_x`` is implicitly 1 (slab).
+    ``comm`` is the MPI communicator (non-array; kept out of any AD path).
+    """
+    rank: int
+    n_ranks: int
+    ny_global: int
+    nx: int
+    comm: Any = None
+
+
 class SpectralLESGrid(NamedTuple):
     cfg: SpectralLESConfig
     dx: float
@@ -116,11 +131,12 @@ class SpectralLESGrid(NamedTuple):
     dz: float
     z_c: jax.Array                 # (nz,) centre heights
     z_f: jax.Array                 # (nz+1,) face heights
-    kx: jax.Array                  # (ny, nx//2+1) rad/m, x-wavenumber
-    ky: jax.Array                  # (ny, nx//2+1) rad/m, y-wavenumber
+    kx: jax.Array                  # (ny, nkx) rad/m, x-wavenumber (kx-local if MPI)
+    ky: jax.Array                  # (ny, nkx) rad/m, y-wavenumber
     k2: jax.Array                  # kx²+ky²
-    dealias_mask: jax.Array        # (ny, nx//2+1) 2/3 truncation mask
-    filter_mask: jax.Array         # (ny, nx//2+1) smooth high-k low-pass σ(k)
+    dealias_mask: jax.Array        # (ny, nkx) 2/3 truncation mask
+    filter_mask: jax.Array         # (ny, nkx) smooth high-k low-pass σ(k)
+    layout: SpectralLESLayout | None = None  # None ⇒ serial (global rfft2)
 
 
 class SpectralLESState(NamedTuple):
@@ -134,7 +150,8 @@ class SpectralLESState(NamedTuple):
     rhs_theta_prev: jax.Array | None = None
 
 
-def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64) -> SpectralLESGrid:
+def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64,
+              layout: SpectralLESLayout | None = None) -> SpectralLESGrid:
     # SGS constants must be non-negative or ν_t can go negative (anti-diffusion,
     # blow-up). The shared vreman/Smagorinsky cores trust these — validate here,
     # the single point where a config becomes a runnable grid.
@@ -186,47 +203,76 @@ def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64) -> SpectralLESGrid:
         fmask = (rn <= cfg.filter_cutoff_frac).astype(dtype)
     else:
         fmask = jnp.ones_like(k2)
+    if layout is not None:
+        # Distributed FFT: each rank holds a kx-column slab (full ky). Pad the
+        # reduced-kx axis to P·ceil(nkx/P) and slice this rank's columns so every
+        # pointwise spectral multiply (kx, ky, k2, masks) lines up with the
+        # (ny, nkx_local, nz) output of distributed_rfft2. Padding columns carry
+        # no energy (zeros), so the sliced wavenumbers there are harmless.
+        from legoesm.parallel.distributed_fft import (
+            kx_local_size, local_kx_slice)
+        nkx = nx // 2 + 1
+        nkx_pad = layout.n_ranks * kx_local_size(nx, layout.n_ranks)
+        lo, hi = local_kx_slice(nx, layout.n_ranks, layout.rank)
+
+        def _slice(arr):
+            return jnp.pad(arr, ((0, 0), (0, nkx_pad - nkx)))[:, lo:hi]
+
+        kx, ky, k2 = _slice(kx), _slice(ky), _slice(k2)
+        mask, fmask = _slice(mask), _slice(fmask)
     return SpectralLESGrid(cfg=cfg, dx=dx, dy=dy, dz=dz, z_c=z_c, z_f=z_f,
-                           kx=kx, ky=ky, k2=k2, dealias_mask=mask, filter_mask=fmask)
+                           kx=kx, ky=ky, k2=k2, dealias_mask=mask,
+                           filter_mask=fmask, layout=layout)
 
 
 # --------------------------------------------------------------------------- #
 # Horizontal spectral derivatives (exact)                                      #
 # --------------------------------------------------------------------------- #
-def _fft(f):
-    return jnp.fft.rfft2(f, axes=(0, 1))
+def _fft(f, g: SpectralLESGrid):
+    """Forward horizontal rfft2 over (y, x). Serial ``jnp.fft.rfft2`` when
+    ``g.layout is None``; otherwise the y-slab distributed FFT (output is
+    ``(ny_global, nkx_local, nz)``)."""
+    if g.layout is None:
+        return jnp.fft.rfft2(f, axes=(0, 1))
+    from legoesm.parallel.distributed_fft import distributed_rfft2
+    L = g.layout
+    return distributed_rfft2(f, ny_global=L.ny_global, nx=L.nx,
+                             n_ranks=L.n_ranks, comm=L.comm)
 
 
-def _ifft(fh, ny, nx):
-    return jnp.fft.irfft2(fh, axes=(0, 1), s=(ny, nx))
+def _ifft(fh, g: SpectralLESGrid):
+    """Inverse of :func:`_fft` (returns the physical y-slab ``(ny_local,nx,nz)``
+    under MPI, the global ``(ny,nx,nz)`` serially)."""
+    if g.layout is None:
+        return jnp.fft.irfft2(fh, axes=(0, 1), s=(g.cfg.ny, g.cfg.nx))
+    from legoesm.parallel.distributed_fft import distributed_irfft2
+    L = g.layout
+    return distributed_irfft2(fh, ny_global=L.ny_global, nx=L.nx,
+                              n_ranks=L.n_ranks, comm=L.comm)
 
 
 def ddx(f, g: SpectralLESGrid):
     """∂/∂x via spectral (exact); Nyquist x-mode killed for a real derivative."""
-    ny, nx = f.shape[0], f.shape[1]
-    fh = _fft(f) * (1j * g.kx[..., None])
-    return _ifft(fh, ny, nx)
+    fh = _fft(f, g) * (1j * g.kx[..., None])
+    return _ifft(fh, g)
 
 
 def ddy(f, g: SpectralLESGrid):
-    ny, nx = f.shape[0], f.shape[1]
-    fh = _fft(f) * (1j * g.ky[..., None])
-    return _ifft(fh, ny, nx)
+    fh = _fft(f, g) * (1j * g.ky[..., None])
+    return _ifft(fh, g)
 
 
 def _apply_filter(f, g: SpectralLESGrid):
     """Smooth horizontal high-wavenumber low-pass (per z-level). Multiplies the
     rfft2 spectrum by the precomputed σ(k) mask; uniform in z ⇒ divergence-free
     preserving when applied equally to u, v, w."""
-    ny, nx = f.shape[0], f.shape[1]
-    return _ifft(_fft(f) * g.filter_mask[..., None], ny, nx)
+    return _ifft(_fft(f, g) * g.filter_mask[..., None], g)
 
 
 def _dealias(f, g: SpectralLESGrid):
     if not g.cfg.dealias:
         return f
-    ny, nx = f.shape[0], f.shape[1]
-    return _ifft(_fft(f) * g.dealias_mask[..., None], ny, nx)
+    return _ifft(_fft(f, g) * g.dealias_mask[..., None], g)
 
 
 # --------------------------------------------------------------------------- #
@@ -391,6 +437,11 @@ def advection(u, v, w, g: SpectralLESGrid):
     # the chained rotational form. ``w·ω`` products are formed at the FACES then
     # averaged (StagGridAvg-on-the-product).
     if g.cfg.dealias:
+        if g.layout is not None:
+            raise NotImplementedError(
+                "3/2-rule de-aliasing under MPI needs a distributed padded FFT "
+                "(the fine 3nx/2 grid changes the kx decomposition); not yet "
+                "wired. Use cfg.dealias=False (2/3 mask is distributed) for now.")
         pf = _pad_to_fine
         tf = lambda x: _truncate_from_fine(x, ny, nx)      # noqa: E731
         u_F, v_F, w_F = pf(u), pf(v), pf(w)
@@ -522,19 +573,23 @@ def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     """Enforce ``∇·u=0`` by a pressure projection. Solve per horizontal
     wavenumber a tridiagonal vertical Poisson ``φ''−k²φ = div(u*)/dt`` with
     Neumann (``w=0``) walls, then ``u = u* − dt ∇φ``."""
-    ny, nx, nz = u_s.shape
+    nz = u_s.shape[-1]
+    # Tridiagonal arrays live in SPECTRAL space: (ny_global, nkx_local, nz) under
+    # MPI, (ny, nxr, nz) serially — take the horizontal shape from g.kx (already
+    # sliced to this rank's kx columns), NOT from the physical slab u_s.
+    nyk, nxr = g.kx.shape
     dz = g.dz
-    uh = _fft(u_s) * (1j * g.kx[..., None])
-    vh = _fft(v_s) * (1j * g.ky[..., None])
+    uh = _fft(u_s, g) * (1j * g.kx[..., None])
+    vh = _fft(v_s, g) * (1j * g.ky[..., None])
     # divergence at centres: i kx û + i ky v̂ + ∂w/∂z|_c
-    wzh = _fft(ddz_f2c(w_s, dz))
-    div_h = uh + vh + wzh                                   # (ny, nxr, nz) complex
+    wzh = _fft(ddz_f2c(w_s, dz), g)
+    div_h = uh + vh + wzh                                   # (nyk, nxr, nz) complex
     rhs = div_h / dt
     # Tridiagonal in z (centres), Neumann walls: φ[-1]=φ[0], φ[nz]=φ[nz-1].
-    k2 = g.k2[..., None]                                    # (ny, nxr, 1)
+    k2 = g.k2[..., None]                                    # (nyk, nxr, 1)
     inv_dz2 = 1.0 / dz ** 2
-    a = jnp.full((ny, g.kx.shape[1], nz), inv_dz2, dtype=rhs.dtype)   # sub
-    c = jnp.full((ny, g.kx.shape[1], nz), inv_dz2, dtype=rhs.dtype)   # super
+    a = jnp.full((nyk, nxr, nz), inv_dz2, dtype=rhs.dtype)   # sub
+    c = jnp.full((nyk, nxr, nz), inv_dz2, dtype=rhs.dtype)   # super
     b = -(2.0 * inv_dz2 + k2) * jnp.ones_like(a)
     # Neumann: top/bottom diagonal loses one neighbour coupling.
     b = b.at[..., 0].set(-(inv_dz2 + k2[..., 0]))
@@ -554,7 +609,7 @@ def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     del s0
     phi_h = _thomas_complex(a, b, c, rhs)
     # u = u* - dt ∇φ.  Horizontal grad spectral; vertical grad to faces.
-    phi = _ifft(phi_h, ny, nx)
+    phi = _ifft(phi_h, g)
     u_new = u_s - dt * ddx(phi, g)
     v_new = v_s - dt * ddy(phi, g)
     dphidz_f = jnp.pad(ddz_c2f(phi, dz), ((0, 0), (0, 0), (1, 1)))    # 0 at walls
