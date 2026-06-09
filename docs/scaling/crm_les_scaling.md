@@ -426,3 +426,26 @@ y-slab (`SpectralLESLayout`, `n_ranks_x=1`).
 `ustar` planar means → `global_sum_mpi`; the 3/2-rule padded FFT; then a gathered
 few-step `step()` trajectory vs single-rank + a bench. The hard primitive (the
 FFT) and the hardest operator (the projection) are now done + AD-safe.
+
+## Iteration 18 (2026-06-09): full spectral-LES step runs distributed on MPI
+
+Completed the minimal distributed spectral-LES `step()` (FFT iter16 + projection
+iter17 + this): a full step runs across a y-slab and matches single-rank.
+
+- `_planar_mean(f, g)`: the three horizontal means (MOST wall stress ⟨|u₁|⟩,
+  buoyancy ⟨θ⟩, `u_*` diagnostic) become a GLOBAL `global_sum_mpi` reduction
+  under the y-slab (AD-safe) — rank-local means would give a wrong wall stress.
+- Guards: LASD dynamic Smagorinsky + 3/2-rule de-aliasing raise under MPI (not
+  yet distributed); static smagorinsky/vreman + the 2/3 mask run.
+- Validated (np=1/2/4, dealias=False + static Smag + neutral, ab2, 3 steps):
+  gathered (u,v,w) == serial **1e-9**; `u_*` == serial scalar **1e-10**; grad ==
+  serial (interior ~1e-9, surface k=0 ~1e-5 = wall-mean reduction reorder, proven
+  localized); serial unit suite **12/12 unchanged**.
+- Bench (global 64²×32, fp64): 30.3 → 30.2 → 28.6 ms/step (np 1/2/4) — functional
+  + correct (was single-rank-only); strong scaling flat on one socket
+  (bandwidth + all-to-all transpose comm) ⇒ needs multi-node aggregate bandwidth.
+
+**Spectral-LES MPI: from single-rank-only → runs distributed and correct.**
+Remaining for the full oracle LES on MPI: distribute the LASD test filter + the
+3/2-rule padded FFT (both guarded). The FFT, the projection, the wall model and
+the full static-SGS step are done + AD-safe.

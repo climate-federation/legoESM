@@ -107,10 +107,16 @@ core buys more than the bandwidth contention costs — before plateauing at np=4
 - **fp32 scales healthily** (rising 27.7→41 Mc/s) — the production GPU mode.
 - fp64 works but ~4× slower (consumer fp64 + the FFT pressure solve in fp64).
 - Stable (state finite) in both precisions.
-- **LES MPI is single-rank-bound**: the pressure projection is a global `rfft2`
-  and LASD adds a sharp-spectral test filter — both need a **distributed FFT**
-  under a pencil decomposition (`mpi4jax.alltoall` exists; the implementation is
-  large and bandwidth-bound on one socket — deferred to multi-node).
+- **Spectral LES now runs distributed on MPI** (was single-rank-only). A
+  transpose-based slab distributed 2-D FFT (`parallel/distributed_fft.py`, AD-safe
+  all-to-all) carries the pressure projection, the spectral filter and the
+  global-mean wall model; a full `step()` matches single-rank to **1e-9** (state),
+  **1e-10** (`u_*`), and is AD-safe (np 1/2/4). Bench (global 64²×32, fp64):
+  30.3 → 30.2 → 28.6 ms/step (np 1/2/4) — correct, strong scaling flat on one
+  socket (bandwidth + the all-to-all transpose comm), so speedup needs multi-node
+  aggregate bandwidth. Still serial under MPI: the LASD dynamic-SGS test filter
+  and the 3/2-rule de-aliasing (both guarded with a clear error) — the next
+  increment.
 
 ---
 
@@ -120,11 +126,13 @@ core buys more than the bandwidth contention costs — before plateauing at np=4
 CRM MPI weak-scales in fp32 + fp64 and strong-scales over a validated (1e-15)
 domain decomposition; CRM fp32 GPU is near-roofline; compressible-plane LES
 strong-scales super-linearly on MPI in fp32 + fp64; spectral LES runs and scales
-on single-GPU in fp32 (production) and fp64.
+on single-GPU in fp32 (production) and fp64, and now **runs distributed + correct
+on MPI** (full static-SGS step, AD-safe).
 
 | genuinely-remaining lever | nature |
 |---------------------------|--------|
-| spectral-LES MPI (distributed FFT) | large; bandwidth-bound on a single socket → needs multi-node |
+| spectral-LES MPI: LASD test filter + 3/2-rule padded FFT | the two operators still serial under MPI (guarded); core FFT/projection/wall-model done |
+| spectral-LES MPI strong scaling | flat on one socket (bandwidth + all-to-all transpose) → needs multi-node |
 | CRM dycore kernel tiling (L2-fit) | deep kernel work; modest gain at >2 M cells |
 | fp64 on consumer GPU | 1/64 hardware wall — not a code issue |
 | CPU MPI strong scaling | single-socket memory-bandwidth bound → needs multiple sockets |
