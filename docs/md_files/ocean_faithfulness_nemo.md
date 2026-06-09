@@ -319,141 +319,45 @@ plotter; used the scorer's existing maps.)
   scaling (dt~287 proportional) is marginal at ico7. Relaunched at **dt=150** (8429592) for the
   higher-res SST/SSS check vs the ico6 day-90 0.84/0.85.
 
-### iter-A (2026-06-08): SSS τ=60 + ico7 dt150 harvested → exposed the SALT-BUDGET bug
-Two completed runs harvested:
-- **5-yr MPAS τ=60** (8429375): SST RMSE **1.73**/corr 0.987; SSS RMSE **0.947**/corr 0.937
-  (FIXED from τ=365's 3.97) — but **AMOC@26N collapsed 20.46→5.71 Sv**; ACC 141.8. Stable.
-- **ico7 dt=150** (8429592, ~55 km, 90-day): SST RMSE **0.925**/corr **0.996** = EXCELLENT; SSS
-  0.933; stable. Higher-res grid is faithful (dt=300 blew; dt=150 rides).
-- **AMOC-vs-SSS-restoring tension** (NEMO RUN_REF is itself 5-yr `20000101_20041231` → apples-to-apples,
-  NEMO AMOC 17.74). τ=365 overshoots (20.46), τ=60 undershoots hard (5.71): a 4× AMOC swing from
-  restoring strength = a *symptom*, not the disease.
+## 2026-06-08 session — 4 fixes → MPAS MAXIMAL FAITHFULNESS (E−P + ice-albedo + salt-norm + τ=60)
+Each codex-reviewed + tested (blow-by-blow in git commits):
+- **E−P surface freshwater** (1b240398): the faithful path NEVER applied P−E to salinity (only runoff +
+  restoring → ~0.4 PSU/yr fresh drift, masked by strong restoring → AMOC suppression). Now
+  `compute_omip2_freshwater_forcing` → `model.step(freshwater=)` (interactive E=−lh/L_v + prescribed P +
+  runoff; in-core config.S_ref + eta-in-solve, AD-safe). Cube folds net onto `sf.freshwater` (external.py).
+- **Sea-ice SW albedo** (854214b0, `--ice-albedo`): SW was absorbed ~100% (NO albedo); `sw_net = sw·(1 −
+  [a_oc·(1−siconc) + a_ice·siconc])` weighted by NEMO's own annual `siconc` (`ORCA1_1y_*icemod.nc`,
+  prescribed → feedback-safe). The cores' 0.94 is a PENETRATION split, NOT an albedo (codex-confirmed; kept).
+- **Salt-flux global normalization** (8d774d94 MPAS + d44f8ff0/3ecaf68e latlon): shared
+  `normalized_virtual_salt_flux` removes the area-mean of P−E+R over the WET mask (conserves global salt).
+  A correct SAFEGUARD but a NO-OP for surface SSS here (CORE-II ∮(P−E+R)≈0, verified by matched-day runs);
+  the SSS lever is the restoring τ.
 
-### ROOT CAUSE (iter-A): the OMIP-2 path never applied P−E to salinity
-`run_omip_core2.py` ran `model.step(surface_forcing=compute_omip2_surface_forcing(...))` which returned
-ONLY `tau_x/tau_y/q_net/sw_down` — **`freshwater=None`**. Salinity was forced ONLY by runoff (a
-one-sided freshwater SOURCE, ~1.2 Sv global) + SSS restoring. The dominant atmospheric **E−P** (precip
-loaded but unused; evaporation never derived from `lh`) was MISSING → net fresh source ≈ 0.3 PSU/yr →
-matches the τ=365 −1.53 PSU 5-yr drift. Strong τ=60 restoring masked it by **injecting net salt** (the
-restoring is not global-mean-removed), and strong INTERIOR restoring (regional masks are shortest-τ-wins,
-so the τ=60 default dominates the Labrador/Nordic deep-convection zone) **suppressed AMOC**. So SSS-good
-and AMOC-good were mutually exclusive *only because the salt budget was open*.
+★ **HEADLINE — τ=60 = maximal faithfulness** (mpas_ico6_5yr_s60full, all fixes + τ=60 restoring), visually
+verified (SST overlaps NEMO + far-SH freezing; SSS tracks NEMO):
+| MPAS ico6 5-yr vs NEMO | SST RMSE/corr | SSS RMSE/bias | ACC | AMOC | note |
+|---|---|---|---|---|---|
+| E−P baseline (τ365) | 1.98 / 0.982 | 5.14 / −2.5 | 136 | 24.5 | SSS drift |
+| E−P+ice+saltnorm (τ365) | 1.82 / 0.984 | 5.16 / −2.6 | 136 | 23.9 | SH SST FIXED (Antarctic +2.0→+1.2) |
+| **+τ60 (MAXIMAL)** | **1.58 / 0.988** | **1.42 / −0.5** | **134** | **13.3** | **best on all** |
+| pre-E−P τ60 (no E−P) | — | 0.95 | — | **5.7 COLLAPSE** | the artifact |
+| NEMO / obs | — | — | 159 / ~137 | 17.7 | |
+**E−P closing the surface budget DECOUPLES strong restoring from AMOC collapse** — the pre-E−P τ=60 AMOC
+collapse (5.7) was the salt-injection artifact of an OPEN budget; with E−P, τ=60 holds SSS (1.42 vs 5.16)
+AND keeps AMOC (13.3, closer to NEMO 17.7 than τ=365's 24.5 overshoot). ico7 dt=150 (~55 km) also faithful
+(SST 0.925/corr 0.996). latlon-full run (E−P+ice+saltnorm, τ=365) in flight.
 
-### FIX (iter-A, codex-reviewed → pivoted to IN-CORE channel): apply P−E surface freshwater
-First attempt populated `OceanSurfaceForcing.freshwater` + applied it post-step via `apply_runoff_step`.
-**Codex caught it** (HIGH): the cube's `scheme="external"` physics ALREADY consumes
-`surface_forcing.freshwater` → double-count; `--no-emp` wouldn't disable it; the post-step NumPy update
-also bypasses the eta free-surface solve, breaks AD/device-residency, and uses `dz_ref[0]`/local-S_top
-vs the core's `config.S_ref`. **Pivoted to the in-core channel** the model already provides:
-- New `compute_omip2_freshwater_forcing(state, forcing, idx_t, grid, grid_type, runoff_R, emp, ramp)` →
-  `FreshwaterForcing(precip=P, evap=E=−lh/L_v, runoff=R)` (`air_sea_fluxes` lh +INTO ocean → evaporating
-  lh<0 → E≥0; `net_freshwater_flux`=P−E+R). Shared `_sample_omip2_forcing` (no dup). precip units
-  verified kg/m²/s (RAIN+SNOW).
-- Run loop delivers it via **`model.step(surface_forcing=sf, freshwater=fw)`** (latlon/MPAS/tripole) →
-  the core applies the virtual salt at `config.S_ref` + the eta source in the barotropic solve, on-device
-  + AD-safe (`freshwater_closure="virtual_salt_flux"` default). Runoff moved into the SAME channel (one
-  freshwater path). CUBE folds `net_freshwater_flux(fw)` onto `surface_forcing.freshwater` (external.py
-  applies once — no double-count). `--no-emp` ablation (default ON). Scan path RAISES (precip not on its
-  device stack). Resolves codex HIGH 1/2 + MED 3/4/6/7.
-- Test: `test_compute_omip2_freshwater_forcing_emp` (P/E exactness, P−E sign, runoff channel, emp=False,
-  ramp). Validation job 8432179 (unit tests + latlon+MPAS in-core-path E2E salinity-sign check). Re-codex
-  on the revised diff pending.
-- **Decisive runs (after validation+codex clean):** MPAS ico6 5-yr + latlon 1° 5-yr, P−E + **weak τ=365
-  restoring**. Hypothesis: P−E closes the global budget → weak interior restoring keeps SSS faithful AND
-  AMOC near NEMO 17.7. Multi-grid SST/SSS PNGs to follow.
+CAVEATS (honest, flagged not hidden):
+1. **Transport binning over-count** — `compute_{mht,amoc}_from_state_mpas` sum ALL edges in a 2° lat-band;
+   each edge-row carries the full transport so it over-counts the line integral by ~N_rows (2–3 at ico6) →
+   MHT 5–6 PW (obs ~1.8) AND the model AMOC magnitudes are UPPER BOUNDS. Should be a latitude-circle SECTION
+   (like ACC@Drake); the NEMO structured-grid reader is exact. FIX = section + analytic unit test (follow-up).
+   ACC (section method) + SST/SSS unaffected; the cross-run AMOC RANKING (collapse vs hold) is still valid.
+2. **MPI owned-mask** for the normalization (an `ocean_global_sum` allreduce double-counts Voronoi halo
+   cells; reverted to local `jnp.sum` — exact single-GPU, which OMIP uses). Follow-up.
+3. **Phase-2 ice insulation** (turbulent/LW reduction under ice) — SW-only done; residual Antarctic +1.2.
+4. Annual-mean siconc (no monthly icemod) over-ices summer / under-ices winter.
 
-### iter-B SH/Antarctic SST WARM BIAS — FIXED via sea-ice SW albedo (commit 854214b0)
-User-flagged (zonal_means/SST_maps PNGs): Antarctic (S of 45S) SST too WARM vs NEMO — MPAS ico6 lego
-**5.08** vs NEMO **3.05** (bias **+2.03**); ico7 only +0.32 (res helps; ORCA1 is also ~1°). ROOT CAUSE:
-`sw_down`=downwelling SWDN absorbed **100%** — NO surface albedo at all (the cores' `sw*0.94` is a
-vertical PENETRATION split, NOT an albedo; total=q_net=100%). NEMO's SI3 ice reflects 60-80% under
-Antarctic ice → near freezing; we absorbed it all. `freeze_floor` only caps the FLOOR.
-**FIX (gated `--ice-albedo`, default off→bit-exact):** at the forcing PRODUCER,
-`sw_net = sw_down*(1 − (a_oc*(1−siconc) + a_ice*siconc))` in BOTH q_net + returned sw_down (applied ONCE;
-the 0.94 penetration split then operates on the albedoed sw_net — **codex confirmed keep-0.94**).
-`load_nemo_siconc` IDW-regrids NEMO's OWN annual `siconc` (`ORCA1_1y_*icemod.nc`; land=NaN verified) onto
-any grid — PRESCRIBED (not SST-triggered → feedback-safe, breaks the +5°C chicken-and-egg). New broadband
-constants `alpha_ocean_broadband`=0.06, `alpha_ice_broadband_cold`=0.65. SW-only is the dominant term
-(~140/280 W/m² Antarctic over-heat); turbulent/LW ice insulation = diagnostics-gated phase 2. Tests +
-E2E (ice-band SST warms less). **LIMITATION:** annual-mean siconc (no monthly icemod) over-ices summer /
-under-ices winter. Codex: HIGH (cube combined-scheme solar double-count) is a FALSE POSITIVE for the
-faithful path (external scheme + `shortwave_penetration=None`); defensive siconc clip + source-mask caveat
-addressed. Combined run (E−P + --ice-albedo) `mpas_ico6_5yr_emp_ice` (8433670) launched → SH-SST PNGs.
-
-### iter-B SSS-drift — FIXED: salt virtual-salt flux now global-normalized (commit 8d774d94)
-The E−P run (8432819) confirmed the drift: SSS 34.67@d90 → 34.28@d450 → 34.14@d540 (~−0.4 PSU/yr). CAUSE
-(confirmed): `normalize_freshwater` (MPAS, ON) removed the area-mean of the **eta** flux only (volume),
-but the **salt** virtual-salt flux used the **RAW** net F_fw=P−E+R → an unbalanced ∮(P−E+R) (interactive
-E from biased SST ≠ prescribed P+runoff) drifts the mean salinity even though volume is conserved.
-**FIX:** `apply_freshwater_virtual_salt_top(normalize=True)` removes the area-weighted ocean mean of the
-PHYSICAL net (P−E+R+ice, NOT restoring) over the EFFECTIVE WET mask before the closure — the SAME area-mean
-the eta path removes (volume+salt consistent). Conserves global salt: salt-mass rate = −S_ref·F_fw (h
-cancels), so ∮(−S_ref·(F_fw−F_mean)·area)=0 (Griffies). Codex confirmed the math; fixed thin-cell mask +
-restoring-exclusion. CAVEATS (documented): local jnp.sum → per-rank under MPI (shared with the eta path;
-OMIP=single-GPU); latlon saltnorm CLOSED (commit d44f8ff0 + wired 3ecaf68e; shared `normalized_virtual_salt_flux` helper). Tests:
-4 salt-conservation unit tests + 90 ocean tests pass. **DEFINITIVE run** `mpas_ico6_5yr_full` (8435879):
-E−P + ice-albedo + salt-norm — the maximal-faithfulness config → the per-grid PNGs + SSS/AMOC/SST scores.
-8432819 (no-saltnorm) is the drift baseline (day-720 SSS 33.87 vs definitive day-90 34.68). latlon `latlon_2yr_full` (8436220) = the fully-faithful latlon (E-P + ice + saltnorm). MPI owned-mask normalization (Voronoi halo double-count) = documented follow-up; OMIP runs are single-GPU.
-
-### iter-C CORRECTION (matched-day comparison) — salt-norm is a NO-OP for surface SSS; lever = restoring τ
-RAN both runs to matched days: baseline (no salt-norm) and definitive (salt-norm) have IDENTICAL surface
-mean_sss at d90/180/270/360 (34.67→34.38). So the salt-norm (global area-mean removal) is a genuine NO-OP:
-CORE-II ∮(P−E+R)≈0 already (globally balanced), so the area-mean it removes is ~zero. The salt-norm is a
-CORRECT conservation SAFEGUARD (guards against any residual imbalance; keep it) but it does NOT fix the
-observed SSS decline. **Re-diagnosis:** the SSS decline is SURFACE freshening (WOA IC 34.63 relaxing under
-the surface freshwater flux) + WEAK τ=365 restoring — a surface/restoring lever, NOT a global-salt issue.
-mean_sss is the SURFACE mean; the salt-norm conserves GLOBAL (3D) salt, which decouples from surface SSS
-under stratification. **CORRECTS the earlier "salt-norm closes the SSS drift" claim.** Real SSS lever =
-restoring strength: τ=60 holds SSS near WOA. The pre-E−P τ=60 AMOC collapse (5.7 Sv) was the salt-injection
-artifact of an OPEN budget; now E−P closes the SURFACE flux, so τ=60 should hold SSS AND keep AMOC (E−P
-provides convection preconditioning, not the restoring). TEST: `mpas_ico6_5yr_s60full` (8437538) = definitive
-+ τ=60 → expect good SSS AND AMOC ~17.7. (ice-albedo SST result is independent + still the primary fix.)
-
-### iter-C BASELINE 5-yr E−P result (8432819, mpas_ico6_5yr_emp, τ=365, no ice, no saltnorm)
-E−P validated on the DYNAMICS: **AMOC@26N 24.5 Sv** (NEMO 17.7; developed STRONGLY, no collapse — vs the
-pre-E−P τ=60's 5.7), **ACC@Drake 135.8 Sv** (spot-on obs ~137), SST RMSE 1.98/corr 0.982 (Antarctic +2.0,
-no ice-albedo). **SSS RMSE 5.14 bias −2.49 (BAD)** = the τ=365 surface drift. So E−P+weak-restoring →
-good AMOC/ACC/SST, bad SSS → confirms SSS lever = restoring τ (τ=60 test in flight 8437538). AMOC 24.5 is a
-+40% overshoot vs NEMO; τ=60 (WOA-pinned SSS) may moderate it. ⚠️ **MHT NH peak 4.99 PW** vs obs ~1.8 (2.7× high). Ruled OUT the net-mass-flux×degC-reference term (~0.06 PW: ρcp·1Sv·15°C, too small). Likely the LATITUDE BINNING in `compute_mht_from_state_mpas` (`spinup.py:709-719` sums ALL edges in a 2° band → over-counts the line-integral across one latitude) OR a geometric factor (dvEdge/sinα). Secondary diagnostic (model-side only, not gating any faithfulness claim); needs careful analysis + a unit test on an analytic transport. DEFERRED, not a hand-wave fix.
-
-### iter-C DEFINITIVE 5-yr result (8435879, mpas_ico6_5yr_full: E−P + ICE-ALBEDO + salt-norm, τ=365)
-**SH WARM BIAS FIXED (ice-albedo):** Antarctic SST bias **+2.02→+1.22**, RMSE **2.38→1.55** vs the no-ice
-baseline; global SST **1.98→1.82**, bias **0.43→0.09**, corr 0.984. AMOC 23.9, ACC 136 (good). SSS 5.16
-(τ=365 drift). **VISUAL VERIFY (zonal_means.png, CLAUDE.md):** zonal-mean SST OVERLAPS NEMO at all lats and
-the far SH reaches **−2°C (freezing)** — the ice-albedo confirmed at the PATTERN level, not just RMSE. SST_
-maps Δ pale over most ocean; largest residual = NH subpolar/WBC (coarse-model Gulf-Stream/Kuroshio path,
-−1.7 NH-mid/−1.1 arctic), NOT the SH. No grid artifacts (smooth Voronoi). SSS zonal-mean ~2-3 PSU too fresh
-everywhere = the τ=365 drift (τ=60 run fixes it: live SSS 34.34 vs τ=365's 32.99). PNGs sent to user.
-
-### iter-C ⚠️ TRANSPORT-BINNING OVER-COUNT (affects MHT AND possibly AMOC) — flagged, needs careful fix
-PINNED the MHT 4.99-PW bug: `compute_mht_from_state_mpas` (+ `compute_amoc_from_state_mpas`) sum the
-northward flux of ALL edges in a 2° lat-band (`spinup.py`). For a ~divergence-free flow each EDGE-ROW
-carries the full transport, so a 2° band (≈2-3 rows at ico6 ~115 km) OVER-COUNTS the single-latitude line
-integral by ~N_rows — matching the MHT 2.7× overshoot (4.99 vs obs ~1.8). **COROLLARY: the AMOC diagnostic
-uses the IDENTICAL ±1° band-sum**, so the model AMOC numbers (24.5, 23.9 Sv this session) MAY be inflated by
-~N_rows; true AMOC could be lower (~12-18). The comparison is apples-to-apples ONLY if the NEMO-side reader
-(`nemo_transports.py`) uses the same band method — NEMO is a STRUCTURED lat-lon grid where one row per
-latitude is exact, so NEMO (17.74) is likely correct while the MPAS band-sum over-counts → **the AMOC
-"overshoot" vs NEMO may be partly this artifact, not physics.** FIX (follow-up, NOT a hand-wave): a correct
-zonal integration (one-row-equivalent normalization, or the heat-flux-divergence/streamfunction-cumsum form)
-+ an ANALYTIC unit test (uniform northward flow → exact transport) + re-derive ALL model AMOC/MHT numbers.
-Until then, treat the model AMOC magnitudes as UPPER BOUNDS; ACC (135-146, section method, single meridian)
-and SST/SSS are unaffected.
-
-### iter-C ★ HEADLINE: τ=60 = MAXIMAL FAITHFULNESS (8437538, mpas_ico6_5yr_s60full) — E−P DECOUPLING CONFIRMED
-The decisive SSS-vs-AMOC test. **E−P + ice-albedo + salt-norm + τ=60 restoring** gives:
-| metric | τ=60 (full) | τ=365 (definitive) | pre-E−P τ=60 | NEMO/obs |
-|---|---|---|---|---|
-| **AMOC@26N** | **13.3** Sv (HELD) | 24.5 | **5.7 (COLLAPSED)** | 17.7 |
-| **ACC@Drake** | **133.7** | 136 | — | ~137 |
-| **SST RMSE/corr** | **1.58 / 0.988** | 1.82 | — | — |
-| **SSS RMSE/bias** | **1.42 / −0.47** | 5.16 / −2.55 | 0.95 | — |
-**τ=60 wins on EVERYTHING.** Strong restoring + E−P holds SSS (1.42 vs 5.16 drift) AND keeps AMOC ALIVE
-(13.3, NOT the pre-E−P 5.7 collapse) → **the pre-E−P τ=60 AMOC collapse WAS the salt-injection artifact of
-an OPEN budget; E−P closes it so the WOA-pinned SSS supports convection.** AMOC 13.3 is even CLOSER to NEMO
-17.7 than τ=365's 24.5 overshoot (binning over-count caveat applies to the absolute, not the ranking).
-VISUAL VERIFY (zonal_means.png): SST overlaps NEMO + far-SH at −2°C freezing; **SSS now TRACKS NEMO** (no
-longer ~2-3 PSU fresh — the τ=60 fix). PNGs sent to user. **This is the all-fixes faithful MPAS result.**
 
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
