@@ -515,3 +515,29 @@ its weak + strong scaling, both precisions, via the new
 precisions; its scaling ceiling is the spectral FFT all-to-all (algorithmic), not
 a code defect. The CRM (local stencil) remains the better-scaling path; the
 spectral LES is the faithful-physics path now usable across ranks.
+
+## Iteration 22 (2026-06-09): 3/2-rule de-aliasing distributed — spectral-LES MPI COMPLETE
+
+Distributed the last serial-under-MPI operator: the oracle-faithful 3/2-rule
+de-aliasing. The distributed spectral LES now uses the SAME de-aliasing as the
+serial/oracle path (not just the 2/3 mask). User-requested accuracy refinement.
+
+- `distributed_fft.py`: `distributed_pad_to_fine` / `distributed_truncate_from_fine`.
+  The 2-D spectral zero-pad is SEPARABLE → x done LOCALLY (undecomposed), y via one
+  all-to-all transpose (`ad_alltoall`); two 1-D inverse-FFT norms compose to the
+  serial 2-D `irfft2` norm. Requires ny_local even (guarded).
+- `_pad_to_fine`/`_truncate_from_fine` dispatch serial↔distributed on the grid.
+
+**Codex caught a 2nd HIGH bug** (always-codex earns its keep again): `scalar_rhs`
+(θ advection) also de-aliases and still omitted `g` → padded only the local slab
+under MPI+dealias+θ. My no-θ test missed it. Fixed + added a θ+buoyancy dealias
+test. Codex round-2: CLEAN.
+
+Validated np=1/2/4 (NY=16): pad/truncate 1e-10, grad 1e-8, dealias=True step 1e-9
+(momentum + θ); serial 12/12 unchanged.
+
+**SPECTRAL-LES MPI NOW COMPLETE** — the full oracle closure runs distributed and
+AD-safe: distributed 2-D FFT, pressure projection, global-mean wall model, dynamic
+LASD SGS, AND 3/2-rule de-aliasing. No operator remains serial-under-MPI. Scaling
+remains FFT-all-to-all-bound (algorithmic, iter20) — the ceiling is the spectral
+method's global coupling, not any missing capability.

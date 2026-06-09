@@ -120,10 +120,11 @@ core buys more than the bandwidth contention costs — before plateauing at np=4
     the pressure-Poisson FFT globally couples the domain, so weak-scaling grows
     the FFT size + the all-to-all transpose volume (the spectral communication
     wall, unlike the CRM's flat local-stencil weak scaling).
-  Only the 3/2-rule de-aliasing stays serial-under-MPI (guarded; accuracy
-  refinement — the 2/3 mask de-aliases distributed). The spectral LES is the
-  faithful-physics path now usable across ranks; the CRM is the better-scaling
-  path.
+  **The full oracle closure now runs distributed** (dynamic LASD SGS + 3/2-rule
+  de-aliasing, both AD-safe) — no operator remains serial-under-MPI. The spectral
+  LES is the faithful-physics path now fully usable across ranks; the CRM is the
+  better-scaling path. The spectral ceiling is the FFT all-to-all (algorithmic),
+  not any missing capability.
 
 ---
 
@@ -138,7 +139,6 @@ on MPI** (full static-SGS step, AD-safe).
 
 | genuinely-remaining lever | nature |
 |---------------------------|--------|
-| spectral-LES MPI: LASD test filter + 3/2-rule padded FFT | the two operators still serial under MPI (guarded); core FFT/projection/wall-model done |
 | spectral-LES MPI strong scaling | flat on one socket (bandwidth + all-to-all transpose) → needs multi-node |
 | CRM dycore kernel tiling (L2-fit) | deep kernel work; modest gain at >2 M cells |
 | fp64 on consumer GPU | 1/64 hardware wall — not a code issue |
