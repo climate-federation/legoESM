@@ -180,3 +180,112 @@ def local_kx_slice(nx, n_ranks, rank):
     """
     nkx_loc = kx_local_size(nx, n_ranks)
     return rank * nkx_loc, (rank + 1) * nkx_loc
+
+
+# --------------------------------------------------------------------------- #
+# 3/2-rule zero-padding / truncation between coarse and fine grids            #
+# --------------------------------------------------------------------------- #
+# The 3/2 de-aliasing pads a coarse (ny,nx) field to the fine (3ny/2, 3nx/2)
+# grid (and truncates back). The 2-D spectral zero-pad is SEPARABLE, so it is
+# done as two independent 1-D zero-pads: the x-direction is LOCAL (x is the
+# undecomposed slab axis) and the y-direction uses one all-to-all transpose
+# (y is the decomposed axis). Two 1-D inverse FFTs (norm 1/nxf then 1/nyf)
+# compose to exactly the 2-D irfft2 normalisation 1/(nyf·nxf) of the serial path.
+def _y_transpose_fft(real_y_slab, ny_global, n_ranks, comm):
+    """Real ``(ny_local, B, nz)`` (y decomposed, B undecomposed) → complex
+    ``(ny_global, B_loc, nz)`` spectrum (full ky, B-slab) via one all-to-all."""
+    P = n_ranks
+    ny_local, B, nz = real_y_slab.shape
+    B_loc = -(-B // P)
+    B_pad = P * B_loc
+    f = real_y_slab
+    if B_pad != B:
+        f = jnp.pad(f, ((0, 0), (0, B_pad - B), (0, 0)))
+    blk = f.reshape(ny_local, P, B_loc, nz).transpose(1, 0, 2, 3)
+    recv = ad_alltoall(blk, comm)                     # (P, ny_local, B_loc, nz)
+    yfull = recv.reshape(ny_global, B_loc, nz)        # full y, B-slab (real)
+    return jnp.fft.fft(yfull, axis=0)                 # complex spectrum
+
+
+def _y_itranspose(spec_full_ky, ny_out_global, n_ranks, comm, B):
+    """Inverse of :func:`_y_transpose_fft` at an arbitrary output y-length:
+    complex ``(ny_out_global, B_loc, nz)`` spectrum → real ``(ny_out_local, B,
+    nz)`` (y decomposed). ``ny_out_global`` must be divisible by ``n_ranks``."""
+    P = n_ranks
+    ny_out_local = ny_out_global // P
+    B_loc, nz = spec_full_ky.shape[1], spec_full_ky.shape[2]
+    ycoarse = jnp.fft.ifft(spec_full_ky, axis=0).real    # (ny_out_global, B_loc, nz)
+    blk = ycoarse.reshape(P, ny_out_local, B_loc, nz)
+    recv = ad_alltoall(blk, comm)                        # (P, ny_out_local, B_loc, nz)
+    out = recv.transpose(1, 0, 2, 3).reshape(ny_out_local, P * B_loc, nz)
+    return out[:, :B, :]
+
+
+def _pad_ky(spec, ny, nyf):
+    """Zero-pad the full-ky axis (axis 0): coarse ``ny`` → fine ``nyf``,
+    dropping the y-Nyquist row (matches the serial 3/2 pad)."""
+    nyh = ny // 2
+    B_loc, nz = spec.shape[1], spec.shape[2]
+    out = jnp.zeros((nyf, B_loc, nz), spec.dtype)
+    out = out.at[:nyh].set(spec[:nyh])                       # +ky
+    out = out.at[nyf - nyh + 1:].set(spec[nyh + 1:ny])       # −ky
+    return out
+
+
+def _truncate_ky(spec, nyf, ny):
+    """Inverse of :func:`_pad_ky`: fine ``nyf`` → coarse ``ny`` (keep low ky)."""
+    nyh = ny // 2
+    B_loc, nz = spec.shape[1], spec.shape[2]
+    out = jnp.zeros((ny, B_loc, nz), spec.dtype)
+    out = out.at[:nyh].set(spec[:nyh])
+    out = out.at[ny - nyh + 1:].set(spec[nyf - nyh + 1:])
+    return out
+
+
+def distributed_pad_to_fine(f_local, *, ny_global, nx, n_ranks, comm):
+    """Distributed 3/2 zero-pad: coarse y-slab ``(ny_local, nx, nz)`` → fine
+    y-slab ``(3ny_local/2, 3nx/2, nz)``. Requires ``ny_local`` even (so
+    ``nyf_local = 3ny_local/2`` is an integer)."""
+    P = n_ranks
+    ny_local, nx_in, nz = f_local.shape
+    if nx_in != nx:
+        raise ValueError(f"x-extent {nx_in} != nx {nx}")
+    if P * ny_local != ny_global:
+        raise ValueError(f"n_ranks*ny_local {P*ny_local} != ny_global {ny_global}")
+    if ny_local % 2:
+        raise ValueError(
+            f"3/2-rule distributed needs ny_local even, got {ny_local} "
+            f"(ny_global={ny_global}, n_ranks={P}); 3ny_local/2 must be integer")
+    nyf, nxf = 3 * ny_global // 2, 3 * nx // 2
+    nxr = nx // 2
+    # 1) local x zero-pad (x undecomposed): rfft_x → place low kx → irfft_x.
+    fxh = jnp.fft.rfft(f_local, axis=1)                    # (ny_local, nx//2+1, nz)
+    padx = jnp.zeros((ny_local, nxf // 2 + 1, nz), dtype=fxh.dtype)
+    padx = padx.at[:, :nxr, :].set(fxh[:, :nxr, :])        # drop x-Nyquist
+    fx = jnp.fft.irfft(padx, n=nxf, axis=1)                # (ny_local, nxf, nz) real
+    # 2) distributed y zero-pad: transpose → fft_y → pad ky → ifft_y → transpose.
+    spec = _y_transpose_fft(fx, ny_global, P, comm)        # (ny_global, B_loc, nz)
+    spec_f = _pad_ky(spec, ny_global, nyf)                 # (nyf, B_loc, nz)
+    return _y_itranspose(spec_f, nyf, P, comm, nxf)        # (nyf_local, nxf, nz)
+
+
+def distributed_truncate_from_fine(f_fine, *, ny_global, nx, n_ranks, comm):
+    """Distributed 3/2 truncation: fine y-slab ``(3ny_local/2, 3nx/2, nz)`` →
+    coarse y-slab ``(ny_local, nx, nz)`` with the oracle's 9/4 scaling. Inverse
+    grid of :func:`distributed_pad_to_fine`."""
+    P = n_ranks
+    nyf_local, nxf, nz = f_fine.shape
+    nyf = 3 * ny_global // 2
+    if P * nyf_local != nyf:
+        raise ValueError(f"n_ranks*nyf_local {P*nyf_local} != nyf {nyf}")
+    nxr = nx // 2
+    # 1) local x truncate: rfft_x → keep low kx → irfft_x(n=nx).
+    fxh = jnp.fft.rfft(f_fine, axis=1)                     # (nyf_local, nxf//2+1, nz)
+    outx = jnp.zeros((nyf_local, nx // 2 + 1, nz), dtype=fxh.dtype)
+    outx = outx.at[:, :nxr, :].set(fxh[:, :nxr, :])
+    fx = jnp.fft.irfft(outx, n=nx, axis=1)                 # (nyf_local, nx, nz) real
+    # 2) distributed y truncate.
+    spec = _y_transpose_fft(fx, nyf, P, comm)             # (nyf, B_loc, nz)
+    spec_c = _truncate_ky(spec, nyf, ny_global)           # (ny_global, B_loc, nz)
+    coarse = _y_itranspose(spec_c, ny_global, P, comm, nx)  # (ny_local, nx, nz)
+    return (9.0 / 4.0) * coarse

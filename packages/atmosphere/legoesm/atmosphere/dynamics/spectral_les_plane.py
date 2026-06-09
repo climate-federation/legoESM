@@ -295,8 +295,17 @@ def _dealias(f, g: SpectralLESGrid):
 # the rfft2 FULL axis is y (axis 0), the REDUCED axis is x (axis 1). Both       #
 # Nyquist modes are dropped (unrepresentable derivative; the oracle does too).  #
 # --------------------------------------------------------------------------- #
-def _pad_to_fine(f_yxz):
-    """Coarse ``(ny,nx,nz)`` → fine ``(3ny/2, 3nx/2, nz)`` physical (zero-pad)."""
+def _pad_to_fine(f_yxz, g: SpectralLESGrid | None = None):
+    """Coarse ``(ny,nx,nz)`` → fine ``(3ny/2, 3nx/2, nz)`` physical (zero-pad).
+
+    Under the y-slab ``g.layout`` the pad is separable: x is done locally (x
+    undecomposed) and y via one all-to-all transpose — see
+    ``parallel/distributed_fft.distributed_pad_to_fine``."""
+    if g is not None and g.layout is not None:
+        from legoesm.parallel.distributed_fft import distributed_pad_to_fine
+        L = g.layout
+        return distributed_pad_to_fine(f_yxz, ny_global=L.ny_global, nx=L.nx,
+                                       n_ranks=L.n_ranks, comm=L.comm)
     ny, nx, nz = f_yxz.shape
     nyf, nxf = 3 * ny // 2, 3 * nx // 2
     nyh, nxr = ny // 2, nx // 2                 # half full-axis; drop x-Nyquist
@@ -307,8 +316,14 @@ def _pad_to_fine(f_yxz):
     return jnp.fft.irfft2(pad, axes=(0, 1), s=(nyf, nxf))
 
 
-def _truncate_from_fine(f_fine, ny, nx):
+def _truncate_from_fine(f_fine, ny, nx, g: SpectralLESGrid | None = None):
     """Fine ``(3ny/2,3nx/2,nz)`` → coarse ``(ny,nx,nz)`` physical (+9/4 scaling)."""
+    if g is not None and g.layout is not None:
+        from legoesm.parallel.distributed_fft import distributed_truncate_from_fine
+        L = g.layout
+        return distributed_truncate_from_fine(f_fine, ny_global=L.ny_global,
+                                              nx=L.nx, n_ranks=L.n_ranks,
+                                              comm=L.comm)
     nyf, _nxf = f_fine.shape[0], f_fine.shape[1]
     nz = f_fine.shape[2]
     nyh, nxr = ny // 2, nx // 2
@@ -450,13 +465,8 @@ def advection(u, v, w, g: SpectralLESGrid):
     # the chained rotational form. ``w·ω`` products are formed at the FACES then
     # averaged (StagGridAvg-on-the-product).
     if g.cfg.dealias:
-        if g.layout is not None:
-            raise NotImplementedError(
-                "3/2-rule de-aliasing under MPI needs a distributed padded FFT "
-                "(the fine 3nx/2 grid changes the kx decomposition); not yet "
-                "wired. Use cfg.dealias=False (2/3 mask is distributed) for now.")
-        pf = _pad_to_fine
-        tf = lambda x: _truncate_from_fine(x, ny, nx)      # noqa: E731
+        pf = lambda x: _pad_to_fine(x, g)                  # noqa: E731
+        tf = lambda x: _truncate_from_fine(x, ny, nx, g)   # noqa: E731
         u_F, v_F, w_F = pf(u), pf(v), pf(w)
         omz_F, omx_F, omy_F = pf(omega_z), pf(omega_x_f), pf(omega_y_f)
         Cu = tf(omz_F * v_F + f2c(w_F * omy_F))             # centres
@@ -550,7 +560,10 @@ def scalar_rhs(theta, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux):
     dthdx, dthdy = ddx(theta, g), ddy(theta, g)            # centres
     dthdz_f = jnp.pad(ddz_c2f(theta, dz), ((0, 0), (0, 0), (1, 1)))  # faces, 0 walls
     if g.cfg.dealias:
-        pf, tf = _pad_to_fine, lambda x: _truncate_from_fine(x, *theta.shape[:2])
+        # Pass g so the 3/2 pad/truncate use the DISTRIBUTED global-y transform
+        # under MPI (theta.shape[0] is ny_LOCAL on a slab). (codex 2026-06-09.)
+        pf = lambda x: _pad_to_fine(x, g)                  # noqa: E731
+        tf = lambda x: _truncate_from_fine(x, g.cfg.ny, g.cfg.nx, g)  # noqa: E731
         adv = tf(pf(u) * pf(dthdx) + pf(v) * pf(dthdy)
                  + f2c(pf(w) * pf(dthdz_f)))
     else:
