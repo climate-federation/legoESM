@@ -91,7 +91,8 @@ legoESM has **two** LES paths; the precision/scaling requirement is met across t
    now**, and it inherits the 1e-15 validation (the CRM full-step test runs
    `smagorinsky_cs=0.2`).
 2. **Spectral incompressible LES** (`spectral_les_plane`, FFT pressure + dynamic
-   LASD SGS) — single-GPU; MPI needs a distributed FFT (deferred, below).
+   LASD SGS) — single-GPU **and now distributed on MPI** via a transpose-based
+   slab FFT (full oracle closure; details below).
 
 ### Compressible-plane LES — MPI strong scaling (`--smag-cs 0.2`, global 48×48×20)
 
@@ -144,12 +145,13 @@ CRM MPI weak-scales in fp32 + fp64 and strong-scales over a validated (1e-15)
 domain decomposition; CRM fp32 GPU is near-roofline; compressible-plane LES
 strong-scales super-linearly on MPI in fp32 + fp64; spectral LES runs and scales
 on single-GPU in fp32 (production) and fp64, and now **runs distributed + correct
-on MPI** (full static-SGS step, AD-safe).
+on MPI** with the **full oracle closure** (dynamic LASD SGS + 3/2-rule
+de-aliasing, AD-safe).
 
 | genuinely-remaining lever | nature |
 |---------------------------|--------|
 | spectral-LES MPI strong scaling | flat on one socket (bandwidth + all-to-all transpose) → needs multi-node |
-| CRM dycore kernel tiling (L2-fit) | deep kernel work; modest gain at >2 M cells |
+| CRM GPU large-N L2-fit | NOT intra-kernel tiling (measured net-negative in the production si_horizontal mode); realized by multi-device DD keeping per-device tiles ≤~1.1 M cells (needs ≥2 GPUs) or a Pallas kernel |
 | fp64 on consumer GPU | 1/64 hardware wall — not a code issue |
 | CPU MPI strong scaling | single-socket memory-bandwidth bound → needs multiple sockets |
 
