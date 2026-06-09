@@ -89,6 +89,7 @@
   "rad_update_steps": 1,
   "radiation": "gray",
   "rh_init": 0.7,
+  "rrtmgp_gpoint_batch_size": 0,
   "rrtmgp_use_scan": null,
   "sbm_RH_ref": 0.7,
   "sbm_cape_threshold": 70.0,
