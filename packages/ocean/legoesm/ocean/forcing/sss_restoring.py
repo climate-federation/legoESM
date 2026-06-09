@@ -99,6 +99,18 @@ DEFAULT_OMIP2_REGIONS: tuple[RegionMaskSpec, ...] = (
     # Southern Ocean marginal sea ice zone (60-80°S) — moderate
     RegionMaskSpec("SO_marginal", lat_min=-80.0, lat_max=-60.0,
                    tau_restore_days=180.0),
+    # Enclosed / semi-enclosed marginal seas that are UNRESOLVED at ~1° (narrow
+    # straits) and accumulate river runoff -> a strong fresh bias vs NEMO (the
+    # SSS-map Δ extremes).  Few-day restoring pins them to WOA, the standard
+    # OMIP-2 marginal-sea treatment (cf. the Mediterranean above).
+    RegionMaskSpec("Baltic", lat_min=53.0, lat_max=66.0,
+                   lon_min=9.0, lon_max=31.0, tau_restore_days=15.0),
+    RegionMaskSpec("Black_Sea", lat_min=40.0, lat_max=48.0,
+                   lon_min=27.0, lon_max=42.0, tau_restore_days=15.0),
+    RegionMaskSpec("Hudson_Bay", lat_min=50.0, lat_max=66.0,
+                   lon_min=264.0, lon_max=295.0, tau_restore_days=20.0),
+    RegionMaskSpec("Okhotsk_NWPac", lat_min=43.0, lat_max=62.0,
+                   lon_min=133.0, lon_max=163.0, tau_restore_days=30.0),
 )
 
 
