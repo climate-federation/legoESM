@@ -2982,10 +2982,13 @@ class TestIter123OceanDriftTolerance:
     def test_iter133_barotropic_gyre_gates(self):
         """iter-133 self-review based on
         docs/ocean_experiments_reference.md 'Barotropic Gyre'
-        Validation Thresholds: gates max_speed_final
-        in [0.05, 0.5] m/s and eta_drift < 1e-3 m absolute.
-        Applied via _run_gyre_experiment shared runner so it
-        covers single + double + sin2 variants.
+        Validation Thresholds: gates max_speed_final with an upper
+        bound of 0.5 m/s and a lower bound defaulting to 0.05 m/s
+        (the monolithic runner may lower it per-case via
+        ``min_max_speed`` for short double-gyre / sin2 spin-ups),
+        plus eta_drift < 1e-3 m absolute. Applied via
+        _run_gyre_experiment shared runner so it covers single +
+        double + sin2 variants.
         """
         from pathlib import Path
         for rel in (
@@ -3007,7 +3010,19 @@ class TestIter123OceanDriftTolerance:
                 if not line.lstrip().startswith("#"))
             assert 'label="max_speed_final_lower"' in code
             assert 'label="max_speed_final_upper"' in code
-            assert "max_speed), 0.05" in code
+            # Lower-speed gate (label="max_speed_final_lower", op="ge"). The
+            # modular runner inlines the 0.05 m/s default; the monolithic runner
+            # feeds the gate ``lower_thresh`` (default 0.05, lowered per-case via
+            # ``min_max_speed`` for short double-gyre / sin2 spin-ups). Tie the
+            # check to the gate ACTUALLY consuming that threshold value (not just
+            # to ``lower_thresh`` being defined somewhere).
+            assert (
+                "max_speed), 0.05" in code
+                or ("max_speed), lower_thresh" in code and "lower_thresh = 0.05" in code)
+            ), (
+                f"{rel}: gyre lower-speed gate must consume the 0.05 m/s default "
+                "(inline ``max_speed), 0.05`` or ``max_speed), lower_thresh`` with "
+                "``lower_thresh = 0.05``).")
             assert "max_speed), 0.5" in code
             assert 'label="eta_drift_absolute"' in code
             assert "eta_drift), 1e-3" in code
@@ -3756,7 +3771,8 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
-        path = scripts_dir / "run_atmosphere_test_matrix.py"
+        # Scripts reorg: run_atmosphere_test_matrix.py lives in the matrix/ bucket.
+        path = scripts_dir / "matrix" / "run_atmosphere_test_matrix.py"
         text = path.read_text()
         # Strip docstrings and comments so we only inspect code.
         import re
