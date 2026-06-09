@@ -378,6 +378,21 @@ CAVEATS (honest, flagged not hidden):
   ico7 ~55km 2yr (8440837), latlon 0.5° 1yr (8440838), + ico6 τ60+marginal-sea (8440840, salinity attribution).
   All with the SECTION-method AMOC. tripole ¼° stays compute-infeasible.
 
+### iter-D RESULTS (1st higher-res run back): marginal-sea = MODEST; corrected AMOC = LOW (real trade-off)
+ico6 τ=60 + marginal-sea restoring (8440840, SECTION-method diags):
+- **SSS 1.42→1.38** (bias −0.47→−0.44): marginal-sea restoring helps MODESTLY — the continental extremes
+  (Baltic/Hudson/Okhotsk) are reduced but NOT eliminated (the NW-Pacific/Japan-Sea patch persists, partly
+  south of the Okhotsk region; enclosed-strait dynamics unresolved at ~115 km). Partial fix, not complete.
+- SST 1.57/0.989 (unchanged), ACC 133.7.
+- **CORRECTED AMOC (section) = 6.05 Sv** (vs the inflated band-sum 13.3; NEMO 17.7) — the REAL τ=60 AMOC is
+  LOW. CONFIRMS the SSS↔AMOC trade-off is REAL + the E−P decoupling is only PARTIAL: strong restoring holds
+  SSS (1.38) but genuinely WEAKENS the AMOC (~6). τ=365 (better AMOC, ~13 est) has bad SSS. No single τ wins
+  on both. MHT 3.3 PW (section; was 5-6 band-sum; still ~1.8× obs ~1.8 — possible real over-transport OR a
+  residual per-latitude-crossing subtlety; secondary, flag).
+- HIGHER-RES (the SST-gap lever) in flight on glab1: ico7-2yr (day-90 stable, ~50h; year-1 read ~10h),
+  latlon-0.5° (slow host stepping ~28h, no blowup yet). ico7-90day on a bad short node was step-0-stuck →
+  cancelled (ico7-2yr supersedes).
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
