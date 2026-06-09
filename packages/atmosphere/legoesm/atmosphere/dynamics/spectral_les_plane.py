@@ -401,16 +401,11 @@ def eddy_viscosity(u, v, w, g: SpectralLESGrid):
     S_tuple, Smag = _strain(u, v, w, g)
     delta = (g.dx * g.dy * g.dz) ** (1.0 / 3.0)
     if g.cfg.smagorinsky_dynamic:
-        if g.layout is not None:
-            raise NotImplementedError(
-                "LASD dynamic Smagorinsky under MPI needs the test-filter / "
-                "Lagrangian planar averages distributed onto the y-slab FFT; "
-                "not yet wired. Use static smagorinsky/vreman for distributed "
-                "runs (both are y-slab-safe).")
         nz = u.shape[-1]
         wc = f2c(w)
         cs2 = lasd_cs2(u, v, wc, *S_tuple, Smag,
-                       jnp.full(nz, delta, dtype=u.dtype), cs_max=g.cfg.cs_max)
+                       jnp.full(nz, delta, dtype=u.dtype), cs_max=g.cfg.cs_max,
+                       layout=g.layout)
         return cs2 * (delta ** 2) * Smag + g.cfg.nu_floor   # ν_t = C_s²·Δ²·|S|
     if g.cfg.sgs_model == "vreman":
         return _vreman_nu_t(u, v, w, g)
