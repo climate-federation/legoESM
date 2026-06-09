@@ -2968,7 +2968,7 @@ class ModelDriver:
                            or not self._device_config.is_distributed)
         _n_dev = len(jax.devices())
         _ncell = int(self.state.T.data.shape[0])
-        if (cfg.radiation == "rrtmgp" and _single_process
+        if (_rad_scheme == "rrtmgp" and _single_process
                 and _n_dev > 1 and _ncell % _n_dev == 0):
             from legoesm.parallel.column_shard import create_column_mesh
             _column_mesh = create_column_mesh(_n_dev)
@@ -2976,7 +2976,7 @@ class ModelDriver:
                 f"  RRTMGP column-sharding: {_ncell} cells / {_n_dev} devices "
                 f"= {_ncell // _n_dev} cols/device"
             )
-        elif cfg.radiation == "rrtmgp" and _single_process and _n_dev > 1:
+        elif _rad_scheme == "rrtmgp" and _single_process and _n_dev > 1:
             logger.warning(
                 f"  RRTMGP column-sharding skipped: nCells={_ncell} not "
                 f"divisible by n_devices={_n_dev}; running single-device "
