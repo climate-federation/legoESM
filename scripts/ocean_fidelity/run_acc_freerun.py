@@ -86,7 +86,8 @@ def _bulk_stats(state, z_coord, grid):
 
 
 def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
-                 bottom_drag_r=None, barotropic_solver=None, dt_mom_ratio=None):
+                 bottom_drag_r=None, barotropic_solver=None, dt_mom_ratio=None,
+                 momentum_friction_additive=False):
     import jax
     import jax.numpy as jnp
     from legoesm.core.field import Field
@@ -117,6 +118,13 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
         # exact tracer conservation). Pass `--dt 43200 --dt-mom-ratio 9
         # --barotropic-solver rigid_lid --outer-integrator ab2` for the faithful run.
         cfg = cfg._replace(dt_mom_ratio=dt_mom_ratio)
+    if momentum_friction_additive:
+        # Veros ADDITIVE momentum vertical-friction placement (friction.py +
+        # solve_stream.py): the implicit friction increment is evaluated on the
+        # pre-step u^n and added alongside the AB2-extrapolated explicit
+        # tendency (weight 1.0), instead of backward-Euler on the AB2 state.
+        # Requires --outer-integrator ab2 (validated at config construction).
+        cfg = cfg._replace(momentum_friction_additive=True)
     model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
     sf = recipe.wind_forcing
     state = recipe.initial_state
@@ -253,6 +261,13 @@ def main() -> int:
                          "dt_mom=4800). Requires --barotropic-solver rigid_lid. Faithful "
                          "run: --dt 43200 --dt-mom-ratio 9 --barotropic-solver rigid_lid "
                          "--outer-integrator ab2.")
+    ap.add_argument("--momentum-friction-additive", action="store_true",
+                    help="Veros ADDITIVE momentum vertical-friction placement "
+                         "(friction.py + solve_stream.py): the implicit friction "
+                         "increment is evaluated on the pre-step u^n and added "
+                         "alongside the AB2 explicit tendency (weight 1.0), instead "
+                         "of backward-Euler on the AB2 state. Requires "
+                         "--outer-integrator ab2.")
     args = ap.parse_args()
 
     import jax
@@ -275,7 +290,8 @@ def main() -> int:
             years, args.dt, outer_integrator=args.outer_integrator,
             bottom_drag_r=args.bottom_drag_r,
             barotropic_solver=args.barotropic_solver,
-            dt_mom_ratio=args.dt_mom_ratio)
+            dt_mom_ratio=args.dt_mom_ratio,
+            momentum_friction_additive=args.momentum_friction_additive)
         lego = _bulk_stats(lego_state, recipe.z_coord, recipe.grid)
 
         veros = None

@@ -776,6 +776,30 @@ class LatLonCGridOceanModel:
                 "implicit_vertical_mixing=True, or surface_forcing_implicit=False "
                 "to keep the explicit surface-forcing placement.")
 
+        # Additive momentum vertical-friction placement (Veros solve_stream.py)
+        # is defined relative to the AB2 outer integrator (the increment is
+        # added alongside the AB2-extrapolated explicit tendency) and needs the
+        # implicit vertical-friction solve to produce that increment.  Reject
+        # unsupported combinations rather than silently falling back to the
+        # sequential placement (dispatch discipline).
+        if config.momentum_friction_additive:
+            if not config.implicit_vertical_mixing:
+                raise ValueError(
+                    "momentum_friction_additive=True requires "
+                    "implicit_vertical_mixing=True: the additive increment IS "
+                    "the backward-Euler vertical-friction solve evaluated on "
+                    "the pre-step velocity u^n (Veros core/friction.py). With "
+                    "explicit vertical mixing there is no implicit friction "
+                    "solve to relocate.")
+            if config.outer_integrator != "ab2":
+                raise ValueError(
+                    "momentum_friction_additive=True requires "
+                    'outer_integrator="ab2": the Veros placement adds the '
+                    "u^n-evaluated friction increment alongside the "
+                    "AB2-extrapolated explicit tendency (solve_stream.py). "
+                    f"Got outer_integrator={config.outer_integrator!r}; only "
+                    "the AB2 path was oracle-verified for this placement.")
+
     def check_barotropic_cfl(self, dt: float) -> float:
         """Check barotropic CFL and warn if marginal or unstable.
 
@@ -1870,6 +1894,8 @@ class LatLonCGridOceanModel:
         *,
         dt_mom=None,
         surface_tracer_forcing=None,
+        do_tracers: bool = True,
+        do_momentum: bool = True,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -1901,6 +1927,13 @@ class LatLonCGridOceanModel:
         implicit surface-forcing placement (``core/thermodynamics.py``).  ``dt``
         here is dt_tracer (the tracer timestep), matching Veros.  ``None`` ⇒
         no surface source ⇒ bit-identical.
+
+        ``do_tracers`` / ``do_momentum`` (static Python bools) select which
+        prognostic fields the solve acts on — the additive momentum-friction
+        placement (``config.momentum_friction_additive``) evaluates the
+        MOMENTUM solve on the pre-step state u^n and the TRACER solve on the
+        AB2 state, in two separate calls.  Defaults (both True) ⇒ the original
+        combined solve ⇒ bit-identical.
 
         Called only when ``config.implicit_vertical_mixing == True``.
         """
@@ -1970,56 +2003,60 @@ class LatLonCGridOceanModel:
         mask_3d = state.land_mask.data[..., jnp.newaxis]
 
         # ---- Tracers (cell-centered: K aligns with T, S directly) ----
-        K_v_cell = K_v_cell.astype(state.T.data.dtype)
-        if K33_iso is not None:
-            # Fold the vertical isoneutral diffusivity K_33 into the implicit
-            # tracer solve (Veros core/isoneutral/diffusion.py:154). K_33 ≥ 0 at
-            # interfaces, same (n_lat, n_lon, nlev-1) shape as K_v_cell.  TRACERS
-            # ONLY — momentum uses A_v_cell, which is untouched.
-            K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)
-        # IMPLICIT surface TRACER forcing (Veros placement): add dt·S_surf
-        # (masked) to the solve INPUT so the backward-Euler tridiagonal solve
-        # realises ``(I − dt·L)·X_new = X_old + dt·S_surf`` at weight 1.0.  dt
-        # here is dt_tracer (the tracer timestep), matching Veros's
-        # ``dt_tracer·forc/dz[surface]`` RHS source.  No-op when None.
-        T_solve_in = state.T.data
-        S_solve_in = state.S.data
-        if surface_tracer_forcing is not None:
-            _dT_surf = surface_tracer_forcing.dT_dt.data.astype(state.T.data.dtype)
-            _dS_surf = surface_tracer_forcing.dS_dt.data.astype(state.S.data.dtype)
-            T_solve_in = state.T.data + dt * _dT_surf * mask_3d
-            S_solve_in = state.S.data + dt * _dS_surf * mask_3d
-        T_new = implicit_vertical_diffusion_ocean(
-            T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
-        )
-        S_new = implicit_vertical_diffusion_ocean(
-            S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
-        )
-        T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
-        S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
+        T_new, S_new = state.T.data, state.S.data
+        if do_tracers:
+            K_v_cell = K_v_cell.astype(state.T.data.dtype)
+            if K33_iso is not None:
+                # Fold the vertical isoneutral diffusivity K_33 into the implicit
+                # tracer solve (Veros core/isoneutral/diffusion.py:154). K_33 ≥ 0 at
+                # interfaces, same (n_lat, n_lon, nlev-1) shape as K_v_cell.  TRACERS
+                # ONLY — momentum uses A_v_cell, which is untouched.
+                K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)
+            # IMPLICIT surface TRACER forcing (Veros placement): add dt·S_surf
+            # (masked) to the solve INPUT so the backward-Euler tridiagonal solve
+            # realises ``(I − dt·L)·X_new = X_old + dt·S_surf`` at weight 1.0.  dt
+            # here is dt_tracer (the tracer timestep), matching Veros's
+            # ``dt_tracer·forc/dz[surface]`` RHS source.  No-op when None.
+            T_solve_in = state.T.data
+            S_solve_in = state.S.data
+            if surface_tracer_forcing is not None:
+                _dT_surf = surface_tracer_forcing.dT_dt.data.astype(state.T.data.dtype)
+                _dS_surf = surface_tracer_forcing.dS_dt.data.astype(state.S.data.dtype)
+                T_solve_in = state.T.data + dt * _dT_surf * mask_3d
+                S_solve_in = state.S.data + dt * _dS_surf * mask_3d
+            T_new = implicit_vertical_diffusion_ocean(
+                T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
+            )
+            S_new = implicit_vertical_diffusion_ocean(
+                S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
+            )
+            T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
+            S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
 
         # ---- Momentum (u at u-faces, v at v-faces) ----
         # Interpolate A_v and dz from cell centers to face centers.  The
         # solver only needs dz to be positive (it clips internally) and
         # the resulting tridiagonal system is well-posed on any column
         # with at least two wet levels.
-        A_v_cell = A_v_cell.astype(state.u.data.dtype)
-        A_v_u = interp_cell_to_uface(A_v_cell)            # (n_lat, n_lon+1, nlev-1)
-        A_v_v = _interp_to_v_points(A_v_cell)             # (n_lat+1, n_lon, nlev-1)
-        dz_u = interp_cell_to_uface(dz_cell)
-        dz_v = _interp_to_v_points(dz_cell)
-        dz_half_u = build_dz_half(dz_u)
-        dz_half_v = build_dz_half(dz_v)
-        u_mask_3d = state.u_mask.data[..., jnp.newaxis]
-        v_mask_3d = state.v_mask.data[..., jnp.newaxis]
-        u_new = implicit_vertical_diffusion_ocean(
-            state.u.data, A_v_u, dz_u, dz_half_u, dt_mom,
-        )
-        v_new = implicit_vertical_diffusion_ocean(
-            state.v.data, A_v_v, dz_v, dz_half_v, dt_mom,
-        )
-        u_new = jnp.where(u_mask_3d > 0.5, u_new, state.u.data)
-        v_new = jnp.where(v_mask_3d > 0.5, v_new, state.v.data)
+        u_new, v_new = state.u.data, state.v.data
+        if do_momentum:
+            A_v_cell = A_v_cell.astype(state.u.data.dtype)
+            A_v_u = interp_cell_to_uface(A_v_cell)        # (n_lat, n_lon+1, nlev-1)
+            A_v_v = _interp_to_v_points(A_v_cell)         # (n_lat+1, n_lon, nlev-1)
+            dz_u = interp_cell_to_uface(dz_cell)
+            dz_v = _interp_to_v_points(dz_cell)
+            dz_half_u = build_dz_half(dz_u)
+            dz_half_v = build_dz_half(dz_v)
+            u_mask_3d = state.u_mask.data[..., jnp.newaxis]
+            v_mask_3d = state.v_mask.data[..., jnp.newaxis]
+            u_new = implicit_vertical_diffusion_ocean(
+                state.u.data, A_v_u, dz_u, dz_half_u, dt_mom,
+            )
+            v_new = implicit_vertical_diffusion_ocean(
+                state.v.data, A_v_v, dz_v, dz_half_v, dt_mom,
+            )
+            u_new = jnp.where(u_mask_3d > 0.5, u_new, state.u.data)
+            v_new = jnp.where(v_mask_3d > 0.5, v_new, state.v.data)
 
         return state._replace(
             u=state.u.replace(data=u_new),
@@ -2358,12 +2395,49 @@ class LatLonCGridOceanModel:
         #     thermodynamics.py vertmix / solve_stream.py du_mix), with the
         #     diffusivity profiles from the tendencies (see docstring) ---
         if self.config.implicit_vertical_mixing:
-            state_ab2 = self._apply_implicit_vertical_mixing(
-                state_ab2, dt, surface_forcing,
-                K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
-                dt_mom=dt / self.config.dt_mom_ratio,
-                surface_tracer_forcing=surface_tracer_forcing,
-            )
+            dt_mom = dt / self.config.dt_mom_ratio
+            if self.config.momentum_friction_additive:
+                # Veros ADDITIVE friction placement (core/friction.py +
+                # core/external/solve_stream.py): the implicit vertical-friction
+                # increment is evaluated on the PRE-STEP velocity u^n and ADDED
+                # to the AB2 state — u^{n+1} = AB2(u) + (BE(u^n) − u^n) — at
+                # weight 1.0 (NOT AB2-extrapolated, like the implicit surface
+                # forcing).  TRACERS keep the sequential implicit-diffusion-on-
+                # the-AB2-state placement in both modes (that IS Veros's tracer
+                # placement, core/thermodynamics.py).  The friction solve has
+                # zero-flux top/bottom BCs ⇒ the increment's depth-mean is ~0 ⇒
+                # the un-AB2'd barotropic mode from the barotropic solver is
+                # untouched.  Measured (.physics-validator/momentum_fair/): the
+                # additive form collapses the realized momentum-increment L2
+                # ratio 4.8→1.6 and lifts corr 0.11→0.44 vs Veros.
+                state_fric = self._apply_implicit_vertical_mixing(
+                    state, dt, surface_forcing,
+                    K_v_phys=K_v_phys, A_v_phys=A_v_phys,
+                    dt_mom=dt_mom, do_tracers=False,
+                )
+                du_impl = state_fric.u.data - state.u.data
+                dv_impl = state_fric.v.data - state.v.data
+                state_ab2 = self._apply_implicit_vertical_mixing(
+                    state_ab2, dt, surface_forcing,
+                    K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
+                    dt_mom=dt_mom,
+                    surface_tracer_forcing=surface_tracer_forcing,
+                    do_momentum=False,
+                )
+                u_add = (state_ab2.u.data + du_impl) * u_mask3
+                v_add = (state_ab2.v.data + dv_impl) * v_mask3
+                u_add = u_add.at[:, -1].set(u_add[:, 0])   # periodic-lon wrap
+                state_ab2 = state_ab2._replace(
+                    u=state_ab2.u.replace(data=u_add),
+                    v=state_ab2.v.replace(data=v_add),
+                )
+            else:
+                state_ab2 = self._apply_implicit_vertical_mixing(
+                    state_ab2, dt, surface_forcing,
+                    K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
+                    dt_mom=dt_mom,
+                    surface_tracer_forcing=surface_tracer_forcing,
+                )
 
         # --- Conservation fixer once, on the final state ---
         if self.config.use_conservation_fixer:

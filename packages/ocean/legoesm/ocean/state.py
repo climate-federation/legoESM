@@ -996,3 +996,23 @@ class LatLonCGridOceanConfig(NamedTuple):
     polar_filter_max_wave_speed: float = 300.0
     # Fraction of the theoretical CFL wavenumber kept (<1 for margin).
     polar_filter_safety_factor: float = 0.85
+
+    # --- Additive momentum vertical-friction placement (Veros) ---
+    # Veros computes the implicit vertical-friction increment du_mix from the
+    # PRE-STEP velocity u^n (core/friction.py, backward-Euler on u^n) and adds
+    # it ADDITIVELY to the AB2-extrapolated explicit tendency
+    # (core/external/solve_stream.py: u^{n+1} = u^n + dt·(AB2(du) + du_mix)).
+    # legoESM's default placement is SEQUENTIAL: backward-Euler friction on the
+    # AB2-advanced state u*.  Both are implicit/unconditionally stable; at
+    # equilibrium (AB2(du) ≈ −du_mix) the O(dt²·A_v) placement delta dominates
+    # the realized momentum increment (measured: reconstructing the additive
+    # form collapses the realized-increment L2 ratio 4.8→1.6 and lifts corr
+    # 0.11→0.44 vs Veros — .physics-validator/momentum_fair/).  TRACERS keep
+    # the sequential implicit-diffusion-on-the-AB2-state placement in BOTH
+    # modes (that IS Veros's tracer placement, core/thermodynamics.py).
+    # Requires ``outer_integrator="ab2"`` and ``implicit_vertical_mixing=True``
+    # (rejected otherwise at config validation).  The friction solve has
+    # zero-flux top/bottom BCs, so the added increment has (thickness-weighted)
+    # zero depth-mean and the barotropic mode from the barotropic solver is
+    # untouched.  Default False ⇒ sequential placement ⇒ BIT-IDENTICAL.
+    momentum_friction_additive: bool = False
