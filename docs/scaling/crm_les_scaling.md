@@ -316,10 +316,27 @@ threads `layout` to `_acoustic_moist_buoyancy_w` and uses one BATCHED allreduce
 dynamics DD path is already exact (1e-15, iter 11); only the moist-mean closure
 trades exactness for scalability.
 
-## Backlog (deferred / large)
+## Iteration 13 (2026-06-08): opt-in exact moist serial parity (implemented)
 
-0. (Optional) `acoustic_moist_global_mean` opt-in flag for exact moist serial
-   parity (batched allreduce; off by default to preserve scaling).
+Added `CompressibleEulerConfig.acoustic_moist_global_mean` (default False). When
+True AND multi-rank, `_acoustic_moist_buoyancy_w` uses a GLOBAL horizontal mean
+(`global_sum_mpi(local_sum) / (ny_global*nx_global)`, AD-safe) instead of the
+rank-local `jnp.mean`. Threaded `layout` through the 3 acoustic-substep fns +
+`step_halo`. Validated (np=2, 3 steps, physical moisture):
+
+| flag | u vs single-rank |
+|------|-----------------:|
+| OFF (default) | 3.85e-5 (rank-local, scalable, unchanged) |
+| **ON** | **1.11e-15 (bit-identical serial parity)** |
+
+No regression: plane MPI suite 2 passed, single-rank 17 passed, new
+`test_moist_global_mean_exact_serial_parity` passes. Default off → zero impact on
+production scaling; opt-in for oracle/validation runs needing exact parity.
+
+**CRM domain-decomposition: fully complete** — fast (123×), correct dynamics
+(1e-15), both precisions, moist tradeoff characterized AND given an exact opt-in.
+
+## Backlog (deferred / large)
 
 1. LES distributed FFT for MPI (the LASD/spectral-pressure blocker).
 2. CRM dycore kernel tiling for L2-fit at large domains.

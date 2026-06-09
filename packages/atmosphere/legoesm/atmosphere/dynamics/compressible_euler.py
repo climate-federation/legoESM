@@ -445,6 +445,18 @@ class CompressibleEulerConfig(NamedTuple):
                                           # only 1x -> resolved convection runs away
                                           # (max|w|->40 m/s, RCE blows up ~day 2.5).
                                           # Requires moist_buoyancy=True. Plane only.
+    acoustic_moist_global_mean: bool = False  # MPI ONLY. The SAM moist-buoyancy
+                                          # perturbation subtracts the horizontal
+                                          # mean of qv/qcond/theta'. Default
+                                          # (False) uses a rank-LOCAL mean under a
+                                          # plane pencil decomposition (zero comm,
+                                          # the scalable production choice) — which
+                                          # diverges ~6e-4 from the single-rank
+                                          # reference. Set True to use the exact
+                                          # GLOBAL mean (one allreduce per field)
+                                          # for serial-parity / oracle validation
+                                          # runs, at ~5-16% per-step comm cost.
+                                          # No effect single-rank or n_ranks==1.
 
 
 # ==============================================================================

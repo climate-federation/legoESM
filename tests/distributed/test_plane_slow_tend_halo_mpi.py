@@ -214,3 +214,62 @@ def test_full_step_halo_matches_single_process(mpi_layout):
                 rtol=1.0e-10, atol=1.0e-10,
                 err_msg=f"{fld} full-step multi-rank mismatch",
             )
+
+
+def test_moist_global_mean_exact_serial_parity(mpi_layout):
+    """``acoustic_moist_global_mean=True`` restores EXACT single-rank parity
+    for the moist (SAM b_moist) path under a pencil decomposition.
+
+    Default (rank-local mean) is the scalable choice and diverges ~1e-4 from
+    single-rank; the opt-in global-mean flag (one allreduce/field) makes it
+    bit-identical, for oracle / validation runs.
+    """
+    if mpi_layout.n_ranks == 1:
+        pytest.skip("requires multi-rank mpirun")
+    grid_global = create_plane_grid(
+        nx=NX_GLOBAL, ny=NY_GLOBAL, nlev=NLEV,
+        dx=2_000.0, dy=2_000.0, dtype=jnp.float64,
+    )
+    hc = create_height_coordinate(NLEV, H=20_000.0)
+    tm_global = make_flat_plane_terrain_metric(grid_global, hc)
+    cfg = CompressibleEulerConfig(
+        sponge_coeff=0.05, sponge_width=5_000.0,
+        hyperdiff_coeff=1.0e6, hyperdiff_rho_coeff=1.0e6,
+        hyperdiff_w_coeff=1.0e6, smagorinsky_cs=0.2,
+        use_coriolis=False, n_acoustic_substeps=12, fix_mass=False,
+        moist_buoyancy=True, acoustic_moist_global_mean=True,
+    )
+    state_global = _build_state(grid_global, hc)
+    # Positive (physical) moisture so b_moist is active.
+    state_global = state_global._replace(
+        tracers=state_global.tracers.replace(
+            data=jnp.abs(state_global.tracers.data)),
+    )
+
+    lay1 = make_plane_pencil_layout(
+        rank=0, n_ranks=1, n_ranks_y=1, n_ranks_x=1,
+        ny_global=NY_GLOBAL, nx_global=NX_GLOBAL,
+    )
+    m_ref = PlaneCompressibleEulerModel(grid_global, hc, tm_global, cfg)
+    ref = state_global
+    for _ in range(3):
+        ref = m_ref.step_halo(ref, dt=0.5, layout=lay1)
+
+    local_grid = create_plane_grid(
+        nx=mpi_layout.nx_local, ny=mpi_layout.ny_local, nlev=NLEV,
+        dx=2_000.0, dy=2_000.0, dtype=jnp.float64,
+    )
+    local_tm = make_flat_plane_terrain_metric(local_grid, hc)
+    m_loc = PlaneCompressibleEulerModel(local_grid, hc, local_tm, cfg)
+    local_state = _slice_state_to_rank(state_global, mpi_layout)
+    for _ in range(3):
+        local_state = m_loc.step_halo(local_state, dt=0.5, layout=mpi_layout)
+
+    for fld in ("u", "w", "theta_prime"):
+        gathered = gather_plane_field(getattr(local_state, fld).data, mpi_layout)
+        if mpi_layout.rank == 0:
+            np.testing.assert_allclose(
+                np.asarray(gathered), np.asarray(getattr(ref, fld).data),
+                rtol=1.0e-9, atol=1.0e-9,
+                err_msg=f"{fld} moist global-mean must match single-rank",
+            )
