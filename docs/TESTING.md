@@ -150,6 +150,84 @@ python scripts/experiment/init_experiment.py coupled/amip --name amip1 --output-
 legoesm reproduce ./runs/w2/<output>/run_manifest.json --check
 ```
 
+## 5. Source-guardrail harness (AI-assisted-dev tripwires)
+
+A layered set of *static* guards that verify the existing source obeys the
+project rules (constants/saturation/dispatch/units, the federation DAG, and
+spec-first physics contracts). These run as ordinary pytest — fast, no GPU — and
+are the cheapest "verify the existing code" pass. See
+[`docs/ai_guardrails/domain_architect_vs_syntax_engine.md`](ai_guardrails/domain_architect_vs_syntax_engine.md)
+for the design (Domain Architect dictates logic; Syntax Engine fills the body).
+
+```bash
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+  tests/test_no_hardcoded_constants.py \
+  tests/test_no_saturation_reimpl.py \
+  tests/test_dispatch_hardening.py \
+  tests/test_physics_contracts.py \
+  tests/test_import_boundaries.py \
+  tests/test_federation_plan.py \
+  tests/test_install_federation.py -q
+```
+
+- **Ratchet audits** — `tests/_ratchet_audit.py` (shared engine, import-only) drives
+  `test_no_hardcoded_constants` (no `9.80616`/`273.15`/… literals; use
+  `legoesm.constants`) and `test_no_saturation_reimpl` (no re-derived Tetens/Magnus;
+  use `legoesm.thermo`). Keys on `(file, value, count)` so swapping one banned
+  literal for another still goes red; budgets ratchet *down* only.
+- **Dispatch hardening** — `test_dispatch_hardening` proves every `scheme="…"`
+  factory raises `ValueError` on an unknown name (no silent default).
+- **Physics contracts** — `test_physics_contracts` checks every physics module
+  declares a machine-checked `__physics_contract__` (units / sign / conserves /
+  differentiable / reference / acceptance criterion).
+- **Federation boundaries** — `test_import_boundaries` (zero-ignore import-linter
+  contracts), `test_federation_plan` (every subpackage + loose module assigned to
+  exactly one member), `test_install_federation` (the pip-install DAG resolver).
+- **LIVE editor hooks** — `.claude/hooks/check_banned_literals.py` (blocks a banned
+  constant *before* the edit lands) and `require_review_artifact.py` (review
+  reminder) are wired in `.claude/settings.json` and fire automatically during
+  Claude Code edits — no manual run needed.
+- **Scientific validators** — `scripts/validate/*.py` exercise real numerics
+  (each is `python scripts/validate/<name>.py`), e.g.
+  `validate_convection_physics.py`, `validate_baro_solver.py`,
+  `validate_ocean_scm.py`, `validate_federation_packaging.py` (per-member wheels
+  build + root-absent import), and `visual_regression.py` (cube-imprint / edge
+  artifacts — **inspect the PNGs**; norms alone are not sufficient).
+- **Conservation sweep** — `python scripts/matrix/check_conservation_all.py`.
+
+## 6. Adversarial-review agents (codex + subagents)
+
+Beyond the static guards, two kinds of AI agents review the existing code. They
+are **user-triggered** (and, for codex, billed); the result feeds the
+iterate-to-clean loop in `CLAUDE.md`.
+
+- **Codex** (slash commands) — adversarial review of the current diff/branch:
+
+  ```text
+  /codex:adversarial-review --wait      # find bugs; then fix flagged
+  /codex:review --wait                  # re-review; repeat until clean (≤30 iter)
+  ```
+
+  One-time setup: `/codex:setup` (needs the Codex CLI; model config in
+  `~/.codex/config.toml`).
+
+- **Specialized subagents** (`.claude/agents/*.md`) — ask Claude Code to launch one
+  on a target module/area:
+  - `physics-validator` — units, sign conventions, conservation, differentiability,
+    idealized-test fidelity, checked against the module's `__physics_contract__`
+    (drives Codex internally, iterates to convergence). Use when adding/refactoring
+    any physics scheme.
+  - `lego-modularity-tester` — swaps parameterizations / NNs / dycores / grids /
+    integrators / complexity levels and asserts every valid config still runs.
+  - `dycore-tester`, `test-differentiability`, `test-scalability`,
+    `test-land-ice`, `validate-matrix`, `slopbuster` (also `/slopbuster audit all`).
+
+  Example: *"run physics-validator on `atmosphere/physics/convection/zhang_mcfarlane.py`"*
+  or *"run lego-modularity-tester over the atmosphere dycores"*.
+
+CI runs the static layers automatically (`.github/workflows/{ci,mpi-distributed,
+mpi-nightly,claude-code-review}.yml`).
+
 ## Adding a component / case / template
 
 1. **New matrix cases** → add `MatrixCase`s to your `scripts/matrix/<component>` runner

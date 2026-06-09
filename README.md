@@ -193,6 +193,40 @@ component plugs into the matrix framework.
 - **Ocean fidelity assessment harness** (`ocean/fidelity/`): Veros DINO / Eady adapters and cross-model comparison reports under `docs/ocean_fidelity/`
 - **Distributed tests** including MPI differentiability (`tests/distributed/test_mpi_differentiability.py`)
 - **Scaling benchmarks** (`scripts/bench/run_levante_gpu_scaling.py`, `scripts/bench/run_cpu_mpi_scaling.py`)
+- **Source-guardrail harness** (static tripwires that verify the existing source obeys the project rules): ratchet audits (`tests/test_no_hardcoded_constants.py`, `tests/test_no_saturation_reimpl.py`), dispatch hardening (`tests/test_dispatch_hardening.py`), spec-first physics contracts (`tests/test_physics_contracts.py`), federation boundaries (`tests/test_import_boundaries.py`, `tests/test_federation_plan.py`), plus LIVE editor hooks in `.claude/hooks/`. Design: [`docs/ai_guardrails/domain_architect_vs_syntax_engine.md`](docs/ai_guardrails/domain_architect_vs_syntax_engine.md)
+- **Scientific validators** (`scripts/validate/*.py`, each `python scripts/validate/<name>.py`): convection/barotropic/ocean-SCM physics, `validate_federation_packaging.py`, and `visual_regression.py` (cube-imprint/edge artifacts — inspect the PNGs)
+- **Adversarial-review agents** (user-triggered): Codex (`/codex:adversarial-review --wait` → fix → `/codex:review --wait`, iterate to clean) and specialized subagents in `.claude/agents/` (`physics-validator`, `lego-modularity-tester`, `dycore-tester`, `test-differentiability`, `test-scalability`, …)
+
+### Running the checks
+
+```bash
+# Fast static guardrails (seconds, no GPU) — verify the existing source
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu pytest \
+  tests/test_no_hardcoded_constants.py tests/test_no_saturation_reimpl.py \
+  tests/test_dispatch_hardening.py tests/test_physics_contracts.py \
+  tests/test_import_boundaries.py tests/test_federation_plan.py -q
+
+# Full unit + guardrail suite
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu pytest tests/ -q
+
+# Scientific test matrices (heavier — exercise numerics + conservation gates)
+JAX_ENABLE_X64=1 python scripts/matrix/run_atmosphere_test_matrix.py
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu python scripts/matrix/run_scm_test_matrix.py
+JAX_ENABLE_X64=1 python scripts/matrix/run_sea_ice_test_matrix.py
+JAX_ENABLE_X64=1 python scripts/matrix/check_conservation_all.py
+
+# Dycore progression (Williamson / Galewsky / Jablonowski–Williamson / Held–Suarez)
+python tests/validation/run_dycore_progression_suite.py
+
+# Federation packaging (per-member wheels build + root-absent import)
+python scripts/validate/validate_federation_packaging.py
+```
+
+> Full details — pytest tiers, the matrix framework, the guardrail harness, and the
+> review agents — are in [`docs/TESTING.md`](docs/TESTING.md). On Apple Silicon set
+> `JAX_PLATFORMS=cpu` (the Metal backend is broken); use `JAX_ENABLE_X64=1` for
+> scientific/conservation runs.
 
 ## Quick Start
 
