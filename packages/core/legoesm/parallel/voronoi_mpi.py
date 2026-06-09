@@ -26,6 +26,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASHydrostaticState
 # NOTE: the MPAS dynamics live in the atmosphere component (a layer ABOVE this
 # shared-substrate ``parallel`` package).  Importing them here would make
@@ -235,12 +236,22 @@ def _fix_mass_mpi(
         Globally-allreduced total area.  Pre-computed once at setup; do
         not include it in the per-step batch allreduce.
     """
-    local_mass_old = jnp.sum(state_old.p_s.data * owned_area)
-    local_mass_new = jnp.sum(state_new.p_s.data * owned_area)
+    # Promote the area-weighted mass sums to the fp64 budget accumulator
+    # before reducing — mirrors the serial ``_fix_mass_mpas_hydro``.  Plain
+    # fp32 reductions over ~10^4-10^5 cells leak ~N·eps noise into
+    # ``mass_old``/``mass_new`` and leave an avoidable dry-mass drift, which
+    # under MPI would also break serial parity on fp32 runs.  (With
+    # JAX_ENABLE_X64 off, ``float64`` falls back to float32 — same as serial.)
+    acc = jnp.float64
+    area_acc = owned_area.astype(acc)
+    local_mass_old = jnp.sum(state_old.p_s.data.astype(acc) * area_acc)
+    local_mass_new = jnp.sum(state_new.p_s.data.astype(acc) * area_acc)
     mass_old, mass_new = batch_allreduce_mpi(
         [local_mass_old, local_mass_new], op="sum",
     )
 
+    # fp64 correction; the storage-precision cast at the end of ``_step``
+    # returns p_s to its carry dtype (mirrors serial cast_pytree(..., "storage")).
     correction = (mass_old - mass_new) / total_area
     p_s_fixed = state_new.p_s.replace(
         data=state_new.p_s.data + correction)
@@ -306,12 +317,33 @@ def make_voronoi_mpi_step(
     physics_fn=None,
     return_phys_state: bool = False,
 ):
-    """Build an MPI-parallel step function for MPAS dynamics.
+    """Build an MPI-parallel step function for MPAS dynamics + AMIP physics.
 
-    The returned function ``step(state, dt) -> state`` operates on
-    rank-local state.  The tendency function includes halo exchange
-    so that every RK stage sees fresh ghost values.  Mass conservation
-    uses a global allreduce over owned cells.
+    The returned function operates on rank-local state.  The tendency
+    function includes halo exchange so that every RK stage sees fresh ghost
+    values; mass conservation uses a global allreduce over owned cells.
+
+    With ``return_phys_state=False`` (default) the contract is the legacy
+    ``step(state, dt) -> state`` (dynamics + stateless physics).  With
+    ``return_phys_state=True`` it is ``step(state, dt, forcing=None,
+    phys_state=None) -> (state, phys_state_out)`` — full operator-split AMIP
+    parity with the serial ``_step_jit`` (tracer advection + halo exchange,
+    traced per-step ``forcing`` such as prescribed ``T_sfc``, and the
+    prognostic ``phys_state`` carry threaded through ``physics_fn``).
+
+    .. note::
+       **Forward-only (not differentiable yet).**  The Voronoi cell/edge
+       halo exchange (:mod:`legoesm.parallel.halo_exchange_voronoi`) calls
+       ``mpi4jax.sendrecv`` directly rather than routing through the
+       AD-safe ``@jax.custom_vjp`` wrapper used by the lat-lon / cubed-
+       sphere halos, so ``jax.grad`` through this step can hit mpi4jax
+       transpose failures / incorrect comm adjoints.  This predates the
+       AMIP extension (the dynamical-core step had the same limitation) and
+       is tracked as a follow-up — adapting the custom-VJP wrapper to the
+       Voronoi comm schedule belongs in ``halo_exchange_voronoi`` and
+       benefits every Voronoi MPI caller, not just AMIP.  Use this step for
+       forward AMIP simulation, not for end-to-end ``jax.grad`` training,
+       until that lands.
 
     Parameters
     ----------
@@ -330,11 +362,12 @@ def make_voronoi_mpi_step(
         convention exactly (dynamics RK → physics → floor → fix_mass).
         The physics is evaluated on the rank-LOCAL mesh after a fresh
         halo exchange, so boundary-owned edges/cells see valid neighbour
-        pressure.  ``physics_fn`` must be a column-/cell-local closure
-        (e.g. Held-Suarez Newtonian relaxation) — it adds NO horizontal
-        halo coupling beyond the pre-physics exchange.  Stateful
-        operator-split carry (``phys_state``) is NOT threaded through the
-        MPI step yet; pass only stateless/additive physics here.
+        pressure.  ``physics_fn`` must be a column-/cell-local closure (it
+        adds NO horizontal halo coupling beyond the pre-physics exchange).
+        When ``return_phys_state=True`` the prognostic ``phys_state`` carry
+        (TKE / convection state) AND the traced ``forcing`` are threaded
+        through, so the full AMIP physics package (radiation, convection,
+        turbulence) runs — not just stateless/additive physics.
         Passed in as a callable (not imported) so this core ``parallel``
         module keeps no dependency on the atmosphere component.
 
@@ -467,6 +500,12 @@ def make_voronoi_mpi_step(
         mass fixer.  ``forcing`` / ``phys_state`` are jit arguments (NOT
         static) so new values each step do not retrace.
         """
+        # Precision parity with the serial ``_step_jit``: integrate in compute
+        # precision, store the result in storage precision.  Without this a
+        # mixed-precision run's owned cells could diverge from serial beyond
+        # the reduction-order residual, and the fp64 mass-fixer correction
+        # would otherwise leave p_s in fp64 (carry-dtype instability).
+        state = cast_pytree(state, None, "compute")
         state_new = dispatch_integrator(
             state, _mpi_tendency_fn, dt, config.time_integrator,
         )
@@ -533,7 +572,7 @@ def make_voronoi_mpi_step(
                 state_new, state, _owned_area, _total_area_global,
             )
 
-        return state_new, phys_state_out
+        return cast_pytree(state_new, None, "storage"), phys_state_out
 
     logger.info(
         "Voronoi MPI step ready: rank=%d/%d, %d owned cells, %d local cells",

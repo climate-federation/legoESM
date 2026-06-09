@@ -1619,8 +1619,14 @@ class ModelDriver:
                 and self._voronoi_layout is not None):
             vlayout = self._voronoi_layout
             self._layout = vlayout
-            self._owned_cell_ids = jnp.arange(
-                vlayout.partition.n_owned_cells)
+            # GLOBAL ids of this rank's owned cells (partition is owned-first,
+            # so the first n_owned local cells map to these global ids).  Used
+            # as the MPAS marker AND by the diagnostics / checkpoint gather to
+            # scatter owned values to the right global index — local positions
+            # 0..n_owned-1 would collide across ranks.
+            self._owned_cell_ids = jnp.asarray(
+                np.asarray(vlayout.partition.local_cells)[
+                    :vlayout.partition.n_owned_cells])
             self._physics_lat = self.grid.grid_lat
             self._physics_lon = self.grid.grid_lon
             self._mpi_rank = vlayout.rank
@@ -2712,6 +2718,52 @@ class ModelDriver:
     # MPAS execution path (uses unified physics pipeline)
     # ==================================================================
 
+    def _mpas_global_diag(self, T_data, p_s_data, u_data, cwv_field):
+        """Global owned-cell diagnostics for an MPAS cell-partition MPI run.
+
+        Reduces over this rank's OWNED cells / edges (halo entities masked
+        out) then allreduces across ranks, so the lightweight timeseries
+        means and extremes are TRUE globals — not the rank-local,
+        halo-double-counted values a plain ``jnp.mean(T_data)`` would give.
+        Mirrors the owned-mask + allreduce convention of the mass fixer.
+
+        Returns ``(mean_T, mean_ps, max_u, T_min, T_max, T_finite, cwv)`` as
+        host floats / bool.  ``cwv`` is NaN when ``cwv_field`` is None.
+        """
+        from mpi4py import MPI as _MPI
+        vl = self._voronoi_layout
+        om_c = vl.owned_mask_cells          # (n_local_cells,) bool
+        om_e = vl.owned_mask_edges          # (n_local_edges,) bool
+        nlev = T_data.shape[-1]
+        T_owned = jnp.where(om_c[:, None], T_data, 0.0)
+        ps_owned = jnp.where(om_c, p_s_data, 0.0)
+        absu_owned = jnp.where(om_e[:, None], jnp.abs(u_data), 0.0)
+        T_min_l = jnp.min(jnp.where(om_c[:, None], T_data, jnp.inf))
+        T_max_l = jnp.max(jnp.where(om_c[:, None], T_data, -jnp.inf))
+        finite_l = jnp.all(jnp.isfinite(T_owned))
+        cwv_sum_l = (jnp.sum(jnp.where(om_c, cwv_field, 0.0))
+                     if cwv_field is not None else jnp.asarray(0.0))
+        # One device→host transfer for all local reductions.
+        _loc = np.asarray(jnp.stack([
+            jnp.sum(T_owned), jnp.sum(ps_owned), jnp.max(absu_owned),
+            T_min_l, T_max_l, finite_l.astype(T_data.dtype),
+            cwv_sum_l.astype(T_data.dtype),
+        ]))
+        n_owned = int(vl.partition.n_owned_cells)
+        comm = _MPI.COMM_WORLD
+        g_sum_T = comm.allreduce(float(_loc[0]), op=_MPI.SUM)
+        g_sum_ps = comm.allreduce(float(_loc[1]), op=_MPI.SUM)
+        g_max_u = comm.allreduce(float(_loc[2]), op=_MPI.MAX)
+        g_T_min = comm.allreduce(float(_loc[3]), op=_MPI.MIN)
+        g_T_max = comm.allreduce(float(_loc[4]), op=_MPI.MAX)
+        g_finite = comm.allreduce(bool(_loc[5] > 0.5), op=_MPI.LAND)
+        g_sum_cwv = comm.allreduce(float(_loc[6]), op=_MPI.SUM)
+        g_n_cells = comm.allreduce(n_owned, op=_MPI.SUM)
+        mean_T = g_sum_T / (g_n_cells * nlev)
+        mean_ps = g_sum_ps / g_n_cells
+        cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
+        return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv
+
     def _run_mpas(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run MPAS model with the unified physics pipeline.
 
@@ -3114,24 +3166,48 @@ class ModelDriver:
                 p_s_data = self.state.p_s.data
                 u_data = self.state.u.data
 
-                # Fuse the diagnostic reductions to a single device→host
-                # transfer instead of five separate ones — each ``float()``
-                # call is a GPU stall under default JAX scheduling.
-                _stats = jnp.stack([
-                    jnp.mean(T_data),
-                    jnp.mean(p_s_data),
-                    jnp.max(jnp.abs(u_data)),
-                    jnp.min(T_data),
-                    jnp.max(T_data),
-                    jnp.all(jnp.isfinite(T_data)).astype(T_data.dtype),
-                ])
-                _stats_host = np.asarray(_stats)
-                mean_T = float(_stats_host[0])
-                mean_ps = float(_stats_host[1])
-                max_u = float(_stats_host[2])
-                T_min = float(_stats_host[3])
-                T_max = float(_stats_host[4])
-                T_finite = bool(_stats_host[5] > 0.5)
+                # Column water vapor field on moist runs (reuse the shared
+                # integral); ``None`` on dry runs keeps the series aligned.
+                _cwv_field = None
+                if (self.state.tracers is not None
+                        and "q_v" in self.state.tracers):
+                    from legoesm.diagnostics.column_integrals import (
+                        column_water_vapor,
+                    )
+                    _cwv_field = column_water_vapor(
+                        self.state.tracers["q_v"].data, p_s_data,
+                        self.sigma.dsigma)
+
+                if self._voronoi_layout is not None:
+                    # MPAS cell-partition MPI: the state spans owned+halo
+                    # cells, and each rank holds only its band — so a plain
+                    # ``jnp.mean`` over ``T_data`` would double-count halo
+                    # cells AND be rank-local.  Reduce over OWNED cells only
+                    # and allreduce to a true global diagnostic (mirrors the
+                    # owned-mask + allreduce mass fixer).
+                    mean_T, mean_ps, max_u, T_min, T_max, T_finite, _cwv = \
+                        self._mpas_global_diag(
+                            T_data, p_s_data, u_data, _cwv_field)
+                else:
+                    # Serial / single-rank: fuse the reductions into one
+                    # device→host transfer (each ``float()`` is a GPU stall).
+                    _stats = jnp.stack([
+                        jnp.mean(T_data),
+                        jnp.mean(p_s_data),
+                        jnp.max(jnp.abs(u_data)),
+                        jnp.min(T_data),
+                        jnp.max(T_data),
+                        jnp.all(jnp.isfinite(T_data)).astype(T_data.dtype),
+                    ])
+                    _stats_host = np.asarray(_stats)
+                    mean_T = float(_stats_host[0])
+                    mean_ps = float(_stats_host[1])
+                    max_u = float(_stats_host[2])
+                    T_min = float(_stats_host[3])
+                    T_max = float(_stats_host[4])
+                    T_finite = bool(_stats_host[5] > 0.5)
+                    _cwv = (float(jnp.mean(_cwv_field))
+                            if _cwv_field is not None else float("nan"))
 
                 _ts["days"].append(elapsed_day)
                 _ts["T_atm"].append(mean_T)
@@ -3140,17 +3216,6 @@ class ModelDriver:
                 _ts["max_wind"].append(max_u)
                 _ts["dry_mass_ps"].append(mean_ps)
                 _ts["T_finite"].append(T_finite)
-                # Column water vapor on moist runs (reuse the shared integral);
-                # NaN on dry runs keeps the series aligned with ``days``.
-                if self.state.tracers is not None and "q_v" in self.state.tracers:
-                    from legoesm.diagnostics.column_integrals import (
-                        column_water_vapor,
-                    )
-                    _cwv = float(jnp.mean(column_water_vapor(
-                        self.state.tracers["q_v"].data, p_s_data,
-                        self.sigma.dsigma)))
-                else:
-                    _cwv = float("nan")
                 _ts["CWV"].append(_cwv)
 
                 elapsed = time.time() - t_start
