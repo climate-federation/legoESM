@@ -10,7 +10,7 @@ commit messages; `OMIP_faithful.md`. Memories: [[omip-faithful-project]], [[omip
 | grid | status | SST RMSE vs NEMO Mar (day-90) |
 |---|---|---|
 | **tripole eORCA025 ¼°** | **FAITHFUL** | **1.15** corr 0.99 |
-| **latlon 1°** | **FAITHFUL** | **1.12** corr 0.99 |
+| **latlon 1°** | **FAITHFUL** | **2-yr full (E−P+ice+saltnorm): SST 1.68/0.987, SSS 1.20/−0.08, Antarctic +1.2** (AMOC un-spun-up@2yr) |
 | **mpas ico6 ~115 km** | **FAITHFUL** (best) | **5-yr MAXIMAL (E−P+ice-albedo+salt-norm+τ60): SST 1.58 corr 0.988, SSS 1.42, ACC 134/obs137, AMOC 13.3 vs 17.7** (binning-caveat) |
 | cubed_sphere | **PARKED** — cold-start mode-1 PGF residual NOT resolution-fixable (C256 ¼° blows too, at a cube EDGE near the equator); all correct numerics committed | n/a (blows at cold-start) |
 | spectral | **NOT-MEANINGFUL** — global SH basis can't represent ORCA1 coastlines (Gibbs ringing; model self-declares unsupported #99; bathy builder refuses real geometry; T21 can't resolve Drake) | n/a (by construction) |
@@ -345,7 +345,7 @@ verified (SST overlaps NEMO + far-SH freezing; SSS tracks NEMO):
 **E−P closing the surface budget DECOUPLES strong restoring from AMOC collapse** — the pre-E−P τ=60 AMOC
 collapse (5.7) was the salt-injection artifact of an OPEN budget; with E−P, τ=60 holds SSS (1.42 vs 5.16)
 AND keeps AMOC (13.3, closer to NEMO 17.7 than τ=365's 24.5 overshoot). ico7 dt=150 (~55 km) also faithful
-(SST 0.925/corr 0.996). latlon-full run (E−P+ice+saltnorm, τ=365) in flight.
+(SST 0.925/corr 0.996). latlon-full (E−P+ice+saltnorm, τ=365, 2-yr) DONE: SST 1.68/corr 0.987, SSS 1.20/bias −0.08, Antarctic +1.2 (SH fix on latlon too); AMOC 1.5 un-spun-up (2-yr, decade-gated). Both grids' PNGs sent.
 
 CAVEATS (honest, flagged not hidden):
 1. **Transport binning over-count** — `compute_{mht,amoc}_from_state_mpas` sum ALL edges in a 2° lat-band;
