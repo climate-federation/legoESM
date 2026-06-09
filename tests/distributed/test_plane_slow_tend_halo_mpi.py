@@ -38,15 +38,29 @@ jax.config.update("jax_enable_x64", True)
 NY_GLOBAL, NX_GLOBAL, NLEV = 8, 12, 6
 
 
+def _balanced_factor(n):
+    """Factor ``n`` into ``(nry, nrx)`` keeping BOTH local dims ≥ 4 (the plane
+    dycore's del4 biharmonic needs nx,ny ≥ 4). A 1×n slab of a 12-wide domain
+    gives nx_local=3 at n=4 — too thin — so prefer the most balanced factoring
+    whose local extents both clear the stencil floor."""
+    best = (1, n)
+    for nry in range(1, n + 1):
+        if n % nry:
+            continue
+        nrx = n // nry
+        if NY_GLOBAL // nry >= 4 and NX_GLOBAL // nrx >= 4:
+            # pick the pair closest to square
+            if abs(nry - nrx) < abs(best[0] - best[1]) or best == (1, n):
+                best = (nry, nrx)
+    return best
+
+
 @pytest.fixture
 def mpi_layout():
     comm = MPI.COMM_WORLD
     n_ranks = comm.Get_size()
     rank = comm.Get_rank()
-    if n_ranks == 1:
-        nry, nrx = 1, 1
-    else:
-        nry, nrx = 1, n_ranks
+    nry, nrx = _balanced_factor(n_ranks)
     return make_plane_pencil_layout(
         rank=rank, n_ranks=n_ranks,
         n_ranks_y=nry, n_ranks_x=nrx,
