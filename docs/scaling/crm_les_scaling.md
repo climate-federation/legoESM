@@ -215,6 +215,40 @@ Obsolete `test_halo_raises_on_jit_multirank` (asserted the removed guard) →
 Codex-reviewed (cache-key layout-hardening applied; Q1 math.prod≡int(jnp.prod) OK;
 Q3 jit≡eager OK).
 
+## Iteration 9 (2026-06-08): DD halo CORRECTNESS bug fixed (the iter-8 caveat)
+
+The iter-8 caveat (multi-rank DD halo mismatches single-process, du_dt ~0.5) was a
+real **silent halo-corruption bug** in `exchange_halo_plane_yxz`, now fixed.
+
+Diagnosis (narrowed step by step):
+- Halo fn at n_ranks=1 (`jnp.roll`) == single-process EXACTLY (diff 0) → the
+  operators are correct; the bug is in the multi-rank EXCHANGE.
+- Mismatch persists with hyperdiffusion OFF → not the biharmonic stencil width.
+- Isolated the exchange: `exchange_halo_plane_yxz` at np=2 gave max|halo−expected|
+  = **5.0** (should be 0).
+- Root cause: the exchange used `sendrecv(send=my_west_edge, source=west_rank,
+  dest=west_rank, tag=rank/west_rank)` — **send-to-X & recv-from-X** per face. At
+  any axis with exactly **2 ranks** (`west_rank == east_rank`), the two
+  sendrecvs to the same neighbour shared a tag ⇒ MPI matched the WRONG message ⇒
+  east/west (or north/south) halos SWAPPED. (66.7 % of cells wrong = the 4 of 6
+  boundary columns affected at NX=12/np=2.)
+
+Fix: standard **directional ring-shift** — each call sends to ONE neighbour and
+receives from the OTHER (`send east-edge→east_rank, recv←west_rank`), one tag per
+shift direction. Unambiguous and deadlock-free at np=2; correct for np≥3 too.
+
+Validated (`.venv-mpi`, JAX 0.9.2 + mpi4jax 0.8.1):
+- exchange isolation np=2/3/4 → **0.0** (was 5.0 @np2).
+- distributed tendency test `...matches_single_process` → **PASSES** (was failing).
+- single-rank halo suite → 48 passed (no regression; single-rank uses `jnp.roll`).
+- AD: `jax.grad` through the exchange is finite AND correct (halo-adjoint
+  accumulation, grad range [2,8] = expected for x=rank+1).
+- DD strong np=2 still 54 ms/step (the iter-8 123× speedup intact, no deadlock).
+
+**The CRM DD path is now FAST (iter 8, 123×) AND CORRECT (iter 9).** The bug
+affected every 2-rank-per-axis decomposition — i.e. most small runs — so this is a
+significant pre-existing correctness fix, not just a scaling one.
+
 ## Backlog (deferred / large)
 
 1. LES distributed FFT for MPI (the LASD/spectral-pressure blocker).
