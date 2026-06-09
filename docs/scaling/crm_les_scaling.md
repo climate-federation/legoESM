@@ -249,6 +249,27 @@ Validated (`.venv-mpi`, JAX 0.9.2 + mpi4jax 0.8.1):
 affected every 2-rank-per-axis decomposition — i.e. most small runs — so this is a
 significant pre-existing correctness fix, not just a scaling one.
 
+## Iteration 10 (2026-06-08): DD CRM scaling, both precisions (correct path)
+
+Added `--precision {float32,float64}` to `bench_plane_crm_dd_scaling.py` (was
+fp64-only). Real DD CRM scaling on the now-correct + fast path:
+
+| mode   | prec | np1   | np2   | np4   | efficiency |
+|--------|------|------:|------:|------:|------------|
+| strong | fp64 | 66.6 | 59.5 | 55.0 ms | 56 % @2, 30 % @4 |
+| strong | fp32 | 50.7 | 51.6 | 47.4 ms | bandwidth-bound (≈flat) |
+| weak   | fp64 | 34.4 | 58.7 | 71.0 ms | ≈48 % (total grows ~2× to np4) |
+
+- **Both precisions work**; fp32 ~1.3× faster than fp64.
+- Scaling is **single-socket memory-bandwidth-limited** — the SAME ceiling the
+  global campaign hit: at N ranks all share one DRAM bus, so neither strong
+  (per-rank work shrinks but bandwidth fixed) nor weak (more ranks contend) scales
+  near-ideal. Functional + correct, hardware-limited; real scaling needs multiple
+  sockets/nodes.
+
+The CRM DD path is now FAST (iter 8), CORRECT (iter 9), and scaling-characterized
+in both precisions (iter 10) — the user requirement met at the achievable scope.
+
 ## Backlog (deferred / large)
 
 1. LES distributed FFT for MPI (the LASD/spectral-pressure blocker).
