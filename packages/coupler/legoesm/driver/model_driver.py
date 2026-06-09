@@ -547,9 +547,25 @@ class ModelDriver:
         """Load SST/SIC forcing data."""
         cfg = self.config
 
+        # Under lat-lon band MPI ``_create_grid`` has already replaced
+        # ``self.grid`` / ``self._grid_lat`` with this rank's band, but the
+        # SST/SIC band-slicing wrapper installed later in ``_setup_parallel``
+        # (``_band_get_sst_sic``) slices ``sst[lat_start:lat_end]`` of a
+        # *global* field.  Building the forcing function on the rank-local
+        # grid here would slice the band twice → an empty ``(0, n_lon)`` SST
+        # on every non-zero rank (the radiation column adapter then fails to
+        # reshape size 0 into the rank-local column count).  Build the forcing
+        # on the preserved GLOBAL grid so the wrapper slices exactly once.
+        # ``_grid_global`` is set only for the lat-lon-MPI case, so serial and
+        # cubed-sphere paths fall back to ``self.grid`` and are unchanged.
+        _global_grid = getattr(self, "_grid_global", None)
+        forcing_grid = _global_grid if _global_grid is not None else self.grid
+        forcing_lat = (forcing_grid.grid_lat if _global_grid is not None
+                       else self._grid_lat)
+
         if cfg.dataset == "analytical":
             from legoesm.forcing.analytical import analytical_sst_sic
-            lat_deg = np.degrees(np.asarray(self._grid_lat))
+            lat_deg = np.degrees(np.asarray(forcing_lat))
             T_ice = cfg.T_ice
 
             def get_sst_sic(day):
@@ -577,7 +593,7 @@ class ModelDriver:
                     path=cfg.forcing_path
                 )
 
-            forcing = load_amip_forcing(forcing_config, self.grid)
+            forcing = load_amip_forcing(forcing_config, forcing_grid)
             self._forcing = forcing
 
             def get_sst_sic(day):
@@ -1161,6 +1177,25 @@ class ModelDriver:
         if cmip_on and perf_mode:
             perf_mode = False
 
+        # Lat-lon band MPI: each rank holds its own latitude band as an
+        # ordinary (non-SPMD-sharded) array, so ``collect_lightweight``'s
+        # ``jnp.mean`` would reduce over this rank's band only — a wrong
+        # "global" mean — and skip the spatial gather, so snapshots/profiles
+        # would capture a single band.  Force the full gather+collect path
+        # (correct global means, profiles, and snapshots).  The gather runs
+        # only at the diagnostic cadence, negligible against the steps
+        # between intervals.  Distinguished from cubed-sphere replicated MPI
+        # by ``_owned_face_ids is None`` (the lat-lon path never sets it).
+        _latlon_mpi = (
+            self._layout is not None
+            and self._owned_face_ids is None
+            and self._device_config is not None
+            and self._device_config.is_distributed
+            and self.config.grid.grid_type == "latlon"
+        )
+        if _latlon_mpi and perf_mode:
+            perf_mode = False
+
         if perf_mode:
             # Lightweight path: scalar reductions only, no gather.
             state = kwargs.get('state', self.state)
@@ -1185,6 +1220,50 @@ class ModelDriver:
                 # data from all ranks into a correct global state on rank 0.
                 state = kwargs.get('state', self.state)
                 jax.block_until_ready(state.u.data)
+                if _latlon_mpi:
+                    # Lat-lon band MPI: concatenate each rank's latitude
+                    # band into the global field on rank 0.  The
+                    # HydrostaticState stores u/v/T cell-centred (identical
+                    # shapes — confirmed: v is NOT a face array here, unlike
+                    # the raw C-grid dynamics state the checkpoint path
+                    # gathers with the v-face trim), so every field uses the
+                    # same scalar concatenation.  All ranks must participate
+                    # in each MPI gather; non-root ranks then bail with the
+                    # sentinel the run loop ignores.
+                    from legoesm.parallel.latlon_mpi import gather_field_latlon
+                    from legoesm.core.field import Field
+                    from legoesm.core.state import HydrostaticState
+
+                    def _g(arr):
+                        if arr is None:
+                            return None
+                        return gather_field_latlon(arr, self._layout)
+
+                    u_g = _g(state.u.data)
+                    v_g = _g(state.v.data)
+                    T_g = _g(state.T.data)
+                    ps_g = _g(state.p_s.data)
+                    phis_g = _g(state.phis.data)
+                    for _tname in (
+                        'q_v', 'q_c', 'q_r', 'sst', 'sic', 'precip_total',
+                        'sw_up_toa', 'lw_up_toa', 'sw_net_sfc', 'lw_net_sfc',
+                        'sw_down_toa', 'shflx', 'lhflx', 'lat_deg_grid',
+                    ):
+                        if kwargs.get(_tname) is not None:
+                            kwargs[_tname] = _g(kwargs[_tname])
+
+                    if self._mpi_rank != 0:
+                        return {'mean_T': 0.0, 'max_v': 0.0}
+
+                    gathered = HydrostaticState(
+                        u=Field(u_g, name="u", dims=state.u.dims, units=state.u.units),
+                        v=Field(v_g, name="v", dims=state.v.dims, units=state.v.units),
+                        T=Field(T_g, name="T", dims=state.T.dims, units=state.T.units),
+                        p_s=Field(ps_g, name="p_s", dims=state.p_s.dims, units=state.p_s.units),
+                        phis=Field(phis_g, name="phis", dims=state.phis.dims, units=state.phis.units),
+                    )
+                    kwargs['state'] = gathered
+                    return self.diagnostics.collect(**kwargs)
                 if self._owned_face_ids is not None and self._layout is not None:
                     from legoesm.parallel.layout import gather
                     from legoesm.core.field import Field
