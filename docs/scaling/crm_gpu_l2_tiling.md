@@ -52,35 +52,56 @@ slow-tendency passes.
 while-loop double buffering: 184 vs 182 Mc/s. XLA does not tile a stencil loop to
 keep a block cache-resident.
 
-**Horizontal tiling — the right, still-UNTESTED lever.** Because the dominant
-(36-pass) acoustic loop is column-local, the domain can be split into horizontal
-tiles that each fit cache, with **no acoustic-substep halo at all**. Only the 3
-slow-tendency passes need a small (±2–4) halo. A `scan`/`vmap` over ~128²–192²
-tiles — slow tendency on tile+halo, substeps on the tile interior — should keep
-each tile cache-resident and recover much of the 1.45× with only a few-percent
-halo overhead (NOT the ~1.4× fat-halo penalty the first draft wrongly assumed).
-This is plausible but **not yet implemented or measured** — the honest status.
+**Horizontal tiling — TESTED, and it does NOT help the production config.** A
+faithful PoC (`scripts/tmp/_poc_acoustic_tiling.py`, since removed) ran the real
+acoustic substep kernel full-field vs 2×2-tiled on N256:
 
-**Pallas — not required to first try.** A custom on-chip-blocked kernel would help
-further, but the column-local structure means a *plain-JAX* tiled step is worth
-trying first; "needs Pallas" is **not** established.
+| config | full | 2×2 tiled | result |
+|--------|-----:|----------:|--------|
+| vertical-only (`semi_implicit`, **dry**) | 2.91 ms | 1.75 ms | **1.66× (bit-identical)** |
 
-## Caveats / honest limits
+So tiling the *vertical-only, dry* acoustic loop is a real win (anti-DCE checked).
+**But that is not the production configuration**, per a second codex review:
 
-- The cheap-tiling win is a hypothesis backed by the column-local structure, not a
-  measurement. Next step: implement a tiled step, validate **bit-identical** vs
-  the untiled `step()` (never regress), measure N256 tiled vs untiled with
-  `--repeat`, codex-review.
-- If `substep_horizontal_acoustic=True` (horizontal-acoustic mode) were used
-  instead, the substeps DO couple ±1/substep and the fat-halo analysis would
-  re-apply — but `step_halo` (DD) rejects that mode, and the bench does not use
-  it.
-- Single-GPU only matters when a single device must hold > ~1.1 M cells; multi-GPU
-  / MPI decomposition that keeps each device's tile under that threshold sidesteps
-  the cliff for the column-local mode (gated on ≥2 devices; this host has 1 GPU +
-  CPU-only MPI).
+1. **Production uses `substep_horizontal_acoustic=True`** (all runners:
+   `run_rcemip_plane`, `run_les_plane`, `run_gate_plane`, `run_lba_plane`) →
+   `plane_acoustic_substeps_si_horizontal`, whose substeps **DO couple
+   horizontally** (per-substep pressure-gradient + divergence, ±1). Tiling that
+   needs a halo of width `n_substeps` (=12) → a 152² tile that itself spills →
+   **net-negative** (the original analysis, correct *for this mode*). The 1.66×
+   only exists in the vertical-only mode production does not run.
+2. **Moist `b_moist` is not column-local.** `_acoustic_moist_buoyancy_w` subtracts
+   the *horizontal mean* of qv/qcond/θ′ (the SAM closure — same coupling that
+   forced the MPI `acoustic_moist_global_mean` opt-in). The PoC's bit-identity
+   held only because it was dry (n_tracers=0); with real moisture each tile would
+   use its slab-local mean → wrong physics unless the global b_moist is precomputed
+   and sliced.
+3. The PoC's isolated 1.66× would be **Amdahl-limited** in the full SSP-RK step
+   anyway (slow tendency, RK combination, reassembly remain), and the bench's
+   bandwidth model / "L2-resident" label is indicative, not measured.
 
-Bottom line: the 1.45× large-N cliff is real and measured; the realistic
-first-line fix is a **plain-JAX horizontal tile loop** (cheap because the acoustic
-substeps are column-local), to be implemented + validated + benchmarked next — the
-first draft's "fat-halo net-negative / needs Pallas" verdict was wrong (codex).
+⇒ **Intra-kernel horizontal tiling is not a production CRM GPU lever.** The
+production acoustic substeps couple horizontally (fat-halo → net-negative) and the
+moist buoyancy couples through a planar mean. The win exists only for a dry
+vertical-only mode that production does not use.
+
+(Aside worth fixing separately: `bench_crm_gpu_scaling.py` runs the *vertical-only*
+acoustic mode, so its absolute numbers under-represent the production
+`si_horizontal` cost.)
+
+## The lever that remains
+
+- **Multi-device domain decomposition** keeps each device's tile below the cache
+  cliff (~1.1 M cells) regardless of acoustic mode — the certified `step_halo` DD
+  provides it, gated on ≥2 devices (this host has 1 GPU + CPU-only MPI). Note
+  `step_halo` currently rejects `substep_horizontal_acoustic` under multi-rank, so
+  DD large-N today implies the vertical-only acoustic mode.
+- **Single-GPU large-N in the production `si_horizontal` mode**: no clean JAX
+  lever (fat-halo tiling net-negative); would need a Pallas on-chip-blocked
+  acoustic kernel — large, GPU-specific, deferred.
+
+Bottom line (after two codex reviews): the 1.45× large-N cache cliff is real and
+measured; horizontal tiling recovers it **only** in the dry vertical-only acoustic
+mode (PoC: 1.66×), which production does not use. For the production
+horizontally-coupled + moist config, intra-kernel tiling does not pay; the lever is
+multi-device decomposition (≥2 GPUs).
