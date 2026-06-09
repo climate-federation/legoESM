@@ -400,3 +400,120 @@ class TestNeutralStability:
             S = S + dt * dS
         assert jnp.all(jnp.isfinite(T))
         assert float(jnp.max(jnp.abs(T))) < 1e3
+
+
+# =====================================================================
+# kr-sum: per-triad reference-cell EOS derivatives (Veros kr loop)
+# =====================================================================
+
+class TestKrSumPairing:
+    """Veros pairs each w-face triad with its REFERENCE CELL's EOS derivatives
+    in both the numerator (drodxb) and the denominator (drodzb) — the ``kr``
+    loop in ``isoneutral.py:176-198``.  The A-triads (upper-level tracer
+    gradients) use the UPPER cell's drdT/drdS; the B-triads the LOWER cell's.
+    Before the kr-sum refinement legoESM used the upper cell for all 8."""
+
+    def _w_inputs(self, eos="veros_nonlin2"):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _w_face_slope_density_inputs,
+        )
+        grid, z, T, S, eta, H, mask, um, vm, J = _setup()
+        eos_fn = make_eos_fn(eos)
+        rho = _rho(T, S, mask, z, eos_fn)
+        rho_filled = _neumann_fill_cgrid(rho, mask)
+        w = _w_face_slope_density_inputs(
+            rho_filled, T, S, mask, z, J, grid, "neutral", eos_fn, RHO_0, G)
+        return grid, z, T, S, mask, J, w
+
+    def test_b_triads_use_lower_cell_derivatives(self):
+        """Term-for-term lock vs the literal Veros kr formulas: the B-slope is
+        −(drdT_lo·dTdx_B + drdS_lo·dSdx_B) / drodzb(drdT_lo, drdS_lo) and the
+        A-slope its upper-cell counterpart."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _w_triad_slopes_tapers,
+        )
+        grid, z, T, S, mask, J, w = self._w_inputs()
+        n_lat, n_lon = mask.shape
+        out = _w_triad_slopes_tapers(
+            n_lat=n_lat, n_lon=n_lon, S_max=0.01, taper_width_frac=0.5, **w)
+        S_Wx1, _, S_Wx3 = out[0], out[1], out[2]
+        # Veros-form replication (no clip in neutral mode).
+        nx_W_A = (w["drdT_w"] * w["dTdx_u"][:, :n_lon, :-1]
+                  + w["drdS_w"] * w["dSdx_u"][:, :n_lon, :-1])
+        nx_W_B = (w["drdT_wb"] * w["dTdx_u"][:, :n_lon, 1:]
+                  + w["drdS_wb"] * w["dSdx_u"][:, :n_lon, 1:])
+        S_A_ref = -nx_W_A / w["drho_dz_w"]
+        S_B_ref = -nx_W_B / w["drho_dz_w_b"]
+        np.testing.assert_array_equal(np.asarray(S_Wx1), np.asarray(S_A_ref))
+        np.testing.assert_array_equal(np.asarray(S_Wx3), np.asarray(S_B_ref))
+
+    def test_kr_sum_is_live_where_drdT_varies_vertically(self):
+        """The refinement must change the neutral B-slopes wherever the EOS
+        derivative varies between the two cells (nonlinear EOS, stratified
+        column) — guards against a silently-dead wiring."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            _w_triad_slopes_tapers,
+        )
+        grid, z, T, S, mask, J, w = self._w_inputs()
+        n_lat, n_lon = mask.shape
+        new = _w_triad_slopes_tapers(
+            n_lat=n_lat, n_lon=n_lon, S_max=0.01, taper_width_frac=0.5, **w)
+        legacy_w = dict(w)
+        legacy_w["drdT_wb"] = w["drdT_w"]      # pre-refinement: upper cell
+        legacy_w["drdS_wb"] = w["drdS_w"]      # everywhere
+        legacy_w["drho_dz_w_b"] = w["drho_dz_w"]
+        old = _w_triad_slopes_tapers(
+            n_lat=n_lat, n_lon=n_lon, S_max=0.01, taper_width_frac=0.5,
+            **legacy_w)
+        # A-triads identical; B-triads differ.
+        np.testing.assert_array_equal(np.asarray(new[0]), np.asarray(old[0]))
+        dmax = float(jnp.max(jnp.abs(new[2] - old[2])))
+        ref = float(jnp.max(jnp.abs(new[2])))
+        assert dmax > 1e-8 * ref, (
+            f"B-slope unchanged by kr-sum (dmax={dmax:.3e}, ref={ref:.3e}) — "
+            "wiring dead?")
+
+    def test_pairing_consistency_q_T_uniform_S_cancels(self):
+        """q = T with uniform S: the per-triad slope is −dTdx/dTdz with the
+        reference cell's drdT cancelling BETWEEN numerator and denominator —
+        but ONLY if the same cell's derivative is used in both (the kr
+        pairing).  A mis-paired build (numerator from one cell, denominator
+        from the other) breaks the cancellation.  Nonlinear EOS so drdT
+        genuinely varies; Redi tendency must vanish to machine precision."""
+        grid, z, T, S, eta, H, mask, um, vm, J = _setup(salt_structure=False)
+        eos_fn = make_eos_fn("veros_nonlin2")
+        rho = _rho(T, S, mask, z, eos_fn)
+        # Pure Redi (kappa_GM=0): along-isopycnal diffusion of an isopycnally
+        # uniform tracer is exactly zero PER TRIAD; any numerator/denominator
+        # cell mismatch leaves a drdT ratio that breaks the identity.
+        tend = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, um, vm, z, J, grid,
+            kappa_GM=0.0, kappa_Redi=1000.0, S_max=1.0e6,
+            taper_width_frac=0.5, slope_density="neutral",
+            T_tracer=T, S_tracer=S, eos_fn=eos_fn, rho_0=RHO_0, g=G,
+        )
+        scale = float(jnp.max(jnp.abs(T)))
+        assert float(jnp.max(jnp.abs(tend))) < 1e-12 * scale
+
+    def test_k33_finite_nonnegative_and_ad(self):
+        """K_33 with the kr-sum: finite, ≥0, and differentiable wrt T."""
+        grid, z, T, S, eta, H, mask, um, vm, J = _setup()
+        cfg = GMRediConfig(
+            kappa_GM=1000.0, kappa_Redi=1000.0, S_max=0.01,
+            taper_width_frac=0.5, implicit_K33=True,
+            slope_density="neutral",
+        )
+
+        def k33_sum(Tx):
+            K33 = compute_isoneutral_K33_latlon(
+                Tx, S, eta, H, grid, z, cfg, eos="veros_nonlin2",
+                mask=mask, rho_0=RHO_0, g=G,
+            )
+            return jnp.sum(K33), K33
+
+        (total, K33), grad = jax.value_and_grad(k33_sum, has_aux=True)(T)
+        assert jnp.all(jnp.isfinite(K33))
+        assert float(jnp.min(K33)) >= 0.0
+        assert float(total) > 0.0
+        assert jnp.all(jnp.isfinite(grad))
+        assert float(jnp.max(jnp.abs(grad))) > 0.0

@@ -580,6 +580,13 @@ def _w_face_slope_density_inputs(
     gradient (exactly the prior inline code).  ``"neutral"``: the locally-
     referenced ``∂ρ/∂T·∇T + ∂ρ/∂S·∇S`` ingredients (W-cell ``drdT_w`` + tracer
     face gradients), with the floor applied to the neutral ``drho_dz_w``.
+
+    kr-sum (Veros ``isoneutral.py:176-198``): each w-face triad references one
+    of the TWO cells adjacent to the face, and Veros builds BOTH ``drodxb`` and
+    ``drodzb`` from that reference cell's own EOS derivatives (the ``kr`` loop).
+    The neutral dict therefore carries both the UPPER-cell (``drdT_w``/
+    ``drho_dz_w``, the A-triads) and the LOWER-cell (``drdT_wb``/
+    ``drho_dz_w_b``, the B-triads) variants.
     """
     _validate_slope_density(slope_density)
     dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
@@ -599,10 +606,15 @@ def _w_face_slope_density_inputs(
             dz_half, _EPS_DIV)
         drdT_w = drdT_c[:, :, :-1]
         drdS_w = drdS_c[:, :, :-1]
+        drdT_wb = drdT_c[:, :, 1:]
+        drdS_wb = drdS_c[:, :, 1:]
         drho_dz_w = jnp.minimum(drdT_w * dTdz_w + drdS_w * dSdz_w, -_EPS_DIV)
+        drho_dz_w_b = jnp.minimum(
+            drdT_wb * dTdz_w + drdS_wb * dSdz_w, -_EPS_DIV)
         return dict(
             drho_dx_u=None, drho_dy_v=None, drho_dz_w=drho_dz_w,
             slope_density="neutral", drdT_w=drdT_w, drdS_w=drdS_w,
+            drdT_wb=drdT_wb, drdS_wb=drdS_wb, drho_dz_w_b=drho_dz_w_b,
             dTdx_u=dTdx_u, dSdx_u=dSdx_u, dTdy_v=dTdy_v, dSdy_v=dSdy_v,
         )
     drho_dx_u = gradient_x_cgrid(rho_filled, grid)
@@ -618,7 +630,7 @@ def _w_face_slope_density_inputs(
 
 def _w_triad_numerators(slope_density, drho_dx_u, drho_dy_v,
                         drdT_w, drdS_w, dTdx_u, dSdx_u, dTdy_v, dSdy_v,
-                        n_lat, n_lon):
+                        n_lat, n_lon, drdT_wb=None, drdS_wb=None):
     """The 8 W-face triad horizontal density-gradient *numerators* ``-∇_hρ``.
 
     Returns ``(nx_W, nx_E, nx_Wb, nx_Eb, ny_S, ny_N, ny_Sb, ny_Nb)`` where the
@@ -629,24 +641,33 @@ def _w_triad_numerators(slope_density, drho_dx_u, drho_dy_v,
       face gradient ``drho_dx_u`` / ``drho_dy_v`` (exactly the slices the prior
       inline code used).
     - ``"neutral"``: the locally-referenced ``∂ρ/∂T·∇T + ∂ρ/∂S·∇S`` form, with
-      the W-cell's own ``drdT_w`` / ``drdS_w`` (``(n_lat,n_lon,nlev-1)``) — the
-      SAME center-cell derivative Veros's K_33 uses for ALL triads at a w-face
-      (``isoneutral.py:177-187`` uses ``drdT[2:-2,2:-2,...]`` for ``drodxb``
-      AND ``drodzb``, shifting only the tracer-gradient index by ``ip``).
+      the PER-TRIAD reference cell's own EOS derivatives (Veros's ``kr`` loop,
+      ``isoneutral.py:176-198``): the A-triads (upper-level tracer gradients)
+      use the UPPER cell's ``drdT_w``/``drdS_w``; the B-triads (lower-level
+      gradients) use the LOWER cell's ``drdT_wb``/``drdS_wb`` — Veros pairs
+      ``drdT[..., kr]`` with ``dTdx[..., kr]`` for both ``drodxb`` and
+      ``drodzb``.  (Before the kr-sum refinement all 8 used the upper cell.)
     """
     if slope_density == "neutral":
+        if drdT_wb is None or drdS_wb is None:
+            raise ValueError(
+                "_w_triad_numerators: slope_density='neutral' requires the "
+                "lower-cell drdT_wb/drdS_wb (the kr-sum pairing); got None. "
+                "Build inputs via _w_face_slope_density_inputs.")
         nx_W = drdT_w * dTdx_u[:, :n_lon, :-1] + drdS_w * dSdx_u[:, :n_lon, :-1]
         nx_E = (drdT_w * dTdx_u[:, 1:n_lon + 1, :-1]
                 + drdS_w * dSdx_u[:, 1:n_lon + 1, :-1])
-        nx_Wb = drdT_w * dTdx_u[:, :n_lon, 1:] + drdS_w * dSdx_u[:, :n_lon, 1:]
-        nx_Eb = (drdT_w * dTdx_u[:, 1:n_lon + 1, 1:]
-                 + drdS_w * dSdx_u[:, 1:n_lon + 1, 1:])
+        nx_Wb = (drdT_wb * dTdx_u[:, :n_lon, 1:]
+                 + drdS_wb * dSdx_u[:, :n_lon, 1:])
+        nx_Eb = (drdT_wb * dTdx_u[:, 1:n_lon + 1, 1:]
+                 + drdS_wb * dSdx_u[:, 1:n_lon + 1, 1:])
         ny_S = drdT_w * dTdy_v[:n_lat, :, :-1] + drdS_w * dSdy_v[:n_lat, :, :-1]
         ny_N = (drdT_w * dTdy_v[1:n_lat + 1, :, :-1]
                 + drdS_w * dSdy_v[1:n_lat + 1, :, :-1])
-        ny_Sb = drdT_w * dTdy_v[:n_lat, :, 1:] + drdS_w * dSdy_v[:n_lat, :, 1:]
-        ny_Nb = (drdT_w * dTdy_v[1:n_lat + 1, :, 1:]
-                 + drdS_w * dSdy_v[1:n_lat + 1, :, 1:])
+        ny_Sb = (drdT_wb * dTdy_v[:n_lat, :, 1:]
+                 + drdS_wb * dSdy_v[:n_lat, :, 1:])
+        ny_Nb = (drdT_wb * dTdy_v[1:n_lat + 1, :, 1:]
+                 + drdS_wb * dSdy_v[1:n_lat + 1, :, 1:])
     else:
         nx_W = drho_dx_u[:, :n_lon, :-1]
         nx_E = drho_dx_u[:, 1:n_lon + 1, :-1]
@@ -663,6 +684,7 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
                            S_max, taper_width_frac,
                            slope_density="in_situ",
                            drdT_w=None, drdS_w=None,
+                           drdT_wb=None, drdS_wb=None, drho_dz_w_b=None,
                            dTdx_u=None, dSdx_u=None, dTdy_v=None, dSdy_v=None):
     """W-face (vertical-flux) triad isopycnal slopes + DM95 tapers.
 
@@ -688,21 +710,27 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
     """
     (nx_W, nx_E, nx_Wb, nx_Eb, ny_S, ny_N, ny_Sb, ny_Nb) = _w_triad_numerators(
         slope_density, drho_dx_u, drho_dy_v, drdT_w, drdS_w,
-        dTdx_u, dSdx_u, dTdy_v, dSdy_v, n_lat, n_lon)
+        dTdx_u, dSdx_u, dTdy_v, dSdy_v, n_lat, n_lon,
+        drdT_wb=drdT_wb, drdS_wb=drdS_wb)
     clip = slope_density != "neutral"
+    # kr-sum: the B-triads divide by the LOWER cell's drodzb (Veros pairs the
+    # same kr-cell derivatives in numerator and denominator).  in_situ has no
+    # per-cell derivative, so both levels share the single face denominator
+    # (a neutral call without the b-variant already raised in the numerators).
+    drho_dz_w_B = drho_dz_w_b if drho_dz_w_b is not None else drho_dz_w
 
-    def _slope(num):
-        s = -num / drho_dz_w
+    def _slope(num, dz=drho_dz_w):
+        s = -num / dz
         return jnp.clip(s, -S_max, S_max) if clip else s
 
-    S_Wx1 = _slope(nx_W)    # W,A
-    S_Wx2 = _slope(nx_E)    # E,A
-    S_Wx3 = _slope(nx_Wb)   # W,B
-    S_Wx4 = _slope(nx_Eb)   # E,B
-    S_Wy1 = _slope(ny_S)    # S,A
-    S_Wy2 = _slope(ny_N)    # N,A
-    S_Wy3 = _slope(ny_Sb)   # S,B
-    S_Wy4 = _slope(ny_Nb)   # N,B
+    S_Wx1 = _slope(nx_W)                    # W,A
+    S_Wx2 = _slope(nx_E)                    # E,A
+    S_Wx3 = _slope(nx_Wb, drho_dz_w_B)      # W,B
+    S_Wx4 = _slope(nx_Eb, drho_dz_w_B)      # E,B
+    S_Wy1 = _slope(ny_S)                    # S,A
+    S_Wy2 = _slope(ny_N)                    # N,A
+    S_Wy3 = _slope(ny_Sb, drho_dz_w_B)      # S,B
+    S_Wy4 = _slope(ny_Nb, drho_dz_w_B)      # N,B
     tw = lambda s: dm95_taper_scalar(s, S_max, transition_width_frac=taper_width_frac)[1]
     return (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
             tw(S_Wx1), tw(S_Wx2), tw(S_Wx3), tw(S_Wx4),
@@ -837,12 +865,21 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
             dz_half, _EPS_DIV)
         dSdz_w = (S_filled[:, :, :-1] - S_filled[:, :, 1:]) / jnp.maximum(
             dz_half, _EPS_DIV)
-        # Per-cell neutral vertical gradient at the w-face (upper cell's drdT),
-        # floored for stable strat.  Each cell's value, so the west/east shift
-        # below picks the per-triad reference cell (the Veros K_11 ``drodze``).
+        # Per-cell neutral vertical gradient at the w-face, floored for stable
+        # strat — BOTH adjacent-cell variants (the Veros kr loop): the upper
+        # cell's (A-triads / faces BELOW their reference cell) and the lower
+        # cell's (B-triads / faces ABOVE their reference cell).  The west/east
+        # (south/north) shifts below pick the per-triad reference COLUMN; the
+        # up/down variant picks the reference CELL within the column, so every
+        # triad pairs its own cell's EOS derivatives in numerator AND
+        # denominator (Veros K_11 ``drodze`` / K_33 ``drodzb``).
         drdT_w = drdT_c[:, :, :-1]
         drdS_w = drdS_c[:, :, :-1]
+        drdT_wb = drdT_c[:, :, 1:]
+        drdS_wb = drdS_c[:, :, 1:]
         drho_dz_w = jnp.minimum(drdT_w * dTdz_w + drdS_w * dSdz_w, -_EPS_DIV)
+        drho_dz_w_b = jnp.minimum(
+            drdT_wb * dTdz_w + drdS_wb * dSdz_w, -_EPS_DIV)
         # Per-reference-cell neutral horizontal gradients at the u/v-faces, used
         # by the u/v-face slopes (S_T*/S_V*).  drdT lifted to the west/east
         # (south/north) neighbour of each u-face (v-face).
@@ -878,6 +915,11 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
         drho_dy_v_north = drho_dy_v
         drdT_w = None
         drdS_w = None
+        drdT_wb = None
+        drdS_wb = None
+        # In-situ has no per-cell EOS derivative; both adjacent cells share
+        # the single face gradient (bit-identical to the prior code).
+        drho_dz_w_b = drho_dz_w
         dTdx_u = dSdx_u = dTdy_v = dSdy_v = None
 
     # -----------------------------------------------------------------
@@ -885,12 +927,20 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     #    triads can be expressed by a single jnp.where / multiplication.
     #    "below" array at level k = drho_dz_w at w-face (k+1/2);
     #    "above" array at level k = drho_dz_w at w-face (k-1/2).
+    #
+    # kr pairing (neutral): a triad referencing cell k is the UPPER cell of
+    # its below-face (k+1/2) ⇒ ``below_lev`` uses the upper-cell variant
+    # ``drho_dz_w``; it is the LOWER cell of its above-face (k-1/2) ⇒
+    # ``above_lev`` uses the lower-cell variant ``drho_dz_w_b`` (Veros
+    # ``drodze``/``drodzn`` build each face gradient from the reference
+    # cell's own drdT — isoneutral.py kr/ki loops).  in_situ: identical
+    # arrays, bit-identical.
     # -----------------------------------------------------------------
     sentinel_rho = jnp.full(
         (n_lat, n_lon, 1), -_EPS_DIV, dtype=drho_dz_w.dtype,
     )
     drho_dz_below_lev = jnp.concatenate([drho_dz_w, sentinel_rho], axis=-1)
-    drho_dz_above_lev = jnp.concatenate([sentinel_rho, drho_dz_w], axis=-1)
+    drho_dz_above_lev = jnp.concatenate([sentinel_rho, drho_dz_w_b], axis=-1)
 
     sentinel_q = jnp.zeros((n_lat, n_lon, 1), dtype=dq_dz_w.dtype)
     dq_dz_below_lev = jnp.concatenate([dq_dz_w, sentinel_q], axis=-1)
@@ -1079,6 +1129,8 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
      taper_Wy1, taper_Wy2, taper_Wy3, taper_Wy4) = _w_triad_slopes_tapers(
         drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon, S_max, taper_width_frac,
         slope_density=slope_density, drdT_w=drdT_w, drdS_w=drdS_w,
+        drdT_wb=drdT_wb, drdS_wb=drdS_wb,
+        drho_dz_w_b=(drho_dz_w_b if slope_density == "neutral" else None),
         dTdx_u=dTdx_u, dSdx_u=dSdx_u, dTdy_v=dTdy_v, dSdy_v=dSdy_v)
 
     # Per-triad vertical flux.  The off-diagonal skew (kR+kG)·S·dq/dx is ALWAYS
