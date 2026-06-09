@@ -53,6 +53,22 @@ These are the invariants every change must preserve.
    Before writing a new helper/constant/formula, grep `src/legoesm/` for an
    existing one and extend it. No thin re-export wrappers
    (`X_utils.py` re-exporting `X.py`).
+5. **AI-guardrail harness (Domain Architect vs Syntax Engine).** See
+   `docs/ai_guardrails/domain_architect_vs_syntax_engine.md`. The human pins the
+   *logic* (units/signs/conserved-qty/valid-sets/references); mechanical gates
+   make any violation fail loudly. These are ratchets — extend, never weaken;
+   `*_TODO`/budget lists only shrink:
+   - Every physics scheme module declares a `__physics_contract__`
+     (`tests/test_physics_contracts.py`); a new one must ship a contract or be
+     classified. Author the contract + an acceptance test *before* the body.
+   - The constant/saturation/dispatch/validate-strict ratchets
+     (`tests/test_no_hardcoded_constants.py`, `test_no_saturation_reimpl.py`,
+     `test_dispatch_hardening.py`, `test_validate_strict_coverage.py`) must stay
+     green; annotate a genuine non-physical literal with `# const-ok: <reason>`
+     rather than weakening a gate. Each gate ships a non-vacuity self-test —
+     never make a gate that can pass on empty input.
+   - The local hooks in `.claude/hooks/` (banned-literal block + review reminder)
+     are a convenience; **CI is authoritative**.
 
 ## Shared utilities — never re-derive
 

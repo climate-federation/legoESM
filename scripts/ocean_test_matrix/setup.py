@@ -90,31 +90,13 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         # FV3-faithful C-D barotropic, not the forbidden a_grid (never-A-grid).
         import legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid  # noqa: F401
 
-        # iter-175 parity with iter-174 monolithic fix:
-        # cubed_sphere ``OceanConfig`` does not expose
-        # ``bottom_drag_r``.  Previously the modular path
-        # silently dropped the parameter without even a
-        # warning (worse than the monolithic path which at
-        # least emitted ``warnings.warn``).  Codex iter-173
-        # MEDIUM-1 flagged the same issue in the monolithic
-        # path: a silent drop lets cube gyre runs produce
-        # ``PASS`` results in cross-grid comparisons that
-        # are NOT physically comparable to lat-lon / MPAS
-        # because bottom drag is missing.
-        #
-        # Same fix as iter-174 (monolithic): raise
-        # ``NotImplementedError`` so the main runner's
-        # exception handler converts the case to ``SKIP``
-        # with the reason in the notes field.
-        if bottom_drag_r is not None and bottom_drag_r > 0.0:
-            raise NotImplementedError(
-                f"cubed_sphere OceanConfig does not expose "
-                f"bottom_drag_r (requested {bottom_drag_r:g}); "
-                f"cube ocean dycore lacks linear bottom drag "
-                f"(deferred per user). Use latlon or mpas for "
-                f"this case to get cross-grid-comparable results."
-            )
-
+        # Phase B.1 parity with the monolithic runner: cubed_sphere
+        # ``OceanConfig`` now exposes ``bottom_drag_r`` and the cd-grid backend
+        # (``ocean_baroclinic_tendencies_cdgrid``) applies linear / quadratic /
+        # BBL bottom drag the same way the lat-lon C-grid does. The earlier
+        # NotImplementedError gate (modular iter-175 / monolithic iter-174) is
+        # removed; the kwarg is plumbed straight through, so the modular and
+        # monolithic paths agree (no silent drop, no spurious SKIP).
         n = params["n"]
         grid = create_cubed_sphere(n)
         kw = dict(n_barotropic_substeps=30, physics=physics,
@@ -123,6 +105,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
         cfg = OceanConfig(**kw)
         model = OceanModel(grid, z_coord, cfg)
         coord_kind = "cube"
