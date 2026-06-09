@@ -5275,7 +5275,7 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float
         return LinearEOSConfig(
             rho_ref=cfg.rho_0, alpha_T=cfg.alpha_T,
             beta_S=0.0,                # T-only buoyancy
-            T_ref=cfg.T_ref, S_ref=cfg.S_uniform,
+            T_ref=cfg.T_ref_C, S_ref=cfg.S_uniform,
         )
 
     return _run_experiment_via_registry(
@@ -5374,7 +5374,7 @@ def run_held_larichev(tc: TestCase, output_dir: Path, days: float
     def _eos(cfg):
         return LinearEOSConfig(
             rho_ref=cfg.rho_0, alpha_T=cfg.alpha_T,
-            beta_S=0.0, T_ref=cfg.T_ref, S_ref=cfg.S_uniform,
+            beta_S=0.0, T_ref=cfg.T_ref_C, S_ref=cfg.S_uniform,
         )
 
     return _run_experiment_via_registry(
