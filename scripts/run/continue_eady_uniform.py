@@ -130,7 +130,7 @@ def _build_config_and_model(args):
             eos="linear",
             eos_linear=LinearEOSConfig(
                 alpha_T=cfg.alpha_T, rho_ref=cfg.rho_0,
-                T_ref=cfg.T_ref, S_ref=cfg.S_uniform,
+                T_ref=cfg.T_ref_C, S_ref=cfg.S_uniform,
             ),
             barotropic_diffusion_alpha=cfg.barotropic_diffusion_alpha,
             barotropic_div_damp=cfg.barotropic_div_damp,

@@ -372,7 +372,7 @@ def _run_single(
             eos="linear",
             eos_linear=LinearEOSConfig(
                 alpha_T=eu_config.alpha_T, rho_ref=eu_config.rho_0,
-                T_ref=eu_config.T_ref, S_ref=eu_config.S_uniform,
+                T_ref=eu_config.T_ref_C, S_ref=eu_config.S_uniform,
             ),
             barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
             barotropic_div_damp=eu_config.barotropic_div_damp,

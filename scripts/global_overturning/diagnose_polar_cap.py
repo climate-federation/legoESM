@@ -101,7 +101,7 @@ def main():
     config = GlobalOverturningConfig(
         use_gm_redi=True, bottom_drag_coeff=2.5e-3, A_h=A_H_GLOBAL,
         H_max=5000.0, dz_surface=20.0, kappa_GM=800.0, kappa_Redi=800.0,
-        T_water_init_C=20.0, T_deep=2.0, T_scale_depth=1000.0,
+        T_water_init_C=20.0, T_deep_C=2.0, T_scale_depth=1000.0,
     )
     z_coord = create_partial_cell_coordinate(z_coord_base, H_bathy)
     state = rest_state_latlon_cgrid_ocean(

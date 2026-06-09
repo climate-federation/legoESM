@@ -145,7 +145,7 @@ def _run_one_ah(A_h, grid, z_coord_base, H_bathy, ocean_mask, gm_redi_cfg,
         kappa_GM=800.0,
         kappa_Redi=800.0,
         T_water_init_C=20.0,
-        T_deep=2.0,
+        T_deep_C=2.0,
         T_scale_depth=1000.0,
     )
 

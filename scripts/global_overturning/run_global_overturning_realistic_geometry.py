@@ -171,7 +171,7 @@ def main():
         kappa_Redi=800.0,
         # Stratification config.
         T_water_init_C=20.0,
-        T_deep=2.0,
+        T_deep_C=2.0,
         T_scale_depth=1000.0,
     )
 

@@ -119,7 +119,7 @@ def _run_one_ah(A_h, grid, z_coord_base, H_bathy, ocean_mask,
     config = GlobalOverturningConfig(
         use_gm_redi=True, bottom_drag_coeff=2.5e-3, A_h=A_h,
         H_max=5000.0, dz_surface=20.0, kappa_GM=800.0, kappa_Redi=800.0,
-        T_water_init_C=20.0, T_deep=2.0, T_scale_depth=1000.0,
+        T_water_init_C=20.0, T_deep_C=2.0, T_scale_depth=1000.0,
     )
     state, z_coord = _build_initial_state(grid, z_coord_base, H_bathy, ocean_mask, config)
 

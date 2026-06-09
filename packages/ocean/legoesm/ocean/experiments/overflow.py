@@ -73,9 +73,9 @@ class OverflowConfig:
     spectral_land_lat_threshold: float = 90.0  # No land for spectral grid
 
     # Temperature/density structure
-    T_cold: float = 5.0            # Cold (dense) water temperature [°C]
-    T_warm: float = 20.0           # Warm (light) water temperature [°C]
-    T_deep: float = 2.0            # Deep water temperature [°C]
+    T_cold_C: float = 5.0            # Cold (dense) water temperature [°C]
+    T_warm_C: float = 20.0           # Warm (light) water temperature [°C]
+    T_deep_C: float = 2.0            # Deep water temperature [°C]
     S_uniform: float = 35.0        # Uniform salinity [PSU]
 
     # Transition parameters
@@ -94,7 +94,7 @@ class OverflowConfig:
     # Physical parameters for RPE calculation
     rho_reference: float = constants.rho_ocean
     alpha_T: float = 2.0e-4         # Thermal expansion coefficient [1/K]
-    T_reference: float = 12.5       # Reference temperature [°C]
+    T_reference_C: float = 12.5       # Reference temperature [°C]
 
     # Validation thresholds
     max_pe_drift: float = 1e-2      # Maximum PE drift (relative)
@@ -141,8 +141,8 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init import rest_state_ocean
         state = rest_state_ocean(
             grid, z_coord,
-            T_water_init_C=config.T_reference,
-            T_deep=config.T_deep,
+            T_water_init_C=config.T_reference_C,
+            T_deep=config.T_deep_C,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
@@ -152,8 +152,8 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_water_init_C=config.T_reference,
-            T_deep=config.T_deep,
+            T_water_init_C=config.T_reference_C,
+            T_deep=config.T_deep_C,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
@@ -163,8 +163,8 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         state = rest_state_mpas_ocean(
             grid, z_coord,
-            T_water_init_C=config.T_reference,
-            T_deep=config.T_deep,
+            T_water_init_C=config.T_reference_C,
+            T_deep=config.T_deep_C,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.land_lat_threshold
@@ -174,8 +174,8 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         state = rest_state_spectral_ocean(
             grid, z_coord,
-            T_water_init_C=config.T_reference,
-            T_deep=config.T_deep,
+            T_water_init_C=config.T_reference_C,
+            T_deep=config.T_deep_C,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
             land_lat_threshold=config.spectral_land_lat_threshold
@@ -205,9 +205,9 @@ def _add_overflow_structure(state, grid_type: str, grid, z_coord,
         np.asarray(grid.lon, dtype=np.float64)
 
     # Convert parameters to radians
-    T_cold = config.T_cold
-    T_warm = config.T_warm
-    T_deep = config.T_deep
+    T_cold = config.T_cold_C
+    T_warm = config.T_warm_C
+    T_deep = config.T_deep_C
     lat_front = np.radians(config.lat_front_deg)
     sigma_front = np.radians(config.front_width_deg)
     lat_shelf = np.radians(config.lat_shelf_deg)
