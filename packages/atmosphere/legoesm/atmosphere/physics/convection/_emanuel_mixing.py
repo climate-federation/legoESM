@@ -276,6 +276,7 @@ def emanuel_mixing_tendencies(
     mse_min_search_offset: float,
     sat_branch_sharpness: float,
     strict_index_sharpness: float = 20.0,
+    epmax: float = 0.999,
     nk_weight: jax.Array | None = None,
 ) -> EmanuelMixingOutput:
     """Genuine Emanuel (i,j) buoyancy-sort mixing matrix and tendencies.
@@ -449,7 +450,6 @@ def emanuel_mixing_tendencies(
         tca >= 0.0, elcrit, elcrit * (1.0 - tca / tlcrit),
     )
     elacrit = jnp.maximum(elacrit, 0.0)
-    epmax = 0.999
     ep = epmax * (1.0 - elacrit / jnp.maximum(clw, 1e-8))
     ep = jnp.clip(ep, 0.0, epmax)
     # EP=0 below NK / below cloud base (oracle DO 57 sets EP=0 for I<=NK,

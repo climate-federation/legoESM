@@ -784,6 +784,10 @@ class EmanuelConfig(NamedTuple):
     # ``level_window_sharpness`` (ICB/INB cloud edges), which must stay
     # moderate to keep the cloud-top/base transition differentiable.
     strict_index_sharpness: float = 20.0
+    # Maximum precipitation efficiency EPMAX in the precip-efficiency EP =
+    # EPMAX·(1 − ELACRIT/CLW), clipped to [0, EPMAX] (oracle convect43c.f
+    # ``EPMAX = 0.999``).
+    precip_efficiency_max: float = 0.999
 
 
 class TiedtkeConfig(NamedTuple):
