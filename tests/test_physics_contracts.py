@@ -170,6 +170,9 @@ EXCLUDED: frozenset[str] = frozenset(
         # CLUBB port: mass-conserving vertical hole-filling — a numerical
         # positivity utility, not a column-physics tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_fill_holes.py",
+        # CLUBB port: coupled wp2/wp3 pentadiagonal advance LHS builders —
+        # internal closure dynamics, not a single column-physics tendency.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_wp23.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",
