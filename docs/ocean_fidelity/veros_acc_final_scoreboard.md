@@ -141,3 +141,26 @@ assembled steps). THREE concrete code-level survivors, never matched:
 Ocean-side smaller gaps (TKE buoyancy time level, surface-buoyancy TKE source,
 negative-TKE reservoir, Ri definition, z-grid T-point placement
 `u_centered_grid` vs midpoints) are catalogued in the audit report.
+
+
+## ROOT CAUSE FOUND AND FIXED (2026-06-10 morning, `abcbd255`)
+
+The attractor-drop test (legoESM departs a verified 1%-faithful copy of
+Veros's 30-yr equilibrium: KE ×6.5 in 5 yr, **EKE runs away first ×26**, Veros
+control flat ±1.1%) plus a term-by-term EKE budget on that same state
+localized the runaway: **net dE/dt flips sign** (Veros −9.2e9 W relaxing,
+legoESM +3.14e10 W growing). 71% of the bias: `_eady_growth_and_length` used
+the **in-situ N²** (compressibility-biased; int_N_dz 2.67× too large → L_def
+2.1× → eke_len 23% long → dissipation ∝1/L too weak). The third instance of
+the in-situ-vs-locally-referenced bug class; it survived oracle gate L4
+because L4 fed Veros's own N² — formula exact, input wrong.
+
+Fix: `n2_mode="adiabatic"` on the EKE/Visbeck Eady–Rossby chain (`abcbd255`,
+default-off byte-identical, validator SHIP). **10-yr falsification: ACC
+transport 1.35× → 1.03× (matched); EKE 17.4× → 8.9× (halved); KE 4.51× →
+4.18×.** Necessary but not sufficient — remaining E-budget levers: the
+positive-definite realized-skew form (1.22× vs Veros's signed −P_diss_skew,
+32% of the bias), the missing −P_diss_iso sink (15%), and the dycore-audit
+items D1 (Coriolis composition), D2 (AB2 scope), D3 (vertical momentum
+advection: upwind-on-perturbation vs centered-on-full-u — the best match for
+the residual barotropic/KE bias).
