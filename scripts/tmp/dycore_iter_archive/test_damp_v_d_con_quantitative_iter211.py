@@ -18,7 +18,7 @@ Then:
 
 Expected:
   PE:  ΔT = -d_con * (u_pre*du + 0.5*du² + v_pre*dv + 0.5*dv²) / c_pd
-       projected from corners to centres via _interp_corner_to_center
+       projected from corners to centres via interp_corner_to_center
   NH:  Δθ_p = -d_con * (u*du + 0.5*du² + v*dv + 0.5*dv²)
               / (c_pd * exner_ref)
 
@@ -51,7 +51,7 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
 )
 from legoesm.atmosphere.held_suarez import held_suarez_init
 from legoesm.core.field import Field
-from legoesm.core.operators_cdgrid import _interp_corner_to_center
+from legoesm.core.operators_cdgrid import interp_corner_to_center
 from legoesm.core.state import NonHydrostaticState
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -133,12 +133,12 @@ def test_pe_damp_v_d_con_heat_matches_formula(small_pe_state_perturbed):
         u_pre * du + 0.5 * du ** 2
         + v_pre * dv + 0.5 * dv ** 2
     )
-    dKE_cc = _interp_corner_to_center(dKE_corner)
+    dKE_cc = interp_corner_to_center(dKE_corner)
     expected_dT = -1.0 * dKE_cc / constants.c_pd
 
     max_expected = float(jnp.max(jnp.abs(expected_dT)))
     # Tolerance: 1e-8 relative.  Tighter than 1e-10 fails because
-    # the model's _interp_corner_to_center call inside the JIT
+    # the model's interp_corner_to_center call inside the JIT
     # graph fuses ops differently than the test's external call,
     # producing a few ULPs of difference in the corner→center
     # 4-point average.  1e-8 catches sign/factor errors while
@@ -151,7 +151,7 @@ def test_pe_damp_v_d_con_heat_matches_formula(small_pe_state_perturbed):
         f"max|delta_T - expected|={diff:.3e}, "
         f"max|expected|={max_expected:.3e}, tol={abs_tol:.3e}.\n"
         f"Indicates a bug in iter-208's wiring (sign, factor of 0.5, "
-        f"or _interp_corner_to_center call) vs iter-211's reconstruction."
+        f"or interp_corner_to_center call) vs iter-211's reconstruction."
     )
 
 

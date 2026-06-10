@@ -18,7 +18,7 @@ CONVECTION_REGISTRY : dict
        "tiedtke": ..., "bechtold": ...}``
 MICROPHYSICS_REGISTRY : dict
     ``{"kessler": ..., "sundqvist": ..., "seifert_beheng": ...,
-      "morrison": ..., "thompson": ...}``
+      "morrison": ..., "thompson": ..., "p3": ..., "ml_emulator": ...}``
 resolve_kernel(registry, name) -> callable
     Import and return the kernel function for *name*.
 """
@@ -121,6 +121,21 @@ MICROPHYSICS_REGISTRY: dict[str, _Entry] = {
     "thompson": (
         "legoesm.atmosphere.physics.microphysics.thompson",
         "thompson_microphysics",
+    ),
+    # P3 matches the standard kernel contract; its prognostic ice
+    # properties reuse the 9-slot hydrometeor layout (q_s -> q_rim,
+    # q_g -> B_rim — see model_driver's full moisture registry note).
+    "p3": (
+        "legoesm.atmosphere.physics.microphysics.p3",
+        "p3_microphysics",
+    ),
+    # The ML emulator kernel takes the Equinox network as a trailing
+    # extra argument; ``physics_pipeline._resolve_microphysics`` builds
+    # the network from the scheme config and binds it into a
+    # standard-contract wrapper.
+    "ml_emulator": (
+        "legoesm.atmosphere.physics.microphysics.ml_emulator",
+        "ml_microphysics",
     ),
 }
 

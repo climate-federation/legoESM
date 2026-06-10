@@ -752,7 +752,7 @@ class TestMPASLandFill:
     def test_three_iter_reaches_three_rings(self):
         """With n_iter=3 (new default), land cells up to 3 edges from
         ocean get filled. This matches the lat-lon
-        ``_neumann_fill_cgrid`` 3-pass behaviour.
+        ``neumann_fill_cgrid`` 3-pass behaviour.
         """
         from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
 

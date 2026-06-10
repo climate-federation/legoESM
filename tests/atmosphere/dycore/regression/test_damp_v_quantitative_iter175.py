@@ -36,7 +36,7 @@ from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
 from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState
 from legoesm.core.operators_cdgrid import (
-    dgrid_vorticity, _interp_center_to_corner,
+    dgrid_vorticity, interp_center_to_corner,
 )
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -103,7 +103,7 @@ def _mean_abs_vorticity(state, cdgrid):
     n_face_uv, n_i_uv, n_j_uv, nlev_uv = state.u.data.shape
     _uv_stack = jnp.stack([state.u.data, state.v.data], axis=-1)
     _uv_flat = _uv_stack.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
-    _uv_d_flat = _interp_center_to_corner(_uv_flat, cdgrid)
+    _uv_d_flat = interp_center_to_corner(_uv_flat, cdgrid)
     _uv_d = _uv_d_flat.reshape(
         _uv_d_flat.shape[0], _uv_d_flat.shape[1],
         _uv_d_flat.shape[2], nlev_uv, 2,

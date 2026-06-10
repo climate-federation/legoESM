@@ -66,7 +66,14 @@ class SegmentCarry(NamedTuple):
     q_v, q_c, q_r : jax.Array
         Moisture tracers.
     conv_prog : jax.Array
-        Prognostic convection control state for mass_flux / EDMF schemes.
+        Prognostic convection control state.  Shape ``(ncol,)`` for the
+        scalar-carrying schemes (mass_flux ``M_c`` / EDMF ``a_u``) and
+        ``(ncol, nlev)`` (the full ``conv_prog_profile``) for the
+        profile-prognostic schemes (zhang_mcfarlane / kain_fritsch /
+        emanuel / tiedtke / bechtold).  The shape is fixed at packing
+        time — ``lax.scan`` cannot reshape the carry mid-segment, so
+        seed it for the configured scheme (see
+        ``convection_scheme_traits().is_profile_prognostic``).
     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc : jax.Array
         Held radiation tendencies for sub-cycling.
     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa : jax.Array
@@ -144,12 +151,21 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                max_cfl=None, precip_accum=None,
                shflx_accum=None, lhflx_accum=None,
                T_land=None, q_i=None, q_s=None, q_g=None,
-               N_c=None, N_r=None, N_i=None):
+               N_c=None, N_r=None, N_i=None,
+               conv_prog_nlev=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
     Prognostic fields are cast to at least the precision policy's storage
     dtype (upcasting only — never downcasts existing float64 arrays).
     Accumulation scalars use at least the accumulate dtype.
+
+    ``conv_prog=None`` allocates a zero carry: ``(ncol,)`` by default
+    (scalar-carrying mass_flux/EDMF and stateless schemes), or
+    ``(ncol, conv_prog_nlev)`` when ``conv_prog_nlev`` is given — pass
+    it (= nlev) for the profile-prognostic convection schemes
+    (zhang_mcfarlane / kain_fritsch / emanuel / tiedtke / bechtold),
+    whose ``conv_prog_profile`` carry must be seeded full-shape before
+    entering ``lax.scan``.
     """
     from legoesm.core.precision import resolve_dtype
     storage = resolve_dtype(None, "storage")
@@ -175,7 +191,12 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
     if lhflx_accum is None:
         lhflx_accum = jnp.zeros_like(state.p_s.data)
     if conv_prog is None:
-        conv_prog = jnp.zeros((state.p_s.data.size,), dtype=storage)
+        if conv_prog_nlev is not None:
+            conv_prog = jnp.zeros(
+                (state.p_s.data.size, int(conv_prog_nlev)), dtype=storage,
+            )
+        else:
+            conv_prog = jnp.zeros((state.p_s.data.size,), dtype=storage)
     # T_land is always a real array in the carry (never None) so the
     # SegmentCarry pytree has no Python-object leaves.  The land tile is
     # gated by PhysicsPipeline.f_land, not by T_land being None — for

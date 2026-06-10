@@ -37,9 +37,9 @@ from legoesm.core.operators_cdgrid import (
     cgrid_tracer_advection_fct,
     cgrid_wet_face_masks,
     cgrid_corner_min,
-    _arakawa_lamb_gradient,
-    _interp_center_to_corner,
-    _extrapolate_boundary_corners,
+    arakawa_lamb_gradient,
+    interp_center_to_corner,
+    extrapolate_boundary_corners,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
@@ -371,7 +371,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     n_face_kp, n_i_kp, n_j_kp, nlev_kp = KE.shape
     _kp_stack = jnp.stack([KE, p_prime_filled], axis=-1)
     _kp_flat = _kp_stack.reshape(n_face_kp, n_i_kp, n_j_kp, nlev_kp * 2)
-    _dkp_dx_flat, _dkp_dy_perp_flat = _arakawa_lamb_gradient(_kp_flat, cdgrid)
+    _dkp_dx_flat, _dkp_dy_perp_flat = arakawa_lamb_gradient(_kp_flat, cdgrid)
     _dkp_dx = _dkp_dx_flat.reshape(
         _dkp_dx_flat.shape[0], _dkp_dx_flat.shape[1],
         _dkp_dx_flat.shape[2], nlev_kp, 2,
@@ -399,7 +399,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     # Adcroft-Campin partial-cell rest test.  Two schemes (config.pgf_scheme),
     # BOTH gated on ``is_partial`` so the pure-z* path is bit-exact (z* never
     # enters this branch).  Both decompose the corner gradient EXACTLY into
-    # existing-operator calls because ``_arakawa_lamb_gradient`` is LINEAR and
+    # existing-operator calls because ``arakawa_lamb_gradient`` is LINEAR and
     # the corner reference depth z_ref is constant across a corner's 4 cells.
     # z_ref uses the eta=0 / J=1 reference centroid (matching p_prime → the
     # correction is eta-independent) measured as an ANOMALY from the full-column
@@ -490,7 +490,7 @@ def ocean_baroclinic_tendencies_cdgrid(
             n_f_s, n_i_s, n_j_s, nlev_s = a_f.shape
             _abc_flat = jnp.stack([a_f, b_f, c_f], axis=-1).reshape(
                 n_f_s, n_i_s, n_j_s, nlev_s * 3)
-            _dabc_dx_flat, _dabc_dy_flat = _arakawa_lamb_gradient(_abc_flat, cdgrid)
+            _dabc_dx_flat, _dabc_dy_flat = arakawa_lamb_gradient(_abc_flat, cdgrid)
             _dabc_dx = _dabc_dx_flat.reshape(
                 _dabc_dx_flat.shape[0], _dabc_dx_flat.shape[1],
                 _dabc_dx_flat.shape[2], nlev_s, 3)
@@ -517,7 +517,7 @@ def ocean_baroclinic_tendencies_cdgrid(
             n_f_c, n_i_c, n_j_c, nlev_c = g_rho.shape
             _gr_flat = jnp.stack([g_rho, g_rho_cent], axis=-1).reshape(
                 n_f_c, n_i_c, n_j_c, nlev_c * 2)
-            _dgr_dx_flat, _dgr_dy_flat = _arakawa_lamb_gradient(_gr_flat, cdgrid)
+            _dgr_dx_flat, _dgr_dy_flat = arakawa_lamb_gradient(_gr_flat, cdgrid)
             _dgr_dx = _dgr_dx_flat.reshape(
                 _dgr_dx_flat.shape[0], _dgr_dx_flat.shape[1],
                 _dgr_dx_flat.shape[2], nlev_c, 2)
@@ -548,7 +548,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     # passive-trailing-axis pattern as the CD-grid PE corner interps.
     n_face_zd, n_i_zd, n_j_zd, nlev_zd = zeta.shape
     _zd_stack = jnp.stack([zeta, div_v], axis=-1)
-    _zd_corner_flat = _interp_center_to_corner(
+    _zd_corner_flat = interp_center_to_corner(
         _zd_stack.reshape(n_face_zd, n_i_zd, n_j_zd, nlev_zd * 2), cdgrid,
     )
     _zd_corner = _zd_corner_flat.reshape(
@@ -589,7 +589,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     # Boundary-corner fix: replace face-boundary corner tendencies with
     # nearest-interior values to eliminate O(dx) halo interpolation error
     # (mirrors atmosphere fix from commit f3f9a86).
-    du_d_dt, dv_d_dt = _extrapolate_boundary_corners(du_d_dt, dv_d_dt, cdgrid.n)
+    du_d_dt, dv_d_dt = extrapolate_boundary_corners(du_d_dt, dv_d_dt, cdgrid.n)
 
     # --- 14. Convert D-grid tendencies back to cell-centre ---
     du_dt, dv_dt = dgrid_to_center_vector(du_d_dt, dv_d_dt)

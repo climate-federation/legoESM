@@ -3,7 +3,7 @@
 This module exposes a low-rank lat-lon basis for the AIMIP "classical"
 surface and radiation knobs that were previously global scalars
 (``Cd_neutral``, ``Ch_neutral``, ``z0``, ``sfc_emissivity``,
-``sfc_albedo``, plus the shared ``albedo_ice`` / ``albedo_ocean``).
+``sfc_albedo``).
 
 The motivation is the cold T-bias and synoptic-pattern residual that
 the global-scalar classical variant cannot close against SFNO (see
@@ -272,19 +272,20 @@ class SpatialFieldSpec(NamedTuple):
 # energy-balance fields over-correcting (was -2.74 K cold at the T21
 # baseline; the per-group LR x5 plus 15-epoch budget pushed them
 # past the bias-zero crossing).  Narrower bounds on
-# ``sfc_emissivity`` / ``sfc_albedo`` / ``albedo_ocean`` /
-# ``albedo_ice`` constrain the optimizer's spatial perturbation to
-# the physically plausible cold-side correction range.
+# ``sfc_emissivity`` / ``sfc_albedo`` constrain the optimizer's
+# spatial perturbation to the physically plausible cold-side
+# correction range.
 # Log-perturb fields (Cd, Ch, z0) drive momentum and BL physics, not
 # the radiation budget, so their scales are left alone.
+# ``albedo_ocean`` / ``albedo_ice`` were removed in the 2026-06
+# dead-code audit: their evaluated fields were never consumed by
+# ``make_aimip_classical_spectral_physics``.
 _FIELD_SPECS: dict[str, SpatialFieldSpec] = {
     "Cd_neutral":     SpatialFieldSpec(f_0=1.5e-3, scale=0.7,  transform="log_perturb"),
     "Ch_neutral":     SpatialFieldSpec(f_0=1.5e-3, scale=0.7,  transform="log_perturb"),
     "z0":             SpatialFieldSpec(f_0=1.0e-4, scale=2.3,  transform="log_perturb"),
     "sfc_emissivity": SpatialFieldSpec(f_0=0.95,   scale=0.02, transform="shift"),
     "sfc_albedo":     SpatialFieldSpec(f_0=0.20,   scale=0.05, transform="shift"),
-    "albedo_ocean":   SpatialFieldSpec(f_0=0.06,   scale=0.02, transform="shift"),
-    "albedo_ice":     SpatialFieldSpec(f_0=0.60,   scale=0.05, transform="shift"),
 }
 
 

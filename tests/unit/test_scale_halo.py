@@ -17,10 +17,10 @@ from legoesm.grids.halo import (
     pad_halo_vector,
     CONNECTIVITY,
     WEST, EAST, SOUTH, NORTH,
-    _extract_edge_strip,
+    extract_edge_strip,
     compute_halo_interp_offsets,
     compute_halo_interp_offsets_h2,
-    _fill_corners_h1,
+    fill_corners_h1,
 )
 
 
@@ -101,7 +101,7 @@ class TestFaceUniqueField:
 
 
 # ---------------------------------------------------------------------------
-# _extract_edge_strip
+# extract_edge_strip
 # ---------------------------------------------------------------------------
 
 class TestExtractEdgeStrip:
@@ -109,27 +109,27 @@ class TestExtractEdgeStrip:
         data = jnp.arange(6 * N * N, dtype=jnp.float64).reshape(6, N, N)
         for face in range(6):
             for edge in [WEST, EAST, SOUTH, NORTH]:
-                strip = _extract_edge_strip(data, face, edge)
+                strip = extract_edge_strip(data, face, edge)
                 assert strip.shape == (N,), f"face={face}, edge={edge}"
 
     def test_west_strip_is_first_row(self):
         data = jnp.arange(6 * N * N, dtype=jnp.float64).reshape(6, N, N)
-        strip = _extract_edge_strip(data, 0, WEST)
+        strip = extract_edge_strip(data, 0, WEST)
         np.testing.assert_array_equal(strip, data[0, 0, :])
 
     def test_east_strip_is_last_row(self):
         data = jnp.arange(6 * N * N, dtype=jnp.float64).reshape(6, N, N)
-        strip = _extract_edge_strip(data, 0, EAST)
+        strip = extract_edge_strip(data, 0, EAST)
         np.testing.assert_array_equal(strip, data[0, -1, :])
 
     def test_south_strip_is_first_col(self):
         data = jnp.arange(6 * N * N, dtype=jnp.float64).reshape(6, N, N)
-        strip = _extract_edge_strip(data, 0, SOUTH)
+        strip = extract_edge_strip(data, 0, SOUTH)
         np.testing.assert_array_equal(strip, data[0, :, 0])
 
     def test_north_strip_is_last_col(self):
         data = jnp.arange(6 * N * N, dtype=jnp.float64).reshape(6, N, N)
-        strip = _extract_edge_strip(data, 0, NORTH)
+        strip = extract_edge_strip(data, 0, NORTH)
         np.testing.assert_array_equal(strip, data[0, :, -1])
 
 
@@ -181,7 +181,7 @@ class TestInteriorPreservation:
 # ---------------------------------------------------------------------------
 
 class TestCorners:
-    """Corner cells should be filled (not zero) after _fill_corners_h1."""
+    """Corner cells should be filled (not zero) after fill_corners_h1."""
 
     def test_corners_nonzero_for_constant_field(self):
         data = jnp.ones((6, N, N), dtype=jnp.float64) * 5.0
@@ -252,7 +252,7 @@ class TestFillCornersH3:
 
     This is plumbing for the ng=3 halo extension (review-doc item #2,
     FB-path stability on W2 C36).  The fill rule is the inside-out
-    2-point averaging used by `_fill_corners_h2`, generalized to a
+    2-point averaging used by `fill_corners_h2`, generalized to a
     3x3 corner block.
     """
 
@@ -277,32 +277,32 @@ class TestFillCornersH3:
     def test_constant_field_preserved(self):
         """Corner fill on a constant edge+interior padded array should
         leave every cell at the same constant value."""
-        from legoesm.grids.halo import _fill_corners_h3
+        from legoesm.grids.halo import fill_corners_h3
         n = N
         padded = self._build_constant_padded(n, halo=3, value=4.25)
-        filled = _fill_corners_h3(padded)
+        filled = fill_corners_h3(padded)
         np.testing.assert_allclose(
             np.asarray(filled), 4.25, atol=1e-12,
             err_msg="Corner fill should preserve constant fields")
 
     def test_shape_preserved(self):
-        from legoesm.grids.halo import _fill_corners_h3
+        from legoesm.grids.halo import fill_corners_h3
         n = N
         padded = self._build_constant_padded(n, halo=3, value=1.0)
-        filled = _fill_corners_h3(padded)
+        filled = fill_corners_h3(padded)
         assert filled.shape == (6, n + 6, n + 6)
 
     def test_zero_corner_cells_get_filled(self):
         """Before the fill, corner 3x3 blocks are zero; after, they
         are non-zero (pulled from non-zero edge halos)."""
-        from legoesm.grids.halo import _fill_corners_h3
+        from legoesm.grids.halo import fill_corners_h3
         n = N
         padded = self._build_constant_padded(n, halo=3, value=7.0)
         # Sanity: corner blocks were left zero by the builder
         assert float(padded[0, 0, 0]) == 0.0
         assert float(padded[0, 0, 2]) == 0.0
         assert float(padded[0, 2, 2]) == 0.0
-        filled = _fill_corners_h3(padded)
+        filled = fill_corners_h3(padded)
         # All 9 SW corner cells of face 0 should be non-zero
         for i in range(3):
             for j in range(3):
@@ -310,14 +310,14 @@ class TestFillCornersH3:
 
     def test_no_mutation_of_interior(self):
         """The fill must leave the interior block untouched."""
-        from legoesm.grids.halo import _fill_corners_h3
+        from legoesm.grids.halo import fill_corners_h3
         n = N
         padded = self._build_constant_padded(n, halo=3, value=0.0)
         # Write a distinct pattern in the interior
         interior_vals = jnp.arange(
             6 * n * n, dtype=jnp.float64).reshape(6, n, n)
         padded = padded.at[:, 3:-3, 3:-3].set(interior_vals)
-        filled = _fill_corners_h3(padded)
+        filled = fill_corners_h3(padded)
         np.testing.assert_array_equal(
             np.asarray(filled[:, 3:-3, 3:-3]),
             np.asarray(interior_vals),
@@ -325,7 +325,7 @@ class TestFillCornersH3:
 
     def test_no_mutation_of_edge_halos(self):
         """The fill must leave the edge-strip halos (non-corner) untouched."""
-        from legoesm.grids.halo import _fill_corners_h3
+        from legoesm.grids.halo import fill_corners_h3
         n = N
         h = 3
         padded = jnp.zeros((6, n + 2 * h, n + 2 * h), dtype=jnp.float64)
@@ -339,8 +339,8 @@ class TestFillCornersH3:
         padded = padded.at[:, -h:, h:-h].set(e)
         padded = padded.at[:, h:-h, :h].set(s)
         padded = padded.at[:, h:-h, -h:].set(no)
-        from legoesm.grids.halo import _fill_corners_h3
-        filled = _fill_corners_h3(padded)
+        from legoesm.grids.halo import fill_corners_h3
+        filled = fill_corners_h3(padded)
         np.testing.assert_array_equal(
             np.asarray(filled[:, :h, h:-h]), np.asarray(w))
         np.testing.assert_array_equal(
@@ -359,7 +359,7 @@ class TestPadHaloLocalH3:
     """Tests for the halo=3 local scalar exchange added in iter-498.
 
     The implementation generalizes `_pad_halo_local_h2` to 3 halo
-    depths, using `_fill_corners_h3` for the 3x3 L-shaped corner
+    depths, using `fill_corners_h3` for the 3x3 L-shaped corner
     blocks.
     """
 
@@ -452,7 +452,7 @@ class TestPadHaloLocalH3:
         from legoesm.grids.halo import (
             _pad_halo_local_h3,
             CONNECTIVITY,
-            _extract_edge_strip_at_depth,
+            extract_edge_strip_at_depth,
         )
         data = jnp.arange(
             6 * N * N, dtype=jnp.float64).reshape(6, N, N)
@@ -461,7 +461,7 @@ class TestPadHaloLocalH3:
         for face in range(6):
             for edge_idx, edge in enumerate(edges):
                 nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
-                expected = _extract_edge_strip_at_depth(
+                expected = extract_edge_strip_at_depth(
                     data, nbr_face, nbr_edge, 2)
                 if is_reversed:
                     expected = expected[::-1]
@@ -672,7 +672,7 @@ class TestPadHaloH3Dispatch:
         On a face-unique constant field (face f → value f+1.0):
           - Edge strips contain a single neighbour face's value
             (covered by iter-535 test).
-          - Corner cells are filled by `_fill_corners_h3` averaging
+          - Corner cells are filled by `fill_corners_h3` averaging
             of adjacent edge halos.  Each corner cell's value is
             therefore some average of the host face's value (from
             interior-side neighbours) and 1-2 neighbour faces'
@@ -1037,7 +1037,7 @@ class TestPadHaloH3Guardrails:
             pad_halo(data, halo=3, interp_offsets=bad)
 
     def test_pad_halo_halo3_rejects_n_mismatch(self):
-        """Final axis (n) must match data.shape[1] — otherwise _interp_strip
+        """Final axis (n) must match data.shape[1] — otherwise interp_strip
         silently produces wrong-sized output."""
         data = jnp.ones((6, N, N), dtype=jnp.float64)
         bad = jnp.zeros((6, 4, 3, N + 2), dtype=jnp.float64)  # n axis wrong
@@ -1124,7 +1124,7 @@ class TestPadHaloH3Guardrails:
         assert diff < 1e-12, (
             f"4D halo=3 helper deviates from scalar h3 ref by "
             f"{diff:.3e}.  Check: local-edge branch uses "
-            f"_place_strip_h3_4d, corner fill uses _fill_corners_h3, "
+            f"_place_strip_h3_4d, corner fill uses fill_corners_h3, "
             f"strip extraction uses _extract_edge_strip_at_depth_4d "
             f"for depths 0, 1, AND 2.")
 
@@ -1231,8 +1231,8 @@ class TestPadHaloH3Guardrails:
         assert diff < 1e-12, (
             f"2D MPI face-only halo=3 deviates from scalar h3 ref by "
             f"{diff:.3e}.  Check: local-edge branch uses "
-            f"_place_strip_h3, corner fill uses _fill_corners_h3, "
-            f"strip extraction uses _extract_edge_strip_at_depth for "
+            f"_place_strip_h3, corner fill uses fill_corners_h3, "
+            f"strip extraction uses extract_edge_strip_at_depth for "
             f"depths 0, 1, AND 2.")
 
     def test_place_strip_h3_index_conventions_iter630(self):
@@ -1756,7 +1756,7 @@ class TestPadHaloH3Guardrails:
         `interp_offsets=None` — skip the offset interpolation so the
         halo values are nearest-cell copies of the neighbour strip
         (possibly reversed), which we can predict exactly with
-        `_extract_edge_strip_at_depth` + `[::-1]` if `is_reversed`.
+        `extract_edge_strip_at_depth` + `[::-1]` if `is_reversed`.
 
         For each face × side × depth-2 (outermost h=3 halo), we
         compute the expected u_east strip directly from CONNECTIVITY
@@ -1777,7 +1777,7 @@ class TestPadHaloH3Guardrails:
             pad_halo_vector,
             CONNECTIVITY,
             WEST, EAST, SOUTH, NORTH,
-            _extract_edge_strip_at_depth,
+            extract_edge_strip_at_depth,
         )
         n = N
         grid = create_cubed_sphere(n=n, use_duogrid=False)
@@ -1829,7 +1829,7 @@ class TestPadHaloH3Guardrails:
                 # Extract neighbour strip at depth=2 (the outermost
                 # h=3 halo at depth 2 from the boundary).
                 strip = np.asarray(
-                    _extract_edge_strip_at_depth(
+                    extract_edge_strip_at_depth(
                         jnp.asarray(u_east_data),
                         nbr_face, nbr_edge, depth=2))
                 if is_reversed:
@@ -1869,7 +1869,7 @@ class TestPadHaloH3Guardrails:
         axis-reversal test only exercises `interp_offsets=None` —
         the nearest-cell-copy branch.  Production callers pass
         `grid.halo_interp_offsets_h3`, which activates the
-        `_interp_strip` Lagrange interpolation after the reversal.
+        `interp_strip` Lagrange interpolation after the reversal.
 
         A bug that applies interp_offsets BEFORE reversal (wrong
         order) or that skips interp on the reversed branch would
@@ -1881,13 +1881,13 @@ class TestPadHaloH3Guardrails:
         LINEAR in the strip direction, 3-point Lagrange
         interpolation is EXACT (quadratic stencil fits linear with
         zero residual), so we can predict the interpolated halo
-        analytically via `_interp_strip(strip_after_reversal,
+        analytically via `interp_strip(strip_after_reversal,
         offsets_1d)`.
 
         Expected chain at face A's outermost halo ring (depth=2):
-          1. strip = _extract_edge_strip_at_depth(u_east, nbr, nbr_edge, 2)
+          1. strip = extract_edge_strip_at_depth(u_east, nbr, nbr_edge, 2)
           2. if is_reversed: strip = strip[::-1]
-          3. strip_interp = _interp_strip(strip, offsets[A, side, 2])
+          3. strip_interp = interp_strip(strip, offsets[A, side, 2])
           4. u_halo = cos_angle_padded_h3[A, halo] * strip_interp
           5. v_halo = -sin_angle_padded_h3[A, halo] * strip_interp
 
@@ -1907,8 +1907,8 @@ class TestPadHaloH3Guardrails:
             pad_halo_vector,
             CONNECTIVITY,
             WEST, EAST, SOUTH, NORTH,
-            _extract_edge_strip_at_depth,
-            _interp_strip,
+            extract_edge_strip_at_depth,
+            interp_strip,
         )
         n = N
         grid = create_cubed_sphere(n=n, use_duogrid=False)
@@ -1955,7 +1955,7 @@ class TestPadHaloH3Guardrails:
                     CONNECTIVITY[face][side])
                 # Step 1: extract neighbour strip at outermost depth.
                 strip = np.asarray(
-                    _extract_edge_strip_at_depth(
+                    extract_edge_strip_at_depth(
                         u_east, nbr_face, nbr_edge, depth=2))
                 # Step 2: apply reversal BEFORE interpolation.
                 if is_reversed:
@@ -1965,7 +1965,7 @@ class TestPadHaloH3Guardrails:
                 offsets_1d = np.asarray(
                     offsets_h3[face, edge_idx, 2, :])
                 strip_interp = np.asarray(
-                    _interp_strip(jnp.asarray(strip),
+                    interp_strip(jnp.asarray(strip),
                                    jnp.asarray(offsets_1d)))
 
                 sl = info["slicer"](face)
@@ -1981,7 +1981,7 @@ class TestPadHaloH3Guardrails:
                 assert u_diff < 1e-4, (
                     f"face={face} side={info['name']} outermost h=3 "
                     f"halo u does NOT match "
-                    f"`cos_angle_padded_h3 * _interp_strip("
+                    f"`cos_angle_padded_h3 * interp_strip("
                     f"reversed_strip, offsets[f, edge_idx, 2])`. "
                     f"max diff = {u_diff:.3e}.  This covers the "
                     f"interpolated branch that iter-599 skipped — "
@@ -2122,7 +2122,7 @@ class TestPadHaloH3Guardrails:
         from unittest import mock
         import legoesm.grids.halo as halo_mod
         from legoesm.grids.halo import (
-            _pad_halo_local, _pad_halo_local_h2)
+            pad_halo_local, _pad_halo_local_h2)
 
         # Stub `pad_halo_mpi` to call the local h1/h2 helpers (because
         # the fallback pad_halo under MPI would otherwise need a live
@@ -2131,7 +2131,7 @@ class TestPadHaloH3Guardrails:
         # post-processing.
         def _stub_pad_halo_mpi(data, topology, halo):
             if halo == 1:
-                return _pad_halo_local(data, None)
+                return pad_halo_local(data, None)
             return _pad_halo_local_h2(data, None)
 
         # Build a real cubed-sphere grid with duogrid for ground truth.
@@ -2175,13 +2175,13 @@ class TestPadHaloH3Guardrails:
         """
         from unittest import mock
         import legoesm.grids.halo as halo_mod
-        from legoesm.grids.halo import _pad_halo_local_4d
+        from legoesm.grids.halo import pad_halo_local_4d
         from legoesm.grids.cubed_sphere import create_cubed_sphere
 
         # Stub `pad_halo_mpi_4d` to call the local h=1 4D helper.
         def _stub_pad_halo_mpi_4d(data, topology, halo):
             assert halo == 1
-            return _pad_halo_local_4d(data, None)
+            return pad_halo_local_4d(data, None)
 
         n = 8
         nlev = 2

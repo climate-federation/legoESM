@@ -1710,14 +1710,14 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
         # review 2026-04-24); the strict match makes the heuristic
         # robust to arbitrary-sized inputs.
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
-            _DEFAULT_SW_GAS,
+            DEFAULT_SW_GAS,
         )
         if config.spectral_band_order not in ("auto", "as_is", "rrtmg_sw"):
             raise ValueError(
                 "SolarConfig.spectral_band_order must be 'auto', 'as_is' "
                 f"or 'rrtmg_sw'; got {config.spectral_band_order!r}",
             )
-        _n_bands, _n_gpt = _rrtmg_sw_band_counts(_DEFAULT_SW_GAS)
+        _n_bands, _n_gpt = _rrtmg_sw_band_counts(DEFAULT_SW_GAS)
         if spec_series.shape[1] == _n_bands and _n_bands != _n_gpt:
             # A per-band (14-band) file may need reordering to the
             # RRTMGP-SW g-point table order before index-based expansion.
@@ -1753,7 +1753,7 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
                         "override.", config.path, config.spectral_var,
                     )
                 spec = _cmip_sw_band_order_to_rrtmgp(spec)
-            spec = _expand_bands_to_gpoints(spec, _DEFAULT_SW_GAS)
+            spec = _expand_bands_to_gpoints(spec, DEFAULT_SW_GAS)
         if config.normalize_spectral:
             denom = float(np.sum(spec))
             if denom <= 0.0:

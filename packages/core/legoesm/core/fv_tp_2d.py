@@ -22,7 +22,7 @@ from legoesm.grids.halo import pad_halo, pad_halo_pair_h2, synchronize_cgrid_flu
 _R3 = 1.0 / 3.0
 
 
-def _pert_ppm(bl, br):
+def pert_ppm(bl, br):
     """FV3 pert_ppm iv=1: standard PPM constraint (tp_core.F90:1193-1212).
 
     Prevents new extrema in the reconstruction.  When bl and br have
@@ -89,7 +89,7 @@ def apply_hord8_limiter(bl, br, dm):
     """FV3_3D iter 585: FV3 iord=8 Lin (1996) monotonicity limiter
     (tp_core.F90:548-553).
 
-    Alternative to ``_pert_ppm`` (iord=9).  iord=8 bounds bl, br by
+    Alternative to ``pert_ppm`` (iord=9).  iord=8 bounds bl, br by
     ±2·|dm| where dm is the cell-center monotone slope:
 
         xt = 2·dm
@@ -120,7 +120,7 @@ def apply_hord8_limiter(bl, br, dm):
     Notes
     -----
     NOT yet wired into the default transport path (which uses iord=9
-    via _pert_ppm).  Exposed as a utility for users who want the iord=8
+    via pert_ppm).  Exposed as a utility for users who want the iord=8
     variant for tracers (e.g., as FV3 namelist sets hord_tr=8 in some
     configs).
     """
@@ -503,12 +503,12 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     elif hord == 9:
         # FV3 iord=9 → pert_ppm(iv=0) for the SCALAR/mass/vorticity transport
         # (tp_core.F90:610: `if(iord==9 .or. iord==13) call pert_ppm(...,0)`).
-        # iv=1 (`_pert_ppm`) is FV3's BOUNDARY-only limiter (tp_core.F90:629,
+        # iv=1 (`pert_ppm`) is FV3's BOUNDARY-only limiter (tp_core.F90:629,
         # 648) + the MOMENTUM ytp_v/xtp_u path (handled separately in
         # fv3_sw_core `_ppm_transport_1d`).  This `_ppm_1d` is the scalar
         # path, so hord=9 must use iv=0 — matching the `_pert_ppm_iv0`
         # docstring ("the limiter used by hord=9") and the hord=12 default.
-        # (Was `_pert_ppm` (iv=1): a latent mislabel; unexercised because the
+        # (Was `pert_ppm` (iv=1): a latent mislabel; unexercised because the
         # live scalar callers use the hord=12 default — codex/oracle iter62.)
         bl, br = _pert_ppm_iv0(q_c, bl, br)
     elif hord == 10:
@@ -671,7 +671,7 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     # the affected code.
     if fortran_legacy_face:
         for k in [0, 1, 2, -3, -2, -1]:
-            bl_k, br_k = _pert_ppm(bl[:, k, :], br[:, k, :])
+            bl_k, br_k = pert_ppm(bl[:, k, :], br[:, k, :])
             bl = bl.at[:, k, :].set(bl_k)
             br = br.at[:, k, :].set(br_k)
 

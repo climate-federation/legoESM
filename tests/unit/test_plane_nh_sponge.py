@@ -4,7 +4,7 @@ Sponge is the top-of-model damping that absorbs vertically-propagating
 gravity / acoustic waves before they reflect off the rigid upper
 boundary. PR2d wires it through
 ``plane_compressible_euler_slow_tendencies`` using the shared
-``_sponge_profile`` taper. These tests confirm the sponge:
+``sponge_profile`` taper. These tests confirm the sponge:
 
 1. Stays at rest when ``sponge_coeff > 0`` is the only setting.
 2. Damps a uniform ``u`` placed in the top layers towards zero;
@@ -21,7 +21,7 @@ import pytest
 
 from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerConfig,
-    _sponge_profile,
+    sponge_profile,
 )
 from legoesm.atmosphere.dynamics.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
@@ -36,7 +36,7 @@ jax.config.update("jax_enable_x64", True)
 
 
 # --------------------------------------------------------------------- #
-# _sponge_profile sanity                                                #
+# sponge_profile sanity                                                #
 # --------------------------------------------------------------------- #
 
 
@@ -46,7 +46,7 @@ def test_sponge_profile_is_zero_below_sponge_window():
     sponge_coeff = 0.05
     z_full = jnp.linspace(H, 0.0, 41)[1:][::-1]
     # Below H - sponge_width = 15 km the profile must be exactly zero.
-    profile = _sponge_profile(z_full, H, sponge_width, sponge_coeff)
+    profile = sponge_profile(z_full, H, sponge_width, sponge_coeff)
     below_mask = z_full < (H - sponge_width)
     assert jnp.max(jnp.abs(profile * below_mask)) == 0.0
 
@@ -55,7 +55,7 @@ def test_sponge_profile_reaches_coeff_at_model_top():
     H = 20.0e3
     sponge_width = 5.0e3
     sponge_coeff = 0.05
-    profile = _sponge_profile(
+    profile = sponge_profile(
         jnp.array([H]), H, sponge_width, sponge_coeff,
     )
     assert float(profile[0]) == pytest.approx(sponge_coeff, rel=1.0e-12)

@@ -35,7 +35,7 @@ Tests
    ``center_to_dgrid_vector(u, v, cdgrid)`` appears within the
    gated branch.
 4. ``test_scalar_path_else_branch_present`` — the else branch
-   keeps ``_interp_center_to_corner`` on the stacked (u, v) for
+   keeps ``interp_center_to_corner`` on the stacked (u, v) for
    the bit-for-bit baseline default.
 """
 from __future__ import annotations
@@ -101,8 +101,8 @@ def test_scalar_path_else_branch_present(nh_source):
         f"missing from {SRC_PATH.name}.  Flag=False would no longer "
         f"reproduce the pre-iter-328 baseline bit-for-bit."
     )
-    pat2 = r"_interp_center_to_corner\(\s*_uv_flat\s*,\s*cdgrid\s*\)"
+    pat2 = r"interp_center_to_corner\(\s*_uv_flat\s*,\s*cdgrid\s*\)"
     assert re.search(pat2, nh_source), (
-        "iter-328 legacy '_interp_center_to_corner(_uv_flat, cdgrid)' "
+        "iter-328 legacy 'interp_center_to_corner(_uv_flat, cdgrid)' "
         "call missing — scalar halo baseline path broken."
     )

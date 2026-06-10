@@ -24,7 +24,7 @@ from legoesm.ml.data.era5_loader import (
     create_era5_dataset,
 )
 from legoesm.ml.channel_packing import WB2_PRESSURE_LEVELS
-def _resolve_var(ds, name):
+def resolve_var(ds, name):
     """Find a variable in the dataset, trying common aliases."""
     aliases = {
         'temperature': 't', 'u_component_of_wind': 'u',
@@ -64,7 +64,7 @@ def _get_cs_weights(n_lon_era5: int, grid):
     return _CS_WEIGHT_CACHE[key]
 
 
-def _open_era5_zarr(zarr_path: str):
+def open_era5_zarr(zarr_path: str):
     """Open an ERA5 Zarr store with dimension normalization.
 
     Public wrapper around the ERA5 loader's internal helpers.
@@ -153,11 +153,11 @@ def ensure_local_cache(
     ds = create_era5_dataset(era5_cfg)
 
     # Also grab surface variables
-    ds_full = _open_era5_zarr(config.zarr_store)
+    ds_full = open_era5_zarr(config.zarr_store)
     ds_full = ds_full.sel(time=slice(f"{years[0]}-01-01", f"{years[1]}-12-31"))
 
     for svar in config.surface_variables:
-        resolved = [v for v in [_resolve_var(ds_full, svar)] if v]
+        resolved = [v for v in [resolve_var(ds_full, svar)] if v]
         for r in resolved:
             if r in ds_full and r not in ds:
                 ds[r] = ds_full[r]
@@ -201,7 +201,7 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
     ERA5Slice with all fields on the native ERA5 lat-lon grid.
     """
     store = config.local_cache_dir if config.local_cache_dir else config.zarr_store
-    ds = _open_era5_zarr(store)
+    ds = open_era5_zarr(store)
 
     # Select time
     ds_t = ds.isel(time=time_idx)
@@ -217,7 +217,7 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
 
     def _get_3d(name):
         """Extract a 3D variable as (lat, lon, level) with levels ascending in pressure."""
-        resolved = [v for v in [_resolve_var(ds_t, name)] if v]
+        resolved = [v for v in [resolve_var(ds_t, name)] if v]
         if not resolved:
             return np.zeros((len(lat), len(lon), len(plev_Pa)))
         data = ds_t[resolved[0]].sel({level_dim: list(config.levels)}).values
@@ -235,9 +235,9 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
     def _get_2d(name):
         """Extract a 2D surface variable as (lat, lon)."""
         # Try time-selected dataset first, then full dataset for static fields
-        resolved = _resolve_var(ds_t, name)
+        resolved = resolve_var(ds_t, name)
         if resolved is None:
-            resolved = _resolve_var(ds, name)
+            resolved = resolve_var(ds, name)
             if resolved is None:
                 return np.zeros((len(lat), len(lon)), dtype=np.float32)
             data = ds[resolved].values
@@ -539,7 +539,7 @@ def load_era5_ic(
     """
     import pandas as pd
 
-    ds = _open_era5_zarr(zarr_path)
+    ds = open_era5_zarr(zarr_path)
 
     # --- locate nearest time index ---
     times = ds.time.values

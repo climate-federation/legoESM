@@ -1,4 +1,4 @@
-"""FV3_3D iter 306: ``_interp_center_to_corner`` (2nd-order 4-pt
+"""FV3_3D iter 306: ``interp_center_to_corner`` (2nd-order 4-pt
 average) preserves constants and is linear.
 
 The 2nd-order interpolant ``0.25 * (NW + NE + SW + SE)`` is
@@ -31,7 +31,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.core.operators_cdgrid import _interp_center_to_corner
+from legoesm.core.operators_cdgrid import interp_center_to_corner
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 
@@ -52,14 +52,14 @@ def test_interp_2nd_order_preserves_constant(c):
     cdgrid, _, _ = _setup()
     n = cdgrid.n
     field = jnp.full((6, n, n), c, dtype=jnp.float64)
-    out = _interp_center_to_corner(field, cdgrid)
+    out = interp_center_to_corner(field, cdgrid)
     assert out.shape == (6, n + 1, n + 1)
     expected = jnp.full((6, n + 1, n + 1), c, dtype=jnp.float64)
     np.testing.assert_allclose(
         np.asarray(out), np.asarray(expected),
         rtol=1e-14, atol=1e-14,
         err_msg=(
-            f"_interp_center_to_corner must reproduce constant "
+            f"interp_center_to_corner must reproduce constant "
             f"{c} exactly (4-pt average sums to 1)."
         ),
     )
@@ -73,10 +73,10 @@ def test_interp_2nd_order_superposition(ab):
     alpha, beta = ab
     cdgrid, f1, f2 = _setup()
 
-    lhs = _interp_center_to_corner(alpha * f1 + beta * f2, cdgrid)
+    lhs = interp_center_to_corner(alpha * f1 + beta * f2, cdgrid)
     rhs = (
-        alpha * _interp_center_to_corner(f1, cdgrid) +
-        beta * _interp_center_to_corner(f2, cdgrid)
+        alpha * interp_center_to_corner(f1, cdgrid) +
+        beta * interp_center_to_corner(f2, cdgrid)
     )
     np.testing.assert_allclose(
         np.asarray(lhs), np.asarray(rhs),

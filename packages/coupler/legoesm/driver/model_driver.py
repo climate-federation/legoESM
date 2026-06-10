@@ -1838,6 +1838,7 @@ class ModelDriver:
             from legoesm.grids.halo import get_halo_backend
             from legoesm.parallel.cubesphere_exchange import (
                 activate_spmd_halo_backend,
+                get_spmd_mesh,
             )
         except ImportError as exc:
             if allow_fallback:
@@ -1876,8 +1877,7 @@ class ModelDriver:
         # ``cubesphere_exchange.py``.
         previous_backend = get_halo_backend()
         if previous_backend == "spmd":
-            from legoesm.grids import halo as _halo_mod
-            active_mesh = getattr(_halo_mod, "_spmd_mesh", None)
+            active_mesh = get_spmd_mesh()
             if not _meshes_compatible(active_mesh, dc.mesh):
                 raise RuntimeError(
                     "SPMD halo backend is already active in this "
@@ -1959,10 +1959,11 @@ class ModelDriver:
                 # prior dispatch.  This is defensive — the typical
                 # case is ``"local"`` → ``"spmd"`` → ``"local"``.
                 from legoesm.grids.halo import (
-                    set_halo_backend, _mpi_topology,
+                    set_halo_backend, get_mpi_topology,
                 )
-                if _mpi_topology is not None:
-                    set_halo_backend("mpi", _mpi_topology)
+                _topology = get_mpi_topology()
+                if _topology is not None:
+                    set_halo_backend("mpi", _topology)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "SPMD halo deactivation failed (%s); halo backend "
@@ -3796,7 +3797,20 @@ class ModelDriver:
         held_sw_up_toa = _aux.get("held_sw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_lw_up_toa = _aux.get("held_lw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_sw_down_toa = _aux.get("held_sw_down_toa", jnp.zeros(_ens_2d, dtype=_sd))
-        conv_shape = (_ens, conv_ncol) if _ens > 1 else (conv_ncol,)
+        # Convective carry: scalar (ncol,) for mass_flux/edmf, full
+        # (ncol, nlev) conv_prog_profile for the profile-prognostic
+        # schemes (ZM/KF/Emanuel/Tiedtke/Bechtold).  The shape must be
+        # seeded correctly HERE — inside the compiled segment scan the
+        # pipeline cannot re-shape the carry.
+        from legoesm.atmosphere.physics.convection.integration import (
+            convection_scheme_traits,
+        )
+        _nlev = int(self.sigma.sigma_full.shape[0])
+        if convection_scheme_traits(cfg.convection).is_profile_prognostic:
+            conv_cell_shape = (conv_ncol, _nlev)
+        else:
+            conv_cell_shape = (conv_ncol,)
+        conv_shape = (_ens, *conv_cell_shape) if _ens > 1 else conv_cell_shape
         if cfg.convection in ("mass_flux", "edmf"):
             from legoesm.atmosphere.physics.convection.config import ConvectionConfig
             _conv_cfg = ConvectionConfig(scheme=cfg.convection)
@@ -3810,6 +3824,11 @@ class ModelDriver:
         else:
             conv_prog_default = jnp.zeros(conv_shape, dtype=_sd)
         conv_prog = _aux.get("conv_prog", conv_prog_default)
+        if tuple(conv_prog.shape) != conv_shape:
+            # Checkpoint from a different convection scheme (e.g. legacy
+            # (ncol,) carry restored into a profile-prognostic run):
+            # re-seed the default rather than crashing the scan trace.
+            conv_prog = conv_prog_default
 
         # Slab-land skin temperature — restored from the checkpoint when
         # available, otherwise initialized from the lowest model-level

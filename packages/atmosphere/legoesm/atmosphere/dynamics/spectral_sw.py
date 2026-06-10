@@ -60,9 +60,13 @@ class SpectralSWState(NamedTuple):
 
 
 class SpectralSWConfig(NamedTuple):
-    """Configuration for the spectral shallow water model."""
+    """Configuration for the spectral shallow water model.
+
+    The background depth H_0 is not a config knob: the mass equation is
+    fully nonlinear in the prognostic ``phi_hat``, so the mean depth is
+    carried by the initial geopotential field.
+    """
     g: float = constants.g
-    mean_depth: float = 5960.0        # H_0 for linearized mass equation [m]
     hyperdiff_coeff: float = 2.338e15 # Spectral diffusion coefficient
     hyperdiff_order: int = 2          # Diffusion order (2 = nabla^4)
     spectral_filter_order: int = 0    # Exponential filter order (0 = off)

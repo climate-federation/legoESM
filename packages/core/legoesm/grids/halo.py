@@ -125,7 +125,7 @@ def _xyz_to_gnomonic_np(
     else: raise ValueError(face)
 
 
-def _extract_edge_strip_at_depth(
+def extract_edge_strip_at_depth(
     data: jax.Array, face: int, edge: int, depth: int,
 ) -> jax.Array:
     """Extract strip at given depth from edge (depth=0 is boundary row).
@@ -253,17 +253,17 @@ def _compute_halo_interp_offsets_ed_hN(n: int, halo: int) -> jnp.ndarray:
     """gnomonic_ed cross-face halo interp offsets, ``(6, 4, halo, n)``.
 
     Position-matching on the actual extended gnomonic_ed cell centres
-    (`_gnomonic_ed_padded_centers`, which extend cleanly into the halo): each
+    (`gnomonic_ed_padded_centers`, which extend cleanly into the halo): each
     halo cell (depth 0..halo-1 beyond an edge) is matched to its neighbour's
     in-domain edge strip via a parabola-vertex fit on great-circle distance,
     giving the true fractional index; ``δ = frac − j``.  gnomonic_ed-specific
     (the equiangular analytic offsets are the wrong geometry — codex gating
     blocker).
     """
-    from legoesm.grids.cubed_sphere import _gnomonic_ed_padded_centers
+    from legoesm.grids.cubed_sphere import gnomonic_ed_padded_centers
 
     ext = halo + 1
-    lon, lat = _gnomonic_ed_padded_centers(n, halo)  # (6, M, M), M=n+2*halo+2
+    lon, lat = gnomonic_ed_padded_centers(n, halo)  # (6, M, M), M=n+2*halo+2
     lon = np.asarray(lon)
     lat = np.asarray(lat)
     xyz = np.stack([
@@ -412,7 +412,7 @@ def _compute_halo_interp_offsets_hN(n: int, halo: int) -> jnp.ndarray:
     return jnp.array(offsets, dtype=jnp.float64)
 
 
-def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
+def interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
     """Interpolate *strip* at positions ``j + offsets_1d[j]``.
 
     Uses 3-point quadratic Lagrange interpolation, giving O(dx^3) value
@@ -496,7 +496,7 @@ def set_halo_backend(backend: str, topology=None) -> None:
         :class:`~legoesm.parallel.latlon_mpi.LatLonBandLayout`.  The
         per-grid ``pad_halo*`` functions branch on the topology's
         type, so a single backend slot serves both grids and the
-        conservation reductions' ``_is_distributed()`` gate fires
+        conservation reductions' ``is_distributed()`` gate fires
         uniformly.
     """
     global _halo_backend, _mpi_topology
@@ -532,7 +532,7 @@ def get_mpi_topology():
 # Scalar halo exchange
 # ==============================================================================
 
-def _extract_edge_strip(data: jax.Array, face: int, edge: int) -> jax.Array:
+def extract_edge_strip(data: jax.Array, face: int, edge: int) -> jax.Array:
     """Extract a 1D strip (length n) from a face edge.
 
     Parameters
@@ -684,11 +684,11 @@ def pad_halo(
         # (`_pad_halo_mpi_face_only` / `_pad_halo_mpi_tiled`) and 4D tensor
         # (`_pad_halo_mpi_4d_face_only` / `_pad_halo_mpi_4d_tiled`) paths
         # all handle three halo depths, and corner cells are filled by
-        # `_fill_corners_h3`.
+        # `fill_corners_h3`.
         #
         # FV3_3D 2026-05-27: option (a) implemented — `pad_halo_mpi`
         # now carries `interp_offsets` through to the face-only receive
-        # path and applies `_interp_strip` strip-by-strip.  This brings
+        # path and applies `interp_strip` strip-by-strip.  This brings
         # the duogrid Lagrange-extrapolated halo to MPI, making the
         # FV3 3D PE/NH cubed-sphere paths bit-for-bit identical to the
         # single-device backend under MPI.  Sub-face tiling still
@@ -709,7 +709,7 @@ def pad_halo(
             data, _spmd_mesh, halo=halo, interp_offsets=offsets,
         )
     elif halo == 1:
-        padded = _pad_halo_local(data, offsets)
+        padded = pad_halo_local(data, offsets)
     elif halo == 2:
         padded = _pad_halo_local_h2(data, offsets)
     else:  # halo == 3
@@ -839,7 +839,7 @@ def pad_halo_4d(
     if data.ndim != 4:
         raise ValueError(f"pad_halo_4d expects 4D input, got {data.ndim}D")
     # FV3_3D iter-1072: non-square (n_x, n_y) data is silently
-    # corrupted by ``_pad_halo_local_4d`` / ``_pad_halo_mpi_face_only_4d``
+    # corrupted by ``pad_halo_local_4d`` / ``_pad_halo_mpi_face_only_4d``
     # because both use ``_get_halo_tables_h1(n=data.shape[1])`` which
     # assumes square shape — the y-axis halo cells past index n_x are
     # left at the jnp.pad default of 0, and the cells filled past
@@ -899,7 +899,7 @@ def pad_halo_4d(
     # MPI dispatch.
     if _halo_backend == "mpi":
         # FV3_3D 2026-05-27: option (a) implemented — `pad_halo_mpi_4d`
-        # now carries `interp_offsets` through and applies `_interp_strip`
+        # now carries `interp_offsets` through and applies `interp_strip`
         # per (face, edge[, depth]) strip on the receive side.  Sibling
         # of the scalar `pad_halo` fix in the same iteration.  Sub-face
         # tiling still refuses (offsets are global-face-indexed).
@@ -918,7 +918,7 @@ def pad_halo_4d(
             data, _spmd_mesh, halo=halo, interp_offsets=offsets,
         )
     elif halo == 1:
-        padded = _pad_halo_local_4d(data, offsets)
+        padded = pad_halo_local_4d(data, offsets)
     elif halo == 2:
         padded = _pad_halo_local_h2_4d(data, offsets)
     else:  # halo == 3 (iter-723)
@@ -947,7 +947,7 @@ def pad_halo_4d(
     return padded
 
 
-def _pad_halo_local_4d(
+def pad_halo_local_4d(
     data: jax.Array,
     interp_offsets: jax.Array | None = None,
 ) -> jax.Array:
@@ -999,7 +999,7 @@ def _pad_halo_local_4d(
                   + c_p1[:, None] * vals_p1).astype(data.dtype)
         padded = padded.at[dst_f, dst_i, dst_j].set(values)
 
-    padded = _fill_corners_h1(padded)
+    padded = fill_corners_h1(padded)
     return padded
 
 
@@ -1015,11 +1015,11 @@ def _pad_halo_local_h2_4d(
       ``48 × n`` halo source cells via a precomputed index table and
       scatter them into the padded array in a single ``.at[].set``
       call.  Mirrors the halo=1 vectorisation
-      (:func:`_pad_halo_local_4d`) and replaces the previous 48-step
+      (:func:`pad_halo_local_4d`) and replaces the previous 48-step
       ``.at[].set`` loop body, which produced one XLA scatter per
       step.
     * ``interp_offsets is not None`` — keep the loop-based path because
-      :func:`_interp_strip` consumes a per-edge offset ``(n,)`` array
+      :func:`interp_strip` consumes a per-edge offset ``(n,)`` array
       and would require a separate per-edge gather to vectorise; this
       branch is exercised only by Lagrange-corrected halos where the
       runtime cost is dominated by the interpolation itself.
@@ -1033,7 +1033,7 @@ def _pad_halo_local_h2_4d(
         src_f, src_i, src_j, dst_f, dst_i, dst_j = _get_halo_tables_h2(n)
         values = data[src_f, src_i, src_j]   # (48*n, nlev)
         padded = padded.at[dst_f, dst_i, dst_j].set(values)
-        padded = _fill_corners_h2(padded)
+        padded = fill_corners_h2(padded)
         return padded
 
     edges = [WEST, EAST, SOUTH, NORTH]
@@ -1043,14 +1043,14 @@ def _pad_halo_local_h2_4d(
             nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
 
             for depth in range(2):
-                strip = _extract_edge_strip_at_depth(
+                strip = extract_edge_strip_at_depth(
                     data, nbr_face, nbr_edge, depth,
                 )  # (n,) for 3D or (n, nlev) for 4D
 
                 if is_reversed:
                     strip = strip[::-1]
 
-                strip = _interp_strip(
+                strip = interp_strip(
                     strip, interp_offsets[face, edge_idx, depth],
                 )
 
@@ -1063,7 +1063,7 @@ def _pad_halo_local_h2_4d(
                 elif edge == NORTH:
                     padded = padded.at[face, 2:-2, n + 2 + depth].set(strip)
 
-    padded = _fill_corners_h2(padded)
+    padded = fill_corners_h2(padded)
     return padded
 
 
@@ -1108,7 +1108,7 @@ def _pad_halo_local_h3_4d(
                 # Extract neighbour strip at this depth — for a 4D
                 # array `data[face, i, j]` returns (nlev,) so the
                 # strip along an edge has shape (n, nlev).
-                strip = _extract_edge_strip_at_depth(
+                strip = extract_edge_strip_at_depth(
                     data, nbr_face, nbr_edge, depth,
                 )
 
@@ -1116,7 +1116,7 @@ def _pad_halo_local_h3_4d(
                     strip = strip[::-1]
 
                 if interp_offsets is not None:
-                    strip = _interp_strip(
+                    strip = interp_strip(
                         strip, interp_offsets[face, edge_idx, depth],
                     )
 
@@ -1135,7 +1135,7 @@ def _pad_halo_local_h3_4d(
                     padded = padded.at[face, 3:-3, n + 3 + depth].set(strip)
 
     # Fill 3×3 L-shaped corner regions (9 cells × 4 corners × 6 faces).
-    padded = _fill_corners_h3(padded)
+    padded = fill_corners_h3(padded)
     return padded
 
 
@@ -1254,7 +1254,7 @@ def pad_halo_vector_4d(
     return u_padded, v_padded
 
 
-def _pad_halo_local(
+def pad_halo_local(
     data: jax.Array,
     interp_offsets: jax.Array | None = None,
 ) -> jax.Array:
@@ -1318,7 +1318,7 @@ def _pad_halo_local(
         padded = padded.at[dst_f, dst_i, dst_j].set(values)
 
     # Fill corner cells (vectorized)
-    padded = _fill_corners_h1(padded)
+    padded = fill_corners_h1(padded)
     return padded
 
 
@@ -1352,7 +1352,7 @@ def _pad_halo_local_h2(
 
             for depth in range(2):
                 # Extract neighbour strip at this depth
-                strip = _extract_edge_strip_at_depth(
+                strip = extract_edge_strip_at_depth(
                     data, nbr_face, nbr_edge, depth,
                 )
 
@@ -1361,7 +1361,7 @@ def _pad_halo_local_h2(
 
                 # Interpolate to correct physical position if offsets provided
                 if interp_offsets is not None:
-                    strip = _interp_strip(
+                    strip = interp_strip(
                         strip, interp_offsets[face, edge_idx, depth],
                     )
 
@@ -1380,7 +1380,7 @@ def _pad_halo_local_h2(
                     padded = padded.at[face, 2:-2, n + 2 + depth].set(strip)
 
     # Fill L-shaped corner regions (4 cells per corner × 4 corners × 6 faces)
-    padded = _fill_corners_h2(padded)
+    padded = fill_corners_h2(padded)
 
     return padded
 
@@ -1421,7 +1421,7 @@ def _pad_halo_local_h3(
 
             for depth in range(3):
                 # Extract neighbour strip at this depth
-                strip = _extract_edge_strip_at_depth(
+                strip = extract_edge_strip_at_depth(
                     data, nbr_face, nbr_edge, depth,
                 )
 
@@ -1430,7 +1430,7 @@ def _pad_halo_local_h3(
 
                 # Interpolate to correct physical position if offsets provided
                 if interp_offsets is not None:
-                    strip = _interp_strip(
+                    strip = interp_strip(
                         strip, interp_offsets[face, edge_idx, depth],
                     )
 
@@ -1450,7 +1450,7 @@ def _pad_halo_local_h3(
                     padded = padded.at[face, 3:-3, n + 3 + depth].set(strip)
 
     # Fill L-shaped 3×3 corner regions (9 cells × 4 corners × 6 faces)
-    padded = _fill_corners_h3(padded)
+    padded = fill_corners_h3(padded)
 
     return padded
 
@@ -1565,7 +1565,7 @@ def _build_halo_tables_h2(n: int) -> tuple:
 
                     # Source cell at this depth on the neighbour's
                     # edge — same convention as
-                    # :func:`_extract_edge_strip_at_depth`.
+                    # :func:`extract_edge_strip_at_depth`.
                     if nbr_edge == WEST:
                         sf, si, sj = nbr_face, depth, k
                     elif nbr_edge == EAST:
@@ -1675,7 +1675,7 @@ def get_corner_fill_mode() -> str:
     return _corner_fill_mode
 
 
-def _fill_corners_h1(padded: jax.Array) -> jax.Array:
+def fill_corners_h1(padded: jax.Array) -> jax.Array:
     """Fill corner cells of halo=1 padded array (cube vertices, 24 cells).
 
     Two modes via :func:`set_corner_fill_mode`:
@@ -1746,7 +1746,7 @@ def _fill_corners_h1(padded: jax.Array) -> jax.Array:
     return padded
 
 
-def _fill_corners_h2(padded: jax.Array) -> jax.Array:
+def fill_corners_h2(padded: jax.Array) -> jax.Array:
     """Fill L-shaped corner regions of halo=2 padded array.
 
     Two modes via :func:`set_corner_fill_mode`:
@@ -1891,7 +1891,7 @@ def _fill_corners_h2(padded: jax.Array) -> jax.Array:
     return padded
 
 
-def _fill_corners_h3(padded: jax.Array) -> jax.Array:
+def fill_corners_h3(padded: jax.Array) -> jax.Array:
     """Fill L-shaped 3×3 corner regions of halo=3 padded array.
 
     Each face has 4 corner regions of 3×3 = 9 cells that are not
@@ -2261,7 +2261,7 @@ def compute_padded_angle(n: int, halo: int = 1) -> jax.Array:
 
     all_angle = []
     for face in range(6):
-        lon, lat = _face_gnomonic_to_lonlat(face, alpha_bx, alpha_by)
+        lon, lat = face_gnomonic_to_lonlat(face, alpha_bx, alpha_by)
 
         # Centred differences on (n_big) → (n_big-2) = (n+2*halo) output
         dlon_dx = lon[2:, 1:-1] - lon[:-2, 1:-1]
@@ -2278,7 +2278,7 @@ def compute_padded_angle(n: int, halo: int = 1) -> jax.Array:
     return jnp.stack(all_angle, axis=0)
 
 
-def _face_gnomonic_to_lonlat(
+def face_gnomonic_to_lonlat(
     face: int,
     alpha_x: jax.Array,
     alpha_y: jax.Array,
@@ -2380,7 +2380,7 @@ def compute_padded_half_metrics(
     all_hy: list[jax.Array] = []
 
     for face in range(6):
-        lon, lat = _face_gnomonic_to_lonlat(face, alpha_bx, alpha_by)
+        lon, lat = face_gnomonic_to_lonlat(face, alpha_bx, alpha_by)
         cos_lat = jnp.cos(lat)
         x = cos_lat * jnp.cos(lon)
         y = cos_lat * jnp.sin(lon)
@@ -2532,7 +2532,7 @@ def _synchronize_cgrid_fluxes_mpi(fx, fy, n, topology):
     Callers comparing across local/MPI must compare owned faces only
     (the MPI-replicated-mode contract).
     """
-    from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
+    from legoesm.parallel.halo_exchange import get_sendrecv_vjp
     from collections import defaultdict
     try:
         import mpi4jax
@@ -2541,7 +2541,7 @@ def _synchronize_cgrid_fluxes_mpi(fx, fy, n, topology):
         raise ImportError(
             "MPI synchronize_cgrid_fluxes requires mpi4jax + mpi4py."
         ) from exc
-    sendrecv = _get_sendrecv_vjp(mpi4jax)
+    sendrecv = get_sendrecv_vjp(mpi4jax)
     comm = _MPI.COMM_WORLD
     rank = topology.rank
 

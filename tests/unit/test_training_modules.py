@@ -549,16 +549,17 @@ class TestTrainableParamsSchemeAware:
                 f"Non-finite grad for scheme={scheme}"
             )
 
-    def test_gray_radiation_keeps_tau_drops_albedo(self):
-        """Gray consumes tau_equator/tau_pole; the blended albedo never
-        reaches its heating rates, so albedo_* would be dead DOF."""
+    def test_gray_radiation_keeps_tau_and_albedo(self):
+        """Gray consumes tau_equator/tau_pole, and (since 2026-06-10)
+        its SW reflection takes the blended albedo, so albedo_* train
+        under gray too."""
         from legoesm.training.trainable_params import trainable_constraints_for_scheme
         names = [
             c.name
             for c in trainable_constraints_for_scheme(radiation_scheme="gray")
         ]
         assert "tau_equator" in names and "tau_pole" in names
-        assert "albedo_ice" not in names and "albedo_ocean" not in names
+        assert "albedo_ice" in names and "albedo_ocean" in names
 
     def test_rrtmgp_keeps_albedo_drops_tau(self):
         """RRTMGP consumes the blended surface albedo but explicitly
@@ -571,6 +572,15 @@ class TestTrainableParamsSchemeAware:
             ]
             assert "albedo_ice" in names and "albedo_ocean" in names
             assert "tau_equator" not in names and "tau_pole" not in names
+
+    def test_no_radiation_drops_radiation_params(self):
+        from legoesm.training.trainable_params import trainable_constraints_for_scheme
+        names = [
+            c.name
+            for c in trainable_constraints_for_scheme(radiation_scheme="none")
+        ]
+        for dead in ("tau_equator", "tau_pole", "albedo_ice", "albedo_ocean"):
+            assert dead not in names
 
     def test_active_turbulence_drops_bulk_exchange_coeffs(self):
         """With a turbulence scheme on, turb_owns_surface bypasses the

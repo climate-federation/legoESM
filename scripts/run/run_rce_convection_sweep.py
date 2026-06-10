@@ -24,7 +24,7 @@ this script (Bechtold ``cape_threshold`` 0→70 and ``delta_deep``
 5e-4→1.75e-3, Emanuel ``sub_cloud_relaxation`` 100→7200, Kuo
 ``tau_relax`` 3600→7200, and an ``M_b_max=0.05`` cap added to all
 mass-flux-based schemes including the shared ``mass_flux`` kernel).
-The shared ``mass_flux._apply_mass_flux_kernel`` was also fixed to
+The shared ``mass_flux.apply_mass_flux_kernel`` was also fixed to
 take ``q_v_u`` and ``q_c_u`` separately so the entraining-diluted
 plume's actual cloud-water source is computed correctly instead of
 the broken ``max(q_u − q_sat(T_u, p), 0)`` that always returned ~0.
@@ -56,7 +56,7 @@ atmosphere test matrix with full PBL + microphysics chain and the
 production ``M_b_max=0.05``.
 
 Probed kernel issues (require codebase work):
-- ``mass_flux._apply_mass_flux_kernel`` (``mass_flux.py:175``) computes
+- ``mass_flux.apply_mass_flux_kernel`` (``mass_flux.py:175``) computes
   ``condensate = max(q_u − q_sat(T_u, p), 0)``; for the entraining-
   diluted plume this is ~0 everywhere, so the kernel emits zero
   ``dq_c_conv_dt`` while ``dT_dt`` stays positive — explicit MSE leak.

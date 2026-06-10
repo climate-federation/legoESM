@@ -84,7 +84,7 @@ from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
 from legoesm.core.conservation import (
     zero_mean_tendency,
-    _batch_global_area_sums,
+    batch_global_area_sums,
     conservation_accumulator,
 )
 from legoesm.core.precision import cast_pytree
@@ -899,8 +899,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 # Iter-57: batch the two area-weighted sums into a
                 # single MPI allreduce / cross-shard reduction (the
                 # cubed-sphere ``fix_mass_hydrostatic`` already does
-                # this via ``_batch_global_area_sums``).
-                mass_target, mass_new = _batch_global_area_sums(
+                # this via ``batch_global_area_sums``).
+                mass_target, mass_new = batch_global_area_sums(
                     [pre_state.p_s, state.p_s], self.grid,
                 )
             else:

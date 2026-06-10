@@ -2,7 +2,7 @@
 
 Tests:
 1. dgrid_to_center_geographic removes spurious v_north for solid-body rotation
-2. _d2a2c_vect vs fv3_cc2c divergence on a balanced solid-body case
+2. d2a2c_vect vs fv3_cc2c divergence on a balanced solid-body case
 3. fv3_sw_tendencies balanced-flow residual decreases with resolution
 4. Metric consistency: rsin_u matches sqrt(1-cosa_u^2)
 """
@@ -246,14 +246,14 @@ class TestDgridToCenterGeographic(unittest.TestCase):
 
 
 class TestD2a2cVsFv3Cc2c(unittest.TestCase):
-    """Compare _d2a2c_vect C-grid vs fv3_cc2c C-grid on balanced solid-body flow."""
+    """Compare d2a2c_vect C-grid vs fv3_cc2c C-grid on balanced solid-body flow."""
 
     def test_transport_divergence_comparison(self):
         """Both C-grid interpolation paths should give similar divergence."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.core.operators_cdgrid import cgrid_divergence, fv3_cc2c, fv3_d2cc
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect
 
         n = 16
         grid = create_cubed_sphere(n)
@@ -262,7 +262,7 @@ class TestD2a2cVsFv3Cc2c(unittest.TestCase):
         u_d, v_d = _make_solid_body_edge(cdgrid)
 
         # Path 1: d2a2c_vect → C-grid (covariant convention, FV3-style)
-        ua, va, uc_cov, vc_cov, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        ua, va, uc_cov, vc_cov, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
 
         # Path 2: fv3_cc2c → C-grid (physical face-normal convention)
         u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
@@ -836,7 +836,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
     """Iter-69: verify fv_tp_2d never reads cube-vertex corner cells.
 
     Codex raised the 2-point-average vs Fortran directional ``copy_corners``
-    discrepancy in ``_fill_corners_h1/h2``.  The practical test of whether
+    discrepancy in ``fill_corners_h1/h2``.  The practical test of whether
     this affects mass transport is whether fv_tp_2d's PPM sweeps ever
     dereference the 2x2 cube-vertex corner blocks at (i_halo, j_halo).
     The slicing pattern (``q_full[:, 2:-2, :]`` for y-sweep,
@@ -1143,36 +1143,36 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
 
     def test_d2a2c_vect_non_duogrid_cube_vertex_gap_documented(self):
         """Iter-108 (Priority 3, corrected from iter-107):
-        `_d2a2c_vect` non-duogrid path does not implement Fortran's
+        `d2a2c_vect` non-duogrid path does not implement Fortran's
         cube-vertex corner overrides for utmp/vtmp and ua/va
         (sw_core.F90:3527-3545 and 3620-3640).
 
         Correct characterization of the gap: Fortran writes halo
         cells near cube vertices with sign-flipped copies of the
         OTHER component on the adjacent face.  Python does NOT do
-        this.  Instead Python uses `_fill_corners_h1` / `_fill_corners_h2`
+        this.  Instead Python uses `fill_corners_h1` / `fill_corners_h2`
         which averages adjacent edge halos — a DIFFERENT convention.
         The two give different numerical values at cube-vertex cells
         (O(1) on random input, O(dx²) on smooth fields).
 
         Iter-107 framed this as "Fortran-style is redundant for the
         common case", which overclaimed the equivalence.  The corrected
-        iter-108 note in `_d2a2c_vect` honestly states the two
+        iter-108 note in `d2a2c_vect` honestly states the two
         approaches differ and the impact has not been quantified.
 
         Duogrid path (via `_d2a2c_vect_duogrid`, which Fortran also
         skips via `dg%is_initialized`) is unaffected.
         """
         import inspect
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect
 
-        src = inspect.getsource(_d2a2c_vect)
+        src = inspect.getsource(d2a2c_vect)
         # The note must name the Fortran lines, the two fill mechanisms
         # Python uses, and state the values differ.
         self.assertIn(
             "sw_core.F90:3527-3545 and 3620-3640", src,
             "The Priority 3 gap note for cube-vertex corner "
-            "overrides was removed from `_d2a2c_vect`.  Either port the "
+            "overrides was removed from `d2a2c_vect`.  Either port the "
             "overrides or restore the note.",
         )
         self.assertIn(
@@ -1180,8 +1180,8 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             "The Priority 3 gap note should explicitly state NOT PORTED.",
         )
         self.assertIn(
-            "_fill_corners_h", src,
-            "The note must acknowledge Python uses _fill_corners_h* "
+            "fill_corners_h", src,
+            "The note must acknowledge Python uses fill_corners_h* "
             "for the cube-vertex halo blocks — a DIFFERENT convention "
             "from Fortran's sign-flip override.",
         )
@@ -1266,13 +1266,13 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
 
         Fortran sw_core.F90:3527-3545 writes `utmp(-2..0, 0)` at three
         halo cells (depths 1, 2, 3 west of interior).  Porting the
-        deepest cell (i=-2, depth 3) requires Python's `_d2a2c_vect`
+        deepest cell (i=-2, depth 3) requires Python's `d2a2c_vect`
         non-duogrid path to allocate at least halo=3 when calling
         `pad_halo_vector` on utmp/vtmp.
 
-        This test PROBES the actual halo depth used by `_d2a2c_vect`
+        This test PROBES the actual halo depth used by `d2a2c_vect`
         — by inspecting the source for the `halo=` keyword passed to
-        `pad_halo_vector`, and by calling `_d2a2c_vect` itself on a
+        `pad_halo_vector`, and by calling `d2a2c_vect` itself on a
         small-n grid and checking the output halo shape indirectly via
         the cdgrid metric shapes.  If someone bumps the halo to >=3,
         this test FAILS, prompting the author to port the deepest
@@ -1282,13 +1282,13 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         import ast
         import inspect
         from legoesm.core import fv3_sw_core
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect
 
-        # Probe the actual halo depth used by `_d2a2c_vect` by parsing
+        # Probe the actual halo depth used by `d2a2c_vect` by parsing
         # its source.  Accept either `halo=<int>` directly or
         # `halo=<name>` with `<name> = <int>` assigned earlier in
         # the function body.
-        src = inspect.getsource(_d2a2c_vect)
+        src = inspect.getsource(d2a2c_vect)
         tree = ast.parse(src).body[0]  # FunctionDef
         # First, build a map of simple int assignments `name = <int>`.
         int_locals: dict[str, int] = {}
@@ -1315,7 +1315,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         self.assertGreaterEqual(
             len(halo_values), 1,
             "Could not resolve `pad_halo_vector(..., halo=...)` to an "
-            "integer literal inside `_d2a2c_vect`.  The priority-3 "
+            "integer literal inside `d2a2c_vect`.  The priority-3 "
             "architectural guard cannot probe the halo depth — update "
             "the test to match the current implementation.",
         )
@@ -1332,7 +1332,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         # is what MAKES the deepest cell unrepresentable.
         self.assertLess(
             actual_halo, fortran_deepest_depth,
-            f"`_d2a2c_vect` now uses halo={actual_halo} >= Fortran's "
+            f"`d2a2c_vect` now uses halo={actual_halo} >= Fortran's "
             f"deepest override depth {fortran_deepest_depth}.  The "
             f"architectural limitation no longer applies — port the "
             f"Fortran cube-vertex overrides (sw_core.F90:3527-3545, "
@@ -1341,19 +1341,19 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
 
         # SECONDARY invariant: halo must be at least 1 for edge_interpolate4
         # at face boundaries to work at all (sw_core.F90:3587).  If this
-        # drops below 1, non-duogrid _d2a2c_vect is broken entirely.
+        # drops below 1, non-duogrid d2a2c_vect is broken entirely.
         self.assertGreaterEqual(
             actual_halo, 1,
-            f"`_d2a2c_vect` halo={actual_halo} < 1: edge_interpolate4 "
+            f"`d2a2c_vect` halo={actual_halo} < 1: edge_interpolate4 "
             f"at face boundaries cannot operate without at least "
             f"halo=1.",
         )
 
-        # Verify by direct call that _d2a2c_vect produces outputs with
+        # Verify by direct call that d2a2c_vect produces outputs with
         # shapes consistent with the probed halo depth.  The cdgrid
         # uses halo=2 metrics (cos/sin_angle_padded_h2) regardless of
         # the `halo=` arg, so the ua/va output shape is (6, n, n),
-        # NOT (6, n+2h, n+2h).  Calling _d2a2c_vect exercises the
+        # NOT (6, n+2h, n+2h).  Calling d2a2c_vect exercises the
         # pad_halo_vector call and fails at graph-trace time if the
         # halo arg is inconsistent with the metric shape, giving us
         # end-to-end verification of the probed constant.
@@ -1364,28 +1364,28 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         cdgrid = create_cubed_sphere_cdgrid(grid)
         u_d = jnp.zeros((6, n, n + 1))
         v_d = jnp.zeros((6, n + 1, n))
-        ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        ua, va, uc, vc, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
         self.assertEqual(ua.shape, (6, n, n))
         self.assertEqual(uc.shape, (6, n + 1, n))
         self.assertEqual(vc.shape, (6, n, n + 1))
 
     def test_d2a2c_vect_unreached_by_default_fv3edge_step(self):
         """Iter-129 followup (Priority 3): END-TO-END runtime proof
-        that the DEFAULT production path never reaches `_d2a2c_vect`.
+        that the DEFAULT production path never reaches `d2a2c_vect`.
 
         The iter-128 claim in docs/fv3_fortran_fidelity_review.md is
         that the default `FV3EdgeShallowWaterModel` + default
-        `CDGridShallowWaterConfig` never calls `_d2a2c_vect` and
+        `CDGridShallowWaterConfig` never calls `d2a2c_vect` and
         therefore does not expose the non-duogrid cube-vertex gap.
         An earlier AST-only test proved which functions STATICALLY
-        name `_d2a2c_vect`, but did not prove that the DEFAULT step
+        name `d2a2c_vect`, but did not prove that the DEFAULT step
         avoids all of them at RUNTIME.
 
         This test installs a call-counting tripwire on
-        `legoesm.core.fv3_sw_core._d2a2c_vect`, runs one step of
+        `legoesm.core.fv3_sw_core.d2a2c_vect`, runs one step of
         `FV3EdgeShallowWaterModel.step` under the default config, and
         asserts the tripwire count is zero.  If anyone adds a new
-        caller of `_d2a2c_vect` (direct or transitive) to the default
+        caller of `d2a2c_vect` (direct or transitive) to the default
         step — e.g. by flipping `use_experimental_csw` to True by
         default, or by wiring FB-chain helpers into the default
         tendency function — the tripwire fires and the test fails
@@ -1426,7 +1426,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         model.set_initial_mass(state)
 
         tripwire_count = {"n": 0}
-        orig_d2a2c = sw_mod._d2a2c_vect
+        orig_d2a2c = sw_mod.d2a2c_vect
 
         def tripwire(*args, **kwargs):
             tripwire_count["n"] += 1
@@ -1436,8 +1436,8 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         # `legoesm.core.fv3_sw_core` sees the tripwire.  End-to-end
         # call to `model.step` JIT-traces the whole tendency + time
         # step; if any path through the default config calls
-        # `_d2a2c_vect`, the tripwire fires during tracing.
-        with mock.patch.object(sw_mod, "_d2a2c_vect", tripwire):
+        # `d2a2c_vect`, the tripwire fires during tracing.
+        with mock.patch.object(sw_mod, "d2a2c_vect", tripwire):
             new_state = model.step(state, 1.0)
             # Force evaluation — JIT traces on first call.
             new_state.h.block_until_ready()
@@ -1445,20 +1445,20 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         self.assertEqual(
             tripwire_count["n"], 0,
             f"Default FV3EdgeShallowWaterModel.step called "
-            f"`_d2a2c_vect` {tripwire_count['n']} times.  The "
+            f"`d2a2c_vect` {tripwire_count['n']} times.  The "
             f"priority-3 claim in docs/fv3_fortran_fidelity_review.md "
             f"that the default production path does not reach "
-            f"`_d2a2c_vect` is FALSE.  Either revert the change that "
+            f"`d2a2c_vect` is FALSE.  Either revert the change that "
             f"added the call, or fully port the Fortran cube-vertex "
             f"overrides at sw_core.F90:3527-3545 and 3620-3640.",
         )
 
     def test_d2a2c_vect_interp_offsets_match_halo_depth(self):
-        """Iter-593 (Codex fidelity review): lock that `_d2a2c_vect`
+        """Iter-593 (Codex fidelity review): lock that `d2a2c_vect`
         passes the CORRECT offset-table shape to `pad_halo_vector`.
 
         Fortran `edge_interpolate4` at face boundaries needs halo=2
-        neighbour data.  `_d2a2c_vect` requests `halo=2` via
+        neighbour data.  `d2a2c_vect` requests `halo=2` via
         `pad_halo_vector(..., halo=2)`.  The corresponding offset
         table must be the 2-halo version:
           - `halo_interp_offsets` shape `(6, 4, n)` — halo=1 only
@@ -1474,7 +1474,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         interpolation degenerates to a uniform shift, introducing
         O(Δα) position error at the cube-face halo boundary.
 
-        This test reads the AST of `_d2a2c_vect` and verifies the
+        This test reads the AST of `d2a2c_vect` and verifies the
         interp_offsets kwarg uses `halo_interp_offsets_h2` (not
         `halo_interp_offsets`).  If a refactor reverts the fix
         (e.g. in search of "fewer attributes"), this assertion
@@ -1486,18 +1486,18 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         from a function or indirect variable).  It also passed
         silently if NO halo=2 call existed at all.  This version
         requires POSITIVE confirmation: exactly one h=2 halo path
-        in `_d2a2c_vect` exists AND uses `halo_interp_offsets_h2`.
+        in `d2a2c_vect` exists AND uses `halo_interp_offsets_h2`.
         If the halo value can't be resolved, the test fails with a
         message requiring the AST probe be updated rather than
         silently passing.
         """
         import ast
         import inspect
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect
 
-        src = inspect.getsource(_d2a2c_vect)
+        src = inspect.getsource(d2a2c_vect)
         tree = ast.parse(src)
-        # Find the pad_halo_vector call inside _d2a2c_vect.
+        # Find the pad_halo_vector call inside d2a2c_vect.
         pad_calls = []
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call)
@@ -1507,7 +1507,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         self.assertGreaterEqual(
             len(pad_calls), 1,
             "Could not locate `pad_halo_vector(...)` call in "
-            "`_d2a2c_vect`.  Has the function been refactored?",
+            "`d2a2c_vect`.  Has the function been refactored?",
         )
 
         def resolve_halo_value(kw_value, tree):
@@ -1547,24 +1547,24 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             # — fail loudly rather than silently skip.
             self.assertIsNotNone(
                 halo_val,
-                msg=(f"pad_halo_vector call #{idx} in `_d2a2c_vect` "
+                msg=(f"pad_halo_vector call #{idx} in `d2a2c_vect` "
                      f"has an unresolvable `halo=` kwarg.  The AST "
                      f"probe cannot verify the offset-table shape "
                      f"invariant.  Update this test to handle the "
                      f"new halo resolution pattern, or use a simpler "
-                     f"literal `halo=2` in `_d2a2c_vect`."))
+                     f"literal `halo=2` in `d2a2c_vect`."))
 
             if halo_val == 2:
                 self.assertTrue(
                     offsets_resolvable,
                     msg=(f"pad_halo_vector(halo=2) call #{idx} in "
-                         f"`_d2a2c_vect` lacks an `interp_offsets=` "
+                         f"`d2a2c_vect` lacks an `interp_offsets=` "
                          f"kwarg.  The h=2 halo cannot interpolate "
                          f"halo strips at the correct physical "
                          f"positions without offsets."))
                 self.assertEqual(
                     offsets_attr, "halo_interp_offsets_h2",
-                    msg=(f"`_d2a2c_vect` pad_halo_vector(halo=2) "
+                    msg=(f"`d2a2c_vect` pad_halo_vector(halo=2) "
                          f"call #{idx} passes `interp_offsets="
                          f"grid.{offsets_attr}`, but halo=2 requires "
                          f"`halo_interp_offsets_h2` (shape (6, 4, 2, "
@@ -1578,7 +1578,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                          f"data per sw_core.F90:3528-3530)."))
                 h2_calls_ok += 1
 
-        # POSITIVE invariant: `_d2a2c_vect` MUST have at least one
+        # POSITIVE invariant: `d2a2c_vect` MUST have at least one
         # halo=2 call with the correct offsets.  The existing test
         # `test_d2a2c_vect_non_duogrid_cube_vertex_gap_architectural_bound`
         # (earlier in this file) already locks `actual_halo >= 1` and
@@ -1589,7 +1589,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         # `edge_interpolate4` without the halo it needs.
         self.assertGreaterEqual(
             h2_calls_ok, 1,
-            msg=("`_d2a2c_vect` contains NO `pad_halo_vector(halo=2)` "
+            msg=("`d2a2c_vect` contains NO `pad_halo_vector(halo=2)` "
                  "call with `interp_offsets=grid.halo_interp_offsets_h2`. "
                  "Fortran sw_core.F90:3587 requires halo=2 neighbour "
                  "data for edge_interpolate4 at face boundaries.  If "
@@ -1600,22 +1600,22 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
 
     def test_d2a2c_vect_reached_by_experimental_csw_and_fb_model(self):
         """Iter-130 (Priority 3 complement): positive-case runtime
-        tripwire proving the EXPERIMENTAL paths DO reach `_d2a2c_vect`.
+        tripwire proving the EXPERIMENTAL paths DO reach `d2a2c_vect`.
 
         The iter-129 negative-case test proves the default
-        `FV3EdgeShallowWaterModel` path does NOT reach `_d2a2c_vect`.
+        `FV3EdgeShallowWaterModel` path does NOT reach `d2a2c_vect`.
         This test is the complement: it proves the two opt-in
         experimental paths DO reach it.  Without this positive
         assertion, one could satisfy the negative test by accidentally
-        breaking `_d2a2c_vect` dispatch on BOTH paths, silently
+        breaking `d2a2c_vect` dispatch on BOTH paths, silently
         leaving the experimental paths unreachable to their own
         FB/csw logic — a different kind of regression.
 
         Paths checked:
           1. `FV3EdgeShallowWaterModel(config with use_experimental_csw=True)`
-             → `fv3_csw_tendencies` → `_d2a2c_vect` (N=3 hits per RK3 step).
+             → `fv3_csw_tendencies` → `d2a2c_vect` (N=3 hits per RK3 step).
           2. `FV3FBShallowWaterModel(default config)` → `fv3_fb_sw_step`
-             → `_c_sw` → `_d2a2c_vect` (N>=1 hit per step).
+             → `_c_sw` → `d2a2c_vect` (N>=1 hit per step).
 
         Together with the iter-129 negative test these pin down the
         call graph: default → no reach; experimental → reach.
@@ -1639,7 +1639,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             h_s=jnp.zeros((6, n, n)),
         )
 
-        orig_d2a2c = sw_mod._d2a2c_vect
+        orig_d2a2c = sw_mod.d2a2c_vect
 
         # Path 1: experimental CSW via FV3EdgeShallowWaterModel
         csw_config = CDGridShallowWaterConfig(use_experimental_csw=True)
@@ -1651,18 +1651,18 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             csw_hits["n"] += 1
             return orig_d2a2c(*a, **kw)
 
-        with mock.patch.object(sw_mod, "_d2a2c_vect", csw_trip), \
+        with mock.patch.object(sw_mod, "d2a2c_vect", csw_trip), \
              warnings.catch_warnings():
             warnings.simplefilter("ignore")  # suppress experimental warning
             s1 = csw_model.step(state, 1.0)
             s1.h.block_until_ready()
         self.assertGreater(
             csw_hits["n"], 0,
-            "use_experimental_csw=True path made ZERO `_d2a2c_vect` "
+            "use_experimental_csw=True path made ZERO `d2a2c_vect` "
             "calls at runtime.  Either fv3_csw_tendencies was rewired "
             "(update this test) or the dispatch is broken.  The "
             "experimental CSW path is REQUIRED to go through "
-            "`_d2a2c_vect` for its FV3-faithful C-grid tendency "
+            "`d2a2c_vect` for its FV3-faithful C-grid tendency "
             "computation.",
         )
 
@@ -1675,20 +1675,20 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             fb_hits["n"] += 1
             return orig_d2a2c(*a, **kw)
 
-        with mock.patch.object(sw_mod, "_d2a2c_vect", fb_trip):
+        with mock.patch.object(sw_mod, "d2a2c_vect", fb_trip):
             s2 = fb_model.step(state, 1.0)
             s2.h.block_until_ready()
         self.assertGreater(
             fb_hits["n"], 0,
-            "FV3FBShallowWaterModel.step made ZERO `_d2a2c_vect` "
+            "FV3FBShallowWaterModel.step made ZERO `d2a2c_vect` "
             "calls at runtime.  The FB path is required to go "
-            "through `_d2a2c_vect` via `_c_sw` — either fv3_fb_sw_step "
+            "through `d2a2c_vect` via `_c_sw` — either fv3_fb_sw_step "
             "was rewired (update this test) or the dispatch is broken.",
         )
 
     def test_d_sw5_iterated_laplacian_halo_gap_documentation_marker(self):
         """Iter-132 / iter-133 (FB-path fidelity gap, simplified):
-        document the `_d_sw5_corner_divergence` halo-mode='edge' gap
+        document the `d_sw5_corner_divergence` halo-mode='edge' gap
         as a Fortran-fidelity marker.
 
         Earlier iterations attempted to bind the source code structure
@@ -1709,21 +1709,21 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         chain (fv3_forward_backward_step, fv3_fb_sw_step), which is
         unstable at C36 for independent reasons.  Production (A-L +
         RK3 in operators_cdgrid.py:fv3_sw_tendencies) does not call
-        `_d_sw5_corner_divergence` and is unaffected.  A future port
+        `d_sw5_corner_divergence` and is unaffected.  A future port
         of proper cubed-sphere corner-staggered halo exchange for
         the Laplacian iteration should update both the source note
         AND this test together.
         """
         import inspect
-        from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
+        from legoesm.core.fv3_sw_core import d_sw5_corner_divergence
 
-        src = inspect.getsource(_d_sw5_corner_divergence)
+        src = inspect.getsource(d_sw5_corner_divergence)
 
         # One literal anchor: the Fortran oracle line range.  Stable
         # even under aggressive refactors since the oracle is external.
         self.assertIn(
             "sw_core.F90:1737-1785", src,
-            "The `_d_sw5_corner_divergence` iterated-Laplacian halo "
+            "The `d_sw5_corner_divergence` iterated-Laplacian halo "
             "gap note was removed without updating this test.  The "
             "note cited Fortran `sw_core.F90:1737-1785` as the "
             "oracle for proper corner-staggered halo exchange.  If "
@@ -1764,7 +1764,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         # applies linear extrapolation even here — this is a known
         # documented fidelity gap relative to Fortran's halo-based
         # approach; see iter-132 marker test for the related
-        # `_d_sw5_corner_divergence` case).
+        # `d_sw5_corner_divergence` case).
         vort_abs = _corner_vorticity(uc, vc, cdgrid, use_duogrid=True)
 
         max_diff = float(jnp.max(jnp.abs(vort_abs - cdgrid.f_corner)))
@@ -2129,7 +2129,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
 
         `_divergence_corner_duo` (`src/legoesm/core/fv3_sw_core.py:
         827-921`) is the duogrid-specific corner divergence helper
-        used by `_d_sw5_corner_divergence`'s nord>0 branch.  Per
+        used by `d_sw5_corner_divergence`'s nord>0 branch.  Per
         Fortran sw_core.F90:2431-2440, it MUST:
           - zero the 4 face boundaries (i=0, i=n, j=0, j=n)
           - multiply the 4 face-adjacent rows/cols (i=1, i=n-1,
@@ -3157,13 +3157,13 @@ class TestD2a2cVectNonDuogridAdjacentStrip(unittest.TestCase):
         """South-edge ut[:, i_lo:i_hi, 0] = uc - 0.25*cosa_u * 4pt(vt)."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect
 
         n = 12
         grid = create_cubed_sphere(n, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         u_d, v_d = _make_solid_body_edge(cdgrid)
-        _, _, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        _, _, uc, vc, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
 
         # Reconstruct expected ut at south (j_face=0) using the 4-point formula.
         i_lo, i_hi = 2, n - 1
@@ -3181,13 +3181,13 @@ class TestD2a2cVectNonDuogridAdjacentStrip(unittest.TestCase):
         """North-edge ut[:, i_lo:i_hi, n-1] matches formula."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect
 
         n = 12
         grid = create_cubed_sphere(n, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         u_d, v_d = _make_solid_body_edge(cdgrid)
-        _, _, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        _, _, uc, vc, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
 
         i_lo, i_hi = 2, n - 1
         vt_sum = (vt[:, i_lo - 1:i_hi - 1, n - 1]
@@ -3203,7 +3203,7 @@ class TestD2a2cVectNonDuogridAdjacentStrip(unittest.TestCase):
 
 class TestD2a2cVectNonDuogridBoundary(unittest.TestCase):
     """Lock in Fortran-faithful face-boundary overrides in the non-duogrid
-    _d2a2c_vect branch (sw_core.F90:660-668, 677-684, 696-703, 714-721).
+    d2a2c_vect branch (sw_core.F90:660-668, 677-684, 696-703, 714-721).
 
     The Fortran overrides ut at face-boundary u-edges (i=is, i=ie+1) and
     vt at face-boundary v-edges (j=js, j=je+1) by dividing uc/vc by
@@ -3220,14 +3220,14 @@ class TestD2a2cVectNonDuogridBoundary(unittest.TestCase):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.grids.halo import pad_halo
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect
 
         n = 12
         # Non-duogrid path
         grid = create_cubed_sphere(n, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         u_d, v_d = _make_solid_body_edge(cdgrid)
-        _, _, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        _, _, uc, vc, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
 
         # Haloed sin_sg so the upwind cell index at i=0 reads from the
         # neighbouring face (matches Fortran sin_sg(0,j,3) / sin_sg(1,j,1)
@@ -4294,7 +4294,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"re-examine whether it now reduces mode A and can "
                  f"replace the default 2-pt-avg, OR\n"
                  f"  (b) the opt-in was silently disabled — restore "
-                 f"the kwarg threading in _arakawa_lamb_gradient and "
+                 f"the kwarg threading in arakawa_lamb_gradient and "
                  f"fv3_sw_tendencies per iter-765b."))
 
     def test_fortran_a2b_corner_avg_is_known_worse(self):
@@ -4434,7 +4434,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"re-examine whether it now reduces mode A and can "
                  f"replace the default 2-pt-avg, OR\n"
                  f"  (b) the opt-in was silently disabled — restore "
-                 f"the kwarg threading in _arakawa_lamb_gradient and "
+                 f"the kwarg threading in arakawa_lamb_gradient and "
                  f"fv3_sw_tendencies per iter-766."))
 
     def test_boundary_fix_skip_corners_is_known_worse(self):
@@ -5607,7 +5607,7 @@ class TestCosineBellPositivity(unittest.TestCase):
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect
         from legoesm.core.fv_tp_2d import transport_step
         from tests.test_cases.cosine_bell import cosine_bell_cubesphere
 
@@ -5621,7 +5621,7 @@ class TestCosineBellPositivity(unittest.TestCase):
 
         # Pre-compute contravariant velocities (winds frozen for
         # cosine bell) — matches matrix lines 1535-1539.
-        _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(
+        _ua, _va, _uc, _vc, ut, vt = d2a2c_vect(
             state.u_d, state.v_d, cdgrid)
         _mass_target = float(jnp.sum(state.h * grid.area))
 
@@ -6373,13 +6373,13 @@ class TestEdgeInterpolate4FortranFormula(unittest.TestCase):
       result = 0.5 * (((t1+dxa(2))*ua(2) - dxa(2)*ua(1))/t1
                       + ((t2+dxa(3))*ua(3) - dxa(3)*ua(4))/t2)
 
-    Used by `_d2a2c_vect` at face boundaries (sw_core.F90:3587, 3603)
+    Used by `d2a2c_vect` at face boundaries (sw_core.F90:3587, 3603)
     where the standard 4th-order Lagrange stencil straddles the
     face boundary.  Formula must match Fortran to 12 decimal places
     in the expression structure; numerical invariants below lock it.
 
     No direct regression test existed before iter-617 — only
-    indirect coverage via `_d2a2c_vect` output.
+    indirect coverage via `d2a2c_vect` output.
     """
 
     def test_linear_input_exact(self):
@@ -6450,7 +6450,7 @@ class TestEdgeInterpolate4FortranFormula(unittest.TestCase):
         """Iter-618 (Codex follow-up): test at the real production
         call shape (6, n, 4).
 
-        `_d2a2c_vect` calls `_edge_interpolate4` with shape
+        `d2a2c_vect` calls `_edge_interpolate4` with shape
         `(6, n, 4)` — 6 faces, n transverse cells, 4 stencil cells
         (at `fv3_sw_core.py:536-541`).  Iter-617 tests used
         `(1, 4)` which doesn't exercise the broadcasting/vectorized
@@ -6981,7 +6981,7 @@ class TestPGradCFortranFormula(unittest.TestCase):
         `rel < 1e-10` relative tolerance (not IEEE bit identity)."""
         import jax.numpy as jnp
         import numpy as np
-        from legoesm.core.fv3_sw_core import _p_grad_c, _pad_halo_auto
+        from legoesm.core.fv3_sw_core import _p_grad_c, pad_halo_auto
 
         cdgrid = self._build_grid(n=8)
         n = cdgrid.n
@@ -6996,9 +6996,9 @@ class TestPGradCFortranFormula(unittest.TestCase):
         dp_x, dp_y = _p_grad_c(h_star, h_s, cdgrid, dt2, g)
 
         # Numpy reference: p = g*(h_star + h_s), halo-exchanged via
-        # the same _pad_halo_auto helper used in production.
+        # the same pad_halo_auto helper used in production.
         p = g * (h_star_np + h_s_np)
-        p_pad = np.asarray(_pad_halo_auto(jnp.asarray(p), cdgrid))
+        p_pad = np.asarray(pad_halo_auto(jnp.asarray(p), cdgrid))
         rdxc = np.asarray(cdgrid.rdxc)
         rdyc = np.asarray(cdgrid.rdyc)
         dp_x_ref = dt2 * rdxc * (p_pad[:, :-1, 1:-1]
@@ -7228,7 +7228,7 @@ class TestFv3D2ccFortranFormula(unittest.TestCase):
 
 
 class TestPertPpmFortranFormula(unittest.TestCase):
-    """Iter-635: direct Fortran-formula lock for `_pert_ppm` (iv=1) and
+    """Iter-635: direct Fortran-formula lock for `pert_ppm` (iv=1) and
     `_pert_ppm_iv0` (iv=0) in `src/legoesm/core/fv_tp_2d.py`.  These
     helpers implement FV3's ``pert_ppm`` routine at
     ``tp_core.F90:1156-1214``.  Before this iter there were behavioural
@@ -7333,7 +7333,7 @@ class TestPertPpmFortranFormula(unittest.TestCase):
         branch at `atol=1e-14` against the JAX implementation.
         """
         import numpy as np
-        from legoesm.core.fv_tp_2d import _pert_ppm
+        from legoesm.core.fv_tp_2d import pert_ppm
 
         # Four probes: (a) opposite sign + a6da < -da2, (b) opposite
         # sign + a6da > da2, (c) opposite sign + |a6da| <= da2
@@ -7341,16 +7341,16 @@ class TestPertPpmFortranFormula(unittest.TestCase):
         bl = np.array([-1.0,  2.0,  1.0, 0.3, 0.0])
         br = np.array([ 3.0, -1.0, -0.5, 0.2, 0.7])
         bl_ref, br_ref = self._ref_pert_ppm_iv1(bl, br)
-        bl_out, br_out = _pert_ppm(bl, br)
+        bl_out, br_out = pert_ppm(bl, br)
         bl_out = np.asarray(bl_out)
         br_out = np.asarray(br_out)
         np.testing.assert_allclose(
             bl_out, bl_ref, atol=1e-14,
-            err_msg=(f"_pert_ppm iv=1 diverges from Fortran on branch "
+            err_msg=(f"pert_ppm iv=1 diverges from Fortran on branch "
                      f"probes.  bl_ref={bl_ref}, bl_got={bl_out}"))
         np.testing.assert_allclose(
             br_out, br_ref, atol=1e-14,
-            err_msg=(f"_pert_ppm iv=1 diverges from Fortran on branch "
+            err_msg=(f"pert_ppm iv=1 diverges from Fortran on branch "
                      f"probes.  br_ref={br_ref}, br_got={br_out}"))
 
     def test_pert_ppm_iv1_matches_fortran_on_random_grid(self):
@@ -7358,21 +7358,21 @@ class TestPertPpmFortranFormula(unittest.TestCase):
         Fortran formula at `atol=1e-14`.  Seeded so a regression reproduces.
         """
         import numpy as np
-        from legoesm.core.fv_tp_2d import _pert_ppm
+        from legoesm.core.fv_tp_2d import pert_ppm
 
         rng = np.random.default_rng(635)
         # Use a wide range so every branch gets exercised.
         bl = rng.standard_normal((6, 16, 16)) * 3.0
         br = rng.standard_normal((6, 16, 16)) * 3.0
         bl_ref, br_ref = self._ref_pert_ppm_iv1(bl, br)
-        bl_out, br_out = _pert_ppm(bl, br)
+        bl_out, br_out = pert_ppm(bl, br)
         np.testing.assert_allclose(
             np.asarray(bl_out), bl_ref, atol=1e-14,
-            err_msg=("_pert_ppm iv=1 random-grid bit-mismatch on bl — "
+            err_msg=("pert_ppm iv=1 random-grid bit-mismatch on bl — "
                      "a branch has diverged from tp_core.F90:1193-1212."))
         np.testing.assert_allclose(
             np.asarray(br_out), br_ref, atol=1e-14,
-            err_msg=("_pert_ppm iv=1 random-grid bit-mismatch on br — "
+            err_msg=("pert_ppm iv=1 random-grid bit-mismatch on br — "
                      "a branch has diverged from tp_core.F90:1193-1212."))
 
     def test_pert_ppm_iv0_matches_fortran_on_branch_probes(self):
@@ -7426,12 +7426,12 @@ class TestPertPpmFortranFormula(unittest.TestCase):
         sampling.
         """
         import numpy as np
-        from legoesm.core.fv_tp_2d import _pert_ppm
+        from legoesm.core.fv_tp_2d import pert_ppm
 
         # Both positive:
         bl = np.array([0.3, 0.5, 1.2])
         br = np.array([0.1, 0.9, 0.4])
-        bl_out, br_out = _pert_ppm(bl, br)
+        bl_out, br_out = pert_ppm(bl, br)
         np.testing.assert_array_equal(
             np.asarray(bl_out), np.zeros_like(bl),
             err_msg=("iv=1: same-sign (both positive) must zero bl"))
@@ -7441,7 +7441,7 @@ class TestPertPpmFortranFormula(unittest.TestCase):
         # Both negative:
         bl = np.array([-0.3, -0.5, -1.2])
         br = np.array([-0.1, -0.9, -0.4])
-        bl_out, br_out = _pert_ppm(bl, br)
+        bl_out, br_out = pert_ppm(bl, br)
         np.testing.assert_array_equal(np.asarray(bl_out), np.zeros_like(bl))
         np.testing.assert_array_equal(np.asarray(br_out), np.zeros_like(br))
 
@@ -8576,7 +8576,7 @@ class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
 
 class TestFillCornersPythonBehavioralLock(unittest.TestCase):
     """Iter-642 / iter-643 (Codex stop-time correction): behavioral
-    lock for `_fill_corners_h1` and `_fill_corners_h2` in
+    lock for `fill_corners_h1` and `fill_corners_h2` in
     ``src/legoesm/grids/halo.py`` (lines 1182-1309).
 
     **IMPORTANT — this is NOT a Fortran-formula lock.**  The iter-642
@@ -8596,7 +8596,7 @@ class TestFillCornersPythonBehavioralLock(unittest.TestCase):
         gradient is a non-FV3 Python operator and there is no
         Fortran reference to match."
 
-    So `_fill_corners_h1` / `_fill_corners_h2` are Python-only cube-
+    So `fill_corners_h1` / `fill_corners_h2` are Python-only cube-
     vertex synthesizers with no Fortran oracle.  They guarantee a
     deterministic direction-invariant value for the Arakawa-Lamb
     B-grid gradient, not a bit-match against Fortran's
@@ -8614,7 +8614,7 @@ class TestFillCornersPythonBehavioralLock(unittest.TestCase):
 
     @staticmethod
     def _ref_fill_corners_h1(padded):
-        """Numpy reproduction of `_fill_corners_h1`: 24 corners
+        """Numpy reproduction of `fill_corners_h1`: 24 corners
         averaged from two adjacent halos."""
         import numpy as np
         out = np.asarray(padded).copy()
@@ -8635,33 +8635,33 @@ class TestFillCornersPythonBehavioralLock(unittest.TestCase):
         """Random padded input → `atol=1e-14` match against the numpy
         reference.  Covers all 24 (face, corner) pairs."""
         import numpy as np
-        from legoesm.grids.halo import _fill_corners_h1
+        from legoesm.grids.halo import fill_corners_h1
 
         n = 8
         rng = np.random.default_rng(642)
         padded = jnp.asarray(rng.standard_normal((6, n + 2, n + 2)))
-        out = _fill_corners_h1(padded)
+        out = fill_corners_h1(padded)
         out_ref = self._ref_fill_corners_h1(padded)
         np.testing.assert_allclose(
             np.asarray(out), out_ref, atol=1e-14,
-            err_msg=("_fill_corners_h1 diverges from the 2-point "
+            err_msg=("fill_corners_h1 diverges from the 2-point "
                      "average reference — check 24-corner gather + "
                      "0.5 factor + adjacent-cell index derivations."))
 
     def test_fill_corners_h1_mutation_suite_iter642(self):
-        """Mutation probes for `_fill_corners_h1`:
+        """Mutation probes for `fill_corners_h1`:
           M1: 0.5 factor → 1.0 (wrong averaging weight)
           M2: swap adjacent indices (a1 ↔ interior-1, etc.)
           M3: dropped the outer-corner set (corners still equal input)
         """
         import numpy as np
-        from legoesm.grids.halo import _fill_corners_h1
+        from legoesm.grids.halo import fill_corners_h1
 
         n = 6
         rng = np.random.default_rng(643)
         padded_np = rng.standard_normal((6, n + 2, n + 2))
         padded = jnp.asarray(padded_np)
-        out = np.asarray(_fill_corners_h1(padded))
+        out = np.asarray(fill_corners_h1(padded))
 
         # M1: factor 1.0 instead of 0.5.
         out_m1 = self._ref_fill_corners_h1(padded).copy()
@@ -8679,12 +8679,12 @@ class TestFillCornersPythonBehavioralLock(unittest.TestCase):
         # values.
         self.assertGreater(
             np.max(np.abs(out[:, 0, 0] - padded_np[:, 0, 0])), 1e-6,
-            msg=("M3: _fill_corners_h1 didn't modify the outer corner "
+            msg=("M3: fill_corners_h1 didn't modify the outer corner "
                  "(0, 0) — the helper is a no-op."))
 
     @staticmethod
     def _ref_fill_corners_h2(padded):
-        """Numpy reproduction of `_fill_corners_h2` inside-out fill."""
+        """Numpy reproduction of `fill_corners_h2` inside-out fill."""
         import numpy as np
         out = np.asarray(padded).copy()
         for f in range(6):
@@ -8714,16 +8714,16 @@ class TestFillCornersPythonBehavioralLock(unittest.TestCase):
         """Random halo=2 padded array → `atol=1e-14` match against the
         inside-out numpy reference."""
         import numpy as np
-        from legoesm.grids.halo import _fill_corners_h2
+        from legoesm.grids.halo import fill_corners_h2
 
         n = 8
         rng = np.random.default_rng(644)
         padded = jnp.asarray(rng.standard_normal((6, n + 4, n + 4)))
-        out = _fill_corners_h2(padded)
+        out = fill_corners_h2(padded)
         out_ref = self._ref_fill_corners_h2(padded)
         np.testing.assert_allclose(
             np.asarray(out), out_ref, atol=1e-14,
-            err_msg=("_fill_corners_h2 diverges from the inside-out "
+            err_msg=("fill_corners_h2 diverges from the inside-out "
                      "reference — the 4-step fill order matters "
                      "(each step reads values set by the previous "
                      "step).  Check SW / SE / NW / NE corner sequences."))
@@ -8739,13 +8739,13 @@ class TestFillCornersPythonBehavioralLock(unittest.TestCase):
         at the outer corner.
         """
         import numpy as np
-        from legoesm.grids.halo import _fill_corners_h2
+        from legoesm.grids.halo import fill_corners_h2
 
         n = 8
         rng = np.random.default_rng(645)
         padded_np = rng.standard_normal((6, n + 4, n + 4))
         padded = jnp.asarray(padded_np)
-        out = np.asarray(_fill_corners_h2(padded))
+        out = np.asarray(fill_corners_h2(padded))
 
         # Reordered reference for SW corner: set outer (0, 0) FIRST
         # (before (1, 1) is computed).  At that point (0, 1) and
@@ -8805,7 +8805,7 @@ class TestDivergenceCornerDuoFortranFormula(unittest.TestCase):
         divg_d(:,1)   *= 0.25
         divg_d(:,n-1) *= 0.25
 
-    This helper is called by `_d_sw5_corner_divergence` for the
+    This helper is called by `d_sw5_corner_divergence` for the
     duogrid nord>0 branch and drives del-n divergence damping — a
     regression in the cross-velocity correction (wrong cos_sg edge
     index), the 0.25 coefficient, or the stencil ordering silently
@@ -9020,7 +9020,7 @@ class TestDivergenceCornerDuoFortranFormula(unittest.TestCase):
 
 class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
     """Iter-645: Fortran-formula lock for the 4th-order D→A averaging
-    stencil used in `_d2a2c_vect` (non-duogrid interior override at
+    stencil used in `d2a2c_vect` (non-duogrid interior override at
     ``fv3_sw_core.py:464-469``) and `_d2a2c_vect_duogrid` (same
     stencil on the fully-haloed domain at ``fv3_sw_core.py:347-355``).
 
@@ -9175,7 +9175,7 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
         formula* (e.g., flipping the multiplier positions while leaving
         the constants alone) would not be caught by iter-645's tests.
 
-        This test runs the REAL `_d2a2c_vect` with the `_A1` module
+        This test runs the REAL `d2a2c_vect` with the `_A1` module
         constant patched to an incorrect value, and verifies the JAX
         output CHANGES versus the unpatched run.  Proves the
         production formula actually consumes `_A1` at interior cells.
@@ -9198,12 +9198,12 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
         v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
 
         # Unpatched production call.
-        out_ref = fv3_sw_core._d2a2c_vect(u_d, v_d, cdgrid)
+        out_ref = fv3_sw_core.d2a2c_vect(u_d, v_d, cdgrid)
 
         # Patch `_A1` to a sentinel and re-run.  If the production code
         # ACTUALLY consumes `_A1`, the output must change somewhere.
         with mock.patch.object(fv3_sw_core, "_A1", 0.5):
-            out_patched = fv3_sw_core._d2a2c_vect(u_d, v_d, cdgrid)
+            out_patched = fv3_sw_core.d2a2c_vect(u_d, v_d, cdgrid)
 
         # The two outputs must differ somewhere on any interior field
         # where the 4th-order stencil fires.  Compare the first return
@@ -9219,7 +9219,7 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
         self.assertTrue(
             any_diff,
             msg=("Patching `_A1` to a sentinel produced NO change in "
-                 "`_d2a2c_vect` output at any return component.  The "
+                 "`d2a2c_vect` output at any return component.  The "
                  "production formula at fv3_sw_core.py:464-469 does "
                  "NOT actually consume `_A1` — iter-645's lock on the "
                  "constant alone would not catch a regression that "
@@ -9234,7 +9234,7 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
         stencil is broken.
 
         Iter-647 adds a direct-output check: at interior cells where
-        the 4th-order override fires, run `_d2a2c_vect` on an
+        the 4th-order override fires, run `d2a2c_vect` on an
         orthogonalised CDGrid (`cos_sg[..., 4] = 0`, `rsin2_cell = 1`),
         feed a random `u_d` with `v_d = 0`, and verify the production
         `ua` at interior cells matches the EXPLICIT 4th-order Lagrange
@@ -9290,7 +9290,7 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
         u_d = rng.standard_normal((6, n, n + 1))
         v_d = np.zeros((6, n + 1, n), dtype=np.float64)
 
-        out = fv3_sw_core._d2a2c_vect(
+        out = fv3_sw_core.d2a2c_vect(
             jnp.asarray(u_d), jnp.asarray(v_d), cdgrid)
         ua = np.asarray(out[0])    # (6, n, n)
 
@@ -9326,7 +9326,7 @@ class TestD2A2C4thOrderStencilFortranFormula(unittest.TestCase):
         # absolute round-off floor.
         np.testing.assert_allclose(
             ua_interior, expected_interior, rtol=0.0, atol=1e-14,
-            err_msg=("_d2a2c_vect interior `ua` does NOT match the "
+            err_msg=("d2a2c_vect interior `ua` does NOT match the "
                      "explicit 4th-order Lagrange formula "
                      "A1*(u[j]+u[j+1]) + A2*(u[j-1]+u[j+2]) within "
                      "float64 round-off (~4 ULPs, threshold 1e-14).  "
@@ -9708,7 +9708,7 @@ class TestCosSgFortranFormulaIter678(unittest.TestCase):
         Returns cos_sg of shape (6, n, n, 9), Python-layout indexed.
         """
         import numpy as np
-        from legoesm.grids.halo import _face_gnomonic_to_lonlat
+        from legoesm.grids.halo import face_gnomonic_to_lonlat
         import jax.numpy as jnp
 
         # Build grid3: corners (6, n+1, n+1, 3) unit vectors on sphere.
@@ -9722,12 +9722,12 @@ class TestCosSgFortranFormulaIter678(unittest.TestCase):
         grid3 = np.empty((6, n + 1, n + 1, 3))
         agrid = np.empty((6, n, n, 3))
         for f in range(6):
-            lon, lat = _face_gnomonic_to_lonlat(f, jnp.asarray(ax), jnp.asarray(ay))
+            lon, lat = face_gnomonic_to_lonlat(f, jnp.asarray(ax), jnp.asarray(ay))
             lon = np.asarray(lon); lat = np.asarray(lat)
             grid3[f, ..., 0] = np.cos(lat) * np.cos(lon)
             grid3[f, ..., 1] = np.cos(lat) * np.sin(lon)
             grid3[f, ..., 2] = np.sin(lat)
-            lon_c, lat_c = _face_gnomonic_to_lonlat(f, jnp.asarray(ax_c), jnp.asarray(ay_c))
+            lon_c, lat_c = face_gnomonic_to_lonlat(f, jnp.asarray(ax_c), jnp.asarray(ay_c))
             lon_c = np.asarray(lon_c); lat_c = np.asarray(lat_c)
             agrid[f, ..., 0] = np.cos(lat_c) * np.cos(lon_c)
             agrid[f, ..., 1] = np.cos(lat_c) * np.sin(lon_c)
@@ -10599,8 +10599,8 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
     duogrid mode via bounded_domain = .true."  Python mirrors this by
     gating `use_duogrid` in the same places Fortran gates
     `bounded_domain .or. duogrid`.  But the scalar halo path in
-    ``grids/halo.py`` unconditionally calls ``_fill_corners_h1`` /
-    ``_fill_corners_h2`` BEFORE the duogrid-specific
+    ``grids/halo.py`` unconditionally calls ``fill_corners_h1`` /
+    ``fill_corners_h2`` BEFORE the duogrid-specific
     ``fill_corner_region`` runs.  This is functionally correct — the
     duogrid corner fill overwrites the averaged values — but the
     non-zero duogrid overwrite is what makes it Fortran-faithful.
@@ -10622,7 +10622,7 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
 
     4. The non-duogrid scalar halo path writes a specific 2-point
        averaged value into corner cells (a legacy choice documented in
-       ``halo.py::_fill_corners_h1``).  This is not Fortran-faithful
+       ``halo.py::fill_corners_h1``).  This is not Fortran-faithful
        (Fortran skips copy_corners for non-duogrid-non-bounded_domain
        only via a different `copy_corners` directional formula) but
        the documented mitigation says the value is never read by PPM.
@@ -10648,13 +10648,13 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
 
     def test_duogrid_corner_fill_overwrites_legacy_fill_corners(self):
         """In duogrid mode, `fill_corner_region` writes values that
-        DIFFER from the 2-point average `_fill_corners_h1` would give,
+        DIFFER from the 2-point average `fill_corners_h1` would give,
         proving the duogrid path is active and not a silent no-op."""
         import numpy as np
         import jax.numpy as jnp
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.halo import (
-            _fill_corners_h1, pad_halo_4d,
+            fill_corners_h1, pad_halo_4d,
         )
 
         grid = create_cubed_sphere(n=8, use_duogrid=True)
@@ -10673,9 +10673,9 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
         pad_no_dg = np.asarray(pad_halo_4d(data_4d, halo=1,
                                            duogrid=None,
                                            interp_offsets=None))[..., 0]
-        # Apply _fill_corners_h1 explicitly on pad_no_dg for clarity (it
+        # Apply fill_corners_h1 explicitly on pad_no_dg for clarity (it
         # was already applied inside pad_halo_4d, but re-apply to be sure).
-        pad_no_dg = np.asarray(_fill_corners_h1(jnp.asarray(pad_no_dg)))
+        pad_no_dg = np.asarray(fill_corners_h1(jnp.asarray(pad_no_dg)))
 
         # The 4 corner cells per face: (0,0), (0,n+1), (n+1,0), (n+1,n+1).
         cis = [0, 0, n + 1, n + 1]
@@ -10696,13 +10696,13 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
                  f"non-constant scalar field."))
 
     def test_fill_corners_h1_writes_documented_2_point_average(self):
-        """Lock: `_fill_corners_h1` writes `0.5*(adj_a + adj_b)` at each
+        """Lock: `fill_corners_h1` writes `0.5*(adj_a + adj_b)` at each
         corner.  If someone changes the formula (e.g. to a 3-point
         weighted average), this test flags it.
         """
         import numpy as np
         import jax.numpy as jnp
-        from legoesm.grids.halo import _fill_corners_h1
+        from legoesm.grids.halo import fill_corners_h1
 
         n = 6
         # Construct a padded (6, n+2, n+2) array with known values at the
@@ -10711,10 +10711,10 @@ class TestDuogridCornerFillFidelityIter682(unittest.TestCase):
         # SW corner (0,0): adjacent cells (0,1) and (1,0).
         padded = padded.at[0, 0, 1].set(10.0)
         padded = padded.at[0, 1, 0].set(20.0)
-        out = np.asarray(_fill_corners_h1(padded))
+        out = np.asarray(fill_corners_h1(padded))
         self.assertAlmostEqual(float(out[0, 0, 0]), 0.5 * (10.0 + 20.0),
             places=10,
-            msg=("`_fill_corners_h1` SW-corner formula changed from "
+            msg=("`fill_corners_h1` SW-corner formula changed from "
                  "0.5*(adjacent_cell_0 + adjacent_cell_1)."))
 
     def test_duogrid_lagrange_weights_partition_of_unity(self):
@@ -10911,7 +10911,7 @@ class TestCosineBellGoldFileIter712(unittest.TestCase):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect
         from legoesm.core.fv_tp_2d import transport_step
         from tests.test_cases.cosine_bell import cosine_bell_cubesphere
 
@@ -10921,7 +10921,7 @@ class TestCosineBellGoldFileIter712(unittest.TestCase):
         grid = create_cubed_sphere(n=n, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         state = cosine_bell_cubesphere(grid, cdgrid)
-        _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(
+        _ua, _va, _uc, _vc, ut, vt = d2a2c_vect(
             state.u_d, state.v_d, cdgrid)
         mass_target = float(jnp.sum(state.h * grid.area))
 
@@ -11157,7 +11157,7 @@ class TestDSwNativeEndToEndGoldFileIter710(unittest.TestCase):
     the full d_sw1..d_sw6 chain.
 
     Existing tests cover pieces (`_d_sw1_recompute_ut_vt`,
-    `_bgrid_ke_transport`, `_d_sw5_corner_divergence`,
+    `_bgrid_ke_transport`, `d_sw5_corner_divergence`,
     `_corner_vorticity`, `_vorticity_flux`, etc.) but there is NO
     end-to-end lock on the full chain including the d_sw6 wind
     update formula `u_new = u_old + (ke_diff_u + fy_vort) * rdx_u`
@@ -11426,8 +11426,8 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
     `vort = abs(dt) * sqrt(delpc**2 + vort**2)` (line 1799) when
     `dddmp > 1e-5`.
 
-    Python's counterpart at `_d_sw5_corner_divergence` (fv3_sw_core.py:
-    1085) is `_interp_center_to_corner(wk, cdgrid)` — a simple
+    Python's counterpart at `d_sw5_corner_divergence` (fv3_sw_core.py:
+    1085) is `interp_center_to_corner(wk, cdgrid)` — a simple
     **4-point (2x2) average** = `0.25 * (f[i,j] + f[i+1,j] + f[i,j+1]
     + f[i+1,j+1])`, which is 2nd-order accurate.
 
@@ -11445,14 +11445,14 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
     """
 
     def test_d_sw5_adaptive_smag_gold_file_exercises_interp(self):
-        """Gold-file test on `_d_sw5_corner_divergence` in the adaptive
+        """Gold-file test on `d_sw5_corner_divergence` in the adaptive
         Smagorinsky regime (`nord=1, dddmp > 1e-5`) — the ONLY production
-        path where `_interp_center_to_corner` feeds into the output.
+        path where `interp_center_to_corner` feeds into the output.
 
         Iter-708 (Codex iter-707 finding): the standalone
         `test_interp_center_to_corner_is_4point_average` doesn't cover
-        the production usage — if someone swaps `_interp_center_to_corner`
-        for a different interpolation ONLY inside `_d_sw5_corner_divergence`,
+        the production usage — if someone swaps `interp_center_to_corner`
+        for a different interpolation ONLY inside `d_sw5_corner_divergence`,
         the standalone test still passes because it directly calls the
         function.  This gold-file test records the end-to-end output
         with the current 2nd-order interpolation baked in: a switch
@@ -11466,7 +11466,7 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
-        from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
+        from legoesm.core.fv3_sw_core import d_sw5_corner_divergence
 
         n = 8
         grid = create_cubed_sphere(n=n, use_duogrid=True)
@@ -11477,11 +11477,11 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
         ua = jnp.asarray(rng.standard_normal((6, n, n)))
         va = jnp.asarray(rng.standard_normal((6, n, n)))
 
-        ke = np.asarray(_d_sw5_corner_divergence(
+        ke = np.asarray(d_sw5_corner_divergence(
             u_d, v_d, ua, va, cdgrid, dt=0.1,
             d2_bg=0.0, dddmp=0.2, d4_bg=0.16, nord=1))
         self.assertEqual(ke.shape, (6, 9, 9))
-        # Pinned fingerprints — will shift if _interp_center_to_corner
+        # Pinned fingerprints — will shift if interp_center_to_corner
         # is swapped or the wk formula changes.  Tolerance is RELATIVE
         # (rtol=1e-6): a real scheme change (e.g. 2nd→4th-order corner
         # interp) shifts these O(dx²)≈% — orders of magnitude above
@@ -11518,7 +11518,7 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
         _rel((ke ** 2).sum(), 3092196932490.258, "ke L2²")
 
     def test_interp_center_to_corner_is_4point_average(self):
-        """Verify Python's _interp_center_to_corner returns the
+        """Verify Python's interp_center_to_corner returns the
         4-point average `0.25*(f[i,j] + f[i+1,j] + f[i,j+1] + f[i+1,j+1])`
         at an INTERIOR corner (where halo effects are negligible)."""
         import numpy as np
@@ -11526,7 +11526,7 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
-        from legoesm.core.operators_cdgrid import _interp_center_to_corner
+        from legoesm.core.operators_cdgrid import interp_center_to_corner
 
         n = 8
         grid = create_cubed_sphere(n=n, use_duogrid=True)
@@ -11534,7 +11534,7 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
         rng = np.random.default_rng(707)
         field = jnp.asarray(rng.standard_normal((6, n, n)))
         field_np = np.asarray(field)
-        corners = np.asarray(_interp_center_to_corner(field, cdgrid))
+        corners = np.asarray(interp_center_to_corner(field, cdgrid))
         self.assertEqual(corners.shape, (6, n + 1, n + 1))
 
         # Interior corner (i, j) in [2, n-1] — far from face edges so
@@ -11548,7 +11548,7 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
                 got = corners[:, i, j]
                 diff = float(np.max(np.abs(got - expected)))
                 self.assertLess(diff, 1e-12,
-                    msg=(f"_interp_center_to_corner at interior corner "
+                    msg=(f"interp_center_to_corner at interior corner "
                          f"({i}, {j}) differs from 4-point average by "
                          f"{diff:.3e}.  If this is an intentional upgrade "
                          f"to 4th-order (a2b_ord4), update iter-707 "
@@ -11563,7 +11563,7 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
     `divg_d(corner) ± uc(corner)`, gated on `.not. duogrid`) was
     ABSENT in Python.  iter-862 ports Check 3 from iter-849's d_sw5
     fidelity audit and ADDS that correction to
-    `_d_sw5_corner_divergence` — but ALWAYS gated on
+    `d_sw5_corner_divergence` — but ALWAYS gated on
     `cdgrid.base.duogrid is None` (the Python equivalent of the
     Fortran `.not. flagstruct%duogrid` gate).  The original
     "MUST stay ABSENT" contract is therefore obsolete; the lock is
@@ -11591,7 +11591,7 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
     the iter-862 patch even when the halo input remains imperfect.
 
     Production (`fv3_sw_tendencies`) does NOT call
-    `_d_sw5_corner_divergence`; iter-862 does NOT alter any
+    `d_sw5_corner_divergence`; iter-862 does NOT alter any
     production W2 / W5 / cosine bell sentinel.
     """
 
@@ -11807,7 +11807,7 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
         The original iter-703/704/705/706 contract asserted that the
         Fortran non-duogrid corner correction (`divg_d ± uc[corner]`)
         was ABSENT from the entire `src/legoesm` tree.  iter-862 ports
-        that correction into `_d_sw5_corner_divergence` (Check 3 from
+        that correction into `d_sw5_corner_divergence` (Check 3 from
         iter-849's d_sw5 fidelity audit), gated on
         `cdgrid.base.duogrid is None` (Python equivalent of Fortran's
         `.not. flagstruct%duogrid`).  The "MUST stay ABSENT" lock is
@@ -11815,7 +11815,7 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
 
         The iter-862 contract — corrections fire ONLY in the legacy
         non-duogrid mode and only inside the well-known
-        `_d_sw5_corner_divergence` helper — is locked positively by
+        `d_sw5_corner_divergence` helper — is locked positively by
         `test_corner_corrections_are_duogrid_gated` above.  That test
         verifies any cube-corner `delpc` / `divg_d` mutation reading
         from `vort` / `uc` lives inside an
@@ -11864,7 +11864,7 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
 
 
 class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
-    """Iter-702 gold-file regression test for `_d_sw5_corner_divergence`
+    """Iter-702 gold-file regression test for `d_sw5_corner_divergence`
     (FV3 sw_core.F90:1641-1821 duogrid branch).
 
     Closes iter-683/685 backlog entries for d_sw5 lines 1569 and 1644
@@ -11911,10 +11911,10 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
         change, not a regression).
         """
         import numpy as np
-        from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
+        from legoesm.core.fv3_sw_core import d_sw5_corner_divergence
 
         cdgrid, u_d, v_d, ua, va = self._setup()
-        ke = np.asarray(_d_sw5_corner_divergence(
+        ke = np.asarray(d_sw5_corner_divergence(
             u_d, v_d, ua, va, cdgrid, dt=0.1,
             d2_bg=0.01, dddmp=0.2, d4_bg=0.0, nord=0))
         self.assertEqual(ke.shape, (6, 9, 9))
@@ -11944,10 +11944,10 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
         spherical get_area) and will re-pin on a future spherical upgrade.
         """
         import numpy as np
-        from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
+        from legoesm.core.fv3_sw_core import d_sw5_corner_divergence
 
         cdgrid, u_d, v_d, ua, va = self._setup()
-        ke = np.asarray(_d_sw5_corner_divergence(
+        ke = np.asarray(d_sw5_corner_divergence(
             u_d, v_d, ua, va, cdgrid, dt=0.1,
             d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1))
         self.assertEqual(ke.shape, (6, 9, 9))
@@ -11964,21 +11964,21 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
         """Perturbing one cell of u_d must visibly change ke_damping —
         catches stubbed-no-op regressions."""
         import numpy as np
-        from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
+        from legoesm.core.fv3_sw_core import d_sw5_corner_divergence
 
         cdgrid, u_d, v_d, ua, va = self._setup()
-        ke_base = np.asarray(_d_sw5_corner_divergence(
+        ke_base = np.asarray(d_sw5_corner_divergence(
             u_d, v_d, ua, va, cdgrid, dt=0.1,
             d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1))
         u_pert = u_d.at[0, 4, 4].add(5.0)
-        ke_pert = np.asarray(_d_sw5_corner_divergence(
+        ke_pert = np.asarray(d_sw5_corner_divergence(
             u_pert, v_d, ua, va, cdgrid, dt=0.1,
             d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1))
         max_change = float(np.max(np.abs(ke_pert - ke_base)))
         self.assertGreater(max_change, 1.0,
             msg=(f"Perturbing u_d at one cell produced max "
                  f"Δke_damping {max_change:.3e} < 1.0 — "
-                 f"_d_sw5_corner_divergence may be a stubbed no-op."))
+                 f"d_sw5_corner_divergence may be a stubbed no-op."))
 
 
 class TestDSw4StructuralLockAstScanner(unittest.TestCase):

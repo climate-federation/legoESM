@@ -177,7 +177,7 @@ class TestCubeCswW2Residual:
 
     def test_w2_csw_pgrad_c_residual_bounded(self):
         from legoesm.core.fv3_sw_core import (
-            _c_sw, _d2a2c_vect, _p_grad_c,
+            _c_sw, d2a2c_vect, _p_grad_c,
         )
         from legoesm import constants
 
@@ -196,7 +196,7 @@ class TestCubeCswW2Residual:
         dt = 1800.0
         dt2 = 0.5 * dt
 
-        _ua, _va, uc_base, vc_base, _ut, _vt = _d2a2c_vect(
+        _ua, _va, uc_base, vc_base, _ut, _vt = d2a2c_vect(
             u_d, v_d, cdgrid)
         h_star, uc_new, vc_new, _ua2, _va2 = _c_sw(
             h, u_d, v_d, h_s, cdgrid, dt, constants.g)

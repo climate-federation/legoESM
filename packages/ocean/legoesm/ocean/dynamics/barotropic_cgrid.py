@@ -423,7 +423,7 @@ def barotropic_substeps_fv3sw(
 
 # ==============================================================================
 # FV3-faithful barotropic via the TRUE FV3 edge-staggered SW core (FV3Edge):
-# upwind absolute-vorticity flux + _d2a2c_vect (sin_sg upwind, corner 2x2 solve).
+# upwind absolute-vorticity flux + d2a2c_vect (sin_sg upwind, corner 2x2 solve).
 # Gated by barotropic_staggering="fv3edge"; the default "fv3sw" (corner-staggered
 # CDGridShallowWaterModel) is unchanged.  cc<->edge lift round-trips to 0.1% on a
 # smooth field (validated).
@@ -478,7 +478,7 @@ def barotropic_substeps_fv3edge(
     sw_edge_model,
 ) -> OceanState:
     """Barotropic substeps via the TRUE FV3 edge-staggered SW core
-    (``FV3EdgeShallowWaterModel``: upwind absolute-vorticity flux + ``_d2a2c_vect``
+    (``FV3EdgeShallowWaterModel``: upwind absolute-vorticity flux + ``d2a2c_vect``
     + RK3 + div-damp) — the algorithmically-faithful counterpart to
     :func:`barotropic_substeps_fv3sw` (corner-staggered, centered).  Gated by
     ``barotropic_staggering="fv3edge"``.

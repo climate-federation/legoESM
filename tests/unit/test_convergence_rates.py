@@ -499,8 +499,9 @@ class TestTimeIntegratorOrder:
                           name="phis_hat", dims=("n_sh",), units="m2/s2"),
         )
 
+        # Background depth H0 enters via the initial phi_hat (h_grid = H0 + bump);
+        # the removed config field of that name was never read by the solver.
         config = SpectralSWConfig(
-            mean_depth=H0,
             hyperdiff_coeff=0.0,
             spectral_filter_order=0,
         )

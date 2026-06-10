@@ -3,7 +3,7 @@
 These tests prevent regressions of the #356 bug class — rank-dependent code
 branching in the lat-lon C-grid dynamics, where a fold-descriptor
 ``is_active`` gate that does NOT also check fold locality (``fold_j >= 0`` /
-``_fold_is_local``) produces different MPI call counts or rank-local-only
+``fold_is_local``) produces different MPI call counts or rank-local-only
 values at partition cuts.  See ``docs/DISTRIBUTED_ARCHITECTURE.md``.
 
 The audit is AST-based (not a line regex), so it is robust to multiline
@@ -24,7 +24,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[2]
 
 # Lat-lon C-grid dynamics modules whose fold-dependent branches must route
-# through ``_fold_is_local`` (the ``fold_j >= 0`` locality check).
+# through ``fold_is_local`` (the ``fold_j >= 0`` locality check).
 _AUDITED = [
     "packages/core/legoesm/grids/operators_latlon_cgrid.py",
     "packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py",
@@ -34,7 +34,7 @@ _AUDITED = [
 ]
 
 # Reading the raw flag is legitimate only inside these canonical helpers.
-_HELPER_DEFS = {"is_tripolar", "_fold_is_local"}
+_HELPER_DEFS = {"is_tripolar", "fold_is_local"}
 
 
 def _is_active_access(node: ast.AST) -> bool:
@@ -85,9 +85,9 @@ def audit_source(text: str) -> list[str]:
     """Return a list of offending ``lineno: text`` for bare fold gates.
 
     An offender is an ``is_active`` access on a *fold descriptor* that is
-    NOT inside the ``is_tripolar`` / ``_fold_is_local`` definitions and whose
+    NOT inside the ``is_tripolar`` / ``fold_is_local`` definitions and whose
     enclosing statement does not also carry a locality check (``fold_j`` or a
-    ``_fold_is_local(...)`` call).
+    ``fold_is_local(...)`` call).
     """
     tree = ast.parse(text)
     src_lines = text.splitlines()
@@ -169,7 +169,7 @@ def audit_source(text: str) -> list[str]:
         return any(
             isinstance(n, ast.Call)
             and isinstance(n.func, ast.Name)
-            and n.func.id == "_fold_is_local"
+            and n.func.id == "fold_is_local"
             for n in ast.walk(node)
         )
 
@@ -212,7 +212,7 @@ def audit_source(text: str) -> list[str]:
         return False
 
     def _has_locality_check(guard: ast.AST, is_active_node: ast.AST) -> bool:
-        # Canonical helper call (``_fold_is_local(...)`` or its negation).
+        # Canonical helper call (``fold_is_local(...)`` or its negation).
         if _calls_fold_is_local(guard):
             return True
         negated = _negated_within(guard, is_active_node)
@@ -233,7 +233,7 @@ def audit_source(text: str) -> list[str]:
             )
             return active_conjunct and has_foldj
         # Inverse / early-return predicate: ``fold is None or not is_active
-        # or fold_j < 0`` (== ``not _fold_is_local``).
+        # or fold_j < 0`` (== ``not fold_is_local``).
         ops = _bool_operands(guard, ast.Or)
         has_neg_foldj = any(
             any(_foldj_compare(n, positive=False) for n in ast.walk(op))
@@ -263,7 +263,7 @@ def test_no_bare_is_active_fold_gate(rel):
     assert path.exists(), f"audited module missing: {rel}"
     offenders = audit_source(path.read_text())
     assert not offenders, (
-        "Bare fold `.is_active` gate without a `fold_j`/`_fold_is_local` "
+        "Bare fold `.is_active` gate without a `fold_j`/`fold_is_local` "
         "locality check (rank-dependent branching risk; see "
         f"docs/DISTRIBUTED_ARCHITECTURE.md, issue #359) in {rel}:\n  "
         + "\n  ".join(offenders)
@@ -295,15 +295,15 @@ _FLAGGED = [
 
 _NOT_FLAGGED = [
     "if fold.is_active and fold.fold_j >= 0:\n    x = 1\n",
-    "if _fold_is_local(grid):\n    x = 1\n",
+    "if fold_is_local(grid):\n    x = 1\n",
     # multiline locality check on the same expression
     "if (fold.is_active\n        and fold.fold_j >= 0):\n    x = 1\n",
     # canonical helper definitions
     "def is_tripolar(grid):\n    fold = grid.fold\n    return fold is not None and bool(fold.is_active)\n",
-    "def _fold_is_local(grid):\n    fold = grid.fold\n    return fold.is_active and fold.fold_j >= 0\n",
-    # inverse / early-return owner predicate (== not _fold_is_local)
+    "def fold_is_local(grid):\n    fold = grid.fold\n    return fold.is_active and fold.fold_j >= 0\n",
+    # inverse / early-return owner predicate (== not fold_is_local)
     "if fold is None or not fold.is_active or fold.fold_j < 0:\n    return simple\n",
-    "if not _fold_is_local(grid):\n    return simple\n",
+    "if not fold_is_local(grid):\n    return simple\n",
     # unrelated active mask (partial-cell coordinate)
     "v = compute(z_coord.is_active, grid)\n",
     "if state.is_active:\n    x = 1\n",
@@ -325,7 +325,7 @@ def test_audit_ignores_safe_and_unrelated(snippet):
 def test_fold_is_local_helper_exists_and_is_single_source():
     core = _ROOT / "packages/core/legoesm/grids/operators_latlon_cgrid.py"
     text = core.read_text()
-    assert "def _fold_is_local(grid)" in text
+    assert "def fold_is_local(grid)" in text
     assert "fold.fold_j >= 0" in text
 
 
@@ -333,5 +333,5 @@ def test_architecture_doc_present():
     doc = _ROOT / "docs/DISTRIBUTED_ARCHITECTURE.md"
     assert doc.exists(), "docs/DISTRIBUTED_ARCHITECTURE.md (issue #359) missing"
     body = doc.read_text()
-    for anchor in ("Pre-pad-then-operate", "_fold_is_local", "is_tripolar"):
+    for anchor in ("Pre-pad-then-operate", "fold_is_local", "is_tripolar"):
         assert anchor in body, f"architecture doc missing section: {anchor}"

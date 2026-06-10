@@ -3,10 +3,10 @@ iv=0 (positive-definite) limiter for hord=9.
 
 FV3 tp_core.F90:610 — `if(iord==9 .or. iord==13) call pert_ppm(...,0)` —
 so for the SCALAR / mass / vorticity transport (`fv_tp_2d` → `_ppm_1d`),
-iord/hord=9 uses pert_ppm with iv=0.  iv=1 (`_pert_ppm`) is FV3's
+iord/hord=9 uses pert_ppm with iv=0.  iv=1 (`pert_ppm`) is FV3's
 boundary-only limiter and the separate momentum (ytp_v/xtp_u) path.
 
-The `_ppm_1d` hord==9 branch previously dispatched to `_pert_ppm` (iv=1),
+The `_ppm_1d` hord==9 branch previously dispatched to `pert_ppm` (iv=1),
 a latent mislabel (unexercised because live scalar callers use the hord=12
 default, which is already iv=0).  These tests pin the corrected dispatch:
 hord=9 must now be bit-identical to hord=12 (both iv=0), and that identity
@@ -21,7 +21,7 @@ jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
-from legoesm.core.fv_tp_2d import _ppm_1d, _pert_ppm, _pert_ppm_iv0  # noqa: E402
+from legoesm.core.fv_tp_2d import _ppm_1d, pert_ppm, _pert_ppm_iv0  # noqa: E402
 
 
 def test_iv0_and_iv1_actually_differ():
@@ -33,7 +33,7 @@ def test_iv0_and_iv1_actually_differ():
     bl = jnp.array([[-0.9]])   # left edge well below q
     br = jnp.array([[-0.9]])   # right edge well below q → parabola min < 0
     bl0, br0 = _pert_ppm_iv0(q, bl, br)
-    bl1, br1 = _pert_ppm(bl, br)
+    bl1, br1 = pert_ppm(bl, br)
     assert not (np.allclose(bl0, bl1) and np.allclose(br0, br1)), (
         "iv=0 and iv=1 limiters coincide on the discriminating input — "
         "the hord9/hord12 equality test would be vacuous")

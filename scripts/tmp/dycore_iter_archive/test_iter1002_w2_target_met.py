@@ -517,7 +517,7 @@ def test_iter59_cube_cb_12day_matrix_config():
         FV3EdgeShallowWaterModel,
         iter1009_dual_target_config,
     )
-    from legoesm.core.fv3_sw_core import _d2a2c_vect
+    from legoesm.core.fv3_sw_core import d2a2c_vect
     from legoesm.core.fv_tp_2d import transport_step
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from tests.test_cases.cosine_bell import (
@@ -533,7 +533,7 @@ def test_iter59_cube_cb_12day_matrix_config():
     model = FV3EdgeShallowWaterModel(grid, cfg)
     cdgrid = model.cdgrid
     state = cosine_bell_cubesphere(grid, cdgrid, beta)
-    _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(state.u_d, state.v_d, cdgrid)
+    _ua, _va, _uc, _vc, ut, vt = d2a2c_vect(state.u_d, state.v_d, cdgrid)
     area64 = grid.area.astype(jnp_local.float64)
     mass_target = float(
         jnp_local.sum(state.h.astype(jnp_local.float64) * area64),

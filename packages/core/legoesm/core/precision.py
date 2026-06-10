@@ -55,7 +55,7 @@ _PRECISION_NAME_TO_DTYPE = {
 }
 
 
-def _parse_dtype(value, *, field_name: str, allow_none: bool = False):
+def parse_dtype(value, *, field_name: str, allow_none: bool = False):
     """Parse a precision config value into a JAX dtype."""
     if value is None:
         if allow_none:
@@ -245,7 +245,7 @@ def set_module_override(module: str, **role_overrides: str) -> None:
         if value is None:
             _MODULE_OVERRIDES[module].pop(role, None)
         else:
-            _MODULE_OVERRIDES[module][role] = _parse_dtype(
+            _MODULE_OVERRIDES[module][role] = parse_dtype(
                 value, field_name=f"{module}.{role}",
             )
 

@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from legoesm.core.fv_tp_2d import (
-    _pert_ppm,           # iord=9
+    pert_ppm,           # iord=9
     _pert_ppm_iv0,       # iord=12
     apply_hord8_limiter, # iord=8
     apply_hord10_limiter,# iord=10
@@ -56,7 +56,7 @@ def test_all_five_iord_variants_distinct():
     bl, br, dm = _build_bl_br_dm(q)
 
     # Apply each variant
-    bl9, br9 = _pert_ppm(bl, br)
+    bl9, br9 = pert_ppm(bl, br)
     bl12, br12 = _pert_ppm_iv0(q, bl, br)
     bl8, br8 = apply_hord8_limiter(bl, br, dm)
     bl11, br11 = apply_hord11_limiter(bl, br, dm, ppm_fac=1.5)
@@ -93,7 +93,7 @@ def test_smooth_region_all_variants_agree():
     bl, br, dm = _build_bl_br_dm(q)
 
     for name, fn in [
-        ("iord=9",  lambda: _pert_ppm(bl, br)),
+        ("iord=9",  lambda: pert_ppm(bl, br)),
         ("iord=12", lambda: _pert_ppm_iv0(q, bl, br)),
         ("iord=8",  lambda: apply_hord8_limiter(bl, br, dm)),
         ("iord=11", lambda: apply_hord11_limiter(bl, br, dm)),

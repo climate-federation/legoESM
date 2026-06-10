@@ -1,7 +1,7 @@
 """FV3_3D iter 585: FV3 iord=8 Lin (1996) monotonicity limiter.
 
 Adds ``apply_hord8_limiter`` to ``legoesm.core.fv_tp_2d`` as an
-alternative to the iord=9 ``_pert_ppm`` limiter.
+alternative to the iord=9 ``pert_ppm`` limiter.
 
 Tests
 -----

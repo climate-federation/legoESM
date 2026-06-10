@@ -41,9 +41,9 @@ from legoesm.atmosphere.physics.thermodynamics import (
 from legoesm.atmosphere.physics.convection.config import TiedtkeConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.mass_flux import (
-    _apply_mass_flux_kernel,
+    apply_mass_flux_kernel,
     stratosphere_mass_flux_gate,
-    _compute_column_geometry,
+    compute_column_geometry,
 )
 from legoesm.atmosphere.physics.convection._triggers import (
     cape_trigger,
@@ -108,7 +108,7 @@ def tiedtke_convection(
 
     # -- Column geometry, moist adiabat, CAPE ------------------------------
     # Use virtual-T moist hydrostatic geometry (clean_physics iter-2 #2).
-    dz, rho, z = _compute_column_geometry(T, p_full, p_half, q_v=q_v)
+    dz, rho, z = compute_column_geometry(T, p_full, p_half, q_v=q_v)
     T_base = T[:, -1]
     q_base = q_v[:, -1]
     p_base = p_full[:, -1]
@@ -267,7 +267,7 @@ def tiedtke_convection(
         + midlevel_weight * config.delta_midlevel
     )
     # Pass the per-column blended delta_0 directly to the kernel.
-    # ``_apply_mass_flux_kernel`` uses ``delta_0`` ONLY in the
+    # ``apply_mass_flux_kernel`` uses ``delta_0`` ONLY in the
     # detrainment terms (``delta_0 * M * (T_u - T) / rho``,
     # ``delta_0 * M * (q_v_u - q_v) / rho``); the compensating-subsidence
     # contributions are independent of ``delta_0``.  The earlier
@@ -277,7 +277,7 @@ def tiedtke_convection(
     # shallow-only column with ``delta_shallow > delta_deep`` this
     # over-amplifies the subsidence drying / warming by the same factor
     # the detrainment is enhanced.
-    dT_dt, dq_v_dt, _ = _apply_mass_flux_kernel(
+    dT_dt, dq_v_dt, _ = apply_mass_flux_kernel(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, M_u_for_kernel,
         z, rho, delta_0_eff[:, None], M_u_max=config.M_b_max,

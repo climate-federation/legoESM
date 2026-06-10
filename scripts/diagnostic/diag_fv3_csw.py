@@ -47,9 +47,9 @@ v_d = 0.5 * (v_pad[:, :-1, 1:-1] + v_pad[:, 1:, 1:-1])
 h_s = jnp.zeros_like(h)
 
 # Test d2a2c_vect with duogrid
-from legoesm.core.fv3_sw_core import _d2a2c_vect
+from legoesm.core.fv3_sw_core import d2a2c_vect
 print("\n--- Testing d2a2c_vect ---")
-ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+ua, va, uc, vc, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
 
 # Check that ua, va make sense (should be close to geographic wind)
 from legoesm.grids.cubed_sphere import rotate_winds_grid_to_geo

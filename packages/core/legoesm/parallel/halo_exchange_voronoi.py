@@ -121,11 +121,11 @@ def _exchange_mpi(
     the previous result exactly, order-independent.
     """
     from legoesm.parallel.reductions import (
-        _mpi4jax_array_result,
-        _require_mpi_stack,
+        mpi4jax_array_result,
+        require_mpi_stack,
     )
 
-    mpi4jax, MPI = _require_mpi_stack()
+    mpi4jax, MPI = require_mpi_stack()
 
     # Use a type-based tag offset to avoid collisions between
     # cell / edge / vertex exchanges in the same JIT trace.
@@ -150,7 +150,7 @@ def _exchange_mpi(
                 (r_count,) + field.shape[1:], dtype=field.dtype,
             )
 
-        recv_data = _mpi4jax_array_result(
+        recv_data = mpi4jax_array_result(
             mpi4jax.sendrecv(
                 send_buf,
                 recv_buf,

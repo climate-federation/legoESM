@@ -36,7 +36,7 @@ def pad_ns_zero(interior: jnp.ndarray) -> jnp.ndarray:
         continuous data across the cut.  Routes through
         :func:`legoesm.grids.halo_latlon.pad_with_pole_bc_lat` which
         in turn delegates to
-        :func:`legoesm.parallel.latlon_mpi._pad_with_pole_bc_lat_mpi`.
+        :func:`legoesm.parallel.latlon_mpi.pad_with_pole_bc_lat_mpi`.
 
     Parameters
     ----------
@@ -66,14 +66,14 @@ def is_tripolar(grid) -> bool:
     Under MPI latitude-band decomposition, ``is_tripolar`` returns True on
     ALL ranks of a tripolar run (the fold is active on every rank, even
     though the fold seam is physically present only on the northernmost
-    rank).  Use :func:`_fold_is_local` to test whether the fold seam is
+    rank).  Use :func:`fold_is_local` to test whether the fold seam is
     locally present for fold-specific computations.
     """
     fold = getattr(grid, "fold", None)
     return fold is not None and bool(fold.is_active)
 
 
-def _fold_is_local(grid) -> bool:
+def fold_is_local(grid) -> bool:
     """Return True if the tripolar fold seam is physically local to this rank.
 
     Under MPI decomposition, ``is_tripolar(grid)`` is True on all ranks of
@@ -96,7 +96,7 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
 
     Under MPI, all ranks call ``pad_ns_zero`` first (ensuring consistent
     MPI sendrecv call counts), then the northernmost rank replaces the
-    north ghost row with fold-permuted data via :func:`_fold_is_local`.
+    north ghost row with fold-permuted data via :func:`fold_is_local`.
 
     Parameters
     ----------
@@ -127,7 +127,7 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
     return padded
 
 
-def _fold_row(last_row, perm, sign, n_lon):
+def fold_row(last_row, perm, sign, n_lon):
     """Apply fold permutation with optional sign flip to one row."""
     n_cols = last_row.shape[1]
     if n_cols == n_lon:
@@ -150,7 +150,7 @@ def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
     fold = getattr(grid, "fold", None)
     if fold is not None and fold.is_active and fold.fold_j >= 0:
         n_lon = fold.perm_v.shape[0]
-        north = _fold_row(interior[-1:], fold.perm_v, fold.vector_sign_v, n_lon)
+        north = fold_row(interior[-1:], fold.perm_v, fold.vector_sign_v, n_lon)
         padded = jnp.concatenate([padded[:-1], north], axis=0)
     return padded
 
@@ -366,7 +366,7 @@ def gradient_y_cgrid(
 
     # Tripolar north fold seam: replace the north polar v-face gradient
     # with the fold-partner gradient on the rank that owns the seam.
-    if _fold_is_local(grid):
+    if fold_is_local(grid):
         fold = grid.fold
         f_partner = f[-1:, fold.perm_T]
         dy_fold = grid.dy_v[-1:]
@@ -706,7 +706,7 @@ def curl_vertex_cgrid(
     # pole row with the fold-permuted sub-polar vertex row (matches the
     # pad_ns_scalar fold convention; vertex fields carry an n_lon+1 wrap
     # column).
-    if _fold_is_local(grid):
+    if fold_is_local(grid):
         fold = grid.fold
         last = zeta[-2:-1]                              # (1, n_lon+1, ...)
         n_lon = fold.perm_T.shape[0]
@@ -717,7 +717,7 @@ def curl_vertex_cgrid(
     return zeta
 
 
-def _gradient_curl_to_u(
+def gradient_curl_to_u(
     zeta: jnp.ndarray,
     grid: LatLonGrid,
 ) -> jnp.ndarray:
@@ -748,7 +748,7 @@ def _gradient_curl_to_u(
         return diff / dy[bcast]
 
 
-def _gradient_curl_to_v(
+def gradient_curl_to_v(
     zeta: jnp.ndarray,
     grid: LatLonGrid,
 ) -> jnp.ndarray:
@@ -852,12 +852,12 @@ def vector_laplacian_cgrid(
 
     # Mask curl at land-adjacent vertices
     if mask is not None:
-        vmask = _compute_vertex_mask(mask, grid=grid)
+        vmask = compute_vertex_mask(mask, grid=grid)
         zeta = zeta * _bcast(vmask, zeta)
 
     # 4. Tangential gradient of curl at faces
-    grad_curl_u = _gradient_curl_to_u(zeta, grid)
-    grad_curl_v = _gradient_curl_to_v(zeta, grid)
+    grad_curl_u = gradient_curl_to_u(zeta, grid)
+    grad_curl_v = gradient_curl_to_v(zeta, grid)
 
     # 5. Vector Laplacian = grad(div) - curl(curl).  curl(curl F) =
     # k × ∇ζ = (-∂ζ/∂y, +∂ζ/∂x).  Signs verified via bump tests.
@@ -873,7 +873,7 @@ def vector_laplacian_cgrid(
     return vlap_u, vlap_v
 
 
-def _compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
+def compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
     """Compute vertex mask: wet only if all four surrounding cells are wet.
 
     Parameters

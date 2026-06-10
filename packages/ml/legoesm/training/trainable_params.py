@@ -46,11 +46,12 @@ _GRAY_RADIATION_TRAINABLE = [
     ParamConstraint("tau_pole", 1.0, 3.0, "sigmoid"),
 ]
 
-# Surface-albedo parameters.  The blended (ice/ocean) albedo reaches the
-# radiative heating only through the RRTMGP solver; the gray solver uses
-# its own static ``gray_config.sfc_albedo``, so under gray these never
-# receive a gradient from the segment loss.
-_RRTMGP_RADIATION_TRAINABLE = [
+# Surface-albedo parameters.  The blended (ice/ocean/land) albedo
+# reaches the radiative heating through BOTH solvers: RRTMGP consumes
+# ``albedo_col`` directly, and since 2026-06-10 the gray SW reflection
+# takes the blended albedo too (``gray_radiation(sfc_albedo=...)``) —
+# only ``radiation="none"`` leaves these without a gradient path.
+_ALBEDO_TRAINABLE = [
     ParamConstraint("albedo_ice", 0.4, 0.8, "sigmoid"),
     ParamConstraint("albedo_ocean", 0.03, 0.10, "sigmoid"),
 ]
@@ -83,11 +84,12 @@ def trainable_constraints_for_scheme(
     never train (zero gradient by construction), so an optimizer is not
     handed dead degrees of freedom:
 
-    - gray radiation consumes ``tau_equator``/``tau_pole`` but ignores the
-      blended surface albedo; rrtmgp consumes ``albedo_ice``/``albedo_ocean``
-      but discards the gray optical depths; ``none`` consumes neither.
+    - the gray optical depths ``tau_equator``/``tau_pole`` only feed the
+      gray solver (rrtmgp explicitly discards them);
+    - the blended-albedo pair trains under gray AND rrtmgp (both consume
+      the pipeline's blended surface albedo) but not ``radiation="none"``;
     - an active turbulence scheme owns the surface fluxes, so the bulk
-      ``C_H``/``C_E`` only train with ``turbulence_scheme="none"``.
+      ``C_H``/``C_E`` only train with ``turbulence_scheme="none"``;
     - only SBM has scheme-specific convection parameters.
 
     Parameters
@@ -109,8 +111,8 @@ def trainable_constraints_for_scheme(
     constraints: list[ParamConstraint] = []
     if radiation == "gray":
         constraints += _GRAY_RADIATION_TRAINABLE
-    elif radiation == "rrtmgp":
-        constraints += _RRTMGP_RADIATION_TRAINABLE
+    if radiation in ("gray", "rrtmgp"):
+        constraints += _ALBEDO_TRAINABLE
     if turbulence_scheme == "none":
         constraints += _BULK_SURFACE_TRAINABLE
     if convection_scheme == "sbm":

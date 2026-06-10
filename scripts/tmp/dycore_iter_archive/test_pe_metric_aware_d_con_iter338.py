@@ -5,7 +5,7 @@ Audit
 -----
 iter-208 PE ``damp_v_d_con`` (and iter-209 NH analogue) uses the
 simpler form ``ΔKE = u·du + 0.5·du² + v·dv + 0.5·dv²`` at corners
-+ ``_interp_corner_to_center``.  iter-238 audit documented this as
++ ``interp_corner_to_center``.  iter-238 audit documented this as
 a fidelity gap vs FV3 ``sw_core.F90:1980``::
 
     heat = -0.25 * d_con * rsin2 * (

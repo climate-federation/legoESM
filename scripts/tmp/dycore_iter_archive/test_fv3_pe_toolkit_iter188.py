@@ -137,13 +137,13 @@ def test_pe_fv3_config_fields_ast_regression():
 # tests/test_fv3_nh_toolkit_iter172.py NH guard structure.
 _PE_GATE_HELPER_PAIRS = [
     # iter-5: cell-centre constant + adaptive divergence damping
-    ("config.div_damp_coeff > 0", "_arakawa_lamb_gradient"),
+    ("config.div_damp_coeff > 0", "arakawa_lamb_gradient"),
     # iter-12: post-step del-n vorticity damping (gated in step,
     # not the tendency function — uses ``self.config.damp_v``).
     ("self.config.damp_v > 0.0", "fv3_del6_vorticity_damping"),
     # iter-14: 4th-order ζ corner interpolation
     ("config.use_fv3_a2b_zeta_corner",
-     "_interp_center_to_corner_a2b_ord4"),
+     "interp_center_to_corner_a2b_ord4"),
     # iter-16: corner-divergence damping (del-2)
     ("config.corner_div_damp_d2_bg > 0.0",
      "fv3_divergence_corner_3d"),
@@ -160,7 +160,7 @@ _PE_GATE_HELPER_PAIRS = [
     # future substring changes (like iter-190's) cannot drift.
     (ITER187_GATE, ITER187_HELPER),
     # iter-208: KE→heat conversion for damp_v.
-    ("self.config.damp_v_d_con > 0.0", "_interp_corner_to_center"),
+    ("self.config.damp_v_d_con > 0.0", "interp_corner_to_center"),
     # iter-218/219: per-step dissipative-heating cap.
     ("self.config.delt_max > 0.0", "jnp.clip"),
     # iter-221: corner-div damping d_con.
@@ -231,7 +231,7 @@ def test_iter188_ast_guard_self_check():
 
     # Drop each gate/helper one at a time; verify the check correctly
     # identifies it.  Note: the helper is shared across pairs (e.g.,
-    # ``_interp_center_to_corner_a2b_ord4`` appears in both iter-14
+    # ``interp_center_to_corner_a2b_ord4`` appears in both iter-14
     # and iter-187), so omitting one occurrence may not necessarily
     # remove all instances — the self-check iterates by INDEX of the
     # pair list and removes the literal at that index.

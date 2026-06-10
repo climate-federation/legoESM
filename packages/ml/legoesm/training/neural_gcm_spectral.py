@@ -43,11 +43,11 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
     SpectralPEConfig,
     spectral_pe_tendencies,
     spectral_pe_to_grid,
-    _compute_spectral_filter,
-    _compute_sponge_factor,
-    _apply_sponge_filter,
-    _apply_spectral_filter_to_state,
-    _apply_filter_to_tracers,
+    compute_spectral_filter,
+    compute_sponge_factor,
+    apply_sponge_filter,
+    apply_spectral_filter_to_state,
+    apply_filter_to_tracers,
 )
 from legoesm.core.field import Field
 from legoesm.grids.gaussian import (
@@ -638,11 +638,11 @@ def spectral_rollout(
 
             # Implicit sponge damping at model top
             if sponge_factor is not None:
-                new_state = _apply_sponge_filter(new_state, sponge_factor, ms)
+                new_state = apply_sponge_filter(new_state, sponge_factor, ms)
 
             # Exponential spectral filter on highest wavenumbers
             if spectral_filter is not None:
-                new_state = _apply_spectral_filter_to_state(
+                new_state = apply_spectral_filter_to_state(
                     new_state, spectral_filter,
                 )
 
@@ -651,7 +651,7 @@ def spectral_rollout(
             # tracer_filter is None or state.tracers is None).
             if tracer_filter is not None and new_state.tracers is not None:
                 new_state = new_state._replace(
-                    tracers=_apply_filter_to_tracers(
+                    tracers=apply_filter_to_tracers(
                         new_state.tracers, tracer_filter, grid,
                     )
                 )
@@ -744,14 +744,14 @@ def spectral_rollout(
         )
 
         if sponge_factor is not None:
-            new_state = _apply_sponge_filter(new_state, sponge_factor, ms)
+            new_state = apply_sponge_filter(new_state, sponge_factor, ms)
         if spectral_filter is not None:
-            new_state = _apply_spectral_filter_to_state(
+            new_state = apply_spectral_filter_to_state(
                 new_state, spectral_filter,
             )
         if tracer_filter is not None and new_state.tracers is not None:
             new_state = new_state._replace(
-                tracers=_apply_filter_to_tracers(
+                tracers=apply_filter_to_tracers(
                     new_state.tracers, tracer_filter, grid,
                 )
             )
@@ -1046,13 +1046,13 @@ def load_training_data(
     """
     import numpy as np
     from legoesm.training.era5_to_state import (
-        _open_era5_zarr, _resolve_var, ERA5Slice,
+        open_era5_zarr, resolve_var, ERA5Slice,
     )
     era5_config = TrainingERA5Config(dt_hours=6)
 
     # Open store once
     store = era5_config.zarr_store
-    ds = _open_era5_zarr(store)
+    ds = open_era5_zarr(store)
 
     # Resolve start offset from config.start_year (defaults to 2015).
     # The WeatherBench2 ERA5 zarr starts at 1959-01-01 00:00 UTC with
@@ -1176,7 +1176,7 @@ def load_training_data(
     level_dim = "level" if "level" in ds.dims else "pressure_level"
 
     # Load surface geopotential (static, no time dim)
-    phis_var = _resolve_var(ds, "geopotential_at_surface")
+    phis_var = resolve_var(ds, "geopotential_at_surface")
     if phis_var:
         phis_era5 = ds[phis_var].values.astype(np.float32)
     else:
@@ -1187,7 +1187,7 @@ def load_training_data(
         ds_t = ds.isel(time=time_idx)
 
         def _get_3d(name):
-            r = _resolve_var(ds_t, name)
+            r = resolve_var(ds_t, name)
             if r is None:
                 return np.zeros((len(lat), len(lon), len(plev_Pa)))
             data = ds_t[r].sel({level_dim: list(era5_config.levels)}).values
@@ -1204,9 +1204,9 @@ def load_training_data(
             return data.astype(np.float32)
 
         def _get_2d(name):
-            r = _resolve_var(ds_t, name)
+            r = resolve_var(ds_t, name)
             if r is None:
-                r = _resolve_var(ds, name)
+                r = resolve_var(ds, name)
                 if r is None:
                     return np.zeros((len(lat), len(lon)), dtype=np.float32)
                 return ds[r].values.squeeze().astype(np.float32)
@@ -1315,13 +1315,13 @@ def _train_spectral_loop(
 
     sponge_factor = None
     if pe_config.sponge_tau > 0:
-        sponge_factor = _compute_sponge_factor(
+        sponge_factor = compute_sponge_factor(
             sigma.sigma_full, pe_config.sponge_sigma,
             pe_config.sponge_tau, config.dt,
         )
     spectral_filter = None
     if pe_config.spectral_filter_strength > 0:
-        spectral_filter = _compute_spectral_filter(
+        spectral_filter = compute_spectral_filter(
             grid.ls, grid.n_max,
             order=pe_config.spectral_filter_order,
             cutoff_fraction=pe_config.spectral_filter_strength,

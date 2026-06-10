@@ -81,7 +81,7 @@ def compute_del6_metrics(cdgrid):
     return del6_u, del6_v
 
 
-def _del6_vt_flux(q, damp, nord, del6_u, del6_v, rarea, cdgrid):
+def del6_vt_flux(q, damp, nord, del6_u, del6_v, rarea, cdgrid):
     """Fortran `del6_vt_flux` port (sw_core.F90:2008-2121).
 
     Del-nord damping for the relative vorticity.  Returns edge
@@ -122,7 +122,7 @@ def _del6_vt_flux(q, damp, nord, del6_u, del6_v, rarea, cdgrid):
         raise ValueError(f"nord must be 0, 1, or 2; got {nord}")
     if q.ndim not in (3, 4):
         raise ValueError(
-            f"_del6_vt_flux expects q.ndim ∈ {{3, 4}}; "
+            f"del6_vt_flux expects q.ndim ∈ {{3, 4}}; "
             f"got ndim={q.ndim}, shape={tuple(q.shape)}."
         )
 
@@ -239,7 +239,7 @@ def fv3_del6_vorticity_damping(u_d, v_d, damp, nord, cdgrid):
     1. Circulation:  `vt = u * dx_at_v`, `ut = v * dy_at_u`.
     2. Cell-mean vorticity:
          `wk = rarea * (vt(i,j) - vt(i,j+1) - ut(i,j) + ut(i+1,j))`
-    3. Del-n flux: `(fx2, fy2) = _del6_vt_flux(wk, damp, nord, ...)`
+    3. Del-n flux: `(fx2, fy2) = del6_vt_flux(wk, damp, nord, ...)`
     4. Convert circulation-form damping to velocity form:
          `du_d = +fy2 / dx_edge_y`   (Fortran: u += fy2, but Fortran u
                                       is in circulation at that point)
@@ -324,8 +324,8 @@ def fv3_del6_vorticity_damping(u_d, v_d, damp, nord, cdgrid):
     ut_east  = ut[:, 1:, :]
     wk = rarea_b * (vt_south - vt_north - ut_west + ut_east)
 
-    # Step 3: del-n flux.  ``_del6_vt_flux`` is iter-1045 ndim-aware.
-    fx2, fy2 = _del6_vt_flux(
+    # Step 3: del-n flux.  ``del6_vt_flux`` is iter-1045 ndim-aware.
+    fx2, fy2 = del6_vt_flux(
         wk, damp, nord,
         del6_u=del6_u_m, del6_v=del6_v_m,
         rarea=rarea, cdgrid=cdgrid,

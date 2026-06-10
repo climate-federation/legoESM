@@ -44,7 +44,7 @@ from legoesm.parallel.mesh import (
     create_device_mesh,
     set_active_config,
 )
-from legoesm.parallel.reductions import _require_mpi_stack
+from legoesm.parallel.reductions import require_mpi_stack
 
 _active_topology: CommTopology | None = None
 _active_layout: DistributedLayout | SingleRankLayout | None = None
@@ -136,7 +136,7 @@ def initialize_distributed(
         )
 
     # Validate MPI dependencies before touching JAX distributed runtime.
-    _mpi4jax, MPI = _require_mpi_stack()
+    _mpi4jax, MPI = require_mpi_stack()
 
     # Get rank/size from MPI BEFORE initializing JAX distributed runtime.
     # This is the authoritative source — MPI is always available under mpirun.
@@ -304,7 +304,7 @@ def initialize_distributed_latlon(
        subsequent ``pad_halo_latlon`` / ``pad_with_pole_bc_lat``
        call inside the dycore dispatches through MPI sendrecv at
        partition cuts + pole-fold / wall-BC constants at boundary
-       ranks, and ``_is_distributed()`` returns True (gating
+       ranks, and ``is_distributed()`` returns True (gating
        conservation reductions).
 
     What this does NOT do
@@ -380,7 +380,7 @@ def initialize_distributed_latlon(
         global_n_lon = 2 * global_n_lat
 
     # Validate MPI dependencies before touching JAX.
-    _mpi4jax, MPI = _require_mpi_stack()
+    _mpi4jax, MPI = require_mpi_stack()
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     n_processes = comm.Get_size()
