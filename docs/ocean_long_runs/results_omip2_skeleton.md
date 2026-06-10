@@ -9,7 +9,7 @@ once the cluster run finishes.
 
 ## Setup
 
-* Driver: ``scripts/ocean_long_runs/run_omip2.py``
+* Driver: ``scripts/run/ocean_long_runs/run_omip2.py``
 * Grids: lat-lon C-grid @ 1 deg (180x360) + MPAS @ 100 km
 * Forcing: JRA55-do (Tsujino 2018) 1958-present, 3-hourly
 * Bulk fluxes: Large & Yeager 2009 (``bulk_flux_omip.py``)

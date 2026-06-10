@@ -16,9 +16,9 @@ scripts in this directory, driven through
 
 Usage:
     JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu \\
-        .venv/bin/python scripts/scm/ocean_column.py convection
+        .venv/bin/python scripts/matrix/scm/ocean_column.py convection
     JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu \\
-        .venv/bin/python scripts/scm/ocean_column.py ekman --hours 96
+        .venv/bin/python scripts/matrix/scm/ocean_column.py ekman --hours 96
 """
 
 from __future__ import annotations

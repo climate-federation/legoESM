@@ -562,7 +562,7 @@ def test_resolve_case_dirs_accepts_campaign_dir(tmp_path: Path) -> None:
 def test_submit_runtime_selector_rejects_python_and_conda_env() -> None:
     module = _load_script_module(
         "submit_neuralgcm_campaign_test",
-        "scripts/s2s/submit_neuralgcm_campaign.py",
+        "scripts/run/s2s/submit_neuralgcm_campaign.py",
     )
 
     with pytest.raises(ValueError, match="Use only one of --python or --conda-env"):
@@ -575,7 +575,7 @@ def test_submit_runtime_selector_rejects_python_and_conda_env() -> None:
 def test_plot_coupling_diagnostics_validates_inputs() -> None:
     module = _load_script_module(
         "plot_coupling_diagnostics_test",
-        "scripts/s2s/plot_coupling_diagnostics.py",
+        "scripts/run/s2s/plot_coupling_diagnostics.py",
     )
     coupled = xr.Dataset(
         {

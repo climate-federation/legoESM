@@ -18,10 +18,10 @@ Tiers
 
 Usage
 -----
-    JAX_ENABLE_X64=1 python scripts/pgf_validation/run_pgf_tier_ladder.py
-    JAX_ENABLE_X64=1 python scripts/pgf_validation/run_pgf_tier_ladder.py --tier 1
-    JAX_ENABLE_X64=1 python scripts/pgf_validation/run_pgf_tier_ladder.py --tier 2 --pgf-scheme smc03
-    JAX_ENABLE_X64=1 python scripts/pgf_validation/run_pgf_tier_ladder.py --tier 3 --days 90
+    JAX_ENABLE_X64=1 python scripts/validate/pgf_validation/run_pgf_tier_ladder.py
+    JAX_ENABLE_X64=1 python scripts/validate/pgf_validation/run_pgf_tier_ladder.py --tier 1
+    JAX_ENABLE_X64=1 python scripts/validate/pgf_validation/run_pgf_tier_ladder.py --tier 2 --pgf-scheme smc03
+    JAX_ENABLE_X64=1 python scripts/validate/pgf_validation/run_pgf_tier_ladder.py --tier 3 --days 90
 """
 
 from __future__ import annotations

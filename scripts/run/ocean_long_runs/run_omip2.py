@@ -23,10 +23,10 @@ Acceptance bars after 30 years:
 Usage::
 
     # Smoke (1 day, synthetic forcing) -- exercises every code path.
-    python scripts/ocean_long_runs/run_omip2.py --smoke --output results/ocean_long_runs/omip2_smoke
+    python scripts/run/ocean_long_runs/run_omip2.py --smoke --output results/ocean_long_runs/omip2_smoke
 
     # Production (30 years, real JRA55-do; cluster only):
-    python scripts/ocean_long_runs/run_omip2.py \\
+    python scripts/run/ocean_long_runs/run_omip2.py \\
         --grid latlon --resolution 180x360 --years 30 \\
         --jra55-cache $LEGOESM_CACHE/forcing/jra55_do \\
         --output results/ocean_long_runs/omip2_lat1deg

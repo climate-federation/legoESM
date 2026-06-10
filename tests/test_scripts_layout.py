@@ -44,15 +44,8 @@ SANCTIONED_ROOT_FILES = frozenset({"README.md", "__init__.py"})
 # Shrink-only: legacy dirs predating this ratchet, queued for re-homing.
 # Remove an entry the moment its dir is moved/deleted — a stale entry fails.
 # NEVER add to this set; a new unsanctioned dir must go straight to a bucket.
-LEGACY_DIRS_TODO = frozenset(
-    {
-        "ocean_long_runs",
-        "ocean_test_matrix",
-        "pgf_validation",
-        "s2s",
-        "scm",
-    }
-)
+# EMPTY since the audit-eng-practices cleanup (2026-06-10) — keep it empty.
+LEGACY_DIRS_TODO = frozenset()
 
 # Shrink-only: legacy root files queued for disposal (currently none).
 LEGACY_ROOT_FILES_TODO = frozenset()
@@ -74,11 +67,18 @@ def list_scripts_entries(scripts_dir: pathlib.Path) -> list[tuple[str, bool]]:
     return out
 
 
-def layout_violations(entries: list[tuple[str, bool]]) -> list[str]:
+def layout_violations(
+    entries: list[tuple[str, bool]],
+    *,
+    legacy_dirs: frozenset = LEGACY_DIRS_TODO,
+    legacy_files: frozenset = LEGACY_ROOT_FILES_TODO,
+) -> list[str]:
     """Pure checker (synthetically testable): violations for one listing.
 
     Two-way: flags (a) unsanctioned entries not in the legacy allowlists and
-    (b) allowlist entries that no longer exist (ratchet down).
+    (b) allowlist entries that no longer exist (ratchet down). The allowlists
+    are injectable so the self-tests stay non-vacuous after the real ones
+    shrink to empty.
     """
     names = {name for name, _ in entries}
     errors: list[str] = []
@@ -86,7 +86,7 @@ def layout_violations(entries: list[tuple[str, bool]]) -> list[str]:
         if is_dir:
             if name in SANCTIONED_BUCKETS:
                 continue
-            if name in LEGACY_DIRS_TODO:
+            if name in legacy_dirs:
                 continue
             errors.append(
                 f"unsanctioned scripts/ dir: {name}/ — new scripts go in a "
@@ -94,19 +94,19 @@ def layout_violations(entries: list[tuple[str, bool]]) -> list[str]:
                 f"File Layout); do NOT extend LEGACY_DIRS_TODO"
             )
         else:
-            if name in SANCTIONED_ROOT_FILES or name in LEGACY_ROOT_FILES_TODO:
+            if name in SANCTIONED_ROOT_FILES or name in legacy_files:
                 continue
             errors.append(
                 f"stray file at scripts/ root: {name} — only "
                 f"{sorted(SANCTIONED_ROOT_FILES)} allowed; debug/one-off "
                 f"scripts go in scripts/tmp/"
             )
-    for name in sorted(LEGACY_DIRS_TODO - names):
+    for name in sorted(legacy_dirs - names):
         errors.append(
             f"stale LEGACY_DIRS_TODO entry: {name} — dir is gone, remove the "
             f"allowlist entry (shrink-only ratchet)"
         )
-    for name in sorted(LEGACY_ROOT_FILES_TODO - names):
+    for name in sorted(legacy_files - names):
         errors.append(
             f"stale LEGACY_ROOT_FILES_TODO entry: {name} — file is gone, "
             f"remove the allowlist entry (shrink-only ratchet)"
@@ -131,27 +131,36 @@ def test_scripts_layout_ratchet() -> None:
 
 def test_layout_checker_flags_synthetic_violations() -> None:
     """Self-test (non-vacuous): known violations must trip the checker."""
+    legacy = frozenset({"old_campaign"})
     entries = [
         ("run", True),  # sanctioned bucket — ok
-        ("scm", True),  # legacy allowlisted — ok
+        ("old_campaign", True),  # legacy allowlisted — ok
         ("my_new_campaign", True),  # unsanctioned dir — must flag
         ("_scratch_debug.sbatch", False),  # stray root file — must flag
         ("README.md", False),  # sanctioned root file — ok
     ]
-    errors = layout_violations(entries)
+    errors = layout_violations(entries, legacy_dirs=legacy)
     assert any("my_new_campaign" in e for e in errors), errors
     assert any("_scratch_debug.sbatch" in e for e in errors), errors
     # And the sanctioned/allowlisted entries must NOT be flagged.
-    assert not any("scm" in e and "stale" not in e for e in errors), errors
-    # Missing allowlist entries (everything else in LEGACY_DIRS_TODO) are
-    # reported stale on this synthetic listing — that IS the two-way ratchet.
-    stale = [e for e in errors if "stale LEGACY_DIRS_TODO" in e]
-    assert len(stale) == len(LEGACY_DIRS_TODO) - 1, errors
+    assert not any("old_campaign" in e for e in errors), errors
+
+
+def test_layout_checker_flags_stale_allowlist_entry() -> None:
+    """Self-test: an allowlist entry whose dir is gone forces a shrink."""
+    errors = layout_violations(
+        [("run", True)], legacy_dirs=frozenset({"rehomed_dir"})
+    )
+    assert any(
+        "stale LEGACY_DIRS_TODO entry: rehomed_dir" in e for e in errors
+    ), errors
 
 
 def test_layout_checker_passes_sanctioned_listing() -> None:
-    """Self-test: a fully sanctioned listing (all legacy present) is clean."""
+    """Self-test: a fully sanctioned listing (incl. legacy present) is clean."""
     entries = [(b, True) for b in sorted(SANCTIONED_BUCKETS)]
-    entries += [(d, True) for d in sorted(LEGACY_DIRS_TODO)]
+    entries += [("old_campaign", True)]
     entries += [(f, False) for f in sorted(SANCTIONED_ROOT_FILES)]
-    assert layout_violations(entries) == []
+    assert (
+        layout_violations(entries, legacy_dirs=frozenset({"old_campaign"})) == []
+    )

@@ -76,7 +76,7 @@ OUTPUT_DIR = Path("results/ocean/global_overturning_mpas_baseline")
 # ico4 is the closest match to lat-lon 36×72 (5°): ~4° spacing, 2562 cells.
 MPAS_SUBDIVISION_LEVEL = 4
 
-# Lesson from scripts/ocean_test_matrix/experiments.py:run_global_barotropic_wind:
+# Lesson from scripts/matrix/ocean_test_matrix/experiments.py:run_global_barotropic_wind:
 # "MPAS ico3 needs higher viscosity than lat-lon at comparable resolution —
 #  the TRiSK discretization on irregular cells requires more dissipation
 #  to remain stable with correct bottom drag."  Apply the same floor here.

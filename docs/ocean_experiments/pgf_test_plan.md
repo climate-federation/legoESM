@@ -368,7 +368,7 @@ varying η and stratification don't reactivate the partial-cell pathology.
 - `tests/ocean/pgf/test_pgf_tiers.py` — parameterised Tier 1-3 tests
 - `tests/ocean/pgf/test_pgf_equatorial.py` — equatorial diagnostics
 - `src/legoesm/ocean/diagnostics/pgf_diagnostics.py` — D1, D2, D3
-- `scripts/pgf_validation/run_pgf_tier_ladder.py` — full tier runner
+- `scripts/validate/pgf_validation/run_pgf_tier_ladder.py` — full tier runner
 
 ### Files to modify
 - `src/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py` — Bug #1 fix

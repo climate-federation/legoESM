@@ -161,7 +161,7 @@ class _CaseSpec:
 
 def _build_setup(grid_type: str, res: str, *, H_max: float, nlev: int):
     """Return (grid, z_coord, model, state) for a fresh rest-state init."""
-    scripts_dir = str(Path(__file__).resolve().parents[1])
+    scripts_dir = str(Path(__file__).resolve().parents[2] / "matrix")  # ocean_test_matrix package home
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
     from ocean_test_matrix.setup import (

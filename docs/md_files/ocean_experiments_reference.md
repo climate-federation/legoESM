@@ -431,7 +431,7 @@ None. Free adjustment.
 - **T_drift_relative < 1e-8 (test-matrix runner gate)** — geostrophic_adjustment has no T forcing or T diffusion, so the
   test-matrix runner gate is tightened to 1e-8 in both
   `scripts/matrix/run_ocean_test_matrix.py:run_geostrophic_adjustment` and
-  `scripts/ocean_test_matrix/experiments.py:run_geostrophic_adjustment`.  Empirically observed drift is roundoff-level
+  `scripts/matrix/ocean_test_matrix/experiments.py:run_geostrophic_adjustment`.  Empirically observed drift is roundoff-level
   (~1e-16 to 1e-12) on all supported grids; 1e-8 leaves a wide safety margin and catches numerical bugs that the loose
   1e-3 contract would miss.
 - T_drift_absolute < 0.1 C (fallback)

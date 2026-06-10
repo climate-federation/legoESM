@@ -18,7 +18,7 @@ USAGE
 -----
 ::
 
-    JAX_ENABLE_X64=1 python scripts/ocean_long_runs/run_centennial_spinup.py \
+    JAX_ENABLE_X64=1 python scripts/run/ocean_long_runs/run_centennial_spinup.py \
         --grid latlon --resolution 36x72 --years 1000 \
         --output results/spinup_1000yr --bryan
 

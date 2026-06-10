@@ -12,7 +12,7 @@ prescribed initial T_sfc ≈ 300 K, T_top near gray-radiation
 equilibrium ≈ 200 K. The script exits non-zero if final state
 fails finite + coarse RCE checks.
 
-The actual gates in ``scripts/scm/rce.py`` (iter-304 audit):
+The actual gates in ``scripts/matrix/scm/rce.py`` (iter-304 audit):
 * ``jnp.all(jnp.isfinite(T_final))``
 * ``240 < T_sfc_final < 320`` K
 * ``150 < T_top_final < 270`` K

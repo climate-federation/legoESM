@@ -353,7 +353,7 @@ def _legoesm_mpas_cell_views(state, mesh, z_coord, with_salt: bool):
 
 def run_legoesm_eady_uniform(grid_type: str) -> dict[str, float]:
     """Run legoESM Eady-uniform on ``grid_type`` for 1 hour, return bulk metrics."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "matrix"))  # ocean_test_matrix package home
     from ocean_test_matrix.setup import _create_ocean_setup
     from ocean_test_matrix.testcase import TestCase
     from legoesm.ocean.experiments.eady_uniform import (

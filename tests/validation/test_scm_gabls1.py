@@ -1,7 +1,7 @@
 """GABLS1 benchmark for the legoESM single-column model.
 
 Integrates the legoESM SCM on the Cuxart et al. (2006) GABLS1 setup
-(see :mod:`scripts.scm.gabls1`) and compares the resulting
+(see :mod:`scripts.matrix.scm.gabls1`) and compares the resulting
 trajectory against the jax_scm oracle stored at
 ``tests/validation/scm_oracle/gabls1_Nz64.nc``.
 
@@ -52,7 +52,7 @@ TEST_SIGMA_TOP = 0.7
 def _import_runner():
     import sys
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
-    from scm import gabls1 as run_scm_gabls1
+    from matrix.scm import gabls1 as run_scm_gabls1
     return run_scm_gabls1
 
 

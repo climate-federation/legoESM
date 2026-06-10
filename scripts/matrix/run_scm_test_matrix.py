@@ -29,13 +29,15 @@ import argparse
 import os
 import sys
 
-# scripts/ (parent of this file's scripts/matrix/ dir) so `from scm import ...`
-# resolves — the scm/ case modules live at scripts/scm/.
+# scripts/ (parent of this file's scripts/matrix/ dir) so `from matrix.scm
+# import ...` resolves — the scm/ case modules live at scripts/matrix/scm/.
+# Importing them as matrix.scm (not bare `scm`) keeps the external jax_scm
+# `scm` package importable for the oracle case (scm/oracle.py).
 _SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from scm import ekman, gabls1, oracle, rce, wangara  # noqa: E402
+from matrix.scm import ekman, gabls1, oracle, rce, wangara  # noqa: E402
 
 CASES = {
     "rce": rce,

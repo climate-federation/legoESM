@@ -39,7 +39,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(_REPO / "scripts"))
+sys.path.insert(0, str(_REPO / "scripts" / "matrix"))  # ocean_test_matrix package home
 
 import jax
 jax.config.update("jax_enable_x64", True)

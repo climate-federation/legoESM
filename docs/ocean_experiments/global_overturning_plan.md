@@ -119,7 +119,7 @@ Support `scheme="combined"` and `scheme="restoring"` (in addition to `"prescribe
 
 ## Phase 3: Test matrix integration + lat-lon validation
 
-**File**: `scripts/ocean_test_matrix/experiments.py`
+**File**: `scripts/matrix/ocean_test_matrix/experiments.py`
 
 Add `run_global_overturning()` runner:
 

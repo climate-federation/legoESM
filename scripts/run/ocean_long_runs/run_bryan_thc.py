@@ -22,10 +22,10 @@ Acceptance bars at equilibrium (500-1000 model years):
 Usage::
 
     # Smoke (1 day, exercises every code path):
-    python scripts/ocean_long_runs/run_bryan_thc.py --smoke --output ...
+    python scripts/run/ocean_long_runs/run_bryan_thc.py --smoke --output ...
 
     # Production (1000 years, cluster only):
-    python scripts/ocean_long_runs/run_bryan_thc.py \\
+    python scripts/run/ocean_long_runs/run_bryan_thc.py \\
         --years 1000 --resolution 36x36 \\
         --output results/ocean_long_runs/bryan_thc_1000yr
 """

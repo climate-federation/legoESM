@@ -194,7 +194,7 @@ def main() -> None:
     jobs_dir.mkdir(parents=True, exist_ok=True)
 
     tag = checkpoint_tag(args.checkpoint)
-    script_entry = repo_root / "scripts" / "s2s" / "neuralgcm_slab.py"
+    script_entry = repo_root / "scripts" / "run" / "s2s" / "neuralgcm_slab.py"
     submission_mode = "refresh_uncoupled_only" if args.refresh_uncoupled_only else "full_campaign"
 
     manifest: dict[str, Any] = {

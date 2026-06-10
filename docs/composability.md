@@ -159,7 +159,7 @@ final_state, history = scm.run(nsteps=288, save_every=12)
 `create_plane_grid` domain. The scale-dependent dynamic Smagorinsky closure
 (LASD; Bou-Zeid–Meneveau–Parlange) lives in
 `legoesm.atmosphere.physics.turbulence.lasd_core`. Canonical cases ship as
-scripts/tests: GABLS1 stable boundary layer (`scripts/scm/gabls1.py`), Wangara
+scripts/tests: GABLS1 stable boundary layer (`scripts/matrix/scm/gabls1.py`), Wangara
 diurnal cycle, and the Skamarock–Klemp rising thermal
 (`scripts/run/run_plane_rising_thermal.py`).
 

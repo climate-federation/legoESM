@@ -41,12 +41,23 @@ bucket:
 | `cluster/` | SLURM job wrappers (e.g. `cluster/omip_nemo/`). |
 | `tmp/` | Throwaway (above) — slated for deletion. |
 
-Campaign suites live as subdirs of the bucket matching their dominant
-function (enforced by `tests/test_scripts_layout.py`): `run/global_overturning/`,
-`run/mpas_realistic_geometry/`, `validate/ocean_fidelity/`,
-`validate/realistic_geometry/`, `bench/jit_profile/`. Remaining legacy dirs
-(`scm/`, `s2s/`, `ocean_long_runs/`, `ocean_test_matrix/`, `pgf_validation/`)
-are queued in that test's shrink-only allowlist.
+Campaign suites and script packages live as subdirs of the bucket matching
+their dominant function (enforced by `tests/test_scripts_layout.py`):
+`run/{global_overturning,mpas_realistic_geometry,ocean_long_runs,s2s}/`,
+`matrix/{scm,ocean_test_matrix}/`,
+`validate/{ocean_fidelity,realistic_geometry,pgf_validation}/`,
+`bench/jit_profile/`.
+
+## Data-path environment variables
+
+Scripts that read large external datasets take a CLI flag first and fall back
+to an environment variable (machine-portable; no personal paths):
+
+| Variable | Used by | Meaning |
+|----------|---------|---------|
+| `LEGOESM_ETOPO_PATH` | `run/global_overturning/run_{comparison_latlon,comparison_mpas,tripole_20yr,global_overturning_mpas_etopo}.py` (`--etopo`) | ETOPO bathymetry NetCDF (default `data/bathymetry/etopo_1deg.nc`). |
+| `LEGOESM_GSAM_ROOT` | `run/run_lba_plane.py`, `run/run_gate_plane.py` (`--case-dir`) | gSAM checkout root holding `CASES/`. |
+| `LEGOESM_CMIP7_RAW` | `data/inspect_cmip7_forcing.py` | Raw CMIP7 forcing staging root (Levante default). |
 
 ## Atmosphere
 
