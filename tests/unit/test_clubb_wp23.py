@@ -515,5 +515,121 @@ def test_wp23_assembly_jit_grad():
     assert jnp.all(jnp.isfinite(jax.grad(loss)(p["wp2"])))
 
 
+# --------------------------------------------------------------------------
+# Centered term_ma_zt_lhs + a1/a3 + skewness-function pre-computes
+# --------------------------------------------------------------------------
+
+def test_term_ma_zt_lhs_uniform_grid():
+    """Uniform grid: zt2zm weights are 1/2 → interior super=fac/2, main=0, sub=-fac/2."""
+    gr, ng, nzm = _gr(stretched=False)
+    nzt = nzm - 1
+    rng = np.random.default_rng(13)
+    wm_zt = jnp.asarray(0.03 * rng.standard_normal((ng, nzt)))
+    band = np.asarray(W.term_ma_zt_lhs(wm_zt, gr))
+    assert band.shape == (3, ng, nzt)
+    fac = np.asarray(wm_zt)[:, 1:-1] * np.asarray(gr.invrs_dzt)[:, 1:-1]
+    np.testing.assert_allclose(band[0, :, 1:-1], 0.5 * fac, rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(band[1, :, 1:-1], 0.0, atol=1e-14)
+    np.testing.assert_allclose(band[2, :, 1:-1], -0.5 * fac, rtol=1e-12, atol=1e-14)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_term_ma_zt_lhs_parity_stretched():
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.mean_adv as RMA  # noqa: N812
+    gr, ng, nzm = _gr(stretched=True)
+    rng = np.random.default_rng(14)
+    wm_zt = jnp.asarray(0.02 * rng.standard_normal((ng, nzm - 1)))
+    rg = _refgr(gr, ng, nzm)
+    np.testing.assert_array_equal(
+        np.asarray(W.term_ma_zt_lhs(wm_zt, gr)),
+        np.asarray(RMA.term_ma_zt_lhs_jax(wm_zt, rg, l_upwind_xm_ma=False)))
+
+
+def _penta_matvec(lhs, x):
+    """Apply a CLUBB-band penta matrix [super2,super1,main,sub1,sub2] to x."""
+    ng, ndim = x.shape
+    y = lhs[2] * x
+    y = y.at[:, :-1].add(lhs[1, :, :-1] * x[:, 1:])     # super1 -> x[k+1]
+    y = y.at[:, :-2].add(lhs[0, :, :-2] * x[:, 2:])     # super2 -> x[k+2]
+    y = y.at[:, 1:].add(lhs[3, :, 1:] * x[:, :-1])      # sub1   -> x[k-1]
+    y = y.at[:, 2:].add(lhs[4, :, 2:] * x[:, :-2])      # sub2   -> x[k-2]
+    return y
+
+
+def test_term_ma_zt_lhs_flows_through_wp23_lhs_correctly():
+    """Integration: assembling centered MA into wp23_lhs and applying the penta
+    matrix to an interleaved [wp2=0, wp3=field] vector reproduces the direct
+    tridiagonal action of term_ma_zt_lhs on wp3 — proving the band mapping
+    (super->band0/super2, sub->band4/sub2) end to end (codex review)."""
+    gr, ng, nzm = _gr(stretched=True)
+    nzt = nzm - 1
+    ndim = 2 * nzm - 1
+    rng = np.random.default_rng(99)
+    wm_zt = jnp.asarray(0.03 * rng.standard_normal((ng, nzt)))
+    field = jnp.asarray(rng.standard_normal((ng, nzt)))   # a wp3 field
+
+    lhs_ma_zt = W.term_ma_zt_lhs(wm_zt, gr)
+    z3 = jnp.zeros((3, ng, nzt))
+    z3m = jnp.zeros((3, ng, nzm))
+    z2 = jnp.zeros((2, ng, nzt))
+    z5 = jnp.zeros((5, ng, nzt))
+    lhs = W.wp23_lhs(
+        nzm=nzm, ndim=ndim, invrs_dt=0.0,
+        lhs_ma_zm=z3m, lhs_diff_zm=z3m, lhs_ta_wp2=jnp.zeros((2, ng, nzm)),
+        lhs_ac_pr2_wp2=jnp.zeros((ng, nzm)), lhs_dp1_wp2=jnp.zeros((ng, nzm)),
+        lhs_pr1_wp2=jnp.zeros((ng, nzm)), lhs_splat_wp2=jnp.zeros((ng, nzm)),
+        lhs_ma_zt=lhs_ma_zt, lhs_diff_zt=z3, lhs_tp_wp3=z2,
+        lhs_ac_pr2_wp3=jnp.zeros((ng, nzt)), lhs_pr1_wp3=jnp.zeros((ng, nzt)),
+        lhs_splat_wp3=jnp.zeros((ng, nzt)), lhs_ta_wp3=z5)
+
+    x = jnp.zeros((ng, ndim)).at[:, 1::2].set(field)      # wp3 on odd slots
+    y = np.asarray(_penta_matvec(lhs, x))
+
+    # direct tridiag action of [super,main,sub] on the wp3 field, interior levels
+    ma = np.asarray(lhs_ma_zt)
+    direct = (ma[0, :, 1:-1] * np.asarray(field)[:, 2:]
+              + ma[1, :, 1:-1] * np.asarray(field)[:, 1:-1]
+              + ma[2, :, 1:-1] * np.asarray(field)[:, :-2])
+    # wp3 interior global indices 3,5,..,2*nzm-5
+    np.testing.assert_allclose(y[:, 3:-2:2], direct, rtol=1e-12, atol=1e-14)
+
+
+def test_compute_a1_a3_coef_formula():
+    gr, ng, nzm = _gr()
+    rng = np.random.default_rng(15)
+    sigma = jnp.asarray(0.1 + 0.4 * rng.random((ng, nzm)))
+    a3_min = jnp.asarray(0.4 + 0.1 * rng.random((ng,)))
+    a1, a3, a1_zt, a3_zt = W.compute_a1_a3_coef(sigma, a3_min, gr)
+    one_minus = 1.0 - np.asarray(sigma)
+    np.testing.assert_allclose(np.asarray(a1), 1.0 / one_minus, rtol=1e-12, atol=1e-14)
+    exp_a3 = np.maximum(-2.0 * one_minus ** 2 + 3.0, np.asarray(a3_min)[:, None])
+    np.testing.assert_allclose(np.asarray(a3), exp_a3, rtol=1e-12, atol=1e-14)
+    # zt interpolation matches the grid operator
+    from legoesm.atmosphere.physics.turbulence.clubb_grid import zm2zt
+    np.testing.assert_array_equal(np.asarray(a1_zt), np.asarray(zm2zt(a1, gr)))
+    np.testing.assert_array_equal(np.asarray(a3_zt), np.asarray(zm2zt(a3, gr)))
+
+
+def test_compute_skw_fnc_formula_and_degenerate():
+    gr, ng, nzm = _gr()
+    nzt = nzm - 1
+    rng = np.random.default_rng(16)
+    Skw = jnp.asarray(rng.standard_normal((ng, nzt)))
+    C = jnp.asarray(0.7 + rng.random((ng,)))
+    Cb = jnp.asarray(0.3 + rng.random((ng,)))
+    Cc = jnp.asarray(1.0 + rng.random((ng,)))
+    out = np.asarray(W.compute_skw_fnc(C, Cb, Cc, Skw))
+    exp = (np.asarray(Cb)[:, None] + (np.asarray(C) - np.asarray(Cb))[:, None]
+           * np.exp(-0.5 * (np.asarray(Skw) / np.asarray(Cc)[:, None]) ** 2))
+    np.testing.assert_allclose(out, exp, rtol=1e-12, atol=1e-14)
+    # degenerate C == Cb -> constant Cb (the |C-Cb| <= floor branch)
+    out2 = np.asarray(W.compute_skw_fnc(Cb, Cb, Cc, Skw))
+    np.testing.assert_allclose(out2, np.asarray(Cb)[:, None] * np.ones((ng, nzt)),
+                               rtol=1e-12, atol=1e-14)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

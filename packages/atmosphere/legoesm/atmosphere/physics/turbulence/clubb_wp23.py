@@ -29,13 +29,14 @@ differentiable.
 from __future__ import annotations
 
 import jax.numpy as jnp
-from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid
+from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, zm2zt
 from legoesm.atmosphere.physics.turbulence.clubb_solve import penta_solve
 
 from legoesm import constants
 
 _TWO_THIRDS = 2.0 / 3.0
 _GAMMA = 1.5   # gamma_over_implicit_ts (constants_clubb)
+_EPS = 1.0e-10  # constants_clubb eps = max(1e-10, machine eps): branch threshold floor
 
 
 def weights_zt2zm(gr: CLUBBGrid):
@@ -358,6 +359,71 @@ def wp3_term_pr_turb_rhs(C_wp3_pr_turb, Kh_zt, wpthvp, dum_dz, dvm_dz,
     return rhs
 
 
+def term_ma_zt_lhs(wm_zt, gr: CLUBBGrid):
+    """Centered mean-advection LHS for a zt-level variable (``term_ma_zt_lhs``).
+
+    Faithful port of the centered (``.not. l_upwind_xm_ma``) branch of
+    ``mean_adv.F90:term_ma_zt_lhs`` — the form used by the wp3 mean advection
+    (the ``l_upwind_xm_ma`` flag gates only the *scalar/wind* advance, not the
+    wp2/wp3 moments). Uses the inline zt->zm weights. ``(3, ncol, nzt)`` =
+    ``[super, main, sub]``; the boundary rows use the reference's
+    ``(1 - weight)`` extension.
+    """
+    w = weights_zt2zm(gr)
+    invrs_dzt = gr.invrs_dzt
+    ngrdcol = wm_zt.shape[0]
+
+    fac = wm_zt[:, 1:-1] * invrs_dzt[:, 1:-1]
+    super_int = fac * w[:, 2:-1, 0]
+    main_int = fac * (w[:, 2:-1, 1] - w[:, 1:-2, 0])
+    sub_int = -fac * w[:, 1:-2, 1]
+
+    fac0 = wm_zt[:, 0] * invrs_dzt[:, 0]
+    sup_bot = fac0 * w[:, 1, 0]
+    mid_bot = -fac0 * (1.0 - w[:, 1, 1])
+    sub_bot = jnp.zeros((ngrdcol,), dtype=wm_zt.dtype)
+
+    fac_top = wm_zt[:, -1] * invrs_dzt[:, -1]
+    sup_top = jnp.zeros((ngrdcol,), dtype=wm_zt.dtype)
+    mid_top = fac_top * (1.0 - w[:, -2, 0])
+    sub_top = -fac_top * w[:, -2, 1]
+
+    sup = jnp.concatenate([sup_bot[:, None], super_int, sup_top[:, None]], axis=1)
+    mid = jnp.concatenate([mid_bot[:, None], main_int, mid_top[:, None]], axis=1)
+    sub = jnp.concatenate([sub_bot[:, None], sub_int, sub_top[:, None]], axis=1)
+    return jnp.stack([sup, mid, sub], axis=0)
+
+
+def compute_a1_a3_coef(sigma_sqd_w, a3_coef_min, gr: CLUBBGrid):
+    """ADG1 ``a1``/``a3`` coefficients on zm and zt levels (``advance_wp2_wp3`` pre-compute).
+
+    ``a1 = 1/(1 - sigma_sqd_w)``; ``a3 = max(-2·(1 - sigma_sqd_w)^2 + 3,
+    a3_coef_min)`` (zm-level), then interpolated to zt. ``sigma_sqd_w`` is
+    ``(ncol, nzm)`` (``< 1``); ``a3_coef_min`` is ``(ncol,)``. Returns
+    ``(a1_coef, a3_coef, a1_coef_zt, a3_coef_zt)``.
+    """
+    one_minus = 1.0 - sigma_sqd_w
+    a1_coef = 1.0 / one_minus
+    a3_coef = jnp.maximum(-2.0 * one_minus ** 2 + 3.0, a3_coef_min[:, None])
+    return a1_coef, a3_coef, zm2zt(a1_coef, gr), zm2zt(a3_coef, gr)
+
+
+def compute_skw_fnc(C, Cb, Cc, Skw):
+    """Skewness-dependent CLUBB coefficient (``C1_Skw_fnc`` / ``C11_Skw_fnc``).
+
+    ``Cb + (C - Cb)·exp(-½·(Skw/Cc)^2)`` where ``|C - Cb|`` exceeds the
+    floor ``|C + Cb|·eps/2`` (else just ``Cb``). ``C``/``Cb``/``Cc`` are
+    ``(ncol,)`` params; ``Skw`` is ``(ncol, nz)`` on the matching grid (zm for
+    C1, zt for C11). NOTE: the CAM-default ``l_damp_wp2_using_em = .false.`` path
+    does NOT apply the extra ``1/3`` factor to ``C1_Skw_fnc`` (that is the True
+    path); the caller decides.
+    """
+    diff = jnp.abs(C - Cb)[:, None]
+    thresh = (jnp.abs(C + Cb) * _EPS / 2.0)[:, None]
+    smooth = Cb[:, None] + (C[:, None] - Cb[:, None]) * jnp.exp(-0.5 * (Skw / Cc[:, None]) ** 2)
+    return jnp.where(diff > thresh, smooth, Cb[:, None] * jnp.ones_like(Skw))
+
+
 # ---------------------------------------------------------------------------
 # Pentadiagonal assembly + solve (interleaved wp2[2k] / wp3[2k+1])
 # ---------------------------------------------------------------------------
@@ -510,4 +576,7 @@ __all__ = [
     "wp23_rhs",
     "wp23_lhs",
     "wp23_solve",
+    "term_ma_zt_lhs",
+    "compute_a1_a3_coef",
+    "compute_skw_fnc",
 ]
