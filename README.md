@@ -226,7 +226,9 @@ python scripts/validate/validate_federation_packaging.py
 > Full details — pytest tiers, the matrix framework, the guardrail harness, and the
 > review agents — are in [`docs/TESTING.md`](docs/TESTING.md). On Apple Silicon set
 > `JAX_PLATFORMS=cpu` (the Metal backend is broken); use `JAX_ENABLE_X64=1` for
-> scientific/conservation runs.
+> scientific/conservation runs. legoESM is developed and tested on Linux and macOS
+> (POSIX) only — Windows is unsupported (bash scripts, SLURM, POSIX subprocess
+> assumptions); use WSL2.
 
 ## Quick Start
 

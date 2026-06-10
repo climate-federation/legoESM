@@ -243,5 +243,12 @@ mpi-nightly,claude-code-review}.yml`).
 
 - CPU only on Apple Silicon (`JAX_PLATFORMS=cpu`; the Metal backend is broken).
 - `JAX_ENABLE_X64=1` for scientific/conservation tests unless explicitly fp32/Metal.
+- The CI **unit tier runs fp32-by-default** (no job-wide `JAX_ENABLE_X64`); unit
+  tests that need x64 self-enable it at module scope. The x64 CI jobs are
+  `top-level-fidelity-tests` and `visual-regression`.
+- Bit-reproducibility caveats (GPU reduction order, JIT cache, fp32-vs-x64) are
+  catalogued in
+  [`docs/portability_gpu_mpi_precision.md`](portability_gpu_mpi_precision.md)
+  ("Nondeterminism sources").
 - Passing norms are necessary but **not sufficient** for cubed-sphere/halo/diffusion
   changes — visually inspect W2 v-wind / W5 wind-speed PNGs (see CLAUDE.md).

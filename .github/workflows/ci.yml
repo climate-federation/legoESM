@@ -96,6 +96,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
+      # Deliberately NO JAX_ENABLE_X64 here: the unit tier is fp32-by-default
+      # (CLAUDE.md: "finite-volume can float32"); unit tests that need x64
+      # self-enable it at module scope (e.g. test_spectral_plane_ops.py,
+      # test_precision_modes.py). Setting it job-wide would change what the
+      # fp32 paths test. x64 jobs: top-level-fidelity-tests, visual-regression.
+      # Known wart: a module-level jax.config.update("jax_enable_x64", True)
+      # leaks across the pytest session for subsequently-imported modules.
       - name: Run unit tests
         run: |
           python -m pytest tests/unit/ -x --timeout=300 \
