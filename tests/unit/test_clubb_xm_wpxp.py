@@ -260,5 +260,137 @@ def test_assembly_jit_grad():
     assert jnp.all(jnp.isfinite(jax.grad(loss)(p["wpxp"])))
 
 
+# --------------------------------------------------------------------------
+# calc_xm_wpxp_ta_terms / calc_xm_wpxp_lhs_terms / diagnose_upxp
+# --------------------------------------------------------------------------
+
+def _ta_inputs(gr, ng, nzm, seed=9):
+    nzt = nzm - 1
+    rng = np.random.default_rng(seed)
+    return dict(
+        sigma_sqd_w=jnp.asarray(0.1 + 0.3 * rng.random((ng, nzm))),
+        wp3_on_wp2_zt=jnp.asarray(0.1 * rng.standard_normal((ng, nzt))),
+        rho_ds_zt=jnp.asarray(1.0 + 0.1 * rng.random((ng, nzt))),
+        invrs_rho_ds_zm=jnp.asarray(1.0 / (1.0 + 0.1 * rng.random((ng, nzm)))),
+        coef_zt=jnp.asarray(0.5 * rng.standard_normal((ng, nzt))),
+    )
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_centered_ta_and_calc_ta_terms_parity():
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.turbulent_adv_pdf as RT  # noqa: N812
+    import clubb_jax.src.CLUBB_core.advance_xm_wpxp_module as R  # noqa: N812
+    gr, ng, nzm = _gr()
+    p = _ta_inputs(gr, ng, nzm)
+    rg = _refgr(gr, ng, nzm)
+    # centered xpyp TA operator
+    np.testing.assert_array_equal(
+        np.asarray(X.xpyp_term_ta_pdf_lhs_centered(p["coef_zt"], p["rho_ds_zt"],
+                                                   p["invrs_rho_ds_zm"], gr)),
+        np.asarray(RT.xpyp_term_ta_pdf_lhs_jax(p["coef_zt"], p["rho_ds_zt"],
+                                               p["invrs_rho_ds_zm"], rg)))
+    # calc_xm_wpxp_ta_terms
+    np.testing.assert_allclose(
+        np.asarray(X.calc_xm_wpxp_ta_terms(p["sigma_sqd_w"], p["wp3_on_wp2_zt"],
+                                           p["rho_ds_zt"], p["invrs_rho_ds_zm"], gr)),
+        np.asarray(R.calc_xm_wpxp_ta_terms(p["sigma_sqd_w"], p["wp3_on_wp2_zt"],
+                                           p["rho_ds_zt"], p["invrs_rho_ds_zm"], rg)),
+        rtol=1e-12, atol=1e-14)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_calc_lhs_terms_and_diagnose_upxp_parity():
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_xm_wpxp_module as R  # noqa: N812
+    gr, ng, nzm = _gr()
+    nzt = nzm - 1
+    rng = np.random.default_rng(10)
+    rg = _refgr(gr, ng, nzm)
+    args = dict(
+        wm_zm=jnp.asarray(0.02 * rng.standard_normal((ng, nzm))),
+        wm_zt=jnp.asarray(0.02 * rng.standard_normal((ng, nzt))),
+        wp2=jnp.asarray(0.2 + 0.5 * rng.random((ng, nzm))),
+        Kw6=jnp.asarray(0.5 + rng.random((ng, nzt))), nu6=10.0,
+        C7_Skw_fnc=jnp.asarray(0.3 + 0.2 * rng.random((ng, nzm))),
+        invrs_rho_ds_zm=jnp.asarray(1.0 / (1.0 + 0.1 * rng.random((ng, nzm)))),
+        rho_ds_zt=jnp.asarray(1.0 + 0.1 * rng.random((ng, nzt))),
+        rho_ds_zm=jnp.asarray(1.0 + 0.1 * rng.random((ng, nzm))),
+        invrs_rho_ds_zt=jnp.asarray(1.0 / (1.0 + 0.1 * rng.random((ng, nzt)))),
+    )
+    mine = X.calc_xm_wpxp_lhs_terms(gr=gr, **args)
+    ref = R.calc_xm_wpxp_lhs_terms(gr=rg, **args)
+    for key in ("lhs_diff_zm", "lhs_ma_zm", "lhs_ma_zt", "lhs_ta_xm", "lhs_tp", "lhs_ac_pr2"):
+        np.testing.assert_array_equal(np.asarray(mine[key]), np.asarray(ref[key]))
+
+    # diagnose_upxp
+    d = dict(
+        ypwp=jnp.asarray(0.05 * rng.standard_normal((ng, nzm))),
+        xm=jnp.asarray(290.0 + rng.standard_normal((ng, nzt))),
+        wpxp=jnp.asarray(0.02 * rng.standard_normal((ng, nzm))),
+        ym=jnp.asarray(5.0 + rng.standard_normal((ng, nzt))),
+        C6x_Skw_fnc=jnp.asarray(2.0 + rng.random((ng, nzm))),
+        tau_C6_zm=jnp.asarray(100.0 + rng.random((ng, nzm))),
+        C7_Skw_fnc=jnp.asarray(0.3 + 0.2 * rng.random((ng, nzm))),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(X.diagnose_upxp(gr=gr, **d)),
+        np.asarray(R.diagnose_upxp(gr=rg, **d)))
+
+
+def _helper_outputs(gr, ng, nzm):
+    """Deterministic outputs of the centered-TA + calc helpers for the golden."""
+    rng = np.random.default_rng(77)
+    nzt = nzm - 1
+    sigma = jnp.asarray(0.1 + 0.3 * rng.random((ng, nzm)))
+    w3w2_zt = jnp.asarray(0.1 * rng.standard_normal((ng, nzt)))
+    rho_zt = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzt)))
+    irho_zm = jnp.asarray(1.0 / (1.0 + 0.1 * rng.random((ng, nzm))))
+    coef = jnp.asarray(0.5 * rng.standard_normal((ng, nzt)))
+    lhs = X.calc_xm_wpxp_lhs_terms(
+        wm_zm=jnp.asarray(0.02 * rng.standard_normal((ng, nzm))),
+        wm_zt=jnp.asarray(0.02 * rng.standard_normal((ng, nzt))),
+        wp2=jnp.asarray(0.2 + 0.5 * rng.random((ng, nzm))),
+        Kw6=jnp.asarray(0.5 + rng.random((ng, nzt))), nu6=10.0,
+        C7_Skw_fnc=jnp.asarray(0.3 + 0.2 * rng.random((ng, nzm))),
+        invrs_rho_ds_zm=irho_zm, rho_ds_zt=rho_zt,
+        rho_ds_zm=jnp.asarray(1.0 + 0.1 * rng.random((ng, nzm))),
+        invrs_rho_ds_zt=jnp.asarray(1.0 / (1.0 + 0.1 * rng.random((ng, nzt)))), gr=gr)
+    return dict(
+        centered_ta=X.xpyp_term_ta_pdf_lhs_centered(coef, rho_zt, irho_zm, gr),
+        ta_terms=X.calc_xm_wpxp_ta_terms(sigma, w3w2_zt, rho_zt, irho_zm, gr),
+        lhs_ta_xm=lhs["lhs_ta_xm"], lhs_tp=lhs["lhs_tp"], lhs_ac_pr2=lhs["lhs_ac_pr2"],
+        lhs_ma_zt=lhs["lhs_ma_zt"],
+    )
+
+
+def test_helpers_match_golden():
+    gr, ng, nzm = _gr()
+    g = np.load(_FIX / "clubb_xm_wpxp_helpers_golden.npz")
+    out = _helper_outputs(gr, ng, nzm)
+    for key in out:
+        np.testing.assert_array_equal(np.asarray(out[key]), g[key])
+
+
+def test_centered_ta_uniform_grid_and_jit():
+    gr, ng, nzm = _gr()
+    p = _ta_inputs(gr, ng, nzm)
+    band = np.asarray(X.xpyp_term_ta_pdf_lhs_centered(p["coef_zt"], p["rho_ds_zt"],
+                                                      p["invrs_rho_ds_zm"], gr))
+    assert band.shape == (3, ng, nzm)
+    assert np.allclose(band[:, :, 0], 0.0) and np.allclose(band[:, :, -1], 0.0)
+
+    def loss(coef):
+        return jnp.sum(X.calc_xm_wpxp_ta_terms(p["sigma_sqd_w"], coef, p["rho_ds_zt"],
+                                               p["invrs_rho_ds_zm"], gr) ** 2)
+
+    assert jnp.isfinite(jax.jit(loss)(p["wp3_on_wp2_zt"]))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(p["wp3_on_wp2_zt"])))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

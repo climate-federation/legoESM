@@ -21,12 +21,102 @@ pure / JIT-safe / differentiable.
 from __future__ import annotations
 
 import jax.numpy as jnp
-from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid
+from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, ddzt, zm2zt
+from legoesm.atmosphere.physics.turbulence.clubb_moments import (
+    diffusion_zm_lhs,
+    term_ma_zm_lhs,
+    term_ma_zt_lhs_upwind,
+)
 from legoesm.atmosphere.physics.turbulence.clubb_solve import penta_solve
 
 from legoesm import constants
 
 _GAMMA = 1.5   # gamma_over_implicit_ts (constants_clubb)
+
+
+def _weights_zm2zt(gr: CLUBBGrid):
+    """zm->zt interpolation weights ``(ncol, nzt, 2)`` = ``[m_above, m_below]``
+    (``calc_zm2zt_weights``, ascending grid), computed inline from the grid."""
+    total = (gr.zm[:, 1:] - gr.zm[:, :-1]) + 1.0e-30
+    w_above = (gr.zt - gr.zm[:, :-1]) / total
+    w_below = (gr.zm[:, 1:] - gr.zt) / total
+    return jnp.stack([w_above, w_below], axis=-1)
+
+
+def xpyp_term_ta_pdf_lhs_centered(coef_zt, rho_ds_zt, invrs_rho_ds_zm, gr: CLUBBGrid):
+    """Centered ADG1 turbulent-advection LHS for w'x' (``xpyp_term_ta_pdf_lhs``).
+
+    The CAM-default wpxp turbulent advection is implicit and centered
+    (``l_explicit_turbulent_adv_wpxp = .false.``, ``l_godunov_upwind_wpxp_ta =
+    .false.``) — distinct from the *upwind* operator used by xp2/xpyp
+    (``l_upwind_xpyp_ta = .true.``). Discretizes
+    ``(1/rho_ds_zm)·d(rho_ds_zt·coef·var_zm)/dz`` at interior zm levels using the
+    inline zm->zt weights. ``coef_zt`` is ``(ncol, nzt)``. ``(3, ncol, nzm)`` =
+    ``[super, main, sub]``; boundaries zero.
+    """
+    w2zt = _weights_zm2zt(gr)
+    fac = invrs_rho_ds_zm[:, 1:-1] * gr.invrs_dzm[:, 1:-1]
+    rho_coef_k = rho_ds_zt[:, 1:] * coef_zt[:, 1:]
+    rho_coef_km1 = rho_ds_zt[:, :-1] * coef_zt[:, :-1]
+    super_int = fac * rho_coef_k * w2zt[:, 1:, 0]
+    main_int = fac * (rho_coef_k * w2zt[:, 1:, 1] - rho_coef_km1 * w2zt[:, :-1, 0])
+    sub_int = -fac * rho_coef_km1 * w2zt[:, :-1, 1]
+    zb = jnp.zeros((coef_zt.shape[0], 1), dtype=coef_zt.dtype)
+    return jnp.stack([jnp.concatenate([zb, super_int, zb], axis=1),
+                      jnp.concatenate([zb, main_int, zb], axis=1),
+                      jnp.concatenate([zb, sub_int, zb], axis=1)], axis=0)
+
+
+def calc_xm_wpxp_ta_terms(sigma_sqd_w, wp3_on_wp2_zt, rho_ds_zt, invrs_rho_ds_zm,
+                          gr: CLUBBGrid):
+    """ADG1 turbulent-advection LHS for w'x' (``calc_xm_wpxp_ta_terms``), ``(3, ncol, nzm)``.
+
+    ``coef = a1_coef_zt·wp3_on_wp2_zt`` with ``a1_coef = 1/(1 - sigma_sqd_w)``
+    regridded zm->zt, fed to :func:`xpyp_term_ta_pdf_lhs_centered`. The same
+    operator serves wprtp and wpthlp (shared ADG1 TA LHS).
+    """
+    a1_coef_zt = zm2zt(1.0 / (1.0 - sigma_sqd_w), gr)
+    coef_zt = a1_coef_zt * wp3_on_wp2_zt
+    return xpyp_term_ta_pdf_lhs_centered(coef_zt, rho_ds_zt, invrs_rho_ds_zm, gr)
+
+
+def calc_xm_wpxp_lhs_terms(wm_zm, wm_zt, wp2, Kw6, nu6, C7_Skw_fnc,
+                           invrs_rho_ds_zm, rho_ds_zt, rho_ds_zm, invrs_rho_ds_zt,
+                           gr: CLUBBGrid):
+    """Shared LHS terms for the xm/w'x' system (``calc_xm_wpxp_lhs_terms``).
+
+    Computes once and shares: the w'x' diffusion (``Kw6 = c_K6·Kh_zt``) + mean
+    advection (zm centered, zt upwind — CAM ``l_upwind_xm_ma = True``) + the
+    xm<->wpxp turbulent-advection / production / accumulation operators. The ADG1
+    TA operator (:func:`calc_xm_wpxp_ta_terms`) is computed separately. ``nu6`` is
+    a scalar background diffusivity. Returns a dict with keys ``lhs_diff_zm,
+    lhs_ma_zm, lhs_ma_zt, lhs_ta_xm, lhs_tp, lhs_ac_pr2``.
+    """
+    nu6_arr = jnp.full((invrs_rho_ds_zm.shape[0],), nu6, dtype=wp2.dtype)
+    return dict(
+        lhs_diff_zm=diffusion_zm_lhs(Kw6, nu6_arr, invrs_rho_ds_zm, rho_ds_zt, gr),
+        lhs_ma_zm=term_ma_zm_lhs(wm_zm, gr),
+        lhs_ma_zt=term_ma_zt_lhs_upwind(wm_zt, gr),
+        lhs_ta_xm=xm_term_ta_lhs(invrs_rho_ds_zt, rho_ds_zm, gr),
+        lhs_tp=wpxp_term_tp_lhs(wp2, gr),
+        lhs_ac_pr2=wpxp_terms_ac_pr2_lhs(C7_Skw_fnc, wm_zt, gr),
+    )
+
+
+def diagnose_upxp(ypwp, xm, wpxp, ym, C6x_Skw_fnc, tau_C6_zm, C7_Skw_fnc, gr: CLUBBGrid):
+    """Diagnose a horizontal turbulent scalar flux ``y'x'`` (``diagnose_upxp``).
+
+    Andre et al. (1978) eqn. 7 / Bougeault et al. (1981) eqn. 4 (CAM
+    ``l_predict_upwp_vpwp = .false.``): ``y'x' = (tau_C6/C6x)·(-y'w'·d(xm)/dz
+    - (1-C7)·w'x'·d(ym)/dz)`` at interior zm levels; boundaries zero. ``ym`` is
+    the smoothed velocity. ``(ncol, nzm)``.
+    """
+    ddzt_xm = ddzt(xm, gr)
+    ddzt_ym = ddzt(ym, gr)
+    interior = (tau_C6_zm[:, 1:-1] / C6x_Skw_fnc[:, 1:-1]) * (
+        -ypwp[:, 1:-1] * ddzt_xm[:, 1:-1]
+        - (1.0 - C7_Skw_fnc[:, 1:-1]) * wpxp[:, 1:-1] * ddzt_ym[:, 1:-1])
+    return jnp.zeros_like(ypwp).at[:, 1:-1].set(interior)
 
 
 def xm_term_ta_lhs(invrs_rho_ds_zt, rho_ds_zm, gr: CLUBBGrid):
@@ -188,4 +278,8 @@ __all__ = [
     "xm_wpxp_lhs",
     "xm_wpxp_rhs",
     "xm_wpxp_solve",
+    "xpyp_term_ta_pdf_lhs_centered",
+    "calc_xm_wpxp_ta_terms",
+    "calc_xm_wpxp_lhs_terms",
+    "diagnose_upxp",
 ]

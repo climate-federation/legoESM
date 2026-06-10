@@ -89,7 +89,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_moments.py` | `advance_windm_edsclrm` ✅12; xp2_xpyp terms/TA/combiners ✅13-15; `term_ma_zm_lhs`+`calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅18; `xp2_xpyp_uv_rhs`+`pos_definite_variances` ✅19; `clip_variance`+`solve_xp2_xpyp`+**`advance_xp2_xpyp` main** (full 5-moment advance, round-off parity) ✅20; `advance_wp2_wp3`, `advance_xm_wpxp` (penta), `mono_flux_limiter` ☐ | 🟡 P5 |
 | `clubb_wp23.py` | coupled wp2/wp3 penta advance: 8 LHS + 9 RHS builders ✅21-22; `wp23_rhs/lhs/solve` ✅23; `compute_a1_a3_coef`/`compute_skw_fnc` ✅24; `clip_skewness` ✅25; **`advance_wp2_wp3` main** ✅26 (composition round-off parity; **CAM uses UPWIND wp3 MA** — `l_upwind_xm_ma=True`) | ✅ |
 | `clubb_fill_holes.py` | `fill_holes_*` ✅19; `fill_holes_wp2_from_horz_tke` (TKE-conserving wp2 fill, CAM) ✅25 | ✅ |
-| `clubb_xm_wpxp.py` | coupled xm/wpxp (rtm/thlm + wprtp/wpthlp) advance: 5 LHS/RHS builders ✅27; `xm_wpxp_lhs/rhs/solve` penta assembly ✅28 (parity+golden); `calc_*_terms`, `diagnose_upxp`, clipping, `advance_xm_wpxp` main ☐ | 🟡 P5 |
+| `clubb_xm_wpxp.py` | coupled xm/wpxp advance: 5 builders ✅27; `xm_wpxp_lhs/rhs/solve` ✅28; centered `xpyp_term_ta_pdf_lhs` + `calc_xm_wpxp_ta_terms`/`calc_xm_wpxp_lhs_terms` + `diagnose_upxp` ✅29 (parity+golden; **CAM wpxp TA is CENTERED** — `l_explicit_turbulent_adv_wpxp`/`l_godunov_upwind_wpxp_ta`=False, unlike xp2/xpyp UPWIND); clipping + `advance_xm_wpxp` main ☐ | 🟡 P5 |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
 
@@ -118,10 +118,10 @@ finite gradients in float32 + float64.
   composition round-off parity), ✅ `fill_holes`/`clip_variance`/`clip_covar`/
   `clip_skewness`. 🟡 `advance_xm_wpxp` (rtm/thlm + wprtp/wpthlp): ✅ iter 27 the
   5 LHS/RHS term builders + ✅ iter 28 `xm_wpxp_lhs/rhs/solve` penta assembly
-  (interleaved wpxp[2k]/xm[2k+1]; CAM `l_diffuse_rtm_and_thlm=False` → xm rows no
-  diffusion). ☐ remaining: `calc_xm_wpxp_ta_terms`/`calc_xm_wpxp_lhs_terms`,
-  `diagnose_upxp` (CAM l_predict_upwp_vpwp=False), the clipping
-  (`xm_wpxp_clipping_and_stats`, `mono_flux_limiter` CAM ON), `advance_xm_wpxp` main.
+  (interleaved wpxp[2k]/xm[2k+1]; CAM `l_diffuse_rtm_and_thlm=False`) + ✅ iter 29
+  `calc_xm_wpxp_ta_terms` (centered TA), `calc_xm_wpxp_lhs_terms`, `diagnose_upxp`.
+  ☐ remaining: the clipping (`xm_wpxp_clipping_and_stats` + `mono_flux_limiter`,
+  CAM `l_mono_flux_lim_*=True`) + the `advance_xm_wpxp` main.
 - **P6 orchestration** ☐ — assemble the `advance_clubb_core`-equivalent for the
   CAM flag subset; pack/unpack carried moment state (wp2/wp3/thlp2/rtp2/rtpthlp/
   wpthlp/wprtp/up2/vp2). `l_call_pdf_closure_twice=True` → PDF pre+post.
