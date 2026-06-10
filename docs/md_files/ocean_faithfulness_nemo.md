@@ -506,6 +506,31 @@ penetration warms... actually COOLS surface; sign needs the impl). Next: impleme
 scheme (NEMO traqsr RGB table + monthly ESACCI chl climatology from INPUTS) + codex; A/B on yr-1 rerun.
 PNGs (tripole yr1 SST/SSS) sent to user 2026-06-10 ~08:40.
 
+### iter-G (user-flagged): tripole lon-72.5 vertical BAND = eORCA1 cyclic-overlap off-by-one (PRE-EXISTING)
+User saw a vertical SST stripe at lon 70-80 on the **tripole** map (absent on yesterday's **latlon** map).
+Root-caused, NOT a flux regression:
+- The stripe is at lon **72.5°E** = the eORCA1 grid's east-west cyclic SEAM. Confirmed in index space: i=0
+  (lon 72.5) duplicates i=360 (lon 72.5); i=361 (73.5) duplicates i=1 (73.5) ⇒ **ORCA 2-point cyclic overlap**
+  (halo col0=col_{n-2}, col_{n-1}=col1).
+- `LatLonCGridOceanModel` (reused for tripole) applies SIMPLE roll-periodicity (`periodic_x=True`, enforces
+  `u[:,n_lon]==u[:,0]`, i.e. col_{n-1}=col0) — correct for a regular lat-lon grid, **off-by-one for the ORCA
+  2-pt overlap** ⇒ the halo columns carry slightly wrong values ⇒ a mild ~0.87°C seam in the seam-adjacent
+  gradient/flux terms, amplified by the scorer's cKDTree-IDW blend across the seam.
+- **PRE-EXISTING, not from this session's flux work:** regridded lon-72 stripe sharpness is 2.71°C in the OLD
+  ice-thermo tripole vs 2.86°C in the NCAR run — essentially identical. The latlon 1° grid has NO such seam by
+  construction (yesterday's clean map). The physical domain i=1..360 integrates correctly (tripole is stable +
+  SST-faithful); only the 2 halo columns are off, so the seam is mild not catastrophic.
+- **FIX = careful curvilinear work (deferred, NOT rushed):** make the tripole apply the ORCA 2-pt cyclic
+  overlap (col0←col_{n-2}, col_{n-1}←col1) instead of the regular-grid roll, with codex review + full
+  cold-start-stability re-validation (the tripole periodicity is load-bearing for the hard-won WOA cold start).
+  Interim: the **latlon 1° grid is the clean-grid comparison vehicle** (no seam).
+- **Large local SST biases (user):** marginal seas (Persian Gulf min 13°C, Red Sea 15°C) are COLD-biased in
+  BOTH runs (old Gulf min was 2.6°C — NCAR is LESS cold, an improvement); no runaway hot cells (0 wet cells
+  >35°C). On the clean latlon grid the dominant local bias is the Kuroshio/Oyashio WBC warm spot (+10°C @
+  40N/150E, resolution-bound, pre-existing). Global banded NCAR-minus-old ΔSST is tiny (≤+0.34°C).
+- **ACTION:** relaunched **latlon 1° 2yr with the corrected NCAR fluxes** (8457282, clean grid, same vehicle
+  as latlon_2yr_full) for an apples-to-apples flux-improvement view without the tripole seam.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
