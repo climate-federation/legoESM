@@ -194,3 +194,31 @@ documented-deferred items (P_diss_adv/nonlin TKE terms, the w→v-face metric
 averaging, D2 AB2-scope, free-surface Coriolis scoping). The oracle-recipe
 method is validated end-to-end: recipe + bridge + frozen-state tiers +
 **drop-hold** + budget-on-state probes + Veros-side runtime ablations.
+
+
+## Phase H: open-issues sweep + the first transfer test (2026-06-10 evening)
+
+- **Transport attribution**: full stack 221 Sv / without-D3 219 / without-
+  additive-friction 279, vs Veros 248 — and Veros's own transport wanders
+  218–255 Sv across its 10/30/100-yr runs. The additive-friction placement is
+  the dominant composition knob (±26%); both brackets sit at the edges of the
+  oracle's natural variability. Closed as composition sensitivity, not a bug.
+- **D2 (AB2 scope, `8db3a75b`)**: dissipative terms at weight 1.0 (Veros's
+  exact scope). The first build's routing bug (diss depth-mean withheld from
+  the barotropic forcing — Veros's uloc includes du_mix) was caught by the
+  independent review AND the 3865 Sv falsification blow-up, fixed per the
+  reviewer's prescription, re-verified (ψ-ratio 0.9999, was 40×).
+  Climate-neutral on the ACC (218 vs 221 Sv) — a faithfulness/stability
+  option. All four dycore-audit items are now built and falsified.
+- **TRANSFER TEST #1 — ACC_Basic (`88e768e3`): the recipe blocks GENERALIZE.**
+  Veros's analytic TKE-only twin differs in exactly two physics settings;
+  both mapped onto existing config options, zero new numerics. 10-yr verdict:
+  KE 0.978×, transport 0.894× (oracle-wander class) — the same closeness
+  class as the matched ACC. The oracle-recipe method's generalization claim
+  has its first proof point.
+
+Remaining (small): the shared abyssal warm drift (both models drift; legoESM
+faster — equilibration-rate difference, characterized not closed), EKE 2.5×,
+and the documented-deferred minor items. NEXT: the first data-backed
+transfer target, Veros `global_4deg` (monthly forcing, real bathymetry, ice
+mask — harness glue only, no new numerics expected).
