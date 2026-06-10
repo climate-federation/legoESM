@@ -590,7 +590,21 @@ when shelf denser; mgrh = slope-direction sign; e3_bbl_0 = BBL thickness at the 
 `tra_bbl_adv` application loop (~trabbl.F90 l.214-300) — distributes the transport down the deep column
 across levels (the intricate part) + e3u_bbl_0/mbku_d/mgrhu setup in tra_bbl_init. Then implement
 gated `bbl_adv` for the latlon-cgrid family (tripole/latlon) + tests + smoke; MPAS port after.
-**Status**: item 1 shipped; item 2 in design; item 3 (diffusivity) not started. Production runs in flight:
+**iter-H item 2 PROGRESS:** `packages/ocean/legoesm/ocean/physics/bbl_adv.py` WRITTEN (compiles; physics
+contract included): `bbl_static_geometry(h_ref, land_mask)` (NEMO tra_bbl_init: mgrh=sign Δdep_bot,
+shelf/deep bottom levels, e3_bbl=min bottom thickness, face common depth), `bbl_transports` (CASE(2):
+tr=width·e3_bbl·g·γ·max(0,Δρ/ρ0)·mgrh, Δρ via canonical `wright_eos` at the face's common bottom pressure
+— equals NEMO's α/β linearisation to linear order, no eos_rab re-derivation), `apply_bbl_adv_tendency`
+(exact tra_bbl_adv 3-leg circulation cell, static-unrolled level loop, .at[].add scatters, telescoping
+conservation). REMAINING: (a) host wrapper `apply_bbl_adv_step(state, geom, dt, ...)` (runner post-step
+pattern like restoring/ice-thermo — zero dycore risk; geometry from `z_coord.h_partial` + land_mask at
+setup; face widths grid.dy_u/dx_v on tripole, dy/dx broadcast on latlon); (b) runner flags `--bbl-adv`
+`--bbl-gamma-s 20`; (c) tests/ocean/unit/test_bbl_adv.py (analytic 2-column overflow: transport formula
+exact + down-slope sign; conservation sum(area·h·dpt)=0 to fp; flat-bottom → zero; gate-off untouched);
+(d) codex adversarial; (e) 120-day tripole smoke w/ --bbl-adv. NOTE periodicity: interior faces only
+(seam exchange via ew_cyclic_overlap halo slaving on tripole; the omitted wrap face on regular latlon is
+1 face of 360 — documented).
+**Status**: item 1 shipped; item 2 module written, wiring+tests next; item 3 (diffusivity) not started. Production runs in flight:
 seam-fixed tripole 2yr (8457733, NCAR fluxes + --ew-cyclic-overlap), latlon 1° 2yr (8457282),
 mpas ico6 2yr (8455138). PNG-on-completion promised to user. Each iter-H change: codex adversarial
 review + tests + smoke before production (CLAUDE.md).
