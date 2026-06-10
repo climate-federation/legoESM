@@ -151,6 +151,18 @@ VALID_LATERAL_VISCOSITY_OPERATOR = frozenset({"vector_laplacian", "flux_divergen
 # ValueError. The "explicit_ab2" path additionally requires outer_integrator="ab2"
 # and barotropic_solver="rigid_lid" (rejected otherwise).
 VALID_CORIOLIS_SCHEME = frozenset({"matsuno_split", "explicit_ab2"})
+# AB2 extrapolation scope (config.ab2_scope):
+#   "total" (default, bit-identical) — the AB2 outer integrator extrapolates the
+#     FULL explicit increment, including the dissipative tendencies.
+#   "advective" (Veros-faithful) — the DISSIPATIVE momentum tendencies (lateral
+#     friction + bottom drag) and tracer tendencies (lateral diffusion + GM/Redi)
+#     are WITHHELD from du_dt/dv_dt/dT_dt/dS_dt (exposed on du_diss/dv_diss/
+#     dT_diss/dS_diss) so the AB2 extrapolates ONLY the advective part; the model
+#     step applies the dissipative part at weight 1.0 (Veros solve_stream.py /
+#     thermodynamics.py). Validated at config construction
+#     (ocean_model_latlon_cgrid.py); unknown -> ValueError. "advective"
+#     additionally requires outer_integrator="ab2" (rejected otherwise).
+VALID_AB2_SCOPE = frozenset({"total", "advective"})
 
 
 def _interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
@@ -2712,6 +2724,27 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
     # --- Stage 9: tracer diffusion tendencies (dT_dt, dS_dt). ---
     dT_dt, dS_dt = _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord)
+    # AB2 "advective" scope: snapshot the LATERAL tracer-diffusion tendency
+    # (computed from the pre-step tracer T^n/S^n, exactly Veros's
+    # ``tr[tau]``-evaluated ``hor_diffusion``) BEFORE surface forcing / sponge /
+    # physics are summed in below, so it can be split into the weight-1.0
+    # dissipative bucket. ``None`` under the default "total" scope ⇒ no extra
+    # arrays, bit-identical. The GM/Redi isoneutral+skew part is added to this
+    # bucket in the model step (where GM/Redi is computed).
+    _ab2_advective = getattr(config, "ab2_scope", "total") == "advective"
+    if _ab2_advective:
+        dT_diss_lat = dT_dt
+        dS_diss_lat = dS_dt
+        # Remove the lateral diffusion from the AB2-extrapolated tracer
+        # tendency; the advective tracer update (model step) then runs on a
+        # dT_dt that carries only the NON-dissipative sources added below
+        # (physics / surface forcing / sponge). The lateral diffusion is
+        # re-applied at weight 1.0 in the model step.
+        dT_dt = jnp.zeros_like(dT_dt)
+        dS_dt = jnp.zeros_like(dS_dt)
+    else:
+        dT_diss_lat = None
+        dS_diss_lat = None
 
     # --- Stages 10 + 10b: horizontal + meridional viscosity. ---
     (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
@@ -2729,6 +2762,27 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     du_dt, dv_dt, diag_Av_vert_u, diag_Av_vert_v = _bc_explicit_vertical_viscosity(
         du_dt, dv_dt, u_prime, v_prime, u, J, z_coord, config, grid,
     )
+
+    # AB2 "advective" scope: split the DISSIPATIVE momentum tendencies (lateral
+    # friction — whichever ``lateral_viscosity_operator`` — + bottom drag) out
+    # of du_dt/dv_dt into the weight-1.0 bucket (Veros solve_stream.py adds
+    # ``du_mix`` unextrapolated). Built from the diagnostic accumulators
+    # populated above (no recompute / no duplicate numerics): Ah∇²u, the
+    # biharmonic / Smagorinsky / Leith hyperviscosities, and bottom drag. The
+    # explicit background A_v vertical friction (diag_Av_vert) is EXCLUDED — it
+    # is the implicit-vertical-friction term whose placement is owned by
+    # ``momentum_friction_additive`` (and is zero under
+    # ``implicit_vertical_mixing=True``). ``None`` under "total" ⇒ bit-identical.
+    if _ab2_advective:
+        du_diss_raw = (diag_Ah_lap_u + diag_Bh_bilap_u + diag_Cs_smag_u
+                       + diag_Cl_leith_u + diag_botdrag_u)
+        dv_diss_raw = (diag_Ah_lap_v + diag_Bh_bilap_v + diag_Cs_smag_v
+                       + diag_Cl_leith_v + diag_botdrag_v)
+        du_dt = du_dt - du_diss_raw
+        dv_dt = dv_dt - dv_diss_raw
+    else:
+        du_diss_raw = None
+        dv_diss_raw = None
 
     # --- Stage 10b: physics-pipeline tendencies. ---
     (du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u,
@@ -2845,6 +2899,26 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     else:
         K_diss_bot = None
 
+    # AB2 "advective"-scope dissipative tendency channel (Veros-faithful
+    # weight-1.0 placement). Face-/cell-masked CONSISTENTLY with the applied
+    # du_dt/dT_dt (which are masked at stage 11 above), so the dissipative
+    # increment is wet exactly where the advective increment is. ``None`` under
+    # the default "total" scope ⇒ no extra fields, bit-identical pytree.
+    if _ab2_advective:
+        du_diss = Field(data=du_diss_raw * u_mask_3d, name="du_diss",
+                        dims=dims_u, units="m/s^2")
+        dv_diss = Field(data=dv_diss_raw * v_mask_3d, name="dv_diss",
+                        dims=dims_v, units="m/s^2")
+        dT_diss = Field(data=dT_diss_lat * mask_3d, name="dT_diss",
+                        dims=dims_3d, units="degC/s")
+        dS_diss = Field(data=dS_diss_lat * mask_3d, name="dS_diss",
+                        dims=dims_3d, units="PSU/s")
+    else:
+        du_diss = None
+        dv_diss = None
+        dT_diss = None
+        dS_diss = None
+
     tendencies = LatLonCGridOceanTendencies(
         du_dt=Field(data=du_dt, name="du_dt", dims=dims_u, units="m/s^2"),
         dv_dt=Field(data=dv_dt, name="dv_dt", dims=dims_v, units="m/s^2"),
@@ -2866,6 +2940,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         Ah_kediss_cell=Ah_kediss_cell,
         surface_tracer_forcing=surface_tracer_forcing,
         K_diss_bot=K_diss_bot,
+        du_diss=du_diss,
+        dv_diss=dv_diss,
+        dT_diss=dT_diss,
+        dS_diss=dS_diss,
     )
 
     if not diagnose_momentum:
@@ -2883,6 +2961,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     def _mv(x):
         return Field(data=x * v_mask_3d, name="diag_v", dims=dims_v, units="m/s^2")
 
+    # Under ab2_scope="advective" the dissipative terms were subtracted from
+    # du_dt/dv_dt (withheld for the weight-1.0 bucket). For the momentum-budget
+    # closure ``Σ components == total`` to hold, restore them into the
+    # diagnostic ``total`` (the per-term diagnostics below still report the full
+    # lateral-friction / bottom-drag components). No-op under "total".
+    diag_du_total = du_dt if du_diss_raw is None else du_dt + du_diss_raw
+    diag_dv_total = dv_dt if dv_diss_raw is None else dv_dt + dv_diss_raw
+
     diagnostics = MomentumTendencyDiagnostics(
         KE_PGF_u=_mu(KE_PGF_u),         KE_PGF_v=_mv(KE_PGF_v),
         vortcor_u=_mu(diag_vortcor_u),  vortcor_v=_mv(diag_vortcor_v),
@@ -2898,8 +2984,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         sponge_u=_mu(diag_sponge_u),    sponge_v=_mv(diag_sponge_v),
         # total_u/v are the actually-applied masked tendencies — must
         # equal Σ of the components above to machine precision.
-        total_u=Field(data=du_dt, name="total_u", dims=dims_u, units="m/s^2"),
-        total_v=Field(data=dv_dt, name="total_v", dims=dims_v, units="m/s^2"),
+        total_u=Field(data=diag_du_total, name="total_u", dims=dims_u, units="m/s^2"),
+        total_v=Field(data=diag_dv_total, name="total_v", dims=dims_v, units="m/s^2"),
     )
     return tendencies, diagnostics
 

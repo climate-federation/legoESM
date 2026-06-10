@@ -661,6 +661,7 @@ class LatLonCGridOceanModel:
             VALID_VERTICAL_MOMENTUM_SCHEME,
             VALID_LATERAL_VISCOSITY_OPERATOR,
             VALID_CORIOLIS_SCHEME,
+            VALID_AB2_SCOPE,
         )
         if config.momentum_advection not in VALID_MOMENTUM_ADVECTION:
             raise ValueError(
@@ -859,6 +860,28 @@ class LatLonCGridOceanModel:
                     "surface solvers instead sub-step the barotropic Coriolis on "
                     "the barotropic gravity-wave clock (different physics, not "
                     f"covered). Got barotropic_solver={config.barotropic_solver!r}.")
+
+        # AB2 extrapolation scope (Veros-faithful dissipative placement). The
+        # "advective" scope withholds the dissipative tendencies from the AB2
+        # extrapolation and applies them at weight 1.0; it is meaningless
+        # without the AB2 outer integrator (the FE path doesn't extrapolate, so
+        # "total" and "advective" already agree). Reject unsupported
+        # combinations rather than silently ignoring the scope.
+        _ab2_scope = getattr(config, "ab2_scope", "total")
+        if _ab2_scope not in VALID_AB2_SCOPE:
+            raise ValueError(
+                f"ab2_scope must be one of {sorted(VALID_AB2_SCOPE)}, "
+                f"got {_ab2_scope!r}")
+        if _ab2_scope == "advective" and config.outer_integrator != "ab2":
+            raise ValueError(
+                'ab2_scope="advective" requires outer_integrator="ab2": the '
+                "advective scope splits the explicit increment into an "
+                "AB2-extrapolated advective part and a weight-1.0 dissipative "
+                "part (momentum lateral friction + bottom drag; tracer lateral "
+                "diffusion + GM/Redi), which is only meaningful for the AB2 "
+                "outer integrator. The forward-Euler path applies every "
+                "tendency at weight 1.0 already (no extrapolation to scope). "
+                f"Got outer_integrator={config.outer_integrator!r}.")
 
     def check_barotropic_cfl(self, dt: float) -> float:
         """Check barotropic CFL and warn if marginal or unstable.
@@ -1064,6 +1087,29 @@ class LatLonCGridOceanModel:
         # 1. Baroclinic tendencies (non-Coriolis)
         tend = self.tendencies(state, surface_forcing, sponge=sponge, dt=dt)
 
+        # AB2 "advective" scope (Veros-faithful): the DISSIPATIVE tendencies are
+        # WITHHELD from tend.{du,dv,dT,dS}_dt and exposed on tend.{...}_diss so
+        # they can be applied at WEIGHT 1.0 (forward-Euler) rather than being
+        # AB2-extrapolated. Accumulate the weight-1.0 dissipative INCREMENT here
+        # (dt · dissipative-rate, evaluated on the PRE-STEP state u^n/T^n — like
+        # Veros's du_mix / hor_diffusion on ``tr[tau]``); the GM/Redi
+        # isoneutral+skew tracer dissipation is added below (where it is
+        # computed). ``_ab2_step`` adds this increment at weight 1.0; the
+        # forward-Euler step() path applies it inline so a non-AB2 outer
+        # integrator stays faithful too. ``None`` carry under "total" ⇒
+        # bit-identical (the diss fields are None ⇒ this whole block is skipped).
+        _ab2_advective = (getattr(self.config, "ab2_scope", "total")
+                          == "advective")
+        _diss_dT_incr = None
+        _diss_dS_incr = None
+        _diss_du_incr = None
+        _diss_dv_incr = None
+        if _ab2_advective and tend.dT_diss is not None:
+            _diss_dT_incr = dt * tend.dT_diss.data
+            _diss_dS_incr = dt * tend.dS_diss.data
+            _diss_du_incr = dt_mom * tend.du_diss.data
+            _diss_dv_incr = dt_mom * tend.dv_diss.data
+
         # 2. Update tracers
         T_new = state.T.data + dt * tend.dT_dt.data
         S_new = state.S.data + dt * tend.dS_dt.data
@@ -1255,6 +1301,26 @@ class LatLonCGridOceanModel:
             F_slow_eta = freshwater_eta_tendency(
                 freshwater, self.config.rho_0,
             ) * state.land_mask.data
+
+        # ab2_scope="advective": the dissipative momentum tendencies (lateral
+        # friction + bottom drag) are withheld from du_dt for weight-1.0
+        # placement, but their DEPTH-MEAN must still force the barotropic
+        # solve — Veros's streamfunction forcing is the depth-integral of
+        # (du[tau] + du_mix) (solve_stream.py:80) and friction.py routes both
+        # bottom drag and lateral friction through du_mix. Without this the
+        # drag never reaches the persistent barotropic balance (the rigid lid
+        # replaces the incoming depth-mean every step) and the transport runs
+        # away (measured 3865 Sv vs 248 — adversarial review check 3). Added
+        # HERE (after du_dt_pert was formed from the diss-free F_slow, so the
+        # 3-D perturbation stays uncontaminated); the weight-1.0 3-D
+        # application then adds only the BAROCLINIC deviation.
+        if tend.du_diss is not None:
+            F_slow_u = (F_slow_u + jnp.sum(
+                tend.du_diss.data * h_u_pre, axis=-1) / H_u_pre
+                ) * state.u_mask.data
+            F_slow_v = (F_slow_v + jnp.sum(
+                tend.dv_diss.data * h_v_pre, axis=-1) / H_v_pre
+                ) * state.v_mask.data
 
         if self.config.barotropic_solver == "rigid_lid":
             # Rigid lid: no free surface — solve the barotropic streamfunction
@@ -1611,8 +1677,18 @@ class LatLonCGridOceanModel:
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                     kappa_redi_override=kappa_redi_override,
                 )
-            T_mid = T_mid + dt * dT_gm * mask_3d
-            S_mid = S_mid + dt * dS_gm * mask_3d
+            if _ab2_advective:
+                # AB2 "advective" scope: GM/Redi is a DISSIPATIVE (isoneutral +
+                # skew) tracer term — Veros applies it at weight 1.0 to
+                # ``tr[taup1]`` (core/isoneutral/diffusion.py), NOT inside the
+                # AB2-extrapolated advection. Route its increment into the
+                # weight-1.0 dissipative bucket instead of adding it to T_mid
+                # (which is what the AB2 extrapolates).
+                _diss_dT_incr = _diss_dT_incr + dt * dT_gm * mask_3d
+                _diss_dS_incr = _diss_dS_incr + dt * dS_gm * mask_3d
+            else:
+                T_mid = T_mid + dt * dT_gm * mask_3d
+                S_mid = S_mid + dt * dS_gm * mask_3d
             if eke_new is not None:
                 state_new = state_new._replace(eke=eke_new)
             # Carry the EKE dissipation (Veros eke_diss_iw) for the prognostic-TKE
@@ -1782,6 +1858,43 @@ class LatLonCGridOceanModel:
                 S=state_new.S.replace(data=S_fw),
             )
 
+        # 8a'. AB2 "advective" scope: apply the weight-1.0 DISSIPATIVE increment.
+        # On the FORWARD-EULER ``step()`` path (``_apply_implicit_vmix=True``)
+        # the dissipative increment (momentum lateral friction + bottom drag;
+        # tracer lateral diffusion + GM/Redi) is added INLINE here at weight 1.0
+        # to the post-advection / post-barotropic explicit state — exactly its
+        # placement under "total", just NOT folded into the AB2'd bucket (the FE
+        # path doesn't AB2, so "total" and "advective" agree to round-off here;
+        # the split MATTERS only for the AB2 outer integrator). On the AB2 path
+        # (``_apply_implicit_vmix=False``) the increment is NOT applied here; it
+        # is returned for ``_ab2_step`` to add at weight 1.0 after the AB2
+        # extrapolation of the advective increment. ``_diss_*_incr`` is ``None``
+        # under "total" ⇒ this block is skipped ⇒ bit-identical.
+        if _diss_dT_incr is not None and _apply_implicit_vmix:
+            # MOMENTUM: only the BAROCLINIC deviation — the increment's
+            # depth-mean already forced the barotropic solve via F_slow (the
+            # Veros uloc structure; see the F_slow diss fold above). Adding
+            # the raw increment here would double-count the depth-mean and,
+            # under the rigid lid, have it discarded next step anyway (the
+            # review-caught routing bug).
+            _du_bc = _diss_du_incr - (
+                jnp.sum(_diss_du_incr * h_u_pre, axis=-1, keepdims=True)
+                / jnp.maximum(jnp.sum(h_u_pre, axis=-1, keepdims=True), 1e-10))
+            _dv_bc = _diss_dv_incr - (
+                jnp.sum(_diss_dv_incr * h_v_pre, axis=-1, keepdims=True)
+                / jnp.maximum(jnp.sum(h_v_pre, axis=-1, keepdims=True), 1e-10))
+            u_diss_new = (state_new.u.data + _du_bc) * u_mask_3d
+            u_diss_new = u_diss_new.at[:, -1].set(u_diss_new[:, 0])
+            state_new = state_new._replace(
+                T=state_new.T.replace(
+                    data=(state_new.T.data + _diss_dT_incr) * mask_3d),
+                S=state_new.S.replace(
+                    data=(state_new.S.data + _diss_dS_incr) * mask_3d),
+                u=state_new.u.replace(data=u_diss_new),
+                v=state_new.v.replace(
+                    data=(state_new.v.data + _dv_bc) * v_mask_3d),
+            )
+
         # 8b. Implicit (backward-Euler) vertical mixing for u, v, T, S.
         #
         # When this branch is active, the PE tendency function has
@@ -1856,8 +1969,16 @@ class LatLonCGridOceanModel:
             # bit-identical).
             _tke_src = (self._assemble_tke_source(state, state_new, tend)
                         if self._tke_prognostic_active() else None)
+            # AB2 "advective" scope: the weight-1.0 dissipative INCREMENT
+            # (momentum lateral friction + bottom drag; tracer lateral
+            # diffusion + GM/Redi) — NOT applied to state_new here; ``_ab2_step``
+            # adds it after the AB2 extrapolation. ``None`` under "total".
+            _diss_incr = (None if _diss_dT_incr is None else
+                          (_diss_dT_incr, _diss_dS_incr,
+                           _diss_du_incr, _diss_dv_incr))
             return state_new, (tend.K_v, tend.A_v, k33_implicit,
-                               tend.surface_tracer_forcing, _tke_src)
+                               tend.surface_tracer_forcing, _tke_src,
+                               _diss_incr)
         return state_new
 
     def _tke_prognostic_active(self) -> bool:
@@ -2638,7 +2759,8 @@ class LatLonCGridOceanModel:
         # tendencies (pre-step state u^n where the vmix scheme surfaces them; else
         # None ⇒ recomputed in _apply_implicit_vertical_mixing, as the FE path).
         state_expl, (K_v_phys, A_v_phys, k33_implicit,
-                     surface_tracer_forcing, tke_source) = self._step_impl(
+                     surface_tracer_forcing, tke_source,
+                     diss_incr) = self._step_impl(
             state, dt, freshwater=freshwater,
             surface_forcing=surface_forcing, sponge=sponge,
             _apply_implicit_vmix=False)
@@ -2651,15 +2773,28 @@ class LatLonCGridOceanModel:
         u_mask3 = state.u_mask.data[..., jnp.newaxis]
         v_mask3 = state.v_mask.data[..., jnp.newaxis]
 
-        # --- Tracers: AB2 the full EXPLICIT increment ---
+        # --- Tracers: AB2 the EXPLICIT increment ---
+        # Under ab2_scope="total" (default) ``state_expl.T - state.T`` is the
+        # FULL explicit increment (advection + lateral diffusion + GM/Redi);
+        # ``diss_incr`` is None ⇒ the algebra below is bit-identical.
+        # Under ab2_scope="advective" the dissipative tendencies were WITHHELD
+        # from ``state_expl`` (PE + GM/Redi routed into ``diss_incr``), so
+        # ``dT_n`` is the ADVECTIVE-only increment that is AB2-extrapolated, and
+        # the weight-1.0 dissipative increment ``ΔT_diss`` is ADDED separately:
+        #   T^{n+1} = T^n + a_n·ΔT_adv^n − a_p·ΔT_adv^{n-1} + 1.0·ΔT_diss^n
+        # (Veros core/thermodynamics.py: AB2 advection, diffusion at weight 1.0).
         dT_n = state_expl.T.data - state.T.data
         dS_n = state_expl.S.data - state.S.data
         dT_p = (state.T_incr_prev.data if state.T_incr_prev is not None
                 else jnp.zeros_like(dT_n))
         dS_p = (state.S_incr_prev.data if state.S_incr_prev is not None
                 else jnp.zeros_like(dS_n))
-        T_ab2 = (state.T.data + a_n * dT_n - a_p * dT_p) * mask3
-        S_ab2 = (state.S.data + a_n * dS_n - a_p * dS_p) * mask3
+        if diss_incr is not None:
+            dT_diss_incr, dS_diss_incr, du_diss_incr, dv_diss_incr = diss_incr
+        else:
+            dT_diss_incr = dS_diss_incr = du_diss_incr = dv_diss_incr = 0.0
+        T_ab2 = (state.T.data + a_n * dT_n - a_p * dT_p + dT_diss_incr) * mask3
+        S_ab2 = (state.S.data + a_n * dS_n - a_p * dS_p + dS_diss_incr) * mask3
 
         # --- Momentum: AB2 the BAROCLINIC increment; keep the explicit
         #     barotropic mode (CFL-stiff, set by the barotropic solver) ---
@@ -2691,6 +2826,21 @@ class LatLonCGridOceanModel:
                 else jnp.zeros_like(dv_n))
         u_ab2 = ((ubc_n + a_n * du_n - a_p * du_p) + bt_u_e) * u_mask3
         v_ab2 = ((vbc_n + a_n * dv_n - a_p * dv_p) + bt_v_e) * v_mask3
+        # ab2_scope="advective": add the weight-1.0 DISSIPATIVE momentum
+        # increment (lateral friction + bottom drag, evaluated on u^n) as its
+        # BAROCLINIC DEVIATION only. The increment's DEPTH-MEAN already forced
+        # the barotropic solve (the diss depth-mean is folded into F_slow in
+        # _step_impl — Veros solve_stream.py:80's uloc includes du_mix), so the
+        # final barotropic mode carries it via ψ; adding the raw increment here
+        # would double-count it for one step and then be DISCARDED by the rigid
+        # lid (which replaces the incoming depth-mean each step) — the
+        # review-caught routing bug that ran the transport away to 3865 Sv.
+        # du_diss_incr is 0.0 under "total" ⇒ the _split is a no-op branch.
+        if diss_incr is not None:
+            du_diss_bc, _ = _split(du_diss_incr, h_u)
+            dv_diss_bc, _ = _split(dv_diss_incr, h_v)
+            u_ab2 = u_ab2 + du_diss_bc * u_mask3
+            v_ab2 = v_ab2 + dv_diss_bc * v_mask3
         u_ab2 = u_ab2.at[:, -1].set(u_ab2[:, 0])   # periodic-lon wrap
 
         state_ab2 = state_expl._replace(
@@ -2783,6 +2933,12 @@ class LatLonCGridOceanModel:
 
         # Carry the EXPLICIT increments for the next AB2 step (NOT the
         # post-implicit-mixing increment — that is the prior scheme's bug).
+        # CARRY SEMANTICS (gated): under ab2_scope="total" (default) dT_n / du_n
+        # are the FULL explicit increment (advection + dissipation) ⇒ carry is
+        # unchanged bit-identically. Under ab2_scope="advective" the dissipative
+        # tendencies were withheld from state_expl, so dT_n / du_n are the
+        # ADVECTIVE-only increment ⇒ the carry holds ONLY the advective part
+        # (Veros carries ``dtemp`` = advection only; diffusion is never lagged).
         return state_ab2._replace(
             T_incr_prev=Field(data=dT_n * mask3, name="T_incr_prev",
                               dims=state.T.dims, units=state.T.units),

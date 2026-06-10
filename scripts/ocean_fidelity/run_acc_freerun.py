@@ -87,7 +87,8 @@ def _bulk_stats(state, z_coord, grid):
 
 def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
                  bottom_drag_r=None, barotropic_solver=None, dt_mom_ratio=None,
-                 momentum_friction_additive=False, coriolis_scheme=None):
+                 momentum_friction_additive=False, coriolis_scheme=None,
+                 ab2_scope=None):
     import jax
     import jax.numpy as jnp
     from legoesm.core.field import Field
@@ -125,6 +126,14 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
         # tendency (weight 1.0), instead of backward-Euler on the AB2 state.
         # Requires --outer-integrator ab2 (validated at config construction).
         cfg = cfg._replace(momentum_friction_additive=True)
+    if ab2_scope is not None:
+        # Veros-faithful AB2 scope (D2): dissipative tendencies (lateral
+        # friction + bottom drag; tracer diffusion + GM/Redi) at weight 1.0
+        # like Veros's du_mix / tr[tau]-diffusion placement, with their
+        # depth-mean routed through the barotropic forcing (solve_stream.py
+        # uloc structure). Requires outer_integrator="ab2". Climate-neutral
+        # on the ACC (218 vs 221 Sv) — faithfulness/stability option.
+        cfg = cfg._replace(ab2_scope=ab2_scope)
     if coriolis_scheme is not None:
         # Veros explicit-AB2 Coriolis placement (dycore-audit D1): the plain f×u
         # enters du_dt (so the outer AB2 extrapolates it and its depth-mean feeds

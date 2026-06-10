@@ -438,6 +438,24 @@ class LatLonCGridOceanTendencies(NamedTuple):
     # extraction (Veros integrate_tke ``forc += K_diss_bot``). ``None`` otherwise
     # (default), keeping the tendency pytree + every existing path bit-identical.
     K_diss_bot: object = None
+    # --- AB2 "advective"-scope dissipative split (Veros-faithful) ---
+    # When ``ab2_scope="advective"`` the DISSIPATIVE momentum / tracer
+    # tendencies are WITHHELD from ``du_dt``/``dv_dt`` / ``dT_dt``/``dS_dt``
+    # (so the outer AB2 extrapolates only the ADVECTIVE part) and exposed here
+    # so the model step can apply them at WEIGHT 1.0 (forward-Euler), matching
+    # Veros's placement (momentum friction + bottom drag in
+    # ``core/external/solve_stream.py``; tracer lateral diffusion in
+    # ``core/thermodynamics.py``). ``du_diss``/``dv_diss`` carry the lateral
+    # friction (whichever ``lateral_viscosity_operator``) + bottom-drag
+    # momentum tendencies [m/s²]; ``dT_diss``/``dS_diss`` carry the lateral
+    # tracer-diffusion tendency [degC/s, PSU/s] (the GM/Redi isoneutral+skew
+    # part is added to these in the model step, where it is computed). ``None``
+    # otherwise (default ``ab2_scope="total"``), keeping the tendency pytree +
+    # every existing path bit-identical.
+    du_diss: object = None
+    dv_diss: object = None
+    dT_diss: object = None
+    dS_diss: object = None
 
 
 class MomentumTendencyDiagnostics(NamedTuple):
@@ -1103,3 +1121,42 @@ class LatLonCGridOceanConfig(NamedTuple):
     # warns at 0.5 and 0.55. Default
     # "matsuno_split" ⇒ BIT-IDENTICAL for every existing config.
     coriolis_scheme: str = "matsuno_split"
+
+    # --- AB2 extrapolation scope (Veros-faithful dissipative placement) ---
+    # Selects WHICH explicit tendencies the AB2 outer integrator extrapolates:
+    #   "total" (DEFAULT, BIT-IDENTICAL) — legoESM's existing scheme: the AB2
+    #     extrapolates the FULL explicit forward-Euler increment, INCLUDING the
+    #     dissipative tendencies (momentum lateral friction + bottom drag;
+    #     tracer lateral diffusion + GM/Redi isoneutral+skew diffusion).
+    #   "advective" (VEROS-FAITHFUL) — only the ADVECTIVE part of the increment
+    #     is AB2-extrapolated; the DISSIPATIVE tendencies are applied at WEIGHT
+    #     1.0 (forward-Euler), matching Veros::
+    #       X^{n+1} = X^n + (1.5+ε)·ΔX_adv^n − (0.5+ε)·ΔX_adv^{n-1} + 1.0·ΔX_diss^n
+    #     Veros AB2-extrapolates ONLY {Coriolis, metric, advection, wind,
+    #     p_hydro} for momentum (``core/external/solve_stream.py``) and ONLY
+    #     advection for tracers (``vs.dtemp`` = ``advect_temperature``,
+    #     ``core/thermodynamics.py``); the dissipative terms ride at weight 1.0:
+    #     momentum lateral friction + bottom drag (added unextrapolated in
+    #     ``solve_stream.py``) and tracer lateral+isoneutral+skew diffusion
+    #     (added to ``tr[taup1]`` at weight 1.0 in ``thermodynamics.py`` /
+    #     ``isoneutral/diffusion.py`` — all computed from the PRE-STEP tracer
+    #     ``tr[tau]``).  In "advective" mode the AB2 carries
+    #     ``{T,S,u,v}_incr_prev`` hold ONLY the advective increment (the carry
+    #     semantics change is GATED — under "total" the carries are unchanged
+    #     bit-identically).
+    # WHY THIS MATTERS: the prior "total" scheme incurs a transient-only
+    # O((0.5+ε)·Δstep(D)) error per dissipative tendency (it converges to the
+    # SAME fixed point as "advective" — both reduce to a forward-Euler steady
+    # balance) AND halves the AB2 stability margin on the NEGATIVE REAL AXIS
+    # where stiff dissipation lives. STABILITY: at weight 1.0 the dissipative
+    # update obeys the forward-EULER stability bound (|1 − λ·dt| ≤ 1, i.e.
+    # λ·dt ≤ 2 for the real-negative eigenvalues of a diffusion operator); AB2
+    # on the negative real axis is stable only to |λ·dt| ≲ 1 — so "advective"
+    # is a STABILITY IMPROVEMENT for stiff dissipation, not a relaxation.
+    # Composes cleanly with ``momentum_friction_additive`` (the implicit
+    # VERTICAL friction is already weight-1.0 there): both on ⇒ the full Veros
+    # dissipative scope (lateral + vertical friction + bottom drag all weight
+    # 1.0).  Requires ``outer_integrator="ab2"`` (the scope is meaningless
+    # without AB2; rejected otherwise at config validation).  Default "total"
+    # ⇒ BIT-IDENTICAL for every existing config.
+    ab2_scope: str = "total"
