@@ -113,7 +113,7 @@ def test_iter884_source_uses_fortran_faithful_indices():
 
 def test_iter884_pert_ppm_applied_at_boundary_halo_cells():
     """Behavioural test: with `use_duogrid=False`, `_ppm_1d` MUST
-    apply iv=1 (= `_pert_ppm`) at the SPECIFIC q_c indices
+    apply iv=1 (= `pert_ppm`) at the SPECIFIC q_c indices
     [0, 1, 2, -3, -2, -1].
 
     Iter-884b (Codex iter-884 stop-time fix): the original count-
@@ -122,7 +122,7 @@ def test_iter884_pert_ppm_applied_at_boundary_halo_cells():
     flagged that as an invalid sentinel.
 
     iter-884b strategy: capture the `id(bl_slice)` of each
-    `_pert_ppm` invocation, then INSPECT which q_c index those
+    `pert_ppm` invocation, then INSPECT which q_c index those
     slices were taken from by comparing against pre-computed
     `bl[:, k, :]` views for every k in [-1, 0, ..., n+1].  The
     captured ids reveal exactly which indices the for-loop
@@ -140,7 +140,7 @@ def test_iter884_pert_ppm_applied_at_boundary_halo_cells():
     q = jnp.asarray(rng.normal(size=(6, n + 4, M)))
 
     # Make every cell mean's bl coordinate UNIQUE so we can read it
-    # back from the captured slice.  We patch _pert_ppm to record
+    # back from the captured slice.  We patch pert_ppm to record
     # the `bl_slice[0, 0]` value (which encodes the q_c index used).
     captured_k_values = []
 
@@ -155,7 +155,7 @@ def test_iter884_pert_ppm_applied_at_boundary_halo_cells():
     # `_pert_ppm_iv0` to return controlled bl/br.
     def fake_pert_ppm_iv0(q_c, bl, br):
         # q_c shape (6, n+2, M).  Return bl[face, k, m] = k
-        # so the subsequent `_pert_ppm` calls receive identifiable
+        # so the subsequent `pert_ppm` calls receive identifiable
         # slices.
         n_plus_2 = bl.shape[1]
         marker = jnp.broadcast_to(
@@ -163,7 +163,7 @@ def test_iter884_pert_ppm_applied_at_boundary_halo_cells():
             bl.shape)
         return marker, marker
 
-    with mock.patch.object(fv_tp_2d_mod, "_pert_ppm", tracking_pert_ppm):
+    with mock.patch.object(fv_tp_2d_mod, "pert_ppm", tracking_pert_ppm):
         with mock.patch.object(
                 fv_tp_2d_mod, "_pert_ppm_iv0", fake_pert_ppm_iv0):
             captured_k_values.clear()
@@ -179,7 +179,7 @@ def test_iter884_pert_ppm_applied_at_boundary_halo_cells():
     actual_markers = sorted(captured_k_values)
 
     assert actual_markers == expected_markers, (
-        f"`_ppm_1d(use_duogrid=False)` invoked `_pert_ppm` at q_c "
+        f"`_ppm_1d(use_duogrid=False)` invoked `pert_ppm` at q_c "
         f"indices with markers {actual_markers}; expected "
         f"{expected_markers} (Fortran-faithful indices [0, 1, 2, "
         f"-3, -2, -1] resolved with q_c.shape[1]={n+2}).\n"
@@ -190,12 +190,12 @@ def test_iter884_pert_ppm_applied_at_boundary_halo_cells():
         f"\n"
         f"This test catches the index regression that the count-only "
         f"check missed (both pre- and post-iter-884 invoke "
-        f"`_pert_ppm` 6 times; only the SPECIFIC indices differ).")
+        f"`pert_ppm` 6 times; only the SPECIFIC indices differ).")
 
 
 def test_iter884_no_pert_ppm_in_duogrid_path():
     """Sanity (also covered by iter-516/iter-517 in test_duogrid.py):
-    with `use_duogrid=True`, `_pert_ppm` must NOT be invoked for the
+    with `use_duogrid=True`, `pert_ppm` must NOT be invoked for the
     boundary iv=1 constraint at all.  This is the
     `not (bounded_domain or duogrid)` gate from Fortran tp_core.F90:612.
     iter-884 preserves this gate exactly; the fix only changes the
@@ -216,11 +216,11 @@ def test_iter884_no_pert_ppm_in_duogrid_path():
         n_calls["n"] += 1
         return bl_slice, br_slice
 
-    with mock.patch.object(fv_tp_2d_mod, "_pert_ppm", counting_pert_ppm):
+    with mock.patch.object(fv_tp_2d_mod, "pert_ppm", counting_pert_ppm):
         _ppm_1d(q, n, use_duogrid=True)
 
     assert n_calls["n"] == 0, (
-        f"`_ppm_1d(use_duogrid=True)` invoked `_pert_ppm` "
+        f"`_ppm_1d(use_duogrid=True)` invoked `pert_ppm` "
         f"{n_calls['n']} times; expected 0.  iter-884 must not "
         f"break the duogrid gate that skips iv=1 boundary "
         f"constraints (Fortran tp_core.F90:612).")

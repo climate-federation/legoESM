@@ -17,7 +17,7 @@ from legoesm.grids.duogrid import (
 )
 from legoesm.grids.halo import (
     CONNECTIVITY, WEST, EAST, SOUTH, NORTH,
-    pad_halo, _pad_halo_local,
+    pad_halo, pad_halo_local,
 )
 
 
@@ -153,8 +153,8 @@ class TestPrecomputeCorrectness:
         padded = padded.at[:, halo:halo+n, halo:halo+n].set(interior)
 
         # Pad with standard nearest-neighbor copy
-        padded_nn = _pad_halo_local(interior, interp_offsets=None)
-        # The output of _pad_halo_local is (6, n+2, n+2), resize if needed
+        padded_nn = pad_halo_local(interior, interp_offsets=None)
+        # The output of pad_halo_local is (6, n+2, n+2), resize if needed
         if halo == 2:
             # For halo=2, extend the linear field into halo manually
             full = jnp.tile(
@@ -417,15 +417,15 @@ class TestD2A2CVectDuoGrid:
         return create_cubed_sphere_cdgrid(grid)
 
     def test_duogrid_branch_dispatches(self):
-        """When duogrid is active, _d2a2c_vect should use the duogrid path."""
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        """When duogrid is active, d2a2c_vect should use the duogrid path."""
+        from legoesm.core.fv3_sw_core import d2a2c_vect
         n = 8
         cdgrid = self._make_grid(n, use_duogrid=True)
         assert cdgrid.base.duogrid is not None
 
         u_d = jnp.ones((6, n, n + 1))
         v_d = jnp.ones((6, n + 1, n))
-        ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        ua, va, uc, vc, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
         assert ua.shape == (6, n, n)
         assert uc.shape == (6, n + 1, n)
         assert vc.shape == (6, n, n + 1)
@@ -435,28 +435,28 @@ class TestD2A2CVectDuoGrid:
 
     def test_uniform_field_zero_divergence(self):
         """Uniform D-grid winds should produce near-zero divergence."""
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect
         n = 8
         cdgrid = self._make_grid(n, use_duogrid=True)
 
         u_d = jnp.zeros((6, n, n + 1))
         v_d = jnp.zeros((6, n + 1, n))
-        ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        ua, va, uc, vc, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
         np.testing.assert_allclose(ua, 0.0, atol=1e-12)
         np.testing.assert_allclose(va, 0.0, atol=1e-12)
         np.testing.assert_allclose(uc, 0.0, atol=1e-12)
         np.testing.assert_allclose(vc, 0.0, atol=1e-12)
 
     def test_non_duogrid_unchanged(self):
-        """Without duogrid, _d2a2c_vect should use the legacy edge-special path."""
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        """Without duogrid, d2a2c_vect should use the legacy edge-special path."""
+        from legoesm.core.fv3_sw_core import d2a2c_vect
         n = 8
         cdgrid = self._make_grid(n, use_duogrid=False)
         assert cdgrid.base.duogrid is None
 
         u_d = jnp.ones((6, n, n + 1))
         v_d = jnp.ones((6, n + 1, n))
-        ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        ua, va, uc, vc, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
         assert ua.shape == (6, n, n)
         assert jnp.all(jnp.isfinite(ua))
 
@@ -2287,7 +2287,7 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
       1. `pert_ppm(iv=1)` at face-boundary interior cells in
          `_ppm_1d` (`fv_tp_2d.py:252-256`).  Fortran tp_core.F90:612
          gates this on `.not. (bounded_domain .or. duogrid)`.
-      2. `_pert_ppm` is the helper called by that legacy path.  We
+      2. `pert_ppm` is the helper called by that legacy path.  We
          mock-patch it to record invocations and verify it is
          NOT called in the duogrid path.
     """
@@ -2331,7 +2331,7 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
         """Iter-517 (Codex follow-up): exercise the FULL production
         propagation chain `fv_tp_2d → _xppm/_yppm → _ppm_1d` instead
         of calling `_ppm_1d` directly with `use_duogrid=...`.  When
-        the CDGrid has duogrid active, `_pert_ppm` must NEVER fire
+        the CDGrid has duogrid active, `pert_ppm` must NEVER fire
         inside any of the four PPM passes that `fv_tp_2d` performs.
 
         This locks the propagation: if a future refactor breaks the
@@ -2360,11 +2360,11 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
             return bl, br
 
         with mock.patch.object(
-            fv_tp_2d_mod, "_pert_ppm", counting_pert_ppm,
+            fv_tp_2d_mod, "pert_ppm", counting_pert_ppm,
         ):
             fv_tp_2d_mod.fv_tp_2d(*inputs)
         assert call_count["n"] == 0, (
-            f"_pert_ppm fired {call_count['n']} times when fv_tp_2d "
+            f"pert_ppm fired {call_count['n']} times when fv_tp_2d "
             f"was called with a duogrid-enabled CDGrid.  Critical "
             f"Duogrid Constraint #2 violated: the propagation of "
             f"`use_duogrid` from fv_tp_2d (line 476) through "
@@ -2374,7 +2374,7 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
 
     def test_pert_ppm_iv1_called_in_non_duogrid_production_path(self):
         """Symmetric guard via the production entry: with a non-duogrid
-        CDGrid, `_pert_ppm` MUST fire.  `fv_tp_2d` performs FOUR PPM
+        CDGrid, `pert_ppm` MUST fire.  `fv_tp_2d` performs FOUR PPM
         passes (fy2, fx1, fx2, fy1; lines 495..513), each running 6
         boundary cells via the `_ppm_1d` loop at line 253.  Expected
         total = 4 * 6 = 24 calls."""
@@ -2394,7 +2394,7 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
             return bl, br
 
         with mock.patch.object(
-            fv_tp_2d_mod, "_pert_ppm", counting_pert_ppm,
+            fv_tp_2d_mod, "pert_ppm", counting_pert_ppm,
         ):
             fv_tp_2d_mod.fv_tp_2d(*inputs)
 
@@ -2404,7 +2404,7 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
         # (a) a pass was added/removed from fv_tp_2d, or (b) the
         # legacy iv=1 loop changed shape.
         assert call_count["n"] == 24, (
-            f"_pert_ppm fired {call_count['n']} times in the non-"
+            f"pert_ppm fired {call_count['n']} times in the non-"
             f"duogrid production path; expected exactly 24 (4 PPM "
             f"passes × 6 boundary cells per Fortran tp_core.F90:"
             f"629/648).  If the duogrid-bypass test passes but this "

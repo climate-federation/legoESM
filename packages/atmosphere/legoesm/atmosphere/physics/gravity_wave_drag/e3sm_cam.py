@@ -317,7 +317,8 @@ def gw_cm_src(
     projection vectors, projected winds, and phase speeds c (ncol, 2*pgwv+1).
     """
     ncol, nlev = u.shape
-    nwav = 2 * pgwv + 1
+    # Spectrum has ``nwav = 2*pgwv + 1`` phase-speed bins; the per-wave axis
+    # is built directly from ``pgwv`` (see the ``(ncol, nwav)`` shape comments).
     # kbot / kfront are 0-d traced integers (jit-safe).  All level access uses
     # dynamic gathers / a one-hot launch mask so nothing requires a Python int
     # (codex iter-2 #1 — int(argmin) on traced pressure broke under jit).
@@ -395,8 +396,8 @@ def build_stand_in_mfcc(pgwv: int, dc: float, beres: E3SMBeresConfig, dtype):
     """
     maxh = beres.maxh
     maxuh = beres.maxuh
-    nwav = 2 * pgwv + 1
-    # Phase-speed bin centres cref(l) = l*dc, l=-pgwv..pgwv.
+    # Phase-speed bin centres cref(l) = l*dc, l=-pgwv..pgwv (the per-wave axis
+    # has length ``nwav = 2*pgwv + 1``; see the ``(nwav,)`` shape comments).
     ls = jnp.arange(-pgwv, pgwv + 1, dtype=dtype)
     cref = ls * dc                                          # (nwav,)
     base_spec = beres.mfcc_peak * jnp.exp(-(cref / beres.mfcc_c0) ** 2)
@@ -995,7 +996,8 @@ def gw_ediff(
     is a known feature of the linear GW saturation theory there).
     """
     ncol, nlev = ubm.shape
-    nwav = gwut.shape[2]
+    # ``gwut`` carries the per-wave axis (length ``nwav = gwut.shape[2]``); the
+    # sum over waves below collapses it (see the ``(ncol, nlev, nwav)`` shapes).
     # egwdffm at midpoints: sum over waves.
     cmu = c[:, None, :] - ubm[:, :, None]                  # (ncol, nlev, nwav)
     egwdffm = prndl * 0.5 * jnp.sum(

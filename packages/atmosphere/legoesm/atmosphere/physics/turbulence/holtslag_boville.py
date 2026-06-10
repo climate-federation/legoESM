@@ -169,17 +169,15 @@ def holtslag_boville_turbulence(
     # zvir = R_v/R_d - 1 = 1/epsilon - 1 (oracle ``zvir`` in calc_obklen).
     zvir = 1.0 / constants.epsilon - 1.0
 
-    # Derived oracle parameters.
-    sffrac = config.sffrac
-    betam = config.betam
-    betah = config.betah
-    betas = config.betas
-    binm = betam * sffrac
-    binh = betah * sffrac
-    fak = config.fak
-    fakn = config.fakn
-    ccon = fak * sffrac * vk
-    ricr = config.Ri_crit
+    # NOTE: the derived oracle parameters (binm/binh = beta{m,h}*sffrac, the
+    # countergradient prefactors ccon=fak*sffrac*vk and fakn, the stable beta
+    # ``betas`` and the bulk-Ri critical number ``ricr``) are recomputed from
+    # ``config`` inside :func:`hb_diffusivities` (lines ~309-318), where they
+    # are actually consumed: the nonlocal K-profile, the countergradient term
+    # ``gamma_theta_half`` (applied in :func:`_diffuse_theta_with_countergradient`)
+    # and the bulk-Richardson PBL height (:func:`_pbl_height` via ``ricr``).
+    # They are NOT needed in this driver, which only assembles inputs and runs
+    # the implicit diffusion, so they are not duplicated here.
 
     # ----- Virtual potential temperature theta_v (oracle thv) -----
     # Exner Pi = (p/p_ref)^kappa ; potential temperature theta = T/Pi.

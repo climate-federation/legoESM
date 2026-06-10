@@ -24,7 +24,6 @@ References
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -32,9 +31,9 @@ from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type comp
 from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_zero,
     is_tripolar,
-    _fold_is_local,
+    fold_is_local,
     pad_ns_scalar,
-    _fold_row,
+    fold_row,
     pad_ns_vector_v,
     interp_cell_to_uface,
     interp_cell_to_vface,
@@ -44,10 +43,10 @@ from legoesm.grids.operators_latlon_cgrid import (
     divergence_cgrid,
     laplacian_cgrid,
     curl_vertex_cgrid,
-    _gradient_curl_to_u,
-    _gradient_curl_to_v,
+    gradient_curl_to_u,
+    gradient_curl_to_v,
     vector_laplacian_cgrid,
-    _compute_vertex_mask,
+    compute_vertex_mask,
 )
 # Operators accept LatLonGrid or LatLonCGridGeometry via duck typing.
 # When geometry fields (dx_u, dy_v, etc.) are available they are used
@@ -69,8 +68,8 @@ from legoesm.grids.operators_latlon_cgrid import (
 # they reduce to jnp.pad — bit-exact to the current code.
 
 
-# ``is_tripolar``, ``_fold_is_local``, ``pad_ns_scalar``, ``pad_ns_vector_v``,
-# ``cell_to_cgrid_winds`` and ``_compute_vertex_mask`` live in
+# ``is_tripolar``, ``fold_is_local``, ``pad_ns_scalar``, ``pad_ns_vector_v``,
+# ``cell_to_cgrid_winds`` and ``compute_vertex_mask`` live in
 # ``legoesm.grids.operators_latlon_cgrid`` (imported above) and are
 # re-exported here for the ocean dynamics call sites.
 
@@ -115,7 +114,7 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
     fold = getattr(grid, "fold", None)
     if fold is not None and fold.is_active and fold.fold_j >= 0:
         n_lon = fold.perm_T.shape[0]
-        north = _fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u, n_lon)
+        north = fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u, n_lon)
         padded = jnp.concatenate([padded[:-1], north], axis=0)
     return padded
 
@@ -162,8 +161,8 @@ def pad_ns_vector_pair(
 
     n_lon = fold.perm_T.shape[0]
 
-    u_src = _fold_row(u_interior[-1:], fold.perm_T, 1.0, n_lon)
-    v_src = _fold_row(v_interior[-1:], fold.perm_v, 1.0, n_lon)
+    u_src = fold_row(u_interior[-1:], fold.perm_T, 1.0, n_lon)
+    v_src = fold_row(v_interior[-1:], fold.perm_v, 1.0, n_lon)
 
     cos_alpha_v = getattr(grid, "cos_alpha_v", None)
     sin_alpha_v = getattr(grid, "sin_alpha_v", None)
@@ -298,7 +297,7 @@ def min_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     f_v = jnp.minimum(f_padded[:-1], f_padded[1:])
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
     f_v = zero_polar_lat_ends(f_v)
-    if _fold_is_local(grid):
+    if fold_is_local(grid):
         f_partner = f[-1:, grid.fold.perm_T]
         north = jnp.minimum(f[-1:], f_partner)
         f_v = jnp.concatenate([f_v[:-1], north], axis=0)
@@ -465,8 +464,8 @@ def recover_velocity_from_streamfunction(
         u_bt = -(1/H_u)·∂ψ/∂y      at u-faces (n_lat, n_lon+1)
         v_bt = +(1/H_v)·∂ψ/∂x      at v-faces (n_lat+1, n_lon)
 
-    The tangential vertex-gradient stencils ``_gradient_curl_to_u`` /
-    ``_gradient_curl_to_v`` supply ∂ψ/∂y at u-faces and ∂ψ/∂x at v-faces
+    The tangential vertex-gradient stencils ``gradient_curl_to_u`` /
+    ``gradient_curl_to_v`` supply ∂ψ/∂y at u-faces and ∂ψ/∂x at v-faces
     (periodic-wrap + pole/wall handling inherited).  Sign convention matches
     ``diagnostics_streamfunction.barotropic_streamfunction`` and Veros
     ``core/external/solve_stream.py`` (u = -1/H ∂ψ/∂y, v = +1/H ∂ψ/∂x).
@@ -483,8 +482,8 @@ def recover_velocity_from_streamfunction(
     -------
     (u_bt, v_bt) : zonal velocity (n_lat, n_lon+1) and meridional (n_lat+1, n_lon).
     """
-    dpsi_dy_u = _gradient_curl_to_u(psi, grid)   # (n_lat, n_lon+1) — ∂ψ/∂y at u-faces
-    dpsi_dx_v = _gradient_curl_to_v(psi, grid)   # (n_lat+1, n_lon) — ∂ψ/∂x at v-faces
+    dpsi_dy_u = gradient_curl_to_u(psi, grid)   # (n_lat, n_lon+1) — ∂ψ/∂y at u-faces
+    dpsi_dx_v = gradient_curl_to_v(psi, grid)   # (n_lat+1, n_lon) — ∂ψ/∂x at v-faces
     u_bt = -inv_H_u * dpsi_dy_u
     v_bt = inv_H_v * dpsi_dx_v
     if u_mask is not None:
@@ -602,7 +601,7 @@ def vector_laplacian_dissipation_cgrid(
     The divergence (cell centres) and relative vorticity ζ (vertices) are formed
     by the SAME shared operators and with the SAME face/vertex masking that
     ``vector_laplacian_cgrid`` uses internally (``divergence_cgrid``,
-    ``curl_vertex_cgrid``, ``_compute_vertex_mask``) — so the energy this credits is
+    ``curl_vertex_cgrid``, ``compute_vertex_mask``) — so the energy this credits is
     exactly the energy the applied viscous tendency removes (no duplicate or
     inconsistent numerics).  ζ² is averaged from the four surrounding vertices to
     the cell centre (the same 4-corner stagger as ``smagorinsky_viscosity_cgrid``).
@@ -643,7 +642,7 @@ def vector_laplacian_dissipation_cgrid(
     # Relative vorticity at vertices (masked at land-adjacent vertices) — same.
     zeta = curl_vertex_cgrid(u_eff, v_eff, grid)
     if mask is not None:
-        vmask = _compute_vertex_mask(mask, grid=grid)
+        vmask = compute_vertex_mask(mask, grid=grid)
         zeta = zeta * _bcast(vmask, zeta)
 
     # ζ² averaged from the four surrounding vertices to the cell centre (the
@@ -1472,7 +1471,7 @@ def strain_rate_cgrid(
     D_S = pad_ns_scalar(D_S[1:-1], grid)
 
     if mask is not None:
-        vmask = _compute_vertex_mask(mask, grid=grid)
+        vmask = compute_vertex_mask(mask, grid=grid)
         D_S = D_S * _bcast2d(vmask)
 
     return D_T, D_S
@@ -1749,7 +1748,7 @@ def viscous_tendency_cgrid(
     # coefficients over the trailing level axis when the velocity is 3D.
     is_3d = u.ndim == 3
 
-    def _bcast_coef(A, like_shape_ndim):
+    def _bcast_coef(A):
         # Add a trailing newaxis if A is a 2D array and the field is 3D.
         if (
             is_3d and isinstance(A, jnp.ndarray) and A.ndim == 2
@@ -1771,8 +1770,8 @@ def viscous_tendency_cgrid(
     D_T, D_S = strain_rate_cgrid(u_eff, v_eff, grid, mask=mask)
 
     # 2. Form stresses (broadcast 2D coefficients over the level axis)
-    stress_h = _bcast_coef(A_h, D_T.ndim) * D_T
-    stress_q = _bcast_coef(A_q, D_S.ndim) * D_S
+    stress_h = _bcast_coef(A_h) * D_T
+    stress_q = _bcast_coef(A_q) * D_S
 
     # 3. Stress divergence (already 3D-native; normalize controls area
     # normalization)
@@ -1783,7 +1782,7 @@ def viscous_tendency_cgrid(
     return tend_u, tend_v
 
 
-def _vertex_area(grid: LatLonGrid) -> jnp.ndarray:
+def vertex_area_1d(grid: LatLonGrid) -> jnp.ndarray:
     """Dual-cell area at vertex (corner) points.
 
     Returns
@@ -1851,7 +1850,7 @@ def smagorinsky_viscosity_q_cgrid(
     deformation_q = jnp.sqrt(D_T_q**2 + D_S**2 + 1e-30)
 
     # Vertex dual cell area; reshape for broadcast over (n_lat+1, n_lon+1[, nlev]).
-    A_vert = _vertex_area(grid)  # (n_lat+1,)
+    A_vert = vertex_area_1d(grid)  # (n_lat+1,)
     Delta_q = jnp.sqrt(A_vert)
     bcast = (slice(None),) + (jnp.newaxis,) * (D_T.ndim - 1)
     Delta_q = Delta_q[bcast]
@@ -1863,7 +1862,7 @@ def smagorinsky_viscosity_q_cgrid(
     A_smag_q = A_smag_q.at[-1].set(0.0)
 
     if mask is not None:
-        vmask = _compute_vertex_mask(mask, grid=grid)
+        vmask = compute_vertex_mask(mask, grid=grid)
         if is_3d:
             vmask = vmask[..., jnp.newaxis]
         A_smag_q = A_smag_q * vmask
@@ -2241,7 +2240,7 @@ def leith_viscosity_q_cgrid(
 
     norm_q = jnp.sqrt(total_sq + 1e-30)
 
-    A_vert = _vertex_area(grid)                          # (n_lat+1,)
+    A_vert = vertex_area_1d(grid)                          # (n_lat+1,)
     bcast = (slice(None),) + (jnp.newaxis,) * (norm_q.ndim - 1)
     Delta_q = jnp.sqrt(A_vert)[bcast]
 
@@ -2252,7 +2251,7 @@ def leith_viscosity_q_cgrid(
     A_leith_q = pad_ns_scalar(A_leith_q[1:-1], grid)
 
     if mask is not None:
-        vmask = _compute_vertex_mask(mask, grid=grid)
+        vmask = compute_vertex_mask(mask, grid=grid)
         if is_3d:
             vmask = vmask[..., jnp.newaxis]
         A_leith_q = A_leith_q * vmask
@@ -2316,7 +2315,7 @@ def neumann_fill_vertex(
 ) -> jnp.ndarray:
     """Fill land vertices with nearest ocean-neighbour (Neumann BC).
 
-    Vertex-level analog of ``_neumann_fill_cgrid`` for the
+    Vertex-level analog of ``neumann_fill_cgrid`` for the
     ``(n_lat+1, n_lon+1)`` vertex grid.  Longitude is periodic
     (column ``n_lon`` duplicates column 0); rows 0 and ``n_lat`` are
     pole vertices with Neumann padding in the meridional direction.
@@ -2520,14 +2519,14 @@ def partial_cell_pgf_correction_y(
 
     Output shape: ``(n_lat+1, n_lon, nlev)``.
     """
-    # Cell-pad-first (PR357 Bug-2 pattern; see ``_interp_to_v_points``):
+    # Cell-pad-first (PR357 Bug-2 pattern; see ``interp_to_v_points``):
     # pad the CELL fields so the v-face at a partition cut is built from the
     # neighbour rank's adjacent cell column (MPI halo exchange) rather than
     # from halo-padding an already-computed interior face.  ``pad_ns_zero``
     # halo-exchanges at interior cuts and zero-pads at the physical pole on
     # every rank (consistent MPI call count); ``zero_polar_lat_ends`` then
     # restores the wall BC at the physical pole only.  The fold seam is
-    # overwritten on the rank that owns it (``_fold_is_local``).
+    # overwritten on the rank that owns it (``fold_is_local``).
     cd_p = pad_ns_zero(centroid_depth)                  # (n_lat+1, n_lon, nlev)
     rp_p = pad_ns_zero(rho_prime)
     centroid_south, centroid_north = cd_p[:-1], cd_p[1:]
@@ -2545,7 +2544,7 @@ def partial_cell_pgf_correction_y(
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
     correction = zero_polar_lat_ends(correction)
 
-    if _fold_is_local(grid):
+    if fold_is_local(grid):
         centroid_partner = centroid_depth[-1:, grid.fold.perm_T, :]
         rho_partner = rho_prime[-1:, grid.fold.perm_T, :]
         face_ref_fold = jnp.minimum(centroid_depth[-1:], centroid_partner)
@@ -2699,7 +2698,7 @@ def density_jacobian_pgf_smc03_y(
     z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
     sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
 
-    # Cell-pad-first (PR357 Bug-2 pattern; see ``_interp_to_v_points``): pad
+    # Cell-pad-first (PR357 Bug-2 pattern; see ``interp_to_v_points``): pad
     # the CELL columns so the v-face PGF at a partition cut is built from the
     # neighbour rank's adjacent column (MPI halo exchange) rather than from
     # halo-padding an already-computed interior face.  ``pad_ns_zero``
@@ -2731,7 +2730,7 @@ def density_jacobian_pgf_smc03_y(
     diff = zero_polar_lat_ends(diff)
 
     # North fold seam: only the rank that owns it overwrites the north row.
-    if _fold_is_local(grid):
+    if fold_is_local(grid):
         fold = grid.fold
         rho_F = rho_per_cell[-1:, fold.perm_T, :]
         h_F = h_partial[-1:, fold.perm_T, :]

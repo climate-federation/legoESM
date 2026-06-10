@@ -88,7 +88,7 @@ def test_iter934_deln_flux_factoring_is_mathematically_equivalent():
     operation is linear in d2.
     """
     from legoesm.core.fv_tp_2d import transport_step
-    from legoesm.core.fv3_sw_core import _d2a2c_vect
+    from legoesm.core.fv3_sw_core import d2a2c_vect
 
     N = 24  # large enough that pre-iter-934 didn't overflow
     grid = create_cubed_sphere(N)
@@ -98,7 +98,7 @@ def test_iter934_deln_flux_factoring_is_mathematically_equivalent():
     u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
     v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
     h = sw.h.data
-    _, _, _, _, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+    _, _, _, _, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
     h_new = transport_step(
         h, ut, vt, 300.0, cdgrid,
         nord=2, damp_c=0.06,

@@ -37,14 +37,33 @@ DEFAULT_TRAINABLE = [
     ParamConstraint("albedo_ocean", 0.03, 0.10, "sigmoid"),
 ]
 
-# Non-convection trainable parameters (shared by all schemes)
-_COMMON_TRAINABLE = [
+# Gray-radiation optical-depth parameters.  The unified pipeline feeds
+# tau_equator/tau_pole only into the gray solver; the RRTMGP branch
+# explicitly discards them (physics_pipeline.py `del tau_equator,
+# tau_pole`), so under rrtmgp they would be dead degrees of freedom.
+_GRAY_RADIATION_TRAINABLE = [
     ParamConstraint("tau_equator", 5.0, 10.0, "sigmoid"),
     ParamConstraint("tau_pole", 1.0, 3.0, "sigmoid"),
-    ParamConstraint("C_H", 0.001, 0.005, "sigmoid"),
-    ParamConstraint("C_E", 0.001, 0.005, "sigmoid"),
+]
+
+# Surface-albedo parameters.  The blended (ice/ocean/land) albedo
+# reaches the radiative heating through BOTH solvers: RRTMGP consumes
+# ``albedo_col`` directly, and since 2026-06-10 the gray SW reflection
+# takes the blended albedo too (``gray_radiation(sfc_albedo=...)``) —
+# only ``radiation="none"`` leaves these without a gradient path.
+_ALBEDO_TRAINABLE = [
     ParamConstraint("albedo_ice", 0.4, 0.8, "sigmoid"),
     ParamConstraint("albedo_ocean", 0.03, 0.10, "sigmoid"),
+]
+
+# Bulk surface-exchange coefficients.  Live only when no turbulence
+# scheme is active: with turbulence on, ``turb_owns_surface`` skips the
+# pipeline's bulk boundary-layer kick and the scheme's own
+# SurfaceLayerConfig (which these trainables are NOT threaded into)
+# supplies the fluxes.
+_BULK_SURFACE_TRAINABLE = [
+    ParamConstraint("C_H", 0.001, 0.005, "sigmoid"),
+    ParamConstraint("C_E", 0.001, 0.005, "sigmoid"),
 ]
 
 # SBM-specific convection parameters
@@ -56,23 +75,49 @@ _SBM_TRAINABLE = [
 
 def trainable_constraints_for_scheme(
     convection_scheme: str = "sbm",
+    radiation_scheme: str = "gray",
+    turbulence_scheme: str = "none",
 ) -> list[ParamConstraint]:
-    """Return trainable parameter constraints appropriate for the given scheme.
+    """Return trainable parameter constraints reachable under the given schemes.
+
+    Filters out parameters that the selected physics configuration can
+    never train (zero gradient by construction), so an optimizer is not
+    handed dead degrees of freedom:
+
+    - the gray optical depths ``tau_equator``/``tau_pole`` only feed the
+      gray solver (rrtmgp explicitly discards them);
+    - the blended-albedo pair trains under gray AND rrtmgp (both consume
+      the pipeline's blended surface albedo) but not ``radiation="none"``;
+    - an active turbulence scheme owns the surface fluxes, so the bulk
+      ``C_H``/``C_E`` only train with ``turbulence_scheme="none"``;
+    - only SBM has scheme-specific convection parameters.
 
     Parameters
     ----------
     convection_scheme : str
-        Convection scheme name: "sbm", "dca", "kuo", "mass_flux", "edmf", "none".
-        Only SBM has scheme-specific trainable parameters.
+        Convection scheme name: "sbm", "dca", "kuo", "mass_flux", "edmf",
+        "none".
+    radiation_scheme : str
+        Radiation scheme name: "gray", "rrtmgp" (alias "rrtmg"), "none".
+    turbulence_scheme : str
+        Turbulence scheme name ("none" enables the bulk surface pair).
 
     Returns
     -------
     list[ParamConstraint]
     """
+    radiation = "rrtmgp" if radiation_scheme == "rrtmg" else radiation_scheme
+
+    constraints: list[ParamConstraint] = []
+    if radiation == "gray":
+        constraints += _GRAY_RADIATION_TRAINABLE
+    if radiation in ("gray", "rrtmgp"):
+        constraints += _ALBEDO_TRAINABLE
+    if turbulence_scheme == "none":
+        constraints += _BULK_SURFACE_TRAINABLE
     if convection_scheme == "sbm":
-        return _COMMON_TRAINABLE + _SBM_TRAINABLE
-    else:
-        return list(_COMMON_TRAINABLE)
+        constraints += _SBM_TRAINABLE
+    return constraints
 
 
 def sigmoid_to_range(raw: jax.Array, lo: float, hi: float) -> jax.Array:

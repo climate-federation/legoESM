@@ -2,7 +2,7 @@
 ζ_corner on the non-hydrostatic 3D path.
 
 Mirrors the iter-14 PE-side wiring; reuses the SW backbone helper
-``_interp_center_to_corner_a2b_ord4`` (port of FV3
+``interp_center_to_corner_a2b_ord4`` (port of FV3
 ``a2b_edge.F90:a2b_ord4``).
 
 Tests

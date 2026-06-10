@@ -473,7 +473,6 @@ def kuo_convection(
     zint_t_safe = _safe(zint_t)
     zint_q_safe = _safe(zint_q)
 
-    cvgu_c = cvgu[:, None]
     # --- Closure tendencies ---
     if config.partition == "kuo1965":
         # dt/dt = cvgu/zint·(tc−t); dq/dt = −ptenq + cvgu/zint·(qvc−qv).

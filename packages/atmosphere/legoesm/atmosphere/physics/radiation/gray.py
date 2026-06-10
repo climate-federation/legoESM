@@ -208,6 +208,7 @@ def _sw_beer_lambert(
     p_s: jnp.ndarray,
     insolation: jnp.ndarray,
     config: GrayRadiationConfig,
+    sfc_albedo: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute SW fluxes using Beer-Lambert absorption (Frierson/Isca style).
 
@@ -226,6 +227,11 @@ def _sw_beer_lambert(
     insolation : jnp.ndarray
         TOA insolation (ncol,) [W/m^2].
     config : GrayRadiationConfig
+    sfc_albedo : jnp.ndarray or None
+        Per-column surface albedo (ncol,).  ``None`` falls back to the
+        scalar ``config.sfc_albedo`` (the historical behavior).  The
+        driver pipeline passes its blended ice/ocean/land albedo here so
+        gray SW sees the same surface the surface energy budget uses.
 
     Returns
     -------
@@ -235,7 +241,7 @@ def _sw_beer_lambert(
         Downward SW flux at interfaces (ncol, nlev+1) [W/m^2].
     """
     tau_sw_0 = config.sw_tau_0
-    alpha = config.sfc_albedo
+    alpha = config.sfc_albedo if sfc_albedo is None else sfc_albedo
 
     # sigma at interfaces
     sigma_half = p_half / p_s[:, None]  # (ncol, nlev+1)
@@ -310,6 +316,7 @@ def gray_radiation(
     q_v: jnp.ndarray | None,
     insolation: jnp.ndarray,
     config: GrayRadiationConfig,
+    sfc_albedo: jnp.ndarray | None = None,
 ) -> RadiationOutput:
     """Compute two-stream gray radiation (LW + SW).
 
@@ -330,6 +337,13 @@ def gray_radiation(
     insolation : jnp.ndarray
         TOA insolation (ncol,) [W/m^2].
     config : GrayRadiationConfig
+    sfc_albedo : jnp.ndarray or None
+        Per-column surface albedo (ncol,) for the SW reflection.
+        ``None`` (default) uses the scalar ``config.sfc_albedo`` —
+        byte-identical to the historical behavior.  The driver pipeline
+        passes its blended ice/ocean/land albedo so gray SW is
+        consistent with the surface energy budget (and the albedo
+        parameters become trainable under gray).
 
     Returns
     -------
@@ -345,7 +359,9 @@ def gray_radiation(
     lw_up, lw_down = _lw_two_stream(T, sfc_temperature, dtau_lw, config)
 
     # SW fluxes
-    sw_up, sw_down = _sw_beer_lambert(p_half, p_s, insolation, config)
+    sw_up, sw_down = _sw_beer_lambert(
+        p_half, p_s, insolation, config, sfc_albedo=sfc_albedo,
+    )
 
     # Heating rates
     lw_hr = _compute_heating_rate(lw_up, lw_down, p_half)

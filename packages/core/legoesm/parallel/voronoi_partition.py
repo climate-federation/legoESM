@@ -182,7 +182,7 @@ def partition_cells_metis(mesh: VoronoiMesh, n_ranks: int) -> np.ndarray:
 # Halo computation
 # ============================================================================
 
-def _compute_halo_cells(
+def compute_halo_cells(
     cell_owner: np.ndarray,
     cellsOnCell: np.ndarray,
     maxEdges: int,
@@ -303,7 +303,7 @@ def partition_voronoi_mesh(
     # Cells
     # ------------------------------------------------------------------
     owned_cells = np.sort(np.where(cell_owner == rank)[0]).astype(np.int64)
-    halo_cells_set = _compute_halo_cells(
+    halo_cells_set = compute_halo_cells(
         cell_owner, cellsOnCell, mesh.maxEdges, rank, halo_depth,
     )
     halo_cells = np.array(sorted(halo_cells_set), dtype=np.int64)
@@ -397,7 +397,7 @@ def partition_voronoi_mesh(
     cell_to_nbr: dict[int, set[int]] = {}
     for R in neighbor_ranks:
         R_owned = set(np.where(cell_owner == R)[0].tolist())
-        R_halo = _compute_halo_cells(
+        R_halo = compute_halo_cells(
             cell_owner, cellsOnCell, mesh.maxEdges, R, halo_depth,
         )
         for c in R_owned | R_halo:

@@ -205,7 +205,7 @@ def mpi_stack_outside_tested_range() -> bool:
     return not (in_jax and in_mpi4jax)
 
 
-def _require_mpi_stack():
+def require_mpi_stack():
     """Return (mpi4jax, MPI) or raise a clear ImportError."""
     missing = []
     if importlib.util.find_spec("mpi4jax") is None:
@@ -228,7 +228,7 @@ def _require_mpi_stack():
     return mpi4jax, MPI
 
 
-def _mpi4jax_array_result(result):
+def mpi4jax_array_result(result):
     """Return the array payload from mpi4jax return values.
 
     mpi4jax<0.8 commonly returned ``(array, token)`` while mpi4jax>=0.8
@@ -257,12 +257,12 @@ def global_sum_mpi(local_value: jax.Array, comm=None) -> jax.Array:
         ``layout.comm``) MUST pass that same communicator — otherwise the reduction
         spans the wrong rank set and can deadlock or mix unrelated ranks.
     """
-    mpi4jax, MPI = _require_mpi_stack()
+    mpi4jax, MPI = require_mpi_stack()
     if comm is None:
         comm = MPI.COMM_WORLD
 
     with mpi_timer("global_sum_mpi"):
-        global_val = _mpi4jax_array_result(
+        global_val = mpi4jax_array_result(
             mpi4jax.allreduce(local_value, op=MPI.SUM, comm=comm),
         )
     return global_val
@@ -271,7 +271,7 @@ def global_sum_mpi(local_value: jax.Array, comm=None) -> jax.Array:
 def is_multi_process() -> bool:
     """Whether reductions must cross process/rank boundaries.
 
-    ``jax.process_count() > 1`` covers JAX multi-host runs; ``_is_distributed()``
+    ``jax.process_count() > 1`` covers JAX multi-host runs; ``is_distributed()``
     covers the mpi4jax single-host-multi-rank path where ``process_count`` stays
     1.  Either condition means a local partial sum must be all-reduced to obtain
     the global value.  Canonical home (#177) for the predicate the ocean
@@ -279,12 +279,12 @@ def is_multi_process() -> bool:
     re-implemented identically.
     """
     # Function-scope import: ``core.operators`` imports ``global_sum_mpi`` from
-    # this module (function-scope), so importing ``_is_distributed`` at module
+    # this module (function-scope), so importing ``is_distributed`` at module
     # top level would risk an operators<->reductions import cycle.
-    from legoesm.core.operators import _is_distributed
+    from legoesm.core.operators import is_distributed
     if jax.process_count() > 1:
         return True
-    return _is_distributed()
+    return is_distributed()
 
 
 def global_sum_if_distributed(local_value: jax.Array) -> jax.Array:
@@ -321,10 +321,10 @@ def global_max_mpi(local_value: jax.Array) -> jax.Array:
     jax.Array
         The global maximum across all processes.
     """
-    mpi4jax, MPI = _require_mpi_stack()
+    mpi4jax, MPI = require_mpi_stack()
 
     with mpi_timer("global_max_mpi"):
-        global_val = _mpi4jax_array_result(
+        global_val = mpi4jax_array_result(
             mpi4jax.allreduce(local_value, op=MPI.MAX, comm=MPI.COMM_WORLD),
         )
     return global_val
@@ -347,10 +347,10 @@ def global_min_mpi(local_value: jax.Array) -> jax.Array:
     jax.Array
         The global minimum across all processes.
     """
-    mpi4jax, MPI = _require_mpi_stack()
+    mpi4jax, MPI = require_mpi_stack()
 
     with mpi_timer("global_min_mpi"):
-        global_val = _mpi4jax_array_result(
+        global_val = mpi4jax_array_result(
             mpi4jax.allreduce(local_value, op=MPI.MIN, comm=MPI.COMM_WORLD),
         )
     return global_val
@@ -374,14 +374,14 @@ def allgather_mpi(local_value: jax.Array) -> jax.Array:
         Concatenated array from all processes along a new leading axis.
         Shape: ``(n_processes,) + local_value.shape``.
     """
-    mpi4jax, MPI = _require_mpi_stack()
+    mpi4jax, MPI = require_mpi_stack()
 
     n_procs = MPI.COMM_WORLD.Get_size()
     recv_shape = (n_procs,) + local_value.shape
     recv_buf = jax.numpy.zeros(recv_shape, dtype=local_value.dtype)
 
     with mpi_timer("allgather_mpi"):
-        recv_buf = _mpi4jax_array_result(
+        recv_buf = mpi4jax_array_result(
             mpi4jax.allgather(local_value, comm=MPI.COMM_WORLD),
         )
     return recv_buf
@@ -419,7 +419,7 @@ def batch_allreduce_mpi(
     if not values:
         return []
 
-    mpi4jax, MPI = _require_mpi_stack()
+    mpi4jax, MPI = require_mpi_stack()
 
     mpi_op_map = {"sum": MPI.SUM, "max": MPI.MAX, "min": MPI.MIN}
     if op not in mpi_op_map:
@@ -445,7 +445,7 @@ def batch_allreduce_mpi(
 
     # Single MPI allreduce.
     with mpi_timer("batch_allreduce_mpi"):
-        global_packed = _mpi4jax_array_result(
+        global_packed = mpi4jax_array_result(
             mpi4jax.allreduce(packed, op=mpi_op, comm=MPI.COMM_WORLD),
         )
 
@@ -481,9 +481,9 @@ def broadcast_mpi(value: jax.Array, root: int = 0) -> jax.Array:
     jax.Array
         The broadcast value on all ranks.
     """
-    mpi4jax, MPI = _require_mpi_stack()
+    mpi4jax, MPI = require_mpi_stack()
 
-    result = _mpi4jax_array_result(
+    result = mpi4jax_array_result(
         mpi4jax.bcast(value, root=root, comm=MPI.COMM_WORLD),
     )
     return result

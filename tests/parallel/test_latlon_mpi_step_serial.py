@@ -6,7 +6,7 @@ Bit-exactness is the right contract here:
 
 * The single-rank layout has both pole flags True, so the rank-aware
   ``pole_v_bc`` reduces to the serial double-pole-zero pad.
-* No MPI reductions actually fire under ``_is_distributed() == False``
+* No MPI reductions actually fire under ``is_distributed() == False``
   (no halo backend activated for this serial test); the external mass
   fixer in the wrapper calls the same ``_apply_safety_rails`` as the
   internal serial fixer, with the same inputs.

@@ -10,7 +10,7 @@ duplicate grid nodes → degenerate corner metrics).
 
 The fix (`_gnomonic_ed_faces_from_angle_1d` + `_gnomonic_ed_extrap1d`) builds the
 ed extended grids as the SAME-FACE continuation via the tested forward map
-`_face_gnomonic_to_lonlat` with the separable 1D ed angle array extrapolated for
+`face_gnomonic_to_lonlat` with the separable 1D ed angle array extrapolated for
 the halo — the direct ed analog of equiangular's ``linspace`` extension.
 
 These pins guard that:
@@ -33,7 +33,7 @@ from legoesm.grids.cubed_sphere import (  # noqa: E402
     gnomonic_ed_supergrid_lonlat,
     gnomonic_ed_padded_supergrid_lonlat,
     make_fv3_native_grid,
-    _gnomonic_ed_remap_to_create,
+    gnomonic_ed_remap_to_create,
 )
 
 
@@ -70,7 +70,7 @@ def test_corner_ext_interior_matches_corners():
     """Refinement consistency: corner_ext[1:-1, 1:-1] == the gnomonic_ed corners."""
     n = 36
     lon, lat = (np.asarray(a) for a in gnomonic_ed_corner_ext_lonlat(n))
-    lc, la = (np.asarray(a) for a in _gnomonic_ed_remap_to_create(
+    lc, la = (np.asarray(a) for a in gnomonic_ed_remap_to_create(
         *make_fv3_native_grid(n, grid_type=0)))
     sep = _gcd(la, lc, lat[:, 1:-1, 1:-1], lon[:, 1:-1, 1:-1])
     assert sep.max() < 1e-12, f"corner_ext interior diverges from corners by {sep.max():.2e}"
@@ -84,7 +84,7 @@ def test_padded_supergrid_interior_matches_supergrid_and_corners():
     sep = _gcd(slat, slon, plat[:, 1:-1, 1:-1], plon[:, 1:-1, 1:-1])
     assert sep.max() < 1e-12, f"padded_sg interior != supergrid ({sep.max():.2e})"
     # supergrid even nodes reproduce the corners
-    lc, la = (np.asarray(a) for a in _gnomonic_ed_remap_to_create(
+    lc, la = (np.asarray(a) for a in gnomonic_ed_remap_to_create(
         *make_fv3_native_grid(n, grid_type=0)))
     sep2 = _gcd(la, lc, slat[:, ::2, ::2], slon[:, ::2, ::2])
     assert sep2.max() < 1e-12, f"supergrid even nodes != corners ({sep2.max():.2e})"

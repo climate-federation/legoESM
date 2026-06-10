@@ -152,14 +152,14 @@ def test_ppermute_schedule_covers_24_adjacencies_once():
 def test_activate_rejects_non_avg_corner_fill():
     """SPMD hard-codes avg corners; activating it under a non-avg corner mode
     must raise rather than silently mismatch the serial corners (codex)."""
-    mesh_before, backend_before = cx._spmd_mesh, halo_mod._halo_backend
+    mesh_before, backend_before = cx.get_spmd_mesh(), halo_mod.get_halo_backend()
     halo_mod.set_corner_fill_mode("fv3_agrid_xdir")
     try:
         with pytest.raises(NotImplementedError, match="corner_fill_mode"):
             cx.activate_spmd_halo_backend(_mesh(), n=8, nlev=1)
         # No-leak: the guard runs FIRST, so a raise leaves globals untouched.
-        assert cx._spmd_mesh is mesh_before
-        assert halo_mod._halo_backend == backend_before != "spmd"
+        assert cx.get_spmd_mesh() is mesh_before
+        assert halo_mod.get_halo_backend() == backend_before != "spmd"
     finally:
         halo_mod.set_corner_fill_mode("avg")
 

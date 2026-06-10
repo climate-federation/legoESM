@@ -175,7 +175,7 @@ def _ppermute_halo_exchange(data, grid, mesh):
     jax.Array
         Halo-padded field.
     """
-    from legoesm.grids.halo import _extract_edge_strip
+    from legoesm.grids.halo import extract_edge_strip
 
     n_devices = mesh.shape["face"] if "face" in mesh.axis_names else 1
     if n_devices <= 1:
@@ -204,7 +204,7 @@ def _ppermute_halo_exchange(data, grid, mesh):
             continue
 
         # Extract edge strips for all faces along this edge.
-        strips = jax.vmap(lambda f: _extract_edge_strip(data, f, edge))(
+        strips = jax.vmap(lambda f: extract_edge_strip(data, f, edge))(
             jnp.arange(6)
         )  # (6, n)
 

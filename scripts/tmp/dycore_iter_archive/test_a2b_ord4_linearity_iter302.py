@@ -30,7 +30,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.core.operators_cdgrid import (
-    _interp_center_to_corner_a2b_ord4,
+    interp_center_to_corner_a2b_ord4,
 )
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -52,11 +52,11 @@ def test_a2b_ord4_superposition(ab):
     alpha, beta = ab
     cdgrid, f1, f2 = _setup()
 
-    lhs = _interp_center_to_corner_a2b_ord4(
+    lhs = interp_center_to_corner_a2b_ord4(
         alpha * f1 + beta * f2, cdgrid,
     )
-    rhs = alpha * _interp_center_to_corner_a2b_ord4(f1, cdgrid) + \
-          beta * _interp_center_to_corner_a2b_ord4(f2, cdgrid)
+    rhs = alpha * interp_center_to_corner_a2b_ord4(f1, cdgrid) + \
+          beta * interp_center_to_corner_a2b_ord4(f2, cdgrid)
 
     np.testing.assert_allclose(
         np.asarray(lhs), np.asarray(rhs), rtol=1e-14, atol=1e-14,
@@ -72,8 +72,8 @@ def test_a2b_ord4_homogeneity(alpha):
     """``a2b_ord4(α*f) = α*a2b_ord4(f)``."""
     cdgrid, f, _ = _setup()
 
-    lhs = _interp_center_to_corner_a2b_ord4(alpha * f, cdgrid)
-    rhs = alpha * _interp_center_to_corner_a2b_ord4(f, cdgrid)
+    lhs = interp_center_to_corner_a2b_ord4(alpha * f, cdgrid)
+    rhs = alpha * interp_center_to_corner_a2b_ord4(f, cdgrid)
 
     np.testing.assert_allclose(
         np.asarray(lhs), np.asarray(rhs), rtol=1e-14, atol=1e-14,

@@ -239,6 +239,21 @@ Passing pytest is *necessary but not sufficient* on the cubed-sphere
 Ocean: `scripts/matrix/run_ocean_test_matrix.py` (current status: 57/57
 PASS).
 
+Fast static guardrails (constants/saturation/dispatch/contracts/federation
+tripwires — seconds, no GPU):
+
+```bash
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+    tests/test_no_hardcoded_constants.py tests/test_no_saturation_reimpl.py \
+    tests/test_dispatch_hardening.py tests/test_physics_contracts.py \
+    tests/test_import_boundaries.py tests/test_federation_plan.py -q
+```
+
+For the full picture — pytest tiers, the matrix framework, the guardrail harness,
+the `scripts/validate/` scientific validators, and the adversarial-review agents
+(Codex `/codex:adversarial-review`, `physics-validator`, `lego-modularity-tester`,
+…) — see [docs/TESTING.md](TESTING.md).
+
 Sea ice: `scripts/matrix/run_sea_ice_test_matrix.py` (15 standard benchmarks).
 
 ---

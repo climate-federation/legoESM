@@ -38,7 +38,7 @@ from __future__ import annotations
 #
 # in both ``primitive_eq_cdgrid.py`` and ``compressible_euler_cdgrid.py``.
 # The unique marker is the assignment ``_zeta_smag_corner =``;
-# ``_interp_center_to_corner_a2b_ord4`` is the helper that must
+# ``interp_center_to_corner_a2b_ord4`` is the helper that must
 # remain present at the iter-170 site (which iter-190 dedup'd into).
 ITER187_GATE = "_zeta_smag_corner ="
-ITER187_HELPER = "_interp_center_to_corner_a2b_ord4"
+ITER187_HELPER = "interp_center_to_corner_a2b_ord4"

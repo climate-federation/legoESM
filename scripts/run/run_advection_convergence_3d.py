@@ -151,17 +151,17 @@ def _flux_divergence_3d(scheme, tracer, mass_flux_u, mass_flux_v,
     # Horizontal scheme dispatch
     if scheme == "upwind":
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _upwind_to_u_points, _upwind_to_v_points)
+            upwind_to_u_points, upwind_to_v_points)
         from legoesm.ocean.vertical import flux_form_vertical_tracer_advection
-        tr_u = _upwind_to_u_points(tracer, mass_flux_u)
-        tr_v = _upwind_to_v_points(tracer, mass_flux_v)
+        tr_u = upwind_to_u_points(tracer, mass_flux_u)
+        tr_v = upwind_to_v_points(tracer, mass_flux_v)
         vert_flux_div = flux_form_vertical_tracer_advection(tracer, w_half)
     elif scheme == "tvd":
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _tvd_to_u_points, _tvd_to_v_points)
+            tvd_to_u_points, tvd_to_v_points)
         from legoesm.ocean.vertical import flux_form_vertical_tracer_advection_tvd
-        tr_u = _tvd_to_u_points(tracer, mass_flux_u)
-        tr_v = _tvd_to_v_points(tracer, mass_flux_v)
+        tr_u = tvd_to_u_points(tracer, mass_flux_u)
+        tr_v = tvd_to_v_points(tracer, mass_flux_v)
         vert_flux_div = flux_form_vertical_tracer_advection_tvd(
             tracer, w_half, h_cell, dt)
     elif scheme == "dst3":

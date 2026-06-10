@@ -22,7 +22,7 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
 )
 from legoesm.atmosphere.dynamics.compressible_euler_plane import (
     PlaneCompressibleEulerModel,
-    _moisture_buoyancy_w_half,
+    moisture_buoyancy_w_half,
     make_flat_plane_terrain_metric,
     make_rest_state,
     plane_compressible_euler_slow_tendencies,
@@ -58,7 +58,7 @@ def test_moisture_buoyancy_zero_horizontal_mean():
     th = jnp.asarray(
         rng.standard_normal((grid.ny, grid.nx, grid.nlev)) * 0.5,
     )
-    b_half = _moisture_buoyancy_w_half(tr, th, hc, _hmean)
+    b_half = moisture_buoyancy_w_half(tr, th, hc, _hmean)
     assert b_half.shape == (grid.ny, grid.nx, grid.nlev + 1)
     # Horizontal mean ≈ 0 at every interface.
     assert float(jnp.max(jnp.abs(jnp.mean(b_half, axis=(0, 1))))) < 1.0e-15
@@ -70,7 +70,7 @@ def test_moisture_buoyancy_zero_when_dry():
     tr = jnp.zeros((grid.ny, grid.nx, grid.nlev, 3))
     rng = np.random.default_rng(1)
     th = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)) * 0.5)
-    b_half = _moisture_buoyancy_w_half(tr, th, hc, _hmean)
+    b_half = moisture_buoyancy_w_half(tr, th, hc, _hmean)
     assert float(jnp.max(jnp.abs(b_half))) == 0.0
 
 
@@ -82,7 +82,7 @@ def test_moisture_buoyancy_rigid_boundaries():
         rng.standard_normal((grid.ny, grid.nx, grid.nlev, 3)) * 5.0e-3,
     )
     th = jnp.zeros((grid.ny, grid.nx, grid.nlev))
-    b_half = _moisture_buoyancy_w_half(tr, th, hc, _hmean)
+    b_half = moisture_buoyancy_w_half(tr, th, hc, _hmean)
     assert float(jnp.max(jnp.abs(b_half[..., 0]))) == 0.0
     assert float(jnp.max(jnp.abs(b_half[..., -1]))) == 0.0
 
@@ -100,7 +100,7 @@ def test_moisture_buoyancy_vapor_up_condensate_down():
     q_r = jnp.zeros((ny, nx, nlev))
     th0 = jnp.zeros((ny, nx, nlev))            # θ′=0 → isolate first order
     tr_vapor = jnp.stack([q_v, q_c, q_r], axis=-1)
-    b_vapor = _moisture_buoyancy_w_half(tr_vapor, th0, hc, _hmean)
+    b_vapor = moisture_buoyancy_w_half(tr_vapor, th0, hc, _hmean)
     # Interior interfaces of the moist column are positively buoyant.
     assert float(jnp.min(b_vapor[0, 0, 1:-1])) > 0.0
 
@@ -108,7 +108,7 @@ def test_moisture_buoyancy_vapor_up_condensate_down():
     q_c2 = q_c.at[0, 0, :].add(0.002)
     tr_cond = jnp.stack([jnp.full((ny, nx, nlev), 0.010), q_c2, q_r],
                         axis=-1)
-    b_cond = _moisture_buoyancy_w_half(tr_cond, th0, hc, _hmean)
+    b_cond = moisture_buoyancy_w_half(tr_cond, th0, hc, _hmean)
     assert float(jnp.max(b_cond[0, 0, 1:-1])) < 0.0
 
 
@@ -125,11 +125,11 @@ def test_moisture_buoyancy_thermal_cross_term():
     # term either ⇒ B ≈ 0 to mean-subtraction round-off.
     th_flat = jnp.zeros((ny, nx, nlev))
     assert float(jnp.max(jnp.abs(
-        _moisture_buoyancy_w_half(tr, th_flat, hc, _hmean)
+        moisture_buoyancy_w_half(tr, th_flat, hc, _hmean)
     ))) < 1.0e-15
     # Warm column (θ′ above the horizontal mean) → positive cross term.
     th = jnp.zeros((ny, nx, nlev)).at[0, 0, :].set(2.0)
-    b = _moisture_buoyancy_w_half(tr, th, hc, _hmean)
+    b = moisture_buoyancy_w_half(tr, th, hc, _hmean)
     assert float(jnp.min(b[0, 0, 1:-1])) > 0.0
 
 
@@ -165,7 +165,7 @@ def test_moist_buoyancy_flag_off_zeroes_contribution():
     tend_off = plane_compressible_euler_slow_tendencies(
         state, grid, hc, tm, cfg_off,
     )
-    b_half = _moisture_buoyancy_w_half(tr, th, hc, _hmean)
+    b_half = moisture_buoyancy_w_half(tr, th, hc, _hmean)
     # on == off + buoyancy, and the buoyancy is actually non-trivial.
     assert jnp.allclose(
         tend_on.dw_dt.data, tend_off.dw_dt.data + b_half, atol=1.0e-14,
@@ -223,7 +223,7 @@ def test_moist_buoyancy_ad_safe():
 
     def loss(tracers):
         return jnp.sum(
-            _moisture_buoyancy_w_half(tracers, th, hc, _hmean) ** 2
+            moisture_buoyancy_w_half(tracers, th, hc, _hmean) ** 2
         )
 
     g = jax.grad(loss)(tr)

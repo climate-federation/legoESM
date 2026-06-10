@@ -3,7 +3,7 @@ upwind-flux SW core) — cc<->edge lift round-trip + stability + zonal symmetry.
 
 fv3_faithful: `barotropic_staggering="fv3edge"` routes the ocean barotropic through
 the TRUE FV3 edge-staggered SW core (`FV3EdgeShallowWaterModel`: upwind
-absolute-vorticity flux + `_d2a2c_vect`), the algorithmically-faithful counterpart
+absolute-vorticity flux + `d2a2c_vect`), the algorithmically-faithful counterpart
 to the default corner-staggered `fv3sw` (`CDGridShallowWaterModel`, centered).
 The only new machinery is the cc<->edge-midpoint vector lift
 (`_cc_to_edge_vector`/`_edge_to_cc_vector`); these tests fail if that lift loses

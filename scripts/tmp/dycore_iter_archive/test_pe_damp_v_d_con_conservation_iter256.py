@@ -39,7 +39,7 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
     hydrostatic_to_fv3,
 )
 from legoesm.atmosphere.held_suarez import held_suarez_init
-from legoesm.core.operators_cdgrid import _interp_corner_to_center
+from legoesm.core.operators_cdgrid import interp_corner_to_center
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.vertical import standard_hybrid_levels
@@ -146,7 +146,7 @@ def test_pe_damp_v_d_con_post_step_conserves_global_energy():
         u_d_pre_damp * du_damp_v + 0.5 * du_damp_v ** 2
         + v_d_pre_damp * dv_damp_v + 0.5 * dv_damp_v ** 2
     )
-    dKE_cc = _interp_corner_to_center(dKE_corner)
+    dKE_cc = interp_corner_to_center(dKE_corner)
 
     # damp_v's contribution to T_d_con (already extracted as
     # dT_d_con = s_on - s_no above; in the no-cfg run dT_d_con

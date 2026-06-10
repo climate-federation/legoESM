@@ -168,13 +168,13 @@ def require_x64(component: str) -> None:
 # XLA flag helpers (from parallel.device_config)
 # ---------------------------------------------------------------------------
 
-_TPU_XLA_FLAGS = {
+TPU_XLA_FLAGS = {
     "xla_tpu_enable_async_collective_fusion": "true",
     "xla_tpu_enable_data_parallel_all_reduce_opt": "true",
     "xla_tpu_enable_latency_hiding_scheduler": "LHS_DEFAULT",
 }
 
-_NVIDIA_GPU_XLA_FLAGS = {
+NVIDIA_GPU_XLA_FLAGS = {
     "xla_gpu_cudnn_gemm_fusion_level": "3",
     # Overlap compute with collective communication (halo exchange, allreduce).
     # NOTE: the per-collective async toggles
@@ -199,12 +199,12 @@ _NVIDIA_GPU_XLA_FLAGS = {
     "xla_gpu_enable_command_buffer": "FUSION,CUSTOM_CALL,COLLECTIVES",
 }
 
-_AMD_GPU_XLA_FLAGS: dict[str, str] = {
+AMD_GPU_XLA_FLAGS: dict[str, str] = {
     # ROCm does not use cuDNN; no vendor-specific flags needed yet.
 }
 
 
-def _set_xla_flags(flags: dict[str, str]) -> None:
+def set_xla_flags(flags: dict[str, str]) -> None:
     """Append XLA flags to ``XLA_FLAGS``, without duplicating existing keys."""
     existing = os.environ.get("XLA_FLAGS", "")
     new_parts = []
@@ -217,13 +217,13 @@ def _set_xla_flags(flags: dict[str, str]) -> None:
         os.environ["XLA_FLAGS"] = combined
 
 
-def _detect_gpu_vendor_pre_init() -> str | None:
+def detect_gpu_vendor_pre_init() -> str | None:
     """Detect GPU vendor *without* triggering ``jax.devices()``.
 
     Once ``jax.devices()`` runs, the XLA client is initialised and any
     further mutations of ``os.environ['XLA_FLAGS']`` no longer take
     effect.  The latency-hiding scheduler flags applied below
-    (``_NVIDIA_GPU_XLA_FLAGS``, ``_AMD_GPU_XLA_FLAGS``) are critical for
+    (``NVIDIA_GPU_XLA_FLAGS``, ``AMD_GPU_XLA_FLAGS``) are critical for
     multi-GPU scaling, so we must set them before JAX is initialised.
 
     Returns ``"nvidia"`` / ``"amd"`` if a vendor is unambiguously
@@ -295,7 +295,7 @@ def gpu_vendor() -> str:
 def _detect_backend_pre_init() -> str | None:
     """Detect the backend without calling ``jax.default_backend()``.
 
-    Mirrors :func:`_detect_gpu_vendor_pre_init`: we cannot afford to
+    Mirrors :func:`detect_gpu_vendor_pre_init`: we cannot afford to
     initialise the PJRT client (via ``jax.default_backend()`` or
     ``jax.devices()``) before the GPU-specific XLA scheduler flags are
     set, otherwise ``XLA_FLAGS`` mutations no-op.  Returns one of
@@ -312,7 +312,7 @@ def _detect_backend_pre_init() -> str | None:
             return "metal"
         if platforms.startswith("cpu"):
             return "cpu"
-    if _detect_gpu_vendor_pre_init() is not None:
+    if detect_gpu_vendor_pre_init() is not None:
         return "gpu"
     if os.environ.get("TPU_NAME") or os.environ.get("COLAB_TPU_ADDR"):
         return "tpu"
@@ -345,7 +345,7 @@ def configure_backend(backend: str | None = None) -> str:
     backend = backend.lower()
 
     if backend == "tpu":
-        _set_xla_flags(_TPU_XLA_FLAGS)
+        set_xla_flags(TPU_XLA_FLAGS)
         jax.config.update("jax_default_matmul_precision", "bfloat16")
         # NOTE: the legacy `jax_spmd_mode='allow_all'` toggle was removed
         # in modern JAX (0.9+) — `jax.config.update("jax_spmd_mode", ...)`
@@ -380,11 +380,11 @@ def configure_backend(backend: str | None = None) -> str:
             if _multi_proc:
                 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
-        pre_init_vendor = _detect_gpu_vendor_pre_init()
+        pre_init_vendor = detect_gpu_vendor_pre_init()
         if pre_init_vendor == "nvidia":
-            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+            set_xla_flags(NVIDIA_GPU_XLA_FLAGS)
         elif pre_init_vendor == "amd":
-            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+            set_xla_flags(AMD_GPU_XLA_FLAGS)
 
         devices = jax.devices()
         vendor = gpu_vendor()
@@ -394,7 +394,7 @@ def configure_backend(backend: str | None = None) -> str:
             # below, and warn so the user can pre-set ``CUDA_VISIBLE_DEVICES``
             # / ``HIP_VISIBLE_DEVICES`` for the next run.
             if vendor == "nvidia":
-                _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+                set_xla_flags(NVIDIA_GPU_XLA_FLAGS)
                 logger.warning(
                     "GPU vendor detected post-init; XLA scheduler flags "
                     "may not take effect this run.  Set "
@@ -402,7 +402,7 @@ def configure_backend(backend: str | None = None) -> str:
                     "import to enable latency-hiding flags.",
                 )
             elif vendor == "amd":
-                _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+                set_xla_flags(AMD_GPU_XLA_FLAGS)
                 logger.warning(
                     "GPU vendor detected post-init; XLA scheduler flags "
                     "may not take effect this run.  Set "
@@ -432,7 +432,7 @@ def configure_backend(backend: str | None = None) -> str:
                 # Drop it; rely on the default XLA thread-pool autoscaling
                 # driven by `os.cpu_count()`.  `xla_cpu_multi_thread_eigen`
                 # remains valid and meaningful for multi-core CPUs.
-                _set_xla_flags({
+                set_xla_flags({
                     "xla_cpu_multi_thread_eigen": "true",
                 })
             except Exception:

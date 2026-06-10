@@ -26,7 +26,7 @@ def fill_land_cells_mpas(
     ``n_iter`` edges from any ocean cell have been filled; deeper
     interior land cells are left unchanged.
 
-    Matches the 3-iteration behaviour of ``_neumann_fill_cgrid`` in
+    Matches the 3-iteration behaviour of ``neumann_fill_cgrid`` in
     ``ocean_pe_latlon_cgrid.py``.  A single iteration (the previous
     default) left any land cell more than one edge from ocean at its
     stale value, which combined with the post-step tracer masking in

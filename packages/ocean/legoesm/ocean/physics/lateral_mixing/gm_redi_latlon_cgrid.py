@@ -32,7 +32,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     interp_wface_to_center,
     laplacian_cgrid,
 )
-from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _neumann_fill_cgrid
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     iterate_eos_and_pressure_anomaly,
 )
@@ -43,7 +43,7 @@ from legoesm.ocean.eos import (
     rho_0 as _RHO_0,
 )
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
-    _EPS,
+    EPS,
     compute_eke_kappa_gm,
     compute_visbeck_kappa_gm,
     dm95_taper,
@@ -164,8 +164,8 @@ def _neutral_drho_derivs(T, S, mask, z_coord, jacobian, eos_fn, rho_0, g):
     Returns ``(drdT, drdS)`` each ``(n_lat, n_lon, nlev)`` at cell centres,
     masked to the wet domain.
     """
-    T_filled = _neumann_fill_cgrid(T, mask)
-    S_filled = _neumann_fill_cgrid(S, mask)
+    T_filled = neumann_fill_cgrid(T, mask)
+    S_filled = neumann_fill_cgrid(S, mask)
     # In-situ density via the SAME 2-iteration EOS coupling the slope builder
     # uses, then the reference hydrostatic pressure (η=0, J=1) — identical to
     # iterate_eos_and_pressure_anomaly's internal p_hydro.
@@ -211,8 +211,8 @@ def _slope_density_face_grads(
         drdT, drdS = _neutral_drho_derivs(
             T, S, mask, z_coord, jacobian, eos_fn, rho_0, g,
         )
-        T_filled = _neumann_fill_cgrid(T, mask)
-        S_filled = _neumann_fill_cgrid(S, mask)
+        T_filled = neumann_fill_cgrid(T, mask)
+        S_filled = neumann_fill_cgrid(S, mask)
         dTdx_u = gradient_x_cgrid(T_filled, grid)
         dSdx_u = gradient_x_cgrid(S_filled, grid)
         dTdy_v = gradient_y_cgrid(T_filled, grid)
@@ -296,7 +296,7 @@ def compute_isopycnal_slopes_latlon_cgrid(
             "requires T, S and eos_fn to build the neutral density gradient."
         )
     # Neumann-fill density to prevent garbage gradients at coastlines.
-    rho_filled = _neumann_fill_cgrid(rho, mask)
+    rho_filled = neumann_fill_cgrid(rho, mask)
 
     # Face density gradients (in-situ FD of rho, or the neutral
     # ∂ρ/∂T·∇T+∂ρ/∂S·∇S form) — shared with the centred K_33 / triad builders.
@@ -332,7 +332,7 @@ def compute_isopycnal_slopes_latlon_cgrid(
         S_y_raw = jnp.clip(S_y_raw, -cfg.S_max, cfg.S_max)
 
     # DM95 tapering via shared helper (identical formula across grids).
-    return dm95_taper(S_x_raw, S_y_raw, cfg.S_max, _EPS, cfg.taper_width_frac)
+    return dm95_taper(S_x_raw, S_y_raw, cfg.S_max, EPS, cfg.taper_width_frac)
 
 
 # =====================================================================
@@ -411,7 +411,7 @@ def gm_redi_tracer_tendency_latlon_cgrid(
         kappa_Redi_b = kappa_Redi
 
     # --- Neumann-fill tracer before computing gradients ---
-    q_filled = _neumann_fill_cgrid(q, mask)
+    q_filled = neumann_fill_cgrid(q, mask)
 
     # --- Horizontal tracer gradients at faces (3D-native) ---
     dq_dx_u = gradient_x_cgrid(q_filled, grid)  # (n_lat, n_lon+1, nlev) at u-faces
@@ -480,7 +480,7 @@ def gm_redi_tracer_tendency_latlon_cgrid(
            + kappa_Redi_b * S2_half * dq_dz_half)
 
     # Vertical flux divergence via shared helper (zero-flux BCs at surface/bottom).
-    dq_vert = vertical_flux_divergence(F_z, dz_actual, _EPS)
+    dq_vert = vertical_flux_divergence(F_z, dz_actual, EPS)
 
     # ================================================================
     # Total tendency, masked
@@ -587,8 +587,8 @@ def _w_face_slope_density_inputs(
         drdT_c, drdS_c = _neutral_drho_derivs(
             T, S, mask, z_coord, jacobian, eos_fn, rho_0, g,
         )
-        T_filled = _neumann_fill_cgrid(T, mask)
-        S_filled = _neumann_fill_cgrid(S, mask)
+        T_filled = neumann_fill_cgrid(T, mask)
+        S_filled = neumann_fill_cgrid(S, mask)
         dTdx_u = gradient_x_cgrid(T_filled, grid)
         dSdx_u = gradient_x_cgrid(S_filled, grid)
         dTdy_v = gradient_y_cgrid(T_filled, grid)
@@ -798,8 +798,8 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     # without it, a land cell that has T = 0 sentinel produces a
     # spurious vertical drho/dz = 0 in the land column, which clips the
     # slope to S_max and breaks the algebraic identity.
-    rho_filled = _neumann_fill_cgrid(rho, mask)
-    q_filled = _neumann_fill_cgrid(q, mask)
+    rho_filled = neumann_fill_cgrid(rho, mask)
+    q_filled = neumann_fill_cgrid(q, mask)
 
     # -----------------------------------------------------------------
     # 1. Density and tracer gradients on the native C-grid
@@ -827,8 +827,8 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
         drdT_c, drdS_c = _neutral_drho_derivs(
             T_tracer, S_tracer, mask, z_coord, jacobian, eos_fn, rho_0, g,
         )
-        T_filled = _neumann_fill_cgrid(T_tracer, mask)
-        S_filled = _neumann_fill_cgrid(S_tracer, mask)
+        T_filled = neumann_fill_cgrid(T_tracer, mask)
+        S_filled = neumann_fill_cgrid(S_tracer, mask)
         dTdx_u = gradient_x_cgrid(T_filled, grid)
         dSdx_u = gradient_x_cgrid(S_filled, grid)
         dTdy_v = gradient_y_cgrid(T_filled, grid)
@@ -1111,7 +1111,7 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
                  + taper_Wy1 * flux_Wy1 + taper_Wy2 * flux_Wy2
                  + taper_Wy3 * flux_Wy3 + taper_Wy4 * flux_Wy4)
 
-    dq_vert = vertical_flux_divergence(F_z, dz_actual, _EPS)
+    dq_vert = vertical_flux_divergence(F_z, dz_actual, EPS)
 
     tendency = (dq_h + dq_vert) * mask[:, :, jnp.newaxis]
     return tendency
@@ -1181,7 +1181,7 @@ def gm_redi_tracer_tendency_latlon(
 
     # Density via 2-iteration EOS coupling.
     eos_fn = make_eos_fn(eos, eos_linear)
-    fill_fn = lambda field: _neumann_fill_cgrid(field, mask)
+    fill_fn = lambda field: neumann_fill_cgrid(field, mask)
     rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask, fill_fn, eos_fn,
         z_coord.dz_ref, rho_0, g,
@@ -1263,7 +1263,7 @@ def gm_redi_tracer_tendency_latlon(
                 jnp.abs(z_full) < cfg.surface_complement_depth, 1.0, 0.0
             )  # (nlev,) — broadcast over (n_lat, n_lon)
             for q_field, tend_ref in [(T, 'dT_dt'), (S, 'dS_dt')]:
-                q_filled = _neumann_fill_cgrid(q_field, mask)
+                q_filled = neumann_fill_cgrid(q_field, mask)
                 dq_dx_u = gradient_x_cgrid(q_filled, grid) * u_mask[:, :, jnp.newaxis]
                 dq_dy_v = gradient_y_cgrid(q_filled, grid) * v_mask[:, :, jnp.newaxis]
                 # complement is (nlev,) — broadcasts over spatial dims. This
@@ -1326,7 +1326,7 @@ def compute_isoneutral_K33_latlon(
         mask = jnp.ones(T.shape[:2], dtype=T.dtype)
     jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
     eos_fn = make_eos_fn(eos, eos_linear)
-    fill_fn = lambda field: _neumann_fill_cgrid(field, mask)
+    fill_fn = lambda field: neumann_fill_cgrid(field, mask)
     rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
     )
@@ -1339,7 +1339,7 @@ def compute_isoneutral_K33_latlon(
     # 2-D handling).  Take only the w-face form here.
     kappa_Redi_w = _kappa_center_uvw(kappa_Redi, nlev)[3]
     n_lat, n_lon = mask.shape
-    rho_filled = _neumann_fill_cgrid(rho, mask)
+    rho_filled = neumann_fill_cgrid(rho, mask)
     slope_density = getattr(cfg, "slope_density", "in_situ")
     w_inputs = _w_face_slope_density_inputs(
         rho_filled, T, S, mask, z_coord, jacobian, grid, slope_density,
@@ -1529,12 +1529,12 @@ def compute_realized_gm_skew_conversion(
         mask = jnp.ones(T.shape[:2], dtype=T.dtype)
     jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
     eos_fn = make_eos_fn(eos, eos_linear)
-    fill_fn = lambda field: _neumann_fill_cgrid(field, mask)
+    fill_fn = lambda field: neumann_fill_cgrid(field, mask)
     rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
     )
     n_lat, n_lon = mask.shape
-    rho_filled = _neumann_fill_cgrid(rho, mask)
+    rho_filled = neumann_fill_cgrid(rho, mask)
     slope_density = getattr(cfg, "slope_density", "in_situ")
     w_inputs = _w_face_slope_density_inputs(
         rho_filled, T, S, mask, z_coord, jacobian, grid, slope_density,
@@ -1755,7 +1755,7 @@ def compute_eke_step_kappa(
         mask = jnp.ones(T.shape[:2], dtype=T.dtype)
     jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
     eos_fn = make_eos_fn(eos, eos_linear)
-    fill_fn = lambda field: _neumann_fill_cgrid(field, mask)
+    fill_fn = lambda field: neumann_fill_cgrid(field, mask)
     rho, _rp, _pp = iterate_eos_and_pressure_anomaly(
         T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
     )

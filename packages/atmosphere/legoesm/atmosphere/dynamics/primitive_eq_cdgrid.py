@@ -26,9 +26,9 @@ from legoesm.core.operators_cdgrid import (
     center_to_dgrid_vector,
     cgrid_divergence,
     dgrid_vorticity,
-    _arakawa_lamb_gradient,
-    _interp_center_to_corner,
-    _interp_corner_to_center,
+    arakawa_lamb_gradient,
+    interp_center_to_corner,
+    interp_corner_to_center,
 )
 from legoesm.core.operators_3d import (
     gradient_x_3d as _gradient_x_3d,
@@ -70,7 +70,7 @@ from legoesm.grids.vertical import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
-from legoesm.core.operators_cdgrid import _overlapped_arakawa_lamb_gradient
+from legoesm.core.operators_cdgrid import overlapped_arakawa_lamb_gradient
 from legoesm.grids.halo import (
     pad_halo_4d as _pad_halo_4d_module,
     pad_halo_vector,
@@ -346,12 +346,14 @@ def fv3_hydrostatic_tendencies(
         div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
     else:
         div_v = None  # computed lazily below if not div-damped
-    from legoesm.grids.halo import _halo_backend
+    from legoesm.grids.halo import get_halo_backend
+    _halo_backend = get_halo_backend()
     _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
     # iter-84: packed MPI/SPMD halos apply duogrid kinked-to-extended remap when duogrid=dg
     _pe_dg = grid.duogrid
     if _halo_backend == "spmd":
-        from legoesm.parallel.cubesphere_exchange import _spmd_mesh
+        from legoesm.parallel.cubesphere_exchange import get_spmd_mesh
+        _spmd_mesh = get_spmd_mesh()
         # FV3_3D 2026-06-04: thread ``interp_offsets`` exactly as the MPI and
         # single-device paths do (when duogrid is off).  Previously the SPMD
         # path dropped it, so the packed exchange NEAREST-COPIED cross-face
@@ -365,14 +367,14 @@ def fv3_hydrostatic_tendencies(
             interp_offsets=_pe_offs_zeta,
         )
     elif _halo_backend == "mpi":
-        from legoesm.grids.halo import _mpi_topology
+        from legoesm.grids.halo import get_mpi_topology
         # FV3_3D iter-1041: pass interp_offsets when duogrid is off so the
         # packed MPI exchange Lagrange-remaps halos rather than nearest-
         # copying — matches the single-device path which threads
         # ``grid.halo_interp_offsets`` here.
         _pe_offs_zeta = None if _pe_dg is not None else grid.halo_interp_offsets
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
-            zeta, B, inv_T, topology=_mpi_topology, duogrid=_pe_dg,
+            zeta, B, inv_T, topology=get_mpi_topology(), duogrid=_pe_dg,
             interp_offsets=_pe_offs_zeta,
         )
     else:
@@ -393,25 +395,25 @@ def fv3_hydrostatic_tendencies(
     _zeta_a2b_ord4: jax.Array | None = None
     if _need_zeta_a2b:
         from legoesm.core.operators_cdgrid import (
-            _interp_center_to_corner_a2b_ord4,
+            interp_center_to_corner_a2b_ord4,
         )
-        # FV3_3D iter-1043: ``_interp_center_to_corner_a2b_ord4`` is
+        # FV3_3D iter-1043: ``interp_center_to_corner_a2b_ord4`` is
         # shape-polymorphic (axes-1/2 slicing, trailing axes broadcast)
         # and ``_pad_halo_auto_h2`` already dispatches to ``pad_halo_4d``
         # for 4D input.  Calling it directly on 4D avoids a ``jax.vmap``
         # that would wrap ``pad_halo`` under MPI — same fix as NH iter-1043.
-        _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
+        _zeta_a2b_ord4 = interp_center_to_corner_a2b_ord4(zeta, cdgrid)
 
     if config.use_fv3_a2b_zeta_corner:
         zeta_corner_relative = _zeta_a2b_ord4
     else:
-        zeta_corner_relative = _interp_center_to_corner(
+        zeta_corner_relative = interp_center_to_corner(
             zeta, cdgrid, padded=_zeta_pad,
         )
     zeta_corner = zeta_corner_relative + cdgrid.f_corner[..., None]
 
     # --- 7. Bernoulli gradient at D-grid corners (Arakawa-Lamb) ---
-    dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid, padded=_B_pad)
+    dB_dx, dB_dy_perp = arakawa_lamb_gradient(B, cdgrid, padded=_B_pad)
 
     # --- 8. Pressure gradient correction at D-grid corners ---
     # Higher precision for PGF to avoid catastrophic cancellation
@@ -420,13 +422,13 @@ def fv3_hydrostatic_tendencies(
     # iter-59: reuse _lnps_pad from merged stage halo when dtype matches
     if _lnps_pad is not None and ln_ps.dtype == _pg_dt:
         _lnps_pad_hi = _lnps_pad[..., 0]  # (6, n+2, n+2) at PGF precision
-        dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(
+        dln_dx_hi, dln_dy_perp_hi = arakawa_lamb_gradient(
             ln_ps_hi, cdgrid, padded=_lnps_pad_hi,
         )
     else:
-        dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(ln_ps_hi, cdgrid)  # 2D, separate exchange
+        dln_dx_hi, dln_dy_perp_hi = arakawa_lamb_gradient(ln_ps_hi, cdgrid)  # 2D, separate exchange
     # Harmonic mean for T at corners suppresses spurious PGF from high-n T.
-    T_corner = 1.0 / _interp_center_to_corner(inv_T, cdgrid, padded=_invT_pad)
+    T_corner = 1.0 / interp_center_to_corner(inv_T, cdgrid, padded=_invT_pad)
     T_corner_hi = T_corner.astype(_pg_dt)
     pg_corr_x = (R_d * T_corner_hi * dln_dx_hi[..., None]).astype(u_d.dtype)
     pg_corr_y_perp = (R_d * T_corner_hi * dln_dy_perp_hi[..., None]).astype(v_d.dtype)
@@ -434,7 +436,7 @@ def fv3_hydrostatic_tendencies(
     # Hybrid coord: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s). Required at model top.
     if _hybrid:
         # iter-60: reuse pre-padded _hf_pad from merged halo
-        _hf_corner = _interp_center_to_corner(
+        _hf_corner = interp_center_to_corner(
             _hybrid_factor, cdgrid, padded=_hf_pad,
         )
         pg_corr_x = pg_corr_x * _hf_corner
@@ -451,11 +453,11 @@ def fv3_hydrostatic_tendencies(
     # Divergence damping at D-grid
     if config.div_damp_coeff > 0:
         if config.use_async_halo and _halo_backend == "mpi":
-            ddiv_dx, ddiv_dy_perp = _overlapped_arakawa_lamb_gradient(
+            ddiv_dx, ddiv_dy_perp = overlapped_arakawa_lamb_gradient(
                 div_v, cdgrid,
             )
         else:
-            ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(
+            ddiv_dx, ddiv_dy_perp = arakawa_lamb_gradient(
                 div_v, cdgrid, padded=_div_v_pad,
             )
         # FV3_3D iter 5: adaptive Smag damp (sw_core.F90:1720)
@@ -463,7 +465,7 @@ def fv3_hydrostatic_tendencies(
         if config.div_damp_dddmp > 0:
             _da_min_c = jnp.min(cdgrid.area_corner)
             _d2_bg = config.div_damp_coeff / _da_min_c
-            _div_abs_corner = _interp_center_to_corner(
+            _div_abs_corner = interp_center_to_corner(
                 jnp.abs(div_v), cdgrid,
             )                                                  # (6, n+1, n+1, nlev)
             _adaptive_coeff = _da_min_c * jnp.maximum(
@@ -523,7 +525,7 @@ def fv3_hydrostatic_tendencies(
                 )
                 _dT_dt_dd_cc = (
                     -config.div_damp_d_con
-                    * _interp_corner_to_center(_dKE_dt_corner_dd)
+                    * interp_corner_to_center(_dKE_dt_corner_dd)
                     / constants.c_pd
                 )
         else:
@@ -691,7 +693,7 @@ def fv3_hydrostatic_tendencies(
                 )
                 _dT_dt_cdd_cc = (
                     -config.corner_div_damp_d_con
-                    * _interp_corner_to_center(_dKE_dt_corner_cdd)
+                    * interp_corner_to_center(_dKE_dt_corner_cdd)
                     / constants.c_pd
                 )
         else:
@@ -719,7 +721,7 @@ def fv3_hydrostatic_tendencies(
         # Loop 113/114: batch (u_d, v_d) corner→centre and back
         n_face_uv, n_i_uv, n_j_uv, nlev_uv = u_d.shape[0], u_d.shape[1] - 1, u_d.shape[2] - 1, u_d.shape[3]
         _uv_d = jnp.stack([u_d, v_d], axis=-1)
-        _uv_cc_flat = _interp_corner_to_center(
+        _uv_cc_flat = interp_corner_to_center(
             _uv_d.reshape(*_uv_d.shape[:-2], nlev_uv * 2),
         )
         _uv_cc = _uv_cc_flat.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2)
@@ -750,7 +752,7 @@ def fv3_hydrostatic_tendencies(
 
         n_face_uv, n_i_uv, n_j_uv, nlev_uv = u_d.shape[0], u_d.shape[1] - 1, u_d.shape[2] - 1, u_d.shape[3]
         _uv_d = jnp.stack([u_d, v_d], axis=-1)
-        _uv_cc_flat = _interp_corner_to_center(
+        _uv_cc_flat = interp_corner_to_center(
             _uv_d.reshape(*_uv_d.shape[:-2], nlev_uv * 2),
         )
         _uv_cc = _uv_cc_flat.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2)
@@ -777,16 +779,16 @@ def fv3_hydrostatic_tendencies(
     ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1)
     # Scalars T + ln(ps): packed halo (MPI) / per-field halo (single-device).
     if _halo_backend == "mpi":
-        from legoesm.grids.halo import _mpi_topology
+        from legoesm.grids.halo import get_mpi_topology
         # FV3_3D iter-1041: thread interp_offsets through the packed MPI
         # exchange to match the single-device Lagrange remap when duogrid off.
         _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
         _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
-            T, ln_ps_3d, topology=_mpi_topology, duogrid=_pe_dg,
+            T, ln_ps_3d, topology=get_mpi_topology(), duogrid=_pe_dg,
             interp_offsets=_pe_offs,
         )
     else:
-        # Duogrid remap when active (matches _pad_halo_auto pattern)
+        # Duogrid remap when active (matches pad_halo_auto pattern)
         _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
         _T_pad = _pad_halo_4d(T, interp_offsets=_pe_offs, duogrid=_pe_dg)
         _lnps_pad = _pad_halo_4d(ln_ps_3d, interp_offsets=_pe_offs, duogrid=_pe_dg)
@@ -829,7 +831,7 @@ def fv3_hydrostatic_tendencies(
     # (FV3 sw_core.F90 + dyn_core.F90:1764-1779)
 
     # --- 12. Diffusion ---
-    # 12a: compact Laplacian at centres avoids _laplacian_dgrid corner-centre roundtrip attenuation.
+    # 12a: compact Laplacian at centres avoids laplacian_dgrid corner-centre roundtrip attenuation.
     # Stack {u_cell, v_cell, T} along trailing axis for batched ∇²/hyperdiff (3 calls → 1).
     _need_uvT_stack = config.A_h > 0 or config.hyperdiff_coeff > 0
     if _need_uvT_stack:
@@ -903,7 +905,7 @@ def fv3_hydrostatic_tendencies(
     # Lift each cc VECTOR tendency block (vert_adv + lap + hyperdiff + physics)
     # to D-grid corners.  fv3_faithful (iter-14): these are face-local (u, v)
     # vector increments, so the cc→corner interp must ROTATE components across
-    # cube panel seams.  The previous batched ``_interp_center_to_corner`` on
+    # cube panel seams.  The previous batched ``interp_center_to_corner`` on
     # the concatenated (u, v) treated them as scalars and seam-blended without
     # rotation (the same bug fixed for the wind lift), re-injecting a cube-edge
     # imprint into every diffusion/physics tendency.  Use ``center_to_dgrid_vector``
@@ -1006,7 +1008,7 @@ def fv3_hydrostatic_tendencies(
                 )
                 _dT_dt_ah_cc = (
                     -config.ah_d_con
-                    * _interp_corner_to_center(_dKE_dt_corner_ah)
+                    * interp_corner_to_center(_dKE_dt_corner_ah)
                     / constants.c_pd
                 )
         else:
@@ -1141,7 +1143,7 @@ def fv3_to_hydrostatic(
     v_d = state.v_d.data
     n_face_a, n_corner_i, n_corner_j, nlev_a = u_d.shape
     _uv_d = jnp.stack([u_d, v_d], axis=-1)  # (face, n+1, n+1, nlev, 2)
-    _uv_cc_flat = _interp_corner_to_center(
+    _uv_cc_flat = interp_corner_to_center(
         _uv_d.reshape(n_face_a, n_corner_i, n_corner_j, nlev_a * 2),
     )
     _uv_cc = _uv_cc_flat.reshape(
@@ -1368,12 +1370,12 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             from legoesm.grids.halo import get_halo_backend as _ghb_pe
             if self.config.use_fv3_cross_face_du_proj:
                 if _ghb_pe() == "mpi":
-                    from legoesm.grids.halo import _mpi_topology
+                    from legoesm.grids.halo import get_mpi_topology
                     from legoesm.grids.dgrid_halo import (
                         pad_halo_dgrid_vector_4d_replicated_mpi,
                     )
                     du_full, dv_full = pad_halo_dgrid_vector_4d_replicated_mpi(
-                        du_normal, dv_normal, _mpi_topology,
+                        du_normal, dv_normal, get_mpi_topology(),
                     )
                 else:
                     from legoesm.grids.dgrid_halo import (
@@ -1400,7 +1402,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             # ΔKE = u·du + 0.5du² + v·dv + 0.5dv²; ΔT = -coeff*ΔKE/c_pd at corners → centres
             if self.config.damp_v_d_con > 0.0:
                 from legoesm.core.operators_cdgrid import (
-                    _interp_corner_to_center,
+                    interp_corner_to_center,
                 )
                 if self.config.use_fv3_metric_aware_d_con:
                     # FV3_3D iter 338/344: metric-aware form (cosa_cell/rsin2_cell)
@@ -1434,7 +1436,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                         u_corner * du_corner + 0.5 * du_corner ** 2
                         + v_corner * dv_corner + 0.5 * dv_corner ** 2
                     )
-                    dKE_cc = _interp_corner_to_center(dKE_corner)
+                    dKE_cc = interp_corner_to_center(dKE_corner)
                     dT = -self.config.damp_v_d_con * dKE_cc / constants.c_pd
                 # FV3_3D iter 433 (PE mirror of NH 431): sponge-zero d_con top N levels
                 if self.config.d_con_top_zero_levels > 0:
@@ -1596,7 +1598,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         # cc → D-grid interp for (u, v).
         # fv3_faithful (iter-14): the winds are a VECTOR, so the cc→corner
         # interp must rotate face-local components across panel seams.  The
-        # previous ``_interp_center_to_corner`` on the stacked (u, v) treated
+        # previous ``interp_center_to_corner`` on the stacked (u, v) treated
         # them as two SCALARS and blended seam-crossing components WITHOUT
         # rotation, producing D-grid winds that were ~167×/83× rougher at
         # panel edges than the interior → a ~229× rougher relative vorticity
@@ -1645,7 +1647,7 @@ def cdgrid_hydrostatic_tendencies(
     # HydrostaticState path: convert cell-centre -> D-grid.
     # fv3_faithful (iter-14): the winds are a VECTOR — use the rotation-aware
     # ``center_to_dgrid_vector`` (matching ``_step_cell_centre``), NOT a scalar
-    # ``_interp_center_to_corner`` on the stacked (u, v), which blends face-local
+    # ``interp_center_to_corner`` on the stacked (u, v), which blends face-local
     # components across panel seams without rotation and re-injects the
     # cube-edge vorticity imprint.  Keeps ``step`` and ``tendencies`` consistent.
     u_d, v_d = center_to_dgrid_vector(state.u.data, state.v.data, cdgrid)
@@ -1664,7 +1666,7 @@ def cdgrid_hydrostatic_tendencies(
     _dv_d = fv3_tend.dv_d_dt.data
     _nd_face, _nd_i, _nd_j, _nd_lev = _du_d.shape
     _duv_d = jnp.stack([_du_d, _dv_d], axis=-1)
-    _duv_cc_flat = _interp_corner_to_center(
+    _duv_cc_flat = interp_corner_to_center(
         _duv_d.reshape(_nd_face, _nd_i, _nd_j, _nd_lev * 2),
     )
     _duv_cc = _duv_cc_flat.reshape(

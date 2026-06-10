@@ -176,22 +176,22 @@ def detect_devices() -> HardwareConfig:
     # mutating XLA_FLAGS is silently ineffective on most JAX versions.
     try:
         from legoesm.runtime.backend import (
-            _detect_gpu_vendor_pre_init,
-            _NVIDIA_GPU_XLA_FLAGS,
-            _AMD_GPU_XLA_FLAGS,
-            _TPU_XLA_FLAGS,
-            _set_xla_flags,
+            detect_gpu_vendor_pre_init,
+            NVIDIA_GPU_XLA_FLAGS,
+            AMD_GPU_XLA_FLAGS,
+            TPU_XLA_FLAGS,
+            set_xla_flags,
         )
 
         _platforms = os.environ.get("JAX_PLATFORMS", "").lower()
         if "tpu" in _platforms:
-            _set_xla_flags(_TPU_XLA_FLAGS)
+            set_xla_flags(TPU_XLA_FLAGS)
         else:
-            _vendor = _detect_gpu_vendor_pre_init()
+            _vendor = detect_gpu_vendor_pre_init()
             if _vendor == "nvidia":
-                _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+                set_xla_flags(NVIDIA_GPU_XLA_FLAGS)
             elif _vendor == "amd":
-                _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+                set_xla_flags(AMD_GPU_XLA_FLAGS)
     except Exception:
         # Non-fatal: if the runtime helpers are unavailable for any
         # reason, fall through to plain JAX detection.
@@ -266,9 +266,9 @@ def configure_jax_for_device(config: HardwareConfig) -> None:
 
 def _configure_tpu(config: HardwareConfig) -> None:
     """Apply TPU-specific JAX and XLA configuration."""
-    from legoesm.runtime.backend import _set_xla_flags, _TPU_XLA_FLAGS
+    from legoesm.runtime.backend import set_xla_flags, TPU_XLA_FLAGS
     # Set XLA flags for TPU optimization.
-    _set_xla_flags(_TPU_XLA_FLAGS)
+    set_xla_flags(TPU_XLA_FLAGS)
 
     # TPU natively supports bfloat16 — enable matmul precision control
     # to allow XLA to choose bf16 for non-critical ops.
@@ -295,17 +295,17 @@ def _configure_gpu(config: HardwareConfig) -> None:
     for multi-GPU scaling.
     """
     from legoesm.runtime.backend import (
-        _detect_gpu_vendor_pre_init, gpu_vendor,
-        _set_xla_flags, _NVIDIA_GPU_XLA_FLAGS, _AMD_GPU_XLA_FLAGS,
+        detect_gpu_vendor_pre_init, gpu_vendor,
+        set_xla_flags, NVIDIA_GPU_XLA_FLAGS, AMD_GPU_XLA_FLAGS,
     )
 
     # Pre-init detection (env-var only, no jax.devices()) to land
     # XLA_FLAGS on time.
-    pre_vendor = _detect_gpu_vendor_pre_init()
+    pre_vendor = detect_gpu_vendor_pre_init()
     if pre_vendor == "nvidia":
-        _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+        set_xla_flags(NVIDIA_GPU_XLA_FLAGS)
     elif pre_vendor == "amd":
-        _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+        set_xla_flags(AMD_GPU_XLA_FLAGS)
 
     # Pre-allocate 90% of GPU memory to avoid fragmentation.
     # Only set if not already configured by the user.
@@ -320,9 +320,9 @@ def _configure_gpu(config: HardwareConfig) -> None:
     # warn so the user can fix the env for next run.
     if pre_vendor is None and vendor != "unknown":
         if vendor == "nvidia":
-            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+            set_xla_flags(NVIDIA_GPU_XLA_FLAGS)
         elif vendor == "amd":
-            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+            set_xla_flags(AMD_GPU_XLA_FLAGS)
         logger.warning(
             "GPU vendor detected post-init from device_config; XLA "
             "scheduler flags may not take effect this run.  Set "
@@ -365,13 +365,13 @@ def _enable_cpu_multithreading() -> None:
     """
     if "XLA_FLAGS" not in os.environ:
         try:
-            from legoesm.runtime.backend import _set_xla_flags
+            from legoesm.runtime.backend import set_xla_flags
             # NOTE: the legacy `intra_op_parallelism_threads=N` XLA flag
             # is NOT recognized by current XLA and crashes JAX at first
             # use with a fatal `Unknown flag in XLA_FLAGS` error from
             # parse_flags_from_env.cc.  Drop it; rely on XLA's default
             # CPU thread-pool autoscaling from os.cpu_count().
-            _set_xla_flags({"xla_cpu_multi_thread_eigen": "true"})
+            set_xla_flags({"xla_cpu_multi_thread_eigen": "true"})
         except Exception:
             pass  # Non-critical; XLA will use defaults.
     if "OMP_NUM_THREADS" not in os.environ:

@@ -76,7 +76,7 @@ def _voronoi_neumann_fill(
     Land cells with at least one ocean neighbour take the
     ocean-neighbour mean; the (now-filled) cells become "ocean" for
     subsequent passes.  Three passes mirror the lat-lon
-    ``_neumann_fill_cgrid`` reach so multi-cell-deep land columns are
+    ``neumann_fill_cgrid`` reach so multi-cell-deep land columns are
     populated to the same depth before any gradient is taken.
 
     The fill is essential for slope computation: an unfilled coastal

@@ -30,7 +30,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 
-def _fold_pole_rows(
+def fold_pole_rows(
     data: jnp.ndarray,
     halo: int,
     negate: bool,
@@ -66,7 +66,7 @@ def _fold_pole_rows(
     return south, north
 
 
-def _pad_halo_latlon_local(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
+def pad_halo_latlon_local(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     """Local (single-rank) scalar halo: lon-wrap + pole-fold on both lat ends.
 
     This is the historical implementation of ``pad_halo_latlon``,
@@ -83,7 +83,7 @@ def _pad_halo_latlon_local(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
 
     # Latitude: pole-folding (scalar — no sign change).  Pole rows are
     # NOT periodic so we still concat the folded rows.
-    south, north = _fold_pole_rows(data_lon, halo, negate=False)
+    south, north = fold_pole_rows(data_lon, halo, negate=False)
     padded = jnp.concatenate([south, data_lon, north], axis=0)
     return padded
 
@@ -96,7 +96,7 @@ def pad_halo_latlon(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     :func:`legoesm.grids.halo.set_halo_backend` with a
     :class:`~legoesm.parallel.latlon_mpi.LatLonBandLayout` topology)
     routes through
-    :func:`legoesm.parallel.latlon_mpi._pad_halo_latlon_mpi`, which
+    :func:`legoesm.parallel.latlon_mpi.pad_halo_latlon_mpi`, which
     does lon-wrap + pole-fold at boundary ranks + MPI sendrecv at
     interior partition cuts.  Callers stay backend-oblivious; same
     pattern as cubed-sphere ``pad_halo``.
@@ -127,16 +127,16 @@ def pad_halo_latlon(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
         # back to the local serial path rather than crashing in the
         # MPI dispatch with an opaque error.
         from legoesm.parallel.latlon_mpi import (
-            LatLonBandLayout, _pad_halo_latlon_mpi,
+            LatLonBandLayout, pad_halo_latlon_mpi,
         )
         if isinstance(topology, LatLonBandLayout):
-            return _pad_halo_latlon_mpi(
+            return pad_halo_latlon_mpi(
                 data, topology, halo=halo, is_vector_v=False,
             )
-    return _pad_halo_latlon_local(data, halo)
+    return pad_halo_latlon_local(data, halo)
 
 
-def _pad_halo_latlon_vector_local(
+def pad_halo_latlon_vector_local(
     data: jnp.ndarray, halo: int = 1,
 ) -> jnp.ndarray:
     """Local vector halo: lon-wrap + pole-fold with sign reversal."""
@@ -145,7 +145,7 @@ def _pad_halo_latlon_vector_local(
     data_lon = jnp.pad(data, (*pad_axes, (halo, halo)), mode="wrap")
 
     # Latitude: pole-folding (vector — negate)
-    south, north = _fold_pole_rows(data_lon, halo, negate=True)
+    south, north = fold_pole_rows(data_lon, halo, negate=True)
     padded = jnp.concatenate([south, data_lon, north], axis=0)
     return padded
 
@@ -174,13 +174,13 @@ def pad_halo_latlon_vector(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     if get_halo_backend() == "mpi":
         topology = get_mpi_topology()
         from legoesm.parallel.latlon_mpi import (
-            LatLonBandLayout, _pad_halo_latlon_mpi,
+            LatLonBandLayout, pad_halo_latlon_mpi,
         )
         if isinstance(topology, LatLonBandLayout):
-            return _pad_halo_latlon_mpi(
+            return pad_halo_latlon_mpi(
                 data, topology, halo=halo, is_vector_v=True,
             )
-    return _pad_halo_latlon_vector_local(data, halo)
+    return pad_halo_latlon_vector_local(data, halo)
 
 
 def pad_halo_vector_latlon(
@@ -209,14 +209,14 @@ def pad_halo_vector_latlon(
 # ==============================================================================
 
 
-def _fold_pole_rows_3d(
+def fold_pole_rows_3d(
     data: jnp.ndarray,
     halo: int,
     negate: bool,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Pole-fold for 3D arrays, shape (n_lat, n_lon_padded, nlev).
 
-    Same logic as _fold_pole_rows but keeps the level axis intact.
+    Same logic as fold_pole_rows but keeps the level axis intact.
     """
     half = data.shape[1] // 2
     sign = -1.0 if negate else 1.0
@@ -226,14 +226,14 @@ def _fold_pole_rows_3d(
     return south, north
 
 
-def _pad_halo_latlon_3d_local(
+def pad_halo_latlon_3d_local(
     data: jnp.ndarray, halo: int = 1,
 ) -> jnp.ndarray:
     """Local 3-D scalar halo: lon-wrap + pole-fold."""
     # Longitude: periodic wrap via single Pad HLO (axis 1).
     data_lon = jnp.pad(data, ((0, 0), (halo, halo), (0, 0)), mode="wrap")
     # Latitude: pole-folding (scalar — no sign change)
-    south, north = _fold_pole_rows_3d(data_lon, halo, negate=False)
+    south, north = fold_pole_rows_3d(data_lon, halo, negate=False)
     return jnp.concatenate([south, data_lon, north], axis=0)
 
 
@@ -243,21 +243,21 @@ def pad_halo_latlon_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     if get_halo_backend() == "mpi":
         topology = get_mpi_topology()
         from legoesm.parallel.latlon_mpi import (
-            LatLonBandLayout, _pad_halo_latlon_mpi,
+            LatLonBandLayout, pad_halo_latlon_mpi,
         )
         if isinstance(topology, LatLonBandLayout):
-            return _pad_halo_latlon_mpi(
+            return pad_halo_latlon_mpi(
                 data, topology, halo=halo, is_vector_v=False,
             )
-    return _pad_halo_latlon_3d_local(data, halo)
+    return pad_halo_latlon_3d_local(data, halo)
 
 
-def _pad_halo_latlon_vector_3d_local(
+def pad_halo_latlon_vector_3d_local(
     data: jnp.ndarray, halo: int = 1,
 ) -> jnp.ndarray:
     """Local 3-D vector halo: lon-wrap + pole-fold with sign reversal."""
     data_lon = jnp.pad(data, ((0, 0), (halo, halo), (0, 0)), mode="wrap")
-    south, north = _fold_pole_rows_3d(data_lon, halo, negate=True)
+    south, north = fold_pole_rows_3d(data_lon, halo, negate=True)
     return jnp.concatenate([south, data_lon, north], axis=0)
 
 
@@ -269,13 +269,13 @@ def pad_halo_latlon_vector_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     if get_halo_backend() == "mpi":
         topology = get_mpi_topology()
         from legoesm.parallel.latlon_mpi import (
-            LatLonBandLayout, _pad_halo_latlon_mpi,
+            LatLonBandLayout, pad_halo_latlon_mpi,
         )
         if isinstance(topology, LatLonBandLayout):
-            return _pad_halo_latlon_mpi(
+            return pad_halo_latlon_mpi(
                 data, topology, halo=halo, is_vector_v=True,
             )
-    return _pad_halo_latlon_vector_3d_local(data, halo)
+    return pad_halo_latlon_vector_3d_local(data, halo)
 
 
 def pad_halo_vector_latlon_3d(
@@ -453,7 +453,7 @@ def pad_with_pole_bc_lat(
     # back to the local serial pad.
     from legoesm.parallel.latlon_mpi import (
         LatLonBandLayout,
-        _pad_with_pole_bc_lat_mpi,
+        pad_with_pole_bc_lat_mpi,
     )
     if not isinstance(topology, LatLonBandLayout):
         return jnp.pad(
@@ -461,7 +461,7 @@ def pad_with_pole_bc_lat(
             constant_values=((south_value, north_value),)
             + ((0, 0),) * (interior.ndim - 1),
         )
-    return _pad_with_pole_bc_lat_mpi(
+    return pad_with_pole_bc_lat_mpi(
         interior, topology,
         halo=halo,
         south_value=south_value,

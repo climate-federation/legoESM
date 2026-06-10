@@ -274,7 +274,7 @@ def apply_balanced_init(state, grid, z_coord, config,
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         gradient_x_cgrid, gradient_y_cgrid, cell_to_cgrid_winds,
     )
-    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _neumann_fill_cgrid
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
     from legoesm.ocean.dynamics.ocean_tendency_common import (
         iterate_eos_and_pressure_anomaly,
     )
@@ -293,7 +293,7 @@ def apply_balanced_init(state, grid, z_coord, config,
 
     _, _, p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask,
-        lambda fld: _neumann_fill_cgrid(fld, mask, grid=grid),
+        lambda fld: neumann_fill_cgrid(fld, mask, grid=grid),
         eos_fn, z_coord.dz_ref, rho_0, g_val,
         n_iter=2, hi_precision_pressure=True, h_actual=h_actual,
     )                                                    # (n_lat, n_lon, nlev)
@@ -313,7 +313,7 @@ def apply_balanced_init(state, grid, z_coord, config,
     p_at_ref = jnp.take_along_axis(p_prime, k_use[..., None], axis=-1)  # (...,1)
     p_ref = p_prime - p_at_ref                              # 0 at the reference
 
-    p_ref_filled = _neumann_fill_cgrid(p_ref, mask, grid=grid)
+    p_ref_filled = neumann_fill_cgrid(p_ref, mask, grid=grid)
     gx_u = gradient_x_cgrid(p_ref_filled, grid)            # (n_lat, n_lon+1, nlev)
     gy_v = gradient_y_cgrid(p_ref_filled, grid)            # (n_lat+1, n_lon, nlev)
     gx_T = 0.5 * (gx_u[:, :-1] + gx_u[:, 1:])              # (n_lat, n_lon, nlev)

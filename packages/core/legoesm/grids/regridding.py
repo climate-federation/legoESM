@@ -700,6 +700,107 @@ def apply_cubedsphere_to_latlon_3d(
 
 
 # ==============================================================================
+# Unstructured (SCVT / Voronoi cell) → lat-lon regridding for CMIP output
+# ==============================================================================
+
+
+class VoronoiToLatLonWeights(NamedTuple):
+    """Inverse-distance k-nearest weights for SCVT/Voronoi cell → lat-lon.
+
+    For each target lat-lon point, ``idx`` holds the ``k`` nearest source
+    cell indices and ``w`` the normalised inverse-(chord-)distance weights
+    (rows sum to 1).  k-nearest IDW (not conservative) — adequate for CMIP
+    diagnostic output on an unstructured mesh, where the alternatives
+    (nearest = blocky; conservative = needs cell polygons) trade simplicity
+    for marginal accuracy.  Mirror of :func:`compute_cs_to_gauss_weights`'s
+    KD-tree + IDW pattern, specialised to a regular lat-lon target.
+
+    Fields
+    ------
+    idx : int64 array, shape (n_target, k) — source cell indices.
+    w : float64 array, shape (n_target, k) — IDW weights, rows sum to 1.
+    n_lat, n_lon : int — target grid shape (row-major ``(n_lat, n_lon)``).
+    lat_cent, lon_cent : 1-D arrays [deg] — target cell centres.
+    """
+
+    idx: np.ndarray
+    w: np.ndarray
+    n_lat: int
+    n_lon: int
+    lat_cent: np.ndarray
+    lon_cent: np.ndarray
+
+
+def compute_voronoi_to_latlon_weights(
+    lat_cell: np.ndarray,
+    lon_cell: np.ndarray,
+    n_lon: int = 360,
+    n_lat: int = 181,
+    k: int = 3,
+) -> VoronoiToLatLonWeights:
+    """Precompute IDW k-nearest weights from Voronoi cell centres to lat-lon.
+
+    Parameters
+    ----------
+    lat_cell, lon_cell : array, shape (nCells,)
+        Voronoi cell-centre latitude / longitude **in radians** (the
+        ``VoronoiMesh.latCell`` / ``lonCell`` convention).
+    n_lon, n_lat : int
+        Output regular lat-lon grid dimensions.
+    k : int
+        Number of nearest source cells per target point (clamped to nCells).
+    """
+    from scipy.spatial import cKDTree
+
+    lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
+    lat_cent = np.linspace(-90.0, 90.0, n_lat)
+    lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
+
+    src_xyz = _latlon_to_xyz(np.asarray(lat_cell, dtype=np.float64),
+                             np.asarray(lon_cell, dtype=np.float64))
+    tgt_xyz = _latlon_to_xyz(np.deg2rad(lat2d.ravel()),
+                             np.deg2rad(lon2d.ravel()))
+
+    k = int(min(k, src_xyz.shape[0]))
+    tree = cKDTree(src_xyz)
+    dist, idx = tree.query(tgt_xyz, k=k)
+    if k == 1:  # cKDTree drops the trailing axis for k==1
+        dist = dist[:, None]
+        idx = idx[:, None]
+    # Inverse-(chord-)distance weights; eps guards an exact hit.
+    w = 1.0 / (dist + 1e-12)
+    w /= w.sum(axis=1, keepdims=True)
+    return VoronoiToLatLonWeights(
+        idx=idx.astype(np.int64), w=w.astype(np.float64),
+        n_lat=n_lat, n_lon=n_lon, lat_cent=lat_cent, lon_cent=lon_cent,
+    )
+
+
+def apply_voronoi_to_latlon(
+    field_cells: np.ndarray, weights: VoronoiToLatLonWeights,
+) -> np.ndarray:
+    """Regrid a cell field ``(nCells,)`` → ``(n_lat, n_lon)`` via IDW."""
+    f = np.asarray(field_cells, dtype=np.float64)
+    if f.ndim != 1:
+        raise ValueError(f"Expected (nCells,) field, got shape {f.shape}")
+    vals = f[weights.idx]                       # (n_target, k)
+    out = np.einsum("tk,tk->t", vals, weights.w)
+    return out.reshape(weights.n_lat, weights.n_lon)
+
+
+def apply_voronoi_to_latlon_3d(
+    field_cells: np.ndarray, weights: VoronoiToLatLonWeights,
+) -> np.ndarray:
+    """Regrid a cell field ``(nCells, nlev)`` → ``(n_lat, n_lon, nlev)``."""
+    f = np.asarray(field_cells, dtype=np.float64)
+    if f.ndim != 2:
+        raise ValueError(f"Expected (nCells, nlev) field, got shape {f.shape}")
+    vals = f[weights.idx]                        # (n_target, k, nlev)
+    out = np.einsum("tk,tkl->tl", weights.w, vals)
+    return out.reshape(weights.n_lat, weights.n_lon, f.shape[-1])
+
+
+# ==============================================================================
 # Legacy KD-tree cubed-sphere to lat-lon regridding (kept for compatibility)
 # ==============================================================================
 

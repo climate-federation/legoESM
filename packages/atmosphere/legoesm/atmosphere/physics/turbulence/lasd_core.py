@@ -63,8 +63,8 @@ def _y_ring_rows(fx, layout):
     needs for its ∂y 3-point average. Two directional sendrecv shifts with
     distinct tags (unambiguous even at n_ranks=2, where prev==next)."""
     import mpi4jax  # noqa: F401
-    from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
-    sr = _get_sendrecv_vjp(mpi4jax)
+    from legoesm.parallel.halo_exchange import get_sendrecv_vjp
+    sr = get_sendrecv_vjp(mpi4jax)
     n, r, comm = layout.n_ranks, layout.rank, layout.comm
     prev, nxt = (r - 1) % n, (r + 1) % n
     top, bot = fx[0:1], fx[-1:]

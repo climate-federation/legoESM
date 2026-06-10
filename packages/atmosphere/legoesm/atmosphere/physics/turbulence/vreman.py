@@ -66,7 +66,7 @@ def vreman_nu_t(a11, a12, a13, a21, a22, a23, a31, a32, a33,
     arg = jnp.maximum(Bbeta, 0.0) / (aa + _EPS)
     # AD-safe sqrt: d/dx √x = ∞ at x=0, so √(arg) NaNs the gradient at rest /
     # 1-D shear (arg=0). The double-where keeps both value AND derivative finite
-    # (0) there — the same guard as `_safe_sqrt_strain` in the Smagorinsky path.
+    # (0) there — the same guard as `safe_sqrt_strain` in the Smagorinsky path.
     safe = jnp.where(arg > 0.0, arg, 1.0)
     root = jnp.where(arg > 0.0, jnp.sqrt(safe), 0.0)
     return c_vreman * root + nu_floor

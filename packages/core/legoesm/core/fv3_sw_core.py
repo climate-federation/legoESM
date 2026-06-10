@@ -11,15 +11,15 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.fv_tp_2d import (
-    _pert_ppm,
+    pert_ppm,
     compute_transport_quantities,
     fv_tp_2d,
     transport_step,
 )
 from legoesm.core.operators_cdgrid import (
-    _pad_halo_auto,
+    pad_halo_auto,
     cgrid_mass_flux_divergence,
-    _interp_center_to_corner_a2b_ord4,
+    interp_center_to_corner_a2b_ord4,
     cgrid_divergence,
     fv3_cc2c,
     fv3_d2cc,
@@ -177,7 +177,7 @@ def _pad_halo_uc_vc_new_via_old_delta(uc, vc, u_d, v_d, cdgrid):
     uc_old_jhalo, vc_old_ihalo = _pad_halo_uc_vc_via_d2a2c(u_d, v_d, cdgrid)
 
     # OLD interior uc/vc for cross-face delta only. iter-948 NEGATIVE: linear extrap worsens W2 |v_max| 75→87.
-    _, _, uc_old_int, vc_old_int, _, _ = _d2a2c_vect(u_d, v_d, cdgrid)
+    _, _, uc_old_int, vc_old_int, _, _ = d2a2c_vect(u_d, v_d, cdgrid)
 
     # uc south/north halo delta
     delta_uc_south = uc_old_jhalo[:, :, 0:1] - uc_old_int[:, :, 0:1]
@@ -514,7 +514,7 @@ def _apply_fortran_d2a2c_corner_overrides(utmp_pad, vtmp_pad, n):
 
     The Fortran utmp/vtmp interior values are NOT modified — only
     halo cells.  This matches our intent of correcting `pad_halo_vector`'s
-    `_fill_corners_h2` 2-point AVERAGE with Fortran's sign-flipped
+    `fill_corners_h2` 2-point AVERAGE with Fortran's sign-flipped
     cross-component copy at the cube vertex.
 
     The vtmp overrides read from utmp_pad INTERIOR cells (which the
@@ -563,7 +563,7 @@ def _apply_fortran_d2a2c_corner_overrides(utmp_pad, vtmp_pad, n):
     return utmp_pad, vtmp_pad
 
 
-def _d2a2c_vect(u_d, v_d, cdgrid):
+def d2a2c_vect(u_d, v_d, cdgrid):
     """FV3 D-grid → A-grid → C-grid (covariant). FV3 sw_core.F90 d2a2c_vect.
 
     Dispatches to _d2a2c_vect_duogrid when dg.ng>=2 (FV3 dg%is_initialized branch).
@@ -581,7 +581,7 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     # overrides for utmp/vtmp and ua/va (sw_core.F90:3527-3545 and 3620-3640 —
     # sign-flipped copies of the OTHER component from the adjacent face) are
     # NOT PORTED to this non-duogrid path.  Python instead uses pad_halo_vector
-    # + _fill_corners_h1/_fill_corners_h2 (2-point edge-halo AVERAGE) — a
+    # + fill_corners_h1/fill_corners_h2 (2-point edge-halo AVERAGE) — a
     # DIFFERENT convention that gives DIFFERENT values at cube-vertex cells
     # (O(1) on random input, O(dx^2) on smooth fields).  The numerical impact
     # on the non-duogrid FB path has NOT been quantified.  (Duogrid path via
@@ -794,7 +794,7 @@ def _sina_u_v_from_sin_sg(cdgrid):
 
     Panel-edge faces: use the single-side sin_sg at the outermost cell,
     matching the sina_u/sina_v construction in `cubed_sphere_cdgrid.py`
-    and `_d_sw5_corner_divergence`.
+    and `d_sw5_corner_divergence`.
 
     Using this formulation instead of ``sqrt(1 - cosa_u**2)`` is the
     Fortran-faithful convention — the two are only identical when
@@ -1047,7 +1047,7 @@ def _apply_legacy_d_sw5_corner_corrections(field_at_corners, edge_halo_field):
     return f
 
 
-def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
+def d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
                              d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
                              apply_legacy_corner_corrections=False):
     """FV3 d_sw5 corner divergence damping (sw_core.F90:1641-1821).
@@ -1137,7 +1137,7 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
                           - v_d[:, :-1, :] * dy_v[:, :-1, :]
                           + v_d[:, 1:, :] * dy_v[:, 1:, :])
             # iter-972: a2b_ord4 4th-order (FV3:1795 a2b_ord4 call)
-            wk_corner = _interp_center_to_corner_a2b_ord4(wk, cdgrid)
+            wk_corner = interp_center_to_corner_a2b_ord4(wk, cdgrid)
             # FV3_3D iter 183: double-where for grad-safe sqrt at rest state
             _smag_arg = delpc ** 2 + wk_corner ** 2
             _safe_smag_arg = jnp.where(_smag_arg > 0.0, _smag_arg, 1.0)
@@ -1326,7 +1326,7 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     use_duogrid = dg is not None and dg.ng >= 2
 
     # 1. d2a2c_vect
-    ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+    ua, va, uc, vc, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
 
     # 2. Scale transport: ut/vt * dt2 * edge_length * sin_sg_upwind (FV3 fv_grid_utils.F90:570)
     dy = cdgrid.dy_edge_x   # (6, n+1, n)
@@ -1355,7 +1355,7 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     vt_scaled = dt2 * vt * dx * sin_upwind_y
 
     # 3. First-order upwind mass transport
-    h_pad = _pad_halo_auto(h, cdgrid)
+    h_pad = pad_halo_auto(h, cdgrid)
     h_left = h_pad[:, :-1, 1:-1]   # (6, n+1, n)
     h_right = h_pad[:, 1:, 1:-1]
     fx = jnp.where(ut_scaled > 0, h_left, h_right) * ut_scaled
@@ -1385,7 +1385,7 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     fx1 = dt2 * fx1
 
     # 7. KE gradient at C-faces
-    ke_pad = _pad_halo_auto(ke_total, cdgrid)
+    ke_pad = pad_halo_auto(ke_total, cdgrid)
     dke_x = cdgrid.rdxc * (ke_pad[:, :-1, 1:-1] - ke_pad[:, 1:, 1:-1])
     dke_y = cdgrid.rdyc * (ke_pad[:, 1:-1, :-1] - ke_pad[:, 1:-1, 1:])
 
@@ -1408,7 +1408,7 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=constants.g,
     """
 
     # 1. d2a2c_vect (covariant)
-    ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+    ua, va, uc, vc, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
 
     # 2. Mass transport via fv3_cc2c (physical face-normal)
     u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
@@ -1424,7 +1424,7 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=constants.g,
     B = ke + g * (h + h_s)
 
     # 4. Bernoulli gradient at C-faces
-    B_pad = _pad_halo_auto(B, cdgrid)
+    B_pad = pad_halo_auto(B, cdgrid)
     dB_x = cdgrid.rdxc * (B_pad[:, :-1, 1:-1] - B_pad[:, 1:, 1:-1])
     dB_y = cdgrid.rdyc * (B_pad[:, 1:-1, :-1] - B_pad[:, 1:-1, 1:])
 
@@ -1440,7 +1440,7 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=constants.g,
     # 8. Div damping: SUBTRACT div_damp*ddiv_x (negated-gradient stencil; iter-57 audit found +sign anti-damps)
     if div_damp > 0:
         div_field = cgrid_divergence(uc, vc, cdgrid)
-        div_pad = _pad_halo_auto(div_field, cdgrid)
+        div_pad = pad_halo_auto(div_field, cdgrid)
         ddiv_x = cdgrid.rdxc * (div_pad[:, :-1, 1:-1] - div_pad[:, 1:, 1:-1])
         ddiv_y = cdgrid.rdyc * (div_pad[:, 1:-1, :-1] - div_pad[:, 1:-1, 1:])
         duc = duc - div_damp * ddiv_x
@@ -1507,7 +1507,7 @@ def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
 def _p_grad_c(h_star, h_s, cdgrid, dt2, g):
     """Backward p-gradient g*grad(h_star+h_s) at C-faces (gravity-wave stability via implicit coupling)."""
     p = g * (h_star + h_s)
-    p_pad = _pad_halo_auto(p, cdgrid)
+    p_pad = pad_halo_auto(p, cdgrid)
     # 2-point gradient (same sign as c_sw KE gradient)
     dp_x = dt2 * cdgrid.rdxc * (p_pad[:, :-1, 1:-1] - p_pad[:, 1:, 1:-1])
     dp_y = dt2 * cdgrid.rdyc * (p_pad[:, 1:-1, :-1] - p_pad[:, 1:-1, 1:])
@@ -1745,12 +1745,12 @@ def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
         # pert_ppm(iv=1) at j=2 and j=npy-2
         bl_2 = bl[:, 2, :]
         br_2 = br[:, 2, :]
-        bl_2_new, br_2_new = _pert_ppm(bl_2, br_2)
+        bl_2_new, br_2_new = pert_ppm(bl_2, br_2)
         bl = bl.at[:, 2, :].set(bl_2_new)
         br = br.at[:, 2, :].set(br_2_new)
         bl_nm2 = bl[:, k_nm2, :]
         br_nm2 = br[:, k_nm2, :]
-        bl_nm2_new, br_nm2_new = _pert_ppm(bl_nm2, br_nm2)
+        bl_nm2_new, br_nm2_new = pert_ppm(bl_nm2, br_nm2)
         bl = bl.at[:, k_nm2, :].set(bl_nm2_new)
         br = br.at[:, k_nm2, :].set(br_nm2_new)
 
@@ -1926,7 +1926,7 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     use_d_sw5_damping = (d2_bg > 1e-10 or dddmp > 1e-10 or d4_bg > 1e-10)
     if use_d_sw5_damping:
         # iter-871b: forward iter-862 corner-corrections flag through FB wrapper
-        ke_damping = _d_sw5_corner_divergence(
+        ke_damping = d_sw5_corner_divergence(
             u_d, v_d, ua, va, cdgrid, dt,
             d2_bg=d2_bg, dddmp=dddmp, d4_bg=d4_bg, nord=nord,
             apply_legacy_corner_corrections=(
@@ -2016,7 +2016,7 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
     # post-mass-update height h_new.  Same corner-difference staggering + dt-LINEAR
     # scaling as the d_sw KE gradient (ke_corner ∝ dt, verified), and the same
     # sign convention (Φ[i]-Φ[i+1] mirrors ke_corner[i]-ke_corner[i+1]).
-    gz_b = _interp_center_to_corner_a2b_ord4(
+    gz_b = interp_center_to_corner_a2b_ord4(
         g * (h_new + h_s), cdgrid)  # (6, n+1, n+1) geopotential at corners
     rdx_u = 1.0 / jnp.maximum(cdgrid.dx_edge_y, _EPS)  # (6, n, n+1) — u_d edge
     rdy_v = 1.0 / jnp.maximum(cdgrid.dy_edge_x, _EPS)  # (6, n+1, n) — v_d edge

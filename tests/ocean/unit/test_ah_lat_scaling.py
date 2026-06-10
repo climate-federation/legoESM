@@ -27,7 +27,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vector_laplacian_dissipation_cgrid,
     divergence_cgrid,
     curl_vertex_cgrid,
-    _compute_vertex_mask,
+    compute_vertex_mask,
 )
 
 

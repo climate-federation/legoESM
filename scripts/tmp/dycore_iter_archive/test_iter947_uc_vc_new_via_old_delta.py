@@ -64,7 +64,7 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     FV3FBShallowWaterModel,
 )
 from legoesm.core.fv3_sw_core import (
-    _d2a2c_vect, _pad_halo_uc_vc_new_via_old_delta,
+    d2a2c_vect, _pad_halo_uc_vc_new_via_old_delta,
 )
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -112,7 +112,7 @@ def test_iter947_helper_shapes_and_interior_preserved():
     N = 24
     _, cdgrid, u_d, v_d, _ = _w2_d_grid_winds(N, use_duogrid=True)
     # Use d2a2c output as a stand-in for "NEW" interior uc, vc.
-    _, _, uc, vc, _, _ = _d2a2c_vect(u_d, v_d, cdgrid)
+    _, _, uc, vc, _, _ = d2a2c_vect(u_d, v_d, cdgrid)
     uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(
         uc, vc, u_d, v_d, cdgrid)
     assert uc_pad.shape == (6, N + 1, N + 2), (

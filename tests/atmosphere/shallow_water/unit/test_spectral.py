@@ -304,7 +304,9 @@ class TestSpectralSW:
     def test_test2_small_tendencies(self, grid_t21):
         """Test Case 2 (geostrophic balance) should have small tendencies."""
         state = williamson_test2_spectral(grid_t21)
-        config = SpectralSWConfig(hyperdiff_coeff=0.0, mean_depth=2.94e4 / constants.g)
+        # Background depth (gh0 = 2.94e4 m^2/s^2) is carried by the TC2 initial
+        # phi_hat from williamson_test2_spectral, not by any config knob.
+        config = SpectralSWConfig(hyperdiff_coeff=0.0)
         tend = spectral_sw_tendencies(state, grid_t21, config)
 
         # Relative to the fields themselves
@@ -414,8 +416,9 @@ class TestSpectralSW:
         """jax.grad through a single step should produce finite gradients."""
         state = williamson_test2_spectral(grid_t21)
         nu = _proper_hyperdiff(grid_t21)
-        config = SpectralSWConfig(hyperdiff_coeff=nu,
-                                  mean_depth=2.94e4 / constants.g)
+        # Background depth is carried by the TC2 initial phi_hat (gh0 = 2.94e4),
+        # not by any config knob.
+        config = SpectralSWConfig(hyperdiff_coeff=nu)
 
         def loss_fn(vor_hat_data):
             s = state._replace(

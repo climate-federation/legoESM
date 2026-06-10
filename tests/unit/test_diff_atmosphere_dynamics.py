@@ -107,7 +107,7 @@ class TestSpectralShallowWater:
         self.model = SpectralShallowWaterModel(grid, config, allow_unsupported_backend=True)
         self.dt = 120.0
 
-        # Build a spectral state: phi_hat = g * mean_depth (constant field)
+        # Build a spectral state: phi_hat = g * H0 (constant mean-depth field)
         n_sh = grid.n_sh
         g = constants.g
         H0 = 5960.0

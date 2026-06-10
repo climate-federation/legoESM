@@ -25,7 +25,7 @@ import jax.numpy as jnp
 
 from typing import Callable, Union
 
-from legoesm.core.operators import _is_distributed
+from legoesm.core.operators import is_distributed
 from legoesm.core.precision import cast
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import (
@@ -44,17 +44,17 @@ _GridT = Union[CubedSphereGrid, LatLonGrid]
 def ocean_global_sum(local_value):
     """MPI-aware global sum for scalar or vector reductions.
 
-    NOTE: this gates only on ``_is_distributed()`` (the mpi4jax/sharded flag),
+    NOTE: this gates only on ``is_distributed()`` (the mpi4jax/sharded flag),
     whereas the MPAS twin :func:`legoesm.parallel.reductions.global_sum_if_distributed`
     also reduces when ``jax.process_count() > 1`` (JAX multi-host).  Under the
-    ocean's actual MPI usage the two are identical (``_is_distributed`` is set,
+    ocean's actual MPI usage the two are identical (``is_distributed`` is set,
     ``process_count`` stays 1).  They differ only for a JAX-multi-host ocean run
     without the MPI flag, where this form would under-reduce.  Unifying onto the
     canonical helper is deliberately deferred until that path can be validated
     (single-rank vs MPI vs sharded), to avoid a silent reduction-semantics change
     in the conservation fixers.
     """
-    if _is_distributed():
+    if is_distributed():
         return global_sum_mpi(local_value)
     return local_value
 

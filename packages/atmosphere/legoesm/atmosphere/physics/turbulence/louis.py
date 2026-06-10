@@ -24,7 +24,10 @@ from legoesm import constants
 from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import LouisConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
-from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
+from legoesm.atmosphere.physics.turbulence.pbl_height import (
+    PBLHeightConfig,
+    diagnose_pbl_height,
+)
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
 )
@@ -192,7 +195,13 @@ def louis_turbulence(
     )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 
-    h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
+    # Thread the scheme's critical Richardson number into the PBL-height
+    # diagnosis (LouisConfig.Ri_crit was previously declared but never
+    # read — the call silently used PBLHeightConfig's default).
+    h_pbl = diagnose_pbl_height(
+        T, q_v, u, v, p_full, z_full,
+        PBLHeightConfig(Ri_crit=config.Ri_crit),
+    )
 
     return TurbulenceOutput(
         du_dt=(u_new - u) / dt,

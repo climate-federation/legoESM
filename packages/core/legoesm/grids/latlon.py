@@ -175,7 +175,7 @@ def create_latlon_grid(
     )
     lon = jnp.linspace(0.0, 2.0 * jnp.pi - dlon, n_lon)
 
-    return _build_uniform_latlon_grid_from_axes(
+    return build_uniform_latlon_grid_from_axes(
         lat=lat, lon=lon, dlat=dlat, dlon=dlon,
         radius=radius, omega=omega, dtype=dtype,
     )
@@ -209,7 +209,7 @@ def compute_v_face_coords(
     return lat_v, cos_lat_v
 
 
-def _build_uniform_latlon_grid_from_axes(
+def build_uniform_latlon_grid_from_axes(
     lat: jax.Array,
     lon: jax.Array,
     dlat: float,

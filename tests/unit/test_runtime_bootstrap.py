@@ -240,7 +240,7 @@ class TestDistributedGuardrails:
         mock_mpi4jax = MagicMock()
 
         with patch(
-            "legoesm.parallel.distributed._require_mpi_stack",
+            "legoesm.parallel.distributed.require_mpi_stack",
             return_value=(mock_mpi4jax, mock_MPI),
         ), patch(
             "legoesm.parallel.distributed.jax.distributed.initialize",
@@ -296,7 +296,7 @@ class TestDistributedGuardrails:
         mock_mpi4jax = MagicMock()
 
         with patch(
-            "legoesm.parallel.distributed._require_mpi_stack",
+            "legoesm.parallel.distributed.require_mpi_stack",
             return_value=(mock_mpi4jax, mock_MPI),
         ), patch(
             "legoesm.parallel.distributed.jax.distributed.initialize",

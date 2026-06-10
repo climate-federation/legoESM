@@ -21,7 +21,7 @@ adapter (byte-identical, since the adapter delegates to the same free functions)
 the lat-lon C-grid shallow-water core (``ops.divergence``/``gradient``/``vorticity``)
 and the MPAS shallow-water core (``ops.divergence``/``gradient``).  The cubed-sphere
 SW core is FV3-faithful with *bespoke* operators (FB-mode, 2-stage, duogrid corner
-work — ``dgrid_to_cgrid``, ``_d_sw5_corner_divergence``, ``fv3_del6_vorticity_damping``),
+work — ``dgrid_to_cgrid``, ``d_sw5_corner_divergence``, ``fv3_del6_vorticity_damping``),
 NOT the generic ``cgrid_*`` functions the cube adapter wraps, so the cube adapter is
 a validated *forward contract*, not a drop-in route (routing it would change FV3
 numerics).  Spectral / SFNO operate through global transforms / neural maps and
@@ -139,14 +139,14 @@ class CubedSphereCDGridOperators:
         """Cell-centre <-> corner stagger interpolation (the cube's scalar stagger)."""
         # Authorized use of the cubed-sphere interp helpers.
         from legoesm.core.operators_cdgrid import (
-            _interp_center_to_corner,
-            _interp_corner_to_center,
+            interp_center_to_corner,
+            interp_corner_to_center,
         )
 
         if (src_location, dst_location) == ("center", "corner"):
-            return _interp_center_to_corner(field, self._cdgrid)
+            return interp_center_to_corner(field, self._cdgrid)
         if (src_location, dst_location) == ("corner", "center"):
-            return _interp_corner_to_center(field)
+            return interp_corner_to_center(field)
         raise ValueError(
             f"unsupported interpolation {src_location!r}->{dst_location!r}; "
             "the cubed-sphere adapter supports 'center'<->'corner'"
@@ -155,13 +155,13 @@ class CubedSphereCDGridOperators:
     def halo_fill(self, field: Any) -> Any:
         """Fill the cross-panel halo of a CELL-CENTRE cubed-sphere field.
 
-        Cell-centre only (the GridOperators ``halo_fill`` contract; ``_pad_halo_auto``
+        Cell-centre only (the GridOperators ``halo_fill`` contract; ``pad_halo_auto``
         auto-selects 2-D/3-D, NOT stagger).  The C-grid face and D-grid corner
         halos are filled by stagger-specific routines inside the cube dycore.
         """
-        from legoesm.core.operators_cdgrid import _pad_halo_auto
+        from legoesm.core.operators_cdgrid import pad_halo_auto
 
-        return _pad_halo_auto(field, self._cdgrid)
+        return pad_halo_auto(field, self._cdgrid)
 
 
 def cubed_sphere_cdgrid_operators(cdgrid: Any) -> CubedSphereCDGridOperators:

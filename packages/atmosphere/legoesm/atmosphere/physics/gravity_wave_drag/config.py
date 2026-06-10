@@ -108,8 +108,6 @@ class McFarlaneConfig(NamedTuple):
         Sub-grid topographic height [m] (default 500).
     k_wave : float
         Horizontal wavenumber [1/m] (default 2*pi/100e3).
-    N_ref : float
-        Reference Brunt-Väisälä frequency [1/s] (default 0.01).
     G_0 : float
         Dimensionless launch-flux efficiency factor (default 0.5).
         The orographic launch stress is
@@ -170,7 +168,6 @@ class McFarlaneConfig(NamedTuple):
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
-    N_ref: float = 0.01
     G_0: float = 0.5
     efficiency: float = 0.5
     min_wind: float = 2.0

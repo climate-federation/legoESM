@@ -30,7 +30,7 @@ Different operators handle this differently:
 
   This represents the rotation of the local vector basis at the
   cube vertex, which our scalar 2-point-average corner fill in
-  ``halo.py::_fill_corners_h1`` does NOT capture.
+  ``halo.py::fill_corners_h1`` does NOT capture.
 
 * The scalar A-grid fill (``fill_corners_agrid``) does the same
   diagonal mirror without a sign flip.
@@ -47,7 +47,7 @@ This module provides:
 
 These are exposed for future use by a forward-backward c_sw + d_sw
 implementation that needs the FV3-faithful corner data.  The
-existing legoESM scalar ``_fill_corners_h1`` 2-point-average path is
+existing legoESM scalar ``fill_corners_h1`` 2-point-average path is
 not changed by this module.
 
 References
@@ -55,7 +55,7 @@ References
 
 - FV3 source: ``fv_mp_mod.F90:1257`` (``fill_corners_dgrid_r8``).
 - FV3 source: ``fv_mp_mod.F90:1032`` (``fill_corners_2d_r8``).
-- legoESM gap note: ``halo.py::_fill_corners_h1`` lines 1473-1485.
+- legoESM gap note: ``halo.py::fill_corners_h1`` lines 1473-1485.
 """
 from __future__ import annotations
 

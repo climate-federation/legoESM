@@ -13,7 +13,7 @@ Differences from :mod:`legoesm.parallel.latlon_mpi`:
 
 AD safety
 ---------
-Every ``sendrecv`` call goes through ``_get_sendrecv_vjp`` from
+Every ``sendrecv`` call goes through ``get_sendrecv_vjp`` from
 :mod:`legoesm.parallel.halo_exchange` (existing ``@jax.custom_vjp``
 wrapper that swaps source / dest in the backward pass per
 ``CLAUDE.md`` "MPI AD compat" rule). ``allreduce(SUM)`` reductions
@@ -34,7 +34,7 @@ Multi-rank coverage
 ``y`` axis first, then E/W of the *already-NS-padded* array so the
 four corner halos arrive via two-axis composition (mirrors the
 cubed-sphere ``_pad_halo_mpi`` pattern). All sendrecv calls flow
-through ``_get_sendrecv_vjp`` so :func:`jax.grad` works through
+through ``get_sendrecv_vjp`` so :func:`jax.grad` works through
 the exchange. Validated by ``tests/distributed/test_plane_pencil_mpi.py``
 under the OpenMPI ``mpi-distributed.yml`` CI job (np = 2, 4).
 
@@ -295,9 +295,9 @@ def exchange_halo_plane_yxz(
                 "mpi4py (install with `pip install -e \".[mpi]\"` and "
                 "have OpenMPI available)."
             ) from exc
-        from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
+        from legoesm.parallel.halo_exchange import get_sendrecv_vjp
         comm = MPI.COMM_WORLD
-        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        sendrecv = get_sendrecv_vjp(mpi4jax)
     else:
         sendrecv = None  # never used; single-rank shortcut above
 
@@ -309,7 +309,6 @@ def exchange_halo_plane_yxz(
     # tag bases total per packed halo round, well below the limit.
     _TAG_NS = 1_000
     _TAG_EW = 2_000
-    rank = layout.rank
 
     # ----- Stage 1: N/S along the y axis -----
     if layout.n_ranks_y == 1:

@@ -43,8 +43,8 @@ from legoesm.atmosphere.physics.thermodynamics import (
 from legoesm.atmosphere.physics.convection.config import KainFritschConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.mass_flux import (
-    _apply_mass_flux_kernel,
-    _compute_column_geometry,
+    apply_mass_flux_kernel,
+    compute_column_geometry,
 )
 from legoesm.atmosphere.physics.convection._triggers import (
     cape_trigger,
@@ -336,9 +336,7 @@ def kain_fritsch_convection(
 
     # -- Column geometry, moist adiabat, CAPE ------------------------------
     # Use virtual-T moist hydrostatic geometry (clean_physics iter-2 #2).
-    dz, rho, z = _compute_column_geometry(T, p_full, p_half, q_v=q_v)
-    T_base = T[:, -1]
-    q_base = q_v[:, -1]
+    dz, rho, z = compute_column_geometry(T, p_full, p_half, q_v=q_v)
     p_base = p_full[:, -1]
 
     # -- Updraft source layer (USL): ~50 hPa mass-weighted parcel ----------
@@ -584,7 +582,7 @@ def kain_fritsch_convection(
     # Plume splits vapor (``plume.q_u``) and cloud water
     # (``plume.q_c_u``) explicitly so we use the kernel's correct
     # cloud-water source directly (see ZM).
-    dT_dt_raw, dq_v_dt_raw, dq_c_conv_dt_raw = _apply_mass_flux_kernel(
+    dT_dt_raw, dq_v_dt_raw, dq_c_conv_dt_raw = apply_mass_flux_kernel(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
         z, rho, kernel_delta, M_u_max=config.M_b_max,

@@ -1,15 +1,15 @@
-"""FV3_3D iter 496: isolate ``_interp_center_to_corner`` —
+"""FV3_3D iter 496: isolate ``interp_center_to_corner`` —
 does this halo-aware interpolation amplify edges under
 duogrid?
 
 iter-495 ruled out ``fv3_divergence_corner_3d``.  The
 remaining suspect is the cell-center → corner interpolation
 used by NH to lift u/v to the D-grid corner.  This op DOES
-read halo (calls ``_pad_halo_auto`` internally).
+read halo (calls ``pad_halo_auto`` internally).
 
 Methodology:
 * Build random cell-centered scalar field.
-* Apply ``_interp_center_to_corner`` with grid_off vs grid_on.
+* Apply ``interp_center_to_corner`` with grid_off vs grid_on.
 * Compare edge_std / interior_std of the corner output.
 
 Tests
@@ -26,7 +26,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.core.operators_cdgrid import _interp_center_to_corner
+from legoesm.core.operators_cdgrid import interp_center_to_corner
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 
@@ -62,13 +62,13 @@ def test_interp_center_to_corner_duogrid_edge_amplification(capsys):
     field = jnp.asarray(
         rng.normal(loc=2.0, scale=1.5, size=(6, n, n, nlev)),
     )
-    corner_off = _interp_center_to_corner(field, cdg_off)
-    corner_on = _interp_center_to_corner(field, cdg_on)
+    corner_off = interp_center_to_corner(field, cdg_off)
+    corner_on = interp_center_to_corner(field, cdg_on)
     e_off, i_off = _edge_and_interior_std(corner_off)
     e_on, i_on = _edge_and_interior_std(corner_on)
     with capsys.disabled():
         print(
-            f"\n[iter-496 _interp_center_to_corner duogrid effect]"
+            f"\n[iter-496 interp_center_to_corner duogrid effect]"
         )
         print(
             f"  no-duogrid: edge std = {e_off:.4f}, "
@@ -88,7 +88,7 @@ def test_interp_center_to_corner_duogrid_edge_amplification(capsys):
         )
         if edge_change > 1.5 * int_change:
             print(
-                f"  Conclusion: ``_interp_center_to_corner`` "
+                f"  Conclusion: ``interp_center_to_corner`` "
                 f"AMPLIFIES edge artifacts under duogrid → "
                 f"matches expected dycore amplifier."
             )
@@ -99,7 +99,7 @@ def test_interp_center_to_corner_duogrid_edge_amplification(capsys):
             )
         else:
             print(
-                f"  Conclusion: ``_interp_center_to_corner`` "
+                f"  Conclusion: ``interp_center_to_corner`` "
                 f"is essentially duogrid-invariant — bug "
                 f"elsewhere."
             )

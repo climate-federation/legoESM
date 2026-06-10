@@ -42,7 +42,7 @@ from legoesm.ice.rheology import (
     strain_rates,
     evp_stress_update,
     mevp_stress_update,
-    _cell_gradient_voronoi,
+    cell_gradient_voronoi,
 )
 
 
@@ -162,9 +162,9 @@ def _stress_divergence_voronoi(
         F_x = ∂σ_11/∂x + ∂σ_12/∂y
         F_y = ∂σ_12/∂x + ∂σ_22/∂y
     """
-    ds11_dx, _ = _cell_gradient_voronoi(sigma_11, mesh)
-    ds12_dx, ds12_dy = _cell_gradient_voronoi(sigma_12, mesh)
-    _, ds22_dy = _cell_gradient_voronoi(sigma_22, mesh)
+    ds11_dx, _ = cell_gradient_voronoi(sigma_11, mesh)
+    ds12_dx, ds12_dy = cell_gradient_voronoi(sigma_12, mesh)
+    _, ds22_dy = cell_gradient_voronoi(sigma_22, mesh)
     Fx = ds11_dx + ds12_dy
     Fy = ds12_dx + ds22_dy
     return Fx, Fy

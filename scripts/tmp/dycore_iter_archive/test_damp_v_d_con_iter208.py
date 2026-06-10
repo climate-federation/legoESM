@@ -11,7 +11,7 @@ to heat in T (energy conservation):
     ΔT = -damp_v_d_con * ΔKE / c_pd
 
 Computed at corners then projected to cell centres via the
-4-point ``_interp_corner_to_center`` helper for the T (cell-
+4-point ``interp_corner_to_center`` helper for the T (cell-
 centre) update.
 
 Tests

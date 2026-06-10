@@ -33,7 +33,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 logger = logging.getLogger(__name__)
 
 # Number of cubed-sphere faces.
-_N_FACES = 6
+N_FACES = 6
 
 
 # ==============================================================================
@@ -314,7 +314,7 @@ def create_device_mesh(
         tiling = (1, 1)
         logger.info(
             "legoESM: %d-device face mesh on %s (faces per device: %d)",
-            n_dev, backend_name, _N_FACES // n_dev,
+            n_dev, backend_name, N_FACES // n_dev,
         )
     else:
         # Sub-face tiling: reshape devices into a 3D mesh
@@ -771,7 +771,7 @@ def shard_pytree(pytree, config: DeviceConfig):
             return leaf
 
         if config.grid_type == "cubed_sphere":
-            if leaf.ndim >= 1 and leaf.shape[0] == _N_FACES:
+            if leaf.ndim >= 1 and leaf.shape[0] == N_FACES:
                 # In tiled cubed-sphere mode, use both tile axes only for
                 # true face-plane arrays; lower-rank face-leading fields keep
                 # face-only sharding.

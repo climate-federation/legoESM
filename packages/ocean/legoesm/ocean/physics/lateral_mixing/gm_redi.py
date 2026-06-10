@@ -55,7 +55,7 @@ from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
-    _EPS,
+    EPS,
     compute_visbeck_kappa_gm,
     dm95_taper,
     vertical_flux_divergence,
@@ -79,7 +79,7 @@ def _compute_tapered_slopes(
     taper : (6, n, n, nlev-1)
         Taper factor in [0, 1].
     """
-    eps = _EPS
+    eps = EPS
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
 
     # Horizontal density gradients at full levels.
@@ -135,7 +135,7 @@ def _tracer_tendency_gm_redi(
     S_x, S_y : (6, n, n, nlev-1)
         Tapered isopycnal slopes at interfaces.
     """
-    eps = _EPS
+    eps = EPS
     q.shape[-1]
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
 

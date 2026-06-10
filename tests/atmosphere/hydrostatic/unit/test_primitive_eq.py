@@ -794,7 +794,7 @@ class TestMassConservation:
 class TestHydrostaticToFV3VectorHalo:
     """Pin the iter-199 fix: ``hydrostatic_to_fv3`` must use
     ``pad_halo_vector`` (with cos/sin angle rotation across cube
-    faces), NOT the scalar ``_interp_center_to_corner`` path.  Pre-fix
+    faces), NOT the scalar ``interp_center_to_corner`` path.  Pre-fix
     the scalar halo introduced ~70 % distortion on the round-trip and
     drove a 1009 Pa/step ps imbalance from a balanced JW jet IC.
     See scaling.md §3 for the audit history.

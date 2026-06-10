@@ -11,7 +11,7 @@ Supported model types:
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -42,6 +42,7 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
 from legoesm.atmosphere.physics._shared import (
     compute_moisture_convergence,
     diagnose_grid_w_from_omega,
+    moisture_convergence_supported,
     zero_like_tracers,
 )
 from legoesm.core.operators_3d import divergence_3d as _div3_cs
@@ -114,6 +115,111 @@ def _get_convection_fn(config: ConvectionConfig):
         raise ValueError(f"Unknown convection scheme: {config.scheme!r}")
 
 
+class ConvectionSchemeTraits(NamedTuple):
+    """Static plumbing traits of a convection scheme.
+
+    Single source of truth for which inputs/carries each scheme needs,
+    shared by the per-model-type bridge factories below AND the unified
+    driver pipeline (``legoesm.driver.physics_pipeline``) so the two
+    call paths cannot drift in what they feed a scheme.
+    """
+    is_scalar_prognostic: bool   # (ncol,) carry (mass_flux M_c / edmf a_u)
+    is_profile_prognostic: bool  # full (ncol, nlev) conv_prog_profile carry
+    is_cmt_capable: bool         # consumes u, v for convective momentum transport
+    is_w_grid_consumer: bool     # consumes resolved w_grid (KF trigger)
+    is_stochastic: bool          # carries conv_stoch_state (+ optional PRNG key)
+    is_mc_consumer: bool         # consumes large-scale moisture convergence
+    is_simple_mc_consumer: bool  # stateless MC-driven leaf (canonical Kuo)
+
+
+def convection_scheme_traits(scheme_name: str) -> ConvectionSchemeTraits:
+    """Return the static plumbing traits for *scheme_name*.
+
+    ZM is technically diagnostic but uses ``[:, -1]`` of the profile as
+    an M_b carry for implicit relaxation; KF is diagnostic but routed
+    through the profile path so the caller plumbs ``w_grid`` for its
+    trigger.  Kuo is the canonical moisture-convergence scheme: a simple
+    leaf whose source IS the large-scale convergence (``None`` MC ⇒
+    correctly quiescent).
+    """
+    return ConvectionSchemeTraits(
+        is_scalar_prognostic=scheme_name in ("mass_flux", "edmf"),
+        is_profile_prognostic=scheme_name in (
+            "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke",
+            "bechtold",
+        ),
+        is_cmt_capable=scheme_name in ("zhang_mcfarlane", "tiedtke", "bechtold"),
+        is_w_grid_consumer=scheme_name in ("kain_fritsch",),
+        is_stochastic=scheme_name in ("bechtold",),
+        is_mc_consumer=scheme_name in ("tiedtke", "bechtold"),
+        is_simple_mc_consumer=scheme_name in ("kuo",),
+    )
+
+
+def diagnose_w_grid_columns_hydrostatic(
+    u_grid,
+    v_grid,
+    p_s,
+    grid,
+    sigma_coord,
+    T_col,
+    p_full_col,
+    q_v_col,
+    *,
+    need_concrete: bool,
+    dtype,
+):
+    """Resolved grid-scale ``w`` [m/s] in ``(ncol, nlev)`` column layout.
+
+    The hydrostatic dycore doesn't expose ``omega`` at the physics
+    boundary, so re-derive it from the standard sigma-coordinate
+    continuity::
+
+        D       = ∇·v_h                  (per full level)
+        D_t     = Σ D · Δσ               (column total)
+        dp_s/dt = -p_s · D_t / (1 - σ_top)
+        σ̇      = compute_sigma_dot(D)
+        ω       = σ · dp_s/dt + p_s · σ̇
+
+    then convert to ``w`` via :func:`._shared.diagnose_grid_w_from_omega`.
+    Only the cubed-sphere and lat-lon grids ship a divergence operator we
+    can call here; other grids fall back to ``zeros`` when
+    ``need_concrete`` (Kain-Fritsch reads ``w_grid`` unconditionally) or
+    ``None`` otherwise (Kuo then uses its convergence-sign proxy rather
+    than a spurious zero-w gate).
+
+    Shared by the hydrostatic bridge below and the unified driver
+    pipeline.
+    """
+    ncol, nlev = T_col.shape
+    div_grid = None
+    if isinstance(grid, CubedSphereGrid):
+        if v_grid is not None:
+            div_grid = _div3_cs(u_grid, v_grid, grid)
+    elif hasattr(grid, "dlat") and hasattr(grid, "dlon"):
+        if v_grid is not None:
+            div_grid = _div3_latlon(u_grid, v_grid, grid)
+
+    if div_grid is not None:
+        sigma_top = sigma_coord.sigma_half[0]
+        # Iter-55: share the cumsum between σ̇ and ``D_total`` (mirrors
+        # iter-52/53 in the dycores).  Saves one cross-shard reduction
+        # per physics call on this w-grid diagnostic path.
+        sigma_dot_grid, _D_total_full = compute_sigma_dot_and_total(
+            div_grid, sigma_coord,
+        )
+        dp_s_dt_grid = -p_s * _D_total_full[..., 0] / (1.0 - sigma_top)
+        omega_grid = compute_pressure_velocity(
+            sigma_dot_grid, p_s, dp_s_dt_grid, sigma_coord,
+        )
+        return diagnose_grid_w_from_omega(
+            omega_grid.reshape(ncol, nlev), T_col, p_full_col, q_v_col,
+        ).astype(dtype)
+    if need_concrete:
+        return jnp.zeros((ncol, nlev), dtype=dtype)
+    return None
+
+
 def make_convection_physics(
     convection_config: ConvectionConfig,
     model_type: str = "hydrostatic",
@@ -179,28 +285,16 @@ def _make_hydrostatic_convection(
     PRs) use the full profile.
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
-    # Scalar-carrying schemes that pack their state at [:, -1].
-    is_scalar_prognostic = scheme_name in ("mass_flux", "edmf")
-    # Profile-carrying schemes (full conv_prog_profile is meaningful).
-    # ZM is technically diagnostic but uses [:, -1] as a M_b carry for
-    # implicit relaxation; we route it through the profile-aware path
-    # because the leaf signature accepts u, v for CMT.  KF is also
-    # diagnostic but routed through the profile path so the bridge can
-    # plumb the ``w_grid`` argument for its trigger.
-    is_profile_prognostic = scheme_name in (
-        "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
-    )
-    is_cmt_capable = scheme_name in ("zhang_mcfarlane", "tiedtke", "bechtold")
-    is_w_grid_consumer = scheme_name in ("kain_fritsch",)
-    is_stochastic = scheme_name in ("bechtold",)
-    is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
-    # Kuo is the canonical moisture-convergence scheme: its source IS the
-    # large-scale ∂q/∂t|dyn (``moisture_convergence``).  It is a simple
-    # leaf (no prognostic carry), so it takes MC in the catch-all path
-    # rather than the profile path.  When MC is None (no resolved
-    # large-scale ascent, e.g. single-column RCE) Kuo is correctly
-    # quiescent.
-    is_simple_mc_consumer = scheme_name in ("kuo",)
+    # Static plumbing traits — single source of truth shared with the
+    # unified driver pipeline (see :func:`convection_scheme_traits`).
+    _tr = convection_scheme_traits(scheme_name)
+    is_scalar_prognostic = _tr.is_scalar_prognostic
+    is_profile_prognostic = _tr.is_profile_prognostic
+    is_cmt_capable = _tr.is_cmt_capable
+    is_w_grid_consumer = _tr.is_w_grid_consumer
+    is_stochastic = _tr.is_stochastic
+    is_mc_consumer = _tr.is_mc_consumer
+    is_simple_mc_consumer = _tr.is_simple_mc_consumer
     # Static at closure-build time: avoid splitting / advancing the
     # master PRNG key when stochasticity is disabled, so the no-noise
     # path is exactly bit-identical to a no-Bechtold run apart from
@@ -284,62 +378,20 @@ def _make_hydrostatic_convection(
             u_col = None
             v_col = None
 
-        # Grid-scale w for w-consuming schemes (Kain-Fritsch).  The
-        # hydrostatic dycore doesn't expose ``omega`` at the physics
-        # boundary, so we re-derive it from the standard sigma-coord
-        # continuity:
-        #
-        #   D     = ∇·v_h            (per full level)
-        #   D_t   = Σ D · Δσ          (column total)
-        #   dp_s/dt = -p_s · D_t / (1 - σ_top)
-        #   σ̇    = compute_sigma_dot(D)
-        #   ω    = σ · dp_s/dt + p_s · σ̇
-        #
-        # then convert to w via :func:`._shared.diagnose_grid_w_from_omega`.
-        # Only the cubed-sphere and lat-lon grids ship with a divergence
-        # operator we can call here; other grids fall back to zeros.
-        # Kain-Fritsch consumes ``w_grid`` for its trigger; Kuo uses it
-        # for the oracle's independent ``w_lcl>0`` activation gate
-        # (faithful to ``kuo_schemes.f90``; falls back to the convergence
-        # -sign proxy when ``w_grid`` is None on grids without a usable
-        # divergence operator).
+        # Grid-scale w for w-consuming schemes (Kain-Fritsch trigger;
+        # Kuo's oracle ``w_lcl>0`` activation gate).  Shared helper —
+        # see :func:`diagnose_w_grid_columns_hydrostatic` for the
+        # sigma-continuity derivation and the per-scheme None/zeros
+        # fallback semantics.
         if is_w_grid_consumer or is_simple_mc_consumer:
-            div_grid = None
-            if isinstance(grid, CubedSphereGrid):
-                if state.v is not None:
-                    div_grid = _div3_cs(state.u.data, state.v.data, grid)
-            elif hasattr(grid, "dlat") and hasattr(grid, "dlon"):
-                if state.v is not None:
-                    div_grid = _div3_latlon(state.u.data, state.v.data, grid)
-
-            if div_grid is not None:
-                sigma_top = sigma_coord.sigma_half[0]
-                # Iter-55: share the cumsum between σ̇ and ``D_total``
-                # (mirrors iter-52/53 in the dycores).  Saves one
-                # cross-shard reduction per physics call on this w-grid
-                # diagnostic path.
-                sigma_dot_grid, _D_total_full = compute_sigma_dot_and_total(
-                    div_grid, sigma_coord,
-                )
-                dp_s_dt_grid = (
-                    -state.p_s.data * _D_total_full[..., 0] / (1.0 - sigma_top)
-                )
-                omega_grid = compute_pressure_velocity(
-                    sigma_dot_grid, state.p_s.data, dp_s_dt_grid, sigma_coord,
-                )                                          # shape_3d
-                w_grid_col = diagnose_grid_w_from_omega(
-                    omega_grid.reshape(ncol, nlev),
-                    T_col, p_full_col, q_v_col,
-                ).astype(_state_dtype)
-            elif is_w_grid_consumer:
-                # Kain-Fritsch needs a concrete array (it reads w_grid
-                # unconditionally); zero-fill where no divergence operator.
-                w_grid_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
-            else:
-                # Kuo: no resolved divergence (e.g. single-column SCM) →
-                # leave ``w_grid`` None so Kuo uses the convergence-sign
-                # proxy rather than a spurious zero-w gate.
-                w_grid_col = None
+            w_grid_col = diagnose_w_grid_columns_hydrostatic(
+                state.u.data,
+                state.v.data if state.v is not None else None,
+                state.p_s.data, grid, sigma_coord,
+                T_col, p_full_col, q_v_col,
+                need_concrete=is_w_grid_consumer,
+                dtype=_state_dtype,
+            )
         else:
             w_grid_col = None
 
@@ -365,6 +417,10 @@ def _make_hydrostatic_convection(
             and state.tracers is not None
             and "q_v" in state.tracers
             and state.v is not None
+            # Degrade to None (proxy / quiescent semantics above) on
+            # grids without an MC operator instead of TypeError-ing —
+            # same guard as the unified pipeline (codex 2026-06-10 P2).
+            and moisture_convergence_supported(grid)
         ):
             _compute_mc = compute_moisture_convergence
             # Tracer values may be Field-wrapped or raw JAX arrays.
@@ -646,15 +702,16 @@ def _make_nonhydrostatic_convection(
     convention for scalar-carrying schemes.
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
-    is_scalar_prognostic = scheme_name in ("mass_flux", "edmf")
-    is_profile_prognostic = scheme_name in (
-        "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
-    )
-    is_cmt_capable = scheme_name in ("zhang_mcfarlane", "tiedtke", "bechtold")
-    is_w_grid_consumer = scheme_name in ("kain_fritsch",)
-    is_stochastic = scheme_name in ("bechtold",)
-    is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
-    is_simple_mc_consumer = scheme_name in ("kuo",)
+    # Static plumbing traits — single source of truth shared across the
+    # bridge factories and the unified driver pipeline.
+    _tr = convection_scheme_traits(scheme_name)
+    is_scalar_prognostic = _tr.is_scalar_prognostic
+    is_profile_prognostic = _tr.is_profile_prognostic
+    is_cmt_capable = _tr.is_cmt_capable
+    is_w_grid_consumer = _tr.is_w_grid_consumer
+    is_stochastic = _tr.is_stochastic
+    is_mc_consumer = _tr.is_mc_consumer
+    is_simple_mc_consumer = _tr.is_simple_mc_consumer
     needs_prng = is_stochastic and getattr(
         scheme_config, "enable_stochastic", False
     )
@@ -960,15 +1017,16 @@ def _make_spectral_pe_convection(
     convention.
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
-    is_scalar_prognostic = scheme_name in ("mass_flux", "edmf")
-    is_profile_prognostic = scheme_name in (
-        "zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold",
-    )
-    is_cmt_capable = scheme_name in ("zhang_mcfarlane", "tiedtke", "bechtold")
-    is_w_grid_consumer = scheme_name in ("kain_fritsch",)
-    is_stochastic = scheme_name in ("bechtold",)
-    is_mc_consumer = scheme_name in ("tiedtke", "bechtold")
-    is_simple_mc_consumer = scheme_name in ("kuo",)
+    # Static plumbing traits — single source of truth shared across the
+    # bridge factories and the unified driver pipeline.
+    _tr = convection_scheme_traits(scheme_name)
+    is_scalar_prognostic = _tr.is_scalar_prognostic
+    is_profile_prognostic = _tr.is_profile_prognostic
+    is_cmt_capable = _tr.is_cmt_capable
+    is_w_grid_consumer = _tr.is_w_grid_consumer
+    is_stochastic = _tr.is_stochastic
+    is_mc_consumer = _tr.is_mc_consumer
+    is_simple_mc_consumer = _tr.is_simple_mc_consumer
     needs_prng = is_stochastic and getattr(
         scheme_config, "enable_stochastic", False
     )
