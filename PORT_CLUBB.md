@@ -220,7 +220,7 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
 | P1 | Wire `"clubb"` into TurbulenceConfig Literal + validate_strict | ☐ (deferred to P7 — needs scheme entry to avoid half-wired dispatch) |
 | P1 | `CLUBBConfig`/`CLUBBFlags` | ☐ |
 | P2 | saturation adapter (Flatau) — `thermo` curves + `clubb_saturation.py` | ✅ iter 3 |
-| P2 | sigma_sqd_w + Brunt–Väisälä (`advance_helper`) | ☐ next |
+| P2 | sigma_sqd_w + Brunt–Väisälä (`clubb_helpers.py`) | ✅ iter 4 |
 | P3 | mixing length / Lscale | ☐ |
 | P4 | ADG1 PDF closure | ☐ |
 | P5 | moment advance + solves + limiters | ☐ |
@@ -327,5 +327,34 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
 - **Next (iter 4):** `clubb_saturation` is ready; do `sigma_sqd_w`
   (`sigma_sqd_w_module`) + Brunt–Väisälä `calc_brunt_vaisala_freq_sqd`
   (`advance_helper_module`) — both feed the mixing-length/PDF; tests + codex.
+
+### iter 4
+- **P2 helpers (done):** new `clubb_helpers.py` (analog of CLUBB
+  `advance_helper_module`) with two CAM-default-tree kernels:
+  - `compute_sigma_sqd_w` — PDF width parameter
+    `gamma_Skw*(1−min(max_x corr_wx²,1))`, smoothed zm→zt→zm with a zero floor.
+    CAM `l_predict_upwp_vpwp=False` ⇒ only rt/thl w-correlations enter
+    `max_corr` (up/v branch pruned, documented). Tolerances come from
+    `CLUBBConfig` (no hardcoded magic numbers).
+  - `calc_brunt_vaisala_freq_sqd` — CAM defaults (`l_use_thvm_in_bv_freq=F`,
+    `l_brunt_vaisala_freq_moist=F`, `l_modify_limiters_for_cnvg_test=F`):
+    returns dry `(g/T0)·d(thlm)/dz`; still computes the moist/mixed/smoothed
+    forms (downstream mixing-length/Ri consume them). Uses
+    `clubb_saturation.sat_mixrat_liq` + `clubb_grid` operators.
+- Constants via `legoesm.constants` (g/c_pd/L_v/R_d/epsilon) — NOT CLUBB
+  globals; ~0.1% tuning-scale difference documented. (PreToolUse hook caught a
+  `9.80616` literal in a docstring; reworded to reference constants by name.)
+- Tests (`test_clubb_helpers.py`, 9): sigma bounds/zero-flux=gamma/high-corr→0;
+  BV dry-form identity, stable→positive, unstable→negative,
+  `ice=0 ⇒ bv_mixed==bv_dry` exact relation; both JIT+grad clean.
+- Classified `clubb_helpers.py` EXCLUDED in physics-contracts. Switched the
+  ruff per-file-ignore to a `clubb*.py` glob (covers all CLUBB modules).
+- Codex adversarial review: **APPROVE, no material findings** (compared
+  directly against the CLUBB-JAX + Fortran references for the CAM branches).
+- **Next (iter 5):** P3 mixing length / `Lscale`. CAM `l_diag_Lscale_from_tau
+  = False` ⇒ the **buoyant-sorting parcel-integral** `Lscale` path in
+  `mixing_length.py` (NOT the tau path). This is the largest single kernel so
+  far — likely split across iter 5–6. Will need `gamma_Skw`/`Skx`
+  (`Skx_module`) which sigma_sqd_w consumes too.
 </content>
 </invoke>

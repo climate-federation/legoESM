@@ -150,12 +150,12 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # them to snake_case would destroy the cross-reference to the reference and the
 # tuning literature (the higher-priority correctness/faithfulness goal), so the
 # pep8-naming mixedCase rules are relaxed ONLY for these files.
-"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_config.py" = ["N815"]
-"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py" = ["N803", "N806", "N815"]
-"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_pdf.py" = ["N803", "N806", "N815"]
-"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_mixing_length.py" = ["N803", "N806", "N815"]
-"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_moments.py" = ["N803", "N806", "N815"]
-"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_saturation.py" = ["N803", "N806", "N815"]
+# Glob over all CLUBB turbulence modules (clubb.py, clubb_grid.py,
+# clubb_config.py, clubb_helpers.py, clubb_pdf.py, clubb_mixing_length.py,
+# clubb_moments.py, clubb_saturation.py, ...). Excludes the pre-existing
+# clubb_lite.py (already clean) only incidentally — relaxing naming there is
+# harmless. N815 covers the config symbol fields; N803/N806 the kernel args/vars.
+"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb*.py" = ["N803", "N806", "N815"]
 # CLUBB port tests use the same physical symbol names as the modules under test
 # (T for temperature, Tc for deg C, etc.) — clearer than snake_case here.
 "tests/unit/test_clubb_*.py" = ["N802", "N803", "N806"]

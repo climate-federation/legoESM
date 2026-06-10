@@ -143,6 +143,10 @@ EXCLUDED: frozenset[str] = frozenset(
         # CLUBB port: saturation mixing-ratio adapter over legoesm.thermo's
         # canonical Flatau curves (a thermo helper, not a tendency scheme).
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_saturation.py",
+        # CLUBB port: advance-helper kernels (sigma_sqd_w PDF width, Brunt-
+        # Vaisala frequency) — diagnostic helpers feeding the closure, not a
+        # single-tendency scheme.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_helpers.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",
