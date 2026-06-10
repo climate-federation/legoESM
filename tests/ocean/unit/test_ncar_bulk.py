@@ -74,14 +74,14 @@ def _np_q_sat(T, p):
 
 
 def _np_pres_temp(q, slp, z, T_abs):
-    """NEMO pres_temp (absolute-T branch, 3 iterations).  Same w=q/q_sat
-    clip-to-[0,1] guard as the implementation (no-op on valid marine
-    inputs; the clip only protects unmasked garbage cells)."""
+    """NEMO pres_temp (absolute-T branch, 3 iterations) — UNCLIPPED
+    w = q/q_sat exactly like the Fortran, so it can falsify the
+    implementation's garbage-cell guard on the physical domain."""
     T = np.maximum(T_abs, 180.0)
     p = np.asarray(slp, dtype=np.float64).copy()
     for _ in range(3):
         qs = _np_q_sat(T, p)
-        w = np.clip(q / qs, 0.0, 1.0)
+        w = q / qs
         xm = (1.0 - w) * _MDRY + w * _MWAT
         p = slp * np.exp(-_GRAV * xm * z / (_RGAS * T))
     return p
@@ -224,6 +224,12 @@ def test_full_flux_path_matches_independent_numpy_mirror():
     T_air = sst + rng.uniform(-6.0, 6.0, n)             # ABSOLUTE at 10 m
     q = rng.uniform(2e-4, 0.020, n)
     slp = rng.uniform(96000.0, 104000.0, n)
+    # Keep q within w = q/q_sat <= 1.5 (up to 150% RH): the random draw can
+    # otherwise pair cold air with tropical humidity (w ~ 9, unphysical),
+    # where the implementation's w<=2 garbage guard INTENTIONALLY departs
+    # from the unclipped Fortran mirror.  Supersaturation parity has its own
+    # dedicated test (q = 1.3 q_sat).
+    q = np.minimum(q, 1.5 * _np_q_sat(T_air, slp))
     u = rng.uniform(-20.0, 20.0, n)
     v = rng.uniform(-20.0, 20.0, n)
     ref = _np_fluxes(u, v, T_air, q, sst, slp)
@@ -339,6 +345,25 @@ def test_l_vap_and_cp_air_reference():
     assert float(moist_air_cp(0.01)) == pytest.approx(
         constants.c_p_dry_air_nemo + 0.01 * constants.c_p_vapor_nemo,
         rel=1e-12)
+
+
+def test_pressure_at_height_supersaturated_matches_unclipped_nemo():
+    """SUPERSATURATED air (q = 1.3 q_sat, RH 130%): the implementation must
+    still match the UNCLIPPED NEMO formula bit-for-bit — the garbage guard
+    clips only at w > 2, beyond any physical supersaturation (codex
+    round-2 MED: a clip at 1.0 would silently diverge from NEMO here)."""
+    T, slp = 275.0, 101000.0
+    q_sat0 = float(_np_q_sat(np.float64(T), np.float64(slp)))
+    q_super = 1.3 * q_sat0
+    p_impl = float(pressure_at_height(
+        jnp.asarray(q_super), jnp.asarray(slp), 10.0, jnp.asarray(T)))
+    p_ref = float(_np_pres_temp(np.float64(q_super), np.float64(slp), 10.0,
+                                np.float64(T)))
+    assert p_impl == pytest.approx(p_ref, rel=1e-13)
+    # and the guard still protects true garbage (land cell at the T floor)
+    p_junk = float(pressure_at_height(
+        jnp.asarray(0.01), jnp.asarray(slp), 10.0, jnp.asarray(150.0)))
+    assert np.isfinite(p_junk) and 0.0 < p_junk <= slp
 
 
 def test_pressure_at_height_and_exner_theta():

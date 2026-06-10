@@ -136,11 +136,14 @@ def pressure_at_height(q_air, slp_Pa, z_m, T_abs_K):
     for _ in range(_N_ITER_PRES):
         e_s = saturation_vapor_pressure_goff(T)
         q_sat = _REPS0 * e_s / (p - (1.0 - _REPS0) * e_s)
-        # Physical saturation ratio is <= ~1; clip so an UNMASKED garbage
-        # cell (e.g. land point with the 180 K temperature floor, where
-        # q >> q_sat) cannot drive the molar mass negative and NaN the
-        # barometric exponential.  No-op for valid marine inputs.
-        w = jnp.clip(q / q_sat, 0.0, 1.0)
+        # NEMO uses w = q/q_sat UNCLIPPED.  The moist molar mass goes
+        # NEGATIVE (-> NaN via the barometric exponential) only for
+        # w > M_dry/(M_dry - M_water) ~ 2.65, far beyond any physical
+        # supersaturation — that regime is reached ONLY by unmasked garbage
+        # cells (land points at the 180 K floor, w ~ 1e5).  Clip at 2.0:
+        # bit-identical to NEMO for every physical input INCLUDING
+        # supersaturated air (codex round-2 MED), NaN-proof on garbage.
+        w = jnp.clip(q / q_sat, 0.0, 2.0)
         xm = (1.0 - w) * constants.M_dry_air + w * constants.M_water
         p = slp * jnp.exp(
             -constants.g_nemo * xm * z_m / (constants.R_gas_molar * T))
