@@ -160,6 +160,9 @@ EXCLUDED: frozenset[str] = frozenset(
         # CLUBB port: ADG1 PDF moment integrals + buoyancy-flux assembly
         # (higher-order moments, wpthvp) — closure plumbing, not a tendency.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_pdf_moments.py",
+        # CLUBB port: tridiagonal-solve adapter (band storage -> thomas_solve)
+        # for the implicit moment advance — a linear-solver helper, not a scheme.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_solve.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",
