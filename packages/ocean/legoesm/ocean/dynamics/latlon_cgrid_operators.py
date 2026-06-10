@@ -24,7 +24,6 @@ References
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -1749,7 +1748,7 @@ def viscous_tendency_cgrid(
     # coefficients over the trailing level axis when the velocity is 3D.
     is_3d = u.ndim == 3
 
-    def _bcast_coef(A, like_shape_ndim):
+    def _bcast_coef(A):
         # Add a trailing newaxis if A is a 2D array and the field is 3D.
         if (
             is_3d and isinstance(A, jnp.ndarray) and A.ndim == 2
@@ -1771,8 +1770,8 @@ def viscous_tendency_cgrid(
     D_T, D_S = strain_rate_cgrid(u_eff, v_eff, grid, mask=mask)
 
     # 2. Form stresses (broadcast 2D coefficients over the level axis)
-    stress_h = _bcast_coef(A_h, D_T.ndim) * D_T
-    stress_q = _bcast_coef(A_q, D_S.ndim) * D_S
+    stress_h = _bcast_coef(A_h) * D_T
+    stress_q = _bcast_coef(A_q) * D_S
 
     # 3. Stress divergence (already 3D-native; normalize controls area
     # normalization)

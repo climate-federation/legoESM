@@ -309,7 +309,6 @@ def exchange_halo_plane_yxz(
     # tag bases total per packed halo round, well below the limit.
     _TAG_NS = 1_000
     _TAG_EW = 2_000
-    rank = layout.rank
 
     # ----- Stage 1: N/S along the y axis -----
     if layout.n_ranks_y == 1:

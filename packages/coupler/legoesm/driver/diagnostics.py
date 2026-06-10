@@ -396,8 +396,8 @@ class DiagnosticCollector:
         if self._voronoi_regrid_weights is not None:
             from legoesm.grids.regridding import apply_voronoi_to_latlon_3d
             arr = np.asarray(field)
-            # Accept (nCells, nlev); reshape a flattened (nCells*nlev,) only
-            # if it carries an explicit nlev (caller passes 2-D for MPAS).
+            # MPAS callers pass an explicit 2-D (nCells, nlev) array;
+            # flattened (nCells*nlev,) inputs are not supported here.
             return apply_voronoi_to_latlon_3d(arr, self._voronoi_regrid_weights)
         arr = np.asarray(field)
         if arr.ndim == 3:

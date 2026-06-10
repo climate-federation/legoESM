@@ -138,11 +138,11 @@ class ModelDriver:
         self._layout = None  # DistributedLayout for scatter/gather
         # MPAS/Voronoi cell-partition MPI: layout carries the partition
         # (owned+halo cell/edge index maps), local mesh, and halo-exchange
-        # handle.  ``_owned_cell_ids`` is the MPAS analogue of
-        # ``_owned_face_ids`` — the diagnostics/checkpoint gather keys on it
-        # to distinguish a cell-partitioned run from cubed-sphere faces.
+        # handle.  The diagnostics / checkpoint gather distinguish a
+        # cell-partitioned run from cubed-sphere faces by checking
+        # ``_voronoi_layout is not None`` and read owned-cell ids straight
+        # off ``_voronoi_layout.partition``.
         self._voronoi_layout = None
-        self._owned_cell_ids: jax.Array | None = None
         self._grid_global = None  # global grid preserved under band/cell MPI
         self._physics_lat = None  # rank-local lat for physics
         self._physics_lon = None  # rank-local lon for physics
@@ -1619,14 +1619,6 @@ class ModelDriver:
                 and self._voronoi_layout is not None):
             vlayout = self._voronoi_layout
             self._layout = vlayout
-            # GLOBAL ids of this rank's owned cells (partition is owned-first,
-            # so the first n_owned local cells map to these global ids).  Used
-            # as the MPAS marker AND by the diagnostics / checkpoint gather to
-            # scatter owned values to the right global index — local positions
-            # 0..n_owned-1 would collide across ranks.
-            self._owned_cell_ids = jnp.asarray(
-                np.asarray(vlayout.partition.local_cells)[
-                    :vlayout.partition.n_owned_cells])
             self._physics_lat = self.grid.grid_lat
             self._physics_lon = self.grid.grid_lon
             self._mpi_rank = vlayout.rank
