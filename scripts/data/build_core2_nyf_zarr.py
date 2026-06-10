@@ -74,6 +74,7 @@ def build(inputs_dir: Path, out: Path) -> Path:
     du, dv = _open("u_10"), _open("v_10")
     dt, dq = _open("t_10"), _open("q_10")
     drad, dprec = _open("ncar_rad"), _open("ncar_precip")
+    dslp = _open("slp")
 
     lat = np.asarray(du["LAT"].values, dtype=np.float64)   # (94,) Gaussian
     lon = np.asarray(du["LON"].values, dtype=np.float64)   # (192,) 0..360
@@ -102,15 +103,27 @@ def build(inputs_dir: Path, out: Path) -> Path:
     sw_down = np.repeat(_f64(drad["SWDN"].values), _REC_PER_DAY, axis=0)
     lw_down = np.repeat(_f64(drad["LWDN"].values), _REC_PER_DAY, axis=0)
     # Precip is monthly (12): broadcast each month across its (days*4) slots.
+    # KEEP snow as its own channel (NEMO reads SNOW separately for the
+    # snow-fusion / snow-heat-content terms of q_ns); precip stays the TOTAL.
+    snow = np.repeat(
+        _f64(dprec["SNOW"].values),                          # kg/m^2/s
+        _DAYS_PER_MONTH * _REC_PER_DAY, axis=0,
+    )
     precip = np.repeat(
         _f64(dprec["RAIN"].values) + _f64(dprec["SNOW"].values),  # kg/m^2/s
         _DAYS_PER_MONTH * _REC_PER_DAY, axis=0,
     )
     runoff = np.zeros_like(precip)                          # see module docstring
+    # Sea-level pressure: 6-hourly like the winds (NEMO sn_slp), used for
+    # moist-air density + the Goff saturation humidity.
+    slp = _f64(dslp["SLP"].values)
+    if float(np.nanmedian(slp)) < 2000.0:                   # hPa -> Pa guard
+        slp = slp * 100.0
 
     for nm, a in [("u10", u10), ("v10", v10), ("T_air", T_air),
                   ("q_air", q_air), ("sw_down", sw_down), ("lw_down", lw_down),
-                  ("precip", precip), ("runoff", runoff)]:
+                  ("precip", precip), ("runoff", runoff), ("snow", snow),
+                  ("slp", slp)]:
         if a.shape != (_N_REC, n_lat, n_lon):
             raise ValueError(f"{nm} shape {a.shape} != {(_N_REC, n_lat, n_lon)}")
 
@@ -126,6 +139,8 @@ def build(inputs_dir: Path, out: Path) -> Path:
             "lw_down": (("time", "lat", "lon"), lw_down),
             "precip": (("time", "lat", "lon"), precip),
             "runoff": (("time", "lat", "lon"), runoff),
+            "snow": (("time", "lat", "lon"), snow),
+            "slp": (("time", "lat", "lon"), slp),
             "time_s": (("time",), time_s),
         },
         coords={"lon": ("lon", lon), "lat": ("lat", lat)},
@@ -156,6 +171,8 @@ def _validate(out: Path) -> None:
         "lw_down[W/m2]": (f.lw_down, 50.0, 500.0),
         "precip[kg/m2/s]": (f.precip, 0.0, 1e-3),
         "|u10|[m/s]": (np.abs(f.u10), 0.0, 60.0),
+        "snow[kg/m2/s]": (f.snow, 0.0, 1e-3),
+        "slp[Pa]": (f.slp, 87000.0, 110000.0),
     }
     print(f"  loaded: lon{f.lon.shape} lat{f.lat.shape} time{f.time_s.shape}")
     ok = True

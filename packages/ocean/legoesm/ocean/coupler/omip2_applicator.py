@@ -168,12 +168,30 @@ def _conservative_regrid_to_latlon(
     ))
 
 
+_BASE_FORCING_CHANNELS = ("u10", "v10", "T_air", "q_air",
+                          "sw_down", "lw_down", "precip")
+# Channels added for NEMO-parity surface fluxes (2026-06): solid
+# precipitation (snow-fusion + snow heat-content terms of q_ns) and
+# sea-level pressure (moist-air density + Goff saturation humidity).
+# OPTIONAL: forcing sets built before the schema extension lack them and
+# the flux assembly falls back to snow=0 / slp=standard atmosphere.
+_OPTIONAL_FORCING_CHANNELS = ("snow", "slp")
+
+
+def _forcing_channels(forcing):
+    """Base channels + whichever optional channels ``forcing`` carries."""
+    names = list(_BASE_FORCING_CHANNELS)
+    for name in _OPTIONAL_FORCING_CHANNELS:
+        if getattr(forcing, name, None) is not None:
+            names.append(name)
+    return tuple(names)
+
+
 def _sample_forcing_latlon(forcing, idx_t, dst_lat_deg, dst_lon_deg):
-    """Conservative-regrid the seven channels at time ``idx_t`` onto a
+    """Conservative-regrid the forcing channels at time ``idx_t`` onto a
     regular destination lat-lon grid."""
     out = {}
-    for name in ("u10", "v10", "T_air", "q_air",
-                  "sw_down", "lw_down", "precip"):
+    for name in _forcing_channels(forcing):
         out[name] = _conservative_regrid_to_latlon(
             getattr(forcing, name)[idx_t],
             forcing.lat, forcing.lon,
@@ -183,11 +201,10 @@ def _sample_forcing_latlon(forcing, idx_t, dst_lat_deg, dst_lon_deg):
 
 
 def _sample_forcing_points(forcing, idx_t, lat_pts_deg, lon_pts_deg):
-    """Nearest-neighbour sample the seven channels at a set of points
+    """Nearest-neighbour sample the forcing channels at a set of points
     (cube / MPAS cell centres)."""
     out = {}
-    for name in ("u10", "v10", "T_air", "q_air",
-                  "sw_down", "lw_down", "precip"):
+    for name in _forcing_channels(forcing):
         out[name] = _nn_interp_to_points(
             getattr(forcing, name)[idx_t],
             forcing.lat, forcing.lon,
@@ -223,7 +240,11 @@ def _apply_cgrid_surface_fluxes(state, forc, *, dz_0, rho_0, c_p,
     """
     T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + constants.T_freeze
     q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)), dtype=np.float64)
-    tau_x, tau_y, sh, lh = air_sea_fluxes(
+    # Legacy operator-split path: pinned to the pre-NCAR two-coefficient
+    # scheme (algo='ly09_2coeff') so its regression tests stay bit-exact.
+    # The FAITHFUL in-step path (compute_omip2_surface_forcing) uses the
+    # NEMO NCAR algorithm.
+    tau_x, tau_y, sh, lh, _evap = air_sea_fluxes(
         u10=jnp.asarray(forc["u10"]),
         v10=jnp.asarray(forc["v10"]),
         T_air_K=jnp.asarray(forc["T_air"]),
@@ -231,6 +252,7 @@ def _apply_cgrid_surface_fluxes(state, forc, *, dz_0, rho_0, c_p,
         T_sfc_K=jnp.asarray(T_sfc_K),
         q_sfc=jnp.asarray(q_sfc),
         rho_air=jnp.asarray(rho_air),
+        algo="ly09_2coeff",
     )
     # --- Heat: Q_net positive into the ocean warms the top cell. ---
     lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
@@ -375,7 +397,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
         T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + constants.T_freeze
         q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
                            dtype=np.float64)
-        tau_x, tau_y, sh, lh = air_sea_fluxes(
+        tau_x, tau_y, sh, lh, _evap = air_sea_fluxes(
             u10=jnp.asarray(forc["u10"]),
             v10=jnp.asarray(forc["v10"]),
             T_air_K=jnp.asarray(forc["T_air"]),
@@ -383,6 +405,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
             T_sfc_K=jnp.asarray(T_sfc_K),
             q_sfc=jnp.asarray(q_sfc),
             rho_air=jnp.asarray(rho_air),
+            algo="ly09_2coeff",
         )
         lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
         Q_net = (np.asarray(sh) + np.asarray(lh)
@@ -427,7 +450,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
         T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[:, 0] + constants.T_freeze
         q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
                            dtype=np.float64)
-        tau_x, tau_y, sh, lh = air_sea_fluxes(
+        tau_x, tau_y, sh, lh, _evap = air_sea_fluxes(
             u10=jnp.asarray(forc["u10"]),
             v10=jnp.asarray(forc["v10"]),
             T_air_K=jnp.asarray(forc["T_air"]),
@@ -435,6 +458,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
             T_sfc_K=jnp.asarray(T_sfc_K),
             q_sfc=jnp.asarray(q_sfc),
             rho_air=jnp.asarray(rho_air),
+            algo="ly09_2coeff",
         )
         lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
         Q_net = (np.asarray(sh) + np.asarray(lh)
@@ -552,18 +576,19 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
     forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
     # MPAS state is (nCells,) at the surface; cube/latlon/tripole are (..., 0).
     T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + float(constants.T_freeze)
-    q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)), dtype=np.float64)
-    _, _, _, lh = air_sea_fluxes(
+    slp = forc.get("slp")
+    # NCAR algo (NEMO-faithful): q_sfc = 0.98*q_sat_goff(SST, slp) computed
+    # internally; evap returned directly (= -lh / L_vap(SST), consistent with
+    # the latent flux by construction -- no separate constants.L_v division).
+    _, _, _, _, evap_j = air_sea_fluxes(
         u10=jnp.asarray(forc["u10"]), v10=jnp.asarray(forc["v10"]),
         T_air_K=jnp.asarray(forc["T_air"]), q_air=jnp.asarray(forc["q_air"]),
-        T_sfc_K=jnp.asarray(T_sfc_K), q_sfc=jnp.asarray(q_sfc),
-        rho_air=jnp.asarray(rho_air),
+        T_sfc_K=jnp.asarray(T_sfc_K),
+        slp_Pa=None if slp is None else jnp.asarray(slp),
     )
-    L_v = float(constants.L_v)
     if emp:
         precip = np.asarray(forc["precip"], dtype=np.float64)
-        # E (positive up) = -lh/L_v  (lh +INTO ocean; evaporation lh<0 -> E>0).
-        evap = -np.asarray(lh, dtype=np.float64) / L_v
+        evap = np.asarray(evap_j, dtype=np.float64)   # positive UP
     else:
         precip = np.zeros_like(np.asarray(forc["precip"], dtype=np.float64))
         evap = np.zeros_like(precip)
@@ -721,21 +746,48 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
 
     # Top-cell ocean temperature (state stored in degC) -> K.
     T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + T_freeze
-    q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)), dtype=np.float64)
-    tau_x, tau_y, sh, lh = air_sea_fluxes(
+    slp = forc.get("slp")
+    tau_x, tau_y, sh, lh, evap = air_sea_fluxes(
         u10=jnp.asarray(forc["u10"]),
         v10=jnp.asarray(forc["v10"]),
         T_air_K=jnp.asarray(forc["T_air"]),
         q_air=jnp.asarray(forc["q_air"]),
         T_sfc_K=jnp.asarray(T_sfc_K),
-        q_sfc=jnp.asarray(q_sfc),
-        rho_air=jnp.asarray(rho_air),
+        slp_Pa=None if slp is None else jnp.asarray(slp),
     )
-    lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
-    # Open-ocean non-SW heat flux (turbulent + net LW).  Under a prescribed-ice
-    # boundary (under_ice) ``_ice_surface_heat`` suppresses this on the ice-covered
-    # fraction and cuts the under-ice SW; otherwise it is the albedo-only surrogate.
-    q_non_sw = np.asarray(sh) + np.asarray(lh) + forc["lw_down"] - lw_up
+    # Non-solar open-water heat flux, assembled EXACTLY like NEMO blk_oce_2:
+    #   qns = eps_w*(LW_down - sigma*T_s^4)            net LW (Kirchhoff: the
+    #                                                  SAME eps_w=0.98 weights
+    #                                                  absorption AND emission)
+    #       + sensible + latent                        NCAR turbulent fluxes
+    #       - snow*L_f                                 melt freshly-fallen snow
+    #       - evap*c_p_sw*T_s[degC]                    evap removes heat at SST
+    #       + rain*c_p_sw*(T_air[degC])                rain heat content @ Tair
+    #       + snow*c_p_ice*min(T_air[degC], 0)         snow heat content
+    # (heat-content terms use NEMO's seawater rcp / fresh-ice c_pi pair; the
+    # rain/snow terms use the air temperature like NEMO -- the ~0.1 K
+    # potential-T refinement is negligible there).
+    lw_net = constants.emissivity_seawater_lw * (
+        np.asarray(forc["lw_down"], dtype=np.float64) - sigma_sb * T_sfc_K ** 4
+    )
+    precip_np = np.asarray(forc["precip"], dtype=np.float64)
+    snow_np = (np.asarray(forc["snow"], dtype=np.float64)
+               if forc.get("snow") is not None else np.zeros_like(precip_np))
+    # CORE-II precip = RAIN+SNOW; guard tiny negative rain from regridding.
+    rain_np = np.maximum(precip_np - snow_np, 0.0)
+    T_air_C = np.asarray(forc["T_air"], dtype=np.float64) - T_freeze
+    T_sfc_C = T_sfc_K - T_freeze
+    q_precip_evap = (
+        - snow_np * float(constants.L_f)
+        - np.asarray(evap, dtype=np.float64) * float(constants.c_p_seawater) * T_sfc_C
+        + rain_np * float(constants.c_p_seawater) * T_air_C
+        + snow_np * float(constants.c_pi) * np.minimum(T_air_C, 0.0)
+    )
+    # Under a prescribed-ice boundary (under_ice) ``_ice_surface_heat``
+    # suppresses this on the ice-covered fraction (snow falling on ice does
+    # NOT cool the ocean) and cuts the under-ice SW; otherwise it is the
+    # albedo-only surrogate.
+    q_non_sw = np.asarray(sh) + np.asarray(lh) + lw_net + q_precip_evap
     sw_net, q_net = _ice_surface_heat(
         forc["sw_down"], q_non_sw, ice_albedo,
         under_ice=under_ice, tau_ice_sw=tau_ice_sw)
@@ -813,11 +865,24 @@ def build_core2_forcing_device_stack(forcing, grid, grid_type: str):
     lat_pts = np.degrees(np.asarray(grid.lat_T)).reshape(-1)
     lon_pts = np.degrees(np.asarray(grid.lon_T)).reshape(-1)
     nn_i, nn_j = core2_forcing_nn_indices(forcing, lat_pts, lon_pts)
-    channels = ("u10", "v10", "T_air", "q_air", "sw_down", "lw_down")
+    channels = ("u10", "v10", "T_air", "q_air", "sw_down", "lw_down",
+                "precip")
     forcing_stack = {
         name: jnp.asarray(np.asarray(getattr(forcing, name)))
         for name in channels
     }
+    # Optional NEMO-parity channels: snow (q_ns fusion/heat-content terms)
+    # and slp (moist-air density + Goff saturation).  Missing -> the same
+    # fallbacks as the host path (snow=0, slp=standard atmosphere), built
+    # as full records so the scan gather stays shape-uniform.
+    ref = np.asarray(forcing.precip)
+    snow = getattr(forcing, "snow", None)
+    slp = getattr(forcing, "slp", None)
+    forcing_stack["snow"] = jnp.asarray(
+        np.zeros_like(ref) if snow is None else np.asarray(snow))
+    forcing_stack["slp"] = jnp.asarray(
+        np.full_like(ref, float(constants.p_atm_std)) if slp is None
+        else np.asarray(slp))
     grid_shape = tuple(np.asarray(grid.lat_T).shape)
     return forcing_stack, jnp.asarray(nn_i), jnp.asarray(nn_j), grid_shape
 
@@ -832,8 +897,10 @@ def compute_omip2_surface_forcing_jax(
     spatial sample is a static nearest-neighbour gather via the fixed
     ``(nn_i, nn_j)`` map, so there is NO host roundtrip per step.
     Bit-equivalent (to fp tolerance) to the host function for tau/q_net/sw_down:
-    identical ``air_sea_fluxes``, ``_bolton_q_sat`` and net-heat formula,
-    identical nearest-neighbour spatial sample.
+    identical ``air_sea_fluxes`` (NCAR), identical NEMO-form non-solar assembly
+    (Kirchhoff LW + snow fusion + precip/evap heat content), identical
+    nearest-neighbour spatial sample.  NO ice (``ice_albedo``/``under_ice``)
+    support — the prescribed-ice runs use the host loop.
 
     LIMITATION: this scan variant covers ONLY tau/q_net/sw_down; it does NOT
     build the P - E / runoff ``FreshwaterForcing`` (its device stack omits the
@@ -858,16 +925,31 @@ def compute_omip2_surface_forcing_jax(
     q_air = _sample("q_air")
     sw_down = _sample("sw_down")
     lw_down = _sample("lw_down")
+    precip = _sample("precip")
+    snow = _sample("snow")
+    slp = _sample("slp")
 
     # Top-cell ocean temperature (state in degC) -> K, pure JAX (no host pull).
     T_sfc_K = state.T.data[..., 0] + T_freeze
-    q_sfc = _bolton_q_sat(T_sfc_K)
-    tau_x, tau_y, sh, lh = air_sea_fluxes(
+    tau_x, tau_y, sh, lh, evap = air_sea_fluxes(
         u10=u10, v10=v10, T_air_K=T_air, q_air=q_air,
-        T_sfc_K=T_sfc_K, q_sfc=q_sfc, rho_air=jnp.asarray(rho_air),
+        T_sfc_K=T_sfc_K, slp_Pa=slp,
     )
-    lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
-    q_net = sh + lh + lw_down - lw_up + sw_down
+    # Non-solar assembly: EXACT jnp mirror of the host
+    # ``compute_omip2_surface_forcing`` (NEMO blk_oce_2 form) -- net-LW
+    # Kirchhoff eps_w, snow fusion, rain/snow/evap heat content.
+    lw_net = constants.emissivity_seawater_lw * (
+        lw_down - sigma_sb * T_sfc_K ** 4)
+    rain = jnp.maximum(precip - snow, 0.0)
+    T_air_C = T_air - T_freeze
+    T_sfc_C = T_sfc_K - T_freeze
+    q_precip_evap = (
+        - snow * constants.L_f
+        - evap * constants.c_p_seawater * T_sfc_C
+        + rain * constants.c_p_seawater * T_air_C
+        + snow * constants.c_pi * jnp.minimum(T_air_C, 0.0)
+    )
+    q_net = sh + lh + lw_net + q_precip_evap + sw_down
     return OceanSurfaceForcing(
         tau_x=tau_x, tau_y=tau_y, q_net=q_net, sw_down=sw_down,
     )

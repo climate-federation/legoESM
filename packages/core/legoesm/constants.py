@@ -100,6 +100,25 @@ S_0 = 1361.0                    # Total solar irradiance [W/m^2]
 emissivity_ocean = 0.97         # [-] open ocean / lake water
 emissivity_ice = 0.97           # [-] fresh sea ice / fresh snow
 emissivity_land = 0.95          # [-] generic land surface
+# NEMO/aerobulk sea-water thermal-IR emissivity (sbc_phy.F90 ``emiss_w``),
+# used in the KIRCHHOFF net-longwave form ``Q_lw = eps*(LW_down - sigma*T^4)``
+# (same eps as IR absorptivity AND emissivity).  The OMIP/CORE-II faithful
+# ocean forcing path uses this; ``emissivity_ocean`` (0.97, emission-only
+# convention) predates it and keeps its existing consumers.
+emissivity_seawater_lw = 0.98   # [-] NEMO sbc_phy emiss_w
+
+# Seawater specific heat used by NEMO (TEOS-10, eosbn2.F90 ``rcp``).  The
+# OMIP-faithful surface-flux path uses it for the precipitation/evaporation
+# heat-content terms of the non-solar flux so they match NEMO bit-for-bit.
+c_p_seawater = 3991.86795711963  # [J/(kg*K)] NEMO TEOS-10 rcp
+
+# NEMO/aerobulk moist-air heat-capacity pair (sbc_phy.F90 rCp_dry/rCp_vap),
+# used by the NCAR bulk algorithm's sensible-heat flux
+# ``cp_air(q) = rCp_dry + rCp_vap*q``.  Deliberately separate from the
+# atmosphere's ``c_pd`` (1004.64): these are NEMO-parity coefficients of the
+# CORE-II/OMIP faithful flux path, not legoESM's atmospheric thermodynamics.
+c_p_dry_air_nemo = 1005.0       # [J/(kg*K)] NEMO sbc_phy rCp_dry
+c_p_vapor_nemo = 1860.0         # [J/(kg*K)] NEMO sbc_phy rCp_vap
 
 # Broadband sea-ice / snow surface albedos used as Delta-Eddington
 # fallback or for the constant-albedo configuration.  Values follow
