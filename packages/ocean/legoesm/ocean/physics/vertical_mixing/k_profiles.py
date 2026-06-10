@@ -23,7 +23,6 @@ floors.
 
 from __future__ import annotations
 
-from typing import Tuple
 
 import jax.numpy as jnp
 
@@ -52,7 +51,10 @@ def compute_vertical_K_profiles(
     dt_tke: float | None = None,
     tke_source=None,
     return_tke: bool = False,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+) -> (
+    tuple[jnp.ndarray, jnp.ndarray]
+    | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
+):
     """Compute total ``(K_v, A_v)`` at interior interfaces for an implicit solve.
 
     Parameters

@@ -1915,8 +1915,8 @@ class LatLonCGridOceanModel:
         if self.config.implicit_vertical_mixing and _apply_implicit_vmix:
             if self._tke_prognostic_active():
                 # PROGNOSTIC TKE: seed from the carried state.tke, assemble the
-                # energy-recycling source forc (eke_diss_iw one-step-lagged from
-                # state.eke_diss + K_diss_bot from this step's tendency), run ONE
+                # energy-recycling source forc (eke_diss_iw from THIS step's EKE
+                # update + K_diss_bot from this step's tendency), run ONE
                 # backward-Euler TKE step (dt = dt_mom) inside the implicit solve,
                 # and carry the updated TKE forward.
                 _tke_old = state.tke.data if state.tke is not None else None

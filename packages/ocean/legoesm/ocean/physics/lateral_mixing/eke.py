@@ -355,7 +355,10 @@ def eke_apply_local_source(
     E_pos = jnp.maximum(E, 0.0)
     # Accumulate the EXPLICIT positive production and the IMPLICIT extra sink rate
     # (from sign-indefinite sources' negative part) so the result stays ≥ 0.
-    extra_sink_rate = 0.0
+    # ``None`` sentinel (not a 0.0 scalar): the default-off path traces the exact
+    # pre-existing ``1 + dt·diss_rate`` denominator with no extra add and no
+    # scalar-dtype interaction — bit-identical by construction.
+    extra_sink_rate = None
     if production_override is None:
         production = eke_kappa_gm(E_pos, L, cfg) * sigma ** 2
     elif clamp_production:
@@ -364,16 +367,21 @@ def eke_apply_local_source(
         # Signed override: positive part explicit, negative part implicit.
         production = jnp.maximum(production_override, 0.0)
         neg = jnp.maximum(-production_override, 0.0)        # ≥ 0 sink magnitude
-        extra_sink_rate = extra_sink_rate + neg / jnp.maximum(E_pos, 1.0e-30)
+        extra_sink_rate = neg / jnp.maximum(E_pos, 1.0e-30)
     if extra_source is not None:
         production = production + jnp.maximum(extra_source, 0.0)
     if signed_source is not None:
         production = production + jnp.maximum(signed_source, 0.0)
         neg = jnp.maximum(-signed_source, 0.0)
-        extra_sink_rate = extra_sink_rate + neg / jnp.maximum(E_pos, 1.0e-30)
+        sink = neg / jnp.maximum(E_pos, 1.0e-30)
+        extra_sink_rate = sink if extra_sink_rate is None else extra_sink_rate + sink
     diss_rate = cfg.c_eps * jnp.sqrt(E_pos + 1.0e-30) / jnp.maximum(L, cfg.l_min)
     # Both rates are ≥ 0; the implicit denominator ≥ 1 ⇒ E_new ≥ 0 by construction.
-    E_new = (E_pos + dt * production) / (1.0 + dt * (diss_rate + extra_sink_rate))
+    # ``diss_rate`` itself stays the pure Eden-Greatbatch rate — the
+    # ``return_dissipation`` product below must exclude the extra sink folding.
+    total_rate = (diss_rate if extra_sink_rate is None
+                  else diss_rate + extra_sink_rate)
+    E_new = (E_pos + dt * production) / (1.0 + dt * total_rate)
     if return_dissipation:
         # Veros eke_diss_iw = c_int·eke[taup1] = diss_rate·E_new (≥ 0) — the IW
         # dissipation ONLY (excludes the realized-source negative-part folding).

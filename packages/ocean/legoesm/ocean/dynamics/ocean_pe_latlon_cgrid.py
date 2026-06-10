@@ -2965,9 +2965,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # du_dt/dv_dt (withheld for the weight-1.0 bucket). For the momentum-budget
     # closure ``Σ components == total`` to hold, restore them into the
     # diagnostic ``total`` (the per-term diagnostics below still report the full
-    # lateral-friction / bottom-drag components). No-op under "total".
-    diag_du_total = du_dt if du_diss_raw is None else du_dt + du_diss_raw
-    diag_dv_total = dv_dt if dv_diss_raw is None else dv_dt + dv_diss_raw
+    # lateral-friction / bottom-drag components). Face-masked like every other
+    # term: ``du_dt`` was masked at stage 11 and the per-term diagnostics are
+    # masked via ``_mu``/``_mv``, so the restored diss must be masked too or
+    # ``total_u/v`` picks up dry-cell values and the closure breaks under land.
+    # No-op under "total".
+    diag_du_total = du_dt if du_diss_raw is None else du_dt + du_diss_raw * u_mask_3d
+    diag_dv_total = dv_dt if dv_diss_raw is None else dv_dt + dv_diss_raw * v_mask_3d
 
     diagnostics = MomentumTendencyDiagnostics(
         KE_PGF_u=_mu(KE_PGF_u),         KE_PGF_v=_mv(KE_PGF_v),

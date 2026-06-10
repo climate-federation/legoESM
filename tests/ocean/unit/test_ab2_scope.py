@@ -351,3 +351,50 @@ def test_differentiable_advective():
     g = jax.grad(loss)(1.0)
     assert np.isfinite(float(g))
     assert abs(float(g)) > 0.0
+
+
+# ------------------------------------------- momentum-diagnostics closure
+
+def test_advective_momentum_diagnostics_closure_and_dry_masking():
+    """Under ab2_scope="advective" the diagnostic ``total_u/v`` restores the
+    withheld dissipative terms FACE-MASKED: (a) Σ components == total to
+    machine precision, (b) total is exactly zero on dry faces, and (c)
+    total == du_dt (advective-only, masked) + du_diss (the masked weight-1.0
+    bucket). Regression for the unmasked du_diss_raw restore (PR #391 review).
+    """
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        latlon_cgrid_ocean_baroclinic_tendencies,
+    )
+    state, model = _channel(outer_integrator="ab2", ab2_scope="advective",
+                            implicit_vertical_mixing=False)
+    # _channel seeds only u; seed v too so the v-side diss bucket (lateral
+    # friction + bottom drag on v) is nonzero and meaningfully tested.
+    rng = np.random.default_rng(7)
+    v = 0.05 * rng.standard_normal(state.v.data.shape)
+    v *= np.asarray(state.v_mask.data)[..., None]
+    state = state._replace(v=state.v.replace(data=jnp.asarray(v)))
+    tend, diag = latlon_cgrid_ocean_baroclinic_tendencies(
+        state, model.grid, model.z_coord, model.config,
+        dt=_DT, diagnose_momentum=True,
+    )
+
+    for ax, mask2d in (("u", state.u_mask.data), ("v", state.v_mask.data)):
+        total = np.asarray(getattr(diag, f"total_{ax}").data)
+        comp_names = [f for f in diag._fields
+                      if f.endswith(f"_{ax}") and not f.startswith("total")
+                      and not f.startswith("vertadv")]
+        comp_sum = sum(np.asarray(getattr(diag, n).data) for n in comp_names)
+        # vertadv is part of the applied tendency here (adaptive form off) —
+        # include it; with the adaptive form it would be excluded.
+        comp_sum = comp_sum + np.asarray(getattr(diag, f"vertadv_{ax}").data)
+        np.testing.assert_allclose(comp_sum, total, atol=1e-12, rtol=1e-12)
+        # Dry faces: exactly zero (the masked restore).
+        dry = np.asarray(mask2d) == 0.0
+        assert np.all(total[dry] == 0.0)
+        # total == applied advective tendency + masked diss bucket.
+        applied = np.asarray(getattr(tend, f"d{ax}_dt").data)
+        diss = np.asarray(getattr(tend, f"d{ax}_diss").data)
+        np.testing.assert_allclose(applied + diss, total,
+                                   atol=1e-12, rtol=1e-12)
+        # And the diss bucket itself is genuinely nonzero somewhere wet.
+        assert np.max(np.abs(diss)) > 0.0

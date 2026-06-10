@@ -334,10 +334,13 @@ class LatLonCGridOceanState(NamedTuple):
     tke: object = None
     # Carried EKE dissipation rate [m^2/s^3] at the interior interfaces (W-grid),
     # 3-D Field (n_lat, n_lon, nlev-1). Populated by the 3-D EKE step (Veros
-    # eke_diss_iw) and consumed ONE STEP LATER by the prognostic TKE source when
-    # vertical_mixing.tke.source_eke_diss=True (the EKE step runs AFTER the TKE
-    # K-profile solve in the legoESM step ordering -> documented one-step lag).
-    # Default None -> inert: zero behaviour change.
+    # eke_diss_iw, run in the GM/Redi stage) and consumed WITHIN THE SAME step by
+    # the prognostic TKE source when vertical_mixing.tke.source_eke_diss=True
+    # (the TKE source reads state_new.eke_diss — this step's EKE update — since
+    # the implicit-vmix TKE solve runs after GM/Redi, matching Veros's same-step
+    # eke->tke ordering). The CARRIED value on state is only the fallback when a
+    # step produces none (e.g. the 2-D EKE path). Default None -> inert: zero
+    # behaviour change.
     eke_diss: object = None
     # Prior EXPLICIT increment ΔX_expl^{n-1} for the AB2 outer integrator
     # (config.outer_integrator == "ab2"): the explicit-only forward-Euler increment
