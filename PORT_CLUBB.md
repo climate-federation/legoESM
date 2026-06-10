@@ -86,7 +86,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_pdf.py` | ADG1 params (`ADG1_pdf_driver`), cloud fraction + rcm (`calc_pdf_liquid_cloud_frac[_components]`) | ✅ |
 | `clubb_pdf_moments.py` | PDF moment integrals, higher-order moments, cloud-water `x'rc'` fluxes, buoyancy flux `wpthvp` | ✅ |
 | `clubb_solve.py` | `tridiag_solve` (CLUBB band → legoESM `thomas_solve`) + `penta_solve` (verbatim CLUBB LU port, bit-exact) | ✅ iter 10-11 |
-| `clubb_moments.py` | `advance_windm_edsclrm` ✅ iter 12; xp2_xpyp terms/TA/combiners ✅ iter 13-15; `term_ma_zm_lhs` + `calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅ iter 18; `xp2_xpyp_uv_rhs` + `pos_definite_variances` ✅ iter 19; advance_xp2_xpyp main, clip_variance, wp2/wp3, xm/wpxp advances + mono_flux_limiter ☐ | 🟡 P5 |
+| `clubb_moments.py` | `advance_windm_edsclrm` ✅12; xp2_xpyp terms/TA/combiners ✅13-15; `term_ma_zm_lhs`+`calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅18; `xp2_xpyp_uv_rhs`+`pos_definite_variances` ✅19; `clip_variance`+`solve_xp2_xpyp`+**`advance_xp2_xpyp` main** (full 5-moment advance, round-off parity) ✅20; `advance_wp2_wp3`, `advance_xm_wpxp` (penta), `mono_flux_limiter` ☐ | 🟡 P5 |
 | `clubb_fill_holes.py` | mass-conserving vertical hole-fill (`fill_holes_type=2` sliding-window+global, CAM default) | ✅ iter 19 |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
@@ -111,11 +111,10 @@ finite gradients in float32 + float64.
 - **P3 mixing length** ✅ — skewness diagnostics + parcel `Lscale` (golden-locked).
 - **P4 ADG1 PDF closure** ✅ — params, cloud fraction+rcm, higher-order moments,
   cloud-water fluxes, buoyancy flux `wpthvp`. (golden-locked + AD-hardened)
-- **P5 moment advance** ☐ — `advance_wp2_wp3`, `advance_xm_wpxp`,
-  `advance_xp2_xpyp`, `advance_windm_edsclrm`; implicit tridiag (CAM
-  tridiag_lu→method 1) solves; clipping (`clip_explicit`); mono flux limiters
-  (CAM ON); `fill_holes`. Pre-impl search: reuse `timestepping/tridiagonal.py`
-  where faithful. **Largest remaining numerics block.**
+- **P5 moment advance** 🟡 — ✅ `advance_windm_edsclrm` (u/v), ✅ `advance_xp2_xpyp`
+  (rtp2/thlp2/rtpthlp/up2/vp2 — full core path, round-off parity), ✅ `fill_holes`
+  + `clip_variance`/`clip_covar`. ☐ remaining: `advance_wp2_wp3` + `advance_xm_wpxp`
+  (penta — `clubb_solve.penta_solve` ready) + `mono_flux_limiter` (CAM ON).
 - **P6 orchestration** ☐ — assemble the `advance_clubb_core`-equivalent for the
   CAM flag subset; pack/unpack carried moment state (wp2/wp3/thlp2/rtp2/rtpthlp/
   wpthlp/wprtp/up2/vp2). `l_call_pdf_closure_twice=True` → PDF pre+post.
@@ -131,28 +130,23 @@ finite gradients in float32 + float64.
 
 ---
 
-## Next (iter 11+)
-P5 moment advance. Solvers: ✅ `clubb_solve.tridiag_solve` (reuses legoESM
-`thomas_solve`) + ✅ `penta_solve` (verbatim CLUBB LU, bit-exact). Next: the
-advance modules in `clubb_moments.py`, each = LHS/RHS assembly + solve +
-clipping (`clip_explicit`) + mono flux limiters (CAM ON) + `fill_holes`:
-`advance_windm_edsclrm` ✅ (golden+parity; LHS builders `diffusion_zt_lhs`,
-`term_ma_zt_lhs_upwind`, `calc_xpwp`, `clip_covar`, `compute_uv_tndcy`,
-`windm_edsclrm_rhs/lhs` all bit-exact to ref; full advance round-off via the
-reused Thomas solve). `advance_xp2_xpyp` in progress: term builders
-`term_dp1_lhs/rhs`, `term_tp_rhs`, `term_pr1`, `term_pr2` ✅ iter 13; the
-upwind turbulent-advection operators + `calc_xp2_xpyp_ta_lhs/rhs` ✅ iter 14;
-the combiners `diffusion_zm_lhs`, `xp2_xpyp_lhs`, `xp2_xpyp_rhs` ✅ iter 15
-(golden + parity); `term_ma_zm_lhs` (centered zm mean adv, inline
-`calc_zm2zt_weights` — stretched-grid bit-exact parity) + the assembly wrappers
-`calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅ iter 18 (parity vs ref +
-self-consistency; codex approve); `xp2_xpyp_uv_rhs` (up2/vp2 explicit RHS,
-CAM gating: C_wp2_splat=0, l_ho_nontrad_coriolis=False static gate) +
-`pos_definite_variances` (wraps new `clubb_fill_holes.py`) ✅ iter 19 (parity +
-JIT-static-arg contract tests; codex approve). Still need the `advance_xp2_xpyp`
-main (which also needs the `invrs_tau_*`/`Cn` dissipation-timescale inputs from
-orchestration) + `clip_variance` (the `l_min_xp2_from_corr_wx=True` threshold
-boost).
-Then `advance_wp2_wp3` + `advance_xm_wpxp` (penta — `clubb_solve.penta_solve`
-ready). Still need `mono_flux_limiter.py` (CAM ON) + `fill_holes.py`. Each
-chunk: analytic + golden/parity + codex.
+## Next (iter 21+)
+*(Compressed at iter 20. iter 11–20 detail in git history; `clubb_moments.py`
+table row above is the live builder ledger.)*
+
+Remaining to reach the DONE gate (full prognostic closure in the live path):
+1. **`advance_wp2_wp3`** (penta solve — `clubb_solve.penta_solve` ready; LHS/RHS
+   builders for the wp2/wp3 system, the `l_tke_aniso=True` / `l_damp_wp2_using_em
+   =False` branches).
+2. **`advance_xm_wpxp`** (penta — rtm/thlm + wprtp/wpthlp coupled solve;
+   `l_predict_upwp_vpwp=False` so upwp/vpwp stay diagnostic/eddy-diffusion).
+3. **`mono_flux_limiter`** (CAM `l_mono_flux_lim_*=True`).
+4. **P6 orchestration** `advance_clubb_core`: the dissipation-timescale inputs
+   (`invrs_tau_*`, `Cn`), `wp3_on_wp2`, `sigma_sqd_w`, the pre+post PDF closure
+   (`l_call_pdf_closure_twice=True`), and pack/unpack of the carried moment state.
+5. **Wire into `clubb.py`**: carry the full moment set as state, replace the
+   phase-1 eddy-diffusion mean advance with the prognostic advances.
+
+Each chunk: analytic/self-consistency oracle (CI) + golden/round-off parity vs
+CLUBB-JAX (patch reference physical constants to isolate algorithm) + codex
+adversarial review.

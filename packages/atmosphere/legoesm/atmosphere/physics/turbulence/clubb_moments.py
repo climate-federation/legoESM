@@ -31,6 +31,7 @@ from legoesm import constants
 
 _EPS = 1.0e-10
 _MAX_MAG_CORRELATION = 0.99   # Cauchy-Schwarz correlation bound (constants_clubb)
+_MAX_MAG_CORRELATION_FLUX = 0.99  # flux correlation bound (constants_clubb)
 _ZERO_THRESHOLD = 0.0
 _ONE_THIRD = 1.0 / 3.0
 _GAMMA_OVER_IMPLICIT_TS = 1.5   # over-implicit weight (constants_clubb)
@@ -649,6 +650,177 @@ def pos_definite_variances(field, rho_ds_zm, dzm, threshold, hf_lower, hf_upper,
                                hf_lower, hf_upper, fill_holes_type)
 
 
+def clip_variance(xp2, threshold_lo, threshold_hi=None):
+    """Clamp a variance to ``[threshold_lo, threshold_hi]`` (``clip_variance``).
+
+    Faithful port of ``clip_explicit.F90:clip_variance``: floors (and optionally
+    caps) ``xp2`` over levels ``0 .. nzm-2`` — the bottom boundary is included,
+    the top level ``nzm-1`` is left unchanged. ``threshold_lo`` may be a scalar
+    or ``(ncol, nzm)`` array (the ``l_min_xp2_from_corr_wx`` boosted floor).
+    """
+    nzm = xp2.shape[1]
+    mask = jnp.arange(nzm)[None, :] < (nzm - 1)
+    out = jnp.where(mask, jnp.maximum(threshold_lo, xp2), xp2)
+    if threshold_hi is not None:
+        out = jnp.where(mask, jnp.minimum(threshold_hi, out), out)
+    return out
+
+
+def solve_xp2_xpyp(lhs_assembled, lhs_ta, rhs_ta, Cn, invrs_tau_zm, threshold,
+                   xapxbp, xam, xbm, wpxap, wpxbp, invrs_dzm, xpyp_forcing, dt,
+                   gamma=_GAMMA_OVER_IMPLICIT_TS):
+    """Build the explicit RHS and tridiag-solve one xp2/xpyp moment (``solve_xp2_xpyp``).
+
+    Combines :func:`xp2_xpyp_rhs` (turbulent advection + production + dissipation
+    + forcing + over-implicit terms) with the pre-assembled shared LHS via the
+    CLUBB-band Thomas solve. Returns the solution on zm levels ``(ncol, nzm)``.
+    """
+    rhs = xp2_xpyp_rhs(lhs_ta, rhs_ta, Cn, invrs_tau_zm, threshold, xapxbp, xam,
+                       xbm, wpxap, wpxbp, invrs_dzm, xpyp_forcing, dt, gamma)
+    return tridiag_solve(lhs_assembled, rhs)
+
+
+def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
+                     wprtp, wpthlp, wpthvp, upwp, vpwp,
+                     wp2, wp2_zt, wp3_on_wp2, wp3_on_wp2_zt,
+                     sigma_sqd_w, thv_ds_zm, Kh_zt,
+                     Cn, invrs_tau_xp2_zm, invrs_tau_C4_zm, invrs_tau_C14_zm,
+                     rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, wm_zm,
+                     rtp2_forcing, thlp2_forcing, rtpthlp_forcing,
+                     nu2, nu9, dt, gr: CLUBBGrid, config):
+    """Advance the five second moments rtp2/thlp2/rtpthlp/up2/vp2 one step.
+
+    Faithful port of the core (non-budget) path of
+    ``advance_xp2_xpyp_module.F90:advance_xp2_xpyp`` for the CAM-default tree.
+    Ties together the builders from :mod:`clubb_moments`:
+
+      * shared turbulent-advection LHS (:func:`calc_xp2_xpyp_ta_lhs`, ADG1
+        upwind) and centered mean-advection LHS (:func:`term_ma_zm_lhs`);
+      * rtp2/thlp2/rtpthlp: one shared implicit LHS (:func:`calc_xp2_xpyp_lhs`)
+        solved per moment (:func:`solve_xp2_xpyp`), then
+        :func:`pos_definite_variances` (hole-fill) + :func:`clip_variance` with
+        the ``l_min_xp2_from_corr_wx`` boosted floor, and :func:`clip_covar`
+        (Cauchy-Schwarz) on rtpthlp;
+      * up2/vp2: the up2/vp2 LHS (:func:`calc_up2_vp2_lhs`) with the
+        pressure-rotation RHS (:func:`xp2_xpyp_uv_rhs`, with :func:`term_pr2`),
+        solved with the shared LHS, then hole-fill + clip.
+
+    CAM gating (static): ``l_lmm_stepping = False`` (no LMM blend),
+    ``C_wp2_splat = 0`` (no splat), ``l_ho_nontrad_coriolis = False`` (no
+    nontraditional Coriolis), ``l_min_xp2_from_corr_wx = True``,
+    ``fill_holes_type = 2``. All means are on zt; all moments/fluxes/forcings on
+    zm; ``Kh_zt`` on zt. The budget/stats diagnostics (``l_sample`` branch) are
+    not part of the live tendency path and are omitted.
+
+    Returns ``(rtp2, thlp2, rtpthlp, up2, vp2)`` on zm levels.
+    """
+    params = config.params
+    flags = config.flags
+    beta = params.beta
+    gamma = _GAMMA_OVER_IMPLICIT_TS
+    rt_thr = config.rt_tol ** 2
+    thl_thr = config.thl_tol ** 2
+    w_tol_sqd = config.w_tol ** 2
+
+    ng, nzm = wp2.shape
+    invrs_dzm = gr.invrs_dzm
+    hf_lower, hf_upper = 1, nzm - 2     # ascending grid: k_lb_zm+dir, k_ub_zm-dir
+
+    # ---- shared operators (w-PDF only → same for all five moments) ----
+    lhs_ma = term_ma_zm_lhs(wm_zm, gr)
+    lhs_ta = calc_xp2_xpyp_ta_lhs(wp3_on_wp2, sigma_sqd_w, beta,
+                                  rho_ds_zm, invrs_rho_ds_zm, gr)
+
+    # ---- rtp2 / thlp2 / rtpthlp (shared LHS) ----
+    rhs_ta_rtp2 = calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta,
+                                       wprtp, wprtp, rho_ds_zm, invrs_rho_ds_zm, gr)
+    rhs_ta_thlp2 = calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta,
+                                        wpthlp, wpthlp, rho_ds_zm, invrs_rho_ds_zm, gr)
+    rhs_ta_rtpthlp = calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta,
+                                          wprtp, wpthlp, rho_ds_zm, invrs_rho_ds_zm, gr)
+
+    lhs_x2, _lhs_diff, _dp1 = calc_xp2_xpyp_lhs(
+        lhs_ta, lhs_ma, Kh_zt, params.c_K2, nu2, invrs_rho_ds_zm, rho_ds_zt,
+        Cn, invrs_tau_xp2_zm, gamma, dt, gr)
+
+    soln_rtp2 = solve_xp2_xpyp(lhs_x2, lhs_ta, rhs_ta_rtp2, Cn, invrs_tau_xp2_zm,
+                               rt_thr, rtp2, rtm, rtm, wprtp, wprtp, invrs_dzm,
+                               rtp2_forcing, dt)
+    soln_thlp2 = solve_xp2_xpyp(lhs_x2, lhs_ta, rhs_ta_thlp2, Cn, invrs_tau_xp2_zm,
+                                thl_thr, thlp2, thlm, thlm, wpthlp, wpthlp, invrs_dzm,
+                                thlp2_forcing, dt)
+    soln_rtpthlp = solve_xp2_xpyp(lhs_x2, lhs_ta, rhs_ta_rtpthlp, Cn, invrs_tau_xp2_zm,
+                                  _ZERO_THRESHOLD, rtpthlp, rtm, thlm, wprtp, wpthlp,
+                                  invrs_dzm, rtpthlp_forcing, dt)
+
+    if flags.l_lmm_stepping:   # CAM default False (static gate)
+        soln_rtp2 = 0.5 * (rtp2 + soln_rtp2)
+        soln_thlp2 = 0.5 * (thlp2 + soln_thlp2)
+        soln_rtpthlp = 0.5 * (rtpthlp + soln_rtpthlp)
+
+    rtp2_fh = pos_definite_variances(soln_rtp2, rho_ds_zm, gr.dzm, rt_thr,
+                                     hf_lower, hf_upper, flags.fill_holes_type)
+    thlp2_fh = pos_definite_variances(soln_thlp2, rho_ds_zm, gr.dzm, thl_thr,
+                                      hf_lower, hf_upper, flags.fill_holes_type)
+
+    if flags.l_min_xp2_from_corr_wx:   # CAM default True (static gate)
+        max_corr2 = _MAX_MAG_CORRELATION_FLUX ** 2
+        thr_thlp2 = jnp.maximum(thl_thr, wpthlp ** 2 / (wp2 * max_corr2))
+        thr_rtp2 = jnp.maximum(rt_thr, wprtp ** 2 / (wp2 * max_corr2))
+    else:
+        thr_thlp2, thr_rtp2 = thl_thr, rt_thr
+    thlp2_cv = clip_variance(thlp2_fh, thr_thlp2)
+    rtp2_cv = clip_variance(rtp2_fh, thr_rtp2)
+
+    # rtpthlp is a COVARIANCE (sign-indefinite): the reference applies neither
+    # pos_definite_variances nor clip_variance to it (those force positivity,
+    # valid only for variances) — only the Cauchy-Schwarz magnitude clip against
+    # the post-clipped variances (advance_xp2_xpyp_module.F90:824). Interior
+    # levels are bounded by |rtpthlp| <= 0.99·sqrt(rtp2·thlp2); the boundary
+    # levels carry the solve's BC values (lower = prior value, upper = 0),
+    # left unchanged by clip_covar, exactly as in the reference.
+    rtpthlp_clip = clip_covar(soln_rtpthlp, rtp2_cv, thlp2_cv, _MAX_MAG_CORRELATION)
+
+    # ---- up2 / vp2 (shared LHS; pressure-rotation RHS) ----
+    lhs_uv, _lhs_diff_uv, lhs_dp1_C4, lhs_dp1_C14 = calc_up2_vp2_lhs(
+        lhs_ta, lhs_ma, Kh_zt, params.c_K9, nu9, invrs_rho_ds_zm, rho_ds_zt,
+        params.C4, params.C14, invrs_tau_C4_zm, invrs_tau_C14_zm, gamma, dt, gr)
+    rhs_ta_up2 = calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta,
+                                      upwp, upwp, rho_ds_zm, invrs_rho_ds_zm, gr)
+    rhs_ta_vp2 = calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta,
+                                      vpwp, vpwp, rho_ds_zm, invrs_rho_ds_zm, gr)
+    pr2 = term_pr2(params.C_uu_shr, params.C_uu_buoy, thv_ds_zm, wpthvp,
+                   upwp, vpwp, um, vm, gr)
+    du_dz = invrs_dzm[:, 1:-1] * (um[:, 1:] - um[:, :-1])
+    dv_dz = invrs_dzm[:, 1:-1] * (vm[:, 1:] - vm[:, :-1])
+    lhs_splat = jnp.zeros((ng, nzm), dtype=wp2.dtype)   # C_wp2_splat = 0
+    omg = 1.0 - gamma
+
+    rhs_up2 = xp2_xpyp_uv_rhs(rhs_ta_up2, up2, vp2, upwp, du_dz, lhs_splat, wp2,
+                              lhs_ta, params.C_uu_shr, params.C4, params.C14,
+                              invrs_tau_C4_zm, invrs_tau_C14_zm, lhs_dp1_C4,
+                              lhs_dp1_C14, pr2, omg, dt, w_tol_sqd, False, None)
+    rhs_vp2 = xp2_xpyp_uv_rhs(rhs_ta_vp2, vp2, up2, vpwp, dv_dz, lhs_splat, wp2,
+                              lhs_ta, params.C_uu_shr, params.C4, params.C14,
+                              invrs_tau_C4_zm, invrs_tau_C14_zm, lhs_dp1_C4,
+                              lhs_dp1_C14, pr2, omg, dt, w_tol_sqd, False, None)
+    soln_up2 = tridiag_solve(lhs_uv, rhs_up2)
+    soln_vp2 = tridiag_solve(lhs_uv, rhs_vp2)
+
+    if flags.l_lmm_stepping:
+        soln_up2 = 0.5 * (up2 + soln_up2)
+        soln_vp2 = 0.5 * (vp2 + soln_vp2)
+
+    up2_fh = pos_definite_variances(soln_up2, rho_ds_zm, gr.dzm, w_tol_sqd,
+                                    hf_lower, hf_upper, flags.fill_holes_type)
+    vp2_fh = pos_definite_variances(soln_vp2, rho_ds_zm, gr.dzm, w_tol_sqd,
+                                    hf_lower, hf_upper, flags.fill_holes_type)
+    up2_cv = clip_variance(up2_fh, w_tol_sqd)
+    vp2_cv = clip_variance(vp2_fh, w_tol_sqd)
+
+    return rtp2_cv, thlp2_cv, rtpthlp_clip, up2_cv, vp2_cv
+
+
 __all__ = [
     "diffusion_zt_lhs",
     "diffusion_zm_lhs",
@@ -673,4 +845,7 @@ __all__ = [
     "calc_xp2_xpyp_ta_rhs",
     "xp2_xpyp_uv_rhs",
     "pos_definite_variances",
+    "clip_variance",
+    "solve_xp2_xpyp",
+    "advance_xp2_xpyp",
 ]

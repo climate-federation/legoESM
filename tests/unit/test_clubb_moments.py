@@ -22,10 +22,12 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb_moments import (  # noqa: E402
     advance_windm_edsclrm,
+    advance_xp2_xpyp,
     calc_up2_vp2_lhs,
     calc_xp2_xpyp_lhs,
     calc_xp2_xpyp_ta_lhs,
     calc_xp2_xpyp_ta_rhs,
+    clip_variance,
     diffusion_zm_lhs,
     pos_definite_variances,
     term_dp1_lhs,
@@ -38,6 +40,7 @@ from legoesm.atmosphere.physics.turbulence.clubb_moments import (  # noqa: E402
     xp2_xpyp_rhs,
     xp2_xpyp_uv_rhs,
 )
+from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 
@@ -696,6 +699,186 @@ def test_pos_definite_variances_fills_and_conserves():
                                  fill_holes_type=2)
     assert np.all(np.asarray(out)[:, 1:nzm - 1] >= -1e-12)
     assert np.all(np.isfinite(np.asarray(out)))
+
+
+# ---------------------------------------------------------------------------
+# clip_variance + advance_xp2_xpyp main
+# ---------------------------------------------------------------------------
+
+def test_clip_variance_floors_interior_keeps_top():
+    rng = np.random.default_rng(61)
+    xp2 = jnp.asarray(rng.standard_normal((2, 9)))   # has negatives
+    out = np.asarray(clip_variance(xp2, 0.5))
+    assert np.all(out[:, :-1] >= 0.5 - 1e-12)     # floored over 0..nzm-2
+    np.testing.assert_array_equal(out[:, -1], np.asarray(xp2)[:, -1])  # top untouched
+    # array threshold + cap
+    lo = jnp.asarray(0.1 + rng.random((2, 9)))
+    out2 = np.asarray(clip_variance(xp2, lo, threshold_hi=2.0))
+    assert np.all(out2[:, :-1] >= np.asarray(lo)[:, :-1] - 1e-12)
+    assert np.all(out2[:, :-1] <= 2.0 + 1e-12)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_clip_variance_parity():
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.clip_explicit as RC  # noqa: N812
+    rng = np.random.default_rng(62)
+    xp2 = jnp.asarray(rng.standard_normal((3, 10)))
+    np.testing.assert_array_equal(
+        np.asarray(clip_variance(xp2, 0.3)),
+        np.asarray(RC.clip_variance(xp2, 0.3)))
+    lo = jnp.asarray(0.1 + rng.random((3, 10)))
+    np.testing.assert_array_equal(
+        np.asarray(clip_variance(xp2, lo, 1.5)),
+        np.asarray(RC.clip_variance(xp2, lo, 1.5)))
+
+
+def _advance_xp2_inputs(seed=70, ng=2, nzt=10):
+    nzm = nzt + 1
+    rng = np.random.default_rng(seed)
+    zm_1d = np.cumsum(np.concatenate([[0.0], 40.0 * 1.1 ** np.arange(nzm)[:-1]]))
+    zm = jnp.asarray(np.tile(zm_1d, (ng, 1)))
+    zt = 0.5 * (zm[:, 1:] + zm[:, :-1])
+    gr = make_clubb_grid(zm, zt)
+    cfg = CLUBBConfig()
+
+    def zmf(s=1.0, base=0.0):
+        return jnp.asarray(base + s * rng.standard_normal((ng, nzm)))
+
+    def ztf(s=1.0, base=0.0):
+        return jnp.asarray(base + s * rng.standard_normal((ng, nzt)))
+
+    wp2 = jnp.asarray(0.2 + 0.5 * rng.random((ng, nzm)))
+    wp2_zt = jnp.asarray(0.2 + 0.5 * rng.random((ng, nzt)))
+    sigma = jnp.asarray(0.1 + 0.3 * rng.random((ng, nzm)))   # < 1
+    return dict(
+        rtm=ztf(1e-3, 8e-3), thlm=ztf(0.5, 290.0), um=ztf(2.0, 5.0), vm=ztf(1.0),
+        rtp2=jnp.asarray(1e-6 + 1e-6 * rng.random((ng, nzm))),
+        thlp2=jnp.asarray(0.05 + 0.05 * rng.random((ng, nzm))),
+        rtpthlp=jnp.asarray(1e-4 * rng.standard_normal((ng, nzm))),
+        up2=jnp.asarray(0.3 + 0.3 * rng.random((ng, nzm))),
+        vp2=jnp.asarray(0.3 + 0.3 * rng.random((ng, nzm))),
+        wprtp=zmf(1e-4), wpthlp=zmf(1e-2), wpthvp=zmf(1e-2), upwp=zmf(0.05),
+        vpwp=zmf(0.05), wp2=wp2, wp2_zt=wp2_zt,
+        wp3_on_wp2=zmf(0.1), wp3_on_wp2_zt=ztf(0.1),
+        sigma_sqd_w=sigma, thv_ds_zm=zmf(1.0, 300.0),
+        Kh_zt=jnp.asarray(1.0 + 3.0 * rng.random((ng, nzt))),
+        Cn=jnp.asarray(np.full((ng, nzm), cfg.params.C2rt)),
+        invrs_tau_xp2_zm=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
+        invrs_tau_C4_zm=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
+        invrs_tau_C14_zm=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
+        rho_ds_zm=jnp.asarray(1.0 + 0.1 * rng.random((ng, nzm))),
+        rho_ds_zt=jnp.asarray(1.0 + 0.1 * rng.random((ng, nzt))),
+        invrs_rho_ds_zm=jnp.asarray(1.0 / (1.0 + 0.1 * rng.random((ng, nzm)))),
+        wm_zm=zmf(0.02),
+        rtp2_forcing=zmf(1e-8), thlp2_forcing=zmf(1e-5), rtpthlp_forcing=zmf(1e-6),
+        nu2=jnp.full((ng,), cfg.params.nu2), nu9=jnp.full((ng,), cfg.params.nu9),
+        dt=300.0, gr=gr, config=cfg,
+    )
+
+
+def test_advance_xp2_xpyp_runs_and_bounds():
+    kw = _advance_xp2_inputs()
+    cfg = kw["config"]
+    rtp2, thlp2, rtpthlp, up2, vp2 = advance_xp2_xpyp(**kw)
+    ng, nzm = kw["wp2"].shape
+    for f in (rtp2, thlp2, rtpthlp, up2, vp2):
+        assert f.shape == (ng, nzm) and np.all(np.isfinite(np.asarray(f)))
+    # variances floored over interior (0..nzm-2)
+    assert np.all(np.asarray(rtp2)[:, :-1] >= cfg.rt_tol ** 2 - 1e-12)
+    assert np.all(np.asarray(thlp2)[:, :-1] >= cfg.thl_tol ** 2 - 1e-12)
+    assert np.all(np.asarray(up2)[:, :-1] >= cfg.w_tol ** 2 - 1e-12)
+    assert np.all(np.asarray(vp2)[:, :-1] >= cfg.w_tol ** 2 - 1e-12)
+    # rtpthlp is a covariance: Cauchy-Schwarz bounded on the interior (where
+    # clip_covar acts); boundaries carry the solve BC values (upper = 0, left
+    # unchanged by clip_covar) — matching the reference (no hole-fill on a
+    # covariance). Finiteness already asserted on all levels above.
+    bound = 0.99 * np.sqrt(np.asarray(rtp2) * np.asarray(thlp2))
+    assert np.all(np.abs(np.asarray(rtpthlp))[:, 1:-1] <= bound[:, 1:-1] + 1e-12)
+    np.testing.assert_array_equal(np.asarray(rtpthlp)[:, -1], 0.0)  # upper BC
+
+
+def test_advance_xp2_xpyp_jit_grad():
+    kw = _advance_xp2_inputs()
+
+    def loss(wp2):
+        out = advance_xp2_xpyp(**dict(kw, wp2=wp2))
+        return sum(jnp.sum(f ** 2) for f in out)
+
+    assert jnp.isfinite(jax.jit(loss)(kw["wp2"]))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(kw["wp2"])))
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_advance_xp2_xpyp_parity():
+    """Round-off parity of the full 5-moment advance vs the reference.
+
+    All LHS/RHS builders are individually bit-exact; the only round-off-level
+    difference is the tridiagonal solve (legoESM Thomas vs the reference LU).
+    """
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_xp2_xpyp_module as R  # noqa: N812
+    from clubb_jax.src.CLUBB_core import parameter_indices as PI  # noqa: N812
+    from clubb_jax.src.derived_types.grid_class import (  # noqa: N812
+        Grid,
+        calc_zm2zt_weights,
+        calc_zt2zm_weights,
+    )
+
+    kw = _advance_xp2_inputs(seed=71)
+    cfg = kw["config"]
+    p = cfg.params
+    gr = kw["gr"]
+    ng, nzm = kw["wp2"].shape
+    nzt = nzm - 1
+
+    clubb_params = np.zeros((ng, 102))
+    clubb_params[:, PI.ic_K2 - 1] = p.c_K2
+    clubb_params[:, PI.ic_K9 - 1] = p.c_K9
+    clubb_params[:, PI.iC2rt - 1] = p.C2rt
+    clubb_params[:, PI.iC4 - 1] = p.C4
+    clubb_params[:, PI.iC14 - 1] = p.C14
+    clubb_params[:, PI.iC_uu_shr - 1] = p.C_uu_shr
+    clubb_params[:, PI.iC_uu_buoy - 1] = p.C_uu_buoy
+    clubb_params[:, PI.ibeta - 1] = p.beta
+
+    zm_np, zt_np, dzt_np = np.asarray(gr.zm), np.asarray(gr.zt), np.asarray(gr.dzt)
+    refgr = Grid(
+        nzm=nzm, nzt=nzt, ngrdcol=ng, zm=gr.zm, zt=gr.zt, dzm=gr.dzm, dzt=gr.dzt,
+        invrs_dzm=gr.invrs_dzm, invrs_dzt=gr.invrs_dzt,
+        weights_zt2zm=jnp.asarray(calc_zt2zm_weights(nzm, nzt, ng, zm_np, zt_np)),
+        weights_zm2zt=jnp.asarray(calc_zm2zt_weights(nzm, nzt, ng, zm_np, zt_np, dzt_np)),
+        k_lb_zm=0, k_ub_zm=nzm - 1, k_lb_zt=0, k_ub_zt=nzt - 1,
+        grid_dir_indx=1, grid_dir=1.0)
+    flags = SimpleNamespace(
+        l_upwind_xpyp_ta=True, l_lmm_stepping=False,
+        l_min_xp2_from_corr_wx=True, fill_holes_type=2,
+        l_ho_nontrad_coriolis=False)
+    nu_vrd = SimpleNamespace(nu2=np.asarray(kw["nu2"]), nu9=np.asarray(kw["nu9"]))
+    lhs_splat = jnp.zeros((ng, nzm))
+
+    # term_pr2 buoyancy uses gravity: the reference CLUBB grav differs from
+    # legoESM constants.g by ~0.04%. Patch the reference module constant to the
+    # legoESM value so the comparison isolates numerics from the constant basis.
+    R.grav = float(constants.g)
+
+    ref = R.advance_xp2_xpyp(
+        kw["Kh_zt"], jnp.asarray(clubb_params), kw["dt"], jnp.zeros((ng,)), flags,
+        refgr, kw["invrs_rho_ds_zm"], kw["invrs_tau_C14_zm"], kw["invrs_tau_C4_zm"],
+        kw["invrs_tau_xp2_zm"], False, lhs_splat, ng, nu_vrd, nzm, kw["rho_ds_zm"],
+        kw["rho_ds_zt"], kw["rtm"], kw["rtp2"], kw["rtp2_forcing"], kw["rtpthlp"],
+        kw["rtpthlp_forcing"], kw["sigma_sqd_w"], None, kw["thlm"], kw["thlp2"],
+        kw["thlp2_forcing"], kw["thv_ds_zm"], kw["um"], kw["up2"], kw["upwp"],
+        kw["vm"], kw["vp2"], kw["vpwp"], kw["wm_zm"], kw["wp2"], kw["wp2_zt"],
+        kw["wp3_on_wp2"], kw["wp3_on_wp2_zt"], kw["wprtp"], kw["wpthlp"], kw["wpthvp"])
+
+    mine = advance_xp2_xpyp(**kw)
+    for a, b in zip(mine, ref):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-9, atol=1e-12)
 
 
 if __name__ == "__main__":
