@@ -149,6 +149,43 @@ def term_ma_zt_lhs_upwind(wm_zt, gr: CLUBBGrid):
     return jnp.stack([sup, mid, sub], axis=0)
 
 
+def term_ma_zm_lhs(wm_zm, gr: CLUBBGrid):
+    """Centered mean-advection LHS for a zm-level variable (``term_ma_zm_lhs``).
+
+    Faithful port of ``mean_adv.F90:term_ma_zm_lhs``: discretizes
+    ``w·d(var_zm)/dz`` implicitly at interior momentum levels with the
+    zm→zt interpolation weights. The xp2/xpyp moments live on zm, so their
+    mean advection always uses this centered form (the ``l_upwind_xm_ma`` flag
+    gates only the *zt*-level scalar/wind advance, not the zm-level moments).
+
+    The zm→zt weights are computed inline from the grid geometry — exactly
+    ``calc_zm2zt_weights`` (``grid_class.F90``), ascending grid (grid_dir=+1):
+
+      ``w_above[k] = (zt[k] - zm[k])   / (zm[k+1] - zm[k])``  (weight of zm[k]),
+      ``w_below[k] = (zm[k+1] - zt[k]) / (zm[k+1] - zm[k])``  (weight of zm[k+1]),
+
+    for ``k = 0 .. nzt-1``. On a uniform grid both are 1/2. Boundary rows
+    (k=0, k=nzm-1) are zero (fixed-value BCs applied by the assembler).
+    ``(3, ngrdcol, nzm)`` = ``[super, main, sub]``.
+    """
+    invrs_dzm = gr.invrs_dzm                       # (ng, nzm)
+    total_dist = (gr.zm[:, 1:] - gr.zm[:, :-1]) + 1.0e-30   # (ng, nzt)
+    w_above = (gr.zt - gr.zm[:, :-1]) / total_dist  # M_ABOVE, (ng, nzt)
+    w_below = (gr.zm[:, 1:] - gr.zt) / total_dist   # M_BELOW, (ng, nzt)
+
+    # Interior momentum levels k = 1 .. nzm-2 (Fortran k = 2 .. nzm-1).
+    fac = wm_zm[:, 1:-1] * invrs_dzm[:, 1:-1]       # (ng, nzm-2)
+    super_int = fac * w_above[:, 1:]                # weights_zm2zt[:, 1:, M_ABOVE]
+    main_int = fac * (w_below[:, 1:] - w_above[:, :-1])
+    sub_int = -fac * w_below[:, :-1]                # weights_zm2zt[:, :-1, M_BELOW]
+
+    zeros_bnd = jnp.zeros((wm_zm.shape[0], 1), dtype=wm_zm.dtype)
+    superdiag = jnp.concatenate([zeros_bnd, super_int, zeros_bnd], axis=1)
+    maindiag = jnp.concatenate([zeros_bnd, main_int, zeros_bnd], axis=1)
+    subdiag = jnp.concatenate([zeros_bnd, sub_int, zeros_bnd], axis=1)
+    return jnp.stack([superdiag, maindiag, subdiag], axis=0)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -505,12 +542,60 @@ def xp2_xpyp_rhs(lhs_ta, rhs_ta, Cn, invrs_tau_zm, threshold, xapxbp, xam, xbm,
     return jnp.concatenate([rhs_lb, rhs_int, rhs_ub], axis=1)
 
 
+def calc_xp2_xpyp_lhs(lhs_ta, lhs_ma, Kh_zt, c_K2, nu2, invrs_rho_ds_zm,
+                      rho_ds_zt, Cn, invrs_tau_xp2_zm, gamma, dt, gr: CLUBBGrid):
+    """Shared implicit LHS for rtp2/thlp2/rtpthlp (``calc_xp2_xpyp_lhs``).
+
+    ``Kw2 = c_K2·Kh_zt`` eddy diffusion + the ``Cn`` pressure-damping (dp1) term,
+    combined with the shared turbulent-advection (``lhs_ta``) and mean-advection
+    (``lhs_ma``) operators. The SAME LHS solves all three second moments under
+    ADG1. ``Cn``/``invrs_tau_xp2_zm`` are ``(ngrdcol, nzm)``; ``nu2`` is
+    ``(ngrdcol,)``. Returns ``(lhs, lhs_diff, dp1)`` — ``lhs_diff``/``dp1`` are
+    reused by the budget diagnostics.
+    """
+    Kw2 = c_K2 * Kh_zt
+    lhs_diff = diffusion_zm_lhs(Kw2, nu2, invrs_rho_ds_zm, rho_ds_zt, gr)
+    dp1 = term_dp1_lhs(Cn, invrs_tau_xp2_zm)
+    lhs = xp2_xpyp_lhs(lhs_ta, lhs_ma, lhs_diff, dp1 * gamma, dt)
+    return lhs, lhs_diff, dp1
+
+
+def calc_up2_vp2_lhs(lhs_ta, lhs_ma, Kh_zt, c_K9, nu9, invrs_rho_ds_zm,
+                     rho_ds_zt, C4, C14, invrs_tau_C4_zm, invrs_tau_C14_zm,
+                     gamma, dt, gr: CLUBBGrid):
+    """Shared implicit LHS for up2/vp2 (``calc_up2_vp2_lhs``).
+
+    The shared TA/MA operators plus the up2/vp2-specific ``Kw9 = c_K9·Kh_zt``
+    eddy diffusion and the ``C4``/``C14`` pressure-damping (dp1) terms scaled by
+    ``gamma``. The same LHS solves both up2 and vp2 (ADG1). ``c_K9`` may be a
+    scalar or per-column ``(ngrdcol,)``. Returns
+    ``(lhs, lhs_diff, lhs_dp1_C4, lhs_dp1_C14)`` — the latter three are reused by
+    the up2/vp2 RHS build and the dp2 budget diagnostic.
+    """
+    c_K9 = jnp.asarray(c_K9)
+    c_K9 = c_K9[:, None] if c_K9.ndim == 1 else c_K9
+    Kw9_zt = c_K9 * Kh_zt
+    lhs_diff = diffusion_zm_lhs(Kw9_zt, nu9, invrs_rho_ds_zm, rho_ds_zt, gr)
+
+    ng, nzm = invrs_tau_C4_zm.shape
+    c4_1d = (2.0 / 3.0) * C4 * jnp.ones((ng, nzm), dtype=invrs_tau_C4_zm.dtype)
+    c14_1d = _ONE_THIRD * C14 * jnp.ones((ng, nzm), dtype=invrs_tau_C14_zm.dtype)
+    lhs_dp1_C4 = term_dp1_lhs(c4_1d, invrs_tau_C4_zm)
+    lhs_dp1_C14 = term_dp1_lhs(c14_1d, invrs_tau_C14_zm)
+    lhs_dp1 = (lhs_dp1_C4 + lhs_dp1_C14) * gamma
+    lhs = xp2_xpyp_lhs(lhs_ta, lhs_ma, lhs_diff, lhs_dp1, dt)
+    return lhs, lhs_diff, lhs_dp1_C4, lhs_dp1_C14
+
+
 __all__ = [
     "diffusion_zt_lhs",
     "diffusion_zm_lhs",
     "xp2_xpyp_lhs",
     "xp2_xpyp_rhs",
     "term_ma_zt_lhs_upwind",
+    "term_ma_zm_lhs",
+    "calc_xp2_xpyp_lhs",
+    "calc_up2_vp2_lhs",
     "calc_xpwp",
     "clip_covar",
     "compute_uv_tndcy",

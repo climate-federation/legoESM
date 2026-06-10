@@ -86,7 +86,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_pdf.py` | ADG1 params (`ADG1_pdf_driver`), cloud fraction + rcm (`calc_pdf_liquid_cloud_frac[_components]`) | ✅ |
 | `clubb_pdf_moments.py` | PDF moment integrals, higher-order moments, cloud-water `x'rc'` fluxes, buoyancy flux `wpthvp` | ✅ |
 | `clubb_solve.py` | `tridiag_solve` (CLUBB band → legoESM `thomas_solve`) + `penta_solve` (verbatim CLUBB LU port, bit-exact) | ✅ iter 10-11 |
-| `clubb_moments.py` | `advance_windm_edsclrm` ✅ iter 12; xp2_xpyp terms/TA/combiners ✅ iter 13-15; wp2/wp3, xm/wpxp advances + limiters + fill_holes ☐ | 🟡 P5 |
+| `clubb_moments.py` | `advance_windm_edsclrm` ✅ iter 12; xp2_xpyp terms/TA/combiners ✅ iter 13-15; `term_ma_zm_lhs` + `calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅ iter 18; xp2_xpyp_uv_rhs, pos_definite_variances, advance_xp2_xpyp main, wp2/wp3, xm/wpxp advances + limiters + fill_holes ☐ | 🟡 P5 |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
 
@@ -142,8 +142,10 @@ reused Thomas solve). `advance_xp2_xpyp` in progress: term builders
 `term_dp1_lhs/rhs`, `term_tp_rhs`, `term_pr1`, `term_pr2` ✅ iter 13; the
 upwind turbulent-advection operators + `calc_xp2_xpyp_ta_lhs/rhs` ✅ iter 14;
 the combiners `diffusion_zm_lhs`, `xp2_xpyp_lhs`, `xp2_xpyp_rhs` ✅ iter 15
-(golden + parity). Still need `term_ma_zm_lhs` (zm mean adv), the assembly
-wrappers `calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs`, `xp2_xpyp_uv_rhs`,
+(golden + parity); `term_ma_zm_lhs` (centered zm mean adv, inline
+`calc_zm2zt_weights` — stretched-grid bit-exact parity) + the assembly wrappers
+`calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅ iter 18 (parity vs ref +
+self-consistency; codex approve). Still need `xp2_xpyp_uv_rhs`,
 `pos_definite_variances`, and the `advance_xp2_xpyp` main (which also needs the
 `invrs_tau_*`/`Cn` dissipation-timescale inputs from orchestration).
 Then `advance_wp2_wp3` + `advance_xm_wpxp` (penta — `clubb_solve.penta_solve`

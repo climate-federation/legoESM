@@ -22,11 +22,14 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb_moments import (  # noqa: E402
     advance_windm_edsclrm,
+    calc_up2_vp2_lhs,
+    calc_xp2_xpyp_lhs,
     calc_xp2_xpyp_ta_lhs,
     calc_xp2_xpyp_ta_rhs,
     diffusion_zm_lhs,
     term_dp1_lhs,
     term_dp1_rhs,
+    term_ma_zm_lhs,
     term_pr1,
     term_pr2,
     term_tp_rhs,
@@ -419,6 +422,152 @@ def test_parity_vs_clubb_jax_reference():
             jnp.asarray(clubb_params), _NU10, _DT, refgr, False, True, True))()
     mine = jax.jit(lambda: advance_windm_edsclrm(**kw))()
     for a, b in zip(mine, ref):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12, atol=1e-14)
+
+
+# ---------------------------------------------------------------------------
+# term_ma_zm_lhs (centered mean advection) + xp2/xpyp LHS-assembly wrappers
+# ---------------------------------------------------------------------------
+
+def _weights_zm2zt(gr):
+    """calc_zm2zt_weights (grid_class.F90), ascending grid: (ng, nzt, 2)."""
+    zm = np.asarray(gr.zm)
+    zt = np.asarray(gr.zt)
+    total = (zm[:, 1:] - zm[:, :-1]) + 1.0e-30
+    w_above = (zt - zm[:, :-1]) / total      # M_ABOVE: weight of zm[k]
+    w_below = (zm[:, 1:] - zt) / total        # M_BELOW: weight of zm[k+1]
+    return np.stack([w_above, w_below], axis=-1)
+
+
+def test_term_ma_zm_lhs_uniform_grid_centered():
+    """On a uniform grid the zm2zt weights are 1/2 → main diag 0, off-diags ±fac/2."""
+    ng, nzm = 2, 9
+    zm = jnp.asarray(np.tile(np.linspace(0.0, 1600.0, nzm), (ng, 1)))
+    gr = make_clubb_grid(zm, 0.5 * (zm[:, 1:] + zm[:, :-1]))
+    rng = np.random.default_rng(11)
+    wm_zm = jnp.asarray(0.03 * rng.standard_normal((ng, nzm)))
+    band = np.asarray(term_ma_zm_lhs(wm_zm, gr))
+    assert band.shape == (3, ng, nzm)
+    # Boundaries (k=0, k=nzm-1) are zero rows.
+    assert np.allclose(band[:, :, 0], 0.0) and np.allclose(band[:, :, -1], 0.0)
+    fac = np.asarray(wm_zm)[:, 1:-1] * np.asarray(gr.invrs_dzm)[:, 1:-1]
+    np.testing.assert_allclose(band[0, :, 1:-1], 0.5 * fac, rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(band[1, :, 1:-1], 0.0, atol=1e-14)
+    np.testing.assert_allclose(band[2, :, 1:-1], -0.5 * fac, rtol=1e-12, atol=1e-14)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_term_ma_zm_lhs_parity():
+    """Bit-exact parity vs mean_adv.term_ma_zm_lhs_jax on a STRETCHED grid.
+
+    The stretched grid is the case where the zm2zt weight convention (which
+    column is M_ABOVE vs M_BELOW) actually matters; on a uniform grid both are
+    1/2 and a wrong convention would pass silently.
+    """
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.mean_adv as RMA  # noqa: N812
+
+    gr, ng, nzm = _gr_only()
+    rng = np.random.default_rng(73)
+    wm_zm = jnp.asarray(0.02 * rng.standard_normal((ng, nzm)))
+    refgr = SimpleNamespace(invrs_dzm=gr.invrs_dzm,
+                            weights_zm2zt=jnp.asarray(_weights_zm2zt(gr)))
+    np.testing.assert_allclose(
+        np.asarray(term_ma_zm_lhs(wm_zm, gr)),
+        np.asarray(RMA.term_ma_zm_lhs_jax(wm_zm, refgr)),
+        rtol=1e-12, atol=1e-14)
+
+
+def _lhs_wrapper_inputs(seed):
+    gr, ng, nzm = _gr_only()
+    nzt = nzm - 1
+    rng = np.random.default_rng(seed)
+    return dict(
+        gr=gr, ng=ng, nzm=nzm, nzt=nzt,
+        lhs_ta=jnp.asarray(rng.standard_normal((3, ng, nzm))),
+        lhs_ma=jnp.asarray(rng.standard_normal((3, ng, nzm))),
+        Kh_zt=jnp.asarray(0.5 + rng.random((ng, nzt))),
+        invrs_rho_ds_zm=jnp.asarray(1.0 / (1.0 + 0.1 * rng.random((ng, nzm)))),
+        rho_ds_zt=jnp.asarray(1.0 + 0.1 * rng.random((ng, nzt))),
+        Cn=jnp.asarray(0.5 + rng.random((ng, nzm))),
+        itau=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
+        nu=jnp.full((ng,), 5.0),
+    )
+
+
+def test_calc_xp2_xpyp_lhs_self_consistent():
+    """The wrapper composes diffusion_zm_lhs + dp1 + xp2_xpyp_lhs (CI-side check)."""
+    p = _lhs_wrapper_inputs(91)
+    c_K2, gamma, dt = 0.025, 1.5, 300.0
+    lhs, lhs_diff, dp1 = calc_xp2_xpyp_lhs(
+        p["lhs_ta"], p["lhs_ma"], p["Kh_zt"], c_K2, p["nu"], p["invrs_rho_ds_zm"],
+        p["rho_ds_zt"], p["Cn"], p["itau"], gamma, dt, p["gr"])
+    assert lhs.shape == (3, p["ng"], p["nzm"]) and dp1.shape == (p["ng"], p["nzm"])
+    exp_diff = diffusion_zm_lhs(c_K2 * p["Kh_zt"], p["nu"], p["invrs_rho_ds_zm"],
+                                p["rho_ds_zt"], p["gr"])
+    exp_dp1 = term_dp1_lhs(p["Cn"], p["itau"])
+    exp_lhs = xp2_xpyp_lhs(p["lhs_ta"], p["lhs_ma"], exp_diff, exp_dp1 * gamma, dt)
+    np.testing.assert_array_equal(np.asarray(lhs_diff), np.asarray(exp_diff))
+    np.testing.assert_array_equal(np.asarray(dp1), np.asarray(exp_dp1))
+    np.testing.assert_array_equal(np.asarray(lhs), np.asarray(exp_lhs))
+
+
+def test_calc_up2_vp2_lhs_self_consistent():
+    """up2/vp2 wrapper composes Kw9 diffusion + C4/C14 dp1 + xp2_xpyp_lhs."""
+    p = _lhs_wrapper_inputs(92)
+    ng, nzm = p["ng"], p["nzm"]
+    c_K9 = jnp.full((ng,), 0.13)
+    C4, C14, gamma, dt = 5.2, 1.0, 1.5, 300.0
+    itau_C4 = p["itau"]
+    itau_C14 = jnp.asarray(itau_C4) * 1.3
+    lhs, lhs_diff, dp1_C4, dp1_C14 = calc_up2_vp2_lhs(
+        p["lhs_ta"], p["lhs_ma"], p["Kh_zt"], c_K9, p["nu"], p["invrs_rho_ds_zm"],
+        p["rho_ds_zt"], C4, C14, itau_C4, itau_C14, gamma, dt, p["gr"])
+    assert lhs.shape == (3, ng, nzm)
+    exp_diff = diffusion_zm_lhs(c_K9[:, None] * p["Kh_zt"], p["nu"],
+                                p["invrs_rho_ds_zm"], p["rho_ds_zt"], p["gr"])
+    exp_c4 = term_dp1_lhs((2.0 / 3.0) * C4 * jnp.ones((ng, nzm)), itau_C4)
+    exp_c14 = term_dp1_lhs((1.0 / 3.0) * C14 * jnp.ones((ng, nzm)), itau_C14)
+    exp_lhs = xp2_xpyp_lhs(p["lhs_ta"], p["lhs_ma"], exp_diff,
+                           (exp_c4 + exp_c14) * gamma, dt)
+    np.testing.assert_array_equal(np.asarray(lhs_diff), np.asarray(exp_diff))
+    np.testing.assert_array_equal(np.asarray(dp1_C4), np.asarray(exp_c4))
+    np.testing.assert_array_equal(np.asarray(dp1_C14), np.asarray(exp_c14))
+    np.testing.assert_array_equal(np.asarray(lhs), np.asarray(exp_lhs))
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_calc_xp2_xpyp_lhs_parity():
+    """Bit-exact parity of both LHS-assembly wrappers vs the reference."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_xp2_xpyp_module as R  # noqa: N812
+
+    p = _lhs_wrapper_inputs(93)
+    c_K2, gamma, dt = 0.025, 1.5, 300.0
+    mine = calc_xp2_xpyp_lhs(
+        p["lhs_ta"], p["lhs_ma"], p["Kh_zt"], c_K2, p["nu"], p["invrs_rho_ds_zm"],
+        p["rho_ds_zt"], p["Cn"], p["itau"], gamma, dt, p["gr"])
+    ref = R.calc_xp2_xpyp_lhs_jax(
+        p["lhs_ta"], p["lhs_ma"], p["Kh_zt"], c_K2, p["nu"], p["invrs_rho_ds_zm"],
+        p["rho_ds_zt"], p["Cn"], p["itau"], gamma, dt, p["gr"])
+    for a, b in zip(mine, ref):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12, atol=1e-14)
+
+    ng, nzm = p["ng"], p["nzm"]
+    c_K9 = jnp.full((ng,), 0.13)
+    C4, C14 = 5.2, 1.0
+    itau_C14 = jnp.asarray(p["itau"]) * 1.3
+    mine9 = calc_up2_vp2_lhs(
+        p["lhs_ta"], p["lhs_ma"], p["Kh_zt"], c_K9, p["nu"], p["invrs_rho_ds_zm"],
+        p["rho_ds_zt"], C4, C14, p["itau"], itau_C14, gamma, dt, p["gr"])
+    ref9 = R.calc_up2_vp2_lhs_jax(
+        p["lhs_ta"], p["lhs_ma"], p["Kh_zt"], c_K9, p["nu"], p["invrs_rho_ds_zm"],
+        p["rho_ds_zt"], C4, C14, p["itau"], itau_C14, gamma, dt, p["gr"])
+    for a, b in zip(mine9, ref9):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12, atol=1e-14)
 
 
