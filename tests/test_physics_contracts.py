@@ -163,6 +163,10 @@ EXCLUDED: frozenset[str] = frozenset(
         # CLUBB port: tridiagonal-solve adapter (band storage -> thomas_solve)
         # for the implicit moment advance — a linear-solver helper, not a scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_solve.py",
+        # CLUBB port: prognostic moment advances (implicit eddy-diffusion /
+        # higher-moment solves) — internal closure dynamics, not a single
+        # column-physics tendency scheme with a units/sign contract.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_moments.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",

@@ -75,7 +75,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_pdf.py` | ADG1 params (`ADG1_pdf_driver`), cloud fraction + rcm (`calc_pdf_liquid_cloud_frac[_components]`) | ✅ |
 | `clubb_pdf_moments.py` | PDF moment integrals, higher-order moments, cloud-water `x'rc'` fluxes, buoyancy flux `wpthvp` | ✅ |
 | `clubb_solve.py` | `tridiag_solve` (CLUBB band → legoESM `thomas_solve`) + `penta_solve` (verbatim CLUBB LU port, bit-exact) | ✅ iter 10-11 |
-| `clubb_moments.py` | wp2/wp3, xp2/xpyp, xm/wpxp, windm/edsclrm advance + implicit solves + limiters + fill_holes | ☐ P5 |
+| `clubb_moments.py` | `advance_windm_edsclrm` ✅ iter 12 (golden+parity); wp2/wp3, xp2/xpyp, xm/wpxp advances + limiters + fill_holes ☐ | 🟡 P5 |
 
 Also added (shared): `legoesm.thermo.saturation_vapor_pressure_flatau[_ice]`.
 
@@ -119,8 +119,10 @@ P5 moment advance. Solvers: ✅ `clubb_solve.tridiag_solve` (reuses legoESM
 `thomas_solve`) + ✅ `penta_solve` (verbatim CLUBB LU, bit-exact). Next: the
 advance modules in `clubb_moments.py`, each = LHS/RHS assembly + solve +
 clipping (`clip_explicit`) + mono flux limiters (CAM ON) + `fill_holes`:
-`advance_windm_edsclrm` (CAM `l_predict_upwp_vpwp=False` u/v eddy-diffusion;
-tridiag — start here), then `advance_xp2_xpyp` (tridiag), then `advance_wp2_wp3`
-+ `advance_xm_wpxp` (penta). Each chunk: analytic + golden/parity + codex. These
-need `diffusion.py` (LHS bands), `mean_adv.py`, `clip_explicit.py`,
-`mono_flux_limiter.py`, `fill_holes.py` from CLUBB-JAX.
+`advance_windm_edsclrm` ✅ (golden+parity; LHS builders `diffusion_zt_lhs`,
+`term_ma_zt_lhs_upwind`, `calc_xpwp`, `clip_covar`, `compute_uv_tndcy`,
+`windm_edsclrm_rhs/lhs` all bit-exact to ref; full advance round-off via the
+reused Thomas solve). Next: `advance_xp2_xpyp` (tridiag), then `advance_wp2_wp3`
++ `advance_xm_wpxp` (penta — `clubb_solve.penta_solve` ready). Still need
+`mono_flux_limiter.py` (CAM ON) + `fill_holes.py` from CLUBB-JAX. Each chunk:
+analytic + golden/parity + codex.
