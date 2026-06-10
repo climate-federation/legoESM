@@ -631,5 +631,67 @@ def test_compute_skw_fnc_formula_and_degenerate():
                                rtol=1e-12, atol=1e-14)
 
 
+# --------------------------------------------------------------------------
+# clip_skewness (CAM l_use_wp3_lim_with_smth_Heaviside=False branch)
+# --------------------------------------------------------------------------
+
+def _clip_skw_inputs(ng=3, nzt=12, seed=21):
+    rng = np.random.default_rng(seed)
+    zt = jnp.asarray(np.tile(np.linspace(20.0, 3000.0, nzt), (ng, 1)))
+    wp2_zt = jnp.asarray(0.2 + 0.5 * rng.random((ng, nzt)))
+    sfc = jnp.zeros((ng,))
+    skw_max = jnp.full((ng,), 4.5)
+    return zt, wp2_zt, sfc, skw_max
+
+
+def test_clip_skewness_enforces_limit():
+    zt, wp2_zt, sfc, skw_max = _clip_skw_inputs()
+    ng, nzt = wp2_zt.shape
+    # large wp3 that must be clipped everywhere
+    wp3 = jnp.asarray(50.0 * np.ones((ng, nzt)))
+    out = np.asarray(W.clip_skewness(wp3, wp2_zt, zt, sfc, skw_max))
+    assert np.all(np.abs(out) <= 100.0 + 1e-9)
+    # |Sk_w| = |wp3|/wp2_zt^1.5 within Skw_max_mag aloft (>100 m AGL)
+    aloft = np.asarray(zt) > 100.0
+    skw = np.abs(out) / np.asarray(wp2_zt) ** 1.5
+    assert np.all(skw[aloft] <= 4.5 + 1e-9)
+
+
+def test_clip_skewness_passes_small_wp3():
+    zt, wp2_zt, sfc, skw_max = _clip_skw_inputs()
+    ng, nzt = wp2_zt.shape
+    wp3 = jnp.asarray(1e-3 * np.ones((ng, nzt)))   # well within the limit
+    out = np.asarray(W.clip_skewness(wp3, wp2_zt, zt, sfc, skw_max))
+    np.testing.assert_allclose(out, np.asarray(wp3), rtol=1e-12, atol=1e-14)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_clip_skewness_parity():
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.clip_explicit as RC  # noqa: N812
+    zt, wp2_zt, sfc, skw_max = _clip_skw_inputs(seed=22)
+    ng, nzt = wp2_zt.shape
+    rng = np.random.default_rng(23)
+    wp3 = jnp.asarray(20.0 * rng.standard_normal((ng, nzt)))
+    out = W.clip_skewness(wp3, wp2_zt, zt, sfc, skw_max)
+    ref = RC.clip_skewness_core(wp3, wp2_zt, zt, sfc, skw_max,
+                                l_use_wp3_lim_with_smth_Heaviside=False)
+    np.testing.assert_allclose(np.asarray(out), np.asarray(ref), rtol=1e-12, atol=1e-14)
+
+
+def test_clip_skewness_jit_grad():
+    zt, wp2_zt, sfc, skw_max = _clip_skw_inputs(seed=24)
+    ng, nzt = wp2_zt.shape
+    wp3 = jnp.asarray(10.0 * np.ones((ng, nzt)))
+
+    def loss(w):
+        return jnp.sum(W.clip_skewness(w, wp2_zt, zt, sfc, skw_max) ** 2)
+
+    assert jnp.isfinite(jax.jit(loss)(wp3))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(wp3)))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -22,6 +22,7 @@ from legoesm.atmosphere.physics.turbulence.clubb_fill_holes import (  # noqa: E4
     fill_holes_global,
     fill_holes_sliding_window,
     fill_holes_vertical,
+    fill_holes_wp2_from_horz_tke,
 )
 
 _CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
@@ -124,6 +125,56 @@ def test_parity_vs_reference():
         np.asarray(fill_holes_vertical(field, rho_ds, dz, 0.0, 1, 14, 2)),
         np.asarray(RF.fill_holes_vertical(field, rho_ds, dz, 0.0, 1, 14, 2)),
         rtol=1e-12, atol=1e-14)
+
+
+def _horz_tke_inputs(seed=0, ng=4, nzm=12):
+    rng = np.random.default_rng(seed)
+    wp2 = 0.3 + 0.5 * rng.random((ng, nzm))
+    # punch wp2 holes (below threshold w_tol^2 = 4e-4) at a few levels
+    wp2[:, 4] = 1.0e-4
+    wp2[:, 7] = 5.0e-5
+    up2 = 0.4 + 0.6 * rng.random((ng, nzm))
+    vp2 = 0.4 + 0.6 * rng.random((ng, nzm))
+    return jnp.asarray(wp2), jnp.asarray(up2), jnp.asarray(vp2)
+
+
+def test_horz_tke_fill_conserves_total_and_fills():
+    wp2, up2, vp2 = _horz_tke_inputs()
+    thr = float((2.0e-2) ** 2)
+    tot_in = np.asarray(wp2 + up2 + vp2)
+    w, u, v = fill_holes_wp2_from_horz_tke(wp2, up2, vp2, thr, 0, 11)
+    tot_out = np.asarray(w + u + v)
+    # total TKE conserved at every level
+    np.testing.assert_allclose(tot_out, tot_in, rtol=1e-12, atol=1e-12)
+    # holes raised toward the threshold (where TKE was available)
+    assert np.asarray(w)[:, 4].min() > np.asarray(wp2)[:, 4].min()
+    assert np.all(np.asarray(u) >= -1e-12) and np.all(np.asarray(v) >= -1e-12)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_horz_tke_fill_parity():
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.fill_holes as RF  # noqa: N812
+    wp2, up2, vp2 = _horz_tke_inputs(seed=2)
+    thr = float((2.0e-2) ** 2)
+    mine = fill_holes_wp2_from_horz_tke(wp2, up2, vp2, thr, 0, 9)
+    ref = RF.fill_holes_wp2_from_horz_tke(wp2, up2, vp2, thr, 0, 9)
+    for a, b in zip(mine, ref):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12, atol=1e-14)
+
+
+def test_horz_tke_fill_jit_grad():
+    wp2, up2, vp2 = _horz_tke_inputs(seed=5)
+    thr = float((2.0e-2) ** 2)
+
+    def loss(w):
+        ww, uu, vv = fill_holes_wp2_from_horz_tke(w, up2, vp2, thr, 0, 11)
+        return jnp.sum(ww ** 2 + uu ** 2 + vv ** 2)
+
+    assert jnp.isfinite(jax.jit(loss)(wp2))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(wp2)))
 
 
 if __name__ == "__main__":

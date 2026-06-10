@@ -149,4 +149,53 @@ def fill_holes_vertical(field, rho_ds, dz, threshold, lower_k, upper_k,
                      "(CAM-default tree implements 1 and 2)")
 
 
-__all__ = ["fill_holes_global", "fill_holes_sliding_window", "fill_holes_vertical"]
+_F64_EPS = jnp.finfo(jnp.float64).eps
+
+
+def fill_holes_wp2_from_horz_tke(wp2, up2, vp2, threshold, lower_k, upper_k):
+    """TKE-conserving wp2 hole-fill from the horizontal variances (CAM default).
+
+    Faithful port of ``fill_holes.F90:fill_holes_wp2_from_horz_tke``
+    (``l_wp2_fill_holes_tke = .true.``): where ``wp2 < threshold`` and there is
+    available TKE in ``up2``/``vp2`` (``> threshold``), borrow from up2/vp2 to
+    fill the wp2 hole, conserving total ``wp2 + up2 + vp2``. If the available
+    TKE is insufficient (case 1) wp2 takes all of it (up2/vp2 floored to
+    ``threshold``); otherwise (case 2) the deficit is drawn proportionally, with
+    one-sided fallbacks when a component has no surplus. Only levels in the
+    static ``[lower_k, upper_k]`` range are modified. ``wp2``/``up2``/``vp2`` are
+    ``(ncol, nzm)``. Returns ``(wp2, up2, vp2)``.
+    """
+    nzm = wp2.shape[1]
+    k_idx = jnp.arange(nzm)[None, :]
+    in_range = (k_idx >= lower_k) & (k_idx <= upper_k)
+
+    do_fill = in_range & (wp2 < threshold) & ((up2 > threshold) | (vp2 > threshold))
+    missing = threshold - wp2
+    up2_avail = jnp.maximum(up2 - threshold, 0.0)
+    vp2_avail = jnp.maximum(vp2 - threshold, 0.0)
+    total_avail = up2_avail + vp2_avail
+
+    case1 = do_fill & (missing >= total_avail)        # not enough TKE
+    wp2_c1 = wp2 + total_avail
+    up2_c1 = jnp.minimum(up2, threshold)
+    vp2_c1 = jnp.minimum(vp2, threshold)
+
+    case2 = do_fill & (missing < total_avail)          # enough TKE
+    eps_thr = _F64_EPS * 1000.0
+    case2a = case2 & (jnp.abs(up2_avail) < eps_thr)    # take all from vp2
+    case2b = case2 & (~case2a) & (jnp.abs(vp2_avail) < eps_thr)  # take all from up2
+    ratio = jnp.where(total_avail > 0.0, missing / jnp.where(total_avail > 0.0, total_avail, 1.0), 0.0)
+
+    up2_2c = threshold + up2_avail * (1.0 - ratio)
+    vp2_2c = threshold + vp2_avail * (1.0 - ratio)
+    up2_c2 = jnp.where(case2a, up2, jnp.where(case2b, up2 - missing, up2_2c))
+    vp2_c2 = jnp.where(case2a, vp2 - missing, jnp.where(case2b, vp2, vp2_2c))
+
+    wp2_new = jnp.where(case1, wp2_c1, jnp.where(case2, threshold, wp2))
+    up2_new = jnp.where(case1, up2_c1, jnp.where(case2, up2_c2, up2))
+    vp2_new = jnp.where(case1, vp2_c1, jnp.where(case2, vp2_c2, vp2))
+    return wp2_new, up2_new, vp2_new
+
+
+__all__ = ["fill_holes_global", "fill_holes_sliding_window", "fill_holes_vertical",
+           "fill_holes_wp2_from_horz_tke"]

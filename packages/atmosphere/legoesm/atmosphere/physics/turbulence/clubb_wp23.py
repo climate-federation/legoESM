@@ -38,6 +38,41 @@ _TWO_THIRDS = 2.0 / 3.0
 _GAMMA = 1.5   # gamma_over_implicit_ts (constants_clubb)
 _EPS = 1.0e-10  # constants_clubb eps = max(1e-10, machine eps): branch threshold floor
 
+# clip_skewness (clip_explicit) algorithm constants (CLUBB; not tunable):
+_WP3_MAX = 100.0           # absolute |wp3| limit [m^3/s^3] ("known magic number")
+_SFC_AGL_THRESH_M = 100.0  # surface-layer threshold for the tighter skewness limit [m AGL]
+_SFC_SKW_FACTOR = 0.0021   # surface-layer wp3_lim_sqd factor (clip_explicit.F90)
+
+
+def _safe_sqrt(x):
+    """``sqrt(max(x,0))`` with a finite (0) gradient at ``x<=0`` (double-where)."""
+    xp = jnp.maximum(x, 0.0)
+    safe = jnp.where(xp > 0.0, xp, 1.0)
+    return jnp.where(xp > 0.0, jnp.sqrt(safe), 0.0)
+
+
+def clip_skewness(wp3, wp2_zt, zt, sfc_elevation, Skw_max_mag):
+    """Limit ``|Sk_w| = |wp3|/wp2_zt^(3/2)`` (``clip_skewness``, CAM branch).
+
+    Faithful port of the ``l_use_wp3_lim_with_smth_Heaviside = .false.`` branch
+    of ``clip_explicit.F90:clip_skewness_core`` (the CAM default — the smooth
+    Heaviside path is the conv-test variant): a sharp 100 m-AGL threshold caps
+    ``wp3^2`` to ``Skw_max_mag^2·wp2_zt^3`` aloft and to
+    ``0.0021·Skw_max_mag^2·wp2_zt^3`` in the surface layer, then clips
+    ``|wp3| <= 100``. ``wp2_zt`` (``>= 0``) and ``wp3`` are zt-level
+    ``(ncol, nzt)``; ``sfc_elevation``/``Skw_max_mag`` are ``(ncol,)``. Pure /
+    JIT-safe / differentiable.
+    """
+    wp2_zt_cubed = wp2_zt ** 3
+    zagl = zt - sfc_elevation[:, None]
+    skw_sq = Skw_max_mag[:, None] ** 2
+    wp3_lim_sqd = jnp.where(zagl <= _SFC_AGL_THRESH_M,
+                            _SFC_SKW_FACTOR * skw_sq * wp2_zt_cubed,
+                            skw_sq * wp2_zt_cubed)
+    exceed = wp3 ** 2 > wp3_lim_sqd
+    wp3 = jnp.where(exceed, jnp.sign(wp3) * _safe_sqrt(wp3_lim_sqd), wp3)
+    return jnp.clip(wp3, -_WP3_MAX, _WP3_MAX)
+
 
 def weights_zt2zm(gr: CLUBBGrid):
     """zt->zm interpolation weights ``(ncol, nzm, 2)`` (``calc_zt2zm_weights``).
@@ -579,4 +614,5 @@ __all__ = [
     "term_ma_zt_lhs",
     "compute_a1_a3_coef",
     "compute_skw_fnc",
+    "clip_skewness",
 ]

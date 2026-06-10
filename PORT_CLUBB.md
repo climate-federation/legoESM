@@ -87,8 +87,8 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_pdf_moments.py` | PDF moment integrals, higher-order moments, cloud-water `x'rc'` fluxes, buoyancy flux `wpthvp` | ✅ |
 | `clubb_solve.py` | `tridiag_solve` (CLUBB band → legoESM `thomas_solve`) + `penta_solve` (verbatim CLUBB LU port, bit-exact) | ✅ iter 10-11 |
 | `clubb_moments.py` | `advance_windm_edsclrm` ✅12; xp2_xpyp terms/TA/combiners ✅13-15; `term_ma_zm_lhs`+`calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅18; `xp2_xpyp_uv_rhs`+`pos_definite_variances` ✅19; `clip_variance`+`solve_xp2_xpyp`+**`advance_xp2_xpyp` main** (full 5-moment advance, round-off parity) ✅20; `advance_wp2_wp3`, `advance_xm_wpxp` (penta), `mono_flux_limiter` ☐ | 🟡 P5 |
-| `clubb_fill_holes.py` | mass-conserving vertical hole-fill (`fill_holes_type=2` sliding-window+global, CAM default) | ✅ iter 19 |
-| `clubb_wp23.py` | coupled wp2/wp3 penta advance: 8 LHS builders + `weights_zt2zm` ✅21; 9 RHS builders ✅22 (2 CAM-divergent from Fortran); `wp23_rhs/lhs/solve` penta assembly ✅23; centered `term_ma_zt_lhs` + `compute_a1_a3_coef` + `compute_skw_fnc` pre-computes ✅24 (parity + band-mapping integration test); `clip_skewness`, `fill_holes_wp2_from_horz_tke`, `advance_wp2_wp3` main ☐ | 🟡 P5 |
+| `clubb_wp23.py` | coupled wp2/wp3 penta advance: 8 LHS + 9 RHS builders ✅21-22; `wp23_rhs/lhs/solve` ✅23; `term_ma_zt_lhs`/`compute_a1_a3_coef`/`compute_skw_fnc` ✅24; `clip_skewness` (CAM non-Heaviside branch) ✅25; `advance_wp2_wp3` main orchestration ☐ | 🟡 P5 |
+| `clubb_fill_holes.py` | `fill_holes_*` ✅19; `fill_holes_wp2_from_horz_tke` (TKE-conserving wp2 fill, CAM) ✅25 | ✅ |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
 
@@ -146,10 +146,10 @@ Remaining to reach the DONE gate (full prognostic closure in the live path):
    `wp23_solve` (penta LU via `clubb_solve.penta_solve`, round-off parity).
    ✅ iter 24: centered `term_ma_zt_lhs` (wp3 MA), `compute_a1_a3_coef`,
    `compute_skw_fnc` (C1/C11; CAM `l_damp_wp2_using_em=False` → NO 1/3 on C1).
-   ☐ remaining for the **main**: `clip_skewness` (CAM
-   `l_use_wp3_lim_with_smth_Heaviside=.false.` → the NON-smooth-Heaviside branch,
-   from Fortran — another CAM-divergence), `fill_holes_wp2_from_horz_tke`
-   (`l_wp2_fill_holes_tke=.true.`), then the orchestration (`Kw1=c_K1·Kh_zt`/
+   ✅ iter 25: `clip_skewness` (CAM non-smooth-Heaviside branch — parity vs
+   CLUBB-JAX `clip_skewness_core(...,False)`) + `fill_holes_wp2_from_horz_tke`
+   (TKE-conserving, `l_wp2_fill_holes_tke=.true.`).
+   ☐ remaining for the **main**: the orchestration (`Kw1=c_K1·Kh_zt`/
    `Kw8=c_K8·Kh_zm`, `em_smth/wp2_smth=zm2zt2zm`, `dum/dvm_dz=ddzt`, the C12 scaling
    of `lhs_diff_zt`, diffusion LHS, call builders+assembly+solve, post-clip).
    CAM clip uses `l_min_wp2_from_corr_wx=.false.` (simple `wp2_min=w_tol²` floor).
