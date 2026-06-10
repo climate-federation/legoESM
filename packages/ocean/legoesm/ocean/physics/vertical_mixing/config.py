@@ -98,6 +98,45 @@ class TKEConfig(NamedTuple):
     #   convective K_M). This is the Veros ACC default.
     prandtl_mode: str = "unit"
     Prandtl_tke0: float = 10.0           # constant Prandtl number (Veros Prandtl_tke0)
+    # ----- Prognostic TKE carry (Veros enable_tke PROGNOSTIC form) -----
+    # ``prognostic=False`` (default, BIT-IDENTICAL): the Mode-B quasi-steady
+    #   diagnostic chain runs in ``compute_vertical_K_profiles`` — ``tke_old=None``
+    #   seeded at background, ``n_iterations=3``, ``dt=86400`` (drives the implicit
+    #   solve to the local quasi-steady equilibrium). No TKE field is carried.
+    # ``prognostic=True``: the TKE field is CARRIED on the ocean state
+    #   (``state.tke``, interior interfaces ``(n_lat, n_lon, nlev-1)``). Each model
+    #   step runs ONE backward-Euler TKE solve with ``dt = dt_mom`` (the MOMENTUM
+    #   timestep — Veros tke.py:137 ``dt_tke = dt_mom`` even though TKE advances
+    #   once per tracer step), ``n_iterations=1``, seeded from the carried field.
+    #   The updated TKE is returned and stored back on the state at the END of the
+    #   model step. Requires the recipe (or driver) to seed ``state.tke`` so the
+    #   ``lax.scan`` carry pytree stays constant.
+    prognostic: bool = False
+    # ----- Energy-recycling sources (Veros forc += eke_diss_iw + K_diss_bot) -----
+    # Each default OFF; only consulted when ``prognostic=True``. They add the
+    # dissipated mechanical energy from OTHER schemes back into the TKE source
+    # ``forc`` (Veros integrate_tke_kernel forc assembly), recycling energy that
+    # would otherwise be lost — the Veros ACC energetically-consistent closure.
+    #
+    # ``source_eke_diss``: add the EKE dissipation rate (Veros ``eke_diss_iw =
+    #   c_int·E`` with ``c_int = eke_c_eps·√E/eke_len`` — the SAME sink the EKE
+    #   step already computes). The EKE step runs AFTER the TKE K-profile solve in
+    #   the legoESM model step (the K-profiles are computed first in
+    #   ``_apply_implicit_vertical_mixing``), so the EKE dissipation is carried
+    #   across via a state field (``state.eke_diss``) — a documented ONE-STEP LAG.
+    #
+    # ``source_bottom_drag_diss``: add ``K_diss_bot`` — the bottom-drag KE
+    #   extraction (Veros friction.linear_bottom_friction: ``diss = r_bot·u²`` at
+    #   the bottom level, mapped to the W-grid). legoESM surfaces this as a
+    #   tendency diagnostic (``LatLonCGridOceanTendencies.K_diss_bot``, mirroring
+    #   the ``Ah_visc_u/v`` K_diss_h pattern) and routes it to the TKE source at
+    #   the interior interfaces.
+    #
+    # ``P_diss_adv`` (advective) and ``P_diss_nonlin`` (cabbeling/non-linear EOS)
+    # are DEFERRED — they need advection/cabbeling dissipation diagnostics that
+    # legoESM does not yet surface (Veros tke.py:142,149). Documented gap.
+    source_eke_diss: bool = False
+    source_bottom_drag_diss: bool = False
 
 
 class KPPConfig(NamedTuple):

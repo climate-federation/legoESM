@@ -262,7 +262,8 @@ def eke_apply_local_source(
     *,
     production_override: jnp.ndarray | None = None,
     extra_source: jnp.ndarray | None = None,
-) -> jnp.ndarray:
+    return_dissipation: bool = False,
+):
     """One step of the local EKE source/sink with **semi-implicit dissipation** —
     unconditionally positivity-preserving (``E_{n+1} >= 0``) with NO clipping/mask.
 
@@ -289,6 +290,14 @@ def eke_apply_local_source(
 
     Both enter the EXPLICIT numerator, so the result stays ≥ 0 by construction
     (numerator ≥ 0, denominator ≥ 1) exactly as the base scheme.
+
+    When ``return_dissipation`` is True, returns ``(E_new, eke_diss_iw)`` where
+    ``eke_diss_iw = c_eps·√E_n·E_{n+1}/L = diss_rate·E_new`` [m²/s³] ≥ 0 is the
+    EKE dissipation rate (Veros ``eke_diss_iw = c_int·eke``, ``c_int =
+    eke_c_eps·√E/eke_len``) — routed to the prognostic-TKE source. The
+    backward-Euler dissipation uses ``E_{n+1}`` (the implicit factor), matching
+    Veros's ``c_int·eke[taup1]``. Default ⇒ returns ``E_new`` only ⇒
+    bit-identical.
     """
     E_pos = jnp.maximum(E, 0.0)
     if production_override is None:
@@ -298,7 +307,11 @@ def eke_apply_local_source(
     if extra_source is not None:
         production = production + jnp.maximum(extra_source, 0.0)
     diss_rate = cfg.c_eps * jnp.sqrt(E_pos + 1.0e-30) / jnp.maximum(L, cfg.l_min)
-    return (E_pos + dt * production) / (1.0 + dt * diss_rate)
+    E_new = (E_pos + dt * production) / (1.0 + dt * diss_rate)
+    if return_dissipation:
+        # Veros eke_diss_iw = c_int·eke[taup1] = diss_rate·E_new (≥ 0).
+        return E_new, diss_rate * E_new
+    return E_new
 
 
 def validate_eke_config(cfg: EKEConfig) -> None:

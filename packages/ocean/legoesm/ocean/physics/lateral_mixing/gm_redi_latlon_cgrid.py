@@ -1500,23 +1500,68 @@ def harmonic_lateral_kediss_eke_source(
         return K_diss_h_w * mask[:, :, jnp.newaxis]
 
     # DYNAMICAL FORM (default): per-face KE-dissipation rate -u·(A_h∇²u) [m²/s³ on
-    # the face].  visc_* are already face-masked by the caller.
-    p_u = -u * visc_u                                   # (n_lat, n_lon+1, nlev)
-    p_v = -v * visc_v                                   # (n_lat+1, n_lon, nlev)
-    # Average the face products to cell centres (inverse of cell->face interp).
-    # u-face j and j+1 straddle cell j: cell value = 0.5*(p_u[:, :-1] + p_u[:, 1:]).
-    diss_cell = 0.5 * (p_u[:, :-1, :] + p_u[:, 1:, :])  # (n_lat, n_lon, nlev)
-    # v-face i and i+1 straddle cell i: cell value = 0.5*(p_v[:-1] + p_v[1:]).
-    diss_cell = diss_cell + 0.5 * (p_v[:-1, :, :] + p_v[1:, :, :])
-    diss_cell = diss_cell * mask[:, :, jnp.newaxis]
-    # Average full-level cell dissipation to the nlev-1 interior interfaces (W-grid),
-    # matching where E lives, then clamp >= 0 to make this a pure source.  NB: the
-    # clamp is NOT inactive — -u·A_h∇²u is locally negative in transport regions, so
-    # the clamp over-credits the column-integrated KE dissipation by ~11-20% vs the
+    # the face], averaged faces→centres→interfaces and clamped ≥ 0.  NB: the clamp
+    # is NOT inactive — -u·A_h∇²u is locally negative in transport regions, so the
+    # clamp over-credits the column-integrated KE dissipation by ~11-20% vs the
     # positive-definite flux form above (set kdiss_h_flux_form=True for the exact,
     # clamp-free Veros analogue).
-    K_diss_h_w = 0.5 * (diss_cell[:, :, :-1] + diss_cell[:, :, 1:])
-    return jnp.maximum(K_diss_h_w, 0.0) * mask[:, :, jnp.newaxis]
+    return _kediss_from_momentum_tendency(visc_u, visc_v, u, v, mask, clamp=True)
+
+
+def _kediss_from_momentum_tendency(
+    tend_u: jnp.ndarray,
+    tend_v: jnp.ndarray,
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    mask: jnp.ndarray,
+    *,
+    clamp: bool = True,
+) -> jnp.ndarray:
+    """KE removal ``-u·tend_u - v·tend_v`` mapped faces→centres→W-grid [m²/s³].
+
+    Shared C-grid mapping for the mean-KE that a face-grid momentum tendency
+    (``A_h∇²u`` for K_diss_h, ``-r·u`` for K_diss_bot) extracts from the flow,
+    routed to the ``nlev-1`` interior interfaces (the W-grid where TKE/EKE live).
+    The per-face dissipation rate ``-u·tend_u`` is averaged to cell centres
+    (inverse of the cell→face interpolation) then to the interior interfaces
+    (``0.5·(c[:-1]+c[1:])`` — Veros's ``dissipation_on_wgrid`` interior mapping).
+    With ``clamp=True`` the result is floored ≥ 0 to make it a pure source (the
+    dynamical form is not positive-definite); the caller passes the already
+    face-masked tendencies.
+    """
+    p_u = -u * tend_u                                   # (n_lat, n_lon+1, nlev)
+    p_v = -v * tend_v                                   # (n_lat+1, n_lon, nlev)
+    diss_cell = 0.5 * (p_u[:, :-1, :] + p_u[:, 1:, :])  # (n_lat, n_lon, nlev)
+    diss_cell = diss_cell + 0.5 * (p_v[:-1, :, :] + p_v[1:, :, :])
+    diss_cell = diss_cell * mask[:, :, jnp.newaxis]
+    K_diss_w = 0.5 * (diss_cell[:, :, :-1] + diss_cell[:, :, 1:])
+    if clamp:
+        K_diss_w = jnp.maximum(K_diss_w, 0.0)
+    return K_diss_w * mask[:, :, jnp.newaxis]
+
+
+def bottom_drag_kediss_tke_source(
+    drag_u: jnp.ndarray,
+    drag_v: jnp.ndarray,
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Bottom-drag KE extraction → prognostic-TKE source ``K_diss_bot`` [m²/s³].
+
+    legoESM's analogue of Veros ``K_diss_bot`` (``veros/core/friction.py``
+    ``linear_bottom_friction``: ``diss = r_bot·u²`` at the bottom level, mapped
+    via ``calc_diss_u/v`` to the T-grid). Here the bottom-drag MOMENTUM tendency
+    ``drag_u = -r_eff·u/dz_bot`` (already face-masked, applied at the seafloor /
+    BBL band by ``_bc_bottom_drag``) gives the per-face KE-removal rate
+    ``-u·drag_u = r_eff·u²/dz_bot ≥ 0`` (drag always opposes the flow), which is
+    averaged faces→centres→interior interfaces (the W-grid where the prognostic
+    TKE lives). No clamp is needed — the term is ≥ 0 by construction (drag·flow),
+    but the shared mapping applies a ≥ 0 floor harmlessly for safety.
+
+    Returns ``(n_lat, n_lon, nlev-1)`` ≥ 0 at the interior interfaces.
+    """
+    return _kediss_from_momentum_tendency(drag_u, drag_v, u, v, mask, clamp=True)
 
 
 def compute_realized_gm_skew_conversion(

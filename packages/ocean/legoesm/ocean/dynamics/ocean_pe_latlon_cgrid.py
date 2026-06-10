@@ -2713,6 +2713,35 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     else:
         Ah_kediss_cell = None
 
+    # Bottom-drag KE-extraction dissipation density K_diss_bot [m²/s³] at the
+    # interior interfaces (W-grid) — exposed ONLY when the prognostic-TKE
+    # ``source_bottom_drag_diss`` option is on (the ACC recipe), so the prognostic
+    # TKE source can recycle the bottom-drag KE extraction (Veros integrate_tke
+    # ``forc += K_diss_bot``). Built from the bottom-drag MOMENTUM tendencies
+    # ``diag_botdrag_u/v`` (= -r·u/dz_bot, already face-masked) via the shared
+    # KE-removal→W-grid mapping. ≥ 0 by construction (drag opposes flow). ``None``
+    # otherwise (default), keeping the tendency pytree + every existing path
+    # bit-identical.
+    _vmix = getattr(config, "physics", None)
+    _vmix = getattr(_vmix, "vertical_mixing", None) if _vmix is not None else None
+    _tke_botdrag = (
+        _vmix is not None and getattr(_vmix, "scheme", None) == "tke"
+        and bool(getattr(_vmix.tke, "prognostic", False))
+        and bool(getattr(_vmix.tke, "source_bottom_drag_diss", False))
+    )
+    if _tke_botdrag:
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            bottom_drag_kediss_tke_source,
+        )
+        K_diss_bot_w = bottom_drag_kediss_tke_source(
+            diag_botdrag_u * u_mask_3d, diag_botdrag_v * v_mask_3d,
+            u, v, mask,
+        )
+        K_diss_bot = Field(data=K_diss_bot_w, name="K_diss_bot",
+                           dims=dims_3d, units="m^2/s^3")
+    else:
+        K_diss_bot = None
+
     tendencies = LatLonCGridOceanTendencies(
         du_dt=Field(data=du_dt, name="du_dt", dims=dims_u, units="m/s^2"),
         dv_dt=Field(data=dv_dt, name="dv_dt", dims=dims_v, units="m/s^2"),
@@ -2733,6 +2762,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         Ah_visc_v=Ah_visc_v,
         Ah_kediss_cell=Ah_kediss_cell,
         surface_tracer_forcing=surface_tracer_forcing,
+        K_diss_bot=K_diss_bot,
     )
 
     if not diagnose_momentum:

@@ -1401,6 +1401,7 @@ class LatLonCGridOceanModel:
             kappa_gm_override = None
             kappa_redi_override = None
             eke_new = None
+            eke_diss_new = None
             # Prognostic-EKE GM closure (Eden-Greatbatch): kappa_GM = c_k·L·√E
             # from the evolving eddy-energy field, and integrate E one step
             # (transport by the depth-mean flow + semi-implicit source/sink).
@@ -1415,7 +1416,7 @@ class LatLonCGridOceanModel:
                     # kappa is a 3-D interface field, and E evolves by the
                     # depth-resolved source/sink + implicit vertical EKE diffusion
                     # + per-interface horizontal transport (Veros's 3-D vs.eke).
-                    eke_new, kappa_gm_override = self._eke_3d_step(
+                    eke_new, kappa_gm_override, eke_diss_new = self._eke_3d_step(
                         state, state_new, T_mid, S_mid, gm_cfg, eke_cfg, lm,
                         tend.A_v, dt,
                         Ah_visc_u=tend.Ah_visc_u, Ah_visc_v=tend.Ah_visc_v,
@@ -1480,6 +1481,10 @@ class LatLonCGridOceanModel:
             S_mid = S_mid + dt * dS_gm * mask_3d
             if eke_new is not None:
                 state_new = state_new._replace(eke=eke_new)
+            # Carry the EKE dissipation (Veros eke_diss_iw) for the prognostic-TKE
+            # source's ONE-STEP-LAGGED recycling (only the 3-D path produces it).
+            if eke_diss_new is not None:
+                state_new = state_new._replace(eke_diss=eke_diss_new)
 
         if self.config.tracer_advection == "som":
             # SOM (Prather 1986): Second Order Moments advection (#210).
@@ -1659,12 +1664,39 @@ class LatLonCGridOceanModel:
         # and bottom and is split-stepped (Lie splitting, 1st-order)
         # after tracer advection, GM/Redi, and the freshwater virtual
         # salt flux — matching MOM6's diabatic-process ordering.
+        tke_new = None
         if self.config.implicit_vertical_mixing and _apply_implicit_vmix:
-            state_new = self._apply_implicit_vertical_mixing(
-                state_new, dt, surface_forcing,
-                K_v_phys=tend.K_v, A_v_phys=tend.A_v,
-                K33_iso=k33_implicit, dt_mom=dt_mom,
-                surface_tracer_forcing=tend.surface_tracer_forcing,
+            if self._tke_prognostic_active():
+                # PROGNOSTIC TKE: seed from the carried state.tke, assemble the
+                # energy-recycling source forc (eke_diss_iw one-step-lagged from
+                # state.eke_diss + K_diss_bot from this step's tendency), run ONE
+                # backward-Euler TKE step (dt = dt_mom) inside the implicit solve,
+                # and carry the updated TKE forward.
+                _tke_old = state.tke.data if state.tke is not None else None
+                # eke_diss is read from state_new (THIS step's EKE update, which
+                # runs at step 7/GM-Redi BEFORE this implicit-mixing TKE solve) —
+                # matching Veros's same-step eke→tke ordering (veros.py:277,285),
+                # so there is NO lag in the synchronous (non-AB2) path. Falls back
+                # to the carried state.eke_diss when state_new has none yet.
+                _tke_source = self._assemble_tke_source(state, state_new, tend)
+                state_new, tke_new = self._apply_implicit_vertical_mixing(
+                    state_new, dt, surface_forcing,
+                    K_v_phys=tend.K_v, A_v_phys=tend.A_v,
+                    K33_iso=k33_implicit, dt_mom=dt_mom,
+                    surface_tracer_forcing=tend.surface_tracer_forcing,
+                    tke_old=_tke_old, tke_source=_tke_source, return_tke=True,
+                )
+            else:
+                state_new = self._apply_implicit_vertical_mixing(
+                    state_new, dt, surface_forcing,
+                    K_v_phys=tend.K_v, A_v_phys=tend.A_v,
+                    K33_iso=k33_implicit, dt_mom=dt_mom,
+                    surface_tracer_forcing=tend.surface_tracer_forcing,
+                )
+        if tke_new is not None:
+            state_new = state_new._replace(
+                tke=Field(data=tke_new, name="tke",
+                          dims=("lat", "lon", "level"), units="m^2/s^2"),
             )
 
         # 9. Conservation fixers
@@ -1683,9 +1715,72 @@ class LatLonCGridOceanModel:
             # solve (so it is NOT AB2-extrapolated) — and runs the conservation
             # fixer once on the final state.  ``tend.surface_tracer_forcing`` is
             # ``None`` unless ``surface_forcing_implicit`` is on ⇒ bit-identical.
+            # The prognostic-TKE source (eke_diss_iw from THIS step's EKE update
+            # on state_new + K_diss_bot from the tendency) is assembled here so
+            # ``_ab2_step``'s single implicit-mixing call can advance state.tke
+            # exactly once per step (None unless prognostic TKE is active ⇒
+            # bit-identical).
+            _tke_src = (self._assemble_tke_source(state, state_new, tend)
+                        if self._tke_prognostic_active() else None)
             return state_new, (tend.K_v, tend.A_v, k33_implicit,
-                               tend.surface_tracer_forcing)
+                               tend.surface_tracer_forcing, _tke_src)
         return state_new
+
+    def _tke_prognostic_active(self) -> bool:
+        """True iff the prognostic TKE vertical-mixing closure is configured.
+
+        Static Python predicate (config-only, no traced values): the
+        ``vertical_mixing`` scheme is ``"tke"`` AND
+        ``vertical_mixing.tke.prognostic=True``. Used to gate the prognostic
+        TKE carry in the model step (default False ⇒ Mode-B diagnostic chain).
+        """
+        physics = getattr(self.config, "physics", None)
+        if physics is None:
+            return False
+        vmix = getattr(physics, "vertical_mixing", None)
+        if vmix is None or vmix.scheme != "tke":
+            return False
+        return bool(getattr(vmix.tke, "prognostic", False))
+
+    def _assemble_tke_source(self, state, state_new, tend):
+        """Assemble the prognostic-TKE energy-recycling source ``forc`` [m²/s³].
+
+        Mirrors Veros integrate_tke ``forc = ... + eke_diss_iw + K_diss_bot``
+        (the ACC short-cut without idemix). Both terms are ≥ 0 (recycled,
+        already-dissipated mechanical energy) and live at the interior
+        interfaces ``(n_lat, n_lon, nlev-1)`` — the same W-grid the prognostic
+        TKE field lives on. Each is gated by its own config flag
+        (``source_eke_diss`` / ``source_bottom_drag_diss``); when both are off
+        the source is ``None`` ⇒ bit-identical to the closure without recycled
+        sources.
+
+        - ``eke_diss``: the EKE dissipation rate (Veros ``eke_diss_iw``). The
+          3-D EKE step (``_eke_3d_step``) runs in the GM/Redi stage of THIS
+          model step — BEFORE this implicit-mixing TKE solve — so ``state_new``
+          already carries this step's ``eke_diss`` (matching Veros's same-step
+          eke→tke ordering, veros.py:277,285: NO lag). Falls back to the carried
+          ``state.eke_diss`` if ``state_new`` has none yet (e.g. the 2-D EKE
+          path, which does not produce the 3-D dissipation field — then the
+          carried field is a documented ONE-STEP LAG, or ``None`` ⇒ no source).
+        - ``K_diss_bot``: this step's bottom-drag KE extraction, surfaced as
+          the tendency diagnostic ``tend.K_diss_bot``.
+        """
+        tke_cfg = self.config.physics.vertical_mixing.tke
+        source = None
+
+        def _accum(src, field):
+            return field if src is None else (src + field)
+
+        if getattr(tke_cfg, "source_eke_diss", False):
+            _eke_diss = state_new.eke_diss
+            if _eke_diss is None:
+                _eke_diss = state.eke_diss
+            if _eke_diss is not None:
+                source = _accum(source, jnp.maximum(_eke_diss.data, 0.0))
+        if getattr(tke_cfg, "source_bottom_drag_diss", False):
+            if tend.K_diss_bot is not None:
+                source = _accum(source, jnp.maximum(tend.K_diss_bot.data, 0.0))
+        return source
 
     def _eke_3d_step(
         self,
@@ -1860,9 +1955,10 @@ class LatLonCGridOceanModel:
                 Ah_visc_u.data, Ah_visc_v.data, state.u.data, state.v.data,
                 self.grid, lm, kdiss_h_cell=_kdiss_cell,
             )
-        E = eke_apply_local_source(
+        E, eke_diss_w = eke_apply_local_source(
             E, sigma3, L3, eke_cfg, dt,
             production_override=production_override, extra_source=extra_source,
+            return_dissipation=True,
         )
 
         # Floor at e_min on wet columns, zero on land (kappa_gm_override is
@@ -1881,7 +1977,16 @@ class LatLonCGridOceanModel:
         )
         eke_new = Field(data=E_new, name="eke",
                         dims=("lat", "lon", "level"), units="m^2/s^2")
-        return eke_new, kappa_gm_override
+        # EKE dissipation rate (Veros eke_diss_iw) at the interior interfaces,
+        # cast to the storage dtype + wet-masked, for the prognostic-TKE source
+        # (consumed ONE STEP LATER — the TKE K-profile solve precedes this EKE
+        # step in the legoESM model step). Field so the scan-carry pytree is
+        # stable; ≥ 0 by construction.
+        eke_diss_new = Field(
+            data=jax.lax.convert_element_type(
+                jnp.where(lm3 > 0.5, jnp.maximum(eke_diss_w, 0.0), 0.0), dtype),
+            name="eke_diss", dims=("lat", "lon", "level"), units="m^2/s^3")
+        return eke_new, kappa_gm_override, eke_diss_new
 
     def _apply_implicit_vertical_mixing(
         self,
@@ -1896,6 +2001,9 @@ class LatLonCGridOceanModel:
         surface_tracer_forcing=None,
         do_tracers: bool = True,
         do_momentum: bool = True,
+        tke_old=None,
+        tke_source=None,
+        return_tke: bool = False,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -1935,10 +2043,22 @@ class LatLonCGridOceanModel:
         AB2 state, in two separate calls.  Defaults (both True) ⇒ the original
         combined solve ⇒ bit-identical.
 
+        ``tke_old`` / ``tke_source`` / ``return_tke`` drive the PROGNOSTIC TKE
+        carry (``vertical_mixing.tke.prognostic=True``). ``tke_old`` is the TKE
+        field carried on ``state.tke`` (interior interfaces); ``tke_source`` is
+        the additive energy-recycling source ``forc`` (eke_diss_iw + K_diss_bot)
+        at the interior interfaces. The prognostic TKE solve uses ``dt_mom`` as
+        its step (Veros tke.py:137 ``dt_tke = dt_mom``). When ``return_tke`` is
+        True this method returns ``(state_new, tke_new)`` where ``tke_new`` is
+        the updated TKE field (``None`` unless the prognostic TKE scheme is
+        active). Defaults (``return_tke=False``) ⇒ returns the state only ⇒
+        bit-identical.
+
         Called only when ``config.implicit_vertical_mixing == True``.
         """
         if dt_mom is None:
             dt_mom = dt
+        tke_new = None
         from legoesm.ocean.physics.vertical_mixing import (
             implicit_vertical_diffusion_ocean, build_dz_half,
             compute_vertical_K_profiles,
@@ -1984,12 +2104,32 @@ class LatLonCGridOceanModel:
             _vmix_eos_fn = _make_eos_fn(
                 eos=self.config.eos, eos_linear=self.config.eos_linear,
             )
-            K_v_cell, A_v_cell = compute_vertical_K_profiles(
-                cc_state, self.z_coord, surface_forcing, physics_config,
-                A_v_background=float(self.config.A_v),
-                K_v_background=float(self.config.K_v),
-                eos_fn=_vmix_eos_fn,
+            # PROGNOSTIC TKE carry: thread the carried TKE + the energy-recycling
+            # source into the fallback K-profile solve, and capture the updated
+            # TKE so the model step can store it back on the state. The TKE step
+            # uses dt_mom (Veros tke.py:137). For non-prognostic configs (and
+            # non-TKE schemes) ``tke_new`` comes back None ⇒ bit-identical.
+            _vmix_cfg = physics_config.vertical_mixing
+            _tke_prognostic = (
+                _vmix_cfg.scheme == "tke"
+                and bool(getattr(_vmix_cfg.tke, "prognostic", False))
             )
+            if _tke_prognostic:
+                K_v_cell, A_v_cell, tke_new = compute_vertical_K_profiles(
+                    cc_state, self.z_coord, surface_forcing, physics_config,
+                    A_v_background=float(self.config.A_v),
+                    K_v_background=float(self.config.K_v),
+                    eos_fn=_vmix_eos_fn,
+                    tke_old=tke_old, dt_tke=dt_mom,
+                    tke_source=tke_source, return_tke=True,
+                )
+            else:
+                K_v_cell, A_v_cell = compute_vertical_K_profiles(
+                    cc_state, self.z_coord, surface_forcing, physics_config,
+                    A_v_background=float(self.config.A_v),
+                    K_v_background=float(self.config.K_v),
+                    eos_fn=_vmix_eos_fn,
+                )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched
         # column heights match the partial-cell / z* layer thicknesses
@@ -2058,12 +2198,15 @@ class LatLonCGridOceanModel:
             u_new = jnp.where(u_mask_3d > 0.5, u_new, state.u.data)
             v_new = jnp.where(v_mask_3d > 0.5, v_new, state.v.data)
 
-        return state._replace(
+        state_out = state._replace(
             u=state.u.replace(data=u_new),
             v=state.v.replace(data=v_new),
             T=state.T.replace(data=T_new),
             S=state.S.replace(data=S_new),
         )
+        if return_tke:
+            return state_out, tke_new
+        return state_out
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: LatLonCGridOceanState, dt: float,
@@ -2332,10 +2475,13 @@ class LatLonCGridOceanModel:
         # tendencies (pre-step state u^n where the vmix scheme surfaces them; else
         # None ⇒ recomputed in _apply_implicit_vertical_mixing, as the FE path).
         state_expl, (K_v_phys, A_v_phys, k33_implicit,
-                     surface_tracer_forcing) = self._step_impl(
+                     surface_tracer_forcing, tke_source) = self._step_impl(
             state, dt, freshwater=freshwater,
             surface_forcing=surface_forcing, sponge=sponge,
             _apply_implicit_vmix=False)
+        _tke_prog = self._tke_prognostic_active()
+        _tke_old = (state.tke.data if (_tke_prog and state.tke is not None)
+                    else None)
         eps = self.config.ab2_epsilon
         a_n, a_p = 1.5 + eps, 0.5 + eps
         mask3 = state.land_mask.data[..., jnp.newaxis]
@@ -2394,6 +2540,15 @@ class LatLonCGridOceanModel:
         # --- Implicit vertical mixing applied ONCE to the AB2 state (Veros
         #     thermodynamics.py vertmix / solve_stream.py du_mix), with the
         #     diffusivity profiles from the tendencies (see docstring) ---
+        # Prognostic TKE under AB2: the TRACER implicit-mixing call is the
+        # single authoritative TKE site (tke_old from state.tke, the source
+        # assembled by _step_impl from this step's EKE update + K_diss_bot);
+        # the updated TKE is stored on the final state below.  The additive-
+        # friction MOMENTUM-only call passes tke_old WITHOUT return_tke so its
+        # A_v profiles are consistent with the carried TKE (Veros derives
+        # kappaM from tke[tau] at step start) but never advances it.  Off ⇒
+        # tke args are all None ⇒ bit-identical.
+        tke_new_ab2 = None
         if self.config.implicit_vertical_mixing:
             dt_mom = dt / self.config.dt_mom_ratio
             if self.config.momentum_friction_additive:
@@ -2414,16 +2569,23 @@ class LatLonCGridOceanModel:
                     state, dt, surface_forcing,
                     K_v_phys=K_v_phys, A_v_phys=A_v_phys,
                     dt_mom=dt_mom, do_tracers=False,
+                    tke_old=_tke_old,
                 )
                 du_impl = state_fric.u.data - state.u.data
                 dv_impl = state_fric.v.data - state.v.data
-                state_ab2 = self._apply_implicit_vertical_mixing(
+                _trac = self._apply_implicit_vertical_mixing(
                     state_ab2, dt, surface_forcing,
                     K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
                     dt_mom=dt_mom,
                     surface_tracer_forcing=surface_tracer_forcing,
                     do_momentum=False,
+                    tke_old=_tke_old, tke_source=tke_source,
+                    return_tke=_tke_prog,
                 )
+                if _tke_prog:
+                    state_ab2, tke_new_ab2 = _trac
+                else:
+                    state_ab2 = _trac
                 u_add = (state_ab2.u.data + du_impl) * u_mask3
                 v_add = (state_ab2.v.data + dv_impl) * v_mask3
                 u_add = u_add.at[:, -1].set(u_add[:, 0])   # periodic-lon wrap
@@ -2432,12 +2594,23 @@ class LatLonCGridOceanModel:
                     v=state_ab2.v.replace(data=v_add),
                 )
             else:
-                state_ab2 = self._apply_implicit_vertical_mixing(
+                _seq = self._apply_implicit_vertical_mixing(
                     state_ab2, dt, surface_forcing,
                     K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
                     dt_mom=dt_mom,
                     surface_tracer_forcing=surface_tracer_forcing,
+                    tke_old=_tke_old, tke_source=tke_source,
+                    return_tke=_tke_prog,
                 )
+                if _tke_prog:
+                    state_ab2, tke_new_ab2 = _seq
+                else:
+                    state_ab2 = _seq
+        if tke_new_ab2 is not None:
+            state_ab2 = state_ab2._replace(
+                tke=Field(data=tke_new_ab2, name="tke",
+                          dims=("lat", "lon", "level"), units="m^2/s^2"),
+            )
 
         # --- Conservation fixer once, on the final state ---
         if self.config.use_conservation_fixer:
@@ -2703,6 +2876,46 @@ class LatLonCGridOceanModel:
             state = state._replace(
                 eke=Field(data=eke0, name="eke", dims=eke_dims,
                           units="m^2/s^2"))
+            # The 3-D EKE step also writes state.eke_diss (Veros eke_diss_iw) every
+            # step; seed it to zero here so the None -> Field transition never
+            # happens mid-scan (breaks the constant-pytree carry). Only the 3-D
+            # path produces it, so seed it only there.
+            if gm_redi.eke.eke_3d and state.eke_diss is None:
+                ediss0 = jnp.zeros((lm.shape[0], lm.shape[1], nlev - 1),
+                                   dtype=eke0.dtype)
+                state = state._replace(
+                    eke_diss=Field(data=ediss0, name="eke_diss",
+                                   dims=("lat", "lon", "level"),
+                                   units="m^2/s^3"))
+
+        # Prognostic-TKE carry: when the prognostic TKE closure is on but the
+        # TKE field has not been seeded (state.tke is None), pre-seed it (and the
+        # eke_diss source-carry field, if source_eke_diss) so the scan keeps a
+        # constant pytree (the model step would otherwise turn tke None -> Field
+        # on the first iteration, crashing lax.scan). Shapes are STATIC per
+        # config: 3-D (n_lat, n_lon, nlev-1) at the interior interfaces. TKE
+        # seeded at tke_background on wet columns; eke_diss seeded at 0.
+        if self._tke_prognostic_active() and state.tke is None:
+            from legoesm.core.field import Field
+            lm = state.land_mask.data
+            nlev = state.T.data.shape[-1]
+            dtype = state.T.data.dtype
+            tke_cfg = self.config.physics.vertical_mixing.tke
+            wet3 = (lm[:, :, jnp.newaxis] > 0.5)
+            tke0 = jnp.where(
+                wet3, tke_cfg.tke_background, 0.0,
+            ).astype(dtype) * jnp.ones((1, 1, nlev - 1), dtype=dtype)
+            state = state._replace(
+                tke=Field(data=tke0, name="tke",
+                          dims=("lat", "lon", "level"), units="m^2/s^2"))
+            if (getattr(tke_cfg, "source_eke_diss", False)
+                    and state.eke_diss is None):
+                ediss0 = jnp.zeros((lm.shape[0], lm.shape[1], nlev - 1),
+                                   dtype=dtype)
+                state = state._replace(
+                    eke_diss=Field(data=ediss0, name="eke_diss",
+                                   dims=("lat", "lon", "level"),
+                                   units="m^2/s^3"))
 
         # Rigid-lid: pre-build the static island/depth data (host-side
         # flood-fill) so the scan captures it as a compile-time constant, and

@@ -325,6 +325,20 @@ class LatLonCGridOceanState(NamedTuple):
     # when the prognostic-EKE GM closure is active (config.gm_redi.eke not None).
     # Default None -> inert (no EKE): zero behaviour change for existing configs.
     eke: object = None
+    # Prognostic turbulent kinetic energy [m^2/s^2] at the interior interfaces
+    # (W-grid), 3-D Field (n_lat, n_lon, nlev-1), used only when the prognostic
+    # TKE vertical-mixing closure is active (vertical_mixing.tke.prognostic=True).
+    # Carried across model steps: each step runs ONE backward-Euler TKE solve
+    # (dt = dt_mom) seeded from this field and stores the updated TKE back.
+    # Default None -> inert (Mode-B diagnostic chain): zero behaviour change.
+    tke: object = None
+    # Carried EKE dissipation rate [m^2/s^3] at the interior interfaces (W-grid),
+    # 3-D Field (n_lat, n_lon, nlev-1). Populated by the 3-D EKE step (Veros
+    # eke_diss_iw) and consumed ONE STEP LATER by the prognostic TKE source when
+    # vertical_mixing.tke.source_eke_diss=True (the EKE step runs AFTER the TKE
+    # K-profile solve in the legoESM step ordering -> documented one-step lag).
+    # Default None -> inert: zero behaviour change.
+    eke_diss: object = None
     # Prior EXPLICIT increment ΔX_expl^{n-1} for the AB2 outer integrator
     # (config.outer_integrator == "ab2"): the explicit-only forward-Euler increment
     # (advection, GM/Redi, lateral friction, Coriolis, barotropic solve, freshwater)
@@ -417,6 +431,13 @@ class LatLonCGridOceanTendencies(NamedTuple):
     Ah_visc_v: object = None
     Ah_kediss_cell: object = None
     surface_tracer_forcing: object = None
+    # Bottom-drag KE-extraction dissipation density [m²/s³] at the interior
+    # interfaces (W-grid, (n_lat, n_lon, nlev-1)) — Veros K_diss_bot. Populated
+    # ONLY when the prognostic-TKE ``source_bottom_drag_diss`` option is on (the
+    # ACC recipe), so the prognostic TKE source can recycle the bottom-drag KE
+    # extraction (Veros integrate_tke ``forc += K_diss_bot``). ``None`` otherwise
+    # (default), keeping the tendency pytree + every existing path bit-identical.
+    K_diss_bot: object = None
 
 
 class MomentumTendencyDiagnostics(NamedTuple):

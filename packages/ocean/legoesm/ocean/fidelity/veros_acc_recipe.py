@@ -151,6 +151,27 @@ ACC_TKE_CONFIG = TKEConfig(
     # convecting column Ri < 0 -> Pr -> 1 so K_H tracks the large convective K_M.
     prandtl_mode="richardson",
     Prandtl_tke0=10.0,
+    # ----- PROGNOSTIC TKE (Veros enable_tke prognostic form) -----
+    # Veros ACC runs enable_tke=True PROGNOSTICALLY: one backward-Euler TKE step
+    # per model step with dt_tke = dt_mom (tke.py:137), the TKE field carried
+    # across steps (state.tke), seeded at tke_background. legoESM's prior recipe
+    # ran the Mode-B quasi-steady DIAGNOSTIC chain (n_iterations=3, dt=86400);
+    # prognostic=True switches to the faithful carried-TKE form.
+    prognostic=True,
+    # Energy-recycling sources (Veros ACC: enable_eke=True, enable_idemix=False,
+    # so integrate_tke ``forc = K_diss_v - P_diss_v - P_diss_nonlin + eke_diss_iw
+    # + K_diss_bot``). legoESM recycles the two terms it can surface today:
+    #   - source_eke_diss: the EKE dissipation rate eke_diss_iw (= c_eps·√E·E/L),
+    #     carried from the 3-D EKE step (state.eke_diss) — fed within the same
+    #     step (legoESM runs EKE before the TKE solve, matching Veros's
+    #     eke→tke ordering), so NO lag in the synchronous path.
+    #   - source_bottom_drag_diss: K_diss_bot, the bottom-drag KE extraction
+    #     (Veros linear_bottom_friction diss = r_bot·u²), surfaced as the
+    #     tendency diagnostic tend.K_diss_bot.
+    # DEFERRED (legoESM does not yet surface the diagnostics): P_diss_adv
+    # (non-conservative advection) and P_diss_nonlin (cabbeling / non-linear EOS).
+    source_eke_diss=True,
+    source_bottom_drag_diss=True,
 )
 
 # Veros GM/Redi knobs (verbatim from ACCSetup)
@@ -396,6 +417,30 @@ def build_acc_state(grid: LatLonGrid,
             eke_dims = ("lat", "lon")
         state = state._replace(
             eke=Field(data=eke0, name="eke", dims=eke_dims, units="m^2/s^2"))
+        # eke_diss (Veros eke_diss_iw): the 3-D EKE step writes this every step;
+        # seed it to zero so the None -> Field transition never happens mid-scan
+        # (constant-pytree carry). Only the 3-D EKE path produces it.
+        if eke_cfg.eke_3d:
+            nlev = z_coord.n_levels
+            ediss0 = jnp.zeros((lm.shape[0], lm.shape[1], nlev - 1),
+                               dtype=eke0.dtype)
+            state = state._replace(
+                eke_diss=Field(data=ediss0, name="eke_diss",
+                               dims=("lat", "lon", "level"), units="m^2/s^3"))
+    # PROGNOSTIC TKE: when the recipe runs prognostic TKE on, seed state.tke at
+    # the tke_background floor on wet columns (interior interfaces, W-grid) so the
+    # carried field is a Field from step 0 (the model step would otherwise turn
+    # tke None -> Field on the first iteration, breaking the lax.scan carry).
+    tke_cfg = ACC_TKE_CONFIG
+    if getattr(tke_cfg, "prognostic", False):
+        lm = state.land_mask.data
+        nlev = z_coord.n_levels
+        wet3 = (lm[:, :, jnp.newaxis] > 0.5)
+        tke0 = jnp.where(wet3, tke_cfg.tke_background, 0.0).astype(
+            lm.dtype) * jnp.ones((1, 1, nlev - 1), dtype=lm.dtype)
+        state = state._replace(
+            tke=Field(data=tke0, name="tke", dims=("lat", "lon", "level"),
+                      units="m^2/s^2"))
     return state
 
 
