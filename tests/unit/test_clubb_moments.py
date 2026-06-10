@@ -22,7 +22,14 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb_moments import (  # noqa: E402
     advance_windm_edsclrm,
+    term_dp1_lhs,
+    term_dp1_rhs,
+    term_pr1,
+    term_pr2,
+    term_tp_rhs,
 )
+
+from legoesm import constants  # noqa: E402
 
 _CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
 _FIX = Path(__file__).resolve().parent / "clubb_fixtures"
@@ -127,6 +134,93 @@ def test_calm_wind_gradient_finite():
 
     g = jax.grad(loss)(kw["um"])
     assert jnp.all(jnp.isfinite(g))
+
+
+# ---------------------------------------------------------------------------
+# advance_xp2_xpyp term builders
+# ---------------------------------------------------------------------------
+
+def _gr_only(ng=2, nzt=8):
+    nzm = nzt + 1
+    zm_1d = np.cumsum(np.concatenate([[0.0], 40.0 * 1.1 ** np.arange(nzm)[:-1]]))
+    zm = jnp.asarray(np.tile(zm_1d, (ng, 1)))
+    return make_clubb_grid(zm, 0.5 * (zm[:, 1:] + zm[:, :-1])), ng, nzm
+
+
+def test_term_dp1_lhs_boundaries_zero_interior():
+    ng, nzm = 2, 9
+    Cn = jnp.asarray(0.5 + np.random.default_rng(0).random((ng, nzm)))
+    itau = jnp.asarray(1e-3 + 1e-3 * np.random.default_rng(1).random((ng, nzm)))
+    out = term_dp1_lhs(Cn, itau)
+    np.testing.assert_array_equal(np.asarray(out)[:, 0], 0.0)
+    np.testing.assert_array_equal(np.asarray(out)[:, -1], 0.0)
+    np.testing.assert_allclose(np.asarray(out[:, 1:-1]), np.asarray(Cn * itau)[:, 1:-1], rtol=1e-13)
+
+
+def test_term_dp1_rhs_definition():
+    ng, nzm = 2, 7
+    Cn = jnp.asarray(np.random.default_rng(2).random((ng, nzm)))
+    itau = jnp.asarray(np.random.default_rng(3).random((ng, nzm)))
+    np.testing.assert_allclose(np.asarray(term_dp1_rhs(Cn, itau, 1e-4)),
+                               np.asarray(Cn * itau * 1e-4), rtol=1e-13)
+
+
+def test_term_pr2_nonnegative():
+    gr, ng, nzm = _gr_only()
+    rng = np.random.default_rng(8)
+    nzt = nzm - 1
+    out = term_pr2(0.3, 0.3, jnp.asarray(300.0 + rng.random((ng, nzm))),
+                   jnp.asarray(rng.standard_normal((ng, nzm)) * 0.01),
+                   jnp.asarray(rng.standard_normal((ng, nzm)) * 0.05),
+                   jnp.asarray(rng.standard_normal((ng, nzm)) * 0.05),
+                   jnp.asarray(rng.standard_normal((ng, nzt))),
+                   jnp.asarray(rng.standard_normal((ng, nzt))), gr)
+    assert jnp.all(out >= 0.0)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_xp2_term_builders_parity():
+    """Bit-exact parity of the dp1/tp/pr1/pr2 term builders vs the reference."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_xp2_xpyp_module as R  # noqa: N812
+
+    gr, ng, nzm = _gr_only()
+    nzt = nzm - 1
+    rng = np.random.default_rng(31)
+    Cn = jnp.asarray(0.5 + rng.random((ng, nzm)))
+    itau = jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm)))
+    np.testing.assert_array_equal(np.asarray(term_dp1_lhs(Cn, itau)),
+                                  np.asarray(R.term_dp1_lhs(Cn, itau)))
+    np.testing.assert_array_equal(np.asarray(term_dp1_rhs(Cn, itau, 1e-4)),
+                                  np.asarray(R.term_dp1_rhs(Cn, itau, 1e-4)))
+    xam = jnp.asarray(rng.standard_normal((ng, nzt)))
+    xbm = jnp.asarray(rng.standard_normal((ng, nzt)))
+    wpxap = jnp.asarray(rng.standard_normal((ng, nzm)))
+    wpxbp = jnp.asarray(rng.standard_normal((ng, nzm)))
+    np.testing.assert_array_equal(
+        np.asarray(term_tp_rhs(xam, xbm, wpxap, wpxbp, gr.invrs_dzm)),
+        np.asarray(R.term_tp_rhs(xam, xbm, wpxap, wpxbp, gr.invrs_dzm)))
+    xbp2 = jnp.asarray(0.1 + rng.random((ng, nzm)))
+    wp2 = jnp.asarray(0.2 + rng.random((ng, nzm)))
+    itc4 = jnp.asarray(1e-3 + rng.random((ng, nzm)))
+    itc14 = jnp.asarray(1e-3 + rng.random((ng, nzm)))
+    np.testing.assert_array_equal(
+        np.asarray(term_pr1(5.2, 2.2, xbp2, wp2, itc4, itc14, (2e-2) ** 2)),
+        np.asarray(R.term_pr1(5.2, 2.2, xbp2, wp2, itc4, itc14, (2e-2) ** 2)))
+    # term_pr2 uses grav -> patch reference constant to legoESM g, then bit-exact.
+    R.grav = constants.g
+    thv = jnp.asarray(300.0 + rng.random((ng, nzm)))
+    wpthvp = jnp.asarray(rng.standard_normal((ng, nzm)) * 0.01)
+    upwp = jnp.asarray(rng.standard_normal((ng, nzm)) * 0.05)
+    vpwp = jnp.asarray(rng.standard_normal((ng, nzm)) * 0.05)
+    um = jnp.asarray(rng.standard_normal((ng, nzt)))
+    vm = jnp.asarray(rng.standard_normal((ng, nzt)))
+    # The reference term_pr2 only reads gr.invrs_dzm, which CLUBBGrid provides.
+    np.testing.assert_array_equal(
+        np.asarray(term_pr2(0.3, 0.3, thv, wpthvp, upwp, vpwp, um, vm, gr)),
+        np.asarray(R.term_pr2(0.3, 0.3, thv, wpthvp, upwp, vpwp, um, vm, gr)))
 
 
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),

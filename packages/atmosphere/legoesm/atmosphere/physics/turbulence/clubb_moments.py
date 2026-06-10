@@ -26,8 +26,12 @@ import jax.numpy as jnp
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid
 from legoesm.atmosphere.physics.turbulence.clubb_solve import tridiag_solve
 
+from legoesm import constants
+
 _EPS = 1.0e-10
 _MAX_MAG_CORRELATION = 0.99   # Cauchy-Schwarz correlation bound (constants_clubb)
+_ZERO_THRESHOLD = 0.0
+_ONE_THIRD = 1.0 / 3.0
 
 
 def _safe_sqrt(x: jax.Array) -> jax.Array:
@@ -268,6 +272,68 @@ def advance_windm_edsclrm(um, vm, upwp, vpwp, wp2, up2, vp2, wm_zt, Kh_zm,
     return um_new, vm_new, upwp_new, vpwp_new
 
 
+# ---------------------------------------------------------------------------
+# advance_xp2_xpyp term builders (scalar/horizontal-velocity variance equations)
+# ---------------------------------------------------------------------------
+
+def term_dp1_lhs(Cn, invrs_tau_zm):
+    """Main-diagonal dissipation-term-1 coefficient for x_a'x_b' (``term_dp1_lhs``).
+
+    Implicit ``+(C_n/tau_zm)·x_a'x_b'(t+1)`` — main diagonal only, interior
+    levels; boundaries zero. ``Cn``/``invrs_tau_zm`` are ``(ngrdcol, nzm)``.
+    """
+    interior = Cn[:, 1:-1] * invrs_tau_zm[:, 1:-1]
+    zeros_bnd = jnp.zeros((Cn.shape[0], 1), dtype=Cn.dtype)
+    return jnp.concatenate([zeros_bnd, interior, zeros_bnd], axis=1)
+
+
+def term_dp1_rhs(Cn, invrs_tau_zm, threshold):
+    """Explicit dissipation-term-1 RHS for x'y' (``term_dp1_rhs``), all levels.
+
+    The explicit part of ``-(C_n/tau_zm)·(x'y' - threshold)`` is
+    ``+(C_n/tau_zm)·threshold``.
+    """
+    return Cn * invrs_tau_zm * threshold
+
+
+def term_tp_rhs(xam, xbm, wpxap, wpxbp, invrs_dzm):
+    """Turbulent production of x_a'x_b' (explicit) on interior zm levels (``term_tp_rhs``).
+
+    ``rhs = -w'x_b'·d(x_am)/dz - w'x_a'·d(x_bm)/dz``. ``x_am``/``x_bm`` are zt
+    (nzt); returns the interior slice ``(ngrdcol, nzm-2)``.
+    """
+    return (-wpxbp[:, 1:-1] * invrs_dzm[:, 1:-1] * (xam[:, 1:] - xam[:, :-1])
+            - wpxap[:, 1:-1] * invrs_dzm[:, 1:-1] * (xbm[:, 1:] - xbm[:, :-1]))
+
+
+def term_pr1(C4, C14, xbp2, wp2, invrs_tau_C4_zm, invrs_tau_C14_zm, w_tol_sqd):
+    """Explicit pressure/dissipation term 1 for up2/vp2 (``term_pr1``), interior.
+
+    ``rhs = (1/3)C4(xbp2+wp2)/tau_C4 - (1/3)C14(xbp2+wp2)/tau_C14
+            + C14·w_tol²/tau_C14``; ``xbp2`` is the *other* horizontal variance.
+    Returns the interior slice ``(ngrdcol, nzm-2)``.
+    """
+    return (_ONE_THIRD * C4 * (xbp2[:, 1:-1] + wp2[:, 1:-1]) * invrs_tau_C4_zm[:, 1:-1]
+            - _ONE_THIRD * C14 * (xbp2[:, 1:-1] + wp2[:, 1:-1]) * invrs_tau_C14_zm[:, 1:-1]
+            + C14 * invrs_tau_C14_zm[:, 1:-1] * w_tol_sqd)
+
+
+def term_pr2(C_uu_shr, C_uu_buoy, thv_ds_zm, wpthvp, upwp, vpwp, um, vm, gr: CLUBBGrid):
+    """Explicit pressure term 2 (PR2) for up2/vp2 (``term_pr2``), interior, floored ≥0.
+
+    ``rhs = (2/3)[C_uu_buoy·(g/thv_ds)·w'thv' + C_uu_shr·(-u'w'·d(um)/dz
+            - v'w'·d(vm)/dz)]`` clamped to 0. Uses ``constants.g``. Returns the
+    interior slice ``(ngrdcol, nzm-2)``.
+    """
+    invrs_dzm = gr.invrs_dzm
+    du_dz = invrs_dzm[:, 1:-1] * (um[:, 1:] - um[:, :-1])
+    dv_dz = invrs_dzm[:, 1:-1] * (vm[:, 1:] - vm[:, :-1])
+    pr2 = (2.0 / 3.0) * (
+        C_uu_buoy * (constants.g / thv_ds_zm[:, 1:-1]) * wpthvp[:, 1:-1]
+        + C_uu_shr * (-upwp[:, 1:-1] * du_dz - vpwp[:, 1:-1] * dv_dz))
+    return jnp.maximum(pr2, _ZERO_THRESHOLD)
+
+
 __all__ = [
     "diffusion_zt_lhs",
     "term_ma_zt_lhs_upwind",
@@ -277,4 +343,9 @@ __all__ = [
     "windm_edsclrm_rhs",
     "windm_edsclrm_lhs",
     "advance_windm_edsclrm",
+    "term_dp1_lhs",
+    "term_dp1_rhs",
+    "term_tp_rhs",
+    "term_pr1",
+    "term_pr2",
 ]
