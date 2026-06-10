@@ -520,10 +520,20 @@ Root-caused, NOT a flux regression:
   ice-thermo tripole vs 2.86°C in the NCAR run — essentially identical. The latlon 1° grid has NO such seam by
   construction (yesterday's clean map). The physical domain i=1..360 integrates correctly (tripole is stable +
   SST-faithful); only the 2 halo columns are off, so the seam is mild not catastrophic.
-- **FIX = careful curvilinear work (deferred, NOT rushed):** make the tripole apply the ORCA 2-pt cyclic
-  overlap (col0←col_{n-2}, col_{n-1}←col1) instead of the regular-grid roll, with codex review + full
-  cold-start-stability re-validation (the tripole periodicity is load-bearing for the hard-won WOA cold start).
-  Interim: the **latlon 1° grid is the clean-grid comparison vehicle** (no seam).
+- **ROOT CAUSE CONFIRMED at mesh level:** the eORCA1 mesh_mask's cyclic halo columns i=0/i=361 are marked
+  LAND everywhere (0 wet) while their ORCA-overlap partners i=360/i=1 are ocean (147/143 wet) — 143 latitudes
+  where i=1 is ocean but its west-neighbour i=0 is a fake land wall. NEMO fills these halos every step via
+  `lbc_lnk`; legoESM read `tmaskutil` raw and never applied the overlap → the lon-72.5 seam ocean is severed.
+  DEEPER: legoESM treats the (332,362) grid as a period-**362** ring (operators `jnp.roll(...,axis=1)` over
+  all 362 cols), but eORCA1 is physically period-**360** with 2 duplicate-longitude overlap halos — so even
+  filling the mask won't hold: the 2 seam columns evolve independently (no halo slaving) and re-drift.
+- **FIX = careful dycore work (DEFERRED, needs user steer — load-bearing + stability-risky):** EITHER
+  (a) per-step ORCA cyclic-overlap exchange on T/S/eta/u/v (col0←col360, col361←col1; lbc_lnk-style, in the
+  hot loop), OR (b) strip to 360 physical columns with period-360 roll (cleaner, bigger grid/state refactor).
+  BOTH risk the hard-won WOA cold-start stability (tripole periodicity is woven through advection/PGF/
+  barotropic) → require gated impl + codex + 30-day cold-start smoke + W2-style visual check BEFORE trusting,
+  then a tripole re-run. NOT a mid-loop rush. Interim: the **latlon 1° grid is the clean-grid comparison
+  vehicle** (regular periodic, no seam) — relaunched with the NCAR fluxes (8457282).
 - **Large local SST biases (user):** marginal seas (Persian Gulf min 13°C, Red Sea 15°C) are COLD-biased in
   BOTH runs (old Gulf min was 2.6°C — NCAR is LESS cold, an improvement); no runaway hot cells (0 wet cells
   >35°C). On the clean latlon grid the dominant local bias is the Kuroshio/Oyashio WBC warm spot (+10°C @
