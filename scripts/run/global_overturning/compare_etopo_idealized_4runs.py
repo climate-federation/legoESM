@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "src"))
-sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(REPO / "scripts" / "matrix"))
 
 from ocean_test_matrix.regridding import _bin_to_latlon  # noqa: E402
 

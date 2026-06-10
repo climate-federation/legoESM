@@ -55,6 +55,12 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
+# ocean_test_matrix package home (scripts/matrix/) for the function-scope
+# imports below — direct execution does not otherwise have it on sys.path.
+_MATRIX_DIR = str(Path(__file__).resolve().parents[1] / "matrix")
+if _MATRIX_DIR not in sys.path:
+    sys.path.insert(0, _MATRIX_DIR)
+
 # ---------------------------------------------------------------------------
 # Regime presets
 # ---------------------------------------------------------------------------

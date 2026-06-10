@@ -20,7 +20,7 @@ def _matrix_module():
         repo_root = Path(__file__).resolve().parents[3]
         scripts_dir = repo_root / "scripts"
         if str(scripts_dir) not in sys.path:
-            sys.path.insert(0, str(scripts_dir))
+            sys.path.insert(0, str(scripts_dir / "matrix"))
         # Phase-4 script reorg moved the runner into scripts/matrix/; the
         # ocean_test_matrix package stayed at scripts/ (kept on sys.path above).
         # Accept either location so the loader survives an in-flight reorg.
@@ -167,7 +167,7 @@ def _rest_state(grid_type, res, H_max=5500.0, nlev=10):
     repo_root = Path(__file__).resolve().parents[3]
     scripts_dir = repo_root / "scripts"
     if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
+        sys.path.insert(0, str(scripts_dir / "matrix"))
     from ocean_test_matrix.setup import _create_ocean_setup
     from ocean_test_matrix.testcase import TestCase
     matrix_mod = _matrix_module()
