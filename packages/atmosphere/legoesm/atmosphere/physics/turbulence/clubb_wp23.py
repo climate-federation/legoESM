@@ -31,6 +31,10 @@ from __future__ import annotations
 import jax.numpy as jnp
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid
 
+from legoesm import constants
+
+_TWO_THIRDS = 2.0 / 3.0
+
 
 def weights_zt2zm(gr: CLUBBGrid):
     """zt->zm interpolation weights ``(ncol, nzm, 2)`` (``calc_zt2zm_weights``).
@@ -186,6 +190,172 @@ def wp3_term_pr1_lhs(C8, C8b, invrs_tau_wp3_zt, Skw_zt):
     return lhs
 
 
+# ---------------------------------------------------------------------------
+# RHS term builders
+# ---------------------------------------------------------------------------
+# Most match CLUBB-JAX (CAM == ARM for these). Two diverge: the CLUBB-JAX port
+# hardcodes the ARM defaults l_damp_wp2_using_em=True and
+# l_use_tke_in_wp3_pr_turb_term=True, but CAM sets BOTH False — so for those the
+# CAM-branch formula is taken from the CLUBB Fortran
+# (CESM .../CLUBB_core/advance_wp2_wp3_module.F90), not from CLUBB-JAX (which
+# only implements the True branch). Those two carry no JAX bit-exact oracle and
+# are validated structurally + golden-pinned + against the Fortran by hand.
+
+
+def wp2_term_pr_dfsn_rhs(C_wp2_pr_dfsn, rho_ds_zt, invrs_rho_ds_zm,
+                         wpup2, wpvp2, wp3, gr: CLUBBGrid):
+    """Pressure-diffusion RHS for wp2 (``wp2_term_pr_dfsn_rhs``), ``(ncol, nzm)``.
+
+    ``C_wp2_pr_dfsn·d/dz[rho_ds·(w'u'^2 + w'v'^2 + w'^3)]/rho_ds`` at interior zm
+    levels; the lower boundary copies the first interior value (per the
+    reference). ``wpup2``/``wpvp2``/``wp3`` are zt-level; ``C_wp2_pr_dfsn`` is
+    ``(ncol,)``.
+    """
+    wpuip2 = wpup2 + wpvp2 + wp3
+    rhs = jnp.zeros_like(invrs_rho_ds_zm)
+    fac = C_wp2_pr_dfsn[:, None] * invrs_rho_ds_zm[:, 1:-1] * gr.invrs_dzm[:, 1:-1]
+    interior = fac * (rho_ds_zt[:, 1:] * wpuip2[:, 1:] - rho_ds_zt[:, :-1] * wpuip2[:, :-1])
+    rhs = rhs.at[:, 1:-1].set(interior)
+    rhs = rhs.at[:, 0].set(rhs[:, 1])
+    return rhs
+
+
+def wp3_term_pr_dfsn_rhs(C_wp3_pr_dfsn, rho_ds_zm, invrs_rho_ds_zt,
+                         wp2up2, wp2vp2, wp4, up2, vp2, wp2, gr: CLUBBGrid):
+    """Pressure-diffusion RHS for wp3 (``wp3_term_pr_dfsn_rhs``), ``(ncol, nzt)``.
+
+    ``C_wp3_pr_dfsn·d/dz[rho_ds·net]/rho_ds`` where ``net = (w'^2 u'^2 + w'^2 v'^2
+    + w'^4) - w'^2(u'^2 + v'^2 + w'^2)`` (all zm-level), at interior zt levels;
+    boundaries zero. ``C_wp3_pr_dfsn`` is ``(ncol,)``.
+    """
+    net = (wp2up2 + wp2vp2 + wp4) - wp2 * (up2 + vp2 + wp2)
+    rhs = jnp.zeros_like(invrs_rho_ds_zt)
+    fac = C_wp3_pr_dfsn[:, None] * invrs_rho_ds_zt[:, 1:-1] * gr.invrs_dzt[:, 1:-1]
+    val = rho_ds_zm[:, 2:-1] * net[:, 2:-1] - rho_ds_zm[:, 1:-2] * net[:, 1:-2]
+    rhs = rhs.at[:, 1:-1].set(fac * val)
+    return rhs
+
+
+def wp2_terms_bp_pr2_rhs(C_uu_buoy, thv_ds_zm, wpthvp):
+    """Buoyancy + pressure-2 RHS for wp2 (``wp2_terms_bp_pr2_rhs``), ``(ncol, nzm)``.
+
+    ``(1 - C_uu_buoy)·2·(g/thv_ds)·w'thv'`` at interior zm levels; boundaries
+    zero. ``C_uu_buoy`` is ``(ncol,)``; uses ``constants.g`` (CLUBB ``grav``).
+    """
+    rhs = jnp.zeros_like(thv_ds_zm)
+    rhs = rhs.at[:, 1:-1].set(
+        (1.0 - C_uu_buoy[:, None]) * 2.0
+        * (constants.g / thv_ds_zm[:, 1:-1]) * wpthvp[:, 1:-1])
+    return rhs
+
+
+def wp2_term_pr3_rhs(C_uu_shr, C_uu_buoy, thv_ds_zm, wpthvp, upwp, um, vpwp, vm,
+                     gr: CLUBBGrid):
+    """Pressure-3 RHS for wp2 (``wp2_term_pr3_rhs``), ``(ncol, nzm)``.
+
+    ``(2/3)·[C_uu_buoy·(g/thv_ds)·w'thv' + C_uu_shr·(-u'w'·d(um)/dz
+    - v'w'·d(vm)/dz)]`` clamped to ``>= 0`` at interior zm levels; boundaries
+    zero. ``um``/``vm`` are zt-level; ``upwp``/``vpwp`` zm-level;
+    ``C_uu_shr``/``C_uu_buoy`` are ``(ncol,)``; uses ``constants.g``.
+    """
+    rhs = jnp.zeros_like(thv_ds_zm)
+    buoy = C_uu_buoy[:, None] * (constants.g / thv_ds_zm[:, 1:-1]) * wpthvp[:, 1:-1]
+    shear = C_uu_shr[:, None] * (
+        -upwp[:, 1:-1] * gr.invrs_dzm[:, 1:-1] * (um[:, 1:] - um[:, :-1])
+        - vpwp[:, 1:-1] * gr.invrs_dzm[:, 1:-1] * (vm[:, 1:] - vm[:, :-1]))
+    val = jnp.maximum(_TWO_THIRDS * (buoy + shear), 0.0)
+    rhs = rhs.at[:, 1:-1].set(val)
+    return rhs
+
+
+def wp2_term_pr1_rhs(C4, up2, vp2, invrs_tau_C4_zm):
+    """Pressure-1 RHS for wp2 (``wp2_term_pr1_rhs``, CAM ``l_tke_aniso = True``).
+
+    ``C4·(u'^2 + v'^2)·invrs_tau_C4_zm / 3`` at interior zm levels; boundaries
+    zero. ``C4`` is ``(ncol,)``. ``(ncol, nzm)``.
+    """
+    rhs = jnp.zeros_like(invrs_tau_C4_zm)
+    rhs = rhs.at[:, 1:-1].set(
+        (C4[:, None] * (up2[:, 1:-1] + vp2[:, 1:-1]) * invrs_tau_C4_zm[:, 1:-1]) / 3.0)
+    return rhs
+
+
+def wp3_terms_bp1_pr2_rhs(C11_Skw_fnc, thv_ds_zt, wp2thvp):
+    """Buoyancy + pressure-2 RHS for wp3 (``wp3_terms_bp1_pr2_rhs``), ``(ncol, nzt)``.
+
+    ``(1 - C11_Skw_fnc)·3·(g/thv_ds)·w'^2 thv'`` at interior zt levels;
+    boundaries zero. Uses ``constants.g``.
+    """
+    rhs = jnp.zeros_like(thv_ds_zt)
+    rhs = rhs.at[:, 1:-1].set(
+        (1.0 - C11_Skw_fnc[:, 1:-1]) * 3.0
+        * (constants.g / thv_ds_zt[:, 1:-1]) * wp2thvp[:, 1:-1])
+    return rhs
+
+
+def wp3_term_pr1_rhs(C8, C8b, invrs_tau_wp3_zt, Skw_zt, wp3):
+    """Pressure-1 RHS for wp3 (``wp3_term_pr1_rhs``), ``(ncol, nzt)``.
+
+    ``C8·invrs_tau_wp3_zt·(2·C8b·Skw_zt^2)·wp3`` at interior zt levels;
+    boundaries zero. In the CAM-default tree ``l_damp_wp3_Skw_squared = .false.``
+    so the orchestration passes ``C8b = 0`` and this term vanishes. ``C8``,
+    ``C8b`` are ``(ncol,)``.
+    """
+    rhs = jnp.zeros_like(wp3)
+    rhs = rhs.at[:, 1:-1].set(
+        C8[:, None] * invrs_tau_wp3_zt[:, 1:-1]
+        * (2.0 * C8b[:, None] * Skw_zt[:, 1:-1] ** 2) * wp3[:, 1:-1])
+    return rhs
+
+
+# --- CAM-branch builders taken from the CLUBB Fortran (CLUBB-JAX has only the
+#     ARM/True branch of each) ------------------------------------------------
+
+def wp2_term_dp1_rhs(C1_Skw_fnc, invrs_tau_C1_zm, threshold):
+    """Dissipation-1 RHS for wp2 — CAM ``l_damp_wp2_using_em = .false.`` branch.
+
+    From ``advance_wp2_wp3_module.F90:wp2_term_dp1_rhs`` (the ``.false.`` path):
+    the wp2 dissipation damps ``w'^2`` only toward its floor ``threshold``
+    (``w_tol^2``), so the explicit RHS is ``+(C1_Skw_fnc·invrs_tau)·threshold``
+    at interior zm levels (boundaries zero). Note: in this branch
+    ``C1_Skw_fnc`` carries NO ``1/3`` factor (the ``1/3`` is the ARM/True path).
+    CLUBB-JAX implements only the True path (``-(C1_Skw_fnc·invrs_tau)·(u'^2 +
+    v'^2)``), so this has no JAX bit-exact oracle.
+    """
+    rhs = jnp.zeros_like(C1_Skw_fnc)
+    rhs = rhs.at[:, 1:-1].set(
+        (C1_Skw_fnc[:, 1:-1] * invrs_tau_C1_zm[:, 1:-1]) * threshold)
+    return rhs
+
+
+def wp3_term_pr_turb_rhs(C_wp3_pr_turb, Kh_zt, wpthvp, dum_dz, dvm_dz,
+                         upwp, vpwp, thv_ds_zt, gr: CLUBBGrid):
+    """Pressure-turbulence RHS for wp3 — CAM ``l_use_tke_in_wp3_pr_turb_term =
+    .false.`` branch (the experimental shear term, CLUBB TRAC #411).
+
+    From ``advance_wp2_wp3_module.F90:wp3_term_pr_turb_rhs`` (the ``.false.``
+    path):
+
+      ``-C_wp3_pr_turb·Kh_zt·d/dz{ (g/thv_ds)·Δw'thv'
+          - Δ(u'w'·du/dz) - Δ(v'w'·dv/dz) }``
+
+    at interior zt levels, where ``Δ`` is the zm-level difference bracketing the
+    zt level. ``wpthvp``/``upwp``/``vpwp``/``dum_dz``/``dvm_dz`` are zm-level
+    (``dum_dz = ddzt(um)``); ``Kh_zt``/``thv_ds_zt`` are zt-level;
+    ``C_wp3_pr_turb`` is ``(ncol,)``; uses ``constants.g``. Boundaries zero.
+    CLUBB-JAX implements only the TKE (True) path, so this has no JAX bit-exact
+    oracle — verified against the Fortran formula + golden-pinned.
+    """
+    rhs = jnp.zeros_like(Kh_zt)
+    C = C_wp3_pr_turb[:, None]
+    buoy = (constants.g / thv_ds_zt[:, 1:-1]) * (wpthvp[:, 2:-1] - wpthvp[:, 1:-2])
+    shr_u = upwp[:, 2:-1] * dum_dz[:, 2:-1] - upwp[:, 1:-2] * dum_dz[:, 1:-2]
+    shr_v = vpwp[:, 2:-1] * dvm_dz[:, 2:-1] - vpwp[:, 1:-2] * dvm_dz[:, 1:-2]
+    rhs = rhs.at[:, 1:-1].set(
+        -C * Kh_zt[:, 1:-1] * gr.invrs_dzt[:, 1:-1] * (buoy - shr_u - shr_v))
+    return rhs
+
+
 __all__ = [
     "weights_zt2zm",
     "wp2_term_ta_lhs",
@@ -196,4 +366,13 @@ __all__ = [
     "wp2_term_dp1_lhs",
     "wp2_term_pr1_lhs",
     "wp3_term_pr1_lhs",
+    "wp2_term_pr_dfsn_rhs",
+    "wp3_term_pr_dfsn_rhs",
+    "wp2_terms_bp_pr2_rhs",
+    "wp2_term_pr3_rhs",
+    "wp2_term_pr1_rhs",
+    "wp3_terms_bp1_pr2_rhs",
+    "wp3_term_pr1_rhs",
+    "wp2_term_dp1_rhs",
+    "wp3_term_pr_turb_rhs",
 ]

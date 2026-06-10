@@ -113,6 +113,21 @@ def _inputs(gr, ng, nzm, seed=5):
         C8b=jnp.asarray(0.3 + rng.random((ng,))),
         invrs_tau_wp3_zt=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzt))),
         Skw_zt=zt(0.5),
+        # --- RHS inputs ---
+        C_wp2_pr_dfsn=jnp.asarray(0.2 + 0.3 * rng.random((ng,))),
+        C_wp3_pr_dfsn=jnp.asarray(0.2 + 0.3 * rng.random((ng,))),
+        C_wp3_pr_turb=jnp.asarray(0.4 + 0.3 * rng.random((ng,))),
+        C_uu_buoy=jnp.asarray(0.3 + 0.1 * rng.random((ng,))),
+        wpup2=zt(0.02), wpvp2=zt(0.02), wp3=zt(0.05),
+        wp2up2=zm(0.02), wp2vp2=zm(0.02), wp4=zm(0.2, 0.5),
+        up2=jnp.asarray(0.3 + 0.3 * rng.random((ng, nzm))),
+        vp2=jnp.asarray(0.3 + 0.3 * rng.random((ng, nzm))),
+        thv_ds_zm=zm(1.0, 300.0), thv_ds_zt=zt(1.0, 300.0),
+        wpthvp=zm(0.02), wp2thvp=zt(0.02),
+        upwp=zm(0.05), vpwp=zm(0.05), um=zt(2.0, 5.0), vm=zt(1.0),
+        Kh_zt=jnp.asarray(1.0 + 3.0 * rng.random((ng, nzt))),
+        dum_dz=zm(1e-2), dvm_dz=zm(1e-2),
+        threshold=float((2.0e-2) ** 2),
     )
 
 
@@ -226,6 +241,110 @@ def test_jit_and_grad():
 
     assert jnp.isfinite(jax.jit(loss)(p["wp2"]))
     assert jnp.all(jnp.isfinite(jax.grad(loss)(p["wp2"])))
+
+
+# --------------------------------------------------------------------------
+# RHS builders
+# --------------------------------------------------------------------------
+
+def _all_rhs_outputs(gr, p):
+    return dict(
+        wp2_pr_dfsn=W.wp2_term_pr_dfsn_rhs(p["C_wp2_pr_dfsn"], p["rho_ds_zt"],
+                                           p["invrs_rho_ds_zm"], p["wpup2"], p["wpvp2"],
+                                           p["wp3"], gr),
+        wp3_pr_dfsn=W.wp3_term_pr_dfsn_rhs(p["C_wp3_pr_dfsn"], p["rho_ds_zm"],
+                                           p["invrs_rho_ds_zt"], p["wp2up2"], p["wp2vp2"],
+                                           p["wp4"], p["up2"], p["vp2"], p["wp2"], gr),
+        wp2_bp_pr2=W.wp2_terms_bp_pr2_rhs(p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"]),
+        wp2_pr3=W.wp2_term_pr3_rhs(p["C_uu_shr"], p["C_uu_buoy"], p["thv_ds_zm"],
+                                   p["wpthvp"], p["upwp"], p["um"], p["vpwp"], p["vm"], gr),
+        wp2_pr1=W.wp2_term_pr1_rhs(p["C4"], p["up2"], p["vp2"], p["invrs_tau_C4_zm"]),
+        wp3_bp1_pr2=W.wp3_terms_bp1_pr2_rhs(p["C11_Skw_fnc"], p["thv_ds_zt"], p["wp2thvp"]),
+        wp3_pr1=W.wp3_term_pr1_rhs(p["C8"], p["C8b"], p["invrs_tau_wp3_zt"], p["Skw_zt"], p["wp3"]),
+        wp2_dp1=W.wp2_term_dp1_rhs(p["C1_Skw_fnc"], p["invrs_tau_C1_zm"], p["threshold"]),
+        wp3_pr_turb=W.wp3_term_pr_turb_rhs(p["C_wp3_pr_turb"], p["Kh_zt"], p["wpthvp"],
+                                           p["dum_dz"], p["dvm_dz"], p["upwp"], p["vpwp"],
+                                           p["thv_ds_zt"], gr),
+    )
+
+
+def test_rhs_builders_match_golden():
+    """Non-skipped CI guard for all 9 RHS builders vs the committed golden."""
+    gr, ng, nzm = _gr()
+    p = _inputs(gr, ng, nzm)
+    g = np.load(_FIX / "clubb_wp23_rhs_golden.npz")
+    out = _all_rhs_outputs(gr, p)
+    for key in out:
+        np.testing.assert_array_equal(np.asarray(out[key]), g[key])
+
+
+def test_wp2_term_dp1_rhs_cam_branch_formula():
+    """CAM l_damp_wp2_using_em=False: interior == C1_Skw_fnc*invrs_tau*threshold."""
+    gr, ng, nzm = _gr()
+    p = _inputs(gr, ng, nzm)
+    out = np.asarray(W.wp2_term_dp1_rhs(p["C1_Skw_fnc"], p["invrs_tau_C1_zm"], p["threshold"]))
+    exp = np.asarray(p["C1_Skw_fnc"]) * np.asarray(p["invrs_tau_C1_zm"]) * p["threshold"]
+    np.testing.assert_allclose(out[:, 1:-1], exp[:, 1:-1], rtol=1e-12, atol=1e-14)
+    assert np.allclose(out[:, 0], 0.0) and np.allclose(out[:, -1], 0.0)
+
+
+def test_wp3_term_pr_turb_rhs_zero_on_uniform_fields():
+    """Experimental shear term #411 vanishes when its bracketed fields are uniform."""
+    gr, ng, nzm = _gr()
+    nzt = nzm - 1
+    C = jnp.full((ng,), 0.5)
+    Kh = jnp.full((ng, nzt), 2.0)
+    thv = jnp.full((ng, nzt), 300.0)
+    const_zm = jnp.full((ng, nzm), 0.3)
+    out = np.asarray(W.wp3_term_pr_turb_rhs(C, Kh, const_zm, const_zm, const_zm,
+                                            const_zm, const_zm, thv, gr))
+    # wpthvp & u'w'*du/dz constant in z -> all bracketed differences vanish -> 0
+    np.testing.assert_allclose(out, 0.0, atol=1e-14)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_rhs_cam_eq_arm_builders_parity():
+    """Parity for the 7 RHS builders where CAM == ARM (vs CLUBB-JAX).
+
+    The 3 buoyancy terms use gravity; the reference module `_grav` (CLUBB 9.81)
+    is patched to legoESM constants.g so parity isolates the algebra. The 2
+    CAM-divergent builders (wp2_term_dp1_rhs/.false., wp3_term_pr_turb_rhs/.false.)
+    have no CLUBB-JAX oracle and are covered by golden + analytic tests above.
+    """
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_wp2_wp3_module as R  # noqa: N812
+    from legoesm import constants
+    R._grav = float(constants.g)
+
+    gr, ng, nzm = _gr()
+    p = _inputs(gr, ng, nzm)
+    rg = _refgr(gr, ng, nzm)
+
+    def chk(a, b):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    chk(W.wp2_term_pr_dfsn_rhs(p["C_wp2_pr_dfsn"], p["rho_ds_zt"], p["invrs_rho_ds_zm"],
+                               p["wpup2"], p["wpvp2"], p["wp3"], gr),
+        R.wp2_term_pr_dfsn_rhs(p["C_wp2_pr_dfsn"], p["rho_ds_zt"], p["invrs_rho_ds_zm"],
+                               p["wpup2"], p["wpvp2"], p["wp3"], rg))
+    chk(W.wp3_term_pr_dfsn_rhs(p["C_wp3_pr_dfsn"], p["rho_ds_zm"], p["invrs_rho_ds_zt"],
+                               p["wp2up2"], p["wp2vp2"], p["wp4"], p["up2"], p["vp2"], p["wp2"], gr),
+        R.wp3_term_pr_dfsn_rhs(p["C_wp3_pr_dfsn"], p["rho_ds_zm"], p["invrs_rho_ds_zt"],
+                               p["wp2up2"], p["wp2vp2"], p["wp4"], p["up2"], p["vp2"], p["wp2"], rg))
+    chk(W.wp2_terms_bp_pr2_rhs(p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"]),
+        R.wp2_terms_bp_pr2_rhs(p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"]))
+    chk(W.wp2_term_pr3_rhs(p["C_uu_shr"], p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"],
+                           p["upwp"], p["um"], p["vpwp"], p["vm"], gr),
+        R.wp2_term_pr3_rhs(p["C_uu_shr"], p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"],
+                           p["upwp"], p["um"], p["vpwp"], p["vm"], rg))
+    chk(W.wp2_term_pr1_rhs(p["C4"], p["up2"], p["vp2"], p["invrs_tau_C4_zm"]),
+        R.wp2_term_pr1_rhs(p["C4"], p["up2"], p["vp2"], p["invrs_tau_C4_zm"]))
+    chk(W.wp3_terms_bp1_pr2_rhs(p["C11_Skw_fnc"], p["thv_ds_zt"], p["wp2thvp"]),
+        R.wp3_terms_bp1_pr2_rhs(p["C11_Skw_fnc"], p["thv_ds_zt"], p["wp2thvp"]))
+    chk(W.wp3_term_pr1_rhs(p["C8"], p["C8b"], p["invrs_tau_wp3_zt"], p["Skw_zt"], p["wp3"]),
+        R.wp3_term_pr1_rhs(p["C8"], p["C8b"], p["invrs_tau_wp3_zt"], p["Skw_zt"], p["wp3"]))
 
 
 if __name__ == "__main__":

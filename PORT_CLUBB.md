@@ -88,7 +88,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_solve.py` | `tridiag_solve` (CLUBB band → legoESM `thomas_solve`) + `penta_solve` (verbatim CLUBB LU port, bit-exact) | ✅ iter 10-11 |
 | `clubb_moments.py` | `advance_windm_edsclrm` ✅12; xp2_xpyp terms/TA/combiners ✅13-15; `term_ma_zm_lhs`+`calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅18; `xp2_xpyp_uv_rhs`+`pos_definite_variances` ✅19; `clip_variance`+`solve_xp2_xpyp`+**`advance_xp2_xpyp` main** (full 5-moment advance, round-off parity) ✅20; `advance_wp2_wp3`, `advance_xm_wpxp` (penta), `mono_flux_limiter` ☐ | 🟡 P5 |
 | `clubb_fill_holes.py` | mass-conserving vertical hole-fill (`fill_holes_type=2` sliding-window+global, CAM default) | ✅ iter 19 |
-| `clubb_wp23.py` | coupled wp2/wp3 penta advance: 8 LHS term builders + inline `weights_zt2zm` ✅ iter 21 (golden+parity); RHS builders, `wp23_lhs/rhs/solve`, `advance_wp2_wp3` main ☐ | 🟡 P5 |
+| `clubb_wp23.py` | coupled wp2/wp3 penta advance: 8 LHS builders + `weights_zt2zm` ✅21; 9 RHS builders ✅22 (7 parity vs CLUBB-JAX + 2 CAM-divergent from Fortran: `wp2_term_dp1_rhs`/.false., `wp3_term_pr_turb_rhs`/#411); `wp23_lhs/rhs/solve`, `advance_wp2_wp3` main ☐ | 🟡 P5 |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
 
@@ -137,10 +137,15 @@ table row above is the live builder ledger.)*
 
 Remaining to reach the DONE gate (full prognostic closure in the live path):
 1. **`advance_wp2_wp3`** (penta — `clubb_solve.penta_solve` ready). ✅ iter 21:
-   the 8 LHS term builders (`clubb_wp23.py`, golden+bit-exact parity; CAM gating
-   `l_standard_term_ta=False` ADG1 TA, `l_tke_aniso=True`, `l_damp_wp3_Skw_squared
-   =False`→C8b=0). ☐ remaining: the RHS term builders, the `wp23_lhs`/`wp23_rhs`
-   penta assembly (interleaved wp2[2k]/wp3[2k+1]), `wp23_solve` (penta), main.
+   8 LHS term builders. ✅ iter 22: 9 RHS term builders (`clubb_wp23.py`).
+   **CAM≠ARM caveat:** CLUBB-JAX hardcodes ARM defaults; CAM sets
+   `l_damp_wp2_using_em=False` and `l_use_tke_in_wp3_pr_turb_term=False`, so those
+   two RHS terms were ported from the **CLUBB Fortran** (in CESM) — no JAX oracle,
+   validated by golden + analytic + Fortran formula. ☐ remaining: the `wp23_lhs`/
+   `wp23_rhs` penta assembly (interleaved wp2[2k]/wp3[2k+1]), `wp23_solve` (penta),
+   main + the pre-compute of `a1/a3_coef`, `C1/C11_Skw_fnc`, `Kw1/Kw8`, `dum/dvm_dz`.
+   **Note:** verify every CAM flag vs the namelist when assembling (the ARM-vs-CAM
+   divergence makes blind CLUBB-JAX reuse unsafe for this module).
 2. **`advance_xm_wpxp`** (penta — rtm/thlm + wprtp/wpthlp coupled solve;
    `l_predict_upwp_vpwp=False` so upwp/vpwp stay diagnostic/eddy-diffusion).
 3. **`mono_flux_limiter`** (CAM `l_mono_flux_lim_*=True`).
