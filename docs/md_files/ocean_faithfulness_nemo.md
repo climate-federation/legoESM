@@ -393,6 +393,65 @@ ico6 τ=60 + marginal-sea restoring (8440840, SECTION-method diags):
   latlon-0.5° (slow host stepping ~28h, no blowup yet). ico7-90day on a bad short node was step-0-stuck →
   cancelled (ico7-2yr supersedes).
 
+### iter-E (2026-06-09): NH-cold-bias ROOT CAUSE found + SEASONAL-albedo fix; colleague-Q evidence
+- **NH cold bias ROOT CAUSE (codex adversarial review, HIGH):** the `--ice-albedo` SW surrogate used the
+  NEMO ANNUAL-MEAN `siconc` applied EVERY step → in NH seasonal-ice zones (Labrador/Greenland/Bering/
+  Okhotsk) it kept a high ice albedo through the open-water summer → ~0.24×SW (≈47 W/m² at summer
+  SWDN~200) spurious cooling all year. Confirmed dominant over runoff/restoring/E−P (codex refuted E−P
+  sign + 0.94-penetration-double-count; keep both).
+- **FIX (commit 6ad1af3e, `--ice-albedo-seasonal`):** build a 12-MONTH siconc climatology. The run wrote
+  NO monthly icemod, so seasonality comes from NEMO's MONTHLY SST (`tos`, ORCA1_1m grid_T): NEMO ice sits
+  at freezing, so cold SST ⟺ ice. `_ice_presence_from_tos` (tanh) + `_seasonal_siconc_from_presence`
+  (per-cell MEAN-PRESERVING norm: 12-mo mean = annual siconc → ice months carry true winter conc, summer→0;
+  conserves annual albedo, codex MEDIUM). Indexed by NOLEAP calendar month each step. 6 unit tests pass
+  (incl. real-file NH-ice-retreats-Mar→Sep / SH-opposite).
+- **SSS-restoring ice-gate fix (same commit):** the driver passed `ice_concentration=None` → the ice gate
+  was DEAD → restoring ran at full strength under sea ice (unlike NEMO `nn_sssr_ice=0`). Now feeds the
+  per-step siconc. siconc loaded when `--ice-albedo OR --sss-restore`; albedo still gated on `--ice-albedo`
+  so an SSS-only run's heat budget is unchanged (codex HIGH).
+- Codex 2× (root-cause + fix-review); all HIGH/MEDIUM/LOW addressed. Merged origin/main (AI-guardrail
+  harness + dispatch/constants tests; clean, no ocean conflicts).
+- **Runs launched with the correction (coarse, fast turnaround):** MPAS ico6 2yr seasonal (8445150),
+  eORCA1 tripole SAME-GRID 3yr seasonal (8445151 — NEMO's own mesh/bathy; colleague Q4). High-res
+  ico7/latlon-0.5 + the annual-albedo tripole were CANCELLED (ran the pre-fix buggy code).
+- **Colleague-question evidence (NEMO namelist_cfg / RUN_REF):** Q1 runoff — SAME Dai-Trenberth-Depoorter
+  file (sorunoff+Icb_flux+socoefr), but NEMO spreads runoff over the TOP 150 m (`rn_dep_max=150`,
+  `ln_rnf_depth_ini`) + monthly, vs legoESM monthly IDW-regridded SURFACE virtual-salt flux. Q2 topo —
+  MPAS ico6 bathy is REGRIDDED from NEMO's eORCA1 (`(e3t·tmask).sum`) onto Voronoi cells, NOT identical to
+  NEMO's tripolar grid (colleague correct; the tripole run removes this). Q3 run length — the shown ico6
+  maps are END of a 5-yr (day 1825) CORE-II NYF spin-up (short for deep-ocean equilibration). Q4 same-grid
+  — eORCA1 tripole run now in flight. NEMO ALSO restores SSS (`nn_sssr=2`, ±4 mm/day, OFF under ice), so
+  our τ-restoring is faithful in kind.
+
+### iter-F (2026-06-09): dual-pole correction — prescribed-ice THERMODYNAMIC boundary (--ice-thermo)
+- **Codex dual-pole review:** the >45S WARM bias is NOT albedo-fixable. The albedo-only surrogate (a)
+  injects 0.35·sw_down into the ocean under sic=1 (α_ice=0.65) and (b) applies FULL open-ocean turbulent/LW
+  fluxes even under ice → the Southern-Ocean under-ice ocean stays too warm. Seasonal albedo (mean-
+  preserving) conserves the annual albedo → only redistributes timing.
+- **ico6 SEASONAL-vs-ANNUAL A/B (yr1, matched grid+time):** ~NEUTRAL (all bands Δ<0.05): antarctic
+  +1.06→+1.03, NH-mid −1.13→−1.11, arctic −1.27→−1.26, global RMSE 1.32→1.30. Confirms seasonal albedo
+  alone does NOT move the 1-yr annual-mean bias (by mean-preservation design); year-1 ≈ WOA IC for all
+  configs (non-discriminating — biases develop multi-year).
+- **--ice-thermo (commit 164c0107):** prescribed-ice thermodynamic boundary = the magnitude lever.
+  `_ice_surface_heat`: under ice cut SW to τ_ice_sw≈0.03 + suppress turbulent/LW by (1−sic); sic=0 open
+  water unchanged. `under_ice_freeze_relax`: post-step 2-sided nudge of top-cell T → freezing
+  (constants.T_freeze_ocean) over τ_ice≈20d, ×sic → COOLS over-warm SH under-ice, HOLDS Arctic. Grid-
+  agnostic; convex (dt/τ clipped ≤1); scan-refused; default off. Codex-reviewed twice (physics A–F
+  confirmed; .copy() MEDIUM + 3 LOW fixed; final confirm clean). 25 applicator+siconc tests pass.
+- **A/B/C RESULT (yr1, both grids) — ICE-THERMO IMPROVES BOTH POLES:**
+  | grid | >45S warm (ann→thermo) | >45N cold (ann→thermo) | global RMSE |
+  |---|---|---|---|
+  | tripole same-grid | +1.20 → **+0.90** | −1.08 → **−0.91** | 1.78 → **1.74** |
+  | ico6 Voronoi | +1.06 → **+0.80** | −1.27 → **−1.15** | 1.32 → **1.27** |
+  Consistent across grids: cools >45S ~0.25–0.30, warms >45N ~0.12–0.17; localized to ice zones (SH-mid/
+  tropics/NH-mid unchanged → no collateral damage); corr 0.985–0.992. Seasonal-alone was ~neutral (mean-
+  preserving); the THERMO boundary (SW cut + flux suppression + freezing relax) is the lever. Confirmed at
+  yr1; runs continue to yr2/3 (developed bias → fix should close more).
+- **Remaining gaps vs NEMO:** (1) >45S residual +0.80–0.90 = Southern-Ocean warm bias (dynamics/clouds/
+  AABW), partly beyond ocean-only prescribed-ice; τ_ice (20d) is a tunable knob. (2) NH-mid −1.58 (tripole)
+  = Gulf Stream/Kuroshio under-resolved at 1° → RESOLUTION-bound (eORCA025), not a forcing fix; the single
+  largest gap. (3) >45N residual −0.91/−1.15 reduced but open.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
