@@ -302,9 +302,64 @@ def make_clubb_grid(zm: jax.Array, zt: jax.Array) -> CLUBBGrid:
     )
 
 
+# ---------------------------------------------------------------------------
+# legoESM <-> CLUBB orientation bridge
+# ---------------------------------------------------------------------------
+# legoESM stores columns TOP-DOWN (index 0 = model top, index -1 = surface;
+# ``z_half[:, -1] == 0``). CLUBB stores them ASCENDING (index 0 = surface).
+# The flip is its own inverse, so one helper serves both directions.
+
+
+def flip_vertical(field: jax.Array) -> jax.Array:
+    """Flip a column field along the vertical axis (axis 1).
+
+    Converts between legoESM top-down ordering and CLUBB ascending ordering.
+    Self-inverse: ``flip_vertical(flip_vertical(x)) == x``. Operates on the
+    last axis of a ``(ngrdcol, nz)`` array.
+    """
+    return field[:, ::-1]
+
+
+def make_clubb_grid_from_levels(z_full: jax.Array, z_half: jax.Array) -> CLUBBGrid:
+    """Build an ascending :class:`CLUBBGrid` from legoESM level heights.
+
+    legoESM level semantics (see ``_shared.compute_heights_from_sigma``):
+      * ``z_full`` — full-level (layer-midpoint) heights [m], shape
+        ``(ncol, nlev)``, TOP-DOWN (index 0 = top).
+      * ``z_half`` — half-level (interface) heights [m], shape
+        ``(ncol, nlev+1)``, TOP-DOWN, with ``z_half[:, -1] == 0`` (surface).
+
+    CLUBB staggering: thermodynamic levels ``zt`` carry means (T, q, u, v) ->
+    legoESM full levels; momentum levels ``zm`` carry fluxes/w-moments ->
+    legoESM half levels. Hence ``nzt = nlev`` and ``nzm = nlev + 1`` (so
+    ``nzt == nzm - 1`` as :func:`make_clubb_grid` requires), with the surface
+    momentum level ``zm[0] == 0``. Each legoESM full level lands exactly at the
+    midpoint of its two bracketing half levels, so ``zt[k]`` lies between
+    ``zm[k]`` and ``zm[k+1]`` — the CLUBB interior staggering.
+
+    Parameters
+    ----------
+    z_full : jax.Array
+        Top-down full-level heights [m], shape ``(ncol, nlev)``.
+    z_half : jax.Array
+        Top-down half-level heights [m], shape ``(ncol, nlev+1)``.
+
+    Returns
+    -------
+    CLUBBGrid
+        Ascending staggered grid with ``zt`` from ``z_full`` and ``zm`` from
+        ``z_half``.
+    """
+    zt = flip_vertical(z_full)   # ascending thermodynamic levels (nlev)
+    zm = flip_vertical(z_half)   # ascending momentum levels (nlev+1), zm[0]=surface
+    return make_clubb_grid(zm, zt)
+
+
 __all__ = [
     "CLUBBGrid",
     "make_clubb_grid",
+    "make_clubb_grid_from_levels",
+    "flip_vertical",
     "zm2zt",
     "zt2zm",
     "ddzm",

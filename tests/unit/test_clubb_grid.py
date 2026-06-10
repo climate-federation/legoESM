@@ -20,12 +20,26 @@ from legoesm.atmosphere.physics.turbulence.clubb_grid import (  # noqa: E402
     CLUBBGrid,
     ddzm,
     ddzt,
+    flip_vertical,
     make_clubb_grid,
+    make_clubb_grid_from_levels,
     zm2zt,
     zm2zt2zm,
     zt2zm,
     zt2zm2zt,
 )
+
+
+def _legoesm_heights(ncol=3, nlev=10):
+    """Synthetic legoESM top-down z_full/z_half with surface (z_half[:,-1])=0."""
+    # Ascending interface heights (surface..top), stretched, then flip top-down.
+    idx = np.arange(nlev + 1, dtype=np.float64)
+    z_half_asc = np.cumsum(np.concatenate([[0.0], 30.0 * 1.12 ** idx[:-1]]))
+    z_half_td = z_half_asc[::-1]                       # top-down, [...,0] surface last
+    z_full_td = 0.5 * (z_half_td[:-1] + z_half_td[1:])
+    z_full = jnp.asarray(np.tile(z_full_td, (ncol, 1)))
+    z_half = jnp.asarray(np.tile(z_half_td, (ncol, 1)))
+    return z_full, z_half
 
 
 def _build_grid(ngrdcol=3, nzm=12, stretched=True):
@@ -226,6 +240,62 @@ def test_operators_jit_and_grad_clean():
     g = jax.grad(fwd)(f_zt)
     assert g.shape == f_zt.shape
     assert jnp.all(jnp.isfinite(g))
+
+
+# ---------------------------------------------------------------------------
+# legoESM <-> CLUBB bridge
+# ---------------------------------------------------------------------------
+
+def test_flip_vertical_self_inverse():
+    x = jnp.asarray(np.arange(3 * 7, dtype=np.float64).reshape(3, 7))
+    np.testing.assert_array_equal(np.asarray(flip_vertical(flip_vertical(x))), np.asarray(x))
+    # Actually reverses the vertical axis.
+    np.testing.assert_array_equal(np.asarray(flip_vertical(x)), np.asarray(x)[:, ::-1])
+
+
+def test_bridge_grid_is_ascending_and_staggered():
+    z_full, z_half = _legoesm_heights(nlev=10)
+    gr = make_clubb_grid_from_levels(z_full, z_half)
+    assert gr.zm.shape == z_half.shape           # nzm = nlev+1
+    assert gr.zt.shape == z_full.shape           # nzt = nlev
+    # Ascending: strictly increasing along axis 1.
+    assert jnp.all(jnp.diff(gr.zm, axis=1) > 0)
+    assert jnp.all(jnp.diff(gr.zt, axis=1) > 0)
+    # Surface momentum level is z=0.
+    np.testing.assert_allclose(np.asarray(gr.zm[:, 0]), 0.0, atol=1e-12)
+    # Each thermo level is the midpoint of its bracketing momentum levels.
+    mid = 0.5 * (gr.zm[:, 1:] + gr.zm[:, :-1])
+    np.testing.assert_allclose(np.asarray(gr.zt), np.asarray(mid), rtol=1e-12)
+
+
+def test_bridge_interpolation_equivariance():
+    """phi(zm2zt(x)) == zm2zt_on_ascending(phi(x)): the flip commutes with interp.
+
+    A field defined as a function of height must give the same thermo-level
+    values whether computed in legoESM top-down space (flip -> interp -> flip)
+    or directly on the ascending CLUBB grid.
+    """
+    z_full, z_half = _legoesm_heights(nlev=12)
+    gr = make_clubb_grid_from_levels(z_full, z_half)
+    # Field on momentum (half) levels, top-down, linear in height.
+    f_half_td = _linear(z_half)
+    # Path A: flip to ascending, interpolate, flip back to top-down.
+    f_zm_asc = flip_vertical(f_half_td)
+    f_zt_asc = zm2zt(f_zm_asc, gr)
+    f_full_td_path_a = flip_vertical(f_zt_asc)
+    # Path B: the exact linear field evaluated at full (thermo) levels, top-down.
+    f_full_td_path_b = _linear(z_full)
+    np.testing.assert_allclose(
+        np.asarray(f_full_td_path_a), np.asarray(f_full_td_path_b), rtol=1e-12
+    )
+
+
+def test_bridge_rejects_mismatched_levels():
+    # z_half must have exactly one more level than z_full.
+    z_full = jnp.zeros((2, 10))
+    z_half_bad = jnp.zeros((2, 10))  # should be 11
+    with pytest.raises(ValueError):
+        make_clubb_grid_from_levels(z_full, z_half_bad)
 
 
 if __name__ == "__main__":

@@ -142,6 +142,21 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+# Fuller CLUBB port (PORT_CLUBB.md): the closure coefficients, model flags and
+# intermediate variables mirror CLUBB's canonical symbol names 1:1 (c_K1,
+# iiPDF_type, l_use_C7_Richardson, C2rt, Skw, wpthlp, Lscale, ...) as in
+# CLUBB-JAX, parameters_tunable.F90, and the CAM ``clubb_*`` namelist. Renaming
+# them to snake_case would destroy the cross-reference to the reference and the
+# tuning literature (the higher-priority correctness/faithfulness goal), so the
+# pep8-naming mixedCase rules are relaxed ONLY for these files.
+"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_config.py" = ["N815"]
+"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py" = ["N803", "N806", "N815"]
+"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_pdf.py" = ["N803", "N806", "N815"]
+"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_mixing_length.py" = ["N803", "N806", "N815"]
+"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_moments.py" = ["N803", "N806", "N815"]
+"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_saturation.py" = ["N803", "N806", "N815"]
+
 [tool.mypy]
 python_version = "3.11"
 warn_return_any = true

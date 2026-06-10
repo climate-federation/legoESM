@@ -215,7 +215,9 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
 | P0 | `clubb_grid.py` staggered operators + 16 tests + codex-approved | ✅ iter 1 |
 | P0 | Authoritative namelist flag/param diff | ✅ iter 1 |
 | P0 | Working `.venv` (uv sync from lockfile) | ✅ iter 1 |
-| P0 | legoESM↔CLUBB grid bridge (z_full/z_half → CLUBBGrid) | ☐ next |
+| P0 | legoESM↔CLUBB grid bridge (z_full/z_half → CLUBBGrid) | ✅ iter 2 |
+| P1 | `CLUBBConfig`/`CLUBBFlags`/`CLUBBParams` + CAM defaults + tests | ✅ iter 2 |
+| P1 | Wire `"clubb"` into TurbulenceConfig Literal + validate_strict | ☐ (deferred to P7 — needs scheme entry to avoid half-wired dispatch) |
 | P1 | `CLUBBConfig`/`CLUBBFlags` | ☐ |
 | P2 | saturation/thermo adapter, sigma_sqd_w, BV freq | ☐ |
 | P3 | mixing length / Lscale | ☐ |
@@ -256,5 +258,45 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
   from legoESM `z_full`/`z_half` with the top-down→ascending flip; round-trip
   equivariance test), then P1 `CLUBBConfig`/`CLUBBFlags` with the CAM-default
   values tabulated above.
+
+### iter 2
+- **Grid bridge (P0 done):** added `make_clubb_grid_from_levels(z_full, z_half)`
+  + `flip_vertical` to `clubb_grid.py`. Verified legoESM ordering is TOP-DOWN
+  with `z_half[:, -1] == 0` (surface); mapping is `zt ↔ z_full` (nlev),
+  `zm ↔ z_half` (nlev+1), flipped to ascending. 4 new tests incl. an
+  interpolation-equivariance test (flip∘interp∘flip == direct) and staggering
+  (zt at zm midpoints, surface zm[0]=0). 20 grid tests pass.
+- **Config (P1 done):** new `clubb_config.py` with `CLUBBFlags` (static),
+  `CLUBBParams` (tunable, dynamic/differentiable leaves), `CLUBBConfig`
+  (bundles flags+params+surface+tolerances+clubb_dt=300s). 54 tests pass.
+- **⚠ CORRECTED a critical flag-transcription error** (caught by codex +
+  re-extraction): I had wrongly fallen back to CLUBB *library* defaults for
+  flags I hadn't initially grepped. Re-extracted ALL `clubb_*` base defaults
+  from the namelist. Fixes vs my first draft:
+  `grid_remap_method 2→1`, `l_call_pdf_closure_twice False→True`,
+  `l_damp_wp2_using_em True→False`, `l_damp_wp3_Skw_squared True→False`,
+  `l_diag_Lscale_from_tau True→False`. Added `l_ascending_grid`, `l_c14_ml`,
+  `l_intr_sfc_flux_smooth`. **Big call-tree implications:**
+  `l_diag_Lscale_from_tau=False` ⇒ Lscale via the **buoyant-sorting integral**
+  path (NOT the tau path) — reshapes P3; `l_call_pdf_closure_twice=True` ⇒ PDF
+  closure runs **twice** (pre+post) — reshapes P4/P6.
+- Added a **source-derived test** (`test_flags_match_cam_namelist_source`) that
+  parses the XML and compares — non-vacuous, skips if CESM tree absent (CI-safe).
+- **Static/dynamic boundary (codex finding):** `CLUBBFlags` is now a frozen
+  dataclass registered via `jax.tree_util.register_static` ⇒ zero dynamic JAX
+  leaves, branchable with Python `if` under jit. Config is closure-captured
+  (it also carries a `str` leaf `surface.bulk_scheme`), matching the legoESM
+  scheme-config pattern. `CLUBBParams` floats remain dynamic leaves (so the
+  coefficients are differentiable for training).
+- Added scoped `[tool.ruff.lint.per-file-ignores]` (N803/N806/N815) for
+  `clubb_*.py` — canonical CLUBB symbol names mirror the reference 1:1.
+- Classified `clubb_config.py` EXCLUDED in physics-contracts. Regression:
+  existing `test_physics_turbulence.py` (42) + contracts still green.
+- Codex adversarial review: round 1 → 2 findings (flag transcription [high];
+  static-leaf flags [medium]) → fixed → round 2 **APPROVE, no material findings**
+  (codex independently diffed the XML vs the config, 0 mismatches).
+- **Next (iter 3):** P2 saturation/thermo adapter (`clubb_saturation.py` →
+  `legoesm.thermo`, Flatau formula), `sigma_sqd_w`, and Brunt-Väisälä
+  (`advance_helper_module`), each with tests + codex review.
 </content>
 </invoke>
