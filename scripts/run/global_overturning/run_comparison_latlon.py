@@ -389,7 +389,7 @@ def main():
     p.add_argument("--slope-foot-alpha", type=float, default=None,
                    help="Adcroft PGF slope foot alpha (DINO production: 3.0).")
     p.add_argument("--etopo",
-                   default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
+                   default=os.environ.get("LEGOESM_ETOPO_PATH", "data/bathymetry/etopo_1deg.nc"))
     args = p.parse_args()
     args = _apply_from_config(args, p)
 

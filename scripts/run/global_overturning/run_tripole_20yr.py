@@ -42,7 +42,7 @@ def snap_partial(H, z):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--years", type=float, default=20.0)
-    p.add_argument("--etopo", default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
+    p.add_argument("--etopo", default=os.environ.get("LEGOESM_ETOPO_PATH", "data/bathymetry/etopo_1deg.nc"))
     p.add_argument("--grid", default="data/grids/eORCA1.2_mesh_mask.nc")
     args = p.parse_args()
 

@@ -336,7 +336,7 @@ def main():
     p.add_argument("--dt", type=float, default=None,
                    help="Override timestep [s] (default: 1200).")
     p.add_argument("--etopo",
-                   default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
+                   default=os.environ.get("LEGOESM_ETOPO_PATH", "data/bathymetry/etopo_1deg.nc"))
     args = p.parse_args()
     args = _apply_from_config(args, p)
 

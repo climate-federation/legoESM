@@ -18,8 +18,8 @@ Usage
         --write-report docs/ocean_fidelity/veros_acc_tendency_comparison.md
 
 Requires Veros installed in the legoESM venv (``pip install -e
-/home/dbalwada/veros``). If Veros is missing the script emits a clear
-install message and runs the legoESM-side smoke test (recipe build,
+<path-to-your-veros-checkout>``). If Veros is missing the script emits a
+clear install message and runs the legoESM-side smoke test (recipe build,
 tendency probe on a rest state) so the harness can be reviewed even
 without Veros available.
 """
@@ -54,10 +54,9 @@ from legoesm.ocean.fidelity.veros_acc_recipe import (
 
 _VEROS_INSTALL_HINT = (
     "Veros is not installed in this legoESM venv. To install:\n\n"
-    "    .venv/bin/pip install -e /home/dbalwada/veros\n\n"
-    "(or wherever you have the team-ocean/veros checkout). The cloned "
-    "source is already at /home/dbalwada/veros if you ran the Phase G "
-    "session's `git clone` step."
+    "    .venv/bin/pip install -e <path-to-your-veros-checkout>\n\n"
+    "(clone from https://github.com/team-ocean/veros if you don't have "
+    "one yet)."
 )
 
 

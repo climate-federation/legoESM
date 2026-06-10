@@ -198,7 +198,7 @@ def main():
     p.add_argument("--years", type=float, default=10.0)
     p.add_argument("--restart", default=None)
     p.add_argument("--checkpoint-years", type=float, default=1.0)
-    p.add_argument("--etopo", default="/home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc")
+    p.add_argument("--etopo", default=os.environ.get("LEGOESM_ETOPO_PATH", "data/bathymetry/etopo_1deg.nc"))
     args = p.parse_args()
 
     outdir = OUTPUT_DIR
