@@ -65,24 +65,36 @@ def validate_bulk_scheme(scheme: str) -> None:
         )
 
 
-def large_yeager_neutral_cd(wind):
+def large_yeager_neutral_cd(wind, *, nemo_parity: bool = False):
     """Large & Yeager (2009) Eq. 6 neutral 10-m drag coefficient ``C_DN``.
 
     .. math::
         C_{DN} = \\left(\\frac{2.7}{U} + 0.142 + \\frac{U}{13.09}
                   - 3.14807\\times10^{-10}\\,U^{6}\\right)\\times10^{-3}
 
-    clipped to ``[0.5e-3, 3.0e-3]``.  The ``-3.14807e-10·U⁶`` high-wind term is
-    LY09's correction over LY04 (which over-estimated drag at ``U > 30 m/s``) and
-    is REQUIRED by the OMIP-2 protocol (Griffies 2016 §2.2).  ``wind`` is the
+    Default (``nemo_parity=False``, the MOST-solver convention): clipped to
+    ``[0.5e-3, 3.0e-3]``.  The ``-3.14807e-10·U⁶`` high-wind term is LY09's
+    correction over LY04 (which over-estimated drag at ``U > 30 m/s``) and is
+    REQUIRED by the OMIP-2 protocol (Griffies 2016 §2.2).  ``wind`` is the
     10-m wind speed [m/s]; floored to 0.5 to avoid the ``1/U`` blow-up at calm
     winds.  The canonical drag law shared by the MOST flux solver and the OMIP-2
     air-sea bulk formulas (no per-component re-derivation).
+
+    ``nemo_parity=True`` reproduces NEMO/aerobulk ``cd_n10_ncar`` EXACTLY
+    (sbcblk_algo_ncar.F90): the same polynomial, but (a) a constant cyclone
+    plateau ``2.34e-3`` for ``U >= 33 m/s`` instead of letting the ``U⁶`` term
+    pull the polynomial down, and (b) ONLY the NEMO floor ``Cx_min = 1e-4`` —
+    no upper clip, so the calm-wind ``2.7/U`` enhancement (up to ``5.54e-3``
+    at the 0.5 m/s floor) is kept.  The two conventions differ only for
+    ``U < ~0.97 m/s`` (where the 3.0e-3 clip binds) and ``U > 33 m/s``.
     """
     U = jnp.maximum(jnp.asarray(wind), 0.5)
     C_DN = (
         2.7 / U + 0.142 + U / 13.09 - 3.14807e-10 * U ** 6
     ) * 1e-3
+    if nemo_parity:
+        C_DN = jnp.where(U >= 33.0, 2.34e-3, C_DN)
+        return jnp.maximum(C_DN, 0.1e-3)
     return jnp.clip(C_DN, 0.5e-3, 3.0e-3)
 
 

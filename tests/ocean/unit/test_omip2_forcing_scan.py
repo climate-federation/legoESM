@@ -148,6 +148,10 @@ def test_scan_block_equals_manual_steps():
             "u10": (-6, 6), "v10": (-6, 6), "T_air": (278, 298),
             "q_air": (4e-3, 1.2e-2), "sw_down": (50, 250),
             "lw_down": (290, 390),
+            # NEMO-parity channels: the scan kernel samples these
+            # unconditionally from the device stack (q_ns heat-content).
+            "precip": (0, 1e-4), "snow": (0, 2e-5),
+            "slp": (99000.0, 103000.0),
         }.items()
     }
     nn_i = jnp.asarray(np.repeat(np.arange(n_lat), n_lon).astype(np.int32))

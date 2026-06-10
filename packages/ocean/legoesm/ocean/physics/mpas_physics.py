@@ -243,12 +243,16 @@ def make_mpas_ocean_physics(
                 _sf_sw = getattr(surface_forcing, "sw_down", None)
 
                 if _sf_sw is not None:
-                    # Split heat flux: non-solar at surface + solar
-                    # penetrating through the column (Jerlov).
-                    # q_net = sw_absorbed + lw_down - lw_up - sh - lh
-                    # sw_absorbed = sw_down * (1 - albedo) — already
-                    # included in q_net.  Extract it for penetration.
-                    sw_absorbed = _sf_sw * 0.94  # ~6% reflected (albedo)
+                    # VERTICAL split of the surface heat flux (NOT an albedo):
+                    # ``q_net`` carries 100% of the incident sw_down; here 94% is
+                    # routed through the Jerlov penetration profile and the
+                    # remaining 6% is retained as non-solar heating in the surface
+                    # skin cell (q_nonsolar = q_net - 0.94*sw).  Total column
+                    # heating = q_nonsolar + integral(penetration) = q_net, so NO
+                    # SW is reflected/lost here.  Any SURFACE ALBEDO is applied
+                    # UPSTREAM in compute_omip2_surface_forcing (--ice-albedo),
+                    # which reduces sw_down -> sw_net in BOTH q_net and this field.
+                    sw_absorbed = _sf_sw * 0.94  # 94% penetrates; 6% surface skin
                     q_nonsolar = _sf_q_net - sw_absorbed
 
                     # Non-solar part: surface cell only

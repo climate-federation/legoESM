@@ -577,7 +577,11 @@ class MPASOceanModel:
             # Global freshwater normalization: subtract the area-weighted
             # mean so the global integral of F_slow_eta is exactly zero.
             # This prevents global volume drift from unbalanced P-E+R
-            # (standard OMIP practice for runs without sea ice).
+            # (standard OMIP practice for runs without sea ice).  Local
+            # ``jnp.sum`` (exact single-rank, matching the salt virtual-salt
+            # normalization which removes the same area-mean).  MPI-sharded runs
+            # need an owned-cell mask to avoid Voronoi halo double-counting
+            # (codex) -- a shared follow-up with the salt path.
             if config.normalize_freshwater:
                 area = mesh.areaCell
                 ocean_area = jnp.sum(area * mask)

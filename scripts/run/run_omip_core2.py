@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import warnings
 from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -51,6 +52,21 @@ def _squeeze2d(a: np.ndarray) -> np.ndarray:
     a = np.asarray(a)
     while a.ndim > 2:
         a = a[0]
+    return a
+
+
+def _ew_overlap_fill(a: np.ndarray) -> np.ndarray:
+    """Fill the ORCA 2-point cyclic-overlap halo columns of a static field.
+
+    ``col[0] <- col[nx-2]``, ``col[nx-1] <- col[1]`` along axis 1 (longitude).
+    For ``(n_lat, n_lon)`` masks/bathy and ``(n_lat, n_lon, nlev)`` IC fields.
+    NumPy counterpart of the model's per-step ``_apply_ew_cyclic_overlap`` so
+    the static geometry/IC start consistent with the reconnected seam.
+    """
+    a = np.array(a, copy=True)
+    nx = a.shape[1]
+    a[:, 0] = a[:, nx - 2]
+    a[:, nx - 1] = a[:, 1]
     return a
 
 
@@ -468,7 +484,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   min_levels=1, div_damp_2=None, div_damp_4=None,
                   smag_cfl_safety=None, convection="none",
                   convection_K_conv=1.0, convection_K_bg=1e-5,
-                  freeze_floor=None):
+                  freeze_floor=None, ew_cyclic_overlap=None,
+                  runoff_depth_spread_m=None, tracer_advection=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -522,6 +539,9 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("div_damp_4", div_damp_4),
                               ("smag_cfl_safety", smag_cfl_safety),
                               ("freeze_floor", freeze_floor),
+                              ("ew_cyclic_overlap", ew_cyclic_overlap),
+                              ("runoff_depth_spread_m", runoff_depth_spread_m),
+                              ("tracer_advection", tracer_advection),
                               ) if v is not None}
     # Grid-agnostic convective adjustment (Oceananigans-style enhanced
     # vertical diffusivity where N^2 < 0).  The tripole base config ships
@@ -590,6 +610,28 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         raise ValueError(
             f"mesh mask shape {land_mask.shape} != grid {(n_lat, n_lon)}"
         )
+    if ew_cyclic_overlap:
+        # ORCA 2-pt cyclic-overlap fill of the static geometry, applied BEFORE
+        # make_partial_cell (codex HIGH): the partial-cell coordinate
+        # (z_coord.is_active / h_partial / bottom_level) is built per-column
+        # from H_bathy/land_mask, so it must see the overlap-filled (reconnected)
+        # seam -- otherwise is_active stays severed at col0/col_{nx-1} while the
+        # 2-D state is wet, corrupting the 3-D tracer-flux masks. A raw tmaskutil
+        # marks the halo cols col0/col_{nx-1} LAND (the lon-72.5E seam wall).
+        # make_partial_cell with NO cross-column smoothing (the faithful config)
+        # is column-local, so identical input columns col0==col{nx-2} yield
+        # identical outputs -> the overlap survives it.
+        if bathy_smoothing_passes and bathy_smoothing_passes > 0:
+            raise ValueError(
+                "--ew-cyclic-overlap with bathy smoothing > 0 is unsupported: "
+                "cross-column smoothing breaks the seam-column identity that the "
+                "partial-cell coordinate relies on. Use 0 smoothing passes.")
+        land_mask = _ew_overlap_fill(land_mask)
+        H_bathy = _ew_overlap_fill(H_bathy)
+        _wet = land_mask > 0.5
+        print(f"[setup] EW cyclic-overlap ON (ORCA tripole seam): halo cols "
+              f"filled col0<-col{n_lon-2}, col{n_lon-1}<-col1; "
+              f"seam wet cells {int(_wet[:, 0].sum())}/{int(_wet[:, 1].sum())}")
     if partial_cell:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -606,6 +648,11 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         from legoesm.core.field import Field
         T_woa, S_woa = compute_woa_3d(grid, z_coord, woa_t, woa_s,
                                       H_bathy, land_mask)
+        if ew_cyclic_overlap:
+            # Overlap-fill the IC so the halo columns start consistent with
+            # their partners (the per-step projection keeps them so).
+            T_woa = _ew_overlap_fill(np.asarray(T_woa))
+            S_woa = _ew_overlap_fill(np.asarray(S_woa))
         if T_woa.shape != state.T.data.shape:
             raise ValueError(
                 f"WOA T shape {T_woa.shape} != state T {state.T.data.shape}"
@@ -636,7 +683,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   smag_cfl_safety=None, freeze_floor=None,
                   use_polar_filter=None, polar_filter_cutoff_lat_deg=None,
                   polar_filter_max_wave_speed=None,
-                  polar_filter_safety_factor=None):
+                  polar_filter_safety_factor=None,
+                  runoff_depth_spread_m=None, tracer_advection=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -674,6 +722,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("div_damp_4", div_damp_4),
                               ("smag_cfl_safety", smag_cfl_safety),
                               ("freeze_floor", freeze_floor),
+                              ("runoff_depth_spread_m", runoff_depth_spread_m),
+                              ("tracer_advection", tracer_advection),
                               ("use_polar_filter", use_polar_filter),
                               ("polar_filter_cutoff_lat_deg",
                                polar_filter_cutoff_lat_deg),
@@ -975,7 +1025,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      pgf_scheme=None, bottom_drag_r=None,
                      bottom_drag_bbl_thickness=None, bottom_drag_bg_velocity=None,
                      partial_cell=False, n_barotropic_substeps=None,
-                     barotropic_solver=None, freeze_floor=None):
+                     barotropic_solver=None, freeze_floor=None,
+                     runoff_depth_spread_m=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -1017,7 +1068,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                               ("bottom_drag_bg_velocity", bottom_drag_bg_velocity),
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_solver", barotropic_solver),
-                              ("freeze_floor", freeze_floor))
+                              ("freeze_floor", freeze_floor),
+                              ("runoff_depth_spread_m", runoff_depth_spread_m))
             if v is not None}
     if _ovr:
         config = config._replace(**_ovr)
@@ -1086,6 +1138,19 @@ _RUNOFF_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/
               "INPUTS/orca1_inputs/data_repository/input_fields/"
               "runoff-icb_DaiTrenberth_Depoorter.nc")
 
+# NEMO ORCA1 RUN_REF sea-ice diagnostics (SI3): annual-mean `siconc` used as the
+# prescribed sea-ice concentration for the SW-albedo surrogate (--ice-albedo).
+_SICONC_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
+              "EXP00/RUN_REF/ORCA1_1y_20000101_20041231_icemod.nc")
+# NEMO ORCA1 RUN_REF MONTHLY ocean grid_T (`tos` = SST [degC]) -> used to give the
+# annual-mean siconc a SEASONAL cycle (--ice-albedo-seasonal): NEMO sea ice sits
+# at the freezing point, so where the monthly SST is at/below freezing NEMO has
+# ice, and where it warms above freezing the ice (and its albedo) is gone.  The
+# run wrote only an ANNUAL icemod (no monthly siconc), so the monthly SST is the
+# faithful seasonal proxy available without a NEMO re-run.
+_TOS_MONTHLY_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/"
+                   "ORCA1/EXP00/RUN_REF/ORCA1_1m_20000101_20041231_grid_T.nc")
+
 
 def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
                         land_mask=None, spread_passes=2):
@@ -1142,6 +1207,156 @@ def load_runoff_monthly(grid, grid_type, lat2d_deg, lon2d_deg, mesh_path,
     return out
 
 
+def load_nemo_siconc(grid, grid_type, lat2d_deg, lon2d_deg, siconc_file=None,
+                     land_mask=None):
+    """Load NEMO ORCA1 sea-ice concentration and IDW-regrid onto the model grid.
+
+    Returns siconc in [0,1], shape ``lat2d_deg.shape`` ((n_lat,n_lon) for
+    latlon/tripole; (nCells,) for MPAS; (6,n,n) for the cube), for the SW-albedo
+    surrogate (``--ice-albedo``).  The available file is an ANNUAL MEAN
+    (``ORCA1_1y_*icemod.nc``), so this is a time-INVARIANT climatology -- load
+    ONCE before the time loop.  LIMITATION: an annual mean over-ices the Antarctic
+    summer (when the SST warm bias is worst) and under-ices winter; a 12-month
+    icemod climatology (if sourced later) would refine this via the
+    ``load_runoff_monthly`` monthly pattern.  Regrids from ALL NEMO ocean cells
+    (incl. ice-free siconc=0) via the same curvilinear IDW used for runoff/bathy."""
+    import xarray as xr
+    ds = xr.open_dataset(siconc_file or _SICONC_NC, decode_times=False)
+    src_lat = _squeeze2d(ds["nav_lat"].values)
+    src_lon = _squeeze2d(ds["nav_lon"].values)
+    sic = np.asarray(ds["siconc"].values, dtype=np.float64)
+    if sic.ndim == 3:                          # (time, y, x) -> annual climatology
+        with warnings.catch_warnings():        # all-NaN land columns -> NaN (kept
+            warnings.simplefilter("ignore", RuntimeWarning)  # out via src_valid below)
+            sic = np.nanmean(sic, axis=0)
+    sic = _squeeze2d(sic)
+    # Source ocean mask = finite cells.  VERIFIED for this NEMO ORCA1 icemod file:
+    # land is written as _FillValue -> NaN (108k NaN cells; e.g. the Sahara cell is
+    # NaN), so finiteness IS the land/ocean discriminator and ice-free OPEN ocean
+    # (siconc=0, finite) is correctly retained as IDW source.  PORTABILITY caveat
+    # (codex): a NEMO build that writes finite land ZEROS instead would let land
+    # cells damp coastal/ice-edge siconc -- use an explicit ocean mask then.
+    src_valid = np.isfinite(sic)
+    sic = np.clip(np.nan_to_num(sic, nan=0.0), 0.0, 1.0)
+    out, _ = _regrid_curv_to_points(
+        sic, src_lat, src_lon, src_valid, lat2d_deg, lon2d_deg, k=4, max_deg=2.0)
+    out = np.clip(out, 0.0, 1.0)
+    if land_mask is not None:
+        out = np.where(np.asarray(land_mask) > 0.5, out, 0.0)
+    print(f"[setup] sea-ice albedo: NEMO siconc (annual) regridded onto {grid_type}, "
+          f"max {float(out.max()):.2f}, ice-covered (>0.15) cell frac "
+          f"{float((out > 0.15).mean()):.3f}")
+    return out
+
+
+def _ice_presence_from_tos(tos_C, ice_edge_C: float = -1.0, ramp_C: float = 1.0):
+    """Sea-ice presence in [0,1] from SST [degC]: 1 where the surface is at/below
+    the freezing point (ice), 0 over warm open water, with a smooth tanh ramp of
+    half-width ``ramp_C`` centred at ``ice_edge_C``.  NEMO sea ice sits at the
+    freezing point, so cold SST is a faithful indicator of ice presence."""
+    return 0.5 * (1.0 - np.tanh((np.asarray(tos_C) - ice_edge_C) / ramp_C))
+
+
+def _seasonal_siconc_from_presence(annual, presence):
+    """Combine an annual-mean siconc map with a (12, *grid) ice-PRESENCE stack into
+    a (12, *grid) monthly siconc.  Per-cell MEAN-PRESERVING normalisation:
+
+        siconc(m) = clip(annual * presence(m) / mean_m presence, 0, 1)
+
+    Before the [0,1] clip the 12-month MEAN equals the annual-mean siconc, so the
+    ANNUAL albedo is CONSERVED: the ice months carry the true (elevated) winter
+    concentration and the warm months go to ~0.  This removes the spurious year-
+    round summer albedo (the NH cold-bias root cause) WITHOUT the annual SW over-
+    absorption a max-normalisation would introduce (codex MEDIUM).  Perennial-ice
+    cells (presence~const) are left ~unchanged; cells with no ice in any month
+    (mean presence -> 0) yield 0.  The clip caps cells whose reconstructed winter
+    concentration exceeds 1 (a cell that is, say, 0.4 annual but iced only 3 months
+    is ~fully iced those months)."""
+    annual = np.asarray(annual)
+    presence = np.asarray(presence)
+    mean_p = np.maximum(presence.mean(axis=0), 1.0e-6)         # per-cell mean presence
+    season = presence / mean_p[None, ...]                      # 12-mo mean = 1 (pre-clip)
+    return np.clip(annual[None, ...] * season, 0.0, 1.0)
+
+
+def load_nemo_siconc_monthly(grid, grid_type, lat2d_deg, lon2d_deg,
+                             siconc_file=None, tos_file=None, land_mask=None,
+                             ice_edge_C: float = -1.0, ramp_C: float = 1.0):
+    """Build a 12-MONTH sea-ice-concentration climatology on the model grid for the
+    SEASONAL SW-albedo surrogate (``--ice-albedo-seasonal``).
+
+    Motivation (codex HIGH; NH cold bias): the annual-MEAN ``siconc`` applied every
+    timestep keeps a high ice albedo through the summer in NH seasonal-ice zones
+    (Labrador/Greenland/Bering/Okhotsk), suppressing summer SW absorption all year
+    -> a large spurious NH cold bias.  The faithful fix is a monthly siconc.  The
+    NEMO run wrote only an annual ``siconc`` (no monthly icemod), but it DID write
+    monthly ``tos`` (SST); NEMO sea ice sits at the freezing point, so the monthly
+    SST is a faithful proxy for WHEN ice is present.
+
+    Construction (NEMO-derived, prescribed -> feedback-safe):
+      presence(m,cell) = 0.5*(1 - tanh((tos_m_C - ice_edge_C) / ramp_C))  in [0,1]
+        (->1 where the monthly SST is at/below freezing, ->0 over warm open water)
+      siconc(m,cell)   = clip(annual_siconc(cell) * presence(m,cell)
+                              / mean_m presence, 0, 1)
+        (per-cell MEAN-PRESERVING so the 12-month mean equals the annual-mean
+         concentration: ice months carry the true winter value, warm months go to
+         ~0 -- captures the seasonal cycle and the correct NH/SH phase and conserves
+         the annual albedo; perennial-ice cells keep presence~const -> unchanged.
+         See :func:`_seasonal_siconc_from_presence`).
+
+    Returns ``(12, *lat2d_deg.shape)`` siconc in [0,1].  LIMITATION: this recovers
+    the SEASONALITY of NEMO's ice from its SST; a true monthly icemod climatology
+    (a NEMO re-run with the monthly ice stream actually written) would be the next
+    refinement.  ``ice_edge_C``/``ramp_C`` set the SST->ice-presence ramp [degC]."""
+    import xarray as xr
+    # Annual siconc spatial pattern, already regridded onto the model grid.
+    annual = load_nemo_siconc(grid, grid_type, lat2d_deg, lon2d_deg,
+                              siconc_file=siconc_file, land_mask=land_mask)
+    ds = xr.open_dataset(tos_file or _TOS_MONTHLY_NC, decode_times=False)
+    src_lat = _squeeze2d(ds["nav_lat"].values)
+    src_lon = _squeeze2d(ds["nav_lon"].values)
+    tos = np.asarray(ds["tos"].values, dtype=np.float64)        # (time, y, x) degC
+    if tos.ndim != 3:
+        raise ValueError(f"monthly tos expected (time,y,x), got {tos.shape}")
+    # Calendar-month climatology: average every record sharing a calendar month
+    # (NYF -> all years share the same forcing; ``tos[k::12]`` are the same month
+    # across years; a partial final year just gives some months 1 extra sample --
+    # e.g. 40 records = 3y + 4m -> months 0-3 get 4, months 4-11 get 3).
+    n_t = tos.shape[0]
+    if n_t < 12:                                                # codex LOW: a <12-record
+        raise ValueError(                                       # file can't form a 12-mo
+            f"monthly tos has only {n_t} records (<12): cannot build a calendar-"      # climatology
+            "month climatology.  Provide >=12 monthly records via --tos-monthly-file.")
+    presence_m = []
+    for m in range(12):
+        recs = tos[m::12]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            tos_m = np.nanmean(recs, axis=0)                    # (y, x) degC
+        src_valid = np.isfinite(tos_m)
+        tos_m = np.nan_to_num(tos_m, nan=10.0)                  # land/NaN -> warm (no ice)
+        tos_grid, _ = _regrid_curv_to_points(
+            tos_m, src_lat, src_lon, src_valid, lat2d_deg, lon2d_deg,
+            k=4, max_deg=2.0)
+        presence_m.append(
+            _ice_presence_from_tos(tos_grid, ice_edge_C, ramp_C))
+    presence = np.stack(presence_m, axis=0)                     # (12, *grid)
+    out = _seasonal_siconc_from_presence(annual, presence)      # (12, *grid)
+    # Summer-vs-winter contrast + annual-mean CONSERVATION diagnostic (codex MEDIUM:
+    # the 12-month mean should track the source annual siconc; the [0,1] clip is the
+    # only departure, where reconstructed winter ice saturates).
+    nh = np.asarray(lat2d_deg) > 45.0
+    if nh.any():
+        mar = out[2][nh].mean(); sep = out[8][nh].mean()
+        mean12 = out.mean(axis=0)
+        print(f"[setup] sea-ice albedo: SEASONAL NEMO siconc (12 mo via monthly SST) "
+              f"on {grid_type}; NH(>45N) mean siconc Mar={mar:.3f} Sep={sep:.3f} "
+              f"(annual={annual[nh].mean():.3f}) -- summer albedo relaxed; "
+              f"12-mo-mean vs annual (conservation) NH={mean12[nh].mean():.3f} "
+              f"global={mean12.mean():.3f} vs {annual.mean():.3f}")
+    return out
+
+
 # noleap calendar month lengths (NEMO/OMIP convention) + cumulative day bounds.
 _MONTH_DAYS = np.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
 _MONTH_CUM = np.cumsum(_MONTH_DAYS)  # [31,59,...,365]
@@ -1152,6 +1367,16 @@ def _runoff_month_idx(step: int, dt: float) -> int:
     NEMO's NOLEAP month lengths (not equal 365/12 bins; codex MEDIUM)."""
     day = (step * dt / _SEC_PER_DAY) % 365.0
     return int(np.searchsorted(_MONTH_CUM, day, side="right"))
+
+
+def _siconc_at_step(siconc, step: int, dt: float, monthly: bool):
+    """Sea-ice concentration for the current step.  ``monthly`` -> index the leading
+    12-month axis of ``siconc`` by the calendar month (same NOLEAP binning as the
+    runoff climatology); otherwise return the single annual map as-is.  ``None``
+    passes through (no ice field loaded)."""
+    if siconc is None or not monthly:
+        return siconc
+    return siconc[_runoff_month_idx(step, dt)]
 
 
 def _idx_t(step: int, dt: float, n_rec: int) -> int:
@@ -1504,6 +1729,12 @@ def main() -> int:
     p.add_argument("--pgf-scheme", type=str, default=None, choices=[None, "adcroft", "smc03"],
                    help="Override tripole PGF scheme (default: run_omip's adcroft).")
     p.add_argument("--A-h", type=float, default=None, help="Override Laplacian viscosity [m2/s].")
+    p.add_argument("--tracer-advection", type=str, default=None,
+                   help="Override the tracer advection scheme (e.g. ppm_fct "
+                        "-- closest to NEMO's FCT2 and less diffusive at "
+                        "fronts than the default tvd/Van-Leer; also weno5, "
+                        "dst3, superbee). Validated per-scheme by the ocean "
+                        "matrix; smoke before production.")
     p.add_argument("--B-h", type=float, default=None, help="Override biharmonic viscosity [m4/s].")
     p.add_argument("--K-bih", type=float, default=None,
                    help="Biharmonic tracer hyperdiffusion [m4/s] -- scale-selectively "
@@ -1562,6 +1793,46 @@ def main() -> int:
                         "prognostic ice, so high-lat (esp. Arctic) cells over-cool "
                         "3-5 C below NEMO (LIM ice caps SST). NEMO-faithful; removes "
                         "~half the Arctic SST RMSE. Off = bit-exact legacy.")
+    p.add_argument("--visc-schedule", type=str, default=None,
+                   help="Piecewise viscosity schedule 'day:A_h:C_smag_lap,...'"
+                        " e.g. '0:1e5:3.0,90:5e4:1.0,180:2e4:0.33' — start at "
+                        "the cold-start-stable values, step down toward "
+                        "NEMO's eddy-viscosity magnitude (1e3-2e4) once the "
+                        "WOA adjustment has passed. One JIT recompile per "
+                        "segment. tripole/latlon (LatLonCGridOceanModel).")
+    p.add_argument("--bbl-adv", action="store_true",
+                   help="NEMO advective bottom-boundary layer (trabbl "
+                        "nn_bbl_adv=2, Campin & Goosse 1999): dense shelf "
+                        "bottom water advects DOWN the continental slope when "
+                        "denser than the deep neighbour (Gibraltar/Med, "
+                        "Denmark Strait, Antarctic overflows — unresolved at "
+                        "1 deg without it). Host post-step exchange, exactly "
+                        "tracer-conserving. latlon/tripole only.")
+    p.add_argument("--bbl-gamma-s", type=float, default=20.0,
+                   help="Advective-BBL coefficient gamma [s] (NEMO "
+                        "rn_gambbl=20).")
+    p.add_argument("--runoff-depth-spread-m", type=float, default=None,
+                   help="Spread river runoff dilution over the top this-many "
+                        "metres (NEMO sbcrnf rn_dep_max=150) instead of a "
+                        "single surface cell — fixes the too-fresh/too-shallow "
+                        "Amazon-type plume. Column-integral salt unchanged. "
+                        "Default None = legacy top-cell (bit-exact).")
+    p.add_argument("--river-mouth-restoring-gate", action="store_true",
+                   help="Disable SSS restoring at river-mouth cells (runoff > "
+                        "threshold), like NEMO sbcssr's (1-2*rnfmsk) damping "
+                        "mask — otherwise the restoring fights the river plume "
+                        "toward the coarse WOA climatology. Requires --runoff "
+                        "+ --sss-restore.")
+    p.add_argument("--ew-cyclic-overlap", action="store_true",
+                   help="TRIPOLE ONLY: reconnect the ORCA east-west cyclic seam "
+                        "(lon ~72.5E on eORCA1). The eORCA1 mesh marks the 2 cyclic "
+                        "halo columns LAND, and the C-grid roll is period-nx (off by "
+                        "one for an ORCA period-(nx-2) grid) -> a spurious wall + a "
+                        "drifting ~1 C SST/SSS seam stripe. Slaves the halo columns to "
+                        "their overlap partners each step (col0<-col[nx-2], "
+                        "col[nx-1]<-col1) + overlap-fills the mask/bathy/IC. "
+                        "ORCA-overlap-specific; do NOT use on a regular lat-lon grid. "
+                        "Off = bit-exact legacy.")
     p.add_argument("--polar-filter", action="store_true",
                    help="Enable the mask-aware Fourier polar filter (lat-lon grid only): "
                         "truncate the zonal modes exceeding the per-latitude CFL near the "
@@ -1581,6 +1852,46 @@ def main() -> int:
                    help="Apply NEMO's Dai-Trenberth river+ice-shelf+iceberg runoff "
                         "(the SAME file ORCA1 uses) as a per-step freshwater/virtual-salt "
                         "flux -> ungates the SSS comparison (tripole/latlon only).")
+    p.add_argument("--no-emp", dest="emp_freshwater", action="store_false",
+                   default=True,
+                   help="DISABLE the atmospheric P - E surface freshwater flux "
+                        "(default ON).  P - E = precip + lh/L_v is the dominant "
+                        "OMIP-2 salt-budget term; ON by default so the multi-year "
+                        "salinity is faithful.  Use --no-emp only for ablation "
+                        "(reproducing the pre-fix runoff-only fresh drift).")
+    p.add_argument("--ice-albedo", action="store_true",
+                   help="Apply a NEMO-siconc-weighted sea-ice + open-ocean SW "
+                        "albedo to the downwelling shortwave (closes the SH/Antarctic "
+                        "warm bias: the ocean previously absorbed ~100%% of SW with "
+                        "no albedo). Prescribed (annual NEMO siconc) -> feedback-safe.")
+    p.add_argument("--siconc-file", type=str, default=None,
+                   help="Override the NEMO sea-ice-concentration file for "
+                        "--ice-albedo (default = the ORCA1 RUN_REF annual icemod.nc).")
+    p.add_argument("--ice-albedo-seasonal", action="store_true",
+                   help="Give the --ice-albedo siconc a 12-MONTH seasonal cycle "
+                        "(via NEMO's monthly SST, since the run wrote no monthly "
+                        "icemod): removes the spurious year-round summer albedo in "
+                        "NH seasonal-ice zones that drives the NH cold bias (codex "
+                        "HIGH). Indexed by calendar month every step. The same "
+                        "monthly siconc also gates SSS restoring (NEMO nn_sssr_ice=0).")
+    p.add_argument("--tos-monthly-file", type=str, default=None,
+                   help="Override the NEMO monthly grid_T (tos) file used to build "
+                        "the seasonal siconc (default = ORCA1 RUN_REF 1m grid_T.nc).")
+    p.add_argument("--ice-thermo", action="store_true",
+                   help="Prescribed-ice THERMODYNAMIC boundary (codex HIGH): under "
+                        "sea ice, cut SW reaching the ocean (--ice-thermo-sw-trans) "
+                        "+ suppress turbulent/LW by (1-sic) + relax the surface "
+                        "ocean toward freezing (--ice-thermo-tau-days). Two-sided -> "
+                        "cools the over-warm Southern-Ocean under-ice cells (the "
+                        ">45S warm bias) AND holds the Arctic near freezing, while "
+                        "open water keeps the seasonal-albedo NH warming. Uses the "
+                        "same prescribed siconc as --ice-albedo (implies a siconc).")
+    p.add_argument("--ice-thermo-tau-days", type=float, default=20.0,
+                   help="Under-ice freezing-relaxation timescale [days] (default 20; "
+                        "physical range 5-30).")
+    p.add_argument("--ice-thermo-sw-trans", type=float, default=0.03,
+                   help="Fraction of downwelling SW transmitted through ice into the "
+                        "ocean (default 0.03; the albedo-only surrogate implies 0.35).")
     p.add_argument("--sss-restore", action="store_true",
                    help="Apply OMIP-2 weak SSS restoring toward the WOA surface "
                         "salinity (the protocol NEMO ORCA1 uses) -> bounds the "
@@ -1591,7 +1902,15 @@ def main() -> int:
     p.add_argument("--sss-restore-tau-days", type=float, default=365.0,
                    help="Interior SSS-restoring timescale [days] (default 365 = "
                         "OMIP-2 interior; regional Arctic/Med/SO use shorter "
-                        "built-in taus).")
+                        "built-in taus). NEMO ORCA1 RUN_REF equivalent: piston "
+                        "-220 mm/day over the 10 m top layer = tau ~45.5 d.")
+    p.add_argument("--sss-restore-bound-mmday", type=float, default=None,
+                   help="Bound |restoring FW flux| at this mm/day-equivalent "
+                        "(NEMO ln_sssr_bnd: rn_sssr_bnd=4.0 in the ORCA1 "
+                        "reference). Default None keeps the loose 200 mm/day "
+                        "safety cap. The bound is what lets a SHORT tau hold "
+                        "SSS without injecting deep-convection-killing salt "
+                        "spikes (the tau=60 AMOC-collapse mechanism).")
     p.add_argument("--woa-smoothing-passes", type=int, default=0,
                    help="Horizontal Laplacian smoothing passes/level on the WOA T,S IC "
                         "-- removes spurious grid-scale fronts from interpolating/flood-"
@@ -1696,10 +2015,21 @@ def main() -> int:
                         "(drag removed afterwards -> free run).")
     args = p.parse_args()
 
+    if args.ice_thermo:   # codex LOW: reject unphysical prescribed-ice params early
+        if not (0.0 <= float(args.ice_thermo_sw_trans) <= 1.0):
+            raise ValueError("--ice-thermo-sw-trans must be in [0,1] (SW fraction "
+                             f"transmitted through ice); got {args.ice_thermo_sw_trans}.")
+        if not (float(args.ice_thermo_tau_days) > 0.0):
+            raise ValueError("--ice-thermo-tau-days must be > 0 (freezing-relaxation "
+                             f"timescale [days]); got {args.ice_thermo_tau_days}.")
+
     from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())
     from legoesm.ocean.forcing import load_core2_nyf
-    from legoesm.ocean.coupler import compute_omip2_surface_forcing
+    from legoesm.ocean.coupler import (
+        compute_omip2_surface_forcing,
+        compute_omip2_freshwater_forcing,
+    )
     from legoesm.core.field import Field
 
     # --config (#376 Phase 4): a template's run controls (time/output/grid)
@@ -1730,6 +2060,17 @@ def main() -> int:
 
     print(f"[setup] building {args.grid} (nlev={args.nlev}, "
           f"woa_init={args.woa_init}) ...")
+    if args.ew_cyclic_overlap and args.grid != "tripole":
+        raise ValueError(
+            "--ew-cyclic-overlap is ORCA-cyclic-overlap-specific (the eORCA1 "
+            "tripole); it is WRONG on a regular period-nx lat-lon grid. "
+            f"Got --grid {args.grid!r}.")
+    if args.river_mouth_restoring_gate and not args.runoff:
+        raise ValueError(
+            "--river-mouth-restoring-gate requires --runoff (the gate masks "
+            "restoring where the Dai-Trenberth runoff field is active; "
+            "without --runoff there is no runoff field and the gate would "
+            "silently do nothing).")
     if args.grid == "tripole":
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
@@ -1742,6 +2083,7 @@ def main() -> int:
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
             freeze_floor=(True if args.freeze_floor else None),
+            runoff_depth_spread_m=args.runoff_depth_spread_m,
             barotropic_solver=args.barotropic_solver,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,
@@ -1758,6 +2100,8 @@ def main() -> int:
             convection=args.convection,
             convection_K_conv=args.convection_K_conv,
             convection_K_bg=args.convection_K_bg,
+            ew_cyclic_overlap=(True if args.ew_cyclic_overlap else None),
+            tracer_advection=args.tracer_advection,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -1790,6 +2134,7 @@ def main() -> int:
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             flat_bottom=args.flat_bottom, partial_cell=args.partial_cell,
             freeze_floor=(True if args.freeze_floor else None),
+            runoff_depth_spread_m=args.runoff_depth_spread_m,
         )
         app_grid_type = "mpas"
     else:
@@ -1805,6 +2150,8 @@ def main() -> int:
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
             freeze_floor=(True if args.freeze_floor else None),
+            runoff_depth_spread_m=args.runoff_depth_spread_m,
+            tracer_advection=args.tracer_advection,
             barotropic_solver=args.barotropic_solver,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,
@@ -1854,6 +2201,90 @@ def main() -> int:
     # (the 5-yr MPAS run drifted 35->31 PSU without it).  Capture the target =
     # the UNSMOOTHED WOA surface salinity BEFORE --woa-smoothing-passes damps the
     # IC fronts (restoring must target the true climatology, not the smoothed IC).
+    visc_schedule = None
+    visc_seg_idx = 0
+    if args.visc_schedule:
+        if app_grid_type not in ("tripole", "latlon"):
+            raise ValueError("--visc-schedule is wired for tripole/latlon "
+                             f"(LatLonCGridOceanModel); got {args.grid!r}.")
+        visc_schedule = []
+        for seg in args.visc_schedule.split(","):
+            parts = seg.strip().split(":")
+            if len(parts) != 3:
+                raise ValueError(
+                    f"--visc-schedule segment {seg!r} must be "
+                    "'day:A_h:C_smag_lap'.")
+            _d, _a, _c = (float(parts[0]), float(parts[1]), float(parts[2]))
+            # strict validation (codex MED): finite, non-negative; NaN would
+            # evade config checks and comparisons.
+            if not (np.isfinite(_d) and np.isfinite(_a) and np.isfinite(_c)):
+                raise ValueError(f"--visc-schedule segment {seg!r}: all "
+                                 "fields must be finite.")
+            if _d < 0.0 or _a < 0.0 or _c < 0.0:
+                raise ValueError(f"--visc-schedule segment {seg!r}: day, "
+                                 "A_h and C_smag_lap must be >= 0.")
+            visc_schedule.append((_d, _a, _c))
+        _days = [d for d, _, _ in visc_schedule]
+        if any(b <= a for a, b in zip(_days, _days[1:])):
+            raise ValueError("--visc-schedule days must be STRICTLY "
+                             "ascending (duplicates would apply a segment "
+                             "one timestep late).")
+        print(f"[setup] viscosity schedule: {visc_schedule}")
+        # Provenance (codex HIGH): the manifest's runtime_config snapshots
+        # only the INITIAL A_h/C_smag_lap; the full schedule is recorded in
+        # the manifest command_line AND in this explicit sidecar.
+        try:
+            import json as _json
+            with open(Path(args.output) / "visc_schedule.json", "w") as _f:
+                _json.dump({"segments_day_Ah_Csmaglap": visc_schedule}, _f,
+                           indent=1)
+        except Exception as _e:  # noqa: BLE001 — provenance best-effort
+            print(f"[warn] visc_schedule sidecar not written: {_e}")
+
+    bbl_geom = None
+    bbl_face_widths = None
+    if args.bbl_adv:
+        # NEMO advective BBL (trabbl nn_bbl_adv=2): static geometry from the
+        # partial-cell reference thicknesses + NEMO mask; host post-step
+        # application (same pattern as restoring / ice-thermo).
+        if app_grid_type not in ("tripole", "latlon"):
+            raise ValueError("--bbl-adv is wired for tripole/latlon only "
+                             f"(got grid {args.grid!r}).")
+        from legoesm.ocean.vertical import OceanPartialCellCoordinate
+        if not isinstance(z_coord, OceanPartialCellCoordinate):
+            raise ValueError("--bbl-adv requires --partial-cell (the BBL "
+                             "geometry comes from per-cell bottom levels).")
+        from legoesm.ocean.physics.bbl_adv import bbl_static_geometry
+        bbl_geom = bbl_static_geometry(
+            jnp.asarray(z_coord.h_partial),
+            jnp.asarray(state.land_mask.data))
+        if app_grid_type == "tripole":
+            # tripole carries face metrics: dy_u (n_lat, n_lon+1 with wrap),
+            # dx_v (n_lat+1, n_lon). Interior faces: between cols i,i+1 ->
+            # u-face index i+1; between rows j,j+1 -> v-face index j+1.
+            _dyu = jnp.asarray(grid.dy_u)[:, 1:-1]
+            _dxv = jnp.asarray(grid.dx_v)[1:-1, :]
+        else:
+            # regular lat-lon: dy const, dx = R cos(lat) dlon at the v-face
+            # rows / cell rows (faces share the row latitude for dy_u).
+            _lat = np.asarray(grid.lat)            # (n_lat,) rad
+            _nlat, _nlon = state.land_mask.data.shape
+            _dlat = float(_lat[1] - _lat[0])
+            _dlon = 2.0 * np.pi / _nlon
+            from legoesm import constants as _const
+            _R = float(getattr(grid, "radius", _const.R_earth))
+            dy = _R * _dlat
+            _dyu = jnp.full((_nlat, _nlon - 1), dy)
+            _latv = 0.5 * (_lat[:-1] + _lat[1:])
+            _dxv = jnp.asarray(
+                (_R * np.cos(_latv) * _dlon)[:, None]
+                * np.ones((1, _nlon)))
+        bbl_face_widths = (_dyu, _dxv)
+        print(f"[setup] BBL-adv ON (Campin-Goosse gamma={args.bbl_gamma_s}s): "
+              f"active i-faces "
+              f"{int(np.asarray(bbl_geom.u_active).sum())}, j-faces "
+              f"{int(np.asarray(bbl_geom.v_active).sum())}")
+
     sss_restore_cfg = None
     sss_restore_target = None
     if args.sss_restore:
@@ -1866,16 +2297,29 @@ def main() -> int:
             raise ValueError("--sss-restore-tau-days must be > 0 (0 divides by "
                              "zero in build_region_masks; negative = anti-restoring).")
         from legoesm.ocean.forcing.sss_restoring import SSSRestoringConfig
+        from legoesm import constants
+        _cfg_kwargs = {}
+        if args.sss_restore_bound_mmday is not None:
+            if not (float(args.sss_restore_bound_mmday) > 0.0):
+                raise ValueError("--sss-restore-bound-mmday must be > 0.")
+            # mm/day water-equivalent -> kg/m^2/s (rho_water * m/day / 86400).
+            _cfg_kwargs["max_flux_kg_m2_s"] = (
+                float(args.sss_restore_bound_mmday) * 1.0e-3 / 86400.0
+                * float(constants.rho_water))
         sss_restore_cfg = SSSRestoringConfig(
             enabled=True,
             tau_restore_days_default=float(args.sss_restore_tau_days),
+            **_cfg_kwargs,
         )
         sss_restore_target = np.asarray(
             state.S.data, dtype=np.float64)[..., 0].copy()      # surface SSS
         _wet = np.asarray(state.land_mask.data) > 0.5
+        _bnd = (f"{args.sss_restore_bound_mmday:.1f} mm/day (NEMO ln_sssr_bnd)"
+                if args.sss_restore_bound_mmday is not None
+                else "200 mm/day safety cap")
         print(f"[setup] SSS restoring ON: tau_default="
               f"{args.sss_restore_tau_days:.0f} d + OMIP-2 regional masks; "
-              f"target = WOA surface SSS "
+              f"flux bound {_bnd}; target = WOA surface SSS "
               f"[{sss_restore_target[_wet].min():.1f},"
               f"{sss_restore_target[_wet].max():.1f}] PSU")
 
@@ -1925,6 +2369,27 @@ def main() -> int:
         runoff_monthly = load_runoff_monthly(
             grid, app_grid_type, lat2d, lon2d, args.mesh,
             land_mask=np.asarray(state.land_mask.data), spread_passes=_spread)
+    # Prescribed sea-ice-concentration field for the SW-albedo surrogate
+    # (--ice-albedo) AND the NEMO-faithful SSS-restoring ice gate (nn_sssr_ice=0:
+    # no restoring under ice).  Loaded ONCE, regridded onto the model grid; passed
+    # to compute_omip2_surface_forcing + the restoring every step (no per-step
+    # recompute).  ``--ice-albedo-seasonal`` -> a (12, *grid) monthly climatology
+    # (leading month axis indexed each step); otherwise a single annual map.  Also
+    # loaded when only --sss-restore is on, so the restoring ice gate is faithful
+    # even without the albedo.
+    siconc_clim = None
+    siconc_monthly = False
+    if args.ice_albedo or args.sss_restore or args.ice_thermo:
+        if args.ice_albedo_seasonal:
+            siconc_clim = load_nemo_siconc_monthly(
+                grid, app_grid_type, lat2d, lon2d, siconc_file=args.siconc_file,
+                tos_file=args.tos_monthly_file,
+                land_mask=np.asarray(state.land_mask.data))
+            siconc_monthly = True
+        else:
+            siconc_clim = load_nemo_siconc(
+                grid, app_grid_type, lat2d, lon2d, siconc_file=args.siconc_file,
+                land_mask=np.asarray(state.land_mask.data))
     # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
     # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
     # would corrupt the comparison invisibly. --forcing-path (set via --config
@@ -2046,6 +2511,22 @@ def main() -> int:
                     "enabled (those need per-step host updates)")
         print(f"[scan] --scan-block ignored: {why}.", flush=True)
     if use_scan:
+        # The scan path applies NONE of the host-loop surface forcing extensions:
+        # P - E (precip is not in the on-device stack), Dai-Trenberth runoff, SSS
+        # restoring, OR the --ice-albedo SW reduction (siconc not on device).
+        # Refuse rather than silently emit a quietly-fresh / no-albedo result if
+        # ANY of those is requested.  P - E is ON by default, so the scan path is
+        # reachable only with --no-emp AND no --runoff/--sss-restore/--ice-albedo
+        # (a pure momentum/heat tripole perf run, issue #354).
+        if (args.emp_freshwater or args.runoff or args.sss_restore
+                or args.ice_albedo or args.ice_thermo):
+            raise SystemExit(
+                "[scan] --scan-block applies no surface salinity/albedo/ice forcing "
+                "(P - E / runoff / SSS restoring / ice-albedo / ice-thermo are "
+                "host-loop only), so it cannot run a faithful integration.  Use the "
+                "host Python loop (omit --scan-block), or drop "
+                "--runoff/--sss-restore/--ice-albedo/--ice-thermo and pass --no-emp "
+                "for the momentum/heat-only scan path.")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
@@ -2117,40 +2598,132 @@ def main() -> int:
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         ramp = min(1.0, (step * dt) / ramp_s) if ramp_s > 0 else 1.0
+        # Piecewise viscosity schedule (--visc-schedule): at each segment
+        # boundary rebuild config+model ONCE (one JIT recompile per segment)
+        # with the next (A_h, C_smag_lap).  The high cold-start viscosity is
+        # only needed during the WOA adjustment; stepping down from an
+        # adjusted state closes the 5-10x gap to NEMO's eddy_viscosity file
+        # (the user-flagged 'fuzzier than NEMO') without the day-30 NaN a
+        # one-jump drop causes.  Exact + auditable (segments logged).
+        if visc_schedule and visc_seg_idx < len(visc_schedule):
+            _day0, _ah, _cs = visc_schedule[visc_seg_idx]
+            if (step - 1) * dt >= _day0 * 86400.0:
+                if (_ah, _cs) != (float(model.config.A_h),
+                                  float(model.config.C_smag_lap)):
+                    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid \
+                        import LatLonCGridOceanModel
+                    model = LatLonCGridOceanModel(
+                        grid, z_coord,
+                        model.config._replace(A_h=_ah, C_smag_lap=_cs))
+                print(f"[visc-schedule] day {(step-1)*dt/86400.0:.1f}: "
+                      f"A_h={_ah:g} C_smag_lap={_cs:g} "
+                      f"(segment {visc_seg_idx + 1}/{len(visc_schedule)})",
+                      flush=True)
+                visc_seg_idx += 1
         # Build CORE-II surface forcing and integrate it INSIDE model.step (the
         # dynamics-core external-tau block) -- energetically consistent, unlike
         # the operator-split applicator (which pumped the runaway). Optional
         # cold-start ramp scales the forcing fields.
+        # Sea-ice concentration for THIS step: the calendar-month slice when a
+        # seasonal (12-month) climatology was loaded, else the single annual map.
+        # Drives both the SW albedo (--ice-albedo only) and the SSS-restoring ice
+        # gate (below).  ``_sic`` may be loaded for restoring alone (when only
+        # --sss-restore is set), so the albedo is gated on --ice-albedo explicitly
+        # to keep an SSS-only run's heat budget unchanged (codex HIGH).
+        _sic = _siconc_at_step(siconc_clim, step, dt, siconc_monthly)
         sf = compute_omip2_surface_forcing(
             state, forcing=forcing, idx_t=it,
             grid=grid, grid_type=app_grid_type,
+            ice_albedo=(_sic if (args.ice_albedo or args.ice_thermo) else None),
+            under_ice=args.ice_thermo, tau_ice_sw=args.ice_thermo_sw_trans,
         )
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
                              q_net=sf.q_net * ramp, sw_down=sf.sw_down * ramp)
-        state = model.step(state, dt, surface_forcing=sf)
-        if runoff_monthly is not None:
-            _R = runoff_monthly[_runoff_month_idx(step, dt)]
-            if app_grid_type == "mpas":
-                from legoesm.ocean.coupler.runoff_apply import apply_runoff_step_mpas
-                state = apply_runoff_step_mpas(
-                    state, R_kg_m2_s=_R, z_coord=z_coord, dt=dt)
-            else:
-                from legoesm.ocean.coupler.runoff_apply import apply_runoff_step
-                state = apply_runoff_step(
-                    state, R_kg_m2_s=_R, z_coord=z_coord, dt=dt)
+        # Surface freshwater (atmospheric P - E + optional Dai-Trenberth runoff)
+        # is delivered through the IN-CORE channel
+        # ``model.step(..., freshwater=FreshwaterForcing)``: the dynamics core
+        # applies the virtual-salt tendency (``config.S_ref``) AND the eta
+        # free-surface source inside the barotropic solve, on-device + AD-safe.
+        # P - E is ON by default (--no-emp = ablation).  The CUBE's 'external'
+        # physics instead consumes ``surface_forcing.freshwater`` directly, so for
+        # the cube the NET flux is folded onto ``sf`` and no freshwater= arg is
+        # passed (single application; avoids the double-count codex flagged).
+        _R = (runoff_monthly[_runoff_month_idx(step, dt)]
+              if runoff_monthly is not None else None)
+        _want_fw = args.emp_freshwater or (_R is not None)
+        if app_grid_type == "cubed_sphere":
+            # CUBE is PARKED (cold-start blowup). Its 'external' physics applies
+            # surface_forcing.freshwater ONCE as a virtual salt with the LOCAL
+            # S_top (not config.S_ref) and NO eta free-surface source -- a
+            # lighter treatment than the latlon/MPAS freshwater= path. Acceptable
+            # for the parked grid; revisit if the cube is unparked for a
+            # salinity-faithful OMIP run.
+            if _want_fw:
+                from legoesm.ocean.freshwater import net_freshwater_flux
+                fw = compute_omip2_freshwater_forcing(
+                    state, forcing=forcing, idx_t=it, grid=grid,
+                    grid_type=app_grid_type, runoff_R=_R,
+                    emp=args.emp_freshwater, ramp=ramp)
+                sf = sf._replace(freshwater=net_freshwater_flux(fw))
+            state = model.step(state, dt, surface_forcing=sf)
+        else:
+            fw = None
+            if _want_fw:
+                fw = compute_omip2_freshwater_forcing(
+                    state, forcing=forcing, idx_t=it, grid=grid,
+                    grid_type=app_grid_type, runoff_R=_R,
+                    emp=args.emp_freshwater, ramp=ramp)
+            state = model.step(state, dt, surface_forcing=sf, freshwater=fw)
         if sss_restore_cfg is not None:
+            # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
+            # under sea ice).  Feed the SAME prescribed siconc the albedo uses
+            # (``_sic``; None only if neither --ice-albedo nor a siconc field is
+            # available, in which case the restoring is ungated as before).
+            # River-mouth gate (NEMO sbcssr (1-2*rnfmsk)): pass the per-cell
+            # runoff so restoring is OFF at river mouths and does not fight
+            # the plume toward coarse WOA (Amazon artifact). Gated by flag.
+            _R_gate = _R if args.river_mouth_restoring_gate else None
             if app_grid_type == "mpas":
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step_mpas
                 state = apply_sss_restoring_step_mpas(
-                    state, S_target=sss_restore_target, ice_concentration=None,
-                    config=sss_restore_cfg, mesh=grid, dt=dt)
+                    state, S_target=sss_restore_target, ice_concentration=_sic,
+                    config=sss_restore_cfg, mesh=grid, dt=dt,
+                    river_runoff=_R_gate)
             else:
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step
                 state = apply_sss_restoring_step(
-                    state, S_target=sss_restore_target, ice_concentration=None,
+                    state, S_target=sss_restore_target, ice_concentration=_sic,
                     config=sss_restore_cfg, grid=grid, z_coord=z_coord, dt=dt,
-                    lat2d_deg=lat2d, lon2d_deg=lon2d)
+                    lat2d_deg=lat2d, lon2d_deg=lon2d,
+                    river_runoff=_R_gate)
+        if args.ice_thermo and _sic is not None:
+            # Prescribed-ice freezing relaxation (the post-step half of the
+            # thermodynamic boundary; the SW cut + (1-sic) flux suppression are in
+            # compute_omip2_surface_forcing).  Nudge the under-ice surface ocean
+            # toward freezing -> cools the over-warm Southern-Ocean under-ice cells
+            # (>45S warm bias) + holds the Arctic near freezing.  Grid-agnostic
+            # top-cell update (same host-state pattern as the SSS restoring).
+            from legoesm.ocean.coupler.omip2_applicator import under_ice_freeze_relax
+            Tn = np.asarray(state.T.data).copy()   # copy: device arrays alias / are read-only
+            Tn[..., 0] = under_ice_freeze_relax(
+                Tn[..., 0], _sic, dt, tau_ice_days=args.ice_thermo_tau_days)
+            state = state._replace(
+                T=Field(jnp.asarray(Tn), name=state.T.name,
+                        dims=state.T.dims, units=state.T.units))
+        if bbl_geom is not None:
+            # NEMO advective BBL (Campin-Goosse): dense shelf bottom water
+            # descends the slope. Host post-step exchange, exactly tracer-
+            # conserving; transports recomputed from current bottom T/S.
+            from legoesm.ocean.physics.bbl_adv import apply_bbl_adv_step
+            state = apply_bbl_adv_step(
+                state, bbl_geom, dt,
+                gamma_s=args.bbl_gamma_s,
+                rho_0=float(model.config.rho_0),
+                area_2d=jnp.asarray(grid.area),
+                dy_u_faces=bbl_face_widths[0],
+                dx_v_faces=bbl_face_widths[1],
+                nlev=int(args.nlev))
         if nudge_tau_s > 0 and (nudge_release_s <= 0 or step * dt < nudge_release_s):
             a = dt / nudge_tau_s
             Tn = np.asarray(state.T.data)
