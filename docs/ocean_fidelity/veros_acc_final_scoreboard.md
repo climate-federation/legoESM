@@ -5,14 +5,23 @@ config (the recipe), replicate a production model — Veros's ACC channel — at
 the per-tendency level (tier 2), the realized-increment level (rung 6), and
 the climate level (multi-year statistics)?
 
-**The answer.** The **dycore-numerics-matching program is complete**: every
-Veros dycore option is imported as a config-selectable, default-off,
-bit-identical-when-off option, and each either matches Veros at or near
-machine precision or was *measured* not to be the climate lever. The remaining
-climate residual is the **eddy-mean equilibration** (parameterized-eddy APE
-drainage under the cold-started prognostic EKE / vertical momentum partition)
-— a physics-regime difference, definitively not the discretization. Details,
-evidence and commits: `oracle_recipe_strategy.md` §8 ledgers.
+**The answer (FINAL, 2026-06-10): YES — and the residual was numerics after
+all.** Every Veros option is a config-selectable, default-off block, and the
+multi-year climate now matches: 10-yr cold-start KE **0.95×** Veros, and
+legoESM **holds Veros's equilibrium** when initialized in it (drop-hold KE
+1.07× over 5 yr, where the pre-fix stack departed ×8). The earlier conclusion
+that the residual was "the eddy-mean equilibration, definitively not the
+dycore numerics" was **overturned** by the 2026-06-09/10 Layer-1 campaign:
+the dominant drivers were (1) the EKE mixing-length computed from the in-situ
+N² (`abcbd255`), (2) the positive-definite GM-skew EKE source form
+(`5bdce06a`), (3) upwind-on-perturbation vertical momentum advection
+(`678e0cbc`, fixed the transport overshoot), and above all (4) **the Matsuno
+Coriolis time-composition** (`3bb0bedb`) — destroying near-inertial energy at
+|G|≈0.83/step where Veros's explicit-AB2 Coriolis is ~0.997, invisible to
+every per-operator comparison. The method lesson: per-tendency matching at
+corr 0.95+ does NOT bound the assembled step's energy pathways; drop-hold
+tests from the oracle's own equilibrium + term-by-term budgets on that state
+do. Details: `oracle_recipe_strategy.md` §8 ledgers.
 
 ## Per-tendency / per-block scoreboard (tier 2 + rung 6, frozen bridged states)
 
@@ -164,3 +173,24 @@ positive-definite realized-skew form (1.22× vs Veros's signed −P_diss_skew,
 items D1 (Coriolis composition), D2 (AB2 scope), D3 (vertical momentum
 advection: upwind-on-perturbation vs centered-on-full-u — the best match for
 the residual barotropic/KE bias).
+
+
+## FINAL RESOLUTION (2026-06-10 afternoon)
+
+| Metric (10-yr cold start vs Veros) | before campaign | after `3bb0bedb` |
+|---|---|---|
+| total KE | 5.4× | **0.95×** |
+| u_surf | 2.06× | **0.99×** |
+| u_bot/u_surf | 2.42× | **1.29×** (0.154 vs 0.119) |
+| mean EKE | 19.8× | **2.5×** |
+| ACC transport | 1.52× | 0.87× (221 Sv — modest undershoot, open) |
+| abyssal T | +2.8 °C | +1.7 °C (open, halved) |
+| **drop-hold from Veros equilibrium** | departs ×8 | **HOLDS (1.07×)** |
+
+Open residuals (small, named): the ACC-transport undershoot (interaction of
+D1×D3×additive-friction worth one attribution pass), the remaining abyssal
+warm drift (both models drift; legoESM faster), EKE 2.5×, and the
+documented-deferred items (P_diss_adv/nonlin TKE terms, the w→v-face metric
+averaging, D2 AB2-scope, free-surface Coriolis scoping). The oracle-recipe
+method is validated end-to-end: recipe + bridge + frozen-state tiers +
+**drop-hold** + budget-on-state probes + Veros-side runtime ablations.
