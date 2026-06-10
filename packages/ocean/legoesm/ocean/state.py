@@ -332,6 +332,14 @@ class LatLonCGridOceanState(NamedTuple):
     # (dt = dt_mom) seeded from this field and stores the updated TKE back.
     # Default None -> inert (Mode-B diagnostic chain): zero behaviour change.
     tke: object = None
+    # Prior-step ADVECTIVE TKE tendency [m^2/s^3] at the interior interfaces
+    # (W-grid), 3-D Field (n_lat, n_lon, nlev-1) — the Adams-Bashforth history
+    # dtke^{n-1} for the prognostic-TKE superbee advection (Veros vs.dtke,
+    # tke.py:292-323), used only when vertical_mixing.tke.advection_scheme !=
+    # "none" (requires prognostic=True). None on the first step => the AB2
+    # increment uses a zero previous tendency, exactly like Veros's
+    # zero-initialised dtke[taum1]. Default None -> inert: zero behaviour change.
+    dtke: object = None
     # Carried EKE dissipation rate [m^2/s^3] at the interior interfaces (W-grid),
     # 3-D Field (n_lat, n_lon, nlev-1). Populated by the 3-D EKE step (Veros
     # eke_diss_iw, run in the GM/Redi stage) and consumed WITHIN THE SAME step by

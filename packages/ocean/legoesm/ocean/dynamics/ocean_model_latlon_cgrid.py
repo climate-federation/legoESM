@@ -652,6 +652,41 @@ class LatLonCGridOceanModel:
                     "gm_source_mode='parameterized', source_p_diss_iso=False)."
                 )
 
+        # Fail-fast prognostic-TKE advection validation (dispatch discipline:
+        # the literal is membership-checked at construction; the dispatch site
+        # raises again as the factory-level tripwire). Advecting a DIAGNOSTIC
+        # TKE is meaningless (no carried field) — reject the combination.
+        if config.physics is not None:
+            _vm = config.physics.vertical_mixing
+            _tke_adv = getattr(_vm.tke, "advection_scheme", "none")
+            _valid_tke_adv = {"none", "superbee"}
+            if _tke_adv not in _valid_tke_adv:
+                raise ValueError(
+                    f"vertical_mixing.tke.advection_scheme must be one of "
+                    f"{sorted(_valid_tke_adv)}, got {_tke_adv!r}")
+            if _tke_adv != "none" and not (
+                    _vm.scheme == "tke"
+                    and bool(getattr(_vm.tke, "prognostic", False))):
+                raise ValueError(
+                    "vertical_mixing.tke.advection_scheme="
+                    f"{_tke_adv!r} requires the PROGNOSTIC TKE closure "
+                    "(vertical_mixing.scheme='tke' AND tke.prognostic=True): "
+                    "only a carried TKE field can be advected (Veros "
+                    "enable_tke_superbee_advection advects the prognostic "
+                    f"tke[tau]). Got scheme={_vm.scheme!r}, "
+                    f"prognostic={getattr(_vm.tke, 'prognostic', False)!r}.")
+            if _tke_adv != "none" and not config.implicit_vertical_mixing:
+                # The advective AB2 increment is applied to the TKE the
+                # implicit-mixing solve returns; without that solve the
+                # prognostic TKE never advances and the advection would be a
+                # SILENT no-op — fail fast instead (dispatch discipline).
+                raise ValueError(
+                    "vertical_mixing.tke.advection_scheme="
+                    f"{_tke_adv!r} requires implicit_vertical_mixing=True "
+                    "(the prognostic TKE advances inside the implicit "
+                    "vertical-mixing solve; without it the advection would "
+                    "silently never apply).")
+
         # Fail-fast momentum-advection dispatch validation (was a silent
         # fallthrough to vector-invariant for any unknown literal). Single
         # source: VALID_MOMENTUM_ADVECTION in ocean_pe_latlon_cgrid.
@@ -1941,6 +1976,15 @@ class LatLonCGridOceanModel:
                     surface_tracer_forcing=tend.surface_tracer_forcing,
                 )
         if tke_new is not None:
+            # Veros order (integrate_tke): the implicit solve writes
+            # tke[taup1] FIRST, then the superbee-advection AB2 increment is
+            # added to it (tke.py:315-323). Advects the carried state.tke
+            # (tke[tau]) by the pre-step state.u/v (u[tau]); dt here is the
+            # TRACER dt (Veros dt_tracer). Static gate ⇒ default adds no ops.
+            if self._tke_advection_active():
+                tke_new, _dtke_field = self._apply_tke_advection(
+                    state, tke_new, dt)
+                state_new = state_new._replace(dtke=_dtke_field)
             state_new = state_new._replace(
                 tke=Field(data=tke_new, name="tke",
                           dims=("lat", "lon", "level"), units="m^2/s^2"),
@@ -1996,6 +2040,81 @@ class LatLonCGridOceanModel:
         if vmix is None or vmix.scheme != "tke":
             return False
         return bool(getattr(vmix.tke, "prognostic", False))
+
+    def _tke_advection_active(self) -> bool:
+        """True iff the prognostic TKE field is ADVECTED (Veros
+        ``enable_tke_superbee_advection``).
+
+        Static Python predicate (config-only): prognostic TKE is on AND
+        ``vertical_mixing.tke.advection_scheme != "none"``. Default False ⇒
+        the model step traces zero additional ops (bit-identical).
+        """
+        if not self._tke_prognostic_active():
+            return False
+        tke_cfg = self.config.physics.vertical_mixing.tke
+        return getattr(tke_cfg, "advection_scheme", "none") != "none"
+
+    def _apply_tke_advection(self, state, tke_new, dt):
+        """Apply the AB2 advective increment to the freshly-solved TKE (Veros
+        ``integrate_tke``'s superbee-advection block, tke.py:286-323).
+
+        Computes the W-grid superbee advective tendency ``dtke^n`` of the
+        CARRIED ``state.tke`` (Veros tke[tau]) using the PRE-STEP velocities
+        ``state.u/v`` (Veros u[tau], the same-step fields the 3-D EKE
+        advection uses), then
+
+            tke ← tke_new + dt·((1.5+ε)·dtke^n − (0.5+ε)·dtke^{n-1})
+
+        with ``dt`` the TRACER timestep (Veros multiplies by
+        ``settings.dt_tracer``, tke.py:318 — NOT dt_tke=dt_mom, which only
+        drives the implicit solve, tke.py:137) and ``ε = config.ab2_epsilon``
+        (the model's one AB2 epsilon; Veros AB_eps). ``dtke^{n-1}`` is the
+        ``state.dtke`` carry — zero when None (first step), exactly Veros's
+        zero-initialised ``dtke[taum1]``. No positivity floor is applied
+        (Veros applies none after this add; every TKE consumer floors
+        internally).
+
+        Returns ``(tke_out, dtke_field)`` where ``dtke_field`` is the new
+        carry. Raises ``ValueError`` on an unknown scheme literal (dispatch
+        hardening; construction validation is the first gate).
+        """
+        from legoesm.ocean.advection import (
+            wgrid_advection_tendency_latlon_cgrid,
+        )
+
+        tke_cfg = self.config.physics.vertical_mixing.tke
+        scheme = getattr(tke_cfg, "advection_scheme", "none")
+        if scheme != "superbee":
+            raise ValueError(
+                f"Unknown TKE advection_scheme {scheme!r}; expected "
+                f"'superbee' (or 'none', which never reaches this dispatch).")
+        dtype = tke_new.dtype
+        lm = state.land_mask.data
+        if state.tke is not None:
+            tke_tau = state.tke.data
+        else:
+            # Cold start (direct step without integrate_scan pre-seeding):
+            # advect the same background-seeded field the implicit solve
+            # seeds (a constant field ⇒ ~zero tendency up to the W-grid
+            # continuity residual absorbed at interface 0).
+            nlev = state.T.data.shape[-1]
+            tke_tau = jnp.where(
+                lm[:, :, jnp.newaxis] > 0.5, tke_cfg.tke_background, 0.0,
+            ).astype(dtype) * jnp.ones((1, 1, nlev - 1), dtype=dtype)
+        dtke_now = wgrid_advection_tendency_latlon_cgrid(
+            tke_tau, state.u.data, state.v.data, self.grid,
+            jnp.asarray(self.z_coord.dz_ref), dt, lm,
+            state.u_mask.data, state.v_mask.data,
+        )
+        dtke_now = jax.lax.convert_element_type(dtke_now, dtype)
+        dtke_prev = (state.dtke.data.astype(dtype)
+                     if state.dtke is not None else jnp.zeros_like(dtke_now))
+        eps = self.config.ab2_epsilon
+        tke_out = tke_new + dt * ((1.5 + eps) * dtke_now
+                                  - (0.5 + eps) * dtke_prev)
+        dtke_field = Field(data=dtke_now, name="dtke",
+                           dims=("lat", "lon", "level"), units="m^2/s^3")
+        return tke_out, dtke_field
 
     def _assemble_tke_source(self, state, state_new, tend):
         """Assemble the prognostic-TKE energy-recycling source ``forc`` [m²/s³].
@@ -2920,6 +3039,14 @@ class LatLonCGridOceanModel:
                 else:
                     state_ab2 = _seq
         if tke_new_ab2 is not None:
+            # Veros order: superbee-advection AB2 increment AFTER the implicit
+            # solve (tke.py:315-323), advecting the carried state.tke by the
+            # pre-step u[tau]; dt is the TRACER dt (Veros dt_tracer — distinct
+            # from the solve's dt_mom under async stepping).
+            if self._tke_advection_active():
+                tke_new_ab2, _dtke_field = self._apply_tke_advection(
+                    state, tke_new_ab2, dt)
+                state_ab2 = state_ab2._replace(dtke=_dtke_field)
             state_ab2 = state_ab2._replace(
                 tke=Field(data=tke_new_ab2, name="tke",
                           dims=("lat", "lon", "level"), units="m^2/s^2"),
@@ -3235,6 +3362,22 @@ class LatLonCGridOceanModel:
                     eke_diss=Field(data=ediss0, name="eke_diss",
                                    dims=("lat", "lon", "level"),
                                    units="m^2/s^3"))
+
+        # TKE-advection AB2 carry: seed the prior advective tendency dtke to
+        # zero (Veros's zero-initialised dtke[taum1]) so the scan pytree stays
+        # constant (the step writes a dtke Field every iteration when the
+        # advection is active). Separate from the tke seeding above: state.tke
+        # may have been pre-seeded by the caller while dtke was not.
+        if self._tke_advection_active() and state.dtke is None:
+            from legoesm.core.field import Field
+            lm = state.land_mask.data
+            nlev = state.T.data.shape[-1]
+            dtype = state.T.data.dtype
+            dtke0 = jnp.zeros((lm.shape[0], lm.shape[1], nlev - 1),
+                              dtype=dtype)
+            state = state._replace(
+                dtke=Field(data=dtke0, name="dtke",
+                           dims=("lat", "lon", "level"), units="m^2/s^3"))
 
         # Rigid-lid: pre-build the static island/depth data (host-side
         # flood-fill) so the scan captures it as a compile-time constant, and

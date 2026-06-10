@@ -137,6 +137,28 @@ class TKEConfig(NamedTuple):
     # legoESM does not yet surface (Veros tke.py:142,149). Documented gap.
     source_eke_diss: bool = False
     source_bottom_drag_diss: bool = False
+    # ----- Lateral/vertical ADVECTION of the prognostic TKE field -----
+    # Veros ``enable_tke_superbee_advection`` (global_4deg sets it True; the
+    # ACC setup does not). Valid: "none" | "superbee"; anything else raises at
+    # model-config construction AND at the dispatch site (dispatch hardening).
+    #
+    # ``"none"`` (default, BIT-IDENTICAL): no advection — not a single traced
+    #   op is added (static Python gate in the model step).
+    # ``"superbee"``: each step computes the W-grid superbee advective
+    #   tendency of the CARRIED tke (Veros tke[tau]) from the PRE-STEP
+    #   velocities (Veros u[tau] via calculate_velocity_on_wgrid) and applies
+    #   it AFTER the implicit TKE solve with Adams-Bashforth-2 weights on the
+    #   tendency history (Veros tke.py:286-323):
+    #       tke ← tke + dt_tracer·((1.5+AB_eps)·dtke^n − (0.5+AB_eps)·dtke^{n-1})
+    #   NOTE the dt's: the implicit TKE solve uses dt_mom (Veros tke.py:137)
+    #   but the advection AB2 increment AND its uCFL weight use dt_tracer
+    #   (Veros tke.py:318, advection.py:47) — they differ under asynchronous
+    #   dt_mom≠dt_tracer stepping (global_4deg: 1800 s vs 86400 s). AB_eps is
+    #   the model's ``ab2_epsilon`` (the one AB2 epsilon — not redefined).
+    #   The tendency history is carried on ``state.dtke`` (zero on the first
+    #   step, like Veros's zero-initialised dtke[taum1]). Requires
+    #   ``prognostic=True`` (advecting a diagnostic TKE is a config error).
+    advection_scheme: str = "none"
 
 
 class KPPConfig(NamedTuple):

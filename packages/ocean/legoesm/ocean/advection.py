@@ -21,11 +21,15 @@ where:
 """
 
 import jax.numpy as jnp
-
 from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
 from legoesm.grids.latlon import LatLonGrid
-from legoesm.ocean.dynamics.latlon_cgrid_operators import is_tripolar
-
+from legoesm.ocean.dynamics._flux_limiters import (
+    sweby_limiter as _superbee_limiter,
+)
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    divergence_cgrid,
+    is_tripolar,
+)
 
 # =============================================================================
 # Flux limiter — DST-3 uses Van Leer (less aggressive than Sweby, better
@@ -50,7 +54,6 @@ def _sweby_limiter(r: jnp.ndarray) -> jnp.ndarray:
 # instead of re-deriving phi(r) = (r+|r|)/(1+|r|); aliased to the local private
 # name so call sites are unchanged.
 from legoesm.core.flux_limiters import van_leer_limiter as _van_leer_limiter
-
 
 # =============================================================================
 # DST-3 coefficients
@@ -804,7 +807,8 @@ def fct_tracer_advection(
     """
     from legoesm.ocean.dynamics.latlon_cgrid_operators import divergence_cgrid
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-        _upwind_to_u_points, _upwind_to_v_points,
+        _upwind_to_u_points,
+        _upwind_to_v_points,
     )
 
     eps = 1e-30
@@ -1366,3 +1370,320 @@ def _zalesak_signsplit_face_alphas(
         jnp.where(ad_vert_int < 0.0, alpha_w_neg, 1.0),
     )
     return alpha_u_full, alpha_v, alpha_vert_face
+
+
+# =============================================================================
+# Veros W-grid superbee advection (for interface-resident energy fields)
+# =============================================================================
+#
+# Faithful port of Veros's ``enable_tke_superbee_advection`` machinery for
+# fields living on the W-grid (TKE/EKE-style energies at the ``M = nlev-1``
+# interior interfaces):
+#
+#   - ``calculate_velocity_on_wgrid`` (veros/core/advection.py:117-217):
+#     dz-weighted average of the cell-centre velocities onto the W-levels,
+#     with the bottom T-cell's lower half absorbed into the deepest W-cell,
+#     and the W-grid vertical velocity rebuilt FROM CONTINUITY of the W-grid
+#     horizontal velocities (so a constant field is advected without spurious
+#     interior sources).
+#   - ``_adv_superbee`` (veros/core/advection.py:22-48): the MITgcm
+#     CFL-dependent superbee flux
+#         F = vel*(var_d + var_u)/2 − |vel|*((1−cr) + uCFL*cr)*rj/2,
+#     cr = superbee-limited slope ratio, uCFL = |vel|*dt_tracer/dx
+#     (Veros uses ``settings.dt_tracer`` in uCFL even for the W-grid fluxes —
+#     advection.py:47).  The limiter is the canonical ``sweby_limiter``
+#     (identical to Veros's ``limiter(cr)=max(clip(2cr,0,1), clip(cr,0,2))``).
+#   - ``adv_flux_superbee_wgrid`` (veros/core/advection.py:221-244) + the
+#     flux-divergence assembly of ``integrate_tke``
+#     (veros/core/tke.py:286-311).
+#
+# W-grid layout mapping (legoESM vs Veros) — load-bearing, read carefully:
+#
+#   Veros carries TKE on ``nz`` W-levels ordered bottom→top: levels
+#   ``k=0..nz-2`` are the interior interfaces (between T-cells k and k+1) and
+#   level ``nz-1`` is the SURFACE half-cell (thickness ``0.5*dzw[-1]``).
+#   legoESM carries interface energies on the ``M = nlev-1`` INTERIOR
+#   interfaces only, ordered top→bottom (index 0 = shallowest interior
+#   interface); the Veros surface half-cell level has NO legoESM counterpart
+#   (the same truncation the prognostic-TKE implicit solve and the 3-D EKE
+#   vertical diffusion already use: an independent M-level W-column with
+#   zero-flux ends, the surface TKE flux BC applied at interface 0).
+#
+#   Index map: legoESM interface ``i``  ⟷  Veros W-level ``k = nz-2-i``.
+#
+#   Veros's vertical flux-divergence special cases (tke.py:304-310) map as:
+#     * Veros bottom level k=0 (``-flux_top[0]/dzw[0]``): legoESM i = M-1 —
+#       reproduced EXACTLY (no flux below the deepest W-cell).
+#     * Veros interior (``-(flux_top[k]-flux_top[k-1])/dzw[k]``): exact.
+#     * Veros surface level k=nz-1 (``/(0.5*dzw[-1])``): the surface half-cell
+#       is NOT carried, so the flux between interface 0 and the (absent)
+#       surface level is set to ZERO and legoESM interface 0 absorbs the
+#       W-grid column-divergence residual — playing the role Veros's surface
+#       half-cell plays (whose own top flux is also zero, adv_ft[...,-1]=0).
+#       Column-integral conservation Σ dE·dzw·area = 0 holds EXACTLY either
+#       way (both flux ends are zero ⇒ vertical telescoping; the horizontal
+#       divergence is flux-form).
+#
+# Metrics use the REFERENCE 1-D dz (``z_coord.dz_ref``): the dzt/dzw ratios in
+# the W-grid velocity are jacobian-independent under z* (uniform column
+# stretching), and the faithful recipes run a rigid lid (J = 1) — matching
+# Veros's fixed dzt/dzw exactly there.
+#
+# Masks: legoESM wet masks are 2-D columns (no kbot-style per-level masking —
+# bathymetry enters via column stretching), so Veros's maskW products reduce
+# to the 2-D u/v face masks and the topography redirect of
+# ``calculate_velocity_on_wgrid`` (interior masked-W folding) has no
+# counterpart.  Veros's halo-interior updates are covered by periodic-lon
+# wrap + zero-flux walls.
+#
+# Horizontal flux divergence goes through the canonical ``divergence_cgrid``
+# (legoESM's shared cell-area convention: exact spherical sin-band areas) vs
+# Veros's ``cost·dxt·dyt`` rectangle areas — on identical fluxes the
+# tendencies agree to machine precision, and the area conventions differ by a
+# smooth ≲1.6% factor at 4°.  Per the oracle-recipe doctrine the shared
+# operator wins; this is the documented residual vs a bit-exact Veros
+# tendency.
+#
+# The limiter is the canonical ``sweby_limiter`` (imported at the top as
+# ``_superbee_limiter``) — identical to Veros's ``limiter(cr)``.
+
+# Veros ``_calc_cr`` division guard (veros/core/advection.py:12) — a pure
+# numerical floor, exempt from the named-constant rule like the other eps
+# floors in this module.
+_SUPERBEE_CR_EPS = 1e-20
+
+
+def _veros_superbee_face_flux(vel, var_m1, var_0, var_1, var_2,
+                              fm_m1, fm_0, fm_1, u_cfl):
+    """Veros ``_adv_superbee`` flux at one face (vectorised over faces).
+
+    ``vel`` is the face velocity; positive transports from ``var_0`` (donor
+    for ``vel > 0``) to ``var_1``.  ``var_m1``/``var_2`` extend the stencil
+    one cell beyond the donor/downstream cell.  ``fm_*`` are the FACE wet
+    masks at the previous / this / next face along the + direction (Veros's
+    ``maskUtr``-style products), zeroing slope contributions through walls.
+    ``u_cfl = |vel|*dt_tracer/dx`` is the CFL-dependent anti-diffusion weight.
+    """
+    rjp = (var_2 - var_1) * fm_1
+    rj = (var_1 - var_0) * fm_0
+    rjm = (var_0 - var_m1) * fm_m1
+    cr = _superbee_limiter(
+        jnp.where(vel > 0.0, rjm, rjp)
+        / jnp.where(jnp.abs(rj) < _SUPERBEE_CR_EPS, _SUPERBEE_CR_EPS, rj)
+    )
+    return (vel * (var_1 + var_0) * 0.5
+            - jnp.abs(vel) * ((1.0 - cr) + u_cfl * cr) * rj * 0.5)
+
+
+def wgrid_velocities_latlon_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    dz_ref: jnp.ndarray,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Horizontal advecting velocities on the W-grid (Veros
+    ``calculate_velocity_on_wgrid``, veros/core/advection.py:123-195).
+
+    ``u_w[..., i]`` is the dz-weighted average of ``u`` at cells ``i`` and
+    ``i+1`` onto interface ``i``; the deepest interface (i = M-1) additionally
+    absorbs the lower half of the bottom T-cell (Veros's bottom redirect,
+    advection.py:169-179 at its k=0).  The Veros surface W-level
+    (``u[-1]*0.5*dzt[-1]/dzw[-1]``) belongs to the surface half-cell legoESM
+    does not carry.
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1, nlev), v : (n_lat+1, n_lon, nlev) — cell-centre-depth
+        face velocities (the C-grid prognostic u/v).
+    dz_ref : (nlev,) reference layer thicknesses.
+    u_mask : (n_lat, n_lon+1), v_mask : (n_lat+1, n_lon) — face wet masks.
+
+    Returns
+    -------
+    u_w : (n_lat, n_lon+1, M), v_w : (n_lat+1, n_lon, M) with M = nlev-1.
+    """
+    dz = jnp.asarray(dz_ref, dtype=u.dtype)
+    dzw = 0.5 * (dz[:-1] + dz[1:])                       # (M,) Veros dzw (interior)
+    w_up = 0.5 * dz[:-1] / dzw                           # weight on cell i
+    w_dn = 0.5 * dz[1:] / dzw                            # weight on cell i+1
+    u_w = u[..., :-1] * w_up + u[..., 1:] * w_dn
+    v_w = v[..., :-1] * w_up + v[..., 1:] * w_dn
+    # Bottom redirect: the deepest W-cell absorbs the bottom T-cell's lower
+    # half (Veros u_wgrid[:, :, 0] += u[:, :, 0]*0.5*dzt[0]/dzw[0]).
+    bottom_extra = 0.5 * dz[-1] / dzw[-1]
+    u_w = u_w.at[..., -1].add(u[..., -1] * bottom_extra)
+    v_w = v_w.at[..., -1].add(v[..., -1] * bottom_extra)
+    u_w = u_w * u_mask[:, :, jnp.newaxis]
+    v_w = v_w * v_mask[:, :, jnp.newaxis]
+    # Enforce the periodic-lon wrap column (face n_lon ≡ face 0) so the
+    # superbee wrap flux and the continuity divergence see the SAME face
+    # velocity even if the caller's u carries a stale wrap column — the
+    # column-integral conservation of the advective tendency depends on it.
+    u_w = u_w.at[:, -1].set(u_w[:, 0])
+    return u_w, v_w
+
+
+def wgrid_vertical_velocity_latlon_cgrid(
+    u_w: jnp.ndarray,
+    v_w: jnp.ndarray,
+    dz_ref: jnp.ndarray,
+    grid: "LatLonGrid",
+) -> jnp.ndarray:
+    """W-grid vertical velocity FROM CONTINUITY (Veros advection.py:197-215).
+
+    Integrates ``∂w/∂z = -div_h(u_w, v_w)`` upward from zero below the
+    deepest W-cell, returning ``w`` at the ``M-1`` vertical flux positions
+    (position ``j`` sits at T-cell centre ``j+1``, between interfaces ``j``
+    and ``j+1``; positive = upward).  Reuses the conservative
+    ``divergence_cgrid`` (the same metric divergence Veros forms explicitly).
+    """
+    dz = jnp.asarray(dz_ref, dtype=u_w.dtype)
+    dzw = 0.5 * (dz[:-1] + dz[1:])                       # (M,)
+    div = divergence_cgrid(u_w, v_w, grid)               # (n_lat, n_lon, M)
+    col = div * dzw
+    # rcs[..., i] = sum over W-cells i..M-1 (bottom-up partial sums).
+    rcs = jnp.cumsum(col[..., ::-1], axis=-1)[..., ::-1]
+    # w at the top of W-cell j+1 = -sum of divergence below it.
+    return -rcs[..., 1:]                                 # (n_lat, n_lon, M-1)
+
+
+def adv_flux_superbee_wgrid_latlon_cgrid(
+    E: jnp.ndarray,
+    u_w: jnp.ndarray,
+    v_w: jnp.ndarray,
+    w_w: jnp.ndarray,
+    grid: "LatLonGrid",
+    dz_ref: jnp.ndarray,
+    dt_tracer: float,
+    land_mask: jnp.ndarray,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Superbee advective fluxes of a W-grid field (Veros
+    ``adv_flux_superbee_wgrid``, veros/core/advection.py:221-244).
+
+    Returns ``(fe, fn, ft)``:
+      fe : (n_lat, n_lon+1, M) zonal flux at u-faces (periodic wrap),
+      fn : (n_lat+1, n_lon, M) meridional flux at v-faces (zero at walls),
+      ft : (n_lat, n_lon, M-1) vertical flux at the interior flux positions
+           (positive = upward); the fluxes above interface 0 and below
+           interface M-1 are zero by construction (see module note).
+
+    ``dt_tracer`` enters ONLY the uCFL anti-diffusion weight (Veros uses
+    ``settings.dt_tracer`` there, advection.py:47).
+    """
+    if is_tripolar(grid):
+        # The meridional superbee stencil here uses simple edge replication at
+        # the north boundary (no fold-partner exchange, cf. _tvd_to_v_points)
+        # and the uCFL metrics assume the regular 1-D lat-lon spacings —
+        # both silently wrong across a tripolar fold. Fail fast (static grid
+        # metadata, raises at trace time) until a fold-aware variant exists.
+        raise NotImplementedError(
+            "W-grid superbee advection does not support tripolar grids "
+            "(fold-aware meridional stencil + 2-D metrics not implemented).")
+    dtype = E.dtype
+    dz = jnp.asarray(dz_ref, dtype=dtype)
+    dzw = 0.5 * (dz[:-1] + dz[1:])                       # (M,)
+    n_lon = E.shape[1]
+    lm3 = land_mask[:, :, jnp.newaxis]
+
+    # ---- Zonal (periodic): face j between cells (j-1)%n_lon and j ----
+    vel_x = u_w[:, :n_lon, :]
+    var_0 = jnp.roll(E, 1, axis=1)                       # west cell (donor, vel>0)
+    var_1 = E                                            # east cell
+    var_m1 = jnp.roll(E, 2, axis=1)
+    var_2 = jnp.roll(E, -1, axis=1)
+    fm = u_mask[:, :n_lon]
+    fm_0 = fm[:, :, jnp.newaxis]
+    fm_m1 = jnp.roll(fm, 1, axis=1)[:, :, jnp.newaxis]
+    fm_1 = jnp.roll(fm, -1, axis=1)[:, :, jnp.newaxis]
+    # Veros uCFL_x = |vel|*dt/(cost*dxt) — dxt of the face's WEST cell, which
+    # on the uniform-dlon lat-lon grid equals the east cell's (exact).
+    dx_cell = (grid.radius * grid.dlon * grid.cos_lat)[:, jnp.newaxis, jnp.newaxis]
+    u_cfl_x = jnp.abs(vel_x) * dt_tracer / dx_cell.astype(dtype)
+    fe_core = _veros_superbee_face_flux(
+        vel_x, var_m1, var_0, var_1, var_2, fm_m1, fm_0, fm_1, u_cfl_x)
+    fe = jnp.concatenate([fe_core, fe_core[:, :1, :]], axis=1)
+
+    # ---- Meridional: interior face i between cells i-1 (south) and i ----
+    vel_y = v_w[1:-1]
+    var_0 = E[:-1]                                       # south (donor, vel>0)
+    var_1 = E[1:]                                        # north
+    var_m1 = jnp.concatenate([E[:1], E[:-2]], axis=0)    # edge replicate south
+    var_2 = jnp.concatenate([E[2:], E[-1:]], axis=0)     # edge replicate north
+    fm_0 = v_mask[1:-1][:, :, jnp.newaxis]
+    fm_m1 = v_mask[:-2][:, :, jnp.newaxis]
+    fm_1 = v_mask[2:][:, :, jnp.newaxis]
+    # Veros uCFL_y = |v·cosu(face)|*dt/(cost(south)*dyt(south)) — the face/
+    # centre cosine ratio is kept for faithfulness (advection.py:44-47).
+    # Face latitudes from grid.lat (same construction divergence_cgrid uses;
+    # LatLonCGridGeometry does not carry cos_lat_v).
+    dy_cell = (0.5 * grid.dy)                            # (n_lat,) cell heights
+    cos_face = jnp.cos(0.5 * (grid.lat[:-1] + grid.lat[1:]))
+    cos_ratio = cos_face / grid.cos_lat[:-1]
+    inv_dy = (cos_ratio / dy_cell[:-1])[:, jnp.newaxis, jnp.newaxis]
+    u_cfl_y = jnp.abs(vel_y) * dt_tracer * inv_dy.astype(dtype)
+    fn_core = _veros_superbee_face_flux(
+        vel_y, var_m1, var_0, var_1, var_2, fm_m1, fm_0, fm_1, u_cfl_y)
+    fn = jnp.pad(fn_core, ((1, 1), (0, 0), (0, 0)))      # zero flux at walls
+
+    # ---- Vertical: + direction = UPWARD (decreasing legoESM index).
+    # Flux position j between interfaces j (above) and j+1 (below).
+    vel_z = w_w                                          # (..., M-1), >0 upward
+    var_0 = E[..., 1:]                                   # below (donor, vel>0)
+    var_1 = E[..., :-1]                                  # above
+    var_m1 = jnp.concatenate([E[..., 2:], E[..., -1:]], axis=-1)  # below-below
+    var_2 = jnp.concatenate([E[..., :1], E[..., :-2]], axis=-1)   # above-above
+    # Veros uCFL_z dx = dzw of the W-cell BELOW the flux position
+    # (advection.py:34, dx = dzw[:-1] in bottom-up indexing).
+    u_cfl_z = jnp.abs(vel_z) * dt_tracer / dzw[1:]
+    ft = _veros_superbee_face_flux(
+        vel_z, var_m1, var_0, var_1, var_2, lm3, lm3, lm3, u_cfl_z)
+    return fe, fn, ft
+
+
+def wgrid_advection_tendency_latlon_cgrid(
+    E: jnp.ndarray,
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: "LatLonGrid",
+    dz_ref: jnp.ndarray,
+    dt_tracer: float,
+    land_mask: jnp.ndarray,
+    u_mask: jnp.ndarray,
+    v_mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Superbee W-grid advective tendency ``dE/dt`` [field-units/s] of an
+    interface-resident energy field (Veros ``integrate_tke``'s ``dtke``
+    assembly, veros/core/tke.py:286-311).
+
+    Orchestrates: W-grid velocities (incl. continuity ``w``) → superbee
+    fluxes → conservative flux divergence.  The volume integral
+    ``Σ dE·dzw·area`` over the closed/periodic domain vanishes to machine
+    precision (flux-form horizontal divergence + zero-ended vertical
+    telescoping).
+
+    Parameters
+    ----------
+    E : (n_lat, n_lon, M) field at the interior interfaces (M = nlev-1).
+    u, v : pre-step C-grid velocities (Veros ``u[..., tau]``).
+    dz_ref : (nlev,) reference layer thicknesses.
+    dt_tracer : tracer timestep [s] — the uCFL weight (Veros dt_tracer).
+    land_mask, u_mask, v_mask : 2-D wet masks.
+    """
+    dtype = E.dtype
+    dz = jnp.asarray(dz_ref, dtype=dtype)
+    dzw = 0.5 * (dz[:-1] + dz[1:])                       # (M,)
+    u_w, v_w = wgrid_velocities_latlon_cgrid(u, v, dz, u_mask, v_mask)
+    w_w = wgrid_vertical_velocity_latlon_cgrid(u_w, v_w, dz, grid)
+    fe, fn, ft = adv_flux_superbee_wgrid_latlon_cgrid(
+        E, u_w, v_w, w_w, grid, dz, dt_tracer, land_mask, u_mask, v_mask)
+    # Horizontal: -div(F) per level (Veros tke.py:293-303, maskW applied).
+    adv_h = -divergence_cgrid(fe, fn, grid)
+    # Vertical: -(F_above - F_below)/dzw with zero fluxes at both column ends
+    # (Veros tke.py:304-310; see the module note on the surface mapping).
+    pad_axes = ((0, 0),) * (ft.ndim - 1)
+    F = jnp.pad(ft, (*pad_axes, (1, 1)))                 # (..., M+1)
+    adv_v = -(F[..., :-1] - F[..., 1:]) / dzw
+    return (adv_h + adv_v) * land_mask[:, :, jnp.newaxis]
