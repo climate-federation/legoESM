@@ -38,6 +38,9 @@ import jax
 import jax.numpy as jnp
 from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig, derive_lmin
+from legoesm.atmosphere.physics.turbulence.clubb_diagnostic import (
+    diagnose_cloud_and_buoyancy,
+)
 from legoesm.atmosphere.physics.turbulence.clubb_grid import (
     flip_vertical,
     make_clubb_grid_from_levels,
@@ -132,7 +135,17 @@ def clubb_turbulence(
     Km_full = params.c_K * Lscale * sqrt_wp2                  # (ncol, nlev)
     Kh_full = Km_full / _PR_T
 
-    # ---- Geometry + gradients (top-down) ----
+    # ---- ADG1 double-Gaussian PDF: cloud fraction + moist buoyancy flux ----
+    # (the distinctive CLUBB closure; ascending grid). The buoyancy production of
+    # wp2 uses the PDF flux ``w'thv'`` (with its cloud-water latent-heat term),
+    # not a plain down-gradient ``-Kh N2``.
+    wp2_a = jnp.maximum(flip_vertical(wp2), config.tke_min)   # ascending zt
+    Kh_a = (params.c_K / _PR_T) * Lscale_a * jnp.sqrt(wp2_a)
+    cloud_frac_a, rcm_a, wpthvp_a = diagnose_cloud_and_buoyancy(
+        thlm, rtm, wp2_a, exner_a, p_a, thv_ds, Kh_a, Lscale_a, gr, config)
+    buoy_prod = flip_vertical((constants.g / jnp.clip(thvm, 1.0, None)) * wpthvp_a)
+
+    # ---- Geometry + shear (top-down) ----
     dz_half = jnp.clip(jnp.abs(z_full[:, :-1] - z_full[:, 1:]), 1.0, None)
     dz_layer = jnp.clip(jnp.abs(z_half[:, :-1] - z_half[:, 1:]), 1.0, None)
     Km_half = 0.5 * (Km_full[:, :-1] + Km_full[:, 1:])
@@ -141,20 +154,15 @@ def clubb_turbulence(
     du_dz = (u[:, :-1] - u[:, 1:]) / dz_half
     dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
     S2_half = du_dz ** 2 + dv_dz ** 2
-    theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
-    N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * (
-        (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half)
 
     def _half_to_full(field_half):
         mid = 0.5 * (field_half[:, :-1] + field_half[:, 1:])
         return jnp.concatenate([field_half[:, :1], mid, field_half[:, -1:]], axis=1)
 
     S2 = _half_to_full(S2_half)
-    N2 = _half_to_full(N2_half)
 
     # ---- wp2 budget (production - dissipation + diffusion); tau = Lscale/sqrt(wp2) ----
     shear_prod = Km_full * S2
-    buoy_prod = -Kh_full * N2
     diss_wp2 = sqrt_wp2 / Lscale                              # 1/tau
     wp2_diffused = implicit_vertical_diffusion(
         wp2, Km_half, rho, dz_layer, dz_half, dt,

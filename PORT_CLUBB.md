@@ -65,8 +65,12 @@ reference facts + per-phase status below are the live source of truth.)*
 CLI + coupler `validate_strict` + `physics_state` carried-TKE + `scm`. Phase 1
 uses the golden-tested **parcel buoyant-sorting `Lscale`** for the eddy
 diffusivity (`Km = c_K·Lscale·√wp2`) + eddy-diffusion mean advance + a wp2
-budget; phase 2+ swaps in the full prognostic moment advances + ADG1 PDF
-buoyancy coupling (the genuinely-fuller-than-lite closure — DONE gate). Helpers
+budget. **Phase 2a (iter 17):** the **ADG1 double-Gaussian PDF** (vs lite's
+single Gaussian) is wired into the live path (`clubb_diagnostic.py`) — cloud
+fraction + cloud water `rcm` + the moist buoyancy flux `wpthvp` (with the
+cloud-water latent-heat term) now drive the wp2 buoyancy production. Phase 2b+
+swaps the diagnostic moments for the full prognostic moment advances carried as
+state (the DONE gate). Helpers
 (all EXCLUDED in `test_physics_contracts` — closure
 plumbing, not single-tendency schemes; all under the `clubb*.py` ruff
 per-file-ignore for canonical CLUBB symbol names):
@@ -82,7 +86,9 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_pdf.py` | ADG1 params (`ADG1_pdf_driver`), cloud fraction + rcm (`calc_pdf_liquid_cloud_frac[_components]`) | ✅ |
 | `clubb_pdf_moments.py` | PDF moment integrals, higher-order moments, cloud-water `x'rc'` fluxes, buoyancy flux `wpthvp` | ✅ |
 | `clubb_solve.py` | `tridiag_solve` (CLUBB band → legoESM `thomas_solve`) + `penta_solve` (verbatim CLUBB LU port, bit-exact) | ✅ iter 10-11 |
-| `clubb_moments.py` | `advance_windm_edsclrm` ✅ iter 12 (golden+parity); wp2/wp3, xp2/xpyp, xm/wpxp advances + limiters + fill_holes ☐ | 🟡 P5 |
+| `clubb_moments.py` | `advance_windm_edsclrm` ✅ iter 12; xp2_xpyp terms/TA/combiners ✅ iter 13-15; wp2/wp3, xm/wpxp advances + limiters + fill_holes ☐ | 🟡 P5 |
+| `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
+| `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
 
 Also added (shared): `legoesm.thermo.saturation_vapor_pressure_flatau[_ice]`.
 

@@ -241,6 +241,9 @@ CONTRACT_TODO: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp_radiation.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/solar.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py",
+        # CLUBB port: diagnostic ADG1-PDF closure (cloud frac / buoyancy flux)
+        # for the runnable scheme — closure plumbing, not a tendency scheme.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_diagnostic.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_lite.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/holtslag_boville.py",
