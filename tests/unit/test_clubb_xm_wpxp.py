@@ -140,5 +140,125 @@ def test_jit_and_grad():
     assert jnp.all(jnp.isfinite(jax.grad(loss)(p["wp2"])))
 
 
+# --------------------------------------------------------------------------
+# Pentadiagonal assembly + solve
+# --------------------------------------------------------------------------
+
+def _asm_inputs(ng, nzm, seed=7):
+    nzt = nzm - 1
+    rng = np.random.default_rng(seed)
+
+    def a(*shape):
+        return jnp.asarray(rng.standard_normal(shape))
+
+    return dict(
+        dt=300.0,
+        lhs_diff_zm=a(3, ng, nzm), lhs_ma_zm=a(3, ng, nzm), lhs_ma_zt=a(3, ng, nzt),
+        lhs_ta_wpxp=a(3, ng, nzm), lhs_ta_xm=a(2, ng, nzt), lhs_tp=a(2, ng, nzm),
+        lhs_ac_pr2=a(ng, nzm), lhs_pr1=a(ng, nzm),
+        wpxp=jnp.asarray(0.01 * rng.standard_normal((ng, nzm))), xm=a(ng, nzt),
+        wpxp_forcing=a(ng, nzm) * 1e-4, xm_forcing=a(ng, nzt) * 1e-4,
+        rhs_bp_pr3=a(ng, nzm), rhs_ta=a(ng, nzm),
+    )
+
+
+def _call_lhs(p):
+    return X.xm_wpxp_lhs(p["lhs_diff_zm"], p["lhs_ma_zm"], p["lhs_ma_zt"],
+                         p["lhs_ta_wpxp"], p["lhs_ta_xm"], p["lhs_tp"],
+                         p["lhs_ac_pr2"], p["lhs_pr1"], p["dt"])
+
+
+def _call_rhs(p):
+    return X.xm_wpxp_rhs(p["wpxp"], p["xm"], p["wpxp_forcing"], p["xm_forcing"],
+                         p["rhs_bp_pr3"], p["rhs_ta"], p["lhs_ta_wpxp"], p["lhs_pr1"],
+                         p["dt"])
+
+
+def test_assembly_shapes_and_bc():
+    ng, nzm = 2, 11
+    p = _asm_inputs(ng, nzm)
+    lhs = np.asarray(_call_lhs(p))
+    rhs = np.asarray(_call_rhs(p))
+    ndim = 2 * nzm - 1
+    assert lhs.shape == (5, ng, ndim) and rhs.shape == (ng, ndim)
+    # wpxp BC corners (j=0, j=ndim-1): diag=1, off-diagonals 0
+    for c in (0, ndim - 1):
+        assert np.allclose(lhs[2, :, c], 1.0)
+        for b in (0, 1, 3, 4):
+            assert np.allclose(lhs[b, :, c], 0.0)
+    np.testing.assert_array_equal(rhs[:, 0], np.asarray(p["wpxp"])[:, 0])
+    assert np.allclose(rhs[:, ndim - 1], 0.0)
+
+
+def test_assembly_matches_golden():
+    ng, nzm = 2, 11
+    p = _asm_inputs(ng, nzm)
+    g = np.load(_FIX / "clubb_xm_wpxp_assembly_golden.npz")
+    np.testing.assert_array_equal(np.asarray(_call_lhs(p)), g["lhs"])
+    np.testing.assert_array_equal(np.asarray(_call_rhs(p)), g["rhs"])
+
+
+def test_solve_deinterleaves():
+    ng, nzm = 2, 9
+    ndim = 2 * nzm - 1
+    rng = np.random.default_rng(2)
+    lhs = jnp.asarray(0.1 * rng.standard_normal((5, ng, ndim)))
+    lhs = lhs.at[2].set(10.0 + rng.random((ng, ndim)))
+    rhs = jnp.asarray(rng.standard_normal((ng, ndim)))
+    wpxp, xm = X.xm_wpxp_solve(lhs, rhs)
+    assert wpxp.shape == (ng, nzm) and xm.shape == (ng, nzm - 1)
+    assert np.all(np.isfinite(np.asarray(wpxp))) and np.all(np.isfinite(np.asarray(xm)))
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_assembly_parity():
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_xm_wpxp_module as R  # noqa: N812
+    ng, nzm = 2, 11
+    p = _asm_inputs(ng, nzm)
+    ref_lhs = R.xm_wpxp_lhs(p["lhs_diff_zm"], p["lhs_ma_zm"], p["lhs_ma_zt"],
+                            p["lhs_ta_wpxp"], p["lhs_ta_xm"], p["lhs_tp"],
+                            p["lhs_ac_pr2"], p["lhs_pr1"], p["dt"])
+    np.testing.assert_array_equal(np.asarray(_call_lhs(p)), np.asarray(ref_lhs))
+    ref_rhs = R.xm_wpxp_rhs(p["wpxp"], p["xm"], p["wpxp_forcing"], p["xm_forcing"],
+                            p["rhs_bp_pr3"], p["rhs_ta"], p["lhs_ta_wpxp"], p["lhs_pr1"],
+                            p["dt"], 0)
+    np.testing.assert_array_equal(np.asarray(_call_rhs(p)), np.asarray(ref_rhs))
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_solve_parity():
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_xm_wpxp_module as R  # noqa: N812
+    ng, nzm = 2, 9
+    ndim = 2 * nzm - 1
+    rng = np.random.default_rng(3)
+    lhs = jnp.asarray(0.1 * rng.standard_normal((5, ng, ndim)))
+    lhs = lhs.at[2].set(10.0 + rng.random((ng, ndim)))
+    rhs = jnp.asarray(rng.standard_normal((ng, ndim)))
+    m2, m3 = X.xm_wpxp_solve(lhs, rhs)
+    r2, r3 = R.xm_wpxp_solve(lhs, rhs)
+    np.testing.assert_allclose(np.asarray(m2), np.asarray(r2), rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(m3), np.asarray(r3), rtol=1e-9, atol=1e-12)
+
+
+def test_assembly_jit_grad():
+    ng, nzm = 2, 11
+    p = _asm_inputs(ng, nzm)
+
+    def loss(wpxp):
+        lhs = _call_lhs(p)
+        rhs = _call_rhs(dict(p, wpxp=wpxp))
+        a, b = X.xm_wpxp_solve(lhs, rhs)
+        return jnp.sum(a ** 2) + jnp.sum(b ** 2)
+
+    assert jnp.isfinite(jax.jit(loss)(p["wpxp"]))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(p["wpxp"])))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

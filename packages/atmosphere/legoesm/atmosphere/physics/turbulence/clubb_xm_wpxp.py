@@ -22,8 +22,11 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid
+from legoesm.atmosphere.physics.turbulence.clubb_solve import penta_solve
 
 from legoesm import constants
+
+_GAMMA = 1.5   # gamma_over_implicit_ts (constants_clubb)
 
 
 def xm_term_ta_lhs(invrs_rho_ds_zt, rho_ds_zm, gr: CLUBBGrid):
@@ -88,10 +91,101 @@ def wpxp_terms_bp_pr3_rhs(C7_Skw_fnc, thv_ds_zm, xpthvp):
     return result
 
 
+# ---------------------------------------------------------------------------
+# Pentadiagonal assembly + solve (interleaved wpxp[2k] / xm[2k+1])
+# ---------------------------------------------------------------------------
+
+def xm_wpxp_lhs(lhs_diff_zm, lhs_ma_zm, lhs_ma_zt, lhs_ta_wpxp, lhs_ta_xm,
+                lhs_tp, lhs_ac_pr2, lhs_pr1, dt):
+    """Assemble the coupled xm/wpxp pentadiagonal LHS (``xm_wpxp_lhs``).
+
+    Faithful port of ``advance_xm_wpxp_module.F90:xm_wpxp_lhs`` for the CAM tree
+    (``l_implemented = False`` standalone, ``l_diffuse_rtm_and_thlm = False`` so
+    the xm rows carry NO diffusion, ``l_iter = True``). Interleaving: wpxp[k] at
+    global index 2k, xm[k] at 2k+1. Bands ``[super2, super1, main, sub1, sub2]``;
+    the wpxp turbulent advection and pressure-1 are over-implicit (scaled by
+    gamma). wpxp lower/upper rows are identity BCs. Returns ``(5, ncol, 2*nzm-1)``.
+    """
+    ngrdcol = lhs_diff_zm.shape[1]
+    nzm = lhs_diff_zm.shape[2]
+    ndim = 2 * nzm - 1
+    invrs_dt = 1.0 / dt
+    g = _GAMMA
+    lhs = jnp.zeros((5, ngrdcol, ndim), dtype=lhs_diff_zm.dtype)
+
+    # xm rows (odd global indices 1,3,..): mean advection (upwind) + xm<->wpxp TA.
+    lhs = lhs.at[0, :, 1::2].set(lhs_ma_zt[0])          # super2: xm[k+1]
+    lhs = lhs.at[1, :, 1::2].set(lhs_ta_xm[0])          # super1: wpxp[k+1]
+    lhs = lhs.at[2, :, 1::2].set(invrs_dt + lhs_ma_zt[1])  # diag
+    lhs = lhs.at[3, :, 1::2].set(lhs_ta_xm[1])          # sub1: wpxp[k]
+    lhs = lhs.at[4, :, 1::2].set(lhs_ma_zt[2])          # sub2: xm[k-1]
+
+    # wpxp interior rows (even global indices 2..2*(nzm-2)).
+    sl = slice(2, 2 * nzm - 2, 2)
+    lhs = lhs.at[0, :, sl].set(lhs_ma_zm[0, :, 1:-1] + lhs_diff_zm[0, :, 1:-1]
+                              + g * lhs_ta_wpxp[0, :, 1:-1])
+    lhs = lhs.at[1, :, sl].set(lhs_tp[0, :, 1:-1])      # super1: xm[k]
+    lhs = lhs.at[2, :, sl].set(
+        lhs_ma_zm[1, :, 1:-1] + lhs_diff_zm[1, :, 1:-1] + lhs_ac_pr2[:, 1:-1]
+        + g * (lhs_ta_wpxp[1, :, 1:-1] + lhs_pr1[:, 1:-1]) + invrs_dt)
+    lhs = lhs.at[3, :, sl].set(lhs_tp[1, :, 1:-1])      # sub1: xm[k-1]
+    lhs = lhs.at[4, :, sl].set(lhs_ma_zm[2, :, 1:-1] + lhs_diff_zm[2, :, 1:-1]
+                              + g * lhs_ta_wpxp[2, :, 1:-1])
+
+    # wpxp lower (j=0) and upper (j=ndim-1) identity BC rows.
+    lhs = lhs.at[2, :, 0].set(1.0)
+    lhs = lhs.at[2, :, -1].set(1.0)
+    return lhs
+
+
+def xm_wpxp_rhs(wpxp, xm, wpxp_forcing, xm_forcing, rhs_bp_pr3, rhs_ta,
+                lhs_ta_wpxp, lhs_pr1, dt, k_lb_zm=0):
+    """Assemble the coupled xm/wpxp explicit RHS (``xm_wpxp_rhs``).
+
+    Faithful port of ``advance_xm_wpxp_module.F90:xm_wpxp_rhs`` (``l_iter = True``
+    so ``wpxp/dt`` is added). xm rows: ``xm/dt + xm_forcing``; wpxp interior:
+    buoyancy/pr3 + forcing + ``rhs_ta`` (0 for ADG1) + the over-implicit TA/pr1
+    contributions + ``wpxp/dt``. wpxp lower BC carries the current value, upper BC
+    is 0. Returns ``(ncol, 2*nzm-1)``.
+    """
+    ngrdcol, nzm = wpxp.shape
+    ndim = 2 * nzm - 1
+    invrs_dt = 1.0 / dt
+    g = _GAMMA
+    rhs = jnp.zeros((ngrdcol, ndim), dtype=wpxp.dtype)
+
+    rhs = rhs.at[:, 0].set(wpxp[:, k_lb_zm])
+    rhs = rhs.at[:, 1::2].set(xm * invrs_dt + xm_forcing)
+
+    ta = lhs_ta_wpxp[:, :, 1:-1]
+    pr1 = lhs_pr1[:, 1:-1]
+    rhs_int = (
+        rhs_bp_pr3[:, 1:-1] + wpxp_forcing[:, 1:-1] + rhs_ta[:, 1:-1]
+        + (1.0 - g) * (-ta[0] * wpxp[:, 2:] - ta[1] * wpxp[:, 1:-1]
+                       - ta[2] * wpxp[:, :-2] - pr1 * wpxp[:, 1:-1])
+        + wpxp[:, 1:-1] * invrs_dt)
+    rhs = rhs.at[:, 2:-1:2].set(rhs_int)
+    rhs = rhs.at[:, -1].set(0.0)
+    return rhs
+
+
+def xm_wpxp_solve(lhs, rhs):
+    """Pentadiagonal solve + de-interleave (``xm_wpxp_solve``).
+
+    Solves with the CLUBB-band penta LU (:func:`clubb_solve.penta_solve`) and
+    splits: wpxp on even slots, xm on odd. Returns ``(wpxp_new, xm_new)``.
+    """
+    soln = penta_solve(lhs, rhs)
+    return soln[:, 0::2], soln[:, 1::2]
+
+
 __all__ = [
     "xm_term_ta_lhs",
     "wpxp_term_tp_lhs",
     "wpxp_terms_ac_pr2_lhs",
     "wpxp_term_pr1_lhs",
     "wpxp_terms_bp_pr3_rhs",
+    "xm_wpxp_lhs",
+    "xm_wpxp_rhs",
+    "xm_wpxp_solve",
 ]
