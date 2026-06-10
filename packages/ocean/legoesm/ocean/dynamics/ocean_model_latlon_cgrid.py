@@ -414,14 +414,16 @@ def _forward_backward_coriolis_3d(
     u_prime_new = (u_prime + dt * f_u[:, :, jnp.newaxis] * v_at_u) * u_mask_3d
 
     # --- Backward step: update v' using NEW u' ---
-    # Average u'_new to v-points (Sadourny 4-point average).
-    # Boundary: wall BC on regular lat-lon; fold halo on tripolar.
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import pad_ns_vector_u
-    u_at_v_interior = 0.25 * (
-        u_prime_new[:-1, :-1] + u_prime_new[:-1, 1:]
-        + u_prime_new[1:, :-1] + u_prime_new[1:, 1:]
+    # Average u'_new to v-points (Sadourny 4-point average) via the
+    # shared cell-pad-first helper: the MPI band partition-cut v-face
+    # averages the neighbour rank's true u' row instead of the old
+    # interior-then-pad_ns_vector_u refill (one face row off at a cut).
+    # Wall BC at physical poles; fold (sign*perm) on tripolar — serial
+    # bit-identical.
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        interp_u_to_vface_4pt,
     )
-    u_at_v = pad_ns_vector_u(u_at_v_interior, grid)
+    u_at_v = interp_u_to_vface_4pt(u_prime_new, grid)
 
     v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis] * u_at_v) * v_mask_3d
 
@@ -2097,6 +2099,11 @@ class LatLonCGridOceanModel:
             new_state = self._apply_polar_filter(new_state, dt)
         if self.config.freeze_floor:
             new_state = self._apply_freeze_floor(new_state)
+        # ORCA east-west cyclic-overlap (tripole seam) — LAST, so the halo
+        # columns exactly mirror their overlap partners after every other
+        # post-step projection (static config-bool gate; default off).
+        if getattr(self.config, "ew_cyclic_overlap", False):
+            new_state = self._apply_ew_cyclic_overlap(new_state)
         return new_state
 
     def _apply_polar_filter(self, state: LatLonCGridOceanState, dt: float
@@ -2254,6 +2261,69 @@ class LatLonCGridOceanModel:
         T_sfc_floored = jnp.maximum(T[..., 0], self.config.freeze_floor_temp_c)
         T_floored = T.at[..., 0].set(T_sfc_floored)
         return state._replace(T=state.T.replace(data=T_floored))
+
+    def _apply_ew_cyclic_overlap(self, state: LatLonCGridOceanState
+                                 ) -> LatLonCGridOceanState:
+        """Slave the two longitude HALO columns to their ORCA 2-point
+        cyclic-overlap partners (``config.ew_cyclic_overlap``).
+
+        The ORCA tripole grid is periodic east-west with a 2-point overlap:
+        column ``0`` duplicates column ``nx-2`` and column ``nx-1`` duplicates
+        column ``1`` (same geographic longitude).  The C-grid operators apply
+        regular-grid roll-periodicity (period ``nx``), which is OFF BY ONE for
+        an ORCA grid (true period ``nx-2``) -- and the eORCA1 mesh marks the
+        halo columns LAND, so the east-west seam (lon ~72.5E on eORCA1) carries
+        a spurious wall and the two physical seam columns drift apart.
+
+        Re-imposing the overlap at the END of each step makes the seam-adjacent
+        physical columns see the correct cross-seam neighbour on the NEXT step:
+        the physical seam u-face (``u[:,1]``) gets the true ``(col1 - col_{nx-2})``
+        eta-gradient PGF + correct upwind tracers, reconnecting both barotropic
+        flow and tracer advection across the seam.
+
+        ALL prognostic fields are slaved (codex adversarial-review HIGH): the
+        barotropic solver carries ``U_old``/``u_prime`` forward (velocity is NOT
+        recomputed from scratch) and the seam u-face Coriolis term reads the
+        ``v`` halo via ``roll(V_bar_c, 1)`` -- so an unslaved velocity halo would
+        re-inject the seam every step, defeating the tracer fix.
+
+        Column rules (``nx = n_lon`` = cell count):
+        * cell-centred (T, S, eta) and v-faces (lat interfaces, also ``nx``
+          columns): ``col[0] <- col[nx-2]``, ``col[nx-1] <- col[1]``.
+        * u-faces (lon interfaces, ``nx+1`` columns): ``u[:,0] <- u[:,nx-2]``
+          (west face of cell 0 == cell nx-2) and ``u[:,nx-1] <- u[:,1]`` (east
+          face of physical cell nx-2 == the seam face == ``u[:,1]``).  The last
+          face ``u[:,nx]`` is left to the model's internal ``u[:,nx]=u[:,0]``
+          wrap -- it feeds only the slaved halo cell, so it is harmless.
+
+        Requires the matching mask/bathy/IC overlap-fill at construction (so the
+        derived u/v face masks treat the reconnected seam as ocean and the halo
+        columns start consistent).  ORCA-OVERLAP-SPECIFIC: correct only on a grid
+        whose first/last columns DUPLICATE columns nx-2 / 1; WRONG on a genuinely
+        period-nx regular lat-lon grid.  Gated (default off) -> bit-exact for
+        every existing grid/config.
+        """
+        nx = state.T.data.shape[1]   # n_lon (cell count)
+
+        def _ovl_cell(a):
+            # cell-column fields (T, S, eta, v): axis-1 size nx.
+            a = a.at[:, 0].set(a[:, nx - 2])
+            a = a.at[:, nx - 1].set(a[:, 1])
+            return a
+
+        def _ovl_u(a):
+            # u-faces: axis-1 size nx+1. Slave the 2 halo seam faces.
+            a = a.at[:, 0].set(a[:, nx - 2])
+            a = a.at[:, nx - 1].set(a[:, 1])
+            return a
+
+        return state._replace(
+            T=state.T.replace(data=_ovl_cell(state.T.data)),
+            S=state.S.replace(data=_ovl_cell(state.S.data)),
+            eta=state.eta.replace(data=_ovl_cell(state.eta.data)),
+            u=state.u.replace(data=_ovl_u(state.u.data)),
+            v=state.v.replace(data=_ovl_cell(state.v.data)),
+        )
 
     def _ab2_step(self, state: LatLonCGridOceanState, dt: float,
                   freshwater=None, surface_forcing=None, sponge=None,

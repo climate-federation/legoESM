@@ -55,6 +55,21 @@ def _squeeze2d(a: np.ndarray) -> np.ndarray:
     return a
 
 
+def _ew_overlap_fill(a: np.ndarray) -> np.ndarray:
+    """Fill the ORCA 2-point cyclic-overlap halo columns of a static field.
+
+    ``col[0] <- col[nx-2]``, ``col[nx-1] <- col[1]`` along axis 1 (longitude).
+    For ``(n_lat, n_lon)`` masks/bathy and ``(n_lat, n_lon, nlev)`` IC fields.
+    NumPy counterpart of the model's per-step ``_apply_ew_cyclic_overlap`` so
+    the static geometry/IC start consistent with the reconnected seam.
+    """
+    a = np.array(a, copy=True)
+    nx = a.shape[1]
+    a[:, 0] = a[:, nx - 2]
+    a[:, nx - 1] = a[:, 1]
+    return a
+
+
 def read_mesh_mask_bathy(mesh_path: str):
     """Derive the 2-D ocean land mask and total bathymetric depth from NEMO's
     own eORCA1 mesh_mask -- the most faithful geometry for the comparison.
@@ -469,7 +484,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   min_levels=1, div_damp_2=None, div_damp_4=None,
                   smag_cfl_safety=None, convection="none",
                   convection_K_conv=1.0, convection_K_bg=1e-5,
-                  freeze_floor=None):
+                  freeze_floor=None, ew_cyclic_overlap=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -523,6 +538,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("div_damp_4", div_damp_4),
                               ("smag_cfl_safety", smag_cfl_safety),
                               ("freeze_floor", freeze_floor),
+                              ("ew_cyclic_overlap", ew_cyclic_overlap),
                               ) if v is not None}
     # Grid-agnostic convective adjustment (Oceananigans-style enhanced
     # vertical diffusivity where N^2 < 0).  The tripole base config ships
@@ -591,6 +607,28 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         raise ValueError(
             f"mesh mask shape {land_mask.shape} != grid {(n_lat, n_lon)}"
         )
+    if ew_cyclic_overlap:
+        # ORCA 2-pt cyclic-overlap fill of the static geometry, applied BEFORE
+        # make_partial_cell (codex HIGH): the partial-cell coordinate
+        # (z_coord.is_active / h_partial / bottom_level) is built per-column
+        # from H_bathy/land_mask, so it must see the overlap-filled (reconnected)
+        # seam -- otherwise is_active stays severed at col0/col_{nx-1} while the
+        # 2-D state is wet, corrupting the 3-D tracer-flux masks. A raw tmaskutil
+        # marks the halo cols col0/col_{nx-1} LAND (the lon-72.5E seam wall).
+        # make_partial_cell with NO cross-column smoothing (the faithful config)
+        # is column-local, so identical input columns col0==col{nx-2} yield
+        # identical outputs -> the overlap survives it.
+        if bathy_smoothing_passes and bathy_smoothing_passes > 0:
+            raise ValueError(
+                "--ew-cyclic-overlap with bathy smoothing > 0 is unsupported: "
+                "cross-column smoothing breaks the seam-column identity that the "
+                "partial-cell coordinate relies on. Use 0 smoothing passes.")
+        land_mask = _ew_overlap_fill(land_mask)
+        H_bathy = _ew_overlap_fill(H_bathy)
+        _wet = land_mask > 0.5
+        print(f"[setup] EW cyclic-overlap ON (ORCA tripole seam): halo cols "
+              f"filled col0<-col{n_lon-2}, col{n_lon-1}<-col1; "
+              f"seam wet cells {int(_wet[:, 0].sum())}/{int(_wet[:, 1].sum())}")
     if partial_cell:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -607,6 +645,11 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         from legoesm.core.field import Field
         T_woa, S_woa = compute_woa_3d(grid, z_coord, woa_t, woa_s,
                                       H_bathy, land_mask)
+        if ew_cyclic_overlap:
+            # Overlap-fill the IC so the halo columns start consistent with
+            # their partners (the per-step projection keeps them so).
+            T_woa = _ew_overlap_fill(np.asarray(T_woa))
+            S_woa = _ew_overlap_fill(np.asarray(S_woa))
         if T_woa.shape != state.T.data.shape:
             raise ValueError(
                 f"WOA T shape {T_woa.shape} != state T {state.T.data.shape}"
@@ -1736,6 +1779,16 @@ def main() -> int:
                         "prognostic ice, so high-lat (esp. Arctic) cells over-cool "
                         "3-5 C below NEMO (LIM ice caps SST). NEMO-faithful; removes "
                         "~half the Arctic SST RMSE. Off = bit-exact legacy.")
+    p.add_argument("--ew-cyclic-overlap", action="store_true",
+                   help="TRIPOLE ONLY: reconnect the ORCA east-west cyclic seam "
+                        "(lon ~72.5E on eORCA1). The eORCA1 mesh marks the 2 cyclic "
+                        "halo columns LAND, and the C-grid roll is period-nx (off by "
+                        "one for an ORCA period-(nx-2) grid) -> a spurious wall + a "
+                        "drifting ~1 C SST/SSS seam stripe. Slaves the halo columns to "
+                        "their overlap partners each step (col0<-col[nx-2], "
+                        "col[nx-1]<-col1) + overlap-fills the mask/bathy/IC. "
+                        "ORCA-overlap-specific; do NOT use on a regular lat-lon grid. "
+                        "Off = bit-exact legacy.")
     p.add_argument("--polar-filter", action="store_true",
                    help="Enable the mask-aware Fourier polar filter (lat-lon grid only): "
                         "truncate the zonal modes exceeding the per-latitude CFL near the "
@@ -1963,6 +2016,11 @@ def main() -> int:
 
     print(f"[setup] building {args.grid} (nlev={args.nlev}, "
           f"woa_init={args.woa_init}) ...")
+    if args.ew_cyclic_overlap and args.grid != "tripole":
+        raise ValueError(
+            "--ew-cyclic-overlap is ORCA-cyclic-overlap-specific (the eORCA1 "
+            "tripole); it is WRONG on a regular period-nx lat-lon grid. "
+            f"Got --grid {args.grid!r}.")
     if args.grid == "tripole":
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
@@ -1991,6 +2049,7 @@ def main() -> int:
             convection=args.convection,
             convection_K_conv=args.convection_K_conv,
             convection_K_bg=args.convection_K_bg,
+            ew_cyclic_overlap=(True if args.ew_cyclic_overlap else None),
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":

@@ -1002,3 +1002,16 @@ class LatLonCGridOceanConfig(NamedTuple):
     polar_filter_max_wave_speed: float = 300.0
     # Fraction of the theoretical CFL wavenumber kept (<1 for margin).
     polar_filter_safety_factor: float = 0.85
+    # --- East-west cyclic-overlap projection (ORCA tripole seam) -----------
+    # When True, the two longitude HALO columns are slaved to their ORCA
+    # 2-point cyclic-overlap partners at the END of each step (cell-centred
+    # fields: ``col[0] <- col[nx-2]``, ``col[nx-1] <- col[1]``), reconnecting
+    # the east-west seam that the regular-grid roll-periodicity (period-nx)
+    # leaves severed on an ORCA grid (physically period nx-2, with 2 overlap
+    # halos).  The eORCA1 mesh marks the halo columns LAND, so the seam
+    # (lon ~72.5E) carries a spurious wall; this + the matching mask/bathy/IC
+    # overlap-fill at construction reconnects it.  ORCA-OVERLAP-SPECIFIC: only
+    # valid on a grid whose first/last columns DUPLICATE columns nx-2 / 1 (the
+    # tripole) -- WRONG on a genuinely period-nx regular lat-lon grid.  Default
+    # False -> bit-exact for every existing grid/config; set only for tripole.
+    ew_cyclic_overlap: bool = False
