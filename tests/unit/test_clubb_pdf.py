@@ -26,10 +26,48 @@ from legoesm.atmosphere.physics.turbulence.clubb_config import (  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb_pdf import (  # noqa: E402
     ADG1_pdf_driver,
     ADG1_w_closure,
+    calc_liquid_cloud_frac_component,
+    calc_pdf_liquid_cloud_frac,
+    transform_pdf_chi_eta_component,
 )
+
+from legoesm import constants  # noqa: E402
 
 _CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
 _BETA, _MFMM = 2.4, derive_mixt_frac_max_mag(4.5)
+_CF_GOLDEN_NPZ = Path(__file__).resolve().parent / "clubb_fixtures" / "clubb_cloudfrac_golden.npz"
+
+
+def _cloud_inputs(rtm_scale=1.0):
+    """ADG1 PDF + thermo fixture spanning clear..cloudy (varying rtm vs rsat)."""
+    rng = np.random.default_rng(7)
+    ng, nzt = 2, 8
+    shp = (ng, nzt)
+    wp2 = jnp.asarray(0.2 + 0.6 * rng.random(shp))
+    sqrt_wp2 = jnp.sqrt(wp2)
+    rtp2 = jnp.asarray(1e-7 + 2e-6 * rng.random(shp))
+    thlp2 = jnp.asarray(0.05 + 0.3 * rng.random(shp))
+    up2 = jnp.asarray(0.1 + 0.5 * rng.random(shp))
+    vp2 = jnp.asarray(0.1 + 0.5 * rng.random(shp))
+    ssw = jnp.asarray(0.2 + 0.5 * rng.random(shp))
+    Skw = jnp.asarray(-1.0 + 2.0 * rng.random(shp))
+    # rtm spans dry (top) to near/above saturation (bottom) to exercise cf in [0,1].
+    rtm = jnp.asarray(rtm_scale * np.linspace(2e-3, 1.6e-2, nzt)[None, :] * np.ones(shp))
+    thlm = jnp.asarray(290.0 + 4.0 * rng.random(shp))
+    um = jnp.asarray(rng.normal(size=shp))
+    vm = jnp.asarray(rng.normal(size=shp))
+
+    def cov(xp2, f):
+        return jnp.asarray(f) * jnp.sqrt(wp2 * xp2)
+
+    adg1 = ADG1_pdf_driver(jnp.asarray(rng.normal(size=shp)), rtm, thlm, um, vm,
+                           wp2, rtp2, thlp2, up2, vp2, Skw,
+                           cov(rtp2, 0.3), cov(thlp2, -0.4), cov(up2, 0.2), cov(vp2, -0.25),
+                           sqrt_wp2, ssw, _BETA, _MFMM)
+    p = jnp.asarray(np.linspace(9.5e4, 6.0e4, nzt)[None, :] * np.ones(shp))
+    exner = (p / constants.p_ref) ** constants.kappa
+    rtpthlp = -0.2 * jnp.sqrt(rtp2 * thlp2)
+    return dict(adg1=adg1, rtpthlp=rtpthlp, rtm=rtm, thlm=thlm, exner=exner, p_in_Pa=p)
 
 
 def _inputs():
@@ -148,6 +186,132 @@ def test_pdf_jit_and_grad_clean():
     assert jnp.isfinite(jax.jit(loss)(kw["wp2"]))
     g = jax.grad(loss)(kw["wp2"])
     assert jnp.all(jnp.isfinite(g))
+
+
+# ---------------------------------------------------------------------------
+# Liquid cloud fraction
+# ---------------------------------------------------------------------------
+
+def test_cloud_frac_bounds_and_rcm_nonneg():
+    kw = _cloud_inputs()
+    rcm, cf = calc_pdf_liquid_cloud_frac(**kw)
+    assert jnp.all(cf >= 0.0) and jnp.all(cf <= 1.0)
+    assert jnp.all(rcm >= 0.0)
+
+
+def test_cloud_frac_dry_limit_clear():
+    rcm, cf = calc_pdf_liquid_cloud_frac(**_cloud_inputs(rtm_scale=0.01))  # rt << rsat
+    assert float(jnp.mean(cf)) < 0.05      # nearly clear everywhere
+    assert float(jnp.max(rcm)) < 1e-4
+
+
+def test_cloud_frac_moist_limit_overcast():
+    rcm, cf = calc_pdf_liquid_cloud_frac(**_cloud_inputs(rtm_scale=30.0))  # rt >> rsat
+    np.testing.assert_allclose(np.asarray(cf), 1.0, atol=1e-9)
+    assert jnp.all(rcm > 0.0)
+
+
+def test_cloud_frac_monotonic_in_moisture():
+    cfs = []
+    for scale in (0.5, 1.0, 2.0, 4.0):
+        _, cf = calc_pdf_liquid_cloud_frac(**_cloud_inputs(rtm_scale=scale))
+        cfs.append(float(jnp.mean(cf)))
+    assert cfs[0] <= cfs[1] <= cfs[2] <= cfs[3]
+
+
+def test_cloud_frac_matches_committed_golden():
+    """Bit-exact vs the committed golden (CI, no reference checkout needed)."""
+    golden = np.load(_CF_GOLDEN_NPZ)
+    rcm, cf = calc_pdf_liquid_cloud_frac(**_cloud_inputs())
+    np.testing.assert_array_equal(np.asarray(rcm), golden["rcm"])
+    np.testing.assert_array_equal(np.asarray(cf), golden["cloud_frac"])
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_clear_cell_gradient_finite_both_dtypes(dtype):
+    """Zero-variance clear cell (mean_chi=0, stdev_chi=0) -> finite gradients.
+
+    Guards the dtype-aware denominator floor: the reference 1e-100 underflows in
+    float32, which would make the inactive Gaussian branch divide by 0 and NaN
+    the reverse-mode gradient.
+    """
+    def cf_loss(args):
+        mean_chi, stdev_chi = args
+        cf, rc = calc_liquid_cloud_frac_component(mean_chi, stdev_chi)
+        return cf + rc
+
+    # Zero-variance clear cell, slightly-cloudy tiny-variance cell, and LARGE
+    # |mean| clear/full cells (stdev=0) — the divide-VJP must stay finite for
+    # any mean magnitude, not just small ones.
+    for mean_chi in (0.0, 1e-3, -1e-3, 10.0, -10.0):
+        args = (jnp.asarray(mean_chi, dtype), jnp.asarray(0.0, dtype))
+        g_mean, g_std = jax.grad(cf_loss)(args)
+        assert jnp.isfinite(g_mean) and jnp.isfinite(g_std), (dtype, mean_chi)
+    # Exactly on the partial<->clear/full cutoff mean_chi = +-5*stdev_chi
+    # (active partial branch via strict comparisons): gradient must be finite.
+    s = jnp.asarray(0.1, dtype)
+    for sign in (1.0, -1.0):
+        g = jax.grad(cf_loss)((sign * 5.0 * s, s))
+        assert all(jnp.isfinite(x) for x in g), (dtype, sign)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_zero_component_variance_gradient_finite(dtype):
+    """alpha_x->0 makes component variances exactly 0; the chi/eta transform's
+    sqrt(varnce_rt*varnce_thl) must keep finite reverse-mode gradients."""
+    def loss(v):
+        vrt, vthl = v
+        out = transform_pdf_chi_eta_component(
+            jnp.asarray(290.0, dtype), jnp.asarray(0.012, dtype),
+            jnp.asarray(0.011, dtype), jnp.asarray(0.9, dtype),
+            vrt, vthl, jnp.asarray(0.5, dtype))
+        return sum(jnp.sum(x) for x in out)
+
+    g = jax.grad(loss)((jnp.asarray(0.0, dtype), jnp.asarray(0.0, dtype)))
+    assert all(jnp.isfinite(x) for x in g), dtype
+
+
+def test_cloud_frac_jit_and_grad():
+    kw = _cloud_inputs()
+
+    def loss(rtm):
+        rcm, cf = calc_pdf_liquid_cloud_frac(**dict(kw, rtm=rtm))
+        return jnp.sum(cf) + jnp.sum(rcm)
+
+    assert jnp.isfinite(jax.jit(loss)(kw["rtm"]))
+    g = jax.grad(loss)(kw["rtm"])
+    assert jnp.all(jnp.isfinite(g))
+
+
+@pytest.mark.skipif(
+    not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+    reason="CLUBB-JAX reference tree not present",
+)
+def test_cloud_frac_parity_vs_clubb_jax_reference():
+    """Bit-exact cloud_frac/rcm vs CLUBB-JAX (constants+saturation patched)."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.pdf_closure_module as refmod
+    from legoesm.atmosphere.physics.turbulence.clubb_saturation import (
+        sat_mixrat_liq as my_sat,
+    )
+
+    refmod.ep = constants.epsilon
+    refmod.Lv = constants.L_v
+    refmod.Rd = constants.R_d
+    refmod.Cp = constants.c_pd
+    refmod.sat_mixrat_liq = lambda p, t, _sf: my_sat(p, t)
+
+    kw = _cloud_inputs()
+    rcm_m, cf_m = calc_pdf_liquid_cloud_frac(**kw)
+    rcm_r, cf_r = refmod.calc_pdf_liquid_cloud_frac_jax(
+        adg1=kw["adg1"], rtpthlp_zt=kw["rtpthlp"], rtm=kw["rtm"], thlm=kw["thlm"],
+        exner=kw["exner"], p_in_Pa=kw["p_in_Pa"], saturation_formula=3)
+    np.testing.assert_array_equal(np.asarray(cf_m), np.asarray(cf_r))
+    np.testing.assert_array_equal(np.asarray(rcm_m), np.asarray(rcm_r))
+    golden = np.load(_CF_GOLDEN_NPZ)
+    np.testing.assert_array_equal(np.asarray(cf_r), golden["cloud_frac"])
+    np.testing.assert_array_equal(np.asarray(rcm_r), golden["rcm"])
 
 
 @pytest.mark.skipif(

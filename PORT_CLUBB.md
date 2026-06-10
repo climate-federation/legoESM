@@ -230,7 +230,8 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
 | P3 | `compute_mixing_length` parcel buoyant-sorting (Lscale up/down) | ✅ iter 6 (golden-locked vs CLUBB-JAX) |
 | P4 | ADG1 PDF component params (`clubb_pdf.py`: w-closure + responders) | ✅ iter 7 (moment-recovery + bit-exact parity) |
 | P4 | derived params (`mixt_frac_max_mag`, `lmin`) in `clubb_config.py` | ✅ iter 7 |
-| P4 | PDF moment integrals (cloud frac, wpthvp, higher moments) | ☐ iter 8+ (large) |
+| P4 | liquid cloud fraction + rcm (chi/eta transform, `clubb_pdf.py`) | ✅ iter 8 (golden-locked + AD-hardened) |
+| P4 | buoyancy flux `wpthvp` + higher-order PDF moments | ☐ iter 9+ |
 | P3 | mixing length / Lscale | ☐ |
 | P4 | ADG1 PDF closure | ☐ |
 | P5 | moment advance + solves + limiters | ☐ |
@@ -449,6 +450,38 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
   buoyancy-flux terms (`wpthvp`, `rcm`, `cloud_frac`). The cloud-fraction output
   is what finally lets the scheme produce a `TurbulenceOutput`-level cloud
   diagnostic. Large — likely iter 8–9.
+
+### iter 8
+- **P4 liquid cloud fraction (done):** extended `clubb_pdf.py` with the
+  pdf_closure cloud diagnosis — `transform_pdf_chi_eta_component`
+  (Sommeria-Deardorff chi/eta transform; local Clausius-Clapeyron slope from
+  `legoesm.constants`), `calc_liquid_cloud_frac_component` (Gaussian-CDF cloud
+  fraction + cloud water with ±max_num_stdevs truncation), `smooth_corr_quotient`
+  + `calc_comp_corrs_binormal`, and `calc_pdf_liquid_cloud_frac` (combine by
+  mixt_frac). Output: `(rcm, cloud_frac)` — the long-deferred cloud diagnostic.
+- **Bit-exact (0.0) vs the reference** `calc_pdf_liquid_cloud_frac_jax`
+  (constants+saturation patched); committed golden fixture
+  `clubb_cloudfrac_golden.npz` + **non-skipped** CI test.
+- Tests (19): cf∈[0,1], dry→clear / moist→overcast, monotone in moisture, golden
+  + live parity, JIT.
+- **AD hardening (3 codex rounds):** codex flagged float32 NaN-gradient paths in
+  the cloud-frac chain. Fixed with: (1) **double-where** denominator guard
+  (`safe_s = where(stdev>sqrt(tiny), stdev, 1.0)`) so the divide VJP can't
+  overflow for any `mean_chi`; (2) **partial-masked** zeta clamp
+  (`where(partial, zeta, clip(zeta,±5))`) so ACTIVE cells — incl. exactly the
+  `mean=±5·stdev` cutoff — keep the RAW reference VJP while masked clear/full
+  cells avoid `exp(-0.5·zeta²)` overflow; (3) `_safe_sqrt` on the
+  `varnce_rt·varnce_thl` term (singular VJP at the `alpha_x→0` zero-variance
+  case). All forward-identical in x64 (golden unchanged). Added float32+float64
+  grad regressions for zero-variance clear cells, large-|mean| clear/full cells,
+  the cutoff, and zero component variance. Round 4 → APPROVE (only the
+  uncommitted-fixture note, resolved by this commit).
+- `clubb_pdf.py` already EXCLUDED in physics-contracts (iter 7).
+- **Next (iter 9):** P4 buoyancy flux `wpthvp` (`calc_xpthvp_terms_jax` +
+  `calc_pdf_xprcp_fluxes`) and the higher-order PDF moments
+  (`calc_wp2xp/wpxp2/wp2xp2/wp4/wpxpyp_pdf`), which feed the wp2/wp3/xp2 moment
+  advance (P5). After that, the moment time-advance + orchestration + the
+  `clubb.py` scheme entry + integration (P5–P7).
 
 <!-- superseded risk note (resolved iter 6):
 - **⚠ Remaining P3 risk (iter 6+):** `compute_mixing_length` is the largest,
