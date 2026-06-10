@@ -24,11 +24,14 @@ from legoesm.atmosphere.physics.turbulence.clubb_moments import (  # noqa: E402
     advance_windm_edsclrm,
     calc_xp2_xpyp_ta_lhs,
     calc_xp2_xpyp_ta_rhs,
+    diffusion_zm_lhs,
     term_dp1_lhs,
     term_dp1_rhs,
     term_pr1,
     term_pr2,
     term_tp_rhs,
+    xp2_xpyp_lhs,
+    xp2_xpyp_rhs,
 )
 
 from legoesm import constants  # noqa: E402
@@ -289,6 +292,98 @@ def test_xp2_ta_jit_grad():
 
     assert jnp.isfinite(jax.jit(loss)(fa))
     assert jnp.all(jnp.isfinite(jax.grad(loss)(fa)))
+
+
+def _xp2_assembly_inputs():
+    """Deterministic inputs for the diffusion_zm/xp2 LHS/RHS combiners."""
+    gr, ng, nzm = _gr_only()
+    nzt = nzm - 1
+    rng = np.random.default_rng(51)
+    return dict(
+        gr=gr, ng=ng, nzm=nzm, nzt=nzt,
+        K_zt=jnp.asarray(0.5 + rng.random((ng, nzt))),
+        nu=jnp.full((ng,), 5.0),
+        irho_zm=jnp.asarray(1.0 / (1.0 + 0.1 * rng.random((ng, nzm)))),
+        rho_zt=jnp.asarray(1.0 + 0.1 * rng.random((ng, nzt))),
+        lhs_ta=jnp.asarray(rng.standard_normal((3, ng, nzm))),
+        lhs_ma=jnp.asarray(rng.standard_normal((3, ng, nzm))),
+        lhs_diff=jnp.asarray(rng.standard_normal((3, ng, nzm))),
+        lhs_dp1=jnp.asarray(rng.standard_normal((ng, nzm))),
+        rhs_ta=jnp.asarray(rng.standard_normal((ng, nzm))),
+        Cn=jnp.asarray(0.5 + rng.random((ng, nzm))),
+        itau=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
+        xapxbp=jnp.asarray(rng.random((ng, nzm))),
+        xam=jnp.asarray(rng.standard_normal((ng, nzt))),
+        xbm=jnp.asarray(rng.standard_normal((ng, nzt))),
+        wpxap=jnp.asarray(rng.standard_normal((ng, nzm))),
+        wpxbp=jnp.asarray(rng.standard_normal((ng, nzm))),
+        forcing=jnp.asarray(1e-5 * rng.standard_normal((ng, nzm))),
+    )
+
+
+def _xp2_assembly_outputs(kw):
+    gr = kw["gr"]
+    diff = diffusion_zm_lhs(kw["K_zt"], kw["nu"], kw["irho_zm"], kw["rho_zt"], gr)
+    lhs = xp2_xpyp_lhs(kw["lhs_ta"], kw["lhs_ma"], kw["lhs_diff"], kw["lhs_dp1"], 300.0)
+    rhs = xp2_xpyp_rhs(kw["lhs_ta"], kw["rhs_ta"], kw["Cn"], kw["itau"], 1e-4, kw["xapxbp"],
+                       kw["xam"], kw["xbm"], kw["wpxap"], kw["wpxbp"], gr.invrs_dzm,
+                       kw["forcing"], 300.0)
+    return diff, lhs, rhs
+
+
+def test_xp2_assembly_matches_golden():
+    g = np.load(_FIX / "clubb_xp2_assembly_golden.npz")
+    diff, lhs, rhs = _xp2_assembly_outputs(_xp2_assembly_inputs())
+    np.testing.assert_array_equal(np.asarray(diff), g["diffusion_zm_lhs"])
+    np.testing.assert_array_equal(np.asarray(lhs), g["xp2_xpyp_lhs"])
+    np.testing.assert_array_equal(np.asarray(rhs), g["xp2_xpyp_rhs"])
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_xp2_assembly_parity():
+    """Bit-exact parity of diffusion_zm_lhs / xp2_xpyp_lhs / xp2_xpyp_rhs vs ref."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_xp2_xpyp_module as R  # noqa: N812
+    import clubb_jax.src.CLUBB_core.diffusion as RD  # noqa: N812
+
+    gr, ng, nzm = _gr_only()
+    nzt = nzm - 1
+    rng = np.random.default_rng(51)
+    K_zt = jnp.asarray(0.5 + rng.random((ng, nzt)))
+    nu = jnp.full((ng,), 5.0)
+    irho_zm = jnp.asarray(1.0 / (1.0 + 0.1 * rng.random((ng, nzm))))
+    rho_zt = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzt)))
+    np.testing.assert_allclose(
+        np.asarray(diffusion_zm_lhs(K_zt, nu, irho_zm, rho_zt, gr)),
+        np.asarray(RD.diffusion_zm_lhs_jax(K_zt, nu, irho_zm, rho_zt, gr)),
+        rtol=1e-12, atol=1e-14)
+
+    lhs_ta = jnp.asarray(rng.standard_normal((3, ng, nzm)))
+    lhs_ma = jnp.asarray(rng.standard_normal((3, ng, nzm)))
+    lhs_diff = jnp.asarray(rng.standard_normal((3, ng, nzm)))
+    lhs_dp1 = jnp.asarray(rng.standard_normal((ng, nzm)))
+    np.testing.assert_allclose(
+        np.asarray(xp2_xpyp_lhs(lhs_ta, lhs_ma, lhs_diff, lhs_dp1, 300.0)),
+        np.asarray(R.xp2_xpyp_lhs(lhs_ta, lhs_ma, lhs_diff, lhs_dp1, 300.0)),
+        rtol=1e-12, atol=1e-14)
+
+    rhs_ta = jnp.asarray(rng.standard_normal((ng, nzm)))
+    Cn = jnp.asarray(0.5 + rng.random((ng, nzm)))
+    itau = jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm)))
+    xapxbp = jnp.asarray(rng.random((ng, nzm)))
+    xam = jnp.asarray(rng.standard_normal((ng, nzt)))
+    xbm = jnp.asarray(rng.standard_normal((ng, nzt)))
+    wpxap = jnp.asarray(rng.standard_normal((ng, nzm)))
+    wpxbp = jnp.asarray(rng.standard_normal((ng, nzm)))
+    forcing = jnp.asarray(1e-5 * rng.standard_normal((ng, nzm)))
+    np.testing.assert_allclose(
+        np.asarray(xp2_xpyp_rhs(lhs_ta, rhs_ta, Cn, itau, 1e-4, xapxbp, xam, xbm,
+                                wpxap, wpxbp, gr.invrs_dzm, forcing, 300.0)),
+        np.asarray(R.xp2_xpyp_rhs(lhs_ta, rhs_ta, Cn, itau, 1e-4, xapxbp, xam, xbm,
+                                  wpxap, wpxbp, gr.invrs_dzm, forcing, 300.0)),
+        rtol=1e-12, atol=1e-14)
 
 
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),

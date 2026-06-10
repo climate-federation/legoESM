@@ -32,6 +32,7 @@ _EPS = 1.0e-10
 _MAX_MAG_CORRELATION = 0.99   # Cauchy-Schwarz correlation bound (constants_clubb)
 _ZERO_THRESHOLD = 0.0
 _ONE_THIRD = 1.0 / 3.0
+_GAMMA_OVER_IMPLICIT_TS = 1.5   # over-implicit weight (constants_clubb)
 
 
 def _safe_sqrt(x: jax.Array) -> jax.Array:
@@ -67,6 +68,37 @@ def diffusion_zt_lhs(K_zm, nu, invrs_rho_ds_zt, rho_ds_zm, gr: CLUBBGrid):
 
     common_top = (invrs_dzt[:, -1:] * invrs_rho_ds_zt[:, -1:]
                   * K_zm_nu[:, -2:-1] * rho_ds_zm[:, -2:-1] * invrs_dzm[:, -2:-1])
+    super_top, sub_top, main_top = jnp.zeros_like(common_top), -common_top, common_top
+
+    superdiag = jnp.concatenate([super_bot, super_int, super_top], axis=1)
+    maindiag = jnp.concatenate([main_bot, main_int, main_top], axis=1)
+    subdiag = jnp.concatenate([sub_bot, sub_int, sub_top], axis=1)
+    return jnp.stack([superdiag, maindiag, subdiag], axis=0)
+
+
+def diffusion_zm_lhs(K_zt, nu, invrs_rho_ds_zm, rho_ds_zt, gr: CLUBBGrid):
+    """Tridiagonal LHS for implicit eddy diffusion of a zm-level variable.
+
+    Faithful port of ``diffusion.F90:diffusion_zm_lhs`` (non-upwind): discretizes
+    ``d/dz[(K_zt + nu) d(var_zm)/dz]`` at zm levels with zero-flux boundaries.
+    Returns ``(3, ngrdcol, nzm)`` = ``[super, main, sub]``. (The k=0 row is not
+    used by the solver, per the Fortran note, but is filled for shape.)
+    """
+    K_zt_nu = K_zt + nu[:, None]
+    invrs_dzm = gr.invrs_dzm
+    invrs_dzt = gr.invrs_dzt
+
+    common_bot = (invrs_dzm[:, :1] * invrs_rho_ds_zm[:, :1]
+                  * K_zt_nu[:, :1] * rho_ds_zt[:, :1] * invrs_dzt[:, :1])
+    super_bot, main_bot, sub_bot = -common_bot, common_bot, jnp.zeros_like(common_bot)
+
+    scale_int = invrs_dzm[:, 1:-1] * invrs_rho_ds_zm[:, 1:-1]
+    super_int = -scale_int * K_zt_nu[:, 1:] * rho_ds_zt[:, 1:] * invrs_dzt[:, 1:]
+    sub_int = -scale_int * K_zt_nu[:, :-1] * rho_ds_zt[:, :-1] * invrs_dzt[:, :-1]
+    main_int = -(super_int + sub_int)
+
+    common_top = (invrs_dzm[:, -1:] * invrs_rho_ds_zm[:, -1:]
+                  * K_zt_nu[:, -1:] * rho_ds_zt[:, -1:] * invrs_dzt[:, -1:])
     super_top, sub_top, main_top = jnp.zeros_like(common_top), -common_top, common_top
 
     superdiag = jnp.concatenate([super_bot, super_int, super_top], axis=1)
@@ -426,8 +458,58 @@ def calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta, flux_a_zm, flux_b_z
                                    rho_ds_zm, invrs_rho_ds_zm, gr)
 
 
+def xp2_xpyp_lhs(lhs_ta, lhs_ma, lhs_diff, lhs_dp1, dt, gamma=_GAMMA_OVER_IMPLICIT_TS):
+    """Assemble the full xp2/xpyp tridiagonal LHS (``xp2_xpyp_lhs``).
+
+    Interior: ``diff + ma + gamma·ta`` (+ ``lhs_dp1`` + ``1/dt`` on the main
+    diagonal); boundaries are fixed-value BCs ``[0, 1, 0]``. ``lhs_dp1`` is the
+    dissipation main-diagonal pre-scaled by the caller. ``(3, ngrdcol, nzm)``.
+    """
+    super_int = lhs_diff[0, :, 1:-1] + lhs_ma[0, :, 1:-1] + lhs_ta[0, :, 1:-1] * gamma
+    main_int = (lhs_diff[1, :, 1:-1] + lhs_ma[1, :, 1:-1] + lhs_ta[1, :, 1:-1] * gamma
+                + lhs_dp1[:, 1:-1] + 1.0 / dt)
+    sub_int = lhs_diff[2, :, 1:-1] + lhs_ma[2, :, 1:-1] + lhs_ta[2, :, 1:-1] * gamma
+
+    ng = lhs_ta.shape[1]
+    zb = jnp.zeros((ng, 1), dtype=lhs_ta.dtype)
+    ob = jnp.ones((ng, 1), dtype=lhs_ta.dtype)
+    return jnp.stack([jnp.concatenate([zb, super_int, zb], axis=1),
+                      jnp.concatenate([ob, main_int, ob], axis=1),
+                      jnp.concatenate([zb, sub_int, zb], axis=1)], axis=0)
+
+
+def xp2_xpyp_rhs(lhs_ta, rhs_ta, Cn, invrs_tau_zm, threshold, xapxbp, xam, xbm,
+                 wpxap, wpxbp, invrs_dzm, xpyp_forcing, dt, gamma=_GAMMA_OVER_IMPLICIT_TS):
+    """Explicit RHS of the x'^2 / x'y' equations (``xp2_xpyp_rhs``).
+
+    Interior: ``rhs_ta + (1-gamma)·(over-implicit TA) + turbulent-production
+    + Cn/tau·threshold + (1-gamma)·(over-implicit DP1) + forcing + xapxbp/dt``.
+    BCs: lower carries the current value, upper is set to ``threshold``.
+    ``(ngrdcol, nzm)``.
+    """
+    one_minus_gamma = 1.0 - gamma
+    rhs_tp_int = term_tp_rhs(xam, xbm, wpxap, wpxbp, invrs_dzm)
+    rhs_dp1_int = Cn[:, 1:-1] * invrs_tau_zm[:, 1:-1] * threshold
+    lhs_dp1_int = Cn[:, 1:-1] * invrs_tau_zm[:, 1:-1]
+
+    rhs_int = (rhs_ta[:, 1:-1]
+               + one_minus_gamma * (-lhs_ta[0, :, 1:-1] * xapxbp[:, 2:]
+                                    - lhs_ta[1, :, 1:-1] * xapxbp[:, 1:-1]
+                                    - lhs_ta[2, :, 1:-1] * xapxbp[:, :-2])
+               + rhs_tp_int + rhs_dp1_int
+               + one_minus_gamma * (-lhs_dp1_int * xapxbp[:, 1:-1])
+               + xpyp_forcing[:, 1:-1] + (1.0 / dt) * xapxbp[:, 1:-1])
+
+    rhs_lb = xapxbp[:, 0:1]
+    rhs_ub = jnp.full((Cn.shape[0], 1), threshold, dtype=Cn.dtype)
+    return jnp.concatenate([rhs_lb, rhs_int, rhs_ub], axis=1)
+
+
 __all__ = [
     "diffusion_zt_lhs",
+    "diffusion_zm_lhs",
+    "xp2_xpyp_lhs",
+    "xp2_xpyp_rhs",
     "term_ma_zt_lhs_upwind",
     "calc_xpwp",
     "clip_covar",
