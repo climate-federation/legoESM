@@ -22,7 +22,7 @@ from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-    _fold_is_local,
+    fold_is_local,
     divergence_cgrid,
     fold_vface_row,
     gradient_x_cgrid,
@@ -229,11 +229,11 @@ def barotropic_substeps_latlon_cgrid(
         # cells across the cut (MPI halo exchange) rather than a halo-padded
         # interior face.  pad_ns_zero zero-pads the physical pole on every
         # rank (consistent MPI call count); the seam is overwritten only on
-        # the rank that owns it (_fold_is_local).
+        # the rank that owns it (fold_is_local).
         mask_p = pad_ns_zero(mask)
         diff_v_mask = mask_p[:-1] * mask_p[1:]
         diff_v_mask = _zero_polar_lat_ends(diff_v_mask)
-        if _fold_is_local(grid):
+        if fold_is_local(grid):
             north_dm = mask[-1:] * mask[-1:, grid.fold.perm_T]
             diff_v_mask = jnp.concatenate(
                 [diff_v_mask[:-1], north_dm], axis=0,
@@ -318,7 +318,7 @@ def barotropic_substeps_latlon_cgrid(
         H_total_pad = pad_ns_zero(H_total_c)
         H_v = jnp.minimum(H_total_pad[:-1], H_total_pad[1:])
         H_v = _zero_polar_lat_ends(H_v)
-        if _fold_is_local(grid):
+        if fold_is_local(grid):
             north = jnp.minimum(
                 H_total_c[-1:], fold_vface_row(H_total_c, grid),
             )

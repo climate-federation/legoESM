@@ -371,7 +371,7 @@ class TestCubedSphereSPMDStep:
 
         Iter-61: ``div_v`` is now computed BEFORE the merged stage halo
         and packed alongside the cell fields when ``div_damp_coeff > 0``,
-        so the line-363 ``_arakawa_lamb_gradient(div_v, cdgrid)`` reuses
+        so the line-363 ``arakawa_lamb_gradient(div_v, cdgrid)`` reuses
         the pre-padded ``_div_v_pad`` instead of doing its own halo.
         Iter-62 extends to 2/3-device multi-face shards.
 

@@ -65,7 +65,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 
 
-def _get_gwd_fn(config: GravityWaveDragConfig):
+def get_gwd_fn(config: GravityWaveDragConfig):
     """Select the GWD backend based on config.scheme."""
     if config.scheme == "rayleigh":
         return "rayleigh", rayleigh_gwd, config.rayleigh
@@ -146,7 +146,7 @@ def _make_hydrostatic_gwd(
     from ``phys_state.gwd_spectrum`` and the updated spectrum is
     returned as the second element of the result tuple.
     """
-    scheme_name, gwd_fn, scheme_config = _get_gwd_fn(gwd_config)
+    scheme_name, gwd_fn, scheme_config = get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
     # ``e3sm_cam`` shares the orographic launch signature (accepts the
@@ -337,7 +337,7 @@ def _make_mpas_gwd(
     MPAS PE driver); the dispatch falls back to a clear NotImplementedError
     at runtime if such a scheme is selected.
     """
-    scheme_name, gwd_fn, scheme_config = _get_gwd_fn(gwd_config)
+    scheme_name, gwd_fn, scheme_config = get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
     # ``e3sm_cam`` shares the orographic launch signature (accepts the
@@ -458,7 +458,7 @@ def _make_nonhydrostatic_gwd(
     Signature: (state, grid, height_coord, terrain_metric, phys_state=None)
                -> NonHydrostaticTendencies
     """
-    scheme_name, gwd_fn, scheme_config = _get_gwd_fn(gwd_config)
+    scheme_name, gwd_fn, scheme_config = get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
     _ml_model_cache = [None]
@@ -606,7 +606,7 @@ def _make_spectral_pe_gwd(
     Signature: (state, grid, sigma_coord, grid_fields=None, phys_state=None)
                -> SpectralHydrostaticState
     """
-    scheme_name, gwd_fn, scheme_config = _get_gwd_fn(gwd_config)
+    scheme_name, gwd_fn, scheme_config = get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
     _ml_model_cache = [None]

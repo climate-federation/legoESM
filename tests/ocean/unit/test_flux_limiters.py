@@ -123,7 +123,7 @@ class TestResolveTvdLimiter:
 # ---------------------------------------------------------------------------
 
 class TestLatLonTvdParameterization:
-    """``_tvd_to_u_points`` / ``_tvd_to_v_points`` take a ``limiter_fn``
+    """``tvd_to_u_points`` / ``tvd_to_v_points`` take a ``limiter_fn``
     kwarg; default behavior matches the pre-refactor Van Leer path,
     and Sweby produces a different (more aggressive) reconstruction
     in the presence of a sharp gradient."""
@@ -146,20 +146,20 @@ class TestLatLonTvdParameterization:
 
     def test_default_matches_van_leer(self):
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _tvd_to_u_points,
+            tvd_to_u_points,
         )
         f, mass_flux_u = self._smooth_gradient_state()
-        default = _tvd_to_u_points(f, mass_flux_u)
-        van_leer = _tvd_to_u_points(f, mass_flux_u, limiter_fn=van_leer_limiter)
+        default = tvd_to_u_points(f, mass_flux_u)
+        van_leer = tvd_to_u_points(f, mass_flux_u, limiter_fn=van_leer_limiter)
         assert jnp.allclose(default, van_leer)
 
     def test_sweby_differs_from_van_leer_on_smooth_gradient(self):
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _tvd_to_u_points,
+            tvd_to_u_points,
         )
         f, mass_flux_u = self._smooth_gradient_state()
-        van_leer = _tvd_to_u_points(f, mass_flux_u, limiter_fn=van_leer_limiter)
-        sweby = _tvd_to_u_points(f, mass_flux_u, limiter_fn=sweby_limiter)
+        van_leer = tvd_to_u_points(f, mass_flux_u, limiter_fn=van_leer_limiter)
+        sweby = tvd_to_u_points(f, mass_flux_u, limiter_fn=sweby_limiter)
         # On a smooth gradient with r ∈ (0.5, 1) Sweby gives psi=1 (max
         # anti-diffusion within the TVD region) while Van Leer gives
         # psi < 1 — so Sweby's face values are systematically further

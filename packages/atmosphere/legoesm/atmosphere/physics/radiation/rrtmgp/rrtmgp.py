@@ -50,7 +50,7 @@ def _default_data_path(basename_nc: str) -> str:
 
 
 _DEFAULT_LW_GAS = _default_data_path("rrtmgp-gas-lw-g128.nc")
-_DEFAULT_SW_GAS = _default_data_path("rrtmgp-gas-sw-g112.nc")
+DEFAULT_SW_GAS = _default_data_path("rrtmgp-gas-sw-g112.nc")
 _DEFAULT_LW_CLOUD = _default_data_path("cloudysky_lw.nc")
 _DEFAULT_SW_CLOUD = _default_data_path("cloudysky_sw.nc")
 
@@ -336,7 +336,7 @@ class RRTMGP:
       key = RRTMGP._optics_cache_key(config)
       if key not in _legoesm_optics_cache:
           lw_file = config.lw_gas_file or _DEFAULT_LW_GAS
-          sw_file = config.sw_gas_file or _DEFAULT_SW_GAS
+          sw_file = config.sw_gas_file or DEFAULT_SW_GAS
           lw_cloud = config.lw_cloud_file or _DEFAULT_LW_CLOUD
           sw_cloud = config.sw_cloud_file or _DEFAULT_SW_CLOUD
 

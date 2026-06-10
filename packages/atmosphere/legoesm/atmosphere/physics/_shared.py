@@ -283,6 +283,23 @@ def zero_like_tracers(tracers):
 # Moisture-convergence diagnostic for Tiedtke / Bechtold closures
 # ---------------------------------------------------------------------------
 
+def moisture_convergence_supported(grid) -> bool:
+    """True when :func:`compute_moisture_convergence` has an operator for *grid*.
+
+    Mirrors that function's dispatch exactly (single-column, cubed
+    sphere, Gaussian/spectral, lat-lon).  Callers that can degrade
+    gracefully (e.g. the unified driver pipeline passing ``None`` MC so
+    Tiedtke/Bechtold engage their built-in proxies) use this instead of
+    catching the TypeError.
+    """
+    return (
+        getattr(grid, "grid_n_columns", None) == 1
+        or isinstance(grid, CubedSphereGrid)
+        or (hasattr(grid, "n_max") and hasattr(grid, "Pnm"))
+        or (hasattr(grid, "dlat") and hasattr(grid, "dlon"))
+    )
+
+
 def compute_moisture_convergence(
     q_v_grid: jnp.ndarray,
     u_grid: jnp.ndarray,

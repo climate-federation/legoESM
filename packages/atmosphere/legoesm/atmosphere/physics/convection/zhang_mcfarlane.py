@@ -8,7 +8,7 @@ is integrated using the shared
 :func:`legoesm.atmosphere.physics.convection._plume.entraining_detraining_plume`
 helper; the environmental tendencies (compensating subsidence +
 detrainment) are computed by the existing
-:func:`legoesm.atmosphere.physics.convection.mass_flux._apply_mass_flux_kernel`
+:func:`legoesm.atmosphere.physics.convection.mass_flux.apply_mass_flux_kernel`
 so this scheme reuses every piece of column physics rather than
 re-implementing it.
 
@@ -49,8 +49,8 @@ from legoesm.atmosphere.physics.thermodynamics import (
 from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.mass_flux import (
-    _apply_mass_flux_kernel,
-    _compute_column_geometry,
+    apply_mass_flux_kernel,
+    compute_column_geometry,
 )
 from legoesm.atmosphere.physics.convection._triggers import (
     cape_trigger,
@@ -118,7 +118,7 @@ def zhang_mcfarlane_convection(
 
     # -- Column geometry, moist adiabat, CAPE --------------------------------
     # Use virtual-T moist hydrostatic geometry (clean_physics iter-2 #2).
-    dz, rho, z = _compute_column_geometry(T, p_full, p_half, q_v=q_v)
+    dz, rho, z = compute_column_geometry(T, p_full, p_half, q_v=q_v)
     T_base = T[:, -1]
     q_base = q_v[:, -1]
     p_base = p_full[:, -1]
@@ -224,7 +224,7 @@ def zhang_mcfarlane_convection(
     # and cloud water (``plume.q_c_u`` — accumulated condensation)
     # explicitly, so the kernel's ``q_c_conv_dt`` is now the correct
     # detrainment of plume cloud water and we use it directly.
-    dT_dt, dq_v_dt, dq_c_conv_dt = _apply_mass_flux_kernel(
+    dT_dt, dq_v_dt, dq_c_conv_dt = apply_mass_flux_kernel(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
         z, rho, config.delta_0, M_u_max=config.M_b_max,

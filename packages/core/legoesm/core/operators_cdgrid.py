@@ -28,7 +28,7 @@ _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 # Internal: halo padding that works for both 2D and 3D
 # ==============================================================================
 
-def _pad_halo_auto(field, cdgrid):
+def pad_halo_auto(field, cdgrid):
     """Pad halo=1 for 2D/3D cell-centre field."""
     dg = cdgrid.base.duogrid
     offsets = None if dg is not None else cdgrid.base.halo_interp_offsets
@@ -231,7 +231,7 @@ def _a2b_ord4_corner_from_padded(f_pad, n):
 
     Accepts padded array of shape ``(6, n+4, n+4)`` (3-D) or
     ``(6, n+4, n+4, nlev)`` (4-D).  Same stencil as
-    :func:`_interp_center_to_corner_a2b_ord4`, but lifted out so it
+    :func:`interp_center_to_corner_a2b_ord4`, but lifted out so it
     can be reused with a pre-rotated vector halo (halo=2).
 
     Returns corner array of shape ``(6, n+1, n+1[, nlev])``.
@@ -516,7 +516,7 @@ def cgrid_wet_face_masks(wet_cc, cdgrid):
     the face, rather than relying on a zeroed cell-centre velocity that the
     d->c average can leave nonzero at the interface (the documented
     ocean_pe_cdgrid seafloor/coastline leak).  Halo-correct across cube-face
-    seams: it uses the same duogrid halo (``_pad_halo_auto``) as the
+    seams: it uses the same duogrid halo (``pad_halo_auto``) as the
     gradient/divergence operators, so a face on a panel edge sees the true
     neighbouring-panel wet state, not a zero-padded ghost.
 
@@ -538,7 +538,7 @@ def cgrid_wet_face_masks(wet_cc, cdgrid):
     mask_u : array, shape (6, n+1, n[, nlev])  -- x-face (u-point) wet mask
     mask_v : array, shape (6, n, n+1[, nlev])  -- y-face (v-point) wet mask
     """
-    wet_pad = _pad_halo_auto(wet_cc, cdgrid)  # halo=1, duogrid-synced
+    wet_pad = pad_halo_auto(wet_cc, cdgrid)  # halo=1, duogrid-synced
     # x-faces between padded cells (i-1, i); y-faces between (j-1, j).
     # Same index convention as ``cgrid_gradient_2d``.
     mask_u = wet_pad[:, 1:, 1:-1] * wet_pad[:, :-1, 1:-1]
@@ -552,7 +552,7 @@ def cgrid_wet_face_masks(wet_cc, cdgrid):
 
 def cgrid_gradient_2d(eta, cdgrid):
     """Compact C-grid gradient cc → edge midpoints (FV3 Bernoulli stencil using dxc/dyc)."""
-    eta_pad = _pad_halo_auto(eta, cdgrid)
+    eta_pad = pad_halo_auto(eta, cdgrid)
     # eta_pad shape: (6, n+2, n+2)  (1-cell halo on each side)
 
     # x-gradient at u-points: (eta[i,j] - eta[i-1,j]) / dxc
@@ -763,7 +763,7 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     dx = cdgrid.dx_edge_y     # (6, n, n+1)
 
     # Halo-padded fields (halo=1 for upwind, halo=2 for PPM)
-    q_pad_full = _pad_halo_auto(q, cdgrid)        # (6, n+2, n+2[, nlev])
+    q_pad_full = pad_halo_auto(q, cdgrid)        # (6, n+2, n+2[, nlev])
     q_pad_h2_full = _pad_halo_auto_h2(q, cdgrid)  # (6, n+4, n+4[, nlev])
 
     # 4D: move nlev to leading so spatial slicing uses [..., (i,j)]
@@ -928,7 +928,7 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
 # Arakawa-Lamb gradient at D-grid corners
 # ==============================================================================
 
-def _arakawa_lamb_gradient(B, cdgrid, padded=None,
+def arakawa_lamb_gradient(B, cdgrid, padded=None,
                            fortran_dir_aware_corners=False,
                            fortran_a2b_corner_avg=False):
     """4-pt Arakawa-Lamb gradient at D-grid corners via precomputed 3D Cartesian matrix.
@@ -937,7 +937,7 @@ def _arakawa_lamb_gradient(B, cdgrid, padded=None,
     fortran_dir_aware_corners (iter-765): dir=1 (x-grad) / dir=2 (y-grad) inner fills at cube vertices.
     fortran_a2b_corner_avg (iter-766): a2b_ord4 3-pt corner avg at 4 cube-vertex halo cells.
     """
-    B_pad = padded if padded is not None else _pad_halo_auto(B, cdgrid)
+    B_pad = padded if padded is not None else pad_halo_auto(B, cdgrid)
 
     # iter-766: refuse iter-765 + iter-766 combination (iter-765 silently wins by mutating cube corners)
     if fortran_a2b_corner_avg and fortran_dir_aware_corners:
@@ -977,7 +977,7 @@ def _arakawa_lamb_gradient(B, cdgrid, padded=None,
 
     if fortran_dir_aware_corners:
         # Two padded variants at 4 cube vertices: dir1 (x-grad: i=0-col, one-j-inward);
-        # dir2 (y-grad: j=0-row, one-i-inward). Naming per halo.py::_fill_corners_h1.
+        # dir2 (y-grad: j=0-row, one-i-inward). Naming per halo.py::fill_corners_h1.
         p = B_pad
         if B.ndim == 3:
             p1 = p.at[:, 0, 0].set(p[:, 0, 1])
@@ -1039,9 +1039,9 @@ def _arakawa_lamb_gradient(B, cdgrid, padded=None,
 # Interpolation helpers
 # ==============================================================================
 
-def _interp_center_to_corner(field, cdgrid, padded=None):
+def interp_center_to_corner(field, cdgrid, padded=None):
     """Cell-centre → D-grid corner (4-pt avg). 2D/3D. padded= skips internal halo (stage-pack)."""
-    f_pad = padded if padded is not None else _pad_halo_auto(field, cdgrid)
+    f_pad = padded if padded is not None else pad_halo_auto(field, cdgrid)
 
     if field.ndim == 3:
         return 0.25 * (f_pad[:, :-1, :-1] + f_pad[:, 1:, :-1]
@@ -1055,8 +1055,8 @@ def cgrid_corner_min(field, cdgrid, padded=None):
 
     Returns, at each D-grid corner, the minimum of the four surrounding
     cell-centre values — using the SAME four cells and halo convention as
-    :func:`_interp_center_to_corner` and the default branch of
-    :func:`_arakawa_lamb_gradient` (``B_pad[:-1,:-1]``, ``[1:,:-1]``,
+    :func:`interp_center_to_corner` and the default branch of
+    :func:`arakawa_lamb_gradient` (``B_pad[:-1,:-1]``, ``[1:,:-1]``,
     ``[:-1,1:]``, ``[1:,1:]``), so a corner value here is co-located with that
     operator's gradient output.  Halo-correct across cube seams (duogrid pad).
 
@@ -1065,7 +1065,7 @@ def cgrid_corner_min(field, cdgrid, padded=None):
     surrounding cell centroid depths.  Shape (6, n, n[, nlev]) → (6, n+1, n+1
     [, nlev]).
     """
-    f_pad = padded if padded is not None else _pad_halo_auto(field, cdgrid)
+    f_pad = padded if padded is not None else pad_halo_auto(field, cdgrid)
     if field.ndim == 3:
         return jnp.minimum(
             jnp.minimum(f_pad[:, :-1, :-1], f_pad[:, 1:, :-1]),
@@ -1077,12 +1077,12 @@ def cgrid_corner_min(field, cdgrid, padded=None):
     )
 
 
-def _interp_center_to_corner_a2b_ord4(field, cdgrid):
+def interp_center_to_corner_a2b_ord4(field, cdgrid):
     """iter-971: 4th-order A→B cc→corner (FV3 a2b_ord4 a2b_edge.F90:50-330 duogrid path).
 
     Cascaded 4-pt stencils: qx → qxx + qy → qyy → qout = 0.5(qxx+qyy).
     a1=9/16, a2=-1/16 (Lagrange 4-pt); b1=7/12, b2=-1/12 (PPM volume mean).
-    Used by iter-959/963 Smag d_sw5 callers (Fortran-faithful vs 2nd-order _interp_center_to_corner).
+    Used by iter-959/963 Smag d_sw5 callers (Fortran-faithful vs 2nd-order interp_center_to_corner).
     """
     n = field.shape[1]
     # Halo=2 for 4-pt stencil on both i and j
@@ -1116,7 +1116,7 @@ def _interp_center_to_corner_a2b_ord4(field, cdgrid):
     return 0.5 * (qxx + qyy)
 
 
-def _interp_corner_to_center(field_d):
+def interp_corner_to_center(field_d):
     """Interpolate D-grid corners to cell centres (4-point average).
 
     Parameters
@@ -1142,10 +1142,10 @@ def _interp_corner_to_center(field_d):
 # Laplacian at D-grid corners
 # ==============================================================================
 
-def _laplacian_dgrid(u_d, cdgrid):
+def laplacian_dgrid(u_d, cdgrid):
     """D-grid Laplacian via cc round-trip (uses inter-face halo). 4D shares halo via pad_halo_4d."""
     # 1. D-grid -> cell centres: (6, n+1, n+1[, nlev]) -> (6, n, n[, nlev])
-    u_cc = _interp_corner_to_center(u_d)
+    u_cc = interp_corner_to_center(u_d)
 
     # 2. Cell-centre Laplacian with proper halo exchange.  Use the
     # native-4D variant on 3D inputs so all levels share one
@@ -1156,14 +1156,14 @@ def _laplacian_dgrid(u_d, cdgrid):
         lap_a = laplacian_compact(u_cc, cdgrid.base)  # (6, n, n)
 
     # 3. Cell centres -> D-grid: (6, n, n[, nlev]) -> (6, n+1, n+1[, nlev])
-    return _interp_center_to_corner(lap_a, cdgrid)
+    return interp_center_to_corner(lap_a, cdgrid)
 
 
 # ==============================================================================
 # Vector-invariant momentum tendencies (unified 2D/3D)
 # ==============================================================================
 
-def _extrapolate_boundary_corners(du, dv, n):
+def extrapolate_boundary_corners(du, dv, n):
     """Fix tendency at 8 cube vertices via bilinear extrapolation from 3 nearest corners.
 
     A-L gradient at vertices has O(dx) error (4 stencil cells from different faces).
@@ -1210,18 +1210,18 @@ def cdgrid_momentum_tendencies(
 
     # 3. Gradients at corners (Arakawa-Lamb)
     if is_3d:
-        dKE_dx, dKE_dy_perp = _arakawa_lamb_gradient(KE, cdgrid)
-        dp_dx, dp_dy_perp = _arakawa_lamb_gradient(h_or_p, cdgrid)
+        dKE_dx, dKE_dy_perp = arakawa_lamb_gradient(KE, cdgrid)
+        dp_dx, dp_dy_perp = arakawa_lamb_gradient(h_or_p, cdgrid)
     else:
         B = KE + g * (h_or_p + h_s_or_p_prime)
-        dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
+        dB_dx, dB_dy_perp = arakawa_lamb_gradient(B, cdgrid)
 
     # 4. Absolute vorticity at corners: interp ζ only, add f_corner directly (FV3 convention).
     # interp(f_cc) adds O(dx²) sin(lat) nonlinearity error vs exact f_corner.
     if is_3d:
-        zeta_corner = _interp_center_to_corner(zeta, cdgrid)
+        zeta_corner = interp_center_to_corner(zeta, cdgrid)
     else:
-        zeta_corner = (_interp_center_to_corner(zeta, cdgrid)
+        zeta_corner = (interp_center_to_corner(zeta, cdgrid)
                        + cdgrid.f_corner)
 
     # 5. Tendencies (gradient already in physical e_x / e_perp coordinates)
@@ -1239,7 +1239,7 @@ def cdgrid_momentum_tendencies(
             dv_d_dt = dv_d_dt - f_corner * u_prime
 
         if div_v is not None:
-            div_corner = _interp_center_to_corner(div_v, cdgrid)
+            div_corner = interp_center_to_corner(div_v, cdgrid)
             du_d_dt = du_d_dt - 0.5 * u_d * div_corner
             dv_d_dt = dv_d_dt - 0.5 * v_d * div_corner
     else:
@@ -1265,8 +1265,8 @@ def cdgrid_momentum_tendencies(
             sin_a = jnp.sin(cdgrid.base.angle)
             lap_u_local = cos_a * lap_ue + sin_a * lap_vn
             lap_v_local = -sin_a * lap_ue + cos_a * lap_vn
-            lap_u_corner = _interp_center_to_corner(lap_u_local, cdgrid)
-            lap_v_corner = _interp_center_to_corner(lap_v_local, cdgrid)
+            lap_u_corner = interp_center_to_corner(lap_u_local, cdgrid)
+            lap_v_corner = interp_center_to_corner(lap_v_local, cdgrid)
             du_d_dt = du_d_dt + A_h * lap_u_corner
             dv_d_dt = dv_d_dt + A_h * lap_v_corner
 
@@ -1277,21 +1277,21 @@ def cdgrid_momentum_tendencies(
             sin_a = jnp.sin(cdgrid.base.angle)
             bilap_u_local = cos_a * bilap_ue + sin_a * bilap_vn
             bilap_v_local = -sin_a * bilap_ue + cos_a * bilap_vn
-            bilap_u_corner = _interp_center_to_corner(bilap_u_local, cdgrid)
-            bilap_v_corner = _interp_center_to_corner(bilap_v_local, cdgrid)
+            bilap_u_corner = interp_center_to_corner(bilap_u_local, cdgrid)
+            bilap_v_corner = interp_center_to_corner(bilap_v_local, cdgrid)
             du_d_dt = du_d_dt - hyperdiff_coeff * bilap_u_corner
             dv_d_dt = dv_d_dt - hyperdiff_coeff * bilap_v_corner
 
     elif A_h > 0 or hyperdiff_coeff > 0:
-        # 3D fallback: _laplacian_dgrid for ocean/PE
+        # 3D fallback: laplacian_dgrid for ocean/PE
         if A_h > 0:
-            du_d_dt = du_d_dt + A_h * _laplacian_dgrid(u_d, cdgrid)
-            dv_d_dt = dv_d_dt + A_h * _laplacian_dgrid(v_d, cdgrid)
+            du_d_dt = du_d_dt + A_h * laplacian_dgrid(u_d, cdgrid)
+            dv_d_dt = dv_d_dt + A_h * laplacian_dgrid(v_d, cdgrid)
         if hyperdiff_coeff > 0:
-            du_d_dt = du_d_dt - hyperdiff_coeff * _laplacian_dgrid(
-                _laplacian_dgrid(u_d, cdgrid), cdgrid)
-            dv_d_dt = dv_d_dt - hyperdiff_coeff * _laplacian_dgrid(
-                _laplacian_dgrid(v_d, cdgrid), cdgrid)
+            du_d_dt = du_d_dt - hyperdiff_coeff * laplacian_dgrid(
+                laplacian_dgrid(u_d, cdgrid), cdgrid)
+            dv_d_dt = dv_d_dt - hyperdiff_coeff * laplacian_dgrid(
+                laplacian_dgrid(v_d, cdgrid), cdgrid)
 
     # 8. Div damp (FV3 Smag). iter-758c revert: tendency form *dt over-damps; iter-757b da_min_c metric retained.
     # iter-872c-take4: narrow gate (div_damp > 0). iter-872c-take5: warn when dddmp>0 + div_damp=0 silent no-op.
@@ -1308,10 +1308,10 @@ def cdgrid_momentum_tendencies(
         da_min_c = jnp.min(cdgrid.area_corner)    # Fortran da_min_c
         d2_bg = div_damp / da_min_c
         div_abs = jnp.abs(div_field)
-        div_abs_corner = _interp_center_to_corner(div_abs, cdgrid)
+        div_abs_corner = interp_center_to_corner(div_abs, cdgrid)
         adaptive_coeff = da_min_c * jnp.maximum(
             d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
-        ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_field, cdgrid)
+        ddiv_dx, ddiv_dy_perp = arakawa_lamb_gradient(div_field, cdgrid)
         du_d_dt = du_d_dt + adaptive_coeff * ddiv_dx
         dv_d_dt = dv_d_dt + adaptive_coeff * ddiv_dy_perp
 
@@ -1489,14 +1489,14 @@ def fv3_sw_tendencies(
     # (b) Height tendency
     if use_fv3_dsw1_mass_transport:
         # iter-904/904b: FV3 d_sw1 mass transport (sw_core.F90:79 → fv_tp_2d).
-        # Uses _d2a2c_vect for (ut, vt) and transport_step (Lin-Rood FV + PPM).
+        # Uses d2a2c_vect for (ut, vt) and transport_step (Lin-Rood FV + PPM).
         # dt required; nord/damp_c forwarded per sw_core.F90:886-887.
         if dt is None:
             raise ValueError(
                 "`use_fv3_dsw1_mass_transport=True` requires `dt` "
                 "(forwarded automatically by `FV3EdgeShallowWaterModel.step`).")
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
-        _, _, _, _, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        from legoesm.core.fv3_sw_core import d2a2c_vect
+        _, _, _, _, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
         h_new = transport_step(
             h, ut, vt, dt, cdgrid,
             nord=dsw1_nord,
@@ -1521,7 +1521,7 @@ def fv3_sw_tendencies(
     # (d) Arakawa-Lamb gradient at D-grid corners.
     # iter-765: dir-aware halo=1 corner fill (sw_core.F90:3856-3915)
     # iter-766: a2b_ord4 3-pt corner avg (a2b_edge.F90:385-388)
-    dB_dx, dB_dy_perp = _arakawa_lamb_gradient(
+    dB_dx, dB_dy_perp = arakawa_lamb_gradient(
         B, cdgrid,
         fortran_dir_aware_corners=fortran_dir_aware_corners,
         fortran_a2b_corner_avg=fortran_a2b_corner_avg)
@@ -1555,8 +1555,8 @@ def fv3_sw_tendencies(
     zeta_abs = zeta + cdgrid.base.f
 
     # (g) Momentum at cell centres: gradient + vorticity at same stagger → 2.6x better geostrophic cancellation
-    dB_dx_cc = _interp_corner_to_center(dB_dx)
-    dB_dy_cc = _interp_corner_to_center(dB_dy_perp)
+    dB_dx_cc = interp_corner_to_center(dB_dx)
+    dB_dy_cc = interp_corner_to_center(dB_dy_perp)
     du_cc = zeta_abs * v_cc - dB_dx_cc      # (6, n, n)
     dv_cc = -zeta_abs * u_cc - dB_dy_cc     # (6, n, n)
 
@@ -1593,12 +1593,12 @@ def fv3_sw_tendencies(
             adaptive_coeff = adaptive_coeff * mask
 
         # iter-765b/766: thread dir_aware_corners + a2b_corner_avg to ALL A-L calls
-        ddiv_dx, ddiv_dy_perp_cc = _arakawa_lamb_gradient(
+        ddiv_dx, ddiv_dy_perp_cc = arakawa_lamb_gradient(
             div_field, cdgrid,
             fortran_dir_aware_corners=fortran_dir_aware_corners,
             fortran_a2b_corner_avg=fortran_a2b_corner_avg)
-        du_cc = du_cc + adaptive_coeff * _interp_corner_to_center(ddiv_dx)
-        dv_cc = dv_cc + adaptive_coeff * _interp_corner_to_center(ddiv_dy_perp_cc)
+        du_cc = du_cc + adaptive_coeff * interp_corner_to_center(ddiv_dx)
+        dv_cc = dv_cc + adaptive_coeff * interp_corner_to_center(ddiv_dy_perp_cc)
 
     # (i) Biharmonic hyperdiffusion (cell-centre geographic path)
     if hyperdiff_coeff > 0:
@@ -1674,9 +1674,9 @@ def fv3_sw_tendencies(
 # Overlapped (async) halo variants for MPI compute-communication overlap
 # ==============================================================================
 
-def _overlapped_arakawa_lamb_gradient(B, cdgrid, masks=None):
+def overlapped_arakawa_lamb_gradient(B, cdgrid, masks=None):
     """Arakawa-Lamb gradient. Falls through to canonical 4D path (mpi4jax has no non-blocking).
 
     Per-level overlap turns 1 halo into nlev halos (strictly worse). Signature kept for forward compat.
     """
-    return _arakawa_lamb_gradient(B, cdgrid)
+    return arakawa_lamb_gradient(B, cdgrid)

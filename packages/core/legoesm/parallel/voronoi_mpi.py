@@ -47,7 +47,7 @@ from legoesm.parallel.voronoi_partition import (
 )
 from legoesm.parallel.halo_exchange_voronoi import VoronoiHaloExchange
 from legoesm.parallel.reductions import (
-    _require_mpi_stack,
+    require_mpi_stack,
     batch_allreduce_mpi,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
@@ -159,7 +159,7 @@ def gather_voronoi_field(
 
     Only owned entities contribute; halo values are discarded.
     """
-    _require_mpi_stack()
+    require_mpi_stack()
     from mpi4py import MPI
     comm = MPI.COMM_WORLD
 
@@ -275,7 +275,7 @@ def initialize_voronoi_mpi(
     Does NOT call ``jax.distributed.initialize()`` or modify any global
     state in ``distributed.py``.
     """
-    _require_mpi_stack()
+    require_mpi_stack()
     from mpi4py import MPI
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()

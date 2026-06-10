@@ -38,8 +38,8 @@ from legoesm.grids.halo import (
     NORTH,
     SOUTH,
     WEST,
-    _face_gnomonic_to_lonlat,
-    _fill_corners_h1,
+    face_gnomonic_to_lonlat,
+    fill_corners_h1,
     pad_halo,
 )
 
@@ -184,7 +184,7 @@ def _compute_sin_cos_sg(n, padded_supergrid_lon, padded_supergrid_lat):
     n : int
         Number of cells per face edge.
     face_gnomonic_to_lonlat : callable
-        ``_face_gnomonic_to_lonlat(face, ax, ay) -> (lon, lat)``
+        ``face_gnomonic_to_lonlat(face, ax, ay) -> (lon, lat)``
 
     Returns
     -------
@@ -621,34 +621,34 @@ def create_cubed_sphere_cdgrid(
         from legoesm.grids.cubed_sphere import (
             gnomonic_ed_supergrid_lonlat, gnomonic_ed_corner_ext_lonlat,
             gnomonic_ed_padded_supergrid_lonlat, make_fv3_native_grid,
-            _gnomonic_ed_remap_to_create)
+            gnomonic_ed_remap_to_create)
         _sg_lon, _sg_lat = gnomonic_ed_supergrid_lonlat(n)            # (6,2n+1,2n+1)
-        corner_lon, corner_lat = _gnomonic_ed_remap_to_create(
+        corner_lon, corner_lat = gnomonic_ed_remap_to_create(
             *make_fv3_native_grid(n, grid_type=0))                   # (6,n+1,n+1)
         corner_ext_lon, corner_ext_lat = gnomonic_ed_corner_ext_lonlat(n)  # (6,n+3,n+3)
         _psg_lon, _psg_lat = gnomonic_ed_padded_supergrid_lonlat(n)  # (6,2n+3,2n+3)
     elif gnomonic == "equiangular":
         _alpha_sg = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, 2 * n + 1)
         _ax_sg, _ay_sg = jnp.meshgrid(_alpha_sg, _alpha_sg, indexing='ij')
-        _sg = [_face_gnomonic_to_lonlat(f, _ax_sg, _ay_sg) for f in range(6)]
+        _sg = [face_gnomonic_to_lonlat(f, _ax_sg, _ay_sg) for f in range(6)]
         _sg_lon = jnp.stack([s[0] for s in _sg])
         _sg_lat = jnp.stack([s[1] for s in _sg])
         _alpha_edges = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
         _ax_e, _ay_e = jnp.meshgrid(_alpha_edges, _alpha_edges, indexing='ij')
-        _cg = [_face_gnomonic_to_lonlat(f, _ax_e, _ay_e) for f in range(6)]
+        _cg = [face_gnomonic_to_lonlat(f, _ax_e, _ay_e) for f in range(6)]
         corner_lon = jnp.stack([c[0] for c in _cg])
         corner_lat = jnp.stack([c[1] for c in _cg])
         _dalpha = jnp.pi / (2 * n)
         _alpha_ext = jnp.linspace(-jnp.pi / 4 - _dalpha, jnp.pi / 4 + _dalpha, n + 3)
         _axe, _aye = jnp.meshgrid(_alpha_ext, _alpha_ext, indexing='ij')
-        _ceg = [_face_gnomonic_to_lonlat(f, _axe, _aye) for f in range(6)]
+        _ceg = [face_gnomonic_to_lonlat(f, _axe, _aye) for f in range(6)]
         corner_ext_lon = jnp.stack([c[0] for c in _ceg])
         corner_ext_lat = jnp.stack([c[1] for c in _ceg])
         _dasg = jnp.pi / (2 * n)
         _alpha_psg = jnp.linspace(
             -jnp.pi / 4 - _dasg / 2, jnp.pi / 4 + _dasg / 2, 2 * n + 3)
         _axp, _ayp = jnp.meshgrid(_alpha_psg, _alpha_psg, indexing='ij')
-        _psg = [_face_gnomonic_to_lonlat(f, _axp, _ayp) for f in range(6)]
+        _psg = [face_gnomonic_to_lonlat(f, _axp, _ayp) for f in range(6)]
         _psg_lon = jnp.stack([s[0] for s in _psg])
         _psg_lat = jnp.stack([s[1] for s in _psg])
     else:
@@ -1175,8 +1175,8 @@ def create_cubed_sphere_cdgrid(
     # creates O(1) errors in the gradient transformation matrix.
     # When duogrid is active on the base grid, route through the duogrid
     # kinked-to-extended remap so the precomputed `grad_c00..c11` matrix
-    # is consistent with `_pad_halo_auto`-routed field halos used by the
-    # runtime `_arakawa_lamb_gradient` operator.  Previously these
+    # is consistent with `pad_halo_auto`-routed field halos used by the
+    # runtime `arakawa_lamb_gradient` operator.  Previously these
     # positions were pinned to `interp_offsets` even in duogrid mode,
     # creating a silent inconsistency between grid-build and runtime halos.
     _base_dg = base.duogrid
@@ -1184,9 +1184,9 @@ def create_cubed_sphere_cdgrid(
     x_pad = pad_halo(x_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
     y_pad = pad_halo(y_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
     z_pad = pad_halo(z_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
-    x_pad = _fill_corners_h1(x_pad)
-    y_pad = _fill_corners_h1(y_pad)
-    z_pad = _fill_corners_h1(z_pad)
+    x_pad = fill_corners_h1(x_pad)
+    y_pad = fill_corners_h1(y_pad)
+    z_pad = fill_corners_h1(z_pad)
 
     # ------------------------------------------------------------------
     # FV3 c_sw metrics: center-to-center distances from supergrid.

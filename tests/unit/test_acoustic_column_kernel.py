@@ -1,4 +1,4 @@
-"""Direct tests for ``_acoustic_column_kernel`` extracted from
+"""Direct tests for ``acoustic_column_kernel`` extracted from
 ``compressible_euler.acoustic_substeps``.
 
 Two responsibilities:
@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.atmosphere.dynamics.compressible_euler import (
-    _acoustic_column_kernel,
+    acoustic_column_kernel,
     acoustic_substeps,
     CompressibleEulerConfig,
 )
@@ -45,7 +45,7 @@ def test_rest_column_kernel_one_substep_stays_at_rest():
     rho_p = jnp.zeros((nlev,), dtype=jnp.float64)
     J = jnp.array(1.0, dtype=jnp.float64)
 
-    w_new, theta_p_new, rho_p_new = _acoustic_column_kernel(
+    w_new, theta_p_new, rho_p_new = acoustic_column_kernel(
         w, theta_p, rho_p, height_coord, J, dt_s=1.0, beta=0.0, g=9.81,
     )
 
@@ -64,7 +64,7 @@ def test_kernel_preserves_rigid_w_boundaries():
     rho_p = jnp.linspace(-0.01, 0.01, nlev, dtype=jnp.float64)
     J = jnp.array(1.0, dtype=jnp.float64)
 
-    w_new, _, _ = _acoustic_column_kernel(
+    w_new, _, _ = acoustic_column_kernel(
         w, theta_p, rho_p, height_coord, J, dt_s=0.1, beta=0.0, g=9.81,
     )
     assert float(w_new[0]) == 0.0
@@ -129,7 +129,7 @@ def test_acoustic_substeps_wrapper_calls_kernel_equivalently():
     )
 
     # Direct kernel call on the single column for comparison.
-    w_direct, theta_direct, rho_direct = _acoustic_column_kernel(
+    w_direct, theta_direct, rho_direct = acoustic_column_kernel(
         w_data[0, 0, 0], theta_p_data[0, 0, 0], rho_p_data[0, 0, 0],
         height_coord, jacobian[0, 0, 0],
         dt_s=0.05, beta=euler_config.acoustic_off_centering, g=euler_config.g,

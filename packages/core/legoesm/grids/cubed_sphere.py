@@ -689,7 +689,7 @@ def _gnomonic_ed_6face_from_theta(
     array ``theta`` (grid POINTS — cell centers or corners as supplied).
 
     Shared pipeline construct → ``-π`` FV3 orientation shift → ``mirror_grid_
-    faces`` → ``_gnomonic_ed_remap_to_create``.  Both symmetrization passes are
+    faces`` → ``gnomonic_ed_remap_to_create``.  Both symmetrization passes are
     machine-zero no-ops on gnomonic_ed.  This is the SINGLE source of gnomonic_ed
     cell-center positions so grid.lon/lat and the padded metrics (angle, hx/hy)
     refer to the SAME centers — mirroring the equiangular convention (cell-
@@ -699,7 +699,7 @@ def _gnomonic_ed_6face_from_theta(
     lon1, lat1 = _gnomonic_ed_construct(theta, alpha=alpha)
     lon1 = lon1 - jnp.pi
     lon6, lat6 = mirror_grid_faces(lon1, lat1)
-    return _gnomonic_ed_remap_to_create(lon6, lat6)
+    return gnomonic_ed_remap_to_create(lon6, lat6)
 
 
 def _compute_gnomonic_ed_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
@@ -728,7 +728,7 @@ def _compute_gnomonic_ed_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
     (corner-derived), not construct-at-cell-centre-θ.
     """
     lon_c, lat_c = make_fv3_native_grid(n, grid_type=0)  # (6, n+1, n+1) corners
-    lon_c, lat_c = _gnomonic_ed_remap_to_create(lon_c, lat_c)  # → create numbering
+    lon_c, lat_c = gnomonic_ed_remap_to_create(lon_c, lat_c)  # → create numbering
     return cell_center2(
         lon_c[:, :-1, :-1], lat_c[:, :-1, :-1],   # SW
         lon_c[:, 1:, :-1], lat_c[:, 1:, :-1],     # SE
@@ -747,7 +747,7 @@ _GNOMONIC_ED_FACE_PERM = (0, 1, 3, 4, 5, 2)
 _GNOMONIC_ED_FACE_ROT = (0, 0, 1, 1, 0, 3)  # k for jnp.rot90 (counter-clockwise)
 
 
-def _gnomonic_ed_remap_to_create(
+def gnomonic_ed_remap_to_create(
     lon: jax.Array, lat: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
     """Remap a 6-face grid from make_fv3_native_grid's FV3 face
@@ -2086,7 +2086,7 @@ def _gnomonic_ed_construct(
     return xyz2latlon(pp1, pp2, pp3)
 
 
-def _gnomonic_ed_padded_centers(n: int, halo: int) -> tuple[jax.Array, jax.Array]:
+def gnomonic_ed_padded_centers(n: int, halo: int) -> tuple[jax.Array, jax.Array]:
     """gnomonic_ed cell CENTRES on the padded grid, ``(6, n_big, n_big)`` create-
     numbered, ``n_big = n+2*halo+2`` (the equiangular padded-metric convention).
 
@@ -2121,7 +2121,7 @@ def _gnomonic_ed_angle_1d(ncells: int) -> jax.Array:
 
     The gnomonic_ed grid is EXACTLY separable per face in gnomonic angle and all
     6 faces are congruent, so the whole grid is
-    ``_face_gnomonic_to_lonlat(f, meshgrid(this, this))`` — verified to reproduce
+    ``face_gnomonic_to_lonlat(f, meshgrid(this, this))`` — verified to reproduce
     the FV3 native ``make_fv3_native_grid(grid_type=0)`` corners to ~3e-15 over
     all 6 faces, with per-face separability ~1e-16 (iter73).  This is the ed
     analog of equiangular's uniform ``linspace(-π/4, π/4)``: the SAME builder,
@@ -2131,7 +2131,7 @@ def _gnomonic_ed_angle_1d(ncells: int) -> jax.Array:
     the construct cannot do (it pins the W/E edges to the boundary meridians,
     collapsing the perpendicular halo at the cube corners; iter73 W2 bug).
     """
-    lon0, lat0 = _gnomonic_ed_remap_to_create(
+    lon0, lat0 = gnomonic_ed_remap_to_create(
         *make_fv3_native_grid(ncells, grid_type=0))
     lon0 = jnp.asarray(lon0)[0]
     lat0 = jnp.asarray(lat0)[0]
@@ -2154,15 +2154,15 @@ def _gnomonic_ed_faces_from_angle_1d(
     ax_1d: jax.Array, ay_1d: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Build all 6 gnomonic_ed faces from the separable 1D angle array(s) via the
-    tested forward map :func:`legoesm.grids.halo._face_gnomonic_to_lonlat` — the
+    tested forward map :func:`legoesm.grids.halo.face_gnomonic_to_lonlat` — the
     same builder the equiangular cdgrid uses, only the 1D distribution differs."""
-    from legoesm.grids.halo import _face_gnomonic_to_lonlat
+    from legoesm.grids.halo import face_gnomonic_to_lonlat
     if ay_1d is None:
         ay_1d = ax_1d
     ax_mesh, ay_mesh = jnp.meshgrid(ax_1d, ay_1d, indexing="ij")
     los, las = [], []
     for f in range(6):
-        lo, la = _face_gnomonic_to_lonlat(f, ax_mesh, ay_mesh)
+        lo, la = face_gnomonic_to_lonlat(f, ax_mesh, ay_mesh)
         los.append(lo)
         las.append(la)
     return jnp.stack(los), jnp.stack(las)
@@ -2217,10 +2217,10 @@ def compute_padded_half_metrics_ed(
     ``hx_ext, hy_ext`` of shape ``(6, n+2*halo, n+2*halo)``, each = half the
     single-cell edge length (``dx/2``) — built on the FV3 gnomonic_ed grid via
     the 2-cell great-circle chord of the definition-A padded CENTRES
-    (:func:`_gnomonic_ed_padded_centers`), per face (CONSISTENT with grid.lon/lat;
+    (:func:`gnomonic_ed_padded_centers`), per face (CONSISTENT with grid.lon/lat;
     the chord convention matches the equiangular builder).
     """
-    lon, lat = _gnomonic_ed_padded_centers(n, halo)  # (6, n_big, n_big)
+    lon, lat = gnomonic_ed_padded_centers(n, halo)  # (6, n_big, n_big)
     cos_lat = jnp.cos(lat)
     x = cos_lat * jnp.cos(lon)
     y = cos_lat * jnp.sin(lon)
@@ -2249,7 +2249,7 @@ def compute_padded_angle_ed(n: int, halo: int = 1) -> jax.Array:
     Angle is face-dependent (equatorial faces 0-3 share one value; polar 4-5
     differ by π — a real N/S orientation flip, present in the equiangular grid).
     """
-    lon6, lat6 = _gnomonic_ed_padded_centers(n, halo)  # (6, n_big, n_big)
+    lon6, lat6 = gnomonic_ed_padded_centers(n, halo)  # (6, n_big, n_big)
     all_angle = []
     for f in range(6):
         lon, lat = lon6[f], lat6[f]
@@ -2270,7 +2270,7 @@ def _compute_exact_cell_areas_ed(n: int, radius: float) -> jax.Array:
     numbered) gnomonic_ed corners.
     """
     lon_c, lat_c = make_fv3_native_grid(n, grid_type=0)
-    lon_c, lat_c = _gnomonic_ed_remap_to_create(lon_c, lat_c)  # (6, n+1, n+1)
+    lon_c, lat_c = gnomonic_ed_remap_to_create(lon_c, lat_c)  # (6, n+1, n+1)
     return get_area(
         lon_c[:, :-1, :-1], lat_c[:, :-1, :-1],   # SW
         lon_c[:, 1:, :-1], lat_c[:, 1:, :-1],     # SE

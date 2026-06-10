@@ -37,7 +37,7 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
     hydrostatic_to_fv3,
 )
 from legoesm.atmosphere.held_suarez import held_suarez_init
-from legoesm.core.operators_cdgrid import _interp_corner_to_center
+from legoesm.core.operators_cdgrid import interp_corner_to_center
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.vertical import standard_hybrid_levels
@@ -116,7 +116,7 @@ def test_pe_d_con_global_energy_conservation():
 
     # Project corner KE rate to cell centres (matches the iter-221
     # implementation).
-    dKE_dt_cc = _interp_corner_to_center(dKE_dt_corner)
+    dKE_dt_cc = interp_corner_to_center(dKE_dt_corner)
 
     # Expected per-cell heat = -d_con * dKE/dt / c_pd.
     expected_dT_dt = -1.0 * dKE_dt_cc / constants.c_pd

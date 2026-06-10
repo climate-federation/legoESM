@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 
 from legoesm.grids.latlon import create_latlon_grid
-from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _neumann_fill_cgrid
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     iterate_eos_and_pressure_anomaly,
 )
@@ -95,7 +95,7 @@ def _setup(n_lat=10, n_lon=14, nlev=8, dTdy=0.08, dTdz_scale=9.0,
 
 def _rho(T, S, mask, z, eos_fn):
     rho, _, _ = iterate_eos_and_pressure_anomaly(
-        T, S, mask, lambda f: _neumann_fill_cgrid(f, mask), eos_fn,
+        T, S, mask, lambda f: neumann_fill_cgrid(f, mask), eos_fn,
         z.dz_ref, RHO_0, G, n_iter=2,
     )
     return rho

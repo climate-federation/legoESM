@@ -43,7 +43,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.core.operators_cdgrid import (
-    _interp_center_to_corner_a2b_ord4,
+    interp_center_to_corner_a2b_ord4,
 )
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -60,7 +60,7 @@ def test_a2b_ord4_preserves_constant(c):
     """``a2b_ord4`` exact for constant fields (rtol=1e-14)."""
     cdgrid, n = _setup()
     field = jnp.full((6, n, n), c, dtype=jnp.float64)
-    out = _interp_center_to_corner_a2b_ord4(field, cdgrid)
+    out = interp_center_to_corner_a2b_ord4(field, cdgrid)
 
     assert out.shape == (6, n + 1, n + 1), (
         f"Expected shape (6, n+1, n+1) corner output but got "
@@ -82,7 +82,7 @@ def test_a2b_ord4_zero_preserved():
     """Zero input → zero output (no spurious bias term)."""
     cdgrid, n = _setup()
     field = jnp.zeros((6, n, n), dtype=jnp.float64)
-    out = _interp_center_to_corner_a2b_ord4(field, cdgrid)
+    out = interp_center_to_corner_a2b_ord4(field, cdgrid)
     assert jnp.all(out == 0.0), (
         "a2b_ord4(0) must be 0 exactly — no constant bias term."
     )
@@ -93,7 +93,7 @@ def test_a2b_ord4_preserves_constant_resolutions(n):
     """Constant-preservation holds across cube resolutions."""
     cdgrid, n_actual = _setup(n=n)
     field = jnp.full((6, n_actual, n_actual), 2.5, dtype=jnp.float64)
-    out = _interp_center_to_corner_a2b_ord4(field, cdgrid)
+    out = interp_center_to_corner_a2b_ord4(field, cdgrid)
     expected = jnp.full(
         (6, n_actual + 1, n_actual + 1), 2.5, dtype=jnp.float64,
     )

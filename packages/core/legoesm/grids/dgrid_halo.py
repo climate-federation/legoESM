@@ -552,8 +552,8 @@ def pad_halo_dgrid_vector_4d_mpi(u_d, v_d, topology):
         # ``_sendrecv_vjp`` wrapper (custom_vjp) so jax.grad flows
         # through MPI sendrecv (raw mpi4jax.sendrecv chokes on the
         # symbolic Zero cotangent JAX emits during backward).
-        from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
-        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        from legoesm.parallel.halo_exchange import get_sendrecv_vjp
+        sendrecv = get_sendrecv_vjp(mpi4jax)
         recv_buf = sendrecv(
             send_buf, jnp.zeros_like(send_buf),
             nbr_rank, nbr_rank,

@@ -29,10 +29,10 @@ from legoesm.core.operators_cdgrid import (
     dgrid_vorticity,
     cgrid_mass_flux_divergence,
     cgrid_divergence,
-    _arakawa_lamb_gradient,
-    _interp_center_to_corner,
-    _interp_corner_to_center,
-    _laplacian_dgrid,
+    arakawa_lamb_gradient,
+    interp_center_to_corner,
+    interp_corner_to_center,
+    laplacian_dgrid,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
@@ -47,7 +47,7 @@ from legoesm.timestepping.split_explicit import (
 )
 from legoesm.atmosphere.dynamics.compressible_euler import (
     compute_exner_perturbation,
-    _sponge_profile,
+    sponge_profile,
     acoustic_substeps,
     acoustic_substeps_semi_implicit,
     CompressibleEulerConfig,
@@ -149,7 +149,7 @@ class CDGridCompressibleEulerConfig(NamedTuple):
         #     dθ_p/dt += -ah_d_con * (dKE/dt) / (c_pd * Π_ref)
         #
         # at corners, projected to cell centres via
-        # ``_interp_corner_to_center``.  Default 0.0 preserves
+        # ``interp_corner_to_center``.  Default 0.0 preserves
         # bit-for-bit baseline; gated INSIDE ``A_h > 0``.
     # FV3-faithful post-step del-(2*(nord_w+1)) damping for vertical
     # velocity ``w`` (FV3_3D iter 193).  Faithful port of FV3
@@ -160,7 +160,7 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     #     dw = (fx2[i,j] - fx2[i+1,j] + fy2[i,j] - fy2[i,j+1]) * rarea
     #     w += dw
     #
-    # Reuses the SW backbone ``_del6_vt_flux`` from
+    # Reuses the SW backbone ``del6_vt_flux`` from
     # ``legoesm.core.fv3_del6_vt_flux``.  Applied ONCE per full
     # timestep AFTER the split-explicit acoustic update (mirrors
     # iter-169 ``damp_v`` post-step pattern).  Default 0.0 preserves
@@ -287,7 +287,7 @@ def cdgrid_compressible_euler_slow_tendencies(
     else:
         _uv_stack = jnp.stack([u, v], axis=-1)  # (6, n, n, nlev, 2)
         _uv_flat = _uv_stack.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
-        _uv_d_flat = _interp_center_to_corner(_uv_flat, cdgrid)
+        _uv_d_flat = interp_center_to_corner(_uv_flat, cdgrid)
         _uv_d = _uv_d_flat.reshape(
             _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
             nlev_uv, 2,
@@ -309,14 +309,17 @@ def cdgrid_compressible_euler_slow_tendencies(
     # Pack K + pi_prime into single halo. FV3_3D iter 325: duogrid remap (PE iter-84 mirror;
     # required for FV3 a2b_edge 4th-order corner accuracy at edges).
     _nh_dg = grid.duogrid
-    from legoesm.grids.halo import _halo_backend as _hb_step6
+    from legoesm.grids.halo import get_halo_backend as _ghb_step6
+    _hb_step6 = _ghb_step6()
     if _hb_step6 == "spmd":
-        from legoesm.parallel.cubesphere_exchange import _spmd_mesh as _spmd_mesh_step6
+        from legoesm.parallel.cubesphere_exchange import get_spmd_mesh
+        _spmd_mesh_step6 = get_spmd_mesh()
         _K_pad_step6, _pi_pad_step6 = packed_pad_halo_4d(
             K, pi_prime, mesh=_spmd_mesh_step6, duogrid=_nh_dg,
         )
     elif _hb_step6 == "mpi":
-        from legoesm.grids.halo import _mpi_topology as _mpi_topo_step6
+        from legoesm.grids.halo import get_mpi_topology as _gmt_step6
+        _mpi_topo_step6 = _gmt_step6()
         # FV3_3D iter-1041: pass interp_offsets when duogrid is off so the
         # packed MPI (K, pi_prime) exchange Lagrange-remaps halos rather
         # than nearest-copying — matches the local path which has
@@ -343,7 +346,7 @@ def cdgrid_compressible_euler_slow_tendencies(
         )
     else:
         _kp_pad_flat = None
-    _dKpi_dx_flat, _dKpi_dy_perp_flat = _arakawa_lamb_gradient(
+    _dKpi_dx_flat, _dKpi_dy_perp_flat = arakawa_lamb_gradient(
         _kp_flat, cdgrid, padded=_kp_pad_flat,
     )
     _dKpi_dx = _dKpi_dx_flat.reshape(
@@ -371,34 +374,34 @@ def cdgrid_compressible_euler_slow_tendencies(
     _zeta_a2b_ord4: jax.Array | None = None
     if _need_zeta_a2b:
         from legoesm.core.operators_cdgrid import (
-            _interp_center_to_corner_a2b_ord4,
+            interp_center_to_corner_a2b_ord4,
         )
-        # FV3_3D iter-1043: ``_interp_center_to_corner_a2b_ord4`` is
+        # FV3_3D iter-1043: ``interp_center_to_corner_a2b_ord4`` is
         # shape-polymorphic (axis-1/2 slicing, trailing axes broadcast)
         # and ``_pad_halo_auto_h2`` already dispatches to
         # ``pad_halo_4d`` for 4D input.  Calling it directly on the 4D
         # ``zeta`` avoids a ``jax.vmap`` that would wrap ``pad_halo``
         # under MPI — mpi4jax's sendrecv batching rule asserts matching
         # batch axes and fires when sendrecv runs inside vmap.
-        _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
+        _zeta_a2b_ord4 = interp_center_to_corner_a2b_ord4(zeta, cdgrid)
 
     if config.use_fv3_a2b_zeta_corner:
         zeta_corner = _zeta_a2b_ord4
     else:
-        zeta_corner = _interp_center_to_corner(zeta, cdgrid)
+        zeta_corner = interp_center_to_corner(zeta, cdgrid)
     if config.use_coriolis:
         abs_vor_corner = zeta_corner + cdgrid.f_corner[..., None]
     else:
         abs_vor_corner = zeta_corner
     if config.use_fv3_a2b_ord4_theta_corner:
         from legoesm.core.operators_cdgrid import (
-            _interp_center_to_corner_a2b_ord4 as _icc_a2b_ord4_theta,
+            interp_center_to_corner_a2b_ord4 as _icc_a2b_ord4_theta,
         )
         # FV3_3D iter-1043: same lift-out-of-vmap rationale as the
         # ``zeta`` a2b path above.
         theta_corner = _icc_a2b_ord4_theta(theta_total, cdgrid)
     else:
-        theta_corner = _interp_center_to_corner(theta_total, cdgrid)
+        theta_corner = interp_center_to_corner(theta_total, cdgrid)
 
     du_d_dt = abs_vor_corner * v_d - dK_dx - c_p * theta_corner * dpi_dx
     dv_d_dt = -abs_vor_corner * u_d - dK_dy_perp - c_p * theta_corner * dpi_dy_perp
@@ -408,22 +411,22 @@ def cdgrid_compressible_euler_slow_tendencies(
     if _need_div_damp:
         div_v = cgrid_divergence(u_c, v_c, cdgrid)         # (6, n, n, nlev)
         # iter-173: async-halo overlap under MPI
-        from legoesm.grids.halo import _halo_backend as _hb_div
-        if config.use_async_halo and _hb_div == "mpi":
+        from legoesm.grids.halo import get_halo_backend as _ghb_div
+        if config.use_async_halo and _ghb_div() == "mpi":
             from legoesm.core.operators_cdgrid import (
-                _overlapped_arakawa_lamb_gradient,
+                overlapped_arakawa_lamb_gradient,
             )
-            ddiv_dx, ddiv_dy_perp = _overlapped_arakawa_lamb_gradient(
+            ddiv_dx, ddiv_dy_perp = overlapped_arakawa_lamb_gradient(
                 div_v, cdgrid,
             )
         else:
-            ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_v, cdgrid)
+            ddiv_dx, ddiv_dy_perp = arakawa_lamb_gradient(div_v, cdgrid)
         if config.div_damp_dddmp > 0.0:
             # FV3 sw_core.F90:1720 adaptive Smagorinsky formulation.
             # ``da_min_c`` = global min B-grid corner area.
             _da_min_c = jnp.min(cdgrid.area_corner)
             _d2_bg = config.div_damp_coeff / _da_min_c
-            _div_abs_corner = _interp_center_to_corner(
+            _div_abs_corner = interp_center_to_corner(
                 jnp.abs(div_v), cdgrid,
             )
             _adaptive_coeff = _da_min_c * jnp.maximum(
@@ -481,7 +484,7 @@ def cdgrid_compressible_euler_slow_tendencies(
                 _dKE_dt_corner_dd = (
                     u_d * _du_d_dt_dd + v_d * _dv_d_dt_dd
                 )
-                _dKE_dt_cc_dd = _interp_corner_to_center(
+                _dKE_dt_cc_dd = interp_corner_to_center(
                     _dKE_dt_corner_dd,
                 )
             _cx_dd = (
@@ -500,8 +503,8 @@ def cdgrid_compressible_euler_slow_tendencies(
         _dtheta_p_dt_dd_cc = None
 
     # Laplacian viscosity — batch (u_d, v_d) into a single
-    # ``_laplacian_dgrid`` call by stacking along a trailing axis and
-    # folding into the level dim.  ``_laplacian_dgrid`` is now
+    # ``laplacian_dgrid`` call by stacking along a trailing axis and
+    # folding into the level dim.  ``laplacian_dgrid`` is now
     # 4D-native (single ``pad_halo_4d`` for all "levels"), so the
     # paired call shares one halo exchange and one compact ∇² across
     # both wind components — same passive-trailing-axis pattern as the
@@ -512,7 +515,7 @@ def cdgrid_compressible_euler_slow_tendencies(
         _uv_d_lap_flat = _uv_d_lap_stack.reshape(
             n_face_vl, n_id_vl, n_jd_vl, nlev_vl * 2,
         )
-        _uv_d_lap_out = _laplacian_dgrid(_uv_d_lap_flat, cdgrid).reshape(
+        _uv_d_lap_out = laplacian_dgrid(_uv_d_lap_flat, cdgrid).reshape(
             n_face_vl, n_id_vl, n_jd_vl, nlev_vl, 2,
         )
         # FV3_3D iter 180: optional Smagorinsky-style adaptive A_h
@@ -574,7 +577,7 @@ def cdgrid_compressible_euler_slow_tendencies(
                 _dKE_dt_corner_ah = (
                     u_d * _du_d_dt_ah + v_d * _dv_d_dt_ah
                 )
-                _dKE_dt_cc_ah = _interp_corner_to_center(
+                _dKE_dt_cc_ah = interp_corner_to_center(
                     _dKE_dt_corner_ah,
                 )
             _cx_ah = (
@@ -728,7 +731,7 @@ def cdgrid_compressible_euler_slow_tendencies(
                 _dKE_dt_corner_cdd = (
                     u_d * _du_d_dt_cdd + v_d * _dv_d_dt_cdd
                 )
-                _dKE_dt_cc_cdd = _interp_corner_to_center(
+                _dKE_dt_cc_cdd = interp_corner_to_center(
                     _dKE_dt_corner_cdd,
                 )
             _cx_cdd = (
@@ -753,7 +756,7 @@ def cdgrid_compressible_euler_slow_tendencies(
         _duv_d_dt.shape[0], _duv_d_dt.shape[1], _duv_d_dt.shape[2],
         nlev_uv * 2,
     )
-    _duv_dt = _interp_corner_to_center(_duv_d_dt_flat).reshape(
+    _duv_dt = interp_corner_to_center(_duv_d_dt_flat).reshape(
         n_face_uv, n_i_uv, n_j_uv, nlev_uv, 2,
     )
     du_dt = _duv_dt[..., 0]
@@ -950,7 +953,7 @@ def cdgrid_compressible_euler_slow_tendencies(
         )
 
     # --- 14. Sponge layer ---
-    sponge = _sponge_profile(
+    sponge = sponge_profile(
         height_coord.z_full, height_coord.H,
         config.sponge_width, config.sponge_coeff,
     )
@@ -958,7 +961,7 @@ def cdgrid_compressible_euler_slow_tendencies(
     dv_dt = dv_dt - sponge * v
     dtheta_p_dt = dtheta_p_dt - sponge * theta_p
 
-    sponge_half = _sponge_profile(
+    sponge_half = sponge_profile(
         height_coord.z_half, height_coord.H,
         config.sponge_width, config.sponge_coeff,
     )
@@ -1167,7 +1170,7 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             _uv_cc_flat = _uv_cc_stack.reshape(
                 n_face_dv, n_id_dv, n_jd_dv, nlev_dv * 2,
             )
-            _uv_d_flat = _interp_center_to_corner(_uv_cc_flat, self.cdgrid)
+            _uv_d_flat = interp_center_to_corner(_uv_cc_flat, self.cdgrid)
             _uv_d = _uv_d_flat.reshape(
                 _uv_d_flat.shape[0], _uv_d_flat.shape[1],
                 _uv_d_flat.shape[2], nlev_dv, 2,
@@ -1247,12 +1250,12 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             from legoesm.grids.halo import get_halo_backend as _ghb_nh
             if self.config.use_fv3_cross_face_du_proj:
                 if _ghb_nh() == "mpi":
-                    from legoesm.grids.halo import _mpi_topology
+                    from legoesm.grids.halo import get_mpi_topology
                     from legoesm.grids.dgrid_halo import (
                         pad_halo_dgrid_vector_4d_replicated_mpi,
                     )
                     du_full, dv_full = pad_halo_dgrid_vector_4d_replicated_mpi(
-                        du_normal, dv_normal, _mpi_topology,
+                        du_normal, dv_normal, get_mpi_topology(),
                     )
                 else:
                     from legoesm.grids.dgrid_halo import (
@@ -1281,7 +1284,7 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 _duv_corner.shape[0], _duv_corner.shape[1],
                 _duv_corner.shape[2], nlev_dv * 2,
             )
-            _duv_cc_flat = _interp_corner_to_center(_duv_corner_flat)
+            _duv_cc_flat = interp_corner_to_center(_duv_corner_flat)
             _duv_cc = _duv_cc_flat.reshape(
                 n_face_dv, n_id_dv, n_jd_dv, nlev_dv, 2,
             )
@@ -1396,10 +1399,10 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 )
 
         # FV3_3D iter 193 (mirror of iter-169 damp_v): post-step del-(2*(nord_w+1)) damp on w
-        # FV3 sw_core.F90:1080-1086 d_sw1. w on half-levels — vmap _del6_vt_flux.
+        # FV3 sw_core.F90:1080-1086 d_sw1. w on half-levels — vmap del6_vt_flux.
         if self.config.damp_w > 0.0:
             from legoesm.core.fv3_del6_vt_flux import (
-                compute_del6_metrics, _del6_vt_flux,
+                compute_del6_metrics, del6_vt_flux,
             )
             del6_u_w, del6_v_w = compute_del6_metrics(self.cdgrid)
             rarea_w = 1.0 / self.cdgrid.base.area    # (6, n, n)
@@ -1408,12 +1411,12 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 self.config.nord_w + 1
             )
 
-            # FV3_3D iter-1045: ``_del6_vt_flux`` is now 4D-native.
+            # FV3_3D iter-1045: ``del6_vt_flux`` is now 4D-native.
             # Direct call on the full half-level field avoids ``jax.vmap``
             # around ``pad_halo`` under MPI.  Output ``fx2``/``fy2`` are
             # 4D (6, n+1, n, nlev_half) and (6, n, n+1, nlev_half).
             w_new_data = state_new.w.data        # (6, n, n, nlev_half)
-            fx2_w, fy2_w = _del6_vt_flux(
+            fx2_w, fy2_w = del6_vt_flux(
                 w_new_data, damp=damp_step_w, nord=self.config.nord_w,
                 del6_u=del6_u_w, del6_v=del6_v_w, rarea=rarea_w,
                 cdgrid=self.cdgrid,

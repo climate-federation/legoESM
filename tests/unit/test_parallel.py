@@ -18,7 +18,7 @@ from legoesm.parallel.mesh import (
     get_active_config,
     shard_pytree,
     replicate_pytree,
-    _N_FACES,
+    N_FACES,
     _best_tile_factorization,
 )
 from legoesm.parallel.comm import (
@@ -30,7 +30,7 @@ from legoesm.parallel.comm import (
     _rank_to_tile,
 )
 from legoesm.parallel.reductions import (
-    _require_mpi_stack,
+    require_mpi_stack,
     _validate_mpi_runtime_versions,
 )
 from legoesm.parallel.metal import get_metal_config, to_cpu
@@ -40,7 +40,7 @@ from legoesm.grids.halo import (
     pad_halo,
     set_halo_backend,
     get_halo_backend,
-    _pad_halo_local,
+    pad_halo_local,
 )
 
 
@@ -67,7 +67,7 @@ class TestDeviceMesh:
         config = create_device_mesh(n_devices="auto")
         assert isinstance(config, DeviceConfig)
         assert config.n_devices >= 1
-        assert config.n_devices <= _N_FACES
+        assert config.n_devices <= N_FACES
 
     def test_create_device_mesh_explicit_devices(self):
         """Explicit device list is accepted and used."""
@@ -452,7 +452,7 @@ class TestMPIDependencyGuards:
 
         with patch("legoesm.parallel.reductions.importlib.util.find_spec", side_effect=_fake_find_spec):
             with pytest.raises(ImportError, match="mpi4jax, mpi4py"):
-                _require_mpi_stack()
+                require_mpi_stack()
 
     def test_initialize_distributed_checks_mpi_before_jax_init(self):
         """initialize_distributed should fail before jax.distributed.initialize when MPI deps are absent."""
@@ -460,7 +460,7 @@ class TestMPIDependencyGuards:
 
         distributed_mod._active_topology = None
         with patch(
-            "legoesm.parallel.distributed._require_mpi_stack",
+            "legoesm.parallel.distributed.require_mpi_stack",
             side_effect=ImportError("missing mpi stack"),
         ):
             with patch(
@@ -495,11 +495,11 @@ class TestHaloDispatch:
             set_halo_backend("mpi")
 
     def test_pad_halo_local_matches(self):
-        """pad_halo with local backend matches _pad_halo_local."""
+        """pad_halo with local backend matches pad_halo_local."""
         set_halo_backend("local")
         data = jnp.ones((6, 8, 8), dtype=jnp.float32)
         result = pad_halo(data)
-        expected = _pad_halo_local(data)
+        expected = pad_halo_local(data)
         assert jnp.allclose(result, expected)
 
     def teardown_method(self):

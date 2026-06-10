@@ -43,11 +43,11 @@ def mesh_6():
 
 class TestAllGather3D:
     def test_matches_local(self, mesh_6):
-        from legoesm.grids.halo import _pad_halo_local
+        from legoesm.grids.halo import pad_halo_local
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo
         n = 8
         data = jax.random.normal(jax.random.PRNGKey(42), (6, n, n))
-        ref = np.array(_pad_halo_local(data))
+        ref = np.array(pad_halo_local(data))
         result = np.array(explicit_pad_halo(_shard_on_face(data, mesh_6), mesh_6))
         np.testing.assert_allclose(result, ref, rtol=1e-6, atol=1e-10)
 
@@ -62,10 +62,10 @@ class TestAllGather3D:
 
 class TestAllGather4D:
     def test_matches_local(self, mesh_6):
-        from legoesm.grids.halo import _pad_halo_local_4d
+        from legoesm.grids.halo import pad_halo_local_4d
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo_4d
         data = jax.random.normal(jax.random.PRNGKey(123), (6, 8, 8, 5))
-        ref = np.array(_pad_halo_local_4d(data))
+        ref = np.array(pad_halo_local_4d(data))
         result = np.array(explicit_pad_halo_4d(_shard_on_face(data, mesh_6), mesh_6))
         np.testing.assert_allclose(result, ref, rtol=1e-6, atol=1e-10)
 
@@ -76,7 +76,7 @@ class TestAllGather4D:
 
 class TestPpermute3D:
     def test_matches_local(self, mesh_6):
-        from legoesm.grids.halo import _pad_halo_local
+        from legoesm.grids.halo import pad_halo_local
         from legoesm.parallel.cubesphere_exchange import (
             set_ppermute_default, explicit_pad_halo, _cache,
         )
@@ -85,7 +85,7 @@ class TestPpermute3D:
         try:
             n = 8
             data = jax.random.normal(jax.random.PRNGKey(42), (6, n, n))
-            ref = np.array(_pad_halo_local(data))
+            ref = np.array(pad_halo_local(data))
             result = np.array(
                 explicit_pad_halo(_shard_on_face(data, mesh_6), mesh_6))
             np.testing.assert_allclose(result, ref, rtol=1e-6, atol=1e-10,
@@ -97,7 +97,7 @@ class TestPpermute3D:
 
 class TestPpermute4D:
     def test_matches_local(self, mesh_6):
-        from legoesm.grids.halo import _pad_halo_local_4d
+        from legoesm.grids.halo import pad_halo_local_4d
         from legoesm.parallel.cubesphere_exchange import (
             set_ppermute_default, explicit_pad_halo_4d, _cache,
         )
@@ -105,7 +105,7 @@ class TestPpermute4D:
         set_ppermute_default(True)
         try:
             data = jax.random.normal(jax.random.PRNGKey(7), (6, 8, 8, 5))
-            ref = np.array(_pad_halo_local_4d(data))
+            ref = np.array(pad_halo_local_4d(data))
             result = np.array(
                 explicit_pad_halo_4d(_shard_on_face(data, mesh_6), mesh_6))
             np.testing.assert_allclose(result, ref, rtol=1e-6, atol=1e-10,
@@ -287,13 +287,13 @@ class TestBackendActivation:
         assert get_halo_backend() == "local"
 
     def test_pad_halo_dispatches_to_spmd(self, mesh_6):
-        from legoesm.grids.halo import pad_halo, _pad_halo_local
+        from legoesm.grids.halo import pad_halo, pad_halo_local
         from legoesm.parallel.cubesphere_exchange import (
             activate_spmd_halo_backend, deactivate_spmd_halo_backend,
         )
         n = 8
         data = jax.random.normal(jax.random.PRNGKey(99), (6, n, n))
-        ref = np.array(_pad_halo_local(data))
+        ref = np.array(pad_halo_local(data))
         activate_spmd_halo_backend(mesh_6)
         try:
             result = np.array(pad_halo(_shard_on_face(data, mesh_6)))
@@ -315,14 +315,14 @@ class TestSPMDWithOffsets:
     """
 
     def test_halo1_3d_with_offsets(self, mesh_6):
-        from legoesm.grids.halo import _pad_halo_local
+        from legoesm.grids.halo import pad_halo_local
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo
         n = 8
         data = jax.random.normal(jax.random.PRNGKey(0), (6, n, n))
         offsets = jax.random.normal(
             jax.random.PRNGKey(1), (6, 4, n),
         ) * 0.3
-        ref = np.array(_pad_halo_local(data, offsets))
+        ref = np.array(pad_halo_local(data, offsets))
         result = np.array(explicit_pad_halo(
             _shard_on_face(data, mesh_6), mesh_6,
             halo=1, interp_offsets=offsets,
@@ -362,9 +362,9 @@ class TestSPMDWithOffsets:
 
     def test_packed_halo1_4d_with_offsets(self, mesh_6):
         """``packed_pad_halo_4d`` with offsets matches per-field
-        ``_pad_halo_local_4d`` calls.  Iter-8 plumbing.
+        ``pad_halo_local_4d`` calls.  Iter-8 plumbing.
         """
-        from legoesm.grids.halo import _pad_halo_local_4d
+        from legoesm.grids.halo import pad_halo_local_4d
         from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
         n, c1, c2 = 8, 5, 3
         f1 = jax.random.normal(jax.random.PRNGKey(6), (6, n, n, c1))
@@ -372,8 +372,8 @@ class TestSPMDWithOffsets:
         offsets = jax.random.normal(
             jax.random.PRNGKey(8), (6, 4, n),
         ) * 0.3
-        ref1 = np.array(_pad_halo_local_4d(f1, offsets))
-        ref2 = np.array(_pad_halo_local_4d(f2, offsets))
+        ref1 = np.array(pad_halo_local_4d(f1, offsets))
+        ref2 = np.array(pad_halo_local_4d(f2, offsets))
         f1_s = _shard_on_face(f1, mesh_6)
         f2_s = _shard_on_face(f2, mesh_6)
         out1, out2 = packed_pad_halo_4d(
@@ -437,7 +437,7 @@ class TestSPMDWithOffsets:
         ppermute kernel so the bandwidth-optimal high-resolution path
         is also numerically equivalent to single-device.
         """
-        from legoesm.grids.halo import _pad_halo_local
+        from legoesm.grids.halo import pad_halo_local
         from legoesm.parallel.cubesphere_exchange import (
             explicit_pad_halo, set_ppermute_default,
         )
@@ -446,7 +446,7 @@ class TestSPMDWithOffsets:
         offsets = jax.random.normal(
             jax.random.PRNGKey(41), (6, 4, n),
         ) * 0.3
-        ref = np.array(_pad_halo_local(data, offsets))
+        ref = np.array(pad_halo_local(data, offsets))
         set_ppermute_default(True)
         try:
             result = np.array(explicit_pad_halo(
@@ -517,7 +517,7 @@ class TestTracerLeakFree:
     """
 
     def test_no_tracer_leak_jitted_pad_halo_4d(self, mesh_6):
-        from legoesm.grids.halo import _pad_halo_local_4d
+        from legoesm.grids.halo import pad_halo_local_4d
         from legoesm.parallel.cubesphere_exchange import (
             activate_spmd_halo_backend, deactivate_spmd_halo_backend,
             explicit_pad_halo_4d, _cache,
@@ -527,7 +527,7 @@ class TestTracerLeakFree:
         activate_spmd_halo_backend(mesh_6, n=8)
         try:
             data = jax.random.normal(jax.random.PRNGKey(327), (6, 8, 8, 5))
-            ref = np.array(_pad_halo_local_4d(data))
+            ref = np.array(pad_halo_local_4d(data))
             data_s = _shard_on_face(data, mesh_6)
 
             @jax.jit
@@ -544,7 +544,7 @@ class TestTracerLeakFree:
             _cache.clear()
 
     def test_no_tracer_leak_jitted_pad_halo_3d(self, mesh_6):
-        from legoesm.grids.halo import _pad_halo_local
+        from legoesm.grids.halo import pad_halo_local
         from legoesm.parallel.cubesphere_exchange import (
             activate_spmd_halo_backend, deactivate_spmd_halo_backend,
             explicit_pad_halo, _cache,
@@ -553,7 +553,7 @@ class TestTracerLeakFree:
         activate_spmd_halo_backend(mesh_6, n=8)
         try:
             data = jax.random.normal(jax.random.PRNGKey(328), (6, 8, 8))
-            ref = np.array(_pad_halo_local(data))
+            ref = np.array(pad_halo_local(data))
             data_s = _shard_on_face(data, mesh_6)
 
             @jax.jit

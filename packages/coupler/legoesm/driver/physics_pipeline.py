@@ -173,6 +173,14 @@ class PhysicsPipeline:
         # ``None`` (default) preserves bit-exact single-mesh behavior.
         self.column_mesh = column_mesh
         self._cloud_scheme = "none"  # set by build_physics_pipeline
+        # Convection scheme name + grid/vertical-coordinate objects for
+        # grid-operator-backed convection inputs (moisture convergence,
+        # resolved w, CMT winds).  Set by build_physics_pipeline; with
+        # the defaults the profile-prognostic input plumbing is inert
+        # (consuming schemes engage their built-in proxies).
+        self._conv_scheme = "none"
+        self._grid = None
+        self._sigma_coord = None
 
     def _blend_land(self, ocean_field, land_field):
         """Blend an ocean/ice surface field with a land field by ``f_land``.
@@ -274,14 +282,79 @@ class PhysicsPipeline:
         if sbm_RH_ref is not None and _conv_cfg is not None and hasattr(_conv_cfg, 'rh_ref'):
             _conv_cfg = _conv_cfg._replace(rh_ref=sbm_RH_ref)
 
-        if conv_prog is None:
+        # Static per-scheme plumbing traits (shared with the bridge
+        # factories so the two call paths cannot drift).
+        from legoesm.atmosphere.physics.convection.integration import (
+            convection_scheme_traits,
+            diagnose_w_grid_columns_hydrostatic,
+        )
+        from legoesm.atmosphere.physics._shared import (
+            compute_moisture_convergence,
+            moisture_convergence_supported,
+        )
+
+        _ctr = convection_scheme_traits(self._conv_scheme)
+
+        # --- Convective prognostic carry --------------------------------
+        # Scalar-prognostic schemes (mass_flux M_c / edmf a_u) carry
+        # (ncol,); profile-prognostic schemes carry the full (ncol, nlev)
+        # conv_prog_profile.  A None or wrong-shape seed (warm start /
+        # scheme switch / legacy (ncol,) zeros) re-initializes to the
+        # scheme default, mirroring the bridge.  Inside lax.scan callers
+        # must seed the correct shape up front — a mismatch there
+        # surfaces as a loud carry-structure trace error, never silent.
+        _prog_shape = (
+            (ad.ncol, nlev) if _ctr.is_profile_prognostic else (ad.ncol,)
+        )
+        if conv_prog is None or tuple(conv_prog.shape) != _prog_shape:
             if _conv_cfg is not None and hasattr(_conv_cfg, 'M_c_init'):
-                conv_prog = jnp.full((ad.ncol,), _conv_cfg.M_c_init, dtype=T_col.dtype)
+                conv_prog = jnp.full(_prog_shape, _conv_cfg.M_c_init, dtype=T_col.dtype)
             elif _conv_cfg is not None and hasattr(_conv_cfg, 'a_u_init'):
-                conv_prog = jnp.full((ad.ncol,), _conv_cfg.a_u_init, dtype=T_col.dtype)
+                conv_prog = jnp.full(_prog_shape, _conv_cfg.a_u_init, dtype=T_col.dtype)
             else:
-                conv_prog = jnp.zeros((ad.ncol,), dtype=T_col.dtype)
+                conv_prog = jnp.zeros(_prog_shape, dtype=T_col.dtype)
         conv_prog_out = conv_prog
+
+        # --- Grid-operator-backed convection inputs ----------------------
+        # Winds for CMT (ZM/Tiedtke/Bechtold), resolved w for the KF
+        # trigger / Kuo's w_lcl gate, and large-scale moisture
+        # convergence for Tiedtke/Bechtold/Kuo.  ``u``/``v`` must live on
+        # the T grid (cell centres); staggered layouts (e.g. MPAS edge
+        # winds) degrade exactly like the bridge: zero CMT, zero/None w,
+        # None MC (consumers then engage their built-in proxies; Kuo is
+        # correctly quiescent).
+        _winds_on_t_grid = (
+            u is not None and v is not None
+            and u.shape == shape_3d and v.shape == shape_3d
+        )
+        u_conv_col = v_conv_col = None
+        if _ctr.is_cmt_capable:
+            if _winds_on_t_grid:
+                u_conv_col = ad.flatten_3d(u)
+                v_conv_col = ad.flatten_3d(v)
+            else:
+                u_conv_col = jnp.zeros((ad.ncol, nlev), dtype=T_col.dtype)
+                v_conv_col = jnp.zeros((ad.ncol, nlev), dtype=T_col.dtype)
+
+        w_grid_col = None
+        if _ctr.is_w_grid_consumer or _ctr.is_simple_mc_consumer:
+            if (self._grid is not None and self._sigma_coord is not None
+                    and _winds_on_t_grid):
+                w_grid_col = diagnose_w_grid_columns_hydrostatic(
+                    u, v, p_s, self._grid, self._sigma_coord,
+                    T_col, p_full_col, q_v_col,
+                    need_concrete=_ctr.is_w_grid_consumer,
+                    dtype=T_col.dtype,
+                )
+            elif _ctr.is_w_grid_consumer:
+                # KF reads w_grid unconditionally — concrete zeros.
+                w_grid_col = jnp.zeros((ad.ncol, nlev), dtype=T_col.dtype)
+
+        mc_col = None
+        if _ctr.is_mc_consumer or _ctr.is_simple_mc_consumer:
+            if (self._grid is not None and _winds_on_t_grid
+                    and moisture_convergence_supported(self._grid)):
+                mc_col = compute_moisture_convergence(q_v, u, v, self._grid)
 
         turb_out = None
         micro_out_ml = None
@@ -337,7 +410,63 @@ class PhysicsPipeline:
                 mass_flux_config=_conv_cfg,
                 louis_config=self.turbulence_config,
             )
-        # Convection (resolved kernel — no dispatch here)
+        # Convection (resolved kernel; the branches below are STATIC
+        # Python on the build-time scheme traits — no traced dispatch).
+        elif _ctr.is_profile_prognostic:
+            if _ctr.is_stochastic:
+                # Bechtold, deterministic only (enable_stochastic=True is
+                # rejected at build in _resolve_convection).  With
+                # prng_key=None the AR1 state passes through untouched and
+                # the stochastic multiplier is exactly 1, so a zero stoch
+                # input is bit-identical and needs no carry slot.
+                _stoch_zero = jnp.zeros((ad.ncol,), dtype=T_col.dtype)
+                conv_out, conv_prog_out, _ = self.convection_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    u=u_conv_col, v=v_conv_col,
+                    conv_prog_profile=conv_prog,
+                    conv_stoch_state=_stoch_zero,
+                    prng_key=None,
+                    dt=dt, config=_conv_cfg,
+                    moisture_convergence=mc_col,
+                )
+            elif _ctr.is_cmt_capable:
+                if _ctr.is_mc_consumer:
+                    # Tiedtke: CMT winds + moisture convergence.
+                    conv_out, conv_prog_out = self.convection_fn(
+                        T=T_col, q_v=q_v_col,
+                        p_full=p_full_col, p_half=p_half_col,
+                        u=u_conv_col, v=v_conv_col,
+                        conv_prog_profile=conv_prog,
+                        dt=dt, config=_conv_cfg,
+                        moisture_convergence=mc_col,
+                    )
+                else:
+                    # Zhang-McFarlane: CMT winds, no MC kwarg.
+                    conv_out, conv_prog_out = self.convection_fn(
+                        T=T_col, q_v=q_v_col,
+                        p_full=p_full_col, p_half=p_half_col,
+                        u=u_conv_col, v=v_conv_col,
+                        conv_prog_profile=conv_prog,
+                        dt=dt, config=_conv_cfg,
+                    )
+            elif _ctr.is_w_grid_consumer:
+                # Kain-Fritsch: resolved-w trigger.
+                conv_out, conv_prog_out = self.convection_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    w_grid=w_grid_col,
+                    conv_prog_profile=conv_prog,
+                    dt=dt, config=_conv_cfg,
+                )
+            else:
+                # Emanuel: plain profile carry.
+                conv_out, conv_prog_out = self.convection_fn(
+                    T=T_col, q_v=q_v_col,
+                    p_full=p_full_col, p_half=p_half_col,
+                    conv_prog_profile=conv_prog,
+                    dt=dt, config=_conv_cfg,
+                )
         elif _conv_cfg is not None and hasattr(_conv_cfg, 'M_c_init'):
             conv_out, conv_prog_out = self.convection_fn(
                 T=T_col, q_v=q_v_col, p_full=p_full_col, p_half=p_half_col,
@@ -347,6 +476,18 @@ class PhysicsPipeline:
             conv_out, conv_prog_out = self.convection_fn(
                 T=T_col, q_v=q_v_col, p_full=p_full_col, p_half=p_half_col,
                 a_u=conv_prog, dt=dt, config=_conv_cfg,
+            )
+        elif _ctr.is_simple_mc_consumer:
+            # Kuo: stateless leaf driven by the large-scale moisture
+            # convergence, plus resolved w for the oracle's ``w_lcl>0``
+            # gate (None → convergence-sign proxy).  Previously the
+            # pipeline called Kuo without MC, leaving it permanently
+            # quiescent on resolved grids (latent bug, fixed 2026-06-10).
+            conv_out = self.convection_fn(
+                T=T_col, q_v=q_v_col, p_full=p_full_col, p_half=p_half_col,
+                dt=dt, config=_conv_cfg,
+                moisture_convergence=mc_col,
+                w_grid=w_grid_col,
             )
         else:
             conv_out = self.convection_fn(
@@ -1012,10 +1153,16 @@ def _build_gray_radiation_fn(config):
             insol = s_0 * jnp.maximum(cos_sza, 0.0)
         else:
             insol = daily_mean_insolation(lat_col, day_of_year, s_0)
+        # Thread the pipeline's blended (ice/ocean/land, plus coupler
+        # overrides) surface albedo into the gray SW reflection so the
+        # solver sees the same surface as the energy budget — previously
+        # gray used only the static ``config.sfc_albedo`` and the
+        # blended albedo was silently dropped (audit 2026-06-10).
         return gray_radiation(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, lat=lat_col,
             q_v=q_v_col, insolation=insol, config=_cfg,
+            sfc_albedo=albedo_col,
         )
 
     return radiation_fn
@@ -1140,15 +1287,15 @@ _RADIATION_BUILDERS: dict[str, callable] = {
 # Convection resolver
 # ---------------------------------------------------------------------------
 
-_PIPELINE_UNSUPPORTED_CONVECTION = frozenset(
-    {
-        "zhang_mcfarlane",
-        "kain_fritsch",
-        "emanuel",
-        "tiedtke",
-        "bechtold",
-    }
-)
+# Schemes accepted by ``ExperimentConfig.validate_strict`` that the
+# unified pipeline can NOT build.  Empty since audit 2026-06-10 — every
+# registered convection scheme is wired through
+# ``PhysicsPipeline.physics_step_no_rad`` (the carry is a full
+# ``(ncol, nlev)`` ``conv_prog_profile`` for the profile-prognostic
+# schemes, plus CMT winds / w_grid / moisture-convergence plumbing
+# mirroring the bridge factory).  ``tests/unit/test_advertised_buildability.py``
+# keeps this shrink-only: adding an entry is a reviewed decision.
+_PIPELINE_UNSUPPORTED_CONVECTION = frozenset()
 
 
 def _resolve_convection(config):
@@ -1156,21 +1303,19 @@ def _resolve_convection(config):
 
     Returns (kernel_fn, kernel_config).
 
-    Prognostic schemes (mass_flux, edmf) are returned directly and their
-    prognostic variable is threaded explicitly through the unified driver.
+    All registered schemes are supported.  Scalar-prognostic schemes
+    (mass_flux ``M_c``, edmf ``a_u``) thread a ``(ncol,)`` carry;
+    profile-prognostic schemes (zhang_mcfarlane, kain_fritsch, emanuel,
+    tiedtke, bechtold) thread the full ``(ncol, nlev)``
+    ``conv_prog_profile`` — see the trait-driven dispatch in
+    ``physics_step_no_rad``.
 
-    The five profile-prognostic schemes (zhang_mcfarlane, kain_fritsch,
-    emanuel, tiedtke, bechtold) are registered in ``CONVECTION_REGISTRY``
-    but are NOT yet wired through ``PhysicsPipeline.physics_step_no_rad``
-    — the pipeline currently threads only a ``(ncol,)`` scalar carry,
-    while these schemes require a ``(ncol, nlev)`` ``conv_prog_profile``
-    plus per-scheme inputs (winds, w_grid, moisture_convergence,
-    stochastic state, PRNG key).  Selecting one of them through the
-    production driver therefore fails fast here rather than producing
-    silently wrong tendencies inside the hot loop.  Users who need
-    these schemes should drive them through
-    :func:`legoesm.atmosphere.physics.convection.integration.make_convection_physics`,
-    which is the supported per-model-type bridge factory.
+    One explicit exclusion: Bechtold with ``enable_stochastic=True``
+    needs a per-segment PRNG-key carry that the unified driver does not
+    thread (the AR1 state would also need a checkpoint slot).  The
+    deterministic default (``enable_stochastic=False``) is bit-identical
+    to the bridge path; stochastic runs use
+    :func:`legoesm.atmosphere.physics.convection.integration.make_convection_physics`.
     """
     from legoesm.atmosphere.physics.convection.config import (
         ConvectionConfig,
@@ -1183,21 +1328,6 @@ def _resolve_convection(config):
     scheme = config.convection
     if scheme == "none":
         return _noop_convection, None
-
-    if scheme in _PIPELINE_UNSUPPORTED_CONVECTION:
-        raise NotImplementedError(
-            f"Convection scheme {scheme!r} is registered but is not "
-            f"yet supported by the unified driver pipeline "
-            f"(PhysicsPipeline.physics_step_no_rad).  The pipeline "
-            f"only threads a (ncol,) scalar convective carry; "
-            f"profile-prognostic schemes need (ncol, nlev) "
-            f"`conv_prog_profile` plus winds / w_grid / "
-            f"moisture_convergence / stochastic state plumbing.  "
-            f"Use `legoesm.atmosphere.physics.convection.integration."
-            f"make_convection_physics` (the per-model-type bridge "
-            f"factory) instead, or extend the pipeline carry to "
-            f"support profile-prognostic schemes."
-        )
 
     conv_fn = resolve_kernel(CONVECTION_REGISTRY, scheme)
 
@@ -1212,7 +1342,27 @@ def _resolve_convection(config):
         cc = ConvectionConfig(scheme=scheme)
         conv_config = getattr(cc, scheme)
 
+    _check_pipeline_convection_supported(scheme, conv_config)
+
     return conv_fn, conv_config
+
+
+def _check_pipeline_convection_supported(scheme, conv_config):
+    """Build-time guard: reject convection configs whose extra state the
+    unified driver cannot thread.  Currently only Bechtold's stochastic
+    mode (today's ``ExperimentConfig`` cannot reach it — Bechtold
+    tunables aren't exposed there yet — but the guard keeps any future
+    tunable wiring from silently running the deterministic path)."""
+    if scheme == "bechtold" and getattr(conv_config, "enable_stochastic", False):
+        raise NotImplementedError(
+            "bechtold with enable_stochastic=True is not supported by the "
+            "unified driver pipeline: the stochastic AR1 multiplier needs "
+            "a per-segment PRNG-key carry (and a conv_stoch_state "
+            "checkpoint slot) that the driver does not thread.  Run the "
+            "deterministic default (enable_stochastic=False, bit-identical "
+            "plumbing), or drive the scheme through `legoesm.atmosphere."
+            "physics.convection.integration.make_convection_physics`."
+        )
 
 
 def _noop_convection(T, q_v, p_full, p_half, dt, config):
@@ -1230,7 +1380,11 @@ def _noop_convection(T, q_v, p_full, p_half, dt, config):
 # Microphysics resolver
 # ---------------------------------------------------------------------------
 
-_PIPELINE_UNSUPPORTED_MICROPHYSICS = frozenset({"p3", "ml_emulator"})
+# Schemes accepted by ``ExperimentConfig.validate_strict`` that the
+# unified pipeline can NOT build.  Empty since audit 2026-06-10 (p3 and
+# ml_emulator are wired below); shrink-only, guarded by
+# ``tests/unit/test_advertised_buildability.py``.
+_PIPELINE_UNSUPPORTED_MICROPHYSICS = frozenset()
 
 
 def _resolve_microphysics(config):
@@ -1238,15 +1392,15 @@ def _resolve_microphysics(config):
 
     Returns (kernel_fn, kernel_config) or (None, None) if disabled.
 
-    ``p3`` and ``ml_emulator`` are valid ``ExperimentConfig.microphysics``
-    literals (they build through
-    :func:`legoesm.atmosphere.physics.microphysics.integration.make_microphysics_physics`,
-    the per-model-type bridge factory) but are NOT wired into the unified
-    pipeline's ``MICROPHYSICS_REGISTRY`` — p3 carries prognostic ice
-    properties and ml_emulator needs trained network weights, neither of
-    which the registry kernel signature threads.  Selecting them here
-    fails fast with a pointer at the bridge instead of surfacing a
-    misleading ``KeyError: Unknown scheme`` from the registry.
+    ``p3`` matches the standard kernel contract directly — its prognostic
+    ice properties reuse the 9-slot hydrometeor layout (``q_s`` → rime
+    mass ``q_rim``, ``q_g`` → rime volume ``B_rim``; the driver's full
+    moisture registry already allocates those tracers for p3).
+
+    ``ml_emulator`` takes the Equinox network as an extra argument, so —
+    mirroring the bridge factory — the emulator is built once here from
+    the scheme config (random-init from ``config.seed``; training code
+    swaps trained weights in) and bound into a standard-contract wrapper.
     """
     if config.microphysics == "none":
         return None, None
@@ -1257,18 +1411,27 @@ def _resolve_microphysics(config):
     )
 
     scheme = config.microphysics
-    if scheme in _PIPELINE_UNSUPPORTED_MICROPHYSICS:
-        raise NotImplementedError(
-            f"Microphysics scheme {scheme!r} is registered but is not yet "
-            f"supported by the unified driver pipeline (it is absent from "
-            f"MICROPHYSICS_REGISTRY).  Use `legoesm.atmosphere.physics."
-            f"microphysics.integration.make_microphysics_physics` (the "
-            f"per-model-type bridge factory) instead, or wire the scheme "
-            f"into the registry with the state it needs."
-        )
     micro_fn = resolve_kernel(MICROPHYSICS_REGISTRY, scheme)
     mc = MicrophysicsConfig(scheme=scheme)
     micro_config = getattr(mc, scheme)
+
+    if scheme == "ml_emulator":
+        from legoesm.atmosphere.physics.microphysics.ml_emulator import (
+            MicrophysicsEmulator,
+        )
+        _model = MicrophysicsEmulator(
+            micro_config.n_input, micro_config.n_hidden,
+            micro_config.n_layers, micro_config.n_output,
+            key=jax.random.PRNGKey(micro_config.seed),
+        )
+        _ml_kernel = micro_fn
+
+        def micro_fn(*, T, q_v, hydrometeors, p_full, p_half, rho, dz, dt,
+                     config):
+            return _ml_kernel(
+                T, q_v, hydrometeors, p_full, p_half, rho, dz, dt,
+                config, _model,
+            )
 
     return micro_fn, micro_config
 
@@ -1311,11 +1474,11 @@ def _resolve_gwd(config):
         GravityWaveDragConfig,
     )
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
-        _get_gwd_fn,
+        get_gwd_fn,
     )
 
     gc = GravityWaveDragConfig(scheme=scheme)
-    _name, gwd_fn, gwd_config = _get_gwd_fn(gc)
+    _name, gwd_fn, gwd_config = get_gwd_fn(gc)
     return gwd_fn, gwd_config
 
 
@@ -1484,4 +1647,7 @@ def build_physics_pipeline(grid, sigma, config):
         column_mesh=column_mesh,
     )
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
+    pipeline._conv_scheme = getattr(config, 'convection', 'none')
+    pipeline._grid = grid
+    pipeline._sigma_coord = sigma
     return pipeline

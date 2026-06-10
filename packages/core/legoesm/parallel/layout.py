@@ -283,9 +283,9 @@ def gather(local_array: jax.Array, layout, root_only: bool = False) -> jax.Array
     if isinstance(layout, SingleRankLayout):
         return local_array
 
-    from legoesm.parallel.reductions import _require_mpi_stack, _mpi4jax_array_result
+    from legoesm.parallel.reductions import require_mpi_stack, mpi4jax_array_result
 
-    mpi4jax, MPI = _require_mpi_stack()
+    mpi4jax, MPI = require_mpi_stack()
     comm = MPI.COMM_WORLD
     own = layout.ownership
     n = layout.global_n
@@ -304,7 +304,7 @@ def gather(local_array: jax.Array, layout, root_only: bool = False) -> jax.Array
 
     if not layout.is_tiled:
         # Face-only: each rank contributes its faces into the global array.
-        all_data = _mpi4jax_array_result(
+        all_data = mpi4jax_array_result(
             _gather_fn(local_array, comm=comm),
         )
         if root_only and comm.Get_rank() != 0:
@@ -315,7 +315,7 @@ def gather(local_array: jax.Array, layout, root_only: bool = False) -> jax.Array
         return all_data.reshape((6,) + (n,) * 2 + trailing)
     else:
         # Tiled: each rank has (1, n_tile, n_tile, ...).
-        all_tiles = _mpi4jax_array_result(
+        all_tiles = mpi4jax_array_result(
             _gather_fn(local_array, comm=comm),
         )
         if root_only and comm.Get_rank() != 0:

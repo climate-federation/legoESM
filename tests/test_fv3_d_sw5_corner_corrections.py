@@ -1,4 +1,4 @@
-"""Iter-862: cube-vertex corner corrections in `_d_sw5_corner_divergence`.
+"""Iter-862: cube-vertex corner corrections in `d_sw5_corner_divergence`.
 
 Pins Check 3 from iter-849's d_sw5 fidelity audit: Fortran
 sw_core.F90:1709-1715 (nord=0) and 1773-1776 (nord>=1) apply explicit
@@ -13,7 +13,7 @@ The corrections (Fortran indexing):
     if (nw_corner) delpc(1,  npy) = delpc(1,  npy) + vort(1,  npy)
 
 iter-862 introduces an opt-in flag
-``apply_legacy_corner_corrections`` on `_d_sw5_corner_divergence`
+``apply_legacy_corner_corrections`` on `d_sw5_corner_divergence`
 (default ``False``).  Default-off avoids applying the Fortran-
 structure correction with Fortran-incomplete halo data (the iter-655
 ``mode='edge'`` same-face halo at cube vertices is O(1)-wrong relative
@@ -30,7 +30,7 @@ Tests cover:
   exactly on the four corners with the right sign and magnitude.
 
 Iter-862 only adds opt-in support to the FB chain helper
-``_d_sw5_corner_divergence``; it does NOT wire the flag into any
+``d_sw5_corner_divergence``; it does NOT wire the flag into any
 production path.  Production ``fv3_sw_tendencies`` does not call
 this helper.
 """
@@ -51,7 +51,7 @@ from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.core.fv3_sw_core import (
-    _d_sw5_corner_divergence,
+    d_sw5_corner_divergence,
     _apply_legacy_d_sw5_corner_corrections,
 )
 
@@ -130,7 +130,7 @@ def test_default_flag_off_is_bitwise_identical_to_baseline_nord0():
 
     for cdgrid_factory in (_legacy_cdgrid, _duogrid_cdgrid):
         cdgrid = cdgrid_factory(n)
-        out = _d_sw5_corner_divergence(
+        out = d_sw5_corner_divergence(
             u_d, v_d, ua, va, cdgrid, dt,
             d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0)
         # No flag passed → flag defaults to False → corrections never
@@ -158,11 +158,11 @@ def test_flag_on_legacy_mode_applies_exact_corner_corrections_nord0():
     u_d, v_d, ua, va = _make_inputs(n, seed=11)
     dt = 100.0
 
-    out_off = _d_sw5_corner_divergence(
+    out_off = d_sw5_corner_divergence(
         u_d, v_d, ua, va, cdgrid, dt,
         d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
         apply_legacy_corner_corrections=False)
-    out_on = _d_sw5_corner_divergence(
+    out_on = d_sw5_corner_divergence(
         u_d, v_d, ua, va, cdgrid, dt,
         d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
         apply_legacy_corner_corrections=True)
@@ -197,11 +197,11 @@ def test_flag_on_duogrid_mode_skipped_nord0():
     u_d, v_d, ua, va = _make_inputs(n, seed=23)
     dt = 100.0
 
-    out_off = _d_sw5_corner_divergence(
+    out_off = d_sw5_corner_divergence(
         u_d, v_d, ua, va, cdgrid, dt,
         d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
         apply_legacy_corner_corrections=False)
-    out_on = _d_sw5_corner_divergence(
+    out_on = d_sw5_corner_divergence(
         u_d, v_d, ua, va, cdgrid, dt,
         d2_bg=1.0, dddmp=0.0, d4_bg=0.0, nord=0,
         apply_legacy_corner_corrections=True)
@@ -238,11 +238,11 @@ def test_flag_on_legacy_mode_nord1_localises_on_corners():
     u_d, v_d, ua, va = _make_inputs(n, seed=37)
     dt = 100.0
 
-    out_off = _d_sw5_corner_divergence(
+    out_off = d_sw5_corner_divergence(
         u_d, v_d, ua, va, cdgrid, dt,
         d2_bg=0.0, dddmp=0.0, d4_bg=1.0, nord=1,
         apply_legacy_corner_corrections=False)
-    out_on = _d_sw5_corner_divergence(
+    out_on = d_sw5_corner_divergence(
         u_d, v_d, ua, va, cdgrid, dt,
         d2_bg=0.0, dddmp=0.0, d4_bg=1.0, nord=1,
         apply_legacy_corner_corrections=True)
@@ -268,7 +268,7 @@ def test_corner_correction_kernel_exact_signs_and_magnitudes():
     """Direct kernel test on synthetic inputs.
 
     `_apply_legacy_d_sw5_corner_corrections` is the small pure helper
-    factored out of `_d_sw5_corner_divergence` (iter-862).  The two
+    factored out of `d_sw5_corner_divergence` (iter-862).  The two
     upstream callers (nord=0 and nord>=1) hand it the right field
     and edge-halo data, but for sign/magnitude/index correctness we
     test the kernel here on a synthetic edge-halo whose corner cells
@@ -346,11 +346,11 @@ def test_nord1_off_vs_on_only_corners_differ_largest_change():
     u_d, v_d, ua, va = _make_inputs(n, seed=37)
     dt = 100.0
 
-    out_off = _d_sw5_corner_divergence(
+    out_off = d_sw5_corner_divergence(
         u_d, v_d, ua, va, cdgrid, dt,
         d2_bg=0.0, dddmp=0.0, d4_bg=1.0, nord=1,
         apply_legacy_corner_corrections=False)
-    out_on = _d_sw5_corner_divergence(
+    out_on = d_sw5_corner_divergence(
         u_d, v_d, ua, va, cdgrid, dt,
         d2_bg=0.0, dddmp=0.0, d4_bg=1.0, nord=1,
         apply_legacy_corner_corrections=True)
@@ -376,7 +376,7 @@ def test_nord1_off_vs_on_only_corners_differ_largest_change():
 def test_d_sw_native_forwards_d_sw5_flag():
     """Iter-871b: `_d_sw_native` must forward
     `apply_legacy_d_sw5_corner_corrections` kwarg through to
-    `_d_sw5_corner_divergence(apply_legacy_corner_corrections=...)`.
+    `d_sw5_corner_divergence(apply_legacy_corner_corrections=...)`.
 
     Codex iter-871 stop-time review: iter-862 added the flag only on
     the inner helper; the FB-chain wrapper was not plumbed, making
@@ -385,7 +385,7 @@ def test_d_sw_native_forwards_d_sw5_flag():
     output on a legacy grid (the d_sw5 corner correction propagates
     through ke into the d_sw6 wind update), (ii) flag=True is
     bit-identical to flag=False on a duogrid grid (the duogrid gate
-    inside `_d_sw5_corner_divergence` short-circuits).
+    inside `d_sw5_corner_divergence` short-circuits).
     """
     from legoesm.core.fv3_sw_core import _d_sw_native
 

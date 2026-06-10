@@ -2,7 +2,7 @@
 
 Adds the ``use_fv3_a2b_ord4_theta_corner`` flag to
 ``CDGridCompressibleEulerConfig`` and wires the
-``theta_corner = _interp_center_to_corner(theta_total, cdgrid)``
+``theta_corner = interp_center_to_corner(theta_total, cdgrid)``
 site (~line 383) to switch to ``a2b_ord4`` when the flag is on.
 
 Default OFF; impact measurement pending.  iter-696/697/698/699

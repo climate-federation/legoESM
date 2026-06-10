@@ -1,4 +1,4 @@
-"""Tests for Fortran-faithful `_del6_vt_flux` port.
+"""Tests for Fortran-faithful `del6_vt_flux` port.
 
 Iter-752 delivers the core standalone algorithm.  Tests verify:
   1. Shape and dtype correctness.
@@ -23,7 +23,7 @@ import pytest
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.core.fv3_del6_vt_flux import (
-    _del6_vt_flux, compute_del6_metrics,
+    del6_vt_flux, compute_del6_metrics,
     fv3_del6_vorticity_damping)
 
 
@@ -58,7 +58,7 @@ def test_del6_vt_flux_constant_field_del2(cdgrid):
     del6_u, del6_v = compute_del6_metrics(cdgrid)
     q = jnp.ones((6, n, n))
     rarea = 1.0 / cdgrid.base.area
-    fx2, fy2 = _del6_vt_flux(q, damp=1.0, nord=0,
+    fx2, fy2 = del6_vt_flux(q, damp=1.0, nord=0,
                               del6_u=del6_u, del6_v=del6_v,
                               rarea=rarea, cdgrid=cdgrid)
     # For a constant field, centred difference across every edge is 0
@@ -78,7 +78,7 @@ def test_del6_vt_flux_shapes(cdgrid):
     q = jnp.array(np.random.default_rng(0).normal(size=(6, n, n)))
     rarea = 1.0 / cdgrid.base.area
     for nord in (0, 1, 2):
-        fx2, fy2 = _del6_vt_flux(q, damp=1.0, nord=nord,
+        fx2, fy2 = del6_vt_flux(q, damp=1.0, nord=nord,
                                   del6_u=del6_u, del6_v=del6_v,
                                   rarea=rarea, cdgrid=cdgrid)
         assert fx2.shape == (6, n + 1, n)
@@ -93,10 +93,10 @@ def test_del6_vt_flux_damp_scales(cdgrid):
     q = jnp.array(np.random.default_rng(42).normal(size=(6, n, n)))
     rarea = 1.0 / cdgrid.base.area
     for nord in (0, 1, 2):
-        fx2_a, fy2_a = _del6_vt_flux(q, damp=1.0, nord=nord,
+        fx2_a, fy2_a = del6_vt_flux(q, damp=1.0, nord=nord,
                                       del6_u=del6_u, del6_v=del6_v,
                                       rarea=rarea, cdgrid=cdgrid)
-        fx2_b, fy2_b = _del6_vt_flux(q, damp=2.0, nord=nord,
+        fx2_b, fy2_b = del6_vt_flux(q, damp=2.0, nord=nord,
                                       del6_u=del6_u, del6_v=del6_v,
                                       rarea=rarea, cdgrid=cdgrid)
         # damp enters linearly on initial d2=damp*q.  On iterated
@@ -166,7 +166,7 @@ def test_del6_vt_flux_zero_field(cdgrid):
     q = jnp.zeros((6, n, n))
     rarea = 1.0 / cdgrid.base.area
     for nord in (0, 1, 2):
-        fx2, fy2 = _del6_vt_flux(q, damp=1.0, nord=nord,
+        fx2, fy2 = del6_vt_flux(q, damp=1.0, nord=nord,
                                   del6_u=del6_u, del6_v=del6_v,
                                   rarea=rarea, cdgrid=cdgrid)
         assert bool(jnp.all(fx2 == 0.0))
@@ -222,7 +222,7 @@ def test_fv3_del6_damping_sign_convention_and_units(cdgrid):
     ut = v_d * cdgrid.dy_edge_x
     wk = rarea * (vt[:, :, :-1] - vt[:, :, 1:]
                   - ut[:, :-1, :] + ut[:, 1:, :])
-    fx2, fy2 = _del6_vt_flux(
+    fx2, fy2 = del6_vt_flux(
         wk, 1.0, 1, del6_u=del6_u_m, del6_v=del6_v_m,
         rarea=rarea, cdgrid=cdgrid)
 

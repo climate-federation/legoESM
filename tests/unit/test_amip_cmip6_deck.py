@@ -675,15 +675,15 @@ class TestCMIPBandOrderRemap:
     def _rrtmgp_bands(self):
         import xarray as xr
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
-            _DEFAULT_SW_GAS,
+            DEFAULT_SW_GAS,
         )
-        ds = (xr.open_dataset(_DEFAULT_SW_GAS)
-              if not _DEFAULT_SW_GAS.endswith(".zarr")
-              else xr.open_zarr(_DEFAULT_SW_GAS))
+        ds = (xr.open_dataset(DEFAULT_SW_GAS)
+              if not DEFAULT_SW_GAS.endswith(".zarr")
+              else xr.open_zarr(DEFAULT_SW_GAS))
         wn = ds["bnd_limits_wavenumber"].values          # (14, 2) cm^-1
         gpt = ds["bnd_limits_gpt"].values.astype(int)    # (14, 2) 1-indexed
         ds.close()
-        return wn, gpt, _DEFAULT_SW_GAS
+        return wn, gpt, DEFAULT_SW_GAS
 
     def test_roll_aligns_every_band_by_wavelength(self):
         """Each CMIP band's flux must be re-ordered into the RRTMGP band

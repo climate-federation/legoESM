@@ -3,7 +3,7 @@ divergence damping gradient call.
 
 Mirror of the PE wiring at ``primitive_eq_cdgrid.py:594-598``.
 Under MPI backend, ``use_async_halo=True`` dispatches the
-``_arakawa_lamb_gradient(div_v)`` call inside the iter-171
+``arakawa_lamb_gradient(div_v)`` call inside the iter-171
 div-damp block to the async-overlapping variant.
 
 Tests
@@ -149,9 +149,9 @@ def test_nh_async_halo_ast_regression():
     src_text = src_path.read_text()
 
     expected_substrings = [
-        "use_async_halo: bool = False",            # config field
-        "config.use_async_halo and _hb_div ==",    # dispatch gate
-        "_overlapped_arakawa_lamb_gradient",       # helper name
+        "use_async_halo: bool = False",              # config field
+        "config.use_async_halo and _ghb_div() ==",   # dispatch gate
+        "overlapped_arakawa_lamb_gradient",          # helper name
     ]
     missing = [s for s in expected_substrings if s not in src_text]
     assert not missing, (

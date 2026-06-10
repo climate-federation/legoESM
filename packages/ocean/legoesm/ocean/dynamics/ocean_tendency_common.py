@@ -91,7 +91,7 @@ def iterate_eos_and_pressure_anomaly(
         Grid-specific land-cell filler.  Must accept and return arrays
         with the same shape as ``T``.  Typical implementations:
         ``jax.vmap(fill_land_cells_cubed_sphere, in_axes=-1)``,
-        ``_neumann_fill_cgrid`` (lat-lon C-grid), or
+        ``neumann_fill_cgrid`` (lat-lon C-grid), or
         ``fill_land_cells_mpas`` (MPAS).
     eos_fn : Callable
         Equation of state ``(T, S, p) → ρ``.  Same signature used by

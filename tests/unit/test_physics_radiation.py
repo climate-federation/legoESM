@@ -370,3 +370,96 @@ class TestGrayQualitative:
         assert olrs[0] < olrs[1] < olrs[2], (
             f"OLR not increasing with T_sfc: {olrs}"
         )
+
+
+# ============================================================================
+# 2f  Per-column surface albedo (blended-albedo threading, 2026-06-10)
+# ============================================================================
+
+class TestPerColumnAlbedo:
+    """Gray SW must consume a per-column surface albedo when given one,
+    fall back byte-identically to ``config.sfc_albedo`` otherwise, and
+    stay differentiable w.r.t. the albedo."""
+
+    def _run(self, sfc_albedo=None, config=None):
+        T, p_full, p_half, T_sfc, lat, q_v = _make_tropical_column()
+        cfg = config or GrayRadiationConfig()
+        insol = jnp.array([400.0])
+        return gray_radiation(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=T_sfc,
+            lat=lat, q_v=q_v, insolation=insol, config=cfg,
+            sfc_albedo=sfc_albedo,
+        )
+
+    def test_none_matches_config_scalar(self):
+        cfg = GrayRadiationConfig(sfc_albedo=0.21)
+        out_none = self._run(config=cfg)
+        out_explicit = self._run(sfc_albedo=jnp.array([0.21]), config=cfg)
+        assert jnp.array_equal(out_none.sw_flux_up, out_explicit.sw_flux_up)
+        assert jnp.array_equal(out_none.heating_rate, out_explicit.heating_rate)
+
+    def test_higher_albedo_reflects_more(self):
+        dark = self._run(sfc_albedo=jnp.array([0.06]))
+        bright = self._run(sfc_albedo=jnp.array([0.65]))
+        # Same downwelling beam, more reflected upward SW everywhere.
+        assert jnp.array_equal(dark.sw_flux_down, bright.sw_flux_down)
+        assert float(bright.sw_flux_up[0, 0]) > float(dark.sw_flux_up[0, 0])
+        # Reflection ratio at the surface equals the albedo ratio.
+        r = float(bright.sw_flux_up[0, -1] / dark.sw_flux_up[0, -1])
+        assert abs(r - 0.65 / 0.06) < 1e-6
+
+    def test_albedo_gradient_flows(self):
+        def loss(alpha):
+            out = self._run(sfc_albedo=alpha)
+            return jnp.sum(out.sw_flux_up[:, 0])  # reflected SW at TOA
+
+        g = jax.grad(loss)(jnp.array([0.3]))
+        assert bool(jnp.all(jnp.isfinite(g)))
+        assert float(jnp.abs(g[0])) > 0.0
+
+    def test_pipeline_blend_reaches_gray(self):
+        """Integration: sea-ice fraction must change gray SW through the
+        pipeline's blended albedo (previously albedo_col was dropped)."""
+        import numpy as np
+        from legoesm.driver.config import (
+            DycoreConfig, ExperimentConfig, GridConfig,
+        )
+        from legoesm.driver.physics_pipeline import build_physics_pipeline
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import make_hybrid_levels
+
+        nlev = 8
+        grid = create_cubed_sphere(4)
+        sigma = make_hybrid_levels(nlev)
+        s2 = grid.grid_lat.shape
+        s3 = (*s2, nlev)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=nlev),
+            dycore=DycoreConfig(
+                model_type="hydrostatic", discretization="cdgrid"),
+            convection="none", radiation="gray", microphysics="none",
+        )
+        config.validate_strict()
+        pipe = build_physics_pipeline(grid, sigma, config)
+
+        T = jnp.asarray(np.broadcast_to(
+            300.0 - 60.0 * np.linspace(0, 1, nlev)[::-1], s3).copy())
+        p_s = jnp.full(s2, 1.0e5)
+        q_v = jnp.full(s3, 5e-3)
+        sst = jnp.full(s2, 290.0)
+        lat = jnp.asarray(grid.grid_lat)
+        lon = jnp.asarray(grid.grid_lon)
+
+        def rad(sic):
+            return pipe.compute_radiation_core(
+                T, p_s, q_v, sst, sic, lat, lon,
+                jnp.asarray(80.0), jnp.asarray(43200.0),
+                None, jnp.asarray(1361.0), None, None,
+            )
+
+        out_ocean = rad(jnp.zeros(s2))
+        out_ice = rad(jnp.ones(s2))
+        # Ice (albedo 0.65) vs ocean (0.06): less SW absorbed at the
+        # surface and a different heating profile.
+        assert float(jnp.max(out_ocean[1] - out_ice[1])) > 1.0  # sw_net_sfc
+        assert float(jnp.max(jnp.abs(out_ocean[0] - out_ice[0]))) > 0.0

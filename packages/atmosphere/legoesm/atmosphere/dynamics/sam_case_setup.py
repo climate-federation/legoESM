@@ -208,11 +208,11 @@ def build_sam_case_initial_state(
     Dry reference + moist tracer (codex iter-33 C/D): the plane core uses a DRY
     reference state (``θ_ref`` dry, dry EOS ``p=EOS(ρ,θ)``) and carries the full
     ``q_v`` as a tracer; moisture enters the dynamics through the SEPARATE moist
-    buoyancy term ``_moisture_buoyancy_w_half`` (vapour-virtual + condensate
+    buoyancy term ``moisture_buoyancy_w_half`` (vapour-virtual + condensate
     loading), which by design reproduces SAM's ``buoyancy.f90`` — INCLUDING the
     ``g·ε_v·⟨q_v⟩`` unbalanced-mean-buoyancy that drives the moist circulation.
     So ``ρ'`` is correctly DRY here (putting moisture in ``ρ'`` would double-count
-    against ``_moisture_buoyancy_w_half`` and the dry EOS); this matches the
+    against ``moisture_buoyancy_w_half`` and the dry EOS); this matches the
     validated RCEMIP plane IC.
     """
     rest = make_rest_state(grid, height_coord, dtype=dtype)

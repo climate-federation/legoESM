@@ -36,7 +36,7 @@ Conventions
   scatter and halo-exchange helpers handle this explicitly.
 
 - AD safety: halo sendrecv uses
-  :func:`legoesm.parallel.halo_exchange._get_sendrecv_vjp` (the AD-safe
+  :func:`legoesm.parallel.halo_exchange.get_sendrecv_vjp` (the AD-safe
   wrapper around ``mpi4jax.sendrecv``).  Backward swaps source/dest as
   required by the reverse-mode rule.
 
@@ -70,10 +70,10 @@ if TYPE_CHECKING:
     # component, which blocks component independence (see import-linter contracts).
 
 from legoesm.grids.halo_latlon import (
-    _fold_pole_rows,
-    _fold_pole_rows_3d,
+    fold_pole_rows,
+    fold_pole_rows_3d,
 )
-from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
+from legoesm.parallel.halo_exchange import get_sendrecv_vjp
 
 
 # ============================================================================
@@ -218,7 +218,7 @@ def _serial_pad_then_strip_lon(
     # public dispatcher would re-enter the MPI path and recurse
     # forever:
     #   pad_halo_latlon (public)
-    #     → _pad_halo_latlon_mpi   (MPI branch)
+    #     → pad_halo_latlon_mpi   (MPI branch)
     #       → exchange_halo_latlon
     #         → _pole_fold_south / _north  (at boundary ranks)
     #           → _serial_pad_then_strip_lon
@@ -228,15 +228,15 @@ def _serial_pad_then_strip_lon(
     # version pre-dated the backend-dispatch refactor and called
     # the dispatcher by accident.
     from legoesm.grids.halo_latlon import (
-        _pad_halo_latlon_local,
-        _pad_halo_latlon_vector_local,
-        _pad_halo_latlon_3d_local,
-        _pad_halo_latlon_vector_3d_local,
+        pad_halo_latlon_local,
+        pad_halo_latlon_vector_local,
+        pad_halo_latlon_3d_local,
+        pad_halo_latlon_vector_3d_local,
     )
     if field.ndim == 2:
         helper = (
-            _pad_halo_latlon_vector_local if negate
-            else _pad_halo_latlon_local
+            pad_halo_latlon_vector_local if negate
+            else pad_halo_latlon_local
         )
         padded = helper(field, halo=halo)        # (n_lat + 2h, n_lon + 2h)
         # Strip the lon halos to recover (halo, n_lon).
@@ -244,8 +244,8 @@ def _serial_pad_then_strip_lon(
         north = padded[-halo:, halo:halo + field.shape[1]]
     elif field.ndim == 3:
         helper = (
-            _pad_halo_latlon_vector_3d_local if negate
-            else _pad_halo_latlon_3d_local
+            pad_halo_latlon_vector_3d_local if negate
+            else pad_halo_latlon_3d_local
         )
         padded = helper(field, halo=halo)        # (n_lat + 2h, n_lon + 2h, nlev)
         south = padded[:halo, halo:halo + field.shape[1], :]
@@ -293,7 +293,7 @@ def _pole_fold_north(field: jax.Array, halo: int, negate: bool) -> jax.Array:
 # different from the atmospheric 180°-longitude-roll pole-fold above.
 #
 # These helpers replicate the serial ocean convention
-# (``legoesm.ocean.dynamics.latlon_cgrid_operators._fold_row`` /
+# (``legoesm.ocean.dynamics.latlon_cgrid_operators.fold_row`` /
 # ``pad_ns_scalar`` / ``pad_ns_vector_u`` / ``pad_ns_vector_v``) so the
 # MPI northernmost rank produces a north halo that is *bit-identical* to
 # the single-rank serial fold.  The descriptor (perm + signs) travels on
@@ -335,7 +335,7 @@ def _fold_tripolar_north(field: jax.Array, halo: int, perm, sign) -> jax.Array:
     then apply the column permutation + sign flip.
 
     For ``halo == 1`` this is bit-identical to the serial
-    ``latlon_cgrid_operators._fold_row(field[-1:], perm, sign, n_lon)``;
+    ``latlon_cgrid_operators.fold_row(field[-1:], perm, sign, n_lon)``;
     ``halo > 1`` is the natural multi-row generalisation.
 
     Handles the periodic wrap column: u-face / vertex fields carry
@@ -481,7 +481,7 @@ def exchange_halo_latlon(
         ) from exc
 
     comm = MPI.COMM_WORLD
-    sendrecv = _get_sendrecv_vjp(mpi4jax)
+    sendrecv = get_sendrecv_vjp(mpi4jax)
 
     # ---- South halo ----
     if layout.south_rank is not None:
@@ -543,7 +543,7 @@ def exchange_halo_latlon(
 # dispatch) is mirrored exactly.
 
 
-def _pad_halo_latlon_mpi(
+def pad_halo_latlon_mpi(
     data, layout: LatLonBandLayout, halo: int = 1,
     is_vector_v: bool = False, is_vector_u: bool = False,
 ):
@@ -568,7 +568,7 @@ def _pad_halo_latlon_mpi(
     """
     if data.ndim not in (2, 3):
         raise ValueError(
-            f"_pad_halo_latlon_mpi: data.ndim must be 2 or 3, got {data.ndim}"
+            f"pad_halo_latlon_mpi: data.ndim must be 2 or 3, got {data.ndim}"
         )
 
     # Step 1: periodic lon wrap (local on every rank — every rank owns
@@ -594,35 +594,35 @@ def _pad_halo_latlon_mpi(
     # — neither matches the full-pad result serial expects.
     if halo > data.shape[0]:
         raise ValueError(
-            f"_pad_halo_latlon_mpi: halo={halo} exceeds n_lat_local="
+            f"pad_halo_latlon_mpi: halo={halo} exceeds n_lat_local="
             f"{data.shape[0]} on rank {layout.rank}."
         )
 
     # --- South halo ---
     if layout.south_rank is None:
         # Pole-fold the lon-padded first ``halo`` rows.  Uses
-        # ``_fold_pole_rows*`` whose lon-shift is ``data.shape[1] // 2``
+        # ``fold_pole_rows*`` whose lon-shift is ``data.shape[1] // 2``
         # — for lon-padded input that's exactly ``(n_lon + 2*halo) // 2``
         # which is the serial convention.
         if data.ndim == 2:
-            south_halo, _ = _fold_pole_rows(lon_padded, halo, negate=is_vector_v)
+            south_halo, _ = fold_pole_rows(lon_padded, halo, negate=is_vector_v)
         else:
-            south_halo, _ = _fold_pole_rows_3d(
+            south_halo, _ = fold_pole_rows_3d(
                 lon_padded, halo, negate=is_vector_v,
             )
     else:
         # MPI sendrecv with south neighbour — exchanges the
-        # lon-padded boundary rows.  AD-safe via _get_sendrecv_vjp.
+        # lon-padded boundary rows.  AD-safe via get_sendrecv_vjp.
         try:
             import mpi4jax
             from mpi4py import MPI
         except ImportError as exc:
             raise ImportError(
-                "_pad_halo_latlon_mpi: multi-rank lat halo requires "
+                "pad_halo_latlon_mpi: multi-rank lat halo requires "
                 "mpi4jax and mpi4py."
             ) from exc
         comm = MPI.COMM_WORLD
-        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        sendrecv = get_sendrecv_vjp(mpi4jax)
         send_bot = lon_padded[:halo].reshape(-1)
         recv_template = jnp.zeros_like(send_bot)
         recv_south = sendrecv(
@@ -650,9 +650,9 @@ def _pad_halo_latlon_mpi(
                 north_halo = jnp.pad(
                     north_unpadded, ((0, 0), (halo, halo), (0, 0)), mode="wrap")
         elif data.ndim == 2:
-            _, north_halo = _fold_pole_rows(lon_padded, halo, negate=is_vector_v)
+            _, north_halo = fold_pole_rows(lon_padded, halo, negate=is_vector_v)
         else:
-            _, north_halo = _fold_pole_rows_3d(
+            _, north_halo = fold_pole_rows_3d(
                 lon_padded, halo, negate=is_vector_v,
             )
     else:
@@ -661,11 +661,11 @@ def _pad_halo_latlon_mpi(
             from mpi4py import MPI
         except ImportError as exc:
             raise ImportError(
-                "_pad_halo_latlon_mpi: multi-rank lat halo requires "
+                "pad_halo_latlon_mpi: multi-rank lat halo requires "
                 "mpi4jax and mpi4py."
             ) from exc
         comm = MPI.COMM_WORLD
-        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        sendrecv = get_sendrecv_vjp(mpi4jax)
         send_top = lon_padded[-halo:].reshape(-1)
         recv_template = jnp.zeros_like(send_top)
         recv_north = sendrecv(
@@ -722,7 +722,7 @@ def _pad_with_pole_bc_lat_mpi_1d(
                 "mpi4jax and mpi4py."
             ) from exc
         comm = MPI.COMM_WORLD
-        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        sendrecv = get_sendrecv_vjp(mpi4jax)
         send_bot = interior[:halo]
         recv_template = jnp.zeros_like(send_bot)
         south_slab = sendrecv(
@@ -746,7 +746,7 @@ def _pad_with_pole_bc_lat_mpi_1d(
                 "mpi4jax and mpi4py."
             ) from exc
         comm = MPI.COMM_WORLD
-        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        sendrecv = get_sendrecv_vjp(mpi4jax)
         send_top = interior[-halo:]
         recv_template = jnp.zeros_like(send_top)
         north_slab = sendrecv(
@@ -758,7 +758,7 @@ def _pad_with_pole_bc_lat_mpi_1d(
     return jnp.concatenate([south_slab, interior, north_slab], axis=0)
 
 
-def _pad_with_pole_bc_lat_mpi(
+def pad_with_pole_bc_lat_mpi(
     interior, layout: LatLonBandLayout, halo: int = 1,
     south_value: float = 0.0, north_value: float = 0.0,
     is_vector_v: bool = False, is_vector_u: bool = False,
@@ -1152,7 +1152,7 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
     is consistent → same MPI call counts); on non-northernmost ranks,
     ``fold_j`` and ``cap_j`` are set to -1 as a sentinel meaning "fold
     exists but is not locally present."  The serial ``pad_ns_*`` operators
-    check ``fold_j >= 0`` via ``_fold_is_local()`` to decide whether to
+    check ``fold_j >= 0`` via ``fold_is_local()`` to decide whether to
     apply the fold permutation.  ``perm_T`` / ``perm_v`` are
     longitude-only and unaffected by latitude banding.
     """
@@ -1170,7 +1170,7 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
     # across ranks to avoid MPI call-count mismatches — issue #356).  On
     # non-northernmost ranks, fold_j and cap_j are set to -1 as a sentinel
     # meaning "fold exists but is not locally present."  The serial
-    # pad_ns_* operators use _fold_is_local() (checks fold_j >= 0) to
+    # pad_ns_* operators use fold_is_local() (checks fold_j >= 0) to
     # decide whether to apply the fold permutation; on non-northernmost
     # ranks they fall through to pad_ns_zero (MPI halo exchange) instead.
     if layout.north_rank is None:
@@ -1500,8 +1500,8 @@ def build_padded_grid(grid, layout: LatLonBandLayout, halo: int = 1):
     # come out bit-for-bit equal to the original grid (same formulas,
     # same lat values); halo cells are freshly computed from the
     # extrapolated lat.
-    from legoesm.grids.latlon import _build_uniform_latlon_grid_from_axes
-    return _build_uniform_latlon_grid_from_axes(
+    from legoesm.grids.latlon import build_uniform_latlon_grid_from_axes
+    return build_uniform_latlon_grid_from_axes(
         lat=extended_lat,
         lon=grid.lon,
         dlat=dlat,
@@ -1543,8 +1543,8 @@ def make_latlon_mpi_step(
        factory time.  Every subsequent ``pad_halo_latlon*``,
        ``pad_ns_zero``, and ``pad_with_pole_bc_lat`` call inside the
        dycore operators dispatches through the MPI sendrecv path.
-       ``_is_distributed()`` returns True, which gates the
-       allreduce inside ``_batch_global_area_sums`` and
+       ``is_distributed()`` returns True, which gates the
+       allreduce inside ``batch_global_area_sums`` and
        ``zero_mean_tendency`` (the mass-fixer reductions).
 
     2. A rank-local ``mpi_model`` is built once:
@@ -1628,7 +1628,7 @@ def make_latlon_mpi_step(
     # pad_with_pole_bc_lat call inside the dycore now dispatches
     # through inter-rank sendrecv at partition cuts and constant /
     # pole-fold pads at boundary ranks.  This also flips
-    # ``_is_distributed()`` so the mass-fixer reductions allreduce.
+    # ``is_distributed()`` so the mass-fixer reductions allreduce.
     set_halo_backend("mpi", layout)
 
     # Build the MPI-aware model: rank-local grid with allreduced
@@ -1677,7 +1677,7 @@ def make_latlon_mpi_step(
         # ranks for halo cells at partition cuts and apply the
         # serial pole-fold / wall-BC constants at boundary ranks.
         # The mass fixer's allreduce fires through the same
-        # ``_is_distributed()`` gate.
+        # ``is_distributed()`` gate.
         return mpi_model._step_cgrid(
             local_state, dt,
             target_mass=target_mass,

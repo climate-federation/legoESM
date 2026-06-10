@@ -77,7 +77,7 @@ from legoesm.atmosphere.dynamics.compressible_euler_plane import (  # noqa: E402
     laplacian_vlast,
 )
 from legoesm.atmosphere.dynamics.compressible_euler import (  # noqa: E402
-    _sponge_profile,
+    sponge_profile,
 )
 from legoesm.grids.plane import create_plane_grid  # noqa: E402
 from legoesm.grids.vertical import (  # noqa: E402
@@ -246,7 +246,7 @@ def main() -> int:
     # multiplied by u, v, theta', rho', w inside slow_tend. Isolating it
     # tells us how cheap it is relative to the substep loop.
     # ----------------------------------------------------------------------
-    sponge_full = _sponge_profile(
+    sponge_full = sponge_profile(
         hc.z_full, hc.H, cfg.sponge_width, cfg.sponge_coeff,
     )
 

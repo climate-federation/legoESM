@@ -28,7 +28,7 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     FV3EdgeShallowWaterState,
     iter1009_dual_target_config,
 )
-from legoesm.core.fv3_sw_core import _d2a2c_vect
+from legoesm.core.fv3_sw_core import d2a2c_vect
 from legoesm.core.fv_tp_2d import transport_step
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -134,7 +134,7 @@ def test_iter1032_cosine_bell_mass_conserves(cdgrid_setup):
     NSTEPS = int(round(DAYS * 86400 / DT))
 
     state = cosine_bell_cubesphere(grid, cdgrid, BETA)
-    _, _, _, _, ut, vt = _d2a2c_vect(state.u_d, state.v_d, cdgrid)
+    _, _, _, _, ut, vt = d2a2c_vect(state.u_d, state.v_d, cdgrid)
     mass_init = float(jnp.sum(state.h * grid.area))
     h = state.h
     for _ in range(NSTEPS):

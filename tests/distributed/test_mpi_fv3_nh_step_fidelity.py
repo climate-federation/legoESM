@@ -153,7 +153,7 @@ class TestFV3NHStepMPIFidelity:
         """FV3_3D iter-1043: a2b_ord4 zeta corner interp under MPI.
 
         Exercises ``use_fv3_a2b_zeta_corner=True`` which previously
-        wrapped ``_interp_center_to_corner_a2b_ord4`` in ``jax.vmap``
+        wrapped ``interp_center_to_corner_a2b_ord4`` in ``jax.vmap``
         on the NH 4D path — and that vmap put ``pad_halo`` (halo=2)
         inside the vmap, triggering mpi4jax's sendrecv batching
         assertion under MPI.  iter-1043 lifts the vmap (the helper

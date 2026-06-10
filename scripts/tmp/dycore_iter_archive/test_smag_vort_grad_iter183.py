@@ -1,5 +1,5 @@
 """FV3_3D iter 183: differentiability of fv3_sw_core
-``_d_sw5_corner_divergence`` Smagorinsky branch at rest state.
+``d_sw5_corner_divergence`` Smagorinsky branch at rest state.
 
 iter 181 fixed the sqrt-at-zero gradient in
 ``compute_smagorinsky_ah_2d``.  iter 182 fixed the same pattern in
@@ -18,7 +18,7 @@ iter 183 applies the same JAX double-where trick.
 Tests
 -----
 1. ``test_d_sw5_smag_grad_finite_at_rest`` — direct test of
-   ``_d_sw5_corner_divergence`` with ``dddmp > 0`` at rest state:
+   ``d_sw5_corner_divergence`` with ``dddmp > 0`` at rest state:
    ``jax.grad`` of a loss that depends on the helper output gives
    finite gradients.  Was NaN before iter 183.
 2. ``test_d_sw5_smag_dddmp_zero_baseline`` — sanity that
@@ -34,7 +34,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
+from legoesm.core.fv3_sw_core import d_sw5_corner_divergence
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 
@@ -58,12 +58,12 @@ def test_d_sw5_smag_dddmp_zero_baseline(small_cube):
     ua = jnp.asarray(rng.uniform(-1.0, 1.0, size=(6, n, n)))
     va = jnp.asarray(rng.uniform(-1.0, 1.0, size=(6, n, n)))
 
-    out_a = _d_sw5_corner_divergence(
+    out_a = d_sw5_corner_divergence(
         u_d, v_d, ua, va, cdgrid, dt=200.0,
         d2_bg=0.005, dddmp=0.0, d4_bg=0.16, nord=1,
     )
     # Same call again — bit-for-bit reproducible (no FP drift).
-    out_b = _d_sw5_corner_divergence(
+    out_b = d_sw5_corner_divergence(
         u_d, v_d, ua, va, cdgrid, dt=200.0,
         d2_bg=0.005, dddmp=0.0, d4_bg=0.16, nord=1,
     )
@@ -73,7 +73,7 @@ def test_d_sw5_smag_dddmp_zero_baseline(small_cube):
 
 def test_d_sw5_smag_grad_finite_at_rest(small_cube):
     """``jax.grad`` of a loss that depends on
-    ``_d_sw5_corner_divergence`` with ``dddmp > 0`` at rest state
+    ``d_sw5_corner_divergence`` with ``dddmp > 0`` at rest state
     (zero u_d, v_d, ua, va) gives finite gradients.  Was NaN
     before iter 183."""
     _, cdgrid, n = small_cube
@@ -83,7 +83,7 @@ def test_d_sw5_smag_grad_finite_at_rest(small_cube):
         v_d = uv_stacked[1]
         ua = uv_stacked[2]
         va = uv_stacked[3]
-        out = _d_sw5_corner_divergence(
+        out = d_sw5_corner_divergence(
             u_d, v_d, ua, va, cdgrid, dt=200.0,
             d2_bg=0.005, dddmp=0.05, d4_bg=0.16, nord=0,
         )
@@ -100,7 +100,7 @@ def test_d_sw5_smag_grad_finite_at_rest(small_cube):
     # care about the AD-safety of the smag_vort sqrt path which is
     # exercised through any nonzero gradient flow).
     def loss_u(u_d_data):
-        out = _d_sw5_corner_divergence(
+        out = d_sw5_corner_divergence(
             u_d_data, v_d, ua, va, cdgrid, dt=200.0,
             d2_bg=0.005, dddmp=0.05, d4_bg=0.16, nord=0,
         )
@@ -108,14 +108,14 @@ def test_d_sw5_smag_grad_finite_at_rest(small_cube):
 
     grad = jax.grad(loss_u)(u_d)
     assert jnp.all(jnp.isfinite(grad)), (
-        "AD through _d_sw5_corner_divergence Smagorinsky branch "
+        "AD through d_sw5_corner_divergence Smagorinsky branch "
         "(dddmp>0) at rest state must be finite after iter 183 fix "
         "to smag_vort = sqrt(delpc² + wk²) sqrt(0) singularity."
     )
 
     # Same with v_d.
     def loss_v(v_d_data):
-        out = _d_sw5_corner_divergence(
+        out = d_sw5_corner_divergence(
             u_d, v_d_data, ua, va, cdgrid, dt=200.0,
             d2_bg=0.005, dddmp=0.05, d4_bg=0.16, nord=0,
         )

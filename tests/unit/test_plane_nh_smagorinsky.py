@@ -501,7 +501,7 @@ def test_full_level_centred_d_dz_linear_field_returns_constant():
     index derivative, which is ``-∂u/∂z_physical`` under the
     top-to-bottom storage order.)"""
     from legoesm.atmosphere.dynamics.compressible_euler_plane import (
-        _full_level_centred_d_dz,
+        full_level_centred_d_dz,
     )
     _, grid, hc, _, _ = _setup()
     a = 2.5
@@ -511,7 +511,7 @@ def test_full_level_centred_d_dz_linear_field_returns_constant():
         (a * hc.z_full + b)[None, None, :],
         (grid.ny, grid.nx, grid.nlev),
     )
-    deriv = _full_level_centred_d_dz(u, hc)
+    deriv = full_level_centred_d_dz(u, hc)
     # |deriv| == |a| at every cell, every level, including top/bottom.
     np.testing.assert_allclose(
         np.asarray(jnp.abs(deriv)),
@@ -623,12 +623,12 @@ def _stable_theta(grid, hc):
 
 
 def test_sgs_brunt_vaisala_unsaturated_equals_virtual_theta_n2():
-    """In a subsaturated, condensate-free column ``_sgs_brunt_vaisala_sq``
+    """In a subsaturated, condensate-free column ``sgs_brunt_vaisala_sq``
     must return the CLEAR branch ``N² = (g/θ_v)·∂θ_v/∂z`` with
     ``θ_v = virtual_temperature(θ, q_v)`` (SAM unsaturated buoy_sgs)."""
     from legoesm import constants
     from legoesm.atmosphere.dynamics.compressible_euler_plane import (
-        _full_level_centred_d_dz, _sgs_brunt_vaisala_sq,
+        full_level_centred_d_dz, sgs_brunt_vaisala_sq,
     )
     from legoesm.atmosphere.physics._shared import virtual_temperature
 
@@ -639,11 +639,11 @@ def test_sgs_brunt_vaisala_unsaturated_equals_virtual_theta_n2():
     tracers = jnp.stack([q_v, jnp.zeros_like(q_v), jnp.zeros_like(q_v)],
                         axis=-1)
 
-    n2 = _sgs_brunt_vaisala_sq(theta, tracers, hc)
+    n2 = sgs_brunt_vaisala_sq(theta, tracers, hc)
 
     theta_v = virtual_temperature(theta, q_v)
     n2_expected = -(constants.g / jnp.clip(theta_v, 1.0, None)) * (
-        _full_level_centred_d_dz(theta_v, hc)
+        full_level_centred_d_dz(theta_v, hc)
     )
     assert jnp.allclose(n2, n2_expected, atol=1.0e-12), (
         "subsaturated column must take the clear virtual-θ N² branch"
@@ -659,7 +659,7 @@ def test_sgs_brunt_vaisala_saturated_reduces_stability():
     effective static stability, so the ``dosmagor`` shutoff lets the LES
     keep mixing inside cloud."""
     from legoesm.atmosphere.dynamics.compressible_euler_plane import (
-        _sgs_brunt_vaisala_sq,
+        sgs_brunt_vaisala_sq,
     )
     from legoesm.thermo import saturation_mixing_ratio
 
@@ -677,14 +677,14 @@ def test_sgs_brunt_vaisala_saturated_reduces_stability():
          jnp.zeros_like(theta), jnp.zeros_like(theta)],
         axis=-1,
     )
-    n2_dry = _sgs_brunt_vaisala_sq(theta, tr_dry, hc)
+    n2_dry = sgs_brunt_vaisala_sq(theta, tr_dry, hc)
 
     # SATURATED: q_v just below q_sat + cloud water pushes non-precip
     # water well above q_sat → smooth moist blend ≈ fully moist.
     q_v = 0.95 * q_sat
     q_c = 0.50 * q_sat
     tr_sat = jnp.stack([q_v, q_c, jnp.zeros_like(theta)], axis=-1)
-    n2_moist = _sgs_brunt_vaisala_sq(theta, tr_sat, hc)
+    n2_moist = sgs_brunt_vaisala_sq(theta, tr_sat, hc)
 
     # Interior levels (skip one-sided boundary gradients).
     assert float(jnp.max(n2_moist[..., 1:-1])) < float(
@@ -693,12 +693,12 @@ def test_sgs_brunt_vaisala_saturated_reduces_stability():
 
 
 def test_sgs_brunt_vaisala_ad_safe_across_saturation():
-    """``jax.grad`` through ``_sgs_brunt_vaisala_sq`` must stay finite
+    """``jax.grad`` through ``sgs_brunt_vaisala_sq`` must stay finite
     even for a column straddling the clear↔moist transition — the smooth
     sigmoid blend (not a hard ``where``) is what guarantees this (Codex
     iter-2 adversarial-review)."""
     from legoesm.atmosphere.dynamics.compressible_euler_plane import (
-        _sgs_brunt_vaisala_sq,
+        sgs_brunt_vaisala_sq,
     )
     from legoesm.thermo import saturation_mixing_ratio
 
@@ -717,14 +717,14 @@ def test_sgs_brunt_vaisala_ad_safe_across_saturation():
     tracers0 = jnp.stack([q_v0, z, z], axis=-1)
 
     def loss(th):
-        return jnp.sum(_sgs_brunt_vaisala_sq(th, tracers0, hc))
+        return jnp.sum(sgs_brunt_vaisala_sq(th, tracers0, hc))
 
     g_theta = jax.grad(loss)(theta)
     assert bool(jnp.all(jnp.isfinite(g_theta)))
 
     def loss_q(qv):
         tr = jnp.stack([qv, z, z], axis=-1)
-        return jnp.sum(_sgs_brunt_vaisala_sq(theta, tr, hc))
+        return jnp.sum(sgs_brunt_vaisala_sq(theta, tr, hc))
 
     g_qv = jax.grad(loss_q)(q_v0)
     assert bool(jnp.all(jnp.isfinite(g_qv)))

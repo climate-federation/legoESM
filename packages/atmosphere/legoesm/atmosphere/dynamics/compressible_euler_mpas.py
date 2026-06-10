@@ -50,7 +50,7 @@ from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
 from legoesm.atmosphere.dynamics.compressible_euler import (
     compute_exner_perturbation,
-    _sponge_profile,
+    sponge_profile,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.timestepping.integration import IntegrationMixin
@@ -272,14 +272,14 @@ def mpas_compressible_euler_slow_tendencies(
     )
 
     # --- 3. Sponge layer ---
-    sponge = _sponge_profile(
+    sponge = sponge_profile(
         height_coord.z_full, height_coord.H,
         config.sponge_width, config.sponge_coeff,
     )
     du_dt_3d = du_dt_3d - sponge * u_3d
     dtheta_p_dt = dtheta_p_dt - sponge * theta_p
 
-    sponge_half = _sponge_profile(
+    sponge_half = sponge_profile(
         height_coord.z_half, height_coord.H,
         config.sponge_width, config.sponge_coeff,
     )

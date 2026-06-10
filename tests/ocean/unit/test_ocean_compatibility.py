@@ -218,7 +218,7 @@ class TestMPIAwareness:
     """Verify ocean module uses MPI-aware patterns."""
 
     def test_conservation_uses_is_distributed(self):
-        """Conservation fixers should use _is_distributed pattern."""
+        """Conservation fixers should use is_distributed pattern."""
         import inspect
         from legoesm.ocean.conservation import _ocean_area_sum, ocean_global_sum
 
@@ -228,8 +228,8 @@ class TestMPIAwareness:
         )
 
         global_source = inspect.getsource(ocean_global_sum)
-        assert "_is_distributed" in global_source, (
-            "ocean_global_sum must check _is_distributed for MPI"
+        assert "is_distributed" in global_source, (
+            "ocean_global_sum must check is_distributed for MPI"
         )
         assert "global_sum_mpi" in global_source, (
             "ocean_global_sum must call global_sum_mpi for MPI allreduce"
@@ -290,7 +290,7 @@ class TestMPIAwareness:
         )
 
         global_source = inspect.getsource(_spectral_global_sum)
-        assert "_is_distributed" in global_source
+        assert "is_distributed" in global_source
         assert "global_sum_mpi" in global_source
 
         fixer_source = inspect.getsource(_spectral_conservation_fixer)

@@ -189,12 +189,12 @@ def test_iter938_ne_corner_vtmp_overrides():
 def test_iter938_helper_is_pure_function():
     """The helper `_apply_fortran_d2a2c_corner_overrides(utmp_pad,
     vtmp_pad, n)` is a STANDALONE module-level function (not wired
-    into `_d2a2c_vect`).  This test confirms its public contract:
+    into `d2a2c_vect`).  This test confirms its public contract:
     inputs unchanged at non-corner cells, outputs match Fortran at
     the 8 corner positions per axis.
 
     Codex iter-938 stop-time finding: wiring this helper into
-    `_d2a2c_vect` would be output-dead because the downstream
+    `d2a2c_vect` would be output-dead because the downstream
     edge_interpolate4 j-slicing reads only interior j ∈ [2, n+1]
     while the corner overrides write to padded j=1 and j=n+2.
     iter-938b removed the dead wiring; the helper remains as a

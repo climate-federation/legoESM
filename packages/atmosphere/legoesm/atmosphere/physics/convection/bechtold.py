@@ -44,9 +44,9 @@ from legoesm.atmosphere.physics.thermodynamics import (
 from legoesm.atmosphere.physics.convection.config import BechtoldConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.mass_flux import (
-    _apply_mass_flux_kernel,
+    apply_mass_flux_kernel,
     stratosphere_mass_flux_gate,
-    _compute_column_geometry,
+    compute_column_geometry,
 )
 from legoesm.atmosphere.physics.convection._triggers import (
     cape_trigger,
@@ -120,7 +120,7 @@ def bechtold_convection(
     # geometry (~1 % thicker / less dense in tropics) — consistent with
     # the mass-flux closure path (mass_flux.diagnose_mass_flux_closure)
     # and the simplified EDMF entry point.  See clean_physics iter-2 #2.
-    dz, rho, z = _compute_column_geometry(T, p_full, p_half, q_v=q_v)
+    dz, rho, z = compute_column_geometry(T, p_full, p_half, q_v=q_v)
     T_base = T[:, -1]
     q_base = q_v[:, -1]
     p_base = p_full[:, -1]
@@ -372,8 +372,8 @@ def bechtold_convection(
     # #1).  Reusing ``dlt_profile`` keeps the plume and the kernel on one
     # consistent detrainment.  The kernel's subsidence terms are
     # δ-independent, so a per-level δ here only rescales the genuinely
-    # δ-proportional detrainment terms (see ``_apply_mass_flux_kernel``).
-    dT_dt, dq_v_dt, _ = _apply_mass_flux_kernel(
+    # δ-proportional detrainment terms (see ``apply_mass_flux_kernel``).
+    dT_dt, dq_v_dt, _ = apply_mass_flux_kernel(
         T, q_v, p_full,
         plume.T_u, plume.q_u, plume.q_c_u, M_u_new,
         z, rho, dlt_profile, M_u_max=config.M_b_max,

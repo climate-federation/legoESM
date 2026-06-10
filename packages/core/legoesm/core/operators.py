@@ -355,7 +355,7 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
     prod = field.data.astype(acc) * grid.area.astype(acc)
     local_sum = jnp.sum(prod)
 
-    if _is_distributed():
+    if is_distributed():
         # iter-169: deferred import (avoids eager top-level
         # cross-package import per CLAUDE.md "Audit lessons —
         # 2026-05-03 cycle" — and fixes the F821 lint failure
@@ -371,7 +371,7 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
     return local_sum
 
 
-def _is_distributed() -> bool:
+def is_distributed() -> bool:
     """Check if the MPI halo backend is active."""
     return get_halo_backend() == "mpi"
 

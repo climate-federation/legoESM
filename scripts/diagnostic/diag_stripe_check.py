@@ -30,8 +30,8 @@ u_d = 0.5*(u_pad[:,1:-1,:-1]+u_pad[:,1:-1,1:])
 v_d = 0.5*(v_pad[:,:-1,1:-1]+v_pad[:,1:,1:-1])
 
 # Run d2a2c_vect
-from legoesm.core.fv3_sw_core import _d2a2c_vect
-ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+from legoesm.core.fv3_sw_core import d2a2c_vect
+ua, va, uc, vc, ut, vt = d2a2c_vect(u_d, v_d, cdgrid)
 
 # Check ua pattern
 ua_np = np.asarray(ua)

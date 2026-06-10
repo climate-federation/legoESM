@@ -9,7 +9,7 @@ Staged-not-integrated (CRM rollout, PR2a):
   are wired into any factory dispatch.
 * PR2b will add the full ``PlaneCompressibleEulerModel`` class, slow
   tendency, ``plane_acoustic_substeps`` (a thin wrapper around the
-  shared :func:`compressible_euler._acoustic_column_kernel`), and the
+  shared :func:`compressible_euler.acoustic_column_kernel`), and the
   dry-validation harness (rising thermal + Straka).
 
 State convention
@@ -43,9 +43,9 @@ import jax.numpy as jnp
 from legoesm.atmosphere.dynamics import plane_operators as _plane_ops
 from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerConfig,
-    _acoustic_column_kernel,
-    _semi_implicit_acoustic_column_kernel,
-    _sponge_profile,
+    acoustic_column_kernel,
+    semi_implicit_acoustic_column_kernel,
+    sponge_profile,
     precompute_si_tridiag_bands,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
@@ -788,7 +788,7 @@ def _vertical_K_diffusion_w(
     return jnp.pad(tend_interior, (*pad_axes, (1, 1)))         # (..., nlev+1)
 
 
-def _safe_sqrt_strain(strain_mag_sq: jax.Array) -> jax.Array:
+def safe_sqrt_strain(strain_mag_sq: jax.Array) -> jax.Array:
     """``sqrt(strain_mag_sq)`` with AD-safe ``d/dx sqrt(0) = 0``.
 
     Forward: zero where input is zero, ``sqrt(input)`` elsewhere
@@ -802,7 +802,7 @@ def _safe_sqrt_strain(strain_mag_sq: jax.Array) -> jax.Array:
     return jnp.where(strain_mag_sq > 0.0, jnp.sqrt(safe), 0.0)
 
 
-def _sgs_brunt_vaisala_sq(
+def sgs_brunt_vaisala_sq(
     theta_total: jax.Array,
     tracers: jax.Array,
     height_coord: HeightCoordinate,
@@ -885,7 +885,7 @@ def _sgs_brunt_vaisala_sq(
         absent ice/precip slots are treated as zero.
     height_coord : HeightCoordinate
         Reference Exner (``exner_ref``) for T/p and ``dz_half`` for the
-        vertical gradients (via :func:`_full_level_centred_d_dz`).
+        vertical gradients (via :func:`full_level_centred_d_dz`).
     phase_blend_width_K : float
         Width [K] of the temperature ramp that splits liquid/ice for the
         mixed-phase ``q_s`` and ``L`` (``w_liq = 1`` above
@@ -907,13 +907,13 @@ def _sgs_brunt_vaisala_sq(
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.thermo import saturation_mixing_ratio_blend
 
-    # ``_full_level_centred_d_dz`` returns the LEVEL-INDEX derivative =
+    # ``full_level_centred_d_dz`` returns the LEVEL-INDEX derivative =
     # −∂/∂z_physical under top-down storage, so every N² carries a leading
     # minus to recover the physical-z stratification (matches the dry term
     # the SMAG-1 commit introduced and the kernel docstring).
     n_tr = tracers.shape[-1]
     if n_tr == 0:
-        dtheta_dlev = _full_level_centred_d_dz(theta_total, height_coord)
+        dtheta_dlev = full_level_centred_d_dz(theta_total, height_coord)
         return -(constants.g / jnp.clip(theta_total, 1.0, None)) * dtheta_dlev
 
     q_v = tracers[..., 0]
@@ -937,7 +937,7 @@ def _sgs_brunt_vaisala_sq(
     # Clear-air virtual-θ N² (SAM unsaturated branch).
     theta_v = virtual_temperature(theta_total, q_v) - theta_total * q_cond
     n2_dry = -(constants.g / jnp.clip(theta_v, 1.0, None)) * (
-        _full_level_centred_d_dz(theta_v, height_coord)
+        full_level_centred_d_dz(theta_v, height_coord)
     )
 
     # Saturated moist-adiabatic N² (Durran–Klemp 1982).  TEMPERATURE-based
@@ -962,11 +962,11 @@ def _sgs_brunt_vaisala_sq(
     ln_theta = jnp.log(jnp.clip(theta_total, 1.0, None))
     n2_moist = -constants.g * (
         A_moist * (
-            _full_level_centred_d_dz(ln_theta, height_coord)
+            full_level_centred_d_dz(ln_theta, height_coord)
             + (L_eff / (constants.c_pd * T))
-            * _full_level_centred_d_dz(q_sat, height_coord)
+            * full_level_centred_d_dz(q_sat, height_coord)
         )
-        - _full_level_centred_d_dz(q_w, height_coord)
+        - full_level_centred_d_dz(q_w, height_coord)
     )
 
     # Smooth clear↔moist blend (differentiable surrogate for SAM's hard
@@ -1011,7 +1011,7 @@ def _compute_smagorinsky_K_m_plane(
     column is statically unstable.  ``def2`` in SAM is ``2 S_ij S_ij``
     — the SAME convention as ``strain_mag_sq`` here.  Pass the precomputed
     sub-grid ``N²`` (clear-vs-moist switched) from
-    :func:`_sgs_brunt_vaisala_sq` as ``n2_sgs`` to activate the term;
+    :func:`sgs_brunt_vaisala_sq` as ``n2_sgs`` to activate the term;
     ``n2_sgs=None`` reduces the closure to the pure-strain form (used by
     the dry-strain unit tests).  Keeping ``N²`` in a single shared helper
     (rather than inline here AND in the halo kernel) prevents serial/MPI
@@ -1058,7 +1058,7 @@ def _compute_smagorinsky_K_m_plane(
     n2_sgs : jax.Array | None
         Precomputed sub-grid Brunt–Väisälä frequency ``N²`` at cell
         centres, shape ``(ny, nx, nlev)`` (from
-        :func:`_sgs_brunt_vaisala_sq`, which switches between clear and
+        :func:`sgs_brunt_vaisala_sq`, which switches between clear and
         saturated stratification).  When provided, the SAM correction
         ``− Pr · N²`` is subtracted inside the strain sqrt.  ``None``
         (default) recovers the pure-strain Smagorinsky form.
@@ -1106,8 +1106,8 @@ def _compute_smagorinsky_K_m_plane(
     # difference of u between full levels k+1, k-1 (centred). Edges
     # use one-sided one-level differences.
     # Build du/dz_full at x-face (same staggering as u).
-    du_dz = _full_level_centred_d_dz(u_yxz, height_coord)
-    dv_dz = _full_level_centred_d_dz(v_yxz, height_coord)
+    du_dz = full_level_centred_d_dz(u_yxz, height_coord)
+    dv_dz = full_level_centred_d_dz(v_yxz, height_coord)
 
     # ∂w/∂x at x-face (cell-centre w_full needed first), ∂w/∂y at y-face.
     # Build w at full level (vertical midpoint of half-level pair) then
@@ -1177,17 +1177,17 @@ def _compute_smagorinsky_K_m_plane(
     l_m_sq = l_m ** 2                                      # (nlev,)
 
     # --- SAM dosmagor stratification (Lilly) correction ---
-    # K_m = (Cs·Δ)² · sqrt(max(0, |S|² − Pr·N²)).  ``_safe_sqrt_strain``
+    # K_m = (Cs·Δ)² · sqrt(max(0, |S|² − Pr·N²)).  ``safe_sqrt_strain``
     # applies the ``max(0, ·)`` shutoff AND keeps ``d/dx sqrt(0) = 0``,
     # so a strongly-stable column (N² ≫ |S|²) yields K_m = 0 exactly,
     # matching SAM ``tke_full.f90:298``.  N² is precomputed by the shared
-    # ``_sgs_brunt_vaisala_sq`` helper (clear↔moist switched) so the serial
+    # ``sgs_brunt_vaisala_sq`` helper (clear↔moist switched) so the serial
     # and halo kernels stay bit-identical.
     if n2_sgs is not None:
         strain_arg = strain_mag_sq - prandtl * n2_sgs
     else:
         strain_arg = strain_mag_sq
-    strain_mag = _safe_sqrt_strain(strain_arg)
+    strain_mag = safe_sqrt_strain(strain_arg)
     if stability_length and n2_sgs is not None:
         # SAM dosmagor stable-layer Deardorff mixing-length limit
         # (SGS_TKE/tke_full.f90:285-298): in STABLE layers (N²>0) shrink the
@@ -1268,9 +1268,9 @@ def _velocity_gradients_plane(u_yxz, v_yxz, w_yxz_half, grid, height_coord):
     dudy = (jnp.roll(uc, -1, axis=0) - jnp.roll(uc, 1, axis=0)) / (2.0 * grid.dy)
     dvdy = (jnp.roll(vc, -1, axis=0) - jnp.roll(vc, 1, axis=0)) / (2.0 * grid.dy)
     dwdy = (jnp.roll(wc, -1, axis=0) - jnp.roll(wc, 1, axis=0)) / (2.0 * grid.dy)
-    dudz = _full_level_centred_d_dz(uc, height_coord)
-    dvdz = _full_level_centred_d_dz(vc, height_coord)
-    dwdz = _full_level_centred_d_dz(wc, height_coord)
+    dudz = full_level_centred_d_dz(uc, height_coord)
+    dvdz = full_level_centred_d_dz(vc, height_coord)
+    dwdz = full_level_centred_d_dz(wc, height_coord)
     return uc, vc, wc, dudx, dudy, dudz, dvdx, dvdy, dvdz, dwdx, dwdy, dwdz
 
 
@@ -1424,7 +1424,7 @@ def _compute_scale_dependent_dynamic_smag_cs_plane(
     return jnp.sqrt(jnp.maximum(cs2, 1.0e-24))                    # C_s (ny,nx,nz)
 
 
-def _full_level_centred_d_dz(
+def full_level_centred_d_dz(
     field_yxz: jax.Array, height_coord: HeightCoordinate
 ) -> jax.Array:
     """Vertical derivative ``∂f/∂(level index)`` at full level.
@@ -1585,7 +1585,7 @@ def _vertical_advection_van_leer_plane(
 # --------------------------------------------------------------------- #
 
 
-def _moisture_buoyancy_w_half(
+def moisture_buoyancy_w_half(
     tracers: jax.Array,
     theta_prime: jax.Array,
     height_coord: HeightCoordinate,
@@ -1702,7 +1702,7 @@ def _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout=None):
     """Frozen SAM moist buoyancy on the w half-levels for the ACOUSTIC loop.
 
     Returns ``B_moist`` (vapour-virtual + condensate loading, :func:`
-    _moisture_buoyancy_w_half`) evaluated ONCE from the stage-initial state, to be
+    moisture_buoyancy_w_half`) evaluated ONCE from the stage-initial state, to be
     added to w EACH acoustic substep — so the condensate-loading drag acts at the
     SAME frequency as the dry θ' buoyancy in the substep loop. Applying it only once
     per RK stage (the old ``slow``-tendency path) let latent-heated updrafts feel
@@ -1734,7 +1734,7 @@ def _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout=None):
     else:
         def _hmean(f):
             return jnp.mean(f, axis=(0, 1), keepdims=True)
-    return _moisture_buoyancy_w_half(
+    return moisture_buoyancy_w_half(
         state.tracers.data, state.theta_prime.data, height_coord, _hmean)
 
 
@@ -1961,7 +1961,7 @@ def plane_compressible_euler_slow_tendencies(
     # with the dry θ' buoyancy), which fixes the convective-updraft runaway.
     if config.moist_buoyancy and not getattr(
             config, "acoustic_moist_buoyancy", True):
-        dw_dt = dw_dt + _moisture_buoyancy_w_half(
+        dw_dt = dw_dt + moisture_buoyancy_w_half(
             state.tracers.data, theta_p, height_coord,
             lambda f: jnp.mean(f, axis=(0, 1), keepdims=True),
         )
@@ -1974,11 +1974,11 @@ def plane_compressible_euler_slow_tendencies(
     #    the MPAS NH dycore pattern in
     #    :func:`compressible_euler_mpas.mpas_compressible_euler_slow_tendencies`.
     _sponge_shape = getattr(config, "sponge_profile_shape", "sin2")
-    sponge_full = _sponge_profile(
+    sponge_full = sponge_profile(
         height_coord.z_full, height_coord.H,
         config.sponge_width, config.sponge_coeff, shape=_sponge_shape,
     )                                         # (nlev,)
-    sponge_half = _sponge_profile(
+    sponge_half = sponge_profile(
         height_coord.z_half, height_coord.H,
         config.sponge_width, config.sponge_coeff, shape=_sponge_shape,
     )                                         # (nlev+1,)
@@ -2101,7 +2101,7 @@ def plane_compressible_euler_slow_tendencies(
             # the SAM dosmagor stratification cutoff (tke_full.f90:154-226).
             # K_m at cell centres; shared with the halo kernel so serial/MPI
             # stay bit-identical.
-            n2_sgs = _sgs_brunt_vaisala_sq(
+            n2_sgs = sgs_brunt_vaisala_sq(
                 theta_total, state.tracers.data, height_coord,
             )
             # DYNAMIC Smagorinsky (Germano/Lilly): replace the fixed
@@ -2269,7 +2269,7 @@ def plane_acoustic_substeps(
     """Run ``n_substeps`` forward-backward acoustic substeps on the plane.
 
     Thin wrapper around
-    :func:`compressible_euler._acoustic_column_kernel` — no duplicated
+    :func:`compressible_euler.acoustic_column_kernel` — no duplicated
     vertical algebra. The kernel is driven by ``jax.lax.fori_loop`` and
     operates on the ``(ny, nx, nlev)`` plane layout via the natural
     last-axis broadcast (the kernel slices ``[..., k]`` for the
@@ -2318,7 +2318,7 @@ def plane_acoustic_substeps(
     b_moist = _acoustic_moist_buoyancy_w(state, height_coord, euler_config, layout)
     w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
     for _ in range(int(n_substeps)):
-        w_final, theta_p_final, rho_p_final = _acoustic_column_kernel(
+        w_final, theta_p_final, rho_p_final = acoustic_column_kernel(
             w_final, theta_p_final, rho_p_final,
             height_coord, J, dt_s, beta, g,
             theta_vert_van_leer=(
@@ -2358,7 +2358,7 @@ def plane_acoustic_substeps_semi_implicit(
     ``dt`` ~ 30-60 s at dx=2 km (advective CFL bound only).
 
     Thin wrapper around
-    :func:`compressible_euler._semi_implicit_acoustic_column_kernel`
+    :func:`compressible_euler.semi_implicit_acoustic_column_kernel`
     — column-local algebra, no duplicated vertical math. Signature
     parity with :func:`plane_acoustic_substeps`.
     """
@@ -2391,7 +2391,7 @@ def plane_acoustic_substeps_semi_implicit(
     w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
     for _ in range(int(n_substeps)):
         w_final, theta_p_final, rho_p_final = (
-            _semi_implicit_acoustic_column_kernel(
+            semi_implicit_acoustic_column_kernel(
                 w_final, theta_p_final, rho_p_final,
                 height_coord, J, dt_s, beta, g,
                 implicit_buoyancy=implicit_buoyancy,
@@ -2504,7 +2504,7 @@ def plane_acoustic_substeps_si_horizontal(
         #    below, so both legs receive consistent acoustic damping
         #    (cavecrew review: asymmetric off-centering between the
         #    vertical and horizontal continuity breaks the f-b stencil).
-        w_new, theta_p_new, rho_p_vert = _semi_implicit_acoustic_column_kernel(
+        w_new, theta_p_new, rho_p_vert = semi_implicit_acoustic_column_kernel(
             w_c, theta_p_c, rho_p_c,
             height_coord, J, dt_s, 0.0, g,
             implicit_buoyancy=implicit_buoyancy,
@@ -2581,11 +2581,11 @@ def validate_plane_config(config: CompressibleEulerConfig) -> None:
     """
     # semi_implicit_acoustic now supported via
     # plane_acoustic_substeps_semi_implicit (per-column Thomas solve
-    # using the shared _semi_implicit_acoustic_column_kernel).
+    # using the shared semi_implicit_acoustic_column_kernel).
     # ``sponge_coeff > 0`` is now supported (PR2d) — the Rayleigh
     # sponge is applied inside ``plane_compressible_euler_slow_tendencies``
     # to ``u``, ``v``, ``theta'`` at full levels and ``w`` at half
-    # levels via the shared ``_sponge_profile`` taper.
+    # levels via the shared ``sponge_profile`` taper.
     # ``hyperdiff_coeff`` and friends are now supported (PR3a) — the
     # biharmonic ``-coeff * Lap(Lap(field))`` term is added to the
     # slow tendency in

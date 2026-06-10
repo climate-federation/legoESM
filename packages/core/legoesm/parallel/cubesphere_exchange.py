@@ -187,7 +187,7 @@ def _fill_halo_and_corners(padded, strips, n_spatial):
 def _fill_halo_and_corners_h2_local(padded, strips, n):
     """Place 4 width-2 edge strips into the halo region and fill 2x2 corners.
 
-    Single-face SPMD analogue of :func:`legoesm.grids.halo._fill_corners_h2`.
+    Single-face SPMD analogue of :func:`legoesm.grids.halo.fill_corners_h2`.
 
     Parameters
     ----------
@@ -219,7 +219,7 @@ def _fill_halo_and_corners_h2_local(padded, strips, n):
     padded = padded.at[2:-2, n + 2].set(strips[NORTH][0])
     padded = padded.at[2:-2, n + 3].set(strips[NORTH][1])
     # Corners: 4 corners × 4 cells per corner.  Inner corner first, then
-    # propagate outward; matches ``halo._fill_corners_h2`` semantics.
+    # propagate outward; matches ``halo.fill_corners_h2`` semantics.
     # SW corner (rows 0..1, cols 0..1)
     padded = padded.at[1, 1].set(0.5 * (padded[1, 2] + padded[2, 1]))
     padded = padded.at[0, 1].set(0.5 * (padded[0, 2] + padded[1, 1]))
@@ -253,8 +253,8 @@ def _make_exchange_allgather(mesh, ndim, with_offsets=False):
     When ``with_offsets`` is True the kernel takes a second
     ``interp_offsets`` argument shaped ``(6, 4, n)`` (replicated) and
     applies the per-edge 3-point Lagrange correction (via
-    :func:`legoesm.grids.halo._interp_strip`) to each gathered strip.
-    This restores numerical equivalence with the local ``_pad_halo_local``
+    :func:`legoesm.grids.halo.interp_strip`) to each gathered strip.
+    This restores numerical equivalence with the local ``pad_halo_local``
     fill, which is the reference path on single device.  Without
     offsets the kernel skips the interp — same behaviour as before
     (and a small numerical drift vs single-device, accepted as the
@@ -334,7 +334,7 @@ def _make_exchange_allgather(mesh, ndim, with_offsets=False):
 
         my_idx = jax.lax.axis_index("face")
         if with_offsets:
-            from legoesm.grids.halo import _interp_strip
+            from legoesm.grids.halo import interp_strip
 
         padded_faces = []
         for i in range(n_faces_per_shard):
@@ -352,7 +352,7 @@ def _make_exchange_allgather(mesh, ndim, with_offsets=False):
                 strip = all_strips[nbr_f[e], nbr_e[e]]
                 strip = jnp.where(rev[e], strip[::-1], strip)
                 if with_offsets:
-                    strip = _interp_strip(strip, offsets[global_face, e])
+                    strip = interp_strip(strip, offsets[global_face, e])
                 halo_strips.append(strip)
             padded = _fill_halo_and_corners(padded, halo_strips, n)
             padded_faces.append(padded)
@@ -378,7 +378,7 @@ def _make_exchange_allgather_h2(mesh, ndim, with_offsets=False):
 
     When ``with_offsets`` is True the kernel takes a replicated
     ``interp_offsets`` argument shaped ``(6, 4, 2, n)`` and applies
-    :func:`legoesm.grids.halo._interp_strip` per (edge, depth) to each
+    :func:`legoesm.grids.halo.interp_strip` per (edge, depth) to each
     gathered strip — restoring bit-exact equivalence with
     ``_pad_halo_local_h2(data, interp_offsets)``.
     """
@@ -447,7 +447,7 @@ def _make_exchange_allgather_h2(mesh, ndim, with_offsets=False):
 
         my_idx = jax.lax.axis_index("face")
         if with_offsets:
-            from legoesm.grids.halo import _interp_strip
+            from legoesm.grids.halo import interp_strip
 
         padded_faces = []
         for i in range(n_faces_per_shard):
@@ -472,10 +472,10 @@ def _make_exchange_allgather_h2(mesh, ndim, with_offsets=False):
                 if with_offsets:
                     # Apply 3-point Lagrange correction per depth.  The
                     # spatial axis (n) is axis 1 of ``strip``;
-                    # ``_interp_strip`` interpolates along axis 0 of its
+                    # ``interp_strip`` interpolates along axis 0 of its
                     # input, so we slice each depth as a (n[, C]) tensor.
-                    strip_d0 = _interp_strip(strip[0], offsets[global_face, e, 0])
-                    strip_d1 = _interp_strip(strip[1], offsets[global_face, e, 1])
+                    strip_d0 = interp_strip(strip[0], offsets[global_face, e, 0])
+                    strip_d1 = interp_strip(strip[1], offsets[global_face, e, 1])
                     strip = jnp.stack([strip_d0, strip_d1], axis=0)
                 halo_strips.append(strip)
 
@@ -497,7 +497,7 @@ def _make_exchange_ppermute(mesh, ndim, with_offsets=False):
     When ``with_offsets`` is True the kernel applies the per-edge
     3-point Lagrange correction to each gathered strip — same numerics
     as the all_gather ``with_offsets`` variant, restoring bit-exact
-    equivalence with ``_pad_halo_local(data, interp_offsets)``.  The
+    equivalence with ``pad_halo_local(data, interp_offsets)``.  The
     offsets are indexed by the *receiving* face / edge (``my_idx``,
     ``e``), matching the local-pad convention.
     """
@@ -554,7 +554,7 @@ def _make_exchange_ppermute(mesh, ndim, with_offsets=False):
             padded = jnp.pad(my_face, ((1, 1), (1, 1), (0, 0)))
         halo_strips = [None, None, None, None]
         if with_offsets:
-            from legoesm.grids.halo import _interp_strip
+            from legoesm.grids.halo import interp_strip
 
         for r in range(4):
             send_edge = ppermute_send_j[r, my_idx]   # traced int
@@ -569,13 +569,13 @@ def _make_exchange_ppermute(mesh, ndim, with_offsets=False):
                 # offsets[my_idx, recv_edge] selects the right per-edge
                 # offset for whichever halo slot this round fills.  The
                 # offset table is indexed by *receiving* face/edge —
-                # same convention the local-pad ``_pad_halo_local``
+                # same convention the local-pad ``pad_halo_local``
                 # uses (halo.py:1078, ``interp_offsets[face, edge_idx]``).
                 # ``recv_edge`` is traced, so we ``lax.dynamic_slice``
                 # by indexing into the (4, n)-shaped face slice.
                 offs_for_face = offsets[my_idx]  # (4, n)
                 offs_for_edge = offs_for_face[recv_edge]  # (n,)
-                received = _interp_strip(received, offs_for_edge)
+                received = interp_strip(received, offs_for_edge)
             # Place in the correct halo slot.  recv_edge is traced,
             # so we use conditional sets.
             for e in range(4):
@@ -720,7 +720,7 @@ def explicit_pad_halo(data, mesh, halo=1, interp_offsets=None):
 
     When ``interp_offsets`` is provided the SPMD kernel applies the
     per-edge 3-point Lagrange correction so the SPMD result matches
-    ``_pad_halo_local(data, interp_offsets)`` bit-for-bit.
+    ``pad_halo_local(data, interp_offsets)`` bit-for-bit.
     """
     if halo == 2:
         if interp_offsets is None:
@@ -729,8 +729,8 @@ def explicit_pad_halo(data, mesh, halo=1, interp_offsets=None):
             mesh, 3, False, halo=2, with_offsets=True,
         )(data, interp_offsets)
     if halo != 1:
-        from legoesm.grids.halo import _pad_halo_local
-        return _pad_halo_local(data, interp_offsets)
+        from legoesm.grids.halo import pad_halo_local
+        return pad_halo_local(data, interp_offsets)
     if interp_offsets is None:
         return _get_exchange(mesh, 3, _use_ppermute, halo=1)(data)
     return _get_exchange(
@@ -746,7 +746,7 @@ def explicit_pad_halo_4d(data, mesh, halo=1, interp_offsets=None):
     """
     # FV3_3D iter-1073 (codex iter-1072 BLOCKER): mirror the iter-1072
     # non-square guard from ``pad_halo_4d`` so SPMD callers don't
-    # bypass the silent-corruption check.  ``_pad_halo_local_4d``
+    # bypass the silent-corruption check.  ``pad_halo_local_4d``
     # fallback path (``halo != 1, halo != 2``) and the SPMD exchanges
     # all assume square ``(n, n)``.
     if data.shape[1] != data.shape[2]:
@@ -762,8 +762,8 @@ def explicit_pad_halo_4d(data, mesh, halo=1, interp_offsets=None):
             mesh, 4, False, halo=2, with_offsets=True,
         )(data, interp_offsets)
     if halo != 1:
-        from legoesm.grids.halo import _pad_halo_local_4d
-        return _pad_halo_local_4d(data, interp_offsets)
+        from legoesm.grids.halo import pad_halo_local_4d
+        return pad_halo_local_4d(data, interp_offsets)
     if interp_offsets is None:
         return _get_exchange(mesh, 4, _use_ppermute, halo=1)(data)
     return _get_exchange(
@@ -1019,3 +1019,14 @@ def deactivate_spmd_halo_backend() -> None:
     from legoesm.grids import halo
     halo._halo_backend = "local"
     halo._spmd_mesh = None
+
+
+def get_spmd_mesh():
+    """Return the active SPMD halo mesh (or ``None``).
+
+    Set by :func:`activate_spmd_halo_backend`; cleared by
+    :func:`deactivate_spmd_halo_backend`.  Dycore step functions call
+    this when ``grids.halo.get_halo_backend() == "spmd"`` to obtain the
+    :class:`jax.sharding.Mesh` for the packed halo exchanges.
+    """
+    return _spmd_mesh

@@ -34,7 +34,7 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
     spectral_pe_to_grid,
 )
 from legoesm.grids.gaussian import GaussianGrid, sh_analysis_3d
-from legoesm.atmosphere.physics.neural_physics import NeuralPhysics, _pack_column_features
+from legoesm.atmosphere.physics.neural_physics import NeuralPhysics, pack_column_features
 from legoesm.atmosphere.physics._shared import zero_like_tracers
 
 
@@ -142,7 +142,7 @@ def make_column_physics_fn(
         solar_col = jnp.full_like(p_s_col, constants.S_0)
 
         # Pack features + vmap forward (normalization built into _pack)
-        features = jax.vmap(_pack_column_features)(
+        features = jax.vmap(pack_column_features)(
             T_col, u_col, v_col, q_col, p_s_col, solar_col,
         )
         y = jax.vmap(neural_physics)(features)  # (ncol, n_output)

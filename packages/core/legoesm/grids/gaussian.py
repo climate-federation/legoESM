@@ -692,12 +692,12 @@ def uv_from_vordiv(
     # d/d(theta) and d/d(lon) components — batch (psi, chi) along a
     # trailing axis so the SH synthesis runs once on (n_sh, 2) for
     # each of the two synthesis variants.  Uses the 3D-native
-    # synthesis (``sh_synthesis_3d`` / ``_sh_synthesis_H_3d``), which
+    # synthesis (``sh_synthesis_3d`` / ``sh_synthesis_H_3d``), which
     # treats any trailing axis (level *or* tracer/component) as a
     # passive batch — for the SW 2D path the ``2`` plays the role of
     # ``nlev=2``.  4 SH syntheses → 2.
     pc_hat = jnp.stack([psi_hat, chi_hat], axis=-1)  # (n_sh, 2)
-    pc_dtheta = _sh_synthesis_H_3d(grid, pc_hat) / a
+    pc_dtheta = sh_synthesis_H_3d(grid, pc_hat) / a
     dpsi_dtheta = pc_dtheta[..., 0]
     dchi_dtheta = pc_dtheta[..., 1]
 
@@ -714,7 +714,7 @@ def uv_from_vordiv(
     return u_cos, v_cos
 
 
-def _sh_synthesis_H(grid: GaussianGrid, coeffs: jax.Array) -> jax.Array:
+def sh_synthesis_H(grid: GaussianGrid, coeffs: jax.Array) -> jax.Array:
     """Inverse SH transform using derivative Legendre Hnm (instead of Pnm).
 
     Produces the theta-derivative of the field on the grid.
@@ -875,8 +875,8 @@ def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
     return _maybe_chunk_trailing(_kernel, coeffs_3d, _sh_chunk_size(), axis=-1)
 
 
-def _sh_synthesis_H_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
-    """3D-native counterpart of :func:`_sh_synthesis_H`.
+def sh_synthesis_H_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
+    """3D-native counterpart of :func:`sh_synthesis_H`.
 
     Returns the θ-derivative of the inverse SH transform at every
     vertical level in a single batched ``segment_sum`` + IRFFT, instead
@@ -1001,7 +1001,7 @@ def uv_from_vordiv_3d(
     Same algorithm as :func:`uv_from_vordiv` but each synthesis is
     batched across both the (psi, chi) potentials *and* all vertical
     levels, using the trailing-axis-passive-batch property of
-    ``sh_synthesis_3d`` / ``_sh_synthesis_H_3d``.  4 per-call SH
+    ``sh_synthesis_3d`` / ``sh_synthesis_H_3d``.  4 per-call SH
     syntheses collapse to 2 (one ``segment_sum`` + IRFFT for both
     ``d/dtheta`` and ``d/dlon`` — psi/chi share the kernel).
 
@@ -1027,7 +1027,7 @@ def uv_from_vordiv_3d(
     pc_stack = jnp.stack([psi_hat, chi_hat], axis=-1)  # (n_sh, nlev, 2)
     pc_flat = pc_stack.reshape(n_sh_pc, nlev_pc * 2)
 
-    pc_dtheta_flat = _sh_synthesis_H_3d(grid, pc_flat) / a
+    pc_dtheta_flat = sh_synthesis_H_3d(grid, pc_flat) / a
     pc_dtheta = pc_dtheta_flat.reshape(
         pc_dtheta_flat.shape[0], pc_dtheta_flat.shape[1], nlev_pc, 2,
     )

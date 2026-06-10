@@ -231,10 +231,9 @@ def main():
     print("\n" + "-" * 50)
     print("  Test Case 2: Steady Geostrophic Flow")
     print("-" * 50)
-    config2 = SpectralSWConfig(
-        hyperdiff_coeff=nu,
-        mean_depth=2.94e4 / constants.g,
-    )
+    # Background depth is carried by the TC2 initial phi_hat (gh0 = 2.94e4),
+    # not by any config knob.
+    config2 = SpectralSWConfig(hyperdiff_coeff=nu)
     state2 = williamson_test2_spectral(grid)
     model2 = SpectralShallowWaterModel(grid, config2)
 

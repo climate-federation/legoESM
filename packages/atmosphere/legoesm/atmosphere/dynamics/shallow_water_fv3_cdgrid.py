@@ -38,7 +38,7 @@ from legoesm.core.operators_cdgrid import (
     dgrid_to_cgrid,
     cgrid_mass_flux_divergence,
     cdgrid_momentum_tendencies,
-    _extrapolate_boundary_corners,
+    extrapolate_boundary_corners,
     fv3_sw_tendencies,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
@@ -57,8 +57,8 @@ from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.core.conservation import conservation_accumulator
 from legoesm.core.fv3_sw_core import (
-    _d2a2c_vect,
-    _d_sw5_corner_divergence,
+    d2a2c_vect,
+    d_sw5_corner_divergence,
     fv3_csw_tendencies,
 )
 from legoesm.core.fv_tp_2d import transport_step
@@ -147,7 +147,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     # Iter-766: Fortran `a2b_ord4` 3-pt cube-corner average in A-L
     # gradient cube-corner halo (a2b_edge.F90:385-388).  Direction-
     # neutral; replaces the 2-pt edge-halo-only average at the 4
-    # cube-vertex halo cells per face in `_arakawa_lamb_gradient`.
+    # cube-vertex halo cells per face in `arakawa_lamb_gradient`.
     # Default OFF; FALSIFIED as a mode-A fix in iter-766 measurement
     # (1.89× W2 v_ll_Linf blowup at C36 dt=300).  Retained as an
     # opt-in diagnostic path for future cube-corner ablation studies.
@@ -270,7 +270,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     # in `fv3_sw_tendencies` from the iter-892 CDGrid PPM
     # (fv3_d2cc -> fv3_cc2c -> cgrid_mass_flux_divergence) to the
     # true-FV3 d_sw1 finite-volume transport
-    # (_d2a2c_vect -> compute_transport_quantities -> transport_step
+    # (d2a2c_vect -> compute_transport_quantities -> transport_step
     # in `fv3_sw_core.py` / `fv_tp_2d.py`), then derives
     # dh_dt = (h_new - h) / dt for the SSP-RK3 caller.  Momentum
     # tendencies (du_d_dt, dv_d_dt) are UNCHANGED in iter-904 — only
@@ -295,7 +295,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     # Iter-905 (default OFF): when True, the production
     # `FV3EdgeShallowWaterModel.step` splits the time integration:
     #   - Mass (h): updated ONCE per full dt via the true-FV3 d_sw1
-    #     finite-volume transport (`_d2a2c_vect` -> `transport_step`),
+    #     finite-volume transport (`d2a2c_vect` -> `transport_step`),
     #     held fixed across the RK3 stages for momentum.
     #   - Momentum (u_d, v_d): SSP-RK3 stages on momentum tendencies
     #     ONLY, with `h` fixed at the IC h (mass tendency forced to
@@ -359,7 +359,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     # `cdgrid_momentum_tendencies`, which has a Fortran-strict 0.0
     # default kwarg added in iter-872c.
     #
-    # The FB chain passes `dddmp` to `_d_sw5_corner_divergence`
+    # The FB chain passes `dddmp` to `d_sw5_corner_divergence`
     # directly via the separate `dddmp` field above.
     dddmp_prod: float = 0.2
 
@@ -370,7 +370,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     # When True (iter-927 REPLACEMENT semantics):
     # 1. Production cell-centre `adaptive_coeff*grad(div)` damping is
     #    SKIPPED (`div_damp` forced to 0 inside `fv3_sw_tendencies`).
-    # 2. After the RK3 main step, `_d_sw5_corner_divergence(u_d, v_d,
+    # 2. After the RK3 main step, `d_sw5_corner_divergence(u_d, v_d,
     #    ua, va, cdgrid, dt, d2_bg=config.d2_bg, dddmp=config.dddmp,
     #    d4_bg=config.d4_bg, nord=config.nord)` is computed and
     #    applied as a per-step KE-gradient wind correction:
@@ -685,7 +685,7 @@ def cdgrid_shallow_water_tendencies(
     # at all face-boundary corners (12-60x larger than interior).
     # Replace with nearest-interior values that have O(dx^2) accuracy.
     n = cdgrid.n
-    du_d_dt, dv_d_dt = _extrapolate_boundary_corners(du_d_dt, dv_d_dt, n)
+    du_d_dt, dv_d_dt = extrapolate_boundary_corners(du_d_dt, dv_d_dt, n)
 
     return dh_dt, du_d_dt, dv_d_dt
 
@@ -748,7 +748,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
         # iter-5: fp64 budget accumulator — fp32 reductions on ~6·N²
         # cubed-sphere arrays leak ~N·eps noise into the anchor and
         # produced ~10^-7 spurious "mass drift" in W5.  Matches the
-        # cubed-sphere PE ``_batch_global_area_sums`` precision.
+        # cubed-sphere PE ``batch_global_area_sums`` precision.
         _acc = conservation_accumulator()
         self._target_mass = jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
@@ -877,8 +877,8 @@ class CDGridShallowWaterModel(IntegrationMixin):
         (same contract as iter-1040+ MPI tests).
         """
         from collections import defaultdict
-        from legoesm.grids.halo import _mpi_topology
-        from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
+        from legoesm.grids.halo import get_mpi_topology
+        from legoesm.parallel.halo_exchange import get_sendrecv_vjp
         try:
             import mpi4jax
             from mpi4py import MPI as _MPI
@@ -886,7 +886,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
             raise ImportError(
                 "MPI _sync_dgrid_boundary_mpi requires mpi4jax + mpi4py."
             ) from exc
-        topology = _mpi_topology
+        topology = get_mpi_topology()
         # FV3_3D iter-1052 (codex F-15): face-only MPI only.  Sub-face
         # tiled mode would need tile-local D-grid sync logic — same
         # limitation as iter-1040+ ``pad_halo_mpi(interp_offsets=...)``.
@@ -897,7 +897,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
                 f"{topology.tiling}.  Sub-face tiling needs tile-local "
                 "edge / vertex sync logic which is not yet derived."
             )
-        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        sendrecv = get_sendrecv_vjp(mpi4jax)
         comm = _MPI.COMM_WORLD
         rank = topology.rank
         n = self.grid.n
@@ -1068,9 +1068,9 @@ class CDGridShallowWaterModel(IntegrationMixin):
                 my_vtx = my_vtx.at[i, 1].set(vn[owner_face, oi, oj])
         # Allreduce SUM: exactly one rank contributes non-zero per row.
         # mpi4jax.allreduce returns (result, token) or just result; use
-        # ``_mpi4jax_array_result`` helper to normalize.
-        from legoesm.parallel.reductions import _mpi4jax_array_result
-        all_vtx = _mpi4jax_array_result(
+        # ``mpi4jax_array_result`` helper to normalize.
+        from legoesm.parallel.reductions import mpi4jax_array_result
+        all_vtx = mpi4jax_array_result(
             mpi4jax.allreduce(my_vtx, op=_MPI.SUM, comm=comm)
         )
         # Apply: for each vertex, set all owned face positions.
@@ -1227,7 +1227,7 @@ class FV3FBShallowWaterModel:
         # iter-5: fp64 budget accumulator — fp32 reductions on ~6·N²
         # cubed-sphere arrays leak ~N·eps noise into the anchor and
         # produced ~10^-7 spurious "mass drift" in W5.  Matches the
-        # cubed-sphere PE ``_batch_global_area_sums`` precision.
+        # cubed-sphere PE ``batch_global_area_sums`` precision.
         _acc = conservation_accumulator()
         self._target_mass = jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
@@ -1355,7 +1355,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         # iter-5: fp64 budget accumulator — fp32 reductions on ~6·N²
         # cubed-sphere arrays leak ~N·eps noise into the anchor and
         # produced ~10^-7 spurious "mass drift" in W5.  Matches the
-        # cubed-sphere PE ``_batch_global_area_sums`` precision.
+        # cubed-sphere PE ``batch_global_area_sums`` precision.
         _acc = conservation_accumulator()
         self._target_mass = jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
@@ -1508,7 +1508,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 # Iter-905: split mass+momentum integration.  Mass via
                 # transport_step ONCE outside RK3; momentum via RK3
                 # with h held fixed at the IC throughout the 3 stages.
-                _, _, _, _, ut0, vt0 = _d2a2c_vect(
+                _, _, _, _, ut0, vt0 = d2a2c_vect(
                     state.u_d, state.v_d, self.cdgrid)
                 eff_nord = (min(2, self.config.nord)
                             if self.config.nord_v < 0
@@ -1592,9 +1592,9 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             # update structure, not a continuous RK3 tendency."
             if self.config.use_fv3_dsw5_corner_damping:
                 _EPS = 1e-30
-                ua, va, _, _, _, _ = _d2a2c_vect(
+                ua, va, _, _, _, _ = d2a2c_vect(
                     state_new.u_d, state_new.v_d, self.cdgrid)
-                ke_damping = _d_sw5_corner_divergence(
+                ke_damping = d_sw5_corner_divergence(
                     state_new.u_d, state_new.v_d, ua, va,
                     self.cdgrid, dt,
                     d2_bg=self.config.d2_bg,

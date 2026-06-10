@@ -46,7 +46,7 @@ from legoesm.grids.gaussian import (
     sh_analysis_dmu_3d,
     uv_from_vordiv_3d,
     spectral_hyperdiffusion_3d,
-    _sh_synthesis_H_3d,
+    sh_synthesis_H_3d,
 )
 from legoesm.grids.vertical import (
     HeightCoordinate,
@@ -58,7 +58,7 @@ from legoesm.thermo import saturation_mixing_ratio
 from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.dynamics.compressible_euler import (
     compute_exner_perturbation,
-    _sponge_profile,
+    sponge_profile,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.timestepping.split_explicit import (
@@ -141,10 +141,10 @@ def _spectral_gradient_3d(grid, coeffs_3d):
         a * cos_lat_2d[..., None]
     )
 
-    # Meridional derivative uses ``_sh_synthesis_H_3d`` — same one-shot
+    # Meridional derivative uses ``sh_synthesis_H_3d`` — same one-shot
     # batched segment-sum + IRFFT as ``sh_synthesis_3d`` (no per-level
     # moveaxis + vmap).
-    dfdy = -_sh_synthesis_H_3d(grid, coeffs_3d) / (
+    dfdy = -sh_synthesis_H_3d(grid, coeffs_3d) / (
         a * cos_lat_2d[..., None]
     )
 
@@ -466,7 +466,7 @@ def spectral_nh_slow_tendencies(
 
     # --- 16. Sponge layer damping ---
     if config.sponge_coeff > 0:
-        sponge = _sponge_profile(
+        sponge = sponge_profile(
             height_coord.z_full, H, config.sponge_width, config.sponge_coeff,
         )  # (nlev,)
         # Damp vorticity, divergence, theta toward reference
@@ -474,7 +474,7 @@ def spectral_nh_slow_tendencies(
         ddiv_hat = ddiv_hat - sponge * state.div_hat.data
         dtheta_p_hat = dtheta_p_hat - sponge * state.theta_prime_hat.data
         # Damp w at half-levels (matching cubed-sphere and MPAS dycores)
-        sponge_half = _sponge_profile(
+        sponge_half = sponge_profile(
             height_coord.z_half, H, config.sponge_width, config.sponge_coeff,
         )  # (nlev+1,)
         dw_hat = dw_hat - sponge_half * state.w_hat.data

@@ -234,7 +234,10 @@ class TestKernelRegistries:
         assert fn.__name__ == fn_name
 
     def test_microphysics_registry_has_all(self):
-        expected = {"kessler", "sundqvist", "seifert_beheng", "morrison", "thompson"}
+        expected = {
+            "kessler", "sundqvist", "seifert_beheng", "morrison",
+            "thompson", "p3", "ml_emulator",
+        }
         assert expected == set(MICROPHYSICS_REGISTRY.keys())
 
     def test_resolve_kessler(self):
@@ -251,33 +254,26 @@ class TestKernelRegistries:
         assert schemes == sorted(CONVECTION_REGISTRY.keys())
 
 
-class TestResolveConvectionRejectsProfileSchemes:
-    """The five new profile-prognostic schemes are registered for kernel
-    lookup but the unified driver pipeline can't yet thread their
-    ``(ncol, nlev)`` carry / wind / w_grid / MC / stochastic plumbing.
-    ``_resolve_convection`` raises ``NotImplementedError`` so configs
-    using these schemes fail at build time with a clear message rather
-    than producing silently-wrong tendencies inside the hot loop.
-
-    Removing one of these tests is a signal that the pipeline now
-    supports the corresponding scheme — at that point the rejection in
-    ``_resolve_convection`` should also be loosened.
+class TestResolveConvectionSupportsAllSchemes:
+    """Since 2026-06-10 the unified driver pipeline threads the full
+    ``(ncol, nlev)`` ``conv_prog_profile`` carry plus CMT winds / w_grid
+    / moisture-convergence plumbing, so every registered convection
+    scheme resolves (the predecessor of this class asserted a
+    NotImplementedError rejection for the five profile-prognostic
+    schemes).  Bridge equivalence is covered by
+    ``tests/unit/test_pipeline_profile_convection.py``.
     """
 
     @pytest.mark.parametrize(
         "scheme",
         ["zhang_mcfarlane", "kain_fritsch", "emanuel", "tiedtke", "bechtold"],
     )
-    def test_resolve_raises_not_implemented(self, scheme, cs_grid):
+    def test_profile_prognostic_schemes_resolve(self, scheme, cs_grid):
         from legoesm.driver.physics_pipeline import _resolve_convection
         config = _make_config(convection=scheme)
-        with pytest.raises(NotImplementedError) as excinfo:
-            _resolve_convection(config)
-        msg = str(excinfo.value)
-        # The error must name the offending scheme and point at the
-        # supported alternative path so users know what to do.
-        assert scheme in msg
-        assert "make_convection_physics" in msg
+        conv_fn, conv_config = _resolve_convection(config)
+        assert callable(conv_fn)
+        assert conv_config is not None
 
     def test_existing_schemes_still_resolve(self, cs_grid):
         """Sanity-check: legacy schemes continue to resolve cleanly."""
@@ -286,6 +282,17 @@ class TestResolveConvectionRejectsProfileSchemes:
             config = _make_config(convection=legacy)
             conv_fn, conv_config = _resolve_convection(config)
             assert callable(conv_fn)
+
+    def test_bechtold_stochastic_still_rejected(self, cs_grid):
+        """The one remaining exclusion: the stochastic AR1 mode needs a
+        PRNG-key carry the driver does not thread."""
+        from legoesm.driver import physics_pipeline as pp
+        config = _make_config(convection="bechtold")
+        _fn, conv_cfg = pp._resolve_convection(config)
+        with pytest.raises(NotImplementedError, match="PRNG"):
+            pp._check_pipeline_convection_supported(
+                "bechtold", conv_cfg._replace(enable_stochastic=True),
+            )
 
 
 # ===================================================================

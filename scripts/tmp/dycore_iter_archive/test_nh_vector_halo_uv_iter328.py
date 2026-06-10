@@ -5,7 +5,7 @@ Audit
 -----
 The NH 3D path (``compressible_euler_cdgrid.py``) stores winds at
 cell centres and interpolates to D-grid corners via
-``_interp_center_to_corner`` on a passive-stacked ``(u, v, lev)``
+``interp_center_to_corner`` on a passive-stacked ``(u, v, lev)``
 axis.  This applies SCALAR halo (with duogrid routing if active)
 but does NOT rotate the (u, v) face-local components across cube-
 face boundaries.  At cube edges the neighbouring face's e_x / e_y
@@ -23,7 +23,7 @@ NH-only.
 
 iter-328 adds opt-in flag ``use_fv3_vector_halo_uv: bool = False``.
 When True, switches NH step 2 from
-``_interp_center_to_corner(stack(u, v))`` to
+``interp_center_to_corner(stack(u, v))`` to
 ``center_to_dgrid_vector(u, v, cdgrid)``.
 
 Tests

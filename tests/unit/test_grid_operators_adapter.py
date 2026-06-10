@@ -114,8 +114,8 @@ def test_cube_adapter_satisfies_the_contract() -> None:
 
 def test_cube_methods_delegate_byte_identically() -> None:
     from legoesm.core.operators_cdgrid import (
-        _interp_center_to_corner,
-        _pad_halo_auto,
+        interp_center_to_corner,
+        pad_halo_auto,
         cgrid_divergence,
         cgrid_gradient_2d,
     )
@@ -124,10 +124,10 @@ def test_cube_methods_delegate_byte_identically() -> None:
     scalar = jnp.cos(grid.grid_lat) * jnp.sin(grid.grid_lon)
 
     # scalar-only operators
-    assert jnp.array_equal(ops.halo_fill(scalar), _pad_halo_auto(scalar, cdgrid))
+    assert jnp.array_equal(ops.halo_fill(scalar), pad_halo_auto(scalar, cdgrid))
     assert jnp.array_equal(
         ops.interpolate(scalar, "center", "corner"),
-        _interp_center_to_corner(scalar, cdgrid),
+        interp_center_to_corner(scalar, cdgrid),
     )
     # gradient -> C-grid winds; reuse for divergence
     g_ad = ops.gradient(scalar)

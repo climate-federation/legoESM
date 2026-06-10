@@ -51,12 +51,12 @@ from legoesm.ocean.state import (
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
-    _interp_to_v_points,
-    _centered_cell_to_uface,
-    _upwind_to_u_points,
-    _upwind_to_v_points,
-    _tvd_to_u_points,
-    _tvd_to_v_points,
+    interp_to_v_points,
+    centered_cell_to_uface,
+    upwind_to_u_points,
+    upwind_to_v_points,
+    tvd_to_u_points,
+    tvd_to_v_points,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks,
@@ -194,8 +194,8 @@ def _compute_advection_flux_div(
         # WENO / DST3 paths (build a face value -> mass_flux*tr_face ->
         # divergence_cgrid); "centered" is simply the unlimited face
         # value. The horizontal face values come from the canonical
-        # centered cell->face interpolations (``_centered_cell_to_uface``,
-        # periodic in longitude; ``_interp_to_v_points``, the centered
+        # centered cell->face interpolations (``centered_cell_to_uface``,
+        # periodic in longitude; ``interp_to_v_points``, the centered
         # cell->v-face interp with the solid-wall / tripolar-fold BC).
         # Wall masking is carried by ``mass_flux_u``/``mass_flux_v``
         # (zero through walls) — the analogue of Veros's maskU/maskV.
@@ -205,8 +205,8 @@ def _compute_advection_flux_div(
         # locally negative tracers) with zero implicit diapycnal mixing.
         # Used for the Veros-faithful ACC comparison; legoESM's production
         # default stays TVD (Van Leer), which is monotone.
-        tr_u = _centered_cell_to_uface(tr)
-        tr_v = _interp_to_v_points(tr, grid)
+        tr_u = centered_cell_to_uface(tr)
+        tr_v = interp_to_v_points(tr, grid)
         tracer_flux_u = mass_flux_u * tr_u
         tracer_flux_v = mass_flux_v * tr_v
         div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
@@ -215,11 +215,11 @@ def _compute_advection_flux_div(
         from legoesm.ocean.dynamics._flux_limiters import resolve_tvd_limiter
         if tracer_advection in ("tvd", "superbee"):
             limiter_fn = resolve_tvd_limiter(tracer_advection)
-            tr_u = _tvd_to_u_points(tr, mass_flux_u, limiter_fn=limiter_fn)
-            tr_v = _tvd_to_v_points(tr, mass_flux_v, grid=grid, limiter_fn=limiter_fn)
+            tr_u = tvd_to_u_points(tr, mass_flux_u, limiter_fn=limiter_fn)
+            tr_v = tvd_to_v_points(tr, mass_flux_v, grid=grid, limiter_fn=limiter_fn)
         else:
-            tr_u = _upwind_to_u_points(tr, mass_flux_u)
-            tr_v = _upwind_to_v_points(tr, mass_flux_v, grid=grid)
+            tr_u = upwind_to_u_points(tr, mass_flux_u)
+            tr_v = upwind_to_v_points(tr, mass_flux_v, grid=grid)
         tracer_flux_u = mass_flux_u * tr_u
         tracer_flux_v = mass_flux_v * tr_v
         div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
@@ -2005,9 +2005,9 @@ class LatLonCGridOceanModel:
         # with at least two wet levels.
         A_v_cell = A_v_cell.astype(state.u.data.dtype)
         A_v_u = interp_cell_to_uface(A_v_cell)            # (n_lat, n_lon+1, nlev-1)
-        A_v_v = _interp_to_v_points(A_v_cell)             # (n_lat+1, n_lon, nlev-1)
+        A_v_v = interp_to_v_points(A_v_cell)             # (n_lat+1, n_lon, nlev-1)
         dz_u = interp_cell_to_uface(dz_cell)
-        dz_v = _interp_to_v_points(dz_cell)
+        dz_v = interp_to_v_points(dz_cell)
         dz_half_u = build_dz_half(dz_u)
         dz_half_v = build_dz_half(dz_v)
         u_mask_3d = state.u_mask.data[..., jnp.newaxis]

@@ -218,8 +218,8 @@ def global_integral(field: Field, grid: LatLonGrid) -> jax.Array:
     prod = field.data.astype(acc) * grid.area.astype(acc)
     local_sum = jnp.sum(prod)
 
-    from legoesm.core.operators import _is_distributed
-    if _is_distributed():
+    from legoesm.core.operators import is_distributed
+    if is_distributed():
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
     return local_sum

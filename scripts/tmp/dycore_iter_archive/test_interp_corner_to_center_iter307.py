@@ -1,10 +1,10 @@
-"""FV3_3D iter 307: ``_interp_corner_to_center`` (D-corner →
+"""FV3_3D iter 307: ``interp_corner_to_center`` (D-corner →
 cell-centre 4-pt average) preserves constants and is linear.
 
 Mirror of iter-306 in the opposite direction.  This helper is
 used by every iter-22[1-6] tendency-form d_con KE→heat path:
 
-    dT_dt_cc = -d_con * _interp_corner_to_center(dKE_dt_corner)
+    dT_dt_cc = -d_con * interp_corner_to_center(dKE_dt_corner)
                / c_pd
 
 (see primitive_eq_cdgrid.py line 1015 for corner_div_damp d_con
@@ -31,7 +31,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.core.operators_cdgrid import _interp_corner_to_center
+from legoesm.core.operators_cdgrid import interp_corner_to_center
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 
 
@@ -57,7 +57,7 @@ def test_interp_corner_to_center_preserves_constant(c):
     n, nlev, *_ = _setup()
     # 2D
     field_2d = jnp.full((6, n + 1, n + 1), c, dtype=jnp.float64)
-    out_2d = _interp_corner_to_center(field_2d)
+    out_2d = interp_corner_to_center(field_2d)
     expected_2d = jnp.full((6, n, n), c, dtype=jnp.float64)
     np.testing.assert_allclose(
         np.asarray(out_2d), np.asarray(expected_2d),
@@ -65,7 +65,7 @@ def test_interp_corner_to_center_preserves_constant(c):
     )
     # 3D
     field_3d = jnp.full((6, n + 1, n + 1, nlev), c, dtype=jnp.float64)
-    out_3d = _interp_corner_to_center(field_3d)
+    out_3d = interp_corner_to_center(field_3d)
     expected_3d = jnp.full((6, n, n, nlev), c, dtype=jnp.float64)
     np.testing.assert_allclose(
         np.asarray(out_3d), np.asarray(expected_3d),
@@ -81,10 +81,10 @@ def test_interp_corner_to_center_superposition(ab):
     _, _, f1_2d, f2_2d, f1_3d, f2_3d = _setup()
 
     # 2D
-    lhs_2d = _interp_corner_to_center(alpha * f1_2d + beta * f2_2d)
+    lhs_2d = interp_corner_to_center(alpha * f1_2d + beta * f2_2d)
     rhs_2d = (
-        alpha * _interp_corner_to_center(f1_2d) +
-        beta * _interp_corner_to_center(f2_2d)
+        alpha * interp_corner_to_center(f1_2d) +
+        beta * interp_corner_to_center(f2_2d)
     )
     np.testing.assert_allclose(
         np.asarray(lhs_2d), np.asarray(rhs_2d),
@@ -92,10 +92,10 @@ def test_interp_corner_to_center_superposition(ab):
     )
 
     # 3D
-    lhs_3d = _interp_corner_to_center(alpha * f1_3d + beta * f2_3d)
+    lhs_3d = interp_corner_to_center(alpha * f1_3d + beta * f2_3d)
     rhs_3d = (
-        alpha * _interp_corner_to_center(f1_3d) +
-        beta * _interp_corner_to_center(f2_3d)
+        alpha * interp_corner_to_center(f1_3d) +
+        beta * interp_corner_to_center(f2_3d)
     )
     np.testing.assert_allclose(
         np.asarray(lhs_3d), np.asarray(rhs_3d),

@@ -48,7 +48,7 @@ from legoesm.grids.gaussian import (
     sh_analysis_oc2_dmu_3d,
     uv_from_vordiv_3d,
     spectral_hyperdiffusion_3d,
-    _sh_synthesis_H,
+    sh_synthesis_H,
 )
 from legoesm.grids.vertical import (
     SigmaCoordinate,
@@ -539,7 +539,7 @@ def spectral_pe_tendencies(
     dfdlon = _dfdlon_lnps
     cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
     dlnps_dx = dfdlon / (a * cos_lat_2d)
-    dfdtheta_cos = _sh_synthesis_H(grid, state.lnps_hat.data)
+    dfdtheta_cos = sh_synthesis_H(grid, state.lnps_hat.data)
     dlnps_dy = -dfdtheta_cos / (a * cos_lat_2d)
 
     # PGF correction: -∇·(R_d·T'·∇_eta(lnp)) computed as spectral div of grid product
@@ -826,7 +826,7 @@ def spectral_pe_tendencies(
     )
 
 
-def _compute_spectral_filter(ls, n_max, order=8, cutoff_fraction=0.65):
+def compute_spectral_filter(ls, n_max, order=8, cutoff_fraction=0.65):
     """Compute an exponential spectral filter.
 
     Applies exp(-alpha * (n/n_max)^order) where alpha is chosen so that
@@ -853,7 +853,7 @@ def _compute_spectral_filter(ls, n_max, order=8, cutoff_fraction=0.65):
     return jnp.exp(-alpha * ratio**order)
 
 
-def _compute_sponge_factor(sigma_full, sponge_sigma, sponge_tau, dt):
+def compute_sponge_factor(sigma_full, sponge_sigma, sponge_tau, dt):
     """Compute multiplicative sponge damping factor per level.
 
     Returns exp(-damping_rate * dt) where damping_rate uses a sin² profile
@@ -870,7 +870,7 @@ def _compute_sponge_factor(sigma_full, sponge_sigma, sponge_tau, dt):
     return jnp.exp(-damping_rate * dt)
 
 
-def _apply_sponge_filter(state, sponge_factor, sponge_factor_T):
+def apply_sponge_filter(state, sponge_factor, sponge_factor_T):
     """Apply multiplicative sponge damping to vor, div, and T' at top levels.
 
     Damps vor and div toward zero.  Damps T perturbations (m != 0 modes)
@@ -901,7 +901,7 @@ def _apply_sponge_filter(state, sponge_factor, sponge_factor_T):
     )
 
 
-def _apply_spectral_filter_to_state(state, spectral_filter):
+def apply_spectral_filter_to_state(state, spectral_filter):
     """Apply exponential spectral filter to all prognostic fields.
 
     Parameters
@@ -921,7 +921,7 @@ def _apply_spectral_filter_to_state(state, spectral_filter):
     )
 
 
-def _apply_filter_to_tracers(tracers, multiplicative_filter, grid):
+def apply_filter_to_tracers(tracers, multiplicative_filter, grid):
     """Apply a per-SH-mode multiplicative filter to grid-space tracers.
 
     Tracers are stored on the model grid (shape ``(n_lat, n_lon, nlev)``)
@@ -1116,7 +1116,7 @@ class SpectralPrimitiveEquationModel:
         # which is now on CPU when Metal is active.
         self._spectral_filter = None
         if self.config.spectral_filter_strength > 0:
-            self._spectral_filter = _compute_spectral_filter(
+            self._spectral_filter = compute_spectral_filter(
                 self.grid.ls,
                 self.grid.n_max,
                 order=self.config.spectral_filter_order,
@@ -1150,7 +1150,7 @@ class SpectralPrimitiveEquationModel:
         ``(n_sh, nlev)`` array (zonal m=0 modes preserved at 1.0,
         non-zonal modes get the sponge factor).  Avoids the per-step
         ``jnp.where(is_zonal, 1.0, sf)`` op in
-        ``_apply_sponge_filter``.
+        ``apply_sponge_filter``.
         """
         if self.config.sponge_tau <= 0:
             return
@@ -1163,7 +1163,7 @@ class SpectralPrimitiveEquationModel:
         else:
             sigma_full = self.sigma_coord.sigma_full
 
-        self._sponge_factor = _compute_sponge_factor(
+        self._sponge_factor = compute_sponge_factor(
             sigma_full, self.config.sponge_sigma, self.config.sponge_tau, dt,
         )
         # Per-(n_sh, nlev) factor for T: 1.0 at m=0, sf elsewhere.
@@ -1221,14 +1221,14 @@ class SpectralPrimitiveEquationModel:
         The filter is the product of:
 
         * the spectral exponential filter (de-aliasing) — same factor
-          used by ``_apply_spectral_filter_to_state`` for vor/div/T;
+          used by ``apply_spectral_filter_to_state`` for vor/div/T;
         * the implicit hyperdiffusion factor ``exp(-nu · eig · dt_eff)``
           — same eigenvalue used by ``_ensure_hyperdiff_filter``.
 
         Both are diagonal in spectral space, so we collapse them into a
         single ``(n_sh,)`` multiplier applied per SH mode via one SH
         round-trip per tracer per step (see
-        :func:`_apply_filter_to_tracers`).
+        :func:`apply_filter_to_tracers`).
 
         Effective time step matches the integrator: ``dt_eff = 2·dt``
         for leapfrog (which spans 2 model dt per step), ``dt_eff = dt``
@@ -1267,7 +1267,7 @@ class SpectralPrimitiveEquationModel:
         if self._tracer_filter is None or state.tracers is None:
             return state
         return state._replace(
-            tracers=_apply_filter_to_tracers(
+            tracers=apply_filter_to_tracers(
                 state.tracers, self._tracer_filter, self.grid,
             )
         )
@@ -1325,11 +1325,11 @@ class SpectralPrimitiveEquationModel:
 
         # Apply implicit sponge filter (unconditionally stable)
         if self._sponge_factor is not None:
-            result = _apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
+            result = apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
 
         # Apply spectral filter (damps highest wavenumbers)
         if self._spectral_filter is not None:
-            result = _apply_spectral_filter_to_state(result, self._spectral_filter)
+            result = apply_spectral_filter_to_state(result, self._spectral_filter)
 
         # Apply combined spectral-filter + implicit-hyperdiff to tracers
         # via one SH round-trip per tracer (no-op when neither knob is
@@ -1478,9 +1478,9 @@ class SpectralPrimitiveEquationModel:
                 result = self._euler_si_jit(state, dt, physics_fn)
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
-                result = _apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
+                result = apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
             if self._spectral_filter is not None:
-                result = _apply_spectral_filter_to_state(result, self._spectral_filter)
+                result = apply_spectral_filter_to_state(result, self._spectral_filter)
             # Implicit hyperdiffusion (unconditionally stable)
             result = self._apply_implicit_hyperdiff(result)
             # Same combined filter applied to grid-space tracers
@@ -1505,11 +1505,11 @@ class SpectralPrimitiveEquationModel:
                 )
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
-                state_np1 = _apply_sponge_filter(
+                state_np1 = apply_sponge_filter(
                     state_np1, self._sponge_factor, self._sponge_factor_T,
                 )
             if self._spectral_filter is not None:
-                state_np1 = _apply_spectral_filter_to_state(
+                state_np1 = apply_spectral_filter_to_state(
                     state_np1, self._spectral_filter,
                 )
             # Implicit hyperdiffusion (unconditionally stable with leapfrog)
