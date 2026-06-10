@@ -452,6 +452,42 @@ ico6 τ=60 + marginal-sea restoring (8440840, SECTION-method diags):
   = Gulf Stream/Kuroshio under-resolved at 1° → RESOLUTION-bound (eORCA025), not a forcing fix; the single
   largest gap. (3) >45N residual −0.91/−1.15 reduced but open.
 
+### iter-G (2026-06-10): NEMO-parity surface fluxes — 8 BC/param bugs found+fixed (commits 6dd81575, dc13d1df)
+**Bias target:** the hemispheric SST dipole (SH warm +0.9..+1.1 incl. 45S-23S NON-ice band, NH cold −1.1;
+yr2 both grids) + the τ60 AMOC collapse (6 Sv). Audited the FULL flux chain line-by-line vs NEMO 5.0.1
+source on disk (sbcblk.F90 / sbcblk_algo_ncar.F90 / sbc_phy.F90 / namelist_cfg) + 2 codex rounds:
+1. **Bulk scheme was a 2-coeff approx** (Ce=Ch fixed {1.46,1.18}e-3, no stability iteration, "good to
+   ~10%") → ported NEMO's FULL NCAR algorithm exactly: 5-iter Obukhov fixed point, ψ_m/ψ_h (shared
+   core.bulk_flux), CdN cyclone plateau + 1e-4 floor (`large_yeager_neutral_cd(nemo_parity=True)`),
+   pres_temp 10-m barometric pressure, theta_exner potential air-T + potential SST (stability/sensible/
+   L_vap on the potential pair; ssq/LW/evap-heat at absolute SST), ρ_air(slp,T,q) at p10, moist cp_air(q),
+   L_vap(θ_sst), 0.98-salt Goff ssq (`thermo.saturation_vapor_pressure_goff`). Legacy scheme pinned as
+   `algo='ly09_2coeff'` (operator-split applicator only).
+2. **LW Kirchhoff**: was lwd − 0.97σT⁴ (absorb 100%/emit 97%) → NEMO 0.98·(lwd−σT⁴). ≈ −11 W/m² (cools).
+3. **Snow fusion missing** → −snow·rLfus + rain/snow/evap heat-content terms (NEMO blk_oce_2 exact,
+   rLfus=0.3333601e6/rcpi=2096.7). New SNOW + SLP zarr channels (builder+loader+host+scan; back-compat
+   fallbacks). nyf.zarr REBUILT + validated (slp valid-max 1156 hPa = Antarctic below-ground reduction, land).
+4. **Regridder LONGITUDE SEAM bug**: 0/360 wrap segment never covered → seam destination column
+   under-weighted (production latlon ~6%-covered last column; tripole/MPAS NN paths unaffected). Ghost-
+   column padding fix.
+5. **SSS-restoring cap was DECORATIVE**: appliers consume dS_dt_top which bypassed the flux clip →
+   τ60 restoring was UNBOUNDED in deep-water-formation spots = the AMOC-collapse mechanism. Tendency now
+   derived from the capped flux; `--sss-restore-bound-mmday 4` = NEMO ln_sssr_bnd (RUN_REF: piston
+   −220 mm/day ≈ τ45.5d on 10 m + ±4 mm/day bound, off under ice).
+6. pres_temp garbage-cell guard (w=q/qsat clip [0,1]); NEMO-parity constants block in constants.py.
+**Verification:** independent NumPy transcription of the Fortran (coefficients AND full flux path incl.
+preprocessing) matches the JAX impl bit-exact (rtol 1e-12 / 1e-10); jit+grad finite; 3825/3826 targeted
+tests green (last = test-side L_vap(θ_sst) expectation, fixed; round-4 in flight). Codex round-1
+NEEDS-ATTENTION (7 findings → all fixed; HIGH = the potential-T preprocessing), round-2 confirm in flight.
+**Runs launched (A/B vs the old-flux ice-thermo baselines):** `mpas_ico6_2yr_ncar` (8454488) +
+`tripole_eorca1_2yr_ncar` (8454489) — same config as the 2yr ice-thermo runs but NCAR fluxes + NEMO
+bounded restoring (τ45.5/bnd4 replaces τ60-unbounded). Baseline yr2 scores for the A/B: ico6 ice-thermo
+yr2 SST RMSE 1.37/corr 0.991 (>45S +0.89, SH-mid +1.04, NH-mid −1.11, >45N −1.06; ACC 141.9, AMOC 2.5
+un-spun, MHT-NH 3.52 PW high). **Expected from the physics:** LW −11 W/m² + snow fusion cool the SH warm
+band; bounded restoring lets AMOC rebuild (NEMO holds 17.7 WITH restoring because of the bound); MHT to
+re-diagnose under corrected fluxes. RGB-chl SW penetration (NEMO ln_qsr_rgb) = known remaining BC gap
+(vertical heating distribution), next lever if the dipole persists.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
