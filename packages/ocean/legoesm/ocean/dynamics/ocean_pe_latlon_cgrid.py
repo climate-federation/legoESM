@@ -139,6 +139,18 @@ VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
 # FLUX-DIVERGENCE harmonic friction ∇·(A_h∇u). Validated at config construction;
 # unknown -> ValueError (dispatch discipline).
 VALID_LATERAL_VISCOSITY_OPERATOR = frozenset({"vector_laplacian", "flux_divergence"})
+# Coriolis time-stepping placement (config.coriolis_scheme):
+#   "matsuno_split" (default, bit-identical) — Coriolis is a sequential
+#     forward-backward (Matsuno) rotation sub-step on the FE-advanced state and
+#     du_dt EXCLUDES Coriolis; the barotropic solver adds its own f×u_bt.
+#   "explicit_ab2" (Veros-faithful) — the plain f×u (full velocity) is an explicit
+#     tendency ENTERING du_dt/dv_dt (so the outer AB2 extrapolates it and its
+#     depth-mean feeds the barotropic slow forcing); the Matsuno sub-step is
+#     skipped and the barotropic solver's own Coriolis addition is gated off.
+# Validated at config construction (ocean_model_latlon_cgrid.py); unknown ->
+# ValueError. The "explicit_ab2" path additionally requires outer_integrator="ab2"
+# and barotropic_solver="rigid_lid" (rejected otherwise).
+VALID_CORIOLIS_SCHEME = frozenset({"matsuno_split", "explicit_ab2"})
 
 
 def _interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
@@ -2651,6 +2663,37 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = _bc_pv_flux(
             du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
         )
+
+    # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).
+    # When config.coriolis_scheme == "explicit_ab2", the plain f×u of the FULL
+    # velocity (Veros core/momentum.py tend_coriolisf) ENTERS du_dt/dv_dt here,
+    # so (a) its depth-mean reaches the barotropic slow forcing F_slow in the
+    # model step (= Veros solve_stream.py uloc/vloc = depth-integral of du
+    # INCLUDING Coriolis), and (b) its perturbation reaches the 3-D du_dt_pert,
+    # both then AB2-extrapolated with the 1.5/0.6 weights. The model step skips
+    # the Matsuno sub-step and gates the barotropic solver's own Coriolis
+    # addition OFF (no double count). Reuses the shared ``coriolis_cgrid`` C-grid
+    # operator (the 0.25 4-point average of f·v→u, −f·u→v with f_u/f_v two-point
+    # face averages) — IDENTICAL stencil to the Matsuno split, so no new numerics.
+    # Folded into the ``vortcor`` diagnostic slot (which then carries (f+ζ)×u,
+    # mirroring Veros where Coriolis and relative-vorticity advection are sibling
+    # momentum-advection terms) so the Σ-components-==-du_dt closure is preserved
+    # with no MomentumTendencyDiagnostics field change. Static Python branch on
+    # the config string ⇒ default ("matsuno_split") is bit-identical: this block
+    # is not traced at all.
+    if getattr(config, "coriolis_scheme", "matsuno_split") == "explicit_ab2":
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import coriolis_cgrid
+        # Pass u_mask=None so the operator does not apply its 2-D mask; we apply
+        # the 3-D face mask here (= the partial-cell-aware u_mask_3d/v_mask_3d
+        # computed above, which the rest of the tendency uses), so the explicit
+        # Coriolis is wet exactly where every other momentum term is.
+        cor_u, cor_v = coriolis_cgrid(u, v, grid, u_mask=None, v_mask=None)
+        cor_u = cor_u * u_mask_3d
+        cor_v = cor_v * v_mask_3d
+        du_dt = du_dt + cor_u
+        dv_dt = dv_dt + cor_v
+        diag_vortcor_u = diag_vortcor_u + cor_u
+        diag_vortcor_v = diag_vortcor_v + cor_v
 
     # --- Stage 7c: WENO divergence (D-term) dissipation. ---
     du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v = _bc_dterm(

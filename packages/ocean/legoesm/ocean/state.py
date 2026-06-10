@@ -1059,3 +1059,47 @@ class LatLonCGridOceanConfig(NamedTuple):
     # zero depth-mean and the barotropic mode from the barotropic solver is
     # untouched.  Default False ⇒ sequential placement ⇒ BIT-IDENTICAL.
     momentum_friction_additive: bool = False
+
+    # --- Coriolis time-stepping placement (Veros vs Matsuno split) ---
+    # Selects HOW the planetary Coriolis force f×u enters the momentum update:
+    #   "matsuno_split" (DEFAULT, BIT-IDENTICAL) — legoESM's existing scheme:
+    #     Coriolis is a SEQUENTIAL forward-backward (Matsuno) rotation SUB-STEP
+    #     (``_forward_backward_coriolis_3d``) applied to the forward-Euler-advanced
+    #     state u* = u^n + dt_mom·du_dt_pert (du_dt EXCLUDES Coriolis), and the
+    #     barotropic solver adds its OWN f×u_bt on the barotropic mode. The outer
+    #     AB2 then extrapolates the total explicit INCREMENT (which contains the
+    #     rotation). The Matsuno one-step map is exactly neutral on the inertial
+    #     mode, but AB2-extrapolating its increment numerically DESTROYS
+    #     near-inertial energy (|G| 0.65–0.86/step at the ACC channel f·dt_mom).
+    #   "explicit_ab2" (VEROS-FAITHFUL) — Coriolis is an EXPLICIT tendency f×u of
+    #     the FULL velocity (Veros core/momentum.py tend_coriolisf: the 0.25 C-grid
+    #     4-point average of f·v→u-points, −f·u→v-points; legoESM reuses the shared
+    #     ``coriolis_cgrid`` operator, which IS that stencil minus two omitted
+    #     metric pieces — the tantr curvature term (measured 0.02–0.04% of
+    #     Coriolis on the ACC grid) and the meridional dyt·cost/(dyu·cosu)
+    #     averaging ratio (up to ~1.6% at the channel edge); BOTH are omitted
+    #     identically by the shared C-grid Coriolis machinery on the
+    #     matsuno_split path too, so they do not affect the scheme comparison
+    #     (adversarial review 2026-06-10, probe_metric.py). It ENTERS ``du_dt``/``dv_dt`` so its depth-mean reaches
+    #     the barotropic slow forcing F_slow (= Veros's solve_stream.py uloc/vloc =
+    #     depth-integral of du INCLUDING Coriolis) and its perturbation reaches the
+    #     3-D du_dt_pert; the outer AB2 extrapolates it with the 1.5/0.6 weights
+    #     (Veros AB2-eps). The Matsuno sub-step is SKIPPED and the barotropic
+    #     solver's OWN Coriolis addition is GATED OFF (no double count). Per-step
+    #     inertial |G| ≈ 0.99–1.01 (weakly anti-damped, like Veros), preserving the
+    #     near-inertial / inertia-gravity energy pathway and the discrete-Ekman
+    #     angle (the matsuno_split path rotates the Ekman balance ~13–15°).
+    # Requires ``outer_integrator="ab2"`` (forward-Euler Coriolis at weight 1.0 is
+    # unconditionally UNSTABLE for pure rotation: sqrt(1+(f·dt)²) > 1 per step) AND
+    # ``barotropic_solver="rigid_lid"`` (the only barotropic path whose Coriolis IS
+    # the depth-mean of the slow forcing; the substep / implicit-CN free-surface
+    # solvers sub-step the barotropic Coriolis on the barotropic gravity-wave clock
+    # — different physics, out of scope). Rejected otherwise at config validation.
+    # STABILITY: AB2-eps Coriolis is conditionally stable in f·dt_mom — empirical
+    # divergence threshold ≈0.55 (review probe). The ACC recipe grid spans
+    # |lat|max≈44° ⇒ |f|max≈9.95e-5, f·dt_mom≈0.48 at dt_mom=4800 s — safely
+    # inside, bounded at all probed friction levels. Configurations poleward of
+    # ~55° at this dt_mom would exceed the threshold; check_coriolis_stability
+    # warns at 0.5 and 0.55. Default
+    # "matsuno_split" ⇒ BIT-IDENTICAL for every existing config.
+    coriolis_scheme: str = "matsuno_split"

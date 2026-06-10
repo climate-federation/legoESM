@@ -660,6 +660,7 @@ class LatLonCGridOceanModel:
             VALID_MOMENTUM_FLUX_SCHEME,
             VALID_VERTICAL_MOMENTUM_SCHEME,
             VALID_LATERAL_VISCOSITY_OPERATOR,
+            VALID_CORIOLIS_SCHEME,
         )
         if config.momentum_advection not in VALID_MOMENTUM_ADVECTION:
             raise ValueError(
@@ -826,6 +827,39 @@ class LatLonCGridOceanModel:
                     f"Got outer_integrator={config.outer_integrator!r}; only "
                     "the AB2 path was oracle-verified for this placement.")
 
+        # Coriolis time-stepping placement (Veros explicit-tendency AB2 vs the
+        # default Matsuno rotation sub-step).  "explicit_ab2" routes the plain
+        # f×u through du_dt (so the outer AB2 extrapolates it and its depth-mean
+        # feeds the barotropic rigid-lid slow forcing) and skips both the Matsuno
+        # sub-step and the barotropic solver's own Coriolis addition.  Reject
+        # unsupported combinations rather than silently mis-placing Coriolis.
+        _cor_scheme = getattr(config, "coriolis_scheme", "matsuno_split")
+        if _cor_scheme not in VALID_CORIOLIS_SCHEME:
+            raise ValueError(
+                f"coriolis_scheme must be one of "
+                f"{sorted(VALID_CORIOLIS_SCHEME)}, got {_cor_scheme!r}")
+        if _cor_scheme == "explicit_ab2":
+            if config.outer_integrator != "ab2":
+                raise ValueError(
+                    'coriolis_scheme="explicit_ab2" requires '
+                    'outer_integrator="ab2": an explicit forward-Euler Coriolis '
+                    "at weight 1.0 is unconditionally UNSTABLE for pure rotation "
+                    "(|G|=sqrt(1+(f·dt)²)>1 every step); only the AB2(-eps) outer "
+                    "integrator has a stable region covering the ACC's f·dt_mom. "
+                    f"Got outer_integrator={config.outer_integrator!r}.")
+            if config.barotropic_solver != "rigid_lid":
+                raise ValueError(
+                    'coriolis_scheme="explicit_ab2" requires '
+                    'barotropic_solver="rigid_lid": the explicit Coriolis '
+                    "tendency reaches the barotropic mode through its depth-mean "
+                    "in the slow forcing F_slow (= Veros solve_stream.py uloc/"
+                    "vloc, the depth-integral of du including Coriolis), and the "
+                    "rigid-lid solver's own f×u_bt addition is gated off to avoid "
+                    "double-counting. The split-explicit / implicit-CN free-"
+                    "surface solvers instead sub-step the barotropic Coriolis on "
+                    "the barotropic gravity-wave clock (different physics, not "
+                    f"covered). Got barotropic_solver={config.barotropic_solver!r}.")
+
     def check_barotropic_cfl(self, dt: float) -> float:
         """Check barotropic CFL and warn if marginal or unstable.
 
@@ -882,6 +916,65 @@ class LatLonCGridOceanModel:
                 )
 
         return cfl
+
+    def check_coriolis_stability(self, dt: float) -> float:
+        """Check the explicit-AB2 Coriolis stability margin and warn if marginal.
+
+        Only meaningful for ``coriolis_scheme="explicit_ab2"`` (a no-op returning
+        the f·dt_mom number otherwise).  An EXPLICIT Adams-Bashforth-2(-ε)
+        Coriolis is conditionally stable in ``f·dt_mom``: the inertial-mode
+        amplification |G| exceeds 1 (anti-damping) once ``f·dt_mom`` crosses ≈0.5,
+        and the forced–damped solution diverges for the channel's available
+        friction once ``f·dt_mom`` reaches ≈0.55–0.6 (verified numerically; see
+        ``.physics-validator/coriolis_scheme/``).  Veros runs the ACC stably
+        because its domain (|lat| ≤ 44°) keeps ``|f|max·dt_mom ≈ 0.49`` (|G|≈0.997,
+        marginally below 1) and its vertical/bottom friction + AB_eps=0.1 hold the
+        weak anti-damping bounded.  A global lat-lon ocean reaching |lat| ≥ 50°
+        would EXCEED the margin; warn so the caller raises ``dt_mom_ratio`` (lowers
+        dt_mom), restricts the domain, or stays on the default ``matsuno_split``.
+
+        Parameters
+        ----------
+        dt : float
+            Baroclinic clock timestep [s] (dt_tracer); the Coriolis is integrated
+            with ``dt_mom = dt / dt_mom_ratio``.
+
+        Returns
+        -------
+        fdt_max : float
+            ``|f|max · dt_mom`` — the explicit-Coriolis stability number.
+        """
+        import warnings
+
+        dt_mom = dt / self.config.dt_mom_ratio
+        f_max = float(jnp.max(jnp.abs(self.grid.f)))
+        fdt_max = f_max * dt_mom
+        if getattr(self.config, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
+            return fdt_max
+        # 0.5 = onset of inertial anti-damping (|G|>1); 0.55 = forced–damped
+        # divergence threshold for the ACC's friction.  Warn at 0.5 (marginal),
+        # strongly at 0.55 (likely unstable).
+        if fdt_max > 0.55:
+            warnings.warn(
+                f"coriolis_scheme='explicit_ab2': |f|max·dt_mom = {fdt_max:.3f} "
+                f"(> 0.55) — the explicit AB2-ε Coriolis is likely UNSTABLE "
+                f"(inertial |G| > 1 and the forced–damped mode diverges for "
+                f"typical ocean friction). f_max={f_max:.3e} s^-1, "
+                f"dt_mom={dt_mom:.0f} s. Reduce dt_mom (raise dt_mom_ratio), "
+                f"restrict the domain to |lat| < ~50°, or use "
+                f"coriolis_scheme='matsuno_split'.",
+                stacklevel=2,
+            )
+        elif fdt_max > 0.5:
+            warnings.warn(
+                f"coriolis_scheme='explicit_ab2': |f|max·dt_mom = {fdt_max:.3f} "
+                f"(> 0.5) — marginal: the inertial mode is weakly anti-damped "
+                f"(|G| slightly > 1), bounded only by friction + AB_eps. Acceptable "
+                f"for the ACC (|f|max·dt_mom ≈ 0.49) but verify boundedness if the "
+                f"domain extends poleward of ~44°.",
+                stacklevel=2,
+            )
+        return fdt_max
 
     def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None,
                    sponge=None, dt=300.0):
@@ -1119,11 +1212,19 @@ class LatLonCGridOceanModel:
         #   u' += dt * f * v'_at_u          (forward: old v')
         #   v' -= dt * f * u'_new_at_v      (backward: new u')
         # This matches the barotropic solver's Coriolis treatment.
-        u_star, v_star = _forward_backward_coriolis_3d(
-            u_star, v_star, dt_mom, self.grid, self.z_coord, self.config,
-            state.u_mask.data, state.v_mask.data, state.land_mask.data,
-            state.eta.data, state.H_bathy.data,
-        )
+        #
+        # SKIPPED under coriolis_scheme="explicit_ab2" (Veros-faithful): there
+        # the plain f×u entered tend.du_dt/dv_dt inside ``tendencies`` above, so
+        # its perturbation is already carried in du_dt_pert → u_star (and AB2'd
+        # by _ab2_step), and its depth-mean is in F_slow → the barotropic solve.
+        # Applying the Matsuno rotation here too would DOUBLE-count Coriolis.
+        # Static Python branch on the config string ⇒ default is bit-identical.
+        if getattr(self.config, "coriolis_scheme", "matsuno_split") != "explicit_ab2":
+            u_star, v_star = _forward_backward_coriolis_3d(
+                u_star, v_star, dt_mom, self.grid, self.z_coord, self.config,
+                state.u_mask.data, state.v_mask.data, state.land_mask.data,
+                state.eta.data, state.H_bathy.data,
+            )
 
         # Enforce periodic wrap column: u[:,n_lon] must equal u[:,0].
         u_star = u_star.at[:, -1].set(u_star[:, 0])
@@ -1164,9 +1265,16 @@ class LatLonCGridOceanModel:
                 barotropic_rigid_lid_latlon_cgrid,
             )
             rl_data = self._ensure_rigid_lid_data(state_mid)
+            # Under coriolis_scheme="explicit_ab2" the planetary Coriolis is
+            # already inside F_slow_u/v (its depth-mean came through du_dt); the
+            # solver must NOT add its own f×u_bt again (no double count).
+            _add_bt_cor = (
+                getattr(self.config, "coriolis_scheme", "matsuno_split")
+                != "explicit_ab2")
             state_new, (Hu_avg, Hv_avg) = barotropic_rigid_lid_latlon_cgrid(
                 state_mid, dt_mom, self.grid, self.z_coord, self.config, rl_data,
                 F_slow_u=F_slow_u, F_slow_v=F_slow_v,
+                add_barotropic_coriolis=_add_bt_cor,
             )
         elif self.config.barotropic_solver == "implicit_cn":
             state_new, (Hu_avg, Hv_avg) = barotropic_implicit_latlon_cgrid(

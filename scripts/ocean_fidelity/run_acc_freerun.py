@@ -87,7 +87,7 @@ def _bulk_stats(state, z_coord, grid):
 
 def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
                  bottom_drag_r=None, barotropic_solver=None, dt_mom_ratio=None,
-                 momentum_friction_additive=False):
+                 momentum_friction_additive=False, coriolis_scheme=None):
     import jax
     import jax.numpy as jnp
     from legoesm.core.field import Field
@@ -125,7 +125,18 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
         # tendency (weight 1.0), instead of backward-Euler on the AB2 state.
         # Requires --outer-integrator ab2 (validated at config construction).
         cfg = cfg._replace(momentum_friction_additive=True)
+    if coriolis_scheme is not None:
+        # Veros explicit-AB2 Coriolis placement (dycore-audit D1): the plain f×u
+        # enters du_dt (so the outer AB2 extrapolates it and its depth-mean feeds
+        # the barotropic rigid-lid slow forcing = solve_stream.py uloc/vloc), the
+        # Matsuno rotation sub-step is skipped, and the rigid-lid solver's own
+        # Coriolis addition is gated off (no double count). Requires
+        # --outer-integrator ab2 + --barotropic-solver rigid_lid (validated).
+        cfg = cfg._replace(coriolis_scheme=coriolis_scheme)
     model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
+    if coriolis_scheme == "explicit_ab2":
+        # Surface the conditional-stability margin for the configured domain.
+        model.check_coriolis_stability(dt)
     sf = recipe.wind_forcing
     state = recipe.initial_state
     # AB2 needs the prior-increment carry seeded (to zero) so the scan keeps a
@@ -146,6 +157,11 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
         _zI = jnp.zeros((rl.nisle,), dtype=state.u.data.dtype)
         state = state._replace(psi=_zV, dpsi=_zV, dpsi_prev=_zV,
                                dpsin=_zI, dpsin_prev=_zI)
+
+    # Reflect the ACTUAL config used by the model (with all the _replace knobs:
+    # outer_integrator, dt_mom_ratio, coriolis_scheme, ...) on the returned recipe
+    # so callers that read recipe.model_config see what ran, not the bare default.
+    recipe = recipe._replace(model_config=cfg)
 
     total_steps = int(round(years * _DAYS_PER_YEAR * _SECONDS_PER_DAY / dt))
     # Integrate in 1-day blocks for granular NaN-checking; jit the inner scan.
