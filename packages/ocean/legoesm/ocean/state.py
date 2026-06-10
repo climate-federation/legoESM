@@ -891,6 +891,28 @@ class LatLonCGridOceanConfig(NamedTuple):
     # vector_invariant / weno momentum paths. Literal default -> safe after
     # `constants`.
     momentum_flux_scheme: str = "upwind"
+    # Stage-8 VERTICAL momentum-advection scheme (independent of the HORIZONTAL
+    # momentum_advection dispatch). Selects how -d/dz(w·u) is discretized:
+    #   "upwind_perturbation" (DEFAULT, BIT-IDENTICAL) — 1st-order interface
+    #     upwind of the BAROCLINIC PERTURBATION u' = u - U_bar. Carries an
+    #     implicit vertical viscosity ~|w|·dz/2 that damps baroclinic shear,
+    #     and OMITS the depth-integral-zero redistribution term -d/dz(w·U_bar)
+    #     (advecting only the perturbation drops the barotropic-momentum part).
+    #     Both effects push the column toward barotropic.
+    #   "centered_full" (VEROS-FAITHFUL) — 2nd-order CENTERED, energy-conserving
+    #     flux of the FULL velocity u (= u' + U_bar), matching the vertical part
+    #     of Veros core/momentum.py momentum_advection
+    #     (flux_top = 0.25·(u[k+1]+u[k])·(w+w_east)). Restores the w·U_bar
+    #     redistribution and removes the upwind implicit viscosity. UNLIMITED ⇒
+    #     dispersive (no monotonicity, no implicit viscosity): stability rests on
+    #     dt_mom + A_v/TKE friction, like Veros. The ACC recipe opts in.
+    # The WENO momentum paths (momentum_advection in {weno5,weno7}) own their own
+    # vertical reconstruction and ignore this field. Literal default -> safe
+    # after `constants`. Validated at config construction; unknown -> ValueError.
+    # REJECTED in combination with adaptive_implicit_vertadv=True (that path
+    # replaces the explicit in-tendency vertical advection entirely with an
+    # upwind backward-Euler solve, so "centered_full" would be a silent no-op).
+    vertical_momentum_scheme: str = "upwind_perturbation"
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian

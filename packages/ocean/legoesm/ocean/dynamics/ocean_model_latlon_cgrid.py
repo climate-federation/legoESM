@@ -658,6 +658,7 @@ class LatLonCGridOceanModel:
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             VALID_MOMENTUM_ADVECTION,
             VALID_MOMENTUM_FLUX_SCHEME,
+            VALID_VERTICAL_MOMENTUM_SCHEME,
             VALID_LATERAL_VISCOSITY_OPERATOR,
         )
         if config.momentum_advection not in VALID_MOMENTUM_ADVECTION:
@@ -677,6 +678,28 @@ class LatLonCGridOceanModel:
                 f"lateral_viscosity_operator must be one of "
                 f"{sorted(VALID_LATERAL_VISCOSITY_OPERATOR)}, "
                 f"got {config.lateral_viscosity_operator!r}",
+            )
+        _vert_mom_scheme = getattr(
+            config, "vertical_momentum_scheme", "upwind_perturbation")
+        if _vert_mom_scheme not in VALID_VERTICAL_MOMENTUM_SCHEME:
+            raise ValueError(
+                f"vertical_momentum_scheme must be one of "
+                f"{sorted(VALID_VERTICAL_MOMENTUM_SCHEME)}, "
+                f"got {_vert_mom_scheme!r}",
+            )
+        # Reject centered_full + adaptive-implicit vertadv: the adaptive-
+        # implicit path (ln_zad_Aimp) replaces the explicit in-tendency
+        # vertical momentum advection ENTIRELY with an upwind backward-Euler
+        # solve at the step level, so "centered_full" (an explicit-stage
+        # option) would be a silent no-op.  Fail fast rather than mislead.
+        if (_vert_mom_scheme == "centered_full"
+                and getattr(config, "adaptive_implicit_vertadv", False)):
+            raise ValueError(
+                "vertical_momentum_scheme='centered_full' is incompatible "
+                "with adaptive_implicit_vertadv=True: the adaptive-implicit "
+                "scheme replaces the explicit vertical momentum advection "
+                "entirely (upwind backward-Euler at the step level), so the "
+                "centered explicit flux would never be applied. Choose one.",
             )
 
         # The lat-lon C-grid applies OceanSurfaceForcing.tau/q_net/salt DIRECTLY

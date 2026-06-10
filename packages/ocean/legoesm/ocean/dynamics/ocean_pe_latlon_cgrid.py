@@ -103,6 +103,7 @@ from legoesm.ocean.advection import (
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
+    flux_form_vertical_momentum_advection_centered as _flux_form_vertical_momentum_advection_centered,
     compute_centroid_depth,
 )
 
@@ -118,6 +119,21 @@ VALID_MOMENTUM_ADVECTION = frozenset(
 # Reconstruction schemes for the advected velocity in the flux-form path
 # (config.momentum_flux_scheme; only used when momentum_advection="flux_form").
 VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered"})
+# Stage-8 VERTICAL momentum-advection scheme (config.vertical_momentum_scheme),
+# independent of the HORIZONTAL momentum_advection dispatch above:
+#   "upwind_perturbation" (default, bit-identical) — 1st-order interface
+#     upwind of the BAROCLINIC PERTURBATION u' = u - U_bar.  Carries an
+#     implicit vertical viscosity ~|w|*dz/2 that damps baroclinic shear and
+#     omits the depth-integral-zero -d/dz(w*U_bar) redistribution term.
+#   "centered_full" (Veros-faithful) — 2nd-order CENTERED (energy-conserving,
+#     unlimited, dispersive) flux of the FULL velocity u, including the
+#     w*U_bar barotropic-redistribution part.  Stability rests on dt_mom +
+#     A_v/TKE friction like Veros (no limiter, no implicit viscosity).
+# The WENO momentum paths (momentum_advection in {weno5,weno7}) own their own
+# vertical reconstruction and ignore this field.
+VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
+    {"upwind_perturbation", "centered_full"}
+)
 # Lateral (harmonic) momentum-viscosity operator form (config.lateral_viscosity_operator):
 # the default VECTOR Laplacian grad(div)−k×grad(curl), or Veros's component-wise
 # FLUX-DIVERGENCE harmonic friction ∇·(A_h∇u). Validated at config construction;
@@ -1450,11 +1466,24 @@ def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom
 def _bc_vertical_momentum_advection(
     du_dt, dv_dt, u_prime, v_prime, w, h_u, h_v, u_mask_3d, v_mask_3d,
     grid, _mom_adv, _weno_order, config, diagnose_momentum=False,
+    u_full=None, v_full=None,
 ):
     """Stage 8: flux-form vertical advection of the perturbation momentum
     (1st-order upwind, or WENO when momentum_advection is weno5/weno7). Pure
     verbatim extraction (Q8). Returns ``(du_dt, dv_dt, diag_vertadv_u,
     diag_vertadv_v)``.
+
+    ``config.vertical_momentum_scheme`` selects the (non-WENO) explicit
+    vertical-advection variant:
+
+    - ``"upwind_perturbation"`` (default, bit-identical) — 1st-order
+      interface upwind of the PERTURBATION velocity ``u_prime``/``v_prime``.
+    - ``"centered_full"`` (Veros-faithful) — 2nd-order centered,
+      energy-conserving flux of the FULL velocity ``u_full``/``v_full``
+      (restoring the ``-d/dz(w*U_bar)`` barotropic-redistribution term and
+      removing the upwind implicit vertical viscosity).  Requires
+      ``u_full``/``v_full`` to be passed.  The WENO momentum paths ignore
+      this field (they have their own vertical reconstruction).
 
     The ``adaptive_implicit_vertadv`` gate (Shchepetkin 2015 / NEMO
     ln_zad_Aimp) is applied here: when ``config.adaptive_implicit_vertadv``
@@ -1529,22 +1558,49 @@ def _bc_vertical_momentum_advection(
             diag_vertadv_v = _flux_form_vertical_momentum_advection_weno(
                 v_prime, w_v, h_v_old, order=_weno_order)
         else:
-            # Default: 1st-order upwind.  The implicit viscosity
-            # (~|w|*dz/2) damps baroclinic shear that explicit A_v=1e-5
-            # cannot.  Pass u/v face-activity masks so vertical momentum
-            # flux is exactly zero at faces below the seafloor —
-            # otherwise float-precision noise in w_u/w_v drives spurious
-            # tendencies inside the rock (and poorly-conditions
-            # adjoints).  ``u_mask_3d`` may be shape ``(..., 1)`` for
-            # pure z* (2D-broadcast) or ``(..., nlev)`` for partial;
-            # broadcast to the velocity shape so the helper's per-level
-            # slicing along the last axis works.
-            u_face_active = jnp.broadcast_to(u_mask_3d, u_prime.shape)
-            v_face_active = jnp.broadcast_to(v_mask_3d, v_prime.shape)
-            diag_vertadv_u = _flux_form_vertical_momentum_advection(
-                u_prime, w_u, h_u_old, face_active=u_face_active)
-            diag_vertadv_v = _flux_form_vertical_momentum_advection(
-                v_prime, w_v, h_v_old, face_active=v_face_active)
+            # Non-WENO explicit vertical momentum advection.  Pass u/v
+            # face-activity masks so the vertical momentum flux is exactly
+            # zero at faces below the seafloor — otherwise float-precision
+            # noise in w_u/w_v drives spurious tendencies inside the rock
+            # (and poorly-conditions adjoints).  ``u_mask_3d`` may be shape
+            # ``(..., 1)`` for pure z* (2D-broadcast) or ``(..., nlev)`` for
+            # partial; broadcast to the velocity shape so the helper's
+            # per-level slicing along the last axis works.
+            #
+            # Python ``if`` on the static (compile-time) config literal —
+            # the feature-gating exception, not ``jnp.where``.
+            _vert_mom_scheme = getattr(
+                config, "vertical_momentum_scheme", "upwind_perturbation")
+            if _vert_mom_scheme == "centered_full":
+                # Veros-faithful: 2nd-order centered, energy-conserving
+                # flux of the FULL velocity (barotropic + baroclinic).
+                # Restores the -d/dz(w*U_bar) redistribution and removes the
+                # upwind implicit vertical viscosity.  ``u_full``/``v_full``
+                # MUST be supplied (the caller passes the same full u, v that
+                # feed mass transport).  Stability rests on dt_mom + A_v/TKE
+                # friction (no limiter / no implicit viscosity here).
+                if u_full is None or v_full is None:
+                    raise ValueError(
+                        "vertical_momentum_scheme='centered_full' requires "
+                        "u_full and v_full to be passed to "
+                        "_bc_vertical_momentum_advection.",
+                    )
+                u_face_active = jnp.broadcast_to(u_mask_3d, u_full.shape)
+                v_face_active = jnp.broadcast_to(v_mask_3d, v_full.shape)
+                diag_vertadv_u = _flux_form_vertical_momentum_advection_centered(
+                    u_full, w_u, h_u_old, face_active=u_face_active)
+                diag_vertadv_v = _flux_form_vertical_momentum_advection_centered(
+                    v_full, w_v, h_v_old, face_active=v_face_active)
+            else:
+                # Default: 1st-order upwind of the PERTURBATION velocity.
+                # The implicit viscosity (~|w|*dz/2) damps baroclinic shear
+                # that explicit A_v=1e-5 cannot.
+                u_face_active = jnp.broadcast_to(u_mask_3d, u_prime.shape)
+                v_face_active = jnp.broadcast_to(v_mask_3d, v_prime.shape)
+                diag_vertadv_u = _flux_form_vertical_momentum_advection(
+                    u_prime, w_u, h_u_old, face_active=u_face_active)
+                diag_vertadv_v = _flux_form_vertical_momentum_advection(
+                    v_prime, w_v, h_v_old, face_active=v_face_active)
         if not _aimp_vertadv:
             # Explicit path: vertadv is part of the slow baroclinic
             # forcing.  (Flag on: it stays a diagnostic only.)
@@ -2602,9 +2658,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     )
 
     # --- Stage 8: vertical momentum advection. ---
+    # ``u``/``v`` (FULL velocity) are passed as ``u_full``/``v_full`` for the
+    # Veros-faithful ``centered_full`` scheme; the default
+    # ``upwind_perturbation`` scheme ignores them and advects ``u_prime``.
     du_dt, dv_dt, diag_vertadv_u, diag_vertadv_v = _bc_vertical_momentum_advection(
         du_dt, dv_dt, u_prime, v_prime, w, h_u, h_v, u_mask_3d, v_mask_3d,
         grid, _mom_adv, _weno_order, config, diagnose_momentum,
+        u_full=u, v_full=v,
     )
 
     # --- Stage 9: tracer diffusion tendencies (dT_dt, dS_dt). ---

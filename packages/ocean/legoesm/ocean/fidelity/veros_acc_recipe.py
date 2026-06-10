@@ -675,6 +675,20 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         # -0.336->0.715 (vector-invariant was anti-correlated). See the §8 ledger.
         momentum_advection="flux_form",
         momentum_flux_scheme="centered",
+        # VERTICAL momentum advection (stage 8): Veros (core/momentum.py
+        # momentum_advection) advects the FULL velocity with a 2nd-order
+        # CENTERED energy-conserving flux (flux_top = 0.25·(u[k+1]+u[k])·(w+w_east)).
+        # legoESM's default ("upwind_perturbation") instead advects only the
+        # baroclinic PERTURBATION u' = u - U_bar with 1st-order interface
+        # upwind — which (a) OMITS the depth-integral-zero -d/dz(w·U_bar)
+        # redistribution of barotropic momentum into shear, and (b) adds an
+        # implicit vertical viscosity ~|w|·dz/2 that damps baroclinic shear.
+        # Both push the column toward barotropic (the observed ubot/usurf 0.30
+        # vs Veros 0.12). The recipe selects the Veros-faithful "centered_full"
+        # for apples-to-apples (doctrine rule H). Stability rests on dt_mom +
+        # A_v/TKE friction, exactly as in Veros (the centered flux is unlimited
+        # and dispersive, with no implicit viscosity).
+        vertical_momentum_scheme="centered_full",
         # TRACER advection: the recipe selects legoESM's "centered" scheme to
         # match Veros ACC's UNLIMITED centered 2nd-order tracer flux
         # (``veros/core/advection.py`` ``adv_flux_2nd``;
