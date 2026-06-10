@@ -604,7 +604,23 @@ exact + down-slope sign; conservation sum(area·h·dpt)=0 to fp; flat-bottom →
 (d) codex adversarial; (e) 120-day tripole smoke w/ --bbl-adv. NOTE periodicity: interior faces only
 (seam exchange via ew_cyclic_overlap halo slaving on tripole; the omitted wrap face on regular latlon is
 1 face of 360 — documented).
-**Status**: item 1 shipped; item 2 module written, wiring+tests next; item 3 (diffusivity) not started. Production runs in flight:
+**iter-H item 2 BBL SHIPPED (commits 82796b83 + 04e1dd7a, codex round-1 NEEDS-ATTENTION → round-2
+APPROVE zero findings, 107 tests):** exact NEMO trabbl nn_bbl_adv=2 port — eos_rab gating (α/β per
+column at ITS OWN bottom pressure via canonical Wright-EOS derivatives, face-averaged; thermobaricity
+preserved — codex HIGH vs my first mean-pressure Δρ), Campin-Goosse transport, exact 3-leg conservative
+exchange, 0.25·V_min/dt Courant cap, host post-step wiring, `--bbl-adv --bbl-gamma-s 20` (latlon/tripole,
+requires --partial-cell). 120-day cold-start smoke 8458619 in flight.
+**iter-H item 3 DIFFUSIVITY AUDIT (the "fuzzy" answer):** NEMO ORCA1 momentum viscosity = the
+`eddy_viscosity_3D.nc` FILE (nn_ahm_ijk_t=-30, iso-level LAPLACIAN): **1e3–2e4 m²/s, median 2e4** —
+our faithful runs use **A_h=1e5 + C_smag_lap=3.0 (the ¼° stabilizer values) ⇒ 5–10× MORE viscous than
+NEMO** = the fuzziness. Tracers: ours tvd/Van-Leer + GM/Redi κ=600 vs NEMO FCT2 + isoneutral-lap
+(Treguier ~1e3) + EIV — comparable class, tvd slightly more diffusive (we have ppm_fct). NEW
+`--tracer-advection` runner knob (tripole+latlon). **Diffusivity smoke 8458624 launched** (120-day
+tripole: A_h=2e4, C_smag_lap=0.33, ppm_fct + seam fix) — stability is the question (these values were
+raised for the cold start); if stable → next-production candidates.
+**Status**: items 1+2 SHIPPED; item 3 audited + smoke in flight. Next production round (after smokes):
+--runoff-depth-spread-m 150 --river-mouth-restoring-gate --bbl-adv [--A-h 2e4 --C-smag-lap 0.33
+--tracer-advection ppm_fct if visc smoke stable]. Production runs in flight:
 seam-fixed tripole 2yr (8457733, NCAR fluxes + --ew-cyclic-overlap), latlon 1° 2yr (8457282),
 mpas ico6 2yr (8455138). PNG-on-completion promised to user. Each iter-H change: codex adversarial
 review + tests + smoke before production (CLAUDE.md).

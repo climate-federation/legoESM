@@ -485,7 +485,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   smag_cfl_safety=None, convection="none",
                   convection_K_conv=1.0, convection_K_bg=1e-5,
                   freeze_floor=None, ew_cyclic_overlap=None,
-                  runoff_depth_spread_m=None):
+                  runoff_depth_spread_m=None, tracer_advection=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -541,6 +541,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("freeze_floor", freeze_floor),
                               ("ew_cyclic_overlap", ew_cyclic_overlap),
                               ("runoff_depth_spread_m", runoff_depth_spread_m),
+                              ("tracer_advection", tracer_advection),
                               ) if v is not None}
     # Grid-agnostic convective adjustment (Oceananigans-style enhanced
     # vertical diffusivity where N^2 < 0).  The tripole base config ships
@@ -683,7 +684,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   use_polar_filter=None, polar_filter_cutoff_lat_deg=None,
                   polar_filter_max_wave_speed=None,
                   polar_filter_safety_factor=None,
-                  runoff_depth_spread_m=None):
+                  runoff_depth_spread_m=None, tracer_advection=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -722,6 +723,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("smag_cfl_safety", smag_cfl_safety),
                               ("freeze_floor", freeze_floor),
                               ("runoff_depth_spread_m", runoff_depth_spread_m),
+                              ("tracer_advection", tracer_advection),
                               ("use_polar_filter", use_polar_filter),
                               ("polar_filter_cutoff_lat_deg",
                                polar_filter_cutoff_lat_deg),
@@ -1727,6 +1729,12 @@ def main() -> int:
     p.add_argument("--pgf-scheme", type=str, default=None, choices=[None, "adcroft", "smc03"],
                    help="Override tripole PGF scheme (default: run_omip's adcroft).")
     p.add_argument("--A-h", type=float, default=None, help="Override Laplacian viscosity [m2/s].")
+    p.add_argument("--tracer-advection", type=str, default=None,
+                   help="Override the tracer advection scheme (e.g. ppm_fct "
+                        "-- closest to NEMO's FCT2 and less diffusive at "
+                        "fronts than the default tvd/Van-Leer; also weno5, "
+                        "dst3, superbee). Validated per-scheme by the ocean "
+                        "matrix; smoke before production.")
     p.add_argument("--B-h", type=float, default=None, help="Override biharmonic viscosity [m4/s].")
     p.add_argument("--K-bih", type=float, default=None,
                    help="Biharmonic tracer hyperdiffusion [m4/s] -- scale-selectively "
@@ -2086,6 +2094,7 @@ def main() -> int:
             convection_K_conv=args.convection_K_conv,
             convection_K_bg=args.convection_K_bg,
             ew_cyclic_overlap=(True if args.ew_cyclic_overlap else None),
+            tracer_advection=args.tracer_advection,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -2135,6 +2144,7 @@ def main() -> int:
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
             freeze_floor=(True if args.freeze_floor else None),
             runoff_depth_spread_m=args.runoff_depth_spread_m,
+            tracer_advection=args.tracer_advection,
             barotropic_solver=args.barotropic_solver,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,
