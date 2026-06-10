@@ -30,10 +30,12 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid
+from legoesm.atmosphere.physics.turbulence.clubb_solve import penta_solve
 
 from legoesm import constants
 
 _TWO_THIRDS = 2.0 / 3.0
+_GAMMA = 1.5   # gamma_over_implicit_ts (constants_clubb)
 
 
 def weights_zt2zm(gr: CLUBBGrid):
@@ -356,6 +358,136 @@ def wp3_term_pr_turb_rhs(C_wp3_pr_turb, Kh_zt, wpthvp, dum_dz, dvm_dz,
     return rhs
 
 
+# ---------------------------------------------------------------------------
+# Pentadiagonal assembly + solve (interleaved wp2[2k] / wp3[2k+1])
+# ---------------------------------------------------------------------------
+
+def wp23_rhs(*, nzm, invrs_dt, rhs_pr_turb_wp3, rhs_pr_dfsn_wp3, rhs_pr_dfsn_wp2,
+             rhs_pr1_wp2, rhs_bp1_pr2_wp3, rhs_pr1_wp3, rhs_bp_pr2_wp2,
+             rhs_pr3_wp2, rhs_dp1_wp2, lhs_pr1_wp2, lhs_tp_wp3, lhs_pr1_wp3,
+             lhs_dp1_wp2, lhs_ta_wp3, wp2, wp3, w_tol_sqd,
+             l_ho_nontrad_coriolis=False, fcor_y=None, wp2up=None, upwp=None):
+    """Assemble the coupled wp2/wp3 explicit RHS vector (``wp23_rhs``).
+
+    Faithful port of ``advance_wp2_wp3_module.F90:wp23_rhs``. Interleaving: wp2[k]
+    at global index 2k, wp3[k] at 2k+1 (ascending grid). Over-implicit terms use
+    the ``(1 - gamma)·(-lhs·field)`` contributions; the four corner rows are the
+    BCs (lower wp2 = current value, lower/upper wp3 = 0, upper wp2 = ``w_tol_sqd``).
+    ``l_ho_nontrad_coriolis`` (CAM ``.false.``) is a static feature gate. Returns
+    ``(ncol, 2*nzm-1)``.
+    """
+    ngrdcol = wp2.shape[0]
+    ndim = 2 * nzm - 1
+    rhs = jnp.zeros((ngrdcol, ndim), dtype=wp2.dtype)
+
+    # wp3 interior (global 3,5,..): pressure-turb + pressure-dfsn
+    rhs = rhs.at[:, 3:-2:2].set(rhs_pr_turb_wp3[:, 1:-1] + rhs_pr_dfsn_wp3[:, 1:-1])
+    # wp2 interior (global 2,4,..): pressure-dfsn
+    rhs = rhs.at[:, 2:-1:2].set(rhs_pr_dfsn_wp2[:, 1:-1])
+
+    # l_tke_aniso=True: wp2 pr1 + over-implicit pr1
+    rhs = rhs.at[:, 2:-1:2].add(rhs_pr1_wp2[:, 1:-1])
+    rhs = rhs.at[:, 2:-1:2].add((1.0 - _GAMMA) * (-lhs_pr1_wp2[:, 1:-1] * wp2[:, 1:-1]))
+
+    # wp3 time tendency + turbulent production (over-implicit) + buoyancy/pr2/pr1
+    rhs = rhs.at[:, 3:-2:2].add(invrs_dt * wp3[:, 1:-1])
+    rhs = rhs.at[:, 3:-2:2].add(
+        (1.0 - _GAMMA) * (-lhs_tp_wp3[0, :, 1:-1] * wp2[:, 2:-1]
+                          - lhs_tp_wp3[1, :, 1:-1] * wp2[:, 1:-2]))
+    rhs = rhs.at[:, 3:-2:2].add(rhs_bp1_pr2_wp3[:, 1:-1])
+    rhs = rhs.at[:, 3:-2:2].add(rhs_pr1_wp3[:, 1:-1])
+    rhs = rhs.at[:, 3:-2:2].add((1.0 - _GAMMA) * (-lhs_pr1_wp3[:, 1:-1] * wp3[:, 1:-1]))
+
+    # wp2 time tendency + buoyancy/pr2 + pr3 + dp1 (over-implicit)
+    rhs = rhs.at[:, 2:-1:2].add(invrs_dt * wp2[:, 1:-1])
+    rhs = rhs.at[:, 2:-1:2].add(rhs_bp_pr2_wp2[:, 1:-1])
+    rhs = rhs.at[:, 2:-1:2].add(rhs_pr3_wp2[:, 1:-1])
+    rhs = rhs.at[:, 2:-1:2].add(rhs_dp1_wp2[:, 1:-1])
+    rhs = rhs.at[:, 2:-1:2].add((1.0 - _GAMMA) * (-lhs_dp1_wp2[:, 1:-1] * wp2[:, 1:-1]))
+
+    # ADG1 TA for wp3 (over-implicit, 5 bands)
+    rhs = rhs.at[:, 3:-2:2].add(
+        (1.0 - _GAMMA) * (
+            -lhs_ta_wp3[0, :, 1:-1] * wp3[:, 2:]
+            - lhs_ta_wp3[1, :, 1:-1] * wp2[:, 2:-1]
+            - lhs_ta_wp3[2, :, 1:-1] * wp3[:, 1:-1]
+            - lhs_ta_wp3[3, :, 1:-1] * wp2[:, 1:-2]
+            - lhs_ta_wp3[4, :, 1:-1] * wp3[:, :-2]))
+
+    if l_ho_nontrad_coriolis:   # CAM default False (static gate)
+        fy = jnp.asarray(fcor_y)
+        fy = fy[:, None] if fy.ndim == 1 else fy
+        rhs = rhs.at[:, 2:-1:2].add(2.0 * fy * upwp[:, 1:-1])
+        rhs = rhs.at[:, 3:-2:2].add(3.0 * fy * jnp.asarray(wp2up)[:, 1:-1])
+
+    # Boundary conditions (k_lb_zm = 0 on the ascending grid)
+    rhs = rhs.at[:, 0].set(wp2[:, 0])
+    rhs = rhs.at[:, 1].set(0.0)
+    rhs = rhs.at[:, 2 * nzm - 3].set(0.0)
+    rhs = rhs.at[:, 2 * nzm - 2].set(w_tol_sqd)
+    return rhs
+
+
+def wp23_lhs(*, nzm, ndim, invrs_dt, lhs_ma_zm, lhs_diff_zm, lhs_ta_wp2,
+             lhs_ac_pr2_wp2, lhs_dp1_wp2, lhs_pr1_wp2, lhs_splat_wp2,
+             lhs_ma_zt, lhs_diff_zt, lhs_tp_wp3, lhs_ac_pr2_wp3, lhs_pr1_wp3,
+             lhs_splat_wp3, lhs_ta_wp3):
+    """Assemble the coupled wp2/wp3 pentadiagonal LHS matrix (``wp23_lhs``).
+
+    Faithful port of ``advance_wp2_wp3_module.F90:wp23_lhs``. Bands
+    ``[super2, super1, main, sub1, sub2]``; wp2[k] at 2k, wp3[k] at 2k+1.
+    Over-implicit implicit terms are scaled by gamma; identity rows pin the four
+    BC corners. ``l_tke_aniso=True`` (wp2 pr1 on the main diagonal) and the splat
+    terms (CAM ``C_wp2_splat=0`` → zero) are included. Returns ``(5, ncol, 2*nzm-1)``.
+    """
+    ngrdcol = lhs_dp1_wp2.shape[0]
+    lhs = jnp.zeros((5, ngrdcol, ndim), dtype=lhs_dp1_wp2.dtype)
+
+    # Lower BC identity (wp2 global 0, wp3 global 1)
+    lhs = lhs.at[2, :, 0].set(1.0)
+    lhs = lhs.at[2, :, 1].set(1.0)
+
+    # wp2 interior rows
+    lhs = lhs.at[0, :, 2:-1:2].set(lhs_ma_zm[0, :, 1:-1] + lhs_diff_zm[0, :, 1:-1])
+    lhs = lhs.at[1, :, 2:-1:2].set(lhs_ta_wp2[0, :, 1:-1])
+    lhs = lhs.at[2, :, 2:-1:2].set(
+        lhs_ma_zm[1, :, 1:-1] + lhs_diff_zm[1, :, 1:-1] + lhs_ac_pr2_wp2[:, 1:-1]
+        + _GAMMA * lhs_dp1_wp2[:, 1:-1] + invrs_dt)
+    lhs = lhs.at[3, :, 2:-1:2].set(lhs_ta_wp2[1, :, 1:-1])
+    lhs = lhs.at[4, :, 2:-1:2].set(lhs_ma_zm[2, :, 1:-1] + lhs_diff_zm[2, :, 1:-1])
+    lhs = lhs.at[2, :, 2:-1:2].add(_GAMMA * lhs_pr1_wp2[:, 1:-1])   # l_tke_aniso=True
+    lhs = lhs.at[2, :, 2:-1:2].add(lhs_splat_wp2[:, 1:-1])
+
+    # wp3 interior rows
+    lhs = lhs.at[0, :, 3:-2:2].set(lhs_ma_zt[0, :, 1:-1] + lhs_diff_zt[0, :, 1:-1])
+    lhs = lhs.at[1, :, 3:-2:2].set(_GAMMA * lhs_tp_wp3[0, :, 1:-1])
+    lhs = lhs.at[2, :, 3:-2:2].set(
+        lhs_ma_zt[1, :, 1:-1] + lhs_diff_zt[1, :, 1:-1] + lhs_ac_pr2_wp3[:, 1:-1]
+        + _GAMMA * lhs_pr1_wp3[:, 1:-1] + lhs_splat_wp3[:, 1:-1] + invrs_dt)
+    lhs = lhs.at[3, :, 3:-2:2].set(_GAMMA * lhs_tp_wp3[1, :, 1:-1])
+    lhs = lhs.at[4, :, 3:-2:2].set(lhs_ma_zt[2, :, 1:-1] + lhs_diff_zt[2, :, 1:-1])
+
+    # ADG1 TA for wp3: add gamma*lhs_ta_wp3 to all 5 bands of the wp3 rows
+    for b in range(5):
+        lhs = lhs.at[b, :, 3:-2:2].add(_GAMMA * lhs_ta_wp3[b, :, 1:-1])
+
+    # Upper BC identity (wp3 global 2*nzm-3, wp2 global 2*nzm-2)
+    lhs = lhs.at[2, :, 2 * nzm - 3].set(1.0)
+    lhs = lhs.at[2, :, 2 * nzm - 2].set(1.0)
+    return lhs
+
+
+def wp23_solve(lhs, rhs):
+    """Pentadiagonal solve + de-interleave (``wp23_solve``).
+
+    Solves the coupled system with the CLUBB-band penta LU
+    (:func:`clubb_solve.penta_solve`) and splits the solution: wp2 on even
+    slots, wp3 on odd. Returns ``(wp2_new, wp3_new)``.
+    """
+    solution = penta_solve(lhs, rhs)
+    return solution[:, 0::2], solution[:, 1::2]
+
+
 __all__ = [
     "weights_zt2zm",
     "wp2_term_ta_lhs",
@@ -375,4 +507,7 @@ __all__ = [
     "wp3_term_pr1_rhs",
     "wp2_term_dp1_rhs",
     "wp3_term_pr_turb_rhs",
+    "wp23_rhs",
+    "wp23_lhs",
+    "wp23_solve",
 ]

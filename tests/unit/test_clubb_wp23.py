@@ -347,5 +347,173 @@ def test_rhs_cam_eq_arm_builders_parity():
         R.wp3_term_pr1_rhs(p["C8"], p["C8b"], p["invrs_tau_wp3_zt"], p["Skw_zt"], p["wp3"]))
 
 
+# --------------------------------------------------------------------------
+# Pentadiagonal assembly + solve
+# --------------------------------------------------------------------------
+
+def _assembly_inputs(ng, nzm, seed=8):
+    nzt = nzm - 1
+    rng = np.random.default_rng(seed)
+
+    def a(*shape):
+        return jnp.asarray(rng.standard_normal(shape))
+
+    return dict(
+        invrs_dt=1.0 / 300.0, w_tol_sqd=float((2.0e-2) ** 2),
+        # RHS term arrays
+        rhs_pr_turb_wp3=a(ng, nzt), rhs_pr_dfsn_wp3=a(ng, nzt),
+        rhs_pr_dfsn_wp2=a(ng, nzm), rhs_pr1_wp2=a(ng, nzm),
+        rhs_bp1_pr2_wp3=a(ng, nzt), rhs_pr1_wp3=a(ng, nzt),
+        rhs_bp_pr2_wp2=a(ng, nzm), rhs_pr3_wp2=a(ng, nzm), rhs_dp1_wp2=a(ng, nzm),
+        lhs_pr1_wp2=a(ng, nzm), lhs_tp_wp3=a(2, ng, nzt), lhs_pr1_wp3=a(ng, nzt),
+        lhs_dp1_wp2=a(ng, nzm), lhs_ta_wp3=a(5, ng, nzt),
+        wp2=jnp.asarray(0.2 + rng.random((ng, nzm))),
+        wp3=a(ng, nzt),
+        # LHS term arrays
+        lhs_ma_zm=a(3, ng, nzm), lhs_diff_zm=a(3, ng, nzm), lhs_ta_wp2=a(2, ng, nzm),
+        lhs_ac_pr2_wp2=a(ng, nzm), lhs_splat_wp2=jnp.zeros((ng, nzm)),
+        lhs_ma_zt=a(3, ng, nzt), lhs_diff_zt=a(3, ng, nzt),
+        lhs_ac_pr2_wp3=a(ng, nzt), lhs_splat_wp3=jnp.zeros((ng, nzt)),
+    )
+
+
+def _call_wp23_rhs(p, nzm):
+    return W.wp23_rhs(
+        nzm=nzm, invrs_dt=p["invrs_dt"], rhs_pr_turb_wp3=p["rhs_pr_turb_wp3"],
+        rhs_pr_dfsn_wp3=p["rhs_pr_dfsn_wp3"], rhs_pr_dfsn_wp2=p["rhs_pr_dfsn_wp2"],
+        rhs_pr1_wp2=p["rhs_pr1_wp2"], rhs_bp1_pr2_wp3=p["rhs_bp1_pr2_wp3"],
+        rhs_pr1_wp3=p["rhs_pr1_wp3"], rhs_bp_pr2_wp2=p["rhs_bp_pr2_wp2"],
+        rhs_pr3_wp2=p["rhs_pr3_wp2"], rhs_dp1_wp2=p["rhs_dp1_wp2"],
+        lhs_pr1_wp2=p["lhs_pr1_wp2"], lhs_tp_wp3=p["lhs_tp_wp3"],
+        lhs_pr1_wp3=p["lhs_pr1_wp3"], lhs_dp1_wp2=p["lhs_dp1_wp2"],
+        lhs_ta_wp3=p["lhs_ta_wp3"], wp2=p["wp2"], wp3=p["wp3"],
+        w_tol_sqd=p["w_tol_sqd"])
+
+
+def _call_wp23_lhs(p, nzm):
+    ndim = 2 * nzm - 1
+    return W.wp23_lhs(
+        nzm=nzm, ndim=ndim, invrs_dt=p["invrs_dt"], lhs_ma_zm=p["lhs_ma_zm"],
+        lhs_diff_zm=p["lhs_diff_zm"], lhs_ta_wp2=p["lhs_ta_wp2"],
+        lhs_ac_pr2_wp2=p["lhs_ac_pr2_wp2"], lhs_dp1_wp2=p["lhs_dp1_wp2"],
+        lhs_pr1_wp2=p["lhs_pr1_wp2"], lhs_splat_wp2=p["lhs_splat_wp2"],
+        lhs_ma_zt=p["lhs_ma_zt"], lhs_diff_zt=p["lhs_diff_zt"],
+        lhs_tp_wp3=p["lhs_tp_wp3"], lhs_ac_pr2_wp3=p["lhs_ac_pr2_wp3"],
+        lhs_pr1_wp3=p["lhs_pr1_wp3"], lhs_splat_wp3=p["lhs_splat_wp3"],
+        lhs_ta_wp3=p["lhs_ta_wp3"])
+
+
+def test_wp23_assembly_shapes_and_bc():
+    ng, nzm = 2, 11
+    p = _assembly_inputs(ng, nzm)
+    rhs = np.asarray(_call_wp23_rhs(p, nzm))
+    lhs = np.asarray(_call_wp23_lhs(p, nzm))
+    ndim = 2 * nzm - 1
+    assert rhs.shape == (ng, ndim) and lhs.shape == (5, ng, ndim)
+    # BC corner rows: main band = 1, off-diagonals = 0
+    for c in (0, 1, ndim - 2, ndim - 1):
+        assert np.allclose(lhs[2, :, c], 1.0)
+        for b in (0, 1, 3, 4):
+            assert np.allclose(lhs[b, :, c], 0.0)
+    # RHS BCs: lower wp2 (0)=value, lower wp3 (1)=0, upper wp3 (ndim-2)=0,
+    # upper wp2 (ndim-1)=w_tol_sqd  [globals 2*nzm-3 and 2*nzm-2]
+    np.testing.assert_array_equal(rhs[:, 0], np.asarray(p["wp2"])[:, 0])
+    assert np.allclose(rhs[:, 1], 0.0) and np.allclose(rhs[:, ndim - 2], 0.0)
+    np.testing.assert_array_equal(rhs[:, ndim - 1], p["w_tol_sqd"])
+
+
+def test_wp23_assembly_matches_golden():
+    ng, nzm = 2, 11
+    p = _assembly_inputs(ng, nzm)
+    g = np.load(_FIX / "clubb_wp23_assembly_golden.npz")
+    np.testing.assert_array_equal(np.asarray(_call_wp23_rhs(p, nzm)), g["rhs"])
+    np.testing.assert_array_equal(np.asarray(_call_wp23_lhs(p, nzm)), g["lhs"])
+
+
+def test_wp23_solve_deinterleaves():
+    ng, nzm = 2, 9
+    ndim = 2 * nzm - 1
+    rng = np.random.default_rng(3)
+    # Diagonally dominant penta system
+    lhs = jnp.asarray(0.1 * rng.standard_normal((5, ng, ndim)))
+    lhs = lhs.at[2].set(10.0 + rng.random((ng, ndim)))
+    rhs = jnp.asarray(rng.standard_normal((ng, ndim)))
+    wp2, wp3 = W.wp23_solve(lhs, rhs)
+    assert wp2.shape == (ng, nzm) and wp3.shape == (ng, nzm - 1)
+    assert np.all(np.isfinite(np.asarray(wp2))) and np.all(np.isfinite(np.asarray(wp3)))
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_wp23_assembly_parity():
+    """Bit-exact parity of wp23_rhs / wp23_lhs vs CLUBB-JAX (pure interleaving)."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_wp2_wp3_module as R  # noqa: N812
+
+    ng, nzm = 2, 11
+    nzt = nzm - 1
+    p = _assembly_inputs(ng, nzm)
+    gr, _, _ = _gr(ng=ng, nzt=nzt)
+    rg = _refgr(gr, ng, nzm)
+    ndim = 2 * nzm - 1
+
+    ref_rhs = R.wp23_rhs(
+        nzm=nzm, ngrdcol=ng, invrs_dt=p["invrs_dt"],
+        rhs_pr_turb_wp3=p["rhs_pr_turb_wp3"], rhs_pr_dfsn_wp3=p["rhs_pr_dfsn_wp3"],
+        rhs_pr_dfsn_wp2=p["rhs_pr_dfsn_wp2"], rhs_pr1_wp2=p["rhs_pr1_wp2"],
+        rhs_bp1_pr2_wp3=p["rhs_bp1_pr2_wp3"], rhs_pr1_wp3=p["rhs_pr1_wp3"],
+        rhs_bp_pr2_wp2=p["rhs_bp_pr2_wp2"], rhs_pr3_wp2=p["rhs_pr3_wp2"],
+        rhs_dp1_wp2=p["rhs_dp1_wp2"], lhs_pr1_wp2=p["lhs_pr1_wp2"],
+        lhs_tp_wp3=p["lhs_tp_wp3"], lhs_pr1_wp3=p["lhs_pr1_wp3"],
+        lhs_dp1_wp2=p["lhs_dp1_wp2"], lhs_ta_wp3=p["lhs_ta_wp3"],
+        wp2=p["wp2"], wp3=p["wp3"], wp2up=jnp.zeros((ng, nzt)),
+        upwp=jnp.zeros((ng, nzm)), l_ho_nontrad_coriolis=False, fcor_y=None, gr=rg)
+    np.testing.assert_array_equal(np.asarray(_call_wp23_rhs(p, nzm)), np.asarray(ref_rhs))
+
+    ref_lhs = R.wp23_lhs(
+        nzm=nzm, ngrdcol=ng, ndim=ndim, invrs_dt=p["invrs_dt"],
+        lhs_ma_zm=p["lhs_ma_zm"], lhs_diff_zm=p["lhs_diff_zm"], lhs_ta_wp2=p["lhs_ta_wp2"],
+        lhs_ac_pr2_wp2=p["lhs_ac_pr2_wp2"], lhs_dp1_wp2=p["lhs_dp1_wp2"],
+        lhs_pr1_wp2=p["lhs_pr1_wp2"], lhs_splat_wp2=p["lhs_splat_wp2"],
+        lhs_ma_zt=p["lhs_ma_zt"], lhs_diff_zt=p["lhs_diff_zt"], lhs_tp_wp3=p["lhs_tp_wp3"],
+        lhs_ac_pr2_wp3=p["lhs_ac_pr2_wp3"], lhs_pr1_wp3=p["lhs_pr1_wp3"],
+        lhs_splat_wp3=p["lhs_splat_wp3"], lhs_ta_wp3=p["lhs_ta_wp3"])
+    np.testing.assert_array_equal(np.asarray(_call_wp23_lhs(p, nzm)), np.asarray(ref_lhs))
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_wp23_solve_parity():
+    """Round-off parity of wp23_solve vs CLUBB-JAX (legoESM penta LU vs reference)."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_wp2_wp3_module as R  # noqa: N812
+    ng, nzm = 2, 9
+    ndim = 2 * nzm - 1
+    rng = np.random.default_rng(4)
+    lhs = jnp.asarray(0.1 * rng.standard_normal((5, ng, ndim)))
+    lhs = lhs.at[2].set(10.0 + rng.random((ng, ndim)))
+    rhs = jnp.asarray(rng.standard_normal((ng, ndim)))
+    m2, m3 = W.wp23_solve(lhs, rhs)
+    r2, r3 = R.wp23_solve(lhs, rhs)
+    np.testing.assert_allclose(np.asarray(m2), np.asarray(r2), rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(m3), np.asarray(r3), rtol=1e-9, atol=1e-12)
+
+
+def test_wp23_assembly_jit_grad():
+    ng, nzm = 2, 11
+    p = _assembly_inputs(ng, nzm)
+
+    def loss(wp2):
+        rhs = _call_wp23_rhs(dict(p, wp2=wp2), nzm)
+        lhs = _call_wp23_lhs(dict(p, wp2=wp2), nzm)
+        a, b = W.wp23_solve(lhs, rhs)
+        return jnp.sum(a ** 2) + jnp.sum(b ** 2)
+
+    assert jnp.isfinite(jax.jit(loss)(p["wp2"]))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(p["wp2"])))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
