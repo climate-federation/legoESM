@@ -1262,8 +1262,25 @@ def gm_redi_tracer_tendency_latlon(
             # the module constant — keeps Visbeck consistent with the pinned Ω
             # (e.g. a Veros recipe) and avoids an inline constants.Omega read.
             f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
+        # Adiabatic Eady-N² for the Visbeck diagnostic (default insitu ⇒
+        # kwargs None ⇒ byte-identical). Build the cell-centre pressure +
+        # pass T/S/EOS only when the Visbeck config opts in.
+        _T_vb = _S_vb = _p_vb = _eos_vb = None
+        if getattr(cfg.visbeck, "n2_mode", "insitu") == "adiabatic":
+            from legoesm.ocean.eos import compute_hydrostatic_pressure
+            from legoesm.ocean.vertical import (
+                OceanPartialCellCoordinate, compute_layer_thickness,
+            )
+            _h_actual = None
+            if isinstance(z_coord, OceanPartialCellCoordinate):
+                _h_actual = compute_layer_thickness(eta, H_bathy, z_coord)
+            _p_vb = compute_hydrostatic_pressure(
+                rho, eta, z_coord.dz_ref, jacobian, rho_0, h_actual=_h_actual,
+            )
+            _T_vb, _S_vb, _eos_vb = T, S, eos_fn
         kappa_GM = compute_visbeck_kappa_gm(
             rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg.visbeck,
+            T=_T_vb, S=_S_vb, p_cell=_p_vb, eos_fn=_eos_vb,
         )
     else:
         kappa_GM = cfg.kappa_GM
@@ -1866,8 +1883,29 @@ def compute_eke_step_kappa(
     beta = jnp.broadcast_to(
         (2.0 * omega * grid.cos_lat / r_earth)[:, None], mask.shape,
     )
+    # Adiabatic static-stability N² (Veros EKE chain) needs the cell-centre
+    # hydrostatic pressure + the same EOS as the dynamical core. Only built
+    # when the EKE config opts in (``n2_mode="adiabatic"``) so the default
+    # ("insitu") path is byte-identical (kwargs stay None).
+    T_eos = S_eos = p_cell = eos_for_n2 = None
+    if getattr(cfg.eke, "n2_mode", "insitu") == "adiabatic":
+        from legoesm.ocean.eos import compute_hydrostatic_pressure
+        from legoesm.ocean.vertical import (
+            OceanPartialCellCoordinate, compute_layer_thickness,
+        )
+        # Partial-cell thickness when applicable (matches k_profiles.py's
+        # adiabatic-N² path), else compute_hydrostatic_pressure falls back to
+        # dz_ref * jacobian internally.
+        h_actual = None
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            h_actual = compute_layer_thickness(eta, H_bathy, z_coord)
+        p_cell = compute_hydrostatic_pressure(
+            rho, eta, z_coord.dz_ref, jacobian, rho_0, h_actual=h_actual,
+        )
+        T_eos, S_eos, eos_for_n2 = T, S, eos_fn
     return compute_eke_kappa_gm(
         eke, rho, S_x, S_y, z_coord, jacobian, f_coriolis,
         cfg.visbeck, cfg.eke, rho_ref=rho_0, beta=beta,
         depth_resolved=depth_resolved,
+        T=T_eos, S=S_eos, p_cell=p_cell, eos_fn=eos_for_n2,
     )

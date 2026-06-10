@@ -232,10 +232,18 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
     #   - gm_source_mode="realized": use the REALIZED GM-skew buoyancy conversion
     #     -(g/ρ₀)∇ρ·F_skew (Veros -P_diss_skew, ~42%) instead of the parameterized
     #     kappa_GM·σ² (which under-counts the per-triad slope variance <S²>≥<S>²).
+    #   - n2_mode="adiabatic": the Eady/deformation-radius N² by adiabatic parcel
+    #     displacement to the upper cell's pressure (Veros eke.py:50-54 via
+    #     thermodynamics.py:99-105), the true static stability the Veros EKE chain
+    #     uses. The legacy in-situ N² is biased ~6x too stable (compressibility) →
+    #     ∫N dz ~2.7x too large → eke_len ~23% too long → EKE dissipation (∝1/L)
+    #     too weak (~71% of the runaway-EKE bias; the third in-situ-vs-locally-
+    #     referenced instance after convection-N² and neutral slopes). Mirrors the
+    #     TKE n2_mode="adiabatic" above.
     eke=EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0,
                   isopycnal_diffusion=True, eke_3d=True,
                   source_kdiss_h=True, kdiss_h_flux_form=True,
-                  gm_source_mode="realized"),
+                  gm_source_mode="realized", n2_mode="adiabatic"),
 )
 
 # Surface restoring timescale

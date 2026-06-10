@@ -117,6 +117,22 @@ class EKEConfig(NamedTuple):
     #     under-counts. Replaces the parameterized P in the EKE source; the GM
     #     tracer flux itself is unchanged. ACC recipe opts in.
     gm_source_mode: str = "parameterized"
+    # Static-stability N² mode for the Eady-growth / deformation-radius chain
+    # (governs eke_len via the column buoyancy integral ∫N dz and the Eady
+    # production σ = N|S|). Mirrors TKEConfig.n2_mode.
+    #   "insitu" (default, BIT-IDENTICAL legacy): N² from the in-situ density
+    #     gradient (compute_buoyancy_frequency). Biased ~6x too stable
+    #     (compressibility) → ∫N dz ~2.7x too large → eke_len ~23% too long →
+    #     EKE dissipation (∝1/L) too weak (a runaway-EKE lever; the third
+    #     in-situ-vs-locally-referenced bug instance after convection-N² and
+    #     neutral slopes).
+    #   "adiabatic": N² by adiabatic parcel displacement to the upper cell's
+    #     pressure (Veros eke.py:50-54 via thermodynamics.py:99-103) — the true
+    #     static stability the Veros EKE chain uses. Requires the EKE step to
+    #     supply T, S, an EOS and the cell-centre pressure to displace parcels
+    #     through the EOS; raises otherwise. (For "rhines" eke_len this directly
+    #     corrects the deformation radius c₁ = ∫N dz / π.)
+    n2_mode: str = "insitu"
 
 
 def eke_mixing_length(L_rossby: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
