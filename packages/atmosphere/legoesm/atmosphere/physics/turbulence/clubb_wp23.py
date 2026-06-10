@@ -29,7 +29,18 @@ differentiable.
 from __future__ import annotations
 
 import jax.numpy as jnp
-from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, zm2zt
+from legoesm.atmosphere.physics.turbulence.clubb_fill_holes import (
+    fill_holes_vertical,
+    fill_holes_wp2_from_horz_tke,
+)
+from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, ddzt, zm2zt
+from legoesm.atmosphere.physics.turbulence.clubb_moments import (
+    clip_variance,
+    diffusion_zm_lhs,
+    diffusion_zt_lhs,
+    term_ma_zm_lhs,
+    term_ma_zt_lhs_upwind,
+)
 from legoesm.atmosphere.physics.turbulence.clubb_solve import penta_solve
 
 from legoesm import constants
@@ -394,41 +405,6 @@ def wp3_term_pr_turb_rhs(C_wp3_pr_turb, Kh_zt, wpthvp, dum_dz, dvm_dz,
     return rhs
 
 
-def term_ma_zt_lhs(wm_zt, gr: CLUBBGrid):
-    """Centered mean-advection LHS for a zt-level variable (``term_ma_zt_lhs``).
-
-    Faithful port of the centered (``.not. l_upwind_xm_ma``) branch of
-    ``mean_adv.F90:term_ma_zt_lhs`` — the form used by the wp3 mean advection
-    (the ``l_upwind_xm_ma`` flag gates only the *scalar/wind* advance, not the
-    wp2/wp3 moments). Uses the inline zt->zm weights. ``(3, ncol, nzt)`` =
-    ``[super, main, sub]``; the boundary rows use the reference's
-    ``(1 - weight)`` extension.
-    """
-    w = weights_zt2zm(gr)
-    invrs_dzt = gr.invrs_dzt
-    ngrdcol = wm_zt.shape[0]
-
-    fac = wm_zt[:, 1:-1] * invrs_dzt[:, 1:-1]
-    super_int = fac * w[:, 2:-1, 0]
-    main_int = fac * (w[:, 2:-1, 1] - w[:, 1:-2, 0])
-    sub_int = -fac * w[:, 1:-2, 1]
-
-    fac0 = wm_zt[:, 0] * invrs_dzt[:, 0]
-    sup_bot = fac0 * w[:, 1, 0]
-    mid_bot = -fac0 * (1.0 - w[:, 1, 1])
-    sub_bot = jnp.zeros((ngrdcol,), dtype=wm_zt.dtype)
-
-    fac_top = wm_zt[:, -1] * invrs_dzt[:, -1]
-    sup_top = jnp.zeros((ngrdcol,), dtype=wm_zt.dtype)
-    mid_top = fac_top * (1.0 - w[:, -2, 0])
-    sub_top = -fac_top * w[:, -2, 1]
-
-    sup = jnp.concatenate([sup_bot[:, None], super_int, sup_top[:, None]], axis=1)
-    mid = jnp.concatenate([mid_bot[:, None], main_int, mid_top[:, None]], axis=1)
-    sub = jnp.concatenate([sub_bot[:, None], sub_int, sub_top[:, None]], axis=1)
-    return jnp.stack([sup, mid, sub], axis=0)
-
-
 def compute_a1_a3_coef(sigma_sqd_w, a3_coef_min, gr: CLUBBGrid):
     """ADG1 ``a1``/``a3`` coefficients on zm and zt levels (``advance_wp2_wp3`` pre-compute).
 
@@ -589,6 +565,137 @@ def wp23_solve(lhs, rhs):
     return solution[:, 0::2], solution[:, 1::2]
 
 
+def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
+                    wpup2, wpvp2, wp2up2, wp2vp2, wp4, wpthvp, wp2thvp,
+                    um, vm, upwp, vpwp, wm_zm, wm_zt, Kh_zm, Kh_zt,
+                    invrs_tau_C4_zm, invrs_tau_wp3_zt, invrs_tau_C1_zm,
+                    Skw_zm, Skw_zt, rho_ds_zm, rho_ds_zt,
+                    invrs_rho_ds_zm, invrs_rho_ds_zt, thv_ds_zm, thv_ds_zt,
+                    sfc_elevation, dt, gr: CLUBBGrid, config):
+    """Advance the coupled wp2 (zm) / wp3 (zt) second/third moments one step.
+
+    Faithful port of the core (non-budget) path of
+    ``advance_wp2_wp3_module.F90:advance_wp2_wp3`` for the CAM-default tree.
+    Assembles the RHS/LHS term builders (:mod:`clubb_wp23`), the diffusion LHS
+    (:mod:`clubb_moments`) and the centered mean-advection operators, solves the
+    interleaved pentadiagonal system (:func:`wp23_solve`), then applies the
+    post-solve chain: ``fill_holes_vertical`` → ``fill_holes_wp2_from_horz_tke``
+    (``l_wp2_fill_holes_tke``) → ``clip_variance`` (``l_min_wp2_from_corr_wx =
+    False`` → the simple ``w_tol^2`` floor) → ``clip_skewness``.
+
+    CAM gating (static / param): ``l_damp_wp2_using_em = False`` (the
+    ``wp2_term_dp1_rhs`` floor form; ``C1_Skw_fnc`` carries no ``1/3``),
+    ``l_damp_wp3_Skw_squared = False`` (``C8b = 0``),
+    ``l_use_tke_in_wp3_pr_turb_term = False`` (the shear ``wp3_term_pr_turb_rhs``
+    using ``dum/dvm_dz = ddzt(um/vm)``), ``l_tke_aniso = True``,
+    ``C_wp2/wp3_splat = 0``, ``l_ho_nontrad_coriolis = False``,
+    ``l_use_wp3_lim_with_smth_Heaviside = False``. Means on zt; moments/fluxes on
+    the noted grids. Budget/stats (``l_sample``) are not part of the live path.
+
+    Returns ``(wp2, wp3, wp2_zt)`` — the clipped wp2 (zm) and wp3 (zt) and the
+    positive-definite wp2 interpolated to zt.
+    """
+    params = config.params
+    flags = config.flags
+    ng, nzm = wp2.shape
+    nzt = nzm - 1
+    ndim = 2 * nzm - 1
+    invrs_dt = 1.0 / dt
+    w_tol_sqd = config.w_tol ** 2
+
+    def col(v):
+        return jnp.full((ng,), v, dtype=wp2.dtype)
+
+    C4, C8, C8b = col(params.C4), col(params.C8), col(params.C8b)
+    C_uu_shr, C_uu_buoy = col(params.C_uu_shr), col(params.C_uu_buoy)
+    C_wp2_pr_dfsn = col(params.C_wp2_pr_dfsn)
+    C_wp3_pr_tp = col(params.C_wp3_pr_tp)
+    C_wp3_pr_turb = col(params.C_wp3_pr_turb)
+    C_wp3_pr_dfsn = col(params.C_wp3_pr_dfsn)
+    c_K1, c_K8 = col(params.c_K1), col(params.c_K8)
+    nu1, nu8 = col(params.nu1), col(params.nu8)
+    C12 = col(params.C12)
+    a3_min, skw_max = col(params.a3_coef_min), col(params.Skw_max_mag)
+
+    # Skewness-dependent coefficients (CAM l_damp_wp2_using_em=False → no 1/3 on C1).
+    C1_Skw_fnc = compute_skw_fnc(col(params.C1), col(params.C1b), col(params.C1c), Skw_zm)
+    C11_Skw_fnc = compute_skw_fnc(col(params.C11), col(params.C11b), col(params.C11c), Skw_zt)
+
+    a1_coef, a3_coef, a1_coef_zt, a3_coef_zt = compute_a1_a3_coef(sigma_sqd_w, a3_min, gr)
+    Kw1 = c_K1[:, None] * Kh_zt   # zt-level diffusivity for wp2
+    Kw8 = c_K8[:, None] * Kh_zm   # zm-level diffusivity for wp3
+    dum_dz = ddzt(um, gr)
+    dvm_dz = ddzt(vm, gr)
+
+    # ---- explicit RHS terms ----
+    rhs_pr_turb_wp3 = wp3_term_pr_turb_rhs(C_wp3_pr_turb, Kh_zt, wpthvp, dum_dz,
+                                           dvm_dz, upwp, vpwp, thv_ds_zt, gr)
+    rhs_pr_dfsn_wp3 = wp3_term_pr_dfsn_rhs(C_wp3_pr_dfsn, rho_ds_zm, invrs_rho_ds_zt,
+                                           wp2up2, wp2vp2, wp4, up2, vp2, wp2, gr)
+    rhs_pr_dfsn_wp2 = wp2_term_pr_dfsn_rhs(C_wp2_pr_dfsn, rho_ds_zt, invrs_rho_ds_zm,
+                                           wpup2, wpvp2, wp3, gr)
+    rhs_bp_pr2_wp2 = wp2_terms_bp_pr2_rhs(C_uu_buoy, thv_ds_zm, wpthvp)
+    rhs_dp1_wp2 = wp2_term_dp1_rhs(C1_Skw_fnc, invrs_tau_C1_zm, w_tol_sqd)
+    rhs_pr3_wp2 = wp2_term_pr3_rhs(C_uu_shr, C_uu_buoy, thv_ds_zm, wpthvp,
+                                   upwp, um, vpwp, vm, gr)
+    rhs_pr1_wp2 = wp2_term_pr1_rhs(C4, up2, vp2, invrs_tau_C4_zm)
+    rhs_bp1_pr2_wp3 = wp3_terms_bp1_pr2_rhs(C11_Skw_fnc, thv_ds_zt, wp2thvp)
+    rhs_pr1_wp3 = wp3_term_pr1_rhs(C8, C8b, invrs_tau_wp3_zt, Skw_zt, wp3)
+
+    # ---- LHS terms needed by wp23_rhs (over-implicit) ----
+    lhs_diff_zm = diffusion_zm_lhs(Kw1, nu1, invrs_rho_ds_zm, rho_ds_zt, gr)
+    lhs_diff_zt = diffusion_zt_lhs(Kw8, nu8, invrs_rho_ds_zt, rho_ds_zm, gr)
+    lhs_tp_wp3 = (wp3_term_tp_lhs(jnp.ones((ng,), dtype=wp2.dtype), wp2, rho_ds_zm,
+                                  invrs_rho_ds_zt, gr)
+                  + wp3_term_tp_lhs(-C_wp3_pr_tp, wp2, rho_ds_zm, invrs_rho_ds_zt, gr))
+    lhs_pr1_wp3 = wp3_term_pr1_lhs(C8, C8b, invrs_tau_wp3_zt, Skw_zt)
+    lhs_dp1_wp2 = wp2_term_dp1_lhs(C1_Skw_fnc, invrs_tau_C1_zm)
+    lhs_pr1_wp2 = wp2_term_pr1_lhs(C4, invrs_tau_C4_zm)
+    lhs_ta_wp3 = wp3_term_ta_ADG1_lhs(wp2, a1_coef_zt, a3_coef_zt, wp3_on_wp2,
+                                      rho_ds_zm, invrs_rho_ds_zt, gr)
+    lhs_splat_wp2 = jnp.zeros((ng, nzm), dtype=wp2.dtype)   # C_wp2_splat = 0
+    lhs_splat_wp3 = jnp.zeros((ng, nzt), dtype=wp2.dtype)   # C_wp3_splat = 0
+
+    rhs = wp23_rhs(
+        nzm=nzm, invrs_dt=invrs_dt, rhs_pr_turb_wp3=rhs_pr_turb_wp3,
+        rhs_pr_dfsn_wp3=rhs_pr_dfsn_wp3, rhs_pr_dfsn_wp2=rhs_pr_dfsn_wp2,
+        rhs_pr1_wp2=rhs_pr1_wp2, rhs_bp1_pr2_wp3=rhs_bp1_pr2_wp3,
+        rhs_pr1_wp3=rhs_pr1_wp3, rhs_bp_pr2_wp2=rhs_bp_pr2_wp2,
+        rhs_pr3_wp2=rhs_pr3_wp2, rhs_dp1_wp2=rhs_dp1_wp2, lhs_pr1_wp2=lhs_pr1_wp2,
+        lhs_tp_wp3=lhs_tp_wp3, lhs_pr1_wp3=lhs_pr1_wp3, lhs_dp1_wp2=lhs_dp1_wp2,
+        lhs_ta_wp3=lhs_ta_wp3, wp2=wp2, wp3=wp3, w_tol_sqd=w_tol_sqd)
+
+    # C12 scales the wp3 diffusion LHS (after the RHS, before the LHS assembly).
+    lhs_diff_zt = lhs_diff_zt * C12[None, :, None]
+
+    # wp2 mean advection is centered; wp3 uses upwind (CAM l_upwind_xm_ma=True).
+    lhs_ma_zm = term_ma_zm_lhs(wm_zm, gr)
+    lhs_ma_zt = term_ma_zt_lhs_upwind(wm_zt, gr)
+    lhs_ta_wp2 = wp2_term_ta_lhs(invrs_rho_ds_zm, rho_ds_zt, gr)
+    lhs_ac_pr2_wp2 = wp2_terms_ac_pr2_lhs(C_uu_shr, wm_zt, gr)
+    lhs_ac_pr2_wp3 = wp3_terms_ac_pr2_lhs(C11_Skw_fnc, wm_zm, gr)
+
+    lhs = wp23_lhs(
+        nzm=nzm, ndim=ndim, invrs_dt=invrs_dt, lhs_ma_zm=lhs_ma_zm,
+        lhs_diff_zm=lhs_diff_zm, lhs_ta_wp2=lhs_ta_wp2, lhs_ac_pr2_wp2=lhs_ac_pr2_wp2,
+        lhs_dp1_wp2=lhs_dp1_wp2, lhs_pr1_wp2=lhs_pr1_wp2, lhs_splat_wp2=lhs_splat_wp2,
+        lhs_ma_zt=lhs_ma_zt, lhs_diff_zt=lhs_diff_zt, lhs_tp_wp3=lhs_tp_wp3,
+        lhs_ac_pr2_wp3=lhs_ac_pr2_wp3, lhs_pr1_wp3=lhs_pr1_wp3,
+        lhs_splat_wp3=lhs_splat_wp3, lhs_ta_wp3=lhs_ta_wp3)
+
+    wp2_new, wp3_new = wp23_solve(lhs, rhs)
+
+    # ---- post-solve fill_holes / clip ----
+    wp2_c = fill_holes_vertical(wp2_new, rho_ds_zm, gr.dzm, w_tol_sqd,
+                                1, nzm - 2, flags.fill_holes_type)
+    if flags.l_wp2_fill_holes_tke:
+        wp2_c, _, _ = fill_holes_wp2_from_horz_tke(wp2_c, up2, vp2, w_tol_sqd, 0, nzm - 3)
+    wp2_c = clip_variance(wp2_c, w_tol_sqd)
+    wp2_zt = jnp.maximum(zm2zt(wp2_c, gr), w_tol_sqd)
+    wp3_c = clip_skewness(wp3_new, wp2_zt, gr.zt, sfc_elevation, skw_max)
+    return wp2_c, wp3_c, wp2_zt
+
+
 __all__ = [
     "weights_zt2zm",
     "wp2_term_ta_lhs",
@@ -611,8 +718,8 @@ __all__ = [
     "wp23_rhs",
     "wp23_lhs",
     "wp23_solve",
-    "term_ma_zt_lhs",
     "compute_a1_a3_coef",
     "compute_skw_fnc",
     "clip_skewness",
+    "advance_wp2_wp3",
 ]

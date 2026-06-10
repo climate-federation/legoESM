@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -519,35 +520,6 @@ def test_wp23_assembly_jit_grad():
 # Centered term_ma_zt_lhs + a1/a3 + skewness-function pre-computes
 # --------------------------------------------------------------------------
 
-def test_term_ma_zt_lhs_uniform_grid():
-    """Uniform grid: zt2zm weights are 1/2 → interior super=fac/2, main=0, sub=-fac/2."""
-    gr, ng, nzm = _gr(stretched=False)
-    nzt = nzm - 1
-    rng = np.random.default_rng(13)
-    wm_zt = jnp.asarray(0.03 * rng.standard_normal((ng, nzt)))
-    band = np.asarray(W.term_ma_zt_lhs(wm_zt, gr))
-    assert band.shape == (3, ng, nzt)
-    fac = np.asarray(wm_zt)[:, 1:-1] * np.asarray(gr.invrs_dzt)[:, 1:-1]
-    np.testing.assert_allclose(band[0, :, 1:-1], 0.5 * fac, rtol=1e-12, atol=1e-14)
-    np.testing.assert_allclose(band[1, :, 1:-1], 0.0, atol=1e-14)
-    np.testing.assert_allclose(band[2, :, 1:-1], -0.5 * fac, rtol=1e-12, atol=1e-14)
-
-
-@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
-                    reason="CLUBB-JAX reference tree not present")
-def test_term_ma_zt_lhs_parity_stretched():
-    if str(_CLUBB_JAX_ROOT) not in sys.path:
-        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
-    import clubb_jax.src.CLUBB_core.mean_adv as RMA  # noqa: N812
-    gr, ng, nzm = _gr(stretched=True)
-    rng = np.random.default_rng(14)
-    wm_zt = jnp.asarray(0.02 * rng.standard_normal((ng, nzm - 1)))
-    rg = _refgr(gr, ng, nzm)
-    np.testing.assert_array_equal(
-        np.asarray(W.term_ma_zt_lhs(wm_zt, gr)),
-        np.asarray(RMA.term_ma_zt_lhs_jax(wm_zt, rg, l_upwind_xm_ma=False)))
-
-
 def _penta_matvec(lhs, x):
     """Apply a CLUBB-band penta matrix [super2,super1,main,sub1,sub2] to x."""
     ng, ndim = x.shape
@@ -560,10 +532,12 @@ def _penta_matvec(lhs, x):
 
 
 def test_term_ma_zt_lhs_flows_through_wp23_lhs_correctly():
-    """Integration: assembling centered MA into wp23_lhs and applying the penta
-    matrix to an interleaved [wp2=0, wp3=field] vector reproduces the direct
-    tridiagonal action of term_ma_zt_lhs on wp3 — proving the band mapping
+    """Integration: assembling the wp3 mean-advection (upwind, CAM
+    l_upwind_xm_ma=True) into wp23_lhs and applying the penta matrix to an
+    interleaved [wp2=0, wp3=field] vector reproduces the direct tridiagonal
+    action of term_ma_zt_lhs_upwind on wp3 — proving the band mapping
     (super->band0/super2, sub->band4/sub2) end to end (codex review)."""
+    from legoesm.atmosphere.physics.turbulence.clubb_moments import term_ma_zt_lhs_upwind
     gr, ng, nzm = _gr(stretched=True)
     nzt = nzm - 1
     ndim = 2 * nzm - 1
@@ -571,7 +545,7 @@ def test_term_ma_zt_lhs_flows_through_wp23_lhs_correctly():
     wm_zt = jnp.asarray(0.03 * rng.standard_normal((ng, nzt)))
     field = jnp.asarray(rng.standard_normal((ng, nzt)))   # a wp3 field
 
-    lhs_ma_zt = W.term_ma_zt_lhs(wm_zt, gr)
+    lhs_ma_zt = term_ma_zt_lhs_upwind(wm_zt, gr)
     z3 = jnp.zeros((3, ng, nzt))
     z3m = jnp.zeros((3, ng, nzm))
     z2 = jnp.zeros((2, ng, nzt))
@@ -691,6 +665,134 @@ def test_clip_skewness_jit_grad():
 
     assert jnp.isfinite(jax.jit(loss)(wp3))
     assert jnp.all(jnp.isfinite(jax.grad(loss)(wp3)))
+
+
+# --------------------------------------------------------------------------
+# advance_wp2_wp3 main
+# --------------------------------------------------------------------------
+
+def _wp23_main_inputs(seed=30, ng=2, nzt=10):
+    from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig
+    nzm = nzt + 1
+    rng = np.random.default_rng(seed)
+    gr, _, _ = _gr(ng=ng, nzt=nzt, stretched=True)
+
+    def zm(s=1.0, b=0.0):
+        return jnp.asarray(b + s * rng.standard_normal((ng, nzm)))
+
+    def zt(s=1.0, b=0.0):
+        return jnp.asarray(b + s * rng.standard_normal((ng, nzt)))
+
+    return dict(
+        wp2=jnp.asarray(0.2 + 0.5 * rng.random((ng, nzm))),
+        wp3=zt(0.05), up2=jnp.asarray(0.3 + 0.3 * rng.random((ng, nzm))),
+        vp2=jnp.asarray(0.3 + 0.3 * rng.random((ng, nzm))),
+        sigma_sqd_w=jnp.asarray(0.1 + 0.3 * rng.random((ng, nzm))),
+        wp3_on_wp2=zm(0.1), wpup2=zt(0.02), wpvp2=zt(0.02),
+        wp2up2=zm(0.02), wp2vp2=zm(0.02), wp4=jnp.asarray(0.5 + 0.3 * rng.random((ng, nzm))),
+        wpthvp=zm(0.02), wp2thvp=zt(0.02), um=zt(2.0, 5.0), vm=zt(1.0),
+        upwp=zm(0.05), vpwp=zm(0.05), wm_zm=zm(0.02), wm_zt=zt(0.02),
+        Kh_zm=jnp.asarray(1.0 + 2.0 * rng.random((ng, nzm))),
+        Kh_zt=jnp.asarray(1.0 + 2.0 * rng.random((ng, nzt))),
+        invrs_tau_C4_zm=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
+        invrs_tau_wp3_zt=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzt))),
+        invrs_tau_C1_zm=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
+        Skw_zm=zm(0.5), Skw_zt=zt(0.5),
+        rho_ds_zm=jnp.asarray(1.0 + 0.1 * rng.random((ng, nzm))),
+        rho_ds_zt=jnp.asarray(1.0 + 0.1 * rng.random((ng, nzt))),
+        invrs_rho_ds_zm=jnp.asarray(1.0 / (1.0 + 0.1 * rng.random((ng, nzm)))),
+        invrs_rho_ds_zt=jnp.asarray(1.0 / (1.0 + 0.1 * rng.random((ng, nzt)))),
+        thv_ds_zm=zm(1.0, 300.0), thv_ds_zt=zt(1.0, 300.0),
+        sfc_elevation=jnp.zeros((ng,)), dt=300.0, gr=gr, config=CLUBBConfig(),
+    )
+
+
+def test_advance_wp2_wp3_runs_and_bounds():
+    kw = _wp23_main_inputs()
+    cfg = kw["config"]
+    wp2, wp3, wp2_zt = W.advance_wp2_wp3(**kw)
+    ng, nzm = kw["wp2"].shape
+    assert wp2.shape == (ng, nzm) and wp3.shape == (ng, nzm - 1)
+    assert wp2_zt.shape == (ng, nzm - 1)
+    for f in (wp2, wp3, wp2_zt):
+        assert np.all(np.isfinite(np.asarray(f)))
+    w_tol_sqd = cfg.w_tol ** 2
+    assert np.all(np.asarray(wp2)[:, :-1] >= w_tol_sqd - 1e-12)     # clip_variance floor
+    assert np.all(np.asarray(wp2_zt) >= w_tol_sqd - 1e-12)
+    assert np.all(np.abs(np.asarray(wp3)) <= 100.0 + 1e-9)          # clip_skewness
+
+
+def test_advance_wp2_wp3_jit_grad():
+    kw = _wp23_main_inputs()
+
+    def loss(wp2):
+        a, b, c = W.advance_wp2_wp3(**dict(kw, wp2=wp2))
+        return jnp.sum(a ** 2) + jnp.sum(b ** 2) + jnp.sum(c ** 2)
+
+    assert jnp.isfinite(jax.jit(loss)(kw["wp2"]))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(kw["wp2"])))
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_advance_wp2_wp3_composition_parity():
+    """Round-off parity of the full main vs the reference, in the configuration
+    where the two CAM-divergent terms vanish (C1=C1b=0 -> C1_Skw_fnc=0 kills the
+    dp1 term in both ARM and CAM branches; C_wp3_pr_turb=0 kills pr_turb in both).
+    This verifies the main's COMPOSITION/wiring against the reference (the
+    reference is hardwired ARM and cannot compute the CAM dp1/pr_turb branches;
+    those branches are golden/analytic-tested separately)."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_wp2_wp3_module as R  # noqa: N812
+    from clubb_jax.src.CLUBB_core import parameter_indices as PI  # noqa: N812
+    from legoesm import constants
+
+    kw = _wp23_main_inputs(seed=31)
+    cfg = kw["config"]
+    # Zero the divergent-term coefficients so ARM == CAM.
+    params2 = cfg.params._replace(C1=0.0, C1b=0.0, C_wp3_pr_turb=0.0)
+    cfg2 = cfg._replace(params=params2)
+    kw2 = dict(kw, config=cfg2)
+
+    ng, nzm = kw["wp2"].shape
+    nzt = nzm - 1
+    p = params2
+    gr = kw["gr"]
+    rg = _refgr(gr, ng, nzm)
+
+    cp = np.zeros((ng, 102))
+    for idx, val in [
+        (PI.iC4, p.C4), (PI.iC8, p.C8), (PI.iC8b, p.C8b), (PI.iC11, p.C11),
+        (PI.iC11b, p.C11b), (PI.iC11c, p.C11c), (PI.iC1, p.C1), (PI.iC1b, p.C1b),
+        (PI.iC1c, p.C1c), (PI.iC12, p.C12), (PI.ia3_coef_min, p.a3_coef_min),
+        (PI.iC_uu_shr, p.C_uu_shr), (PI.iC_uu_buoy, p.C_uu_buoy),
+        (PI.iC_wp2_pr_dfsn, p.C_wp2_pr_dfsn), (PI.iC_wp3_pr_tp, p.C_wp3_pr_tp),
+        (PI.iC_wp3_pr_turb, p.C_wp3_pr_turb), (PI.iC_wp3_pr_dfsn, p.C_wp3_pr_dfsn),
+        (PI.ic_K1, p.c_K1), (PI.ic_K8, p.c_K8), (PI.iSkw_max_mag, p.Skw_max_mag),
+    ]:
+        cp[:, idx - 1] = val
+
+    flags = SimpleNamespace(
+        fill_holes_type=2, l_wp2_fill_holes_tke=True, l_min_wp2_from_corr_wx=False,
+        l_use_wp3_lim_with_smth_Heaviside=False, l_lmm_stepping=False,
+        l_standard_term_ta=False)
+
+    R._grav = float(constants.g)
+    ref = R.advance_wp2_wp3(
+        kw["wp2"], kw["wp3"], kw["up2"], kw["vp2"], kw["sigma_sqd_w"], kw["wp3_on_wp2"],
+        jnp.zeros((ng, nzm)), kw["wpup2"], kw["wpvp2"], kw["wp2up2"], kw["wp2vp2"],
+        kw["wp4"], kw["wpthvp"], kw["wp2thvp"], kw["um"], kw["vm"], kw["upwp"], kw["vpwp"],
+        kw["wm_zm"], kw["wm_zt"], kw["Kh_zm"], kw["Kh_zt"], kw["invrs_tau_C4_zm"],
+        kw["invrs_tau_wp3_zt"], kw["invrs_tau_C1_zm"], kw["Skw_zm"], kw["Skw_zt"],
+        kw["rho_ds_zm"], kw["rho_ds_zt"], kw["invrs_rho_ds_zm"], kw["invrs_rho_ds_zt"],
+        kw["thv_ds_zm"], kw["thv_ds_zt"], jnp.zeros((ng, nzm)), jnp.zeros((ng, nzt)),
+        jnp.zeros((ng, nzm)), jnp.zeros((ng, nzm)), jnp.ones((ng, nzm)), jnp.ones((ng, nzm)),
+        jnp.asarray(cp), kw["dt"], p.nu1, p.nu8, rg, flags, kw["sfc_elevation"])
+
+    mine = W.advance_wp2_wp3(**kw2)
+    for a, b in zip(mine, ref):
+        np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-9, atol=1e-12)
 
 
 if __name__ == "__main__":

@@ -87,7 +87,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_pdf_moments.py` | PDF moment integrals, higher-order moments, cloud-water `x'rc'` fluxes, buoyancy flux `wpthvp` | ✅ |
 | `clubb_solve.py` | `tridiag_solve` (CLUBB band → legoESM `thomas_solve`) + `penta_solve` (verbatim CLUBB LU port, bit-exact) | ✅ iter 10-11 |
 | `clubb_moments.py` | `advance_windm_edsclrm` ✅12; xp2_xpyp terms/TA/combiners ✅13-15; `term_ma_zm_lhs`+`calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅18; `xp2_xpyp_uv_rhs`+`pos_definite_variances` ✅19; `clip_variance`+`solve_xp2_xpyp`+**`advance_xp2_xpyp` main** (full 5-moment advance, round-off parity) ✅20; `advance_wp2_wp3`, `advance_xm_wpxp` (penta), `mono_flux_limiter` ☐ | 🟡 P5 |
-| `clubb_wp23.py` | coupled wp2/wp3 penta advance: 8 LHS + 9 RHS builders ✅21-22; `wp23_rhs/lhs/solve` ✅23; `term_ma_zt_lhs`/`compute_a1_a3_coef`/`compute_skw_fnc` ✅24; `clip_skewness` (CAM non-Heaviside branch) ✅25; `advance_wp2_wp3` main orchestration ☐ | 🟡 P5 |
+| `clubb_wp23.py` | coupled wp2/wp3 penta advance: 8 LHS + 9 RHS builders ✅21-22; `wp23_rhs/lhs/solve` ✅23; `compute_a1_a3_coef`/`compute_skw_fnc` ✅24; `clip_skewness` ✅25; **`advance_wp2_wp3` main** ✅26 (composition round-off parity; **CAM uses UPWIND wp3 MA** — `l_upwind_xm_ma=True`) | ✅ |
 | `clubb_fill_holes.py` | `fill_holes_*` ✅19; `fill_holes_wp2_from_horz_tke` (TKE-conserving wp2 fill, CAM) ✅25 | ✅ |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
@@ -113,9 +113,10 @@ finite gradients in float32 + float64.
 - **P4 ADG1 PDF closure** ✅ — params, cloud fraction+rcm, higher-order moments,
   cloud-water fluxes, buoyancy flux `wpthvp`. (golden-locked + AD-hardened)
 - **P5 moment advance** 🟡 — ✅ `advance_windm_edsclrm` (u/v), ✅ `advance_xp2_xpyp`
-  (rtp2/thlp2/rtpthlp/up2/vp2 — full core path, round-off parity), ✅ `fill_holes`
-  + `clip_variance`/`clip_covar`. ☐ remaining: `advance_wp2_wp3` + `advance_xm_wpxp`
-  (penta — `clubb_solve.penta_solve` ready) + `mono_flux_limiter` (CAM ON).
+  (rtp2/thlp2/rtpthlp/up2/vp2), ✅ `advance_wp2_wp3` (wp2/wp3 penta — full main,
+  composition round-off parity), ✅ `fill_holes`/`clip_variance`/`clip_covar`/
+  `clip_skewness`. ☐ remaining: `advance_xm_wpxp` (penta — rtm/thlm + wprtp/wpthlp)
+  + `mono_flux_limiter` (CAM ON).
 - **P6 orchestration** ☐ — assemble the `advance_clubb_core`-equivalent for the
   CAM flag subset; pack/unpack carried moment state (wp2/wp3/thlp2/rtp2/rtpthlp/
   wpthlp/wprtp/up2/vp2). `l_call_pdf_closure_twice=True` → PDF pre+post.
