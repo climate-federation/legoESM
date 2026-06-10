@@ -578,7 +578,19 @@ USER REQUEST: fix (1) large-river (Amazon) SSS issue, (2) Gibraltar intrusion / 
   on the faithful runs — match NEMO (FCT-like advection + isoneutral lap + GM) or identify our excess
   diffusion. NOTE: scorer maps IDW-regrid BOTH models (symmetric blur) → "fuzzy" is likely genuine model
   diffusivity, but VERIFY by comparing native-grid sharpness first.
-**Status**: investigation phase; nothing implemented yet for iter-H. Production runs in flight:
+**iter-H item 1 DONE (commit 1aa4d297, codex APPROVE, 72 tests):** runoff depth-spread
+(`runoff_spread_virtual_salt_tendency_3d`, fractional per-level weights → h_rnf=min(150, wet depth) exact,
+column-integral salt bit-identical to legacy, both cores gated via `runoff_depth_spread_m`) + river-mouth
+restoring gate (`--river-mouth-restoring-gate`, NEMO (1−2·rnfmsk)). Flags for next production round:
+`--runoff-depth-spread-m 150 --river-mouth-restoring-gate`.
+**iter-H item 2 (BBL) design state:** NEMO trabbl.F90 CASE(2) extracted — per u/v face:
+`tr_bbl = e2u·e3u_bbl_0·(g·rn_gambbl)·max(0, Δρ̂)·mgrhu` with Δρ̂ = ½(2α·ΔT−2β·ΔS) between SHELF
+(up-slope) and DEEP (down-slope) BOTTOM cells at common local depth (eos_rab at bottom), active only
+when shelf denser; mgrh = slope-direction sign; e3_bbl_0 = BBL thickness at the face. REMAINING TO READ:
+`tra_bbl_adv` application loop (~trabbl.F90 l.214-300) — distributes the transport down the deep column
+across levels (the intricate part) + e3u_bbl_0/mbku_d/mgrhu setup in tra_bbl_init. Then implement
+gated `bbl_adv` for the latlon-cgrid family (tripole/latlon) + tests + smoke; MPAS port after.
+**Status**: item 1 shipped; item 2 in design; item 3 (diffusivity) not started. Production runs in flight:
 seam-fixed tripole 2yr (8457733, NCAR fluxes + --ew-cyclic-overlap), latlon 1° 2yr (8457282),
 mpas ico6 2yr (8455138). PNG-on-completion promised to user. Each iter-H change: codex adversarial
 review + tests + smoke before production (CLAUDE.md).
