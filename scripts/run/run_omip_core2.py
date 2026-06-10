@@ -1793,6 +1793,13 @@ def main() -> int:
                         "prognostic ice, so high-lat (esp. Arctic) cells over-cool "
                         "3-5 C below NEMO (LIM ice caps SST). NEMO-faithful; removes "
                         "~half the Arctic SST RMSE. Off = bit-exact legacy.")
+    p.add_argument("--visc-schedule", type=str, default=None,
+                   help="Piecewise viscosity schedule 'day:A_h:C_smag_lap,...'"
+                        " e.g. '0:1e5:3.0,90:5e4:1.0,180:2e4:0.33' — start at "
+                        "the cold-start-stable values, step down toward "
+                        "NEMO's eddy-viscosity magnitude (1e3-2e4) once the "
+                        "WOA adjustment has passed. One JIT recompile per "
+                        "segment. tripole/latlon (LatLonCGridOceanModel).")
     p.add_argument("--bbl-adv", action="store_true",
                    help="NEMO advective bottom-boundary layer (trabbl "
                         "nn_bbl_adv=2, Campin & Goosse 1999): dense shelf "
@@ -2194,6 +2201,46 @@ def main() -> int:
     # (the 5-yr MPAS run drifted 35->31 PSU without it).  Capture the target =
     # the UNSMOOTHED WOA surface salinity BEFORE --woa-smoothing-passes damps the
     # IC fronts (restoring must target the true climatology, not the smoothed IC).
+    visc_schedule = None
+    visc_seg_idx = 0
+    if args.visc_schedule:
+        if app_grid_type not in ("tripole", "latlon"):
+            raise ValueError("--visc-schedule is wired for tripole/latlon "
+                             f"(LatLonCGridOceanModel); got {args.grid!r}.")
+        visc_schedule = []
+        for seg in args.visc_schedule.split(","):
+            parts = seg.strip().split(":")
+            if len(parts) != 3:
+                raise ValueError(
+                    f"--visc-schedule segment {seg!r} must be "
+                    "'day:A_h:C_smag_lap'.")
+            _d, _a, _c = (float(parts[0]), float(parts[1]), float(parts[2]))
+            # strict validation (codex MED): finite, non-negative; NaN would
+            # evade config checks and comparisons.
+            if not (np.isfinite(_d) and np.isfinite(_a) and np.isfinite(_c)):
+                raise ValueError(f"--visc-schedule segment {seg!r}: all "
+                                 "fields must be finite.")
+            if _d < 0.0 or _a < 0.0 or _c < 0.0:
+                raise ValueError(f"--visc-schedule segment {seg!r}: day, "
+                                 "A_h and C_smag_lap must be >= 0.")
+            visc_schedule.append((_d, _a, _c))
+        _days = [d for d, _, _ in visc_schedule]
+        if any(b <= a for a, b in zip(_days, _days[1:])):
+            raise ValueError("--visc-schedule days must be STRICTLY "
+                             "ascending (duplicates would apply a segment "
+                             "one timestep late).")
+        print(f"[setup] viscosity schedule: {visc_schedule}")
+        # Provenance (codex HIGH): the manifest's runtime_config snapshots
+        # only the INITIAL A_h/C_smag_lap; the full schedule is recorded in
+        # the manifest command_line AND in this explicit sidecar.
+        try:
+            import json as _json
+            with open(Path(args.output) / "visc_schedule.json", "w") as _f:
+                _json.dump({"segments_day_Ah_Csmaglap": visc_schedule}, _f,
+                           indent=1)
+        except Exception as _e:  # noqa: BLE001 — provenance best-effort
+            print(f"[warn] visc_schedule sidecar not written: {_e}")
+
     bbl_geom = None
     bbl_face_widths = None
     if args.bbl_adv:
@@ -2551,6 +2598,28 @@ def main() -> int:
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         ramp = min(1.0, (step * dt) / ramp_s) if ramp_s > 0 else 1.0
+        # Piecewise viscosity schedule (--visc-schedule): at each segment
+        # boundary rebuild config+model ONCE (one JIT recompile per segment)
+        # with the next (A_h, C_smag_lap).  The high cold-start viscosity is
+        # only needed during the WOA adjustment; stepping down from an
+        # adjusted state closes the 5-10x gap to NEMO's eddy_viscosity file
+        # (the user-flagged 'fuzzier than NEMO') without the day-30 NaN a
+        # one-jump drop causes.  Exact + auditable (segments logged).
+        if visc_schedule and visc_seg_idx < len(visc_schedule):
+            _day0, _ah, _cs = visc_schedule[visc_seg_idx]
+            if (step - 1) * dt >= _day0 * 86400.0:
+                if (_ah, _cs) != (float(model.config.A_h),
+                                  float(model.config.C_smag_lap)):
+                    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid \
+                        import LatLonCGridOceanModel
+                    model = LatLonCGridOceanModel(
+                        grid, z_coord,
+                        model.config._replace(A_h=_ah, C_smag_lap=_cs))
+                print(f"[visc-schedule] day {(step-1)*dt/86400.0:.1f}: "
+                      f"A_h={_ah:g} C_smag_lap={_cs:g} "
+                      f"(segment {visc_seg_idx + 1}/{len(visc_schedule)})",
+                      flush=True)
+                visc_seg_idx += 1
         # Build CORE-II surface forcing and integrate it INSIDE model.step (the
         # dynamics-core external-tau block) -- energetically consistent, unlike
         # the operator-split applicator (which pumped the runaway). Optional
