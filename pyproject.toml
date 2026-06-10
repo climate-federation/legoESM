@@ -157,8 +157,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # harmless. N815 covers the config symbol fields; N803/N806 the kernel args/vars.
 "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb*.py" = ["N802", "N803", "N806", "N815"]
 # CLUBB port tests use the same physical symbol names as the modules under test
-# (T for temperature, Tc for deg C, etc.) — clearer than snake_case here.
-"tests/unit/test_clubb_*.py" = ["N802", "N803", "N806"]
+# (T for temperature, Tc for deg C, etc.) — clearer than snake_case here. E402:
+# these tests set jax_enable_x64 before importing the modules under test (a
+# standard JAX-testing idiom), so module-level imports follow that call.
+"tests/unit/test_clubb_*.py" = ["E402", "N802", "N803", "N806"]
 
 [tool.mypy]
 python_version = "3.11"

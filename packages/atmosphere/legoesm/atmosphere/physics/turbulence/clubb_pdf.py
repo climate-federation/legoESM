@@ -310,6 +310,21 @@ def calc_pdf_liquid_cloud_frac(adg1, rtpthlp, rtm, thlm, exner, p_in_Pa):
         ``(rcm, cloud_frac)`` on zt levels — cloud water [kg/kg] and liquid
         cloud fraction [-].
     """
+    comp = calc_pdf_liquid_cloud_frac_components(
+        adg1, rtpthlp, rtm, thlm, exner, p_in_Pa)
+    return comp["rcm"], comp["cloud_frac"]
+
+
+def calc_pdf_liquid_cloud_frac_components(adg1, rtpthlp, rtm, thlm, exner, p_in_Pa):
+    """Per-component liquid cloud-fraction PDF closure (the full intermediates).
+
+    Like :func:`calc_pdf_liquid_cloud_frac` but returns every per-component
+    intermediate (``chi``/``crt``/``cthl``/``stdev_chi``/``stdev_eta``/
+    ``corr_ce``/``cf``/``rc`` for components 1 and 2, plus ``mixt_frac``,
+    ``cloud_frac`` and ``rcm``). The cloud-water flux assembly
+    (:func:`clubb_pdf_moments.calc_pdf_xprcp_fluxes`) consumes these.
+    Mirrors ``pdf_closure_module.F90:calc_pdf_liquid_cloud_frac_components``.
+    """
     from legoesm.atmosphere.physics.turbulence.clubb_saturation import sat_mixrat_liq
 
     corr_1, corr_2 = calc_comp_corrs_binormal(
@@ -323,9 +338,9 @@ def calc_pdf_liquid_cloud_frac(adg1, rtpthlp, rtm, thlm, exner, p_in_Pa):
     rsatl_1 = sat_mixrat_liq(p_in_Pa, tl_1)
     rsatl_2 = sat_mixrat_liq(p_in_Pa, tl_2)
 
-    chi_1, _, _, schi_1, _, _, _ = transform_pdf_chi_eta_component(
+    (chi_1, crt_1, cthl_1, schi_1, seta_1, _, corr_ce_1) = transform_pdf_chi_eta_component(
         tl_1, rsatl_1, adg1["rt_1"], exner, adg1["varnce_rt_1"], adg1["varnce_thl_1"], corr_1)
-    chi_2, _, _, schi_2, _, _, _ = transform_pdf_chi_eta_component(
+    (chi_2, crt_2, cthl_2, schi_2, seta_2, _, corr_ce_2) = transform_pdf_chi_eta_component(
         tl_2, rsatl_2, adg1["rt_2"], exner, adg1["varnce_rt_2"], adg1["varnce_thl_2"], corr_2)
 
     cf_1, rc_1 = calc_liquid_cloud_frac_component(chi_1, schi_1)
@@ -333,7 +348,15 @@ def calc_pdf_liquid_cloud_frac(adg1, rtpthlp, rtm, thlm, exner, p_in_Pa):
 
     cloud_frac = mf * cf_1 + (1.0 - mf) * cf_2
     rcm = jnp.maximum(0.0, mf * rc_1 + (1.0 - mf) * rc_2)
-    return rcm, cloud_frac
+    return {
+        "mixt_frac": mf, "cloud_frac": cloud_frac, "rcm": rcm,
+        "chi_1": chi_1, "chi_2": chi_2,
+        "crt_1": crt_1, "crt_2": crt_2, "cthl_1": cthl_1, "cthl_2": cthl_2,
+        "stdev_chi_1": schi_1, "stdev_chi_2": schi_2,
+        "stdev_eta_1": seta_1, "stdev_eta_2": seta_2,
+        "corr_ce_1": corr_ce_1, "corr_ce_2": corr_ce_2,
+        "cf_1": cf_1, "cf_2": cf_2, "rc_1": rc_1, "rc_2": rc_2,
+    }
 
 
 __all__ = [
@@ -345,4 +368,5 @@ __all__ = [
     "transform_pdf_chi_eta_component",
     "calc_liquid_cloud_frac_component",
     "calc_pdf_liquid_cloud_frac",
+    "calc_pdf_liquid_cloud_frac_components",
 ]

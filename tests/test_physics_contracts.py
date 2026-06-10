@@ -157,6 +157,9 @@ EXCLUDED: frozenset[str] = frozenset(
         # component means/variances/mixture fraction) — closure plumbing feeding
         # the PDF moment integrals, not a single-tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_pdf.py",
+        # CLUBB port: ADG1 PDF moment integrals + buoyancy-flux assembly
+        # (higher-order moments, wpthvp) — closure plumbing, not a tendency.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_pdf_moments.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",

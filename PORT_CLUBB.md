@@ -231,7 +231,8 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
 | P4 | ADG1 PDF component params (`clubb_pdf.py`: w-closure + responders) | ✅ iter 7 (moment-recovery + bit-exact parity) |
 | P4 | derived params (`mixt_frac_max_mag`, `lmin`) in `clubb_config.py` | ✅ iter 7 |
 | P4 | liquid cloud fraction + rcm (chi/eta transform, `clubb_pdf.py`) | ✅ iter 8 (golden-locked + AD-hardened) |
-| P4 | buoyancy flux `wpthvp` + higher-order PDF moments | ☐ iter 9+ |
+| P4 | higher-order PDF moments + `wpthvp` + cloud-water fluxes | ✅ iter 9 (`clubb_pdf_moments.py`, golden-locked) |
+| **P4 DONE** | ADG1 PDF closure complete (params+cloud+moments+fluxes) | ✅ iter 7-9 |
 | P3 | mixing length / Lscale | ☐ |
 | P4 | ADG1 PDF closure | ☐ |
 | P5 | moment advance + solves + limiters | ☐ |
@@ -482,6 +483,34 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
   (`calc_wp2xp/wpxp2/wp2xp2/wp4/wpxpyp_pdf`), which feed the wp2/wp3/xp2 moment
   advance (P5). After that, the moment time-advance + orchestration + the
   `clubb.py` scheme entry + integration (P5–P7).
+
+### iter 9
+- **P4 PDF moments + buoyancy flux + cloud-water fluxes (done) — P4 COMPLETE.**
+  New `clubb_pdf_moments.py`: the 5 PDF moment integrals
+  (`calc_wp2xp_pdf`/`wpxp2`/`wp2xp2`/`wp4`/`wpxpyp_pdf`),
+  `calc_pdf_higher_order_moments` (ADG1: velocity-scalar corrs = 0),
+  `calc_xprcp_component` + `calc_pdf_xprcp_fluxes` (cloud-water `x'rc'` fluxes,
+  mix by mixt_frac + zt→zm regrid w/ `k_ub_zm` zeroed), and `calc_xpthvp_terms`
+  (buoyancy flux `wpthvp = wpthlp + ep1·thv·wprtp + rc_coef·wprcp` — the wp2
+  buoyancy production). Refactored `clubb_pdf.calc_pdf_liquid_cloud_frac` to
+  expose `calc_pdf_liquid_cloud_frac_components` (per-component intermediates).
+- Moment integrals + cloud-water fluxes use **no physical constants** → bit-exact
+  to the reference; buoyancy flux uses `legoesm.constants` → golden generated
+  with reference constants patched. Committed goldens `clubb_hom_golden.npz`,
+  `clubb_xpthvp_golden.npz`, `clubb_xprcp_golden.npz` + non-skipped CI tests +
+  live parity. `_safe_sqrt` on all variance-product sqrts. 30 PDF/moment tests.
+- Codex adversarial review: flagged [medium] incomplete x'rc' path (only the
+  per-component leaf was ported) → added `calc_pdf_xprcp_fluxes` assembly →
+  **APPROVE** (codex ran the parity tests in the venv: bit-exact).
+- Added `E402` to the `tests/unit/test_clubb_*.py` ruff per-file-ignore (the
+  jax-x64-before-import idiom).
+- **Next (iter 10):** compress PORT_CLUBB.md (10-iter milestone), then start P5 —
+  the moment time-advance (`advance_wp2_wp3`, `advance_xm_wpxp`,
+  `advance_xp2_xpyp`, `advance_windm_edsclrm`) with the implicit tridiagonal
+  solves, clipping (`clip_explicit`), mono flux limiters (CAM defaults ON), and
+  `fill_holes`. Then P6 orchestration + P7 the `clubb.py` scheme entry +
+  integration. All PDF inputs (params, cloud, moments, wpthvp, mixing length,
+  sigma_sqd_w, Skx, saturation) are now in place.
 
 <!-- superseded risk note (resolved iter 6):
 - **⚠ Remaining P3 risk (iter 6+):** `compute_mixing_length` is the largest,
