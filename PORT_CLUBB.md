@@ -74,7 +74,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_mixing_length.py` | parcel buoyant-sorting `Lscale` (golden-locked) | ✅ |
 | `clubb_pdf.py` | ADG1 params (`ADG1_pdf_driver`), cloud fraction + rcm (`calc_pdf_liquid_cloud_frac[_components]`) | ✅ |
 | `clubb_pdf_moments.py` | PDF moment integrals, higher-order moments, cloud-water `x'rc'` fluxes, buoyancy flux `wpthvp` | ✅ |
-| `clubb_solve.py` | `tridiag_solve` (CLUBB band → legoESM `thomas_solve`); penta solver still TODO | ✅ iter 10 (tridiag) |
+| `clubb_solve.py` | `tridiag_solve` (CLUBB band → legoESM `thomas_solve`) + `penta_solve` (verbatim CLUBB LU port, bit-exact) | ✅ iter 10-11 |
 | `clubb_moments.py` | wp2/wp3, xp2/xpyp, xm/wpxp, windm/edsclrm advance + implicit solves + limiters + fill_holes | ☐ P5 |
 
 Also added (shared): `legoesm.thermo.saturation_vapor_pressure_flatau[_ice]`.
@@ -116,11 +116,11 @@ finite gradients in float32 + float64.
 
 ## Next (iter 11+)
 P5 moment advance. Solvers: ✅ `clubb_solve.tridiag_solve` (reuses legoESM
-`thomas_solve`; tridiag paths = windm_edsclrm + xp2_xpyp). ☐ **pentadiagonal**
-solver (`penta_lu_solve`) needed by wp2_wp3 + xm_wpxp (coupled 2-field systems,
-size 2*nzm-1) — legoESM has no penta solver, so port CLUBB's. Then:
-`advance_windm_edsclrm` (CAM `l_predict_upwp_vpwp=False` u/v eddy-diffusion
-advance — simplest, tridiag), then `advance_xp2_xpyp` (tridiag), then
-`advance_wp2_wp3` + `advance_xm_wpxp` (penta), each with the LHS/RHS assembly,
-clipping (`clip_explicit`), mono flux limiters (CAM ON), `fill_holes`. Each
-chunk: analytic + golden parity (constants patched where used) + codex.
+`thomas_solve`) + ✅ `penta_solve` (verbatim CLUBB LU, bit-exact). Next: the
+advance modules in `clubb_moments.py`, each = LHS/RHS assembly + solve +
+clipping (`clip_explicit`) + mono flux limiters (CAM ON) + `fill_holes`:
+`advance_windm_edsclrm` (CAM `l_predict_upwp_vpwp=False` u/v eddy-diffusion;
+tridiag — start here), then `advance_xp2_xpyp` (tridiag), then `advance_wp2_wp3`
++ `advance_xm_wpxp` (penta). Each chunk: analytic + golden/parity + codex. These
+need `diffusion.py` (LHS bands), `mean_adv.py`, `clip_explicit.py`,
+`mono_flux_limiter.py`, `fill_holes.py` from CLUBB-JAX.
