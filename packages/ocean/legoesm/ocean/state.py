@@ -102,6 +102,23 @@ class OceanSurfaceForcing(NamedTuple):
         ocean], e.g. sea-ice brine rejection on freeze.  Applied to the top
         layer salinity as dS/dt = salt_flux*1e3/(rho_0*dz_0); distinct from the
         ``freshwater`` (virtual-salt dilution) channel.
+    q_prescribed : array or None
+        Prescribed part of the surface heat flux [W/m², positive into ocean]
+        consumed ONLY by the ``"flux_feedback"`` surface-forcing scheme
+        (Veros global_4deg ``qnet``).  Kept separate from ``q_net`` so the
+        feedback scheme owns the TOTAL heat in one place (ice mask) and so
+        the prescribed-channel ``c_sw`` seam is not double-counted — leave
+        ``q_net=None`` when using ``flux_feedback``.
+    q_feedback : array or None
+        Linear SST-feedback (piston) coefficient [W/m²/K, ≥ 0 damps] for the
+        ``"flux_feedback"`` scheme (Veros ``qnec``).  Heat contribution is
+        ``q_feedback · (T_feedback_target − T_surf)``.
+    T_feedback_target : array or None
+        Target SST [°C] for the ``q_feedback`` term (Veros ``sst_clim``,
+        monthly-interpolated by the driver/harness).
+    S_restore_target : array or None
+        Target SSS [PSU] for the ``flux_feedback`` scheme's surface-salinity
+        restoring (Veros ``sss_clim``).
     """
     sw_down: object = None       # jnp.ndarray | None
     q_net: object = None         # jnp.ndarray | None
@@ -109,6 +126,11 @@ class OceanSurfaceForcing(NamedTuple):
     tau_y: object = None         # jnp.ndarray | None
     freshwater: object = None    # jnp.ndarray | None
     salt_flux: object = None     # jnp.ndarray | None  (real salt mass, kg/m2/s)
+    # --- "flux_feedback" scheme channels (None ⇒ inert; see docstring) ---
+    q_prescribed: object = None        # jnp.ndarray | None  [W/m²]
+    q_feedback: object = None          # jnp.ndarray | None  [W/m²/K]
+    T_feedback_target: object = None   # jnp.ndarray | None  [°C]
+    S_restore_target: object = None    # jnp.ndarray | None  [PSU]
 
 
 class OceanConfig(NamedTuple):

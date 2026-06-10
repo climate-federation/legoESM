@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+import jax.numpy as jnp
+
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import (
@@ -14,6 +16,9 @@ from legoesm.ocean.vertical import (
 from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
 from legoesm.ocean.physics.surface_forcing.prescribed import prescribed_surface_forcing
 from legoesm.ocean.physics.surface_forcing.external import external_surface_forcing
+from legoesm.ocean.physics.surface_forcing.flux_feedback import (
+    flux_feedback_surface_forcing,
+)
 from legoesm.ocean.physics.surface_forcing.restoring import restoring_surface_forcing
 from legoesm.ocean.physics.surface_forcing.bulk_formulas import bulk_formula_surface_forcing
 from legoesm.ocean.physics.tendencies import (
@@ -50,6 +55,8 @@ def make_surface_forcing_physics(
         return _make_bulk_formulas(config)
     elif scheme == "external":
         return _make_external(config)
+    elif scheme == "flux_feedback":
+        return _make_flux_feedback(config)
     else:
         raise ValueError(f"Unknown surface forcing scheme: {scheme!r}")
 
@@ -84,6 +91,39 @@ def _make_external(config: SurfaceForcingConfig) -> Callable:
         out = external_surface_forcing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             h[..., 0], surface_forcing,
+        )
+        return wrap_ocean_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+    return physics_fn
+
+
+def _make_flux_feedback(config: SurfaceForcingConfig) -> Callable:
+    """Veros-style flux + SST-feedback heat forcing + SSS restoring + ice mask
+    (global_4deg), driven by the traced ``OceanSurfaceForcing`` channels
+    ``q_prescribed`` / ``q_feedback`` / ``T_feedback_target`` /
+    ``S_restore_target``.  Returns zero tendencies when no forcing is passed.
+    A ``make_surface_forcing_physics`` citizen, so
+    ``surface_forcing_implicit=True`` routes its dT/dS rates into the
+    backward-Euler solve via the existing ``surface_tracer_forcing_fn`` seam."""
+    cfg = config.flux_feedback
+
+    def physics_fn(state: OceanState, grid: CubedSphereGrid,
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
+        if surface_forcing is None:
+            # Tracer-shaped zeros (NOT zero_ocean_tendencies, whose du/dT
+            # share state.u's shape): the implicit ``surface_tracer_forcing_fn``
+            # seam calls this with the FULL C-grid state (staggered u), and
+            # only dT_dt/dS_dt are consumed there.
+            return wrap_ocean_tendencies(
+                None, None, jnp.zeros_like(state.T.data),
+                jnp.zeros_like(state.S.data), state,
+            )
+        # Partial-cell-aware ACTUAL top-layer thickness (mirrors "external"):
+        # the W/m² → K/s conversion is conservative on shallow top cells and
+        # equals Veros's fixed dzt[-1] under a rigid lid with full top cells.
+        h = compute_layer_thickness(state.eta.data, state.H_bathy.data, z_coord)
+        out = flux_feedback_surface_forcing(
+            state.T.data, state.S.data, h[..., 0], surface_forcing, cfg,
         )
         return wrap_ocean_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn

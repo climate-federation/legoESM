@@ -2796,6 +2796,24 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # heat (q_net + penetrating shortwave) from the explicit ``dT_dt`` and route
     # it into ``dT_surf`` for the implicit (backward-Euler) application; WIND
     # STRESS stays explicit either way (it is AB2'd in both legoESM and Veros).
+    # Dispatch hardening: under the ``flux_feedback`` scheme the heat flux is
+    # ``q_prescribed`` (consumed by the scheme); a simultaneous ``q_net`` would
+    # ALSO be routed here by ``_bc_external_surface_forcing`` and double-count
+    # the heat.  None-ness is static pytree structure, so this raises at trace
+    # time (no runtime cost).
+    _sf_cfg = getattr(getattr(config, "physics", None), "surface_forcing", None)
+    if (
+        _sf_cfg is not None
+        and getattr(_sf_cfg, "scheme", "none") == "flux_feedback"
+        and surface_forcing is not None
+        and getattr(surface_forcing, "q_net", None) is not None
+        and getattr(surface_forcing, "q_prescribed", None) is not None
+    ):
+        raise ValueError(
+            "flux_feedback surface forcing consumes q_prescribed; passing "
+            "q_net simultaneously would double-count the surface heat flux. "
+            "Leave q_net=None (route all prescribed heat via q_prescribed)."
+        )
     _sf_implicit = bool(getattr(config, "surface_forcing_implicit", False))
     du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat = _bc_external_surface_forcing(
         du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid,
