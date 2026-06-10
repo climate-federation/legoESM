@@ -150,6 +150,9 @@ EXCLUDED: frozenset[str] = frozenset(
         # CLUBB port: skewness diagnostics (gamma(Skw), Skx, LG05 ansatz) —
         # pure closure helpers, not a single-tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_skewness.py",
+        # CLUBB port: nonlocal mixing-length (Lscale) parcel buoyant-sorting —
+        # a diagnostic length scale, not a single-tendency scheme.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_mixing_length.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",

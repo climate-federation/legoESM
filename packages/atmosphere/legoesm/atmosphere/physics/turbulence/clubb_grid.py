@@ -64,12 +64,21 @@ class CLUBBGrid(NamedTuple):
     invrs_dzt : jax.Array
         ``1 / (zm[k+1] - zm[k])`` evaluated at thermodynamic levels [1/m],
         shape ``(ngrdcol, nzt)``. Used by :func:`ddzm`.
+    dzm : jax.Array
+        Momentum-level spacing [m], shape ``(ngrdcol, nzm)`` (reciprocal of
+        ``invrs_dzm`` away from degenerate levels). Consumed by the
+        mixing-length parcel integrals.
+    dzt : jax.Array
+        Thermodynamic-level spacing ``zm[k+1] - zm[k]`` [m], shape
+        ``(ngrdcol, nzt)``.
     """
 
     zm: jax.Array
     zt: jax.Array
     invrs_dzm: jax.Array
     invrs_dzt: jax.Array
+    dzm: jax.Array
+    dzt: jax.Array
 
 
 def zm2zt(azm: jax.Array, gr: CLUBBGrid) -> jax.Array:
@@ -299,6 +308,8 @@ def make_clubb_grid(zm: jax.Array, zt: jax.Array) -> CLUBBGrid:
         zt=zt,
         invrs_dzm=_safe_invrs(dzm),
         invrs_dzt=_safe_invrs(dzt),
+        dzm=dzm,
+        dzt=dzt,
     )
 
 

@@ -70,9 +70,11 @@ def test_make_clubb_grid_shapes_and_pytree():
     assert gr.zt.shape == zt.shape
     assert gr.invrs_dzt.shape == zt.shape
     assert gr.invrs_dzm.shape == zm.shape
+    assert gr.dzm.shape == zm.shape
+    assert gr.dzt.shape == zt.shape
     # NamedTuple flattens as a pytree.
     leaves = jax.tree_util.tree_leaves(gr)
-    assert len(leaves) == 4
+    assert len(leaves) == 6
     assert all(jnp.all(jnp.isfinite(x)) for x in leaves)
 
 

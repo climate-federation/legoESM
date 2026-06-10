@@ -224,7 +224,7 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
 | P2 | saturation adapter (Flatau) — `thermo` curves + `clubb_saturation.py` | ✅ iter 3 |
 | P2 | sigma_sqd_w + Brunt–Väisälä (`clubb_helpers.py`) | ✅ iter 4 |
 | P3 | skewness diagnostics (`clubb_skewness.py`: Skx, gamma_Skw, LG05) | ✅ iter 5 |
-| P3 | `compute_mixing_length` parcel buoyant-sorting (Lscale up/down) | ☐ iter 6+ (largest kernel) |
+| P3 | `compute_mixing_length` parcel buoyant-sorting (Lscale up/down) | ✅ iter 6 (golden-locked vs CLUBB-JAX) |
 | P3 | mixing length / Lscale | ☐ |
 | P4 | ADG1 PDF closure | ☐ |
 | P5 | moment advance + solves + limiters | ☐ |
@@ -381,6 +381,42 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
   N802 (canonical fn names `Skx_func`, `LG_2005_ansatz`).
 - Codex adversarial review: **APPROVE, no material findings** (formulas, param
   mapping, w_tol_sqd floor, inverse, AD branches all verified vs Skx_module.py).
+### iter 6
+- **P3 mixing length (done, golden-locked):** new `clubb_mixing_length.py` ports
+  the full parcel buoyant-sorting `Lscale` (CAM `l_diag_Lscale_from_tau=False`
+  path): `_parcel_thv`, `_upward/_downward_inner_while`,
+  `_compute_lscale_up_col/_down_col`, `_bounded_while`, `set_Lscale_max`,
+  `compute_mixing_length`. legoESM adaptations: `legoesm.constants`,
+  `clubb_saturation` (Flatau ⇒ `saturation_formula` arg dropped), `clubb_grid`
+  operators, and **`vmap` over columns** (CLAUDE.md, vs the ref's per-column
+  Python loop) with each column using its own grid; the dynamic-trip parcel
+  `while`s are grad-safe fixed-length `lax.scan` (`_bounded_while`).
+- Extended `CLUBBGrid` with `dzm`/`dzt` (parcel kernel needs the spacings);
+  updated the grid pytree-leaf test (4→6).
+- **GOLDEN PARITY vs the CLUBB-JAX reference:** verified `compute_mixing_length`
+  is **bit-exact** (0.0 diff) to `CLUBB-JAX/.../mixing_length.py` once the
+  reference's constants+saturation are patched to the legoESM values — proving
+  the algorithm is faithful and the only difference is the intended ~0.1%
+  constant set. Committed a tiny golden fixture
+  `tests/unit/clubb_fixtures/clubb_lscale_golden.npz` (2.8 KB; CLAUDE.md
+  tiny-numeric-baseline carve-out, outside the gitignored `data/`) +
+  **non-skipped** CI test `test_matches_committed_golden` (assert_array_equal),
+  with the live reference test (skipped if sibling absent) re-verifying the
+  golden stays in sync. Fixture spans neutral(boundary-exit) /
+  strongly-stable(early-exit) / moist-saturated(condensing) columns.
+- Tests (8): set_Lscale_max, shapes/positivity, Lscale_max cap,
+  neutral≫stable, monotone-stability, JIT+grad, golden, live-parity.
+  `clubb_mixing_length.py` EXCLUDED in physics-contracts.
+- Codex adversarial review: initial pass flagged [high] "no oracle test" →
+  added the bit-exact golden parity → re-review flagged the fixture/test were
+  still uncommitted (resolved by this commit). Algorithm faithfulness confirmed
+  by the 0.0-diff parity.
+- **Next (iter 7):** P4 ADG1 PDF closure (`pdf_closure_module` ADG1 branch +
+  `setup_clubb_pdf_params`) — the cloud-fraction / buoyancy-flux heart; needs
+  `sigma_sqd_w`(✓), `Skx`/`gamma_Skw`(✓), `sat_mixrat_liq`(✓). Largest remaining
+  kernel after this.
+
+<!-- superseded risk note (resolved iter 6):
 - **⚠ Remaining P3 risk (iter 6+):** `compute_mixing_length` is the largest,
   hardest kernel — per-column parcel **while-loop** ascents/descents
   (`_compute_lscale_up_col`/`_compute_lscale_down_col`, `_bounded_while`,
@@ -389,5 +425,5 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
   `while`. Porting JAX-clean (lax.while_loop/scan, differentiable, vmap or
   per-column) is the single biggest remaining task; will span ≥2 iterations and
   needs its own careful codex pass. Not started — flagged, not skipped.
-</content>
-</invoke>
+-->
+
