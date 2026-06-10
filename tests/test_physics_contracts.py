@@ -147,6 +147,9 @@ EXCLUDED: frozenset[str] = frozenset(
         # Vaisala frequency) — diagnostic helpers feeding the closure, not a
         # single-tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_helpers.py",
+        # CLUBB port: skewness diagnostics (gamma(Skw), Skx, LG05 ansatz) —
+        # pure closure helpers, not a single-tendency scheme.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_skewness.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",

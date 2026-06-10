@@ -188,7 +188,9 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
   `clubb_turbulence` raising `NotImplementedError` is FORBIDDEN (CLAUDE.md) —
   instead land it last when the call tree is real.
 - **P2 Thermo/saturation adapter** + sigma_sqd_w + Brunt-Vaisala (helper_module).
-- **P3 Mixing length** (`Lscale`, tau) — `l_diag_Lscale_from_tau` path.
+- **P3 Mixing length** (`Lscale`, tau). ⚠ CAM `l_diag_Lscale_from_tau=False`
+  ⇒ buoyant-sorting **parcel-integral** `Lscale` (NOT the tau path). Split:
+  skewness ✅ iter 5; `compute_mixing_length` parcel asc/desc ⏳ iter 6+.
 - **P4 ADG1 PDF closure** — the heart; `pdf_closure_module` ADG1 branch +
   `setup_clubb_pdf_params`. Cloud fraction, wpthvp, buoyancy terms.
 - **P5 Moment advance** — wp2/wp3, xp2/xpyp, xm/wpxp, windm; implicit solves;
@@ -221,6 +223,8 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
 | P1 | `CLUBBConfig`/`CLUBBFlags` | ☐ |
 | P2 | saturation adapter (Flatau) — `thermo` curves + `clubb_saturation.py` | ✅ iter 3 |
 | P2 | sigma_sqd_w + Brunt–Väisälä (`clubb_helpers.py`) | ✅ iter 4 |
+| P3 | skewness diagnostics (`clubb_skewness.py`: Skx, gamma_Skw, LG05) | ✅ iter 5 |
+| P3 | `compute_mixing_length` parcel buoyant-sorting (Lscale up/down) | ☐ iter 6+ (largest kernel) |
 | P3 | mixing length / Lscale | ☐ |
 | P4 | ADG1 PDF closure | ☐ |
 | P5 | moment advance + solves + limiters | ☐ |
@@ -356,5 +360,34 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
   `mixing_length.py` (NOT the tau path). This is the largest single kernel so
   far — likely split across iter 5–6. Will need `gamma_Skw`/`Skx`
   (`Skx_module`) which sigma_sqd_w consumes too.
+
+### iter 5
+- **P3 skewness (done):** new `clubb_skewness.py` ports `Skx_module.py`:
+  `Skx_func`, `compute_gamma_Skw` (Gaussian γ(Skw) with the degenerate-coef
+  `jnp.where` guard + static `l_gamma_Skw` branch), `LG_2005_ansatz` (LG05 eqs
+  11/16/33), `xp3_LG_2005_ansatz` (inverse of `Skx_func`). Feeds
+  `compute_sigma_sqd_w` (γ_Skw), the PDF closure, and the diagnostic `xp3`
+  (CAM `l_advance_xp3=False`).
+- **Convention adaptation:** the CLUBB ref indexes `clubb_params[:, iX]` out of
+  the 102-vector; I pass the coefficients as named scalar args from
+  `CLUBBParams` (`Skw_denom_coef`, `gamma_coef`/`b`/`c`, `beta`). `w_tol_sqd`
+  floor implemented as `w_tol**2` from config. Codex verified the
+  index→name mapping is faithful.
+- Tests (`test_clubb_skewness.py`, 10): Skx normalization + odd symmetry; γ(Skw)
+  limits (Skw=0→γ_coef, large→γ_coefb, bounded, degenerate→constant, flag-off→
+  constant, golden); LG05 zero-flux→0; **xp3∘Skx_func round-trip** recovers the
+  LG05 skewness; differentiable wrt coefficients; JIT-clean.
+- `clubb_skewness.py` EXCLUDED in physics-contracts; per-file-ignore glob gains
+  N802 (canonical fn names `Skx_func`, `LG_2005_ansatz`).
+- Codex adversarial review: **APPROVE, no material findings** (formulas, param
+  mapping, w_tol_sqd floor, inverse, AD branches all verified vs Skx_module.py).
+- **⚠ Remaining P3 risk (iter 6+):** `compute_mixing_length` is the largest,
+  hardest kernel — per-column parcel **while-loop** ascents/descents
+  (`_compute_lscale_up_col`/`_compute_lscale_down_col`, `_bounded_while`,
+  `_upward_inner_while`) doing buoyant-sorting CAPE integrals, ~600 LOC. The
+  ref uses a Python `for i in range(ngrdcol)` over columns + dynamic-indexed
+  `while`. Porting JAX-clean (lax.while_loop/scan, differentiable, vmap or
+  per-column) is the single biggest remaining task; will span ≥2 iterations and
+  needs its own careful codex pass. Not started — flagged, not skipped.
 </content>
 </invoke>
