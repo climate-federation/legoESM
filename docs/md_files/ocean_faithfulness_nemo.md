@@ -615,9 +615,7 @@ requires --partial-cell). 120-day cold-start smoke 8458619 in flight.
 our faithful runs use **A_h=1e5 + C_smag_lap=3.0 (the ¼° stabilizer values) ⇒ 5–10× MORE viscous than
 NEMO** = the fuzziness. Tracers: ours tvd/Van-Leer + GM/Redi κ=600 vs NEMO FCT2 + isoneutral-lap
 (Treguier ~1e3) + EIV — comparable class, tvd slightly more diffusive (we have ppm_fct). NEW
-`--tracer-advection` runner knob (tripole+latlon). **Diffusivity smoke 8458624 launched** (120-day
-tripole: A_h=2e4, C_smag_lap=0.33, ppm_fct + seam fix) — stability is the question (these values were
-raised for the cold start); if stable → next-production candidates.
+`--tracer-advection` runner knob (tripole+latlon). **Diffusivity smoke 8458624 NaN'd by day 30** — the one-jump NEMO-level viscosity drop (A_h 1e5→2e4 + C_smag_lap 3.0→0.33 + ppm_fct, 3 variables at once) breaks the WOA cold start: the high viscosity IS load-bearing (consistent with the ~50-iteration cold-start history). ISOLATED follow-up smokes launched: ppm_fct-only (8458659, stock viscosity — the front-sharpness gain without the stability risk) + viscosity bisect A_h=5e4/C_smag_lap=1.0 with tvd (8458660). Honest expectation: we can likely close PART of the NEMO viscosity gap (bisect) + the advection order, not all of it — NEMO's cold start tolerates 2e4 because its initialisation/restart history differs; ours needs the dissipation crutch during adjustment. A ramped-viscosity schedule (start 1e5, decay to 2e4 over ~90 days) is the likely full fix — design next if the bisect holds.
 **Status**: items 1+2 SHIPPED; item 3 audited + smoke in flight. Next production round (after smokes):
 --runoff-depth-spread-m 150 --river-mouth-restoring-gate --bbl-adv [--A-h 2e4 --C-smag-lap 0.33
 --tracer-advection ppm_fct if visc smoke stable]. Production runs in flight:
