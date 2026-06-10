@@ -34,16 +34,30 @@ evidence and commits: `oracle_recipe_strategy.md` §8 ledgers.
 | Tracer realized increment | L2 3.85 → **1.69** (floor 1.23) | implicit surface-forcing placement (rung 6 discovery) |
 | Outer integrator (AB2 + dt_mom≠dt_tracer + rigid lid) | bit-faithful (rung 6: adds no error) | #44; async ratio 9 conserves at machine precision under rigid lid |
 
-## Climate scoreboard (multi-year free runs, faithful stack)
+## Climate scoreboard (10-yr vs 10-yr, same setup + metrics — REFRESHED 2026-06-10)
 
-| Metric | legoESM / Veros | Status |
-|---|---|---|
-| ACC transport | O(100 Sv) vs 110.6 Sv (chaotic at 1 yr) | rigid lid restored Veros magnitude (free surface gave 18 Sv) |
-| Total KE | **0.94×** (was 1.48×) | closed by the EKE-source match cascade |
-| Front sharpness | **0.97×** | closed |
-| EKE | **2.42× overshoot** | OPEN — faithful overshoot (source matches on same state; legoESM flow more energetic) |
-| Abyssal T | **+5 °C warm** | OPEN — driven by the ~6× too-strong resolved Eulerian overturning |
-| u_bot/u_surf | 0.49 vs 0.21 (too barotropic) | OPEN — vertical momentum partition / eddy form stress |
+The 2026-05-31 numbers (KE 0.94×, EKE 2.42×) predated five fidelity options and
+used different metrics; the refreshed apples-to-apples comparison
+(`.physics-validator/veros_ablation/`, full faithful stack incl. prognostic
+TKE `2bfa841a`) is the authoritative one:
+
+| Metric | Veros | legoESM (diag TKE) | legoESM (prog TKE) | Status |
+|---|---|---|---|---|
+| ACC transport | 248 Sv | 1.52× | **1.35×** | OPEN, improved |
+| Total KE | 5.9e16 J | 5.41× | **4.51×** | OPEN, improved |
+| Mean EKE | 1.7e-3 | 19.8× | **17.4×** | OPEN, improved |
+| Abyssal T | 0.27 °C | +2.8 °C | +3.15 °C | OPEN |
+| u_bot/u_surf | 0.123 | 2.42× | **2.31×** | OPEN, improved |
+| Surface T | 12.03 °C | 0.99× | 0.99× | restoring pins it ✓ |
+
+**The 2026-06-09/10 Layer-1 campaign** (user challenge: "chaos explains
+weather, not climate"): the closure energy cycle was audited and CLOSED —
+prognostic TKE built (the one structural hole; moves the residual ~15% the
+right way), all recycling/budget terms (H1/H2/H3/H6) measured **climate-inert
+in Veros itself** via runtime ablations, and the forcing fields exonerated at
+machine precision (realized wind acceleration ratio 1.000000). The residual
+is therefore NOT the closures' form, the forcing, the integrator, or the
+placements.
 
 The three OPEN rows are one structural difference: the too-barotropic vertical
 momentum partition under the cold-started parameterized-eddy field (legoESM
@@ -69,12 +83,21 @@ EKE/GM depth structure, bottom-drag mapping).
    (implicit vs explicit), constant-kappa T_iso (kappa confound) all looked
    like model gaps until the harness was made fair.
 
-## Open levers (ranked, for whoever picks this up)
+## Open levers (ranked, post-campaign 2026-06-10)
 
-1. **Eddy-mean equilibration** (the climate residual): research-level — eddy
-   form stress / APE drainage / warm-started or equilibrated EKE experiments.
-2. **Momentum realized-increment ceiling**: bridge Veros's psi/dpsin + du
-   history at higher fidelity if the 0.28→0.44 gap matters.
-3. **T_iso beyond 0.37**: the remaining confound is the 3-D kappa structure
-   fed to the comparison + per-corner metric factors (tripolar); the slope
-   form itself is now Veros-faithful including the kr pairing.
+Never-isolated comparisons — the only places the residual can still hide
+before the eddy-mean-equilibration attribution stands on closed ground:
+
+1. **Rigid-lid ψ-solve / barotropic-coupling OUTPUTS** on an identical RHS
+   (never snapshot-compared): Veros's dpsi extrapolation as CG guess, the
+   AB2-of-dpsi structure, and the vertical-mean removal/re-add sequence
+   (`solve_stream.py:164-199`) vs legoESM's un-AB2'd barotropic mode.
+2. **Spherical metric/curvature terms** in the momentum budget (Veros
+   `momentum.py:43-73` tantr terms) — bounded by coriolis corr 0.96/0.98 but
+   never isolated; systematic O(u·v·tanφ/R).
+3. **Isolated vertical momentum advection** + **realized bottom-drag
+   tendency** (formula-matched, never tier-2'd).
+4. **T_iso 0.37 pattern** (the APE-drainage operator's spatial structure).
+5. **Equilibration experiments** (warm-started / equilibrated EKE+TKE,
+   longer runs): the climate lever if 1–4 clear. 10-yr runs cost ~25 min on
+   a V100S — an attribution matrix is cheap now.
