@@ -292,7 +292,7 @@ def compute_sss_restoring_flux(
     inv_tau_eff = inv_tau_eff * ice_factor
 
     S_diff = S_model_top - S_target
-    # Salinity tendency in the surface layer [PSU/s].
+    # Salinity tendency in the surface layer [PSU/s] (pre-cap).
     dS_dt_top = -S_diff * inv_tau_eff
 
     # Equivalent FW flux: derived from a virtual-salt convention.
@@ -305,12 +305,19 @@ def compute_sss_restoring_flux(
         freshwater_flux, -config.max_flux_kg_m2_s, config.max_flux_kg_m2_s,
     )
 
+    # The applied tendency is re-derived from the CAPPED flux so the flux
+    # bound (NEMO ``ln_sssr_bnd``/``rn_sssr_bnd`` semantics when configured
+    # to ±4 mm/day-equivalent) actually limits what reaches the ocean.
+    # Previously ``dS_dt_top`` bypassed the clip, so the τ-restoring
+    # appliers (``apply_sss_restoring_step*``, which consume ``dS_dt_top``)
+    # saw an UNBOUNDED restoring while only the unused flux diagnostics
+    # were capped.
+    dS_dt_top = -freshwater_flux * S_safe / (rho_0 * config.z1_m)
+
     # Salt-mass flux: dM_salt/dt = rho_0 · z1 · dS/dt · 1e-3
-    # (PSU·kg/m³·m/s · g/kg / 1000 = kg(salt)/m²/s).
+    # (PSU·kg/m³·m/s · g/kg / 1000 = kg(salt)/m²/s), from the capped
+    # tendency so all outputs stay mutually consistent.
     salt_flux = rho_0 * config.z1_m * dS_dt_top * 1.0e-3
-    salt_flux = jnp.clip(
-        salt_flux, -config.max_flux_kg_m2_s, config.max_flux_kg_m2_s,
-    )
 
     return {
         "freshwater_flux": freshwater_flux,

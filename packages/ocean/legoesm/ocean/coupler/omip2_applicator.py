@@ -150,8 +150,19 @@ def _conservative_regrid_to_latlon(
         float(dst_lat_deg[0]), float(dst_lon_deg[0]),
     )
     if key not in _REGRID_WEIGHTS_CACHE:
+        # LONGITUDE WRAP: pad the source with one ghost column on each side
+        # (last column shifted -360, first column shifted +360) so a
+        # destination cell straddling the 0/360 seam sees full source
+        # coverage.  Without this the seam-adjacent destination column was
+        # only partially covered (under-weighted forcing stripe at the last
+        # longitude; with the coarse synthetic test forcing the column came
+        # back HALVED, and the 10-m pressure iteration then NaN'd on the
+        # resulting garbage air temperature).
+        src_lon = np.asarray(src_lon_deg, dtype=np.float64)
+        src_lon_padded = np.concatenate(
+            [[src_lon[-1] - 360.0], src_lon, [src_lon[0] + 360.0]])
         src_lat_edges = _edges_from_centers_deg(src_lat_deg)
-        src_lon_edges = _edges_from_centers_deg(src_lon_deg, periodic=True)
+        src_lon_edges = _edges_from_centers_deg(src_lon_padded, periodic=True)
         dst_lat_edges = _edges_from_centers_deg(dst_lat_deg)
         dst_lon_edges = _edges_from_centers_deg(dst_lon_deg, periodic=True)
         # Clamp lat edges into [-pi/2, pi/2] in case the inferred edge
@@ -163,9 +174,9 @@ def _conservative_regrid_to_latlon(
             dst_lat_edges, dst_lon_edges,
         )
     weights = _REGRID_WEIGHTS_CACHE[key]
-    return np.asarray(apply_conservative_regrid(
-        jnp_local.asarray(field_2d), weights,
-    ))
+    f = jnp_local.asarray(field_2d)
+    f_padded = jnp_local.concatenate([f[:, -1:], f, f[:, :1]], axis=1)
+    return np.asarray(apply_conservative_regrid(f_padded, weights))
 
 
 _BASE_FORCING_CHANNELS = ("u10", "v10", "T_air", "q_air",
@@ -760,13 +771,13 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     #                                                  SAME eps_w=0.98 weights
     #                                                  absorption AND emission)
     #       + sensible + latent                        NCAR turbulent fluxes
-    #       - snow*L_f                                 melt freshly-fallen snow
+    #       - snow*L_fus                               melt freshly-fallen snow
     #       - evap*c_p_sw*T_s[degC]                    evap removes heat at SST
-    #       + rain*c_p_sw*(T_air[degC])                rain heat content @ Tair
-    #       + snow*c_p_ice*min(T_air[degC], 0)         snow heat content
-    # (heat-content terms use NEMO's seawater rcp / fresh-ice c_pi pair; the
-    # rain/snow terms use the air temperature like NEMO -- the ~0.1 K
-    # potential-T refinement is negligible there).
+    #       + rain*c_p_sw*(theta_air[degC])            rain heat content
+    #       + snow*c_p_ice*min(theta_air[degC], 0)     snow heat content
+    # (NEMO blk_oce_2 receives theta_air_zt for the rain/snow terms and the
+    # ABSOLUTE skin/bulk SST for LW + evap heat content; rcp/rcpi/rLfus are
+    # the NEMO-parity values.)
     lw_net = constants.emissivity_seawater_lw * (
         np.asarray(forc["lw_down"], dtype=np.float64) - sigma_sb * T_sfc_K ** 4
     )
@@ -775,13 +786,17 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                if forc.get("snow") is not None else np.zeros_like(precip_np))
     # CORE-II precip = RAIN+SNOW; guard tiny negative rain from regridding.
     rain_np = np.maximum(precip_np - snow_np, 0.0)
-    T_air_C = np.asarray(forc["T_air"], dtype=np.float64) - T_freeze
+    from legoesm.ocean.bulk_flux_omip import potential_air_temperature_10m
+    theta_air_j, _ = potential_air_temperature_10m(
+        jnp.asarray(forc["T_air"]), jnp.asarray(forc["q_air"]),
+        None if slp is None else jnp.asarray(slp))
+    theta_air_C = np.asarray(theta_air_j, dtype=np.float64) - T_freeze
     T_sfc_C = T_sfc_K - T_freeze
     q_precip_evap = (
-        - snow_np * float(constants.L_f)
+        - snow_np * float(constants.L_fus_nemo)
         - np.asarray(evap, dtype=np.float64) * float(constants.c_p_seawater) * T_sfc_C
-        + rain_np * float(constants.c_p_seawater) * T_air_C
-        + snow_np * float(constants.c_pi) * np.minimum(T_air_C, 0.0)
+        + rain_np * float(constants.c_p_seawater) * theta_air_C
+        + snow_np * float(constants.c_p_ice_nemo) * np.minimum(theta_air_C, 0.0)
     )
     # Under a prescribed-ice boundary (under_ice) ``_ice_surface_heat``
     # suppresses this on the ice-covered fraction (snow falling on ice does
@@ -902,14 +917,13 @@ def compute_omip2_surface_forcing_jax(
     nearest-neighbour spatial sample.  NO ice (``ice_albedo``/``under_ice``)
     support — the prescribed-ice runs use the host loop.
 
-    LIMITATION: this scan variant covers ONLY tau/q_net/sw_down; it does NOT
-    build the P - E / runoff ``FreshwaterForcing`` (its device stack omits the
-    ``precip`` channel, see :func:`build_core2_forcing_device_stack`).  The
-    faithful surface-freshwater forcing is therefore applied only on the HOST run
-    loop (``compute_omip2_freshwater_forcing`` -> ``model.step(freshwater=...)``);
-    the run driver refuses ``--scan-block`` for salinity-faithful runs until
-    precip is added to the device stack and the freshwater channel is wired into
-    the scan body.
+    LIMITATION: this scan variant covers ONLY tau/q_net/sw_down.  The device
+    stack DOES carry precip/snow/slp (the q_ns heat-content terms need them),
+    but the P - E / runoff ``FreshwaterForcing`` is still NOT built here: the
+    faithful surface-freshwater forcing is applied only on the HOST run loop
+    (``compute_omip2_freshwater_forcing`` -> ``model.step(freshwater=...)``),
+    and the run driver refuses ``--scan-block`` for salinity-faithful runs
+    until the freshwater channel is wired into the scan body.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
     sigma_sb = float(constants.sigma_sb)
@@ -937,17 +951,20 @@ def compute_omip2_surface_forcing_jax(
     )
     # Non-solar assembly: EXACT jnp mirror of the host
     # ``compute_omip2_surface_forcing`` (NEMO blk_oce_2 form) -- net-LW
-    # Kirchhoff eps_w, snow fusion, rain/snow/evap heat content.
+    # Kirchhoff eps_w, snow fusion, rain/snow heat content at theta_air,
+    # evap heat content at the absolute SST.
+    from legoesm.ocean.bulk_flux_omip import potential_air_temperature_10m
     lw_net = constants.emissivity_seawater_lw * (
         lw_down - sigma_sb * T_sfc_K ** 4)
     rain = jnp.maximum(precip - snow, 0.0)
-    T_air_C = T_air - T_freeze
+    theta_air, _ = potential_air_temperature_10m(T_air, q_air, slp)
+    theta_air_C = theta_air - T_freeze
     T_sfc_C = T_sfc_K - T_freeze
     q_precip_evap = (
-        - snow * constants.L_f
+        - snow * constants.L_fus_nemo
         - evap * constants.c_p_seawater * T_sfc_C
-        + rain * constants.c_p_seawater * T_air_C
-        + snow * constants.c_pi * jnp.minimum(T_air_C, 0.0)
+        + rain * constants.c_p_seawater * theta_air_C
+        + snow * constants.c_p_ice_nemo * jnp.minimum(theta_air_C, 0.0)
     )
     q_net = sh + lh + lw_net + q_precip_evap + sw_down
     return OceanSurfaceForcing(

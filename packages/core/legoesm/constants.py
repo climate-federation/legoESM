@@ -120,6 +120,20 @@ c_p_seawater = 3991.86795711963  # [J/(kg*K)] NEMO TEOS-10 rcp
 c_p_dry_air_nemo = 1005.0       # [J/(kg*K)] NEMO sbc_phy rCp_dry
 c_p_vapor_nemo = 1860.0         # [J/(kg*K)] NEMO sbc_phy rCp_vap
 
+# Remaining NEMO-parity constants of the CORE-II/OMIP faithful flux path
+# (values verbatim from NEMO 5.0.1 phycst.F90 / sbc_phy.F90).  They differ
+# from legoESM's globals in the 4th-5th digit; the faithful path uses these
+# so flux-level golden tests against the NEMO formulas close exactly.
+g_nemo = 9.80665                # [m/s^2]  NEMO phycst grav
+R_v_nemo = 461.495              # [J/(kg*K)] NEMO sbc_phy R_vap (ours: 461.51)
+L_fus_nemo = 0.3333601e6        # [J/kg]   NEMO phycst rLfus (ours L_f: 3.337e5)
+c_p_ice_nemo = 2096.7           # [J/(kg*K)] NEMO phycst rcpi (ours c_pi: 2106)
+# Universal molar constants used by NEMO's barometric 10-m pressure
+# (sbc_phy pres_temp): molar gas constant + dry-air/water molar masses.
+R_gas_molar = 8.314510          # [J/(mol*K)] universal molar gas constant
+M_dry_air = 28.9647e-3          # [kg/mol] dry-air molar mass
+M_water = 18.0153e-3            # [kg/mol] water molar mass
+
 # Broadband sea-ice / snow surface albedos used as Delta-Eddington
 # fallback or for the constant-albedo configuration.  Values follow
 # CICE6 conventions (Briegleb & Light 2007).  Spectral splits:

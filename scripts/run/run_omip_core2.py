@@ -1805,7 +1805,15 @@ def main() -> int:
     p.add_argument("--sss-restore-tau-days", type=float, default=365.0,
                    help="Interior SSS-restoring timescale [days] (default 365 = "
                         "OMIP-2 interior; regional Arctic/Med/SO use shorter "
-                        "built-in taus).")
+                        "built-in taus). NEMO ORCA1 RUN_REF equivalent: piston "
+                        "-220 mm/day over the 10 m top layer = tau ~45.5 d.")
+    p.add_argument("--sss-restore-bound-mmday", type=float, default=None,
+                   help="Bound |restoring FW flux| at this mm/day-equivalent "
+                        "(NEMO ln_sssr_bnd: rn_sssr_bnd=4.0 in the ORCA1 "
+                        "reference). Default None keeps the loose 200 mm/day "
+                        "safety cap. The bound is what lets a SHORT tau hold "
+                        "SSS without injecting deep-convection-killing salt "
+                        "spikes (the tau=60 AMOC-collapse mechanism).")
     p.add_argument("--woa-smoothing-passes", type=int, default=0,
                    help="Horizontal Laplacian smoothing passes/level on the WOA T,S IC "
                         "-- removes spurious grid-scale fronts from interpolating/flood-"
@@ -2091,16 +2099,29 @@ def main() -> int:
             raise ValueError("--sss-restore-tau-days must be > 0 (0 divides by "
                              "zero in build_region_masks; negative = anti-restoring).")
         from legoesm.ocean.forcing.sss_restoring import SSSRestoringConfig
+        from legoesm import constants
+        _cfg_kwargs = {}
+        if args.sss_restore_bound_mmday is not None:
+            if not (float(args.sss_restore_bound_mmday) > 0.0):
+                raise ValueError("--sss-restore-bound-mmday must be > 0.")
+            # mm/day water-equivalent -> kg/m^2/s (rho_water * m/day / 86400).
+            _cfg_kwargs["max_flux_kg_m2_s"] = (
+                float(args.sss_restore_bound_mmday) * 1.0e-3 / 86400.0
+                * float(constants.rho_water))
         sss_restore_cfg = SSSRestoringConfig(
             enabled=True,
             tau_restore_days_default=float(args.sss_restore_tau_days),
+            **_cfg_kwargs,
         )
         sss_restore_target = np.asarray(
             state.S.data, dtype=np.float64)[..., 0].copy()      # surface SSS
         _wet = np.asarray(state.land_mask.data) > 0.5
+        _bnd = (f"{args.sss_restore_bound_mmday:.1f} mm/day (NEMO ln_sssr_bnd)"
+                if args.sss_restore_bound_mmday is not None
+                else "200 mm/day safety cap")
         print(f"[setup] SSS restoring ON: tau_default="
               f"{args.sss_restore_tau_days:.0f} d + OMIP-2 regional masks; "
-              f"target = WOA surface SSS "
+              f"flux bound {_bnd}; target = WOA surface SSS "
               f"[{sss_restore_target[_wet].min():.1f},"
               f"{sss_restore_target[_wet].max():.1f}] PSU")
 

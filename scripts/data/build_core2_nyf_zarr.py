@@ -172,7 +172,10 @@ def _validate(out: Path) -> None:
         "precip[kg/m2/s]": (f.precip, 0.0, 1e-3),
         "|u10|[m/s]": (np.abs(f.u10), 0.0, 60.0),
         "snow[kg/m2/s]": (f.snow, 0.0, 1e-3),
-        "slp[Pa]": (f.slp, 87000.0, 110000.0),
+        # Upper bound 1200 hPa: CORE-II SLP over the Antarctic/Greenland ice
+        # sheets is a below-ground sea-level reduction (fictitious, up to
+        # ~1160 hPa) — those cells are land-masked when regridded to ocean.
+        "slp[Pa]": (f.slp, 87000.0, 120000.0),
     }
     print(f"  loaded: lon{f.lon.shape} lat{f.lat.shape} time{f.time_s.shape}")
     ok = True

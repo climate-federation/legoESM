@@ -33,9 +33,16 @@ Algorithms (``algo=``)
 algorithm at ``zt = zu = 10 m`` (the CORE-II measurement heights, so the
 height-shift branch of NEMO's ``turb_ncar`` is exactly zero and omitted):
 
+0. NEMO temperature preprocessing (blk_oce_1 / sbc_phy, ``ln_tair_pot=F``):
+   10-m pressure ``p10 = pres_temp(q, slp, 10, T_abs)`` (3-iteration
+   barometric with moist molar mass + Goff saturation), potential air
+   temperature ``theta_air = theta_exner(T_abs, p10) = T (1e5/p10)^gamma_dry``
+   and potential SST ``theta_sst = theta_exner(SST, slp)``.  The saturation
+   humidity stays at the ABSOLUTE SST: ``ssq = 0.98 q_sat_goff(SST, slp)``.
 1. ``Ub = max(|U10|, 0.5)``; neutral coefficients ``CdN`` (LY09 Eq. 6 with
    NEMO's cyclone plateau + ``1e-4`` floor), ``CeN = 34.6e-3 sqrt(CdN)``,
-   ``ChN = (32.7 unstable | 18 stable) e-3 sqrt(CdN)``.
+   ``ChN = (32.7 unstable | 18 stable) e-3 sqrt(CdN)`` from the
+   ``theta_air/theta_sst`` virtual-temperature difference.
 2. 5 fixed-point iterations (NEMO ``nb_iter0``): friction scales
    ``u* = sqrt(Cd) Ub``, ``theta* = Ch/sqrt(Cd) dtheta``,
    ``q* = Ce/sqrt(Cd) dq``; Obukhov ``1/L`` (virtual-temperature form,
@@ -44,11 +51,10 @@ height-shift branch of NEMO's ``turb_ncar`` is exactly zero and omitted):
    coefficient updates ``Cd = CdN/(1 - sqrt(CdN)/kappa psi_m)^2`` and
    ``Cx = CxN r / (1 + CxN (-psi_h)/(kappa sqrt(CdN)))`` with
    ``r = sqrt(Cd/CdN)``, all floored at ``1e-4``.
-3. Fluxes with moist-air density ``rho(slp, T, q)`` (floored at 0.8; the
-   flux assembly uses ``max(rho, 1.0)`` exactly like NEMO's
-   ``BULK_FORMULA``), moist ``cp_air(q)``, SST-dependent ``L_vap``, the
-   0.98 salt-reduced Goff saturation humidity at the surface, and the
-   potential air temperature ``theta = T_air + gamma_moist(T_air, q) zu``.
+3. Fluxes (NEMO BULK_FORMULA): moist-air density ``rho(T_abs, q, p10)``
+   (floored at 0.8; the assembly uses ``Ub max(rho, 1.0)``), moist
+   ``cp_air(q)``, sensible on ``(theta_air - theta_sst)``, latent with
+   ``L_vap(theta_sst)`` — exactly the (potential/absolute) mix NEMO uses.
 
 ``psi_m`` / ``psi_h`` are the canonical Paulson/Dyer forms shared with the
 MOST solver (``legoesm.core.bulk_flux.psi_m/psi_h`` — identical to NEMO's
@@ -85,9 +91,72 @@ _ONE_ON_L_ABS_MAX: float = 200.0  # NEMO One_on_L |1/L| cap [1/m]
 _RHO_AIR_FLOOR: float = 0.8    # NEMO rho_air floor [kg/m^3]
 _RHO_FLUX_FLOOR: float = 1.0   # NEMO BULK_FORMULA zUrho = Ub*MAX(rho, 1.0)
 _QSAT_SALT_FACTOR: float = 0.98  # NEMO sbc_phy rdct_qsat_salt
-_RCTV0: float = constants.R_v / constants.R_d - 1.0  # ~0.608 (NEMO rctv0)
+# NEMO-parity derived constants (sbc_phy): rctv0 = R_vap/R_dry - 1,
+# reps0 = R_dry/R_vap, gamma_dry = R_gas/(M_dry cp_dry) — all derived from
+# the NEMO base constants so the parity chain stays exact.
+_RCTV0: float = constants.R_v_nemo / constants.R_d - 1.0
+_REPS0: float = constants.R_d / constants.R_v_nemo
+_GAMMA_DRY: float = constants.R_gas_molar / (
+    constants.M_dry_air * constants.c_p_dry_air_nemo)
+_P_EXNER_REF: float = 1.0e5    # NEMO sbc_phy rpref [Pa]
+_N_ITER_PRES: int = 3          # NEMO pres_temp barometric iterations
 
 _VALID_OMIP_BULK_ALGOS = ("ncar", "ly09_2coeff")
+
+
+def exner_potential_temperature(T_K, p_Pa):
+    """Potential temperature via the Exner function (NEMO ``theta_exner``).
+
+    ``theta = T (rpref / p)^gamma_dry`` with ``rpref = 1e5 Pa`` and the
+    dry-air Poisson constant ``gamma_dry = R_gas/(M_dry cp_dry)``.  Used for
+    BOTH the 10-m air temperature (with the 10-m pressure) and the potential
+    sea-surface temperature (with the sea-level pressure), exactly like
+    NEMO blk_oce_1.
+    """
+    T = jnp.asarray(T_K, dtype=jnp.float64)
+    p = jnp.asarray(p_Pa, dtype=jnp.float64)
+    return T * (_P_EXNER_REF / p) ** _GAMMA_DRY
+
+
+def pressure_at_height(q_air, slp_Pa, z_m, T_abs_K):
+    """Air pressure at height ``z_m`` (NEMO ``pres_temp``, absolute-T branch).
+
+    3 fixed-point iterations of the barometric law with the MOIST molar mass
+    ``xm = (1 - q/q_sat) M_dry + (q/q_sat) M_water`` (q_sat from the Goff
+    curve at the CURRENT pressure iterate):
+
+        p <- slp * exp( -g xm z / (R_gas T) )
+
+    Static iteration count — jit/grad-safe.
+    """
+    q = jnp.asarray(q_air, dtype=jnp.float64)
+    slp = jnp.asarray(slp_Pa, dtype=jnp.float64)
+    T = jnp.maximum(jnp.asarray(T_abs_K, dtype=jnp.float64), 180.0)
+    p = slp
+    for _ in range(_N_ITER_PRES):
+        e_s = saturation_vapor_pressure_goff(T)
+        q_sat = _REPS0 * e_s / (p - (1.0 - _REPS0) * e_s)
+        # Physical saturation ratio is <= ~1; clip so an UNMASKED garbage
+        # cell (e.g. land point with the 180 K temperature floor, where
+        # q >> q_sat) cannot drive the molar mass negative and NaN the
+        # barometric exponential.  No-op for valid marine inputs.
+        w = jnp.clip(q / q_sat, 0.0, 1.0)
+        xm = (1.0 - w) * constants.M_dry_air + w * constants.M_water
+        p = slp * jnp.exp(
+            -constants.g_nemo * xm * z_m / (constants.R_gas_molar * T))
+    return p
+
+
+def potential_air_temperature_10m(T_air_K, q_air, slp_Pa=None):
+    """NEMO blk_oce_1 air-temperature preprocessing at zt = 10 m.
+
+    Returns ``(theta_air, p10)``: the potential air temperature
+    ``theta_exner(T_abs, p10)`` and the 10-m pressure from
+    :func:`pressure_at_height`.  ``slp_Pa=None`` -> standard atmosphere.
+    """
+    p_slp = constants.p_atm_std if slp_Pa is None else slp_Pa
+    p10 = pressure_at_height(q_air, p_slp, _ZU_M, T_air_K)
+    return exner_potential_temperature(T_air_K, p10), p10
 
 
 def seawater_q_sat(T_sfc_K, slp_Pa=None):
@@ -103,7 +172,7 @@ def seawater_q_sat(T_sfc_K, slp_Pa=None):
     p = constants.p_atm_std if slp_Pa is None else slp_Pa
     e_s = saturation_vapor_pressure_goff(jnp.asarray(T_sfc_K, dtype=jnp.float64))
     p = jnp.asarray(p, dtype=jnp.float64)
-    q = constants.epsilon * e_s / (p - (1.0 - constants.epsilon) * e_s)
+    q = _REPS0 * e_s / (p - (1.0 - _REPS0) * e_s)
     return _QSAT_SALT_FACTOR * q
 
 
@@ -141,24 +210,6 @@ def moist_air_cp(q_air):
     )
 
 
-def gamma_moist(T_air_K, q_air):
-    """Moist-adiabatic lapse rate [K/m] (NEMO/aerobulk ``gamma_moist``).
-
-    Used to lift the CORE-II absolute 10-m air temperature to potential
-    temperature: ``theta = T + gamma_moist(T, q) * zu`` (~0.06-0.1 K).
-    """
-    T = jnp.maximum(jnp.asarray(T_air_K, dtype=jnp.float64), 180.0)
-    q = jnp.maximum(jnp.asarray(q_air, dtype=jnp.float64), 1.0e-6)
-    w = q / (1.0 - q)                       # mixing ratio
-    iRT = 1.0 / (constants.R_d * T)
-    L = latent_heat_vaporization_sst(T)     # same curve, evaluated at T_air
-    return (
-        constants.g * (1.0 + L * w * iRT)
-        / (constants.c_p_dry_air_nemo
-           + L * L * w * constants.epsilon * iRT / T)
-    )
-
-
 def _virt_temp(T_K, q):
     """(Absolute or potential) virtual temperature (NEMO ``virt_temp``)."""
     return T_K * (1.0 + _RCTV0 * q)
@@ -172,7 +223,7 @@ def _one_on_obukhov(theta_K, q, u_star, theta_star, q_star):
     """
     zqa = 1.0 + _RCTV0 * q
     inv_L = (
-        constants.g * constants.kappa_von_karman
+        constants.g_nemo * constants.kappa_von_karman
         * (theta_star * zqa + _RCTV0 * theta_K * q_star)
         / jnp.maximum(u_star * u_star * theta_K * zqa, 1.0e-9)
     )
@@ -192,14 +243,16 @@ def _ce_n10(sqrt_cdn):
     return jnp.maximum(1.0e-3 * 34.6 * sqrt_cdn, _CX_MIN)
 
 
-def ncar_transfer_coefficients(theta_air_K, q_air, T_sfc_K, q_sfc, wind_speed,
-                               *, nb_iter: int = _NB_ITER_NCAR):
+def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
+                               wind_speed, *, nb_iter: int = _NB_ITER_NCAR):
     """Stability-iterated NCAR transfer coefficients at zt = zu = 10 m.
 
     Exact port of NEMO ``turb_ncar`` for the CORE-II case (all forcing at
     10 m, so ``l_zt_equal_zu`` and every ``LOG(zu/10)`` term vanishes).
-    ``nb_iter`` is a static Python int (fixed unrolled loop: differentiable,
-    no traced control flow).
+    Both temperatures are POTENTIAL (NEMO passes ``theta_air_zt`` and the
+    Exner potential SST ``zsspt``); ``q_sfc`` is the salt-reduced saturation
+    humidity at the ABSOLUTE SST.  ``nb_iter`` is a static Python int
+    (fixed unrolled loop: differentiable, no traced control flow).
 
     Returns ``(Cd, Ch, Ce, Ub)`` with ``Ub = max(wind_speed, 0.5)``.
     """
@@ -208,7 +261,7 @@ def ncar_transfer_coefficients(theta_air_K, q_air, T_sfc_K, q_sfc, wind_speed,
     k = constants.kappa_von_karman
     theta = jnp.asarray(theta_air_K, dtype=jnp.float64)
     q = jnp.asarray(q_air, dtype=jnp.float64)
-    sst = jnp.asarray(T_sfc_K, dtype=jnp.float64)
+    sst = jnp.asarray(theta_sst_K, dtype=jnp.float64)
     ssq = jnp.asarray(q_sfc, dtype=jnp.float64)
 
     Ub = jnp.maximum(jnp.asarray(wind_speed, dtype=jnp.float64), _U10_FLOOR_M_S)
@@ -349,15 +402,23 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
         return tau_x, tau_y, shflx, lhflx, evap
 
     # --- NCAR (NEMO-faithful) ---------------------------------------------
+    # NEMO blk_oce_1 preprocessing: ssq at the ABSOLUTE SST + slp; potential
+    # air temperature via the 10-m barometric pressure + Exner; potential
+    # SST via Exner at slp.  Stability, sensible flux and L_vap then use the
+    # POTENTIAL pair (theta_air, theta_sst) exactly like NEMO.
+    slp_for_sst = constants.p_atm_std if slp_Pa is None else jnp.asarray(
+        slp_Pa, dtype=jnp.float64)
     ssq = seawater_q_sat(sst, slp_Pa) if q_sfc is None else jnp.asarray(
         q_sfc, dtype=jnp.float64)
-    theta_air = T_air + gamma_moist(T_air, q_a) * _ZU_M
+    theta_air, p10 = potential_air_temperature_10m(T_air, q_a, slp_Pa)
+    theta_sst = exner_potential_temperature(sst, slp_for_sst)
 
     Cd, Ch, Ce, Ub = ncar_transfer_coefficients(
-        theta_air, q_a, sst, ssq, wind_speed, nb_iter=nb_iter,
+        theta_air, q_a, theta_sst, ssq, wind_speed, nb_iter=nb_iter,
     )
 
-    rho = rho_air_moist(T_air, q_a, slp_Pa) if rho_air is None else jnp.asarray(
+    # NEMO: rhoa = rho_air(ztabs, q, zpre) with the 10-m pressure.
+    rho = rho_air_moist(T_air, q_a, p10) if rho_air is None else jnp.asarray(
         rho_air, dtype=jnp.float64)
     # NEMO BULK_FORMULA: zUrho = Ub * MAX(rho, 1.0)
     Urho = Ub * jnp.maximum(rho, _RHO_FLUX_FLOOR)
@@ -367,9 +428,9 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
     tau_x = -Urho * Cd * u_arr
     tau_y = -Urho * Cd * v_arr
 
-    L_vap = latent_heat_vaporization_sst(sst)
+    L_vap = latent_heat_vaporization_sst(theta_sst)   # NEMO L_vap(pTs=zsspt)
     z_evap = Urho * Ce * (q_a - ssq)          # NEMO zevap (<0 evaporating)
-    shflx = Urho * Ch * (theta_air - sst) * moist_air_cp(q_a)
+    shflx = Urho * Ch * (theta_air - theta_sst) * moist_air_cp(q_a)
     lhflx = L_vap * z_evap
     evap = -z_evap                            # rn_efac = 1
     return tau_x, tau_y, shflx, lhflx, evap
@@ -377,12 +438,14 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
 
 __all__ = [
     "air_sea_fluxes",
-    "gamma_moist",
+    "exner_potential_temperature",
     "large_yeager_cd",
     "large_yeager_ch",
     "latent_heat_vaporization_sst",
     "moist_air_cp",
     "ncar_transfer_coefficients",
+    "potential_air_temperature_10m",
+    "pressure_at_height",
     "rho_air_moist",
     "seawater_q_sat",
 ]
