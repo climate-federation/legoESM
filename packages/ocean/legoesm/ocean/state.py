@@ -763,6 +763,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     barotropic_implicit_theta_pgf: float = 0.55
     barotropic_implicit_pcg_tol: float = 1.0e-10
     barotropic_implicit_pcg_maxiter: int = 200
+    # Distributed (MPI) implicit-CN knobs.  Under MPI the stock
+    # ``jax.scipy`` CG deadlocks (rank-local dot products + a residual-
+    # dependent ``while_loop`` desynchronise the collective schedule), so
+    # the multi-rank path runs a HAND-ROLLED fixed-iteration PCG of
+    # exactly ``barotropic_implicit_pcg_fixed_iters`` iterations (static
+    # ``fori_loop`` => uniform collective schedule, no deadlock) wrapped
+    # in ``jax.lax.custom_linear_solve`` (implicit-function adjoint).  The
+    # single-rank path is UNCHANGED (still stock CG).  Default 60 is a
+    # conservative estimate for 1e-10 residual on a diagonally-dominant
+    # Helmholtz at 1°-¼°; it MUST be validated against the returned global
+    # residual (``barotropic_implicit_pcg_residual_tol``) for each deck —
+    # tripole-fold / coastal conditioning can require more.  See
+    # docs/ocean_experiments/distributed_barotropic_pcg.md.
+    barotropic_implicit_pcg_fixed_iters: int = 60
+    barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     # Rigid-lid streamfunction solver knobs (only used when
     # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
     # surface entirely: the depth-integrated flow is non-divergent and carried
@@ -1015,3 +1030,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # tripole) -- WRONG on a genuinely period-nx regular lat-lon grid.  Default
     # False -> bit-exact for every existing grid/config; set only for tripole.
     ew_cyclic_overlap: bool = False
+    # --- River-runoff depth spreading (NEMO rn_dep_max) --------------------
+    # When > 0, the RUNOFF component of the freshwater forcing dilutes the
+    # top ``runoff_depth_spread_m`` metres of the column (NEMO sbcrnf spreads
+    # rivers over the top 150 m) instead of a single surface cell -- large
+    # rivers (Amazon) otherwise sit too fresh/too shallow/too local.  The
+    # column-integral salt tendency is unchanged (conservation identical);
+    # only the vertical distribution moves.  0 = legacy top-cell (bit-exact).
+    runoff_depth_spread_m: float = 0.0

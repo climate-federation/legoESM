@@ -134,6 +134,13 @@ class SSSRestoringConfig(NamedTuple):
     ice_gate_softness: float = 0.1   # tanh width around threshold
     regions: tuple[RegionMaskSpec, ...] = DEFAULT_OMIP2_REGIONS
     S_floor: float = 1.0             # avoid division by zero in PSU
+    # River-mouth gate (NEMO sbcssr: restoring damped by (1-2*rnfmsk) -> ZERO
+    # at river mouths): when a per-cell ``river_runoff`` field is passed to
+    # ``compute_sss_restoring_flux``, cells whose runoff exceeds this
+    # threshold get NO restoring -- otherwise the restoring fights the river
+    # plume toward the coarse WOA climatology (the Amazon SSS artifact).
+    # ~1e-6 kg/m2/s ~ 0.086 mm/day, far below any river-mouth cell.
+    river_gate_threshold_kg_m2_s: float = 1.0e-6
     # Cap the maximum FW flux to ±200 mm/day-equivalent so a
     # pathological S_target − S_model jump does not blow up the
     # ocean surface budget.
@@ -227,6 +234,7 @@ def compute_sss_restoring_flux(
     lon_deg: jnp.ndarray,
     ice_concentration: jnp.ndarray,
     config: SSSRestoringConfig,
+    river_runoff: jnp.ndarray | None = None,
 ) -> dict:
     """Compute the OMIP-2 SSS restoring fluxes.
 
@@ -290,6 +298,16 @@ def compute_sss_restoring_flux(
         ice_factor = jnp.ones_like(ice_concentration)
 
     inv_tau_eff = inv_tau_eff * ice_factor
+
+    # River-mouth gate (NEMO sbcssr (1-2*rnfmsk): NO restoring at river
+    # mouths so the relaxation does not fight the river plume toward the
+    # coarse WOA climatology).  Hard gate at the threshold — river-mouth
+    # cells carry runoff orders of magnitude above it.
+    if river_runoff is not None:
+        river_factor = jnp.where(
+            jnp.asarray(river_runoff) > config.river_gate_threshold_kg_m2_s,
+            0.0, 1.0)
+        inv_tau_eff = inv_tau_eff * river_factor
 
     S_diff = S_model_top - S_target
     # Salinity tendency in the surface layer [PSU/s] (pre-cap).

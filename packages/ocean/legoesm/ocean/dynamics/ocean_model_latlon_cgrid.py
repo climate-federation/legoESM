@@ -708,6 +708,17 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {config.barotropic_solver!r}")
+        # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
+        if config.barotropic_implicit_pcg_fixed_iters < 1:
+            raise ValueError(
+                "barotropic_implicit_pcg_fixed_iters must be >= 1 "
+                "(the distributed PCG runs exactly this many iterations); "
+                f"got {config.barotropic_implicit_pcg_fixed_iters!r}")
+        if config.barotropic_implicit_pcg_residual_tol <= 0.0:
+            raise ValueError(
+                "barotropic_implicit_pcg_residual_tol must be > 0 "
+                f"(diagnostic acceptance tol); got "
+                f"{config.barotropic_implicit_pcg_residual_tol!r}")
         # Asynchronous dt_mom≠dt_tracer stepping (dt_mom = dt / dt_mom_ratio).
         if config.dt_mom_ratio < 1.0:
             raise ValueError(
@@ -1605,7 +1616,27 @@ class LatLonCGridOceanModel:
         # flux remains here, applied to the top layer of S.
         if freshwater is not None and self.config.freshwater_closure != "none":
             dz_0 = h_k_new[..., 0]
-            if getattr(self.config, "normalize_freshwater", False):
+            _S_dtype = state_new.S.data.dtype
+            _spread_m = float(getattr(self.config, "runoff_depth_spread_m", 0.0))
+            if _spread_m > 0.0:
+                # NEMO-style runoff depth spreading (rn_dep_max): the runoff
+                # channel dilutes the top `_spread_m` metres; all other
+                # channels stay at the top cell.  Column-integral salt
+                # tendency identical to the legacy closure (conservation
+                # unchanged).  Static config gate -> legacy path untraced.
+                from legoesm.ocean.freshwater import (
+                    runoff_spread_virtual_salt_tendency_3d,
+                )
+                dS_fw_3d = runoff_spread_virtual_salt_tendency_3d(
+                    freshwater, self.config.S_ref, h_k_new, self.config.rho_0,
+                    mask, runoff_spread_m=_spread_m,
+                    area=self.grid.area,
+                    normalize=bool(getattr(self.config,
+                                           "normalize_freshwater", False)),
+                )
+                S_fw = state_new.S.data + (
+                    dt * dS_fw_3d * mask[..., None]).astype(_S_dtype)
+            elif getattr(self.config, "normalize_freshwater", False):
                 # Global-salt-conserving virtual salt: remove the area-mean of the
                 # net freshwater (the OMIP correction) so an unbalanced ∮(P-E+R)
                 # does not drift mean salinity.  Shared with the MPAS path.
@@ -1614,19 +1645,21 @@ class LatLonCGridOceanModel:
                     freshwater, self.config.S_ref, dz_0, self.config.rho_0,
                     self.grid.area, mask,
                 )
+                S_fw = state_new.S.data.at[..., 0].add(
+                    (dt * dS_fw * mask).astype(_S_dtype),
+                )
             else:
                 dS_fw = virtual_salt_flux(
                     freshwater, S_ref=self.config.S_ref, dz_0=dz_0, rho_0=self.config.rho_0,
                 )
-            # Cast the freshwater contribution to S's dtype so the
-            # scatter add does not silently widen on x64 mode (the
-            # freshwater struct is built at JAX-default precision in
-            # init helpers, which can be f64 while S runs at the
-            # storage policy's f32).
-            _S_dtype = state_new.S.data.dtype
-            S_fw = state_new.S.data.at[..., 0].add(
-                (dt * dS_fw * mask).astype(_S_dtype),
-            )
+                # Cast the freshwater contribution to S's dtype so the
+                # scatter add does not silently widen on x64 mode (the
+                # freshwater struct is built at JAX-default precision in
+                # init helpers, which can be f64 while S runs at the
+                # storage policy's f32).
+                S_fw = state_new.S.data.at[..., 0].add(
+                    (dt * dS_fw * mask).astype(_S_dtype),
+                )
             state_new = state_new._replace(
                 S=state_new.S.replace(data=S_fw),
             )

@@ -245,6 +245,17 @@ class MPASOceanConfig(NamedTuple):
     barotropic_implicit_theta_pgf: float = 0.55
     barotropic_implicit_pcg_tol: float = 1.0e-10
     barotropic_implicit_pcg_maxiter: int = 200
+    # Distributed (MPI) implicit-CN knobs — RESERVED for future MPAS use,
+    # mirroring the lat-lon ``LatLonCGridOceanConfig`` contract.  MPAS
+    # currently runs stock CG (single-rank only): distributing the
+    # Voronoi PCG needs a halo-exchange inside ``A_op`` and owned-cell-
+    # masked reductions that aren't wired yet (see the Step-4
+    # TODO(distributed-mpas-pcg) note in barotropic_implicit_mpas.py and
+    # docs/ocean_experiments/distributed_barotropic_pcg.md).  ``fixed_iters``
+    # would target 1e-10 residual on the diagonally-dominant Voronoi
+    # Helmholtz; kept here so the config schema matches the lat-lon path.
+    barotropic_implicit_pcg_fixed_iters: int = 60
+    barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     freshwater_closure: str = "virtual_salt_flux"
     normalize_freshwater: bool = False  # When True, subtract the global
                                         # area-weighted mean freshwater flux
@@ -344,6 +355,11 @@ class MPASOceanConfig(NamedTuple):
     # applies).  Off by default so conserving runs are bit-exact unaffected.
     freeze_floor: bool = False
     freeze_floor_temp_c: float = constants.T_freeze_ocean - constants.T_freeze
+    # River-runoff depth spreading (NEMO sbcrnf rn_dep_max): when > 0 the
+    # runoff freshwater dilutes the top this-many metres instead of a single
+    # surface cell (Amazon plume fidelity).  Column-integral salt tendency
+    # unchanged; 0 = legacy top-cell (bit-exact).
+    runoff_depth_spread_m: float = 0.0
 
 
 class MPASSimpleOceanConfig(NamedTuple):

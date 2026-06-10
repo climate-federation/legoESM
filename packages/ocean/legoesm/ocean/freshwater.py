@@ -233,6 +233,116 @@ def normalized_virtual_salt_flux(
     return virtual_salt_flux_from_net(F_fw, S_ref, h_top, rho_0)
 
 
+def runoff_spread_virtual_salt_tendency_3d(
+    fw,
+    S_ref: float,
+    h_k: jnp.ndarray,
+    rho_0: float,
+    mask: jnp.ndarray,
+    *,
+    runoff_spread_m: float,
+    area: jnp.ndarray | None = None,
+    normalize: bool = False,
+) -> jnp.ndarray:
+    """FULL-COLUMN virtual-salt tendency [PSU/s] with the RUNOFF component
+    spread over the top ``runoff_spread_m`` metres (NEMO ``rn_dep_max=150``).
+
+    NEMO injects river runoff uniformly over the levels down to
+    ``h_rnf = min(rn_dep_max, local depth)`` (sbcrnf.F90: ``phdivn[k] -=
+    rnf/(rho0*h_rnf)`` for ``k <= nk_rnf``), instead of diluting a single
+    surface cell — the Amazon/large-river plume otherwise sits too fresh,
+    too shallow and too local.  Virtual-salt equivalent::
+
+        dS/dt[k] = -S_ref * R / (rho_0 * h_rnf)   for spread levels k
+        dS/dt[0] += -S_ref * F_top / (rho_0 * h_0) (all NON-runoff channels)
+
+    Spread weights are FRACTIONAL per level (a level straddling the spread
+    depth contributes only its above-depth fraction), so
+    ``h_rnf = min(runoff_spread_m, wet column depth)`` exactly on any vertical
+    grid (NEMO ``h_rnf = min(rn_dep_max, depth)``).  The COLUMN-INTEGRAL salt
+    tendency is exactly ``-S_ref*(F_top + R)/rho_0`` — bit-identical
+    conservation to the legacy top-cell closure, only the vertical
+    distribution changes.
+
+    NOTE (NEMO equivalence scope): this spreads the SALINITY dilution only;
+    the freshwater VOLUME still enters the free surface at the top (the
+    eta/barotropic path is unchanged), whereas NEMO injects the volume
+    divergence at depth too.  Salt and volume conservation are identical;
+    the small dynamic difference (where the volume convergence sits in the
+    column) is a documented refinement, not a budget error.
+
+    ``normalize=True`` reproduces :func:`normalized_virtual_salt_flux`'s
+    GLOBAL-SALT closure exactly: the area-mean of the PHYSICAL flux
+    (P-E+R+ice, runoff INCLUDED in the mean, restoring excluded) is removed
+    from the TOP-cell channel, the raw runoff is spread — the total applied
+    flux equals the legacy normalized total.
+
+    Parameters
+    ----------
+    fw : FreshwaterForcing
+    h_k : jax.Array, shape (..., nlev)
+        ACTUAL layer thicknesses (partial-cell aware; 0 on dry levels).
+    mask : jax.Array, shape (...,)
+        Ocean mask (1 = ocean).
+    runoff_spread_m : float
+        Spread depth [m] (NEMO rn_dep_max). Must be > 0 — the caller gates
+        the legacy top-cell path on a static config bool.
+
+    Returns
+    -------
+    jax.Array, shape (..., nlev)
+        Salinity tendency; the caller multiplies by its land mask and
+        integrates (``S += dt*dS`` or ``dS_dt += dS``).
+    """
+    if runoff_spread_m <= 0.0:
+        raise ValueError(
+            "runoff_spread_virtual_salt_tendency_3d requires "
+            f"runoff_spread_m > 0 (got {runoff_spread_m}); the legacy "
+            "top-cell closure handles the un-spread case.")
+    R = fw.runoff
+    h_top = h_k[..., 0]
+    # --- top-cell channels (everything but runoff) -------------------------
+    F_top = fw.precip - fw.evap + fw.ice_fw
+    restoring = getattr(fw, "restoring", None)
+    if normalize:
+        if area is None:
+            raise ValueError("normalize=True requires `area`")
+        # Mean over the SAME physical net + effective-wet mask as
+        # normalized_virtual_salt_flux, so the global closure is unchanged.
+        wet = mask * (h_top > 1.0e-3).astype(mask.dtype)
+        F_phys = F_top + R
+        w = area * wet
+        F_mean = jnp.sum(F_phys * w) / jnp.maximum(jnp.sum(w), 1.0e-10)
+        F_top = F_top - F_mean * wet
+    if restoring is not None:
+        F_top = F_top + restoring
+    dS_top = virtual_salt_flux_from_net(F_top, S_ref, h_top, rho_0)
+
+    # --- runoff spread over the top runoff_spread_m ------------------------
+    # Per-level FRACTIONAL weight (codex MED): a level straddling the spread
+    # depth contributes only the fraction of its thickness above it, so
+    # ``h_rnf = sum(w*h_k) = min(runoff_spread_m, wet column depth)`` exactly
+    # (NEMO h_rnf = min(rn_dep_max, depth)) on any vertical grid — including
+    # coarse/partial grids where whole-level inclusion would overshoot
+    # (h=[100,100,...], spread=150 must give h_rnf=150, not 200).  The top
+    # level always carries weight where wet, so shallow columns degrade
+    # gracefully to the legacy single-cell form.  The conservation identity
+    # is exact for any weights: sum_k (dS_col*w_k)*h_k = dS_col*h_rnf.
+    cum_above = jnp.cumsum(h_k, axis=-1) - h_k          # depth of level top
+    h_safe = jnp.maximum(h_k, 1.0e-3)
+    w_frac = jnp.clip((runoff_spread_m - cum_above) / h_safe, 0.0, 1.0)
+    wet_lvl = (h_k > 1.0e-3) & (mask[..., None] > 0.5)
+    w_frac = jnp.where(wet_lvl, w_frac, 0.0)
+    h_rnf = jnp.sum(w_frac * h_k, axis=-1)
+    wet_col = (h_top > 1.0e-3) & (mask > 0.5)
+    h_rnf_safe = jnp.maximum(h_rnf, 1.0e-3)
+    dS_rnf_col = jnp.where(wet_col, -S_ref * R / (rho_0 * h_rnf_safe), 0.0)
+    dS_3d = dS_rnf_col[..., None] * w_frac
+    # Land cells return exactly zero from the helper itself (codex LOW) —
+    # callers' mask multiply is then a harmless no-op.
+    return dS_3d.at[..., 0].add(dS_top * mask)
+
+
 def salt_flux_salinity_tendency(salt_flux, dz_0, rho_0: float):
     """Top-layer salinity tendency from a REAL salt-mass flux [PSU/s].
 

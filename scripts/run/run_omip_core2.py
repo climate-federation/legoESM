@@ -484,7 +484,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   min_levels=1, div_damp_2=None, div_damp_4=None,
                   smag_cfl_safety=None, convection="none",
                   convection_K_conv=1.0, convection_K_bg=1e-5,
-                  freeze_floor=None, ew_cyclic_overlap=None):
+                  freeze_floor=None, ew_cyclic_overlap=None,
+                  runoff_depth_spread_m=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -539,6 +540,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("smag_cfl_safety", smag_cfl_safety),
                               ("freeze_floor", freeze_floor),
                               ("ew_cyclic_overlap", ew_cyclic_overlap),
+                              ("runoff_depth_spread_m", runoff_depth_spread_m),
                               ) if v is not None}
     # Grid-agnostic convective adjustment (Oceananigans-style enhanced
     # vertical diffusivity where N^2 < 0).  The tripole base config ships
@@ -680,7 +682,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   smag_cfl_safety=None, freeze_floor=None,
                   use_polar_filter=None, polar_filter_cutoff_lat_deg=None,
                   polar_filter_max_wave_speed=None,
-                  polar_filter_safety_factor=None):
+                  polar_filter_safety_factor=None,
+                  runoff_depth_spread_m=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -718,6 +721,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("div_damp_4", div_damp_4),
                               ("smag_cfl_safety", smag_cfl_safety),
                               ("freeze_floor", freeze_floor),
+                              ("runoff_depth_spread_m", runoff_depth_spread_m),
                               ("use_polar_filter", use_polar_filter),
                               ("polar_filter_cutoff_lat_deg",
                                polar_filter_cutoff_lat_deg),
@@ -1019,7 +1023,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      pgf_scheme=None, bottom_drag_r=None,
                      bottom_drag_bbl_thickness=None, bottom_drag_bg_velocity=None,
                      partial_cell=False, n_barotropic_substeps=None,
-                     barotropic_solver=None, freeze_floor=None):
+                     barotropic_solver=None, freeze_floor=None,
+                     runoff_depth_spread_m=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -1061,7 +1066,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                               ("bottom_drag_bg_velocity", bottom_drag_bg_velocity),
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_solver", barotropic_solver),
-                              ("freeze_floor", freeze_floor))
+                              ("freeze_floor", freeze_floor),
+                              ("runoff_depth_spread_m", runoff_depth_spread_m))
             if v is not None}
     if _ovr:
         config = config._replace(**_ovr)
@@ -1779,6 +1785,18 @@ def main() -> int:
                         "prognostic ice, so high-lat (esp. Arctic) cells over-cool "
                         "3-5 C below NEMO (LIM ice caps SST). NEMO-faithful; removes "
                         "~half the Arctic SST RMSE. Off = bit-exact legacy.")
+    p.add_argument("--runoff-depth-spread-m", type=float, default=None,
+                   help="Spread river runoff dilution over the top this-many "
+                        "metres (NEMO sbcrnf rn_dep_max=150) instead of a "
+                        "single surface cell — fixes the too-fresh/too-shallow "
+                        "Amazon-type plume. Column-integral salt unchanged. "
+                        "Default None = legacy top-cell (bit-exact).")
+    p.add_argument("--river-mouth-restoring-gate", action="store_true",
+                   help="Disable SSS restoring at river-mouth cells (runoff > "
+                        "threshold), like NEMO sbcssr's (1-2*rnfmsk) damping "
+                        "mask — otherwise the restoring fights the river plume "
+                        "toward the coarse WOA climatology. Requires --runoff "
+                        "+ --sss-restore.")
     p.add_argument("--ew-cyclic-overlap", action="store_true",
                    help="TRIPOLE ONLY: reconnect the ORCA east-west cyclic seam "
                         "(lon ~72.5E on eORCA1). The eORCA1 mesh marks the 2 cyclic "
@@ -2021,6 +2039,12 @@ def main() -> int:
             "--ew-cyclic-overlap is ORCA-cyclic-overlap-specific (the eORCA1 "
             "tripole); it is WRONG on a regular period-nx lat-lon grid. "
             f"Got --grid {args.grid!r}.")
+    if args.river_mouth_restoring_gate and not args.runoff:
+        raise ValueError(
+            "--river-mouth-restoring-gate requires --runoff (the gate masks "
+            "restoring where the Dai-Trenberth runoff field is active; "
+            "without --runoff there is no runoff field and the gate would "
+            "silently do nothing).")
     if args.grid == "tripole":
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
@@ -2033,6 +2057,7 @@ def main() -> int:
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
             freeze_floor=(True if args.freeze_floor else None),
+            runoff_depth_spread_m=args.runoff_depth_spread_m,
             barotropic_solver=args.barotropic_solver,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,
@@ -2082,6 +2107,7 @@ def main() -> int:
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             flat_bottom=args.flat_bottom, partial_cell=args.partial_cell,
             freeze_floor=(True if args.freeze_floor else None),
+            runoff_depth_spread_m=args.runoff_depth_spread_m,
         )
         app_grid_type = "mpas"
     else:
@@ -2097,6 +2123,7 @@ def main() -> int:
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
             freeze_floor=(True if args.freeze_floor else None),
+            runoff_depth_spread_m=args.runoff_depth_spread_m,
             barotropic_solver=args.barotropic_solver,
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,
@@ -2519,17 +2546,23 @@ def main() -> int:
             # under sea ice).  Feed the SAME prescribed siconc the albedo uses
             # (``_sic``; None only if neither --ice-albedo nor a siconc field is
             # available, in which case the restoring is ungated as before).
+            # River-mouth gate (NEMO sbcssr (1-2*rnfmsk)): pass the per-cell
+            # runoff so restoring is OFF at river mouths and does not fight
+            # the plume toward coarse WOA (Amazon artifact). Gated by flag.
+            _R_gate = _R if args.river_mouth_restoring_gate else None
             if app_grid_type == "mpas":
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step_mpas
                 state = apply_sss_restoring_step_mpas(
                     state, S_target=sss_restore_target, ice_concentration=_sic,
-                    config=sss_restore_cfg, mesh=grid, dt=dt)
+                    config=sss_restore_cfg, mesh=grid, dt=dt,
+                    river_runoff=_R_gate)
             else:
                 from legoesm.ocean.coupler.sss_apply import apply_sss_restoring_step
                 state = apply_sss_restoring_step(
                     state, S_target=sss_restore_target, ice_concentration=_sic,
                     config=sss_restore_cfg, grid=grid, z_coord=z_coord, dt=dt,
-                    lat2d_deg=lat2d, lon2d_deg=lon2d)
+                    lat2d_deg=lat2d, lon2d_deg=lon2d,
+                    river_runoff=_R_gate)
         if args.ice_thermo and _sic is not None:
             # Prescribed-ice freezing relaxation (the post-step half of the
             # thermodynamic boundary; the SW cut + (1-sic) flux suppression are in
