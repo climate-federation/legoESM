@@ -334,6 +334,98 @@ def term_pr2(C_uu_shr, C_uu_buoy, thv_ds_zm, wpthvp, upwp, vpwp, um, vm, gr: CLU
     return jnp.maximum(pr2, _ZERO_THRESHOLD)
 
 
+# ---------------------------------------------------------------------------
+# Turbulent advection of xp2/xpyp (CAM l_upwind_xpyp_ta = True; ascending grid)
+# ---------------------------------------------------------------------------
+# CAM uses the upwind (Godunov-style one-sided) turbulent-advection operator on
+# the ascending grid (grid_dir = +1). The centered branch (needs weights_zm2zt)
+# is out of the CAM-default tree and not ported.
+
+
+def _xpyp_ta_pdf_lhs_upwind(coef_zm, sgn, rho_ds_zm, invrs_rho_ds_zm, gr: CLUBBGrid):
+    """Upwind turbulent-advection LHS for xp2/xpyp (``xpyp_term_ta_pdf_lhs``).
+
+    One-sided stencil keyed on ``sgn`` (grid_dir=+1): ``(3, ngrdcol, nzm)`` =
+    ``[super, main, sub]``; boundaries zero.
+    """
+    invrs_dzt = gr.invrs_dzt
+    irho = invrs_rho_ds_zm[:, 1:-1]
+    s = sgn[:, 1:-1]
+    rho_k, coef_k = rho_ds_zm[:, 1:-1], coef_zm[:, 1:-1]
+    rho_km1, coef_km1 = rho_ds_zm[:, :-2], coef_zm[:, :-2]
+    rho_kp1, coef_kp1 = rho_ds_zm[:, 2:], coef_zm[:, 2:]
+    idzt_km1, idzt_k = invrs_dzt[:, :-1], invrs_dzt[:, 1:]
+    zint = jnp.zeros_like(rho_k)
+
+    sup_up = zint
+    main_up = irho * idzt_km1 * rho_k * coef_k
+    sub_up = -irho * idzt_km1 * rho_km1 * coef_km1
+    sup_dn = irho * idzt_k * rho_kp1 * coef_kp1
+    main_dn = -irho * idzt_k * rho_k * coef_k
+    sub_dn = zint
+    is_up = s > 0.0
+    super_int = jnp.where(is_up, sup_up, sup_dn)
+    main_int = jnp.where(is_up, main_up, main_dn)
+    sub_int = jnp.where(is_up, sub_up, sub_dn)
+
+    zb = jnp.zeros((rho_ds_zm.shape[0], 1), dtype=rho_ds_zm.dtype)
+    return jnp.stack([jnp.concatenate([zb, super_int, zb], axis=1),
+                      jnp.concatenate([zb, main_int, zb], axis=1),
+                      jnp.concatenate([zb, sub_int, zb], axis=1)], axis=0)
+
+
+def _xpyp_ta_pdf_rhs_upwind(term_zm, sgn, rho_ds_zm, invrs_rho_ds_zm, gr: CLUBBGrid):
+    """Upwind turbulent-advection explicit RHS for xp2/xpyp (``xpyp_term_ta_pdf_rhs``).
+
+    Returns ``(ngrdcol, nzm)``; boundaries zero.
+    """
+    invrs_dzt = gr.invrs_dzt
+    irho = invrs_rho_ds_zm[:, 1:-1]
+    s = sgn[:, 1:-1]
+    rho_k, term_k = rho_ds_zm[:, 1:-1], term_zm[:, 1:-1]
+    rho_km1, term_km1 = rho_ds_zm[:, :-2], term_zm[:, :-2]
+    rho_kp1, term_kp1 = rho_ds_zm[:, 2:], term_zm[:, 2:]
+    idzt_km1, idzt_k = invrs_dzt[:, :-1], invrs_dzt[:, 1:]
+
+    rhs_up = -irho * idzt_km1 * (rho_k * term_k - rho_km1 * term_km1)
+    rhs_dn = -irho * idzt_k * (rho_kp1 * term_kp1 - rho_k * term_k)
+    rhs_int = jnp.where(s > 0.0, rhs_up, rhs_dn)
+    zb = jnp.zeros((rho_ds_zm.shape[0], 1), dtype=rho_ds_zm.dtype)
+    return jnp.concatenate([zb, rhs_int, zb], axis=1)
+
+
+def calc_xp2_xpyp_ta_lhs(wp3_on_wp2, sigma_sqd_w, beta, rho_ds_zm, invrs_rho_ds_zm,
+                         gr: CLUBBGrid):
+    """Shared implicit turbulent-advection LHS for xp2/xpyp (ADG1 upwind path).
+
+    The operator depends only on the w-PDF, so it is the SAME ``(3, ngrdcol,
+    nzm)`` for all five moments. ``beta`` is a scalar/per-column param.
+    """
+    beta_c = jnp.asarray(beta)
+    beta_c = beta_c[:, None] if beta_c.ndim == 1 else beta_c
+    a1 = 1.0 / (1.0 - sigma_sqd_w)
+    sgn = jnp.where(wp3_on_wp2 >= 0.0, 1.0, -1.0)
+    coef_zm = _ONE_THIRD * beta_c * a1 * wp3_on_wp2
+    return _xpyp_ta_pdf_lhs_upwind(coef_zm, sgn, rho_ds_zm, invrs_rho_ds_zm, gr)
+
+
+def calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta, flux_a_zm, flux_b_zm,
+                         rho_ds_zm, invrs_rho_ds_zm, gr: CLUBBGrid):
+    """Turbulent-advection explicit RHS for one xp2/xpyp moment (ADG1 upwind).
+
+    Explicit term ``wp_coef·<w'a'><w'b'>`` with ``wp_coef = (1 - beta/3)·a1²·
+    wp3_on_wp2 / wp2``; variance uses ``flux_a = flux_b``, covariance uses the
+    two distinct fluxes (e.g. rtpthlp: wprtp, wpthlp).
+    """
+    beta_c = jnp.asarray(beta)
+    beta_c = beta_c[:, None] if beta_c.ndim == 1 else beta_c
+    a1 = 1.0 / (1.0 - sigma_sqd_w)
+    sgn = jnp.where(wp3_on_wp2 >= 0.0, 1.0, -1.0)
+    wp_coef = (1.0 - _ONE_THIRD * beta_c) * a1 ** 2 * wp3_on_wp2 / wp2
+    return _xpyp_ta_pdf_rhs_upwind(wp_coef * flux_a_zm * flux_b_zm, sgn,
+                                   rho_ds_zm, invrs_rho_ds_zm, gr)
+
+
 __all__ = [
     "diffusion_zt_lhs",
     "term_ma_zt_lhs_upwind",
@@ -348,4 +440,6 @@ __all__ = [
     "term_tp_rhs",
     "term_pr1",
     "term_pr2",
+    "calc_xp2_xpyp_ta_lhs",
+    "calc_xp2_xpyp_ta_rhs",
 ]

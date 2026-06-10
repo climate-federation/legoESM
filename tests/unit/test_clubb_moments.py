@@ -22,6 +22,8 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb_moments import (  # noqa: E402
     advance_windm_edsclrm,
+    calc_xp2_xpyp_ta_lhs,
+    calc_xp2_xpyp_ta_rhs,
     term_dp1_lhs,
     term_dp1_rhs,
     term_pr1,
@@ -221,6 +223,72 @@ def test_xp2_term_builders_parity():
     np.testing.assert_array_equal(
         np.asarray(term_pr2(0.3, 0.3, thv, wpthvp, upwp, vpwp, um, vm, gr)),
         np.asarray(R.term_pr2(0.3, 0.3, thv, wpthvp, upwp, vpwp, um, vm, gr)))
+
+
+def test_xp2_ta_shapes_and_boundaries():
+    gr, ng, nzm = _gr_only()
+    rng = np.random.default_rng(9)
+    wp3 = jnp.asarray(rng.standard_normal((ng, nzm)))
+    ssw = jnp.asarray(0.2 + 0.4 * rng.random((ng, nzm)))
+    rho = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzm)))
+    irho = 1.0 / rho
+    lhs = calc_xp2_xpyp_ta_lhs(wp3, ssw, 2.4, rho, irho, gr)
+    assert lhs.shape == (3, ng, nzm)
+    # Boundaries zeroed (top + bottom).
+    np.testing.assert_array_equal(np.asarray(lhs)[:, :, 0], 0.0)
+    np.testing.assert_array_equal(np.asarray(lhs)[:, :, -1], 0.0)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_xp2_ta_parity():
+    """Bit-exact parity of the upwind turbulent-advection LHS/RHS vs the reference."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_xp2_xpyp_module as R  # noqa: N812
+
+    gr, ng, nzm = _gr_only()
+    nzt = nzm - 1
+    rng = np.random.default_rng(41)
+    wp3 = jnp.asarray(rng.standard_normal((ng, nzm)))
+    ssw = jnp.asarray(0.2 + 0.4 * rng.random((ng, nzm)))
+    wp2 = jnp.asarray(0.2 + 0.6 * rng.random((ng, nzm)))
+    rho = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzm)))
+    irho = 1.0 / rho
+    beta_col = jnp.full((ng,), 2.4)
+    refgr = SimpleNamespace(zm=gr.zm, zt=gr.zt, dzm=gr.dzm, invrs_dzm=gr.invrs_dzm,
+                            invrs_dzt=gr.invrs_dzt, grid_dir=1.0)
+    # Reference upwind path ignores the *_zt args; pass placeholders.
+    zt0 = jnp.zeros((ng, nzt))
+    mine_lhs = calc_xp2_xpyp_ta_lhs(wp3, ssw, beta_col, rho, irho, gr)
+    ref_lhs = R.calc_xp2_xpyp_ta_lhs_jax(True, wp3, zt0, ssw, beta_col, rho, irho, zt0, refgr)
+    np.testing.assert_allclose(np.asarray(mine_lhs), np.asarray(ref_lhs), rtol=1e-12, atol=1e-14)
+
+    fa = jnp.asarray(1e-4 * rng.standard_normal((ng, nzm)))
+    fb = jnp.asarray(1e-3 * rng.standard_normal((ng, nzm)))
+    mine_rhs = calc_xp2_xpyp_ta_rhs(wp3, ssw, wp2, beta_col, fa, fb, rho, irho, gr)
+    ref_rhs = R.calc_xp2_xpyp_ta_rhs_jax(
+        True, wp3, zt0, ssw, wp2, zt0, beta_col, fa, fb, rho, irho, zt0, refgr)
+    np.testing.assert_allclose(np.asarray(mine_rhs), np.asarray(ref_rhs), rtol=1e-12, atol=1e-16)
+
+
+def test_xp2_ta_jit_grad():
+    gr, ng, nzm = _gr_only()
+    rng = np.random.default_rng(12)
+    wp3 = jnp.asarray(rng.standard_normal((ng, nzm)))
+    ssw = jnp.asarray(0.2 + 0.4 * rng.random((ng, nzm)))
+    wp2 = jnp.asarray(0.2 + 0.6 * rng.random((ng, nzm)))
+    rho = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzm)))
+    irho = 1.0 / rho
+    fa = jnp.asarray(1e-4 * rng.standard_normal((ng, nzm)))
+
+    def loss(f):
+        lhs = calc_xp2_xpyp_ta_lhs(wp3, ssw, 2.4, rho, irho, gr)
+        rhs = calc_xp2_xpyp_ta_rhs(wp3, ssw, wp2, 2.4, f, f, rho, irho, gr)
+        return jnp.sum(lhs ** 2) + jnp.sum(rhs ** 2)
+
+    assert jnp.isfinite(jax.jit(loss)(fa))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(fa)))
 
 
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),

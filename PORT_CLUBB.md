@@ -123,10 +123,11 @@ clipping (`clip_explicit`) + mono flux limiters (CAM ON) + `fill_holes`:
 `term_ma_zt_lhs_upwind`, `calc_xpwp`, `clip_covar`, `compute_uv_tndcy`,
 `windm_edsclrm_rhs/lhs` all bit-exact to ref; full advance round-off via the
 reused Thomas solve). `advance_xp2_xpyp` in progress: term builders
-`term_dp1_lhs/rhs`, `term_tp_rhs`, `term_pr1`, `term_pr2` ✅ iter 13 (bit-exact
-parity); still need the turbulent-advection terms (`calc_xp2_xpyp_ta_*`), the
-LHS/RHS assembly (`calc_xp2_xpyp_lhs`, `xp2_xpyp_rhs`, `calc_up2_vp2_lhs`,
-`xp2_xpyp_uv_rhs`), `pos_definite_variances`, and the `advance_xp2_xpyp` main.
+`term_dp1_lhs/rhs`, `term_tp_rhs`, `term_pr1`, `term_pr2` ✅ iter 13; the
+upwind turbulent-advection operators + `calc_xp2_xpyp_ta_lhs/rhs` ✅ iter 14
+(bit-exact parity, CAM `l_upwind_xpyp_ta`). Still need the LHS/RHS assembly
+(`calc_xp2_xpyp_lhs`, `xp2_xpyp_rhs`, `calc_up2_vp2_lhs`, `xp2_xpyp_uv_rhs`),
+`pos_definite_variances`, and the `advance_xp2_xpyp` main.
 Then `advance_wp2_wp3` + `advance_xm_wpxp` (penta — `clubb_solve.penta_solve`
 ready). Still need `mono_flux_limiter.py` (CAM ON) + `fill_holes.py`. Each
 chunk: analytic + golden/parity + codex.
