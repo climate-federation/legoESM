@@ -553,6 +553,36 @@ Root-caused, NOT a flux regression:
   launched (8457733): NCAR fluxes + bounded restoring + seam fix** (supersedes the no-overlap 8455137,
   cancelled). MPAS (Voronoi) has no ORCA seam → unaffected.
 
+### iter-H (2026-06-10, IN PROGRESS — user-flagged): Amazon rivers, Gibraltar/Med, "fuzzier than NEMO"
+USER REQUEST: fix (1) large-river (Amazon) SSS issue, (2) Gibraltar intrusion / Mediterranean temperature
+("maybe a NEMO trick?"), (3) legoESM looks FUZZIER/more diffusive than NEMO on the maps.
+**NEMO ORCA1 ground truth extracted (namelist_cfg + SHARED/namelist_ref, all verified on disk):**
+- **Gibraltar/Med trick = ADVECTIVE BOTTOM BOUNDARY LAYER**: `ln_trabbl=.true.`, `nn_bbl_adv=2`
+  (advective BBL, both upper+lower flux), `rn_gambbl=20 s`, `nn_bbl_ldf=0` (diffusive BBL OFF),
+  `rn_ahtbbl=1000` (unused at ldf=0). Dense Med overflow water ADVECTS down the continental slope —
+  without it the 1° Med can't ventilate (our marginal-sea cold bias + no Med tongue). NOT a resolution
+  trick: ORCA1 is 1° like us. legoESM has NO BBL scheme on the tripole/latlon path → implement
+  advective-BBL (Beckmann & Döscher 1997 + NEMO trabbl.F90 nn_bbl_adv=2 form) as a gated parameterization.
+- **Runoff**: NEMO spreads river runoff over the TOP 150 m (`ln_rnf_depth_ini=.true.`, `rn_dep_max=150`,
+  `rn_rnf_max=0.05`); legoESM applies it as a SURFACE virtual-salt flux at single cells → Amazon plume
+  too fresh/too shallow/too local. ALSO NEMO disables/reverses SSS restoring near river mouths (sbcssr
+  `(1-2*rnfmsk)` with socoefr) — our restoring fights the plume toward coarse WOA. Fix = (a) spread the
+  runoff freshwater over the top-150m layers (freshwater channel or tracer tendency), (b) river-mouth
+  restoring mask derived from the Dai-Trenberth runoff field (where runoff > threshold → zero restoring).
+- **"Fuzzy"/diffusivity**: NEMO tracers = FCT-2 advection (`ln_traadv_fct`, nn_fct_h=2,v=2) + LAPLACIAN
+  ISO-NEUTRAL diffusion (`ln_traldf_lap+iso+msc`) with Treguier-varying aht (`nn_aht_ijk_t=21`,
+  rn_Ud=0.01 m/s, rn_Ld=200 km → aht ~ O(1000) m²/s at 1°) + GM/EIV ON (`ln_ldfeiv`, nn_aei_ijk_t=21,
+  rn_Ue=0.02, rn_Le=200 km). Momentum: namdyn_ldf block NOT yet read (find it in namelist_cfg ~l.400+;
+  ORCA1 default is BILAPLACIAN momentum). NEXT: read our `run_omip._create_setup('tripole'/...)` tracer
+  advection scheme + K_h/A_h + whether GM/Redi (EXISTS for latlon-cgrid: gm_redi_latlon_cgrid) is enabled
+  on the faithful runs — match NEMO (FCT-like advection + isoneutral lap + GM) or identify our excess
+  diffusion. NOTE: scorer maps IDW-regrid BOTH models (symmetric blur) → "fuzzy" is likely genuine model
+  diffusivity, but VERIFY by comparing native-grid sharpness first.
+**Status**: investigation phase; nothing implemented yet for iter-H. Production runs in flight:
+seam-fixed tripole 2yr (8457733, NCAR fluxes + --ew-cyclic-overlap), latlon 1° 2yr (8457282),
+mpas ico6 2yr (8455138). PNG-on-completion promised to user. Each iter-H change: codex adversarial
+review + tests + smoke before production (CLAUDE.md).
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
