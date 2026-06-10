@@ -288,3 +288,36 @@ class CLUBBConfig(NamedTuple):
     thl_tol: float = 1.0e-2
     wp2_max: float = 1000.0
     tke_min: float = 1.0e-6
+
+
+# ---------------------------------------------------------------------------
+# Derived parameters (recomputed from base config, never stored as magic
+# numbers — Oracle-recipe fidelity doctrine). Faithful to
+# ``parameters_tunable.F90:setup_parameters`` / ``CLUBB-JAX`` derivation.
+# ---------------------------------------------------------------------------
+import math as _math  # noqa: E402
+
+# Reference sigma_sqd_w used in the mixt_frac cap derivation (NOT a tunable):
+_MIXT_FRAC_CAP_SIGMA_REF = 0.4
+# Reference layer depth [m] scaling lmin (parameters_tunable.F90 ``lmin_deltaz``).
+_LMIN_DELTAZ = 40.0
+
+
+def derive_mixt_frac_max_mag(Skw_max_mag: float) -> float:
+    """Maximum |mixt_frac - 0.5| + 0.5 cap, derived from ``Skw_max_mag``.
+
+    ``1 - 0.5*(1 - Skw_max/sqrt(4*(1-0.4)^3 + Skw_max^2))`` — the ADG1 mixture
+    fraction evaluated at the maximum allowed w-skewness (so the runtime
+    ``mixt_frac`` clip is consistent with ``Skw_max_mag``). With the CAM default
+    ``Skw_max_mag = 4.5`` this is ~0.9897.
+    """
+    inner = 4.0 * (1.0 - _MIXT_FRAC_CAP_SIGMA_REF) ** 3 + Skw_max_mag ** 2
+    return 1.0 - 0.5 * (1.0 - Skw_max_mag / _math.sqrt(inner))
+
+
+def derive_lmin(lmin_coef: float) -> float:
+    """Minimum mixing length [m] = ``lmin_coef * lmin_deltaz`` (40 m).
+
+    With the CAM default ``lmin_coef = 0.1`` this is 4 m.
+    """
+    return lmin_coef * _LMIN_DELTAZ

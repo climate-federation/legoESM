@@ -153,6 +153,10 @@ EXCLUDED: frozenset[str] = frozenset(
         # CLUBB port: nonlocal mixing-length (Lscale) parcel buoyant-sorting —
         # a diagnostic length scale, not a single-tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_mixing_length.py",
+        # CLUBB port: ADG1 assumed-PDF parameter closure (double-Gaussian
+        # component means/variances/mixture fraction) — closure plumbing feeding
+        # the PDF moment integrals, not a single-tendency scheme.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_pdf.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",

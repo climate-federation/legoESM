@@ -193,6 +193,9 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
   skewness ✅ iter 5; `compute_mixing_length` parcel asc/desc ⏳ iter 6+.
 - **P4 ADG1 PDF closure** — the heart; `pdf_closure_module` ADG1 branch +
   `setup_clubb_pdf_params`. Cloud fraction, wpthvp, buoyancy terms.
+  - PDF component params (`ADG1_pdf_driver`) ✅ iter 7 (`clubb_pdf.py`).
+  - PDF moment integrals (cloud frac, wpthvp, wp2xp/wpxp2/..., chi/eta
+    transform) ⏳ iter 8+ (`pdf_closure_module` ADG1 path) — large.
 - **P5 Moment advance** — wp2/wp3, xp2/xpyp, xm/wpxp, windm; implicit solves;
   clipping (`clip_explicit`), mono flux limiters (CAM defaults ON), fill_holes.
 - **P6 Orchestration** — assemble `advance_clubb_core`-equivalent for the
@@ -225,6 +228,9 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
 | P2 | sigma_sqd_w + Brunt–Väisälä (`clubb_helpers.py`) | ✅ iter 4 |
 | P3 | skewness diagnostics (`clubb_skewness.py`: Skx, gamma_Skw, LG05) | ✅ iter 5 |
 | P3 | `compute_mixing_length` parcel buoyant-sorting (Lscale up/down) | ✅ iter 6 (golden-locked vs CLUBB-JAX) |
+| P4 | ADG1 PDF component params (`clubb_pdf.py`: w-closure + responders) | ✅ iter 7 (moment-recovery + bit-exact parity) |
+| P4 | derived params (`mixt_frac_max_mag`, `lmin`) in `clubb_config.py` | ✅ iter 7 |
+| P4 | PDF moment integrals (cloud frac, wpthvp, higher moments) | ☐ iter 8+ (large) |
 | P3 | mixing length / Lscale | ☐ |
 | P4 | ADG1 PDF closure | ☐ |
 | P5 | moment advance + solves + limiters | ☐ |
@@ -415,6 +421,34 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
   `setup_clubb_pdf_params`) — the cloud-fraction / buoyancy-flux heart; needs
   `sigma_sqd_w`(✓), `Skx`/`gamma_Skw`(✓), `sat_mixrat_liq`(✓). Largest remaining
   kernel after this.
+
+### iter 7
+- **P4 ADG1 PDF parameters (done):** new `clubb_pdf.py` ports the CAM-default
+  ADG1 branch of `adg1_adg2_3d_luhar_pdf.py`: `ADG1_w_closure` (mixture fraction
+  + double-Gaussian w components), `ADG1_ADG2_responder_params` (bi-normal
+  rt/thl/u/v components from the w-x covariance), `ADG1_pdf_driver`. ADG2 /
+  3D-Luhar / new-PDF drivers correctly omitted (CAM `iiPDF_type=ADG1`).
+- These kernels use **no physical constants** (only `beta`, derived
+  `mixt_frac_max_mag`, a zero floor) ⇒ the port is **bit-exact** to the
+  reference (golden parity test, skipif sibling absent).
+- **Derived params** added to `clubb_config.py` (Oracle-recipe doctrine: derived
+  values recomputed, not stored as magic numbers): `derive_mixt_frac_max_mag`
+  (from `Skw_max_mag`; 0.9897 at CAM 4.5) and `derive_lmin`
+  (`lmin_coef*40m`; 4 m at CAM 0.1), faithful to `parameters_tunable.F90`.
+- Tests (`test_clubb_pdf.py`, 8): **exact moment-recovery oracles** that run in
+  CI without the reference — w mean/variance/skewness, responder
+  mean/covariance/variance reproduced to machine precision (these fully pin the
+  closure: w-closure + alpha_x + width_factor + varnce split), plus
+  zero-skew→mf=0.5, mixt_frac bounds, components straddle mean, JIT+grad, and
+  the live bit-exact parity. `clubb_pdf.py` EXCLUDED in physics-contracts.
+- Codex adversarial review: **APPROVE, no material findings** (ADG1 formulas,
+  derived-param formulas, and ADG2/Luhar omission verified vs the references).
+- **Next (iter 8):** P4 PDF moment integrals — `pdf_closure_module` ADG1 path:
+  chi/eta transform (`transform_pdf_chi_eta_component`), liquid cloud fraction
+  (`calc_pdf_liquid_cloud_frac`), `wpNxp`/`wpxpM` moment integrals, and the
+  buoyancy-flux terms (`wpthvp`, `rcm`, `cloud_frac`). The cloud-fraction output
+  is what finally lets the scheme produce a `TurbulenceOutput`-level cloud
+  diagnostic. Large — likely iter 8–9.
 
 <!-- superseded risk note (resolved iter 6):
 - **⚠ Remaining P3 risk (iter 6+):** `compute_mixing_length` is the largest,
