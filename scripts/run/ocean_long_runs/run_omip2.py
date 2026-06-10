@@ -57,7 +57,7 @@ jax.config.update("jax_enable_x64", True)
 def _import_matrix_module():
     """Load the matrix runner module (file-based, not a package)."""
     import importlib.util
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     matrix_path = repo_root / "scripts" / "matrix" / "run_ocean_test_matrix.py"
     spec = importlib.util.spec_from_file_location(
         "_rom_for_omip2", matrix_path,
@@ -118,7 +118,7 @@ def main() -> int:
     args = p.parse_args()
 
     args.output.mkdir(parents=True, exist_ok=True)
-    scripts_dir = Path(__file__).resolve().parents[1]
+    scripts_dir = Path(__file__).resolve().parents[2] / "matrix"
 
     print(f"==> Building global rest-state on {args.grid}/{args.resolution}")
     state, grid, z_coord, model = _build_state(

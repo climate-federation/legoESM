@@ -43,7 +43,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 jax.config.update("jax_enable_x64", True)
 

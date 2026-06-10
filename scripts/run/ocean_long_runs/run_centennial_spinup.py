@@ -129,7 +129,7 @@ def main() -> int:
     args = p.parse_args()
 
     args.output.mkdir(parents=True, exist_ok=True)
-    scripts_dir = Path(__file__).resolve().parents[1]
+    scripts_dir = Path(__file__).resolve().parents[2] / "matrix"
     sys.path.insert(0, str(scripts_dir))
 
     from legoesm import constants

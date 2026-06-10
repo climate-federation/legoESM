@@ -7,7 +7,7 @@ import numpy as np
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 import jax; import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 from legoesm.core.precision import PrecisionPolicy, set_policy
 set_policy(PrecisionPolicy.fp64())
 from legoesm.core.field import Field

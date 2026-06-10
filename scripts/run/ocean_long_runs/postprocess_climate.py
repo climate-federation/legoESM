@@ -36,7 +36,7 @@ import numpy as np
 
 
 def _matrix_module():
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     matrix_path = repo_root / "scripts" / "matrix" / "run_ocean_test_matrix.py"
     spec = importlib.util.spec_from_file_location(
         "_rom_for_postprocess", matrix_path,
@@ -48,7 +48,7 @@ def _matrix_module():
 
 
 def _build_grid_and_state(grid_type, resolution, H_max, nlev, restart_path):
-    scripts_dir = Path(__file__).resolve().parents[1]
+    scripts_dir = Path(__file__).resolve().parents[2] / "matrix"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
     from ocean_test_matrix.setup import _create_ocean_setup

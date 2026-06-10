@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import jax, jax.numpy as jnp
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 from legoesm.grids.latlon import create_latlon_grid

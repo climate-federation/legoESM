@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import jax, jax.numpy as jnp
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.vertical import create_ocean_z_star

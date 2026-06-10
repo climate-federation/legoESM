@@ -181,8 +181,8 @@ def _build_setup(grid_type: str, res: str, *, H_max: float, nlev: int):
     # rebuilding on every call.
     if not hasattr(_build_setup, "_matrix_mod"):
         import importlib.util
-        matrix_path = (Path(__file__).resolve().parents[1]
-                       / "run_ocean_test_matrix.py")
+        matrix_path = (Path(__file__).resolve().parents[2]
+                       / "matrix" / "run_ocean_test_matrix.py")
         mod_name = "_rom_for_cube_compare"
         spec = importlib.util.spec_from_file_location(mod_name, matrix_path)
         matrix_mod = importlib.util.module_from_spec(spec)

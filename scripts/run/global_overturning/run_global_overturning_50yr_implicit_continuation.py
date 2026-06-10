@@ -27,7 +27,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "matrix"))
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 from legoesm.ocean.vertical import create_ocean_z_star

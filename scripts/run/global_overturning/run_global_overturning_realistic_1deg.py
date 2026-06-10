@@ -41,7 +41,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 from legoesm.grids.latlon import create_latlon_grid

@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 # Ensure the scripts directory is on the path for ocean_test_matrix imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "matrix"))
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
