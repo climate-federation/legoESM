@@ -1230,10 +1230,23 @@ def _noop_convection(T, q_v, p_full, p_half, dt, config):
 # Microphysics resolver
 # ---------------------------------------------------------------------------
 
+_PIPELINE_UNSUPPORTED_MICROPHYSICS = frozenset({"p3", "ml_emulator"})
+
+
 def _resolve_microphysics(config):
     """Resolve microphysics kernel and config from ExperimentConfig.
 
     Returns (kernel_fn, kernel_config) or (None, None) if disabled.
+
+    ``p3`` and ``ml_emulator`` are valid ``ExperimentConfig.microphysics``
+    literals (they build through
+    :func:`legoesm.atmosphere.physics.microphysics.integration.make_microphysics_physics`,
+    the per-model-type bridge factory) but are NOT wired into the unified
+    pipeline's ``MICROPHYSICS_REGISTRY`` — p3 carries prognostic ice
+    properties and ml_emulator needs trained network weights, neither of
+    which the registry kernel signature threads.  Selecting them here
+    fails fast with a pointer at the bridge instead of surfacing a
+    misleading ``KeyError: Unknown scheme`` from the registry.
     """
     if config.microphysics == "none":
         return None, None
@@ -1244,6 +1257,15 @@ def _resolve_microphysics(config):
     )
 
     scheme = config.microphysics
+    if scheme in _PIPELINE_UNSUPPORTED_MICROPHYSICS:
+        raise NotImplementedError(
+            f"Microphysics scheme {scheme!r} is registered but is not yet "
+            f"supported by the unified driver pipeline (it is absent from "
+            f"MICROPHYSICS_REGISTRY).  Use `legoesm.atmosphere.physics."
+            f"microphysics.integration.make_microphysics_physics` (the "
+            f"per-model-type bridge factory) instead, or wire the scheme "
+            f"into the registry with the state it needs."
+        )
     micro_fn = resolve_kernel(MICROPHYSICS_REGISTRY, scheme)
     mc = MicrophysicsConfig(scheme=scheme)
     micro_config = getattr(mc, scheme)

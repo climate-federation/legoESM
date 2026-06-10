@@ -136,6 +136,14 @@ class ModelDriver:
         self._mpi_world_size: int | None = None
         self._owned_face_ids: jax.Array | None = None  # shape (n_local_faces,)
         self._layout = None  # DistributedLayout for scatter/gather
+        # MPAS/Voronoi cell-partition MPI: layout carries the partition
+        # (owned+halo cell/edge index maps), local mesh, and halo-exchange
+        # handle.  The diagnostics / checkpoint gather distinguish a
+        # cell-partitioned run from cubed-sphere faces by checking
+        # ``_voronoi_layout is not None`` and read owned-cell ids straight
+        # off ``_voronoi_layout.partition``.
+        self._voronoi_layout = None
+        self._grid_global = None  # global grid preserved under band/cell MPI
         self._physics_lat = None  # rank-local lat for physics
         self._physics_lon = None  # rank-local lon for physics
 
@@ -369,7 +377,37 @@ class ModelDriver:
             # mpas aliases (voronoi, icosahedral, mpas_voronoi) are normalised
             # to "mpas" at the config boundary (driver.config.normalize_grid_type).
             kwargs = {"lloyd_iterations": 50} if gc.grid_type == "mpas" else {}
-            self.grid = create_grid(gc.grid_type, gc.resolution, **kwargs)
+            global_grid = create_grid(gc.grid_type, gc.resolution, **kwargs)
+            # MPAS / Voronoi cell-partition MPI: partition the global mesh
+            # and slice this rank's (owned + halo) local mesh.  Deferred to
+            # here — not the runtime bootstrap — because the partition needs
+            # the actual mesh (geometric / METIS graph partition + halo-ring
+            # expansion).  The global mesh is preserved as ``self._grid_global``
+            # for global-cell state init and the diagnostics / checkpoint
+            # gather to rank 0 (mirrors the lat-lon band-MPI pattern, but the
+            # slice is an unstructured owned-cell index set, not a lat band).
+            if (gc.grid_type == "mpas" and self.config.distributed
+                    and self._device_config is not None
+                    and self._device_config.is_distributed):
+                from legoesm.parallel.voronoi_mpi import initialize_voronoi_mpi
+                rank, n_ranks, vlayout = initialize_voronoi_mpi(global_grid)
+                self._grid_global = global_grid
+                self._voronoi_layout = vlayout
+                self._mpi_rank = rank
+                self._mpi_world_size = n_ranks
+                self.grid = vlayout.local_mesh
+                logger.info(
+                    "  MPAS MPI: rank %d/%d owns %d cells (+%d halo), "
+                    "%d local edges of %d global",
+                    rank, n_ranks,
+                    vlayout.partition.n_owned_cells,
+                    vlayout.partition.n_local_cells
+                    - vlayout.partition.n_owned_cells,
+                    vlayout.partition.n_local_edges,
+                    vlayout.partition.nEdges_global,
+                )
+            else:
+                self.grid = global_grid
 
         if gc.vertical_coord == "hybrid":
             from legoesm.grids.vertical import make_hybrid_levels
@@ -547,9 +585,33 @@ class ModelDriver:
         """Load SST/SIC forcing data."""
         cfg = self.config
 
+        # Under lat-lon band MPI ``_create_grid`` has already replaced
+        # ``self.grid`` / ``self._grid_lat`` with this rank's band, but the
+        # SST/SIC band-slicing wrapper installed later in ``_setup_parallel``
+        # (``_band_get_sst_sic``) slices ``sst[lat_start:lat_end]`` of a
+        # *global* field.  Building the forcing function on the rank-local
+        # grid here would slice the band twice → an empty ``(0, n_lon)`` SST
+        # on every non-zero rank (the radiation column adapter then fails to
+        # reshape size 0 into the rank-local column count).  Build the forcing
+        # on the preserved GLOBAL grid so the wrapper slices exactly once.
+        # This applies ONLY to the lat-lon band path, which installs that
+        # re-slicing wrapper.  MPAS cell-partition MPI also sets
+        # ``_grid_global`` but has NO such wrapper — its state, physics, and
+        # forcing all live on this rank's local (owned+halo) cells, so the
+        # forcing must be built on the LOCAL mesh (``self.grid``) to match the
+        # local state; using the global mesh there would yield an
+        # ``(nCells_global,)`` SST that mismatches the local column count.
+        # Serial and cubed-sphere paths have no ``_grid_global`` → local grid.
+        _use_global_forcing = (
+            getattr(self, "_grid_global", None) is not None
+            and cfg.grid.grid_type == "latlon"
+        )
+        forcing_grid = self._grid_global if _use_global_forcing else self.grid
+        forcing_lat = forcing_grid.grid_lat
+
         if cfg.dataset == "analytical":
             from legoesm.forcing.analytical import analytical_sst_sic
-            lat_deg = np.degrees(np.asarray(self._grid_lat))
+            lat_deg = np.degrees(np.asarray(forcing_lat))
             T_ice = cfg.T_ice
 
             def get_sst_sic(day):
@@ -577,7 +639,7 @@ class ModelDriver:
                     path=cfg.forcing_path
                 )
 
-            forcing = load_amip_forcing(forcing_config, self.grid)
+            forcing = load_amip_forcing(forcing_config, forcing_grid)
             self._forcing = forcing
 
             def get_sst_sic(day):
@@ -1161,6 +1223,25 @@ class ModelDriver:
         if cmip_on and perf_mode:
             perf_mode = False
 
+        # Lat-lon band MPI: each rank holds its own latitude band as an
+        # ordinary (non-SPMD-sharded) array, so ``collect_lightweight``'s
+        # ``jnp.mean`` would reduce over this rank's band only — a wrong
+        # "global" mean — and skip the spatial gather, so snapshots/profiles
+        # would capture a single band.  Force the full gather+collect path
+        # (correct global means, profiles, and snapshots).  The gather runs
+        # only at the diagnostic cadence, negligible against the steps
+        # between intervals.  Distinguished from cubed-sphere replicated MPI
+        # by ``_owned_face_ids is None`` (the lat-lon path never sets it).
+        _latlon_mpi = (
+            self._layout is not None
+            and self._owned_face_ids is None
+            and self._device_config is not None
+            and self._device_config.is_distributed
+            and self.config.grid.grid_type == "latlon"
+        )
+        if _latlon_mpi and perf_mode:
+            perf_mode = False
+
         if perf_mode:
             # Lightweight path: scalar reductions only, no gather.
             state = kwargs.get('state', self.state)
@@ -1185,6 +1266,50 @@ class ModelDriver:
                 # data from all ranks into a correct global state on rank 0.
                 state = kwargs.get('state', self.state)
                 jax.block_until_ready(state.u.data)
+                if _latlon_mpi:
+                    # Lat-lon band MPI: concatenate each rank's latitude
+                    # band into the global field on rank 0.  The
+                    # HydrostaticState stores u/v/T cell-centred (identical
+                    # shapes — confirmed: v is NOT a face array here, unlike
+                    # the raw C-grid dynamics state the checkpoint path
+                    # gathers with the v-face trim), so every field uses the
+                    # same scalar concatenation.  All ranks must participate
+                    # in each MPI gather; non-root ranks then bail with the
+                    # sentinel the run loop ignores.
+                    from legoesm.parallel.latlon_mpi import gather_field_latlon
+                    from legoesm.core.field import Field
+                    from legoesm.core.state import HydrostaticState
+
+                    def _g(arr):
+                        if arr is None:
+                            return None
+                        return gather_field_latlon(arr, self._layout)
+
+                    u_g = _g(state.u.data)
+                    v_g = _g(state.v.data)
+                    T_g = _g(state.T.data)
+                    ps_g = _g(state.p_s.data)
+                    phis_g = _g(state.phis.data)
+                    for _tname in (
+                        'q_v', 'q_c', 'q_r', 'sst', 'sic', 'precip_total',
+                        'sw_up_toa', 'lw_up_toa', 'sw_net_sfc', 'lw_net_sfc',
+                        'sw_down_toa', 'shflx', 'lhflx', 'lat_deg_grid',
+                    ):
+                        if kwargs.get(_tname) is not None:
+                            kwargs[_tname] = _g(kwargs[_tname])
+
+                    if self._mpi_rank != 0:
+                        return {'mean_T': 0.0, 'max_v': 0.0}
+
+                    gathered = HydrostaticState(
+                        u=Field(u_g, name="u", dims=state.u.dims, units=state.u.units),
+                        v=Field(v_g, name="v", dims=state.v.dims, units=state.v.units),
+                        T=Field(T_g, name="T", dims=state.T.dims, units=state.T.units),
+                        p_s=Field(ps_g, name="p_s", dims=state.p_s.dims, units=state.p_s.units),
+                        phis=Field(phis_g, name="phis", dims=state.phis.dims, units=state.phis.units),
+                    )
+                    kwargs['state'] = gathered
+                    return self.diagnostics.collect(**kwargs)
                 if self._owned_face_ids is not None and self._layout is not None:
                     from legoesm.parallel.layout import gather
                     from legoesm.core.field import Field
@@ -1475,6 +1600,37 @@ class ModelDriver:
             return
         if (not self._device_config.is_distributed
                 and self._device_config.n_devices <= 1):
+            return
+
+        # MPAS / Voronoi cell-partition MPI.  Like the lat-lon band, each
+        # rank already owns its local (owned+halo) mesh state directly:
+        # ``_create_grid`` sliced ``self.grid`` to ``vlayout.local_mesh`` and
+        # ``_init_state`` built the state on it, and ``_create_forcing`` built
+        # the SST function on the local cells — so there is no scatter from
+        # global and no forcing re-slice wrapper (contrast the lat-lon band,
+        # whose forcing is global + sliced).  Physics runs column-local on
+        # every local cell; halo columns are recomputed but harmless (their
+        # prognostic values are overwritten by the next step's halo exchange).
+        # The owned-cell mask gates conservation reductions and the
+        # diagnostics gather.  Set the markers and return BEFORE the
+        # cubed-sphere face path below (which assumes a leading dim of 6 and
+        # would mis-handle the 1-D ``(nCells,)`` cell layout).
+        if (self._device_config.is_distributed
+                and self._voronoi_layout is not None):
+            vlayout = self._voronoi_layout
+            self._layout = vlayout
+            self._physics_lat = self.grid.grid_lat
+            self._physics_lon = self.grid.grid_lon
+            self._mpi_rank = vlayout.rank
+            self._mpi_world_size = vlayout.n_ranks
+            logger.info(
+                "  Parallel: MPAS cell-partition MPI — rank %d/%d, "
+                "%d owned cells (+%d halo)",
+                vlayout.rank, vlayout.n_ranks,
+                vlayout.partition.n_owned_cells,
+                vlayout.partition.n_local_cells
+                - vlayout.partition.n_owned_cells,
+            )
             return
 
         # Stage 3-C: lat-lon band MPI follows a different parallel
@@ -2076,9 +2232,31 @@ class ModelDriver:
         if self.config.grid.grid_type == "mpas":
             ckpt_path = self._output_dir / f"checkpoint_day_{int(round(day)):04d}.npz"
             s = self.state
+            # Under MPAS cell-partition MPI each rank holds only its owned+halo
+            # band; gather the owned cells/edges into the GLOBAL field on rank 0
+            # so the restart chain reads a single canonical global checkpoint
+            # (mirrors the lat-lon band gather).  All ranks must participate in
+            # each gather (collective); non-root ranks then bail before I/O.
+            if self._voronoi_layout is not None:
+                from legoesm.parallel.voronoi_mpi import gather_voronoi_field
+                part = self._voronoi_layout.partition
+                u_d = gather_voronoi_field(s.u.data, part, "edge")
+                T_d = gather_voronoi_field(s.T.data, part, "cell")
+                ps_d = gather_voronoi_field(s.p_s.data, part, "cell")
+                phis_d = gather_voronoi_field(s.phis.data, part, "cell")
+                trc_d = (None if s.tracers is None else {
+                    _k: gather_voronoi_field(s.tracers[_k].data, part, "cell")
+                    for _k in s.tracers})
+                if self._mpi_rank != 0:
+                    return
+            else:
+                u_d, T_d, ps_d, phis_d = (
+                    s.u.data, s.T.data, s.p_s.data, s.phis.data)
+                trc_d = (None if s.tracers is None
+                         else {_k: s.tracers[_k].data for _k in s.tracers})
             _save = dict(
-                u=np.asarray(s.u.data), T=np.asarray(s.T.data),
-                p_s=np.asarray(s.p_s.data), phis=np.asarray(s.phis.data),
+                u=np.asarray(u_d), T=np.asarray(T_d),
+                p_s=np.asarray(ps_d), phis=np.asarray(phis_d),
                 step=np.asarray(int(step)), day=np.asarray(float(day)),
             )
             # Persist moisture tracers too (moist MPAS runs), so a chained
@@ -2086,10 +2264,10 @@ class ModelDriver:
             # colliding with u/T/p_s/phis; ``tracer_names`` lets load rebuild
             # the dict.  Dry runs (tracers=None) write neither and are
             # byte-identical to before.
-            if s.tracers is not None:
-                _save["tracer_names"] = np.asarray(sorted(s.tracers.keys()))
-                for _k in s.tracers:
-                    _save[f"trc_{_k}"] = np.asarray(s.tracers[_k].data)
+            if trc_d is not None:
+                _save["tracer_names"] = np.asarray(sorted(trc_d.keys()))
+                for _k in trc_d:
+                    _save[f"trc_{_k}"] = np.asarray(trc_d[_k])
             np.savez(ckpt_path, **_save)
             logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
             return
@@ -2289,38 +2467,73 @@ class ModelDriver:
             from legoesm.core.state import HydrostaticState
             from legoesm.core.field import Field
             d = np.load(path)
-            # Shape guard on EVERY prognostic field: the mesh built from
-            # --resolution/--nlev must match the checkpoint, else the TRiSK
-            # gathers index out of range (u) or broadcasts wrong (T/p_s/phis)
-            # — both silent.  Check all four so a corrupt/mismatched file is
-            # rejected up front instead of failing deep inside a JIT trace.
-            for _name, _ck in (("u", self.state.u.data),
-                               ("T", self.state.T.data),
-                               ("p_s", self.state.p_s.data),
-                               ("phis", self.state.phis.data)):
-                if tuple(d[_name].shape) != tuple(_ck.shape):
-                    raise ValueError(
-                        f"MPAS checkpoint {path.name} {_name}-shape "
-                        f"{tuple(d[_name].shape)} != current mesh "
-                        f"{_name}-shape {tuple(_ck.shape)}; rebuild with the "
-                        f"same --resolution/--nlev."
-                    )
+            # Under MPAS cell-partition MPI the checkpoint is GLOBAL but
+            # ``self.state`` is this rank's local (owned+halo) band, so scatter
+            # the global arrays to local cells/edges (mirror of the save-side
+            # gather).  Serial runs use the global arrays directly.  The shape
+            # guard compares against the GLOBAL mesh size under MPI, the local
+            # state otherwise.
+            _mpi = self._voronoi_layout is not None
+            if _mpi:
+                from legoesm.parallel.voronoi_partition import scatter_to_local
+                part = self._voronoi_layout.partition
+                _guard = (("u", part.nEdges_global, self.state.u.data.shape[1:]),
+                          ("T", part.nCells_global, self.state.T.data.shape[1:]),
+                          ("p_s", part.nCells_global, self.state.p_s.data.shape[1:]),
+                          ("phis", part.nCells_global,
+                           self.state.phis.data.shape[1:]))
+                for _name, _n_global, _trail in _guard:
+                    if (d[_name].shape[0] != _n_global
+                            or tuple(d[_name].shape[1:]) != tuple(_trail)):
+                        raise ValueError(
+                            f"MPAS checkpoint {path.name} {_name}-shape "
+                            f"{tuple(d[_name].shape)} != global mesh "
+                            f"({_n_global}, {tuple(_trail)}); rebuild with the "
+                            f"same --resolution/--nlev.")
+
+                def _scatter(name, entity):
+                    return scatter_to_local(jnp.asarray(d[name]), part, entity)
+                _u, _T, _ps, _phis = (_scatter("u", "edge"),
+                                      _scatter("T", "cell"),
+                                      _scatter("p_s", "cell"),
+                                      _scatter("phis", "cell"))
+            else:
+                # Shape guard on EVERY prognostic field: the mesh built from
+                # --resolution/--nlev must match the checkpoint, else the TRiSK
+                # gathers index out of range (u) or broadcast wrong (T/p_s/phis)
+                # — both silent.  Reject a corrupt/mismatched file up front.
+                for _name, _ck in (("u", self.state.u.data),
+                                   ("T", self.state.T.data),
+                                   ("p_s", self.state.p_s.data),
+                                   ("phis", self.state.phis.data)):
+                    if tuple(d[_name].shape) != tuple(_ck.shape):
+                        raise ValueError(
+                            f"MPAS checkpoint {path.name} {_name}-shape "
+                            f"{tuple(d[_name].shape)} != current mesh "
+                            f"{_name}-shape {tuple(_ck.shape)}; rebuild with the "
+                            f"same --resolution/--nlev."
+                        )
+                _u, _T, _ps, _phis = (jnp.asarray(d["u"]), jnp.asarray(d["T"]),
+                                      jnp.asarray(d["p_s"]), jnp.asarray(d["phis"]))
             self.state = HydrostaticState(
-                u=Field(data=jnp.asarray(d["u"]), name="u",
+                u=Field(data=_u, name="u",
                         dims=("nEdges", "nlev"), units="m/s"),
-                T=Field(data=jnp.asarray(d["T"]), name="T",
+                T=Field(data=_T, name="T",
                         dims=("nCells", "nlev"), units="K"),
-                p_s=Field(data=jnp.asarray(d["p_s"]), name="p_s",
+                p_s=Field(data=_ps, name="p_s",
                           dims=("nCells",), units="Pa"),
-                phis=Field(data=jnp.asarray(d["phis"]), name="phis",
+                phis=Field(data=_phis, name="phis",
                            dims=("nCells",), units="m2/s2"),
             )
             # Restore moisture tracers (moist MPAS runs); absent ⇒ dry restart.
             if "tracer_names" in d:
                 _names = [str(n) for n in d["tracer_names"]]
                 self.state = self.state._replace(tracers={
-                    _k: Field(data=jnp.asarray(d[f"trc_{_k}"]), name=_k,
-                              dims=("nCells", "nlev"), units="kg/kg")
+                    _k: Field(
+                        data=(scatter_to_local(
+                                  jnp.asarray(d[f"trc_{_k}"]), part, "cell")
+                              if _mpi else jnp.asarray(d[f"trc_{_k}"])),
+                        name=_k, dims=("nCells", "nlev"), units="kg/kg")
                     for _k in _names
                 })
             step = int(d["step"])
@@ -2554,6 +2767,52 @@ class ModelDriver:
     # MPAS execution path (uses unified physics pipeline)
     # ==================================================================
 
+    def _mpas_global_diag(self, T_data, p_s_data, u_data, cwv_field):
+        """Global owned-cell diagnostics for an MPAS cell-partition MPI run.
+
+        Reduces over this rank's OWNED cells / edges (halo entities masked
+        out) then allreduces across ranks, so the lightweight timeseries
+        means and extremes are TRUE globals — not the rank-local,
+        halo-double-counted values a plain ``jnp.mean(T_data)`` would give.
+        Mirrors the owned-mask + allreduce convention of the mass fixer.
+
+        Returns ``(mean_T, mean_ps, max_u, T_min, T_max, T_finite, cwv)`` as
+        host floats / bool.  ``cwv`` is NaN when ``cwv_field`` is None.
+        """
+        from mpi4py import MPI as _MPI
+        vl = self._voronoi_layout
+        om_c = vl.owned_mask_cells          # (n_local_cells,) bool
+        om_e = vl.owned_mask_edges          # (n_local_edges,) bool
+        nlev = T_data.shape[-1]
+        T_owned = jnp.where(om_c[:, None], T_data, 0.0)
+        ps_owned = jnp.where(om_c, p_s_data, 0.0)
+        absu_owned = jnp.where(om_e[:, None], jnp.abs(u_data), 0.0)
+        T_min_l = jnp.min(jnp.where(om_c[:, None], T_data, jnp.inf))
+        T_max_l = jnp.max(jnp.where(om_c[:, None], T_data, -jnp.inf))
+        finite_l = jnp.all(jnp.isfinite(T_owned))
+        cwv_sum_l = (jnp.sum(jnp.where(om_c, cwv_field, 0.0))
+                     if cwv_field is not None else jnp.asarray(0.0))
+        # One device→host transfer for all local reductions.
+        _loc = np.asarray(jnp.stack([
+            jnp.sum(T_owned), jnp.sum(ps_owned), jnp.max(absu_owned),
+            T_min_l, T_max_l, finite_l.astype(T_data.dtype),
+            cwv_sum_l.astype(T_data.dtype),
+        ]))
+        n_owned = int(vl.partition.n_owned_cells)
+        comm = _MPI.COMM_WORLD
+        g_sum_T = comm.allreduce(float(_loc[0]), op=_MPI.SUM)
+        g_sum_ps = comm.allreduce(float(_loc[1]), op=_MPI.SUM)
+        g_max_u = comm.allreduce(float(_loc[2]), op=_MPI.MAX)
+        g_T_min = comm.allreduce(float(_loc[3]), op=_MPI.MIN)
+        g_T_max = comm.allreduce(float(_loc[4]), op=_MPI.MAX)
+        g_finite = comm.allreduce(bool(_loc[5] > 0.5), op=_MPI.LAND)
+        g_sum_cwv = comm.allreduce(float(_loc[6]), op=_MPI.SUM)
+        g_n_cells = comm.allreduce(n_owned, op=_MPI.SUM)
+        mean_T = g_sum_T / (g_n_cells * nlev)
+        mean_ps = g_sum_ps / g_n_cells
+        cwv = (g_sum_cwv / g_n_cells) if cwv_field is not None else float("nan")
+        return mean_T, mean_ps, g_max_u, g_T_min, g_T_max, g_finite, cwv
+
     def _run_mpas(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run MPAS model with the unified physics pipeline.
 
@@ -2635,10 +2894,24 @@ class ModelDriver:
         # (job 8113954, L4 nCells=2562): fp32 heating is float32 + finite and
         # matches fp64 to rel-diff 1.5e-3 (REAL fp32, not a no-op).  Enabled
         # only for rrtmgp -- gray ignores the rrtmgp sub-config.
-        _rrtmgp_fp32 = (cfg.radiation == "rrtmgp")
+        # ``run_amip.py`` aliases the CLI ``rrtmgp`` → ``rrtmg`` for backward
+        # compatibility, but the canonical ``RadiationConfig.scheme`` is
+        # ``"rrtmgp"`` (the only non-gray value ``make_radiation_physics`` /
+        # ``_call_radiation_backend`` recognise — line 687 pre-builds the
+        # optics ONLY for ``scheme == "rrtmgp"``).  Passing the bare alias
+        # ``"rrtmg"`` skipped the pre-build, so the RRTMGP optics tables were
+        # (re)loaded from disk INSIDE the per-step JIT — a TracerArrayConversion
+        # crash (``np.asarray`` on a traced lookup table) that broke MPAS rrtmgp
+        # both serial and under MPI, and also left ``compute_fp32`` permanently
+        # off.  Normalise the alias back to the canonical scheme here.
+        _rad_scheme = (
+            "rrtmgp" if cfg.radiation in ("rrtmg", "rrtmgp")
+            else cfg.radiation
+        )
+        _rrtmgp_fp32 = (_rad_scheme == "rrtmgp")
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
-                scheme=cfg.radiation if cfg.radiation != "none" else "none",
+                scheme=_rad_scheme if _rad_scheme != "none" else "none",
                 rrtmgp=RRTMGPConfig(
                     co2_ppmv=cfg.co2_ppmv,
                     ch4_ppbv=cfg.ch4_ppbv,
@@ -2687,7 +2960,7 @@ class ModelDriver:
                            or not self._device_config.is_distributed)
         _n_dev = len(jax.devices())
         _ncell = int(self.state.T.data.shape[0])
-        if (cfg.radiation == "rrtmgp" and _single_process
+        if (_rad_scheme == "rrtmgp" and _single_process
                 and _n_dev > 1 and _ncell % _n_dev == 0):
             from legoesm.parallel.column_shard import create_column_mesh
             _column_mesh = create_column_mesh(_n_dev)
@@ -2695,7 +2968,7 @@ class ModelDriver:
                 f"  RRTMGP column-sharding: {_ncell} cells / {_n_dev} devices "
                 f"= {_ncell // _n_dev} cols/device"
             )
-        elif cfg.radiation == "rrtmgp" and _single_process and _n_dev > 1:
+        elif _rad_scheme == "rrtmgp" and _single_process and _n_dev > 1:
             logger.warning(
                 f"  RRTMGP column-sharding skipped: nCells={_ncell} not "
                 f"divisible by n_devices={_n_dev}; running single-device "
@@ -2910,6 +3183,29 @@ class ModelDriver:
         # feed it back next step.  None on the first step ⇒ physics initialises
         # its own state.
         _phys_state = None
+
+        # MPAS cell-partition MPI: swap the serial ``model.step`` for the
+        # halo-exchanging MPI step.  Same operator-split as the serial step
+        # (dynamics RK incl. tracer advection → physics → floors → mass fix),
+        # but each RK stage first exchanges cell/edge/tracer halos so every
+        # owned boundary cell sees fresh neighbour values, and the mass fixer
+        # sums only owned cells with a global allreduce (the model's internal
+        # fixer would double-count halo cells).  The same column-local
+        # ``physics_fn`` and the traced ``forcing`` / ``phys_state`` carry are
+        # threaded through unchanged.  Built once outside the loop.
+        _mpi_step = None
+        if self._voronoi_layout is not None:
+            from legoesm.parallel.voronoi_mpi import make_voronoi_mpi_step
+            _mpi_step = make_voronoi_mpi_step(
+                self.model, self._voronoi_layout, self.model.sigma_coord,
+                config=self.model.config, physics_fn=physics_fn,
+                return_phys_state=True,
+            )
+            logger.info(
+                "  MPAS MPI step active (rank %d/%d)",
+                self._voronoi_layout.rank, self._voronoi_layout.n_ranks,
+            )
+
         for step in range(n_steps_total):
             if _sst_forcing:
                 _force_day = START_DAY + step * DT / 86400.0
@@ -2917,10 +3213,14 @@ class ModelDriver:
                 if _fd_int != _last_force_day:
                     _forcing = {"T_sfc": _compute_T_sfc(_force_day)}
                     _last_force_day = _fd_int
-            self.state = self.model.step(
-                self.state, DT, physics_fn=physics_fn, forcing=_forcing,
-                phys_state=_phys_state)
-            _phys_state = self.model._phys_state
+            if _mpi_step is not None:
+                self.state, _phys_state = _mpi_step(
+                    self.state, DT, _forcing, _phys_state)
+            else:
+                self.state = self.model.step(
+                    self.state, DT, physics_fn=physics_fn, forcing=_forcing,
+                    phys_state=_phys_state)
+                _phys_state = self.model._phys_state
 
             # Diagnostics at intervals
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
@@ -2929,24 +3229,48 @@ class ModelDriver:
                 p_s_data = self.state.p_s.data
                 u_data = self.state.u.data
 
-                # Fuse the diagnostic reductions to a single device→host
-                # transfer instead of five separate ones — each ``float()``
-                # call is a GPU stall under default JAX scheduling.
-                _stats = jnp.stack([
-                    jnp.mean(T_data),
-                    jnp.mean(p_s_data),
-                    jnp.max(jnp.abs(u_data)),
-                    jnp.min(T_data),
-                    jnp.max(T_data),
-                    jnp.all(jnp.isfinite(T_data)).astype(T_data.dtype),
-                ])
-                _stats_host = np.asarray(_stats)
-                mean_T = float(_stats_host[0])
-                mean_ps = float(_stats_host[1])
-                max_u = float(_stats_host[2])
-                T_min = float(_stats_host[3])
-                T_max = float(_stats_host[4])
-                T_finite = bool(_stats_host[5] > 0.5)
+                # Column water vapor field on moist runs (reuse the shared
+                # integral); ``None`` on dry runs keeps the series aligned.
+                _cwv_field = None
+                if (self.state.tracers is not None
+                        and "q_v" in self.state.tracers):
+                    from legoesm.diagnostics.column_integrals import (
+                        column_water_vapor,
+                    )
+                    _cwv_field = column_water_vapor(
+                        self.state.tracers["q_v"].data, p_s_data,
+                        self.sigma.dsigma)
+
+                if self._voronoi_layout is not None:
+                    # MPAS cell-partition MPI: the state spans owned+halo
+                    # cells, and each rank holds only its band — so a plain
+                    # ``jnp.mean`` over ``T_data`` would double-count halo
+                    # cells AND be rank-local.  Reduce over OWNED cells only
+                    # and allreduce to a true global diagnostic (mirrors the
+                    # owned-mask + allreduce mass fixer).
+                    mean_T, mean_ps, max_u, T_min, T_max, T_finite, _cwv = \
+                        self._mpas_global_diag(
+                            T_data, p_s_data, u_data, _cwv_field)
+                else:
+                    # Serial / single-rank: fuse the reductions into one
+                    # device→host transfer (each ``float()`` is a GPU stall).
+                    _stats = jnp.stack([
+                        jnp.mean(T_data),
+                        jnp.mean(p_s_data),
+                        jnp.max(jnp.abs(u_data)),
+                        jnp.min(T_data),
+                        jnp.max(T_data),
+                        jnp.all(jnp.isfinite(T_data)).astype(T_data.dtype),
+                    ])
+                    _stats_host = np.asarray(_stats)
+                    mean_T = float(_stats_host[0])
+                    mean_ps = float(_stats_host[1])
+                    max_u = float(_stats_host[2])
+                    T_min = float(_stats_host[3])
+                    T_max = float(_stats_host[4])
+                    T_finite = bool(_stats_host[5] > 0.5)
+                    _cwv = (float(jnp.mean(_cwv_field))
+                            if _cwv_field is not None else float("nan"))
 
                 _ts["days"].append(elapsed_day)
                 _ts["T_atm"].append(mean_T)
@@ -2955,17 +3279,6 @@ class ModelDriver:
                 _ts["max_wind"].append(max_u)
                 _ts["dry_mass_ps"].append(mean_ps)
                 _ts["T_finite"].append(T_finite)
-                # Column water vapor on moist runs (reuse the shared integral);
-                # NaN on dry runs keeps the series aligned with ``days``.
-                if self.state.tracers is not None and "q_v" in self.state.tracers:
-                    from legoesm.diagnostics.column_integrals import (
-                        column_water_vapor,
-                    )
-                    _cwv = float(jnp.mean(column_water_vapor(
-                        self.state.tracers["q_v"].data, p_s_data,
-                        self.sigma.dsigma)))
-                else:
-                    _cwv = float("nan")
                 _ts["CWV"].append(_cwv)
 
                 elapsed = time.time() - t_start

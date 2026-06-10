@@ -103,6 +103,30 @@ def setup_devices(
                 tiling=(1, 1),
                 grid_type=grid_type,
             )
+        if grid_type == "mpas":
+            # MPAS / Voronoi cell-partition MPI.  Unlike the lat-lon band
+            # (a layout computable from ``n_lat`` alone), the Voronoi
+            # partition needs the *actual global mesh*, which ModelDriver
+            # builds in ``_create_grid``.  So the partition + halo-backend
+            # activation are deferred to that point
+            # (``ModelDriver._create_grid`` calls ``initialize_voronoi_mpi``
+            # and sets ``self._voronoi_layout``).  Here we only return a
+            # minimal DeviceConfig so the driver takes the MPAS distributed
+            # code paths; CPU single-node MPI needs no JAX device mesh
+            # (mpi4jax handles inter-rank comm).  Validation of the MPI
+            # stack happens when the partition's ``VoronoiHaloExchange`` is
+            # constructed.
+            import jax
+            return DeviceConfig(
+                mesh=None,
+                face_sharding=None,
+                replicated_sharding=None,
+                n_devices=1,
+                backend=jax.default_backend().upper(),
+                is_distributed=True,
+                tiling=(1, 1),
+                grid_type=grid_type,
+            )
         from legoesm.parallel.distributed import initialize_distributed
         return initialize_distributed(grid_type=grid_type)
 

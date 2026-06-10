@@ -83,11 +83,18 @@ _DRIVER_SUPPORTED: dict[tuple[str, str, str], str] = {
     ("nonhydrostatic","plane",          "plane"):        "plane_compressible_euler",
 
     # --- SFNO data-driven ---
-    ("shallow_water", "sfno",           "cubed_sphere"): "sfno_shallow_water",
-    ("hydrostatic",   "sfno",           "cubed_sphere"): "sfno_primitive_equations",
+    # SFNO is a spherical-harmonic operator: it reads ``grid.n_sh`` and
+    # runs SH synthesis/analysis, so it can only construct on the Gaussian
+    # spectral grid.  (These rows previously advertised ``cubed_sphere``,
+    # which has no SH transform — the build crashed with AttributeError.)
+    ("shallow_water", "sfno",           "gaussian"):     "sfno_shallow_water",
+    ("hydrostatic",   "sfno",           "gaussian"):     "sfno_primitive_equations",
 
     # --- U-Cast data-driven (convolutional U-Net emulator) ---
-    ("hydrostatic",   "u_cast",         "cubed_sphere"): "ucast_primitive_equations",
+    # The U-Net itself is grid-agnostic, but the PE bridge packs/unpacks
+    # the spectral primitive-equation state (see ucast_pe.py docstring:
+    # ``grid : GaussianGrid``), so it is Gaussian-only too.
+    ("hydrostatic",   "u_cast",         "gaussian"):     "ucast_primitive_equations",
 }
 
 
@@ -507,8 +514,25 @@ def create_atmosphere_dycore(
 
     # ----- U-Cast data-driven (convolutional U-Net emulator) -----
     if solver_name == "ucast_primitive_equations":
-        from legoesm.atmosphere.dynamics.ucast_pe import UCastPrimitiveEquationModel
-        return UCastPrimitiveEquationModel(grid=grid, sigma_coord=sigma)
+        from legoesm.atmosphere.dynamics.ucast_pe import (
+            UCastPrimitiveEquationConfig,
+            UCastPrimitiveEquationModel,
+        )
+        from legoesm.ml.channel_packing import PE3DChannelSpec
+
+        # The default UCastConfig is sized for the 13-level ERA5 pressure
+        # set (4*13+2 = 54 channels).  The driver knows the experiment's
+        # actual nlev, so size the network to the PE channel count here —
+        # the model ctor fail-fasts on any mismatch.
+        base = UCastPrimitiveEquationConfig()
+        n_ch = PE3DChannelSpec(nlev=sigma.n_levels).n_channels
+        cfg = base._replace(
+            ucast_config=base.ucast_config._replace(
+                in_channels=n_ch, out_channels=n_ch,
+            )
+        )
+        return UCastPrimitiveEquationModel(
+            grid=grid, sigma_coord=sigma, config=cfg)
 
     # Should be unreachable — the key check above guarantees this.
     raise RuntimeError(f"Internal error: unhandled solver {solver_name!r}")

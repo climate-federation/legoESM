@@ -45,10 +45,7 @@ from legoesm.training.trainable_params import (
     range_to_sigmoid,
     sigmoid_to_range,
 )
-from legoesm.training.aimip_spatial import (
-    AIMIPSpatialSurfaceParams,
-    SPATIAL_FIELD_NAMES,
-)
+from legoesm.training.aimip_spatial import AIMIPSpatialSurfaceParams
 
 
 # ----------------------------------------------------------------------
@@ -615,11 +612,7 @@ def make_aimip_classical_spectral_physics(
     ``physics_pipeline.py:897`` ``_PIPELINE_UNSUPPORTED_CONVECTION``).
     """
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
-    from legoesm.atmosphere.physics.radiation.config import (
-        GrayRadiationConfig,
-        RadiationConfig,
-        RRTMGPConfig,
-    )
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
 
     # Radiation backend toggle.  ``rrtmgp`` is the production
     # correlated-k path: it explicitly couples Xu-Randall cloud
