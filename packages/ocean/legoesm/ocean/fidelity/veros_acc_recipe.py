@@ -393,6 +393,9 @@ def build_acc_land_mask(grid: LatLonGrid) -> jnp.ndarray:
 
 def build_acc_state(grid: LatLonGrid,
                      z_coord: OceanZStarCoordinate,
+                     *,
+                     gm_redi: GMRediConfig = ACC_GM_REDI_CONFIG,
+                     tke: TKEConfig = ACC_TKE_CONFIG,
                      ) -> LatLonCGridOceanState:
     """Veros ACC initial conditions:
 
@@ -400,6 +403,13 @@ def build_acc_state(grid: LatLonGrid,
     - S uniform 35 PSU
     - u, v, eta zero
     - Bathymetry depth = full H_max where wet, zero where land
+
+    ``gm_redi`` / ``tke`` default to the ACC configs (so the historical call
+    ``build_acc_state(grid, z_coord)`` is bit-identical). The acc_basic transfer
+    recipe passes its own configs (EKE off ``gm_redi.eke=None`` -> no EKE-field
+    seeding; ``tke.prognostic`` may still be True -> TKE field seeded). Gating the
+    seed branches on the PASSED configs (not the module-level ACC constants) is
+    the only behavioural change, and it is a no-op when the defaults are used.
     """
     H_max = float(np.sum(ACC_DZT))
     land_mask = build_acc_land_mask(grid)
@@ -425,7 +435,7 @@ def build_acc_state(grid: LatLonGrid,
     # eke_3d=True (the ACC recipe): the eddy-energy field is 3-D on the interior
     # interfaces (n_lat, n_lon, nlev-1) (the W-grid), seeded to e_min on wet
     # columns. Otherwise it is the 2-D depth-integrated (n_lat, n_lon) field.
-    eke_cfg = ACC_GM_REDI_CONFIG.eke
+    eke_cfg = gm_redi.eke
     if eke_cfg is not None:
         lm = state.land_mask.data
         if eke_cfg.eke_3d:
@@ -452,7 +462,7 @@ def build_acc_state(grid: LatLonGrid,
     # the tke_background floor on wet columns (interior interfaces, W-grid) so the
     # carried field is a Field from step 0 (the model step would otherwise turn
     # tke None -> Field on the first iteration, breaking the lax.scan carry).
-    tke_cfg = ACC_TKE_CONFIG
+    tke_cfg = tke
     if getattr(tke_cfg, "prognostic", False):
         lm = state.land_mask.data
         nlev = z_coord.n_levels
