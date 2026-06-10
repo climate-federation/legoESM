@@ -49,9 +49,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install ruff
+      # dev extra (not bare ruff): lint-imports/grimp must be able to import the
+      # installed legoesm namespace to walk the dependency graph.
+      - run: pip install -e ".[dev]"
       - name: Ruff check (errors only)
         run: ruff check src/legoesm --select E9,F63,F7,F82 --statistics
+      - name: Import-boundary contracts (import-linter)
+        run: lint-imports
 
   type-check:
     name: Type Check (core)

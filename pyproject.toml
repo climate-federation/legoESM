@@ -253,8 +253,8 @@ ignore_imports = []
 #
 # The ONLY allowed component->above edges are the OPTIONAL heavy features whose
 # install path is declared as a per-component extra (legoesm-atmosphere[ml],
-# legoesm-ocean[ml], legoesm-ocean[tools]) — the SFNO neural dycores / ML physics
-# parameterization (-> legoesm.ml.*) and the Stommel-gyre drift diagnostic
+# legoesm-ocean[ml], legoesm-ocean[tools]) — the SFNO/U-Cast neural dycores / ML
+# physics parameterization (-> legoesm.ml.*) and the Stommel-gyre drift diagnostic
 # (-> legoesm.diagnostics).  Those exact edges are baselined below; the BASE
 # component import is still core-only (`import legoesm.atmosphere`/`legoesm.ocean`
 # pulls no ml/tools — verified).  alerting="error" makes this a ratchet: any NEW
@@ -281,9 +281,10 @@ forbidden_modules = [
 ]
 unmatched_ignore_imports_alerting = "error"
 ignore_imports = [
-    # OPTIONAL FEATURE: SFNO neural dynamical cores + ML physics parameterization.
-    # Declared by the legoesm-atmosphere[ml] / legoesm-ocean[ml] extras (top-level
-    # imports; the base component does not pull these modules).
+    # OPTIONAL FEATURE: SFNO/U-Cast neural dynamical cores + ML physics
+    # parameterization. Declared by the legoesm-atmosphere[ml] / legoesm-ocean[ml]
+    # extras (top-level imports; the base component does not pull these modules —
+    # both sfno_pe and ucast_pe are lazily re-exported by dynamics/__init__).
     "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.sfno",
     "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.normalization",
     "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.channel_packing",
@@ -291,6 +292,10 @@ ignore_imports = [
     "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.normalization",
     "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.channel_packing",
     "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.conservation",
+    "legoesm.atmosphere.dynamics.ucast_pe -> legoesm.ml.ucast",
+    "legoesm.atmosphere.dynamics.ucast_pe -> legoesm.ml.normalization",
+    "legoesm.atmosphere.dynamics.ucast_pe -> legoesm.ml.channel_packing",
+    "legoesm.atmosphere.dynamics.ucast_pe -> legoesm.ml.conservation",
     "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.normalization",
     "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.physics.io",
     "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.physics.model",

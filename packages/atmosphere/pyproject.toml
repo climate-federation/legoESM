@@ -33,10 +33,11 @@ dependencies = [
 # Optional heavy feature reaching UP into the ML layer.  The BASE atmosphere
 # imports only legoesm-core (verified: `import legoesm.atmosphere` does not pull
 # ml), so the component stays standalone; this extra declares the install path
-# for the SFNO neural dynamical cores + ML physics parameterization, which import
-# the neural primitives at top level:
-#   atmosphere.dynamics.{sfno_sw,sfno_pe} and atmosphere.physics.ml_parameterization
-#   -> legoesm.ml.{sfno,normalization,channel_packing,conservation,physics.*}
+# for the SFNO/U-Cast neural dynamical cores + ML physics parameterization, which
+# import the neural primitives at top level:
+#   atmosphere.dynamics.{sfno_sw,sfno_pe,ucast_pe} and
+#   atmosphere.physics.ml_parameterization
+#   -> legoesm.ml.{sfno,ucast,normalization,channel_packing,conservation,physics.*}
 # Install with `pip install legoesm-atmosphere[ml]`.  These component->ml edges
 # are baselined in import-linter contract #3.
 [project.optional-dependencies]
