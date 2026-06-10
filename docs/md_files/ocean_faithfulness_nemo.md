@@ -488,6 +488,24 @@ band; bounded restoring lets AMOC rebuild (NEMO holds 17.7 WITH restoring becaus
 re-diagnose under corrected fluxes. RGB-chl SW penetration (NEMO ln_qsr_rgb) = known remaining BC gap
 (vertical heating distribution), next lever if the dipole persists.
 
+### iter-G yr-1 A/B RESULT (tripole, 8455137 in flight): NEMO-parity fluxes IMPROVE — SH-mid is the residual
+Tripole yr-1 (ncar fluxes + bounded τ45.5 restoring) vs yr-1 old-flux ice-thermo baseline, NEMO annual:
+| | baseline | **ncar** |
+|---|---|---|
+| SST RMSE / corr | 1.74 / 0.985 | **1.43 / 0.990** |
+| >45S | +0.90 | **+0.76** |
+| SH-mid | ~+1.0 | +1.13 (PERSISTS) |
+| tropics | −0.14 | **−0.01** |
+| NH-mid / >45N | −1.28 / −0.91 | −1.05 / −1.11 |
+| SSS RMSE / bias | — | **1.30 / −0.03** (bounded restoring: NO drift) |
+Run stable day-365 (seasonal cycle clean, max|u| ≤1.1). **Verdict: flux fixes deliver (−18% RMSE, SH-pole
++ tropics improved); the 45S-23S SH-mid warm band is now THE bias** — not ice (ice-thermo zone ends 45S),
+not turbulent-flux scheme (just fixed). Leading candidate: SW PENETRATION (NEMO RGB+chlorophyll
+`ln_qsr_rgb` vs our fixed 2-band — Southern-Ocean high-chl traps heat near surface in NEMO; our deeper
+penetration warms... actually COOLS surface; sign needs the impl). Next: implement `rgb_chl` penetration
+scheme (NEMO traqsr RGB table + monthly ESACCI chl climatology from INPUTS) + codex; A/B on yr-1 rerun.
+PNGs (tripole yr1 SST/SSS) sent to user 2026-06-10 ~08:40.
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
