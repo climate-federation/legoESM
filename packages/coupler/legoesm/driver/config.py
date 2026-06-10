@@ -458,7 +458,7 @@ class ExperimentConfig(NamedTuple):
                 f"got {self.convection!r}"
             )
         _valid_turbulence = (
-            "smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+            "smagorinsky", "louis", "tke", "mynn25", "clubb_lite", "clubb",
             "holtslag_boville", "ysu", "edmf", "none",
         )
         if self.turbulence not in _valid_turbulence:

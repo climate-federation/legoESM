@@ -49,6 +49,7 @@ from legoesm.atmosphere.physics.turbulence.smagorinsky import smagorinsky_turbul
 from legoesm.atmosphere.physics.turbulence.louis import louis_turbulence
 from legoesm.atmosphere.physics.turbulence.tke import tke_turbulence
 from legoesm.atmosphere.physics.turbulence.mynn25 import mynn25_turbulence
+from legoesm.atmosphere.physics.turbulence.clubb import clubb_turbulence
 from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_lite_turbulence
 from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
     holtslag_boville_turbulence,
@@ -94,6 +95,7 @@ class TurbulenceSchemeTraits(NamedTuple):
 _ENERGY_FIELD_BY_SCHEME = {
     "tke": "tke",
     "clubb_lite": "tke",
+    "clubb": "tke",
     "edmf": "tke",
     "mynn25": "qke",
 }
@@ -125,6 +127,10 @@ def get_turbulence_fn(config: TurbulenceConfig):
         return "mynn25", mynn25_turbulence, config.mynn25
     elif config.scheme == "clubb_lite":
         return "clubb_lite", clubb_lite_turbulence, config.clubb_lite
+    elif config.scheme == "clubb":
+        from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig
+        clubb_cfg = config.clubb if config.clubb is not None else CLUBBConfig()
+        return "clubb", clubb_turbulence, clubb_cfg
     elif config.scheme == "holtslag_boville":
         return "holtslag_boville", holtslag_boville_turbulence, config.holtslag_boville
     elif config.scheme == "ysu":

@@ -59,8 +59,15 @@ reference facts + per-phase status below are the live source of truth.)*
 
 ## Architecture (modules under `physics/turbulence/`)
 
-`clubb.py` = entry `clubb_turbulence(...)` + legoESM↔CLUBB bridge + orchestration
-(NOT yet written). Helpers (all EXCLUDED in `test_physics_contracts` — closure
+`clubb.py` = entry `clubb_turbulence(...)` + legoESM↔CLUBB bridge + orchestration.
+**RUNNABLE as of iter 16** (phase 1): `scheme="clubb"` dispatches through
+`make_turbulence_physics`, runs end-to-end, JIT/grad-clean, wired into the AMIP
+CLI + coupler `validate_strict` + `physics_state` carried-TKE + `scm`. Phase 1
+uses the golden-tested **parcel buoyant-sorting `Lscale`** for the eddy
+diffusivity (`Km = c_K·Lscale·√wp2`) + eddy-diffusion mean advance + a wp2
+budget; phase 2+ swaps in the full prognostic moment advances + ADG1 PDF
+buoyancy coupling (the genuinely-fuller-than-lite closure — DONE gate). Helpers
+(all EXCLUDED in `test_physics_contracts` — closure
 plumbing, not single-tendency schemes; all under the `clubb*.py` ruff
 per-file-ignore for canonical CLUBB symbol names):
 
@@ -105,10 +112,13 @@ finite gradients in float32 + float64.
 - **P6 orchestration** ☐ — assemble the `advance_clubb_core`-equivalent for the
   CAM flag subset; pack/unpack carried moment state (wp2/wp3/thlp2/rtp2/rtpthlp/
   wpthlp/wprtp/up2/vp2). `l_call_pdf_closure_twice=True` → PDF pre+post.
-- **P7 integration** ☐ — `clubb.py` entry matching `TurbulenceOutput`; wire
-  `"clubb"` into `TurbulenceConfig` Literal + `get_turbulence_fn` dispatch +
-  `needs_tke`-style carried-moment slots in `integration.py` +
-  `ExperimentConfig.validate_strict` membership. **This is the DONE gate.**
+- **P7 integration** 🟡 — ✅ iter 16: `clubb.py` entry + `TurbulenceOutput`;
+  `"clubb"` wired into `get_turbulence_fn` dispatch + 4× `needs_tke` +
+  `TurbulenceConfig.clubb` (None default, TYPE_CHECKING annotation — no import
+  cycle) + coupler `validate_strict` + `physics_state` tke_schemes + `scm` +
+  AMIP CLI choices. Runnable + tested. ☐ remaining: upgrade phase-1 eddy
+  diffusion → the full prognostic moment advances + PDF buoyancy coupling so the
+  live tendency path uses the genuinely-fuller-than-lite closure (DONE gate).
 - **P8 validation** ☐ — single-column idealized (BOMEX/DYCOMS-ish) sanity,
   conservation/positivity, AD smoke through one step, codex-clean.
 
