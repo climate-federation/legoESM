@@ -73,6 +73,11 @@ data = [
 metal = ["jax-metal"]
 # Interactive configuration wizard (scripts/experiment/wizard.py, `legoesm wizard`).
 wizard = ["questionary>=2.0"]
+# Tested jax envelope for MPI is >=0.8,<0.10 (runtime-guarded in
+# parallel/reductions.py — jax 0.10 removed CustomCallV1, breaking mpi4jax
+# 0.8/0.9). Do NOT cap jax here: uv resolves one universal lock across all
+# extras, so a cap would downgrade the default (non-MPI) workspace install.
+# For a working MPI stack install `-r requirements_mpi.txt` (pinned combo).
 mpi = [
     "mpi4py>=4.1,<5",
     "mpi4jax>=0.8,<0.9",
