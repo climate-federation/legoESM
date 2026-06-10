@@ -276,6 +276,68 @@ def eos_density_derivatives(
     return drho_dT.astype(T.dtype), drho_dS.astype(T.dtype)
 
 
+def int_drhodTS_dynamic_enthalpy(
+    eos_fn,
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    z_full: jnp.ndarray,
+    rho_0: float,
+    g: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""Dynamic-enthalpy integrands ``(int_drhodT, int_drhodS)`` = ``∫_z^0 ∂ρ/∂X dz'``.
+
+    These are exactly Veros's ``int_drhodT`` / ``int_drhodS`` (``get_int_drhodT`` /
+    ``get_int_drhodS``, ``veros/core/density/get_rho.py:157-195``) — the
+    vertically-integrated EOS partial derivatives that drive the isoneutral /
+    skew APE-dissipation diagnostics ``P_diss_skew`` / ``P_diss_iso``
+    (``veros/core/isoneutral/diffusion.py``).  The gradient of these fields
+    contracted with the GM/Redi flux is the energy the parameterization extracts
+    from (skew) / dissipates into (iso) the mean APE — the quantity the EKE
+    source needs (``-P_diss_skew`` feeds EKE; ``-P_diss_iso`` sinks it).
+
+    Leading-order form (EOS-agnostic, used here):
+
+        int_drhodX(z) ≈ -z · (∂ρ/∂X)(T, S, p_local),  z < 0 (depth ≈ -z),
+
+    i.e. the cell-local EOS partial derivative (from
+    :func:`eos_density_derivatives` at the LOCAL hydrostatic pressure
+    ``p ≈ rho_0·g·|z|``) times the depth ``|z| = -z``.  This is the exact integral
+    when ``∂ρ/∂X`` is pressure-independent (linear EOS) and captures the dominant
+    term for the nonlinear EOSs; the residual is the thermobaric correction
+    ``∫(∂²ρ/∂X∂p)·∂p/∂z·z' dz'`` — measured ≈5 % on the ACC column means for
+    veros_nonlin2 but up to ≈16 % pointwise at ~2000 m for the Wright EOS (the
+    leading form evaluates ∂ρ/∂X at the LOCAL bottom-of-column pressure × full
+    depth instead of integrating the depth-varying derivative; adversarial
+    review 2026-06-10). A documented approximation that keeps this helper a
+    single EOS-agnostic code path (no per-EOS analytic antiderivative); a
+    faithful per-EOS analytic dynamic enthalpy is the refinement if the signed
+    conversions ever need the last few percent.
+
+    Sign convention: ``z_full < 0`` below the surface, so ``-z_full = |z| ≥ 0``
+    and ``int_drhodX`` carries the sign of ``∂ρ/∂X``.  Fully ``jax.grad``-safe
+    (only :func:`eos_density_derivatives` + a multiply).
+
+    Parameters
+    ----------
+    eos_fn : Callable[[array, array, array], array] — equation of state.
+    T, S : array — potential temperature [°C], salinity [g/kg] at cell centres.
+    z_full : array broadcastable to ``T`` — cell-centre height [m] (negative
+        below the surface; the ``z_full_ref`` of the vertical coordinate).
+    rho_0, g : reference density [kg/m³] and gravity [m/s²] for ``p = rho_0·g·|z|``.
+
+    Returns
+    -------
+    int_drhodT, int_drhodS : arrays, same shape as ``T`` —
+        ``∫_z^0 ∂ρ/∂T dz'`` [kg/m³·m / K] and ``∫_z^0 ∂ρ/∂S dz'`` [kg/m³·m / (g/kg)].
+    """
+    z = jnp.broadcast_to(jnp.asarray(z_full), T.shape)
+    p_local = jnp.asarray(rho_0 * g) * jnp.abs(z)
+    drho_dT, drho_dS = eos_density_derivatives(eos_fn, T, S, p_local)
+    int_drhodT = -z * drho_dT
+    int_drhodS = -z * drho_dS
+    return int_drhodT, int_drhodS
+
+
 # ==============================================================================
 # Linear equation of state
 # ==============================================================================

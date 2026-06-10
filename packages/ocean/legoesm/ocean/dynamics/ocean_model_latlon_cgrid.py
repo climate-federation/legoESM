@@ -76,6 +76,7 @@ from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,
     compute_realized_gm_skew_conversion,
+    compute_realized_signed_conversions,
     eke_horizontal_transport,
     eke_3d_horizontal_transport,
     eke_3d_vertical_diffusion,
@@ -639,14 +640,16 @@ class LatLonCGridOceanModel:
             validate_eke_config(_eke)
             if not _eke.eke_3d and (
                 _eke.source_kdiss_h or _eke.gm_source_mode != "parameterized"
+                or _eke.source_p_diss_iso
             ):
                 raise ValueError(
                     "EKEConfig source augmentation (source_kdiss_h="
                     f"{_eke.source_kdiss_h!r}, gm_source_mode="
-                    f"{_eke.gm_source_mode!r}) requires eke_3d=True (the source "
+                    f"{_eke.gm_source_mode!r}, source_p_diss_iso="
+                    f"{_eke.source_p_diss_iso!r}) requires eke_3d=True (the source "
                     "terms live on the 3-D W-grid). Set eke_3d=True or leave the "
                     "augmentation at its defaults (source_kdiss_h=False, "
-                    "gm_source_mode='parameterized')."
+                    "gm_source_mode='parameterized', source_p_diss_iso=False)."
                 )
 
         # Fail-fast momentum-advection dispatch validation (was a silent
@@ -1935,6 +1938,8 @@ class LatLonCGridOceanModel:
         # Both are ≥ 0 and enter the EXPLICIT production, so the semi-implicit
         # update stays positivity-preserving (numerator ≥ 0, denominator ≥ 1).
         production_override = None
+        signed_source = None
+        clamp_production = True
         if eke_cfg.gm_source_mode == "realized":
             production_override = compute_realized_gm_skew_conversion(
                 T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
@@ -1943,6 +1948,32 @@ class LatLonCGridOceanModel:
                 mask=lm,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
             )
+        elif eke_cfg.gm_source_mode == "realized_signed":
+            # Literal SIGNED Veros conversions: -P_diss_skew (source) and, when
+            # source_p_diss_iso, -P_diss_iso (Redi sink). The signed skew replaces
+            # the parameterized production (NOT clamped — folded semi-implicitly);
+            # the iso sink is added to the signed source (it is ≤ 0 mostly, so its
+            # negative part folds into the implicit factor, keeping E ≥ e_min).
+            # K_iso = K_gm coupling (enable_eke_isopycnal_diffusion): the Redi
+            # diffusivity follows the prognostic kappa_GM(z).
+            kappa_redi_w = (kappa_gm_override
+                            if eke_cfg.isopycnal_diffusion else None)
+            neg_skew, neg_iso = compute_realized_signed_conversions(
+                T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                self.grid, self.z_coord, gm_cfg, kappa_gm_override,
+                want_skew=True, want_iso=eke_cfg.source_p_diss_iso,
+                kappa_redi_w=kappa_redi_w,
+                eos=self.config.eos, eos_linear=self.config.eos_linear,
+                mask=lm, u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+                rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+            )
+            production_override = neg_skew
+            clamp_production = False
+            if eke_cfg.source_p_diss_iso:
+                # -P_diss_iso is the Redi APE-dissipation; SUBTRACT it from the EKE
+                # source (Veros forc has -P_diss_iso, mostly < 0 ⇒ a sink). neg_iso
+                # IS -P_diss_iso, so it is added directly as a signed source.
+                signed_source = neg_iso
         extra_source = None
         if eke_cfg.source_kdiss_h and Ah_visc_u is not None:
             # Flux form (kdiss_h_flux_form=True): pass the pre-computed positive-
@@ -1958,6 +1989,7 @@ class LatLonCGridOceanModel:
         E, eke_diss_w = eke_apply_local_source(
             E, sigma3, L3, eke_cfg, dt,
             production_override=production_override, extra_source=extra_source,
+            signed_source=signed_source, clamp_production=clamp_production,
             return_dissipation=True,
         )
 

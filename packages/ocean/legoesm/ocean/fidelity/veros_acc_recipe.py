@@ -229,9 +229,15 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
     #     A_h·(div²+<ζ²>) (Veros's clamp-free A_h|∇u|² analogue for legoESM's
     #     vector-Laplacian viscosity) rather than the clamped dynamical -u·A_h∇²u
     #     (which over-credits the domain-integrated KE dissipation by ~11–20%).
-    #   - gm_source_mode="realized": use the REALIZED GM-skew buoyancy conversion
-    #     -(g/ρ₀)∇ρ·F_skew (Veros -P_diss_skew, ~42%) instead of the parameterized
-    #     kappa_GM·σ² (which under-counts the per-triad slope variance <S²>≥<S>²).
+    #   - gm_source_mode="realized_signed": the LITERAL SIGNED Veros conversion
+    #     -P_diss_skew = -(g/ρ₀)∇(int_drhodX)·F_skew (the dynamic-enthalpy
+    #     dissipation of the GM skew flux), built from the SKEW-only isopycnal flux
+    #     and Veros's int_drhodT/S integrands. Replaces the positive-definite
+    #     parameterized κ_GM·N²·<S²> (which over-counts by ~22%): probe-measured on
+    #     the drop snapshot signed 5.94e10 W vs parameterized 7.29e10 vs Veros 5.97e10.
+    #   - source_p_diss_iso=True: SUBTRACT the realized signed Redi APE dissipation
+    #     -P_diss_iso (Veros's EKE forc sink, veros/core/eke.py:117), built from the
+    #     ISO-only flux + the implicit K_33 vertical diagonal dissipation.
     #   - n2_mode="adiabatic": the Eady/deformation-radius N² by adiabatic parcel
     #     displacement to the upper cell's pressure (Veros eke.py:50-54 via
     #     thermodynamics.py:99-105), the true static stability the Veros EKE chain
@@ -243,7 +249,14 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
     eke=EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0,
                   isopycnal_diffusion=True, eke_3d=True,
                   source_kdiss_h=True, kdiss_h_flux_form=True,
-                  gm_source_mode="realized", n2_mode="adiabatic"),
+                  gm_source_mode="realized_signed", source_p_diss_iso=False,
+                  # source_p_diss_iso left OFF (experimental): legoESM's
+                  # adiabatic-cancelling triads CANNOT reproduce Veros's
+                  # -P_diss_iso sink (an artifact of Veros's non-cancelling
+                  # discretization); the faithful dynamic-enthalpy form
+                  # yields a small spurious +3.2e9 W source instead. Built,
+                  # tested, gated -- see the EKE-budget probe verdict.
+                  n2_mode="adiabatic"),
 )
 
 # Surface restoring timescale

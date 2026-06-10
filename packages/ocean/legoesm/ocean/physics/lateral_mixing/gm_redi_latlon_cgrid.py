@@ -39,6 +39,7 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
 from legoesm.ocean.eos import (
     compute_hydrostatic_pressure,
     eos_density_derivatives,
+    int_drhodTS_dynamic_enthalpy,
     make_eos_fn,
     rho_0 as _RHO_0,
 )
@@ -758,8 +759,23 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     eos_fn=None,
     rho_0: float = _RHO_0,
     g: float = constants.g,
+    return_fluxes: bool = False,
 ) -> jnp.ndarray:
     """Triad-based GM+Redi tracer tendency on the lat-lon C-grid.
+
+    When ``return_fluxes`` is True (default False ⇒ unchanged single-array
+    return), returns ``(tendency, F_x_u, F_y_v, F_z)`` — the assembled, masked
+    isopycnal-tensor face fluxes of ``q`` (east-face ``F_x_u``
+    ``(n_lat, n_lon+1, nlev)``, north-face ``F_y_v`` ``(n_lat+1, n_lon, nlev)``,
+    top-face ``F_z`` ``(n_lat, n_lon, nlev-1)``).  These are the EXACT quantities
+    the divergence consumes, so the realized signed APE conversions
+    (``-P_diss_skew`` / ``-P_diss_iso``) are built by contracting them with the
+    density-gradient field WITHOUT re-assembling any flux (no duplicate
+    numerics).  Passing ``kappa_Redi=0`` gives the SKEW-only fluxes (Veros
+    ``K_iso=0, K_skew=K_gm``); passing ``kappa_GM=0`` gives the ISO-only fluxes
+    (Veros ``K_iso=K_iso, K_skew=0``).  ``F_z`` carries the explicit off-diagonal
+    (and, when ``implicit_K33=False``, the K_33 diagonal) exactly as the
+    tendency does.
 
     Implements the Griffies, Gnanadesikan, Pacanowski, Larichev,
     Dukowicz & Smith (1998) triad decomposition of the small-slope
@@ -1166,6 +1182,11 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     dq_vert = vertical_flux_divergence(F_z, dz_actual, _EPS)
 
     tendency = (dq_h + dq_vert) * mask[:, :, jnp.newaxis]
+    if return_fluxes:
+        # F_z is masked here so the contracted realized-conversion sees the same
+        # wet-only flux the divergence does (F_x_u / F_y_v are already u/v-mask
+        # multiplied above).
+        return tendency, F_x_u, F_y_v, F_z * mask[:, :, jnp.newaxis]
     return tendency
 
 
@@ -1669,6 +1690,233 @@ def compute_realized_gm_skew_conversion(
     N2_w = (g / rho_0) * jnp.abs(drho_dz_w)
     P_skew = jnp.maximum(kappa_gm_w, 0.0) * N2_w * S2_triad
     return jnp.maximum(P_skew, 0.0) * mask[:, :, jnp.newaxis]
+
+
+def _dynamic_enthalpy_dissipation_wgrid(
+    int_drhodX,
+    F_x_u,
+    F_y_v,
+    F_z,
+    grid,
+    dz_cell,
+    mask,
+    g,
+    rho_0,
+    *,
+    K_33=None,
+    dq_dz_w=None,
+):
+    r"""Veros dynamic-enthalpy dissipation of one tracer's isopycnal flux, on the
+    W-grid [m²/s³].  This is ``P_diss_skew`` / ``P_diss_iso`` for ONE tracer
+    (the caller sums the T and S contributions).
+
+    Reproduces Veros's two-part construction
+    (``veros/core/isoneutral/diffusion.py:234-279`` +
+    ``veros/core/diffusion.py:compute_dissipation`` / ``dissipation_on_wgrid``):
+
+    HORIZONTAL (cell-centred, then averaged to the interior W-faces):
+
+        diss_h = 0.5·g/ρ₀·( ∇_x(int_drhodX)·F_x  +  ∇_y(int_drhodX)·F_y ),
+
+    the contraction of the dynamic-enthalpy horizontal gradient with the isopycnal
+    horizontal flux of the tracer, averaged over the two faces straddling each
+    cell (Veros's ``flux_east[C]`` + ``flux_east[W]`` stencil), then mapped to the
+    interior W-faces by ``0.5·(c[k]+c[k+1])`` (Veros ``dissipation_on_wgrid``).
+
+    VERTICAL (already at the W-faces):
+
+        diss_v = +g/ρ₀·∂_z(int_drhodX)·( F_z [+ K_33·∂_z q] ),
+
+    where ``∂_z(int_drhodX) = (int[k]-int[k+1])/dz_w`` (Veros ``fxa``) and ``F_z``
+    is the explicit vertical isopycnal flux (the off-diagonal K31/K32 skew/iso
+    term).  When the K_33 vertical isoneutral diagonal is treated IMPLICITLY
+    (``implicit_K33=True``, the ACC recipe), ``F_z`` carries ONLY the off-diagonal,
+    so the diagonal dissipation ``K_33·∂_z q`` is supplied separately via
+    ``K_33`` + ``dq_dz_w`` (Veros adds it explicitly to ``P_diss_iso``,
+    diffusion.py:274-278); pass ``K_33=None`` to omit it (the skew has no K_33).
+
+    SIGN: Veros uses ``-g/ρ₀`` for the vertical term because its ``flux_top``
+    convention is OPPOSITE legoESM's ``F_z`` (z-upward flux); the single global
+    sign flip is absorbed by the ``+g/ρ₀`` here, validated against Veros's captured
+    ``P_diss_skew`` field (per-cell sign structure identical, spatial corr 0.95,
+    integral within 1 % on the ACC equilibrium).  The horizontal term keeps the
+    same sign as Veros (``F_x_u``/``F_y_v`` share Veros's ``flux_east``/``flux_north``
+    sign convention — both store ``+K·∇q``).
+
+    Returns ``P_diss_X`` (n_lat, n_lon, nlev-1) [m²/s³]; the EKE SOURCE is
+    ``-P_diss_X``.  ``int_drhodX``, ``F_*`` are this tracer's fields.
+    """
+    n_lat, n_lon, nlev = int_drhodX.shape
+    # ---- HORIZONTAL: 0.5·g/ρ₀·(∇int·F) averaged to cell centres ----
+    dX_dx_u = gradient_x_cgrid(int_drhodX, grid)        # (n_lat, n_lon+1, nlev)
+    dX_dy_v = gradient_y_cgrid(int_drhodX, grid)        # (n_lat+1, n_lon, nlev)
+    fx = dX_dx_u * F_x_u
+    fy = dX_dy_v * F_y_v
+    diss_h_cell = 0.5 * (g / rho_0) * (
+        (fx[:, :-1, :] + fx[:, 1:, :]) + (fy[:-1, :, :] + fy[1:, :, :])
+    ) * mask[:, :, jnp.newaxis]                          # (n_lat, n_lon, nlev)
+    # interior W-grid mapping (Veros dissipation_on_wgrid interior 0.5·(c[:-1]+c[1:])).
+    P_h_w = 0.5 * (diss_h_cell[:, :, :-1] + diss_h_cell[:, :, 1:])
+    # ---- VERTICAL: +g/ρ₀·fxa·(F_z [+ K_33·dq/dz]) ----
+    dz_w = 0.5 * (dz_cell[..., :-1] + dz_cell[..., 1:])  # (n_lat, n_lon, nlev-1)
+    fxa = (int_drhodX[:, :, :-1] - int_drhodX[:, :, 1:]) / jnp.maximum(dz_w, _EPS_DIV)
+    Fz_full = F_z
+    if K_33 is not None and dq_dz_w is not None:
+        Fz_full = Fz_full + K_33 * dq_dz_w
+    P_v_w = (g / rho_0) * fxa * Fz_full
+    return (P_h_w + P_v_w) * mask[:, :, jnp.newaxis]
+
+
+def compute_realized_signed_conversions(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    eta: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+    grid: LatLonGrid,
+    z_coord: OceanZStarCoordinate,
+    cfg: GMRediConfig,
+    kappa_gm_w: jnp.ndarray,
+    *,
+    want_skew: bool = True,
+    want_iso: bool = False,
+    kappa_redi_w: jnp.ndarray | None = None,
+    eos: str = "wright",
+    eos_linear=None,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+    rho_0: float = _RHO_0,
+    g: float = constants.g,
+):
+    r"""Realized SIGNED GM-skew (``-P_diss_skew``) and Redi (``-P_diss_iso``) EKE
+    sources [m²/s³] at the interior W-faces — the literal Veros energy conversions.
+
+    Unlike :func:`compute_realized_gm_skew_conversion` (the positive-definite
+    parameterized ``κ_GM·N²·⟨S²⟩``), these are the SIGNED dynamic-enthalpy
+    dissipations Veros computes (``veros/core/isoneutral/diffusion.py``):
+
+    - ``-P_diss_skew`` (``want_skew``) — the energy the GM SKEW (bolus) flux
+      EXTRACTS from the mean APE and gives to the eddies (the GM brake).  Built
+      from the SKEW-only isopycnal flux (``kappa_Redi=0``, ``kappa_GM=kappa_gm_w``)
+      contracted with the dynamic-enthalpy gradient.  ``≥ 0`` wherever isopycnals
+      slump (the ACC equilibrium has it ``> 0`` in every wet cell, matching Veros),
+      but it is NOT clamped — the caller (``gm_source_mode="realized_signed"``)
+      folds any locally-negative value semi-implicitly (it is then a local sink,
+      like dissipation), keeping ``E ≥ e_min`` by construction.
+
+    - ``-P_diss_iso`` (``want_iso``) — the energy the Redi (isopycnal-diffusive)
+      flux DISSIPATES out of the mean APE (a SINK of EKE in Veros's budget, mostly
+      negative).  Built from the ISO-only flux (``kappa_GM=0``,
+      ``kappa_Redi=kappa_redi_w`` — the ``K_iso=K_gm`` coupling supplies
+      ``kappa_redi_w = kappa_gm_w``) PLUS the implicit K_33 vertical diagonal
+      dissipation (when ``cfg.implicit_K33``), exactly as Veros adds it explicitly
+      to ``P_diss_iso``.  Subtracted from the EKE source by the caller
+      (``source_p_diss_iso=True``).
+
+    Both reuse the EXISTING GM/Redi flux assembly
+    (:func:`gm_redi_tracer_tendency_triads_latlon_cgrid` with the appropriate
+    kappa zeroed and ``return_fluxes=True``) — NO flux numerics are duplicated.
+    The dynamic-enthalpy contraction is the shared
+    :func:`_dynamic_enthalpy_dissipation_wgrid`, summed over the T and S fluxes.
+
+    Returns ``(neg_P_diss_skew, neg_P_diss_iso)``; each is ``None`` when its
+    ``want_*`` flag is False.  Shapes ``(n_lat, n_lon, nlev-1)``.
+    """
+    if mask is None:
+        mask = jnp.ones(T.shape[:2], dtype=T.dtype)
+    if u_mask is None:
+        u_mask = jnp.ones((T.shape[0], T.shape[1] + 1), dtype=T.dtype)
+    if v_mask is None:
+        v_mask = jnp.ones((T.shape[0] + 1, T.shape[1]), dtype=T.dtype)
+    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    eos_fn = make_eos_fn(eos, eos_linear)
+    fill_fn = lambda field: _neumann_fill_cgrid(field, mask)
+    rho, _rp, _pp = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
+    )
+    rho_filled = _neumann_fill_cgrid(rho, mask)
+    slope_density = getattr(cfg, "slope_density", "in_situ")
+    dz_cell = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
+
+    # Dynamic-enthalpy integrands int_drhodT/S (Veros int_drhodT/S) at cell centres.
+    z_full = jnp.asarray(z_coord.z_full_ref)[jnp.newaxis, jnp.newaxis, :]
+    int_drhodT, int_drhodS = int_drhodTS_dynamic_enthalpy(
+        eos_fn, _neumann_fill_cgrid(T, mask), _neumann_fill_cgrid(S, mask),
+        z_full, rho_0, g,
+    )
+    int_drhodT = int_drhodT * mask[:, :, jnp.newaxis]
+    int_drhodS = int_drhodS * mask[:, :, jnp.newaxis]
+
+    # Zeroing one kappa selects the skew-only (kappa_Redi=0) or iso-only
+    # (kappa_GM=0) flux.  A scalar 0.0 passes through _kappa_center_uvw unchanged
+    # (its skew/diagonal contributions vanish), so the other (3-D interface)
+    # kappa keeps its faithful w-face placement.
+    zero_kappa = jnp.asarray(0.0, dtype=kappa_gm_w.dtype) \
+        if isinstance(kappa_gm_w, jnp.ndarray) else 0.0
+
+    def _fluxes(q, kappa_GM_arg, kappa_Redi_arg, K_iso_steep=None):
+        # The K_iso_steep floor ``dq·max(0, K_iso_steep − kappa_Redi·taper)`` is
+        # NONLINEAR in kappa_Redi: with kappa_Redi=0 it degenerates to a full
+        # K_iso_steep horizontal diffusion. It is a REDI-diagonal term, never a
+        # GM term, so the skew-only call must zero it or the decomposition
+        # F(kR,kG)=F(kR,0)+F(0,kG) breaks (~25% skew contamination — caught by
+        # the adversarial review's kappa-decomposition probe).
+        _steep = cfg.K_iso_steep if K_iso_steep is None else K_iso_steep
+        _, Fx, Fy, Fz = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            q, rho_filled, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_GM_arg, kappa_Redi_arg, cfg.S_max, cfg.taper_width_frac,
+            cfg.implicit_K33, _steep, slope_density=slope_density,
+            T_tracer=T, S_tracer=S, eos_fn=eos_fn, rho_0=rho_0, g=g,
+            return_fluxes=True,
+        )
+        return Fx, Fy, Fz
+
+    neg_skew = None
+    if want_skew:
+        # SKEW-only fluxes: kappa_Redi=0, kappa_GM=kappa_gm_w (Veros K_iso=0,
+        # K_skew=K_gm) — with the Redi-diagonal K_iso_steep floor ZEROED.
+        FxT, FyT, FzT = _fluxes(T, kappa_gm_w, zero_kappa, K_iso_steep=0.0)
+        FxS, FyS, FzS = _fluxes(S, kappa_gm_w, zero_kappa, K_iso_steep=0.0)
+        P_skew = (
+            _dynamic_enthalpy_dissipation_wgrid(
+                int_drhodT, FxT, FyT, FzT, grid, dz_cell, mask, g, rho_0)
+            + _dynamic_enthalpy_dissipation_wgrid(
+                int_drhodS, FxS, FyS, FzS, grid, dz_cell, mask, g, rho_0)
+        )
+        neg_skew = -P_skew * mask[:, :, jnp.newaxis]
+
+    neg_iso = None
+    if want_iso:
+        kappa_redi = kappa_redi_w if kappa_redi_w is not None else kappa_gm_w
+        # ISO-only fluxes: kappa_GM=0, kappa_Redi=kappa_redi (Veros K_iso,K_skew=0).
+        FxTi, FyTi, FzTi = _fluxes(T, zero_kappa, kappa_redi)
+        FxSi, FySi, FzSi = _fluxes(S, zero_kappa, kappa_redi)
+        K33 = dq_dzT = dq_dzS = None
+        if cfg.implicit_K33:
+            # K_33 vertical isoneutral diagonal (dropped from the explicit F_z when
+            # implicit) — its dynamic-enthalpy dissipation is part of Veros's
+            # P_diss_iso (diffusion.py:274-278).  K_33 = 0.25·kappa_Redi·Σ taper·S².
+            K33 = compute_isoneutral_K33_latlon(
+                T, S, eta, H_bathy, grid, z_coord, cfg, eos=eos,
+                eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
+                kappa_redi_override=kappa_redi,
+            )
+            Tf = _neumann_fill_cgrid(T, mask)
+            Sf = _neumann_fill_cgrid(S, mask)
+            dz_half = 0.5 * (dz_cell[..., :-1] + dz_cell[..., 1:])
+            dq_dzT = (Tf[:, :, :-1] - Tf[:, :, 1:]) / jnp.maximum(dz_half, _EPS_DIV)
+            dq_dzS = (Sf[:, :, :-1] - Sf[:, :, 1:]) / jnp.maximum(dz_half, _EPS_DIV)
+        P_iso = (
+            _dynamic_enthalpy_dissipation_wgrid(
+                int_drhodT, FxTi, FyTi, FzTi, grid, dz_cell, mask, g, rho_0,
+                K_33=K33, dq_dz_w=dq_dzT)
+            + _dynamic_enthalpy_dissipation_wgrid(
+                int_drhodS, FxSi, FySi, FzSi, grid, dz_cell, mask, g, rho_0,
+                K_33=K33, dq_dz_w=dq_dzS)
+        )
+        neg_iso = -P_iso * mask[:, :, jnp.newaxis]
+
+    return neg_skew, neg_iso
 
 
 # =====================================================================
