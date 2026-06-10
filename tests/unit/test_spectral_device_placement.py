@@ -23,7 +23,10 @@ from legoesm.parallel import metal
 from legoesm.parallel.metal import SpectralDevicePlacement, place_spectral_grid
 
 
-def test_non_metal_grid_untouched_and_flags_off():
+def test_non_metal_grid_untouched_and_flags_off(monkeypatch):
+    # Pin the backend so the test is correct even on an actual Metal host
+    # (codex review LOW: without this, a Metal machine takes the other branch).
+    monkeypatch.setattr(metal, "get_backend", lambda: "cpu")
     grid = jnp.arange(4.0)
     placement = place_spectral_grid(grid, allow_unsupported=True)
     assert isinstance(placement, SpectralDevicePlacement)
@@ -34,6 +37,7 @@ def test_non_metal_grid_untouched_and_flags_off():
 
 
 def test_non_metal_calls_spectral_backend_check(monkeypatch):
+    monkeypatch.setattr(metal, "get_backend", lambda: "cpu")
     calls: list[bool] = []
     monkeypatch.setattr(
         metal,
@@ -46,6 +50,8 @@ def test_non_metal_calls_spectral_backend_check(monkeypatch):
 
 
 def test_non_metal_propagates_backend_check_failure(monkeypatch):
+    monkeypatch.setattr(metal, "get_backend", lambda: "gpu")
+
     def _boom(*, allow_unsupported=False):
         raise RuntimeError("no fp64 on this backend")
 
@@ -55,6 +61,11 @@ def test_non_metal_propagates_backend_check_failure(monkeypatch):
 
 
 def test_metal_routes_grid_to_cpu_and_skips_backend_check(monkeypatch):
+    # CI has no Metal device, so jax.devices()[0] is CPU here: this verifies
+    # branch selection, flag plumbing, and the check_spectral_backend skip —
+    # NOT a real Metal->CPU transfer (default_device == cpu_device on CPU CI).
+    # The true-Metal invariant is only checkable on Apple hardware (codex
+    # review LOW: acknowledged coverage gap).
     monkeypatch.setattr(metal, "get_backend", lambda: "metal")
 
     def _must_not_run(*, allow_unsupported=False):
