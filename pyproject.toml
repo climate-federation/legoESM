@@ -156,6 +156,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_mixing_length.py" = ["N803", "N806", "N815"]
 "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_moments.py" = ["N803", "N806", "N815"]
 "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_saturation.py" = ["N803", "N806", "N815"]
+# CLUBB port tests use the same physical symbol names as the modules under test
+# (T for temperature, Tc for deg C, etc.) — clearer than snake_case here.
+"tests/unit/test_clubb_*.py" = ["N802", "N803", "N806"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -140,6 +140,9 @@ EXCLUDED: frozenset[str] = frozenset(
         # (no units/signs/conserved quantity — it is grid plumbing, like a
         # _shared helper), so it carries no single-tendency physics contract.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_grid.py",
+        # CLUBB port: saturation mixing-ratio adapter over legoesm.thermo's
+        # canonical Flatau curves (a thermo helper, not a tendency scheme).
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_saturation.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",

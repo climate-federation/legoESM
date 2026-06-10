@@ -219,7 +219,8 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
 | P1 | `CLUBBConfig`/`CLUBBFlags`/`CLUBBParams` + CAM defaults + tests | ✅ iter 2 |
 | P1 | Wire `"clubb"` into TurbulenceConfig Literal + validate_strict | ☐ (deferred to P7 — needs scheme entry to avoid half-wired dispatch) |
 | P1 | `CLUBBConfig`/`CLUBBFlags` | ☐ |
-| P2 | saturation/thermo adapter, sigma_sqd_w, BV freq | ☐ |
+| P2 | saturation adapter (Flatau) — `thermo` curves + `clubb_saturation.py` | ✅ iter 3 |
+| P2 | sigma_sqd_w + Brunt–Väisälä (`advance_helper`) | ☐ next |
 | P3 | mixing length / Lscale | ☐ |
 | P4 | ADG1 PDF closure | ☐ |
 | P5 | moment advance + solves + limiters | ☐ |
@@ -298,5 +299,33 @@ penta/tridiag LU solvers vs `timestepping/tridiagonal.py` — reconcile iter-3.)
 - **Next (iter 3):** P2 saturation/thermo adapter (`clubb_saturation.py` →
   `legoesm.thermo`, Flatau formula), `sigma_sqd_w`, and Brunt-Väisälä
   (`advance_helper_module`), each with tests + codex review.
+
+### iter 3
+- **P2 saturation (done):** CAM default is `saturation_formula = flatau` and
+  `l_rcm_supersat_adj = .false.` (so the bisection `rcm_sat_adj` is NOT in the
+  tree — CLUBB diagnoses cloud water from the PDF, deferred to P4).
+- Added the **canonical Flatau SVP curves to `legoesm.thermo`**
+  (`saturation_vapor_pressure_flatau` liquid + `..._ice_flatau`), coefficients
+  verbatim from CLUBB-JAX `saturation.py`/`saturation.F90`, with the deg-C clip
+  floors (−85 liquid, −90 ice). Putting them in the shared thermo module keeps
+  the port compliant with the CLAUDE.md "saturation only from `thermo`" rule
+  (curve NOT re-derived inside the physics tree). Additive — no change to the
+  Tetens default or existing consumers.
+- New `clubb_saturation.py`: thin adapter `sat_mixrat_liq`/`sat_mixrat_ice`
+  assembling `rsat = ε·esat/(p−esat)` with CLUBB's AD-safe denominator guard
+  (`where(safe, p−esat, 1)` before divide; `rsat = ε` fallback when `p−esat<1`).
+- Tests (`test_clubb_saturation.py`, 17): Flatau golden anchors (computed +
+  pinned), positivity/monotonicity, ice<liquid sub-freezing, Flatau≈Tetens
+  within 3% over 240–310 K, mixing-ratio definition match, ε-fallback, and
+  **finite reverse-mode gradient through the fallback region**, JIT-clean.
+  `test_no_saturation_reimpl` ratchet still green (curve lives in `thermo`).
+- Classified `clubb_saturation.py` EXCLUDED in physics-contracts. Extended the
+  scoped ruff per-file-ignore to `tests/unit/test_clubb_*.py` (physical symbol
+  names T/Tc). CI gate is `E9,F63,F7,F82` only — N-rules are advisory.
+- Codex adversarial review: **APPROVE, no material findings** (confirmed the
+  pre-division guard, ε fallback, CAM flatau + rcm-adj-off, additive thermo).
+- **Next (iter 4):** `clubb_saturation` is ready; do `sigma_sqd_w`
+  (`sigma_sqd_w_module`) + Brunt–Väisälä `calc_brunt_vaisala_freq_sqd`
+  (`advance_helper_module`) — both feed the mixing-length/PDF; tests + codex.
 </content>
 </invoke>
