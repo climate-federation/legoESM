@@ -49,30 +49,46 @@ from legoesm import constants
 
 
 __physics_contract__ = {
-    "name": "bbl_adv",
-    "units": {
-        "T": "degC", "S": "PSU", "h_k": "m", "area": "m^2",
+    "summary": (
+        "Advective bottom boundary layer (Campin & Goosse 1999; NEMO trabbl "
+        "nn_bbl_adv=2): where the up-slope (shelf) bottom cell is denser "
+        "than the down-slope (deep) bottom cell at a common reference "
+        "depth, a down-slope transport tr = width*e3_bbl*g*gamma*"
+        "max(0, drho/rho0) exchanges tracers through a closed 3-leg "
+        "circulation cell (shelf bottom -> deep bottom, upward return in "
+        "the deep column, horizontal return at shelf level). Resolves the "
+        "1-deg overflow problem (Gibraltar/Med, Denmark Strait)."
+    ),
+    "inputs": {
+        "T": "degC", "S": "PSU", "h_ref": "m", "land_mask": "1",
+        "area": "m^2", "dy_u_faces": "m", "dx_v_faces": "m",
+        "gamma_s": "s", "rho_0": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
         "utr_bbl": "m^3/s", "vtr_bbl": "m^3/s",
         "dT_dt": "degC/s", "dS_dt": "PSU/s",
-        "gamma_s": "s",
     },
-    "signs": {
-        "transport": "positive toward the DEEPER column (down-slope); "
-                     "active only when the shelf bottom cell is denser at "
-                     "a common reference depth",
-        "tendency": "tracer tendency added to dT_dt/dS_dt (PSU degC per s)",
-    },
-    "conserves": [
-        "tracer mass: the 3-leg circulation cell telescopes to zero under "
-        "the volume weights area*h_k (verified by unit test to fp tol)",
-    ],
+    "sign_convention": (
+        "Transports are signed down-slope (positive toward the larger "
+        "index when the neighbour is deeper, like NEMO mgrh), and are "
+        "non-zero only when the shelf bottom is DENSER; the tendency "
+        "moves the deep bottom cell toward the shelf water properties."
+    ),
+    # The 3-leg exchange telescopes to zero under the area*h volume
+    # weights: total heat and salt are conserved exactly (unit-tested to
+    # fp tolerance on a random staircase domain).
+    "conserves": ["tracer", "salt"],
     "differentiable": True,
-    "reference": "Campin & Goosse (1999) Tellus 51A 412-430; Beckmann & "
-                 "Doscher (1997) JPO 27 581-591; NEMO 5.0.1 TRA/trabbl.F90 "
-                 "(nn_bbl_adv=2, rn_gambbl=20 s, ORCA1 RUN_REF namelist)",
-    "idealized_test": "tests/ocean/unit/test_bbl_adv.py — analytic 2-column "
-                      "dense-shelf overflow (transport formula exact, "
-                      "down-slope sign, conservation, gate-off bit-exact)",
+    "reference": (
+        "Campin & Goosse (1999) Tellus 51A 412-430; Beckmann & Doscher "
+        "(1997) JPO 27 581-591; NEMO 5.0.1 TRA/trabbl.F90 (ORCA1 RUN_REF: "
+        "nn_bbl_adv=2, rn_gambbl=20 s)"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_bbl_adv.py: analytic 2-column dense-shelf "
+        "overflow (closed-form transport, down-slope sign), exact "
+        "conservation, flat-bottom/land inactivity, host-step bounds."
+    ),
 }
 
 
@@ -91,11 +107,11 @@ class BBLGeometry(NamedTuple):
     kv_d: jnp.ndarray       # j-face deep bottom level
     e3u_bbl: jnp.ndarray    # i-face BBL thickness = min(bottom e3 of the 2 columns)
     e3v_bbl: jnp.ndarray    # j-face BBL thickness
-    dep_u: jnp.ndarray      # i-face common reference depth (mean bottom depth) [m]
-    dep_v: jnp.ndarray      # j-face common reference depth [m]
+    dep_bot: jnp.ndarray    # per-CELL bottom mid-cell depth [m] (n_lat, n_lon)
     u_active: jnp.ndarray   # i-face both-columns-wet AND sloped (float 0/1)
     v_active: jnp.ndarray   # j-face mask
     bot_k: jnp.ndarray      # per-CELL bottom level index (n_lat, n_lon)
+    h_ref: jnp.ndarray      # per-cell reference thicknesses (n_lat, n_lon, nlev)
 
 
 def bbl_static_geometry(h_ref: jnp.ndarray, land_mask: jnp.ndarray
@@ -129,7 +145,6 @@ def bbl_static_geometry(h_ref: jnp.ndarray, land_mask: jnp.ndarray
     ku_s = jnp.where(mgrhu >= 0, bot_k[:, :-1], bot_k[:, 1:])     # shallow col
     ku_d = jnp.maximum(bot_k[:, :-1], bot_k[:, 1:])               # NEMO mbku_d
     e3u_bbl = jnp.minimum(e3_bot[:, :-1], e3_bot[:, 1:])
-    dep_u = 0.5 * (dL + dR)
     u_active = ((mask[:, :-1] > 0.5) & (mask[:, 1:] > 0.5)
                 & (mgrhu != 0)).astype(jnp.float64)
 
@@ -139,7 +154,6 @@ def bbl_static_geometry(h_ref: jnp.ndarray, land_mask: jnp.ndarray
     kv_s = jnp.where(mgrhv >= 0, bot_k[:-1, :], bot_k[1:, :])
     kv_d = jnp.maximum(bot_k[:-1, :], bot_k[1:, :])
     e3v_bbl = jnp.minimum(e3_bot[:-1, :], e3_bot[1:, :])
-    dep_v = 0.5 * (dS_ + dN)
     v_active = ((mask[:-1, :] > 0.5) & (mask[1:, :] > 0.5)
                 & (mgrhv != 0)).astype(jnp.float64)
 
@@ -147,8 +161,8 @@ def bbl_static_geometry(h_ref: jnp.ndarray, land_mask: jnp.ndarray
         mgrhu=mgrhu, mgrhv=mgrhv, ku_s=ku_s.astype(jnp.int32),
         ku_d=ku_d.astype(jnp.int32), kv_s=kv_s.astype(jnp.int32),
         kv_d=kv_d.astype(jnp.int32), e3u_bbl=e3u_bbl, e3v_bbl=e3v_bbl,
-        dep_u=dep_u, dep_v=dep_v, u_active=u_active, v_active=v_active,
-        bot_k=bot_k.astype(jnp.int32),
+        dep_bot=dep_bot, u_active=u_active, v_active=v_active,
+        bot_k=bot_k.astype(jnp.int32), h_ref=h,
     )
 
 
@@ -161,42 +175,53 @@ def _bottom_ts(T, S, bot_k):
 
 def bbl_transports(T: jnp.ndarray, S: jnp.ndarray, geom: BBLGeometry,
                    dy_u: jnp.ndarray, dx_v: jnp.ndarray, *,
-                   gamma_s: float, rho_0: float, eos_fn=None):
+                   gamma_s: float, rho_0: float):
     """Campin-Goosse down-slope transports per face [m^3/s].
 
-        tr = facewidth * e3_bbl * (g*gamma) * max(0, (rho_shelf-rho_deep)/rho0)
+        tr = facewidth * e3_bbl * (g*gamma) * max(0, zgdrho) * mgrh
 
-    The density difference is evaluated with the canonical EOS at the FACE's
-    common reference pressure (NEMO uses the alpha/beta linearisation at the
-    common bottom depth — identical to linear order; the direct Delta-rho
-    avoids re-deriving eos_rab).  Returns ``(utr, vtr)`` SIGNED down-slope
-    (multiplied by mgrh like NEMO, so + means toward larger index).
+    with the EXACT NEMO trabbl gating (eos_rab form): alpha/beta evaluated
+    per column at ITS OWN bottom pressure (thermobaricity preserved — the
+    canonical Wright-EOS derivatives, ``thermal_expansion_coeff`` /
+    ``haline_contraction_coeff``), AVERAGED across the face, then
+
+        zgdrho = max(0, abar*(T_deep - T_shelf) - bbar*(S_deep - S_shelf))
+
+    which is the linearized (rho_shelf - rho_deep)/rho — positive only when
+    the shelf bottom cell is denser.  A naive direct-density difference at
+    the face-mean pressure misses the compressibility asymmetry across
+    steep shelf-to-deep faces (codex HIGH) — exactly the overflow faces
+    this scheme exists for.
     """
-    from legoesm.ocean.eos import wright_eos
-    eos = wright_eos if eos_fn is None else eos_fn
+    from legoesm.ocean.eos import (
+        haline_contraction_coeff, thermal_expansion_coeff,
+    )
     g_gamma = constants.g * gamma_s
 
     Tb, Sb = _bottom_ts(T, S, geom.bot_k)
+    p_bot = rho_0 * constants.g * geom.dep_bot          # per-cell bottom p
+    alpha = thermal_expansion_coeff(Tb, Sb, p_bot)
+    beta = haline_contraction_coeff(Tb, Sb, p_bot)
 
     def _face_tr(axis):
         if axis == 0:   # j-faces
-            T1, T2 = Tb[:-1, :], Tb[1:, :]
-            S1, S2 = Sb[:-1, :], Sb[1:, :]
-            mgrh, dep = geom.mgrhv, geom.dep_v
-            e3, act, width = geom.e3v_bbl, geom.v_active, dx_v
+            sl1 = (slice(0, -1), slice(None)); sl2 = (slice(1, None), slice(None))
+            mgrh, e3, act, width = (geom.mgrhv, geom.e3v_bbl,
+                                    geom.v_active, dx_v)
         else:           # i-faces
-            T1, T2 = Tb[:, :-1], Tb[:, 1:]
-            S1, S2 = Sb[:, :-1], Sb[:, 1:]
-            mgrh, dep = geom.mgrhu, geom.dep_u
-            e3, act, width = geom.e3u_bbl, geom.u_active, dy_u
+            sl1 = (slice(None), slice(0, -1)); sl2 = (slice(None), slice(1, None))
+            mgrh, e3, act, width = (geom.mgrhu, geom.e3u_bbl,
+                                    geom.u_active, dy_u)
+        T1, T2, S1, S2 = Tb[sl1], Tb[sl2], Sb[sl1], Sb[sl2]
+        a_bar = 0.5 * (alpha[sl1] + alpha[sl2])
+        b_bar = 0.5 * (beta[sl1] + beta[sl2])
         # shelf = up-slope column, deep = down-slope column (by mgrh)
         T_sh = jnp.where(mgrh >= 0, T1, T2)
         T_dp = jnp.where(mgrh >= 0, T2, T1)
         S_sh = jnp.where(mgrh >= 0, S1, S2)
         S_dp = jnp.where(mgrh >= 0, S2, S1)
-        p = rho_0 * constants.g * dep
-        drho = eos(T_sh, S_sh, p) - eos(T_dp, S_dp, p)
-        zgdrho = jnp.maximum(drho / rho_0, 0.0)       # only shelf-denser
+        zgdrho = jnp.maximum(
+            a_bar * (T_dp - T_sh) - b_bar * (S_dp - S_sh), 0.0)
         return width * e3 * g_gamma * zgdrho * mgrh * act
 
     return _face_tr(1), _face_tr(0)
@@ -275,7 +300,66 @@ def apply_bbl_adv_tendency(dT_dt, dS_dt, T, S, h_k, area, geom: BBLGeometry,
 
 __all__ = [
     "BBLGeometry",
+    "apply_bbl_adv_step",
     "apply_bbl_adv_tendency",
     "bbl_static_geometry",
     "bbl_transports",
 ]
+
+
+def apply_bbl_adv_step(state, geom: BBLGeometry, dt: float, *,
+                       gamma_s: float, rho_0: float,
+                       area_2d, dy_u_faces, dx_v_faces, nlev: int):
+    """HOST post-step BBL application (the faithful-runner pattern, like the
+    SSS restoring / ice-thermo nudges): recompute the Campin-Goosse
+    transports from the CURRENT bottom T/S and integrate one forward-Euler
+    exchange step ``pt += dt * d(pt)/dt``.
+
+    Operator-split with the dynamics exactly like NEMO applies trabbl within
+    its sequential tracer trends.  Stability: the exchange is a bounded
+    relaxation between cells; with NEMO's gamma=20 s and 1-deg cells the
+    per-step exchange fraction ``|tr|*dt/V`` is << 1 at any ocean dt (see the
+    unit test's magnitude check).
+
+    Parameters
+    ----------
+    state : LatLonCGridOceanState-like (T, S Fields with (..., nlev) data)
+    geom : BBLGeometry from :func:`bbl_static_geometry` (STATIC, build once)
+    dy_u_faces : (n_lat, n_lon-1) i-face widths [m] (NEMO e2u at the face)
+    dx_v_faces : (n_lat-1, n_lon) j-face widths [m] (NEMO e1v)
+    nlev : static Python int.
+
+    Returns the state with T, S updated.
+    """
+    T = jnp.asarray(state.T.data, dtype=jnp.float64)
+    S = jnp.asarray(state.S.data, dtype=jnp.float64)
+    # actual thicknesses for the volume weights: reuse the static reference
+    # h embedded in the geometry via the caller (h_k passed implicitly when
+    # the geometry was built from h_partial; eta-induced J deviation is
+    # O(eta/H) and irrelevant for an exchange tendency).
+    h_k = geom.h_ref
+    utr, vtr = bbl_transports(
+        T, S, geom, dy_u_faces, dx_v_faces,
+        gamma_s=gamma_s, rho_0=rho_0)
+    # Face-local exchange cap (codex MED): the host-split Euler exchange
+    # fraction |tr|*dt/V must stay << 1 for every touched cell.  Cap |tr|
+    # at 0.25*V_min/dt with V_min = min bottom-cell volume of the two
+    # columns — inactive at ORCA1 scales (fraction ~1e-2), engages only on
+    # pathological tiny-area/extreme-drho faces. Sign/zero pattern kept.
+    area = jnp.asarray(area_2d, dtype=jnp.float64)
+    e3_bot = jnp.take_along_axis(h_k, geom.bot_k[..., None], axis=-1)[..., 0]
+    V_bot = area * jnp.maximum(e3_bot, 1.0e-3)
+    cap_u = 0.25 * jnp.minimum(V_bot[:, :-1], V_bot[:, 1:]) / dt
+    cap_v = 0.25 * jnp.minimum(V_bot[:-1, :], V_bot[1:, :]) / dt
+    utr = jnp.sign(utr) * jnp.minimum(jnp.abs(utr), cap_u)
+    vtr = jnp.sign(vtr) * jnp.minimum(jnp.abs(vtr), cap_v)
+    zero = jnp.zeros_like(T)
+    dT, dS = apply_bbl_adv_tendency(
+        zero, jnp.zeros_like(S), T, S, h_k, jnp.asarray(area_2d), geom,
+        utr, vtr, nlev=nlev)
+    T_new = (T + dt * dT).astype(state.T.data.dtype)
+    S_new = (S + dt * dS).astype(state.S.data.dtype)
+    return state._replace(
+        T=state.T.replace(data=T_new),
+        S=state.S.replace(data=S_new),
+    )
