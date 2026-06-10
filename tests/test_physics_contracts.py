@@ -133,6 +133,10 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/config.py",
+        # CLUBB port: pure staggered-grid interpolation/derivative operators
+        # (no units/signs/conserved quantity — it is grid plumbing, like a
+        # _shared helper), so it carries no single-tendency physics contract.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_grid.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",
