@@ -540,6 +540,18 @@ Root-caused, NOT a flux regression:
   40N/150E, resolution-bound, pre-existing). Global banded NCAR-minus-old ΔSST is tiny (≤+0.34°C).
 - **ACTION:** relaunched **latlon 1° 2yr with the corrected NCAR fluxes** (8457282, clean grid, same vehicle
   as latlon_2yr_full) for an apples-to-apples flux-improvement view without the tripole seam.
+- **SEAM FIX IMPLEMENTED + VALIDATED (commit 98f9b779, `--ew-cyclic-overlap`, gated default-off):** a
+  post-step ORCA cyclic-overlap projection slaves the 2 longitude halo columns to their overlap partners
+  for ALL prognostic fields each step (cell-column T/S/eta/v: col[0]<-col[nx-2], col[nx-1]<-col[1]; u-faces:
+  u[:,0]<-u[:,nx-2], u[:,nx-1]<-u[:,1], u[:,nx] to the internal wrap) + a matching mask/bathy/IC overlap-fill
+  at construction BEFORE make_partial_cell. Codex round-1 caught 2 real HIGH bugs (velocity MUST be slaved —
+  barotropic carries U_old + seam u-face reads the v halo via Coriolis roll; partial-cell coord built before
+  the fill) → round-2 APPROVE. 52 unit tests pass (cell+v+u-face slaving, partial-cell seam identity, gating
+  bit-identical). **120-day WOA cold-start smoke (8457440) STABLE** (max|u| 1.01 m/s, finite, physical) AND
+  the seam closed: native i1-vs-i_{nx-2} jump **0.87→0.085 °C (10×)**, regridded lon-72 stripe sharpness
+  **2.86→0.345 °C (8×)**. The hard-won cold-start survives the reconnected seam. **Definitive tripole run
+  launched (8457733): NCAR fluxes + bounded restoring + seam fix** (supersedes the no-overlap 8455137,
+  cancelled). MPAS (Voronoi) has no ORCA seam → unaffected.
 
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
