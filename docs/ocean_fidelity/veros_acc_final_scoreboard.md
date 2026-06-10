@@ -101,3 +101,43 @@ before the eddy-mean-equilibration attribution stands on closed ground:
 5. **Equilibration experiments** (warm-started / equilibrated EKE+TKE,
    longer runs): the climate lever if 1–4 clear. 10-yr runs cost ~25 min on
    a V100S — an attribution matrix is cheap now.
+
+
+## Overnight falsification campaign (2026-06-10, addendum)
+
+Run-length asymptote (10/30/100-yr matched pairs): KE ratio 4.51 → 3.46 →
+**3.24** (flattening ≈3×), EKE → 13.7×, abyss ratio dissolves to 1.86 (Veros's
+own abyss drifts to 2.64 °C). Verdict: a genuine ≈3× attractor difference plus
+a transient overshoot.
+
+Falsifications (each a 10-yr GPU run via the override/monkeypatch harness,
+`.physics-validator/veros_ablation/legoesm_10yr_variant.py`):
+- background `A_v=0`: NO effect (0.997–1.018) — killed;
+- realized TKE shear production (1/(1+2δ) attenuation of the measured 6.1×
+  over-forcing): NO effect (KE +6%) — the TKE pathway does not control this
+  ACC's energetics;
+- `kappa_gm_max=5e4`: marginal (KE −3%, EKE +14% — the cap partially CONTAINS
+  the overshoot).
+
+Expert audits (ocean-model + dycore personas; reports under
+`.physics-validator/{ocean_expert_audit,dycore_expert_audit}/`): priority
+dycore suspects verified clean (dt_mom semantics faithful; AB2 barotropic
+composition algebraically equivalent on flat bottom; tracer-velocity offset a
+non-compounding 0.2% phase lead; the balanced mode exactly neutral in both
+assembled steps). THREE concrete code-level survivors, never matched:
+1. **D3 — vertical momentum advection**: legoESM 1st-order upwind on the
+   baroclinic perturbation u′ vs Veros 2nd-order centered on full u (the
+   recipe's `momentum_flux_scheme="centered"` reaches only the horizontal
+   block). Missing ∂z(w·U_bar) + upwind viscosity ≈1e-3 m²/s damping
+   baroclinic shear → too-barotropic (matches 0.30 vs 0.12); ~15% of the jet
+   spin-up rate. Best symptom match.
+2. **D1 — Coriolis composition**: sequential Matsuno sub-step inside the outer
+   AB2 destroys 14–23 %/step of near-inertial energy (+ ≈13–15° discrete-Ekman
+   rotation) vs Veros's explicit-AB2 Coriolis that routes ageostrophic energy
+   through friction → TKE.
+3. **D2 — AB2 scope**: legoESM extrapolates the TOTAL explicit increment;
+   Veros AB2s only {Coriolis, advection, wind, PGF} with dissipative terms at
+   weight 1.0.
+Ocean-side smaller gaps (TKE buoyancy time level, surface-buoyancy TKE source,
+negative-TKE reservoir, Ri definition, z-grid T-point placement
+`u_centered_grid` vs midpoints) are catalogued in the audit report.
