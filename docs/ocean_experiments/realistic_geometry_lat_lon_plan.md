@@ -638,7 +638,7 @@ geometry.
 
 **Tasks:**
 
-- Write `scripts/global_overturning/run_global_overturning_realistic_implicit_spinup.py`
+- Write `scripts/run/global_overturning/run_global_overturning_realistic_implicit_spinup.py`
   (10 yr) and `..._50yr_implicit_continuation.py` (40 yr).  Same
   driver structure as the flat-bottom counterparts; only the geometry
   + initial T/S construction differs.

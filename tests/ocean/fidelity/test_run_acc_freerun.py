@@ -1,4 +1,4 @@
-"""Unit tests for scripts/ocean_fidelity/run_acc_freerun.py.
+"""Unit tests for scripts/validate/ocean_fidelity/run_acc_freerun.py.
 
 The script lives outside ``src/`` so we add ``scripts/`` to sys.path (same
 pattern as test_run_comparison_script.py). The heavy end-to-end run (legoESM +
@@ -30,7 +30,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 def freerun_module():
     sys.path.insert(0, str(SCRIPTS_DIR))
     try:
-        import ocean_fidelity.run_acc_freerun as mod  # type: ignore
+        import validate.ocean_fidelity.run_acc_freerun as mod  # type: ignore
         importlib.reload(mod)
         return mod
     finally:

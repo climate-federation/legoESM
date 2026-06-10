@@ -2,7 +2,7 @@
 
 **Date**: 2026-05-09
 **Branch**: `feature/mpas_topo`
-**Script**: `scripts/mpas_realistic_geometry/run_mpas_etopo_progression.py`
+**Script**: `scripts/run/mpas_realistic_geometry/run_mpas_etopo_progression.py`
 
 ## Motivation
 
@@ -529,14 +529,14 @@ restarts + snapshots + daily timeseries CSV.
   `compute_centroid_depth()`
 
 **Scripts**:
-- `scripts/mpas_realistic_geometry/run_mpas_etopo_progression.py` —
+- `scripts/run/mpas_realistic_geometry/run_mpas_etopo_progression.py` —
   9-case progression (a-i), supports `--snap-frac`, `--A-v`, `--pgf-scheme`,
   `--production`, `--etopo /path/to/etopo.nc`
-- `scripts/mpas_realistic_geometry/run_mpas_etopo_coast_spinup.py` —
+- `scripts/run/mpas_realistic_geometry/run_mpas_etopo_coast_spinup.py` —
   multi-year coast-only spinup (proven 14+ years stable)
-- `scripts/mpas_realistic_geometry/run_mpas_etopo_spinup_v2.py` —
+- `scripts/run/mpas_realistic_geometry/run_mpas_etopo_spinup_v2.py` —
   multi-year full bathymetry spinup (still blows up — needs PGF fix)
-- `scripts/mpas_realistic_geometry/_*.py` — many one-off diagnostics
+- `scripts/tmp/_*.py` — many one-off diagnostics
   (ssh comparison, growth localization, dissipation tests, etc.) —
   scratch files, can be deleted or archived
 
@@ -587,23 +587,23 @@ restarts + snapshots + daily timeseries CSV.
 ```bash
 # 9-case progression at ico5 (no ETOPO needed)
 CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python3 \
-  scripts/mpas_realistic_geometry/run_mpas_etopo_progression.py \
+  scripts/run/mpas_realistic_geometry/run_mpas_etopo_progression.py \
   --subdivision 5 --cases a,b,c,d,e,f,f2,g
 
 # ETOPO cases (snap + A_v=1e-2 are now defaults for case i)
 CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python3 \
-  scripts/mpas_realistic_geometry/run_mpas_etopo_progression.py \
+  scripts/run/mpas_realistic_geometry/run_mpas_etopo_progression.py \
   --subdivision 5 --cases h,i \
   --etopo /home/dbalwada/legoESM/data/bathymetry/etopo_1deg.nc
 
 # Multi-year stable coast-only spinup (the working baseline)
 CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python3 \
-  scripts/mpas_realistic_geometry/run_mpas_etopo_coast_spinup.py \
+  scripts/run/mpas_realistic_geometry/run_mpas_etopo_coast_spinup.py \
   --years 10 --checkpoint-days 365
 
 # Multi-year full bathymetry attempt (will blow up — for diagnostics)
 CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python3 \
-  scripts/mpas_realistic_geometry/run_mpas_etopo_spinup_v2.py \
+  scripts/run/mpas_realistic_geometry/run_mpas_etopo_spinup_v2.py \
   --years 2 --checkpoint-days 30
 ```
 
@@ -628,7 +628,7 @@ config `A_h=5e4, A_v=1e-2, bottom_drag_r=1e-3, eq_boost=0`.  The
 diagnostic ran the baroclinic tendency function five times with one term
 zeroed each call (PGF, A_h viscosity, A_v, bottom drag) and
 differenced.  The script lives at
-`scripts/mpas_realistic_geometry/_momentum_budget.py`.
+`scripts/tmp/_momentum_budget.py`.
 
 ### What the budget revealed
 

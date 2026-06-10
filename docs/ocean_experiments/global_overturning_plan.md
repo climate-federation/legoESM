@@ -555,7 +555,7 @@ run for direct comparison).
    Output: `results/ocean/global_overturning_implicit_spinup/`.  Final
    state at `restart_day003650.npz`, healthy diagnostics (|η|max=3.3 m,
    T∈[0,23.9]°C, |u|max=0.73 m/s).  Spinup driver:
-   `scripts/global_overturning/run_global_overturning_implicit_spinup.py`.
+   `scripts/run/global_overturning/run_global_overturning_implicit_spinup.py`.
 
 2. ✅ **1-yr verification from fresh spinup state** — done 2026-04-28.
    Output: `results/ocean/momentum_budget_online_implicit_postspinup/`.
@@ -574,7 +574,7 @@ run for direct comparison).
    cadence every 5 sim-yr (days 5475, 7300, ..., 18250) matching the
    original `global_overturning_50yr_gmredi/` for direct comparison.
    ~3–4 h wall.  Driver:
-   `scripts/global_overturning/run_global_overturning_50yr_implicit_continuation.py`.
+   `scripts/run/global_overturning/run_global_overturning_50yr_implicit_continuation.py`.
 
 4. ⏳ **Final comparison plots** vs original (broken-solver) 50yr run —
    pending continuation completion.  The headline question being

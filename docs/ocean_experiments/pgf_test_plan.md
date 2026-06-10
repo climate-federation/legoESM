@@ -113,8 +113,8 @@ Key results to build on, not re-derive:
 - SMC03 unit tests: 4 phases (31 tests) covering harmonic slopes,
   pressure interpolation, full PGF operators, pipeline integration
 - Partial-cell unit tests: phases 0-7 (28+ tests)
-- BH seamount script: `scripts/realistic_geometry_validation/run_phase3a_seamount.py`
-- ETOPO script: `scripts/realistic_geometry_validation/run_phase6_etopo.py`
+- BH seamount script: `scripts/validate/realistic_geometry/run_phase3a_seamount.py`
+- ETOPO script: `scripts/validate/realistic_geometry/run_phase6_etopo.py`
 - Rest-state experiment: `src/legoesm/ocean/experiments/rest_state.py`
 
 ### What was NOT tested on that branch

@@ -46,15 +46,9 @@ SANCTIONED_ROOT_FILES = frozenset({"README.md", "__init__.py"})
 # NEVER add to this set; a new unsanctioned dir must go straight to a bucket.
 LEGACY_DIRS_TODO = frozenset(
     {
-        "diagnostic",
-        "global_overturning",
-        "mpas_realistic_geometry",
-        "ocean_fidelity",
         "ocean_long_runs",
         "ocean_test_matrix",
         "pgf_validation",
-        "profile",
-        "realistic_geometry_validation",
         "s2s",
         "scm",
     }
@@ -139,7 +133,7 @@ def test_layout_checker_flags_synthetic_violations() -> None:
     """Self-test (non-vacuous): known violations must trip the checker."""
     entries = [
         ("run", True),  # sanctioned bucket — ok
-        ("diagnostic", True),  # legacy allowlisted — ok
+        ("scm", True),  # legacy allowlisted — ok
         ("my_new_campaign", True),  # unsanctioned dir — must flag
         ("_scratch_debug.sbatch", False),  # stray root file — must flag
         ("README.md", False),  # sanctioned root file — ok
@@ -148,7 +142,7 @@ def test_layout_checker_flags_synthetic_violations() -> None:
     assert any("my_new_campaign" in e for e in errors), errors
     assert any("_scratch_debug.sbatch" in e for e in errors), errors
     # And the sanctioned/allowlisted entries must NOT be flagged.
-    assert not any("diagnostic" in e and "stale" not in e for e in errors), errors
+    assert not any("scm" in e and "stale" not in e for e in errors), errors
     # Missing allowlist entries (everything else in LEGACY_DIRS_TODO) are
     # reported stale on this synthetic listing — that IS the two-way ratchet.
     stale = [e for e in errors if "stale LEGACY_DIRS_TODO" in e]

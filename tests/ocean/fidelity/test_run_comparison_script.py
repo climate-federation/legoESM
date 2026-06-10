@@ -1,4 +1,4 @@
-"""Unit tests for scripts/ocean_fidelity/run_comparison.py.
+"""Unit tests for scripts/validate/ocean_fidelity/run_comparison.py.
 
 The script lives outside ``src/`` so we add ``scripts/`` to sys.path in the
 test (same pattern the script uses internally for ``src/``).
@@ -24,7 +24,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 def comparison_module():
     sys.path.insert(0, str(SCRIPTS_DIR))
     try:
-        import ocean_fidelity.run_comparison as mod  # type: ignore
+        import validate.ocean_fidelity.run_comparison as mod  # type: ignore
         importlib.reload(mod)
         return mod
     finally:

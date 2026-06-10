@@ -2,7 +2,7 @@
 
 Tolerance: relative delta <= 5.0% (with metric-specific absolute floors
 for near-zero references; see ``_ABS_FLOOR`` in
-``scripts/ocean_fidelity/compare_legoesm_vs_veros.py``).
+``scripts/validate/ocean_fidelity/compare_legoesm_vs_veros.py``).
 
 Result: **30 / 30 metrics within tolerance** across the four
 (case × variant) combinations.

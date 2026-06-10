@@ -6322,7 +6322,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Guarantee that per-case results/<case>/<grid>/<res>/ directories "
             "contain the snapshot NetCDFs and conservation CSVs that the "
             "ocean fidelity layer (tests/ocean/fidelity, "
-            "scripts/ocean_fidelity/run_comparison.py) reads. "
+            "scripts/validate/ocean_fidelity/run_comparison.py) reads. "
             "Default-off: runners only emit their full per-case diagnostics "
             "when this flag is passed or when a tier explicitly requires it."
         ))

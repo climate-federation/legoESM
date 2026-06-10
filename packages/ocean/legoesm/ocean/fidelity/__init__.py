@@ -4,7 +4,7 @@ Three layers:
 
 1. **Layer A** — CI pytest fixtures producing scalar metrics checked against
    committed JSON tolerances. Tiers 0-4 every PR; Tier 5 nightly.
-2. **Layer B** — Markdown / HTML release report (``scripts/ocean_fidelity/
+2. **Layer B** — Markdown / HTML release report (``scripts/validate/ocean_fidelity/
    build_fidelity_report.py``). Tiers 0-7.
 3. **Layer C** — Per-tier analysis notebooks under ``notebooks/ocean_fidelity/``.
    Tiers 5-8.

@@ -784,10 +784,9 @@ def main(argv: list[str] | None = None):
             sys.exit(1)
 
     if args.plot and _is_root:
-        # Iter 34: ``plot_amip`` lives under ``scripts/diagnostic/``
-        # (moved in an earlier reorg).  ``--plot`` previously inserted
-        # ``scripts/`` and crashed with ``ModuleNotFoundError``.
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "diagnostic"))
+        # ``plot_amip`` lives under ``scripts/plot/`` (bucket layout; see
+        # tests/test_scripts_layout.py).
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plot"))
         from plot_amip import plot_amip as _plot_amip
 
         _plot_amip(driver.output_dir, show=False)

@@ -38,8 +38,15 @@ bucket:
 | `plot/` | Plotting / figure regeneration (`plot_*`, `replot_*`, `regen_*`). |
 | `validate/` | Validators + intercomparison (`validate_*`, `verify_*`, `eval_*`, `audit_*`, `compare_*`). |
 | `data/` | Forcing/data prep + environment setup (`download_*`, `prepare_*`, `generate_*`, `build_*`, `make_ryf`, `setup_*`). |
+| `cluster/` | SLURM job wrappers (e.g. `cluster/omip_nemo/`). |
 | `tmp/` | Throwaway (above) — slated for deletion. |
-| _other subdirs_ | `scm/`, `ocean_test_matrix/`, `global_overturning/`, `diagnostic/`, `profile/`, `s2s/`, … (pre-existing component packages, unchanged). |
+
+Campaign suites live as subdirs of the bucket matching their dominant
+function (enforced by `tests/test_scripts_layout.py`): `run/global_overturning/`,
+`run/mpas_realistic_geometry/`, `validate/ocean_fidelity/`,
+`validate/realistic_geometry/`, `bench/jit_profile/`. Remaining legacy dirs
+(`scm/`, `s2s/`, `ocean_long_runs/`, `ocean_test_matrix/`, `pgf_validation/`)
+are queued in that test's shrink-only allowlist.
 
 ## Atmosphere
 
