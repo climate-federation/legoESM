@@ -1451,11 +1451,33 @@ class ModelDriver:
         from legoesm.driver.restart import (
             RUN_MANIFEST_FILENAME,
             compute_config_hash,
+            dataset_provenance_entry,
             read_run_manifest,
             validate_run_manifest,
             write_run_manifest,
         )
         manifest_file = self._output_dir / RUN_MANIFEST_FILENAME
+        # Dataset provenance: every path-typed ExperimentConfig field that
+        # names an input dataset. Membership-checked against _fields (legacy
+        # config kinds may lack some) — never getattr-with-default, which
+        # would silently drop a renamed field.
+        dataset_path_fields = (
+            "forcing_path",
+            "sic_path",
+            "ozone_file",
+            "ghg_file",
+            "solar_file",
+            "aerosol_file",
+            "volcanic_aerosol_file",
+            "land_mask_path",
+            "ic_path",
+        )
+        config_fields = type(self._input_config)._fields
+        datasets = [
+            dataset_provenance_entry(getattr(self._input_config, name), dataset_id=name)
+            for name in dataset_path_fields
+            if name in config_fields and getattr(self._input_config, name)
+        ]
         # Atomic-exclusive create: wins the race against a concurrent start into
         # the same directory.  The winner creates the manifest; everyone else
         # (this run on retry/resume, or a racing process) takes the validate path.
@@ -1465,6 +1487,7 @@ class ModelDriver:
                 self._input_config,
                 exclusive=True,
                 rng_seeds={"master": self._input_config.seed},
+                dataset_provenance=datasets,
             )
             return
         except FileExistsError:

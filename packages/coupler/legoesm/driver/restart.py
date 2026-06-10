@@ -275,7 +275,15 @@ def _meta_path(checkpoint_path: Path) -> Path:
 #
 # ``legoesm reproduce`` (a follow-up) reads either a bare tag (env-only) or a
 # full manifest (env + config + bit-digest ``--check``).
+#
+# Bit-identical replay holds per platform/precision/backend; the caveats (GPU
+# reduction order, JIT cache, fp32 vs x64) are catalogued in
+# docs/portability_gpu_mpi_precision.md ("Nondeterminism sources").
 
+# Version policy: bump ONLY on a breaking shape change (removed/renamed field,
+# changed meaning). validate_run_manifest requires the EXACT version, so a bump
+# invalidates resume-into-existing-dir for every older manifest — populating an
+# already-present optional field (e.g. dataset_provenance) is NOT a bump.
 RUN_MANIFEST_SCHEMA_VERSION = 1
 RUN_MANIFEST_FILENAME = "run_manifest.json"
 
@@ -326,6 +334,56 @@ def _json_safe(obj):
         f"run-manifest value of type {type(obj).__name__!r} is not "
         f"JSON-serializable (value: {obj!r})"
     )
+
+
+def dataset_provenance_entry(
+    path,
+    *,
+    dataset_id: str | None = None,
+    sha256: str | None = None,
+    compute_sha256: bool = False,
+) -> dict:
+    """One ``[result].dataset_provenance`` entry for an input dataset.
+
+    Records identity plus cheap integrity facts for the resolved path:
+    ``{id, path, exists, size_bytes, mtime_utc, sha256}``. A checksum is
+    recorded only when already known (pass it through from
+    ``config/data_catalog.yaml``) or on explicit ``compute_sha256=True`` —
+    hashing is opt-in because forcing files are routinely multi-GB and a run
+    start must not stall on them. For a directory store (Zarr) size/sha256
+    stay ``None``; resolved path + mtime still pin identity. Pure-Python,
+    ``_json_safe``-clean, never raises on a missing path (``exists=False`` is
+    itself provenance worth recording).
+    """
+    p = Path(path).expanduser()
+    exists = p.exists()
+    size_bytes = None
+    mtime_utc = None
+    if exists:
+        try:
+            stat = p.stat()
+            mtime_utc = datetime.fromtimestamp(
+                stat.st_mtime, tz=timezone.utc
+            ).isoformat()
+            if p.is_file():
+                size_bytes = int(stat.st_size)
+        except OSError:
+            pass  # stat raced a concurrent delete — keep exists, drop details
+    digest = sha256
+    if digest is None and compute_sha256 and exists and p.is_file():
+        h = hashlib.sha256()
+        with open(p, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        digest = h.hexdigest()
+    return {
+        "id": dataset_id if dataset_id is not None else p.name,
+        "path": str(p.resolve()),
+        "exists": bool(exists),
+        "size_bytes": size_bytes,
+        "mtime_utc": mtime_utc,
+        "sha256": digest,
+    }
 
 
 def build_run_manifest(
