@@ -27,6 +27,7 @@ from legoesm.atmosphere.physics.turbulence.clubb_moments import (  # noqa: E402
     calc_xp2_xpyp_ta_lhs,
     calc_xp2_xpyp_ta_rhs,
     diffusion_zm_lhs,
+    pos_definite_variances,
     term_dp1_lhs,
     term_dp1_rhs,
     term_ma_zm_lhs,
@@ -35,6 +36,7 @@ from legoesm.atmosphere.physics.turbulence.clubb_moments import (  # noqa: E402
     term_tp_rhs,
     xp2_xpyp_lhs,
     xp2_xpyp_rhs,
+    xp2_xpyp_uv_rhs,
 )
 
 from legoesm import constants  # noqa: E402
@@ -569,6 +571,131 @@ def test_calc_xp2_xpyp_lhs_parity():
         p["rho_ds_zt"], C4, C14, p["itau"], itau_C14, gamma, dt, p["gr"])
     for a, b in zip(mine9, ref9):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12, atol=1e-14)
+
+
+# ---------------------------------------------------------------------------
+# xp2_xpyp_uv_rhs (up2/vp2 explicit RHS) + pos_definite_variances
+# ---------------------------------------------------------------------------
+
+def _uv_rhs_inputs(seed):
+    gr, ng, nzm = _gr_only()
+    rng = np.random.default_rng(seed)
+    ni = nzm - 2
+
+    def zm(s=1.0):
+        return jnp.asarray(s * rng.standard_normal((ng, nzm)))
+
+    return dict(
+        gr=gr, ng=ng, nzm=nzm,
+        rhs_ta_this=zm(1e-3),
+        this_pre=jnp.asarray(0.3 + rng.random((ng, nzm))),
+        other_pre=jnp.asarray(0.3 + rng.random((ng, nzm))),
+        this_wp=jnp.asarray(0.05 * rng.standard_normal((ng, nzm))),
+        this_dvel_dz=jnp.asarray(1e-2 * rng.standard_normal((ng, ni))),
+        lhs_splat=jnp.zeros((ng, nzm)),   # CAM C_wp2_splat = 0
+        wp2=jnp.asarray(0.2 + 0.5 * rng.random((ng, nzm))),
+        lhs_ta=jnp.asarray(rng.standard_normal((3, ng, nzm))),
+        C_uu_shr=jnp.asarray(0.4 * np.ones((ng, 1))),
+        C4=jnp.asarray(5.2 * np.ones((ng, 1))),
+        C14=jnp.asarray(1.0 * np.ones((ng, 1))),
+        invrs_tau_C4_zm=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
+        invrs_tau_C14_zm=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
+        lhs_dp1_C4=jnp.asarray(rng.random((ng, nzm))),
+        lhs_dp1_C14=jnp.asarray(rng.random((ng, nzm))),
+        pr2=jnp.asarray(np.abs(rng.standard_normal((ng, ni)))),
+        omg=-0.5, dt=300.0, w_tol_sqd=float((2.0e-2) ** 2),
+    )
+
+
+def _call_uv_rhs(p):
+    return xp2_xpyp_uv_rhs(
+        p["rhs_ta_this"], p["this_pre"], p["other_pre"], p["this_wp"],
+        p["this_dvel_dz"], p["lhs_splat"], p["wp2"], p["lhs_ta"], p["C_uu_shr"],
+        p["C4"], p["C14"], p["invrs_tau_C4_zm"], p["invrs_tau_C14_zm"],
+        p["lhs_dp1_C4"], p["lhs_dp1_C14"], p["pr2"], p["omg"], p["dt"],
+        p["w_tol_sqd"], False, None)
+
+
+def test_uv_rhs_boundaries_and_shape():
+    p = _uv_rhs_inputs(31)
+    rhs = np.asarray(_call_uv_rhs(p))
+    assert rhs.shape == (p["ng"], p["nzm"])
+    # lower BC carries the current value, upper BC is w_tol_sqd
+    np.testing.assert_array_equal(rhs[:, 0], np.asarray(p["this_pre"])[:, 0])
+    np.testing.assert_allclose(rhs[:, -1], p["w_tol_sqd"], rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_uv_rhs_parity():
+    """Bit-exact parity vs advance_xp2_xpyp_module.xp2_xpyp_uv_rhs (CAM tree)."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_xp2_xpyp_module as R  # noqa: N812
+
+    p = _uv_rhs_inputs(32)
+    ref = R.xp2_xpyp_uv_rhs(
+        np.asarray(p["rhs_ta_this"]), np.asarray(p["this_pre"]),
+        np.asarray(p["other_pre"]), np.asarray(p["this_wp"]),
+        np.asarray(p["this_dvel_dz"]), np.asarray(p["lhs_splat"]),
+        np.asarray(p["wp2"]), np.asarray(p["lhs_ta"]), np.asarray(p["C_uu_shr"]),
+        np.asarray(p["C4"]), np.asarray(p["C14"]),
+        np.asarray(p["invrs_tau_C4_zm"]), np.asarray(p["invrs_tau_C14_zm"]),
+        np.asarray(p["lhs_dp1_C4"]), np.asarray(p["lhs_dp1_C14"]),
+        np.asarray(p["pr2"]), p["omg"], p["dt"], p["w_tol_sqd"], False, None)
+    np.testing.assert_allclose(np.asarray(_call_uv_rhs(p)), np.asarray(ref),
+                               rtol=1e-12, atol=1e-14)
+
+
+def test_uv_rhs_jit_static_coriolis_gate():
+    """JIT xp2_xpyp_uv_rhs through the public signature with l_coriolis static.
+
+    Exercises both the gate-off (CAM default) and gate-on branches under jit,
+    proving the static feature-gate contract (codex review).
+    """
+    p = _uv_rhs_inputs(33)
+    jf = jax.jit(xp2_xpyp_uv_rhs, static_argnums=(19,))
+    off = jf(p["rhs_ta_this"], p["this_pre"], p["other_pre"], p["this_wp"],
+             p["this_dvel_dz"], p["lhs_splat"], p["wp2"], p["lhs_ta"],
+             p["C_uu_shr"], p["C4"], p["C14"], p["invrs_tau_C4_zm"],
+             p["invrs_tau_C14_zm"], p["lhs_dp1_C4"], p["lhs_dp1_C14"], p["pr2"],
+             p["omg"], p["dt"], p["w_tol_sqd"], False, None)
+    assert jnp.all(jnp.isfinite(off))
+    fcor = jnp.asarray(1e-4 * np.ones((p["ng"], 1)))
+    on = jf(p["rhs_ta_this"], p["this_pre"], p["other_pre"], p["this_wp"],
+            p["this_dvel_dz"], p["lhs_splat"], p["wp2"], p["lhs_ta"],
+            p["C_uu_shr"], p["C4"], p["C14"], p["invrs_tau_C4_zm"],
+            p["invrs_tau_C14_zm"], p["lhs_dp1_C4"], p["lhs_dp1_C14"], p["pr2"],
+            p["omg"], p["dt"], p["w_tol_sqd"], True, fcor)
+    assert jnp.all(jnp.isfinite(on))
+    # gate-on differs from gate-off only by the -2*fcor*wp interior term
+    diff = np.asarray(on)[:, 1:-1] - np.asarray(off)[:, 1:-1]
+    exp = -2.0 * np.asarray(fcor) * np.asarray(p["this_wp"])[:, 1:-1]
+    np.testing.assert_allclose(diff, exp, rtol=1e-12, atol=1e-14)
+
+
+def test_pos_definite_variances_jit_static_args():
+    """JIT pos_definite_variances with the static hole-fill contract."""
+    gr, ng, nzm = _gr_only()
+    rng = np.random.default_rng(43)
+    field = jnp.asarray(0.4 + rng.random((ng, nzm)))
+    rho_ds = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzm)))
+    jf = jax.jit(pos_definite_variances, static_argnums=(4, 5, 6))
+    out = jf(field, rho_ds, gr.dzm, 0.0, 1, nzm - 2, 2)
+    assert jnp.all(jnp.isfinite(out))
+
+
+def test_pos_definite_variances_fills_and_conserves():
+    gr, ng, nzm = _gr_only()
+    rng = np.random.default_rng(41)
+    field = np.asarray(0.4 + rng.random((ng, nzm)))
+    field[:, 3] = -0.2   # punch a hole
+    field = jnp.asarray(field)
+    rho_ds = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzm)))
+    out = pos_definite_variances(field, rho_ds, gr.dzm, 0.0, 1, nzm - 2,
+                                 fill_holes_type=2)
+    assert np.all(np.asarray(out)[:, 1:nzm - 1] >= -1e-12)
+    assert np.all(np.isfinite(np.asarray(out)))
 
 
 if __name__ == "__main__":

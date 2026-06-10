@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from legoesm.atmosphere.physics.turbulence.clubb_fill_holes import fill_holes_vertical
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid
 from legoesm.atmosphere.physics.turbulence.clubb_solve import tridiag_solve
 
@@ -587,6 +588,67 @@ def calc_up2_vp2_lhs(lhs_ta, lhs_ma, Kh_zt, c_K9, nu9, invrs_rho_ds_zm,
     return lhs, lhs_diff, lhs_dp1_C4, lhs_dp1_C14
 
 
+def xp2_xpyp_uv_rhs(rhs_ta_this, this_pre, other_pre, this_wp, this_dvel_dz,
+                    lhs_splat, wp2, lhs_ta, C_uu_shr, C4, C14,
+                    invrs_tau_C4_zm, invrs_tau_C14_zm, lhs_dp1_C4, lhs_dp1_C14,
+                    pr2, omg, dt, w_tol_sqd, l_coriolis=False, fcor_y_col=None):
+    """Explicit RHS for the up2 (or vp2) equation (``xp2_xpyp_uv_rhs``).
+
+    The pressure-rotation (C_uu) form. Symmetric: for vp2 pass the v-quantities
+    as ``this_*``/``this_wp``/``this_dvel_dz`` and the *pre-solve* up2 as
+    ``other_pre`` (the C4/C14 isotropization couples the two horizontal
+    variances). Interior terms: shared turbulent advection (over-implicit
+    ``omg``), shear production ``(1-C_uu_shr)·(-2 u'w' d(vel)/dz)``, ``term_pr1``
+    (C4/C14 isotropization), over-implicit dp1 damping, ``pr2`` (buoyancy/shear
+    pressure), and ``xp2/dt``. The splat term ``½·lhs_splat·wp2`` is zero in the
+    CAM default (``C_wp2_splat = 0``) but kept for faithfulness.
+
+    ``l_coriolis`` (CAM default ``l_ho_nontrad_coriolis = .false.``) is a
+    **compile-time static** feature gate (Python branch, not ``jnp.where``):
+    when on, subtracts ``2·fcor_y·this_wp`` (``fcor_y_col`` is ``(ncol, 1)``).
+    In normal use it is a static ``CLUBBFlags`` field closed over by the
+    enclosing ``jax.jit``; if this helper is jitted directly, pass it via
+    ``static_argnums=(19,)`` / ``static_argnames=("l_coriolis",)``. BCs: lower
+    row carries the current value, upper row is ``w_tol_sqd``.
+    ``this_dvel_dz``/``pr2`` are interior slices ``(ncol, nzm-2)``. Returns
+    ``(ncol, nzm)``.
+    """
+    ng = this_pre.shape[0]
+    rhs_int = (
+        rhs_ta_this[:, 1:-1]
+        + 0.5 * lhs_splat[:, 1:-1] * wp2[:, 1:-1]
+        + omg * (-lhs_ta[0, :, 1:-1] * this_pre[:, 2:]
+                 - lhs_ta[1, :, 1:-1] * this_pre[:, 1:-1]
+                 - lhs_ta[2, :, 1:-1] * this_pre[:, :-2])
+        + (1.0 - C_uu_shr) * (-this_wp[:, 1:-1] * this_dvel_dz
+                              - this_wp[:, 1:-1] * this_dvel_dz)
+        + term_pr1(C4, C14, other_pre, wp2, invrs_tau_C4_zm, invrs_tau_C14_zm, w_tol_sqd)
+        + omg * (-lhs_dp1_C4[:, 1:-1] - lhs_dp1_C14[:, 1:-1]) * this_pre[:, 1:-1]
+        + pr2
+        + (1.0 / dt) * this_pre[:, 1:-1])
+    if l_coriolis:
+        rhs_int = rhs_int - 2.0 * fcor_y_col * this_wp[:, 1:-1]
+
+    rhs_lb = this_pre[:, 0:1]
+    rhs_ub = jnp.full((ng, 1), w_tol_sqd, dtype=this_pre.dtype)
+    return jnp.concatenate([rhs_lb, rhs_int, rhs_ub], axis=1)
+
+
+def pos_definite_variances(field, rho_ds_zm, dzm, threshold, hf_lower, hf_upper,
+                           fill_holes_type):
+    """Mass-conserving hole-fill of one variance field (``pos_definite_variances``).
+
+    Thin wrapper over :func:`clubb_fill_holes.fill_holes_vertical` (CAM default
+    ``fill_holes_type = 2``): restores ``field >= threshold`` over the zm
+    interior ``[hf_lower, hf_upper]`` while conserving ``sum(rho_ds·dz·field)``.
+    ``hf_lower``/``hf_upper``/``fill_holes_type`` are **compile-time static**
+    (closed over by the enclosing ``jax.jit``; if jitted directly, pass via
+    ``static_argnums=(4, 5, 6)``).
+    """
+    return fill_holes_vertical(field, rho_ds_zm, dzm, threshold,
+                               hf_lower, hf_upper, fill_holes_type)
+
+
 __all__ = [
     "diffusion_zt_lhs",
     "diffusion_zm_lhs",
@@ -609,4 +671,6 @@ __all__ = [
     "term_pr2",
     "calc_xp2_xpyp_ta_lhs",
     "calc_xp2_xpyp_ta_rhs",
+    "xp2_xpyp_uv_rhs",
+    "pos_definite_variances",
 ]

@@ -86,7 +86,8 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_pdf.py` | ADG1 params (`ADG1_pdf_driver`), cloud fraction + rcm (`calc_pdf_liquid_cloud_frac[_components]`) | ✅ |
 | `clubb_pdf_moments.py` | PDF moment integrals, higher-order moments, cloud-water `x'rc'` fluxes, buoyancy flux `wpthvp` | ✅ |
 | `clubb_solve.py` | `tridiag_solve` (CLUBB band → legoESM `thomas_solve`) + `penta_solve` (verbatim CLUBB LU port, bit-exact) | ✅ iter 10-11 |
-| `clubb_moments.py` | `advance_windm_edsclrm` ✅ iter 12; xp2_xpyp terms/TA/combiners ✅ iter 13-15; `term_ma_zm_lhs` + `calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅ iter 18; xp2_xpyp_uv_rhs, pos_definite_variances, advance_xp2_xpyp main, wp2/wp3, xm/wpxp advances + limiters + fill_holes ☐ | 🟡 P5 |
+| `clubb_moments.py` | `advance_windm_edsclrm` ✅ iter 12; xp2_xpyp terms/TA/combiners ✅ iter 13-15; `term_ma_zm_lhs` + `calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅ iter 18; `xp2_xpyp_uv_rhs` + `pos_definite_variances` ✅ iter 19; advance_xp2_xpyp main, clip_variance, wp2/wp3, xm/wpxp advances + mono_flux_limiter ☐ | 🟡 P5 |
+| `clubb_fill_holes.py` | mass-conserving vertical hole-fill (`fill_holes_type=2` sliding-window+global, CAM default) | ✅ iter 19 |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
 
@@ -145,9 +146,13 @@ the combiners `diffusion_zm_lhs`, `xp2_xpyp_lhs`, `xp2_xpyp_rhs` ✅ iter 15
 (golden + parity); `term_ma_zm_lhs` (centered zm mean adv, inline
 `calc_zm2zt_weights` — stretched-grid bit-exact parity) + the assembly wrappers
 `calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅ iter 18 (parity vs ref +
-self-consistency; codex approve). Still need `xp2_xpyp_uv_rhs`,
-`pos_definite_variances`, and the `advance_xp2_xpyp` main (which also needs the
-`invrs_tau_*`/`Cn` dissipation-timescale inputs from orchestration).
+self-consistency; codex approve); `xp2_xpyp_uv_rhs` (up2/vp2 explicit RHS,
+CAM gating: C_wp2_splat=0, l_ho_nontrad_coriolis=False static gate) +
+`pos_definite_variances` (wraps new `clubb_fill_holes.py`) ✅ iter 19 (parity +
+JIT-static-arg contract tests; codex approve). Still need the `advance_xp2_xpyp`
+main (which also needs the `invrs_tau_*`/`Cn` dissipation-timescale inputs from
+orchestration) + `clip_variance` (the `l_min_xp2_from_corr_wx=True` threshold
+boost).
 Then `advance_wp2_wp3` + `advance_xm_wpxp` (penta — `clubb_solve.penta_solve`
 ready). Still need `mono_flux_limiter.py` (CAM ON) + `fill_holes.py`. Each
 chunk: analytic + golden/parity + codex.

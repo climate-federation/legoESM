@@ -167,6 +167,9 @@ EXCLUDED: frozenset[str] = frozenset(
         # higher-moment solves) — internal closure dynamics, not a single
         # column-physics tendency scheme with a units/sign contract.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_moments.py",
+        # CLUBB port: mass-conserving vertical hole-filling — a numerical
+        # positivity utility, not a column-physics tendency scheme.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_fill_holes.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",
