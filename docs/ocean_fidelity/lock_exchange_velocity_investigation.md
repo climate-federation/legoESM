@@ -148,7 +148,7 @@ Re-run after any `LatLonCGridOceanModel` change:
 ```bash
 JAX_PLATFORMS=cpu .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
     --only lock_exchange --grid latlon_regional
-JAX_PLATFORMS=cpu .venv/bin/python scripts/ocean_fidelity/run_comparison.py \
+JAX_PLATFORMS=cpu .venv/bin/python scripts/validate/ocean_fidelity/run_comparison.py \
     --output docs/ocean_fidelity/initial_comparison_$(git rev-parse --short HEAD).md
 ```
 

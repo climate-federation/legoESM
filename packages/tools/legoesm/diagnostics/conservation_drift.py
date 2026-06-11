@@ -277,7 +277,7 @@ def apply_drift_tolerance(
     delegates to this helper specialized for ``label="mass"``
     (post-iter-128 codex iter-127-followup LOW-1).  The two ocean
     runners (monolithic ``scripts/run_ocean_test_matrix.py`` and
-    modular ``scripts/ocean_test_matrix/timeloop.py``) likewise
+    modular ``scripts/matrix/ocean_test_matrix/timeloop.py``) likewise
     delegate via thin ``_apply_drift_tolerance`` wrappers.
 
     Parameters

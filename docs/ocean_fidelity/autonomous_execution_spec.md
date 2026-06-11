@@ -60,7 +60,7 @@ T=0,S=0 (zero-padded wall rows from `create_regional_latlon_grid`) → −27 kg/
    time-level alignment: test `vs.rho`/`vs.temp` τ vs τ±1 in the bridge for a consistent
    (T,S,ρ) triple.
 **GATE:** (a) a test asserts the bridged ACC state has ZERO wet cells with T==0 & S==0;
-(b) `JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python scripts/ocean_fidelity/compare_tendencies_acc.py --runlen-s 864000`
+(b) `JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python scripts/validate/ocean_fidelity/compare_tendencies_acc.py --runlen-s 864000`
 → interior density L2 < 0.1 kg/m³ AND pattern-corr > 0.999; (c) full ocean unit suite green.
 **NON-GOALS:** bitwise; driving the genuine ρ-vs-depth (~0.05) or float diffs to zero.
 **ESCALATE:** if after an honest wall fix + the single time-level test the residual is still

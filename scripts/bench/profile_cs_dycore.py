@@ -110,7 +110,10 @@ def main() -> int:
     print("=" * 72)
 
     # --- Build segment step (reuses run_levante_gpu_scaling builder). ------
-    step_fn, carry, dt, total_cells, cells_per_gpu = _build_segment_benchmark(
+    # The trailing dev_config is the driver's resolved DeviceConfig —
+    # unused here: this profile is single-GPU, so the mesh is None.
+    (step_fn, carry, dt, total_cells, cells_per_gpu,
+     _dev_config) = _build_segment_benchmark(
         physics_level=physics_level,
         grid_type="cubed-sphere",
         n_grid=n_grid,

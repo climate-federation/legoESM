@@ -420,11 +420,26 @@ class CompiledShardedStep:
             )
         return self._out_sharding_cache[key]
 
+    def _get_in_shardings(self, state):
+        """Input-sharding pytree for the ``(state, dt)`` call signature.
+
+        Mirrors the output leaf policy (:func:`create_output_shardings`)
+        for the state argument so the compiled executable pins its inputs
+        to the face-sharded layout instead of silently accepting — and
+        then redundantly computing the full globe from — a replicated
+        copy on every device.  ``dt`` is a scalar and stays
+        unconstrained (replicated).  On a single-device config
+        (``mesh is None``) the policy pytree is all-``None``, i.e. no
+        constraint — identical to the previous behavior.
+        """
+        return (self._get_out_shardings(state), None)
+
     def _compile(self, state, physics_fn=None):
         """Trace and compile a new executable, returning the jitted fn."""
         t0 = time.monotonic()
 
         out_shardings = self._get_out_shardings(state)
+        in_shardings = self._get_in_shardings(state)
 
         model = self._model
         halo_fn = self._halo_exchange_fn
@@ -437,14 +452,16 @@ class CompiledShardedStep:
         if physics_fn is not None and hasattr(model, "step_with_physics"):
             _phys = physics_fn
 
-            @partial(jax.jit, out_shardings=out_shardings)
+            @partial(jax.jit, in_shardings=in_shardings,
+                     out_shardings=out_shardings)
             def _jitted(s, dt):
                 new = model.step_with_physics(s, dt, _phys)
                 if halo_fn is not None:
                     new = halo_fn(new)
                 return new
         else:
-            @partial(jax.jit, out_shardings=out_shardings)
+            @partial(jax.jit, in_shardings=in_shardings,
+                     out_shardings=out_shardings)
             def _jitted(s, dt):
                 new = model.step(s, dt)
                 if halo_fn is not None:
@@ -632,10 +649,12 @@ def make_sharded_step(
         after each dynamics step.  If ``None``, the model's built-in
         halo exchange (via ``pad_halo``) is used.
     n : int, optional
-        Per-face resolution for SPMD halo backend auto-selection
-        (ppermute vs all_gather). 0 skips auto-selection.
+        Per-face resolution — logging/prewarm metadata forwarded to
+        ``activate_spmd_halo_backend``.  The old ppermute-vs-all_gather
+        volume auto-selection is RETIRED: ppermute is always selected;
+        all_gather only via explicit ``LEGOESM_SPMD_FORCE_ALLGATHER=1``.
     nlev : int, optional
-        Number of vertical levels for SPMD halo backend auto-selection.
+        Number of vertical levels (logging only, see ``n``).
 
     Returns
     -------
@@ -644,34 +663,37 @@ def make_sharded_step(
 
     Notes
     -----
-    The key insight for cubed-sphere parallelism: JAX's ``jit`` with
-    ``NamedSharding`` already performs SPMD execution — each device
-    computes only its shard.  Operators like ``pad_halo`` that access
-    data from other faces trigger automatic cross-device communication
-    (via XLA's HLO collective ops) when the data is sharded across
-    devices.
-
-    For face-only sharding (<=6 devices), this is sufficient.  The
-    cubed-sphere halo exchange in ``grids/halo.py`` reads from all 6
-    faces, so XLA inserts the necessary all-gather or permute ops.
+    For face-only sharding (1/2/3/6 devices) this function ACTIVATES
+    the explicit SPMD halo backend
+    (``cubesphere_exchange.activate_spmd_halo_backend``): ``pad_halo``
+    then routes through shard_map ppermute kernels (multiface; one-face
+    at halo=1 with 6 devices) instead of relying on XLA's implicit
+    cross-shard reads.  Letting GSPMD auto-insert collectives for the
+    cross-face reads — the pre-activation behavior this Notes section
+    used to describe — replicates ALL compute per device (HLO probe job
+    8456476); the all_gather kernels survive only as the explicit
+    ``LEGOESM_SPMD_FORCE_ALLGATHER=1`` diagnostic.
 
     For sub-face tiling (>6 devices), additional tile-boundary
-    exchange is needed; this is handled by the tiled halo backend.
+    exchange is needed; the SPMD halo backend is NOT activated there
+    (the tiled path is unvalidated — bench guards exclude it).
     """
     if config.mesh is None:
         logger.info("make_sharded_step: single-device mode, using plain JIT")
         return _SingleDeviceStep(model)
 
     # Activate explicit SPMD halo exchange for face-sharded cubed-sphere.
-    # This replaces implicit cross-shard reads with explicit all_gather
-    # collectives, producing much better XLA communication patterns.
+    # This replaces implicit cross-shard reads with explicit
+    # collective-permute rounds, producing much better XLA communication
+    # patterns.
     #
-    # Iter-49: the SPMD halo kernels (allgather + halo=2 allgather) now
-    # support multi-face shards (n_faces_per_shard ∈ {1, 2, 3, 6}).
-    # Activation generalised from "exactly 6 devices" to "any divisor
-    # of 6" — 1, 2, 3, 6 — so 2- and 3-device configurations also use
-    # the explicit SPMD path instead of falling back to the auto-gather
-    # default halo backend.
+    # Iter-49 generalised activation from "exactly 6 devices" to "any
+    # divisor of 6" (1, 2, 3, 6) on the allgather kernels; the
+    # ppermute-multiface refit then made ppermute the DEFAULT exchange
+    # for every face-sharded count and at halo=2 — the allgather
+    # variant provably replicated ALL compute per device (HLO probe job
+    # 8456476, per-device FLOPs ratio 1.00 at 2 devices) and is now an
+    # explicit diagnostic opt-in only (LEGOESM_SPMD_FORCE_ALLGATHER=1).
     _n = config.n_devices
     if (_n in (1, 2, 3, 6)
             and getattr(config, 'tiling', (1, 1)) == (1, 1)
@@ -1666,8 +1688,18 @@ def make_voronoi_sharded_step(
 
     Returns
     -------
-    Callable[[state, float], state]
-        JIT-compiled step function.
+    callable
+        ``step(state, dt, physics_fn=None) -> state``.  ``physics_fn``
+        follows the MPAS operator-split convention
+        (``physics_fn(state, mesh, sigma_coord, *, phys_state, forcing)``
+        returning bare ``MPASHydrostaticTendencies`` — e.g.
+        ``held_suarez_forcing_mpas``) and is captured in the jitted
+        closure, never traced as an argument (same convention as
+        :class:`CompiledShardedStep`).  Each distinct ``physics_fn``
+        identity compiles a separate executable; ``physics_fn=None``
+        compiles exactly the dynamics-only graph.  On a single-device
+        config this returns ``model.step``, whose signature is
+        call-compatible.
     """
     if dev_config.n_devices <= 1 or dev_config.mesh is None:
         return model.step
@@ -1970,56 +2002,120 @@ def make_voronoi_sharded_step(
     # JIT-compiled step: SSP-RK3 with halo refresh between stages
     # ------------------------------------------------------------------
 
-    @jax.jit
-    def _step(state, dt):
-        u = state.u.data       # (nEdges, nlev) sharded
-        T = state.T.data       # (nCells, nlev) sharded
-        ps = state.p_s.data    # (nCells,) sharded
-        phis = state.phis.data # (nCells,) sharded
+    def _build_step(physics_fn=None):
+        """Build one jitted step executable.
 
-        # --- Stage 1: k1 = state + dt * F(state) ---
-        du1, dT1, dps1 = _shard_tendency(u, T, ps, phis, dt)
-        u1 = u + dt * du1
-        T1 = T + dt * dT1
-        ps1 = ps + dt * dps1
+        ``physics_fn`` is captured in the closure — JAX cannot trace a
+        Python callable as an array argument (same convention as
+        ``CompiledShardedStep._compile`` / ``_SingleDeviceStep``).
+        ``physics_fn=None`` produces exactly the dynamics-only graph.
+        """
+        _phys = physics_fn
 
-        # --- Stage 2: k2 = 3/4*state + 1/4*(k1 + dt*F(k1)) ---
-        du2, dT2, dps2 = _shard_tendency(u1, T1, ps1, phis, dt)
-        u2 = 0.75 * u + 0.25 * (u1 + dt * du2)
-        T2 = 0.75 * T + 0.25 * (T1 + dt * dT2)
-        ps2 = 0.75 * ps + 0.25 * (ps1 + dt * dps2)
+        @jax.jit
+        def _step(state, dt):
+            u = state.u.data       # (nEdges, nlev) sharded
+            T = state.T.data       # (nCells, nlev) sharded
+            ps = state.p_s.data    # (nCells,) sharded
+            phis = state.phis.data # (nCells,) sharded
 
-        # --- Stage 3: k3 = 1/3*state + 2/3*(k2 + dt*F(k2)) ---
-        du3, dT3, dps3 = _shard_tendency(u2, T2, ps2, phis, dt)
-        u_new = (1.0 / 3.0) * u + (2.0 / 3.0) * (u2 + dt * du3)
-        T_new = (1.0 / 3.0) * T + (2.0 / 3.0) * (T2 + dt * dT3)
-        ps_new = (1.0 / 3.0) * ps + (2.0 / 3.0) * (ps2 + dt * dps3)
+            # --- Stage 1: k1 = state + dt * F(state) ---
+            du1, dT1, dps1 = _shard_tendency(u, T, ps, phis, dt)
+            u1 = u + dt * du1
+            T1 = T + dt * dT1
+            ps1 = ps + dt * dps1
 
-        # --- Post-processing (mirrors model.step) ---
-        if cfg.T_min > 0:
-            T_new = jnp.maximum(T_new, cfg.T_min)
+            # --- Stage 2: k2 = 3/4*state + 1/4*(k1 + dt*F(k1)) ---
+            du2, dT2, dps2 = _shard_tendency(u1, T1, ps1, phis, dt)
+            u2 = 0.75 * u + 0.25 * (u1 + dt * du2)
+            T2 = 0.75 * T + 0.25 * (T1 + dt * dT2)
+            ps2 = 0.75 * ps + 0.25 * (ps1 + dt * dps2)
 
-        if cfg.fix_mass:
-            # Compute both masses inside a single reduction.  Stacking
-            # the two ps fields and reducing once lets XLA fuse the
-            # two cross-device sums into a single allreduce HLO instead
-            # of emitting two sequentially-dependent allreduces (the
-            # second cannot start until the first materialises).
-            ps_pair = jnp.stack([ps, ps_new], axis=0)
-            masses = jnp.sum(ps_pair * _area_for_mass[None], axis=tuple(
-                range(1, ps_pair.ndim)
-            ))  # shape (2,)
-            correction = (masses[0] - masses[1]) / _total_area
-            ps_new = ps_new + correction
+            # --- Stage 3: k3 = 1/3*state + 2/3*(k2 + dt*F(k2)) ---
+            du3, dT3, dps3 = _shard_tendency(u2, T2, ps2, phis, dt)
+            u_new = (1.0 / 3.0) * u + (2.0 / 3.0) * (u2 + dt * du3)
+            T_new = (1.0 / 3.0) * T + (2.0 / 3.0) * (T2 + dt * dT3)
+            ps_new = (1.0 / 3.0) * ps + (2.0 / 3.0) * (ps2 + dt * dps3)
 
-        return MPASHydrostaticState(
-            u=state.u.replace(data=u_new),
-            T=state.T.replace(data=T_new),
-            p_s=state.p_s.replace(data=ps_new),
-            phis=state.phis,
-        )
+            # --- Operator-split physics (mirrors
+            #     MPASPrimitiveEquationModel._step_jit): evaluate ONCE on
+            #     the post-dynamics state and apply forward over dt,
+            #     BEFORE the temperature floor and the mass fix.  Column
+            #     physics is cell/edge-local, so it runs on the sharded
+            #     global arrays OUTSIDE the shard_map kernel — GSPMD
+            #     partitions the pointwise work per device with no halo
+            #     traffic. ---
+            if _phys is not None:
+                post_dyn = MPASHydrostaticState(
+                    u=state.u.replace(data=u_new),
+                    T=state.T.replace(data=T_new),
+                    p_s=state.p_s.replace(data=ps_new),
+                    phis=state.phis,
+                )
+                _pt = _phys(post_dyn, global_mesh, sigma,
+                            phys_state=None, forcing=None)
+                if type(_pt) is tuple:
+                    # (tendencies, phys_state_out) is the stateful-physics
+                    # convention; this step has no physics-state carry
+                    # channel and silently dropping the carry would
+                    # corrupt stateful schemes (TKE etc.).  Trace-time
+                    # Python check → loud failure, never a wrong answer.
+                    raise TypeError(
+                        "make_voronoi_sharded_step: physics_fn returned a "
+                        "(tendencies, phys_state) tuple, but the sharded "
+                        "Voronoi step has no physics-state carry channel. "
+                        "Use a stateless physics_fn returning bare "
+                        "tendencies (e.g. held_suarez_forcing_mpas)."
+                    )
+                u_new = u_new + dt * _pt.du_dt.data
+                T_new = T_new + dt * _pt.dT_dt.data
+                ps_new = ps_new + dt * _pt.dp_s_dt.data
 
-    return _step
+            # --- Post-processing (mirrors model.step) ---
+            if cfg.T_min > 0:
+                T_new = jnp.maximum(T_new, cfg.T_min)
+
+            if cfg.fix_mass:
+                # Compute both masses inside a single reduction.  Stacking
+                # the two ps fields and reducing once lets XLA fuse the
+                # two cross-device sums into a single allreduce HLO instead
+                # of emitting two sequentially-dependent allreduces (the
+                # second cannot start until the first materialises).
+                ps_pair = jnp.stack([ps, ps_new], axis=0)
+                masses = jnp.sum(ps_pair * _area_for_mass[None], axis=tuple(
+                    range(1, ps_pair.ndim)
+                ))  # shape (2,)
+                correction = (masses[0] - masses[1]) / _total_area
+                ps_new = ps_new + correction
+
+            return MPASHydrostaticState(
+                u=state.u.replace(data=u_new),
+                T=state.T.replace(data=T_new),
+                p_s=state.p_s.replace(data=ps_new),
+                phis=state.phis,
+            )
+
+        return _step
+
+    # Executable cache keyed by physics_fn identity (same convention as
+    # ``_make_cache_key``: distinct callables ⇒ distinct XLA programs; a
+    # stable callable ⇒ exactly one compile).  Each cached executable's
+    # closure holds a strong reference to its physics_fn, so an id()
+    # cannot be recycled while its cache entry is alive.
+    _step_cache: dict = {}
+
+    def _voronoi_step(state, dt, physics_fn=None):
+        """Sharded Voronoi step.  ``physics_fn`` is closure-captured into
+        the jitted executable (selected by object identity) — it is never
+        passed to ``jax.jit`` as a traced argument."""
+        key = None if physics_fn is None else id(physics_fn)
+        fn = _step_cache.get(key)
+        if fn is None:
+            fn = _build_step(physics_fn)
+            _step_cache[key] = fn
+        return fn(state, dt)
+
+    return _voronoi_step
 
 
 # ======================================================================

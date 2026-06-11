@@ -494,3 +494,90 @@ class TestADSafe:
         interior = g[2:-2]
         expected = 2.0 * scalar_field_2d[2:-2]
         np.testing.assert_allclose(interior, expected, rtol=1e-5, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# interp_cell_to_vface_halo: serial bit-identity guarantees
+# ---------------------------------------------------------------------------
+#
+# The backend-aware cell→v-face interp used by the PE dycore (pressure-
+# gradient T_v, continuity dp_v, vertical-advection sd_v, physics-
+# tendency dv coupling) promises BIT-IDENTICAL serial behaviour: under
+# the local backend, under an armed non-band MPI topology, and on a
+# single-rank band layout it must reproduce the legacy
+# ``interp_cell_to_vface`` (pole edge-copy convention) exactly.  The
+# interior-cut averaging branch needs real ranks and is pinned by
+# tests/distributed/test_latlon_mpi_step.py at np>1.
+
+
+class TestInterpCellToVfaceHaloSerial:
+
+    @pytest.fixture
+    def cell_field_3d(self, single_rank_layout):
+        """Non-trivial (n_lat, n_lon, nlev) cell-centred field."""
+        n_lat, n_lon = (
+            single_rank_layout.n_lat_global,
+            single_rank_layout.n_lon_global,
+        )
+        rng = np.random.default_rng(20260610)
+        return jnp.asarray(rng.standard_normal((n_lat, n_lon, 5)))
+
+    def test_local_backend_bit_identical(self, cell_field_3d):
+        """No backend armed → literal delegation to the legacy interp."""
+        from legoesm.grids.halo import set_halo_backend
+        from legoesm.grids.operators_latlon_cgrid import (
+            interp_cell_to_vface,
+            interp_cell_to_vface_halo,
+        )
+        set_halo_backend("local")
+        ref = interp_cell_to_vface(cell_field_3d)
+        out = interp_cell_to_vface_halo(cell_field_3d)
+        assert out.shape == (
+            cell_field_3d.shape[0] + 1,
+            *cell_field_3d.shape[1:],
+        )
+        assert out.dtype == ref.dtype
+        np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
+
+    def test_single_rank_band_backend_bit_identical(
+        self, cell_field_3d, single_rank_layout,
+    ):
+        """Armed single-rank band layout (south/north both poles) →
+        still the legacy pole edge-copy convention, bit-for-bit."""
+        from legoesm.grids.halo import set_halo_backend
+        from legoesm.grids.operators_latlon_cgrid import (
+            interp_cell_to_vface,
+            interp_cell_to_vface_halo,
+        )
+        set_halo_backend("mpi", single_rank_layout)
+        try:
+            out = interp_cell_to_vface_halo(cell_field_3d)
+        finally:
+            set_halo_backend("local")
+        ref = interp_cell_to_vface(cell_field_3d)
+        np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))
+        # Pole faces carry the legacy edge copy.
+        np.testing.assert_array_equal(
+            np.asarray(out[0]), np.asarray(cell_field_3d[0]))
+        np.testing.assert_array_equal(
+            np.asarray(out[-1]), np.asarray(cell_field_3d[-1]))
+
+    def test_non_band_mpi_topology_falls_back(self, cell_field_3d):
+        """Armed MPI backend with a NON-band topology (e.g. the
+        cubed-sphere CommTopology) → local fallback, not a crash."""
+        from legoesm.grids.halo import set_halo_backend
+        from legoesm.grids.operators_latlon_cgrid import (
+            interp_cell_to_vface,
+            interp_cell_to_vface_halo,
+        )
+
+        class _NotABandLayout:
+            pass
+
+        set_halo_backend("mpi", _NotABandLayout())
+        try:
+            out = interp_cell_to_vface_halo(cell_field_3d)
+        finally:
+            set_halo_backend("local")
+        ref = interp_cell_to_vface(cell_field_3d)
+        np.testing.assert_array_equal(np.asarray(out), np.asarray(ref))

@@ -31,7 +31,9 @@ from pathlib import Path
 import pytest
 
 
-_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+# The cross-grid .sh wrappers live in the run/ bucket (Phase-4 scripts reorg;
+# this constant lagged behind that move and every read 404'd).
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts" / "run"
 
 
 # ---------------------------------------------------------------------------
@@ -56,44 +58,93 @@ _OMIP_GRIDS = {"cubed_sphere", "latlon", "mpas", "spectral"}
 # Helpers.
 # ---------------------------------------------------------------------------
 
-def _parse_bash_assoc_array(text: str, name: str) -> dict:
-    """Extract ``declare -A NAME=( [k]=v ... )`` into a Python dict.
+def _parse_grid_table(text: str) -> tuple[list[str], list[list[str]]]:
+    """Parse the table-driven wrapper grammar (RCE/AMIP wrappers today)::
 
-    Returns the inner mapping; raises ``AssertionError`` if not found.
-    Both quoted and unquoted RHS forms are supported.
+        GRID_TABLE=(
+            "cubed_sphere:48:cdgrid:cubed_sphere"
+            ...
+        )
+        for ENTRY in "${GRID_TABLE[@]}"; do
+            IFS=':' read -r GRID RES DISC FOLDER ... <<< "$ENTRY"
+
+    Returns ``(field_names, rows)``; rows are padded to the field count
+    (bash ``read`` leaves trailing fields empty when an entry omits them).
+    """
+    m = re.search(r"GRID_TABLE=\((.*?)\n\)", text, re.DOTALL)
+    assert m, "no GRID_TABLE=( ... ) block found"
+    rows = [e.split(":") for e in re.findall(r'"([^"\n]+)"', m.group(1))]
+    m_fields = re.search(r"IFS=':'\s+read\s+-r\s+([A-Z_ ]+?)\s*<<<", text)
+    assert m_fields, "no `IFS=':' read -r ...` field-name line found"
+    fields = m_fields.group(1).split()
+    rows = [r + [""] * (len(fields) - len(r)) for r in rows]
+    return fields, rows
+
+
+def _grid_table_column(text: str, column: str) -> dict:
+    """``{grid_type: <column value>}`` from the GRID_TABLE grammar."""
+    fields, rows = _parse_grid_table(text)
+    assert "GRID" in fields, f"GRID field missing from table fields {fields}"
+    assert column in fields, f"{column} field missing from table fields {fields}"
+    gi, ci = fields.index("GRID"), fields.index(column)
+    return {r[gi]: r[ci] for r in rows}
+
+
+def _parse_bash_assoc_array(text: str, name: str) -> dict:
+    """Extract the ``{grid_type: value}`` mapping named ``NAME``.
+
+    Two wrapper grammars are supported:
+      * legacy ``declare -A NAME=( [k]=v ... )`` assoc arrays (OMIP wrapper);
+      * the table-driven ``GRID_TABLE`` grammar (RCE/AMIP wrappers), where
+        ``GRID_DISC``/``GRID_FOLDER``/``GRID_RES`` correspond to the
+        ``DISC``/``FOLDER``/``RES`` columns keyed by ``GRID``.
     """
     m = re.search(
         rf"declare\s+-A\s+{name}=\((.*?)\)",
         text, re.DOTALL,
     )
-    assert m, f"associative array {name} not found"
-    body = m.group(1)
-    entries = re.findall(r"\[\s*([\w]+)\s*\]\s*=\s*\"?([\w_\- ]+?)\"?\s*(?:\n|$)", body)
-    return dict(entries)
+    if m:
+        body = m.group(1)
+        entries = re.findall(
+            r"\[\s*([\w]+)\s*\]\s*=\s*\"?([\w_\- ]+?)\"?\s*(?:\n|$)", body
+        )
+        return dict(entries)
+    column = name.removeprefix("GRID_")
+    return _grid_table_column(text, column)
+
+
+# Loop openings for both grammars (legacy scalar loop vs GRID_TABLE entry loop).
+_LOOP_OPEN_RE = (
+    r"for\s+GRID\s+in\s+[^;]+;\s*do"
+    r"|for\s+ENTRY\s+in\s+\"\$\{GRID_TABLE\[@\]\}\";\s*do"
+)
 
 
 def _extract_grid_loop(text: str) -> list[str]:
-    """Return the ordered grid_type names from
-    ``for GRID in cubed_sphere latlon voronoi gaussian; do``.
+    """Return the ordered grid_type names the wrapper iterates over —
+    ``for GRID in a b c; do`` (legacy) or the GRID column of GRID_TABLE.
     """
     m = re.search(r"for\s+GRID\s+in\s+([^;]+);\s*do", text)
-    assert m, "no `for GRID in ...; do` loop found"
-    return m.group(1).split()
+    if m:
+        return m.group(1).split()
+    fields, rows = _parse_grid_table(text)
+    gi = fields.index("GRID")
+    return [r[gi] for r in rows]
 
 
 def _extract_grid_loop_body(text: str) -> tuple[int, int, str]:
     """Return ``(start_offset, end_offset, body)`` of the bash
-    ``for GRID in ...; do  <body>  done`` block.
+    grid loop block (either grammar; see ``_LOOP_OPEN_RE``).
 
     iter-54 fix: the cross-grid wrappers contain no nested
     ``for``/``while``/``until`` blocks, so we just locate the
     NEXT ``done`` keyword (anchored at line start to avoid
     matching ``for``/``done`` substrings inside echo / variable /
     error-message text such as ``run_amip.py failed for $GRID``)
-    after the ``for GRID in ...; do`` opening.
+    after the loop opening.
     """
-    m_open = re.search(r"for\s+GRID\s+in\s+[^;]+;\s*do", text)
-    assert m_open, "no `for GRID in ...; do` loop opening"
+    m_open = re.search(_LOOP_OPEN_RE, text)
+    assert m_open, "no grid loop opening (`for GRID in ...` / GRID_TABLE form)"
     # Match a ``done`` keyword at the start of a line (allowing
     # leading whitespace) — bash convention for loop closures
     # in these wrapper scripts.
@@ -274,12 +325,8 @@ class TestRceCrossGridWrapper:
         Pin: the wrapper must call ``rm -f "$OUTDIR/...``"`` for
         the matrix-format files before invoking run_rce.py.
         """
-        # Find the rm -f calls inside the loop body.
-        body_match = re.search(
-            r'for\s+GRID\s+in\b.*?done', wrapper_code, re.DOTALL,
-        )
-        assert body_match, "could not locate RCE wrapper for-loop body"
-        body = body_match.group(0)
+        # Find the rm -f calls inside the loop body (grammar-agnostic helper).
+        _, _, body = _extract_grid_loop_body(wrapper_code)
         # The purge happens BEFORE run_rce.py.
         purge_match = re.search(
             r'rm\s+-f\s+"\$OUTDIR/mean_timeseries\.csv"', body,

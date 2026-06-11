@@ -8,14 +8,14 @@ are likely resolution-dominated, not grid-type-dominated. Need ico6
 
 ## Quick Start: How to Run Experiments
 
-All experiments use two scripts in `scripts/global_overturning/`.
+All experiments use two scripts in `scripts/run/global_overturning/`.
 Each run saves a `config.json` to its output directory with all actual
 parameter values. Results go to `results/ocean/comparison_mpas_v_latlon/`.
 
 ### Best MPAS run (METOPO1 — stable 20yr, ACC=73 Sv)
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py \
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/run/global_overturning/run_comparison_mpas.py \
   --tag MPAS_ETOPO \
   --days 7300 --save-every-days 30 \
   --a-h 1e5 \
@@ -51,7 +51,7 @@ For flat bottom, add `--flat-bottom` (validated in MBR2, 20yr stable).
 ### Best Mercator run (MRC_ETOPO1 — completed 10yr, ACC=105 Sv)
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_latlon.py \
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/run/global_overturning/run_comparison_latlon.py \
   --tag MERC_ETOPO \
   --days 3650 --save-every-days 30 \
   --mercator \
@@ -93,12 +93,12 @@ With baroclinic PGF, dt=1200s exceeds CFL and blows up at day 20.
 
 ```bash
 # Barotropic test (~2 min for 120 days)
-CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_latlon.py \
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 python scripts/run/global_overturning/run_comparison_latlon.py \
   --tag BT_TEST --days 120 --save-every-days 10 \
   --mercator --flat-bottom --uniform-T --a-h 1e4 --dt 1200
 
 # MPAS flat-bottom short test (~5 min for 120 days)
-CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py \
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/run/global_overturning/run_comparison_mpas.py \
   --tag MPAS_TEST --days 120 --save-every-days 10 \
   --flat-bottom --a-h 1e5 --kappa-gm 2400 --kappa-redi 2400 --s-max 0.01
 ```
@@ -107,15 +107,15 @@ CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_co
 
 ```bash
 # MPAS section plots (surface maps + zonal-mean + Drake + Atlantic)
-JAX_ENABLE_X64=1 python scripts/global_overturning/_plot_mpas_sections.py \
+JAX_ENABLE_X64=1 python scripts/tmp/_plot_mpas_sections.py \
   results/ocean/comparison_mpas_v_latlon/mpas_TAG/restarts/restart_dayNNNNNN.npz
 
 # Meridional wavenumber spectrum (Mercator or regular lat-lon)
-JAX_ENABLE_X64=1 python scripts/global_overturning/_jet_spectrum_mercator.py \
+JAX_ENABLE_X64=1 python scripts/tmp/_jet_spectrum_mercator.py \
   latlon_TAG --mercator --n-lon 360
 
 # Drake Passage transport time series
-python scripts/global_overturning/_drake_timeseries.py
+python scripts/tmp/_drake_timeseries.py
 ```
 
 ### Important notes
@@ -132,12 +132,12 @@ Every run saves `config.json` to its output directory. To replicate:
 
 ```bash
 # Exact reproduction
-CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py \
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/run/global_overturning/run_comparison_mpas.py \
   --from-config results/ocean/comparison_mpas_v_latlon/mpas_METOPO1_20yr/config.json \
   --tag METOPO1_reproduce
 
 # Reproduce but override one parameter
-CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/global_overturning/run_comparison_mpas.py \
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python scripts/run/global_overturning/run_comparison_mpas.py \
   --from-config results/ocean/comparison_mpas_v_latlon/mpas_METOPO1_20yr/config.json \
   --tag METOPO1_lower_visc --a-h 5e4
 ```

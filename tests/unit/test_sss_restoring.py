@@ -195,6 +195,56 @@ class TestSSSRestoringFlux:
         # Fully ice-covered should be ~zero.
         assert jnp.all(jnp.abs(out_ice["freshwater_flux"]) < 1e-6)
 
+    def test_nemo_linear_ice_gate_scales_as_one_minus_fr_i(self):
+        """``ice_gate_mode="nemo_linear"`` reproduces NEMO sbcssr nn_sssr_ice=0:
+        the restoring weight is exactly ``1 - fr_i`` (zero under full ice)."""
+        lat2d, lon2d, S_target = self._grid_and_target()
+        S_model = S_target + 1.0
+        cfg = SSSRestoringConfig(enabled=True, regions=(),
+                                 tau_restore_days_default=365.0,
+                                 ice_gate_mode="nemo_linear")
+        out_open = compute_sss_restoring_flux(
+            S_model, S_target, lat2d, lon2d, jnp.zeros_like(lat2d), cfg)
+        out_half = compute_sss_restoring_flux(
+            S_model, S_target, lat2d, lon2d, jnp.full(lat2d.shape, 0.5), cfg)
+        out_full = compute_sss_restoring_flux(
+            S_model, S_target, lat2d, lon2d, jnp.ones_like(lat2d), cfg)
+        # Half ice -> exactly half the open-water restoring.
+        np.testing.assert_allclose(
+            np.asarray(out_half["dS_dt_top"]),
+            0.5 * np.asarray(out_open["dS_dt_top"]), rtol=1e-6)
+        # Full ice -> zero restoring.
+        assert jnp.all(jnp.abs(out_full["dS_dt_top"]) < 1e-12)
+
+    def test_nemo_linear_differs_from_tanh_at_marginal_ice(self):
+        """At high partial ice the two gate laws diverge (tanh has a sharper
+        cutoff): nemo_linear gives 1-fr_i=0.2 at fr_i=0.8 vs tanh's ~0.18."""
+        lat2d, lon2d, S_target = self._grid_and_target()
+        S_model = S_target + 1.0
+        ice = jnp.full(lat2d.shape, 0.8)
+        base = dict(enabled=True, regions=(), tau_restore_days_default=365.0)
+        out_lin = compute_sss_restoring_flux(
+            S_model, S_target, lat2d, lon2d, ice,
+            SSSRestoringConfig(ice_gate_mode="nemo_linear", **base))
+        out_tanh = compute_sss_restoring_flux(
+            S_model, S_target, lat2d, lon2d, ice,
+            SSSRestoringConfig(ice_gate_mode="tanh", **base))
+        # At fr_i=0.8 nemo_linear weight = 1-0.8 = 0.2; the tanh law's extra
+        # cutoff makes it weaker (~0.176), so |nemo_linear| restoring is the
+        # STRONGER of the two (both negative; compare magnitudes, not allclose
+        # whose default atol swamps the ~1e-9 PSU/s restoring).
+        assert jnp.all(jnp.abs(out_lin["dS_dt_top"]) > jnp.abs(out_tanh["dS_dt_top"]))
+        # And the ratio is the expected 0.2/0.176 ~ 1.13 (well above 1).
+        ratio = jnp.abs(out_lin["dS_dt_top"]) / jnp.abs(out_tanh["dS_dt_top"])
+        assert float(jnp.mean(ratio)) > 1.05
+
+    def test_unknown_ice_gate_mode_raises(self):
+        lat2d, lon2d, S_target = self._grid_and_target()
+        with pytest.raises(ValueError, match="unknown ice_gate_mode"):
+            compute_sss_restoring_flux(
+                S_target + 1.0, S_target, lat2d, lon2d, jnp.full(lat2d.shape, 0.5),
+                SSSRestoringConfig(enabled=True, ice_gate_mode="bogus"))
+
     def test_arctic_stronger_restoring_than_interior(self):
         lat2d, lon2d, S_target = self._grid_and_target()
         S_model = S_target + 1.0

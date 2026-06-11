@@ -5,7 +5,7 @@ Until 2026-04-28 the factory only handled
 ``surface_forcing.scheme == "prescribed"``; the global_overturning
 experiment configures ``scheme = "combined"`` (prescribed wind + SST
 restoring), and that case used to fall through to a zero-tendency
-no-op silently — see ``scripts/global_overturning/run_global_overturning_mpas_baseline.py``.
+no-op silently — see ``scripts/run/global_overturning/run_global_overturning_mpas_baseline.py``.
 
 These tests pin the four schemes the factory is now contracted to
 support (none, prescribed, restoring, combined) and assert that

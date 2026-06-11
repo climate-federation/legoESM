@@ -16,11 +16,11 @@ fallen back to CPU), all functions are no-ops.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 
-from legoesm.runtime.backend import get_backend
+from legoesm.runtime.backend import check_spectral_backend, get_backend
 
 
 class MetalConfig(NamedTuple):
@@ -68,6 +68,58 @@ def get_metal_config() -> MetalConfig:
         metal_device=None,
         cpu_device=cpu_device,
         is_metal=False,
+    )
+
+
+class SpectralDevicePlacement(NamedTuple):
+    """Resolved device routing for a spectral model's grid.
+
+    Attributes
+    ----------
+    grid
+        The (possibly CPU-transferred) grid to store on the model.
+    use_cpu_for_spectral : bool
+        ``True`` only on a functional Metal backend.
+    cpu_device, default_device : jax.Device or None
+        Set only when routing is active (Metal); ``None`` otherwise — matches
+        the sentinel convention the spectral dycores already use.
+    """
+
+    grid: Any
+    use_cpu_for_spectral: bool
+    cpu_device: jax.Device | None
+    default_device: jax.Device | None
+
+
+def place_spectral_grid(grid, *, allow_unsupported: bool = False) -> SpectralDevicePlacement:
+    """Route a spectral grid to a device that supports float64/complex128.
+
+    On Metal the grid is transferred to CPU (Metal lacks fp64/complex128) and
+    the returned flags let the model run its transforms there; on every other
+    backend the grid is returned untouched after
+    :func:`legoesm.runtime.backend.check_spectral_backend` verifies fp64
+    support (or merely warns with ``allow_unsupported=True``).
+
+    Single home for the constructor block previously copy-pasted across the
+    four spectral dycores (atmosphere ``spectral_sw``/``spectral_pe``/
+    ``spectral_nh``, ocean ``spectral_ocean_pe``) — behavior-identical to
+    those blocks. Must run before any float64 computation on the grid.
+    """
+    backend = get_backend()
+    if backend == "metal":
+        cpu_device = jax.devices("cpu")[0]
+        return SpectralDevicePlacement(
+            grid=jax.device_put(grid, cpu_device),
+            use_cpu_for_spectral=True,
+            cpu_device=cpu_device,
+            default_device=jax.devices()[0],
+        )
+    check_spectral_backend(allow_unsupported=allow_unsupported)
+    return SpectralDevicePlacement(
+        grid=grid,
+        use_cpu_for_spectral=False,
+        cpu_device=None,
+        default_device=None,
     )
 
 

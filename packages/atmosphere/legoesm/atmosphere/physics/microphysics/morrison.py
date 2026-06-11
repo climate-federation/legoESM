@@ -139,8 +139,11 @@ def morrison_microphysics(
     N_g_arg = N_g if graupel_double_moment else None
     sharpness = config.saturation_sharpness
 
-    N_c_eff = effective_Nc(N_c, config.Nc_0,
-                           predict_Nc=getattr(config, "predict_Nc", False))
+    N_c_eff = effective_Nc(
+        N_c, config.Nc_0,
+        predict_Nc=getattr(config, "predict_Nc", False),
+        nc_specified_field=getattr(config, "nc_from_aerosol", False),
+    )
 
     # === WARM RAIN (shared Seifert-Beheng helpers) ===
     # Pass ``q_c`` so the evaporation branch (negative ``condensation``)

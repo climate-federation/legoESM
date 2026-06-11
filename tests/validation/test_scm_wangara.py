@@ -3,7 +3,7 @@
 Exercises the Phase B v2 ``prescribe='fluxes'`` channel against a
 known convective forcing (cosine-shaped surface heat / moisture
 flux peaking at 13:00 local time, Wangara Day 33).  See
-:mod:`scripts.scm.wangara` for the legoESM setup and the
+:mod:`scripts.matrix.scm.wangara` for the legoESM setup and the
 jax_scm reference in ``tests/validation/scm_oracle/wangara_Nz64.nc``.
 
 What this test checks:
@@ -43,7 +43,7 @@ TEST_SIGMA_TOP = 0.78
 def _import_runner():
     import sys
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
-    from scm import wangara as run_scm_wangara
+    from matrix.scm import wangara as run_scm_wangara
     return run_scm_wangara
 
 

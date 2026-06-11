@@ -470,3 +470,89 @@ def pad_with_pole_bc_lat(
         is_vector_u=is_vector_u,
         north_fold=north_fold,
     )
+
+
+def pad_with_pole_bc_lat_multi(
+    fields,
+    halo: int = 1,
+    south_values=None,
+    north_values=None,
+) -> tuple:
+    """Batched :func:`pad_with_pole_bc_lat` for independent wall-BC scalars.
+
+    Pads every field in ``fields`` along the lat axis with constant
+    boundary values, backend-dispatched.  Value-identical to calling
+    :func:`pad_with_pole_bc_lat` once per field — but under the MPI
+    lat-lon band backend the interior partition cuts are exchanged in
+    ONE fused sendrecv pair per cut per dtype group instead of one pair
+    per field.  mpi4jax sendrecvs are token-serialized (no overlap), so
+    each fused cluster of N pads saves ``(N-1) x 2`` sendrecv latencies
+    per step — the measured rank-growing term of the ocean baroclinic
+    phase (scaling campaign audit lever O4).
+
+    Scalar wall-BC fields only: no ``is_vector_*`` / ``north_fold``
+    support (those callers keep the single-field path; their boundary
+    handling is field-specific, while the interior-cut exchange this
+    helper fuses is flag-independent).
+
+    Set ``LEGOESM_LATLON_FUSED_HALO=0`` to force the per-field
+    single-exchange fallback (A/B lever; trace-time Python switch, same
+    pattern as the other feature gates).
+
+    Parameters
+    ----------
+    fields : sequence of jax.Array
+        Fields to pad along axis 0.  Must share ``n_lat`` (axis 0);
+        trailing shapes / dtypes may differ.
+    halo : int
+    south_values, north_values : sequence of float, optional
+        Per-field boundary constants (default all-zero, i.e.
+        ``pad_ns_zero`` semantics).
+
+    Returns
+    -------
+    tuple of jax.Array, in input order.
+    """
+    fields = tuple(fields)
+    n = len(fields)
+    if n == 0:
+        return ()
+    if south_values is None:
+        south_values = (0.0,) * n
+    if north_values is None:
+        north_values = (0.0,) * n
+    south_values = tuple(south_values)
+    north_values = tuple(north_values)
+    if len(south_values) != n or len(north_values) != n:
+        raise ValueError(
+            "pad_with_pole_bc_lat_multi: south_values/north_values must "
+            f"match len(fields)={n}; got {len(south_values)}/"
+            f"{len(north_values)}."
+        )
+
+    import os
+
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+
+    fused = os.environ.get("LEGOESM_LATLON_FUSED_HALO", "1") != "0"
+    if get_halo_backend() == "mpi" and fused:
+        from legoesm.parallel.latlon_mpi import (
+            LatLonBandLayout,
+            pad_with_pole_bc_lat_multi_mpi,
+        )
+        topology = get_mpi_topology()
+        if isinstance(topology, LatLonBandLayout):
+            return pad_with_pole_bc_lat_multi_mpi(
+                fields, topology, halo=halo,
+                south_values=south_values, north_values=north_values,
+            )
+    # Local backend / non-latlon topology / fused-off: per-field pads
+    # (bit-identical semantics; under MPI this is the legacy
+    # one-sendrecv-pair-per-field schedule).
+    return tuple(
+        pad_with_pole_bc_lat(
+            f, halo=halo,
+            south_value=south_values[i], north_value=north_values[i],
+        )
+        for i, f in enumerate(fields)
+    )

@@ -26,7 +26,7 @@ def _matrix_module():
         repo_root = Path(__file__).resolve().parents[3]
         scripts_dir = repo_root / "scripts"
         if str(scripts_dir) not in sys.path:
-            sys.path.insert(0, str(scripts_dir))
+            sys.path.insert(0, str(scripts_dir / "matrix"))
         matrix_path = scripts_dir / "matrix" / "run_ocean_test_matrix.py"
         if not matrix_path.exists():
             matrix_path = scripts_dir / "run_ocean_test_matrix.py"

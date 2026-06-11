@@ -359,7 +359,7 @@ but is not long-run stable.
 
 * **P6 partially done — scripts ready, validation pending.** Wrote
   two production-ready scripts under
-  ``scripts/mpas_realistic_geometry/``:
+  ``scripts/run/mpas_realistic_geometry/``:
   - ``run_mpas_seamount_rest.py`` — canonical PGF-over-topography
     test (compares `pgf_scheme="centered"` vs `"adcroft"`).
   - ``run_mpas_etopo_spinup.py`` — wind-driven GO spinup on ico4

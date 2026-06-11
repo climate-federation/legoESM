@@ -47,7 +47,7 @@ from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 
 # Test-matrix helpers for running the loop and plotting.
 import sys
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "matrix"))
 from ocean_test_matrix.timeloop import _run_timeloop
 from ocean_test_matrix.extraction import (
     _make_check_fn, _make_scalar_fn, _make_extract_fn, _key_array_fn,

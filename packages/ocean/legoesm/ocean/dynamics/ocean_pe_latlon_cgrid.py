@@ -75,10 +75,10 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     flux_divergence_viscosity_cgrid,
     interp_cell_to_uface,
     is_tripolar,
+    lat_ends_are_poles,
     min_cell_to_uface,
     min_cell_to_vface,
     curl_vertex_cgrid,
-    pad_ns_scalar,
     pad_ns_zero,
     fold_is_local,
     smagorinsky_biharmonic_tendency_cgrid,
@@ -181,6 +181,14 @@ def interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     f_v : array, shape (n_lat+1, n_lon, ...) at v-points.
     """
     f_padded = pad_ns_zero(f)
+    return _finish_interp_to_v(f, f_padded, grid)
+
+
+def _finish_interp_to_v(
+    f: jnp.ndarray, f_padded: jnp.ndarray, grid,
+) -> jnp.ndarray:
+    """Midpoint + pole/fold post-processing shared by the single and
+    batched ``interp_to_v_points`` variants (one numeric source)."""
     f_v = 0.5 * (f_padded[:-1] + f_padded[1:])
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
     f_v = zero_polar_lat_ends(f_v)
@@ -196,6 +204,22 @@ def interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
             north = jnp.concatenate([core, core[:, 0:1]], axis=1)
         f_v = jnp.concatenate([f_v[:-1], north], axis=0)
     return f_v
+
+
+def interp_to_v_points_multi(fields, grid=None) -> tuple:
+    """Batched :func:`interp_to_v_points` for independent cell fields.
+
+    Value-identical to ``tuple(interp_to_v_points(f, grid) for f in
+    fields)``; under the MPI band backend the cell pads ride ONE fused
+    sendrecv pair per cut (audit lever O4) instead of one per field.
+    """
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
+    fields = tuple(fields)
+    padded = pad_with_pole_bc_lat_multi(fields, halo=1)
+    return tuple(
+        _finish_interp_to_v(f, f_p, grid)
+        for f, f_p in zip(fields, padded)
+    )
 
 
 # Canonical Van Leer limiter from core (redundancy audit), aliased to the local
@@ -243,25 +267,94 @@ def tvd_to_v_points(
     """TVD interpolation to v-points. Solid wall at poles (#170).
 
     ``limiter_fn`` selects the flux limiter; see :func:`tvd_to_u_points`.
+
+    Cell-pad-first (PR357 Bug-2 pattern; codex P2 review)
+    -----------------------------------------------------
+    The cell-centred field is padded by TWO latitude rows through the
+    backend-dispatched
+    :func:`legoesm.grids.halo_latlon.pad_with_pole_bc_lat` (local
+    ``jnp.pad`` fallback / ``pad_with_pole_bc_lat_mpi`` sendrecv at
+    interior partition cuts — the AD-safe ``_sendrecv_vjp`` path)
+    BEFORE any neighbour shift is formed.  All ``n_lat+1`` local
+    v-faces — including the duplicated partition-cut faces — are then
+    computed from true cell data, so neighbouring ranks produce
+    bit-identical TVD values at a shared cut face and the result
+    matches the serial reconstruction there.
+
+    Previously ``f_south2``/``f_north2`` (the second-neighbour limiter
+    ratios) were built from rank-local rows only and the two end faces
+    were filled afterwards by exchanging the neighbour's *face* rows —
+    one face row off at a cut — silently corrupting partition-cut
+    faces while the global flux divergence still telescoped at
+    symmetric cuts (invisible to the np=2 conservation gate).
+
+    Serial bit-identity (local backend)
+    -----------------------------------
+    Interior faces use exactly the previous shifts (identical floats,
+    identical arithmetic order).  The two historical edge conventions
+    are restored explicitly at PHYSICAL poles only:
+
+    * first interior face: ``f_south2 := f_south`` (the old
+      ``concatenate([f[:1], f[:-2]])`` clamp → ``r_pos = 0`` → first
+      order at the wall);
+    * last interior face: ``f_north2 := f_north`` (old
+      ``concatenate([f[2:], f[-1:]])``) or the tripolar fold-partner
+      row (old ``f[-1:, fold.perm_T]``);
+    * pole faces: zero (old ``pad_ns_zero`` ends) with the tripolar
+      north face row fold-overwritten (old ``pad_ns_scalar``).
+
+    One halo=2 cell pad (2 sendrecvs/rank) replaces the previous
+    end-of-function halo=1 face pad (also 2 sendrecvs/rank): no extra
+    MPI message, and every rank calls it unconditionally (uniform
+    collective schedule — no deadlock).
     """
     eps = 1e-30
-    f_south = f[:-1]; f_north = f[1:]
-    f_south2 = jnp.concatenate([f[:1], f[:-2]], axis=0)
-    fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
-        f_north2 = jnp.concatenate([f[2:], f[-1:, fold.perm_T]], axis=0)
-    else:
-        f_north2 = jnp.concatenate([f[2:], f[-1:]], axis=0)
+    from legoesm.grids.halo_latlon import (
+        pad_with_pole_bc_lat,
+        zero_polar_lat_ends,
+    )
+
+    n_lat = f.shape[0]
+    # (1) Pad cells by 2 rows: f_pad[k] holds global cell row j0-2+k at
+    #     an interior cut; pole-touching ends get constant ghosts whose
+    #     values never reach the output (every ghost-touching face is
+    #     overridden by the clamp restore / pole-face BC below).
+    f_pad = pad_with_pole_bc_lat(
+        f, halo=2, south_value=0.0, north_value=0.0,
+    )
+    # (2) ALL n_lat+1 local v-faces; face i sits between cells i-1 and i.
+    f_south = f_pad[1:n_lat + 2]     # f[i-1]
+    f_north = f_pad[2:n_lat + 3]     # f[i]
+    f_south2 = f_pad[0:n_lat + 1]    # f[i-2]
+    f_north2 = f_pad[3:n_lat + 4]    # f[i+1]
+    # (3) Historical second-neighbour edge clamps at PHYSICAL poles only
+    #     (static at trace time; MPI cut ends keep the true neighbour
+    #     rows delivered by the pad).
+    south_is_pole, north_is_pole = lat_ends_are_poles()
+    if south_is_pole:
+        f_south2 = f_south2.at[1].set(f_south[1])
+    if north_is_pole:
+        if fold_is_local(grid):
+            f_north2 = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+        else:
+            f_north2 = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
     delta_pos = f_north - f_south
     r_pos = (f_south - f_south2) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
     delta_neg = f_south - f_north
     r_neg = (f_north2 - f_north) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
     f_pos = f_south + 0.5 * limiter_fn(r_pos) * delta_pos
     f_neg = f_north + 0.5 * limiter_fn(r_neg) * delta_neg
-    f_tvd = jnp.where(mass_flux_v[1:-1] > 0, f_pos, f_neg)
-    if grid is not None:
-        return pad_ns_scalar(f_tvd, grid)
-    return pad_ns_zero(f_tvd)
+    f_tvd = jnp.where(mass_flux_v > 0, f_pos, f_neg)
+    # (4) Wall BC at the physical pole faces only (matches the previous
+    #     pad_ns_zero zero ends; backend-aware so interior cut faces
+    #     keep their computed values), then the tripolar north fold row
+    #     exactly as pad_ns_scalar produced it (perm_T of the last
+    #     interior face row).
+    f_tvd = zero_polar_lat_ends(f_tvd)
+    if fold_is_local(grid):
+        north = f_tvd[-2:-1][:, grid.fold.perm_T]
+        f_tvd = jnp.concatenate([f_tvd[:-1], north], axis=0)
+    return f_tvd
 
 
 def upwind_to_u_points(
@@ -317,20 +410,47 @@ def upwind_to_v_points(
     -------
     f_v : array, shape (n_lat+1, n_lon, ...) at v-points.
         Upwind value: uses the upstream cell based on mass_flux_v sign.
-        Boundary faces (i=0 and i=n_lat) are zero (solid wall).
+        Boundary faces (i=0 and i=n_lat) are zero (solid wall) at
+        physical poles; at an MPI band partition cut they carry the
+        true upwind value selected from the neighbour rank's cell row.
+
+    Notes
+    -----
+    Cell-pad-first (same recipe as :func:`tvd_to_v_points`): the cell
+    field is padded by one latitude row through the backend-dispatched
+    :func:`legoesm.grids.halo_latlon.pad_with_pole_bc_lat` (local
+    ``jnp.pad`` / AD-safe MPI sendrecv at interior cuts) BEFORE the
+    upwind selection, so every local v-face — including the duplicated
+    partition-cut faces — picks from true cell data.  Previously the
+    end faces were refilled by ``pad_ns_scalar``/``pad_ns_zero`` from
+    the neighbour's *face* rows — one face row off at a cut.  Serial
+    bit-identity: interior faces select between exactly the previous
+    operands; pole faces are zeroed (the old pad ends) and the tripolar
+    fold row is the fold-permuted last interior face row, exactly as
+    ``pad_ns_scalar`` built it.  One cell pad replaces one face pad —
+    same collective count on every rank.
     """
-    # Interior face i (for i=1..n_lat-1) sits between cell i-1 and cell i.
+    from legoesm.grids.halo_latlon import (
+        pad_with_pole_bc_lat,
+        zero_polar_lat_ends,
+    )
+    # Face i sits between cell i-1 and cell i (m_pad rows i and i+1).
     # Positive flux => flow from cell i-1 to cell i => upwind is cell i-1.
     # Negative flux => flow from cell i to cell i-1 => upwind is cell i.
-    f_south = f[:-1]   # cell i-1 for interior faces
-    f_north = f[1:]    # cell i   for interior faces
-    # Interior mass flux: faces 1..n_lat-1
-    mf_interior = mass_flux_v[1:-1]
-    f_upwind = jnp.where(mf_interior > 0, f_south, f_north)
+    f_pad = pad_with_pole_bc_lat(
+        f, halo=1, south_value=0.0, north_value=0.0,
+    )
+    f_south = f_pad[:-1]   # cell i-1 for face i
+    f_north = f_pad[1:]    # cell i   for face i
+    f_v = jnp.where(mass_flux_v > 0, f_south, f_north)
 
-    if grid is not None:
-        return pad_ns_scalar(f_upwind, grid)
-    return pad_ns_zero(f_upwind)
+    # Wall BC at the physical pole faces only (backend-aware), then the
+    # tripolar north fold row exactly as pad_ns_scalar produced it.
+    f_v = zero_polar_lat_ends(f_v)
+    if fold_is_local(grid):
+        north = f_v[-2:-1][:, grid.fold.perm_T]
+        f_v = jnp.concatenate([f_v[:-1], north], axis=0)
+    return f_v
 
 
 def neumann_fill_cgrid(
@@ -354,18 +474,44 @@ def neumann_fill_cgrid(
     fold = getattr(grid, "fold", None) if grid is not None else None
     use_fold = fold is not None and fold.is_active and fold.fold_j >= 0
 
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
+    south_is_pole, north_is_pole = lat_ends_are_poles()
+
     m = mask
     filled = f
     for _ in range(3):
-        f_s = jnp.concatenate([filled[0:1], filled[:-1]], axis=0)
-        m_s = jnp.concatenate([m[0:1], m[:-1]], axis=0)
-        if use_fold:
-            north_of_fold = filled[-1:, fold.perm_T]
-            f_n = jnp.concatenate([filled[1:], north_of_fold], axis=0)
-            m_n = jnp.concatenate([m[1:], m[-1:, fold.perm_T]], axis=0)
-        else:
-            f_n = jnp.concatenate([filled[1:], filled[-1:]], axis=0)
-            m_n = jnp.concatenate([m[1:], m[-1:]], axis=0)
+        # N/S neighbours.  Cell rows partition WITHOUT overlap across
+        # MPI bands, so one backend-dispatched halo=1 pad per array
+        # delivers the true neighbour rows (j0-1 / j1+1) at interior
+        # cuts; the historical edge conventions — Neumann clamp at the
+        # poles, fold-permuted partner row at the tripolar seam — are
+        # restored at PHYSICAL band ends only (codex round-5 MAJOR:
+        # the previous rank-local clamp filled land cells at a cut
+        # from the band edge instead of the neighbour rank).  Interior
+        # entries keep the EXACT historical local shifts; only the two
+        # end entries are spliced from the pad ghosts — bit-identical
+        # on the local backend.  Pads are unconditional on every rank
+        # (uniform collective schedule); the rank-dependent branches
+        # below only concatenate local arrays.
+        # Fused: one sendrecv pair per cut for field + mask per pass
+        # (audit lever O4; ``m`` is updated each pass).
+        f_pad, m_pad = pad_with_pole_bc_lat_multi((filled, m), halo=1)
+        f_s = jnp.concatenate([f_pad[0:1], filled[:-1]], axis=0)
+        m_s = jnp.concatenate([m_pad[0:1], m[:-1]], axis=0)
+        f_n = jnp.concatenate([filled[1:], f_pad[-1:]], axis=0)
+        m_n = jnp.concatenate([m[1:], m_pad[-1:]], axis=0)
+        if south_is_pole:
+            f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
+            m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
+        if north_is_pole:
+            if use_fold:
+                f_n = jnp.concatenate(
+                    [f_n[:-1], filled[-1:, fold.perm_T]], axis=0)
+                m_n = jnp.concatenate(
+                    [m_n[:-1], m[-1:, fold.perm_T]], axis=0)
+            else:
+                f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
+                m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
         f_w = jnp.roll(filled, 1, axis=1)
         m_w = jnp.roll(m, 1, axis=1)
         f_e = jnp.roll(filled, -1, axis=1)
@@ -1322,12 +1468,17 @@ def _bc_pv_flux(
     # value is BIG_H so a physical-pole vertex reduces to the local two-cell
     # min (bit-identical to the previous boundary rows); interior partition
     # cuts sendrecv the neighbour's real row instead.
-    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
-    h_k_pad = pad_with_pole_bc_lat(
-        h_k_active, halo=1, south_value=BIG_H, north_value=BIG_H,
-    )
-    h_sw_pad = pad_with_pole_bc_lat(
-        h_sw_active, halo=1, south_value=BIG_H, north_value=BIG_H,
+    # Thickness-weighted mass fluxes at faces — computed BEFORE the pad so
+    # the Fu / u lat pads ride the SAME fused exchange as the two
+    # active-thickness pads (audit lever O4: 4 pads -> 1 sendrecv pair per
+    # cut; all four fields are independent inputs at this point).
+    Fv = h_v * v * v_mask_3d  # (n_lat+1, n_lon, nlev)
+    Fu = h_u * u * u_mask_3d  # (n_lat, n_lon+1, nlev)
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
+    h_k_pad, h_sw_pad, Fu_ext, u_ext = pad_with_pole_bc_lat_multi(
+        (h_k_active, h_sw_active, Fu, u), halo=1,
+        south_values=(BIG_H, BIG_H, 0.0, 0.0),
+        north_values=(BIG_H, BIG_H, 0.0, 0.0),
     )
     h_vtx = jnp.minimum(
         jnp.minimum(h_k_pad[:-1], h_k_pad[1:]),
@@ -1351,9 +1502,7 @@ def _bc_pv_flux(
     # Potential vorticity q = ζ / h at vertices
     q = zeta / jnp.maximum(h_vtx, 1e-10)
 
-    # Thickness-weighted mass fluxes at faces
-    Fv = h_v * v * v_mask_3d  # (n_lat+1, n_lon, nlev)
-    Fu = h_u * u * u_mask_3d  # (n_lat, n_lon+1, nlev)
+    # (Fv / Fu computed above, before the fused pad.)
 
     # Average Fv to u-points (4-point, periodic in lon)
     Fv_west = jnp.roll(Fv, 1, axis=1)
@@ -1373,7 +1522,7 @@ def _bc_pv_flux(
     # which deadlocked across ranks under the fold-active-everywhere invariant.
     from legoesm.ocean.dynamics.latlon_cgrid_operators import fold_row
     fold_local = fold_is_local(grid)
-    Fu_ext = pad_ns_zero(Fu)   # (n_lat+2, n_lon+1, nlev)
+    # Fu_ext padded in the fused exchange above; (n_lat+2, n_lon+1, nlev).
     if fold_local:
         _f = grid.fold
         Fu_fold_row = fold_row(
@@ -1393,7 +1542,7 @@ def _bc_pv_flux(
     # Average total u to v-points (4-point average; fold-reflected at north
     # on tripolar).  Uses total velocity for consistency with total-velocity
     # Sadourny EC PV flux and WENO upwinding (#160).
-    u_ext = pad_ns_zero(u)   # halo at cuts, zero at the physical pole
+    # u_ext padded in the fused exchange above (halo at cuts, zero pole).
     if fold_local:
         _f = grid.fold
         u_fold_row = fold_row(
@@ -2296,6 +2445,7 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
         _sf_q_net = getattr(surface_forcing, "q_net", None)
         _sf_sw = getattr(surface_forcing, "sw_down", None)
         _sf_salt = getattr(surface_forcing, "salt_flux", None)
+        _sf_chl = getattr(surface_forcing, "chl", None)
 
         if _sf_tau_x is not None and _sf_tau_y is not None:
             # Atmosphere convention (opposes wind) -> ocean reaction.
@@ -2348,8 +2498,36 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             # uses the SAME scatter-add/add sequence as before (bit-identical
             # default-off path); the implicit branch starts from zeros.
             dT_target = dT_surf if route_heat_to_implicit else dT_dt
-            if _sf_sw is not None:
-                # Split: non-solar at surface, solar penetrating column.
+            if _sf_sw is not None and _sf_chl is not None:
+                # NEMO RGB chlorophyll penetration (ln_qsr_rgb).  NEMO
+                # partitions 100% of net SW across IR + R/G/B bands, so NO
+                # 0.94 "skin" pre-split here: the full sw is the penetrating
+                # qsr and the non-solar surface flux is q_net - sw.
+                sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
+                q_nonsolar = q_net_T - sw_T
+                dT_target = dT_target.at[..., 0].add(
+                    q_nonsolar * inv_rho_csw_dz * mask
+                )
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    apply_shortwave_penetration,
+                    ShortwavePenetrationConfig,
+                )
+                # ``h_k`` is the live (z*/partial-cell) thickness; a dry cell
+                # carries h_k = 0, which is both the wet mask and the safe
+                # denominator guard inside the RGB kernel.
+                wet_cell = jnp.asarray(h_k > 0.0, dtype=T.dtype)
+                sw_tend = apply_shortwave_penetration(
+                    ShortwavePenetrationConfig(scheme="rgb_chl"),
+                    sw_T,
+                    chl=jnp.asarray(_sf_chl, dtype=T.dtype),
+                    dz_live=h_k,
+                    wet_cell=wet_cell,
+                    rho_0=float(rho_0),
+                )
+                dT_target = dT_target + sw_tend * mask_3d
+            elif _sf_sw is not None:
+                # Split: non-solar at surface, solar penetrating column
+                # (legacy two-band Jerlov; 0.94 skin split unchanged).
                 sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
                 sw_absorbed = sw_T * jnp.asarray(0.94, dtype=T.dtype)
                 q_nonsolar = q_net_T - sw_absorbed

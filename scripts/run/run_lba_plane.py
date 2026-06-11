@@ -55,7 +55,12 @@ from legoesm.atmosphere.sam_case_forcing import (  # noqa: E402
 from legoesm.grids.plane import create_plane_grid  # noqa: E402
 
 
-_GSAM_LBA = "/home/gentine/Documents/Code/gSAM/gsam1.8.7/gSAM1.8.7/CASES/LBA"
+# gSAM checkout root (directory holding CASES/); set LEGOESM_GSAM_ROOT to
+# point at your local gSAM checkout, or pass --case-dir directly.
+_GSAM_ROOT = _os.environ.get(
+    "LEGOESM_GSAM_ROOT", "/home/gentine/Documents/Code/gSAM/gsam1.8.7/gSAM1.8.7"
+)
+_GSAM_LBA = f"{_GSAM_ROOT}/CASES/LBA"
 
 
 def parse_args():

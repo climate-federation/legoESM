@@ -87,7 +87,7 @@ def _sample_days_from_args(args: argparse.Namespace) -> tuple[float, ...]:
 
 def _generate_standard_run_plots(run_dir: Path) -> None:
     """Regenerate the standard AMIP diagnostic plots for one run directory."""
-    plot_amip_path = REPO_ROOT / "scripts" / "diagnostic" / "plot_amip.py"
+    plot_amip_path = REPO_ROOT / "scripts" / "plot" / "plot_amip.py"
     spec = importlib.util.spec_from_file_location("plot_amip_module", plot_amip_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"unable to load plot_amip from {plot_amip_path}")

@@ -2161,7 +2161,7 @@ def _check_finite(state, grid_type):
 # global-overturning progress plotter.  We dump every field of the
 # state that has a ``.data`` attribute, plus the simulation day and
 # step index.  The plotter
-# (``scripts/global_overturning/plot_realistic_geometry_progress.py``
+# (``scripts/run/global_overturning/plot_realistic_geometry_progress.py``
 # and the JRA55 sibling) reads these to compute MOC, BSF, snapshots.
 # ===========================================================================
 
@@ -2169,7 +2169,7 @@ def _check_finite(state, grid_type):
 def _save_restart(state, day, step, output_dir):
     """Save a state restart in the global-overturning npz format.
 
-    Mirrors ``scripts/global_overturning/run_global_overturning_*``
+    Mirrors ``scripts/run/global_overturning/run_global_overturning_*``
     so the same plotting helpers consume both runs without
     discrimination.
 

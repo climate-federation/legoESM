@@ -505,9 +505,9 @@ issue with the β_S = 0 thermal-wind balance at this resolution); the
 | `src/legoesm/ocean/experiments/global_overturning.py` | DONE |
 | `tests/ocean/unit/test_gm_redi_latlon_cgrid.py` | DONE (21 tests) |
 | `tests/ocean/unit/test_gm_redi_eady_physics.py` | DONE (4 tests) |
-| `scripts/ocean_test_matrix/experiments.py` | DONE (3 Eady cases) |
-| `scripts/ocean_test_matrix/testcase.py` | DONE |
-| `scripts/ocean_test_matrix/setup.py` | DONE (gm_redi param) |
+| `scripts/matrix/ocean_test_matrix/experiments.py` | DONE (3 Eady cases) |
+| `scripts/matrix/ocean_test_matrix/testcase.py` | DONE |
+| `scripts/matrix/ocean_test_matrix/setup.py` | DONE (gm_redi param) |
 
 ---
 

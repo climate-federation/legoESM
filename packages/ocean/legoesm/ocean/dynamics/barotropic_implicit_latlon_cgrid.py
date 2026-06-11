@@ -536,6 +536,8 @@ def barotropic_implicit_latlon_cgrid(
     F_slow_eta: jnp.ndarray | None = None,
     F_slow_u: jnp.ndarray | None = None,
     F_slow_v: jnp.ndarray | None = None,
+    *,
+    return_residual: bool = False,
 ) -> tuple[LatLonCGridOceanState, tuple[jnp.ndarray, jnp.ndarray]]:
     """Single-step implicit free-surface solver (lat-lon C-grid).
 
@@ -543,6 +545,13 @@ def barotropic_implicit_latlon_cgrid(
     -------
     (state_new, (Hu_avg, Hv_avg))
         Same return signature as ``barotropic_substeps_latlon_cgrid``.
+        When ``return_residual=True`` (static; default ``False`` keeps
+        the hot path unchanged) the returned tuple is instead
+        ``(state_new, (Hu_avg, Hv_avg), rel_residual)`` where
+        ``rel_residual`` is the GLOBAL relative Helmholtz residual
+        ``sqrt(global(r·r)/global(rhs·rhs))`` — a DIAGNOSTIC for the
+        fixed-iteration distributed PCG.  Log / assert it OUTSIDE the
+        JIT; never branch the compiled step on it.
 
     Notes
     -----
@@ -636,13 +645,14 @@ def barotropic_implicit_latlon_cgrid(
         U_old + dt_t * (-g * grad_x_eta_old + f_u * V_at_u + F_slow_u)
     ) * u_mask
 
-    # U_pred at v-points (4-pt average) for FB Coriolis on V
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import pad_ns_vector_u
-    U_pred_at_v_int = 0.25 * (
-        U_pred[:-1, :-1] + U_pred[:-1, 1:]
-        + U_pred[1:, :-1] + U_pred[1:, 1:]
+    # U_pred at v-points (4-pt average) for FB Coriolis on V, via the
+    # shared cell-pad-first helper (partition-cut faces average the
+    # neighbour rank's true U row; wall/fold conventions bit-identical
+    # to the old interior-then-pad_ns_vector_u serial path).
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        interp_u_to_vface_4pt,
     )
-    U_pred_at_v = pad_ns_vector_u(U_pred_at_v_int, grid)
+    U_pred_at_v = interp_u_to_vface_4pt(U_pred, grid)
 
     V_pred = (
         V_old + dt_t * (-g * grad_y_eta_old - f_v * U_pred_at_v + F_slow_v)
@@ -677,25 +687,107 @@ def barotropic_implicit_latlon_cgrid(
         + dt_t * F_slow_eta * mask
     ) * mask
 
-    # Jacobi preconditioner diagonal (the operator itself is built inside
-    # the custom-VJP solver so the adjoint can take exact parameter
-    # cotangents — see solve_helmholtz_freesurface).
+    # Jacobi preconditioner diagonal + Helmholtz operator.  ``A_op``
+    # feeds the distributed-PCG branch and the residual diagnostics; on
+    # the single-rank branch the operator is REBUILT inside the
+    # custom-VJP solver so its adjoint can take exact parameter
+    # cotangents (see solve_helmholtz_freesurface) — same
+    # ``_make_helmholtz`` numerics, so the two instances are identical.
     inv_diag = _helmholtz_inv_diag(
         H_u_old, H_v_old, coeff, grid, mask,
     )
-
-    # Solve.  Tolerance is on relative residual; 1e-10 is plenty for our
-    # mass-conservation needs (||A·η - rhs|| < 1e-10 implies mass error
-    # per step is well below floating-point precision of the integral).
-    # Forward = stock preconditioned CG, bit-identical; reverse mode uses
-    # the TRUE (area-weighted) transpose — stock cg's symmetry-reusing
-    # VJP biased free-surface gradients by ~1% (commit-1e370679 sibling).
-    pcg_tol = jnp.asarray(config.barotropic_implicit_pcg_tol, dtype=eta_dtype)
-    pcg_maxiter = int(config.barotropic_implicit_pcg_maxiter)
-    eta_new = solve_helmholtz_freesurface(
-        rhs, eta_old, H_u_old, H_v_old, coeff, mask, u_mask, v_mask,
-        inv_diag, grid, tol=pcg_tol, maxiter=pcg_maxiter,
+    A_op = _make_helmholtz(
+        H_u_old, H_v_old, coeff, grid, mask, u_mask, v_mask,
     )
+
+    def M_inv(r: jnp.ndarray) -> jnp.ndarray:
+        return r * inv_diag.astype(r.dtype)
+
+    # Solve dispatch — MERGE COMPOSITION of the area-weighted-adjoint fix
+    # (PR #394 branch, commit 625a5610) with the MPI-scaling refactor
+    # (``barotropic_common.solve_helmholtz_implicit``).  Static Python
+    # branch, so only one solver is traced:
+    #
+    # * single-rank, no force_pcg → :func:`solve_helmholtz_freesurface`.
+    #   Forward = the stock preconditioned ``jax.scipy`` CG VERBATIM
+    #   (``jax.custom_vjp`` inlines the primal — bit-identical to the
+    #   ``solve_helmholtz_implicit`` stock branch this routes around);
+    #   reverse mode applies the TRUE area-weighted transpose
+    #   ``A⁻ᵀ = W·A⁻¹·W⁻¹`` — stock cg's symmetry-reusing VJP biased
+    #   every free-surface gradient by ~1% (per-solve AD/FD 0.9909;
+    #   commit-1e370679 sibling).  Tolerance is on relative residual;
+    #   1e-10 keeps the per-step mass error below the float precision of
+    #   the integral.
+    # * distributed or force_pcg → ``barotropic_common``'s UNROLLED
+    #   fixed-iteration PCG (static fori_loop, uniform MPI collective
+    #   schedule, no deadlock).  Differentiated STRAIGHT THROUGH — A_op's
+    #   halo sendrecv-VJP + the allreduce-SUM dots are AD-safe, so those
+    #   gradients are correct by construction and need no custom
+    #   transpose.  (``custom_linear_solve`` is impossible there: the
+    #   halo ``_sendrecv_vjp`` custom_vjp has no transpose rule — see
+    #   barotropic_common's module note.)
+    from legoesm.core.operators import is_distributed as _is_distributed
+    from legoesm.ocean.dynamics.barotropic_common import (
+        HelmholtzSolveDiagnostics,
+        _global_rel_residual as _rel_resid,
+        solve_helmholtz_implicit,
+    )
+    _area_eta = grid.area.astype(eta_dtype)
+    _residual_tol = config.barotropic_implicit_pcg_residual_tol
+    # ``force_pcg`` selects the fixed-M PCG body even single-rank
+    # (solver-matched parity references + the faster-single-rank
+    # option, job 8458701); its global dots reduce locally when not
+    # multi-process, so the flag is safe pre-arming.
+    _use_pcg = _is_distributed() or bool(config.barotropic_implicit_force_pcg)
+    if not _use_pcg:
+        pcg_tol = jnp.asarray(
+            config.barotropic_implicit_pcg_tol, dtype=eta_dtype,
+        )
+        eta_new = solve_helmholtz_freesurface(
+            rhs, eta_old, H_u_old, H_v_old, coeff, mask, u_mask, v_mask,
+            inv_diag, grid, tol=pcg_tol,
+            maxiter=int(config.barotropic_implicit_pcg_maxiter),
+        )
+        # Same diagnostic contract as the solve_helmholtz_implicit stock
+        # branch (global rel-residual + converged flag), so the
+        # runtime-check consumer below is branch-uniform.
+        _rel = _rel_resid(A_op, eta_new, rhs)
+        _solve_diag = HelmholtzSolveDiagnostics(
+            rel_residual=_rel, converged=_rel <= _residual_tol,
+        )
+    else:
+        eta_new, _solve_diag = solve_helmholtz_implicit(
+            A_op, rhs, M_inv, eta_old,
+            distributed=True,
+            fixed_iters=int(config.barotropic_implicit_pcg_fixed_iters),
+            residual_tol=_residual_tol,
+            stock_cg_tol=config.barotropic_implicit_pcg_tol,
+            stock_cg_maxiter=int(config.barotropic_implicit_pcg_maxiter),
+            pcg_variant=str(config.barotropic_implicit_pcg_variant),
+            # W-inner-product weight for the single_reduce recurrences
+            # (masked cell area — the dot in which this FV Helmholtz is
+            # self-adjoint; ignored by the standard body).
+            dot_weight=_area_eta * mask,
+        )
+    # Debug-gated consumer for the solve diagnostic (codex 2026-06-11
+    # MAJOR: ``_solve_diag`` was computed and silently discarded on the
+    # production path — an under-converged fixed-M solve would advance
+    # the model with a bad eta).  Prints ONLY on non-convergence; the
+    # production-default path (enable_runtime_checks=False) is
+    # unchanged.  ``return_residual=True`` callers keep the loud
+    # outside-JIT handling.
+    if bool(config.enable_runtime_checks):
+        jax.lax.cond(
+            _solve_diag.converged,
+            lambda _r: None,
+            lambda _r: jax.debug.print(
+                "WARNING barotropic_implicit_latlon_cgrid: fixed-M PCG "
+                "NOT converged (rel_residual={r:.3e} > tol) — raise "
+                "barotropic_implicit_pcg_fixed_iters or check "
+                "conditioning.", r=_r,
+            ),
+            _solve_diag.rel_residual,
+        )
     eta_new = eta_new * mask
 
     # Global mass conservation correction.  The CG solve minimizes the
@@ -704,12 +796,41 @@ def barotropic_implicit_latlon_cgrid(
     # bias that accumulates over 10⁵-10⁶ steps.  Project out the global
     # mean drift so that sum(eta_new * area) = sum(rhs * area) exactly.
     # This is standard practice (MOM6, NEMO, MITgcm).
-    _area_eta = grid.area.astype(eta_dtype)
-    _ocean_area = jnp.sum(_area_eta * mask)
-    _target_mass = jnp.sum(rhs * _area_eta)
-    _actual_mass = jnp.sum(eta_new * _area_eta)
+    #
+    # BLOCKER-1 fix: the three area-weighted sums MUST be GLOBAL under
+    # MPI.  A rank-local ``jnp.sum`` would apply a different per-rank
+    # mean correction to each sub-domain — distorting the spatial eta
+    # field per-rank (the outer ``fix_eta_drift`` global projection can
+    # only fix the global mean, not undo per-rank spatial offsets, and
+    # may be disabled).  Use the same MPI-aware batched SUM that the
+    # adjacent ``clamp_and_redistribute`` (eta_floor) uses.
+    #
+    # Accumulate in ``ocean_diagnostics`` precision (f64 even when the
+    # state runs at f32) — ``target_mass - actual_mass`` is a huge-area
+    # cancellation that would lose the whole correction signal in f32
+    # (mirrors the outer ``fix_eta_drift`` cast in ocean_model_latlon).
+    from legoesm.parallel.reductions import (
+        batch_allreduce_mpi as _batch_allreduce_mpi,
+        is_multi_process as _is_multi_process,
+    )
+    from legoesm.core.precision import cast as _cast
+    _M = "ocean_diagnostics"
+    _area_acc = _cast(_area_eta, _M, "accumulate")
+    _mask_acc = _cast(mask, _M, "accumulate")
+    _wa = _area_acc * _mask_acc
+    _ocean_area_l = jnp.sum(_wa)
+    _target_mass_l = jnp.sum(_cast(rhs, _M, "accumulate") * _area_acc)
+    _actual_mass_l = jnp.sum(_cast(eta_new, _M, "accumulate") * _area_acc)
+    if _is_multi_process():
+        _ocean_area, _target_mass, _actual_mass = _batch_allreduce_mpi(
+            [_ocean_area_l, _target_mass_l, _actual_mass_l], op="sum",
+        )
+    else:
+        _ocean_area, _target_mass, _actual_mass = (
+            _ocean_area_l, _target_mass_l, _actual_mass_l,
+        )
     _correction = (_target_mass - _actual_mass) / jnp.maximum(_ocean_area, 1e-30)
-    eta_new = (eta_new + _correction * mask) * mask
+    eta_new = (eta_new + _correction.astype(eta_dtype) * mask) * mask
 
     # Floor clamp (mass-conserving redistribution).  In normal operation
     # this never fires; it is a safety net for extreme transients.
@@ -788,4 +909,13 @@ def barotropic_implicit_latlon_cgrid(
         u=state.u.replace(data=u_new_3d),
         v=state.v.replace(data=v_new_3d),
     )
+    if return_residual:
+        # Report the residual of the ACTUAL returned eta (after the mass
+        # projection + floor clamp), not the raw-solve residual — those
+        # post-steps add a uniform offset / redistribute mass, so the
+        # contract diagnostic must describe ``state_new.eta``.  Recompute
+        # via the same A_op; SUM-only + stop_gradient inside the helper
+        # (``_rel_resid`` imported at the solve dispatch above).
+        rel_final = _rel_resid(A_op, eta_new, rhs)
+        return state_new, (Hu_avg, Hv_avg), rel_final
     return state_new, (Hu_avg, Hv_avg)

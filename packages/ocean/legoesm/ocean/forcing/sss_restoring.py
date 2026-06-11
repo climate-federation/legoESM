@@ -130,6 +130,7 @@ class SSSRestoringConfig(NamedTuple):
     tau_restore_days_default: float = 365.0
     z1_m: float = 10.0
     ice_gate: bool = True
+    ice_gate_mode: str = "tanh"      # "tanh" | "nemo_linear"
     ice_gate_threshold: float = 0.9
     ice_gate_softness: float = 0.1   # tanh width around threshold
     regions: tuple[RegionMaskSpec, ...] = DEFAULT_OMIP2_REGIONS
@@ -286,14 +287,27 @@ def compute_sss_restoring_flux(
     """
     inv_tau_eff, region_active = build_region_masks(lat_deg, lon_deg, config)
 
-    # Ice gating: down-weight restoring linearly with ice
-    # concentration, with a soft cutoff above ``ice_gate_threshold``.
+    # Ice gating: down-weight restoring under sea ice.
+    #   "tanh"        — legoESM default: ``(1 - fr_i)`` linear weight times an
+    #                   extra soft tanh cutoff above ``ice_gate_threshold``.
+    #   "nemo_linear" — exact NEMO ``sbcssr`` ``nn_sssr_ice = 0``: the under-ice
+    #                   relaxation coefficient is ``coefice = 1 - fr_i`` (zero
+    #                   under full ice), with NO tanh cutoff.  ORCA1 RUN_REF
+    #                   uses nn_sssr_ice = 0, so this is the faithful setting.
     if config.ice_gate:
-        soft = jnp.maximum(config.ice_gate_softness, 1e-6)
-        ice_factor = 0.5 * (
-            1.0 - jnp.tanh((ice_concentration - config.ice_gate_threshold) / soft)
-        )
-        ice_factor = ice_factor * (1.0 - ice_concentration)
+        if config.ice_gate_mode == "nemo_linear":
+            ice_factor = jnp.clip(1.0 - ice_concentration, 0.0, 1.0)
+        elif config.ice_gate_mode == "tanh":
+            soft = jnp.maximum(config.ice_gate_softness, 1e-6)
+            ice_factor = 0.5 * (
+                1.0 - jnp.tanh((ice_concentration - config.ice_gate_threshold) / soft)
+            )
+            ice_factor = ice_factor * (1.0 - ice_concentration)
+        else:
+            raise ValueError(
+                f"unknown ice_gate_mode {config.ice_gate_mode!r} "
+                "(expected 'tanh' or 'nemo_linear')"
+            )
     else:
         ice_factor = jnp.ones_like(ice_concentration)
 

@@ -50,7 +50,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     vector_laplacian_cgrid,
     laplacian_cgrid,
     interp_cell_to_uface,
-    interp_cell_to_vface,
+    interp_cell_to_vface_halo,
     cell_to_cgrid_winds,
 )
 from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
@@ -198,8 +198,10 @@ def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
     return out
 
 
-# interp_cell_to_uface and interp_cell_to_vface are imported from
-# legoesm.ocean.dynamics.latlon_cgrid_operators (shared with ocean).
+# interp_cell_to_uface and interp_cell_to_vface_halo are imported from
+# legoesm.grids.operators_latlon_cgrid (shared with ocean).  The v-face
+# variant is the backend-dispatched twin of ``interp_cell_to_vface``:
+# bit-identical in serial, neighbour-averaged at MPI band cuts.
 
 
 def _face_to_cell_u(u: jnp.ndarray) -> jnp.ndarray:
@@ -361,8 +363,26 @@ def cgrid_latlon_hydrostatic_tendencies(
     dln_dx = _dBln_dx[..., nlev_g]   # squeeze trailing-1 → (n_lat, n_lon+1)
     dln_dy = _dBln_dy[..., nlev_g]
 
+    # Cell→face interps: the v-face (latitude) direction uses the
+    # halo-aware variant so a band's end faces — which are interior
+    # partition cuts under latitude-band MPI, not poles — receive the
+    # serial interior average across the cut (AD-safe sendrecv) instead
+    # of the legacy pole edge-copy.  Serial / single-rank behaviour is
+    # bit-identical (the helper falls back to ``interp_cell_to_vface``).
+    # The u-face (longitude) direction never needs a halo variant: lon
+    # is periodic and fully rank-local under band decomposition.
+    # Fused entry-level lat pads (audit lever O4; atm census probe
+    # 8460424): ONE sendrecv pair per cut carries T's v-face-interp
+    # ghost rows AND u's ghost rows — and the padded u is consumed
+    # TWICE downstream (curl circulation + the absolute-vorticity
+    # 4-pt u->v-face average), so this single exchange replaces three
+    # per tendency evaluation.  Serial/local backend: two jnp.pads,
+    # value-identical (unused ones are dead-code-eliminated).
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
+    _T_lat_pad, _u_lat_pad = pad_with_pole_bc_lat_multi((T, u), halo=1)
+
     T_u = interp_cell_to_uface(T)
-    T_v = interp_cell_to_vface(T)
+    T_v = interp_cell_to_vface_halo(T, f_pad=_T_lat_pad)
 
     pg_corr_x = R_d * T_u * dln_dx[:, :, jnp.newaxis]
     pg_corr_y = R_d * T_v * dln_dy[:, :, jnp.newaxis]
@@ -373,7 +393,7 @@ def cgrid_latlon_hydrostatic_tendencies(
         B_coeff = sigma_coord.B_full  # (nlev,)
         hybrid_factor = B_coeff * p_s[..., jnp.newaxis] / p_full
         hf_u = interp_cell_to_uface(hybrid_factor)
-        hf_v = interp_cell_to_vface(hybrid_factor)
+        hf_v = interp_cell_to_vface_halo(hybrid_factor)
         pg_corr_x = pg_corr_x * hf_u
         pg_corr_y = pg_corr_y * hf_v
 
@@ -382,7 +402,9 @@ def cgrid_latlon_hydrostatic_tendencies(
     dv_dt = -(dB_dy + pg_corr_y)
 
     # --- 8. Coriolis using absolute vorticity (ζ+f) ---
-    cor_u, cor_v = absolute_vorticity_coriolis(u, v, grid)
+    cor_u, cor_v = absolute_vorticity_coriolis(
+        u, v, grid, u_lat_pad=_u_lat_pad,
+    )
     du_dt = du_dt + cor_u
     dv_dt = dv_dt + cor_v
 
@@ -399,7 +421,7 @@ def cgrid_latlon_hydrostatic_tendencies(
     if _hybrid:
         # Hybrid closure: dp = dA + dB * p_s varies horizontally.
         dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
-        dp_v = interp_cell_to_vface(dp)  # (n_lat+1, n_lon, nlev)
+        dp_v = interp_cell_to_vface_halo(dp)  # (n_lat+1, n_lon, nlev)
         div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
         _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
         D_total_p = _cumsum_dp[..., -1]
@@ -411,7 +433,7 @@ def cgrid_latlon_hydrostatic_tendencies(
         # Flux-form: div(dp_k * v) where dp_k = p_s * dsigma_k
         dp = p_s[..., jnp.newaxis] * dsigma  # (n_lat, n_lon, nlev)
         dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
-        dp_v = interp_cell_to_vface(dp)  # (n_lat+1, n_lon, nlev)
+        dp_v = interp_cell_to_vface_halo(dp)  # (n_lat+1, n_lon, nlev)
         div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
         _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
         D_total_p = _cumsum_dp[..., -1]
@@ -442,9 +464,9 @@ def cgrid_latlon_hydrostatic_tendencies(
         _pad_axes = ((0, 0),) * (_mf_inner.ndim - 1) + ((1, 1),)
         mass_flux = jnp.pad(_mf_inner[..., :-1], _pad_axes)
         mf_u = interp_cell_to_uface(mass_flux)
-        mf_v = interp_cell_to_vface(mass_flux)
+        mf_v = interp_cell_to_vface_halo(mass_flux)
         ps_u = interp_cell_to_uface(p_s[..., jnp.newaxis])[..., 0]
-        ps_v = interp_cell_to_vface(p_s[..., jnp.newaxis])[..., 0]
+        ps_v = interp_cell_to_vface_halo(p_s[..., jnp.newaxis])[..., 0]
         du_dt = du_dt + vertical_advection_hybrid(u, mf_u, ps_u, sigma_coord)
         dv_dt = dv_dt + vertical_advection_hybrid(v, mf_v, ps_v, sigma_coord)
         vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
@@ -461,7 +483,7 @@ def cgrid_latlon_hydrostatic_tendencies(
         _pad_axes_sd = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 0),)
         sigma_dot = jnp.pad(sigma_dot_inner, _pad_axes_sd)
         sd_u = interp_cell_to_uface(sigma_dot)
-        sd_v = interp_cell_to_vface(sigma_dot)
+        sd_v = interp_cell_to_vface_halo(sigma_dot)
         du_dt = du_dt + vertical_advection(u, sd_u, sigma_coord)
         dv_dt = dv_dt + vertical_advection(v, sd_v, sigma_coord)
         vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)
@@ -781,8 +803,22 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 dv_phys = (phys_tend.dv_dt.data
                            if phys_tend.dv_dt is not None
                            else jnp.zeros_like(du_phys))
+                # Cell→face coupling of physics wind tendencies.
+                # v-face: halo-aware — under latitude-band MPI the
+                # band's end rows are interior partition cuts (NOT
+                # poles), so the legacy end-row copy of
+                # ``interp_cell_to_vface`` would diverge from the
+                # serial average 0.5*(dv_phys[j-1] + dv_phys[j]) at
+                # the cut faces.  ``interp_cell_to_vface_halo`` pads
+                # one lat row through the backend-dispatched
+                # ``pad_with_pole_bc_lat`` (AD-safe ``_sendrecv_vjp``
+                # sendrecv at cuts) and is bit-identical to the legacy
+                # convention in serial / at true poles.
+                # u-face: no halo needed — lon is periodic and fully
+                # rank-local under band decomposition, so the legacy
+                # wrap interp already matches serial row-by-row.
                 du = du + interp_cell_to_uface(du_phys)
-                dv = dv + interp_cell_to_vface(dv_phys)
+                dv = dv + interp_cell_to_vface_halo(dv_phys)
 
                 # Physics tracer tendencies (only for tracers already in state;
                 # introducing new tracer keys here would break the RK

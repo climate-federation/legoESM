@@ -126,7 +126,7 @@ sign flip `(-u, -v)`, matching the existing fold behaviour.
 the eORCA1 tripolar grid (332×362, ~1°) using NEMO's native bathymetry
 and land mask.
 
-**Runner:** `scripts/global_overturning/run_tripole_20yr.py` (the runner
+**Runner:** `scripts/run/global_overturning/run_tripole_20yr.py` (the runner
 referenced earlier in this doc — `run_global_overturning_tripole.py` —
 was the bring-up version with the 4 documented bugs and was deleted on
 2026-05-20 after the production runner stabilised.)
@@ -202,7 +202,7 @@ Applied to all three surface tendency formulas (momentum, heat, freshwater).
 
 #### Bug 4: Shelf cell masking
 **Commit:** `9a3c5ad3`
-**File:** `scripts/global_overturning/run_tripole_20yr.py` (then `run_global_overturning_tripole.py`)
+**File:** `scripts/run/global_overturning/run_tripole_20yr.py` (then `run_global_overturning_tripole.py`)
 
 z-star vertical coordinate scales the first-layer thickness as
 `dz_ref[0] · H_bathy / H_max`. On a 27 m shelf cell with `H_max = 5500 m`
@@ -273,7 +273,7 @@ ACC/AMOC structure visible in the cross-grid comparison plots
 ### Reproducing the 20-yr production run
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/global_overturning/run_tripole_20yr.py \
+JAX_ENABLE_X64=1 python scripts/run/global_overturning/run_tripole_20yr.py \
     --grid data/grids/eORCA1.2_mesh_mask.nc \
     --etopo data/bathymetry/etopo_1deg.nc --years 20
 ```
@@ -323,7 +323,7 @@ shaped the entire phased rollout:
   C-grid T→u/v interpolation, land-cell zeroing.
 - `tests/ocean/unit/test_tripole_fold.py` — 21 fold/rotation/integration
   tests.
-- `scripts/global_overturning/run_tripole_20yr.py` — ORCA1
+- `scripts/run/global_overturning/run_tripole_20yr.py` — ORCA1
   production runner used for the 20-year reference run. The bring-up
   variant `run_global_overturning_tripole.py` plus the
   `_diagnose_tripole_blowup.py`, `_probe_fold_cells.py`,

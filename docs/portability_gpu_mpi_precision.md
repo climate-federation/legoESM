@@ -46,3 +46,34 @@ JAX_PLATFORMS=cuda .venv/bin/python scripts/run/run_spectral_les.py --dynamic --
 # MPI:
 bash scripts/experiment/run_mpi_tests.sh 2
 ```
+
+## Nondeterminism sources
+
+"Same config, same machine" does **not** guarantee bit-identical output in every
+configuration. Known sources, and what bounds them:
+
+- **GPU reduction order.** Floating-point addition is non-associative; XLA on
+  GPU may reorder reductions (and pick different kernels after autotuning), so
+  global sums / norms can differ in the last bits between runs and between
+  driver/XLA versions. CPU runs are deterministic. For strict GPU determinism
+  set `XLA_FLAGS=--xla_gpu_deterministic_ops=true` (slower).
+- **XLA autotuning + persistent JIT cache.** A warm compilation cache
+  (`LEGOESM_JAX_CACHE_DIR`) replays previously-selected kernels; a cold cache
+  may autotune to different ones. Disable with `LEGOESM_JAX_CACHE_DISABLE=1`
+  when bisecting numeric differences.
+- **fp32 vs x64.** The unit tier and Metal paths run fp32; scientific runs use
+  `JAX_ENABLE_X64=1`. Comparing across precision modes is a model change, not
+  nondeterminism — see `runtime/precision.py` (`PrecisionPolicy`).
+- **MPI reductions.** `global_sum_mpi` uses `allreduce(SUM)`; MPI libraries
+  guarantee the same reduction order for a fixed rank count/topology, so a
+  fixed `-np` is reproducible, but results differ across rank counts (different
+  partial-sum trees). Serial-vs-MPI equality is therefore tested to tolerance,
+  not bitwise (`tests/distributed/`).
+- **Metal CPU fallback.** On Apple Silicon spectral work routes to CPU
+  (`parallel/metal.py`); a run that silently fell back executes different
+  kernels than a GPU run — check `get_backend()` when comparing machines.
+- **What IS deterministic.** All model randomness descends from
+  `config.seed` via `runtime/rng.py` (SHA-256 named subkeys, order-independent),
+  and the run manifest records seeds + `state_digest` so
+  `legoesm reproduce <manifest> --check` verifies bit-identical replay on the
+  same platform/precision/backend.

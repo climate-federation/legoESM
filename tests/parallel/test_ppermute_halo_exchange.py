@@ -122,17 +122,25 @@ def test_spmd_vector_halo_matches_serial():
     np.testing.assert_array_equal(np.asarray(gv), np.asarray(rv))
 
 
-def test_halo2_falls_back_to_allgather_and_matches():
-    """halo=2 is all_gather-only; with the ppermute default ON it must still
-    fall back and bit-match serial (codex: lock the fallback)."""
+def test_halo2_routes_ppermute_multiface_and_matches():
+    """halo=2 with the ppermute default ON routes to the multiface
+    ppermute kernel (k=1 at 6 devices) — it must bit-match serial AND
+    actually emit collective-permute, not the retired all_gather
+    fallback (the pre-multiface code hard-routed halo=2 to
+    allgather_h2; see tests/parallel/test_ppermute_multiface.py for
+    the full multiface matrix)."""
     n = 8
     data = jax.random.normal(jax.random.PRNGKey(4), (6, n, n))
     set_halo_backend("local")
     ref = pad_halo(data, halo=2)
     cx.set_ppermute_default(True)
-    got = cx.explicit_pad_halo(data, _mesh(), halo=2)
+    mesh = _mesh()
+    got = cx.explicit_pad_halo(data, mesh, halo=2)
     assert got.shape == ref.shape == (6, n + 4, n + 4)
     np.testing.assert_array_equal(np.asarray(got), np.asarray(ref))
+    hlo = jax.jit(lambda d: cx.explicit_pad_halo(d, mesh, halo=2)).lower(
+        data).compile().as_text()
+    assert "collective-permute" in hlo and "all-gather" not in hlo
 
 
 def test_ppermute_schedule_covers_24_adjacencies_once():

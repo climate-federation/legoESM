@@ -215,17 +215,25 @@ class TestPadHaloLatlonTripolar:
     (codex #353 finding 3)."""
 
     def _run(self, layout, field, *, vector):
-        from legoesm.grids.halo import set_halo_backend, get_halo_backend
+        from legoesm.grids.halo import (
+            set_halo_backend, get_halo_backend, get_mpi_topology,
+        )
         from legoesm.grids.halo_latlon import (
             pad_halo_latlon, pad_halo_latlon_vector,
         )
-        prev = get_halo_backend()
+        # Robust restore (bisect 8459341): a leaked armed backend from an
+        # earlier file must be re-armed WITH its topology, not as a bare
+        # "mpi" string (which set_halo_backend rejects).
+        prev, prev_topo = get_halo_backend(), get_mpi_topology()
         try:
             set_halo_backend("mpi", layout)
             fn = pad_halo_latlon_vector if vector else pad_halo_latlon
             return fn(field, halo=1)
         finally:
-            set_halo_backend(prev)
+            if prev == "mpi":
+                set_halo_backend(prev, prev_topo)
+            else:
+                set_halo_backend(prev)
 
     def test_scalar_north_fold(self, single_rank_tripole_layout, tripole_geom):
         fold = tripole_geom.fold
@@ -258,16 +266,22 @@ class TestPadWithPoleBcTripolar:
     mpi4jax needed)."""
 
     def _run(self, layout, field, *, north_fold):
-        from legoesm.grids.halo import set_halo_backend, get_halo_backend
+        from legoesm.grids.halo import (
+            set_halo_backend, get_halo_backend, get_mpi_topology,
+        )
         from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
-        prev = get_halo_backend()
+        # Robust restore — see TestPadHaloLatlonTripolar._run.
+        prev, prev_topo = get_halo_backend(), get_mpi_topology()
         try:
             set_halo_backend("mpi", layout)
             return pad_with_pole_bc_lat(
                 field, halo=1, south_value=0.0, north_value=0.0,
                 is_vector_v=False, north_fold=north_fold)
         finally:
-            set_halo_backend(prev)
+            if prev == "mpi":
+                set_halo_backend(prev, prev_topo)
+            else:
+                set_halo_backend(prev)
 
     def test_default_keeps_north_wall(self, single_rank_tripole_layout):
         """Backward-compat: without north_fold the north stays a zero wall

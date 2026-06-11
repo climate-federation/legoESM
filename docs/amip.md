@@ -54,7 +54,7 @@ python scripts/validate/smoke_test_amip_all_grids.py --days 1
 #   cubed_sphere/{centered,finite_volume,cdgrid}
 #   latlon/{centered,finite_volume,latlon_cgrid}
 #   gaussian/spectral
-#   voronoi/mpas (--dt 60 due to MPAS hidden CFL constraint)
+#   voronoi/mpas (standard dt; integrator auto-mapped to ssp_rk54_scan)
 ```
 
 See [`forcing/AMIP.md`](forcing/AMIP.md) for the iteration-by-iteration trace

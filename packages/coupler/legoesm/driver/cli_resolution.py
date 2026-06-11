@@ -5,7 +5,7 @@ iter-115 (codex iter-114-followup HIGH-1, MEDIUM-2): centralized
 the iter-95/102/107/108/110/111/112 dispatch + validation logic
 so that ``run_atmosphere_test_matrix.py``,
 ``run_ocean_test_matrix.py``,
-``scripts/ocean_test_matrix/cli.py``, and
+``scripts/matrix/ocean_test_matrix/cli.py``, and
 ``run_omip.py`` (which iter-114 codex review caught was
 missing the dispatch entirely) all share a single
 implementation.

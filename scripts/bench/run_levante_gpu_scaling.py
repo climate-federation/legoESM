@@ -76,8 +76,19 @@ def _configure_mpi_gpu_affinity() -> None:
     local_rank = (
         os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
         or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK")
-        or os.environ.get("SLURM_LOCALID")
     )
+    if local_rank is None:
+        # SLURM_LOCALID is exported even in a plain sbatch batch step
+        # (ntasks=1, no srun).  Pinning on it there hid all but GPU 0
+        # from single-process multi-GPU runs: every "2-GPU" case ran on
+        # one device with efficiency silently pinned at exactly 0.5
+        # (Ginsburg jobs 8454397/8454737, 2026-06-10).  Only honor it
+        # for genuine multi-task launches.
+        slurm_localid = os.environ.get("SLURM_LOCALID")
+        slurm_ntasks = os.environ.get("SLURM_NTASKS", "1")
+        if slurm_localid is not None and slurm_ntasks.isdigit() \
+                and int(slurm_ntasks) > 1:
+            local_rank = slurm_localid
     if local_rank is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = local_rank
 
@@ -235,6 +246,15 @@ class TimingResult:
     cells_per_gpu: int
     mcells_per_s: float
     scaling_efficiency: float = 1.0
+    # Collective-permute op census of the compiled TIMED executable
+    # (comm-minimisation step 1: measurement infrastructure for the
+    # upcoming halo-fusion work).  ``-1`` = not measured — single
+    # device, MPI, non-cubed-sphere, or the HLO guard was skipped via
+    # LEGOESM_SPMD_FORCE_ALLGATHER.  Sync ops lower as
+    # ``collective-permute``; async pairs as ``-start``/``-done``.
+    hlo_collective_permute: int = -1
+    hlo_collective_permute_start: int = -1
+    hlo_collective_permute_done: int = -1
 
 
 @dataclass
@@ -382,31 +402,346 @@ def _valid_gpu_counts(max_gpus: int, grid_type: str = "cubed-sphere") -> list[in
     """Return valid GPU counts up to max_gpus for the given grid type.
 
     Cubed-sphere requires divisors of 6 (face sharding) or 6*k^2 (tiling).
-    Icosahedral and spectral grids support any GPU count.  Lat-lon is
-    single-GPU only here: the benchmark has no sharded step yet (the multi-GPU
-    branch raises NotImplementedError), so scheduling n_gpus>1 would only emit
-    failing points.
+    Icosahedral supports any GPU count — its single-process multi-GPU path
+    routes through ``make_voronoi_sharded_step``, a real domain-decomposed
+    ``shard_map`` step.  Lat-lon and spectral are single-GPU only: neither
+    has a validated single-process multi-GPU sharded step.  Lat-lon raises
+    NotImplementedError for n_gpus > 1; spectral creates a level mesh and
+    shards the state but then falls through to plain ``model.step``, so a
+    "multi-GPU" spectral point would just re-time the single-device program
+    (the 1->2 GPU exactly-0.500-efficiency replication failure mode).
     """
-    if grid_type == "latlon":
+    if grid_type in ("latlon", "spectral"):
+        # Reason: no validated single-process multi-GPU sharded step.
         return [1]
-    if grid_type in ("icosahedral", "spectral"):
+    if grid_type == "icosahedral":
         return list(range(1, max_gpus + 1))
 
-    # Cubed-sphere constraints
-    valid = []
-    # face-only: divisors of 6
-    for n in [1, 2, 3, 6]:
-        if n <= max_gpus:
-            valid.append(n)
-    # sub-face tiling: 6*k^2
-    k = 2
-    while True:
-        n = 6 * k * k
-        if n > max_gpus:
-            break
-        valid.append(n)
-        k += 1
-    return sorted(set(valid))
+    # Cubed-sphere constraints: face-only divisors of 6. Sub-face tiled
+    # counts (6*k^2 = 24, 54, ...) are EXCLUDED until the tiled SPMD halo
+    # path is validated — make_sharded_step only activates the SPMD halo
+    # backend for face-only tiling, so tiled runs would execute on an
+    # unasserted path (codex review 2026-06-10).
+    return [n for n in [1, 2, 3, 6] if n <= max_gpus]
+
+
+# ===========================================================================
+# Sharding tripwire (single-process multi-GPU cubed-sphere)
+# ===========================================================================
+
+def _assert_expected_sharding(state, dev_config, *, where: str) -> None:
+    """Loud tripwire: face-leading leaves must actually be face-sharded.
+
+    Guards against the 1->2 GPU replication bug (exactly 0.500 scaling
+    efficiency at identical wall time): the timed executable silently
+    ran with a fully replicated state, so every device computed the
+    whole globe.  Verifies, leaf by leaf, that *state* carries the
+    sharding the cubed-sphere SPMD policy expects — the SAME policy
+    (``create_output_shardings``) used for the ``out_shardings`` of
+    ``CompiledShardedStep`` and of the timed scan runner:
+
+    * face-leading ``jax.Array`` leaves must be split across all
+      ``dev_config.n_devices`` devices, with per-shard shape equal to
+      ``NamedSharding.shard_shape`` (i.e. NOT replicated);
+    * scalar/constant leaves (expected spec ``P()``) are allowed to be
+      replicated;
+    * non-``jax.Array`` leaves are skipped.
+
+    Only meaningful for the cubed-sphere face-sharding policy — callers
+    must not invoke it for voronoi/level/lat-lon meshes.  No-op when
+    ``dev_config.mesh is None`` or ``n_devices == 1``.
+
+    Raises ``RuntimeError`` on the first mismatch — never warn-only.
+    """
+    if (
+        dev_config is None
+        or getattr(dev_config, "mesh", None) is None
+        or dev_config.n_devices == 1
+    ):
+        return
+
+    import jax  # lazy: see top-of-file note on JAX init order
+    from jax.sharding import PartitionSpec as _P
+    from legoesm.parallel.sharded_dynamics import create_output_shardings
+
+    expected = create_output_shardings(state, dev_config)
+    # ``None`` marks non-array leaves in the policy pytree (and optional
+    # ``None`` fields in the state map to ``None`` in the policy); flatten
+    # BOTH sides with the same none-as-leaf convention so the two
+    # flattenings stay aligned one-to-one.
+    _none_leaf = lambda x: x is None
+    state_leaves = jax.tree_util.tree_flatten_with_path(
+        state, is_leaf=_none_leaf,
+    )[0]
+    expected_leaves = jax.tree_util.tree_leaves(expected, is_leaf=_none_leaf)
+    if len(state_leaves) != len(expected_leaves):
+        raise RuntimeError(
+            f"{where}: sharding tripwire cannot align {len(state_leaves)} "
+            f"state leaves with {len(expected_leaves)} expected shardings"
+        )
+
+    n_dev = dev_config.n_devices
+    for (path, leaf), exp in zip(state_leaves, expected_leaves):
+        if exp is None or not isinstance(leaf, jax.Array):
+            continue
+        name = jax.tree_util.keystr(path)
+        actual = leaf.sharding
+        try:
+            matches = actual.is_equivalent_to(exp, leaf.ndim)
+        except (AttributeError, TypeError):
+            matches = actual == exp
+        if not matches:
+            raise RuntimeError(
+                f"{where}: leaf {name} sharding {actual} does not match "
+                f"expected {exp} — state lost its face sharding (every "
+                f"device would compute the full globe)"
+            )
+        if exp.spec == _P():
+            continue  # replicated scalars/constants: allowed
+        shards = leaf.addressable_shards
+        if len(shards) != n_dev:
+            raise RuntimeError(
+                f"{where}: leaf {name} has {len(shards)} addressable "
+                f"shard(s), expected {n_dev}"
+            )
+        want = exp.shard_shape(leaf.shape)
+        for shard in shards:
+            if shard.data.shape != want:
+                raise RuntimeError(
+                    f"{where}: leaf {name} shard shape {shard.data.shape} "
+                    f"!= expected {want} (full shape {leaf.shape}) — leaf "
+                    f"is replicated, not face-sharded"
+                )
+
+
+# ===========================================================================
+# Timed scan runner — shared between the dry-dycore and moist-segment paths
+# ===========================================================================
+
+def _count_collective_permute_ops(hlo_text: str) -> dict[str, int]:
+    """Census of collective-permute ops in a compiled HLO module.
+
+    Counts opcode *applications* (``<opcode>(``) so each op is counted
+    once regardless of how many times its result name appears.  Sync
+    halo exchanges lower to ``collective-permute``; the async form
+    lowers to ``collective-permute-start`` / ``collective-permute-done``
+    pairs.  Comm-minimisation sequencing step 1: this census is the
+    before/after metric for the upcoming halo-fusion work.
+    """
+    import re
+    return {
+        "collective-permute": len(
+            re.findall(r"\bcollective-permute\(", hlo_text)),
+        "collective-permute-start": len(
+            re.findall(r"\bcollective-permute-start\(", hlo_text)),
+        "collective-permute-done": len(
+            re.findall(r"\bcollective-permute-done\(", hlo_text)),
+    }
+
+
+def _hlo_census_fields(hlo_counts: dict[str, int] | None) -> dict[str, int]:
+    """``TimingResult`` kwargs for the collective-permute census.
+
+    Empty dict (→ the ``-1`` "not measured" defaults) when the HLO
+    guard did not run.
+    """
+    if hlo_counts is None:
+        return {}
+    return {
+        "hlo_collective_permute": hlo_counts["collective-permute"],
+        "hlo_collective_permute_start": hlo_counts["collective-permute-start"],
+        "hlo_collective_permute_done": hlo_counts["collective-permute-done"],
+    }
+
+
+def _build_timed_scan_runner(
+    *,
+    step_fn,
+    state,
+    dev_config,
+    grid_type: str,
+    n_timing: int,
+    dt_static: float,
+    n_grid: int,
+    n_levels: int,
+    n_gpus: int,
+    precision: str,
+    is_cs_distributed: bool,
+    is_mpi: bool,
+):
+    """Build the timed ``lax.scan`` executable with the full sharded-path
+    guard stack — ONE implementation for the dry-dycore and the
+    moist/segment benchmark branches (codex BLOCKER: the segment branch
+    bypassed every guard below and could record replicated-compute
+    timings as multi-GPU scaling rows).
+
+    Call AFTER warmup, with *state* being the post-warmup seed of the
+    timed scan.  Applies, in order:
+
+    1. the ``_scan_shardings`` gate — explicit in/out shardings for the
+       OUTER timed jit, built once from the same shared leaf policy
+       (``create_output_shardings``) as the inner compiled step.  Only
+       for single-process multi-device cubed-sphere runs; ``None``
+       (plain ``jax.jit``) everywhere else — zero behavior change for
+       single-GPU / MPI / non-cubed-sphere rows;
+    2. sharding tripwire #1 on the post-warmup seed state;
+    3. the compiled-HLO hot-path guard: zero full-cube all-gathers in
+       the timed executable (LEGOESM_SPMD_FORCE_ALLGATHER=1 skips with
+       a loud warning), plus the collective-permute op census (printed
+       and returned for the result row metadata).  The
+       ``lower().compile()`` result is reused as the timed runner, so
+       the guard adds no extra compilation;
+    4. precompile against leaf-cloned state (so the timed run still
+       starts from the post-warmup state, and queued XLA work cannot
+       overlap the timed region — block on the precompile OUTPUT);
+    5. sharding tripwire #2 on the precompile output (the actual timed
+       executable's result).
+
+    ``dt_static`` is captured in the scan-body closure as a Python
+    float: several dycore step methods do Python ``==`` / ``if dt > 0``
+    checks against a cached dt (spectral tracer filter, SI matrix
+    cache, sponge factors), which require a concrete value, and a
+    fixed-dt benchmark wants dt folded into compiled constants anyway.
+
+    Returns ``(scan_runner, hlo_collective_counts)`` where the counts
+    dict is ``None`` whenever the sharded gate is off or the HLO guard
+    was skipped.
+    """
+    import jax
+
+    # ------------------------------------------------------------------
+    # State-sharding pytree for the *timed* executable.  The inner
+    # compiled step constrains its own in/out shardings, but the
+    # program actually measured is the OUTER scan-runner jit — without
+    # explicit shardings on it XLA may run the whole scan replicated
+    # (the 1->2 GPU "exactly 0.500 efficiency, identical wall time"
+    # bug).  Built ONCE from the same policy as the inner step's
+    # out_shardings; also gates the `_assert_expected_sharding`
+    # tripwire calls below.
+    # ------------------------------------------------------------------
+    _scan_shardings = None
+    if (
+        grid_type == "cubed-sphere"
+        and dev_config is not None
+        and dev_config.mesh is not None
+        and dev_config.n_devices > 1
+        and not is_cs_distributed
+        and not is_mpi
+    ):
+        from legoesm.parallel.sharded_dynamics import create_output_shardings
+        _scan_shardings = create_output_shardings(state, dev_config)
+
+    # Tripwire #1: after compile + warmup the state that seeds the timed
+    # scan must still be face-sharded.  Loud RuntimeError, never a
+    # warning — a replicated state here means every device computes the
+    # full globe and the timing is meaningless.
+    if _scan_shardings is not None:
+        _assert_expected_sharding(state, dev_config, where="after warmup")
+
+    # Build dtype-safe scan runner (prevents float32→float64 promotion
+    # from breaking scan's type-matching requirement).
+    input_dtypes = jax.tree.map(
+        lambda x: x.dtype if hasattr(x, "dtype") else None, state)
+
+    def _run(st):
+        def _body(carry, _):
+            new = step_fn(carry, dt_static)
+            new = jax.tree.map(
+                lambda x, d: x.astype(d)
+                if d is not None and hasattr(x, "astype") else x,
+                new, input_dtypes,
+            )
+            return new, None
+        return jax.lax.scan(_body, st, None, length=n_timing)[0]
+
+    # Constrain the MEASURED executable too: explicit in/out shardings
+    # on the outer scan jit (same pytree as the inner step's
+    # out_shardings).  Without them the timed program is free to run
+    # replicated even when the inner step is sharded.
+    if _scan_shardings is not None:
+        scan_runner = jax.jit(
+            _run,
+            in_shardings=(_scan_shardings,),
+            out_shardings=_scan_shardings,
+        )
+    else:
+        scan_runner = jax.jit(_run)
+
+    # ------------------------------------------------------------------
+    # Once-per-config compiled-HLO hot-path guard (codex BLOCKER 3): the
+    # TIMED program must contain zero all-gather ops with full-cube face
+    # extent.  The job-8456476 probe proved such gathers mean every
+    # device computes the whole globe (per-device FLOPs ratio 1.00)
+    # while the sharding tripwires above still pass — sharded state,
+    # replicated compute.  Gated to single-process multi-device
+    # cubed-sphere runs (the `_scan_shardings` gate); MPI and other
+    # grids are untouched.  The lower().compile() result is reused as
+    # the timed runner, so the guard adds no extra compilation.
+    # ------------------------------------------------------------------
+    hlo_counts = None
+    if _scan_shardings is not None:
+        if os.environ.get("LEGOESM_SPMD_FORCE_ALLGATHER", "") == "1":
+            print(
+                "    WARNING: LEGOESM_SPMD_FORCE_ALLGATHER=1 — the "
+                "all_gather DIAGNOSTIC halo backend is active; skipping "
+                "the full-cube all-gather HLO guard.  Timing rows from "
+                "this run measure the compute-replicating backend and "
+                "must not be quoted as scaling numbers.",
+                flush=True,
+            )
+        else:
+            from legoesm.parallel.cubesphere_exchange import (
+                assert_no_fullcube_allgather,
+            )
+            _compiled_runner = scan_runner.lower(state).compile()
+            _hlo_text = _compiled_runner.as_text()
+            assert_no_fullcube_allgather(
+                _hlo_text, n=n_grid,
+                context=(
+                    f"timed scan runner (C{n_grid}/L{n_levels}, "
+                    f"n_gpus={n_gpus}, {precision})"
+                ),
+            )
+            print(
+                "    HLO guard: hot path clean — no full-cube all-gather "
+                "ops in the timed executable",
+                flush=True,
+            )
+            hlo_counts = _count_collective_permute_ops(_hlo_text)
+            print(
+                f"    HLO census: {hlo_counts['collective-permute']} "
+                f"collective-permute, "
+                f"{hlo_counts['collective-permute-start']} -start, "
+                f"{hlo_counts['collective-permute-done']} -done op(s) "
+                f"in the timed executable",
+                flush=True,
+            )
+            scan_runner = _compiled_runner
+
+    # Pre-compile the scan runner without mutating the timed state.
+    # Re-binding ``state`` to the precompile output would start the
+    # *timing* run from state advanced by ``n_timing`` extra steps —
+    # biasing finite-time comparisons.  Clone the leaves so XLA still
+    # compiles and warms caches against identical input
+    # shapes/dtypes/sharding, but the original state remains the seed
+    # for the timed scan.  IMPORTANT: block on the *output* leaves,
+    # not the input — blocking the input does not wait for the queued
+    # kernel to finish, so XLA work could overlap with the timed
+    # region and bias measurements.
+    _precompile_state = jax.tree.map(lambda x: x, state)
+    _precompile_out = scan_runner(_precompile_state)
+    jax.block_until_ready(jax.tree.leaves(_precompile_out))
+
+    # Tripwire #2: the compiled scan runner's OUTPUT must be face-sharded
+    # — this inspects the actual timed executable's result, catching the
+    # "compiled loop feeds replicated output back" failure mode before
+    # any timing is recorded.
+    if _scan_shardings is not None:
+        _assert_expected_sharding(
+            _precompile_out, dev_config, where="after scan precompile",
+        )
+
+    return scan_runner, hlo_counts
 
 
 # ===========================================================================
@@ -555,8 +890,10 @@ def _build_segment_benchmark(
 
     Uses ModelDriver to construct the full AMIP pipeline (dynamics +
     radiation + convection + microphysics) with analytical forcing.
-    Returns (step_fn, state_carry, dt, total_cells, cells_per_gpu)
-    where step_fn wraps run_segment(carry, 1, forcing).
+    Returns (step_fn, state_carry, dt, total_cells, cells_per_gpu,
+    dev_config) where step_fn wraps run_segment(carry, 1, forcing) and
+    dev_config is the driver's resolved DeviceConfig (consumed by the
+    shared timed-scan-runner guard stack).
     """
     import jax
     import jax.numpy as jnp
@@ -601,6 +938,26 @@ def _build_segment_benchmark(
 
     driver = ModelDriver(config)
     driver.setup()
+
+    # Tripwire (mirrors the dry path's create_device_mesh check): the
+    # row below is labeled with n_gpus, so the resolved device config
+    # MUST actually have that many devices.  The runtime silently
+    # clamps when fewer devices are visible (e.g. CUDA_VISIBLE_DEVICES
+    # mishap) — without this check the segment branch could record
+    # "2-GPU" rows from de-facto 1-device (replicated) programs.
+    # Skipped under MPI, where n_devices is the per-rank count.
+    dev_config = driver._device_config
+    if (
+        dev_config is not None
+        and not dev_config.is_distributed
+        and dev_config.n_devices != n_gpus
+    ):
+        raise RuntimeError(
+            f"requested n_gpus={n_gpus} but the driver's device config "
+            f"resolved to {dev_config.n_devices} device(s) — "
+            f"refusing to record a mislabeled scaling row "
+            f"(visible devices: {len(jax.devices())})"
+        )
 
     # Prepare run context (builds physics pipeline, solar, ozone, etc.)
     ctx = driver._prepare_run_context(0, config.start_day, restore_carry=False)
@@ -647,8 +1004,19 @@ def _build_segment_benchmark(
         albedo_ocean=config.albedo_ocean,
         ghg_vmr_override=ctx.get("ghg_vmr"),
         owned_face_ids=None,
+        # Single-process multi-GPU: pin carry/forcing in/out shardings
+        # on the segment JITs (third replication site).  The internal
+        # mesh gate makes this a no-op for 1-GPU rows (mesh is None);
+        # under MPI the per-rank config must NOT carry single-process
+        # shardings, so pass None there.
+        device_config=(
+            dev_config
+            if dev_config is not None and not dev_config.is_distributed
+            else None
+        ),
     )
-    # Use the non-donating variant for benchmarking (safe with scan)
+    # Use the non-donating variant for benchmarking (safe with scan).
+    # With a live mesh this is the non-donating SHARDED jit wrapper.
     run_segment = run_segment_obj.raw
 
     # Pack initial carry.  Iter 10: route the held_* arrays through
@@ -691,6 +1059,29 @@ def _build_segment_benchmark(
         o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
     )
 
+    # Single-process multi-GPU: shard the carry AND forcing across the
+    # mesh BEFORE the segment, exactly as the production driver does
+    # (``ModelDriver`` runs ``shard_pytree`` on the carry right before
+    # ``run_segment``).  ``driver.state`` is already face-sharded (from
+    # ``shard_state`` in setup), but the carry's auxiliary fields
+    # (``held_*`` radiation, ``conv_prog``, accumulators, ``T_land``) and
+    # the forcing (``o3_vmr``, ``sst``/``sic``) are built UNSHARDED here
+    # — and the segment now MATCHES the input layout rather than
+    # re-deriving one, so without this the face-leading aux/forcing
+    # leaves would stay replicated (every device computing the full
+    # globe for them) and the ``_assert_expected_sharding`` tripwire
+    # below correctly fails.  Same gate as ``device_config`` above
+    # (multi-device, live mesh, single-process — NOT MPI).
+    if (
+        dev_config is not None
+        and not dev_config.is_distributed
+        and dev_config.mesh is not None
+        and dev_config.n_devices > 1
+    ):
+        from legoesm.parallel.mesh import shard_pytree
+        carry = shard_pytree(carry, dev_config)
+        forcing = shard_pytree(forcing, dev_config)
+
     # Total cells
     if grid_type == "cubed-sphere":
         total_cells = 6 * n_grid * n_grid * n_levels
@@ -706,7 +1097,7 @@ def _build_segment_benchmark(
     def step_fn(c, _dt):
         return _run_seg(c, 1, _forcing)
 
-    return step_fn, carry, dt, total_cells, cells_per_gpu
+    return step_fn, carry, dt, total_cells, cells_per_gpu, dev_config
 
 
 def _run_segment_benchmark(
@@ -732,7 +1123,8 @@ def _run_segment_benchmark(
     # RRTMG optics are preloaded inside _build_segment_benchmark() via
     # ModelDriver.setup() → _create_physics() → preload_rrtmgp_optics().
 
-    step_fn, carry, dt_used, total_cells, cells_per_gpu = _build_segment_benchmark(
+    (step_fn, carry, dt_used, total_cells, cells_per_gpu,
+     dev_config) = _build_segment_benchmark(
         physics_level=physics_level,
         grid_type=grid_type,
         n_grid=n_grid,
@@ -768,33 +1160,38 @@ def _run_segment_benchmark(
     jax.block_until_ready(jax.tree.leaves(carry))
     warmup_time = time.perf_counter() - t_warmup_start
 
-    # Timed steps via lax.scan
-    input_dtypes = jax.tree.map(
-        lambda x: x.dtype if hasattr(x, "dtype") else None, carry)
+    # MPI detection (mirrors the dry path): the shared runner's sharded
+    # guard stack must stay off for MPI ranks.
+    _rank, _n_ranks = 0, 1
+    try:
+        from mpi4py import MPI as _MPI
+        _rank, _n_ranks = _MPI.COMM_WORLD.Get_rank(), _MPI.COMM_WORLD.Get_size()
+    except ImportError:
+        pass
+    _is_mpi = _n_ranks > 1
 
-    # dt is captured in the closure as a Python float so dycore step
-    # methods that do `if dt == cached_dt` checks see a concrete value.
-    _dt_static = float(dt_used)
-
-    @jax.jit
-    def _scan_run(c):
-        def _body(carry, _):
-            new = step_fn(carry, _dt_static)
-            new = jax.tree.map(
-                lambda x, d: x.astype(d)
-                if d is not None and hasattr(x, "astype") else x,
-                new, input_dtypes,
-            )
-            return new, None
-        return jax.lax.scan(_body, c, None, length=n_timing)[0]
-
-    # Pre-compile scan against a leaf-cloned carry so the timed run
-    # starts from the post-warmup state rather than state advanced by
-    # ``n_timing`` extra steps.  Iter 1 made this fix in the bare-dycore
-    # benchmark; iter 3 extends it to the segment-driver path here.
-    _precompile_carry = jax.tree.map(lambda x: x, carry)
-    _precompile_out = _scan_run(_precompile_carry)
-    jax.block_until_ready(jax.tree.leaves(_precompile_out))
+    # Timed steps via lax.scan — through the SAME shared runner +
+    # sharding gate + tripwires + HLO guard as the dry-dycore path
+    # (codex BLOCKER: this branch used to bypass all of them).  The
+    # scan carries a SegmentCarry; ``create_output_shardings`` is the
+    # shared leaf policy (face-leading leaves shard, scalars/diag
+    # accumulators replicate).
+    scan_runner, _hlo_counts = _build_timed_scan_runner(
+        step_fn=step_fn,
+        state=carry,
+        dev_config=dev_config,
+        grid_type=grid_type,
+        n_timing=n_timing,
+        dt_static=float(dt_used),
+        n_grid=n_grid,
+        n_levels=n_levels,
+        n_gpus=n_gpus,
+        precision=precision,
+        is_cs_distributed=bool(
+            dev_config is not None and dev_config.is_distributed
+        ),
+        is_mpi=_is_mpi,
+    )
 
     # MPI barrier before timing
     try:
@@ -806,7 +1203,7 @@ def _run_segment_benchmark(
         pass
 
     t0 = time.perf_counter()
-    carry = _scan_run(carry)
+    carry = scan_runner(carry)
     jax.block_until_ready(jax.tree.leaves(carry))
 
     try:
@@ -848,6 +1245,7 @@ def _run_segment_benchmark(
         total_cells=total_cells,
         cells_per_gpu=cells_per_gpu,
         mcells_per_s=mcells_per_s,
+        **_hlo_census_fields(_hlo_counts),
     )
 
 
@@ -1116,6 +1514,19 @@ def run_benchmark(
             dev_config = active_cfg
         else:
             dev_config = create_device_mesh(n_devices=n_gpus)
+            # Tripwire (codex ppermute-multiface review): the row below is
+            # labeled with n_gpus, so the mesh MUST actually have that many
+            # devices.  create_device_mesh silently clamps when fewer
+            # devices are visible (e.g. CUDA_VISIBLE_DEVICES mishap) — the
+            # old behavior recorded "2-GPU" rows from de-facto 1-device
+            # (replicated) programs without complaint.
+            if dev_config.n_devices != n_gpus:
+                raise RuntimeError(
+                    f"requested n_gpus={n_gpus} but the device mesh "
+                    f"resolved to {dev_config.n_devices} device(s) — "
+                    f"refusing to record a mislabeled scaling row "
+                    f"(visible devices: {len(jax.devices())})"
+                )
 
     backend = dev_config.backend
 
@@ -1190,6 +1601,24 @@ def run_benchmark(
     elif grid_type == "cubed-sphere" and dev_config.n_devices > 1:
         from legoesm.parallel.sharded_dynamics import make_sharded_step
         step_fn = make_sharded_step(model, dev_config, n=n_grid, nlev=n_levels)
+        # ``make_sharded_step`` itself activates the explicit SPMD halo
+        # backend for face-sharded counts (2/3/6 devices, tiling (1,1));
+        # do NOT re-activate it here — assert it actually happened.  If
+        # the "local" backend were silently left active, ``pad_halo``
+        # would fall back to implicit cross-shard reads that GSPMD
+        # resolves by replicating compute on every device (HLO probe
+        # job 8456476) — correct numbers, meaningless timings.
+        if dev_config.tiling == (1, 1):
+            from legoesm.grids.halo import get_halo_backend
+            _active_halo = get_halo_backend()
+            if _active_halo != "spmd":
+                raise RuntimeError(
+                    f"cubed-sphere single-process multi-GPU benchmark "
+                    f"requires the SPMD halo backend, but the active "
+                    f"backend is {_active_halo!r} — make_sharded_step did "
+                    f"not activate it (n_devices={dev_config.n_devices}, "
+                    f"tiling={dev_config.tiling})"
+                )
     else:
         step_fn = model.step
 
@@ -1250,52 +1679,26 @@ def run_benchmark(
     # Timed steps — use lax.scan to compile all timing steps into a
     # single XLA program, eliminating per-step host dispatch overhead
     # and enabling XLA's latency-hiding scheduler to pipeline
-    # collectives across steps.
+    # collectives across steps.  The sharding gate, both sharding
+    # tripwires, the full-cube all-gather HLO guard + collective-
+    # permute census, and the clone-precompile step all live in the
+    # shared `_build_timed_scan_runner` (also used by the moist
+    # segment branch).
     # ---------------------------------------------------------------
-
-    # Build dtype-safe scan runner (prevents float32→float64 promotion
-    # from breaking scan's type-matching requirement).
-    input_dtypes = jax.tree.map(
-        lambda x: x.dtype if hasattr(x, "dtype") else None, state)
-
-    # Capture dt as a Python float in the closure rather than passing
-    # it through scan as a traced argument.  Several dycore step methods
-    # (e.g. SpectralPrimitiveEquationModel._ensure_tracer_filter, the SI
-    # matrix cache, the sponge-factor cache) do Python `==` / `if dt > 0`
-    # checks against the cached dt — those require a concrete value.
-    # Treating dt as static also lets XLA fold dt into compiled constants,
-    # which is the right behaviour for a fixed-dt benchmark.
-    _dt_static = float(dt)
-
-    def _make_scan_runner(n, dt_const):
-        @jax.jit
-        def _run(st):
-            def _body(carry, _):
-                new = step_fn(carry, dt_const)
-                new = jax.tree.map(
-                    lambda x, d: x.astype(d)
-                    if d is not None and hasattr(x, "astype") else x,
-                    new, input_dtypes,
-                )
-                return new, None
-            return jax.lax.scan(_body, st, None, length=n)[0]
-        return _run
-
-    scan_runner = _make_scan_runner(n_timing, _dt_static)
-
-    # Pre-compile the scan runner without mutating the timed state.
-    # The previous implementation re-bound ``state`` to the precompile
-    # output, so the *timing* run started from state advanced by
-    # ``n_timing`` steps — biasing finite-time comparisons.  We clone
-    # the leaves so XLA still compiles and warms caches against
-    # identical input shapes/dtypes/sharding, but the original state
-    # remains the seed for the timed scan.  IMPORTANT: block on the
-    # *output* leaves, not the input — blocking the input does not
-    # wait for the queued kernel to finish, so XLA work could overlap
-    # with the timed region and bias measurements.  Iter 5 fix.
-    _precompile_state = jax.tree.map(lambda x: x, state)
-    _precompile_out = scan_runner(_precompile_state)
-    jax.block_until_ready(jax.tree.leaves(_precompile_out))
+    scan_runner, _hlo_counts = _build_timed_scan_runner(
+        step_fn=step_fn,
+        state=state,
+        dev_config=dev_config,
+        grid_type=grid_type,
+        n_timing=n_timing,
+        dt_static=float(dt),
+        n_grid=n_grid,
+        n_levels=n_levels,
+        n_gpus=n_gpus,
+        precision=precision,
+        is_cs_distributed=_is_cs_distributed,
+        is_mpi=_is_mpi,
+    )
 
     # Synchronize all ranks before timing for fair measurement
     try:
@@ -1356,6 +1759,7 @@ def run_benchmark(
         total_cells=total_cells,
         cells_per_gpu=cells_per_gpu,
         mcells_per_s=mcells_per_s,
+        **_hlo_census_fields(_hlo_counts),
     )
 
 
@@ -1604,6 +2008,42 @@ def run_strong_scaling(
 # ===========================================================================
 # Output: CSV, JSON, summary table
 # ===========================================================================
+
+def _device_memory_stats() -> list[dict]:
+    """Best-effort per-device memory stats for metadata.json.
+
+    ``Device.memory_stats()`` is backend/version dependent (returns
+    ``None`` on CPU, may raise on some platforms).  Returns ``{}`` or an
+    error string per device when unavailable — NEVER fails the benchmark
+    over memory accounting.
+    """
+    import jax  # lazy: see top-of-file note on JAX init order
+
+    try:
+        devices = jax.local_devices()
+    except Exception as exc:  # pragma: no cover — defensive
+        return [{"error": f"{type(exc).__name__}: {exc}"}]
+    stats = []
+    for i, d in enumerate(devices):
+        entry: dict[str, Any] = {
+            "id": getattr(d, "id", i),
+            "platform": getattr(d, "platform", "unknown"),
+        }
+        try:
+            ms = d.memory_stats()
+            entry["memory_stats"] = (
+                {
+                    str(k): (v if isinstance(v, (int, float, bool, str))
+                             else str(v))
+                    for k, v in ms.items()
+                }
+                if ms else {}
+            )
+        except Exception as exc:
+            entry["memory_stats"] = f"unavailable: {type(exc).__name__}: {exc}"
+        stats.append(entry)
+    return stats
+
 
 def write_csv(results: list[TimingResult], path: Path) -> None:
     """Write results to a CSV file."""
@@ -1969,12 +2409,22 @@ def main() -> int:
                     f"{world_size} ranks = {max_gpus} GPUs"
                 )
     else:
+        try:
+            available = len(jax.devices("gpu"))
+        except RuntimeError:
+            available = len(jax.devices())
         max_gpus = args.n_gpus
         if max_gpus <= 0:
-            try:
-                max_gpus = len(jax.devices("gpu"))
-            except RuntimeError:
-                max_gpus = len(jax.devices())
+            max_gpus = available
+        elif max_gpus > available:
+            # Fail LOUD: a silent clamp downstream produced months of
+            # replicated "multi-GPU" rows with efficiency exactly 0.5.
+            raise RuntimeError(
+                f"--n-gpus={max_gpus} requested but JAX exposes only "
+                f"{available} device(s) (CUDA_VISIBLE_DEVICES="
+                f"{os.environ.get('CUDA_VISIBLE_DEVICES')!r}). Refusing "
+                "to benchmark a clamped device count."
+            )
         if max_gpus < 1:
             max_gpus = 1
 
@@ -2144,6 +2594,9 @@ def main() -> int:
             "python_version": sys.version,
             "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
             "slurm_nodelist": os.environ.get("SLURM_NODELIST", ""),
+            # Best-effort: {} / error string per device when the backend
+            # has no memory accounting; never fails the run.
+            "device_memory_stats": _device_memory_stats(),
         }
         meta_path = output_dir / "metadata.json"
         with open(meta_path, "w", encoding="utf-8") as f:

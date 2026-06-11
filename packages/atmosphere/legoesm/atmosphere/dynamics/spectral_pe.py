@@ -36,7 +36,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
-from legoesm.runtime.backend import check_spectral_backend, get_backend
+from legoesm.parallel.metal import place_spectral_grid
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_analysis,
@@ -1100,17 +1100,13 @@ class SpectralPrimitiveEquationModel:
             )
 
         # --- Metal detection MUST happen before any float64 computation ---
-        backend = get_backend()
-        if backend == "metal":
-            self._use_cpu_for_spectral = True
-            self._cpu_device = jax.devices("cpu")[0]
-            self._default_device = jax.devices()[0]
-            self.grid = jax.device_put(grid, self._cpu_device)
-        else:
-            self.grid = grid
-            check_spectral_backend(
-                allow_unsupported=allow_unsupported_backend,
-            )
+        placement = place_spectral_grid(
+            grid, allow_unsupported=allow_unsupported_backend
+        )
+        self.grid = placement.grid
+        self._use_cpu_for_spectral = placement.use_cpu_for_spectral
+        self._cpu_device = placement.cpu_device
+        self._default_device = placement.default_device
 
         # Precompute spectral filter (time-independent) — uses self.grid
         # which is now on CPU when Metal is active.

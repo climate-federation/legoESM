@@ -86,8 +86,10 @@ def jax_native_halo_exchange(data, grid, mesh=None):
 
        This is a **legacy** entry point.  For production multi-device
        halo exchange, use the SPMD backend activated via
-       ``activate_spmd_halo_backend()`` in ``cubesphere_exchange.py``,
-       which auto-selects between all_gather and ppermute.
+       ``activate_spmd_halo_backend()`` in ``cubesphere_exchange.py``
+       (ppermute multiface exchange; all_gather only as the explicit
+       ``LEGOESM_SPMD_FORCE_ALLGATHER=1`` diagnostic — it replicates
+       compute, HLO probe job 8456476).
 
     When running on multi-GPU/TPU with JAX sharding, this uses
     ``jax.lax.ppermute`` for device-to-device communication instead of MPI.

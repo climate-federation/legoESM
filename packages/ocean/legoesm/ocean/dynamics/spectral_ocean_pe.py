@@ -46,7 +46,7 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
-from legoesm.runtime.backend import get_backend, check_spectral_backend
+from legoesm.parallel.metal import place_spectral_grid
 from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn, scale_depth
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
@@ -736,17 +736,13 @@ class SpectralOceanModel:
             else:
                 raise ValueError(msg)
 
-        backend = get_backend()
-        if backend == "metal":
-            self._use_cpu_for_spectral = True
-            self._cpu_device = jax.devices("cpu")[0]
-            self._default_device = jax.devices()[0]
-            self.grid = jax.device_put(grid, self._cpu_device)
-        else:
-            self.grid = grid
-            check_spectral_backend(
-                allow_unsupported=allow_unsupported_backend,
-            )
+        placement = place_spectral_grid(
+            grid, allow_unsupported=allow_unsupported_backend
+        )
+        self.grid = placement.grid
+        self._use_cpu_for_spectral = placement.use_cpu_for_spectral
+        self._cpu_device = placement.cpu_device
+        self._default_device = placement.default_device
 
     @staticmethod
     def _validate_config(config: SpectralOceanConfig) -> None:

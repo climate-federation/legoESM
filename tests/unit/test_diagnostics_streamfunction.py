@@ -1,7 +1,7 @@
 """Tests for ``legoesm.ocean.diagnostics_streamfunction``.
 
 The MOC and BSF helpers used to live inline in
-``scripts/global_overturning/plot_realistic_geometry_progress.py``.
+``scripts/run/global_overturning/plot_realistic_geometry_progress.py``.
 These tests verify the extraction did not change behaviour and that
 the helpers are physically sensible on simple analytical inputs.
 """

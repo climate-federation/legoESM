@@ -45,6 +45,18 @@ from legoesm.parallel.latlon_mpi import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _restore_halo_backend():
+    """``make_latlon_mpi_step`` arms the GLOBAL halo backend
+    (``set_halo_backend("mpi", layout)``) and documents that the caller
+    deactivates it.  Without this teardown the armed backend leaks into
+    later test files (bisect job 8459341: the tripole-serial suite saw
+    ``prev == "mpi"`` and failed in its own restore)."""
+    yield
+    from legoesm.grids.halo import set_halo_backend
+    set_halo_backend("local")
+
+
 @pytest.fixture(scope="module")
 def grid():
     # n_lat=16, n_lon=32 — small enough to be quick on the login node,
