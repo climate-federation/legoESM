@@ -99,6 +99,20 @@ def test_long_kernel_cloud_branch_matches_oracle():
     # Interior wake-capture >1 must NOT be capped: r_l=70um (col 10),
     # ratio=1.0 (row 20) -> 4.0.
     (70.0, 1.00, 4.0000),
+    # ASYMMETRIC bilinear (p=0.3, q=0.6; cols 6,7 rows 3,4) — swapped p/q
+    # weights or transposed table would NOT reproduce this:
+    # 0.7*0.4*0.02 + 0.3*0.4*0.28 + 0.7*0.6*0.06 + 0.3*0.6*0.50 = 0.1544.
+    (33.0, 0.18, 0.1544),
+    # Boundary semantics: r_um exactly 6 -> irr=0 -> small-collector branch
+    # (first column), ratio=0.5 row 10 -> 0.0400.
+    (6.0, 0.50, 0.0400),
+    # r_um exactly 300 -> irr=14 -> STILL bilinear (p=1), UNCAPPED: row 19
+    # (q=1) col 14 -> 2.3.
+    (300.0, 0.95, 2.3000),
+    # r_um just above 300 -> irr=15 -> large branch, capped at 1.
+    (300.0001, 0.95, 1.0000),
+    # ratio boundaries: exactly 0 -> row 0 (0.001); exactly 1 handled above.
+    (50.0, 0.00, 0.0010),
 ])
 def test_hall_kernel_matches_table_oracle(r_l_um, ratio, E_expected):
     """Hand-computed Hall-table points: grid nodes, bilinear midpoint, both
@@ -122,6 +136,15 @@ def test_hall_kernel_symmetric_nonneg_zero_safe():
     radii = jnp.asarray(np.geomspace(1e-6, 1e-3, 30))
     K = jax.jit(jax.vmap(lambda r: hall_kernel(r, 0.5 * r, jnp.asarray(0.1))))(radii)
     assert bool(jnp.all(jnp.isfinite(K))) and bool(jnp.all(K >= 0.0))
+
+
+def test_kernels_grad_safe_at_zero_radius():
+    """Zero-radius gradients must be finite (AD-safe where-before-divide) —
+    a plain where over r_s/max(r_l, tiny) NaNs the VJP at r=0."""
+    for fn in (lambda r: hall_kernel(r, r, jnp.asarray(0.4)),
+               lambda r: sedimentation_kernel(r, r, jnp.asarray(0.4))):
+        g = jax.grad(fn)(jnp.asarray(0.0))
+        assert bool(jnp.isfinite(g))
 
 
 def test_collision_kernel_dispatch_and_unknown():

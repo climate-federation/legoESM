@@ -58,6 +58,34 @@ def test_crossing_deposits_exact_mass_and_deactivates():
     assert float(dp2) == 0.0
 
 
+def test_exact_boundary_crossing_deposits_same_step():
+    """z_new == 0 exactly must deposit THIS step (crossing condition is <=, not
+    <) and never double-count."""
+    cfg = SDMConfig(terminal_velocity="rogers_yau")
+    R, dt, area = 1.0e-4, 1.0, 1.0
+    v_t = float(terminal_velocity_rogers_yau(jnp.asarray(R)))
+    state, _ = _column([R], xi=2.0e5)
+    z = jnp.asarray([v_t * dt])                  # lands exactly at z_new = 0
+    state2, z2, dp = sediment_step(state, z, 1.0, 9.0e4, 283.0, dt, area, cfg)
+    m_rep = 2.0e5 * _PREF * R**3
+    assert float(dp) == pytest.approx(m_rep / area, rel=1e-12)
+    assert float(state2.active[0]) == 0.0
+    _, _, dp2 = sediment_step(state2, z2, 1.0, 9.0e4, 283.0, dt, area, cfg)
+    assert float(dp2) == 0.0
+
+
+def test_active_droplet_at_surface_deposits_once():
+    """An active droplet already at z=0 deposits on the next step, once."""
+    cfg = SDMConfig(terminal_velocity="rogers_yau")
+    state, _ = _column([5.0e-5], xi=1.0e6)
+    z = jnp.asarray([0.0])
+    state2, z2, dp = sediment_step(state, z, 1.0, 9.0e4, 283.0, 1.0, 1.0, cfg)
+    assert float(dp) == pytest.approx(1.0e6 * _PREF * (5.0e-5) ** 3, rel=1e-12)
+    assert float(state2.active[0]) == 0.0
+    _, _, dp2 = sediment_step(state2, z2, 1.0, 9.0e4, 283.0, 1.0, 1.0, cfg)
+    assert float(dp2) == 0.0
+
+
 def test_column_rainout_conserves_water_and_orders_arrivals():
     """All drops rain out; airborne+precip conserved every step; the largest
     drop (fastest Stokes fall) arrives first."""
@@ -83,7 +111,8 @@ def test_column_rainout_conserves_water_and_orders_arrivals():
     assert np.all(np.diff(n_active) <= 0)
     t_first = (np.argmax(n_active < 3) + 1) * dt
     v_big = float(terminal_velocity_rogers_yau(jnp.asarray(1.2e-4)))
-    assert t_first == pytest.approx(z0 / v_big, abs=2 * dt)
+    # crossing happens at step ceil(z0/(v_t dt)): t_first in (z0/v_t, z0/v_t+dt]
+    assert z0 / v_big < t_first <= z0 / v_big + 1.0001 * dt
 
 
 def test_inactive_droplets_do_not_fall_or_deposit():

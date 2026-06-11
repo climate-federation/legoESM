@@ -44,6 +44,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
 
 __physics_contract__ = {
@@ -177,8 +178,9 @@ def sedimentation_kernel(r_i: jax.Array, r_j: jax.Array, dv: jax.Array) -> jax.A
     """
     r_min = jnp.minimum(r_i, r_j)
     r_max = jnp.maximum(r_i, r_j)
-    # 0/0 guard: two zero-radius droplets have zero cross-section -> K = 0.
-    p = jnp.where(r_max > 0.0, r_min / jnp.maximum(r_max, 1.0e-300), 0.0)
+    # AD-safe 0/0 guard (zero-radius pair has zero cross-section -> K = 0):
+    # where-before-divide so the VJP never differentiates 1/r at r=0.
+    p = safe_divide(r_min, r_max, 1.0e-30)
     E = 0.5 * p * p / ((1.0 + p) * (1.0 + p))
     return jnp.pi * (r_i + r_j) ** 2 * E * jnp.abs(dv)
 
@@ -219,7 +221,8 @@ def hall_kernel(r_i: jax.Array, r_j: jax.Array, dv: jax.Array) -> jax.Array:
     sumr = r_l + r_s
     r_um = r_l * 1.0e6
     # Two zero-radius droplets: zero cross-section -> ratio irrelevant, K = 0.
-    ratio = jnp.where(r_l > 0.0, r_s / jnp.maximum(r_l, 1.0e-300), 0.0)
+    # AD-safe where-before-divide (a plain where still NaNs the gradient).
+    ratio = safe_divide(r_s, r_l, 1.0e-30)
 
     r0 = _HALL_R0_UM.astype(r_l.dtype)
     rat = _HALL_RAT.astype(r_l.dtype)
