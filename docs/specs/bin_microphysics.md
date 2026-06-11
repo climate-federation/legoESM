@@ -199,7 +199,20 @@ collection (`coll_xyz` between every pair). Incremental build:
   (>~170 µm) and reaches a far higher max — the reason to separate
   categories. 7 tests (monotone, graupel>snow precip regime, mm-size
   magnitudes, density correction exact, array broadcast, unknown-category
-  raises, differentiable).
+  raises, differentiable). Codex: PASS-WITH-NOTES → ρ_ref=1.2 + tight
+  coefficient test applied.
+- **Iter 3 (2026-06-11)** — column carries TWO ice categories: crystal/snow
+  (`q_i`) and graupel/hail (`q_g`). `freeze_step_routed` sends small frozen
+  drops → snow, frozen rain → graupel; both melt above 0 °C; riming +
+  aggregation act on the snow category; **each category now SEDIMENTS at its
+  own fall speed** (rain via Shima, snow + graupel via `ice_fall_speed`) —
+  ice precipitates for the first time (previously trapped in-column). Output
+  `dq_i_dt` (snow) + `dq_g_dt` (graupel); total-water closure extended to
+  `−dq_v = dq_c+dq_r+dq_i+dq_g+precip`. Tests: graupel precipitates >1.4×
+  faster than equal-mass snow (the multi-category payoff), cold-cell ice
+  falls without melting (loss == precip), aggregation conserves vs precip,
+  multistep trajectory conserves all 5 species, supercooled freeze closure
+  incl. both categories. 116 fast_sbm + 242 microphysics/integration green.
 
 ## Remaining work (warm + full ice phase done → bit-exact FSBM-2)
 

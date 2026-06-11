@@ -78,7 +78,10 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import (
     radius_from_mass,
 )
 from legoesm.atmosphere.physics.microphysics.fast_sbm.freezing import (
-    freeze_step,
+    freeze_step_routed,
+)
+from legoesm.atmosphere.physics.microphysics.fast_sbm.ice_fall_speed import (
+    ice_fall_speed,
 )
 from legoesm.atmosphere.physics.microphysics.fast_sbm.melting import (
     melt_step,
@@ -245,18 +248,22 @@ def fast_sbm_microphysics(
     q_r = jnp.maximum(hydrometeors.q_r, 0.0)
     q_v_pos = jnp.maximum(q_v, 0.0)
 
-    q_i = jnp.maximum(hydrometeors.q_i, 0.0)
+    q_i = jnp.maximum(hydrometeors.q_i, 0.0)    # ice crystals / snow
+    q_g = jnp.maximum(hydrometeors.q_g, 0.0)    # graupel / hail
 
-    def cell(T_c, qv_c, qc_c, qr_c, qi_c, Nc_c, Nr_c, p_c, rho_c):
-        # Pre-physics liquid + ice spectra (closure baselines).
+    def cell(T_c, qv_c, qc_c, qr_c, qi_c, qg_c, Nc_c, Nr_c, p_c, rho_c):
+        # Pre-physics liquid + two ice categories (closure baselines).
         f_liq0 = _reconstruct_spectrum(qc_c, qr_c, Nc_c, Nr_c, rho_c, masses,
                                        config)
-        f_ice0 = _reconstruct_ice(qi_c, rho_c, masses, config)
-        # MELT carried ice above 0 °C → adds to liquid, cools (oracle
-        # J_W_MELT). Closes the cross-step ice loop freezing opens.
-        melt = melt_step(f_ice0, masses, T_c, rho_c, dt, config)
-        f_pre = f_liq0 + melt.f_liquid
-        f_ice_after_melt = melt.f_ice
+        f_snow0 = _reconstruct_ice(qi_c, rho_c, masses, config)
+        f_graupel0 = _reconstruct_ice(qg_c, rho_c, masses, config)
+        # MELT both carried ice categories above 0 °C → add to liquid, cool
+        # (oracle J_W_MELT). Closes the cross-step ice loop freezing opens.
+        melt_s = melt_step(f_snow0, masses, T_c, rho_c, dt, config)
+        melt_g = melt_step(f_graupel0, masses, T_c, rho_c, dt, config)
+        f_pre = f_liq0 + melt_s.f_liquid + melt_g.f_liquid
+        f_snow_after_melt = melt_s.f_ice
+        f_graupel_after_melt = melt_g.f_ice
         # CCN activation, DEFICIT form (codex review iters 8-9): the
         # diagnosable activated number at this S is the TARGET cloud number
         # N_target = N_CCN·frac_above(r_crit); we seed only the deficit
@@ -277,75 +284,77 @@ def fast_sbm_microphysics(
             f_seed, T_c, qv_c, p_c, rho_c, dt, masses, config=config)
         g1 = bott_coalescence(g_from_f(cond.f, masses), ck, masses, tables)
         f1 = f_from_g(g1, masses)
-        # Immersion freezing (oracle FREEZ): supercooled drops freeze to
-        # ice, releasing fusion heat. Liquid feeding sedimentation is the
-        # UNFROZEN remainder; the frozen mass joins the ice spectrum.
-        frz = freeze_step(f1, masses, T_c, rho_c, dt, config)
+        # Habit-routed immersion freezing (oracle FREEZ KRFREEZ): supercooled
+        # drops freeze to ice — small bins → ice crystals/snow, large (frozen
+        # rain) → graupel/hail. Liquid feeding sedimentation is the unfrozen
+        # remainder.
+        frz = freeze_step_routed(f1, masses, T_c, rho_c, dt, config)
         f1_liq = frz.f_liquid
-        f_ice_pre_rime = f_ice_after_melt + frz.f_ice
-        # RIMING (oracle coll_xyx_lwf): supercooled ice collects cloud
-        # liquid → larger ice, the rimed liquid freezing onto it. Gated on
-        # T < 0 °C (above freezing melting dominates). The collected liquid
-        # releases fusion heat.
+        f_snow_pre_rime = f_snow_after_melt + frz.f_crystals
+        f_graupel_final = f_graupel_after_melt + frz.f_hail
+        # RIMING (oracle coll_xyx_lwf): supercooled ice (snow collector)
+        # collects cloud liquid → larger ice, the rimed liquid freezing onto
+        # it. Gated on T < 0 °C; the collected liquid releases fusion heat.
         liq_before_rime = mass_density(f1_liq, masses)
         g_ice_r, g_liq_r = bott_riming(
-            g_from_f(f_ice_pre_rime, masses), g_from_f(f1_liq, masses),
+            g_from_f(f_snow_pre_rime, masses), g_from_f(f1_liq, masses),
             ck, masses, rime_tables)
         supercooled = T_c < constants.T_freeze
-        f_ice_rimed = jnp.where(supercooled, f_from_g(g_ice_r, masses),
-                                f_ice_pre_rime)
+        f_snow_rimed = jnp.where(supercooled, f_from_g(g_ice_r, masses),
+                                 f_snow_pre_rime)
         f1_liq = jnp.where(supercooled, f_from_g(g_liq_r, masses), f1_liq)
         rimed = (liq_before_rime - mass_density(f1_liq, masses)) / rho_c
         dT_rime = (constants.L_f / constants.c_pd) * rimed
-        # ICE-ICE AGGREGATION (ice self-collection → snow): the SAME Bott
-        # self-collection operator and Courant geometry as liquid
-        # coalescence, applied to the ice spectrum (crystal-crystal sticking
-        # is mathematically self-collection). The collision KERNEL is an
-        # APPROXIMATION — the scaled liquid kernel (`ck·efficiency`), not an
-        # ice-specific kernel; a true ice kernel (fall speeds, branched-
-        # crystal cross-sections, temperature-dependent sticking) lands with
-        # the multi-ice-habit iteration (see spec). Gated on T < 0 °C like
-        # riming: warm ice is being melted away (J_W_MELT), not aggregating.
-        # Mass-conserving (ice→ice), no phase change → no latent heat, the
-        # closure is unaffected.
+        # ICE-ICE AGGREGATION (snow self-collection): Bott self-collection on
+        # the snow spectrum with a scaled-liquid kernel (approximation; see
+        # spec). Gated on T < 0 °C. Mass-conserving, no latent heat.
         ck_ice = ck * config.ice_aggregation_efficiency
-        f_ice_agg = f_from_g(
-            bott_coalescence(g_from_f(f_ice_rimed, masses), ck_ice, masses,
+        f_snow_agg = f_from_g(
+            bott_coalescence(g_from_f(f_snow_rimed, masses), ck_ice, masses,
                              tables), masses)
-        f_ice_final = jnp.where(supercooled, f_ice_agg, f_ice_rimed)
-        # Net ice change carried to q_i (melt consumes, freeze + rime
-        # produce).
-        dq_i_dt_c = (mass_density(f_ice_final, masses) / rho_c - qi_c) / dt
-        # Vapor change = −(condensation growth) only; melt and freeze are
-        # internal liquid↔ice (vapor-neutral). With melt water + activation
-        # seed already in f_pre, mass(f1)−mass(f_pre) is exactly that growth.
+        f_snow_final = jnp.where(supercooled, f_snow_agg, f_snow_rimed)
+        # Vapor change = −(condensation growth) only; melt/freeze/rime are
+        # internal liquid↔ice (vapor-neutral). Both melt waters are already
+        # in f_pre, so mass(f1)−mass(f_pre) is exactly that growth.
         dq_v = -(mass_density(f1, masses) - mass_density(f_pre, masses)) \
             / rho_c
         dq_v_dt = dq_v / dt
-        # Heating = condensation (L_v) + fusion on freezing + fusion on
-        # riming − fusion on melt.
+        # Heating = condensation (L_v) + fusion on freezing + on riming −
+        # fusion on melting BOTH ice categories (melt.dT already negative).
         dT_dt_c = (-(constants.L_v / constants.c_pd) * dq_v_dt
-                   + frz.dT / dt + dT_rime / dt + melt.dT / dt)
-        return (dT_dt_c, dq_v_dt, dq_i_dt_c, f_liq0, f1_liq)
+                   + frz.dT / dt + dT_rime / dt
+                   + melt_s.dT / dt + melt_g.dT / dt)
+        return (dT_dt_c, dq_v_dt, f_liq0, f1_liq, f_snow0, f_snow_final,
+                f_graupel0, f_graupel_final)
 
     cell_v = jax.vmap(jax.vmap(cell))
-    dT_dt, dqv_dt, dqi_dt, f0, f1 = cell_v(
-        T, q_v_pos, q_c, q_r, q_i, hydrometeors.N_c, hydrometeors.N_r,
-        p_full, rho)
+    (dT_dt, dqv_dt, f0, f1, f_snow0, f_snow1, f_graupel0, f_graupel1) = \
+        cell_v(T, q_v_pos, q_c, q_r, q_i, q_g, hydrometeors.N_c,
+               hydrometeors.N_r, p_full, rho)
 
-    # Sedimentation on the per-bin mixing ratios (oracle FALFLUXHUCM_Z;
-    # couples levels, so it runs on the (ncol, nlev, n_bins) field).
-    # Fall speeds are LEVEL-DEPENDENT (oracle VR1(K,KR)): density/pressure
-    # at each level set the bin terminal velocity (codex review iter 8-9).
+    # Per-species level-coupled sedimentation (oracle FALFLUXHUCM_Z), each at
+    # its own LEVEL-DEPENDENT fall speed: rain (Shima cloud/rain), snow and
+    # graupel (computed ice fall speeds — graupel falls several × faster, so
+    # it precipitates earlier). Ice now FALLS (previously trapped in column).
     r_bins = radius_from_mass(masses)
-    v_cell = jax.vmap(jax.vmap(
+    v_rain = jax.vmap(jax.vmap(
         lambda rho_c, p_c, T_c: terminal_velocity_cloud_rain_shima(
             r_bins, rho_c, p_c, T_c)))(rho, p_full, T)   # (ncol, nlev, nkr)
-    q_bins = bin_mixing_ratios_from_f(f1, masses, rho)
-    dq_bins_dt, precip = sediment_bins(
-        q_bins, rho, v_cell, dz, dt, config.n_fall_substeps)
-    f_final = f_from_bin_mixing_ratios(
-        q_bins + dt * dq_bins_dt, masses, rho)
+    v_snow = jax.vmap(jax.vmap(
+        lambda rho_c: ice_fall_speed(masses, rho_c, "snow", config)))(rho)
+    v_graupel = jax.vmap(jax.vmap(
+        lambda rho_c: ice_fall_speed(masses, rho_c, "graupel", config)))(rho)
+
+    def _sediment(f_field, v_field):
+        q_bins = bin_mixing_ratios_from_f(f_field, masses, rho)
+        dq_dt, prc = sediment_bins(q_bins, rho, v_field, dz, dt,
+                                   config.n_fall_substeps)
+        return f_from_bin_mixing_ratios(q_bins + dt * dq_dt, masses, rho), prc
+
+    f_rain_final, precip_r = _sediment(f1, v_rain)
+    f_snow_final, precip_s = _sediment(f_snow1, v_snow)
+    f_graupel_final, precip_g = _sediment(f_graupel1, v_graupel)
+    precip = precip_r + precip_s + precip_g
 
     # Bulk projection across the oracle cloud/rain boundary.
     bin_is_cloud = jnp.arange(masses.shape[0]) < cloud_bins
@@ -359,21 +368,25 @@ def fast_sbm_microphysics(
                 number_density(f_r, masses))
 
     qc0, qr0, nc0, nr0 = split(f0)
-    qc1, qr1, nc1, nr1 = split(f_final)
+    qc1, qr1, nc1, nr1 = split(f_rain_final)
     inv_dt = 1.0 / dt
+    # Ice tendencies: post-sediment ice minus the carried input (the
+    # reconstruction carries exactly q_i / q_g, so f_snow0/f_graupel0 mass =
+    # q_i / q_g).
+    dq_i_dt = (mass_density(f_snow_final, masses) / rho
+               - mass_density(f_snow0, masses) / rho) * inv_dt
+    dq_g_dt = (mass_density(f_graupel_final, masses) / rho
+               - mass_density(f_graupel0, masses) / rho) * inv_dt
 
-    # Freezing depletes the liquid that reaches `split` (f1→f1_liq feeds
-    # sedimentation), so dq_c/dq_r already reflect the frozen loss; dq_i is
-    # the matching ice gain (liquid+ice conserved, vapor untouched).
     zeros = jnp.zeros_like(T)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dqv_dt,
         dq_c_dt=(qc1 - qc0) * inv_dt,
         dq_r_dt=(qr1 - qr0) * inv_dt,
-        dq_i_dt=dqi_dt,
+        dq_i_dt=dq_i_dt,
         dq_s_dt=zeros,
-        dq_g_dt=zeros,
+        dq_g_dt=dq_g_dt,
         dN_c_dt=(nc1 - nc0) * inv_dt,
         dN_r_dt=(nr1 - nr0) * inv_dt,
         dN_i_dt=zeros,
