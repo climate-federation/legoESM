@@ -126,16 +126,14 @@ finite gradients in float32 + float64.
 - **P6 orchestration** ✅ — `advance_clubb_core` (iter 46) + `compute_clubb_
   diagnostics`/`compute_pdf_closure`; conservation-tested (iter 50). See the
   iter-50 status block below.
-- **P7 integration** 🟡 — ✅ iter 16: `clubb.py` entry + `TurbulenceOutput`;
-  `"clubb"` wired into `get_turbulence_fn` dispatch + `needs_tke` +
-  `TurbulenceConfig.clubb` + coupler `validate_strict` + `physics_state` +
-  `scm` + AMIP CLI. Runnable + tested (phase-1 diagnostic path). `clubb_step` +
-  `integrate_clubb_column` (iter 47-48) give the full prognostic path, run+tested
-  standalone. ☐ remaining: flip the live dispatch to the prognostic path (after
-  the dry-regime instability is bounded) — see iter-50 status block.
-- **P8 validation** 🟡 — multi-step prognostic run + conservation + jit/grad +
-  dry-regime stability (host-diffusion fix, iter 51) ✅; ☐ idealized
-  BOMEX/DYCOMS sanity + the production dispatch flip / coupled-run check.
+- **P7 integration** ✅ — `scheme="clubb"` dispatches (phase-1 diagnostic by
+  default; full prognostic with `CLUBBConfig.prognostic=True`), carries
+  `CLUBBMomentState` in `PhysicsState.clubb_moments`, and RUNS end-to-end through
+  `combined.make_physics` (iter 53). Wired into coupler `validate_strict` +
+  `physics_state` + `scm` + AMIP CLI.
+- **P8 validation** ✅ — per-piece CLUBB-JAX parity + conservation + multi-step
+  prognostic stability (host-diffusion fix) + jit/grad + end-to-end pipeline run.
+  Optional future: idealized BOMEX/DYCOMS, longer coupled stability run.
 
 ---
 
@@ -162,6 +160,15 @@ CLUBB-JAX bit/round-off:
 - **Conservation (iter 50):** `advance_clubb_core` conserves column-integrated
   ρ_ds-weighted thlm/rtm to <1e-9 over 5 steps (zero sfc flux + zero forcing) —
   truth-tier proof the assembly has NO spurious source.
+- **Production dispatch (iter 52-53):** `pack/unpack_clubb_moments` +
+  `PhysicsState.clubb_moments` carry (gated, gwd_spectrum-style); opt-in
+  `CLUBBConfig.prognostic`; `clubb_turbulence_prognostic` (the `(TurbulenceOutput,
+  packed-carry)` scheme entry); `get_turbulence_fn`/`turbulence_carry_field`/
+  `_read_turb_carry` route the carry; `combined.py` stores it under the matching
+  slot. nonhydro/spectral_pe fail-fast (don't persist phys_state); hydrostatic +
+  mpas allowed. **END-TO-END: `scheme="clubb", prognostic=True` RUNS through
+  `combined.make_physics` on a cubed-sphere state, carrying clubb_moments across
+  steps (moments evolve, tendencies finite).** Codex-approved (2 rounds).
 
 **✅ RESOLVED — dry-regime instability (iter 48-51).** Root cause CONFIRMED by
 experiment: the standalone SCM driver advances the means with CLUBB ALONE, so it
@@ -177,19 +184,18 @@ so no water is created. A tiny nu removes the instability entirely (wp2max
 conservation/positivity. Codex-approved. Characterizer
 `scripts/validate/clubb_prognostic_stability.py`.
 
-**Remaining to DONE — production dispatch flip (in progress):**
-- ✅ **Persistence foundation** (iter 52): `pack_clubb_moments`/`unpack_clubb_moments`
-  (CLUBBMomentState ↔ (ncol,15,nzm) array, gwd_spectrum-style); `PhysicsState.
-  clubb_moments` field seeded by `init_physics_state` when `scheme=clubb` +
-  `CLUBBConfig.prognostic=True`, minimal (ncol,1,1) otherwise; opt-in
-  `CLUBBConfig.prognostic` flag. Non-disruptive (25 combined/migration tests
-  pass); restart serializes generically. Codex-approved.
-- ☐ **integration.py/combined.py wiring**: `combined.py` registers the clubb
-  turbulence physics_fn with `field_name="clubb_moments"` (when prognostic);
-  the turbulence physics_fn for prognostic clubb reads `phys_state.clubb_moments`,
-  `unpack` → `clubb_step` → `pack` the new moments + return tendencies. Coupled
-  dycore supplies the numerical diffusion the bare SCM driver needed.
-- ☐ **Coupled-run verification** of prognostic clubb (short SCM / aquaplanet).
+**✅ DONE — prognostic CLUBB runs+tested in legoESM (iter 53).** `scheme="clubb"`
+with `CLUBBConfig(prognostic=True)` dispatches the full prognostic higher-order
+moment closure, carries `CLUBBMomentState` in `PhysicsState.clubb_moments` across
+steps, and **runs end-to-end through `combined.make_physics`** on a cubed-sphere
+state (verified: moments persist+evolve, tendencies finite, 2 steps). Default
+`scheme="clubb"` (opt-out) remains the diagnostic phase-1 path. nonhydro/
+spectral_pe drivers fail-fast (don't persist phys_state — documented, same as
+MYNN-2.5); hydrostatic + mpas supported.
+
+**Optional future hardening (beyond run+test):** longer coupled aquaplanet/
+held-Suarez stability run; idealized BOMEX/DYCOMS validation; thread phys_state
+through the nonhydro/spectral_pe drivers to lift their fail-fast.
 
 ## CAM-vs-ARM caveats (CLUBB-JAX is ARM-wired; re-check the CAM NAMELIST per module)
 - Namelist OVERRIDES the Fortran flag defaults — always check the namelist.
