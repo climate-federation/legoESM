@@ -1719,11 +1719,19 @@ class LatLonCGridOceanModel:
                 # AB2-extrapolated advection. Route its increment into the
                 # weight-1.0 dissipative bucket instead of adding it to T_mid
                 # (which is what the AB2 extrapolates).
-                _diss_dT_incr = _diss_dT_incr + dt * dT_gm * mask_3d
-                _diss_dS_incr = _diss_dS_incr + dt * dS_gm * mask_3d
+                # active_3d (not the 2-D mask_3d): on a partial-cell coord the
+                # GM/Redi tendency is nonzero at SUB-SEAFLOOR cells of wet
+                # columns (the triad assembly masks 2-D only); writing it
+                # there drifts dry S negative → sqrt(S<0) NaN in the gsw EOS
+                # (global_4deg step-4 blowup). Veros masks with the 3-D maskT.
+                # Pure z-star: active_3d == mask_3d ⇒ bit-identical.
+                _diss_dT_incr = _diss_dT_incr + dt * dT_gm * active_3d
+                _diss_dS_incr = _diss_dS_incr + dt * dS_gm * active_3d
             else:
-                T_mid = T_mid + dt * dT_gm * mask_3d
-                S_mid = S_mid + dt * dS_gm * mask_3d
+                # active_3d for the same sub-seafloor reason as the diss bucket
+                # above (bit-identical on pure z-star where active_3d==mask_3d).
+                T_mid = T_mid + dt * dT_gm * active_3d
+                S_mid = S_mid + dt * dS_gm * active_3d
             if eke_new is not None:
                 state_new = state_new._replace(eke=eke_new)
             # Carry the EKE dissipation (Veros eke_diss_iw) for the prognostic-TKE
@@ -2101,12 +2109,31 @@ class LatLonCGridOceanModel:
             tke_tau = jnp.where(
                 lm[:, :, jnp.newaxis] > 0.5, tke_cfg.tke_background, 0.0,
             ).astype(dtype) * jnp.ones((1, 1, nlev - 1), dtype=dtype)
+        # Variable-bathymetry guard (partial-cell coords): the advecting u/v
+        # must be zero at sub-seafloor levels (the barotropic correction
+        # writes U_bar at EVERY level of a face column, so the raw arrays
+        # carry O(0.1–1 m/s) below the seafloor of shallow columns) and the
+        # tendency must vanish at dry interfaces — Veros's maskU/maskV/maskW
+        # in calculate_velocity_on_wgrid + the dtke assembly.  Without this,
+        # shallow shelf columns accumulate ±1e7 m²/s² TKE within ~20 steps
+        # (global_4deg 78°N blowup).  Flat-bottom (pure z-star): no-op.
+        u_adv, v_adv = state.u.data, state.v.data
+        _wet_if_adv = None
+        if isinstance(self.z_coord, OceanPartialCellCoordinate):
+            _um3, _vm3 = compute_face_masks_3d(
+                self.z_coord.is_active, self.grid)
+            u_adv = u_adv * _um3.astype(u_adv.dtype)
+            v_adv = v_adv * _vm3.astype(v_adv.dtype)
+            _wet_if_adv = self.z_coord.is_active.astype(dtype)[..., 1:]
+            tke_tau = tke_tau * _wet_if_adv
         dtke_now = wgrid_advection_tendency_latlon_cgrid(
-            tke_tau, state.u.data, state.v.data, self.grid,
+            tke_tau, u_adv, v_adv, self.grid,
             jnp.asarray(self.z_coord.dz_ref), dt, lm,
             state.u_mask.data, state.v_mask.data,
         )
         dtke_now = jax.lax.convert_element_type(dtke_now, dtype)
+        if _wet_if_adv is not None:
+            dtke_now = dtke_now * _wet_if_adv
         dtke_prev = (state.dtke.data.astype(dtype)
                      if state.dtke is not None else jnp.zeros_like(dtke_now))
         eps = self.config.ab2_epsilon
@@ -2267,8 +2294,22 @@ class LatLonCGridOceanModel:
         # 3-D transport broadcasts them over the level axis internally.
         u_mask = state.u_mask.data
         v_mask = state.v_mask.data
-        U_z = 0.5 * (state.u.data[..., :-1] + state.u.data[..., 1:])
-        V_z = 0.5 * (state.v.data[..., :-1] + state.v.data[..., 1:])
+        # Variable-bathymetry guard (partial-cell coords): zero the advecting
+        # u/v at sub-seafloor levels (the barotropic correction writes U_bar at
+        # every level of a face column — see _apply_tke_advection) and keep the
+        # eddy energy off the dry interfaces.  Veros maskU/maskV/maskW.  Pure
+        # z-star: no-op (masks all ones).
+        _u_lvl, _v_lvl = state.u.data, state.v.data
+        _wet_if_eke = None
+        if isinstance(self.z_coord, OceanPartialCellCoordinate):
+            _um3, _vm3 = compute_face_masks_3d(
+                self.z_coord.is_active, self.grid)
+            _u_lvl = _u_lvl * _um3.astype(_u_lvl.dtype)
+            _v_lvl = _v_lvl * _vm3.astype(_v_lvl.dtype)
+            _wet_if_eke = self.z_coord.is_active.astype(dtype)[..., 1:]
+            E = E * _wet_if_eke
+        U_z = 0.5 * (_u_lvl[..., :-1] + _u_lvl[..., 1:])
+        V_z = 0.5 * (_v_lvl[..., :-1] + _v_lvl[..., 1:])
         U_z = U_z * u_mask[:, :, jnp.newaxis]
         V_z = V_z * v_mask[:, :, jnp.newaxis]
 
@@ -2276,6 +2317,8 @@ class LatLonCGridOceanModel:
         E = E + dt * eke_3d_horizontal_transport(
             E, U_z, V_z, self.grid, eke_cfg, lm, u_mask, v_mask,
         )
+        if _wet_if_eke is not None:
+            E = E * _wet_if_eke
 
         # (2) Implicit vertical EKE diffusion on the W-grid column.
         # W-cell thicknesses dz_w (= Veros dzw) and the interior-W-interface
@@ -2378,6 +2421,10 @@ class LatLonCGridOceanModel:
         E_new = jax.lax.convert_element_type(
             jnp.where(lm3 > 0.5, jnp.maximum(E, eke_cfg.e_min), 0.0), dtype,
         )
+        if _wet_if_eke is not None:
+            # Keep the eddy energy off dry interfaces (Veros maskW) on
+            # partial-cell coords; no-op on flat-bottom.
+            E_new = E_new * jax.lax.convert_element_type(_wet_if_eke, dtype)
         eke_new = Field(data=E_new, name="eke",
                         dims=("lat", "lon", "level"), units="m^2/s^2")
         # EKE dissipation rate (Veros eke_diss_iw) at the interior interfaces,
@@ -2545,6 +2592,19 @@ class LatLonCGridOceanModel:
 
         mask_3d = state.land_mask.data[..., jnp.newaxis]
 
+        # Partial-cell dry-interface guard: no implicit flux through the
+        # seafloor.  K/A at interface k couple cells k and k+1; where cell k+1
+        # is below the seafloor the diffusivity must be EXACTLY zero (Veros
+        # maskW), or the solve mixes the bottom wet cell with the T=S=0 (or
+        # u=0) rock cells — incl. the K33 isoneutral diagonal and the A_v/K_v
+        # config backgrounds, which are NOT covered by the K-profile-level
+        # masking in compute_vertical_K_profiles.  Pure z-star: no-op.
+        if isinstance(self.z_coord, OceanPartialCellCoordinate):
+            _wet_if_vmix = self.z_coord.is_active.astype(
+                state.T.data.dtype)[..., 1:]
+        else:
+            _wet_if_vmix = None
+
         # ---- Tracers (cell-centered: K aligns with T, S directly) ----
         T_new, S_new = state.T.data, state.S.data
         if do_tracers:
@@ -2555,6 +2615,8 @@ class LatLonCGridOceanModel:
                 # interfaces, same (n_lat, n_lon, nlev-1) shape as K_v_cell.  TRACERS
                 # ONLY — momentum uses A_v_cell, which is untouched.
                 K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)
+            if _wet_if_vmix is not None:
+                K_v_cell = K_v_cell * _wet_if_vmix
             # IMPLICIT surface TRACER forcing (Veros placement): add dt·S_surf
             # (masked) to the solve INPUT so the backward-Euler tridiagonal solve
             # realises ``(I − dt·L)·X_new = X_old + dt·S_surf`` at weight 1.0.  dt
@@ -2584,8 +2646,24 @@ class LatLonCGridOceanModel:
         u_new, v_new = state.u.data, state.v.data
         if do_momentum:
             A_v_cell = A_v_cell.astype(state.u.data.dtype)
+            if _wet_if_vmix is not None:
+                A_v_cell = A_v_cell * _wet_if_vmix
             A_v_u = interp_cell_to_uface(A_v_cell)        # (n_lat, n_lon+1, nlev-1)
             A_v_v = _interp_to_v_points(A_v_cell)         # (n_lat+1, n_lon, nlev-1)
+            if _wet_if_vmix is not None:
+                # FACE seafloor guard (partial cells): the cell→face AVERAGE
+                # leaves A_v_face = ½·A_deep at interfaces BELOW the shallower
+                # neighbour's bottom (where the face is closed).  The friction
+                # solve then leaks momentum across the face's seafloor into the
+                # rock cells — with convective A_v ~ kappaM_max this drains the
+                # wet column's transport every dt_mom, breaking ∇·(Σh·u)=0 and
+                # pumping w ~100× the Veros oracle's (the 4° Antarctic-coast
+                # 2Δz blowup).  Min-rule face activity (Veros maskU/maskV on
+                # the W grid) zeroes those interfaces; no-op on flat bottom.
+                _act_u3, _act_v3 = compute_face_masks_3d(
+                    self.z_coord.is_active, self.grid)
+                A_v_u = A_v_u * _act_u3.astype(A_v_u.dtype)[..., 1:]
+                A_v_v = A_v_v * _act_v3.astype(A_v_v.dtype)[..., 1:]
             dz_u = interp_cell_to_uface(dz_cell)
             dz_v = _interp_to_v_points(dz_cell)
             dz_half_u = build_dz_half(dz_u)
@@ -2891,6 +2969,23 @@ class LatLonCGridOceanModel:
         mask3 = state.land_mask.data[..., jnp.newaxis]
         u_mask3 = state.u_mask.data[..., jnp.newaxis]
         v_mask3 = state.v_mask.data[..., jnp.newaxis]
+        # Partial-cell coords: fold the per-level FACE/CELL activity into the
+        # AB2 masks.  Without this, a face that is wet at the surface but
+        # CLOSED at depth (variable bathymetry) carries a growing artifact:
+        # the rigid lid zeroes the closed-cell velocity each step
+        # (u_active_3d) while this reconstruction rebuilds
+        # u^{n+1} = u^n + 1.6·Δ^n − 0.6·Δ^{n-1} with Δ^n = −u^n there — the
+        # recurrence u^{n+1} = −0.6·u^n + 0.6·u^{n-1}, |r|max = 1.13 ⇒ +13%
+        # PER STEP unbounded growth in every closed-face cell (the global_4deg
+        # deep-cell blowup; ablation-isolated, scheme-independent).  Masking
+        # the AB2 state AND the carried increments pins closed cells at 0 — a
+        # stable fixed point.  Pure z-star: masks unchanged ⇒ bit-identical.
+        if isinstance(self.z_coord, OceanPartialCellCoordinate):
+            _au3, _av3 = compute_face_masks_3d(
+                self.z_coord.is_active, self.grid)
+            u_mask3 = u_mask3 * _au3.astype(u_mask3.dtype)
+            v_mask3 = v_mask3 * _av3.astype(v_mask3.dtype)
+            mask3 = mask3 * self.z_coord.is_active.astype(mask3.dtype)
 
         # --- Tracers: AB2 the EXPLICIT increment ---
         # Under ab2_scope="total" (default) ``state_expl.T - state.T`` is the

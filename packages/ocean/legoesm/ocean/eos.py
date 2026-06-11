@@ -1747,7 +1747,14 @@ def compute_buoyancy_frequency_adiabatic(
 
     # drho/dz with z positive upward; (rho_upper - rho_lower)/dz. For a
     # stable column rho_upper < rho_lower -> drho/dz < 0 -> N^2 > 0.
-    drho_dz = (rho_upper - rho_lower) / dz_interface
+    # Land/dry-column guard: with a partial-cell coordinate the Jacobian is 0
+    # over land (H_bathy = 0), so dz_interface = 0 there and the unguarded
+    # division returned 0/0 = NaN (uniform T=S=0 land columns) — which then
+    # poisoned the TKE/EKE chains through every downstream `× mask`
+    # (0·NaN = NaN). With the floor, land columns give exactly
+    # 0/eps = 0 ⇒ N² = 0 (neutral) — masked downstream as before. Wet
+    # interfaces (dz_interface >= O(10 m)) are bit-identical.
+    drho_dz = (rho_upper - rho_lower) / jnp.maximum(dz_interface, 1.0e-12)
     return -(g / rho_ref) * drho_dz
 
 

@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    compute_face_masks_3d,
     divergence_cgrid,
     gradient_x_cgrid,
     gradient_y_cgrid,
@@ -58,6 +59,16 @@ from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 # Division-guard epsilon — larger than float32 machine eps to prevent
 # intermediate blow-up in the backward pass (see plan §7, AD safety).
 _EPS_DIV = 1e-10
+# Salinity floor [PSU] applied ONLY to the inputs of EOS *differentiation*
+# (jax.grad): a sqrt(S)-bearing EOS (TEOS-10 gsw) has an unbounded ∂ρ/∂S at
+# exactly S=0, so jax.grad returns NaN there — and NaN survives the
+# downstream ``× mask`` (0·NaN = NaN).  S=0 occurs only on LAND cells the
+# 3-pass horizontal Neumann fill could not reach (continental interiors) and
+# on sub-seafloor dry cells (handled by _fill_dry_cells_columnwise); both
+# have their derivative outputs masked/tapered away, so the floor never
+# touches a physical value (wet salinity ≫ 1e-3 by the kbot salt==0 land
+# rule).  Numerical safety floor, not a physical constant.
+_S_GRAD_FLOOR = 1.0e-3
 
 
 def _kappa_is_interface_3d(kappa, nlev: int) -> bool:
@@ -143,6 +154,32 @@ def _validate_slope_density(slope_density: str) -> None:
         )
 
 
+def _fill_dry_cells_columnwise(q, z_coord):
+    """Fill SUB-SEAFLOOR (dry) cells with the deepest overlying active value.
+
+    Variable-bathymetry guard for EOS *differentiation*: with a partial-cell
+    coordinate the cells below the seafloor carry the IC fill value (T=S=0).
+    Density EVALUATION there is finite, but ``jax.grad`` of an EOS with a
+    ``sqrt(S)`` term (TEOS-10 gsw, ``eos="veros_gsw"``) is NaN at exactly
+    S=0 — and one NaN at a bottom face propagates through the B-triad slopes
+    and the implicit-K33 column solve to the WHOLE column (global_4deg: every
+    non-full-depth column went NaN on step 1).  Dry-cell derivative values
+    are physically arbitrary — they are killed downstream by the wet-face
+    indicators and the dm95 taper (exactly how Veros handles its salt=0 dry
+    cells: its ANALYTIC ``gsw_drhodS`` is finite at 0 and ``maskW`` zeroes
+    the flux) — but they must be FINITE for the masking to work.
+
+    Thin no-op wrapper around the canonical
+    :func:`legoesm.ocean.vertical.extrapolate_below_seafloor` (no duplicate
+    numerics): bit-identical pass-through (zero traced ops) when ``z_coord``
+    has no ``is_active`` (pure z-star, e.g. the flat-bottom ACC recipes).
+    """
+    if getattr(z_coord, "is_active", None) is None:
+        return q
+    from legoesm.ocean.vertical import extrapolate_below_seafloor
+    return extrapolate_below_seafloor(q, z_coord)
+
+
 def _neutral_drho_derivs(T, S, mask, z_coord, jacobian, eos_fn, rho_0, g):
     """Cell-centred EOS partials ``(∂ρ/∂T, ∂ρ/∂S)`` at the LOCAL cell pressure.
 
@@ -165,11 +202,18 @@ def _neutral_drho_derivs(T, S, mask, z_coord, jacobian, eos_fn, rho_0, g):
     Returns ``(drdT, drdS)`` each ``(n_lat, n_lon, nlev)`` at cell centres,
     masked to the wet domain.
     """
-    T_filled = _neumann_fill_cgrid(T, mask)
-    S_filled = _neumann_fill_cgrid(S, mask)
+    T_filled = _fill_dry_cells_columnwise(_neumann_fill_cgrid(T, mask), z_coord)
+    S_filled = _fill_dry_cells_columnwise(_neumann_fill_cgrid(S, mask), z_coord)
+    # Off-the-sqrt(S)-singularity guard for the jax.grad evaluation below;
+    # only unreachable-land cells (masked outputs) sit at S=0 (see
+    # _S_GRAD_FLOOR).
+    S_filled = jnp.maximum(S_filled, _S_GRAD_FLOOR)
     # In-situ density via the SAME 2-iteration EOS coupling the slope builder
     # uses, then the reference hydrostatic pressure (η=0, J=1) — identical to
-    # iterate_eos_and_pressure_anomaly's internal p_hydro.
+    # iterate_eos_and_pressure_anomaly's internal p_hydro.  (The dry-cell
+    # column fill changes ONLY sub-seafloor values: the hydrostatic integral
+    # at a wet cell never reads cells below it, so wet-cell drdT/drdS are
+    # bit-identical; see _fill_dry_cells_columnwise.)
     horiz_shape = T.shape[:-1]
     J_ref = jnp.ones(horiz_shape, dtype=T.dtype)
     eta_ref = jnp.zeros(horiz_shape, dtype=T.dtype)
@@ -819,6 +863,26 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     dz_actual = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
     dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
 
+    # Per-level face/interface activity (partial-cell coords): Veros masks the
+    # triad fluxes with the 3-D maskU/maskV (Ai_ez/Ai_nz) and maskW
+    # (Ai_bx/Ai_by, the W-face triads).  With only the 2-D masks, fluxes cross
+    # CLOSED faces below the shallower neighbour's seafloor and through the
+    # seafloor W-face; the wet-cell side of those fluxes is real tendency while
+    # the dry-cell side is discarded by the model's active_3d guard — a NET
+    # TRACER LEAK (global_4deg: −6%/yr volume salt with GM on; machine-zero
+    # without GM).  Pure z-star: masks are all-ones ⇒ bit-identical.
+    _is_active_3d = getattr(z_coord, "is_active", None)
+    if _is_active_3d is not None:
+        _um3, _vm3 = compute_face_masks_3d(_is_active_3d, grid)
+        u_mask_lvl = _um3.astype(q.dtype)                 # (n_lat, n_lon+1, nlev)
+        v_mask_lvl = _vm3.astype(q.dtype)                 # (n_lat+1, n_lon, nlev)
+        w_mask_if = jnp.asarray(
+            _is_active_3d, dtype=q.dtype)[..., 1:]        # (n_lat, n_lon, nlev-1)
+    else:
+        u_mask_lvl = jnp.ones((n_lat, n_lon + 1, 1), dtype=q.dtype)
+        v_mask_lvl = jnp.ones((n_lat + 1, n_lon, 1), dtype=q.dtype)
+        w_mask_if = jnp.ones((n_lat, n_lon, 1), dtype=q.dtype)
+
     # Resolve kappa to its center / u-face / v-face / w-face forms (shared
     # helper, identical dispatch for kappa_GM, kappa_Redi, and the K_33 getter):
     #   * scalar / 2-D (n_lat, n_lon)  → cell-centred broadcast + horizontal
@@ -1053,7 +1117,7 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
             + w_T2 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T2)
             + w_T3 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T3)
             + w_T4 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T4))
-    F_x_u = F_x_u * u_mask[:, :, jnp.newaxis]
+    F_x_u = F_x_u * u_mask[:, :, jnp.newaxis] * u_mask_lvl
 
     # -----------------------------------------------------------------
     # 4. V-FACE triads — flux F_y at (n_lat+1, n_lon, nlev)
@@ -1111,7 +1175,7 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
             + w_V2 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V2)
             + w_V3 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V3)
             + w_V4 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V4))
-    F_y_v = F_y_v * v_mask[:, :, jnp.newaxis]
+    F_y_v = F_y_v * v_mask[:, :, jnp.newaxis] * v_mask_lvl
 
     # Horizontal divergence (single conservative call).
     dq_h = divergence_cgrid(F_x_u, F_y_v, grid)
@@ -1178,6 +1242,9 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
                  + taper_Wx3 * flux_Wx3 + taper_Wx4 * flux_Wx4
                  + taper_Wy1 * flux_Wy1 + taper_Wy2 * flux_Wy2
                  + taper_Wy3 * flux_Wy3 + taper_Wy4 * flux_Wy4)
+    # Veros maskW: no W-face flux through the seafloor (see the per-level
+    # face-activity note above) — required for tracer conservation.
+    F_z = F_z * w_mask_if
 
     dq_vert = vertical_flux_divergence(F_z, dz_actual, _EPS)
 
@@ -1840,8 +1907,15 @@ def compute_realized_signed_conversions(
 
     # Dynamic-enthalpy integrands int_drhodT/S (Veros int_drhodT/S) at cell centres.
     z_full = jnp.asarray(z_coord.z_full_ref)[jnp.newaxis, jnp.newaxis, :]
+    # Dry-cell column fill: int_drhodTS differentiates the EOS via jax.grad —
+    # NaN at the sub-seafloor S=0 cells under the gsw EOS (see
+    # _fill_dry_cells_columnwise); wet-cell values are unchanged.
     int_drhodT, int_drhodS = int_drhodTS_dynamic_enthalpy(
-        eos_fn, _neumann_fill_cgrid(T, mask), _neumann_fill_cgrid(S, mask),
+        eos_fn,
+        _fill_dry_cells_columnwise(_neumann_fill_cgrid(T, mask), z_coord),
+        jnp.maximum(
+            _fill_dry_cells_columnwise(_neumann_fill_cgrid(S, mask), z_coord),
+            _S_GRAD_FLOOR),
         z_full, rho_0, g,
     )
     int_drhodT = int_drhodT * mask[:, :, jnp.newaxis]

@@ -106,6 +106,34 @@ def compute_vertical_K_profiles(
     interface_shape = T.shape[:-1] + (nlev - 1,)
     dtype = T.dtype
 
+    # ---- Variable-bathymetry (partial-cell) dry-cell guard ----
+    # Same pattern as the MPAS vmix bridge (mpas_integration.py:238-296):
+    # extend the deepest ACTIVE T/S/u/v downward so the schemes' N²/shear see
+    # a neutral, quiescent sub-seafloor instead of the T=S=0 IC fill (which
+    # reads as a huge fake instability at the seafloor interface → spurious
+    # convective K_M mixing the bottom wet cell with rock), and zero the
+    # returned K/A (and prognostic TKE) at NON-WET interfaces — no flux
+    # through the seafloor, Veros's maskW semantics.  No-op (bit-identical)
+    # for pure z-star coords (no ``is_active``), e.g. the flat-bottom ACC.
+    _is_active = getattr(z_coord, "is_active", None)
+    if _is_active is not None:
+        from legoesm.ocean.vertical import extrapolate_below_seafloor
+        _T_f = extrapolate_below_seafloor(state.T.data, z_coord)
+        _S_f = extrapolate_below_seafloor(state.S.data, z_coord)
+        state = state._replace(T=state.T.replace(data=_T_f),
+                               S=state.S.replace(data=_S_f))
+        # u/v only when already cell-centred (the lat-lon model passes the
+        # centred cc_state; staggered shapes have no cell is_active match).
+        if state.u.data.shape[:-1] == state.T.data.shape[:-1]:
+            _u_f = extrapolate_below_seafloor(state.u.data, z_coord)
+            _v_f = extrapolate_below_seafloor(state.v.data, z_coord)
+            state = state._replace(u=state.u.replace(data=_u_f),
+                                   v=state.v.replace(data=_v_f))
+        # Interface k sits between cells k and k+1: wet iff cell k+1 active.
+        _wet_if = jnp.asarray(_is_active, dtype=dtype)[..., 1:]
+    else:
+        _wet_if = None
+
     # Start with the configured background floors.  These are scalar
     # floats; broadcast to interface shape.
     K_v_total = jnp.full(interface_shape, K_v_background, dtype=dtype)
@@ -158,6 +186,16 @@ def compute_vertical_K_profiles(
         K_max = vmix.kpp.K_max
         K_v_total = jnp.minimum(K_v_total, K_max)
         A_v_total = jnp.minimum(A_v_total, K_max)
+
+    # Zero K/A (and the prognostic TKE) at non-wet interfaces (partial-cell
+    # coords only; see the dry-cell guard above).  The implicit solve then
+    # has no flux through the seafloor — wet cells can never exchange with
+    # rock cells regardless of what the schemes produced below the bottom.
+    if _wet_if is not None:
+        K_v_total = K_v_total * _wet_if
+        A_v_total = A_v_total * _wet_if
+        if tke_new is not None:
+            tke_new = tke_new * _wet_if
 
     if return_tke:
         return K_v_total, A_v_total, tke_new
