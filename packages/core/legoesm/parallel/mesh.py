@@ -863,6 +863,61 @@ def shard_pytree(pytree, config: DeviceConfig):
 # 1..nl for ti > 0; tile 0 contributes rows 0..nl).
 
 
+def classify_face_metric(arr, n: int):
+    """Classify a cubed-sphere metric array for tiled (6*kt^2) layout.
+
+    The tiled shard_map tendency stage (P4 phase-1b) needs every metric
+    as a PER-TILE block.  How a field becomes one depends on its
+    horizontal extents relative to the face resolution ``n``:
+
+    Returns one of
+      ("sliceable", None)  both horiz axes in {n, n+1} — host-slice
+          per tile with :func:`tiled_face_block` (centered cell /
+          staggered corner / edge metrics).
+      ("padded", h)        a horiz axis is n+2h (h>=1) — the global
+          array holds only the outer FACE ring; an interior tile's
+          local ring is NOT a slice, so it must be produced by running
+          the tiled halo exchange ONCE at setup on the unpadded metric
+          (codex P4 metric design).
+      ("table", None)      exchange-helper offset table (6, 4, m) — an
+          exchange internal, not a per-tile spatial metric.
+      ("scalar", None)     0-d / non-face-leading array.
+      ("other", None)      face-leading but unrecognised extent — must
+          be classified before it can ride the tiled stage (ratchet).
+
+    Pure / shape-only; no device or mesh needed.
+    """
+    import numpy as _np
+
+    if not hasattr(arr, "shape") or arr.ndim < 1 or arr.shape[0] != N_FACES:
+        return ("scalar", None)
+    if arr.ndim < 3:
+        # (6, m) face-leading vector — e.g. nothing spatial in 2 dims.
+        return ("scalar", None)
+    # Exchange-helper offset tables are (6, 4, ...) — the size-4 edge
+    # axis is the unambiguous signature (h1 (6,4,n); h2/h3 (6,4,2,n)),
+    # distinct from any spatial metric at a tiled scale (n >= 12).
+    # Checked BEFORE the horizontal-extent logic: an h1 table is
+    # (6, 4, n), whose b == n would otherwise read as a spatial axis.
+    if arr.shape[1] == 4:
+        return ("table", None)
+    a, b = arr.shape[1], arr.shape[2]
+    horiz = {n, n + 1}
+
+    def _pad_h(x):
+        d = x - n
+        return (d // 2) if (d > 0 and d % 2 == 0) else None
+
+    if a in horiz and b in horiz:
+        return ("sliceable", None)
+    ha, hb = _pad_h(a), _pad_h(b)
+    hs = [h for h in (ha if a not in horiz else None,
+                      hb if b not in horiz else None) if h]
+    if (a in horiz or ha) and (b in horiz or hb) and hs:
+        return ("padded", max(hs))
+    return ("other", None)
+
+
 def tiled_face_block(face_arr, ti: int, tj: int, nl: int, kt: int):
     """Slice tile (ti, tj)'s block from ANY single-face metric array,
     inferring per-axis staggering from the shape.
