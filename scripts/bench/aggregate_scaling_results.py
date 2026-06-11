@@ -38,22 +38,54 @@ def load_results(base_dir: Path) -> list[dict]:
 
 
 def compute_scaling_efficiency(results: list[dict]) -> list[dict]:
-    """Compute scaling efficiency relative to fewest-rank baseline."""
+    """Compute scaling efficiency relative to fewest-rank baseline.
+
+    Strong-scaling groups are keyed on resolution (same problem, more
+    ranks).  Weak-scaling groups must NOT be: a weak sweep grows the
+    resolution with the rank count by construction, so keying on
+    resolution would put every weak case in its own singleton group
+    and report a vacuous 100% efficiency for each.  Weak cases group
+    by (grid, physics, precision) and normalize by the recorded
+    actual cells/rank below.
+    """
     groups: dict[tuple, list[dict]] = {}
     for r in results:
-        key = (r["grid_type"], r["physics_level"], r["mode"],
-               r["resolution"], r["precision"])
+        mode = r["mode"]
+        # n_levels in the key for BOTH modes: an output tree holding
+        # L26 and L60 sweeps must not share a baseline (Codex P1-fix
+        # review, MAJOR 2).  ``.get`` tolerates pre-field result JSONs.
+        key = (r["grid_type"], r["physics_level"], mode,
+               None if mode == "weak" else r["resolution"],
+               r.get("n_levels"), r["precision"])
         groups.setdefault(key, []).append(r)
 
     for key, group in groups.items():
-        _, _, mode, _, _ = key
+        _, _, mode, _, _, _ = key
         group.sort(key=lambda x: x["n_ranks"])
         baseline = group[0]
 
         for r in group:
             if mode == "weak":
+                # Ideal weak scaling: constant time at constant
+                # cells/rank.  The weak resolution pickers cannot hold
+                # cells/rank exactly constant between rank counts —
+                # lat-lon rounds n_lat up for divisibility (and the
+                # >=2-rows/rank band floor), icosahedral jumps in
+                # discrete 4x subdivision levels — so normalize by the
+                # ACTUAL recorded cells_per_rank.  Mirrors the
+                # ``cells_per_gpu`` normalization in
+                # scripts/bench/run_levante_gpu_scaling.py
+                # (run_weak_scaling):
+                #   eff = (t_base / t_N) * (cpr_N / cpr_base)
+                base_cpr = baseline.get("cells_per_rank")
+                cpr = r.get("cells_per_rank")
+                cell_ratio = (
+                    cpr / base_cpr if (base_cpr and cpr) else 1.0
+                )
                 r["scaling_efficiency"] = (
-                    baseline["time_per_step_ms"] / r["time_per_step_ms"])
+                    baseline["time_per_step_ms"] / r["time_per_step_ms"]
+                    * cell_ratio
+                )
             else:
                 ideal = r["n_ranks"] / baseline["n_ranks"]
                 actual = baseline["time_per_step_ms"] / r["time_per_step_ms"]
@@ -141,17 +173,28 @@ def plot_results(results: list[dict], output_dir: Path) -> None:
         weak = [r for r in grid_results if r["mode"] == "weak"]
         if weak:
             fig, ax = plt.subplots(1, 1, figsize=(8, 5.5))
-            for phys in sorted(set(r["physics_level"] for r in weak)):
+            # One line per (physics, n_levels, precision): a mixed
+            # output tree (e.g. L26 + L60 sweeps) must not be drawn
+            # as a single line (Codex P1-fix review round 2, MINOR).
+            weak_series = sorted(set(
+                (r["physics_level"], r.get("n_levels"), r["precision"])
+                for r in weak
+            ), key=lambda k: (k[0], str(k[1]), k[2]))
+            for phys, nlev, prec in weak_series:
                 data = sorted(
-                    [r for r in weak if r["physics_level"] == phys],
+                    [r for r in weak
+                     if r["physics_level"] == phys
+                     and r.get("n_levels") == nlev
+                     and r["precision"] == prec],
                     key=lambda r: r["n_ranks"],
                 )
                 ranks = [r["n_ranks"] for r in data]
                 ms = [r["time_per_step_ms"] for r in data]
+                label = f"{phys} L{nlev} {prec}"
                 ax.plot(ranks, ms,
                         color=physics_colors.get(phys, "#333"),
                         marker=physics_markers.get(phys, "o"),
-                        linewidth=2, markersize=7, label=phys)
+                        linewidth=2, markersize=7, label=label)
 
             ax.set_xscale("log", base=2)
             ax.set_xlabel("MPI Ranks", fontsize=12)
@@ -175,22 +218,31 @@ def plot_results(results: list[dict], output_dir: Path) -> None:
                 for i, res in enumerate(resolutions)
             }
 
-            for res in resolutions:
-                for phys in sorted(set(r["physics_level"] for r in strong)):
-                    data = sorted(
-                        [r for r in strong
-                         if r["resolution"] == res and r["physics_level"] == phys],
-                        key=lambda r: r["n_ranks"],
-                    )
-                    if not data:
-                        continue
-                    ranks = [r["n_ranks"] for r in data]
-                    sypd = [r["sypd"] for r in data]
-                    label = f"res={res} {phys}"
-                    ax.plot(ranks, sypd,
-                            color=res_colors[res],
-                            marker=physics_markers.get(phys, "o"),
-                            linewidth=2, markersize=7, label=label)
+            # One line per (resolution, physics, n_levels, precision)
+            # — same mixed-tree separation as the weak plot.
+            strong_series = sorted(set(
+                (r["resolution"], r["physics_level"],
+                 r.get("n_levels"), r["precision"])
+                for r in strong
+            ), key=lambda k: (k[0], k[1], str(k[2]), k[3]))
+            for res, phys, nlev, prec in strong_series:
+                data = sorted(
+                    [r for r in strong
+                     if r["resolution"] == res
+                     and r["physics_level"] == phys
+                     and r.get("n_levels") == nlev
+                     and r["precision"] == prec],
+                    key=lambda r: r["n_ranks"],
+                )
+                if not data:
+                    continue
+                ranks = [r["n_ranks"] for r in data]
+                sypd = [r["sypd"] for r in data]
+                label = f"res={res} {phys} L{nlev} {prec}"
+                ax.plot(ranks, sypd,
+                        color=res_colors[res],
+                        marker=physics_markers.get(phys, "o"),
+                        linewidth=2, markersize=7, label=label)
 
             ax.set_xscale("log", base=2)
             ax.set_yscale("log", base=10)

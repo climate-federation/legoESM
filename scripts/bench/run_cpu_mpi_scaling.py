@@ -4,17 +4,19 @@
 Measures wall-clock time per step and SYPD across varying MPI rank counts
 and resolutions for the supported grid+physics combinations.
 
-MPI-scalable grid (multi-rank weak/strong scaling):
-  icosahedral   -- MPAS Voronoi TRiSK PE dycore
+MPI-scalable grids (multi-rank weak/strong scaling, genuinely
+domain-decomposed at the dycore level):
+  icosahedral   -- MPAS Voronoi TRiSK PE dycore (cell partition)
+  latlon        -- Lat-lon C-grid FV PE dycore (latitude-band
+                   decomposition via ``make_latlon_mpi_step``;
+                   needs >=2 lat rows per rank for the halo=2
+                   PPM/biharmonic exchanges)
 
-Single-rank only (these grids are listed but their MPI paths are not
-domain-decomposed at the dycore level — see iter 13/14 honest-sweep
-guards):
+Single-rank only (listed but their MPI paths are not domain-decomposed
+at the dycore level — see iter 13/14 honest-sweep guards):
   cubed-sphere  -- C-D grid + FV3 PE dycore (replicated dynamics
                    under MPI; iter 3 added scattered halo support but
                    driver-side state scatter is not yet implemented)
-  latlon        -- Lat-lon FV PE dycore (``make_latlon_mpi_step``
-                   raises NotImplementedError, see #115)
   spectral      -- Gaussian + spectral PE dycore (no MPI path at all)
 
 Physics levels:
@@ -27,10 +29,13 @@ Use --sweep to generate all cases for a SLURM array job.
 
 Usage
 -----
-Multi-rank MPI scaling (icosahedral only)::
+Multi-rank MPI scaling (icosahedral or latlon)::
 
     mpirun -np 8 python scripts/run_cpu_mpi_scaling.py \\
         --grid icosahedral --mode strong --physics held_suarez
+
+    mpirun -np 4 python scripts/run_cpu_mpi_scaling.py \\
+        --grid latlon --mode strong --physics held_suarez
 
 Single-rank case (any grid)::
 
@@ -202,10 +207,31 @@ def _weak_resolution_cs(n_ranks: int, base_n: int = WEAK_BASE_CS) -> int:
 
 
 def _weak_resolution_ll(n_ranks: int, base_n: int = WEAK_BASE_LL) -> int:
+    """Weak-scaling n_lat for the lat-lon band decomposition.
+
+    Constant *cells per rank* (the icosahedral analog): total cells
+    scale as ``n_lat * n_lon = 2 * n_lat**2``, so ``n_lat ~
+    sqrt(n_ranks)`` keeps cells/rank fixed.  Constraints layered on
+    top:
+
+    * divisible by ``n_ranks`` (uniform bands → clean cells/rank),
+    * at least 2 lat rows per rank — ``pad_halo_latlon_mpi`` raises
+      when ``halo(=2 for PPM/biharmonic) > n_lat_local``, so a band
+      must never be thinner than the deepest operator halo.
+
+    The divisibility / band-floor rounding means the ACTUAL cells per
+    rank drifts between rank counts (it is not exactly ``2 *
+    base_n**2 * nlev``).  Each result row records the actual
+    ``cells_per_rank`` (``TimingResult.cells_per_rank``, serialized to
+    the per-case JSON), and the weak-efficiency computation in
+    ``scripts/bench/aggregate_scaling_results.py`` normalizes by it —
+    the same actual-cells normalization the icosahedral weak path
+    needs for its discrete 4x subdivision-level jumps (see
+    ``run_levante_gpu_scaling.run_weak_scaling``).
+    """
     n_raw = base_n * math.sqrt(n_ranks)
     n_rounded = max(8, 2 * round(n_raw / 2))
-    # Must be divisible by n_ranks
-    while n_rounded % n_ranks != 0:
+    while n_rounded % n_ranks != 0 or n_rounded < 2 * n_ranks:
         n_rounded += 2
     return n_rounded
 
@@ -226,14 +252,6 @@ def _weak_resolution_ico(n_ranks: int, base_level: int = WEAK_BASE_ICO) -> int:
 
 def _valid_rank_counts(max_ranks: int, grid_type: str) -> list[int]:
     if grid_type == "spectral":
-        return [1]
-    if grid_type == "latlon":
-        # Lat-lon MPI step raises NotImplementedError (the latitude-band
-        # decomposition infrastructure exists but the C-grid operators
-        # have not been adapted to local domains).  Iter 1 stripped
-        # lat-lon from the GPU sweep; iter 5 mirrors that here so the
-        # CPU MPI driver does not generate multi-rank cases that
-        # immediately error out and pollute the sweep summary.  See #115.
         return [1]
     if grid_type == "cubed-sphere":
         # Iter 13 honest-sweep guard: cubed-sphere MPI is not yet
@@ -409,6 +427,7 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,
         CGridLatLonPrimitiveEquationConfig,
+        hydrostatic_to_cgrid,
     )
 
     from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
@@ -417,7 +436,9 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     n_lon = 2 * resolution
     grid = create_latlon_grid(n_lat, n_lon)
 
-    # Clamp dt to pole-cell CFL limit
+    # Clamp dt to pole-cell CFL limit (computed on the GLOBAL grid so
+    # every rank derives the identical dt — only the boundary ranks
+    # own the actual pole rows under band MPI).
     dx_pole = pole_cell_dx(grid)
     dt = min(dt, cfl_max_dt(dx_pole, 300.0, cfl_number=0.8, ndim=1))
 
@@ -426,9 +447,8 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         fix_mass=True,
         use_polar_filter=False,
     )
-    model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
 
-    # Baroclinic wave init for lat-lon
+    # Baroclinic wave init for lat-lon (cell-centred HydrostaticState).
     from tests.test_cases.baroclinic_wave import (
         baroclinic_wave_init_latlon,
     )
@@ -440,18 +460,70 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     physics_fn = _build_physics_fn(physics_level, "latlon")
 
     if n_ranks > 1:
-        from legoesm.parallel.latlon_mpi import make_latlon_mpi_step
-        # make_latlon_mpi_step raises NotImplementedError — lat-lon
-        # MPI local-compute requires operator adaptation not yet done.
-        make_latlon_mpi_step(model, grid, None, sigma, config)
+        # Latitude-band MPI (mirrors the multi-rank icosahedral path):
+        # 1. convert the global state to raw C-grid arrays *before*
+        #    arming the MPI halo backend (the conversion's pole pads
+        #    must run on the global array with the local backend),
+        # 2. arm the band layout + MPI halo backend,
+        # 3. slice the global grid to this rank's band, build the
+        #    rank-local model on it,
+        # 4. scatter the global state to the band,
+        # 5. wrap the step;  ``make_latlon_mpi_step`` forwards
+        #    ``physics_fn`` per RK stage exactly like the serial
+        #    ``model.step(state, dt, physics_fn=...)`` path
+        #    (Held-Suarez is column-local, so it adds no halo
+        #    coupling beyond the dycore's own exchanges).
+        from legoesm.parallel.distributed import initialize_distributed_latlon
+        from legoesm.parallel.latlon_mpi import (
+            make_latlon_mpi_step,
+            scatter_state_latlon,
+            slice_latlon_grid_to_band,
+        )
+
+        if n_lat // n_ranks < 2:
+            raise ValueError(
+                f"lat-lon band MPI needs >=2 lat rows per rank for the "
+                f"halo=2 PPM/biharmonic exchange; got n_lat={n_lat} on "
+                f"{n_ranks} ranks ({n_lat // n_ranks} rows/rank)."
+            )
+
+        # (1) global cell-centred -> global C-grid, still serial.
+        cgrid_global = hydrostatic_to_cgrid(state, grid)
+
+        # (2) band layout + MPI halo backend.
+        layout = initialize_distributed_latlon(
+            global_n_lat=n_lat, global_n_lon=n_lon,
+        )
+
+        # (3) rank-local band model (the wrapper re-instantiates it
+        # with rank-aware pole_v_bc + allreduced total_area itself).
+        band_grid = slice_latlon_grid_to_band(grid, layout)
+        local_model = CGridLatLonPrimitiveEquationModel(
+            band_grid, sigma, config, dt=dt,
+        )
+
+        # (4) + (5)
+        state = scatter_state_latlon(cgrid_global, layout)
+        step_fn = make_latlon_mpi_step(
+            local_model, layout, physics_fn=physics_fn,
+        )
+        # ACTUAL rank-local cell count (Codex P1-fix review, MINOR):
+        # ``total // n_ranks`` is only exact when n_lat divides evenly
+        # (the sweep generator enforces that, a direct ``--resolution``
+        # run does not — the first ``n_lat % n_ranks`` ranks then carry
+        # one extra row).  Rank 0 is in that first group, so its count
+        # is the bottleneck-rank load — the right weak-scaling
+        # normalizer for the rank-0-written result JSON.
+        cells_per_rank = layout.n_lat_local * n_lon * nlev
     else:
+        model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if physics_fn is not None:
             _phys = physics_fn
             step_fn = lambda state, dt: model.step(state, dt, physics_fn=_phys)
         else:
             step_fn = model.step
+        cells_per_rank = total_cells
 
-    cells_per_rank = total_cells // max(1, n_ranks)
     return step_fn, state, dt, total_cells, cells_per_rank
 
 
@@ -752,7 +824,9 @@ def generate_sweep_cases(
 
         for res in resolutions:
             for n in rank_counts:
-                if grid_type == "latlon" and res % n != 0:
+                # Lat-lon bands: uniform decomposition (divisible) AND
+                # >=2 lat rows per rank (halo=2 exchange minimum).
+                if grid_type == "latlon" and (res % n != 0 or res // n < 2):
                     continue
                 cases.append(CaseSpec(grid_type, res, n, "strong", physics, nlev, precision))
 
@@ -915,12 +989,18 @@ def main() -> int:
                 flush=True,
             )
         return 2
-    if grid_type == "latlon" and n_ranks > 1:
+    # Lat-lon band MPI is real (latitude-band decomposition), but a
+    # band must hold at least 2 lat rows for the halo=2 PPM /
+    # biharmonic exchange (``pad_halo_latlon_mpi`` raises when
+    # ``halo > n_lat_local``).  Refuse undersized configurations
+    # up-front with a clear message instead of a mid-build traceback.
+    if grid_type == "latlon" and n_ranks > 1 and resolution // n_ranks < 2:
         if is_rank0:
             print(
-                "ERROR: lat-lon MPI step is not implemented "
-                "(``make_latlon_mpi_step`` raises NotImplementedError, "
-                "see #115).  Use 1 rank.",
+                f"ERROR: lat-lon band MPI needs >=2 lat rows per rank "
+                f"(halo=2 exchange); resolution={resolution} on "
+                f"{n_ranks} ranks gives {resolution // n_ranks} "
+                f"rows/rank.  Increase --resolution or reduce ranks.",
                 flush=True,
             )
         return 2
