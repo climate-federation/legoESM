@@ -131,6 +131,11 @@ finite gradients in float32 + float64.
   `CLUBBMomentState` in `PhysicsState.clubb_moments`, and RUNS end-to-end through
   `combined.make_physics` (iter 53). Wired into coupler `validate_strict` +
   `physics_state` + `scm` + AMIP CLI.
+- **No-regression (iter 57):** the 98-test turbulence-integration suite
+  (`test_physics_turbulence` + `test_turbulence`) passes clean — the shared-infra
+  changes (PhysicsState.clubb_moments, the `_read_turb_carry` refactor across all
+  4 physics_fn paths, combined.py carry routing) left every other turbulence
+  scheme intact.
 - **P8 validation** ✅ — per-piece CLUBB-JAX parity + conservation + multi-step
   prognostic stability (host-diffusion fix) + jit/grad + end-to-end pipeline run.
   Idealized physics (iter 54-55): (a) convective BL — surface heating develops
