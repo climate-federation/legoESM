@@ -367,10 +367,49 @@ def initialize_distributed_latlon(
             )
             _active_topology = None
     if _active_topology is not None:
+        _want_n_lon = (2 * global_n_lat if global_n_lon is None
+                       else global_n_lon)
+        if (_active_topology.n_lat_global != global_n_lat
+                or _active_topology.n_lon_global != _want_n_lon):
+            # Same hydra, third head (after the cross-grid TYPE reuse
+            # above and the test backend leaks): reusing a layout for
+            # a DIFFERENT global grid silently mis-slices every band
+            # (and may carry a foreign tripolar fold) — the np=2 PCG
+            # step-parity 1e-5 drift in merge gate 8460563 was exactly
+            # a leaked smaller fold-active layout.  Re-arm fresh.
+            warnings.warn(
+                "initialize_distributed_latlon() re-called with a "
+                f"different global grid ({global_n_lat}x{_want_n_lon} "
+                f"vs active {_active_topology.n_lat_global}x"
+                f"{_active_topology.n_lon_global}); replacing the "
+                "active layout and re-arming the MPI halo backend.",
+                RuntimeWarning, stacklevel=2,
+            )
+            _active_topology = None
+    if _active_topology is not None:
         active_fold = getattr(_active_topology, "fold", None)
         active_on = (active_fold is not None
                      and getattr(active_fold, "is_active", False))
         requested_on = fold is not None and getattr(fold, "is_active", False)
+        if active_on and not requested_on:
+            # Mirror of the upgrade case below: a leaked TRIPOLAR layout
+            # must not serve a REGULAR-grid request — the foreign north
+            # fold permutes/sign-flips the northern band rows of every
+            # subsequent pad (merge gate 8460563: 1e-5 step-parity drift
+            # from exactly this same-dims stale-fold reuse).  Re-arm
+            # without the fold.
+            warnings.warn(
+                "initialize_distributed_latlon() re-called WITHOUT a "
+                "tripolar fold after a fold-active init; replacing the "
+                "active layout with a fold-less one and re-arming the "
+                "MPI halo backend.",
+                RuntimeWarning, stacklevel=2,
+            )
+            updated = _active_topology._replace(fold=None)
+            _active_topology = updated
+            from legoesm.grids.halo import set_halo_backend
+            set_halo_backend("mpi", updated)
+            return updated
         if requested_on and not active_on:
             # A prior fold-less init must NOT mask a later tripolar (ORCA)
             # init — otherwise the ocean run would silently use the
