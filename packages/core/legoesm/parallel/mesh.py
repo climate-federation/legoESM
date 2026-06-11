@@ -789,6 +789,19 @@ def shard_pytree(pytree, config: DeviceConfig):
                 if config.tiling != (1, 1) and leaf.ndim < 3:
                     sharding = tiled_face_only or config.face_sharding
                     return jax.device_put(leaf, sharding)
+                if config.tiling != (1, 1) and leaf.ndim >= 3:
+                    # STAGGERED face-plane leaves — D-grid winds
+                    # (6, n+1, n, ...) / (6, n, n+1, ...) — cannot
+                    # shard over the tile axes (IndivisibleError, P4
+                    # discovery probe job 8464703).  Phase-1: face-only
+                    # sharding (spatial replicated across a face's kt^2
+                    # tile devices); the tiled shard_map stage slices
+                    # its LOCAL duplicated-shared-row block body-side
+                    # (Pace layout) via staggered_face_to_tile_blocks.
+                    tx, ty = config.tiling
+                    if leaf.shape[1] % tx != 0 or leaf.shape[2] % ty != 0:
+                        sharding = tiled_face_only or config.face_sharding
+                        return jax.device_put(leaf, sharding)
                 return jax.device_put(leaf, config.face_sharding)
             return jax.device_put(leaf, config.replicated_sharding)
 
@@ -833,6 +846,64 @@ def shard_pytree(pytree, config: DeviceConfig):
         return jax.device_put(leaf, config.replicated_sharding)
 
     return jax.tree.map(_shard_leaf, pytree)
+
+
+# ==============================================================================
+# Tiled staggered-leaf layout (P4 phase-1) — Pace-style duplicated rows
+# ==============================================================================
+# D-grid staggered face arrays (n+1 cells on one horizontal axis) cannot
+# shard evenly over a (face, tile_i, tile_j) mesh.  The tiled shard_map
+# stage instead works on PER-TILE BLOCKS that DUPLICATE the shared
+# staggered row/col between neighbouring tiles (each tile holds nl+1
+# entries on the staggered axis), exactly the FV3/Pace rank layout.
+# These pure helpers define that layout once — body-side slicing and
+# the canonical-owner inverse — so shard/gather and the parity tests
+# share a single source of truth.  Canonical ownership: the LOWER tile
+# owns the shared boundary entry (tile ti contributes its rows
+# 1..nl for ti > 0; tile 0 contributes rows 0..nl).
+
+
+def staggered_tile_block(face_arr, ti: int, tj: int, nl: int,
+                         stag_axis: int):
+    """Slice tile (ti, tj)'s duplicated-row staggered block.
+
+    face_arr : (n+1, n, ...) when ``stag_axis == 0``, (n, n+1, ...)
+        when ``stag_axis == 1`` (single face, no leading face axis).
+    Returns (nl+1, nl, ...) / (nl, nl+1, ...): the shared boundary
+    entry appears in BOTH adjacent tiles' blocks.
+    """
+    if stag_axis == 0:
+        return face_arr[ti * nl: ti * nl + nl + 1,
+                        tj * nl: (tj + 1) * nl]
+    return face_arr[ti * nl: (ti + 1) * nl,
+                    tj * nl: tj * nl + nl + 1]
+
+
+def staggered_blocks_to_face(blocks, kt: int, stag_axis: int):
+    """Inverse of per-tile slicing: canonical (n+1, ...) face array.
+
+    blocks : nested list ``blocks[ti][tj]`` of (nl+1, nl, ...) /
+        (nl, nl+1, ...) arrays in tile-row-major order.
+    Shared entries must agree between neighbouring blocks (the tiled
+    exchange maintains this); the LOWER tile's copy is taken
+    (canonical owner), so a disagreement is silently resolved — the
+    parity tests assert agreement separately.
+    """
+    import jax.numpy as jnp
+
+    if stag_axis == 0:
+        rows = []
+        for ti in range(kt):
+            row = jnp.concatenate([blocks[ti][tj] for tj in range(kt)],
+                                  axis=1)
+            rows.append(row if ti == 0 else row[1:])
+        return jnp.concatenate(rows, axis=0)
+    cols = []
+    for tj in range(kt):
+        col = jnp.concatenate([blocks[ti][tj] for ti in range(kt)],
+                              axis=0)
+        cols.append(col if tj == 0 else col[:, 1:])
+    return jnp.concatenate(cols, axis=1)
 
 
 def shard_latlon(pytree, config: DeviceConfig):
