@@ -178,6 +178,38 @@ def _core_state_env(gr, ng, nzm, seed=7):
     return state, forcing, env
 
 
+def test_advance_clubb_core_conserves_thlm_rtm():
+    """Truth-tier check: with ZERO surface flux (flux BCs at the surface level
+    zeroed) and ZERO forcing and wm=0, the flux-form scalar advances must
+    CONSERVE the column-integrated rho_ds-weighted thlm and rtm across steps. A
+    spurious source in the assembly (wrong field fed to an advance, a
+    non-telescoping flux divergence) would break this even though the per-step
+    finiteness/shape tests pass. (The mean advances inside advance_clubb_core run
+    on the carried state directly — no reset, unlike clubb_step.)"""
+    gr, ng, nzm = _gr()
+    state, forcing, env = _core_state_env(gr, ng, nzm)
+    # Zero the surface (index 0, ascending) flux BCs so no surface source enters.
+    state = state._replace(
+        wprtp=state.wprtp.at[:, 0].set(0.0),
+        wpthlp=state.wpthlp.at[:, 0].set(0.0),
+        upwp=state.upwp.at[:, 0].set(0.0),
+        vpwp=state.vpwp.at[:, 0].set(0.0))
+    w = np.asarray(env["rho_ds_zt"]) * np.asarray(gr.dzt)   # mass weight (zt)
+
+    def col_int(field_zt):
+        return np.sum(w * np.asarray(field_zt), axis=1)
+
+    thlm0, rtm0 = col_int(state.thlm), col_int(state.rtm)
+    s = state
+    for _ in range(5):
+        s, _ = advance_clubb_core(s, forcing, **env)
+    # Relative drift over 5 steps must be at round-off (flux-form conservation).
+    rel_thlm = np.max(np.abs(col_int(s.thlm) - thlm0) / np.abs(thlm0))
+    rel_rtm = np.max(np.abs(col_int(s.rtm) - rtm0) / np.abs(rtm0))
+    assert rel_thlm < 1e-9, f"thlm not conserved: rel drift {rel_thlm:.2e}"
+    assert rel_rtm < 1e-9, f"rtm not conserved: rel drift {rel_rtm:.2e}"
+
+
 def test_advance_clubb_core_one_step():
     gr, ng, nzm = _gr()
     state, forcing, env = _core_state_env(gr, ng, nzm)
