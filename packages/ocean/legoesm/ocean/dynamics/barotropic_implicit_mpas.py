@@ -57,7 +57,18 @@ PCG converges rapidly with a Jacobi preconditioner.
 
 Differentiability:
 ``jax.scipy.sparse.linalg.cg`` is differentiable through implicit-
-function-theorem custom-VJP.
+function-theorem custom-VJP, but its transpose solve re-uses the SAME
+operator, assuming Euclidean symmetry — and ``A`` is symmetric only in
+the AREA-WEIGHTED cell inner product (measured Euclidean asymmetry
+1.4e-2 on the level-2 icosahedral mesh, area-weighted ~2e-15), so the
+stock VJP silently biased every reverse-mode gradient through the
+free-surface solve (forward always correct).  Fixed backward-only via
+``jax.custom_vjp`` in :func:`solve_helmholtz_freesurface_mpas`: the
+primal CG call is verbatim (forward bit-identical) and the adjoint
+applies the TRUE transpose ``A^{-T} = W·A^{-1}·W^{-1}`` with
+``W = diag(areaCell)`` — the exact mirror of the lat-lon C-grid fix in
+``barotropic_implicit_latlon_cgrid.solve_helmholtz_freesurface`` and a
+sibling of the rigid-lid seam-reduced adjoint (commit 1e370679).
 
 Tracer transport consistency:
 returns ``Hu_avg = H_e_old · [(1-θ)·u_n + θ·u_{n+1}]`` — time-averaged
@@ -134,6 +145,33 @@ def _edge_H_min_rule(
     return jnp.maximum(jnp.sum(h_e_k, axis=1), min_water_col)
 
 
+def _helmholtz_apply_mpas(
+    eta_in: jnp.ndarray,
+    H_e: jnp.ndarray,
+    coeff: jnp.ndarray,
+    mesh: VoronoiMesh,
+    mask: jnp.ndarray,
+    edge_mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Apply ``A(η) = η - coeff · div(H · grad η)`` (cell-centred Helmholtz).
+
+    Parametric form so the custom VJP in
+    :func:`solve_helmholtz_freesurface_mpas` can take exact cotangents
+    w.r.t. the operator parameters (``θ̄ = -(∂_θ A(θ)·x)ᵀ·λ``) via
+    ``jax.vjp`` without closure-capturing tracers (scan-lowering safe;
+    mirrors ``barotropic_implicit_latlon_cgrid._helmholtz_apply``).
+    """
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+    H_e_face = H_e * edge_mask
+    eta_m = eta_in * mask
+    eta_filled = fill_land_cells_mpas(eta_m, mask, c1, c2)
+    grad = gradient_edge(eta_filled, mesh)
+    flux = H_e_face * grad
+    div_grad = divergence_cell(flux, mesh) * mask
+    return (eta_m - coeff * div_grad) * mask
+
+
 def _make_helmholtz(
     H_e: jnp.ndarray,
     coeff: jnp.ndarray,
@@ -145,36 +183,30 @@ def _make_helmholtz(
 
     Built from the TRiSK FV gradient + FV divergence (Ringler et al.
     2010 Eqs. 21-22).  Symmetric in the area-weighted cell inner
-    product, positive-definite for ``coeff ≥ 0`` and ``H ≥ 0``.
+    product (NOT the Euclidean one — the divergence carries 1/areaCell;
+    see :func:`solve_helmholtz_freesurface_mpas`), positive-definite for
+    ``coeff ≥ 0`` and ``H ≥ 0``.
 
     The land-cell Neumann fill on η before gradient_edge ensures the
     operator is consistent with the same fill used in the explicit
     substep — both feed gradient_edge a coastline-smoothed field rather
     than the raw (ocean → 0 → ocean) jump.
     """
-    c1 = mesh.cellsOnEdge[0]
-    c2 = mesh.cellsOnEdge[1]
-    H_e_face = H_e * edge_mask
 
     def A_op(eta_in: jnp.ndarray) -> jnp.ndarray:
-        eta_m = eta_in * mask
-        eta_filled = fill_land_cells_mpas(eta_m, mask, c1, c2)
-        grad = gradient_edge(eta_filled, mesh)
-        flux = H_e_face * grad
-        div_grad = divergence_cell(flux, mesh) * mask
-        return (eta_m - coeff * div_grad) * mask
+        return _helmholtz_apply_mpas(eta_in, H_e, coeff, mesh, mask, edge_mask)
 
     return A_op
 
 
-def _make_diag_preconditioner(
+def _helmholtz_inv_diag_mpas(
     H_e: jnp.ndarray,
     coeff: jnp.ndarray,
     mesh: VoronoiMesh,
     mask: jnp.ndarray,
     edge_mask: jnp.ndarray,
-):
-    """Jacobi preconditioner for the Voronoi Helmholtz.
+) -> jnp.ndarray:
+    """Inverse diagonal of the Voronoi Helmholtz (Jacobi preconditioner).
 
     Diagonal of ``A(η) = η - coeff · div(H · grad η)``:
 
@@ -195,14 +227,150 @@ def _make_diag_preconditioner(
         H_g * dv_g / dc_g * mask_eoc, axis=0,
     ) / mesh.areaCell
     diag = 1.0 + coeff * diag_off
-    inv_diag = jnp.where(
+    return jnp.where(
         mask > 0.5, 1.0 / jnp.maximum(diag, 1.0e-30), 0.0,
     )
+
+
+def _make_diag_preconditioner(
+    H_e: jnp.ndarray,
+    coeff: jnp.ndarray,
+    mesh: VoronoiMesh,
+    mask: jnp.ndarray,
+    edge_mask: jnp.ndarray,
+):
+    """Return ``M(r) = diag⁻¹ · r`` Jacobi preconditioner (see
+    :func:`_helmholtz_inv_diag_mpas`)."""
+    inv_diag = _helmholtz_inv_diag_mpas(H_e, coeff, mesh, mask, edge_mask)
 
     def M_inv(r: jnp.ndarray) -> jnp.ndarray:
         return r * inv_diag
 
     return M_inv
+
+
+def solve_helmholtz_freesurface_mpas(
+    rhs: jnp.ndarray,
+    x0: jnp.ndarray,
+    H_e: jnp.ndarray,
+    coeff: jnp.ndarray,
+    mask: jnp.ndarray,
+    edge_mask: jnp.ndarray,
+    inv_diag: jnp.ndarray,
+    mesh: VoronoiMesh,
+    *,
+    tol,
+    maxiter: int,
+) -> jnp.ndarray:
+    """Preconditioned-CG Helmholtz solve with the area-weighted adjoint.
+
+    Exact mirror of
+    ``barotropic_implicit_latlon_cgrid.solve_helmholtz_freesurface`` on
+    the Voronoi mesh — read that docstring for the full derivation and
+    the probe/ test references.  Summary:
+
+    - Forward: byte-identical to the stock ``jax.scipy.sparse.linalg.cg``
+      call (the pre-fix path, verbatim primal inside ``jax.custom_vjp``).
+    - ``A`` is self-adjoint only in ``<x,y>_W = Σ x·y·areaCell``
+      (``Aᵀ = W·A·W⁻¹``); stock cg's VJP re-solves with ``A`` assuming
+      Euclidean symmetry → biased reverse-mode gradients.  The custom
+      bwd applies the true transpose
+
+          λ = A⁻ᵀ·η̄ = w̃ · cg(A, η̄·mask/w̃)·mask,
+          w̃ = areaCell/max(areaCell)
+
+      (the constant rescale cancels exactly by linearity — verified
+      bitwise in x64 — and keeps the adjoint rhs at O(η̄); raw ~1e12 m²
+      cell areas push float32 CG residual norms toward subnormal, the
+      config-dependent NaN gradient seen while shipping this fix, which
+      w̃ removes entirely at zero cost).
+    - Operator-parameter cotangents are exact IFT,
+      ``θ̄ = -(∂_θ A(θ)·x)ᵀ·λ`` via ``jax.vjp`` of
+      :func:`_helmholtz_apply_mpas` at the converged solution, for
+      θ ∈ {H_e, coeff, mask, edge_mask}.
+    - ``x0`` and ``inv_diag`` get exact zero cotangents (IFT; stock-cg
+      behaviour for the Krylov guess).
+    - CLOSURE RULE: fwd/bwd closures capture only ``mesh``/``maxiter``;
+      every traced array AND ``tol`` (array-valued in the production
+      caller, created inside the traced step body) is an explicit
+      custom_vjp argument — a closure-captured constant array leaks as a
+      tracer under grad-of-scan ("No constant handler for
+      DynamicJaxprTracer").
+    - ``custom_vjp`` does not support forward-mode AD: ``jax.jvp``
+      through this solve raises (documented limitation; remedy = paired
+      ``custom_jvp`` on the same operator).
+
+    Verified against a dense ground truth (level-2 icosahedral mesh,
+    explicit matrix, ``Sᵀ`` solve) in
+    tests/ocean/unit/test_freesurface_helmholtz_adjoint_mpas.py,
+    including the weighting-slip mutations.
+    """
+
+    def _forward_cg(rhs_in, x0_in, H_e_in, coeff_in,
+                    mask_in, edge_mask_in, inv_diag_in, tol_in):
+        # The pre-fix forward, verbatim.
+        A_op = _make_helmholtz(H_e_in, coeff_in, mesh, mask_in, edge_mask_in)
+
+        def M_inv(r):
+            return r * inv_diag_in
+
+        eta_sol, _info = jax.scipy.sparse.linalg.cg(
+            A_op, rhs_in, x0=x0_in, tol=tol_in, maxiter=maxiter, M=M_inv,
+        )
+        return eta_sol
+
+    @jax.custom_vjp
+    def _cg_area_adjoint(rhs_in, x0_in, H_e_in, coeff_in,
+                         mask_in, edge_mask_in, inv_diag_in, tol_in):
+        return _forward_cg(rhs_in, x0_in, H_e_in, coeff_in,
+                           mask_in, edge_mask_in, inv_diag_in, tol_in)
+
+    def _cg_fwd(rhs_in, x0_in, H_e_in, coeff_in,
+                mask_in, edge_mask_in, inv_diag_in, tol_in):
+        eta_sol = _forward_cg(rhs_in, x0_in, H_e_in, coeff_in,
+                              mask_in, edge_mask_in, inv_diag_in, tol_in)
+        res = (eta_sol, H_e_in, coeff_in, mask_in, edge_mask_in,
+               inv_diag_in, tol_in)
+        return eta_sol, res
+
+    def _cg_bwd(res, eta_bar):
+        (eta_sol, H_e_in, coeff_in, mask_in, edge_mask_in,
+         inv_diag_in, tol_in) = res
+        A_op = _make_helmholtz(H_e_in, coeff_in, mesh, mask_in, edge_mask_in)
+
+        def M_inv(r):
+            return r * inv_diag_in
+
+        area_w = mesh.areaCell.astype(eta_bar.dtype)
+        w_rel = area_w / jnp.max(area_w)
+        eta_bar_m = eta_bar * mask_in
+        lam_hat, _info = jax.scipy.sparse.linalg.cg(
+            A_op, eta_bar_m / w_rel, x0=jnp.zeros_like(eta_bar_m),
+            tol=tol_in, maxiter=maxiter, M=M_inv,
+        )
+        lam = w_rel * lam_hat * mask_in
+
+        _, vjp_params = jax.vjp(
+            lambda He, c, m, em: _helmholtz_apply_mpas(
+                eta_sol, He, c, mesh, m, em,
+            ),
+            H_e_in, coeff_in, mask_in, edge_mask_in,
+        )
+        dH_e, dcoeff, dmask, dedge_mask = vjp_params(lam)
+
+        return (
+            lam,                          # rhs
+            jnp.zeros_like(lam),          # x0: exact zero (IFT, stock-cg)
+            -dH_e, -dcoeff,               # operator parameters
+            -dmask, -dedge_mask,          # masks
+            jnp.zeros_like(inv_diag_in),  # preconditioner: zero (IFT)
+            jnp.zeros_like(tol_in),       # solver knob: zero (IFT)
+        )
+
+    _cg_area_adjoint.defvjp(_cg_fwd, _cg_bwd)
+
+    return _cg_area_adjoint(rhs, x0, H_e, coeff, mask, edge_mask,
+                            inv_diag, jnp.asarray(tol))
 
 
 def barotropic_implicit_mpas(
@@ -332,15 +500,20 @@ def barotropic_implicit_mpas(
     ) * mask
 
     # ----- Step 4: PCG solve --------------------------------------------
-    A_op = _make_helmholtz(H_e_old, coeff, mesh, mask, edge_mask)
-    M_inv = _make_diag_preconditioner(H_e_old, coeff, mesh, mask, edge_mask)
+    # Jacobi diagonal (the operator is built inside the custom-VJP solver
+    # so the adjoint can take exact parameter cotangents).
+    inv_diag = _helmholtz_inv_diag_mpas(H_e_old, coeff, mesh, mask, edge_mask)
 
     pcg_tol = jnp.asarray(
         config.barotropic_implicit_pcg_tol, dtype=eta_dtype,
     )
     pcg_maxiter = int(config.barotropic_implicit_pcg_maxiter)
-    eta_new, _info = jax.scipy.sparse.linalg.cg(
-        A_op, rhs, x0=eta_old, tol=pcg_tol, maxiter=pcg_maxiter, M=M_inv,
+    # Forward = stock preconditioned CG, bit-identical; reverse mode uses
+    # the TRUE (area-weighted) transpose — stock cg's symmetry-reusing
+    # VJP biased free-surface gradients (commit-1e370679 sibling).
+    eta_new = solve_helmholtz_freesurface_mpas(
+        rhs, eta_old, H_e_old, coeff, mask, edge_mask, inv_diag, mesh,
+        tol=pcg_tol, maxiter=pcg_maxiter,
     )
     eta_new = eta_new * mask
 
