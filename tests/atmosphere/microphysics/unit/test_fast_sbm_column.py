@@ -262,6 +262,32 @@ def test_cold_cell_does_not_melt_ice():
     np.testing.assert_allclose(np.asarray(out.dq_i_dt), 0.0, atol=1e-15)
 
 
+def test_reconstruction_conserves_mass_when_floor_binds():
+    # Codex iter-13 WARN: the thin-cloud mass floor changes the spectrum
+    # SHAPE when it binds (mean droplet < 2 µm) but the exact-mass rescale
+    # must still preserve q to roundoff. Drive the floor with tiny q + huge
+    # N (sub-2µm mean) for cloud and ice.
+    from legoesm.atmosphere.physics.microphysics.fast_sbm import (
+        mass_density, mass_doubling_grid)
+    from legoesm.atmosphere.physics.microphysics.fast_sbm.column import (
+        _reconstruct_spectrum, _reconstruct_ice)
+    m = mass_doubling_grid()
+    cfg = FastSBMConfig()
+    rho = jnp.asarray(1.1)
+    z = jnp.asarray(0.0)
+    for qc, Nc in [(1.0e-6, 1.0e10), (5.0e-5, 5.0e9), (1.0e-3, 1.0e8)]:
+        f = _reconstruct_spectrum(jnp.asarray(qc), z, jnp.asarray(Nc), z,
+                                  rho, m, cfg)
+        assert float(mass_density(f, m) / rho) == pytest.approx(qc, rel=1e-12)
+    for qr, Nr in [(1.0e-6, 1.0e7), (1.0e-4, 1.0e3)]:   # rain mode floor
+        f = _reconstruct_spectrum(z, jnp.asarray(qr), z, jnp.asarray(Nr),
+                                  rho, m, cfg)
+        assert float(mass_density(f, m) / rho) == pytest.approx(qr, rel=1e-12)
+    f_i = _reconstruct_ice(jnp.asarray(1.0e-6), rho, m, cfg)
+    assert float(mass_density(f_i, m) / rho) == pytest.approx(1.0e-6,
+                                                              rel=1e-12)
+
+
 def test_float32_grad_dry_atmosphere():
     # Regression (iter 13): the end-to-end hydrostatic grad test surfaced
     # three float32 NaN-gradient traps over a DRY column — Köhler r_crit
