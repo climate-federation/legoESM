@@ -159,10 +159,26 @@ def test_prognostic_Nc_used_when_present():
     assert col(out_low.dq_r_dt, out_low) > col(out_high.dq_r_dt, out_high)
 
 
-def test_clear_cell_fixed_point():
+def test_clear_supersaturated_cell_activates_cloud():
+    # With CCN activation a supersaturated CLEAR cell must form cloud
+    # (number + condensed water) — not stay clear.
     T, q_v, hyd, p, p_half, rho, dz = _fields(1.05, q_c=0.0, q_r=0.0)
     out = fast_sbm_microphysics(T, q_v, hyd, p, p_half, rho, dz, DT)
-    # No spectrum, no activation in the adapter → nothing happens.
+    assert np.all(np.asarray(out.dN_c_dt) > 0.0)     # droplets nucleated
+    assert np.all(np.asarray(out.dq_c_dt) > 0.0)     # cloud water grew
+    assert np.all(np.asarray(out.dq_v_dt) < 0.0)     # vapor consumed
+    # Total-water closure holds through activation + condensation + precip.
+    col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
+    np.testing.assert_allclose(
+        -col(out.dq_v_dt),
+        col(out.dq_c_dt + out.dq_r_dt) + np.asarray(out.precipitation),
+        rtol=1e-9)
+
+
+def test_subsaturated_clear_cell_fixed_point():
+    # A clear SUBsaturated cell activates nothing and stays put.
+    T, q_v, hyd, p, p_half, rho, dz = _fields(0.8, q_c=0.0, q_r=0.0)
+    out = fast_sbm_microphysics(T, q_v, hyd, p, p_half, rho, dz, DT)
     for fld in (out.dT_dt, out.dq_v_dt, out.dq_c_dt, out.dq_r_dt):
         np.testing.assert_allclose(np.asarray(fld), 0.0, atol=1e-15)
 

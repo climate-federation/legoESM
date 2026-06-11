@@ -18,6 +18,12 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.condensation_driver import
     WarmCondensationResult,
     warm_condensation_step,
 )
+from legoesm.atmosphere.physics.microphysics.fast_sbm.nucleation import (
+    NucleationResult,
+    activate_ccn,
+    critical_dry_radius,
+    kelvin_coefficient,
+)
 from legoesm.atmosphere.physics.microphysics.fast_sbm.sedimentation import (
     sediment_bins,
 )
@@ -71,6 +77,10 @@ __all__ = [
     "RemapResult",
     "WarmCondensationResult",
     "condensation_new_masses",
+    "NucleationResult",
+    "activate_ccn",
+    "critical_dry_radius",
+    "kelvin_coefficient",
     "remap_spectrum",
     "sediment_bins",
     "warm_condensation_step",

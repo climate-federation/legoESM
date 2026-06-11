@@ -26,10 +26,12 @@ After the per-cell physics, per-bin **sedimentation** (oracle
 ``FALFLUXHUCM_Z``) settles the spectrum down the column and yields the
 surface precipitation.
 
-**Documented limitations** (same stateless-interface reasons as the SDM
-adapter): no aerosol activation (a supersaturated CLEAR cell stays
-clear) and no ice (``dq_i/dq_s/dq_g = 0``) — those land with the
-nucleation/ice iterations. Spectrum shape is re-imposed each step by
+A supersaturated cell nucleates new droplets from a prescribed aerosol
+reservoir by Köhler activation (``nucleation.activate_ccn``) — so a clear
+supersaturated cell forms cloud, not nothing.
+
+**Documented limitations**: no ice (``dq_i/dq_s/dq_g = 0``) — lands with
+the ice iteration. Spectrum shape is re-imposed each step by
 reconstruction; the bin-resolved physics acts within the step. Fall
 speeds and collision kernels use a fixed warm-cloud reference state
 (the oracle pressure-interpolates its tables; per-level velocities come
@@ -64,6 +66,10 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import (
     number_density,
     radius_from_mass,
 )
+from legoesm.atmosphere.physics.microphysics.fast_sbm.nucleation import (
+    activate_ccn,
+)
+from legoesm.thermo import relative_humidity
 from legoesm.atmosphere.physics.microphysics.fast_sbm.sedimentation import (
     sediment_bins,
 )
@@ -199,13 +205,33 @@ def fast_sbm_microphysics(
     q_v_pos = jnp.maximum(q_v, 0.0)
 
     def cell(T_c, qv_c, qc_c, qr_c, Nc_c, Nr_c, p_c, rho_c):
-        f0 = _reconstruct_spectrum(qc_c, qr_c, Nc_c, Nr_c, rho_c, masses,
-                                   config)
+        # Pre-physics spectrum (the vapor/heat closure baseline).
+        f_pre = _reconstruct_spectrum(qc_c, qr_c, Nc_c, Nr_c, rho_c, masses,
+                                      config)
+        # CCN activation: a supersaturated cell nucleates new droplets from
+        # the aerosol reservoir into the smallest bins (fills the
+        # "clear cell stays clear" gap). The haze mass it adds is debited
+        # from vapor by the total-liquid closure below.
+        S_c = relative_humidity(T_c, p_c, qv_c)
+        n_existing = number_density(
+            jnp.where(jnp.arange(masses.shape[0]) < cloud_bins, f_pre, 0.0),
+            masses)
+        n_avail = jnp.maximum(config.ccn_number - n_existing, 0.0)
+        nucl = activate_ccn(S_c, T_c, n_avail, masses, config)
+        f_seed = f_pre + nucl.df
         cond = warm_condensation_step(
-            f0, T_c, qv_c, p_c, rho_c, dt, masses, config=config)
+            f_seed, T_c, qv_c, p_c, rho_c, dt, masses, config=config)
         g1 = bott_coalescence(g_from_f(cond.f, masses), ck, masses, tables)
         f1 = f_from_g(g1, masses)
-        return ((cond.T - T_c) / dt, (cond.q_v - qv_c) / dt, f0, f1)
+        # Total-water closure (nucleation + condensation, coalescence is
+        # mass-conserving): vapor change = −(in-cell liquid gain). Exact
+        # regardless of the haze seed; sedimentation (below) is vapor-
+        # neutral and only repartitions liquid ↔ precip.
+        dq_v = -(mass_density(f1, masses) - mass_density(f_pre, masses)) \
+            / rho_c
+        dq_v_dt = dq_v / dt
+        dT_dt_c = -(constants.L_v / constants.c_pd) * dq_v_dt
+        return (dT_dt_c, dq_v_dt, f_pre, f1)
 
     cell_v = jax.vmap(jax.vmap(cell))
     dT_dt, dqv_dt, f0, f1 = cell_v(

@@ -50,3 +50,15 @@ class FastSBMConfig(NamedTuple):
     # adapts NSUB at runtime; a traced trip count is not reverse-mode
     # differentiable, so the port fixes it).
     n_fall_substeps: int = 4
+    # --- CCN activation (Köhler; oracle JERNUCL01_KS aerosol mode) ---
+    # Total CCN number concentration available to activate [1/m^3].
+    ccn_number: float = 1.0e8
+    # Log-normal dry-aerosol mode: median radius [m] and geometric std [-]
+    # (continental accumulation mode defaults).
+    aerosol_dry_median: float = 5.0e-8
+    aerosol_geom_std: float = 2.0
+    # Solute van't Hoff ions, molar mass [kg/mol], density [kg/m^3]
+    # (ammonium sulfate defaults: 3 ions, 0.132 kg/mol, 1770 kg/m^3).
+    aerosol_ions: float = 3.0
+    aerosol_molar_mass: float = 0.132
+    aerosol_solute_density: float = 1770.0

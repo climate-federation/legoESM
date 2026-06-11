@@ -33,7 +33,7 @@ Process inventory (oracle subroutine → port module → status):
 | Collision kernels | `Kernals_KS` (l. 6238) — NOTE: only pressure-interpolates file-read `YW*` tables | computed kernels (reuse `sdm/kernels.py` Golovin/Hall/Long) + optional table load | Golovin **done (iter 2)**; Hall/efficiency todo |
 | Collision-coalescence (Bott flux) | `coll_xxx_lwf` + `courant_bott_KS` | `fast_sbm/collision.py` | **liquid self-collection done (iter 2)**; LWF variant (snow), xyx/xyz cross-species todo |
 | Diffusional growth (cond/evap dep/sub) | `JERRATE_KS`→`JERTIMESC_KS`→`JERSUPSAT_KS`→`JERDFUN_KS`/`JERNEWF_KS`→`ONECOND1` | `diffusional_growth.py` + `supersaturation.py` + `remap.py` + `condensation_driver.py` | **warm chain + ONECOND1 driver done (iters 3-6)** |
-| Drop nucleation (CCN activation) | `JERNUCL01_KS`, `WATER_NUCLEATION`, `LogNormal_modes_Aerosol` | `fast_sbm/nucleation.py` | todo |
+| Drop nucleation (CCN activation) | `JERNUCL01_KS`, `WATER_NUCLEATION`, `LogNormal_modes_Aerosol` | `fast_sbm/nucleation.py` | **done (iter 9)** — Köhler r_crit + lognormal-tail activation, wired into column |
 | Freezing/melting | `FREEZ`, melting block in FAST_SBM | `fast_sbm/ice_phase.py` | todo |
 | Breakup (collisional + spontaneous) | `coll_breakup_KS`, `Spont_Rain_BreakUp` | `fast_sbm/breakup.py` | todo |
 | Sedimentation per bin | `FALFLUXHUCM_Z` + fall-speed tables `VR1..VR5` | `fast_sbm/sedimentation.py` (REUSES `output.sedimentation_tendency` per bin) | **done (iter 8)** — static substeps (adaptive NSUB not reverse-AD-able); wired into column adapter, precipitation live |
@@ -273,3 +273,25 @@ EXCLUDED.
   invariance 1e-12, bottom-layer precipitation accounting exact,
   positivity at raw CFL 10.8 (cap roundoff −1e-19 documented),
   d(precip)/d(V) > 0 finite. 65 fast_sbm tests green.
+
+### Iter 9 (2026-06-11) — CCN activation
+- **`fast_sbm/nucleation.py`** — Köhler-theory activation (oracle
+  `JERNUCL01_KS`/`WATER_NUCLEATION`): critical dry radius
+  `r_crit=(A/3)(4/(B s²))^{1/3}` with `A=2σ_w/(ρ_w R_v T)` (Kelvin,
+  from `constants.sigma_water`), `B=i·M_w/M_s·ρ_s/ρ_w` (Raoult); activated
+  number = lognormal-aerosol tail above `r_crit` (REUSES
+  `grid.lognormal_cdf`), seeded into the smallest bin. `FastSBMConfig`
+  grew aerosol fields (ccn_number, dry_median, geom_std, ions, molar_mass,
+  solute_density — ammonium-sulfate defaults). Contract ships.
+- **Fills the "clear cell stays clear" gap**: column adapter now activates
+  CCN in supersaturated cells BEFORE condensation; the haze seed mass is
+  debited from vapor by a rewritten TOTAL-liquid closure
+  (`dq_v=−(mass(f1)−mass(f_pre))/ρ`, exact through nucleation +
+  condensation + mass-conserving coalescence; sedimentation vapor-neutral).
+- Validation: nucleation (7 tests) — Kelvin coeff vs oracle AKOE 5%,
+  `r_crit∝s^{−2/3}` exact, oracle RCRITI formula 1e-12, no activation at
+  S≤1, monotone-in-s + reservoir-bounded, bin-0 seed carries exactly
+  n_activated, d/dS>0; column — clear supersaturated cell now forms cloud
+  (dN_c>0, dq_c>0, dq_v<0) with total-water closure 1e-9; clear
+  subsaturated cell still a fixed point. 76 fast_sbm tests green;
+  ratchets 3946.
