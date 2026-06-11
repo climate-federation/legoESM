@@ -212,7 +212,7 @@ def morrison_microphysics(
     q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
     N_i_target = jnp.minimum(
         config.N_i0 * jnp.exp(
-            config.cooper_a * jnp.maximum(T_freeze - T, 0.0)
+            jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), 80.0)
         ),
         config.N_i_nuc_max,
     ) / jnp.clip(rho, 0.1)
@@ -491,11 +491,17 @@ def morrison_microphysics(
         #   d_rat = LAMI·DCS;  NPRCI = N0I/(LAMI·180)·exp(−d_rat);
         #   m_ip  = (ρ_ci·π/6)/LAMI³;
         #   PRCI  = m_ip·NPRCI·(((d_rat+3)·d_rat+6)·d_rat+6).
+        # The product is algebraically PRCI = (ρ_ci π/6)·N0I/(180·LAMI⁴)·…;
+        # with q_i = (ρ_ci π)·N0I/LAMI⁴ (Γ(4)=6 inverse-exponential PSD),
+        # N0I/LAMI⁴ = q_i/(ρ_ci π) cancels the LAMI³/LAMI⁴ entirely:
+        #   PRCI = (q_i/1080)·exp(−d_rat)·(((d_rat+3)d_rat+6)d_rat+6).
+        # This avoids forming 1/LAMI³ (= 1/safe_pow(1e-30,3) = 1/1e-90, which
+        # UNDERFLOWS float32 → Inf·0 = NaN when N_i→0; codex precision review),
+        # is identical for N_i>0, and stays finite at LAMI=0 (→ q_i/180, the
+        # bare 180-s timescale).
         d_rat = lami_ac * dcs
-        nprci = n0i_ac / (jnp.clip(lami_ac, 1.0e-30) * 180.0) * jnp.exp(-d_rat)
-        m_ip = (config.rho_cloud_ice * jnp.pi / 6.0) / safe_pow(
-            jnp.clip(lami_ac, 1.0e-30), 3.0)
-        ferrier = m_ip * nprci * (((d_rat + 3.0) * d_rat + 6.0) * d_rat + 6.0)
+        ferrier = (jnp.clip(q_i, 0.0) / 1080.0) * jnp.exp(-d_rat) \
+            * (((d_rat + 3.0) * d_rat + 6.0) * d_rat + 6.0)
         aggregation = jnp.where(
             (jnp.clip(q_i, 0.0) > 1.0e-14) & (T <= T_freeze), ferrier, 0.0)
     elif config.ice_to_snow_scheme == "heuristic":

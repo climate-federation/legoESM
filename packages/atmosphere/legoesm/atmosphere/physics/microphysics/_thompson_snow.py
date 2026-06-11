@@ -113,7 +113,12 @@ def _psd_integral(p, M2, M3, ratio):
     """
     lam0 = _LAM0 * ratio
     lam1 = _LAM1 * ratio
-    norm = safe_pow(jnp.clip(M2, 1.0e-30), 4.0) / safe_pow(jnp.clip(M3, 1.0e-30), 3.0)
+    # M2^4/M3^3 written as M2·(M2/M3)^3 = M2·ratio^3 — algebraically identical
+    # but float32-safe: forming M2^4 (~1e-42 for thin snow) underflows float32
+    # to 0 and M3^3 likewise, giving 0/0 = NaN; the ratio form keeps every
+    # intermediate in range (the f32 NaN found in the SCM cold mixed-phase
+    # thompson run).
+    norm = jnp.clip(M2, 1.0e-30) * safe_pow(jnp.clip(ratio, 1.0e-30), 3.0)
     g0 = jnp.exp(jax.lax.lgamma(p + 1.0))
     g1 = jnp.exp(jax.lax.lgamma(p + _MU_S + 1.0))
     term0 = _KAP0 * g0 / safe_pow(jnp.clip(lam0, 1.0e-30), p + 1.0)
@@ -188,7 +193,7 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     c_vent = 1.0 + (1.0 + _BV_S) / 2.0
     g0 = jnp.exp(jax.lax.lgamma(c_vent + 1.0))
     g1 = jnp.exp(jax.lax.lgamma(c_vent + _MU_S + 1.0))
-    norm = safe_pow(jnp.clip(M2, 1.0e-30), 4.0) / safe_pow(jnp.clip(M3, 1.0e-30), 3.0)
+    norm = jnp.clip(M2, 1.0e-30) * safe_pow(jnp.clip(ratio, 1.0e-30), 3.0)  # = M2^4/M3^3, f32-safe
     I_vent = norm * (
         _KAP0 * g0 / safe_pow(jnp.clip(lam0 + 0.5 * _FV_S, 1.0e-30), c_vent + 1.0)
         + _KAP1 * safe_pow(jnp.clip(ratio, 1.0e-30), _MU_S) * g1

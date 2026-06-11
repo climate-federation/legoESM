@@ -134,7 +134,7 @@ def thompson_microphysics(
     # finite cap. Mirrors ``morrison.py`` (which has always capped here).
     N_i_target = jnp.minimum(
         config.N_i0 * jnp.exp(
-            config.cooper_a * jnp.maximum(T_freeze - T, 0.0)
+            jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), 80.0)
         ),
         config.N_i_nuc_max,
     ) / jnp.clip(rho, 0.1)

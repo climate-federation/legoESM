@@ -170,7 +170,7 @@ def p3_microphysics(
     # the finite cap. Mirrors morrison.py / thompson.py.
     N_i_target = jnp.minimum(
         config.N_i0
-        * jnp.exp(config.cooper_a * jnp.maximum(T_freeze - T, 0.0)),
+        * jnp.exp(jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), 80.0)),
         config.N_i_nuc_max,
     ) / jnp.clip(rho, 0.1)
     dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_ice
