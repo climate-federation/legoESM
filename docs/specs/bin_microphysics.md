@@ -30,7 +30,7 @@ CGS; port is SI (CGS only inside oracle-diff tests).
 | Sedimentation per bin | `FALFLUXHUCM_Z` + `VR1..VR5` | `sedimentation.py` (REUSES `output.sedimentation_tendency`) | **done** — static substeps, per-level fall speeds, precip live |
 | Column driver + wiring | `FAST_SBM` | `column.py` + `integration.py` + `kernel_registry.py` | **switchable `scheme="fast_sbm"` done** — stateless adapter |
 | Freezing (immersion) | `FREEZ` (Bigg) | `freezing.py` | **done (iter 11)** — wired in column as liquid→ice + fusion heat; ice-spectrum carry-through deferred |
-| Melting | melting block | `ice_phase.py` | todo |
+| Melting | `J_W_MELT` (Jiwen Fan) | `melting.py` | **done (iter 12)** — wired in column with q_i carry-through (freeze↔melt loop closed) |
 | Breakup | `coll_breakup_KS`, `Spont_Rain_BreakUp` | `breakup.py` | todo |
 
 **Lookup-table strategy**: WRF data-file tables (`capacity33.asc`, masses,
@@ -146,4 +146,17 @@ shrink.
   d/dT); cold-cell column test (ice + total-water closure incl. dq_i,
   supersaturated to avoid the S≈1 cancellation). Codex ADV-10-4 self-limit
   test tightened to assert ~0 activation when target already met. 85
+  fast_sbm tests green. Codex review iter 11: PASS (only caveat = the
+  cross-step ice persistence, addressed next).
+- **Iter 12 (2026-06-11)** — **`melting.py`**: Jiwen-Fan constant-timescale
+  melting (oracle `J_W_MELT`), size-dependent rate ladder (small bins full,
+  mid `0.5/50`, large `0.683/120` s⁻¹ — thresholds in `FastSBMConfig`),
+  ice→liquid + `−(L_f/c_pd)Δq` cooling. **Closes the freeze↔melt loop**:
+  column now reconstructs an ice spectrum from carried `q_i`, melts it
+  above 0 °C before warm physics, and the net `dq_i` = (melt-consumed +
+  freeze-produced) — `q_i` is a real carried tracer (fixes iter-11 codex
+  caveat). Total-water closure proven incl. melt/freeze internal transfers.
+  6 melting tests (oracle rate ladder, mass conservation, small-bin full
+  melt, **freeze→melt round-trip conserves**, d/dT) + 2 column tests
+  (warm cell melts carried ice with closure; cold cell preserves ice). 91
   fast_sbm tests green.

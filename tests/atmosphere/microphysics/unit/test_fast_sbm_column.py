@@ -233,6 +233,35 @@ def test_supercooled_cell_freezes_to_ice():
         + np.asarray(out.precipitation), rtol=1e-8)
 
 
+def test_warm_cell_melts_carried_ice():
+    # A warm (T > 0 °C) cell carrying q_i must MELT it: dq_i < 0, melt water
+    # joins liquid, latent cooling, total water closes incl. ice.
+    T, q_v, hyd, p, p_half, rho, dz = _fields(0.99, q_c=2.0e-4, q_r=0.0)
+    hyd = hyd._replace(q_i=jnp.full((NCOL, NLEV), 5.0e-4))
+    out = fast_sbm_microphysics(T, q_v, hyd, p, p_half, rho, dz, DT)
+    assert np.all(np.asarray(out.dq_i_dt) < 0.0)         # ice melting away
+    # Closure incl. ice: −dq_v = dq_c+dq_r+dq_i+precip.
+    col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
+    np.testing.assert_allclose(
+        -col(out.dq_v_dt),
+        col(out.dq_c_dt + out.dq_r_dt + out.dq_i_dt)
+        + np.asarray(out.precipitation), rtol=1e-8)
+
+
+def test_cold_cell_does_not_melt_ice():
+    # A subfreezing cell leaves carried ice intact (no melt source).
+    T = jnp.full((NCOL, NLEV), constants.T_freeze - 10.0)
+    p = jnp.full((NCOL, NLEV), P0)
+    e = 0.9 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
+    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    rho = jnp.full((NCOL, NLEV), 1.1)
+    hyd = make_zero_hydrometeors(NCOL, NLEV)._replace(
+        q_i=jnp.full((NCOL, NLEV), 5.0e-4))
+    out = fast_sbm_microphysics(T, q_v, hyd, p, jnp.zeros((NCOL, NLEV + 1)),
+                                rho, jnp.full((NCOL, NLEV), 100.0), DT)
+    np.testing.assert_allclose(np.asarray(out.dq_i_dt), 0.0, atol=1e-15)
+
+
 def test_column_jit_and_grad():
     T, q_v, hyd, p, p_half, rho, dz = _fields(1.02)
 

@@ -78,6 +78,9 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import (
 from legoesm.atmosphere.physics.microphysics.fast_sbm.freezing import (
     freeze_step,
 )
+from legoesm.atmosphere.physics.microphysics.fast_sbm.melting import (
+    melt_step,
+)
 from legoesm.atmosphere.physics.microphysics.fast_sbm.nucleation import (
     activate_ccn,
 )
@@ -188,6 +191,18 @@ def _reconstruct_spectrum(q_c, q_r, N_c, N_r, rho, masses,
     return f_c + f_r
 
 
+def _reconstruct_ice(q_i, rho, masses, config: FastSBMConfig):
+    """Ice spectrum [m^-3 kg^-1] carrying exactly q_i of mass (exponential
+    mode at a floor number, mass-rescaled). Lets q_i persist across steps
+    (carried tracer) so melting can act on previously frozen ice."""
+    n_i = jnp.asarray(config.ice_number_floor, masses.dtype)
+    m_mean = q_i * rho / n_i
+    f_i = discretize_exponential(masses, n_i, jnp.maximum(m_mean, 1.0e-30))
+    mass_i = mass_density(f_i, masses)
+    return f_i * jnp.where(mass_i > 0.0, q_i * rho / jnp.where(
+        mass_i > 0.0, mass_i, 1.0), 0.0)
+
+
 def fast_sbm_microphysics(
     T: jax.Array,
     q_v: jax.Array,
@@ -216,10 +231,18 @@ def fast_sbm_microphysics(
     q_r = jnp.maximum(hydrometeors.q_r, 0.0)
     q_v_pos = jnp.maximum(q_v, 0.0)
 
-    def cell(T_c, qv_c, qc_c, qr_c, Nc_c, Nr_c, p_c, rho_c):
-        # Pre-physics spectrum (the vapor/heat closure baseline).
-        f_pre = _reconstruct_spectrum(qc_c, qr_c, Nc_c, Nr_c, rho_c, masses,
-                                      config)
+    q_i = jnp.maximum(hydrometeors.q_i, 0.0)
+
+    def cell(T_c, qv_c, qc_c, qr_c, qi_c, Nc_c, Nr_c, p_c, rho_c):
+        # Pre-physics liquid + ice spectra (closure baselines).
+        f_liq0 = _reconstruct_spectrum(qc_c, qr_c, Nc_c, Nr_c, rho_c, masses,
+                                       config)
+        f_ice0 = _reconstruct_ice(qi_c, rho_c, masses, config)
+        # MELT carried ice above 0 °C → adds to liquid, cools (oracle
+        # J_W_MELT). Closes the cross-step ice loop freezing opens.
+        melt = melt_step(f_ice0, masses, T_c, rho_c, dt, config)
+        f_pre = f_liq0 + melt.f_liquid
+        f_ice_after_melt = melt.f_ice
         # CCN activation, DEFICIT form (codex review iters 8-9): the
         # diagnosable activated number at this S is the TARGET cloud number
         # N_target = N_CCN·frac_above(r_crit); we seed only the deficit
@@ -242,26 +265,27 @@ def fast_sbm_microphysics(
         f1 = f_from_g(g1, masses)
         # Immersion freezing (oracle FREEZ): supercooled drops freeze to
         # ice, releasing fusion heat. Liquid feeding sedimentation is the
-        # UNFROZEN remainder; the frozen mass becomes q_i. (Ice-spectrum
-        # carry-through / ice collision / melting / ice sedimentation are
-        # the ice-subsystem iterations; here ice is a diagnostic sink.)
+        # UNFROZEN remainder; the frozen mass joins the ice spectrum.
         frz = freeze_step(f1, masses, T_c, rho_c, dt, config)
         f1_liq = frz.f_liquid
-        dq_i_dt_c = mass_density(frz.f_ice, masses) / rho_c / dt
-        # Total-water closure: vapor change = −(in-cell CONDENSED gain),
-        # where condensed = liquid + ice (freezing is liquid↔ice internal,
-        # vapor-neutral). mass(f1)=mass(f1_liq)+mass(f_ice) so this is
-        # exactly −(mass(f1)−mass(f_pre))/ρ.
+        f_ice_final = f_ice_after_melt + frz.f_ice
+        # Net ice change carried to q_i (melt consumes, freeze produces).
+        dq_i_dt_c = (mass_density(f_ice_final, masses) / rho_c - qi_c) / dt
+        # Vapor change = −(condensation growth) only; melt and freeze are
+        # internal liquid↔ice (vapor-neutral). With melt water + activation
+        # seed already in f_pre, mass(f1)−mass(f_pre) is exactly that growth.
         dq_v = -(mass_density(f1, masses) - mass_density(f_pre, masses)) \
             / rho_c
         dq_v_dt = dq_v / dt
-        # Heating = condensation (L_v) + fusion (L_f).
-        dT_dt_c = -(constants.L_v / constants.c_pd) * dq_v_dt + frz.dT / dt
-        return (dT_dt_c, dq_v_dt, dq_i_dt_c, f_pre, f1_liq)
+        # Heating = condensation (L_v) + fusion on freezing − fusion on melt.
+        dT_dt_c = (-(constants.L_v / constants.c_pd) * dq_v_dt
+                   + frz.dT / dt + melt.dT / dt)
+        return (dT_dt_c, dq_v_dt, dq_i_dt_c, f_liq0, f1_liq)
 
     cell_v = jax.vmap(jax.vmap(cell))
     dT_dt, dqv_dt, dqi_dt, f0, f1 = cell_v(
-        T, q_v_pos, q_c, q_r, hydrometeors.N_c, hydrometeors.N_r, p_full, rho)
+        T, q_v_pos, q_c, q_r, q_i, hydrometeors.N_c, hydrometeors.N_r,
+        p_full, rho)
 
     # Sedimentation on the per-bin mixing ratios (oracle FALFLUXHUCM_Z;
     # couples levels, so it runs on the (ncol, nlev, n_bins) field).

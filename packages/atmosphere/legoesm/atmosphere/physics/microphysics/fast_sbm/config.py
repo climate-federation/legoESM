@@ -68,3 +68,14 @@ class FastSBMConfig(NamedTuple):
     bigg_a: float = 0.3333e-4
     bigg_b0: float = 0.66
     bigg_b_max: float = 0.66
+    # --- Jiwen Fan melting (oracle J_W_MELT) ---
+    # Bin thresholds (0-based) + rates [1/s]: bins ≤ full melt completely,
+    # ≤ mid melt at rate_mid, above at rate_high (oracle snow ladder:
+    # KR≤14 full, 15–21 @ 0.5/50, ≥22 @ 0.683/120 in 1-based).
+    melt_full_bin: int = 13
+    melt_mid_bin: int = 20
+    melt_rate_mid: float = 0.5 / 50.0
+    melt_rate_high: float = 0.683 / 120.0
+    # Ice-spectrum reconstruction number floor [1/m^3] (carried q_i → ice
+    # spectrum for melting; single-moment ice closure).
+    ice_number_floor: float = 1.0e4
