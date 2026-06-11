@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from legoesm import constants
 from legoesm.forcing.amip import load_amip_forcing, AMIPForcingConfig
 
 
@@ -73,7 +74,7 @@ def test_real_kelvin_sst_with_wrong_celsius_offset_fails(tmp_path):
     cfg = AMIPForcingConfig(
         dataset="custom", path=str(p),
         sst_var="tosbcs", sic_var="siconcbcs",
-        sst_offset=273.15,   # WRONG for a Kelvin file
+        sst_offset=constants.T_freeze,   # Celsius offset: WRONG for a Kelvin file
         sic_scale=0.01,
     )
     with pytest.raises(ValueError, match="(?i)kelvin|spurious|physical ocean"):

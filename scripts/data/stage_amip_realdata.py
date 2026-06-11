@@ -35,6 +35,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# CLAUDE.md "Constant and Parameter Discipline": no hardcoded C<->K offset.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from legoesm import constants  # noqa: E402
+
 # Public ARCO ERA5 (mirrors run_amip_cmip6_deck._DEFAULT_ARCO_ERA5).
 _ARCO_ERA5 = (
     "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
@@ -123,8 +127,9 @@ def _validate_sst_file(path: Path, sst_var: str, sic_var: str):
         sst_offset = 0.0
         print("[stage]   -> SST looks like Kelvin: use --sst-offset 0")
     else:
-        sst_offset = 273.15
-        print("[stage]   -> SST looks like Celsius: use --sst-offset 273.15")
+        sst_offset = constants.T_freeze
+        print(f"[stage]   -> SST looks like Celsius: use "
+              f"--sst-offset {constants.T_freeze}")
     if sic_max > 1.5:
         sic_scale = 0.01
         print("[stage]   -> SIC looks like percent: use --sic-scale 0.01")
