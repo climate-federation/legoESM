@@ -2539,6 +2539,7 @@ def compute_geometric_step_kappa(
         compute_geometric_column_integrals(
             rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg.visbeck,
             rho_ref=rho_0, n2_mode=getattr(cfg.eke, "n2_mode", "insitu"),
+            n2_over_dzw=getattr(cfg.eke, "n2_over_dzw", False),
             T=T_eos, S=S_eos, p_cell=p_cell, eos_fn=eos_for_n2,
         ))
     if eke_int is None:

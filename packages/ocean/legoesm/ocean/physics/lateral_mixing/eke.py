@@ -264,6 +264,13 @@ class EKEConfig(NamedTuple):
     #     through the EOS; raises otherwise. (For "rhines" eke_len this directly
     #     corrects the deformation radius c₁ = ∫N dz / π.)
     n2_mode: str = "insitu"
+    # Veros dzw slot for the ADIABATIC N² divisor (the deferred EKE-side
+    # twin of ``TKEConfig.veros_dz_slots``; only consulted with
+    # ``n2_mode="adiabatic"``): divide the adiabatic density contrast by the
+    # ACTUAL centre spacing ``dz_half_ref·J`` (Veros ``dzw``,
+    # thermodynamics.py:99) instead of the midpoint reconstruction
+    # ``0.5·(dzt_k+dzt_{k+1})·J``. On a Veros u_centered coordinate the two
+    # alternate by up to ±50% per level. Default False ⇒ BIT-IDENTICAL.
     # --- Closure dispatch (appended LAST: positional construction stable) ---
     # "eden_greatbatch" (default, bit-identical legacy): everything above.
     # "geometric": the Torres et al. (2025) GEOMETRIC depth-integrated EKE
@@ -276,6 +283,15 @@ class EKEConfig(NamedTuple):
     # :class:`GeometricConfig` when ``closure="geometric"`` and None otherwise
     # (a set-but-unused GeometricConfig is rejected — no silent ignoring).
     geometric: GeometricConfig | None = None
+    # Veros dzw slot for the ADIABATIC N² divisor (the deferred EKE-side
+    # twin of ``TKEConfig.veros_dz_slots``; only consulted with
+    # ``n2_mode="adiabatic"``; appended last — positional construction
+    # stable): divide the adiabatic density contrast by the ACTUAL centre
+    # spacing ``dz_half_ref·J`` (Veros ``dzw``, thermodynamics.py:99)
+    # instead of the midpoint reconstruction ``0.5·(dzt_k+dzt_{k+1})·J``.
+    # On a Veros u_centered coordinate the two alternate by up to ±50% per
+    # level. Default False ⇒ BIT-IDENTICAL.
+    n2_over_dzw: bool = False
 
 
 def eke_mixing_length(L_rossby: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:

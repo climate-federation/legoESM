@@ -212,6 +212,8 @@ GLOBAL4_EKE_CONFIG = EKEConfig(
     gm_source_mode="realized_signed",
     source_p_diss_iso=False,      # gated off (ACC verdict; see eke.py docs)
     n2_mode="adiabatic",
+    n2_over_dzw=True,             # Veros dzw slot for the adiabatic-N² divisor
+    #                               (deferred EKE-side twin of veros_dz_slots)
 )
 
 # GM/Redi: enable_neutral_diffusion + enable_skew_diffusion with

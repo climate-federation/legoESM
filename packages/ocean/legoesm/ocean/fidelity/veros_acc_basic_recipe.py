@@ -153,6 +153,14 @@ ACC_BASIC_TKE_CONFIG = TKEConfig(
     # un-routable K_diss_gm/K_diss_h/P_diss_skew, see block comment above).
     source_eke_diss=False,
     source_bottom_drag_diss=True,
+    # Veros step order (see ACC_TKE_CONFIG): tracer kappa from the carried
+    # tke[tau], TKE solved AFTER the implicit T/S mixing on the POST-mixing
+    # Nsqr[taup1] + the surface buoyancy-flux P_diss_v slot
+    # (thermodynamics.py:385-388) — the identified dominant ACC_Basic
+    # residual (.physics-validator/tke_metric_fix/).
+    buoyancy_timing="post_mixing_veros",
+    # Realized implicit-friction K_diss_v (friction.py:131-151), not K_M·S².
+    shear_production="realized_veros",
 )
 
 

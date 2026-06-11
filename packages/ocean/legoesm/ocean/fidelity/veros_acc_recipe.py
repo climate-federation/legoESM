@@ -196,6 +196,21 @@ ACC_TKE_CONFIG = TKEConfig(
     # (non-conservative advection) and P_diss_nonlin (cabbeling / non-linear EOS).
     source_eke_diss=True,
     source_bottom_drag_diss=True,
+    # ----- Veros step order: TKE charges the POST-MIXING stratification -----
+    # Veros solves the TKE budget AFTER the implicit T/S vertical mixing
+    # (veros.py:263-285): the kappa profiles consumed by the TRACER solve come
+    # from the PREVIOUS step's TKE (set_tke_diffusivities at tau), and the TKE
+    # forcing charges P_diss_v = kappaH·Nsqr[taup1] — the stratification the
+    # implicit solve has ALREADY stabilised (thermodynamics.py:385) — plus the
+    # surface buoyancy-flux P_diss_v slot (386-388). legoESM's legacy ordering
+    # charged the PRE-mixing N² (the full instability every step) — the
+    # identified dominant ACC_Basic residual after the metric-slot fixes
+    # (.physics-validator/tke_metric_fix/).
+    buoyancy_timing="post_mixing_veros",
+    # Veros K_diss_v is the REALIZED implicit-friction dissipation
+    # κ·(∂u_new/∂z)·(∂u_old/∂z) (friction.py:131-151), not the pre-solve
+    # parameterised K_M·S² (audited at ~6.1× the realized form).
+    shear_production="realized_veros",
 )
 
 # Veros GM/Redi knobs (verbatim from ACCSetup)
@@ -288,7 +303,11 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
                   # discretization); the faithful dynamic-enthalpy form
                   # yields a small spurious +3.2e9 W source instead. Built,
                   # tested, gated -- see the EKE-budget probe verdict.
-                  n2_mode="adiabatic"),
+                  n2_mode="adiabatic",
+                  # Veros dzw slot for the adiabatic-N² divisor (the
+                  # deferred EKE-side twin of TKE veros_dz_slots; the
+                  # u_centered dz_half_ref IS Veros's dzw here).
+                  n2_over_dzw=True),
 )
 
 # Surface restoring timescale

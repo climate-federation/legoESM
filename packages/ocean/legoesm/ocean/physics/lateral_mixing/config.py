@@ -78,6 +78,12 @@ class VisbeckConfig(NamedTuple):
     #     supply T, S, an EOS and the cell-centre pressure (or its ingredients)
     #     to displace parcels through the EOS; raises if any is missing.
     n2_mode: str = "insitu"
+    # Veros dzw slot for the ADIABATIC N² divisor (mirrors
+    # ``EKEConfig.n2_over_dzw``; only consulted with ``n2_mode="adiabatic"``):
+    # divide the adiabatic density contrast by the actual centre spacing
+    # ``dz_half_ref·J`` (Veros ``dzw``) instead of the midpoint
+    # reconstruction. Default False ⇒ BIT-IDENTICAL legacy.
+    n2_over_dzw: bool = False
 
 
 class GMRediConfig(NamedTuple):

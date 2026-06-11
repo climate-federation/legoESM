@@ -139,30 +139,64 @@ class TKEConfig(NamedTuple):
     #   (kappaM = c_k·mxl·sqrttke; sqrttke = sqrt(max(0, tke)), consistent
     #   with the negative-TKE energy debt of
     #   positivity="veros_surface_correction").
-    # ``kappa_convention`` is the LAST closure-module fidelity knob. KNOWN
-    # REMAINING Veros-fidelity gap (documented, NOT a closure option):
+    kappa_convention: str = "gaspar_sqrt2e"
+    # ----- TKE buoyancy-term timing (the Veros step-order option) -----
     # Veros assembles the TKE forcing from REALIZED dissipation diagnostics
-    # of the SAME step, evaluated AFTER the implicit T/S vertical mixing —
+    # of the SAME step, evaluated AFTER the implicit T/S vertical mixing
+    # (veros.py:239-298 step order: set_tke_diffusivities[tau] → momentum →
+    # thermodynamics{advect → vertmix → calc_eq_of_state(taup1) →
+    # surf_densityf → diag_P_diss_v} → integrate_tke):
     #   forc = K_diss_v − P_diss_v          (tke.py:142)
     #   P_diss_v = kappaH·Nsqr[taup1]       (thermodynamics.py:385: the
     #     POST-MIXING N² — the implicit solve has already removed most of
     #     the instability, so convective TKE production is only the
     #     residual),
-    #   P_diss_v[surface] = −(g/ρ0)·forc_rho_surface (thermodynamics.py:
-    #     386-388 — the surface buoyancy-flux TKE source/sink; absent in
-    #     legoESM),
-    #   K_diss_v = the realized vertical-friction work (friction.py), not
-    #     kappaM·S².
-    # legoESM parameterises P_b/P_s inside the solve from the PRE-mixing N²
-    # and kappaM·S²; with persistent surface-forced instability this
-    # charges the FULL instability every step — measured ~100× too much TKE
-    # in convecting columns vs the Veros equilibrium
-    # (.physics-validator/tke_metric_fix/: frac(N²<0) matches ~0.4, but
-    # Veros TKE never exceeds 1e-3 anywhere). Fixing it requires reordering
-    # the model step (TKE update AFTER the tracer implicit mixing, on the
-    # post-mixing N²) — a dynamics-step change, tracked as the next
-    # fidelity item.
-    kappa_convention: str = "gaspar_sqrt2e"
+    #   P_diss_v[surface W] = −(g/ρ0)·forc_rho_surface (thermodynamics.py:
+    #     386-388 + surf_densityf 304-317 — the surface buoyancy-flux TKE
+    #     source/sink at taup1 surface T/S).
+    #
+    # ``"pre_mixing"`` (default, BIT-IDENTICAL legacy): the TKE budget is
+    #   solved BEFORE the tracer implicit mixing, charging the PRE-mixing
+    #   N² inside the same K-profile computation that feeds the tracer
+    #   solve. With persistent surface-forced instability this charges the
+    #   FULL instability every step — measured ~100× too much TKE in
+    #   convecting columns vs the Veros equilibrium
+    #   (.physics-validator/tke_metric_fix/).
+    # ``"post_mixing_veros"``: the Veros ordering inside
+    #   ``_apply_implicit_vertical_mixing`` — (1) K_M/K_H for the TRACER and
+    #   MOMENTUM solves are derived from the CARRIED tke (Veros
+    #   set_tke_diffusivities from tke[tau]; kappa consumed by tracers is
+    #   the previous step's TKE); (2) the implicit T/S solve runs; (3) N² is
+    #   recomputed from the MIXED T/S (the dzw-slotted adiabatic N²);
+    #   (4) ONE backward-Euler TKE solve charges that POST-mixing N² plus
+    #   the surface buoyancy-flux P_diss_v slot, with an internal surface-W
+    #   row (Veros's surface half-volume point, seeded from the topmost
+    #   interior interface — legoESM does not carry it across steps; the
+    #   documented residual approximation). Requires ``prognostic=True``,
+    #   ``veros_dz_slots=True``, ``n2_mode="adiabatic"`` and
+    #   ``positivity="veros_surface_correction"`` (fail loudly otherwise).
+    # DEFERRED Veros forc terms (oracle runs enable_conserve_energy=True):
+    #   −P_diss_nonlin (cabbeling; needs dynamic-enthalpy diagnostics),
+    #   −P_diss_adv (globally-redistributed advection dissipation), and the
+    #   no-EKE branch ``+K_diss_gm + K_diss_h − P_diss_skew`` (tke.py:174-176;
+    #   acc_basic class). K_diss_gm ≡ 0 in the oracle (no TEM friction).
+    #   K_diss_h − P_diss_skew partially cancel; wiring them needs a
+    #   TKE-side gate for the flux-form K_diss_h density (today gated by
+    #   ``EKEConfig.source_kdiss_h``) + a constant-kappa call of
+    #   ``compute_realized_gm_skew_conversion`` in the tendency — real
+    #   plumbing, documented gap, not silently approximated.
+    buoyancy_timing: str = "pre_mixing"
+    # ----- TKE shear-production form (Veros realized K_diss_v) -----
+    # ``"pre_solve"`` (default, BIT-IDENTICAL legacy): P_s = K_M·S² from the
+    #   PRE-solve velocities — the parameterised explicit form.
+    # ``"realized_veros"``: Veros friction.py:131-151 — the realized
+    #   implicit-friction dissipation K_diss_v = κ·(∂u_new/∂z)·(∂u_old/∂z)
+    #   summed over u and v, faces→centres at the interior interfaces. The
+    #   old ocean-expert audit measured the pre-solve explicit K_M·S² as
+    #   ~6.1× Veros's realized form on the same state. Only consulted under
+    #   ``buoyancy_timing="post_mixing_veros"`` (the realized increments
+    #   exist only after the friction solve); fail loudly otherwise.
+    shear_production: str = "pre_solve"
     # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
     # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)
     #   -- the MOMENTUM floor ``kappaM_min`` leaks into the TRACER floor

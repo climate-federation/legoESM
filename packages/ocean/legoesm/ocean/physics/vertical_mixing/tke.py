@@ -122,6 +122,32 @@ class TKEOutput(NamedTuple):
     l_eps: jnp.ndarray     # (..., nlev-1) dissipation mixing length (diagnostic)
 
 
+class TKEPostMixingContext(NamedTuple):
+    """Phase-1 closure ingredients for the POST-MIXING TKE solve.
+
+    Produced by :func:`tke_set_diffusivities` (the legoESM analogue of Veros
+    ``set_tke_diffusivities``, tke.py:20-113, evaluated from the CARRIED
+    ``tke_old`` = Veros ``tke[tau]``) and consumed by
+    :func:`tke_integrate_post_mixing` AFTER the implicit tracer solve
+    (``TKEConfig.buoyancy_timing="post_mixing_veros"``). A plain trace-local
+    container — never crosses a JIT boundary as an argument.
+    """
+    K_M_old: jnp.ndarray      # (..., nlev-1) kappaM from tke[tau] (feeds friction)
+    K_H_old: jnp.ndarray      # (..., nlev-1) kappaH from tke[tau] (feeds tracers + P_diss_v)
+    mxl: jnp.ndarray          # (..., nlev-1) buoyancy mixing length (tau)
+    sqrttke: jnp.ndarray      # (..., nlev-1) sqrt(max(0, tke[tau]))
+    shear_sq: jnp.ndarray     # (..., nlev-1) |du/dz|²+|dv/dz|² (pre-solve)
+    tke_old: jnp.ndarray      # (..., nlev-1) the carried TKE
+    surface_flux: jnp.ndarray  # (...) wind-work TKE flux (|tau|/rho_0)^{3/2}
+    dz_half: jnp.ndarray      # (..., nlev-1) Veros dzw (u_centered centre spacing · J)
+    dz_cell: jnp.ndarray      # (..., nlev) cell thicknesses dzt·J
+    dz_surface: jnp.ndarray   # (...) surface W half-volume 0.5·dzw_top
+    p_cell: jnp.ndarray       # (..., nlev) cell-centre hydrostatic pressure [Pa]
+    eos_fn: object            # EOS callable (T, S, p) -> rho (static)
+    rho_0: float
+    g: float
+
+
 # ---------------------------------------------------------------------------
 # Mixing length: Bougeault-Lacarrere (1989) asymmetric construction.
 # ---------------------------------------------------------------------------
@@ -991,6 +1017,21 @@ def tke_vertical_mixing(
     -------
     TKEOutput
     """
+    if (getattr(cfg, "buoyancy_timing", "pre_mixing")
+            == "post_mixing_veros"):
+        # This orchestrator IS the pre-mixing solve (the TKE budget charged
+        # before the tracer implicit mixing). The post-mixing Veros order
+        # runs tke_set_diffusivities + tke_integrate_post_mixing from the
+        # model step instead — reaching here means a caller (Mode B, SCM,
+        # the explicit physics pipeline) cannot honour the option.
+        raise ValueError(
+            "TKEConfig.buoyancy_timing='post_mixing_veros' cannot be solved "
+            "by tke_vertical_mixing (the pre-mixing orchestrator); it "
+            "requires the prognostic model-step ordering "
+            "(_apply_implicit_vertical_mixing) via tke_set_diffusivities + "
+            "tke_integrate_post_mixing."
+        )
+    _validate_post_mixing_cfg(cfg)
     positivity = getattr(cfg, "positivity", "floor")
     if positivity not in ("floor", "veros_surface_correction"):
         raise ValueError(
@@ -1087,9 +1128,333 @@ def tke_vertical_mixing(
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr, l_eps=l_eps_final)
 
 
+# ---------------------------------------------------------------------------
+# POST-MIXING Veros step order (TKEConfig.buoyancy_timing="post_mixing_veros")
+# ---------------------------------------------------------------------------
+
+
+def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
+    """Fail loudly unless the post-mixing prerequisites hold (see config doc)."""
+    timing = getattr(cfg, "buoyancy_timing", "pre_mixing")
+    if timing not in ("pre_mixing", "post_mixing_veros"):
+        raise ValueError(
+            f"Unknown TKEConfig.buoyancy_timing={timing!r}; expected "
+            f"'pre_mixing' or 'post_mixing_veros'."
+        )
+    shear = getattr(cfg, "shear_production", "pre_solve")
+    if shear not in ("pre_solve", "realized_veros"):
+        raise ValueError(
+            f"Unknown TKEConfig.shear_production={shear!r}; expected "
+            f"'pre_solve' or 'realized_veros'."
+        )
+    if timing == "post_mixing_veros":
+        if not (getattr(cfg, "prognostic", False)
+                and getattr(cfg, "veros_dz_slots", False)
+                and cfg.n2_mode == "adiabatic"
+                and getattr(cfg, "positivity", "floor")
+                == "veros_surface_correction"):
+            raise ValueError(
+                "TKEConfig.buoyancy_timing='post_mixing_veros' requires "
+                "prognostic=True, veros_dz_slots=True, n2_mode='adiabatic' "
+                "and positivity='veros_surface_correction' (the Veros "
+                "integrate_tke form); got prognostic="
+                f"{getattr(cfg, 'prognostic', False)!r}, veros_dz_slots="
+                f"{getattr(cfg, 'veros_dz_slots', False)!r}, n2_mode="
+                f"{cfg.n2_mode!r}, positivity="
+                f"{getattr(cfg, 'positivity', 'floor')!r}."
+            )
+    elif shear == "realized_veros":
+        raise ValueError(
+            "TKEConfig.shear_production='realized_veros' requires "
+            "buoyancy_timing='post_mixing_veros' (the realized implicit-"
+            "friction increments only exist in the reordered step); got "
+            f"buoyancy_timing={timing!r}."
+        )
+
+
+def tke_set_diffusivities(
+    u_cell: jnp.ndarray,
+    v_cell: jnp.ndarray,
+    T_cell: jnp.ndarray,
+    S_cell: jnp.ndarray,
+    rho_cell: jnp.ndarray,
+    dz_half: jnp.ndarray,
+    tke_old: jnp.ndarray,
+    tau_x_surface: jnp.ndarray | None,
+    tau_y_surface: jnp.ndarray | None,
+    cfg: TKEConfig,
+    rho_0: float,
+    g: float,
+    *,
+    p_cell: jnp.ndarray,
+    dz_ref: jnp.ndarray,
+    jacobian: jnp.ndarray,
+    eos_fn,
+    z_interface: jnp.ndarray,
+    dz_surface: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, TKEPostMixingContext]:
+    """Veros ``set_tke_diffusivities`` (tke.py:20-113) from the CARRIED TKE.
+
+    Phase 1 of the post-mixing Veros step order: derive ``K_M``/``K_H`` (and
+    the mxl/sqrttke linearisation points of the later TKE solve) from the
+    PREVIOUS step's TKE — the kappa profiles the TRACER and MOMENTUM
+    implicit solves consume — WITHOUT advancing the TKE field. Composes the
+    same shared helpers the legacy orchestrator uses
+    (:func:`_compute_N2` / :func:`_vertical_shear_squared` /
+    :func:`compute_mixing_lengths` / :func:`compute_K_from_tke`); no
+    numerics are re-derived.
+
+    Returns ``(K_M, K_H, ctx)``; ``ctx`` packages every phase-1 ingredient
+    :func:`tke_integrate_post_mixing` needs after the tracer solve.
+    """
+    _validate_post_mixing_cfg(cfg)
+    if getattr(cfg, "buoyancy_timing", "pre_mixing") != "post_mixing_veros":
+        raise ValueError(
+            "tke_set_diffusivities is the post-mixing phase-1 entry point; "
+            f"got buoyancy_timing={getattr(cfg, 'buoyancy_timing', None)!r}."
+        )
+    dz_cell = dz_ref * jacobian[..., jnp.newaxis]
+    shear_sq = _vertical_shear_squared(u_cell, v_cell, dz_half)
+    N2 = _compute_N2(
+        rho_cell, dz_half, rho_0, g,
+        T_cell=T_cell, S_cell=S_cell, p_cell=p_cell,
+        dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
+        n2_mode=cfg.n2_mode, adiabatic_over_dz_half=True,
+    )
+    if tau_x_surface is None and tau_y_surface is None:
+        surface_flux = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)
+    else:
+        tx = (tau_x_surface if tau_x_surface is not None
+              else jnp.zeros_like(rho_cell[..., 0]))
+        ty = (tau_y_surface if tau_y_surface is not None
+              else jnp.zeros_like(rho_cell[..., 0]))
+        surface_flux = (jnp.sqrt(tx * tx + ty * ty) / rho_0) ** 1.5
+
+    l_k, _l_eps = compute_mixing_lengths(
+        tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell)
+    K_M, K_H = compute_K_from_tke(
+        tke_old, l_k, cfg, N2=N2, shear_sq=shear_sq, z_interface=z_interface)
+    ctx = TKEPostMixingContext(
+        K_M_old=K_M, K_H_old=K_H, mxl=l_k,
+        sqrttke=jnp.sqrt(jnp.maximum(tke_old, 0.0)),
+        shear_sq=shear_sq, tke_old=tke_old, surface_flux=surface_flux,
+        dz_half=dz_half, dz_cell=dz_cell,
+        dz_surface=jnp.asarray(dz_surface, dtype=rho_cell.dtype),
+        p_cell=p_cell, eos_fn=eos_fn, rho_0=rho_0, g=g,
+    )
+    return K_M, K_H, ctx
+
+
+def compute_surface_buoyancy_P_diss_v(
+    T_sfc: jnp.ndarray,
+    S_sfc: jnp.ndarray,
+    p_sfc: jnp.ndarray,
+    forc_temp_surface: jnp.ndarray,
+    forc_salt_surface: jnp.ndarray,
+    eos_fn,
+    rho_0: float,
+    g: float = constants.g,
+    eos_salinity_floor: float = 1.0e-3,
+) -> jnp.ndarray:
+    r"""Surface buoyancy-flux ``P_diss_v`` slot (Veros thermodynamics.py:304-317,
+    386-388).
+
+    .. math::
+
+        \text{forc\_rho\_surface} =
+            \frac{\partial\rho}{\partial T}\,F_T^{sfc}
+          + \frac{\partial\rho}{\partial S}\,F_S^{sfc},
+        \qquad
+        P_{diss,v}^{sfc} = -\frac{g}{\rho_0}\,\text{forc\_rho\_surface}
+
+    with the EOS derivatives evaluated at the POST-MIXING (taup1) surface
+    T/S (``surf_densityf``) via the shared
+    :func:`legoesm.ocean.eos.eos_density_derivatives` (EOS-generic autodiff —
+    Veros ``get_drhodT``/``get_drhodS``). ``F_T^{sfc}``/``F_S^{sfc}`` are the
+    surface KINEMATIC fluxes [K·m/s] / [PSU·m/s] (Veros
+    ``forc_temp_surface``/``forc_salt_surface`` = legoESM's implicit surface
+    rate × top-cell thickness). A destabilising flux (surface cooling /
+    brine) gives ``forc_rho_surface > 0`` ⇒ ``P_diss_v < 0`` ⇒ the TKE
+    forcing ``-P_diss_v > 0`` (buoyancy-driven TKE production). [m²/s³]
+
+    ``eos_salinity_floor``: the EOS DERIVATIVE is evaluated at
+    ``max(S_sfc, floor)`` — the TEOS-10/gsw polynomials carry ``√S`` terms
+    whose S-derivative is +∞ at S=0 (the land-fill salinity) and NaN for
+    S<0, and ``NaN·mask`` does NOT mask NaN out (the global_4deg day-5
+    blowup: land-column NaN advected into wet columns by the TKE superbee
+    advection). Physically S ≥ O(1) PSU in every wet cell, so the floor
+    only guards the autodiff evaluation point on land / unphysical
+    transients; the surface FLUXES are not modified. [PSU]
+    """
+    from legoesm.ocean.eos import eos_density_derivatives
+    S_eval = jnp.maximum(S_sfc, jnp.asarray(eos_salinity_floor,
+                                            dtype=S_sfc.dtype))
+    drho_dT, drho_dS = eos_density_derivatives(eos_fn, T_sfc, S_eval, p_sfc)
+    forc_rho = (drho_dT * forc_temp_surface.astype(T_sfc.dtype)
+                + drho_dS * forc_salt_surface.astype(T_sfc.dtype))
+    return -(g / rho_0) * forc_rho
+
+
+def realized_implicit_friction_dissipation(
+    u_old: jnp.ndarray,
+    u_new: jnp.ndarray,
+    A_v_face: jnp.ndarray,
+    dz_half: jnp.ndarray,
+) -> jnp.ndarray:
+    r"""Realized implicit vertical-friction dissipation at interfaces.
+
+    Veros ``implicit_vert_friction`` diagnoses the K_diss_v contribution as
+    the product of the POST-solve friction flux with the PRE-solve shear
+    (friction.py:131-151)::
+
+        flux[k] = κ_f[k] · (u_new[k] − u_new[k+1]) / dzw[k]
+        diss[k] = (u_old[k] − u_old[k+1]) · flux[k] / dzw[k]
+                = κ_f[k] · g_new[k] · g_old[k]            [m²/s³]
+
+    (legoESM top-down indexing; the implicit solve damps the shear so
+    ``g_new·g_old ≥ 0`` generically — Veros applies no clamp, neither does
+    this). Grid-agnostic on the last axis: call once per velocity component
+    on its own face stagger with the SAME ``A_v_face``/``dz_half`` the
+    friction solve used, then average faces→centres at the caller.
+
+    Parameters
+    ----------
+    u_old, u_new : (..., nlev) — pre-/post-solve velocity on one stagger.
+    A_v_face : (..., nlev-1) — the interface viscosity the solve used.
+    dz_half : (..., nlev-1) — centre-spacing metric of the solve.
+
+    Returns
+    -------
+    diss : (..., nlev-1) at the interior interfaces [m²/s³].
+    """
+    dz_safe = jnp.maximum(dz_half, _EPS)
+    g_old = (u_old[..., :-1] - u_old[..., 1:]) / dz_safe
+    g_new = (u_new[..., :-1] - u_new[..., 1:]) / dz_safe
+    return A_v_face * g_new * g_old
+
+
+def tke_integrate_post_mixing(
+    ctx: TKEPostMixingContext,
+    N2_post: jnp.ndarray,
+    K_diss_v: jnp.ndarray,
+    P_diss_v_surface: jnp.ndarray,
+    dt: float,
+    cfg: TKEConfig,
+    external_source: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    r"""Veros ``integrate_tke`` (tke.py:116-244) on the POST-MIXING state.
+
+    Solves ONE backward-Euler TKE step charging
+
+    .. math::
+
+        \text{forc} = K_{diss,v} - P_{diss,v}, \qquad
+        P_{diss,v} = \kappa_H\,N^2_{\text{post}}
+
+    with ``κ_H`` from the CARRIED TKE (``ctx.K_H_old``; Veros kappaH from
+    tke[tau]) and ``N²_post`` the POST-tracer-mixing stratification
+    (thermodynamics.py:385) — plus the surface buoyancy-flux ``P_diss_v``
+    slot at an INTERNAL surface-W row (thermodynamics.py:386-388).
+
+    The tridiagonal is the Veros assembly (tke.py:185-227) over ``nlev``
+    W rows top-down: row 0 = the surface half-volume W point (volume
+    ``ctx.dz_surface`` = 0.5·dzw_top; Veros's last W level), rows
+    ``1..nlev-1`` = the carried interior interfaces (volumes ``ctx.dz_half``
+    = Veros dzw), face gradients over the intervening CELL thickness
+    ``ctx.dz_cell`` (Veros dzt). The surface row is NOT carried across steps
+    (legoESM's prognostic TKE lives on the nlev−1 interior interfaces): it
+    is seeded from the topmost interior value each step — the SAME seeding
+    the banked term-level oracle probe uses
+    (.physics-validator/tke_metric_fix/probe_tke_term_level_postfix.py) —
+    and its solved value is returned only through the implicit coupling.
+    Veros's surface-only positivity clamp (tke.py:238-244) therefore acts on
+    a discarded row; the interior may go negative (the energy debt of
+    ``positivity="veros_surface_correction"``), exactly as in Veros.
+
+    Parameters
+    ----------
+    ctx : TKEPostMixingContext — phase-1 ingredients from
+        :func:`tke_set_diffusivities` (kappa/mxl/sqrttke at tau).
+    N2_post : (..., nlev-1) — SIGNED adiabatic N² from the MIXED T/S over
+        the dzw slot (the caller recomputes it after the tracer solve).
+    K_diss_v : (..., nlev-1) — shear-production forcing: ``K_M_old·S²``
+        (``shear_production="pre_solve"``) or the realized implicit-friction
+        dissipation (``"realized_veros"``), at cell-centre interfaces.
+    P_diss_v_surface : (...) — the surface buoyancy-flux slot from
+        :func:`compute_surface_buoyancy_P_diss_v` (zero array when no
+        surface forcing).
+    dt : float — the TKE timestep (= dt_mom, Veros tke.py:137).
+    cfg : TKEConfig.
+    external_source : (..., nlev-1) or None — energy-recycling ``forc``
+        terms (eke_diss_iw + K_diss_bot) at the interior interfaces.
+
+    Returns
+    -------
+    tke_new : (..., nlev-1) — the carried interior interfaces (signed; no
+        interior floor).
+    """
+    _validate_post_mixing_cfg(cfg)
+    e_old = ctx.tke_old
+    n_int = e_old.shape[-1]          # nlev - 1 interior interfaces
+    n_w = n_int + 1                  # + the internal surface W row
+    dtype = e_old.dtype
+
+    # --- forc (Veros tke.py:142): interior rows ---
+    forc_int = K_diss_v.astype(dtype) - ctx.K_H_old * N2_post.astype(dtype)
+    if external_source is not None:
+        forc_int = forc_int + external_source.astype(dtype)
+    # Surface W row: K_diss_v ≡ 0 there (friction diss[..., surface] = 0,
+    # friction.py:149) − the surface buoyancy-flux P_diss_v slot. The
+    # interior-shaped external_source has no surface entry (legoESM's
+    # eke_diss/K_diss_bot live on the carried interfaces) — documented.
+    forc_srf = -P_diss_v_surface.astype(dtype)
+    forc_w = jnp.concatenate([forc_srf[..., jnp.newaxis], forc_int], axis=-1)
+
+    # --- W-row state/closure arrays (surface row seeded by top-interior copy,
+    #     matching the banked oracle probe; Veros carries a real value) ---
+    def _w(x):
+        return jnp.concatenate([x[..., :1], x], axis=-1)
+
+    e_w = _w(e_old)
+    kM_w = _w(ctx.K_M_old)
+    sqrttke_w = _w(ctx.sqrttke)
+    mxl_w = _w(ctx.mxl)
+
+    # --- Veros tridiagonal assembly (tke.py:185-227), top-down ---
+    # delta[w] couples W rows w and w+1 through cell w (thickness dzt[w]·J):
+    # surface W (z=0) and interface 0 sandwich cell 0, generally cell w.
+    dz_face = jnp.maximum(ctx.dz_cell[..., :n_w - 1], _EPS)   # (..., n_w-1)
+    delta = (dt * cfg.alpha_tke * 0.5
+             * (kM_w[..., :-1] + kM_w[..., 1:]) / dz_face)
+    vol = jnp.concatenate(
+        [jnp.maximum(ctx.dz_surface, _EPS)[..., jnp.newaxis],
+         jnp.maximum(ctx.dz_half[..., :n_int], _EPS)], axis=-1)
+    a = jnp.concatenate(
+        [jnp.zeros_like(delta[..., :1]), -delta / vol[..., 1:]], axis=-1)
+    c = jnp.concatenate(
+        [-delta / vol[..., :n_w - 1], jnp.zeros_like(delta[..., :1])],
+        axis=-1)
+    b = 1.0 - (a + c) + dt * cfg.c_eps * sqrttke_w / jnp.maximum(
+        mxl_w, cfg.mxl_min)
+
+    d = e_w + dt * forc_w
+    # Wind-work surface injection over the surface half-volume (tke.py:225).
+    d = d.at[..., 0].add(dt * ctx.surface_flux.astype(dtype) / vol[..., 0])
+
+    e_new_w = _tridiag_thomas(a, b, c, d)
+    # Veros surface clamp (tke.py:238-244) acts on the (discarded) surface
+    # row; the carried interior stays UNFLOORED (energy debt allowed).
+    return e_new_w[..., 1:]
+
+
 __all__ = (
     "TKEOutput",
+    "TKEPostMixingContext",
     "compute_K_from_tke",
     "compute_mixing_lengths",
+    "compute_surface_buoyancy_P_diss_v",
+    "realized_implicit_friction_dissipation",
+    "tke_integrate_post_mixing",
+    "tke_set_diffusivities",
     "tke_vertical_mixing",
 )
