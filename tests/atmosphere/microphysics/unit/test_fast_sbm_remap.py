@@ -132,6 +132,93 @@ def test_drop_tail_merge_folds_spurious_tail():
         float(jnp.sum(f[lo:hi + 1] * m[lo:hi + 1])), rtol=1e-9)
 
 
+def test_exact_match_overwrite_semantics():
+    # Oracle KO: an exact-match source ASSIGNS PSINEW(K)=FI(K)*RR(K),
+    # overwriting earlier deposits into K; later sources still add on top.
+    # Construct: source bin 4 grows onto bin 5's center region BEFORE the
+    # exact source 5 is visited; oracle semantics → bin-5 packet equals
+    # f5*m5 plus only the deposits from sources AFTER 5 (none here), i.e.
+    # the bin-4 deposit into 5 is overwritten.
+    m, _ = _spectrum()
+    f = jnp.zeros_like(m).at[4].set(1.0e12).at[5].set(2.0e12)
+    m_new = jnp.asarray(m)
+    m_new = m_new.at[4].set(float(m[5]))      # bin 4 lands exactly on 5
+    # (all other bins exact-match: unchanged masses)
+    out = remap_spectrum(f, m, m_new, three_point=False,
+                         drop_tail_merge=False)
+    psi_out = np.asarray(out.f_new * m)
+    # Bin 4's packet went to bin 5 first (boundary hit, then the
+    # exact-match source 5 OVERWROTE it) → bin 5 holds only its own packet.
+    assert psi_out[5] == pytest.approx(float(f[5] * m[5]), rel=1e-12)
+    assert psi_out[4] == 0.0
+
+
+def test_boundary_equality_lands_lower_interval():
+    # m_new exactly on a grid node must use the LOWER interval (oracle
+    # first-match linear search): all weight goes to that node, none below.
+    m, _ = _spectrum()
+    f = jnp.zeros_like(m).at[7].set(1.0e12)
+    m_new = jnp.asarray(m).at[7].set(float(m[8]))
+    out = remap_spectrum(f, m, m_new, three_point=False,
+                         drop_tail_merge=False)
+    psi_out = np.asarray(out.f_new * m)
+    assert psi_out[8] == pytest.approx(float(f[7] * m[7]), rel=1e-12)
+    assert psi_out[7] == 0.0
+
+
+def test_negative_new_mass_kills_packet():
+    # Oracle pre-step: RN < 0 → RN = tiny, FI = 0 (packet destroyed).
+    m, _ = _spectrum()
+    f = jnp.zeros_like(m).at[3].set(1.0e12)
+    m_new = jnp.asarray(m).at[3].set(-1.0e-15)
+    out = remap_spectrum(f, m, m_new, three_point=False,
+                         drop_tail_merge=False)
+    np.testing.assert_array_equal(np.asarray(out.f_new), 0.0)
+
+
+def test_sentinel_overflow_fraction_is_lost():
+    # A top-bin packet growing past m_top splits between the top bin and
+    # the discarded sentinel slot — the sentinel fraction is LOST (oracle
+    # drops PSINEW(NRX+1)); the retained fraction matches the KO weight.
+    m, _ = _spectrum()
+    n = m.shape[0]
+    f = jnp.zeros_like(m).at[n - 1].set(1.0e6)
+    grow = 2.0
+    m_new = jnp.asarray(m).at[n - 1].set(grow * float(m[n - 1]))
+    out = remap_spectrum(f, m, m_new, three_point=False,
+                         drop_tail_merge=False)
+    psi_in = float(f[n - 1] * m[n - 1])
+    w_keep = (1024.0 - grow) / (1024.0 - 1.0)
+    assert float(out.f_new[n - 1] * m[n - 1]) == pytest.approx(
+        psi_in * w_keep, rel=1e-12)
+
+
+def test_empty_tail_window_merge_noop():
+    # Tail merge with an empty drop window must be a no-op (oracle KMAX
+    # falls back to the window floor).
+    m, _ = _spectrum()
+    f = jnp.zeros_like(m).at[20].set(1.0e10)   # outside [5..11]
+    m_new = jnp.asarray(m) * (1.0 + 1.0e-12)
+    out = remap_spectrum(f, m, m_new, three_point=False,
+                         drop_tail_merge=True)
+    out_off = remap_spectrum(f, m, m_new, three_point=False,
+                             drop_tail_merge=False)
+    np.testing.assert_array_equal(np.asarray(out.f_new),
+                                  np.asarray(out_off.f_new))
+
+
+def test_evaporation_disables_three_point_and_merge():
+    # Under evaporation (m_new[0] < masses[0]) the 3-point and tail-merge
+    # paths must be inert: all four gate combinations agree exactly.
+    m, f = _spectrum()
+    m_new = jnp.asarray(m) * 0.95              # uniform shrink
+    outs = [remap_spectrum(f, m, m_new, three_point=tp, drop_tail_merge=dm)
+            for tp in (False, True) for dm in (False, True)]
+    base = np.asarray(outs[0].f_new)
+    for o in outs[1:]:
+        np.testing.assert_array_equal(np.asarray(o.f_new), base)
+
+
 def test_remap_differentiable_through_s_int():
     m, f = _spectrum()
     f = f.at[-8:].set(0.0)

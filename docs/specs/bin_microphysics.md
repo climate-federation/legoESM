@@ -193,3 +193,20 @@ EXCLUDED.
   (number non-increasing); saturated+empty spectrum = exact fixed point;
   40-step scan: |S| monotone ↓, ends <10% of initial; d(dq_c)/d(T,q)
   finite, d(dq_c)/dq > 0. 47 fast_sbm tests green total.
+- Codex review (iters 4-5) must-fixes, all applied: (1) KO + 3-point
+  exact-match is an OVERWRITE in the oracle (not add) — KO now a
+  sequential scan replicating assignment-then-add ordering; (2) boundary
+  hits `m_new == grid node` now take the LOWER interval
+  (`searchsorted side='left'` = oracle first-match search; the doubling
+  grid hits this exactly); (3) small-x guard now uses series for
+  `em/R`,`tail` so d/dR at R→0 is the analytic derivative (was zeroed);
+  (4) `COEFF_REMAPING` = oracle literal 0.0066667 (not exact 1/150);
+  (5) sentinel-overflow doc fixed (fraction LOST, not kept); (6) contracts
+  note piecewise gradients (remap) / Re=2.5 jump; (7) RW constants
+  decision recorded: derived `L_v/R_v`, `L_v/c_pd`, `epsilon` from
+  `legoesm.constants` (≤0.5% from oracle roundings) — physics-faithful
+  over rounding-faithful, consistently with the saturation-curve policy.
+  New edge tests: mixed exact/non-exact overwrite, boundary equality,
+  negative new mass, sentinel loss fraction, empty merge window,
+  evaporation-disables-passes equivalence, dS/dR correctness at R=0
+  (central-difference pinned). 54 fast_sbm tests green.

@@ -136,3 +136,27 @@ def test_differentiable_and_batched():
     for R0 in (0.0, 1.0e-13, 1.0e-6, 2.0):   # straddles the small-x guard
         g = jax.grad(loss)(jnp.array([0.005, R0, 1.0e-3]))
         assert np.all(np.isfinite(np.asarray(g))), R0
+
+
+def test_gradient_in_R_correct_at_zero():
+    # Codex review: a constant-limit guard would zero d/dR near R=0. The
+    # series guard must reproduce the analytic derivative
+    #   d S_new/dR|_{R=0} = -S0 dt²/2·... — checked against central
+    # finite differences far below the |x|<1e-4 switch.
+    S0, F, dt = 0.005, 1.0e-3, 0.4
+
+    def s_new(R):
+        return integrate_supersaturation(jnp.asarray(S0), R,
+                                         jnp.asarray(F), dt).S_new
+
+    def s_int(R):
+        return integrate_supersaturation(jnp.asarray(S0), R,
+                                         jnp.asarray(F), dt).S_int
+
+    for fn in (s_new, s_int):
+        g0 = float(jax.grad(fn)(jnp.asarray(0.0)))
+        h = 1.0e-7
+        fd = (float(fn(jnp.asarray(h))) - float(fn(jnp.asarray(-h)))) \
+            / (2.0 * h)
+        assert g0 == pytest.approx(fd, rel=1e-6)
+        assert g0 != 0.0

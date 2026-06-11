@@ -118,13 +118,19 @@ def integrate_supersaturation(
     R = relax_rate
     x = R * dt
     em = -jnp.expm1(-x)                      # 1 - exp(-R dt), exact small-x
-    # Guard the R→0 division: em/R → dt and (dt − em/R)/R → dt²/2. Use the
-    # series-equivalent smooth forms via where on a dimensionless threshold.
-    small = jnp.abs(x) < 1.0e-12
+    # Guard the R→0 division with SERIES (not constants) so gradients in R
+    # stay correct through the switch (codex review: a constant-limit
+    # branch zeroes d/dR near R=0):
+    #   em/R           = dt·φ(x),  φ = (1−e^{−x})/x = 1 − x/2 + x²/6 − …
+    #   (dt − em/R)/R  = dt²·ψ(x), ψ = (1−φ)/x     = 1/2 − x/6 + x²/24 − …
+    # Truncation O(x³) < 1e-12 inside the |x| < 1e-4 window.
+    small = jnp.abs(x) < 1.0e-4
     R_safe = jnp.where(small, 1.0, R)
-    em_over_R = jnp.where(small, dt, em / R_safe)
-    # (dt - em/R)/R with exact x->0 limit dt^2/2:
-    tail = jnp.where(small, 0.5 * dt * dt, (dt - em_over_R) / R_safe)
+    em_over_R = jnp.where(
+        small, dt * (1.0 - x / 2.0 + x * x / 6.0), em / R_safe)
+    tail = jnp.where(
+        small, dt * dt * (0.5 - x / 6.0 + x * x / 24.0),
+        (dt - em / R_safe) / R_safe)
     S_new = S * (1.0 - em) + forcing * em_over_R
     S_int = S * em_over_R + forcing * tail
     return SupersatStep(S_new=S_new, S_int=S_int)

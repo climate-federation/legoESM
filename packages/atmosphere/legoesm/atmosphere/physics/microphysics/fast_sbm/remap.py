@@ -8,10 +8,12 @@ remapped onto the fixed grid (oracle ``JERNEWF_KS``):
 
 1. **Kovetz–Olund 2-point split** on the packet variable ``ψ_k = f_k m_k``:
    the packet lands between grid bins I and I+1 with linear-in-mass
-   weights — conserves BOTH Σψ (∝ number) and Σψ·m (∝ mass) exactly.
-   Shrinking below the grid loses the sub-grid fraction (evaporation
-   toward vapor); growth beyond the top lands against a sentinel at
-   ``1024·m_top`` (oracle ``RRS(NRX+1)``), keeping mass in the top bin.
+   weights — conserves BOTH Σψ (∝ number) and Σψ·m (∝ mass) exactly for
+   in-grid targets. Shrinking below the grid loses the sub-grid fraction
+   (evaporation toward vapor); growth beyond the top splits against a
+   sentinel node at ``1024·m_top`` (oracle ``RRS(NRX+1)``) whose slot is
+   then DISCARDED — the sentinel fraction is lost, exactly as the oracle
+   drops ``PSINEW(NRX+1)``.
 2. **3-point correction** (``ISIGN_3POINT = 1``, condensation only):
    anti-diffusive quadratic redistribution with the oracle's monotonicity
    ("smoothing criteria") and positivity guards; the oracle EXITs the
@@ -58,6 +60,10 @@ __physics_contract__ = {
         "never create negative packets (oracle guards replicated)."
     ),
     "conserves": ["mass"],
+    # Differentiable in the KO weights (d f_new/d m_new flows inside a
+    # fixed target interval); gradients are PIECEWISE — zero/discontinuous
+    # across bin-boundary crossings, exact-match gates, smoothing gates
+    # and merge gates (searchsorted indices carry no gradient).
     "differentiable": True,
     "reference": (
         "Kovetz & Olund (1969) JAS 26:1060; Khain et al. (2008) "
@@ -75,9 +81,11 @@ __physics_contract__ = {
 
 # Oracle parameters (module_mp_fast_sbm.F l. 1704-1706, 2465).
 ISIGN_3POINT_DEFAULT = True
-# A drop bin with < 1/150 of its left neighbour's mass content is merged
-# left (oracle COEFF_REMAPING = 0.0066667).
-COEFF_REMAPING = 1.0 / 150.0
+# A drop bin with less than this fraction of its left neighbour's mass
+# content is merged left. Oracle literal 0.0066667D0 (their 1/150
+# rounding) kept VERBATIM — using exact 1/150 flips merges in the
+# threshold band (codex review).
+COEFF_REMAPING = 0.0066667
 # Drop-spectrum remap window, 0-based [5..11] (oracle KRDROP_REMAPING_MIN=6
 # .. MAX=12, 1-based).
 KRDROP_REMAP_LO = 5
@@ -107,16 +115,29 @@ def condensation_new_masses(
     return jnp.where(a < 0.0, _MASS_FLOOR, jnp.maximum(a, 0.0) ** 1.5)
 
 
+def _interval_index(rrs: jax.Array, x: jax.Array, n: int) -> jax.Array:
+    """First interval I with ``rrs[I] <= x <= rrs[I+1]`` — the oracle's
+    ascending linear search. ``side='left'`` puts an exact boundary hit
+    ``x == rrs[j]`` into the LOWER interval [j-1, j], matching the first
+    index the Fortran while-loop accepts (codex review: side='right'
+    diverged exactly on the doubling grid's boundary hits)."""
+    return jnp.clip(jnp.searchsorted(rrs, x, side="left") - 1, 0, n - 1)
+
+
 def _ko_two_point(psi_packets: jax.Array, m_new: jax.Array,
                   rrs: jax.Array, f: jax.Array, masses: jax.Array,
                   n: int) -> jax.Array:
     """Kovetz–Olund linear split of every packet ``ψ_k = f_k m_k`` at its
     new mass onto the extended grid ``rrs`` (n+1 nodes, sentinel at
-    1024·m_top). Returns ``psinew`` (n+1,); order-independent scatter."""
+    1024·m_top). Returns ``psinew`` (n+1,).
+
+    Sequential over source bins in ascending order because the oracle's
+    exact-match shortcut is an ASSIGNMENT (``PSINEW(K)=FI(K)*RR(K)``), not
+    an accumulation — it overwrites whatever earlier sources deposited in
+    bin K, and later sources still add on top (codex review)."""
     exact = jnp.abs(m_new - masses) < _EXACT_MATCH_ATOL
     below = m_new < rrs[0]
-    # Interval I: rrs[I] <= m_new <= rrs[I+1] (oracle linear search).
-    idx = jnp.clip(jnp.searchsorted(rrs, m_new, side="right") - 1, 0, n - 1)
+    idx = _interval_index(rrs, m_new, n)
     rr_lo = rrs[idx]
     rr_hi = rrs[idx + 1]
     w_hi = (m_new - rr_lo) / (rr_hi - rr_lo)
@@ -125,19 +146,24 @@ def _ko_two_point(psi_packets: jax.Array, m_new: jax.Array,
     # (oracle GMAT2 with RRTMP=0) — the rest has evaporated off the grid.
     w_below = m_new / rrs[0]
 
-    active = (f > 0.0) & ~exact
-    p = psi_packets
-    add_lo = jnp.where(active & ~below, p * w_lo, 0.0)
-    add_hi = jnp.where(active & ~below, p * w_hi, 0.0)
-    add_b0 = jnp.where(active & below, p * w_below, 0.0)
-    add_exact = jnp.where(exact & (f > 0.0), p, 0.0)
+    def body(psinew, k):
+        p = psi_packets[k]
+        has = f[k] > 0.0
+        is_exact = exact[k]
+        is_below = below[k]
+        # Oracle order: exact → overwrite; below-grid → partial add to bin
+        # 0; otherwise two-point add.
+        psinew = psinew.at[k].set(
+            jnp.where(has & is_exact, p, psinew[k]))
+        psinew = psinew.at[0].add(
+            jnp.where(has & ~is_exact & is_below, p * w_below[k], 0.0))
+        add = has & ~is_exact & ~is_below
+        psinew = psinew.at[idx[k]].add(jnp.where(add, p * w_lo[k], 0.0))
+        psinew = psinew.at[idx[k] + 1].add(jnp.where(add, p * w_hi[k], 0.0))
+        return psinew, None
 
-    psinew = jnp.zeros(n + 1, dtype=psi_packets.dtype)
-    psinew = psinew.at[idx].add(jnp.where(below, 0.0, add_lo))
-    psinew = psinew.at[idx + 1].add(jnp.where(below, 0.0, add_hi))
-    psinew = psinew.at[0].add(jnp.sum(add_b0))
-    # Exact-match packets stay in place.
-    psinew = psinew.at[jnp.arange(n)].add(add_exact)
+    psinew0 = jnp.zeros(n + 1, dtype=psi_packets.dtype)
+    psinew, _ = jax.lax.scan(body, psinew0, jnp.arange(n))
     return psinew
 
 
@@ -155,9 +181,13 @@ def _three_point_correction(psi: jax.Array, psi_packets: jax.Array,
         p_k = psi_packets[k]
         p_k1 = psi_packets[k + 1]
         m_n = m_new[k]
+        # Oracle exact-match in the 3-point pass is an OVERWRITE
+        # (PSI(K)=FI(K)*RR(K)) before skipping the correction.
+        psi = psi.at[k].set(
+            jnp.where((f[k] > 0.0) & exact[k], p_k, psi[k]))
         consider = (f[k] > 0.0) & ~exact[k] & (rrs[1] < m_n)
 
-        i = jnp.clip(jnp.searchsorted(rrs, m_n, side="right") - 1, 1, n - 2)
+        i = jnp.clip(_interval_index(rrs, m_n, n), 1, n - 2)
         rr_i, rr_p, rr_m = rrs[i], rrs[i + 1], rrs[i - 1]
         m_n2 = m_new[k + 1]
         rr_i2, rr_p2, rr_m2 = rrs[i + 1], rrs[i + 2], rrs[i]
