@@ -108,6 +108,19 @@ class SpectralLESConfig(NamedTuple):
     #                                 self-starting, 3rd-order, and stable to a ~2-3×
     #                                 larger advective CFL than AB2 → supports the
     #                                 larger time steps a CFL-adaptive controller picks.
+    moist: bool = False             # moist θ_v buoyancy from the water tracers:
+    #                                 b = (g/θ_ref0)·(θ_v − ⟨θ_v⟩) with
+    #                                 θ_v = θ·(1 + (1/ε−1)·q_v − q_c − q_r) (vapour
+    #                                 buoyancy + liquid condensate loading). Requires
+    #                                 buoyancy=True and a state with tracers. θ stays
+    #                                 the FULL potential temperature (the microphysics
+    #                                 coupling applies the latent heating to it).
+    n_tracers: int = 0              # trailing water-tracer fields on the state, the
+    #                                 STANDARD microphysics slot layout ([0]=q_v,
+    #                                 [1]=q_c, [2]=q_r, [3]=q_i, [4]=q_s, [5]=q_g,
+    #                                 [6]=N_c, [7]=N_r, [8]=N_i — see microphysics/
+    #                                 integration._PLANE_MIN_TRACER_SLOTS) so ANY
+    #                                 scheme swaps in unchanged. 0 ⇒ dry (unchanged).
 
 
 class SpectralLESLayout(NamedTuple):
@@ -149,6 +162,10 @@ class SpectralLESState(NamedTuple):
     rhs_w_prev: jax.Array
     theta: jax.Array | None = None      # (ny,nx,nz) potential temperature [K]
     rhs_theta_prev: jax.Array | None = None
+    tracers: jax.Array | None = None    # (ny,nx,nz,n_tracers) water tracers, the
+    #                                     standard microphysics slot layout (see
+    #                                     SpectralLESConfig.n_tracers)
+    rhs_tracers_prev: jax.Array | None = None
 
 
 def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64,
@@ -643,6 +660,30 @@ def scalar_rhs(theta, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux):
     return -adv + Hsgs + Vsgs
 
 
+def virtual_theta(theta, tracers):
+    """Virtual potential temperature with liquid-water loading:
+    ``θ_v = θ·(1 + (1/ε−1)·q_v − q_c − q_r)``.
+
+    ``(1/ε−1) ≈ 0.608`` from the shared ``constants.epsilon`` (R_d/R_v) — no
+    re-derived 0.61 literal. Ice slots are ignored (warm-cloud LES); extend with
+    ``− q_i − q_s − q_g`` if a mixed-phase case is ever run on this core."""
+    eps_v = 1.0 / constants.epsilon - 1.0
+    q_v = tracers[..., 0]
+    q_c = tracers[..., 1] if tracers.shape[-1] > 1 else 0.0
+    q_r = tracers[..., 2] if tracers.shape[-1] > 2 else 0.0
+    return theta * (1.0 + eps_v * q_v - q_c - q_r)
+
+
+def buoyancy_w_moist(theta, tracers, g: SpectralLESGrid):
+    """Moist Boussinesq buoyancy on the w-faces:
+    ``b = (g/θ_ref0)·(θ_v − ⟨θ_v⟩_xy)`` (same anomaly form as :func:`buoyancy_w`
+    — the planar mean is absorbed by the pressure projection)."""
+    th_v = virtual_theta(theta, tracers)
+    g_over_th = constants.g / g.cfg.theta_ref0
+    b_c = g_over_th * (th_v - _planar_mean(th_v, g, keepdims=True))
+    return jnp.pad(c2f(b_c), ((0, 0), (0, 0), (1, 1)))      # faces, 0 at walls
+
+
 def buoyancy_w(theta, g: SpectralLESGrid):
     """Boussinesq buoyancy on the w-faces: ``b = (g/θ_ref0)·(θ − ⟨θ⟩_xy)`` — only
     the deviation from the horizontal-mean profile drives the eddies (the mean is
@@ -730,7 +771,8 @@ def _thomas_complex(a, b, c, d):
 # One AB2 time step                                                            #
 # --------------------------------------------------------------------------- #
 def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
-        theta=None, sfc_theta_flux=0.0, t_sfc=None):
+        theta=None, sfc_theta_flux=0.0, t_sfc=None,
+        tracers=None, sfc_qv_flux=0.0):
     """Momentum RHS = -advection + SGS force + Coriolis + a constant body force.
 
     ``f_cor``≠0 drives a geostrophic/Ekman balance toward ``u_geo=(ug,vg)``; a
@@ -762,9 +804,36 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
     if theta is not None:
         Rtheta = scalar_rhs(theta, u, v, w, nu_t, g, sfc_flux)
         if g.cfg.buoyancy:
-            Rw = Rw + buoyancy_w(theta, g)
+            if g.cfg.moist:
+                # moist=True with no tracers would silently fall back to DRY
+                # buoyancy — a mis-assembled moist case must fail loudly
+                # (codex 2026-06-11 #2).
+                if tracers is None or tracers.shape[-1] < 1:
+                    raise ValueError(
+                        "cfg.moist=True needs a state with >=1 water tracer "
+                        "(slot 0 = q_v) for the theta_v buoyancy; got "
+                        "tracers=None/empty.")
+                Rw = Rw + buoyancy_w_moist(theta, tracers, g)
+            else:
+                Rw = Rw + buoyancy_w(theta, g)
+    Rtracers = None
+    if tracers is not None and tracers.shape[-1] == 0:
+        # Degenerate (…,0) array: no transport, but keep the pytree leaf shape
+        # (codex 2026-06-11 #3 — jnp.stack on an empty list would crash).
+        Rtracers = jnp.zeros_like(tracers)
+    elif tracers is not None:
+        # Each water tracer is advected + SGS-diffused exactly like θ (the same
+        # scalar operator ⇒ same numerics, no re-derivation). Surface flux: the
+        # prescribed kinematic moisture flux enters slot 0 (q_v); all other
+        # slots have zero surface flux. Static Python loop over the (small,
+        # compile-time-constant) slot count — unrolled at trace time.
+        cols = []
+        for k in range(tracers.shape[-1]):
+            flx = sfc_qv_flux if k == 0 else 0.0
+            cols.append(scalar_rhs(tracers[..., k], u, v, w, nu_t, g, flx))
+        Rtracers = jnp.stack(cols, axis=-1)
     Rw = Rw.at[..., 0].set(0.0).at[..., -1].set(0.0)
-    return Ru, Rv, Rw, u_star, Rtheta
+    return Ru, Rv, Rw, u_star, Rtheta, Rtracers
 
 
 def _surface_ustar(u, v, g: SpectralLESGrid):
@@ -778,21 +847,26 @@ def _surface_ustar(u, v, g: SpectralLESGrid):
     return (Cd ** 0.5) * _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
 
 
-def _filt_state(u, v, w, th, g):
+def _filt_state(u, v, w, th, tr, g):
     """Apply the high-k cutoff to a state (no-op if disabled). Divergence-free
     preserving (mask uniform in z); re-zeros the w walls."""
     if not g.cfg.spectral_filter:
-        return u, v, w, th
+        return u, v, w, th, tr
     u = _apply_filter(u, g)
     v = _apply_filter(v, g)
     w = _apply_filter(w, g).at[..., 0].set(0.0).at[..., -1].set(0.0)
     th = None if th is None else _apply_filter(th, g)
-    return u, v, w, th
+    if tr is not None and tr.shape[-1] > 0:
+        # _apply_filter contracts over the horizontal axes; map it over the
+        # trailing tracer axis (static unroll, small slot count).
+        tr = jnp.stack([_apply_filter(tr[..., k], g)
+                        for k in range(tr.shape[-1])], axis=-1)
+    return u, v, w, th, tr
 
 
 def step(state: SpectralLESState, g: SpectralLESGrid, dt,
          u_geo, f_cor: float, first: bool = False, force=(0.0, 0.0),
-         sfc_theta_flux=0.0, t_sfc=None):
+         sfc_theta_flux=0.0, t_sfc=None, sfc_qv_flux=0.0):
     """One time step + pressure projection.
 
     ``time_scheme`` selects the integrator. The RK options ("rk3"=SSP-RK3,
@@ -804,23 +878,28 @@ def step(state: SpectralLESState, g: SpectralLESGrid, dt,
     scheme and Boussinesq buoyancy is added to w. A high-k spectral cutoff is applied
     once at the end. ``dt`` may be a Python float or a JAX scalar."""
     u, v, w, th = state.u, state.v, state.w, state.theta
+    tr = state.tracers
     if g.cfg.time_scheme == "ab2":
-        Ru, Rv, Rw, u_star, Rth = rhs(u, v, w, g, u_geo, f_cor, force=force,
-                                      theta=th, sfc_theta_flux=sfc_theta_flux,
-                                      t_sfc=t_sfc)
+        Ru, Rv, Rw, u_star, Rth, Rtr = rhs(u, v, w, g, u_geo, f_cor, force=force,
+                                           theta=th, sfc_theta_flux=sfc_theta_flux,
+                                           t_sfc=t_sfc, tracers=tr,
+                                           sfc_qv_flux=sfc_qv_flux)
         if first:
-            au, av, aw, ath = Ru, Rv, Rw, Rth
+            au, av, aw, ath, atr = Ru, Rv, Rw, Rth, Rtr
         else:
             au = 1.5 * Ru - 0.5 * state.rhs_u_prev
             av = 1.5 * Rv - 0.5 * state.rhs_v_prev
             aw = 1.5 * Rw - 0.5 * state.rhs_w_prev
             ath = None if Rth is None else 1.5 * Rth - 0.5 * state.rhs_theta_prev
+            atr = None if Rtr is None else 1.5 * Rtr - 0.5 * state.rhs_tracers_prev
         w_s = (w + dt * aw).at[..., 0].set(0.0).at[..., -1].set(0.0)
         u_n, v_n, w_n = project(u + dt * au, v + dt * av, w_s, dt, g)
         th_n = None if th is None else th + dt * ath
-        u_n, v_n, w_n, th_n = _filt_state(u_n, v_n, w_n, th_n, g)
-        return SpectralLESState(u=u_n, v=v_n, w=w_n, theta=th_n,
-                                rhs_theta_prev=Rth, rhs_u_prev=Ru,
+        tr_n = None if tr is None else tr + dt * atr
+        u_n, v_n, w_n, th_n, tr_n = _filt_state(u_n, v_n, w_n, th_n, tr_n, g)
+        return SpectralLESState(u=u_n, v=v_n, w=w_n, theta=th_n, tracers=tr_n,
+                                rhs_theta_prev=Rth, rhs_tracers_prev=Rtr,
+                                rhs_u_prev=Ru,
                                 rhs_v_prev=Rv, rhs_w_prev=Rw), u_star
 
     # --- SSP-RK via the shared integrator -------------------------------------
@@ -828,14 +907,23 @@ def step(state: SpectralLESState, g: SpectralLESGrid, dt,
     # integrator's axpy/linear-combination leave them at 0); the per-stage "fast"
     # update is the incompressible pressure projection (no acoustic substep here).
     def slow_fn(s):
-        Ru, Rv, Rw, _u, Rth = rhs(s.u, s.v, s.w, g, u_geo, f_cor, force=force,
-                                  theta=s.theta, sfc_theta_flux=sfc_theta_flux,
-                                  t_sfc=t_sfc)
+        Ru, Rv, Rw, _u, Rth, Rtr = rhs(s.u, s.v, s.w, g, u_geo, f_cor,
+                                       force=force, theta=s.theta,
+                                       sfc_theta_flux=sfc_theta_flux,
+                                       t_sfc=t_sfc, tracers=s.tracers,
+                                       sfc_qv_flux=sfc_qv_flux)
+        # History leaves zeroed from the INPUT state's structure (not the RHS):
+        # if the caller passed rhs_*_prev=None with an active field, mirroring
+        # Rth/Rtr here would change the pytree structure mid-integration and
+        # jax.tree.map would reject the mismatch (codex 2026-06-11 #1).
         return SpectralLESState(
-            u=Ru, v=Rv, w=Rw, theta=Rth,
+            u=Ru, v=Rv, w=Rw, theta=Rth, tracers=Rtr,
             rhs_u_prev=jnp.zeros_like(Ru), rhs_v_prev=jnp.zeros_like(Rv),
             rhs_w_prev=jnp.zeros_like(Rw),
-            rhs_theta_prev=None if Rth is None else jnp.zeros_like(Rth))
+            rhs_theta_prev=(None if s.rhs_theta_prev is None
+                            else jnp.zeros_like(s.rhs_theta_prev)),
+            rhs_tracers_prev=(None if s.rhs_tracers_prev is None
+                              else jnp.zeros_like(s.rhs_tracers_prev)))
 
     def proj_fn(s_slow, slow_tend, dt_sub, n_sub, cfg):    # acoustic_update_fn slot
         wz = s_slow.w.at[..., 0].set(0.0).at[..., -1].set(0.0)
@@ -844,13 +932,15 @@ def step(state: SpectralLESState, g: SpectralLESGrid, dt,
 
     se_cfg = SplitExplicitConfig(n_substeps=1, outer_integrator=g.cfg.time_scheme)
     out = split_explicit_step(state, slow_fn, proj_fn, dt, se_cfg)
-    u_n, v_n, w_n, th_n = _filt_state(out.u, out.v, out.w, out.theta, g)
+    u_n, v_n, w_n, th_n, tr_n = _filt_state(out.u, out.v, out.w, out.theta,
+                                            out.tracers, g)
     # u_* diagnostic from the RETURNED (filtered) state so it matches what the
     # caller sees (the filter is a horizontal low-pass; the surface-layer effect is
     # tiny, but keep them consistent).
     u_star = _surface_ustar(u_n, v_n, g)
     return SpectralLESState(
-        u=u_n, v=v_n, w=w_n, theta=th_n,
+        u=u_n, v=v_n, w=w_n, theta=th_n, tracers=tr_n,
         rhs_u_prev=jnp.zeros_like(u_n), rhs_v_prev=jnp.zeros_like(v_n),
         rhs_w_prev=jnp.zeros_like(w_n),
-        rhs_theta_prev=None if th_n is None else jnp.zeros_like(th_n)), u_star
+        rhs_theta_prev=None if th_n is None else jnp.zeros_like(th_n),
+        rhs_tracers_prev=None if tr_n is None else jnp.zeros_like(tr_n)), u_star

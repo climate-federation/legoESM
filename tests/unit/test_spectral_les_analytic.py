@@ -113,7 +113,7 @@ class TestCoriolisTendencyLES:
         u = jnp.full((ny, nx, nz), U0)
         v = jnp.full((ny, nx, nz), V0)
         w = jnp.zeros((ny, nx, nz + 1))
-        Ru, Rv, Rw, _us, _rth = sl.rhs(u, v, w, g, u_geo=(0.0, 0.0), f_cor=self.F)
+        Ru, Rv, Rw, _us, _rth, _rtr = sl.rhs(u, v, w, g, u_geo=(0.0, 0.0), f_cor=self.F)
         return np.asarray(Ru), np.asarray(Rv)
 
     def test_du_dt_equals_plus_f_v(self):
@@ -155,7 +155,7 @@ class TestViscousTendencyLES:
         u = self.U0 * jnp.sin(ky * y)[:, None, None] * jnp.ones((ny, nx, nz))
         v = jnp.zeros((ny, nx, nz))
         w = jnp.zeros((ny, nx, nz + 1))
-        Ru, _Rv, _Rw, _us, _rth = sl.rhs(u, v, w, g, u_geo=(0.0, 0.0), f_cor=0.0)
+        Ru, _Rv, _Rw, _us, _rth, _rtr = sl.rhs(u, v, w, g, u_geo=(0.0, 0.0), f_cor=0.0)
         return g, np.asarray(u), np.asarray(Ru), ky
 
     def test_laplacian_shape(self):

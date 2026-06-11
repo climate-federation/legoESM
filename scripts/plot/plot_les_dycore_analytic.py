@@ -54,12 +54,12 @@ def coriolis_panel(ax):
     for V0 in Vs:
         u = jnp.full((ny, nx, nz), 0.0); v = jnp.full((ny, nx, nz), V0)
         w = jnp.zeros((ny, nx, nz + 1))
-        Ru, _, _, _, _ = sl.rhs(u, v, w, g, u_geo=(0.0, 0.0), f_cor=F)
+        Ru, _, _, _, _, _ = sl.rhs(u, v, w, g, u_geo=(0.0, 0.0), f_cor=F)
         du.append(float(np.mean(np.asarray(Ru)[..., 1:])))
     for U0 in Vs:
         u = jnp.full((ny, nx, nz), U0); v = jnp.full((ny, nx, nz), 0.0)
         w = jnp.zeros((ny, nx, nz + 1))
-        _, Rv, _, _, _ = sl.rhs(u, v, w, g, u_geo=(0.0, 0.0), f_cor=F)
+        _, Rv, _, _, _, _ = sl.rhs(u, v, w, g, u_geo=(0.0, 0.0), f_cor=F)
         dv.append(float(np.mean(np.asarray(Rv)[..., 1:])))
     ax.plot(Vs, du, "o", color="tab:blue", label="du/dt  num")
     ax.plot(Vs, F * Vs, "--", color="k", label="+f·V (analytic)")
@@ -79,7 +79,7 @@ def viscous_k2_panel(ax):
     for m in (1, 2, 3, 4, 5, 6):
         ky = 2.0 * np.pi * m / g.cfg.Ly
         u = U0 * jnp.sin(ky * y)[:, None, None] * jnp.ones((ny, nx, nz))
-        Ru, _, _, _, _ = sl.rhs(u, jnp.zeros((ny, nx, nz)),
+        Ru, _, _, _, _, _ = sl.rhs(u, jnp.zeros((ny, nx, nz)),
                                 jnp.zeros((ny, nx, nz + 1)), g,
                                 u_geo=(0.0, 0.0), f_cor=0.0)
         ks.append(ky); amps.append(float(np.max(np.abs(np.asarray(Ru)[..., nz // 2]))))
