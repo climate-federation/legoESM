@@ -112,6 +112,39 @@ S_0 = 1361.0                    # Total solar irradiance [W/m^2]
 emissivity_ocean = 0.97         # [-] open ocean / lake water
 emissivity_ice = 0.97           # [-] fresh sea ice / fresh snow
 emissivity_land = 0.95          # [-] generic land surface
+# NEMO/aerobulk sea-water thermal-IR emissivity (sbc_phy.F90 ``emiss_w``),
+# used in the KIRCHHOFF net-longwave form ``Q_lw = eps*(LW_down - sigma*T^4)``
+# (same eps as IR absorptivity AND emissivity).  The OMIP/CORE-II faithful
+# ocean forcing path uses this; ``emissivity_ocean`` (0.97, emission-only
+# convention) predates it and keeps its existing consumers.
+emissivity_seawater_lw = 0.98   # [-] NEMO sbc_phy emiss_w
+
+# Seawater specific heat used by NEMO (TEOS-10, eosbn2.F90 ``rcp``).  The
+# OMIP-faithful surface-flux path uses it for the precipitation/evaporation
+# heat-content terms of the non-solar flux so they match NEMO bit-for-bit.
+c_p_seawater = 3991.86795711963  # [J/(kg*K)] NEMO TEOS-10 rcp
+
+# NEMO/aerobulk moist-air heat-capacity pair (sbc_phy.F90 rCp_dry/rCp_vap),
+# used by the NCAR bulk algorithm's sensible-heat flux
+# ``cp_air(q) = rCp_dry + rCp_vap*q``.  Deliberately separate from the
+# atmosphere's ``c_pd`` (1004.64): these are NEMO-parity coefficients of the
+# CORE-II/OMIP faithful flux path, not legoESM's atmospheric thermodynamics.
+c_p_dry_air_nemo = 1005.0       # [J/(kg*K)] NEMO sbc_phy rCp_dry
+c_p_vapor_nemo = 1860.0         # [J/(kg*K)] NEMO sbc_phy rCp_vap
+
+# Remaining NEMO-parity constants of the CORE-II/OMIP faithful flux path
+# (values verbatim from NEMO 5.0.1 phycst.F90 / sbc_phy.F90).  They differ
+# from legoESM's globals in the 4th-5th digit; the faithful path uses these
+# so flux-level golden tests against the NEMO formulas close exactly.
+g_nemo = 9.80665                # [m/s^2]  NEMO phycst grav
+R_v_nemo = 461.495              # [J/(kg*K)] NEMO sbc_phy R_vap (ours: 461.51)
+L_fus_nemo = 0.3333601e6        # [J/kg]   NEMO phycst rLfus (ours L_f: 3.337e5)
+c_p_ice_nemo = 2096.7           # [J/(kg*K)] NEMO phycst rcpi (ours c_pi: 2106)
+# Universal molar constants used by NEMO's barometric 10-m pressure
+# (sbc_phy pres_temp): molar gas constant + dry-air/water molar masses.
+R_gas_molar = 8.314510          # [J/(mol*K)] universal molar gas constant
+M_dry_air = 28.9647e-3          # [kg/mol] dry-air molar mass
+M_water = 18.0153e-3            # [kg/mol] water molar mass
 
 # Broadband sea-ice / snow surface albedos used as Delta-Eddington
 # fallback or for the constant-albedo configuration.  Values follow
@@ -130,6 +163,17 @@ alpha_pond_max_vis = 0.27       # Deep melt pond, visible band (Briegleb-Light)
 alpha_pond_max_nir = 0.07       # Deep melt pond, near-IR band
 i0_vis = 0.70                   # Fraction of incident VIS that penetrates bare ice
 i0_nir = 0.0                    # NIR has negligible penetration
+
+# Broadband (VIS+NIR integrated) surface shortwave albedos for the coarse OMIP
+# ocean-only SW-reduction surrogate (no spectral split): the effective albedo at
+# a cell is alpha_ocean_broadband*(1-siconc) + alpha_ice_broadband_cold*siconc,
+# with siconc the prescribed sea-ice concentration.  The open-ocean value is the
+# broadband reflectance that was previously MISSING (the ocean absorbed 100% of
+# downwelling SW); the sea-ice value is the snow-free-to-snow broadband mean
+# (CICE6 / Briegleb-Light, ~mean of the cold VIS/NIR ice+snow albedos above).
+alpha_ocean_broadband = 0.06        # [-] open-ocean broadband albedo
+alpha_ice_broadband_cold = 0.65     # [-] cold (snow-covered) sea-ice broadband
+alpha_ice_broadband_warm = 0.45     # [-] melting sea-ice broadband (phase-2 blend)
 
 # ==============================================================================
 # Molecular Weights (kg/mol)

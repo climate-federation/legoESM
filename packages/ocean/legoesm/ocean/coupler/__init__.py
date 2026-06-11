@@ -11,6 +11,7 @@ forcing + L&Y 2009 bulk fluxes into the ocean state.
 from .omip2_applicator import (
     apply_omip2_surface_fluxes,
     compute_omip2_surface_forcing,
+    compute_omip2_freshwater_forcing,
 )
 from .sss_apply import apply_sss_restoring_step, apply_sss_restoring_step_mpas
 from .runoff_apply import apply_runoff_step, apply_runoff_step_mpas
@@ -23,6 +24,7 @@ from .tidal_mixing_apply import apply_tidal_mixing_step
 __all__ = [
     "apply_omip2_surface_fluxes",
     "compute_omip2_surface_forcing",
+    "compute_omip2_freshwater_forcing",
     "apply_sss_restoring_step",
     "apply_sss_restoring_step_mpas",
     "apply_runoff_step",

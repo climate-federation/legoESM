@@ -88,6 +88,45 @@ def tau_from_flux_coefficient(A: float, rho_0: float, c_p_or_one: float,
     return rho_0 * c_p_or_one * dz_0 / A
 
 
+class FluxFeedbackConfig(NamedTuple):
+    """Veros-style "flux + feedback" surface forcing (global_4deg transfer).
+
+    Surface-layer tendencies computed from per-step traced
+    ``OceanSurfaceForcing`` channels (``q_prescribed`` [W/m²], ``q_feedback``
+    [W/m²/K], ``T_feedback_target`` [°C], ``S_restore_target`` [PSU] —
+    monthly interpolation lives in the driver/harness, NOT here):
+
+        dT/dt = (q_prescribed + q_feedback·(T_target − T_surf))
+                / (rho_0 · c_sw · dz_0)                       [K/s]
+        dS/dt = (S_target − S_surf) / tau_restore_s           [PSU/s]
+
+    with a simple sea-ice mask zeroing BOTH where the surface is below
+    freezing AND the net heat flux is cooling (Veros global_4deg
+    ``set_forcing_kernel``).
+
+    Heat-capacity note: ``c_sw`` defaults to ``constants.c_sw`` (3994.0
+    J/(kg·K), Gill 1982) which is NOT the value the Veros global_4deg setup
+    kernel hardcodes (``cp_0 = 3991.86795711963``, a 0.05% mismatch). A
+    Veros-faithful recipe must pass the Veros value explicitly; it is a
+    setup-kernel literal, not a ``legoesm.constants`` candidate.
+
+    Ice-threshold note: the default is the constants-derived
+    ``T_freeze_ocean − T_freeze`` = −1.7999999999999545 °C, equal to Veros's
+    literal ``−1.8`` only to ~4.6e-14 (float representation of the
+    subtraction). It selects a comparison branch, so the gap is physically
+    inert; documented for bit-level oracle work.
+    """
+    c_sw: float = constants.c_sw        # seawater specific heat [J/(kg·K)] — see note
+    rho_0: float = constants.rho_ocean  # Boussinesq reference density [kg/m³]
+    tau_restore_s: float = 2592000.0    # SSS restoring timescale [s] (Veros t_rest = 30 d)
+    ice_mask: bool = True               # apply the simple sea-ice mask
+    # Freezing threshold [°C] for the ice mask (Veros literal −1.8).
+    ice_threshold_C: float = constants.T_freeze_ocean - constants.T_freeze
+    # Minimum top-cell thickness [m] discriminating ocean vs land columns
+    # (same convention as PrescribedForcingConfig).
+    min_wet_cell_thickness_m: float = 1.0e-3
+
+
 class BulkFormulaConfig(NamedTuple):
     """COARE-like air-sea flux formulation."""
     C_D: float = 1.5e-3     # Drag coefficient (constant scheme)
@@ -118,9 +157,14 @@ class SurfaceForcingConfig(NamedTuple):
     through the physics path — the cubed-sphere two-way coupling route.  NOTE
     ``external`` uses the ATMOSPHERE tau convention (ocean reaction = -tau),
     OPPOSITE the ``prescribed`` scheme (on-ocean +tau).  (MPAS uses a separate
-    physics factory and does not yet dispatch ``external``.)
+    physics factory and does not yet dispatch ``external``.)  Use
+    ``scheme="flux_feedback"`` for the Veros-style prescribed-flux +
+    SST-feedback + SSS-restoring tracer forcing driven by traced
+    ``OceanSurfaceForcing`` channels (wind stress still flows through the
+    ``tau_x``/``tau_y`` channels in the dynamics seam, explicit).
     """
-    scheme: str = "none"  # "prescribed","restoring","combined","bulk_formulas","external","none"
+    scheme: str = "none"  # "prescribed","restoring","combined","bulk_formulas","external","flux_feedback","none"
     prescribed: PrescribedForcingConfig = PrescribedForcingConfig()
     restoring: RestoringConfig = RestoringConfig()
     bulk_formulas: BulkFormulaConfig = BulkFormulaConfig()
+    flux_feedback: FluxFeedbackConfig = FluxFeedbackConfig()

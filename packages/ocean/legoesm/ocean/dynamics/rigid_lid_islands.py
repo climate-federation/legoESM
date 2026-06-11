@@ -61,12 +61,23 @@ def _label_islands(cell_land: np.ndarray, periodic_x: bool) -> tuple[np.ndarray,
     """
     from scipy.ndimage import label
 
-    structure = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]])  # 4-connectivity
+    # 8-CONNECTIVITY (merge diagonally connected land masses) — Veros/pyOM
+    # faithful: ``island._compute_isleperim`` uses ``structure = ones((3,3))``.
+    # This is also REQUIRED for well-posedness of the island system here:
+    # two land masses touching only at a corner SHARE that vertex, so with
+    # 4-connectivity they become two islands whose vertex masks OVERLAP —
+    # the basis-function Dirichlet conditions (ψ=1 on one island's vertices,
+    # 0 on the others') are then CONTRADICTORY at the shared vertex and the
+    # island coupling matrix goes ill-conditioned (global_4deg: 11 islands
+    # 4-connected vs Veros's 5, ψ-solve NaN by step 4).  Flat-wall domains
+    # without diagonal land contacts (the ACC channel) are unchanged.
+    structure = np.ones((3, 3))
     raw, n_raw = label(cell_land, structure=structure)
 
     if periodic_x and n_raw > 1:
-        # Union-find merge across the x-wrap: land in column 0 adjacent (same
-        # row) to land in column -1 belongs to the same mass.
+        # Union-find merge across the x-wrap: land in column 0 adjacent
+        # (same row, 8-connected ⇒ also row±1) to land in column -1 belongs
+        # to the same mass.
         parent = list(range(n_raw + 1))
 
         def find(a):
@@ -82,9 +93,16 @@ def _label_islands(cell_land: np.ndarray, periodic_x: bool) -> tuple[np.ndarray,
 
         col0 = raw[:, 0]
         coln = raw[:, -1]
-        for r in range(cell_land.shape[0]):
+        n_lat = cell_land.shape[0]
+        for r in range(n_lat):
             if col0[r] > 0 and coln[r] > 0:
                 union(int(col0[r]), int(coln[r]))
+            # Diagonal wrap contacts (8-connectivity across the seam).
+            if col0[r] > 0:
+                if r > 0 and coln[r - 1] > 0:
+                    union(int(col0[r]), int(coln[r - 1]))
+                if r + 1 < n_lat and coln[r + 1] > 0:
+                    union(int(col0[r]), int(coln[r + 1]))
         # Relabel by representative.
         rep = np.array([find(i) for i in range(n_raw + 1)])
         raw = rep[raw]

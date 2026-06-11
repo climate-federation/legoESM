@@ -119,6 +119,30 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
     return padded
 
 
+def interp_u_to_vface_4pt(u: jnp.ndarray, grid) -> jnp.ndarray:
+    """Sadourny 4-point average of a u-face field onto v-faces.
+
+    ``u`` is ``(n_lat, n_lon+1, ...)`` (u-faces incl. the periodic wrap
+    column); returns ``(n_lat+1, n_lon, ...)`` at v-faces.  Interior v-faces
+    are the plain 4-point cell-corner average; the south/north boundary rows
+    come from :func:`pad_ns_vector_u` (zero at physical walls — those v-faces
+    are wall-masked downstream — and the fold (sign·perm) row on tripolar).
+
+    This is the shared helper referenced by the Matsuno Coriolis backward
+    step in ``ocean_model_latlon_cgrid.py`` (commit ``98f9b779`` switched the
+    call site to this name but its definition never landed — restored here
+    with the HISTORICAL interior-average-then-pad semantics, bit-identical to
+    the pre-``98f9b779`` step in every serial case incl. the tripolar fold).
+    TODO(MPI band partition): the intended improvement is cell-pad-FIRST so a
+    partition-cut v-face averages the neighbour rank's true u row instead of
+    the zero refill; needs the halo-exchange row plumbed in here.
+    """
+    interior = 0.25 * (
+        u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:]
+    )
+    return pad_ns_vector_u(interior, grid)
+
+
 def pad_ns_vector_pair(
     u_interior: jnp.ndarray,
     v_interior: jnp.ndarray,

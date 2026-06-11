@@ -559,7 +559,7 @@ def test_3d_path_bit_identical_with_augmentation_off():
     bit. This is the regression guard that the new branches are fully gated."""
     recipe, model_off = _acc_model_with_eke(
         source_kdiss_h=False, kdiss_h_flux_form=False,
-        gm_source_mode="parameterized")
+        gm_source_mode="parameterized", source_p_diss_iso=False)
     state = recipe.initial_state
     s = state
     for _ in range(5):
@@ -569,7 +569,7 @@ def test_3d_path_bit_identical_with_augmentation_off():
     # untouched by the augmentation code.
     _recipe2, model_ref = _acc_model_with_eke(
         source_kdiss_h=False, kdiss_h_flux_form=False,
-        gm_source_mode="parameterized")
+        gm_source_mode="parameterized", source_p_diss_iso=False)
     s2 = recipe.initial_state
     for _ in range(5):
         s2 = model_ref.step(s2, DT_MOM_S, surface_forcing=recipe.wind_forcing)
@@ -615,7 +615,7 @@ def test_augmentation_on_increases_eke_source():
     add energy (the whole point). The two states share the same seed + forcing."""
     recipe, model_off = _acc_model_with_eke(
         source_kdiss_h=False, kdiss_h_flux_form=False,
-        gm_source_mode="parameterized")
+        gm_source_mode="parameterized", source_p_diss_iso=False)
     _recipe2, model_on = _acc_model_with_eke()  # recipe default = augmentation ON
     s_off = recipe.initial_state
     s_on = recipe.initial_state
@@ -700,11 +700,13 @@ def test_model_rejects_source_augmentation_without_eke_3d():
     # Reset the augmentation flags to their defaults first, then set ONE bad combo.
     # kdiss_h_flux_form=False isolates the eke_3d requirement (otherwise the
     # recipe's kdiss_h_flux_form=True + source_kdiss_h=False combo would trip its
-    # own validation first).
+    # own validation first). source_p_diss_iso=False likewise isolates the eke_3d
+    # check from the source_p_diss_iso<->realized_signed pairing validation (the
+    # recipe runs gm_source_mode='realized_signed' with source_p_diss_iso=False).
     for bad in (dict(eke_3d=False, source_kdiss_h=True, kdiss_h_flux_form=False,
-                     gm_source_mode="parameterized"),
+                     gm_source_mode="parameterized", source_p_diss_iso=False),
                 dict(eke_3d=False, source_kdiss_h=False, kdiss_h_flux_form=False,
-                     gm_source_mode="realized")):
+                     gm_source_mode="realized", source_p_diss_iso=False)):
         eke = gm.eke._replace(**bad)
         cfg = recipe.model_config._replace(gm_redi=gm._replace(eke=eke))
         with pytest.raises(ValueError, match="eke_3d=True"):
@@ -718,7 +720,12 @@ def test_acc_recipe_opts_in_to_both_sources():
     and to the FAITHFUL positive-definite K_diss_h flux form."""
     assert ACC_GM_REDI_CONFIG.eke.source_kdiss_h is True
     assert ACC_GM_REDI_CONFIG.eke.kdiss_h_flux_form is True
-    assert ACC_GM_REDI_CONFIG.eke.gm_source_mode == "realized"
+    # The signed GM-skew conversion (the EKE-budget completion) supersedes the
+    # positive-definite "realized" form; the experimental -P_diss_iso term is
+    # deliberately OFF (legoESM's adiabatic-cancelling triads cannot reproduce
+    # Veros's non-cancelling iso sink — see the recipe comment).
+    assert ACC_GM_REDI_CONFIG.eke.gm_source_mode == "realized_signed"
+    assert ACC_GM_REDI_CONFIG.eke.source_p_diss_iso is False
     assert ACC_GM_REDI_CONFIG.eke.eke_3d is True
 
 

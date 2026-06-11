@@ -349,7 +349,8 @@ def rigid_lid_step(psi, dpsi, dpsi_prev, dpsin, dpsin_prev,
 
 
 def barotropic_rigid_lid_latlon_cgrid(state, dt, grid, z_coord, config, rl_data,
-                                      *, F_slow_u, F_slow_v):
+                                      *, F_slow_u, F_slow_v,
+                                      add_barotropic_coriolis=True):
     """Rigid-lid barotropic step with the standard barotropic-solver contract.
 
     Drop-in for ``barotropic_implicit_latlon_cgrid`` / the explicit-substep
@@ -414,11 +415,28 @@ def barotropic_rigid_lid_latlon_cgrid(state, dt, grid, z_coord, config, rl_data,
 
     # Add the planetary Coriolis to the barotropic forcing, evaluated on the
     # rigid-lid barotropic velocity at time n (recovered from ψ^n).
-    u_bt_n, v_bt_n = recover_velocity_from_streamfunction(
-        psi, rl_data.inv_H_u, rl_data.inv_H_v, grid, u_mask=u_mask, v_mask=v_mask)
-    cor_u, cor_v = coriolis_cgrid(u_bt_n, v_bt_n, grid, u_mask=u_mask, v_mask=v_mask)
-    F_u = F_slow_u + cor_u
-    F_v = F_slow_v + cor_v
+    #
+    # GATED OFF under coriolis_scheme="explicit_ab2" (add_barotropic_coriolis=
+    # False): there the 3-D Coriolis tendency f×u already entered du_dt, so its
+    # depth-mean is INSIDE F_slow_u/v (= Veros solve_stream.py uloc/vloc =
+    # depth-integral of du including Coriolis). Adding it again here would
+    # double-count the barotropic Coriolis. The depth-mean of the 3-D Coriolis
+    # tendency on u^n equals coriolis_cgrid(U_bar^n) only up to the C-grid
+    # averaging order (depth-mean of a 4-pt average vs 4-pt average of the
+    # depth-mean) — under the rigid lid eta≡0 the column depth is fixed so the
+    # two barotropic-Coriolis forcings agree to the metric-weight level; routing
+    # it through F_slow is the faithful (Veros) structure either way.
+    if add_barotropic_coriolis:
+        u_bt_n, v_bt_n = recover_velocity_from_streamfunction(
+            psi, rl_data.inv_H_u, rl_data.inv_H_v, grid,
+            u_mask=u_mask, v_mask=v_mask)
+        cor_u, cor_v = coriolis_cgrid(
+            u_bt_n, v_bt_n, grid, u_mask=u_mask, v_mask=v_mask)
+        F_u = F_slow_u + cor_u
+        F_v = F_slow_v + cor_v
+    else:
+        F_u = F_slow_u
+        F_v = F_slow_v
 
     psi_new, dpsi_new, dpsi_shift, dpsin_new, dpsin_shift, u_bt, v_bt = rigid_lid_step(
         psi, dpsi, dpsi_prev, dpsin, dpsin_prev, F_u, F_v, rl_data, dt, config, grid)

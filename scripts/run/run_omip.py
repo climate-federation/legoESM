@@ -557,6 +557,10 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 A_h_eq_sigma_deg=A_h_eq_sigma_deg,
                 K_h=_K_h, A_v=A_v, K_v=K_v,
                 B_h=_B_h,
+                # OMIP global freshwater correction: conserve global salt under
+                # an unbalanced P-E+R (matches the MPAS config). Volume is already
+                # conserved via fix_eta_drift; this adds the salt normalization.
+                normalize_freshwater=True,
                 C_smag=_C_smag,
                 C_smag_lap=C_smag_lap,
                 C_leith=_C_leith,

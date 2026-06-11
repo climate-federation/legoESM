@@ -91,6 +91,7 @@ class PhysicsPipeline:
         micro_fn=None,
         micro_config=None,
         dynamic_albedo=False,
+        diurnal_cycle=False,
         turbulence_fn=None,
         turbulence_config=None,
         gwd_fn=None,
@@ -139,27 +140,14 @@ class PhysicsPipeline:
         self.rad_update_steps = 1
         self.micro_fn = micro_fn
         self.micro_config = micro_config
-        # ``dynamic_albedo`` is advertised (docstring + AMIP config) as
-        # "temperature/zenith-dependent albedo", but ``compute_radiation_core``
-        # never reads it — the surface albedo is always the static
-        # ``blend_surface_property(sic, albedo_ice, albedo_ocean)``.  Silently
-        # storing the flag turns it into a no-op: a user who enables it gets
-        # the constant 0.06/0.65 albedo with no error.  Until the zenith
-        # albedo is wired into the radiation surface boundary (see
-        # ``legoesm.surface_albedo.ocean_albedo`` / coupler
-        # ``ocean_albedo_config``), fail loudly rather than silently ignore.
-        if dynamic_albedo:
-            raise NotImplementedError(
-                "dynamic_albedo=True is not wired into PhysicsPipeline "
-                "radiation: compute_radiation_core uses a static surface "
-                "albedo blend and never reads this flag, so enabling it would "
-                "silently be a no-op (constant ocean/ice albedo). For a "
-                "zenith/temperature-dependent ocean albedo, run the coupled "
-                "driver with CouplerConfig.ocean_albedo_config(method='zenith') "
-                "(legoesm.surface_albedo.ocean_albedo). Leave dynamic_albedo "
-                "False here."
-            )
+        # ``dynamic_albedo``: zenith-angle-dependent ocean albedo
+        # (Briegleb 1992 via ``legoesm.surface_albedo.ocean_albedo``)
+        # applied in ``compute_radiation_core`` before the sea-ice/land
+        # blends.  ``diurnal_cycle`` selects instantaneous cos(SZA) vs
+        # the daytime-effective daily-mean cosine — matching the zenith
+        # convention the radiation solver itself uses.
         self.dynamic_albedo = dynamic_albedo
+        self.diurnal_cycle = diurnal_cycle
         self.turbulence_fn = turbulence_fn
         self.turbulence_config = turbulence_config
         self.gwd_fn = gwd_fn
@@ -235,13 +223,20 @@ class PhysicsPipeline:
                             C_H=None, C_E=None,
                             q_i=None, q_s=None, q_g=None,
                             N_c=None, N_r=None, N_i=None,
-                            T_land=None):
+                            T_land=None, aerosol_od=None):
         """Convection + microphysics + BL exchange with held radiation.
 
         ``T_land`` is the slab-land skin temperature.  When the land tile
         is active (``self.f_land is not None``) the surface temperature
         used for bulk turbulent fluxes is the land/ocean blend, so land
         columns exchange heat and moisture against the land surface.
+
+        ``aerosol_od`` is the per-layer aerosol optical depth in COLUMN
+        format (ncol, nlev) from the external forcing pipeline.  Consumed
+        only when the microphysics config sets ``nc_from_aerosol``: the
+        column AOD is inverted to a specified droplet number
+        (Andreae 2009, ``aerosol_activation.ccn_from_aod``) that fills
+        ``hydrometeors.N_c`` for specified-Nc double-moment schemes.
         """
         _C_H = self.C_H if C_H is None else C_H
         _C_E = self.C_E if C_E is None else C_E
@@ -538,12 +533,59 @@ class PhysicsPipeline:
             dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
             dz_col = dp_col / (rho_col * constants.g)
             _z = jnp.zeros_like(q_c_col)
+            # Aerosol-CCN specified droplet number: under specified-Nc
+            # (``predict_Nc=False`` — the N_c carry slot exists for
+            # double-moment schemes but is dead zeros, never evolved),
+            # fill the N_c input with the Andreae (2009) AOD->CCN
+            # diagnostic so ``effective_Nc(..., nc_specified_field=True)``
+            # sees the aerosol-driven per-column value instead of the
+            # constant Nc_0 — the aerosol -> microphysics link.  The
+            # override is unconditional on the carry VALUE: gating on
+            # ``N_c is None`` would silently skip every Morrison run
+            # (the full moisture registry always allocates the N_c
+            # tracer; codex review 2026-06-10 hypothesis confirmed).
+            # Prognostic-Nc runs (predict_Nc=True) keep their carry.
+            _nc_aer_wanted = (
+                getattr(self.micro_config, "nc_from_aerosol", False)
+                and not getattr(self.micro_config, "predict_Nc", False)
+            )
+            if _nc_aer_wanted and aerosol_od is None:
+                # Fail fast at trace time: a configured aerosol-CCN
+                # coupling with no aerosol field would silently feed
+                # zero N_c (→ Nc_0 fallback) into every column —
+                # exactly the silent no-op class the codex review
+                # flagged.  ``aerosol_od`` is a static-None only when
+                # the forcing pipeline was never wired.
+                raise ValueError(
+                    "nc_from_aerosol=True but no aerosol_od was passed "
+                    "to physics_step_no_rad — enable external aerosol "
+                    "forcing (--aerosol-forcing external) or disable "
+                    "--aerosol-ccn."
+                )
+            _nc_aer_specified = _nc_aer_wanted and aerosol_od is not None
+            if _nc_aer_specified:
+                from legoesm.atmosphere.physics.microphysics.aerosol_activation import (  # noqa: E501
+                    ccn_from_aod,
+                )
+                # Column AOD = sum of the per-layer ODs the forcing
+                # pipeline distributed from the Kinne climatology
+                # (~550 nm).  The Andreae fit uses AOT500; the
+                # 500-vs-550 nm difference (~5-10 % for Angstrom
+                # exponents 0.7-1.7) is well inside the fit's factor-2
+                # scatter, so no spectral correction is applied.
+                _aod_col = jnp.sum(aerosol_od, axis=-1)        # (ncol,)
+                _n_ccn = ccn_from_aod(_aod_col)                # (ncol,)
+                _n_c_col = jnp.broadcast_to(
+                    _n_ccn[:, None], q_c_col.shape,
+                )
+            else:
+                _n_c_col = ad.flatten_3d(N_c) if N_c is not None else _z
             hydrometeors = HydrometeorState(
                 q_c=q_c_col, q_r=q_r_col,
                 q_i=ad.flatten_3d(q_i) if q_i is not None else _z,
                 q_s=ad.flatten_3d(q_s) if q_s is not None else _z,
                 q_g=ad.flatten_3d(q_g) if q_g is not None else _z,
-                N_c=ad.flatten_3d(N_c) if N_c is not None else _z,
+                N_c=_n_c_col,
                 N_r=ad.flatten_3d(N_r) if N_r is not None else _z,
                 N_i=ad.flatten_3d(N_i) if N_i is not None else _z,
             )
@@ -749,7 +791,38 @@ class PhysicsPipeline:
         nlev = self.sigma_full.shape[0]
 
         T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
-        albedo = blend_surface_property(sic, _albedo_ice, _albedo_ocean)
+        if self.dynamic_albedo:
+            # Zenith-dependent ocean albedo (Briegleb 1992).  Use the
+            # SAME zenith convention as the radiation solver: the
+            # instantaneous cos(SZA) under a diurnal cycle, else the
+            # daytime-effective daily-mean cosine
+            # mu = Q_day / (S_0 · f_day) (what RRTMGP sees as
+            # cos_zenith on the non-diurnal path).  Ice/land albedo
+            # blends below are unchanged.
+            from legoesm.surface_albedo import (
+                ocean_albedo, OceanAlbedoConfig,
+            )
+            from legoesm.atmosphere.physics.radiation.solar import (
+                cos_zenith_angle, daily_mean_insolation, daylight_fraction,
+            )
+            if self.diurnal_cycle:
+                _hour = seconds_of_day / 3600.0
+                _mu = jnp.maximum(
+                    cos_zenith_angle(lat, lon, day_of_year, _hour), 0.0,
+                )
+            else:
+                _q_day = daily_mean_insolation(lat, day_of_year, s_0)
+                _f_day = daylight_fraction(lat, day_of_year)
+                _mu = jnp.clip(
+                    _q_day / (s_0 * jnp.maximum(_f_day, 1.0e-6)), 0.0, 1.0,
+                )
+            _albedo_ocean_dyn = ocean_albedo(
+                _mu, OceanAlbedoConfig(method="zenith"),
+            )
+            albedo = blend_surface_property(sic, _albedo_ice,
+                                            _albedo_ocean_dyn)
+        else:
+            albedo = blend_surface_property(sic, _albedo_ice, _albedo_ocean)
         emissivity = blend_surface_property(sic, self.emissivity_ice, self.emissivity_ocean)
 
         # --- Land tile: blend land surface into T_sfc / albedo / emissivity
@@ -826,6 +899,26 @@ class PhysicsPipeline:
             q_i_col = None if q_i is None else ad.flatten_3d(q_i)
             n_cloud_col = None if N_c is None else ad.flatten_3d(N_c)
             n_ice_col = None if N_i is None else ad.flatten_3d(N_i)
+            # Aerosol-CCN droplet number for the radiation PSD: under
+            # specified-Nc with aerosol coupling, feed the SAME
+            # Andreae (2009) AOD->CCN diagnostic into the cloud-optics
+            # effective radius so the Twomey (first indirect) effect is
+            # consistent between the microphysics and the radiation.
+            # Overrides the (dead-zeros) N_c carry — same rationale as
+            # the microphysics fill in ``physics_step_no_rad``;
+            # prognostic-Nc runs keep their carry.
+            if (aerosol_od_precomputed is not None
+                    and getattr(self.micro_config, "nc_from_aerosol",
+                                False)
+                    and not getattr(self.micro_config, "predict_Nc",
+                                    False)):
+                from legoesm.atmosphere.physics.microphysics.aerosol_activation import (  # noqa: E501
+                    ccn_from_aod,
+                )
+                _aod_col = jnp.sum(aerosol_od_precomputed, axis=-1)
+                n_cloud_col = jnp.broadcast_to(
+                    ccn_from_aod(_aod_col)[:, None], T_col.shape,
+                )
             # ``compute_cloud_properties`` is parameterised on mixing
             # ratio (RH from q_v vs q_sat_mixing_ratio); leave the
             # mixing-ratio q_v here and only feed the converted
@@ -996,6 +1089,7 @@ class PhysicsPipeline:
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
                     C_H=C_H, C_E=C_E, T_land=T_land,
                     q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
+                    aerosol_od=aerosol_od,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match
@@ -1028,6 +1122,7 @@ class PhysicsPipeline:
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
                     C_H=C_H, C_E=C_E, T_land=T_land,
                     q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
+                    aerosol_od=aerosol_od,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -1415,6 +1510,20 @@ def _resolve_microphysics(config):
     mc = MicrophysicsConfig(scheme=scheme)
     micro_config = getattr(mc, scheme)
 
+    # Aerosol-CCN coupling (Andreae 2009 AOD->CCN): only meaningful for
+    # schemes whose warm rain consumes a droplet number through
+    # ``effective_Nc`` with a specified-Nc mode (currently Morrison).
+    # Fail loudly on a scheme that would silently ignore the flag.
+    if getattr(config, "nc_from_aerosol", False):
+        if "nc_from_aerosol" not in getattr(micro_config, "_fields", ()):
+            raise ValueError(
+                f"nc_from_aerosol=True is not supported by the "
+                f"{scheme!r} microphysics scheme (no specified-Nc "
+                "aerosol mode); use --microphysics morrison or drop "
+                "--aerosol-ccn."
+            )
+        micro_config = micro_config._replace(nc_from_aerosol=True)
+
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (
             MicrophysicsEmulator,
@@ -1639,6 +1748,7 @@ def build_physics_pipeline(grid, sigma, config):
         micro_fn=micro_fn,
         micro_config=micro_config,
         dynamic_albedo=config.dynamic_albedo,
+        diurnal_cycle=config.diurnal_cycle,
         turbulence_fn=turb_fn,
         turbulence_config=turb_config,
         gwd_fn=gwd_fn,

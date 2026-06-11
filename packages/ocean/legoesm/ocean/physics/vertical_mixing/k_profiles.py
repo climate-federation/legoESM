@@ -23,7 +23,6 @@ floors.
 
 from __future__ import annotations
 
-from typing import Tuple
 
 import jax.numpy as jnp
 
@@ -47,7 +46,15 @@ def compute_vertical_K_profiles(
     A_v_background: float = 0.0,
     K_v_background: float = 0.0,
     eos_fn=None,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    *,
+    tke_old=None,
+    dt_tke: float | None = None,
+    tke_source=None,
+    return_tke: bool = False,
+) -> (
+    tuple[jnp.ndarray, jnp.ndarray]
+    | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
+):
     """Compute total ``(K_v, A_v)`` at interior interfaces for an implicit solve.
 
     Parameters
@@ -71,28 +78,74 @@ def compute_vertical_K_profiles(
         the historical behaviour. Passing the model's EOS makes the TKE
         N² (and, for ``n2_mode="adiabatic"``, the convective trigger)
         consistent with the dynamical core.
+    tke_old, dt_tke, tke_source, return_tke
+        PROGNOSTIC TKE carry (Veros enable_tke prognostic form). Consulted
+        ONLY when the vmix scheme is ``"tke"`` AND
+        ``vertical_mixing.tke.prognostic=True``. ``tke_old`` is the carried
+        TKE at the interior interfaces ``(..., nlev-1)`` (or ``None`` for the
+        first step / cold start); ``dt_tke`` is the TKE step ``dt`` (= the
+        MOMENTUM timestep ``dt_mom``, Veros tke.py:137); ``tke_source`` is an
+        optional additive energy-recycling source ``forc`` [m²/s³] at the
+        interior interfaces (``eke_diss_iw`` + ``K_diss_bot``, Veros
+        integrate_tke forc). ``return_tke=True`` makes this function return the
+        3-tuple ``(K_v, A_v, tke_new)`` so the caller can carry ``tke_new``
+        back onto the state; otherwise the 2-tuple ``(K_v, A_v)`` is returned
+        (BIT-IDENTICAL legacy contract).
 
     Returns
     -------
     (K_v, A_v) : tuple of arrays
         Each of shape ``state.T.data.shape[:-1] + (nlev - 1,)``, on
         interior interfaces, in m²/s.
+    (K_v, A_v, tke_new) : when ``return_tke=True`` — ``tke_new`` is the updated
+        prognostic TKE field ``(..., nlev-1)`` when the active scheme is the
+        prognostic TKE closure, else ``None``.
     """
     T = state.T.data
     nlev = T.shape[-1]
     interface_shape = T.shape[:-1] + (nlev - 1,)
     dtype = T.dtype
 
+    # ---- Variable-bathymetry (partial-cell) dry-cell guard ----
+    # Same pattern as the MPAS vmix bridge (mpas_integration.py:238-296):
+    # extend the deepest ACTIVE T/S/u/v downward so the schemes' N²/shear see
+    # a neutral, quiescent sub-seafloor instead of the T=S=0 IC fill (which
+    # reads as a huge fake instability at the seafloor interface → spurious
+    # convective K_M mixing the bottom wet cell with rock), and zero the
+    # returned K/A (and prognostic TKE) at NON-WET interfaces — no flux
+    # through the seafloor, Veros's maskW semantics.  No-op (bit-identical)
+    # for pure z-star coords (no ``is_active``), e.g. the flat-bottom ACC.
+    _is_active = getattr(z_coord, "is_active", None)
+    if _is_active is not None:
+        from legoesm.ocean.vertical import extrapolate_below_seafloor
+        _T_f = extrapolate_below_seafloor(state.T.data, z_coord)
+        _S_f = extrapolate_below_seafloor(state.S.data, z_coord)
+        state = state._replace(T=state.T.replace(data=_T_f),
+                               S=state.S.replace(data=_S_f))
+        # u/v only when already cell-centred (the lat-lon model passes the
+        # centred cc_state; staggered shapes have no cell is_active match).
+        if state.u.data.shape[:-1] == state.T.data.shape[:-1]:
+            _u_f = extrapolate_below_seafloor(state.u.data, z_coord)
+            _v_f = extrapolate_below_seafloor(state.v.data, z_coord)
+            state = state._replace(u=state.u.replace(data=_u_f),
+                                   v=state.v.replace(data=_v_f))
+        # Interface k sits between cells k and k+1: wet iff cell k+1 active.
+        _wet_if = jnp.asarray(_is_active, dtype=dtype)[..., 1:]
+    else:
+        _wet_if = None
+
     # Start with the configured background floors.  These are scalar
     # floats; broadcast to interface shape.
     K_v_total = jnp.full(interface_shape, K_v_background, dtype=dtype)
     A_v_total = jnp.full(interface_shape, A_v_background, dtype=dtype)
 
+    tke_new = None
     vmix = physics_config.vertical_mixing
     if vmix.scheme != "none":
-        K_vmix, A_vmix = _vmix_K_profiles(
+        K_vmix, A_vmix, tke_new = _vmix_K_profiles(
             state, z_coord, surface_forcing, vmix, physics_config.constants,
-            eos_fn=eos_fn)
+            eos_fn=eos_fn,
+            tke_old=tke_old, dt_tke=dt_tke, tke_source=tke_source)
         K_v_total = K_v_total + K_vmix
         A_v_total = A_v_total + A_vmix
 
@@ -134,6 +187,18 @@ def compute_vertical_K_profiles(
         K_v_total = jnp.minimum(K_v_total, K_max)
         A_v_total = jnp.minimum(A_v_total, K_max)
 
+    # Zero K/A (and the prognostic TKE) at non-wet interfaces (partial-cell
+    # coords only; see the dry-cell guard above).  The implicit solve then
+    # has no flux through the seafloor — wet cells can never exchange with
+    # rock cells regardless of what the schemes produced below the bottom.
+    if _wet_if is not None:
+        K_v_total = K_v_total * _wet_if
+        A_v_total = A_v_total * _wet_if
+        if tke_new is not None:
+            tke_new = tke_new * _wet_if
+
+    if return_tke:
+        return K_v_total, A_v_total, tke_new
     return K_v_total, A_v_total
 
 
@@ -143,7 +208,8 @@ def compute_vertical_K_profiles(
 
 
 def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
-                     constants_config=ConstantsConfig(), eos_fn=None):
+                     constants_config=ConstantsConfig(), eos_fn=None,
+                     *, tke_old=None, dt_tke=None, tke_source=None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -153,6 +219,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
 
     ``eos_fn`` (optional) overrides the density EOS used to compute N²
     (default Wright 1997 -> bit-identical legacy).
+
+    ``tke_old`` / ``dt_tke`` / ``tke_source`` drive the PROGNOSTIC TKE carry
+    (``tke`` scheme + ``prognostic=True``); see
+    :func:`compute_vertical_K_profiles`.
+
+    Returns ``(K_v, A_v, tke_new)`` — ``tke_new`` is the updated prognostic TKE
+    field for the prognostic ``tke`` scheme, else ``None``.
     """
     scheme = vmix_cfg.scheme
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
@@ -164,7 +237,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         dtype = state.T.data.dtype
         K_v = jnp.full(shape, cfg.K_v, dtype=dtype)
         A_v = jnp.full(shape, cfg.A_v, dtype=dtype)
-        return K_v, A_v
+        return K_v, A_v, None
 
     rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
 
@@ -177,7 +250,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             rho, z_coord, J, vmix_cfg.richardson,
             apply_diffusion=False,
         )
-        return out.K_v, out.A_v
+        return out.K_v, out.A_v, None
 
     if scheme == "tke":
         from legoesm.ocean.physics.vertical_mixing.tke import (
@@ -213,18 +286,53 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 rho, state.eta.data, z_coord.dz_ref, J,
                 constants_config.rho_0, h_actual=h_actual,
             )
-        # Use Mode B (diagnostic / quasi-steady) iteration: ``tke_old=None``
-        # seeds at background and 3 iterations of the same backward-Euler
-        # step bring TKE to within ~few % of the prognostic equilibrium
-        # for typical ocean shear / stratification. True prognostic mode
-        # (TKE carried across timesteps via ``state.tke``) is a future
-        # upgrade tracked in the Phase G audit doc.
+        tke_cfg = vmix_cfg.tke
+        prognostic = bool(getattr(tke_cfg, "prognostic", False))
+        if prognostic:
+            # PROGNOSTIC mode (Veros enable_tke): ONE backward-Euler step per
+            # model step, seeded from the carried ``tke_old``, with dt = the
+            # MOMENTUM timestep ``dt_tke`` (= dt_mom; Veros tke.py:137 dt_tke =
+            # dt_mom even though TKE advances once per tracer step). The updated
+            # TKE is returned to the caller (``tke_new``) to carry on the state.
+            # ``tke_source`` is the additive energy-recycling forc (eke_diss_iw
+            # + K_diss_bot) routed in by the model step (Stage 2), at the
+            # interior interfaces — None ⇒ no recycled sources.
+            if dt_tke is None:
+                raise ValueError(
+                    "prognostic TKE (vertical_mixing.tke.prognostic=True) "
+                    "requires dt_tke (the momentum timestep dt_mom) to be passed "
+                    "to compute_vertical_K_profiles."
+                )
+            _tke_seed = tke_old
+            if _tke_seed is None:
+                # Cold start (state.tke not seeded): background floor, one step.
+                leading = T_data.shape[:-1]
+                _tke_seed = jnp.full(
+                    leading + (z_coord.n_levels - 1,),
+                    tke_cfg.tke_background, dtype=T_data.dtype,
+                )
+            tke_out = tke_vertical_mixing(
+                u_data, v_data, T_data, S_data, rho, dz_half,
+                tke_old=_tke_seed,
+                tau_x_surface=tau_x, tau_y_surface=tau_y,
+                dt=dt_tke, cfg=tke_cfg,
+                rho_0=constants_config.rho_0, g=constants_config.g,
+                n_iterations=1,
+                p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J, eos_fn=eos_fn,
+                z_interface=z_coord.z_half_ref[1:-1],
+                external_source=tke_source,
+            )
+            return tke_out.K_H, tke_out.K_M, tke_out.tke_new
+        # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
+        # background and 3 iterations of the same backward-Euler step bring TKE
+        # to within ~few % of the prognostic equilibrium for typical ocean
+        # shear / stratification. No TKE field is carried.
         _DIAGNOSTIC_DT = 86400.0   # long dt drives implicit solve to equilibrium
         tke_out = tke_vertical_mixing(
             u_data, v_data, T_data, S_data, rho, dz_half,
             tke_old=None,
             tau_x_surface=tau_x, tau_y_surface=tau_y,
-            dt=_DIAGNOSTIC_DT, cfg=vmix_cfg.tke,
+            dt=_DIAGNOSTIC_DT, cfg=tke_cfg,
             rho_0=constants_config.rho_0, g=constants_config.g,
             n_iterations=3,
             p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J, eos_fn=eos_fn,
@@ -233,7 +341,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             # downward, interior interfaces drop the surface (k=0) + bottom.
             z_interface=z_coord.z_half_ref[1:-1],
         )
-        return tke_out.K_H, tke_out.K_M
+        return tke_out.K_H, tke_out.K_M, None
 
     if scheme == "kpp":
         from legoesm.ocean.physics.vertical_mixing.kpp import (
@@ -282,13 +390,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
             apply_diffusion=False,
         )
-        return out.K_v, out.A_v
+        return out.K_v, out.A_v, None
 
     # "none" — handled by the caller, but be defensive.
     nlev = state.T.data.shape[-1]
     shape = state.T.data.shape[:-1] + (nlev - 1,)
     dtype = state.T.data.dtype
-    return jnp.zeros(shape, dtype=dtype), jnp.zeros(shape, dtype=dtype)
+    return jnp.zeros(shape, dtype=dtype), jnp.zeros(shape, dtype=dtype), None
 
 
 def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig):

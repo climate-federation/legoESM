@@ -68,6 +68,11 @@ def load_core2_nyf(*, cache_dir: Optional[Path] = None,
             lw_down=np.asarray(ds.lw_down.values, dtype=np.float64),
             precip=np.asarray(ds.precip.values, dtype=np.float64),
             runoff=np.asarray(ds.runoff.values, dtype=np.float64),
+            # NEMO-parity channels (2026-06 schema): absent on old caches.
+            snow=(np.asarray(ds.snow.values, dtype=np.float64)
+                  if "snow" in ds else None),
+            slp=(np.asarray(ds.slp.values, dtype=np.float64)
+                 if "slp" in ds else None),
         )
     if not allow_synthetic:
         raise FileNotFoundError(

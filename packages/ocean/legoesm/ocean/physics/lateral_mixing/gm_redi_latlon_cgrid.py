@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    compute_face_masks_3d,
     divergence_cgrid,
     gradient_x_cgrid,
     gradient_y_cgrid,
@@ -39,6 +40,7 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
 from legoesm.ocean.eos import (
     compute_hydrostatic_pressure,
     eos_density_derivatives,
+    int_drhodTS_dynamic_enthalpy,
     make_eos_fn,
     rho_0 as _RHO_0,
 )
@@ -57,6 +59,16 @@ from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 # Division-guard epsilon — larger than float32 machine eps to prevent
 # intermediate blow-up in the backward pass (see plan §7, AD safety).
 _EPS_DIV = 1e-10
+# Salinity floor [PSU] applied ONLY to the inputs of EOS *differentiation*
+# (jax.grad): a sqrt(S)-bearing EOS (TEOS-10 gsw) has an unbounded ∂ρ/∂S at
+# exactly S=0, so jax.grad returns NaN there — and NaN survives the
+# downstream ``× mask`` (0·NaN = NaN).  S=0 occurs only on LAND cells the
+# 3-pass horizontal Neumann fill could not reach (continental interiors) and
+# on sub-seafloor dry cells (handled by _fill_dry_cells_columnwise); both
+# have their derivative outputs masked/tapered away, so the floor never
+# touches a physical value (wet salinity ≫ 1e-3 by the kbot salt==0 land
+# rule).  Numerical safety floor, not a physical constant.
+_S_GRAD_FLOOR = 1.0e-3
 
 
 def _kappa_is_interface_3d(kappa, nlev: int) -> bool:
@@ -142,6 +154,32 @@ def _validate_slope_density(slope_density: str) -> None:
         )
 
 
+def _fill_dry_cells_columnwise(q, z_coord):
+    """Fill SUB-SEAFLOOR (dry) cells with the deepest overlying active value.
+
+    Variable-bathymetry guard for EOS *differentiation*: with a partial-cell
+    coordinate the cells below the seafloor carry the IC fill value (T=S=0).
+    Density EVALUATION there is finite, but ``jax.grad`` of an EOS with a
+    ``sqrt(S)`` term (TEOS-10 gsw, ``eos="veros_gsw"``) is NaN at exactly
+    S=0 — and one NaN at a bottom face propagates through the B-triad slopes
+    and the implicit-K33 column solve to the WHOLE column (global_4deg: every
+    non-full-depth column went NaN on step 1).  Dry-cell derivative values
+    are physically arbitrary — they are killed downstream by the wet-face
+    indicators and the dm95 taper (exactly how Veros handles its salt=0 dry
+    cells: its ANALYTIC ``gsw_drhodS`` is finite at 0 and ``maskW`` zeroes
+    the flux) — but they must be FINITE for the masking to work.
+
+    Thin no-op wrapper around the canonical
+    :func:`legoesm.ocean.vertical.extrapolate_below_seafloor` (no duplicate
+    numerics): bit-identical pass-through (zero traced ops) when ``z_coord``
+    has no ``is_active`` (pure z-star, e.g. the flat-bottom ACC recipes).
+    """
+    if getattr(z_coord, "is_active", None) is None:
+        return q
+    from legoesm.ocean.vertical import extrapolate_below_seafloor
+    return extrapolate_below_seafloor(q, z_coord)
+
+
 def _neutral_drho_derivs(T, S, mask, z_coord, jacobian, eos_fn, rho_0, g):
     """Cell-centred EOS partials ``(∂ρ/∂T, ∂ρ/∂S)`` at the LOCAL cell pressure.
 
@@ -164,11 +202,18 @@ def _neutral_drho_derivs(T, S, mask, z_coord, jacobian, eos_fn, rho_0, g):
     Returns ``(drdT, drdS)`` each ``(n_lat, n_lon, nlev)`` at cell centres,
     masked to the wet domain.
     """
-    T_filled = neumann_fill_cgrid(T, mask)
-    S_filled = neumann_fill_cgrid(S, mask)
+    T_filled = _fill_dry_cells_columnwise(neumann_fill_cgrid(T, mask), z_coord)
+    S_filled = _fill_dry_cells_columnwise(neumann_fill_cgrid(S, mask), z_coord)
+    # Off-the-sqrt(S)-singularity guard for the jax.grad evaluation below;
+    # only unreachable-land cells (masked outputs) sit at S=0 (see
+    # _S_GRAD_FLOOR).
+    S_filled = jnp.maximum(S_filled, _S_GRAD_FLOOR)
     # In-situ density via the SAME 2-iteration EOS coupling the slope builder
     # uses, then the reference hydrostatic pressure (η=0, J=1) — identical to
-    # iterate_eos_and_pressure_anomaly's internal p_hydro.
+    # iterate_eos_and_pressure_anomaly's internal p_hydro.  (The dry-cell
+    # column fill changes ONLY sub-seafloor values: the hydrostatic integral
+    # at a wet cell never reads cells below it, so wet-cell drdT/drdS are
+    # bit-identical; see _fill_dry_cells_columnwise.)
     horiz_shape = T.shape[:-1]
     J_ref = jnp.ones(horiz_shape, dtype=T.dtype)
     eta_ref = jnp.zeros(horiz_shape, dtype=T.dtype)
@@ -580,6 +625,13 @@ def _w_face_slope_density_inputs(
     gradient (exactly the prior inline code).  ``"neutral"``: the locally-
     referenced ``∂ρ/∂T·∇T + ∂ρ/∂S·∇S`` ingredients (W-cell ``drdT_w`` + tracer
     face gradients), with the floor applied to the neutral ``drho_dz_w``.
+
+    kr-sum (Veros ``isoneutral.py:176-198``): each w-face triad references one
+    of the TWO cells adjacent to the face, and Veros builds BOTH ``drodxb`` and
+    ``drodzb`` from that reference cell's own EOS derivatives (the ``kr`` loop).
+    The neutral dict therefore carries both the UPPER-cell (``drdT_w``/
+    ``drho_dz_w``, the A-triads) and the LOWER-cell (``drdT_wb``/
+    ``drho_dz_w_b``, the B-triads) variants.
     """
     _validate_slope_density(slope_density)
     dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
@@ -599,10 +651,15 @@ def _w_face_slope_density_inputs(
             dz_half, _EPS_DIV)
         drdT_w = drdT_c[:, :, :-1]
         drdS_w = drdS_c[:, :, :-1]
+        drdT_wb = drdT_c[:, :, 1:]
+        drdS_wb = drdS_c[:, :, 1:]
         drho_dz_w = jnp.minimum(drdT_w * dTdz_w + drdS_w * dSdz_w, -_EPS_DIV)
+        drho_dz_w_b = jnp.minimum(
+            drdT_wb * dTdz_w + drdS_wb * dSdz_w, -_EPS_DIV)
         return dict(
             drho_dx_u=None, drho_dy_v=None, drho_dz_w=drho_dz_w,
             slope_density="neutral", drdT_w=drdT_w, drdS_w=drdS_w,
+            drdT_wb=drdT_wb, drdS_wb=drdS_wb, drho_dz_w_b=drho_dz_w_b,
             dTdx_u=dTdx_u, dSdx_u=dSdx_u, dTdy_v=dTdy_v, dSdy_v=dSdy_v,
         )
     drho_dx_u = gradient_x_cgrid(rho_filled, grid)
@@ -618,7 +675,7 @@ def _w_face_slope_density_inputs(
 
 def _w_triad_numerators(slope_density, drho_dx_u, drho_dy_v,
                         drdT_w, drdS_w, dTdx_u, dSdx_u, dTdy_v, dSdy_v,
-                        n_lat, n_lon):
+                        n_lat, n_lon, drdT_wb=None, drdS_wb=None):
     """The 8 W-face triad horizontal density-gradient *numerators* ``-∇_hρ``.
 
     Returns ``(nx_W, nx_E, nx_Wb, nx_Eb, ny_S, ny_N, ny_Sb, ny_Nb)`` where the
@@ -629,24 +686,33 @@ def _w_triad_numerators(slope_density, drho_dx_u, drho_dy_v,
       face gradient ``drho_dx_u`` / ``drho_dy_v`` (exactly the slices the prior
       inline code used).
     - ``"neutral"``: the locally-referenced ``∂ρ/∂T·∇T + ∂ρ/∂S·∇S`` form, with
-      the W-cell's own ``drdT_w`` / ``drdS_w`` (``(n_lat,n_lon,nlev-1)``) — the
-      SAME center-cell derivative Veros's K_33 uses for ALL triads at a w-face
-      (``isoneutral.py:177-187`` uses ``drdT[2:-2,2:-2,...]`` for ``drodxb``
-      AND ``drodzb``, shifting only the tracer-gradient index by ``ip``).
+      the PER-TRIAD reference cell's own EOS derivatives (Veros's ``kr`` loop,
+      ``isoneutral.py:176-198``): the A-triads (upper-level tracer gradients)
+      use the UPPER cell's ``drdT_w``/``drdS_w``; the B-triads (lower-level
+      gradients) use the LOWER cell's ``drdT_wb``/``drdS_wb`` — Veros pairs
+      ``drdT[..., kr]`` with ``dTdx[..., kr]`` for both ``drodxb`` and
+      ``drodzb``.  (Before the kr-sum refinement all 8 used the upper cell.)
     """
     if slope_density == "neutral":
+        if drdT_wb is None or drdS_wb is None:
+            raise ValueError(
+                "_w_triad_numerators: slope_density='neutral' requires the "
+                "lower-cell drdT_wb/drdS_wb (the kr-sum pairing); got None. "
+                "Build inputs via _w_face_slope_density_inputs.")
         nx_W = drdT_w * dTdx_u[:, :n_lon, :-1] + drdS_w * dSdx_u[:, :n_lon, :-1]
         nx_E = (drdT_w * dTdx_u[:, 1:n_lon + 1, :-1]
                 + drdS_w * dSdx_u[:, 1:n_lon + 1, :-1])
-        nx_Wb = drdT_w * dTdx_u[:, :n_lon, 1:] + drdS_w * dSdx_u[:, :n_lon, 1:]
-        nx_Eb = (drdT_w * dTdx_u[:, 1:n_lon + 1, 1:]
-                 + drdS_w * dSdx_u[:, 1:n_lon + 1, 1:])
+        nx_Wb = (drdT_wb * dTdx_u[:, :n_lon, 1:]
+                 + drdS_wb * dSdx_u[:, :n_lon, 1:])
+        nx_Eb = (drdT_wb * dTdx_u[:, 1:n_lon + 1, 1:]
+                 + drdS_wb * dSdx_u[:, 1:n_lon + 1, 1:])
         ny_S = drdT_w * dTdy_v[:n_lat, :, :-1] + drdS_w * dSdy_v[:n_lat, :, :-1]
         ny_N = (drdT_w * dTdy_v[1:n_lat + 1, :, :-1]
                 + drdS_w * dSdy_v[1:n_lat + 1, :, :-1])
-        ny_Sb = drdT_w * dTdy_v[:n_lat, :, 1:] + drdS_w * dSdy_v[:n_lat, :, 1:]
-        ny_Nb = (drdT_w * dTdy_v[1:n_lat + 1, :, 1:]
-                 + drdS_w * dSdy_v[1:n_lat + 1, :, 1:])
+        ny_Sb = (drdT_wb * dTdy_v[:n_lat, :, 1:]
+                 + drdS_wb * dSdy_v[:n_lat, :, 1:])
+        ny_Nb = (drdT_wb * dTdy_v[1:n_lat + 1, :, 1:]
+                 + drdS_wb * dSdy_v[1:n_lat + 1, :, 1:])
     else:
         nx_W = drho_dx_u[:, :n_lon, :-1]
         nx_E = drho_dx_u[:, 1:n_lon + 1, :-1]
@@ -663,6 +729,7 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
                            S_max, taper_width_frac,
                            slope_density="in_situ",
                            drdT_w=None, drdS_w=None,
+                           drdT_wb=None, drdS_wb=None, drho_dz_w_b=None,
                            dTdx_u=None, dSdx_u=None, dTdy_v=None, dSdy_v=None):
     """W-face (vertical-flux) triad isopycnal slopes + DM95 tapers.
 
@@ -688,21 +755,27 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
     """
     (nx_W, nx_E, nx_Wb, nx_Eb, ny_S, ny_N, ny_Sb, ny_Nb) = _w_triad_numerators(
         slope_density, drho_dx_u, drho_dy_v, drdT_w, drdS_w,
-        dTdx_u, dSdx_u, dTdy_v, dSdy_v, n_lat, n_lon)
+        dTdx_u, dSdx_u, dTdy_v, dSdy_v, n_lat, n_lon,
+        drdT_wb=drdT_wb, drdS_wb=drdS_wb)
     clip = slope_density != "neutral"
+    # kr-sum: the B-triads divide by the LOWER cell's drodzb (Veros pairs the
+    # same kr-cell derivatives in numerator and denominator).  in_situ has no
+    # per-cell derivative, so both levels share the single face denominator
+    # (a neutral call without the b-variant already raised in the numerators).
+    drho_dz_w_B = drho_dz_w_b if drho_dz_w_b is not None else drho_dz_w
 
-    def _slope(num):
-        s = -num / drho_dz_w
+    def _slope(num, dz=drho_dz_w):
+        s = -num / dz
         return jnp.clip(s, -S_max, S_max) if clip else s
 
-    S_Wx1 = _slope(nx_W)    # W,A
-    S_Wx2 = _slope(nx_E)    # E,A
-    S_Wx3 = _slope(nx_Wb)   # W,B
-    S_Wx4 = _slope(nx_Eb)   # E,B
-    S_Wy1 = _slope(ny_S)    # S,A
-    S_Wy2 = _slope(ny_N)    # N,A
-    S_Wy3 = _slope(ny_Sb)   # S,B
-    S_Wy4 = _slope(ny_Nb)   # N,B
+    S_Wx1 = _slope(nx_W)                    # W,A
+    S_Wx2 = _slope(nx_E)                    # E,A
+    S_Wx3 = _slope(nx_Wb, drho_dz_w_B)      # W,B
+    S_Wx4 = _slope(nx_Eb, drho_dz_w_B)      # E,B
+    S_Wy1 = _slope(ny_S)                    # S,A
+    S_Wy2 = _slope(ny_N)                    # N,A
+    S_Wy3 = _slope(ny_Sb, drho_dz_w_B)      # S,B
+    S_Wy4 = _slope(ny_Nb, drho_dz_w_B)      # N,B
     tw = lambda s: dm95_taper_scalar(s, S_max, transition_width_frac=taper_width_frac)[1]
     return (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
             tw(S_Wx1), tw(S_Wx2), tw(S_Wx3), tw(S_Wx4),
@@ -730,8 +803,23 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     eos_fn=None,
     rho_0: float = _RHO_0,
     g: float = constants.g,
+    return_fluxes: bool = False,
 ) -> jnp.ndarray:
     """Triad-based GM+Redi tracer tendency on the lat-lon C-grid.
+
+    When ``return_fluxes`` is True (default False ⇒ unchanged single-array
+    return), returns ``(tendency, F_x_u, F_y_v, F_z)`` — the assembled, masked
+    isopycnal-tensor face fluxes of ``q`` (east-face ``F_x_u``
+    ``(n_lat, n_lon+1, nlev)``, north-face ``F_y_v`` ``(n_lat+1, n_lon, nlev)``,
+    top-face ``F_z`` ``(n_lat, n_lon, nlev-1)``).  These are the EXACT quantities
+    the divergence consumes, so the realized signed APE conversions
+    (``-P_diss_skew`` / ``-P_diss_iso``) are built by contracting them with the
+    density-gradient field WITHOUT re-assembling any flux (no duplicate
+    numerics).  Passing ``kappa_Redi=0`` gives the SKEW-only fluxes (Veros
+    ``K_iso=0, K_skew=K_gm``); passing ``kappa_GM=0`` gives the ISO-only fluxes
+    (Veros ``K_iso=K_iso, K_skew=0``).  ``F_z`` carries the explicit off-diagonal
+    (and, when ``implicit_K33=False``, the K_33 diagonal) exactly as the
+    tendency does.
 
     Implements the Griffies, Gnanadesikan, Pacanowski, Larichev,
     Dukowicz & Smith (1998) triad decomposition of the small-slope
@@ -774,6 +862,26 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     n_lat, n_lon, nlev = q.shape
     dz_actual = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
     dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
+
+    # Per-level face/interface activity (partial-cell coords): Veros masks the
+    # triad fluxes with the 3-D maskU/maskV (Ai_ez/Ai_nz) and maskW
+    # (Ai_bx/Ai_by, the W-face triads).  With only the 2-D masks, fluxes cross
+    # CLOSED faces below the shallower neighbour's seafloor and through the
+    # seafloor W-face; the wet-cell side of those fluxes is real tendency while
+    # the dry-cell side is discarded by the model's active_3d guard — a NET
+    # TRACER LEAK (global_4deg: −6%/yr volume salt with GM on; machine-zero
+    # without GM).  Pure z-star: masks are all-ones ⇒ bit-identical.
+    _is_active_3d = getattr(z_coord, "is_active", None)
+    if _is_active_3d is not None:
+        _um3, _vm3 = compute_face_masks_3d(_is_active_3d, grid)
+        u_mask_lvl = _um3.astype(q.dtype)                 # (n_lat, n_lon+1, nlev)
+        v_mask_lvl = _vm3.astype(q.dtype)                 # (n_lat+1, n_lon, nlev)
+        w_mask_if = jnp.asarray(
+            _is_active_3d, dtype=q.dtype)[..., 1:]        # (n_lat, n_lon, nlev-1)
+    else:
+        u_mask_lvl = jnp.ones((n_lat, n_lon + 1, 1), dtype=q.dtype)
+        v_mask_lvl = jnp.ones((n_lat + 1, n_lon, 1), dtype=q.dtype)
+        w_mask_if = jnp.ones((n_lat, n_lon, 1), dtype=q.dtype)
 
     # Resolve kappa to its center / u-face / v-face / w-face forms (shared
     # helper, identical dispatch for kappa_GM, kappa_Redi, and the K_33 getter):
@@ -837,12 +945,21 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
             dz_half, _EPS_DIV)
         dSdz_w = (S_filled[:, :, :-1] - S_filled[:, :, 1:]) / jnp.maximum(
             dz_half, _EPS_DIV)
-        # Per-cell neutral vertical gradient at the w-face (upper cell's drdT),
-        # floored for stable strat.  Each cell's value, so the west/east shift
-        # below picks the per-triad reference cell (the Veros K_11 ``drodze``).
+        # Per-cell neutral vertical gradient at the w-face, floored for stable
+        # strat — BOTH adjacent-cell variants (the Veros kr loop): the upper
+        # cell's (A-triads / faces BELOW their reference cell) and the lower
+        # cell's (B-triads / faces ABOVE their reference cell).  The west/east
+        # (south/north) shifts below pick the per-triad reference COLUMN; the
+        # up/down variant picks the reference CELL within the column, so every
+        # triad pairs its own cell's EOS derivatives in numerator AND
+        # denominator (Veros K_11 ``drodze`` / K_33 ``drodzb``).
         drdT_w = drdT_c[:, :, :-1]
         drdS_w = drdS_c[:, :, :-1]
+        drdT_wb = drdT_c[:, :, 1:]
+        drdS_wb = drdS_c[:, :, 1:]
         drho_dz_w = jnp.minimum(drdT_w * dTdz_w + drdS_w * dSdz_w, -_EPS_DIV)
+        drho_dz_w_b = jnp.minimum(
+            drdT_wb * dTdz_w + drdS_wb * dSdz_w, -_EPS_DIV)
         # Per-reference-cell neutral horizontal gradients at the u/v-faces, used
         # by the u/v-face slopes (S_T*/S_V*).  drdT lifted to the west/east
         # (south/north) neighbour of each u-face (v-face).
@@ -878,6 +995,11 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
         drho_dy_v_north = drho_dy_v
         drdT_w = None
         drdS_w = None
+        drdT_wb = None
+        drdS_wb = None
+        # In-situ has no per-cell EOS derivative; both adjacent cells share
+        # the single face gradient (bit-identical to the prior code).
+        drho_dz_w_b = drho_dz_w
         dTdx_u = dSdx_u = dTdy_v = dSdy_v = None
 
     # -----------------------------------------------------------------
@@ -885,12 +1007,20 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     #    triads can be expressed by a single jnp.where / multiplication.
     #    "below" array at level k = drho_dz_w at w-face (k+1/2);
     #    "above" array at level k = drho_dz_w at w-face (k-1/2).
+    #
+    # kr pairing (neutral): a triad referencing cell k is the UPPER cell of
+    # its below-face (k+1/2) ⇒ ``below_lev`` uses the upper-cell variant
+    # ``drho_dz_w``; it is the LOWER cell of its above-face (k-1/2) ⇒
+    # ``above_lev`` uses the lower-cell variant ``drho_dz_w_b`` (Veros
+    # ``drodze``/``drodzn`` build each face gradient from the reference
+    # cell's own drdT — isoneutral.py kr/ki loops).  in_situ: identical
+    # arrays, bit-identical.
     # -----------------------------------------------------------------
     sentinel_rho = jnp.full(
         (n_lat, n_lon, 1), -_EPS_DIV, dtype=drho_dz_w.dtype,
     )
     drho_dz_below_lev = jnp.concatenate([drho_dz_w, sentinel_rho], axis=-1)
-    drho_dz_above_lev = jnp.concatenate([sentinel_rho, drho_dz_w], axis=-1)
+    drho_dz_above_lev = jnp.concatenate([sentinel_rho, drho_dz_w_b], axis=-1)
 
     sentinel_q = jnp.zeros((n_lat, n_lon, 1), dtype=dq_dz_w.dtype)
     dq_dz_below_lev = jnp.concatenate([dq_dz_w, sentinel_q], axis=-1)
@@ -987,7 +1117,7 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
             + w_T2 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T2)
             + w_T3 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T3)
             + w_T4 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T4))
-    F_x_u = F_x_u * u_mask[:, :, jnp.newaxis]
+    F_x_u = F_x_u * u_mask[:, :, jnp.newaxis] * u_mask_lvl
 
     # -----------------------------------------------------------------
     # 4. V-FACE triads — flux F_y at (n_lat+1, n_lon, nlev)
@@ -1045,7 +1175,7 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
             + w_V2 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V2)
             + w_V3 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V3)
             + w_V4 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V4))
-    F_y_v = F_y_v * v_mask[:, :, jnp.newaxis]
+    F_y_v = F_y_v * v_mask[:, :, jnp.newaxis] * v_mask_lvl
 
     # Horizontal divergence (single conservative call).
     dq_h = divergence_cgrid(F_x_u, F_y_v, grid)
@@ -1079,6 +1209,8 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
      taper_Wy1, taper_Wy2, taper_Wy3, taper_Wy4) = _w_triad_slopes_tapers(
         drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon, S_max, taper_width_frac,
         slope_density=slope_density, drdT_w=drdT_w, drdS_w=drdS_w,
+        drdT_wb=drdT_wb, drdS_wb=drdS_wb,
+        drho_dz_w_b=(drho_dz_w_b if slope_density == "neutral" else None),
         dTdx_u=dTdx_u, dSdx_u=dSdx_u, dTdy_v=dTdy_v, dSdy_v=dSdy_v)
 
     # Per-triad vertical flux.  The off-diagonal skew (kR+kG)·S·dq/dx is ALWAYS
@@ -1110,10 +1242,18 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
                  + taper_Wx3 * flux_Wx3 + taper_Wx4 * flux_Wx4
                  + taper_Wy1 * flux_Wy1 + taper_Wy2 * flux_Wy2
                  + taper_Wy3 * flux_Wy3 + taper_Wy4 * flux_Wy4)
+    # Veros maskW: no W-face flux through the seafloor (see the per-level
+    # face-activity note above) — required for tracer conservation.
+    F_z = F_z * w_mask_if
 
     dq_vert = vertical_flux_divergence(F_z, dz_actual, EPS)
 
     tendency = (dq_h + dq_vert) * mask[:, :, jnp.newaxis]
+    if return_fluxes:
+        # F_z is masked here so the contracted realized-conversion sees the same
+        # wet-only flux the divergence does (F_x_u / F_y_v are already u/v-mask
+        # multiplied above).
+        return tendency, F_x_u, F_y_v, F_z * mask[:, :, jnp.newaxis]
     return tendency
 
 
@@ -1210,8 +1350,25 @@ def gm_redi_tracer_tendency_latlon(
             # the module constant — keeps Visbeck consistent with the pinned Ω
             # (e.g. a Veros recipe) and avoids an inline constants.Omega read.
             f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
+        # Adiabatic Eady-N² for the Visbeck diagnostic (default insitu ⇒
+        # kwargs None ⇒ byte-identical). Build the cell-centre pressure +
+        # pass T/S/EOS only when the Visbeck config opts in.
+        _T_vb = _S_vb = _p_vb = _eos_vb = None
+        if getattr(cfg.visbeck, "n2_mode", "insitu") == "adiabatic":
+            from legoesm.ocean.eos import compute_hydrostatic_pressure
+            from legoesm.ocean.vertical import (
+                OceanPartialCellCoordinate, compute_layer_thickness,
+            )
+            _h_actual = None
+            if isinstance(z_coord, OceanPartialCellCoordinate):
+                _h_actual = compute_layer_thickness(eta, H_bathy, z_coord)
+            _p_vb = compute_hydrostatic_pressure(
+                rho, eta, z_coord.dz_ref, jacobian, rho_0, h_actual=_h_actual,
+            )
+            _T_vb, _S_vb, _eos_vb = T, S, eos_fn
         kappa_GM = compute_visbeck_kappa_gm(
             rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg.visbeck,
+            T=_T_vb, S=_S_vb, p_cell=_p_vb, eos_fn=_eos_vb,
         )
     else:
         kappa_GM = cfg.kappa_GM
@@ -1448,23 +1605,68 @@ def harmonic_lateral_kediss_eke_source(
         return K_diss_h_w * mask[:, :, jnp.newaxis]
 
     # DYNAMICAL FORM (default): per-face KE-dissipation rate -u·(A_h∇²u) [m²/s³ on
-    # the face].  visc_* are already face-masked by the caller.
-    p_u = -u * visc_u                                   # (n_lat, n_lon+1, nlev)
-    p_v = -v * visc_v                                   # (n_lat+1, n_lon, nlev)
-    # Average the face products to cell centres (inverse of cell->face interp).
-    # u-face j and j+1 straddle cell j: cell value = 0.5*(p_u[:, :-1] + p_u[:, 1:]).
-    diss_cell = 0.5 * (p_u[:, :-1, :] + p_u[:, 1:, :])  # (n_lat, n_lon, nlev)
-    # v-face i and i+1 straddle cell i: cell value = 0.5*(p_v[:-1] + p_v[1:]).
-    diss_cell = diss_cell + 0.5 * (p_v[:-1, :, :] + p_v[1:, :, :])
-    diss_cell = diss_cell * mask[:, :, jnp.newaxis]
-    # Average full-level cell dissipation to the nlev-1 interior interfaces (W-grid),
-    # matching where E lives, then clamp >= 0 to make this a pure source.  NB: the
-    # clamp is NOT inactive — -u·A_h∇²u is locally negative in transport regions, so
-    # the clamp over-credits the column-integrated KE dissipation by ~11-20% vs the
+    # the face], averaged faces→centres→interfaces and clamped ≥ 0.  NB: the clamp
+    # is NOT inactive — -u·A_h∇²u is locally negative in transport regions, so the
+    # clamp over-credits the column-integrated KE dissipation by ~11-20% vs the
     # positive-definite flux form above (set kdiss_h_flux_form=True for the exact,
     # clamp-free Veros analogue).
-    K_diss_h_w = 0.5 * (diss_cell[:, :, :-1] + diss_cell[:, :, 1:])
-    return jnp.maximum(K_diss_h_w, 0.0) * mask[:, :, jnp.newaxis]
+    return _kediss_from_momentum_tendency(visc_u, visc_v, u, v, mask, clamp=True)
+
+
+def _kediss_from_momentum_tendency(
+    tend_u: jnp.ndarray,
+    tend_v: jnp.ndarray,
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    mask: jnp.ndarray,
+    *,
+    clamp: bool = True,
+) -> jnp.ndarray:
+    """KE removal ``-u·tend_u - v·tend_v`` mapped faces→centres→W-grid [m²/s³].
+
+    Shared C-grid mapping for the mean-KE that a face-grid momentum tendency
+    (``A_h∇²u`` for K_diss_h, ``-r·u`` for K_diss_bot) extracts from the flow,
+    routed to the ``nlev-1`` interior interfaces (the W-grid where TKE/EKE live).
+    The per-face dissipation rate ``-u·tend_u`` is averaged to cell centres
+    (inverse of the cell→face interpolation) then to the interior interfaces
+    (``0.5·(c[:-1]+c[1:])`` — Veros's ``dissipation_on_wgrid`` interior mapping).
+    With ``clamp=True`` the result is floored ≥ 0 to make it a pure source (the
+    dynamical form is not positive-definite); the caller passes the already
+    face-masked tendencies.
+    """
+    p_u = -u * tend_u                                   # (n_lat, n_lon+1, nlev)
+    p_v = -v * tend_v                                   # (n_lat+1, n_lon, nlev)
+    diss_cell = 0.5 * (p_u[:, :-1, :] + p_u[:, 1:, :])  # (n_lat, n_lon, nlev)
+    diss_cell = diss_cell + 0.5 * (p_v[:-1, :, :] + p_v[1:, :, :])
+    diss_cell = diss_cell * mask[:, :, jnp.newaxis]
+    K_diss_w = 0.5 * (diss_cell[:, :, :-1] + diss_cell[:, :, 1:])
+    if clamp:
+        K_diss_w = jnp.maximum(K_diss_w, 0.0)
+    return K_diss_w * mask[:, :, jnp.newaxis]
+
+
+def bottom_drag_kediss_tke_source(
+    drag_u: jnp.ndarray,
+    drag_v: jnp.ndarray,
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Bottom-drag KE extraction → prognostic-TKE source ``K_diss_bot`` [m²/s³].
+
+    legoESM's analogue of Veros ``K_diss_bot`` (``veros/core/friction.py``
+    ``linear_bottom_friction``: ``diss = r_bot·u²`` at the bottom level, mapped
+    via ``calc_diss_u/v`` to the T-grid). Here the bottom-drag MOMENTUM tendency
+    ``drag_u = -r_eff·u/dz_bot`` (already face-masked, applied at the seafloor /
+    BBL band by ``_bc_bottom_drag``) gives the per-face KE-removal rate
+    ``-u·drag_u = r_eff·u²/dz_bot ≥ 0`` (drag always opposes the flow), which is
+    averaged faces→centres→interior interfaces (the W-grid where the prognostic
+    TKE lives). No clamp is needed — the term is ≥ 0 by construction (drag·flow),
+    but the shared mapping applies a ≥ 0 floor harmlessly for safety.
+
+    Returns ``(n_lat, n_lon, nlev-1)`` ≥ 0 at the interior interfaces.
+    """
+    return _kediss_from_momentum_tendency(drag_u, drag_v, u, v, mask, clamp=True)
 
 
 def compute_realized_gm_skew_conversion(
@@ -1555,6 +1757,240 @@ def compute_realized_gm_skew_conversion(
     N2_w = (g / rho_0) * jnp.abs(drho_dz_w)
     P_skew = jnp.maximum(kappa_gm_w, 0.0) * N2_w * S2_triad
     return jnp.maximum(P_skew, 0.0) * mask[:, :, jnp.newaxis]
+
+
+def _dynamic_enthalpy_dissipation_wgrid(
+    int_drhodX,
+    F_x_u,
+    F_y_v,
+    F_z,
+    grid,
+    dz_cell,
+    mask,
+    g,
+    rho_0,
+    *,
+    K_33=None,
+    dq_dz_w=None,
+):
+    r"""Veros dynamic-enthalpy dissipation of one tracer's isopycnal flux, on the
+    W-grid [m²/s³].  This is ``P_diss_skew`` / ``P_diss_iso`` for ONE tracer
+    (the caller sums the T and S contributions).
+
+    Reproduces Veros's two-part construction
+    (``veros/core/isoneutral/diffusion.py:234-279`` +
+    ``veros/core/diffusion.py:compute_dissipation`` / ``dissipation_on_wgrid``):
+
+    HORIZONTAL (cell-centred, then averaged to the interior W-faces):
+
+        diss_h = 0.5·g/ρ₀·( ∇_x(int_drhodX)·F_x  +  ∇_y(int_drhodX)·F_y ),
+
+    the contraction of the dynamic-enthalpy horizontal gradient with the isopycnal
+    horizontal flux of the tracer, averaged over the two faces straddling each
+    cell (Veros's ``flux_east[C]`` + ``flux_east[W]`` stencil), then mapped to the
+    interior W-faces by ``0.5·(c[k]+c[k+1])`` (Veros ``dissipation_on_wgrid``).
+
+    VERTICAL (already at the W-faces):
+
+        diss_v = +g/ρ₀·∂_z(int_drhodX)·( F_z [+ K_33·∂_z q] ),
+
+    where ``∂_z(int_drhodX) = (int[k]-int[k+1])/dz_w`` (Veros ``fxa``) and ``F_z``
+    is the explicit vertical isopycnal flux (the off-diagonal K31/K32 skew/iso
+    term).  When the K_33 vertical isoneutral diagonal is treated IMPLICITLY
+    (``implicit_K33=True``, the ACC recipe), ``F_z`` carries ONLY the off-diagonal,
+    so the diagonal dissipation ``K_33·∂_z q`` is supplied separately via
+    ``K_33`` + ``dq_dz_w`` (Veros adds it explicitly to ``P_diss_iso``,
+    diffusion.py:274-278); pass ``K_33=None`` to omit it (the skew has no K_33).
+
+    SIGN: Veros uses ``-g/ρ₀`` for the vertical term because its ``flux_top``
+    convention is OPPOSITE legoESM's ``F_z`` (z-upward flux); the single global
+    sign flip is absorbed by the ``+g/ρ₀`` here, validated against Veros's captured
+    ``P_diss_skew`` field (per-cell sign structure identical, spatial corr 0.95,
+    integral within 1 % on the ACC equilibrium).  The horizontal term keeps the
+    same sign as Veros (``F_x_u``/``F_y_v`` share Veros's ``flux_east``/``flux_north``
+    sign convention — both store ``+K·∇q``).
+
+    Returns ``P_diss_X`` (n_lat, n_lon, nlev-1) [m²/s³]; the EKE SOURCE is
+    ``-P_diss_X``.  ``int_drhodX``, ``F_*`` are this tracer's fields.
+    """
+    n_lat, n_lon, nlev = int_drhodX.shape
+    # ---- HORIZONTAL: 0.5·g/ρ₀·(∇int·F) averaged to cell centres ----
+    dX_dx_u = gradient_x_cgrid(int_drhodX, grid)        # (n_lat, n_lon+1, nlev)
+    dX_dy_v = gradient_y_cgrid(int_drhodX, grid)        # (n_lat+1, n_lon, nlev)
+    fx = dX_dx_u * F_x_u
+    fy = dX_dy_v * F_y_v
+    diss_h_cell = 0.5 * (g / rho_0) * (
+        (fx[:, :-1, :] + fx[:, 1:, :]) + (fy[:-1, :, :] + fy[1:, :, :])
+    ) * mask[:, :, jnp.newaxis]                          # (n_lat, n_lon, nlev)
+    # interior W-grid mapping (Veros dissipation_on_wgrid interior 0.5·(c[:-1]+c[1:])).
+    P_h_w = 0.5 * (diss_h_cell[:, :, :-1] + diss_h_cell[:, :, 1:])
+    # ---- VERTICAL: +g/ρ₀·fxa·(F_z [+ K_33·dq/dz]) ----
+    dz_w = 0.5 * (dz_cell[..., :-1] + dz_cell[..., 1:])  # (n_lat, n_lon, nlev-1)
+    fxa = (int_drhodX[:, :, :-1] - int_drhodX[:, :, 1:]) / jnp.maximum(dz_w, _EPS_DIV)
+    Fz_full = F_z
+    if K_33 is not None and dq_dz_w is not None:
+        Fz_full = Fz_full + K_33 * dq_dz_w
+    P_v_w = (g / rho_0) * fxa * Fz_full
+    return (P_h_w + P_v_w) * mask[:, :, jnp.newaxis]
+
+
+def compute_realized_signed_conversions(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    eta: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+    grid: LatLonGrid,
+    z_coord: OceanZStarCoordinate,
+    cfg: GMRediConfig,
+    kappa_gm_w: jnp.ndarray,
+    *,
+    want_skew: bool = True,
+    want_iso: bool = False,
+    kappa_redi_w: jnp.ndarray | None = None,
+    eos: str = "wright",
+    eos_linear=None,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+    rho_0: float = _RHO_0,
+    g: float = constants.g,
+):
+    r"""Realized SIGNED GM-skew (``-P_diss_skew``) and Redi (``-P_diss_iso``) EKE
+    sources [m²/s³] at the interior W-faces — the literal Veros energy conversions.
+
+    Unlike :func:`compute_realized_gm_skew_conversion` (the positive-definite
+    parameterized ``κ_GM·N²·⟨S²⟩``), these are the SIGNED dynamic-enthalpy
+    dissipations Veros computes (``veros/core/isoneutral/diffusion.py``):
+
+    - ``-P_diss_skew`` (``want_skew``) — the energy the GM SKEW (bolus) flux
+      EXTRACTS from the mean APE and gives to the eddies (the GM brake).  Built
+      from the SKEW-only isopycnal flux (``kappa_Redi=0``, ``kappa_GM=kappa_gm_w``)
+      contracted with the dynamic-enthalpy gradient.  ``≥ 0`` wherever isopycnals
+      slump (the ACC equilibrium has it ``> 0`` in every wet cell, matching Veros),
+      but it is NOT clamped — the caller (``gm_source_mode="realized_signed"``)
+      folds any locally-negative value semi-implicitly (it is then a local sink,
+      like dissipation), keeping ``E ≥ e_min`` by construction.
+
+    - ``-P_diss_iso`` (``want_iso``) — the energy the Redi (isopycnal-diffusive)
+      flux DISSIPATES out of the mean APE (a SINK of EKE in Veros's budget, mostly
+      negative).  Built from the ISO-only flux (``kappa_GM=0``,
+      ``kappa_Redi=kappa_redi_w`` — the ``K_iso=K_gm`` coupling supplies
+      ``kappa_redi_w = kappa_gm_w``) PLUS the implicit K_33 vertical diagonal
+      dissipation (when ``cfg.implicit_K33``), exactly as Veros adds it explicitly
+      to ``P_diss_iso``.  Subtracted from the EKE source by the caller
+      (``source_p_diss_iso=True``).
+
+    Both reuse the EXISTING GM/Redi flux assembly
+    (:func:`gm_redi_tracer_tendency_triads_latlon_cgrid` with the appropriate
+    kappa zeroed and ``return_fluxes=True``) — NO flux numerics are duplicated.
+    The dynamic-enthalpy contraction is the shared
+    :func:`_dynamic_enthalpy_dissipation_wgrid`, summed over the T and S fluxes.
+
+    Returns ``(neg_P_diss_skew, neg_P_diss_iso)``; each is ``None`` when its
+    ``want_*`` flag is False.  Shapes ``(n_lat, n_lon, nlev-1)``.
+    """
+    if mask is None:
+        mask = jnp.ones(T.shape[:2], dtype=T.dtype)
+    if u_mask is None:
+        u_mask = jnp.ones((T.shape[0], T.shape[1] + 1), dtype=T.dtype)
+    if v_mask is None:
+        v_mask = jnp.ones((T.shape[0] + 1, T.shape[1]), dtype=T.dtype)
+    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    eos_fn = make_eos_fn(eos, eos_linear)
+    fill_fn = lambda field: neumann_fill_cgrid(field, mask)
+    rho, _rp, _pp = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
+    )
+    rho_filled = neumann_fill_cgrid(rho, mask)
+    slope_density = getattr(cfg, "slope_density", "in_situ")
+    dz_cell = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
+
+    # Dynamic-enthalpy integrands int_drhodT/S (Veros int_drhodT/S) at cell centres.
+    z_full = jnp.asarray(z_coord.z_full_ref)[jnp.newaxis, jnp.newaxis, :]
+    # Dry-cell column fill: int_drhodTS differentiates the EOS via jax.grad —
+    # NaN at the sub-seafloor S=0 cells under the gsw EOS (see
+    # _fill_dry_cells_columnwise); wet-cell values are unchanged.
+    int_drhodT, int_drhodS = int_drhodTS_dynamic_enthalpy(
+        eos_fn,
+        _fill_dry_cells_columnwise(neumann_fill_cgrid(T, mask), z_coord),
+        jnp.maximum(
+            _fill_dry_cells_columnwise(neumann_fill_cgrid(S, mask), z_coord),
+            _S_GRAD_FLOOR),
+        z_full, rho_0, g,
+    )
+    int_drhodT = int_drhodT * mask[:, :, jnp.newaxis]
+    int_drhodS = int_drhodS * mask[:, :, jnp.newaxis]
+
+    # Zeroing one kappa selects the skew-only (kappa_Redi=0) or iso-only
+    # (kappa_GM=0) flux.  A scalar 0.0 passes through _kappa_center_uvw unchanged
+    # (its skew/diagonal contributions vanish), so the other (3-D interface)
+    # kappa keeps its faithful w-face placement.
+    zero_kappa = jnp.asarray(0.0, dtype=kappa_gm_w.dtype) \
+        if isinstance(kappa_gm_w, jnp.ndarray) else 0.0
+
+    def _fluxes(q, kappa_GM_arg, kappa_Redi_arg, K_iso_steep=None):
+        # The K_iso_steep floor ``dq·max(0, K_iso_steep − kappa_Redi·taper)`` is
+        # NONLINEAR in kappa_Redi: with kappa_Redi=0 it degenerates to a full
+        # K_iso_steep horizontal diffusion. It is a REDI-diagonal term, never a
+        # GM term, so the skew-only call must zero it or the decomposition
+        # F(kR,kG)=F(kR,0)+F(0,kG) breaks (~25% skew contamination — caught by
+        # the adversarial review's kappa-decomposition probe).
+        _steep = cfg.K_iso_steep if K_iso_steep is None else K_iso_steep
+        _, Fx, Fy, Fz = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            q, rho_filled, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_GM_arg, kappa_Redi_arg, cfg.S_max, cfg.taper_width_frac,
+            cfg.implicit_K33, _steep, slope_density=slope_density,
+            T_tracer=T, S_tracer=S, eos_fn=eos_fn, rho_0=rho_0, g=g,
+            return_fluxes=True,
+        )
+        return Fx, Fy, Fz
+
+    neg_skew = None
+    if want_skew:
+        # SKEW-only fluxes: kappa_Redi=0, kappa_GM=kappa_gm_w (Veros K_iso=0,
+        # K_skew=K_gm) — with the Redi-diagonal K_iso_steep floor ZEROED.
+        FxT, FyT, FzT = _fluxes(T, kappa_gm_w, zero_kappa, K_iso_steep=0.0)
+        FxS, FyS, FzS = _fluxes(S, kappa_gm_w, zero_kappa, K_iso_steep=0.0)
+        P_skew = (
+            _dynamic_enthalpy_dissipation_wgrid(
+                int_drhodT, FxT, FyT, FzT, grid, dz_cell, mask, g, rho_0)
+            + _dynamic_enthalpy_dissipation_wgrid(
+                int_drhodS, FxS, FyS, FzS, grid, dz_cell, mask, g, rho_0)
+        )
+        neg_skew = -P_skew * mask[:, :, jnp.newaxis]
+
+    neg_iso = None
+    if want_iso:
+        kappa_redi = kappa_redi_w if kappa_redi_w is not None else kappa_gm_w
+        # ISO-only fluxes: kappa_GM=0, kappa_Redi=kappa_redi (Veros K_iso,K_skew=0).
+        FxTi, FyTi, FzTi = _fluxes(T, zero_kappa, kappa_redi)
+        FxSi, FySi, FzSi = _fluxes(S, zero_kappa, kappa_redi)
+        K33 = dq_dzT = dq_dzS = None
+        if cfg.implicit_K33:
+            # K_33 vertical isoneutral diagonal (dropped from the explicit F_z when
+            # implicit) — its dynamic-enthalpy dissipation is part of Veros's
+            # P_diss_iso (diffusion.py:274-278).  K_33 = 0.25·kappa_Redi·Σ taper·S².
+            K33 = compute_isoneutral_K33_latlon(
+                T, S, eta, H_bathy, grid, z_coord, cfg, eos=eos,
+                eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
+                kappa_redi_override=kappa_redi,
+            )
+            Tf = neumann_fill_cgrid(T, mask)
+            Sf = neumann_fill_cgrid(S, mask)
+            dz_half = 0.5 * (dz_cell[..., :-1] + dz_cell[..., 1:])
+            dq_dzT = (Tf[:, :, :-1] - Tf[:, :, 1:]) / jnp.maximum(dz_half, _EPS_DIV)
+            dq_dzS = (Sf[:, :, :-1] - Sf[:, :, 1:]) / jnp.maximum(dz_half, _EPS_DIV)
+        P_iso = (
+            _dynamic_enthalpy_dissipation_wgrid(
+                int_drhodT, FxTi, FyTi, FzTi, grid, dz_cell, mask, g, rho_0,
+                K_33=K33, dq_dz_w=dq_dzT)
+            + _dynamic_enthalpy_dissipation_wgrid(
+                int_drhodS, FxSi, FySi, FzSi, grid, dz_cell, mask, g, rho_0,
+                K_33=K33, dq_dz_w=dq_dzS)
+        )
+        neg_iso = -P_iso * mask[:, :, jnp.newaxis]
+
+    return neg_skew, neg_iso
 
 
 # =====================================================================
@@ -1769,8 +2205,29 @@ def compute_eke_step_kappa(
     beta = jnp.broadcast_to(
         (2.0 * omega * grid.cos_lat / r_earth)[:, None], mask.shape,
     )
+    # Adiabatic static-stability N² (Veros EKE chain) needs the cell-centre
+    # hydrostatic pressure + the same EOS as the dynamical core. Only built
+    # when the EKE config opts in (``n2_mode="adiabatic"``) so the default
+    # ("insitu") path is byte-identical (kwargs stay None).
+    T_eos = S_eos = p_cell = eos_for_n2 = None
+    if getattr(cfg.eke, "n2_mode", "insitu") == "adiabatic":
+        from legoesm.ocean.eos import compute_hydrostatic_pressure
+        from legoesm.ocean.vertical import (
+            OceanPartialCellCoordinate, compute_layer_thickness,
+        )
+        # Partial-cell thickness when applicable (matches k_profiles.py's
+        # adiabatic-N² path), else compute_hydrostatic_pressure falls back to
+        # dz_ref * jacobian internally.
+        h_actual = None
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            h_actual = compute_layer_thickness(eta, H_bathy, z_coord)
+        p_cell = compute_hydrostatic_pressure(
+            rho, eta, z_coord.dz_ref, jacobian, rho_0, h_actual=h_actual,
+        )
+        T_eos, S_eos, eos_for_n2 = T, S, eos_fn
     return compute_eke_kappa_gm(
         eke, rho, S_x, S_y, z_coord, jacobian, f_coriolis,
         cfg.visbeck, cfg.eke, rho_ref=rho_0, beta=beta,
         depth_resolved=depth_resolved,
+        T=T_eos, S=S_eos, p_cell=p_cell, eos_fn=eos_for_n2,
     )

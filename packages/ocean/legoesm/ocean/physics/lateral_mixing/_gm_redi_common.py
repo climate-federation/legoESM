@@ -10,7 +10,11 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.ocean.eos import compute_buoyancy_frequency, rho_0 as _RHO_0_DEFAULT
+from legoesm.ocean.eos import (
+    compute_buoyancy_frequency,
+    compute_buoyancy_frequency_adiabatic,
+    rho_0 as _RHO_0_DEFAULT,
+)
 from legoesm.ocean.physics.lateral_mixing.config import VisbeckConfig
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
@@ -130,6 +134,11 @@ def compute_visbeck_kappa_gm(
     f_coriolis: jnp.ndarray,
     cfg: VisbeckConfig,
     rho_ref: float = _RHO_0_DEFAULT,
+    *,
+    T: jnp.ndarray | None = None,
+    S: jnp.ndarray | None = None,
+    p_cell: jnp.ndarray | None = None,
+    eos_fn=None,
 ) -> jnp.ndarray:
     """Visbeck (1997) adaptive GM coefficient.
 
@@ -155,6 +164,8 @@ def compute_visbeck_kappa_gm(
     """
     sigma_bar, L, wet_col, _int_N_dz, _sigma_local = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg, rho_ref,
+        n2_mode=getattr(cfg, "n2_mode", "insitu"),
+        T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
     )
     # Apply the wet-column mask AFTER clipping — otherwise dry columns
     # get lifted to ``kappa_min`` rather than 0 (Codex review caught
@@ -173,6 +184,12 @@ def _eady_growth_and_length(
     f_coriolis: jnp.ndarray,
     cfg,
     rho_ref: float = _RHO_0_DEFAULT,
+    *,
+    n2_mode: str = "insitu",
+    T: jnp.ndarray | None = None,
+    S: jnp.ndarray | None = None,
+    p_cell: jnp.ndarray | None = None,
+    eos_fn=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Depth-averaged Eady growth rate ``sigma_bar = <N|S|>_z`` and mixing length
     ``L`` (first-baroclinic Rossby radius, or ``cfg.L_fixed``), the wet-column mask,
@@ -182,6 +199,22 @@ def _eady_growth_and_length(
     ``"rhines"`` eke_len — the deformation radius ``c1=int_N_dz/π``) so the
     N²/slope/length numerics live in ONE place. ``cfg`` is a VisbeckConfig (uses
     ``L_min``, ``L_max``, ``f_min``, ``use_rossby_radius``, ``L_fixed``).
+
+    ``n2_mode`` selects the static-stability N²:
+
+    - ``"insitu"`` (default, BIT-IDENTICAL legacy): N² from the in-situ density
+      gradient (:func:`compute_buoyancy_frequency`). The extra ``T/S/p_cell/eos_fn``
+      kwargs are ignored — the in-situ branch never touches them, so passing the
+      defaults (None) is byte-identical to the pre-change code.
+    - ``"adiabatic"``: N² by adiabatic parcel displacement to the upper cell's
+      pressure (:func:`compute_buoyancy_frequency_adiabatic`; Veros EKE chain).
+      Requires ``T``, ``S``, ``p_cell`` (cell-centre hydrostatic pressure [Pa]) and
+      ``eos_fn`` to displace parcels through the EOS; raises if any is missing.
+
+    The adiabatic N² is SIGNED (not clipped), but the downstream ``N = sqrt(max(N²,
+    1e-30))`` floors it ≥ 0 exactly as the in-situ path does — statically unstable
+    interfaces contribute N ≈ 0 (no Eady growth, tiny buoyancy integral), which is
+    the physically correct Eady/Rossby behaviour (no growth on an unstable column).
 
     Returns ``(sigma_bar, L, wet_col, int_N_dz, sigma)`` — ``sigma`` is the LOCAL
     Eady growth ``N|S|`` at interfaces (n_lat, n_lon, nlev-1), used by the 3-D EKE
@@ -193,9 +226,26 @@ def _eady_growth_and_length(
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
 
     # Local growth rate sigma_Eady ~ N * |S| at each interior interface.
-    N2 = compute_buoyancy_frequency(
-        rho, z_coord.dz_ref, jacobian, rho_ref=rho_ref, g=constants.g,
-    )
+    if n2_mode == "insitu":
+        N2 = compute_buoyancy_frequency(
+            rho, z_coord.dz_ref, jacobian, rho_ref=rho_ref, g=constants.g,
+        )
+    elif n2_mode == "adiabatic":
+        if T is None or S is None or p_cell is None or eos_fn is None:
+            raise ValueError(
+                "_eady_growth_and_length: n2_mode='adiabatic' requires T, S, "
+                "p_cell (cell-centre pressure [Pa]) and eos_fn to displace "
+                "parcels through the EOS; one or more was None."
+            )
+        N2 = compute_buoyancy_frequency_adiabatic(
+            T, S, p_cell, z_coord.dz_ref, jacobian,
+            eos_fn=eos_fn, rho_ref=rho_ref, g=constants.g,
+        )
+    else:
+        raise ValueError(
+            "_eady_growth_and_length: n2_mode must be 'insitu' or 'adiabatic', "
+            f"got {n2_mode!r}."
+        )
     # Use a small positive floor on N² before sqrt, NOT a hard zero.
     # ``sqrt(0)`` has an infinite gradient in JAX; combined with the
     # ``maximum(N²,0)`` mask whose gradient is zero on the unstable
@@ -259,6 +309,10 @@ def compute_eke_kappa_gm(
     *,
     beta: jnp.ndarray | None = None,
     depth_resolved: bool = False,
+    T: jnp.ndarray | None = None,
+    S: jnp.ndarray | None = None,
+    p_cell: jnp.ndarray | None = None,
+    eos_fn=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Prognostic GM coefficient from the eddy-energy field ``E`` (Eden-Greatbatch).
 
@@ -286,8 +340,15 @@ def compute_eke_kappa_gm(
         eke_mixing_length, eke_rhines_length,
     )
 
+    # The Eady/Rossby N² chain for the EKE closure is governed by the EKE
+    # config's ``n2_mode`` (mirroring TKEConfig.n2_mode), NOT the Visbeck
+    # config's — the Visbeck diagnostic and the prognostic EKE may opt in
+    # independently. ``visbeck_cfg`` is still used for the LENGTH params
+    # (L_min/L_max/f_min/use_rossby_radius/L_fixed).
     sigma_bar, L_rossby, wet_col, int_N_dz, sigma_local = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref,
+        n2_mode=getattr(eke_cfg, "n2_mode", "insitu"),
+        T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
     )
     scheme = eke_cfg.mixing_length_scheme
     if depth_resolved:
