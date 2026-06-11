@@ -32,7 +32,7 @@ Process inventory (oracle subroutine → port module → status):
 | Bin grid + moments | parameter block, QC/QNC diags | `fast_sbm/grid.py` | **done (iter 1)** |
 | Collision kernels | `Kernals_KS` (l. 6238) — NOTE: only pressure-interpolates file-read `YW*` tables | computed kernels (reuse `sdm/kernels.py` Golovin/Hall/Long) + optional table load | Golovin **done (iter 2)**; Hall/efficiency todo |
 | Collision-coalescence (Bott flux) | `coll_xxx_lwf` + `courant_bott_KS` | `fast_sbm/collision.py` | **liquid self-collection done (iter 2)**; LWF variant (snow), xyx/xyz cross-species todo |
-| Diffusional growth (cond/evap dep/sub) | `JERRATE_KS`→`JERTIMESC_KS`→`JERSUPSAT_KS`→`JERDFUN_KS`/`JERNEWF_KS` | `fast_sbm/diffusional_growth.py` | **rates+relaxation integral done (iter 3)**; supersat integrator + remap todo |
+| Diffusional growth (cond/evap dep/sub) | `JERRATE_KS`→`JERTIMESC_KS`→`JERSUPSAT_KS`→`JERDFUN_KS`/`JERNEWF_KS` | `fast_sbm/diffusional_growth.py` + `supersaturation.py` | **rates+relaxation (iter 3) + analytic supersat ODE (iter 4) done**; growth remap (`JERDFUN`/`JERNEWF`) todo |
 | Drop nucleation (CCN activation) | `JERNUCL01_KS`, `WATER_NUCLEATION`, `LogNormal_modes_Aerosol` | `fast_sbm/nucleation.py` | todo |
 | Freezing/melting | `FREEZ`, melting block in FAST_SBM | `fast_sbm/ice_phase.py` | todo |
 | Breakup (collisional + spontaneous) | `coll_breakup_KS`, `Spont_Rain_BreakUp` | `fast_sbm/breakup.py` | todo |
@@ -134,3 +134,20 @@ EXCLUDED.
   ventilation limits (f(V=0)=1 exactly, cap, monotone); B>0 monotone in
   size; SFN linearity + explicit formula + physical window; T/p gradients
   finite.
+
+### Iter 4 (2026-06-11)
+- **`fast_sbm/supersaturation.py`** — oracle `JERSUPSAT_KS` warm branch:
+  exact linear-ODE step `dS/dt=−R·S+F` → (`S_new`, `S_int=∫S dt`, the
+  driver of bin growth `Δm=B·S_int`). Single `expm1` formulation replaces
+  the oracle's |R·dt|≶1e-6 branch pair (their Taylor EXPM1 = workaround for
+  Fortran exp precision; `jnp.expm1` is that limit exactly) — analytically
+  identical, cancellation-free, smooth gradients incl. R=0.
+  `supersat_relaxation_rate` = oracle `RW=(OPER2+B5L·AL1)·DOPL·SFN` with
+  L_v/R_v and L_v/c_pd derived from constants (oracle hardcodes 5.42e3/2500
+  roundings — ≤0.5% documented deviation). Ships contract.
+- Validation (7 tests): verbatim oracle large-x branch 1e-13; verbatim
+  small-x Taylor branch (tolerance 1e-8 = the ORACLE's own catastrophic
+  cancellation noise, port is cancellation-free); ballistic R=0 branch
+  exact; equilibrium F/R + pure decay S_int→S0/R; independent RK2 ODE
+  solve 1e-7; RW vs oracle rounded constants (7e-3) and vs derived
+  constants (1e-14); grads finite across R=0/1e-13/1e-6/2 incl. batched.
