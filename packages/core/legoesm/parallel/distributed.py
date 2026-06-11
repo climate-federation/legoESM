@@ -472,6 +472,26 @@ def set_active_layout(layout) -> None:
     _active_layout = layout
 
 
+def reset_distributed_topology() -> None:
+    """Disarm the MPI halo backend and forget the active topology/layout.
+
+    For test isolation and multi-run drivers: an armed backend leaks
+    into EVERYTHING padded afterwards in the same process — a later
+    test's 'serial reference' silently dispatches its pads through the
+    leftover band layout (merge gate 8460566: a deterministic 1e-5
+    step-parity 'drift' that was really a band-MPI-padded serial
+    reference).  Mirrors the documented contract that callers of
+    ``initialize_distributed_latlon`` deactivate with
+    ``set_halo_backend('local')`` once a run finishes — this helper
+    also clears the module topology so the next init starts fresh.
+    """
+    global _active_topology, _active_layout
+    _active_topology = None
+    _active_layout = None
+    from legoesm.grids.halo import set_halo_backend
+    set_halo_backend("local")
+
+
 # =========================================================================
 # Rank-local API (new — no zero-masked global arrays)
 # =========================================================================
