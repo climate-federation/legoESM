@@ -93,6 +93,20 @@ def _get_microphysics_fn(config: MicrophysicsConfig):
         raise ValueError(f"Unknown microphysics scheme: {config.scheme!r}")
 
 
+def get_microphysics_fn(config: MicrophysicsConfig):
+    """Public scheme dispatch: ``config.scheme`` → ``(scheme_name, micro_fn,
+    scheme_config)``. The swappable per-scheme tendency interface — used by the
+    grid adapters here AND external dycores (e.g. the spectral plane LES) so no
+    caller imports the private ``_get_microphysics_fn``."""
+    return _get_microphysics_fn(config)
+
+
+def min_tracer_slots(scheme_name: str) -> int:
+    """Public lookup of the minimum tracer-slot count a scheme writes (standard
+    slot layout, see ``_PLANE_MIN_TRACER_SLOTS``)."""
+    return _PLANE_MIN_TRACER_SLOTS[scheme_name]
+
+
 from legoesm.atmosphere.physics._shared import (
     compute_layer_dz as _compute_heights_from_sigma,
     compute_rho as _compute_rho,

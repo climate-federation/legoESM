@@ -54,11 +54,20 @@ def build(args, dtype):
         smagorinsky_dynamic=args.dynamic, nu_floor=args.nu_floor,
         sgs_model=args.sgs_model, time_scheme=args.time_scheme)
     g = sl.make_grid(cfg, dtype=dtype)
-    # Log-law mean IC (shear from t=0) + divergence-free small perturbations.
     z = g.z_c
-    u_tar = args.ustar / _KAPPA * jnp.log(jnp.clip(z, args.z0, None) / args.z0)
     key = jax.random.PRNGKey(0)
-    amp = args.ic_amp * args.ustar / _KAPPA   # IC perturbation (fraction of bulk)
+    if args.ekman:
+        # Neutral ROTATING Ekman layer: uniform geostrophic mean wind (Ug, 0)
+        # spun up under Coriolis f_cor (sl.rhs adds f·(u-u_geo)). The turbulent
+        # Ekman spiral + cross-isobar veering + ~0.3·u*/f depth emerge from that
+        # balance. Reference: laminar Ekman spiral + Coleman (1990) / Andren
+        # (1994) neutral truly-rotating ABL-LES intercomparison.
+        u_tar = jnp.full_like(z, args.Ug)
+        amp = args.ic_amp * args.Ug                # IC perturbation (fraction of Ug)
+    else:
+        # Log-law mean IC (shear from t=0) + divergence-free small perturbations.
+        u_tar = args.ustar / _KAPPA * jnp.log(jnp.clip(z, args.z0, None) / args.z0)
+        amp = args.ic_amp * args.ustar / _KAPPA   # IC perturbation (fraction of bulk)
     u = jnp.broadcast_to(u_tar, (args.ny, args.nx, args.nz)).astype(dtype) + (
         amp * jax.random.normal(key, (args.ny, args.nx, args.nz), dtype=dtype))
     v = amp * jax.random.normal(jax.random.PRNGKey(1),
@@ -70,7 +79,9 @@ def build(args, dtype):
     u, v, w = sl.project(u, v, w, dt=args.dt, g=g)          # divergence-free IC
     st = sl.SpectralLESState(u=u, v=v, w=w, rhs_u_prev=jnp.zeros_like(u),
                              rhs_v_prev=jnp.zeros_like(v), rhs_w_prev=jnp.zeros_like(w))
-    force = (args.ustar ** 2 / args.Lz, 0.0)               # constant PG body force
+    # Ekman: geostrophic balance (Coriolis vs PG) drives the wind, no body force.
+    # Neutral channel: constant PG body force ⇒ target u_*.
+    force = (0.0, 0.0) if args.ekman else (args.ustar ** 2 / args.Lz, 0.0)
     return g, st, force
 
 
@@ -100,6 +111,13 @@ def main():
     p.add_argument("--hours", type=float, default=1.5)
     p.add_argument("--f32", action="store_true")
     p.add_argument("--dynamic", action="store_true", help="Bou-Zeid LASD scale-dependent dynamic C_s(x,y,z)")
+    p.add_argument("--ekman", action="store_true",
+                   help="neutral ROTATING Ekman layer: geostrophic wind Ug + "
+                        "Coriolis fcor instead of the non-rotating PG channel")
+    p.add_argument("--Ug", type=float, default=10.0,
+                   help="geostrophic wind speed [m/s] (Ekman mode)")
+    p.add_argument("--fcor", type=float, default=1.0e-4,
+                   help="Coriolis parameter [1/s] (Ekman mode)")
     p.add_argument("--ic-amp", type=float, default=0.05, help="IC perturbation as fraction of bulk wind")
     p.add_argument("--nu-floor", type=float, default=0.0,
                    help="background eddy-viscosity floor [m²/s] — damps residual "
@@ -161,13 +179,21 @@ def main():
     # high), the force integrates the bulk error on a slow timescale tau_bulk, so
     # it tracks only the MEAN drag, not the fast fluctuations. fx is carried
     # across steps as an explicit state.
-    fx0 = jnp.asarray(args.ustar ** 2 / args.Lz, dtype=dtype)
+    fx0 = jnp.asarray(0.0 if args.ekman else args.ustar ** 2 / args.Lz, dtype=dtype)
     gain = 1.0 / args.tau_bulk
+
+    # Ekman: geostrophic forcing (u_geo, f_cor) replaces the channel's PG body
+    # force + bulk integral control (the wind is set by the f vs PG balance, not
+    # pinned to a log-law target). `args.ekman` is a static Python bool ⇒ the
+    # branch is resolved at trace time, no per-step host control flow.
+    u_geo = (args.Ug, 0.0) if args.ekman else (0.0, 0.0)
+    f_cor = args.fcor if args.ekman else 0.0
 
     @partial(jax.jit, static_argnames=("first",))
     def step(state, fx, dt, first=False):
-        state, us = sl.step(state, g=g, dt=dt, u_geo=(0.0, 0.0),
-                            f_cor=0.0, first=first, force=(fx, 0.0))
+        force = (0.0, 0.0) if args.ekman else (fx, 0.0)
+        state, us = sl.step(state, g=g, dt=dt, u_geo=u_geo,
+                            f_cor=f_cor, first=first, force=force)
         rc = (dt / tau_sp) * spc                            # sponge from the live dt
         rf = (dt / tau_sp) * spf
         u, v, w = state.u, state.v, state.w
@@ -177,7 +203,8 @@ def main():
         # The z-varying sponge damping does NOT preserve ∇·u=0; re-project so the
         # next step starts incompressible (codex physics review 2026-06-09).
         u, v, w = sl.project(u, v, w, dt=dt, g=g)
-        fx = fx + gain * (u_bulk_target - jnp.mean(u))      # slow integral control
+        if not args.ekman:
+            fx = fx + gain * (u_bulk_target - jnp.mean(u))  # slow integral control
         return state._replace(u=u, v=v, w=w), fx, us
     tau = args.Lz / args.ustar                              # eddy turnover [s]
     print(f"[spectral-LES neutral] {args.nx}x{args.ny}x{args.nz} "

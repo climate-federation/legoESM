@@ -102,12 +102,16 @@ def plot_snapshot(npz_path: Path, out_png: Path | None = None) -> Path:
         ("thp", thp, "coolwarm", r"$\theta'$  [K]",        True),
         ("spd", spd, "viridis", r"$|U|$  [m s$^{-1}$]",    False),
     ]
+    if "qc" in d.files:                         # moist run: cloud-water row
+        rows.append(("qc", np.asarray(d["qc"]) * 1.0e3, "Blues",
+                     r"$q_c$  [g kg$^{-1}$]", False))
     w_lim = _sym_limit(w)
     th_lim = _sym_limit(thp)
 
     # constrained_layout sizes the per-row colorbars with a real gap from the
     # panels (tight_layout jams them against the last column).
-    fig, axes = plt.subplots(3, nh, figsize=(2.7 * nh + 1.2, 7.8),
+    nrows = len(rows)
+    fig, axes = plt.subplots(nrows, nh, figsize=(2.7 * nh + 1.2, 2.6 * nrows),
                              squeeze=False, layout="constrained")
     for r, (key, fld, cmap, label, sym) in enumerate(rows):
         if sym:
@@ -115,6 +119,8 @@ def plot_snapshot(npz_path: Path, out_png: Path | None = None) -> Path:
             vmin, vmax = -lim, lim
         else:
             vmin, vmax = 0.0, float(np.nanpercentile(fld, 99.5))
+            if key == "qc":                 # mostly-zero cloud field: scale to
+                vmax = max(float(fld.max()), 1e-3)   # the max, not a percentile
         im = None
         for c in range(nh):
             ax = axes[r][c]
@@ -137,7 +143,7 @@ def plot_snapshot(npz_path: Path, out_png: Path | None = None) -> Path:
                 ax.set_ylabel("y  [km]")
             else:
                 ax.set_yticklabels([])
-            if r == 2:
+            if r == nrows - 1:
                 ax.set_xlabel("x  [km]")
             else:
                 ax.set_xticklabels([])
@@ -153,6 +159,72 @@ def plot_snapshot(npz_path: Path, out_png: Path | None = None) -> Path:
         rf"domain {Lx:.1f}$\times${Ly:.1f} km",
         fontsize=12)
     out_png = out_png or npz_path.with_suffix(".png")
+    fig.savefig(out_png)
+    plt.close(fig)
+    return out_png
+
+
+# --------------------------------------------------------------------------- #
+# 3D stacked-slice figure (the recorded height cross-sections as horizontal    #
+# planes in a perspective box — a genuine 3D view of the turbulent field).     #
+# --------------------------------------------------------------------------- #
+def plot_snapshot_3d(npz_path: Path, out_png: Path | None = None,
+                     field: str = "w") -> Path:
+    """Render the surface + four height cross-sections as semi-transparent
+    coloured planes stacked at their physical heights in a 3D axes. Uses only
+    the data already in ``snap_NNN.npz`` (no extra recording)."""
+    d = np.load(npz_path)
+    case = str(d["case"])
+    t_hours = float(d["t_hours"])
+    heights = np.asarray(d["heights"])              # (nh,) ascending [m]
+    Lx = float(d["Lx"]) / 1000.0
+    Ly = float(d["Ly"]) / 1000.0
+    nh = heights.shape[0]
+
+    if field == "w":
+        fld = np.asarray(d["w"]); cmap = plt.get_cmap("RdBu_r")
+        lim = _sym_limit(fld); norm = plt.Normalize(-lim, lim)
+        clabel = r"$w$  [m s$^{-1}$]"
+    else:                                            # θ anomaly per height
+        th = np.asarray(d["theta"])
+        fld = th - th.mean(axis=(1, 2), keepdims=True)
+        cmap = plt.get_cmap("coolwarm")
+        lim = _sym_limit(fld); norm = plt.Normalize(-lim, lim)
+        clabel = r"$\theta'$  [K]"
+
+    ny, nx = fld[0].shape
+    xs = np.linspace(0.0, Lx, nx)
+    ys = np.linspace(0.0, Ly, ny)
+    X, Y = np.meshgrid(xs, ys)
+
+    fig = plt.figure(figsize=(8.5, 7.5))
+    ax = fig.add_subplot(111, projection="3d", computed_zorder=False)
+    for k in range(nh):
+        Z = np.full_like(X, float(heights[k]))
+        fc = cmap(norm(fld[k]))
+        fc[..., 3] = 0.78 if k < nh - 1 else 0.92    # lower planes more opaque
+        ax.plot_surface(X, Y, Z, facecolors=fc, rstride=1, cstride=1,
+                        linewidth=0, antialiased=False, shade=False,
+                        rasterized=True)
+        ax.text(Lx * 1.02, 0.0, float(heights[k]), f"{heights[k]:.0f} m",
+                fontsize=7, color="0.25")
+
+    ax.set_xlabel("x  [km]", labelpad=8)
+    ax.set_ylabel("y  [km]", labelpad=8)
+    ax.set_zlabel("z  [m]", labelpad=8)
+    ax.set_xlim(0, Lx); ax.set_ylim(0, Ly)
+    ax.set_zlim(0, float(heights[-1]) * 1.05)
+    ax.set_box_aspect((1.0, 1.0, 0.85))
+    ax.view_init(elev=22, azim=-58)
+    ax.xaxis.pane.set_alpha(0.04); ax.yaxis.pane.set_alpha(0.04)
+    ax.zaxis.pane.set_alpha(0.04)
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.6, aspect=22, pad=0.10)
+    cbar.set_label(clabel)
+    ax.set_title(f"{_CASE_TITLE.get(case, case)} — 3D cross-sections, "
+                 f"t = {t_hours:.2f} h", fontsize=12)
+    out_png = out_png or npz_path.with_name(npz_path.stem + "_3d.png")
     fig.savefig(out_png)
     plt.close(fig)
     return out_png
@@ -243,11 +315,14 @@ def main() -> int:
         case = str(np.load(prof_files[0])["case"]) if prof_files else out_dir.name
         for p in snap_files:
             png = plot_snapshot(p)
-            print(f"  wrote {png}")
+            png3d = plot_snapshot_3d(p)
+            print(f"  wrote {png}  {png3d}")
         if snap_files:
             hero = out_dir / f"les_{case}_snapshot_final.png"
             plot_snapshot(snap_files[-1], hero)
-            print(f"  wrote {hero}")
+            hero3d = out_dir / f"les_{case}_3d_final.png"
+            plot_snapshot_3d(snap_files[-1], hero3d)
+            print(f"  wrote {hero}  {hero3d}")
         if prof_files:
             evo = out_dir / f"les_{case}_profile_evolution.png"
             plot_profile_evolution(prof_files, evo)
