@@ -297,14 +297,22 @@ def fast_sbm_microphysics(
         f1_liq = jnp.where(supercooled, f_from_g(g_liq_r, masses), f1_liq)
         rimed = (liq_before_rime - mass_density(f1_liq, masses)) / rho_c
         dT_rime = (constants.L_f / constants.c_pd) * rimed
-        # ICE-ICE AGGREGATION (ice self-collection → snow): the Bott
-        # self-collection operator on the ice spectrum, with a reduced
-        # ice-ice collection efficiency. Mass-conserving, no phase change
-        # (ice→ice), so no latent heat and the closure is unaffected.
+        # ICE-ICE AGGREGATION (ice self-collection → snow): the SAME Bott
+        # self-collection operator and Courant geometry as liquid
+        # coalescence, applied to the ice spectrum (crystal-crystal sticking
+        # is mathematically self-collection). The collision KERNEL is an
+        # APPROXIMATION — the scaled liquid kernel (`ck·efficiency`), not an
+        # ice-specific kernel; a true ice kernel (fall speeds, branched-
+        # crystal cross-sections, temperature-dependent sticking) lands with
+        # the multi-ice-habit iteration (see spec). Gated on T < 0 °C like
+        # riming: warm ice is being melted away (J_W_MELT), not aggregating.
+        # Mass-conserving (ice→ice), no phase change → no latent heat, the
+        # closure is unaffected.
         ck_ice = ck * config.ice_aggregation_efficiency
-        f_ice_final = f_from_g(
+        f_ice_agg = f_from_g(
             bott_coalescence(g_from_f(f_ice_rimed, masses), ck_ice, masses,
                              tables), masses)
+        f_ice_final = jnp.where(supercooled, f_ice_agg, f_ice_rimed)
         # Net ice change carried to q_i (melt consumes, freeze + rime
         # produce).
         dq_i_dt_c = (mass_density(f_ice_final, masses) / rho_c - qi_c) / dt

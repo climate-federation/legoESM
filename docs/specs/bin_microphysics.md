@@ -157,10 +157,15 @@ test before the body. Helpers (`grid.py`, `config.py`) in
 
 ### Iter 15 (2026-06-11) — ice aggregation + multi-step conservation
 - **Ice-ice aggregation** (snow formation): it is ice *self*-collection,
-  so it REUSES `bott_coalescence` on the ice spectrum with a reduced
-  `ice_aggregation_efficiency` (config, ~0.1 vs liquid). Mass-conserving,
-  no phase change → no latent heat, closure unchanged. Wired in column
-  after riming (all T).
+  so it REUSES `bott_coalescence` + the self-collection Courant geometry on
+  the ice spectrum (crystal-crystal sticking IS mathematically self-
+  collection). The collision KERNEL is an explicit APPROXIMATION — the
+  scaled liquid kernel `ck·ice_aggregation_efficiency` (~0.1), NOT an
+  ice-specific kernel; a true ice kernel (fall speeds, branched-crystal
+  cross-sections, T-dependent sticking) lands with the multi-ice-habit
+  iteration. Gated on `T<0 °C` (codex iter-15: warm ice is melting away,
+  not aggregating). Mass-conserving, no phase change → no latent heat,
+  closure unchanged.
 - **Multi-step trajectory conservation test**: full scheme (warm + ice +
   riming + aggregation) run 30 steps feeding tendencies back; total water
   (vapor+cloud+rain+ice) minus accumulated surface precip conserved to

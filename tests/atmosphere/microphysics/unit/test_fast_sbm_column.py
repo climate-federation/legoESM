@@ -393,6 +393,35 @@ def test_ice_aggregation_conserves_ice_mass():
     np.testing.assert_allclose(np.asarray(out.dq_v_dt), 0.0, atol=1e-12)
 
 
+def test_ice_aggregation_redistributes_spectrum():
+    # Non-vacuous (codex iter-15): bulk-mass invariance alone could pass if
+    # aggregation did nothing. Check at the KERNEL level that aggregation
+    # actually moves ice mass to larger bins (number decreases, mass
+    # conserved) — the snow-formation signature.
+    from legoesm.atmosphere.physics.microphysics.fast_sbm import (
+        bott_coalescence, collision_ck_matrix, discretize_exponential,
+        g_from_f, mass_density_from_g, mass_doubling_grid, number_density_from_g,
+        radius_from_mass)
+    from legoesm.atmosphere.physics.microphysics.sdm.kernels import (
+        golovin_kernel)
+    m = mass_doubling_grid()
+    r = radius_from_mass(m)
+    ck = collision_ck_matrix(golovin_kernel(r[:, None], r[None, :], 1.5e3)
+                             * 0.1, 5.0)
+    from legoesm.atmosphere.physics.microphysics.fast_sbm import (
+        precompute_collision_tables)
+    tables = precompute_collision_tables(m)
+    f_ice = discretize_exponential(m, 1.0e6, 1.0e-9)   # small crystals
+    g = g_from_f(f_ice, m)
+    N0 = float(number_density_from_g(g, m))
+    M0 = float(mass_density_from_g(g))
+    g1 = bott_coalescence(g, ck, m, tables)
+    N1 = float(number_density_from_g(g1, m))
+    M1 = float(mass_density_from_g(g1))
+    assert N1 < N0                      # crystals stuck together → fewer
+    assert abs(M1 - M0) / M0 < 1e-9     # ice mass conserved
+
+
 def test_multistep_total_water_conserved():
     # Run the full scheme for many steps feeding tendencies back, and
     # verify total water (vapor + cloud + rain + ice) minus accumulated
