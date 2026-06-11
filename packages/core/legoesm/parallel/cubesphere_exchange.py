@@ -1134,6 +1134,65 @@ def _get_tiled_tables(kt: int) -> _TiledTables:
     return _TILED_TABLE_CACHE[kt]
 
 
+def _tiled_corner_modes(kt: int) -> np.ndarray:
+    """Static per-(device, corner) selection for the P3 corner fill.
+
+    Corner order: (lo,lo), (lo,hi), (hi,lo), (hi,hi) in padded-block
+    (i, j).  Modes — derived from where the corner lands in the SERIAL
+    padded face:
+      0 = avg        true cube vertex (serial averages too)
+      1 = diagonal   interior x interior cut: serial holds the plain
+                     diagonal interior cell -> diagonal-tile ppermute
+      2 = j-sliver   corner row is a W/E halo row, cut along j: serial
+                     holds the strip-neighbour's interp'd W/E strip end
+      3 = i-sliver   corner col is a S/N halo col, cut along i: same
+                     with the S/N strip
+    """
+    n_dev = 6 * kt * kt
+    modes = np.zeros((n_dev, 4), dtype=np.int32)
+    for f in range(6):
+        for ti in range(kt):
+            for tj in range(kt):
+                t = _tile_id(f, ti, tj, kt)
+                for c, (ci_lo, cj_lo) in enumerate(
+                        ((True, True), (True, False),
+                         (False, True), (False, False))):
+                    border_i = (ti == 0) if ci_lo else (ti == kt - 1)
+                    border_j = (tj == 0) if cj_lo else (tj == kt - 1)
+                    if border_i and border_j:
+                        modes[t, c] = 0
+                    elif not border_i and not border_j:
+                        modes[t, c] = 1
+                    elif border_i:
+                        modes[t, c] = 2
+                    else:
+                        modes[t, c] = 3
+    return modes
+
+
+def _tiled_diag_perms(kt: int):
+    """Four intra-face diagonal partial permutations (towards the
+    (lo,lo)/(lo,hi)/(hi,lo)/(hi,hi) corners of the RECEIVER): receiver
+    corner (lo,lo) needs the (ti-1, tj-1) tile's (hi,hi) interior cell,
+    i.e. that tile SENDS towards (+i, +j)."""
+    to_ll, to_lh, to_hl, to_hh = [], [], [], []
+    for f in range(6):
+        for ti in range(kt):
+            for tj in range(kt):
+                t = _tile_id(f, ti, tj, kt)
+                if ti > 0 and tj > 0:
+                    to_ll.append((_tile_id(f, ti - 1, tj - 1, kt), t))
+                if ti > 0 and tj < kt - 1:
+                    to_lh.append((_tile_id(f, ti - 1, tj + 1, kt), t))
+                if ti < kt - 1 and tj > 0:
+                    to_hl.append((_tile_id(f, ti + 1, tj - 1, kt), t))
+                if ti < kt - 1 and tj < kt - 1:
+                    to_hh.append((_tile_id(f, ti + 1, tj + 1, kt), t))
+    # Receiver corner (lo,lo) gets the diagonal tile's (hi,hi) cell:
+    # sender (ti-1,tj-1) -> receiver t is exactly the to_ll list.
+    return tuple(map(tuple, (to_ll, to_lh, to_hl, to_hh)))
+
+
 def _tiled_guard_perms(kt: int):
     """Static perms for the guard-sliver rounds along each tile axis.
 
@@ -1227,6 +1286,8 @@ def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
     tables = _get_tiled_tables(kt)
     g = 2  # guard depth: |offsets| <~ 0.5 + quadratic stencil reach
     j_fwd, j_bwd, i_fwd, i_bwd = _tiled_guard_perms(kt)
+    diag_perms = _tiled_diag_perms(kt)
+    corner_mode_j = jnp.asarray(_tiled_corner_modes(kt))
     AXES = ("face", "tile_i", "tile_j")
 
     P = jax.sharding.PartitionSpec
@@ -1320,6 +1381,45 @@ def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
             pad_width = pad_width + ((0, 0),)
         padded = jnp.pad(tile, pad_width)
         padded = _fill_halo_and_corners(padded, halo_list, n_loc)
+
+        # ---- P3: serial-exact tile corners ----
+        # The avg fill above is only the SERIAL value at true cube
+        # vertices.  At an interior x interior cut the serial padded
+        # face holds the plain DIAGONAL interior cell; where the
+        # corner row/col is a face-halo row cut along the strip it
+        # holds the strip-NEIGHBOUR's (interp'd) strip end.  Static
+        # per-(device, corner) modes select among the four candidates;
+        # ppermute non-targets receive zeros, masked by the mode.
+        final = jnp.stack(halo_list, axis=0)        # (4, n_loc[, C])
+        diag_send = (tile[-1, -1], tile[-1, 0], tile[0, -1], tile[0, 0])
+        diag_recv = [
+            jax.lax.ppermute(diag_send[c], AXES, diag_perms[c])
+            for c in range(4)
+        ]
+        sl_jf = jax.lax.ppermute(
+            jnp.stack([final[0, -1], final[1, -1]]), AXES, j_fwd)
+        sl_jb = jax.lax.ppermute(
+            jnp.stack([final[0, 0], final[1, 0]]), AXES, j_bwd)
+        sl_if = jax.lax.ppermute(
+            jnp.stack([final[2, -1], final[3, -1]]), AXES, i_fwd)
+        sl_ib = jax.lax.ppermute(
+            jnp.stack([final[2, 0], final[3, 0]]), AXES, i_bwd)
+        # Per corner (lo,lo),(lo,hi),(hi,lo),(hi,hi): the W/E-row
+        # sliver candidate and the S/N-col sliver candidate.
+        sliv_we = (sl_jf[0], sl_jb[0], sl_jf[1], sl_jb[1])
+        sliv_sn = (sl_if[0], sl_if[1], sl_ib[0], sl_ib[1])
+        corner_ij = ((0, 0), (0, -1), (-1, 0), (-1, -1))
+        my_mode = corner_mode_j[my_id]
+        for c, (ci, cj) in enumerate(corner_ij):
+            val = jnp.where(
+                my_mode[c] == 1, diag_recv[c],
+                jnp.where(
+                    my_mode[c] == 2, sliv_we[c],
+                    jnp.where(my_mode[c] == 3, sliv_sn[c],
+                              padded[ci, cj]),
+                ),
+            )
+            padded = padded.at[ci, cj].set(val)
         return padded[None]
 
     return _exchange
