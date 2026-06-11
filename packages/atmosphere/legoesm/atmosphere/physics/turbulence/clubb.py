@@ -43,6 +43,8 @@ from legoesm.atmosphere.physics.turbulence.clubb_core import (
     CLUBBMomentState,
     advance_clubb_core,
     init_clubb_moments,
+    pack_clubb_moments,
+    unpack_clubb_moments,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_diagnostic import (
     diagnose_cloud_and_buoyancy,
@@ -350,6 +352,50 @@ def clubb_step(
     dq_v_dt = (q_new - q_v) / dt
     diags = dict(diags, ustar=ustar, shflx=shflx, lhflx=lhflx)
     return du_dt, dv_dt, dT_dt, dq_v_dt, new_state, diags
+
+
+def clubb_turbulence_prognostic(
+    u: jax.Array,
+    v: jax.Array,
+    T: jax.Array,
+    q_v: jax.Array,
+    clubb_moments: jax.Array,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    z_full: jax.Array,
+    z_half: jax.Array,
+    T_sfc: jax.Array,
+    q_sfc: jax.Array,
+    rho: jax.Array,
+    dt: float,
+    config: CLUBBConfig,
+) -> tuple[TurbulenceOutput, jax.Array]:
+    """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
+
+    Drop-in for :func:`clubb_turbulence` with the SAME carry-slot interface — the
+    carried state is the packed :class:`CLUBBMomentState` ``(ncol, 15, nlev+1)``
+    (``PhysicsState.clubb_moments``) instead of the single ``wp2`` slot. Unpacks
+    it, advances the full higher-order moment closure one step
+    (:func:`clubb_step` → :func:`clubb_core.advance_clubb_core`), and repacks the
+    new moments as the carry. No host numerical diffusion is added here: in a
+    coupled run the dynamical core supplies it (the bare-SCM stand-in lives in
+    :func:`integrate_clubb_column`).
+
+    Returns ``(TurbulenceOutput, clubb_moments_new)``; the second element flows
+    back into ``PhysicsState.clubb_moments`` via the carry machinery.
+    """
+    moments = unpack_clubb_moments(clubb_moments)
+    du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
+        u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
+        T_sfc, q_sfc, rho, dt, config)
+    # Diffusivities for diagnostics (ascending zt → top-down (ncol, nlev)).
+    Kh_full = flip_vertical(diags["Kh_zt"])
+    h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
+    output = TurbulenceOutput(
+        du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dq_v_dt=dq_v_dt,
+        Km=Kh_full, Kh=Kh_full, shflx=diags["shflx"], lhflx=diags["lhflx"],
+        ustar=diags["ustar"], h_pbl=h_pbl)
+    return output, pack_clubb_moments(new_moments)
 
 
 def integrate_clubb_column(

@@ -18,6 +18,7 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     clubb_step,
     clubb_turbulence,
+    clubb_turbulence_prognostic,
     integrate_clubb_column,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
@@ -337,6 +338,111 @@ def test_init_clubb_moments_shapes_and_floors():
     assert m.rtm.shape == (3, 20) and m.wp2.shape == (3, 21) and m.wp3.shape == (3, 20)
     assert np.all(np.asarray(m.wp2) == CLUBBConfig().tke_min)
     assert np.allclose(np.asarray(m.rtp2), CLUBBConfig().rt_tol ** 2)
+
+
+def test_prognostic_dispatch_selects_prognostic_fn():
+    """scheme='clubb' with prognostic=True dispatches clubb_turbulence_prognostic
+    and routes its carry to the PhysicsState.clubb_moments slot."""
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        get_turbulence_fn,
+        turbulence_carry_field,
+    )
+    name, fn, cfg = get_turbulence_fn(
+        TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True)))
+    assert name == "clubb" and fn is clubb_turbulence_prognostic
+    assert turbulence_carry_field(name, cfg) == "clubb_moments"
+    # default (diagnostic) clubb still routes to tke + clubb_turbulence.
+    name2, fn2, cfg2 = get_turbulence_fn(TurbulenceConfig(scheme="clubb"))
+    assert fn2 is clubb_turbulence and turbulence_carry_field(name2, cfg2) == "tke"
+
+
+def test_clubb_turbulence_prognostic_carry_roundtrip_multistep():
+    """The prognostic scheme entry carries the packed CLUBBMomentState
+    (ncol,15,nlev+1) in/out of the tke-slot interface and runs stably multi-step
+    in a moist column (the model carry path; no host diffusion needed here)."""
+    from legoesm.atmosphere.physics.turbulence.clubb_core import (
+        init_clubb_moments,
+        pack_clubb_moments,
+    )
+    from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
+    kw = _column(ncol=3, nlev=24, dtheta_dz=4e-3)   # moist, stably stratified
+    kw.pop("tke")
+    kw["z_full"] = 0.5 * (kw["z_half"][:, :-1] + kw["z_half"][:, 1:])
+    ncol, nlev = kw["T"].shape
+    cfg = CLUBBConfig(prognostic=True)
+    carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
+    assert carry.shape == (ncol, 15, nlev + 1)
+    u, v, T, q = kw["u"], kw["v"], kw["T"], kw["q_v"]
+    dt = 150.0
+    for _ in range(10):
+        out, carry = clubb_turbulence_prognostic(
+            u, v, T, q, carry, kw["p_full"], kw["p_half"], kw["z_full"],
+            kw["z_half"], kw["T_sfc"], kw["q_sfc"], kw["rho"], dt, cfg)
+        assert isinstance(out, TurbulenceOutput)
+        assert carry.shape == (ncol, 15, nlev + 1)
+        u = u + dt * out.du_dt
+        v = v + dt * out.dv_dt
+        T = T + dt * out.dT_dt
+        q = jnp.maximum(q + dt * out.dq_v_dt, 0.0)
+    assert np.all(np.isfinite(np.asarray(carry)))
+    assert np.all(np.isfinite(np.asarray(T))) and np.all(np.asarray(T) > 100.0)
+    # wp2 (slot 4) evolved away from the init floor (the moments are prognostic).
+    wp2_final = np.asarray(carry)[:, 4, :]
+    assert float(np.max(wp2_final)) > CLUBBConfig().tke_min
+
+
+def test_prognostic_clubb_blocked_on_non_persisting_drivers():
+    """Prognostic CLUBB needs a driver that persists PhysicsState; the
+    nonhydrostatic CD-grid + spectral PE factories drop it, so they fail fast
+    (like MYNN-2.5). Hydrostatic + mpas persist → allowed."""
+    from legoesm.atmosphere.physics.turbulence.integration import make_turbulence_physics
+    tc = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True))
+    for mt in ("nonhydrostatic", "spectral_pe"):
+        with pytest.raises(NotImplementedError, match="prognostic CLUBB"):
+            make_turbulence_physics(tc, mt, 300.0)
+    # hydrostatic builds fine.
+    assert make_turbulence_physics(tc, "hydrostatic", 300.0) is not None
+    # diagnostic clubb is allowed on all (stateless wp2 in tke).
+    tc_diag = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig())
+    assert make_turbulence_physics(tc_diag, "nonhydrostatic", 300.0) is not None
+
+
+def test_read_turb_carry_fails_fast_on_wrong_clubb_shape():
+    """_read_turb_carry raises (no silent resize/retrace) when phys_state carries
+    a wrong-shaped clubb_moments slot (PhysicsState not init'd for prognostic)."""
+    from types import SimpleNamespace
+    from legoesm.atmosphere.physics.turbulence.integration import _read_turb_carry
+    bad = SimpleNamespace(clubb_moments=jnp.zeros((4, 1, 1)))   # minimal placeholder
+    with pytest.raises(ValueError, match="prognostic CLUBB expects"):
+        _read_turb_carry(bad, "clubb_moments", 4, 24, CLUBBConfig(prognostic=True),
+                         jnp.float64)
+    # phys_state=None seeds fresh at the correct shape (one-off call).
+    seeded = _read_turb_carry(None, "clubb_moments", 4, 24,
+                              CLUBBConfig(prognostic=True), jnp.float64)
+    assert seeded.shape == (4, 15, 25)
+
+
+def test_clubb_turbulence_prognostic_jit_and_grad():
+    from legoesm.atmosphere.physics.turbulence.clubb_core import (
+        init_clubb_moments,
+        pack_clubb_moments,
+    )
+    kw = _column(ncol=2, nlev=16, dtheta_dz=4e-3)
+    kw.pop("tke")
+    kw["z_full"] = 0.5 * (kw["z_half"][:, :-1] + kw["z_half"][:, 1:])
+    ncol, nlev = kw["T"].shape
+    cfg = CLUBBConfig(prognostic=True)
+    carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
+
+    def loss(T):
+        out, c = clubb_turbulence_prognostic(
+            kw["u"], kw["v"], T, kw["q_v"], carry, kw["p_full"], kw["p_half"],
+            kw["z_full"], kw["z_half"], kw["T_sfc"], kw["q_sfc"], kw["rho"], 150.0, cfg)
+        return jnp.sum(out.dT_dt ** 2) + jnp.sum(c ** 2)
+
+    assert jnp.isfinite(jax.jit(loss)(kw["T"]))
+    g = jax.grad(loss)(kw["T"])
+    assert g.shape == kw["T"].shape and jnp.all(jnp.isfinite(g))
 
 
 if __name__ == "__main__":
