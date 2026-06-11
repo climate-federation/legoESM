@@ -282,6 +282,14 @@ class CLUBBConfig(NamedTuple):
         ``N^2 = (g/T0) d(thlm)/dz`` (CLUBB ``T0``; CAM standard 300 K). A fixed
         reference (not a tunable closure coefficient), passed to
         ``calc_brunt_vaisala_freq_sqd``.
+    prognostic : bool
+        Select the FULL prognostic higher-order moment closure
+        (``advance_clubb_core`` via ``clubb_step``, carrying ``CLUBBMomentState``
+        in ``PhysicsState.clubb_moments``) instead of the default diagnostic
+        phase-1 path (parcel ``Lscale`` eddy diffusion + ADG1-PDF buoyancy). Opt-
+        in (default ``False``) so existing ``scheme="clubb"`` runs are unchanged.
+        Read only at setup/dispatch time (a static Python branch), never in
+        traced code, so it stays a valid plain pytree-leaf field.
     """
 
     flags: CLUBBFlags = CLUBBFlags()
@@ -294,6 +302,7 @@ class CLUBBConfig(NamedTuple):
     wp2_max: float = 1000.0
     tke_min: float = 1.0e-6
     T0: float = 300.0
+    prognostic: bool = False
 
 
 # ---------------------------------------------------------------------------

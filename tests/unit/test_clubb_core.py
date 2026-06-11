@@ -24,6 +24,9 @@ from legoesm.atmosphere.physics.turbulence.clubb_core import (  # noqa: E402
     advance_clubb_core,
     compute_clubb_diagnostics,
     compute_pdf_closure,
+    init_clubb_moments,
+    pack_clubb_moments,
+    unpack_clubb_moments,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
 
@@ -176,6 +179,27 @@ def _core_state_env(gr, ng, nzm, seed=7):
         fcor=jnp.full((ng,), 1e-4), ug=zt(1.0, 5.0), vg=zt(1.0),
         dt=300.0, gr=gr, config=CLUBBConfig())
     return state, forcing, env
+
+
+def test_pack_unpack_clubb_moments_roundtrip():
+    """pack/unpack is a lossless round-trip and the packed array has the
+    PhysicsState-carry shape (ncol, 15, nzm)."""
+    gr, ng, nzm = _gr()
+    nlev = nzm - 1
+    state = _core_state_env(gr, ng, nzm)[0]
+    arr = pack_clubb_moments(state)
+    assert arr.shape == (ng, 15, nzm)
+    back = unpack_clubb_moments(arr)
+    for name in CLUBBMomentState._fields:
+        np.testing.assert_array_equal(
+            np.asarray(getattr(back, name)), np.asarray(getattr(state, name)))
+    # zt-level fields keep nlev length; zm-level fields keep nzm.
+    assert back.rtm.shape == (ng, nlev) and back.wp2.shape == (ng, nzm)
+    assert back.wp3.shape == (ng, nlev)
+    # init_clubb_moments also round-trips.
+    m0 = init_clubb_moments(ng, nlev, CLUBBConfig())
+    back0 = unpack_clubb_moments(pack_clubb_moments(m0))
+    np.testing.assert_array_equal(np.asarray(back0.wp2), np.asarray(m0.wp2))
 
 
 def test_advance_clubb_core_conserves_thlm_rtm():

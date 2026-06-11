@@ -391,11 +391,53 @@ def init_clubb_moments(ncol: int, nlev: int, config, dtype=jnp.float64) -> CLUBB
         rtpthlp=zm0)
 
 
+# Field layout for packing CLUBBMomentState into a single (ncol, NFIELDS, nzm)
+# array carried in PhysicsState (like gwd_spectrum). zt-level fields (nlev) use
+# the first nlev slots of the nzm axis with the trailing slot zero-padded.
+N_MOMENT_FIELDS = len(CLUBBMomentState._fields)   # 15
+_ZT_FIELD_NAMES = frozenset(("rtm", "thlm", "um", "vm", "wp3"))  # rest are zm
+
+
+def pack_clubb_moments(state: CLUBBMomentState) -> jax.Array:
+    """Pack a :class:`CLUBBMomentState` into one ``(ncol, 15, nzm)`` array.
+
+    zm-level fields (``wp2``/variances/fluxes) fill the full ``nzm`` axis; zt-level
+    fields (``rtm``/``thlm``/``um``/``vm``/``wp3``, length ``nlev = nzm-1``) fill
+    ``[:, :nlev]`` with a zero in the trailing slot. Inverse of
+    :func:`unpack_clubb_moments`. Used to carry the moment state in
+    ``PhysicsState`` as a single regular array.
+    """
+    cols = []
+    for name in CLUBBMomentState._fields:
+        f = getattr(state, name)
+        if name in _ZT_FIELD_NAMES:                       # (ncol, nlev) -> (ncol, nzm)
+            f = jnp.concatenate([f, jnp.zeros_like(f[:, :1])], axis=1)
+        cols.append(f[:, None, :])                        # (ncol, 1, nzm)
+    return jnp.concatenate(cols, axis=1)                  # (ncol, 15, nzm)
+
+
+def unpack_clubb_moments(arr: jax.Array) -> CLUBBMomentState:
+    """Unpack a ``(ncol, 15, nzm)`` array into a :class:`CLUBBMomentState`.
+
+    Inverse of :func:`pack_clubb_moments`: zt-level fields are sliced back to
+    ``nlev = nzm-1`` (dropping the zero pad).
+    """
+    nlev = arr.shape[2] - 1
+    fields = {}
+    for i, name in enumerate(CLUBBMomentState._fields):
+        col = arr[:, i, :]
+        fields[name] = col[:, :nlev] if name in _ZT_FIELD_NAMES else col
+    return CLUBBMomentState(**fields)
+
+
 __all__ = [
     "CLUBBForcing",
     "CLUBBMomentState",
+    "N_MOMENT_FIELDS",
     "advance_clubb_core",
     "compute_clubb_diagnostics",
     "compute_pdf_closure",
     "init_clubb_moments",
+    "pack_clubb_moments",
+    "unpack_clubb_moments",
 ]
