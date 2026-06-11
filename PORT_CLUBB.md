@@ -14,7 +14,7 @@ review per substantial change.
 `make_turbulence_physics(...)`, producing a valid `TurbulenceOutput`, with
 passing unit+integration tests and an idealized-case sanity check.
 
-*(Compressed at iter 10/20/30/40; verbose per-iter logs dropped — see git
+*(Compressed at iter 10/20/30/40/60/70; verbose per-iter logs dropped — see git
 history. The reference facts + module table + status below are the live source
 of truth.)*
 
@@ -110,7 +110,7 @@ finite gradients in float32 + float64.
 
 ---
 
-## Status @ iter 60 — ✅ DONE (compressed; iter 11–59 detail in git history)
+## Status @ iter 70 — ✅ DONE (compressed; iter 11–69 detail in git history)
 
 **legoESM can be run AND tested with the prognostic `clubb.py` scheme.**
 `scheme="clubb"` + `CLUBBConfig(prognostic=True)` dispatches the full CAM-default-
@@ -144,116 +144,49 @@ sorting `Lscale` + full prognostic moment transport (clubb_lite has none).
 - codex-adversarially-reviewed at every substantial step (real bugs caught+fixed:
   CAM 3-C2 dissipation, surface-flux sign, variance-floor leak, sub-cycle moisture
   contract, dispatch persistence guards, retrace hazard).
-- **column-moisture conservation @ scheme entry (iter 61):** a no-surface-flux
-  (`q_sfc`=near-sfc `q_v` ⇒ `lhflx==0`) single prognostic step conserves the
-  mass-weighted (`ρ·dz`) column total to round-off (<1e-12 rel/step). Made
-  **non-vacuous** after codex caught that the rest/floor moment state gives
-  `dq_v_dt`~1e-11 (no `wprtp` flux ⇒ any scheme trivially "conserves"): the test
-  first spins up a real flux via `integrate_clubb_column` (dt=150,nsteps=40), then
-  asserts BOTH a nontrivial-transport floor (`max|dq·dt|`~1e-6 ≫ 1e-8) AND
-  conservation. Note: the bare scheme entry is single-step-stable only — feeding
-  its tendencies back without dycore/host diffusion NaNs by step 1 (the documented
-  dry-regime instability), so multi-step spin-up MUST use the diffusion-stabilized
-  driver.
-- **column-heat (θl) conservation @ scheme entry (iter 62):** the heat counterpart
-  — zero surface sensible-heat flux (`T_sfc`=near-sfc `T` ⇒ `shflx==0`, with
-  `lhflx==0` too) ⇒ mass-weighted column **θl** conserved to round-off, with the
-  same spin-up non-vacuity guard (`max|dθl·dt|`~3e-4 K). **Bridge fact codex
-  surfaced:** `clubb_step` maps the advanced mean back as `T_new = thlm·exner`
-  (`clubb.py:353`), so the scheme's reported `dT_dt/exner` is *exactly* the
-  prognostic **θl** (=`thlm`) tendency BY CONSTRUCTION — i.e. prognostic CLUBB
-  reports a θl-equivalent temperature and `q_v`=`rtm` (total water), NOT a
-  saturation-adjusted (T, q_v) split. So the conserved quantity is θl/rt (the
-  CLUBB prognostics), correct WITH cloud present (this spun-up column IS cloudy,
-  `rcm`~5e-3) — the first codex pass nearly let a test ship claiming the (false)
-  `θl=θ` no-cloud reason; corrected to state the bridge identity instead. Implies
-  follow-up: a host saturation-adjustment / cloud-liquid partition of the returned
-  tendencies is left to microphysics (consistent with `l_rcm_supersat_adj=.false.`).
-- **turbulence→microphysics coupling closes the water+energy budget (iter 63):**
-  resolved the iter-62 follow-up by VERIFYING the design assumption rather than
-  changing the bridge. Confirmed the legoESM moist-physics architecture is the
-  standard one — turbulence transports the moist-conserved θl/rt and DEFERS
-  condensation+latent heating to microphysics (`combined.make_physics` order
-  turbulence→microphysics, tendencies summed; `sundqvist` does the saturation
-  adjustment `f·max(q_v−q_sat,0)` with `dT=L_v·net_cond/c_pd`). So prognostic
-  CLUBB's θl/rt return is CORRECT (not a bug) for this pipeline; the inconsistency
-  with the simpler diagnostic/clubb_lite paths (which mix actual T/q_v) only shows
-  in cloudy columns and is bounded. New test
-  `test_prognostic_clubb_couples_to_microphysics_total_water_budget` runs the real
-  CLUBB→sundqvist sequence and asserts: real condensation fires (non-vacuous,
-  `max dq_c`~2e-5), the condensation is enthalpy-consistent (`c_pd·dT+L_v·dq_v`~1e-18),
-  and the **combined column water budget closes to the surface precip sink**
-  (`Σ mass·(dq_v|clubb+dq_v|μ+dq_c|μ+dq_r|μ)+precip ≈ 0`, rel<1e-12) with a
-  genuinely nonzero precip (~5e-3 kg/m²/s, autoconversion firing). codex-reviewed.
-- **column-momentum conservation → surface stress (iter 64):** third leg of the
-  conservation triad. `Σ mass·du/dt = τ_x` (surface stress is the only momentum
-  source/sink; top flux zero). Checks (1) the surface-stress SIGN (the iter-47
-  bug): `u_sfc>0 ⇒ τ_x<0` drag, column eastward momentum decreases; (2) interior
-  flux-form conservation of the **wind** advance — note u/v go through CAM's
-  `advance_windm_edsclrm` eddy-diffusion path (`l_predict_upwp_vpwp=F`), NOT the
-  `advance_xm_wpxp` the scalars use, so it needs its own check. The budget closes
-  to **O(Δt)** (not round-off like the scalars) because the surface stress is
-  applied semi-implicitly; verified via Richardson — cutting Δt 10× cuts the
-  residual ~10× (0.28%→0.028%), proving the interior is exact and the surface
-  term is the sole O(Δt) discrepancy (NOT a ρ-vs-ρ_ds weighting error, which
-  would be Δt-independent). codex-reviewed.
-- **moist-chain differentiability (iter 65):** `jax.grad` flows end-to-end through
-  the coupled prognostic-CLUBB → `sundqvist` chain, incl. the `max(q_v−q_sat,0)`
-  condensation kink (subgradient). The core legoESM autodiff requirement, for the
-  coupled moist path. Tested two ways so it can't pass with a dead condensation
-  path: an aggregate smoke check AND a **microphysics-only** objective
-  (`Σ precip²+Σ dT_μ²`) whose nonzero grad can only come through the kink, guarded
-  by a forward check that the column actually condenses (`max(dq_c)`, precip>0).
-  codex-reviewed (first pass flagged the aggregate-only grad could be satisfied by
-  the CLUBB term alone → added the microphysics-specific gradient + active-branch
-  guard).
-- **the defining 'fuller-than-clubb_lite' signature (iter 66):** prognostic CLUBB
-  develops buoyancy-driven vertical-velocity SKEWNESS (positive `wp3` in the upper
-  mixed layer / entrainment zone, ~+0.06–0.15 at 600–860 m) under surface heating
-  — the prognostic THIRD moment that drives non-local transport and that a
-  down-gradient eddy-diffusion scheme (`clubb_lite`, flux=−Kh·∂φ/∂z, no 3rd moment)
-  cannot represent at all. Test contrasts a heated column vs a near-neutral control
-  (verified `|shflx| < 5%` of convective): convective `wp2`≫control & upper-BL
-  `wp3`>0.05 aloft; control `wp3`≈0. codex-reviewed (flagged [med] surface-inclusive
-  mean could mask a near-surface spike → switched to an upper-BL (400–900 m, surface
-  excluded) statistic; [med] control not truly zero-flux → assert its diagnosed
-  `shflx` ≪ convective + reframe as 'near-neutral'; [med] "unlike clubb_lite" was
-  prose-only → now EXECUTES `clubb_lite_turbulence` on the same column and asserts
-  its `TurbulenceOutput` has no `wp3` field and carries only `wp2`, structurally
-  proving the down-gradient scheme cannot represent the third moment). Aside
-  surfaced: a cooled-surface 'stable' control is unusable — fixed cold `T_sfc`
-  over-cools the air and flips to convection.
 
-**Key fixed bug — float32 dtype promotion in `clubb_mixing_length.py` (iter 67):**
-the parcel buoyant-sorting Lscale (golden-locked vs CLUBB-JAX) carried hardcoded
-`jnp.float64(0.0)` scan/while carry inits + default-dtype (float64-under-x64)
-`jnp.zeros` pads / `jnp.full` `_ZLMIN` col / `set_Lscale_max` 1e5 cap. With a
-float32 column these promote to float64 and CRASH `lax.scan`'s carry-type check
-(float32 in / float64 out) — breaking the Apple-Silicon/GPU float32 path
-(CLAUDE.md cross-backend requirement). Fix: anchor `dt_f=thlm.dtype` in
-`compute_mixing_length`, cast `Lscale_max`, and make every scan/while carry init +
-padded concat use `dt_f`/`tke_0.dtype`/`zt.dtype`. Preserves float64 EXACTLY (8
-golden-parity mixing-length tests still pass; under float64 inputs the anchors are
-float64, identical to before). New regression test
-`test_prognostic_clubb_runs_in_float32_no_dtype_promotion` (asserts every output +
-moment carry stays float32 and finite, single-step + multistep). Found by
-exercising the scheme in float32 — a path no prior test covered.
-- **iter 68 completeness sweep:** swept ALL `clubb_*.py` for the same bug class
-  and confirmed `clubb_mixing_length.py` was the ONLY strong-float64 source — every
-  other module uses dtype-preserving `jnp.zeros_like`/`ones_like` or weak
-  `jnp.full(.., py_float)`/`jnp.asarray(py_float)` (which don't promote float32).
-  Both clubb entry points verified float32-clean; added
-  `test_diagnostic_clubb_runs_in_float32_no_dtype_promotion` for the DEFAULT
-  diagnostic `scheme="clubb"` path (the prognostic float32 test only covered the
-  opt-in path).
-- **iter 69 float32 numerical fidelity:** beyond finite/no-promotion, verified the
-  fix preserved VALUES — float32 `Lscale` matches the float64 reference to ~1e-7
-  (float32 eps) on an identical column (`test_clubb_mixing_length_float32_is_
-  numerically_faithful`); `Km`∝`Lscale` and the moisture tendency likewise agree
-  (~1e-3). Documented inherent float32 caveat: `dT_dt=Π·(θl_new−θl)/dt` is a
-  difference of two ~300 K values → ~5–10% float32 cancellation noise (shared by
-  clubb_lite + the diagnostic path; NOT a CLUBB defect; fixable only by a deep
-  perturbation-form solve refactor, not worth the risk).
+**Validation hardening (iter 61–69; compressed at iter 70 — detail in git history).**
+All in `tests/unit/test_clubb_scheme.py`; each codex-adversarially-reviewed to
+clean. Common technique: spin up real moments via `integrate_clubb_column`
+(dt=150,nsteps=40) so the property is **non-vacuous** (the rest/floor state gives
+~round-off tendencies any scheme trivially passes).
+- **Conservation triad @ scheme entry, zero surface flux:** column **rt** (moisture,
+  iter 61) and **θl** (heat, iter 62) conserved to round-off (`<1e-12` rel/step,
+  `ρ·dz` weight); **momentum** `Σ mass·du/dt = τ_x` (iter 64) — closes to **O(Δt)**
+  (surface stress applied semi-implicitly; Richardson: Δt 10× → residual 10×;
+  confirms interior flux-form conservation + the surface-stress SIGN, the iter-47
+  bug). Winds use `advance_windm_edsclrm`, scalars use `advance_xm_wpxp`.
+- **Bridge convention (iter 62, surfaced by codex):** `clubb_step` maps the mean
+  back as `T_new = thlm·exner`, so reported `dT_dt/exner` is EXACTLY the prognostic
+  **θl** tendency and `q_v`=`rtm` (total water) — prognostic CLUBB returns θl/rt,
+  NOT a saturation-adjusted (T,q_v) split (cloud partition deferred to microphysics,
+  per `l_rcm_supersat_adj=.false.`).
+- **Turbulence→microphysics coupling (iter 63):** that θl/rt return is CORRECT for
+  the legoESM pipeline (modules run on the same state, tendencies summed; `sundqvist`
+  does the saturation adjustment `f·max(q_v−q_sat,0)`, `dT=L_v·net_cond/c_pd`).
+  Verified CLUBB→sundqvist closes the column water budget to the surface-precip sink
+  (rel<1e-12) with nonzero precip, condensation enthalpy-consistent (`c_pd·dT+L_v·dq_v`~0).
+- **Moist-chain differentiability (iter 65):** `jax.grad` flows end-to-end through
+  CLUBB→sundqvist incl. the `max(q_v−q_sat,0)` kink; guarded by a microphysics-only
+  objective + active-condensation forward check (so a dead kink can't pass).
+- **The defining fuller-than-clubb_lite signature (iter 66):** under surface heating
+  prognostic CLUBB develops buoyancy-driven vertical-velocity SKEWNESS (`wp3`>0 in
+  the upper mixed layer, ~+0.06–0.15) — the third moment driving non-local transport;
+  the test EXECUTES `clubb_lite_turbulence` and asserts it has no `wp3` (down-gradient,
+  no 3rd moment). Contrast vs a verified near-neutral control. (Aside: a cooled-surface
+  'stable' control is unusable — fixed cold `T_sfc` over-cools the air → convection.)
+- **float32 / Metal cross-backend (iter 67–69):** FIXED a real bug — the parcel-Lscale
+  `compute_mixing_length` had strong-float64 sources (`jnp.float64(0.0)` scan carries,
+  default-dtype `jnp.zeros` pads / `jnp.full` col / `set_Lscale_max` cap) that promoted
+  a float32 column and CRASHED `lax.scan`'s carry-type check under x64. Fix: normalize
+  EVERY float input (state, `Lscale_max`, `mu`, `lmin`, all `CLUBBGrid` fields) to
+  `dt_f=thlm.dtype` at function top — preserves float64 EXACTLY (8 golden-parity tests
+  pass). Swept all `clubb_*.py` → this was the ONLY strong-float64 source (others use
+  dtype-preserving `zeros_like` or weak `full(py_float)`). Both entry points verified
+  float32-finite, no-promotion, AND numerically faithful (float32 Lscale matches f64
+  to ~1e-7). Caveat (documented, inherent, not a defect): `dT_dt=Π·(θl_new−θl)/dt` is
+  a difference of two ~300 K values → ~5–10% float32 cancellation noise (shared by
+  clubb_lite + diagnostic path); Lscale/Km/moisture unaffected.
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz
