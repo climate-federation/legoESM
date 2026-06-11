@@ -1130,6 +1130,71 @@ def test_prognostic_clubb_runs_through_mpas_driver():
     assert not np.allclose(np.asarray(ps.clubb_moments), moments0)
 
 
+def test_default_diagnostic_clubb_runs_through_mpas_driver():
+    """The DEFAULT ``scheme="clubb"`` (diagnostic phase-1 path — what most users
+    get, the distinct ``clubb_turbulence`` entry: parcel-``Lscale`` eddy diffusion +
+    ADG1-PDF cloud/buoyancy, carrying ``wp2`` in the ``tke`` slot) also runs
+    end-to-end through the MPAS combined physics.
+
+    Complements ``test_prognostic_clubb_runs_through_mpas_driver`` (the opt-in
+    prognostic entry, iter 82) by covering the default entry on the production
+    Voronoi-mesh driver: a sheared edge-normal wind exercises the Perot edge↔cell
+    reconstruction + cell→edge projection, and the diagnosed eddy-diffusion wind
+    tendency comes back finite, non-trivial, and spatially structured."""
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.core.field import Field
+    from legoesm.core.state import MPASHydrostaticState
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    nlev = 10
+    mesh = create_voronoi_mesh(3, lloyd_iterations=3)
+    sigma = create_sigma_coordinate(nlev)
+    nC, nE = mesh.nCells, mesh.nEdges
+    rng = np.random.default_rng(0)
+    u_edge = jnp.asarray(np.linspace(2.0, 10.0, nlev)[None, :]
+                         + 2.0 * rng.standard_normal((nE, nlev)))
+    state = MPASHydrostaticState(
+        u=Field(u_edge, name="u", dims=("nEdges", "nlev"), units="m/s"),
+        T=Field(jnp.full((nC, nlev), 265.0), name="T", dims=("nCells", "nlev"), units="K"),
+        p_s=Field(jnp.full((nC,), 1e5), name="p_s", dims=("nCells",), units="Pa"),
+        phis=Field(jnp.zeros((nC,)), name="phis", dims=("nCells",), units="m^2/s^2"))
+
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig()),  # diagnostic
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"))
+    phys_state = init_physics_state(nC, nlev, cfg)
+    physics_fn = make_physics(cfg, model_type="mpas", dt=300.0)
+
+    def half(u_arr):
+        return MPASHydrostaticState(
+            u=Field(u_arr, name="u", dims=("nEdges", "nlev"), units="m/s"),
+            T=state.T, p_s=state.p_s, phis=state.phis)
+
+    # Baseline vs half-wind from the SAME carry → the only changed input is the
+    # edge wind (codex iter-84: a wind-independent structured tendency would
+    # otherwise pass; mirrors the iter-82 prognostic test's fix).
+    tend, _ = physics_fn(state, mesh, sigma, phys_state)
+    tend_half, _ = physics_fn(half(u_edge * 0.5), mesh, sigma, phys_state)
+    du = np.asarray(tend.du_dt.data)
+    assert np.all(np.isfinite(np.asarray(tend.dT_dt.data)))
+    assert np.all(np.isfinite(du))                      # edge wind tendency
+    # The MPAS edge↔cell wind bridge produced a non-trivial, structured tendency...
+    assert np.max(np.abs(du)) > 1e-5
+    assert not np.allclose(du, du.flat[0])
+    # ...that genuinely DEPENDS on the edge wind input (proves the reconstruction/
+    # projection carry the wind, not a fixed artifact).
+    assert np.max(np.abs(du - np.asarray(tend_half.du_dt.data))) > 1e-5
+
+
 def test_read_turb_carry_fails_fast_on_wrong_clubb_shape():
     """_read_turb_carry raises (no silent resize/retrace) when phys_state carries
     a wrong-shaped clubb_moments slot (PhysicsState not init'd for prognostic)."""

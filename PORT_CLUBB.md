@@ -205,6 +205,15 @@ efficient multi-step testing.
   surgery → human-directed PR. Prognostic CLUBB remains runnable/tested via the direct
   `combined.make_physics` MPAS path (iter 82, which threads `phys_state` explicitly) and
   `integrate_clubb_column`; only the *production CLI* exposure is blocked.
+- **Default (diagnostic) CLUBB through MPAS (iter 84):** iter-82 covered only the opt-in
+  PROGNOSTIC entry on MPAS; the DEFAULT `scheme="clubb"` (diagnostic `clubb_turbulence`:
+  parcel-`Lscale` eddy diffusion + ADG1-PDF, `wp2` in the `tke` slot — the path most users
+  hit) now has MPAS integration coverage too. `test_default_diagnostic_clubb_runs_through_
+  mpas_driver` runs it end-to-end through the MPAS combined physics with a sheared
+  edge-normal wind; asserts finite + structured `du_dt` AND wind-input SENSITIVITY
+  (same-carry baseline vs half-wind, `max|du_base−du_half|>1e-5`) so the Perot edge↔cell
+  reconstruction/projection is genuinely exercised. Codex flagged the same input-
+  sensitivity gap as iter-82 (proactively-missed; fixed) → re-review approve.
 - **Prescribed-flux conservation triad (iters 77/78/79), all codex-approved:** for the
   iter-76 prescribed `sfc_*` BCs — **heat** (77) and **moisture** (79) are applied as
   EXACT flux-form Neumann lower-BCs (`Σ_k (ρ_k dz_k)(dT_dt/Π or dq_v_dt)_k = ρ_sfc·flux`
