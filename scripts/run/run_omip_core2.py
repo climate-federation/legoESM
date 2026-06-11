@@ -1615,7 +1615,7 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir):
         print(f"[transports] MHT diag skipped: {type(e).__name__}: {e}")
 
 
-def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d):
+def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     save_kw = dict(
         T=np.asarray(state.T.data), S=np.asarray(state.S.data),
@@ -1626,6 +1626,15 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d):
     # MPAS has no separate v field; the scorer reads T/S/land_mask/lat_T/lon_T only.
     if getattr(state, "v", None) is not None:
         save_kw["v"] = np.asarray(state.v.data)
+    # Geometry for the offline mixed-layer-depth diagnostic (de Boyer Montegut /
+    # Treguier 2023): sea-floor depth + level-centre reference depths.  The MLD
+    # scorer derives the per-level wet mask from ``z_center_ref < H_bathy``.
+    H_bathy = getattr(state, "H_bathy", None)
+    if H_bathy is not None:
+        save_kw["H_bathy"] = np.asarray(H_bathy.data)
+    if z_coord is not None and getattr(z_coord, "z_half_ref", None) is not None:
+        zh = np.asarray(z_coord.z_half_ref)              # (nlev+1,), <=0
+        save_kw["z_center_ref"] = np.abs(0.5 * (zh[:-1] + zh[1:]))   # (nlev,) positive
     np.savez_compressed(out_dir / f"snapshot_{tag}.npz", **save_kw)
 
 
@@ -2658,10 +2667,10 @@ def main() -> int:
                 print(f"[snapshot] day {day:.0f} saved", flush=True)
             if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
                 yr = step // steps_per_year
-                _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d)
+                _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d, z_coord=z_coord)
                 print(f"[snapshot] year {yr} saved", flush=True)
         state = jax.block_until_ready(state)
-        _save_snapshot(out_dir, "final", state, lat2d, lon2d)
+        _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
         _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
         _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
         _mht_diag(state, grid, z_coord, app_grid_type, out_dir)
@@ -2852,11 +2861,11 @@ def main() -> int:
             print(f"[snapshot] day {day:.0f} saved", flush=True)
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
-            _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d)
+            _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d, z_coord=z_coord)
             print(f"[snapshot] year {yr} saved", flush=True)
 
     state = jax.block_until_ready(state)
-    _save_snapshot(out_dir, "final", state, lat2d, lon2d)
+    _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
     _mht_diag(state, grid, z_coord, app_grid_type, out_dir)
