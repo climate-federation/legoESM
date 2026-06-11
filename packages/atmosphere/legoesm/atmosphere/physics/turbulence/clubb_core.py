@@ -60,9 +60,14 @@ def compute_clubb_diagnostics(wp2, wp3, up2, vp2, thlp2, rtp2, wpthlp, wprtp,
     tau = compute_tau_family(Lscale, em, sqrt_em_zt, brunt_vaisala_freq_sqd, gr, config)
     Lscale_zm = jnp.maximum(zt2zm(Lscale, gr), 0.0)
     C6rt, C6thl, C7 = compute_C6_C7_Skw_fnc(skw["Skw_zm"], Lscale_zm, config, gr)
+
+    # Eddy diffusivities Kh = c_K·Lscale·sqrt(em) (zt and zm levels).
+    em_min = 1.5 * config.w_tol ** 2
+    Kh_zt = config.params.c_K * Lscale * sqrt_em_zt
+    Kh_zm = config.params.c_K * Lscale_zm * jnp.sqrt(jnp.maximum(em, em_min))
     return dict(
         **skw, gamma_Skw=gamma_Skw, sigma_sqd_w=sigma_sqd_w, em=em,
-        sqrt_em_zt=sqrt_em_zt, Lscale_zm=Lscale_zm,
+        sqrt_em_zt=sqrt_em_zt, Lscale_zm=Lscale_zm, Kh_zt=Kh_zt, Kh_zm=Kh_zm,
         C6rt_Skw_fnc=C6rt, C6thl_Skw_fnc=C6thl, C7_Skw_fnc=C7, **tau,
     )
 

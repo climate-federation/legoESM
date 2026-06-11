@@ -53,9 +53,10 @@ def test_diagnostics_keys_and_shapes():
     out = compute_clubb_diagnostics(**_inputs(gr, ng, nzm))
     expected = {"Skw_zm", "Skw_zt", "wp2_zt", "wp3_zm", "wp3_on_wp2",
                 "wp3_on_wp2_zt", "gamma_Skw", "sigma_sqd_w", "em", "sqrt_em_zt",
-                "Lscale_zm", "C6rt_Skw_fnc", "C6thl_Skw_fnc", "C7_Skw_fnc",
-                "invrs_tau_C1_zm", "invrs_tau_C4_zm", "invrs_tau_C6_zm",
-                "invrs_tau_C14_zm", "invrs_tau_xp2_zm", "invrs_tau_wp3_zt"}
+                "Lscale_zm", "Kh_zt", "Kh_zm", "C6rt_Skw_fnc", "C6thl_Skw_fnc",
+                "C7_Skw_fnc", "invrs_tau_C1_zm", "invrs_tau_C4_zm",
+                "invrs_tau_C6_zm", "invrs_tau_C14_zm", "invrs_tau_xp2_zm",
+                "invrs_tau_wp3_zt"}
     assert expected <= set(out)
     for k, v in out.items():
         assert np.all(np.isfinite(np.asarray(v))), k
@@ -63,9 +64,11 @@ def test_diagnostics_keys_and_shapes():
     assert out["Skw_zm"].shape == (ng, nzm) and out["Skw_zt"].shape == (ng, nzt)
     assert out["sigma_sqd_w"].shape == (ng, nzm)
     assert out["invrs_tau_wp3_zt"].shape == (ng, nzt)
-    # sigma_sqd_w in (0, 1)
+    assert out["Kh_zt"].shape == (ng, nzt) and out["Kh_zm"].shape == (ng, nzm)
+    # sigma_sqd_w in (0, 1); Kh >= 0
     s = np.asarray(out["sigma_sqd_w"])
     assert np.all((s >= 0.0) & (s < 1.0))
+    assert np.all(np.asarray(out["Kh_zt"]) >= 0.0) and np.all(np.asarray(out["Kh_zm"]) >= 0.0)
 
 
 def test_diagnostics_jit_and_grad():
