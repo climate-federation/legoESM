@@ -44,10 +44,17 @@ not carried in the ``lax.scan`` state.  Only ``psi`` and the tendency histories
 
 Differentiability
 -----------------
-The elliptic solve uses ``jax.scipy.sparse.linalg.bicgstab`` (Veros's solver
-choice; robust to the area-normalised operator's asymmetry), differentiable via
-the implicit-function theorem.  The per-step dense island solve is
-``jnp.linalg.solve``.  The static data is not differentiated through.
+The elliptic solve uses ``jax.scipy.sparse.linalg.cg`` on the symmetrized SPD
+operator ``S = -A_vertex·L`` (see ``_symmetric_solve_operator``; CG replaced
+Veros's BiCG-STAB because BiCG-STAB's adjoint broke down to NaN cotangent-
+dependently), differentiable via the implicit-function theorem.  The VJP is
+overridden to solve the adjoint system in the seam-REDUCED vertex space, where
+``S`` is exactly Euclidean-symmetric — on the seam-redundant (n_lon+1) layout
+it is NOT, which silently biased every reverse-mode gradient through the
+ψ-solve by a few % up to 25% (see ``solve_streamfunction_interior``).  The
+forward solve is bit-identical to the plain CG call.  The per-step dense
+island solve is ``jnp.linalg.solve``.  The static data is not differentiated
+through.
 """
 
 from __future__ import annotations
@@ -181,6 +188,13 @@ def _symmetric_solve_operator(psi, rl_data, grid):
     return jnp.where(rl_data.solve_mask > 0.5, -rl_data.A_vertex * Lpsi, psi)
 
 
+def _seam_expand(v):
+    """Expand a seam-reduced vertex field (n_lat+1, n_lon) to the redundant
+    layout (n_lat+1, n_lon+1) by re-appending the periodic duplicate of
+    column 0 as the wrap column."""
+    return jnp.concatenate([v, v[:, :1]], axis=1)
+
+
 def solve_streamfunction_interior(rhs, rl_data, grid, x0, *, tol, maxiter):
     """Solve L(dψ) = rhs on the wet interior (ψ=0 on land), via preconditioned CG.
 
@@ -193,6 +207,65 @@ def solve_streamfunction_interior(rhs, rl_data, grid, x0, *, tol, maxiter):
     (BiCG-STAB's adjoint breaks down to NaN cotangent-dependently, which broke
     the end-to-end jax.grad design goal).  Returns dψ (n_lat+1, n_lon+1), zero on
     land.
+
+    Seam-reduced adjoint (custom VJP)
+    ---------------------------------
+    The vertex layout (n_lat+1, n_lon+1) stores the periodic wrap REDUNDANTLY:
+    column ``n_lon`` duplicates column 0.  ``S`` maps wrap-consistent fields to
+    wrap-consistent fields and equals the physical operator there, so the
+    FORWARD solve is correct.  But as a matrix on the redundant space ``S`` is
+    NOT Euclidean-symmetric: the operator/RHS stencils park the seam coupling
+    on different redundant columns than their transpose partners — e.g. the row
+    at vertex column 0 reads its west neighbour through the wrapped v-face
+    (``jnp.roll``), whose stencil touches ψ columns ``n_lon-1`` **and**
+    ``n_lon`` (the duplicate), while the row at column ``n_lon-1`` reads its
+    east neighbour from column ``n_lon`` only — so ``S[0, n_lon-1] != 0`` but
+    ``S[n_lon-1, 0] == 0`` (that weight sits in ``S[n_lon-1, n_lon]``).
+    Measured: rel asymmetry up to 0.42 on wrap-consistent vectors, exactly
+    symmetric (~1e-15) once the duplicate column is folded onto column 0
+    (probe: tests/ocean/unit/test_rigid_lid_seam_adjoint.py).
+
+    ``jax.scipy.sparse.linalg.cg``'s VJP (``lax.custom_linear_solve`` with
+    ``transpose_solve = solve``) re-solves with ``S`` assuming Euclidean
+    symmetry, so every reverse-mode gradient through the ψ-solve was biased —
+    measured AD/FD 1.061 on a single-solve functional and 0.971 (KE) / 0.82
+    (transport) on multi-step objectives in the adjoint-matching harness
+    (.physics-validator/adjoint_oracle_match/RESULTS.md), eps-stable over 3
+    decades of FD step.
+
+    Fix (backward-only): the forward CG call is kept byte-identical (running
+    the forward in the reduced space would change the Krylov path — the
+    redundant inner products double-count the seam column — and perturb the
+    solution at the tolerance level, ~1e-10 rel).  Only the VJP is overridden
+    via ``jax.custom_vjp`` whose primal is the UNCHANGED stock CG call.
+    (``lax.custom_linear_solve`` with an explicit ``transpose_solve`` was
+    tried first and is mathematically equivalent, but the extra/restructured
+    linear_solve primitive perturbs XLA fusion of ADJACENT step ops — the
+    faithful ACC stack drifted in the last bit of T from step 2 while u/ψ
+    stayed identical.  ``custom_vjp`` inlines the primal transparently, which
+    A/B-verified bit-identical over 12 faithful-ACC steps + a global_4deg
+    step.  CLOSURE RULE for scan-compatibility: the fwd/bwd closures must
+    capture only CONCRETE arrays — any value COMPUTED from them in this
+    function body, e.g. ``inv_diag[:, :-1]``, becomes a tracer when the step
+    is traced inside ``lax.scan`` and a tracer captured in the bwd closure
+    fails at lowering ("No constant handler for DynamicJaxprTracer"); slice
+    INSIDE the closure body instead.)  With ``E`` (duplicate col 0 →
+    wrap col) and ``P`` (drop wrap col), the solution map on the wrap-
+    consistent inputs the model produces is ``F(rhs_sym) = E·S_r⁻¹·P·rhs_sym``
+    with ``S_r = P·S·E`` exactly symmetric, so the adjoint is
+    ``Fᵀ = Pᵀ·S_r⁻¹·Eᵀ``: fold the seam cotangent onto column 0 (``Eᵀ``), run
+    the SAME preconditioned CG on the seam-reduced operator, and zero-pad the
+    duplicate column (``Pᵀ`` — each physical dof's cotangent counted exactly
+    once).  ``x0`` receives no cotangent, identical to stock ``cg`` (the
+    Krylov guess does not affect the converged solution; IFT).  Verified
+    AD/FD = 1 ± 2e-8 (was 1.061) with the forward bit-identical.
+
+    Known limitation: ``custom_vjp`` does not support forward-mode AD, so
+    ``jax.jvp``/``jacfwd`` through the ψ-solve now raises (stock ``cg``
+    supported it).  Reverse mode is the end-to-end design goal and no repo
+    path uses forward-mode through the ocean step (grep 2026-06-11); if one
+    ever does, add a paired ``custom_jvp`` solving the tangent system with
+    the same reduced operator.
     """
     sm = rl_data.solve_mask
     rhs_sym = jnp.where(sm > 0.5, -rl_data.A_vertex * rhs, 0.0)
@@ -204,9 +277,54 @@ def solve_streamfunction_interior(rhs, rl_data, grid, x0, *, tol, maxiter):
     def precond(r):
         return r * rl_data.inv_diag
 
-    dpsi, _info = jax.scipy.sparse.linalg.cg(
-        op, rhs_sym, x0=x0_in, tol=tol, atol=0.0, maxiter=maxiter, M=precond,
-    )
+    # Seam-REDUCED operator/preconditioner for the adjoint solve: S_r = P·S·E
+    # (drop the duplicate wrap column from the operator's domain and range).
+    # Exactly Euclidean-symmetric, unlike S on the redundant layout.
+    def op_reduced(v):
+        return op(_seam_expand(v))[:, :-1]
+
+    def precond_reduced(r):
+        # Slice INSIDE the closure (see docstring CLOSURE RULE): hoisting
+        # ``inv_diag[:, :-1]`` out captures a tracer under lax.scan tracing
+        # and breaks jax.grad-through-scan at lowering.
+        return r * rl_data.inv_diag[:, :-1]
+
+    def _forward_cg(rhs_sym_in, x0_v):
+        # The pre-fix forward, verbatim — custom_vjp inlines this primal
+        # transparently (bit-identical; A/B-verified, see docstring).
+        dpsi_f, _info = jax.scipy.sparse.linalg.cg(
+            op, rhs_sym_in, x0=x0_v, tol=tol, atol=0.0, maxiter=maxiter,
+            M=precond,
+        )
+        return dpsi_f
+
+    @jax.custom_vjp
+    def _cg_seam_adjoint(rhs_sym_in, x0_v):
+        return _forward_cg(rhs_sym_in, x0_v)
+
+    def _cg_fwd(rhs_sym_in, x0_v):
+        return _forward_cg(rhs_sym_in, x0_v), None
+
+    def _cg_bwd(_res, dpsi_bar):
+        # Fᵀ = Pᵀ·S_r⁻¹·Eᵀ, solved in the seam-reduced space where S is
+        # truly symmetric (re-solving with S on the redundant layout — what
+        # stock cg's VJP does — IS the bug this fixes).
+        # Eᵀ: fold the duplicate-column cotangent onto column 0, drop wrap col.
+        g_reduced = dpsi_bar.at[:, 0].add(dpsi_bar[:, -1])[:, :-1]
+        lam_reduced, _info = jax.scipy.sparse.linalg.cg(
+            op_reduced, g_reduced, x0=jnp.zeros_like(g_reduced),
+            tol=tol, atol=0.0, maxiter=maxiter, M=precond_reduced,
+        )
+        # Pᵀ: zero-pad the duplicate column — each physical dof exactly once.
+        rhs_sym_bar = jnp.concatenate(
+            [lam_reduced, jnp.zeros_like(lam_reduced[:, :1])], axis=1)
+        # x0 cotangent is exactly zero (matches stock cg; IFT — the Krylov
+        # guess does not affect the converged solution).
+        return rhs_sym_bar, jnp.zeros_like(rhs_sym_bar)
+
+    _cg_seam_adjoint.defvjp(_cg_fwd, _cg_bwd)
+
+    dpsi = _cg_seam_adjoint(rhs_sym, x0_in)
     return dpsi * sm
 
 
