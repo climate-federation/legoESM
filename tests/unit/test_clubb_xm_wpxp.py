@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -596,6 +597,70 @@ def test_advance_xm_wpxp_wiring():
     np.testing.assert_array_equal(np.asarray(wprtp), np.asarray(exp_wprtp))
     np.testing.assert_array_equal(np.asarray(thlm), np.asarray(exp_thlm))
     np.testing.assert_array_equal(np.asarray(wpthlp), np.asarray(exp_wpthlp))
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_advance_xm_wpxp_full_main_parity():
+    """Gold-standard: the full main's scalar-pair outputs (wprtp/rtm/wpthlp/thlm)
+    match the reference main, with the reference configured to ARM-matching
+    constants where my main passes per-column constants for C6 and the C7 array
+    via Cx_fnc_Richardson. Round-off (the penta solve differs)."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_xm_wpxp_module as R  # noqa: N812
+    from clubb_jax.src.CLUBB_core import parameter_indices as PI  # noqa: N812
+    from legoesm import constants
+    R.wpxp_terms_bp_pr3_rhs.__defaults__ = (float(constants.g),)
+
+    gr, ng, nzm = _gr(ng=2, nzt=12)
+    nzt = nzm - 1
+    rg = _refgr(gr, ng, nzm)
+    kw = _main_inputs(gr, ng, nzm, seed=44)
+    # Use per-column-constant C6 so ARM (clubb_params[iC6rt]) == my C6rt_Skw_fnc.
+    C6rt_c, C6thl_c = 4.0, 4.5
+    kw = dict(kw, C6rt_Skw_fnc=jnp.full((ng, nzm), C6rt_c),
+              C6thl_Skw_fnc=jnp.full((ng, nzm), C6thl_c))
+    mine = X.advance_xm_wpxp(**kw)   # (wprtp, rtm, wpthlp, thlm)
+
+    cp = np.zeros((ng, 102))
+    cp[:, PI.iC6rt - 1] = C6rt_c
+    cp[:, PI.iC6thl - 1] = C6thl_c
+    cp[:, PI.ic_K6 - 1] = kw["config"].params.c_K6
+    cp[:, PI.ibeta - 1] = kw["config"].params.beta
+    cp[:, PI.iC_uu_shr - 1] = kw["config"].params.C_uu_shr
+    flags = SimpleNamespace(
+        l_enable_relaxed_clipping=False, l_mono_flux_lim_rtm=True,
+        l_mono_flux_lim_thlm=True, l_mono_flux_lim_spikefix=True, fill_holes_type=2,
+        l_ho_nontrad_coriolis=False, l_uv_nudge=False, l_predict_upwp_vpwp=True,
+        ipdf_call_placement=0, iiPDF_type=1, l_call_pdf_closure_twice=True,
+        l_standard_term_ta=False)
+    z_zm = jnp.zeros((ng, nzm))
+    z_zt = jnp.zeros((ng, nzt))
+    ref = R.advance_xm_wpxp(
+        Cx_fnc_Richardson=kw["C7_Skw_fnc"], Kh_zt=kw["Kh_zt"], clubb_params=jnp.asarray(cp),
+        dt_advance=kw["dt"], fcor=jnp.full((ng,), 1e-4), fcor_y=jnp.zeros((ng,)),
+        flags=flags, gr=rg, invrs_rho_ds_zm=kw["invrs_rho_ds_zm"],
+        invrs_rho_ds_zt=kw["invrs_rho_ds_zt"], invrs_tau_C6_zm=kw["invrs_tau_C6_zm"],
+        l_sample=False, mixt_frac_zm=kw["mixt_frac_zm"], ngrdcol=ng,
+        nu_vert_res_dep=SimpleNamespace(nu6=kw["config"].params.nu6), nzm=nzm, nzt=nzt,
+        rc_coef_zm=z_zm, rho_ds_zm=kw["rho_ds_zm"], rho_ds_zt=kw["rho_ds_zt"],
+        rtm_forcing=kw["rtm_forcing"], rtm_ref=kw["rtm"], rtp2=kw["rtp2"],
+        rtpthvp=kw["rtpthvp"], sigma_sqd_w=kw["sigma_sqd_w"], sponge_cfg=None,
+        stats_writer=None, thlm_forcing=kw["thlm_forcing"], thlm_ref=kw["thlm"],
+        thlp2=kw["thlp2"], thlpthvp=kw["thlpthvp"], thv_ds_zm=kw["thv_ds_zm"],
+        ts_nudge=0.0, ug=z_zt, um_forcing=z_zt, um_ref=z_zt, up2=jnp.full((ng, nzm), 0.4),
+        uprcp=z_zm, varnce_w_1_zm=kw["varnce_w_1_zm"], varnce_w_2_zm=kw["varnce_w_2_zm"],
+        vg=z_zt, vm_forcing=z_zt, vm_ref=z_zt, vp2=jnp.full((ng, nzm), 0.4), vprcp=z_zm,
+        w_1_zm=kw["w_1_zm"], w_2_zm=kw["w_2_zm"], wm_zm=kw["wm_zm"], wm_zt=kw["wm_zt"],
+        wp2=kw["wp2"], wp3_on_wp2_zt=kw["wp3_on_wp2_zt"], wprtp_forcing=kw["wprtp_forcing"],
+        wpthlp_forcing=kw["wpthlp_forcing"], rcm=z_zt, rtm=kw["rtm"], thlm=kw["thlm"],
+        um=z_zt, upwp=z_zm, vm=z_zt, vpwp=z_zm, wprtp=kw["wprtp"], wpthlp=kw["wpthlp"])
+
+    # ref dict: wprtp/rtm/wpthlp/thlm
+    for key, val in zip(("wprtp", "rtm", "wpthlp", "thlm"), mine):
+        np.testing.assert_allclose(np.asarray(val), np.asarray(ref[key]),
+                                   rtol=1e-9, atol=1e-11)
 
 
 def test_advance_xm_wpxp_jit_grad():

@@ -176,5 +176,7 @@ CLUBB-JAX (patch reference physical constants to isolate algorithm) + codex revi
 **⚠ Pending codex batch** (external rate limit, resets ~19:37 MDT): iter-34→39
 (`advance_xm_wpxp` main, `clubb_tau` incl. iter-38 AD-hardening + iter-39
 `compute_tke`, `clubb_skewness` diagnostics, `clubb_coefficients`). All small,
-parity/analytic/jit-grad self-validated. RUN THE BATCH the moment codex resets,
-before tackling the (larger) PDF-closure wiring.
+parity/analytic/jit-grad self-validated. iter-41 added the **gold-standard
+full-main reference-parity test** for `advance_xm_wpxp` (round-off match vs the
+reference main — substitutes for codex on the biggest pending piece). RUN THE
+BATCH the moment codex resets, before tackling the (larger) PDF-closure wiring.
