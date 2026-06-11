@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm import constants
+from legoesm.atmosphere.physics.microphysics.fast_sbm.config import FastSBMConfig
 from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
 
 
@@ -546,7 +547,8 @@ class MicrophysicsConfig(NamedTuple):
     ------
     scheme : str
         Active scheme: "kessler", "sundqvist", "seifert_beheng",
-        "morrison", "thompson", "p3", "sdm", "ml_emulator", or "none".
+        "morrison", "thompson", "p3", "sdm", "fast_sbm", "ml_emulator",
+        or "none".
     kessler : KesslerConfig
     sundqvist : SundqvistConfig
     seifert_beheng : SeifertBehengConfig
@@ -557,6 +559,11 @@ class MicrophysicsConfig(NamedTuple):
         Super-Droplet Method (Shima et al. 2009). The column path is a
         diffusional-condensation adapter; the full Lagrangian model is in
         ``microphysics/sdm/box_model.py``.
+    fast_sbm : FastSBMConfig
+        Fast spectral-bin microphysics (WRF FSBM-2 port). The column path
+        reconstructs the 33-bin liquid spectrum from bulk (q_c, q_r, N_r)
+        and runs oracle condensation + Bott coalescence per step (see
+        ``docs/specs/bin_microphysics.md``).
     ml_emulator : MicrophysicsMLEmulatorConfig
     """
     scheme: str = "none"
@@ -567,4 +574,5 @@ class MicrophysicsConfig(NamedTuple):
     thompson: ThompsonConfig = ThompsonConfig()
     p3: P3Config = P3Config()
     sdm: SDMConfig = SDMConfig()
+    fast_sbm: FastSBMConfig = FastSBMConfig()
     ml_emulator: MicrophysicsMLEmulatorConfig = MicrophysicsMLEmulatorConfig()
