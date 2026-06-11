@@ -148,9 +148,12 @@ above = the live builder ledger; per-module CAM-vs-ARM caveats are in each
 module's docstring.)*
 
 **Status:** ALL 4 prognostic advances + all clips/limiter + the tau/Skw/C6-C7
-orchestration pieces are ported & parity-validated. The scheme is runnable+tested
-(phase-1 Lscale eddy diffusion + ADG1-PDF diagnostic buoyancy). The DONE gate is
-wiring the *prognostic* closure into `clubb.py`'s live tendency path.
+orchestration + the diagnostics bundle (`compute_clubb_diagnostics`) + the full
+ADG1 PDF closure (`compute_pdf_closure`, iter 45) are ported & parity/codex-
+validated. The scheme is runnable+tested (phase-1 Lscale eddy diffusion +
+ADG1-PDF diagnostic buoyancy). Two pieces remain to the DONE gate: the
+`advance_clubb_core` assembly (diagnostics→PDF→4 advances) and wiring the
+*prognostic* closure into `clubb.py`'s live tendency path.
 
 **CAM-vs-ARM rule of thumb (verified the hard way):** CLUBB-JAX is wired for ARM;
 re-check the CAM namelist/Fortran per module. Caught: wp2/wp3 UPWIND MA
@@ -160,24 +163,29 @@ TA CENTERED; wp2_dp1 + wp3_pr_turb CAM branches from CESM Fortran;
 `l_use_invrs_tau_N2_iso/l_pos_def/l_enable_relaxed_clipping=False`.
 
 **Remaining to DONE:**
-1. **PDF-closure outputs**: the pre+post ADG1 closure (`l_call_pdf_closure_twice
-   =True`) producing the 4th-order moments (wp4/wp2up2/wp2vp2/wpup2/wpvp2/wp2thvp/
-   rtpthvp/thlpthvp) + PDF velocity params (`w_1/w_2/varnce_w/mixt_frac`). Have
-   `ADG1_pdf_driver`/`calc_pdf_higher_order_moments` — needs the input wiring.
-2. **sigma_sqd_w + brunt** wiring (helpers exist: `compute_sigma_sqd_w`,
-   `calc_brunt_vaisala_freq_sqd`).
-3. **`advance_clubb_core` assembly** + carried moment state (wp2/wp3/up2/vp2/
-   rtp2/thlp2/rtpthlp/wprtp/wpthlp), with the pre/post PDF placement.
-4. **Wire into `clubb.py`**: carry the moment set as state; replace the phase-1
-   eddy-diffusion mean advance with the prognostic advances.
+1. ✅ **PDF-closure diagnostics bundle** (iter 43-44, `clubb_core.py`):
+   `compute_clubb_diagnostics` = Skw/sigma_sqd_w/em/tau-family/C6-C7/Kh.
+2. ✅ **PDF-closure outputs** (iter 45, `clubb_core.compute_pdf_closure`): the
+   CAM-default ADG1 closure producing wpthvp/wp2thvp/rtpthvp/thlpthvp +
+   wp4/wp2up2/wp2vp2/wpup2/wpvp2/wp2rtp/wp2thlp/wp2up/wprtp2/wpthlp2/wprtpthlp +
+   wprcp/rtprcp/thlprcp/uprcp/vprcp + cloud_frac/rcm/rc_coef_zm. Composes the
+   parity-tested helpers; reuses Skw_zt/wp2_zt/sigma_sqd_w from the diagnostics
+   bundle. **Codex-reviewed & approved** (caught + fixed a real variance-floor
+   leak: rt_tol²/thl_tol² floors feed ONLY the ADG1 driver, calc_xpthvp_terms
+   gets RAW regrids — regression-tested).
+3. ☐ **`advance_clubb_core` assembly** + carried moment state (wp2/wp3/up2/vp2/
+   rtp2/thlp2/rtpthlp/wprtp/wpthlp), running compute_clubb_diagnostics →
+   compute_pdf_closure → the 4 advances in CAM order (xm_wpxp→xp2_xpyp→wp2_wp3→
+   windm) with `clip_covars_denom` between. All sub-pieces now exist.
+4. ☐ **Wire into `clubb.py`**: carry the moment set as state; replace the phase-1
+   eddy-diffusion mean advance with the prognostic advances (DONE gate).
 
 Each chunk: analytic/self-consistency oracle (CI) + golden/round-off parity vs
 CLUBB-JAX (patch reference physical constants to isolate algorithm) + codex review.
 
-**⚠ Pending codex batch** (external rate limit, resets ~19:37 MDT): iter-34→39
-(`advance_xm_wpxp` main, `clubb_tau` incl. iter-38 AD-hardening + iter-39
-`compute_tke`, `clubb_skewness` diagnostics, `clubb_coefficients`). All small,
-parity/analytic/jit-grad self-validated. iter-41 added the **gold-standard
-full-main reference-parity test** for `advance_xm_wpxp` (round-off match vs the
-reference main — substitutes for codex on the biggest pending piece). RUN THE
-BATCH the moment codex resets, before tackling the (larger) PDF-closure wiring.
+**Codex status:** rate limit reset; iter-45 ran a fresh adversarial-review on
+`compute_pdf_closure` (needs-attention → fixed → approve). Earlier pending batch
+(iter-34→39: advance_xm_wpxp main, clubb_tau, clubb_skewness diagnostics,
+clubb_coefficients) all carry parity/analytic/jit-grad self-validation + the
+iter-41 gold-standard full-main reference-parity test for advance_xm_wpxp;
+re-run opportunistically when building advance_clubb_core touches them.
