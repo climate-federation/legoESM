@@ -144,6 +144,17 @@ sorting `Lscale` + full prognostic moment transport (clubb_lite has none).
 - codex-adversarially-reviewed at every substantial step (real bugs caught+fixed:
   CAM 3-C2 dissipation, surface-flux sign, variance-floor leak, sub-cycle moisture
   contract, dispatch persistence guards, retrace hazard).
+- **column-moisture conservation @ scheme entry (iter 61):** a no-surface-flux
+  (`q_sfc`=near-sfc `q_v` ⇒ `lhflx==0`) single prognostic step conserves the
+  mass-weighted (`ρ·dz`) column total to round-off (<1e-12 rel/step). Made
+  **non-vacuous** after codex caught that the rest/floor moment state gives
+  `dq_v_dt`~1e-11 (no `wprtp` flux ⇒ any scheme trivially "conserves"): the test
+  first spins up a real flux via `integrate_clubb_column` (dt=150,nsteps=40), then
+  asserts BOTH a nontrivial-transport floor (`max|dq·dt|`~1e-6 ≫ 1e-8) AND
+  conservation. Note: the bare scheme entry is single-step-stable only — feeding
+  its tendencies back without dycore/host diffusion NaNs by step 1 (the documented
+  dry-regime instability), so multi-step spin-up MUST use the diffusion-stabilized
+  driver.
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz

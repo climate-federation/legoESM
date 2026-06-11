@@ -356,6 +356,62 @@ def test_prognostic_dispatch_selects_prognostic_fn():
     assert fn2 is clubb_turbulence and turbulence_carry_field(name2, cfg2) == "tke"
 
 
+def test_prognostic_clubb_conserves_column_moisture_no_sfc_flux():
+    """Production-scheme conservation, made NON-VACUOUS by first spinning up a
+    real turbulent moisture flux.
+
+    With NO surface moisture flux (``q_sfc`` = current near-surface ``q_v`` ⇒
+    ``lhflx == 0``), the prognostic CLUBB scheme must CONSERVE the mass-weighted
+    column moisture: turbulent redistribution moves water vertically but
+    flux-form telescoping with zero surface+top flux leaves the column total
+    unchanged.
+
+    Subtlety this test guards against: from the rest/floor moment state the
+    turbulent moisture flux ``wprtp`` is ~0, so ``dq_v_dt`` is ~1e-11 kg/kg/s
+    and *any* scheme — even one that zeroed ``dq_v_dt`` — would trivially
+    "conserve". That makes a bare single-step assertion vacuous. So we first
+    integrate the stable SCM driver to develop a genuine ``wprtp`` (the driver's
+    flux-form host diffusion keeps the bare column finite), THEN take one
+    prognostic-CLUBB step and assert BOTH (a) the redistribution is nontrivial
+    (``max|dq_v_dt·dt|`` well above round-off) AND (b) the column total is
+    conserved to round-off. A regression that suppressed the scalar flux/solve
+    would now FAIL guard (a); one that broke flux-form telescoping would fail
+    (b)."""
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        integrate_clubb_column,
+    )
+    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)   # moist, stably stratified
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
+    # Spin up the higher-order moments so a real turbulent moisture flux exists
+    # (dt=150, nsteps=40 is the proven-stable driver setting; the flux-form host
+    # diffusion damps the bare-column 2Δz noise without altering the column sum).
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=150.0, nsteps=40, config=cfg)
+    # One prognostic-CLUBB step from the spun-up state with ZERO surface moisture
+    # flux: q_sfc tracks the *current* near-surface q_v so the bulk lhflx is 0.
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    out, _ = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, pack_clubb_moments(m_f), kw["p_full"], kw["p_half"],
+        kw["z_full"], kw["z_half"], T_f[:, -1], q_f[:, -1], rho, 150.0, cfg)
+    assert np.all(np.asarray(out.lhflx) == 0.0)          # genuinely zero sfc flux
+    # Layer mass [kg/m^2] = rho * dz; column moisture tendency = sum(mass*dq_v_dt).
+    dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
+    mass = np.asarray(rho) * dz
+    dq = np.asarray(out.dq_v_dt)
+    col_dq = np.sum(mass * dq, axis=1)                   # kg/m^2/s
+    col_q = np.sum(mass * np.asarray(q_f), axis=1)       # kg/m^2
+    # (a) Nontrivial redistribution: the per-step moisture change somewhere in the
+    # column is >=1e-8 kg/kg (the spun-up case is ~1e-6; the rest state is ~1e-11,
+    # so this floor cleanly separates "real transport" from "vacuously quiescent").
+    assert float(np.max(np.abs(dq) * 150.0)) > 1e-8
+    # (b) Yet the mass-weighted column total drifts only at flux-form round-off.
+    assert np.all(np.abs(col_dq) * 150.0 / col_q < 1e-12)
+
+
 def test_clubb_turbulence_prognostic_carry_roundtrip_multistep():
     """The prognostic scheme entry carries the packed CLUBBMomentState
     (ncol,15,nlev+1) in/out of the tke-slot interface and runs stably multi-step
