@@ -248,6 +248,36 @@ def test_warm_cell_melts_carried_ice():
         + np.asarray(out.precipitation), rtol=1e-8)
 
 
+def test_supercooled_riming_grows_ice_from_cloud():
+    # A supercooled cell carrying ICE + CLOUD liquid: riming (oracle
+    # coll_xyx_lwf) collects cloud onto ice → more ice than the same cell
+    # with no pre-existing ice (freezing alone), with extra fusion heat and
+    # total-water closure incl. ice.
+    T = jnp.full((NCOL, NLEV), constants.T_freeze - 15.0)
+    p = jnp.full((NCOL, NLEV), P0)
+    # Supersaturated → real condensation, so the closure isn't a near-zero
+    # cancellation of the (much larger) riming/freezing internal transfers.
+    e = 1.02 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
+    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    rho = jnp.full((NCOL, NLEV), 1.1)
+    base = make_zero_hydrometeors(NCOL, NLEV)._replace(
+        q_c=jnp.full((NCOL, NLEV), 2.0e-3))
+    with_ice = base._replace(q_i=jnp.full((NCOL, NLEV), 1.0e-3))
+    p_half = jnp.zeros((NCOL, NLEV + 1))
+    dz = jnp.full((NCOL, NLEV), 100.0)
+    out_no_ice = fast_sbm_microphysics(T, q_v, base, p, p_half, rho, dz, DT)
+    out_ice = fast_sbm_microphysics(T, q_v, with_ice, p, p_half, rho, dz, DT)
+    col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
+    # More cloud→ice conversion (the ice collects cloud) than freezing-only.
+    # Compare the cloud LOSS: with seed ice, more cloud is removed.
+    assert np.all(col(out_ice.dq_c_dt) < col(out_no_ice.dq_c_dt))
+    # Closure incl. ice.
+    np.testing.assert_allclose(
+        -col(out_ice.dq_v_dt),
+        col(out_ice.dq_c_dt + out_ice.dq_r_dt + out_ice.dq_i_dt)
+        + np.asarray(out_ice.precipitation), rtol=1e-7)
+
+
 def test_cold_cell_does_not_melt_ice():
     # A subfreezing cell leaves carried ice intact (no melt source).
     T = jnp.full((NCOL, NLEV), constants.T_freeze - 10.0)

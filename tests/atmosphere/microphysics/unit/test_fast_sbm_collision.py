@@ -236,3 +236,78 @@ def test_number_density_consistent_f_and_g():
     g = g_from_f(f, m)
     np.testing.assert_allclose(float(number_density_from_g(g, m)),
                                float(number_density(f, m)), rtol=1e-13)
+
+
+# ---------------------------------------------------------------------------
+# Cross-species riming (oracle coll_xyx_lwf): ice collects liquid -> ice
+# ---------------------------------------------------------------------------
+def _riming_setup():
+    from legoesm.atmosphere.physics.microphysics.fast_sbm import (
+        precompute_riming_tables)
+    m = mass_doubling_grid()
+    tables = precompute_riming_tables(m)
+    r = radius_from_mass(m)
+    kernel = golovin_kernel(r[:, None], r[None, :], B_GOLOVIN)
+    return m, tables, kernel
+
+
+def test_riming_tables_full_grid():
+    from legoesm.atmosphere.physics.microphysics.fast_sbm import (
+        precompute_riming_tables)
+    m = mass_doubling_grid()
+    n = m.shape[0]
+    t = precompute_riming_tables(m)
+    # Full (i,j) grid over source bins 0..n-2 (both species), not the
+    # i<=j triangle.
+    assert len(t.i_idx) == (n - 1) * (n - 1)
+    i = np.asarray(t.i_idx); j = np.asarray(t.j_idx)
+    assert np.all(i <= n - 2) and np.all(j <= n - 2)
+
+
+def test_riming_conserves_total_mass_grows_ice():
+    from legoesm.atmosphere.physics.microphysics.fast_sbm import bott_riming
+    m, tables, kernel = _riming_setup()
+    ck = collision_ck_matrix(kernel, 1.0)
+    # Ice at large bins, liquid (cloud) at small bins.
+    g_ice = jnp.zeros_like(m).at[18].set(1.0e-3)
+    g_liq = jnp.zeros_like(m).at[5].set(2.0e-3)
+    M0 = float(mass_density_from_g(g_ice) + mass_density_from_g(g_liq))
+    ice0 = float(mass_density_from_g(g_ice))
+    gi, gl = bott_riming(g_ice, g_liq, ck, m, tables)
+    M1 = float(mass_density_from_g(gi) + mass_density_from_g(gl))
+    assert abs(M1 - M0) / M0 < 1.0e-9          # total liquid+ice conserved
+    assert float(mass_density_from_g(gi)) > ice0   # ice grew
+    assert float(mass_density_from_g(gl)) < float(mass_density_from_g(g_liq))
+    assert np.all(np.asarray(gi) >= 0.0) and np.all(np.asarray(gl) >= 0.0)
+
+
+def test_riming_no_op_without_ice_or_liquid():
+    from legoesm.atmosphere.physics.microphysics.fast_sbm import bott_riming
+    m, tables, kernel = _riming_setup()
+    ck = collision_ck_matrix(kernel, 1.0)
+    g_liq = jnp.zeros_like(m).at[5].set(1.0e-3)
+    gi, gl = bott_riming(jnp.zeros_like(m), g_liq, ck, m, tables)
+    np.testing.assert_array_equal(np.asarray(gi), 0.0)
+    np.testing.assert_allclose(np.asarray(gl), np.asarray(g_liq), rtol=1e-12)
+    g_ice = jnp.zeros_like(m).at[18].set(1.0e-3)
+    gi2, gl2 = bott_riming(g_ice, jnp.zeros_like(m), ck, m, tables)
+    np.testing.assert_allclose(np.asarray(gi2), np.asarray(g_ice), rtol=1e-12)
+    np.testing.assert_array_equal(np.asarray(gl2), 0.0)
+
+
+def test_riming_differentiable():
+    from legoesm.atmosphere.physics.microphysics.fast_sbm import bott_riming
+    m, tables, kernel = _riming_setup()
+
+    def ice_after(b):
+        ck = collision_ck_matrix(
+            golovin_kernel(radius_from_mass(m)[:, None],
+                           radius_from_mass(m)[None, :], 1.0) * b, 1.0)
+        g_ice = jnp.zeros_like(m).at[18].set(1.0e-3)
+        g_liq = jnp.zeros_like(m).at[5].set(2.0e-3)
+        gi, _ = bott_riming(g_ice, g_liq, ck, m, tables)
+        return mass_density_from_g(gi)
+
+    g = jax.grad(ice_after)(jnp.asarray(B_GOLOVIN))
+    assert np.isfinite(float(g))
+    assert float(g) > 0.0     # stronger kernel → more riming → more ice

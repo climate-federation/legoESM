@@ -51,12 +51,14 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.collision import (
     GMIN_DEFAULT,
     CollisionTables,
     bott_coalescence,
+    bott_riming,
     collision_ck_matrix,
     f_from_g,
     g_from_f,
     mass_density_from_g,
     number_density_from_g,
     precompute_collision_tables,
+    precompute_riming_tables,
 )
 from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import (
     COL,
@@ -110,6 +112,7 @@ __all__ = [
     "bin_mass_widths",
     "bin_mixing_ratios_from_f",
     "bott_coalescence",
+    "bott_riming",
     "collision_ck_matrix",
     "discretize_exponential",
     "discretize_lognormal",
@@ -122,5 +125,6 @@ __all__ = [
     "number_density",
     "number_density_from_g",
     "precompute_collision_tables",
+    "precompute_riming_tables",
     "radius_from_mass",
 ]

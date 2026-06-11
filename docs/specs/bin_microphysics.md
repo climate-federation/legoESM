@@ -24,7 +24,7 @@ CGS; port is SI (CGS only inside oracle-diff tests).
 |---|---|---|---|
 | Bin grid + moments | param block, QC/QNC | `grid.py` | **done** |
 | Collision kernels | `Kernals_KS` (only p-interpolates file-read `YW*` tables) | computed (reuse `sdm/kernels.py` Golovin/Hall/Long) | Golovin/Hall/Long **done**; oracle-table load todo |
-| Collision-coalescence (Bott) | `coll_xxx_lwf`+`courant_bott_KS` | `collision.py` | **liquid self-collection done**; LWF (snow), xyx/xyz cross-species todo |
+| Collision-coalescence (Bott) | `coll_xxx_lwf`+`courant_bott_KS` | `collision.py` | **liquid self-collection + cross-species riming (`coll_xyx`) done**; LWF/`dm_rime` tracking + ice-ice aggregation (`coll_xyz`) todo |
 | Diffusional growth | `JERRATE`→`JERTIMESC`→`JERSUPSAT`→`JERDFUN`/`JERNEWF`→`ONECOND1` | `diffusional_growth.py`+`supersaturation.py`+`remap.py`+`condensation_driver.py` | **warm chain + ONECOND1 done** |
 | Drop nucleation (CCN) | `JERNUCL01_KS`, `WATER_NUCLEATION` | `nucleation.py` | **done** — Köhler r_crit + lognormal-tail, deficit-activation in column |
 | Sedimentation per bin | `FALFLUXHUCM_Z` + `VR1..VR5` | `sedimentation.py` (REUSES `output.sedimentation_tendency`) | **done** — static substeps, per-level fall speeds, precip live |
@@ -139,12 +139,29 @@ test before the body. Helpers (`grid.py`, `config.py`) in
 - Regression test `test_float32_grad_dry_atmosphere` (dry column, `rho(T)`,
   float32) pins all three. 94 fast_sbm + 284 microphysics/integration green.
 
-## Remaining work (warm-only port → full FSBM-2)
+### Iter 14 (2026-06-11) — cross-species riming
+- **`collision.py` `bott_riming`** (oracle `coll_xyx_lwf`): ice collector
+  bin `j` + liquid bin `i` → ice bin `k=ima(i,j)`, full `(i,j)` grid via
+  new `precompute_riming_tables` (Courant matrix is symmetric in
+  `m_i+m_j`, so reuses the same per-pair geometry). Same Bott flux split /
+  aliasing / gmin semantics as self-collection, two spectra, product to
+  ice. Total ice+liquid mass conserved; LWF/`dm_rime` tracking deferred
+  (rimed liquid treated as fully frozen → caller releases fusion heat).
+- Wired in column: supercooled cells (`T<0 °C`) rime cloud liquid onto
+  ice → `dq_i` up, `dq_c/dq_r` down, `+(L_f/c_pd)·rimed` heat; gated by
+  `jnp.where(T<T_freeze)`, vapor-neutral so the total-water closure is
+  unchanged. 5 riming kernel tests (full-grid table, mass conservation +
+  ice growth, empty-species no-op, d/dkernel>0) + a column test
+  (seed-ice cell converts more cloud→ice than freezing-only, closure
+  holds). 100 fast_sbm tests green.
 
-Ice phase (freezing/melting, snow + graupel/hail spectra, LWF tracking in
-`coll_xyx`/`coll_xyz`), collisional + spontaneous breakup, oracle kernel-table
-loader for bit-fidelity, per-bin prognostic tracers (replace per-step
-reconstruction), persistent aerosol reservoir.
+## Remaining work (warm + riming done → full FSBM-2)
+
+Ice-ice aggregation (`coll_xyz`, snow/graupel/hail cross-species), LWF +
+`dm_rime` riming-fraction tracking, collisional + spontaneous breakup
+(needs oracle `PKIJ/QKJ` tables), multi-ice-category habit spectra, oracle
+kernel-table loader for bit-fidelity, per-bin prognostic tracers (replace
+per-step reconstruction), persistent aerosol reservoir.
 
 ## Iteration log (compressed at iter 10)
 

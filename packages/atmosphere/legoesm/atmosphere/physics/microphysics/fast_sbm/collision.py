@@ -148,6 +148,45 @@ def precompute_collision_tables(masses) -> CollisionTables:
     )
 
 
+def precompute_riming_tables(masses) -> CollisionTables:
+    """Full-grid pair tables for CROSS-SPECIES collection (oracle
+    ``coll_xyx_lwf`` over the full ``(i,j)`` grid, not the ``i≤j`` triangle).
+
+    A collector bin ``j`` and a collected bin ``i`` merge to mass
+    ``x0=m_i+m_j`` landing in bin ``k=ima(i,j)`` with the same Courant
+    number as self-collection (``ima``/``chucm`` depend only on ``m_i+m_j``,
+    so the matrix is symmetric — oracle ``courant_bott_KS`` fills it
+    symmetrically). Every ordered pair with both source bins below the top
+    is emitted. NumPy static geometry.
+    """
+    m = np.asarray(masses, dtype=np.float64)
+    n = m.shape[0]
+    ii, jj, kk, cc = [], [], [], []
+    for i in range(n - 1):          # collected (e.g. liquid) bin
+        for j in range(n - 1):      # collector (e.g. ice) bin
+            x0 = m[i] + m[j]
+            for k in range(max(i, j), n):
+                if k == 0:
+                    continue
+                if m[k] >= x0 and m[k - 1] < x0:
+                    c = math.log(x0 / m[k - 1]) / math.log(m[k] / m[k - 1])
+                    k_t = k
+                    if c > 1.0 - 1.0e-8:
+                        c = 0.0
+                        k_t = k + 1
+                    ii.append(i)
+                    jj.append(j)
+                    kk.append(min(n - 2, k_t - 1))
+                    cc.append(c)
+                    break
+    return CollisionTables(
+        i_idx=jnp.asarray(ii, dtype=jnp.int32),
+        j_idx=jnp.asarray(jj, dtype=jnp.int32),
+        k_idx=jnp.asarray(kk, dtype=jnp.int32),
+        c_pair=jnp.asarray(cc, dtype=jnp.float64),
+    )
+
+
 def collision_ck_matrix(kernel: jax.Array, dt: float | jax.Array) -> jax.Array:
     """Pair coefficient table ``ck = K·dt·dlnr`` (oracle ``Kernals_KS``).
 
@@ -289,3 +328,86 @@ def bott_coalescence(
              tables.c_pair.astype(g.dtype))
     g_out, _ = jax.lax.scan(body, g, pairs)
     return g_out
+
+
+def bott_riming(
+    g_ice: jax.Array,
+    g_liq: jax.Array,
+    ck: jax.Array,
+    masses: jax.Array,
+    tables: CollisionTables,
+    prdkrn: float | jax.Array = 1.0,
+    gmin: float = GMIN_DEFAULT,
+) -> tuple[jax.Array, jax.Array]:
+    """Cross-species collection — ice collects liquid → larger ice (oracle
+    ``coll_xyx_lwf``, riming). Returns ``(g_ice_new, g_liq_new)``.
+
+    For each pair (collected liquid bin ``i``, collector ice bin ``j``) the
+    collision integral removes ``gsi`` of liquid and ``gsj`` of ice and
+    deposits the sum ``gsk=gsi+gsj`` into ice bin ``k=ima(i,j)`` (Bott flux
+    split to ``k``/``k+1``). Total mass ``Σ(g_ice+g_liq)`` is conserved up
+    to the gmin floors. Liquid-water-fraction tracking (oracle ``flx/fly``,
+    ``dm_rime``) is deferred — the rimed liquid is treated as fully frozen
+    onto the ice (the caller releases its fusion heat). Sequential
+    Gauss-Seidel scan over the full ``(i,j)`` grid in oracle order.
+    """
+    x = masses
+
+    def body(carry, pair):
+        g_ice, g_liq = carry
+        i, j, k, c_ij = pair          # i: liquid bin, j: ice bin
+        kp = k + 1
+        gy_i = g_liq[i]
+        gx_j = g_ice[j]
+        active = (gy_i > gmin) & (gx_j > gmin)
+
+        x01 = ck[j, i] * gy_i * gx_j * prdkrn
+        x02 = jnp.minimum(x01, gy_i * x[j])
+        x03 = jnp.where(j != k, jnp.minimum(x02, gx_j * x[i]), x02)
+        gsi = x03 / x[j]              # liquid removed
+        gsj = x03 / x[i]             # ice removed
+        gsk = gsi + gsj
+        no_change = (~active) | (gsk <= gmin)
+
+        gy_i_new = jnp.maximum(gy_i - gsi, 0.0)
+        # Ice bin j may alias the product bin k (collector grows into its
+        # own next bin); read post-update.
+        gx_j_new = gx_j - gsj
+        gx_j_new = jnp.where(j != k, jnp.maximum(gx_j_new, 0.0), gx_j_new)
+        gk_base = jnp.where(k == j, gx_j_new, g_ice[k])
+        gk = gk_base + gsk
+        no_flux = (~no_change) & (gk <= gmin)
+        full = (~no_change) & (gk > gmin)
+
+        gkp = g_ice[kp]
+        gk_safe = jnp.where(full, gk, 1.0)
+        x1 = jnp.log(gkp / gk_safe + 1.0e-15)
+        x1_near_zero = jnp.abs(x1) < 1.0e-6
+        x1_safe = jnp.where(x1_near_zero, 1.0, x1)
+        flux_formula = gsk / x1_safe * (
+            jnp.exp(0.5 * x1_safe) - jnp.exp(x1_safe * (0.5 - c_ij)))
+        flux = jnp.where(x1_near_zero, gsk * c_ij, flux_formula)
+        flux = jnp.minimum(jnp.minimum(flux, gsk), gk)
+
+        # Liquid loses gsi (or stays if no change).
+        v_liq_i = jnp.where(no_change, gy_i, gy_i_new)
+        # Ice: source j loses gsj; target k,kp gain the split.
+        v_ice_j_pre = jnp.where(no_change, gx_j, gx_j_new)
+        v_ice_k = jnp.where(no_change, g_ice[k],
+                            jnp.where(no_flux, gk_base,
+                                      jnp.maximum(gk - flux, gmin)))
+        v_ice_kp = jnp.where(full, jnp.maximum(gkp + flux, gmin), gkp)
+
+        g_liq = g_liq.at[i].set(v_liq_i)
+        # Write j first, then k, kp (oracle order); when k==j the k write
+        # overwrites with the post-collision product, matching the Fortran
+        # read-after-write.
+        g_ice = g_ice.at[j].set(v_ice_j_pre)
+        g_ice = g_ice.at[k].set(v_ice_k)
+        g_ice = g_ice.at[kp].set(v_ice_kp)
+        return (g_ice, g_liq), None
+
+    pairs = (tables.i_idx, tables.j_idx, tables.k_idx,
+             tables.c_pair.astype(g_ice.dtype))
+    (g_ice_out, g_liq_out), _ = jax.lax.scan(body, (g_ice, g_liq), pairs)
+    return g_ice_out, g_liq_out

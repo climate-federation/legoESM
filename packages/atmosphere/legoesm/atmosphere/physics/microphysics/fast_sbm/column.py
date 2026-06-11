@@ -53,10 +53,12 @@ import jax.numpy as jnp
 
 from legoesm.atmosphere.physics.microphysics.fast_sbm.collision import (
     bott_coalescence,
+    bott_riming,
     collision_ck_matrix,
     f_from_g,
     g_from_f,
     precompute_collision_tables,
+    precompute_riming_tables,
 )
 from legoesm.atmosphere.physics.microphysics.fast_sbm.condensation_driver import (
     warm_condensation_step,
@@ -231,6 +233,7 @@ def fast_sbm_microphysics(
     # this works inside jit/grad traces (a traced `masses` cannot cross
     # into the host-side table build).
     tables = precompute_collision_tables(mass_doubling_grid_np())
+    rime_tables = precompute_riming_tables(mass_doubling_grid_np())
     kernel = _kernel_matrix(masses, config)
     ck = collision_ck_matrix(kernel, dt)
     # Oracle diagnostic split is IF(KRR < KRDROP) with KRDROP=15 (1-based)
@@ -279,8 +282,23 @@ def fast_sbm_microphysics(
         # UNFROZEN remainder; the frozen mass joins the ice spectrum.
         frz = freeze_step(f1, masses, T_c, rho_c, dt, config)
         f1_liq = frz.f_liquid
-        f_ice_final = f_ice_after_melt + frz.f_ice
-        # Net ice change carried to q_i (melt consumes, freeze produces).
+        f_ice_pre_rime = f_ice_after_melt + frz.f_ice
+        # RIMING (oracle coll_xyx_lwf): supercooled ice collects cloud
+        # liquid → larger ice, the rimed liquid freezing onto it. Gated on
+        # T < 0 °C (above freezing melting dominates). The collected liquid
+        # releases fusion heat.
+        liq_before_rime = mass_density(f1_liq, masses)
+        g_ice_r, g_liq_r = bott_riming(
+            g_from_f(f_ice_pre_rime, masses), g_from_f(f1_liq, masses),
+            ck, masses, rime_tables)
+        supercooled = T_c < constants.T_freeze
+        f_ice_final = jnp.where(supercooled, f_from_g(g_ice_r, masses),
+                                f_ice_pre_rime)
+        f1_liq = jnp.where(supercooled, f_from_g(g_liq_r, masses), f1_liq)
+        rimed = (liq_before_rime - mass_density(f1_liq, masses)) / rho_c
+        dT_rime = (constants.L_f / constants.c_pd) * rimed
+        # Net ice change carried to q_i (melt consumes, freeze + rime
+        # produce).
         dq_i_dt_c = (mass_density(f_ice_final, masses) / rho_c - qi_c) / dt
         # Vapor change = −(condensation growth) only; melt and freeze are
         # internal liquid↔ice (vapor-neutral). With melt water + activation
@@ -288,9 +306,10 @@ def fast_sbm_microphysics(
         dq_v = -(mass_density(f1, masses) - mass_density(f_pre, masses)) \
             / rho_c
         dq_v_dt = dq_v / dt
-        # Heating = condensation (L_v) + fusion on freezing − fusion on melt.
+        # Heating = condensation (L_v) + fusion on freezing + fusion on
+        # riming − fusion on melt.
         dT_dt_c = (-(constants.L_v / constants.c_pd) * dq_v_dt
-                   + frz.dT / dt + melt.dT / dt)
+                   + frz.dT / dt + dT_rime / dt + melt.dT / dt)
         return (dT_dt_c, dq_v_dt, dq_i_dt_c, f_liq0, f1_liq)
 
     cell_v = jax.vmap(jax.vmap(cell))
