@@ -356,6 +356,65 @@ def test_prognostic_dispatch_selects_prognostic_fn():
     assert fn2 is clubb_turbulence and turbulence_carry_field(name2, cfg2) == "tke"
 
 
+def test_prognostic_clubb_surface_heat_flux_tracks_surface_temperature():
+    """CLUBB's NATIVE surface-flux coupling responds correctly to the surface
+    temperature — the coupling the GABLS1 SCM benchmark (prescribe="T_s" + active
+    bulk transfer) relies on.
+
+    With the bulk transfer active (``Ch_neutral>0``), ``clubb_step`` computes the
+    surface sensible-heat flux from ``(T_sfc − T_air)`` via the bulk formula and
+    exposes it as ``out.shflx``. The sign must track the air–surface contrast:
+      * a COLD surface (``T_sfc < T_air``) → ``shflx < 0`` (downward; heat drawn
+        OUT of the near-surface air — exactly what cools/stabilises a GABLS1 SBL);
+      * a WARM surface (``T_sfc > T_air``) → ``shflx > 0`` (upward);
+      * ``T_sfc == T_air`` → ``shflx == 0``.
+    This is a DIRECT, deterministic check of the surface boundary coupling (no
+    slow SCM integration, no indirect cooling-proxy inference). Two layers are
+    asserted so a correct *diagnostic* flux alone cannot make it pass:
+      1. ``out.shflx`` (the diagnosed bulk flux) has the right sign + antisymmetry;
+      2. the flux is actually COUPLED into the prognostic state — the near-surface
+         temperature tendency ``out.dT_dt[:, -1]`` responds with the matching sign
+         (cold surface cools, warm warms), proving the chain
+         ``shflx → wpthlp_sfc lower-BC → advance_clubb_core → dT_dt`` is live. A
+         regression that left ``shflx`` correct but zeroed/inverted the
+         ``wpthlp_sfc`` boundary condition would pass (1) but fail (2)."""
+    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+
+    kw = _column(ncol=2, nlev=16, dtheta_dz=4e-3)
+    kw.pop("tke")
+    kw["z_full"] = 0.5 * (kw["z_half"][:, :-1] + kw["z_half"][:, 1:])
+    ncol, nlev = kw["T"].shape
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0,
+                      surface=SurfaceLayerConfig(Cd_neutral=1.5e-3, Ch_neutral=1.5e-3))
+    carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
+
+    def response(dT_sfc):
+        """(diagnosed surface heat flux, near-surface temperature tendency)."""
+        out, _ = clubb_turbulence_prognostic(
+            kw["u"], kw["v"], kw["T"], kw["q_v"], carry, kw["p_full"], kw["p_half"],
+            kw["z_full"], kw["z_half"], kw["T"][:, -1] + dT_sfc, kw["q_v"][:, -1],
+            kw["rho"], 300.0, cfg)
+        return np.asarray(out.shflx), np.asarray(out.dT_dt)[:, -1]
+
+    cold_shf, cold_dT = response(-5.0)      # surface colder than air
+    warm_shf, warm_dT = response(+5.0)      # surface warmer than air
+    neut_shf, neut_dT = response(0.0)
+
+    # (1) Diagnosed bulk surface flux: sign tracks the contrast; antisymmetric.
+    assert np.all(cold_shf < 0.0), f"cold surface gave non-downward shflx: {cold_shf}"
+    assert np.all(warm_shf > 0.0), f"warm surface gave non-upward shflx: {warm_shf}"
+    assert np.allclose(neut_shf, 0.0, atol=1e-9), f"neutral shflx not ~0: {neut_shf}"
+    assert np.allclose(warm_shf, -cold_shf, rtol=1e-6)  # linearised bulk formula
+    # (2) Coupled into the prognostic tendency: near-surface dT_dt responds with
+    # the matching sign and is well above the ~1e-8 zero-flux floor (neut_dT).
+    assert np.all(cold_dT < neut_dT - 1e-6), (
+        f"cold surface did not cool near-surface air: dT={cold_dT} vs neutral {neut_dT}")
+    assert np.all(warm_dT > neut_dT + 1e-6), (
+        f"warm surface did not warm near-surface air: dT={warm_dT} vs neutral {neut_dT}")
+    assert np.allclose(warm_dT - neut_dT, -(cold_dT - neut_dT), rtol=1e-3)
+
+
 def test_prognostic_clubb_conserves_column_moisture_no_sfc_flux():
     """Production-scheme conservation, made NON-VACUOUS by first spinning up a
     real turbulent moisture flux.

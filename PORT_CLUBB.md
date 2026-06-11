@@ -218,6 +218,21 @@ jitted `integrate_clubb_column` for efficient multi-step testing.
   (`1e-4<tke_max<5`), so an unchanged/no-op column can no longer pass. mynn25
   default unchanged; existing `test_scm_gabls1.py` (calls `build_scm`/`scm.run`
   directly) unaffected.
+- **native surface-flux coupling test (iter 73):** `test_prognostic_clubb_surface_
+  heat_flux_tracks_surface_temperature` — a DIRECT, fast, deterministic check that
+  CLUBB's surface sensible-heat flux responds to the air–surface contrast (the
+  coupling GABLS1 relies on): cold surface (`T_sfc<T_air`) ⇒ `shflx<0` (downward,
+  cools/stabilises the SBL), warm ⇒ `shflx>0`, equal ⇒ 0, and antisymmetric
+  (`shflx(+ΔT)=−shflx(−ΔT)`). codex first caught a SLOW SCM-run version as unsound
+  — its "near-surface cooling ⇒ coupling live" inference was false (over a short
+  window GABLS1's `T_s`≈265 K is initially WARMER than the ~264.6 K air, so the
+  early surface flux is upward; the observed cooling came from turbulent mixing,
+  not the surface sink). Replaced with this direct assertion. A 2nd codex pass then
+  noted asserting only `out.shflx` proves the *diagnostic* flux but not that it's
+  *coupled* into the prognostic tendency → added a 2nd layer: the near-surface
+  `out.dT_dt[:,-1]` must respond with the matching sign (cold cools, warm warms,
+  antisymmetric, ≫ the ~1e-8 zero-flux floor), proving the full chain
+  `shflx→wpthlp_sfc BC→advance_clubb_core→dT_dt`. No SCM run, deterministic.
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz
