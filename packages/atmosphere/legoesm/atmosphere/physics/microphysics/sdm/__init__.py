@@ -42,6 +42,7 @@ from legoesm.atmosphere.physics.microphysics.sdm.particles import (
 )
 from legoesm.atmosphere.physics.microphysics.sdm.condensation import (
     drsq_dt,
+    drsq_dt_jac,
     integrate_radius,
 )
 from legoesm.atmosphere.physics.microphysics.sdm.kernels import (
@@ -89,6 +90,7 @@ __all__ = [
     "represented_water_mass",
     "water_mass_per_droplet",
     "drsq_dt",
+    "drsq_dt_jac",
     "integrate_radius",
     "collision_kernel",
     "golovin_kernel",

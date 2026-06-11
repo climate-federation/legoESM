@@ -26,7 +26,21 @@ class SDMConfig(NamedTuple):
         increase this for accuracy. Must be >= 1.
     condensation_integrator : str
         ODE integrator for droplet growth: ``"rk4"`` (4th-order Runge-Kutta,
-        default) or ``"euler"`` (forward Euler). Unknown values raise.
+        default), ``"euler"`` (forward Euler) — both fixed-substep and
+        reverse-mode differentiable — or ``"rk4_adaptive"`` (the ERF
+        stiffness-based integrator: per-droplet ``dt = cfl/|τ|``,
+        stage-positivity step-halving, unconverged/steady exits; NOT
+        reverse-mode differentiable). Unknown values raise.
+    adaptive_cfl : float
+        Stiffness CFL of the adaptive integrator: ``dt = adaptive_cfl/|τ|``
+        with ``τ`` the growth-ODE Jacobian (ERF ``mass_change_cfl``).
+    adaptive_stol : float
+        Steady-state exit tolerance on the relative R² update per step
+        (ERF's ``stol = 1e-6``).
+    adaptive_max_steps : int
+        Iteration cap for the adaptive loop, counting accepted steps AND
+        halvings (ERF caps accepted steps at 100; halvings are additionally
+        bounded by the too-small exit).
     include_curvature : bool
         Include the Kelvin curvature term (raises equilibrium vapor pressure
         over a curved surface). True is the physically complete Köhler growth.
@@ -75,6 +89,9 @@ class SDMConfig(NamedTuple):
 
     n_substeps_condensation: int = 1
     condensation_integrator: str = "rk4"
+    adaptive_cfl: float = 1.0             # [-] dt = cfl/|tau| (ERF mass_change_cfl)
+    adaptive_stol: float = 1.0e-6         # [-] steady-state exit (ERF stol)
+    adaptive_max_steps: int = 200         # [-] accepted steps + halvings cap
     include_curvature: bool = True
     include_solute: bool = True
     solute_ionization: float = 2.0        # van't Hoff i for NaCl

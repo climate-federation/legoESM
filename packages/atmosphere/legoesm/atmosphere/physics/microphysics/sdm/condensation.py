@@ -166,6 +166,142 @@ def _euler_step(r_sq, h, S, T, e_s, N_s, include_curvature, include_solute):
     )
 
 
+def drsq_dt_jac(
+    r_sq: jax.Array,
+    T: jax.Array,
+    e_s: jax.Array,
+    N_s: jax.Array,
+    include_curvature: bool = True,
+    include_solute: bool = True,
+) -> jax.Array:
+    """Jacobian ``∂(dR²/dt)/∂(R²)`` [1/s] of the growth ODE (ERF ``rhs_jac``).
+
+    Only the Kelvin (``β/R``) and Raoult (``γ/R³``) terms depend on ``R²``; the
+    Maxwell ``α`` term is constant, so its derivative is zero — a pure droplet
+    with curvature/solute off has ``jac = 0`` (no stiffness)::
+
+        d(β u^{-1/2})/du   = -½ β u^{-3/2}
+        d(γ u^{-3/2})/du   = -(3/2) γ u^{-5/2}
+
+    with ``β = -2(a/T)/(F_k+F_d)`` and ``γ = +2 b N_s/(F_k+F_d)`` exactly as in
+    :func:`drsq_dt`. Used by the adaptive integrator as the stiffness estimate
+    ``τ`` (``dt = cfl/|τ|``).
+
+    This is the oracle's APPROXIMATE Jacobian: like ERF, it evaluates
+    ``F_k+F_d`` (including the Knudsen correction ``d_cf``) at the current
+    ``R²`` but neglects ``∂(F_d)/∂R²`` through ``d_cf`` — so it differs from
+    ``jax.grad(drsq_dt)`` (and is exactly 0 for a pure Maxwell droplet).
+    Adequate for step-size control; do not use it as an exact derivative.
+    """
+    D = constants.D_vapor
+    K = constants.k_air
+    Rv = constants.R_v
+    rho_l = constants.rho_water
+    L = constants.L_v
+
+    r_sq = jnp.maximum(r_sq, _R_SQ_FLOOR)
+    R = jnp.sqrt(r_sq)
+
+    lambda_v = 2.0 * D / jnp.sqrt(8.0 * T * Rv / jnp.pi)
+    Kn = lambda_v / R
+    d_cf = (1.0 + Kn) / (1.0 + 2.0 * Kn * (1.0 + Kn))
+    F_k = (L / (Rv * T) - 1.0) * (L * rho_l) / (K * T)
+    F_d = (rho_l * Rv * T) / (d_cf * D * e_s)
+    denom = F_k + F_d
+
+    R_inv = 1.0 / R
+    R_inv3 = R_inv * R_inv * R_inv
+    R_inv5 = R_inv3 * R_inv * R_inv
+
+    out = jnp.zeros_like(r_sq)
+    if include_curvature:
+        a = 2.0 * constants.sigma_water / (Rv * rho_l)
+        beta = -2.0 * (a / T) / denom
+        out = out - 0.5 * beta * R_inv3
+    if include_solute:
+        b = (3.0 / (4.0 * jnp.pi)) * (_M_H2O_KG / rho_l)
+        gamma = 2.0 * b * N_s / denom
+        out = out - 1.5 * gamma * R_inv5
+    return out
+
+
+def _integrate_adaptive_rk4(
+    r_sq0, t_final, S, T, e_s, N_s,
+    include_curvature, include_solute, cfl, stol, max_steps,
+):
+    """ERF adaptive stiffness-based RK4 in ``u = R²`` for ONE droplet.
+
+    Faithful port of the ERF ``TI::rk4`` loop semantics:
+
+    * each accepted step recomputes ``dt = cfl/|τ|`` from the stiffness
+      ``τ = rhs_jac(u)`` (``τ = 0`` — pure Maxwell — gives the whole remaining
+      interval, exactly ERF's ``cfl/0 → ∞`` then limit-to-``t_final``);
+    * any RK stage ``≤ 0`` or a non-finite/non-positive result halves ``dt``
+      and retries;
+    * the ERF too-small exit (``dt < 1e-12·cfl/|τ|`` AND ``dt < 1e-12·t_final``)
+      marks the droplet *unconverged*: its radius is left UNCHANGED (ERF skips
+      the particle update for unconverged droplets);
+    * steady-state exit when ``snorm = |u_new-u|/u < stol``.
+
+    Implemented as a single ``lax.while_loop`` whose iterations are either an
+    accepted step or one halving (ERF's unbounded inner halving loop is folded
+    into the outer loop; the too-small exit bounds it). NOT reverse-mode
+    differentiable (``while_loop``) — use the fixed-substep integrators for
+    gradient work.
+    """
+    dtype = r_sq0.dtype
+    eps_exit = jnp.asarray(1.0e-12, dtype)
+
+    def _dt_from_tau(u, t):
+        tau = jnp.abs(drsq_dt_jac(u, T, e_s, N_s, include_curvature, include_solute))
+        dt_stiff = jnp.where(tau > 0.0, cfl / tau, t_final - t)
+        return jnp.minimum(dt_stiff, t_final - t), tau
+
+    def cond(st):
+        u, t, dt, n, failed, steady = st
+        return (~failed) & (~steady) & (t < t_final) & (n < max_steps)
+
+    def body(st):
+        u, t, dt, n, failed, steady = st
+        k1 = drsq_dt(u, S, T, e_s, N_s, include_curvature, include_solute)
+        u2 = u + 0.5 * dt * k1
+        k2 = drsq_dt(u2, S, T, e_s, N_s, include_curvature, include_solute)
+        u3 = u + 0.5 * dt * k2
+        k3 = drsq_dt(u3, S, T, e_s, N_s, include_curvature, include_solute)
+        u4 = u + dt * k3
+        k4 = drsq_dt(u4, S, T, e_s, N_s, include_curvature, include_solute)
+        u_new = u + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        ok = ((u2 > 0.0) & (u3 > 0.0) & (u4 > 0.0)
+              & jnp.isfinite(u_new) & (u_new > 0.0))
+
+        # Accepted: advance, check steady, recompute dt from fresh stiffness.
+        snorm = jnp.abs(u_new - u) / jnp.maximum(u, _R_SQ_FLOOR)
+        steady_acc = snorm < stol
+        t_acc = t + dt
+        dt_acc, _ = _dt_from_tau(u_new, t_acc)
+
+        # Rejected: halve; ERF too-small exit -> unconverged failure.
+        dt_half = 0.5 * dt
+        _, tau_here = _dt_from_tau(u, t)
+        dt_ref = jnp.where(tau_here > 0.0, cfl / tau_here, t_final)
+        too_small = (dt_half < eps_exit * dt_ref) & (dt_half < eps_exit * t_final)
+
+        u = jnp.where(ok, u_new, u)
+        t = jnp.where(ok, t_acc, t)
+        dt = jnp.where(ok, jnp.maximum(dt_acc, 0.0), dt_half)
+        steady = jnp.where(ok, steady_acc, steady)
+        failed = jnp.where(ok, failed, too_small)
+        return (u, t, dt, n + 1, failed, steady)
+
+    dt0, _ = _dt_from_tau(r_sq0, jnp.zeros((), dtype))
+    init = (r_sq0, jnp.zeros((), dtype), dt0,
+            jnp.zeros((), jnp.int32),
+            jnp.zeros((), jnp.bool_), jnp.zeros((), jnp.bool_))
+    u, t, dt, n, failed, steady = lax.while_loop(cond, body, init)
+    # Unconverged droplets keep their initial radius (ERF skips their update).
+    return jnp.where(failed, r_sq0, u)
+
+
 def integrate_radius(
     state: SuperDropletState,
     S: jax.Array,
@@ -197,22 +333,24 @@ def integrate_radius(
 
     Notes
     -----
-    Fixed equal sub-steps are used. The growth ODE stiffens as ``R -> 0``
-    (the curvature ``1/R`` and solute ``1/R³`` terms blow up); for a droplet
-    evaporating to near the dry radius in a single step, increase
-    ``n_substeps_condensation``. ``r_sq`` is floored to ``_R_SQ_FLOOR`` after
-    every sub-step so the integration stays finite; the ERF-faithful adaptive
-    stiffness-based sub-stepping is the planned refinement (see
-    ``docs/specs/superdroplet_sdm.md``).
+    ``"rk4"``/``"euler"`` use ``cfg.n_substeps_condensation`` fixed equal
+    sub-steps (reverse-mode differentiable; the ODE stiffens as ``R -> 0``, so
+    increase the sub-step count for strong evaporation). ``"rk4_adaptive"`` is
+    the ERF stiffness-based integrator (``dt = cfl/|τ|`` from
+    :func:`drsq_dt_jac`, stage-positivity step-halving, too-small unconverged
+    exit leaving the radius unchanged, steady-state early exit) — per-droplet
+    ``lax.while_loop``, NOT reverse-mode differentiable.
     """
     if cfg.condensation_integrator == "rk4":
         step_fn = _rk4_step
     elif cfg.condensation_integrator == "euler":
         step_fn = _euler_step
+    elif cfg.condensation_integrator == "rk4_adaptive":
+        step_fn = None
     else:
         raise ValueError(
             f"Unknown SDM condensation_integrator: {cfg.condensation_integrator!r} "
-            "(expected 'rk4' or 'euler')"
+            "(expected 'rk4', 'euler', or 'rk4_adaptive')"
         )
 
     n_sub = int(cfg.n_substeps_condensation)
@@ -232,15 +370,35 @@ def integrate_radius(
     else:
         N_s = jnp.zeros_like(state.radius)
 
-    h = jnp.asarray(dt, dtype=dtype) / n_sub
     include_curvature = cfg.include_curvature
     include_solute = cfg.include_solute
 
-    def body(_, r_sq):
-        r_sq = step_fn(r_sq, h, S, T, e_s, N_s, include_curvature, include_solute)
-        return jnp.maximum(r_sq, _R_SQ_FLOOR)
+    if cfg.condensation_integrator == "rk4_adaptive":
+        # Per-droplet adaptive integration: broadcast the ambient fields to the
+        # droplet axis and vmap the single-droplet while_loop.
+        n_sd = state.radius.shape[0]
+        t_final = jnp.asarray(dt, dtype=dtype)
+        S_b = jnp.broadcast_to(S, (n_sd,)).astype(dtype)
+        T_b = jnp.broadcast_to(T, (n_sd,)).astype(dtype)
+        e_s_b = jnp.broadcast_to(e_s, (n_sd,)).astype(dtype)
+        cfl = jnp.asarray(cfg.adaptive_cfl, dtype=dtype)
+        stol = jnp.asarray(cfg.adaptive_stol, dtype=dtype)
+        max_steps = jnp.asarray(int(cfg.adaptive_max_steps), jnp.int32)
+        r_sq = jax.vmap(
+            lambda u0, s, t, es, ns: _integrate_adaptive_rk4(
+                u0, t_final, s, t, es, ns,
+                include_curvature, include_solute, cfl, stol, max_steps,
+            )
+        )(state.radius**2, S_b, T_b, e_s_b, N_s)
+    else:
+        h = jnp.asarray(dt, dtype=dtype) / n_sub
 
-    r_sq = lax.fori_loop(0, n_sub, body, state.radius**2)
+        def body(_, r_sq):
+            r_sq = step_fn(r_sq, h, S, T, e_s, N_s, include_curvature, include_solute)
+            return jnp.maximum(r_sq, _R_SQ_FLOOR)
+
+        r_sq = lax.fori_loop(0, n_sub, body, state.radius**2)
+
     radius_new = jnp.sqrt(jnp.maximum(r_sq, _R_SQ_FLOOR))
     # Inactive droplets do not grow.
     radius_new = jnp.where(state.active > 0, radius_new, state.radius)
