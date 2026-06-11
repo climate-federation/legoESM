@@ -491,6 +491,7 @@ def test_read_turb_carry_fails_fast_on_wrong_clubb_shape():
     """_read_turb_carry raises (no silent resize/retrace) when phys_state carries
     a wrong-shaped clubb_moments slot (PhysicsState not init'd for prognostic)."""
     from types import SimpleNamespace
+
     from legoesm.atmosphere.physics.turbulence.integration import _read_turb_carry
     bad = SimpleNamespace(clubb_moments=jnp.zeros((4, 1, 1)))   # minimal placeholder
     with pytest.raises(ValueError, match="prognostic CLUBB expects"):
@@ -568,16 +569,16 @@ def test_prognostic_clubb_runs_in_combined_physics_pipeline():
     cubed-sphere state, carrying PhysicsState.clubb_moments across TWO steps —
     the moments persist and evolve, tendencies stay finite. This is the
     'legoESM can be run+tested with the prognostic clubb scheme' check."""
+    from legoesm.atmosphere.held_suarez import held_suarez_init
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
     from legoesm.atmosphere.physics.physics_state import init_physics_state
     from legoesm.atmosphere.physics.radiation.config import RadiationConfig
-    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
-    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
-    from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
     from legoesm.core.field import Field
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.held_suarez import held_suarez_init
 
     n, nlev = 3, 10
     grid = create_cubed_sphere(n)
@@ -609,22 +610,67 @@ def test_prognostic_clubb_runs_in_combined_physics_pipeline():
     assert not np.allclose(np.asarray(phys_state.clubb_moments), moments0)
 
 
+def test_prognostic_clubb_differentiable_through_pipeline():
+    """End-to-end AD (the foundational legoESM requirement): jax.grad flows
+    through the REAL combined-physics pipeline with prognostic CLUBB — a scalar
+    loss on the temperature tendency is differentiable w.r.t. the input T, with a
+    finite, nonzero gradient. Confirms the new scheme keeps the model jax.grad-
+    compatible in production (not just in isolated unit tests)."""
+    from legoesm.atmosphere.held_suarez import held_suarez_init
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.core.field import Field
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    n, nlev = 2, 8
+    grid = create_cubed_sphere(n)
+    sigma = create_sigma_coordinate(nlev)
+    state = held_suarez_init(grid, sigma)
+    state = state._replace(tracers={
+        "q_v": Field(5e-3 * jnp.ones((6, n, n, nlev)), name="q_v",
+                     dims=("face", "x", "y", "level"), units="kg/kg")})
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True)),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"))
+    phys_state = init_physics_state(6 * n * n, nlev, cfg)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    T0 = state.T.data
+
+    def loss(T):
+        s = state._replace(T=state.T.replace(data=T))
+        tend, _ = physics_fn(s, grid, sigma, phys_state)
+        return jnp.sum(tend.dT_dt.data ** 2) + jnp.sum(tend.du_dt.data ** 2)
+
+    g = jax.grad(loss)(T0)
+    assert g.shape == T0.shape
+    assert np.all(np.isfinite(np.asarray(g)))
+    assert float(np.max(np.abs(np.asarray(g)))) > 0.0   # nonzero — clubb is in the graph
+
+
 def test_prognostic_clubb_pipeline_multistep_stable():
     """Production-viability: the prognostic carry stays BOUNDED + finite over many
     combined-physics steps on a realistic (smooth) cubed-sphere profile — i.e. the
     moment closure reaches a stable quasi-equilibrium with the column, it does not
     blow up. Repeated physics calls evolve PhysicsState.clubb_moments while the
     (smooth) mean state is held fixed."""
+    from legoesm.atmosphere.held_suarez import held_suarez_init
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
     from legoesm.atmosphere.physics.physics_state import init_physics_state
     from legoesm.atmosphere.physics.radiation.config import RadiationConfig
-    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
-    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
-    from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
     from legoesm.core.field import Field
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.held_suarez import held_suarez_init
 
     n, nlev = 2, 8
     grid = create_cubed_sphere(n)
