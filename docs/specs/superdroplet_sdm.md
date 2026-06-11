@@ -130,9 +130,18 @@ particle-state-threading interface). Documented, not hidden.
 - conservation: water mass (vapor+liquid) under condensation; sum(xi*m) under coalescence.
 
 ## Status (2026-06-11)
-Iterations 1-5 complete on branch `feat/sdm-microphysics`, each codex-reviewed +
+Iterations 1-8 complete on branch `feat/sdm-microphysics`, each codex-reviewed +
 hardened. Modules: `particles`, `condensation`, `kernels`, `coalescence`,
-`coupling`, `box_model`, `column`. Validations passing:
+`coupling`, `box_model`, `column`, `sedimentation`.
+- **All 5 oracle collision kernels**: Golovin, sedimentation, Long, Hall (full
+  21×15 table, bilinear, cap-only-on-large-branch), Brownian (Seinfeld-Pandis
+  Fuchs form, ERF-faithful ADDITIVE `include_brownian` wiring).
+- **Sedimentation + surface rain accumulation** (`sedimentation.py`): terminal-
+  velocity fall, crossing deposits ξm → precip [kg/m²], exact conservation,
+  `column_rainout` driver.
+Remaining oracle gaps (future work): adaptive stiffness-based / implicit
+condensation sub-stepping (BE/CN/DIRK2), resolved-flow particle advection,
+aerosol activation / multi-species, particle recycling/injection. Validations passing:
 - **Golovin box (collision)**: ensemble number decay matches analytic
   `N(t)=N0 exp(-(b/ρ_w)Lt)` to 0.36% and 2nd mass moment to 1.9%; `Σξm` conserved.
 - **Adiabatic parcel (condensation/activation)**: supersaturation peaks (~1.018)
