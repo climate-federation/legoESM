@@ -226,6 +226,7 @@ def _fixed_iteration_pcg(
     x0: jnp.ndarray,
     *,
     max_iter: int,
+    dot_weight: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Jacobi-preconditioned CG run for EXACTLY ``max_iter`` iterations.
 
@@ -261,10 +262,23 @@ def _fixed_iteration_pcg(
         consumes this ``rr`` directly for the relative-residual
         diagnostic (no second ``A_op``).
     """
+    # ``dot_weight`` (optional): weighted/owned-masked dots for every CG
+    # scalar — REQUIRED on partitioned unstructured meshes whose local
+    # arrays carry HALO entries (an unweighted local sum double-counts
+    # them in the allreduce; pass owned_mask·area).  ``None`` keeps the
+    # historical Euclidean dots bit-exactly (the lat-lon band path,
+    # whose rows partition without overlap).
+    if dot_weight is None:
+        def _dotw(a):
+            return a
+    else:
+        def _dotw(a):
+            return a * dot_weight
+
     r0 = b - A_op(x0)
     z0 = M_inv(r0)
     # Initial r·z and r·r (one batched reduction).
-    rz0, rr0 = _global_dot_batch([(r0, z0), (r0, r0)])
+    rz0, rr0 = _global_dot_batch([(_dotw(r0), z0), (_dotw(r0), r0)])
 
     # FREEZE threshold for the CG scalar divisions, RELATIVE to the
     # initial r·z (all of rz/pAp live in the same units as rz0).  Once
@@ -319,14 +333,16 @@ def _fixed_iteration_pcg(
     def body(_i: int, st: _CGState) -> _CGState:
         Ap = A_op(st.p)
         # Reduction 1/iter: p·Ap (needed for α).
-        (pAp,) = _global_dot_batch([(st.p, Ap)])
+        (pAp,) = _global_dot_batch([(_dotw(st.p), Ap)])
         alpha = _safe_div(st.rz, pAp)
         x_new = st.x + alpha * st.p
         r_new = st.r - alpha * Ap
         z_new = M_inv(r_new)
         # Reduction 2/iter: r·z (for β) AND r·r (residual monitor),
         # batched into one message.
-        rz_new, rr_new = _global_dot_batch([(r_new, z_new), (r_new, r_new)])
+        rz_new, rr_new = _global_dot_batch(
+            [(_dotw(r_new), z_new), (_dotw(r_new), r_new)],
+        )
         beta = _safe_div(rz_new, st.rz)
         p_new = z_new + beta * st.p
         return _CGState(x=x_new, r=r_new, p=p_new, rz=rz_new, rr=rr_new)
@@ -401,10 +417,12 @@ def _fixed_iteration_pcg_single_reduce(
     z0 = M_inv(r0)
     w0 = A_op(z0)
     # ONE batched init reduction: ρ0, μ0 in the W-inner product, plus
-    # the (Euclidean) residual monitor — same rr convention as the
-    # standard body so the diagnostic is variant-comparable.
+    # the residual monitor — ALSO W-weighted: on halo-carrying
+    # partitioned meshes (MPAS) an unweighted local r·r double-counts
+    # halo entries in the allreduce; on lat-lon this makes the
+    # diagnostic the area-weighted norm (documented, conservative).
     rho0, mu0, rr0 = _global_dot_batch(
-        [(r0 * W, z0), (w0 * W, z0), (r0, r0)],
+        [(r0 * W, z0), (w0 * W, z0), (r0 * W, r0)],
     )
 
     finfo = jnp.finfo(b.dtype)
@@ -434,9 +452,9 @@ def _fixed_iteration_pcg_single_reduce(
         z_new = M_inv(r_new)
         w_new = A_op(z_new)
         # The single batched reduction of the iteration (W-dots for
-        # the CG scalars; Euclidean r·r monitor).
+        # the CG scalars AND the r·r monitor — see the init comment).
         rho_new, mu_new, rr_new = _global_dot_batch(
-            [(r_new * W, z_new), (w_new * W, z_new), (r_new, r_new)],
+            [(r_new * W, z_new), (w_new * W, z_new), (r_new * W, r_new)],
         )
         beta = _safe_div(rho_new, st.rho)
         t_new = mu_new - beta * beta * st.t
@@ -572,8 +590,12 @@ def solve_helmholtz_implicit(
     #   "single_reduce" — 1 batched reduction/iter (Chronopoulos-Gear);
     #                     the multi-node weak-scaling lever.
     if pcg_variant == "standard":
+        # ``dot_weight`` optional here (None = historical Euclidean dots,
+        # bit-exact for the lat-lon band path); REQUIRED semantics on
+        # halo-carrying partitioned meshes — see _fixed_iteration_pcg.
         eta_new, rr = _fixed_iteration_pcg(
             A_op, rhs, M_inv, x0, max_iter=fixed_iters,
+            dot_weight=dot_weight,
         )
     elif pcg_variant == "single_reduce":
         if dot_weight is None:
@@ -594,7 +616,11 @@ def solve_helmholtz_implicit(
             "solve_helmholtz_implicit: unknown pcg_variant "
             f"{pcg_variant!r}; expected 'standard' or 'single_reduce'."
         )
-    (bb,) = _global_dot_batch([(rhs, rhs)])
+    # rhs norm for the relative-residual diagnostic — same weighting as
+    # the solver's rr (owned-masked on partitioned meshes; halo entries
+    # would double-count in the allreduce otherwise).
+    _rhs_w = rhs if dot_weight is None else rhs * dot_weight
+    (bb,) = _global_dot_batch([(_rhs_w, rhs)])
     eps = jnp.asarray(1.0e-30, dtype=rhs.dtype)
     rel = jax.lax.stop_gradient(jnp.sqrt(rr / jnp.maximum(bb, eps)))
     return eta_new, HelmholtzSolveDiagnostics(

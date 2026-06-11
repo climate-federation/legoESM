@@ -284,7 +284,20 @@ def is_multi_process() -> bool:
     from legoesm.core.operators import is_distributed
     if jax.process_count() > 1:
         return True
-    return is_distributed()
+    if is_distributed():
+        return True
+    # Voronoi/MPAS cell-partition MPI arms NO halo backend (it carries a
+    # partition layout instead), so the two checks above are FALSE there
+    # — the distributed-MPAS-PCG triangulation (job 8460616) caught
+    # ``_global_dot_batch`` silently skipping its allreduce: every rank
+    # exactly solved its own half-system (rel_res 1e-17) while
+    # disagreeing globally.  The active layout is the multi-process
+    # signal on that path.  NOTE for consumers: Voronoi local arrays
+    # carry HALO entities — a partial sum feeding the allreduce must be
+    # owned-masked or it double-counts (see
+    # ``VoronoiPartitionLayout.owned_mask_cells``).
+    from legoesm.parallel.voronoi_mpi import get_active_voronoi_layout
+    return get_active_voronoi_layout() is not None
 
 
 def mpi_world_size() -> int:

@@ -248,24 +248,29 @@ def barotropic_implicit_mpas(
     Step-4 note), so this residual is NOT a global reduction.  Log /
     assert it OUTSIDE the JIT; never branch the compiled step on it.
     """
-    # FAIL-FAST at ENTRY, before any state-derived JAX work (codex
-    # 2026-06-11 MINOR: the previous placement built the predictor/RHS
-    # first).  Predicate (codex CRITICAL): ``is_distributed()`` alone
-    # NEVER fires on the Voronoi MPI path — it checks the global halo
-    # backend, which ``initialize_voronoi_mpi`` does not arm; the
-    # mpi4py world size trips on any real multi-rank launch.  This
-    # solver would otherwise run a SILENT rank-local stock CG + a
-    # rank-local mass projection (see TODO(distributed-mpas-pcg)).
-    from legoesm.core.operators import is_distributed as _is_distributed
+    # Distributed dispatch at ENTRY (resolves TODO(distributed-mpas-pcg)):
+    # when ``initialize_voronoi_mpi`` has armed a partition layout, the
+    # solve runs the shared fixed-M PCG with (a) a cell-halo exchange
+    # composed into every A_op application — the local TRiSK stencil
+    # then sees fresh ghost-ring values each iteration — and (b)
+    # owned-cell-masked area-weighted dots (``dot_weight``), so the
+    # global reductions never double-count halo cells.  A multi-rank
+    # launch WITHOUT the layout stays a loud refusal: the stock-CG
+    # fallback would silently run rank-local (codex CRITICAL,
+    # 2026-06-11 — ``is_distributed()`` alone never fires here, hence
+    # the mpi4py world-size predicate).
     from legoesm.parallel.reductions import mpi_world_size as _world
-    if _is_distributed() or _world() > 1:
+    from legoesm.parallel.voronoi_mpi import get_matching_voronoi_layout
+    # Mesh-matched accessor (codex MAJOR): a stale layout from another
+    # mesh must not hijack this solve into the distributed branch.
+    _vlayout = get_matching_voronoi_layout(mesh)
+    if _vlayout is None and _world() > 1:
         raise NotImplementedError(
-            "MPAS barotropic_solver='implicit_cn' is single-rank only: "
-            "the stock-CG solve and its mass projection are rank-local "
-            "and would silently diverge under MPI.  Use "
-            "barotropic_solver='explicit_substep' for distributed MPAS "
-            "runs (see TODO(distributed-mpas-pcg) in "
-            "barotropic_implicit_mpas.py)."
+            "MPAS barotropic_solver='implicit_cn' under MPI requires the "
+            "Voronoi partition layout (call initialize_voronoi_mpi and "
+            "build the model on layout.local_mesh); without it the "
+            "stock-CG solve and its mass projection would silently run "
+            "rank-local.  Use 'explicit_substep' otherwise."
         )
     g = jnp.asarray(config.g)
     mask = state.land_mask.data
@@ -395,28 +400,80 @@ def barotropic_implicit_mpas(
     A_op = _make_helmholtz(H_e_old, coeff, mesh, mask, edge_mask)
     M_inv = _make_diag_preconditioner(H_e_old, coeff, mesh, mask, edge_mask)
 
-    pcg_tol = jnp.asarray(
-        config.barotropic_implicit_pcg_tol, dtype=eta_dtype,
-    )
-    pcg_maxiter = int(config.barotropic_implicit_pcg_maxiter)
-    eta_new, _info = jax.scipy.sparse.linalg.cg(
-        A_op, rhs, x0=eta_old, tol=pcg_tol, maxiter=pcg_maxiter, M=M_inv,
-    )
-    eta_new = eta_new * mask
-    # Single-rank only (see Step-4 note): the area-weighted sums are
-    # rank-local, which is exact because there is exactly one rank.  When
-    # distributed MPAS lands, these must become owned-cell-masked global
-    # SUMs (NOT a bare ``batch_allreduce_mpi``, which would double-count
-    # halo cells).  Accumulate in ``ocean_diagnostics`` precision so the
-    # huge-area ``target - actual`` cancellation survives in f32.
+    if _vlayout is not None:
+        # ---- Distributed fixed-M PCG (shared solver) ----------------
+        # The local TRiSK A_op is correct on OWNED cells provided its
+        # input carries fresh ghost values — compose one cell-halo
+        # exchange per application (one message round per PCG
+        # iteration, static collective schedule).  Dots are owned-
+        # masked AND area-weighted: owned-masking removes the halo
+        # double-count in the allreduce; the area weight is the inner
+        # product in which this FV Helmholtz is self-adjoint (required
+        # by the single_reduce recurrences, harmless for standard).
+        from legoesm.parallel.halo_exchange_voronoi import (
+            VoronoiHaloExchange,
+        )
+        from legoesm.ocean.dynamics.barotropic_common import (
+            solve_helmholtz_implicit,
+        )
+        _exchanger = VoronoiHaloExchange(_vlayout.partition, backend="mpi")
+
+        def A_op_dist(eta_in: jnp.ndarray) -> jnp.ndarray:
+            return A_op(_exchanger.exchange_cell_field(eta_in))
+
+        _owned = _vlayout.owned_mask_cells.astype(eta_dtype)
+        _w_dots = _owned * mesh.areaCell.astype(eta_dtype) * mask
+        eta_new, _solve_diag = solve_helmholtz_implicit(
+            A_op_dist, rhs, M_inv, eta_old,
+            distributed=True,
+            fixed_iters=int(config.barotropic_implicit_pcg_fixed_iters),
+            residual_tol=config.barotropic_implicit_pcg_residual_tol,
+            stock_cg_tol=config.barotropic_implicit_pcg_tol,
+            stock_cg_maxiter=int(config.barotropic_implicit_pcg_maxiter),
+            pcg_variant=str(config.barotropic_implicit_pcg_variant),
+            dot_weight=_w_dots,
+        )
+        # Refresh the halo ring of the solution before downstream
+        # stencils consume it.
+        eta_new = _exchanger.exchange_cell_field(eta_new) * mask
+    else:
+        pcg_tol = jnp.asarray(
+            config.barotropic_implicit_pcg_tol, dtype=eta_dtype,
+        )
+        pcg_maxiter = int(config.barotropic_implicit_pcg_maxiter)
+        eta_new, _info = jax.scipy.sparse.linalg.cg(
+            A_op, rhs, x0=eta_old, tol=pcg_tol, maxiter=pcg_maxiter, M=M_inv,
+        )
+        eta_new = eta_new * mask
+    # Mass projection: area-weighted sums.  Single-rank: plain local
+    # sums (exact).  Distributed: OWNED-masked partial sums + ONE
+    # batched global allreduce (a bare allreduce of unmasked local sums
+    # would double-count halo cells).  Accumulate in
+    # ``ocean_diagnostics`` precision so the huge-area ``target -
+    # actual`` cancellation survives in f32.
     from legoesm.core.precision import cast as _cast
     _M = "ocean_diagnostics"
     _area_cell = mesh.areaCell.astype(eta_dtype)
     _area_acc = _cast(_area_cell, _M, "accumulate")
     _wa = _area_acc * _cast(mask, _M, "accumulate")
-    _ocean_area = jnp.sum(_wa)
-    _target_mass = jnp.sum(_cast(rhs, _M, "accumulate") * _area_acc)
-    _actual_mass = jnp.sum(_cast(eta_new, _M, "accumulate") * _area_acc)
+    if _vlayout is not None:
+        _owned_acc = _cast(_owned, _M, "accumulate")
+        _wa = _wa * _owned_acc
+        _area_proj = _area_acc * _owned_acc
+    else:
+        _area_proj = _area_acc
+    _ocean_area_l = jnp.sum(_wa)
+    _target_mass_l = jnp.sum(_cast(rhs, _M, "accumulate") * _area_proj)
+    _actual_mass_l = jnp.sum(_cast(eta_new, _M, "accumulate") * _area_proj)
+    if _vlayout is not None:
+        from legoesm.parallel.reductions import batch_allreduce_mpi
+        _ocean_area, _target_mass, _actual_mass = batch_allreduce_mpi(
+            [_ocean_area_l, _target_mass_l, _actual_mass_l],
+        )
+    else:
+        _ocean_area = _ocean_area_l
+        _target_mass = _target_mass_l
+        _actual_mass = _actual_mass_l
     _correction = (_target_mass - _actual_mass) / jnp.maximum(_ocean_area, 1e-30)
     eta_new = (eta_new + _correction.astype(eta_dtype) * mask) * mask
     # Residual diagnostic for the single-rank stock-CG path (uniform
@@ -431,13 +488,34 @@ def barotropic_implicit_mpas(
     # Mass-conserving floor clamp (safety net for extreme transients;
     # in normal operation this is a no-op since the PCG converges to
     # well-resolved η).
-    eta_new = _clamp_redistribute(eta_new, eta_floor, mask, mesh.areaCell)
+    if _vlayout is not None:
+        eta_new = _clamp_redistribute(
+            eta_new, eta_floor, mask, mesh.areaCell,
+            owned_weight=_owned, force_global=True,
+        )
+    else:
+        eta_new = _clamp_redistribute(
+            eta_new, eta_floor, mask, mesh.areaCell,
+        )
 
     # Residual diagnostic of the FINAL eta (post projection + clamp).
     # Rank-local (single-rank path); ``stop_gradient`` keeps it out of
     # reverse mode.
-    _rr = jnp.sum((rhs - A_op(eta_new)) ** 2)
-    _bb = jnp.sum(rhs ** 2)
+    _res_vec = rhs - A_op(eta_new)
+    if _vlayout is not None:
+        # Owned-masked global residual (eta_new's halo ring was
+        # refreshed above, so the local A_op is exact on owned cells;
+        # halo rows are excluded from the sums and the two squared
+        # norms ride one batched allreduce).
+        _rr_l = jnp.sum(_owned * _res_vec**2)
+        _bb_l = jnp.sum(_owned * rhs**2)
+        from legoesm.parallel.reductions import (
+            batch_allreduce_mpi as _bar,
+        )
+        _rr, _bb = _bar([_rr_l, _bb_l])
+    else:
+        _rr = jnp.sum(_res_vec**2)
+        _bb = jnp.sum(rhs**2)
     _solve_diag_rel = jax.lax.stop_gradient(
         jnp.sqrt(_rr / jnp.maximum(_bb, jnp.asarray(1.0e-30, dtype=eta_dtype)))
     )
