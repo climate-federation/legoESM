@@ -251,17 +251,18 @@ def _riming_setup():
     return m, tables, kernel
 
 
-def test_riming_tables_full_grid():
+def test_riming_tables_oracle_traversal():
     from legoesm.atmosphere.physics.microphysics.fast_sbm import (
         precompute_riming_tables)
     m = mass_doubling_grid()
     n = m.shape[0]
     t = precompute_riming_tables(m)
-    # Full (i,j) grid over source bins 0..n-2 (both species), not the
-    # i<=j triangle.
-    assert len(t.i_idx) == (n - 1) * (n - 1)
     i = np.asarray(t.i_idx); j = np.asarray(t.j_idx)
-    assert np.all(i <= n - 2) and np.all(j <= n - 2)
+    # Oracle coll_xyx_lwf with indc=1 skips j<=i (collector strictly larger
+    # than the collected droplet) → (n-1)(n-2)/2 pairs, all j > i.
+    assert np.all(j > i)
+    assert np.all(j <= n - 2)
+    assert len(t.i_idx) == (n - 1) * (n - 2) // 2
 
 
 def test_riming_conserves_total_mass_grows_ice():

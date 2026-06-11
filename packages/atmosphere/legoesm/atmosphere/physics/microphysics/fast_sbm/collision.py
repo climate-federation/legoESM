@@ -149,21 +149,25 @@ def precompute_collision_tables(masses) -> CollisionTables:
 
 
 def precompute_riming_tables(masses) -> CollisionTables:
-    """Full-grid pair tables for CROSS-SPECIES collection (oracle
-    ``coll_xyx_lwf`` over the full ``(i,j)`` grid, not the ``i≤j`` triangle).
+    """Pair tables for CROSS-SPECIES collection (oracle ``coll_xyx_lwf``).
 
-    A collector bin ``j`` and a collected bin ``i`` merge to mass
-    ``x0=m_i+m_j`` landing in bin ``k=ima(i,j)`` with the same Courant
-    number as self-collection (``ima``/``chucm`` depend only on ``m_i+m_j``,
-    so the matrix is symmetric — oracle ``courant_bott_KS`` fills it
-    symmetrically). Every ordered pair with both source bins below the top
-    is emitted. NumPy static geometry.
+    Collected bin ``i`` and collector bin ``j`` merge to mass
+    ``x0=m_i+m_j`` landing in bin ``k=ima(i,j)``; ``ima``/``chucm`` depend
+    only on ``m_i+m_j`` so the Courant geometry is the same symmetric
+    matrix as self-collection (oracle ``courant_bott_KS``).
+
+    Only ``j > i`` pairs are emitted: the oracle loops ``jmin=i; do
+    j=jmin+indc`` with ``indc=1`` for every riming call
+    (``module_mp_fast_sbm.F:880,883`` + call sites 8462/8495/8534), so the
+    collector bin is strictly larger than the collected bin — physically,
+    ice in a larger mass bin sweeps up the smaller droplets it overtakes.
+    ``(n-1)(n-2)/2`` pairs. NumPy static geometry.
     """
     m = np.asarray(masses, dtype=np.float64)
     n = m.shape[0]
     ii, jj, kk, cc = [], [], [], []
     for i in range(n - 1):          # collected (e.g. liquid) bin
-        for j in range(n - 1):      # collector (e.g. ice) bin
+        for j in range(i + 1, n - 1):   # collector bin, strictly > i
             x0 = m[i] + m[j]
             for k in range(max(i, j), n):
                 if k == 0:

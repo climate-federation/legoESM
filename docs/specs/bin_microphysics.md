@@ -163,6 +163,17 @@ Ice-ice aggregation (`coll_xyz`, snow/graupel/hail cross-species), LWF +
 kernel-table loader for bit-fidelity, per-bin prognostic tracers (replace
 per-step reconstruction), persistent aerosol reservoir.
 
+**Codex iter-14 review** (HIGH/FAIL → fixed): `precompute_riming_tables`
+emitted the full `(i,j)` grid, but oracle `coll_xyx_lwf` (`jmin=i; do
+j=jmin+indc`, `indc=1`) skips `j≤i` — the collector ice bin is strictly
+larger than the collected droplet (riming sweeps up *smaller* droplets).
+Restricted to `j>i` (`(n-1)(n-2)/2` pairs); removed pairs were spurious
+small-ice-collects-large-liquid interactions. Test updated to the oracle
+traversal; added a warm-cell gradient test through the where-discarded
+riming branch. g-space mass conservation confirmed machine-precision
+(3.3e-14). Same-grid (single ice spectrum) = documented port
+simplification vs the oracle's per-habit `x,y` grids.
+
 ## Iteration log (compressed at iter 10)
 
 Iters 1–9 built the warm-rain chain bottom-up, each commit codex-reviewed +

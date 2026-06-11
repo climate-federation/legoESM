@@ -278,6 +278,30 @@ def test_supercooled_riming_grows_ice_from_cloud():
         + np.asarray(out_ice.precipitation), rtol=1e-7)
 
 
+def test_warm_cell_grad_through_discarded_riming():
+    # Riming runs unconditionally then where-selects on T<T_freeze (codex
+    # iter-14 LOW): a WARM cell carrying ice+cloud must have finite
+    # gradients even though its riming branch is discarded — guards the
+    # where-trap on the unselected supercooled branch.
+    T = jnp.full((NCOL, NLEV), constants.T_freeze + 5.0)
+    p = jnp.full((NCOL, NLEV), P0)
+    e = 1.0 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
+    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    rho = jnp.full((NCOL, NLEV), 1.1)
+    hyd = make_zero_hydrometeors(NCOL, NLEV)._replace(
+        q_c=jnp.full((NCOL, NLEV), 1.0e-3),
+        q_i=jnp.full((NCOL, NLEV), 5.0e-4))
+    p_half = jnp.zeros((NCOL, NLEV + 1))
+    dz = jnp.full((NCOL, NLEV), 100.0)
+
+    def loss(Tx):
+        out = fast_sbm_microphysics(Tx, q_v, hyd, p, p_half, rho, dz, DT)
+        return jnp.sum(out.dT_dt ** 2)
+
+    g = jax.grad(loss)(T)
+    assert np.all(np.isfinite(np.asarray(g)))
+
+
 def test_cold_cell_does_not_melt_ice():
     # A subfreezing cell leaves carried ice intact (no melt source).
     T = jnp.full((NCOL, NLEV), constants.T_freeze - 10.0)
