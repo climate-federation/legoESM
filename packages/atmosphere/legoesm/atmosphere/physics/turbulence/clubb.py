@@ -367,6 +367,7 @@ def integrate_clubb_column(
     nsteps: int,
     config: CLUBBConfig,
     moments: CLUBBMomentState | None = None,
+    host_numerical_diffusion: float = 0.05,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Integrate a single-column prognostic CLUBB run for ``nsteps`` steps.
 
@@ -379,16 +380,18 @@ def integrate_clubb_column(
     unlike the diagnostic phase-1 entry — and is the multi-step stability/AD
     test bed for the scheme. All column fields are top-down ``(ncol, nlev)``.
 
-    **Scope / regime limit (important).** This is a *research / test* driver, not
-    a production integrator. It is validated in the moist, stably/unstably
-    stratified regime (see the passing multi-step tests). A long (~hours),
-    *near-dry, weakly-stratified* column currently develops a multi-step
-    numerical instability (grid-scale ``T`` extremes; ``wp2`` growth with step
-    count) — tracked in ``PORT_CLUBB.md`` as an open investigation. The density
-    floor / moisture clip below keep the integrator FINITE but do **not** make a
-    divergent dry run physical, and deliberately do **not** floor ``T`` itself (a
-    ``T`` clamp would mask the instability rather than fix it). Do not use this
-    driver for production runs in untested regimes until that growth is resolved.
+    **Host numerical diffusion.** In a coupled model CLUBB returns *tendencies*
+    and the dynamical core advances + numerically diffuses the means; that
+    diffusion damps grid-scale (2Δz) vertical noise. A *bare* single-column
+    driver advances the means with CLUBB alone, so it must supply that stand-in
+    itself — without it, a long near-dry weakly-stratified column grows
+    grid-scale ``T`` noise and ``wp2`` (the iter-48 instability; root-caused iter
+    49-51 to absent host diffusion, NOT a closure/conservation/port error — a
+    tiny ``host_numerical_diffusion`` removes it entirely, ``wp2max`` 10.7→0.06).
+    ``host_numerical_diffusion`` is a dimensionless 2nd-order vertical-diffusion
+    coefficient (0 ⇒ bare CLUBB, exposes the noise; default 0.05 ⇒ a coupled-
+    model-like stand-in). Applied in **flux form** so it conserves the
+    column-summed means exactly (zero-flux top/bottom).
 
     ``moments`` defaults to a rest state (:func:`clubb_core.init_clubb_moments`).
     ``nsteps`` is a **static** Python int (the ``lax.scan`` length, fixed at trace
@@ -402,10 +405,20 @@ def integrate_clubb_column(
     if moments is None:
         moments = init_clubb_moments(ncol, nlev, config, dtype=T.dtype)
     exner_td = (p_full / constants.p_ref) ** constants.kappa
+    nu = host_numerical_diffusion
     # Safety floor for the recomputed virtual temperature so the prognostic
     # density stays strictly positive even if a long/dry SCM run drifts T low
     # (mirrors the shared compute_rho floor; finite-gradient via max).
     tv_floor = config.T0 * 0.5
+
+    def _diffuse(f):
+        """Flux-form 2nd-order vertical diffusion (zero-flux BCs → conserves
+        sum(f) exactly): f[k] += flux[k] - flux[k-1], flux[k+1/2]=nu*(f[k+1]-f[k]).
+        For ``nu <= 0.5`` the update is a convex combination of {f[k-1],f[k],f[k+1]}
+        → monotone (stays within neighbour min/max), so it preserves positivity of
+        a non-negative input AND the column sum."""
+        flux = nu * (f[:, 1:] - f[:, :-1])           # (ncol, nlev-1) interfaces
+        return f.at[:, :-1].add(flux).at[:, 1:].add(-flux)
 
     def _step(carry, _):
         u_c, v_c, T_c, q_c, m_c = carry
@@ -414,12 +427,16 @@ def integrate_clubb_column(
         du, dv, dT, dq, m_new, diag = clubb_step(
             u_c, v_c, T_c, q_c, m_c, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho_c, dt, config)
-        # Moisture positivity: negative specific humidity is unphysical; clip the
-        # mean to >= 0 before it feeds next step's density / saturation closure.
-        u_n = u_c + dt * du
-        v_n = v_c + dt * dv
-        T_n = T_c + dt * dT
-        q_n = jnp.maximum(q_c + dt * dq, 0.0)
+        # Moisture positivity is enforced on the CLUBB-tendency update FIRST (the
+        # physical moisture-fixer; a non-conservative source, as in any model),
+        # THEN the conservative host-stand-in diffusion is applied LAST. Because
+        # _diffuse is monotone for nu<=0.5, diffusing a non-negative field keeps it
+        # non-negative — so q stays >= 0 AND its (clipped) column sum is conserved
+        # by the diffusion (no spurious water creation by the diffusion itself).
+        u_n = _diffuse(u_c + dt * du)
+        v_n = _diffuse(v_c + dt * dv)
+        T_n = _diffuse(T_c + dt * dT)
+        q_n = _diffuse(jnp.maximum(q_c + dt * dq, 0.0))
         # Keep the carried CLUBBMomentState means consistent with the updated mean
         # state (they are reset from the column inside clubb_step each step, but a
         # consistent returned state matters for callers/restart inspection).

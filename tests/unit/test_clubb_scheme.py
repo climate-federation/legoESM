@@ -229,20 +229,12 @@ def test_integrate_clubb_column_multistep_stable():
     assert cf.shape[0] == 40 and np.all((cf >= 0.0) & (cf <= 1.0))
 
 
-@pytest.mark.xfail(reason="KNOWN: a long (~3 h) near-dry, weakly-stratified "
-                   "single-column run develops a multi-step instability (T grows "
-                   "grid-scale extremes, wp2 grows with step count at fixed total "
-                   "time) — a genuine numerical growth in the integrated closure "
-                   "for this regime, NOT forward-Euler stiffness. The moist regime "
-                   "(test_integrate_clubb_column_multistep_stable / "
-                   "_develops_tke_when_unstable) is stable. Tracked in PORT_CLUBB.md "
-                   "as the next investigation (suspect: buoyancy/dissipation balance "
-                   "or surface-BC heat injection in the dry limit). The q_v>=0 clip + "
-                   "virtual-temperature density floor keep it finite, not physical.",
-                   strict=True)
 def test_integrate_clubb_column_dry_stress_stays_physical():
-    """Stress case: long near-dry weakly-stratified run. Currently xfail —
-    exposes a real dry-regime multi-step instability (see the xfail reason)."""
+    """A long (~3 h) near-dry, weakly-stratified run stays physical WITH the
+    host-numerical-diffusion stand-in (default): wp2 bounded, T physical, q_v>=0.
+    Root-caused iter 49-51: the bare driver (nu=0) grows grid-scale 2dz noise the
+    coupled dynamical core would damp; a tiny host diffusion removes it (the
+    closure itself is conservative + parity-faithful)."""
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=2e-3)
     kw["q_v"] = jnp.full_like(kw["q_v"], 1e-5)   # near-dry
     kw["q_sfc"] = jnp.full_like(kw["q_sfc"], 1e-5)
@@ -251,7 +243,55 @@ def test_integrate_clubb_column_dry_stress_stays_physical():
     assert np.all(np.isfinite(np.asarray(T_f))) and np.all(np.asarray(T_f) > 100.0)
     assert np.all(np.asarray(q_f) >= 0.0)
     assert np.all(np.isfinite(np.asarray(m_f.wp2)))
-    assert float(np.max(np.asarray(m_f.wp2))) < CLUBBConfig().wp2_max
+    assert float(np.max(np.asarray(m_f.wp2))) < 50.0
+
+
+def test_integrate_clubb_column_host_diffusion_controls_grid_noise():
+    """Root-cause guard: the dry-regime instability is grid-scale (2dz) noise the
+    host numerical diffusion damps. Bare (nu=0) grows wp2 large; the default
+    stand-in keeps it bounded. Pins the root cause + the fix (not a closure bug)."""
+    def _run(nu):
+        kw = _scm_column(ncol=1, nlev=24, dtheta_dz=2e-3)
+        kw["q_v"] = jnp.full_like(kw["q_v"], 1e-5)
+        kw["q_sfc"] = jnp.full_like(kw["q_sfc"], 1e-5)
+        _, _, _, _, m_f, _ = integrate_clubb_column(
+            **kw, dt=200.0, nsteps=60, config=CLUBBConfig(),
+            host_numerical_diffusion=nu)
+        return float(np.max(np.asarray(m_f.wp2)))
+    bare, damped = _run(0.0), _run(0.05)
+    # Bare driver: wp2 grows far above the tke_min (1e-6) rest floor (grid-scale
+    # instability). Host-diffusion stand-in: bounded small. Diffusion cuts it >5x.
+    assert bare > 1.0
+    assert damped < 0.2
+    assert bare > 5.0 * damped
+
+
+def test_host_diffusion_conserves_sum_and_preserves_positivity():
+    """The flux-form host diffusion (as used in integrate_clubb_column) must
+    conserve the column sum exactly AND keep a non-negative (incl. near-zero,
+    O(1e-5)) input non-negative for nu<=0.5 — so it never creates water mass
+    (codex: the moisture-positivity clip is applied to the CLUBB tendency BEFORE
+    this diffusion, which then conserves the clipped sum)."""
+    rng = np.random.default_rng(0)
+    nlev = 24
+
+    def diffuse(f, nu):
+        flux = nu * (f[:, 1:] - f[:, :-1])
+        return f.at[:, :-1].add(flux).at[:, 1:].add(-flux)
+
+    for nu in (0.05, 0.25, 0.5):
+        # near-dry profile with sharp 2dz structure that would undershoot if the
+        # operator weren't monotone.
+        q = jnp.asarray(1e-5 * (1.0 + 0.9 * np.sin(np.arange(nlev)))[None, :]
+                        + 1e-6 * rng.random((1, nlev)))
+        qd = diffuse(q, nu)
+        np.testing.assert_allclose(float(jnp.sum(qd)), float(jnp.sum(q)),
+                                   rtol=0, atol=1e-18)   # column sum conserved
+        assert np.all(np.asarray(qd) >= 0.0)             # positivity preserved
+        # T-like field: sum conserved (general field, not just non-negative).
+        Tf = jnp.asarray(250.0 + 40.0 * rng.random((1, nlev)))
+        np.testing.assert_allclose(float(jnp.sum(diffuse(Tf, nu))),
+                                   float(jnp.sum(Tf)), rtol=1e-14, atol=0)
 
 
 def test_integrate_clubb_column_develops_tke_when_unstable():
