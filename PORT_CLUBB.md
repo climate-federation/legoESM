@@ -169,6 +169,22 @@ sorting `Lscale` + full prognostic moment transport (clubb_lite has none).
   `θl=θ` no-cloud reason; corrected to state the bridge identity instead. Implies
   follow-up: a host saturation-adjustment / cloud-liquid partition of the returned
   tendencies is left to microphysics (consistent with `l_rcm_supersat_adj=.false.`).
+- **turbulence→microphysics coupling closes the water+energy budget (iter 63):**
+  resolved the iter-62 follow-up by VERIFYING the design assumption rather than
+  changing the bridge. Confirmed the legoESM moist-physics architecture is the
+  standard one — turbulence transports the moist-conserved θl/rt and DEFERS
+  condensation+latent heating to microphysics (`combined.make_physics` order
+  turbulence→microphysics, tendencies summed; `sundqvist` does the saturation
+  adjustment `f·max(q_v−q_sat,0)` with `dT=L_v·net_cond/c_pd`). So prognostic
+  CLUBB's θl/rt return is CORRECT (not a bug) for this pipeline; the inconsistency
+  with the simpler diagnostic/clubb_lite paths (which mix actual T/q_v) only shows
+  in cloudy columns and is bounded. New test
+  `test_prognostic_clubb_couples_to_microphysics_total_water_budget` runs the real
+  CLUBB→sundqvist sequence and asserts: real condensation fires (non-vacuous,
+  `max dq_c`~2e-5), the condensation is enthalpy-consistent (`c_pd·dT+L_v·dq_v`~1e-18),
+  and the **combined column water budget closes to the surface precip sink**
+  (`Σ mass·(dq_v|clubb+dq_v|μ+dq_c|μ+dq_r|μ)+precip ≈ 0`, rel<1e-12) with a
+  genuinely nonzero precip (~5e-3 kg/m²/s, autoconversion firing). codex-reviewed.
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz

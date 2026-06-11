@@ -468,6 +468,86 @@ def test_prognostic_clubb_conserves_column_heat_no_sfc_flux():
     assert np.all(np.abs(col_dthl) * 150.0 / col_thl < 1e-12)
 
 
+def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
+    """Validate the moist-physics CONTRACT that makes prognostic CLUBB's
+    variable convention correct.
+
+    Prognostic CLUBB transports the moist-conserved variables θl (``thlm``) and
+    total water rt (``rtm``), and the column bridge reports them back as the
+    ``T``/``q_v`` tendencies (``T = thlm·Π``, ``q_v = rtm``; clubb.py). It does
+    NOT do a saturation adjustment — it defers condensation + the associated
+    latent heating to the microphysics scheme. That deferral is only correct if
+    turbulence and microphysics together close the column water + energy budget.
+
+    Production execution model (``combined.make_physics``): every physics module
+    is called on the SAME (original) state and the tendencies are SUMMED — there
+    is no sequential state update between turbulence and microphysics. So this
+    test computes BOTH the CLUBB step and the ``sundqvist`` condensation from the
+    same spun-up column (NOT a CLUBB-then-micro chain) and checks the summed-
+    tendency budget. The budget closes because each stage independently conserves:
+    CLUBB conserves total water (``Σ mass·dq_v|clubb ≈ 0`` at zero surface flux),
+    and ``sundqvist``'s column water budget closes to the surface precip sink, so
+
+        Σ mass·(dq_v|clubb + dq_v|μ + dq_c|μ + dq_r|μ) + precip ≈ 0 .
+
+    Scope: the spun-up column is supersaturated (independent of CLUBB), so the
+    branch exercised is condensation → autoconversion → surface precip — exactly
+    the branch CLUBB's transported moisture feeds. Incoming rain is zero
+    (``dq_r|μ ≡ 0`` by the diagnostic-rain scheme's instant-fallout semantics),
+    so the rain-drain path is inactive here by construction and is covered by the
+    microphysics' own tests, not this coupling test.
+
+    Asserted alongside: (a) real condensation (non-vacuous), and (b) the
+    condensation is enthalpy-consistent (``c_pd·dT + L_v·dq_v = 0``)."""
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+    from legoesm.atmosphere.physics.microphysics.output import make_zero_hydrometeors
+    from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
+    from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
+    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    dt = 150.0
+    # Spin up real turbulent fluxes; the resulting column is supersaturated.
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=dt, nsteps=40, config=cfg)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    ncol, nlev = T_f.shape
+    dz = jnp.abs(kw["z_half"][:, :-1] - kw["z_half"][:, 1:])
+    # Production model: BOTH modules act on the SAME state; tendencies are summed.
+    out, _ = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, pack_clubb_moments(m_f), kw["p_full"], kw["p_half"],
+        kw["z_full"], kw["z_half"], T_f[:, -1], q_f[:, -1], rho, dt, cfg)
+    assert np.all(np.asarray(out.lhflx) == 0.0)          # zero sfc moisture flux
+    hyd = make_zero_hydrometeors(ncol, nlev, dtype=T_f.dtype)   # q_r == 0
+    mp = sundqvist_microphysics(
+        T_f, q_f, hyd, kw["p_full"], kw["p_half"], rho, dz, dt, SundqvistConfig())
+
+    mass = np.asarray(rho) * np.asarray(dz)              # kg/m^2
+    dqc = np.asarray(mp.dq_c_dt)
+    dqv_m = np.asarray(mp.dq_v_dt)
+    dqr = np.asarray(mp.dq_r_dt)
+    dTm = np.asarray(mp.dT_dt)
+    precip = np.asarray(mp.precipitation)                # kg/m^2/s
+    assert float(np.max(np.abs(dqr))) == 0.0             # diagnostic-rain: no q_r tracer growth
+    # (a) Non-vacuous: the spun-up column is supersaturated → real condensation.
+    assert float(np.max(dqc)) > 1e-7
+    # (b) Condensation is enthalpy-consistent (latent heating balances vapor sink).
+    assert float(np.max(np.abs(constants.c_pd * dTm + constants.L_v * dqv_m))) < 1e-10
+    # (c) Headline: summed turbulence+microphysics tendencies close the column
+    # water budget to the surface precip sink (CLUBB conserves; sundqvist closes).
+    clubb_col_dqv = np.sum(mass * np.asarray(out.dq_v_dt), axis=1)
+    micro_col = np.sum(mass * (dqv_m + dqc + dqr), axis=1)
+    col_water = np.sum(mass * np.asarray(q_f), axis=1)
+    combined_resid = clubb_col_dqv + micro_col + precip  # kg/m^2/s, want ~0
+    # precip is genuinely nonzero (autoconversion fires), so this is not a
+    # condensation-only check: the precip sink term is exercised.
+    assert np.all(precip > 1e-4)
+    assert np.all(np.abs(combined_resid) * dt / col_water < 1e-12)
+
+
 def test_clubb_turbulence_prognostic_carry_roundtrip_multistep():
     """The prognostic scheme entry carries the packed CLUBBMomentState
     (ncol,15,nlev+1) in/out of the tke-slot interface and runs stably multi-step
