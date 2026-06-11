@@ -94,7 +94,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_mfl.py` | monotonic-flux-limiter JAX port: erf velocity + `mfl_xm_*` ✅30; `calc_turb_adv_range` (masked `fori_loop`) ✅31; **`monotonic_turbulent_flux_limit`** core (masked windowed min/max + `lax.scan` sequential clip + xm re-solve + top spike-fix, round-off parity all 4 fields, differentiable) ✅32 | ✅ |
 | `clubb_tau.py` | CAM tau family: `calc_stability_correction` + `compute_tau_family` (`invrs_tau_C1/C4/C6/C14/xp2_zm`, `invrs_tau_wp3_zt` from parcel Lscale + N2 stability corr) ✅35 | ✅ |
 | `clubb_coefficients.py` | C6rt/C6thl/C7 `_Skw_fnc` (CAM skewness functions, NOT ARM Richardson) + `damp_coefficient` (Lscale stable-region damping, from Fortran) ✅37 | ✅ |
-| `clubb_core.py` | `compute_clubb_diagnostics` (bundles Skw/σ²/em/tau/C6-C7) ✅43; `advance_clubb_core` (PDF closure + 4-advance ordered loop) ☐ | 🟡 P6 |
+| `clubb_core.py` | `compute_clubb_diagnostics` ✅43; `compute_pdf_closure` ✅45; `advance_clubb_core` (PDF + 4-advance ordered loop, conservation-tested) ✅46/50; `CLUBBMomentState`/`CLUBBForcing`/`init_clubb_moments` | ✅ |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
 
@@ -123,134 +123,83 @@ finite gradients in float32 + float64.
   moments), `advance_wp2_wp3` (wp2/wp3 penta), `advance_xm_wpxp` (rtm/thlm +
   wprtp/wpthlp). All clips/limiters: `fill_holes*`, `clip_variance`,
   `clip_covar`, `clip_skewness`, full MFL (`clubb_mfl.py`).
-- **P6 orchestration** 🟡 — the `advance_clubb_core`-equivalent. Done: tau family
-  (`clubb_tau.py`: `compute_tke`/`compute_tau_family`/`calc_stability_correction`),
-  `Skw`/`wp3_on_wp2` diagnostics, C6/C7 `_Skw_fnc` (`clubb_coefficients.py`).
-  ☐ remaining: `sigma_sqd_w`/`brunt_vaisala_freq_sqd` wiring (helpers exist), the
-  pre+post ADG1 PDF closure (`l_call_pdf_closure_twice=True`) producing the
-  4th-order moments (wp4/wp2up2/wp2thvp/rtpthvp/…) + PDF `w_1/w_2/varnce_w/
-  mixt_frac`, and pack/unpack of the carried moment state.
+- **P6 orchestration** ✅ — `advance_clubb_core` (iter 46) + `compute_clubb_
+  diagnostics`/`compute_pdf_closure`; conservation-tested (iter 50). See the
+  iter-50 status block below.
 - **P7 integration** 🟡 — ✅ iter 16: `clubb.py` entry + `TurbulenceOutput`;
-  `"clubb"` wired into `get_turbulence_fn` dispatch + 4× `needs_tke` +
-  `TurbulenceConfig.clubb` (None default, TYPE_CHECKING annotation — no import
-  cycle) + coupler `validate_strict` + `physics_state` tke_schemes + `scm` +
-  AMIP CLI choices. Runnable + tested. ☐ remaining: upgrade phase-1 eddy
-  diffusion → the full prognostic moment advances + PDF buoyancy coupling so the
-  live tendency path uses the genuinely-fuller-than-lite closure (DONE gate).
-- **P8 validation** ☐ — single-column idealized (BOMEX/DYCOMS-ish) sanity,
-  conservation/positivity, AD smoke through one step, codex-clean.
+  `"clubb"` wired into `get_turbulence_fn` dispatch + `needs_tke` +
+  `TurbulenceConfig.clubb` + coupler `validate_strict` + `physics_state` +
+  `scm` + AMIP CLI. Runnable + tested (phase-1 diagnostic path). `clubb_step` +
+  `integrate_clubb_column` (iter 47-48) give the full prognostic path, run+tested
+  standalone. ☐ remaining: flip the live dispatch to the prognostic path (after
+  the dry-regime instability is bounded) — see iter-50 status block.
+- **P8 validation** 🟡 — multi-step prognostic run + conservation + jit/grad ✅;
+  ☐ idealized BOMEX/DYCOMS sanity + the dry-regime stability resolution.
 
 ---
 
-## Next (iter 41+)
-*(Compressed at iter 40. iter 11–40 detail in git history + the module table
-above = the live builder ledger; per-module CAM-vs-ARM caveats are in each
-module's docstring.)*
+## Status @ iter 50 (compressed; iter 11–50 detail in git history)
 
-**Status:** The full prognostic closure RUNS multi-step and is TESTED end-to-end
-(iter 48). `advance_clubb_core` (iter 46) = diagnostics→pre-PDF→4 advances
-(xm_wpxp→xp2_xpyp→wp2_wp3→windm, `clip_covars_denom` between)→post-PDF.
-`clubb_step` (iter 47) bridges legoESM column inputs → host env + surface-flux
-BCs → `advance_clubb_core` → du/dv/dT/dq. `integrate_clubb_column` (iter 48) =
-`lax.scan` over `clubb_step` carrying `CLUBBMomentState`+means: a self-contained
-SCM-style prognostic run. Validated: 40-step stable, TKE growth under heating,
-jit+grad through the scan, returned-state consistency. All codex-reviewed.
+**The full prognostic CLUBB closure is BUILT, RUNS multi-step, and is TESTED.**
+Pipeline (all in `clubb_core.py` unless noted), each piece parity-validated vs
+CLUBB-JAX bit/round-off:
+- `compute_clubb_diagnostics` (iter 43-44): Skw/σ²/em/tau-family/C6-C7/Kh.
+- `compute_pdf_closure` (iter 45): CAM ADG1 closure → wpthvp/wp2thvp/rtpthvp/
+  thlpthvp + HOM (wp4/wp2up2/…/wprtpthlp) + cloud-water fluxes + cloud_frac/rcm
+  + ADG1 w_*_zm. (codex caught a real variance-floor leak: rt/thl_tol² floors
+  feed ONLY the ADG1 driver; `calc_xpthvp_terms` gets RAW regrids.)
+- `advance_clubb_core` (iter 46): per-step closure on `CLUBBMomentState`/
+  `CLUBBForcing` pytrees, CAM order diagnostics→pre-PDF→xm_wpxp→xp2_xpyp→
+  wp2_wp3→windm (`clip_covars_denom` between)→post-PDF (`l_call_pdf_closure_twice`).
+- `clubb_step` (iter 47, `clubb.py`): legoESM top-down column → ascending host
+  env (exner/p/thv_ds/rho_ds/invrs zt+zm, dry N², Lscale≥lmin, wm=0, fcor=0,
+  ug=um/vg=vm) + surface-flux lower BCs → `advance_clubb_core` → du/dv/dT/dq.
+  New `CLUBBConfig.T0` (ref temp for N²).
+- `integrate_clubb_column` + `init_clubb_moments` (iter 48): `lax.scan` SCM-style
+  multi-step prognostic run. Validated: 40-step stable, TKE growth under heating,
+  jit+grad, returned-means consistency, q_v≥0 + density floor.
+- **Conservation (iter 50):** `advance_clubb_core` conserves column-integrated
+  ρ_ds-weighted thlm/rtm to <1e-9 over 5 steps (zero sfc flux + zero forcing) —
+  truth-tier proof the assembly has NO spurious source.
 
-**⚠ OPEN ISSUE (iter 48-49, tracked):** a long (~3 h) **near-dry, weakly-stratified**
-single-column run develops a multi-step instability (grid-scale `T` extremes;
-`wp2` grows with step COUNT at fixed total time). Moist regime stable. Strict
-`xfail` (`test_integrate_clubb_column_dry_stress_stays_physical`); reusable
-characterizer `scripts/validate/clubb_prognostic_stability.py`.
-*iter-49 localization:* (1) GENUINE GROWING MODE, not Courant — smaller dt at
-fixed time is WORSE; (2) needs weak stratification (dθ/dz ≲ 2e-3) AND sustained
-surface heating; (3) the wp2 buoyancy production (`wp2_terms_bp_pr2_rhs`), `tau`
-family, and `calc_stability_correction` ALL match CLUBB-JAX bit/round-off — the
-per-piece port is faithful, and the stability-enhanced dissipation is correctly
-weak at small N² so it can't brake the growth; (4) the standalone SCM driver
-advances the means with CLUBB alone (no dycore numerical diffusion to damp 2-dz
-noise) → partly a driver-exposure artifact a coupled run would damp.
-*Definitive next step:* run a CLUBB-JAX reference `advance_clubb_core` on an
-identical weakly-stratified forced column and compare the trajectory — settles
-bug vs inherent-closure-delicacy. No speculative physics edits (would risk the
-parity-validated terms).
-
-**Remaining for production dispatch (separate from run+test):** carry
-`CLUBBMomentState` through `PhysicsState` (`combined.py` registers a per-scheme
-carry field — set it to `clubb_moments`; mind zm=nlev+1 vs the tke-slot nlev) +
-restart I/O, and flip `integration.py`'s `scheme="clubb"` from the stateless
-`clubb_turbulence` to a `clubb_step`-backed physics_fn. The extension point is
-clean (`tagged_fns` `(fn, accepts_ps, field_name)` in `combined.py`).
-
-**CAM-vs-ARM rule of thumb (verified the hard way):** CLUBB-JAX is wired for ARM;
-re-check the CAM namelist/Fortran per module. Caught: wp2/wp3 UPWIND MA
-(`l_upwind_xm_ma=True`); xp2/xpyp TA UPWIND (`l_upwind_xpyp_ta=True`) but xm/wpxp
-TA CENTERED; wp2_dp1 + wp3_pr_turb CAM branches from CESM Fortran;
-`l_damp_wp3_Skw_squared=False`→C8b=0; C6/C7 are skewness fns not Richardson;
-`l_use_invrs_tau_N2_iso/l_pos_def/l_enable_relaxed_clipping=False`.
+**⚠ OPEN ISSUE — dry-regime forced instability (iter 48-50, tracked):** a long
+(~3 h) **near-dry, weakly-stratified** column under sustained surface heating
+grows `wp2` + grid-scale `T` noise. Moist regime stable. Strict `xfail`
+(`test_integrate_clubb_column_dry_stress_stays_physical`); characterizer
+`scripts/validate/clubb_prognostic_stability.py`. Established: **NOT a Courant
+limit** (smaller dt = worse), **NOT a conservation/source bug** (iter-50 test),
+**NOT a per-piece port error** (all terms match CLUBB-JAX). It is a forced-
+response numerical amplification — the standalone SCM driver advances the means
+with CLUBB ALONE (no dycore numerical diffusion to damp 2Δz noise, which a
+coupled run provides) + inherent higher-order-closure stiffness at small N².
+*Next:* either (a) confirm via a CLUBB-JAX reference `advance_clubb_core`
+trajectory on the identical column (≈80-arg signature + module-global carries +
+stats plumbing → big harness), or (b) accept it as a documented stability-
+envelope limit (like any scheme's CFL) since the assembly is proven conservative
++ faithful. No speculative physics edits (would risk parity-validated terms).
 
 **Remaining to DONE:**
-1. ✅ **PDF-closure diagnostics bundle** (iter 43-44, `clubb_core.py`):
-   `compute_clubb_diagnostics` = Skw/sigma_sqd_w/em/tau-family/C6-C7/Kh.
-2. ✅ **PDF-closure outputs** (iter 45, `clubb_core.compute_pdf_closure`): the
-   CAM-default ADG1 closure producing wpthvp/wp2thvp/rtpthvp/thlpthvp +
-   wp4/wp2up2/wp2vp2/wpup2/wpvp2/wp2rtp/wp2thlp/wp2up/wprtp2/wpthlp2/wprtpthlp +
-   wprcp/rtprcp/thlprcp/uprcp/vprcp + cloud_frac/rcm/rc_coef_zm. Composes the
-   parity-tested helpers; reuses Skw_zt/wp2_zt/sigma_sqd_w from the diagnostics
-   bundle. **Codex-reviewed & approved** (caught + fixed a real variance-floor
-   leak: rt_tol²/thl_tol² floors feed ONLY the ADG1 driver, calc_xpthvp_terms
-   gets RAW regrids — regression-tested).
-3. ✅ **`advance_clubb_core` assembly** (iter 46, `clubb_core.py`): the full
-   per-step closure on `CLUBBMomentState`/`CLUBBForcing` pytrees, CAM order with
-   `clip_covars_denom` between, pre+post PDF (`l_call_pdf_closure_twice=True`).
-   Codex-approved (3 rounds). **CAM 3-C2 fix**: `advance_xp2_xpyp` inherited the
-   ARM single-C2 shared-LHS solve from CLUBB-JAX; CAM uses 3 distinct dp1
-   dissipation coefficients (C2rt=C2thl=1.0, C2rtthl=1.3) — a shared solve is
-   valid only when equal (`advance_xp2_xpyp_module.F90:836`). Refactored to
-   per-moment LHS+solve; dropped the `Cn` arg (now owned from config). Verified
-   FALSE POSITIVE: windm uses start-of-step `Kh_zm` by design (reference computes
-   Kh once in "Block M", same array to wp2_wp3 + windm).
-4. ✅ **Column bridge `clubb_step`** (iter 47, `clubb.py`): builds the ascending
-   host env (exner/p/thv_ds/rho_ds/invrs zt+zm, dry N², Lscale floored at lmin,
-   wm=0, fcor=0, ug=um/vg=vm), sets surface-flux lower BCs (kinematic:
-   wpthlp_sfc=shflx/(ρ·cp·exner), wprtp_sfc=lhflx/(ρ·Lv), **upwp_sfc=tau_x/ρ** —
-   codex caught the sign), resets means from the live column, calls
-   `advance_clubb_core`, maps means back to du/dv/dT/dq. New `CLUBBConfig.T0`
-   (ref temp for N²). Codex-approved. Bug fixed: Lscale_zm=0→invrs_tau=inf
-   (floor Lscale at lmin; grid-consistent test columns). Verified CAM
-   `l_diag_Lscale_from_tau=.false.` → simple tau model is the CAM path (Fortran
-   default is .true.; the CAM namelist overrides — per-module namelist check).
-5. ✅ **Multi-step prognostic run+test** (iter 48): `integrate_clubb_column`
-   (`lax.scan` over `clubb_step`) + `init_clubb_moments`. The closure runs and is
-   tested end-to-end over many steps (moist regime stable). Density floor +
-   q_v≥0 clip + returned-state-means consistency; dry-regime instability tracked
-   (xfail, see OPEN ISSUE above).
-6. ☐ **Production dispatch flip** (optional hardening, not run+test): persist
-   `CLUBBMomentState` via `PhysicsState`/`combined.py` `tagged_fns` + restart I/O
-   and back `scheme="clubb"` with `clubb_step`. AND resolve the dry-regime
-   instability before production use.
+- ☐ **Resolve / bound the dry-regime instability** (above) — gating question.
+- ☐ **Production dispatch flip**: persist `CLUBBMomentState` via `PhysicsState`
+  + `combined.py` `tagged_fns` `(fn, accepts_ps, field_name="clubb_moments")` +
+  restart I/O (mind zm=nlev+1 vs tke-slot nlev), and back `scheme="clubb"` in
+  `integration.py` with a `clubb_step`-driven physics_fn (currently the stateless
+  phase-1 `clubb_turbulence` — runnable + tested, but diagnostic, not prognostic).
+  Do this AFTER the instability is bounded (don't ship an unstable live path).
 
-Each chunk: analytic/self-consistency oracle (CI) + golden/round-off parity vs
-CLUBB-JAX (patch reference physical constants to isolate algorithm) + codex review.
+## CAM-vs-ARM caveats (CLUBB-JAX is ARM-wired; re-check the CAM NAMELIST per module)
+- Namelist OVERRIDES the Fortran flag defaults — always check the namelist.
+- `l_predict_upwp_vpwp=F` → u/v via `advance_windm_edsclrm` (not prognostic upwp/vpwp).
+- `l_diag_Lscale_from_tau=F` (Fortran default T, namelist F!) → SIMPLE `tau=Lscale/√em`,
+  not the `invrs_tau_bkgnd+sfc+shear+N²` path in `mixing_length.calc_Lscale`.
+- xp2 dp1: **3 distinct C2** (C2rt=C2thl=1.0, C2rtthl=1.3) → per-moment LHS+solve;
+  CLUBB-JAX's single-C2 shared-LHS is ARM-only (valid iff all equal, F90:836).
+- wp2/wp3 UPWIND mean-adv (`l_upwind_xm_ma=T`); xp2/xpyp TA UPWIND but xm/wpxp TA
+  CENTERED; `l_damp_wp3_Skw_squared=F`→C8b=0; C6/C7 skewness fns NOT Richardson;
+  `l_use_invrs_tau_N2_iso/l_pos_def/l_enable_relaxed_clipping=F`.
+- Surface BCs (`clubb_step`): stress `tau=-ρ·Cd·|V|·u` → `u'w'_sfc=tau_x/ρ` (neg
+  for u>0=drag); heat/moisture positive-up `wpthlp_sfc=shflx/(ρ·cp·exner)`,
+  `wprtp_sfc=lhflx/(ρ·Lv)`.
 
-**Codex status:** rate limit reset. iter-45 reviewed `compute_pdf_closure`
-(needs-attention→fix→approve, variance-floor leak). iter-46 reviewed
-`advance_clubb_core` + the CAM 3-C2 fix (3 rounds: Kh_zm false-positive verified,
-C2rtthl bug fixed → approve). Earlier pending batch (iter-34→39: advance_xm_wpxp
-main, clubb_tau, clubb_skewness, clubb_coefficients) carry parity/analytic/
-jit-grad self-validation + the iter-41 gold-standard full-main reference-parity
-test for advance_xm_wpxp.
-
-**CAM-vs-ARM caught (iter 46):** xp2 dp1 dissipation uses 3 distinct C2
-(C2rt/C2thl/C2rtthl); CLUBB-JAX hardwires single C2rt (ARM). Single shared-LHS
-solve valid only when all equal. Pattern reminder: even "shared-LHS" optimizations
-in CLUBB-JAX can encode ARM-specific coefficient-equality assumptions.
-
-**CAM-flag re-verified (iter 47):** `l_diag_Lscale_from_tau` — Fortran
-model_flags default `.true.` BUT the CAM namelist overrides to `.false.`, so CAM
-uses the SIMPLE `tau = Lscale/sqrt(em)` model (my `compute_tau_family`), not the
-complex `invrs_tau_bkgnd+sfc+shear+N²` path in `mixing_length.py:calc_Lscale`.
-Always check the CAM NAMELIST, not just the Fortran flag default.
-
-**Surface-flux signs (iter 47, `clubb_step`):** stress `tau=-ρ·Cd·|V|·u` so the
-kinematic momentum BC is `u'w'_sfc = tau_x/ρ` (negative for u>0 = drag). Heat/
-moisture BCs positive-up: `wpthlp_sfc=shflx/(ρ·cp·exner)`, `wprtp_sfc=lhflx/(ρ·Lv)`.
+Per-chunk testing: analytic/conservation oracle (CI) + round-off parity vs
+CLUBB-JAX (constants patched to isolate algorithm) + codex adversarial review.
