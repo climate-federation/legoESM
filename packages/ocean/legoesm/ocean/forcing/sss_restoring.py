@@ -99,6 +99,18 @@ DEFAULT_OMIP2_REGIONS: tuple[RegionMaskSpec, ...] = (
     # Southern Ocean marginal sea ice zone (60-80°S) — moderate
     RegionMaskSpec("SO_marginal", lat_min=-80.0, lat_max=-60.0,
                    tau_restore_days=180.0),
+    # Enclosed / semi-enclosed marginal seas that are UNRESOLVED at ~1° (narrow
+    # straits) and accumulate river runoff -> a strong fresh bias vs NEMO (the
+    # SSS-map Δ extremes).  Few-day restoring pins them to WOA, the standard
+    # OMIP-2 marginal-sea treatment (cf. the Mediterranean above).
+    RegionMaskSpec("Baltic", lat_min=53.0, lat_max=66.0,
+                   lon_min=9.0, lon_max=31.0, tau_restore_days=15.0),
+    RegionMaskSpec("Black_Sea", lat_min=40.0, lat_max=48.0,
+                   lon_min=27.0, lon_max=42.0, tau_restore_days=15.0),
+    RegionMaskSpec("Hudson_Bay", lat_min=50.0, lat_max=66.0,
+                   lon_min=264.0, lon_max=295.0, tau_restore_days=20.0),
+    RegionMaskSpec("Okhotsk_NWPac", lat_min=43.0, lat_max=62.0,
+                   lon_min=133.0, lon_max=163.0, tau_restore_days=30.0),
 )
 
 
@@ -122,6 +134,13 @@ class SSSRestoringConfig(NamedTuple):
     ice_gate_softness: float = 0.1   # tanh width around threshold
     regions: tuple[RegionMaskSpec, ...] = DEFAULT_OMIP2_REGIONS
     S_floor: float = 1.0             # avoid division by zero in PSU
+    # River-mouth gate (NEMO sbcssr: restoring damped by (1-2*rnfmsk) -> ZERO
+    # at river mouths): when a per-cell ``river_runoff`` field is passed to
+    # ``compute_sss_restoring_flux``, cells whose runoff exceeds this
+    # threshold get NO restoring -- otherwise the restoring fights the river
+    # plume toward the coarse WOA climatology (the Amazon SSS artifact).
+    # ~1e-6 kg/m2/s ~ 0.086 mm/day, far below any river-mouth cell.
+    river_gate_threshold_kg_m2_s: float = 1.0e-6
     # Cap the maximum FW flux to ±200 mm/day-equivalent so a
     # pathological S_target − S_model jump does not blow up the
     # ocean surface budget.
@@ -215,6 +234,7 @@ def compute_sss_restoring_flux(
     lon_deg: jnp.ndarray,
     ice_concentration: jnp.ndarray,
     config: SSSRestoringConfig,
+    river_runoff: jnp.ndarray | None = None,
 ) -> dict:
     """Compute the OMIP-2 SSS restoring fluxes.
 
@@ -279,8 +299,18 @@ def compute_sss_restoring_flux(
 
     inv_tau_eff = inv_tau_eff * ice_factor
 
+    # River-mouth gate (NEMO sbcssr (1-2*rnfmsk): NO restoring at river
+    # mouths so the relaxation does not fight the river plume toward the
+    # coarse WOA climatology).  Hard gate at the threshold — river-mouth
+    # cells carry runoff orders of magnitude above it.
+    if river_runoff is not None:
+        river_factor = jnp.where(
+            jnp.asarray(river_runoff) > config.river_gate_threshold_kg_m2_s,
+            0.0, 1.0)
+        inv_tau_eff = inv_tau_eff * river_factor
+
     S_diff = S_model_top - S_target
-    # Salinity tendency in the surface layer [PSU/s].
+    # Salinity tendency in the surface layer [PSU/s] (pre-cap).
     dS_dt_top = -S_diff * inv_tau_eff
 
     # Equivalent FW flux: derived from a virtual-salt convention.
@@ -293,12 +323,19 @@ def compute_sss_restoring_flux(
         freshwater_flux, -config.max_flux_kg_m2_s, config.max_flux_kg_m2_s,
     )
 
+    # The applied tendency is re-derived from the CAPPED flux so the flux
+    # bound (NEMO ``ln_sssr_bnd``/``rn_sssr_bnd`` semantics when configured
+    # to ±4 mm/day-equivalent) actually limits what reaches the ocean.
+    # Previously ``dS_dt_top`` bypassed the clip, so the τ-restoring
+    # appliers (``apply_sss_restoring_step*``, which consume ``dS_dt_top``)
+    # saw an UNBOUNDED restoring while only the unused flux diagnostics
+    # were capped.
+    dS_dt_top = -freshwater_flux * S_safe / (rho_0 * config.z1_m)
+
     # Salt-mass flux: dM_salt/dt = rho_0 · z1 · dS/dt · 1e-3
-    # (PSU·kg/m³·m/s · g/kg / 1000 = kg(salt)/m²/s).
+    # (PSU·kg/m³·m/s · g/kg / 1000 = kg(salt)/m²/s), from the capped
+    # tendency so all outputs stay mutually consistent.
     salt_flux = rho_0 * config.z1_m * dS_dt_top * 1.0e-3
-    salt_flux = jnp.clip(
-        salt_flux, -config.max_flux_kg_m2_s, config.max_flux_kg_m2_s,
-    )
 
     return {
         "freshwater_flux": freshwater_flux,

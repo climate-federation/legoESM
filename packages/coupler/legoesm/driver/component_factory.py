@@ -224,7 +224,10 @@ def create_atmosphere_dycore(
             hyperdiff_coeff=diff.hyperdiff,
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
-            time_integrator=dc.time_integrator,  # honor the dycore.time_integrator axis
+            # "auto" -> this dycore's own default; explicit names verbatim.
+            time_integrator=(CDGridShallowWaterConfig().time_integrator
+                             if dc.time_integrator == "auto"
+                             else dc.time_integrator),
         )
         return CDGridShallowWaterModel(grid, cfg)
 
@@ -244,7 +247,10 @@ def create_atmosphere_dycore(
             # bit-exact for existing call sites.
             implicit_grav_wave_use_pcg=dc.implicit_grav_wave_use_pcg,
             implicit_grav_wave_damping=dc.implicit_grav_wave_damping,
-            time_integrator=dc.time_integrator,  # honor the dycore.time_integrator axis
+            # "auto" -> this dycore's own default; explicit names verbatim.
+            time_integrator=(CDGridPrimitiveEquationConfig().time_integrator
+                             if dc.time_integrator == "auto"
+                             else dc.time_integrator),
         )
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 
@@ -292,7 +298,8 @@ def create_atmosphere_dycore(
         # stability); it does not support the other integrators.  Tolerate the
         # global default (no deliberate choice) but REJECT any other EXPLICIT
         # time_integrator with a clear message instead of silently overriding it.
-        if dc.time_integrator not in ("ssp_rk54", type(dc)().time_integrator):
+        if dc.time_integrator not in ("ssp_rk54", "auto",
+                                      type(dc)().time_integrator):
             raise ValueError(
                 f"spectral hydrostatic PE supports only time_integrator='ssp_rk54' "
                 f"(spectral stability); got dycore.time_integrator="
@@ -319,13 +326,27 @@ def create_atmosphere_dycore(
         from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
         )
+        # Integrator: ``"auto"`` (run_amip CLI default) resolves to the
+        # MPAS dycore's own default (ssp_rk54_scan).  The MPAS
+        # biharmonic hyperdiffusion eigenvalues at production time
+        # steps fall OUTSIDE ssp_rk3's stability region
+        # (primitive_eq_mpas.py stability notes: ssp_rk3 diverges
+        # within ~3 steps at dt=600 with hyperdiff ON, ssp_rk54 stays
+        # bounded) — silently forwarding the global "ssp_rk3" default
+        # was the "MPAS hidden CFL constraint" that forced the AMIP
+        # smoke test down to dt=60 (AMIP.md Known issues #2).  Any
+        # explicit scheme name (including ssp_rk3, for deliberate
+        # integrator-sensitivity runs) is forwarded verbatim.
+        _ti = dc.time_integrator
+        if _ti == "auto":
+            _ti = MPASPrimitiveEquationConfig().time_integrator
         cfg = MPASPrimitiveEquationConfig(
             nu_del2=diff.A_h,
             nu_del4=diff.hyperdiff,
             nu_del4_ps=diff.hyperdiff,
             K_h=diff.A_h,
             fix_mass=dc.fix_mass,
-            time_integrator=dc.time_integrator,  # honor the dycore.time_integrator axis
+            time_integrator=_ti,
         )
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
@@ -496,7 +517,10 @@ def create_atmosphere_dycore(
             polar_filter_max_wave_speed=dc.polar_filter_max_wave_speed,
             # Task #25: time integrator (default ssp_rk3, opt into
             # ssp_rk3_scan for ~1.5× JIT compile speedup at scale).
-            time_integrator=dc.time_integrator,
+            # "auto" -> this dycore's own default; explicit names verbatim.
+            time_integrator=(CGridLatLonPrimitiveEquationConfig().time_integrator
+                             if dc.time_integrator == "auto"
+                             else dc.time_integrator),
         )
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)

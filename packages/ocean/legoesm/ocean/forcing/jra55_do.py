@@ -53,7 +53,11 @@ class OceanForcing(NamedTuple):
     """Seven-channel ocean atmospheric forcing on a regular lat-lon grid.
 
     Arrays have shape ``(n_time, n_lat, n_lon)`` with units documented
-    on each field.
+    on each field.  ``snow``/``slp`` are OPTIONAL NEMO-parity channels
+    (solid precipitation for the q_ns snow-fusion/heat-content terms;
+    sea-level pressure for moist-air density + Goff saturation humidity).
+    ``None`` on forcing sets built before the 2026-06 schema extension —
+    consumers fall back to snow=0 / slp=standard-atmosphere.
     """
     lon: np.ndarray            # (n_lon,) deg E in [0, 360)
     lat: np.ndarray            # (n_lat,) deg N in [-90, 90]
@@ -64,8 +68,10 @@ class OceanForcing(NamedTuple):
     q_air: np.ndarray          # kg/kg
     sw_down: np.ndarray        # W/m^2
     lw_down: np.ndarray        # W/m^2
-    precip: np.ndarray         # kg/m^2/s
+    precip: np.ndarray         # kg/m^2/s (TOTAL = rain + snow)
     runoff: np.ndarray         # kg/m^2/s
+    snow: Optional[np.ndarray] = None   # kg/m^2/s solid precipitation
+    slp: Optional[np.ndarray] = None    # Pa sea-level pressure
 
 
 def _cache_dir() -> Path:

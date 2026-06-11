@@ -49,6 +49,38 @@ def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
     return 611.2 * jnp.exp(17.67 * T_c / (T_c + 243.5))
 
 
+def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
+    """Saturation vapour pressure over liquid water, WMO Goff (1957) [Pa].
+
+    Exact port of NEMO/aerobulk ``sbc_phy.F90::e_sat_sclr`` (the curve NEMO's
+    bulk formulas use), kept alongside the Tetens default so the OMIP/CORE-II
+    faithful ocean forcing reproduces NEMO's saturation humidity bit-for-bit.
+    Differs from :func:`saturation_vapor_pressure` by ~0.1–0.3 % over the
+    ocean-temperature range.  The temperature is floored at 180 K exactly as
+    NEMO does (guards masked/garbage cells).
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+
+    Returns
+    -------
+    jax.Array
+        Saturation vapor pressure [Pa].
+    """
+    T_K = jnp.maximum(T, 180.0)
+    rt = constants.T_freeze / T_K
+    log10_T = jnp.log10(T_K / constants.T_freeze)
+    return 100.0 * 10.0 ** (
+        10.79574 * (1.0 - rt)
+        - 5.028 * log10_T
+        + 1.50475e-4 * (1.0 - 10.0 ** (-8.2969 * (T_K / constants.T_freeze - 1.0)))
+        + 0.42873e-3 * (10.0 ** (4.76955 * (1.0 - rt)) - 1.0)
+        + 0.78614
+    )
+
+
 def saturation_mixing_ratio(
     T: jax.Array,
     p: jax.Array,

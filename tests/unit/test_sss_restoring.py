@@ -221,6 +221,31 @@ class TestSSSRestoringFlux:
         )
         assert jnp.all(jnp.abs(out["freshwater_flux"]) <= config.max_flux_kg_m2_s)
 
+    def test_max_flux_cap_bounds_applied_tendency(self):
+        """The flux bound must limit ``dS_dt_top`` — what the τ-restoring
+        appliers actually integrate — not just the flux diagnostics (NEMO
+        ``ln_sssr_bnd`` semantics; previously the tendency bypassed the
+        clip and the cap was decorative)."""
+        from legoesm import constants
+        lat2d, lon2d, S_target = self._grid_and_target()
+        S_model = S_target + 100.0          # force the cap to engage
+        ice = jnp.zeros_like(lat2d)
+        # NEMO ORCA1 reference bound: 4 mm/day water-equivalent.
+        bound = 4.0e-3 / 86400.0 * constants.rho_water
+        config = SSSRestoringConfig(enabled=True, max_flux_kg_m2_s=bound)
+        out = compute_sss_restoring_flux(
+            S_model, S_target, lat2d, lon2d, ice, config,
+        )
+        S_safe = jnp.maximum(S_target, config.S_floor)
+        dS_bound = bound * S_safe / (constants.rho_ocean * config.z1_m)
+        assert jnp.all(jnp.abs(out["dS_dt_top"]) <= dS_bound * (1 + 1e-12))
+        # the cap is ACTIVE somewhere in this construction
+        assert jnp.any(jnp.abs(out["freshwater_flux"]) >= bound * (1 - 1e-12))
+        # flux / tendency / salt outputs stay mutually consistent
+        fw_back = (-constants.rho_ocean * config.z1_m * out["dS_dt_top"]
+                   / S_safe)
+        assert jnp.allclose(fw_back, out["freshwater_flux"], rtol=1e-12)
+
 
 # ==============================================================================
 # WOA SSS interp to model grid

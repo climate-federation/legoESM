@@ -39,7 +39,10 @@ from typing import Callable, Optional, Tuple
 import jax.numpy as jnp
 
 from legoesm.ocean.eos import compute_hydrostatic_pressure
-from legoesm.ocean.freshwater import virtual_salt_flux
+from legoesm.ocean.freshwater import (
+    virtual_salt_flux,
+    normalized_virtual_salt_flux,
+)
 
 
 def iterate_eos_and_pressure_anomaly(
@@ -332,6 +335,9 @@ def apply_freshwater_virtual_salt_top(
     h_top: jnp.ndarray,
     rho_0: float,
     mask: jnp.ndarray,
+    *,
+    area: jnp.ndarray | None = None,
+    normalize: bool = False,
 ) -> jnp.ndarray:
     """Add the surface virtual-salt tendency to the top tracer level.
 
@@ -353,13 +359,28 @@ def apply_freshwater_virtual_salt_top(
     mask : jax.Array
         Ocean mask (1 = ocean) with the same horizontal shape as the
         leading axes of ``dS_dt``.
+    area : jax.Array, optional
+        Cell area (same shape as ``mask``).  REQUIRED when ``normalize``.
+    normalize : bool
+        When True, remove the ocean-area-weighted global mean of the net
+        freshwater flux BEFORE the virtual-salt closure so the surface flux
+        conserves GLOBAL SALT (the OMIP global freshwater correction; otherwise
+        an unbalanced ∮(P-E+R) drifts the mean salinity).  Mirrors the free
+        surface (eta) normalization so volume and salt stay consistent.
 
     Returns
     -------
     jax.Array
         ``dS_dt`` with the virtual-salt flux added to the top layer.
     """
-    dS_top = virtual_salt_flux(freshwater, S_ref, h_top, rho_0)
+    if normalize:
+        if area is None:
+            raise ValueError(
+                "apply_freshwater_virtual_salt_top: normalize=True requires `area`")
+        dS_top = normalized_virtual_salt_flux(
+            freshwater, S_ref, h_top, rho_0, area, mask)
+    else:
+        dS_top = virtual_salt_flux(freshwater, S_ref, h_top, rho_0)
     # Cast the freshwater contribution to dS_dt's dtype so the scatter
     # add does not silently widen on x64 mode (the freshwater struct
     # is built at JAX-default precision in init helpers, which can be

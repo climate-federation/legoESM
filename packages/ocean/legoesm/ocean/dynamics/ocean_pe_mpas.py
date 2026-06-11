@@ -854,9 +854,32 @@ def mpas_ocean_baroclinic_tendencies(
     # from ocean_model_mpas.py:step()).  Only the virtual salt flux is
     # applied here as a tracer tendency.
     if freshwater is not None and config.freshwater_closure != "none":
-        dS_dt_3d = apply_freshwater_virtual_salt_top(
-            dS_dt_3d, freshwater, config.S_ref, h_k[:, 0], config.rho_0, mask,
-        )
+        # When ``normalize_freshwater`` is on, remove the global area-mean of the
+        # net freshwater flux so the virtual-salt closure conserves GLOBAL SALT
+        # (the same correction the free-surface eta path applies for volume in
+        # ocean_model_mpas.step) -- without it an unbalanced ∮(P-E+R) drifts the
+        # mean salinity even though volume is conserved.
+        _spread_m = float(getattr(config, "runoff_depth_spread_m", 0.0))
+        if _spread_m > 0.0:
+            # NEMO-style runoff depth spreading (rn_dep_max=150): the runoff
+            # channel dilutes the top `_spread_m` metres; other channels stay
+            # at the top cell; column-integral conservation unchanged.
+            from legoesm.ocean.freshwater import (
+                runoff_spread_virtual_salt_tendency_3d,
+            )
+            dS_fw_3d = runoff_spread_virtual_salt_tendency_3d(
+                freshwater, config.S_ref, h_k, config.rho_0, mask,
+                runoff_spread_m=_spread_m, area=mesh.areaCell,
+                normalize=bool(getattr(config, "normalize_freshwater", False)),
+            )
+            dS_dt_3d = dS_dt_3d + (dS_fw_3d * mask[:, None]).astype(
+                dS_dt_3d.dtype)
+        else:
+            dS_dt_3d = apply_freshwater_virtual_salt_top(
+                dS_dt_3d, freshwater, config.S_ref, h_k[:, 0], config.rho_0, mask,
+                area=mesh.areaCell,
+                normalize=bool(getattr(config, "normalize_freshwater", False)),
+            )
 
     # ---- Real salt-mass flux (e.g. sea-ice brine rejection) ----
     # A top-layer salinity SOURCE distinct from the freshwater virtual-salt

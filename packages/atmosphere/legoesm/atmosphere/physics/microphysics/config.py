@@ -99,6 +99,15 @@ class MorrisonConfig(NamedTuple):
                                      # which needs SAM's droplet-activation source
                                      # (not yet ported) — leaving it False matches SAM
                                      # and avoids the sink-only Nc<0 drift.
+    # Aerosol-CCN coupling (AMIP): with predict_Nc=False, the physics
+    # pipeline fills ``hydrometeors.N_c`` with a per-column SPECIFIED
+    # droplet number diagnosed from the prescribed aerosol optical depth
+    # (Andreae 2009 AOT–CCN inversion, ``aerosol_activation.ccn_from_aod``)
+    # and ``effective_Nc`` uses that field instead of the constant Nc_0.
+    # N_c is still NOT evolved (dN_c/dt = 0).  Closes the aerosol →
+    # microphysics link (Twomey r_eff + KK2000 Nc^-1.79 lifetime
+    # effects).  Ignored when predict_Nc=True.
+    nc_from_aerosol: bool = False
     # Warm rain (Seifert-Beheng knobs; consumed only when
     # warm_rain_scheme="seifert_beheng")
     k_au: float = 6e2

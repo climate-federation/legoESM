@@ -846,6 +846,47 @@ class ModelDriver:
                     f"{float(jnp.mean(self.tracers['q_v'])) * 1000:.2f} g/kg)"
                 )
 
+        # Spectral moist AMIP (CMIP6 deck on gaussian/spectral): the
+        # spectral state keeps prognostics as SH coefficients, so the
+        # generic ``hasattr(state, 'p_s')`` moisture init above never
+        # fires and ``self.tracers['q_v']`` is still zeros here.
+        # Initialize q_v on the Gaussian grid from the (transformed)
+        # T/p_s rest state with the SAME rh_init * q_sat * sigma**2
+        # taper as the gridpoint paths, then attach the tracers to the
+        # dycore state so the spectral PE step advects them and the
+        # combined physics (convection/microphysics) can read + update
+        # them.  Gated on moist physics — a dry spectral run (e.g. the
+        # AIMIP gray path) keeps tracers=None, byte-for-byte unchanged.
+        if cfg.dycore.discretization == "spectral":
+            _moist = (cfg.microphysics != "none" or cfg.convection != "none"
+                      or cfg.turbulence != "none")
+            if _moist:
+                from legoesm.core.field import Field
+                from legoesm.atmosphere.dynamics.spectral_pe import (
+                    spectral_pe_to_grid,
+                )
+                _f0 = spectral_pe_to_grid(self.state, self.grid, self.sigma)
+                _p_full0 = _f0['p_s'][..., None] * self.sigma.sigma_full
+                _q_sat0 = saturation_mixing_ratio(_f0['T'], _p_full0)
+                _q_v0 = jnp.minimum(
+                    cfg.rh_init * _q_sat0 * self.sigma.sigma_full ** 2,
+                    _q_sat0,
+                )
+                self.tracers["q_v"] = _q_v0
+                self.state = self.state._replace(tracers={
+                    k: Field(data=v, name=k,
+                             dims=("n_lat", "n_lon", "nlev"), units="kg/kg")
+                    for k, v in self.tracers.items()
+                })
+                _cwv0 = float(jnp.mean(column_water_vapor(
+                    _q_v0, _f0['p_s'], self.sigma.dsigma)))
+                logger.info(
+                    f"  Spectral moisture ON: dycore advects "
+                    f"{sorted(self.tracers.keys())} (q_v mean "
+                    f"{float(jnp.mean(_q_v0)) * 1000:.2f} g/kg, "
+                    f"CWV={_cwv0:.1f} kg/m2)"
+                )
+
         # ERA5 IC override — replace held-suarez rest state with ERA5 reanalysis.
         # Applied after the default moisture init so the Field metadata (dims,
         # units, names) from held_suarez_init is preserved as the template.
@@ -2933,6 +2974,14 @@ class ModelDriver:
             else cfg.radiation
         )
         _rrtmgp_fp32 = (_rad_scheme == "rrtmgp")
+        # Cloud-radiation coupling: thread the configured cloud-fraction
+        # scheme into RRTMGP (cloud optics from microphysics condensate +
+        # number).  ``include_clouds`` must be consistent with the cloud
+        # scheme or ``_validate_cloud_gate`` raises (silently-clear-sky
+        # guard).  Previously the MPAS path left cloud_scheme="none", so
+        # an "AMIP" MPAS run radiated CLEAR-SKY regardless of --clouds.
+        _cloud_scheme = (cfg.cloud_scheme
+                         if _rad_scheme == "rrtmgp" else "none")
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=_rad_scheme if _rad_scheme != "none" else "none",
@@ -2941,14 +2990,16 @@ class ModelDriver:
                     ch4_ppbv=cfg.ch4_ppbv,
                     n2o_ppbv=cfg.n2o_ppbv,
                     compute_fp32=_rrtmgp_fp32,
+                    include_clouds=(_cloud_scheme != "none"),
                     gpoint_batch_size=getattr(
                         cfg, "rrtmgp_gpoint_batch_size", 0),
                 ),
+                cloud_scheme=_cloud_scheme,
+                diurnal_cycle=cfg.diurnal_cycle,
                 # Ozone source (default "standard" matches the bare default; a
                 # non-standard --ozone-source now flows to MPAS rrtmgp).  The
-                # external CMIP6 ozone FILE (source="external") additionally
-                # needs the forcing-pipeline loader — a follow-on; the
-                # parameterized sources (standard/analytical/ml) work here.
+                # external CMIP6 ozone FILE arrives per-step via the traced
+                # ``forcing["o3_vmr"]`` (precedence over this source).
                 ozone=OzoneProfileConfig(source=cfg.ozone_source),
             ),
             convection=ConvectionConfig(scheme=cfg.convection),
@@ -3000,71 +3051,6 @@ class ModelDriver:
             )
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
                                   column_mesh=_column_mesh)
-
-        # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
-        # Without this the MPAS hydrostatic radiation falls back to using the
-        # lowest model-level temperature ``T[..., -1]`` as the surface
-        # temperature (see integration.py ``_make_hydrostatic_radiation``), so
-        # the column has NO external thermal anchor and cold-drifts toward a
-        # dry gray-radiative equilibrium fully decoupled from the prescribed
-        # SST (measured: <T_atm> 290 -> 257 K over 30 days, still falling).
-        # The cubed-sphere/lat-lon and spectral paths apply the SST every
-        # step; the MPAS path previously applied nothing — so an "AMIP" run on
-        # MPAS was not actually SST-forced.
-        #
-        # We set a FIXED (annual-mean, sea-ice-blended) per-cell surface
-        # temperature ONCE here, before the step loop.  ``model.step`` is
-        # ``jax.jit`` with ``physics_fn`` marked *static* (primitive_eq_mpas.py
-        # ``_step_jit`` static_argnums), so the override-closure cell is read
-        # at trace time and BAKED into the first compile; a per-step update
-        # would be silently ignored (stale value) unless every step paid a
-        # retrace.  A fixed climatological anchor is therefore the correct
-        # shape for the JIT'd MPAS path, is byte-identical across every
-        # restart-chain link, and captures the first-order SST -> atmosphere
-        # coupling (surface longwave).  The seasonal SST cycle and the
-        # turbulent surface fluxes are intentionally NOT applied here: the
-        # former needs traced forcing threaded through the MPAS step signature
-        # and the latter needs the edge->cell wind interp (AMIP.md Known #3).
-        # ---- AMIP surface boundary: TIME-VARYING prescribed SST ----
-        # The prescribed SST/SIC is applied as the radiative surface
-        # temperature via a per-step TRACED ``forcing={"T_sfc": (nCells,)}``
-        # threaded through ``model.step`` -> combined physics -> radiation
-        # (see primitive_eq_mpas.step + radiation integration ``_wants_forcing``).
-        # Unlike the earlier fixed-anchor ``set_T_sfc_override`` (a JIT-static
-        # closure that could only carry ONE baked value), ``forcing`` is a jit
-        # argument, so the SST can vary in time (seasonal cycle) WITHOUT
-        # retracing — matching the cube/spectral AMIP paths.  Without any
-        # surface anchor the MPAS radiation falls back to ``T[..., -1]`` (the
-        # lowest air level) and the column cold-drifts, decoupled from the SST.
-        _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
-        _compute_T_sfc = None
-        if _sst_forcing:
-            from legoesm.forcing.surface_utils import blend_surface_temperature
-            _T_ice = cfg.T_ice
-            _ncell = int(self.state.T.data.shape[0])
-
-            def _compute_T_sfc(day):
-                # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
-                # built on grid.grid_lat = mesh.latCell for analytical/AMIP
-                # data), sea-ice-blended, as a (nCells,) surface temperature.
-                _sst, _sic = self.get_sst_sic(day)
-                return blend_surface_temperature(
-                    jnp.asarray(_sst), jnp.asarray(_sic), _T_ice).reshape(-1)
-
-            # Shape guard once, up front: a non-per-cell get_sst_sic would
-            # otherwise surface as an opaque error deep inside the JIT trace.
-            _ts0 = _compute_T_sfc(START_DAY)
-            if _ts0.shape != (_ncell,):
-                raise ValueError(
-                    f"MPAS SST forcing shape {tuple(_ts0.shape)} != "
-                    f"(nCells={_ncell},); get_sst_sic must return per-cell "
-                    f"arrays on the MPAS mesh (grid.grid_lat = latCell)."
-                )
-            logger.info(
-                "  AMIP SST surface forcing (time-varying): "
-                f"day {START_DAY:.1f} T_sfc=[{float(jnp.min(_ts0)):.1f},"
-                f"{float(jnp.max(_ts0)):.1f}] mean={float(jnp.mean(_ts0)):.1f} K"
-            )
 
         # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
         # Without this the MPAS hydrostatic radiation falls back to using the
@@ -3202,6 +3188,23 @@ class ModelDriver:
         # constant so the jit'd step compiles once (the value is traced).
         _forcing = None
         _last_force_day = None
+        # External CMIP6 forcing (ozone file / aerosol / transient GHG) on
+        # the MPAS path: threaded through the same per-step TRACED
+        # ``forcing`` dict as T_sfc, refreshed at daily cadence.  The
+        # radiation factory (``_make_hydrostatic_radiation``) reads
+        # ``forcing["o3_vmr"|"aerosol_od"|"ghg_vmr"]`` and forwards them
+        # to RRTMGP — closing the "MPAS path bypasses external forcing"
+        # gap flagged by the CMIP6 deck driver.  Gated on a spectral
+        # radiation scheme: gray ignores all three channels.
+        # ``ghg_vmr`` values are wrapped in jnp.asarray so a monthly
+        # value change stays a traced-value change (no retrace); the
+        # dict KEY STRUCTURE is decided once here and never changes
+        # mid-run (pytree stability for the JIT'd step).
+        _ext_forcing = (
+            cfg.radiation in ("rrtmg", "rrtmgp")
+            and (self._ozone_ext_active or self._aerosol_active
+                 or self._ghg_active or bool(self._experiment))
+        )
         # Operator-split physics carry (prognostic TKE / convection state).
         # ``model.step`` stashes the OUT state on ``self.model._phys_state``;
         # feed it back next step.  None on the first step ⇒ physics initialises
@@ -3230,13 +3233,38 @@ class ModelDriver:
                 self._voronoi_layout.rank, self._voronoi_layout.n_ranks,
             )
 
+        _forcing_daily: dict = {}
+        from legoesm.forcing.time_utils import day_to_calendar
         for step in range(n_steps_total):
-            if _sst_forcing:
+            if _sst_forcing or _ext_forcing:
                 _force_day = START_DAY + step * DT / 86400.0
                 _fd_int = int(_force_day)
                 if _fd_int != _last_force_day:
-                    _forcing = {"T_sfc": _compute_T_sfc(_force_day)}
+                    _forcing_daily = {}
+                    if _sst_forcing:
+                        _forcing_daily["T_sfc"] = _compute_T_sfc(_force_day)
+                    if _ext_forcing:
+                        _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
+                        _o3, _aer, _ghg = self._precompute_external_forcing(
+                            _force_day, _ext_p_s, jnp.asarray(_ext_lat),
+                        )
+                        _forcing_daily["o3_vmr"] = _o3
+                        _forcing_daily["aerosol_od"] = _aer
+                        if _ghg is not None:
+                            _forcing_daily["ghg_vmr"] = {
+                                k: jnp.asarray(v) for k, v in _ghg.items()
+                            }
                     _last_force_day = _fd_int
+                # Per-STEP traced calendar time: the radiation factory
+                # closure (``set_time``) is baked at trace time inside the
+                # JIT'd MPAS step, so without these two traced scalars the
+                # whole run would see the insolation of the initial day —
+                # no seasonal or diurnal cycle.  Scalars only; the heavier
+                # daily fields above are reused between updates.
+                _doy, _sod = day_to_calendar(_force_day)
+                _forcing = dict(_forcing_daily)
+                _forcing["day_of_year"] = jnp.asarray(_doy)
+                _forcing["seconds_of_day"] = jnp.asarray(_sod)
             if _mpi_step is not None:
                 self.state, _phys_state = _mpi_step(
                     self.state, DT, _forcing, _phys_state)
@@ -3503,6 +3531,116 @@ class ModelDriver:
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
             )
 
+        # ---- Full-physics spectral AMIP (CMIP6 deck) ----
+        # The legacy ``_spectral_physics_fn`` above is the dry gray
+        # radiation + Rayleigh-friction stack used by Held-Suarez-like
+        # idealized runs.  For AMIP CMIP6 (rrtmg radiation and/or moist
+        # physics) we build the SAME unified physics pipeline as the
+        # MPAS path (``make_physics(model_type='spectral_pe')``):
+        # RRTMGP + convection + turbulence + microphysics + GWD with
+        # external forcing (ozone file / aerosol / transient GHG /
+        # SST anchor / traced calendar time) threaded through the
+        # per-step TRACED ``forcing_data`` dict.  Previously this path
+        # hard-coded dry gray radiation + constant solar, so a CMIP6
+        # AMIP run on gaussian/spectral silently ignored every forcing
+        # channel (the deck-driver "spectral path bypasses external
+        # forcing" warning).
+        _full_physics = (
+            cfg.radiation in ("rrtmg", "rrtmgp")
+            or cfg.microphysics != "none" or cfg.convection != "none"
+            or cfg.turbulence != "none" or cfg.gravity_wave_drag != "none"
+        )
+        _phys_fn_loop = _spectral_physics_fn
+        _ext_forcing = False
+        if _full_physics:
+            from legoesm.atmosphere.physics.combined import (
+                PhysicsConfig, make_physics,
+            )
+            from legoesm.atmosphere.physics.radiation.config import (
+                RadiationConfig, RRTMGPConfig, OzoneProfileConfig,
+            )
+            from legoesm.atmosphere.physics.convection.config import (
+                ConvectionConfig,
+            )
+            from legoesm.atmosphere.physics.turbulence.config import (
+                TurbulenceConfig,
+            )
+            from legoesm.atmosphere.physics.microphysics.config import (
+                MicrophysicsConfig,
+            )
+            from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+                GravityWaveDragConfig,
+            )
+
+            # Normalize the CLI radiation alias ("rrtmg") to the
+            # physics-layer scheme name — see the _run_mpas rationale.
+            _rad_scheme = ("rrtmgp" if cfg.radiation in ("rrtmg", "rrtmgp")
+                           else cfg.radiation)
+            _cloud_scheme = (cfg.cloud_scheme
+                             if _rad_scheme == "rrtmgp" else "none")
+            # phys_state is NOT threaded through the spectral step
+            # (the SI/leapfrog JIT treats physics_fn as static and only
+            # returns the state).  Prognostic-carry schemes would
+            # silently re-initialize their carry every step — refuse
+            # loudly instead of degrading.
+            _stateful_turb = ("tke", "mynn25", "edmf")
+            _stateful_conv = ("bechtold",)
+            if cfg.turbulence in _stateful_turb or cfg.convection in _stateful_conv:
+                raise NotImplementedError(
+                    f"turbulence={cfg.turbulence!r} / "
+                    f"convection={cfg.convection!r} carry prognostic "
+                    "physics state, which the spectral PE step does not "
+                    "thread between steps yet.  Use a diagnostic scheme "
+                    "(louis / holtslag_boville; sbm / zhang_mcfarlane) "
+                    "on gaussian/spectral, or run cubed_sphere/latlon."
+                )
+            phys_cfg = PhysicsConfig(
+                radiation=RadiationConfig(
+                    scheme=_rad_scheme,
+                    rrtmgp=RRTMGPConfig(
+                        co2_ppmv=cfg.co2_ppmv,
+                        ch4_ppbv=cfg.ch4_ppbv,
+                        n2o_ppbv=cfg.n2o_ppbv,
+                        include_clouds=(_cloud_scheme != "none"),
+                        gpoint_batch_size=getattr(
+                            cfg, "rrtmgp_gpoint_batch_size", 0),
+                    ),
+                    cloud_scheme=_cloud_scheme,
+                    diurnal_cycle=cfg.diurnal_cycle,
+                    ozone=OzoneProfileConfig(source=cfg.ozone_source),
+                ),
+                convection=ConvectionConfig(scheme=cfg.convection),
+                turbulence=TurbulenceConfig(scheme=cfg.turbulence),
+                microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
+                gravity_wave_drag=GravityWaveDragConfig(
+                    scheme=cfg.gravity_wave_drag),
+            )
+            _combined_fn = make_physics(
+                phys_cfg, model_type="spectral_pe", dt=DT,
+            )
+
+            def _amip_physics_fn(state, grid, sigma_coord, forcing_data=None):
+                # The spectral step extracts ``result[0]`` from tuple
+                # returns, so the (tendency, phys_state_out) pair from
+                # the combined pipeline is handled; phys_state_out is
+                # dropped (stateless schemes only — guarded above).
+                return _combined_fn(state, grid, sigma_coord,
+                                    phys_state=None, forcing=forcing_data)
+
+            _phys_fn_loop = _amip_physics_fn
+            _ext_forcing = (
+                _rad_scheme == "rrtmgp"
+                and (self._ozone_ext_active or self._aerosol_active
+                     or self._ghg_active or bool(self._experiment))
+            )
+            logger.info(
+                "  Spectral full-physics AMIP pipeline: "
+                f"radiation={_rad_scheme} clouds={_cloud_scheme} "
+                f"convection={cfg.convection} turbulence={cfg.turbulence} "
+                f"microphysics={cfg.microphysics} "
+                f"external_forcing={'ON' if _ext_forcing else 'off'}"
+            )
+
         self._current_day = START_DAY
         run_status = "COMPLETED"
         logger.info(f"Starting spectral: {n_steps_total - start_step} steps, {N_DAYS} days")
@@ -3535,21 +3673,56 @@ class ModelDriver:
         }
 
         t_start = time.time()
+        _ext_daily: dict = {}
+        _last_ext_day = None
+        if _full_physics:
+            from legoesm.forcing.time_utils import day_to_calendar
         for step in range(start_step, n_steps_total):
             self._current_day = START_DAY + (step + 1) * DT / 86400.0
 
-            # Build TRACED forcing_data
-            sst_step, sic_step = self.get_sst_sic(self._current_day)
-            insol_step = daily_mean_insolation(_lat_col_loop, self._current_day, S_0)
-            forcing_data = {
-                "day": jnp.asarray(self._current_day),
-                "sst": sst_step,
-                "sic": sic_step,
-                "insol": insol_step,
-            }
+            if _full_physics:
+                # Traced forcing for the unified pipeline: SST/SIC-blend
+                # surface anchor + per-step calendar time + (daily) the
+                # external CMIP6 ozone/aerosol/GHG fields.
+                sst_step, sic_step = self.get_sst_sic(self._current_day)
+                if sst_step.ndim == 1:
+                    sst_step = jnp.broadcast_to(sst_step[:, None], shape_2d)
+                    sic_step = jnp.broadcast_to(sic_step[:, None], shape_2d)
+                _T_sfc_step = blend_surface_temperature(
+                    sst_step, sic_step, T_ice).reshape(-1)
+                _fd_int = int(self._current_day)
+                if _ext_forcing and _fd_int != _last_ext_day:
+                    _f_now = spectral_pe_to_grid(
+                        self.state, self.grid, self.sigma)
+                    _o3, _aer, _ghg = self._precompute_external_forcing(
+                        self._current_day, _f_now['p_s'], _lat_2d_loop,
+                    )
+                    _ext_daily = {"o3_vmr": _o3, "aerosol_od": _aer}
+                    if _ghg is not None:
+                        _ext_daily["ghg_vmr"] = {
+                            k: jnp.asarray(v) for k, v in _ghg.items()
+                        }
+                    _last_ext_day = _fd_int
+                _doy, _sod = day_to_calendar(self._current_day)
+                forcing_data = {
+                    "T_sfc": _T_sfc_step,
+                    "day_of_year": jnp.asarray(_doy),
+                    "seconds_of_day": jnp.asarray(_sod),
+                    **_ext_daily,
+                }
+            else:
+                # Legacy dry gray path: traced SST/SIC + daily-mean insol
+                sst_step, sic_step = self.get_sst_sic(self._current_day)
+                insol_step = daily_mean_insolation(_lat_col_loop, self._current_day, S_0)
+                forcing_data = {
+                    "day": jnp.asarray(self._current_day),
+                    "sst": sst_step,
+                    "sic": sic_step,
+                    "insol": insol_step,
+                }
             self.state = self.model.step(
                 self.state, DT,
-                physics_fn=_spectral_physics_fn,
+                physics_fn=_phys_fn_loop,
                 forcing_data=forcing_data,
             )
 
