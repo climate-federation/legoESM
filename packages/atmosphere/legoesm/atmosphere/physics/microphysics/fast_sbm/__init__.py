@@ -14,6 +14,11 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.diffusional_growth import 
     vapor_diffusivity,
     ventilation_factor,
 )
+from legoesm.atmosphere.physics.microphysics.fast_sbm.remap import (
+    RemapResult,
+    condensation_new_masses,
+    remap_spectrum,
+)
 from legoesm.atmosphere.physics.microphysics.fast_sbm.supersaturation import (
     SupersatStep,
     integrate_supersaturation,
@@ -56,6 +61,9 @@ __all__ = [
     "R_MIN_LIQUID",
     "CollisionTables",
     "FastSBMConfig",
+    "RemapResult",
+    "condensation_new_masses",
+    "remap_spectrum",
     "SupersatStep",
     "integrate_supersaturation",
     "supersat_relaxation_rate",

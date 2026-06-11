@@ -32,7 +32,7 @@ Process inventory (oracle subroutine → port module → status):
 | Bin grid + moments | parameter block, QC/QNC diags | `fast_sbm/grid.py` | **done (iter 1)** |
 | Collision kernels | `Kernals_KS` (l. 6238) — NOTE: only pressure-interpolates file-read `YW*` tables | computed kernels (reuse `sdm/kernels.py` Golovin/Hall/Long) + optional table load | Golovin **done (iter 2)**; Hall/efficiency todo |
 | Collision-coalescence (Bott flux) | `coll_xxx_lwf` + `courant_bott_KS` | `fast_sbm/collision.py` | **liquid self-collection done (iter 2)**; LWF variant (snow), xyx/xyz cross-species todo |
-| Diffusional growth (cond/evap dep/sub) | `JERRATE_KS`→`JERTIMESC_KS`→`JERSUPSAT_KS`→`JERDFUN_KS`/`JERNEWF_KS` | `fast_sbm/diffusional_growth.py` + `supersaturation.py` | **rates+relaxation (iter 3) + analytic supersat ODE (iter 4) done**; growth remap (`JERDFUN`/`JERNEWF`) todo |
+| Diffusional growth (cond/evap dep/sub) | `JERRATE_KS`→`JERTIMESC_KS`→`JERSUPSAT_KS`→`JERDFUN_KS`/`JERNEWF_KS` | `diffusional_growth.py` + `supersaturation.py` + `remap.py` | **full warm chain done (iters 3-5)**; ONECOND1 substepping driver next |
 | Drop nucleation (CCN activation) | `JERNUCL01_KS`, `WATER_NUCLEATION`, `LogNormal_modes_Aerosol` | `fast_sbm/nucleation.py` | todo |
 | Freezing/melting | `FREEZ`, melting block in FAST_SBM | `fast_sbm/ice_phase.py` | todo |
 | Breakup (collisional + spontaneous) | `coll_breakup_KS`, `Spont_Rain_BreakUp` | `fast_sbm/breakup.py` | todo |
@@ -151,3 +151,28 @@ EXCLUDED.
   exact; equilibrium F/R + pure decay S_int→S0/R; independent RK2 ODE
   solve 1e-7; RW vs oracle rounded constants (7e-3) and vs derived
   constants (1e-14); grads finite across R=0/1e-13/1e-6/2 incl. batched.
+- Codex re-review (fixes + iter 3): CONDITIONAL PASS → conditions fixed in
+  `72dfd61a` (saturation-curve deviation corrected to verified ±3.4% at
+  243/310 K extremes — was understated; L_v/p_atm_std deltas + Re=2.5
+  ventilation jump documented). Flux-limit fix verified sound (no
+  where-trap; 1e-6 gate appropriate for f32).
+
+### Iter 5 (2026-06-11)
+- **`fast_sbm/remap.py`** — oracle `JERDFUN_KS`/`JERNEWF_KS`:
+  `condensation_new_masses` (exact m^{2/3} growth update, oracle floor),
+  `remap_spectrum` = Kovetz–Olund 2-point packet split (ψ=f·m; conserves
+  Σψ AND Σψ·m exactly; below-grid evaporation loss; 1024·m_top sentinel),
+  3-point anti-diffusive correction (smoothing criteria with Fortran
+  operator precedence, positivity guards, EXIT-kills-pass semantics via
+  scan carry flag), drop-tail merge (window bins 6–12 1-based,
+  COEFF_REMAPING=1/150, KMAX edge search, right-to-left cascade,
+  unrolled static window). Evaporation disables 3-point + merge (oracle
+  IEvap/IDROP). Negative-ψ: oracle hard-stops; port returns `min_psi`
+  diagnostic (no silent clamp). Ships contract.
+- Validation (8 tests): identity exact; doubling → exact one-bin shift;
+  KO conservation (number 1e-12; post-remap mass == post-GROWTH mass,
+  both ±3-point); evaporation monotone-number/no-negatives; growth-law
+  limits (s_int=0 → 2-ulp identity inside remap shortcut; overshoot
+  floor); tail-merge folds spurious tail + window mass conserved;
+  d(mass)/d(S_int) finite positive THROUGH the remap; jit+vmap columns
+  with s_int sign mix.
