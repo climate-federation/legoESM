@@ -1243,7 +1243,15 @@ def _interp_strip_guarded(seg_padded, offsets_seg, g, n_loc, seg_start, n):
     w_m = 0.5 * f * (f - 1.0)
     w_0 = 1.0 - f * f
     w_p = 0.5 * f * (f + 1.0)
-    base = jc - jnp.int32(seg_start) + jnp.int32(g)
+    # g=2 covers the documented gnomonic offsets (|delta| <~ 0.5) plus
+    # the quadratic stencil reach; clip defensively so a future grid
+    # variant with larger offsets reads a clamped guard cell instead of
+    # out-of-bounds garbage (codex MAJOR — loud is better, but traced
+    # indices cannot assert; the parity probe is the loud gate).
+    base = jnp.clip(
+        jc - jnp.int32(seg_start) + jnp.int32(g),
+        1, n_loc + 2 * g - 2,
+    )
     if seg_padded.ndim > 1:
         shp = (-1,) + (1,) * (seg_padded.ndim - 1)
         w_m, w_0, w_p = (w.reshape(shp) for w in (w_m, w_0, w_p))
@@ -1255,18 +1263,20 @@ def _interp_strip_guarded(seg_padded, offsets_seg, g, n_loc, seg_start, n):
 
 
 def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
-    """Tiled (6*kt^2-device) ppermute shard_map exchange — halo=1.
+    """Tiled (6*kt^2-device) ppermute shard_map exchange — halo 1/2.
 
     One tile per device on mesh axes ("face", "tile_i", "tile_j").
     Schedule: 4 strip ppermute rounds (every tile edge is remote) +
-    4 guard-sliver rounds feeding the cross-face Lagrange interp.
-    Receiver pipeline order matches the face kernels: reverse →
-    (guards) → interpolate → place; interior tile edges are exact
-    copies (no interp — a serial face array is contiguous across tile
-    cuts).  Corner halo cells use the avg fill of the face kernels;
-    artificial interior-tile corners therefore differ from the serial
-    diagonal value — the parity probe quantifies whether the dycore
-    consumes them (design P3 escalates to a diagonal round if so).
+    4 guard-sliver rounds feeding the cross-face Lagrange interp +
+    the P3 corner rounds (4 diagonal + 4 post-interp sliver) that make
+    tile corners serial-exact: plain diagonal cells at interior cuts,
+    the strip-neighbour's interp'd strip end where a corner row/col is
+    a face-halo strip cut, and the avg/cascade fill only at true cube
+    vertices (where the serial pad averages too).  Receiver pipeline
+    order matches the face kernels: reverse → (guards) → interpolate →
+    place; interior tile edges are exact copies.  Parity: 0.0 vs
+    pad_halo_local/pad_halo on all lanes (h1+h2 x offsets+raw, full
+    padded blocks), 24 processes at C48 kt=2 (job 8464648).
     """
     if ndim not in (3, 4):
         raise ValueError(f"ndim must be 3 or 4, got {ndim}")
@@ -1769,6 +1779,13 @@ def _select_variant(use_ppermute, halo, n_devices):
     * every other ppermute combination (halo=2 at any count; halo=1 at
       1/2/3 devices) → the multiface ppermute kernel.
     """
+    if n_devices > 6:
+        # 6*kt^2 sub-face tiling — the tiled kernel is the ONLY
+        # exchange that understands tile cuts (allgather/multiface
+        # would silently mis-route strips), so it wins regardless of
+        # the use_ppermute flag (the activation pre-warm loop also
+        # iterates the allgather combos).
+        return "ppermute_tiled"
     if not use_ppermute:
         return "allgather_h2" if halo == 2 else "allgather"
     if halo == 1 and n_devices == 6:
@@ -1808,16 +1825,27 @@ def _get_exchange(mesh, ndim, use_ppermute, halo=1, with_offsets=False):
     and multiface kernels.
     """
     n_devices = len(mesh.devices.flat)
-    if n_devices < 1 or 6 % n_devices != 0:
+    mesh_shape = tuple(mesh.devices.shape)
+    is_tiled = (
+        len(mesh_shape) == 3 and mesh_shape[0] == 6
+        and mesh_shape[1] == mesh_shape[2] and mesh_shape[1] >= 2
+    )
+    if not is_tiled and (n_devices < 1 or 6 % n_devices != 0):
         raise ValueError(
             f"SPMD cubed-sphere halo exchange requires a face-axis mesh "
-            f"whose device count divides 6, got {n_devices}."
+            f"whose device count divides 6, or a (6, kt, kt) tiled "
+            f"mesh; got {n_devices} devices, shape {mesh_shape}."
         )
-    faces_per_shard = 6 // n_devices
+    faces_per_shard = 1 if is_tiled else 6 // n_devices
     variant = _select_variant(use_ppermute, halo, n_devices)
-    key = (id(mesh), ndim, variant, halo, with_offsets, faces_per_shard)
+    key = (id(mesh), ndim, variant, halo, with_offsets, faces_per_shard,
+           mesh_shape)
     if key not in _cache:
-        if variant == "allgather_h2":
+        if variant == "ppermute_tiled":
+            _cache[key] = _make_exchange_ppermute_tiled(
+                mesh, ndim, halo=halo, with_offsets=with_offsets,
+            )
+        elif variant == "allgather_h2":
             _cache[key] = _make_exchange_allgather_h2(
                 mesh, ndim, with_offsets=with_offsets,
             )
@@ -2182,16 +2210,32 @@ def activate_spmd_halo_backend(
             f"serial path. Call set_corner_fill_mode('avg'), or use the mpi4jax "
             f"backend for non-avg corner fills.")
     n_devices = len(mesh.devices.flat)
-    if n_devices < 1 or 6 % n_devices != 0:
+    _mshape = tuple(mesh.devices.shape)
+    _is_tiled = (
+        len(_mshape) == 3 and _mshape[0] == 6
+        and _mshape[1] == _mshape[2] and _mshape[1] >= 2
+    )
+    if not _is_tiled and (n_devices < 1 or 6 % n_devices != 0):
         raise ValueError(
             f"SPMD halo backend requires a face-axis mesh whose device "
-            f"count divides 6 (1, 2, 3 or 6), got {n_devices}."
+            f"count divides 6 (1, 2, 3 or 6) or a (6, kt, kt) tiled "
+            f"mesh, got {n_devices} devices, shape {_mshape}."
         )
+    if _is_tiled and (force_allgather
+                      or os.environ.get(_FORCE_ALLGATHER_ENV) == "1"):
+        # Checked BEFORE any global mutation: tiled meshes have no
+        # allgather diagnostic kernel, and a partially-armed backend
+        # is worse than a refusal (codex CRITICAL 2).
+        raise ValueError(
+            "tiled (6*kt^2) meshes have no allgather diagnostic kernel "
+            f"— unset {_FORCE_ALLGATHER_ENV} for tiled runs.")
     _spmd_mesh = mesh
     halo._halo_backend = "spmd"
     halo._spmd_mesh = mesh
 
-    if force_allgather is None:
+    if _is_tiled:
+        use_pp = True  # only kernel that understands tile cuts
+    elif force_allgather is None:
         use_pp = select_exchange_backend(n, nlev, n_devices)
     else:
         use_pp = not force_allgather
@@ -2199,8 +2243,11 @@ def activate_spmd_halo_backend(
     backend_name = "ppermute" if use_pp else "all_gather(DIAGNOSTIC)"
     logger.info(
         "SPMD halo backend activated (mesh=%s, %d devices, "
-        "faces/shard=%d, n=%d, nlev=%d, exchange=%s)",
-        mesh.axis_names, n_devices, 6 // n_devices, n, nlev, backend_name,
+        "layout=%s, n=%d, nlev=%d, exchange=%s)",
+        mesh.axis_names, n_devices,
+        f"tiled kt={_mshape[1]}" if _is_tiled
+        else f"faces/shard={6 // n_devices}",
+        n, nlev, backend_name,
     )
 
     # Pre-warm the exchange kernel cache so the factories are never
