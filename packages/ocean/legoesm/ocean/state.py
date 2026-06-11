@@ -148,6 +148,25 @@ class OceanSurfaceForcing(NamedTuple):
         surface deposit AND the full solar column (Veros ``ice[..., None]``).
         Mixing ``q_solar`` with the ``sw_down``/``q_net`` channels raises at
         trace time.
+    S_restore_piston : array or None
+        Per-cell PISTON VELOCITY [m/s] for the ``flux_feedback`` scheme's
+        surface-salinity restoring (EXT-N3; Veros north_atlantic ``sss_rest``
+        = forcing-file field / 100, ``north_atlantic.py:245-249`` — per-cell,
+        monthly; interpolation to the current time is driver/harness work,
+        this channel is per-step traced).  When given (requires
+        ``FluxFeedbackConfig.salt_restore_piston=True`` and
+        ``S_restore_target``), the restoring rate becomes
+
+            dS/dt = S_restore_piston · (S_restore_target − S_surf) / dz₀
+
+        (Veros ``forc_salt_surface = sss_rest·(sss_clim − S)·maskT``
+        [PSU·m/s], ``north_atlantic.py:336-340``, divided by the top-cell
+        thickness in the implicit RHS, ``core/thermodynamics.py:282``),
+        REPLACING the scalar ``1/tau_restore_s`` form.  Passing it without
+        the config gate (or relying on the scalar while the gate is on)
+        raises at trace time — never a silent fallback.  The ice mask zeroes
+        this rate exactly like the scalar form (Veros zeroes
+        forc_salt_surface, ``north_atlantic.py:342-344``).
     """
     sw_down: object = None       # jnp.ndarray | None
     q_net: object = None         # jnp.ndarray | None
@@ -162,6 +181,7 @@ class OceanSurfaceForcing(NamedTuple):
     T_feedback_target: object = None   # jnp.ndarray | None  [°C]
     S_restore_target: object = None    # jnp.ndarray | None  [PSU]
     q_solar: object = None             # jnp.ndarray | None  [W/m²] (penetrative)
+    S_restore_piston: object = None    # jnp.ndarray | None  [m/s] (per-cell SSS piston)
 
 
 class OceanConfig(NamedTuple):
@@ -442,6 +462,15 @@ class SurfaceTracerForcing(NamedTuple):
     True; ``None`` otherwise (default), keeping the tendency pytree + every
     existing path bit-identical.
 
+    The same (dT_dt, dS_dt) rate-pair container is REUSED for the implicit
+    COLUMN tracer source on the SEPARATE
+    ``LatLonCGridOceanTendencies.tracer_source`` slot
+    (``sponge_forcing_implicit``, the Veros ``tempsalt_sources`` placement).
+    The slots must stay distinct: the post-mixing TKE surface buoyancy-flux
+    reconstruction column-sums THIS slot to rebuild Veros's
+    ``forc_temp_surface`` and must exclude column sources (Veros keeps
+    tempsalt_sources out of forc_rho_surface).
+
     Fields
     ------
     dT_dt : Field
@@ -520,6 +549,24 @@ class LatLonCGridOceanTendencies(NamedTuple):
     dv_diss: object = None
     dT_diss: object = None
     dS_diss: object = None
+    # --- Implicit COLUMN tracer source (Veros tempsalt_sources placement) ---
+    # tracer_source is a :class:`SurfaceTracerForcing`-typed (dT_dt, dS_dt)
+    # full-column RATE pair, populated ONLY when
+    # ``LatLonCGridOceanConfig.sponge_forcing_implicit`` is on: the sponge T/S
+    # relaxation rates are then WITHHELD from ``dT_dt``/``dS_dt`` (so the AB2
+    # outer integrator never extrapolates them) and applied at weight 1.0
+    # inside the backward-Euler implicit vertical-mixing solve — Veros's
+    # ``tempsalt_sources`` placement (forward-Euler at taup1 BEFORE the
+    # implicit vmix; ``veros/core/thermodynamics.py:419`` →
+    # ``veros/core/diffusion.py:132-141``).  Carried on a SEPARATE slot from
+    # ``surface_tracer_forcing`` because the post-mixing TKE surface
+    # buoyancy-flux reconstruction column-sums ``surface_tracer_forcing`` to
+    # rebuild Veros's ``forc_temp_surface`` — a column SOURCE must stay out of
+    # that sum, exactly as Veros keeps ``tempsalt_sources`` out of
+    # ``forc_rho_surface`` (thermodynamics.py:312-314).  ``None`` otherwise
+    # (default), keeping the tendency pytree + every existing path
+    # bit-identical.
+    tracer_source: object = None
 
 
 class MomentumTendencyDiagnostics(NamedTuple):
@@ -1289,3 +1336,24 @@ class LatLonCGridOceanConfig(NamedTuple):
     # column-integral salt tendency is unchanged (conservation identical);
     # only the vertical distribution moves.  0 = legacy top-cell (bit-exact).
     runoff_depth_spread_m: float = 0.0
+    # --- Implicit (weight-1.0 pre-vmix) sponge placement (EXT-N2) -----------
+    # Apply the SPONGE tracer relaxation (``SpongeForcing`` gamma·(ref − q))
+    # at weight 1.0 inside the backward-Euler vertical-mixing solve instead of
+    # summing it into the explicit (AB2-extrapolated) ``dT_dt``/``dS_dt`` —
+    # matching Veros, which applies ``tempsalt_sources`` forward-Euler at
+    # taup1 AFTER the AB2'd advection/diffusion and BEFORE the implicit vmix
+    # (``veros/core/thermodynamics.py:419`` → ``veros/core/diffusion.py:
+    # 132-141``: ``temp[taup1] += dt_tracer·temp_source·maskT``, NOT AB2'd).
+    # The Rung-6 oracle tendency-match showed this placement CLASS
+    # (weight-1-in-the-implicit-seam vs AB2'd-explicit) is a leading-order
+    # fidelity term — the analogous implicit surface-forcing option dropped
+    # the realized-T L2 mismatch 3.85 → 1.69.  The withheld rates ride
+    # ``LatLonCGridOceanTendencies.tracer_source`` (NOT
+    # ``surface_tracer_forcing``: the TKE surface buoyancy-flux
+    # reconstruction must exclude column sources, as Veros keeps
+    # tempsalt_sources out of forc_rho_surface).  The MOMENTUM sponge
+    # (u_ref/v_ref) stays explicit (Veros has no momentum sponge).  Requires
+    # ``implicit_vertical_mixing=True`` (rejected otherwise at config
+    # validation).  Default False ⇒ the explicit stage-10c placement ⇒
+    # BIT-IDENTICAL.
+    sponge_forcing_implicit: bool = False

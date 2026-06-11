@@ -299,18 +299,26 @@ def apply_sponge_tracer_relaxation(
         Current tracer state.
     sponge : SpongeForcing
         Must expose ``gamma``, ``T_ref``, ``S_ref``.  ``gamma`` is the
-        relaxation rate per cell (1 / s), broadcast along the vertical
-        axis via ``expand_gamma_axis``.
+        relaxation rate (1 / s), either HORIZONTAL (rank ``T.ndim - 1``:
+        ``(n_lat, n_lon)`` lat-lon / ``(nCells,)`` MPAS), broadcast along
+        the vertical axis via ``expand_gamma_axis`` — the original path,
+        bit-identical — or FULL-RANK per-cell (rank ``T.ndim``: a
+        z-varying / partial-column rate, e.g. the Veros north_atlantic
+        ``rest_tscl(x, y, z)`` field, ``north_atlantic.py:102/257-261``,
+        consumed as ``temp_source = maskT · rest_tscl · (t* − T)``,
+        ``:346-356``), used as-is.  Any other rank raises (trace-time:
+        ``ndim`` is static under JIT).
     mask : jax.Array, optional
         Ocean mask.  When provided, the relaxation tendency is
         multiplied by ``mask`` (with the same axis expansion as
         ``gamma``) so land cells stay quiescent.  When ``None`` no
         masking is applied (the caller masks downstream).
     expand_gamma_axis : int, default -1
-        Axis on which to insert a singleton in ``sponge.gamma`` so that
-        it broadcasts against the (..., nlev) tracer arrays.  Use ``-1``
-        for both lat-lon C-grid (axis after lat/lon) and MPAS (axis
-        after nCells).
+        Axis on which to insert a singleton in a HORIZONTAL
+        ``sponge.gamma`` so that it broadcasts against the (..., nlev)
+        tracer arrays.  Use ``-1`` for both lat-lon C-grid (axis after
+        lat/lon) and MPAS (axis after nCells).  Ignored for a full-rank
+        per-cell gamma.
 
     Returns
     -------
@@ -318,7 +326,16 @@ def apply_sponge_tracer_relaxation(
     """
     dtype = T.dtype
     gamma = sponge.gamma.astype(dtype)
-    gamma_b = jnp.expand_dims(gamma, expand_gamma_axis)
+    if gamma.ndim == T.ndim:
+        # Full-rank per-cell rate (EXT-N1: Veros north_atlantic rest_tscl).
+        gamma_b = gamma
+    elif gamma.ndim == T.ndim - 1:
+        gamma_b = jnp.expand_dims(gamma, expand_gamma_axis)
+    else:
+        raise ValueError(
+            f"SpongeForcing.gamma must have rank T.ndim - 1 (horizontal, "
+            f"vertically broadcast) or T.ndim (full per-cell rate); got "
+            f"gamma.ndim={gamma.ndim} with T.ndim={T.ndim}.")
     dT = gamma_b * (sponge.T_ref.astype(dtype) - T)
     dS = gamma_b * (sponge.S_ref.astype(dtype) - S)
     if mask is not None:
