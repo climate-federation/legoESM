@@ -25,6 +25,9 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.freezing import (
     freeze_step,
     freeze_step_routed,
 )
+from legoesm.atmosphere.physics.microphysics.fast_sbm.ice_fall_speed import (
+    ice_fall_speed,
+)
 from legoesm.atmosphere.physics.microphysics.fast_sbm.melting import (
     MeltResult,
     melt_fraction,
@@ -100,6 +103,7 @@ __all__ = [
     "critical_dry_radius",
     "freeze_step",
     "freeze_step_routed",
+    "ice_fall_speed",
     "kelvin_coefficient",
     "melt_fraction",
     "melt_step",

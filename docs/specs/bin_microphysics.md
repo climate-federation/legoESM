@@ -187,7 +187,19 @@ collection (`coll_xyz` between every pair). Incremental build:
   single-category `freeze_step`; the two categories sum EXACTLY to the
   single-category ice (5 tests: sum-equals-single 1e-14, split-at-krfreeze,
   mass conservation, no-op above freezing, differentiable). Foundation for
-  carrying distinct ice categories through the column.
+  carrying distinct ice categories through the column. Codex: PASS (habit
+  collapse + grad test notes applied).
+- **Iter 2 (2026-06-11)** — per-bin ice terminal velocities by category
+  (`ice_fall_speed.py`): computed replacement for the oracle's file-read
+  `VR2..VR5` tables — `V=a·D^b·(ρ₀/ρ_air)^½`, `D=(6m/πρ_cat)^{1/3}`,
+  Locatelli-Hobbs (1974) coefficients + bulk density per habit (snow
+  a=11.72/b=0.41/ρ=100; graupel a=124/b=0.66/ρ=400, all in `FastSBMConfig`).
+  Physical crossover: at equal mass fluffy low-density snow is larger so
+  falls faster at small sizes; dense graupel wins in the precip regime
+  (>~170 µm) and reaches a far higher max — the reason to separate
+  categories. 7 tests (monotone, graupel>snow precip regime, mm-size
+  magnitudes, density correction exact, array broadcast, unknown-category
+  raises, differentiable).
 
 ## Remaining work (warm + full ice phase done → bit-exact FSBM-2)
 

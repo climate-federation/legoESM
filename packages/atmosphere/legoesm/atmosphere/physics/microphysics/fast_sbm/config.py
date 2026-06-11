@@ -87,3 +87,13 @@ class FastSBMConfig(NamedTuple):
     # [-], scaling the Bott kernel. ~0.1 reflects the lower sticking
     # efficiency of ice crystals vs liquid coalescence.
     ice_aggregation_efficiency: float = 0.1
+    # --- Ice terminal-velocity power laws V = a·D^b (Locatelli & Hobbs
+    # 1974; SI: D [m], V [m/s]) + category bulk density [kg/m^3] ---
+    # Unrimed aggregates / pristine crystals (low density, slow).
+    fall_a_snow: float = 11.72
+    fall_b_snow: float = 0.41
+    rho_snow: float = 100.0
+    # Lump graupel / hail (dense, fast).
+    fall_a_graupel: float = 124.0
+    fall_b_graupel: float = 0.66
+    rho_graupel: float = 400.0
