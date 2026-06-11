@@ -2197,6 +2197,7 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
         _sf_q_net = getattr(surface_forcing, "q_net", None)
         _sf_sw = getattr(surface_forcing, "sw_down", None)
         _sf_salt = getattr(surface_forcing, "salt_flux", None)
+        _sf_chl = getattr(surface_forcing, "chl", None)
 
         if _sf_tau_x is not None and _sf_tau_y is not None:
             # Atmosphere convention (opposes wind) -> ocean reaction.
@@ -2249,8 +2250,36 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             # uses the SAME scatter-add/add sequence as before (bit-identical
             # default-off path); the implicit branch starts from zeros.
             dT_target = dT_surf if route_heat_to_implicit else dT_dt
-            if _sf_sw is not None:
-                # Split: non-solar at surface, solar penetrating column.
+            if _sf_sw is not None and _sf_chl is not None:
+                # NEMO RGB chlorophyll penetration (ln_qsr_rgb).  NEMO
+                # partitions 100% of net SW across IR + R/G/B bands, so NO
+                # 0.94 "skin" pre-split here: the full sw is the penetrating
+                # qsr and the non-solar surface flux is q_net - sw.
+                sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
+                q_nonsolar = q_net_T - sw_T
+                dT_target = dT_target.at[..., 0].add(
+                    q_nonsolar * inv_rho_csw_dz * mask
+                )
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    apply_shortwave_penetration,
+                    ShortwavePenetrationConfig,
+                )
+                # ``h_k`` is the live (z*/partial-cell) thickness; a dry cell
+                # carries h_k = 0, which is both the wet mask and the safe
+                # denominator guard inside the RGB kernel.
+                wet_cell = jnp.asarray(h_k > 0.0, dtype=T.dtype)
+                sw_tend = apply_shortwave_penetration(
+                    ShortwavePenetrationConfig(scheme="rgb_chl"),
+                    sw_T,
+                    chl=jnp.asarray(_sf_chl, dtype=T.dtype),
+                    dz_live=h_k,
+                    wet_cell=wet_cell,
+                    rho_0=float(rho_0),
+                )
+                dT_target = dT_target + sw_tend * mask_3d
+            elif _sf_sw is not None:
+                # Split: non-solar at surface, solar penetrating column
+                # (legacy two-band Jerlov; 0.94 skin split unchanged).
                 sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
                 sw_absorbed = sw_T * jnp.asarray(0.94, dtype=T.dtype)
                 q_nonsolar = q_net_T - sw_absorbed

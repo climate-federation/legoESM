@@ -102,6 +102,10 @@ class OceanSurfaceForcing(NamedTuple):
         ocean], e.g. sea-ice brine rejection on freeze.  Applied to the top
         layer salinity as dS/dt = salt_flux*1e3/(rho_0*dz_0); distinct from the
         ``freshwater`` (virtual-salt dilution) channel.
+    chl : array or None
+        Surface chlorophyll [mg/m³] for the RGB shortwave-penetration scheme
+        (``ShortwavePenetrationConfig.scheme == "rgb_chl"``).  2D horizontal
+        field; ``None`` when the two-band Jerlov scheme is in use.
     """
     sw_down: object = None       # jnp.ndarray | None
     q_net: object = None         # jnp.ndarray | None
@@ -109,6 +113,7 @@ class OceanSurfaceForcing(NamedTuple):
     tau_y: object = None         # jnp.ndarray | None
     freshwater: object = None    # jnp.ndarray | None
     salt_flux: object = None     # jnp.ndarray | None  (real salt mass, kg/m2/s)
+    chl: object = None           # jnp.ndarray | None  (surface chlorophyll, mg/m3)
 
 
 class OceanConfig(NamedTuple):
