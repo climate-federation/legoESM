@@ -199,6 +199,62 @@ def scatter_state_voronoi(
     )
 
 
+def scatter_state_mpas_ocean(global_state, partition: VoronoiPartition):
+    """Rank-local ``MPASOceanState`` from a global one.
+
+    ``u`` is edge-centered; ``T, S, eta, w, H_bathy, land_mask`` are
+    cell-centered.  ``rho_ref_z`` (a static reference profile, no
+    horizontal axis) is passed through unsliced.  Mirrors
+    :func:`scatter_state_voronoi` (the atmosphere twin) — each rank
+    slices its (owned + halo) entities; no communication.
+    """
+    # Schema-drift tripwire (codex MINOR): a NEW MPASOceanState field
+    # would pass through _replace UNSLICED silently — fail loudly so
+    # the scatter/gather pair is extended deliberately.
+    _expected = {"u", "T", "S", "eta", "w", "H_bathy", "land_mask",
+                 "rho_ref_z"}
+    if set(global_state._fields) != _expected:
+        raise ValueError(
+            "scatter_state_mpas_ocean: MPASOceanState schema changed "
+            f"({sorted(set(global_state._fields) ^ _expected)}); extend "
+            "the scatter/gather pair (and this set) deliberately."
+        )
+
+    def _cell(f):
+        return f.replace(data=scatter_to_local(f.data, partition, "cell"))
+
+    new = global_state._replace(
+        u=global_state.u.replace(
+            data=scatter_to_local(global_state.u.data, partition, "edge")),
+        T=_cell(global_state.T),
+        S=_cell(global_state.S),
+        eta=_cell(global_state.eta),
+        w=_cell(global_state.w),
+        H_bathy=_cell(global_state.H_bathy),
+        land_mask=_cell(global_state.land_mask),
+    )
+    return new
+
+
+def gather_state_mpas_ocean(local_state, partition: VoronoiPartition):
+    """Global ``MPASOceanState`` from rank-local states (owned entities
+    only; Allgatherv per field).  Inverse of
+    :func:`scatter_state_mpas_ocean`; ``rho_ref_z`` passes through."""
+    def _g(f, entity):
+        return f.replace(
+            data=gather_voronoi_field(f.data, partition, entity))
+
+    return local_state._replace(
+        u=_g(local_state.u, "edge"),
+        T=_g(local_state.T, "cell"),
+        S=_g(local_state.S, "cell"),
+        eta=_g(local_state.eta, "cell"),
+        w=_g(local_state.w, "cell"),
+        H_bathy=_g(local_state.H_bathy, "cell"),
+        land_mask=_g(local_state.land_mask, "cell"),
+    )
+
+
 def gather_voronoi_field(
     local_field: jnp.ndarray,
     partition: VoronoiPartition,
