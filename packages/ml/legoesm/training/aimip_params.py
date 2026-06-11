@@ -45,10 +45,7 @@ from legoesm.training.trainable_params import (
     range_to_sigmoid,
     sigmoid_to_range,
 )
-from legoesm.training.aimip_spatial import (
-    AIMIPSpatialSurfaceParams,
-    SPATIAL_FIELD_NAMES,
-)
+from legoesm.training.aimip_spatial import AIMIPSpatialSurfaceParams
 
 
 # ----------------------------------------------------------------------
@@ -82,7 +79,6 @@ _TIEDTKE_TRAINABLE: list[ParamConstraint] = [
 
 _LOUIS_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("louis_l_mix_max", 20.0, 400.0, "sigmoid"),
-    ParamConstraint("louis_Ck", 0.1, 0.6, "sigmoid"),
     ParamConstraint("louis_Ri_crit", 0.1, 0.6, "sigmoid"),
     ParamConstraint("louis_b_louis", 2.0, 10.0, "sigmoid"),
     ParamConstraint("louis_c_louis", 5.0, 30.0, "sigmoid"),
@@ -101,9 +97,8 @@ _MCFARLANE_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("mcfarlane_efficiency", 0.1, 1.0, "sigmoid"),
     ParamConstraint("mcfarlane_min_wind", 0.5, 5.0, "sigmoid"),
     ParamConstraint("mcfarlane_envelope_scale", 0.5, 2.0, "sigmoid"),
-    # Extended: orographic wavenumber + reference BV + spread + tau cap.
+    # Extended: orographic wavenumber + spread + tau cap.
     ParamConstraint("mcfarlane_k_wave", 1.0e-5, 5.0e-4, "sigmoid"),
-    ParamConstraint("mcfarlane_N_ref", 5.0e-3, 2.0e-2, "sigmoid"),
     ParamConstraint("mcfarlane_directional_spread", 0.5, 2.0, "sigmoid"),
     ParamConstraint("mcfarlane_tau_max", 1.0, 50.0, "sigmoid"),
 ]
@@ -160,7 +155,6 @@ _SBM_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("sbm_tau_c", 1800.0, 21600.0, "sigmoid"),
     ParamConstraint("sbm_RH_ref", 0.5, 0.9, "sigmoid"),
     ParamConstraint("sbm_CAPE_threshold", 10.0, 500.0, "sigmoid"),
-    ParamConstraint("sbm_T_min_convect", 180.0, 220.0, "sigmoid"),
 ]
 
 # RRTMGP knobs (active when ``aimip_radiation=rrtmgp``).
@@ -176,14 +170,15 @@ _RRTMGP_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("rrtmgp_aerosol_g", 0.5, 0.9, "sigmoid"),
 ]
 
-# Shared surface-energy-balance knobs (also feed gray radiation
-# ``tau_equator`` / ``tau_pole``).  v7: widened albedo_ice /
-# albedo_ocean for the same reason as the rad scalars above.
+# Shared gray-radiation optical-depth knobs (``tau_equator`` /
+# ``tau_pole``).  ``albedo_ice`` / ``albedo_ocean`` were removed in the
+# 2026-06 dead-code audit: no scalar or spatial consumer in
+# ``make_aimip_classical_spectral_physics`` ever injected them (the
+# Mode-1 RRTMGP knob set in ``trainable_params.py`` is separate and
+# still carries live albedo knobs).
 _AIMIP_COMMON_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("tau_equator", 3.0, 12.0, "sigmoid"),
     ParamConstraint("tau_pole", 0.5, 4.0, "sigmoid"),
-    ParamConstraint("albedo_ice", 0.3, 0.95, "sigmoid"),
-    ParamConstraint("albedo_ocean", 0.02, 0.25, "sigmoid"),
 ]
 
 
@@ -218,8 +213,8 @@ class AIMIPClassicalParams(eqx.Module):
 
     When ``spatial_surface`` is non-None, the surface-aerodynamic and
     surface-radiation fields (``Cd_neutral``, ``Ch_neutral``, ``z0``,
-    ``sfc_emissivity``, ``sfc_albedo``, ``albedo_ocean``,
-    ``albedo_ice``) become low-rank learnable lat-lon fields gated by
+    ``sfc_emissivity``, ``sfc_albedo``) become low-rank learnable
+    lat-lon fields gated by
     a land mask (see :mod:`legoesm.training.aimip_spatial`).  The
     corresponding scalar knobs in ``raw_values`` are still trained
     and used as the spatial-field baselines for ocean columns; the
@@ -358,7 +353,6 @@ class AIMIPClassicalParams(eqx.Module):
         base = LouisConfig(surface=self.to_surface_config())
         return base._replace(
             l_mix_max=d["louis_l_mix_max"],
-            Ck=d["louis_Ck"],
             Ri_crit=d["louis_Ri_crit"],
             b_louis=d["louis_b_louis"],
             c_louis=d["louis_c_louis"],
@@ -375,7 +369,6 @@ class AIMIPClassicalParams(eqx.Module):
             min_wind=d["mcfarlane_min_wind"],
             envelope_scale=d["mcfarlane_envelope_scale"],
             k_wave=d["mcfarlane_k_wave"],
-            N_ref=d["mcfarlane_N_ref"],
             directional_spread=d["mcfarlane_directional_spread"],
             tau_max=d["mcfarlane_tau_max"],
         )
@@ -415,7 +408,6 @@ class AIMIPClassicalParams(eqx.Module):
             tau_c=d["sbm_tau_c"],
             rh_ref=d["sbm_RH_ref"],
             cape_threshold=d["sbm_CAPE_threshold"],
-            T_min_convect=d["sbm_T_min_convect"],
         )
 
     def to_gray_radiation_config(self):
@@ -507,7 +499,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         "tiedtke_mc_proxy_RH_crit": float(t.mc_proxy_RH_crit),
         # Louis
         "louis_l_mix_max": float(lo.l_mix_max),
-        "louis_Ck": float(lo.Ck),
         "louis_Ri_crit": float(lo.Ri_crit),
         "louis_b_louis": float(lo.b_louis),
         "louis_c_louis": float(lo.c_louis),
@@ -523,7 +514,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         "mcfarlane_min_wind": float(mc.min_wind),
         "mcfarlane_envelope_scale": float(mc.envelope_scale),
         "mcfarlane_k_wave": float(mc.k_wave),
-        "mcfarlane_N_ref": float(mc.N_ref),
         "mcfarlane_directional_spread": float(mc.directional_spread),
         "mcfarlane_tau_max": float(mc.tau_max),
         # Cloud (Xu-Randall)
@@ -550,7 +540,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         "sbm_tau_c": float(sbm.tau_c),
         "sbm_RH_ref": float(sbm.rh_ref),
         "sbm_CAPE_threshold": float(sbm.cape_threshold),
-        "sbm_T_min_convect": float(sbm.T_min_convect),
         # RRTMGP
         "rrtmgp_co2_ppmv": float(rr.co2_ppmv),
         "rrtmgp_ch4_ppbv": float(rr.ch4_ppbv),
@@ -562,8 +551,6 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         # Shared
         "tau_equator": 7.2,
         "tau_pole": 1.8,
-        "albedo_ice": 0.65,
-        "albedo_ocean": 0.06,
     }
 
 
@@ -615,11 +602,7 @@ def make_aimip_classical_spectral_physics(
     ``physics_pipeline.py:897`` ``_PIPELINE_UNSUPPORTED_CONVECTION``).
     """
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
-    from legoesm.atmosphere.physics.radiation.config import (
-        GrayRadiationConfig,
-        RadiationConfig,
-        RRTMGPConfig,
-    )
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
 
     # Radiation backend toggle.  ``rrtmgp`` is the production
     # correlated-k path: it explicitly couples Xu-Randall cloud

@@ -26,10 +26,10 @@ from legoesm.parallel.device_config import (
 # The XLA-flag helpers live in runtime.backend (device_config imports them from
 # there); import from their actual home, not the module they moved out of.
 from legoesm.runtime.backend import (
-    _set_xla_flags,
-    _TPU_XLA_FLAGS,
-    _NVIDIA_GPU_XLA_FLAGS,
-    _AMD_GPU_XLA_FLAGS,
+    set_xla_flags,
+    TPU_XLA_FLAGS,
+    NVIDIA_GPU_XLA_FLAGS,
+    AMD_GPU_XLA_FLAGS,
 )
 
 
@@ -252,14 +252,14 @@ class TestBatchSize:
 # ============================================================================
 
 class TestXLAFlags:
-    """Tests for _set_xla_flags and configure_jax_for_device."""
+    """Tests for set_xla_flags and configure_jax_for_device."""
 
     def test_set_xla_flags_adds_to_env(self):
-        """_set_xla_flags appends flags to XLA_FLAGS."""
+        """set_xla_flags appends flags to XLA_FLAGS."""
         old = os.environ.get("XLA_FLAGS", "")
         try:
             os.environ["XLA_FLAGS"] = ""
-            _set_xla_flags({"test_flag_abc": "true"})
+            set_xla_flags({"test_flag_abc": "true"})
             assert "test_flag_abc=true" in os.environ["XLA_FLAGS"]
         finally:
             if old:
@@ -268,11 +268,11 @@ class TestXLAFlags:
                 os.environ.pop("XLA_FLAGS", None)
 
     def test_set_xla_flags_does_not_duplicate(self):
-        """_set_xla_flags does not duplicate existing flags."""
+        """set_xla_flags does not duplicate existing flags."""
         old = os.environ.get("XLA_FLAGS", "")
         try:
             os.environ["XLA_FLAGS"] = "--test_flag_xyz=false"
-            _set_xla_flags({"test_flag_xyz": "true"})
+            set_xla_flags({"test_flag_xyz": "true"})
             # Should not add because key already present
             assert os.environ["XLA_FLAGS"].count("test_flag_xyz") == 1
         finally:
@@ -282,11 +282,11 @@ class TestXLAFlags:
                 os.environ.pop("XLA_FLAGS", None)
 
     def test_set_xla_flags_merges_with_existing(self):
-        """_set_xla_flags preserves existing flags while adding new ones."""
+        """set_xla_flags preserves existing flags while adding new ones."""
         old = os.environ.get("XLA_FLAGS", "")
         try:
             os.environ["XLA_FLAGS"] = "--existing_flag=1"
-            _set_xla_flags({"new_flag_qrs": "2"})
+            set_xla_flags({"new_flag_qrs": "2"})
             flags = os.environ["XLA_FLAGS"]
             assert "existing_flag=1" in flags
             assert "new_flag_qrs=2" in flags
@@ -692,5 +692,5 @@ class TestGPUVendorDetection:
 
     def test_xla_flags_nvidia_only(self):
         """NVIDIA XLA flags contain cuDNN; AMD flags do not."""
-        assert "xla_gpu_cudnn_gemm_fusion_level" in _NVIDIA_GPU_XLA_FLAGS
-        assert "xla_gpu_cudnn_gemm_fusion_level" not in _AMD_GPU_XLA_FLAGS
+        assert "xla_gpu_cudnn_gemm_fusion_level" in NVIDIA_GPU_XLA_FLAGS
+        assert "xla_gpu_cudnn_gemm_fusion_level" not in AMD_GPU_XLA_FLAGS

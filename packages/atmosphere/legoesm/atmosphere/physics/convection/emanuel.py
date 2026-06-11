@@ -46,8 +46,8 @@ from legoesm.atmosphere.physics.thermodynamics import (
 from legoesm.atmosphere.physics.convection.config import EmanuelConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.mass_flux import (
-    _apply_mass_flux_kernel,
-    _compute_column_geometry,
+    apply_mass_flux_kernel,
+    compute_column_geometry,
 )
 from legoesm.atmosphere.physics.convection._triggers import (
     cape_trigger,
@@ -192,7 +192,7 @@ def emanuel_convection(
     # surface), which the smooth-surrogate scheme does not yet diagnose.  A
     # smooth max-MSE origin selector is a future faithfulness upgrade; the
     # surface-origin choice is the documented scope of this iteration.
-    dz, rho, z = _compute_column_geometry(T, p_full, p_half, q_v=q_v)
+    dz, rho, z = compute_column_geometry(T, p_full, p_half, q_v=q_v)
     T_base = T[:, -1]
     q_base = q_v[:, -1]
     p_base = p_full[:, -1]
@@ -370,7 +370,7 @@ def emanuel_convection(
         plume_M_u_capped = jnp.clip(plume.M_u, 0.0, config.M_b_max)
         plume = plume._replace(M_u=plume_M_u_capped)
 
-        dT_dt, dq_v_dt, dq_c_conv_dt = _apply_mass_flux_kernel(
+        dT_dt, dq_v_dt, dq_c_conv_dt = apply_mass_flux_kernel(
             T, q_v, p_full,
             plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
             z, rho, config.delta_0 * sort_multiplier, M_u_max=config.M_b_max,

@@ -77,7 +77,7 @@ def test_smag_vort_cap_formula_machine_precision():
         fv3_divergence_corner_3d,
     )
     from legoesm.core.operators_cdgrid import (
-        _interp_center_to_corner_a2b_ord4,
+        interp_center_to_corner_a2b_ord4,
         dgrid_vorticity,
     )
 
@@ -88,7 +88,7 @@ def test_smag_vort_cap_formula_machine_precision():
 
     # zeta_a2b_ord4 at corners (matches iter-170/187 path).
     zeta_cc = dgrid_vorticity(state.u_d.data, state.v_d.data, cdgrid)
-    zeta_a2b_corner = _interp_center_to_corner_a2b_ord4(
+    zeta_a2b_corner = interp_center_to_corner_a2b_ord4(
         zeta_cc, cdgrid,
     )
 

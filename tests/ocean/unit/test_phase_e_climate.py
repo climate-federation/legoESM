@@ -40,9 +40,12 @@ def test_load_jra55_do_synthetic_fallback():
         assert np.isfinite(arr).all()
 
 
-def test_load_core2_nyf_synthetic_fallback():
+def test_load_core2_nyf_synthetic_fallback(tmp_path):
+    # Point at an EMPTY cache dir: on machines where the real nyf.zarr cache
+    # exists the loader (correctly) returns the 1460-record CORE-II data and
+    # the synthetic branch would never be exercised.
     from legoesm.ocean.forcing import load_core2_nyf
-    f = load_core2_nyf(n_time=12)
+    f = load_core2_nyf(cache_dir=tmp_path, n_time=12)
     assert f.time_s.shape == (12,)
     assert np.isfinite(f.T_air).all()
 
@@ -78,7 +81,9 @@ def test_air_sea_fluxes_sign_conventions():
     import jax.numpy as jnp
     from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
     # Wind blowing east at 10 m/s -> tau_x < 0 (drag opposes wind).
-    tau_x, tau_y, sh, lh = air_sea_fluxes(
+    # NCAR default algo; q_sfc / rho_air pinned explicitly so only the
+    # sign conventions are under test (not the internal Goff/moist-rho).
+    tau_x, tau_y, sh, lh, evap = air_sea_fluxes(
         u10=jnp.array(10.0), v10=jnp.array(0.0),
         T_air_K=jnp.array(290.0), q_air=jnp.array(0.005),
         T_sfc_K=jnp.array(295.0), q_sfc=jnp.array(0.012),
@@ -86,16 +91,17 @@ def test_air_sea_fluxes_sign_conventions():
     )
     # tau_x: stress on the OCEAN follows the wind direction (drag on
     # the ocean from above is positive eastward when u10 > 0).
-    # ``simple_bulk_fluxes`` uses the atmosphere convention "stress
+    # ``air_sea_fluxes`` uses the atmosphere convention "stress
     # opposes wind" so tau_x is negative here.
     assert float(tau_x) < 0.0
     # SST warmer than air -> ocean heats the atmosphere -> shflx into
     # the ocean is negative.
     assert float(sh) < 0.0
-    # Air moister than sea-saturation specific humidity here (q_air
+    # Air drier than sea-saturation specific humidity here (q_air
     # 0.005 < q_sfc 0.012) so lhflx into the ocean is negative
-    # (evaporative cooling).
+    # (evaporative cooling) and the returned evaporation is positive-up.
     assert float(lh) < 0.0
+    assert float(evap) > 0.0
 
 
 # ---------------------------------------------------------------------------

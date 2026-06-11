@@ -24,7 +24,7 @@ from legoesm.grids.halo import (
     pad_halo,
     pad_halo_vector,
     set_halo_backend,
-    _pad_halo_local,
+    pad_halo_local,
     _pad_halo_local_h2,
 )
 from legoesm.ocean.conservation import ocean_conservation_fixer
@@ -79,7 +79,7 @@ class TestMPIHaloExchange:
             data = data.at[f].set(float(f + 1))
 
         # Reference: local halo exchange (no MPI).
-        reference = _pad_halo_local(data)
+        reference = pad_halo_local(data)
 
         # Zero non-owned faces then apply MPI halo exchange.
         partitioned = _zero_non_owned(data, topology)
@@ -100,7 +100,7 @@ class TestMPIHaloExchange:
         key = jax.random.PRNGKey(42)
         data = jax.random.normal(key, (6, n, n), dtype=jnp.float32)
 
-        reference = _pad_halo_local(data)
+        reference = pad_halo_local(data)
 
         partitioned = _zero_non_owned(data, topology)
         set_halo_backend("mpi", topology)

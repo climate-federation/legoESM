@@ -18,7 +18,7 @@ from legoesm.ocean.eos import (
 from legoesm.ocean.physics.lateral_mixing.config import VisbeckConfig
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
-_EPS = float(jnp.finfo(jnp.float32).eps)  # ~1.19e-7
+EPS = float(jnp.finfo(jnp.float32).eps)  # ~1.19e-7
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ def dm95_taper(
     S_x: jnp.ndarray,
     S_y: jnp.ndarray,
     S_max: float,
-    eps: float = _EPS,
+    eps: float = EPS,
     transition_width_frac: float = 0.1,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Apply Danabasoglu & McWilliams (1995) smooth slope tapering.
@@ -68,7 +68,7 @@ def dm95_taper(
 def dm95_taper_scalar(
     S: jnp.ndarray,
     S_max: float,
-    eps: float = _EPS,
+    eps: float = EPS,
     transition_width_frac: float = 0.1,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Single-component variant of :func:`dm95_taper`.
@@ -96,7 +96,7 @@ def dm95_taper_scalar(
 def vertical_flux_divergence(
     F_z: jnp.ndarray,
     dz_actual: jnp.ndarray,
-    eps: float = _EPS,
+    eps: float = EPS,
 ) -> jnp.ndarray:
     """Compute vertical flux divergence at full levels.
 
@@ -221,7 +221,7 @@ def _eady_growth_and_length(
     source (depth-resolved ``P = kappa_GM(z)·sigma(z)^2``); ``sigma_bar`` is its
     depth average (the 2-D EKE source).
     """
-    eps = _EPS
+    eps = EPS
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
 

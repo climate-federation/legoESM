@@ -130,7 +130,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # --- Shared utilities (acoustic substeps, sponge, Exner) ---
     "CompressibleEulerConfig": ("legoesm.atmosphere.dynamics.compressible_euler", "CompressibleEulerConfig"),
     "compute_exner_perturbation": ("legoesm.atmosphere.dynamics.compressible_euler", "compute_exner_perturbation"),
-    "_sponge_profile": ("legoesm.atmosphere.dynamics.compressible_euler", "_sponge_profile"),
+    "sponge_profile": ("legoesm.atmosphere.dynamics.compressible_euler", "sponge_profile"),
+    "acoustic_column_kernel": ("legoesm.atmosphere.dynamics.compressible_euler", "acoustic_column_kernel"),
+    "semi_implicit_acoustic_column_kernel": ("legoesm.atmosphere.dynamics.compressible_euler", "semi_implicit_acoustic_column_kernel"),
     "acoustic_substeps": ("legoesm.atmosphere.dynamics.compressible_euler", "acoustic_substeps"),
     "acoustic_substeps_semi_implicit": ("legoesm.atmosphere.dynamics.compressible_euler", "acoustic_substeps_semi_implicit"),
 }

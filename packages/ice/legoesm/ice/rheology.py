@@ -58,7 +58,7 @@ def _is_voronoi_mesh(grid) -> bool:
     return isinstance(grid, VoronoiMesh)
 
 
-def _cell_gradient_voronoi(
+def cell_gradient_voronoi(
     f_cell: jnp.ndarray,
     mesh: VoronoiMesh,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -128,8 +128,8 @@ def _strain_rates_voronoi(
     -------
     eps_11, eps_22, eps_12 : array ``(nCells,)``
     """
-    du_dx, du_dy = _cell_gradient_voronoi(u_ice, mesh)
-    dv_dx, dv_dy = _cell_gradient_voronoi(v_ice, mesh)
+    du_dx, du_dy = cell_gradient_voronoi(u_ice, mesh)
+    dv_dx, dv_dy = cell_gradient_voronoi(v_ice, mesh)
     eps_11 = du_dx
     eps_22 = dv_dy
     eps_12 = 0.5 * (du_dy + dv_dx)

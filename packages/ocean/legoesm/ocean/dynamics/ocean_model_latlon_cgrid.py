@@ -51,12 +51,12 @@ from legoesm.ocean.state import (
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
-    _interp_to_v_points,
-    _centered_cell_to_uface,
-    _upwind_to_u_points,
-    _upwind_to_v_points,
-    _tvd_to_u_points,
-    _tvd_to_v_points,
+    interp_to_v_points,
+    centered_cell_to_uface,
+    upwind_to_u_points,
+    upwind_to_v_points,
+    tvd_to_u_points,
+    tvd_to_v_points,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks,
@@ -195,8 +195,8 @@ def _compute_advection_flux_div(
         # WENO / DST3 paths (build a face value -> mass_flux*tr_face ->
         # divergence_cgrid); "centered" is simply the unlimited face
         # value. The horizontal face values come from the canonical
-        # centered cell->face interpolations (``_centered_cell_to_uface``,
-        # periodic in longitude; ``_interp_to_v_points``, the centered
+        # centered cell->face interpolations (``centered_cell_to_uface``,
+        # periodic in longitude; ``interp_to_v_points``, the centered
         # cell->v-face interp with the solid-wall / tripolar-fold BC).
         # Wall masking is carried by ``mass_flux_u``/``mass_flux_v``
         # (zero through walls) — the analogue of Veros's maskU/maskV.
@@ -206,8 +206,8 @@ def _compute_advection_flux_div(
         # locally negative tracers) with zero implicit diapycnal mixing.
         # Used for the Veros-faithful ACC comparison; legoESM's production
         # default stays TVD (Van Leer), which is monotone.
-        tr_u = _centered_cell_to_uface(tr)
-        tr_v = _interp_to_v_points(tr, grid)
+        tr_u = centered_cell_to_uface(tr)
+        tr_v = interp_to_v_points(tr, grid)
         tracer_flux_u = mass_flux_u * tr_u
         tracer_flux_v = mass_flux_v * tr_v
         div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
@@ -216,11 +216,11 @@ def _compute_advection_flux_div(
         from legoesm.ocean.dynamics._flux_limiters import resolve_tvd_limiter
         if tracer_advection in ("tvd", "superbee"):
             limiter_fn = resolve_tvd_limiter(tracer_advection)
-            tr_u = _tvd_to_u_points(tr, mass_flux_u, limiter_fn=limiter_fn)
-            tr_v = _tvd_to_v_points(tr, mass_flux_v, grid=grid, limiter_fn=limiter_fn)
+            tr_u = tvd_to_u_points(tr, mass_flux_u, limiter_fn=limiter_fn)
+            tr_v = tvd_to_v_points(tr, mass_flux_v, grid=grid, limiter_fn=limiter_fn)
         else:
-            tr_u = _upwind_to_u_points(tr, mass_flux_u)
-            tr_v = _upwind_to_v_points(tr, mass_flux_v, grid=grid)
+            tr_u = upwind_to_u_points(tr, mass_flux_u)
+            tr_v = upwind_to_v_points(tr, mass_flux_v, grid=grid)
         tracer_flux_u = mass_flux_u * tr_u
         tracer_flux_v = mass_flux_v * tr_v
         div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
@@ -415,14 +415,16 @@ def _forward_backward_coriolis_3d(
     u_prime_new = (u_prime + dt * f_u[:, :, jnp.newaxis] * v_at_u) * u_mask_3d
 
     # --- Backward step: update v' using NEW u' ---
-    # Average u'_new to v-points (Sadourny 4-point average).
-    # Boundary: wall BC on regular lat-lon; fold halo on tripolar.
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import pad_ns_vector_u
-    u_at_v_interior = 0.25 * (
-        u_prime_new[:-1, :-1] + u_prime_new[:-1, 1:]
-        + u_prime_new[1:, :-1] + u_prime_new[1:, 1:]
+    # Average u'_new to v-points (Sadourny 4-point average) via the
+    # shared cell-pad-first helper: the MPI band partition-cut v-face
+    # averages the neighbour rank's true u' row instead of the old
+    # interior-then-pad_ns_vector_u refill (one face row off at a cut).
+    # Wall BC at physical poles; fold (sign*perm) on tripolar — serial
+    # bit-identical.
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        interp_u_to_vface_4pt,
     )
-    u_at_v = pad_ns_vector_u(u_at_v_interior, grid)
+    u_at_v = interp_u_to_vface_4pt(u_prime_new, grid)
 
     v_prime_new = (v_prime - dt * f_v[:, :, jnp.newaxis] * u_at_v) * v_mask_3d
 
@@ -769,6 +771,17 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {config.barotropic_solver!r}")
+        # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
+        if config.barotropic_implicit_pcg_fixed_iters < 1:
+            raise ValueError(
+                "barotropic_implicit_pcg_fixed_iters must be >= 1 "
+                "(the distributed PCG runs exactly this many iterations); "
+                f"got {config.barotropic_implicit_pcg_fixed_iters!r}")
+        if config.barotropic_implicit_pcg_residual_tol <= 0.0:
+            raise ValueError(
+                "barotropic_implicit_pcg_residual_tol must be > 0 "
+                f"(diagnostic acceptance tol); got "
+                f"{config.barotropic_implicit_pcg_residual_tol!r}")
         # Asynchronous dt_mom≠dt_tracer stepping (dt_mom = dt / dt_mom_ratio).
         if config.dt_mom_ratio < 1.0:
             raise ValueError(
@@ -1885,18 +1898,50 @@ class LatLonCGridOceanModel:
         # flux remains here, applied to the top layer of S.
         if freshwater is not None and self.config.freshwater_closure != "none":
             dz_0 = h_k_new[..., 0]
-            dS_fw = virtual_salt_flux(
-                freshwater, S_ref=self.config.S_ref, dz_0=dz_0, rho_0=self.config.rho_0,
-            )
-            # Cast the freshwater contribution to S's dtype so the
-            # scatter add does not silently widen on x64 mode (the
-            # freshwater struct is built at JAX-default precision in
-            # init helpers, which can be f64 while S runs at the
-            # storage policy's f32).
             _S_dtype = state_new.S.data.dtype
-            S_fw = state_new.S.data.at[..., 0].add(
-                (dt * dS_fw * mask).astype(_S_dtype),
-            )
+            _spread_m = float(getattr(self.config, "runoff_depth_spread_m", 0.0))
+            if _spread_m > 0.0:
+                # NEMO-style runoff depth spreading (rn_dep_max): the runoff
+                # channel dilutes the top `_spread_m` metres; all other
+                # channels stay at the top cell.  Column-integral salt
+                # tendency identical to the legacy closure (conservation
+                # unchanged).  Static config gate -> legacy path untraced.
+                from legoesm.ocean.freshwater import (
+                    runoff_spread_virtual_salt_tendency_3d,
+                )
+                dS_fw_3d = runoff_spread_virtual_salt_tendency_3d(
+                    freshwater, self.config.S_ref, h_k_new, self.config.rho_0,
+                    mask, runoff_spread_m=_spread_m,
+                    area=self.grid.area,
+                    normalize=bool(getattr(self.config,
+                                           "normalize_freshwater", False)),
+                )
+                S_fw = state_new.S.data + (
+                    dt * dS_fw_3d * mask[..., None]).astype(_S_dtype)
+            elif getattr(self.config, "normalize_freshwater", False):
+                # Global-salt-conserving virtual salt: remove the area-mean of the
+                # net freshwater (the OMIP correction) so an unbalanced ∮(P-E+R)
+                # does not drift mean salinity.  Shared with the MPAS path.
+                from legoesm.ocean.freshwater import normalized_virtual_salt_flux
+                dS_fw = normalized_virtual_salt_flux(
+                    freshwater, self.config.S_ref, dz_0, self.config.rho_0,
+                    self.grid.area, mask,
+                )
+                S_fw = state_new.S.data.at[..., 0].add(
+                    (dt * dS_fw * mask).astype(_S_dtype),
+                )
+            else:
+                dS_fw = virtual_salt_flux(
+                    freshwater, S_ref=self.config.S_ref, dz_0=dz_0, rho_0=self.config.rho_0,
+                )
+                # Cast the freshwater contribution to S's dtype so the
+                # scatter add does not silently widen on x64 mode (the
+                # freshwater struct is built at JAX-default precision in
+                # init helpers, which can be f64 while S runs at the
+                # storage policy's f32).
+                S_fw = state_new.S.data.at[..., 0].add(
+                    (dt * dS_fw * mask).astype(_S_dtype),
+                )
             state_new = state_new._replace(
                 S=state_new.S.replace(data=S_fw),
             )
@@ -2649,7 +2694,7 @@ class LatLonCGridOceanModel:
             if _wet_if_vmix is not None:
                 A_v_cell = A_v_cell * _wet_if_vmix
             A_v_u = interp_cell_to_uface(A_v_cell)        # (n_lat, n_lon+1, nlev-1)
-            A_v_v = _interp_to_v_points(A_v_cell)         # (n_lat+1, n_lon, nlev-1)
+            A_v_v = interp_to_v_points(A_v_cell)         # (n_lat+1, n_lon, nlev-1)
             if _wet_if_vmix is not None:
                 # FACE seafloor guard (partial cells): the cell→face AVERAGE
                 # leaves A_v_face = ½·A_deep at interfaces BELOW the shallower
@@ -2665,7 +2710,7 @@ class LatLonCGridOceanModel:
                 A_v_u = A_v_u * _act_u3.astype(A_v_u.dtype)[..., 1:]
                 A_v_v = A_v_v * _act_v3.astype(A_v_v.dtype)[..., 1:]
             dz_u = interp_cell_to_uface(dz_cell)
-            dz_v = _interp_to_v_points(dz_cell)
+            dz_v = interp_to_v_points(dz_cell)
             dz_half_u = build_dz_half(dz_u)
             dz_half_v = build_dz_half(dz_v)
             u_mask_3d = state.u_mask.data[..., jnp.newaxis]
@@ -2748,6 +2793,11 @@ class LatLonCGridOceanModel:
             new_state = self._apply_polar_filter(new_state, dt)
         if self.config.freeze_floor:
             new_state = self._apply_freeze_floor(new_state)
+        # ORCA east-west cyclic-overlap (tripole seam) — LAST, so the halo
+        # columns exactly mirror their overlap partners after every other
+        # post-step projection (static config-bool gate; default off).
+        if getattr(self.config, "ew_cyclic_overlap", False):
+            new_state = self._apply_ew_cyclic_overlap(new_state)
         return new_state
 
     def _apply_polar_filter(self, state: LatLonCGridOceanState, dt: float
@@ -2905,6 +2955,69 @@ class LatLonCGridOceanModel:
         T_sfc_floored = jnp.maximum(T[..., 0], self.config.freeze_floor_temp_c)
         T_floored = T.at[..., 0].set(T_sfc_floored)
         return state._replace(T=state.T.replace(data=T_floored))
+
+    def _apply_ew_cyclic_overlap(self, state: LatLonCGridOceanState
+                                 ) -> LatLonCGridOceanState:
+        """Slave the two longitude HALO columns to their ORCA 2-point
+        cyclic-overlap partners (``config.ew_cyclic_overlap``).
+
+        The ORCA tripole grid is periodic east-west with a 2-point overlap:
+        column ``0`` duplicates column ``nx-2`` and column ``nx-1`` duplicates
+        column ``1`` (same geographic longitude).  The C-grid operators apply
+        regular-grid roll-periodicity (period ``nx``), which is OFF BY ONE for
+        an ORCA grid (true period ``nx-2``) -- and the eORCA1 mesh marks the
+        halo columns LAND, so the east-west seam (lon ~72.5E on eORCA1) carries
+        a spurious wall and the two physical seam columns drift apart.
+
+        Re-imposing the overlap at the END of each step makes the seam-adjacent
+        physical columns see the correct cross-seam neighbour on the NEXT step:
+        the physical seam u-face (``u[:,1]``) gets the true ``(col1 - col_{nx-2})``
+        eta-gradient PGF + correct upwind tracers, reconnecting both barotropic
+        flow and tracer advection across the seam.
+
+        ALL prognostic fields are slaved (codex adversarial-review HIGH): the
+        barotropic solver carries ``U_old``/``u_prime`` forward (velocity is NOT
+        recomputed from scratch) and the seam u-face Coriolis term reads the
+        ``v`` halo via ``roll(V_bar_c, 1)`` -- so an unslaved velocity halo would
+        re-inject the seam every step, defeating the tracer fix.
+
+        Column rules (``nx = n_lon`` = cell count):
+        * cell-centred (T, S, eta) and v-faces (lat interfaces, also ``nx``
+          columns): ``col[0] <- col[nx-2]``, ``col[nx-1] <- col[1]``.
+        * u-faces (lon interfaces, ``nx+1`` columns): ``u[:,0] <- u[:,nx-2]``
+          (west face of cell 0 == cell nx-2) and ``u[:,nx-1] <- u[:,1]`` (east
+          face of physical cell nx-2 == the seam face == ``u[:,1]``).  The last
+          face ``u[:,nx]`` is left to the model's internal ``u[:,nx]=u[:,0]``
+          wrap -- it feeds only the slaved halo cell, so it is harmless.
+
+        Requires the matching mask/bathy/IC overlap-fill at construction (so the
+        derived u/v face masks treat the reconnected seam as ocean and the halo
+        columns start consistent).  ORCA-OVERLAP-SPECIFIC: correct only on a grid
+        whose first/last columns DUPLICATE columns nx-2 / 1; WRONG on a genuinely
+        period-nx regular lat-lon grid.  Gated (default off) -> bit-exact for
+        every existing grid/config.
+        """
+        nx = state.T.data.shape[1]   # n_lon (cell count)
+
+        def _ovl_cell(a):
+            # cell-column fields (T, S, eta, v): axis-1 size nx.
+            a = a.at[:, 0].set(a[:, nx - 2])
+            a = a.at[:, nx - 1].set(a[:, 1])
+            return a
+
+        def _ovl_u(a):
+            # u-faces: axis-1 size nx+1. Slave the 2 halo seam faces.
+            a = a.at[:, 0].set(a[:, nx - 2])
+            a = a.at[:, nx - 1].set(a[:, 1])
+            return a
+
+        return state._replace(
+            T=state.T.replace(data=_ovl_cell(state.T.data)),
+            S=state.S.replace(data=_ovl_cell(state.S.data)),
+            eta=state.eta.replace(data=_ovl_cell(state.eta.data)),
+            u=state.u.replace(data=_ovl_u(state.u.data)),
+            v=state.v.replace(data=_ovl_cell(state.v.data)),
+        )
 
     def _ab2_step(self, state: LatLonCGridOceanState, dt: float,
                   freshwater=None, surface_forcing=None, sponge=None,

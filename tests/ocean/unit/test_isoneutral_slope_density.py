@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 
 from legoesm.grids.latlon import create_latlon_grid
-from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _neumann_fill_cgrid
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     iterate_eos_and_pressure_anomaly,
 )
@@ -95,7 +95,7 @@ def _setup(n_lat=10, n_lon=14, nlev=8, dTdy=0.08, dTdz_scale=9.0,
 
 def _rho(T, S, mask, z, eos_fn):
     rho, _, _ = iterate_eos_and_pressure_anomaly(
-        T, S, mask, lambda f: _neumann_fill_cgrid(f, mask), eos_fn,
+        T, S, mask, lambda f: neumann_fill_cgrid(f, mask), eos_fn,
         z.dz_ref, RHO_0, G, n_iter=2,
     )
     return rho
@@ -420,7 +420,7 @@ class TestKrSumPairing:
         grid, z, T, S, eta, H, mask, um, vm, J = _setup()
         eos_fn = make_eos_fn(eos)
         rho = _rho(T, S, mask, z, eos_fn)
-        rho_filled = _neumann_fill_cgrid(rho, mask)
+        rho_filled = neumann_fill_cgrid(rho, mask)
         w = _w_face_slope_density_inputs(
             rho_filled, T, S, mask, z, J, grid, "neutral", eos_fn, RHO_0, G)
         return grid, z, T, S, mask, J, w

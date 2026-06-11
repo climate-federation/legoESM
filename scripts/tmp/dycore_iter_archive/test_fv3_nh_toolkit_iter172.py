@@ -449,13 +449,13 @@ NH_GATE_HELPER_PAIRS = [
     ("self.config.damp_v > 0.0", "fv3_del6_vorticity_damping"),
     # iter-170: a2b zeta corner
     ("config.use_fv3_a2b_zeta_corner",
-     "_interp_center_to_corner_a2b_ord4"),
+     "interp_center_to_corner_a2b_ord4"),
     # iter-171: cell-centre div damping
-    ("config.div_damp_coeff > 0.0", "_arakawa_lamb_gradient"),
+    ("config.div_damp_coeff > 0.0", "arakawa_lamb_gradient"),
     # iter-173: async-halo overlap dispatch (added by iter-178
     # to close the gap that the iter-172 guard predates iter-173).
     ("config.use_async_halo and _hb_div ==",
-     "_overlapped_arakawa_lamb_gradient"),
+     "overlapped_arakawa_lamb_gradient"),
     # iter-180: Smagorinsky-adaptive A_h dispatch (added by
     # iter-186 to extend the guard).  When ``smagorinsky_cs > 0``
     # AND ``A_h > 0``, the adaptive coefficient is computed via

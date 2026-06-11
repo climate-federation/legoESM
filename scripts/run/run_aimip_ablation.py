@@ -142,8 +142,8 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
     """Train the classical AIMIP pipeline with the given scheme overrides,
     evaluate on the held-out eval windows, return metrics."""
     from legoesm.atmosphere.dynamics.spectral_pe import (
-        _compute_spectral_filter,
-        _compute_sponge_factor,
+        compute_spectral_filter,
+        compute_sponge_factor,
         spectral_pe_to_grid,
     )
     from legoesm.training.aimip_params import (
@@ -197,13 +197,13 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
     pe_config = spec_cfg.pe_config
     sponge_factor = None
     if pe_config.sponge_tau > 0:
-        sponge_factor = _compute_sponge_factor(
+        sponge_factor = compute_sponge_factor(
             sigma.sigma_full, pe_config.sponge_sigma,
             pe_config.sponge_tau, spec_cfg.dt,
         )
     spectral_filter = None
     if pe_config.spectral_filter_strength > 0:
-        spectral_filter = _compute_spectral_filter(
+        spectral_filter = compute_spectral_filter(
             grid.ls, grid.n_max,
             order=pe_config.spectral_filter_order,
             cutoff_fraction=pe_config.spectral_filter_strength,

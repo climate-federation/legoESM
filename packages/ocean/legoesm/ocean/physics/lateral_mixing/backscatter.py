@@ -42,7 +42,7 @@ import jax.numpy as jnp
 
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     viscous_tendency_cgrid,
-    _vertex_area,
+    vertex_area_1d,
 )
 from legoesm.core.operators_voronoi import vector_laplacian_del2_3d
 
@@ -117,7 +117,7 @@ def _A_bs_q_cgrid(E: jnp.ndarray, grid, c_bs: float) -> jnp.ndarray:
     E_q = jnp.pad(E_q_int, (*pad_axes, (1, 1), (0, 0)))
     E_q = jnp.concatenate([E_q, E_q[..., 0:1]], axis=-1)
 
-    A_vert = _vertex_area(grid)                         # (n_lat+1,) [m²]
+    A_vert = vertex_area_1d(grid)                         # (n_lat+1,) [m²]
     Delta_q = jnp.sqrt(A_vert)[:, jnp.newaxis]           # length [m]
     return c_bs * Delta_q * jnp.sqrt(jnp.maximum(E_q, 0.0) + 1e-30)
 

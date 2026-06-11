@@ -48,25 +48,25 @@ scale_depth = 1000.0     # Reference e-folding depth for stratification [m]
 # ==============================================================================
 
 # Specific volume coefficients al0(T, S)
-_a0 = 7.057924e-4
-_a1 = 3.480336e-7
-_a2 = -1.112733e-7
+WRIGHT_A0 = 7.057924e-4
+WRIGHT_A1 = 3.480336e-7
+WRIGHT_A2 = -1.112733e-7
 
 # Pressure offset p0(T, S) [Pa]
-_b0 = 5.790749e8
-_b1 = 3.516535e6
-_b2 = -4.002714e4
-_b3 = 2.084372e2
-_b4 = 5.944068e5
-_b5 = -9.643486e3
+WRIGHT_B0 = 5.790749e8
+WRIGHT_B1 = 3.516535e6
+WRIGHT_B2 = -4.002714e4
+WRIGHT_B3 = 2.084372e2
+WRIGHT_B4 = 5.944068e5
+WRIGHT_B5 = -9.643486e3
 
 # Lambda(T, S) [m^2/s^2]
-_c0 = 1.704853e5
-_c1 = 7.904722e2
-_c2 = -7.984422
-_c3 = 5.140652e-2
-_c4 = -2.302158e2
-_c5 = -3.079464
+WRIGHT_C0 = 1.704853e5
+WRIGHT_C1 = 7.904722e2
+WRIGHT_C2 = -7.984422
+WRIGHT_C3 = 5.140652e-2
+WRIGHT_C4 = -2.302158e2
+WRIGHT_C5 = -3.079464
 
 
 def wright_eos(
@@ -92,7 +92,7 @@ def wright_eos(
     Notes
     -----
     Intermediate computation is promoted to float64 to avoid precision
-    loss from large polynomial coefficients (e.g., _b0 ~ 5.79e8).
+    loss from large polynomial coefficients (e.g., WRIGHT_B0 ~ 5.79e8).
     If ``JAX_ENABLE_X64=1`` is not set, the astype calls are no-ops
     (safe but no precision improvement).  ``jnp.astype`` is
     differentiable in JAX.
@@ -114,13 +114,13 @@ def wright_eos(
     p = p.astype(hi)
 
     # Specific volume parameter
-    al0 = _a0 + _a1 * T + _a2 * S
+    al0 = WRIGHT_A0 + WRIGHT_A1 * T + WRIGHT_A2 * S
 
     # Pressure offset
-    p0 = (_b0 + _b4 * S) + T * (_b1 + T * (_b2 + _b3 * T) + _b5 * S)
+    p0 = (WRIGHT_B0 + WRIGHT_B4 * S) + T * (WRIGHT_B1 + T * (WRIGHT_B2 + WRIGHT_B3 * T) + WRIGHT_B5 * S)
 
     # Lambda
-    lam = (_c0 + _c4 * S) + T * (_c1 + T * (_c2 + _c3 * T) + _c5 * S)
+    lam = (WRIGHT_C0 + WRIGHT_C4 * S) + T * (WRIGHT_C1 + T * (WRIGHT_C2 + WRIGHT_C3 * T) + WRIGHT_C5 * S)
 
     # Density: rho = (p + p0) / (lambda + al0 * (p + p0))
     p_plus_p0 = p + p0
@@ -135,9 +135,9 @@ def _wright_eos_scalar(T: float, S: float, p: float) -> float:
     Used internally by ``thermal_expansion_coeff`` and
     ``haline_contraction_coeff`` via ``jax.grad``.
     """
-    al0 = _a0 + _a1 * T + _a2 * S
-    p0 = (_b0 + _b4 * S) + T * (_b1 + T * (_b2 + _b3 * T) + _b5 * S)
-    lam = (_c0 + _c4 * S) + T * (_c1 + T * (_c2 + _c3 * T) + _c5 * S)
+    al0 = WRIGHT_A0 + WRIGHT_A1 * T + WRIGHT_A2 * S
+    p0 = (WRIGHT_B0 + WRIGHT_B4 * S) + T * (WRIGHT_B1 + T * (WRIGHT_B2 + WRIGHT_B3 * T) + WRIGHT_B5 * S)
+    lam = (WRIGHT_C0 + WRIGHT_C4 * S) + T * (WRIGHT_C1 + T * (WRIGHT_C2 + WRIGHT_C3 * T) + WRIGHT_C5 * S)
     p_plus_p0 = p + p0
     return p_plus_p0 / (lam + al0 * p_plus_p0)
 
@@ -1762,7 +1762,7 @@ def compute_buoyancy_frequency_adiabatic(
 # Shared helpers for ocean physics integration modules
 # ==============================================================================
 
-def _maybe_partial_h_actual(state, z_coord):
+def maybe_partial_h_actual(state, z_coord):
     """Return per-cell h_actual when z_coord is a partial-cell coord,
     else None (caller falls back to dz * jacobian).
 
@@ -1812,7 +1812,7 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None):
     """
     if eos_fn is None:
         eos_fn = wright_eos
-    h_actual = _maybe_partial_h_actual(state, z_coord)
+    h_actual = maybe_partial_h_actual(state, z_coord)
     # Two EOS iterations for density-pressure consistency, matching the
     # dynamical core (ocean_pe_cdgrid.py).
     rho = eos_fn(state.T.data, state.S.data, jnp.zeros_like(state.T.data))
@@ -1842,7 +1842,7 @@ def compute_ocean_rho_and_pressure(state, z_coord, jacobian, eos_fn=None):
     p_hydro : array — hydrostatic pressure [Pa].
     """
     rho = compute_ocean_rho(state, z_coord, jacobian, eos_fn=eos_fn)
-    h_actual = _maybe_partial_h_actual(state, z_coord)
+    h_actual = maybe_partial_h_actual(state, z_coord)
     p_hydro = compute_hydrostatic_pressure(
         rho, state.eta.data, z_coord.dz_ref, jacobian, rho_0,
         h_actual=h_actual,

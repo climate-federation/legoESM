@@ -8,7 +8,7 @@ import pytest
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.halo import (
     CONNECTIVITY, WEST, EAST, SOUTH, NORTH,
-    pad_halo, pad_halo_vector, pad_halo_4d, _extract_edge_strip,
+    pad_halo, pad_halo_vector, pad_halo_4d, extract_edge_strip,
 )
 
 
@@ -260,23 +260,23 @@ class TestEdgeStripExtraction:
 
     def test_west_edge(self):
         data = jnp.arange(6 * 4 * 4, dtype=jnp.float32).reshape(6, 4, 4)
-        strip = _extract_edge_strip(data, 0, WEST)
+        strip = extract_edge_strip(data, 0, WEST)
         assert strip.shape == (4,)
         assert jnp.allclose(strip, data[0, 0, :])
 
     def test_east_edge(self):
         data = jnp.arange(6 * 4 * 4, dtype=jnp.float32).reshape(6, 4, 4)
-        strip = _extract_edge_strip(data, 2, EAST)
+        strip = extract_edge_strip(data, 2, EAST)
         assert jnp.allclose(strip, data[2, -1, :])
 
     def test_south_edge(self):
         data = jnp.arange(6 * 4 * 4, dtype=jnp.float32).reshape(6, 4, 4)
-        strip = _extract_edge_strip(data, 4, SOUTH)
+        strip = extract_edge_strip(data, 4, SOUTH)
         assert jnp.allclose(strip, data[4, :, 0])
 
     def test_north_edge(self):
         data = jnp.arange(6 * 4 * 4, dtype=jnp.float32).reshape(6, 4, 4)
-        strip = _extract_edge_strip(data, 5, NORTH)
+        strip = extract_edge_strip(data, 5, NORTH)
         assert jnp.allclose(strip, data[5, :, -1])
 
 
@@ -292,7 +292,7 @@ class TestPadHalo4DHalo3Iter725:
        `(6, n+6, n+6, nlev)`.
     2. The result is bit-identical to per-level 2D `pad_halo(halo=3)`.
     3. The same holds WITH `interp_offsets` provided (iter-724 fix
-       to `_interp_strip` that broadcasts weights along trailing dims).
+       to `interp_strip` that broadcasts weights along trailing dims).
     4. Wrong-shape interp_offsets raises `ValueError` (iter-724 guard).
     5. halo=1 and halo=2 4D paths UNCHANGED (iter-723/724 are additive;
        pins against accidental regression of the working paths).
@@ -327,7 +327,7 @@ class TestPadHalo4DHalo3Iter725:
     def test_halo3_4d_with_offsets_matches_per_level(self):
         """halo=3 4D + interp_offsets must produce bit-identical output
         to per-level 2D + interp_offsets.  Exercises the iter-724
-        `_interp_strip` fix that broadcasts weights along trailing
+        `interp_strip` fix that broadcasts weights along trailing
         dims.  Pre-iter-724 this crashed with a shape broadcast error.
         """
         n = 8
@@ -384,7 +384,7 @@ class TestPadHalo4DHalo3Iter725:
             )
 
     def test_halo2_4d_with_offsets_no_longer_crashes(self):
-        """Iter-724 also fixed a latent bug in the `_interp_strip`
+        """Iter-724 also fixed a latent bug in the `interp_strip`
         broadcast that affected halo=2 4D when called with offsets AND
         without duogrid (suppression).  Lock that the fixed call now
         works.  Pre-iter-724 this crashed with:

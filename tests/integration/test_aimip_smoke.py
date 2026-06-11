@@ -95,7 +95,7 @@ def test_aimip_classical_params_to_louis_preserves_defaults():
     params = AIMIPClassicalParams.from_defaults()
     cfg = params.to_louis_config()
     canon = LouisConfig()
-    for field in ("l_mix_max", "Ck", "Ri_crit", "b_louis", "c_louis"):
+    for field in ("l_mix_max", "Ri_crit", "b_louis", "c_louis"):
         assert math.isclose(
             float(getattr(cfg, field)),
             float(getattr(canon, field)),

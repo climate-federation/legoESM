@@ -185,7 +185,7 @@ class NeuralPhysics(eqx.Module):
 # Column feature packing / unpacking
 # ======================================================================
 
-def _pack_column_features(
+def pack_column_features(
     T: jax.Array,
     u: jax.Array,
     v: jax.Array,
@@ -317,7 +317,7 @@ def make_neural_step_unified(
         solar_flat = jnp.broadcast_to(s_0, p_s_flat.shape)
 
         # Pack features per column: (ncol, n_input)
-        features = jax.vmap(_pack_column_features)(
+        features = jax.vmap(pack_column_features)(
             T_col, u_col, v_col, q_v_col, p_s_flat, solar_flat,
         )
 

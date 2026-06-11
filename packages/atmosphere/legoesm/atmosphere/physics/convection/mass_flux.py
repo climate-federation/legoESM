@@ -21,7 +21,7 @@ mass-flux profile ``M(z)``, an entraining/diluting updraft ``(T_u,
 q_u)``, and grid geometry, they apply the same compensating
 subsidence + detrainment tendencies and diagnose surface
 precipitation from the column integral of detrained condensate.
-The kernel is factored into ``_apply_mass_flux_kernel`` so the two
+The kernel is factored into ``apply_mass_flux_kernel`` so the two
 schemes differ only in (a) the prognostic update rule and (b) the
 M(z) profile.
 
@@ -70,7 +70,7 @@ from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 # =============================================================================
 
 
-def _compute_column_geometry(
+def compute_column_geometry(
     T: jax.Array,
     p_full: jax.Array,
     p_half: jax.Array,
@@ -197,7 +197,7 @@ def stratosphere_mass_flux_gate(
     )
 
 
-def _apply_mass_flux_kernel(
+def apply_mass_flux_kernel(
     T: jax.Array,
     q_v: jax.Array,
     p_full: jax.Array,
@@ -308,7 +308,7 @@ def diagnose_mass_flux_closure(
     config: MassFluxConfig = MassFluxConfig(),
 ) -> MassFluxClosureDiagnostics:
     """Diagnose closure terms before computing mass-flux tendencies."""
-    dz, rho, z = _compute_column_geometry(T, p_full, p_half, q_v=q_v)
+    dz, rho, z = compute_column_geometry(T, p_full, p_half, q_v=q_v)
     T_moist, cape, convective_mask = _compute_cape_diagnostics(
         T, p_full, p_half, config.cape_threshold, config.cape_activation_scale,
         q_v=q_v,
@@ -374,7 +374,7 @@ def mass_flux_convection_from_closure(
     q_v_u = dilution * q_v_u_undiluted + (1.0 - dilution) * q_v
     q_c_u = dilution * q_c_u_undiluted
 
-    dT_dt, dq_v_dt, dq_c_conv_dt = _apply_mass_flux_kernel(
+    dT_dt, dq_v_dt, dq_c_conv_dt = apply_mass_flux_kernel(
         T=T,
         q_v=q_v,
         p_full=p_full,
@@ -467,7 +467,7 @@ def edmf_convection(
     a_u_new : jax.Array
         Updated updraft area fraction, shape ``(ncol,)``.
     """
-    dz, rho, z = _compute_column_geometry(T, p_full, p_half, q_v=q_v)
+    dz, rho, z = compute_column_geometry(T, p_full, p_half, q_v=q_v)
     T_moist, cape, convective_mask = _compute_cape_diagnostics(
         T, p_full, p_half, config.cape_threshold, config.cape_activation_scale,
         q_v=q_v,
@@ -522,7 +522,7 @@ def edmf_convection(
     M_profile = rho * a_u_new[:, None] * w_u
 
     del dz  # (kept for interface symmetry — kernel no longer needs it)
-    dT_dt, dq_v_dt, dq_c_conv_dt = _apply_mass_flux_kernel(
+    dT_dt, dq_v_dt, dq_c_conv_dt = apply_mass_flux_kernel(
         T=T,
         q_v=q_v,
         p_full=p_full,

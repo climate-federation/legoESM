@@ -77,7 +77,7 @@ __all__ = (
 def _pad_halo_nearest_copy(field):
     """Halo exchange via nearest-index copy only.
 
-    The standard ``_pad_halo_auto`` path in ``operators_cdgrid``
+    The standard ``pad_halo_auto`` path in ``operators_cdgrid``
     optionally applies a 3-point Lagrange interpolation
     (``interp_offsets``) or a duogrid remap when the source panel
     is not aligned with the destination halo strip.  Both options

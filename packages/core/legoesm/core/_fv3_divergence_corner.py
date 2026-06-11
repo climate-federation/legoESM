@@ -94,7 +94,7 @@ def _to_agrid_cell_centre_2d(
     """Convert C-D corner winds to A-grid cell-centre (ua, va) for FV3.
 
     A-grid cell-centre value at (i, j) = average of the 4 surrounding
-    corner values.  This is exactly ``_interp_corner_to_center``.
+    corner values.  This is exactly ``interp_corner_to_center``.
     """
     ua = 0.25 * (
         u_corner[:, :-1, :-1] + u_corner[:, 1:, :-1]

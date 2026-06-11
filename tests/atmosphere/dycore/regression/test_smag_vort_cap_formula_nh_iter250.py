@@ -87,7 +87,7 @@ def test_nh_smag_vort_cap_formula_machine_precision():
     )
     from legoesm.core.operators_cdgrid import (
         center_to_dgrid_vector, dgrid_vorticity,
-        _interp_center_to_corner_a2b_ord4,
+        interp_center_to_corner_a2b_ord4,
     )
 
     # Convert u, v at cell centres to D-grid corner storage.
@@ -100,7 +100,7 @@ def test_nh_smag_vort_cap_formula_machine_precision():
 
     # zeta_a2b_ord4 at corners.
     zeta_cc = dgrid_vorticity(u_d, v_d, cdgrid)
-    zeta_a2b_corner = _interp_center_to_corner_a2b_ord4(
+    zeta_a2b_corner = interp_center_to_corner_a2b_ord4(
         zeta_cc, cdgrid,
     )
 

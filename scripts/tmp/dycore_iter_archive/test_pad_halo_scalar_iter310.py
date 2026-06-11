@@ -13,7 +13,7 @@ combination — so:
 
 Pinning these foundational invariants ensures that EVERY
 downstream helper that calls pad_halo (a2b_ord4, divergence,
-laplacian, _interp_center_to_corner, etc.) inherits correct
+laplacian, interp_center_to_corner, etc.) inherits correct
 constant-preservation and linearity.
 
 Tests

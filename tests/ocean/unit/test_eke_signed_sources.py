@@ -54,7 +54,7 @@ from legoesm.ocean.physics.lateral_mixing.eke import (
     validate_eke_config,
 )
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
-    _neumann_fill_cgrid,
+    neumann_fill_cgrid,
     compute_eke_step_kappa,
     compute_realized_signed_conversions,
     gm_redi_tracer_tendency_triads_latlon_cgrid,
@@ -152,10 +152,10 @@ def _independent_signed_skew(recipe, model, state):
         depth_resolved=True)
     jac = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
     eos_fn = make_eos_fn(cfg.eos, cfg.eos_linear)
-    fill = lambda f: _neumann_fill_cgrid(f, lm)
+    fill = lambda f: neumann_fill_cgrid(f, lm)
     rho, _r, _p = iterate_eos_and_pressure_anomaly(
         T, S, lm, fill, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2)
-    rho_f = _neumann_fill_cgrid(rho, lm)
+    rho_f = neumann_fill_cgrid(rho, lm)
     zero = jnp.asarray(0.0)
     common = dict(z_coord=z_coord, jacobian=jac, grid=grid, kappa_GM=kg,
                   kappa_Redi=zero, S_max=gm_cfg.S_max,
@@ -170,7 +170,7 @@ def _independent_signed_skew(recipe, model, state):
     z_full = jnp.asarray(z_coord.z_full_ref)[None, None, :]
     intT, intS = int_drhodTS_dynamic_enthalpy(
         make_eos_fn(cfg.eos, cfg.eos_linear),
-        _neumann_fill_cgrid(T, lm), _neumann_fill_cgrid(S, lm),
+        neumann_fill_cgrid(T, lm), neumann_fill_cgrid(S, lm),
         z_full, rho_0, g)
     intT = intT * lm[:, :, None]; intS = intS * lm[:, :, None]
     dz_cell = z_coord.dz_ref * jac[:, :, None]

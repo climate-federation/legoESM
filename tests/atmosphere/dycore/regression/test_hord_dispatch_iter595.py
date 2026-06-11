@@ -2,7 +2,7 @@
 
 Adds ``hord`` kwarg (default 12 = preserves pre-iter-595 behavior)
 to _ppm_1d, _xppm, _yppm.  Dispatches to the appropriate limiter
-(iord=8/9/10/11/12 → iter 585/_pert_ppm/iter 593/iter 592/_pert_ppm_iv0).
+(iord=8/9/10/11/12 → iter 585/pert_ppm/iter 593/iter 592/_pert_ppm_iv0).
 
 Tests
 -----

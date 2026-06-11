@@ -447,16 +447,16 @@ def multidim_tracer_advection(
     """
     from legoesm.ocean.dynamics.latlon_cgrid_operators import divergence_cgrid
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-        _upwind_to_u_points,
-        _upwind_to_v_points,
+        upwind_to_u_points,
+        upwind_to_v_points,
     )
     from legoesm.ocean.vertical import flux_form_vertical_tracer_advection
 
     eps = 1e-10
 
     # --- Pass 1: preliminary upwind fluxes for transverse correction ---
-    tr_u_upw = _upwind_to_u_points(tracer, mass_flux_u)
-    tr_v_upw = _upwind_to_v_points(tracer, mass_flux_v)
+    tr_u_upw = upwind_to_u_points(tracer, mass_flux_u)
+    tr_v_upw = upwind_to_v_points(tracer, mass_flux_v)
     flux_u_upw = mass_flux_u * tr_u_upw
     flux_v_upw = mass_flux_v * tr_v_upw
     div_h_upw = divergence_cgrid(flux_u_upw, flux_v_upw, grid)
@@ -807,15 +807,14 @@ def fct_tracer_advection(
     """
     from legoesm.ocean.dynamics.latlon_cgrid_operators import divergence_cgrid
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-        _upwind_to_u_points,
-        _upwind_to_v_points,
+        upwind_to_u_points, upwind_to_v_points,
     )
 
     eps = 1e-30
 
     # --- Step 1: Horizontal face fluxes (low and high order) ---
-    tr_u_low = _upwind_to_u_points(tracer, mass_flux_u)
-    tr_v_low = _upwind_to_v_points(tracer, mass_flux_v)
+    tr_u_low = upwind_to_u_points(tracer, mass_flux_u)
+    tr_v_low = upwind_to_v_points(tracer, mass_flux_v)
     flux_u_low = mass_flux_u * tr_u_low
     flux_v_low = mass_flux_v * tr_v_low
     div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)

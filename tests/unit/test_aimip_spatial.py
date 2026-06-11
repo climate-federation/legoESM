@@ -157,10 +157,10 @@ def test_aimip_spatial_surface_params_from_defaults_has_expected_fields():
 
 
 def test_aimip_spatial_surface_params_n_trainable_count():
-    """Default truncation has 13 coefs per field; 7 fields -> 91 coefs."""
+    """Default truncation has 13 coefs per field; 5 fields -> 65 coefs."""
     from legoesm.training.aimip_spatial import AIMIPSpatialSurfaceParams
     p = AIMIPSpatialSurfaceParams.from_defaults()
-    assert p.n_trainable() == 91
+    assert p.n_trainable() == 65
 
 
 def test_aimip_spatial_surface_nonzero_init_breaks_symmetry():
@@ -231,7 +231,7 @@ def test_aimip_classical_params_with_spatial_surface_builds():
 
     params = AIMIPClassicalParams.from_defaults(spatial_surface=True)
     assert params.spatial_surface is not None
-    assert params.spatial_surface.n_trainable() == 91
+    assert params.spatial_surface.n_trainable() == 65
 
     # Synthetic phis: positive over half the grid (Northern hemisphere).
     phis = jnp.where(

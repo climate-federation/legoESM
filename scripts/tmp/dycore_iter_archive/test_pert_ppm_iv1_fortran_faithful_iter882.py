@@ -1,10 +1,10 @@
-"""Iter-882: pin `_pert_ppm` (iv=1, standard PPM constraint) against
+"""Iter-882: pin `pert_ppm` (iv=1, standard PPM constraint) against
 an explicit Fortran-faithful NumPy reference.
 
 Fortran's `pert_ppm` (`tp_core.F90:1193-1212`) iv=1 branch implements
 the standard PPM monotonicity constraint (Colella-Woodward 1984
 eq. 1.10).  Our Python implementation in
-`src/legoesm/core/fv_tp_2d.py:_pert_ppm` should match.
+`src/legoesm/core/fv_tp_2d.py:pert_ppm` should match.
 
 Fortran reference (paraphrased):
 ```
@@ -42,7 +42,7 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
-from legoesm.core.fv_tp_2d import _pert_ppm
+from legoesm.core.fv_tp_2d import pert_ppm
 
 
 def _pert_ppm_fortran_reference(bl, br):
@@ -122,12 +122,12 @@ def _expected_outputs_per_branch():
 
 
 def test_iter882_pert_ppm_iv1_matches_fortran_reference():
-    """`_pert_ppm` MUST match the Fortran iv=1 reference + per-branch
+    """`pert_ppm` MUST match the Fortran iv=1 reference + per-branch
     expected outputs on hand-built inputs covering all 4 branches.
     """
     bl, br = _make_test_inputs()
 
-    bl_actual, br_actual = _pert_ppm(jnp.asarray(bl), jnp.asarray(br))
+    bl_actual, br_actual = pert_ppm(jnp.asarray(bl), jnp.asarray(br))
     bl_ref, br_ref = _pert_ppm_fortran_reference(bl, br)
     bl_expected, br_expected = _expected_outputs_per_branch()
 
@@ -135,22 +135,22 @@ def test_iter882_pert_ppm_iv1_matches_fortran_reference():
     np.testing.assert_allclose(
         np.asarray(bl_actual), bl_ref, rtol=1e-12, atol=1e-12,
         err_msg=(
-            "`_pert_ppm` bl output differs from Fortran reference. "
+            "`pert_ppm` bl output differs from Fortran reference. "
             "Audit the iv=1 standard PPM constraint logic in "
             "`fv_tp_2d.py` against `tp_core.F90:1193-1212`."))
     np.testing.assert_allclose(
         np.asarray(br_actual), br_ref, rtol=1e-12, atol=1e-12,
-        err_msg=("`_pert_ppm` br output differs from Fortran reference."))
+        err_msg=("`pert_ppm` br output differs from Fortran reference."))
 
     # Production matches hand-computed per-branch expected.
     np.testing.assert_allclose(
         np.asarray(bl_actual), bl_expected, rtol=1e-12, atol=1e-12,
         err_msg=(
-            "iter-882 branch-coverage failure: `_pert_ppm` bl output "
+            "iter-882 branch-coverage failure: `pert_ppm` bl output "
             "differs from hand-computed per-branch expected.  Either "
             "the production matches the reference but BOTH have the "
             "same bug, OR a test input no longer fires the intended "
-            "branch.  Audit `fv_tp_2d.py:_pert_ppm` and the iter-882 "
+            "branch.  Audit `fv_tp_2d.py:pert_ppm` and the iter-882 "
             "branch trace comments against Fortran tp_core.F90:"
             "1193-1212."))
     np.testing.assert_allclose(
@@ -160,7 +160,7 @@ def test_iter882_pert_ppm_iv1_matches_fortran_reference():
 
 @pytest.mark.parametrize("seed", [7, 19, 47])
 def test_iter882_pert_ppm_iv1_random_inputs(seed):
-    """Random-input cross-check: `_pert_ppm` matches the Fortran
+    """Random-input cross-check: `pert_ppm` matches the Fortran
     NumPy reference on random (bl, br) pairs spanning multiple
     sign and magnitude regimes.
     """
@@ -171,12 +171,12 @@ def test_iter882_pert_ppm_iv1_random_inputs(seed):
     bl = rng.normal(size=n) * 1.5
     br = rng.normal(size=n) * 1.5
 
-    bl_actual, br_actual = _pert_ppm(jnp.asarray(bl), jnp.asarray(br))
+    bl_actual, br_actual = pert_ppm(jnp.asarray(bl), jnp.asarray(br))
     bl_ref, br_ref = _pert_ppm_fortran_reference(bl, br)
 
     np.testing.assert_allclose(
         np.asarray(bl_actual), bl_ref, rtol=1e-12, atol=1e-12,
-        err_msg=f"_pert_ppm bl mismatch on seed={seed}")
+        err_msg=f"pert_ppm bl mismatch on seed={seed}")
     np.testing.assert_allclose(
         np.asarray(br_actual), br_ref, rtol=1e-12, atol=1e-12,
-        err_msg=f"_pert_ppm br mismatch on seed={seed}")
+        err_msg=f"pert_ppm br mismatch on seed={seed}")

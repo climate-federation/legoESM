@@ -10,8 +10,8 @@ commit messages; `OMIP_faithful.md`. Memories: [[omip-faithful-project]], [[omip
 | grid | status | SST RMSE vs NEMO Mar (day-90) |
 |---|---|---|
 | **tripole eORCA025 ¼°** | **FAITHFUL** | **1.15** corr 0.99 |
-| **latlon 1°** | **FAITHFUL** | **1.12** corr 0.99 |
-| **mpas ico6 ~115 km** | **FAITHFUL** (best) | day-90 **SST 0.84**/**SSS 0.85**; **5-yr+SSS-restore: AMOC 20.5 vs 17.7, ACC 144 vs 159/obs137, SST 1.87** corr 0.985 |
+| **latlon 1°** | **FAITHFUL** | **2-yr full (E−P+ice+saltnorm): SST 1.68/0.987, SSS 1.20/−0.08, Antarctic +1.2** (AMOC un-spun-up@2yr) |
+| **mpas ico6 ~115 km** | **FAITHFUL** (best) | **5-yr MAXIMAL (E−P+ice-albedo+salt-norm+τ60): SST 1.58 corr 0.988, SSS 1.42, ACC 134/obs137, AMOC 13.3 vs 17.7** (binning-caveat) |
 | cubed_sphere | **PARKED** — cold-start mode-1 PGF residual NOT resolution-fixable (C256 ¼° blows too, at a cube EDGE near the equator); all correct numerics committed | n/a (blows at cold-start) |
 | spectral | **NOT-MEANINGFUL** — global SH basis can't represent ORCA1 coastlines (Gibbs ringing; model self-declares unsupported #99; bathy builder refuses real geometry; T21 can't resolve Drake) | n/a (by construction) |
 **"All 5 grids match ORCA1" is impossible BY CONSTRUCTION (spectral).** Achievable maximum =
@@ -318,6 +318,310 @@ plotter; used the scorer's existing maps.)
 - **ico7 (~55 km) at dt=300 BLEW UP** (8429439): non-finite by day 30 — CFL, the ico6 dt=600/115km
   scaling (dt~287 proportional) is marginal at ico7. Relaunched at **dt=150** (8429592) for the
   higher-res SST/SSS check vs the ico6 day-90 0.84/0.85.
+
+## 2026-06-08 session — 4 fixes → MPAS MAXIMAL FAITHFULNESS (E−P + ice-albedo + salt-norm + τ=60)
+Each codex-reviewed + tested (blow-by-blow in git commits):
+- **E−P surface freshwater** (1b240398): the faithful path NEVER applied P−E to salinity (only runoff +
+  restoring → ~0.4 PSU/yr fresh drift, masked by strong restoring → AMOC suppression). Now
+  `compute_omip2_freshwater_forcing` → `model.step(freshwater=)` (interactive E=−lh/L_v + prescribed P +
+  runoff; in-core config.S_ref + eta-in-solve, AD-safe). Cube folds net onto `sf.freshwater` (external.py).
+- **Sea-ice SW albedo** (854214b0, `--ice-albedo`): SW was absorbed ~100% (NO albedo); `sw_net = sw·(1 −
+  [a_oc·(1−siconc) + a_ice·siconc])` weighted by NEMO's own annual `siconc` (`ORCA1_1y_*icemod.nc`,
+  prescribed → feedback-safe). The cores' 0.94 is a PENETRATION split, NOT an albedo (codex-confirmed; kept).
+- **Salt-flux global normalization** (8d774d94 MPAS + d44f8ff0/3ecaf68e latlon): shared
+  `normalized_virtual_salt_flux` removes the area-mean of P−E+R over the WET mask (conserves global salt).
+  A correct SAFEGUARD but a NO-OP for surface SSS here (CORE-II ∮(P−E+R)≈0, verified by matched-day runs);
+  the SSS lever is the restoring τ.
+
+★ **HEADLINE — τ=60 = maximal faithfulness** (mpas_ico6_5yr_s60full, all fixes + τ=60 restoring), visually
+verified (SST overlaps NEMO + far-SH freezing; SSS tracks NEMO):
+| MPAS ico6 5-yr vs NEMO | SST RMSE/corr | SSS RMSE/bias | ACC | AMOC | note |
+|---|---|---|---|---|---|
+| E−P baseline (τ365) | 1.98 / 0.982 | 5.14 / −2.5 | 136 | 24.5 | SSS drift |
+| E−P+ice+saltnorm (τ365) | 1.82 / 0.984 | 5.16 / −2.6 | 136 | 23.9 | SH SST FIXED (Antarctic +2.0→+1.2) |
+| **+τ60 (MAXIMAL)** | **1.58 / 0.988** | **1.42 / −0.5** | **134** | **13.3** | **best on all** |
+| pre-E−P τ60 (no E−P) | — | 0.95 | — | **5.7 COLLAPSE** | the artifact |
+| NEMO / obs | — | — | 159 / ~137 | 17.7 | |
+**E−P closing the surface budget DECOUPLES strong restoring from AMOC collapse** — the pre-E−P τ=60 AMOC
+collapse (5.7) was the salt-injection artifact of an OPEN budget; with E−P, τ=60 holds SSS (1.42 vs 5.16)
+AND keeps AMOC (13.3, closer to NEMO 17.7 than τ=365's 24.5 overshoot). ico7 dt=150 (~55 km) also faithful
+(SST 0.925/corr 0.996). latlon-full (E−P+ice+saltnorm, τ=365, 2-yr) DONE: SST 1.68/corr 0.987, SSS 1.20/bias −0.08, Antarctic +1.2 (SH fix on latlon too); AMOC 1.5 un-spun-up (2-yr, decade-gated). Both grids' PNGs sent.
+
+CAVEATS (honest, flagged not hidden):
+1. **Transport binning over-count** — `compute_{mht,amoc}_from_state_mpas` sum ALL edges in a 2° lat-band;
+   each edge-row carries the full transport so it over-counts the line integral by ~N_rows (2–3 at ico6) →
+   MHT 5–6 PW (obs ~1.8) AND the model AMOC magnitudes are UPPER BOUNDS. Should be a latitude-circle SECTION
+   (like ACC@Drake); the NEMO structured-grid reader is exact. FIX = section + analytic unit test (follow-up).
+   ACC (section method) + SST/SSS unaffected; the cross-run AMOC RANKING (collapse vs hold) is still valid.
+2. **MPI owned-mask** for the normalization (an `ocean_global_sum` allreduce double-counts Voronoi halo
+   cells; reverted to local `jnp.sum` — exact single-GPU, which OMIP uses). Follow-up.
+3. **Phase-2 ice insulation** (turbulent/LW reduction under ice) — SW-only done; residual Antarctic +1.2.
+4. Annual-mean siconc (no monthly icemod) over-ices summer / under-ices winter.
+
+
+### iter-D (2026-06-09): AMOC binning fix + marginal-sea SSS + merged main + higher-res runs
+- **AMOC/MHT binning OVER-COUNT FIXED** (5720f441/da75024e): `compute_{amoc,mht}_from_state_mpas` summed
+  u·sinα over a 2° lat-band → over-counted by ~N_rows. VERIFIED ×1.84 at ico6 / ×1.12 at ico5 vs the
+  analytic uniform-flow transport. Replaced with the latitude-circle SECTION (straddling cells, full normal
+  flux, oriented) → ×1.000 exact at any res; 28 AMOC tests pass; codex-clean (per-level NaN sanitize +
+  docstrings). **CORRECTED session AMOC** (were band-sum ×1.84): τ=60 ~7.2, τ=365 ~13.0 (vs NEMO 17.7) —
+  τ=365 closest; the SSS↔AMOC trade-off is only PARTIALLY decoupled by E−P (τ=60 holds SSS but AMOC ~7.2).
+  ACC (already a section) + SST/SSS unaffected.
+- **Marginal-sea SSS restoring** (1772032f): Baltic/Black Sea/Hudson/Okhotsk few-day restoring → fix the
+  enclosed-sea FRESH bias (the user-flagged continental salinity issue; unresolved straits + runoff). 11
+  regions total. 19 sss tests pass.
+- **Merged origin/main** (134c9490, 54 commits: CRM/plane MPI perf + atmosphere physics + federation) —
+  clean, no ocean conflicts, 96 ocean tests pass post-merge.
+- **SST hemispheric gaps (Antarctic warm +1.2 / NH cold −1.7) = RESOLUTION-limited** (user-flagged). The ice
+  -albedo helped the warm SH but the two CONFLICT on a single albedo (Antarctic wants more, NH wants less).
+  ico7 90-day already showed Antarctic +0.32 / NH-mid +0.22 on resolution alone. HIGHER-RES runs launched:
+  ico7 ~55km 2yr (8440837), latlon 0.5° 1yr (8440838), + ico6 τ60+marginal-sea (8440840, salinity attribution).
+  All with the SECTION-method AMOC. tripole ¼° stays compute-infeasible.
+
+### iter-D RESULTS (1st higher-res run back): marginal-sea = MODEST; corrected AMOC = LOW (real trade-off)
+ico6 τ=60 + marginal-sea restoring (8440840, SECTION-method diags):
+- **SSS 1.42→1.38** (bias −0.47→−0.44): marginal-sea restoring helps MODESTLY — the continental extremes
+  (Baltic/Hudson/Okhotsk) are reduced but NOT eliminated (the NW-Pacific/Japan-Sea patch persists, partly
+  south of the Okhotsk region; enclosed-strait dynamics unresolved at ~115 km). Partial fix, not complete.
+- SST 1.57/0.989 (unchanged), ACC 133.7.
+- **CORRECTED AMOC (section) = 6.05 Sv** (vs the inflated band-sum 13.3; NEMO 17.7) — the REAL τ=60 AMOC is
+  LOW. CONFIRMS the SSS↔AMOC trade-off is REAL + the E−P decoupling is only PARTIAL: strong restoring holds
+  SSS (1.38) but genuinely WEAKENS the AMOC (~6). τ=365 (better AMOC, ~13 est) has bad SSS. No single τ wins
+  on both. MHT 3.3 PW (section; was 5-6 band-sum; still ~1.8× obs ~1.8 — possible real over-transport OR a
+  residual per-latitude-crossing subtlety; secondary, flag).
+- HIGHER-RES (the SST-gap lever) in flight on glab1: ico7-2yr (day-90 stable, ~50h; year-1 read ~10h),
+  latlon-0.5° (slow host stepping ~28h, no blowup yet). ico7-90day on a bad short node was step-0-stuck →
+  cancelled (ico7-2yr supersedes).
+
+### iter-E (2026-06-09): NH-cold-bias ROOT CAUSE found + SEASONAL-albedo fix; colleague-Q evidence
+- **NH cold bias ROOT CAUSE (codex adversarial review, HIGH):** the `--ice-albedo` SW surrogate used the
+  NEMO ANNUAL-MEAN `siconc` applied EVERY step → in NH seasonal-ice zones (Labrador/Greenland/Bering/
+  Okhotsk) it kept a high ice albedo through the open-water summer → ~0.24×SW (≈47 W/m² at summer
+  SWDN~200) spurious cooling all year. Confirmed dominant over runoff/restoring/E−P (codex refuted E−P
+  sign + 0.94-penetration-double-count; keep both).
+- **FIX (commit 6ad1af3e, `--ice-albedo-seasonal`):** build a 12-MONTH siconc climatology. The run wrote
+  NO monthly icemod, so seasonality comes from NEMO's MONTHLY SST (`tos`, ORCA1_1m grid_T): NEMO ice sits
+  at freezing, so cold SST ⟺ ice. `_ice_presence_from_tos` (tanh) + `_seasonal_siconc_from_presence`
+  (per-cell MEAN-PRESERVING norm: 12-mo mean = annual siconc → ice months carry true winter conc, summer→0;
+  conserves annual albedo, codex MEDIUM). Indexed by NOLEAP calendar month each step. 6 unit tests pass
+  (incl. real-file NH-ice-retreats-Mar→Sep / SH-opposite).
+- **SSS-restoring ice-gate fix (same commit):** the driver passed `ice_concentration=None` → the ice gate
+  was DEAD → restoring ran at full strength under sea ice (unlike NEMO `nn_sssr_ice=0`). Now feeds the
+  per-step siconc. siconc loaded when `--ice-albedo OR --sss-restore`; albedo still gated on `--ice-albedo`
+  so an SSS-only run's heat budget is unchanged (codex HIGH).
+- Codex 2× (root-cause + fix-review); all HIGH/MEDIUM/LOW addressed. Merged origin/main (AI-guardrail
+  harness + dispatch/constants tests; clean, no ocean conflicts).
+- **Runs launched with the correction (coarse, fast turnaround):** MPAS ico6 2yr seasonal (8445150),
+  eORCA1 tripole SAME-GRID 3yr seasonal (8445151 — NEMO's own mesh/bathy; colleague Q4). High-res
+  ico7/latlon-0.5 + the annual-albedo tripole were CANCELLED (ran the pre-fix buggy code).
+- **Colleague-question evidence (NEMO namelist_cfg / RUN_REF):** Q1 runoff — SAME Dai-Trenberth-Depoorter
+  file (sorunoff+Icb_flux+socoefr), but NEMO spreads runoff over the TOP 150 m (`rn_dep_max=150`,
+  `ln_rnf_depth_ini`) + monthly, vs legoESM monthly IDW-regridded SURFACE virtual-salt flux. Q2 topo —
+  MPAS ico6 bathy is REGRIDDED from NEMO's eORCA1 (`(e3t·tmask).sum`) onto Voronoi cells, NOT identical to
+  NEMO's tripolar grid (colleague correct; the tripole run removes this). Q3 run length — the shown ico6
+  maps are END of a 5-yr (day 1825) CORE-II NYF spin-up (short for deep-ocean equilibration). Q4 same-grid
+  — eORCA1 tripole run now in flight. NEMO ALSO restores SSS (`nn_sssr=2`, ±4 mm/day, OFF under ice), so
+  our τ-restoring is faithful in kind.
+
+### iter-F (2026-06-09): dual-pole correction — prescribed-ice THERMODYNAMIC boundary (--ice-thermo)
+- **Codex dual-pole review:** the >45S WARM bias is NOT albedo-fixable. The albedo-only surrogate (a)
+  injects 0.35·sw_down into the ocean under sic=1 (α_ice=0.65) and (b) applies FULL open-ocean turbulent/LW
+  fluxes even under ice → the Southern-Ocean under-ice ocean stays too warm. Seasonal albedo (mean-
+  preserving) conserves the annual albedo → only redistributes timing.
+- **ico6 SEASONAL-vs-ANNUAL A/B (yr1, matched grid+time):** ~NEUTRAL (all bands Δ<0.05): antarctic
+  +1.06→+1.03, NH-mid −1.13→−1.11, arctic −1.27→−1.26, global RMSE 1.32→1.30. Confirms seasonal albedo
+  alone does NOT move the 1-yr annual-mean bias (by mean-preservation design); year-1 ≈ WOA IC for all
+  configs (non-discriminating — biases develop multi-year).
+- **--ice-thermo (commit 164c0107):** prescribed-ice thermodynamic boundary = the magnitude lever.
+  `_ice_surface_heat`: under ice cut SW to τ_ice_sw≈0.03 + suppress turbulent/LW by (1−sic); sic=0 open
+  water unchanged. `under_ice_freeze_relax`: post-step 2-sided nudge of top-cell T → freezing
+  (constants.T_freeze_ocean) over τ_ice≈20d, ×sic → COOLS over-warm SH under-ice, HOLDS Arctic. Grid-
+  agnostic; convex (dt/τ clipped ≤1); scan-refused; default off. Codex-reviewed twice (physics A–F
+  confirmed; .copy() MEDIUM + 3 LOW fixed; final confirm clean). 25 applicator+siconc tests pass.
+- **A/B/C RESULT (yr1, both grids) — ICE-THERMO IMPROVES BOTH POLES:**
+  | grid | >45S warm (ann→thermo) | >45N cold (ann→thermo) | global RMSE |
+  |---|---|---|---|
+  | tripole same-grid | +1.20 → **+0.90** | −1.08 → **−0.91** | 1.78 → **1.74** |
+  | ico6 Voronoi | +1.06 → **+0.80** | −1.27 → **−1.15** | 1.32 → **1.27** |
+  Consistent across grids: cools >45S ~0.25–0.30, warms >45N ~0.12–0.17; localized to ice zones (SH-mid/
+  tropics/NH-mid unchanged → no collateral damage); corr 0.985–0.992. Seasonal-alone was ~neutral (mean-
+  preserving); the THERMO boundary (SW cut + flux suppression + freezing relax) is the lever. Confirmed at
+  yr1; runs continue to yr2/3 (developed bias → fix should close more).
+- **Remaining gaps vs NEMO:** (1) >45S residual +0.80–0.90 = Southern-Ocean warm bias (dynamics/clouds/
+  AABW), partly beyond ocean-only prescribed-ice; τ_ice (20d) is a tunable knob. (2) NH-mid −1.58 (tripole)
+  = Gulf Stream/Kuroshio under-resolved at 1° → RESOLUTION-bound (eORCA025), not a forcing fix; the single
+  largest gap. (3) >45N residual −0.91/−1.15 reduced but open.
+
+### iter-G (2026-06-10): NEMO-parity surface fluxes — 8 BC/param bugs found+fixed (commits 6dd81575, dc13d1df)
+**Bias target:** the hemispheric SST dipole (SH warm +0.9..+1.1 incl. 45S-23S NON-ice band, NH cold −1.1;
+yr2 both grids) + the τ60 AMOC collapse (6 Sv). Audited the FULL flux chain line-by-line vs NEMO 5.0.1
+source on disk (sbcblk.F90 / sbcblk_algo_ncar.F90 / sbc_phy.F90 / namelist_cfg) + 2 codex rounds:
+1. **Bulk scheme was a 2-coeff approx** (Ce=Ch fixed {1.46,1.18}e-3, no stability iteration, "good to
+   ~10%") → ported NEMO's FULL NCAR algorithm exactly: 5-iter Obukhov fixed point, ψ_m/ψ_h (shared
+   core.bulk_flux), CdN cyclone plateau + 1e-4 floor (`large_yeager_neutral_cd(nemo_parity=True)`),
+   pres_temp 10-m barometric pressure, theta_exner potential air-T + potential SST (stability/sensible/
+   L_vap on the potential pair; ssq/LW/evap-heat at absolute SST), ρ_air(slp,T,q) at p10, moist cp_air(q),
+   L_vap(θ_sst), 0.98-salt Goff ssq (`thermo.saturation_vapor_pressure_goff`). Legacy scheme pinned as
+   `algo='ly09_2coeff'` (operator-split applicator only).
+2. **LW Kirchhoff**: was lwd − 0.97σT⁴ (absorb 100%/emit 97%) → NEMO 0.98·(lwd−σT⁴). ≈ −11 W/m² (cools).
+3. **Snow fusion missing** → −snow·rLfus + rain/snow/evap heat-content terms (NEMO blk_oce_2 exact,
+   rLfus=0.3333601e6/rcpi=2096.7). New SNOW + SLP zarr channels (builder+loader+host+scan; back-compat
+   fallbacks). nyf.zarr REBUILT + validated (slp valid-max 1156 hPa = Antarctic below-ground reduction, land).
+4. **Regridder LONGITUDE SEAM bug**: 0/360 wrap segment never covered → seam destination column
+   under-weighted (production latlon ~6%-covered last column; tripole/MPAS NN paths unaffected). Ghost-
+   column padding fix.
+5. **SSS-restoring cap was DECORATIVE**: appliers consume dS_dt_top which bypassed the flux clip →
+   τ60 restoring was UNBOUNDED in deep-water-formation spots = the AMOC-collapse mechanism. Tendency now
+   derived from the capped flux; `--sss-restore-bound-mmday 4` = NEMO ln_sssr_bnd (RUN_REF: piston
+   −220 mm/day ≈ τ45.5d on 10 m + ±4 mm/day bound, off under ice).
+6. pres_temp garbage-cell guard (w=q/qsat clip [0,1]); NEMO-parity constants block in constants.py.
+**Verification:** independent NumPy transcription of the Fortran (coefficients AND full flux path incl.
+preprocessing) matches the JAX impl bit-exact (rtol 1e-12 / 1e-10); jit+grad finite; 3825/3826 targeted
+tests green (last = test-side L_vap(θ_sst) expectation, fixed; round-4 in flight). Codex round-1
+NEEDS-ATTENTION (7 findings → all fixed; HIGH = the potential-T preprocessing), round-2 confirm in flight.
+**Runs launched (A/B vs the old-flux ice-thermo baselines):** `mpas_ico6_2yr_ncar` (8454488) +
+`tripole_eorca1_2yr_ncar` (8454489) — same config as the 2yr ice-thermo runs but NCAR fluxes + NEMO
+bounded restoring (τ45.5/bnd4 replaces τ60-unbounded). Baseline yr2 scores for the A/B: ico6 ice-thermo
+yr2 SST RMSE 1.37/corr 0.991 (>45S +0.89, SH-mid +1.04, NH-mid −1.11, >45N −1.06; ACC 141.9, AMOC 2.5
+un-spun, MHT-NH 3.52 PW high). **Expected from the physics:** LW −11 W/m² + snow fusion cool the SH warm
+band; bounded restoring lets AMOC rebuild (NEMO holds 17.7 WITH restoring because of the bound); MHT to
+re-diagnose under corrected fluxes. RGB-chl SW penetration (NEMO ln_qsr_rgb) = known remaining BC gap
+(vertical heating distribution), next lever if the dipole persists.
+
+### iter-G yr-1 A/B RESULT (tripole, 8455137 in flight): NEMO-parity fluxes IMPROVE — SH-mid is the residual
+Tripole yr-1 (ncar fluxes + bounded τ45.5 restoring) vs yr-1 old-flux ice-thermo baseline, NEMO annual:
+| | baseline | **ncar** |
+|---|---|---|
+| SST RMSE / corr | 1.74 / 0.985 | **1.43 / 0.990** |
+| >45S | +0.90 | **+0.76** |
+| SH-mid | ~+1.0 | +1.13 (PERSISTS) |
+| tropics | −0.14 | **−0.01** |
+| NH-mid / >45N | −1.28 / −0.91 | −1.05 / −1.11 |
+| SSS RMSE / bias | — | **1.30 / −0.03** (bounded restoring: NO drift) |
+Run stable day-365 (seasonal cycle clean, max|u| ≤1.1). **Verdict: flux fixes deliver (−18% RMSE, SH-pole
++ tropics improved); the 45S-23S SH-mid warm band is now THE bias** — not ice (ice-thermo zone ends 45S),
+not turbulent-flux scheme (just fixed). Leading candidate: SW PENETRATION (NEMO RGB+chlorophyll
+`ln_qsr_rgb` vs our fixed 2-band — Southern-Ocean high-chl traps heat near surface in NEMO; our deeper
+penetration warms... actually COOLS surface; sign needs the impl). Next: implement `rgb_chl` penetration
+scheme (NEMO traqsr RGB table + monthly ESACCI chl climatology from INPUTS) + codex; A/B on yr-1 rerun.
+PNGs (tripole yr1 SST/SSS) sent to user 2026-06-10 ~08:40.
+
+### iter-G (user-flagged): tripole lon-72.5 vertical BAND = eORCA1 cyclic-overlap off-by-one (PRE-EXISTING)
+User saw a vertical SST stripe at lon 70-80 on the **tripole** map (absent on yesterday's **latlon** map).
+Root-caused, NOT a flux regression:
+- The stripe is at lon **72.5°E** = the eORCA1 grid's east-west cyclic SEAM. Confirmed in index space: i=0
+  (lon 72.5) duplicates i=360 (lon 72.5); i=361 (73.5) duplicates i=1 (73.5) ⇒ **ORCA 2-point cyclic overlap**
+  (halo col0=col_{n-2}, col_{n-1}=col1).
+- `LatLonCGridOceanModel` (reused for tripole) applies SIMPLE roll-periodicity (`periodic_x=True`, enforces
+  `u[:,n_lon]==u[:,0]`, i.e. col_{n-1}=col0) — correct for a regular lat-lon grid, **off-by-one for the ORCA
+  2-pt overlap** ⇒ the halo columns carry slightly wrong values ⇒ a mild ~0.87°C seam in the seam-adjacent
+  gradient/flux terms, amplified by the scorer's cKDTree-IDW blend across the seam.
+- **PRE-EXISTING, not from this session's flux work:** regridded lon-72 stripe sharpness is 2.71°C in the OLD
+  ice-thermo tripole vs 2.86°C in the NCAR run — essentially identical. The latlon 1° grid has NO such seam by
+  construction (yesterday's clean map). The physical domain i=1..360 integrates correctly (tripole is stable +
+  SST-faithful); only the 2 halo columns are off, so the seam is mild not catastrophic.
+- **ROOT CAUSE CONFIRMED at mesh level:** the eORCA1 mesh_mask's cyclic halo columns i=0/i=361 are marked
+  LAND everywhere (0 wet) while their ORCA-overlap partners i=360/i=1 are ocean (147/143 wet) — 143 latitudes
+  where i=1 is ocean but its west-neighbour i=0 is a fake land wall. NEMO fills these halos every step via
+  `lbc_lnk`; legoESM read `tmaskutil` raw and never applied the overlap → the lon-72.5 seam ocean is severed.
+  DEEPER: legoESM treats the (332,362) grid as a period-**362** ring (operators `jnp.roll(...,axis=1)` over
+  all 362 cols), but eORCA1 is physically period-**360** with 2 duplicate-longitude overlap halos — so even
+  filling the mask won't hold: the 2 seam columns evolve independently (no halo slaving) and re-drift.
+- **FIX = careful dycore work (DEFERRED, needs user steer — load-bearing + stability-risky):** EITHER
+  (a) per-step ORCA cyclic-overlap exchange on T/S/eta/u/v (col0←col360, col361←col1; lbc_lnk-style, in the
+  hot loop), OR (b) strip to 360 physical columns with period-360 roll (cleaner, bigger grid/state refactor).
+  BOTH risk the hard-won WOA cold-start stability (tripole periodicity is woven through advection/PGF/
+  barotropic) → require gated impl + codex + 30-day cold-start smoke + W2-style visual check BEFORE trusting,
+  then a tripole re-run. NOT a mid-loop rush. Interim: the **latlon 1° grid is the clean-grid comparison
+  vehicle** (regular periodic, no seam) — relaunched with the NCAR fluxes (8457282).
+- **Large local SST biases (user):** marginal seas (Persian Gulf min 13°C, Red Sea 15°C) are COLD-biased in
+  BOTH runs (old Gulf min was 2.6°C — NCAR is LESS cold, an improvement); no runaway hot cells (0 wet cells
+  >35°C). On the clean latlon grid the dominant local bias is the Kuroshio/Oyashio WBC warm spot (+10°C @
+  40N/150E, resolution-bound, pre-existing). Global banded NCAR-minus-old ΔSST is tiny (≤+0.34°C).
+- **ACTION:** relaunched **latlon 1° 2yr with the corrected NCAR fluxes** (8457282, clean grid, same vehicle
+  as latlon_2yr_full) for an apples-to-apples flux-improvement view without the tripole seam.
+- **SEAM FIX IMPLEMENTED + VALIDATED (commit 98f9b779, `--ew-cyclic-overlap`, gated default-off):** a
+  post-step ORCA cyclic-overlap projection slaves the 2 longitude halo columns to their overlap partners
+  for ALL prognostic fields each step (cell-column T/S/eta/v: col[0]<-col[nx-2], col[nx-1]<-col[1]; u-faces:
+  u[:,0]<-u[:,nx-2], u[:,nx-1]<-u[:,1], u[:,nx] to the internal wrap) + a matching mask/bathy/IC overlap-fill
+  at construction BEFORE make_partial_cell. Codex round-1 caught 2 real HIGH bugs (velocity MUST be slaved —
+  barotropic carries U_old + seam u-face reads the v halo via Coriolis roll; partial-cell coord built before
+  the fill) → round-2 APPROVE. 52 unit tests pass (cell+v+u-face slaving, partial-cell seam identity, gating
+  bit-identical). **120-day WOA cold-start smoke (8457440) STABLE** (max|u| 1.01 m/s, finite, physical) AND
+  the seam closed: native i1-vs-i_{nx-2} jump **0.87→0.085 °C (10×)**, regridded lon-72 stripe sharpness
+  **2.86→0.345 °C (8×)**. The hard-won cold-start survives the reconnected seam. **Definitive tripole run
+  launched (8457733): NCAR fluxes + bounded restoring + seam fix** (supersedes the no-overlap 8455137,
+  cancelled). MPAS (Voronoi) has no ORCA seam → unaffected.
+
+### iter-H (2026-06-10, IN PROGRESS — user-flagged): Amazon rivers, Gibraltar/Med, "fuzzier than NEMO"
+USER REQUEST: fix (1) large-river (Amazon) SSS issue, (2) Gibraltar intrusion / Mediterranean temperature
+("maybe a NEMO trick?"), (3) legoESM looks FUZZIER/more diffusive than NEMO on the maps.
+**NEMO ORCA1 ground truth extracted (namelist_cfg + SHARED/namelist_ref, all verified on disk):**
+- **Gibraltar/Med trick = ADVECTIVE BOTTOM BOUNDARY LAYER**: `ln_trabbl=.true.`, `nn_bbl_adv=2`
+  (advective BBL, both upper+lower flux), `rn_gambbl=20 s`, `nn_bbl_ldf=0` (diffusive BBL OFF),
+  `rn_ahtbbl=1000` (unused at ldf=0). Dense Med overflow water ADVECTS down the continental slope —
+  without it the 1° Med can't ventilate (our marginal-sea cold bias + no Med tongue). NOT a resolution
+  trick: ORCA1 is 1° like us. legoESM has NO BBL scheme on the tripole/latlon path → implement
+  advective-BBL (Beckmann & Döscher 1997 + NEMO trabbl.F90 nn_bbl_adv=2 form) as a gated parameterization.
+- **Runoff**: NEMO spreads river runoff over the TOP 150 m (`ln_rnf_depth_ini=.true.`, `rn_dep_max=150`,
+  `rn_rnf_max=0.05`); legoESM applies it as a SURFACE virtual-salt flux at single cells → Amazon plume
+  too fresh/too shallow/too local. ALSO NEMO disables/reverses SSS restoring near river mouths (sbcssr
+  `(1-2*rnfmsk)` with socoefr) — our restoring fights the plume toward coarse WOA. Fix = (a) spread the
+  runoff freshwater over the top-150m layers (freshwater channel or tracer tendency), (b) river-mouth
+  restoring mask derived from the Dai-Trenberth runoff field (where runoff > threshold → zero restoring).
+- **"Fuzzy"/diffusivity**: NEMO tracers = FCT-2 advection (`ln_traadv_fct`, nn_fct_h=2,v=2) + LAPLACIAN
+  ISO-NEUTRAL diffusion (`ln_traldf_lap+iso+msc`) with Treguier-varying aht (`nn_aht_ijk_t=21`,
+  rn_Ud=0.01 m/s, rn_Ld=200 km → aht ~ O(1000) m²/s at 1°) + GM/EIV ON (`ln_ldfeiv`, nn_aei_ijk_t=21,
+  rn_Ue=0.02, rn_Le=200 km). Momentum: namdyn_ldf block NOT yet read (find it in namelist_cfg ~l.400+;
+  ORCA1 default is BILAPLACIAN momentum). NEXT: read our `run_omip._create_setup('tripole'/...)` tracer
+  advection scheme + K_h/A_h + whether GM/Redi (EXISTS for latlon-cgrid: gm_redi_latlon_cgrid) is enabled
+  on the faithful runs — match NEMO (FCT-like advection + isoneutral lap + GM) or identify our excess
+  diffusion. NOTE: scorer maps IDW-regrid BOTH models (symmetric blur) → "fuzzy" is likely genuine model
+  diffusivity, but VERIFY by comparing native-grid sharpness first.
+**iter-H item 1 DONE (commit 1aa4d297, codex APPROVE, 72 tests):** runoff depth-spread
+(`runoff_spread_virtual_salt_tendency_3d`, fractional per-level weights → h_rnf=min(150, wet depth) exact,
+column-integral salt bit-identical to legacy, both cores gated via `runoff_depth_spread_m`) + river-mouth
+restoring gate (`--river-mouth-restoring-gate`, NEMO (1−2·rnfmsk)). Flags for next production round:
+`--runoff-depth-spread-m 150 --river-mouth-restoring-gate`.
+**iter-H item 2 (BBL) design state:** NEMO trabbl.F90 CASE(2) extracted — per u/v face:
+`tr_bbl = e2u·e3u_bbl_0·(g·rn_gambbl)·max(0, Δρ̂)·mgrhu` with Δρ̂ = ½(2α·ΔT−2β·ΔS) between SHELF
+(up-slope) and DEEP (down-slope) BOTTOM cells at common local depth (eos_rab at bottom), active only
+when shelf denser; mgrh = slope-direction sign; e3_bbl_0 = BBL thickness at the face. REMAINING TO READ:
+`tra_bbl_adv` application loop (~trabbl.F90 l.214-300) — distributes the transport down the deep column
+across levels (the intricate part) + e3u_bbl_0/mbku_d/mgrhu setup in tra_bbl_init. Then implement
+gated `bbl_adv` for the latlon-cgrid family (tripole/latlon) + tests + smoke; MPAS port after.
+**iter-H item 2 PROGRESS:** `packages/ocean/legoesm/ocean/physics/bbl_adv.py` WRITTEN (compiles; physics
+contract included): `bbl_static_geometry(h_ref, land_mask)` (NEMO tra_bbl_init: mgrh=sign Δdep_bot,
+shelf/deep bottom levels, e3_bbl=min bottom thickness, face common depth), `bbl_transports` (CASE(2):
+tr=width·e3_bbl·g·γ·max(0,Δρ/ρ0)·mgrh, Δρ via canonical `wright_eos` at the face's common bottom pressure
+— equals NEMO's α/β linearisation to linear order, no eos_rab re-derivation), `apply_bbl_adv_tendency`
+(exact tra_bbl_adv 3-leg circulation cell, static-unrolled level loop, .at[].add scatters, telescoping
+conservation). REMAINING: (a) host wrapper `apply_bbl_adv_step(state, geom, dt, ...)` (runner post-step
+pattern like restoring/ice-thermo — zero dycore risk; geometry from `z_coord.h_partial` + land_mask at
+setup; face widths grid.dy_u/dx_v on tripole, dy/dx broadcast on latlon); (b) runner flags `--bbl-adv`
+`--bbl-gamma-s 20`; (c) tests/ocean/unit/test_bbl_adv.py (analytic 2-column overflow: transport formula
+exact + down-slope sign; conservation sum(area·h·dpt)=0 to fp; flat-bottom → zero; gate-off untouched);
+(d) codex adversarial; (e) 120-day tripole smoke w/ --bbl-adv. NOTE periodicity: interior faces only
+(seam exchange via ew_cyclic_overlap halo slaving on tripole; the omitted wrap face on regular latlon is
+1 face of 360 — documented).
+**iter-H item 2 BBL SHIPPED (commits 82796b83 + 04e1dd7a, codex round-1 NEEDS-ATTENTION → round-2
+APPROVE zero findings, 107 tests):** exact NEMO trabbl nn_bbl_adv=2 port — eos_rab gating (α/β per
+column at ITS OWN bottom pressure via canonical Wright-EOS derivatives, face-averaged; thermobaricity
+preserved — codex HIGH vs my first mean-pressure Δρ), Campin-Goosse transport, exact 3-leg conservative
+exchange, 0.25·V_min/dt Courant cap, host post-step wiring, `--bbl-adv --bbl-gamma-s 20` (latlon/tripole,
+requires --partial-cell). 120-day cold-start smoke 8458619 in flight.
+**iter-H item 3 DIFFUSIVITY AUDIT (the "fuzzy" answer):** NEMO ORCA1 momentum viscosity = the
+`eddy_viscosity_3D.nc` FILE (nn_ahm_ijk_t=-30, iso-level LAPLACIAN): **1e3–2e4 m²/s, median 2e4** —
+our faithful runs use **A_h=1e5 + C_smag_lap=3.0 (the ¼° stabilizer values) ⇒ 5–10× MORE viscous than
+NEMO** = the fuzziness. Tracers: ours tvd/Van-Leer + GM/Redi κ=600 vs NEMO FCT2 + isoneutral-lap
+(Treguier ~1e3) + EIV — comparable class, tvd slightly more diffusive (we have ppm_fct). NEW
+`--tracer-advection` runner knob (tripole+latlon). **Diffusivity smoke 8458624 NaN'd by day 30** — the one-jump NEMO-level viscosity drop (A_h 1e5→2e4 + C_smag_lap 3.0→0.33 + ppm_fct, 3 variables at once) breaks the WOA cold start: the high viscosity IS load-bearing (consistent with the ~50-iteration cold-start history). ISOLATED follow-up smokes launched: ppm_fct-only (8458659, stock viscosity — the front-sharpness gain without the stability risk) + viscosity bisect A_h=5e4/C_smag_lap=1.0 with tvd (8458660). Honest expectation: we can likely close PART of the NEMO viscosity gap (bisect) + the advection order, not all of it — NEMO's cold start tolerates 2e4 because its initialisation/restart history differs; ours needs the dissipation crutch during adjustment. A ramped-viscosity schedule (start 1e5, decay to 2e4 over ~90 days) is the likely full fix — design next if the bisect holds.
+**SMOKE VERDICTS:** BBL 60-day STABLE (max|u| 0.757 == baseline; TIMEOUT at 1h30 wall, conservative+capped+codex-approved => GO), ppm_fct 60-day STABLE (livelier fronts 1.31 m/s, physical), visc-bisect A_h=5e4/Smag=1.0 60-day STABLE (full 2e4 jump NaN'd day-30 => viscosity partially reducible; ramp design pending). **Seam-fixed tripole yr1 SCORED: RMSE 1.31 / bias 0.000 / corr 0.992, >45S +0.51** (trajectory 1.74 old-flux -> 1.43 NCAR -> 1.31 +seam); PNGs sent. **FULL-STACK iter-H tripole 2yr LAUNCHED (8458811)**: seam + NCAR + spread-150 + river gate + BBL + ppm_fct (viscosity held 1e5/3.0 this round). **visc-schedule note:** first vramp smoke NaN'd day-30 — segment-0 mistakenly set C_smag_lap=3.0 WITHOUT the --smag-cfl-safety cap it pairs with (eORCA025 pairing; this config's base is 0.33) → 9× over the diffusive CFL. NOT a schedule-mechanism failure (mechanism codex-APPROVEd cd715884). Relaunched 8458955 with '0:1e5:0.33,90:5e4:0.33,180:2e4:0.33' (A_h-only step-downs). **Status**: items 1+2 SHIPPED; item 3 audited, bisect validated 120d, schedule smoke v2 in flight. Next production round (after smokes):
+--runoff-depth-spread-m 150 --river-mouth-restoring-gate --bbl-adv [--A-h 2e4 --C-smag-lap 0.33
+--tracer-advection ppm_fct if visc smoke stable]. Production runs in flight:
+seam-fixed tripole 2yr (8457733, NCAR fluxes + --ew-cyclic-overlap), latlon 1° 2yr (8457282),
+mpas ico6 2yr (8455138). PNG-on-completion promised to user. Each iter-H change: codex adversarial
+review + tests + smoke before production (CLAUDE.md).
 
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.

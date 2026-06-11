@@ -78,9 +78,9 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.ocean.eos import (
-    _a0, _a1, _a2,                 # specific volume α₀(T, S)
-    _b0, _b1, _b2, _b3, _b4, _b5,  # pressure offset p₀(T, S)
-    _c0, _c1, _c2, _c3, _c4, _c5,  # lambda(T, S)
+    WRIGHT_A0, WRIGHT_A1, WRIGHT_A2,                 # specific volume α₀(T, S)
+    WRIGHT_B0, WRIGHT_B1, WRIGHT_B2, WRIGHT_B3, WRIGHT_B4, WRIGHT_B5,  # pressure offset p₀(T, S)
+    WRIGHT_C0, WRIGHT_C1, WRIGHT_C2, WRIGHT_C3, WRIGHT_C4, WRIGHT_C5,  # lambda(T, S)
 )
 
 
@@ -95,9 +95,9 @@ def wright_eos_coefficients(
     integrator avoid a redundant evaluation when the caller already has
     (T, S) per cell.
     """
-    al0 = _a0 + _a1 * T + _a2 * S
-    p0  = (_b0 + _b4 * S) + T * (_b1 + T * (_b2 + _b3 * T) + _b5 * S)
-    lam = (_c0 + _c4 * S) + T * (_c1 + T * (_c2 + _c3 * T) + _c5 * S)
+    al0 = WRIGHT_A0 + WRIGHT_A1 * T + WRIGHT_A2 * S
+    p0  = (WRIGHT_B0 + WRIGHT_B4 * S) + T * (WRIGHT_B1 + T * (WRIGHT_B2 + WRIGHT_B3 * T) + WRIGHT_B5 * S)
+    lam = (WRIGHT_C0 + WRIGHT_C4 * S) + T * (WRIGHT_C1 + T * (WRIGHT_C2 + WRIGHT_C3 * T) + WRIGHT_C5 * S)
     return al0, p0, lam
 
 

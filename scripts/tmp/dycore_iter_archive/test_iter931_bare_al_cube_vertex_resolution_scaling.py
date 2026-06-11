@@ -25,7 +25,7 @@ constraints, not because higher resolution doesn't help.
 This sentinel pins the four data points within ±5 % so future iters
 that change the bare A-L cancellation structure (zeta, B-grad,
 halo treatment) are caught — any rewrite of `fv3_d2cc`/
-`_arakawa_lamb_gradient`/`pad_halo_vector` should preserve or
+`arakawa_lamb_gradient`/`pad_halo_vector` should preserve or
 improve this scaling.
 """
 from __future__ import annotations
@@ -42,8 +42,8 @@ import pytest
 
 from legoesm import constants
 from legoesm.core.operators_cdgrid import (
-    _arakawa_lamb_gradient,
-    _interp_corner_to_center,
+    arakawa_lamb_gradient,
+    interp_corner_to_center,
     dgrid_vorticity,
     fv3_d2cc,
 )
@@ -69,7 +69,7 @@ def _measure_bare_residual(N: int) -> dict:
     u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
     KE = 0.5 * (u_cc**2 + v_cc**2)
     B = KE + constants.g * (h + h_s)
-    _, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
+    _, dB_dy_perp = arakawa_lamb_gradient(B, cdgrid)
 
     grid_obj = cdgrid.base
     dg = grid_obj.duogrid
@@ -90,7 +90,7 @@ def _measure_bare_residual(N: int) -> dict:
     )
     zeta = dgrid_vorticity(u_corner, v_corner, cdgrid)
     zeta_abs = zeta + cdgrid.base.f
-    dB_dy_cc = _interp_corner_to_center(dB_dy_perp)
+    dB_dy_cc = interp_corner_to_center(dB_dy_perp)
 
     coriolis_dv = -np.asarray(zeta_abs * u_cc)
     bernoulli_dv = -np.asarray(dB_dy_cc)
@@ -117,7 +117,7 @@ def _measure_bare_residual(N: int) -> dict:
 def test_iter931_bare_al_residual_scaling_pinned(N, expected):
     """Pin the bare A-L imperfect-cancellation residual at each
     resolution within ±5 %.  Catches any rewrite of `fv3_d2cc`/
-    `_arakawa_lamb_gradient`/`pad_halo_vector` that perturbs the
+    `arakawa_lamb_gradient`/`pad_halo_vector` that perturbs the
     cube-vertex behaviour.
     """
     measured = _measure_bare_residual(N)

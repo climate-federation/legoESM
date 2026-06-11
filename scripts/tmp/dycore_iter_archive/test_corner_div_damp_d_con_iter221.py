@@ -22,7 +22,7 @@ The energy-conserving heat addition is (FV3 sw_core.F90 line
     dT/dt += -corner_div_damp_d_con * (dKE/dt) / c_pd
 
 where the heat tendency is computed at corners then projected to
-cell centres via ``_interp_corner_to_center`` for the T
+cell centres via ``interp_corner_to_center`` for the T
 tendency.  The 0.5*du² term that FV3 carries in the discrete
 form is O(dt) and dropped in this RK3-compatible tendency port.
 

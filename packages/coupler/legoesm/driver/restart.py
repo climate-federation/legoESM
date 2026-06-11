@@ -21,10 +21,7 @@ from typing import NamedTuple
 import jax
 import numpy as np
 
-from legoesm.forcing.amip_config import (
-    load_checkpoint,
-    save_checkpoint,
-)
+from legoesm.forcing.amip_config import save_checkpoint
 
 # Pure state-digest helpers live in the legoesm-core substrate (io.state_digest)
 # so io.state_checkpoint can share them without importing this driver-level

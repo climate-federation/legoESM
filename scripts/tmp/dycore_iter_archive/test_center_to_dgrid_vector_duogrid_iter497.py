@@ -1,8 +1,8 @@
 """FV3_3D iter 497: ``center_to_dgrid_vector`` (iter-328
 vector-aware halo interp) — does it amplify edges more or
-less than ``_interp_center_to_corner`` under duogrid?
+less than ``interp_center_to_corner`` under duogrid?
 
-iter-496 found ``_interp_center_to_corner`` (4-point average
+iter-496 found ``interp_center_to_corner`` (4-point average
 on stacked u/v) amplifies edge std × 1.122 under duogrid.
 iter-328 added ``center_to_dgrid_vector`` (vector-aware halo
 with rotation across face boundaries) — does this version

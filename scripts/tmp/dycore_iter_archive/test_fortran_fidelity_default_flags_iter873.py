@@ -55,7 +55,7 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
 
 # Each entry: (field_name, expected_default, iter_added, doc_anchor).
 # Note: `fortran_dir_aware_corners` is a function-level kwarg on
-# `_arakawa_lamb_gradient` / `fv3_sw_tendencies`, NOT a config field
+# `arakawa_lamb_gradient` / `fv3_sw_tendencies`, NOT a config field
 # (iter-765 marked it FALSIFIED — never promoted to config).  This
 # inventory covers only `CDGridShallowWaterConfig` fields.
 _FORTRAN_FIDELITY_OPT_IN_FLAGS = [
@@ -65,7 +65,7 @@ _FORTRAN_FIDELITY_OPT_IN_FLAGS = [
     ("apply_legacy_d_sw4_corner_ke_fix", False, "iter-869b",
      "sw_core.F90:1438-1466"),
     ("apply_legacy_d_sw5_corner_corrections", False, "iter-871b",
-     "_d_sw5_corner_divergence inner helper"),
+     "d_sw5_corner_divergence inner helper"),
     ("boundary_fix_skip_corners", False, "iter-769",
      "boundary-corner cascaded smoothing"),
     ("use_experimental_csw", False, "pre-iter-862",

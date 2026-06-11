@@ -146,7 +146,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py", "_get_convection_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py", "make_convection_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/convection/kuo.py", "kuo_convection"),
-        ("packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py", "_get_gwd_fn"),
+        # Renamed _get_gwd_fn -> get_gwd_fn (private-import promotion,
+        # 2026-06-10); the unknown-scheme raise itself is unchanged.
+        ("packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py", "get_gwd_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py", "make_gwd_physics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "_get_microphysics_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "make_microphysics_physics"),

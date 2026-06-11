@@ -280,8 +280,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         p_cell = None
         if getattr(vmix_cfg.tke, "n2_mode", "insitu") == "adiabatic":
             from legoesm.ocean.eos import compute_hydrostatic_pressure
-            from legoesm.ocean.eos import _maybe_partial_h_actual
-            h_actual = _maybe_partial_h_actual(state, z_coord)
+            from legoesm.ocean.eos import maybe_partial_h_actual
+            h_actual = maybe_partial_h_actual(state, z_coord)
             p_cell = compute_hydrostatic_pressure(
                 rho, state.eta.data, z_coord.dz_ref, J,
                 constants_config.rho_0, h_actual=h_actual,

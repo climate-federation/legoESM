@@ -7,7 +7,7 @@ scatter / gather / geometry-slice helpers.  The multi-rank counterparts
 live in :mod:`tests.distributed.test_latlon_mpi_tripole`.
 
 The bit-exactness target is the SERIAL ocean fold convention
-(:func:`legoesm.ocean.dynamics.latlon_cgrid_operators._fold_row` /
+(:func:`legoesm.ocean.dynamics.latlon_cgrid_operators.fold_row` /
 ``pad_ns_scalar`` / ``pad_ns_vector_u`` / ``pad_ns_vector_v``): the MPI
 northernmost-rank north halo must equal the serial permutation fold
 bit-for-bit (``rtol=0, atol=0`` — pure integer indexing + sign flip).
@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 from legoesm.grids.tripole import create_synthetic_tripole
-from legoesm.ocean.dynamics.latlon_cgrid_operators import _fold_row
+from legoesm.ocean.dynamics.latlon_cgrid_operators import fold_row
 from legoesm.parallel.latlon_mpi import (
     _fold_tripolar_north,
     _is_tripolar_layout,
@@ -91,13 +91,13 @@ class TestLayoutFold:
 
 
 # ---------------------------------------------------------------------------
-# Part 2: _fold_tripolar_north bit-exact vs serial _fold_row (halo=1)
+# Part 2: _fold_tripolar_north bit-exact vs serial fold_row (halo=1)
 # ---------------------------------------------------------------------------
 
 
 class TestFoldTripolarNorthMatchesSerial:
     """The keystone: the MPI fold helper must equal the serial ocean
-    ``_fold_row`` north convention bit-for-bit."""
+    ``fold_row`` north convention bit-for-bit."""
 
     @pytest.mark.parametrize("ndim", [2, 3])
     def test_scalar_north(self, tripole_geom, ndim):
@@ -105,7 +105,7 @@ class TestFoldTripolarNorthMatchesSerial:
         shape = (N_LAT, N_LON) + ((4,) if ndim == 3 else ())
         field = _rand(shape, seed=1)
         out = _fold_tripolar_north(field, 1, fold.perm_T, 1.0)
-        ref = _fold_row(field[-1:], fold.perm_T, 1.0, N_LON)
+        ref = fold_row(field[-1:], fold.perm_T, 1.0, N_LON)
         np.testing.assert_allclose(out, ref, rtol=0, atol=0)
 
     @pytest.mark.parametrize("ndim", [2, 3])
@@ -115,7 +115,7 @@ class TestFoldTripolarNorthMatchesSerial:
         shape = (N_LAT, N_LON + 1) + ((4,) if ndim == 3 else ())
         field = _rand(shape, seed=2)
         out = _fold_tripolar_north(field, 1, fold.perm_T, fold.vector_sign_u)
-        ref = _fold_row(field[-1:], fold.perm_T, fold.vector_sign_u, N_LON)
+        ref = fold_row(field[-1:], fold.perm_T, fold.vector_sign_u, N_LON)
         np.testing.assert_allclose(out, ref, rtol=0, atol=0)
         # The wrap column must equal column 0 of the folded core.
         np.testing.assert_allclose(out[:, -1], out[:, 0], rtol=0, atol=0)
@@ -126,7 +126,7 @@ class TestFoldTripolarNorthMatchesSerial:
         shape = (N_LAT, N_LON) + ((4,) if ndim == 3 else ())
         field = _rand(shape, seed=3)
         out = _fold_tripolar_north(field, 1, fold.perm_v, fold.vector_sign_v)
-        ref = _fold_row(field[-1:], fold.perm_v, fold.vector_sign_v, N_LON)
+        ref = fold_row(field[-1:], fold.perm_v, fold.vector_sign_v, N_LON)
         np.testing.assert_allclose(out, ref, rtol=0, atol=0)
 
     def test_halo2_multi_row_fold(self, tripole_geom):
@@ -182,7 +182,7 @@ class TestSingleRankExchangeTripolar:
         out = exchange_halo_latlon(
             field, single_rank_tripole_layout, halo=1, is_vector_u=True)
         north = out[-1:]
-        ref = _fold_row(field[-1:], fold.perm_T, fold.vector_sign_u, N_LON)
+        ref = fold_row(field[-1:], fold.perm_T, fold.vector_sign_u, N_LON)
         np.testing.assert_allclose(north, ref, rtol=0, atol=0)
 
     def test_is_vector_uv_mutually_exclusive(self, single_rank_tripole_layout):
@@ -284,7 +284,7 @@ class TestPadWithPoleBcTripolar:
         # South wall: zero row.
         np.testing.assert_allclose(out[0], jnp.zeros((N_LON,)), rtol=0, atol=0)
         # North seam: fold partner of the last interior row, NOT zero.
-        ref_north = _fold_row(field[-1:], fold.perm_T, 1.0, N_LON)[0]
+        ref_north = fold_row(field[-1:], fold.perm_T, 1.0, N_LON)[0]
         np.testing.assert_allclose(out[-1], ref_north, rtol=0, atol=0)
         assert float(jnp.max(jnp.abs(out[-1]))) > 0.0
 
@@ -431,7 +431,7 @@ class TestGeometrySlicing:
         paths and MPI call counts → MPI_ERR_TRUNCATE.  The fix: fold is
         ACTIVE on all ranks, with fold_j=-1 as a sentinel on non-
         northernmost ranks meaning "fold exists but is not local."
-        The _fold_is_local() helper checks fold_j >= 0.
+        The fold_is_local() helper checks fold_j >= 0.
         """
         n_ranks = 3
         for r in range(n_ranks):

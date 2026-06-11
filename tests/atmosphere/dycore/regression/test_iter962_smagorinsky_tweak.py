@@ -12,7 +12,7 @@ many existing pinned sentinels), but callers who want better W2
 fidelity on the FB chain can opt in.
 
 Iter-962 locks in the iter-959 measurement so a future change to
-d_sw5's adaptive Smagorinsky branch (`_d_sw5_corner_divergence`
+d_sw5's adaptive Smagorinsky branch (`d_sw5_corner_divergence`
 nord==0 path or the nord>=1 Smagorinsky inside _divergence_corner_duo)
 that changes this output gets caught.
 """

@@ -49,7 +49,7 @@ Cross-cutting:
 
 7. ``test_smag_vort_uses_relative_vorticity_via_a2b_ord4`` — AST
    regression that the iter-187 site reads ``zeta`` (relative)
-   and calls ``_interp_center_to_corner_a2b_ord4`` (FV3 ``a2b_ord4``
+   and calls ``interp_center_to_corner_a2b_ord4`` (FV3 ``a2b_ord4``
    for ``wk → vort``).  Catches a refactor that accidentally
    reads the absolute ``zeta_corner`` (relative + f_corner).
 """
@@ -390,7 +390,7 @@ def test_nh_nord2_fv3_production_default_finite(small_nh_state):
 def test_smag_vort_uses_relative_vorticity_via_a2b_ord4():
     """AST regression: the iter-187 smag_vort site MUST use the
     relative-vorticity ``zeta`` (cell centres, no Coriolis) lifted to
-    corners via ``_interp_center_to_corner_a2b_ord4``.  Catches a
+    corners via ``interp_center_to_corner_a2b_ord4``.  Catches a
     refactor that accidentally feeds the absolute ``zeta_corner =
     zeta_relative + f_corner`` into smag_vort — that would inflate
     the cap at the poles where f dominates and silently bias the
@@ -400,7 +400,7 @@ def test_smag_vort_uses_relative_vorticity_via_a2b_ord4():
     sequence inside the corner-div-damp d4 branch:
 
         _zeta_smag_corner = jax.vmap(
-            lambda lev: _interp_center_to_corner_a2b_ord4(...)
+            lambda lev: interp_center_to_corner_a2b_ord4(...)
         )(zeta)
 
     The literal substring matched is robust to small whitespace changes
@@ -424,7 +424,7 @@ def test_smag_vort_uses_relative_vorticity_via_a2b_ord4():
             f"changed away from FV3 sw_core.F90:1797."
         )
         # Confirm a2b_ord4 helper is used, not a 2nd-order avg.
-        assert "_interp_center_to_corner_a2b_ord4" in src, (
+        assert "interp_center_to_corner_a2b_ord4" in src, (
             f"{label}: iter-187 must use a2b_ord4 for ζ→corner "
             f"(FV3 sw_core.F90:1795)."
         )

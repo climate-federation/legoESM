@@ -548,3 +548,51 @@ class TestTrainableParamsSchemeAware:
             assert all(jnp.isfinite(v) for v in grads.raw_values.values()), (
                 f"Non-finite grad for scheme={scheme}"
             )
+
+    def test_gray_radiation_keeps_tau_and_albedo(self):
+        """Gray consumes tau_equator/tau_pole, and (since 2026-06-10)
+        its SW reflection takes the blended albedo, so albedo_* train
+        under gray too."""
+        from legoesm.training.trainable_params import trainable_constraints_for_scheme
+        names = [
+            c.name
+            for c in trainable_constraints_for_scheme(radiation_scheme="gray")
+        ]
+        assert "tau_equator" in names and "tau_pole" in names
+        assert "albedo_ice" in names and "albedo_ocean" in names
+
+    def test_rrtmgp_keeps_albedo_drops_tau(self):
+        """RRTMGP consumes the blended surface albedo but explicitly
+        discards the gray optical depths (dead DOF under rrtmgp)."""
+        from legoesm.training.trainable_params import trainable_constraints_for_scheme
+        for rad in ("rrtmgp", "rrtmg"):  # rrtmg is a normalized alias
+            names = [
+                c.name
+                for c in trainable_constraints_for_scheme(radiation_scheme=rad)
+            ]
+            assert "albedo_ice" in names and "albedo_ocean" in names
+            assert "tau_equator" not in names and "tau_pole" not in names
+
+    def test_no_radiation_drops_radiation_params(self):
+        from legoesm.training.trainable_params import trainable_constraints_for_scheme
+        names = [
+            c.name
+            for c in trainable_constraints_for_scheme(radiation_scheme="none")
+        ]
+        for dead in ("tau_equator", "tau_pole", "albedo_ice", "albedo_ocean"):
+            assert dead not in names
+
+    def test_active_turbulence_drops_bulk_exchange_coeffs(self):
+        """With a turbulence scheme on, turb_owns_surface bypasses the
+        bulk C_H/C_E path entirely — they must not be offered."""
+        from legoesm.training.trainable_params import trainable_constraints_for_scheme
+        names_off = [
+            c.name
+            for c in trainable_constraints_for_scheme(turbulence_scheme="none")
+        ]
+        names_on = [
+            c.name
+            for c in trainable_constraints_for_scheme(turbulence_scheme="louis")
+        ]
+        assert "C_H" in names_off and "C_E" in names_off
+        assert "C_H" not in names_on and "C_E" not in names_on

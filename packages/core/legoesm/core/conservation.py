@@ -24,7 +24,7 @@ def _tiny(x=None):
 _EPS_ENERGY = 1e-20
 
 from legoesm import constants
-from legoesm.core.operators import global_integral, _is_distributed
+from legoesm.core.operators import global_integral, is_distributed
 from legoesm.core.operators_voronoi import kinetic_energy_cell
 from legoesm.core.precision import resolve_dtype, get_policy
 from legoesm.core.state import ShallowWaterState, HydrostaticState
@@ -114,13 +114,13 @@ def global_area_sum(
             mask = mask[..., None]
         prod = prod * mask
     local_sum = jnp.sum(prod)
-    if _is_distributed():
+    if is_distributed():
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
     return local_sum
 
 
-def _batch_global_area_sums(
+def batch_global_area_sums(
     arrays: list[jax.Array],
     grid,
     owned_mask: jax.Array | None = None,
@@ -151,7 +151,7 @@ def _batch_global_area_sums(
     )
     local_sums = [summed[..., i] for i in range(len(arrays))]
 
-    if _is_distributed():
+    if is_distributed():
         from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
     return local_sums
@@ -198,7 +198,7 @@ def fix_mass_shallow_water(
     -------
     ShallowWaterState : Mass-conserving state.
     """
-    mass_old, mass_new = _batch_global_area_sums(
+    mass_old, mass_new = batch_global_area_sums(
         [state_old.h.data, state_new.h.data], grid,
     )
     correction = (mass_old - mass_new) / _total_area(grid)
@@ -241,7 +241,7 @@ def fix_energy_shallow_water(
     # fp64 budget accumulator before the area-weighted sum.  The pre-
     # iter-42 path computed ``0.5 * h * (u² + v²)`` in fp32 (input
     # storage dtype), so the square+multiply lost ~7 bits of precision
-    # before ``_batch_global_area_sums`` ever cast to fp64 — the same
+    # before ``batch_global_area_sums`` ever cast to fp64 — the same
     # fp32-field bug iter-1/4/5 fixed for the mass diagnostic, just on
     # the energy path.
     acc = conservation_accumulator()
@@ -259,7 +259,7 @@ def fix_energy_shallow_water(
     KE_new_field = 0.5 * h_new * (u_new**2 + v_new**2)
     PE_new_field = 0.5 * g_acc * (h_new + h_s_new)**2
 
-    E_old, KE_new, PE_new = _batch_global_area_sums(
+    E_old, KE_new, PE_new = batch_global_area_sums(
         [E_old_field, KE_new_field, PE_new_field], grid,
     )
 
@@ -323,7 +323,7 @@ def fix_mass_hydrostatic(
     -------
     HydrostaticState : Mass-conserving state.
     """
-    mass_old, mass_new = _batch_global_area_sums(
+    mass_old, mass_new = batch_global_area_sums(
         [state_old.p_s.data, state_new.p_s.data], grid,
     )
     correction = (mass_old - mass_new) / _total_area(grid)
@@ -379,7 +379,7 @@ def zero_mean_tendency(
         # Sum over all spatial axes (all except the last)
         spatial_axes = tuple(range(area_ndim))
         level_sums = jnp.sum(prod, axis=spatial_axes)  # (nlev,)
-        if _is_distributed():
+        if is_distributed():
             from legoesm.parallel.reductions import global_sum_mpi
             level_sums = global_sum_mpi(level_sums)
         corrections = level_sums / total_area_acc  # (nlev,)
@@ -613,7 +613,7 @@ def fix_ps_mass(
     batched allreduce, matching :func:`fix_mass_hydrostatic`'s
     communication pattern.
     """
-    mass_old, mass_new = _batch_global_area_sums(
+    mass_old, mass_new = batch_global_area_sums(
         [p_s_old, p_s_new], grid, owned_mask=owned_mask,
     )
     correction = (mass_old - mass_new) / _total_area(grid)
@@ -717,7 +717,7 @@ def fix_mass_nonhydrostatic(
         axis=-1,
     )
     col_vol = J * jnp.sum(dz)
-    current_mass, total_vol = _batch_global_area_sums(
+    current_mass, total_vol = batch_global_area_sums(
         [col_mass, col_vol], grid,
     )
     correction = (target_mass - current_mass) / total_vol
@@ -779,7 +779,7 @@ def compute_hydrostatic_energy(
     ie_col = _col_triple[..., 1]
     pe_col = _col_triple[..., 2]
 
-    ke, ie, pe = _batch_global_area_sums([ke_col, ie_col, pe_col], grid)
+    ke, ie, pe = batch_global_area_sums([ke_col, ie_col, pe_col], grid)
 
     total = ke + ie + pe
     return {
@@ -847,7 +847,7 @@ def compute_nh_energy(
     ie_col = _col_triple[..., 1]
     pe_col = _col_triple[..., 2]
 
-    ke, ie, pe = _batch_global_area_sums([ke_col, ie_col, pe_col], grid)
+    ke, ie, pe = batch_global_area_sums([ke_col, ie_col, pe_col], grid)
 
     total = ke + ie + pe
     return {
@@ -873,7 +873,7 @@ def compute_conservation_diagnostics(
     """
     # iter-44: promote energy field to fp64 budget accumulator before
     # the area-sum (same fp32-field bug as iter-42/43).  The mass
-    # integrand (h alone) is already correct via _batch_global_area_sums
+    # integrand (h alone) is already correct via batch_global_area_sums
     # internal cast.
     acc = conservation_accumulator()
     h = state.h.data.astype(acc)
@@ -884,7 +884,7 @@ def compute_conservation_diagnostics(
 
     ke = 0.5 * h * (u**2 + v**2)
     pe = 0.5 * g_acc * (h + h_s)**2
-    total_mass, total_energy = _batch_global_area_sums(
+    total_mass, total_energy = batch_global_area_sums(
         [h, ke + pe], grid,
     )
 
@@ -1043,7 +1043,7 @@ def _batch_global_area_sums_voronoi(
     arrays: list[jax.Array],
     mesh,
 ) -> list[jax.Array]:
-    """Voronoi analogue of :func:`_batch_global_area_sums`.
+    """Voronoi analogue of :func:`batch_global_area_sums`.
 
     Stacks the arrays along a new trailing axis, multiplies by
     ``mesh.areaCell`` (cast to the fp64 conservation accumulator),
@@ -1055,7 +1055,7 @@ def _batch_global_area_sums_voronoi(
     stacked = jnp.stack([arr.astype(acc) for arr in arrays], axis=-1)
     summed = jnp.sum(stacked * area_acc[..., None], axis=0)  # (n_arrays,)
     local_sums = [summed[..., i] for i in range(len(arrays))]
-    if _is_distributed():
+    if is_distributed():
         from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
     return local_sums

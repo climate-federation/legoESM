@@ -213,13 +213,13 @@ def test_iter888_on_path_matches_fortran_formula_predictions():
     # To avoid getting tangled in those branches, use a TRACE of the
     # formula: re-apply iv=1 on the predicted bl/br and compare
     # against the actual output.
-    from legoesm.core.fv_tp_2d import _pert_ppm
+    from legoesm.core.fv_tp_2d import pert_ppm
 
     # Predicted iv=1-applied bl/br at index 0:
-    pred_bl_0_iv1, pred_br_0_iv1 = _pert_ppm(
+    pred_bl_0_iv1, pred_br_0_iv1 = pert_ppm(
         jnp.asarray(expected_bl_0), jnp.asarray(expected_br_0))
     # Predicted iv=1-applied bl/br at index 1:
-    pred_bl_1_iv1, pred_br_1_iv1 = _pert_ppm(
+    pred_bl_1_iv1, pred_br_1_iv1 = pert_ppm(
         jnp.asarray(expected_bl_1), jnp.asarray(expected_br_1))
     # Predicted iv=1-applied bl/br at index 2: br[2] is UNCHANGED
     # from the standard al-based computation, so we don't have a
@@ -927,8 +927,8 @@ def test_iter890_ppm_1d_bounded_domain_gates_legacy_overrides():
     flags are False, the overrides fire (legacy global cubed sphere
     is in play).
 
-    Strategy: monkey-patch `_pert_ppm` to count invocations.  The
-    legacy code path calls `_pert_ppm` 6 times at boundary indices.
+    Strategy: monkey-patch `pert_ppm` to count invocations.  The
+    legacy code path calls `pert_ppm` 6 times at boundary indices.
     bounded_domain=True or use_duogrid=True must skip those 6 calls.
     """
     from unittest import mock
@@ -946,7 +946,7 @@ def test_iter890_ppm_1d_bounded_domain_gates_legacy_overrides():
         n_calls["n"] += 1
         return bl_slice, br_slice
 
-    with mock.patch.object(fv_tp_2d_mod, "_pert_ppm", counting_pert_ppm):
+    with mock.patch.object(fv_tp_2d_mod, "pert_ppm", counting_pert_ppm):
         # Case A: legacy global cubed sphere (both flags False) — 6 calls
         n_calls["n"] = 0
         _ppm_1d(q, n, use_duogrid=False, bounded_domain=False)
@@ -968,17 +968,17 @@ def test_iter890_ppm_1d_bounded_domain_gates_legacy_overrides():
         n_both = n_calls["n"]
 
     assert n_legacy == 6, (
-        f"Legacy global cubed sphere case: expected 6 _pert_ppm calls "
+        f"Legacy global cubed sphere case: expected 6 pert_ppm calls "
         f"at boundary indices, got {n_legacy}.")
     assert n_bounded == 0, (
-        f"bounded_domain=True case: expected 0 _pert_ppm calls "
+        f"bounded_domain=True case: expected 0 pert_ppm calls "
         f"(Fortran tp_core.F90:612 gate `.not. (bounded_domain .or. "
         f"duogrid)` must bypass the iv=1 limiter), got {n_bounded}.")
     assert n_duogrid == 0, (
-        f"use_duogrid=True case: expected 0 _pert_ppm calls (legacy "
+        f"use_duogrid=True case: expected 0 pert_ppm calls (legacy "
         f"contract from iter-884), got {n_duogrid}.")
     assert n_both == 0, (
-        f"Both flags True case: expected 0 _pert_ppm calls, got {n_both}.")
+        f"Both flags True case: expected 0 pert_ppm calls, got {n_both}.")
 
 
 def test_iter890_ppm_1d_bounded_domain_skips_position_aware_corrections():

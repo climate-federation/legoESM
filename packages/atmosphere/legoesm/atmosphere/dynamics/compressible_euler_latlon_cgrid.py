@@ -88,7 +88,7 @@ from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerConfig,
-    _sponge_profile,
+    sponge_profile,
     acoustic_substeps,
     acoustic_substeps_semi_implicit,
     compute_exner_perturbation,
@@ -355,7 +355,7 @@ def cgrid_latlon_nh_slow_tendencies(
     # profile at the physical w locations.  The v0 code averaged a
     # full-level sponge profile to half-levels, which mis-located the
     # tapered region by half a layer.
-    sponge_half = _sponge_profile(
+    sponge_half = sponge_profile(
         height_coord.z_half, height_coord.H,
         cfg.sponge_width, cfg.sponge_coeff,
     )  # (nlev+1,)

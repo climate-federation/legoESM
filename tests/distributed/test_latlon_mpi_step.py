@@ -179,7 +179,7 @@ class TestMPIStepEquivalence:
 
     @pytest.fixture(autouse=True)
     def _activate_mpi_halo_backend(self):
-        """``_is_distributed()`` returns ``get_halo_backend() == "mpi"``.
+        """``is_distributed()`` returns ``get_halo_backend() == "mpi"``.
         The mass fixer + zero_mean_tendency need this to allreduce.
 
         We don't need a real cubed-sphere topology — the lat-lon path
@@ -365,5 +365,5 @@ class TestMPIStepEquivalence:
             f"Mass drifted by {rel_drift:.3e} over one MPI step on "
             f"{MPI.COMM_WORLD.Get_size()} ranks.  Either the fixer "
             f"isn't seeing the global total area, or the allreduce "
-            f"in _batch_global_area_sums isn't firing."
+            f"in batch_global_area_sums isn't firing."
         )

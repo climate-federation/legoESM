@@ -2849,7 +2849,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         # Cosine bell is PURE HORIZONTAL ADVECTION — `model.step()` is
         # NEVER called.  Instead, the `step_fn` below uses
         # `transport_step` directly with pre-computed frozen winds
-        # (_d2a2c_vect output).  The CDGridShallowWaterConfig fields
+        # (d2a2c_vect output).  The CDGridShallowWaterConfig fields
         # (div_damp, damp_v, nord_v, hyperdiff_coeff) are NOT READ by
         # the cosine-bell stepping code.  iter-34 (new_test_dycores):
         # bring the declaration in line with the iter1009 dual-target
@@ -2868,11 +2868,11 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
         # FV3-faithful transport: d2a2c_vect for contravariant velocities,
         # then Lin-Rood split transport with Courant-number PPM.
-        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv3_sw_core import d2a2c_vect
         from legoesm.core.fv_tp_2d import transport_step
 
         # Pre-compute contravariant velocities (winds are frozen)
-        _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(
+        _ua, _va, _uc, _vc, ut, vt = d2a2c_vect(
             state.u_d, state.v_d, cdgrid)
 
         # Pre-compute initial mass for conservation fixer (fp64 acc)

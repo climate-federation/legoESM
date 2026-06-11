@@ -6,7 +6,7 @@ spectral):
 
 - ``CompressibleEulerConfig`` — base configuration NamedTuple
 - ``compute_exner_perturbation`` — Exner function perturbation from EOS
-- ``_sponge_profile`` — Rayleigh damping profile
+- ``sponge_profile`` — Rayleigh damping profile
 - ``acoustic_substeps`` — forward-backward acoustic substeps
 - ``acoustic_substeps_semi_implicit`` — tridiagonal implicit acoustic substeps
 
@@ -513,7 +513,7 @@ def compute_exner_perturbation(
 # Sponge layer
 # ==============================================================================
 
-def _sponge_profile(
+def sponge_profile(
     z_full: jax.Array,
     H: float,
     sponge_width: float,
@@ -594,7 +594,7 @@ def _theta_vert_advection_van_leer_kernel(
     return (flux_div + dwdz) / J[..., None]
 
 
-def _acoustic_column_kernel(
+def acoustic_column_kernel(
     w_c: jax.Array,
     theta_p_c: jax.Array,
     rho_p_c: jax.Array,
@@ -731,7 +731,7 @@ def acoustic_substeps(
     3. Backward: update theta' using vertical advection by w
 
     The per-substep vertical algebra is factored into
-    :func:`_acoustic_column_kernel` so it can be reused by other dycores
+    :func:`acoustic_column_kernel` so it can be reused by other dycores
     (currently the future plane dycore in the CRM rollout, PR2b).
 
     Parameters
@@ -765,7 +765,7 @@ def acoustic_substeps(
 
     def substep_body(i, carry):
         w_c, theta_p_c, rho_p_c = carry
-        return _acoustic_column_kernel(
+        return acoustic_column_kernel(
             w_c, theta_p_c, rho_p_c,
             height_coord, J, dt_s, beta, g,
         )
@@ -808,14 +808,14 @@ def precompute_si_tridiag_bands(
     ``g`` — they do NOT depend on the substep carry ``(w, theta_p,
     rho_p)``. Callers running a multi-substep ``jax.lax.fori_loop``
     can call this once outside the loop and pass the result into
-    :func:`_semi_implicit_acoustic_column_kernel` via
+    :func:`semi_implicit_acoustic_column_kernel` via
     ``precomputed_tridiag`` to skip recomputing them every iteration.
 
     Contract
     --------
     The returned ``(a_tri, b_tri, c_tri)`` are tied to the EXACT
     ``(dt_s, height_coord, J, g, implicit_buoyancy)`` passed here.
-    When forwarded to :func:`_semi_implicit_acoustic_column_kernel`,
+    When forwarded to :func:`semi_implicit_acoustic_column_kernel`,
     the same ``dt_s``, ``height_coord``, ``J``, ``g`` MUST be passed
     to the kernel (used for the RHS / backward updates). When
     ``precomputed_tridiag is not None`` the kernel IGNORES its own
@@ -873,7 +873,7 @@ def precompute_si_tridiag_bands(
     return (a_tri, b_tri, c_tri)
 
 
-def _semi_implicit_acoustic_column_kernel(
+def semi_implicit_acoustic_column_kernel(
     w_c: jax.Array,
     theta_p_c: jax.Array,
     rho_p_c: jax.Array,
@@ -889,7 +889,7 @@ def _semi_implicit_acoustic_column_kernel(
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Single semi-implicit acoustic substep (column-local algebra).
 
-    Layout-agnostic counterpart of :func:`_acoustic_column_kernel`.
+    Layout-agnostic counterpart of :func:`acoustic_column_kernel`.
     Treats the vertical pressure-gradient term in the w equation
     implicitly via a per-column tridiagonal Thomas solve so the
     vertical acoustic CFL constraint is lifted.
@@ -900,7 +900,7 @@ def _semi_implicit_acoustic_column_kernel(
 
     Boundary contract (post iter-69)
     --------------------------------
-    Unlike :func:`_acoustic_column_kernel` (explicit) which preserves
+    Unlike :func:`acoustic_column_kernel` (explicit) which preserves
     the input boundary values ``w_c[..., 0]`` and ``w_c[..., -1]``,
     this kernel **overwrites** them with 0 (rigid lid/bottom BC) on
     output. Callers MUST already obey the rigid BC on entry; this

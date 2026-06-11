@@ -94,10 +94,11 @@ class LouisConfig(NamedTuple):
     ------
     l_mix_max : float
         Maximum mixing length [m] (default 100.0).
-    Ck : float
-        Mixing length coefficient (default 0.4).
     Ri_crit : float
-        Critical Richardson number (default 0.25).
+        Critical *bulk* Richardson number for the PBL-height diagnosis
+        (threaded into ``PBLHeightConfig.Ri_crit``; default 0.25).  The
+        Louis stability functions themselves are smooth in the gradient
+        Ri and use no critical cutoff.
     b_heat_ratio : float
         Ratio of the heat stability-function coefficient to the momentum
         one, ``b_h / b_m`` (Louis, Tiedtke & Geleyn 1982 use 3b for heat
@@ -112,7 +113,6 @@ class LouisConfig(NamedTuple):
         Surface layer parameters.
     """
     l_mix_max: float = 100.0
-    Ck: float = 0.4
     Ri_crit: float = 0.25
     # Louis stability function coefficients (Holtslag & De Bruin 1988)
     b_louis: float = 5.0

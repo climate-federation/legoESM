@@ -509,6 +509,11 @@ class ExperimentConfig(NamedTuple):
                 f"aimip_variant must be one of {AIMIP_VARIANTS}, "
                 f"got {self.aimip_variant!r}"
             )
+        # NOTE: the classical variant runs through the AIMIP training entry
+        # point (make_aimip_classical_spectral_physics), NOT the unified
+        # ModelDriver pipeline — tiedtke is profile-prognostic and
+        # build_physics_pipeline fails fast on it with a pointer at the
+        # bridge factory (see _PIPELINE_UNSUPPORTED_CONVECTION).
         if self.aimip_variant == "classical":
             if self.convection != "tiedtke":
                 errors.append(

@@ -54,7 +54,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.grids.latlon import (
     LatLonGrid,
-    _build_uniform_latlon_grid_from_axes,
+    build_uniform_latlon_grid_from_axes,
 )
 
 
@@ -588,7 +588,7 @@ def create_nested_latlon_grid(
         parent, j_start, j_count, i_start, i_count, r,
     )
 
-    child = _build_uniform_latlon_grid_from_axes(
+    child = build_uniform_latlon_grid_from_axes(
         lat=jnp.asarray(lat_c), lon=jnp.asarray(lon_c),
         dlat=dlat_c, dlon=dlon_c, radius=radius, omega=omega, dtype=dtype,
     )

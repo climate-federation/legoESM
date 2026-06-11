@@ -32,7 +32,7 @@ import jax.numpy as jnp
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
 from legoesm.core.field import Field
-from legoesm.core.operators import _is_distributed
+from legoesm.core.operators import is_distributed
 from legoesm.parallel.reductions import global_sum_mpi
 from legoesm.grids.gaussian import (
     GaussianGrid,
@@ -66,7 +66,7 @@ def _spectral_cell_area(grid: GaussianGrid) -> jnp.ndarray:
 
 def _spectral_global_sum(local_value: jnp.ndarray) -> jnp.ndarray:
     """MPI-aware global sum for spectral ocean reductions."""
-    if _is_distributed():
+    if is_distributed():
         return global_sum_mpi(local_value)
     return local_value
 

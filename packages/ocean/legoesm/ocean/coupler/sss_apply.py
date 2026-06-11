@@ -43,6 +43,7 @@ def apply_sss_restoring_step(
     dt: float,
     lat2d_deg: np.ndarray | None = None,
     lon2d_deg: np.ndarray | None = None,
+    river_runoff: np.ndarray | jnp.ndarray | None = None,
 ) -> object:
     """Apply one timestep of OMIP-2 SSS restoring to ``state``.
 
@@ -124,6 +125,9 @@ def apply_sss_restoring_step(
         lon_deg=jnp.asarray(lon2d),
         ice_concentration=jnp.asarray(ice),
         config=config,
+        river_runoff=(None if river_runoff is None
+                      else jnp.asarray(np.asarray(river_runoff,
+                                                  dtype=np.float64))),
     )
 
     dS_dt = np.asarray(out["dS_dt_top"], dtype=np.float64)
@@ -150,6 +154,7 @@ def apply_sss_restoring_step_mpas(
     config: SSSRestoringConfig,
     mesh,
     dt: float,
+    river_runoff: np.ndarray | jnp.ndarray | None = None,
 ) -> object:
     """Apply one timestep of OMIP-2 SSS restoring on a Voronoi mesh.
 
@@ -199,6 +204,9 @@ def apply_sss_restoring_step_mpas(
         lon_deg=jnp.asarray(lon_deg),
         ice_concentration=jnp.asarray(ice),
         config=config,
+        river_runoff=(None if river_runoff is None
+                      else jnp.asarray(np.asarray(river_runoff,
+                                                  dtype=np.float64))),
     )
     dS_dt = np.asarray(out["dS_dt_top"], dtype=np.float64)
     land_mask = np.asarray(state.land_mask.data, dtype=np.float64)

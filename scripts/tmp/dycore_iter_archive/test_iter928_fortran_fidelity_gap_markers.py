@@ -93,7 +93,7 @@ def _file_contains(path: Path, needle: str) -> bool:
             "Fortran has NO post-tendency smoothing analog",
         ),
         # 6. Real d_sw5 machinery exists only in experimental FB path.
-        # _d_sw5_corner_divergence's docstring says production
+        # d_sw5_corner_divergence's docstring says production
         # fv3_sw_tendencies does NOT call this helper.
         (
             "issue6_real_dsw5_only_in_fb_path",
@@ -101,7 +101,7 @@ def _file_contains(path: Path, needle: str) -> bool:
             "Production ``fv3_sw_tendencies`` does NOT call this helper",
         ),
         # 7. Cube-vertex halo handling NOT PORTED in non-duogrid path.
-        # _d2a2c_vect documents the gap explicitly.
+        # d2a2c_vect documents the gap explicitly.
         (
             "issue7_cube_vertex_halo_not_ported_non_duogrid",
             FV3_SW_CORE,

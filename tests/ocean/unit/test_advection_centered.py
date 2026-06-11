@@ -10,7 +10,7 @@ The lat-lon C-grid ``tracer_advection="centered"`` option reproduces Veros's
 reusing the SAME flux-form divergence machinery as the TVD / WENO / DST3 paths
 (build a face value -> ``mass_flux * tr_face`` -> ``divergence_cgrid``). The
 horizontal face values come from the canonical centered cell->face interps
-(``_centered_cell_to_uface`` periodic in lon, ``_interp_to_v_points`` the
+(``centered_cell_to_uface`` periodic in lon, ``interp_to_v_points`` the
 centered cell->v-face with the solid-wall BC); the vertical from
 ``flux_form_vertical_tracer_advection_centered``.
 
@@ -183,14 +183,14 @@ class TestCenteredHorizontalFaceValues:
     def test_u_face_is_two_cell_average(self):
         """u-face value = 0.5*(T[i-1] + T[i]), periodic in longitude."""
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _centered_cell_to_uface,
+            centered_cell_to_uface,
         )
         grid = _make_grid()
         nlev = 3
         n_lat, n_lon = grid.n_lat, grid.n_lon
         key = jax.random.PRNGKey(7)
         f = jax.random.uniform(key, (n_lat, n_lon, nlev), minval=1.0, maxval=5.0)
-        f_u = _centered_cell_to_uface(f)
+        f_u = centered_cell_to_uface(f)
         assert f_u.shape == (n_lat, n_lon + 1, nlev)
 
         f_np = np.asarray(f)
@@ -206,14 +206,14 @@ class TestCenteredHorizontalFaceValues:
     def test_v_face_is_two_cell_average_interior(self):
         """v-face value = 0.5*(T[i-1] + T[i]) interior; wall BC at poles."""
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _interp_to_v_points,
+            interp_to_v_points,
         )
         grid = _make_grid()
         nlev = 3
         n_lat, n_lon = grid.n_lat, grid.n_lon
         key = jax.random.PRNGKey(8)
         f = jax.random.uniform(key, (n_lat, n_lon, nlev), minval=1.0, maxval=5.0)
-        f_v = _interp_to_v_points(f, grid)
+        f_v = interp_to_v_points(f, grid)
         assert f_v.shape == (n_lat + 1, n_lon, nlev)
         f_np = np.asarray(f)
         ref_int = 0.5 * (f_np[:-1, :, :] + f_np[1:, :, :])
@@ -221,14 +221,14 @@ class TestCenteredHorizontalFaceValues:
 
     def test_uniform_tracer_gives_uniform_faces(self):
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _centered_cell_to_uface, _interp_to_v_points,
+            centered_cell_to_uface, interp_to_v_points,
         )
         grid = _make_grid()
         nlev = 4
         n_lat, n_lon = grid.n_lat, grid.n_lon
         f = jnp.full((n_lat, n_lon, nlev), 3.0)
-        f_u = _centered_cell_to_uface(f)
-        f_v = _interp_to_v_points(f, grid)
+        f_u = centered_cell_to_uface(f)
+        f_v = interp_to_v_points(f, grid)
         assert jnp.allclose(f_u, 3.0, atol=1e-14)
         # Interior v-faces uniform; the pole BC (pad_ns_scalar) carries the
         # adjacent scalar so it is also 3.0 here.
@@ -256,7 +256,7 @@ class TestCenteredConservation:
             interp_cell_to_uface, divergence_cgrid,
         )
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _interp_to_v_points,
+            interp_to_v_points,
         )
         from legoesm.ocean.vertical import diagnose_w_from_flux_div
 
@@ -267,7 +267,7 @@ class TestCenteredConservation:
         tr = jax.random.uniform(key, (n_lat, n_lon, nlev), minval=1.0, maxval=5.0)
         h_k = jnp.full((n_lat, n_lon, nlev), 100.0)
         h_u = interp_cell_to_uface(h_k)
-        h_v = _interp_to_v_points(h_k)
+        h_v = interp_to_v_points(h_k)
 
         # Periodic mass fluxes (face n_lon = face 0); zero at poles.
         k1, k2 = jax.random.split(key)
@@ -317,7 +317,7 @@ class TestCenteredConservation:
             interp_cell_to_uface, divergence_cgrid,
         )
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _interp_to_v_points,
+            interp_to_v_points,
         )
 
         grid = _make_grid(n_lat=8, n_lon=16)
@@ -326,7 +326,7 @@ class TestCenteredConservation:
         tr = jnp.full((n_lat, n_lon, nlev), 7.0)
         h_k = jnp.full((n_lat, n_lon, nlev), 100.0)
         h_u = interp_cell_to_uface(h_k)
-        h_v = _interp_to_v_points(h_k)
+        h_v = interp_to_v_points(h_k)
         # Zero mass flux (rest) -> zero flux divergence both ways.
         mf_u = jnp.zeros((n_lat, n_lon + 1, nlev))
         mf_v = jnp.zeros((n_lat + 1, n_lon, nlev))
@@ -342,7 +342,7 @@ class TestCenteredConservation:
             interp_cell_to_uface,
         )
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _interp_to_v_points,
+            interp_to_v_points,
         )
 
         grid = _make_grid(n_lat=6, n_lon=12)
@@ -350,7 +350,7 @@ class TestCenteredConservation:
         n_lat, n_lon = grid.n_lat, grid.n_lon
         h_k = jnp.full((n_lat, n_lon, nlev), 100.0)
         h_u = interp_cell_to_uface(h_k)
-        h_v = _interp_to_v_points(h_k)
+        h_v = interp_to_v_points(h_k)
         key = jax.random.PRNGKey(2)
         k1, k2 = jax.random.split(key)
         mf_u_int = 0.01 * jax.random.normal(k1, (n_lat, n_lon, nlev))
@@ -415,7 +415,7 @@ class TestBitIdenticalDefault:
             interp_cell_to_uface, divergence_cgrid,
         )
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _interp_to_v_points,
+            interp_to_v_points,
         )
         from legoesm.ocean.vertical import diagnose_w_from_flux_div
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -429,7 +429,7 @@ class TestBitIdenticalDefault:
         tr = jax.random.uniform(key, (n_lat, n_lon, nlev), minval=1.0, maxval=5.0)
         h_k = jnp.full((n_lat, n_lon, nlev), 100.0)
         h_u = interp_cell_to_uface(h_k)
-        h_v = _interp_to_v_points(h_k)
+        h_v = interp_to_v_points(h_k)
         k1, k2 = jax.random.split(key)
         mf_u_int = 0.02 * jax.random.normal(k1, (n_lat, n_lon, nlev))
         mf_u = jnp.concatenate([mf_u_int, mf_u_int[:, :1, :]], axis=1)

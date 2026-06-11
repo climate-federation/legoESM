@@ -775,6 +775,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     differentiable_barotropic: bool = False
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
+    # When True, remove the area-mean of the net freshwater flux from the
+    # virtual-salt closure so the surface freshwater conserves GLOBAL SALT (the
+    # OMIP global freshwater correction; matches the MPAS config field). Default
+    # False keeps the legacy raw-flux behaviour bit-exact. Volume is already
+    # conserved separately via ``fix_eta_drift``.
+    normalize_freshwater: bool = False
     tracer_advection: str = "tvd"  # "upwind", "centered" (unlimited 2nd-order, Veros adv_flux_2nd), "tvd" (Van Leer), "superbee" (Sweby/Veros), "ppm_fct", "ppm", "dst3", "dst3_multidim", "som", "weno5", "weno7"
     gm_redi: object = None         # GMRediConfig or None; enables GM/Redi lateral mixing
     physics: object = None
@@ -829,6 +835,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     barotropic_implicit_theta_pgf: float = 0.55
     barotropic_implicit_pcg_tol: float = 1.0e-10
     barotropic_implicit_pcg_maxiter: int = 200
+    # Distributed (MPI) implicit-CN knobs.  Under MPI the stock
+    # ``jax.scipy`` CG deadlocks (rank-local dot products + a residual-
+    # dependent ``while_loop`` desynchronise the collective schedule), so
+    # the multi-rank path runs a HAND-ROLLED fixed-iteration PCG of
+    # exactly ``barotropic_implicit_pcg_fixed_iters`` iterations (static
+    # ``fori_loop`` => uniform collective schedule, no deadlock) wrapped
+    # in ``jax.lax.custom_linear_solve`` (implicit-function adjoint).  The
+    # single-rank path is UNCHANGED (still stock CG).  Default 60 is a
+    # conservative estimate for 1e-10 residual on a diagonally-dominant
+    # Helmholtz at 1°-¼°; it MUST be validated against the returned global
+    # residual (``barotropic_implicit_pcg_residual_tol``) for each deck —
+    # tripole-fold / coastal conditioning can require more.  See
+    # docs/ocean_experiments/distributed_barotropic_pcg.md.
+    barotropic_implicit_pcg_fixed_iters: int = 60
+    barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     # Rigid-lid streamfunction solver knobs (only used when
     # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
     # surface entirely: the depth-integrated flow is non-divergent and carried
@@ -1193,3 +1214,24 @@ class LatLonCGridOceanConfig(NamedTuple):
     # without AB2; rejected otherwise at config validation).  Default "total"
     # ⇒ BIT-IDENTICAL for every existing config.
     ab2_scope: str = "total"
+    # --- East-west cyclic-overlap projection (ORCA tripole seam) -----------
+    # When True, the two longitude HALO columns are slaved to their ORCA
+    # 2-point cyclic-overlap partners at the END of each step (cell-centred
+    # fields: ``col[0] <- col[nx-2]``, ``col[nx-1] <- col[1]``), reconnecting
+    # the east-west seam that the regular-grid roll-periodicity (period-nx)
+    # leaves severed on an ORCA grid (physically period nx-2, with 2 overlap
+    # halos).  The eORCA1 mesh marks the halo columns LAND, so the seam
+    # (lon ~72.5E) carries a spurious wall; this + the matching mask/bathy/IC
+    # overlap-fill at construction reconnects it.  ORCA-OVERLAP-SPECIFIC: only
+    # valid on a grid whose first/last columns DUPLICATE columns nx-2 / 1 (the
+    # tripole) -- WRONG on a genuinely period-nx regular lat-lon grid.  Default
+    # False -> bit-exact for every existing grid/config; set only for tripole.
+    ew_cyclic_overlap: bool = False
+    # --- River-runoff depth spreading (NEMO rn_dep_max) --------------------
+    # When > 0, the RUNOFF component of the freshwater forcing dilutes the
+    # top ``runoff_depth_spread_m`` metres of the column (NEMO sbcrnf spreads
+    # rivers over the top 150 m) instead of a single surface cell -- large
+    # rivers (Amazon) otherwise sit too fresh/too shallow/too local.  The
+    # column-integral salt tendency is unchanged (conservation identical);
+    # only the vertical distribution moves.  0 = legacy top-cell (bit-exact).
+    runoff_depth_spread_m: float = 0.0

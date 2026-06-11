@@ -79,7 +79,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import NamedSharding, PartitionSpec as P
 
-from legoesm.parallel.mesh import DeviceConfig, _N_FACES
+from legoesm.parallel.mesh import DeviceConfig, N_FACES
 from legoesm.core.field import Field
 from legoesm.grids.halo import pad_halo, pad_halo_4d
 
@@ -207,7 +207,7 @@ def shard_state(
             return leaf
 
         if grid_type == "cubed_sphere":
-            if leaf.ndim >= 1 and leaf.shape[0] == _N_FACES:
+            if leaf.ndim >= 1 and leaf.shape[0] == N_FACES:
                 if config.tiling != (1, 1) and leaf.ndim >= 3:
                     pspec = spec.tiled_3d if leaf.ndim >= 4 else spec.tiled_2d
                     if pspec is not None:
@@ -296,7 +296,7 @@ def create_output_shardings(state, config: DeviceConfig, grid_type: str = "cubed
             return None
 
         if grid_type == "cubed_sphere":
-            if leaf.ndim >= 1 and leaf.shape[0] == _N_FACES:
+            if leaf.ndim >= 1 and leaf.shape[0] == N_FACES:
                 if config.tiling != (1, 1) and leaf.ndim >= 3:
                     pspec = spec.tiled_3d if leaf.ndim >= 4 else spec.tiled_2d
                     if pspec is not None:
@@ -805,7 +805,7 @@ def make_face_halo_exchange(grid, config: DeviceConfig):
         def _exchange_leaf(leaf):
             if not isinstance(leaf, (jax.Array, jnp.ndarray)):
                 return leaf
-            if leaf.ndim < 3 or leaf.shape[0] != _N_FACES:
+            if leaf.ndim < 3 or leaf.shape[0] != N_FACES:
                 return leaf
 
             if leaf.ndim == 3:
@@ -857,7 +857,7 @@ def make_ppermute_halo_exchange(grid, config: DeviceConfig):
         def _exchange_leaf(leaf):
             if not isinstance(leaf, (jax.Array, jnp.ndarray)):
                 return leaf
-            if leaf.ndim < 3 or leaf.shape[0] != _N_FACES:
+            if leaf.ndim < 3 or leaf.shape[0] != N_FACES:
                 return leaf
             if leaf.ndim == 3:
                 return jax_native_halo_exchange(leaf, grid, mesh=config.mesh)
@@ -1201,7 +1201,7 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
         VoronoiPartition,
         HaloCommSchedule,
         build_local_mesh,
-        _compute_halo_cells,
+        compute_halo_cells,
     )
 
     nCells = global_mesh.nCells
@@ -1255,13 +1255,13 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
         set(owned_edges.tolist())
 
         # ----- Halo cells: k-ring neighbours of owned cells ----- #
-        halo_cells_set = _compute_halo_cells(
+        halo_cells_set = compute_halo_cells(
             cell_owner, cellsOnCell_np, maxEdges, rank, halo_depth,
         )
         # Augment with the OTHER cell of every owned edge: on Voronoi
         # SCVT meshes the cellsOnCell adjacency *should* match the
         # cellsOnEdge connectivity, but the k-ring construction in
-        # ``_compute_halo_cells`` can miss a handful of cells at the
+        # ``compute_halo_cells`` can miss a handful of cells at the
         # mesh boundary or near pentagons (owned edges whose far cell
         # is reachable via cellsOnEdge but whose hop chain through
         # cellsOnCell at depth <= halo_depth is broken by a -1 slot

@@ -233,7 +233,7 @@ class TestSpectralRolloutTracers:
             _compute_tracer_filter,
         )
         from legoesm.atmosphere.dynamics.spectral_pe import (
-            _compute_spectral_filter,
+            compute_spectral_filter,
         )
 
         # Build a wave-9 q_v tracer perturbation (close to n_max=10 →
@@ -253,7 +253,7 @@ class TestSpectralRolloutTracers:
         carry = carry._replace(q_v=q_grid)
         state = carry_to_spectral_state(carry, _GRID)
         # Verify the precomputed tracer filter is non-None.
-        spectral_filter = _compute_spectral_filter(
+        spectral_filter = compute_spectral_filter(
             _GRID.ls, _GRID.n_max, order=8, cutoff_fraction=0.01,
         )
         pe_config = SpectralPEConfig(

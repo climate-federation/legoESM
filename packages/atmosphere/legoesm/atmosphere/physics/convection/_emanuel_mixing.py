@@ -213,7 +213,6 @@ def _lift_parcel(
     cpd = constants.c_pd
     cpv = constants.c_pv
     rv = constants.R_v
-    eps = constants.epsilon
     lv0 = constants.L_v
 
     # Source-level (NK) properties via the smooth one-hot reduction.

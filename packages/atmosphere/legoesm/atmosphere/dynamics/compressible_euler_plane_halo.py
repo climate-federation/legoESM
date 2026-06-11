@@ -75,11 +75,11 @@ from legoesm.atmosphere.dynamics import (
     plane_operators_halo as oh,
 )
 from legoesm.atmosphere.dynamics.compressible_euler import (
-    CompressibleEulerConfig, _sponge_profile, compute_exner_perturbation,
+    CompressibleEulerConfig, sponge_profile, compute_exner_perturbation,
 )
 from legoesm.atmosphere.dynamics.compressible_euler_plane import (
-    _full_level_centred_d_dz, _moisture_buoyancy_w_half,
-    _safe_sqrt_strain, _sgs_brunt_vaisala_sq,
+    full_level_centred_d_dz, moisture_buoyancy_w_half,
+    safe_sqrt_strain, sgs_brunt_vaisala_sq,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.core.state import (
@@ -136,15 +136,15 @@ def _compute_smagorinsky_K_m_plane_halo(
     Mirror of
     :func:`compressible_euler_plane._compute_smagorinsky_K_m_plane`
     operating on already-halo-padded u, v, w slabs. Vertical gradients
-    are column-local — reuses :func:`_full_level_centred_d_dz` +
-    :func:`_safe_sqrt_strain` from the serial module so the inner
+    are column-local — reuses :func:`full_level_centred_d_dz` +
+    :func:`safe_sqrt_strain` from the serial module so the inner
     arithmetic stays in one canonical implementation.
 
     The SAM ``dosmagor`` stratification correction
     ``K_m = (Cs·Δ)²·sqrt(max(0, |S|² − Pr·N²))`` is applied identically
     to the serial kernel.  ``N²`` is COLUMN-LOCAL (no horizontal
     neighbours), so the precomputed sub-grid ``n2_sgs`` slab from the
-    shared :func:`compressible_euler_plane._sgs_brunt_vaisala_sq` is
+    shared :func:`compressible_euler_plane.sgs_brunt_vaisala_sq` is
     passed at the rank-local INTERIOR shape ``(ny, nx, nlev)`` — no halo
     exchange of N² needed.  ``n2_sgs=None`` recovers the pure-strain
     form.  Both kernels consuming the one shared N² helper prevents
@@ -211,8 +211,8 @@ def _compute_smagorinsky_K_m_plane_halo(
     ) / dz_full
     S33_center = dw_dz_center
 
-    du_dz_int = _full_level_centred_d_dz(u_int, height_coord)
-    dv_dz_int = _full_level_centred_d_dz(v_int, height_coord)
+    du_dz_int = full_level_centred_d_dz(u_int, height_coord)
+    dv_dz_int = full_level_centred_d_dz(v_int, height_coord)
 
     # ∂w/∂x at x-face (i, j) needs w_full(i-1, j); ∂w/∂y at y-face needs
     # w_full(i, j-1). Reuse the padded w to slice both shifts.
@@ -230,14 +230,14 @@ def _compute_smagorinsky_K_m_plane_halo(
     # — pull from +1-in-x shifted positions.
     w_full_xp1 = w_full_pad[h:-h, h + 1 : (-h + 1) if h > 1 else None, :]
     u_xp1_int = u_xp1                                   # already sliced
-    du_dz_xp1 = _full_level_centred_d_dz(u_xp1_int, height_coord)
+    du_dz_xp1 = full_level_centred_d_dz(u_xp1_int, height_coord)
     dw_dx_xface_xp1 = (w_full_xp1 - w_full_int) / grid.dx
     S13_xface_xp1 = 0.5 * (du_dz_xp1 + dw_dx_xface_xp1)
     S13_sq_center = 0.5 * (S13_xface ** 2 + S13_xface_xp1 ** 2)
 
     w_full_yp1 = w_full_pad[h + 1 : (-h + 1) if h > 1 else None, h:-h, :]
     v_yp1_int = v_yp1                                   # already sliced
-    dv_dz_yp1 = _full_level_centred_d_dz(v_yp1_int, height_coord)
+    dv_dz_yp1 = full_level_centred_d_dz(v_yp1_int, height_coord)
     dw_dy_yface_yp1 = (w_full_yp1 - w_full_int) / grid.dy
     S23_yface_yp1 = 0.5 * (dv_dz_yp1 + dw_dy_yface_yp1)
     S23_sq_center = 0.5 * (S23_yface ** 2 + S23_yface_yp1 ** 2)
@@ -266,12 +266,12 @@ def _compute_smagorinsky_K_m_plane_halo(
 
     # SAM dosmagor stratification (Lilly) correction — see the serial
     # _compute_smagorinsky_K_m_plane. N² precomputed column-local by the
-    # shared _sgs_brunt_vaisala_sq helper and passed in as n2_sgs.
+    # shared sgs_brunt_vaisala_sq helper and passed in as n2_sgs.
     if n2_sgs is not None:
         strain_arg = strain_mag_sq - prandtl * n2_sgs
     else:
         strain_arg = strain_mag_sq
-    strain_mag = _safe_sqrt_strain(strain_arg)
+    strain_mag = safe_sqrt_strain(strain_arg)
     if stability_length and n2_sgs is not None:
         # SAM dosmagor stable-layer Deardorff mixing-length limit — mirror of
         # the serial _compute_smagorinsky_K_m_plane (SGS_TKE/tke_full.f90:
@@ -311,7 +311,7 @@ def _global_hmean_plane(f_int: jax.Array, layout: PlanePencilLayout):
 
     Returns a ``(1, 1, nlev)`` profile that broadcasts against the
     interior field.  Used for the moist-buoyancy perturbation
-    (:func:`_moisture_buoyancy_w_half`) which subtracts the SAM ``qv0``
+    (:func:`moisture_buoyancy_w_half`) which subtracts the SAM ``qv0``
     base state = horizontal mean.
 
     ``n_ranks == 1`` takes the LOCAL ``jnp.sum`` path (no MPI stack
@@ -597,18 +597,18 @@ def plane_compressible_euler_slow_tendencies_halo(
     # acoustic helper's local mean equals this global mean ⇒ serial==halo parity.)
     if config.moist_buoyancy and not getattr(
             config, "acoustic_moist_buoyancy", True):
-        dw_dt = dw_dt + _moisture_buoyancy_w_half(
+        dw_dt = dw_dt + moisture_buoyancy_w_half(
             state.tracers.data, theta_p, height_coord,
             lambda f: _global_hmean_plane(f, layout),
         )
 
     # 9. Rayleigh sponge (column-local).
     _sponge_shape = getattr(config, "sponge_profile_shape", "sin2")
-    sponge_full = _sponge_profile(
+    sponge_full = sponge_profile(
         height_coord.z_full, height_coord.H,
         config.sponge_width, config.sponge_coeff, shape=_sponge_shape,
     )
-    sponge_half = _sponge_profile(
+    sponge_half = sponge_profile(
         height_coord.z_half, height_coord.H,
         config.sponge_width, config.sponge_coeff, shape=_sponge_shape,
     )
@@ -714,7 +714,7 @@ def plane_compressible_euler_slow_tendencies_halo(
             # exchange needed). Built by the SAME shared helper the serial call
             # site uses, on the rank-local interior θ/tracers, so the clear↔
             # moist switch and serial/MPI parity hold bit-for-bit at n_ranks==1.
-            n2_sgs_h = _sgs_brunt_vaisala_sq(
+            n2_sgs_h = sgs_brunt_vaisala_sq(
                 theta_total, state.tracers.data, height_coord,
             )
             K_m_int = _compute_smagorinsky_K_m_plane_halo(
@@ -995,11 +995,11 @@ def _slow_tendency_phase2_jit(
     )
 
     # Sponge.
-    sponge_full = _sponge_profile(
+    sponge_full = sponge_profile(
         height_coord.z_full, height_coord.H,
         cfg.sponge_width, cfg.sponge_coeff,
     )
-    sponge_half = _sponge_profile(
+    sponge_half = sponge_profile(
         height_coord.z_half, height_coord.H,
         cfg.sponge_width, cfg.sponge_coeff,
     )
@@ -1183,7 +1183,7 @@ def slow_tendency_jit_split(
     # phase2 signature does not carry. Skipped when moisture is off.
     if config.moist_buoyancy and not getattr(
             config, "acoustic_moist_buoyancy", True):  # else added in acoustic loop
-        b_half = _moisture_buoyancy_w_half(
+        b_half = moisture_buoyancy_w_half(
             state.tracers.data, state.theta_prime.data, height_coord,
             lambda f: _global_hmean_plane(f, layout),
         )
