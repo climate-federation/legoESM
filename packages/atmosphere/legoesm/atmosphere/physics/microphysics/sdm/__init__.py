@@ -12,11 +12,19 @@ identical real droplets it stands for). The processes are:
 * **condensation/evaporation** — diffusional growth of each droplet
   (``condensation.py``); differentiable.
 * **collision-coalescence** — Shima's Monte-Carlo algorithm
-  (``coalescence.py``, later iteration); stochastic, not differentiable.
-* **sedimentation/advection** — terminal-velocity fall (later iteration).
+  (``coalescence.py``); stochastic, pure function of an explicit PRNG key, not
+  differentiable.
+* **collision kernels + terminal velocities** (``kernels.py``).
+* **particle <-> grid coupling** — deposition, latent heating, total-water
+  closure (``coupling.py``).
+* **drivers** (``box_model.py``): a composed persistent box
+  (``box_step`` / ``run_box``, condensation + coalescence) and an adiabatic
+  parcel (``parcel_step`` / ``run_parcel``).
+* **switchable column scheme** ``scheme="sdm"`` (``column.py``,
+  ``sdm_microphysics``) — a stateless diffusional-condensation adapter for the
+  Eulerian column-physics interface.
 
-This sub-package is being built incrementally; this revision provides the
-particle representation, configuration, and the diffusional-growth core.
+Sedimentation/advection of the particles is not yet implemented.
 """
 
 from __future__ import annotations
@@ -52,9 +60,12 @@ from legoesm.atmosphere.physics.microphysics.sdm.coupling import (
     liquid_water_content,
 )
 from legoesm.atmosphere.physics.microphysics.sdm.box_model import (
+    BoxState,
     ParcelState,
+    box_step,
     liquid_mixing_ratio,
     parcel_step,
+    run_box,
     run_parcel,
     saturation_ratio,
 )
@@ -84,6 +95,9 @@ __all__ = [
     "ParcelState",
     "parcel_step",
     "run_parcel",
+    "BoxState",
+    "box_step",
+    "run_box",
     "liquid_mixing_ratio",
     "saturation_ratio",
     "sdm_microphysics",

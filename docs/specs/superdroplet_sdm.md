@@ -42,7 +42,9 @@ Jacobian (for implicit): d/d(R^2) of beta/R + gamma/R^3 terms = `dRsqdt::rhs_jac
 Coefficients (water): L=L_v=2.5e6, K=therco=2.40e-2 W/m/K, R_v=461.505, rho_l=rho_w=1000,
 D=diffelq=2.21e-5 m^2/s (const for water), sigma=0.076148325 N/m =>
 a=2 sigma/(R_v rho_w)=3.300e-7 [m K] (curvature term uses a/T), b=4.3e-6 [m^3/mol] (solute).
-S = saturation ratio = q_v / q_sat (= RH). For pure water droplets w/o aerosol the
+S = saturation ratio = e/e_sat (vapor-pressure based; e = p·r/(eps+r) from the vapor
+mixing ratio r — see thermo.relative_humidity, NOT the mixing-ratio ratio q_v/q_sat).
+For pure water droplets w/o aerosol the
 curvature+solute terms are negligible at R>~1um => classic Maxwell: d(R^2)/dt=2(S-1)/(F_k+F_d).
 Integrators: adaptive-substep with dt=cfl/|tau|, tau=rhs_jac; default explicit (RK4/RK3BS),
 implicit BE/CN/DIRK2 via Newton for stiff (small R). Port: sub-stepped RK4 + analytic R^2 form.
@@ -98,9 +100,13 @@ New sub-package `packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm
                    solver tols, surface tension/curvature/solute coeffs, init dist params). All
                    tunables here (audit: no magic numbers in hot loops). Constants via
                    `legoesm.constants`; saturation via `legoesm.thermo` (audit-mandated, NOT ERF Tetens).
-- `box_model.py` — persistent-particle box/parcel driver (lax.scan), natural SDM home + test case.
-- `__init__.py`  — exports `sdm_microphysics` (column operator) + box driver.
-Each physics leaf carries `__physics_contract__`.
+- `box_model.py` — persistent-particle drivers (lax.scan): `run_box` composes
+  condensation + Shima coalescence (ERF order) in a well-mixed box; `run_parcel`
+  is the adiabatic activation parcel. Natural Lagrangian SDM home + test cases.
+- `__init__.py`  — exports `sdm_microphysics` (column operator) + box/parcel drivers.
+Each physics leaf (`condensation`, `kernels`, `coalescence`, `coupling`, `column`)
+carries `__physics_contract__`; `particles`/`config`/`box_model` are plumbing/
+drivers (EXCLUDED from the contract gate).
 
 ### Switchable wiring
 - `MicrophysicsConfig`: add `scheme` literal `"sdm"` + `sdm: SDMConfig = SDMConfig()`.
@@ -136,13 +142,33 @@ hardened. Modules: `particles`, `condensation`, `kernels`, `coalescence`,
   consistency, donor-clamp positivity, S=1 round-trip, factory dispatch.
 `scheme="sdm"` is selectable, strict-validated, dispatched, and driver-buildable.
 
+### Smoke / oracle-consistency validation (`scripts/validate/validate_sdm_smoke.py`)
+End-to-end ALL-PASS (stable, physically realistic, oracle-consistent):
+- **Golovin collision box vs analytic Scott (1968)** — the exact benchmark ERF /
+  Shima (2009 Fig. 4) validate against: the super-droplet **number decay matches
+  `N(t)=N0 exp(-b/ρ_w·L·t)` to 1.2-4.5%** over τ=b·L·t = 0.5..3, mass conserved to
+  1e-16. (2nd mass moment matches at moderate τ; its giant-drop tail is
+  under-sampled by a finite super-droplet count past τ~1 — a known SDM
+  convergence property, diagnostic-only there.) Running the ERF C++/AMReX oracle
+  is unnecessary: its published acceptance test IS this analytic comparison, and
+  the per-formula numerics were matched term-by-term in the unit tests.
+- **Warm-rain box (`run_box`, condensation + collision)** — rain forms
+  (q_rain 0 -> 1.27 g/kg), N 1e8 -> 1e4 /m^3, droplets 18 -> 825 um, water
+  conserved; autoconversion emerges from the resolved Long-kernel collisions.
+- **Adiabatic parcel** — realistic activation: peak supersaturation +0.44%,
+  droplets 8 -> 18.6 um, LWC 1.21 g/kg, total water conserved to ~1e-15, moist
+  adiabat. (A physical caveat learned here: pure-water droplets started
+  *subsaturated* evaporate to the radius floor where the curvature term traps
+  them — start at cloud base, or carry aerosol/solute, which real SDM does.)
+
 ### Column-adapter scope + exposure (codex iter-5)
 The stateless column path (`sdm/column.py`) does **diffusional condensation/
 evaporation only** on a mean droplet reconstructed from `q_c` + prescribed `cdnc`
-(donor-clamped, water-conserving). Collision-coalescence, sedimentation/precip,
-and aerosol activation/nucleation need a persistent droplet population → they
-live in `box_model.py` (and a future particle-state-threading interface), NOT in
-the column op. Consequently `scheme="sdm"` is registered + strict-valid but is
+(donor-clamped, water-conserving). Collision-coalescence (`coalescence.py`) and
+aerosol activation need a persistent droplet population: the composed persistent
+path is `box_model.run_box` (condensation + Shima coalescence); sedimentation/
+precip of the particles is not yet implemented. None of these run in the column
+op. Consequently `scheme="sdm"` is registered + strict-valid but is
 **intentionally not exposed in the AMIP CLI** (`scripts/run/run_amip.py` choices)
 — same treatment as `p3`/`ml_emulator` — because a condensation-only scheme is
 not a complete precipitating microphysics for a full climate run.

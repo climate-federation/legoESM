@@ -30,8 +30,11 @@ import jax.numpy as jnp
 from jax import lax
 
 from legoesm import constants
+from jax import random
+
 from legoesm.thermo import relative_humidity
 from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
+from legoesm.atmosphere.physics.microphysics.sdm.coalescence import coalescence_step
 from legoesm.atmosphere.physics.microphysics.sdm.condensation import integrate_radius
 from legoesm.atmosphere.physics.microphysics.sdm.coupling import condensation_exchange
 from legoesm.atmosphere.physics.microphysics.sdm.particles import (
@@ -152,4 +155,106 @@ def run_parcel(
         return parcel, diag
 
     final, history = lax.scan(body, parcel0, xs=None, length=n_steps)
+    return final, history
+
+
+# ==========================================================================
+# Composed persistent box: condensation + collision-coalescence
+# ==========================================================================
+class BoxState(NamedTuple):
+    """Persistent state of a well-mixed SDM box (no lift).
+
+    ``droplets.multiplicity`` is the number of real droplets represented in the
+    box (a count). ``key`` is the threaded ``jax.random`` state consumed by the
+    stochastic coalescence.
+    """
+
+    droplets: SuperDropletState
+    T: jax.Array            # temperature [K]
+    p: jax.Array            # pressure [Pa]
+    q_v: jax.Array          # vapor mixing ratio [kg/kg]
+    key: jax.Array          # PRNG key
+
+
+def box_step(
+    box: BoxState,
+    V_cell: float | jax.Array,
+    M_air: float | jax.Array,
+    dt: float | jax.Array,
+    cfg: SDMConfig,
+    do_condensation: bool = True,
+    do_coalescence: bool = True,
+) -> BoxState:
+    """One full SDM box step: condensation then collision-coalescence.
+
+    Mirrors the ERF process order (phaseChange -> coalescence) on a *persistent*
+    super-droplet population in a well-mixed box (no advection or sedimentation).
+    ``do_condensation`` / ``do_coalescence`` are static feature flags (e.g.
+    collision-only for the Golovin test).
+
+    ``M_air`` is the box's **conserved** dry-air mass [kg] (an isobaric box's
+    volume expands with latent heating, but its air mass is fixed); the liquid
+    mixing ratio is ``q_l = Σξm / M_air`` and the box air density is
+    ``ρ = M_air/V_cell``. Coalescence consumes a fresh split of ``box.key``.
+    """
+    droplets, T, p, q_v, key = box
+    dt = jnp.asarray(dt, dtype=T.dtype)
+    rho = M_air / V_cell
+
+    # 1. condensation / evaporation (latent heat + vapor exchange)
+    if do_condensation:
+        S = relative_humidity(T, p, q_v)
+        q_l_before = liquid_mixing_ratio(droplets, M_air)
+        droplets = integrate_radius(droplets, S, T, dt, cfg)
+        q_l_after = liquid_mixing_ratio(droplets, M_air)
+        q_v, T = condensation_exchange(
+            q_l_before, q_l_after, q_v, T, c_p=constants.c_pd, L_v=constants.L_v)
+
+    # 2. collision-coalescence (Shima Monte-Carlo)
+    if do_coalescence:
+        key, sub = random.split(key)
+        droplets = coalescence_step(droplets, V_cell, rho, p, T, dt, sub, cfg)
+
+    return BoxState(droplets=droplets, T=T, p=p, q_v=q_v, key=key)
+
+
+def run_box(
+    box0: BoxState,
+    V_cell: float | jax.Array,
+    dt: float | jax.Array,
+    n_steps: int,
+    cfg: SDMConfig,
+    do_condensation: bool = True,
+    do_coalescence: bool = True,
+) -> tuple[BoxState, dict]:
+    """Integrate the composed SDM box for ``n_steps`` steps (``lax.scan``).
+
+    The box's dry-air mass ``M_air = ρ_0·V_cell`` (from the initial state) is
+    held constant (isobaric box). Returns ``(final_box, history)`` with per-step
+    stacked diagnostics: total liquid mixing ratio ``q_l``, rain liquid
+    ``q_rain`` (droplets with ``R >= cfg.r_rain``), vapor ``q_v``, temperature
+    ``T``, total water ``q_t = q_v + q_l``, represented number ``N`` (Σξ), and
+    mass-weighted mean radius. ``static_argnames=("n_steps", "cfg",
+    "do_condensation", "do_coalescence")`` when wrapping in ``jax.jit``.
+    """
+    M_air = box0.p / (constants.R_d * box0.T) * V_cell   # conserved dry-air mass
+
+    def body(box, _):
+        box = box_step(box, V_cell, M_air, dt, cfg, do_condensation, do_coalescence)
+        d = box.droplets
+        m = represented_water_mass(d)                 # per-droplet ξ_i m_i
+        q_l = jnp.sum(m) / M_air
+        is_rain = d.radius >= cfg.r_rain
+        q_rain = jnp.sum(jnp.where(is_rain, m, 0.0)) / M_air
+        N = jnp.sum(d.active * d.multiplicity)
+        # mass-weighted mean radius Σ(ξ m R)/Σ(ξ m)
+        mw = m
+        mean_r = jnp.sum(mw * d.radius) / jnp.maximum(jnp.sum(mw), 1e-300)
+        diag = {
+            "q_l": q_l, "q_rain": q_rain, "q_v": box.q_v, "T": box.T,
+            "q_t": box.q_v + q_l, "N": N, "mean_radius": mean_r,
+        }
+        return box, diag
+
+    final, history = lax.scan(body, box0, xs=None, length=n_steps)
     return final, history
