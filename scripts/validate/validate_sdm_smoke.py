@@ -51,6 +51,7 @@ from legoesm.atmosphere.physics.microphysics.sdm import (
     SDMConfig,
     SuperDropletState,
     box_water,
+    exponential_water_droplets,
     liquid_mixing_ratio,
     run_box,
     run_parcel,
@@ -124,13 +125,7 @@ def run_golovin(outdir):
     # exponential initial spectrum, equal multiplicity (constant-xi SDM init)
     key = random.PRNGKey(0)
     k_init, k_run = random.split(key)
-    U = random.uniform(k_init, (n_sd,), dtype=jnp.float64)
-    x = -x0 * jnp.log(1.0 - U)
-    R0 = (x / (_FOUR_THIRDS_PI * _RHO_W)) ** (1.0 / 3.0)
-    xi0 = N0 * V / n_sd
-    droplets = SuperDropletState(
-        multiplicity=jnp.full((n_sd,), xi0),
-        radius=R0, solute_mass=jnp.zeros((n_sd,)), active=jnp.ones((n_sd,)))
+    droplets = exponential_water_droplets(k_init, n_sd, N0 * V, x0)
     box0 = BoxState(droplets=droplets, T=jnp.asarray(283.0), p=jnp.asarray(9.0e4),
                     q_v=jnp.asarray(0.0), key=k_run)
 
@@ -245,13 +240,7 @@ def run_warm_rain(outdir):
     # population has zero differential fall speed, so the hydrodynamic kernel
     # vanishes and nothing ever collides. Real clouds inherit width from
     # aerosol/activation; here we seed it directly.
-    U = random.uniform(k_init, (n_sd,), dtype=jnp.float64)
-    xmass = -x0 * jnp.log(1.0 - U)
-    R0 = (xmass / (_FOUR_THIRDS_PI * _RHO_W)) ** (1.0 / 3.0)
-    droplets = SuperDropletState(
-        multiplicity=jnp.full((n_sd,), N0 * V / n_sd),
-        radius=R0,
-        solute_mass=jnp.zeros((n_sd,)), active=jnp.ones((n_sd,)))
+    droplets = exponential_water_droplets(k_init, n_sd, N0 * V, x0)
     box0 = BoxState(droplets=droplets, T=jnp.asarray(T0), p=jnp.asarray(p0),
                     q_v=jnp.asarray(1.001 * q_sat0), key=k_run)
 

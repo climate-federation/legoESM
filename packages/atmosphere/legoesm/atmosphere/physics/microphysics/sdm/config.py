@@ -29,11 +29,14 @@ class SDMConfig(NamedTuple):
         default), ``"euler"`` (forward Euler) — both fixed-substep and
         reverse-mode differentiable — ``"rk4_adaptive"`` (the ERF
         stiffness-based explicit integrator: per-droplet ``dt = cfl/|τ|``,
-        stage-positivity step-halving, unconverged/steady exits), or ``"be"``
-        (the ERF implicit backward Euler with the same adaptive outer loop
-        and a Newton inner solve — unconditionally stable for the stiff
-        Köhler terms). The adaptive integrators are NOT reverse-mode
-        differentiable. Unknown values raise.
+        stage-positivity step-halving, unconverged/steady exits), or the
+        implicit Newton family sharing the same adaptive outer loop:
+        ``"be"`` (backward Euler), ``"cn"`` (Crank-Nicolson), ``"dirk2"``
+        (ERF dirk212, 2-stage DIRK) — unconditionally stable for the stiff
+        Köhler terms. The adaptive integrators are NOT reverse-mode
+        differentiable. Unknown values raise. This completes the ERF
+        ``SDMassChangeTIMethod`` enum (RK3BS's role is covered by the
+        stiffness-adaptive rk4).
     adaptive_cfl : float
         Stiffness CFL of the adaptive integrator: ``dt = adaptive_cfl/|τ|``
         with ``τ`` the growth-ODE Jacobian (ERF ``mass_change_cfl``).

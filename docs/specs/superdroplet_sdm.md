@@ -145,9 +145,16 @@ Iterations 1-12 complete on branch `feat/sdm-microphysics`, each codex-reviewed
   `drsq_dt_jac`, accepted-step-only cap, partial-on-cap = ERF semantics), and
   implicit `be` (ERF NewtonSolver + TI::be, unconditionally stable for stiff
   Köhler haze). Adaptive family is jit-only (not reverse-diff).
-Remaining oracle gaps (future work): ERF CN/DIRK2 integrators (trivial
-extensions of the Newton machinery), resolved-flow particle advection,
-aerosol activation/injection + multi-species, particle recycling. Validations passing:
+Follow-up branch `feat/sdm-followups` (iters 13-15, codex-clean): ERF
+constant-multiplicity initialization spectra (`init.py`: exponential-mass +
+truncated-lognormal-radius, exact erfinv; dedups the validation samplers),
+particle recycling (`recycling.py`: inactive -> fresh dry aerosol with the
+exact 1e-15 m water seed), and the CN/DIRK2 implicit integrators — the ERF
+`SDMassChangeTIMethod` enum is now COMPLETE (rk4/euler fixed-differentiable +
+rk4_adaptive/be/cn/dirk2 on one shared adaptive outer loop).
+Remaining oracle gaps (future work): resolved-flow particle advection (needs
+the Eulerian wind-field coupling architecture); the ERF 'sampled'
+importance-multiplicity initialization mode. Validations passing:
 - **Golovin box (collision)**: ensemble number decay matches analytic
   `N(t)=N0 exp(-(b/ρ_w)Lt)` to 0.36% and 2nd mass moment to 1.9%; `Σξm` conserved.
 - **Adiabatic parcel (condensation/activation)**: supersaturation peaks (~1.018)
