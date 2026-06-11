@@ -288,6 +288,15 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             )
         tke_cfg = vmix_cfg.tke
         prognostic = bool(getattr(tke_cfg, "prognostic", False))
+        # Veros metric slots (TKEConfig.veros_dz_slots): the surface-flux
+        # injection volume is Veros's surface W half-volume 0.5·dzw_top
+        # (tke.py:225) = the distance from z=0 down to the top cell centre,
+        # scaled by the z-star Jacobian like every other thickness. On a
+        # Veros u_centered coordinate -z_full_ref[0] IS 0.5·dzw_top exactly
+        # (dzw_top = 2·dzt_top - dzw[-2] = -2·zt_top, numerics.py:21).
+        dz_surface = None
+        if getattr(tke_cfg, "veros_dz_slots", False):
+            dz_surface = (-z_coord.z_full_ref[0]) * J
         if prognostic:
             # PROGNOSTIC mode (Veros enable_tke): ONE backward-Euler step per
             # model step, seeded from the carried ``tke_old``, with dt = the
@@ -321,6 +330,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J, eos_fn=eos_fn,
                 z_interface=z_coord.z_half_ref[1:-1],
                 external_source=tke_source,
+                dz_surface=dz_surface,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -340,6 +350,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             # floor (Veros enable_kappaH_profile); z_half_ref is negative
             # downward, interior interfaces drop the surface (k=0) + bottom.
             z_interface=z_coord.z_half_ref[1:-1],
+            dz_surface=dz_surface,
         )
         return tke_out.K_H, tke_out.K_M, None
 

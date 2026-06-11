@@ -142,6 +142,30 @@ ACC_TKE_CONFIG = TKEConfig(
     # convects: the buoyancy length blows up over unstable columns and K_M
     # saturates toward kappaM_max.
     n2_mode="adiabatic",
+    # Veros vertical-metric slots (the TKE metric-consistency fix,
+    # .physics-validator/accbasic_regression/): adiabatic N² over dzw (the
+    # u_centered dz_half, thermodynamics.py:99), buoyancy-length growth
+    # allowance + TKE-diffusion face gradients over dzt with dzw control
+    # volumes (tke.py:54-65,185-222), surface injection over 0.5·dzw_top
+    # (tke.py:225). Without this the chain mixes midpoint/dzw/dzt slots
+    # and — on the u_centered z-coordinate below — equilibrates onto a
+    # spurious deep-TKE branch (mean TKE ~1e-2 vs Veros's ~1e-4 class,
+    # ACC_Basic KE 0.98→0.77).
+    veros_dz_slots=True,
+    # Veros TKE positivity (tke.py:224-245): the buoyancy sink P_diss_v =
+    # kappaH·N² is EXPLICIT in forc, interior TKE may go NEGATIVE (an
+    # energy debt — Veros's 10-yr mean TKE is literally negative,
+    # -1.5e-3), and only the surface level is clamped at zero. The legacy
+    # per-step background floor erases the interior debt every step — a
+    # spurious energy injection that (with the metric slots fixed) was
+    # still feeding a ~1e-2 deep TKE reservoir on the u_centered
+    # coordinate (.physics-validator/tke_metric_fix/ re-ablation).
+    positivity="veros_surface_correction",
+    # Veros K-from-TKE amplitude (tke.py:73): kappaM = c_k·mxl·sqrt(max(0,e)).
+    # The legacy Gaspar form c_k·l_k·√(2e) double-counts the √2 already
+    # inside the Veros buoyancy length (mxl = √2·√e/√N̄) — K_M/K_H/P_s
+    # ×1.414 vs the oracle wherever the caps/floors don't bind.
+    kappa_convention="veros_sqrte",
     # Veros tracer diffusivity K_H = max(kappaH_min, K_M/Prandtl) with the
     # Richardson-dependent Prandtl number (enable_Prandtl_tke=True, the Veros
     # ACC + global default): Pr = max(1, min(10, 6.6*Ri)). In the stratified
