@@ -18,6 +18,7 @@ Public API: state_new = model.step(state, dt)
 
 from __future__ import annotations
 
+import os
 from functools import partial
 
 import jax
@@ -52,6 +53,7 @@ from legoesm.ocean.state import (
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
     interp_to_v_points,
+    interp_to_v_points_multi,
     centered_cell_to_uface,
     upwind_to_u_points,
     upwind_to_v_points,
@@ -241,6 +243,107 @@ def _compute_advection_flux_div(
     return div_hut, vert_flux_div
 
 
+# Schemes whose HORIZONTAL reconstruction is strictly level-independent
+# (elementwise limiters + lon rolls + lat pads; no cross-level coupling)
+# — the set the pair fast-path below may stack along the level axis.
+_LEVEL_SEPARABLE_H_SCHEMES = frozenset(
+    {"tvd", "superbee", "upwind", "centered"}
+)
+
+
+def _compute_advection_flux_div_pair(
+    tr_a: jnp.ndarray,
+    tr_b: jnp.ndarray,
+    tracer_advection: str,
+    mass_flux_u: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    w_baro: jnp.ndarray,
+    h_k_old: jnp.ndarray,
+    h_u_old: jnp.ndarray,
+    h_v_old: jnp.ndarray,
+    grid,
+    dt: float,
+):
+    """Advection flux divergence for TWO tracers (T, S) in one pass.
+
+    The horizontal reconstructions of the production schemes
+    (``_LEVEL_SEPARABLE_H_SCHEMES``) are level-independent, so both
+    tracers ride ONE reconstruction call on a level-axis stack
+    ``[tr_a ‖ tr_b]`` — the AL81 ``t_stack`` precedent: pure
+    relabeling, no arithmetic.  This halves the remaining per-step
+    tracer N-S exchanges (the halo=2 cell pad inside
+    ``tvd_to_v_points`` was one of the few unfused sites left, census
+    8459326) and halves the horizontal-reconstruction work.  The
+    VERTICAL flux divergence couples levels (it must not see the
+    stack seam) and is computed per tracer with the original
+    functions.  Every other scheme falls back to two single-tracer
+    calls — value-identical, no fast path.
+
+    Returns ``((div_hut_a, vert_a), (div_hut_b, vert_b))`` — each pair
+    bit-identical to ``_compute_advection_flux_div`` on that tracer
+    (identical elementwise ops applied to the same per-level values).
+    """
+    # Trace-time opt-in gate (LEGOESM_TRACER_PAIR=1 → level-stacked
+    # pair; baked into the compiled graph — flip BEFORE first compile).
+    # DEFAULT OFF: the stack halves pad count + reconstruction calls
+    # but DOUBLES the reconstruction intermediates, and the same-node
+    # A/B (job 8460192) measured np=1 −3% and LL128-np8 −17% with no
+    # multi-rank win — the vmix field-batching lesson a third time
+    # (stacking ADDS bandwidth where the phase is bandwidth-bound).
+    # Kept opt-in: bit-identical (tests/ocean/unit/
+    # test_tracer_pair_advection.py) and the trade may flip on GPU.
+    if (
+        tracer_advection not in _LEVEL_SEPARABLE_H_SCHEMES
+        or os.environ.get("LEGOESM_TRACER_PAIR", "0") != "1"
+    ):
+        return (
+            _compute_advection_flux_div(
+                tr_a, tracer_advection, mass_flux_u, mass_flux_v,
+                w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
+            ),
+            _compute_advection_flux_div(
+                tr_b, tracer_advection, mass_flux_u, mass_flux_v,
+                w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
+            ),
+        )
+
+    nlev = tr_a.shape[-1]
+    trs = jnp.concatenate([tr_a, tr_b], axis=-1)
+    mfu2 = jnp.concatenate([mass_flux_u, mass_flux_u], axis=-1)
+    mfv2 = jnp.concatenate([mass_flux_v, mass_flux_v], axis=-1)
+
+    if tracer_advection in ("tvd", "superbee"):
+        from legoesm.ocean.dynamics._flux_limiters import resolve_tvd_limiter
+        limiter_fn = resolve_tvd_limiter(tracer_advection)
+        tr_u2 = tvd_to_u_points(trs, mfu2, limiter_fn=limiter_fn)
+        tr_v2 = tvd_to_v_points(trs, mfv2, grid=grid, limiter_fn=limiter_fn)
+    elif tracer_advection == "upwind":
+        tr_u2 = upwind_to_u_points(trs, mfu2)
+        tr_v2 = upwind_to_v_points(trs, mfv2, grid=grid)
+    else:  # "centered"
+        tr_u2 = centered_cell_to_uface(trs)
+        tr_v2 = interp_to_v_points(trs, grid)
+
+    div2 = divergence_cgrid(mfu2 * tr_u2, mfv2 * tr_v2, grid)
+    div_a, div_b = div2[..., :nlev], div2[..., nlev:]
+
+    if tracer_advection in ("tvd", "superbee"):
+        from legoesm.ocean.dynamics._flux_limiters import resolve_tvd_limiter
+        _lim = resolve_tvd_limiter(tracer_advection)
+        vert_a = flux_form_vertical_tracer_advection_tvd(
+            tr_a, w_baro, h_k_old, dt, limiter_fn=_lim)
+        vert_b = flux_form_vertical_tracer_advection_tvd(
+            tr_b, w_baro, h_k_old, dt, limiter_fn=_lim)
+    elif tracer_advection == "upwind":
+        vert_a = flux_form_vertical_tracer_advection(tr_a, w_baro)
+        vert_b = flux_form_vertical_tracer_advection(tr_b, w_baro)
+    else:  # "centered"
+        vert_a = flux_form_vertical_tracer_advection_centered(tr_a, w_baro)
+        vert_b = flux_form_vertical_tracer_advection_centered(tr_b, w_baro)
+
+    return (div_a, vert_a), (div_b, vert_b)
+
+
 def _ssp_rk3_tracer_step(
     tr: jnp.ndarray,
     tracer_advection: str,
@@ -309,6 +412,68 @@ def _ssp_rk3_tracer_step(
     tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
 
     return tr_new
+
+
+def _ssp_rk3_tracer_pair_step(
+    tr_a: jnp.ndarray,
+    tr_b: jnp.ndarray,
+    tracer_advection: str,
+    mass_flux_u: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    w_baro: jnp.ndarray,
+    h_k_old: jnp.ndarray,
+    h_k_new: jnp.ndarray,
+    h_u_old: jnp.ndarray,
+    h_v_old: jnp.ndarray,
+    grid,
+    dt: float,
+    active_3d: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """RK3 tracer step for the (T, S) pair — one fused flux-div per stage.
+
+    Per-tracer arithmetic is kept statement-identical to
+    :func:`_ssp_rk3_tracer_step`; the only change is that each stage's
+    two flux divergences come from ONE
+    :func:`_compute_advection_flux_div_pair` call (3 fused horizontal
+    reconstructions + pads per step instead of 6).
+    """
+
+    def _flux_div_pair(a_val, b_val):
+        (dh_a, dv_a), (dh_b, dv_b) = _compute_advection_flux_div_pair(
+            a_val, b_val, tracer_advection, mass_flux_u, mass_flux_v,
+            w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
+        )
+        return dh_a + dv_a, dh_b + dv_b
+
+    h_safe = jnp.maximum(h_k_old, 1e-10)
+
+    # Stage 1
+    fd0_a, fd0_b = _flux_div_pair(tr_a, tr_b)
+    a1 = (h_k_old * tr_a - dt * fd0_a) / h_safe
+    a1 = jnp.where(active_3d > 0.5, a1, tr_a)
+    b1 = (h_k_old * tr_b - dt * fd0_b) / h_safe
+    b1 = jnp.where(active_3d > 0.5, b1, tr_b)
+
+    # Stage 2
+    fd1_a, fd1_b = _flux_div_pair(a1, b1)
+    a1_adv = (h_k_old * a1 - dt * fd1_a) / h_safe
+    a1_adv = jnp.where(active_3d > 0.5, a1_adv, tr_a)
+    a2 = 0.75 * tr_a + 0.25 * a1_adv
+    b1_adv = (h_k_old * b1 - dt * fd1_b) / h_safe
+    b1_adv = jnp.where(active_3d > 0.5, b1_adv, tr_b)
+    b2 = 0.75 * tr_b + 0.25 * b1_adv
+
+    # Stage 3 — conservative final update via effective flux
+    fd2_a, fd2_b = _flux_div_pair(a2, b2)
+    h_new_safe = jnp.maximum(h_k_new, 1e-10)
+    F_eff_a = (1.0 / 6.0) * fd0_a + (1.0 / 6.0) * fd1_a + (2.0 / 3.0) * fd2_a
+    a_new = (h_k_old * tr_a - dt * F_eff_a) / h_new_safe
+    a_new = jnp.where(active_3d > 0.5, a_new, tr_a)
+    F_eff_b = (1.0 / 6.0) * fd0_b + (1.0 / 6.0) * fd1_b + (2.0 / 3.0) * fd2_b
+    b_new = (h_k_old * tr_b - dt * F_eff_b) / h_new_safe
+    b_new = jnp.where(active_3d > 0.5, b_new, tr_b)
+
+    return a_new, b_new
 
 
 def _forward_backward_coriolis_3d(
@@ -1530,23 +1695,35 @@ class LatLonCGridOceanModel:
                         dims=_dims_fd, units="m/s"),
                 )
 
+            # T+S pair fast path: ONE fused horizontal reconstruction +
+            # N-S pad per stage for both tracers (level-axis stack; see
+            # _compute_advection_flux_div_pair).  Bit-identical to the
+            # historical per-tracer calls; non-separable schemes fall
+            # back to two single-tracer calls inside the pair helpers.
+            if _tti == "rk3":
+                T_corrected, S_corrected = _ssp_rk3_tracer_pair_step(
+                    T_mid, S_mid, _adv,
+                    mass_flux_u, mass_flux_v, w_baro,
+                    h_k_old, h_k_new, h_u_old, h_v_old,
+                    self.grid, dt, active_3d,
+                )
+                _pair_divs = (None, None)
+            else:
+                _pair_divs = _compute_advection_flux_div_pair(
+                    T_mid, S_mid, _adv,
+                    mass_flux_u, mass_flux_v, w_baro,
+                    h_k_old, h_u_old, h_v_old, self.grid, dt,
+                )
+
             for tr_name in ['T', 'S']:
                 tr = T_mid if tr_name == 'T' else S_mid
 
                 if _tti == "rk3":
-                    # RK3: 3 sub-stages, 3x cost, 3rd-order temporal
-                    tr_new = _ssp_rk3_tracer_step(
-                        tr, _adv,
-                        mass_flux_u, mass_flux_v, w_baro,
-                        h_k_old, h_k_new, h_u_old, h_v_old,
-                        self.grid, dt, active_3d,
-                    )
+                    # Computed by the pair step above.
+                    continue
                 else:
-                    # Compute flux divergence (single evaluation for Euler/AB2)
-                    div_hut, vert_flux_div = _compute_advection_flux_div(
-                        tr, _adv,
-                        mass_flux_u, mass_flux_v, w_baro,
-                        h_k_old, h_u_old, h_v_old, self.grid, dt,
+                    div_hut, vert_flux_div = (
+                        _pair_divs[0] if tr_name == 'T' else _pair_divs[1]
                     )
                     total_flux_div = div_hut + vert_flux_div
 
@@ -1952,7 +2129,7 @@ class LatLonCGridOceanModel:
         if dt_mom is None:
             dt_mom = dt
         from legoesm.ocean.physics.vertical_mixing import (
-            implicit_vertical_diffusion_ocean, build_dz_half,
+            implicit_vertical_diffusion_ocean_batched, build_dz_half,
             compute_vertical_K_profiles,
         )
         from legoesm.ocean.vertical import compute_ocean_jacobian
@@ -2034,35 +2211,94 @@ class LatLonCGridOceanModel:
             _dS_surf = surface_tracer_forcing.dS_dt.data.astype(state.S.data.dtype)
             T_solve_in = state.T.data + dt * _dT_surf * mask_3d
             S_solve_in = state.S.data + dt * _dS_surf * mask_3d
-        T_new = implicit_vertical_diffusion_ocean(
-            T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
-        )
-        S_new = implicit_vertical_diffusion_ocean(
-            S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
-        )
-        T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
-        S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
 
-        # ---- Momentum (u at u-faces, v at v-faces) ----
+        # ---- Momentum coefficient inputs (u at u-faces, v at v-faces) ----
         # Interpolate A_v and dz from cell centers to face centers.  The
         # solver only needs dz to be positive (it clips internally) and
         # the resulting tridiagonal system is well-posed on any column
         # with at least two wet levels.
         A_v_cell = A_v_cell.astype(state.u.data.dtype)
         A_v_u = interp_cell_to_uface(A_v_cell)            # (n_lat, n_lon+1, nlev-1)
-        A_v_v = interp_to_v_points(A_v_cell)             # (n_lat+1, n_lon, nlev-1)
         dz_u = interp_cell_to_uface(dz_cell)
-        dz_v = interp_to_v_points(dz_cell)
+        # Fused v-interps: one sendrecv pair per cut for A_v + dz
+        # (audit lever O4; both are independent cell fields here).
+        A_v_v, dz_v = interp_to_v_points_multi((A_v_cell, dz_cell))
         dz_half_u = build_dz_half(dz_u)
         dz_half_v = build_dz_half(dz_v)
         u_mask_3d = state.u_mask.data[..., jnp.newaxis]
         v_mask_3d = state.v_mask.data[..., jnp.newaxis]
-        u_new = implicit_vertical_diffusion_ocean(
-            state.u.data, A_v_u, dz_u, dz_half_u, dt_mom,
-        )
-        v_new = implicit_vertical_diffusion_ocean(
-            state.v.data, A_v_v, dz_v, dz_half_v, dt_mom,
-        )
+
+        # ---- FIELD-BATCHED backward-Euler solve (T, S, u, v in ONE call) ----
+        # The four systems are independent (no cross-field coupling) but share
+        # nlev on the last axis, so they batch into a single thomas_solve_batched
+        # — collapsing 8 serialised while-loops (4 fields × fwd+bwd sweep) into 2
+        # on CPU (and the while-loop-free PCR/cuSPARSE path on CUDA).  Each
+        # field keeps its OWN coefficients exactly as the prior 4 separate solves:
+        # T, S use the tracer diffusivity K_v_cell + tracer dt; u, v use the
+        # face-interpolated viscosity A_v_u/A_v_v + momentum dt_mom.  The
+        # per-field coefficient build is byte-identical to
+        # implicit_vertical_diffusion_ocean (shared _build_implicit_tridiag), so
+        # the batched result equals the 4-separate result to f64 roundoff.
+        vmix_systems = [
+            (T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt),
+            (S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt),
+            (state.u.data, A_v_u, dz_u, dz_half_u, dt_mom),
+            (state.v.data, A_v_v, dz_v, dz_half_v, dt_mom),
+        ]
+        # A/B + opt-in toggle (static, read once at trace time — a Python `if`
+        # on a static bool per the feature-gating exception, NOT jnp.where).
+        # DEFAULT = OFF (the 4-separate solve).  Measured A/B (jobs 8459136 CPU
+        # / 8459145 GPU, 2026-06-10): the field-batched solve HELPS at LL128
+        # (+16% CPU / +8% GPU on the vmix phase) but REGRESSES at the
+        # production-relevant LL192 (-15% CPU / -14% GPU) on BOTH backends —
+        # the implicit vmix is MEMORY-bandwidth-bound, so batching's extra
+        # intermediate-array traffic (vmap batch on CPU, PCR levels on GPU)
+        # dominates its dispatch saving at scale.  The batched path is
+        # bit-faithful + conservation-correct (tests/ocean/unit/
+        # test_implicit_vmix_batched.py), so it stays available as an opt-in
+        # (LEGOESM_VMIX_BATCHED=1) for small-grid / future-solver use, but is
+        # NOT the default.  The env var is read at TRACE time and baked into
+        # the compiled graph — flip it BEFORE the first compile (a fresh
+        # process), NOT after warmup.
+        if os.environ.get("LEGOESM_VMIX_BATCHED", "0") == "1":
+            T_new, S_new, u_new, v_new = (
+                implicit_vertical_diffusion_ocean_batched(vmix_systems)
+            )
+        else:
+            from legoesm.ocean.physics.vertical_mixing import (
+                implicit_vertical_diffusion_ocean,
+                implicit_vertical_diffusion_ocean_pair,
+            )
+            # T and S share the IDENTICAL tridiagonal matrix (same
+            # K_v_cell incl. any K33_iso fold, same dz/dz_half/dt), so
+            # the pair solve factors it ONCE — bit-identical outputs,
+            # one fewer coefficient build + forward-factor sweep (the
+            # vmix is memory-bandwidth-bound; this REMOVES traffic
+            # where field-batching ADDED it).  A/B kill-switch:
+            # LEGOESM_VMIX_TSPAIR=0 restores the two separate solves.
+            # Trace-time switch (same caveat as LEGOESM_VMIX_BATCHED):
+            # baked into the compiled graph — flip it BEFORE the first
+            # compile (a fresh process), NOT after warmup.
+            if os.environ.get("LEGOESM_VMIX_TSPAIR", "1") != "0":
+                T_new, S_new = implicit_vertical_diffusion_ocean_pair(
+                    T_solve_in, S_solve_in,
+                    K_v_cell, dz_cell, dz_half_cell, dt,
+                )
+            else:
+                T_new = implicit_vertical_diffusion_ocean(
+                    T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
+                )
+                S_new = implicit_vertical_diffusion_ocean(
+                    S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
+                )
+            u_new = implicit_vertical_diffusion_ocean(
+                state.u.data, A_v_u, dz_u, dz_half_u, dt_mom,
+            )
+            v_new = implicit_vertical_diffusion_ocean(
+                state.v.data, A_v_v, dz_v, dz_half_v, dt_mom,
+            )
+        T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
+        S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
         u_new = jnp.where(u_mask_3d > 0.5, u_new, state.u.data)
         v_new = jnp.where(v_mask_3d > 0.5, v_new, state.v.data)
 

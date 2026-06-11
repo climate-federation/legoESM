@@ -295,6 +295,13 @@ class TestMassConservation:
         initial_mass = jnp.sum(global_state.p_s.data * mesh.areaCell)
 
         if rank == 0:
+            # rtol floor: ``global_mass`` is a rank-partitioned
+            # allreduce while ``initial_mass`` is a serial jnp.sum —
+            # different summation ORDERS, so 1e-12 agreement is not
+            # achievable.  Observed floor 7.5e-9 at total mass ~5e19
+            # (ssp_rk3, np=2); pre-existing at HEAD, NOT a halo-batching
+            # regression (bisect job 8456934, 2026-06-10).  3e-8 = 4x
+            # margin; a real conservation bug sits orders above.
             np.testing.assert_allclose(
-                float(global_mass), float(initial_mass), rtol=1e-12,
+                float(global_mass), float(initial_mass), rtol=3e-8,
                 err_msg="Mass not conserved under MPI")

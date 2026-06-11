@@ -160,6 +160,19 @@ class MPASOceanModel:
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {self.config.barotropic_solver!r}"
             )
+        # Reserved distributed-PCG knobs (single-rank stock CG today; see
+        # barotropic_implicit_mpas.py Step-4 TODO).  Validate so the
+        # schema stays consistent with the lat-lon path.
+        if self.config.barotropic_implicit_pcg_fixed_iters < 1:
+            raise ValueError(
+                "barotropic_implicit_pcg_fixed_iters must be >= 1; got "
+                f"{self.config.barotropic_implicit_pcg_fixed_iters!r}"
+            )
+        if self.config.barotropic_implicit_pcg_residual_tol <= 0.0:
+            raise ValueError(
+                "barotropic_implicit_pcg_residual_tol must be > 0; got "
+                f"{self.config.barotropic_implicit_pcg_residual_tol!r}"
+            )
 
         # Precompute upwind-of-upwind cell indices for TVD advection.
         # This is a one-time mesh topology operation stored as static data.
@@ -597,6 +610,33 @@ class MPASOceanModel:
             # scheme.  Eliminates the TRiSK rotational null branch
             # (Thuburn 2008; Ringler+ 2010 §6) that monotonically grows
             # in the explicit_substep run on global ico4 (#214).
+            #
+            # FAIL-FAST under MPI: MPAS implicit_cn is SINGLE-RANK only
+            # (stock CG).  Unlike the lat-lon C-grid, the Voronoi
+            # barotropic A_op does no halo exchange and its reductions
+            # would double-count ghost cells, so a multi-rank run would
+            # SILENTLY produce a stale-ghost / rank-local-mass solve.
+            # Refuse it explicitly until the distributed Voronoi PCG lands
+            # (barotropic_implicit_mpas.py Step-4 TODO).
+            # ``is_multi_process()`` alone MISSES the Voronoi MPI path
+            # (it builds a partition layout without arming the global
+            # halo backend — codex 2026-06-11 CRITICAL); the world-size
+            # check trips on any real ``mpirun -np N`` launch.
+            from legoesm.parallel.reductions import (
+                is_multi_process,
+                mpi_world_size,
+            )
+            if is_multi_process() or mpi_world_size() > 1:
+                raise NotImplementedError(
+                    "barotropic_solver='implicit_cn' is single-rank only on "
+                    "MPAS: the Voronoi barotropic A_op lacks halo exchange "
+                    "and the reductions would double-count ghost cells under "
+                    "MPI, silently corrupting the solve.  Use "
+                    "'explicit_substep' for multi-rank MPAS, or the lat-lon "
+                    "C-grid (which HAS the distributed PCG).  See "
+                    "barotropic_implicit_mpas.py Step-4 "
+                    "TODO(distributed-mpas-pcg)."
+                )
             eta_new, u_bar_new, Hu_avg = barotropic_implicit_mpas(
                 state_for_baro, mesh, z_coord, config, dt,
                 F_slow_eta=F_slow_eta,
@@ -795,6 +835,18 @@ class MPASOceanModel:
             # Globally sum the locally-masked expected forcing so the
             # comparison against the globally-summed ``heat_old`` /
             # ``salt_old`` inside the fixer is consistent.
+            # TODO(voronoi-mpi-conservation): ``is_multi_process()`` is
+            # False on the Voronoi MPI path (partition layout, halo
+            # backend never armed), so a distributed MPAS run takes the
+            # rank-LOCAL branch and fixes against a rank-local mass
+            # target.  Not switched to a world-size predicate here
+            # because this is a silent dispatch (an mpirun ensemble of
+            # independent serial members would then allreduce across
+            # members and corrupt them); needs a layout-aware signal
+            # threaded from the driver instead.  REACHABLE today via a
+            # distributed explicit_substep MPAS run with the fixer on —
+            # pre-existing, tracked for the distributed-MPAS milestone
+            # alongside TODO(distributed-mpas-pcg).
             from legoesm.parallel.reductions import is_multi_process
             if is_multi_process():
                 from legoesm.parallel.reductions import global_sum_mpi

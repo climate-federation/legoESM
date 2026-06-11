@@ -182,14 +182,32 @@ def _make_sendrecv_vjp(mpi4jax_mod):
                 sendtag=sendtag, recvtag=recvtag, comm=comm,
             )
         )
-        return result, ()
+        # Save the send buffer as residual: the BACKWARD recv template must
+        # be SEND-shaped (the returned cotangent d_send pairs with send_buf).
+        # Cubed-sphere strips have send.shape == recv.shape so zeros_like(g)
+        # used to work by accident; Voronoi per-neighbor send/recv counts
+        # generally DIFFER, which would mis-shape the backward message and
+        # the returned cotangent.  Bit-identical for equal-shape callers.
+        #
+        # NOTE: a metadata-only residual (shape, dtype) to avoid retaining the
+        # send activation (codex integration review 2026-06-10, MINOR) was
+        # tried and REVERTED — both numpy-dtype-object and dtype-name-str
+        # forms hit "not a valid JAX type" in the backward zeros/sendrecv on
+        # this jax/mpi4jax stack.  Correctness of this shared AD primitive
+        # outranks the memory micro-opt; revisit with an on-device-verified
+        # ShapeDtypeStruct idiom, not a login-node guess.
+        return result, (send_buf,)
 
-    def _bwd(source, dest, sendtag, recvtag, comm, _res, g):
+    def _bwd(source, dest, sendtag, recvtag, comm, res, g):
         # bwd receives nondiff args first, then residuals, then cotangent.
         # Reverse: swap source<->dest so cotangent flows back to sender.
+        # ``g`` is RECV-shaped (cotangent of the output); the message we
+        # receive back carries the peer's cotangent for OUR send_buf, so
+        # the template must be SEND-shaped.
+        (send_buf,) = res
         d_send = mpi4jax_array_result(
             mpi4jax_mod.sendrecv(
-                g, jnp.zeros_like(g),
+                g, jnp.zeros_like(send_buf),
                 source=dest, dest=source,
                 sendtag=sendtag, recvtag=recvtag, comm=comm,
             )

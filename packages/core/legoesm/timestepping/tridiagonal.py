@@ -273,6 +273,108 @@ def pcr_solve_batched(
     return x
 
 
+def thomas_solve_shared(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    ds: "tuple[jax.Array, ...]",
+) -> "tuple[jax.Array, ...]":
+    """Thomas solve with ONE factorization and SEVERAL right-hand sides.
+
+    All ``ds`` share the same tridiagonal matrix ``(a, b, c)`` — the
+    forward-elimination factors (``denom``, ``c_star``) are computed
+    ONCE and reused for every RHS, instead of once per
+    :func:`thomas_solve` call.  The arithmetic per RHS is kept
+    operation-for-operation identical to :func:`thomas_solve` (same
+    ``_TINY`` clamps, same loop order, same dtype promotion when all
+    RHS share a dtype), so each returned solution is BIT-IDENTICAL to
+    the corresponding single-RHS call.  Use case: the ocean implicit
+    vertical mixing solves T and S against the same diffusivity matrix
+    (vmix is memory-bandwidth-bound — building/sweeping the
+    coefficients once is the saving; jobs 8458934/8459136).
+
+    Falls back to per-RHS :func:`thomas_solve` when the RHS dtypes
+    differ (a shared work dtype would change the promotion of the
+    narrower field and break bit-faithfulness).
+
+    Parameters
+    ----------
+    a, b, c : jax.Array, shape (..., n)
+        Shared tridiagonal coefficients (conventions of
+        :func:`thomas_solve`).
+    ds : tuple of jax.Array, each shape (..., n)
+        Right-hand sides.
+
+    Returns
+    -------
+    tuple of jax.Array — solutions, in input order, each in its RHS
+    dtype.
+    """
+    ds = tuple(ds)
+    if not ds:
+        return ()
+    if len(ds) == 1 or len({d.dtype for d in ds}) != 1:
+        return tuple(thomas_solve(a, b, c, d) for d in ds)
+
+    n = b.shape[-1]
+    out_dtype = ds[0].dtype
+    work_dtype = jnp.result_type(a, b, c, ds[0])
+    a = jnp.asarray(a, work_dtype)
+    b = jnp.asarray(b, work_dtype)
+    c = jnp.asarray(c, work_dtype)
+    ds = tuple(jnp.asarray(d, work_dtype) for d in ds)
+
+    c0_star = c[..., 0] / (b[..., 0] + _TINY)
+    c_star = jnp.zeros_like(c)
+    c_star = c_star.at[..., 0].set(c0_star)
+    d_stars = tuple(
+        jnp.zeros_like(d).at[..., 0].set(d[..., 0] / (b[..., 0] + _TINY))
+        for d in ds
+    )
+
+    def forward_body(k, carry):
+        c_star_c, d_stars_c = carry
+        ak = a[..., k]
+        bk = b[..., k]
+        ck = c[..., k]
+        c_prev = c_star_c[..., k - 1]
+
+        denom = bk - ak * c_prev
+        denom = jnp.where(jnp.abs(denom) < _TINY, _TINY, denom)
+
+        c_star_c = c_star_c.at[..., k].set(ck / denom)
+        d_stars_c = tuple(
+            d_star_c.at[..., k].set(
+                (d[..., k] - ak * d_star_c[..., k - 1]) / denom
+            )
+            for d, d_star_c in zip(ds, d_stars_c)
+        )
+        return (c_star_c, d_stars_c)
+
+    c_star, d_stars = jax.lax.fori_loop(
+        1, n, forward_body, (c_star, d_stars),
+    )
+
+    xs = tuple(
+        jnp.zeros_like(d).at[..., -1].set(d_star[..., -1])
+        for d, d_star in zip(ds, d_stars)
+    )
+
+    def backward_body(k_rev, xs_c):
+        k = n - 2 - k_rev
+        return tuple(
+            x_c.at[..., k].set(
+                d_star[..., k] - c_star[..., k] * x_c[..., k + 1]
+            )
+            for x_c, d_star in zip(xs_c, d_stars)
+        )
+
+    xs = jax.lax.fori_loop(0, n - 1, backward_body, xs)
+    return tuple(
+        jax.lax.convert_element_type(x, out_dtype) for x in xs
+    )
+
+
 def thomas_solve_batched(
     a: jax.Array,
     b: jax.Array,

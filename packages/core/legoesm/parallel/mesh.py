@@ -14,7 +14,8 @@ Supports three sharding strategies:
    devices for lat-lon grids.
 
 4. **Level sharding** (spectral): distribute vertical levels across devices
-   for embarrassingly parallel SH transforms.
+   for level-tiled SH transforms (memory scaffolding; spectral scales as
+   single-device — see ``create_cubed_sphere_level_mesh`` docstring).
 
 For multi-node MPI, see :mod:`legoesm.parallel.distributed`.
 """
@@ -557,7 +558,17 @@ def create_level_mesh(
     """Create a JAX device mesh for level-parallel spectral computation.
 
     Distributes vertical levels across devices.  Each level's SH transform
-    is independent, making this embarrassingly parallel.
+    is independent in principle, but this path is NOT wired for real
+    distributed throughput today: the SH transforms (``sh_analysis_3d`` /
+    ``sh_synthesis_3d``) batch/chunk the level axis for MEMORY only and emit
+    no per-shard collectives, ``DeviceConfig.is_distributed`` is hardcoded
+    ``False`` here, and the semi-implicit spectral solve couples vertical
+    levels (an ``(nlev, nlev)`` matrix per wavenumber) so true level
+    sharding would force a level all-gather.  Spectral therefore scales as
+    single-device (``_valid_gpu_counts`` returns ``[1]`` in the scaling
+    bench) — a genuine cliff, not a missing-flag.  Treat this mesh as
+    memory-tiling scaffolding pending a real latitude-decomposed Legendre
+    transform.
 
     Parameters
     ----------

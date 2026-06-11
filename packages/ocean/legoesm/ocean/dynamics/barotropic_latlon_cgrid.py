@@ -27,9 +27,9 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     fold_vface_row,
     gradient_x_cgrid,
     gradient_y_cgrid,
+    interp_u_to_vface_4pt,
     min_cell_to_uface,
     min_cell_to_vface,
-    pad_ns_vector_u,
     pad_ns_zero,
 )
 from legoesm.grids.halo_latlon import zero_polar_lat_ends as _zero_polar_lat_ends
@@ -355,11 +355,14 @@ def barotropic_substeps_latlon_cgrid(
             f_u * V_at_u - g * deta_dx + F_slow_u
         )) * u_mask
 
-        U_new_at_v_interior = 0.25 * (
-            U_bar_new[:-1, :-1] + U_bar_new[:-1, 1:]
-            + U_bar_new[1:, :-1] + U_bar_new[1:, 1:]
-        )
-        U_new_at_v = pad_ns_vector_u(U_new_at_v_interior, grid)
+        # U averaged to v-points for the backward Coriolis half-step,
+        # cell-pad-first (shared interp_u_to_vface_4pt): the partition-
+        # cut v-face uses the exact serial 4-point average instead of
+        # the neighbour's adjacent FACE row (one row off — the old
+        # interior-then-pad_ns_vector_u pattern).  Serial bit-identical;
+        # one cell pad per substep replaces one face pad per substep
+        # (same collective count on every rank).
+        U_new_at_v = interp_u_to_vface_4pt(U_bar_new, grid)
         V_bar_new = (V_bar_c + dt_s * (
             -f_v * U_new_at_v - g * deta_dy + F_slow_v
         )) * v_mask

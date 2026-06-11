@@ -287,6 +287,28 @@ def is_multi_process() -> bool:
     return is_distributed()
 
 
+def mpi_world_size() -> int:
+    """``MPI_COMM_WORLD`` size if mpi4py is importable, else 1.
+
+    Host-level Python (trace-safe, no JAX ops).  Complements
+    :func:`is_multi_process` for FAIL-FAST guards: the Voronoi/MPAS MPI
+    path builds a partition layout WITHOUT arming the global halo
+    backend, so ``is_distributed()`` stays False there and a guard
+    keyed on :func:`is_multi_process` alone never fires (codex review
+    2026-06-11 CRITICAL — the MPAS implicit_cn refusal was unreachable
+    in exactly the ``mpirun -np N`` scenario it targeted).  A guard
+    using ``is_multi_process() or mpi_world_size() > 1`` trips on any
+    real multi-rank launch.  Caveat: an ``mpirun`` ensemble of
+    INDEPENDENT serial members also trips such guards — that pattern
+    is not used in this repo (ensembles batch via vmap).
+    """
+    try:
+        from mpi4py import MPI
+    except ImportError:
+        return 1
+    return int(MPI.COMM_WORLD.Get_size())
+
+
 def global_sum_if_distributed(local_value: jax.Array) -> jax.Array:
     """Global SUM across processes when distributed, else identity.
 

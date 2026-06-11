@@ -213,6 +213,8 @@ def barotropic_implicit_mpas(
     dt: float,
     F_slow_eta=None,
     F_slow_u=None,
+    *,
+    return_residual: bool = False,
 ):
     """Single-step implicit free-surface solver (MPAS Voronoi C-grid).
 
@@ -238,7 +240,33 @@ def barotropic_implicit_mpas(
         Time-averaged depth-integrated edge transport, used by the
         tracer-flux step in :class:`MPASOceanModel` (matches the
         :func:`barotropic_substeps_mpas` interface).
+
+    When ``return_residual=True`` (static; default ``False``) a fourth
+    value ``rel_residual`` is appended — the (rank-local) relative
+    Helmholtz residual diagnostic of the stock-CG solve.  MPAS runs stock
+    CG only (single-rank; the distributed PCG is deferred — see the
+    Step-4 note), so this residual is NOT a global reduction.  Log /
+    assert it OUTSIDE the JIT; never branch the compiled step on it.
     """
+    # FAIL-FAST at ENTRY, before any state-derived JAX work (codex
+    # 2026-06-11 MINOR: the previous placement built the predictor/RHS
+    # first).  Predicate (codex CRITICAL): ``is_distributed()`` alone
+    # NEVER fires on the Voronoi MPI path — it checks the global halo
+    # backend, which ``initialize_voronoi_mpi`` does not arm; the
+    # mpi4py world size trips on any real multi-rank launch.  This
+    # solver would otherwise run a SILENT rank-local stock CG + a
+    # rank-local mass projection (see TODO(distributed-mpas-pcg)).
+    from legoesm.core.operators import is_distributed as _is_distributed
+    from legoesm.parallel.reductions import mpi_world_size as _world
+    if _is_distributed() or _world() > 1:
+        raise NotImplementedError(
+            "MPAS barotropic_solver='implicit_cn' is single-rank only: "
+            "the stock-CG solve and its mass projection are rank-local "
+            "and would silently diverge under MPI.  Use "
+            "barotropic_solver='explicit_substep' for distributed MPAS "
+            "runs (see TODO(distributed-mpas-pcg) in "
+            "barotropic_implicit_mpas.py)."
+        )
     g = jnp.asarray(config.g)
     mask = state.land_mask.data
     H_bathy = state.H_bathy.data
@@ -332,6 +360,38 @@ def barotropic_implicit_mpas(
     ) * mask
 
     # ----- Step 4: PCG solve --------------------------------------------
+    # MPAS stays on stock ``jax.scipy`` CG (single-rank only).  The
+    # distributed fixed-iteration PCG that the lat-lon C-grid solver uses
+    # (``barotropic_common.solve_helmholtz_implicit``) is NOT yet wired up
+    # for MPAS because the Voronoi barotropic path lacks the two pieces a
+    # multi-rank iterated solve needs, and adding them is real
+    # infrastructure rather than a shared-helper reuse:
+    #
+    #   1. Halo-in-matvec.  ``A_op`` -> ``gradient_edge(phi_cell)`` only
+    #      indexes ``phi_cell[cellsOnEdge]`` locally; it does NOT exchange
+    #      ghost-cell values.  The explicit substep loop has no halo
+    #      exchange either.  In a fixed-iteration PCG ``p``/``eta`` change
+    #      every iteration, so the ghost cells would go stale after the
+    #      first matvec.  A correct distributed MPAS PCG must call a
+    #      Voronoi cell halo-exchange inside ``A_op`` before
+    #      ``fill_land_cells_mpas``/``gradient_edge``.
+    #   2. Owned-cell reductions.  Voronoi local meshes hold owned + halo
+    #      cells (``voronoi_mpi.make_voronoi_partition_layout`` exposes
+    #      ``owned_mask_cells``).  PCG dot products, the residual, and the
+    #      mass projection would double-count ghost cells unless every
+    #      global SUM is masked to owned cells.
+    #
+    # The lat-lon C-grid band decomposition has neither problem (its
+    # ``A_op`` pre-pads through the backend-dispatched halo, and cell rows
+    # partition without overlap so there are no ghost cells in the
+    # reduction).  Distributing the MPAS PCG is therefore deferred —
+    # TODO(distributed-mpas-pcg): thread a Voronoi cell-halo exchange into
+    # ``A_op`` and an ``owned_cell_mask`` into ``solve_helmholtz_implicit``
+    # /``_global_dot_batch``, then mirror the lat-lon dispatch here.  The
+    # MPAS ocean MPI path is currently forward-only for AD
+    # (``voronoi_mpi.py``), so implicit_cn under MPI is unsupported until
+    # then; single-rank stock CG is unchanged and fully differentiable.
+    # (np>1 refusal is at function ENTRY — see top of this function.)
     A_op = _make_helmholtz(H_e_old, coeff, mesh, mask, edge_mask)
     M_inv = _make_diag_preconditioner(H_e_old, coeff, mesh, mask, edge_mask)
 
@@ -343,19 +403,44 @@ def barotropic_implicit_mpas(
         A_op, rhs, x0=eta_old, tol=pcg_tol, maxiter=pcg_maxiter, M=M_inv,
     )
     eta_new = eta_new * mask
-
-    # Global mass conservation correction (same as lat-lon solver).
+    # Single-rank only (see Step-4 note): the area-weighted sums are
+    # rank-local, which is exact because there is exactly one rank.  When
+    # distributed MPAS lands, these must become owned-cell-masked global
+    # SUMs (NOT a bare ``batch_allreduce_mpi``, which would double-count
+    # halo cells).  Accumulate in ``ocean_diagnostics`` precision so the
+    # huge-area ``target - actual`` cancellation survives in f32.
+    from legoesm.core.precision import cast as _cast
+    _M = "ocean_diagnostics"
     _area_cell = mesh.areaCell.astype(eta_dtype)
-    _ocean_area = jnp.sum(_area_cell * mask)
-    _target_mass = jnp.sum(rhs * _area_cell)
-    _actual_mass = jnp.sum(eta_new * _area_cell)
+    _area_acc = _cast(_area_cell, _M, "accumulate")
+    _wa = _area_acc * _cast(mask, _M, "accumulate")
+    _ocean_area = jnp.sum(_wa)
+    _target_mass = jnp.sum(_cast(rhs, _M, "accumulate") * _area_acc)
+    _actual_mass = jnp.sum(_cast(eta_new, _M, "accumulate") * _area_acc)
     _correction = (_target_mass - _actual_mass) / jnp.maximum(_ocean_area, 1e-30)
-    eta_new = (eta_new + _correction * mask) * mask
+    eta_new = (eta_new + _correction.astype(eta_dtype) * mask) * mask
+    # Residual diagnostic for the single-rank stock-CG path (uniform
+    # return shape with the lat-lon solver's ``return_residual``).
+    # RANK-LOCAL ON PURPOSE: do NOT route through the lat-lon helper's
+    # ``_global_dot_batch`` (which would fire a bare ``batch_allreduce_mpi``
+    # under MPI and double-count Voronoi halo cells — the exact reason the
+    # MPAS solver is single-rank only here).  Plain ``jnp.sum`` is exact
+    # for the single rank this path runs on.  Computed AFTER the floor
+    # clamp below so it reflects the ACTUAL returned eta.
 
     # Mass-conserving floor clamp (safety net for extreme transients;
     # in normal operation this is a no-op since the PCG converges to
     # well-resolved η).
     eta_new = _clamp_redistribute(eta_new, eta_floor, mask, mesh.areaCell)
+
+    # Residual diagnostic of the FINAL eta (post projection + clamp).
+    # Rank-local (single-rank path); ``stop_gradient`` keeps it out of
+    # reverse mode.
+    _rr = jnp.sum((rhs - A_op(eta_new)) ** 2)
+    _bb = jnp.sum(rhs ** 2)
+    _solve_diag_rel = jax.lax.stop_gradient(
+        jnp.sqrt(_rr / jnp.maximum(_bb, jnp.asarray(1.0e-30, dtype=eta_dtype)))
+    )
 
     # ----- Step 5: corrector for u_bar using new η gradient delta ------
     eta_filled_new = fill_land_cells_mpas(eta_new, mask, c1, c2)
@@ -422,4 +507,6 @@ def barotropic_implicit_mpas(
         (1.0 - theta_eta) * u_bar_old + theta_eta * u_bar_new
     ) * edge_mask
 
+    if return_residual:
+        return eta_new, u_bar_new, Hu_avg, _solve_diag_rel
     return eta_new, u_bar_new, Hu_avg

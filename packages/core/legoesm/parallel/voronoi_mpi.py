@@ -2,8 +2,16 @@
 
 Each MPI rank owns a partition of the Voronoi mesh obtained via
 Recursive Coordinate Bisection (RCB) or METIS graph partitioning.
-Halo exchange uses ``mpi4jax.sendrecv`` to update ghost cell/edge
-values from their owning ranks between each RK stage.
+Ghost cell/edge values are refreshed from their owning ranks between
+each RK stage.  The DEFAULT state exchange is the legacy per-entity
+path (u edges; T+p_s packed cells; tracers packed cells); the batched
+union-neighbor exchange
+(:func:`legoesm.parallel.halo_exchange_voronoi.batched_halo_exchange`,
+one message per neighbor per dtype group) is OPT-IN via
+``LEGOESM_VORONOI_BATCHED_HALO=1`` pending a performance fix — see
+``_USE_BATCHED_HALO`` below.  On both paths every message routes
+through the AD-safe ``@jax.custom_vjp`` sendrecv wrapper (reverse-mode
+differentiable, never raw ``mpi4jax.sendrecv``).
 
 Design
 ------
@@ -20,6 +28,7 @@ This module does NOT touch the global ``_active_topology`` or
 from __future__ import annotations
 
 import logging
+import os
 from typing import NamedTuple
 
 import numpy as np
@@ -38,14 +47,19 @@ from legoesm.core.state import MPASHydrostaticState
 # needs no import either.
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.parallel.voronoi_partition import (
+    BatchedHaloSchedule,
     VoronoiPartition,
+    build_batched_halo_schedule,
     build_local_mesh,
     partition_cells_geometric,
     partition_cells_metis,
     partition_voronoi_mesh,
     scatter_to_local,
 )
-from legoesm.parallel.halo_exchange_voronoi import VoronoiHaloExchange
+from legoesm.parallel.halo_exchange_voronoi import (
+    VoronoiHaloExchange,
+    batched_halo_exchange,
+)
 from legoesm.parallel.reductions import (
     require_mpi_stack,
     batch_allreduce_mpi,
@@ -53,6 +67,34 @@ from legoesm.parallel.reductions import (
 from legoesm.timestepping.dispatch import dispatch_integrator
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Halo-exchange path switch
+# ============================================================================
+
+# Selects the MPAS state-exchange implementation in ``make_voronoi_mpi_step``
+# (both the per-RK-stage exchange and the post-physics exchange).  Read ONCE
+# at import time:
+#
+#   * unset / ``"0"`` (DEFAULT) -> legacy per-entity exchange: per neighbor,
+#     one u edge message + ONE packed T/p_s cell message + ONE packed tracer
+#     cell message, via ``VoronoiHaloExchange`` -> ``_exchange_mpi`` -> the
+#     AD-safe ``get_sendrecv_vjp`` wrapper.
+#   * ``"1"`` -> batched union-neighbor exchange (``batched_halo_exchange``,
+#     one message per union neighbor per dtype group).  OPT-IN pending a
+#     performance fix: 18x CPU runtime regression at I5 np=8 f32
+#     (435.9 vs 24.1 ms/step; job 8457273, 2026-06-10) — see the
+#     ``halo_exchange_voronoi`` module docstring.
+#
+# Trace-time semantics: the flag is consulted as a static Python bool while
+# ``make_voronoi_mpi_step`` builds the exchange closure, which is then traced
+# into the jitted ``_step`` — the choice is baked into the compiled step.
+# Flipping the environment variable after this module is imported has NO
+# effect; tests/profiling opt in either by setting the env var before first
+# import or by monkeypatching ``voronoi_mpi._USE_BATCHED_HALO`` BEFORE
+# calling ``make_voronoi_mpi_step``.
+_USE_BATCHED_HALO = os.environ.get("LEGOESM_VORONOI_BATCHED_HALO", "0") == "1"
 
 
 # ============================================================================
@@ -72,6 +114,11 @@ class VoronoiPartitionLayout(NamedTuple):
     local_mesh: VoronoiMesh
     owned_mask_cells: jnp.ndarray   # (n_local_cells,) bool
     owned_mask_edges: jnp.ndarray   # (n_local_edges,) bool
+    # Union-neighbor batched schedule for the fused u/T/p_s/tracer state
+    # exchange (one message per neighbor per dtype group).  Built at
+    # layout time; ``None`` only for layouts constructed by hand —
+    # ``make_voronoi_mpi_step`` rebuilds it on demand then.
+    batched_comm: BatchedHaloSchedule | None = None
 
 
 def make_voronoi_partition_layout(
@@ -123,6 +170,8 @@ def make_voronoi_partition_layout(
         local_mesh=local_mesh,
         owned_mask_cells=owned_mask_cells,
         owned_mask_edges=owned_mask_edges,
+        batched_comm=build_batched_halo_schedule(
+            partition.cell_comm, partition.edge_comm),
     )
 
 
@@ -332,18 +381,23 @@ def make_voronoi_mpi_step(
     prognostic ``phys_state`` carry threaded through ``physics_fn``).
 
     .. note::
-       **Forward-only (not differentiable yet).**  The Voronoi cell/edge
-       halo exchange (:mod:`legoesm.parallel.halo_exchange_voronoi`) calls
-       ``mpi4jax.sendrecv`` directly rather than routing through the
-       AD-safe ``@jax.custom_vjp`` wrapper used by the lat-lon / cubed-
-       sphere halos, so ``jax.grad`` through this step can hit mpi4jax
-       transpose failures / incorrect comm adjoints.  This predates the
-       AMIP extension (the dynamical-core step had the same limitation) and
-       is tracked as a follow-up — adapting the custom-VJP wrapper to the
-       Voronoi comm schedule belongs in ``halo_exchange_voronoi`` and
-       benefits every Voronoi MPI caller, not just AMIP.  Use this step for
-       forward AMIP simulation, not for end-to-end ``jax.grad`` training,
-       until that lands.
+       **Differentiable halo path.**  The Voronoi halo exchange
+       (:mod:`legoesm.parallel.halo_exchange_voronoi`) routes every
+       message through the AD-safe ``@jax.custom_vjp`` sendrecv wrapper
+       (:func:`legoesm.parallel.halo_exchange.get_sendrecv_vjp`) — the
+       same path the lat-lon / cubed-sphere halos use — so ``jax.grad``
+       through this step propagates halo cotangents back to the owning
+       rank (see ``tests/distributed/test_mpi_differentiability.py::
+       TestVoronoiHaloMPIGrad``).  This holds on BOTH state-exchange
+       paths: the DEFAULT legacy per-entity exchange (u edges; T+p_s
+       packed cells; tracers packed cells) and the OPT-IN batched
+       union-neighbor exchange (one message per union (cell ∪ edge)
+       neighbor per dtype group — ``n_union_nbrs`` messages vs the
+       legacy ``n_edge_nbrs + 2*n_cell_nbrs``), selected at import via
+       ``LEGOESM_VORONOI_BATCHED_HALO=1`` (see ``_USE_BATCHED_HALO``;
+       opt-in pending an 18x CPU runtime-regression fix).  Note the
+       mass fixer's ``allreduce`` remains the only other collective; as
+       everywhere, keep ``global_max/min`` out of losses.
 
     Parameters
     ----------
@@ -379,7 +433,6 @@ def make_voronoi_mpi_step(
         config = model.config
 
     local_mesh = layout.local_mesh
-    halo_ex = layout.halo_exchange
     owned_mask = layout.owned_mask_cells
 
     # Re-instantiate the dynamics model on the rank-LOCAL mesh using the same
@@ -418,50 +471,131 @@ def make_voronoi_mpi_step(
     # initial-condition path does this); we simply pass it through here
     # rather than paying for a per-step ``exchange_cell_field``.
 
-    def _exchange_mpas_state(state: MPASHydrostaticState) -> MPASHydrostaticState:
-        """Exchange halos for u (edge), T+p_s (cell), and tracers (cell).
-
-        ``T`` and ``p_s`` are stacked into a single
-        ``(n_local_cells, nlev + 1)`` tensor so we issue **one**
-        ``exchange_cell_field`` call instead of two.  Any prognostic
-        ``tracers`` (q_v, q_c, ...) are stacked along a trailing axis and
-        exchanged in **one** further cell collective — tracer advection in
-        the dynamics tendency reads neighbour-cell values, so a boundary-
-        owned cell needs fresh halo tracer columns each RK stage exactly as
-        it needs fresh T/p_s.  ``phis`` is static (halo filled at setup) and
-        ``v`` is None on MPAS (edge-normal ``u`` is the wind), so neither is
-        exchanged.
-        """
-        u_ex = halo_ex.exchange_edge_field(state.u.data)
-        # Pack T (nlev) + p_s (1) along the trailing axis for one exchange.
-        Tp_packed = jnp.concatenate(
-            [state.T.data, state.p_s.data[..., None]], axis=-1,
-        )
-        Tp_ex = halo_ex.exchange_cell_field(Tp_packed)
-        nlev = state.T.data.shape[-1]
-        T_ex = Tp_ex[..., :nlev]
-        ps_ex = Tp_ex[..., nlev]
-
-        new = MPASHydrostaticState(
-            u=state.u.replace(data=u_ex),
-            T=state.T.replace(data=T_ex),
-            p_s=state.p_s.replace(data=ps_ex),
-            phis=state.phis,  # static after scatter; halos already correct
-            v=state.v,
-            tracers=state.tracers,
-        )
-        if state.tracers is not None and len(state.tracers) > 0:
-            _tnames = list(state.tracers.keys())
-            # (n_local_cells, nlev, n_tracers) — one collective for all.
-            q_packed = jnp.stack(
-                [state.tracers[k].data for k in _tnames], axis=-1,
+    # Static Python switch (module-level ``_USE_BATCHED_HALO``, env
+    # ``LEGOESM_VORONOI_BATCHED_HALO`` read at import): both branches bind
+    # the same ``_exchange_mpas_state`` name, and BOTH route every message
+    # through the AD-safe ``get_sendrecv_vjp`` sendrecv wrapper.  The choice
+    # is baked into the traced/jitted ``_step`` — the dynamics RK stages AND
+    # the post-physics exchange below use this same closure.
+    if _USE_BATCHED_HALO:
+        # Union-neighbor batched schedule: ONE message per neighbor per dtype
+        # group for the whole prognostic state.  A layout constant — built in
+        # ``make_voronoi_partition_layout``; rebuilt here only for layouts
+        # constructed by hand (e.g. direct ``VoronoiPartitionLayout(...)``).
+        _batched_sched = layout.batched_comm
+        if _batched_sched is None:
+            _batched_sched = build_batched_halo_schedule(
+                layout.partition.cell_comm, layout.partition.edge_comm,
             )
-            q_ex = halo_ex.exchange_cell_field(q_packed)
-            new = new._replace(tracers={
-                k: state.tracers[k].replace(data=q_ex[..., i])
-                for i, k in enumerate(_tnames)
-            })
-        return new
+        _rank = layout.rank
+
+        def _exchange_mpas_state(
+                state: MPASHydrostaticState) -> MPASHydrostaticState:
+            """Batched halo exchange for u (edge) + T/p_s/tracers (cell).
+
+            OPT-IN (``LEGOESM_VORONOI_BATCHED_HALO=1``) pending a
+            performance fix — 18x CPU runtime regression vs the legacy
+            per-entity path (job 8457273, 2026-06-10); see
+            ``_USE_BATCHED_HALO`` and the ``halo_exchange_voronoi``
+            module docstring.
+
+            All prognostic fields go out in **one** flat message per union
+            (cell ∪ edge) neighbor per dtype group via
+            :func:`legoesm.parallel.halo_exchange_voronoi.batched_halo_exchange`
+            — ``n_union_nbrs`` messages instead of the legacy
+            ``n_edge_nbrs + 2*n_cell_nbrs`` (u edges; T+p_s cells; tracer
+            cells).  Pack/unpack is linear gather/scatter, so exchanged
+            values are bit-identical to the per-entity path.  Tracer
+            advection in the dynamics tendency reads neighbour-cell values,
+            so boundary-owned cells need fresh halo tracer columns each RK
+            stage exactly as they need fresh T/p_s.  ``phis`` is static
+            (halo filled at setup) and ``v`` is None on MPAS (edge-normal
+            ``u`` is the wind), so neither is exchanged.
+
+            The tracer WIRE order is canonicalized to ``sorted(keys)`` —
+            every rank packs/unpacks tracers in the same order even if dict
+            insertion order ever diverged across ranks (same-dtype tracers
+            would otherwise swap silently: identical message sizes/tags,
+            wrong assignment).  Values map back by key, so sorting changes
+            nothing semantically; the tracer set itself is fixed at trace
+            time.
+            """
+            _tnames = (sorted(state.tracers)
+                       if state.tracers is not None else [])
+            cell_fields = (state.T.data, state.p_s.data) + tuple(
+                state.tracers[k].data for k in _tnames)
+            (u_ex,), cell_ex = batched_halo_exchange(
+                (state.u.data,), cell_fields, _batched_sched, _rank,
+            )
+
+            new = MPASHydrostaticState(
+                u=state.u.replace(data=u_ex),
+                T=state.T.replace(data=cell_ex[0]),
+                p_s=state.p_s.replace(data=cell_ex[1]),
+                phis=state.phis,  # static after scatter; halos correct
+                v=state.v,
+                tracers=state.tracers,
+            )
+            if _tnames:
+                new = new._replace(tracers={
+                    k: state.tracers[k].replace(data=cell_ex[2 + i])
+                    for i, k in enumerate(_tnames)
+                })
+            return new
+    else:
+        # DEFAULT: legacy per-entity exchange.  ``halo_ex`` dispatches
+        # through ``_exchange_mpi`` — every message via the AD-safe
+        # ``get_sendrecv_vjp`` custom-VJP wrapper, same as the batched path.
+        halo_ex = layout.halo_exchange
+
+        def _exchange_mpas_state(
+                state: MPASHydrostaticState) -> MPASHydrostaticState:
+            """Exchange halos for u (edge), T+p_s (cell), and tracers (cell).
+
+            ``T`` and ``p_s`` are stacked into a single
+            ``(n_local_cells, nlev + 1)`` tensor so we issue **one**
+            ``exchange_cell_field`` call instead of two.  Any prognostic
+            ``tracers`` (q_v, q_c, ...) are stacked along a trailing axis
+            and exchanged in **one** further cell collective — tracer
+            advection in the dynamics tendency reads neighbour-cell values,
+            so a boundary-owned cell needs fresh halo tracer columns each
+            RK stage exactly as it needs fresh T/p_s.  ``phis`` is static
+            (halo filled at setup) and ``v`` is None on MPAS (edge-normal
+            ``u`` is the wind), so neither is exchanged.
+            """
+            u_ex = halo_ex.exchange_edge_field(state.u.data)
+            # Pack T (nlev) + p_s (1) along the trailing axis: one exchange.
+            Tp_packed = jnp.concatenate(
+                [state.T.data, state.p_s.data[..., None]], axis=-1,
+            )
+            Tp_ex = halo_ex.exchange_cell_field(Tp_packed)
+            nlev = state.T.data.shape[-1]
+            T_ex = Tp_ex[..., :nlev]
+            ps_ex = Tp_ex[..., nlev]
+
+            new = MPASHydrostaticState(
+                u=state.u.replace(data=u_ex),
+                T=state.T.replace(data=T_ex),
+                p_s=state.p_s.replace(data=ps_ex),
+                phis=state.phis,  # static after scatter; halos correct
+                v=state.v,
+                tracers=state.tracers,
+            )
+            if state.tracers is not None and len(state.tracers) > 0:
+                # Canonical sorted(keys) WIRE order — same cross-rank
+                # consistency guard as the batched path (values map back
+                # by key, so sorting changes nothing semantically).
+                _tnames = sorted(state.tracers)
+                # (n_local_cells, nlev, n_tracers) — one collective for all.
+                q_packed = jnp.stack(
+                    [state.tracers[k].data for k in _tnames], axis=-1,
+                )
+                q_ex = halo_ex.exchange_cell_field(q_packed)
+                new = new._replace(tracers={
+                    k: state.tracers[k].replace(data=q_ex[..., i])
+                    for i, k in enumerate(_tnames)
+                })
+            return new
 
     def _mpi_tendency_fn(state: MPASHydrostaticState) -> MPASHydrostaticState:
         """Exchange halos then compute tendencies on local mesh.

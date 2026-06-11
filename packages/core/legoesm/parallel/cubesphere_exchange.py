@@ -2,20 +2,30 @@
 
 Replaces the implicit cross-shard reads that ``pad_halo`` generates
 under face-axis sharding with **explicit collective operations**
-inside ``shard_map``.  Two collective backends are provided:
+inside ``shard_map``.  Three collective kernels are provided:
 
-* **all_gather** (default): each device gathers all 6 faces, then
-  locally extracts the 4 neighbor strips it needs.  Simple, correct,
-  and sufficient for ≤6 GPUs at moderate resolution.
+* **ppermute multiface** (DEFAULT for every face-sharded device count
+  ``n_devices ∈ {1, 2, 3, 6}``, halo 1 and 2): each shard owns
+  ``k = 6 / n_devices`` contiguous faces.  Face edges *within* a shard
+  are filled shard-locally (same rotation + corner conventions as the
+  serial path); edges *crossing* shard boundaries ride a static
+  device-pair schedule of ``jax.lax.ppermute`` rounds, one
+  concatenated strip buffer per (src, dst) device pair per round.
+  No value is ever materialized with full face extent on any device.
 
-* **ppermute** (``use_ppermute=True``): 4 rounds of
-  ``jax.lax.ppermute``, each moving one edge strip per device.
-  Moves ~50× less data than all_gather (edge strips vs full faces),
-  which matters at C192+ resolution on bandwidth-limited interconnects.
+* **ppermute one-face** (halo=1, exactly 6 devices): the original
+  validated 4-round perfect-matching kernel — kept as the lowest-risk
+  path for the 1-face-per-device layout.
 
-Both backends produce explicit HLO collectives (``all-gather`` or
-``collective-permute``) that NCCL/ICI can schedule and pipeline,
-unlike the implicit ``dynamic-slice`` pattern from standard sharding.
+* **all_gather** (EXPLICIT DIAGNOSTIC OPT-IN ONLY — ``force_allgather``
+  kwarg on :func:`activate_spmd_halo_backend` or env
+  ``LEGOESM_SPMD_FORCE_ALLGATHER=1``): each device gathers the
+  perimeter strips of all 6 faces.  The HLO probe (job 8456476) proved
+  that this variant's true cost is not bandwidth but **full compute
+  replication** (per-device/single-device FLOPs ratio 1.00 at 2
+  devices, all-gather results with full 6-face extent), so it must
+  never be auto-selected.  Use :func:`assert_no_fullcube_allgather`
+  as the mechanical tripwire against this bug class returning.
 
 Also supports:
 - **Packed multi-field exchange**: stack several fields → one
@@ -29,13 +39,18 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+from collections import Counter
 from functools import partial
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
+from legoesm.grids.halo import (
+    CONNECTIVITY, WEST, EAST, SOUTH, NORTH, interp_strip,
+)
 
 logger = logging.getLogger("legoesm.parallel.cubesphere_exchange")
 
@@ -244,11 +259,16 @@ def _fill_halo_and_corners_h2_local(padded, strips, n):
 
 
 # ===================================================================
-# Backend A: all_gather  (simple, low-latency for ≤6 devices)
+# Backend A: all_gather  (EXPLICIT DIAGNOSTIC OPT-IN ONLY)
 # ===================================================================
+# Reachable only with the module ppermute flag off (force_allgather /
+# LEGOESM_SPMD_FORCE_ALLGATHER=1).  The strips all_gather regains full
+# 6-face extent on every device and GSPMD then replicates ALL
+# downstream compute (HLO probe job 8456476: per-device FLOPs ratio
+# 1.00 at 2 devices) — production routing uses the ppermute kernels.
 
 def _make_exchange_allgather(mesh, ndim, with_offsets=False):
-    """Build a shard_map exchange using all_gather.
+    """Build a shard_map exchange using all_gather (diagnostic only).
 
     When ``with_offsets`` is True the kernel takes a second
     ``interp_offsets`` argument shaped ``(6, 4, n)`` (replicated) and
@@ -298,10 +318,10 @@ def _make_exchange_allgather(mesh, ndim, with_offsets=False):
         # path safe only at 6 devices; at 2 or 3 devices the kernel
         # silently dropped 1 or 2 faces.  Generalising via per-face
         # loop (n_faces_per_shard ≤ 6) lets the SPMD halo activate at
-        # any divisor of 6.  Iter-1's restriction in
-        # ``make_sharded_step`` is left in place pending a final
-        # ppermute multi-face refit (the all_gather kernel is the
-        # default and is fully generalised here).
+        # any divisor of 6.  The ppermute multi-face refit has since
+        # landed: this all_gather kernel is no longer the default (it
+        # replicates compute, see the Backend A header) and survives
+        # only as the explicit diagnostic opt-in.
         if ndim == 3:
             my_strips = jnp.stack([
                 jnp.stack([
@@ -363,12 +383,14 @@ def _make_exchange_allgather(mesh, ndim, with_offsets=False):
 
 
 # ===================================================================
-# Backend A2: all_gather for halo=2 (gather 2-cell-wide perimeter strips)
+# Backend A2: all_gather for halo=2 (EXPLICIT DIAGNOSTIC OPT-IN ONLY —
+# see the Backend A header; production halo=2 routing is the multiface
+# ppermute kernel)
 # ===================================================================
 
 def _make_exchange_allgather_h2(mesh, ndim, with_offsets=False):
     """Build a shard_map exchange for halo=2 using a single all_gather of
-    2-cell-wide perimeter strips.
+    2-cell-wide perimeter strips (diagnostic only).
 
     The volume per face is ``8 * n[, * C]`` cells (4 edges × 2 deep)
     versus the previous fall-through path which used the local h2 fill
@@ -594,10 +616,514 @@ def _make_exchange_ppermute(mesh, ndim, with_offsets=False):
 
 
 # ===================================================================
+# Backend C: multi-face ppermute (k = 6 / n_devices faces per shard)
+# ===================================================================
+#
+# Generalizes the one-face ppermute kernel to n_devices ∈ {1, 2, 3, 6}
+# with k = 6/n_devices CONTIGUOUS faces per shard (matching how
+# ``Mesh(devices, ("face",))`` + ``P("face")`` block-partitions axis 0:
+# device d owns global faces [d*k, (d+1)*k)).
+#
+#   * intra-shard face edges → shard-local strip copies (no collective);
+#   * cross-shard face edges → static schedule of ppermute rounds.
+#     The schedule is a proper edge coloring of the DIRECTED DEVICE-PAIR
+#     graph (codex design review: coloring on device pairs, not face
+#     pairs — at n_devices=3 every device has cross edges to BOTH other
+#     devices, so multiple rounds are required).  Each round is a
+#     partial permutation (each device sends ≤ 1 buffer and receives
+#     ≤ 1 buffer); all strips a device owes a given peer in a round are
+#     packed into ONE fixed-shape buffer (slots), so the SPMD program
+#     is shape-uniform across devices.
+#
+# By König's edge-coloring theorem on the bipartite (senders ×
+# receivers) multigraph, max(out_degree, in_degree) rounds always
+# suffice; the exhaustive backtracking below finds such an optimal
+# coloring deterministically.  Resulting round counts:
+#   n_devices=1 → 0 rounds (everything intra-shard)
+#   n_devices=2 → 1 round   (pairwise swap, 8 strips/direction)
+#   n_devices=3 → 2 rounds  (two opposite 3-cycles, ≤ 4 strips/pair)
+#   n_devices=6 → 4 rounds  (octahedral face graph, 1 strip/pair)
+
+
+class _MultifaceTables(NamedTuple):
+    """Static per-layout tables for the multi-face ppermute exchange.
+
+    All index tables have a leading device axis so the SPMD kernel can
+    select its rows with the traced ``jax.lax.axis_index("face")``.
+
+    Attributes
+    ----------
+    perms : tuple[tuple[tuple[int, int], ...], ...]
+        ``perms[r]`` is the (src_dev, dst_dev) pair list for ppermute
+        round ``r``.
+    max_slots : int
+        Strip-slot count of every round's send/recv buffer (global max
+        over all directed device pairs; unused slots carry garbage on
+        send and an out-of-bounds target on receive → dropped).
+    loc_lf, loc_le : (n_devices, k, 4) int32
+        Intra-shard source (local face, edge) for each receiving
+        (local face i, edge e).  Cross-shard entries point at (0, 0)
+        as a placeholder; they are provably overwritten by a ppermute
+        round (coverage asserted at build time).
+    rev : (n_devices, k, 4) int32
+        ``CONNECTIVITY[g][e].reversed`` for the receiving (face, edge)
+        — applied receiver-side to BOTH local and ppermute strips
+        (senders always transmit unreversed source-edge strips).
+    send_lf, send_le : (n_rounds, n_devices, max_slots) int32
+        Strip (local face, edge) this device places in slot ``m`` when
+        it is round ``r``'s sender (garbage rows when idle/padding).
+    recv_tgt : (n_rounds, n_devices, max_slots) int32
+        Flattened ``local_face * 4 + edge`` halo target for slot ``m``,
+        or the sentinel ``4 * k`` (out of bounds → ``mode="drop"``
+        scatter discards it) when the slot is padding or the device
+        does not receive in round ``r``.
+    faces_per_shard : int
+        k = 6 // n_devices.
+    """
+
+    perms: tuple
+    max_slots: int
+    loc_lf: np.ndarray
+    loc_le: np.ndarray
+    rev: np.ndarray
+    send_lf: np.ndarray
+    send_le: np.ndarray
+    recv_tgt: np.ndarray
+    faces_per_shard: int
+
+
+def _color_device_pairs(pairs, n_rounds):
+    """Exhaustive backtracking edge coloring of directed device pairs.
+
+    Returns a list of ``n_rounds`` lists of (src, dst) pairs where no
+    round repeats a src or a dst (each round is a valid ppermute
+    partial permutation), or ``None`` if no coloring with ``n_rounds``
+    exists.  Deterministic: pairs are processed in sorted order and
+    rounds tried in ascending index.
+    """
+    rounds_src = [set() for _ in range(n_rounds)]
+    rounds_dst = [set() for _ in range(n_rounds)]
+    assignment = [-1] * len(pairs)
+
+    def _bt(i):
+        if i == len(pairs):
+            return True
+        s, d = pairs[i]
+        for r in range(n_rounds):
+            if s not in rounds_src[r] and d not in rounds_dst[r]:
+                rounds_src[r].add(s)
+                rounds_dst[r].add(d)
+                assignment[i] = r
+                if _bt(i + 1):
+                    return True
+                rounds_src[r].remove(s)
+                rounds_dst[r].remove(d)
+                assignment[i] = -1
+        return False
+
+    if not _bt(0):
+        return None
+    out = [[] for _ in range(n_rounds)]
+    for i, p in enumerate(pairs):
+        out[assignment[i]].append(p)
+    return out
+
+
+def _build_multiface_tables(faces_per_shard: int) -> _MultifaceTables:
+    """Build the static multi-face exchange tables for a face layout.
+
+    The tables are halo-depth independent (the schedule moves whole
+    (face, edge) strips; only the strip payload shape differs between
+    halo=1 and halo=2), so one table set serves both kernels.
+    """
+    k = int(faces_per_shard)
+    if k not in (1, 2, 3, 6):
+        raise ValueError(
+            f"faces_per_shard must be one of 1, 2, 3, 6 (n_devices must "
+            f"divide 6), got {k}."
+        )
+    n_dev = 6 // k
+
+    def owner(f):
+        return f // k
+
+    loc_lf = np.zeros((n_dev, k, 4), dtype=np.int32)
+    loc_le = np.zeros((n_dev, k, 4), dtype=np.int32)
+    rev = np.zeros((n_dev, k, 4), dtype=np.int32)
+    # cross[(src_dev, dst_dev)] = sorted list of
+    #   (dst_local_face, dst_edge, src_local_face, src_edge)
+    cross: dict[tuple[int, int], list] = {}
+    covered_local = set()
+    for d in range(n_dev):
+        for i in range(k):
+            g = d * k + i
+            for e in range(4):
+                nf, ne, rv = CONNECTIVITY[g][e]
+                rev[d, i, e] = int(rv)
+                sd = owner(nf)
+                if sd == d:
+                    loc_lf[d, i, e] = nf - d * k
+                    loc_le[d, i, e] = ne
+                    covered_local.add((d, i, e))
+                else:
+                    cross.setdefault((sd, d), []).append(
+                        (i, e, nf - sd * k, ne)
+                    )
+
+    pairs = sorted(cross.keys())
+    for p in pairs:
+        # Canonical slot order by (receiving local face, edge) — both
+        # the send and recv tables are derived from this single list,
+        # so sender slot m and receiver slot m always describe the
+        # same strip.
+        cross[p].sort()
+
+    if pairs:
+        out_deg = Counter(s for s, _ in pairs)
+        in_deg = Counter(d for _, d in pairs)
+        r_min = max(max(out_deg.values()), max(in_deg.values()))
+        rounds = _color_device_pairs(pairs, r_min)
+        # König guarantees an r_min coloring exists for the bipartite
+        # send/recv multigraph; the exhaustive search must find it.
+        if rounds is None:  # pragma: no cover - mathematically unreachable
+            raise RuntimeError(
+                f"multiface ppermute schedule coloring failed for "
+                f"faces_per_shard={k} at the König bound {r_min}."
+            )
+        max_slots = max(len(v) for v in cross.values())
+    else:
+        rounds = []
+        max_slots = 1  # unused (n_rounds == 0)
+
+    n_rounds = len(rounds)
+    t_rounds = max(n_rounds, 1)  # keep arrays non-empty for jnp.asarray
+    send_lf = np.zeros((t_rounds, n_dev, max_slots), dtype=np.int32)
+    send_le = np.zeros((t_rounds, n_dev, max_slots), dtype=np.int32)
+    recv_tgt = np.full((t_rounds, n_dev, max_slots), 4 * k, dtype=np.int32)
+    covered_cross = set()
+    for r, rnd in enumerate(rounds):
+        # Each round must be a partial permutation on devices.
+        if (len({s for s, _ in rnd}) != len(rnd)
+                or len({d for _, d in rnd}) != len(rnd)):
+            raise RuntimeError(
+                f"multiface schedule round {r} is not a partial "
+                f"permutation: {rnd}"
+            )
+        for (s, d) in rnd:
+            for m, (i, e, slf, sle) in enumerate(cross[(s, d)]):
+                send_lf[r, s, m] = slf
+                send_le[r, s, m] = sle
+                recv_tgt[r, d, m] = i * 4 + e
+                covered_cross.add((d, i, e))
+
+    # --- build-time invariants (loud failure beats silent halo junk) ---
+    all_entries = {
+        (d, i, e) for d in range(n_dev) for i in range(k) for e in range(4)
+    }
+    if covered_local | covered_cross != all_entries or (
+            covered_local & covered_cross):
+        raise RuntimeError(
+            f"multiface tables for faces_per_shard={k}: (face, edge) "
+            f"coverage broken — local={len(covered_local)}, "
+            f"cross={len(covered_cross)}, total={len(all_entries)}."
+        )
+    if sorted(p for rnd in rounds for p in rnd) != pairs:
+        raise RuntimeError(
+            f"multiface schedule for faces_per_shard={k} does not cover "
+            f"every directed device pair exactly once."
+        )
+
+    return _MultifaceTables(
+        perms=tuple(tuple(rnd) for rnd in rounds),
+        max_slots=max_slots,
+        loc_lf=loc_lf,
+        loc_le=loc_le,
+        rev=rev,
+        send_lf=send_lf,
+        send_le=send_le,
+        recv_tgt=recv_tgt,
+        faces_per_shard=k,
+    )
+
+
+# Built lazily on first factory call (NOT at import — iter-93 doctrine:
+# no eager work at module import).  Keyed by faces_per_shard.
+_MULTIFACE_TABLE_CACHE: dict[int, _MultifaceTables] = {}
+
+
+def _get_multiface_tables(faces_per_shard: int) -> _MultifaceTables:
+    if faces_per_shard not in _MULTIFACE_TABLE_CACHE:
+        _MULTIFACE_TABLE_CACHE[faces_per_shard] = _build_multiface_tables(
+            faces_per_shard,
+        )
+    return _MULTIFACE_TABLE_CACHE[faces_per_shard]
+
+
+def _make_exchange_ppermute_multiface(mesh, ndim, halo=1, with_offsets=False):
+    """Build the multi-face ppermute shard_map exchange.
+
+    Supports halo=1 and halo=2, 3D ``(6, n, n)`` and 4D ``(6, n, n, C)``
+    inputs, with optional per-edge Lagrange ``interp_offsets`` (h1
+    offsets ``(6, 4, n)``; h2 offsets ``(6, 4, 2, n)``) — the same
+    receiver-side reverse→interpolate→place pipeline as the serial
+    local pad, so the output is bit-identical to
+    ``pad_halo_local``/``_pad_halo_local_h2`` (avg corner fill).
+    """
+    if ndim not in (3, 4):
+        raise ValueError(f"ndim must be 3 or 4, got {ndim}")
+    if halo not in (1, 2):
+        raise ValueError(f"multiface ppermute supports halo 1/2, got {halo}")
+
+    n_devices = len(mesh.devices.flat)
+    if n_devices < 1 or 6 % n_devices != 0:
+        raise ValueError(
+            f"multiface ppermute exchange requires a face-axis mesh whose "
+            f"device count divides 6; got {n_devices} devices."
+        )
+    k = 6 // n_devices
+    tables = _get_multiface_tables(k)
+    n_rounds = len(tables.perms)
+    perms = tables.perms  # static python (src, dst) pair tuples
+
+    P = jax.sharding.PartitionSpec
+    in_sp_data = P("face", *((None,) * (ndim - 1)))
+    out_sp = P("face", *((None,) * (ndim - 1)))
+    in_sp = (in_sp_data, P()) if with_offsets else in_sp_data
+
+    # iter-94g pattern: jnp table constants built in the factory body
+    # (outside the shard_map closure body, after backend init).
+    loc_lf_j = jnp.asarray(tables.loc_lf)
+    loc_le_j = jnp.asarray(tables.loc_le)
+    rev_j = jnp.asarray(tables.rev)
+    send_lf_j = jnp.asarray(tables.send_lf)
+    send_le_j = jnp.asarray(tables.send_le)
+    recv_tgt_j = jnp.asarray(tables.recv_tgt)
+
+    @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=out_sp,
+             check_vma=False)
+    def _exchange(*args):
+        if with_offsets:
+            local_shard, offsets = args
+        else:
+            (local_shard,) = args
+            offsets = None
+
+        n = local_shard.shape[1]
+        my_idx = jax.lax.axis_index("face")
+
+        # ---- extract all 4k perimeter strips once (static loops) ----
+        # halo=1 payload: (4, n[, C]) per face; halo=2 payload:
+        # (4, 2, n[, C]) with depth-0 = boundary cell, depth-1 = one
+        # cell inward (same convention as _make_exchange_allgather_h2
+        # and the serial extract_edge_strip_at_depth).
+        def _face_strips(face):
+            if halo == 1:
+                if ndim == 3:
+                    return jnp.stack([
+                        face[0, :], face[-1, :], face[:, 0], face[:, -1],
+                    ], axis=0)
+                return jnp.stack([
+                    face[0, :, :], face[-1, :, :],
+                    face[:, 0, :], face[:, -1, :],
+                ], axis=0)
+            if ndim == 3:
+                return jnp.stack([
+                    jnp.stack([face[0, :], face[1, :]], axis=0),
+                    jnp.stack([face[-1, :], face[-2, :]], axis=0),
+                    jnp.stack([face[:, 0], face[:, 1]], axis=0),
+                    jnp.stack([face[:, -1], face[:, -2]], axis=0),
+                ], axis=0)
+            return jnp.stack([
+                jnp.stack([face[0, :, :], face[1, :, :]], axis=0),
+                jnp.stack([face[-1, :, :], face[-2, :, :]], axis=0),
+                jnp.stack([face[:, 0, :], face[:, 1, :]], axis=0),
+                jnp.stack([face[:, -1, :], face[:, -2, :]], axis=0),
+            ], axis=0)
+
+        my_strips = jnp.stack(
+            [_face_strips(local_shard[i]) for i in range(k)], axis=0,
+        )  # (k, 4, [2,] n[, C])
+
+        # ---- intra-shard fill (cross entries are placeholders that the
+        # ppermute rounds provably overwrite — coverage asserted at
+        # table-build time) ----
+        my_loc_lf = loc_lf_j[my_idx].reshape(-1)   # (4k,) traced
+        my_loc_le = loc_le_j[my_idx].reshape(-1)
+        halo_flat = my_strips[my_loc_lf, my_loc_le]  # (4k, [2,] n[, C])
+
+        # ---- cross-shard ppermute rounds ----
+        for r in range(n_rounds):
+            send_buf = my_strips[send_lf_j[r, my_idx],
+                                 send_le_j[r, my_idx]]  # (max_slots, ...)
+            received = jax.lax.ppermute(send_buf, "face", perms[r])
+            tgt = recv_tgt_j[r, my_idx]  # (max_slots,) — 4k sentinel drops
+            halo_flat = halo_flat.at[tgt].set(received, mode="drop")
+
+        halo_buf = halo_flat.reshape((k, 4) + halo_flat.shape[1:])
+
+        # ---- receiver-side reversal along the spatial strip axis ----
+        # (senders transmit unreversed source-edge strips; reversal is a
+        # property of the receiving (face, edge), exactly as the serial
+        # tables bake it in and the one-face kernel applies it.)
+        flip_axis = 2 if halo == 1 else 3
+        my_rev = rev_j[my_idx].reshape(
+            (k, 4) + (1,) * (halo_buf.ndim - 2)
+        ).astype(bool)
+        halo_buf = jnp.where(
+            my_rev, jnp.flip(halo_buf, axis=flip_axis), halo_buf,
+        )
+
+        if with_offsets:
+            # Offsets are indexed by the *receiving* global face/edge —
+            # same convention as pad_halo_local (halo.py).  Slice this
+            # shard's k rows with the traced device index.
+            offs_dev = jax.lax.dynamic_slice_in_dim(
+                offsets, my_idx * k, k, axis=0,
+            )  # (k, 4, n) for h1; (k, 4, 2, n) for h2
+
+        pad_width = ((halo, halo), (halo, halo))
+        if ndim == 4:
+            pad_width = pad_width + ((0, 0),)
+
+        padded_faces = []
+        for i in range(k):
+            padded = jnp.pad(local_shard[i], pad_width)
+            strips = []
+            for e in range(4):
+                s = halo_buf[i, e]
+                if with_offsets:
+                    if halo == 1:
+                        s = interp_strip(s, offs_dev[i, e])
+                    else:
+                        # Per-depth Lagrange, matching the allgather_h2
+                        # kernel and the serial h2 loop (reverse first,
+                        # then interpolate each depth).
+                        s = jnp.stack([
+                            interp_strip(s[0], offs_dev[i, e, 0]),
+                            interp_strip(s[1], offs_dev[i, e, 1]),
+                        ], axis=0)
+                strips.append(s)
+            if halo == 1:
+                padded = _fill_halo_and_corners(padded, strips, n)
+            else:
+                padded = _fill_halo_and_corners_h2_local(padded, strips, n)
+            padded_faces.append(padded)
+
+        return jnp.stack(padded_faces, axis=0)
+
+    return _exchange
+
+
+# ===================================================================
+# Compiled-HLO tripwire: full-cube all-gather detector
+# ===================================================================
+
+# Matches the RESULT type list of a sync or async all-gather HLO op:
+#   %ag  = f32[6,4,24,8]{3,2,1,0} all-gather(f32[3,4,24,8] %x), ...
+#   %ags = (f32[3,...], f32[6,...]) all-gather-start(...), ...
+#   %agd = f32[6,4,24,8]{3,2,1,0} all-gather-done(%ags)
+# The -done form is matched too so the guard does not depend on the
+# paired -start line surviving textual transformations (duplicate
+# reports for a start/done pair are harmless — the result is a flag).
+_HLO_ALLGATHER_LINE_RE = re.compile(
+    r"=\s*(.+?)\s+all-gather(?:-start|-done)?\("
+)
+_HLO_SHAPE_RE = re.compile(r"\[([0-9,]*)\]")
+
+
+def find_fullcube_allgathers(
+    hlo_text: str, n_faces: int = 6, n: int | None = None,
+) -> list[str]:
+    """Scan compiled HLO text for all-gather ops that materialize the cube.
+
+    Mechanical tripwire (NOT a proof) for the compute-replication bug
+    class proven by the job-8456476 HLO probe: under face sharding any
+    all-gather whose result regains the full 6-face extent means some
+    value is replicated across the face axis — and GSPMD then replicates
+    the downstream compute (per-device FLOPs ratio 1.00 at 2 devices).
+
+    Flags an all-gather result shape when either
+    * its leading dim equals ``n_faces`` and it has more than one
+      element per face (catches both full fields ``[6,n,n,...]`` and
+      perimeter-strip gathers ``[6,4,n,...]``), or
+    * ``n`` is given and the total element count is >= ``n_faces*n*n``
+      (catches full-cube volume hidden behind reshapes/slicing — the
+      codex-flagged false-pass surface).
+
+    Known false-pass surface: an all-gather whose result drops the
+    leading face dim AND stays under the volume bound.  Known
+    false-positive surface: a legitimate gather of a non-face axis of
+    extent exactly ``n_faces`` — none exist on the ppermute hot path.
+
+    Returns the offending result-shape strings (empty list = clean).
+    """
+    bad: list[str] = []
+    for line in hlo_text.splitlines():
+        if "all-gather" not in line:
+            continue
+        m = _HLO_ALLGATHER_LINE_RE.search(line)
+        if m is None:
+            continue
+        for dims_s in _HLO_SHAPE_RE.findall(m.group(1)):
+            dims = [int(d) for d in dims_s.split(",") if d]
+            if not dims:
+                continue
+            total = 1
+            for d in dims:
+                total *= d
+            if (dims[0] == n_faces and total > n_faces) or (
+                    n is not None and total >= n_faces * n * n):
+                bad.append(f"[{dims_s}]")
+    return bad
+
+
+def assert_no_fullcube_allgather(
+    hlo_text: str,
+    n_faces: int = 6,
+    n: int | None = None,
+    context: str = "compiled program",
+) -> None:
+    """Raise ``RuntimeError`` if :func:`find_fullcube_allgathers` flags
+    any op — loud guard for benches/tests on the hot path (every device
+    would silently compute the full globe while the timing rows claim
+    multi-device scaling)."""
+    bad = find_fullcube_allgathers(hlo_text, n_faces=n_faces, n=n)
+    if bad:
+        raise RuntimeError(
+            f"{context}: compiled HLO contains {len(bad)} all-gather "
+            f"op(s) with full-cube face extent {bad[:8]} — the SPMD halo "
+            f"is materializing all {n_faces} faces per device (compute "
+            f"replication, HLO probe job 8456476).  Expected the "
+            f"ppermute multiface exchange (collective-permute only).  "
+            f"If the all_gather diagnostic backend was intended, set "
+            f"LEGOESM_SPMD_FORCE_ALLGATHER=1 explicitly."
+        )
+
+
+# ===================================================================
 # Public scalar exchange API
 # ===================================================================
 
 _cache: dict[tuple, object] = {}
+
+
+def _select_variant(use_ppermute, halo, n_devices):
+    """Resolve the kernel variant name for routing + cache keying.
+
+    * ``use_ppermute=False`` → the all_gather kernels (explicit
+      diagnostic opt-in only — see module docstring).
+    * ``use_ppermute=True, halo=1, n_devices=6`` → the original
+      validated one-face ppermute kernel (lowest-risk path for the
+      1-face-per-device layout; bit-identical to the multiface kernel
+      by the parity tests, kept per codex review).
+    * every other ppermute combination (halo=2 at any count; halo=1 at
+      1/2/3 devices) → the multiface ppermute kernel.
+    """
+    if not use_ppermute:
+        return "allgather_h2" if halo == 2 else "allgather"
+    if halo == 1 and n_devices == 6:
+        return "ppermute_oneface"
+    return "ppermute_multiface"
 
 
 def _get_exchange(mesh, ndim, use_ppermute, halo=1, with_offsets=False):
@@ -606,104 +1132,122 @@ def _get_exchange(mesh, ndim, use_ppermute, halo=1, with_offsets=False):
     Parameters
     ----------
     mesh : jax.sharding.Mesh
-        Face-axis mesh.
+        Face-axis mesh (device count must divide 6).
     ndim : int
         3 for scalar (6, n, n) inputs, 4 for (6, n, n, C) inputs.
     use_ppermute : bool
-        When *True* and ``halo == 1``, use the bandwidth-optimal
-        4-round ppermute backend.  Otherwise use the all_gather kernel.
-        ``ppermute`` is currently halo=1 only; halo=2 always uses the
-        2-strip all_gather kernel.  When ``with_offsets`` is True,
-        ``ppermute`` is forced off (only the all_gather kernel applies
-        ``interp_offsets``).
+        When *True* (the production default set by
+        :func:`activate_spmd_halo_backend`), route to a ppermute kernel
+        — the multiface kernel for any layout, except halo=1 at exactly
+        6 devices which keeps the original validated one-face kernel.
+        When *False*, route to the all_gather kernels (diagnostic
+        opt-in only: they replicate compute, see module docstring).
     halo : int
         Halo depth.  Supported: 1, 2.  Other values fall back to the
         local pad path; see :func:`explicit_pad_halo`.
     with_offsets : bool
         When True, build a kernel that takes a second ``interp_offsets``
         argument and applies the per-edge Lagrange correction.
+
+    Notes
+    -----
+    The cache key includes the shard layout (``faces_per_shard``) and
+    the resolved variant name (codex MINOR 6): ``id(mesh)`` alone can
+    collide after garbage collection, and the old
+    ``use_ppermute``-boolean key could not distinguish the one-face
+    and multiface kernels.
     """
-    key = (id(mesh), ndim, use_ppermute, halo, with_offsets)
+    n_devices = len(mesh.devices.flat)
+    if n_devices < 1 or 6 % n_devices != 0:
+        raise ValueError(
+            f"SPMD cubed-sphere halo exchange requires a face-axis mesh "
+            f"whose device count divides 6, got {n_devices}."
+        )
+    faces_per_shard = 6 // n_devices
+    variant = _select_variant(use_ppermute, halo, n_devices)
+    key = (id(mesh), ndim, variant, halo, with_offsets, faces_per_shard)
     if key not in _cache:
-        if with_offsets:
-            if halo == 2:
-                # halo=2 ppermute kernel does not exist — only the
-                # 2-strip allgather supports halo=2.  ``use_ppermute``
-                # is silently downgraded to False on this path; the
-                # caller already passes ``False`` when halo=2.
-                _cache[key] = _make_exchange_allgather_h2(
-                    mesh, ndim, with_offsets=True,
-                )
-            elif use_ppermute:
-                _cache[key] = _make_exchange_ppermute(
-                    mesh, ndim, with_offsets=True,
-                )
-            else:
-                _cache[key] = _make_exchange_allgather(
-                    mesh, ndim, with_offsets=True,
-                )
-        elif halo == 2:
-            _cache[key] = _make_exchange_allgather_h2(mesh, ndim)
-        elif use_ppermute:
-            _cache[key] = _make_exchange_ppermute(mesh, ndim)
-        else:
-            _cache[key] = _make_exchange_allgather(mesh, ndim)
+        if variant == "allgather_h2":
+            _cache[key] = _make_exchange_allgather_h2(
+                mesh, ndim, with_offsets=with_offsets,
+            )
+        elif variant == "allgather":
+            _cache[key] = _make_exchange_allgather(
+                mesh, ndim, with_offsets=with_offsets,
+            )
+        elif variant == "ppermute_oneface":
+            _cache[key] = _make_exchange_ppermute(
+                mesh, ndim, with_offsets=with_offsets,
+            )
+        else:  # ppermute_multiface
+            _cache[key] = _make_exchange_ppermute_multiface(
+                mesh, ndim, halo=halo, with_offsets=with_offsets,
+            )
     return _cache[key]
 
 
 # Module-level flag: use ppermute by default?
 _use_ppermute: bool = False
 
-# Auto-selection threshold (bytes).  When the all_gather data volume
-# per device exceeds this, ppermute is preferred.  Default 4 MB.
-_AUTO_THRESHOLD_BYTES = int(
-    float(os.environ.get("LEGOESM_SPMD_HALO_THRESHOLD_MB", "4")) * 1_048_576
-)
+# Explicit all_gather diagnostic override (documented opt-in).
+_FORCE_ALLGATHER_ENV = "LEGOESM_SPMD_FORCE_ALLGATHER"
+
+
+def _force_allgather_from_env() -> bool:
+    return os.environ.get(_FORCE_ALLGATHER_ENV, "") == "1"
 
 
 def select_exchange_backend(
-    n: int,
+    n: int = 0,
     nlev: int = 1,
     n_devices: int = 6,
     dtype_bytes: int = 4,
 ) -> bool:
     """Decide whether to use ppermute (True) or all_gather (False).
 
-    Heuristic: all_gather moves O(6 * n^2 * nlev * dtype_bytes) per
-    device.  ppermute moves O(4 * n * nlev * dtype_bytes).  When the
-    all_gather volume exceeds the threshold, ppermute is better.
+    Always returns True (ppermute) unless the explicit all_gather
+    diagnostic override ``LEGOESM_SPMD_FORCE_ALLGATHER=1`` is set.
 
-    The threshold is configurable via ``LEGOESM_SPMD_HALO_THRESHOLD_MB``
-    (default 4 MB).
+    RETIRED HEURISTIC: this function used to compare estimated
+    all_gather data volume against ``LEGOESM_SPMD_HALO_THRESHOLD_MB``.
+    That heuristic was structurally wrong — the all_gather variant's
+    true cost is not bandwidth but FULL COMPUTE REPLICATION (HLO probe
+    job 8456476: per-device/single-device FLOPs ratio 1.00 at 2
+    devices, all-gather results with full 6-face extent), which no
+    data-volume model can see.  ppermute is therefore the only
+    auto-selectable backend; all_gather remains available solely as an
+    explicit diagnostic opt-in.
 
     Parameters
     ----------
-    n : int
-        Per-face spatial resolution (e.g. 48 for C48).
-    nlev : int
-        Number of vertical levels (1 for shallow water).
-    n_devices : int
-        Number of devices in the mesh.
-    dtype_bytes : int
-        Bytes per element (4 for float32, 8 for float64).
+    n, nlev, n_devices, dtype_bytes : int
+        Retained for call-site compatibility; no longer consulted.
 
     Returns
     -------
     bool
-        True if ppermute is recommended, False for all_gather.
+        True if ppermute is selected, False only under the explicit
+        all_gather diagnostic override.
     """
-    allgather_bytes = 6 * n * n * nlev * dtype_bytes
-    return allgather_bytes > _AUTO_THRESHOLD_BYTES
+    del n, nlev, n_devices, dtype_bytes  # retired volume heuristic inputs
+    return not _force_allgather_from_env()
 
 
 def set_ppermute_default(enabled: bool) -> None:
-    """Switch the default collective backend.
+    """Switch the module-flag collective backend.
 
     Parameters
     ----------
     enabled : bool
-        ``True`` → use 4 rounds of ``ppermute`` (bandwidth-optimal).
-        ``False`` → use ``all_gather`` (latency-optimal at low N).
+        ``True`` → ppermute kernels (the production default set by
+        :func:`activate_spmd_halo_backend`): the multiface kernel with
+        a layout-dependent round count (0/1/2/4 rounds at 1/2/3/6
+        devices), or the one-face 4-round kernel at halo=1 with
+        exactly 6 devices.
+        ``False`` → the all_gather kernels — DIAGNOSTIC ONLY: they
+        replicate all compute per device (HLO probe job 8456476), so
+        only set this for explicit comparisons, never for production
+        or timing runs.
     """
     global _use_ppermute
     _use_ppermute = enabled
@@ -712,10 +1256,11 @@ def set_ppermute_default(enabled: bool) -> None:
 def explicit_pad_halo(data, mesh, halo=1, interp_offsets=None):
     """Explicit 3D scalar exchange.  (6,n,n) → (6,n+2h,n+2h).
 
-    Halo=1 uses ppermute or all_gather (auto-selected via the module
-    flag), with ``interp_offsets`` Lagrange correction applied in
-    either kernel when provided.  Halo=2 uses the 2-strip all_gather
-    kernel (ppermute is currently halo=1 only).  Other halo depths
+    Halo=1 and halo=2 both honour the module ppermute flag (the
+    production default set by :func:`activate_spmd_halo_backend`):
+    ppermute routes to the multiface kernel (one-face kernel at halo=1
+    with exactly 6 devices); the all_gather kernels remain reachable
+    only with the flag off (diagnostic opt-in).  Other halo depths
     fall back to the local-pad path.
 
     When ``interp_offsets`` is provided the SPMD kernel applies the
@@ -724,9 +1269,9 @@ def explicit_pad_halo(data, mesh, halo=1, interp_offsets=None):
     """
     if halo == 2:
         if interp_offsets is None:
-            return _get_exchange(mesh, 3, False, halo=2)(data)
+            return _get_exchange(mesh, 3, _use_ppermute, halo=2)(data)
         return _get_exchange(
-            mesh, 3, False, halo=2, with_offsets=True,
+            mesh, 3, _use_ppermute, halo=2, with_offsets=True,
         )(data, interp_offsets)
     if halo != 1:
         from legoesm.grids.halo import pad_halo_local
@@ -757,9 +1302,9 @@ def explicit_pad_halo_4d(data, mesh, halo=1, interp_offsets=None):
         )
     if halo == 2:
         if interp_offsets is None:
-            return _get_exchange(mesh, 4, False, halo=2)(data)
+            return _get_exchange(mesh, 4, _use_ppermute, halo=2)(data)
         return _get_exchange(
-            mesh, 4, False, halo=2, with_offsets=True,
+            mesh, 4, _use_ppermute, halo=2, with_offsets=True,
         )(data, interp_offsets)
     if halo != 1:
         from legoesm.grids.halo import pad_halo_local_4d
@@ -857,18 +1402,19 @@ def packed_pad_halo_4d(
     unpacked ``pad_halo_4d`` path applies it (see halo.py:559-573).
 
     When ``interp_offsets`` is provided (and ``duogrid`` is None — the
-    canonical Lagrange-corrected halo path), the SPMD allgather kernel
-    applies per-edge 3-point Lagrange correction to each gathered strip
+    canonical Lagrange-corrected halo path), the SPMD exchange kernel
+    applies per-edge 3-point Lagrange correction to each received strip
     using the same offsets the unpacked ``pad_halo_4d`` would apply.
     Without this, the packed SPMD path silently bypasses
     ``interp_offsets`` while the unpacked ``pad_halo_4d`` path applies
     them.
 
-    ``halo`` selects the SPMD exchange depth.  ``halo=1`` uses the
-    1-strip allgather kernel (shape ``(6, n+2, n+2, C)`` per device);
-    ``halo=2`` uses the 2-strip allgather kernel (shape
-    ``(6, n+4, n+4, C)``) — the same kernel
-    :func:`explicit_pad_halo_4d` selects when called with that depth.
+    ``halo`` selects the SPMD exchange depth (1 → ``(6, n+2, n+2, C)``,
+    2 → ``(6, n+4, n+4, C)``).  Kernel routing is identical to
+    :func:`explicit_pad_halo_4d`: the ppermute kernels under the module
+    flag (multiface for any face-sharded layout; one-face at halo=1
+    with 6 devices), the all_gather kernels only as the explicit
+    diagnostic opt-in.
     """
     if not fields:
         return []
@@ -944,19 +1490,32 @@ def _apply_duogrid_4d(padded, duogrid, halo):
 _spmd_mesh = None
 
 
-def activate_spmd_halo_backend(mesh, n: int = 0, nlev: int = 1) -> None:
+def activate_spmd_halo_backend(
+    mesh, n: int = 0, nlev: int = 1, *, force_allgather: bool | None = None,
+) -> None:
     """Switch the global halo backend to explicit SPMD exchange.
 
-    When *n* (per-face resolution) is provided, auto-selects between
-    all_gather and ppermute based on estimated data volume.
+    The exchange kernel is **ppermute** for every face-sharded device
+    count (1, 2, 3, 6 — multiface kernel; one-face kernel at halo=1
+    with exactly 6 devices).  The all_gather kernels are an explicit
+    diagnostic opt-in ONLY: they were proven to replicate ALL compute
+    on every device (HLO probe job 8456476 — per-device FLOPs ratio
+    1.00 at 2 devices), so no heuristic may auto-select them.
 
     Parameters
     ----------
     mesh : jax.sharding.Mesh
+        Face-axis mesh; the device count must divide 6.
     n : int
-        Per-face resolution for auto-selection (0 = skip auto-select).
+        Per-face resolution.  Retained for call-site compatibility and
+        logging; no longer drives backend choice (the retired volume
+        heuristic could not see replication cost).
     nlev : int
-        Number of vertical levels.
+        Number of vertical levels (logging only, see ``n``).
+    force_allgather : bool or None
+        ``True`` selects the all_gather diagnostic kernels.  ``None``
+        (default) defers to the ``LEGOESM_SPMD_FORCE_ALLGATHER=1``
+        environment override, otherwise ppermute.
     """
     global _spmd_mesh, _use_ppermute
     from legoesm.grids import halo
@@ -972,26 +1531,26 @@ def activate_spmd_halo_backend(mesh, n: int = 0, nlev: int = 1) -> None:
             f"'{cfm}': the 4 cube-corner cells would silently mismatch the "
             f"serial path. Call set_corner_fill_mode('avg'), or use the mpi4jax "
             f"backend for non-avg corner fills.")
+    n_devices = len(mesh.devices.flat)
+    if n_devices < 1 or 6 % n_devices != 0:
+        raise ValueError(
+            f"SPMD halo backend requires a face-axis mesh whose device "
+            f"count divides 6 (1, 2, 3 or 6), got {n_devices}."
+        )
     _spmd_mesh = mesh
     halo._halo_backend = "spmd"
     halo._spmd_mesh = mesh
 
-    # Auto-select ppermute vs all_gather based on data volume.
-    # The ppermute kernel still assumes exactly one face per shard
-    # (only the all_gather + all_gather_h2 kernels are multi-face,
-    # iter-49); force all_gather when n_devices != 6 so 2- and
-    # 3-device configs at high resolution stay correct.
-    n_devices = len(mesh.devices.flat)
-    if n_devices == 6 and n > 0:
+    if force_allgather is None:
         use_pp = select_exchange_backend(n, nlev, n_devices)
     else:
-        use_pp = False
+        use_pp = not force_allgather
     _use_ppermute = use_pp
-    backend_name = "ppermute" if use_pp else "all_gather"
+    backend_name = "ppermute" if use_pp else "all_gather(DIAGNOSTIC)"
     logger.info(
         "SPMD halo backend activated (mesh=%s, %d devices, "
-        "n=%d, nlev=%d, exchange=%s)",
-        mesh.axis_names, n_devices, n, nlev, backend_name,
+        "faces/shard=%d, n=%d, nlev=%d, exchange=%s)",
+        mesh.axis_names, n_devices, 6 // n_devices, n, nlev, backend_name,
     )
 
     # Pre-warm the exchange kernel cache so the factories are never
@@ -1004,12 +1563,17 @@ def activate_spmd_halo_backend(mesh, n: int = 0, nlev: int = 1) -> None:
     # relevant (ndim, halo, with_offsets, use_ppermute) combinations
     # here, outside any JIT scope, populates the cache before the first
     # compilation begins.  (Fix from bd072199 on ap/amip_upper_atm.)
+    # halo=2 now warms BOTH flag values too (the public APIs honour the
+    # module flag at halo=2 since the multiface ppermute kernel landed,
+    # so a post-activation ``set_ppermute_default`` flip must still be
+    # a cache hit inside JIT).
     for _ndim in (3, 4):
         for _pp in (False, True):
-            _get_exchange(mesh, _ndim, _pp, halo=1, with_offsets=False)
-            _get_exchange(mesh, _ndim, _pp, halo=1, with_offsets=True)
-        _get_exchange(mesh, _ndim, False, halo=2, with_offsets=False)
-        _get_exchange(mesh, _ndim, False, halo=2, with_offsets=True)
+            for _halo in (1, 2):
+                _get_exchange(mesh, _ndim, _pp, halo=_halo,
+                              with_offsets=False)
+                _get_exchange(mesh, _ndim, _pp, halo=_halo,
+                              with_offsets=True)
 
 
 def deactivate_spmd_halo_backend() -> None:

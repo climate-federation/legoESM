@@ -773,8 +773,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # dependent ``while_loop`` desynchronise the collective schedule), so
     # the multi-rank path runs a HAND-ROLLED fixed-iteration PCG of
     # exactly ``barotropic_implicit_pcg_fixed_iters`` iterations (static
-    # ``fori_loop`` => uniform collective schedule, no deadlock) wrapped
-    # in ``jax.lax.custom_linear_solve`` (implicit-function adjoint).  The
+    # ``fori_loop`` => uniform collective schedule, no deadlock),
+    # UNROLLED and differentiated straight through (the halo
+    # ``_sendrecv_vjp`` + the ``allreduce(SUM)`` dots are AD-safe;
+    # ``custom_linear_solve`` is NOT used because it cannot transpose the
+    # MPI-halo ``custom_vjp`` — see barotropic_common's module note).  The
     # single-rank path is UNCHANGED (still stock CG).  Default 60 is a
     # conservative estimate for 1e-10 residual on a diagonally-dominant
     # Helmholtz at 1°-¼°; it MUST be validated against the returned global
@@ -783,6 +786,26 @@ class LatLonCGridOceanConfig(NamedTuple):
     # docs/ocean_experiments/distributed_barotropic_pcg.md.
     barotropic_implicit_pcg_fixed_iters: int = 60
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
+    # Force the fixed-iteration PCG even when not distributed.  Two uses:
+    # (1) solver-matched serial parity references — the np>=2 implicit_cn
+    # path ALWAYS runs the fixed-M PCG, so a serial reference using stock
+    # CG differs at the solver-residual level by construction (parity
+    # bisect job 8459362: identical "MISMATCH" across all halo knobs);
+    # (2) performance — the fixed-M PCG measured FASTER single-rank than
+    # stock CG (20.8 vs 24.6 ms, job 8458701).  Under a single process
+    # the PCG's global dots are plain local sums (``is_multi_process()``
+    # gate), so this is safe pre-arming inside an MPI job.
+    barotropic_implicit_force_pcg: bool = False
+    # Distributed-PCG body variant (only used on the fixed-M PCG path):
+    #   "standard"      — 2 sequentially-dependent reductions/iter.
+    #   "single_reduce" — Chronopoulos-Gear recurrences, ONE batched
+    #                     reduction/iter (M+1 vs 2M+1 per solve) — the
+    #                     multi-node weak-scaling lever (probe 8460255:
+    #                     np32 weak growth was allreduce-latency-bound).
+    # Equivalent in exact arithmetic; differs at round-off (solver-
+    # tolerance lane, not bit-exact).  Validated at solver dispatch
+    # (unknown ⇒ ValueError).
+    barotropic_implicit_pcg_variant: str = "standard"
     # Rigid-lid streamfunction solver knobs (only used when
     # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
     # surface entirely: the depth-integrated flow is non-divergent and carried

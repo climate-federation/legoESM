@@ -557,3 +557,46 @@ def test_implicit_solver_equatorial_visc_boost_strongest_at_equator(
     assert eq_reduction > 0, (
         f"Equatorial reduction must be positive; got {eq_reduction:.3f}"
     )
+
+
+def test_mpas_implicit_cn_refuses_mpi(state, mesh, z_coord, monkeypatch):
+    """MPAS ``implicit_cn`` MUST fail-fast under MPI (single-rank only).
+
+    The Voronoi barotropic ``A_op`` does no halo exchange and its
+    reductions would double-count ghost cells, so a multi-rank run would
+    SILENTLY corrupt the solve.  The model step raises ``NotImplementedError``
+    when ``is_multi_process()`` is True.  (The distributed Voronoi PCG is
+    deferred — see barotropic_implicit_mpas.py Step-4 TODO.)  Patches the
+    ``reductions.is_multi_process`` the dispatch guard imports.
+    """
+    import legoesm.parallel.reductions as _red
+
+    monkeypatch.setattr(_red, "is_multi_process", lambda: True)
+    cfg = MPASOceanConfig(barotropic_solver="implicit_cn")
+    model = MPASOceanModel(mesh, z_coord, cfg)
+    with pytest.raises(NotImplementedError, match="single-rank only on"):
+        model.step(state, dt=300.0)
+
+
+class TestMultiRankRefusal:
+    """The np>1 FAIL-FAST must fire on the Voronoi MPI scenario it
+    targets (codex 2026-06-11 CRITICAL: an is_distributed()-only
+    predicate never fires there — the Voronoi path does not arm the
+    global halo backend; the mpi4py world-size check does)."""
+
+    def test_entry_guard_fires_on_world_size(self, monkeypatch):
+        import legoesm.parallel.reductions as red
+        from legoesm.ocean.dynamics.barotropic_implicit_mpas import (
+            barotropic_implicit_mpas,
+        )
+
+        monkeypatch.setattr(red, "mpi_world_size", lambda: 2)
+        with pytest.raises(NotImplementedError, match="single-rank only"):
+            # Entry guard fires before any state/mesh use, so dummies
+            # suffice.
+            barotropic_implicit_mpas(None, None, None, None, 600.0)
+
+    def test_world_size_one_without_mpi4py_is_serial(self):
+        from legoesm.parallel.reductions import mpi_world_size
+
+        assert mpi_world_size() >= 1

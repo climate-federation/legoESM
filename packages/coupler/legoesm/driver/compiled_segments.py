@@ -490,6 +490,7 @@ def build_segment_fn(
     owned_face_ids=None,
     hs_newtonian_relax=None,
     step_unified_no_rad=None,
+    device_config=None,
 ):
     """Build a compiled segment function.
 
@@ -550,6 +551,40 @@ def build_segment_fn(
         Used for replicated-dynamics MPI: conservation fixers sum
         only owned faces, physics operates on owned columns only.
         ``None`` means single-rank (all faces owned).
+    device_config : DeviceConfig or None, optional
+        Single-process multi-GPU SPMD device configuration (from
+        ``legoesm.parallel.mesh.create_device_mesh``).  When provided
+        AND ``device_config.mesh is not None``, the segment JITs pin
+        explicit ``in_shardings``/``out_shardings`` READ DIRECTLY OFF
+        the input carry/forcing the driver already sharded upstream
+        (``ModelDriver`` runs ``shard_pytree`` / ``shard_state`` before
+        the segment call, so every committed array leaf carries its own
+        ``NamedSharding``).  The jit copies that existing layout
+        verbatim — it does NOT re-derive a face-shard-vs-replicate
+        policy.  This matters because the moist/AMIP carry stores
+        FLATTENED cell-packed fields (the profile-prognostic
+        ``conv_prog`` is ``[n_cells, nlev]`` = ``[6*n*n, nlev]``); the
+        shape-``[0]``-keyed ``create_output_shardings`` classifier
+        misreads those flat leaves as replicated, so the formerly
+        derived ``in_sharding`` ``P()`` disagreed with the arg's actual
+        sharding and ``jax.jit`` raised "Sharding passed to jit does not
+        match the sharding on the respective arg" (the moist segment was
+        the third single-process multi-GPU replication site).  Reading
+        the actual ``.sharding`` is correct for BOTH the cubed-sphere
+        ``(6, n, n, nlev)`` dycore state and the flat cell-packed carry.
+        ``out_shardings`` equals the carry's input layout because the
+        scan body preserves carry shape (no resize/repack).  In that
+        mode the returned function's ``.raw`` attribute becomes a
+        non-donating *sharded* JIT wrapper (still composable with an
+        outer ``jax.grad`` — buffer donation, not JIT, is the AD
+        conflict; a first ``.raw`` call under ``jax.grad`` sees abstract
+        tracer leaves with no concrete sharding, so the jit infers the
+        layout, and a later concrete production call gets its own pinned
+        wrapper via the per-leaf sharding cache key).  With
+        ``device_config=None`` (default) or a mesh-less config,
+        behaviour is byte-identical to the legacy path: donating JIT
+        kernels, and ``.raw`` stays the non-JIT, non-donating function
+        that the training drivers differentiate through.
 
     Returns
     -------
@@ -1014,6 +1049,266 @@ def build_segment_fn(
         start_step = int(carry.step_index)
         return start_step % rad_update_steps == 0
 
+    # ------------------------------------------------------------------
+    # Optional single-process multi-GPU sharding (third replication
+    # site: the moist/AMIP segment path).  Active only when a
+    # ``device_config`` with a live mesh is supplied — see the
+    # ``device_config`` parameter docstring.  The donating production
+    # kernels AND the non-donating ``.raw`` variant get explicit
+    # in/out shardings READ DIRECTLY OFF the input carry/forcing that
+    # the driver already sharded (``ModelDriver`` runs ``shard_pytree``
+    # / ``shard_state`` upstream, so every committed array leaf carries
+    # its own ``NamedSharding``).  The jit then only has to *match* the
+    # layout that already exists — it never re-derives a policy.
+    #
+    # Why not re-derive via ``create_output_shardings``: that classifier
+    # keys on ``leaf.shape[0] == 6`` to decide face-shard-vs-replicate.
+    # The moist/AMIP carry stores FLATTENED cell-packed fields (e.g. the
+    # profile-prognostic ``conv_prog`` is ``[n_cells, nlev]`` =
+    # ``[6*n*n, nlev]``, leading dim 6*n*n, not 6).  The classifier
+    # falls through to replicated ``P()`` for those, but the upstream
+    # sharder may have placed the cell axis on the ``"face"`` mesh axis
+    # — so the derived ``in_sharding`` ``P()`` disagreed with the arg's
+    # actual ``P("face")`` and ``jax.jit`` raised "Sharding passed to
+    # jit does not match the sharding on the respective arg" (jobs
+    # 8457808/8457809).  Reading the actual ``.sharding`` is correct for
+    # BOTH layouts: the cubed-sphere ``(6, n, n, nlev)`` dycore state
+    # (its leaves are ``P("face", ...)`` from ``shard_state``, which a
+    # ``jax.jit`` ndim-normalised match accepts) AND the flat cell-packed
+    # carry (whatever axis the driver sharded, we copy verbatim).
+    #
+    # ``out_shardings`` == the carry's INPUT shardings: the scan body
+    # (``_run_single`` / ``_run_subcycled``) is a ``lax.scan`` whose
+    # carry-in structure/shape MUST equal carry-out (each field is
+    # ``_match_dtype(x_upd, carry.field)`` — identical shape, no resize
+    # or repack), so the output layout is the input layout by
+    # construction.
+    #
+    # Pinning is GATED on the call being a top-level all-concrete
+    # dispatch.  Under an outer trace (``jax.grad`` on the ``.raw`` path,
+    # or an enclosing ``jit``) the carry carries tracer leaves whose
+    # abstract ``.sharding`` does NOT reflect the concrete array the
+    # transform feeds the inner jit at execution time — pinning from it
+    # raised "Sharding passed to jit does not match the sharding on the
+    # respective arg" (CPU job 8458320).  So when any leaf is a tracer we
+    # build a PLAIN jit (no in/out shardings) and let the outer trace
+    # propagate layout; pinning is only for the concrete production /
+    # bench dispatch that has no enclosing trace to do so.
+    #
+    # Wrappers are cached by (single/subcycled, donate, PIN, carry
+    # treedef, forcing treedef, leaf-shape signatures, and — in the
+    # pinned branch only — leaf-SHARDING signatures): each ``jax.jit``
+    # object owns its compile cache, so rebuilding a wrapper per segment
+    # would retrace/recompile on every call (CLAUDE.md closure/recompile
+    # rules).  Treedefs are in the key because forcing/carry pytree
+    # structure can vary across calls (optional ``sfc_*_override`` /
+    # double-moment fields flip between None and array); leaf shapes
+    # because XLA specialises on shape; the ``pin`` flag because a
+    # traced (unpinned) call and a concrete (pinned) call are different
+    # executables; and the per-leaf sharding signature (pinned branch)
+    # because two concrete calls with identical structure+shapes but
+    # DIFFERENT layouts must not share a wrapper.  Because every pinned
+    # leaf sharding is on the SINGLE build-time mesh (identity-honoured
+    # or replicated on it), the ``(axis_names, spec)`` signature uniquely
+    # identifies the layout.
+    # ------------------------------------------------------------------
+    _sharding_active = (
+        device_config is not None
+        and getattr(device_config, "mesh", None) is not None
+    )
+    _sharded_jit_cache: dict = {}
+    # The single build-time mesh.  ``_input_sharding`` honours a leaf's
+    # committed sharding ONLY when it lives on EXACTLY this mesh object —
+    # see that helper for why identity (not a device-set / equivalence
+    # match) is the right test.
+    _mesh = device_config.mesh if _sharding_active else None
+
+    def _shape_signature(tree) -> tuple:
+        return tuple(
+            tuple(getattr(leaf, "shape", ()))
+            for leaf in jax.tree_util.tree_leaves(tree)
+        )
+
+    def _replicated_sharding():
+        """``NamedSharding(mesh, P())`` for the configured mesh."""
+        from jax.sharding import NamedSharding, PartitionSpec
+        return NamedSharding(device_config.mesh, PartitionSpec())
+
+    def _input_sharding(leaf):
+        """In-sharding for one leaf: concrete ``NamedSharding`` for every
+        array leaf, ``None`` only for non-array (structural) leaves.
+
+        This mirrors ``create_output_shardings``' invariant — every array
+        leaf gets a concrete sharding, ``None`` marks the structural
+        non-array slots ``jax.jit`` skips — but instead of re-deriving the
+        layout it COPIES the layout the upstream driver already committed:
+
+        * a committed ``jax.Array`` whose ``.sharding`` is a
+          ``NamedSharding`` on EXACTLY the build-time mesh object → that
+          exact sharding (this is the crash fix: a flat ``[6*n*n, nlev]``
+          carry leaf the driver placed on ``P("face")`` is matched
+          verbatim, never re-classified to ``P()``);
+        * any other array leaf — abstract tracers under an outer
+          ``jax.grad`` (``tracer.sharding`` lives on an ``AbstractMesh``,
+          not this concrete mesh), uncommitted / single-device arrays,
+          arrays committed to a DIFFERENT mesh — gets THIS mesh's
+          fully-replicated ``P()`` sharding.  Replicated is valid
+          regardless of the input's prior placement, keeps the AD path
+          working (grad-of-jit composes; donation, not jit, is the AD
+          conflict), and preserves the ``device_config=None``
+          byte-identical contract because that path never reaches here
+          (``_sharding_active`` is ``False``);
+        * non-array leaves (Python scalars, structural ``None`` optional
+          fields) → ``None``.
+
+        The honour test is mesh-object IDENTITY ONLY (codex r1/r2 major).
+        Not a device-set or ``(axis_names, spec)`` equivalence match: two
+        distinct ``Mesh`` objects can share a device set yet differ in
+        device ordering / shape / axis names, so admitting a non-build-
+        time mesh would (a) leak a foreign mesh's sharding into
+        ``in_shardings``/``out_shardings`` and (b) let the
+        ``(axis_names, spec)`` cache signature collide across genuinely
+        different concrete layouts.  Identity guarantees every honoured
+        sharding references the SINGLE build-time mesh, which is exactly
+        what the driver produces (it shards with
+        ``NamedSharding(device_config.mesh, ...)`` — the same object
+        passed here) and what makes the signature sufficient.
+
+        Reading ``.sharding`` off the INPUT is safe even when the wrapper
+        donates argument 0: donation invalidates a buffer only when the
+        compiled call CONSUMES it, strictly after this host-side metadata
+        read.
+        """
+        if not isinstance(leaf, jax.Array):
+            return None
+        from jax.sharding import NamedSharding
+        # ``.sharding`` is a concrete ``NamedSharding`` on committed
+        # arrays; on a tracer it returns the aval's (abstract-mesh)
+        # sharding.  Some tracer types could raise instead — treat any
+        # failure as "no honourable layout" and fall through to
+        # replicated (never crash the host-side derivation).
+        try:
+            sharding = getattr(leaf, "sharding", None)
+        except Exception:
+            sharding = None
+        # Honour the committed layout ONLY when it lives on exactly this
+        # mesh object.  A foreign / abstract mesh falls through to a
+        # replicated sharding pinned on the build-time mesh.
+        if isinstance(sharding, NamedSharding) and sharding.mesh is _mesh:
+            return sharding
+        # Every other array leaf is pinned replicated on the mesh — never
+        # ``None`` (a ``None`` in an array-leaf slot would make ``jax.jit``
+        # mismatch the in_shardings tree against the argument tree).
+        return _replicated_sharding()
+
+    def _sharding_tree(tree):
+        # No ``is_leaf`` override: structural ``None`` optional fields
+        # (warm-rain ``q_i`` etc.) stay ``None`` so the resulting pytree
+        # structure matches exactly what ``jax.jit`` flattens the real
+        # argument into (its default registry treats ``None`` as a
+        # zero-leaf node, never a value).  ``_input_sharding`` runs on the
+        # genuine array leaves and returns a concrete ``NamedSharding`` for
+        # each — so the flattened in_shardings has one concrete entry per
+        # array leaf, exactly as ``jax.jit`` requires.
+        return jax.tree_util.tree_map(_input_sharding, tree)
+
+    def _sharding_signature(tree) -> tuple:
+        """Hashable per-leaf layout key for the (pinned) wrapper cache.
+
+        Used ONLY for pinned (all-concrete) wrappers — the unpinned
+        traced branch keys on ``()`` instead.  Flattened with the SAME
+        (default) registry ``jax.jit`` uses to bind ``in_shardings`` to
+        the argument, so it has one entry per real array leaf (structural
+        ``None`` slots are skipped both here and by ``jax.jit``).  Each
+        leaf's ``(mesh axis names, spec)`` pair hashes distinctly, so two
+        concrete dispatches with identical treedefs+shapes but DIFFERENT
+        layouts (e.g. a fully face-sharded carry vs one whose flat
+        cell-packed ``conv_prog`` is replicated) get SEPARATE cache
+        entries — they are different XLA executables.  Every pinned leaf
+        sharding is on the single build-time mesh, so ``(axis_names,
+        spec)`` uniquely identifies the layout.
+        """
+        return tuple(
+            (tuple(s.mesh.axis_names), s.spec)
+            for s in jax.tree_util.tree_leaves(_sharding_tree(tree))
+        )
+
+    def _tree_has_tracer(*trees) -> bool:
+        """True if any leaf is a JAX tracer (i.e. we are under an outer
+        trace such as ``jax.grad`` / an enclosing ``jit``).
+
+        A tracer's ``.sharding`` reports its aval's (often abstract-mesh)
+        sharding, which does NOT reflect the CONCRETE array the enclosing
+        transform ultimately feeds the inner jit at execution time — so
+        pinning ``in_shardings`` from a tracer leaf can disagree with the
+        real runtime arg and raise "Sharding passed to jit does not match
+        the sharding on the respective arg".  When any leaf is traced we
+        therefore skip pinning entirely and let the outer trace propagate
+        layout (XLA already sees the enclosing shardings).
+        """
+        import jax.core as _jax_core
+        for tree in trees:
+            for leaf in jax.tree_util.tree_leaves(tree):
+                if isinstance(leaf, _jax_core.Tracer):
+                    return True
+        return False
+
+    def _get_sharded_jit(kind: str, donate: bool, carry, forcing):
+        """Return the cached sharded JIT wrapper for this call signature."""
+        # Pin explicit shardings ONLY for a top-level (all-concrete)
+        # dispatch — production / bench call ``run_segment`` with a
+        # committed sharded carry and no outer trace, so XLA needs the
+        # explicit in/out shardings to avoid silently replicating the
+        # whole-globe compute.  Under an outer ``jax.grad`` (the ``.raw``
+        # training path) the carry carries tracer leaves; pinning is then
+        # both unnecessary (the outer trace propagates layout) and unsafe
+        # (a tracer's abstract sharding != the concrete runtime arg) — so
+        # we build a plain jit and let inference do the work.
+        pin = not _tree_has_tracer(carry, forcing)
+        key = (
+            kind,
+            donate,
+            pin,
+            jax.tree_util.tree_structure(carry),
+            jax.tree_util.tree_structure(forcing),
+            _shape_signature(carry),
+            _shape_signature(forcing),
+            # Layout signature only distinguishes wrappers in the pinned
+            # branch; in the unpinned branch every concrete layout shares
+            # one inferred wrapper (``()`` keeps the key well-formed).
+            _sharding_signature(carry) if pin else (),
+            _sharding_signature(forcing) if pin else (),
+        )
+        fn = _sharded_jit_cache.get(key)
+        if fn is None:
+            target = _run_subcycled if kind == "subcycled" else _run_single
+            jit_kwargs: dict = dict(static_argnums=(1,))
+            if pin:
+                # NOTE: with ``static_argnums`` JAX matches
+                # ``in_shardings`` against the tree of DYNAMIC args
+                # only (jax 0.9.x ``pjit._process_in_axis_resources``
+                # uses ``tree_without_statics``) — hence a 2-tuple for
+                # the ``(carry, n_steps_static, forcing)`` signature.
+                # A 3-tuple with a placeholder for ``n_steps`` raises
+                # "wrong length ... for an args tuple of length 2".
+                # Every array leaf carries a concrete ``NamedSharding``
+                # (its committed layout if on this mesh, else replicated
+                # ``P()``); structural ``None`` marks only the non-array
+                # slots ``jax.jit`` skips — the same invariant
+                # ``create_output_shardings`` produced, so the
+                # in_shardings tree binds 1:1 to the argument leaves.
+                # ``out_shardings`` == the carry's input layout because
+                # the scan body preserves carry shape (no resize/repack).
+                jit_kwargs["in_shardings"] = (
+                    _sharding_tree(carry), _sharding_tree(forcing),
+                )
+                jit_kwargs["out_shardings"] = _sharding_tree(carry)
+            if donate:
+                jit_kwargs["donate_argnums"] = (0,)
+            fn = jax.jit(target, **jit_kwargs)
+            _sharded_jit_cache[key] = fn
+        return fn
+
     def run_segment_jit(carry: SegmentCarry, n_steps: int,
                         forcing: SegmentForcing) -> SegmentCarry:
         """Run n_steps of the atmosphere integration as a compiled kernel.
@@ -1039,7 +1334,15 @@ def build_segment_fn(
             Updated state after n_steps.
         """
         if _use_subcycle(carry, n_steps):
+            if _sharding_active:
+                return _get_sharded_jit("subcycled", True, carry, forcing)(
+                    carry, n_steps, forcing,
+                )
             return _run_subcycled_jit(carry, n_steps, forcing)
+        if _sharding_active:
+            return _get_sharded_jit("single", True, carry, forcing)(
+                carry, n_steps, forcing,
+            )
         return _run_single_jit(carry, n_steps, forcing)
 
     def run_segment(carry: SegmentCarry, n_steps: int,
@@ -1058,11 +1361,27 @@ def build_segment_fn(
         time scaling differs.  The AD pipeline already pays a
         recompute / activation cost dominated by physics, so the
         cond-vs-subcycle JIT-time tradeoff is irrelevant here.
+
+        Opt-in sharded mode (``device_config`` with a live mesh): this
+        becomes a non-donating *sharded* JIT wrapper so single-process
+        multi-GPU benchmark/production callers of ``.raw`` keep the
+        carry face-sharded instead of compiling replicated compute.
+        Still grad-safe (no donation), and still dispatchable from
+        inside an outer trace (no ``int(step_index)`` host read on
+        this path).  With ``device_config=None`` this body is exactly
+        the legacy non-JIT call.
         """
+        if _sharding_active:
+            return _get_sharded_jit("single", False, carry, forcing)(
+                carry, n_steps, forcing,
+            )
         return _run_single(carry, n_steps, forcing)
 
-    # Attach both variants; default is the JIT version for inference
+    # Attach both variants; default is the JIT version for inference.
+    # The sharded-wrapper cache is exposed for tests/introspection
+    # (e.g. asserting "no wrapper rebuild per segment").
     run_segment_jit.raw = run_segment
+    run_segment_jit._sharded_jit_cache = _sharded_jit_cache
     return run_segment_jit
 
 

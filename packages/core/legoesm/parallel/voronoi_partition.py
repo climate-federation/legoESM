@@ -58,6 +58,62 @@ class HaloCommSchedule(NamedTuple):
     recv_idx: jnp.ndarray   # (total_recv,) local indices to fill
 
 
+class BatchedHaloSchedule(NamedTuple):
+    """Union-neighbor comm schedule joining the cell + edge index spaces.
+
+    Built once at layout-build time by :func:`build_batched_halo_schedule`
+    from a partition's ``cell_comm`` and ``edge_comm``.  Lets the MPAS
+    state exchange send ONE message per neighbor per dtype group (u edges
+    + T/p_s cells + tracer cells packed into a single flat buffer) instead
+    of one message per neighbor per entity exchange.
+
+    ``neighbor_ranks`` is the sorted union of the cell and edge neighbor
+    lists.  A rank present in only one of the two entity schedules gets
+    zero counts for the other entity (zero-length pack segments).  The
+    union relation is symmetric across ranks whenever the underlying
+    entity schedules are (rank A lists B iff B lists A) — see
+    ``tests/distributed/test_voronoi_batched_halo.py`` for the mechanical
+    cross-rank check.
+
+    For union neighbor ``i``:
+
+    - cell send rows: ``cell_send_idx[sum(cell_send_counts[:i]) : ... +
+      cell_send_counts[i]]`` (local OWNED cell indices to pack);
+    - cell recv rows: same slicing of ``cell_recv_idx`` (local HALO cell
+      indices to fill);
+    - edge send/recv rows: identical layout in ``edge_send_idx`` /
+      ``edge_recv_idx``.
+
+    All counts are Python ints (layout constants) so every pack/unpack
+    slice has a static shape under JIT.  Concatenating the per-neighbor
+    recv rows in union order yields exactly ``cell_recv_idx`` /
+    ``edge_recv_idx``, so the unpack can do a single functional scatter
+    per field.
+    """
+    neighbor_ranks: tuple[int, ...]
+    cell_send_counts: tuple[int, ...]
+    cell_recv_counts: tuple[int, ...]
+    edge_send_counts: tuple[int, ...]
+    edge_recv_counts: tuple[int, ...]
+    cell_send_idx: jnp.ndarray   # (total_cell_send,) local indices to pack
+    cell_recv_idx: jnp.ndarray   # (total_cell_recv,) local indices to fill
+    edge_send_idx: jnp.ndarray   # (total_edge_send,)
+    edge_recv_idx: jnp.ndarray   # (total_edge_recv,)
+
+    def messages_per_exchange(self, n_dtype_groups: int = 1) -> int:
+        """Messages one batched state exchange posts per rank.
+
+        Pure schedule math for the homogeneous case where every dtype
+        group touches both index spaces (the expected production case:
+        all prognostic fields share one dtype, so ``n_dtype_groups=1``).
+        For heterogeneous groups (e.g. a cell-only dtype group facing an
+        edge-only neighbor) the exact count is
+        :func:`legoesm.parallel.halo_exchange_voronoi.count_batched_messages`,
+        which never exceeds this bound.
+        """
+        return len(self.neighbor_ranks) * n_dtype_groups
+
+
 class VoronoiPartition(NamedTuple):
     """Domain decomposition descriptor for one rank of a Voronoi mesh.
 
@@ -249,6 +305,83 @@ def _assemble_schedule(recv_by_rank, send_by_rank, g2l, neighbor_ranks):
         recv_idx=(jnp.array(recv_idx_all, dtype=jnp.int32)
                   if recv_idx_all
                   else jnp.empty(0, dtype=jnp.int32)),
+    )
+
+
+def build_batched_halo_schedule(
+    cell_comm: HaloCommSchedule,
+    edge_comm: HaloCommSchedule,
+) -> BatchedHaloSchedule:
+    """Join the cell and edge comm schedules into one union-neighbor schedule.
+
+    Per union neighbor (sorted union of the two neighbor lists), the
+    per-entity send/recv index slices are re-laid-out in union-neighbor
+    order; ranks absent from one entity schedule get a zero count for
+    that entity.  Everything here is host-side layout math (numpy) run
+    once at layout-build time — the resulting index arrays are JIT
+    constants.
+
+    The per-neighbor message sequence stays in sorted-rank order on every
+    rank, exactly like the entity schedules it replaces, so the blocking
+    ``sendrecv`` pairing properties of the existing exchange carry over
+    unchanged.
+    """
+
+    def _per_neighbor(comm: HaloCommSchedule):
+        """rank -> (send_rows, recv_rows) numpy slices for one entity."""
+        send_idx = np.asarray(comm.send_idx)
+        recv_idx = np.asarray(comm.recv_idx)
+        out: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        s_off = r_off = 0
+        for i, r in enumerate(comm.neighbor_ranks):
+            s_cnt = comm.send_counts[i]
+            r_cnt = comm.recv_counts[i]
+            out[r] = (
+                send_idx[s_off:s_off + s_cnt],
+                recv_idx[r_off:r_off + r_cnt],
+            )
+            s_off += s_cnt
+            r_off += r_cnt
+        return out
+
+    cell_by_rank = _per_neighbor(cell_comm)
+    edge_by_rank = _per_neighbor(edge_comm)
+    union = sorted(set(cell_by_rank) | set(edge_by_rank))
+
+    _empty = np.empty(0, dtype=np.int32)
+    cell_send_chunks, cell_recv_chunks = [], []
+    edge_send_chunks, edge_recv_chunks = [], []
+    cell_send_counts, cell_recv_counts = [], []
+    edge_send_counts, edge_recv_counts = [], []
+    for r in union:
+        c_s, c_r = cell_by_rank.get(r, (_empty, _empty))
+        e_s, e_r = edge_by_rank.get(r, (_empty, _empty))
+        cell_send_chunks.append(c_s)
+        cell_recv_chunks.append(c_r)
+        edge_send_chunks.append(e_s)
+        edge_recv_chunks.append(e_r)
+        cell_send_counts.append(int(len(c_s)))
+        cell_recv_counts.append(int(len(c_r)))
+        edge_send_counts.append(int(len(e_s)))
+        edge_recv_counts.append(int(len(e_r)))
+
+    def _cat(chunks):
+        if chunks:
+            flat = np.concatenate(chunks).astype(np.int32)
+        else:
+            flat = np.empty(0, dtype=np.int32)
+        return jnp.asarray(flat)
+
+    return BatchedHaloSchedule(
+        neighbor_ranks=tuple(int(r) for r in union),
+        cell_send_counts=tuple(cell_send_counts),
+        cell_recv_counts=tuple(cell_recv_counts),
+        edge_send_counts=tuple(edge_send_counts),
+        edge_recv_counts=tuple(edge_recv_counts),
+        cell_send_idx=_cat(cell_send_chunks),
+        cell_recv_idx=_cat(cell_recv_chunks),
+        edge_send_idx=_cat(edge_send_chunks),
+        edge_recv_idx=_cat(edge_recv_chunks),
     )
 
 
