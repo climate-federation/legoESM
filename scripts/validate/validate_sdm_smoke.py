@@ -50,6 +50,7 @@ from legoesm.atmosphere.physics.microphysics.sdm import (
     ParcelState,
     SDMConfig,
     SuperDropletState,
+    box_water,
     liquid_mixing_ratio,
     run_box,
     run_parcel,
@@ -148,9 +149,11 @@ def run_golovin(outdir):
     boxes = {0: box0}
     cur = box0
     done = 0
+    traj_finite = True
     for target in snap_steps[1:]:
-        cur, _ = run_box(cur, V, dt, target - done, cfg,
+        cur, h = run_box(cur, V, dt, target - done, cfg,
                          do_condensation=False, do_coalescence=True)
+        traj_finite = traj_finite and bool(np.all(np.asarray(h["finite"]) > 0.5))
         done = target
         boxes[target] = cur
 
@@ -214,6 +217,8 @@ def run_golovin(outdir):
         fig.savefig(path, dpi=110)
         plt.close(fig)
         print(f"  saved {path}")
+    ok = ok and traj_finite          # finiteness over EVERY step, not just snapshots
+    print(f"  full-trajectory finite: {traj_finite}")
     print(f"  --> {'PASS' if ok else 'FAIL'} (stable + matches analytic moments)")
     return ok
 
@@ -251,26 +256,37 @@ def run_warm_rain(outdir):
                     q_v=jnp.asarray(1.001 * q_sat0), key=k_run)
 
     dt, n_steps = 2.0, 1800   # 3600 s
+    # TRUE initial diagnostics (history[0] is the post-first-step state).
+    q_l_init, q_rain_init, N_init = (float(v) for v in box_water(box0, V, cfg.r_rain))
+    q_t_init = float(box0.q_v) + q_l_init
     final, hist = run_box(box0, V, dt, n_steps, cfg,
                           do_condensation=True, do_coalescence=True)
+    # Control: condensation ONLY (no coalescence) — isolates collision-driven
+    # rain so threshold crossing by the seeded tail / condensation is ruled out.
+    _, hist_ctrl = run_box(box0, V, dt, n_steps, cfg,
+                           do_condensation=True, do_coalescence=False)
     q_l = np.asarray(hist["q_l"])
     q_rain = np.asarray(hist["q_rain"])
     q_t = np.asarray(hist["q_t"])
     rbar = np.asarray(hist["mean_radius"])
     N = np.asarray(hist["N"])
-    finite = bool(np.all(np.isfinite(q_l)) and np.all(np.isfinite(rbar))
-                  and jnp.all(jnp.isfinite(final.droplets.radius)))
-    q_t0 = q_t[0]
-    massdrift = float(np.max(np.abs(q_t - q_t0)) / q_t0)
-    rain_formed = q_rain[-1] > 10.0 * q_rain[0] + 1e-9 and q_rain[-1] > 1e-6
+    q_rain_ctrl = np.asarray(hist_ctrl["q_rain"])
+    finite = bool(np.all(np.asarray(hist["finite"]) > 0.5)
+                  and np.all(np.asarray(hist_ctrl["finite"]) > 0.5)
+                  and np.all(np.isfinite(q_l)) and np.all(np.isfinite(rbar)))
+    massdrift = float(np.max(np.abs(q_t - q_t_init)) / q_t_init)
+    rain_init_negligible = q_rain_init < 1e-7
+    # rain is COLLISION-driven: the full run far exceeds the no-coalescence control
+    rain_from_collision = (q_rain[-1] > 1e-6
+                           and q_rain[-1] > 20.0 * (q_rain_ctrl[-1] + q_rain_init))
     grew = rbar[-1] > rbar[0]
-    nfell = N[-1] < N[0]
-    print(f"  finite={finite}  q_t drift={massdrift:.2e}  "
-          f"mean_r {rbar[0]*1e6:.1f}->{rbar[-1]*1e6:.1f} um  "
-          f"N {N[0]:.2e}->{N[-1]:.2e}  q_rain {q_rain[0]*1e3:.2e}->{q_rain[-1]*1e3:.3f} g/kg")
-    # 1e-5 relative: fp round-off accumulated over ~1800 cbrt/cube coalescence +
-    # condensation-exchange steps (each step conserves q_t analytically).
-    ok = finite and (massdrift < 1e-5) and rain_formed and grew and nfell
+    nfell = N[-1] < N_init
+    print(f"  finite={finite}  q_t drift={massdrift:.2e}  q_rain_init={q_rain_init:.1e}  "
+          f"mean_r {rbar[0]*1e6:.1f}->{rbar[-1]*1e6:.1f}um  N {N_init:.2e}->{N[-1]:.2e}  "
+          f"q_rain {q_rain[-1]*1e3:.3f} vs control {q_rain_ctrl[-1]*1e3:.2e} g/kg")
+    # 1e-5 relative: fp round-off over ~1800 cbrt/cube + condensation steps.
+    ok = (finite and (massdrift < 1e-5) and rain_init_negligible
+          and rain_from_collision and grew and nfell)
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -324,7 +340,9 @@ def run_parcel_case(outdir):
     S = np.asarray(hist["S"]); q_l = np.asarray(hist["q_l"])
     q_t = np.asarray(hist["q_t"]); rbar = np.asarray(hist["mean_radius"])
     q_t0 = float(parcel0.q_v + liquid_mixing_ratio(parcel0.droplets, 1.0))
-    finite = bool(np.all(np.isfinite(S)) and np.all(np.isfinite(q_l)))
+    finite = bool(np.all(np.isfinite(S)) and np.all(np.isfinite(q_l))
+                  and np.all(np.isfinite(rbar))
+                  and np.all(np.isfinite(np.asarray(hist["T"]))))
     massdrift = float(np.max(np.abs(q_t - q_t0)) / q_t0)
     peaked = S.max() > 1.0 and S.argmax() < len(S) - 1 and S[-1] < S.max()
     small_ss = (S.max() - 1.0) < 0.05      # realistic peak supersaturation (<5%)

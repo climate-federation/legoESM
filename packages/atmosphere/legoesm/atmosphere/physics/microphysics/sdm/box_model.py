@@ -237,7 +237,10 @@ def run_box(
     mass-weighted mean radius. ``static_argnames=("n_steps", "cfg",
     "do_condensation", "do_coalescence")`` when wrapping in ``jax.jit``.
     """
-    M_air = box0.p / (constants.R_d * box0.T) * V_cell   # conserved dry-air mass
+    # Conserved DRY-air mass: q_v is a dry-air mixing ratio, so the dry-air
+    # partial pressure is p - e (e = vapor partial pressure), not the total p.
+    e0 = box0.p * box0.q_v / (constants.epsilon + box0.q_v)
+    M_air = (box0.p - e0) / (constants.R_d * box0.T) * V_cell
 
     def body(box, _):
         box = box_step(box, V_cell, M_air, dt, cfg, do_condensation, do_coalescence)
@@ -250,11 +253,37 @@ def run_box(
         # mass-weighted mean radius Σ(ξ m R)/Σ(ξ m)
         mw = m
         mean_r = jnp.sum(mw * d.radius) / jnp.maximum(jnp.sum(mw), 1e-300)
+        # per-step finiteness flag (1.0 = all finite) for full-trajectory stability
+        finite = (jnp.all(jnp.isfinite(d.radius))
+                  & jnp.all(jnp.isfinite(d.multiplicity))
+                  & jnp.isfinite(box.T) & jnp.isfinite(box.q_v)).astype(box.T.dtype)
         diag = {
             "q_l": q_l, "q_rain": q_rain, "q_v": box.q_v, "T": box.T,
-            "q_t": box.q_v + q_l, "N": N, "mean_radius": mean_r,
+            "q_t": box.q_v + q_l, "N": N, "mean_radius": mean_r, "finite": finite,
         }
         return box, diag
 
     final, history = lax.scan(body, box0, xs=None, length=n_steps)
     return final, history
+
+
+def box_water(
+    box: BoxState,
+    V_cell: float | jax.Array,
+    r_rain: float = float("inf"),
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Liquid diagnostics ``(q_l, q_rain, N)`` for a box state.
+
+    Uses the SAME dry-air-mass normalizer as :func:`run_box`
+    (``M_air = (p - e)/(R_d T)·V_cell``), so an explicitly computed *initial*
+    baseline matches the scanned history exactly (the history's first entry is
+    the post-first-step state, not the initial). ``q_rain`` is the liquid in
+    droplets with ``R >= r_rain`` (default inf -> 0). ``N = Σξ``.
+    """
+    e = box.p * box.q_v / (constants.epsilon + box.q_v)
+    M_air = (box.p - e) / (constants.R_d * box.T) * V_cell
+    m = represented_water_mass(box.droplets)
+    q_l = jnp.sum(m) / M_air
+    q_rain = jnp.sum(jnp.where(box.droplets.radius >= r_rain, m, 0.0)) / M_air
+    N = jnp.sum(box.droplets.active * box.droplets.multiplicity)
+    return q_l, q_rain, N
