@@ -99,14 +99,40 @@ def test_freeze_melt_round_trip_conserves():
                         + mass_density(melt.f_liquid, m)
                         + mass_density(melt.f_ice, m))
     np.testing.assert_allclose(total_after, total_before, rtol=1e-12)
+    # Heat cancellation: fully melting back exactly the frozen mass releases
+    # then re-absorbs the same fusion heat → net ~0 (codex iter-12: round
+    # trip must check energy, not just mass). At 200 s every frozen bin
+    # melts (frac=1), so melt mass == frozen mass and dT_freeze+dT_melt=0.
+    np.testing.assert_allclose(
+        float(mass_density(melt.f_liquid, m)),
+        float(mass_density(frz.f_ice, m)), rtol=1e-12)   # all ice melted
+    assert float(frz.dT) > 0.0 and float(melt.dT) < 0.0
+    np.testing.assert_allclose(float(frz.dT + melt.dT), 0.0, atol=1e-12)
 
 
-def test_melting_differentiable_in_T():
+def test_melting_gradient_in_f_ice_is_melt_fraction():
+    # The real sensitivity is in f_ice: d(liquid_k)/d(f_ice_k) = melt
+    # fraction_k (linear). The T-gate is a step (no T-sensitivity above
+    # freezing) — codex review iter 12: don't overclaim "differentiable
+    # in T".
     m, f = _ice()
+    cfg = FastSBMConfig()
     rho = jnp.asarray(1.0)
+    # Gradient of total melt water w.r.t. each ice bin = mass_k·dm_k·frac_k.
+    from legoesm.atmosphere.physics.microphysics.fast_sbm import (
+        bin_mass_widths)
 
-    def liquid_mass(T):
-        return mass_density(melt_step(f, m, T, rho, 5.0).f_liquid, m)
+    def melt_water(fi):
+        return mass_density(
+            melt_step(fi, m, jnp.asarray(constants.T_freeze + 3.0), rho,
+                      5.0).f_liquid, m)
 
-    g = jax.grad(liquid_mass)(jnp.asarray(constants.T_freeze + 3.0))
-    assert np.isfinite(float(g))
+    g = jax.grad(melt_water)(f)
+    expect = np.asarray(m * bin_mass_widths(m)
+                        * melt_fraction(m.shape[0], 5.0, cfg))
+    np.testing.assert_allclose(np.asarray(g), expect, rtol=1e-12)
+    # T-gradient above freezing is ~0 (rate ladder is T-independent).
+    gT = jax.grad(lambda T: mass_density(
+        melt_step(f, m, T, rho, 5.0).f_liquid, m))(
+        jnp.asarray(constants.T_freeze + 3.0))
+    assert float(gT) == 0.0

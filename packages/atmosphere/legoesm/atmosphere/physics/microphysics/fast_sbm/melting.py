@@ -51,6 +51,10 @@ __physics_contract__ = {
         "and ΔT = −(L_f/c_pd)·Δq_melt <= 0. Below freezing nothing happens."
     ),
     "conserves": ["mass"],
+    # Differentiable in f_ice (linear) and rho; the T-dependence is only the
+    # on/off gate at T_freeze (a step, as in the oracle's IF(DEL_T>=0)) — the
+    # constant-rate ladder carries NO temperature sensitivity above freezing,
+    # so d/dT of the melt is zero there and undefined exactly at T_freeze.
     "differentiable": True,
     "reference": (
         "Khain et al. (2004) JAS 61:2963; WRF module_mp_fast_sbm.F "
@@ -59,7 +63,8 @@ __physics_contract__ = {
     "idealized_test": (
         "No melting at T < 0 °C; the smallest bins melt fully in one step, "
         "mid/large bins melt the oracle fractions meltrate·dt; ice+liquid "
-        "mass conserved; ΔT = −(L_f/c_pd)·Δq_melt; differentiable in T."
+        "mass conserved; ΔT = −(L_f/c_pd)·Δq_melt; gradient in f_ice is the "
+        "per-bin melt fraction (the T-gate is a step, not smooth)."
     ),
 }
 
