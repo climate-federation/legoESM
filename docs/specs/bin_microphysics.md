@@ -32,7 +32,7 @@ Process inventory (oracle subroutine → port module → status):
 | Bin grid + moments | parameter block, QC/QNC diags | `fast_sbm/grid.py` | **done (iter 1)** |
 | Collision kernels | `Kernals_KS` (l. 6238) — NOTE: only pressure-interpolates file-read `YW*` tables | computed kernels (reuse `sdm/kernels.py` Golovin/Hall/Long) + optional table load | Golovin **done (iter 2)**; Hall/efficiency todo |
 | Collision-coalescence (Bott flux) | `coll_xxx_lwf` + `courant_bott_KS` | `fast_sbm/collision.py` | **liquid self-collection done (iter 2)**; LWF variant (snow), xyx/xyz cross-species todo |
-| Diffusional growth (cond/evap dep/sub) | `JERRATE_KS`→`JERTIMESC_KS`→`JERSUPSAT_KS`→`JERDFUN_KS`/`JERNEWF_KS` | `diffusional_growth.py` + `supersaturation.py` + `remap.py` | **full warm chain done (iters 3-5)**; ONECOND1 substepping driver next |
+| Diffusional growth (cond/evap dep/sub) | `JERRATE_KS`→`JERTIMESC_KS`→`JERSUPSAT_KS`→`JERDFUN_KS`/`JERNEWF_KS`→`ONECOND1` | `diffusional_growth.py` + `supersaturation.py` + `remap.py` + `condensation_driver.py` | **warm chain + ONECOND1 driver done (iters 3-6)** |
 | Drop nucleation (CCN activation) | `JERNUCL01_KS`, `WATER_NUCLEATION`, `LogNormal_modes_Aerosol` | `fast_sbm/nucleation.py` | todo |
 | Freezing/melting | `FREEZ`, melting block in FAST_SBM | `fast_sbm/ice_phase.py` | todo |
 | Breakup (collisional + spontaneous) | `coll_breakup_KS`, `Spont_Rain_BreakUp` | `fast_sbm/breakup.py` | todo |
@@ -176,3 +176,20 @@ EXCLUDED.
   floor); tail-merge folds spurious tail + window mass conserved;
   d(mass)/d(S_int) finite positive THROUGH the remap; jit+vmap columns
   with s_int sign mix.
+
+### Iter 6 (2026-06-11)
+- **`fast_sbm/condensation_driver.py`** — oracle `ONECOND1` assembled:
+  S from `thermo.relative_humidity`, B/SFN/R chain, JERSUPSAT step with
+  in-step forcing 0 (oracle passes `DYN1=0`), growth+remap, exact closure
+  `q−=Δq_c`, `T+=(L_v/c_pd)Δq_c`. Key oracle finding: this version's
+  substep limiter is vestigial (`DTNEWL=min(DT,TIMEREV)` → ONE pass) and
+  the final `JERDFUN_NEW(SUPINTW)` remap of the original spectrum then
+  coincides with the in-loop remap — port implements the single-pass form
+  directly (documented; wrap in `lax.scan` if a future oracle re-enables
+  `DT_WATER_COND`). Ships contract (conserves moisture+energy).
+- **Simple case passes**: supersaturated parcel (S=2%, 100 cm⁻³ @ 10 µm)
+  condenses — total water invariant 1e-13, `c_pd ΔT = −L_v Δq_v` 1e-12,
+  S decays toward equilibrium without overshoot; RH 90% parcel evaporates
+  (number non-increasing); saturated+empty spectrum = exact fixed point;
+  40-step scan: |S| monotone ↓, ends <10% of initial; d(dq_c)/d(T,q)
+  finite, d(dq_c)/dq > 0. 47 fast_sbm tests green total.
