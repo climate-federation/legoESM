@@ -76,6 +76,18 @@ M_H2O = 18.01528        # [g/mol] water
 epsilon = R_d / R_v              # Molecular weight ratio (~0.622)
 
 # ==============================================================================
+# Cloud-microphysics material properties
+# (diffusional droplet growth: Super-Droplet Method, bin/bulk condensation)
+# ==============================================================================
+D_vapor = 2.21e-5               # Water-vapor diffusivity in air [m^2/s]
+                                # (Pruppacher & Klett 1997; CONST value)
+k_air = 2.40e-2                 # Thermal conductivity of air [W/(m*K)]
+                                # (Pruppacher & Klett 1997)
+sigma_water = 0.0728            # Surface tension of the water-air interface [N/m]
+                                # at ~293 K (Pruppacher & Klett 1997) — Kelvin
+                                # curvature term in Köhler droplet growth
+
+# ==============================================================================
 # Turbulence
 # ==============================================================================
 kappa_von_karman = 0.4          # Von Kármán constant for the log-law (Pope 2000)
