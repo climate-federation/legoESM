@@ -79,12 +79,12 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-# Ensure scripts/ is on sys.path (for ocean_test_matrix package).
+# Ensure scripts/matrix/ is on sys.path (for the ocean_test_matrix package).
 # __file__ is scripts/matrix/run_ocean_test_matrix.py; the ocean_test_matrix
-# package lives at scripts/ocean_test_matrix, so parents[1] == scripts/.
-_SCRIPTS_DIR = str(Path(__file__).resolve().parents[1])
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
+# package lives alongside it at scripts/matrix/ocean_test_matrix/.
+_MATRIX_DIR = str(Path(__file__).resolve().parent)
+if _MATRIX_DIR not in sys.path:
+    sys.path.insert(0, _MATRIX_DIR)
 
 # JAX configuration must happen before any jax.numpy import.
 import jax
@@ -524,7 +524,7 @@ def _apply_drift_tolerance(
     helper (iter-127 codex iter-126-followup LOW-5).
 
     Pre-iter-127, the helper was duplicated in this module
-    AND in ``scripts/ocean_test_matrix/timeloop.py``.  iter-127
+    AND in ``scripts/matrix/ocean_test_matrix/timeloop.py``.  iter-127
     consolidates so future fixes flow through one place.
     The wrapper exists for backward compatibility with the
     existing callsites in this module.
@@ -6322,7 +6322,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Guarantee that per-case results/<case>/<grid>/<res>/ directories "
             "contain the snapshot NetCDFs and conservation CSVs that the "
             "ocean fidelity layer (tests/ocean/fidelity, "
-            "scripts/ocean_fidelity/run_comparison.py) reads. "
+            "scripts/validate/ocean_fidelity/run_comparison.py) reads. "
             "Default-off: runners only emit their full per-case diagnostics "
             "when this flag is passed or when a tier explicitly requires it."
         ))

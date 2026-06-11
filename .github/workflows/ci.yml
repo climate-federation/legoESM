@@ -49,9 +49,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install ruff
+      # dev extra (not bare ruff): lint-imports/grimp must be able to import the
+      # installed legoesm namespace to walk the dependency graph.
+      - run: pip install -e ".[dev]"
       - name: Ruff check (errors only)
         run: ruff check src/legoesm --select E9,F63,F7,F82 --statistics
+      - name: Import-boundary contracts (import-linter)
+        run: lint-imports
 
   type-check:
     name: Type Check (core)
@@ -92,6 +96,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
+      # Deliberately NO JAX_ENABLE_X64 here: the unit tier is fp32-by-default
+      # (CLAUDE.md: "finite-volume can float32"); unit tests that need x64
+      # self-enable it at module scope (e.g. test_spectral_plane_ops.py,
+      # test_precision_modes.py). Setting it job-wide would change what the
+      # fp32 paths test. x64 jobs: top-level-fidelity-tests, visual-regression.
+      # Known wart: a module-level jax.config.update("jax_enable_x64", True)
+      # leaks across the pytest session for subsequently-imported modules.
       - name: Run unit tests
         run: |
           python -m pytest tests/unit/ -x --timeout=300 \

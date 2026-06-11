@@ -79,7 +79,7 @@ dry column) already locked by L1's grad probe + `test_L2_rhines_dry_column_finit
 GATE: `JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 pytest tests/ocean/unit/test_eke.py -q` → 35 passed.
 
 ### 2026-05-29 · L4 done — oracle confirmation: eke_len reproduced to MACHINE PRECISION
-`scripts/ocean_fidelity/compare_eke_len_veros.py`: ran Veros ACC (enable_eke, 864000 s), captured
+`scripts/validate/ocean_fidelity/compare_eke_len_veros.py`: ran Veros ACC (enable_eke, 864000 s), captured
 `eke,K_gm,eke_len,L_rossby,L_rhines,Nsqr,dzw,maskW,coriolis_t,beta`, and fed Veros's OWN
 `(int_N_dz=Σ√N²·dzw·maskW, |coriolis_t|, beta, eke)` into the L1 functions. At the diagnostic time
 level (tau=2):
@@ -92,7 +92,7 @@ scale (L_rhines mean 8.29 km) IS the limiter, exactly the ~25x reduction E9 flag
 deeper analog of E9 (which matched K_gm given Veros's eke_len); now the eke_len machinery ITSELF is
 reproduced bit-exactly. The Rhines-limited mixing-length FORM matches the oracle ⇒ EKE can be adopted
 apples-to-apples in the ACC recipe (L5). Informational gate (needs Veros); repro:
-`JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python scripts/ocean_fidelity/compare_eke_len_veros.py`.
+`JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python scripts/validate/ocean_fidelity/compare_eke_len_veros.py`.
 NEXT: L5 — flip EKE on in `build_acc_model_config` (`eke=EKEConfig(mixing_length_scheme="rhines",
 eke_cross=2.0, eke_crhin=1.0)`; other params already default to ACC); update the stale
 `build_acc_physics_config` docstring + strategy §8 ledger; lock with a recipe test.
@@ -147,7 +147,7 @@ is NOT cleanly attributable to the integrator alone. The GM coefficient is apple
 exact form, L4); the Redi diffusivity is NOT yet — reproducing `K_iso=K_gm` (prognostic Redi) is the
 documented next must-build, and the free-run should be re-measured AFTER that lands. Updated the
 driver's `_KNOWN_DIFFERENCES` accordingly. Repro: `JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python
-scripts/ocean_fidelity/run_acc_freerun.py --years 0.0821918`.
+scripts/validate/ocean_fidelity/run_acc_freerun.py --years 0.0821918`.
 
 # Follow-on build: prognostic Redi `K_iso = K_gm` (R-gates)
 

@@ -113,8 +113,8 @@ Key results to build on, not re-derive:
 - SMC03 unit tests: 4 phases (31 tests) covering harmonic slopes,
   pressure interpolation, full PGF operators, pipeline integration
 - Partial-cell unit tests: phases 0-7 (28+ tests)
-- BH seamount script: `scripts/realistic_geometry_validation/run_phase3a_seamount.py`
-- ETOPO script: `scripts/realistic_geometry_validation/run_phase6_etopo.py`
+- BH seamount script: `scripts/validate/realistic_geometry/run_phase3a_seamount.py`
+- ETOPO script: `scripts/validate/realistic_geometry/run_phase6_etopo.py`
 - Rest-state experiment: `src/legoesm/ocean/experiments/rest_state.py`
 
 ### What was NOT tested on that branch
@@ -368,7 +368,7 @@ varying η and stratification don't reactivate the partial-cell pathology.
 - `tests/ocean/pgf/test_pgf_tiers.py` — parameterised Tier 1-3 tests
 - `tests/ocean/pgf/test_pgf_equatorial.py` — equatorial diagnostics
 - `src/legoesm/ocean/diagnostics/pgf_diagnostics.py` — D1, D2, D3
-- `scripts/pgf_validation/run_pgf_tier_ladder.py` — full tier runner
+- `scripts/validate/pgf_validation/run_pgf_tier_ladder.py` — full tier runner
 
 ### Files to modify
 - `src/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py` — Bug #1 fix

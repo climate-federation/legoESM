@@ -17,7 +17,8 @@ import sys
 import xarray as xr
 
 
-ROOT = "/work/bd1179/CMIP7_forcings_raw"
+# Raw CMIP7 forcing staging root (Levante default); override per machine.
+ROOT = os.environ.get("LEGOESM_CMIP7_RAW", "/work/bd1179/CMIP7_forcings_raw")
 
 # Representative file per category. Globs are resolved to the first alphabetical
 # match so that the report reflects a concrete schema, not an abstract pattern.

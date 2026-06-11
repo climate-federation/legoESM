@@ -68,7 +68,7 @@ TURBULENCE_SCHEMES = (
 
 
 def build_initial_profiles(nlev: int, T_sfc: float):
-    """Moist tropical sounding (same construction as scripts/scm/rce.py):
+    """Moist tropical sounding (same construction as scripts/matrix/scm/rce.py):
     tropospheric lapse 6.5 K/km capped at 200 K, near-saturated near-
     surface humidity decaying upward."""
     sigma = jnp.linspace(0.01, 1.0, nlev)

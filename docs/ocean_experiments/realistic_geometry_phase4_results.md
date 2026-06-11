@@ -91,7 +91,7 @@ Five plots saved alongside the restarts:
 - `moc_progress.png` — meridional overturning ψ(lat, z) [Sv]
 - `barotropic_streamfunction_progress.png` — ψ_bt(lat, lon) [Sv]
 
-Re-runnable from the same script (`scripts/global_overturning/plot_realistic_geometry_progress.py`) as further restarts land.
+Re-runnable from the same script (`scripts/run/global_overturning/plot_realistic_geometry_progress.py`) as further restarts land.
 
 ## Qualitative assessment
 
@@ -188,9 +188,9 @@ residual from ``O(h²·ρ'')`` to ``O(h³·ρ''')``.  Multi-day work.
 
 ## File pointers
 
-- Run script: `scripts/global_overturning/run_global_overturning_realistic_geometry.py`
-- MEO sweep: `scripts/realistic_geometry_validation/plot_meo_bathymetry_sweep.py`
-- Plotting: `scripts/global_overturning/plot_realistic_geometry_progress.py`
+- Run script: `scripts/run/global_overturning/run_global_overturning_realistic_geometry.py`
+- MEO sweep: `scripts/validate/realistic_geometry/plot_meo_bathymetry_sweep.py`
+- Plotting: `scripts/run/global_overturning/plot_realistic_geometry_progress.py`
 - Restarts (years 0, 5, 10, 15, 20): `results/ocean/global_overturning_realistic_geometry/restart_day*.npz`
 - Plots:        `results/ocean/global_overturning_realistic_geometry/{timeseries,snapshots,T_zonal_mean,moc,barotropic_streamfunction}_progress.png`
 - Run log:      `/tmp/go_rg_50yr_r02_v2.log` (year-by-year diagnostics, last printed yr 20.78)
@@ -211,7 +211,7 @@ multi-day fixes.
 
 ### Stage 0a — Surface-speed × H_bathy overlay (existing 20-yr restarts)
 
-Diagnostic script: `scripts/global_overturning/diagnose_surface_speed_bands.py`.
+Diagnostic script: `scripts/run/global_overturning/diagnose_surface_speed_bands.py`.
 Plots:
 - `results/ocean/global_overturning_realistic_geometry/speed_bathy_overlay.png`
 - `.../u_v_components.png`
@@ -235,7 +235,7 @@ shifted the diagnosis toward the C-grid 2Δy null mode.
 
 ### Stage 0b' — A_h sweep (1e4 / 5e4 / 2e5)
 
-Driver: `scripts/global_overturning/diagnose_ah_sweep.py`.  Three 2-yr
+Driver: `scripts/run/global_overturning/diagnose_ah_sweep.py`.  Three 2-yr
 spinups, identical config except A_h.  Restarts in
 `results/ocean/ah_sweep/run_Ah{1e04,5e04,2e05}/`, comparison plots in
 `results/ocean/ah_sweep/`.
@@ -263,7 +263,7 @@ only sub-linearly while off-equator drops near-linearly).
 
 ### D1 — Localising the A_h=2e5 blow-up
 
-Driver: `scripts/global_overturning/diagnose_blowup_and_weno.py`.
+Driver: `scripts/run/global_overturning/diagnose_blowup_and_weno.py`.
 Outputs in `results/ocean/ah_diagnostics/ah2e5_blowup/`.
 
 Fine-cadence rerun with η-tracking every 5 sim-days:
@@ -339,7 +339,7 @@ Landed on this branch:
 - 6 unit tests in `tests/ocean/unit/test_ah_lat_scaling.py` (shape,
   endpoints, equator-near-unity, off-is-identity, scales-correctly-at-
   high-lat, viscous-CFL-latitude-independent).  All passing.
-- Sweep driver: `scripts/global_overturning/diagnose_cos2lat_sweep.py`.
+- Sweep driver: `scripts/run/global_overturning/diagnose_cos2lat_sweep.py`.
   Three 2-yr spinups at A_h_global ∈ {1e5, 2e5, 5e5}, all with
   `A_h_lat_scaling=True`.  Outputs in `results/ocean/cos2lat_sweep/`.
 
@@ -499,7 +499,7 @@ Items previously listed as gated on AL81 budget test are now closed
 
 ## Session 2026-05-02 — Phase 4(c) production 50-yr run (overnight)
 
-Driver: ``scripts/global_overturning/run_global_overturning_realistic_50yr_polar_cap.py``.
+Driver: ``scripts/run/global_overturning/run_global_overturning_realistic_50yr_polar_cap.py``.
 Output: ``results/ocean/global_overturning_realistic_50yr_polar_cap/``.
 
 Configuration (full fix stack from session 2026-05-01 evening):
@@ -606,7 +606,7 @@ solved.  It now is.
 
 ### Artefacts (Phase 4(c))
 
-- Driver: ``scripts/global_overturning/run_global_overturning_realistic_50yr_polar_cap.py``
+- Driver: ``scripts/run/global_overturning/run_global_overturning_realistic_50yr_polar_cap.py``
 - Restarts: ``results/ocean/global_overturning_realistic_50yr_polar_cap/restart_day{000000..016438}.npz`` (yr 0-45)
 - Progress plots: ``timeseries_progress.png``, ``snapshots_progress.png``,
   ``T_zonal_mean_progress.png``, ``moc_progress.png``,
@@ -622,10 +622,10 @@ solved.  It now is.
 ### Key artefacts from this session
 
 - Diagnostic scripts:
-  - `scripts/global_overturning/diagnose_surface_speed_bands.py`
-  - `scripts/global_overturning/diagnose_ah_sweep.py`
-  - `scripts/global_overturning/diagnose_blowup_and_weno.py`
-  - `scripts/global_overturning/diagnose_cos2lat_sweep.py`
+  - `scripts/run/global_overturning/diagnose_surface_speed_bands.py`
+  - `scripts/run/global_overturning/diagnose_ah_sweep.py`
+  - `scripts/run/global_overturning/diagnose_blowup_and_weno.py`
+  - `scripts/run/global_overturning/diagnose_cos2lat_sweep.py`
 - Implementation: `src/legoesm/ocean/dynamics/latlon_cgrid_operators.py`
   (added `laplacian_scaling_factor`),
   `src/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py` (plumbing),
@@ -635,7 +635,7 @@ solved.  It now is.
 
 ## Session 2026-05-02 afternoon — Phase 4(c) extension to 100 yr
 
-Driver: ``scripts/global_overturning/run_global_overturning_realistic_100yr_continuation.py``.
+Driver: ``scripts/run/global_overturning/run_global_overturning_realistic_100yr_continuation.py``.
 Restarts continue to write into the same output directory as the
 50-yr run (``results/ocean/global_overturning_realistic_50yr_polar_cap/``)
 so the progress plots cover yr 0-100 in one figure set.
@@ -728,7 +728,7 @@ without any "but did the dynamical core finally settle?" caveat.
 
 ### Artefacts (extension)
 
-- Driver: ``scripts/global_overturning/run_global_overturning_realistic_100yr_continuation.py``
+- Driver: ``scripts/run/global_overturning/run_global_overturning_realistic_100yr_continuation.py``
 - Restarts: ``results/ocean/global_overturning_realistic_50yr_polar_cap/restart_day{018264..036494}.npz`` (yr 50-100)
 - Continuation-segment plot: ``umax_timeseries_continuation.png`` (yr 45-100, marked PASS)
 - Progress plots refreshed in-place (now yr 0-100):

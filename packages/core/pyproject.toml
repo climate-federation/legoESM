@@ -38,6 +38,9 @@ dependencies = [
 
 [project.optional-dependencies]
 mesh = ["pymetis>=1.2", "scipy>=1.10"]
+# Tested jax envelope for MPI is >=0.8,<0.10 (runtime-guarded in
+# parallel/reductions.py). No jax cap here — see root pyproject [mpi] comment;
+# pinned working combo lives in requirements_mpi.txt.
 mpi = ["mpi4py>=4.1,<5", "mpi4jax>=0.8,<0.9"]
 
 # Namespace package: NO legoesm/__init__.py, so this wheel ships

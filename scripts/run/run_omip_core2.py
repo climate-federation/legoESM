@@ -1984,7 +1984,10 @@ def main() -> int:
     # failure never aborts a long integration.
     manifest_path = None
     try:
-        from legoesm.driver.restart import write_run_manifest
+        from legoesm.driver.restart import (
+            dataset_provenance_entry,
+            write_run_manifest,
+        )
         from legoesm.ocean.config import OceanRunRecord
         run_record = OceanRunRecord(
             runtime_config=model.config,
@@ -2005,6 +2008,15 @@ def main() -> int:
         manifest_path = write_run_manifest(
             out_dir, run_record, config_kind="ocean",
             runner_tag="run_omip_core2",
+            dataset_provenance=[
+                dataset_provenance_entry(pth, dataset_id=did)
+                for did, pth in (
+                    ("core2_forcing", args.forcing_path),
+                    ("woa_t", args.woa_t),
+                    ("woa_s", args.woa_s),
+                )
+                if pth
+            ],
         )
         print(f"[setup] wrote run manifest {manifest_path}")
     except Exception as _exc:  # noqa: BLE001 — provenance is best-effort

@@ -268,4 +268,4 @@ the bottom (z-star bathymetry-step PGF errors).
 - `src/legoesm/ocean/dynamics/barotropic_implicit_latlon_cgrid.py` — CG solver
 - `src/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py` — model step
 - `scripts/run/run_omip.py` — OMIP pipeline with bathymetry processing
-- `scripts/global_overturning/diagnose_momentum_balance.py` — budget analysis
+- `scripts/run/global_overturning/diagnose_momentum_balance.py` — budget analysis

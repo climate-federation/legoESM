@@ -234,14 +234,14 @@ A5. **Shape and dtype:** output shape `(nEdges, nlev)`; dtype matches
 
 ### Phase B — seamount end-to-end (regression)
 
-Re-run `scripts/mpas_realistic_geometry/run_mpas_seamount_rest.py` with
+Re-run `scripts/run/mpas_realistic_geometry/run_mpas_seamount_rest.py` with
 `--schemes centered adcroft smc03`. Pass criterion: SMC03 max|u| at
 6h ≤ centered (~few×1e-5 m/s); ideally lower than both. Update the
 script's `--schemes` default to include `smc03` once it passes.
 
 ### Phase C — ETOPO 30-day smoke
 
-`scripts/mpas_realistic_geometry/run_mpas_etopo_spinup.py` with
+`scripts/run/mpas_realistic_geometry/run_mpas_etopo_spinup.py` with
 `pgf_scheme="smc03"`, `--years 0.083` (30 days), `--dt 500`. Pass
 criterion: completes without NaN (vs. centered's day-5 blowup).
 Snapshot the bottom-trapped diagnostic (re-run the
@@ -1613,7 +1613,7 @@ contrast) regimes: at a true coast both kite-mean and min-rule give
 the same answer; the hybrid only differs at *steps*, where it
 amplifies q in the wrong direction.
 
-**Diagnostic on ETOPO+ico4** (`scripts/mpas_realistic_geometry/diagnose_vertex_thickness_hybrid.py`):
+**Diagnostic on ETOPO+ico4** (`scripts/run/mpas_realistic_geometry/diagnose_vertex_thickness_hybrid.py`):
 
 | metric | value |
 |--------|-------|
@@ -1782,7 +1782,7 @@ Possible mechanisms (not yet probed):
 
 ### Reproducibility
 
-- Diagnostic: ``scripts/mpas_realistic_geometry/diagnose_vertex_thickness_hybrid.py``
+- Diagnostic: ``scripts/run/mpas_realistic_geometry/diagnose_vertex_thickness_hybrid.py``
 - A/B re-run: ``run_mpas_etopo_spinup.py --vertex-thickness-alpha {0.0|0.5} --tau-max 0.0 --years 0.247``
 - Logs: ``outputs/vth_audit/run_alpha0p{0,5}_{,AUDIT2_FIXED_}90d.log``
 

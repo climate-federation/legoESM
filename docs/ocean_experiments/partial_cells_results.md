@@ -560,7 +560,7 @@ foundation.
 - ``--pgf-scheme`` flag on the BH script; output dir tagged so
   results don't collide with the Adcroft baseline.
 - New Phase 6 ETOPO script
-  (``scripts/realistic_geometry_validation/run_phase6_etopo.py``)
+  (``scripts/validate/realistic_geometry/run_phase6_etopo.py``)
   with side-by-side Adcroft/SMC03 benchmarking on real bathymetry,
   showing 100-150× SMC03 advantage in the rest-state magnitude
   before the global-domain instability sets in.
@@ -648,6 +648,6 @@ Partial-cell-related issues to address before a merge:
 - `tests/ocean/unit/test_partial_cells_phase{0..6}.py` — 28 tests.
 
 ### Scripts
-- `scripts/realistic_geometry_validation/run_phase3a_seamount.py` —
+- `scripts/validate/realistic_geometry/run_phase3a_seamount.py` —
   BH seamount stress test, supports `--coord {zstar,partial}` and
   `--bottom-drag-r`.

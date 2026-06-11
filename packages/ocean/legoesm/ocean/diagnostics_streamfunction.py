@@ -15,7 +15,7 @@ barotropic_streamfunction
 History
 -------
 The two helpers used to live inline in
-``scripts/global_overturning/plot_realistic_geometry_progress.py``.
+``scripts/run/global_overturning/plot_realistic_geometry_progress.py``.
 They were moved here once a second consumer (the tropical-OMIP
 progress plotter) appeared, since copy-and-rename across plot scripts
 is forbidden by the project's CLAUDE.md.

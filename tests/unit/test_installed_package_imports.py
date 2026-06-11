@@ -108,10 +108,10 @@ PRODUCTION_ROOTS = tuple(
 # pattern. They are out of scope for the held_suarez cleanup but
 # remain known tech debt; flagged for a follow-up audit.
 GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
-    "scripts/diagnostic/diag_williamson2.py": frozenset({
+    "scripts/tmp/diagnostic/diag_williamson2.py": frozenset({
         "tests.unit.test_williamson2_cdgrid",
     }),
-    "scripts/diagnostic/validate_cubed_sphere_fv3_atmos.py": frozenset({
+    "scripts/validate/validate_cubed_sphere_fv3_atmos.py": frozenset({
         "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1",
         "tests.test_cases.williamson",
     }),

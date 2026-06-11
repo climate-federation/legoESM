@@ -27,12 +27,20 @@ jobs:
           mpirun --version
 
       - name: Install Python Dependencies
+        # Deterministic tested MPI stack (jax 0.9.2 + mpi4jax 0.8.1.post2) —
+        # see requirements_mpi.txt and the matching comment in
+        # mpi-distributed.yml; bare ".[dev,mpi]" resolves jax 0.10+ which
+        # breaks mpi4jax 0.8/0.9 at runtime (CustomCallV1 removed).
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,mpi]"
+          pip install -e ".[dev]"
+          pip install -r requirements_mpi.txt
 
       - name: Run Nightly Long-Run MPI Ocean Conservation
         env:
+          # mpi4jax 0.8's own version self-check predates jax 0.9 and warns
+          # even inside legoESM's tested envelope; legoESM's runtime guard
+          # (parallel/reductions.py, NOT suppressed) is the authoritative check.
           MPI4JAX_NO_WARN_JAX_VERSION: "1"
         run: |
           mpirun --oversubscribe -np 3 \

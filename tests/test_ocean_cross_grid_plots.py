@@ -1,6 +1,6 @@
 """Unit tests for the cross-grid comparison + diagnostic helpers in
 ``scripts/matrix/run_ocean_test_matrix.py`` and the modular copy at
-``scripts/ocean_test_matrix/diagnostic_io.py``.
+``scripts/matrix/ocean_test_matrix/diagnostic_io.py``.
 
 Pins the iter-19 latlon-C-grid staggered-velocity averaging fix and the
 iter-21 defensive shape-validation refinement.
@@ -29,8 +29,8 @@ def _read_repo_or_legoesm(repo, rel):
 _SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-# run_ocean_test_matrix moved to scripts/matrix/; ocean_test_matrix/ subdir stays
-# under scripts/ (used below via _SCRIPT_DIR).
+# run_ocean_test_matrix and the ocean_test_matrix/ package both live under
+# scripts/matrix/ (bucket layout; see tests/test_scripts_layout.py).
 _MATRIX_DIR = _SCRIPT_DIR / "matrix"
 if str(_MATRIX_DIR) not in sys.path:
     sys.path.insert(0, str(_MATRIX_DIR))
@@ -143,17 +143,17 @@ class TestStaggeredVelocityAveraging:
 
 
 # ---------------------------------------------------------------------------
-# Modular copy at scripts/ocean_test_matrix/diagnostic_io.py
+# Modular copy at scripts/matrix/ocean_test_matrix/diagnostic_io.py
 # ---------------------------------------------------------------------------
 
 class TestModularCopyParity:
     def test_modular_diagnostic_io_loads(self):
         """iter-21 LOW: the modular copy
-        ``scripts/ocean_test_matrix/diagnostic_io.py`` had the same
+        ``scripts/matrix/ocean_test_matrix/diagnostic_io.py`` had the same
         unfixed staggered-velocity bug.  Verify it imports cleanly."""
         import importlib
         # Direct import via package path.
-        sys.path.insert(0, str(_SCRIPT_DIR / "ocean_test_matrix"))
+        sys.path.insert(0, str(_MATRIX_DIR / "ocean_test_matrix"))
         try:
             import diagnostic_io  # noqa: F401
         finally:
@@ -706,7 +706,7 @@ class TestOceanTestMatrixPackageDelegates:
     level copy) had been missed in iter-88's "factor into shared
     helper" refactor.  iter-91 audited more aggressively and
     found two MORE missed copies in the sibling
-    ``scripts/ocean_test_matrix/`` package:
+    ``scripts/matrix/ocean_test_matrix/`` package:
 
       * ``ocean_test_matrix/timeloop.py:_compute_drift``
         (10 callsites in ``experiments.py``: T_drift, PE_drift,
@@ -1551,7 +1551,7 @@ class TestIter123OceanDriftTolerance:
 
     def test_modular_timeloop_has_apply_drift_tolerance(self):
         """iter-126 codex iter-124-followup MEDIUM-3:
-        ``scripts/ocean_test_matrix/timeloop.py`` must export
+        ``scripts/matrix/ocean_test_matrix/timeloop.py`` must export
         ``_apply_drift_tolerance`` so the modular package's
         ``experiments.py`` can use the iter-123/124 helper.
         """
@@ -1575,7 +1575,7 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         path = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py")
         text = path.read_text()
         assert "_apply_drift_tolerance" in text, (
@@ -1603,7 +1603,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/timeloop.py",
+            "scripts/matrix/ocean_test_matrix/timeloop.py",
         ):
             text = (
                 Path(__file__).resolve().parent.parent / rel
@@ -1615,7 +1615,7 @@ class TestIter123OceanDriftTolerance:
     def test_iter127_modular_geostrophic_uses_gate(self):
         from pathlib import Path
         path = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py")
         text = path.read_text()
         # Find run_geostrophic_adjustment and verify it has
@@ -1638,7 +1638,7 @@ class TestIter123OceanDriftTolerance:
     def test_iter127_modular_overflow_uses_gate(self):
         from pathlib import Path
         path = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py")
         text = path.read_text()
         import re
@@ -1657,7 +1657,7 @@ class TestIter123OceanDriftTolerance:
     def test_iter127_modular_stommel_uses_gate(self):
         from pathlib import Path
         path = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py")
         text = path.read_text()
         import re
@@ -1843,7 +1843,7 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         path = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py")
         text = path.read_text()
         import re
@@ -1885,7 +1885,7 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         path = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py")
         text = path.read_text()
         import re
@@ -1907,7 +1907,7 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         path = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py")
         text = path.read_text()
         import re
@@ -1940,7 +1940,7 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         path = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py")
         text = path.read_text()
         import re
@@ -2017,8 +2017,8 @@ class TestIter123OceanDriftTolerance:
         repo = Path(__file__).resolve().parent.parent
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/timeloop.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/timeloop.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
             "legoesm/diagnostics/conservation_drift.py",
         ):
             text = _read_repo_or_legoesm(repo, rel)
@@ -2106,7 +2106,7 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         path = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py")
         text = path.read_text()
         import re
@@ -2129,7 +2129,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -2188,7 +2188,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -2215,7 +2215,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -2320,7 +2320,7 @@ class TestIter123OceanDriftTolerance:
     def test_iter130_modular_value_threshold_wrapper_accepts_n_samples(self):
         """iter-130 codex iter-129-followup HIGH-2: same
         guard for the modular ``_apply_value_threshold`` wrapper
-        in ``scripts/ocean_test_matrix/timeloop.py``.
+        in ``scripts/matrix/ocean_test_matrix/timeloop.py``.
         """
         import importlib.util
         import sys
@@ -2438,7 +2438,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -2481,7 +2481,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -2573,7 +2573,7 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         text = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py").read_text()
         import re
         m = re.search(
@@ -2629,7 +2629,7 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         text = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py").read_text()
         import re
         for fn in (
@@ -2659,7 +2659,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -2686,8 +2686,8 @@ class TestIter123OceanDriftTolerance:
         repo = Path(__file__).resolve().parent.parent
         files_to_check = [
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
-            "scripts/ocean_test_matrix/timeloop.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/timeloop.py",
             "src/legoesm/diagnostics/conservation_drift.py",
         ]
         for stale_line in (":575", ":626", ":681-682",
@@ -2720,7 +2720,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -2806,7 +2806,7 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         text = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py").read_text()
         import re
         m = re.search(
@@ -2833,7 +2833,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -2863,7 +2863,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -2890,7 +2890,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -2919,7 +2919,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -2954,7 +2954,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -2993,7 +2993,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -3039,7 +3039,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -3177,7 +3177,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/experiments.py",
+            "scripts/matrix/ocean_test_matrix/experiments.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -3222,7 +3222,7 @@ class TestIter123OceanDriftTolerance:
         Verifies the monolithic runner: (1) the cube branch forwards
         ``bottom_drag_r`` into ``OceanConfig``; (2) the old
         ``bottom_drag_r > 0`` NotImplementedError gate is gone. The modular path
-        (``scripts/ocean_test_matrix/setup.py``) is held to the same contract by
+        (``scripts/matrix/ocean_test_matrix/setup.py``) is held to the same contract by
         ``test_iter175_modular_setup_cube_bottom_drag_r_plumbed`` — both runners
         now plumb the kwarg (parity restored).
         """
@@ -3245,7 +3245,7 @@ class TestIter123OceanDriftTolerance:
 
     def test_iter175_modular_setup_cube_bottom_drag_r_plumbed(self):
         """Phase B.1 parity (supersedes the iter-175 NotImplementedError gate):
-        ``scripts/ocean_test_matrix/setup.py`` (modular) must now PLUMB
+        ``scripts/matrix/ocean_test_matrix/setup.py`` (modular) must now PLUMB
         ``bottom_drag_r`` into the cube ``OceanConfig`` exactly like the
         monolithic ``scripts/matrix/run_ocean_test_matrix.py`` — cube bottom
         drag is supported (the cd-grid backend applies it), so neither path may
@@ -3259,10 +3259,10 @@ class TestIter123OceanDriftTolerance:
         import re
         from pathlib import Path
         text = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix" / "setup.py").read_text()
+                / "scripts" / "matrix" / "ocean_test_matrix" / "setup.py").read_text()
         # (1) bottom_drag_r is plumbed into the cube OceanConfig (parity).
         assert 'kw["bottom_drag_r"] = bottom_drag_r' in text, (
-            "Phase B.1 parity: scripts/ocean_test_matrix/setup.py must forward "
+            "Phase B.1 parity: scripts/matrix/ocean_test_matrix/setup.py must forward "
             "bottom_drag_r into the cube OceanConfig like the monolithic runner.")
         # (2) the old cube bottom_drag_r>0 NotImplementedError gate is gone.
         assert re.search(
@@ -3284,7 +3284,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/timeloop.py",
+            "scripts/matrix/ocean_test_matrix/timeloop.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -3551,7 +3551,7 @@ class TestIter123OceanDriftTolerance:
         from pathlib import Path
         for rel in (
             "scripts/matrix/run_ocean_test_matrix.py",
-            "scripts/ocean_test_matrix/timeloop.py",
+            "scripts/matrix/ocean_test_matrix/timeloop.py",
         ):
             text = (Path(__file__).resolve().parent.parent
                     / rel).read_text()
@@ -3671,7 +3671,7 @@ class TestIter123OceanDriftTolerance:
         """
         from pathlib import Path
         path = (Path(__file__).resolve().parent.parent
-                / "scripts" / "ocean_test_matrix"
+                / "scripts" / "matrix" / "ocean_test_matrix"
                 / "experiments.py")
         text = path.read_text()
         # Strip line comments before counting active calls.

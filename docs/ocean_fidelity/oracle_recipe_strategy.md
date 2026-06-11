@@ -119,7 +119,7 @@ This maps directly onto the existing `ocean/fidelity/` harness: the `ci_marker â
 nightly, manual_only}` field; the design rule *"the fidelity layer never re-integrates the
 model â€” it consumes artifacts"*; and heavy optional deps (Veros, copernicusmarine) imported
 only when the relevant submodule is touched. The live driver
-`scripts/ocean_fidelity/compare_tendencies_acc.py` is the `manual_only`/deployed piece; the
+`scripts/validate/ocean_fidelity/compare_tendencies_acc.py` is the `manual_only`/deployed piece; the
 metric-vs-committed-tolerance fixtures are the `fast` piece.
 
 **Obligation that comes with moving the live oracle out of CI:** the committed golden can go

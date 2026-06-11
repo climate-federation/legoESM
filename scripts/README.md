@@ -38,8 +38,26 @@ bucket:
 | `plot/` | Plotting / figure regeneration (`plot_*`, `replot_*`, `regen_*`). |
 | `validate/` | Validators + intercomparison (`validate_*`, `verify_*`, `eval_*`, `audit_*`, `compare_*`). |
 | `data/` | Forcing/data prep + environment setup (`download_*`, `prepare_*`, `generate_*`, `build_*`, `make_ryf`, `setup_*`). |
+| `cluster/` | SLURM job wrappers (e.g. `cluster/omip_nemo/`). |
 | `tmp/` | Throwaway (above) — slated for deletion. |
-| _other subdirs_ | `scm/`, `ocean_test_matrix/`, `global_overturning/`, `diagnostic/`, `profile/`, `s2s/`, … (pre-existing component packages, unchanged). |
+
+Campaign suites and script packages live as subdirs of the bucket matching
+their dominant function (enforced by `tests/test_scripts_layout.py`):
+`run/{global_overturning,mpas_realistic_geometry,ocean_long_runs,s2s}/`,
+`matrix/{scm,ocean_test_matrix}/`,
+`validate/{ocean_fidelity,realistic_geometry,pgf_validation}/`,
+`bench/jit_profile/`.
+
+## Data-path environment variables
+
+Scripts that read large external datasets take a CLI flag first and fall back
+to an environment variable (machine-portable; no personal paths):
+
+| Variable | Used by | Meaning |
+|----------|---------|---------|
+| `LEGOESM_ETOPO_PATH` | `run/global_overturning/run_{comparison_latlon,comparison_mpas,tripole_20yr,global_overturning_mpas_etopo}.py` (`--etopo`) | ETOPO bathymetry NetCDF (default `data/bathymetry/etopo_1deg.nc`). |
+| `LEGOESM_GSAM_ROOT` | `run/run_lba_plane.py`, `run/run_gate_plane.py` (`--case-dir`) | gSAM checkout root holding `CASES/`. |
+| `LEGOESM_CMIP7_RAW` | `data/inspect_cmip7_forcing.py` | Raw CMIP7 forcing staging root (Levante default). |
 
 ## Atmosphere
 

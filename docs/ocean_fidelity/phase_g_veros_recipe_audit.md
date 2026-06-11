@@ -33,7 +33,7 @@ Audit sources:
   ``ocean/physics/{vertical_mixing,lateral_mixing,convection,bottom_drag,
   surface_forcing}/``, and ``timestepping/``.
 - Existing bulk-metric harness in
-  ``scripts/ocean_fidelity/compare_legoesm_vs_veros.py`` (Veros linear-EOS
+  ``scripts/validate/ocean_fidelity/compare_legoesm_vs_veros.py`` (Veros linear-EOS
   coefficients + partial Eady/DINO recipe mapping; not gallery-anchored).
 
 Veros is not installed on the audit host (the harness assumes a sibling
@@ -122,7 +122,7 @@ they wrap:
     ``variables.py`` — ``U_GRID = ("xu", "yt", "zt")``,
     ``V_GRID = ("xt", "yu", "zt")``). **Same staggering as legoESM's
     lat-lon C-grid.** Earlier drafts of this audit and a comment in
-    ``scripts/ocean_fidelity/compare_legoesm_vs_veros.py`` (line 158)
+    ``scripts/validate/ocean_fidelity/compare_legoesm_vs_veros.py`` (line 158)
     described Veros as B-grid; that is incorrect.
 12. **Free surface** — implicit linear free-surface solver; not configurable.
 13. **Constants** — ``rho_0 = 1024`` (linear EOS), ``grav = 9.81``,
@@ -412,6 +412,6 @@ production work:
   gallery configurations, so the bulletproof scoreboard does not yet cover
   the Phase G recipe-acceptance surface. Phase G strengthens *and*
   broadens it.
-- **Existing harness reused**: ``scripts/ocean_fidelity/compare_legoesm_vs_veros.py``
+- **Existing harness reused**: ``scripts/validate/ocean_fidelity/compare_legoesm_vs_veros.py``
   encodes Veros's linear-EOS coefficients and the ``_VEROS_*`` constants
   that the recipe override mechanism will replace.

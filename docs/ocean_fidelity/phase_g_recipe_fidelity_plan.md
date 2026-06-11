@@ -22,7 +22,7 @@ What landed (session 2026-05-28):
   ``build_acc_recipe()`` matches ``veros.setups.acc.acc.ACCSetup``
   parameter-for-parameter. ``veros_snapshot_to_legoesm_state``
   handles halo strip / time-level selection / vertical reversal /
-  axis transpose. ``scripts/ocean_fidelity/compare_tendencies_acc.py``
+  axis transpose. ``scripts/validate/ocean_fidelity/compare_tendencies_acc.py``
   drives the end-to-end comparison.
 - **G.1a — TKE closure (Gaspar 1990 / Burchard 2002)** as
   ``vertical_mixing="tke"``, wired into the implicit-mixing path.
@@ -55,7 +55,7 @@ acceptance run:**
 
 ```bash
 .venv/bin/pip install -e /home/dbalwada/veros
-.venv/bin/python scripts/ocean_fidelity/compare_tendencies_acc.py \
+.venv/bin/python scripts/validate/ocean_fidelity/compare_tendencies_acc.py \
     --write-report docs/ocean_fidelity/veros_acc_tendency_comparison.md
 ```
 
@@ -256,7 +256,7 @@ test mirrors the production diagnostic-closure invariant.
 ``veros_snapshot_to_legoesm_state`` strips Veros's halos, selects
 the τ time level, reverses the vertical axis, transposes (x,y)
 ↔ (lat,lon).
-``scripts/ocean_fidelity/compare_tendencies_acc.py`` orchestrates
+``scripts/validate/ocean_fidelity/compare_tendencies_acc.py`` orchestrates
 the comparison and emits a Markdown report.
 
 **Acceptance gate (per-process, on a frozen ACC snapshot):**
@@ -392,9 +392,9 @@ acceptance metrics that prove it.
   strengthens, does not replace, the bulk-metric gate.
 - **Adjacent**: ``docs/md_files/ocean_validation_improvement_plan.md`` predates the recipe
   framing; it remains as historical context and is not modified here.
-- **Existing harness reused**: ``scripts/ocean_fidelity/compare_legoesm_vs_veros.py``,
-  ``scripts/ocean_fidelity/compare_legoesm_cube_vs_latlon.py``, and
-  ``scripts/ocean_fidelity/run_comparison.py`` provide the reference-driver
+- **Existing harness reused**: ``scripts/validate/ocean_fidelity/compare_legoesm_vs_veros.py``,
+  ``scripts/validate/ocean_fidelity/compare_legoesm_cube_vs_latlon.py``, and
+  ``scripts/validate/ocean_fidelity/run_comparison.py`` provide the reference-driver
   scaffolding that G.0 will extend (snapshot dump-and-load) and G.1 will reuse
   end-to-end.
 - **Existing modules called**: ``ocean_tendency_common.py``,

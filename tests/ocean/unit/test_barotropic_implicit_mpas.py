@@ -87,7 +87,7 @@ def _u_bar_grid_metric(u_3d, eta, H_bathy, z_coord, mesh, mask, polar_lat_deg=70
     """Return σ(grid-scale u_bar) / rms(u_bar) on interior edges.
 
     Mirrors the diagnostic used in
-    ``scripts/global_overturning/diagnose_mpas_baro_noise.py``.
+    ``scripts/run/global_overturning/diagnose_mpas_baro_noise.py``.
     Hex Voronoi has no native zonal/meridional Laplacian; we use the
     TRiSK ``vector_laplacian_del2`` and rescale by mean(dvEdge)² so
     the metric has the same scale as u_bar itself.
@@ -256,7 +256,7 @@ def test_implicit_solver_cleaner_than_explicit_substep(state, mesh, z_coord):
     improvement) rather than the 3× ratio used in the lat-lon analog.
     Strong noise on MPAS develops at finer resolution and longer
     integration than is feasible for a unit test (see
-    scripts/global_overturning/diagnose_mpas_baro_noise.py for the
+    scripts/run/global_overturning/diagnose_mpas_baro_noise.py for the
     resolution-of-record check).
     """
     physics = _make_physics(tau_max=0.05)
