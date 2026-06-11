@@ -21,6 +21,7 @@ pure / JIT-safe / differentiable.
 from __future__ import annotations
 
 import jax.numpy as jnp
+from legoesm.atmosphere.physics._shared import buoyancy_coefficient
 from legoesm.atmosphere.physics.turbulence.clubb_fill_holes import fill_holes_vertical
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, ddzt, zm2zt
 from legoesm.atmosphere.physics.turbulence.clubb_mfl import (
@@ -38,8 +39,6 @@ from legoesm.atmosphere.physics.turbulence.clubb_moments import (
     term_ma_zt_lhs_upwind,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_solve import penta_solve
-
-from legoesm import constants
 
 _GAMMA = 1.5   # gamma_over_implicit_ts (constants_clubb)
 # Monotonic-flux-limiter xm tolerances (constants_clubb):
@@ -249,7 +248,7 @@ def wpxp_terms_bp_pr3_rhs(C7_Skw_fnc, thv_ds_zm, xpthvp):
     ``(1 - C7_Skw_fnc)·(g/thv_ds)·x'thv'`` at each zm level (``xpthvp`` = r'thv'
     or thl'thv'); boundaries zeroed. Uses ``constants.g`` (CLUBB ``grav``).
     """
-    result = (constants.g / thv_ds_zm) * (1.0 - C7_Skw_fnc) * xpthvp
+    result = buoyancy_coefficient(thv_ds_zm) * (1.0 - C7_Skw_fnc) * xpthvp
     result = result.at[:, 0].set(0.0)
     result = result.at[:, -1].set(0.0)
     return result

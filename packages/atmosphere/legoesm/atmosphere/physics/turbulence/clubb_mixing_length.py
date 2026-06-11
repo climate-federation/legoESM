@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from legoesm.atmosphere.physics._shared import buoyancy_coefficient
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, zm2zt
 from legoesm.atmosphere.physics.turbulence.clubb_saturation import sat_mixrat_liq
 
@@ -334,7 +335,7 @@ def compute_mixing_length(
 
     # ---- Shared precomputations (vectorized over columns) ----
     tke_i = zm2zt(em, gr)                                  # (ngrdcol, nzt)
-    grav_on_thvm = constants.g / thvm
+    grav_on_thvm = buoyancy_coefficient(thvm)
     Lv_coef = constants.L_v / (exner * constants.c_pd) - _EP2 * thv_ds
 
     exp_mu_dzm = jnp.exp(-mu[:, None] * gr.dzm)            # (ngrdcol, nzm)

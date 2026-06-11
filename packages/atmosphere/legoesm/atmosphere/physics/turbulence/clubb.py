@@ -38,7 +38,11 @@ import math
 
 import jax
 import jax.numpy as jnp
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import (
+    buoyancy_coefficient,
+    exner_function,
+    virtual_temperature,
+)
 from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig, derive_lmin
 from legoesm.atmosphere.physics.turbulence.clubb_core import (
     CLUBBForcing,
@@ -114,7 +118,7 @@ def clubb_turbulence(
     sqrt_wp2 = jnp.sqrt(wp2)
 
     # ---- Thermodynamics (top-down) ----
-    exner = (p_full / constants.p_ref) ** constants.kappa     # (ncol, nlev)
+    exner = exner_function(p_full)                            # (ncol, nlev)
     theta = T / exner
     theta_v = virtual_temperature(T, q_v) / exner             # = theta * (1 + 0.61 q_v)
     # Dry phase-1 mapping to CLUBB variables (rcm = 0): thl ~ theta, rt ~ q_v.
@@ -156,7 +160,7 @@ def clubb_turbulence(
     Kh_a = (params.c_K / _PR_T) * Lscale_a * jnp.sqrt(wp2_a)
     cloud_frac_a, rcm_a, wpthvp_a = diagnose_cloud_and_buoyancy(
         thlm, rtm, wp2_a, exner_a, p_a, thv_ds, Kh_a, Lscale_a, gr, config)
-    buoy_prod = flip_vertical((constants.g / jnp.clip(thvm, 1.0, None)) * wpthvp_a)
+    buoy_prod = flip_vertical(buoyancy_coefficient(jnp.clip(thvm, 1.0, None)) * wpthvp_a)
 
     # ---- Geometry + shear (top-down) ----
     dz_half = jnp.clip(jnp.abs(z_full[:, :-1] - z_full[:, 1:]), 1.0, None)
@@ -263,7 +267,7 @@ def clubb_step(
     params = config.params
 
     # ---- Thermodynamics (top-down) ----
-    exner = (p_full / constants.p_ref) ** constants.kappa
+    exner = exner_function(p_full)
     theta = T / exner
     thv = virtual_temperature(T, q_v) / exner
 
@@ -497,7 +501,7 @@ def integrate_clubb_column(
     ncol, nlev = T.shape
     if moments is None:
         moments = init_clubb_moments(ncol, nlev, config, dtype=T.dtype)
-    exner_td = (p_full / constants.p_ref) ** constants.kappa
+    exner_td = exner_function(p_full)
     nu = host_numerical_diffusion
     # Safety floor for the recomputed virtual temperature so the prognostic
     # density stays strictly positive even if a long/dry SCM run drifts T low

@@ -23,11 +23,10 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from legoesm.atmosphere.physics._shared import buoyancy_coefficient
 from legoesm.atmosphere.physics.turbulence.clubb_fill_holes import fill_holes_vertical
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid
 from legoesm.atmosphere.physics.turbulence.clubb_solve import tridiag_solve
-
-from legoesm import constants
 
 _EPS = 1.0e-10
 _MAX_MAG_CORRELATION = 0.99   # Cauchy-Schwarz correlation bound (constants_clubb)
@@ -421,7 +420,7 @@ def term_pr2(C_uu_shr, C_uu_buoy, thv_ds_zm, wpthvp, upwp, vpwp, um, vm, gr: CLU
     du_dz = invrs_dzm[:, 1:-1] * (um[:, 1:] - um[:, :-1])
     dv_dz = invrs_dzm[:, 1:-1] * (vm[:, 1:] - vm[:, :-1])
     pr2 = (2.0 / 3.0) * (
-        C_uu_buoy * (constants.g / thv_ds_zm[:, 1:-1]) * wpthvp[:, 1:-1]
+        C_uu_buoy * buoyancy_coefficient(thv_ds_zm[:, 1:-1]) * wpthvp[:, 1:-1]
         + C_uu_shr * (-upwp[:, 1:-1] * du_dz - vpwp[:, 1:-1] * dv_dz))
     return jnp.maximum(pr2, _ZERO_THRESHOLD)
 

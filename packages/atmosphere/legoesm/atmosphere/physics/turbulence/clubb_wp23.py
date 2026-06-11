@@ -29,6 +29,7 @@ differentiable.
 from __future__ import annotations
 
 import jax.numpy as jnp
+from legoesm.atmosphere.physics._shared import buoyancy_coefficient
 from legoesm.atmosphere.physics.turbulence.clubb_fill_holes import (
     fill_holes_vertical,
     fill_holes_wp2_from_horz_tke,
@@ -42,8 +43,6 @@ from legoesm.atmosphere.physics.turbulence.clubb_moments import (
     term_ma_zt_lhs_upwind,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_solve import penta_solve
-
-from legoesm import constants
 
 _TWO_THIRDS = 2.0 / 3.0
 _GAMMA = 1.5   # gamma_over_implicit_ts (constants_clubb)
@@ -294,7 +293,7 @@ def wp2_terms_bp_pr2_rhs(C_uu_buoy, thv_ds_zm, wpthvp):
     rhs = jnp.zeros_like(thv_ds_zm)
     rhs = rhs.at[:, 1:-1].set(
         (1.0 - C_uu_buoy[:, None]) * 2.0
-        * (constants.g / thv_ds_zm[:, 1:-1]) * wpthvp[:, 1:-1])
+        * buoyancy_coefficient(thv_ds_zm[:, 1:-1]) * wpthvp[:, 1:-1])
     return rhs
 
 
@@ -308,7 +307,7 @@ def wp2_term_pr3_rhs(C_uu_shr, C_uu_buoy, thv_ds_zm, wpthvp, upwp, um, vpwp, vm,
     ``C_uu_shr``/``C_uu_buoy`` are ``(ncol,)``; uses ``constants.g``.
     """
     rhs = jnp.zeros_like(thv_ds_zm)
-    buoy = C_uu_buoy[:, None] * (constants.g / thv_ds_zm[:, 1:-1]) * wpthvp[:, 1:-1]
+    buoy = C_uu_buoy[:, None] * buoyancy_coefficient(thv_ds_zm[:, 1:-1]) * wpthvp[:, 1:-1]
     shear = C_uu_shr[:, None] * (
         -upwp[:, 1:-1] * gr.invrs_dzm[:, 1:-1] * (um[:, 1:] - um[:, :-1])
         - vpwp[:, 1:-1] * gr.invrs_dzm[:, 1:-1] * (vm[:, 1:] - vm[:, :-1]))
@@ -338,7 +337,7 @@ def wp3_terms_bp1_pr2_rhs(C11_Skw_fnc, thv_ds_zt, wp2thvp):
     rhs = jnp.zeros_like(thv_ds_zt)
     rhs = rhs.at[:, 1:-1].set(
         (1.0 - C11_Skw_fnc[:, 1:-1]) * 3.0
-        * (constants.g / thv_ds_zt[:, 1:-1]) * wp2thvp[:, 1:-1])
+        * buoyancy_coefficient(thv_ds_zt[:, 1:-1]) * wp2thvp[:, 1:-1])
     return rhs
 
 
@@ -397,7 +396,7 @@ def wp3_term_pr_turb_rhs(C_wp3_pr_turb, Kh_zt, wpthvp, dum_dz, dvm_dz,
     """
     rhs = jnp.zeros_like(Kh_zt)
     C = C_wp3_pr_turb[:, None]
-    buoy = (constants.g / thv_ds_zt[:, 1:-1]) * (wpthvp[:, 2:-1] - wpthvp[:, 1:-2])
+    buoy = buoyancy_coefficient(thv_ds_zt[:, 1:-1]) * (wpthvp[:, 2:-1] - wpthvp[:, 1:-2])
     shr_u = upwp[:, 2:-1] * dum_dz[:, 2:-1] - upwp[:, 1:-2] * dum_dz[:, 1:-2]
     shr_v = vpwp[:, 2:-1] * dvm_dz[:, 2:-1] - vpwp[:, 1:-2] * dvm_dz[:, 1:-2]
     rhs = rhs.at[:, 1:-1].set(
