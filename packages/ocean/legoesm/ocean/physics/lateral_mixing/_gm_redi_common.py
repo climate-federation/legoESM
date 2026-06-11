@@ -7,6 +7,7 @@ and ``gm_redi_latlon_cgrid.py`` (lat-lon C-grid) import from here.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -25,12 +26,62 @@ EPS = float(jnp.finfo(jnp.float32).eps)  # ~1.19e-7
 # DM95 slope tapering
 # ---------------------------------------------------------------------------
 
+# Adjoint-stabilization modes for the GM/Redi isoneutral operator
+# (``GMRediConfig.adjoint_stabilization``).  The slope saturation (DM95
+# taper; ±S_max clip on the in-situ path) bounds the PRIMAL fluxes but the
+# TAPER does not bound the LINEARIZED operator: ``d(taper·S)/d(state)``
+# exceeds the primal coefficient bound via (a) the taper-derivative term
+# ``S·taper'`` in the transition band (≈1/(2·width_frac) excess) and (b) the
+# UNCLIPPED neutral-slope tangent ``∂S/∂(∇ρ) ∝ 1/∂_zρ`` in weakly-stratified
+# cells (the dominant path on the real ACC state).  The tangent/adjoint
+# propagator then amplifies per step where the primal is stable, and
+# long-horizon reverse-mode PARAMETER gradients grow exponentially
+# (~×2-5/step on the Veros ACC recipe; probes + verdict in
+# .physics-validator/gm_adjoint_stab/RESULTS.md, demo campaign in
+# .physics-validator/diff_veros_demos/).  The fix is the standard
+# differentiable-solver flux-limiter trick: treat the slope coefficient —
+# or, finer, just the limiter (taper) — as a non-differentiated
+# (Picard-frozen) coefficient via ``stop_gradient``:
+#
+# - ``"none"`` (default): exact AD, bit-identical legacy behaviour.
+# - ``"stop_gradient_slopes"`` (RECOMMENDED): ``stop_gradient`` on the
+#   slopes (and hence on the tapers computed from them) — the full
+#   frozen-coefficient linearization.  Kills both mechanisms; full ACC
+#   step |G| 78 → 1.02.  Keeps the tracer-flux linearization and the
+#   κ sensitivity, drops only the density→tensor feedback.
+# - ``"stop_gradient_taper"``: ``stop_gradient`` on the DM95 taper FACTORS
+#   only.  Kills mechanism (a) only — measured INSUFFICIENT on the
+#   faithful (neutral-slope) ACC stack.
+#
+# All options are primal-invisible; none is used unless explicitly
+# selected (default-off).  See the ``GMRediConfig.adjoint_stabilization``
+# field doc for the full measured verdict.
+VALID_ADJOINT_STABILIZATION = frozenset(
+    {"none", "stop_gradient_taper", "stop_gradient_slopes"}
+)
+
+
+def validate_adjoint_stabilization(mode: str) -> None:
+    """Fail-fast on an unknown ``adjoint_stabilization`` literal.
+
+    Static Python check (Dispatch Discipline): a typo must NOT silently
+    fall through to the exact-AD path (it would mask the stabilization
+    entirely and the long-horizon gradients would silently explode again).
+    """
+    if mode not in VALID_ADJOINT_STABILIZATION:
+        raise ValueError(
+            f"Unknown GMRediConfig.adjoint_stabilization={mode!r}; "
+            f"expected one of {sorted(VALID_ADJOINT_STABILIZATION)}."
+        )
+
+
 def dm95_taper(
     S_x: jnp.ndarray,
     S_y: jnp.ndarray,
     S_max: float,
     eps: float = EPS,
     transition_width_frac: float = 0.1,
+    stop_gradient_taper: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Apply Danabasoglu & McWilliams (1995) smooth slope tapering.
 
@@ -53,6 +104,11 @@ def dm95_taper(
         Default ``0.1`` matches the legoESM pre-2026 convention.
         Veros's ``iso_dslope`` parameter maps via
         ``transition_width_frac = iso_dslope / iso_slopec``.
+    stop_gradient_taper : bool
+        When True, the taper factor is wrapped in ``lax.stop_gradient``
+        (the ``"stop_gradient_taper"`` adjoint-stabilization mode; see
+        the module note above).  Primal bit-identical; static Python
+        gate (no traced branching).
 
     Returns
     -------
@@ -62,6 +118,8 @@ def dm95_taper(
     taper = 0.5 * (1.0 + jnp.tanh(
         (S_max - S_mag) / (transition_width_frac * S_max + eps)
     ))
+    if stop_gradient_taper:
+        taper = jax.lax.stop_gradient(taper)
     return S_x * taper, S_y * taper, taper
 
 
@@ -70,6 +128,7 @@ def dm95_taper_scalar(
     S_max: float,
     eps: float = EPS,
     transition_width_frac: float = 0.1,
+    stop_gradient_taper: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Single-component variant of :func:`dm95_taper`.
 
@@ -77,7 +136,8 @@ def dm95_taper_scalar(
     (e.g. MPAS/Voronoi edges).  Identical functional form, with ``|S|``
     replaced by ``|S_n|``. See :func:`dm95_taper` for parameter
     semantics (in particular ``transition_width_frac`` ↔ Veros's
-    ``iso_dslope / iso_slopec``).
+    ``iso_dslope / iso_slopec`` and ``stop_gradient_taper`` ↔ the
+    ``"stop_gradient_taper"`` adjoint-stabilization mode).
 
     Returns
     -------
@@ -86,6 +146,8 @@ def dm95_taper_scalar(
     taper = 0.5 * (1.0 + jnp.tanh(
         (S_max - jnp.abs(S)) / (transition_width_frac * S_max + eps)
     ))
+    if stop_gradient_taper:
+        taper = jax.lax.stop_gradient(taper)
     return S * taper, taper
 
 

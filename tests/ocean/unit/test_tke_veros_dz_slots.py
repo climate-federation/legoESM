@@ -664,3 +664,74 @@ def test_veros_buoyancy_length_upward_pass_binds():
     out = tke_mod._veros_buoyancy_length(
         e, N2, dz_int, mxl_min, dz_cell=jnp.asarray(dz_cell))
     np.testing.assert_allclose(np.asarray(out), ref, rtol=1e-12)
+
+
+def test_negative_tke_gradients_are_finite():
+    """AD-safety pin for the negative-TKE energy debt (#22 follow-on fix).
+
+    ``sqrt(max(0, e))`` has a NaN derivative wherever e <= 0 (``d sqrt`` at 0
+    is inf, the ``max`` tangent there is 0, and 0*inf = NaN) — with Veros's
+    ``positivity="veros_surface_correction"`` the carried TKE goes negative,
+    so EVERY parameter/state gradient across >= 2 model steps was NaN-poisoned
+    (found while threading the kappa-scale c_k through the ACC recipe;
+    .physics-validator/gm_adjoint_stab/RESULTS.md).  The double-``where`` fix
+    keeps the primal BIT-IDENTICAL and the debt-branch derivative exactly 0.
+
+    Pins: (a) grad/jvp of the three fixed sites are FINITE with negative e;
+    (b) the primal equals the sqrt(max(0,e)) form bit-for-bit; (c) the raw
+    pattern itself is NaN (non-vacuity: if the double-where is reverted to
+    sqrt(max(0,e)), (a) goes red exactly like the raw pattern).
+    """
+    from legoesm.ocean.physics.vertical_mixing.tke import (
+        _veros_buoyancy_length,
+        compute_K_from_tke,
+        compute_mixing_lengths,
+    )
+
+    # (c) non-vacuity: the unguarded pattern IS NaN under AD.
+    raw = jax.grad(lambda x: jnp.sum(jnp.sqrt(jnp.maximum(0.0, x))))(
+        jnp.asarray([-1.0e-4, 1.0e-3]))
+    assert not bool(jnp.all(jnp.isfinite(raw)))
+
+    e = jnp.asarray([1.0e-3, -2.0e-4, 0.0])[None, None, :]
+    N2 = jnp.full((1, 1, 3), 1.0e-5)
+    dzh = jnp.asarray(DZ_HALF_UC)[None, None, :]
+    dzc = jnp.asarray(DZ_CELL)[None, None, :]
+    shear = jnp.full((1, 1, 3), 1.0e-6)
+    cfg = TKEConfig(n2_mode="adiabatic", prandtl_mode="constant",
+                    veros_dz_slots=True, kappa_convention="veros_sqrte",
+                    positivity="veros_surface_correction")
+
+    # (b) primal bit-identity with the sqrt(max(0,e)) form.
+    l_buoy = _veros_buoyancy_length(e, N2, dzh, cfg.mxl_min, dz_cell=dzc)
+    sqrttke_ref = jnp.sqrt(jnp.maximum(0.0, e))
+    mxl_ref = jnp.sqrt(2.0) * sqrttke_ref / jnp.sqrt(jnp.maximum(1e-12, N2))
+    # reproduce the two limiter sweeps on the reference start value
+    import numpy as _np
+    m = _np.asarray(mxl_ref)[0, 0].copy()
+    dzc_n = _np.asarray(dzc)[0, 0]
+    for k in range(1, 3):
+        m[k] = min(m[k], m[k - 1] + dzc_n[k])
+    for k in range(1, -1, -1):
+        m[k] = min(m[k], m[k + 1] + dzc_n[k + 1])
+    m = _np.maximum(m, cfg.mxl_min)
+    _np.testing.assert_array_equal(_np.asarray(l_buoy)[0, 0], m)
+
+    # (a) finite gradients through the three fixed sites.
+    def loss_len(ee):
+        return jnp.sum(_veros_buoyancy_length(
+            ee, N2, dzh, cfg.mxl_min, dz_cell=dzc))
+
+    g1 = jax.grad(loss_len)(e)
+    assert bool(jnp.all(jnp.isfinite(g1)))
+
+    def loss_K(ee):
+        l_k, _ = compute_mixing_lengths(ee, N2, dzh, cfg, signed_n2=True,
+                                        dz_cell=dzc)
+        K_M, K_H = compute_K_from_tke(ee, l_k, cfg, N2=N2, shear_sq=shear)
+        return jnp.sum(K_M) + jnp.sum(K_H)
+
+    g2 = jax.grad(loss_K)(e)
+    assert bool(jnp.all(jnp.isfinite(g2)))
+    jv = jax.jvp(loss_K, (e,), (jnp.ones_like(e),))[1]
+    assert bool(jnp.isfinite(jv))
