@@ -695,6 +695,104 @@ def test_clubb_microphysics_chain_is_differentiable():
     assert float(jnp.max(jnp.abs(g_micro))) > 0.0    # grad flows THROUGH the kink
 
 
+def test_prognostic_clubb_develops_convective_skewness_unlike_clubb_lite():
+    """The defining 'fuller-than-clubb_lite' signature: buoyancy-driven
+    vertical-velocity SKEWNESS (positive ``wp3``).
+
+    The whole point of porting the full higher-order CLUBB closure (vs the
+    down-gradient eddy-diffusion ``clubb_lite``) is the prognostic THIRD moment
+    ``wp3`` and the non-local transport it drives. In a convective boundary layer
+    (surface heating), buoyant plumes make updrafts narrower/stronger than the
+    broad gentle downdrafts → the vertical-velocity distribution is positively
+    skewed, ``wp3 > 0``. A pure down-gradient scheme (flux = −Kh·∂φ/∂z) has NO
+    third moment and cannot represent this at all.
+
+    We contrast a strongly-heated column against a near-neutral control (surface
+    temperature equal to the near-surface air, so the diagnosed surface buoyancy
+    flux is negligible — verified, NOT assumed). The convective case must develop
+    (a) genuine turbulence (``wp2`` ≫ control) and (b) a clearly POSITIVE skewness
+    in the UPPER mixed layer (400–900 m, the entrainment zone where buoyant plume
+    skewness peaks — measured ALOFT, surface levels excluded, so it cannot be a
+    near-surface superadiabatic artifact), which the near-neutral control does not
+    develop (its ``wp3`` ≈ 0 — any skewness there would be numerical, not
+    buoyant). This is the physical raison d'être of the port.
+
+    (Aside found while writing this: a *cooled*-surface control is NOT usable as a
+    'stable' contrast — a fixed cold ``T_sfc`` over-cools the near-surface air and
+    flips the column to vigorous convection. The near-neutral zero-offset control
+    is the clean, quiescent baseline.)"""
+    from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
+    from legoesm.atmosphere.physics.turbulence.clubb_lite import (
+        clubb_lite_turbulence,
+    )
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
+
+    ncol, nlev = 1, 40
+    p_half = (np.linspace(5e4, 1.0e5, nlev + 1)[None, :]
+              * np.ones((ncol, nlev + 1)))
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    z_half = np.tile(np.linspace(3000.0, 0.0, nlev + 1), (ncol, 1))
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    exner = (p_full / constants.p_ref) ** constants.kappa
+    zc = z_full
+    # Mixed layer below 1 km, capping inversion + stable free troposphere above.
+    theta = 300.0 + np.where(zc < 1000.0, 0.0, 0.006 * (zc - 1000.0) + 2.0)
+    T = jnp.asarray(theta * exner)
+    u = jnp.asarray(np.full((ncol, nlev), 5.0))
+    v = jnp.asarray(np.zeros((ncol, nlev)))
+    q_v = jnp.asarray(np.full((ncol, nlev), 5e-3))
+    p_full = jnp.asarray(p_full)
+    p_half = jnp.asarray(p_half)
+    z_full = jnp.asarray(z_full)
+    z_half = jnp.asarray(z_half)
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    zt = np.sort(zc[0])
+    # Upper mixed layer / entrainment zone — surface levels EXCLUDED so the
+    # skewness statistic measures non-local transport aloft, not a surface spike.
+    upper_bl = (zt > 400.0) & (zt < 900.0)
+
+    def spin_up(t_sfc_offset):
+        _, _, _, _, m_f, d = integrate_clubb_column(
+            u, v, T, q_v, p_full, p_half, z_full, z_half, T[:, -1] + t_sfc_offset,
+            q_v[:, -1], dt=150.0, nsteps=60, config=cfg)
+        shflx = float(np.asarray(d["shflx"])[-1, 0])
+        return np.asarray(m_f.wp3)[0], np.asarray(m_f.wp2)[0], shflx
+
+    wp3_conv, wp2_conv, sh_conv = spin_up(8.0)    # strong surface heating
+    wp3_neut, wp2_neut, sh_neut = spin_up(0.0)    # near-neutral control
+
+    # Everything stays finite and variances are non-negative.
+    for arr in (wp3_conv, wp2_conv, wp3_neut, wp2_neut):
+        assert np.all(np.isfinite(arr))
+    assert np.all(wp2_conv >= 0.0) and np.all(wp2_neut >= 0.0)
+    # The control really is near-neutral: its surface heat flux is a small
+    # fraction of the convective case's (verified, not assumed).
+    assert sh_conv > 0.0
+    assert abs(sh_neut) < 0.05 * sh_conv
+    # (a) The convective case is genuinely turbulent; the control is quiescent.
+    assert float(np.max(wp2_conv)) > 10.0 * float(np.max(wp2_neut))
+    assert float(np.max(wp2_conv)) > 0.1
+    # (b) THE signature: positive vertical-velocity skewness in the UPPER mixed
+    # layer (aloft, surface excluded) — buoyancy-driven, the third moment a
+    # down-gradient scheme cannot represent. The near-neutral control has none.
+    assert float(np.max(wp3_conv[upper_bl])) > 0.05      # clear positive peak aloft
+    assert float(np.mean(wp3_conv[upper_bl])) > 0.0      # net positive skewness aloft
+    assert float(np.max(np.abs(wp3_neut[upper_bl]))) < 1e-3
+
+    # (c) The full-vs-lite boundary, EXECUTED (not just asserted in prose): run
+    # clubb_lite on the same convective column. It is a down-gradient eddy-
+    # diffusion scheme whose ONLY turbulence-state carry is wp2 (a single second
+    # moment) — its TurbulenceOutput has no wp3 field at all, so it structurally
+    # cannot represent the third-moment skewness the full closure develops above.
+    rho_lite = p_full / (constants.R_d * T)
+    out_lite, wp2_lite = clubb_lite_turbulence(
+        u, v, T, q_v, jnp.full((ncol, nlev), 0.4), p_full, p_half, z_full,
+        z_half, T[:, -1] + 8.0, q_v[:, -1], rho_lite, 150.0, CLUBBLiteConfig())
+    assert not hasattr(out_lite, "wp3")                  # no third moment, by design
+    assert wp2_lite.shape == (ncol, nlev)                # carries one 2nd moment only
+    assert jnp.all(jnp.isfinite(wp2_lite))
+
+
 def test_clubb_turbulence_prognostic_carry_roundtrip_multistep():
     """The prognostic scheme entry carries the packed CLUBBMomentState
     (ncol,15,nlev+1) in/out of the tke-slot interface and runs stably multi-step

@@ -207,6 +207,22 @@ sorting `Lscale` + full prognostic moment transport (clubb_lite has none).
   codex-reviewed (first pass flagged the aggregate-only grad could be satisfied by
   the CLUBB term alone → added the microphysics-specific gradient + active-branch
   guard).
+- **the defining 'fuller-than-clubb_lite' signature (iter 66):** prognostic CLUBB
+  develops buoyancy-driven vertical-velocity SKEWNESS (positive `wp3` in the upper
+  mixed layer / entrainment zone, ~+0.06–0.15 at 600–860 m) under surface heating
+  — the prognostic THIRD moment that drives non-local transport and that a
+  down-gradient eddy-diffusion scheme (`clubb_lite`, flux=−Kh·∂φ/∂z, no 3rd moment)
+  cannot represent at all. Test contrasts a heated column vs a near-neutral control
+  (verified `|shflx| < 5%` of convective): convective `wp2`≫control & upper-BL
+  `wp3`>0.05 aloft; control `wp3`≈0. codex-reviewed (flagged [med] surface-inclusive
+  mean could mask a near-surface spike → switched to an upper-BL (400–900 m, surface
+  excluded) statistic; [med] control not truly zero-flux → assert its diagnosed
+  `shflx` ≪ convective + reframe as 'near-neutral'; [med] "unlike clubb_lite" was
+  prose-only → now EXECUTES `clubb_lite_turbulence` on the same column and asserts
+  its `TurbulenceOutput` has no `wp3` field and carries only `wp2`, structurally
+  proving the down-gradient scheme cannot represent the third moment). Aside
+  surfaced: a cooled-surface 'stable' control is unusable — fixed cold `T_sfc`
+  over-cools the air and flips to convection.
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz
