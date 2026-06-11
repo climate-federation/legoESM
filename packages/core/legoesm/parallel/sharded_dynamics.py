@@ -298,6 +298,17 @@ def create_output_shardings(state, config: DeviceConfig, grid_type: str = "cubed
         if grid_type == "cubed_sphere":
             if leaf.ndim >= 1 and leaf.shape[0] == N_FACES:
                 if config.tiling != (1, 1) and leaf.ndim >= 3:
+                    # Staggered D-grid leaves (n+1 on a horizontal
+                    # axis) cannot take tile specs (IndivisibleError;
+                    # P4 phase-1 policy matches mesh.shard_pytree):
+                    # face-only sharding, body-side block slicing via
+                    # staggered_tile_block.
+                    tx, ty = config.tiling
+                    if (leaf.shape[1] % tx != 0
+                            or leaf.shape[2] % ty != 0):
+                        pspec = P("face",
+                                  *([None] * (leaf.ndim - 1)))
+                        return NamedSharding(mesh, pspec)
                     pspec = spec.tiled_3d if leaf.ndim >= 4 else spec.tiled_2d
                     if pspec is not None:
                         return NamedSharding(mesh, pspec)
