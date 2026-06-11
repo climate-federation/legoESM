@@ -92,6 +92,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_xm_wpxp.py` | coupled xm/wpxp advance: builders + assembly ✅27-28; TA/LHS pre-computes + `diagnose_upxp` ✅29; `solve_xm_wpxp_with_single_lhs` + `xm_wpxp_clipping_and_stats` ✅33; **`advance_xm_wpxp` main** (rtm/wprtp + thlm/wpthlp; CAM `l_predict_upwp_vpwp=False`; C6/C7_Skw_fnc as inputs) ✅34 (wiring check + sub-piece parity; codex pending rate-limit) | ✅ |
 | `clubb_mfl.py` | monotonic-flux-limiter JAX port: erf velocity + `mfl_xm_*` ✅30; `calc_turb_adv_range` (masked `fori_loop`) ✅31; **`monotonic_turbulent_flux_limit`** core (masked windowed min/max + `lax.scan` sequential clip + xm re-solve + top spike-fix, round-off parity all 4 fields, differentiable) ✅32 | ✅ |
 | `clubb_tau.py` | CAM tau family: `calc_stability_correction` + `compute_tau_family` (`invrs_tau_C1/C4/C6/C14/xp2_zm`, `invrs_tau_wp3_zt` from parcel Lscale + N2 stability corr) ✅35 | ✅ |
+| `clubb_coefficients.py` | C6rt/C6thl/C7 `_Skw_fnc` (CAM skewness functions, NOT ARM Richardson) + `damp_coefficient` (Lscale stable-region damping, from Fortran) ✅37 | ✅ |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
 
@@ -168,18 +169,19 @@ CAM branches came from the CESM Fortran; `l_damp_wp3_Skw_squared=False`→C8b=0.
 2. **`advance_xm_wpxp` main** — orchestrate the iter-27-29 pieces + clipping.
 3. **P6 orchestration** `advance_clubb_core` (in progress): ✅ iter 35 tau family
    (`clubb_tau.py`); ✅ iter 36 `Skw`/`wp3_on_wp2` diagnostics (`clubb_skewness`).
-   ☐ remaining: the `C*_Skw_fnc` family (CAM `l_use_C7_Richardson=False` →
-   skewness functions, NOT the ARM Richardson/const — needs the Fortran branch),
-   `sigma_sqd_w` (have `compute_sigma_sqd_w`), the pre+post PDF closure
-   (`l_call_pdf_closure_twice=True`) producing the 4th-order moments (wp4/wp2up2/
-   wp2thvp/rtpthvp/…) + the PDF `w_1/w_2/varnce_w/mixt_frac`, and the carried state.
+   ✅ iter 37 the C6/C7 `_Skw_fnc` family (`clubb_coefficients.py`, CAM skewness
+   functions + Lscale damping). ☐ remaining: C1/C11 are computed inside
+   `advance_wp2_wp3`; `sigma_sqd_w` (have `compute_sigma_sqd_w`); the pre+post PDF
+   closure (`l_call_pdf_closure_twice=True`) producing the 4th-order moments
+   (wp4/wp2up2/wp2thvp/rtpthvp/…) + the PDF `w_1/w_2/varnce_w/mixt_frac`; em (TKE)
+   + brunt_vaisala_freq_sqd; and the carried moment state.
 4. **Wire into `clubb.py`**: carry the full moment set as state, replace the
    phase-1 eddy-diffusion mean advance with the prognostic advances.
 
 **⚠ Pending codex review** (external rate limit until ~19:37 MDT): iter-34
-`advance_xm_wpxp` main, iter-35 `clubb_tau`, iter-36 `clubb_skewness`
-diagnostics. All small + parity/jit-grad self-validated. Run the batch
-retroactively the moment the limit resets, before adding more major code.
+`advance_xm_wpxp` main, iter-35 `clubb_tau`, iter-36 `clubb_skewness`, iter-37
+`clubb_coefficients`. All small, low-complexity (no sqrt/0-division AD hazards),
+parity/analytic/jit-grad self-validated. Run the batch the moment codex resets.
 
 Each chunk: analytic/self-consistency oracle (CI) + golden/round-off parity vs
 CLUBB-JAX (patch reference physical constants to isolate algorithm) + codex
