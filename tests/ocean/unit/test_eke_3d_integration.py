@@ -200,7 +200,7 @@ def _build_acc_model_2d():
     # behaviour being locked).
     eke_2d = recipe.model_config.gm_redi.eke._replace(
         eke_3d=False, source_kdiss_h=False, kdiss_h_flux_form=False,
-        gm_source_mode="parameterized")
+        gm_source_mode="parameterized", source_p_diss_iso=False)
     gm_2d = recipe.model_config.gm_redi._replace(eke=eke_2d)
     cfg_2d = recipe.model_config._replace(gm_redi=gm_2d)
     model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg_2d)

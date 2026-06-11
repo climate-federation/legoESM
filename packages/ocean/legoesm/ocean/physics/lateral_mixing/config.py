@@ -67,6 +67,17 @@ class VisbeckConfig(NamedTuple):
     kappa_min: float = 1.0e2             # κ floor [m²/s]
     kappa_max: float = 4.0e3             # κ ceiling [m²/s]
     f_min: float = 1.0e-6                # |f| floor for Rossby-radius denom
+    # Static-stability N² mode for the Eady-growth / Rossby-radius chain.
+    #   "insitu" (default, BIT-IDENTICAL legacy): N² from the in-situ density
+    #     gradient (compute_buoyancy_frequency). The in-situ ∂_zρ carries the
+    #     adiabatic compressibility term and is biased ~6x too stable, which
+    #     makes ∫N dz ~2.7x too large → L_def ~2.1x → eke_len ~23% too long.
+    #   "adiabatic": N² by adiabatic parcel displacement to the upper cell's
+    #     pressure (Veros thermodynamics.py:99-103, eke.py:50-54), the true
+    #     static stability used by the Veros EKE chain. Requires the caller to
+    #     supply T, S, an EOS and the cell-centre pressure (or its ingredients)
+    #     to displace parcels through the EOS; raises if any is missing.
+    n2_mode: str = "insitu"
 
 
 class GMRediConfig(NamedTuple):

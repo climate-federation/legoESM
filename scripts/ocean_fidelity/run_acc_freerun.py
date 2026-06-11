@@ -86,7 +86,9 @@ def _bulk_stats(state, z_coord, grid):
 
 
 def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
-                 bottom_drag_r=None, barotropic_solver=None, dt_mom_ratio=None):
+                 bottom_drag_r=None, barotropic_solver=None, dt_mom_ratio=None,
+                 momentum_friction_additive=False, coriolis_scheme=None,
+                 ab2_scope=None):
     import jax
     import jax.numpy as jnp
     from legoesm.core.field import Field
@@ -117,7 +119,33 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
         # exact tracer conservation). Pass `--dt 43200 --dt-mom-ratio 9
         # --barotropic-solver rigid_lid --outer-integrator ab2` for the faithful run.
         cfg = cfg._replace(dt_mom_ratio=dt_mom_ratio)
+    if momentum_friction_additive:
+        # Veros ADDITIVE momentum vertical-friction placement (friction.py +
+        # solve_stream.py): the implicit friction increment is evaluated on the
+        # pre-step u^n and added alongside the AB2-extrapolated explicit
+        # tendency (weight 1.0), instead of backward-Euler on the AB2 state.
+        # Requires --outer-integrator ab2 (validated at config construction).
+        cfg = cfg._replace(momentum_friction_additive=True)
+    if ab2_scope is not None:
+        # Veros-faithful AB2 scope (D2): dissipative tendencies (lateral
+        # friction + bottom drag; tracer diffusion + GM/Redi) at weight 1.0
+        # like Veros's du_mix / tr[tau]-diffusion placement, with their
+        # depth-mean routed through the barotropic forcing (solve_stream.py
+        # uloc structure). Requires outer_integrator="ab2". Climate-neutral
+        # on the ACC (218 vs 221 Sv) — faithfulness/stability option.
+        cfg = cfg._replace(ab2_scope=ab2_scope)
+    if coriolis_scheme is not None:
+        # Veros explicit-AB2 Coriolis placement (dycore-audit D1): the plain f×u
+        # enters du_dt (so the outer AB2 extrapolates it and its depth-mean feeds
+        # the barotropic rigid-lid slow forcing = solve_stream.py uloc/vloc), the
+        # Matsuno rotation sub-step is skipped, and the rigid-lid solver's own
+        # Coriolis addition is gated off (no double count). Requires
+        # --outer-integrator ab2 + --barotropic-solver rigid_lid (validated).
+        cfg = cfg._replace(coriolis_scheme=coriolis_scheme)
     model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
+    if coriolis_scheme == "explicit_ab2":
+        # Surface the conditional-stability margin for the configured domain.
+        model.check_coriolis_stability(dt)
     sf = recipe.wind_forcing
     state = recipe.initial_state
     # AB2 needs the prior-increment carry seeded (to zero) so the scan keeps a
@@ -138,6 +166,11 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
         _zI = jnp.zeros((rl.nisle,), dtype=state.u.data.dtype)
         state = state._replace(psi=_zV, dpsi=_zV, dpsi_prev=_zV,
                                dpsin=_zI, dpsin_prev=_zI)
+
+    # Reflect the ACTUAL config used by the model (with all the _replace knobs:
+    # outer_integrator, dt_mom_ratio, coriolis_scheme, ...) on the returned recipe
+    # so callers that read recipe.model_config see what ran, not the bare default.
+    recipe = recipe._replace(model_config=cfg)
 
     total_steps = int(round(years * _DAYS_PER_YEAR * _SECONDS_PER_DAY / dt))
     # Integrate in 1-day blocks for granular NaN-checking; jit the inner scan.
@@ -253,6 +286,13 @@ def main() -> int:
                          "dt_mom=4800). Requires --barotropic-solver rigid_lid. Faithful "
                          "run: --dt 43200 --dt-mom-ratio 9 --barotropic-solver rigid_lid "
                          "--outer-integrator ab2.")
+    ap.add_argument("--momentum-friction-additive", action="store_true",
+                    help="Veros ADDITIVE momentum vertical-friction placement "
+                         "(friction.py + solve_stream.py): the implicit friction "
+                         "increment is evaluated on the pre-step u^n and added "
+                         "alongside the AB2 explicit tendency (weight 1.0), instead "
+                         "of backward-Euler on the AB2 state. Requires "
+                         "--outer-integrator ab2.")
     args = ap.parse_args()
 
     import jax
@@ -275,7 +315,8 @@ def main() -> int:
             years, args.dt, outer_integrator=args.outer_integrator,
             bottom_drag_r=args.bottom_drag_r,
             barotropic_solver=args.barotropic_solver,
-            dt_mom_ratio=args.dt_mom_ratio)
+            dt_mom_ratio=args.dt_mom_ratio,
+            momentum_friction_additive=args.momentum_friction_additive)
         lego = _bulk_stats(lego_state, recipe.z_coord, recipe.grid)
 
         veros = None

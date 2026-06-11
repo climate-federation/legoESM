@@ -454,6 +454,7 @@ def _solve_tke_backward_euler(
     surface_flux: jnp.ndarray,
     dt: float,
     cfg: TKEConfig,
+    external_source: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Backward-Euler tridiagonal solve for one TKE time step.
 
@@ -476,12 +477,25 @@ def _solve_tke_backward_euler(
         ``forc_tke_surface = (|tau|/rho_0)^{3/2}``.
     dt : float
     cfg : TKEConfig
+    external_source : (..., nlev-1) or None — additive energy-recycling source
+        ``forc`` [m²/s³] at the interior interfaces (Veros integrate_tke
+        ``forc = ... + eke_diss_iw + K_diss_bot``). Enters the RHS explicitly
+        (already-dissipated mechanical energy, ≥ 0). ``None`` ⇒ no source ⇒
+        BIT-IDENTICAL to the prior form.
 
     Returns
     -------
     e_new : (..., nlev-1)
     """
     N = e_old.shape[-1]   # number of interfaces
+    # Dtype hygiene: surface_flux / external_source can promote to f64 (tau or
+    # the EKE-diss source built at default precision) while e_old runs at the
+    # storage policy's f32 — cast them down so the tridiagonal RHS scatter does
+    # not raise the JAX implicit-downcast FutureWarning. No numeric change when
+    # dtypes already match (the default path).
+    surface_flux = surface_flux.astype(e_old.dtype)
+    if external_source is not None:
+        external_source = external_source.astype(e_old.dtype)
     e_sqrt = jnp.sqrt(jnp.maximum(e_old, cfg.tke_background))
     # Linearised dissipation rate (per unit e_new):
     diss_rate = cfg.c_eps * e_sqrt / jnp.maximum(l_eps, cfg.mxl_min)
@@ -544,8 +558,12 @@ def _solve_tke_backward_euler(
     diag = 1.0 + dt * (diss_rate + buoy_sink_rate) + b_diff
 
     # RHS: explicit shear-production source + explicit convective buoyancy
-    # production (zero in the default in-situ mode) + previous-step e.
+    # production (zero in the default in-situ mode) + previous-step e
+    # + the external energy-recycling source ``forc`` (eke_diss_iw + K_diss_bot,
+    # Veros integrate_tke; zero / None ⇒ bit-identical).
     rhs = e_old + dt * (P_s + buoy_source)
+    if external_source is not None:
+        rhs = rhs + dt * external_source
 
     # Surface flux BC at interface k=0: add the flux divergence with
     # ``forc_tke_surface``-style energy input.
@@ -713,6 +731,7 @@ def tke_vertical_mixing(
     jacobian: jnp.ndarray | None = None,
     eos_fn=None,
     z_interface: jnp.ndarray | None = None,
+    external_source: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -753,6 +772,11 @@ def tke_vertical_mixing(
     cfg : TKEConfig
     n_iterations : int
         See Mode A / Mode B above.
+    external_source : (..., nlev-1) or None
+        Additive energy-recycling TKE source ``forc`` [m²/s³] at the interior
+        interfaces (Veros integrate_tke ``forc = ... + eke_diss_iw + K_diss_bot``),
+        applied EXPLICITLY in every sub-iteration's backward-Euler RHS. ``None``
+        ⇒ bit-identical to the closure without recycled sources.
 
     Returns
     -------
@@ -803,6 +827,7 @@ def tke_vertical_mixing(
             dz_half=dz_half,
             surface_flux=surface_flux,
             dt=dt, cfg=cfg,
+            external_source=external_source,
         )
 
     # Final K from converged TKE.

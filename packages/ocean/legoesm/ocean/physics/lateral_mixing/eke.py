@@ -116,7 +116,46 @@ class EKEConfig(NamedTuple):
     #     <S²> ≥ <S>² that the parameterized sigma² (a squared slope AVERAGE)
     #     under-counts. Replaces the parameterized P in the EKE source; the GM
     #     tracer flux itself is unchanged. ACC recipe opts in.
+    #   "realized_signed" — the LITERAL SIGNED Veros conversion -P_diss_skew =
+    #     -(g/ρ₀)·∇(int_drhodX)·F_skew summed over X∈{T,S} (the dynamic-enthalpy
+    #     dissipation of the GM SKEW flux; veros/core/isoneutral/diffusion.py:234-263,
+    #     compute_dissipation + the vertical flux_top term). Built from the SKEW-only
+    #     isopycnal flux (kappa_Redi=0) the GM tracer tendency assembles, contracted
+    #     with the Veros int_drhodT/S dynamic-enthalpy integrands — NOT the positive-
+    #     definite κ_GM·N²·⟨S²⟩ parameterization of "realized". On the ACC equilibrium
+    #     it is ≥ 0 in every wet cell (matching Veros), but it is NOT clamped: any
+    #     locally-negative value is folded SEMI-IMPLICITLY by eke_apply_local_source
+    #     as a local sink (like dissipation), keeping E ≥ e_min by construction. This
+    #     removes the ~22% positive-definite over-count of "realized" (probe: signed
+    #     5.94e10 W vs parameterized 7.29e10 W vs Veros 5.97e10 W on the drop snapshot).
+    #     Requires eke_3d=True (3-D W-grid source). ACC recipe opts in.
     gm_source_mode: str = "parameterized"
+    # When True (default off ⇒ bit-identical), SUBTRACT the realized SIGNED Redi
+    # (isopycnal-diffusive) APE dissipation -P_diss_iso from the EKE source — Veros's
+    # P_diss_iso sink (veros/core/eke.py:117; -P_diss_iso term of the EKE forc).
+    # Built analogously to the signed skew (the ISO-only flux, kappa_GM=0, plus the
+    # implicit K_33 vertical-diagonal dissipation) contracted with the dynamic-
+    # enthalpy gradient. Requires eke_3d=True AND gm_source_mode="realized_signed"
+    # (the signed Redi sink only makes sense paired with the signed skew source —
+    # both are the literal Veros conversions; mixing the parameterized skew with the
+    # signed iso sink would be inconsistent). ACC recipe opts into both.
+    source_p_diss_iso: bool = False
+    # Static-stability N² mode for the Eady-growth / deformation-radius chain
+    # (governs eke_len via the column buoyancy integral ∫N dz and the Eady
+    # production σ = N|S|). Mirrors TKEConfig.n2_mode.
+    #   "insitu" (default, BIT-IDENTICAL legacy): N² from the in-situ density
+    #     gradient (compute_buoyancy_frequency). Biased ~6x too stable
+    #     (compressibility) → ∫N dz ~2.7x too large → eke_len ~23% too long →
+    #     EKE dissipation (∝1/L) too weak (a runaway-EKE lever; the third
+    #     in-situ-vs-locally-referenced bug instance after convection-N² and
+    #     neutral slopes).
+    #   "adiabatic": N² by adiabatic parcel displacement to the upper cell's
+    #     pressure (Veros eke.py:50-54 via thermodynamics.py:99-103) — the true
+    #     static stability the Veros EKE chain uses. Requires the EKE step to
+    #     supply T, S, an EOS and the cell-centre pressure to displace parcels
+    #     through the EOS; raises otherwise. (For "rhines" eke_len this directly
+    #     corrects the deformation radius c₁ = ∫N dz / π.)
+    n2_mode: str = "insitu"
 
 
 def eke_mixing_length(L_rossby: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
@@ -262,7 +301,10 @@ def eke_apply_local_source(
     *,
     production_override: jnp.ndarray | None = None,
     extra_source: jnp.ndarray | None = None,
-) -> jnp.ndarray:
+    signed_source: jnp.ndarray | None = None,
+    clamp_production: bool = True,
+    return_dissipation: bool = False,
+):
     """One step of the local EKE source/sink with **semi-implicit dissipation** —
     unconditionally positivity-preserving (``E_{n+1} >= 0``) with NO clipping/mask.
 
@@ -277,7 +319,7 @@ def eke_apply_local_source(
     standard stable treatment of the quadratic-in-magnitude EKE dissipation
     (Eden-Greatbatch / Veros).
 
-    Optional EKE-source augmentation (both default ``None`` ⇒ bit-identical):
+    Optional EKE-source augmentation (all default ``None``/``True`` ⇒ bit-identical):
 
     - ``production_override`` — replaces the parameterized GM conversion
       ``kappa_GM·sigma²`` with a supplied source [m²/s³] (the ``gm_source_mode=
@@ -286,19 +328,65 @@ def eke_apply_local_source(
     - ``extra_source`` — an additional non-negative explicit source [m²/s³] added to
       the production (the ``source_kdiss_h`` lateral-friction term, Veros
       ``K_diss_h``). Must be ≥ 0 to keep the positivity-by-construction guarantee.
+    - ``signed_source`` — a SIGN-INDEFINITE source/sink [m²/s³] (the realized SIGNED
+      ``-P_diss_skew`` source and/or the ``-P_diss_iso`` Redi sink, summed by the
+      caller).  Positivity is preserved by SPLITTING it: the non-negative part enters
+      the explicit numerator, and the magnitude of the NEGATIVE part is folded into
+      the implicit denominator as an extra linear sink rate ``max(0,-signed)/E_n``
+      (backward-Euler on the negative-source magnitude), so ``E_{n+1} ≥ 0`` by
+      construction even where the conversion is locally a sink.  This is the
+      documented treatment vs Veros's plain EXPLICIT ``forc`` (Veros relies on the
+      ``E ≥ 0`` re-floor; legoESM folds the local sink semi-implicitly so no floor
+      is needed and the step is unconditionally stable).
+    - ``clamp_production`` (default True) — when False, a ``production_override`` is
+      NOT clamped to ``≥ 0`` but routed through the same negative-part-implicit split
+      as ``signed_source`` (the ``gm_source_mode="realized_signed"`` path: the signed
+      skew conversion can be locally negative).
 
-    Both enter the EXPLICIT numerator, so the result stays ≥ 0 by construction
-    (numerator ≥ 0, denominator ≥ 1) exactly as the base scheme.
+    When ``return_dissipation`` is True, returns ``(E_new, eke_diss_iw)`` where
+    ``eke_diss_iw = c_eps·√E_n·E_{n+1}/L = diss_rate·E_new`` [m²/s³] ≥ 0 is the
+    Eden-Greatbatch dissipation rate (Veros ``eke_diss_iw = c_int·eke``, ``c_int =
+    eke_c_eps·√E/eke_len``) — routed to the prognostic-TKE source.  It is the
+    Eden-Greatbatch interior dissipation ONLY (NOT the realized-source negative part,
+    which is folded into the same implicit factor but is the GM/Redi APE conversion,
+    not the IW-breaking dissipation Veros routes to TKE).  Default ⇒ returns
+    ``E_new`` only ⇒ bit-identical.
     """
     E_pos = jnp.maximum(E, 0.0)
+    # Accumulate the EXPLICIT positive production and the IMPLICIT extra sink rate
+    # (from sign-indefinite sources' negative part) so the result stays ≥ 0.
+    # ``None`` sentinel (not a 0.0 scalar): the default-off path traces the exact
+    # pre-existing ``1 + dt·diss_rate`` denominator with no extra add and no
+    # scalar-dtype interaction — bit-identical by construction.
+    extra_sink_rate = None
     if production_override is None:
         production = eke_kappa_gm(E_pos, L, cfg) * sigma ** 2
-    else:
+    elif clamp_production:
         production = jnp.maximum(production_override, 0.0)
+    else:
+        # Signed override: positive part explicit, negative part implicit.
+        production = jnp.maximum(production_override, 0.0)
+        neg = jnp.maximum(-production_override, 0.0)        # ≥ 0 sink magnitude
+        extra_sink_rate = neg / jnp.maximum(E_pos, 1.0e-30)
     if extra_source is not None:
         production = production + jnp.maximum(extra_source, 0.0)
+    if signed_source is not None:
+        production = production + jnp.maximum(signed_source, 0.0)
+        neg = jnp.maximum(-signed_source, 0.0)
+        sink = neg / jnp.maximum(E_pos, 1.0e-30)
+        extra_sink_rate = sink if extra_sink_rate is None else extra_sink_rate + sink
     diss_rate = cfg.c_eps * jnp.sqrt(E_pos + 1.0e-30) / jnp.maximum(L, cfg.l_min)
-    return (E_pos + dt * production) / (1.0 + dt * diss_rate)
+    # Both rates are ≥ 0; the implicit denominator ≥ 1 ⇒ E_new ≥ 0 by construction.
+    # ``diss_rate`` itself stays the pure Eden-Greatbatch rate — the
+    # ``return_dissipation`` product below must exclude the extra sink folding.
+    total_rate = (diss_rate if extra_sink_rate is None
+                  else diss_rate + extra_sink_rate)
+    E_new = (E_pos + dt * production) / (1.0 + dt * total_rate)
+    if return_dissipation:
+        # Veros eke_diss_iw = c_int·eke[taup1] = diss_rate·E_new (≥ 0) — the IW
+        # dissipation ONLY (excludes the realized-source negative-part folding).
+        return E_new, diss_rate * E_new
+    return E_new
 
 
 def validate_eke_config(cfg: EKEConfig) -> None:
@@ -329,10 +417,21 @@ def validate_eke_config(cfg: EKEConfig) -> None:
         raise ValueError(f"EKEConfig.eke_crhin must be > 0, got {cfg.eke_crhin!r}")
     if cfg.alpha_eke < 0.0:
         raise ValueError(f"EKEConfig.alpha_eke must be >= 0, got {cfg.alpha_eke!r}")
-    if cfg.gm_source_mode not in ("parameterized", "realized"):
+    if cfg.gm_source_mode not in ("parameterized", "realized", "realized_signed"):
         raise ValueError(
-            "EKEConfig.gm_source_mode must be 'parameterized' or 'realized', got "
-            f"{cfg.gm_source_mode!r}"
+            "EKEConfig.gm_source_mode must be 'parameterized', 'realized', or "
+            f"'realized_signed', got {cfg.gm_source_mode!r}"
+        )
+    if cfg.source_p_diss_iso and cfg.gm_source_mode != "realized_signed":
+        # The signed Redi (-P_diss_iso) sink is only consistent paired with the
+        # signed skew source (both are the literal Veros conversions). Reject the
+        # mismatched combination rather than silently mixing parameterized skew
+        # with a signed iso sink.
+        raise ValueError(
+            "EKEConfig.source_p_diss_iso=True requires gm_source_mode="
+            "'realized_signed' (the signed -P_diss_iso Redi sink is only "
+            "consistent with the signed -P_diss_skew source; got gm_source_mode="
+            f"{cfg.gm_source_mode!r})."
         )
     if cfg.kdiss_h_flux_form and not cfg.source_kdiss_h:
         # kdiss_h_flux_form selects the discretisation of the K_diss_h source; it

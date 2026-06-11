@@ -102,6 +102,23 @@ class OceanSurfaceForcing(NamedTuple):
         ocean], e.g. sea-ice brine rejection on freeze.  Applied to the top
         layer salinity as dS/dt = salt_flux*1e3/(rho_0*dz_0); distinct from the
         ``freshwater`` (virtual-salt dilution) channel.
+    q_prescribed : array or None
+        Prescribed part of the surface heat flux [W/m², positive into ocean]
+        consumed ONLY by the ``"flux_feedback"`` surface-forcing scheme
+        (Veros global_4deg ``qnet``).  Kept separate from ``q_net`` so the
+        feedback scheme owns the TOTAL heat in one place (ice mask) and so
+        the prescribed-channel ``c_sw`` seam is not double-counted — leave
+        ``q_net=None`` when using ``flux_feedback``.
+    q_feedback : array or None
+        Linear SST-feedback (piston) coefficient [W/m²/K, ≥ 0 damps] for the
+        ``"flux_feedback"`` scheme (Veros ``qnec``).  Heat contribution is
+        ``q_feedback · (T_feedback_target − T_surf)``.
+    T_feedback_target : array or None
+        Target SST [°C] for the ``q_feedback`` term (Veros ``sst_clim``,
+        monthly-interpolated by the driver/harness).
+    S_restore_target : array or None
+        Target SSS [PSU] for the ``flux_feedback`` scheme's surface-salinity
+        restoring (Veros ``sss_clim``).
     """
     sw_down: object = None       # jnp.ndarray | None
     q_net: object = None         # jnp.ndarray | None
@@ -109,6 +126,11 @@ class OceanSurfaceForcing(NamedTuple):
     tau_y: object = None         # jnp.ndarray | None
     freshwater: object = None    # jnp.ndarray | None
     salt_flux: object = None     # jnp.ndarray | None  (real salt mass, kg/m2/s)
+    # --- "flux_feedback" scheme channels (None ⇒ inert; see docstring) ---
+    q_prescribed: object = None        # jnp.ndarray | None  [W/m²]
+    q_feedback: object = None          # jnp.ndarray | None  [W/m²/K]
+    T_feedback_target: object = None   # jnp.ndarray | None  [°C]
+    S_restore_target: object = None    # jnp.ndarray | None  [PSU]
 
 
 class OceanConfig(NamedTuple):
@@ -325,6 +347,31 @@ class LatLonCGridOceanState(NamedTuple):
     # when the prognostic-EKE GM closure is active (config.gm_redi.eke not None).
     # Default None -> inert (no EKE): zero behaviour change for existing configs.
     eke: object = None
+    # Prognostic turbulent kinetic energy [m^2/s^2] at the interior interfaces
+    # (W-grid), 3-D Field (n_lat, n_lon, nlev-1), used only when the prognostic
+    # TKE vertical-mixing closure is active (vertical_mixing.tke.prognostic=True).
+    # Carried across model steps: each step runs ONE backward-Euler TKE solve
+    # (dt = dt_mom) seeded from this field and stores the updated TKE back.
+    # Default None -> inert (Mode-B diagnostic chain): zero behaviour change.
+    tke: object = None
+    # Prior-step ADVECTIVE TKE tendency [m^2/s^3] at the interior interfaces
+    # (W-grid), 3-D Field (n_lat, n_lon, nlev-1) — the Adams-Bashforth history
+    # dtke^{n-1} for the prognostic-TKE superbee advection (Veros vs.dtke,
+    # tke.py:292-323), used only when vertical_mixing.tke.advection_scheme !=
+    # "none" (requires prognostic=True). None on the first step => the AB2
+    # increment uses a zero previous tendency, exactly like Veros's
+    # zero-initialised dtke[taum1]. Default None -> inert: zero behaviour change.
+    dtke: object = None
+    # Carried EKE dissipation rate [m^2/s^3] at the interior interfaces (W-grid),
+    # 3-D Field (n_lat, n_lon, nlev-1). Populated by the 3-D EKE step (Veros
+    # eke_diss_iw, run in the GM/Redi stage) and consumed WITHIN THE SAME step by
+    # the prognostic TKE source when vertical_mixing.tke.source_eke_diss=True
+    # (the TKE source reads state_new.eke_diss — this step's EKE update — since
+    # the implicit-vmix TKE solve runs after GM/Redi, matching Veros's same-step
+    # eke->tke ordering). The CARRIED value on state is only the fallback when a
+    # step produces none (e.g. the 2-D EKE path). Default None -> inert: zero
+    # behaviour change.
+    eke_diss: object = None
     # Prior EXPLICIT increment ΔX_expl^{n-1} for the AB2 outer integrator
     # (config.outer_integrator == "ab2"): the explicit-only forward-Euler increment
     # (advection, GM/Redi, lateral friction, Coriolis, barotropic solve, freshwater)
@@ -417,6 +464,31 @@ class LatLonCGridOceanTendencies(NamedTuple):
     Ah_visc_v: object = None
     Ah_kediss_cell: object = None
     surface_tracer_forcing: object = None
+    # Bottom-drag KE-extraction dissipation density [m²/s³] at the interior
+    # interfaces (W-grid, (n_lat, n_lon, nlev-1)) — Veros K_diss_bot. Populated
+    # ONLY when the prognostic-TKE ``source_bottom_drag_diss`` option is on (the
+    # ACC recipe), so the prognostic TKE source can recycle the bottom-drag KE
+    # extraction (Veros integrate_tke ``forc += K_diss_bot``). ``None`` otherwise
+    # (default), keeping the tendency pytree + every existing path bit-identical.
+    K_diss_bot: object = None
+    # --- AB2 "advective"-scope dissipative split (Veros-faithful) ---
+    # When ``ab2_scope="advective"`` the DISSIPATIVE momentum / tracer
+    # tendencies are WITHHELD from ``du_dt``/``dv_dt`` / ``dT_dt``/``dS_dt``
+    # (so the outer AB2 extrapolates only the ADVECTIVE part) and exposed here
+    # so the model step can apply them at WEIGHT 1.0 (forward-Euler), matching
+    # Veros's placement (momentum friction + bottom drag in
+    # ``core/external/solve_stream.py``; tracer lateral diffusion in
+    # ``core/thermodynamics.py``). ``du_diss``/``dv_diss`` carry the lateral
+    # friction (whichever ``lateral_viscosity_operator``) + bottom-drag
+    # momentum tendencies [m/s²]; ``dT_diss``/``dS_diss`` carry the lateral
+    # tracer-diffusion tendency [degC/s, PSU/s] (the GM/Redi isoneutral+skew
+    # part is added to these in the model step, where it is computed). ``None``
+    # otherwise (default ``ab2_scope="total"``), keeping the tendency pytree +
+    # every existing path bit-identical.
+    du_diss: object = None
+    dv_diss: object = None
+    dT_diss: object = None
+    dS_diss: object = None
 
 
 class MomentumTendencyDiagnostics(NamedTuple):
@@ -891,6 +963,28 @@ class LatLonCGridOceanConfig(NamedTuple):
     # vector_invariant / weno momentum paths. Literal default -> safe after
     # `constants`.
     momentum_flux_scheme: str = "upwind"
+    # Stage-8 VERTICAL momentum-advection scheme (independent of the HORIZONTAL
+    # momentum_advection dispatch). Selects how -d/dz(w·u) is discretized:
+    #   "upwind_perturbation" (DEFAULT, BIT-IDENTICAL) — 1st-order interface
+    #     upwind of the BAROCLINIC PERTURBATION u' = u - U_bar. Carries an
+    #     implicit vertical viscosity ~|w|·dz/2 that damps baroclinic shear,
+    #     and OMITS the depth-integral-zero redistribution term -d/dz(w·U_bar)
+    #     (advecting only the perturbation drops the barotropic-momentum part).
+    #     Both effects push the column toward barotropic.
+    #   "centered_full" (VEROS-FAITHFUL) — 2nd-order CENTERED, energy-conserving
+    #     flux of the FULL velocity u (= u' + U_bar), matching the vertical part
+    #     of Veros core/momentum.py momentum_advection
+    #     (flux_top = 0.25·(u[k+1]+u[k])·(w+w_east)). Restores the w·U_bar
+    #     redistribution and removes the upwind implicit viscosity. UNLIMITED ⇒
+    #     dispersive (no monotonicity, no implicit viscosity): stability rests on
+    #     dt_mom + A_v/TKE friction, like Veros. The ACC recipe opts in.
+    # The WENO momentum paths (momentum_advection in {weno5,weno7}) own their own
+    # vertical reconstruction and ignore this field. Literal default -> safe
+    # after `constants`. Validated at config construction; unknown -> ValueError.
+    # REJECTED in combination with adaptive_implicit_vertadv=True (that path
+    # replaces the explicit in-tendency vertical advection entirely with an
+    # upwind backward-Euler solve, so "centered_full" would be a silent no-op).
+    vertical_momentum_scheme: str = "upwind_perturbation"
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian
@@ -1017,6 +1111,109 @@ class LatLonCGridOceanConfig(NamedTuple):
     polar_filter_max_wave_speed: float = 300.0
     # Fraction of the theoretical CFL wavenumber kept (<1 for margin).
     polar_filter_safety_factor: float = 0.85
+
+    # --- Additive momentum vertical-friction placement (Veros) ---
+    # Veros computes the implicit vertical-friction increment du_mix from the
+    # PRE-STEP velocity u^n (core/friction.py, backward-Euler on u^n) and adds
+    # it ADDITIVELY to the AB2-extrapolated explicit tendency
+    # (core/external/solve_stream.py: u^{n+1} = u^n + dt·(AB2(du) + du_mix)).
+    # legoESM's default placement is SEQUENTIAL: backward-Euler friction on the
+    # AB2-advanced state u*.  Both are implicit/unconditionally stable; at
+    # equilibrium (AB2(du) ≈ −du_mix) the O(dt²·A_v) placement delta dominates
+    # the realized momentum increment (measured: reconstructing the additive
+    # form collapses the realized-increment L2 ratio 4.8→1.6 and lifts corr
+    # 0.11→0.44 vs Veros — .physics-validator/momentum_fair/).  TRACERS keep
+    # the sequential implicit-diffusion-on-the-AB2-state placement in BOTH
+    # modes (that IS Veros's tracer placement, core/thermodynamics.py).
+    # Requires ``outer_integrator="ab2"`` and ``implicit_vertical_mixing=True``
+    # (rejected otherwise at config validation).  The friction solve has
+    # zero-flux top/bottom BCs, so the added increment has (thickness-weighted)
+    # zero depth-mean and the barotropic mode from the barotropic solver is
+    # untouched.  Default False ⇒ sequential placement ⇒ BIT-IDENTICAL.
+    momentum_friction_additive: bool = False
+
+    # --- Coriolis time-stepping placement (Veros vs Matsuno split) ---
+    # Selects HOW the planetary Coriolis force f×u enters the momentum update:
+    #   "matsuno_split" (DEFAULT, BIT-IDENTICAL) — legoESM's existing scheme:
+    #     Coriolis is a SEQUENTIAL forward-backward (Matsuno) rotation SUB-STEP
+    #     (``_forward_backward_coriolis_3d``) applied to the forward-Euler-advanced
+    #     state u* = u^n + dt_mom·du_dt_pert (du_dt EXCLUDES Coriolis), and the
+    #     barotropic solver adds its OWN f×u_bt on the barotropic mode. The outer
+    #     AB2 then extrapolates the total explicit INCREMENT (which contains the
+    #     rotation). The Matsuno one-step map is exactly neutral on the inertial
+    #     mode, but AB2-extrapolating its increment numerically DESTROYS
+    #     near-inertial energy (|G| 0.65–0.86/step at the ACC channel f·dt_mom).
+    #   "explicit_ab2" (VEROS-FAITHFUL) — Coriolis is an EXPLICIT tendency f×u of
+    #     the FULL velocity (Veros core/momentum.py tend_coriolisf: the 0.25 C-grid
+    #     4-point average of f·v→u-points, −f·u→v-points; legoESM reuses the shared
+    #     ``coriolis_cgrid`` operator, which IS that stencil minus two omitted
+    #     metric pieces — the tantr curvature term (measured 0.02–0.04% of
+    #     Coriolis on the ACC grid) and the meridional dyt·cost/(dyu·cosu)
+    #     averaging ratio (up to ~1.6% at the channel edge); BOTH are omitted
+    #     identically by the shared C-grid Coriolis machinery on the
+    #     matsuno_split path too, so they do not affect the scheme comparison
+    #     (adversarial review 2026-06-10, probe_metric.py). It ENTERS ``du_dt``/``dv_dt`` so its depth-mean reaches
+    #     the barotropic slow forcing F_slow (= Veros's solve_stream.py uloc/vloc =
+    #     depth-integral of du INCLUDING Coriolis) and its perturbation reaches the
+    #     3-D du_dt_pert; the outer AB2 extrapolates it with the 1.5/0.6 weights
+    #     (Veros AB2-eps). The Matsuno sub-step is SKIPPED and the barotropic
+    #     solver's OWN Coriolis addition is GATED OFF (no double count). Per-step
+    #     inertial |G| ≈ 0.99–1.01 (weakly anti-damped, like Veros), preserving the
+    #     near-inertial / inertia-gravity energy pathway and the discrete-Ekman
+    #     angle (the matsuno_split path rotates the Ekman balance ~13–15°).
+    # Requires ``outer_integrator="ab2"`` (forward-Euler Coriolis at weight 1.0 is
+    # unconditionally UNSTABLE for pure rotation: sqrt(1+(f·dt)²) > 1 per step) AND
+    # ``barotropic_solver="rigid_lid"`` (the only barotropic path whose Coriolis IS
+    # the depth-mean of the slow forcing; the substep / implicit-CN free-surface
+    # solvers sub-step the barotropic Coriolis on the barotropic gravity-wave clock
+    # — different physics, out of scope). Rejected otherwise at config validation.
+    # STABILITY: AB2-eps Coriolis is conditionally stable in f·dt_mom — empirical
+    # divergence threshold ≈0.55 (review probe). The ACC recipe grid spans
+    # |lat|max≈44° ⇒ |f|max≈9.95e-5, f·dt_mom≈0.48 at dt_mom=4800 s — safely
+    # inside, bounded at all probed friction levels. Configurations poleward of
+    # ~55° at this dt_mom would exceed the threshold; check_coriolis_stability
+    # warns at 0.5 and 0.55. Default
+    # "matsuno_split" ⇒ BIT-IDENTICAL for every existing config.
+    coriolis_scheme: str = "matsuno_split"
+
+    # --- AB2 extrapolation scope (Veros-faithful dissipative placement) ---
+    # Selects WHICH explicit tendencies the AB2 outer integrator extrapolates:
+    #   "total" (DEFAULT, BIT-IDENTICAL) — legoESM's existing scheme: the AB2
+    #     extrapolates the FULL explicit forward-Euler increment, INCLUDING the
+    #     dissipative tendencies (momentum lateral friction + bottom drag;
+    #     tracer lateral diffusion + GM/Redi isoneutral+skew diffusion).
+    #   "advective" (VEROS-FAITHFUL) — only the ADVECTIVE part of the increment
+    #     is AB2-extrapolated; the DISSIPATIVE tendencies are applied at WEIGHT
+    #     1.0 (forward-Euler), matching Veros::
+    #       X^{n+1} = X^n + (1.5+ε)·ΔX_adv^n − (0.5+ε)·ΔX_adv^{n-1} + 1.0·ΔX_diss^n
+    #     Veros AB2-extrapolates ONLY {Coriolis, metric, advection, wind,
+    #     p_hydro} for momentum (``core/external/solve_stream.py``) and ONLY
+    #     advection for tracers (``vs.dtemp`` = ``advect_temperature``,
+    #     ``core/thermodynamics.py``); the dissipative terms ride at weight 1.0:
+    #     momentum lateral friction + bottom drag (added unextrapolated in
+    #     ``solve_stream.py``) and tracer lateral+isoneutral+skew diffusion
+    #     (added to ``tr[taup1]`` at weight 1.0 in ``thermodynamics.py`` /
+    #     ``isoneutral/diffusion.py`` — all computed from the PRE-STEP tracer
+    #     ``tr[tau]``).  In "advective" mode the AB2 carries
+    #     ``{T,S,u,v}_incr_prev`` hold ONLY the advective increment (the carry
+    #     semantics change is GATED — under "total" the carries are unchanged
+    #     bit-identically).
+    # WHY THIS MATTERS: the prior "total" scheme incurs a transient-only
+    # O((0.5+ε)·Δstep(D)) error per dissipative tendency (it converges to the
+    # SAME fixed point as "advective" — both reduce to a forward-Euler steady
+    # balance) AND halves the AB2 stability margin on the NEGATIVE REAL AXIS
+    # where stiff dissipation lives. STABILITY: at weight 1.0 the dissipative
+    # update obeys the forward-EULER stability bound (|1 − λ·dt| ≤ 1, i.e.
+    # λ·dt ≤ 2 for the real-negative eigenvalues of a diffusion operator); AB2
+    # on the negative real axis is stable only to |λ·dt| ≲ 1 — so "advective"
+    # is a STABILITY IMPROVEMENT for stiff dissipation, not a relaxation.
+    # Composes cleanly with ``momentum_friction_additive`` (the implicit
+    # VERTICAL friction is already weight-1.0 there): both on ⇒ the full Veros
+    # dissipative scope (lateral + vertical friction + bottom drag all weight
+    # 1.0).  Requires ``outer_integrator="ab2"`` (the scope is meaningless
+    # without AB2; rejected otherwise at config validation).  Default "total"
+    # ⇒ BIT-IDENTICAL for every existing config.
+    ab2_scope: str = "total"
     # --- East-west cyclic-overlap projection (ORCA tripole seam) -----------
     # When True, the two longitude HALO columns are slaved to their ORCA
     # 2-point cyclic-overlap partners at the END of each step (cell-centred

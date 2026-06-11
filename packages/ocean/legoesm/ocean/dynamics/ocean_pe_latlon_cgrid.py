@@ -103,6 +103,7 @@ from legoesm.ocean.advection import (
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
+    flux_form_vertical_momentum_advection_centered as _flux_form_vertical_momentum_advection_centered,
     compute_centroid_depth,
 )
 
@@ -118,11 +119,50 @@ VALID_MOMENTUM_ADVECTION = frozenset(
 # Reconstruction schemes for the advected velocity in the flux-form path
 # (config.momentum_flux_scheme; only used when momentum_advection="flux_form").
 VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered"})
+# Stage-8 VERTICAL momentum-advection scheme (config.vertical_momentum_scheme),
+# independent of the HORIZONTAL momentum_advection dispatch above:
+#   "upwind_perturbation" (default, bit-identical) — 1st-order interface
+#     upwind of the BAROCLINIC PERTURBATION u' = u - U_bar.  Carries an
+#     implicit vertical viscosity ~|w|*dz/2 that damps baroclinic shear and
+#     omits the depth-integral-zero -d/dz(w*U_bar) redistribution term.
+#   "centered_full" (Veros-faithful) — 2nd-order CENTERED (energy-conserving,
+#     unlimited, dispersive) flux of the FULL velocity u, including the
+#     w*U_bar barotropic-redistribution part.  Stability rests on dt_mom +
+#     A_v/TKE friction like Veros (no limiter, no implicit viscosity).
+# The WENO momentum paths (momentum_advection in {weno5,weno7}) own their own
+# vertical reconstruction and ignore this field.
+VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
+    {"upwind_perturbation", "centered_full"}
+)
 # Lateral (harmonic) momentum-viscosity operator form (config.lateral_viscosity_operator):
 # the default VECTOR Laplacian grad(div)−k×grad(curl), or Veros's component-wise
 # FLUX-DIVERGENCE harmonic friction ∇·(A_h∇u). Validated at config construction;
 # unknown -> ValueError (dispatch discipline).
 VALID_LATERAL_VISCOSITY_OPERATOR = frozenset({"vector_laplacian", "flux_divergence"})
+# Coriolis time-stepping placement (config.coriolis_scheme):
+#   "matsuno_split" (default, bit-identical) — Coriolis is a sequential
+#     forward-backward (Matsuno) rotation sub-step on the FE-advanced state and
+#     du_dt EXCLUDES Coriolis; the barotropic solver adds its own f×u_bt.
+#   "explicit_ab2" (Veros-faithful) — the plain f×u (full velocity) is an explicit
+#     tendency ENTERING du_dt/dv_dt (so the outer AB2 extrapolates it and its
+#     depth-mean feeds the barotropic slow forcing); the Matsuno sub-step is
+#     skipped and the barotropic solver's own Coriolis addition is gated off.
+# Validated at config construction (ocean_model_latlon_cgrid.py); unknown ->
+# ValueError. The "explicit_ab2" path additionally requires outer_integrator="ab2"
+# and barotropic_solver="rigid_lid" (rejected otherwise).
+VALID_CORIOLIS_SCHEME = frozenset({"matsuno_split", "explicit_ab2"})
+# AB2 extrapolation scope (config.ab2_scope):
+#   "total" (default, bit-identical) — the AB2 outer integrator extrapolates the
+#     FULL explicit increment, including the dissipative tendencies.
+#   "advective" (Veros-faithful) — the DISSIPATIVE momentum tendencies (lateral
+#     friction + bottom drag) and tracer tendencies (lateral diffusion + GM/Redi)
+#     are WITHHELD from du_dt/dv_dt/dT_dt/dS_dt (exposed on du_diss/dv_diss/
+#     dT_diss/dS_diss) so the AB2 extrapolates ONLY the advective part; the model
+#     step applies the dissipative part at weight 1.0 (Veros solve_stream.py /
+#     thermodynamics.py). Validated at config construction
+#     (ocean_model_latlon_cgrid.py); unknown -> ValueError. "advective"
+#     additionally requires outer_integrator="ab2" (rejected otherwise).
+VALID_AB2_SCOPE = frozenset({"total", "advective"})
 
 
 def interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
@@ -1450,11 +1490,24 @@ def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom
 def _bc_vertical_momentum_advection(
     du_dt, dv_dt, u_prime, v_prime, w, h_u, h_v, u_mask_3d, v_mask_3d,
     grid, _mom_adv, _weno_order, config, diagnose_momentum=False,
+    u_full=None, v_full=None,
 ):
     """Stage 8: flux-form vertical advection of the perturbation momentum
     (1st-order upwind, or WENO when momentum_advection is weno5/weno7). Pure
     verbatim extraction (Q8). Returns ``(du_dt, dv_dt, diag_vertadv_u,
     diag_vertadv_v)``.
+
+    ``config.vertical_momentum_scheme`` selects the (non-WENO) explicit
+    vertical-advection variant:
+
+    - ``"upwind_perturbation"`` (default, bit-identical) — 1st-order
+      interface upwind of the PERTURBATION velocity ``u_prime``/``v_prime``.
+    - ``"centered_full"`` (Veros-faithful) — 2nd-order centered,
+      energy-conserving flux of the FULL velocity ``u_full``/``v_full``
+      (restoring the ``-d/dz(w*U_bar)`` barotropic-redistribution term and
+      removing the upwind implicit vertical viscosity).  Requires
+      ``u_full``/``v_full`` to be passed.  The WENO momentum paths ignore
+      this field (they have their own vertical reconstruction).
 
     The ``adaptive_implicit_vertadv`` gate (Shchepetkin 2015 / NEMO
     ln_zad_Aimp) is applied here: when ``config.adaptive_implicit_vertadv``
@@ -1529,22 +1582,49 @@ def _bc_vertical_momentum_advection(
             diag_vertadv_v = _flux_form_vertical_momentum_advection_weno(
                 v_prime, w_v, h_v_old, order=_weno_order)
         else:
-            # Default: 1st-order upwind.  The implicit viscosity
-            # (~|w|*dz/2) damps baroclinic shear that explicit A_v=1e-5
-            # cannot.  Pass u/v face-activity masks so vertical momentum
-            # flux is exactly zero at faces below the seafloor —
-            # otherwise float-precision noise in w_u/w_v drives spurious
-            # tendencies inside the rock (and poorly-conditions
-            # adjoints).  ``u_mask_3d`` may be shape ``(..., 1)`` for
-            # pure z* (2D-broadcast) or ``(..., nlev)`` for partial;
-            # broadcast to the velocity shape so the helper's per-level
-            # slicing along the last axis works.
-            u_face_active = jnp.broadcast_to(u_mask_3d, u_prime.shape)
-            v_face_active = jnp.broadcast_to(v_mask_3d, v_prime.shape)
-            diag_vertadv_u = _flux_form_vertical_momentum_advection(
-                u_prime, w_u, h_u_old, face_active=u_face_active)
-            diag_vertadv_v = _flux_form_vertical_momentum_advection(
-                v_prime, w_v, h_v_old, face_active=v_face_active)
+            # Non-WENO explicit vertical momentum advection.  Pass u/v
+            # face-activity masks so the vertical momentum flux is exactly
+            # zero at faces below the seafloor — otherwise float-precision
+            # noise in w_u/w_v drives spurious tendencies inside the rock
+            # (and poorly-conditions adjoints).  ``u_mask_3d`` may be shape
+            # ``(..., 1)`` for pure z* (2D-broadcast) or ``(..., nlev)`` for
+            # partial; broadcast to the velocity shape so the helper's
+            # per-level slicing along the last axis works.
+            #
+            # Python ``if`` on the static (compile-time) config literal —
+            # the feature-gating exception, not ``jnp.where``.
+            _vert_mom_scheme = getattr(
+                config, "vertical_momentum_scheme", "upwind_perturbation")
+            if _vert_mom_scheme == "centered_full":
+                # Veros-faithful: 2nd-order centered, energy-conserving
+                # flux of the FULL velocity (barotropic + baroclinic).
+                # Restores the -d/dz(w*U_bar) redistribution and removes the
+                # upwind implicit vertical viscosity.  ``u_full``/``v_full``
+                # MUST be supplied (the caller passes the same full u, v that
+                # feed mass transport).  Stability rests on dt_mom + A_v/TKE
+                # friction (no limiter / no implicit viscosity here).
+                if u_full is None or v_full is None:
+                    raise ValueError(
+                        "vertical_momentum_scheme='centered_full' requires "
+                        "u_full and v_full to be passed to "
+                        "_bc_vertical_momentum_advection.",
+                    )
+                u_face_active = jnp.broadcast_to(u_mask_3d, u_full.shape)
+                v_face_active = jnp.broadcast_to(v_mask_3d, v_full.shape)
+                diag_vertadv_u = _flux_form_vertical_momentum_advection_centered(
+                    u_full, w_u, h_u_old, face_active=u_face_active)
+                diag_vertadv_v = _flux_form_vertical_momentum_advection_centered(
+                    v_full, w_v, h_v_old, face_active=v_face_active)
+            else:
+                # Default: 1st-order upwind of the PERTURBATION velocity.
+                # The implicit viscosity (~|w|*dz/2) damps baroclinic shear
+                # that explicit A_v=1e-5 cannot.
+                u_face_active = jnp.broadcast_to(u_mask_3d, u_prime.shape)
+                v_face_active = jnp.broadcast_to(v_mask_3d, v_prime.shape)
+                diag_vertadv_u = _flux_form_vertical_momentum_advection(
+                    u_prime, w_u, h_u_old, face_active=u_face_active)
+                diag_vertadv_v = _flux_form_vertical_momentum_advection(
+                    v_prime, w_v, h_v_old, face_active=v_face_active)
         if not _aimp_vertadv:
             # Explicit path: vertadv is part of the slow baroclinic
             # forcing.  (Flag on: it stays a diagnostic only.)
@@ -2596,19 +2676,75 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
         )
 
+    # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).
+    # When config.coriolis_scheme == "explicit_ab2", the plain f×u of the FULL
+    # velocity (Veros core/momentum.py tend_coriolisf) ENTERS du_dt/dv_dt here,
+    # so (a) its depth-mean reaches the barotropic slow forcing F_slow in the
+    # model step (= Veros solve_stream.py uloc/vloc = depth-integral of du
+    # INCLUDING Coriolis), and (b) its perturbation reaches the 3-D du_dt_pert,
+    # both then AB2-extrapolated with the 1.5/0.6 weights. The model step skips
+    # the Matsuno sub-step and gates the barotropic solver's own Coriolis
+    # addition OFF (no double count). Reuses the shared ``coriolis_cgrid`` C-grid
+    # operator (the 0.25 4-point average of f·v→u, −f·u→v with f_u/f_v two-point
+    # face averages) — IDENTICAL stencil to the Matsuno split, so no new numerics.
+    # Folded into the ``vortcor`` diagnostic slot (which then carries (f+ζ)×u,
+    # mirroring Veros where Coriolis and relative-vorticity advection are sibling
+    # momentum-advection terms) so the Σ-components-==-du_dt closure is preserved
+    # with no MomentumTendencyDiagnostics field change. Static Python branch on
+    # the config string ⇒ default ("matsuno_split") is bit-identical: this block
+    # is not traced at all.
+    if getattr(config, "coriolis_scheme", "matsuno_split") == "explicit_ab2":
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import coriolis_cgrid
+        # Pass u_mask=None so the operator does not apply its 2-D mask; we apply
+        # the 3-D face mask here (= the partial-cell-aware u_mask_3d/v_mask_3d
+        # computed above, which the rest of the tendency uses), so the explicit
+        # Coriolis is wet exactly where every other momentum term is.
+        cor_u, cor_v = coriolis_cgrid(u, v, grid, u_mask=None, v_mask=None)
+        cor_u = cor_u * u_mask_3d
+        cor_v = cor_v * v_mask_3d
+        du_dt = du_dt + cor_u
+        dv_dt = dv_dt + cor_v
+        diag_vortcor_u = diag_vortcor_u + cor_u
+        diag_vortcor_v = diag_vortcor_v + cor_v
+
     # --- Stage 7c: WENO divergence (D-term) dissipation. ---
     du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v = _bc_dterm(
         du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv,
     )
 
     # --- Stage 8: vertical momentum advection. ---
+    # ``u``/``v`` (FULL velocity) are passed as ``u_full``/``v_full`` for the
+    # Veros-faithful ``centered_full`` scheme; the default
+    # ``upwind_perturbation`` scheme ignores them and advects ``u_prime``.
     du_dt, dv_dt, diag_vertadv_u, diag_vertadv_v = _bc_vertical_momentum_advection(
         du_dt, dv_dt, u_prime, v_prime, w, h_u, h_v, u_mask_3d, v_mask_3d,
         grid, _mom_adv, _weno_order, config, diagnose_momentum,
+        u_full=u, v_full=v,
     )
 
     # --- Stage 9: tracer diffusion tendencies (dT_dt, dS_dt). ---
     dT_dt, dS_dt = _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord)
+    # AB2 "advective" scope: snapshot the LATERAL tracer-diffusion tendency
+    # (computed from the pre-step tracer T^n/S^n, exactly Veros's
+    # ``tr[tau]``-evaluated ``hor_diffusion``) BEFORE surface forcing / sponge /
+    # physics are summed in below, so it can be split into the weight-1.0
+    # dissipative bucket. ``None`` under the default "total" scope ⇒ no extra
+    # arrays, bit-identical. The GM/Redi isoneutral+skew part is added to this
+    # bucket in the model step (where GM/Redi is computed).
+    _ab2_advective = getattr(config, "ab2_scope", "total") == "advective"
+    if _ab2_advective:
+        dT_diss_lat = dT_dt
+        dS_diss_lat = dS_dt
+        # Remove the lateral diffusion from the AB2-extrapolated tracer
+        # tendency; the advective tracer update (model step) then runs on a
+        # dT_dt that carries only the NON-dissipative sources added below
+        # (physics / surface forcing / sponge). The lateral diffusion is
+        # re-applied at weight 1.0 in the model step.
+        dT_dt = jnp.zeros_like(dT_dt)
+        dS_dt = jnp.zeros_like(dS_dt)
+    else:
+        dT_diss_lat = None
+        dS_diss_lat = None
 
     # --- Stages 10 + 10b: horizontal + meridional viscosity. ---
     (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
@@ -2627,6 +2763,27 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         du_dt, dv_dt, u_prime, v_prime, u, J, z_coord, config, grid,
     )
 
+    # AB2 "advective" scope: split the DISSIPATIVE momentum tendencies (lateral
+    # friction — whichever ``lateral_viscosity_operator`` — + bottom drag) out
+    # of du_dt/dv_dt into the weight-1.0 bucket (Veros solve_stream.py adds
+    # ``du_mix`` unextrapolated). Built from the diagnostic accumulators
+    # populated above (no recompute / no duplicate numerics): Ah∇²u, the
+    # biharmonic / Smagorinsky / Leith hyperviscosities, and bottom drag. The
+    # explicit background A_v vertical friction (diag_Av_vert) is EXCLUDED — it
+    # is the implicit-vertical-friction term whose placement is owned by
+    # ``momentum_friction_additive`` (and is zero under
+    # ``implicit_vertical_mixing=True``). ``None`` under "total" ⇒ bit-identical.
+    if _ab2_advective:
+        du_diss_raw = (diag_Ah_lap_u + diag_Bh_bilap_u + diag_Cs_smag_u
+                       + diag_Cl_leith_u + diag_botdrag_u)
+        dv_diss_raw = (diag_Ah_lap_v + diag_Bh_bilap_v + diag_Cs_smag_v
+                       + diag_Cl_leith_v + diag_botdrag_v)
+        du_dt = du_dt - du_diss_raw
+        dv_dt = dv_dt - dv_diss_raw
+    else:
+        du_diss_raw = None
+        dv_diss_raw = None
+
     # --- Stage 10b: physics-pipeline tendencies. ---
     (du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u,
      diag_phys_v) = _bc_physics_tendencies(
@@ -2639,6 +2796,24 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # heat (q_net + penetrating shortwave) from the explicit ``dT_dt`` and route
     # it into ``dT_surf`` for the implicit (backward-Euler) application; WIND
     # STRESS stays explicit either way (it is AB2'd in both legoESM and Veros).
+    # Dispatch hardening: under the ``flux_feedback`` scheme the heat flux is
+    # ``q_prescribed`` (consumed by the scheme); a simultaneous ``q_net`` would
+    # ALSO be routed here by ``_bc_external_surface_forcing`` and double-count
+    # the heat.  None-ness is static pytree structure, so this raises at trace
+    # time (no runtime cost).
+    _sf_cfg = getattr(getattr(config, "physics", None), "surface_forcing", None)
+    if (
+        _sf_cfg is not None
+        and getattr(_sf_cfg, "scheme", "none") == "flux_feedback"
+        and surface_forcing is not None
+        and getattr(surface_forcing, "q_net", None) is not None
+        and getattr(surface_forcing, "q_prescribed", None) is not None
+    ):
+        raise ValueError(
+            "flux_feedback surface forcing consumes q_prescribed; passing "
+            "q_net simultaneously would double-count the surface heat flux. "
+            "Leave q_net=None (route all prescribed heat via q_prescribed)."
+        )
     _sf_implicit = bool(getattr(config, "surface_forcing_implicit", False))
     du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat = _bc_external_surface_forcing(
         du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid,
@@ -2713,6 +2888,55 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     else:
         Ah_kediss_cell = None
 
+    # Bottom-drag KE-extraction dissipation density K_diss_bot [m²/s³] at the
+    # interior interfaces (W-grid) — exposed ONLY when the prognostic-TKE
+    # ``source_bottom_drag_diss`` option is on (the ACC recipe), so the prognostic
+    # TKE source can recycle the bottom-drag KE extraction (Veros integrate_tke
+    # ``forc += K_diss_bot``). Built from the bottom-drag MOMENTUM tendencies
+    # ``diag_botdrag_u/v`` (= -r·u/dz_bot, already face-masked) via the shared
+    # KE-removal→W-grid mapping. ≥ 0 by construction (drag opposes flow). ``None``
+    # otherwise (default), keeping the tendency pytree + every existing path
+    # bit-identical.
+    _vmix = getattr(config, "physics", None)
+    _vmix = getattr(_vmix, "vertical_mixing", None) if _vmix is not None else None
+    _tke_botdrag = (
+        _vmix is not None and getattr(_vmix, "scheme", None) == "tke"
+        and bool(getattr(_vmix.tke, "prognostic", False))
+        and bool(getattr(_vmix.tke, "source_bottom_drag_diss", False))
+    )
+    if _tke_botdrag:
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            bottom_drag_kediss_tke_source,
+        )
+        K_diss_bot_w = bottom_drag_kediss_tke_source(
+            diag_botdrag_u * u_mask_3d, diag_botdrag_v * v_mask_3d,
+            u, v, mask,
+        )
+        K_diss_bot = Field(data=K_diss_bot_w, name="K_diss_bot",
+                           dims=dims_3d, units="m^2/s^3")
+    else:
+        K_diss_bot = None
+
+    # AB2 "advective"-scope dissipative tendency channel (Veros-faithful
+    # weight-1.0 placement). Face-/cell-masked CONSISTENTLY with the applied
+    # du_dt/dT_dt (which are masked at stage 11 above), so the dissipative
+    # increment is wet exactly where the advective increment is. ``None`` under
+    # the default "total" scope ⇒ no extra fields, bit-identical pytree.
+    if _ab2_advective:
+        du_diss = Field(data=du_diss_raw * u_mask_3d, name="du_diss",
+                        dims=dims_u, units="m/s^2")
+        dv_diss = Field(data=dv_diss_raw * v_mask_3d, name="dv_diss",
+                        dims=dims_v, units="m/s^2")
+        dT_diss = Field(data=dT_diss_lat * mask_3d, name="dT_diss",
+                        dims=dims_3d, units="degC/s")
+        dS_diss = Field(data=dS_diss_lat * mask_3d, name="dS_diss",
+                        dims=dims_3d, units="PSU/s")
+    else:
+        du_diss = None
+        dv_diss = None
+        dT_diss = None
+        dS_diss = None
+
     tendencies = LatLonCGridOceanTendencies(
         du_dt=Field(data=du_dt, name="du_dt", dims=dims_u, units="m/s^2"),
         dv_dt=Field(data=dv_dt, name="dv_dt", dims=dims_v, units="m/s^2"),
@@ -2733,6 +2957,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         Ah_visc_v=Ah_visc_v,
         Ah_kediss_cell=Ah_kediss_cell,
         surface_tracer_forcing=surface_tracer_forcing,
+        K_diss_bot=K_diss_bot,
+        du_diss=du_diss,
+        dv_diss=dv_diss,
+        dT_diss=dT_diss,
+        dS_diss=dS_diss,
     )
 
     if not diagnose_momentum:
@@ -2750,6 +2979,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     def _mv(x):
         return Field(data=x * v_mask_3d, name="diag_v", dims=dims_v, units="m/s^2")
 
+    # Under ab2_scope="advective" the dissipative terms were subtracted from
+    # du_dt/dv_dt (withheld for the weight-1.0 bucket). For the momentum-budget
+    # closure ``Σ components == total`` to hold, restore them into the
+    # diagnostic ``total`` (the per-term diagnostics below still report the full
+    # lateral-friction / bottom-drag components). Face-masked like every other
+    # term: ``du_dt`` was masked at stage 11 and the per-term diagnostics are
+    # masked via ``_mu``/``_mv``, so the restored diss must be masked too or
+    # ``total_u/v`` picks up dry-cell values and the closure breaks under land.
+    # No-op under "total".
+    diag_du_total = du_dt if du_diss_raw is None else du_dt + du_diss_raw * u_mask_3d
+    diag_dv_total = dv_dt if dv_diss_raw is None else dv_dt + dv_diss_raw * v_mask_3d
+
     diagnostics = MomentumTendencyDiagnostics(
         KE_PGF_u=_mu(KE_PGF_u),         KE_PGF_v=_mv(KE_PGF_v),
         vortcor_u=_mu(diag_vortcor_u),  vortcor_v=_mv(diag_vortcor_v),
@@ -2765,8 +3006,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         sponge_u=_mu(diag_sponge_u),    sponge_v=_mv(diag_sponge_v),
         # total_u/v are the actually-applied masked tendencies — must
         # equal Σ of the components above to machine precision.
-        total_u=Field(data=du_dt, name="total_u", dims=dims_u, units="m/s^2"),
-        total_v=Field(data=dv_dt, name="total_v", dims=dims_v, units="m/s^2"),
+        total_u=Field(data=diag_du_total, name="total_u", dims=dims_u, units="m/s^2"),
+        total_v=Field(data=diag_dv_total, name="total_v", dims=dims_v, units="m/s^2"),
     )
     return tendencies, diagnostics
 

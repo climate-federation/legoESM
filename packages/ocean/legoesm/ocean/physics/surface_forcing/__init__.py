@@ -5,6 +5,7 @@ from legoesm.ocean.physics.surface_forcing.config import (
     PrescribedForcingConfig,
     RestoringConfig,
     BulkFormulaConfig,
+    FluxFeedbackConfig,
 )
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.physics.surface_forcing.integration import (
@@ -16,6 +17,7 @@ __all__ = [
     "PrescribedForcingConfig",
     "RestoringConfig",
     "BulkFormulaConfig",
+    "FluxFeedbackConfig",
     "SurfaceForcingOutput",
     "make_surface_forcing_physics",
 ]

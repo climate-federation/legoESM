@@ -151,6 +151,27 @@ ACC_TKE_CONFIG = TKEConfig(
     # convecting column Ri < 0 -> Pr -> 1 so K_H tracks the large convective K_M.
     prandtl_mode="richardson",
     Prandtl_tke0=10.0,
+    # ----- PROGNOSTIC TKE (Veros enable_tke prognostic form) -----
+    # Veros ACC runs enable_tke=True PROGNOSTICALLY: one backward-Euler TKE step
+    # per model step with dt_tke = dt_mom (tke.py:137), the TKE field carried
+    # across steps (state.tke), seeded at tke_background. legoESM's prior recipe
+    # ran the Mode-B quasi-steady DIAGNOSTIC chain (n_iterations=3, dt=86400);
+    # prognostic=True switches to the faithful carried-TKE form.
+    prognostic=True,
+    # Energy-recycling sources (Veros ACC: enable_eke=True, enable_idemix=False,
+    # so integrate_tke ``forc = K_diss_v - P_diss_v - P_diss_nonlin + eke_diss_iw
+    # + K_diss_bot``). legoESM recycles the two terms it can surface today:
+    #   - source_eke_diss: the EKE dissipation rate eke_diss_iw (= c_eps·√E·E/L),
+    #     carried from the 3-D EKE step (state.eke_diss) — fed within the same
+    #     step (legoESM runs EKE before the TKE solve, matching Veros's
+    #     eke→tke ordering), so NO lag in the synchronous path.
+    #   - source_bottom_drag_diss: K_diss_bot, the bottom-drag KE extraction
+    #     (Veros linear_bottom_friction diss = r_bot·u²), surfaced as the
+    #     tendency diagnostic tend.K_diss_bot.
+    # DEFERRED (legoESM does not yet surface the diagnostics): P_diss_adv
+    # (non-conservative advection) and P_diss_nonlin (cabbeling / non-linear EOS).
+    source_eke_diss=True,
+    source_bottom_drag_diss=True,
 )
 
 # Veros GM/Redi knobs (verbatim from ACCSetup)
@@ -208,13 +229,34 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
     #     A_h·(div²+<ζ²>) (Veros's clamp-free A_h|∇u|² analogue for legoESM's
     #     vector-Laplacian viscosity) rather than the clamped dynamical -u·A_h∇²u
     #     (which over-credits the domain-integrated KE dissipation by ~11–20%).
-    #   - gm_source_mode="realized": use the REALIZED GM-skew buoyancy conversion
-    #     -(g/ρ₀)∇ρ·F_skew (Veros -P_diss_skew, ~42%) instead of the parameterized
-    #     kappa_GM·σ² (which under-counts the per-triad slope variance <S²>≥<S>²).
+    #   - gm_source_mode="realized_signed": the LITERAL SIGNED Veros conversion
+    #     -P_diss_skew = -(g/ρ₀)∇(int_drhodX)·F_skew (the dynamic-enthalpy
+    #     dissipation of the GM skew flux), built from the SKEW-only isopycnal flux
+    #     and Veros's int_drhodT/S integrands. Replaces the positive-definite
+    #     parameterized κ_GM·N²·<S²> (which over-counts by ~22%): probe-measured on
+    #     the drop snapshot signed 5.94e10 W vs parameterized 7.29e10 vs Veros 5.97e10.
+    #   - source_p_diss_iso=True: SUBTRACT the realized signed Redi APE dissipation
+    #     -P_diss_iso (Veros's EKE forc sink, veros/core/eke.py:117), built from the
+    #     ISO-only flux + the implicit K_33 vertical diagonal dissipation.
+    #   - n2_mode="adiabatic": the Eady/deformation-radius N² by adiabatic parcel
+    #     displacement to the upper cell's pressure (Veros eke.py:50-54 via
+    #     thermodynamics.py:99-105), the true static stability the Veros EKE chain
+    #     uses. The legacy in-situ N² is biased ~6x too stable (compressibility) →
+    #     ∫N dz ~2.7x too large → eke_len ~23% too long → EKE dissipation (∝1/L)
+    #     too weak (~71% of the runaway-EKE bias; the third in-situ-vs-locally-
+    #     referenced instance after convection-N² and neutral slopes). Mirrors the
+    #     TKE n2_mode="adiabatic" above.
     eke=EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0,
                   isopycnal_diffusion=True, eke_3d=True,
                   source_kdiss_h=True, kdiss_h_flux_form=True,
-                  gm_source_mode="realized"),
+                  gm_source_mode="realized_signed", source_p_diss_iso=False,
+                  # source_p_diss_iso left OFF (experimental): legoESM's
+                  # adiabatic-cancelling triads CANNOT reproduce Veros's
+                  # -P_diss_iso sink (an artifact of Veros's non-cancelling
+                  # discretization); the faithful dynamic-enthalpy form
+                  # yields a small spurious +3.2e9 W source instead. Built,
+                  # tested, gated -- see the EKE-budget probe verdict.
+                  n2_mode="adiabatic"),
 )
 
 # Surface restoring timescale
@@ -351,6 +393,9 @@ def build_acc_land_mask(grid: LatLonGrid) -> jnp.ndarray:
 
 def build_acc_state(grid: LatLonGrid,
                      z_coord: OceanZStarCoordinate,
+                     *,
+                     gm_redi: GMRediConfig = ACC_GM_REDI_CONFIG,
+                     tke: TKEConfig = ACC_TKE_CONFIG,
                      ) -> LatLonCGridOceanState:
     """Veros ACC initial conditions:
 
@@ -358,6 +403,13 @@ def build_acc_state(grid: LatLonGrid,
     - S uniform 35 PSU
     - u, v, eta zero
     - Bathymetry depth = full H_max where wet, zero where land
+
+    ``gm_redi`` / ``tke`` default to the ACC configs (so the historical call
+    ``build_acc_state(grid, z_coord)`` is bit-identical). The acc_basic transfer
+    recipe passes its own configs (EKE off ``gm_redi.eke=None`` -> no EKE-field
+    seeding; ``tke.prognostic`` may still be True -> TKE field seeded). Gating the
+    seed branches on the PASSED configs (not the module-level ACC constants) is
+    the only behavioural change, and it is a no-op when the defaults are used.
     """
     H_max = float(np.sum(ACC_DZT))
     land_mask = build_acc_land_mask(grid)
@@ -383,7 +435,7 @@ def build_acc_state(grid: LatLonGrid,
     # eke_3d=True (the ACC recipe): the eddy-energy field is 3-D on the interior
     # interfaces (n_lat, n_lon, nlev-1) (the W-grid), seeded to e_min on wet
     # columns. Otherwise it is the 2-D depth-integrated (n_lat, n_lon) field.
-    eke_cfg = ACC_GM_REDI_CONFIG.eke
+    eke_cfg = gm_redi.eke
     if eke_cfg is not None:
         lm = state.land_mask.data
         if eke_cfg.eke_3d:
@@ -396,6 +448,30 @@ def build_acc_state(grid: LatLonGrid,
             eke_dims = ("lat", "lon")
         state = state._replace(
             eke=Field(data=eke0, name="eke", dims=eke_dims, units="m^2/s^2"))
+        # eke_diss (Veros eke_diss_iw): the 3-D EKE step writes this every step;
+        # seed it to zero so the None -> Field transition never happens mid-scan
+        # (constant-pytree carry). Only the 3-D EKE path produces it.
+        if eke_cfg.eke_3d:
+            nlev = z_coord.n_levels
+            ediss0 = jnp.zeros((lm.shape[0], lm.shape[1], nlev - 1),
+                               dtype=eke0.dtype)
+            state = state._replace(
+                eke_diss=Field(data=ediss0, name="eke_diss",
+                               dims=("lat", "lon", "level"), units="m^2/s^3"))
+    # PROGNOSTIC TKE: when the recipe runs prognostic TKE on, seed state.tke at
+    # the tke_background floor on wet columns (interior interfaces, W-grid) so the
+    # carried field is a Field from step 0 (the model step would otherwise turn
+    # tke None -> Field on the first iteration, breaking the lax.scan carry).
+    tke_cfg = tke
+    if getattr(tke_cfg, "prognostic", False):
+        lm = state.land_mask.data
+        nlev = z_coord.n_levels
+        wet3 = (lm[:, :, jnp.newaxis] > 0.5)
+        tke0 = jnp.where(wet3, tke_cfg.tke_background, 0.0).astype(
+            lm.dtype) * jnp.ones((1, 1, nlev - 1), dtype=lm.dtype)
+        state = state._replace(
+            tke=Field(data=tke0, name="tke", dims=("lat", "lon", "level"),
+                      units="m^2/s^2"))
     return state
 
 
@@ -609,6 +685,20 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         # -0.336->0.715 (vector-invariant was anti-correlated). See the §8 ledger.
         momentum_advection="flux_form",
         momentum_flux_scheme="centered",
+        # VERTICAL momentum advection (stage 8): Veros (core/momentum.py
+        # momentum_advection) advects the FULL velocity with a 2nd-order
+        # CENTERED energy-conserving flux (flux_top = 0.25·(u[k+1]+u[k])·(w+w_east)).
+        # legoESM's default ("upwind_perturbation") instead advects only the
+        # baroclinic PERTURBATION u' = u - U_bar with 1st-order interface
+        # upwind — which (a) OMITS the depth-integral-zero -d/dz(w·U_bar)
+        # redistribution of barotropic momentum into shear, and (b) adds an
+        # implicit vertical viscosity ~|w|·dz/2 that damps baroclinic shear.
+        # Both push the column toward barotropic (the observed ubot/usurf 0.30
+        # vs Veros 0.12). The recipe selects the Veros-faithful "centered_full"
+        # for apples-to-apples (doctrine rule H). Stability rests on dt_mom +
+        # A_v/TKE friction, exactly as in Veros (the centered flux is unlimited
+        # and dispersive, with no implicit viscosity).
+        vertical_momentum_scheme="centered_full",
         # TRACER advection: the recipe selects legoESM's "centered" scheme to
         # match Veros ACC's UNLIMITED centered 2nd-order tracer flux
         # (``veros/core/advection.py`` ``adv_flux_2nd``;
