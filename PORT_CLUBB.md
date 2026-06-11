@@ -146,7 +146,10 @@ finite gradients in float32 + float64.
   4 physics_fn paths, combined.py carry routing) left every other turbulence
   scheme intact.
 - **P8 validation** ✅ — per-piece CLUBB-JAX parity + conservation + multi-step
-  prognostic stability (host-diffusion fix) + jit/grad + end-to-end pipeline run.
+  prognostic stability (host-diffusion fix) + jit/grad + end-to-end pipeline run
+  + **end-to-end jax.grad through `make_physics`** (iter 59: the foundational
+  legoESM autodiff requirement — finite nonzero gradient w.r.t. T through the
+  full production pipeline incl. advance_clubb_core's penta solves).
   Idealized physics (iter 54-55): (a) convective BL — surface heating develops
   >3× the TKE of an unheated stable column with upward buoyancy flux; (b) cloud-
   PDF moisture response — the ADG1 cloud fraction increases monotonically with
