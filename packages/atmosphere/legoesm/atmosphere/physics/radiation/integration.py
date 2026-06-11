@@ -478,6 +478,9 @@ def _call_radiation_backend(
     rrtmgp_solver=None,
     lon: jnp.ndarray | None = None,
     ml_ozone_coefs=None,
+    o3_vmr_override: jnp.ndarray | None = None,
+    aerosol_od: jnp.ndarray | None = None,
+    solar_spectral_fraction: jnp.ndarray | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -497,6 +500,21 @@ def _call_radiation_backend(
         the two-stream solver uses the daytime-effective cos(SZA) instead of
         the day+night average, and SW fluxes/heating are rescaled by f_day
         to recover daily-mean energy balance.
+    o3_vmr_override : jnp.ndarray or None
+        Pre-computed external ozone VMR (ncol, nlev) — e.g. the CMIP6
+        input4MIPs ozone file interpolated by
+        ``ModelDriver._precompute_external_forcing``.  When supplied it
+        takes precedence over the config-driven ``_compute_ozone_vmr``
+        (standard / analytical / ML profiles), matching the precedence
+        the coupled ``physics_pipeline`` path applies.
+    aerosol_od : jnp.ndarray or None
+        Per-layer aerosol optical depth (ncol, nlev) from the external
+        forcing pipeline (Kinne climatology + volcanic), passed to the
+        RRTMGP solver as ``aerosol_optical_depth``.  Ignored by gray
+        radiation.
+    solar_spectral_fraction : jnp.ndarray or None
+        Per-g-point solar weights for spectral solar-cycle forcing,
+        passed through to ``solve_columns``.
     """
     if radiation_config.scheme == "gray":
         radiation_fn, scheme_config = _get_radiation_fn(radiation_config)
@@ -533,11 +551,15 @@ def _call_radiation_backend(
             )
     q_v_safe = q_v if q_v is not None else jnp.zeros_like(T)
 
-    # Compute ozone VMR based on config.
-    o3_vmr = _compute_ozone_vmr(
-        p_full, lat, radiation_config.ozone,
-        T=T, lon=lon, ml_ozone_coefs=ml_ozone_coefs,
-    )
+    # Compute ozone VMR based on config — unless the caller supplied a
+    # pre-computed external (CMIP6 file) ozone column, which wins.
+    if o3_vmr_override is not None:
+        o3_vmr = o3_vmr_override
+    else:
+        o3_vmr = _compute_ozone_vmr(
+            p_full, lat, radiation_config.ozone,
+            T=T, lon=lon, ml_ozone_coefs=ml_ozone_coefs,
+        )
 
     # Compute cloud properties if cloud scheme is active.
     cloud_kwargs = {}
@@ -586,6 +608,8 @@ def _call_radiation_backend(
         sfc_emissivity=sfc_emissivity_override,
         o3_vmr=o3_vmr,
         ghg_vmr_override=ghg_vmr_override,
+        aerosol_optical_depth=aerosol_od,
+        solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
 
@@ -791,11 +815,37 @@ def _make_hydrostatic_radiation(
             _ovr = _T_sfc_override_cell[0]
         T_sfc = _apply_T_sfc_override(T[..., -1], _ovr)
 
+        # External CMIP6 forcing (MPAS / standalone-driver paths): the
+        # coupled cube/lat-lon pipeline threads these through
+        # ``SegmentForcing``; here they arrive via the same per-step
+        # TRACED ``forcing`` dict as ``T_sfc`` so the JIT'd step never
+        # retraces when the monthly forcing values change.
+        #   o3_vmr      : (ncol, nlev) external ozone VMR
+        #   aerosol_od  : (ncol, nlev) per-layer aerosol optical depth
+        #   ghg_vmr     : dict[str, scalar] transient GHG VMRs
+        _o3_ext = forcing.get("o3_vmr") if forcing is not None else None
+        _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
+        _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
+
+        # Calendar time: prefer per-step TRACED forcing values (the MPAS
+        # AMIP loop) over the static ``set_time`` closure.  The closure
+        # cell is read at TRACE time inside the JIT'd dycore step, so a
+        # multi-year MPAS run would otherwise integrate with the
+        # insolation frozen at the initial day — no seasonal or diurnal
+        # cycle (found 2026-06-10 while wiring CMIP6 forcing into the
+        # standalone grid paths).
+        _doy = _time["day_of_year"]
+        _sod = _time["seconds_of_day"]
+        if forcing is not None and forcing.get("day_of_year") is not None:
+            _doy = forcing["day_of_year"]
+        if forcing is not None and forcing.get("seconds_of_day") is not None:
+            _sod = forcing["seconds_of_day"]
+
         insol, cos_sza, f_day = _compute_insolation(
             lat, radiation_config,
             lon=lon,
-            day_of_year=_time["day_of_year"],
-            seconds_of_day=_time["seconds_of_day"],
+            day_of_year=_doy,
+            seconds_of_day=_sod,
         )
 
         # Flatten to column-major (ncol, nlev)
@@ -850,6 +900,10 @@ def _make_hydrostatic_radiation(
                 n_ice_col = shard_columns(n_ice_col, column_mesh)
             if f_day_col is not None:
                 f_day_col = shard_columns(f_day_col, column_mesh)
+            if _o3_ext is not None:
+                _o3_ext = shard_columns(_o3_ext, column_mesh)
+            if _aer_ext is not None:
+                _aer_ext = shard_columns(_aer_ext, column_mesh)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
@@ -869,6 +923,9 @@ def _make_hydrostatic_radiation(
             rrtmgp_solver=rrtmgp_solver,
             lon=lon_col,
             ml_ozone_coefs=ml_ozone_coefs,
+            o3_vmr_override=_o3_ext,
+            aerosol_od=_aer_ext,
+            ghg_vmr_override=_ghg_ext,
         )
 
         dT_dt = rad_out.heating_rate.reshape(shape_3d)
@@ -1472,7 +1529,7 @@ def _make_spectral_pe_radiation(
 
     def _physics_fn_core(
         state, grid, sigma_coord, grid_fields=None,
-        sim_time_seconds=0.0,
+        sim_time_seconds=0.0, forcing=None,
     ):
         # 1. Transform spectral state to grid space
         fields = grid_fields
@@ -1489,8 +1546,24 @@ def _make_spectral_pe_radiation(
         p_full = sigma_coord.pressure_at_full(p_s)
         p_half = sigma_coord.pressure_at_half(p_s)
 
-        # Surface temperature = lowest level
-        T_sfc = _apply_T_sfc_override(T[..., -1], _T_sfc_override_cell[0])  # (n_lat, n_lon)
+        # Surface temperature = lowest level (default), overridable by a
+        # per-step TRACED ``forcing["T_sfc"]`` (the AMIP path — prescribed
+        # SST/SIC blend, time-varying without retrace) or the static
+        # ``set_T_sfc_override`` closure.  Same precedence as the
+        # hydrostatic/MPAS radiation factory.
+        _ovr = None
+        if forcing is not None and forcing.get("T_sfc") is not None:
+            _ovr = forcing["T_sfc"]
+        else:
+            _ovr = _T_sfc_override_cell[0]
+        T_sfc = _apply_T_sfc_override(T[..., -1], _ovr)  # (n_lat, n_lon)
+
+        # External CMIP6 forcing via the same traced ``forcing`` dict
+        # (see _make_hydrostatic_radiation): o3_vmr / aerosol_od are
+        # (ncol, nlev) columns, ghg_vmr is a dict of traced scalars.
+        _o3_ext = forcing.get("o3_vmr") if forcing is not None else None
+        _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
+        _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
 
         # Effective time-of-day for the diurnal cycle.  ``_time`` holds
         # the *initial* day_of_year + seconds_of_day captured at module
@@ -1507,6 +1580,15 @@ def _make_spectral_pe_radiation(
         total_secs = secs_init + sim_time_seconds
         secs_eff = jnp.mod(total_secs, 86400.0)
         day_eff = day_init + jnp.floor_divide(total_secs, 86400.0)
+        # Per-step TRACED calendar time from the forcing dict wins over
+        # the static ``set_time`` closure + ``sim_time_seconds`` thread —
+        # the closure cell is baked at trace time inside the JIT'd
+        # spectral step, so a production AMIP loop must pass time as a
+        # traced value (same rationale as the hydrostatic/MPAS factory).
+        if forcing is not None and forcing.get("day_of_year") is not None:
+            day_eff = forcing["day_of_year"]
+        if forcing is not None and forcing.get("seconds_of_day") is not None:
+            secs_eff = forcing["seconds_of_day"]
 
         # Insolation (with diurnal cycle support).
         # For diurnal cycle we need 2-D lat/lon; otherwise lat is 1-D and
@@ -1564,6 +1646,9 @@ def _make_spectral_pe_radiation(
             rrtmgp_solver=rrtmgp_solver,
             lon=lon_col,
             ml_ozone_coefs=ml_ozone_coefs,
+            o3_vmr_override=_o3_ext,
+            aerosol_od=_aer_ext,
+            ghg_vmr_override=_ghg_ext,
         )
 
         # Reshape heating rate back to (n_lat, n_lon, nlev)
@@ -1599,16 +1684,21 @@ def _make_spectral_pe_radiation(
 
         def physics_fn(
             state, grid, sigma_coord, grid_fields=None,
-            sim_time_seconds=0.0,
+            sim_time_seconds=0.0, forcing=None,
         ):
             return _physics_fn_ckpt(
                 state, grid, sigma_coord, grid_fields, sim_time_seconds,
+                forcing,
             )
     else:
         physics_fn = _physics_fn_core
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override
+    # Marker: consumes the per-step traced ``forcing`` dict (T_sfc /
+    # o3_vmr / aerosol_od / ghg_vmr) — the spectral combined dispatcher
+    # forwards ``forcing`` only to fns that advertise it.
+    physics_fn._wants_forcing = True
     return physics_fn
 
 

@@ -193,7 +193,7 @@ echo "[$(date -u)] Done.  Exit code: ${RC}"
 # --------------------------------------------------------------------
 if [[ -f "${OUTPUT_DIR}/monthly_means.npz" ]] && (( SLURM_PROCID == 0 || ! ${SLURM_PROCID+x} )); then
     echo "[$(date -u)] Rendering yearly maps …"
-    "${PY}" "${REPO_ROOT}/scripts/diagnostic/plot_amip_yearly_maps.py" \
+    "${PY}" "${REPO_ROOT}/scripts/plot/plot_amip_yearly_maps.py" \
         --input  "${OUTPUT_DIR}/monthly_means.npz" \
         --output "${OUTPUT_DIR}/yearly_maps" \
         --start-year "${START_YEAR}" \

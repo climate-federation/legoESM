@@ -23,7 +23,7 @@ from pathlib import Path
 # the test-matrix experiment modules without installing them.
 import sys
 REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "matrix"))
 
 from ocean_test_matrix.experiments import run_eady_gm_redi  # noqa: E402
 from ocean_test_matrix.testcase import TestCase             # noqa: E402

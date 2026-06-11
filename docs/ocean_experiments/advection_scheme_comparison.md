@@ -879,7 +879,7 @@ even at weak forcing.
   previously used a regridded `(0, 360) × (−90, 90)` canvas and
   did not crop to the actual `source_lon_range`, so the 10°-wide
   domain appeared as a thin vertical sliver. Two fixes applied:
-  (i) `run_eady_uniform` in `scripts/ocean_test_matrix/experiments.py`
+  (i) `run_eady_uniform` in `scripts/matrix/ocean_test_matrix/experiments.py`
   now passes `domain_extent=(lon_west, lon_east, lat_south, lat_north)`
   to `_save_case_diagnostics`; (ii) `_save_snapshot_plots` in
   `diagnostic_io.py` now crops the regridded array to

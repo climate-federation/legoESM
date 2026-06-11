@@ -89,6 +89,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-day", type=float, default=0.0)
     parser.add_argument("--days", type=int, default=200)
     parser.add_argument("--dt", type=float, default=600.0)
+    parser.add_argument(
+        "--dt-auto", action="store_true", default=False,
+        help="Override --dt with the empirically-validated cross-grid "
+             "stability-ladder value for (grid_type, resolution) from "
+             "legoesm.driver.rce_dt.auto_dt_rce (e.g. C36->150 s, "
+             "latlon72->75 s, voronoi->300 s).  The ladder-safe choice "
+             "for long production runs; raises if the resolution is "
+             "past the last measured ladder point.")
     # Issue #273 Phase 3: implicit gravity-wave damping (semi-implicit
     # Helmholtz solve via CG).  Off by default to preserve bit-exact
     # behaviour with the legacy explicit-diffusion path.  Set
@@ -123,12 +131,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # bit-equivalent output (pinned by
     # tests/timestepping/test_ssp_rk3_scan_bit_equivalence.py).
     parser.add_argument(
-        "--time-integrator", type=str, default="ssp_rk3",
-        choices=["ssp_rk3", "ssp_rk3_scan", "ssp_rk34", "ssp_rk54",
-                  "rk4"],
-        help="Time integrator (default ssp_rk3 — IEEE-identical to "
-             "existing runs).  ssp_rk3_scan is the JIT-compile-time "
-             "optimised variant for production lat-lon C-grid AMIP.",
+        "--time-integrator", type=str, default="auto",
+        choices=["auto", "ssp_rk3", "ssp_rk3_scan", "ssp_rk34",
+                 "ssp_rk54", "ssp_rk54_scan", "rk4"],
+        help="Time integrator.  'auto' (default) selects each dycore's "
+             "own stable default: ssp_rk3 on cube/lat-lon (IEEE-"
+             "identical to existing runs) and ssp_rk54_scan on MPAS "
+             "(the biharmonic hyperdiffusion eigenvalues at production "
+             "dt fall outside ssp_rk3's stability region — the former "
+             "'hidden CFL' blow-up).  An explicit name is forwarded "
+             "verbatim to every dycore, including ssp_rk3 on MPAS for "
+             "deliberate integrator-sensitivity runs.  ssp_rk3_scan is "
+             "the JIT-compile-time optimised variant for production "
+             "lat-lon C-grid AMIP.",
     )
     parser.add_argument(
         "--implicit-grav-wave-use-pcg", action="store_true",
@@ -207,6 +222,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--diurnal-cycle", action="store_true", default=False)
+    parser.add_argument("--dynamic-albedo", action="store_true", default=False,
+                        help="Zenith-angle-dependent ocean albedo "
+                             "(Briegleb 1992) instead of the constant "
+                             "ocean albedo; sea-ice/land blends unchanged.")
     parser.add_argument("--co2-ppmv", type=float, default=415.0)
     parser.add_argument("--ch4-ppbv", type=float, default=1900.0)
     parser.add_argument("--n2o-ppbv", type=float, default=332.0)
@@ -328,6 +347,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--microphysics", type=str, default="none",
                         choices=["none", "kessler", "sundqvist",
                                  "seifert_beheng", "morrison", "thompson"])
+    parser.add_argument("--aerosol-ccn", action="store_true", default=False,
+                        help="Diagnose the specified cloud-droplet number "
+                             "from the prescribed aerosol optical depth "
+                             "(Andreae 2009 AOT-CCN inversion) instead of "
+                             "the constant Nc_0.  Requires "
+                             "--aerosol-forcing external and "
+                             "--microphysics morrison.")
 
     # Topography
     parser.add_argument("--topography", type=str, default="flat")
@@ -483,6 +509,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         volcanic_aerosol_scale=args.volcanic_aerosol_scale,
         cloud_scheme=args.clouds,
         microphysics=args.microphysics,
+        nc_from_aerosol=args.aerosol_ccn,
         convection=args.convection,
         turbulence=args.turbulence,
         gravity_wave_drag=args.gravity_wave_drag,
@@ -491,7 +518,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         topo_smoothing=args.topo_smoothing,
         topo_edge_blend=args.topo_edge_blend,
         land_mask_path=args.land_mask_file,
-        dynamic_albedo=False,
+        dynamic_albedo=args.dynamic_albedo,
         experiment=args.experiment,
         start_year=args.start_year,
         sbm_tau_c=args.sbm_tau_c,
@@ -540,6 +567,31 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
         parser.error("--ic-path required when --ic era5")
     if args.ghg_forcing == "external" and not args.ghg_file:
         parser.error("--ghg-file required when --ghg-forcing is external")
+    if args.aerosol_ccn:
+        if args.aerosol_forcing != "external":
+            parser.error("--aerosol-ccn requires --aerosol-forcing external "
+                         "(the droplet number is diagnosed from the "
+                         "prescribed aerosol optical depth)")
+        if args.microphysics != "morrison":
+            parser.error("--aerosol-ccn requires --microphysics morrison "
+                         "(the only scheme with a specified-Nc aerosol "
+                         "mode)")
+        if (args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
+                               "mpas")
+                or args.discretization in ("spectral", "mpas")):
+            parser.error("--aerosol-ccn is wired through the coupled "
+                         "physics pipeline (cubed_sphere / latlon only); "
+                         "the MPAS and spectral standalone paths do not "
+                         "fill the specified-Nc field yet.")
+    if args.dynamic_albedo and (
+            args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
+                               "mpas")
+            or args.discretization in ("spectral", "mpas")):
+        parser.error("--dynamic-albedo is consumed by the coupled physics "
+                     "pipeline (cubed_sphere / latlon only); the MPAS and "
+                     "spectral standalone radiation paths use the "
+                     "RRTMGPConfig constant surface albedo and would "
+                     "silently ignore the flag.")
     if args.physics_parameterization == "ml":
         if args.convection != "mass_flux" or args.turbulence != "louis":
             parser.error(
@@ -688,6 +740,17 @@ def main(argv: list[str] | None = None):
     args = parser.parse_args(argv)
     args = _postprocess_args(args, parser)
 
+    # --dt-auto: replace --dt with the ladder-validated value for this
+    # (grid, resolution).  Single source of truth = the same
+    # ``auto_dt_rce`` the advisory below compares against, so a
+    # --dt-auto run never trips its own warning.
+    if getattr(args, "dt_auto", False):
+        from legoesm.driver.rce_dt import auto_dt_rce
+        _ladder_dt = auto_dt_rce(args.grid_type, args.resolution)
+        print(f"[run_amip] --dt-auto: {args.grid_type}/N={args.resolution} "
+              f"-> dt={_ladder_dt:.0f} s (was {args.dt:.0f} s)")
+        args.dt = _ladder_dt
+
     # iter-36: dt sanity advisory, generalising the iter-32
     # AMIP-wrapper fix to the script level. The hard-coded
     # default(--dt) = 600 was iter-13-validated only at N <= 24.
@@ -784,10 +847,9 @@ def main(argv: list[str] | None = None):
             sys.exit(1)
 
     if args.plot and _is_root:
-        # Iter 34: ``plot_amip`` lives under ``scripts/diagnostic/``
-        # (moved in an earlier reorg).  ``--plot`` previously inserted
-        # ``scripts/`` and crashed with ``ModuleNotFoundError``.
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "diagnostic"))
+        # ``plot_amip`` lives under ``scripts/plot/`` (bucket layout; see
+        # tests/test_scripts_layout.py).
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plot"))
         from plot_amip import plot_amip as _plot_amip
 
         _plot_amip(driver.output_dir, show=False)

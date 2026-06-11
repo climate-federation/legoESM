@@ -13,14 +13,14 @@ Source code now lives under:
 
 Shared scripts now live under:
 
-- `scripts/s2s/sfno_slab.py`
-- `scripts/s2s/neuralgcm_slab.py`
-- `scripts/s2s/run_sfno_campaign.py`
-- `scripts/s2s/run_neuralgcm_campaign.py`
-- `scripts/s2s/submit_neuralgcm_campaign.py`
-- `scripts/s2s/plot_coupling_diagnostics.py`
+- `scripts/run/s2s/sfno_slab.py`
+- `scripts/run/s2s/neuralgcm_slab.py`
+- `scripts/run/s2s/run_sfno_campaign.py`
+- `scripts/run/s2s/run_neuralgcm_campaign.py`
+- `scripts/run/s2s/submit_neuralgcm_campaign.py`
+- `scripts/run/s2s/plot_coupling_diagnostics.py`
 
-Legacy `legoesm.ml.sfno_s2s` imports and the old top-level slab scripts were removed in this refactor. Downstream callers should use the `legoesm.ml.s2s.*` packages and `scripts/s2s/*` entry points directly.
+Legacy `legoesm.ml.sfno_s2s` imports and the old top-level slab scripts were removed in this refactor. Downstream callers should use the `legoesm.ml.s2s.*` packages and `scripts/run/s2s/*` entry points directly.
 
 Canonical results roots now live under:
 
@@ -37,7 +37,7 @@ The emulator wrappers used by the dycore-coupling path are also kept compatible 
 
 ## SFNO Slab Workflow
 
-The SFNO slab implementation remains the training and ensemble-rollout path built around ChaosBench-style daily subseasonal forecasting. The canonical CLI is `scripts/s2s/sfno_slab.py` and the canonical package is `legoesm.ml.s2s.sfno_slab`.
+The SFNO slab implementation remains the training and ensemble-rollout path built around ChaosBench-style daily subseasonal forecasting. The canonical CLI is `scripts/run/s2s/sfno_slab.py` and the canonical package is `legoesm.ml.s2s.sfno_slab`.
 
 Typical outputs per case or stage live under `results/ml/s2s/sfno_slab/...` and include checkpoints, rollout member outputs, campaign metrics, center comparisons, snapshot figures, and daily GIFs.
 
@@ -72,10 +72,10 @@ The warm-start chain is explicit in the checkpoint metadata:
 
 For campaign evaluation, the canonical path is:
 
-- generate per-init-date case outputs with `python scripts/s2s/sfno_slab.py ensemble-inference ...`
-- refresh case metrics and representative plots with `python scripts/s2s/sfno_slab.py postprocess-ensemble ...`
-- aggregate semimonthly campaigns with `python scripts/s2s/run_sfno_campaign.py --aggregate-only ...`
-- compare against external centers with `python scripts/s2s/sfno_slab.py postprocess-center-crps ...`
+- generate per-init-date case outputs with `python scripts/run/s2s/sfno_slab.py ensemble-inference ...`
+- refresh case metrics and representative plots with `python scripts/run/s2s/sfno_slab.py postprocess-ensemble ...`
+- aggregate semimonthly campaigns with `python scripts/run/s2s/run_sfno_campaign.py --aggregate-only ...`
+- compare against external centers with `python scripts/run/s2s/sfno_slab.py postprocess-center-crps ...`
 
 The center-level comparison currently uses the aggregated `case_ensemble_daily_metrics.csv` CRPS series for the coupled and uncoupled SFNO runs, then compares those windows against the ChaosBench center baselines fetched from the LEAP/ChaosBench Hugging Face CSVs for `ECMWF`, `UKMO`, `NCEP`, and `CMA`.
 
@@ -91,7 +91,7 @@ The NeuralGCM slab implementation lives under `legoesm.ml.s2s.neuralgcm_slab` an
 - campaign aggregation
 - center-level CRPS comparison
 
-The canonical interactive CLI is `scripts/s2s/neuralgcm_slab.py`. Campaign automation lives in `scripts/s2s/run_neuralgcm_campaign.py` and `scripts/s2s/submit_neuralgcm_campaign.py`.
+The canonical interactive CLI is `scripts/run/s2s/neuralgcm_slab.py`. Campaign automation lives in `scripts/run/s2s/run_neuralgcm_campaign.py` and `scripts/run/s2s/submit_neuralgcm_campaign.py`.
 
 In this workflow, NeuralGCM consumes SST and sea ice as externally supplied forcing variables. The slab driver rebuilds those forcing fields once per forecast day rather than letting the lower boundary free-run for the full 42-day window. Coupled runs therefore feed back slab-updated SST plus that day's prepared sea ice, while uncoupled runs reapply the day-0 SST and day-0 sea ice every day.
 
@@ -128,16 +128,16 @@ Existing campaign artifacts can be refreshed under the latest slab workflow with
 
 For NeuralGCM:
 
-- rerun case-level metrics and representative plots with `python scripts/s2s/neuralgcm_slab.py postprocess-case ...`
-- rebuild campaign aggregates with `python scripts/s2s/neuralgcm_slab.py postprocess-campaign ...`
-- rebuild cross-campaign CRPS comparisons with `python scripts/s2s/neuralgcm_slab.py postprocess-center-crps ...`
-- regenerate proof-of-coupling figures with `python scripts/s2s/plot_coupling_diagnostics.py ...`
+- rerun case-level metrics and representative plots with `python scripts/run/s2s/neuralgcm_slab.py postprocess-case ...`
+- rebuild campaign aggregates with `python scripts/run/s2s/neuralgcm_slab.py postprocess-campaign ...`
+- rebuild cross-campaign CRPS comparisons with `python scripts/run/s2s/neuralgcm_slab.py postprocess-center-crps ...`
+- regenerate proof-of-coupling figures with `python scripts/run/s2s/plot_coupling_diagnostics.py ...`
 
 For SFNO:
 
-- rerun case-level metrics and representative plots with `python scripts/s2s/sfno_slab.py postprocess-ensemble ...`
-- rebuild campaign aggregates with `python scripts/s2s/run_sfno_campaign.py --aggregate-only ...`
-- rebuild cross-campaign CRPS comparisons with `python scripts/s2s/sfno_slab.py postprocess-center-crps ...`
+- rerun case-level metrics and representative plots with `python scripts/run/s2s/sfno_slab.py postprocess-ensemble ...`
+- rebuild campaign aggregates with `python scripts/run/s2s/run_sfno_campaign.py --aggregate-only ...`
+- rebuild cross-campaign CRPS comparisons with `python scripts/run/s2s/sfno_slab.py postprocess-center-crps ...`
 
 ## Current NeuralGCM Status
 
@@ -162,9 +162,9 @@ The refreshed SFNO campaign artifacts reproduce the prior results up to small fl
 
 ## Recommended Entry Points
 
-- Training or rollout work for SFNO: `python scripts/s2s/sfno_slab.py ...`
-- SFNO campaign aggregation from existing case directories: `python scripts/s2s/run_sfno_campaign.py --aggregate-only ...`
-- Interactive NeuralGCM slab case run: `python scripts/s2s/neuralgcm_slab.py ensemble-inference ...`
-- NeuralGCM campaign aggregation from existing case directories: `python scripts/s2s/neuralgcm_slab.py postprocess-campaign ...`
-- Sequential NeuralGCM campaign run: `python scripts/s2s/run_neuralgcm_campaign.py ...`
-- Slurm NeuralGCM campaign submission: `python scripts/s2s/submit_neuralgcm_campaign.py ...`
+- Training or rollout work for SFNO: `python scripts/run/s2s/sfno_slab.py ...`
+- SFNO campaign aggregation from existing case directories: `python scripts/run/s2s/run_sfno_campaign.py --aggregate-only ...`
+- Interactive NeuralGCM slab case run: `python scripts/run/s2s/neuralgcm_slab.py ensemble-inference ...`
+- NeuralGCM campaign aggregation from existing case directories: `python scripts/run/s2s/neuralgcm_slab.py postprocess-campaign ...`
+- Sequential NeuralGCM campaign run: `python scripts/run/s2s/run_neuralgcm_campaign.py ...`
+- Slurm NeuralGCM campaign submission: `python scripts/run/s2s/submit_neuralgcm_campaign.py ...`

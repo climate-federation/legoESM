@@ -145,7 +145,7 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0, q_c=None):
     return condensation, q_sat
 
 
-def effective_Nc(N_c, Nc_0, *, predict_Nc=True):
+def effective_Nc(N_c, Nc_0, *, predict_Nc=True, nc_specified_field=False):
     """Effective cloud-droplet number for the size distribution / autoconversion.
 
     ``predict_Nc=False`` (SAM M2005 default ``dopredictNc=.false.``) returns the
@@ -165,6 +165,15 @@ def effective_Nc(N_c, Nc_0, *, predict_Nc=True):
         ``1e8`` /m³ maritime, ``1e9`` /m³ continental.
     predict_Nc : bool, default True
         If False, return ``Nc_0`` everywhere (SAM specified-Nc).
+    nc_specified_field : bool, default False
+        Specified-but-SPATIALLY-VARYING droplet number (the
+        aerosol-CCN diagnostic, ``MicrophysicsConfig.nc_from_aerosol``):
+        with ``predict_Nc=False``, use the caller-filled ``N_c`` field
+        where physical (``N_c > 1``) instead of the constant ``Nc_0``.
+        ``N_c`` is still NOT evolved (``dN_c/dt = 0`` upstream) — it is
+        a per-column diagnostic from the aerosol forcing
+        (``aerosol_activation.ccn_from_aod``), refreshed every step by
+        the physics pipeline.  Ignored when ``predict_Nc=True``.
 
     Returns
     -------
@@ -183,6 +192,9 @@ def effective_Nc(N_c, Nc_0, *, predict_Nc=True):
     canonical maritime per-volume value.
     """
     if not predict_Nc:
+        if nc_specified_field:
+            # Aerosol-CCN specified field: spatially varying, not evolved.
+            return jnp.where(N_c > 1.0, N_c, Nc_0 * jnp.ones_like(N_c))
         return Nc_0 * jnp.ones_like(N_c)
     return jnp.where(N_c > 1.0, N_c, Nc_0 * jnp.ones_like(N_c))
 

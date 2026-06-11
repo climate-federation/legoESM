@@ -78,6 +78,75 @@ def test_optional_provenance_fields_are_threaded() -> None:
     assert m["result"]["model_weights_provenance"] == {"checkpoint": "physics.eqx"}
 
 
+def test_dataset_provenance_entry_shape_and_checksum(tmp_path: Path) -> None:
+    """Entry records identity + cheap integrity facts; sha256 is opt-in."""
+    import hashlib
+
+    from legoesm.driver.restart import dataset_provenance_entry
+
+    f = tmp_path / "forcing.nc"
+    f.write_bytes(b"not-really-netcdf")
+    entry = dataset_provenance_entry(f, dataset_id="amip_sst_sic")
+    assert entry["id"] == "amip_sst_sic"
+    assert entry["path"] == str(f.resolve())
+    assert entry["exists"] is True
+    assert entry["size_bytes"] == len(b"not-really-netcdf")
+    assert isinstance(entry["mtime_utc"], str) and "T" in entry["mtime_utc"]
+    assert entry["sha256"] is None  # hashing is opt-in (multi-GB forcing)
+
+    hashed = dataset_provenance_entry(f, compute_sha256=True)
+    assert hashed["id"] == "forcing.nc"  # default id = file name
+    assert hashed["sha256"] == hashlib.sha256(b"not-really-netcdf").hexdigest()
+    # A catalog-supplied checksum passes through verbatim (no re-hash).
+    pinned = dataset_provenance_entry(f, sha256="cafe" * 16)
+    assert pinned["sha256"] == "cafe" * 16
+
+
+def test_dataset_provenance_entry_missing_and_dir_store(tmp_path: Path) -> None:
+    """Missing path is recorded (exists=False), never raises; Zarr-style
+    directory stores get identity + mtime but no size/sha256."""
+    from legoesm.driver.restart import dataset_provenance_entry
+
+    gone = dataset_provenance_entry(tmp_path / "nope.zarr")
+    assert gone["exists"] is False
+    assert gone["size_bytes"] is None
+    assert gone["mtime_utc"] is None
+    assert gone["sha256"] is None
+
+    store = tmp_path / "cache.zarr"
+    store.mkdir()
+    d = dataset_provenance_entry(store, compute_sha256=True)
+    assert d["exists"] is True
+    assert d["size_bytes"] is None  # directory: size/hash not computed
+    assert d["sha256"] is None
+    assert isinstance(d["mtime_utc"], str)
+
+
+def test_dataset_provenance_entries_roundtrip_in_manifest(tmp_path: Path) -> None:
+    """Entries are _json_safe-clean and survive write->read; a v1 manifest
+    stays valid with and without them (populating the optional field is NOT
+    a schema bump)."""
+    from legoesm.driver.restart import (
+        dataset_provenance_entry,
+        validate_run_manifest,
+    )
+
+    f = tmp_path / "etopo.nc"
+    f.write_bytes(b"\x00" * 8)
+    entries = [dataset_provenance_entry(f, dataset_id="etopo_1deg")]
+    out = tmp_path / "with_datasets"
+    write_run_manifest(out, _sample_config(), dataset_provenance=entries)
+    m = read_run_manifest(out)
+    validate_run_manifest(m)
+    assert m["result"]["dataset_provenance"] == entries
+
+    out2 = tmp_path / "without_datasets"
+    write_run_manifest(out2, _sample_config())
+    m2 = read_run_manifest(out2)
+    validate_run_manifest(m2)
+    assert m2["result"]["dataset_provenance"] == []
+
+
 def test_write_then_read_roundtrips(tmp_path: Path) -> None:
     cfg = _sample_config()
     path = write_run_manifest(tmp_path, cfg, command_line="legoesm run x.yaml")
@@ -303,6 +372,32 @@ def test_driver_manifest_uses_resolved_normalized_config(tmp_path: Path) -> None
     driver._mpi_rank = 1
     driver._write_run_manifest()
     assert not (rank1_dir / RUN_MANIFEST_FILENAME).exists()
+
+
+def test_driver_manifest_records_dataset_provenance(tmp_path: Path) -> None:
+    """Path-typed ExperimentConfig fields land in [result].dataset_provenance;
+    empty path fields are skipped (default config -> empty list)."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.model_driver import ModelDriver
+
+    forcing = tmp_path / "amip_sst.nc"
+    forcing.write_bytes(b"\x01\x02")
+    driver = ModelDriver(ExperimentConfig(forcing_path=str(forcing)))
+    driver._output_dir = tmp_path / "run"
+    driver._mpi_rank = None
+    driver._write_run_manifest()
+    m = read_run_manifest(tmp_path / "run")
+    entries = m["result"]["dataset_provenance"]
+    assert [e["id"] for e in entries] == ["forcing_path"]
+    assert entries[0]["path"] == str(forcing.resolve())
+    assert entries[0]["exists"] is True
+
+    # No path fields set -> provenance list stays empty (no noise entries).
+    bare = ModelDriver(ExperimentConfig())
+    bare._output_dir = tmp_path / "bare"
+    bare._mpi_rank = None
+    bare._write_run_manifest()
+    assert read_run_manifest(tmp_path / "bare")["result"]["dataset_provenance"] == []
 
 
 def test_driver_manifest_records_input_config_not_setup_mutated(tmp_path: Path) -> None:

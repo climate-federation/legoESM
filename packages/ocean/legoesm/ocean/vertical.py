@@ -834,6 +834,86 @@ def flux_form_vertical_momentum_advection(
     return -vert_flux_div / h_u_safe
 
 
+def flux_form_vertical_momentum_advection_centered(
+    u: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_u: jnp.ndarray,
+    face_active: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Veros-faithful 2nd-order CENTERED vertical momentum advection.
+
+    Same per-thickness advective-tendency interface as
+    :func:`flux_form_vertical_momentum_advection` (the 1st-order upwind
+    version), but the interface velocity is the UNLIMITED 2-cell average
+
+        ``F[k] = w_half[k] * 0.5*(u[k-1] + u[k])``   (1 <= k <= nlev-1)
+        ``F[0] = F[nlev] = 0``                        (rigid-lid / no-flux)
+
+    and the tendency is ``-(F_top - F_bot) / h_u`` per level.  This is the
+    vertical part of Veros ``core/momentum.py`` ``momentum_advection``
+    (``flux_top = 0.25*(u[k+1]+u[k])*(wtr+wtr_east)``: the ``0.25`` is
+    ``0.5`` for the 2-cell ``u`` average times ``0.5`` for the
+    interpolation of ``w`` to the momentum point — the latter is handled
+    by the caller, which passes ``w_half`` already interpolated to the
+    u/v face).  Veros leaves ``flux_top`` zero at both the surface and the
+    bottom interface (``flux_top[..., :-1]`` set; bottom skipped in the
+    ``du_adv[1:] += flux_top[:-1]`` update), matching the zero-pad at both
+    ends here.
+
+    Energy property
+    ---------------
+    The centered (skew-symmetric) flux conserves the vertical-advection
+    contribution to column kinetic energy to machine precision for a
+    non-divergent column ``w`` (``w_half[0]=w_half[nlev]=0``): the discrete
+    ``sum_k u[k] * (F[k]-F[k+1])`` telescopes to a boundary term that
+    vanishes.  The 1st-order upwind flux is strictly KE-dissipative
+    (implicit vertical viscosity ``~|w|*dz/2``), which damps baroclinic
+    shear; the centered scheme removes that damping.
+
+    DISPERSION / STABILITY
+    ----------------------
+    The centered face value is UNLIMITED, so this scheme is dispersive (no
+    monotonicity, no implicit viscosity).  Stability rests on the same
+    ingredients Veros relies on: a short momentum time step (``dt_mom``)
+    and explicit/implicit vertical friction (background ``A_v`` + TKE/KPP
+    ``kappaM``).  Use only with those in place (the ACC recipe).
+
+    Caller convention
+    ------------------
+    To reproduce Veros, pass the FULL face velocity ``u`` (barotropic +
+    baroclinic).  This restores the depth-integral-zero redistribution
+    term ``-d/dz(w * U_bar)`` that advecting the perturbation ``u' =
+    u - U_bar`` alone omits — the term that vertically redistributes
+    barotropic momentum into shear.
+
+    Parameters
+    ----------
+    u : array, shape (..., nlev)
+        Velocity at full levels at the momentum point.  Pass the FULL
+        velocity for the Veros-faithful behaviour.
+    w_half : array, shape (..., nlev+1)
+        Vertical velocity on half (interface) levels at the SAME momentum
+        point as ``u``.  Positive = upward; zero at surface and bottom.
+    h_u : array, shape (..., nlev)
+        Layer thickness at the momentum point (advective-form denominator).
+    face_active : array | None, shape (..., nlev)
+        Optional per-level face-activity mask (1 = wet, 0 = closed below
+        the partial seafloor).  Gates the flux at any interface bordering
+        an inactive face to exactly zero (same role as in the upwind /
+        tracer helpers).
+
+    Returns
+    -------
+    tendency : array, shape (..., nlev)
+        ``-(F_top - F_bot) / h_u`` — per-thickness momentum tendency.
+    """
+    vert_flux_div = flux_form_vertical_tracer_advection_centered(
+        u, w_half, cell_active=face_active,
+    )
+    h_u_safe = jnp.maximum(h_u, 1.0e-10)
+    return -vert_flux_div / h_u_safe
+
+
 # ---------------------------------------------------------------------------
 # Adaptive-implicit vertical momentum advection
 # (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``)

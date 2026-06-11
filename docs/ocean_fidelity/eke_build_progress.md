@@ -160,7 +160,7 @@ The ACC setup sets eke_c_k=0.4, eke_c_eps=0.5, eke_k_max=1e4, eke_lmin=100, supe
 isopycnal diffusion — ALL match EKEConfig() defaults exactly. NUMERICAL CONFIRMATION: feeding
 Veros's OWN eke + eke_len into legoESM eke_kappa_gm reproduces Veros's K_gm to MACHINE PRECISION
 at the matching time level (tau=2: max_rel_err=0.0, corr=1.000000, 19560 wet cells). Reproducible:
-scripts/ocean_fidelity/compare_eke_kappa_veros.py.
+scripts/validate/ocean_fidelity/compare_eke_kappa_veros.py.
 GAP SURFACED (the next must-build, NOT part of E1-E9): the MIXING LENGTH differs.
   Veros eke_len = max(eke_lmin, min(eke_cross·L_rossby, eke_crhin·L_rhines)), eke_cross=2, with the
     eddy-energy Rhines scale L_rhines=√(√E/β) -> developed ACC: ~8 km mean, 47 km max.
@@ -177,7 +177,7 @@ formula is pointwise; a 2-D field comparison would use depth-reduced Veros eke.
 Stale-doc corrections (EKE now exists): build_acc_physics_config docstring, strategy doc §8 ledger
 (EKE row -> DONE + new eke_len row) + §"apples-to-apples" must-build line, phase_g_recipe_fidelity_
 plan.md (2 notes).
-Commands: JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python scripts/ocean_fidelity/compare_eke_kappa_veros.py
+Commands: JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python scripts/validate/ocean_fidelity/compare_eke_kappa_veros.py
 => "reproduces Veros K_gm to MACHINE PRECISION".
 
 ## FINAL STATUS

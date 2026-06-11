@@ -554,7 +554,7 @@ class TestTier3:
 
         # Load ETOPO
         try:
-            from scripts.pgf_validation.run_pgf_tier_ladder import (
+            from scripts.validate.pgf_validation.run_pgf_tier_ladder import (
                 _load_etopo_bathymetry, TierConfig,
             )
         except ImportError:

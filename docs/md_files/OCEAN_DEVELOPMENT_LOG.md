@@ -625,7 +625,7 @@ Audit of all dissipation schemes revealed A_v and K_v were **anti-diffusive** on
 
 ### Ocean checkpoint utility
 
-Added `scripts/ocean_test_matrix/checkpoint.py` with `save_ocean_checkpoint` / `load_ocean_checkpoint` for saving/restoring ocean state to NPZ. Avoids re-running spinup during parameter tuning.
+Added `scripts/matrix/ocean_test_matrix/checkpoint.py` with `save_ocean_checkpoint` / `load_ocean_checkpoint` for saving/restoring ocean state to NPZ. Avoids re-running spinup during parameter tuning.
 
 ---
 
@@ -793,11 +793,11 @@ A comprehensive survey of dissipation in MOM6, MITgcm, NEMO, POP, MPAS-Ocean, HY
 - `src/legoesm/ocean/experiments/eady_uniform.py` — new experiment (IC, forcing, validation)
 - `src/legoesm/ocean/dynamics/latlon_cgrid_operators.py` — Smagorinsky operators (strain_rate, viscosity, biharmonic)
 - `src/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py` — Smagorinsky tendency (import only, not wired)
-- `scripts/ocean_test_matrix/experiments.py` — runner with eu_config parameter, velocity cross-sections
-- `scripts/ocean_test_matrix/diagnostic_io.py` — symmetric colorbars, field-tagged cross-section filenames, cmap parameter
-- `scripts/ocean_test_matrix/timeloop.py` — max_speed monitoring and early termination (#187)
-- `scripts/ocean_test_matrix/setup.py` — domain bounds and C_smag/bottom_drag_r passthrough
-- `scripts/ocean_test_matrix/testcase.py` — eady_uniform grid resolution
+- `scripts/matrix/ocean_test_matrix/experiments.py` — runner with eu_config parameter, velocity cross-sections
+- `scripts/matrix/ocean_test_matrix/diagnostic_io.py` — symmetric colorbars, field-tagged cross-section filenames, cmap parameter
+- `scripts/matrix/ocean_test_matrix/timeloop.py` — max_speed monitoring and early termination (#187)
+- `scripts/matrix/ocean_test_matrix/setup.py` — domain bounds and C_smag/bottom_drag_r passthrough
+- `scripts/matrix/ocean_test_matrix/testcase.py` — eady_uniform grid resolution
 
 ### Related Issues
 

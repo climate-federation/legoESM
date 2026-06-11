@@ -6,7 +6,7 @@ The cross-section PNGs on disk from MPAS runs completed before the fix contain
 a lat-compression artefact: with a global 181-row target grid and a regional
 point cloud spanning only ~18° in latitude, the bin_centers were linearly
 mapped onto all 181 target rows, compressing the actual gradient zone into a
-narrow visual band. The fix (in `scripts/ocean_test_matrix/diagnostic_io.py`)
+narrow visual band. The fix (in `scripts/matrix/ocean_test_matrix/diagnostic_io.py`)
 switches to a regional target lat-lon grid + max_dist KDTree cap when the
 source cloud covers less than 80% of the global range.
 
@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "matrix"))  # ocean_test_matrix package home
 from ocean_test_matrix.diagnostic_io import _save_cross_sections  # noqa: E402
 
 
