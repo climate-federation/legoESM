@@ -201,15 +201,22 @@ def main(argv: list[str] | None = None) -> int:
                         action="store_false")
 
     # Output
-    parser.add_argument("--ic", type=str, default="default",
+    parser.add_argument("--ic", type=str, default="era5",
                         choices=["default", "standard", "era5"],
-                        help="Initial condition: 'default' (uniform T_init rest "
-                             "state), 'standard' (realistic lapse-rate + "
-                             "equator-pole gradient + thermal-wind jet; lat-lon "
-                             "only — Earth-like CWV), or 'era5' (reanalysis from "
-                             "--ic-path).")
+                        help="Initial condition (default 'era5' for "
+                             "production AMIP CMIP realism): 'era5' "
+                             "(reanalysis from --ic-path; supported on "
+                             "cubed_sphere / latlon / gaussian — winds + "
+                             "Earth-like moisture, no spin-up cold drift), "
+                             "'standard' (lapse-rate + equator-pole "
+                             "gradient + thermal-wind jet; lat-lon only), "
+                             "or 'default' (uniform T_init rest state — "
+                             "fast but unphysically weak winds + high CWV; "
+                             "the only IC for voronoi/mpas until "
+                             "era5_to_mpas_carry lands).")
     parser.add_argument("--ic-path", type=str, default="",
-                        help="ERA5 Zarr path when --ic era5.")
+                        help="ERA5 Zarr path / GCS URI (required when "
+                             "--ic era5).")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--monthly-means", action="store_true", default=True)
 
@@ -339,11 +346,54 @@ def main(argv: list[str] | None = None) -> int:
         # Diagnostics
         "--clear-sky-diag",
     ]
-    # Initial condition (default keeps the prior uniform-T_init behaviour; pass
-    # --ic standard for a physically realistic lapse-rate + balanced-jet IC on
-    # lat-lon — Earth-like column water vapour).
-    cmd += ["--ic", args.ic]
-    if args.ic == "era5":
+    # Initial condition.  ``era5`` (the production default) gives
+    # realistic winds + Earth-like moisture and avoids the uniform-IC
+    # cold-start (weak winds, ~1 K/day drift, CWV ~80).  Resolve the IC
+    # per grid so each grid uses the most realistic IC it supports:
+    #   cubed_sphere / latlon / gaussian-spectral : era5 (needs --ic-path)
+    #   voronoi / mpas                            : era5 not yet wired ->
+    #                                               fall back to default
+    # ``standard`` (the balanced-jet IC) is lat-lon only.
+    _ic = args.ic
+    # Did the user EXPLICITLY ask for this IC, or is it the era5 default?
+    # An explicit request for an IC a grid cannot honour must FAIL, not
+    # silently downgrade; the default may quietly fall back (codex review).
+    _ic_explicit = "--ic" in sys.argv
+    _mpas = (args.grid_type in ("voronoi", "mpas")
+             or args.discretization == "mpas")
+    if _ic == "era5":
+        # Resolve the unsupported-grid fallback BEFORE the --ic-path
+        # check: an MPAS run never uses ERA5, so it must not be forced to
+        # supply an ERA5 path (codex review).
+        if _mpas:
+            if _ic_explicit:
+                print("[deck] ERROR: --ic era5 explicitly requested but "
+                      "ERA5 IC is not wired for voronoi/mpas (needs "
+                      "era5_to_mpas_carry). Pass --ic default for this "
+                      "grid, or run a supported grid (cubed_sphere/latlon/"
+                      "gaussian).")
+                return 2
+            print("[deck] NOTE: ERA5 IC is not yet wired for voronoi/mpas; "
+                  "the era5 DEFAULT falls back to --ic default here.")
+            _ic = "default"
+        elif not args.ic_path:
+            print("[deck] ERROR: --ic era5 (the production default) "
+                  "requires --ic-path pointing at an ERA5 Zarr store / "
+                  "GCS URI.  Provide it, or pass --ic standard (lat-lon) "
+                  "or --ic default for a quick non-reanalysis IC.")
+            return 2
+    elif _ic == "standard" and args.grid_type != "latlon":
+        if _ic_explicit:
+            print(f"[deck] ERROR: --ic standard explicitly requested but "
+                  f"the balanced-jet standard IC is lat-lon only; "
+                  f"{args.grid_type} is unsupported. Pass --ic era5 "
+                  "(with --ic-path) or --ic default.")
+            return 2
+        print(f"[deck] NOTE: --ic standard is lat-lon only; "
+              f"{args.grid_type} falls back to --ic default.")
+        _ic = "default"
+    cmd += ["--ic", _ic]
+    if _ic == "era5":
         cmd += ["--ic-path", args.ic_path]
     if args.diurnal_cycle:
         cmd.append("--diurnal-cycle")

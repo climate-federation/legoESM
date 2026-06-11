@@ -29,6 +29,16 @@ END_YEAR=2009
 DAYS=10950           # 30 years
 RAD_STEPS="${RAD_STEPS:-18}"  # 18 = 3-hourly at dt=600 (production choice
                               # 2026-06-10); 6 = 1-hourly for fidelity runs
+# Initial condition: era5 (realistic winds + moisture) is the production
+# default and needs an ERA5 Zarr store / GCS URI in ERA5_IC_PATH.  Set
+# IC=default to run the (less realistic) uniform-IC cold start instead.
+IC="${IC:-era5}"
+ERA5_IC_PATH="${ERA5_IC_PATH:-}"
+if [[ "$IC" == "era5" && -z "$ERA5_IC_PATH" ]]; then
+  echo "[30y] ERROR: IC=era5 (default) needs ERA5_IC_PATH=<zarr/gcs uri>." >&2
+  echo "[30y]   export ERA5_IC_PATH=... , or run with IC=default." >&2
+  exit 2
+fi
 
 export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
@@ -64,6 +74,12 @@ for case in "${CASES[@]}"; do
   # --dt-auto picks each grid's ladder-validated stable timestep
   # (C36->150 s, latlon72->75 s, T47->150 s, voronoi->300 s) so a long
   # run cannot blow up at the over-large default dt mid-chain.
+  # IC: era5 on cube/latlon/gaussian; the deck auto-falls voronoi/mpas
+  # back to --ic default (era5_to_mpas_carry not yet wired).
+  IC_ARGS=(--ic "$IC")
+  if [[ "$IC" == "era5" ]]; then
+    IC_ARGS+=(--ic-path "$ERA5_IC_PATH")
+  fi
   "$PY" "$DECK" \
     --forcing-dir "$FORCING" --auto-generate \
     --start-year $START_YEAR --end-year $END_YEAR \
@@ -73,6 +89,7 @@ for case in "${CASES[@]}"; do
     --rad-update-steps "$RAD_STEPS" \
     --diag-days 30 --checkpoint-days 365 \
     --radiation rrtmg \
+    "${IC_ARGS[@]}" \
     --output "$OUT" \
     ${EXTRA:+--extra $EXTRA} \
     "${RESTART_ARGS[@]}" \

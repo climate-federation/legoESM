@@ -1135,6 +1135,32 @@ class GHGConfig(NamedTuple):
     start_year: int = 1979
 
 
+# CF/CMIP6 ``units`` strings → multiplicative factor that converts the
+# stored value to a DIMENSIONLESS mole fraction (mol/mol).  Covers the
+# input4MIPs convention (``"1"`` / ``"mole_fraction"`` already mol/mol)
+# and the common pre-scaled forms (ppm/ppb/ppt and their ``1e-6`` etc.
+# spellings).  Used by ``_load_ghg_annual_file`` so the rest of the
+# pipeline reasons in a single, unambiguous unit.
+_GHG_UNIT_TO_MOLE_FRACTION = {
+    # Already dimensionless mole fraction.  NOTE: empty units ("") is
+    # deliberately NOT here — a file with no units attribute is
+    # AMBIGUOUS (mol/mol vs ppm) and must go through the magnitude
+    # heuristic + warning, never be assumed mol/mol (codex review).
+    "1": 1.0, "mol/mol": 1.0, "mol mol-1": 1.0, "mol mol^-1": 1.0,
+    "mole_fraction": 1.0, "mole fraction": 1.0, "dimensionless": 1.0,
+    # ppm family → 1e-6.
+    "1e-6": 1.0e-6, "ppm": 1.0e-6, "ppmv": 1.0e-6,
+    "umol/mol": 1.0e-6, "µmol/mol": 1.0e-6, "umol mol-1": 1.0e-6,
+    "micromol/mol": 1.0e-6,
+    # ppb family → 1e-9.
+    "1e-9": 1.0e-9, "ppb": 1.0e-9, "ppbv": 1.0e-9,
+    "nmol/mol": 1.0e-9, "nmol mol-1": 1.0e-9, "nanomol/mol": 1.0e-9,
+    # ppt family → 1e-12.
+    "1e-12": 1.0e-12, "ppt": 1.0e-12, "pptv": 1.0e-12,
+    "pmol/mol": 1.0e-12, "pmol mol-1": 1.0e-12, "picomol/mol": 1.0e-12,
+}
+
+
 @lru_cache(maxsize=4)
 def _load_ghg_annual_file(path: str) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """Load CMIP6-style annual global-mean GHG file (Zarr or NetCDF).
@@ -1147,8 +1173,14 @@ def _load_ghg_annual_file(path: str) -> tuple[np.ndarray, dict[str, np.ndarray]]
     Returns
     -------
     (years, data) where years is shape (N,) and data maps variable
-    names to 1-D numpy arrays of length N.  Values are in the file's
-    native units (CO2 in 1e-6, CH4/N2O in 1e-9, CFCs in 1e-12).
+    names to 1-D numpy arrays of length N.  Values are normalized to
+    DIMENSIONLESS mole fractions (mol/mol) using each variable's
+    ``units`` attribute (audit 2026-06-11) so the caller can convert to
+    ppmv/ppbv/pptv with fixed factors regardless of the file's storage
+    unit.  An unrecognised ``units`` string falls back to a magnitude
+    heuristic (CO2-scale value < 1 ⇒ already mole fraction) and logs a
+    warning rather than silently feeding a 1e6-wrong concentration to
+    radiation.
     """
     ds = _open_forcing_dataset(path)
     if "time" not in ds.dims:
@@ -1161,7 +1193,8 @@ def _load_ghg_annual_file(path: str) -> tuple[np.ndarray, dict[str, np.ndarray]]
         if varname not in ds.data_vars:
             ds.close()
             raise ValueError(f"Variable {varname!r} not found in {path!r}")
-        arr = np.asarray(ds[varname].values, dtype=np.float64)
+        var = ds[varname]
+        arr = np.asarray(var.values, dtype=np.float64)
         # Squeeze spatial dimensions (lat=1, lon=1) → 1-D time series
         arr = arr.squeeze()
         if arr.ndim != 1 or arr.shape[0] != years.shape[0]:
@@ -1171,6 +1204,33 @@ def _load_ghg_annual_file(path: str) -> tuple[np.ndarray, dict[str, np.ndarray]]
                 f"squeezing (got shape {arr.shape}, expected "
                 f"({years.shape[0]},))"
             )
+        # Normalize to mole fraction via the units attribute.
+        units = str(var.attrs.get("units", "")).strip().lower()
+        if units in _GHG_UNIT_TO_MOLE_FRACTION:
+            arr = arr * _GHG_UNIT_TO_MOLE_FRACTION[units]
+        else:
+            # Unknown units: fall back to a magnitude heuristic on the
+            # CO2-scale (mole fraction ~3e-4 vs ppmv ~300) and warn.
+            ref = float(np.nanmax(np.abs(arr)))
+            scale = 1.0
+            if varname == "CO2" and ref > 1.0:
+                scale = 1.0e-6
+            elif varname in ("CH4", "N2O") and ref > 1.0e-3:
+                scale = 1.0e-9
+            elif varname.startswith("CFC") and ref > 1.0e-6:
+                scale = 1.0e-12
+            logger.warning(
+                "GHG file %s: variable %s has unrecognised/empty units "
+                "%r; assuming scale %g to mole fraction (max=%g). Set a "
+                "CF units attribute (e.g. '1', 'ppm', 'nmol/mol') to "
+                "remove this guess.",
+                path, varname, var.attrs.get("units", ""), scale, ref,
+            )
+            arr = arr * scale
+        # ``@lru_cache`` returns the SAME object on every call; mark the
+        # arrays read-only so a caller's in-place mutation cannot poison
+        # subsequent cached reads (codex review).
+        arr.flags.writeable = False
         data[varname] = arr
 
     ds.close()
@@ -1216,14 +1276,19 @@ def get_ghg_at_time(config: GHGConfig, day: float) -> dict:
         years, data = _load_ghg_annual_file(config.path)
         # Convert simulation day → fractional year
         year = config.start_year + day / 365.25
-        # File stores mole fractions scaled by unit metadata:
-        # CO2 in 1e-6 (ppmv), CH4/N2O in 1e-9 (ppbv), CFCs in 1e-12 (pptv)
+        # ``_load_ghg_annual_file`` returns DIMENSIONLESS mole fractions
+        # (mol/mol), normalized from the file's units attribute.  This
+        # function's contract is ppmv/ppbv/pptv, so convert with the
+        # fixed factors — the inverse of ``ghg_concentrations_to_vmr``.
+        # (audit 2026-06-11: the previous code returned the raw mole
+        # fraction labelled "co2_ppmv", so radiation saw CO2 ≈ 3.4e-10
+        # vmr — effectively zero CO2, a ~1 K/day spurious LW cooling.)
         return {
-            "co2_ppmv": _interp_1d(years, data["CO2"], year),
-            "ch4_ppbv": _interp_1d(years, data["CH4"], year),
-            "n2o_ppbv": _interp_1d(years, data["N2O"], year),
-            "cfc11_pptv": _interp_1d(years, data["CFC_11"], year),
-            "cfc12_pptv": _interp_1d(years, data["CFC_12"], year),
+            "co2_ppmv": _interp_1d(years, data["CO2"], year) * 1.0e6,
+            "ch4_ppbv": _interp_1d(years, data["CH4"], year) * 1.0e9,
+            "n2o_ppbv": _interp_1d(years, data["N2O"], year) * 1.0e9,
+            "cfc11_pptv": _interp_1d(years, data["CFC_11"], year) * 1.0e12,
+            "cfc12_pptv": _interp_1d(years, data["CFC_12"], year) * 1.0e12,
         }
     else:
         raise ValueError(f"Unknown GHG source: {config.source!r}")
