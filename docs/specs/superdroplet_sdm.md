@@ -130,8 +130,8 @@ particle-state-threading interface). Documented, not hidden.
 - conservation: water mass (vapor+liquid) under condensation; sum(xi*m) under coalescence.
 
 ## Status (2026-06-11)
-Iterations 1-8 complete on branch `feat/sdm-microphysics`, each codex-reviewed +
-hardened. Modules: `particles`, `condensation`, `kernels`, `coalescence`,
+Iterations 1-12 complete on branch `feat/sdm-microphysics`, each codex-reviewed
++ hardened. Modules: `particles`, `condensation`, `kernels`, `coalescence`,
 `coupling`, `box_model`, `column`, `sedimentation`.
 - **All 5 oracle collision kernels**: Golovin, sedimentation, Long, Hall (full
   21×15 table, bilinear, cap-only-on-large-branch), Brownian (Seinfeld-Pandis
@@ -139,9 +139,15 @@ hardened. Modules: `particles`, `condensation`, `kernels`, `coalescence`,
 - **Sedimentation + surface rain accumulation** (`sedimentation.py`): terminal-
   velocity fall, crossing deposits ξm → precip [kg/m²], exact conservation,
   `column_rainout` driver.
-Remaining oracle gaps (future work): adaptive stiffness-based / implicit
-condensation sub-stepping (BE/CN/DIRK2), resolved-flow particle advection,
-aerosol activation / multi-species, particle recycling/injection. Validations passing:
+- **Condensation integrator family** (`condensation_integrator`): fixed-substep
+  `rk4`/`euler` (reverse-mode differentiable, default), ERF adaptive
+  stiffness-based `rk4_adaptive` (dt=cfl/|τ| via the oracle's approximate
+  `drsq_dt_jac`, accepted-step-only cap, partial-on-cap = ERF semantics), and
+  implicit `be` (ERF NewtonSolver + TI::be, unconditionally stable for stiff
+  Köhler haze). Adaptive family is jit-only (not reverse-diff).
+Remaining oracle gaps (future work): ERF CN/DIRK2 integrators (trivial
+extensions of the Newton machinery), resolved-flow particle advection,
+aerosol activation/injection + multi-species, particle recycling. Validations passing:
 - **Golovin box (collision)**: ensemble number decay matches analytic
   `N(t)=N0 exp(-(b/ρ_w)Lt)` to 0.36% and 2nd mass moment to 1.9%; `Σξm` conserved.
 - **Adiabatic parcel (condensation/activation)**: supersaturation peaks (~1.018)
@@ -162,6 +168,14 @@ harness (PySDM runs in its own venv, `pysdm_golovin_reference.py` dumps .npz;
 the repo-venv validator compares) so PySDM's numba stack never touches the
 jax env. Strongest consistency evidence: two independent Monte-Carlo
 implementations of the same algorithm agreeing within ensemble noise.
+
+### Activation-parcel cross-validation vs PySDM (`validate_sdm_parcel_vs_pysdm.py`)
+Second independent-oracle case: Arabas & Shima (2017)-style monodisperse
+ammonium-sulfate parcel, PySDM (κ-Köhler κ=0.72, implicit condensation) vs
+legoESM (ideal van't Hoff i=3, explicit `rk4_adaptive`): **S_max−1 within 2.0%,
+peak timing 1.0%, final radius 1.2%, LWC 3.7%, T within 0.05 K; identical
+0.115 µm haze equilibrium** — the activation chain agrees across two
+independent Köhler forms, saturation curves, and integrators.
 
 ### Smoke / oracle-consistency validation (`scripts/validate/validate_sdm_smoke.py`)
 End-to-end ALL-PASS (stable, physically realistic, oracle-consistent):
