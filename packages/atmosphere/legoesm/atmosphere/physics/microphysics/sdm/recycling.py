@@ -5,11 +5,17 @@ coalescence) or that rained out of the column (sedimentation) is *recycled*:
 reset to a fresh dry-aerosol particle and re-injected, exactly as the ERF
 oracle —
 
-* aerosol (solute) mass drawn from the configured initialization mode (here
-  the truncated log-normal of :func:`...init.sample_lognormal_radius`);
-* water content reset to a tiny seed droplet of radius ``1e-15 m`` (the
-  oracle's literal value — effectively dry; the wet radius is then the dry
-  aerosol radius and the condensation solver re-equilibrates it);
+* aerosol (solute) mass drawn from the log-normal initialization mode
+  (:func:`...init.sample_lognormal_radius`; optionally truncated). The oracle
+  draws each particle's aerosol at a random index from a pre-sampled pool —
+  iid draws here are distribution-identical (deliberate, not bit-equivalent);
+* water content reset to the oracle's literal ``1e-15 m`` seed radius —
+  ``SuperDropletState.radius`` is the water-equivalent wet radius, so the
+  recycled droplet carries exactly the ERF seed water mass. With
+  ``include_solute`` the Raoult term re-inflates it to the haze equilibrium on
+  the next condensation step (the growth integrator's ``1e-9 m`` radius floor
+  applies first); recycling without solute leaves the seed stuck under the
+  Kelvin barrier — recycle only with a solute-carrying configuration;
 * multiplicity set to the constant average ``ξ = n_total/n_sd`` (the ERF
   constant-multiplicity branch; the sampled-importance branch is not ported);
 * height re-drawn uniformly in ``[z_min, z_max]`` (the recycle bounds);
@@ -64,10 +70,11 @@ __physics_contract__ = {
     "differentiable": False,
     "reference": "Shima et al. (2009) QJRMS 135:1307; ERF SuperDropletPCRecycle",
     "idealized_test": (
-        "All-active ensemble passes through bit-identically; an inactive slot "
-        "becomes active with xi_recycle, a lognormal dry radius (wet == dry), "
-        "the 1e-15 m water-mass seed implied radius bound, and z in "
-        "[z_min, z_max]; deterministic for a fixed key."
+        "All-active finite ensemble passes through unchanged; an inactive slot "
+        "becomes active with xi_recycle, wet radius exactly the 1e-15 m water "
+        "seed (represented water = xi*(4/3)pi*rho_w*(1e-15)^3 exactly), a "
+        "lognormal solute mass, and z in [z_min, z_max]; deterministic for a "
+        "fixed key."
     ),
 }
 
@@ -85,6 +92,8 @@ def recycle_inactive(
     solute_density: float,
     z_min: float | jax.Array,
     z_max: float | jax.Array,
+    r_dry_min: float | None = None,
+    r_dry_max: float | None = None,
 ) -> tuple[SuperDropletState, jax.Array]:
     """Recycle every inactive slot as a fresh dry-aerosol super-droplet.
 
@@ -104,6 +113,9 @@ def recycle_inactive(
         density [kg/m³]) — the recycled solute mass is ``(4/3)π ρ_s r_dry³``.
     z_min, z_max : float
         Re-injection height bounds [m] (ERF ``recyc_zmin/zmax``).
+    r_dry_min, r_dry_max : float, optional
+        Truncation bounds for the dry-radius draw (forwarded to
+        :func:`...init.sample_lognormal_radius`).
 
     Returns
     -------
@@ -118,14 +130,19 @@ def recycle_inactive(
     inactive = state.active <= 0.0
 
     r_dry = sample_lognormal_radius(k_r, n_sd, r_dry_median, geom_std,
+                                    r_min=r_dry_min, r_max=r_dry_max,
                                     dtype=dtype)
     m_solute = (4.0 / 3.0) * jnp.pi * solute_density * r_dry**3
-    # ERF resets the water mass to a 1e-15 m seed; the effective wet radius of
-    # the recycled (essentially dry) droplet is its dry aerosol radius.
+    # ERF resets the water mass to a 1e-15 m seed. Our `radius` IS the
+    # water-equivalent wet radius, so the seed value goes there directly —
+    # setting r_dry here would inject spurious represented water
+    # (rho_w * r_dry^3, ~1e24x the seed). The dry-aerosol information lives
+    # entirely in `solute_mass`; the Raoult term re-inflates the droplet.
+    seed = jnp.asarray(_WATER_SEED_RADIUS, dtype)
     z_new_draw = z_min + random.uniform(k_z, (n_sd,), dtype=dtype) * (z_max - z_min)
 
     xi = jnp.where(inactive, jnp.asarray(xi_recycle, dtype), state.multiplicity)
-    radius = jnp.where(inactive, r_dry, state.radius)
+    radius = jnp.where(inactive, seed, state.radius)
     solute = jnp.where(inactive, m_solute, state.solute_mass)
     active = jnp.where(inactive, 1.0, state.active).astype(dtype)
     z_out = jnp.where(inactive, z_new_draw, z)
