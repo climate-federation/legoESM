@@ -18,7 +18,10 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
-from legoesm.atmosphere.physics.turbulence.clubb_core import compute_clubb_diagnostics  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb_core import (  # noqa: E402
+    compute_clubb_diagnostics,
+    compute_pdf_closure,
+)
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
 
 
@@ -72,6 +75,116 @@ def test_diagnostics_keys_and_shapes():
     s = np.asarray(out["sigma_sqd_w"])
     assert np.all((s >= 0.0) & (s < 1.0))
     assert np.all(np.asarray(out["Kh_zt"]) >= 0.0) and np.all(np.asarray(out["Kh_zm"]) >= 0.0)
+
+
+def _pdf_inputs(gr, ng, nzm, seed=3):
+    """Post-advance moment state + means/thermo for ``compute_pdf_closure``."""
+    nzt = nzm - 1
+    rng = np.random.default_rng(seed)
+    diag = compute_clubb_diagnostics(**_inputs(gr, ng, nzm, seed=seed))
+    kw = _inputs(gr, ng, nzm, seed=seed)
+
+    def zt(s=1.0, b=0.0):
+        return jnp.asarray(b + s * rng.standard_normal((ng, nzt)))
+
+    return dict(
+        diag=diag, wp2=kw["wp2"], wp3=kw["wp3"], rtp2=kw["rtp2"],
+        thlp2=kw["thlp2"], rtpthlp=jnp.asarray(1e-7 * rng.standard_normal((ng, nzm))),
+        up2=kw["up2"], vp2=kw["vp2"], wprtp=kw["wprtp"], wpthlp=kw["wpthlp"],
+        upwp=jnp.asarray(1e-2 * rng.standard_normal((ng, nzm))),
+        vpwp=jnp.asarray(1e-2 * rng.standard_normal((ng, nzm))),
+        wm_zt=zt(1e-3), rtm=zt(1e-3, 8e-3), thlm=zt(1.0, 295.0),
+        um=zt(2.0, 5.0), vm=zt(2.0),
+        exner_zt=jnp.asarray(0.9 + 0.05 * rng.random((ng, nzt))),
+        p_in_Pa_zt=jnp.asarray(7e4 + 2e4 * rng.random((ng, nzt))),
+        thv_ds_zt=zt(1.0, 300.0), gr=gr, config=CLUBBConfig(),
+    )
+
+
+def test_pdf_closure_keys_shapes_finite():
+    gr, ng, nzm = _gr()
+    nzt = nzm - 1
+    out = compute_pdf_closure(**_pdf_inputs(gr, ng, nzm))
+    expected = {"wpthvp", "wp2thvp", "rtpthvp", "thlpthvp", "rc_coef_zm",
+                "cloud_frac", "rcm", "wprcp", "rtprcp", "thlprcp", "uprcp",
+                "vprcp", "wp4_zm", "wp2up2_zm", "wp2vp2_zm", "wpup2", "wpvp2",
+                "wp2rtp", "wp2thlp", "wp2up", "wprtp2", "wpthlp2", "wprtpthlp"}
+    assert expected <= set(out)
+    for k, v in out.items():
+        assert np.all(np.isfinite(np.asarray(v))), k
+    # buoyancy fluxes on zm except wp2thvp (zt); cloud_frac/rcm on zt
+    assert out["wpthvp"].shape == (ng, nzm)
+    assert out["wp2thvp"].shape == (ng, nzt)
+    assert out["cloud_frac"].shape == (ng, nzt) and out["rcm"].shape == (ng, nzt)
+    # cloud fraction in [0, 1]; cloud water non-negative
+    cf = np.asarray(out["cloud_frac"])
+    assert np.all((cf >= 0.0) & (cf <= 1.0))
+    assert np.all(np.asarray(out["rcm"]) >= 0.0)
+
+
+def test_pdf_closure_jit_and_grad():
+    gr, ng, nzm = _gr()
+    kw = _pdf_inputs(gr, ng, nzm)
+
+    def loss(wp2):
+        out = compute_pdf_closure(**dict(kw, wp2=wp2))
+        return jnp.sum(out["wpthvp"] ** 2) + jnp.sum(out["wp4_zm"] ** 2)
+
+    assert jnp.isfinite(jax.jit(loss)(kw["wp2"]))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(kw["wp2"])))
+
+
+def test_pdf_closure_buoyancy_uses_raw_not_floored_variance():
+    """Regression (codex): the scalar-variance floor (``rt_tol^2``/``thl_tol^2``)
+    feeds ONLY the ADG1 driver, never the buoyancy assembly. In a cloud-free
+    (``rcm=0``) column the x'thv' fluxes reduce to closed form in the RAW
+    (un-floored) regridded variances; pinning them there proves the floor does
+    not leak a tolerance-level covariance into rtpthvp/thlpthvp."""
+    from legoesm.atmosphere.physics.turbulence.clubb_grid import zm2zt, zt2zm
+    from legoesm.atmosphere.physics.turbulence.clubb_pdf_moments import _EP1
+
+    gr, ng, nzm = _gr()
+    nzt = nzm - 1
+    kw = _pdf_inputs(gr, ng, nzm)
+    # Sub-tolerance scalar variances (< rt_tol^2 / thl_tol^2) and a strongly
+    # subsaturated, warm/dry column -> rcm = 0 (no cloud-water buoyancy term).
+    kw["rtp2"] = jnp.full((ng, nzm), 1e-20)
+    kw["thlp2"] = jnp.full((ng, nzm), 1e-6)   # thl_tol^2 = 1e-4 -> floored if leaked
+    kw["rtpthlp"] = jnp.zeros((ng, nzm))
+    kw["rtm"] = jnp.full((ng, nzt), 1e-4)     # very dry
+    kw["thlm"] = jnp.full((ng, nzt), 320.0)   # warm
+    kw["p_in_Pa_zt"] = jnp.full((ng, nzt), 9e4)
+    kw["exner_zt"] = jnp.full((ng, nzt), 1.0)
+    kw["thv_ds_zt"] = jnp.full((ng, nzt), 320.0)
+    # Recompute the diagnostics consistent with the variance override.
+    kw["diag"] = compute_clubb_diagnostics(
+        wp2=kw["wp2"], wp3=kw["wp3"], up2=kw["up2"], vp2=kw["vp2"],
+        thlp2=kw["thlp2"], rtp2=kw["rtp2"], wpthlp=kw["wpthlp"], wprtp=kw["wprtp"],
+        Lscale=jnp.full((ng, nzt), 100.0),
+        brunt_vaisala_freq_sqd=jnp.full((ng, nzm), 1e-4), gr=gr, config=CLUBBConfig())
+
+    out = compute_pdf_closure(**kw)
+    assert np.allclose(np.asarray(out["rcm"]), 0.0), "column must be cloud-free"
+
+    # Closed form with RAW (un-floored) regridded variances, top zm level zeroed.
+    rtp2_zt = zm2zt(kw["rtp2"], gr)
+    thlp2_zt = zm2zt(kw["thlp2"], gr)
+    rtpthlp_zt = zm2zt(kw["rtpthlp"], gr)
+    # Cloud-water flux terms (rc_coef * x'rc') vanish at rcm = 0.
+    rtpthvp_zt = rtpthlp_zt + _EP1 * kw["thv_ds_zt"] * rtp2_zt
+    thlpthvp_zt = thlp2_zt + _EP1 * kw["thv_ds_zt"] * rtpthlp_zt
+    k_ub = nzm - 1
+    exp_rtpthvp = zt2zm(rtpthvp_zt, gr).at[:, k_ub].set(0.0)
+    exp_thlpthvp = zt2zm(thlpthvp_zt, gr).at[:, k_ub].set(0.0)
+    np.testing.assert_allclose(np.asarray(out["rtpthvp"]), np.asarray(exp_rtpthvp),
+                               rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(out["thlpthvp"]), np.asarray(exp_thlpthvp),
+                               rtol=0, atol=1e-12)
+    # And the floored value would be visibly different (thl_tol^2 = 1e-4 >> 1e-6).
+    floored_thlpthvp = zt2zm(
+        jnp.maximum(thlp2_zt, CLUBBConfig().thl_tol ** 2)
+        + _EP1 * kw["thv_ds_zt"] * rtpthlp_zt, gr).at[:, k_ub].set(0.0)
+    assert not np.allclose(np.asarray(out["thlpthvp"]), np.asarray(floored_thlpthvp))
 
 
 _CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
