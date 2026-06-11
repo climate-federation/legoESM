@@ -172,6 +172,61 @@ test before the body. Helpers (`grid.py`, `config.py`) in
   2e-3 — validates the scheme as a stable, conservative INTEGRATOR (not
   just per-step). 108 fast_sbm + integration tests green.
 
+## Multi-ice-habit subsystem (in progress, branch `feat/fast-sbm-multi-ice`)
+
+Oracle carries 5 distributions: drops (`FF1`), ice crystals (`FF2`, 3 habits
+columns/plates/dendrites), snow (`FF3`), graupel (`FF4`), hail (`FF5`). The
+single-ice-spectrum port (above) collapses these; the multi-ice subsystem
+separates them, each with its own fall speed, capacitance, and cross-species
+collection (`coll_xyz` between every pair). Incremental build:
+
+- **Iter 1 (2026-06-11)** — habit-routed freezing. `freeze_step_routed`
+  (oracle `FREEZ` `KRFREEZE` split): frozen drops in bins `< krfreeze`
+  (=21, 1-based oracle `KR≤KRFREEZ`) → pristine ice crystals, larger
+  (frozen rain) → hail/graupel. Same Bigg rate + fusion heat as
+  single-category `freeze_step`; the two categories sum EXACTLY to the
+  single-category ice (5 tests: sum-equals-single 1e-14, split-at-krfreeze,
+  mass conservation, no-op above freezing, differentiable). Foundation for
+  carrying distinct ice categories through the column. Codex: PASS (habit
+  collapse + grad test notes applied).
+- **Iter 2 (2026-06-11)** — per-bin ice terminal velocities by category
+  (`ice_fall_speed.py`): computed replacement for the oracle's file-read
+  `VR2..VR5` tables — `V=a·D^b·(ρ₀/ρ_air)^½`, `D=(6m/πρ_cat)^{1/3}`,
+  Locatelli-Hobbs (1974) coefficients + bulk density per habit (snow
+  a=11.72/b=0.41/ρ=100; graupel a=124/b=0.66/ρ=400, all in `FastSBMConfig`).
+  Physical crossover: at equal mass fluffy low-density snow is larger so
+  falls faster at small sizes; dense graupel wins in the precip regime
+  (>~170 µm) and reaches a far higher max — the reason to separate
+  categories. 7 tests (monotone, graupel>snow precip regime, mm-size
+  magnitudes, density correction exact, array broadcast, unknown-category
+  raises, differentiable). Codex: PASS-WITH-NOTES → ρ_ref=1.2 + tight
+  coefficient test applied.
+- **Iter 3 (2026-06-11)** — column carries TWO ice categories: crystal/snow
+  (`q_i`) and graupel/hail (`q_g`). `freeze_step_routed` sends small frozen
+  drops → snow, frozen rain → graupel; both melt above 0 °C; riming +
+  aggregation act on the snow category; **each category now SEDIMENTS at its
+  own fall speed** (rain via Shima, snow + graupel via `ice_fall_speed`) —
+  ice precipitates for the first time (previously trapped in-column). Output
+  `dq_i_dt` (snow) + `dq_g_dt` (graupel); total-water closure extended to
+  `−dq_v = dq_c+dq_r+dq_i+dq_g+precip`. Tests: graupel precipitates >1.4×
+  faster than equal-mass snow (the multi-category payoff), cold-cell ice
+  falls without melting (loss == precip), aggregation conserves vs precip,
+  multistep trajectory conserves all 5 species, supercooled freeze closure
+  incl. both categories. 116 fast_sbm + 242 microphysics/integration green.
+  Codex iter-3 review: PASS-WITH-NOTES (all 6 invariants PASS); LOW notes
+  (docstring, graupel-melt-ladder, q_g>0 asserts) applied.
+- **Iter 4 (2026-06-11)** — **graupel riming** (closes the comprehensive
+  review's lone HIGH/FAIL): the oracle rimes BOTH ice categories
+  (`coll_xyx_lwf(g4/g5,g1,…)` l.8495/8534), not snow only. Now snow rimes
+  cloud first, then graupel collects the REMAINING cloud; both supercooled-
+  gated, both release fusion heat (`dT_rime` over the total rimed liquid).
+  Comprehensive review confirmed mass/energy/differentiability all CLEAN;
+  this fills the one missing growth/heating path. Added the two flagged
+  test gaps: warm-cell graupel melt (dq_g<0 + 5-species closure) and
+  supercooled graupel riming (seed graupel converts more cloud→ice than
+  freeze-only). 5-species closure stays exact (5.8e-12) with graupel
+  riming on; float32 dry-atmosphere grad still finite. 119 fast_sbm green.
+
 ## Remaining work (warm + full ice phase done → bit-exact FSBM-2)
 
 Multi-ice-category habits (separate snow/graupel/hail spectra + their

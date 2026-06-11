@@ -222,14 +222,19 @@ def test_supercooled_cell_freezes_to_ice():
     p_half = jnp.zeros((NCOL, NLEV + 1))
     dz = jnp.full((NCOL, NLEV), 100.0)
     out = fast_sbm_microphysics(T, q_v, hyd, p, p_half, rho, dz, DT)
-    assert np.all(np.asarray(out.dq_i_dt) > 0.0)         # ice formed
+    # Ice forms (crystals + hail via habit-routed freezing). Both categories
+    # are actually produced (codex iter-3: assert q_g path is non-zero, not
+    # just present in the budget).
+    assert np.all(np.asarray(out.dq_i_dt) > 0.0)         # snow/crystals
+    assert np.all(np.asarray(out.dq_g_dt) > 0.0)         # graupel from rain
     # Net heating exceeds the condensation-only part (fusion adds warming).
     assert np.all(np.asarray(out.dT_dt) > 0.0)
-    # Total water closure incl. ice: −dq_v = dq_c+dq_r+dq_i+precip.
+    # Total water closure incl. BOTH ice categories: −dq_v = dq_c + dq_r +
+    # dq_i + dq_g + precip.
     col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
     np.testing.assert_allclose(
         -col(out.dq_v_dt),
-        col(out.dq_c_dt + out.dq_r_dt + out.dq_i_dt)
+        col(out.dq_c_dt + out.dq_r_dt + out.dq_i_dt + out.dq_g_dt)
         + np.asarray(out.precipitation), rtol=1e-8)
 
 
@@ -302,18 +307,104 @@ def test_warm_cell_grad_through_discarded_riming():
     assert np.all(np.isfinite(np.asarray(g)))
 
 
-def test_cold_cell_does_not_melt_ice():
-    # A subfreezing cell leaves carried ice intact (no melt source).
+def test_warm_cell_melts_carried_graupel():
+    # Codex review (comprehensive, MEDIUM test-gap): the warm-melt path was
+    # tested for q_i only. A warm cell carrying GRAUPEL must melt it
+    # (dq_g < 0), the meltwater join liquid with latent cooling, and the
+    # 5-species closure include dq_g.
+    T, q_v, hyd, p, p_half, rho, dz = _fields(0.99, q_c=2.0e-4, q_r=0.0)
+    hyd = hyd._replace(q_g=jnp.full((NCOL, NLEV), 5.0e-4))
+    out = fast_sbm_microphysics(T, q_v, hyd, p, p_half, rho, dz, DT)
+    assert np.all(np.asarray(out.dq_g_dt) < 0.0)         # graupel melting
+    col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
+    np.testing.assert_allclose(
+        -col(out.dq_v_dt),
+        col(out.dq_c_dt + out.dq_r_dt + out.dq_i_dt + out.dq_g_dt)
+        + np.asarray(out.precipitation), rtol=1e-8)
+
+
+def test_supercooled_graupel_rimes_cloud():
+    # Codex review (comprehensive, HIGH): graupel must rime supercooled
+    # cloud (oracle coll_xyx_lwf g4/g5). A supercooled cell with seed
+    # graupel + cloud converts more cloud→ice than the same cell with no
+    # graupel (freeze-only), with closure holding.
+    T = jnp.full((NCOL, NLEV), constants.T_freeze - 15.0)
+    p = jnp.full((NCOL, NLEV), P0)
+    e = 1.02 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
+    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    rho = jnp.full((NCOL, NLEV), 1.1)
+    base = make_zero_hydrometeors(NCOL, NLEV)._replace(
+        q_c=jnp.full((NCOL, NLEV), 2.0e-3))
+    with_graupel = base._replace(q_g=jnp.full((NCOL, NLEV), 1.0e-3))
+    p_half = jnp.zeros((NCOL, NLEV + 1))
+    dz = jnp.full((NCOL, NLEV), 100.0)
+    out0 = fast_sbm_microphysics(T, q_v, base, p, p_half, rho, dz, DT)
+    out_g = fast_sbm_microphysics(T, q_v, with_graupel, p, p_half, rho, dz,
+                                  DT)
+    col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
+    # Seed graupel collects cloud → more cloud removed than freeze-only.
+    assert np.all(col(out_g.dq_c_dt) < col(out0.dq_c_dt))
+    # Closure holds with graupel riming active.
+    np.testing.assert_allclose(
+        -col(out_g.dq_v_dt),
+        col(out_g.dq_c_dt + out_g.dq_r_dt + out_g.dq_i_dt + out_g.dq_g_dt)
+        + np.asarray(out_g.precipitation), rtol=1e-7)
+
+
+def test_graupel_precipitates_faster_than_snow():
+    # The point of carrying two ice categories (iter-3): at equal carried
+    # mass, dense graupel falls several × faster than fluffy snow, so it
+    # reaches the surface as precipitation sooner. Same cold column, same
+    # ice mass, routed once as snow (q_i) and once as graupel (q_g).
+    T = jnp.full((NCOL, NLEV), constants.T_freeze - 10.0)
+    p = jnp.full((NCOL, NLEV), P0)
+    e = 0.8 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
+    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    rho = jnp.full((NCOL, NLEV), 1.1)
+    dz = jnp.full((NCOL, NLEV), 100.0)
+    ph = jnp.zeros((NCOL, NLEV + 1))
+    as_snow = make_zero_hydrometeors(NCOL, NLEV)._replace(
+        q_i=jnp.full((NCOL, NLEV), 1.0e-3))
+    as_graupel = make_zero_hydrometeors(NCOL, NLEV)._replace(
+        q_g=jnp.full((NCOL, NLEV), 1.0e-3))
+    out_s = fast_sbm_microphysics(T, q_v, as_snow, p, ph, rho, dz, DT)
+    out_g = fast_sbm_microphysics(T, q_v, as_graupel, p, ph, rho, dz, DT)
+    # Graupel precipitates more of its mass per step than snow (one-step CFL
+    # caps the ratio below the full ~2-3× fall-speed ratio, but it is clearly
+    # faster).
+    assert float(jnp.sum(out_g.precipitation)) > \
+        1.4 * float(jnp.sum(out_s.precipitation))
+    # Each routes only its own category's tendency.
+    assert np.all(np.asarray(out_g.dq_g_dt) < 0.0)   # graupel falls
+    assert np.all(np.asarray(out_g.dq_i_dt) == 0.0)  # no snow involved
+    assert np.all(np.asarray(out_s.dq_i_dt) < 0.0)   # snow falls
+    assert np.all(np.asarray(out_s.dq_g_dt) == 0.0)
+
+
+def test_cold_cell_ice_sediments_without_melting():
+    # A subfreezing cell carrying ice does NOT melt it (no liquid produced,
+    # no warming) but the ice now FALLS (iter-3: ice sediments at the snow
+    # fall speed instead of being trapped). Column ice loss == precip.
     T = jnp.full((NCOL, NLEV), constants.T_freeze - 10.0)
     p = jnp.full((NCOL, NLEV), P0)
     e = 0.9 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
     q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
     rho = jnp.full((NCOL, NLEV), 1.1)
+    dz = jnp.full((NCOL, NLEV), 100.0)
     hyd = make_zero_hydrometeors(NCOL, NLEV)._replace(
         q_i=jnp.full((NCOL, NLEV), 5.0e-4))
     out = fast_sbm_microphysics(T, q_v, hyd, p, jnp.zeros((NCOL, NLEV + 1)),
-                                rho, jnp.full((NCOL, NLEV), 100.0), DT)
-    np.testing.assert_allclose(np.asarray(out.dq_i_dt), 0.0, atol=1e-15)
+                                rho, dz, DT)
+    # No melt: no cloud/rain produced, no net warming, vapor untouched.
+    np.testing.assert_allclose(np.asarray(out.dq_c_dt), 0.0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(out.dq_v_dt), 0.0, atol=1e-12)
+    # Ice falls (sediments) → column ice decreases, precip > 0.
+    col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
+    assert np.all(col(out.dq_i_dt) <= 0.0)
+    assert np.all(np.asarray(out.precipitation) > 0.0)
+    # Column ice loss exactly equals what precipitated (no melt, no source).
+    np.testing.assert_allclose(-col(out.dq_i_dt),
+                               np.asarray(out.precipitation), rtol=1e-9)
 
 
 def test_reconstruction_conserves_mass_when_floor_binds():
@@ -386,11 +477,14 @@ def test_ice_aggregation_conserves_ice_mass():
     p_half = jnp.zeros((NCOL, NLEV + 1))
     dz = jnp.full((NCOL, NLEV), 100.0)
     out = fast_sbm_microphysics(T, q_v, hyd, p, p_half, rho, dz, DT)
-    # No vapor exchange (subsaturated, no liquid), no melt (cold): ice
-    # change is aggregation (internal) — q_i tendency ~0 (aggregation
-    # conserves total ice mass; ice does not sediment in this adapter).
-    np.testing.assert_allclose(np.asarray(out.dq_i_dt), 0.0, atol=1e-12)
+    # No vapor exchange (subsaturated, no liquid), no melt (cold). Aggregation
+    # conserves ice mass internally; the only ice MASS change is sedimentation
+    # → column ice loss exactly equals precipitation (iter-3: ice falls).
     np.testing.assert_allclose(np.asarray(out.dq_v_dt), 0.0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(out.dq_c_dt), 0.0, atol=1e-12)
+    col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
+    np.testing.assert_allclose(-col(out.dq_i_dt),
+                               np.asarray(out.precipitation), rtol=1e-9)
 
 
 def test_ice_aggregation_redistributes_spectrum():
@@ -443,7 +537,10 @@ def test_multistep_total_water_conserved():
         q_i=jnp.full((ncol, nlev), 3.0e-4))
 
     def total_water(qv, h):
-        return float(jnp.sum((qv + h.q_c + h.q_r + h.q_i) * rho * dz))
+        # All species incl. BOTH ice categories (q_i = crystals/snow,
+        # q_g = graupel/hail) — graupel now forms from frozen rain.
+        return float(jnp.sum(
+            (qv + h.q_c + h.q_r + h.q_i + h.q_g) * rho * dz))
 
     qv = q_v0
     tw0 = total_water(qv, hyd)
@@ -455,12 +552,14 @@ def test_multistep_total_water_conserved():
         hyd = hyd._replace(
             q_c=jnp.maximum(hyd.q_c + dt * out.dq_c_dt, 0.0),
             q_r=jnp.maximum(hyd.q_r + dt * out.dq_r_dt, 0.0),
-            q_i=jnp.maximum(hyd.q_i + dt * out.dq_i_dt, 0.0))
+            q_i=jnp.maximum(hyd.q_i + dt * out.dq_i_dt, 0.0),
+            q_g=jnp.maximum(hyd.q_g + dt * out.dq_g_dt, 0.0))
         accum_precip += float(jnp.sum(out.precipitation * dt))
     tw1 = total_water(qv, hyd)
     # Non-vacuous: the trajectory actually moved water through ice and out
     # as precip (riming grew the seeded ice; rain reached the surface).
-    assert float(jnp.max(hyd.q_i)) > 3.0e-4      # ice grew via riming
+    assert float(jnp.max(hyd.q_i)) > 3.0e-4      # snow grew via riming
+    assert float(jnp.max(hyd.q_g)) > 0.0         # graupel produced (q_g path)
     assert accum_precip > 0.0                    # something precipitated
     # Closure over the trajectory: water now + what precipitated == start.
     # Clamps to nonnegative can only ADD water, so the two-sided rel=2e-3

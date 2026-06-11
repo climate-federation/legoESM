@@ -68,6 +68,10 @@ class FastSBMConfig(NamedTuple):
     bigg_a: float = 0.3333e-4
     bigg_b0: float = 0.66
     bigg_b_max: float = 0.66
+    # Habit-routing bin threshold (oracle FREEZ KRFREEZ=21, 1-based): frozen
+    # drops in 0-based bins < krfreeze become pristine ice crystals, the
+    # larger bins (frozen rain) become hail/graupel.
+    krfreeze: int = 21
     # --- Jiwen Fan melting (oracle J_W_MELT) ---
     # Bin thresholds (0-based) + rates [1/s]: bins ≤ full melt completely,
     # ≤ mid melt at rate_mid, above at rate_high (oracle snow ladder:
@@ -83,3 +87,16 @@ class FastSBMConfig(NamedTuple):
     # [-], scaling the Bott kernel. ~0.1 reflects the lower sticking
     # efficiency of ice crystals vs liquid coalescence.
     ice_aggregation_efficiency: float = 0.1
+    # --- Ice terminal-velocity power laws V = a·D^b (Locatelli & Hobbs
+    # 1974; SI: D [m], V [m/s]) + category bulk density [kg/m^3] ---
+    # Unrimed aggregates / pristine crystals (low density, slow).
+    fall_a_snow: float = 11.72
+    fall_b_snow: float = 0.41
+    rho_snow: float = 100.0
+    # Lump graupel / hail (dense, fast).
+    fall_a_graupel: float = 124.0
+    fall_b_graupel: float = 0.66
+    rho_graupel: float = 400.0
+    # Foote-du Toit (ρ_ref/ρ_air)^½ density-correction reference [kg/m^3]
+    # (standard WRF near-surface value; the level where the correction = 1).
+    fall_rho_ref: float = 1.2
