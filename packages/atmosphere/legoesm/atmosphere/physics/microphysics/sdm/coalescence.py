@@ -22,9 +22,11 @@ well-mixed cell. One step:
 Because the candidate pairs are non-overlapping, the per-pair updates are
 independent and applied with conflict-free scatters.
 
-**Exact invariant:** the represented water mass ``Σ_i ξ_i m_i`` is conserved to
-machine precision; the represented number ``Σ_i ξ_i`` decreases. This is *not*
-differentiable (random permutation + stochastic integer γ); it is a pure
+**Invariant:** the represented water mass ``Σ_i ξ_i m_i`` is conserved to
+floating-point round-off — the merge is algebraically exact in both branches,
+but mass recomputed from ``cbrt(γR_i³+R_j³)³`` carries ~1e-12 relative
+round-off — and the represented number ``Σ_i ξ_i`` is non-increasing. This is
+*not* differentiable (random permutation + stochastic integer γ); it is a pure
 function of an explicit ``jax.random`` key (user said differentiability is not
 required for coalescence).
 
@@ -75,8 +77,9 @@ __physics_contract__ = {
     "reference": "Shima et al. (2009) QJRMS 135:1307; ERF SuperDropletPCCoalescence",
     "idealized_test": (
         "Golovin additive kernel from any IC: ensemble-mean Σξ(t)/Σξ(0) = "
-        "exp(-(b/ρ_w)·L·t) (L = Σξm/V_cell conserved); represented water mass "
-        "Σξm conserved to machine precision; deterministic for a fixed key."
+        "exp(-(b/ρ_w)·L·t) and 2nd mass moment Σξm²(t) = Σξm²(0)·exp(2(b/ρ_w)Lt) "
+        "(L = Σξm/V_cell conserved); represented water mass Σξm conserved to "
+        "floating-point round-off; deterministic for a fixed key."
     ),
 }
 
@@ -163,13 +166,22 @@ def coalescence_step(
     frac = P - floor_P
     u = random.uniform(k_gamma, (L,), dtype=dtype)
     gamma = floor_P + (u < frac).astype(dtype)
+    # Cap at ⌊ξ_big/ξ_small⌋ so the larger-multiplicity droplet is not
+    # over-consumed. Guard the floating-point quotient against rounding up to a
+    # value whose product exceeds ξ_big (which would let the split branch CREATE
+    # mass): drop one collision if γ_cap·ξ_small overshoots ξ_big. This makes
+    # ``excess = ξ_big − γ ξ_small >= 0`` hold for every pair.
     xi_small_safe = jnp.maximum(xi_small, 1.0)  # avoid 0-division for inactive slots
-    gamma = jnp.minimum(gamma, jnp.floor(xi_big / xi_small_safe))
+    gamma_cap = jnp.floor(xi_big / xi_small_safe)
+    gamma_cap = jnp.where(gamma_cap * xi_small > xi_big, gamma_cap - 1.0, gamma_cap)
+    gamma_cap = jnp.maximum(gamma_cap, 0.0)
+    gamma = jnp.minimum(gamma, gamma_cap)
     gamma = jnp.where((xi_small > 0.0) & (act_pair > 0.0), gamma, 0.0)
-    gamma = jnp.maximum(gamma, 0.0)
 
     has_coal = gamma > 0.0
-    # Degenerate equal-multiplicity split when ξ_big == γ ξ_small.
+    # Degenerate full-consumption split when ξ_big == γ ξ_small. Because the cap
+    # above guarantees excess >= 0, ``excess <= 0`` selects exactly that case,
+    # so the split branch conserves mass (no negative-excess mass creation).
     excess = xi_big - gamma * xi_small
     case_split = has_coal & (excess <= 0.0)
 
