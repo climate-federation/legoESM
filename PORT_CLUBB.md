@@ -81,7 +81,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_config.py` | `CLUBBFlags` (static, `register_static`), `CLUBBParams` (dynamic/differentiable), `CLUBBConfig`; `derive_mixt_frac_max_mag`/`derive_lmin` | ✅ |
 | `clubb_saturation.py` | `sat_mixrat_liq`/`_ice` (Flatau, via `thermo` curves) | ✅ |
 | `clubb_helpers.py` | `compute_sigma_sqd_w`, `calc_brunt_vaisala_freq_sqd` | ✅ |
-| `clubb_skewness.py` | `Skx_func`, `compute_gamma_Skw`, `LG_2005_ansatz`, `xp3_LG_2005_ansatz` | ✅ |
+| `clubb_skewness.py` | `Skx_func`, `compute_gamma_Skw`, `LG_2005_ansatz`, `xp3_LG_2005_ansatz` ✅; `calc_wp3_on_wp2` + `compute_skewness_diagnostics` (Skw_zm/zt + wp3_on_wp2 wiring) ✅36 | ✅ |
 | `clubb_mixing_length.py` | parcel buoyant-sorting `Lscale` (golden-locked) | ✅ |
 | `clubb_pdf.py` | ADG1 params (`ADG1_pdf_driver`), cloud fraction + rcm (`calc_pdf_liquid_cloud_frac[_components]`) | ✅ |
 | `clubb_pdf_moments.py` | PDF moment integrals, higher-order moments, cloud-water `x'rc'` fluxes, buoyancy flux `wpthvp` | ✅ |
@@ -166,16 +166,20 @@ CAM branches came from the CESM Fortran; `l_damp_wp3_Skw_squared=False`→C8b=0.
    (masked `lax` loop — the host-numpy level-range search is not JIT/AD-safe) +
    the limiter core + `xm_wpxp_clipping_and_stats`.
 2. **`advance_xm_wpxp` main** — orchestrate the iter-27-29 pieces + clipping.
-3. **P6 orchestration** `advance_clubb_core` (in progress): ✅ iter 35 the tau
-   family (`clubb_tau.py`). ☐ remaining: `Skw`/`sigma_sqd_w`/`wp3_on_wp2` +
-   `C*_Skw_fnc` wiring, the pre+post PDF closure (`l_call_pdf_closure_twice=True`)
-   producing the 4th-order moments (wp4/wp2up2/wp2thvp/rtpthvp/…) + the PDF
-   `w_1/w_2/varnce_w/mixt_frac`, and pack/unpack of the carried moment state.
+3. **P6 orchestration** `advance_clubb_core` (in progress): ✅ iter 35 tau family
+   (`clubb_tau.py`); ✅ iter 36 `Skw`/`wp3_on_wp2` diagnostics (`clubb_skewness`).
+   ☐ remaining: the `C*_Skw_fnc` family (CAM `l_use_C7_Richardson=False` →
+   skewness functions, NOT the ARM Richardson/const — needs the Fortran branch),
+   `sigma_sqd_w` (have `compute_sigma_sqd_w`), the pre+post PDF closure
+   (`l_call_pdf_closure_twice=True`) producing the 4th-order moments (wp4/wp2up2/
+   wp2thvp/rtpthvp/…) + the PDF `w_1/w_2/varnce_w/mixt_frac`, and the carried state.
 4. **Wire into `clubb.py`**: carry the full moment set as state, replace the
    phase-1 eddy-diffusion mean advance with the prognostic advances.
 
 **⚠ Pending codex review** (external rate limit until ~19:37 MDT): iter-34
-`advance_xm_wpxp` main + iter-35 `clubb_tau`. Run retroactively when available.
+`advance_xm_wpxp` main, iter-35 `clubb_tau`, iter-36 `clubb_skewness`
+diagnostics. All small + parity/jit-grad self-validated. Run the batch
+retroactively the moment the limit resets, before adding more major code.
 
 Each chunk: analytic/self-consistency oracle (CI) + golden/round-off parity vs
 CLUBB-JAX (patch reference physical constants to isolate algorithm) + codex

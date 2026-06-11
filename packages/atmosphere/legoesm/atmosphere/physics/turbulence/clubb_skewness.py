@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, zm2zt, zt2zm
 
 # CLUBB ``eps`` = max(1e-10, machine-eps); used only in the degenerate-gamma
 # guard below. A safety tolerance, not a physical constant.
 _EPS = 1.0e-10
+_WP3_ON_WP2_CLIP = 1000.0   # bound on the wp3/wp2 ratio (calc_wp3_on_wp2)
 
 
 def Skx_func(
@@ -170,4 +172,40 @@ def xp3_LG_2005_ansatz(
     return Skx_zt * xp2_safe * jnp.sqrt(xp2_safe)
 
 
-__all__ = ["Skx_func", "compute_gamma_Skw", "LG_2005_ansatz", "xp3_LG_2005_ansatz"]
+def calc_wp3_on_wp2(wp2, wp3, w_tol, gr: CLUBBGrid):
+    """Smoothed ``wp3/wp2`` ratio on zm and zt levels (``calc_wp3_on_wp2``).
+
+    ``wp2`` is floored to ``w_tol^2`` on zt, the ratio clipped to ``[-1000,
+    1000]``, then round-tripped zt->zm->zt to suppress spikes. ``wp2`` is
+    zm-level, ``wp3`` zt-level. Returns ``(wp3_on_wp2, wp3_on_wp2_zt)``.
+    """
+    w_tol_sqd = w_tol ** 2
+    wp2_zt = jnp.maximum(zm2zt(wp2, gr), w_tol_sqd)
+    wp3_on_wp2_zt = jnp.clip(wp3 / jnp.maximum(wp2_zt, w_tol_sqd),
+                             -_WP3_ON_WP2_CLIP, _WP3_ON_WP2_CLIP)
+    wp3_on_wp2 = zt2zm(wp3_on_wp2_zt, gr)
+    wp3_on_wp2_zt = zm2zt(wp3_on_wp2, gr)
+    return wp3_on_wp2, wp3_on_wp2_zt
+
+
+def compute_skewness_diagnostics(wp2, wp3, w_tol, Skw_denom_coef, gr: CLUBBGrid):
+    """Skewness + wp3/wp2-ratio diagnostics for the moment advances.
+
+    Assembles ``Skw`` on both grids (:func:`Skx_func`) and the smoothed
+    ``wp3_on_wp2`` ratio (:func:`calc_wp3_on_wp2`) from the carried ``wp2`` (zm)
+    and ``wp3`` (zt). Returns a dict with ``Skw_zm``, ``Skw_zt``, ``wp2_zt``
+    (floored), ``wp3_zm``, ``wp3_on_wp2``, ``wp3_on_wp2_zt`` — the diagnostics the
+    wp2/wp3, xp2/xpyp and xm/wpxp advances consume.
+    """
+    w_tol_sqd = w_tol ** 2
+    wp2_zt = jnp.maximum(zm2zt(wp2, gr), w_tol_sqd)
+    wp3_zm = zt2zm(wp3, gr)
+    Skw_zt = Skx_func(wp2_zt, wp3, w_tol, Skw_denom_coef)
+    Skw_zm = Skx_func(wp2, wp3_zm, w_tol, Skw_denom_coef)
+    wp3_on_wp2, wp3_on_wp2_zt = calc_wp3_on_wp2(wp2, wp3, w_tol, gr)
+    return dict(Skw_zm=Skw_zm, Skw_zt=Skw_zt, wp2_zt=wp2_zt, wp3_zm=wp3_zm,
+                wp3_on_wp2=wp3_on_wp2, wp3_on_wp2_zt=wp3_on_wp2_zt)
+
+
+__all__ = ["Skx_func", "compute_gamma_Skw", "LG_2005_ansatz", "xp3_LG_2005_ansatz",
+           "calc_wp3_on_wp2", "compute_skewness_diagnostics"]
