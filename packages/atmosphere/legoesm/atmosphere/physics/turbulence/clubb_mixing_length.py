@@ -37,6 +37,7 @@ import jax
 import jax.numpy as jnp
 from legoesm.atmosphere.physics._shared import buoyancy_coefficient
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, zm2zt
+from legoesm.atmosphere.physics.turbulence.clubb_helpers import safe_sqrt
 from legoesm.atmosphere.physics.turbulence.clubb_saturation import sat_mixrat_liq
 
 from legoesm import constants
@@ -53,11 +54,6 @@ _ZLMIN = 0.1                   # minimum Lscale [m]
 _LSCALE_SFCLYR_DEPTH = 500.0   # surface-layer depth for lminh [m]
 
 
-def _safe_sqrt(x: jax.Array) -> jax.Array:
-    """``sqrt(max(x,0))`` with a finite (0) gradient at ``x<=0`` (double-where)."""
-    xp = jnp.maximum(x, 0.0)
-    safe = jnp.where(xp > 0.0, xp, 1.0)
-    return jnp.where(xp > 0.0, jnp.sqrt(safe), 0.0)
 
 
 def _bounded_while(cond_fn, body_fn, init_state, max_iters):
@@ -162,7 +158,7 @@ def _compute_lscale_up_col(
         # Case A: TKE exhausted before reaching k+1.
         dCAPE_1_kp1 = dCAPE_dz_1_up[k_py + 1]
         safe_dCAPE_a = jnp.where(jnp.abs(dCAPE_1_kp1) > 0.0, dCAPE_1_kp1, 1.0)
-        frac_a = -_safe_sqrt(-2.0 * tke_i_k * dzm[k_py + 1] * dCAPE_1_kp1) / safe_dCAPE_a
+        frac_a = -safe_sqrt(-2.0 * tke_i_k * dzm[k_py + 1] * dCAPE_1_kp1) / safe_dCAPE_a
 
         # Case B/C: parcel survives the initial step -> inner ascent.
         j_last, exited_early, j_final, tke_exit, dCAPE_exit_prev, dCAPE_exit_j = (
@@ -184,7 +180,7 @@ def _compute_lscale_up_col(
         invrs_diff = 1.0 / safe_diff
         disc = dCAPE_exit_prev ** 2 - 2.0 * tke_exit * invrs_dzm[j_final] * dCAPE_diff
         frac_quad = (-dCAPE_exit_prev * invrs_diff * dzm[j_final]
-                     - _safe_sqrt(disc) * invrs_diff * dzm[j_final])
+                     - safe_sqrt(disc) * invrs_diff * dzm[j_final])
         frac_inner = jnp.where(linear_case, frac_linear, frac_quad)
         frac_bc = jnp.where(exited_early, frac_inner, 0.0)
 
@@ -263,7 +259,7 @@ def _compute_lscale_down_col(
 
         dCAPE_1_km1 = dCAPE_dz_1_down[k_py - 1]
         safe_dCAPE_a = jnp.where(jnp.abs(dCAPE_1_km1) > 0.0, dCAPE_1_km1, 1.0)
-        frac_a = _safe_sqrt(2.0 * tke_i_k * dzm[k_py] * dCAPE_1_km1) / safe_dCAPE_a
+        frac_a = safe_sqrt(2.0 * tke_i_k * dzm[k_py] * dCAPE_1_km1) / safe_dCAPE_a
 
         j_last, exited_early, j_final, tke_exit, dCAPE_exit_plus1, dCAPE_exit_j = (
             _downward_inner_while(
@@ -284,7 +280,7 @@ def _compute_lscale_down_col(
         invrs_diff = 1.0 / safe_diff
         disc = dCAPE_exit_plus1 ** 2 + 2.0 * tke_exit * invrs_dzm[j_final + 1] * dCAPE_diff
         frac_quad = (-dCAPE_exit_plus1 * invrs_diff * dzm[j_final + 1]
-                     + _safe_sqrt(disc) * invrs_diff * dzm[j_final + 1])
+                     + safe_sqrt(disc) * invrs_diff * dzm[j_final + 1])
         frac_inner = jnp.where(linear_case, frac_linear, frac_quad)
         frac_bc = jnp.where(exited_early, frac_inner, 0.0)
 
@@ -465,7 +461,7 @@ def compute_mixing_length(
 
     Lscale_up = jnp.maximum(lminh, Lscale_up_all)
     Lscale_down = jnp.maximum(lminh, Lscale_down_all)
-    Lscale = _safe_sqrt(Lscale_up * Lscale_down)
+    Lscale = safe_sqrt(Lscale_up * Lscale_down)
 
     # Upper boundary: Lscale[k_ub] = Lscale[k_ub - 1].
     Lscale = Lscale.at[:, k_ub_zt_py].set(Lscale[:, k_ub_zt_py - 1])

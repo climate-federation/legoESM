@@ -44,6 +44,21 @@ _ZERO_THRESHOLD = 0.0
 _BV_CLIP_COEF = 1.0e8
 
 
+def safe_sqrt(x: jax.Array) -> jax.Array:
+    """``sqrt(max(x,0))`` with a finite (0) gradient at ``x<=0`` (double-where).
+
+    The canonical AD-safe square root shared across the CLUBB modules: the
+    ``jnp.sqrt`` is never evaluated at ``<=0`` in either the primal or the VJP, so
+    the gradient stays finite (0) at the boundary instead of the ``+inf`` slope of
+    a bare ``sqrt`` at 0. A ``NaN`` input maps to 0 (``NaN > 0`` is False).
+    (NOTE: ``clubb_mfl._safe_sqrt`` is a deliberate variant that PROPAGATES ``NaN``
+    instead -- kept local there; do not collapse it into this one.)
+    """
+    xp = jnp.maximum(x, 0.0)
+    safe = jnp.where(xp > 0.0, xp, 1.0)
+    return jnp.where(xp > 0.0, jnp.sqrt(safe), 0.0)
+
+
 def compute_sigma_sqd_w(
     gamma_Skw_fnc: jax.Array,
     wp2: jax.Array,
@@ -190,4 +205,4 @@ def calc_brunt_vaisala_freq_sqd(
     return brunt_vaisala_freq_sqd, bv_mixed, bv_smth, bv_dry, bv_moist
 
 
-__all__ = ["compute_sigma_sqd_w", "calc_brunt_vaisala_freq_sqd"]
+__all__ = ["safe_sqrt", "compute_sigma_sqd_w", "calc_brunt_vaisala_freq_sqd"]

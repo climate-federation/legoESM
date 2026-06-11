@@ -19,6 +19,7 @@ from legoesm.atmosphere.physics.turbulence.clubb_grid import (  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb_helpers import (  # noqa: E402
     calc_brunt_vaisala_freq_sqd,
     compute_sigma_sqd_w,
+    safe_sqrt,
 )
 
 from legoesm import constants  # noqa: E402
@@ -170,6 +171,22 @@ def test_bv_grad_and_jit():
     assert jnp.isfinite(jax.jit(loss)(thlm))
     g = jax.grad(loss)(thlm)
     assert jnp.all(jnp.isfinite(g))
+
+
+def test_safe_sqrt_value_and_ad_safety():
+    """The shared AD-safe sqrt (de-duplicated from 5 clubb modules): correct value
+    for x>0, 0 at x<=0, a FINITE gradient at x=0 (where a bare sqrt has +inf
+    slope), and NaN mapped to 0 (the standard masking variant; ``clubb_mfl`` keeps
+    a separate NaN-propagating one)."""
+    x = jnp.asarray([4.0, 1.0, 0.25, 1e-12])
+    np.testing.assert_allclose(np.asarray(safe_sqrt(x)), np.sqrt(np.asarray(x)),
+                               rtol=1e-12)
+    edge = jnp.asarray([0.0, -1.0, -3.0, jnp.nan])
+    np.testing.assert_array_equal(np.asarray(safe_sqrt(edge)), np.zeros(4))
+    g0 = jax.grad(lambda v: safe_sqrt(v))(0.0)
+    assert np.isfinite(g0) and g0 == 0.0
+    gv = jax.grad(lambda v: jnp.sum(safe_sqrt(v)))(jnp.asarray([0.0, 4.0]))
+    assert np.all(np.isfinite(np.asarray(gv)))
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ from legoesm.atmosphere.physics.turbulence.clubb_fill_holes import (
     fill_holes_wp2_from_horz_tke,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, ddzt, zm2zt
+from legoesm.atmosphere.physics.turbulence.clubb_helpers import safe_sqrt
 from legoesm.atmosphere.physics.turbulence.clubb_moments import (
     clip_variance,
     diffusion_zm_lhs,
@@ -54,11 +55,6 @@ _SFC_AGL_THRESH_M = 100.0  # surface-layer threshold for the tighter skewness li
 _SFC_SKW_FACTOR = 0.0021   # surface-layer wp3_lim_sqd factor (clip_explicit.F90)
 
 
-def _safe_sqrt(x):
-    """``sqrt(max(x,0))`` with a finite (0) gradient at ``x<=0`` (double-where)."""
-    xp = jnp.maximum(x, 0.0)
-    safe = jnp.where(xp > 0.0, xp, 1.0)
-    return jnp.where(xp > 0.0, jnp.sqrt(safe), 0.0)
 
 
 def clip_skewness(wp3, wp2_zt, zt, sfc_elevation, Skw_max_mag):
@@ -80,7 +76,7 @@ def clip_skewness(wp3, wp2_zt, zt, sfc_elevation, Skw_max_mag):
                             _SFC_SKW_FACTOR * skw_sq * wp2_zt_cubed,
                             skw_sq * wp2_zt_cubed)
     exceed = wp3 ** 2 > wp3_lim_sqd
-    wp3 = jnp.where(exceed, jnp.sign(wp3) * _safe_sqrt(wp3_lim_sqd), wp3)
+    wp3 = jnp.where(exceed, jnp.sign(wp3) * safe_sqrt(wp3_lim_sqd), wp3)
     return jnp.clip(wp3, -_WP3_MAX, _WP3_MAX)
 
 

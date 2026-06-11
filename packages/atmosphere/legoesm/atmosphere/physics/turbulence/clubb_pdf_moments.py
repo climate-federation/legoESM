@@ -25,9 +25,9 @@ the top momentum level (``k_ub_zm = nzm-1``, ascending) is zeroed, matching the
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, zt2zm
+from legoesm.atmosphere.physics.turbulence.clubb_helpers import safe_sqrt
 
 from legoesm import constants
 
@@ -35,11 +35,6 @@ _EP1 = (1.0 - constants.epsilon) / constants.epsilon
 _EP2 = 1.0 / constants.epsilon
 
 
-def _safe_sqrt(x: jax.Array) -> jax.Array:
-    """``sqrt(max(x,0))`` with a finite (0) gradient at ``x<=0`` (double-where)."""
-    xp = jnp.maximum(x, 0.0)
-    safe = jnp.where(xp > 0.0, xp, 1.0)
-    return jnp.where(xp > 0.0, jnp.sqrt(safe), 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -53,9 +48,9 @@ def calc_wp2xp_pdf(wm, xm, w_1, w_2, x_1, x_2, varnce_w_1, varnce_w_2,
     dw1, dw2 = w_1 - wm, w_2 - wm
     dx1, dx2 = x_1 - xm, x_2 - xm
     return (a * ((dw1 ** 2 + varnce_w_1) * dx1
-                 + 2.0 * corr_w_x_1 * _safe_sqrt(varnce_w_1 * varnce_x_1) * dw1)
+                 + 2.0 * corr_w_x_1 * safe_sqrt(varnce_w_1 * varnce_x_1) * dw1)
             + (1.0 - a) * ((dw2 ** 2 + varnce_w_2) * dx2
-                           + 2.0 * corr_w_x_2 * _safe_sqrt(varnce_w_2 * varnce_x_2) * dw2))
+                           + 2.0 * corr_w_x_2 * safe_sqrt(varnce_w_2 * varnce_x_2) * dw2))
 
 
 def calc_wpxp2_pdf(wm, xm, w_1, w_2, x_1, x_2, varnce_w_1, varnce_w_2,
@@ -65,9 +60,9 @@ def calc_wpxp2_pdf(wm, xm, w_1, w_2, x_1, x_2, varnce_w_1, varnce_w_2,
     dw1, dw2 = w_1 - wm, w_2 - wm
     dx1, dx2 = x_1 - xm, x_2 - xm
     return (a * (dw1 * (dx1 ** 2 + varnce_x_1)
-                 + 2.0 * corr_w_x_1 * _safe_sqrt(varnce_w_1 * varnce_x_1) * dx1)
+                 + 2.0 * corr_w_x_1 * safe_sqrt(varnce_w_1 * varnce_x_1) * dx1)
             + (1.0 - a) * (dw2 * (dx2 ** 2 + varnce_x_2)
-                           + 2.0 * corr_w_x_2 * _safe_sqrt(varnce_w_2 * varnce_x_2) * dx2))
+                           + 2.0 * corr_w_x_2 * safe_sqrt(varnce_w_2 * varnce_x_2) * dx2))
 
 
 def calc_wp2xp2_pdf(wm, xm, w_1, w_2, x_1, x_2, varnce_w_1, varnce_w_2,
@@ -77,10 +72,10 @@ def calc_wp2xp2_pdf(wm, xm, w_1, w_2, x_1, x_2, varnce_w_1, varnce_w_2,
     dw1, dw2 = w_1 - wm, w_2 - wm
     dx1, dx2 = x_1 - xm, x_2 - xm
     term1 = (dw1 ** 2 * (dx1 ** 2 + varnce_x_1)
-             + 4.0 * corr_w_x_1 * _safe_sqrt(varnce_w_1 * varnce_x_1) * dx1 * dw1
+             + 4.0 * corr_w_x_1 * safe_sqrt(varnce_w_1 * varnce_x_1) * dx1 * dw1
              + (dx1 ** 2 + (1.0 + 2.0 * corr_w_x_1 ** 2) * varnce_x_1) * varnce_w_1)
     term2 = (dw2 ** 2 * (dx2 ** 2 + varnce_x_2)
-             + 4.0 * corr_w_x_2 * _safe_sqrt(varnce_w_2 * varnce_x_2) * dx2 * dw2
+             + 4.0 * corr_w_x_2 * safe_sqrt(varnce_w_2 * varnce_x_2) * dx2 * dw2
              + (dx2 ** 2 + (1.0 + 2.0 * corr_w_x_2 ** 2) * varnce_x_2) * varnce_w_2)
     return a * term1 + (1.0 - a) * term2
 
@@ -102,12 +97,12 @@ def calc_wpxpyp_pdf(wm, xm, ym, w_1, w_2, x_1, x_2, y_1, y_2,
     dw1, dw2 = w_1 - wm, w_2 - wm
     dx1, dx2 = x_1 - xm, x_2 - xm
     dy1, dy2 = y_1 - ym, y_2 - ym
-    comp1 = (dw1 * dx1 * dy1 + corr_x_y_1 * _safe_sqrt(varnce_x_1 * varnce_y_1) * dw1
-             + corr_w_y_1 * _safe_sqrt(varnce_w_1 * varnce_y_1) * dx1
-             + corr_w_x_1 * _safe_sqrt(varnce_w_1 * varnce_x_1) * dy1)
-    comp2 = (dw2 * dx2 * dy2 + corr_x_y_2 * _safe_sqrt(varnce_x_2 * varnce_y_2) * dw2
-             + corr_w_y_2 * _safe_sqrt(varnce_w_2 * varnce_y_2) * dx2
-             + corr_w_x_2 * _safe_sqrt(varnce_w_2 * varnce_x_2) * dy2)
+    comp1 = (dw1 * dx1 * dy1 + corr_x_y_1 * safe_sqrt(varnce_x_1 * varnce_y_1) * dw1
+             + corr_w_y_1 * safe_sqrt(varnce_w_1 * varnce_y_1) * dx1
+             + corr_w_x_1 * safe_sqrt(varnce_w_1 * varnce_x_1) * dy1)
+    comp2 = (dw2 * dx2 * dy2 + corr_x_y_2 * safe_sqrt(varnce_x_2 * varnce_y_2) * dw2
+             + corr_w_y_2 * safe_sqrt(varnce_w_2 * varnce_y_2) * dx2
+             + corr_w_x_2 * safe_sqrt(varnce_w_2 * varnce_x_2) * dy2)
     return a * comp1 + (1.0 - a) * comp2
 
 

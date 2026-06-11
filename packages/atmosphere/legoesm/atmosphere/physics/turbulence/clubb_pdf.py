@@ -31,6 +31,7 @@ import math as _math
 
 import jax
 import jax.numpy as jnp
+from legoesm.atmosphere.physics.turbulence.clubb_helpers import safe_sqrt
 
 from legoesm import constants
 
@@ -48,11 +49,6 @@ _SQRT_2 = _math.sqrt(2.0)
 _SQRT_2PI = _math.sqrt(2.0 * _math.pi)
 
 
-def _safe_sqrt(x: jax.Array) -> jax.Array:
-    """``sqrt(max(x,0))`` with a finite (0) gradient at ``x<=0`` (double-where)."""
-    xp = jnp.maximum(x, 0.0)
-    safe = jnp.where(xp > 0.0, xp, 1.0)
-    return jnp.where(xp > 0.0, jnp.sqrt(safe), 0.0)
 
 
 def ADG1_w_closure(wm, wp2, Skw, sigma_sqd_w, sqrt_wp2, mixt_frac_max_mag):
@@ -77,10 +73,10 @@ def ADG1_w_closure(wm, wp2, Skw, sigma_sqd_w, sqrt_wp2, mixt_frac_max_mag):
 
     one_minus_mf = 1.0 - mixt_frac
     sigma_factor = 1.0 - sigma_sqd_w
-    # _safe_sqrt: 1-sigma_sqd_w -> 0 in well-mixed/surface layers -> bare sqrt
+    # safe_sqrt: 1-sigma_sqd_w -> 0 in well-mixed/surface layers -> bare sqrt
     # has an inf reverse-mode gradient there (forward-identical, arg >= 0).
-    w_1_n = _safe_sqrt(one_minus_mf / mixt_frac * sigma_factor)
-    w_2_n = -_safe_sqrt(mixt_frac / one_minus_mf * sigma_factor)
+    w_1_n = safe_sqrt(one_minus_mf / mixt_frac * sigma_factor)
+    w_2_n = -safe_sqrt(mixt_frac / one_minus_mf * sigma_factor)
 
     w_1 = wm + sqrt_wp2 * w_1_n
     w_2 = wm + sqrt_wp2 * w_2_n
@@ -206,8 +202,8 @@ def calc_comp_corrs_binormal(xpyp, xm, ym, mu_x_1, mu_x_2, mu_y_1, mu_y_2,
     a = jnp.asarray(mixt_frac)
     numerator = (xpyp - a * (mu_x_1 - xm) * (mu_y_1 - ym)
                  - (1.0 - a) * (mu_x_2 - xm) * (mu_y_2 - ym))
-    denominator = (a * _safe_sqrt(sigma_x_1_sqd * sigma_y_1_sqd)
-                   + (1.0 - a) * _safe_sqrt(sigma_x_2_sqd * sigma_y_2_sqd))
+    denominator = (a * safe_sqrt(sigma_x_1_sqd * sigma_y_1_sqd)
+                   + (1.0 - a) * safe_sqrt(sigma_x_2_sqd * sigma_y_2_sqd))
     corr = smooth_corr_quotient(numerator, denominator, _EPS)
     return corr, corr
 
@@ -230,14 +226,14 @@ def transform_pdf_chi_eta_component(tl, rsatl, rt, exner_in,
             * (constants.c_pd / constants.L_v) * cc_slope * rsatl * exner_in)
     vrnc_rt_t = crt ** 2 * varnce_rt
     vrnc_thl_t = cthl ** 2 * varnce_thl
-    # _safe_sqrt: component variances can be exactly 0 (e.g. alpha_x clipped to 0
+    # safe_sqrt: component variances can be exactly 0 (e.g. alpha_x clipped to 0
     # for perfectly-correlated columns), and a bare sqrt has a singular VJP
     # there. Forward-identical (variances >= 0).
-    corr_t = 2.0 * corr_rt_thl * crt * cthl * _safe_sqrt(varnce_rt * varnce_thl)
+    corr_t = 2.0 * corr_rt_thl * crt * cthl * safe_sqrt(varnce_rt * varnce_thl)
     vrnc_chi = vrnc_rt_t - corr_t + vrnc_thl_t
     vrnc_eta = vrnc_rt_t + corr_t + vrnc_thl_t
-    stdev_chi = _safe_sqrt(vrnc_chi)
-    stdev_eta = _safe_sqrt(vrnc_eta)
+    stdev_chi = safe_sqrt(vrnc_chi)
+    stdev_eta = safe_sqrt(vrnc_eta)
     covar_chi_eta = vrnc_rt_t - vrnc_thl_t
     # smooth_corr_quotient (pdf_utilities) bounding corr_chi_eta to [-0.99, 0.99].
     corr_chi_eta = smooth_corr_quotient(covar_chi_eta, stdev_chi * stdev_eta, _CHI_TOL ** 2)

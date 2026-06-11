@@ -21,11 +21,11 @@ the reference. All arrays on the ascending CLUBB grid; ``zt`` = thermodynamic
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 from legoesm.atmosphere.physics._shared import buoyancy_coefficient
 from legoesm.atmosphere.physics.turbulence.clubb_fill_holes import fill_holes_vertical
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid
+from legoesm.atmosphere.physics.turbulence.clubb_helpers import safe_sqrt
 from legoesm.atmosphere.physics.turbulence.clubb_solve import tridiag_solve
 
 _EPS = 1.0e-10
@@ -36,11 +36,6 @@ _ONE_THIRD = 1.0 / 3.0
 _GAMMA_OVER_IMPLICIT_TS = 1.5   # over-implicit weight (constants_clubb)
 
 
-def _safe_sqrt(x: jax.Array) -> jax.Array:
-    """``sqrt(max(x,0))`` with a finite (0) gradient at ``x<=0`` (double-where)."""
-    xp = jnp.maximum(x, 0.0)
-    safe = jnp.where(xp > 0.0, xp, 1.0)
-    return jnp.where(xp > 0.0, jnp.sqrt(safe), 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -207,10 +202,10 @@ def clip_covar(wpxp, wp2, xp2, max_mag_corr=_MAX_MAG_CORRELATION):
     """Cauchy-Schwarz clip of a covariance after the solve (``clip_covar``).
 
     Clips ``wpxp`` to ``±max_mag_corr·sqrt(wp2·xp2)`` at interior levels; the
-    top/bottom boundaries are left unchanged. ``_safe_sqrt`` keeps the gradient
+    top/bottom boundaries are left unchanged. ``safe_sqrt`` keeps the gradient
     finite where a variance is zero (forward-identical, variances ≥ 0).
     """
-    bound = max_mag_corr * _safe_sqrt(wp2 * xp2)
+    bound = max_mag_corr * safe_sqrt(wp2 * xp2)
     clipped = jnp.clip(wpxp, -bound, bound)
     clipped = clipped.at[:, 0].set(wpxp[:, 0])
     clipped = clipped.at[:, -1].set(wpxp[:, -1])
@@ -335,7 +330,7 @@ def advance_windm_edsclrm(um, vm, upwp, vpwp, wp2, up2, vp2, wm_zt, Kh_zm,
     # so calm-wind columns (um=vm=0, which feed the implicit sfc-flux LHS term)
     # keep finite gradients.
     wind_speed = jnp.sqrt(jnp.maximum(um ** 2 + vm ** 2, _EPS ** 2))
-    u_star_sqd = _safe_sqrt(upwp[:, 0] ** 2 + vpwp[:, 0] ** 2)
+    u_star_sqd = safe_sqrt(upwp[:, 0] ** 2 + vpwp[:, 0] ** 2)
 
     # First Crank-Nicholson half (explicit) for upwp/vpwp.
     xpwp_u = calc_xpwp(Km_zm_p_nu10, um, gr.invrs_dzm)[:, 1:-1]
