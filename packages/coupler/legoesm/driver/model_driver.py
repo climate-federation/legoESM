@@ -3222,9 +3222,29 @@ class ModelDriver:
         )
         # Operator-split physics carry (prognostic TKE / convection state).
         # ``model.step`` stashes the OUT state on ``self.model._phys_state``;
-        # feed it back next step.  None on the first step ⇒ physics initialises
-        # its own state.
-        _phys_state = None
+        # feed it back next step.  SEEDED here (issue #405): starting from
+        # ``None`` is NOT lazy-init — ``update_physics_state(None, ...)``
+        # returns ``None``, so the carry would stay ``None`` forever and
+        # every stateful scheme (tke/mynn25/bechtold/prognostic GWD) would
+        # silently reseed its prognostic fields each timestep.
+        from legoesm.atmosphere.physics.physics_state import (
+            init_physics_state,
+        )
+        from legoesm.core.precision import get_policy as _get_policy
+        _ncol_phys = int(self.state.T.data.shape[0])
+        _nlev_phys = int(self.state.T.data.shape[1])
+        # Storage dtype for the persistent carry — EXCEPT when the
+        # prognostic-spectral GWD is active: its wave-action spectrum
+        # integration wants the default/compute dtype (codex review;
+        # see the GWD integration note in physics_state.init docs).
+        _seed_dtype = (
+            None
+            if phys_cfg.gravity_wave_drag.scheme == "prognostic_spectral"
+            else _get_policy().storage
+        )
+        _phys_state = init_physics_state(
+            _ncol_phys, _nlev_phys, phys_cfg, dtype=_seed_dtype,
+        )
 
         # MPAS cell-partition MPI: swap the serial ``model.step`` for the
         # halo-exchanging MPI step.  Same operator-split as the serial step
@@ -3410,6 +3430,45 @@ class ModelDriver:
     # ==================================================================
     # Spectral execution path (Held-Suarez + radiation on Gaussian grid)
     # ==================================================================
+
+    @staticmethod
+    def _refuse_stateful_physics_unthreaded(cfg) -> None:
+        """Refuse prognostic-carry physics on loops that drop the carry.
+
+        Issue #405: ``update_physics_state(None, ...)`` returns ``None``,
+        so a loop that never seeds/threads ``PhysicsState`` silently
+        reseeds every stateful scheme each timestep — the run "succeeds"
+        with physics that has no memory.  Loud refusal beats silent
+        wrong numbers.  The MPAS loop seeds and threads the carry and is
+        exempt; remove a caller of this guard only together with real
+        carry plumbing (and a stateful-memory test).
+        """
+        _stateful_turb = ("tke", "mynn25", "edmf")
+        # mass_flux / edmf convection carry a prognostic scalar in
+        # conv_prog_profile[:, -1]; bechtold additionally carries the
+        # AR1 stochastic state (codex review — bechtold alone was
+        # under-inclusive).
+        _stateful_conv = ("bechtold", "mass_flux", "edmf")
+        _turb = getattr(cfg, "turbulence", "none")
+        _conv = getattr(cfg, "convection", "none")
+        # Accept both driver CLI configs (plain scheme strings) and
+        # PhysicsConfig-style objects (sub-config with .scheme).
+        _turb = getattr(_turb, "scheme", _turb)
+        _conv = getattr(_conv, "scheme", _conv)
+        _gwd = getattr(cfg, "gravity_wave_drag", "none")
+        _gwd = getattr(_gwd, "scheme", _gwd)
+        if (_turb in _stateful_turb or _conv in _stateful_conv
+                or _gwd == "prognostic_spectral"):
+            raise NotImplementedError(
+                f"turbulence={_turb!r} / convection={_conv!r} / "
+                f"gwd={_gwd!r} carry prognostic physics state, which "
+                "this run loop does not thread between steps yet "
+                "(issue #405) — the carry would silently reseed every "
+                "timestep.  Use a diagnostic scheme (louis / "
+                "holtslag_boville; sbm / zhang_mcfarlane; linear GWD), "
+                "or run the MPAS driver path, which seeds and threads "
+                "PhysicsState."
+            )
 
     def _run_spectral(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run spectral PE model with physics coupling.
@@ -3598,17 +3657,7 @@ class ModelDriver:
             # returns the state).  Prognostic-carry schemes would
             # silently re-initialize their carry every step — refuse
             # loudly instead of degrading.
-            _stateful_turb = ("tke", "mynn25", "edmf")
-            _stateful_conv = ("bechtold",)
-            if cfg.turbulence in _stateful_turb or cfg.convection in _stateful_conv:
-                raise NotImplementedError(
-                    f"turbulence={cfg.turbulence!r} / "
-                    f"convection={cfg.convection!r} carry prognostic "
-                    "physics state, which the spectral PE step does not "
-                    "thread between steps yet.  Use a diagnostic scheme "
-                    "(louis / holtslag_boville; sbm / zhang_mcfarlane) "
-                    "on gaussian/spectral, or run cubed_sphere/latlon."
-                )
+            self._refuse_stateful_physics_unthreaded(cfg)
             phys_cfg = PhysicsConfig(
                 radiation=RadiationConfig(
                     scheme=_rad_scheme,
@@ -4126,6 +4175,14 @@ class ModelDriver:
 
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
         cfg = ctx["cfg"]
+        # Issue #405: neither this loop nor the cdgrid/latlon
+        # ``step_with_physics`` thread PhysicsState between steps, so
+        # prognostic-carry schemes would silently reseed every step
+        # (physics with no memory; runs "succeed").  Refuse loudly —
+        # the same guard the spectral loop ships — until the carry is
+        # threaded (follow-up: SegmentCarry slot + step_with_physics
+        # phys_state plumbing + checkpoint persistence).
+        self._refuse_stateful_physics_unthreaded(cfg)
         DT = ctx["DT"]
         N_DAYS = ctx["N_DAYS"]
         START_DAY = ctx["START_DAY"]
@@ -4590,6 +4647,14 @@ class ModelDriver:
         # restart-safety for the non-compiled reference path).
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
         cfg = ctx["cfg"]
+        # Issue #405: neither this loop nor the cdgrid/latlon
+        # ``step_with_physics`` thread PhysicsState between steps, so
+        # prognostic-carry schemes would silently reseed every step
+        # (physics with no memory; runs "succeed").  Refuse loudly —
+        # the same guard the spectral loop ships — until the carry is
+        # threaded (follow-up: SegmentCarry slot + step_with_physics
+        # phys_state plumbing + checkpoint persistence).
+        self._refuse_stateful_physics_unthreaded(cfg)
         DT = ctx["DT"]
         N_DAYS = ctx["N_DAYS"]
         START_DAY = ctx["START_DAY"]
