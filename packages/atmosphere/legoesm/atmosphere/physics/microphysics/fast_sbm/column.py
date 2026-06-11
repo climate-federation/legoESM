@@ -38,10 +38,12 @@ computed fall speed (snow slow, graupel fast). Output ``dq_i_dt`` and
 ``dq_g_dt`` are live.
 
 **Documented limitations**:
-* Riming grows the SNOW category only; the oracle rimes onto graupel/hail
-  too (``coll_xyx`` call sites 8462/8495/8534) — a graupel-riming
-  iteration is pending. Graupel melt reuses the snow melt-rate ladder
-  (oracle has category-specific melt thresholds).
+* Riming uses the warm liquid collision kernel ``ck`` for both categories
+  (the oracle uses category-specific ice-liquid cross kernels
+  ``cwsl``/``cwgl`` — a documented kernel approximation; the Bott
+  collection METHOD is faithful). Both snow and graupel rime (snow first,
+  graupel collects the remainder). Graupel melt reuses the snow melt-rate
+  ladder (oracle has category-specific melt thresholds).
 * The third snow category (oracle separates pristine crystals ``FF2`` from
   snow aggregates ``FF3``) and the per-habit ice-crystal sub-types
   (``ICEMAX=3``) are collapsed; ``q_s`` and ``dq_s_dt`` stay zero.
@@ -307,18 +309,33 @@ def fast_sbm_microphysics(
         frz = freeze_step_routed(f1, masses, T_c, rho_c, dt, config)
         f1_liq = frz.f_liquid
         f_snow_pre_rime = f_snow_after_melt + frz.f_crystals
-        f_graupel_final = f_graupel_after_melt + frz.f_hail
-        # RIMING (oracle coll_xyx_lwf): supercooled ice (snow collector)
-        # collects cloud liquid → larger ice, the rimed liquid freezing onto
-        # it. Gated on T < 0 °C; the collected liquid releases fusion heat.
+        f_graupel_pre_rime = f_graupel_after_melt + frz.f_hail
+        # RIMING (oracle coll_xyx_lwf): supercooled ice collects cloud liquid
+        # → larger ice, the rimed liquid freezing onto it (fusion heat). The
+        # oracle rimes BOTH ice categories (snow `cwsl` l.8462, graupel/hail
+        # `coll_xyx_lwf(g4/g5,g1,…)` l.8495/8534); we rime snow first, then
+        # graupel collects the REMAINING cloud. Gated on T < 0 °C. The
+        # collision kernel is the warm liquid kernel `ck` (the oracle uses
+        # category-specific ice-liquid cross kernels `cwsl`/`cwgl` — a
+        # documented kernel approximation; the Bott collection METHOD is
+        # faithful).
+        supercooled = T_c < constants.T_freeze
         liq_before_rime = mass_density(f1_liq, masses)
-        g_ice_r, g_liq_r = bott_riming(
+        # snow collects cloud
+        g_snow_r, g_liq_r = bott_riming(
             g_from_f(f_snow_pre_rime, masses), g_from_f(f1_liq, masses),
             ck, masses, rime_tables)
-        supercooled = T_c < constants.T_freeze
-        f_snow_rimed = jnp.where(supercooled, f_from_g(g_ice_r, masses),
+        f_snow_rimed = jnp.where(supercooled, f_from_g(g_snow_r, masses),
                                  f_snow_pre_rime)
         f1_liq = jnp.where(supercooled, f_from_g(g_liq_r, masses), f1_liq)
+        # graupel collects the remaining cloud
+        g_graupel_r, g_liq_r2 = bott_riming(
+            g_from_f(f_graupel_pre_rime, masses), g_from_f(f1_liq, masses),
+            ck, masses, rime_tables)
+        f_graupel_rimed = jnp.where(supercooled, f_from_g(g_graupel_r, masses),
+                                    f_graupel_pre_rime)
+        f1_liq = jnp.where(supercooled, f_from_g(g_liq_r2, masses), f1_liq)
+        # Total rimed liquid (onto snow + graupel) releases fusion heat.
         rimed = (liq_before_rime - mass_density(f1_liq, masses)) / rho_c
         dT_rime = (constants.L_f / constants.c_pd) * rimed
         # ICE-ICE AGGREGATION (snow self-collection): Bott self-collection on
@@ -329,6 +346,7 @@ def fast_sbm_microphysics(
             bott_coalescence(g_from_f(f_snow_rimed, masses), ck_ice, masses,
                              tables), masses)
         f_snow_final = jnp.where(supercooled, f_snow_agg, f_snow_rimed)
+        f_graupel_final = f_graupel_rimed
         # Vapor change = −(condensation growth) only; melt/freeze/rime are
         # internal liquid↔ice (vapor-neutral). Both melt waters are already
         # in f_pre, so mass(f1)−mass(f_pre) is exactly that growth.

@@ -307,6 +307,50 @@ def test_warm_cell_grad_through_discarded_riming():
     assert np.all(np.isfinite(np.asarray(g)))
 
 
+def test_warm_cell_melts_carried_graupel():
+    # Codex review (comprehensive, MEDIUM test-gap): the warm-melt path was
+    # tested for q_i only. A warm cell carrying GRAUPEL must melt it
+    # (dq_g < 0), the meltwater join liquid with latent cooling, and the
+    # 5-species closure include dq_g.
+    T, q_v, hyd, p, p_half, rho, dz = _fields(0.99, q_c=2.0e-4, q_r=0.0)
+    hyd = hyd._replace(q_g=jnp.full((NCOL, NLEV), 5.0e-4))
+    out = fast_sbm_microphysics(T, q_v, hyd, p, p_half, rho, dz, DT)
+    assert np.all(np.asarray(out.dq_g_dt) < 0.0)         # graupel melting
+    col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
+    np.testing.assert_allclose(
+        -col(out.dq_v_dt),
+        col(out.dq_c_dt + out.dq_r_dt + out.dq_i_dt + out.dq_g_dt)
+        + np.asarray(out.precipitation), rtol=1e-8)
+
+
+def test_supercooled_graupel_rimes_cloud():
+    # Codex review (comprehensive, HIGH): graupel must rime supercooled
+    # cloud (oracle coll_xyx_lwf g4/g5). A supercooled cell with seed
+    # graupel + cloud converts more cloud→ice than the same cell with no
+    # graupel (freeze-only), with closure holding.
+    T = jnp.full((NCOL, NLEV), constants.T_freeze - 15.0)
+    p = jnp.full((NCOL, NLEV), P0)
+    e = 1.02 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
+    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    rho = jnp.full((NCOL, NLEV), 1.1)
+    base = make_zero_hydrometeors(NCOL, NLEV)._replace(
+        q_c=jnp.full((NCOL, NLEV), 2.0e-3))
+    with_graupel = base._replace(q_g=jnp.full((NCOL, NLEV), 1.0e-3))
+    p_half = jnp.zeros((NCOL, NLEV + 1))
+    dz = jnp.full((NCOL, NLEV), 100.0)
+    out0 = fast_sbm_microphysics(T, q_v, base, p, p_half, rho, dz, DT)
+    out_g = fast_sbm_microphysics(T, q_v, with_graupel, p, p_half, rho, dz,
+                                  DT)
+    col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
+    # Seed graupel collects cloud → more cloud removed than freeze-only.
+    assert np.all(col(out_g.dq_c_dt) < col(out0.dq_c_dt))
+    # Closure holds with graupel riming active.
+    np.testing.assert_allclose(
+        -col(out_g.dq_v_dt),
+        col(out_g.dq_c_dt + out_g.dq_r_dt + out_g.dq_i_dt + out_g.dq_g_dt)
+        + np.asarray(out_g.precipitation), rtol=1e-7)
+
+
 def test_graupel_precipitates_faster_than_snow():
     # The point of carrying two ice categories (iter-3): at equal carried
     # mass, dense graupel falls several × faster than fluffy snow, so it

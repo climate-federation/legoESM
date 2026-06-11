@@ -213,6 +213,19 @@ collection (`coll_xyz` between every pair). Incremental build:
   falls without melting (loss == precip), aggregation conserves vs precip,
   multistep trajectory conserves all 5 species, supercooled freeze closure
   incl. both categories. 116 fast_sbm + 242 microphysics/integration green.
+  Codex iter-3 review: PASS-WITH-NOTES (all 6 invariants PASS); LOW notes
+  (docstring, graupel-melt-ladder, q_g>0 asserts) applied.
+- **Iter 4 (2026-06-11)** — **graupel riming** (closes the comprehensive
+  review's lone HIGH/FAIL): the oracle rimes BOTH ice categories
+  (`coll_xyx_lwf(g4/g5,g1,…)` l.8495/8534), not snow only. Now snow rimes
+  cloud first, then graupel collects the REMAINING cloud; both supercooled-
+  gated, both release fusion heat (`dT_rime` over the total rimed liquid).
+  Comprehensive review confirmed mass/energy/differentiability all CLEAN;
+  this fills the one missing growth/heating path. Added the two flagged
+  test gaps: warm-cell graupel melt (dq_g<0 + 5-species closure) and
+  supercooled graupel riming (seed graupel converts more cloud→ice than
+  freeze-only). 5-species closure stays exact (5.8e-12) with graupel
+  riming on; float32 dry-atmosphere grad still finite. 119 fast_sbm green.
 
 ## Remaining work (warm + full ice phase done → bit-exact FSBM-2)
 
