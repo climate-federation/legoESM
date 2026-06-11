@@ -156,14 +156,23 @@ BCs → `advance_clubb_core` → du/dv/dT/dq. `integrate_clubb_column` (iter 48)
 SCM-style prognostic run. Validated: 40-step stable, TKE growth under heating,
 jit+grad through the scan, returned-state consistency. All codex-reviewed.
 
-**⚠ OPEN ISSUE (iter 48, tracked):** a long (~3 h) **near-dry, weakly-stratified**
-single-column run develops a multi-step numerical instability (grid-scale `T`
-extremes; `wp2` grows with step COUNT at fixed total time → real growth, not
-forward-Euler stiffness). Moist regime is stable. Captured as a strict `xfail`
-(`test_integrate_clubb_column_dry_stress_stays_physical`). NEXT INVESTIGATION —
-suspects: buoyancy/dissipation balance or surface-BC heat injection in the dry
-limit; instrument the column energy budget over the run; check `wpthvp`
-buoyancy-production sign vs dissipation `tau` in low-moisture columns.
+**⚠ OPEN ISSUE (iter 48-49, tracked):** a long (~3 h) **near-dry, weakly-stratified**
+single-column run develops a multi-step instability (grid-scale `T` extremes;
+`wp2` grows with step COUNT at fixed total time). Moist regime stable. Strict
+`xfail` (`test_integrate_clubb_column_dry_stress_stays_physical`); reusable
+characterizer `scripts/validate/clubb_prognostic_stability.py`.
+*iter-49 localization:* (1) GENUINE GROWING MODE, not Courant — smaller dt at
+fixed time is WORSE; (2) needs weak stratification (dθ/dz ≲ 2e-3) AND sustained
+surface heating; (3) the wp2 buoyancy production (`wp2_terms_bp_pr2_rhs`), `tau`
+family, and `calc_stability_correction` ALL match CLUBB-JAX bit/round-off — the
+per-piece port is faithful, and the stability-enhanced dissipation is correctly
+weak at small N² so it can't brake the growth; (4) the standalone SCM driver
+advances the means with CLUBB alone (no dycore numerical diffusion to damp 2-dz
+noise) → partly a driver-exposure artifact a coupled run would damp.
+*Definitive next step:* run a CLUBB-JAX reference `advance_clubb_core` on an
+identical weakly-stratified forced column and compare the trajectory — settles
+bug vs inherent-closure-delicacy. No speculative physics edits (would risk the
+parity-validated terms).
 
 **Remaining for production dispatch (separate from run+test):** carry
 `CLUBBMomentState` through `PhysicsState` (`combined.py` registers a per-scheme
