@@ -97,19 +97,39 @@ so a too-large dt cannot blow up mid-chain.
    hangs on a pre-existing non-AMIP collective deadlock (unrelated to
    this work) — run AMIP MPI tests with `--timeout` isolated.
 
-## Forcing provenance — REAL science requires ESGF
+## The faithful real-data combination
 
-`forcing_amip/` is **synthetic** (`generate_amip_forcing.py`):
-synthetic-noise SST, real-historical GHG.  Fine for pipeline proof,
-NOT scientific AMIP.  Real PCMDI AMIP II / input4MIPs SST/SIC needs an
-ESGF account (`config/data_catalog.yaml: amip_sst_sic`, no auto-URL).
+A faithful AMIP CMIP run = **correct GHG (CO2 fix)** + **ERA5 IC** +
+**real observed SST** + **months of spin-up**.  Each piece is wired:
 
-**To run the real 30-yr campaign:**
-1. Download AMIP II bcs SST/SIC (1979-2009) from ESGF input4MIPs into
-   `forcing_amip/sst_sic_amip_1979-2009.nc` (+ matching GHG/ozone/
-   solar/aerosol/volcanic, or `--auto-generate` the non-SST channels).
-2. `bash scripts/run/run_amip30y_allgrids_local.sh` (checkpointed,
-   resumable, `--dt-auto`, 3-h radiation, production physics).
+| Piece | Source | Credentials | How |
+|-------|--------|-------------|-----|
+| GHG/ozone/solar/aerosol | synthetic deck (units-correct) or real input4MIPs | none | `--auto-generate` or drop real files in `--forcing-dir` |
+| **ERA5 IC** | **public ARCO ERA5** (`gs://gcp-public-data-arco-era5/...`) | **none** | deck default `--ic era5` auto-uses it; override `--ic-path` |
+| **Observed SST/SIC** | PCMDI / input4MIPs AMIP II bcs (`tosbcs` K, `siconcbcs` %) | ESGF account | `--sst-file <path>` (deck defaults the var/unit flags) |
+| **Spin-up** | checkpointed multi-year run | n/a | launcher `--checkpoint-days 365`, resumes from latest |
+
+The synthetic `forcing_amip/` (synthetic-noise SST, real-historical
+GHG) is a **pipeline proof**, NOT scientific AMIP — its SST is fake.
+
+### Stage + run
+
+```bash
+# 1. Verify ERA5 reachability + (once downloaded) validate the real SST:
+python scripts/data/stage_amip_realdata.py --print-esgf          # ESGF steps
+python scripts/data/stage_amip_realdata.py --sst-file /data/tosbcs_*.nc
+
+# 2. Run the checkpointed 30-yr campaign on all grids:
+export ERA5_IC_PATH=gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3
+export SST_FILE=/data/tosbcs_input4MIPs_*_PCMDI-AMIP-1-1-9_gn_187001-202112.nc
+bash scripts/run/run_amip30y_allgrids_local.sh   # era5 IC + real SST + dt-auto
+```
+
+The amip.py units-attribute guard cross-checks the SST file's Kelvin/
+Celsius + percent/fraction against the deck flags, so a wrong file/flag
+combination fails loudly (tests/unit/test_amip_real_sst.py).  ERA5 IC is
+wired on cubed_sphere / latlon / gaussian; voronoi/mpas fall back to the
+uniform IC until `era5_to_mpas_carry` lands.
 
 ## Pipeline proof (running 2026-06-11)
 
