@@ -188,6 +188,24 @@ clean. Common technique: spin up real moments via `integrate_clubb_column`
   a difference of two ~300 K values → ~5–10% float32 cancellation noise (shared by
   clubb_lite + diagnostic path); Lscale/Km/moisture unaffected.
 
+**Production-SCM runnability (iter 71):** confirmed prognostic CLUBB RUNS through
+the real `SingleColumnModel` driver (not just the standalone `integrate_clubb_column`)
+on a Wangara-style convective-BL setup — 40 steps finite, `T_low`=277.5 K (physical),
+`wp2` develops. `clubb` is registered in the SCM's `stateful_turb` set, so the
+production single-column driver supports it. NOTE: SCM `.run()` is an EAGER Python
+loop (~8 s/step with full prognostic CLUBB, ~50 s first-step compile) → use the
+jitted `integrate_clubb_column` for efficient multi-step testing.
+- **Deferred (codex-flagged, NOT shipped):** packaging this as a selectable
+  `--turbulence clubb` option for the Wangara *benchmark* needs proper surface-flux
+  coupling first. The SCM `prescribe="fluxes"` path injects the kinematic flux as a
+  lowest-cell HOST tendency and zeroes the scheme's bulk flux (`Ch_neutral=0`, same
+  for the existing mynn25 case), so CLUBB's native `wpthlp_sfc`/`wprtp_sfc` moment
+  lower-BC is 0 — the scheme responds only to the host-warmed gradient, not its
+  surface-flux BC. To certify CLUBB on Wangara, plumb `w_th_s`/`w_qv_s` into the
+  CLUBB surface moment BC (a scheme-specific prescribed-flux bypass) + use a
+  physically-calibrated `wp2` gate (the `1e-3` floor is too weak). Tracked as a
+  follow-up.
+
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz
 noise a coupled dycore damps — NOT a closure bug (conservation + per-piece parity
