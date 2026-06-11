@@ -230,7 +230,6 @@ CONTRACT_TODO: frozenset[str] = frozenset(
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_mpas.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/harmonic.py",
         "packages/ocean/legoesm/ocean/physics/mixing.py",
-        "packages/ocean/legoesm/ocean/physics/shortwave_penetration.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/bulk_formulas.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/external.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/prescribed.py",

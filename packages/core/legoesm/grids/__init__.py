@@ -17,6 +17,7 @@ from legoesm.grids.latlon import (
     ensure_geometry,
     create_mercator_grid,
     create_regional_latlon_grid,
+    create_stretched_latlon_grid,
 )
 from legoesm.grids.nesting import (
     NestedLatLonGrid,

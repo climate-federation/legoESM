@@ -24,19 +24,24 @@ References
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
 from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type compat
 from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_zero,
+    pad_ns_zero_multi,
     is_tripolar,
     fold_is_local,
+    lat_ends_are_poles,  # noqa: F401 — re-export for ocean dynamics call sites
     pad_ns_scalar,
     fold_row,
     pad_ns_vector_v,
     interp_cell_to_uface,
     interp_cell_to_vface,
+    interp_u_to_vface_4pt,
     cell_to_cgrid_winds,
     gradient_x_cgrid,
     gradient_y_cgrid,
@@ -178,10 +183,9 @@ def pad_ns_vector_pair(
     """
     fold = getattr(grid, "fold", None)
     if fold is None or not fold.is_active or fold.fold_j < 0:
-        return pad_ns_zero(u_interior), pad_ns_zero(v_interior)
+        return pad_ns_zero_multi(u_interior, v_interior)
 
-    u_padded = pad_ns_zero(u_interior)
-    v_padded = pad_ns_zero(v_interior)
+    u_padded, v_padded = pad_ns_zero_multi(u_interior, v_interior)
 
     n_lon = fold.perm_T.shape[0]
 
@@ -431,11 +435,12 @@ def coriolis_cgrid(
     # --- Average u to v-points ---
     # v-point (i+1/2, j) has 4 neighboring u-points:
     # u[i, j], u[i, j+1], u[i+1, j], u[i+1, j+1]
-    # Average: u_at_v = 0.25 * (u[i,j] + u[i,j+1] + u[i+1,j] + u[i+1,j+1])
-    u_avg_interior = 0.25 * (u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:])
-    # u_avg_interior shape: (n_lat-1, n_lon, ...)
-    # Boundary: wall BC (zero) on regular lat-lon; fold halo on tripolar.
-    u_at_v = pad_ns_vector_u(u_avg_interior, grid)
+    # Shared cell-pad-first 4-pt average (interp_u_to_vface_4pt): the
+    # MPI band partition-cut v-face averages the neighbour rank's true
+    # u row instead of the old interior-then-pad_ns_vector_u refill
+    # (one face row off at a cut).  Wall BC (zero) at physical poles;
+    # fold (sign*perm) on tripolar — serial bit-identical.
+    u_at_v = interp_u_to_vface_4pt(u, grid)
 
     # --- Coriolis terms ---
     # Reshape 2D ``f_u``/``f_v`` to broadcast over the trailing level
@@ -2371,12 +2376,45 @@ def neumann_fill_vertex(
     m = vtx_mask
     filled = f
 
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
+    south_is_pole, north_is_pole = lat_ends_are_poles()
+
     for _ in range(n_passes):
-        # N/S neighbours: Neumann padding at rows 0 and n_lat.
-        f_s = jnp.concatenate([filled[0:1], filled[:-1]], axis=0)
-        m_s = jnp.concatenate([m[0:1], m[:-1]], axis=0)
-        f_n = jnp.concatenate([filled[1:], filled[-1:]], axis=0)
-        m_n = jnp.concatenate([m[1:], m[-1:]], axis=0)
+        # N/S neighbours.  Vertex rows are DUPLICATED at an MPI band
+        # cut (both ranks own the shared row j0), so the neighbour row
+        # beyond a band end is the neighbour rank's SECOND row — pad
+        # the de-duplicated row block ``[:-1]`` (n_lat_local rows,
+        # cell-like partitioning) by TWO rows through the
+        # backend-dispatched pad: ``pad[k]`` holds global vertex row
+        # ``j0-2+k``, delivering both the ``j0-1`` (south) and
+        # ``j1+2`` (north) ghosts in a single pad call per array
+        # (halo=2 → one sendrecv pair per cut side).
+        # The historical Neumann edge clamp (rows 0 / n_lat copy
+        # themselves) is restored at PHYSICAL band ends only — pole or
+        # fold seam, where it is the serial convention — so the local
+        # backend stays bit-identical while interior cuts see the true
+        # neighbour rows (codex round-4 MAJOR: a land-vertex fill at a
+        # cut row otherwise clamps at the band edge and diverges from
+        # serial wherever land touches the cut).
+        # Fused: one sendrecv pair per cut for field + mask per pass
+        # (audit lever O4; ``m`` is updated each pass, so it cannot be
+        # hoisted out of the loop).
+        f_pad, m_pad = pad_with_pole_bc_lat_multi(
+            (filled[:-1], m[:-1]), halo=2,
+        )  # f_pad[k] = global vertex row j0-2+k; f_pad[1] = j0-1,
+        #    f_pad[-1] = j1+2 (true neighbour rows at interior cuts).
+        # Interior entries keep the EXACT historical local shifts;
+        # only the two end entries are spliced from the pad ghosts.
+        f_s = jnp.concatenate([f_pad[1:2], filled[:-1]], axis=0)
+        m_s = jnp.concatenate([m_pad[1:2], m[:-1]], axis=0)
+        f_n = jnp.concatenate([filled[1:], f_pad[-1:]], axis=0)
+        m_n = jnp.concatenate([m[1:], m_pad[-1:]], axis=0)
+        if south_is_pole:
+            f_s = jnp.concatenate([filled[0:1], f_s[1:]], axis=0)
+            m_s = jnp.concatenate([m[0:1], m_s[1:]], axis=0)
+        if north_is_pole:
+            f_n = jnp.concatenate([f_n[:-1], filled[-1:]], axis=0)
+            m_n = jnp.concatenate([m_n[:-1], m[-1:]], axis=0)
 
         # E/W neighbours: periodic on core columns 0..n_lon-1, then wrap.
         # Column n_lon duplicates column 0, so rolling the full array
@@ -2529,6 +2567,47 @@ def partial_cell_pgf_correction_x(
         return correction_full / dx_u[:, jnp.newaxis, jnp.newaxis]
 
 
+def _dy_v_full_cell_pad_first(grid) -> jnp.ndarray:
+    """v-face meridional spacing at ALL ``n_lat+1`` faces, cell-pad-first.
+
+    Interior faces: ``0.5*(dy_h[i-1] + dy_h[i])`` — the identical
+    arithmetic of the historical edge-padded form.  Partition-cut faces
+    (codex review 2026-06-10 MAJOR): the ghost half-height comes from
+    the neighbour rank via the backend-dispatched pad, so a cut v-face
+    divides by the TRUE serial metric on variable-dy (Mercator) grids —
+    the previous rank-local ``mode='edge'`` clamp was wrong there at
+    np>=2.  Pole faces get an INERT nonzero value (``dy_h[0]`` /
+    ``dy_h[-1]`` — NOT the historical edge-midpoint; both call sites
+    zero the pole-row numerators upstream, so only nonzero-ness
+    matters; a future caller with nonzero pole numerators must handle
+    the pole denominator itself).  ``grid.dy`` is a concrete 1-D
+    metric, so under MPI the pad constant-folds at trace time
+    (static-metric pad) — zero per-step comm.  Shared by
+    ``partial_cell_pgf_correction_y`` and
+    ``density_jacobian_pgf_smc03_y`` (one numeric source).
+    """
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    if isinstance(grid.dy, jax.core.Tracer):
+        # Differentiable/dynamic metric (not the current invariant —
+        # grid metrics are concrete): fall back to the historical
+        # rank-local edge-midpoint form rather than crashing on
+        # ``float()`` below.  Wrong-at-cuts only for a traced
+        # variable-dy metric, which no current configuration builds.
+        dy_h = grid.dy * 0.5
+        dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])
+        return jnp.pad(dy_v_interior, (1, 1), mode="edge")
+    # Pad the CONCRETE grid.dy (a jnp op like ``grid.dy * 0.5`` would
+    # stage to a Tracer inside jit — defeating the static fold AND
+    # crashing the float() boundary constants); scale afterwards.
+    dy_np = np.asarray(grid.dy)
+    dy_pad = pad_with_pole_bc_lat(
+        grid.dy, halo=1,
+        south_value=float(dy_np[0]), north_value=float(dy_np[-1]),
+    )
+    dy_h_pad = dy_pad * 0.5                               # (n_lat+2,)
+    return 0.5 * (dy_h_pad[:-1] + dy_h_pad[1:])           # (n_lat+1,)
+
+
 def partial_cell_pgf_correction_y(
     centroid_depth: jnp.ndarray,
     rho_prime: jnp.ndarray,
@@ -2551,8 +2630,8 @@ def partial_cell_pgf_correction_y(
     # every rank (consistent MPI call count); ``zero_polar_lat_ends`` then
     # restores the wall BC at the physical pole only.  The fold seam is
     # overwritten on the rank that owns it (``fold_is_local``).
-    cd_p = pad_ns_zero(centroid_depth)                  # (n_lat+1, n_lon, nlev)
-    rp_p = pad_ns_zero(rho_prime)
+    # Fused: one sendrecv pair per cut for both fields (audit lever O4).
+    cd_p, rp_p = pad_ns_zero_multi(centroid_depth, rho_prime)
     centroid_south, centroid_north = cd_p[:-1], cd_p[1:]
     rho_prime_south, rho_prime_north = rp_p[:-1], rp_p[1:]
 
@@ -2587,11 +2666,8 @@ def partial_cell_pgf_correction_y(
     else:
         # Regular or Mercator: variable-dy safe.  Pole rows are zero from
         # zero_polar_lat_ends, so dividing them by the edge-padded dy is inert.
-        dy_h = grid.dy * 0.5                              # (n_lat,)
-        dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])       # (n_lat-1,)
-        dy_v_full = jnp.pad(dy_v_interior, (1, 1), mode="edge")
         bcast = (slice(None),) + (jnp.newaxis,) * (correction.ndim - 1)
-        return correction / dy_v_full[bcast]
+        return correction / _dy_v_full_cell_pad_first(grid)[bcast]
 
 
 # =============================================================================
@@ -2730,10 +2806,10 @@ def density_jacobian_pgf_smc03_y(
     # every rank (consistent MPI call count); ``zero_polar_lat_ends`` then
     # restores the wall BC at the physical pole.  ``z_centroid``/``sigma`` are
     # per-column quantities, so the halo-exchanged neighbour column is exact.
-    rho_p = pad_ns_zero(rho_per_cell)
-    h_p = pad_ns_zero(h_partial)
-    zc_p = pad_ns_zero(z_centroid)
-    sig_p = pad_ns_zero(sigma)
+    # Fused: one sendrecv pair per cut for all four fields (audit lever O4).
+    rho_p, h_p, zc_p, sig_p = pad_ns_zero_multi(
+        rho_per_cell, h_partial, z_centroid, sigma,
+    )
     rho_S, rho_N = rho_p[:-1], rho_p[1:]
     h_S, h_N = h_p[:-1], h_p[1:]
     z_c_S, z_c_N = zc_p[:-1], zc_p[1:]
@@ -2777,15 +2853,11 @@ def density_jacobian_pgf_smc03_y(
         dy_v = grid.dy_v  # full 2D
         return diff / dy_v[:, :, jnp.newaxis]
     else:
-        # Regular or Mercator: variable-dy safe.
-        dy_h = grid.dy * 0.5                                # (n_lat,)
-        dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])         # (n_lat-1,)
+        # Regular or Mercator: variable-dy safe.  diff has shape
+        # (n_lat+1, n_lon, nlev); pole rows are zeroed by
+        # zero_polar_lat_ends above, so their denominator is inert.
         bcast = (slice(None),) + (jnp.newaxis,) * (diff.ndim - 1)
-        # diff has shape (n_lat+1, n_lon, nlev).  Pad dy_v_interior with edge
-        # values for the pole rows — harmless since those rows are zeroed by
-        # zero_polar_lat_ends above.
-        dy_v_full = jnp.pad(dy_v_interior, (1, 1), mode='edge')
-        return diff / dy_v_full[bcast]
+        return diff / _dy_v_full_cell_pad_first(grid)[bcast]
 
 
 def pv_flux_al81_partial_cell(
@@ -3093,11 +3165,33 @@ def pv_flux_al81_partial_cell(
     # north-cell view is t_pad[1:, ...] (rows 1..n_lat+1).  At the
     # pole rows the corresponding triad value is 0, so the v-tendency
     # at pole faces vanishes naturally.
-    pad0 = ((1, 1), (0, 0), (0, 0))
-    t_NW_S = jnp.pad(t_NW, pad0)[:-1, :, :]   # south-cell NW at v-face j
-    t_NE_S = jnp.pad(t_NE, pad0)[:-1, :, :]
-    t_SW_N = jnp.pad(t_SW, pad0)[1:, :, :]    # north-cell SW at v-face j
-    t_SE_N = jnp.pad(t_SE, pad0)[1:, :, :]
+    #
+    # Backend-dispatched pad (np>=2 parity): the triads are CELL-row
+    # quantities, so at an interior MPI band cut the ghost row must be
+    # the neighbour rank's edge-cell triads (AD-safe sendrecv) — a
+    # plain jnp.pad zero treated the cut like a pole wall and silently
+    # dropped the south/north-cell half of the 12-point stencil at the
+    # shared v-face.  The corruption is invisible while u = 0 (the
+    # triads multiply F_u = h·u), which is why a cold-start first step
+    # stays bit-exact and the error appears from step 2.  Physical
+    # poles still get exactly 0 (bit-identical to the old jnp.pad on
+    # the local backend).  All four triads ride in ONE pad
+    # (concatenated along the level axis — pure relabeling, no
+    # arithmetic) so the per-RHS collective count grows by exactly two
+    # sendrecv pairs (this pad + the F_u pad below), uniformly on
+    # every rank.
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
+    t_stack = jnp.concatenate([t_NW, t_NE, t_SW, t_SE], axis=-1)
+    # Fused with the F_u pad below: ONE sendrecv pair per cut for both
+    # (audit lever O4); t_stack and F_u are independent inputs here.
+    t_stack_pad, F_u_pad = pad_with_pole_bc_lat_multi(
+        (t_stack, F_u), halo=1,
+    )  # (n_lat+2, n_lon, 4*nlev), (n_lat+2, n_lon+1, nlev)
+    t_NW_pad, t_NE_pad, t_SW_pad, t_SE_pad = jnp.split(t_stack_pad, 4, axis=-1)
+    t_NW_S = t_NW_pad[:-1, :, :]   # south-cell NW at v-face j
+    t_NE_S = t_NE_pad[:-1, :, :]
+    t_SW_N = t_SW_pad[1:, :, :]    # north-cell SW at v-face j
+    t_SE_N = t_SE_pad[1:, :, :]
 
     # F_u at the four offsets, mapped to v-face index.  At v-face
     # (j, i), we need:
@@ -3105,9 +3199,12 @@ def pv_flux_al81_partial_cell(
     #   F_u_S_E = F_u[j-1, i+1, :]
     #   F_u_N_W = F_u[j  , i  , :]
     #   F_u_N_E = F_u[j  , i+1, :]
-    # F_u has shape (n_lat, n_lon+1, nlev); pad in axis 0 with zeros
-    # to align with v-face row index (rows 0..n_lat for v).
-    F_u_pad = jnp.pad(F_u, pad0)              # (n_lat+2, n_lon+1, nlev)
+    # F_u has shape (n_lat, n_lon+1, nlev); pad in axis 0 to align
+    # with v-face row index (rows 0..n_lat for v).  Backend-dispatched
+    # for the same reason as the triad pad above: at an MPI band cut
+    # the v-face needs the neighbour rank's edge F_u row (zero at
+    # physical poles — bit-identical to the old jnp.pad locally).
+    # F_u_pad computed in the fused exchange with t_stack above.
     F_u_south = F_u_pad[:-1, :, :]            # (n_lat+1, n_lon+1, nlev)
     F_u_north = F_u_pad[1:, :, :]
     # Convert (n_lon+1) periodic to per-cell-index (n_lon).  At v-face

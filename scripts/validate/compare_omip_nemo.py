@@ -112,8 +112,15 @@ def _load_legoesm(path):
     # rad2deg AGAIN here corrupted the coordinates (45 deg -> 2578) -> the regrid
     # mapped every cell to nonsense lat-lon, scrambling the SST/SSS pattern
     # (corr ~0.1) and inflating the bias. Use the stored degrees as-is.
+    keys = set(getattr(s, "files", []))
     return {
         "sst": np.asarray(s["T"])[..., 0], "sss": np.asarray(s["S"])[..., 0],
+        # Full T/S columns + geometry for the mixed-layer-depth diagnostic
+        # (present only in snapshots written after _save_snapshot grew the MLD
+        # geometry; None for older snapshots -> MLD comparison is skipped).
+        "T3d": np.asarray(s["T"]), "S3d": np.asarray(s["S"]),
+        "H_bathy": np.asarray(s["H_bathy"]) if "H_bathy" in keys else None,
+        "z_center_ref": np.asarray(s["z_center_ref"]) if "z_center_ref" in keys else None,
         "lat": np.asarray(s["lat_T"]),
         "lon": np.asarray(s["lon_T"]),
         "mask": np.asarray(s["land_mask"]),
@@ -188,6 +195,8 @@ def _load_nemo(path, tidx, month=None):
         sel = (lambda v: np.asarray(ds[v].isel({tdim: tidx})) if tdim
                else np.asarray(ds[v]))
     sst = sel("tos"); sss = sel("sos")
+    # NEMO density-threshold MLD (dsigma=0.01 wrt 10m); None if not archived.
+    mld = sel("mldr10_1") if "mldr10_1" in ds.variables else None
     lat = np.asarray(ds["nav_lat"]); lon = np.asarray(ds["nav_lon"])
     # NEMO land/fill is already NaN here (xarray CF-decodes _FillValue=1e20), so
     # finiteness alone is the correct ocean mask. The old ``& (|sst| > 1e-6)``
@@ -195,6 +204,7 @@ def _load_nemo(path, tidx, month=None):
     # near-0 C ocean cells (upwelling / near-freezing) in float32.
     mask = np.isfinite(sst).astype(np.float64)
     return {"sst": np.nan_to_num(sst), "sss": np.nan_to_num(sss),
+            "mld": mld,  # NEMO mldr10_1 [m] (finite over ocean, NaN land) or None
             "lat": lat, "lon": lon % 360.0, "mask": mask,
             "n_time": int(ds.sizes.get("time_counter", 1))}
 
@@ -302,6 +312,58 @@ def main() -> int:
         return ("excellent" if rmse < exc else "good" if rmse < good else "poor")
     sst_v = _verdict(sst["rmse"], _TOL["sst_rmse_excellent_C"], _TOL["sst_rmse_good_C"])
 
+    # Mixed-layer depth (de Boyer Montegut / Treguier 2023, GMD 16:3849).
+    # Needs legoESM full T/S + geometry (z_center_ref, H_bathy from a snapshot
+    # written after _save_snapshot grew the MLD geometry) AND NEMO mldr10_1.
+    # Uses delta_sigma=0.01 to MATCH NEMO mldr10_1 (a larger threshold -> deeper
+    # MLD, so 0.03-vs-0.01 would bias the model deep).  Snapshot/annual-state
+    # MLD: MLD(mean T,S) is not seasonal-mean MLD -- label accordingly.
+    plot_fields = {"SST": (sstL, sstN), "SSS": (sssL, sssN)}
+    mld_report = None
+    if (N.get("mld") is not None and L.get("z_center_ref") is not None
+            and L.get("H_bathy") is not None):
+        from legoesm.ocean.diagnostics import mixed_layer_depth
+        z_c = np.asarray(L["z_center_ref"], dtype=np.float64)         # (nlev,)
+        Hb = np.asarray(L["H_bathy"], dtype=np.float64)
+        # Per-level wet mask: level centre above the sea floor AND in the ocean.
+        wet = ((z_c[(None,) * Hb.ndim + (slice(None),)] < Hb[..., None])
+               & (L["mask"][..., None] > 0.5)).astype(np.float64)
+        bottom = Hb
+        mldL = np.asarray(mixed_layer_depth(
+            L["T3d"], L["S3d"], z_c, delta_sigma=0.01,
+            wet_mask=wet, bottom_depth=bottom))
+        mldL_g, ocLm = regrid_curv_to_latlon(
+            np.nan_to_num(mldL, nan=0.0), L["lat"], L["lon"],
+            np.isfinite(mldL).astype(np.float64), tgt_lat, tgt_lon)
+        mldN_g, ocNm = regrid_curv_to_latlon(
+            np.nan_to_num(N["mld"], nan=0.0), N["lat"], N["lon"],
+            np.isfinite(N["mld"]).astype(np.float64), tgt_lat, tgt_lon)
+        mld_ocean = ocean & (ocLm > 0.5) & (ocNm > 0.5)
+        mld_area = (np.cos(np.deg2rad(tgt_lat))[:, None]
+                    * np.ones_like(tgt_lon)[None, :]) * mld_ocean
+        mld_raw = _wstats(mldL_g, mldN_g, mld_area)
+        mld_log = _wstats(np.log1p(np.maximum(mldL_g, 0.0)),
+                          np.log1p(np.maximum(mldN_g, 0.0)), mld_area)
+        # Median bias is robust to the deep-convection tail that dominates RMSE.
+        finite = mld_ocean & np.isfinite(mldL_g) & np.isfinite(mldN_g)
+        med_bias = float(np.median((mldL_g - mldN_g)[finite])) if finite.any() else float("nan")
+        mld_report = {**mld_raw, "rmse_log1p_m": mld_log["rmse"],
+                      "median_bias_m": med_bias, "delta_sigma": 0.01,
+                      "method": "de Boyer Montegut / Treguier 2023; dsigma=0.01 wrt 10m "
+                                "to match NEMO mldr10_1; snapshot/annual-state (not seasonal)"}
+        print(f"[MLD] rmse {mld_raw['rmse']:.1f} m  bias {mld_raw['bias']:+.1f} m  "
+              f"median-bias {med_bias:+.1f} m  corr {mld_raw['corr']:.3f}  "
+              f"rmse(log1p) {mld_log['rmse']:.3f}")
+        # Cap at the 99th percentile for display so deep-convection cells don't
+        # wash out the colour scale (scoring above uses raw metres).
+        cap = float(np.nanpercentile(np.where(mld_ocean, mldN_g, np.nan), 99))
+        plot_fields["MLD"] = (np.minimum(mldL_g, cap), np.minimum(mldN_g, cap))
+    elif N.get("mld") is not None:
+        print("[mld] SKIPPED: NEMO mldr10_1 present but the legoESM snapshot lacks "
+              "the z_center_ref and/or H_bathy geometry (written by _save_snapshot "
+              "only for runs after the MLD-geometry change) -- re-run to enable the "
+              "MLD comparison.")
+
     report = {
         "legoesm_snapshot": str(args.legoesm_snapshot),
         "nemo_gridt": str(args.nemo_gridt), "nemo_time_idx": args.nemo_time_idx,
@@ -309,11 +371,11 @@ def main() -> int:
         "SST": sst, "SST_verdict": sst_v,
         "SST_bands": sst_bands,
         "SSS_gated_runoff0": sss,
+        "MLD_dsigma0p01": mld_report,
         "tolerances": _TOL,
     }
     (out / "report.json").write_text(json.dumps(report, indent=2))
-    _plot(out, tgt_lat, tgt_lon, {"SST": (sstL, sstN), "SSS": (sssL, sssN)}, ocean,
-          label=args.grid_label)
+    _plot(out, tgt_lat, tgt_lon, plot_fields, ocean, label=args.grid_label)
     print(f"[verdict] SST match = {sst_v} (RMSE {sst['rmse']:.3f} C, "
           f"bias {sst['bias']:.3f} C, corr {sst['corr']:.3f})")
     print(f"[done] report + plots -> {out}")

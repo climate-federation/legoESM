@@ -61,6 +61,48 @@ def _reverse_z(arr: np.ndarray) -> np.ndarray:
     return arr[..., ::-1]
 
 
+def veros_u_centered_z_centres(dz_top_down: np.ndarray) -> np.ndarray:
+    """Veros cell-centre depths ``zt`` via pyOM's ``u_centered_grid`` recursion.
+
+    Veros does NOT place its T points at cell midpoints: ``u_centered_grid``
+    (core/numerics.py:9-21, applied to z at :74-76) builds the REFLECTED
+    recursion ``zt[k] = 2·zw[k-1] − zt[k-1]`` with ``zw_raw[k] = Σ_{i≥1}
+    dzt[i]`` and ``zt[0] = zw[0] − dzt[0]/2``, then shifts so the surface
+    interface is 0.  On a STRETCHED grid this differs from midpoints by up to
+    half a cell (global_4deg: 25 m), and the derived centre spacing ``dzw =
+    zt[k+1]−zt[k]`` (the denominator of every Veros vertical gradient and the
+    implicit-solve metric) alternates around the midpoint value — global_4deg
+    interior dzw = [30, 110, 90, 190, 190, …] m (top-down) vs midpoint
+    [60, 85, 120, 165, 215, …].  A faithful recipe must build its
+    ``z_full_ref``/``dz_half_ref`` from THIS construction or every isoneutral
+    slope (∝ 1/∂_zρ), K_33 (∝ S²) and vertical gradient inherits an
+    alternating per-level bias (tier-2 isolation: F_z rms lego/Veros by level
+    = [1.71, 0.84, 1.26, 0.88, 1.10, …] — exactly the dz_half/dzw ratios).
+    On a UNIFORM grid the recursion reduces to midpoints (the flat-bottom ACC
+    channel divides the same stretched ddz by 2.5, so it is NOT uniform and
+    carries the same bias).
+
+    Parameters
+    ----------
+    dz_top_down : (nlev,) layer thicknesses, k=0 = surface (legoESM order).
+
+    Returns
+    -------
+    z_full_ref : (nlev,) cell-centre depths, top-down, negative (legoESM
+        convention) — bit-identical to Veros's ``zt`` (reversed).
+    """
+    dzt = np.asarray(dz_top_down, dtype=np.float64)[::-1]  # Veros bottom-up
+    nz = dzt.shape[0]
+    zw = np.zeros(nz)
+    zw[1:] = np.cumsum(dzt[1:])
+    zt = np.zeros(nz)
+    zt[0] = zw[0] - dzt[0] * 0.5
+    for k in range(1, nz):
+        zt[k] = 2.0 * zw[k - 1] - zt[k - 1]
+    zt = zt - zw[-1]
+    return zt[::-1]
+
+
 def _extract_veros_var(
     result: VerosResult, name: str, tau: int = 1,
 ) -> np.ndarray:

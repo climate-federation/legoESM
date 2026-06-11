@@ -1142,6 +1142,12 @@ _RUNOFF_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/
 # prescribed sea-ice concentration for the SW-albedo surrogate (--ice-albedo).
 _SICONC_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
               "EXP00/RUN_REF/ORCA1_1y_20000101_20041231_icemod.nc")
+# Monthly ESACCI/BIOMER chlorophyll climatology (mg/m^3) on a 0.5deg regular grid,
+# the input NEMO ORCA1 reads for ln_qsr_rgb/nn_chldta=1 (--sw-rgb-chl).  CHLA has
+# shape (12, 361, 721) with 2D nav_lat/nav_lon, regridded like siconc/runoff.
+_CHL_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
+           "INPUTS/orca1_inputs/data_repository/input_fields/"
+           "merged_ESACCI_BIOMER4V1R1_CHL_REG05.nc")
 # NEMO ORCA1 RUN_REF MONTHLY ocean grid_T (`tos` = SST [degC]) -> used to give the
 # annual-mean siconc a SEASONAL cycle (--ice-albedo-seasonal): NEMO sea ice sits
 # at the freezing point, so where the monthly SST is at/below freezing NEMO has
@@ -1246,6 +1252,48 @@ def load_nemo_siconc(grid, grid_type, lat2d_deg, lon2d_deg, siconc_file=None,
     print(f"[setup] sea-ice albedo: NEMO siconc (annual) regridded onto {grid_type}, "
           f"max {float(out.max()):.2f}, ice-covered (>0.15) cell frac "
           f"{float((out > 0.15).mean()):.3f}")
+    return out
+
+
+def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None):
+    """Load the monthly ESACCI chlorophyll climatology and IDW-regrid onto the grid.
+
+    Returns a ``(12, *lat2d_deg.shape)`` array of surface chlorophyll [mg/m^3] for
+    the RGB shortwave-penetration scheme (``--sw-rgb-chl``).  The source
+    ``CHLA(12, 361, 721)`` lives on a 0.5deg regular grid with 2D nav_lat/nav_lon,
+    so the SAME curvilinear IDW used for siconc/runoff/bathy applies directly.
+    Values are left in physical units (the model clamps to NEMO's [0.03, 10] range
+    at class-index time); only non-finite source cells are excluded from the IDW.
+    Loaded ONCE before the time loop and indexed per step by calendar month."""
+    import xarray as xr
+    ds = xr.open_dataset(chl_file or _CHL_NC, decode_times=False)
+    src_lat = _squeeze2d(ds["nav_lat"].values)
+    src_lon = _squeeze2d(ds["nav_lon"].values)
+    chl = np.asarray(ds["CHLA"].values, dtype=np.float64)   # (12, y, x)
+    if chl.ndim != 3 or chl.shape[0] != 12:
+        raise ValueError(
+            f"expected monthly CHLA (12, y, x); got shape {chl.shape} in {chl_file or _CHL_NC}"
+        )
+    out_months = []
+    for m in range(12):
+        src = chl[m]
+        # Valid IDW sources = finite AND positive Chl: a NEMO build that writes
+        # land/missing cells as finite 0 would otherwise dilute coastal ocean
+        # down to the 0.03 clamp floor (codex MED).  This file's ocean min is
+        # ~0.007 mg/m3 with land as _FillValue, so finiteness alone suffices,
+        # but the `> 0` guard makes the loader robust to a zero-filled variant.
+        src_valid = np.isfinite(src) & (src > 0.0)
+        src_filled = np.nan_to_num(src, nan=0.0)
+        om, _ = _regrid_curv_to_points(
+            src_filled, src_lat, src_lon, src_valid, lat2d_deg, lon2d_deg,
+            k=4, max_deg=2.0)
+        # Floor at the NEMO clamp minimum so flood-filled land/coast cells never
+        # produce a zero/negative Chl that would underflow the class-index log10.
+        out_months.append(np.maximum(om, 0.03))
+    out = np.stack(out_months, axis=0)
+    print(f"[setup] RGB chlorophyll: ESACCI monthly regridded onto {grid_type}, "
+          f"range {float(out.min()):.3f}-{float(out.max()):.3f} mg/m3, "
+          f"annual-mean {float(out.mean()):.3f}")
     return out
 
 
@@ -1567,7 +1615,7 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir):
         print(f"[transports] MHT diag skipped: {type(e).__name__}: {e}")
 
 
-def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d):
+def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     save_kw = dict(
         T=np.asarray(state.T.data), S=np.asarray(state.S.data),
@@ -1578,6 +1626,15 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d):
     # MPAS has no separate v field; the scorer reads T/S/land_mask/lat_T/lon_T only.
     if getattr(state, "v", None) is not None:
         save_kw["v"] = np.asarray(state.v.data)
+    # Geometry for the offline mixed-layer-depth diagnostic (de Boyer Montegut /
+    # Treguier 2023): sea-floor depth + level-centre reference depths.  The MLD
+    # scorer derives the per-level wet mask from ``z_center_ref < H_bathy``.
+    H_bathy = getattr(state, "H_bathy", None)
+    if H_bathy is not None:
+        save_kw["H_bathy"] = np.asarray(H_bathy.data)
+    if z_coord is not None and getattr(z_coord, "z_half_ref", None) is not None:
+        zh = np.asarray(z_coord.z_half_ref)              # (nlev+1,), <=0
+        save_kw["z_center_ref"] = np.abs(0.5 * (zh[:-1] + zh[1:]))   # (nlev,) positive
     np.savez_compressed(out_dir / f"snapshot_{tag}.npz", **save_kw)
 
 
@@ -1911,6 +1968,22 @@ def main() -> int:
                         "safety cap. The bound is what lets a SHORT tau hold "
                         "SSS without injecting deep-convection-killing salt "
                         "spikes (the tau=60 AMOC-collapse mechanism).")
+    p.add_argument("--sw-rgb-chl", action="store_true",
+                   help="Use NEMO's RGB chlorophyll shortwave-penetration scheme "
+                        "(ln_qsr_rgb) instead of the uniform 2-band Jerlov default: "
+                        "IR + R/G/B bands with chlorophyll-dependent extinction from "
+                        "the monthly ESACCI Chl climatology (Morel-Berthon vertical "
+                        "profile). Clear subtropical water penetrates deeper (cools "
+                        "the surface warm bias); productive subpolar water traps light "
+                        "near the surface. latlon/tripole only (wired into the PE "
+                        "C-grid step). --chl-file overrides the default ESACCI path.")
+    p.add_argument("--chl-file", type=str, default=None,
+                   help="Override path to the monthly ESACCI chlorophyll NetCDF "
+                        "(default: NEMO ORCA1 INPUTS merged_ESACCI...CHL_REG05.nc).")
+    p.add_argument("--sss-ice-gate-nemo", action="store_true",
+                   help="Use NEMO's exact under-ice SSS-restoring law (sbcssr "
+                        "nn_sssr_ice=0: coefice = 1 - fr_i, zero under full ice) "
+                        "instead of the legoESM tanh cutoff. Requires --sss-restore.")
     p.add_argument("--woa-smoothing-passes", type=int, default=0,
                    help="Horizontal Laplacian smoothing passes/level on the WOA T,S IC "
                         "-- removes spurious grid-scale fronts from interpolating/flood-"
@@ -2071,6 +2144,11 @@ def main() -> int:
             "restoring where the Dai-Trenberth runoff field is active; "
             "without --runoff there is no runoff field and the gate would "
             "silently do nothing).")
+    if args.sss_ice_gate_nemo and not args.sss_restore:
+        raise ValueError(
+            "--sss-ice-gate-nemo requires --sss-restore (it only changes the "
+            "under-ice weighting of the SSS restoring; with no restoring it "
+            "would silently do nothing).")
     if args.grid == "tripole":
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
@@ -2299,6 +2377,8 @@ def main() -> int:
         from legoesm.ocean.forcing.sss_restoring import SSSRestoringConfig
         from legoesm import constants
         _cfg_kwargs = {}
+        if args.sss_ice_gate_nemo:
+            _cfg_kwargs["ice_gate_mode"] = "nemo_linear"
         if args.sss_restore_bound_mmday is not None:
             if not (float(args.sss_restore_bound_mmday) > 0.0):
                 raise ValueError("--sss-restore-bound-mmday must be > 0.")
@@ -2390,6 +2470,16 @@ def main() -> int:
             siconc_clim = load_nemo_siconc(
                 grid, app_grid_type, lat2d, lon2d, siconc_file=args.siconc_file,
                 land_mask=np.asarray(state.land_mask.data))
+    # Monthly chlorophyll for the RGB SW-penetration scheme (--sw-rgb-chl).  Loaded
+    # once; indexed per step by calendar month, then attached to the surface
+    # forcing as ``chl`` (the PE C-grid step switches to rgb_chl when chl is set).
+    chl_clim = None
+    if args.sw_rgb_chl:
+        if app_grid_type not in ("latlon", "tripole"):
+            raise ValueError(
+                f"--sw-rgb-chl is wired for latlon/tripole only, not {app_grid_type!r}")
+        chl_clim = load_nemo_chl_monthly(
+            grid, app_grid_type, lat2d, lon2d, chl_file=args.chl_file)
     # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
     # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
     # would corrupt the comparison invisibly. --forcing-path (set via --config
@@ -2589,10 +2679,10 @@ def main() -> int:
                 print(f"[snapshot] day {day:.0f} saved", flush=True)
             if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
                 yr = step // steps_per_year
-                _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d)
+                _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d, z_coord=z_coord)
                 print(f"[snapshot] year {yr} saved", flush=True)
         state = jax.block_until_ready(state)
-        _save_snapshot(out_dir, "final", state, lat2d, lon2d)
+        _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
         _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
         _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
         _mht_diag(state, grid, z_coord, app_grid_type, out_dir)
@@ -2652,6 +2742,11 @@ def main() -> int:
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
                              q_net=sf.q_net * ramp, sw_down=sf.sw_down * ramp)
+        # Surface chlorophyll for THIS step (calendar-month slice); attaching it
+        # switches the PE step to NEMO's RGB penetration.  NOT ramped — Chl is a
+        # fixed optical climatology, independent of the dynamical spin-up ramp.
+        if chl_clim is not None:
+            sf = sf._replace(chl=chl_clim[_runoff_month_idx(step, dt)])
         # Surface freshwater (atmospheric P - E + optional Dai-Trenberth runoff)
         # is delivered through the IN-CORE channel
         # ``model.step(..., freshwater=FreshwaterForcing)``: the dynamics core
@@ -2778,11 +2873,11 @@ def main() -> int:
             print(f"[snapshot] day {day:.0f} saved", flush=True)
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
-            _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d)
+            _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d, z_coord=z_coord)
             print(f"[snapshot] year {yr} saved", flush=True)
 
     state = jax.block_until_ready(state)
-    _save_snapshot(out_dir, "final", state, lat2d, lon2d)
+    _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
     _mht_diag(state, grid, z_coord, app_grid_type, out_dir)

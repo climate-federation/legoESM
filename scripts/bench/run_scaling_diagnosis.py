@@ -271,11 +271,12 @@ def _setup_cubed_sphere(n: int, nlev: int, dt: float, precision: str,
         step_fn = model.step
     elif n_local_devices > 1:
         from legoesm.parallel.sharded_dynamics import make_sharded_step
-        from legoesm.parallel.mesh import create_device_mesh
-        step_fn = make_sharded_step(
-            model, create_device_mesh(n_devices=n_local_devices),
-            n=n, nlev=nlev,
-        )
+        from legoesm.parallel.mesh import create_device_mesh, shard_pytree
+        mesh_cfg = create_device_mesh(n_devices=n_local_devices)
+        step_fn = make_sharded_step(model, mesh_cfg, n=n, nlev=nlev)
+        # CompiledShardedStep now constrains inputs via in_shardings:
+        # commit the initial state to the face sharding up front.
+        state = shard_pytree(state, mesh_cfg)
     else:
         step_fn = model.step
 

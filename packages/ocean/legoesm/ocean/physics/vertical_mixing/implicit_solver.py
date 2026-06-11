@@ -41,7 +41,11 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.timestepping.tridiagonal import thomas_solve
+from legoesm.timestepping.tridiagonal import (
+    thomas_solve,
+    thomas_solve_batched,
+    thomas_solve_shared,
+)
 
 _EPS = float(jnp.finfo(jnp.float32).eps)  # ~1.19e-7
 
@@ -103,6 +107,75 @@ def implicit_vertical_diffusion_ocean(
         # One-level columns have no vertical gradient ⇒ no-op.
         return field
 
+    a, b, c, d = _build_implicit_tridiag(field, K, dz, dz_half, dt)
+    return thomas_solve(a, b, c, d)
+
+
+def implicit_vertical_diffusion_ocean_pair(
+    field_1: jax.Array,
+    field_2: jax.Array,
+    K: jax.Array | float,
+    dz: jax.Array,
+    dz_half: jax.Array,
+    dt: float,
+) -> tuple[jax.Array, jax.Array]:
+    """Backward-Euler vertical diffusion of TWO fields sharing ONE matrix.
+
+    ``field_1`` and ``field_2`` (same shape, e.g. T and S) diffuse
+    against the IDENTICAL tridiagonal system — same ``K``, ``dz``,
+    ``dz_half``, ``dt`` — so the coefficient build and the Thomas
+    forward-elimination factors are computed ONCE
+    (:func:`legoesm.timestepping.tridiagonal.thomas_solve_shared`)
+    instead of once per field.  The implicit vmix is memory-bandwidth
+    bound (phase split 8458934; field-batching measured a NON-win,
+    jobs 8459136/8459145, because it ADDS traffic — this variant
+    REMOVES a full duplicate coefficient build + factor sweep).
+
+    Outputs are BIT-IDENTICAL to two
+    :func:`implicit_vertical_diffusion_ocean` calls (the shared solver
+    keeps per-RHS arithmetic operation-identical; on mixed dtypes it
+    falls back to per-field solves).
+    """
+    if not isinstance(dt, jax.core.Tracer):
+        if dt <= 0.0:
+            raise ValueError(f"dt must be > 0, got {dt!r}")
+    if field_1.shape != field_2.shape:
+        raise ValueError(
+            "implicit_vertical_diffusion_ocean_pair: fields must share a "
+            f"shape; got {field_1.shape} vs {field_2.shape}"
+        )
+
+    nlev = field_1.shape[-1]
+    if nlev < 2:
+        return field_1, field_2
+
+    a, b, c, d1 = _build_implicit_tridiag(field_1, K, dz, dz_half, dt)
+    x1, x2 = thomas_solve_shared(a, b, c, (d1, field_2))
+    return x1, x2
+
+
+def _build_implicit_tridiag(
+    field: jax.Array,
+    K: jax.Array | float,
+    dz: jax.Array,
+    dz_half: jax.Array,
+    dt: float,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Assemble the backward-Euler tridiagonal ``(a, b, c, d)`` for one field.
+
+    This is the *exact* coefficient construction that
+    :func:`implicit_vertical_diffusion_ocean` feeds to :func:`thomas_solve`,
+    factored out so the field-batched entry point
+    (:func:`implicit_vertical_diffusion_ocean_batched`) can build each field's
+    system with byte-identical arithmetic and then solve them all in ONE
+    batched Thomas call.  ``a, b, c, d`` are returned with the system (level)
+    on the LAST axis and ``field``'s leading shape preserved (no flattening).
+
+    Caller guarantees ``field.shape[-1] = nlev >= 2`` (the ``nlev < 2`` no-op
+    is handled by the public wrappers before this is invoked).
+    """
+    nlev = field.shape[-1]
+
     # --- Promote K, dz, dz_half to match the field's leading shape ---
     K_arr = jnp.asarray(K)
     if K_arr.ndim == 0:
@@ -155,8 +228,133 @@ def implicit_vertical_diffusion_ocean(
     b = 1.0 + alpha + beta
     c = -beta
     d = field
+    return a, b, c, d
 
-    return thomas_solve(a, b, c, d)
+
+def implicit_vertical_diffusion_ocean_batched(
+    systems: "list[tuple[jax.Array, jax.Array | float, jax.Array, jax.Array, float]]",
+) -> "list[jax.Array]":
+    """Backward-Euler vertical diffusion for SEVERAL fields in ONE solve.
+
+    Each entry of ``systems`` is ``(field, K, dz, dz_half, dt)`` with the SAME
+    per-field semantics as :func:`implicit_vertical_diffusion_ocean` — every
+    field may have a different leading (column) shape and its OWN ``K`` /
+    ``dz`` / ``dz_half`` / ``dt``.  The only shared requirement is that all
+    fields have the SAME number of vertical levels ``nlev`` on the last axis
+    (the tridiagonal system size).
+
+    Why batch
+    ---------
+    The ocean step solves four independent backward-Euler systems per step —
+    ``T``, ``S`` (cell centres, tracer ``dt``, diffusivity ``K_v``) and
+    ``u``, ``v`` (staggered faces, momentum ``dt_mom``, viscosity ``A_v``).
+    Each separate :func:`thomas_solve` lowers to TWO ``fori_loop`` while-loops
+    (forward + backward sweep) that XLA cannot fuse across, so the four calls
+    serialise into eight while-loops.  Here we build each field's tridiagonal
+    with the *identical* :func:`_build_implicit_tridiag` arithmetic, flatten
+    each to ``(n_cols_field, nlev)``, CONCATENATE along the column axis into a
+    single ``(Σ n_cols, nlev)`` batch, and issue ONE
+    :func:`thomas_solve_batched`.  On CPU that collapses 8 while-loops → 2; on
+    a CUDA backend ``thomas_solve_batched`` uses the while-loop-free PCR
+    (or cuSPARSE) path, so the per-device dispatch cost drops further.
+
+    Bit-faithfulness
+    ----------------
+    The per-field coefficients are byte-identical to the four separate
+    :func:`implicit_vertical_diffusion_ocean` calls (same
+    ``_build_implicit_tridiag``).  ``thomas_solve_batched``'s default CPU
+    backend is ``vmap(thomas_solve)`` over the concatenated columns, so the
+    batched result equals the four-separate result to the last bit on the
+    DEFAULT/LEGACY CPU backend.  (On CUDA — or with a forced
+    ``LEGOESM_TRIDIAG=pcr``/``cusparse`` on any backend — PCR/cuSPARSE are
+    different but equally exact direct solvers, agreeing to machine epsilon,
+    NOT bit-for-bit; the bit-faithfulness tests force ``LEGOESM_TRIDIAG=legacy``
+    so the exact-equality gate is meaningful regardless of where they run.)  The dtype contract of
+    :func:`thomas_solve` (solve in ``result_type(a,b,c,d)``, return in
+    ``d.dtype``) is reproduced exactly PER FIELD: each system uses its OWN
+    work dtype, and fields are GROUPED by work dtype so a f32-only system is
+    never silently promoted to f64 just because it shares the batch with a
+    f64 system (that would change its f32 result bits) — each group is one
+    dtype-uniform :func:`thomas_solve_batched`, and each field's output is
+    cast back to its own ``d.dtype``.  Production passes four dtype-uniform
+    fields ⇒ a single group ⇒ one batched solve; mixed dtypes ⇒ one solve
+    per dtype, each still bit-faithful to the scalar path.
+
+    Returns
+    -------
+    list[jax.Array]
+        One updated field per input entry, in the same order, each with the
+        same shape and dtype as its input ``field``.
+    """
+    if not systems:
+        return []
+
+    nlev = systems[0][0].shape[-1]
+    for idx, (field, _K, _dz, _dzh, dt) in enumerate(systems):
+        if field.shape[-1] != nlev:
+            raise ValueError(
+                f"implicit_vertical_diffusion_ocean_batched requires every "
+                f"field to share nlev on the last axis; system 0 has "
+                f"nlev={nlev} but system {idx} has nlev={field.shape[-1]}")
+        # Mirror the public wrapper's concrete-scalar positivity guard.
+        if not isinstance(dt, jax.core.Tracer):
+            if dt <= 0.0:
+                raise ValueError(
+                    f"dt must be > 0, got {dt!r} (system {idx})")
+
+    if nlev < 2:
+        # One-level columns have no vertical gradient ⇒ no-op (same as the
+        # scalar wrapper); return the inputs unchanged.
+        return [field for (field, _K, _dz, _dzh, _dt) in systems]
+
+    # Build each field's tridiagonal with the IDENTICAL per-field arithmetic
+    # the scalar solve uses, flatten the leading (column) axes, and record its
+    # OWN work dtype + output dtype.  thomas_solve solves field i in
+    # ``result_type(a_i, b_i, c_i, d_i)`` and returns in ``d_i.dtype``; to stay
+    # bit-faithful per field we reproduce BOTH exactly — fields are GROUPED BY
+    # work dtype so a f32-only system is NEVER promoted to f64 just because it
+    # shares the batch with a f64 system (that would change its f32 result
+    # bits).  Within a group all systems share the work dtype, so they
+    # concatenate into one dtype-uniform thomas_solve_batched call (which
+    # requires a/b/c/d to share dtype).  Production passes four dtype-uniform
+    # fields ⇒ a single group ⇒ one solve; mixed dtypes ⇒ one solve per dtype.
+    built = []  # per system: (a2d, b2d, c2d, d2d, work_dtype, out_dtype, shape)
+    for (field, K, dz, dz_half, dt) in systems:
+        a, b, c, d = _build_implicit_tridiag(field, K, dz, dz_half, dt)
+        a2d = a.reshape(-1, nlev)
+        b2d = b.reshape(-1, nlev)
+        c2d = c.reshape(-1, nlev)
+        d2d = d.reshape(-1, nlev)
+        work_dtype = jnp.result_type(a2d, b2d, c2d, d2d)
+        built.append((a2d, b2d, c2d, d2d, work_dtype, d.dtype, field.shape))
+
+    # Group system indices by their work dtype, preserving first-seen order so
+    # the (rare) multi-group path is deterministic.
+    groups: dict = {}
+    for i, item in enumerate(built):
+        groups.setdefault(item[4], []).append(i)
+
+    outs: list = [None] * len(systems)
+    for work_dtype, idxs in groups.items():
+        a_cat = jnp.concatenate(
+            [built[i][0].astype(work_dtype) for i in idxs], axis=0)
+        b_cat = jnp.concatenate(
+            [built[i][1].astype(work_dtype) for i in idxs], axis=0)
+        c_cat = jnp.concatenate(
+            [built[i][2].astype(work_dtype) for i in idxs], axis=0)
+        d_cat = jnp.concatenate(
+            [built[i][3].astype(work_dtype) for i in idxs], axis=0)
+        x_cat = thomas_solve_batched(a_cat, b_cat, c_cat, d_cat)
+        start = 0
+        for i in idxs:
+            n_i = built[i][0].shape[0]
+            out_dtype = built[i][5]
+            shape = built[i][6]
+            outs[i] = jax.lax.convert_element_type(
+                x_cat[start:start + n_i], out_dtype,
+            ).reshape(shape)
+            start += n_i
+    return outs
 
 
 # ---------------------------------------------------------------------------

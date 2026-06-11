@@ -18,6 +18,7 @@ Public API: state_new = model.step(state, dt)
 
 from __future__ import annotations
 
+import os
 from functools import partial
 
 import jax
@@ -52,6 +53,7 @@ from legoesm.ocean.state import (
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
     interp_to_v_points,
+    interp_to_v_points_multi,
     centered_cell_to_uface,
     upwind_to_u_points,
     upwind_to_v_points,
@@ -75,6 +77,8 @@ from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,
+    compute_geometric_step_kappa,
+    geometric_barotropic_production,
     compute_realized_gm_skew_conversion,
     compute_realized_signed_conversions,
     eke_horizontal_transport,
@@ -242,6 +246,107 @@ def _compute_advection_flux_div(
     return div_hut, vert_flux_div
 
 
+# Schemes whose HORIZONTAL reconstruction is strictly level-independent
+# (elementwise limiters + lon rolls + lat pads; no cross-level coupling)
+# — the set the pair fast-path below may stack along the level axis.
+_LEVEL_SEPARABLE_H_SCHEMES = frozenset(
+    {"tvd", "superbee", "upwind", "centered"}
+)
+
+
+def _compute_advection_flux_div_pair(
+    tr_a: jnp.ndarray,
+    tr_b: jnp.ndarray,
+    tracer_advection: str,
+    mass_flux_u: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    w_baro: jnp.ndarray,
+    h_k_old: jnp.ndarray,
+    h_u_old: jnp.ndarray,
+    h_v_old: jnp.ndarray,
+    grid,
+    dt: float,
+):
+    """Advection flux divergence for TWO tracers (T, S) in one pass.
+
+    The horizontal reconstructions of the production schemes
+    (``_LEVEL_SEPARABLE_H_SCHEMES``) are level-independent, so both
+    tracers ride ONE reconstruction call on a level-axis stack
+    ``[tr_a ‖ tr_b]`` — the AL81 ``t_stack`` precedent: pure
+    relabeling, no arithmetic.  This halves the remaining per-step
+    tracer N-S exchanges (the halo=2 cell pad inside
+    ``tvd_to_v_points`` was one of the few unfused sites left, census
+    8459326) and halves the horizontal-reconstruction work.  The
+    VERTICAL flux divergence couples levels (it must not see the
+    stack seam) and is computed per tracer with the original
+    functions.  Every other scheme falls back to two single-tracer
+    calls — value-identical, no fast path.
+
+    Returns ``((div_hut_a, vert_a), (div_hut_b, vert_b))`` — each pair
+    bit-identical to ``_compute_advection_flux_div`` on that tracer
+    (identical elementwise ops applied to the same per-level values).
+    """
+    # Trace-time opt-in gate (LEGOESM_TRACER_PAIR=1 → level-stacked
+    # pair; baked into the compiled graph — flip BEFORE first compile).
+    # DEFAULT OFF: the stack halves pad count + reconstruction calls
+    # but DOUBLES the reconstruction intermediates, and the same-node
+    # A/B (job 8460192) measured np=1 −3% and LL128-np8 −17% with no
+    # multi-rank win — the vmix field-batching lesson a third time
+    # (stacking ADDS bandwidth where the phase is bandwidth-bound).
+    # Kept opt-in: bit-identical (tests/ocean/unit/
+    # test_tracer_pair_advection.py) and the trade may flip on GPU.
+    if (
+        tracer_advection not in _LEVEL_SEPARABLE_H_SCHEMES
+        or os.environ.get("LEGOESM_TRACER_PAIR", "0") != "1"
+    ):
+        return (
+            _compute_advection_flux_div(
+                tr_a, tracer_advection, mass_flux_u, mass_flux_v,
+                w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
+            ),
+            _compute_advection_flux_div(
+                tr_b, tracer_advection, mass_flux_u, mass_flux_v,
+                w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
+            ),
+        )
+
+    nlev = tr_a.shape[-1]
+    trs = jnp.concatenate([tr_a, tr_b], axis=-1)
+    mfu2 = jnp.concatenate([mass_flux_u, mass_flux_u], axis=-1)
+    mfv2 = jnp.concatenate([mass_flux_v, mass_flux_v], axis=-1)
+
+    if tracer_advection in ("tvd", "superbee"):
+        from legoesm.ocean.dynamics._flux_limiters import resolve_tvd_limiter
+        limiter_fn = resolve_tvd_limiter(tracer_advection)
+        tr_u2 = tvd_to_u_points(trs, mfu2, limiter_fn=limiter_fn)
+        tr_v2 = tvd_to_v_points(trs, mfv2, grid=grid, limiter_fn=limiter_fn)
+    elif tracer_advection == "upwind":
+        tr_u2 = upwind_to_u_points(trs, mfu2)
+        tr_v2 = upwind_to_v_points(trs, mfv2, grid=grid)
+    else:  # "centered"
+        tr_u2 = centered_cell_to_uface(trs)
+        tr_v2 = interp_to_v_points(trs, grid)
+
+    div2 = divergence_cgrid(mfu2 * tr_u2, mfv2 * tr_v2, grid)
+    div_a, div_b = div2[..., :nlev], div2[..., nlev:]
+
+    if tracer_advection in ("tvd", "superbee"):
+        from legoesm.ocean.dynamics._flux_limiters import resolve_tvd_limiter
+        _lim = resolve_tvd_limiter(tracer_advection)
+        vert_a = flux_form_vertical_tracer_advection_tvd(
+            tr_a, w_baro, h_k_old, dt, limiter_fn=_lim)
+        vert_b = flux_form_vertical_tracer_advection_tvd(
+            tr_b, w_baro, h_k_old, dt, limiter_fn=_lim)
+    elif tracer_advection == "upwind":
+        vert_a = flux_form_vertical_tracer_advection(tr_a, w_baro)
+        vert_b = flux_form_vertical_tracer_advection(tr_b, w_baro)
+    else:  # "centered"
+        vert_a = flux_form_vertical_tracer_advection_centered(tr_a, w_baro)
+        vert_b = flux_form_vertical_tracer_advection_centered(tr_b, w_baro)
+
+    return (div_a, vert_a), (div_b, vert_b)
+
+
 def _ssp_rk3_tracer_step(
     tr: jnp.ndarray,
     tracer_advection: str,
@@ -310,6 +415,68 @@ def _ssp_rk3_tracer_step(
     tr_new = jnp.where(active_3d > 0.5, tr_new, tr)
 
     return tr_new
+
+
+def _ssp_rk3_tracer_pair_step(
+    tr_a: jnp.ndarray,
+    tr_b: jnp.ndarray,
+    tracer_advection: str,
+    mass_flux_u: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    w_baro: jnp.ndarray,
+    h_k_old: jnp.ndarray,
+    h_k_new: jnp.ndarray,
+    h_u_old: jnp.ndarray,
+    h_v_old: jnp.ndarray,
+    grid,
+    dt: float,
+    active_3d: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """RK3 tracer step for the (T, S) pair — one fused flux-div per stage.
+
+    Per-tracer arithmetic is kept statement-identical to
+    :func:`_ssp_rk3_tracer_step`; the only change is that each stage's
+    two flux divergences come from ONE
+    :func:`_compute_advection_flux_div_pair` call (3 fused horizontal
+    reconstructions + pads per step instead of 6).
+    """
+
+    def _flux_div_pair(a_val, b_val):
+        (dh_a, dv_a), (dh_b, dv_b) = _compute_advection_flux_div_pair(
+            a_val, b_val, tracer_advection, mass_flux_u, mass_flux_v,
+            w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
+        )
+        return dh_a + dv_a, dh_b + dv_b
+
+    h_safe = jnp.maximum(h_k_old, 1e-10)
+
+    # Stage 1
+    fd0_a, fd0_b = _flux_div_pair(tr_a, tr_b)
+    a1 = (h_k_old * tr_a - dt * fd0_a) / h_safe
+    a1 = jnp.where(active_3d > 0.5, a1, tr_a)
+    b1 = (h_k_old * tr_b - dt * fd0_b) / h_safe
+    b1 = jnp.where(active_3d > 0.5, b1, tr_b)
+
+    # Stage 2
+    fd1_a, fd1_b = _flux_div_pair(a1, b1)
+    a1_adv = (h_k_old * a1 - dt * fd1_a) / h_safe
+    a1_adv = jnp.where(active_3d > 0.5, a1_adv, tr_a)
+    a2 = 0.75 * tr_a + 0.25 * a1_adv
+    b1_adv = (h_k_old * b1 - dt * fd1_b) / h_safe
+    b1_adv = jnp.where(active_3d > 0.5, b1_adv, tr_b)
+    b2 = 0.75 * tr_b + 0.25 * b1_adv
+
+    # Stage 3 — conservative final update via effective flux
+    fd2_a, fd2_b = _flux_div_pair(a2, b2)
+    h_new_safe = jnp.maximum(h_k_new, 1e-10)
+    F_eff_a = (1.0 / 6.0) * fd0_a + (1.0 / 6.0) * fd1_a + (2.0 / 3.0) * fd2_a
+    a_new = (h_k_old * tr_a - dt * F_eff_a) / h_new_safe
+    a_new = jnp.where(active_3d > 0.5, a_new, tr_a)
+    F_eff_b = (1.0 / 6.0) * fd0_b + (1.0 / 6.0) * fd1_b + (2.0 / 3.0) * fd2_b
+    b_new = (h_k_old * tr_b - dt * F_eff_b) / h_new_safe
+    b_new = jnp.where(active_3d > 0.5, b_new, tr_b)
+
+    return a_new, b_new
 
 
 def _forward_backward_coriolis_3d(
@@ -506,6 +673,21 @@ class LatLonCGridOceanModel:
         self.z_coord = z_coord
         self.config = config or LatLonCGridOceanConfig()
         self._validate_config(self.config)
+        # GEOMETRIC EKE closure (Torres et al. 2025) needs the regular-grid
+        # B_T operator (flux_divergence_viscosity_cgrid raises on tripolar);
+        # fail at construction, not at the first traced step.
+        _gm = self.config.gm_redi
+        if (_gm is not None and getattr(_gm, "eke", None) is not None
+                and _gm.eke.closure == "geometric"):
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import is_tripolar
+            if is_tripolar(self.grid):
+                raise ValueError(
+                    "EKEConfig.closure='geometric' is not supported on "
+                    "tripolar grids (the B_T shear-production operator "
+                    "flux_divergence_viscosity_cgrid is regular-lat-lon "
+                    "only). Use a regular lat-lon grid or extend the "
+                    "operator."
+                )
         self._cfl_checked = False
         # Static rigid-lid data (islands, basis, depths), built eagerly from the
         # first concrete state (host-side flood-fill).  None until built.
@@ -1670,6 +1852,64 @@ class LatLonCGridOceanModel:
                         Ah_visc_u=tend.Ah_visc_u, Ah_visc_v=tend.Ah_visc_v,
                         Ah_kediss_cell=tend.Ah_kediss_cell,
                     )
+                elif eke_cfg.closure == "geometric":
+                    # GEOMETRIC closure (Torres et al. 2025, JAMES,
+                    # doi:10.1029/2025MS005394): depth-INTEGRATED 2-D EKE
+                    # budget (Eq. 1) — ``state.eke`` carries ∫EKE dz [m³/s²].
+                    # Static Python dispatch on the config literal (validated
+                    # at construction); the default closure is bit-identical.
+                    geom = eke_cfg.geometric
+                    E_in = state.eke.data if state.eke is not None else None
+                    (E, kappa_gm_override, kappa_n_geom, prod_bc, L_eff,
+                     dz_geom) = compute_geometric_step_kappa(
+                        T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                        E_in, self.grid, self.z_coord, gm_cfg,
+                        eos=self.config.eos, eos_linear=self.config.eos_linear,
+                        mask=lm,
+                        rho_0=self.config.constants.rho_0,
+                        g=self.config.constants.g,
+                        omega=self.config.constants.Omega,
+                        r_earth=self.config.constants.R_earth,
+                    )
+                    # Barotropic production B_T = ∫κ_u|∇h u_h|² dz (Eq. 3)
+                    # from the start-of-step velocities (the same time level
+                    # that advects E below).
+                    prod_bt = geometric_barotropic_production(
+                        state.u.data, state.v.data, self.grid, geom.kappa_u,
+                        dz_geom, lm, state.u_mask.data, state.v_mask.data,
+                        z_coord=self.z_coord,
+                    )
+                    # Shim config routing the GEOMETRIC coefficients through
+                    # the SHARED 2-D transport + semi-implicit fold:
+                    # k_iso←kappa_e (T_e diffusion, Eq. 5) and
+                    # c_eps←c_eps_geometric, which with L=L_eff=R_d·√H makes
+                    # the fold rate c_eps·√I/L_eff = C_ε·√(I/H)/R_d — the
+                    # EXACT Eq.-4 dissipation linearised implicitly (see
+                    # geometric_dissipation_length).  No duplicate numerics.
+                    shim_cfg = eke_cfg._replace(
+                        c_eps=geom.c_eps_geometric, k_iso=geom.kappa_e)
+                    # Advecting flow: ∇h·(u_h ∫E dz) with the depth-mean flow
+                    # (paper Eq. 1 / Appendix D "integrated transport" with
+                    # φ(z)=1) — the same level-mean U_bar construction as the
+                    # EG 2-D path (conserves the area integral of E).
+                    U_bar = jnp.mean(state.u.data, axis=-1) * state.u_mask.data
+                    V_bar = jnp.mean(state.v.data, axis=-1) * state.v_mask.data
+                    E_t = E + dt * eke_horizontal_transport(
+                        E, U_bar, V_bar, self.grid, shim_cfg,
+                        lm, state.u_mask.data, state.v_mask.data,
+                    )
+                    # B_C + B_T explicit (both ≥ 0), D_e implicit — E ≥ 0 by
+                    # construction (the paper instead zeroes D_e where E < 0,
+                    # p. 5; the fold is strictly stronger — documented).
+                    E_new = eke_apply_local_source(
+                        E_t, jnp.zeros_like(E_t), L_eff, shim_cfg, dt,
+                        production_override=prod_bc + prod_bt,
+                    )
+                    eke_new = Field(data=E_new * lm, name="eke",
+                                    dims=("lat", "lon"), units="m^3/s^2")
+                    # κ_n (Eq. 7) → Redi tracer diffusivity (EKE-GM+N).
+                    if geom.kappa_n_coupling:
+                        kappa_redi_override = kappa_n_geom
                 else:
                     if state.eke is not None:
                         E = state.eke.data
@@ -1812,23 +2052,35 @@ class LatLonCGridOceanModel:
                         dims=_dims_fd, units="m/s"),
                 )
 
+            # T+S pair fast path: ONE fused horizontal reconstruction +
+            # N-S pad per stage for both tracers (level-axis stack; see
+            # _compute_advection_flux_div_pair).  Bit-identical to the
+            # historical per-tracer calls; non-separable schemes fall
+            # back to two single-tracer calls inside the pair helpers.
+            if _tti == "rk3":
+                T_corrected, S_corrected = _ssp_rk3_tracer_pair_step(
+                    T_mid, S_mid, _adv,
+                    mass_flux_u, mass_flux_v, w_baro,
+                    h_k_old, h_k_new, h_u_old, h_v_old,
+                    self.grid, dt, active_3d,
+                )
+                _pair_divs = (None, None)
+            else:
+                _pair_divs = _compute_advection_flux_div_pair(
+                    T_mid, S_mid, _adv,
+                    mass_flux_u, mass_flux_v, w_baro,
+                    h_k_old, h_u_old, h_v_old, self.grid, dt,
+                )
+
             for tr_name in ['T', 'S']:
                 tr = T_mid if tr_name == 'T' else S_mid
 
                 if _tti == "rk3":
-                    # RK3: 3 sub-stages, 3x cost, 3rd-order temporal
-                    tr_new = _ssp_rk3_tracer_step(
-                        tr, _adv,
-                        mass_flux_u, mass_flux_v, w_baro,
-                        h_k_old, h_k_new, h_u_old, h_v_old,
-                        self.grid, dt, active_3d,
-                    )
+                    # Computed by the pair step above.
+                    continue
                 else:
-                    # Compute flux divergence (single evaluation for Euler/AB2)
-                    div_hut, vert_flux_div = _compute_advection_flux_div(
-                        tr, _adv,
-                        mass_flux_u, mass_flux_v, w_baro,
-                        h_k_old, h_u_old, h_v_old, self.grid, dt,
+                    div_hut, vert_flux_div = (
+                        _pair_divs[0] if tr_name == 'T' else _pair_divs[1]
                     )
                     total_flux_div = div_hut + vert_flux_div
 
@@ -2093,6 +2345,35 @@ class LatLonCGridOceanModel:
         if vmix is None or vmix.scheme != "tke":
             return False
         return bool(getattr(vmix.tke, "prognostic", False))
+
+    def _tke_post_mixing_active(self) -> bool:
+        """True iff the prognostic TKE runs the Veros POST-MIXING step order.
+
+        Static Python predicate (config-only): prognostic TKE is on AND
+        ``vertical_mixing.tke.buoyancy_timing == "post_mixing_veros"``. The
+        K profiles for the tracer/momentum solves then come from the CARRIED
+        TKE (Veros set_tke_diffusivities from tke[tau]) and the TKE budget is
+        solved AFTER the implicit tracer mixing, charging the POST-mixing N²
+        plus the surface buoyancy-flux P_diss_v slot (Veros
+        thermodynamics.py:385-388 + tke.py:142). Default False ⇒ the
+        pre-mixing legacy ordering, bit-identical.
+        """
+        if not self._tke_prognostic_active():
+            return False
+        tke_cfg = self.config.physics.vertical_mixing.tke
+        return (getattr(tke_cfg, "buoyancy_timing", "pre_mixing")
+                == "post_mixing_veros")
+
+    def _tke_realized_kdiss_active(self) -> bool:
+        """True iff the post-mixing TKE charges the REALIZED implicit-friction
+        dissipation (Veros K_diss_v, friction.py:131-151) instead of the
+        pre-solve ``K_M·S²`` (``TKEConfig.shear_production="realized_veros"``;
+        static config-only predicate)."""
+        if not self._tke_post_mixing_active():
+            return False
+        tke_cfg = self.config.physics.vertical_mixing.tke
+        return (getattr(tke_cfg, "shear_production", "pre_solve")
+                == "realized_veros")
 
     def _tke_advection_active(self) -> bool:
         """True iff the prognostic TKE field is ADVECTED (Veros
@@ -2499,6 +2780,8 @@ class LatLonCGridOceanModel:
         tke_old=None,
         tke_source=None,
         return_tke: bool = False,
+        K_diss_v_w=None,
+        return_K_diss_v: bool = False,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -2549,13 +2832,35 @@ class LatLonCGridOceanModel:
         active). Defaults (``return_tke=False``) ⇒ returns the state only ⇒
         bit-identical.
 
+        POST-MIXING TKE (``TKEConfig.buoyancy_timing="post_mixing_veros"``,
+        the Veros step order): the fallback K-profile computation returns the
+        phase-1 :class:`TKEPostMixingContext` (kappa from the CARRIED TKE =
+        Veros set_tke_diffusivities at tau), the tracer/momentum solves run
+        on those profiles, and the TKE budget is then solved HERE, AFTER the
+        tracer solve — charging the POST-mixing N² (Veros Nsqr[taup1],
+        thermodynamics.py:385) plus the surface buoyancy-flux ``P_diss_v``
+        slot (thermodynamics.py:386-388).  ``K_diss_v_w`` is an optional
+        PRE-COMPUTED realized friction-dissipation field (interior
+        interfaces, cell-centred) for ``shear_production="realized_veros"``
+        when this call does not solve momentum itself (the additive-friction
+        AB2 split); ``return_K_diss_v=True`` (momentum-only call,
+        ``return_tke=False``) makes the method return
+        ``(state_new, K_diss_v)`` so ``_ab2_step`` can thread it into the
+        tracer call.  All defaults ⇒ bit-identical.
+
         Called only when ``config.implicit_vertical_mixing == True``.
         """
         if dt_mom is None:
             dt_mom = dt
+        if return_K_diss_v and return_tke:
+            raise ValueError(
+                "_apply_implicit_vertical_mixing: return_K_diss_v is for the "
+                "momentum-only call (return_tke must be False).")
         tke_new = None
+        _post_mixing = self._tke_post_mixing_active()
+        _tke_ctx = None
         from legoesm.ocean.physics.vertical_mixing import (
-            implicit_vertical_diffusion_ocean, build_dz_half,
+            implicit_vertical_diffusion_ocean_batched, build_dz_half,
             compute_vertical_K_profiles,
         )
         from legoesm.ocean.vertical import compute_ocean_jacobian
@@ -2566,6 +2871,13 @@ class LatLonCGridOceanModel:
         if K_v_phys is not None and A_v_phys is not None:
             # Fast path: use K profiles already computed by the physics
             # function, just add the config background floors.
+            if _post_mixing and do_tracers:
+                raise ValueError(
+                    "buoyancy_timing='post_mixing_veros' requires the "
+                    "fallback K-profile path (the TKE scheme must not "
+                    "surface K_v/A_v on the tendencies): the post-mixing "
+                    "TKE solve needs the phase-1 context from "
+                    "compute_vertical_K_profiles.")
             state.T.data.shape[-1]
             dtype = state.T.data.dtype
             K_v_cell = K_v_phys + jnp.asarray(self.config.K_v, dtype=dtype)
@@ -2618,6 +2930,12 @@ class LatLonCGridOceanModel:
                     tke_old=tke_old, dt_tke=dt_mom,
                     tke_source=tke_source, return_tke=True,
                 )
+                if _post_mixing:
+                    # Phase 1 only (Veros set_tke_diffusivities from the
+                    # carried tke[tau]): the third slot is the post-mixing
+                    # CONTEXT, not an updated TKE — the budget is solved
+                    # below, AFTER the tracer solve.
+                    _tke_ctx, tke_new = tke_new, None
             else:
                 K_v_cell, A_v_cell = compute_vertical_K_profiles(
                     cc_state, self.z_coord, surface_forcing, physics_config,
@@ -2674,16 +2992,8 @@ class LatLonCGridOceanModel:
                 _dS_surf = surface_tracer_forcing.dS_dt.data.astype(state.S.data.dtype)
                 T_solve_in = state.T.data + dt * _dT_surf * mask_3d
                 S_solve_in = state.S.data + dt * _dS_surf * mask_3d
-            T_new = implicit_vertical_diffusion_ocean(
-                T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
-            )
-            S_new = implicit_vertical_diffusion_ocean(
-                S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
-            )
-            T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
-            S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
 
-        # ---- Momentum (u at u-faces, v at v-faces) ----
+        # ---- Momentum coefficient inputs (u at u-faces, v at v-faces) ----
         # Interpolate A_v and dz from cell centers to face centers.  The
         # solver only needs dz to be positive (it clips internally) and
         # the resulting tridiagonal system is well-posed on any column
@@ -2694,7 +3004,10 @@ class LatLonCGridOceanModel:
             if _wet_if_vmix is not None:
                 A_v_cell = A_v_cell * _wet_if_vmix
             A_v_u = interp_cell_to_uface(A_v_cell)        # (n_lat, n_lon+1, nlev-1)
-            A_v_v = interp_to_v_points(A_v_cell)         # (n_lat+1, n_lon, nlev-1)
+            dz_u = interp_cell_to_uface(dz_cell)
+            # Fused v-interps: one sendrecv pair per cut for A_v + dz
+            # (audit lever O4; both are independent cell fields here).
+            A_v_v, dz_v = interp_to_v_points_multi((A_v_cell, dz_cell))
             if _wet_if_vmix is not None:
                 # FACE seafloor guard (partial cells): the cell→face AVERAGE
                 # leaves A_v_face = ½·A_deep at interfaces BELOW the shallower
@@ -2709,20 +3022,163 @@ class LatLonCGridOceanModel:
                     self.z_coord.is_active, self.grid)
                 A_v_u = A_v_u * _act_u3.astype(A_v_u.dtype)[..., 1:]
                 A_v_v = A_v_v * _act_v3.astype(A_v_v.dtype)[..., 1:]
-            dz_u = interp_cell_to_uface(dz_cell)
-            dz_v = interp_to_v_points(dz_cell)
             dz_half_u = build_dz_half(dz_u)
             dz_half_v = build_dz_half(dz_v)
             u_mask_3d = state.u_mask.data[..., jnp.newaxis]
             v_mask_3d = state.v_mask.data[..., jnp.newaxis]
-            u_new = implicit_vertical_diffusion_ocean(
-                state.u.data, A_v_u, dz_u, dz_half_u, dt_mom,
+
+        # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---
+        # Trace-time env switches (feature-gating exception: static
+        # Python `if`, baked into the compiled graph — flip BEFORE the
+        # first compile).  Field-batched solve measured a NON-win at
+        # production resolution (jobs 8459136/8459145: +16%/+8% at
+        # LL128 but -15%/-14% at LL192 — bandwidth-bound, batching adds
+        # intermediate traffic), so it stays opt-in; it solves all four
+        # fields in one call, hence only valid when BOTH gates are on.
+        from legoesm.ocean.physics.vertical_mixing import (
+            implicit_vertical_diffusion_ocean,
+            implicit_vertical_diffusion_ocean_pair,
+        )
+        _vmix_batched = (
+            os.environ.get("LEGOESM_VMIX_BATCHED", "0") == "1"
+            and do_tracers and do_momentum
+        )
+        if _vmix_batched:
+            T_new, S_new, u_new, v_new = (
+                implicit_vertical_diffusion_ocean_batched([
+                    (T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt),
+                    (S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt),
+                    (state.u.data, A_v_u, dz_u, dz_half_u, dt_mom),
+                    (state.v.data, A_v_v, dz_v, dz_half_v, dt_mom),
+                ])
             )
-            v_new = implicit_vertical_diffusion_ocean(
-                state.v.data, A_v_v, dz_v, dz_half_v, dt_mom,
-            )
+        else:
+            if do_tracers:
+                # T and S share the IDENTICAL tridiagonal matrix (same
+                # K_v_cell incl. any K33_iso fold + partial-cell wet
+                # mask, same dz/dz_half/dt), so the pair solve factors
+                # it ONCE — bit-identical outputs, one fewer
+                # coefficient build + forward-factor sweep (vmix is
+                # memory-bandwidth-bound; this REMOVES traffic where
+                # field-batching ADDED it).  LEGOESM_VMIX_TSPAIR=0
+                # restores the two separate solves (trace-time switch,
+                # same caveat as above).
+                if os.environ.get("LEGOESM_VMIX_TSPAIR", "1") != "0":
+                    T_new, S_new = implicit_vertical_diffusion_ocean_pair(
+                        T_solve_in, S_solve_in,
+                        K_v_cell, dz_cell, dz_half_cell, dt,
+                    )
+                else:
+                    T_new = implicit_vertical_diffusion_ocean(
+                        T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
+                    )
+                    S_new = implicit_vertical_diffusion_ocean(
+                        S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
+                    )
+            if do_momentum:
+                u_new = implicit_vertical_diffusion_ocean(
+                    state.u.data, A_v_u, dz_u, dz_half_u, dt_mom,
+                )
+                v_new = implicit_vertical_diffusion_ocean(
+                    state.v.data, A_v_v, dz_v, dz_half_v, dt_mom,
+                )
+        if do_tracers:
+            T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
+            S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
+        if do_momentum:
             u_new = jnp.where(u_mask_3d > 0.5, u_new, state.u.data)
             v_new = jnp.where(v_mask_3d > 0.5, v_new, state.v.data)
+            if self._tke_realized_kdiss_active() and (
+                    return_K_diss_v or (K_diss_v_w is None and do_tracers)):
+                # Realized implicit-friction dissipation K_diss_v (Veros
+                # friction.py:131-151): κ_f·(∂u_new/∂z)·(∂u_old/∂z) per face
+                # interface with the SAME viscosity/metric the solve used,
+                # averaged faces→centres (Veros ugrid_to_tgrid /
+                # vgrid_to_tgrid; index-based 0.5/0.5 like the shared
+                # _kediss_from_momentum_tendency mapping). No clamp (Veros
+                # applies none).
+                from legoesm.ocean.physics.vertical_mixing.tke import (
+                    realized_implicit_friction_dissipation,
+                )
+                _diss_u = realized_implicit_friction_dissipation(
+                    state.u.data, u_new, A_v_u, dz_half_u)
+                _diss_v = realized_implicit_friction_dissipation(
+                    state.v.data, v_new, A_v_v, dz_half_v)
+                K_diss_v_w = (
+                    0.5 * (_diss_u[:, :-1, :] + _diss_u[:, 1:, :])
+                    + 0.5 * (_diss_v[:-1, :, :] + _diss_v[1:, :, :]))
+
+        # ---- POST-MIXING TKE solve (Veros integrate_tke placement) ----
+        # Runs AFTER the implicit tracer solve, in the call that owns the
+        # tracers (the authoritative TKE site): recompute the SIGNED
+        # adiabatic N² from the MIXED T/S over the dzw slot (Veros
+        # calc_eq_of_state(taup1) → Nsqr[taup1]), build the surface
+        # buoyancy-flux P_diss_v slot from the post-mixing surface T/S +
+        # the implicit surface forcing (surf_densityf → diag_P_diss_v),
+        # and run ONE backward-Euler TKE step with dt = dt_mom.
+        if _post_mixing and do_tracers and _tke_ctx is not None:
+            from legoesm.ocean.eos import (
+                compute_buoyancy_frequency_adiabatic,
+            )
+            from legoesm.ocean.physics.vertical_mixing.tke import (
+                compute_surface_buoyancy_P_diss_v, tke_integrate_post_mixing,
+            )
+            tke_cfg = self.config.physics.vertical_mixing.tke
+            T_n2, S_n2 = T_new, S_new
+            if isinstance(self.z_coord, OceanPartialCellCoordinate):
+                # Same sub-seafloor guard the phase-1 N² used (k_profiles):
+                # extend the deepest ACTIVE T/S downward so the seafloor
+                # interface reads neutral, not the T=S=0 rock fill.
+                from legoesm.ocean.vertical import extrapolate_below_seafloor
+                T_n2 = extrapolate_below_seafloor(T_n2, self.z_coord)
+                S_n2 = extrapolate_below_seafloor(S_n2, self.z_coord)
+            # Veros recomputes Nsqr[taup1] at the STATIC reference pressures
+            # (press = abs(zt)); reuse the phase-1 cell pressures (the
+            # hydrostatic p of the pre-solve state — the mixing step does
+            # not move the pressure field).
+            N2_post = compute_buoyancy_frequency_adiabatic(
+                T_n2, S_n2, _tke_ctx.p_cell,
+                self.z_coord.dz_ref, J_cell,
+                eos_fn=_tke_ctx.eos_fn, rho_ref=_tke_ctx.rho_0,
+                g=_tke_ctx.g, dz_half=_tke_ctx.dz_half,
+            )
+            # Surface kinematic fluxes [K·m/s] from the implicit surface
+            # forcing RATE × the actual top-cell thickness (Veros
+            # forc_temp_surface = dzt·rate; thermodynamics.py:276). The
+            # penetrating-shortwave column below the top cell is NOT folded
+            # (Veros routes it via temp_source, not forc_temp_surface).
+            _sfc_T = T_new[..., 0]
+            _sfc_S = S_new[..., 0]
+            if surface_tracer_forcing is not None:
+                _dz_top = dz_cell[..., 0]
+                _forc_T = (surface_tracer_forcing.dT_dt.data[..., 0]
+                           * _dz_top * state.land_mask.data)
+                _forc_S = (surface_tracer_forcing.dS_dt.data[..., 0]
+                           * _dz_top * state.land_mask.data)
+            else:
+                _forc_T = jnp.zeros_like(_sfc_T)
+                _forc_S = jnp.zeros_like(_sfc_S)
+            P_diss_v_sfc = compute_surface_buoyancy_P_diss_v(
+                _sfc_T, _sfc_S, _tke_ctx.p_cell[..., 0],
+                _forc_T, _forc_S, _tke_ctx.eos_fn,
+                rho_0=_tke_ctx.rho_0, g=_tke_ctx.g,
+            ) * state.land_mask.data
+            if self._tke_realized_kdiss_active():
+                if K_diss_v_w is None:
+                    raise ValueError(
+                        "shear_production='realized_veros' needs the realized "
+                        "K_diss_v: solve momentum in this call "
+                        "(do_momentum=True) or pass K_diss_v_w from the "
+                        "momentum-only call (return_K_diss_v=True).")
+                _kdiss = K_diss_v_w
+            else:
+                _kdiss = _tke_ctx.K_M_old * _tke_ctx.shear_sq
+            tke_new = tke_integrate_post_mixing(
+                _tke_ctx, N2_post, _kdiss, P_diss_v_sfc,
+                dt=dt_mom, cfg=tke_cfg, external_source=tke_source,
+            )
+            if _wet_if_vmix is not None:
+                tke_new = tke_new * _wet_if_vmix
 
         state_out = state._replace(
             u=state.u.replace(data=u_new),
@@ -2730,6 +3186,8 @@ class LatLonCGridOceanModel:
             T=state.T.replace(data=T_new),
             S=state.S.replace(data=S_new),
         )
+        if return_K_diss_v:
+            return state_out, K_diss_v_w
         if return_tke:
             return state_out, tke_new
         return state_out
@@ -3205,12 +3663,25 @@ class LatLonCGridOceanModel:
                 # untouched.  Measured (.physics-validator/momentum_fair/): the
                 # additive form collapses the realized momentum-increment L2
                 # ratio 4.8→1.6 and lifts corr 0.11→0.44 vs Veros.
-                state_fric = self._apply_implicit_vertical_mixing(
+                # Post-mixing TKE with the REALIZED K_diss_v: the friction
+                # increments live in THIS momentum-only call (BE(u^n) − u^n),
+                # so the realized dissipation is computed here and threaded
+                # into the tracer call (the authoritative TKE site) —
+                # matching Veros, where friction (K_diss_v) runs before
+                # integrate_tke (veros.py:266→285). Off ⇒ no extra return ⇒
+                # bit-identical.
+                _want_kdv = self._tke_realized_kdiss_active()
+                _fric = self._apply_implicit_vertical_mixing(
                     state, dt, surface_forcing,
                     K_v_phys=K_v_phys, A_v_phys=A_v_phys,
                     dt_mom=dt_mom, do_tracers=False,
                     tke_old=_tke_old,
+                    return_K_diss_v=_want_kdv,
                 )
+                if _want_kdv:
+                    state_fric, _kdiss_v_w = _fric
+                else:
+                    state_fric, _kdiss_v_w = _fric, None
                 du_impl = state_fric.u.data - state.u.data
                 dv_impl = state_fric.v.data - state.v.data
                 _trac = self._apply_implicit_vertical_mixing(
@@ -3221,6 +3692,7 @@ class LatLonCGridOceanModel:
                     do_momentum=False,
                     tke_old=_tke_old, tke_source=tke_source,
                     return_tke=_tke_prog,
+                    K_diss_v_w=_kdiss_v_w,
                 )
                 if _tke_prog:
                     state_ab2, tke_new_ab2 = _trac

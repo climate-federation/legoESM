@@ -101,7 +101,9 @@ def create_grid(grid_type: str, resolution: int | None = None, **kwargs: Any):
 
 
 #: Regional / limited-area grids instantiable via :func:`create_regional_grid`.
-REGIONAL_GRID_TYPES: tuple[str, ...] = ("latlon", "mercator", "mpas", "cubed_sphere")
+REGIONAL_GRID_TYPES: tuple[str, ...] = (
+    "latlon", "latlon_stretched", "mercator", "mpas", "cubed_sphere",
+)
 
 
 def create_regional_grid(grid_type: str, **kwargs: Any):
@@ -120,6 +122,10 @@ def create_regional_grid(grid_type: str, **kwargs: Any):
     ``latlon``    ``create_regional_latlon_grid`` (n_lat, n_lon,  ``(grid, mask)``
                   lat_south, lat_north, lon_west=, lon_east=,
                   periodic_x=)
+    ``latlon_stretched`` ``create_stretched_latlon_grid`` (dy_deg, ``(grid, mask)``
+                  n_lon, lat_south, lon_west=, lon_east=,
+                  periodic_x=) — arbitrary per-row meridional
+                  spacing (e.g. Vinokur)
     ``mercator``  ``create_mercator_grid`` (n_lon, lat_max_deg,   ``grid``
                   lon_west_deg=, lon_east_deg=)
     ``mpas``      ``create_regional_voronoi_mesh`` (lon_range,     ``grid``
@@ -128,8 +134,8 @@ def create_regional_grid(grid_type: str, **kwargs: Any):
                   return_cdgrid=)
     ============  ==============================================  =================
 
-    Note ``latlon`` returns a ``(grid, wall_mask)`` tuple (the others return a
-    bare grid object — they carry their boundary masking differently).  Raises
+    Note ``latlon`` / ``latlon_stretched`` return a ``(grid, wall_mask)`` tuple
+    (the others return a bare grid object — they carry their boundary masking differently).  Raises
     ``ValueError`` for an unknown *grid_type*.  Doubly-periodic *idealized* boxes
     (LES / SCM / RCE) are a distinct extent — use
     ``legoesm.grids.plane.create_plane_grid``.
@@ -138,6 +144,10 @@ def create_regional_grid(grid_type: str, **kwargs: Any):
         from legoesm.grids.latlon import create_regional_latlon_grid
 
         return create_regional_latlon_grid(**kwargs)
+    if grid_type == "latlon_stretched":
+        from legoesm.grids.latlon import create_stretched_latlon_grid
+
+        return create_stretched_latlon_grid(**kwargs)
     if grid_type == "mercator":
         from legoesm.grids.latlon import create_mercator_grid
 

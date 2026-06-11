@@ -99,7 +99,10 @@ def compute_vertical_K_profiles(
         interior interfaces, in m²/s.
     (K_v, A_v, tke_new) : when ``return_tke=True`` — ``tke_new`` is the updated
         prognostic TKE field ``(..., nlev-1)`` when the active scheme is the
-        prognostic TKE closure, else ``None``.
+        prognostic TKE closure, else ``None``. Under
+        ``TKEConfig.buoyancy_timing="post_mixing_veros"`` the third slot is
+        instead a :class:`...tke.TKEPostMixingContext` (phase-1 kappa from the
+        carried TKE; the model step advances the TKE AFTER the tracer solve).
     """
     T = state.T.data
     nlev = T.shape[-1]
@@ -194,7 +197,10 @@ def compute_vertical_K_profiles(
     if _wet_if is not None:
         K_v_total = K_v_total * _wet_if
         A_v_total = A_v_total * _wet_if
-        if tke_new is not None:
+        if tke_new is not None and isinstance(tke_new, jnp.ndarray):
+            # Post-mixing TKE returns a TKEPostMixingContext in this slot
+            # (phase 1; no tke array to mask yet) — the model step masks the
+            # post-solve tke_new with the same wet-interface guard.
             tke_new = tke_new * _wet_if
 
     if return_tke:
@@ -288,6 +294,15 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             )
         tke_cfg = vmix_cfg.tke
         prognostic = bool(getattr(tke_cfg, "prognostic", False))
+        # Veros metric slots (TKEConfig.veros_dz_slots): the surface-flux
+        # injection volume is Veros's surface W half-volume 0.5·dzw_top
+        # (tke.py:225) = the distance from z=0 down to the top cell centre,
+        # scaled by the z-star Jacobian like every other thickness. On a
+        # Veros u_centered coordinate -z_full_ref[0] IS 0.5·dzw_top exactly
+        # (dzw_top = 2·dzt_top - dzw[-2] = -2·zt_top, numerics.py:21).
+        dz_surface = None
+        if getattr(tke_cfg, "veros_dz_slots", False):
+            dz_surface = (-z_coord.z_full_ref[0]) * J
         if prognostic:
             # PROGNOSTIC mode (Veros enable_tke): ONE backward-Euler step per
             # model step, seeded from the carried ``tke_old``, with dt = the
@@ -311,6 +326,31 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     leading + (z_coord.n_levels - 1,),
                     tke_cfg.tke_background, dtype=T_data.dtype,
                 )
+            if (getattr(tke_cfg, "buoyancy_timing", "pre_mixing")
+                    == "post_mixing_veros"):
+                # POST-MIXING Veros step order (buoyancy_timing=
+                # "post_mixing_veros"): phase 1 only — K_M/K_H for the
+                # tracer + momentum solves from the CARRIED tke (Veros
+                # set_tke_diffusivities, tke[tau]). The TKE field is NOT
+                # advanced here; the model step runs
+                # ``tke_integrate_post_mixing`` AFTER the implicit tracer
+                # solve on the POST-mixing N². The third slot returns the
+                # :class:`TKEPostMixingContext` (the phase-1 ingredients)
+                # instead of a tke array.
+                from legoesm.ocean.physics.vertical_mixing.tke import (
+                    tke_set_diffusivities,
+                )
+                K_M_old, K_H_old, _tke_ctx = tke_set_diffusivities(
+                    u_data, v_data, T_data, S_data, rho, dz_half,
+                    tke_old=_tke_seed,
+                    tau_x_surface=tau_x, tau_y_surface=tau_y,
+                    cfg=tke_cfg,
+                    rho_0=constants_config.rho_0, g=constants_config.g,
+                    p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J,
+                    eos_fn=eos_fn, z_interface=z_coord.z_half_ref[1:-1],
+                    dz_surface=dz_surface,
+                )
+                return K_H_old, K_M_old, _tke_ctx
             tke_out = tke_vertical_mixing(
                 u_data, v_data, T_data, S_data, rho, dz_half,
                 tke_old=_tke_seed,
@@ -321,6 +361,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J, eos_fn=eos_fn,
                 z_interface=z_coord.z_half_ref[1:-1],
                 external_source=tke_source,
+                dz_surface=dz_surface,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -340,6 +381,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             # floor (Veros enable_kappaH_profile); z_half_ref is negative
             # downward, interior interfaces drop the surface (k=0) + bottom.
             z_interface=z_coord.z_half_ref[1:-1],
+            dz_surface=dz_surface,
         )
         return tke_out.K_H, tke_out.K_M, None
 

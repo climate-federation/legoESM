@@ -1669,6 +1669,8 @@ def compute_buoyancy_frequency_adiabatic(
     eos_fn=None,
     rho_ref: float = rho_0,
     g: float = constants.g,
+    *,
+    dz_half: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""Static-stability ``N^2`` via adiabatic parcel displacement.
 
@@ -1725,6 +1727,17 @@ def compute_buoyancy_frequency_adiabatic(
         Reference density [kg/m^3].
     g : float
         Gravitational acceleration [m/s^2].
+    dz_half : array or None (keyword-only)
+        ACTUAL distance between adjacent cell centres [m], shape
+        ``(..., nlev-1)`` (already Jacobian-scaled). This is the slot Veros
+        divides by — ``dzw`` (thermodynamics.py:99) — which on a stretched
+        u_centered grid is NOT the midpoint interface spacing. ``None``
+        (default, BIT-IDENTICAL legacy): the midpoint reconstruction
+        ``0.5*(dz·J)[k] + 0.5*(dz·J)[k+1]`` is used, preserving every
+        existing caller byte-for-byte (the EKE/Visbeck adiabatic path in
+        ``lateral_mixing/_gm_redi_common.py`` and legacy TKE configs).
+        Callers on a Veros-faithful coordinate (``TKEConfig.veros_dz_slots``)
+        pass their ``dz_half`` so N² is taken over the true centre spacing.
 
     Returns
     -------
@@ -1734,8 +1747,13 @@ def compute_buoyancy_frequency_adiabatic(
     if eos_fn is None:
         eos_fn = wright_eos
 
-    dz_actual = dz * jacobian[..., jnp.newaxis]
-    dz_interface = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
+    if dz_half is None:
+        # Legacy midpoint reconstruction (bit-identical default).
+        dz_actual = dz * jacobian[..., jnp.newaxis]
+        dz_interface = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
+    else:
+        # Veros dzw slot: the caller's actual centre-to-centre spacing.
+        dz_interface = dz_half
 
     # Common reference pressure = the UPPER cell's centre pressure (Veros
     # press[k] = abs(zt[k])).

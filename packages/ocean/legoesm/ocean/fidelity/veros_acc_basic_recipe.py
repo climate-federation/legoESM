@@ -91,16 +91,34 @@ ACC_BASIC_GM_REDI_CONFIG = GMRediConfig(
     implicit_K33=True,           # Veros applies the vertical K_33 implicitly
     K_iso_steep=500.0,           # <-> Veros K_iso_steep (acc_basic.py:42)
     slope_density="neutral",     # Veros neutral (locally-referenced) slopes
+    veros_triad_weights=True,    # Veros dzw(pair)/(4 dzt) triad weights (see doc)
+    double_redi_diagonal=True,   # Veros adds K_11/K_22 in BOTH the iso and skew
+    #                              passes (acc_basic runs neutral+skew; see the
+    #                              GMRediConfig field doc) — 2× horiz. diagonal.
     eke=None,                    # enable_eke=False -> constant kappa, no EKE
 )
 
 # (2) TKE with enable_Prandtl_tke=False: constant Prandtl = Prandtl_tke0 = 10.
 #     Everything else identical to acc's TKE (prognostic carried TKE, same
 #     c_k/c_eps/alpha_tke/mxl_min/tke_mxl_choice/kappaM_min/kappaH_min/
-#     enable_kappaH_profile, adiabatic N^2 for the convective ventilation).
-#     EKE-derived TKE sources are OFF (enable_eke=False -> Veros adds no
-#     eke_diss_tke; enable_idemix=False -> no K_diss_bot into TKE either,
-#     tke.py:154-166).
+#     enable_kappaH_profile, adiabatic N^2 for the convective ventilation,
+#     Veros vertical-metric slots).
+#
+#     Recycled TKE sources under EKE off + IDEMIX off — Veros's no-idemix /
+#     no-EKE branch (tke.py:168-180) is NOT source-free; it adds
+#         forc += K_diss_gm + K_diss_h - P_diss_skew      (tke.py:176)
+#         forc += K_diss_bot                              (tke.py:178)
+#     legoESM routes what it can surface today:
+#       - K_diss_bot (bottom-drag KE extraction): surfaced as the tendency
+#         diagnostic ``tend.K_diss_bot`` and routed via
+#         ``source_bottom_drag_diss=True`` (the existing tke_source seam) —
+#         the SAME wiring the acc recipe uses.
+#       - K_diss_gm + K_diss_h - P_diss_skew: NO TKE routing seam exists yet.
+#         K_diss_h is only computed as an EKE source (eke_cfg.source_kdiss_h,
+#         which never runs here: eke=None); K_diss_gm and P_diss_skew are not
+#         surfaced as W-grid dissipation diagnostics at all (the realized GM
+#         conversion exists only inside the 3-D EKE step). DOCUMENTED GAP —
+#         building that plumbing is out of scope for this recipe.
 ACC_BASIC_TKE_CONFIG = TKEConfig(
     c_k=0.1,
     c_eps=0.7,
@@ -112,13 +130,37 @@ ACC_BASIC_TKE_CONFIG = TKEConfig(
     kappaH_min=2.0e-5,
     enable_kappaH_profile=True,
     n2_mode="adiabatic",         # Veros adiabatic static stability (convection)
+    # Veros vertical-metric slots (the TKE metric-consistency fix; see
+    # ACC_TKE_CONFIG + .physics-validator/accbasic_regression/): adiabatic
+    # N² over dzw, mxl growth allowance + diffusion face gradients over dzt
+    # with dzw control volumes, surface injection over 0.5·dzw_top. Without
+    # this, the u_centered z-coordinate flips the chain onto a spurious
+    # deep-TKE branch (mean TKE ×137, ACC_Basic KE ratio 0.98→0.77).
+    veros_dz_slots=True,
+    # Veros TKE positivity (tke.py:224-245; see ACC_TKE_CONFIG): explicit
+    # buoyancy sink, interior TKE may go negative (energy debt), surface
+    # level clamped at zero only — the legacy per-step floor was a spurious
+    # energy source feeding the deep TKE reservoir.
+    positivity="veros_surface_correction",
+    # Veros K-from-TKE amplitude (tke.py:73; see ACC_TKE_CONFIG): the
+    # legacy √(2e) double-counts the √2 inside the buoyancy length.
+    kappa_convention="veros_sqrte",
     # enable_Prandtl_tke=False  ==>  CONSTANT Prandtl = Prandtl_tke0 = 10.
     prandtl_mode="constant",
     Prandtl_tke0=10.0,
     prognostic=True,             # Veros enable_tke prognostic carried-TKE form
-    # EKE off + IDEMIX off => Veros adds NO recycled energy to the TKE forc.
+    # EKE off => no eke_diss_iw; but Veros STILL recycles K_diss_bot (+ the
+    # un-routable K_diss_gm/K_diss_h/P_diss_skew, see block comment above).
     source_eke_diss=False,
-    source_bottom_drag_diss=False,
+    source_bottom_drag_diss=True,
+    # Veros step order (see ACC_TKE_CONFIG): tracer kappa from the carried
+    # tke[tau], TKE solved AFTER the implicit T/S mixing on the POST-mixing
+    # Nsqr[taup1] + the surface buoyancy-flux P_diss_v slot
+    # (thermodynamics.py:385-388) — the identified dominant ACC_Basic
+    # residual (.physics-validator/tke_metric_fix/).
+    buoyancy_timing="post_mixing_veros",
+    # Realized implicit-friction K_diss_v (friction.py:131-151), not K_M·S².
+    shear_production="realized_veros",
 )
 
 

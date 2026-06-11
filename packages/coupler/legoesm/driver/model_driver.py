@@ -1958,11 +1958,14 @@ class ModelDriver:
             )
             return
 
-        # Resolution and vertical level count drive the
-        # ppermute / all_gather auto-selection inside
-        # ``activate_spmd_halo_backend``.  ``self.state.T.data`` has
-        # shape ``(6, n, n, nlev)`` for cubed-sphere hydrostatic
-        # states.
+        # Resolution and vertical level count are logging-only inputs
+        # to ``activate_spmd_halo_backend`` — the old volume-based
+        # ppermute/all_gather auto-selection is RETIRED (the all_gather
+        # variant replicates ALL compute, HLO probe job 8456476;
+        # ppermute is the only auto-selectable exchange, all_gather is
+        # an explicit ``LEGOESM_SPMD_FORCE_ALLGATHER=1`` diagnostic).
+        # ``self.state.T.data`` has shape ``(6, n, n, nlev)`` for
+        # cubed-sphere hydrostatic states.
         n_face = int(self.state.T.data.shape[1])
         nlev = (
             int(self.state.T.data.shape[-1])
@@ -4186,6 +4189,48 @@ class ModelDriver:
         _seg_lat = self._physics_lat if self._physics_lat is not None else self._grid_lat
         _seg_lon = self._physics_lon if self._physics_lon is not None else self._grid_lon
 
+        # Single-process multi-GPU SPMD (third replication site — the
+        # moist/AMIP segment path): hand the device config to
+        # ``build_segment_fn`` so the compiled segment pins explicit
+        # carry/forcing in/out shardings instead of silently compiling
+        # replicated carry compute on every device.  Gated to exactly
+        # the ``_setup_parallel`` SPMD branch that face-sharded the
+        # state via ``shard_state``: single-node (not MPI-distributed),
+        # more than one device, a live mesh with a ``"face"`` axis
+        # (the shared face-sharding leaf policy), and no
+        # replicated-dynamics owned-face decomposition.  Everything
+        # else (single device, MPI ranks, lat-lon band, voronoi,
+        # spectral level mesh) passes ``None`` — byte-identical legacy
+        # behaviour, including the non-JIT ``.raw`` training contract.
+        # Sub-face tiling is excluded for now (codex r1): the tiled
+        # SPMD halo path is unvalidated — ``_maybe_activate_spmd_halo_
+        # backend`` and the scaling bench both restrict to face-only
+        # ``tiling == (1, 1)``; widen all three together once tiled
+        # halo exchange has HLO/tripwire coverage.
+        #
+        # Ensembles (``ensemble_size > 1``) are excluded (codex r4): the
+        # segment is then dispatched under ``jax.vmap`` (see the ensemble
+        # branch below), so the carry leaves are ``BatchTracer``s and the
+        # segment's tracer guard (correctly) refuses to pin shardings from
+        # a tracer's abstract layout — leaving pinning OFF, which is the
+        # silent-replication failure this gate exists to prevent.  An
+        # ensemble-aware face-sharded-under-vmap path is a separate effort
+        # (the ensemble axis is leading, not the face axis); until it has
+        # HLO/tripwire coverage, ensemble SPMD keeps the legacy donating
+        # kernels (no behaviour change vs before this fix).
+        _seg_device_config = None
+        if (
+            self._device_config is not None
+            and not self._device_config.is_distributed
+            and self._device_config.n_devices > 1
+            and self._device_config.mesh is not None
+            and "face" in getattr(self._device_config.mesh, "axis_names", ())
+            and getattr(self._device_config, "tiling", (1, 1)) == (1, 1)
+            and self._owned_face_ids is None
+            and self._ensemble_size <= 1
+        ):
+            _seg_device_config = self._device_config
+
         run_segment = build_segment_fn(
             model=self.model,
             step_unified=step_unified,
@@ -4220,6 +4265,7 @@ class ModelDriver:
             ghg_vmr_override=ghg_vmr,
             owned_face_ids=self._owned_face_ids,
             hs_newtonian_relax=self._hs_newtonian_relax,
+            device_config=_seg_device_config,
         )
 
         logger.info(
@@ -4484,6 +4530,7 @@ class ModelDriver:
                         ghg_vmr_override=ghg_vmr,
                         owned_face_ids=self._owned_face_ids,
                         hs_newtonian_relax=self._hs_newtonian_relax,
+                        device_config=_seg_device_config,
                     )
 
             # Checkpoint

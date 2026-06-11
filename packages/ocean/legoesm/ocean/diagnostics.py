@@ -11,7 +11,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.ocean.eos import compute_buoyancy_frequency, rho_0 as _RHO_0
+from legoesm.ocean.eos import compute_buoyancy_frequency, rho_0 as _RHO_0, wright_eos
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
 
@@ -209,3 +209,160 @@ def isotropic_enstrophy_spectrum(
     k, spec = _isotropic_spectrum_2d(zeta, dx, detrend=detrend)
 
     return k, 0.5 * spec
+
+
+# ============================================================================
+# Mixed-layer depth (de Boyer Montegut 2004/2022; Treguier et al. 2023 OMIP)
+# ============================================================================
+
+
+def mixed_layer_depth(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    z_centers: jnp.ndarray,
+    *,
+    delta_sigma: float = 0.03,
+    ref_depth_m: float = 10.0,
+    wet_mask: jnp.ndarray | None = None,
+    bottom_depth: jnp.ndarray | None = None,
+    eos_fn=wright_eos,
+    p_ref_pa: float = 0.0,
+) -> jnp.ndarray:
+    """Density-threshold mixed-layer depth [m] (de Boyer Montegut method).
+
+    MLD = shallowest depth below ``ref_depth_m`` where the potential density
+    exceeds the value at the reference depth by ``delta_sigma``::
+
+        MLD = min{ z > z_ref : sigma_theta(z) - sigma_theta(z_ref) >= delta_sigma }
+
+    with linear interpolation in z to the exact crossing, anchored on a virtual
+    reference point ``(z_ref, dsigma=0)`` so the search starts at 10 m rather than
+    the surface.  This is the OMIP / de Boyer Montegut (2022) diagnostic used by
+    Treguier et al. (2023, GMD 16:3849).
+
+    THRESHOLD: ``delta_sigma`` default 0.03 kg/m^3 is the de Boyer Montegut /
+    Treguier literature value.  NEMO ORCA1 RUN_REF writes ``mldr10_1`` with
+    ``dsigma = 0.01`` wrt 10 m, so a comparison against that field MUST pass
+    ``delta_sigma=0.01`` (a larger threshold gives a DEEPER MLD, so 0.03-vs-0.01
+    would bias the model deep).
+
+    Parameters
+    ----------
+    T, S : array, shape (..., nlev)
+        Potential temperature [degC] and salinity [PSU] at level centres.
+    z_centers : array, shape (nlev,)
+        Level-centre depths [m, positive down], strictly increasing.
+    delta_sigma : float
+        Potential-density threshold [kg/m^3].
+    ref_depth_m : float
+        Reference depth [m] for the density anomaly (10 m, OMIP standard).
+    wet_mask : array, shape (..., nlev) or None
+        Per-level ocean mask in {0,1}.  Dry levels are excluded from the search
+        and the reference interpolation.  ``None`` -> all wet.
+    bottom_depth : array, shape (...) or None
+        Per-column sea-floor depth [m] (e.g. ``H_bathy``).  Used as the MLD when
+        the column is fully mixed (no crossing) -- NEMO/dBM convention.  ``None``
+        -> deepest wet level centre (underestimates by up to half a bottom cell;
+        a logged approximation, prefer passing H_bathy).
+    eos_fn : callable
+        ``fn(T, S, p) -> rho`` [kg/m^3], p in Pa.  Default ``wright_eos`` (the
+        nonlinear seawater EOS) -- use it for NEMO-method parity regardless of
+        what EOS the run's dynamics used.
+    p_ref_pa : float
+        Reference pressure for the potential density [Pa].  0.0 = sigma-theta
+        referenced to the surface (dBM/NEMO convention); do NOT reference to the
+        10 m pressure (the criterion is wrt the 10 m density VALUE, not pressure).
+
+    Returns
+    -------
+    mld : array, shape (...)
+        Mixed-layer depth [m].  NaN over fully-dry (land) columns.
+    """
+    nlev = z_centers.shape[0]
+    lead = T.shape[:-1]
+    z = jnp.asarray(z_centers, dtype=T.dtype)                       # (nlev,)
+    if wet_mask is None:
+        wet = jnp.ones(T.shape, dtype=T.dtype)
+    else:
+        wet = jnp.asarray(wet_mask, dtype=T.dtype)
+
+    # Potential density anomaly sigma_theta = rho(T,S,p_ref) - 1000.
+    sigma = eos_fn(T, S, jnp.asarray(p_ref_pa, dtype=T.dtype)) - 1000.0   # (..., nlev)
+
+    # First wet level per column (shallowest ocean cell) -> its sigma is the
+    # fallback reference when the 10 m bracket levels are not both wet.
+    first_wet = jnp.argmax(wet > 0.5, axis=-1)                      # (...)
+    sigma_top_wet = jnp.take_along_axis(sigma, first_wet[..., None], axis=-1)[..., 0]
+
+    # Reference-depth density: linear interpolation of sigma onto ref_depth from
+    # the two bracketing level centres (shared 1-D z, so the weights are static --
+    # z_centers must be a CONCRETE array, not a jit-traced value).  If ref_depth
+    # is above the first centre (coarse grid) OR either bracket is DRY, fall back
+    # to the shallowest wet level's sigma (avoids interpolating through rock /
+    # inventing surface structure by extrapolation).
+    if float(z[0]) >= ref_depth_m:
+        sigma_ref = sigma_top_wet
+    else:
+        i_hi = int(jnp.searchsorted(z, jnp.asarray(ref_depth_m, dtype=z.dtype), side="right"))
+        i_hi = min(max(i_hi, 1), nlev - 1)
+        i_lo = i_hi - 1
+        w = (ref_depth_m - float(z[i_lo])) / (float(z[i_hi]) - float(z[i_lo]))
+        sigma_interp = (1.0 - w) * sigma[..., i_lo] + w * sigma[..., i_hi]
+        both_wet = (wet[..., i_lo] > 0.5) & (wet[..., i_hi] > 0.5)
+        sigma_ref = jnp.where(both_wet, sigma_interp, sigma_top_wet)
+
+    dsig = sigma - sigma_ref[..., jnp.newaxis]                      # (..., nlev)
+
+    # Search only wet levels strictly below the reference depth.
+    below_ref = (z > ref_depth_m)[(None,) * len(lead) + (slice(None),)]
+    searchable = (wet > 0.5) & jnp.broadcast_to(below_ref, dsig.shape)
+    exceed = (dsig >= delta_sigma) & searchable                    # (..., nlev)
+    has_crossing = jnp.any(exceed, axis=-1)                        # (...)
+
+    # First exceeding level (argmax of the boolean; 0 when none -> guarded below).
+    idx = jnp.argmax(exceed.astype(jnp.int32), axis=-1)            # (...)
+    idx_lo = jnp.maximum(idx - 1, 0)
+
+    z_k = z[idx]                                                   # (...)
+    z_km1 = z[idx_lo]
+    dsig_k = jnp.take_along_axis(dsig, idx[..., None], axis=-1)[..., 0]
+    dsig_km1 = jnp.take_along_axis(dsig, idx_lo[..., None], axis=-1)[..., 0]
+    wet_km1 = jnp.take_along_axis(wet, idx_lo[..., None], axis=-1)[..., 0]
+
+    # Lower bracket = the previous level ONLY if it is below the reference depth
+    # AND wet (a dry gap between 10 m and the crossing must not corrupt the
+    # interpolation); otherwise anchor on the virtual reference point (z_ref,
+    # dsig=0).
+    use_prev = (z_km1 > ref_depth_m) & (wet_km1 > 0.5)
+    z_lo = jnp.where(use_prev, z_km1, jnp.asarray(ref_depth_m, dtype=T.dtype))
+    dsig_lo = jnp.where(use_prev, dsig_km1, jnp.zeros_like(dsig_km1))
+
+    denom = dsig_k - dsig_lo
+    frac = jnp.where(jnp.abs(denom) > 1e-12,
+                     (delta_sigma - dsig_lo) / jnp.where(denom == 0.0, 1.0, denom),
+                     0.0)
+    frac = jnp.clip(frac, 0.0, 1.0)
+    mld_cross = z_lo + (z_k - z_lo) * frac
+
+    # Fully mixed (no crossing) -> bottom depth.
+    if bottom_depth is None:
+        # Deepest wet level centre per column (logged approximation).
+        wet_depth = jnp.where(wet > 0.5, z[(None,) * len(lead) + (slice(None),)], 0.0)
+        bottom = jnp.max(wet_depth, axis=-1)
+    else:
+        bottom = jnp.asarray(bottom_depth, dtype=T.dtype)
+
+    mld = jnp.where(has_crossing, mld_cross, bottom)
+
+    # A crossing can never be deeper than the sea floor (defensive against an
+    # inconsistent wet_mask/bottom_depth pair).
+    mld = jnp.minimum(mld, bottom)
+
+    # Shallow column (sea floor above the reference depth): the whole column is
+    # the mixed layer -> MLD = bottom depth.
+    mld = jnp.where(bottom < ref_depth_m, bottom, mld)
+
+    # Land / fully-dry columns -> NaN.
+    column_wet = jnp.any(wet > 0.5, axis=-1)
+    mld = jnp.where(column_wet, mld, jnp.nan)
+    return mld

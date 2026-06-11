@@ -69,9 +69,15 @@ def test_prandtl_off_maps_to_constant_prandtl():
     # Prognostic carried TKE (Veros enable_tke), adiabatic N^2 for convection.
     assert tke.prognostic is True
     assert tke.n2_mode == "adiabatic"
-    # EKE off + IDEMIX off -> Veros adds NO recycled energy to the TKE forc.
+    # EKE off -> no eke_diss_iw recycling; but Veros's no-idemix branch
+    # STILL adds K_diss_bot to the TKE forc (tke.py:178) — routed via the
+    # existing source seam. (K_diss_gm + K_diss_h - P_diss_skew of
+    # tke.py:176 have no legoESM TKE routing yet; documented gap in the
+    # recipe.)
     assert tke.source_eke_diss is False
-    assert tke.source_bottom_drag_diss is False
+    assert tke.source_bottom_drag_diss is True
+    # Veros vertical-metric slots (the TKE metric-consistency fix).
+    assert tke.veros_dz_slots is True
 
 
 def test_tke_shared_params_match_acc():

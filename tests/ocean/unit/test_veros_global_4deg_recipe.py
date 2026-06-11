@@ -453,3 +453,42 @@ def test_recipe_steps_once_finite_synthetic():
         arr = np.asarray(getattr(after, fld).data)
         assert np.all(np.isfinite(arr)), f"non-finite {fld} after one step"
     assert float(np.max(np.abs(np.asarray(after.eta.data)))) < 1e-6  # rigid lid
+
+
+def test_veros_u_centered_z_centres_recursion():
+    """Direct unit test for the bridge's u_centered_grid construction (review
+    hygiene item): hand-computed pyOM recursion on a tiny stretched grid, the
+    uniform-grid midpoint degeneration, and the global_4deg reference values.
+    """
+    import numpy as np
+    from legoesm.ocean.fidelity.veros_state_bridge import veros_u_centered_z_centres
+
+    # Hand-computed: dzt top-down [10, 20, 40] (bottom-up [40, 20, 10]).
+    # pyOM (bottom-up): zt[0] = dz[0]/2 = 20; zw[0] = 40
+    # zt[k] = 2*zw[k-1] - zt[k-1]: zt[1] = 80-20 = 60; zw[1] = 60
+    # zt[2] = 120-60 = 60 ... recompute carefully against numerics.py:
+    #   zw_raw = cumsum(bottom-up dz) = [40, 60, 70]
+    #   zt[0] = 40 - 40/2 = 20; zt[1] = 2*40 - 20 = 60; zt[2] = 2*60 - 60 = 60
+    # shift so surface interface = 0 (total depth 70): depths top-down =
+    #   70 - [60, 60, 20] reversed -> [10, 10, 50]
+    # (z is NEGATIVE-down: surface interface 0, centres below.)
+    z = veros_u_centered_z_centres(np.array([10.0, 20.0, 40.0]))
+    np.testing.assert_allclose(z, np.array([-10.0, -10.0, -50.0]), atol=1e-12)
+    # NOT the midpoints [-5, -20, -50]: the recursion differs on stretched grids.
+    assert abs(z[0] - (-5.0)) > 1.0
+
+    # Uniform grid degenerates to midpoints exactly.
+    zu = veros_u_centered_z_centres(np.full(6, 100.0))
+    np.testing.assert_allclose(zu, -(np.arange(6) * 100.0 + 50.0), atol=1e-12)
+
+    # global_4deg dzt (top-down): first interior centre-spacings dzw must be
+    # the documented alternating sequence [30, 110, 90, 190, 190] (NOT the
+    # midpoint [60, 85, 120, 165, 215]) — provenance: Veros numerics.py:9-22
+    # applied to the global_4deg ddz, verified bit-identical vs the banked
+    # oracle zt during review.
+    ddz_td = np.array([50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0,
+                       390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0])
+    zg = veros_u_centered_z_centres(ddz_td)
+    dzw = -np.diff(zg)   # positive spacings, top-down
+    np.testing.assert_allclose(dzw[:5], [30.0, 110.0, 90.0, 190.0, 190.0],
+                               atol=1e-9)

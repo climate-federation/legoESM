@@ -117,6 +117,7 @@ from legoesm.ocean.fidelity.veros_acc_recipe import (
     ACC_TKE_CONFIG,
     ACCRecipe,
 )
+from legoesm.ocean.fidelity.veros_state_bridge import veros_u_centered_z_centres
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +212,8 @@ GLOBAL4_EKE_CONFIG = EKEConfig(
     gm_source_mode="realized_signed",
     source_p_diss_iso=False,      # gated off (ACC verdict; see eke.py docs)
     n2_mode="adiabatic",
+    n2_over_dzw=True,             # Veros dzw slot for the adiabatic-N² divisor
+    #                               (deferred EKE-side twin of veros_dz_slots)
 )
 
 # GM/Redi: enable_neutral_diffusion + enable_skew_diffusion with
@@ -226,6 +229,12 @@ GLOBAL4_GM_REDI_CONFIG = GMRediConfig(
     implicit_K33=True,
     K_iso_steep=1000.0,           # Veros K_iso_steep     (ACC: 500)
     slope_density="neutral",
+    veros_triad_weights=True,     # Veros dzw(pair)/(4 dzt) triad weights, no
+    #                               boundary renormalization (see GMRediConfig).
+    double_redi_diagonal=True,    # Veros adds K_11/K_22 in BOTH the iso and
+    #                               skew passes (diffusion.py:40-47 +
+    #                               thermodynamics.py:430-437) — the oracle's
+    #                               2× horizontal diagonal (see GMRediConfig).
     eke=GLOBAL4_EKE_CONFIG,
 )
 
@@ -271,12 +280,21 @@ def build_global_4deg_grid() -> LatLonGrid:
 
 def build_global_4deg_z_coord() -> OceanZStarCoordinate:
     """15-level reference z-coordinate from the Veros ``ddz`` (k=0 surface =
-    50 m in legoESM ordering; Veros stores the reversed ``ddz[::-1]``)."""
+    50 m in legoESM ordering; Veros stores the reversed ``ddz[::-1]``).
+
+    Cell CENTRES (and hence ``dz_half_ref``, the vertical-gradient /
+    implicit-solve metric) use Veros's ``u_centered_grid`` recursion — NOT
+    midpoints — so every ∂/∂z, isoneutral slope and K_33 sees the oracle's
+    ``dzw`` (see :func:`..veros_state_bridge.veros_u_centered_z_centres`;
+    the same construction ``veros_zt_centres`` already uses for kbot).
+    Interfaces (``z_half_ref``) are identical in both conventions."""
     dz_ref = jnp.asarray(GLOBAL4_DDZ, dtype=jnp.float64)
     z_half_ref = jnp.concatenate([
         jnp.zeros(1, dtype=dz_ref.dtype), -jnp.cumsum(dz_ref),
     ])
-    z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
+    z_full_ref = jnp.asarray(
+        veros_u_centered_z_centres(np.asarray(GLOBAL4_DDZ)),
+        dtype=dz_ref.dtype)
     dz_half_ref = jnp.abs(z_full_ref[:-1] - z_full_ref[1:])
     return OceanZStarCoordinate(
         n_levels=NZ, H_max=H_MAX,
@@ -301,14 +319,9 @@ def veros_zt_centres() -> np.ndarray:
     up to 25 m and mis-buckets 56 columns' kbot — the u_centered form
     reproduces the oracle kbot histogram bit-identically
     ([1281, 569, 563, 407, 247, 120, 70, 46, 40, 41, 33, 36, 36, 40, 71, 0])."""
-    dzt = GLOBAL4_DDZ[::-1]
-    zw = np.zeros(NZ)
-    zw[1:] = np.cumsum(dzt[1:])
-    zt = np.zeros(NZ)
-    zt[0] = zw[0] - dzt[0] * 0.5
-    for k in range(1, NZ):
-        zt[k] = 2.0 * zw[k - 1] - zt[k - 1]
-    return zt - zw[-1]
+    # Shared canonical construction (also feeds build_global_4deg_z_coord's
+    # z_full_ref/dz_half_ref): top-down output, flipped here to Veros order.
+    return veros_u_centered_z_centres(np.asarray(GLOBAL4_DDZ))[::-1]
 
 
 def replicate_veros_kbot(bathymetry_xy: np.ndarray,

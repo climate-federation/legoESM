@@ -758,6 +758,71 @@ def _pad_with_pole_bc_lat_mpi_1d(
     return jnp.concatenate([south_slab, interior, north_slab], axis=0)
 
 
+def _pad_static_wall_bc_mpi(
+    interior, layout: LatLonBandLayout, halo: int,
+    south_value: float, north_value: float,
+):
+    """Trace-time host-MPI pad of a CONCRETE (non-Tracer) field.
+
+    Grid metrics (``grid.lat``, ``sin_lat``, tripolar ``dx_T`` rows, …)
+    are closed-over constants inside the jitted step, so their wall-BC
+    pads are static — yet the traced ``sendrecv`` op cannot be
+    constant-folded by XLA, so every operator call re-exchanged the
+    same bytes every step (census job 8459289: 14 metric pads/step, two
+    of them inside the barotropic PCG ``fori_loop`` body = 120 executed
+    sendrecv pairs/step at M=60).  This helper performs the exchange
+    ONCE at trace time with host mpi4py; the result is a compile-time
+    constant and the per-step collective disappears.
+
+    Deadlock safety: tracing is SPMD-synchronous — every rank traces
+    the same Python (same shapes/dtypes ⇒ same jit cache hits/misses;
+    the persistent XLA cache caches compilation, not tracing), so all
+    ranks execute the same eager ``Sendrecv`` schedule in the same
+    order.  Blocking host ``Sendrecv`` pairs match neighbour-to-
+    neighbour exactly like the traced path.
+
+    Wall-BC semantics only (constants at pole-touching boundaries —
+    callers with ``north_fold=True`` keep the traced path).
+
+    ``mpi4py`` is imported only inside the neighbor branches (codex
+    round-2 MAJOR): a single-rank armed-"mpi" backend (both neighbors
+    ``None`` — ``make_latlon_mpi_step`` arms even at n_ranks=1) must
+    keep working without the optional MPI stack, exactly like the
+    traced 1-D path.
+    """
+    arr = np.asarray(interior)
+    trailing = arr.shape[1:]
+
+    if layout.south_rank is None:
+        south = np.full((halo,) + trailing, south_value, dtype=arr.dtype)
+    else:
+        from mpi4py import MPI
+
+        south = np.empty((halo,) + trailing, dtype=arr.dtype)
+        MPI.COMM_WORLD.Sendrecv(
+            np.ascontiguousarray(arr[:halo]), dest=layout.south_rank,
+            sendtag=layout.rank,
+            recvbuf=south, source=layout.south_rank,
+            recvtag=layout.south_rank,
+        )
+    if layout.north_rank is None:
+        north = np.full((halo,) + trailing, north_value, dtype=arr.dtype)
+    else:
+        from mpi4py import MPI
+
+        north = np.empty((halo,) + trailing, dtype=arr.dtype)
+        MPI.COMM_WORLD.Sendrecv(
+            np.ascontiguousarray(arr[-halo:]), dest=layout.north_rank,
+            sendtag=layout.rank,
+            recvbuf=north, source=layout.north_rank,
+            recvtag=layout.north_rank,
+        )
+    return jnp.concatenate(
+        [jnp.asarray(south), jnp.asarray(interior), jnp.asarray(north)],
+        axis=0,
+    )
+
+
 def pad_with_pole_bc_lat_mpi(
     interior, layout: LatLonBandLayout, halo: int = 1,
     south_value: float = 0.0, north_value: float = 0.0,
@@ -792,6 +857,43 @@ def pad_with_pole_bc_lat_mpi(
     """
     if halo <= 0:
         return interior
+
+    # Static-metric constant folding (census job 8459289): a concrete
+    # (non-Tracer) 1-D input is a closed-over compile-time constant —
+    # its wall-BC pad is exchanged ONCE at trace time via host MPI
+    # instead of a per-step traced sendrecv that XLA cannot fold.
+    # Codex-hardened gate (review 2026-06-10):
+    #   * ndim == 1 only — covers every measured static pad (the
+    #     1-D lat metrics; census 8459289) while keeping the rarely-
+    #     trodden 2-D tripolar-metric pads on the traced path;
+    #   * boundary constants must ALSO be non-Tracers (a traced
+    #     south/north value must not be constant-folded);
+    #   * same halo <= n_lat_local guard as the traced path (a silent
+    #     short send would truncate/hang instead of raising).
+    # INVARIANT (same class as every traced mpi4jax collective in this
+    # module): tracing is SPMD-symmetric — every rank traces the same
+    # jitted functions in the same order.  Rank-subset tracing would
+    # block in the trace-time Sendrecv exactly like rank-subset
+    # EXECUTION blocks the traced sendrecv.  Set
+    # ``LEGOESM_LATLON_STATIC_METRIC_PAD=0`` to restore the traced
+    # exchange (A/B + kill-switch lever).
+    import os
+    if (
+        not north_fold
+        and interior.ndim == 1
+        and not isinstance(interior, jax.core.Tracer)
+        and not isinstance(south_value, jax.core.Tracer)
+        and not isinstance(north_value, jax.core.Tracer)
+        and os.environ.get("LEGOESM_LATLON_STATIC_METRIC_PAD", "1") != "0"
+    ):
+        if halo > interior.shape[0]:
+            raise ValueError(
+                f"pad_with_pole_bc_lat_mpi: halo={halo} exceeds "
+                f"n_lat_local={interior.shape[0]} on rank {layout.rank}"
+            )
+        return _pad_static_wall_bc_mpi(
+            interior, layout, halo, south_value, north_value,
+        )
 
     # 1D lat-axis metrics (sin_lat, cos_lat_v_interior, dx_cell, …)
     # don't have a lon axis to pole-fold over.  Build the result
@@ -835,6 +937,174 @@ def pad_with_pole_bc_lat_mpi(
         )
         padded = jnp.concatenate([padded[:-halo], north_const], axis=0)
     return padded
+
+
+# ============================================================================
+# Fused multi-field halo exchange (scaling campaign, audit lever O4)
+# ============================================================================
+#
+# The lat-lon band MPI step issues O(30) independent wall-BC cell pads per
+# step, each paying its own token-serialized sendrecv pair (~200-300 us
+# latency on Ginsburg CPU nodes — the measured rank-growing term of the
+# baroclinic phase, jobs 8458934/8458989).  mpi4jax sendrecvs do NOT
+# overlap (token chain), so N independent pads cost N x latency.  Fusing
+# independent same-dataflow-level pads into ONE concatenated sendrecv per
+# cut per dtype group cuts that latency term by the cluster size while
+# exchanging bit-identical bytes (concat -> sendrecv -> split is value-
+# identical to per-field sendrecvs; no arithmetic).
+#
+# Scope: scalar wall-BC fields ONLY (``pad_ns_zero`` /
+# ``pad_with_pole_bc_lat`` with constant boundary values, no
+# ``north_fold``, no ``is_vector_*``) — boundary slabs are constant fills,
+# so per-field flags reduce to per-field constants and the interior cut
+# exchange is flag-independent.  Pole-fold / tripolar-fold callers keep
+# the single-field path.
+
+
+def pad_with_pole_bc_lat_multi_mpi(
+    fields,
+    layout: LatLonBandLayout,
+    halo: int = 1,
+    south_values=None,
+    north_values=None,
+):
+    """Fused MPI variant of N independent ``pad_with_pole_bc_lat`` calls.
+
+    Pads every field in ``fields`` along the lat axis (axis 0) with
+    ``halo`` rows per side: constant ``south_values[i]`` /
+    ``north_values[i]`` at pole-touching boundaries, MPI-sendrecv'd
+    neighbour rows at interior partition cuts.  All fields must share
+    ``n_lat_local`` (axis 0); trailing shapes and dtypes may differ
+    (fields are flattened and concatenated per dtype group — ONE
+    sendrecv pair per cut per dtype group instead of one per field).
+
+    Value-identical to ``tuple(pad_with_pole_bc_lat_mpi(f, layout,
+    halo, sv, nv) for ...)`` for wall-BC scalars: the single-field path
+    pole-folds at boundary ranks and then overwrites the boundary slabs
+    with the constants, so skipping the fold and filling constants
+    directly produces the same result with less local compute.
+
+    AD-safe: the fused buffer goes through the same
+    :func:`get_sendrecv_vjp` custom-vjp as the single-field path;
+    ``concatenate``/``slice`` carry native JAX VJPs.
+
+    Returns a tuple of padded arrays, in input order.
+    """
+    fields = tuple(fields)
+    n = len(fields)
+    if n == 0:
+        return ()
+    if south_values is None:
+        south_values = (0.0,) * n
+    if north_values is None:
+        north_values = (0.0,) * n
+    south_values = tuple(south_values)
+    north_values = tuple(north_values)
+    if len(south_values) != n or len(north_values) != n:
+        raise ValueError(
+            "pad_with_pole_bc_lat_multi_mpi: south_values/north_values "
+            f"must match len(fields)={n}; got {len(south_values)}/"
+            f"{len(north_values)}."
+        )
+    if halo <= 0:
+        return fields
+
+    n_lat_local = fields[0].shape[0]
+    for i, f in enumerate(fields):
+        if f.shape[0] != n_lat_local:
+            raise ValueError(
+                "pad_with_pole_bc_lat_multi_mpi: all fields must share "
+                f"n_lat_local (axis 0); field 0 has {n_lat_local}, field "
+                f"{i} has {f.shape[0]}."
+            )
+    if halo > n_lat_local:
+        raise ValueError(
+            f"pad_with_pole_bc_lat_multi_mpi: halo={halo} exceeds "
+            f"n_lat_local={n_lat_local} on rank {layout.rank}."
+        )
+
+    south_slabs: list = [None] * n
+    north_slabs: list = [None] * n
+
+    # Pole-touching boundaries: constant wall-BC fill, no comm.
+    if layout.south_rank is None:
+        for i, f in enumerate(fields):
+            south_slabs[i] = jnp.full(
+                (halo,) + f.shape[1:],
+                jnp.asarray(south_values[i], dtype=f.dtype),
+            )
+    if layout.north_rank is None:
+        for i, f in enumerate(fields):
+            north_slabs[i] = jnp.full(
+                (halo,) + f.shape[1:],
+                jnp.asarray(north_values[i], dtype=f.dtype),
+            )
+
+    # Interior partition cuts: ONE fused sendrecv per cut per dtype group.
+    if layout.south_rank is not None or layout.north_rank is not None:
+        try:
+            import mpi4jax
+            from mpi4py import MPI
+        except ImportError as exc:
+            raise ImportError(
+                "Lat-lon fused MPI halo exchange (n_ranks>1) requires "
+                "mpi4jax and mpi4py."
+            ) from exc
+        comm = MPI.COMM_WORLD
+        sendrecv = get_sendrecv_vjp(mpi4jax)
+
+        # Group field indices by dtype in first-appearance order — the
+        # order is trace-deterministic, so every rank issues the same
+        # fused-message schedule (sendrecv pairing relies on it).
+        groups: dict = {}
+        for i, f in enumerate(fields):
+            groups.setdefault(jnp.dtype(f.dtype), []).append(i)
+
+        for idxs in groups.values():
+            sizes = [
+                halo * int(np.prod(fields[i].shape[1:], dtype=np.int64))
+                for i in idxs
+            ]
+            offsets = np.concatenate([[0], np.cumsum(sizes)])
+
+            if layout.south_rank is not None:
+                send_bot = jnp.concatenate(
+                    [fields[i][:halo].reshape(-1) for i in idxs]
+                )
+                recv_south = sendrecv(
+                    send_bot, jnp.zeros_like(send_bot),
+                    layout.south_rank,      # source
+                    layout.south_rank,      # dest
+                    layout.rank,            # sendtag = sender's rank
+                    layout.south_rank,      # recvtag = source's rank
+                    comm,
+                )
+                for k, i in enumerate(idxs):
+                    south_slabs[i] = recv_south[
+                        offsets[k]:offsets[k + 1]
+                    ].reshape((halo,) + fields[i].shape[1:])
+
+            if layout.north_rank is not None:
+                send_top = jnp.concatenate(
+                    [fields[i][-halo:].reshape(-1) for i in idxs]
+                )
+                recv_north = sendrecv(
+                    send_top, jnp.zeros_like(send_top),
+                    layout.north_rank,
+                    layout.north_rank,
+                    layout.rank,
+                    layout.north_rank,
+                    comm,
+                )
+                for k, i in enumerate(idxs):
+                    north_slabs[i] = recv_north[
+                        offsets[k]:offsets[k + 1]
+                    ].reshape((halo,) + fields[i].shape[1:])
+
+    return tuple(
+        jnp.concatenate([south_slabs[i], fields[i], north_slabs[i]], axis=0)
+        for i in range(n)
+    )
 
 
 # ============================================================================
@@ -1522,6 +1792,7 @@ def make_latlon_mpi_step(
     layout: LatLonBandLayout,
     *,
     halo: int = 2,  # kept for backward-compat signature; unused now
+    physics_fn: Callable | None = None,
 ) -> Callable:
     """Build an MPI-aware step function for the lat-lon C-grid dycore.
 
@@ -1568,24 +1839,44 @@ def make_latlon_mpi_step(
        backend-aware operators inside ``_step_cgrid`` handle all the
        halo plumbing.
 
-    Polar filter is still gated as a Stage-3 follow-up.  Physics
-    (``physics_fn``) and prescribed-SST scatter for AMIP also belong
-    to Stage 3 — surfaced as ``physics_fn=None`` here.
+    Column physics is supported via ``physics_fn`` (forwarded per RK
+    stage to ``_step_cgrid``, exactly like the serial
+    ``model.step(state, dt, physics_fn=...)`` path).  Prescribed-SST
+    scatter for AMIP remains the ``ModelDriver`` path's job.
 
     Parameters
     ----------
     model : CGridLatLonPrimitiveEquationModel
         Built against the **rank-local** grid (sliced from the
         global grid for this band).  ``model.grid.total_area`` may be
-        either the band area or the sphere area; the wrapper
-        re-allreduces it defensively so callers don't have to remember
-        which.
+        either the band area or the sphere area — the wrapper ignores
+        it and recomputes the global total by allreducing
+        ``sum(model.grid.area)`` (the per-cell band area is
+        unambiguous; re-allreducing an already-global ``total_area``
+        scalar would double-count by ``n_ranks``).
     layout : LatLonBandLayout
     halo : int, default 2
         Kept for backward-compatible signature.  No longer used —
         the operator-internal halo widths (1 for compact stencils,
         2 for PPM and biharmonic) are determined by each operator
         as it calls ``pad_halo_latlon(field, halo=k)``.
+    physics_fn : callable or None, default None
+        Column-physics callable forwarded unchanged to
+        ``_step_cgrid`` (where it is a *static* jit argument —
+        pass a stable module-level function or a long-lived closure,
+        never a fresh lambda per step, or every step recompiles).
+        Same contract as the serial ``model.step``: either the
+        3-arg form ``physics_fn(hs_state, grid, sigma_coord)`` or a
+        1-arg closure ``physics_fn(hs_state)`` (see
+        ``CGridLatLonPrimitiveEquationModel._call_physics``).  Under
+        band MPI it receives the **rank-local** cell-centred
+        ``HydrostaticState`` view plus the rank-local band grid /
+        sigma — it must be column-local (no global-lat assumptions).
+        Dynamics tendencies in the same RK stage are computed from
+        backend-aware halo-exchanged operators on the same rank-local
+        fields, so physics and dynamics see a consistent state.
+        ``None`` (default) keeps the previous dynamics-only
+        behaviour.
 
     Returns
     -------
@@ -1634,7 +1925,16 @@ def make_latlon_mpi_step(
     # Build the MPI-aware model: rank-local grid with allreduced
     # ``total_area`` (mass-fixer divisor); pole_v_bc tracks which
     # ends of the band touch actual global poles.
-    global_total_area = global_sum_mpi(model.grid.total_area)
+    #
+    # Derive the global total from the rank-local PER-CELL ``area``
+    # (unambiguous on every path) rather than allreducing the
+    # ``total_area`` scalar: callers arrive with ``total_area`` either
+    # band-local (tests' ``_make_local_model``) or already global
+    # (``slice_latlon_grid_to_band``), and allreducing an
+    # already-global scalar would give ``n_ranks * sphere_area`` — a
+    # silently wrong mass-fixer denominator (Codex P1-fix review,
+    # MAJOR 1).
+    global_total_area = global_sum_mpi(jnp.sum(model.grid.area))
     mpi_grid = model.grid._replace(total_area=global_total_area)
     mpi_config = model.config._replace(
         pole_v_bc=(
@@ -1677,11 +1977,15 @@ def make_latlon_mpi_step(
         # ranks for halo cells at partition cuts and apply the
         # serial pole-fold / wall-BC constants at boundary ranks.
         # The mass fixer's allreduce fires through the same
-        # ``is_distributed()`` gate.
+        # ``is_distributed()`` gate.  ``physics_fn`` (static jit arg,
+        # closure-captured so its identity is stable across steps) is
+        # evaluated inside each RK stage on the rank-local state —
+        # identical calling convention to the serial
+        # ``model.step(state, dt, physics_fn=...)`` delegate.
         return mpi_model._step_cgrid(
             local_state, dt,
             target_mass=target_mass,
-            physics_fn=None,
+            physics_fn=physics_fn,
         )
 
     return step_fn
