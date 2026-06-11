@@ -17,6 +17,7 @@ import pytest
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.sdm import (
     SDMConfig,
+    brownian_kernel,
     collision_kernel,
     golovin_kernel,
     hall_kernel,
@@ -136,6 +137,89 @@ def test_hall_kernel_symmetric_nonneg_zero_safe():
     radii = jnp.asarray(np.geomspace(1e-6, 1e-3, 30))
     K = jax.jit(jax.vmap(lambda r: hall_kernel(r, 0.5 * r, jnp.asarray(0.1))))(radii)
     assert bool(jnp.all(jnp.isfinite(K))) and bool(jnp.all(K >= 0.0))
+
+
+def _brownian_oracle(r1, r2, m1, m2, p, T):
+    """Independent numpy transcription of ERF Brownian_SeinfeldPandis."""
+    kB = constants.k_B
+    d1, d2 = 2.0 * r1, 2.0 * r2
+    Tc = T - constants.T_freeze
+    visc = ((1.718 + 4.9e-3 * Tc) * 1e-5 if Tc >= 0
+            else (1.718 + 4.9e-3 * Tc - 1.2e-5 * Tc * Tc) * 1e-5)
+    lam = (2.0 * visc) / (p * np.sqrt(8.0 * constants.M_air * 1e-3
+                                      / (np.pi * constants.R_d * T)))
+    out = []
+    for d, m in ((d1, m1), (d2, m2)):
+        slip = 1.0 + 2.0 * lam * (1.2570 + 0.40 * np.exp(-0.550 * d / lam)) / d
+        D = kB * T / (3.0 * np.pi * visc) * slip / d
+        c = np.sqrt(8.0 * kB * T / np.pi / m)
+        lmfp = 8.0 / np.pi * D / c
+        g = ((d + lmfp) ** 3 - (d * d + lmfp * lmfp) ** 1.5) / (3.0 * d * lmfp) - d
+        out.append((D, c, g))
+    (D1, c1, g1), (D2, c2, g2) = out
+    sumdia, sumd = d1 + d2, D1 + D2
+    sumc = np.sqrt(c1**2 + c2**2)
+    sumg = np.sqrt(2 * g1**2 + 2 * g2**2)
+    denom = sumdia / (sumdia + 2 * sumg) + 8.0 * sumd / (sumdia * sumc)
+    return 2.0 * np.pi * sumdia * sumd / denom
+
+
+@pytest.mark.parametrize("r1,r2", [
+    (5.0e-8, 5.0e-8),     # Kn >> 1 free-molecular haze
+    (5.0e-7, 5.0e-8),     # transition, unequal
+    (1.0e-6, 1.0e-6),     # near-continuum equal
+    (1.0e-5, 1.0e-6),     # cloud droplet + haze
+])
+def test_brownian_kernel_matches_independent_oracle(r1, r2):
+    p, T = 9.0e4, 283.0
+    rho_w = constants.rho_water
+    m1 = 4.0 / 3.0 * np.pi * rho_w * r1**3
+    m2 = 4.0 / 3.0 * np.pi * rho_w * r2**3
+    got = float(brownian_kernel(jnp.asarray(r1), jnp.asarray(r2),
+                                jnp.asarray(m1), jnp.asarray(m2),
+                                jnp.asarray(p), jnp.asarray(T)))
+    expected = _brownian_oracle(r1, r2, m1, m2, p, T)
+    assert got == pytest.approx(expected, rel=1e-10, abs=0.0)
+    # symmetry
+    got_sym = float(brownian_kernel(jnp.asarray(r2), jnp.asarray(r1),
+                                    jnp.asarray(m2), jnp.asarray(m1),
+                                    jnp.asarray(p), jnp.asarray(T)))
+    assert got_sym == pytest.approx(got, rel=1e-12)
+    assert got > 0.0
+
+
+def test_brownian_continuum_limit_equal_spheres():
+    """Large equal spheres (slip->1, g->0): K -> 8 k_B T / (3 mu), the classic
+    continuum Brownian coagulation coefficient."""
+    r = 2.0e-6
+    p, T = 1.01325e5, 293.15
+    m = 4.0 / 3.0 * np.pi * constants.rho_water * r**3
+    K = float(brownian_kernel(jnp.asarray(r), jnp.asarray(r),
+                              jnp.asarray(m), jnp.asarray(m),
+                              jnp.asarray(p), jnp.asarray(T)))
+    visc = (1.718 + 4.9e-3 * (T - constants.T_freeze)) * 1e-5
+    K_continuum = 8.0 * constants.k_B * T / (3.0 * visc)
+    assert K == pytest.approx(K_continuum, rel=0.15)   # within slip/Fuchs corrections
+
+
+def test_brownian_additive_in_coalescence():
+    """cfg.include_brownian adds k_brown on top of the selected kernel (ERF
+    k_val += k_brown): with a zero hydrodynamic kernel (golovin b=0) Brownian
+    alone must still produce coalescence probability > 0 deterministically."""
+    from jax import random
+    from legoesm.atmosphere.physics.microphysics.sdm import SuperDropletState, coalescence_step
+    o = jnp.ones((64,))
+    st = SuperDropletState(multiplicity=o * 1.0e12, radius=o * 5.0e-8,
+                          solute_mass=o * 0.0, active=o)
+    args = (1.0e-9, 1.0, 9.0e4, 283.0, 10.0)   # tiny V_cell -> high probability
+    cfg_off = SDMConfig(collision_kernel="golovin", golovin_b=0.0,
+                        include_brownian=False)
+    cfg_on = cfg_off._replace(include_brownian=True)
+    out_off = coalescence_step(st, *args, random.PRNGKey(0), cfg_off)
+    out_on = coalescence_step(st, *args, random.PRNGKey(0), cfg_on)
+    # zero kernel -> nothing happens; Brownian on -> coalescence occurred
+    assert jnp.array_equal(out_off.multiplicity, st.multiplicity)
+    assert float(jnp.sum(out_on.multiplicity)) < float(jnp.sum(st.multiplicity))
 
 
 def test_kernels_grad_safe_at_zero_radius():

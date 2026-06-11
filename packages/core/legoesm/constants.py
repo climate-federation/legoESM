@@ -198,6 +198,10 @@ N_A = 6.02214076e23             # [1/mol] particles per mole
 # and any other code that needs R independent of a specific gas (R_d,
 # R_v are gas-specific = R / M).
 R_universal = 8.314462618       # [J/(mol·K)] = N_A · k_B
+# Boltzmann constant, derived from the two exact SI constants above so the
+# identity R = N_A·k_B holds to machine precision (Brownian coagulation,
+# molecular diffusion).
+k_B = R_universal / N_A         # [J/K] ≈ 1.380649e-23
 
 # ==============================================================================
 # Mathematical Constants

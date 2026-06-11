@@ -44,8 +44,12 @@ from jax import random
 
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
-from legoesm.atmosphere.physics.microphysics.sdm.particles import SuperDropletState
+from legoesm.atmosphere.physics.microphysics.sdm.particles import (
+    SuperDropletState,
+    water_mass_per_droplet,
+)
 from legoesm.atmosphere.physics.microphysics.sdm.kernels import (
+    brownian_kernel,
     collision_kernel,
     terminal_velocity,
 )
@@ -155,6 +159,14 @@ def coalescence_step(
         dv = jnp.abs(v_big - v_small)
 
     K = collision_kernel(R_big, R_small, dv, cfg)
+    if cfg.include_brownian:
+        # ERF adds the Brownian coagulation coefficient on top of the selected
+        # kernel (k_val += k_brown), using the TOTAL droplet mass (water+solute).
+        T_a = jnp.asarray(T, dtype=dtype)
+        p_a = jnp.asarray(p, dtype=dtype)
+        m_big = water_mass_per_droplet(state)[big] + s_big
+        m_small = water_mass_per_droplet(state)[small] + s_small
+        K = K + brownian_kernel(R_big, R_small, m_big, m_small, p_a, T_a)
 
     # Shima scaled probability: ⌊n/2⌋ candidate pairs represent all C(n,2) pairs.
     scaling = 0.5 * n * (n - 1) / L

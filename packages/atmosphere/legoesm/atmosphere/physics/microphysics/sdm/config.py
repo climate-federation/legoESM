@@ -50,6 +50,10 @@ class SDMConfig(NamedTuple):
     golovin_b : float
         Golovin kernel coefficient ``b`` [1/s] (K = b(X_i+X_j); Shima 2009
         Golovin box test uses b = 1.5e3).
+    include_brownian : bool
+        Add the Brownian (Seinfeld-Pandis) coagulation coefficient on top of
+        the selected collision kernel (ERF ``include_brownian_coalescence``;
+        additive, matters only for sub-micron droplets/haze).
     r_rain : float
         Radius threshold [m] separating cloud water from rain when depositing
         super-droplet liquid to grid mixing ratios (ERF default 40 um).
@@ -78,6 +82,7 @@ class SDMConfig(NamedTuple):
     collision_kernel: str = "golovin"
     terminal_velocity: str = "rogers_yau"
     golovin_b: float = 1.5e3              # [1/s] Golovin kernel coefficient
+    include_brownian: bool = False        # add Brownian coagulation to the kernel
     r_rain: float = 4.0e-5               # [m] cloud/rain radius threshold (40 um)
     cdnc: float = 1.0e8                  # [1/m^3] prescribed cloud-droplet number
     r_min_reconstruct: float = 1.0e-6   # [m] min reconstructed mean-droplet radius

@@ -255,6 +255,91 @@ def hall_kernel(r_i: jax.Array, r_j: jax.Array, dv: jax.Array) -> jax.Array:
     return E * (jnp.pi * sumr * sumr) * jnp.abs(dv)
 
 
+def brownian_kernel(
+    r_i: jax.Array,
+    r_j: jax.Array,
+    m_i: jax.Array,
+    m_j: jax.Array,
+    p: jax.Array,
+    T: jax.Array,
+) -> jax.Array:
+    """Brownian coagulation coefficient K₁₂ [m³/s] (Seinfeld & Pandis).
+
+    Faithful transcription of ERF ``CollisionKernel::Brownian_SeinfeldPandis``
+    (Fuchs transition-regime form): per-droplet diffusivity with Cunningham
+    slip, thermal speed from the droplet mass, droplet mean free path, and the
+    Fuchs ``g`` length correction::
+
+        K12 = 2π·(d₁+d₂)·(D₁+D₂) / [ (d₁+d₂)/((d₁+d₂)+2√(2g₁²+2g₂²))
+                                      + 8(D₁+D₂)/((d₁+d₂)·√(c̄₁²+c̄₂²)) ]
+
+    In ERF this is **additive**: when enabled it is added on top of the chosen
+    collision kernel (``k_val += k_brown``), exactly as ported in
+    ``coalescence_step`` via ``cfg.include_brownian``.
+
+    Note: the air mean-free-path expression is transcribed as the oracle wrote
+    it (``λ = 2μ/(p·√(8·M_air/(π·R_d·T)))``, SCALE-SDM lineage); it gives a
+    few× the textbook λ_air, affecting only the slip correction of sub-micron
+    droplets. Continuum-regime behaviour (slip→1) matches the classical
+    ``8k_BT/3μ`` equal-size limit.
+
+    Parameters: radii [m], total droplet masses [kg], pressure [Pa],
+    temperature [K]. Elementwise; AD-safe at zero radius (K→finite·0 paths are
+    where-guarded by the caller's mass/radius floors — radii here must be > 0,
+    enforced by flooring below).
+    """
+    dtype = jnp.result_type(r_i, r_j)
+    # Floors: a zero-radius/mass droplet has no Brownian cross-section; floor
+    # to keep every 1/d and 1/m finite (caller multiplicity gates real use).
+    d1 = jnp.maximum(2.0 * r_i, _DIAM_FLOOR_CM / 100.0)
+    d2 = jnp.maximum(2.0 * r_j, _DIAM_FLOOR_CM / 100.0)
+    m1 = jnp.maximum(m_i, 1.0e-300)
+    m2 = jnp.maximum(m_j, 1.0e-300)
+    kB = constants.k_B
+
+    # Dynamic viscosity [Pa·s] (Pruppacher & Klett; SI twin of _visc_air_cgs).
+    Tc = T - constants.T_freeze
+    visc = jnp.where(
+        Tc >= 0.0,
+        (_VISC_MU0 + _VISC_SLOPE * Tc) * 1.0e-5,
+        (_VISC_MU0 + _VISC_SLOPE * Tc - _VISC_CURV * Tc * Tc) * 1.0e-5,
+    )
+
+    # Air mean free path [m] — oracle expression (see docstring note).
+    M_air_kg = constants.M_air * 1.0e-3
+    lam_air = (2.0 * visc) / (p * jnp.sqrt(8.0 * M_air_kg / (jnp.pi * constants.R_d * T)))
+
+    # Cunningham slip corrections.
+    c1 = 1.2570 + 0.40 * jnp.exp(-0.550 * d1 / lam_air)
+    c2 = 1.2570 + 0.40 * jnp.exp(-0.550 * d2 / lam_air)
+    slip1 = 1.0 + 2.0 * lam_air * c1 / d1
+    slip2 = 1.0 + 2.0 * lam_air * c2 / d2
+
+    # Diffusivities [m²/s] and thermal speeds [m/s].
+    dcoef = kB * T / (3.0 * jnp.pi * visc)
+    D1 = dcoef * slip1 / d1
+    D2 = dcoef * slip2 / d2
+    vcoef = 8.0 * kB * T / jnp.pi
+    cb1 = jnp.sqrt(vcoef / m1)
+    cb2 = jnp.sqrt(vcoef / m2)
+
+    # Droplet mean free paths and Fuchs g length terms.
+    lam1 = (8.0 / jnp.pi) * D1 / cb1
+    lam2 = (8.0 / jnp.pi) * D2 / cb2
+    g1 = ((d1 + lam1) ** 3
+          - jnp.exp(1.5 * jnp.log(d1 * d1 + lam1 * lam1))) / (3.0 * d1 * lam1) - d1
+    g2 = ((d2 + lam2) ** 3
+          - jnp.exp(1.5 * jnp.log(d2 * d2 + lam2 * lam2))) / (3.0 * d2 * lam2) - d2
+
+    sumdia = d1 + d2
+    sumd = D1 + D2
+    sumc = jnp.sqrt(cb1 * cb1 + cb2 * cb2)
+    sumg = jnp.sqrt(2.0 * g1 * g1 + 2.0 * g2 * g2)
+
+    denom = sumdia / (sumdia + 2.0 * sumg) + (8.0 * sumd) / (sumdia * sumc)
+    return (2.0 * jnp.pi * sumdia * sumd / denom).astype(dtype)
+
+
 def collision_kernel(
     r_i: jax.Array,
     r_j: jax.Array,
