@@ -179,9 +179,11 @@ CAM branches came from the CESM Fortran; `l_damp_wp3_Skw_squared=False`→C8b=0.
    phase-1 eddy-diffusion mean advance with the prognostic advances.
 
 **⚠ Pending codex review** (external rate limit until ~19:37 MDT): iter-34
-`advance_xm_wpxp` main, iter-35 `clubb_tau`, iter-36 `clubb_skewness`, iter-37
-`clubb_coefficients`. All small, low-complexity (no sqrt/0-division AD hazards),
-parity/analytic/jit-grad self-validated. Run the batch the moment codex resets.
+`advance_xm_wpxp` main, iter-35/38 `clubb_tau`, iter-36 `clubb_skewness`, iter-37
+`clubb_coefficients`. All small, parity/analytic/jit-grad self-validated. iter-38
+was a **self-audit hardening pass** (AD-guarded the `1/em` stability-correction
+division in `compute_tau_family`; the other 3 modules' divisions are all guarded
++ reference-consistent). Run the batch the moment codex resets.
 
 Each chunk: analytic/self-consistency oracle (CI) + golden/round-off parity vs
 CLUBB-JAX (patch reference physical constants to isolate algorithm) + codex

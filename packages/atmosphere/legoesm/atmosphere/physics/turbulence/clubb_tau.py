@@ -59,8 +59,12 @@ def compute_tau_family(Lscale, em, sqrt_em_zt, brunt_vaisala_freq_sqd, gr: CLUBB
     invrs_tau_zm = 1.0 / tau_zm
     invrs_tau_zt = 1.0 / tau_zt
 
+    # em is floored to em_min here for the stability-correction division (em is
+    # physically TKE >= em_min, so this is forward-identical to the reference's
+    # raw-em form, but keeps the 1/em gradient finite at the floor — AD safety).
     stability_correction = calc_stability_correction(
-        brunt_vaisala_freq_sqd, Lscale_zm, em, params.lambda0_stability_coef)
+        brunt_vaisala_freq_sqd, Lscale_zm, jnp.maximum(em, em_min),
+        params.lambda0_stability_coef)
     invrs_tau_N2_zm = invrs_tau_zm * stability_correction
 
     return dict(

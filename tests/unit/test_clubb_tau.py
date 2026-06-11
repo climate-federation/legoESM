@@ -107,5 +107,23 @@ def test_jit_and_grad():
     assert jnp.all(jnp.isfinite(jax.grad(loss)(p["Lscale"])))
 
 
+def test_stability_correction_grad_finite_at_low_em():
+    """The em-floor must keep the C1/C6 gradient finite even at em -> 0 (the
+    1/em stability-correction division) — self-audit AD hardening."""
+    gr, ng, nzm = _gr()
+    p = _inputs(ng, nzm)
+    cfg = CLUBBConfig()
+    # em with zeros and values below em_min, including positive N2 (active corr)
+    em = jnp.zeros((ng, nzm)).at[:, : nzm // 2].set(1.0e-8)
+    brunt = jnp.full((ng, nzm), 1.0e-4)   # all positive -> stability corr active
+
+    def loss(em):
+        out = T.compute_tau_family(p["Lscale"], em, p["sqrt_em_zt"], brunt, gr, cfg)
+        return jnp.sum(out["invrs_tau_C1_zm"] ** 2)
+
+    g = jax.grad(loss)(em)
+    assert jnp.all(jnp.isfinite(g))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
