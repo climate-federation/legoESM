@@ -7,6 +7,9 @@ outputs, correct shapes, and jit/grad cleanliness.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -69,6 +72,43 @@ def test_diagnostics_keys_and_shapes():
     s = np.asarray(out["sigma_sqd_w"])
     assert np.all((s >= 0.0) & (s < 1.0))
     assert np.all(np.asarray(out["Kh_zt"]) >= 0.0) and np.all(np.asarray(out["Kh_zm"]) >= 0.0)
+
+
+_CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_sigma_sqd_w_cam_form_matches_reference():
+    """Audit (iter 45): the CAM rt/thl-only ``compute_sigma_sqd_w`` used inside
+    ``compute_clubb_diagnostics`` is bit-exact to the full CLUBB-JAX reference
+    invoked with ``l_predict_upwp_vpwp=False`` (the CAM default), proving the
+    omitted up2/vp2/upwp/vpwp correlation terms are correctly absent."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.sigma_sqd_w_module as R  # noqa: N812
+    from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig
+    from legoesm.atmosphere.physics.turbulence.clubb_helpers import compute_sigma_sqd_w
+
+    gr, ng, nzm = _gr()
+    cfg = CLUBBConfig()
+    rng = np.random.default_rng(45)
+    gamma = jnp.asarray(0.2 + 0.2 * rng.random((ng, nzm)))
+    wp2 = jnp.asarray(0.2 + 0.5 * rng.random((ng, nzm)))
+    thlp2 = jnp.asarray(0.05 + 0.05 * rng.random((ng, nzm)))
+    rtp2 = jnp.asarray(1e-6 + 1e-6 * rng.random((ng, nzm)))
+    wpthlp = jnp.asarray(1e-2 * rng.standard_normal((ng, nzm)))
+    wprtp = jnp.asarray(1e-4 * rng.standard_normal((ng, nzm)))
+    # Dummy momentum-flux/variance fields the reference ignores when the flag is off.
+    dummy = jnp.asarray(rng.standard_normal((ng, nzm)))
+
+    mine = compute_sigma_sqd_w(
+        gamma, wp2, thlp2, rtp2, wpthlp, wprtp, gr,
+        w_tol=cfg.w_tol, thl_tol=cfg.thl_tol, rt_tol=cfg.rt_tol)
+    ref = R.compute_sigma_sqd_w(
+        gamma, wp2, thlp2, rtp2, dummy, dummy, wpthlp, wprtp, dummy, dummy,
+        False, gr)
+    np.testing.assert_array_equal(np.asarray(mine), np.asarray(ref))
 
 
 def test_diagnostics_jit_and_grad():
