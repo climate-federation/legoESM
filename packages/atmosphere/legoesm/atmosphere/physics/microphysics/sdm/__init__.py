@@ -43,6 +43,7 @@ from legoesm.atmosphere.physics.microphysics.sdm.condensation import (
 from legoesm.atmosphere.physics.microphysics.sdm.kernels import (
     collision_kernel,
     golovin_kernel,
+    hall_kernel,
     long_kernel,
     sedimentation_kernel,
     terminal_velocity,
@@ -84,6 +85,7 @@ __all__ = [
     "golovin_kernel",
     "sedimentation_kernel",
     "long_kernel",
+    "hall_kernel",
     "terminal_velocity",
     "terminal_velocity_rogers_yau",
     "terminal_velocity_atlas_ulbrich",

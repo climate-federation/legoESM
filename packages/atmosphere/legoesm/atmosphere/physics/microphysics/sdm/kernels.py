@@ -13,6 +13,9 @@ a collision probability per unit time (see ``coalescence.py``):
 * ``sedimentation``  — geometric gravitational sweep-out
   ``K = E·π(R_i+R_j)²·|Δv|`` with ``E = ½p²/(1+p)²``, ``p = R_min/R_max``.
 * ``long``           — Long (1974) polynomial collision efficiency.
+* ``hall``           — Hall (1980) tabulated collision efficiency
+  ``E(r_large, r_small/r_large)`` (21×15 table, bilinear interpolation;
+  E > 1 at large ratio = wake-capture enhancement, faithful to the table).
 
 The hydrodynamic kernels take ``dv``, the **relative speed** (a non-negative
 magnitude ``|v_i − v_j| = √Σ(v_i−v_j)²``). The oracle computes this Euclidean
@@ -45,9 +48,9 @@ from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
 
 __physics_contract__ = {
     "summary": (
-        "Collision kernels (Golovin/sedimentation/Long) and droplet terminal "
-        "velocities (Rogers-Yau/Atlas-Ulbrich/SCALE-SDM) for SDM coalescence "
-        "and sedimentation."
+        "Collision kernels (Golovin/sedimentation/Long/Hall) and droplet "
+        "terminal velocities (Rogers-Yau/Atlas-Ulbrich/SCALE-SDM) for SDM "
+        "coalescence and sedimentation."
     ),
     "inputs": {
         "r_i": "m",
@@ -119,6 +122,41 @@ _VZ_B = (-3.18657, 0.9926960, -1.53193e-3, -0.987059e-3,
          -0.578878e-3, 0.855176e-4, -0.327815e-5)
 _VZ_C = (-5.00015, 5.23778, -2.04914, 0.475294, -0.542819e-1, 0.238449e-2)
 
+# --- Hall (1980) collision-efficiency table (SCALE-SDM / ERF transcription) ---
+# Collector (larger) radii [um]:
+_HALL_R0_UM = jnp.array(
+    [6.0, 8.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 70.0,
+     100.0, 150.0, 200.0, 300.0])
+# Radius ratios r_small/r_large [-]:
+_HALL_RAT = jnp.array(
+    [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50,
+     0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00])
+# Efficiency E[ratio, r_large] (21 x 15). Values > 1 at large ratio/radius are
+# the wake-capture enhancement in the original table.
+_HALL_ECOLL = jnp.array([
+    [0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010, 0.0010],
+    [0.0030, 0.0030, 0.0030, 0.0040, 0.0050, 0.0050, 0.0050, 0.0100, 0.1000, 0.0500, 0.2000, 0.5000, 0.7700, 0.8700, 0.9700],
+    [0.0070, 0.0070, 0.0070, 0.0080, 0.0090, 0.0100, 0.0100, 0.0700, 0.4000, 0.4300, 0.5800, 0.7900, 0.9300, 0.9600, 1.0000],
+    [0.0090, 0.0090, 0.0090, 0.0120, 0.0150, 0.0100, 0.0200, 0.2800, 0.6000, 0.6400, 0.7500, 0.9100, 0.9700, 0.9800, 1.0000],
+    [0.0140, 0.0140, 0.0140, 0.0150, 0.0160, 0.0300, 0.0600, 0.5000, 0.7000, 0.7700, 0.8400, 0.9500, 0.9700, 1.0000, 1.0000],
+    [0.0170, 0.0170, 0.0170, 0.0200, 0.0220, 0.0600, 0.1000, 0.6200, 0.7800, 0.8400, 0.8800, 0.9500, 1.0000, 1.0000, 1.0000],
+    [0.0300, 0.0300, 0.0240, 0.0220, 0.0320, 0.0620, 0.2000, 0.6800, 0.8300, 0.8700, 0.9000, 0.9500, 1.0000, 1.0000, 1.0000],
+    [0.0250, 0.0250, 0.0250, 0.0360, 0.0430, 0.1300, 0.2700, 0.7400, 0.8600, 0.8900, 0.9200, 1.0000, 1.0000, 1.0000, 1.0000],
+    [0.0270, 0.0270, 0.0270, 0.0400, 0.0520, 0.2000, 0.4000, 0.7800, 0.8800, 0.9000, 0.9400, 1.0000, 1.0000, 1.0000, 1.0000],
+    [0.0300, 0.0300, 0.0300, 0.0470, 0.0640, 0.2500, 0.5000, 0.8000, 0.9000, 0.9100, 0.9500, 1.0000, 1.0000, 1.0000, 1.0000],
+    [0.0400, 0.0400, 0.0330, 0.0370, 0.0680, 0.2400, 0.5500, 0.8000, 0.9000, 0.9100, 0.9500, 1.0000, 1.0000, 1.0000, 1.0000],
+    [0.0350, 0.0350, 0.0350, 0.0550, 0.0790, 0.2900, 0.5800, 0.8000, 0.9000, 0.9100, 0.9500, 1.0000, 1.0000, 1.0000, 1.0000],
+    [0.0370, 0.0370, 0.0370, 0.0620, 0.0820, 0.2900, 0.5900, 0.7800, 0.9000, 0.9100, 0.9500, 1.0000, 1.0000, 1.0000, 1.0000],
+    [0.0370, 0.0370, 0.0370, 0.0600, 0.0800, 0.2900, 0.5800, 0.7700, 0.8900, 0.9100, 0.9500, 1.0000, 1.0000, 1.0000, 1.0000],
+    [0.0370, 0.0370, 0.0370, 0.0410, 0.0750, 0.2500, 0.5400, 0.7600, 0.8800, 0.9200, 0.9500, 1.0000, 1.0000, 1.0000, 1.0000],
+    [0.0370, 0.0370, 0.0370, 0.0520, 0.0670, 0.2500, 0.5100, 0.7700, 0.8800, 0.9300, 0.9700, 1.0000, 1.0000, 1.0000, 1.0000],
+    [0.0370, 0.0370, 0.0370, 0.0470, 0.0570, 0.2500, 0.4900, 0.7700, 0.8900, 0.9500, 1.0000, 1.0000, 1.0000, 1.0000, 1.0000],
+    [0.0360, 0.0360, 0.0360, 0.0420, 0.0480, 0.2300, 0.4700, 0.7800, 0.9200, 1.0000, 1.0200, 1.0200, 1.0200, 1.0200, 1.0200],
+    [0.0400, 0.0400, 0.0350, 0.0330, 0.0400, 0.1120, 0.4500, 0.7900, 1.0100, 1.0300, 1.0400, 1.0400, 1.0400, 1.0400, 1.0400],
+    [0.0330, 0.0330, 0.0330, 0.0330, 0.0330, 0.1190, 0.4700, 0.9500, 1.3000, 1.7000, 2.3000, 2.3000, 2.3000, 2.3000, 2.3000],
+    [0.0270, 0.0270, 0.0270, 0.0270, 0.0270, 0.1250, 0.5200, 1.4000, 2.3000, 3.0000, 4.0000, 4.0000, 4.0000, 4.0000, 4.0000],
+])
+
 
 # ==========================================================================
 # Collision kernels  K(R_i, R_j[, Δv])  [m^3/s]
@@ -161,6 +199,59 @@ def long_kernel(r_i: jax.Array, r_j: jax.Array, dv: jax.Array) -> jax.Array:
     return c_rate * (jnp.pi * sumr * sumr) * jnp.abs(dv)
 
 
+def hall_kernel(r_i: jax.Array, r_j: jax.Array, dv: jax.Array) -> jax.Array:
+    """Hall (1980) tabulated collision-efficiency kernel [m³/s].
+
+    ``K = E(r_l, r_s/r_l)·π(r_l+r_s)²·|Δv|`` with the efficiency bilinearly
+    interpolated from the 21(ratio) × 15(collector-radius) table, exactly as
+    the SCALE-SDM/ERF oracle:
+
+    * ``r_l > 300 µm``: 1-D interpolation in ratio at the last radius column,
+      **capped at E = 1** (the oracle caps only this branch);
+    * ``6 µm < r_l <= 300 µm``: bilinear in (radius, ratio), uncapped — table
+      values > 1 (wake capture) are faithful;
+    * ``r_l <= 6 µm``: 1-D interpolation in ratio at the first radius column.
+
+    ``dv`` is the relative *speed* (non-negative magnitude the caller computes).
+    """
+    r_l = jnp.maximum(r_i, r_j)
+    r_s = jnp.minimum(r_i, r_j)
+    sumr = r_l + r_s
+    r_um = r_l * 1.0e6
+    # Two zero-radius droplets: zero cross-section -> ratio irrelevant, K = 0.
+    ratio = jnp.where(r_l > 0.0, r_s / jnp.maximum(r_l, 1.0e-300), 0.0)
+
+    r0 = _HALL_R0_UM.astype(r_l.dtype)
+    rat = _HALL_RAT.astype(r_l.dtype)
+    ecoll = _HALL_ECOLL.astype(r_l.dtype)
+
+    # Oracle index search: irr = first i with r_um <= r0[i] (15 if beyond);
+    # iqq = first i in 1..20 with ratio <= rat[i].
+    irr = jnp.searchsorted(r0, r_um, side="left")          # 0..15
+    iqq = jnp.clip(jnp.searchsorted(rat, ratio, side="left"), 1, 20)
+
+    q = (ratio - rat[iqq - 1]) / (rat[iqq] - rat[iqq - 1])
+
+    # Branch: large collector (irr >= 15) — last column, capped at 1.
+    e_large = (1.0 - q) * ecoll[iqq - 1, 14] + q * ecoll[iqq, 14]
+    e_large = jnp.minimum(e_large, 1.0)
+
+    # Branch: interior (1 <= irr < 15) — bilinear; clip indices for safe gather
+    # (the mask below selects which branch's value is used).
+    irr_b = jnp.clip(irr, 1, 14)
+    p_w = (r_um - r0[irr_b - 1]) / (r0[irr_b] - r0[irr_b - 1])
+    e_bilin = ((1.0 - p_w) * (1.0 - q) * ecoll[iqq - 1, irr_b - 1]
+               + p_w * (1.0 - q) * ecoll[iqq - 1, irr_b]
+               + (1.0 - p_w) * q * ecoll[iqq, irr_b - 1]
+               + p_w * q * ecoll[iqq, irr_b])
+
+    # Branch: small collector (irr == 0) — first column.
+    e_small = (1.0 - q) * ecoll[iqq - 1, 0] + q * ecoll[iqq, 0]
+
+    E = jnp.where(irr >= 15, e_large, jnp.where(irr >= 1, e_bilin, e_small))
+    return E * (jnp.pi * sumr * sumr) * jnp.abs(dv)
+
+
 def collision_kernel(
     r_i: jax.Array,
     r_j: jax.Array,
@@ -178,10 +269,12 @@ def collision_kernel(
         return sedimentation_kernel(r_i, r_j, dv)
     elif cfg.collision_kernel == "long":
         return long_kernel(r_i, r_j, dv)
+    elif cfg.collision_kernel == "hall":
+        return hall_kernel(r_i, r_j, dv)
     else:
         raise ValueError(
             f"Unknown SDM collision_kernel: {cfg.collision_kernel!r} "
-            "(expected 'golovin', 'sedimentation', or 'long')"
+            "(expected 'golovin', 'sedimentation', 'long', or 'hall')"
         )
 
 

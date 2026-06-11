@@ -19,6 +19,7 @@ from legoesm.atmosphere.physics.microphysics.sdm import (
     SDMConfig,
     collision_kernel,
     golovin_kernel,
+    hall_kernel,
     long_kernel,
     sedimentation_kernel,
     terminal_velocity,
@@ -84,6 +85,45 @@ def test_long_kernel_cloud_branch_matches_oracle():
     assert got == pytest.approx(expected, rel=1e-12, abs=0.0)
 
 
+@pytest.mark.parametrize("r_l_um,ratio,E_expected", [
+    # Exact grid node: r_l=100um (col 11), ratio=0.50 (row 10) -> E=1.0000.
+    (100.0, 0.50, 1.0000),
+    # Bilinear midpoint: r_l=35um (between cols 6,7), ratio=0.225 (rows 4,5):
+    # 0.25*(0.0600+0.5000+0.1000+0.6200) = 0.3200.
+    (35.0, 0.225, 0.3200),
+    # Small-collector branch (r_l<6um, col 0), ratio=0.50 (row 10) -> 0.0400.
+    (5.0, 0.50, 0.0400),
+    # Large-collector branch (r_l>300um, col 14), ratio=0.95 (row 19):
+    # table 2.3 capped at 1.0 (oracle caps ONLY this branch).
+    (400.0, 0.95, 1.0000),
+    # Interior wake-capture >1 must NOT be capped: r_l=70um (col 10),
+    # ratio=1.0 (row 20) -> 4.0.
+    (70.0, 1.00, 4.0000),
+])
+def test_hall_kernel_matches_table_oracle(r_l_um, ratio, E_expected):
+    """Hand-computed Hall-table points: grid nodes, bilinear midpoint, both
+    1-D edge branches, the large-branch cap, and uncapped interior E>1."""
+    r_l = r_l_um * 1.0e-6
+    r_s = ratio * r_l
+    dv = 0.37
+    got = float(hall_kernel(jnp.asarray(r_l), jnp.asarray(r_s), jnp.asarray(dv)))
+    expected = E_expected * np.pi * (r_l + r_s) ** 2 * dv
+    assert got == pytest.approx(expected, rel=1e-12, abs=0.0)
+
+
+def test_hall_kernel_symmetric_nonneg_zero_safe():
+    r1, r2, dv = 8.0e-5, 3.0e-5, 0.4
+    k12 = float(hall_kernel(jnp.asarray(r1), jnp.asarray(r2), jnp.asarray(dv)))
+    k21 = float(hall_kernel(jnp.asarray(r2), jnp.asarray(r1), jnp.asarray(dv)))
+    assert k12 == pytest.approx(k21, rel=1e-12)
+    assert k12 > 0.0
+    assert float(hall_kernel(jnp.asarray(0.0), jnp.asarray(0.0), jnp.asarray(0.4))) == 0.0
+    # vmap/jit over a radius batch stays finite
+    radii = jnp.asarray(np.geomspace(1e-6, 1e-3, 30))
+    K = jax.jit(jax.vmap(lambda r: hall_kernel(r, 0.5 * r, jnp.asarray(0.1))))(radii)
+    assert bool(jnp.all(jnp.isfinite(K))) and bool(jnp.all(K >= 0.0))
+
+
 def test_collision_kernel_dispatch_and_unknown():
     cfg = SDMConfig()
     r1, r2, dv = 2.0e-5, 1.0e-5, 0.1
@@ -93,9 +133,11 @@ def test_collision_kernel_dispatch_and_unknown():
                                   cfg._replace(collision_kernel="sedimentation"))) > 0.0
     assert float(collision_kernel(jnp.asarray(r1), jnp.asarray(r2), jnp.asarray(dv),
                                   cfg._replace(collision_kernel="long"))) > 0.0
+    assert float(collision_kernel(jnp.asarray(r1), jnp.asarray(r2), jnp.asarray(dv),
+                                  cfg._replace(collision_kernel="hall"))) > 0.0
     with pytest.raises(ValueError, match="Unknown SDM collision_kernel"):
         collision_kernel(jnp.asarray(r1), jnp.asarray(r2), jnp.asarray(dv),
-                         cfg._replace(collision_kernel="hall"))
+                         cfg._replace(collision_kernel="brownian"))
 
 
 # --------------------------------------------------------------------------

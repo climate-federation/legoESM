@@ -40,8 +40,9 @@ class SDMConfig(NamedTuple):
         Molar mass of the dissolved aerosol [kg/mol] (NaCl -> 0.05844).
     collision_kernel : str
         Collision-coalescence kernel: ``"golovin"`` (analytic test kernel,
-        default), ``"sedimentation"`` (geometric sweep-out), or ``"long"``
-        (Long 1974 polynomial efficiency). Unknown values raise.
+        default), ``"sedimentation"`` (geometric sweep-out), ``"long"``
+        (Long 1974 polynomial efficiency), or ``"hall"`` (Hall 1980 tabulated
+        efficiency, bilinear interpolation). Unknown values raise.
     terminal_velocity : str
         Droplet terminal-velocity law: ``"rogers_yau"`` (Stokes R²,
         default), ``"atlas_ulbrich"`` (rain power law), or
