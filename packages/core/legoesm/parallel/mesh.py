@@ -952,6 +952,36 @@ def tiled_face_block(face_arr, ti: int, tj: int, nl: int, kt: int):
     return face_arr[i0:i1, j0:j1]
 
 
+def tiled_padded_block(face_arr, ti: int, tj: int, nl: int, kt: int):
+    """Slice tile (ti, tj)'s nl+2h padded block from a PRECOMPUTED
+    padded face metric (n+2h on each horizontal axis).
+
+    Key fact (codex P4 padded-metric design): a cubed-sphere padded
+    angle metric (``cos_angle_padded`` etc.) already encodes the
+    RECEIVER-face extended-gnomonic-geometry halo for the whole face
+    (``angle = angle_padded[:, 1:-1, 1:-1]``; cubed_sphere.py:360).  A
+    tile's local nl+2h ring is therefore a contiguous SUB-WINDOW of
+    that global padded array — interior tiles pick up neighbouring
+    same-face interior cells, edge tiles pick up the receiver-geometry
+    outer ring — so the per-tile padded metric is a plain strided
+    slice, NOT a halo exchange (a scalar exchange of the UNpadded
+    cos_angle would carry the neighbour basis = wrong at face seams).
+
+    face_arr : (n+2h, n+2h, ...) precomputed padded metric (single
+        face).  h is inferred per axis from the extent.
+    Returns the (nl+2h, nl+2h, ...) tile block.
+    """
+    ha = face_arr.shape[0] - kt * nl
+    hb = face_arr.shape[1] - kt * nl
+    if ha <= 0 or ha % 2 or hb <= 0 or hb % 2:
+        raise ValueError(
+            f"axes {face_arr.shape[:2]} are not kt*nl+2h padded for "
+            f"kt={kt}, nl={nl}.")
+    ha, hb = ha // 2, hb // 2
+    return face_arr[ti * nl: ti * nl + nl + 2 * ha,
+                    tj * nl: tj * nl + nl + 2 * hb]
+
+
 def staggered_tile_block(face_arr, ti: int, tj: int, nl: int,
                          stag_axis: int):
     """Slice tile (ti, tj)'s duplicated-row staggered block.
@@ -1069,25 +1099,27 @@ def replicate_pytree(pytree, config: DeviceConfig):
 # ==============================================================================
 
 def stack_tiled_sliceable_metrics(cdgrid, kt: int):
-    """Stack per-tile blocks of every SLICEABLE cdgrid metric over the
-    (face, tile_i, tile_j) device order.
+    """Stack per-tile blocks of every per-tile-SLICEABLE cdgrid metric
+    over the (face, tile_i, tile_j) device order.
 
-    For each metric the classifier marks ``"sliceable"`` (both
-    horizontal axes in {n, n+1} — cell / corner / edge fields), this
-    builds an array of shape ``(6*kt^2, *block_shape)`` where device
-    ``d = (f*kt + ti)*kt + tj`` holds ``tiled_face_block(field[f], ti,
-    tj, nl, kt)``.  This is the cubed-sphere analogue of the voronoi
-    ``stacked_meshes`` pattern: the tiled ``shard_map`` tendency stage
-    indexes the stack by ``axis_index`` to get its own tile's static
-    metric.
+    Two metric classes are pure per-tile slices and both are stacked:
+      * ``"sliceable"`` (axes in {n, n+1} — cell / corner / edge) via
+        :func:`tiled_face_block`;
+      * ``"padded"`` (precomputed n+2h angle metrics) via
+        :func:`tiled_padded_block` — the global padded array already
+        holds the receiver-geometry halo for the whole face, so a
+        tile's nl+2h ring is a strided slice, NOT a halo exchange
+        (codex P4 padded design).
+    The result is ``(6*kt^2, *block)`` per metric where device
+    ``d = (f*kt + ti)*kt + tj`` holds its own tile block — the
+    cubed-sphere analogue of the voronoi ``stacked_meshes`` pattern the
+    tiled ``shard_map`` tendency stage indexes by ``axis_index``.
 
-    Returns ``(stacks, deferred)`` where ``stacks`` is
-    ``{dotted_name: stacked_array}`` for sliceable metrics and
-    ``deferred`` is the sorted list of ``(name, classification)`` for
-    every padded / table / scalar field this function does NOT
-    produce — the explicit contract boundary (padded metrics are the
-    setup-exchange step; tables ride the exchange; scalars become
-    ``nl``).  Pure host-side numpy/JAX slicing; no device placement.
+    Returns ``(stacks, deferred)``: ``deferred`` is now ONLY the
+    non-spatial fields — exchange offset ``table`` arrays (consumed by
+    the tiled state exchange, not per-tile metrics) and ``scalar``
+    fields (``n`` becomes ``nl`` for the local grid).  Pure host-side
+    slicing; no device placement.
     """
     import jax.numpy as jnp
 
@@ -1112,15 +1144,22 @@ def stack_tiled_sliceable_metrics(cdgrid, kt: int):
     deferred = []
     for name, arr in _walk(cdgrid):
         kind, h = classify_face_metric(arr, n)
-        if kind != "sliceable":
+        if kind == "sliceable":
+            _blk = tiled_face_block
+        elif kind == "padded":
+            # Padded metrics are ALSO a pure per-tile slice (the global
+            # padded array already holds the receiver-geometry halo for
+            # the whole face — codex P4 padded design); h2 padded angle
+            # metrics ride a strided nl+2h window, no exchange.
+            _blk = tiled_padded_block
+        else:
             deferred.append((name, kind if h is None else f"{kind}:h{h}"))
             continue
         blocks = []
         for f in range(6):
             for ti in range(kt):
                 for tj in range(kt):
-                    blocks.append(
-                        tiled_face_block(arr[f], ti, tj, nl, kt))
+                    blocks.append(_blk(arr[f], ti, tj, nl, kt))
         stacks[name] = jnp.stack(blocks, axis=0)
     deferred.sort()
     return stacks, deferred

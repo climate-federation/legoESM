@@ -126,6 +126,53 @@ def getattr_deep(obj, dotted):
     return obj
 
 
+def test_tiled_padded_block_kt1_identity(cdgrid):
+    """kt=1: the single tile's padded block IS the whole face padded
+    array (codex parity-test design — the receiver-geometry halo is
+    already baked into the global padded metric)."""
+    from legoesm.parallel.mesh import tiled_padded_block
+
+    cap = cdgrid.base.cos_angle_padded  # (6, n+2, n+2)
+    blk = tiled_padded_block(cap[0], 0, 0, nl=N, kt=1)
+    np.testing.assert_array_equal(np.asarray(blk), np.asarray(cap[0]))
+
+
+@pytest.mark.parametrize("kt", (2, 3))
+def test_tiled_padded_block_interior_consistency(cdgrid, kt):
+    """A tile's nl+2 padded block: interior == the tile's face cells,
+    and the +1 ring matches the global padded array's neighbouring
+    cells (same-face interior for interior tiles, receiver-geom ring at
+    face edges) — all by construction a slice."""
+    from legoesm.parallel.mesh import tiled_padded_block
+
+    nl = N // kt
+    cap = cdgrid.base.cos_angle_padded  # (6, n+2, n+2), face at [1:-1]
+    f = 0
+    for ti in range(kt):
+        for tj in range(kt):
+            blk = np.asarray(tiled_padded_block(cap[f], ti, tj, nl, kt))
+            assert blk.shape == (nl + 2, nl + 2)
+            # Block is exactly the strided window of the global padded.
+            want = np.asarray(cap[f])[
+                ti * nl: ti * nl + nl + 2,
+                tj * nl: tj * nl + nl + 2]
+            np.testing.assert_array_equal(blk, want)
+            # Interior of the block == the tile's face cells (cos_angle).
+            ca = np.asarray(cdgrid.base.cos_angle[f])
+            np.testing.assert_allclose(
+                blk[1:-1, 1:-1],
+                ca[ti * nl:(ti + 1) * nl, tj * nl:(tj + 1) * nl],
+                rtol=0, atol=1e-12)
+
+
+def test_tiled_padded_block_rejects_unpadded():
+    import jax.numpy as _jnp
+
+    from legoesm.parallel.mesh import tiled_padded_block
+    with pytest.raises(ValueError, match="not kt.nl"):
+        tiled_padded_block(_jnp.zeros((12, 12)), 0, 0, nl=6, kt=2)
+
+
 @pytest.mark.parametrize("kt", (2, 3))
 def test_stack_tiled_sliceable_metrics(cdgrid, kt):
     """Every sliceable metric stacks to (6*kt^2, *block) and each
@@ -146,11 +193,19 @@ def test_stack_tiled_sliceable_metrics(cdgrid, kt):
     assert set(stacks) | deferred_names == all_names
     assert not (set(stacks) & deferred_names)
 
-    # No sliceable field was deferred.
+    # Only non-spatial fields (table / scalar) may be deferred — every
+    # sliceable AND padded metric must be stacked.
     for name in deferred_names:
         arr = getattr_deep(cdgrid, name)
-        assert classify_face_metric(arr, N)[0] != "sliceable", (
-            f"{name} is sliceable but was deferred")
+        assert classify_face_metric(arr, N)[0] in ("table", "scalar"), (
+            f"{name} is a spatial metric but was deferred")
+
+    # The padded angle metrics are now stacked (slice, not exchange).
+    for name in ("base.cos_angle_padded", "base.sin_angle_padded",
+                 "base.cos_angle_padded_h2", "base.sin_angle_padded_h2"):
+        assert name in stacks, f"{name} padded metric not stacked"
+        h = (getattr_deep(cdgrid, name).shape[1] - N) // 2
+        assert stacks[name].shape[1] == nl + 2 * h
 
     # Spot-check a centered, a corner, and an edge field roundtrip.
     for name in ("base.area", "lon_corner", "dx_edge_y"):
