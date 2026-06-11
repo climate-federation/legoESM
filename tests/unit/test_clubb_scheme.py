@@ -412,6 +412,62 @@ def test_prognostic_clubb_conserves_column_moisture_no_sfc_flux():
     assert np.all(np.abs(col_dq) * 150.0 / col_q < 1e-12)
 
 
+def test_prognostic_clubb_conserves_column_heat_no_sfc_flux():
+    """Heat counterpart of the moisture-conservation invariant (NON-VACUOUS).
+
+    CLUBB transports liquid-water potential temperature ``θl`` (the prognostic
+    ``thlm``) in flux form, so with NO surface sensible-heat flux (``T_sfc`` =
+    current near-surface ``T`` ⇒ ``shflx == 0``) the mass-weighted column ``θl``
+    total must be conserved to round-off — turbulent mixing rearranges heat
+    vertically but creates none.
+
+    What ``dT_dt / Π`` actually is: the column bridge maps the advanced mean back
+    as ``T_new = thlm_new · Π`` (``clubb.py`` ``T_new = flip_vertical(thlm)*exner``),
+    so ``out.dT_dt / Π`` is *exactly* the prognostic ``θl`` tendency ``dθl/dt`` —
+    by construction, independent of whether the column is cloudy. (It is: this
+    spun-up state carries cloud water, ``rcm`` ~ 5e-3, so this is genuinely a
+    ``θl`` budget, NOT a dry-``θ`` one — ``θl ≠ θ`` here.) The conserved quantity
+    under turbulent transport is ``θl``, not ``θ``, so verifying ``Σ mass·dθl/dt
+    ≈ 0`` is the physically correct heat invariant. Exercises the heat path
+    through the bridge (the Exner conversion + surface-BC packing) that the
+    moisture test does not.
+
+    Made non-vacuous the same way: spin up a real turbulent heat flux ``wpthlp``
+    via the stable SCM driver first, then assert BOTH a nontrivial-redistribution
+    floor AND conservation. ``q_sfc`` also tracks ``q_v`` so ``lhflx == 0`` too —
+    a purely internal redistribution with all surface fluxes off."""
+    from legoesm.atmosphere.physics._shared import (
+        exner_function,
+        virtual_temperature,
+    )
+    from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
+    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=150.0, nsteps=40, config=cfg)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    # Zero BOTH surface fluxes: T_sfc/q_sfc track the current near-surface values.
+    out, _ = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, pack_clubb_moments(m_f), kw["p_full"], kw["p_half"],
+        kw["z_full"], kw["z_half"], T_f[:, -1], q_f[:, -1], rho, 150.0, cfg)
+    # All surface fluxes off (heat AND moisture) → purely internal redistribution.
+    assert np.all(np.asarray(out.shflx) == 0.0)          # genuinely zero sfc heat flux
+    assert np.all(np.asarray(out.lhflx) == 0.0)          # and zero sfc moisture flux
+    dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
+    mass = np.asarray(rho) * dz
+    exner = np.asarray(exner_function(kw["p_full"]))
+    dthl = np.asarray(out.dT_dt) / exner                 # dθl/dt [K/s]
+    col_dthl = np.sum(mass * dthl, axis=1)               # (kg/m^2) K/s
+    col_thl = np.sum(mass * np.asarray(T_f) / exner, axis=1)
+    # (a) Nontrivial heat redistribution (~3e-4 K/step here; rest state ~1e-9 K).
+    assert float(np.max(np.abs(dthl) * 150.0)) > 1e-6
+    # (b) Mass-weighted column θl drifts only at flux-form round-off.
+    assert np.all(np.abs(col_dthl) * 150.0 / col_thl < 1e-12)
+
+
 def test_clubb_turbulence_prognostic_carry_roundtrip_multistep():
     """The prognostic scheme entry carries the packed CLUBBMomentState
     (ncol,15,nlev+1) in/out of the tke-slot interface and runs stably multi-step

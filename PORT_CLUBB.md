@@ -155,6 +155,20 @@ sorting `Lscale` + full prognostic moment transport (clubb_lite has none).
   its tendencies back without dycore/host diffusion NaNs by step 1 (the documented
   dry-regime instability), so multi-step spin-up MUST use the diffusion-stabilized
   driver.
+- **column-heat (θl) conservation @ scheme entry (iter 62):** the heat counterpart
+  — zero surface sensible-heat flux (`T_sfc`=near-sfc `T` ⇒ `shflx==0`, with
+  `lhflx==0` too) ⇒ mass-weighted column **θl** conserved to round-off, with the
+  same spin-up non-vacuity guard (`max|dθl·dt|`~3e-4 K). **Bridge fact codex
+  surfaced:** `clubb_step` maps the advanced mean back as `T_new = thlm·exner`
+  (`clubb.py:353`), so the scheme's reported `dT_dt/exner` is *exactly* the
+  prognostic **θl** (=`thlm`) tendency BY CONSTRUCTION — i.e. prognostic CLUBB
+  reports a θl-equivalent temperature and `q_v`=`rtm` (total water), NOT a
+  saturation-adjusted (T, q_v) split. So the conserved quantity is θl/rt (the
+  CLUBB prognostics), correct WITH cloud present (this spun-up column IS cloudy,
+  `rcm`~5e-3) — the first codex pass nearly let a test ship claiming the (false)
+  `θl=θ` no-cloud reason; corrected to state the bridge identity instead. Implies
+  follow-up: a host saturation-adjustment / cloud-liquid partition of the returned
+  tendencies is left to microphysics (consistent with `l_rcm_supersat_adj=.false.`).
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz
