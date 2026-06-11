@@ -1036,6 +1036,100 @@ def test_prognostic_clubb_blocked_on_non_persisting_drivers():
     assert make_turbulence_physics(tc_diag, "nonhydrostatic", 300.0) is not None
 
 
+def test_prognostic_clubb_runs_through_mpas_driver():
+    """Prognostic CLUBB runs end-to-end through the MPAS (Voronoi-mesh) combined
+    physics — the second claimed-supported driver, and the only one besides
+    hydrostatic that persists ``PhysicsState``.
+
+    The MPAS turbulence path is NOT a trivial reuse of the hydrostatic column
+    backend: it reconstructs cell-centred winds from the edge-normal ``u`` (Perot),
+    runs the column scheme, and projects the wind tendency back to edges, all while
+    threading the packed ``clubb_moments`` carry. ``test_..._blocked_on_non_
+    persisting_drivers`` only asserts the *build* policy for hydrostatic; this is
+    the first test to actually BUILD and RUN prognostic CLUBB on ``model_type=
+    "mpas"``.
+
+    The column is given a SHEARED, non-uniform edge-normal wind so the edge↔cell
+    bridge is genuinely exercised (a rest state ``u=0`` would leave the
+    reconstruction/projection untested — a broken Perot mapping or an all-zero
+    projection would still give a finite ``du_dt``; codex iter-82). The test
+    therefore asserts more than finiteness: the edge wind tendency is non-trivial
+    in magnitude, spatially STRUCTURED, and SENSITIVE to the wind field (a
+    wind-independent or all-zero projection fails), plus the moment carry survives
+    the round trip and evolves."""
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        make_turbulence_physics,
+    )
+    from legoesm.core.field import Field
+    from legoesm.core.state import MPASHydrostaticState
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    nlev = 10
+    mesh = create_voronoi_mesh(3, lloyd_iterations=3)
+    sigma = create_sigma_coordinate(nlev)
+    nC, nE = mesh.nCells, mesh.nEdges
+    # Sheared (2→12 m/s) + per-edge structured edge-normal wind so the Perot
+    # reconstruction yields non-zero, spatially-varying cell winds.
+    rng = np.random.default_rng(0)
+    shear = np.linspace(2.0, 12.0, nlev)[None, :]
+    u_edge = jnp.asarray(shear + 3.0 * rng.standard_normal((nE, nlev)))
+
+    def make_state(u_arr):
+        return MPASHydrostaticState(
+            u=Field(u_arr, name="u", dims=("nEdges", "nlev"), units="m/s"),
+            T=Field(jnp.full((nC, nlev), 265.0), name="T", dims=("nCells", "nlev"), units="K"),
+            p_s=Field(jnp.full((nC,), 1e5), name="p_s", dims=("nCells",), units="Pa"),
+            phis=Field(jnp.zeros((nC,)), name="phis", dims=("nCells",), units="m^2/s^2"))
+
+    tc = TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True))
+    # The build-policy docstring claims mpas is allowed — verify it actually builds.
+    assert make_turbulence_physics(tc, "mpas", 300.0) is not None
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme="none"), turbulence=tc,
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"))
+    phys_state = init_physics_state(nC, nlev, cfg)
+    assert phys_state.clubb_moments.shape == (nC, 15, nlev + 1)
+    physics_fn = make_physics(cfg, model_type="mpas", dt=300.0)
+
+    moments0 = np.asarray(phys_state.clubb_moments).copy()
+    # --- Wind-bridge coverage: baseline vs half-wind from the SAME carry, so the
+    # ONLY changed input is the wind amplitude (codex iter-82: comparing across an
+    # evolved carry would confound wind dependence with carry evolution). ---
+    tend_base, _ = physics_fn(make_state(u_edge), mesh, sigma, phys_state)
+    tend_half, _ = physics_fn(make_state(u_edge * 0.5), mesh, sigma, phys_state)
+    du_base = np.asarray(tend_base.du_dt.data)
+    assert np.all(np.isfinite(du_base))
+    assert np.all(np.isfinite(np.asarray(tend_base.dT_dt.data)))
+    # (1) The edge↔cell wind bridge produced a NON-TRIVIAL edge tendency (an
+    # all-zero reconstruction/projection would give ~0).
+    assert np.max(np.abs(du_base)) > 1e-5, f"MPAS edge wind tendency ~0: {np.max(np.abs(du_base))}"
+    # (2) ...that is spatially STRUCTURED (not a constant fill).
+    assert not np.allclose(du_base, du_base.flat[0])
+    # (3) ...and depends ONLY on the wind field (same carry; only u halved) —
+    # proving the reconstruction/projection carry the wind, not a fixed artifact.
+    assert np.max(np.abs(du_base - np.asarray(tend_half.du_dt.data))) > 1e-5
+
+    # --- Carry persistence/evolution across steps (separate from the wind probe). ---
+    ps = phys_state
+    for _ in range(2):
+        tend, ps = physics_fn(make_state(u_edge), mesh, sigma, ps)
+        assert np.all(np.isfinite(np.asarray(tend.dT_dt.data)))
+        assert np.all(np.isfinite(np.asarray(tend.du_dt.data)))
+        assert ps.clubb_moments.shape == (nC, 15, nlev + 1)
+        assert np.all(np.isfinite(np.asarray(ps.clubb_moments)))
+    # (4) The moment carry survived the round trip and evolved (genuinely prognostic).
+    assert not np.allclose(np.asarray(ps.clubb_moments), moments0)
+
+
 def test_read_turb_carry_fails_fast_on_wrong_clubb_shape():
     """_read_turb_carry raises (no silent resize/retrace) when phys_state carries
     a wrong-shaped clubb_moments slot (PhysicsState not init'd for prognostic)."""

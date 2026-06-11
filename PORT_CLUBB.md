@@ -212,6 +212,21 @@ efficient multi-step testing.
   dycore supplies that BETWEEN physics dt, not within one), so a strongly-SHEARED column
   destabilises over a long bare `dt` (O(1) residuals on `_scm_column`; iter-48 again) —
   the test uses a low-shear column where the sub-cycle stays stable. Codex: approve.
+- **MPAS-driver integration coverage (iter 82):** prognostic CLUBB was claimed-supported
+  on `model_type="mpas"` (the 2nd PhysicsState-persisting driver) but had ZERO integration
+  coverage — `..._blocked_on_non_persisting_drivers` only asserted the build policy for
+  hydrostatic. Added `test_prognostic_clubb_runs_through_mpas_driver`: builds + RUNS
+  prognostic CLUBB end-to-end through the MPAS combined physics on a Voronoi mesh, where
+  the turbulence path does a non-trivial Perot edge→cell wind reconstruction + cell→edge
+  projection around the column scheme while threading the `clubb_moments` carry. **Codex
+  caught two real [medium]s, both fixed:** (1) a rest state `u=0` leaves the edge↔cell wind
+  bridge untested (an all-zero projection still gives finite `du_dt`) → drive a SHEARED
+  (2→12 m/s) + per-edge-structured edge wind and assert `max|du_dt|>1e-5` + spatial
+  structure; (2) the wind-sensitivity check confounded wind change with carry evolution
+  (baseline from evolved carry vs half-wind from fresh) → compute both baseline and
+  half-wind from the SAME `phys_state` so wind amplitude is the only changed input
+  (`max|du_base−du_half|>1e-5`). Separate 2-step loop checks carry persistence/evolution.
+  3rd codex pass: approve. Confirms the MPAS edge↔cell wind round-trip + moment carry work.
 - **GABLS1 stable-BL — shipped (iter 72):** correctly-coupled SCM benchmark via
   `prescribe="T_s"` + ACTIVE bulk transfer (`Ch_neutral=1.5e-3`) so CLUBB's own bulk
   formula computes the surface heat flux → native `wpthlp_sfc` coupling drives the SBL
