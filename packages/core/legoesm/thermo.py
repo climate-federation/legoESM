@@ -252,3 +252,40 @@ def saturation_specific_humidity(
     """
     w_sat = saturation_mixing_ratio(T, p)
     return w_sat / (1.0 + w_sat)
+
+
+def relative_humidity(
+    T: jax.Array,
+    p: jax.Array,
+    mixing_ratio: jax.Array,
+) -> jax.Array:
+    """Saturation ratio ``S = e / e_sat`` (WMO relative humidity, as a fraction).
+
+    Computes the water-vapor partial pressure from the vapor MIXING RATIO
+    ``r = m_v / m_d`` [kg/kg dry air] and divides by the saturation vapor
+    pressure::
+
+        e = p * r / (epsilon + r)
+        S = e / saturation_vapor_pressure(T)
+
+    This is the saturation ratio that diffusional droplet growth uses (its
+    ``(S - 1)`` supersaturation), and is distinct from the mixing-ratio ratio
+    ``r / r_sat`` — the two differ by ``O(r/epsilon, e_sat/p)`` (~1 %), which is
+    a large fractional error in the small ``S - 1`` activation signal.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    p : jax.Array
+        Pressure [Pa].
+    mixing_ratio : jax.Array
+        Water-vapor mixing ratio ``r = m_v/m_d`` [kg/kg].
+
+    Returns
+    -------
+    jax.Array
+        Saturation ratio ``S = e/e_sat`` [-] (1.0 at saturation).
+    """
+    e = p * mixing_ratio / (constants.epsilon + mixing_ratio)
+    return e / saturation_vapor_pressure(T)

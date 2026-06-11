@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm import constants
+from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
 
 
 class KesslerConfig(NamedTuple):
@@ -545,13 +546,17 @@ class MicrophysicsConfig(NamedTuple):
     ------
     scheme : str
         Active scheme: "kessler", "sundqvist", "seifert_beheng",
-        "morrison", "thompson", "p3", "ml_emulator", or "none".
+        "morrison", "thompson", "p3", "sdm", "ml_emulator", or "none".
     kessler : KesslerConfig
     sundqvist : SundqvistConfig
     seifert_beheng : SeifertBehengConfig
     morrison : MorrisonConfig
     thompson : ThompsonConfig
     p3 : P3Config
+    sdm : SDMConfig
+        Super-Droplet Method (Shima et al. 2009). The column path is a
+        diffusional-condensation adapter; the full Lagrangian model is in
+        ``microphysics/sdm/box_model.py``.
     ml_emulator : MicrophysicsMLEmulatorConfig
     """
     scheme: str = "none"
@@ -561,4 +566,5 @@ class MicrophysicsConfig(NamedTuple):
     morrison: MorrisonConfig = MorrisonConfig()
     thompson: ThompsonConfig = ThompsonConfig()
     p3: P3Config = P3Config()
+    sdm: SDMConfig = SDMConfig()
     ml_emulator: MicrophysicsMLEmulatorConfig = MicrophysicsMLEmulatorConfig()

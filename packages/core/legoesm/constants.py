@@ -76,6 +76,18 @@ M_H2O = 18.01528        # [g/mol] water
 epsilon = R_d / R_v              # Molecular weight ratio (~0.622)
 
 # ==============================================================================
+# Cloud-microphysics material properties
+# (diffusional droplet growth: Super-Droplet Method, bin/bulk condensation)
+# ==============================================================================
+D_vapor = 2.21e-5               # Water-vapor diffusivity in air [m^2/s]
+                                # (Pruppacher & Klett 1997; CONST value)
+k_air = 2.40e-2                 # Thermal conductivity of air [W/(m*K)]
+                                # (Pruppacher & Klett 1997)
+sigma_water = 0.0728            # Surface tension of the water-air interface [N/m]
+                                # at ~293 K (Pruppacher & Klett 1997) — Kelvin
+                                # curvature term in Köhler droplet growth
+
+# ==============================================================================
 # Turbulence
 # ==============================================================================
 kappa_von_karman = 0.4          # Von Kármán constant for the log-law (Pope 2000)
@@ -185,7 +197,12 @@ N_A = 6.02214076e23             # [1/mol] particles per mole
 # Used by biochemistry / photosynthesis (Arrhenius temperature factors)
 # and any other code that needs R independent of a specific gas (R_d,
 # R_v are gas-specific = R / M).
-R_universal = 8.314462618       # [J/(mol·K)] = N_A · k_B
+R_universal = 8.314462618       # [J/(mol·K)] ≈ N_A·k_B (value truncated at
+                                # 10 digits; exact product is 8.31446261815324)
+# Boltzmann constant — exact by SI definition (2019 redefinition). Defined as
+# its own literal rather than R_universal/N_A because the R_universal literal
+# above is truncated (deriving would be off by ~2e-11 relative).
+k_B = 1.380649e-23              # [J/K] (exact, SI)
 
 # ==============================================================================
 # Mathematical Constants

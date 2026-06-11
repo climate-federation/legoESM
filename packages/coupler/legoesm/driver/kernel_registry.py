@@ -129,6 +129,13 @@ MICROPHYSICS_REGISTRY: dict[str, _Entry] = {
         "legoesm.atmosphere.physics.microphysics.p3",
         "p3_microphysics",
     ),
+    # SDM column adapter: diffusional condensation/evaporation of a
+    # reconstructed mean cloud droplet (q_v, q_c). The full Lagrangian
+    # super-droplet model lives in microphysics/sdm/box_model.py.
+    "sdm": (
+        "legoesm.atmosphere.physics.microphysics.sdm",
+        "sdm_microphysics",
+    ),
     # The ML emulator kernel takes the Equinox network as a trailing
     # extra argument; ``physics_pipeline._resolve_microphysics`` builds
     # the network from the scheme config and binds it into a

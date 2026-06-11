@@ -7,7 +7,9 @@ Seven backends are available, spanning warm-rain through mixed-phase to ML:
 4. **Morrison**: Double-moment ice+liquid (Morrison et al. 2005)
 5. **Thompson**: Hybrid moment with graupel (Thompson et al. 2008)
 6. **P3**: Predicted Particle Properties single-category ice (Morrison & Milbrandt 2015)
-7. **ML Emulator**: Equinox MLP surrogate
+7. **SDM**: Super-Droplet Method, particle-based (Shima et al. 2009); the column
+   path is a diffusional-condensation adapter, full Lagrangian model in `sdm/`
+8. **ML Emulator**: Equinox MLP surrogate
 
 All produce the same `MicrophysicsOutput` interface.
 
@@ -31,6 +33,7 @@ from legoesm.atmosphere.physics.microphysics.config import (
     MorrisonConfig,
     ThompsonConfig,
     P3Config,
+    SDMConfig,
     MicrophysicsMLEmulatorConfig,
 )
 from legoesm.atmosphere.physics.microphysics.output import (
@@ -46,6 +49,7 @@ from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_behen
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
+from legoesm.atmosphere.physics.microphysics.sdm import sdm_microphysics
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     ml_microphysics,
     MicrophysicsEmulator,

@@ -39,12 +39,16 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 __physics_contract__ = {
-    "units": {
-        "aod": "1 (column aerosol optical depth at ~500 nm)",
-        "return": "1/m^3 (cloud droplet / CCN number concentration)",
-    },
-    "signs": {"aod": ">= 0", "return": "> 0"},
-    "conserves": [],
+    "summary": (
+        "Aerosol -> cloud-droplet (CCN) number concentration from column "
+        "aerosol optical depth (Andreae 2009 AOT-CCN relation, inverted)."
+    ),
+    "inputs": {"aod": "1 (column aerosol optical depth at ~500 nm)"},
+    "outputs": {"N_ccn": "1/m^3 (cloud droplet / CCN number concentration)"},
+    "sign_convention": (
+        "aod >= 0; returned CCN number > 0 and monotonically increasing in aod."
+    ),
+    "conserves": ["none"],
     "differentiable": True,
     "reference": (
         "Andreae (2009), ACP 9, 543-556, doi:10.5194/acp-9-543-2009: "

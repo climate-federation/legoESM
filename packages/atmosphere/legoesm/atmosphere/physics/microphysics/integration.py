@@ -50,6 +50,7 @@ from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_behen
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
+from legoesm.atmosphere.physics.microphysics.sdm import sdm_microphysics
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     ml_microphysics,
     MicrophysicsEmulator,
@@ -82,6 +83,8 @@ def _get_microphysics_fn(config: MicrophysicsConfig):
         return "thompson", thompson_microphysics, config.thompson
     elif config.scheme == "p3":
         return "p3", p3_microphysics, config.p3
+    elif config.scheme == "sdm":
+        return "sdm", sdm_microphysics, config.sdm
     elif config.scheme == "ml_emulator":
         return "ml_emulator", ml_microphysics, config.ml_emulator
     elif config.scheme == "none":
@@ -229,8 +232,11 @@ def _make_hydrostatic_microphysics(
         # Extract water vapor from tracers if available; else assume dry.
         q_v_col = _get_tracer("q_v")
 
-        rho = _compute_rho(T_col, p_full_col)
-        dz = _compute_heights_from_sigma(T_col, p_half_col)
+        # Moist (virtual-temperature) density and thickness — the helpers
+        # apply T_v = T(1+0.608 q_v); a dry rho overestimates density (and the
+        # SDM column's reconstructed droplet mass) by ~0.6·q_v.
+        rho = _compute_rho(T_col, p_full_col, q_v_col)
+        dz = _compute_heights_from_sigma(T_col, p_half_col, q_v_col)
 
         # Extract actual hydrometeor state from tracers (fall back to zero
         # for any species not present in the tracer registry).
@@ -471,6 +477,7 @@ _PLANE_MIN_TRACER_SLOTS = {
     "morrison": 9,          # q_{v,c,r,i,s,g} + N_{c,r,i}
     "thompson": 9,          # q_{v,c,r,i,s,g} + N_{c,r,i}
     "p3": 9,                # q_{v,c,r,i} + q_rim(s) + B_rim(g) + N_{c,r,i}
+    "sdm": 2,               # q_v, q_c (condensation adapter; dq_r is always 0)
     "ml_emulator": 9,       # generic full layout
     "none": 0,              # no-op
 }
@@ -962,8 +969,10 @@ def _make_spectral_pe_microphysics(
 
         q_v_col = _get_tracer("q_v")
 
-        rho = _compute_rho(T_col, p_full_col)
-        dz = _compute_heights_from_sigma(T_col, p_half_col)
+        # Moist (virtual-temperature) density/thickness — see the hydrostatic
+        # bridge note above.
+        rho = _compute_rho(T_col, p_full_col, q_v_col)
+        dz = _compute_heights_from_sigma(T_col, p_half_col, q_v_col)
 
         hydrometeors = HydrometeorState(
             q_c=_get_tracer("q_c"),

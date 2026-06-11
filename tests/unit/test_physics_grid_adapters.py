@@ -236,7 +236,7 @@ class TestKernelRegistries:
     def test_microphysics_registry_has_all(self):
         expected = {
             "kessler", "sundqvist", "seifert_beheng", "morrison",
-            "thompson", "p3", "ml_emulator",
+            "thompson", "p3", "sdm", "ml_emulator",
         }
         assert expected == set(MICROPHYSICS_REGISTRY.keys())
 
@@ -244,6 +244,11 @@ class TestKernelRegistries:
         fn = resolve_kernel(MICROPHYSICS_REGISTRY, "kessler")
         assert callable(fn)
         assert fn.__name__ == "kessler_microphysics"
+
+    def test_resolve_sdm(self):
+        fn = resolve_kernel(MICROPHYSICS_REGISTRY, "sdm")
+        assert callable(fn)
+        assert fn.__name__ == "sdm_microphysics"
 
     def test_unknown_scheme_raises(self):
         with pytest.raises(KeyError, match="nonexistent"):
