@@ -177,14 +177,19 @@ so no water is created. A tiny nu removes the instability entirely (wp2max
 conservation/positivity. Codex-approved. Characterizer
 `scripts/validate/clubb_prognostic_stability.py`.
 
-**Remaining to DONE:**
-- ☐ **Production dispatch flip**: persist `CLUBBMomentState` via `PhysicsState`
-  + `combined.py` `tagged_fns` `(fn, accepts_ps, field_name="clubb_moments")` +
-  restart I/O (mind zm=nlev+1 vs tke-slot nlev), and back `scheme="clubb"` in
-  `integration.py` with a `clubb_step`-driven physics_fn (currently the stateless
-  phase-1 `clubb_turbulence` — runnable + tested, diagnostic). The coupled model's
-  dycore supplies the numerical diffusion the bare SCM driver needed, so the
-  prognostic path should be stable in production; verify with a short coupled run.
+**Remaining to DONE — production dispatch flip (in progress):**
+- ✅ **Persistence foundation** (iter 52): `pack_clubb_moments`/`unpack_clubb_moments`
+  (CLUBBMomentState ↔ (ncol,15,nzm) array, gwd_spectrum-style); `PhysicsState.
+  clubb_moments` field seeded by `init_physics_state` when `scheme=clubb` +
+  `CLUBBConfig.prognostic=True`, minimal (ncol,1,1) otherwise; opt-in
+  `CLUBBConfig.prognostic` flag. Non-disruptive (25 combined/migration tests
+  pass); restart serializes generically. Codex-approved.
+- ☐ **integration.py/combined.py wiring**: `combined.py` registers the clubb
+  turbulence physics_fn with `field_name="clubb_moments"` (when prognostic);
+  the turbulence physics_fn for prognostic clubb reads `phys_state.clubb_moments`,
+  `unpack` → `clubb_step` → `pack` the new moments + return tendencies. Coupled
+  dycore supplies the numerical diffusion the bare SCM driver needed.
+- ☐ **Coupled-run verification** of prognostic clubb (short SCM / aquaplanet).
 
 ## CAM-vs-ARM caveats (CLUBB-JAX is ARM-wired; re-check the CAM NAMELIST per module)
 - Namelist OVERRIDES the Fortran flag defaults — always check the namelist.
