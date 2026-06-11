@@ -187,6 +187,24 @@ efficient multi-step testing.
   override fields + the SHARED generic `turb_fn` dispatch in `integration.py`, which has
   a fixed signature across all schemes + `scm.py`) → deferred to a human-directed PR, not
   done autonomously (iter 78/80 re-confirmed the risk).
+- **AMIP-CLI prognostic exposure — investigated, NOT shipped (iter 83):** attempted to
+  expose prognostic CLUBB through the production AMIP CLI (`--clubb-prognostic` → an
+  additive `ExperimentConfig.clubb_prognostic` field → the `model_driver._run_mpas`
+  `TurbulenceConfig` build site, with a fail-loud non-MPAS guard). **Codex caught two
+  [high] blockers, both confirmed real → reverted the whole change:** (1) the MPAS run
+  loop (`_run_mpas`) starts `_phys_state=None` and `update_physics_state(None, …)` returns
+  `None` (verified at `physics_state.py:265`), so the `clubb_moments` carry is DISCARDED
+  and RESEEDED every step — the prognostic kernel would run with no time carry (silently
+  wrong, "succeeds" but isn't prognostic); (2) MPAS checkpoints persist only
+  `u/T/p_s/phis/tracers`, so restarts reset the moments. This is a GENERAL latent
+  limitation: `_run_mpas` does not carry ANY stateful-physics state (TKE/qke, prognostic
+  convection/GWD, CLUBB) across steps — currently masked because MPAS AMIP runs use
+  `--turbulence none`. Fix = initialize a real `PhysicsState` before the MPAS loop when
+  stateful physics is active + persist the carry (incl. `clubb_moments`) in the MPAS
+  checkpoint format + restore on restart. Deep run-loop-lifecycle + checkpoint-format
+  surgery → human-directed PR. Prognostic CLUBB remains runnable/tested via the direct
+  `combined.make_physics` MPAS path (iter 82, which threads `phys_state` explicitly) and
+  `integrate_clubb_column`; only the *production CLI* exposure is blocked.
 - **Prescribed-flux conservation triad (iters 77/78/79), all codex-approved:** for the
   iter-76 prescribed `sfc_*` BCs — **heat** (77) and **moisture** (79) are applied as
   EXACT flux-form Neumann lower-BCs (`Σ_k (ρ_k dz_k)(dT_dt/Π or dq_v_dt)_k = ρ_sfc·flux`
