@@ -46,6 +46,18 @@ from legoesm.atmosphere.physics.microphysics.sdm.coalescence import (
     coalescence_step,
     represented_number,
 )
+from legoesm.atmosphere.physics.microphysics.sdm.coupling import (
+    cloud_rain_mixing_ratios,
+    condensation_exchange,
+    liquid_water_content,
+)
+from legoesm.atmosphere.physics.microphysics.sdm.box_model import (
+    ParcelState,
+    liquid_mixing_ratio,
+    parcel_step,
+    run_parcel,
+    saturation_ratio,
+)
 
 __all__ = [
     "SDMConfig",
@@ -65,4 +77,12 @@ __all__ = [
     "terminal_velocity_cloud_rain_shima",
     "coalescence_step",
     "represented_number",
+    "liquid_water_content",
+    "cloud_rain_mixing_ratios",
+    "condensation_exchange",
+    "ParcelState",
+    "parcel_step",
+    "run_parcel",
+    "liquid_mixing_ratio",
+    "saturation_ratio",
 ]

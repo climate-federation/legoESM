@@ -49,6 +49,9 @@ class SDMConfig(NamedTuple):
     golovin_b : float
         Golovin kernel coefficient ``b`` [1/s] (K = b(X_i+X_j); Shima 2009
         Golovin box test uses b = 1.5e3).
+    r_rain : float
+        Radius threshold [m] separating cloud water from rain when depositing
+        super-droplet liquid to grid mixing ratios (ERF default 40 um).
     """
 
     n_substeps_condensation: int = 1
@@ -60,3 +63,4 @@ class SDMConfig(NamedTuple):
     collision_kernel: str = "golovin"
     terminal_velocity: str = "rogers_yau"
     golovin_b: float = 1.5e3              # [1/s] Golovin kernel coefficient
+    r_rain: float = 4.0e-5               # [m] cloud/rain radius threshold (40 um)

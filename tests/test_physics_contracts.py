@@ -99,6 +99,7 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/particles.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/box_model.py",
         "packages/atmosphere/legoesm/atmosphere/physics/physics_state.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/config.py",
