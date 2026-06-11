@@ -124,3 +124,46 @@ def getattr_deep(obj, dotted):
     for part in dotted.split("."):
         obj = getattr(obj, part)
     return obj
+
+
+@pytest.mark.parametrize("kt", (2, 3))
+def test_stack_tiled_sliceable_metrics(cdgrid, kt):
+    """Every sliceable metric stacks to (6*kt^2, *block) and each
+    device's block equals the global per-tile slice; the deferred list
+    is exactly the padded/table/scalar fields (no sliceable dropped)."""
+    from legoesm.parallel.mesh import (
+        stack_tiled_sliceable_metrics,
+        classify_face_metric,
+    )
+
+    nl = N // kt
+    stacks, deferred = stack_tiled_sliceable_metrics(cdgrid, kt)
+    deferred_names = {n for n, _ in deferred}
+
+    # Partition completeness: every array field is either stacked or
+    # deferred, never both, never missing.
+    all_names = {name for name, _ in _all_array_fields(cdgrid)}
+    assert set(stacks) | deferred_names == all_names
+    assert not (set(stacks) & deferred_names)
+
+    # No sliceable field was deferred.
+    for name in deferred_names:
+        arr = getattr_deep(cdgrid, name)
+        assert classify_face_metric(arr, N)[0] != "sliceable", (
+            f"{name} is sliceable but was deferred")
+
+    # Spot-check a centered, a corner, and an edge field roundtrip.
+    for name in ("base.area", "lon_corner", "dx_edge_y"):
+        arr = getattr_deep(cdgrid, name)
+        stack = stacks[name]
+        assert stack.shape[0] == 6 * kt * kt
+        for f in range(6):
+            for ti in range(kt):
+                for tj in range(kt):
+                    d = (f * kt + ti) * kt + tj
+                    want = arr[f][
+                        ti * nl: ti * nl + stack.shape[1],
+                        tj * nl: tj * nl + stack.shape[2]]
+                    np.testing.assert_array_equal(
+                        np.asarray(stack[d]), np.asarray(want),
+                        err_msg=f"{name} device {d} block mismatch")

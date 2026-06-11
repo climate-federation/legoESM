@@ -1062,3 +1062,65 @@ def replicate_pytree(pytree, config: DeviceConfig):
         return jax.device_put(leaf, config.replicated_sharding)
 
     return jax.tree.map(_replicate_leaf, pytree)
+
+
+# ==============================================================================
+# Tiled cdgrid sliceable-metric assembly (P4 phase-1b)
+# ==============================================================================
+
+def stack_tiled_sliceable_metrics(cdgrid, kt: int):
+    """Stack per-tile blocks of every SLICEABLE cdgrid metric over the
+    (face, tile_i, tile_j) device order.
+
+    For each metric the classifier marks ``"sliceable"`` (both
+    horizontal axes in {n, n+1} — cell / corner / edge fields), this
+    builds an array of shape ``(6*kt^2, *block_shape)`` where device
+    ``d = (f*kt + ti)*kt + tj`` holds ``tiled_face_block(field[f], ti,
+    tj, nl, kt)``.  This is the cubed-sphere analogue of the voronoi
+    ``stacked_meshes`` pattern: the tiled ``shard_map`` tendency stage
+    indexes the stack by ``axis_index`` to get its own tile's static
+    metric.
+
+    Returns ``(stacks, deferred)`` where ``stacks`` is
+    ``{dotted_name: stacked_array}`` for sliceable metrics and
+    ``deferred`` is the sorted list of ``(name, classification)`` for
+    every padded / table / scalar field this function does NOT
+    produce — the explicit contract boundary (padded metrics are the
+    setup-exchange step; tables ride the exchange; scalars become
+    ``nl``).  Pure host-side numpy/JAX slicing; no device placement.
+    """
+    import jax.numpy as jnp
+
+    n = cdgrid.base.n
+    if n % kt != 0:
+        raise ValueError(
+            f"face resolution n={n} not divisible by kt={kt}")
+    nl = n // kt
+
+    def _walk(obj, prefix=""):
+        fields = getattr(obj, "_fields", None)
+        if fields is None:
+            return
+        for fname in fields:
+            val = getattr(obj, fname)
+            if hasattr(val, "_fields"):
+                yield from _walk(val, prefix=f"{prefix}{fname}.")
+            elif hasattr(val, "shape"):
+                yield (f"{prefix}{fname}", val)
+
+    stacks = {}
+    deferred = []
+    for name, arr in _walk(cdgrid):
+        kind, h = classify_face_metric(arr, n)
+        if kind != "sliceable":
+            deferred.append((name, kind if h is None else f"{kind}:h{h}"))
+            continue
+        blocks = []
+        for f in range(6):
+            for ti in range(kt):
+                for tj in range(kt):
+                    blocks.append(
+                        tiled_face_block(arr[f], ti, tj, nl, kt))
+        stacks[name] = jnp.stack(blocks, axis=0)
+    deferred.sort()
+    return stacks, deferred
