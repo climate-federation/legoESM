@@ -38,6 +38,11 @@ import jax
 import jax.numpy as jnp
 from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig, derive_lmin
+from legoesm.atmosphere.physics.turbulence.clubb_core import (
+    CLUBBForcing,
+    CLUBBMomentState,
+    advance_clubb_core,
+)
 from legoesm.atmosphere.physics.turbulence.clubb_diagnostic import (
     diagnose_cloud_and_buoyancy,
 )
@@ -45,6 +50,9 @@ from legoesm.atmosphere.physics.turbulence.clubb_grid import (
     flip_vertical,
     make_clubb_grid_from_levels,
     zt2zm,
+)
+from legoesm.atmosphere.physics.turbulence.clubb_helpers import (
+    calc_brunt_vaisala_freq_sqd,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_mixing_length import (
     compute_mixing_length,
@@ -202,3 +210,142 @@ def clubb_turbulence(
         h_pbl=h_pbl,
     )
     return output, wp2_new
+
+
+def clubb_step(
+    u: jax.Array,
+    v: jax.Array,
+    T: jax.Array,
+    q_v: jax.Array,
+    moments: CLUBBMomentState,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    z_full: jax.Array,
+    z_half: jax.Array,
+    T_sfc: jax.Array,
+    q_sfc: jax.Array,
+    rho: jax.Array,
+    dt: float,
+    config: CLUBBConfig,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
+    """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
+
+    This is the *full prognostic* path (phase 2): it builds the ascending-grid
+    host environment CLUBB needs, sets the surface turbulent-flux lower boundary
+    conditions, advances the complete higher-order moment set with
+    :func:`clubb_core.advance_clubb_core`, and maps the advanced means back to
+    top-down ``(ncol, nlev)`` tendencies. The 15-field :class:`CLUBBMomentState`
+    (means on zt, moments/fluxes on zm, ``wp3`` zt) is carried in and out.
+
+    Modelling choices (documented; refined as the scheme matures):
+
+      * Dry phase mapping ``thl ~ theta``, ``rt ~ q_v`` (``rcm`` enters only via
+        the PDF closure inside ``advance_clubb_core``).
+      * Mean vertical velocity ``wm = 0`` (grid-scale subsidence is the dycore's
+        job, not the column closure).
+      * Geostrophic wind ``ug = um``, ``vg = vm`` and ``fcor = 0`` → the
+        Coriolis/geostrophic term in ``advance_windm_edsclrm`` vanishes (rotation
+        is handled by the dycore; the turbulence scheme only diffuses).
+      * Dry-static reference profiles ``thv_ds``/``rho_ds`` taken as the current
+        ``thv``/``rho`` (a per-column Boussinesq-style reference).
+      * Large-scale ``CLUBBForcing`` = 0 (other physics supply those tendencies).
+
+    Returns ``(du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diagnostics)`` — the
+    four mean tendencies (top-down ``(ncol, nlev)``), the advanced moment state,
+    and the ``cloud_frac``/``rcm``/``wpthvp``/``Kh_*`` diagnostics dict.
+    """
+    ncol, nlev = T.shape
+    params = config.params
+
+    # ---- Thermodynamics (top-down) ----
+    exner = (p_full / constants.p_ref) ** constants.kappa
+    theta = T / exner
+    thv = virtual_temperature(T, q_v) / exner
+
+    # ---- Ascending CLUBB grid + means on zt ----
+    gr = make_clubb_grid_from_levels(z_full, z_half)
+    thlm = flip_vertical(theta)          # thl ~ theta (zt)
+    rtm = flip_vertical(q_v)             # rt ~ q_v   (zt)
+    um = flip_vertical(u)
+    vm = flip_vertical(v)
+    exner_zt = flip_vertical(exner)
+    p_zt = flip_vertical(p_full)
+    thv_zt = flip_vertical(thv)
+
+    # ---- Dry-static reference + density profiles (zt and zm) ----
+    thv_ds_zt = thv_zt
+    thv_ds_zm = zt2zm(thv_zt, gr)
+    rho_ds_zt = flip_vertical(rho)
+    rho_ds_zm = zt2zm(rho_ds_zt, gr)
+    invrs_rho_ds_zt = 1.0 / rho_ds_zt
+    invrs_rho_ds_zm = 1.0 / rho_ds_zm
+
+    # ---- Brunt-Vaisala N^2 (dry CAM-default form; rcm/ice unused there) ----
+    zeros_zt = jnp.zeros((ncol, nlev), dtype=T.dtype)
+    brunt = calc_brunt_vaisala_freq_sqd(
+        thlm, exner_zt, rtm, zeros_zt, p_zt, zeros_zt,
+        params.bv_efold, config.T0, gr)[0]
+
+    # ---- Parcel buoyant-sorting mixing length ----
+    em_zm = jnp.maximum(
+        0.5 * (moments.wp2 + moments.up2 + moments.vp2), config.tke_min)  # l_tke_aniso
+    mu = jnp.full((ncol,), params.mu)
+    lmin = derive_lmin(params.lmin_coef)
+    Lscale_max = set_Lscale_max(False, None, None, ncol)
+    Lscale, _, _ = compute_mixing_length(
+        thv_zt, thlm, rtm, em_zm, Lscale_max, p_zt, exner_zt, thv_ds_zt,
+        mu, lmin, False, gr)
+    # Enforce the physical minimum mixing length lmin (compute_mixing_length can
+    # return < lmin; CLUBB floors it). A strictly positive Lscale keeps the
+    # dissipation time tau = Lscale/sqrt(em) finite (invrs_tau = 1/tau).
+    Lscale = jnp.maximum(Lscale, lmin)
+
+    # ---- Surface turbulent-flux lower boundary conditions (kinematic) ----
+    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
+        u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
+        T_sfc, q_sfc, rho[:, -1], config.surface)
+    rho_sfc = rho[:, -1]
+    exner_sfc = exner[:, -1]
+    wpthlp_sfc = shflx / (rho_sfc * constants.c_pd * exner_sfc)   # w'thl' [K m/s]
+    wprtp_sfc = lhflx / (rho_sfc * constants.L_v)                 # w'rt'  [kg/kg m/s]
+    # Surface stress convention is tau = -rho*Cd*|V|*u (compute_surface_fluxes),
+    # so the kinematic momentum flux is u'w'_sfc = tau_x/rho (NEGATIVE for u>0 —
+    # momentum transported downward / drag), NOT -tau_x/rho.
+    upwp_sfc = tau_x / rho_sfc                                    # u'w'   [m^2/s^2]
+    vpwp_sfc = tau_y / rho_sfc
+    # The mean state (rtm/thlm/um/vm) is owned by the model and re-read from the
+    # live column each step; only the higher-order moments/fluxes persist in
+    # ``moments``. Reset the means here, then set the surface flux BCs.
+    state = moments._replace(
+        rtm=rtm, thlm=thlm, um=um, vm=vm,
+        wprtp=moments.wprtp.at[:, 0].set(wprtp_sfc),
+        wpthlp=moments.wpthlp.at[:, 0].set(wpthlp_sfc),
+        upwp=moments.upwp.at[:, 0].set(upwp_sfc),
+        vpwp=moments.vpwp.at[:, 0].set(vpwp_sfc))
+
+    # ---- Advance the full prognostic moment set ----
+    zeros_zm = jnp.zeros((ncol, nlev + 1), dtype=T.dtype)
+    forcing = CLUBBForcing(
+        rtm=zeros_zt, thlm=zeros_zt, um=zeros_zt, vm=zeros_zt, wprtp=zeros_zm,
+        wpthlp=zeros_zm, rtp2=zeros_zm, thlp2=zeros_zm, rtpthlp=zeros_zm)
+    sfc_elevation = flip_vertical(z_half)[:, 0]
+    new_state, diags = advance_clubb_core(
+        state, forcing, Lscale=Lscale, brunt_vaisala_freq_sqd=brunt,
+        exner_zt=exner_zt, p_in_Pa_zt=p_zt, thv_ds_zt=thv_ds_zt,
+        thv_ds_zm=thv_ds_zm, rho_ds_zm=rho_ds_zm, rho_ds_zt=rho_ds_zt,
+        invrs_rho_ds_zm=invrs_rho_ds_zm, invrs_rho_ds_zt=invrs_rho_ds_zt,
+        wm_zt=zeros_zt, wm_zm=zeros_zm, sfc_elevation=sfc_elevation,
+        fcor=jnp.zeros((ncol,), dtype=T.dtype), ug=um, vg=vm, dt=dt, gr=gr,
+        config=config)
+
+    # ---- Map advanced means back to top-down tendencies ----
+    u_new = flip_vertical(new_state.um)
+    v_new = flip_vertical(new_state.vm)
+    T_new = flip_vertical(new_state.thlm) * exner    # thl ~ theta -> T = theta*exner
+    q_new = flip_vertical(new_state.rtm)
+    du_dt = (u_new - u) / dt
+    dv_dt = (v_new - v) / dt
+    dT_dt = (T_new - T) / dt
+    dq_v_dt = (q_new - q_v) / dt
+    diags = dict(diags, ustar=ustar, shflx=shflx, lhflx=lhflx)
+    return du_dt, dv_dt, dT_dt, dq_v_dt, new_state, diags

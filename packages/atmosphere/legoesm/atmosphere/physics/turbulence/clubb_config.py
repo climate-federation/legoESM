@@ -277,6 +277,11 @@ class CLUBBConfig(NamedTuple):
     tke_min : float
         Floor for the carried TKE/wp2 state slot [m^2/s^2] (mirrors the other
         prognostic-moment schemes so ``integration.py`` can seed the state).
+    T0 : float
+        Reference temperature [K] for the dry Brunt-Vaisala frequency
+        ``N^2 = (g/T0) d(thlm)/dz`` (CLUBB ``T0``; CAM standard 300 K). A fixed
+        reference (not a tunable closure coefficient), passed to
+        ``calc_brunt_vaisala_freq_sqd``.
     """
 
     flags: CLUBBFlags = CLUBBFlags()
@@ -288,6 +293,7 @@ class CLUBBConfig(NamedTuple):
     thl_tol: float = 1.0e-2
     wp2_max: float = 1000.0
     tke_min: float = 1.0e-6
+    T0: float = 300.0
 
 
 # ---------------------------------------------------------------------------

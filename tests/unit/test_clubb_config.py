@@ -51,8 +51,9 @@ def test_flags_are_static_no_leaves():
     cfg_leaves = jax.tree_util.tree_leaves(cfg)
     param_leaves = jax.tree_util.tree_leaves(CLUBBParams())
     surface_leaves = jax.tree_util.tree_leaves(cfg.surface)
-    # 5 tolerances + clubb_dt = 6 scalar fields on CLUBBConfig itself.
-    assert len(cfg_leaves) == len(param_leaves) + len(surface_leaves) + 6
+    # clubb_dt + w_tol + rt_tol + thl_tol + wp2_max + tke_min + T0 = 7 scalar
+    # fields on CLUBBConfig itself.
+    assert len(cfg_leaves) == len(param_leaves) + len(surface_leaves) + 7
 
 
 def test_flags_hashable_and_branchable_under_jit():
