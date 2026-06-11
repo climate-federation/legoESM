@@ -18,10 +18,28 @@ orchestration; the parcel buoyant-sorting ``Lscale`` itself comes from
 from __future__ import annotations
 
 import jax.numpy as jnp
-from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, zt2zm
+from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, zm2zt, zt2zm
 
 _MAX_STABILITY_CORR = 3.0   # cap on the N2 stability enhancement (advance_helper)
 _EM_MIN_COEF = 1.5          # em_min = 1.5 * w_tol^2 (constants_clubb)
+
+
+def compute_tke(wp2, up2, vp2, gr: CLUBBGrid, config):
+    """Turbulent kinetic energy ``em`` (zm) and ``sqrt_em_zt`` (zt).
+
+    CAM ``l_tke_aniso = .true.`` → ``em = 0.5·(wp2 + vp2 + up2)`` (the anisotropic
+    TKE); the ``.false.`` branch uses ``em = 1.5·wp2``. ``sqrt_em_zt =
+    sqrt(max(zm2zt(em), em_min))`` with ``em_min = 1.5·w_tol^2``. All moment
+    inputs are zm-level. Returns ``(em, sqrt_em_zt)`` — the TKE the tau model and
+    MFL consume.
+    """
+    if config.flags.l_tke_aniso:
+        em = 0.5 * (wp2 + vp2 + up2)
+    else:
+        em = 1.5 * wp2
+    em_min = _EM_MIN_COEF * config.w_tol ** 2
+    sqrt_em_zt = jnp.sqrt(jnp.maximum(zm2zt(em, gr), em_min))
+    return em, sqrt_em_zt
 
 
 def calc_stability_correction(brunt_vaisala_freq_sqd, Lscale_zm, em,
@@ -76,4 +94,4 @@ def compute_tau_family(Lscale, em, sqrt_em_zt, brunt_vaisala_freq_sqd, gr: CLUBB
     )
 
 
-__all__ = ["calc_stability_correction", "compute_tau_family"]
+__all__ = ["compute_tke", "calc_stability_correction", "compute_tau_family"]

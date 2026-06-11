@@ -17,7 +17,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
-from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid, zt2zm  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid, zm2zt, zt2zm  # noqa: E402
 from legoesm.atmosphere.physics.turbulence import clubb_tau as T  # noqa: E402, N812
 
 _CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
@@ -92,6 +92,23 @@ def test_tau_family_formulas():
     exp = np.asarray(out["invrs_tau_zm"]) * np.asarray(out["stability_correction"])
     np.testing.assert_allclose(np.asarray(out["invrs_tau_C1_zm"]), exp, rtol=1e-12)
     np.testing.assert_array_equal(np.asarray(out["invrs_tau_C6_zm"]), np.asarray(out["invrs_tau_C1_zm"]))
+
+
+def test_compute_tke_formula():
+    gr, ng, nzm = _gr()
+    cfg = CLUBBConfig()   # CAM l_tke_aniso=True
+    rng = np.random.default_rng(11)
+    wp2 = jnp.asarray(0.2 + 0.5 * rng.random((ng, nzm)))
+    up2 = jnp.asarray(0.3 + 0.5 * rng.random((ng, nzm)))
+    vp2 = jnp.asarray(0.3 + 0.5 * rng.random((ng, nzm)))
+    em, sqrt_em_zt = T.compute_tke(wp2, up2, vp2, gr, cfg)
+    np.testing.assert_allclose(np.asarray(em),
+                               0.5 * (np.asarray(wp2) + np.asarray(vp2) + np.asarray(up2)),
+                               rtol=1e-12)
+    em_min = 1.5 * cfg.w_tol ** 2
+    exp = np.sqrt(np.maximum(np.asarray(zm2zt(em, gr)), em_min))
+    np.testing.assert_allclose(np.asarray(sqrt_em_zt), exp, rtol=1e-12)
+    assert np.all(np.asarray(sqrt_em_zt) >= np.sqrt(em_min) - 1e-12)
 
 
 def test_jit_and_grad():
