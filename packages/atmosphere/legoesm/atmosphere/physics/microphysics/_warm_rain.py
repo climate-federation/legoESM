@@ -486,8 +486,8 @@ def rain_freezing_bigg(q_r, N_r, T, rho, config, dt=None):
         scale = jnp.minimum(
             1.0,
             jnp.minimum(
-                qr_pos / jnp.maximum(mnuccr * dt, 1.0e-30),
-                nr_pos / jnp.maximum(nnuccr * dt, 1.0e-30)))
+                qr_pos / jnp.maximum(mnuccr * dt, 1.0e-15),
+                nr_pos / jnp.maximum(nnuccr * dt, 1.0e-15)))
         mnuccr = mnuccr * scale
         nnuccr = nnuccr * scale
     return mnuccr, nnuccr
