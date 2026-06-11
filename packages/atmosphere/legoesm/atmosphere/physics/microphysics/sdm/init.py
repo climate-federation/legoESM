@@ -94,7 +94,12 @@ def sample_exponential_mass(
     return jnp.asarray(mass_min, dtype) - delta * jnp.log1p(-U)
 
 
-def _lognormal_cdf(r, r_mean, sigma):
+def lognormal_cdf(r, r_mean, sigma):
+    """CDF of a log-normal with median ``r_mean`` and log-std ``sigma``.
+
+    Public so other spectral initialisers (e.g. the fast-SBM bin
+    discretisation) reuse the same curve instead of re-deriving it.
+    """
     from jax.scipy.special import erf
     return 0.5 * (1.0 + erf(jnp.log(r / r_mean) / (sigma * _SQRT2)))
 
@@ -130,9 +135,9 @@ def sample_lognormal_radius(
     r_mean = jnp.asarray(r_mean, dtype)
     sigma = jnp.log(jnp.asarray(geom_std, dtype))
     u = random.uniform(key, (n_sd,), dtype=dtype)
-    cdf_lo = _lognormal_cdf(jnp.asarray(r_min, dtype), r_mean, sigma) \
+    cdf_lo = lognormal_cdf(jnp.asarray(r_min, dtype), r_mean, sigma) \
         if r_min is not None else jnp.asarray(0.0, dtype)
-    cdf_hi = _lognormal_cdf(jnp.asarray(r_max, dtype), r_mean, sigma) \
+    cdf_hi = lognormal_cdf(jnp.asarray(r_max, dtype), r_mean, sigma) \
         if r_max is not None else jnp.asarray(1.0, dtype)
     u_trunc = cdf_lo + u * (cdf_hi - cdf_lo)
     # Keep erfinv off the exact ±1 poles (open-interval guard).
