@@ -71,12 +71,21 @@ def _equilibrium_wet_radius(S0, T, m_s):
 def main(ref_path):
     ref = np.load(ref_path)
     # Handshake: the reference must match this script's setup exactly.
+    # The PySDM kappa must equal the ideal van't Hoff kappa implied by OUR
+    # solute parameters: kappa = i·M_w·rho_s/(M_s·rho_w) — this IS the
+    # cross-model solute-equivalence claim, so a reference generated with a
+    # different kappa must fail here, not drift through the loose gates.
+    kappa_expected = (ION_AS * (constants.M_H2O * 1e-3) * RHO_AS
+                      / (M_AS * constants.rho_water))
     for name, val in (("T0", T0), ("p0", P0), ("rh0", RH0), ("w", W),
                       ("dt", DT), ("n_steps", N_STEPS),
                       ("n_aerosol", N_AEROSOL), ("r_dry", R_DRY),
                       ("rho_as", RHO_AS)):
         assert abs(float(ref[name]) - val) / max(abs(val), 1e-300) < 1e-12, \
             f"reference setup mismatch: {name}"
+    assert abs(float(ref["kappa"]) - kappa_expected) / kappa_expected < 0.01, \
+        (f"reference kappa {float(ref['kappa'])} != ideal van't Hoff "
+         f"{kappa_expected:.4f} implied by i={ION_AS}, M_s={M_AS}")
 
     # initial vapour from OUR saturation curve (each side uses its own thermo,
     # consistently — that IS part of the formulae difference under test)
