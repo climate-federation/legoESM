@@ -172,6 +172,23 @@ test before the body. Helpers (`grid.py`, `config.py`) in
   2e-3 — validates the scheme as a stable, conservative INTEGRATOR (not
   just per-step). 108 fast_sbm + integration tests green.
 
+## Multi-ice-habit subsystem (in progress, branch `feat/fast-sbm-multi-ice`)
+
+Oracle carries 5 distributions: drops (`FF1`), ice crystals (`FF2`, 3 habits
+columns/plates/dendrites), snow (`FF3`), graupel (`FF4`), hail (`FF5`). The
+single-ice-spectrum port (above) collapses these; the multi-ice subsystem
+separates them, each with its own fall speed, capacitance, and cross-species
+collection (`coll_xyz` between every pair). Incremental build:
+
+- **Iter 1 (2026-06-11)** — habit-routed freezing. `freeze_step_routed`
+  (oracle `FREEZ` `KRFREEZE` split): frozen drops in bins `< krfreeze`
+  (=21, 1-based oracle `KR≤KRFREEZ`) → pristine ice crystals, larger
+  (frozen rain) → hail/graupel. Same Bigg rate + fusion heat as
+  single-category `freeze_step`; the two categories sum EXACTLY to the
+  single-category ice (5 tests: sum-equals-single 1e-14, split-at-krfreeze,
+  mass conservation, no-op above freezing, differentiable). Foundation for
+  carrying distinct ice categories through the column.
+
 ## Remaining work (warm + full ice phase done → bit-exact FSBM-2)
 
 Multi-ice-category habits (separate snow/graupel/hail spectra + their

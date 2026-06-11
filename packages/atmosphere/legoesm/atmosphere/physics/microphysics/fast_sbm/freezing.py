@@ -82,6 +82,17 @@ class FreezeResult(NamedTuple):
     dT: jax.Array         # fusion warming [K]
 
 
+class FreezeRoutedResult(NamedTuple):
+    """Bigg freezing with the oracle's habit routing (FREEZ): frozen drops
+    in bins ``≤ KRFREEZ`` become pristine ice crystals, the larger bins
+    become hail/graupel."""
+
+    f_liquid: jax.Array   # depleted drop distribution (n_bins,)
+    f_crystals: jax.Array  # frozen small drops → ice crystals (n_bins,)
+    f_hail: jax.Array     # frozen large drops → hail/graupel (n_bins,)
+    dT: jax.Array         # fusion warming [K]
+
+
 def bigg_freezing_rate(
     masses: jax.Array, T: jax.Array, config: FastSBMConfig = FastSBMConfig()
 ) -> jax.Array:
@@ -116,3 +127,36 @@ def freeze_step(
     dq_ice = mass_density(df, masses) / rho
     dT = (constants.L_f / constants.c_pd) * dq_ice
     return FreezeResult(f_liquid=f_liquid_new, f_ice=df, dT=dT)
+
+
+def freeze_step_routed(
+    f_liquid: jax.Array,
+    masses: jax.Array,
+    T: jax.Array,
+    rho: jax.Array,
+    dt: float | jax.Array,
+    config: FastSBMConfig = FastSBMConfig(),
+) -> FreezeRoutedResult:
+    """Bigg freezing with the oracle's two-category habit routing.
+
+    Oracle ``FREEZ`` (``module_mp_fast_sbm.F:6614-6618``):
+    ``IF(KR<=KRFREEZ) FF2(crystals)+=YK2 ELSE FF5(hail)+=YK2`` — small frozen
+    drops nucleate pristine ice crystals, large frozen drops (frozen rain)
+    become hail/graupel. The freezing *rate* and fusion heat are identical
+    to :func:`freeze_step`; only the destination category differs by bin.
+    Total frozen mass and the depleted liquid are unchanged, so any caller
+    that sums the two categories recovers the single-category result
+    exactly.
+    """
+    P = bigg_freezing_rate(masses, T, config)
+    frozen_frac = -jnp.expm1(-P * dt)
+    df = f_liquid * frozen_frac
+    f_liquid_new = f_liquid - df
+    # Bin split: bins 0..KRFREEZ-1 (0-based) → crystals, ≥ KRFREEZ → hail.
+    is_crystal = jnp.arange(masses.shape[0]) < config.krfreeze
+    f_crystals = jnp.where(is_crystal, df, 0.0)
+    f_hail = jnp.where(is_crystal, 0.0, df)
+    dq_ice = mass_density(df, masses) / rho
+    dT = (constants.L_f / constants.c_pd) * dq_ice
+    return FreezeRoutedResult(f_liquid=f_liquid_new, f_crystals=f_crystals,
+                              f_hail=f_hail, dT=dT)

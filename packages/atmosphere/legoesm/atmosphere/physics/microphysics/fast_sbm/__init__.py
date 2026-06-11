@@ -20,8 +20,10 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.condensation_driver import
 )
 from legoesm.atmosphere.physics.microphysics.fast_sbm.freezing import (
     FreezeResult,
+    FreezeRoutedResult,
     bigg_freezing_rate,
     freeze_step,
+    freeze_step_routed,
 )
 from legoesm.atmosphere.physics.microphysics.fast_sbm.melting import (
     MeltResult,
@@ -90,12 +92,14 @@ __all__ = [
     "WarmCondensationResult",
     "condensation_new_masses",
     "FreezeResult",
+    "FreezeRoutedResult",
     "MeltResult",
     "NucleationResult",
     "activate_ccn",
     "bigg_freezing_rate",
     "critical_dry_radius",
     "freeze_step",
+    "freeze_step_routed",
     "kelvin_coefficient",
     "melt_fraction",
     "melt_step",

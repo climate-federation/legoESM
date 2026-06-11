@@ -68,6 +68,10 @@ class FastSBMConfig(NamedTuple):
     bigg_a: float = 0.3333e-4
     bigg_b0: float = 0.66
     bigg_b_max: float = 0.66
+    # Habit-routing bin threshold (oracle FREEZ KRFREEZ=21, 1-based): frozen
+    # drops in 0-based bins < krfreeze become pristine ice crystals, the
+    # larger bins (frozen rain) become hail/graupel.
+    krfreeze: int = 21
     # --- Jiwen Fan melting (oracle J_W_MELT) ---
     # Bin thresholds (0-based) + rates [1/s]: bins ≤ full melt completely,
     # ≤ mid melt at rate_mid, above at rate_high (oracle snow ladder:
