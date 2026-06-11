@@ -37,7 +37,7 @@ Process inventory (oracle subroutine → port module → status):
 | Freezing/melting | `FREEZ`, melting block in FAST_SBM | `fast_sbm/ice_phase.py` | todo |
 | Breakup (collisional + spontaneous) | `coll_breakup_KS`, `Spont_Rain_BreakUp` | `fast_sbm/breakup.py` | todo |
 | Sedimentation per bin | fall-speed tables `VR1..VR5` + advection in FAST_SBM | `fast_sbm/sedimentation.py` (reuse `output.sedimentation_tendency`) | todo |
-| Column driver + scheme wiring | `FAST_SBM` subroutine | `fast_sbm/column.py` + `integration.py` dispatch | todo |
+| Column driver + scheme wiring | `FAST_SBM` subroutine | `fast_sbm/column.py` + `integration.py` dispatch | **switchable `scheme="fast_sbm"` done (iter 7)** — stateless adapter (reconstruct→evolve→project); per-bin prognostic tracers later |
 
 **Lookup-table strategy**: WRF reads tables (`capacity33.asc`, masses,
 terminal velocities, kernels `YW*`, breakup `PKIJ/QKJ`) from data files NOT in
@@ -210,3 +210,29 @@ EXCLUDED.
   negative new mass, sentinel loss fraction, empty merge window,
   evaporation-disables-passes equivalence, dS/dR correctness at R=0
   (central-difference pinned). 54 fast_sbm tests green.
+
+### Iter 7 (2026-06-11) — SWITCHABLE SCHEME
+- **`fast_sbm/column.py`** — `scheme="fast_sbm"` live: stateless column
+  adapter (SDM pattern, but resolving the FULL 33-bin spectrum): bulk
+  (q_c, q_r, N_r) → mass-exact lognormal cloud + exponential rain modes →
+  ONECOND1 condensation + Bott coalescence (computed Hall/Long kernels,
+  `terminal_velocity_cloud_rain_shima` reused) → bulk tendencies split at
+  KRDROP. **Autoconversion/accretion emerge from the resolved collection
+  equation — no tuned rate anywhere.** Limitations documented: no
+  activation (clear cell stays clear), precipitation=0 until
+  sedimentation, warm-only. Contract ships.
+- Wiring: `integration.py` dispatch + import, `MicrophysicsConfig.
+  fast_sbm` field + docstring, `_PLANE_MIN_TRACER_SLOTS["fast_sbm"]=9`,
+  `driver/config.py` `_valid_microphysics` += fast_sbm, package
+  `__init__` exports (FastSBMConfig, fast_sbm_microphysics). Config grew
+  adapter fields (cdnc, cloud_geom_std, n_rain_floor, collision_kernel,
+  golovin_b); `_kernel_matrix` raises ValueError on unknown kernel.
+- `mass_doubling_grid` got a NumPy twin (`mass_doubling_grid_np`) so
+  collision-table precompute stays host-side under jit/grad traces.
+- Validation (6 tests): dispatch via PUBLIC MicrophysicsConfig (+unknown
+  scheme raises), unknown kernel raises, (ncol,nlev) condensation closure
+  (dq_v=−dq_l, dT=(L/c_p)dq_l, ice identically 0), **emergent
+  autoconversion** (dense cloud ≫ thin cloud rain production at S=0,
+  liquid conserved by coalescence 5e-9), clear-cell fixed point, jit+grad
+  through the full operator. Ratchets green (2078), microphysics tree 180,
+  hydrostatic integration 68.

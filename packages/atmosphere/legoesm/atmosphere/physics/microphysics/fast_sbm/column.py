@@ -1,0 +1,231 @@
+"""Stateless column adapter — fast-SBM as ``scheme="fast_sbm"``.
+
+Matches the legoESM column-physics interface
+``micro_fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt, cfg)
+-> MicrophysicsOutput`` (see ``microphysics/integration.py``), following
+the SDM adapter's stateless-reconstruction pattern but resolving a FULL
+33-bin liquid spectrum per cell:
+
+1. **Reconstruct** the liquid spectrum from bulk state: cloud water
+   ``q_c`` → lognormal mode (prescribed ``cdnc``, ``cloud_geom_std``),
+   rain ``q_r`` → exponential (Marshall-Palmer-like) mode using the
+   dycore's prognostic ``N_r`` (floored). Each mode is rescaled to carry
+   its bulk mass EXACTLY, so the adapter's closure introduces no
+   discretization mass error.
+2. **Evolve** one step of the ported oracle warm physics on the combined
+   spectrum: ONECOND1 condensation/evaporation (exact vapor/heat closure)
+   then Bott collision-coalescence (Hall/Long computed kernels) — so
+   autoconversion/accretion EMERGE from the resolved stochastic-collection
+   equation across the oracle's ``KRDROP`` (~50 µm) cloud/rain boundary
+   instead of being parameterized.
+3. **Project** back to bulk tendencies: ``dq_c``, ``dq_r`` (mass below /
+   above ``KRDROP``), ``dN_c``, ``dN_r``, with ``dT``/``dq_v`` from the
+   condensation closure.
+
+**Documented limitations** (same stateless-interface reasons as the SDM
+adapter): no aerosol activation (a supersaturated CLEAR cell stays
+clear), no sedimentation/surface precipitation yet (``precipitation=0``;
+rain stays in the column), no ice (``dq_i/dq_s/dq_g = 0``) — those land
+with the nucleation/sedimentation/ice iterations. Spectrum shape is
+re-imposed each step by reconstruction; the bin-resolved physics acts
+within the step.
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+
+from legoesm.atmosphere.physics.microphysics.fast_sbm.collision import (
+    bott_coalescence,
+    collision_ck_matrix,
+    f_from_g,
+    g_from_f,
+    precompute_collision_tables,
+)
+from legoesm.atmosphere.physics.microphysics.fast_sbm.condensation_driver import (
+    warm_condensation_step,
+)
+from legoesm.atmosphere.physics.microphysics.fast_sbm.config import FastSBMConfig
+from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import (
+    KRDROP,
+    discretize_exponential,
+    discretize_lognormal,
+    mass_density,
+    mass_doubling_grid,
+    mass_doubling_grid_np,
+    number_density,
+    radius_from_mass,
+)
+from legoesm.atmosphere.physics.microphysics.output import (
+    HydrometeorState,
+    MicrophysicsOutput,
+)
+from legoesm.atmosphere.physics.microphysics.sdm.kernels import (
+    golovin_kernel,
+    hall_kernel,
+    long_kernel,
+    terminal_velocity_cloud_rain_shima,
+)
+from legoesm import constants
+
+__physics_contract__ = {
+    "summary": (
+        "Warm fast-SBM column operator: reconstruct the 33-bin liquid "
+        "spectrum from (q_c, q_r, N_r), run oracle condensation "
+        "(ONECOND1) + Bott collision-coalescence, project back to bulk "
+        "tendencies — autoconversion emerges from the resolved spectrum."
+    ),
+    "inputs": {
+        "T": "K", "q_v": "kg/kg", "q_c": "kg/kg", "q_r": "kg/kg",
+        "N_r": "1/m^3", "p_full": "Pa", "rho": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
+        "dq_r_dt": "kg/kg/s", "dN_c_dt": "1/m^3/s", "dN_r_dt": "1/m^3/s",
+        "precipitation": "kg/m^2/s (zero until sedimentation lands)",
+    },
+    "sign_convention": (
+        "Condensation: dq_c+dq_r>0 with dq_v=-(dq_c+dq_r) and dT_dt="
+        "(L_v/c_pd)(dq_c+dq_r)/dt>0; coalescence moves mass cloud->rain "
+        "(dq_c<0, dq_r>0) at fixed total liquid; total water and moist "
+        "enthalpy are exactly closed."
+    ),
+    "conserves": ["moisture", "energy"],
+    "differentiable": True,
+    "reference": (
+        "Khain et al. (2004) JAS 61:2963; Shpund et al. (2019) JGR "
+        "124:9800; WRF module_mp_fast_sbm.F FAST_SBM/ONECOND1/coal_bott"
+    ),
+    "idealized_test": (
+        "Supersaturated cloudy cell condenses with exact closures; "
+        "drizzle-free thin cloud produces ~no rain while a dense cloud "
+        "transfers mass to rain through KRDROP (emergent autoconversion); "
+        "clear cell is a fixed point; total water invariant to roundoff "
+        "per cell."
+    ),
+}
+
+
+def _kernel_matrix(masses, config: FastSBMConfig):
+    """Collision kernel K(m_i, m_j) [m^3/s] from computed formulations
+    (the oracle's YW* tables are file-read; CLAUDE-spec'd substitution —
+    see docs/specs/bin_microphysics.md kernel strategy)."""
+    r = radius_from_mass(masses)
+    ri, rj = r[:, None], r[None, :]
+    if config.collision_kernel == "golovin":
+        return golovin_kernel(ri, rj, config.golovin_b)
+    # Terminal velocities at a reference warm-cloud state (the oracle's
+    # pressure interpolation of its tables is the analogue; refine when
+    # the sedimentation iteration lands per-level velocities).
+    v = terminal_velocity_cloud_rain_shima(
+        r, jnp.asarray(1.1), jnp.asarray(9.0e4), jnp.asarray(283.0))
+    dv = jnp.abs(v[:, None] - v[None, :])
+    if config.collision_kernel == "hall":
+        return hall_kernel(ri, rj, dv)
+    if config.collision_kernel == "long":
+        return long_kernel(ri, rj, dv)
+    raise ValueError(
+        f"Unknown fast_sbm collision_kernel: {config.collision_kernel!r} "
+        "(expected 'hall', 'long', or 'golovin')")
+
+
+def _reconstruct_spectrum(q_c, q_r, N_r, rho, masses, config: FastSBMConfig):
+    """Liquid spectrum f [m^-3 kg^-1] carrying exactly q_c+q_r of mass."""
+    # Cloud mode: lognormal at prescribed cdnc, mass-rescaled to q_c·ρ.
+    m_mean_c = q_c * rho / config.cdnc
+    r_med = radius_from_mass(jnp.maximum(m_mean_c, 1.0e-30)) \
+        * jnp.exp(-1.5 * jnp.log(config.cloud_geom_std) ** 2)
+    f_c = discretize_lognormal(masses, config.cdnc, r_med,
+                               config.cloud_geom_std)
+    mass_c = mass_density(f_c, masses)
+    f_c = f_c * jnp.where(mass_c > 0.0, q_c * rho / jnp.where(
+        mass_c > 0.0, mass_c, 1.0), 0.0)
+    # Rain mode: exponential with the dycore's N_r (floored).
+    n_r = jnp.maximum(N_r, config.n_rain_floor)
+    m_mean_r = q_r * rho / n_r
+    f_r = discretize_exponential(masses, n_r,
+                                 jnp.maximum(m_mean_r, 1.0e-30))
+    mass_r = mass_density(f_r, masses)
+    f_r = f_r * jnp.where(mass_r > 0.0, q_r * rho / jnp.where(
+        mass_r > 0.0, mass_r, 1.0), 0.0)
+    return f_c + f_r
+
+
+def fast_sbm_microphysics(
+    T: jax.Array,
+    q_v: jax.Array,
+    hydrometeors: HydrometeorState,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    rho: jax.Array,
+    dz: jax.Array,
+    dt: float,
+    config: FastSBMConfig = FastSBMConfig(),
+) -> MicrophysicsOutput:
+    """Fast-SBM warm microphysics over ``(ncol, nlev)`` fields."""
+    masses = mass_doubling_grid(dtype=T.dtype)
+    # Tables are static grid geometry — precomputed from the NumPy twin so
+    # this works inside jit/grad traces (a traced `masses` cannot cross
+    # into the host-side table build).
+    tables = precompute_collision_tables(mass_doubling_grid_np())
+    kernel = _kernel_matrix(masses, config)
+    ck = collision_ck_matrix(kernel, dt)
+    cloud_bins = KRDROP   # oracle cloud/rain boundary (bin 15, ~50 um)
+
+    q_c = jnp.maximum(hydrometeors.q_c, 0.0)
+    q_r = jnp.maximum(hydrometeors.q_r, 0.0)
+    q_v_pos = jnp.maximum(q_v, 0.0)
+
+    def cell(T_c, qv_c, qc_c, qr_c, Nr_c, p_c, rho_c):
+        f0 = _reconstruct_spectrum(qc_c, qr_c, Nr_c, rho_c, masses, config)
+        cond = warm_condensation_step(
+            f0, T_c, qv_c, p_c, rho_c, dt, masses, config=config)
+        g1 = bott_coalescence(g_from_f(cond.f, masses), ck, masses, tables)
+        f1 = f_from_g(g1, masses)
+        # Bulk projection across the oracle cloud/rain boundary.
+        def split(f):
+            qc = mass_density(
+                jnp.where(jnp.arange(masses.shape[0]) < cloud_bins, f, 0.0),
+                masses) / rho_c
+            qr = mass_density(
+                jnp.where(jnp.arange(masses.shape[0]) >= cloud_bins, f, 0.0),
+                masses) / rho_c
+            nc = number_density(
+                jnp.where(jnp.arange(masses.shape[0]) < cloud_bins, f, 0.0),
+                masses)
+            nr = number_density(
+                jnp.where(jnp.arange(masses.shape[0]) >= cloud_bins, f, 0.0),
+                masses)
+            return qc, qr, nc, nr
+
+        qc0, qr0, nc0, nr0 = split(f0)
+        qc1, qr1, nc1, nr1 = split(f1)
+        inv_dt = 1.0 / dt
+        return (
+            (cond.T - T_c) * inv_dt,
+            (cond.q_v - qv_c) * inv_dt,
+            (qc1 - qc0) * inv_dt,
+            (qr1 - qr0) * inv_dt,
+            (nc1 - nc0) * inv_dt,
+            (nr1 - nr0) * inv_dt,
+        )
+
+    cell_v = jax.vmap(jax.vmap(cell))
+    dT_dt, dqv_dt, dqc_dt, dqr_dt, dnc_dt, dnr_dt = cell_v(
+        T, q_v_pos, q_c, q_r, hydrometeors.N_r, p_full, rho)
+
+    zeros = jnp.zeros_like(T)
+    return MicrophysicsOutput(
+        dT_dt=dT_dt,
+        dq_v_dt=dqv_dt,
+        dq_c_dt=dqc_dt,
+        dq_r_dt=dqr_dt,
+        dq_i_dt=zeros,
+        dq_s_dt=zeros,
+        dq_g_dt=zeros,
+        dN_c_dt=dnc_dt,
+        dN_r_dt=dnr_dt,
+        dN_i_dt=zeros,
+        precipitation=jnp.zeros(T.shape[0], dtype=T.dtype),
+    )

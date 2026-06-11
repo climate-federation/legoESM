@@ -70,10 +70,23 @@ def mass_doubling_grid(
     ``2.0**k`` is exact in floating point, so the doubling property
     ``m[k+1] == 2 m[k]`` holds bitwise.
     """
+    return jnp.asarray(mass_doubling_grid_np(n_bins, r_min, rho),
+                       dtype=dtype)
+
+
+def mass_doubling_grid_np(
+    n_bins: int = NKR_LIQUID,
+    r_min: float = R_MIN_LIQUID,
+    rho: float = constants.rho_water,
+):
+    """NumPy twin of :func:`mass_doubling_grid` — static grid geometry for
+    setup-time consumers (collision-table precompute) that must stay
+    host-side even when called inside a traced function."""
+    import numpy as np
     if n_bins < 1:
         raise ValueError(f"n_bins must be >= 1, got {n_bins}")
     m1 = _FOUR_THIRDS_PI * rho * float(r_min) ** 3
-    return m1 * (2.0 ** jnp.arange(n_bins, dtype=dtype))
+    return m1 * (2.0 ** np.arange(n_bins))
 
 
 def radius_from_mass(mass: jax.Array, rho: float = constants.rho_water) -> jax.Array:

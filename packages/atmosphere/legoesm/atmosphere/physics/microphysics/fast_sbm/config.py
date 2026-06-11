@@ -31,3 +31,18 @@ class FastSBMConfig(NamedTuple):
     nu_air_ref_m2s: float = 1.3e-5
     diffusivity_T_exponent: float = 1.94
     ventilation_max: float = 5.0
+    # --- column-adapter reconstruction (stateless interface; see
+    # column.py docstring) ---
+    # Prescribed cloud-droplet number for spectrum reconstruction [1/m^3]
+    # (same closure role and default as SDMConfig.cdnc / Seifert-Beheng
+    # maritime Nc_0).
+    cdnc: float = 1.0e8
+    # Geometric std of the reconstructed cloud-droplet lognormal [-].
+    cloud_geom_std: float = 1.4
+    # Rain-drop number floor for reconstruction when the dycore carries no
+    # N_r [1/m^3].
+    n_rain_floor: float = 1.0e3
+    # Collision kernel for the in-step Bott coalescence: "hall", "long",
+    # or "golovin" (analytic test kernel, uses golovin_b).
+    collision_kernel: str = "hall"
+    golovin_b: float = 1.5e3
