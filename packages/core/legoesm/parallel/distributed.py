@@ -490,6 +490,8 @@ def reset_distributed_topology() -> None:
     _active_layout = None
     from legoesm.grids.halo import set_halo_backend
     set_halo_backend("local")
+    from legoesm.parallel.voronoi_mpi import reset_voronoi_layout
+    reset_voronoi_layout()
 
 
 # =========================================================================

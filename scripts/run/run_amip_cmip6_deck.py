@@ -50,6 +50,14 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_FORCING = _REPO_ROOT / "forcing_amip"
+# Public Analysis-Ready Cloud-Optimized (ARCO) ERA5 on GCS — no
+# credentials required.  Used as the default ERA5 IC source so the
+# realistic --ic era5 path works out of the box (load_era5_ic handles
+# the gs:// URI + auto-detects pressure levels and the nearest time).
+_DEFAULT_ARCO_ERA5 = (
+    "gs://gcp-public-data-arco-era5/ar/"
+    "full_37-1h-0p25deg-chunk-1.zarr-v3"
+)
 
 # CLAUDE.md "Constant and Parameter Discipline": never hardcode 273.15 etc.
 sys.path.insert(0, str(_REPO_ROOT / "src"))
@@ -59,6 +67,7 @@ from legoesm import constants  # noqa: E402
 def _check_forcing_files(
     forcing_dir: Path, start_year: int, end_year: int,
     *, require_aerosol: bool = True, require_volcanic: bool = True,
+    require_sst: bool = True,
 ) -> dict[str, Path]:
     """Verify the canonical 6-file deck exists in ``forcing_dir``.
 
@@ -104,6 +113,10 @@ def _check_forcing_files(
         skip.add("aerosol")
     if not require_volcanic:
         skip.add("volcanic")
+    if not require_sst:
+        # A real --sst-file is supplied separately; don't require the
+        # synthetic sst_sic deck file.
+        skip.add("sst")
     missing = [name for name, p in files.items()
                if name not in skip and not p.exists()]
     if missing:
@@ -201,15 +214,49 @@ def main(argv: list[str] | None = None) -> int:
                         action="store_false")
 
     # Output
-    parser.add_argument("--ic", type=str, default="default",
+    parser.add_argument("--ic", type=str, default="era5",
                         choices=["default", "standard", "era5"],
-                        help="Initial condition: 'default' (uniform T_init rest "
-                             "state), 'standard' (realistic lapse-rate + "
-                             "equator-pole gradient + thermal-wind jet; lat-lon "
-                             "only — Earth-like CWV), or 'era5' (reanalysis from "
-                             "--ic-path).")
+                        help="Initial condition (default 'era5' for "
+                             "production AMIP CMIP realism): 'era5' "
+                             "(reanalysis from --ic-path; supported on "
+                             "cubed_sphere / latlon / gaussian — winds + "
+                             "Earth-like moisture, no spin-up cold drift), "
+                             "'standard' (lapse-rate + equator-pole "
+                             "gradient + thermal-wind jet; lat-lon only), "
+                             "or 'default' (uniform T_init rest state — "
+                             "fast but unphysically weak winds + high CWV; "
+                             "the only IC for voronoi/mpas until "
+                             "era5_to_mpas_carry lands).")
     parser.add_argument("--ic-path", type=str, default="",
-                        help="ERA5 Zarr path when --ic era5.")
+                        help="ERA5 Zarr path / GCS URI (required when "
+                             "--ic era5).  Default: the public ARCO ERA5 "
+                             "store (gs://gcp-public-data-arco-era5/...), "
+                             "no credentials needed.")
+    # Real (vs synthetic) prescribed SST/SIC.  ``--sst-file`` points the
+    # deck at a real input4MIPs AMIP II boundary-condition file; the
+    # var-name/unit flags default to that dataset's convention
+    # (``tosbcs`` in K, ``siconcbcs`` in percent).  Omit ``--sst-file``
+    # to use the synthetic deck SST (``sst`` in Celsius).
+    parser.add_argument("--sst-file", type=str, default="",
+                        help="Real prescribed-SST file (e.g. PCMDI/"
+                             "input4MIPs AMIP II bcs) instead of the "
+                             "synthetic deck SST.  Pair with --sst-var/"
+                             "--sst-offset/--sic-var/--sic-scale or accept "
+                             "the input4MIPs defaults.")
+    parser.add_argument("--sst-var", type=str, default=None,
+                        help="SST variable name (default: 'sst' synthetic, "
+                             "'tosbcs' when --sst-file is given).")
+    parser.add_argument("--sic-var", type=str, default=None,
+                        help="SIC variable name (default: 'sic' synthetic, "
+                             "'siconcbcs' when --sst-file is given).")
+    parser.add_argument("--sst-offset", type=float, default=None,
+                        help="Additive SST offset to Kelvin (default: "
+                             "273.15 synthetic-Celsius, 0.0 for a Kelvin "
+                             "input4MIPs file).")
+    parser.add_argument("--sic-scale", type=float, default=None,
+                        help="Multiplicative SIC scale to fraction "
+                             "(default: 1.0 synthetic-fraction, 0.01 for a "
+                             "percent input4MIPs file).")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--monthly-means", action="store_true", default=True)
 
@@ -262,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         forcing_dir, args.start_year, args.end_year,
         require_aerosol=aerosol_active,
         require_volcanic=volcanic_active,
+        require_sst=not args.sst_file,
     )
 
     if "_missing" in files:
@@ -271,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
                 forcing_dir, args.start_year, args.end_year,
                 require_aerosol=aerosol_active,
                 require_volcanic=volcanic_active,
+                require_sst=not args.sst_file,
             )
             if "_missing" in files:
                 raise RuntimeError(
@@ -284,16 +333,46 @@ def main(argv: list[str] | None = None) -> int:
                   "run scripts/data/generate_amip_forcing.py manually first.")
             return 2
 
+    # Resolve the SST source + its var-name/unit convention.  A real
+    # ``--sst-file`` (input4MIPs AMIP II bcs) defaults to that dataset's
+    # convention (tosbcs in K, siconcbcs in percent); the synthetic deck
+    # SST is ``sst`` in Celsius, fraction SIC.  Explicit --sst-var etc.
+    # always win.  The amip.py units-attribute guard cross-checks the
+    # chosen offset/scale against the file's ``units`` and the converted
+    # values, so a wrong combination fails loudly rather than mis-forcing.
+    # An SST var/unit override without --sst-file would point the
+    # SYNTHETIC deck file at a real-data variable name -> late loader
+    # KeyError.  Reject up front (codex review).
+    if not args.sst_file and any(v is not None for v in (
+            args.sst_var, args.sic_var, args.sst_offset, args.sic_scale)):
+        print("[deck] ERROR: --sst-var/--sic-var/--sst-offset/--sic-scale "
+              "only apply to a real --sst-file. The synthetic deck SST is "
+              "'sst' in Celsius (offset 273.15), 'sic' as a fraction. "
+              "Provide --sst-file <input4MIPs file> or drop the overrides.")
+        return 2
+    if args.sst_file:
+        _sst_path = args.sst_file
+        _sst_var = args.sst_var if args.sst_var is not None else "tosbcs"
+        _sic_var = args.sic_var if args.sic_var is not None else "siconcbcs"
+        _sst_off = args.sst_offset if args.sst_offset is not None else 0.0
+        _sic_scl = args.sic_scale if args.sic_scale is not None else 0.01
+    else:
+        _sst_path = str(files["sst"])
+        _sst_var = "sst"
+        _sic_var = "sic"
+        _sst_off = constants.T_freeze  # synthetic file is Celsius
+        _sic_scl = 1.0
+
     # Build the run_amip.py command
     run_amip = _REPO_ROOT / "scripts" / "run" / "run_amip.py"
     cmd = [
         sys.executable, str(run_amip),
         "--dataset", "custom",
-        "--forcing-path", str(files["sst"]),
-        "--sst-var", "sst",
-        "--sic-var", "sic",
-        "--sst-offset", str(constants.T_freeze),  # synthetic file is in Celsius
-        "--sic-scale", "1.0",
+        "--forcing-path", _sst_path,
+        "--sst-var", _sst_var,
+        "--sic-var", _sic_var,
+        "--sst-offset", str(_sst_off),
+        "--sic-scale", str(_sic_scl),
         "--time-var", "time",
         "--lat-var", "lat",
         "--lon-var", "lon",
@@ -339,12 +418,65 @@ def main(argv: list[str] | None = None) -> int:
         # Diagnostics
         "--clear-sky-diag",
     ]
-    # Initial condition (default keeps the prior uniform-T_init behaviour; pass
-    # --ic standard for a physically realistic lapse-rate + balanced-jet IC on
-    # lat-lon — Earth-like column water vapour).
-    cmd += ["--ic", args.ic]
-    if args.ic == "era5":
-        cmd += ["--ic-path", args.ic_path]
+    # Initial condition.  ``era5`` (the production default) gives
+    # realistic winds + Earth-like moisture and avoids the uniform-IC
+    # cold-start (weak winds, ~1 K/day drift, CWV ~80).  Resolve the IC
+    # per grid so each grid uses the most realistic IC it supports:
+    #   cubed_sphere / latlon / gaussian-spectral : era5 (needs --ic-path)
+    #   voronoi / mpas                            : era5 not yet wired ->
+    #                                               fall back to default
+    # ``standard`` (the balanced-jet IC) is lat-lon only.
+    _ic = args.ic
+    # Did the user EXPLICITLY ask for this IC, or is it the era5 default?
+    # An explicit request for an IC a grid cannot honour must FAIL, not
+    # silently downgrade; the default may quietly fall back (codex review).
+    _ic_explicit = "--ic" in sys.argv
+    _mpas = (args.grid_type in ("voronoi", "mpas")
+             or args.discretization == "mpas")
+    if _ic == "era5":
+        # Resolve the unsupported-grid fallback BEFORE the --ic-path
+        # check: an MPAS run never uses ERA5, so it must not be forced to
+        # supply an ERA5 path (codex review).
+        if _mpas:
+            if _ic_explicit:
+                print("[deck] ERROR: --ic era5 explicitly requested but "
+                      "ERA5 IC is not wired for voronoi/mpas (needs "
+                      "era5_to_mpas_carry). Pass --ic default for this "
+                      "grid, or run a supported grid (cubed_sphere/latlon/"
+                      "gaussian).")
+                return 2
+            print("[deck] NOTE: ERA5 IC is not yet wired for voronoi/mpas; "
+                  "the era5 DEFAULT falls back to --ic default here.")
+            _ic = "default"
+    elif _ic == "standard" and args.grid_type != "latlon":
+        if _ic_explicit:
+            print(f"[deck] ERROR: --ic standard explicitly requested but "
+                  f"the balanced-jet standard IC is lat-lon only; "
+                  f"{args.grid_type} is unsupported. Pass --ic era5 "
+                  "(with --ic-path) or --ic default.")
+            return 2
+        print(f"[deck] NOTE: --ic standard is lat-lon only; "
+              f"{args.grid_type} falls back to --ic default.")
+        _ic = "default"
+    cmd += ["--ic", _ic]
+    if _ic == "era5":
+        # An EXPLICIT --ic-path "" (e.g. from a shell-interpolated unset
+        # var) is a user error, not a request for the ARCO default —
+        # error rather than silently fall through (codex review).
+        if "--ic-path" in sys.argv and not args.ic_path:
+            print("[deck] ERROR: --ic-path was given but is empty (likely "
+                  "an unset shell variable). Provide a real ERA5 zarr/GCS "
+                  "URI, or omit --ic-path to use the public ARCO ERA5 "
+                  "default.")
+            return 2
+        # Default to the public ARCO ERA5 store (no credentials) so the
+        # realistic IC works out-of-box; an explicit --ic-path overrides.
+        _ic_path = args.ic_path or _DEFAULT_ARCO_ERA5
+        if not args.ic_path:
+            print(f"[deck] NOTE: --ic era5 with no --ic-path; using the "
+                  f"public ARCO ERA5 store {_ic_path} (override with "
+                  "--ic-path).")
+        cmd += ["--ic-path", _ic_path]
     if args.diurnal_cycle:
         cmd.append("--diurnal-cycle")
     if args.monthly_means:

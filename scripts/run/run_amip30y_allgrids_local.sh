@@ -29,6 +29,23 @@ END_YEAR=2009
 DAYS=10950           # 30 years
 RAD_STEPS="${RAD_STEPS:-18}"  # 18 = 3-hourly at dt=600 (production choice
                               # 2026-06-10); 6 = 1-hourly for fidelity runs
+# Initial condition: era5 (realistic winds + moisture) is the production
+# default and needs an ERA5 Zarr store / GCS URI in ERA5_IC_PATH.  Set
+# IC=default to run the (less realistic) uniform-IC cold start instead.
+IC="${IC:-era5}"
+# ERA5 IC source: defaults to the PUBLIC ARCO ERA5 store on GCS (no
+# credentials).  Override with a local zarr via ERA5_IC_PATH.
+ERA5_IC_PATH="${ERA5_IC_PATH:-gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3}"
+# Real prescribed SST: point SST_FILE at an input4MIPs AMIP II bcs file
+# (tosbcs K, siconcbcs percent) for a FAITHFUL run.  Empty -> the
+# synthetic deck SST (pipeline-valid, not observed) is used instead.
+SST_FILE="${SST_FILE:-}"
+if [[ -z "$SST_FILE" ]]; then
+  echo "[30y] NOTE: SST_FILE unset -> using SYNTHETIC deck SST (not the" >&2
+  echo "[30y]   observed input4MIPs AMIP II bcs). For a faithful run, run" >&2
+  echo "[30y]   scripts/data/stage_amip_realdata.py --print-esgf and set" >&2
+  echo "[30y]   export SST_FILE=<tosbcs input4MIPs file>." >&2
+fi
 
 export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
@@ -64,6 +81,16 @@ for case in "${CASES[@]}"; do
   # --dt-auto picks each grid's ladder-validated stable timestep
   # (C36->150 s, latlon72->75 s, T47->150 s, voronoi->300 s) so a long
   # run cannot blow up at the over-large default dt mid-chain.
+  # IC: era5 on cube/latlon/gaussian; the deck auto-falls voronoi/mpas
+  # back to --ic default (era5_to_mpas_carry not yet wired).
+  IC_ARGS=(--ic "$IC")
+  if [[ "$IC" == "era5" ]]; then
+    IC_ARGS+=(--ic-path "$ERA5_IC_PATH")
+  fi
+  # Real observed SST overrides the synthetic deck SST when provided.
+  if [[ -n "$SST_FILE" ]]; then
+    IC_ARGS+=(--sst-file "$SST_FILE")
+  fi
   "$PY" "$DECK" \
     --forcing-dir "$FORCING" --auto-generate \
     --start-year $START_YEAR --end-year $END_YEAR \
@@ -73,6 +100,7 @@ for case in "${CASES[@]}"; do
     --rad-update-steps "$RAD_STEPS" \
     --diag-days 30 --checkpoint-days 365 \
     --radiation rrtmg \
+    "${IC_ARGS[@]}" \
     --output "$OUT" \
     ${EXTRA:+--extra $EXTRA} \
     "${RESTART_ARGS[@]}" \
