@@ -95,6 +95,7 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/__init__.py",
+        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/grid.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/microphysics/output.py",

@@ -68,7 +68,8 @@ __physics_contract__ = {
         "supersaturation against this spectrum is 1/(SFN·(A2-ish thermo "
         "factor)) in the JERSUPSAT integrator."
     ),
-    "conserves": ["none (coefficients only — no state update here)"],
+    # Coefficients only — no state update happens in this module.
+    "conserves": ["none"],
     "differentiable": True,
     "reference": (
         "Pruppacher & Klett (1997) ch. 13; Khain et al. (2004) JAS 61:2963; "

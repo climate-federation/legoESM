@@ -5,6 +5,15 @@ Eulerian bin microphysics on a mass-doubling grid (33 liquid bins,
 See ``docs/specs/bin_microphysics.md`` for the port plan and status.
 """
 
+from legoesm.atmosphere.physics.microphysics.fast_sbm.config import (
+    FastSBMConfig,
+)
+from legoesm.atmosphere.physics.microphysics.fast_sbm.diffusional_growth import (
+    drop_growth_coefficient,
+    supersat_relaxation_integral,
+    vapor_diffusivity,
+    ventilation_factor,
+)
 from legoesm.atmosphere.physics.microphysics.fast_sbm.collision import (
     GMIN_DEFAULT,
     CollisionTables,
@@ -41,6 +50,11 @@ __all__ = [
     "NKR_LIQUID",
     "R_MIN_LIQUID",
     "CollisionTables",
+    "FastSBMConfig",
+    "drop_growth_coefficient",
+    "supersat_relaxation_integral",
+    "vapor_diffusivity",
+    "ventilation_factor",
     "bin_mass_widths",
     "bin_mixing_ratios_from_f",
     "bott_coalescence",

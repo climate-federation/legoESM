@@ -32,7 +32,7 @@ Process inventory (oracle subroutine → port module → status):
 | Bin grid + moments | parameter block, QC/QNC diags | `fast_sbm/grid.py` | **done (iter 1)** |
 | Collision kernels | `Kernals_KS` (l. 6238) — NOTE: only pressure-interpolates file-read `YW*` tables | computed kernels (reuse `sdm/kernels.py` Golovin/Hall/Long) + optional table load | Golovin **done (iter 2)**; Hall/efficiency todo |
 | Collision-coalescence (Bott flux) | `coll_xxx_lwf` + `courant_bott_KS` | `fast_sbm/collision.py` | **liquid self-collection done (iter 2)**; LWF variant (snow), xyx/xyz cross-species todo |
-| Diffusional growth (cond/evap dep/sub) | `JERRATE_KS`→`JERTIMESC_KS`→`JERSUPSAT_KS`→`JERDFUN_KS`/`JERNEWF_KS` | `fast_sbm/diffusional_growth.py` | todo |
+| Diffusional growth (cond/evap dep/sub) | `JERRATE_KS`→`JERTIMESC_KS`→`JERSUPSAT_KS`→`JERDFUN_KS`/`JERNEWF_KS` | `fast_sbm/diffusional_growth.py` | **rates+relaxation integral done (iter 3)**; supersat integrator + remap todo |
 | Drop nucleation (CCN activation) | `JERNUCL01_KS`, `WATER_NUCLEATION`, `LogNormal_modes_Aerosol` | `fast_sbm/nucleation.py` | todo |
 | Freezing/melting | `FREEZ`, melting block in FAST_SBM | `fast_sbm/ice_phase.py` | todo |
 | Breakup (collisional + spontaneous) | `coll_breakup_KS`, `Spont_Rain_BreakUp` | `fast_sbm/breakup.py` | todo |
@@ -109,3 +109,28 @@ EXCLUDED.
   in-code — `Kernals_KS` only pressure-interpolates them. Port strategy
   updated: computed kernels (reuse SDM Hall/Long/Golovin) as default;
   optional oracle-table loader later for bit-level fidelity.
+- Codex adversarial review (iters 1-2): verdict FAIL → all fixed in
+  `eb2f4c51`: CRITICAL f32 0/0 NaN at Bott flux `x1→0` (analytic limit
+  `flux→gsk·c` + f32 value/grad regression test), refined-grid top-pair
+  omission documented (oracle never assigns), scalar `rho_air` accepted,
+  contract text overstatement fixed. Transcription itself verified faithful
+  (statement order, index translation, clamps, salvage, aliasing).
+
+### Iter 3 (2026-06-11)
+- **`fast_sbm/diffusional_growth.py`** — oracle `JERRATE_KS`/`JERTIMESC_KS`:
+  `vapor_diffusivity` (D_ref·(p₀/p)(T/T₀)^1.94), `ventilation_factor`
+  (PK: Re=2rV/ν via oracle's (m/ρ)^⅓ form, X=√Re·Sc^⅓, branch at Re=2.5
+  kept faithfully discontinuous, cap 5.0), `drop_growth_coefficient`
+  (B = 4πC·f_vent/(F_D+F_K), capacitance=r for drops),
+  `supersat_relaxation_integral` (SFN = Σf·B·dm/ρ_air). Ships contract.
+- **`fast_sbm/config.py`** — `FastSBMConfig` (oracle reference coefficients
+  D=0.211 cm²/s, ν=0.13 cm²/s, exponent 1.94, VENTPL_MAX=5 — kept as scheme
+  params since repo constants use different reference states).
+- Saturation from `legoesm.thermo` (NOT a POLYSVP port — repo single-curve
+  rule; <0.5% difference, model consistency wins).
+- Validation (6 tests): **cross-implementation pin** — ventilation-off B
+  reproduces `sdm.condensation.drsq_dt` Maxwell core to 2e-3 (Knudsen
+  residual) with matched D; diffusivity reference-state collapse;
+  ventilation limits (f(V=0)=1 exactly, cap, monotone); B>0 monotone in
+  size; SFN linearity + explicit formula + physical window; T/p gradients
+  finite.
