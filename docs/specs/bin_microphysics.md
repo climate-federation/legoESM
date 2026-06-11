@@ -29,7 +29,8 @@ CGS; port is SI (CGS only inside oracle-diff tests).
 | Drop nucleation (CCN) | `JERNUCL01_KS`, `WATER_NUCLEATION` | `nucleation.py` | **done** — Köhler r_crit + lognormal-tail, deficit-activation in column |
 | Sedimentation per bin | `FALFLUXHUCM_Z` + `VR1..VR5` | `sedimentation.py` (REUSES `output.sedimentation_tendency`) | **done** — static substeps, per-level fall speeds, precip live |
 | Column driver + wiring | `FAST_SBM` | `column.py` + `integration.py` + `kernel_registry.py` | **switchable `scheme="fast_sbm"` done** — stateless adapter |
-| Freezing/melting | `FREEZ` + melting block | `ice_phase.py` | todo |
+| Freezing (immersion) | `FREEZ` (Bigg) | `freezing.py` | **done (iter 11)** — wired in column as liquid→ice + fusion heat; ice-spectrum carry-through deferred |
+| Melting | melting block | `ice_phase.py` | todo |
 | Breakup | `coll_breakup_KS`, `Spont_Rain_BreakUp` | `breakup.py` | todo |
 
 **Lookup-table strategy**: WRF data-file tables (`capacity33.asc`, masses,
@@ -133,3 +134,16 @@ shrink.
   (self-limiting, no aerosol-reservoir state), per-level sedimentation fall
   speeds (`sediment_bins` accepts `(ncol,nlev,nkr)` velocity), remaining
   stateless gaps documented. Spec text shrunk. 78 fast_sbm tests green.
+  Codex re-review: CONDITIONAL PASS (only a loose test bound, tightened).
+- **Iter 11 (2026-06-11)** — **`freezing.py`**: Bigg (1953) immersion
+  freezing (oracle `FREEZ`), per-bin rate `P=m·A·exp(−B(m)·ΔT)`, frozen
+  fraction `1−exp(−P·dt)`, liquid→ice + `(L_f/c_pd)Δq_ice` fusion heat;
+  CGS Bigg coeffs in `FastSBMConfig` (mass kg→g internally). Wired in
+  column: supercooled cells now produce `dq_i_dt` + fusion warming
+  (ice-spectrum carry-through/collision/melting/ice-sedimentation deferred
+  — ice is a diagnostic sink for now). 6 freezing tests (oracle PF formula
+  1e-12, mass conservation, deeper-supercooling/larger-drops monotone,
+  d/dT); cold-cell column test (ice + total-water closure incl. dq_i,
+  supersaturated to avoid the S≈1 cancellation). Codex ADV-10-4 self-limit
+  test tightened to assert ~0 activation when target already met. 85
+  fast_sbm tests green.

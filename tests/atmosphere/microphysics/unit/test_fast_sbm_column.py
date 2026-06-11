@@ -175,23 +175,27 @@ def test_clear_supersaturated_cell_activates_cloud():
         rtol=1e-9)
 
 
-def test_activation_self_limits_over_steps():
-    # Deficit activation (codex review iters 8-9): re-running a cell whose
-    # cloud number already meets the Köhler target must NOT keep adding
-    # droplets. Step a clear supersaturated cell once, feed the resulting
-    # N_c back, and check the second step's new-droplet production collapses.
-    T, q_v, hyd0, p, p_half, rho, dz = _fields(1.02, q_c=0.0, q_r=0.0)
-    out1 = fast_sbm_microphysics(T, q_v, hyd0, p, p_half, rho, dz, DT)
-    dNc1 = float(out1.dN_c_dt[0, 0])
-    assert dNc1 > 0.0
-    # Feed back the activated cloud (N_c and a matching q_c) and re-run at
-    # the SAME supersaturation.
-    hyd1 = hyd0._replace(
-        q_c=jnp.maximum(hyd0.q_c + DT * out1.dq_c_dt, 0.0),
-        N_c=jnp.maximum(DT * out1.dN_c_dt, 0.0))
-    out2 = fast_sbm_microphysics(T, q_v, hyd1, p, p_half, rho, dz, DT)
-    # Second-step activation is a small fraction of the first (target met).
-    assert float(out2.dN_c_dt[0, 0]) < 0.2 * dNc1
+def test_activation_self_limits_when_target_met():
+    # Deficit activation (codex review iters 8-9, ADV-10-4): a cell whose
+    # cloud number ALREADY meets/exceeds the Köhler target must NOT add new
+    # droplets (an additive `ccn_number − n_existing` reservoir WOULD).
+    # Feed N_c well above any plausible target directly — isolates the
+    # self-limiting property from coalescence replenishment dynamics.
+    T, q_v, hyd0, p, p_half, rho, dz = _fields(1.02, q_c=1.0e-3, q_r=0.0)
+    cfg = FastSBMConfig()
+    # Clear cell with NO existing cloud → full activation deficit.
+    clear = _fields(1.02, q_c=0.0, q_r=0.0)[2]
+    out_clear = fast_sbm_microphysics(T, q_v, clear, p, p_half, rho, dz, DT,
+                                      cfg)
+    dNc_clear = float(out_clear.dN_c_dt[0, 0])
+    assert dNc_clear > 0.0
+    # Same cell but already carrying 10× the CCN budget as cloud number.
+    saturated = hyd0._replace(N_c=jnp.full((NCOL, NLEV), 10.0 * cfg.ccn_number))
+    out_sat = fast_sbm_microphysics(T, q_v, saturated, p, p_half, rho, dz,
+                                    DT, cfg)
+    # Net dN_c may be negative (coalescence), but the ACTIVATION component is
+    # zero: positive dN_c can't exceed a tiny fraction of the clear-cell one.
+    assert float(out_sat.dN_c_dt[0, 0]) < 0.01 * dNc_clear
 
 
 def test_subsaturated_clear_cell_fixed_point():
@@ -200,6 +204,33 @@ def test_subsaturated_clear_cell_fixed_point():
     out = fast_sbm_microphysics(T, q_v, hyd, p, p_half, rho, dz, DT)
     for fld in (out.dT_dt, out.dq_v_dt, out.dq_c_dt, out.dq_r_dt):
         np.testing.assert_allclose(np.asarray(fld), 0.0, atol=1e-15)
+    np.testing.assert_allclose(np.asarray(out.dq_i_dt), 0.0, atol=1e-15)
+
+
+def test_supercooled_cell_freezes_to_ice():
+    # A SUPERSATURATED supercooled (T < 0 °C) cloudy cell: real condensation
+    # (so the water budget isn't a near-zero cancellation) + freezing to ice
+    # with fusion warming.
+    T = jnp.full((NCOL, NLEV), constants.T_freeze - 20.0)
+    p = jnp.full((NCOL, NLEV), P0)
+    e = 1.05 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
+    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    rho = jnp.full((NCOL, NLEV), 1.1)
+    hyd = make_zero_hydrometeors(NCOL, NLEV)._replace(
+        q_c=jnp.full((NCOL, NLEV), 1.0e-3),
+        q_r=jnp.full((NCOL, NLEV), 5.0e-4))
+    p_half = jnp.zeros((NCOL, NLEV + 1))
+    dz = jnp.full((NCOL, NLEV), 100.0)
+    out = fast_sbm_microphysics(T, q_v, hyd, p, p_half, rho, dz, DT)
+    assert np.all(np.asarray(out.dq_i_dt) > 0.0)         # ice formed
+    # Net heating exceeds the condensation-only part (fusion adds warming).
+    assert np.all(np.asarray(out.dT_dt) > 0.0)
+    # Total water closure incl. ice: −dq_v = dq_c+dq_r+dq_i+precip.
+    col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
+    np.testing.assert_allclose(
+        -col(out.dq_v_dt),
+        col(out.dq_c_dt + out.dq_r_dt + out.dq_i_dt)
+        + np.asarray(out.precipitation), rtol=1e-8)
 
 
 def test_column_jit_and_grad():

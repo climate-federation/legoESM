@@ -62,3 +62,9 @@ class FastSBMConfig(NamedTuple):
     aerosol_ions: float = 3.0
     aerosol_molar_mass: float = 0.132
     aerosol_solute_density: float = 1770.0
+    # --- Bigg (1953) immersion freezing (oracle FREEZ) ---
+    # Pre-factor A [1/(g·s)] and slope B0, B_max [1/K] (oracle CGS DATA:
+    # AFREEZMY=0.3333e-4, BFREEZMY=B_max=0.66 → constant slope by default).
+    bigg_a: float = 0.3333e-4
+    bigg_b0: float = 0.66
+    bigg_b_max: float = 0.66

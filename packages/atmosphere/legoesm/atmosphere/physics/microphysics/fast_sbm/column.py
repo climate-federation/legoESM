@@ -75,6 +75,9 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import (
     number_density,
     radius_from_mass,
 )
+from legoesm.atmosphere.physics.microphysics.fast_sbm.freezing import (
+    freeze_step,
+)
 from legoesm.atmosphere.physics.microphysics.fast_sbm.nucleation import (
     activate_ccn,
 )
@@ -237,18 +240,27 @@ def fast_sbm_microphysics(
             f_seed, T_c, qv_c, p_c, rho_c, dt, masses, config=config)
         g1 = bott_coalescence(g_from_f(cond.f, masses), ck, masses, tables)
         f1 = f_from_g(g1, masses)
-        # Total-water closure (nucleation + condensation, coalescence is
-        # mass-conserving): vapor change = −(in-cell liquid gain). Exact
-        # regardless of the haze seed; sedimentation (below) is vapor-
-        # neutral and only repartitions liquid ↔ precip.
+        # Immersion freezing (oracle FREEZ): supercooled drops freeze to
+        # ice, releasing fusion heat. Liquid feeding sedimentation is the
+        # UNFROZEN remainder; the frozen mass becomes q_i. (Ice-spectrum
+        # carry-through / ice collision / melting / ice sedimentation are
+        # the ice-subsystem iterations; here ice is a diagnostic sink.)
+        frz = freeze_step(f1, masses, T_c, rho_c, dt, config)
+        f1_liq = frz.f_liquid
+        dq_i_dt_c = mass_density(frz.f_ice, masses) / rho_c / dt
+        # Total-water closure: vapor change = −(in-cell CONDENSED gain),
+        # where condensed = liquid + ice (freezing is liquid↔ice internal,
+        # vapor-neutral). mass(f1)=mass(f1_liq)+mass(f_ice) so this is
+        # exactly −(mass(f1)−mass(f_pre))/ρ.
         dq_v = -(mass_density(f1, masses) - mass_density(f_pre, masses)) \
             / rho_c
         dq_v_dt = dq_v / dt
-        dT_dt_c = -(constants.L_v / constants.c_pd) * dq_v_dt
-        return (dT_dt_c, dq_v_dt, f_pre, f1)
+        # Heating = condensation (L_v) + fusion (L_f).
+        dT_dt_c = -(constants.L_v / constants.c_pd) * dq_v_dt + frz.dT / dt
+        return (dT_dt_c, dq_v_dt, dq_i_dt_c, f_pre, f1_liq)
 
     cell_v = jax.vmap(jax.vmap(cell))
-    dT_dt, dqv_dt, f0, f1 = cell_v(
+    dT_dt, dqv_dt, dqi_dt, f0, f1 = cell_v(
         T, q_v_pos, q_c, q_r, hydrometeors.N_c, hydrometeors.N_r, p_full, rho)
 
     # Sedimentation on the per-bin mixing ratios (oracle FALFLUXHUCM_Z;
@@ -280,13 +292,16 @@ def fast_sbm_microphysics(
     qc1, qr1, nc1, nr1 = split(f_final)
     inv_dt = 1.0 / dt
 
+    # Freezing depletes the liquid that reaches `split` (f1→f1_liq feeds
+    # sedimentation), so dq_c/dq_r already reflect the frozen loss; dq_i is
+    # the matching ice gain (liquid+ice conserved, vapor untouched).
     zeros = jnp.zeros_like(T)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dqv_dt,
         dq_c_dt=(qc1 - qc0) * inv_dt,
         dq_r_dt=(qr1 - qr0) * inv_dt,
-        dq_i_dt=zeros,
+        dq_i_dt=dqi_dt,
         dq_s_dt=zeros,
         dq_g_dt=zeros,
         dN_c_dt=(nc1 - nc0) * inv_dt,
