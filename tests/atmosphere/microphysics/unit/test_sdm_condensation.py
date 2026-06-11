@@ -30,17 +30,33 @@ from legoesm.atmosphere.physics.microphysics.sdm import (
 )
 
 
-def _maxwell_denominator(T: float) -> float:
-    """Analytic F_k + F_d at the dilute limit (Kn->0, d_cf->1)."""
+def _drsq_dt_oracle(R, S, T, N_s, include_curvature, include_solute):
+    """Independent re-implementation of d(R²)/dt for cross-checking the module.
+
+    Same physical constants (values are repo policy, not under test) but a
+    separate algebraic path, so it catches power/sign/coefficient/d_cf bugs:
+    ``α + β/R + γ/R³`` with the full Fukuta-Walter Knudsen correction.
+    """
     D = constants.D_vapor
     K = constants.k_air
     Rv = constants.R_v
     rho_l = constants.rho_water
     L = constants.L_v
     e_s = float(saturation_vapor_pressure(jnp.asarray(T)))
+    lam = 2.0 * D / np.sqrt(8.0 * T * Rv / np.pi)
+    Kn = lam / R
+    d_cf = (1.0 + Kn) / (1.0 + 2.0 * Kn * (1.0 + Kn))
     F_k = (L / (Rv * T) - 1.0) * (L * rho_l) / (K * T)
-    F_d = (rho_l * Rv * T) / (D * e_s)
-    return F_k, F_d
+    F_d = (rho_l * Rv * T) / (d_cf * D * e_s)
+    denom = F_k + F_d
+    out = 2.0 * (S - 1.0) / denom
+    if include_curvature:
+        a = 2.0 * constants.sigma_water / (Rv * rho_l)
+        out -= 2.0 * (a / T) / denom / R
+    if include_solute:
+        b = (3.0 / (4.0 * np.pi)) * (constants.M_H2O * 1.0e-3 / rho_l)
+        out += 2.0 * b * N_s / denom / R**3
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -86,23 +102,64 @@ def test_config_defaults_and_unknown_integrator():
 # --------------------------------------------------------------------------
 # Growth law vs analytic Maxwell
 # --------------------------------------------------------------------------
-def test_maxwell_growth_matches_analytic():
-    """With curvature/solute off, d(R²)/dt = 2(S-1)/(F_k+F_d) is constant, so a
-    single RK4 step reproduces the analytic R² increment to machine precision."""
+@pytest.mark.parametrize("include_curvature,include_solute", [
+    (False, False), (True, False), (False, True), (True, True),
+])
+def test_drsq_dt_matches_oracle_exactly(include_curvature, include_solute):
+    """drsq_dt reproduces the independent algebraic oracle to ~machine
+    precision (abs=0), term by term. Catches wrong powers (/R vs /R³), a wrong
+    a/T placement, a missing factor of 2, or a dropped d_cf — none of which the
+    earlier sign-only checks would have caught."""
+    T = 283.0
+    S = 1.005
+    R = 2.0e-6          # small enough that curvature/solute/Knudsen all matter
+    N_s = 3.0e-15       # solute moles
+    e_s = float(saturation_vapor_pressure(jnp.asarray(T)))
+    got = float(drsq_dt(jnp.asarray(R) ** 2, S, T, e_s, jnp.asarray(N_s),
+                        include_curvature, include_solute))
+    expected = _drsq_dt_oracle(R, S, T, N_s, include_curvature, include_solute)
+    assert got == pytest.approx(expected, rel=1e-12, abs=0.0)
+
+
+def test_euler_single_step_is_exact():
+    """One forward-Euler sub-step must equal R0² + dt·drsq_dt(R0²) exactly —
+    validates the integrator wiring (that integrate_radius actually advances by
+    the drsq_dt RHS) independently of the RHS's physical correctness."""
     T = 283.0
     S = 1.01
     R0 = 1.5e-5
-    dt = 2.0
+    dt = 0.5
     cfg = SDMConfig(include_curvature=False, include_solute=False,
-                    n_substeps_condensation=1, condensation_integrator="rk4")
+                    n_substeps_condensation=1, condensation_integrator="euler")
     st = make_monodisperse(n_sd=1, radius=R0, multiplicity=1.0)
+    e_s = float(saturation_vapor_pressure(jnp.asarray(T)))
+    rhs = float(drsq_dt(jnp.asarray(R0) ** 2, S, T, e_s, jnp.asarray(0.0),
+                        False, False))
     st2 = integrate_radius(st, S=S, T=T, dt=dt, cfg=cfg)
-
-    F_k, F_d = _maxwell_denominator(T)
-    drsq = 2.0 * (S - 1.0) / (F_k + F_d)
-    rsq_expected = R0**2 + drsq * dt
-    assert float(st2.radius[0]) ** 2 == pytest.approx(rsq_expected, rel=1e-10)
+    assert float(st2.radius[0]) ** 2 == pytest.approx(R0**2 + dt * rhs,
+                                                      rel=1e-12, abs=0.0)
     assert float(st2.radius[0]) > R0  # supersaturated -> growth
+
+
+def test_rk4_more_accurate_than_euler_on_growth():
+    """RK4 with 1 sub-step is closer to a fine-Euler reference than 1 Euler
+    sub-step (4th vs 1st order), confirming the higher-order integrator wins."""
+    T, S, R0, dt = 283.0, 1.02, 5.0e-6, 5.0
+    st = make_monodisperse(n_sd=1, radius=R0, multiplicity=1.0)
+    base = SDMConfig(include_curvature=True, include_solute=False)
+    ref = float(integrate_radius(
+        st, S, T, dt,
+        base._replace(condensation_integrator="euler",
+                      n_substeps_condensation=20000)).radius[0])
+    r_eul = float(integrate_radius(
+        st, S, T, dt,
+        base._replace(condensation_integrator="euler",
+                      n_substeps_condensation=1)).radius[0])
+    r_rk4 = float(integrate_radius(
+        st, S, T, dt,
+        base._replace(condensation_integrator="rk4",
+                      n_substeps_condensation=1)).radius[0])
+    assert abs(r_rk4 - ref) < abs(r_eul - ref)
 
 
 def test_evaporation_shrinks_droplet():

@@ -123,6 +123,19 @@ particle-state-threading interface). Documented, not hidden.
 - per-leaf unit tests (tendencies directly).
 - conservation: water mass (vapor+liquid) under condensation; sum(xi*m) under coalescence.
 
+## Faithfulness caveats (intentional deviations from the ERF oracle)
+- **Constants follow legoESM canonical values, not ERF's** (repo audit forbids
+  hardcoded/duplicated physical constants): `R_v=461.51` (ERF 461.5),
+  `L_v=2.501e6` (ERF 2.5e6), saturation via `thermo.saturation_vapor_pressure`
+  Tetens curve (ERF uses SAM `erf_esatw`). Differences <0.04%; the *method* is
+  faithful. This is a deliberate WONTFIX (codex iter-1 finding #3).
+- **Condensation integrator is fixed-substep RK4/Euler**; ERF's adaptive
+  stiffness-based dt with step-halving + Newton-implicit (BE/CN/DIRK2) options
+  are the planned refinement. Fixed substeps stiffen as R->dry-radius; the
+  `_R_SQ_FLOOR` keeps it finite (codex iter-1 finding #5).
+- **`cfg` is a static argument** (carries str/bool fields) — jit via closure or
+  `static_argnames`, as every legoESM scheme does (codex iter-1 finding #1).
+
 ## Iteration plan
 1. [this iter] oracle digest + `particles.py` + `condensation.py` + `config.py` skeleton + Maxwell-growth test + contracts. codex review. commit.
 2. kernels + terminal velocity + tests. codex. commit.

@@ -188,7 +188,21 @@ def integrate_radius(
     dt : float
         Physics step [s].
     cfg : SDMConfig
-        Scheme configuration.
+        Scheme configuration. ``cfg`` is a **static** argument (it carries
+        Python ``str``/``bool``/``int`` fields): when wrapping a call in
+        ``jax.jit`` pass it via closure or ``static_argnames=("cfg",)`` —
+        it cannot be a traced argument. This matches how every legoESM
+        scheme threads its config (resolved at trace time, never traced).
+
+    Notes
+    -----
+    Fixed equal sub-steps are used. The growth ODE stiffens as ``R -> 0``
+    (the curvature ``1/R`` and solute ``1/R³`` terms blow up); for a droplet
+    evaporating to near the dry radius in a single step, increase
+    ``n_substeps_condensation``. ``r_sq`` is floored to ``_R_SQ_FLOOR`` after
+    every sub-step so the integration stays finite; the ERF-faithful adaptive
+    stiffness-based sub-stepping is the planned refinement (see
+    ``docs/specs/superdroplet_sdm.md``).
     """
     if cfg.condensation_integrator == "rk4":
         step_fn = _rk4_step
@@ -206,13 +220,18 @@ def integrate_radius(
             f"n_substeps_condensation must be >= 1, got {cfg.n_substeps_condensation!r}"
         )
 
-    e_s = saturation_vapor_pressure(jnp.asarray(T, dtype=state.radius.dtype))
+    # Pin S, T, dt to the droplet dtype so e_s and the R² update do not silently
+    # promote/demote across the integration (float32 radius vs float64 scalars).
+    dtype = state.radius.dtype
+    S = jnp.asarray(S, dtype=dtype)
+    T = jnp.asarray(T, dtype=dtype)
+    e_s = saturation_vapor_pressure(T)
     if cfg.include_solute:
         N_s = state.solute_mass * cfg.solute_ionization / cfg.solute_molar_mass
     else:
         N_s = jnp.zeros_like(state.radius)
 
-    h = jnp.asarray(dt, dtype=state.radius.dtype) / n_sub
+    h = jnp.asarray(dt, dtype=dtype) / n_sub
     include_curvature = cfg.include_curvature
     include_solute = cfg.include_solute
 
