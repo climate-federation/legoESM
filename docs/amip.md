@@ -3,62 +3,136 @@
 Atmosphere-only integration with prescribed sea surface temperature (SST) and
 sea-ice concentration (SIC) from observational datasets.
 
-## Quick start: CMIP6 AMIP deck
+## How to run an AMIP CMIP simulation
 
-For a complete CMIP6-protocol AMIP run (transient GHG, ozone, solar, aerosol,
-volcanic), use `scripts/run/run_amip_cmip6_deck.py` instead of `run_amip.py`
-directly.  The deck driver auto-generates synthetic CMIP6-shape forcing files
-(or consumes real ones if dropped under `forcing_amip/` with the canonical
-names) and pins the canonical RRTMG + Sundqvist + Kessler + SBM + Louis stack:
+`scripts/run/run_amip_cmip6_deck.py` is the one entry point for a full
+CMIP6-protocol AMIP run (prescribed SST/SIC + transient GHG, ozone, solar,
+aerosol, volcanic).  It wraps the low-level `run_amip.py`, pins the
+production physics stack, and works on **every grid** (cubed-sphere,
+lat-lon, Gaussian/spectral, MPAS/Voronoi).
+
+Pick the level that matches what you want:
+
+### A. Quickest — pipeline smoke (synthetic forcing, minutes)
+
+Confirms the model runs end-to-end on every grid.  No data needed; the
+deck auto-generates synthetic CMIP6-shape forcing.
+
+```bash
+# All 8 (grid, discretization) cases, gray radiation, 1-day each:
+python scripts/validate/smoke_test_amip_all_grids.py --days 1
+#   cubed_sphere/{centered,finite_volume,cdgrid}
+#   latlon/{centered,finite_volume,latlon_cgrid}
+#   gaussian/spectral
+#   voronoi/mpas   (standard dt; integrator auto-mapped to ssp_rk54_scan)
+
+# Or a single short run on one grid:
+JAX_ENABLE_X64=1 python scripts/run/run_amip_cmip6_deck.py \
+    --grid-type cubed_sphere --discretization finite_volume \
+    --resolution 16 --days 30 --ic default \
+    --output results/amip_smoke
+```
+
+> The synthetic deck has **fake SST** (noise) — fine for a pipeline check,
+> NOT scientific AMIP.  For realism use the real-data path below.
+
+### B. Realistic — ERA5 initial condition (no credentials)
+
+The deck default `--ic era5` pulls the initial atmospheric state from the
+**public ARCO ERA5** store on GCS (no account needed), giving real winds +
+moisture and avoiding the cold-start drift of the uniform IC.  ERA5 IC is
+wired on cubed-sphere / lat-lon / Gaussian (MPAS falls back to the uniform
+IC for now).
 
 ```bash
 JAX_ENABLE_X64=1 python scripts/run/run_amip_cmip6_deck.py \
-    --resolution 16 --days 30 --output results/amip_deck_test
+    --grid-type cubed_sphere --discretization finite_volume \
+    --resolution 36 --days 120 --dt-auto \
+    --radiation rrtmg --ic era5 \
+    --output results/amip_era5
+#   --ic era5 with no --ic-path -> public ARCO ERA5 automatically.
 ```
 
-The `forcing_amip/` directory expects six files following the CMIP6 schemas:
+### C. Faithful CMIP — real observed SST + ERA5 IC (full combination)
 
-| File                              | Purpose             | Schema reference                               |
-|-----------------------------------|---------------------|------------------------------------------------|
-| `sst_sic_amip_<sy>-<ey>.nc`       | SST + SIC monthly   | HadISST                                        |
-| `ghg_amip_<sy>-<ey>.nc`           | Annual GHG          | input4MIPs `greenhouse_historical_plus.nc`    |
-| `ozone_amip_clim.nc` (or `_<sy>-<ey>.nc`) | Ozone clim or interannual | input4MIPs vmro3 (CCMI-1-0)            |
-| `solar_amip_<sy>-<ey>.nc`         | Daily TSI + 14-band | MPI-M `swflux_14band_cmip6_*`                 |
-| `aerosol_amip_clim.nc`            | Monthly zonal AOD   | Kinne                                          |
-| `volcanic_amip_<sy>-<ey>.nc`      | Volcanic AOD        | CMIP6 `bc_aeropt_cmip6_volc_*`                |
+A scientifically-faithful AMIP run needs the four pieces together:
+**correct GHG** (built-in) + **ERA5 IC** (public ARCO) + **real observed
+SST** (PCMDI / input4MIPs AMIP II bcs — needs a free ESGF account to
+download) + **months of spin-up** (checkpointed).
 
-To regenerate (or seed) the synthetic deck:
+```bash
+# 1. Stage + validate (prints the ESGF download steps and a ready command):
+python scripts/data/stage_amip_realdata.py --print-esgf
+python scripts/data/stage_amip_realdata.py --sst-file /data/tosbcs_input4MIPs_*.nc
+
+# 2. One 30-year run with real SST + ERA5 IC:
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 python scripts/run/run_amip_cmip6_deck.py \
+    --grid-type cubed_sphere --discretization finite_volume \
+    --resolution 36 --days 10950 --dt-auto \
+    --rad-update-steps 18 --diag-days 30 --checkpoint-days 365 \
+    --radiation rrtmg --ic era5 \
+    --sst-file /data/tosbcs_input4MIPs_*_PCMDI-AMIP-1-1-9_gn_*.nc \
+    --output results/amip30y_cube
+
+# 3. Or all four grids, checkpointed + resumable, via the launcher:
+export ERA5_IC_PATH=gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3
+export SST_FILE=/data/tosbcs_input4MIPs_*_PCMDI-AMIP-1-1-9_gn_*.nc
+bash scripts/run/run_amip30y_allgrids_local.sh
+```
+
+The deck defaults the real-SST var/unit flags to the input4MIPs convention
+(`tosbcs` in K, `siconcbcs` in %); the loader's units-attribute guard
+rejects a wrong file/flag combination loudly.
+
+### Production physics defaults
+
+The deck pins a faithful, validated stack (override any with the matching
+flag): **RRTMG** radiation, **Morrison** double-moment microphysics
+(M2005/MG — SAM-oracle validated), **Sundqvist** cloud fraction, **SBM**
+convection, **Louis** PBL, with **aerosol→CCN** coupling (Andreae 2009) and
+**zenith-dependent ocean albedo** (Briegleb 1992) on the pipeline grids.
+`--dt-auto` picks each grid's stability-ladder timestep (C36→150 s,
+latlon72→75 s, T47→150 s, voronoi→300 s) so long runs cannot blow up.
+
+### 2.5° resolution per grid
+
+| Grid | `--grid-type / --discretization` | `--resolution` |
+|------|----------------------------------|----------------|
+| Cubed-sphere | `cubed_sphere / finite_volume` | `36` (C36) |
+| Lat-lon | `latlon / finite_volume` | `72` |
+| Gaussian | `gaussian / spectral` | `47` (T47) |
+| Voronoi/MPAS | `voronoi / mpas` | `5` (level 5) |
+
+### Forcing files
+
+`forcing_amip/` holds the six CMIP6-schema files (auto-generated synthetic
+when missing, or drop real input4MIPs files in with these names):
+
+| File | Purpose | Schema reference |
+|------|---------|------------------|
+| `sst_sic_amip_<sy>-<ey>.nc` | SST + SIC monthly | HadISST (or `--sst-file` for input4MIPs AMIP II bcs) |
+| `ghg_amip_<sy>-<ey>.nc` | Annual GHG | input4MIPs `greenhouse_historical_plus` |
+| `ozone_amip_clim.nc` (or `_<sy>-<ey>.nc`) | Ozone clim or interannual | input4MIPs vmro3 (CCMI-1-0) |
+| `solar_amip_<sy>-<ey>.nc` | Daily TSI + 14-band | MPI-M `swflux_14band_cmip6_*` |
+| `aerosol_amip_clim.nc` | Monthly zonal AOD | Kinne |
+| `volcanic_amip_<sy>-<ey>.nc` | Volcanic AOD | CMIP6 `bc_aeropt_cmip6_volc_*` |
+
+Regenerate / seed the synthetic deck (non-SST channels are units-correct):
 
 ```bash
 python scripts/data/generate_amip_forcing.py --out forcing_amip \
     --start-year 1979 --end-year 2014
-# Optional: interannually-varying ozone (exercises the loader's
-# non-cyclic dispatch instead of the 12-month climatology):
-python scripts/data/generate_amip_forcing.py --out forcing_amip \
-    --start-year 1979 --end-year 2014 \
-    --component ozone --ozone-interannual
 ```
 
-To validate a finished run:
+### Validate a finished run
 
 ```bash
-python scripts/validate/validate_amip_run.py results/amip_deck_test
+python scripts/validate/validate_amip_run.py results/amip30y_cube
 ```
 
-To run the deck across every supported (grid, discretization)
-combination as a smoke test:
-
-```bash
-python scripts/validate/smoke_test_amip_all_grids.py --days 1
-# All 8 cases pass on legoESM main:
-#   cubed_sphere/{centered,finite_volume,cdgrid}
-#   latlon/{centered,finite_volume,latlon_cgrid}
-#   gaussian/spectral
-#   voronoi/mpas (standard dt; integrator auto-mapped to ssp_rk54_scan)
-```
-
-See [`forcing/AMIP.md`](forcing/AMIP.md) for the iteration-by-iteration trace
-of how this infrastructure was built.
+See [`amip_cmip_allgrids.md`](amip_cmip_allgrids.md) for the all-grids
+forcing/physics-wiring runbook and [`forcing/AMIP.md`](forcing/AMIP.md) for
+the build trace.
 
 ## Overview
 
@@ -73,7 +147,7 @@ The AMIP driver (`scripts/run/run_amip.py`) couples:
 - **Boundary layer**: Bulk aerodynamic heat and moisture exchange (constant coefficients default; MOST/COARE3/LY04 available via coupler `bulk_scheme`)
 - **Large-scale condensation**: Saturation adjustment with latent heating
 - **Clouds**: Diagnostic cloud fraction (`--clouds {none,sundqvist,xu_randall}`) coupled to RRTMG radiation
-- **Microphysics**: Selectable via `--microphysics {none,kessler,sundqvist}`
+- **Microphysics**: Selectable via `--microphysics {none,kessler,sundqvist,seifert_beheng,morrison,thompson}` (deck default: `morrison`)
 - **Ozone**: Selectable via `--ozone-source {standard,analytical,none}`
 - **Friction**: Rayleigh drag (strong in BL, weak free-atmosphere)
 - **Surface**: Prescribed SST + SIC from NetCDF, blending surface temperature,
@@ -383,7 +457,8 @@ are available but not yet validated for AMIP-length runs.
 --clouds {none,sundqvist,xu_randall}       Cloud fraction scheme (default: none)
 
 # Physics
---microphysics {none,kessler,sundqvist}    Microphysics scheme (default: none)
+--microphysics {none,kessler,sundqvist,seifert_beheng,morrison,thompson}
+                                           Microphysics (run_amip default: none; deck default: morrison)
 --dynamic-albedo                  Temperature/zenith-dependent surface albedo (default: off)
 
 # Diagnostics
