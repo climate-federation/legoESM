@@ -1219,16 +1219,30 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
     def step(self, state, dt, physics_fn=None):
         """Advance one step. Accepts FV3HydrostaticState or HydrostaticState."""
-        # Precompute target mass outside JIT boundary (avoid writing traced into self)
+        target_mass = None
         if (self.config.use_conservation_fixer and self.config.fix_mass
-                and self.config.anchor_mass_to_initial
-                and self._target_mass is None):
-            self._target_mass = global_integral(state.p_s, self.grid)
+                and self.config.anchor_mass_to_initial):
+            target_mass = self._target_mass
+            if target_mass is None:
+                target_mass = global_integral(state.p_s, self.grid)
+                if not isinstance(target_mass, jax.core.Tracer):
+                    # Designed eager path: cache the concrete t=0 mass so
+                    # later segments keep anchoring to the same constant.
+                    self._target_mass = target_mass
+                # Traced path (step() called inside an OUTER jit/scan —
+                # e.g. make_sharded_step, probe/bench scan drivers):
+                # NEVER cache — a tracer stored on self leaks into the
+                # next trace (UnexpectedTracerError).  Thread the
+                # per-call pre-step mass instead; the fixer then
+                # telescopes post-step mass back to the initial mass,
+                # matching the non-anchor branch's semantics.
 
         if isinstance(state, FV3HydrostaticState):
-            return self._step_fv3(state, dt, physics_fn=physics_fn)
+            return self._step_fv3(
+                state, dt, physics_fn=physics_fn, target_mass=target_mass)
         # Legacy cell-centre state path
-        return self._step_cell_centre(state, dt, physics_fn=physics_fn)
+        return self._step_cell_centre(
+            state, dt, physics_fn=physics_fn, target_mass=target_mass)
 
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_fv3(
@@ -1236,6 +1250,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         state: FV3HydrostaticState,
         dt: float,
         physics_fn=None,
+        target_mass=None,
     ) -> FV3HydrostaticState:
         """Advance one time step with D-grid prognostic winds."""
         state = cast_pytree(state, None, "compute")
@@ -1549,9 +1564,25 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         # Iter-2: raw-array fix_ps_mass skips fv3_to_hydrostatic roundtrip
         if self.config.use_conservation_fixer and self.config.fix_mass:
             if self.config.anchor_mass_to_initial:
-                # _target_mass precomputed in step() outside JIT
+                # Anchor target threaded from step() (concrete cached t=0
+                # mass on the eager path; per-call value under an outer
+                # jit).  Direct callers of _step_fv3 / step_cell_centre
+                # pass None: honour a concrete set_target_mass(...) /
+                # cached snapshot first (pre-fix behaviour), then fall
+                # back to the pre-step mass, which telescopes to the
+                # initial mass exactly like the non-anchor branch below.
+                # Tracer-cached values are never read (the step() fix
+                # never stores them; defensive guard regardless).
+                if target_mass is not None:
+                    _target = target_mass
+                elif (self._target_mass is not None
+                        and not isinstance(self._target_mass,
+                                           jax.core.Tracer)):
+                    _target = self._target_mass
+                else:
+                    _target = global_integral(state.p_s, self.grid)
                 p_s_fixed = fix_ps_mass_target(
-                    state_new.p_s.data, self._target_mass, self.grid,
+                    state_new.p_s.data, _target, self.grid,
                 )
             else:
                 p_s_fixed = fix_ps_mass(
@@ -1593,6 +1624,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         state: HydrostaticState,
         dt: float,
         physics_fn=None,
+        target_mass=None,
     ) -> HydrostaticState:
         """Cell-centre wrapper: cc winds → D-grid corners (entry); back to cc (exit)."""
         # cc → D-grid interp for (u, v).
@@ -1618,7 +1650,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             phis=state.phis,
             tracers=state.tracers,
         )
-        fv3_new = self._step_fv3(fv3_state, dt, physics_fn=physics_fn)
+        fv3_new = self._step_fv3(
+            fv3_state, dt, physics_fn=physics_fn, target_mass=target_mass)
         return fv3_to_hydrostatic(fv3_new, self.cdgrid)
 
     # Backward-compatible aliases

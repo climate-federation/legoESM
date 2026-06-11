@@ -695,8 +695,25 @@ def make_sharded_step(
     # 8456476, per-device FLOPs ratio 1.00 at 2 devices) and is now an
     # explicit diagnostic opt-in only (LEGOESM_SPMD_FORCE_ALLGATHER=1).
     _n = config.n_devices
-    if (_n in (1, 2, 3, 6)
-            and getattr(config, 'tiling', (1, 1)) == (1, 1)
+    _tiling = getattr(config, 'tiling', (1, 1))
+    _face_ok = (_n in (1, 2, 3, 6) and _tiling == (1, 1))
+    # 6*kt^2 sub-face tiling: the tiled ppermute EXCHANGE is serial-
+    # exact (h1+h2, offsets+raw, corners — probe job 8464648), but the
+    # DYCORE is not yet tile-aware: consumers slice padded arrays with
+    # full-face (n+2h) indexing (operators_cdgrid.py:555/638/766,
+    # operators_3d.py:85, fv_tp_2d.py:1024, fv3_sw_core.py:1358 —
+    # codex review) and staggered (n+1) leaves cannot shard over tile
+    # axes (IndivisibleError, probe job 8464703).  Activation is
+    # therefore EXPERIMENTAL and opt-in only; the P4 milestone
+    # (tile-aware consumers + staggered-leaf ownership layout) flips
+    # the default.
+    import os as _os
+    _tiled_ok = (
+        _os.environ.get("LEGOESM_TILED_SPMD", "0") == "1"
+        and _tiling[0] == _tiling[1] and _tiling[0] >= 2
+        and _n == 6 * _tiling[0] * _tiling[1]
+    )
+    if ((_face_ok or _tiled_ok)
             and config.mesh is not None
             and "face" in getattr(config.mesh, 'axis_names', ())):
         from legoesm.parallel.cubesphere_exchange import (
@@ -705,8 +722,10 @@ def make_sharded_step(
         activate_spmd_halo_backend(config.mesh, n=n, nlev=nlev)
         logger.info(
             "make_sharded_step: activated SPMD halo backend "
-            "(%d devices, face-sharded, n=%d, nlev=%d)",
-            config.n_devices, n, nlev,
+            "(%d devices, %s, n=%d, nlev=%d)",
+            config.n_devices,
+            "face-sharded" if _face_ok else f"tiled {_tiling}",
+            n, nlev,
         )
 
     logger.info(

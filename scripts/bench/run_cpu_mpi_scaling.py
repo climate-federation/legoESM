@@ -330,6 +330,7 @@ def _build_amip_step(
     precision: str,
     physics_level: str,
     dt: float | None = None,
+    cs_spmd: bool = False,
 ):
     """Build a step function + initial state for one benchmark case.
 
@@ -354,6 +355,9 @@ def _build_amip_step(
         return x
 
     if grid_type == "cubed-sphere":
+        if cs_spmd:
+            return _build_cubed_sphere_spmd(
+                resolution, nlev, dt, dtype, physics_level, _cast)
         return _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
                                   physics_level, _cast)
     elif grid_type == "latlon":
@@ -415,6 +419,82 @@ def _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     else:
         step_fn = model.step
     cells_per_rank = total_cells // max(1, n_ranks)
+    return step_fn, state, dt, total_cells, cells_per_rank
+
+
+def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
+                             cast_fn):
+    """A1 path: TRUE cubed-sphere decomposition via jax.distributed.
+
+    Multi-controller SPMD: the global face mesh is built from
+    ``jax.devices()`` (THE multi-controller fix — ``jax.local_devices``
+    would give each process a private 1-device mesh), the existing
+    ``make_sharded_step`` + multiface-ppermute halo runs unchanged, and
+    the state is sharded across the global device set.  Conservation
+    (``fix_mass``) reduces on global-sharded arrays at the jnp level —
+    SPMD-global by construction (parity receipt 6.7e-10 @5 steps, job
+    8462928).  ``jax.distributed.initialize()`` must already have run
+    (``main`` does it for ``--cs-spmd`` BEFORE any other JAX use).
+
+    mpi4jax is NEVER armed in this mode: the replicated cubed-sphere
+    path's mpi4jax halo machinery and jax.distributed collectives in
+    one program is the documented mixed-stack deadlock hazard.
+    """
+    import jax
+
+    from legoesm.parallel.mesh import create_device_mesh, shard_pytree
+    from legoesm.parallel.sharded_dynamics import make_sharded_step
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from tests.test_cases.baroclinic_wave import baroclinic_wave_init
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig,
+        hydrostatic_to_fv3,
+        create_cubed_sphere_cdgrid,
+    )
+
+    if physics_level != "none":
+        raise ValueError(
+            "--cs-spmd currently benchmarks the dry dycore only "
+            f"(physics={physics_level!r}); physics column scatter under "
+            "the SPMD path is the next wiring step."
+        )
+    gdev = jax.devices()
+    n_global = len(gdev)
+    if 6 % n_global != 0:
+        raise ValueError(
+            f"--cs-spmd needs a global device count dividing 6, got "
+            f"{n_global} (launch with srun -n 1|2|3|6)."
+        )
+
+    cfg_mesh = create_device_mesh(n_devices=n_global, devices=gdev)
+    grid = create_cubed_sphere(resolution)
+    sigma = create_sigma_coordinate(nlev)
+    state = hydrostatic_to_fv3(
+        baroclinic_wave_init(grid, sigma, perturbed=True),
+        create_cubed_sphere_cdgrid(grid))
+    state = jax.tree.map(cast_fn, state)
+    # IDENTICAL config to the serial cubed-sphere baseline above —
+    # speedup comparisons are meaningless across different dynamics
+    # settings.  The conservation fixers reduce via jnp-level global
+    # sums on global-sharded arrays (SPMD-global psum by construction;
+    # conservation-reduction audit + parity receipt).
+    config = CDGridPrimitiveEquationConfig(
+        hyperdiff_coeff=0.0,
+        hyperdiff_ps_coeff=0.0,
+        use_conservation_fixer=True,
+        fix_mass=True,
+        anchor_mass_to_initial=True,
+        zero_mean_ps_tendency=True,
+    )
+    model = CDGridPrimitiveEquationModel(grid, sigma, config)
+
+    step_fn = make_sharded_step(model, cfg_mesh, n=resolution, nlev=nlev)
+    state = shard_pytree(state, cfg_mesh)
+
+    total_cells = 6 * resolution * resolution * nlev
+    cells_per_rank = total_cells // n_global
     return step_fn, state, dt, total_cells, cells_per_rank
 
 
@@ -634,6 +714,7 @@ def run_single_benchmark(
     n_warmup: int,
     n_timing: int,
     dt: float | None = None,
+    cs_spmd: bool = False,
 ) -> TimingResult:
     """Run a single benchmark case and return timing."""
     _validate_physics(grid_type, physics_level)
@@ -650,6 +731,7 @@ def run_single_benchmark(
         precision=precision,
         physics_level=physics_level,
         dt=dt,
+        cs_spmd=cs_spmd,
     )
 
     if grid_type == "spectral":
@@ -894,6 +976,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-warmup", type=int, default=5)
     p.add_argument("--n-timing", type=int, default=50)
     p.add_argument(
+        "--cs-spmd", action="store_true",
+        help="Cubed-sphere TRUE domain decomposition via jax.distributed "
+             "multi-controller SPMD (global face mesh + multiface "
+             "ppermute; the A1 path).  Replaces the replicated-dynamics "
+             "refusal: launch with srun -n {2,3,6} (must divide 6).  "
+             "Uses jax.distributed ONLY — the mpi4jax halo backend is "
+             "never armed in this mode (mixed stacks deadlock).  "
+             "Parity receipt: scripts/tmp/_probe_spmd_cube_parity.py "
+             "(shard-local vs serial = 6.7e-10 @5 steps, job 8462928).",
+    )
+    p.add_argument(
         "--output-dir", type=str, default="results/cpu_scaling",
         help="Output directory for results.",
     )
@@ -936,9 +1029,69 @@ def main() -> int:
     # --- Configure JAX for CPU ---
     _configure_jax_cpu(args.precision)
 
+    # --- A1 SPMD mode: federate processes into ONE multi-controller JAX
+    # program BEFORE any other JAX use.  jax.distributed only — the
+    # mpi4jax halo backend is never armed on this path (mixed stacks
+    # deadlock; see --cs-spmd help).  Single-process launches skip the
+    # init (jax.distributed requires a real multi-process environment).
+    if args.cs_spmd:
+        # Resolve the REQUESTED grid before touching jax.distributed:
+        # every non-cubed-sphere builder arms the mpi4jax halo backend,
+        # and mpi4jax + jax.distributed collectives in one program is
+        # the documented mixed-stack deadlock.  (--case is parsed again
+        # below; this early peek only needs the grid field.)
+        _grid_req = (
+            json.loads(args.case).get("grid", args.grid)
+            if args.case else args.grid
+        )
+        if _grid_req != "cubed-sphere":
+            print(
+                f"ERROR: --cs-spmd supports only --grid cubed-sphere "
+                f"(got {_grid_req!r}); lat-lon/icosahedral paths arm "
+                "mpi4jax, which must never coexist with "
+                "jax.distributed in one program.",
+                flush=True,
+            )
+            return 2
+        import jax as _jax
+        import os as _os
+        # Launcher-agnostic process count: SLURM (srun) or OpenMPI
+        # (mpirun) — gating on SLURM_NTASKS alone would silently skip
+        # initialize() under mpirun and leave N independent local
+        # meshes all reporting n_ranks=N.
+        _nproc = int(_os.environ.get(
+            "SLURM_NTASKS", _os.environ.get("OMPI_COMM_WORLD_SIZE", "1")))
+        if _nproc > 1:
+            _jax.distributed.initialize()
+
     # --- MPI init ---
     rank, n_ranks = _init_mpi()
     is_rank0 = (rank == 0)
+
+    # cs-spmd consistency gate: every launched process must have joined
+    # ONE multi-controller program.  A mismatch means initialize() was
+    # skipped (unknown launcher) or partially failed — measuring would
+    # produce N independent serial runs labelled n_ranks=N.
+    if args.cs_spmd:
+        import jax as _jax
+        if n_ranks > 1 and _jax.process_count() != n_ranks:
+            if is_rank0:
+                print(
+                    f"ERROR: --cs-spmd launched with {n_ranks} MPI "
+                    f"processes but jax.process_count()="
+                    f"{_jax.process_count()} — jax.distributed did not "
+                    "federate them (unsupported launcher?).  Refusing "
+                    "to record replicated-serial numbers.",
+                    flush=True,
+                )
+            return 3
+        if n_ranks == 1 and is_rank0:
+            print(
+                "NOTE: --cs-spmd with a single process = sharded-on-1-"
+                "device, NOT multi-controller SPMD; use the no-flag "
+                "serial path for baselines.",
+                flush=True,
+            )
 
     # --- Parse case spec if provided ---
     if args.case:
@@ -980,7 +1133,7 @@ def main() -> int:
     # ``mpirun -np N`` with ``--mode single``.  Refuse the
     # configuration up-front instead of silently capturing replicated-
     # dynamics numbers.
-    if grid_type == "cubed-sphere" and n_ranks > 1:
+    if grid_type == "cubed-sphere" and n_ranks > 1 and not args.cs_spmd:
         if is_rank0:
             print(
                 "ERROR: cubed-sphere MPI is currently replicated-"
@@ -1029,6 +1182,7 @@ def main() -> int:
         physics_level=physics_level,
         n_warmup=args.n_warmup,
         n_timing=args.n_timing,
+        cs_spmd=bool(args.cs_spmd),
     )
 
     if is_rank0:
