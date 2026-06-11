@@ -262,6 +262,35 @@ def test_cold_cell_does_not_melt_ice():
     np.testing.assert_allclose(np.asarray(out.dq_i_dt), 0.0, atol=1e-15)
 
 
+def test_float32_grad_dry_atmosphere():
+    # Regression (iter 13): the end-to-end hydrostatic grad test surfaced
+    # three float32 NaN-gradient traps over a DRY column — Köhler r_crit
+    # (inf-branch + 1/u² reciprocal VJP overflow), the q_v=0 OPER2
+    # singularity, and the thin-cloud reconstruction rescale (1/mass²). All
+    # must stay finite at float32 with zero hydrometeors and zero vapor.
+    # float32 arrays exercise the float32 numeric path (the overflow that
+    # produced the NaN is a float32 range property, independent of the x64
+    # config flag — under x64 these explicit-float32 ops still run in f32).
+    ncol, nlev = 2, 5
+    T = jnp.linspace(230.0, 300.0, nlev)[None, :].repeat(ncol, 0) \
+        .astype(jnp.float32)
+    p = jnp.full((ncol, nlev), 8.0e4, jnp.float32)
+    dz = jnp.full((ncol, nlev), 100.0, jnp.float32)
+    hyd = make_zero_hydrometeors(ncol, nlev, dtype=jnp.float32)
+    ph = jnp.zeros((ncol, nlev + 1), jnp.float32)
+
+    def loss(Tx):
+        # rho(T) — reproduces the wrapper's T-dependence that triggered the
+        # thin-cloud rescale gradient overflow.
+        rho_x = (p / (constants.R_d * Tx)).astype(jnp.float32)
+        out = fast_sbm_microphysics(Tx, jnp.zeros((ncol, nlev), jnp.float32),
+                                    hyd, p, ph, rho_x, dz, 300.0)
+        return jnp.sum(out.dT_dt ** 2)
+
+    g = jax.grad(loss)(T)
+    assert np.all(np.isfinite(np.asarray(g)))
+
+
 def test_column_jit_and_grad():
     T, q_v, hyd, p, p_half, rho, dz = _fields(1.02)
 

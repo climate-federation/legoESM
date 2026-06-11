@@ -115,6 +115,30 @@ test before the body. Helpers (`grid.py`, `config.py`) in
   gaps: no persistent `FCCNR` budget, single-bin seed placement (oracle
   spreads bins 1–8), fixed-reference collision kernel (weak p-dependence).
 
+### Iter 13 (2026-06-11) — end-to-end integration + float32 AD hardening
+- **`scheme="fast_sbm"` validated through the REAL production pipeline**:
+  `make_microphysics_physics(config, "hydrostatic")` → `physics_fn(state,
+  grid, sigma)` on a Held-Suarez cubed-sphere state (shapes, finite
+  tendencies, `jax.grad`). Added to `tests/atmosphere/hydrostatic/unit/
+  test_microphysics.py::TestIntegrationHydrostatic`.
+- That test surfaced **three float32 NaN-gradient traps** over a dry
+  atmosphere (forward finite, grad NaN), all fixed:
+  1. `nucleation.critical_dry_radius`: a constant `jnp.inf` in a
+     `where(s>0,…,inf)` poisoned the VJP (`inf·0`); and `(4/(B s²))^{1/3}`
+     made the reciprocal VJP carry `1/u²≈1e48` → float32 overflow.
+     Reformulated to the algebraically identical `s^{-2/3}` (VJP `s^{-5/3}`,
+     in-range) on a floored `s`, gate left to the caller's `S>1`.
+  2. `supersaturation.supersat_relaxation_rate`: OPER2 `ε/((…)q)` is a 1/0
+     at `q_v=0`; with `sfn=0` (no droplets) the product is `∞·0=NaN`.
+     Floored `q_v` in that term → empty cell gives `R=0`.
+  3. `column._reconstruct_spectrum`/`_reconstruct_ice`: the exact-mass
+     rescale `q·ρ/mass_shape` overflowed (`1/mass²`) when a near-zero mean
+     mass drove `r_med` below the grid (`mass_shape→0`). Floored the mean
+     mass at the smallest bin so the mode stays on-grid (rescale≈1, bounded
+     grad) — thin-cloud closure, never binds for real cloud (≳5 µm).
+- Regression test `test_float32_grad_dry_atmosphere` (dry column, `rho(T)`,
+  float32) pins all three. 94 fast_sbm + 284 microphysics/integration green.
+
 ## Remaining work (warm-only port → full FSBM-2)
 
 Ice phase (freezing/melting, snow + graupel/hail spectra, LWF tracking in

@@ -93,9 +93,18 @@ def supersat_relaxation_rate(
     sfn: jax.Array,
 ) -> jax.Array:
     """Relaxation rate ``R`` [s⁻¹] of the warm supersaturation ODE
-    (oracle ``RW = (OPER2(QPS) + B5L·AL1)·DOPL·SFNL``)."""
+    (oracle ``RW = (OPER2(QPS) + B5L·AL1)·DOPL·SFNL``).
+
+    ``q_v`` is floored at a tiny positive value in the OPER2 term: at a
+    bone-dry level (``q_v=0``) the ``ε/((…)q)`` vapor-pressure derivative is
+    a 1/0 singularity, and although ``sfn`` is also 0 there (no droplets),
+    the product ``∞·0`` is NaN in both the forward pass and reverse-mode AD.
+    The floor keeps the psychrometric factor finite so the empty-spectrum
+    cell correctly yields ``R = finite·0 = 0`` (surfaced by the end-to-end
+    hydrostatic grad test over a dry upper atmosphere)."""
     eps = constants.epsilon
-    dlne_dq = eps / ((eps + (1.0 - eps) * q_v) * q_v)
+    q_safe = jnp.maximum(q_v, 1.0e-12)
+    dlne_dq = eps / ((eps + (1.0 - eps) * q_safe) * q_safe)
     dlnes_dT = constants.L_v / (constants.R_v * T * T)
     psychro = dlne_dq + dlnes_dT * (constants.L_v / constants.c_pd)
     return psychro * (1.0 + S) * sfn

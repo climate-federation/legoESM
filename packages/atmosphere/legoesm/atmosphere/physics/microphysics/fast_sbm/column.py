@@ -170,10 +170,20 @@ def _reconstruct_spectrum(q_c, q_r, N_c, N_r, rho, masses,
     closes a single-moment column (codex review item 10 — keeps cloud
     number consistent with whatever the driver feeds back as ``dN_c_dt``).
     """
+    # Mean particle mass is floored at the SMALLEST BIN MASS, not at a tiny
+    # 1e-30 (float32 AD hazard, surfaced by the end-to-end hydrostatic grad
+    # test over a dry atmosphere): a near-zero mean mass drives r_med/r_mean
+    # far below the grid, so the binned mass `mass_shape` collapses toward
+    # zero and the exact-mass rescale `q·ρ/mass_shape` develops a `1/mass²`
+    # gradient that overflows. Flooring keeps the reconstructed mode ON the
+    # grid (mass_shape ≈ q·ρ, rescale ≈ 1), so the spectrum stays linear in
+    # q·ρ with a bounded gradient; for any real cloud (droplets ≳ 5 µm) the
+    # floor never binds.
+    m_floor = masses[0]
     # Cloud mode: lognormal at the cloud number, mass-rescaled to q_c·ρ.
     n_c = jnp.where(N_c > 0.0, N_c, config.cdnc)
-    m_mean_c = q_c * rho / n_c
-    r_med = radius_from_mass(jnp.maximum(m_mean_c, 1.0e-30)) \
+    m_mean_c = jnp.maximum(q_c * rho / n_c, m_floor)
+    r_med = radius_from_mass(m_mean_c) \
         * jnp.exp(-1.5 * jnp.log(config.cloud_geom_std) ** 2)
     f_c = discretize_lognormal(masses, n_c, r_med,
                                config.cloud_geom_std)
@@ -182,9 +192,8 @@ def _reconstruct_spectrum(q_c, q_r, N_c, N_r, rho, masses,
         mass_c > 0.0, mass_c, 1.0), 0.0)
     # Rain mode: exponential with the dycore's N_r (floored).
     n_r = jnp.maximum(N_r, config.n_rain_floor)
-    m_mean_r = q_r * rho / n_r
-    f_r = discretize_exponential(masses, n_r,
-                                 jnp.maximum(m_mean_r, 1.0e-30))
+    m_mean_r = jnp.maximum(q_r * rho / n_r, m_floor)
+    f_r = discretize_exponential(masses, n_r, m_mean_r)
     mass_r = mass_density(f_r, masses)
     f_r = f_r * jnp.where(mass_r > 0.0, q_r * rho / jnp.where(
         mass_r > 0.0, mass_r, 1.0), 0.0)
@@ -196,8 +205,10 @@ def _reconstruct_ice(q_i, rho, masses, config: FastSBMConfig):
     mode at a floor number, mass-rescaled). Lets q_i persist across steps
     (carried tracer) so melting can act on previously frozen ice."""
     n_i = jnp.asarray(config.ice_number_floor, masses.dtype)
-    m_mean = q_i * rho / n_i
-    f_i = discretize_exponential(masses, n_i, jnp.maximum(m_mean, 1.0e-30))
+    # Floor at the smallest bin mass — same float32 AD-safety reason as the
+    # liquid reconstruction (keeps the mode on-grid, bounds the rescale grad).
+    m_mean = jnp.maximum(q_i * rho / n_i, masses[0])
+    f_i = discretize_exponential(masses, n_i, m_mean)
     mass_i = mass_density(f_i, masses)
     return f_i * jnp.where(mass_i > 0.0, q_i * rho / jnp.where(
         mass_i > 0.0, mass_i, 1.0), 0.0)

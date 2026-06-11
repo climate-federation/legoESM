@@ -106,9 +106,18 @@ def critical_dry_radius(
     s = S - 1.0
     A = kelvin_coefficient(T)
     B = hygroscopicity(config)
+    # Two float32 AD hazards, both avoided here (surfaced by the end-to-end
+    # grad test):
+    #  1. A constant `jnp.inf` in a `where(s>0, r_crit, inf)` branch poisons
+    #     reverse-mode AD (inf·0 = NaN). So r_crit is evaluated on a floored
+    #     s everywhere (finite, smooth) and the caller's `S>1` gate zeros the
+    #     subsaturated activation — same result, no inf.
+    #  2. Writing `(4/(B s²))^(1/3)` makes the reciprocal's VJP carry `1/u²`
+    #     with u = B s² ≈ 1e-24, i.e. ≈1e48 → overflows float32 to inf, then
+    #     inf·0 = NaN. The algebraically identical `s^(-2/3)` form has VJP
+    #     `s^(-5/3)` (≈1e20 at the floor) which stays in float32 range.
     s_safe = jnp.maximum(s, _S_FLOOR)
-    r_crit = (A / 3.0) * (4.0 / (B * s_safe * s_safe)) ** (1.0 / 3.0)
-    return jnp.where(s > 0.0, r_crit, jnp.inf)
+    return (A / 3.0) * (4.0 / B) ** (1.0 / 3.0) * s_safe ** (-2.0 / 3.0)
 
 
 class NucleationResult(NamedTuple):
