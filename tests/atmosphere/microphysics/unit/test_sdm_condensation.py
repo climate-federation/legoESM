@@ -389,6 +389,62 @@ def test_all_adaptive_integrators_agree_on_stiff_kohler(method):
     assert got == pytest.approx(ref, rel=2e-3)
 
 
+def test_cn_dirk2_single_attempt_matches_exact_stage_algebra():
+    """Single-attempt stage-algebra oracle: solve each implicit stage equation
+    EXACTLY (brentq root of mu*u' - F(u') - rhs_const) and rebuild the oracle's
+    update. Tight tolerance (rel 1e-6, Newton rtol-limited) — a wrong CN mu
+    (1/dt instead of 2/dt) shifts the stage ROOT itself and fails, which the
+    adaptive end-to-end tests cannot see (codex probe)."""
+    from scipy.optimize import brentq
+    from legoesm.atmosphere.physics.microphysics.sdm.condensation import (
+        _make_attempt,
+    )
+
+    T, S = 283.0, 0.99
+    e_s = float(saturation_vapor_pressure(jnp.asarray(T)))
+    N_s = 1.0e-16 * 2.0 / 0.05844         # nonlinear: curvature+solute active
+    u0 = (3.0e-7) ** 2
+    dt = 0.05
+
+    def F(u):
+        return float(drsq_dt(jnp.asarray(u), S, T, e_s, jnp.asarray(N_s),
+                             True, True))
+
+    def solve(mu, rhs_const, lo=1e-18, hi=1e-10):
+        return brentq(lambda u: mu * u - F(u) - rhs_const, lo, hi,
+                      xtol=1e-30, rtol=8.9e-16)
+
+    args = (jnp.asarray(S), jnp.asarray(T), jnp.asarray(e_s), jnp.asarray(N_s),
+            True, True,
+            jnp.asarray(1e-12), jnp.asarray(1e-40), jnp.asarray(1e-14),
+            jnp.asarray(60, jnp.int32), jnp.float64)
+
+    # CN oracle: mu = 2/dt; u2 root of mu*u2 - F(u2) = mu*(u0 + dt/2*f1);
+    # update u0 + dt/2*(f1 + F(u2)).
+    f1 = F(u0)
+    mu_cn = 1.0 / (0.5 * dt)
+    u2_cn = solve(mu_cn, mu_cn * (u0 + 0.5 * dt * f1))
+    expected_cn = u0 + 0.5 * dt * (f1 + F(u2_cn))
+    got_cn, ok_cn = _make_attempt("cn", *args)(jnp.asarray(u0), jnp.asarray(dt))
+    assert bool(ok_cn)
+    assert float(got_cn) == pytest.approx(expected_cn, rel=1e-6, abs=0.0)
+    # discrimination: the wrong-mu (1/dt) construction must differ measurably
+    u2_wrong = solve(1.0 / dt, (1.0 / dt) * (u0 + 0.5 * dt * f1))
+    expected_wrong = u0 + 0.5 * dt * (f1 + F(u2_wrong))
+    assert abs(expected_wrong - expected_cn) / abs(expected_cn) > 1e-5
+
+    # DIRK2 oracle: mu = 1/dt; u1 root of mu*u1 - F(u1) = mu*u0; f1d = F(u1);
+    # u2 root of mu*u2 - F(u2) = mu*(u0 - dt*f1d); update u0 + dt/2*(f1d+F(u2)).
+    mu_d = 1.0 / dt
+    u1_d = solve(mu_d, mu_d * u0)
+    f1_d = F(u1_d)
+    u2_d = solve(mu_d, mu_d * (u0 - dt * f1_d))
+    expected_d = u0 + 0.5 * dt * (f1_d + F(u2_d))
+    got_d, ok_d = _make_attempt("dirk2", *args)(jnp.asarray(u0), jnp.asarray(dt))
+    assert bool(ok_d)
+    assert float(got_d) == pytest.approx(expected_d, rel=1e-6, abs=0.0)
+
+
 @pytest.mark.parametrize("method", ["cn", "dirk2"])
 def test_cn_dirk2_steady_noop_and_growth(method):
     cfg = SDMConfig(include_curvature=False, include_solute=False,
