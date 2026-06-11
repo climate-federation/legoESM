@@ -30,8 +30,21 @@ A supersaturated cell nucleates new droplets from a prescribed aerosol
 reservoir by Köhler activation (``nucleation.activate_ccn``) — so a clear
 supersaturated cell forms cloud, not nothing.
 
+The column carries TWO ice categories: crystal/snow (``q_i``) and
+graupel/hail (``q_g``). Habit-routed freezing sends small frozen drops to
+snow and frozen rain to graupel; both melt above 0 °C; riming and
+aggregation grow the snow category; each category sediments at its own
+computed fall speed (snow slow, graupel fast). Output ``dq_i_dt`` and
+``dq_g_dt`` are live.
+
 **Documented limitations**:
-* No ice (``dq_i/dq_s/dq_g = 0``) — lands with the ice iteration.
+* Riming grows the SNOW category only; the oracle rimes onto graupel/hail
+  too (``coll_xyx`` call sites 8462/8495/8534) — a graupel-riming
+  iteration is pending. Graupel melt reuses the snow melt-rate ladder
+  (oracle has category-specific melt thresholds).
+* The third snow category (oracle separates pristine crystals ``FF2`` from
+  snow aggregates ``FF3``) and the per-habit ice-crystal sub-types
+  (``ICEMAX=3``) are collapsed; ``q_s`` and ``dq_s_dt`` stay zero.
 * Spectrum shape is re-imposed each step by reconstruction; the
   bin-resolved physics acts within the step.
 * CCN activation is **deficit-diagnostic**, not a depleting aerosol
@@ -259,6 +272,9 @@ def fast_sbm_microphysics(
         f_graupel0 = _reconstruct_ice(qg_c, rho_c, masses, config)
         # MELT both carried ice categories above 0 °C → add to liquid, cool
         # (oracle J_W_MELT). Closes the cross-step ice loop freezing opens.
+        # Graupel reuses the snow melt-rate ladder; the oracle has
+        # category-specific melt thresholds (FF4 graupel KR<=13 vs FF3 snow
+        # KR<=14) — a documented simplification, refined with per-habit melt.
         melt_s = melt_step(f_snow0, masses, T_c, rho_c, dt, config)
         melt_g = melt_step(f_graupel0, masses, T_c, rho_c, dt, config)
         f_pre = f_liq0 + melt_s.f_liquid + melt_g.f_liquid

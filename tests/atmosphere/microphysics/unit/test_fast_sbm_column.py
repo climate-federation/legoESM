@@ -222,8 +222,11 @@ def test_supercooled_cell_freezes_to_ice():
     p_half = jnp.zeros((NCOL, NLEV + 1))
     dz = jnp.full((NCOL, NLEV), 100.0)
     out = fast_sbm_microphysics(T, q_v, hyd, p, p_half, rho, dz, DT)
-    # Ice forms (crystals + hail via habit-routed freezing).
-    assert np.all(np.asarray(out.dq_i_dt) + np.asarray(out.dq_g_dt) > 0.0)
+    # Ice forms (crystals + hail via habit-routed freezing). Both categories
+    # are actually produced (codex iter-3: assert q_g path is non-zero, not
+    # just present in the budget).
+    assert np.all(np.asarray(out.dq_i_dt) > 0.0)         # snow/crystals
+    assert np.all(np.asarray(out.dq_g_dt) > 0.0)         # graupel from rain
     # Net heating exceeds the condensation-only part (fusion adds warming).
     assert np.all(np.asarray(out.dT_dt) > 0.0)
     # Total water closure incl. BOTH ice categories: −dq_v = dq_c + dq_r +
@@ -511,7 +514,8 @@ def test_multistep_total_water_conserved():
     tw1 = total_water(qv, hyd)
     # Non-vacuous: the trajectory actually moved water through ice and out
     # as precip (riming grew the seeded ice; rain reached the surface).
-    assert float(jnp.max(hyd.q_i)) > 3.0e-4      # ice grew via riming
+    assert float(jnp.max(hyd.q_i)) > 3.0e-4      # snow grew via riming
+    assert float(jnp.max(hyd.q_g)) > 0.0         # graupel produced (q_g path)
     assert accum_precip > 0.0                    # something precipitated
     # Closure over the trajectory: water now + what precipitated == start.
     # Clamps to nonnegative can only ADD water, so the two-sided rel=2e-3
