@@ -185,6 +185,18 @@ sorting `Lscale` + full prognostic moment transport (clubb_lite has none).
   and the **combined column water budget closes to the surface precip sink**
   (`Σ mass·(dq_v|clubb+dq_v|μ+dq_c|μ+dq_r|μ)+precip ≈ 0`, rel<1e-12) with a
   genuinely nonzero precip (~5e-3 kg/m²/s, autoconversion firing). codex-reviewed.
+- **column-momentum conservation → surface stress (iter 64):** third leg of the
+  conservation triad. `Σ mass·du/dt = τ_x` (surface stress is the only momentum
+  source/sink; top flux zero). Checks (1) the surface-stress SIGN (the iter-47
+  bug): `u_sfc>0 ⇒ τ_x<0` drag, column eastward momentum decreases; (2) interior
+  flux-form conservation of the **wind** advance — note u/v go through CAM's
+  `advance_windm_edsclrm` eddy-diffusion path (`l_predict_upwp_vpwp=F`), NOT the
+  `advance_xm_wpxp` the scalars use, so it needs its own check. The budget closes
+  to **O(Δt)** (not round-off like the scalars) because the surface stress is
+  applied semi-implicitly; verified via Richardson — cutting Δt 10× cuts the
+  residual ~10× (0.28%→0.028%), proving the interior is exact and the surface
+  term is the sole O(Δt) discrepancy (NOT a ρ-vs-ρ_ds weighting error, which
+  would be Δt-independent). codex-reviewed.
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz

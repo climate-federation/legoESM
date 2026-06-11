@@ -468,6 +468,78 @@ def test_prognostic_clubb_conserves_column_heat_no_sfc_flux():
     assert np.all(np.abs(col_dthl) * 150.0 / col_thl < 1e-12)
 
 
+def test_prognostic_clubb_conserves_column_momentum_to_surface_stress():
+    """Momentum budget closure — the third leg of the conservation triad (after
+    column θl and total-water rt).
+
+    Turbulent transport conserves column momentum apart from the surface stress
+    (the top flux is zero), so the mass-weighted column momentum tendency must
+    equal the surface stress:  Σ mass·du/dt = τ_x  (and likewise v ↔ τ_y).
+
+    Two things this checks that the scalar tests can't:
+    1. **Surface-stress SIGN** (a historically-fixed bug), for BOTH components:
+       with u_sfc, v_sfc > 0 the drag stress τ_x, τ_y < 0, and the column loses
+       both eastward and northward momentum (Σ mass·du/dt, Σ mass·dv/dt < 0).
+    2. **Interior flux-form conservation of u/v.** The winds advance via CAM's
+       ``advance_windm_edsclrm`` eddy-diffusion path (``l_predict_upwp_vpwp=F``),
+       NOT the prognostic ``advance_xm_wpxp`` the scalars use — so it needs its
+       own conservation check. The interior transport is flux-form exact; the
+       only non-closure is the surface stress applied semi-implicitly, an
+       **O(Δt)** difference from τ(uⁿ). We verify that explicitly: the budget
+       residual shrinks ~linearly as Δt is cut 10×, which both confirms interior
+       conservation and pins the surface treatment as the sole O(Δt) term (a
+       ρ-vs-ρ_ds weighting error would instead be Δt-independent)."""
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
+    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        compute_surface_fluxes,
+    )
+
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    # Shift v to a clearly positive wind so the v-budget relative residual is
+    # well-conditioned (the default near-zero-mean v has columns with τ_y ≈ 0).
+    kw["v"] = kw["v"] + 5.0
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=150.0, nsteps=40, config=cfg)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
+    mass = np.asarray(rho) * dz
+    carry = pack_clubb_moments(m_f)
+    # Surface stress as clubb_step computes it (explicit, from the current wind).
+    tau_x, tau_y, _, _, _ = compute_surface_fluxes(
+        u_f[:, -1], v_f[:, -1], T_f[:, -1], q_f[:, -1], T_f[:, -1], q_f[:, -1],
+        rho[:, -1], cfg.surface)
+    tau_x = np.asarray(tau_x)
+    tau_y = np.asarray(tau_y)
+
+    def momentum_resid(dt):
+        out, _ = clubb_turbulence_prognostic(  # dt < clubb_dt → n_sub == 1
+            u_f, v_f, T_f, q_f, carry, kw["p_full"], kw["p_half"], kw["z_full"],
+            kw["z_half"], T_f[:, -1], q_f[:, -1], rho, dt, cfg)
+        col_du = np.sum(mass * np.asarray(out.du_dt), axis=1)
+        col_dv = np.sum(mass * np.asarray(out.dv_dt), axis=1)
+        rel_u = np.abs(col_du - tau_x) / np.abs(tau_x)
+        rel_v = np.abs(col_dv - tau_y) / np.abs(tau_y)
+        return rel_u, rel_v, col_du, col_dv
+
+    rel_u_big, rel_v_big, col_du_big, col_dv_big = momentum_resid(150.0)
+    rel_u_small, rel_v_small, _, _ = momentum_resid(15.0)
+    # (1) Surface stress is drag in BOTH components: positive surface wind →
+    # negative stress and the column loses momentum in that direction.
+    assert np.all(u_f[:, -1] > 0.0) and np.all(v_f[:, -1] > 0.0)
+    assert np.all(tau_x < 0.0) and np.all(tau_y < 0.0)
+    assert np.all(col_du_big < 0.0) and np.all(col_dv_big < 0.0)
+    # (2a) Both budgets close to within the O(Δt) surface term at the model step.
+    assert np.all(rel_u_big < 1e-2) and np.all(rel_v_big < 1e-2)
+    # (2b) Cutting Δt 10× cuts both residuals ~10× → interior conservation is
+    # exact, surface treatment is the sole O(Δt) term (Richardson convergence).
+    assert np.all(rel_u_small < rel_u_big / 5.0)
+    assert np.all(rel_v_small < rel_v_big / 5.0)
+
+
 def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
     """Validate the moist-physics CONTRACT that makes prognostic CLUBB's
     variable convention correct.
