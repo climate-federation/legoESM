@@ -75,8 +75,9 @@ def test_no_growth_roundtrip_at_saturation():
     """At S=1 with no curvature the droplet does not grow, so the
     q_c -> R -> q_c reconstruction/inverse must round-trip exactly (dq_c=0).
     A broken reconstruction or inverse would leak a spurious source/sink that
-    the sign/conservation tests cannot see. Includes a cell just above qc_min
-    and a clear cell just below it (radius-floor artifacts)."""
+    the sign/conservation tests cannot see. Includes ultra-thin cells exercising
+    the r_min_reconstruct N_eff closure branch (no cloudy/clear gate — the
+    closure is exactly continuous in q_c)."""
     cfg = SDMConfig(include_curvature=False, include_solute=False)
     T, q_v, hyd, p_full, p_half, rho, dz = _columns(
         S_list=[1.0, 1.0, 1.0],

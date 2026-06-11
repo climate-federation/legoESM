@@ -117,7 +117,7 @@ def sdm_microphysics(
     dt : float
         Physics step [s].
     config : SDMConfig
-        SDM configuration (uses ``cdnc``, ``qc_min``, and the condensation
+        SDM configuration (uses ``cdnc``, ``r_min_reconstruct``, and the condensation
         integrator settings). Static argument.
 
     Returns
@@ -137,15 +137,16 @@ def sdm_microphysics(
     # smaller than r_min_reconstruct (an nm-scale Kelvin-barrier *artifact* of
     # the closure, not physics), hold the droplet at r_min_reconstruct and
     # reduce the effective number instead (N_eff = q_c·ρ/m_min ∝ q_c). The
-    # round trip stays exact (N_eff·m/ρ = q_c in both branches) and the
-    # tendency vanishes continuously as q_c -> 0 (no jump at the qc_min gate).
+    # round trip is exact in both branches (N_eff·m/ρ = q_c, including q_c=0
+    # where N_eff=0), so no cloudy/clear gate is needed at all: the tendency is
+    # exactly continuous, ∝ q_c for thin cloud and identically 0 in clear air.
+    # A supersaturated clear cell still produces nothing (no activation —
+    # documented above).
     cdnc = config.cdnc
     m_min = _FOUR_THIRDS_PI * rho_w * config.r_min_reconstruct**3
     m_drop = q_c * rho / cdnc                       # [kg] per droplet at full cdnc
     N_eff = jnp.where(m_drop >= m_min, cdnc, q_c * rho / m_min)   # [1/m^3]
     R = jnp.cbrt(jnp.maximum(m_drop, m_min) / (_FOUR_THIRDS_PI * rho_w))
-    cloudy = q_c > config.qc_min                    # cells with cloud water
-    R = jnp.where(cloudy, R, config.r_min_reconstruct)
 
     # Saturation ratio S = e/e_sat (vapor-pressure based — NOT q_v/q_sat).
     S = relative_humidity(T, p_full, q_v)
@@ -161,15 +162,14 @@ def sdm_microphysics(
         multiplicity=jnp.ones_like(R),
         radius=R,
         solute_mass=jnp.zeros_like(R),
-        active=jnp.where(cloudy, 1.0, 0.0).astype(_dtype),
+        active=jnp.ones_like(R),
     )
     droplets = integrate_radius(droplets, S, T, dt, config)
     R_new = droplets.radius
 
     # Regrown cloud water (same N_eff closure as the reconstruction, so the
-    # no-growth round trip is exact); clear cells stay clear.
+    # no-growth round trip is exact; clear cells have N_eff = 0 -> stay clear).
     q_c_new = N_eff * _FOUR_THIRDS_PI * rho_w * R_new**3 / rho
-    q_c_new = jnp.where(cloudy, q_c_new, q_c)
 
     dq_c_dt = (q_c_new - q_c) / dt
     # Donor clamps: condensation cannot exceed available vapor, evaporation
