@@ -165,6 +165,13 @@ CLUBB-JAX bit/round-off:
 - **Conservation (iter 50):** `advance_clubb_core` conserves column-integrated
   ρ_ds-weighted thlm/rtm to <1e-9 over 5 steps (zero sfc flux + zero forcing) —
   truth-tier proof the assembly has NO spurious source.
+- **CLUBB sub-cycling (iter 56):** `clubb_turbulence_prognostic` runs CLUBB at
+  `config.clubb_dt` (CAM `clubb_timestep`), sub-cycling `n_sub=ceil(dt/clubb_dt)`
+  sub-steps within the host `dt` and returning the net (raw, unclipped) tendency
+  + sub-cycled moments. n_sub=1 bit-identical to the single step. Codex caught a
+  moisture-contract mismatch (the sub-cycle's q-clip leaked into the host
+  tendency) → fixed to the raw-tendency contract (positivity is the host's job);
+  regression-tested.
 - **Production dispatch (iter 52-53):** `pack/unpack_clubb_moments` +
   `PhysicsState.clubb_moments` carry (gated, gwd_spectrum-style); opt-in
   `CLUBBConfig.prognostic`; `clubb_turbulence_prognostic` (the `(TurbulenceOutput,
