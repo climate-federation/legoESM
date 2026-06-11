@@ -82,8 +82,15 @@ def sample_exponential_mass(
     ``u ∈ (0,1]``; jax uniform is ``[0,1)`` so ``1−U`` gives the identical
     distribution without ``log(0)``).
     """
+    if n_sd < 1:
+        raise ValueError(f"n_sd must be >= 1, got {n_sd}")
+    if not (float(mass_mean) > float(mass_min) >= 0.0):
+        raise ValueError(
+            f"need mass_mean > mass_min >= 0, got mean={mass_mean}, min={mass_min}")
     delta = jnp.asarray(mass_mean, dtype) - jnp.asarray(mass_min, dtype)
     U = random.uniform(key, (n_sd,), dtype=dtype)
+    # log1p(-U) == log(1-U) to roundoff (~1e-15 relative — NOT bit-identical
+    # to the naive form, but more accurate near U=0).
     return jnp.asarray(mass_min, dtype) - delta * jnp.log1p(-U)
 
 
@@ -107,7 +114,19 @@ def sample_lognormal_radius(
     remapped to ``[CDF(r_min), CDF(r_max)]`` when truncation bounds are given
     (the ERF truncated-inverse-CDF construction, with the exact erfinv).
     ``r_mean`` is the *median* (geometric mean) of the distribution.
+    ``geom_std`` must be > 1 (a degenerate σ=0 'log-normal' has no consistent
+    truncated-CDF inverse).
     """
+    if n_sd < 1:
+        raise ValueError(f"n_sd must be >= 1, got {n_sd}")
+    if not float(r_mean) > 0.0:
+        raise ValueError(f"r_mean must be > 0, got {r_mean}")
+    if not float(geom_std) > 1.0:
+        raise ValueError(f"geom_std must be > 1, got {geom_std}")
+    if r_min is not None and not float(r_min) > 0.0:
+        raise ValueError(f"r_min must be > 0, got {r_min}")
+    if r_min is not None and r_max is not None and not float(r_max) > float(r_min):
+        raise ValueError(f"need r_max > r_min, got [{r_min}, {r_max}]")
     r_mean = jnp.asarray(r_mean, dtype)
     sigma = jnp.log(jnp.asarray(geom_std, dtype))
     u = random.uniform(key, (n_sd,), dtype=dtype)
@@ -135,6 +154,8 @@ def exponential_water_droplets(
     ``n_total`` is the number of real droplets represented (count in the box,
     or per kg for a unit parcel); each super-droplet gets ``ξ = n_total/n_sd``.
     """
+    if not float(n_total) >= 0.0:
+        raise ValueError(f"n_total must be >= 0, got {n_total}")
     mass = sample_exponential_mass(key, n_sd, mass_mean, dtype=dtype)
     radius = jnp.cbrt(mass / (_FOUR_THIRDS_PI * constants.rho_water))
     o = jnp.ones((n_sd,), dtype=dtype)
@@ -166,6 +187,13 @@ def lognormal_aerosol_droplets(
     the condensation solver — see the activation-parcel validator — or start
     near-dry and let the first steps relax it).
     """
+    if not float(n_total) >= 0.0:
+        raise ValueError(f"n_total must be >= 0, got {n_total}")
+    if not float(solute_density) > 0.0:
+        raise ValueError(f"solute_density must be > 0, got {solute_density}")
+    if not float(wet_radius_factor) >= 1.0:
+        raise ValueError(
+            f"wet_radius_factor must be >= 1 (wet >= dry), got {wet_radius_factor}")
     r_dry = sample_lognormal_radius(key, n_sd, r_dry_median, geom_std,
                                     r_min=r_min, r_max=r_max, dtype=dtype)
     m_s = _FOUR_THIRDS_PI * solute_density * r_dry**3

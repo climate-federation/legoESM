@@ -41,6 +41,45 @@ def test_lognormal_radius_moments_and_truncation():
     assert r_t.min() >= 2.0e-8 and r_t.max() <= 2.0e-7
 
 
+def test_truncated_lognormal_distribution_shape():
+    """The truncated samples' parent-CDF values must be uniform on
+    [CDF(r_min), CDF(r_max)] — locks the truncated SHAPE, not just the bounds
+    (a wrong remap that merely clips into range would fail this)."""
+    from scipy.special import erf
+    n = 200_000
+    r_med, gstd, r_lo, r_hi = 5.0e-8, 1.8, 2.0e-8, 2.0e-7
+    sig = np.log(gstd)
+    r = np.asarray(sample_lognormal_radius(
+        random.PRNGKey(7), n, r_med, gstd, r_min=r_lo, r_max=r_hi))
+    cdf = 0.5 * (1.0 + erf(np.log(r / r_med) / (sig * np.sqrt(2.0))))
+    lo = 0.5 * (1.0 + erf(np.log(r_lo / r_med) / (sig * np.sqrt(2.0))))
+    hi = 0.5 * (1.0 + erf(np.log(r_hi / r_med) / (sig * np.sqrt(2.0))))
+    u = (cdf - lo) / (hi - lo)        # should be ~ Uniform(0,1)
+    assert u.mean() == pytest.approx(0.5, abs=0.005)
+    assert u.var() == pytest.approx(1.0 / 12.0, rel=0.02)
+
+
+def test_invalid_parameters_raise():
+    k = random.PRNGKey(0)
+    with pytest.raises(ValueError, match="n_sd"):
+        sample_exponential_mass(k, 0, 1e-12)
+    with pytest.raises(ValueError, match="mass_mean > mass_min"):
+        sample_exponential_mass(k, 8, 1e-13, mass_min=2e-13)
+    with pytest.raises(ValueError, match="geom_std"):
+        sample_lognormal_radius(k, 8, 5e-8, 1.0)        # degenerate sigma=0
+    with pytest.raises(ValueError, match="r_mean"):
+        sample_lognormal_radius(k, 8, -1e-8, 1.6)
+    with pytest.raises(ValueError, match="r_max > r_min"):
+        sample_lognormal_radius(k, 8, 5e-8, 1.6, r_min=2e-7, r_max=1e-7)
+    with pytest.raises(ValueError, match="wet_radius_factor"):
+        lognormal_aerosol_droplets(k, 8, 1e7, 5e-8, 1.6, 1770.0,
+                                   wet_radius_factor=0.5)
+    with pytest.raises(ValueError, match="solute_density"):
+        lognormal_aerosol_droplets(k, 8, 1e7, 5e-8, 1.6, -1.0)
+    with pytest.raises(ValueError, match="n_total"):
+        exponential_water_droplets(k, 8, -1.0, 1e-12)
+
+
 def test_samplers_deterministic():
     a = sample_exponential_mass(random.PRNGKey(3), 64, 1e-12)
     b = sample_exponential_mass(random.PRNGKey(3), 64, 1e-12)
