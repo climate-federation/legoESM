@@ -217,6 +217,24 @@ jitted `integrate_clubb_column` for efficient multi-step testing.
   Δt dependence. Confirms correct magnitude + no double-counting (a doubled application
   would give 2×). Codex adversarial review: approve, no findings. (Test-only iteration;
   no production code changed.)
+- **Prescribed MOMENTUM semantics corrected + pinned (iter 78):** investigating a
+  momentum analogue of the iter-77 budget revealed the prescribed momentum BC behaves
+  fundamentally differently from heat/moisture — a Δt-INDEPENDENT non-closure (col_dv≈0
+  for a cross-wind-prescribed stress). Root cause: CAM's `l_imp_sfc_momentum_flux=.true.`
+  wind advance (`advance_windm_edsclrm`/`windm_edsclrm_lhs`) consumes ONLY the stress-
+  vector MAGNITUDE `u_*^2 = sqrt(u'w'_sfc²+v'w'_sfc²)` and re-applies it as an implicit
+  drag ANTIPARALLEL to the near-surface wind — the prescribed AZIMUTH is discarded
+  (confirmed: prescribing `(W,0)` vs `(0,W)` gives bit-identical `du_dt`/`dv_dt`). Heat/
+  moisture, by contrast, enter `advance_xm_wpxp` directly as exact directional flux BCs
+  (iter-77). This is faithful CAM physics (correct for prescribed-`u_*` LES forcing; exact
+  for the bulk drag, which is already wind-antiparallel) — NOT a bug — but the iter-76
+  docstring misleadingly implied directional component prescription. Fixed: corrected the
+  `clubb_step` contract docstring (heat/moisture = exact directional; momentum = magnitude-
+  only wind-opposing drag, azimuth discarded) + added `test_prognostic_clubb_prescribed_
+  momentum_flux_is_magnitude_only_drag` (direction-independence bit-identity, ustar=
+  `(u'w'²+v'w'²)^¼` round-trip, magnitude scaling + drag sign). **Codex [medium] caught a
+  real formula slip** (docstring dropped the sqrt: wrote `u_*²=u'w'²+v'w'²` instead of
+  `sqrt(...)`); fixed both docstrings, re-review approve. No behavior change.
 - **GABLS1 stable-BL — shipped (iter 72):** the correctly-coupled SCM benchmark.
   GABLS1 uses `prescribe="T_s"` (cooling surface temperature) with the bulk
   transfer ACTIVE (`Ch_neutral=1.5e-3`), so the surface heat flux is computed from

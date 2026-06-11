@@ -276,6 +276,22 @@ def clubb_step(
     The reported ``shflx``/``lhflx``/``ustar`` diagnostics are made consistent
     with whichever BC was actually used.
 
+    **Heat/moisture vs momentum semantics differ (important):** ``sfc_wpthlp``/
+    ``sfc_wprtp`` enter ``advance_xm_wpxp`` directly as the scalar surface-flux
+    lower-BC — applied EXACTLY and directionally (a prescribed ``w'thl'_sfc``
+    closes the column θl budget to round-off). The momentum components are NOT
+    applied as an independent ``(u'w', v'w')`` vector: CAM's
+    ``l_imp_sfc_momentum_flux = .true.`` path (``advance_windm_edsclrm``) consumes
+    ONLY the surface-stress-vector MAGNITUDE
+    ``u_*^2 = sqrt(u'w'_sfc^2 + v'w'_sfc^2)`` (so ``u_* = (u'w'_sfc^2 +
+    v'w'_sfc^2)^{1/4}``) and re-applies it implicitly as a drag ANTIPARALLEL to the
+    near-surface wind (``-rho u_*^2 u/|V|``). So ``sfc_upwp``/``sfc_vpwp`` set only
+    the stress magnitude (equivalently a prescribed ``u_*``); their azimuth is discarded —
+    prescribing ``(u'w', 0)`` and ``(0, u'w')`` give identical wind tendencies.
+    This is the correct contract for prescribed-``u_*`` LES forcing and is exact
+    for the bulk drag (which is already wind-antiparallel by construction), but a
+    cross-wind momentum-flux vector cannot be imposed through this interface.
+
     Returns ``(du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diagnostics)`` — the
     four mean tendencies (top-down ``(ncol, nlev)``), the advanced moment state,
     and the ``cloud_frac``/``rcm``/``wpthvp``/``Kh_*`` diagnostics dict.

@@ -1627,5 +1627,64 @@ def test_prognostic_clubb_prescribed_heat_flux_closes_column_budget():
     assert np.all(rel < 1e-9), f"prescribed-heat-flux budget not closed: rel={rel}"
 
 
+def test_prognostic_clubb_prescribed_momentum_flux_is_magnitude_only_drag():
+    """Pin the (CAM-faithful) momentum semantics of the prescribed-flux interface:
+    ``sfc_upwp``/``sfc_vpwp`` set only the surface-stress MAGNITUDE, not a vector.
+
+    Unlike the scalar heat/moisture BCs (applied directionally + exactly via
+    ``advance_xm_wpxp``; see ``..._closes_column_budget``), CAM's
+    ``l_imp_sfc_momentum_flux=.true.`` wind advance (``advance_windm_edsclrm``)
+    consumes only the stress-vector magnitude ``u_*^2 = sqrt(u'w'_sfc^2 +
+    v'w'_sfc^2)`` (so ``u_* = (u'w'_sfc^2 + v'w'_sfc^2)^(1/4)``) and re-applies it
+    as a drag ANTIPARALLEL to the near-surface wind. The prescribed azimuth is
+    discarded.
+    Three discriminating checks:
+      (1) **Direction-independence:** prescribing ``(W, 0)`` and ``(0, W)`` (equal
+          magnitude, orthogonal direction) give BIT-IDENTICAL ``du_dt``/``dv_dt``
+          and identical ``ustar`` — proof that only the magnitude is used.
+      (2) **ustar round-trip:** ``ustar == (u'w'^2 + v'w'^2)^(1/4)``.
+      (3) **Magnitude scaling + drag sign:** a larger ``|tau|`` gives a larger
+          near-surface wind tendency, and the drag opposes the mean wind.
+    """
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
+    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    ncol, nlev = kw["T"].shape
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=150.0, nsteps=40, config=cfg)
+    carry = pack_clubb_moments(m_f)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    zero = jnp.zeros((ncol,))
+
+    def run(uw, vw):
+        out, _ = clubb_turbulence_prognostic(
+            u_f, v_f, T_f, q_f, carry, kw["p_full"], kw["p_half"], kw["z_full"],
+            kw["z_half"], T_f[:, -1], q_f[:, -1], rho, 150.0, cfg,
+            zero, zero, jnp.full((ncol,), uw), jnp.full((ncol,), vw))
+        return out
+
+    W = 0.08
+    out_x = run(-W, 0.0)        # stress along -u
+    out_y = run(0.0, -W)        # stress along -v (same magnitude)
+    out_xy = run(-W, -W)        # larger magnitude (|tau| = sqrt(2)*W)
+
+    # (1) Orthogonal prescribed directions, equal magnitude → identical tendencies.
+    assert np.array_equal(np.asarray(out_x.du_dt), np.asarray(out_y.du_dt))
+    assert np.array_equal(np.asarray(out_x.dv_dt), np.asarray(out_y.dv_dt))
+    assert np.allclose(np.asarray(out_x.ustar), np.asarray(out_y.ustar), rtol=1e-12)
+    # (2) ustar is the fourth root of the prescribed stress-squared magnitude.
+    assert np.allclose(np.asarray(out_x.ustar), W ** 0.5, rtol=1e-6)   # (W^2)^(1/4)
+    # (3) A larger |tau| drags harder, and the drag opposes the (positive-mean) u.
+    assert np.all(np.asarray(out_xy.ustar) > np.asarray(out_x.ustar))
+    assert np.all(np.asarray(u_f)[:, -1] > 0.0)                        # mean u > 0
+    assert np.all(np.asarray(out_x.du_dt)[:, -1] < 0.0)               # drag opposes u
+    assert np.all(np.abs(np.asarray(out_xy.du_dt)[:, -1])
+                  > np.abs(np.asarray(out_x.du_dt)[:, -1]))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
