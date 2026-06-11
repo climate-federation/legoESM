@@ -149,6 +149,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="Simulation length in days (default 30)")
     parser.add_argument("--dt", type=float, default=600.0,
                         help="Time step (default 600 s)")
+    parser.add_argument("--dt-auto", action="store_true", default=False,
+                        help="Use the cross-grid stability-ladder dt for "
+                             "(grid, resolution) instead of --dt "
+                             "(forwarded to run_amip; ladder-safe for "
+                             "long production runs).")
     parser.add_argument("--diag-days", type=int, default=5)
     parser.add_argument("--checkpoint-days", type=int, default=0)
 
@@ -166,17 +171,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--radiation", type=str, default="rrtmg")
     parser.add_argument("--rad-update-steps", type=int, default=6)
     parser.add_argument("--clouds", type=str, default="sundqvist")
-    # Sundqvist microphysics (large-scale condensation) is the canonical
-    # CMIP-physics default — Kessler in the integrated AMIP path produces
-    # NaN winds at day ~2 with current SBM/clouds settings (tracked in
-    # AMIP.md "Known issues"; surfaces in `tests/unit/test_amip_cmip6_deck.py`
-    # follow-ups).
-    parser.add_argument("--microphysics", type=str, default="sundqvist")
+    # Morrison double-moment (M2005/MG) is the production default: the
+    # most faithful + best-validated microphysics in the repo (SAM-oracle
+    # validation in docs/md_files/CRM_faithful_SAM.md; RCEMIP-viable per
+    # the microphysics-RCE campaign) with number-aware r_eff and the
+    # aerosol-CCN coupling.  Sundqvist (the previous default) remains
+    # the fast diagnostic fallback (--microphysics sundqvist).  Kessler
+    # in the integrated AMIP path produces NaN winds at day ~2 with
+    # current SBM/clouds settings (AMIP.md "Known issues").
+    parser.add_argument("--microphysics", type=str, default="morrison")
     parser.add_argument("--convection", type=str, default="sbm")
     parser.add_argument("--turbulence", type=str, default="louis")
     parser.add_argument("--gravity-wave-drag", type=str, default="none")
     parser.add_argument("--diurnal-cycle", action="store_true", default=True)
     parser.add_argument("--no-diurnal-cycle", dest="diurnal_cycle",
+                        action="store_false")
+    # Aerosol-CCN coupling (Andreae 2009 AOD->CCN -> specified Nc) and
+    # zenith-dependent ocean albedo (Briegleb 1992): ON by default for
+    # the production stack; both require/imply their upstream channel
+    # (aerosol external forcing; rrtmg radiation).  Disable for
+    # bit-compat with pre-2026-06 runs.
+    parser.add_argument("--aerosol-ccn", dest="aerosol_ccn",
+                        action="store_true", default=True)
+    parser.add_argument("--no-aerosol-ccn", dest="aerosol_ccn",
+                        action="store_false")
+    parser.add_argument("--dynamic-albedo", dest="dynamic_albedo",
+                        action="store_true", default=True)
+    parser.add_argument("--no-dynamic-albedo", dest="dynamic_albedo",
                         action="store_false")
 
     # Output
@@ -284,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
         # Integration
         "--days", str(args.days),
         "--dt", str(args.dt),
+        *(["--dt-auto"] if args.dt_auto else []),
         "--diag-days", str(args.diag_days),
         "--checkpoint-days", str(args.checkpoint_days),
         # Radiation
@@ -333,6 +355,34 @@ def main(argv: list[str] | None = None) -> int:
             "--aerosol-file", str(files["aerosol"]),
             "--aerosol-reference-aod", "0.05",
         ]
+    # Aerosol-CCN + dynamic albedo run through the coupled physics
+    # pipeline, which only the cubed-sphere / lat-lon paths use — the
+    # MPAS and spectral standalone loops build physics via
+    # ``make_physics`` and do not fill the specified-Nc field or the
+    # pipeline albedo blend (run_amip hard-errors on --aerosol-ccn for
+    # those grids).  Gate on grid path + the upstream requirements so
+    # the default-on flags degrade gracefully.
+    _pipeline_path = (args.grid_type in ("cubed_sphere", "latlon")
+                      and args.discretization not in ("spectral", "mpas"))
+    if (args.aerosol_ccn and aerosol_active
+            and args.microphysics == "morrison" and _pipeline_path):
+        cmd.append("--aerosol-ccn")
+    elif args.aerosol_ccn:
+        print("[deck] NOTE: aerosol-CCN coupling skipped "
+              f"(aerosol_active={aerosol_active}, "
+              f"microphysics={args.microphysics!r}, "
+              f"grid={args.grid_type}/{args.discretization}; needs "
+              "external aerosol + morrison + cubed_sphere/latlon).")
+    # Zenith-dependent ocean albedo: meaningful for spectral radiation
+    # only (gray has no surface SW dependence on albedo blending here).
+    if (args.dynamic_albedo and args.radiation in ("rrtmg", "rrtmgp")
+            and _pipeline_path):
+        cmd.append("--dynamic-albedo")
+    elif args.dynamic_albedo:
+        print("[deck] NOTE: dynamic (zenith) ocean albedo skipped "
+              f"(radiation={args.radiation!r}, "
+              f"grid={args.grid_type}/{args.discretization}; needs "
+              "rrtmg + cubed_sphere/latlon).")
     # ``volcanic_active`` requires ``aerosol_active`` (see top of main()
     # for the rationale): ModelDriver gates volcanic on
     # ``aerosol_forcing == "external"``, so passing
@@ -363,23 +413,16 @@ def main(argv: list[str] | None = None) -> int:
     # the run.  The driver gates GHG/ozone/aerosol on
     # ``cfg.radiation in ("rrtmg", "rrtmgp")``: those channels are
     # configured but inert under ``--radiation gray``.  Surface SST/SIC
-    # and solar TSI affect both gray and RRTMG paths.
+    # affects every path.
     #
-    # Two grid paths bypass the external-forcing pipeline entirely
-    # even when the user has requested rrtmg/rrtmgp:
-    #
-    # * gaussian/spectral routes through ``ModelDriver._run_spectral``,
-    #   which hard-codes gray radiation + constant solar.
-    # * voronoi/mpas routes through ``ModelDriver._run_mpas``, which
-    #   builds the physics via ``make_physics(model_type="mpas", ...)``
-    #   without calling ``_precompute_external_forcing`` and without
-    #   passing ``SegmentForcing`` — the external o3/aerosol/ghg/solar
-    #   configs are *set up* by ``_configure_external_forcing`` but
-    #   never reach the radiation kernel on this grid.
-    #
-    # Without an explicit warning here the deck-driver activity report
-    # would say "ACTIVE" while the run silently ignores those forcings
-    # — the silent-bias case the iter-3/4 codex reviews flagged.
+    # 2026-06-10: the gaussian/spectral and voronoi/mpas paths now run
+    # the SAME unified physics pipeline (RRTMGP + convection +
+    # microphysics + clouds) with external ozone / aerosol / transient
+    # GHG threaded per step through the traced ``forcing`` dict, so
+    # GHG/ozone/aerosol/volcanic are ACTIVE there under rrtmg.  The one
+    # remaining gap on those two paths is the solar FILE (TSI +
+    # 14-band spectral): they integrate with the configured constant
+    # S_0 (annual TSI cycle ~0.1 W/m² is not threaded yet).
     print("[deck] Command:")
     print("  " + " \\\n    ".join(cmd))
     print("[deck] Forcing-channel activity for this run:")
@@ -389,38 +432,19 @@ def main(argv: list[str] | None = None) -> int:
                      and args.discretization == "spectral")
     mpas_path = (args.grid_type == "voronoi"
                  and args.discretization == "mpas")
-    bypassed_path = spectral_path or mpas_path
-    forcing_silently_dropped = rad_active and bypassed_path
-    if forcing_silently_dropped:
-        path_name = ("gaussian/spectral" if spectral_path
-                     else "voronoi/mpas")
-        print(
-            f"[deck] WARNING: {path_name} routes through a code path "
-            "that does NOT consume external CMIP6 forcings even when "
-            "--radiation rrtmg is selected.  GHG / ozone / aerosol / "
-            "volcanic configs are LOADED but the radiation kernel on "
-            "this grid uses an internal default profile.  Use "
-            "cubed_sphere/latlon for production CMIP6 AMIP runs, or "
-            "run with --radiation gray here so the activity report "
-            "below matches what the model actually does."
-        )
-    # Effective active state: a forcing is only ACTIVE if both
-    # rrtmg/rrtmgp is selected AND the grid path actually consumes it.
-    effective_active = rad_active and not bypassed_path
+    effective_active = rad_active
 
     def _flag(b: bool) -> str:
         if b:
             return "ACTIVE"
-        if rad_active and spectral_path:
-            return "inert (spectral path uses gray radiation)"
-        if rad_active and mpas_path:
-            return "inert (MPAS path bypasses external forcing)"
         return "inert (gray radiation)"
 
     if spectral_path:
-        solar_label = "inert (spectral path uses constant S_0)"
+        solar_label = ("inert (spectral path uses constant S_0; "
+                       "solar file not threaded)")
     elif mpas_path:
-        solar_label = "inert (MPAS path uses constant S_0)"
+        solar_label = ("inert (MPAS path uses constant S_0; "
+                       "solar file not threaded)")
     else:
         solar_label = "ACTIVE"
 

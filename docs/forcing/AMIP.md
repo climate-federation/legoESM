@@ -235,7 +235,7 @@ iterations; full details in the iteration log below.  Highlights:
       `cubed_sphere/cdgrid`
     - `latlon/centered`, `latlon/finite_volume`, `latlon/latlon_cgrid`
     - `gaussian/spectral`
-    - `voronoi/mpas` (with `--dt 60` due to a hidden CFL constraint)
+    - `voronoi/mpas` (standard `dt=600` since 2026-06-10: component factory maps the no-choice integrator default to the MPAS dycore ssp_rk54_scan, closing the "hidden CFL" `--dt 60` workaround)
 - ✅ **Forcing channels covered**: SST, SIC, transient GHG (CO₂/CH₄/N₂O/
   CFC-11/CFC-12), ozone (cyclic clim *and* interannual non-cyclic
   branch), solar TSI + 14-band spectral, aerosol AOD (Kinne-style),
