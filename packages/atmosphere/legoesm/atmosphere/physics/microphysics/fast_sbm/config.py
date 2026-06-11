@@ -46,3 +46,7 @@ class FastSBMConfig(NamedTuple):
     # or "golovin" (analytic test kernel, uses golovin_b).
     collision_kernel: str = "hall"
     golovin_b: float = 1.5e3
+    # Static per-step count for per-bin sedimentation (oracle FALFLUXHUCM_Z
+    # adapts NSUB at runtime; a traced trip count is not reverse-mode
+    # differentiable, so the port fixes it).
+    n_fall_substeps: int = 4

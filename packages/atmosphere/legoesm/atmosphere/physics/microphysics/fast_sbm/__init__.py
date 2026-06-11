@@ -18,6 +18,9 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.condensation_driver import
     WarmCondensationResult,
     warm_condensation_step,
 )
+from legoesm.atmosphere.physics.microphysics.fast_sbm.sedimentation import (
+    sediment_bins,
+)
 from legoesm.atmosphere.physics.microphysics.fast_sbm.remap import (
     RemapResult,
     condensation_new_masses,
@@ -69,6 +72,7 @@ __all__ = [
     "WarmCondensationResult",
     "condensation_new_masses",
     "remap_spectrum",
+    "sediment_bins",
     "warm_condensation_step",
     "SupersatStep",
     "integrate_supersaturation",

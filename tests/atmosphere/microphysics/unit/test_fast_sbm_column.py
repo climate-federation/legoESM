@@ -65,16 +65,23 @@ def test_condensation_closure_on_fields():
     T, q_v, hyd, p, p_half, rho, dz = _fields(1.02)
     out = fast_sbm_microphysics(T, q_v, hyd, p, p_half, rho, dz, DT)
     assert out.dT_dt.shape == (NCOL, NLEV)
-    dql = np.asarray(out.dq_c_dt + out.dq_r_dt)
-    assert np.all(dql > 0.0)                       # supersaturated → grows
-    # Vapor/heat closure per cell.
-    np.testing.assert_allclose(np.asarray(out.dq_v_dt), -dql, rtol=1e-10)
+    # Heat closure per cell (condensation only — sedimentation moves
+    # liquid without phase change).
     np.testing.assert_allclose(
         np.asarray(out.dT_dt),
-        (constants.L_v / constants.c_pd) * dql, rtol=1e-10)
-    # Warm-only: ice tendencies identically zero.
+        -(constants.L_v / constants.c_pd) * np.asarray(out.dq_v_dt),
+        rtol=1e-10)
+    # Column water closure: vapor loss = liquid gain + surface precip.
+    col = lambda x: np.asarray(jnp.sum(x * rho * dz, axis=1))
+    np.testing.assert_allclose(
+        -col(out.dq_v_dt),
+        col(out.dq_c_dt + out.dq_r_dt) + np.asarray(out.precipitation),
+        rtol=1e-9)
+    # Supersaturated: net condensation.
+    assert np.all(np.asarray(out.dq_v_dt) < 0.0)
+    # Warm-only: ice tendencies identically zero; precip nonnegative.
     np.testing.assert_array_equal(np.asarray(out.dq_i_dt), 0.0)
-    np.testing.assert_array_equal(np.asarray(out.precipitation), 0.0)
+    assert np.all(np.asarray(out.precipitation) >= 0.0)
 
 
 def test_emergent_autoconversion_dense_vs_thin():
@@ -88,15 +95,18 @@ def test_emergent_autoconversion_dense_vs_thin():
                                      DT, cfg)
     out_dense = fast_sbm_microphysics(T, q_v, hyd_dense, p, p_half, rho,
                                       dz, DT, cfg)
-    rain_thin = float(out_thin.dq_r_dt[0, 0])
-    rain_dense = float(out_dense.dq_r_dt[0, 0])
+    # Rain production = column rain-mass gain + what already precipitated.
+    col = lambda x: float(jnp.sum((x * rho * dz)[0]))
+    rain_thin = col(out_thin.dq_r_dt) + float(out_thin.precipitation[0])
+    rain_dense = col(out_dense.dq_r_dt) + float(out_dense.precipitation[0])
     assert rain_dense > 0.0
     assert rain_dense > 50.0 * max(rain_thin, 0.0) or rain_thin <= 0.0
-    # Coalescence conserves liquid: rain gain ≈ cloud loss at S = 0 ...
-    # (condensation at exactly S=0 contributes ~nothing).
+    # At S = 0 coalescence+settling conserve liquid against precip:
+    # column (dq_c + dq_r) + precip ≈ 0 (condensation contributes ~0).
     np.testing.assert_allclose(
-        float(out_dense.dq_c_dt[0, 0] + out_dense.dq_r_dt[0, 0]),
-        0.0, atol=5.0e-9)
+        col(out_dense.dq_c_dt + out_dense.dq_r_dt)
+        + float(out_dense.precipitation[0]),
+        0.0, atol=5.0e-9 * float(jnp.sum((rho * dz)[0])))
 
 
 def test_clear_cell_fixed_point():

@@ -36,7 +36,7 @@ Process inventory (oracle subroutine → port module → status):
 | Drop nucleation (CCN activation) | `JERNUCL01_KS`, `WATER_NUCLEATION`, `LogNormal_modes_Aerosol` | `fast_sbm/nucleation.py` | todo |
 | Freezing/melting | `FREEZ`, melting block in FAST_SBM | `fast_sbm/ice_phase.py` | todo |
 | Breakup (collisional + spontaneous) | `coll_breakup_KS`, `Spont_Rain_BreakUp` | `fast_sbm/breakup.py` | todo |
-| Sedimentation per bin | fall-speed tables `VR1..VR5` + advection in FAST_SBM | `fast_sbm/sedimentation.py` (reuse `output.sedimentation_tendency`) | todo |
+| Sedimentation per bin | `FALFLUXHUCM_Z` + fall-speed tables `VR1..VR5` | `fast_sbm/sedimentation.py` (REUSES `output.sedimentation_tendency` per bin) | **done (iter 8)** — static substeps (adaptive NSUB not reverse-AD-able); wired into column adapter, precipitation live |
 | Column driver + scheme wiring | `FAST_SBM` subroutine | `fast_sbm/column.py` + `integration.py` dispatch | **switchable `scheme="fast_sbm"` done (iter 7)** — stateless adapter (reconstruct→evolve→project); per-bin prognostic tracers later |
 
 **Lookup-table strategy**: WRF reads tables (`capacity33.asc`, masses,
@@ -236,3 +236,18 @@ EXCLUDED.
   liquid conserved by coalescence 5e-9), clear-cell fixed point, jit+grad
   through the full operator. Ratchets green (2078), microphysics tree 180,
   hydrostatic integration 68.
+
+### Iter 8 (2026-06-11)
+- **`fast_sbm/sedimentation.py`** — oracle `FALFLUXHUCM_Z` per-bin
+  settling, REUSING shared `output.sedimentation_tendency` (same upstream
+  flux divergence; FCT positivity cap) over static `n_fall_substeps`
+  (oracle's adaptive NSUB → config constant; reverse-AD constraint,
+  documented). Wired into column adapter after coalescence: per-bin
+  mixing ratios settle on the (ncol, nlev, nkr) field, surface
+  precipitation now LIVE in `MicrophysicsOutput`.
+- Column tests updated to column-integral closures (vapor loss = liquid
+  gain + precip, 1e-9; heat closure unchanged). Sedimentation tests (5):
+  zero-velocity fixed point, downward-only transport with column+precip
+  invariance 1e-12, bottom-layer precipitation accounting exact,
+  positivity at raw CFL 10.8 (cap roundoff −1e-19 documented),
+  d(precip)/d(V) > 0 finite. 65 fast_sbm tests green.

@@ -22,13 +22,18 @@ the SDM adapter's stateless-reconstruction pattern but resolving a FULL
    above ``KRDROP``), ``dN_c``, ``dN_r``, with ``dT``/``dq_v`` from the
    condensation closure.
 
+After the per-cell physics, per-bin **sedimentation** (oracle
+``FALFLUXHUCM_Z``) settles the spectrum down the column and yields the
+surface precipitation.
+
 **Documented limitations** (same stateless-interface reasons as the SDM
 adapter): no aerosol activation (a supersaturated CLEAR cell stays
-clear), no sedimentation/surface precipitation yet (``precipitation=0``;
-rain stays in the column), no ice (``dq_i/dq_s/dq_g = 0``) — those land
-with the nucleation/sedimentation/ice iterations. Spectrum shape is
-re-imposed each step by reconstruction; the bin-resolved physics acts
-within the step.
+clear) and no ice (``dq_i/dq_s/dq_g = 0``) — those land with the
+nucleation/ice iterations. Spectrum shape is re-imposed each step by
+reconstruction; the bin-resolved physics acts within the step. Fall
+speeds and collision kernels use a fixed warm-cloud reference state
+(the oracle pressure-interpolates its tables; per-level velocities come
+with a later iteration).
 """
 
 from __future__ import annotations
@@ -49,13 +54,18 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.condensation_driver import
 from legoesm.atmosphere.physics.microphysics.fast_sbm.config import FastSBMConfig
 from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import (
     KRDROP,
+    bin_mixing_ratios_from_f,
     discretize_exponential,
     discretize_lognormal,
+    f_from_bin_mixing_ratios,
     mass_density,
     mass_doubling_grid,
     mass_doubling_grid_np,
     number_density,
     radius_from_mass,
+)
+from legoesm.atmosphere.physics.microphysics.fast_sbm.sedimentation import (
+    sediment_bins,
 )
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -83,7 +93,7 @@ __physics_contract__ = {
     "outputs": {
         "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
         "dq_r_dt": "kg/kg/s", "dN_c_dt": "1/m^3/s", "dN_r_dt": "1/m^3/s",
-        "precipitation": "kg/m^2/s (zero until sedimentation lands)",
+        "precipitation": "kg/m^2/s (surface flux from per-bin settling)",
     },
     "sign_convention": (
         "Condensation: dq_c+dq_r>0 with dq_v=-(dq_c+dq_r) and dT_dt="
@@ -183,49 +193,49 @@ def fast_sbm_microphysics(
             f0, T_c, qv_c, p_c, rho_c, dt, masses, config=config)
         g1 = bott_coalescence(g_from_f(cond.f, masses), ck, masses, tables)
         f1 = f_from_g(g1, masses)
-        # Bulk projection across the oracle cloud/rain boundary.
-        def split(f):
-            qc = mass_density(
-                jnp.where(jnp.arange(masses.shape[0]) < cloud_bins, f, 0.0),
-                masses) / rho_c
-            qr = mass_density(
-                jnp.where(jnp.arange(masses.shape[0]) >= cloud_bins, f, 0.0),
-                masses) / rho_c
-            nc = number_density(
-                jnp.where(jnp.arange(masses.shape[0]) < cloud_bins, f, 0.0),
-                masses)
-            nr = number_density(
-                jnp.where(jnp.arange(masses.shape[0]) >= cloud_bins, f, 0.0),
-                masses)
-            return qc, qr, nc, nr
-
-        qc0, qr0, nc0, nr0 = split(f0)
-        qc1, qr1, nc1, nr1 = split(f1)
-        inv_dt = 1.0 / dt
-        return (
-            (cond.T - T_c) * inv_dt,
-            (cond.q_v - qv_c) * inv_dt,
-            (qc1 - qc0) * inv_dt,
-            (qr1 - qr0) * inv_dt,
-            (nc1 - nc0) * inv_dt,
-            (nr1 - nr0) * inv_dt,
-        )
+        return ((cond.T - T_c) / dt, (cond.q_v - qv_c) / dt, f0, f1)
 
     cell_v = jax.vmap(jax.vmap(cell))
-    dT_dt, dqv_dt, dqc_dt, dqr_dt, dnc_dt, dnr_dt = cell_v(
+    dT_dt, dqv_dt, f0, f1 = cell_v(
         T, q_v_pos, q_c, q_r, hydrometeors.N_r, p_full, rho)
+
+    # Sedimentation on the per-bin mixing ratios (oracle FALFLUXHUCM_Z;
+    # couples levels, so it runs on the (ncol, nlev, n_bins) field).
+    v_fall = terminal_velocity_cloud_rain_shima(
+        radius_from_mass(masses), jnp.asarray(1.1), jnp.asarray(9.0e4),
+        jnp.asarray(283.0))
+    q_bins = bin_mixing_ratios_from_f(f1, masses, rho)
+    dq_bins_dt, precip = sediment_bins(
+        q_bins, rho, v_fall, dz, dt, config.n_fall_substeps)
+    f_final = f_from_bin_mixing_ratios(
+        q_bins + dt * dq_bins_dt, masses, rho)
+
+    # Bulk projection across the oracle cloud/rain boundary.
+    bin_is_cloud = jnp.arange(masses.shape[0]) < cloud_bins
+
+    def split(f):
+        f_c = jnp.where(bin_is_cloud, f, 0.0)
+        f_r = jnp.where(~bin_is_cloud, f, 0.0)
+        return (mass_density(f_c, masses) / rho,
+                mass_density(f_r, masses) / rho,
+                number_density(f_c, masses),
+                number_density(f_r, masses))
+
+    qc0, qr0, nc0, nr0 = split(f0)
+    qc1, qr1, nc1, nr1 = split(f_final)
+    inv_dt = 1.0 / dt
 
     zeros = jnp.zeros_like(T)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dqv_dt,
-        dq_c_dt=dqc_dt,
-        dq_r_dt=dqr_dt,
+        dq_c_dt=(qc1 - qc0) * inv_dt,
+        dq_r_dt=(qr1 - qr0) * inv_dt,
         dq_i_dt=zeros,
         dq_s_dt=zeros,
         dq_g_dt=zeros,
-        dN_c_dt=dnc_dt,
-        dN_r_dt=dnr_dt,
+        dN_c_dt=(nc1 - nc0) * inv_dt,
+        dN_r_dt=(nr1 - nr0) * inv_dt,
         dN_i_dt=zeros,
-        precipitation=jnp.zeros(T.shape[0], dtype=T.dtype),
+        precipitation=precip,
     )
