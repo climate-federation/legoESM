@@ -133,8 +133,9 @@ finite gradients in float32 + float64.
   `integrate_clubb_column` (iter 47-48) give the full prognostic path, run+tested
   standalone. ☐ remaining: flip the live dispatch to the prognostic path (after
   the dry-regime instability is bounded) — see iter-50 status block.
-- **P8 validation** 🟡 — multi-step prognostic run + conservation + jit/grad ✅;
-  ☐ idealized BOMEX/DYCOMS sanity + the dry-regime stability resolution.
+- **P8 validation** 🟡 — multi-step prognostic run + conservation + jit/grad +
+  dry-regime stability (host-diffusion fix, iter 51) ✅; ☐ idealized
+  BOMEX/DYCOMS sanity + the production dispatch flip / coupled-run check.
 
 ---
 
@@ -162,30 +163,28 @@ CLUBB-JAX bit/round-off:
   ρ_ds-weighted thlm/rtm to <1e-9 over 5 steps (zero sfc flux + zero forcing) —
   truth-tier proof the assembly has NO spurious source.
 
-**⚠ OPEN ISSUE — dry-regime forced instability (iter 48-50, tracked):** a long
-(~3 h) **near-dry, weakly-stratified** column under sustained surface heating
-grows `wp2` + grid-scale `T` noise. Moist regime stable. Strict `xfail`
-(`test_integrate_clubb_column_dry_stress_stays_physical`); characterizer
-`scripts/validate/clubb_prognostic_stability.py`. Established: **NOT a Courant
-limit** (smaller dt = worse), **NOT a conservation/source bug** (iter-50 test),
-**NOT a per-piece port error** (all terms match CLUBB-JAX). It is a forced-
-response numerical amplification — the standalone SCM driver advances the means
-with CLUBB ALONE (no dycore numerical diffusion to damp 2Δz noise, which a
-coupled run provides) + inherent higher-order-closure stiffness at small N².
-*Next:* either (a) confirm via a CLUBB-JAX reference `advance_clubb_core`
-trajectory on the identical column (≈80-arg signature + module-global carries +
-stats plumbing → big harness), or (b) accept it as a documented stability-
-envelope limit (like any scheme's CFL) since the assembly is proven conservative
-+ faithful. No speculative physics edits (would risk parity-validated terms).
+**✅ RESOLVED — dry-regime instability (iter 48-51).** Root cause CONFIRMED by
+experiment: the standalone SCM driver advances the means with CLUBB ALONE, so it
+exposes grid-scale (2Δz) vertical noise a coupled model's dynamical-core
+numerical diffusion damps. Ruled out: Courant (smaller dt = worse), conservation/
+source bug (iter-50 conservation test), per-piece port error (all terms match
+CLUBB-JAX). FIX (iter 51): `integrate_clubb_column` gains `host_numerical_
+diffusion` (default 0.05) — a CONSERVATIVE flux-form 2nd-order vertical diffusion
+of the carried means (convex combo for nu≤0.5 → conserves column sum + preserves
+positivity); the q_v floor is applied to the CLUBB tendency BEFORE the diffusion
+so no water is created. A tiny nu removes the instability entirely (wp2max
+10.7→0.06). Dry-stress test now PASSES; tests pin the root cause + the diffusion's
+conservation/positivity. Codex-approved. Characterizer
+`scripts/validate/clubb_prognostic_stability.py`.
 
 **Remaining to DONE:**
-- ☐ **Resolve / bound the dry-regime instability** (above) — gating question.
 - ☐ **Production dispatch flip**: persist `CLUBBMomentState` via `PhysicsState`
   + `combined.py` `tagged_fns` `(fn, accepts_ps, field_name="clubb_moments")` +
   restart I/O (mind zm=nlev+1 vs tke-slot nlev), and back `scheme="clubb"` in
   `integration.py` with a `clubb_step`-driven physics_fn (currently the stateless
-  phase-1 `clubb_turbulence` — runnable + tested, but diagnostic, not prognostic).
-  Do this AFTER the instability is bounded (don't ship an unstable live path).
+  phase-1 `clubb_turbulence` — runnable + tested, diagnostic). The coupled model's
+  dycore supplies the numerical diffusion the bare SCM driver needed, so the
+  prognostic path should be stable in production; verify with a short coupled run.
 
 ## CAM-vs-ARM caveats (CLUBB-JAX is ARM-wired; re-check the CAM NAMELIST per module)
 - Namelist OVERRIDES the Fortran flag defaults — always check the namelist.
