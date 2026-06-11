@@ -161,6 +161,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # these tests set jax_enable_x64 before importing the modules under test (a
 # standard JAX-testing idiom), so module-level imports follow that call.
 "tests/unit/test_clubb_*.py" = ["E402", "N802", "N803", "N806"]
+# CLUBB validation/characterization scripts use the same physical symbol names
+# (T for temperature) and set jax_enable_x64 before importing (E402).
+"scripts/validate/clubb_*.py" = ["E402", "N802", "N803", "N806"]
 
 [tool.mypy]
 python_version = "3.11"
