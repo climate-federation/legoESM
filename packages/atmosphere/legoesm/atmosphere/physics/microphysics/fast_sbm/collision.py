@@ -116,10 +116,12 @@ def precompute_collision_tables(masses) -> CollisionTables:
             x0 = m[i] + m[j]
             # On the production doubling grid every source pair lands
             # (x0 <= 2 m_j <= m_top). On FINER log grids the top source
-            # pairs can overflow the grid (x0 > m_top); the oracle never
-            # assigns those (its search just falls through), so they are
-            # skipped here too — coalesced mass beyond the grid top is not
-            # representable and the pair does not interact.
+            # pairs can overflow the grid (x0 > m_top); the oracle's search
+            # falls through WITHOUT assigning, leaving ima/chucm at their
+            # prior (undefined) values — unreachable on its production
+            # grid. The port skips such pairs explicitly (no interaction):
+            # safer than mirroring undefined Fortran state, same result on
+            # every grid the oracle actually runs.
             for k in range(j, n):
                 if k == 0:
                     continue

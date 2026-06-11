@@ -18,9 +18,18 @@ analytically). The supersaturation relaxation integral
 feeds the analytic supersaturation integrator (next module in the chain).
 
 Saturation vapor pressure comes from ``legoesm.thermo`` (repo-wide single
-saturation curve) — NOT a port of the oracle's ``POLYSVP`` polynomial; the
-two agree to <0.5% over cloud temperatures, and model consistency wins
-(CLAUDE.md shared-utilities rule).
+saturation curve) — NOT a port of the oracle's ``A·exp(−B/T)`` exponential
+fit / ``POLYSVP``. Deviation vs the oracle curve (codex-verified): ~+0.1%
+near 273 K but up to ≈3.4% at the 243 K / 310 K extremes, propagating
+proportionally into ``F_D`` and ``B`` there. Model consistency wins
+anyway (CLAUDE.md shared-utilities rule: a re-derived curve diverging from
+the model's own saturation caused false supersaturation in CI before) —
+oracle-fidelity comparisons at cold/hot extremes must account for this.
+
+Other accepted constant deviations from the oracle's CGS values:
+``constants.L_v`` vs the oracle's 2.5e10 erg/g (+0.04%, ~0.08% in F_K) and
+``constants.p_atm_std`` vs PZERO = 101300 Pa (0.025% in D) — both kept on
+repo-wide constants by design.
 
 Differences from ``sdm/condensation.py`` (same Maxwell denominator, shared
 deliberately at the formula level, not by import): SDM works per-particle
@@ -70,6 +79,9 @@ __physics_contract__ = {
     ),
     # Coefficients only — no state update happens in this module.
     "conserves": ["none"],
+    # Differentiable a.e.: the oracle's ventilation branch at Re = 2.5 is a
+    # deliberate ~1% jump and the ventilation_max cap is kinked — gradients
+    # are finite everywhere but not globally smooth across those points.
     "differentiable": True,
     "reference": (
         "Pruppacher & Klett (1997) ch. 13; Khain et al. (2004) JAS 61:2963; "
