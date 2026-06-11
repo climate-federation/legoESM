@@ -529,6 +529,53 @@ def test_prognostic_clubb_runs_in_combined_physics_pipeline():
     assert not np.allclose(np.asarray(phys_state.clubb_moments), moments0)
 
 
+def test_prognostic_clubb_pipeline_multistep_stable():
+    """Production-viability: the prognostic carry stays BOUNDED + finite over many
+    combined-physics steps on a realistic (smooth) cubed-sphere profile — i.e. the
+    moment closure reaches a stable quasi-equilibrium with the column, it does not
+    blow up. Repeated physics calls evolve PhysicsState.clubb_moments while the
+    (smooth) mean state is held fixed."""
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+    from legoesm.core.field import Field
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.held_suarez import held_suarez_init
+
+    n, nlev = 2, 8
+    grid = create_cubed_sphere(n)
+    sigma = create_sigma_coordinate(nlev)
+    state = held_suarez_init(grid, sigma)
+    state = state._replace(tracers={
+        "q_v": Field(5e-3 * jnp.ones((6, n, n, nlev)), name="q_v",
+                     dims=("face", "x", "y", "level"), units="kg/kg")})
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True)),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"))
+    ncol = 6 * n * n
+    phys_state = init_physics_state(ncol, nlev, cfg)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+    step = jax.jit(lambda ps: physics_fn(state, grid, sigma, ps))
+
+    wp2_max_hist = []
+    for _ in range(15):
+        _, phys_state = step(phys_state)
+        cm = np.asarray(phys_state.clubb_moments)
+        assert np.all(np.isfinite(cm))
+        wp2_max_hist.append(float(np.max(cm[:, 4, :])))   # wp2 slot
+    # No blow-up: wp2 stays well-bounded across the run.
+    assert max(wp2_max_hist) < CLUBBConfig().wp2_max
+    # Quasi-equilibrium: the last few steps don't keep growing super-linearly.
+    assert wp2_max_hist[-1] < 5.0 * max(wp2_max_hist[:3] + [1e-3])
+
+
 def test_clubb_turbulence_prognostic_jit_and_grad():
     from legoesm.atmosphere.physics.turbulence.clubb_core import (
         init_clubb_moments,
