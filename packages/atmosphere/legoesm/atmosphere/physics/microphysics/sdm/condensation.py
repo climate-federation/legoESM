@@ -311,6 +311,113 @@ def _integrate_adaptive_rk4(
     return jnp.where(failed, r_sq0, u)
 
 
+def _newton_solve(u_init, rhs, mu, S, T, e_s, N_s,
+                  include_curvature, include_solute,
+                  rtol, atol, stol, maxits):
+    """Scalar Newton solve of ``mu·u − F(u) − rhs = 0`` (ERF ``NewtonSolver``).
+
+    ``F`` is the growth RHS :func:`drsq_dt` and the Newton slope uses the
+    oracle's approximate Jacobian (``mu − rhs_jac``). Exit conditions exactly
+    as ERF: absolute residual ``≤ atol``; relative residual (to the first
+    iterate's) ``≤ rtol``; step size ``|du|/|u| ≤ stol``; non-finite residual
+    or ``u ≤ 0`` fails. Returns ``(u, converged)``.
+    """
+    dtype = u_init.dtype
+
+    def cond(st):
+        u, res0, k, converged, failed = st
+        return (~converged) & (~failed) & (k < maxits)
+
+    def body(st):
+        u, res0, k, converged, failed = st
+        residual = mu * u - (rhs + drsq_dt(u, S, T, e_s, N_s,
+                                           include_curvature, include_solute))
+        res_a = jnp.abs(residual)
+        res0 = jnp.where(k == 0, jnp.where(res_a > 0.0, res_a, 1.0), res0)
+        res_r = res_a / res0
+        conv_now = (res_a <= atol) | (res_r <= rtol)
+        bad = ~jnp.isfinite(res_a)
+
+        slope = mu - drsq_dt_jac(u, T, e_s, N_s,
+                                 include_curvature, include_solute)
+        du = -residual / slope
+        small_step = jnp.abs(du) / jnp.maximum(jnp.abs(u), _R_SQ_FLOOR) <= stol
+        u_next = u + du
+        nonpos = u_next <= 0.0
+
+        # ERF order: convergence checked BEFORE the update; the small-step
+        # exit accepts the pre-update u (treated as converged).
+        u = jnp.where(conv_now | bad | small_step, u, u_next)
+        converged = converged | conv_now | (small_step & ~bad)
+        failed = failed | bad | (~conv_now & ~small_step & nonpos)
+        return (u, res0, k + 1, converged, failed)
+
+    init = (u_init, jnp.ones((), dtype), jnp.zeros((), jnp.int32),
+            jnp.zeros((), jnp.bool_), jnp.zeros((), jnp.bool_))
+    u, _, _, converged, failed = lax.while_loop(cond, body, init)
+    return u, converged & ~failed & (u > 0.0)
+
+
+def _integrate_adaptive_be(
+    r_sq0, t_final, S, T, e_s, N_s,
+    include_curvature, include_solute, cfl, stol, max_steps,
+    newton_rtol, newton_atol, newton_stol, newton_maxits,
+):
+    """ERF ``TI::be`` — adaptive backward Euler with Newton (one droplet).
+
+    Same outer adaptivity as :func:`_integrate_adaptive_rk4` (``dt = cfl/|τ|``,
+    halve on failure, ERF too-small unconverged exit leaving the radius
+    unchanged, steady exit, accepted-step-only cap): each accepted step solves
+    ``u_new/dt − F(u_new) = u/dt`` implicitly. Unconditionally stable for the
+    stiff Köhler terms. NOT reverse-mode differentiable.
+    """
+    dtype = r_sq0.dtype
+    eps_exit = jnp.asarray(1.0e-12, dtype)
+
+    def _dt_from_tau(u, t):
+        tau = jnp.abs(drsq_dt_jac(u, T, e_s, N_s, include_curvature, include_solute))
+        dt_stiff = jnp.where(tau > 0.0, cfl / tau, t_final - t)
+        return jnp.minimum(dt_stiff, t_final - t), tau
+
+    def cond(st):
+        u, t, dt, n, failed, steady = st
+        return (~failed) & (~steady) & (t < t_final) & (n < max_steps)
+
+    def body(st):
+        u, t, dt, n, failed, steady = st
+        mu = 1.0 / jnp.maximum(dt, jnp.asarray(1.0e-300, dtype))
+        u_new, conv = _newton_solve(u, mu * u, mu, S, T, e_s, N_s,
+                                    include_curvature, include_solute,
+                                    newton_rtol, newton_atol, newton_stol,
+                                    newton_maxits)
+        ok = conv & jnp.isfinite(u_new) & (u_new > 0.0)
+
+        snorm = jnp.abs(u_new - u) / jnp.maximum(u, _R_SQ_FLOOR)
+        steady_acc = snorm < stol
+        t_acc = t + dt
+        dt_acc, _ = _dt_from_tau(u_new, t_acc)
+
+        dt_half = 0.5 * dt
+        _, tau_here = _dt_from_tau(u, t)
+        dt_ref = jnp.where(tau_here > 0.0, cfl / tau_here, t_final)
+        too_small = (dt_half < eps_exit * dt_ref) & (dt_half < eps_exit * t_final)
+
+        u = jnp.where(ok, u_new, u)
+        t = jnp.where(ok, t_acc, t)
+        dt = jnp.where(ok, jnp.maximum(dt_acc, 0.0), dt_half)
+        steady = jnp.where(ok, steady_acc, steady)
+        failed = jnp.where(ok, failed, too_small)
+        n = jnp.where(ok, n + 1, n)
+        return (u, t, dt, n, failed, steady)
+
+    dt0, _ = _dt_from_tau(r_sq0, jnp.zeros((), dtype))
+    init = (r_sq0, jnp.zeros((), dtype), dt0,
+            jnp.zeros((), jnp.int32),
+            jnp.zeros((), jnp.bool_), jnp.zeros((), jnp.bool_))
+    u, t, dt, n, failed, steady = lax.while_loop(cond, body, init)
+    return jnp.where(failed, r_sq0, u)
+
+
 def integrate_radius(
     state: SuperDropletState,
     S: jax.Array,
@@ -354,12 +461,12 @@ def integrate_radius(
         step_fn = _rk4_step
     elif cfg.condensation_integrator == "euler":
         step_fn = _euler_step
-    elif cfg.condensation_integrator == "rk4_adaptive":
+    elif cfg.condensation_integrator in ("rk4_adaptive", "be"):
         step_fn = None
     else:
         raise ValueError(
             f"Unknown SDM condensation_integrator: {cfg.condensation_integrator!r} "
-            "(expected 'rk4', 'euler', or 'rk4_adaptive')"
+            "(expected 'rk4', 'euler', 'rk4_adaptive', or 'be')"
         )
 
     n_sub = int(cfg.n_substeps_condensation)
@@ -382,7 +489,7 @@ def integrate_radius(
     include_curvature = cfg.include_curvature
     include_solute = cfg.include_solute
 
-    if cfg.condensation_integrator == "rk4_adaptive":
+    if cfg.condensation_integrator in ("rk4_adaptive", "be"):
         # Per-droplet adaptive integration: broadcast the ambient fields to the
         # droplet axis and vmap the single-droplet while_loop.
         n_sd = state.radius.shape[0]
@@ -393,12 +500,24 @@ def integrate_radius(
         cfl = jnp.asarray(cfg.adaptive_cfl, dtype=dtype)
         stol = jnp.asarray(cfg.adaptive_stol, dtype=dtype)
         max_steps = jnp.asarray(int(cfg.adaptive_max_steps), jnp.int32)
-        r_sq = jax.vmap(
-            lambda u0, s, t, es, ns: _integrate_adaptive_rk4(
-                u0, t_final, s, t, es, ns,
-                include_curvature, include_solute, cfl, stol, max_steps,
-            )
-        )(state.radius**2, S_b, T_b, e_s_b, N_s)
+        if cfg.condensation_integrator == "rk4_adaptive":
+            def _one(u0, s, t, es, ns):
+                return _integrate_adaptive_rk4(
+                    u0, t_final, s, t, es, ns,
+                    include_curvature, include_solute, cfl, stol, max_steps)
+        else:
+            n_rtol = jnp.asarray(cfg.newton_rtol, dtype=dtype)
+            n_atol = jnp.asarray(cfg.newton_atol, dtype=dtype)
+            n_stol = jnp.asarray(cfg.newton_stol, dtype=dtype)
+            n_maxits = jnp.asarray(int(cfg.newton_maxits), jnp.int32)
+
+            def _one(u0, s, t, es, ns):
+                return _integrate_adaptive_be(
+                    u0, t_final, s, t, es, ns,
+                    include_curvature, include_solute, cfl, stol, max_steps,
+                    n_rtol, n_atol, n_stol, n_maxits)
+
+        r_sq = jax.vmap(_one)(state.radius**2, S_b, T_b, e_s_b, N_s)
     else:
         h = jnp.asarray(dt, dtype=dtype) / n_sub
 

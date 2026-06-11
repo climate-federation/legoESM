@@ -27,10 +27,13 @@ class SDMConfig(NamedTuple):
     condensation_integrator : str
         ODE integrator for droplet growth: ``"rk4"`` (4th-order Runge-Kutta,
         default), ``"euler"`` (forward Euler) — both fixed-substep and
-        reverse-mode differentiable — or ``"rk4_adaptive"`` (the ERF
-        stiffness-based integrator: per-droplet ``dt = cfl/|τ|``,
-        stage-positivity step-halving, unconverged/steady exits; NOT
-        reverse-mode differentiable). Unknown values raise.
+        reverse-mode differentiable — ``"rk4_adaptive"`` (the ERF
+        stiffness-based explicit integrator: per-droplet ``dt = cfl/|τ|``,
+        stage-positivity step-halving, unconverged/steady exits), or ``"be"``
+        (the ERF implicit backward Euler with the same adaptive outer loop
+        and a Newton inner solve — unconditionally stable for the stiff
+        Köhler terms). The adaptive integrators are NOT reverse-mode
+        differentiable. Unknown values raise.
     adaptive_cfl : float
         Stiffness CFL of the adaptive integrator: ``dt = adaptive_cfl/|τ|``
         with ``τ`` the growth-ODE Jacobian (ERF ``mass_change_cfl``).
@@ -42,6 +45,12 @@ class SDMConfig(NamedTuple):
         halvings do not consume the budget — they are bounded by the
         too-small exit). Hitting the cap returns the partially integrated
         radius, exactly as ERF does.
+    newton_rtol, newton_atol, newton_stol : float
+        Newton-solver tolerances for the implicit ``"be"`` integrator
+        (relative/absolute residual, step-size exit — ERF
+        ``m_newton_{rtol,atol,stol}``).
+    newton_maxits : int
+        Newton iteration cap (ERF ``m_newton_maxits``).
     include_curvature : bool
         Include the Kelvin curvature term (raises equilibrium vapor pressure
         over a curved surface). True is the physically complete Köhler growth.
@@ -93,6 +102,10 @@ class SDMConfig(NamedTuple):
     adaptive_cfl: float = 1.0             # [-] dt = cfl/|tau| (ERF mass_change_cfl)
     adaptive_stol: float = 1.0e-6         # [-] steady-state exit (ERF stol)
     adaptive_max_steps: int = 100         # [-] accepted-step cap (ERF max_steps)
+    newton_rtol: float = 1.0e-8           # [-] Newton relative-residual exit
+    newton_atol: float = 1.0e-40          # [m^2/s] Newton absolute-residual exit
+    newton_stol: float = 1.0e-10          # [-] Newton step-size exit
+    newton_maxits: int = 30               # [-] Newton iteration cap
     include_curvature: bool = True
     include_solute: bool = True
     solute_ionization: float = 2.0        # van't Hoff i for NaCl

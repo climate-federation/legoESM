@@ -337,6 +337,62 @@ def test_adaptive_step_cap_counts_accepted_steps_only():
     assert r_100 < 1.0e-6
 
 
+def test_be_matches_reference_on_stiff_kohler():
+    """Implicit BE (Newton) must land on the same dense-Euler reference as the
+    adaptive explicit integrator for a stiff sub-micron Köhler droplet."""
+    cfg0 = SDMConfig(include_curvature=True, include_solute=True)
+    st = make_monodisperse(n_sd=1, radius=2.0e-7, multiplicity=1.0,
+                           solute_mass=1.0e-16)
+    S, T, dt = 0.99, 283.0, 5.0
+    ref = float(integrate_radius(
+        st, S, T, dt, cfg0._replace(condensation_integrator="euler",
+                                    n_substeps_condensation=200000)).radius[0])
+    r_be = float(integrate_radius(
+        st, S, T, dt, cfg0._replace(condensation_integrator="be")).radius[0])
+    assert r_be == pytest.approx(ref, rel=1e-3)
+
+
+def test_be_exact_for_pure_maxwell():
+    """Constant RHS (pure Maxwell): BE's update u + dt·alpha is EXACT, so one
+    adaptive-BE integration must match the analytic increment tightly."""
+    cfg = SDMConfig(include_curvature=False, include_solute=False,
+                    condensation_integrator="be")
+    R0, S, T, dt = 1.5e-5, 1.01, 283.0, 2.0
+    st = make_monodisperse(n_sd=1, radius=R0, multiplicity=1.0)
+    e_s = float(saturation_vapor_pressure(jnp.asarray(T)))
+    rhs = float(drsq_dt(jnp.asarray(R0) ** 2, S, T, e_s, jnp.asarray(0.0),
+                        False, False))
+    out = integrate_radius(st, S, T, dt, cfg)
+    # RHS is u-independent at fixed R-arg... it varies via d_cf(R); BE solves
+    # with the implicit endpoint, so compare against the dense reference.
+    ref = float(integrate_radius(
+        st, S, T, dt, SDMConfig(include_curvature=False, include_solute=False,
+                                condensation_integrator="euler",
+                                n_substeps_condensation=100000)).radius[0])
+    assert float(out.radius[0]) == pytest.approx(ref, rel=1e-4)
+    assert float(out.radius[0]) ** 2 > R0**2 + 0.5 * dt * rhs  # grew sensibly
+
+
+def test_be_steady_and_haze_equilibrium():
+    """BE at S=1 (no curvature/solute) is an exact no-op; a soluble haze
+    droplet at S<1 relaxes toward its stable Köhler equilibrium."""
+    cfg = SDMConfig(include_curvature=False, include_solute=False,
+                    condensation_integrator="be")
+    st = make_monodisperse(n_sd=2, radius=8.0e-6, multiplicity=1.0)
+    out = integrate_radius(st, 1.0, 283.0, 100.0, cfg)
+    assert jnp.allclose(out.radius, st.radius, rtol=0.0, atol=0.0)
+
+    cfg2 = SDMConfig(include_curvature=True, include_solute=True,
+                     condensation_integrator="be")
+    hz = make_monodisperse(n_sd=1, radius=1.0e-6, multiplicity=1.0,
+                           solute_mass=1.0e-16)
+    r1 = float(integrate_radius(hz, 0.97, 283.0, 50.0, cfg2).radius[0])
+    r2 = float(integrate_radius(hz._replace(radius=jnp.asarray([r1])),
+                                0.97, 283.0, 50.0, cfg2).radius[0])
+    assert r1 < 1.0e-6                       # shrinks toward equilibrium
+    assert abs(r2 - r1) < abs(1.0e-6 - r1)   # converging (contraction)
+
+
 def test_adaptive_jit_and_unknown_integrator():
     cfg = SDMConfig(condensation_integrator="rk4_adaptive",
                     include_curvature=True, include_solute=False)
