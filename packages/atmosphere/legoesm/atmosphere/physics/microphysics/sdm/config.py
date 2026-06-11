@@ -38,9 +38,10 @@ class SDMConfig(NamedTuple):
         Steady-state exit tolerance on the relative R² update per step
         (ERF's ``stol = 1e-6``).
     adaptive_max_steps : int
-        Iteration cap for the adaptive loop, counting accepted steps AND
-        halvings (ERF caps accepted steps at 100; halvings are additionally
-        bounded by the too-small exit).
+        Cap on ACCEPTED steps of the adaptive loop (ERF ``max_steps = 100``;
+        halvings do not consume the budget — they are bounded by the
+        too-small exit). Hitting the cap returns the partially integrated
+        radius, exactly as ERF does.
     include_curvature : bool
         Include the Kelvin curvature term (raises equilibrium vapor pressure
         over a curved surface). True is the physically complete Köhler growth.
@@ -91,7 +92,7 @@ class SDMConfig(NamedTuple):
     condensation_integrator: str = "rk4"
     adaptive_cfl: float = 1.0             # [-] dt = cfl/|tau| (ERF mass_change_cfl)
     adaptive_stol: float = 1.0e-6         # [-] steady-state exit (ERF stol)
-    adaptive_max_steps: int = 200         # [-] accepted steps + halvings cap
+    adaptive_max_steps: int = 100         # [-] accepted-step cap (ERF max_steps)
     include_curvature: bool = True
     include_solute: bool = True
     solute_ionization: float = 2.0        # van't Hoff i for NaCl

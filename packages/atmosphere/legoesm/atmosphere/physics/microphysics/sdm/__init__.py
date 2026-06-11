@@ -10,7 +10,9 @@ each a computational particle carrying a multiplicity ``ξ`` (the number of
 identical real droplets it stands for). The processes are:
 
 * **condensation/evaporation** — diffusional growth of each droplet
-  (``condensation.py``); differentiable.
+  (``condensation.py``); differentiable with the default fixed-substep
+  integrators (the opt-in ERF adaptive ``rk4_adaptive`` mode is jit-only,
+  not reverse-mode differentiable).
 * **collision-coalescence** — Shima's Monte-Carlo algorithm
   (``coalescence.py``); stochastic, pure function of an explicit PRNG key, not
   differentiable.

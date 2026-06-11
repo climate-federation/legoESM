@@ -53,7 +53,10 @@ __physics_contract__ = {
     "summary": (
         "Super-droplet diffusional growth: vapor-diffusion (Maxwell-Mason) "
         "condensation/evaporation with Kelvin curvature and Raoult solute "
-        "(Köhler) terms and a Knudsen diffusivity correction."
+        "(Köhler) terms and a Knudsen diffusivity correction. The "
+        "differentiable=True claim covers the default fixed-substep "
+        "rk4/euler integrators; the opt-in rk4_adaptive mode (lax.while_loop) "
+        "is jit-compatible but NOT reverse-mode differentiable."
     ),
     "inputs": {
         "radius": "m",
@@ -241,13 +244,16 @@ def _integrate_adaptive_rk4(
     * the ERF too-small exit (``dt < 1e-12·cfl/|τ|`` AND ``dt < 1e-12·t_final``)
       marks the droplet *unconverged*: its radius is left UNCHANGED (ERF skips
       the particle update for unconverged droplets);
-    * steady-state exit when ``snorm = |u_new-u|/u < stol``.
+    * steady-state exit when ``snorm = |u_new-u|/u < stol``;
+    * the step cap counts ACCEPTED steps only (ERF ``n_step``); halvings are
+      bounded by the too-small exit (geometric halving terminates in ~40
+      rejections). Hitting the cap with ``t < t_final`` returns the partially
+      integrated radius — exactly what ERF does (``a_success`` stays true at
+      the cap); with the default cap of 100 accepted steps this is rare.
 
     Implemented as a single ``lax.while_loop`` whose iterations are either an
-    accepted step or one halving (ERF's unbounded inner halving loop is folded
-    into the outer loop; the too-small exit bounds it). NOT reverse-mode
-    differentiable (``while_loop``) — use the fixed-substep integrators for
-    gradient work.
+    accepted step or one halving. NOT reverse-mode differentiable
+    (``while_loop``) — use the fixed-substep integrators for gradient work.
     """
     dtype = r_sq0.dtype
     eps_exit = jnp.asarray(1.0e-12, dtype)
@@ -259,6 +265,8 @@ def _integrate_adaptive_rk4(
 
     def cond(st):
         u, t, dt, n, failed, steady = st
+        # n counts ACCEPTED steps only (ERF's n_step) — halvings are bounded
+        # by the too-small exit, exactly as the oracle's unbounded inner loop.
         return (~failed) & (~steady) & (t < t_final) & (n < max_steps)
 
     def body(st):
@@ -291,7 +299,8 @@ def _integrate_adaptive_rk4(
         dt = jnp.where(ok, jnp.maximum(dt_acc, 0.0), dt_half)
         steady = jnp.where(ok, steady_acc, steady)
         failed = jnp.where(ok, failed, too_small)
-        return (u, t, dt, n + 1, failed, steady)
+        n = jnp.where(ok, n + 1, n)   # accepted steps only, like ERF n_step
+        return (u, t, dt, n, failed, steady)
 
     dt0, _ = _dt_from_tau(r_sq0, jnp.zeros((), dtype))
     init = (r_sq0, jnp.zeros((), dtype), dt0,

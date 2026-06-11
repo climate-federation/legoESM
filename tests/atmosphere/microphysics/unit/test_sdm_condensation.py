@@ -317,6 +317,26 @@ def test_adaptive_steady_state_exit_at_saturation():
     assert jnp.allclose(out.radius, st.radius, rtol=0.0, atol=0.0)
 
 
+def test_adaptive_step_cap_counts_accepted_steps_only():
+    """An evaporating solute droplet takes early REJECTED (halved) attempts
+    before settling toward its Köhler equilibrium. Halvings must not consume
+    the accepted-step budget (ERF n_step counts accepted only): the default
+    cap of 100 must give the same converged answer as a huge cap. Before the
+    fix, halvings burned the budget and a low cap silently truncated."""
+    cfg0 = SDMConfig(include_curvature=True, include_solute=True,
+                     condensation_integrator="rk4_adaptive")
+    st = make_monodisperse(n_sd=1, radius=1.0e-6, multiplicity=1.0,
+                           solute_mass=1.0e-16)
+    S, T, dt = 0.97, 283.0, 50.0
+    r_100 = float(integrate_radius(
+        st, S, T, dt, cfg0._replace(adaptive_max_steps=100)).radius[0])
+    r_big = float(integrate_radius(
+        st, S, T, dt, cfg0._replace(adaptive_max_steps=10000)).radius[0])
+    assert r_100 == pytest.approx(r_big, rel=1e-12, abs=0.0)
+    # and it actually moved toward the haze equilibrium (shrank)
+    assert r_100 < 1.0e-6
+
+
 def test_adaptive_jit_and_unknown_integrator():
     cfg = SDMConfig(condensation_integrator="rk4_adaptive",
                     include_curvature=True, include_solute=False)
