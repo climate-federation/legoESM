@@ -142,6 +142,30 @@ ACC_TKE_CONFIG = TKEConfig(
     # convects: the buoyancy length blows up over unstable columns and K_M
     # saturates toward kappaM_max.
     n2_mode="adiabatic",
+    # Veros vertical-metric slots (the TKE metric-consistency fix,
+    # .physics-validator/accbasic_regression/): adiabatic N² over dzw (the
+    # u_centered dz_half, thermodynamics.py:99), buoyancy-length growth
+    # allowance + TKE-diffusion face gradients over dzt with dzw control
+    # volumes (tke.py:54-65,185-222), surface injection over 0.5·dzw_top
+    # (tke.py:225). Without this the chain mixes midpoint/dzw/dzt slots
+    # and — on the u_centered z-coordinate below — equilibrates onto a
+    # spurious deep-TKE branch (mean TKE ~1e-2 vs Veros's ~1e-4 class,
+    # ACC_Basic KE 0.98→0.77).
+    veros_dz_slots=True,
+    # Veros TKE positivity (tke.py:224-245): the buoyancy sink P_diss_v =
+    # kappaH·N² is EXPLICIT in forc, interior TKE may go NEGATIVE (an
+    # energy debt — Veros's 10-yr mean TKE is literally negative,
+    # -1.5e-3), and only the surface level is clamped at zero. The legacy
+    # per-step background floor erases the interior debt every step — a
+    # spurious energy injection that (with the metric slots fixed) was
+    # still feeding a ~1e-2 deep TKE reservoir on the u_centered
+    # coordinate (.physics-validator/tke_metric_fix/ re-ablation).
+    positivity="veros_surface_correction",
+    # Veros K-from-TKE amplitude (tke.py:73): kappaM = c_k·mxl·sqrt(max(0,e)).
+    # The legacy Gaspar form c_k·l_k·√(2e) double-counts the √2 already
+    # inside the Veros buoyancy length (mxl = √2·√e/√N̄) — K_M/K_H/P_s
+    # ×1.414 vs the oracle wherever the caps/floors don't bind.
+    kappa_convention="veros_sqrte",
     # Veros tracer diffusivity K_H = max(kappaH_min, K_M/Prandtl) with the
     # Richardson-dependent Prandtl number (enable_Prandtl_tke=True, the Veros
     # ACC + global default): Pr = max(1, min(10, 6.6*Ri)). In the stratified
@@ -172,6 +196,21 @@ ACC_TKE_CONFIG = TKEConfig(
     # (non-conservative advection) and P_diss_nonlin (cabbeling / non-linear EOS).
     source_eke_diss=True,
     source_bottom_drag_diss=True,
+    # ----- Veros step order: TKE charges the POST-MIXING stratification -----
+    # Veros solves the TKE budget AFTER the implicit T/S vertical mixing
+    # (veros.py:263-285): the kappa profiles consumed by the TRACER solve come
+    # from the PREVIOUS step's TKE (set_tke_diffusivities at tau), and the TKE
+    # forcing charges P_diss_v = kappaH·Nsqr[taup1] — the stratification the
+    # implicit solve has ALREADY stabilised (thermodynamics.py:385) — plus the
+    # surface buoyancy-flux P_diss_v slot (386-388). legoESM's legacy ordering
+    # charged the PRE-mixing N² (the full instability every step) — the
+    # identified dominant ACC_Basic residual after the metric-slot fixes
+    # (.physics-validator/tke_metric_fix/).
+    buoyancy_timing="post_mixing_veros",
+    # Veros K_diss_v is the REALIZED implicit-friction dissipation
+    # κ·(∂u_new/∂z)·(∂u_old/∂z) (friction.py:131-151), not the pre-solve
+    # parameterised K_M·S² (audited at ~6.1× the realized form).
+    shear_production="realized_veros",
 )
 
 # Veros GM/Redi knobs (verbatim from ACCSetup)
@@ -191,6 +230,14 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
     #                              the explicit F_z (the tier-2 dtemp_iso residual).
     K_iso_steep=500.0,           # ↔ Veros K_iso_steep (acc.py:41): horizontal-
     #                              diffusion floor on K_11/K_22 at steep slopes.
+    veros_triad_weights=True,    # ↔ Veros dzw(pair)/(4·dzt) triad weights with no
+    #                              boundary renormalization (see GMRediConfig doc).
+    double_redi_diagonal=True,   # ↔ Veros adds the precomputed K_11/K_22 diagonal
+    #                              in BOTH the iso and skew passes (diffusion.py:
+    #                              40-47 + thermodynamics.py:430-437; acc.py runs
+    #                              enable_neutral_diffusion AND enable_skew_
+    #                              diffusion) — the oracle's 2× horizontal
+    #                              diagonal (see the GMRediConfig field doc).
     slope_density="neutral",     # ↔ Veros isoneutral.py:40-41: build the slopes
     #                              from the LOCALLY-REFERENCED neutral density
     #                              gradient ∂ρ/∂T·∇T+∂ρ/∂S·∇S (get_drhodT/get_drhodS
@@ -256,7 +303,11 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
                   # discretization); the faithful dynamic-enthalpy form
                   # yields a small spurious +3.2e9 W source instead. Built,
                   # tested, gated -- see the EKE-budget probe verdict.
-                  n2_mode="adiabatic"),
+                  n2_mode="adiabatic",
+                  # Veros dzw slot for the adiabatic-N² divisor (the
+                  # deferred EKE-side twin of TKE veros_dz_slots; the
+                  # u_centered dz_half_ref IS Veros's dzw here).
+                  n2_over_dzw=True),
 )
 
 # Surface restoring timescale
@@ -344,9 +395,18 @@ def build_acc_z_coord() -> OceanZStarCoordinate:
         jnp.zeros(1, dtype=dz_ref.dtype),
         -jnp.cumsum(dz_ref),
     ])
-    # z_full_ref: cell centres
-    z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
-    # dz_half_ref: distance between adjacent cell centres
+    # z_full_ref: cell centres — Veros's u_centered_grid recursion, NOT
+    # midpoints (the ACC ddz/2.5 is stretched, so the two differ by up to
+    # 10 m and dz_half_ref — the vertical-gradient / implicit-solve metric —
+    # alternates around the midpoint value exactly as Veros's dzw does; see
+    # veros_u_centered_z_centres).  Interfaces above are identical either way.
+    from legoesm.ocean.fidelity.veros_state_bridge import (
+        veros_u_centered_z_centres,
+    )
+    z_full_ref = jnp.asarray(
+        veros_u_centered_z_centres(np.asarray(dz_ref)), dtype=dz_ref.dtype)
+    # dz_half_ref: distance between adjacent cell centres (== Veros dzw
+    # interior, z-flipped)
     dz_half_ref = jnp.abs(z_full_ref[:-1] - z_full_ref[1:])
 
     return OceanZStarCoordinate(

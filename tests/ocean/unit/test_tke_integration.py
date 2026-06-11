@@ -143,7 +143,10 @@ def test_model_construction_with_tke():
     z_coord = create_ocean_z_star(n_levels=8, H_max=4000.0)
     physics = OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="tke", tke=TKEConfig()),
-        lateral_mixing=LateralMixingConfig(scheme="harmonic"),
+        # 'harmonic' physics lateral mixing is rejected on the lat-lon
+        # C-grid (horizontal viscosity goes via config.A_h); 'none' keeps
+        # this test about the TKE wiring it actually exercises.
+        lateral_mixing=LateralMixingConfig(scheme="none"),
         surface_forcing=SurfaceForcingConfig(scheme="none"),
         bottom_drag=BottomDragConfig(scheme="none"),
         convection=OceanConvectionConfig(scheme="none"),

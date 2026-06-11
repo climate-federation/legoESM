@@ -165,6 +165,7 @@ def compute_visbeck_kappa_gm(
     sigma_bar, L, wet_col, _int_N_dz, _sigma_local = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg, rho_ref,
         n2_mode=getattr(cfg, "n2_mode", "insitu"),
+        n2_over_dzw=getattr(cfg, "n2_over_dzw", False),
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
     )
     # Apply the wet-column mask AFTER clipping — otherwise dry columns
@@ -186,6 +187,7 @@ def _eady_growth_and_length(
     rho_ref: float = _RHO_0_DEFAULT,
     *,
     n2_mode: str = "insitu",
+    n2_over_dzw: bool = False,
     T: jnp.ndarray | None = None,
     S: jnp.ndarray | None = None,
     p_cell: jnp.ndarray | None = None,
@@ -237,9 +239,22 @@ def _eady_growth_and_length(
                 "p_cell (cell-centre pressure [Pa]) and eos_fn to displace "
                 "parcels through the EOS; one or more was None."
             )
+        # ``n2_over_dzw`` (EKEConfig/VisbeckConfig opt-in): divide the
+        # adiabatic density contrast by the ACTUAL centre spacing
+        # ``dz_half_ref·J`` — the Veros ``dzw`` slot (thermodynamics.py:99) —
+        # instead of the midpoint reconstruction. On a Veros u_centered
+        # coordinate the two differ by up to ±50% per level (the same slot
+        # fixed for the TKE chain by ``TKEConfig.veros_dz_slots``; the
+        # EKE-side slot was the deferred remainder of that batch). Default
+        # False ⇒ BIT-IDENTICAL legacy. Only the N² divisor changes: the
+        # column-reduction weights (``dz_half`` above) keep the legacy
+        # midpoint metric, exactly like the TKE fix's scoping.
+        _dzw = (z_coord.dz_half_ref * jacobian[..., jnp.newaxis]
+                if n2_over_dzw else None)
         N2 = compute_buoyancy_frequency_adiabatic(
             T, S, p_cell, z_coord.dz_ref, jacobian,
             eos_fn=eos_fn, rho_ref=rho_ref, g=constants.g,
+            dz_half=_dzw,
         )
     else:
         raise ValueError(
@@ -295,6 +310,65 @@ def _eady_growth_and_length(
     return sigma_bar, L, wet_col, int_N_dz, sigma
 
 
+def compute_geometric_column_integrals(
+    rho: jnp.ndarray,
+    S_x: jnp.ndarray,
+    S_y: jnp.ndarray,
+    z_coord: OceanZStarCoordinate,
+    jacobian: jnp.ndarray,
+    f_coriolis: jnp.ndarray,
+    visbeck_cfg,
+    rho_ref: float = _RHO_0_DEFAULT,
+    *,
+    n2_mode: str = "insitu",
+    n2_over_dzw: bool = False,
+    T: jnp.ndarray | None = None,
+    S: jnp.ndarray | None = None,
+    p_cell: jnp.ndarray | None = None,
+    eos_fn=None,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Column integrals for the GEOMETRIC EKE closure (Torres et al. 2025,
+    JAMES, doi:10.1029/2025MS005394), from the SHARED Eady machinery — no
+    duplicate N²/slope numerics.
+
+    With the local Eady rate ``sigma(z) = N|S|`` at the interior interfaces
+    (the SAME tapered/clipped slopes + N the GM/Redi tendency uses — the
+    paper likewise builds ``M⁴/N²`` "from the isoneutral slopes already
+    computed by the model", Eq. 2, p. 4; the slope bound/taper here is the
+    GM/Redi config's S_max/DM95 machinery rather than NEMO's hard 1/100 +
+    mixed-layer ramp — the model's canonical slope treatment):
+
+        int_sigma2_dz = ∫(N|S|)² dz = ∫M⁴/N² dz   [m/s²]  (B_C integrand,
+                                                            Eq. 2)
+        int_sigma_dz  = ∫ N|S|  dz  = ∫M²/N  dz   [m/s]   (kappa_gm
+                                                            denominator, Eq. 6)
+        int_N_dz      = ∫N dz                     [m/s]   (R_d, Appendix D)
+        H_col         = Σ dz                      [m]     (column depth)
+
+    plus the wet-column mask.  The interface measure is the SAME ``dz_half``
+    weight ``_eady_growth_and_length`` uses for its column averages, so
+    ``int_sigma_dz`` is numerically consistent with ``sigma_bar·Σdz_half``.
+    All outputs are zeroed on dry columns (NaN-free, like the Eady outputs).
+
+    Returns ``(int_sigma2_dz, int_sigma_dz, int_N_dz, H_col, wet_col)``.
+    """
+    _sigma_bar, _L, wet_col, int_N_dz, sigma = _eady_growth_and_length(
+        rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref,
+        n2_mode=n2_mode, n2_over_dzw=n2_over_dzw,
+        T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
+    )
+    # Interface thickness weights — the same metric assembly as
+    # _eady_growth_and_length (dz at centres from the z* Jacobian; half-sums
+    # at the interior interfaces).
+    dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
+    dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
+    int_sigma_dz = jnp.where(wet_col, jnp.sum(sigma * dz_half, axis=-1), 0.0)
+    int_sigma2_dz = jnp.where(
+        wet_col, jnp.sum(sigma ** 2 * dz_half, axis=-1), 0.0)
+    H_col = jnp.sum(dz_actual, axis=-1)
+    return int_sigma2_dz, int_sigma_dz, int_N_dz, H_col, wet_col
+
+
 def compute_eke_kappa_gm(
     E: jnp.ndarray,
     rho: jnp.ndarray,
@@ -348,6 +422,7 @@ def compute_eke_kappa_gm(
     sigma_bar, L_rossby, wet_col, int_N_dz, sigma_local = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref,
         n2_mode=getattr(eke_cfg, "n2_mode", "insitu"),
+        n2_over_dzw=getattr(eke_cfg, "n2_over_dzw", False),
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
     )
     scheme = eke_cfg.mixing_length_scheme

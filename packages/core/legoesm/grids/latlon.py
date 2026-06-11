@@ -22,6 +22,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
 
@@ -310,6 +311,55 @@ def build_uniform_latlon_grid_from_axes(
     )
 
 
+def _regional_lon_axis(
+    n_lon: int,
+    lon_west: float,
+    lon_east: float,
+    periodic_x: bool,
+):
+    """Longitude axis shared by the regional / stretched lat-lon builders.
+
+    Returns ``(lon, dlon, nx)`` with *lon* the cell-centre longitudes
+    [rad].  ``periodic_x=True``: ``nx = n_lon`` cells spanning
+    ``[lon_west, lon_east)`` (channel, no E/W walls).
+    ``periodic_x=False``: ``nx = n_lon + 2`` with one wall column added
+    on each side (closed basin).  Factored out of
+    :func:`create_regional_latlon_grid` so that
+    :func:`create_stretched_latlon_grid` produces bit-identical zonal
+    axes for the same inputs.
+    """
+    lon_w_rad = jnp.deg2rad(lon_west)
+    lon_e_rad = jnp.deg2rad(lon_east)
+    dlon = (lon_e_rad - lon_w_rad) / n_lon
+    if periodic_x:
+        nx = n_lon
+        lon = jnp.linspace(
+            float(lon_w_rad), float(lon_e_rad) - float(dlon), n_lon)
+    else:
+        nx = n_lon + 2
+        lon = jnp.linspace(
+            float(lon_w_rad) - dlon / 2.0,
+            float(lon_e_rad) + dlon / 2.0,
+            nx,
+        )
+    return lon, dlon, nx
+
+
+def _regional_wall_mask(ny: int, nx: int, periodic_x: bool, dtype):
+    """Wall mask shared by the regional / stretched lat-lon builders.
+
+    1 = ocean interior, 0 = wall.  Walls at N/S always; E/W walls only
+    for the closed-basin (``periodic_x=False``) case.
+    """
+    wall_mask = jnp.ones((ny, nx), dtype=dtype)
+    wall_mask = wall_mask.at[0, :].set(0.0)   # south wall
+    wall_mask = wall_mask.at[-1, :].set(0.0)  # north wall
+    if not periodic_x:
+        wall_mask = wall_mask.at[:, 0].set(0.0)   # west wall
+        wall_mask = wall_mask.at[:, -1].set(0.0)  # east wall
+    return wall_mask
+
+
 def create_regional_latlon_grid(
     n_lat: int,
     n_lon: int,
@@ -387,25 +437,7 @@ def create_regional_latlon_grid(
         ny,
     )
 
-    if periodic_x:
-        # Channel: periodic in x over [lon_west, lon_east), no wall cells
-        nx = n_lon
-        lon_w_rad = jnp.deg2rad(lon_west)
-        lon_e_rad = jnp.deg2rad(lon_east)
-        dlon = (lon_e_rad - lon_w_rad) / n_lon
-        lon = jnp.linspace(
-            float(lon_w_rad), float(lon_e_rad) - float(dlon), n_lon)
-    else:
-        # Closed basin: wall cells on east/west
-        nx = n_lon + 2
-        lon_w_rad = jnp.deg2rad(lon_west)
-        lon_e_rad = jnp.deg2rad(lon_east)
-        dlon = (lon_e_rad - lon_w_rad) / n_lon
-        lon = jnp.linspace(
-            float(lon_w_rad) - dlon / 2.0,
-            float(lon_e_rad) + dlon / 2.0,
-            nx,
-        )
+    lon, dlon, nx = _regional_lon_axis(n_lon, lon_west, lon_east, periodic_x)
 
     lat2d, lon2d = jnp.meshgrid(lat, lon, indexing="ij")
 
@@ -424,12 +456,7 @@ def create_regional_latlon_grid(
     total_area = jnp.sum(area)
 
     # Wall mask: walls at N/S always; E/W walls only for closed basin
-    wall_mask = jnp.ones((ny, nx), dtype=dtype)
-    wall_mask = wall_mask.at[0, :].set(0.0)   # south wall
-    wall_mask = wall_mask.at[-1, :].set(0.0)  # north wall
-    if not periodic_x:
-        wall_mask = wall_mask.at[:, 0].set(0.0)   # west wall
-        wall_mask = wall_mask.at[:, -1].set(0.0)  # east wall
+    wall_mask = _regional_wall_mask(ny, nx, periodic_x, dtype)
 
     _c = lambda a: a.astype(dtype) if hasattr(a, 'astype') else a
     grid = LatLonGrid(
@@ -648,6 +675,241 @@ def create_mercator_grid(
     )
 
 
+def create_stretched_latlon_grid(
+    dy_deg,
+    n_lon: int,
+    lat_south: float,
+    lon_west: float = 0.0,
+    lon_east: float = 360.0,
+    radius: float = constants.R_earth,
+    omega: float = constants.Omega,
+    dtype=None,
+    periodic_x: bool = False,
+) -> tuple[LatLonGrid, jax.Array]:
+    """Lat-lon grid with an ARBITRARY per-row meridional spacing array.
+
+    The meridional analogue of :func:`create_regional_latlon_grid` for
+    non-uniform latitude spacing (e.g. a Vinokur-stretched ``dyt`` as in
+    the Veros ``global_flexible`` setup): the caller supplies the
+    interior cell heights ``dy_deg`` directly instead of a uniform
+    ``(lat_north - lat_south) / n_lat``.  Zonal spacing stays uniform
+    (all target setups have uniform ``dxt``); operators consume the
+    per-row 1-D ``grid.dy`` array, which is already variable-dy safe
+    throughout the lat-lon C-grid stack (Mercator/DINO precedent).
+
+    Construction (Mercator pattern — faces supplied directly, exact
+    sin-face areas, no ``compute_v_face_coords`` extrapolation):
+
+    - Cell FACES from a cumulative sum: the first interior cell's south
+      face sits at ``lat_south``; interior faces follow from
+      ``cumsum(dy_deg)``.  One wall row is added at each end (the
+      ``create_regional_latlon_grid`` convention) whose height is
+      edge-extended (``dy_deg[0]`` / ``dy_deg[-1]`` — the analogue of
+      Veros's ghost-row ``dyt[:2] = dyt[2]``).
+    - Cell CENTRES via the pyOM/Veros ``u_centered_grid`` placement:
+      each face bisects its two adjacent centres
+      (``face[j] = (centre[j] + centre[j+1]) / 2``), seeded with
+      ``centre[0] = face[1] - dy_wall/2``.  An EXACTLY-uniform
+      ``dy_deg`` short-circuits to :func:`create_regional_latlon_grid`
+      with ``lat_north = lat_south + sum(dy_deg)`` — the result is then
+      BIT-identical to the canonical uniform builder (the cumsum +
+      recursion path agrees with it only to float64 round-off, and the
+      branch is continuous at that level).  For stretched ``dy_deg``
+      the interior
+      centres land EXACTLY on Veros ``yt[2:-2]``; note centres are then
+      *not* the midpoints of their faces.  This is also the placement
+      whose faces ``create_latlon_geometry`` reconstructs exactly from
+      centre midpoints (its variable-dlat branch).
+    - Cell areas use the exact spherical form
+      ``R² Δλ |sin(φ_face[j+1]) − sin(φ_face[j])|`` (Mercator formula —
+      valid for any orthogonal spherical grid).
+
+    Veros mapping (``calc_grid`` convention, probe-verified for the
+    4deg recipe): Veros aligns ``yu[2] = y_origin``, i.e. ``y_origin``
+    is the NORTH face of the first interior cell.  Therefore::
+
+        lat_south = y_origin - dy_deg[0]
+
+    and this grid's interior rows ``[1:-1]`` match Veros ``yt[2:-2]``
+    / faces ``lat_v[1:-1]`` match Veros ``yu[1:-2]``.
+
+    Parameters
+    ----------
+    dy_deg : array-like, shape (n_lat,)
+        Interior cell heights [DEGREES latitude], south to north.  All
+        entries must be positive and finite; the builder rejects arrays
+        whose row-to-row variation is so rapid that a u-centred cell
+        centre escapes its cell (smooth stretchings — Vinokur, Mercator,
+        geometric ≲ 2x jumps — are fine).
+    n_lon : int
+        Number of interior zonal cells (uniform spacing).
+    lat_south : float
+        Latitude of the FIRST INTERIOR cell's south face [degrees]
+        (Veros: ``y_origin - dy_deg[0]``).
+    lon_west, lon_east : float
+        Zonal extent [degrees], as in ``create_regional_latlon_grid``.
+    radius : float
+        Sphere radius [m].
+    omega : float
+        Rotation rate [rad/s].
+    dtype : optional
+        Storage dtype; defaults to the active precision policy.
+        Placement math always runs in float64 (Mercator precedent).
+    periodic_x : bool
+        If True, periodic channel in x (no E/W wall columns).
+
+    Returns
+    -------
+    grid : LatLonGrid
+        ``n_lat + 2`` latitude rows (wall rows at N/S).  Longitude
+        columns: ``n_lon + 2`` if closed, ``n_lon`` if periodic.
+        ``grid.dy`` is the per-row 2-cell span [m]; ``grid.dlat`` is the
+        smallest (most CFL-stringent) row's dlat [rad] — diagnostics
+        only, as on the Mercator grid.
+    wall_mask : jax.Array
+        1 = ocean interior, 0 = wall.
+    """
+    d_int = np.asarray(dy_deg, dtype=np.float64)
+    if d_int.ndim != 1 or d_int.size < 2:
+        raise ValueError(
+            f"dy_deg must be a 1-D array with at least 2 entries, got "
+            f"shape {d_int.shape}"
+        )
+    if not bool(np.all(np.isfinite(d_int))) or bool(np.any(d_int <= 0.0)):
+        raise ValueError(
+            "dy_deg entries must all be positive and finite, got "
+            f"min={np.min(d_int)!r}"
+        )
+    span = float(np.sum(d_int))
+    if lat_south < -90.0:
+        raise ValueError(f"lat_south={lat_south} must be >= -90")
+    if lat_south + span > 90.0 + 1e-9:
+        raise ValueError(
+            f"interior span exceeds the north pole: lat_south={lat_south} "
+            f"+ sum(dy_deg)={span} > 90"
+        )
+    if not periodic_x and lon_west >= lon_east:
+        raise ValueError(f"lon_west={lon_west} must be < lon_east={lon_east}")
+
+    # Exactly-uniform dy_deg → delegate to the canonical uniform
+    # builder: BIT-identical output to create_regional_latlon_grid
+    # (linspace centre placement + product-form areas), and downstream
+    # consumers see the one well-trodden uniform-grid object.  The
+    # stretched path below agrees with it only to float64 round-off
+    # (cumsum + u-centred recursion reorder the float ops), so the
+    # branch is continuous at the ~ULP level for near-uniform input.
+    if bool(np.all(d_int == d_int[0])):
+        return create_regional_latlon_grid(
+            n_lat=int(d_int.size),
+            n_lon=n_lon,
+            lat_south=lat_south,
+            lat_north=lat_south + span,
+            lon_west=lon_west,
+            lon_east=lon_east,
+            radius=radius,
+            omega=omega,
+            dtype=dtype,
+            periodic_x=periodic_x,
+        )
+
+    if dtype is None:
+        try:
+            from legoesm.core.precision import get_policy
+            dtype = get_policy().storage
+        except Exception:
+            dtype = jnp.float32
+
+    # --- Meridional placement (float64 numpy; setup-time only) ---
+    n_int = d_int.size
+    ny = n_int + 2
+    # Wall rows edge-extend the adjacent interior height (Veros ghost
+    # convention dyt[:2] = dyt[2] / dyt[-2:] = dyt[-3]).
+    d_full = np.concatenate([d_int[:1], d_int, d_int[-1:]])      # (ny,)
+    # Faces from cumsum; face index 1 (south face of the first interior
+    # row) pinned at lat_south.
+    faces_deg = (lat_south - d_int[0]) + np.concatenate(
+        [np.zeros(1), np.cumsum(d_full)])                        # (ny+1,)
+    # Centres: pyOM/Veros u_centered_grid recursion
+    # centre[j+1] = 2*face[j+1] - centre[j], vectorised with the same
+    # alternating-cumsum trick Veros uses (veros/core/numerics.py).
+    yt = np.empty(ny, dtype=np.float64)
+    yt[0] = faces_deg[1] - 0.5 * d_full[0]
+    yt[1:] = 2.0 * faces_deg[1:-1]
+    alt = np.ones(ny, dtype=np.float64)
+    alt[::2] = -1.0
+    centers_deg = alt * np.cumsum(alt * yt)                      # (ny,)
+    if not (
+        bool(np.all(centers_deg > faces_deg[:-1]))
+        and bool(np.all(centers_deg < faces_deg[1:]))
+    ):
+        raise ValueError(
+            "dy_deg varies too rapidly: a u-centred cell centre escaped "
+            "its cell (faces no longer interleave centres). Use a "
+            "smoother stretching (adjacent dy ratios well below 2)."
+        )
+
+    lat = jnp.asarray(np.deg2rad(centers_deg))                   # (ny,)
+    lat_face = jnp.asarray(np.deg2rad(faces_deg))                # (ny+1,)
+
+    lon, dlon, nx = _regional_lon_axis(n_lon, lon_west, lon_east, periodic_x)
+
+    lat2d, lon2d = jnp.meshgrid(lat, lon, indexing="ij")
+
+    # abs-clamp like the global builder: wall rows of near-pole domains
+    # may poke past ±90° (regional convention keeps them; they are land).
+    cos_lat = jnp.maximum(jnp.abs(jnp.cos(lat)), 1e-10)
+    sin_lat = jnp.sin(lat)
+    # Faces supplied directly (Mercator pattern) — do NOT extrapolate
+    # via compute_v_face_coords.
+    lat_v = lat_face
+    cos_lat_v = jnp.maximum(jnp.abs(jnp.cos(lat_v)), 1e-10)
+
+    f = 2.0 * omega * sin_lat[:, None] * jnp.ones((1, nx))
+
+    dx = radius * 2.0 * dlon * cos_lat[:, None] * jnp.ones((1, nx))
+    # dy(j) = 2 · R · (lat_face[j+1] - lat_face[j]) — 2-cell convention,
+    # defined from face differences for exact dy/lat_v consistency
+    # (Mercator pattern).
+    dy = 2.0 * radius * (lat_face[1:] - lat_face[:-1])           # (ny,)
+
+    # Exact spherical area: R² · Δλ · |sin(φ_face[j+1]) − sin(φ_face[j])|.
+    sin_face = jnp.sin(lat_face)
+    area_lat = radius**2 * dlon * jnp.abs(sin_face[1:] - sin_face[:-1])
+    area = area_lat[:, None] * jnp.ones((1, nx))
+    total_area = jnp.sum(area)
+
+    # Representative scalar dlat = smallest (most CFL-stringent) row —
+    # the Mercator convention. Diagnostics only; operators use grid.dy.
+    dlat_repr = float(np.min(np.deg2rad(d_full)))
+
+    wall_mask = _regional_wall_mask(ny, nx, periodic_x, dtype)
+
+    def _c(a):
+        return a.astype(dtype) if hasattr(a, "astype") else a
+
+    grid = LatLonGrid(
+        n_lat=ny,
+        n_lon=nx,
+        radius=float(radius),
+        lat=_c(lat),
+        lon=_c(lon),
+        lat2d=_c(lat2d),
+        lon2d=_c(lon2d),
+        cos_lat=_c(cos_lat),
+        sin_lat=_c(sin_lat),
+        lat_v=_c(lat_v),
+        cos_lat_v=_c(cos_lat_v),
+        f=_c(f),
+        dx=_c(dx),
+        dy=_c(dy),
+        area=_c(area),
+        total_area=total_area,
+        dlon=float(dlon),
+        dlat=float(dlat_repr),
+    )
+    return grid, wall_mask
+
+
 # =========================================================================
 # Tripolar-ready C-grid geometry
 # =========================================================================
@@ -697,6 +959,14 @@ def ensure_geometry(
         omega=omega,
         lat_1d=getattr(grid, "lat", None),
         lon_1d=getattr(grid, "lon", None),
+        # Pass the grid's ACTUAL face latitudes so variable-dlat grids
+        # (Mercator, stretched) get exact per-row metrics instead of
+        # the centre-midpoint face reconstruction (which is exact for
+        # the stretched builder's interior but not at its wall rows,
+        # and only O(Δφ²)-approximate on Mercator).  Uniform-dlat
+        # grids never consult the faces (scalar-dlat branch), so their
+        # geometries are bit-unchanged.
+        lat_face_1d=getattr(grid, "lat_v", None),
     )
 
 
@@ -959,6 +1229,7 @@ def create_latlon_geometry(
     *,
     lat_1d: jax.Array | None = None,
     lon_1d: jax.Array | None = None,
+    lat_face_1d: jax.Array | None = None,
 ) -> LatLonCGridGeometry:
     """Create a regular lat-lon ``LatLonCGridGeometry``.
 
@@ -992,6 +1263,14 @@ def create_latlon_geometry(
     lon_1d : jax.Array, optional
         Cell-center longitudes in radians (length ``n_lon``).  Same
         rationale as ``lat_1d``.
+    lat_face_1d : jax.Array, optional
+        Cell-face latitudes in radians (length ``n_lat + 1``).  Only
+        consulted on variable-dlat grids (Mercator / stretched), where
+        it replaces the centre-midpoint face reconstruction with the
+        grid's exact faces — the reconstruction is exact for the
+        u-centred stretched placement's interior but not at its wall
+        rows, and only approximate on Mercator.  Ignored on
+        uniform-dlat grids (scalar-dlat branch).
 
     Returns
     -------
@@ -1031,6 +1310,24 @@ def create_latlon_geometry(
         else:
             _is_variable_dlat = False
 
+    if lat_face_1d is not None:
+        # Exact faces available: detect variable dlat from ALL rows,
+        # not the boundary-vs-middle two-point probe above — an
+        # arbitrary spacing array can be uniform at those two probes
+        # while stretched elsewhere, which would silently select the
+        # uniform-metric branch.
+        lat_face_1d = jnp.asarray(lat_face_1d)
+        if lat_face_1d.shape != (n_lat + 1,):
+            raise ValueError(
+                f"lat_face_1d must have shape ({n_lat + 1},), got "
+                f"{lat_face_1d.shape}"
+            )
+        _row_dlat = lat_face_1d[1:] - lat_face_1d[:-1]
+        _is_variable_dlat = bool(
+            float(jnp.max(jnp.abs(_row_dlat - _row_dlat[0])))
+            > 1e-6 * abs(float(_row_dlat[0]))
+        )
+
     if lon_1d is None:
         dlon = 2.0 * jnp.pi / n_lon
         lon_1d = jnp.linspace(0.0, 2.0 * jnp.pi - dlon, n_lon)
@@ -1057,18 +1354,25 @@ def create_latlon_geometry(
     # For variable-dlat grids (Mercator), compute per-row cell heights
     # from lat_face differences (exact spherical area).
     if _is_variable_dlat:
-        # Reconstruct face latitudes from cell centers (inverse of
-        # Mercator center placement).  Face j sits halfway between
-        # center j-1 and center j.
-        lat_face_interior = 0.5 * (lat_1d[:-1] + lat_1d[1:])  # (n_lat-1,)
-        # Extend to south and north boundaries symmetrically
-        lat_face_south = lat_1d[0] - 0.5 * (lat_1d[1] - lat_1d[0])
-        lat_face_north = lat_1d[-1] + 0.5 * (lat_1d[-1] - lat_1d[-2])
-        lat_face = jnp.concatenate([
-            jnp.array([lat_face_south]),
-            lat_face_interior,
-            jnp.array([lat_face_north]),
-        ])  # (n_lat+1,)
+        if lat_face_1d is not None:
+            # Exact faces supplied by the grid (Mercator analytic
+            # faces / stretched-builder cumsum faces); shape already
+            # validated above.
+            lat_face = lat_face_1d
+        else:
+            # Reconstruct face latitudes from cell centers (inverse of
+            # the u-centred placement: face j sits halfway between
+            # center j-1 and center j; boundary faces by half-cell
+            # extrapolation).  Exact for the stretched builder's
+            # interior, approximate at its wall rows and on Mercator.
+            lat_face_interior = 0.5 * (lat_1d[:-1] + lat_1d[1:])  # (n_lat-1,)
+            lat_face_south = lat_1d[0] - 0.5 * (lat_1d[1] - lat_1d[0])
+            lat_face_north = lat_1d[-1] + 0.5 * (lat_1d[-1] - lat_1d[-2])
+            lat_face = jnp.concatenate([
+                jnp.array([lat_face_south]),
+                lat_face_interior,
+                jnp.array([lat_face_north]),
+            ])  # (n_lat+1,)
         dlat_1d = lat_face[1:] - lat_face[:-1]  # (n_lat,) per-row dlat
         # Exact spherical area: R² * dlon * |sin(φ_face[j+1]) - sin(φ_face[j])|
         sin_face = jnp.sin(lat_face)

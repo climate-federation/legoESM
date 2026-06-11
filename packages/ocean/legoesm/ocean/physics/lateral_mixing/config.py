@@ -78,6 +78,12 @@ class VisbeckConfig(NamedTuple):
     #     supply T, S, an EOS and the cell-centre pressure (or its ingredients)
     #     to displace parcels through the EOS; raises if any is missing.
     n2_mode: str = "insitu"
+    # Veros dzw slot for the ADIABATIC N² divisor (mirrors
+    # ``EKEConfig.n2_over_dzw``; only consulted with ``n2_mode="adiabatic"``):
+    # divide the adiabatic density contrast by the actual centre spacing
+    # ``dz_half_ref·J`` (Veros ``dzw``) instead of the midpoint
+    # reconstruction. Default False ⇒ BIT-IDENTICAL legacy.
+    n2_over_dzw: bool = False
 
 
 class GMRediConfig(NamedTuple):
@@ -174,6 +180,47 @@ class GMRediConfig(NamedTuple):
     # floor is correct but INERT for ACC — it matches Veros either way. (A fully
     # Veros-faithful steep-slope taper would need the UNCLIPPED slope; that is the
     # deeper slope-stencil difference, deferred.)
+    veros_triad_weights: bool = False
+    # ^ Veros-faithful u/v-face TRIAD WEIGHTS (default False = bit-identical
+    # legacy). Veros weights each u/v-face triad by its vertical pair's W-cell
+    # thickness, ``dzw(pair)/(4·dzt(level))`` (isoneutral.py:123-129 sumz,
+    # diffusion.py:33-47 — the plain Δtr·dzw/(4·dzt) form), with NO
+    # renormalization where triads are missing: at the surface the two
+    # "above" triads use the half-cell ``dzw_sfc = dzt[0]/2`` and are DEAD
+    # for the off-diagonal (taper→0 via the zeroed dTdz) while their
+    # K_iso_steep diagonal floor survives; at the bottom the two "below"
+    # triads vanish entirely. legoESM's legacy convention instead
+    # renormalizes by the number of valid triads (1/N_valid, equal weights),
+    # keeping the boundary diagonal at full strength — a defensible
+    # discretization → option, not canonical. On a stretched vertical grid
+    # the two weightings differ at EVERY level (global_4deg z1: lego/Veros
+    # skew F_x = 1.29 with 1/N, ≈1.0 with dzw weights) and by ~2× in the
+    # off-diagonal at the surface level (the tier-2 z0 = 3.2× signature).
+    # Only meaningful with slope_density="neutral" (the in_situ slope-clip
+    # pins dead-triad tapers at 0.5 instead of 0); the faithful recipes are
+    # all neutral.
+    double_redi_diagonal: bool = False
+    # ^ Veros-faithful DOUBLE-COUNTED Redi horizontal diagonal (oracle quirk;
+    # default False = bit-identical single diagonal). Veros adds the
+    # PRE-computed diagonal flux ``K_11·∂T/∂x`` / ``K_22·∂T/∂y`` inside
+    # ``_calc_tracer_fluxes`` UNCONDITIONALLY (core/isoneutral/diffusion.py:
+    # 40-47, 67-77), and with ``enable_neutral_diffusion`` +
+    # ``enable_skew_diffusion`` both on (the ACC and global_4deg setups) that
+    # kernel runs TWICE per tracer per step (thermodynamics.py:430-437) — the
+    # iso pass AND the skew pass each add the full K_11/K_22 diagonal, so
+    # Veros's net horizontal isoneutral diffusion carries 2× the diagonal
+    # (≈ 2·K_iso_0 ≈ 2000 m²/s of along-isopycnal smoothing). legoESM's
+    # single diagonal is the textbook Redi tensor; matching the oracle
+    # requires reproducing the double-add, so this is a config-selectable
+    # OPTION (judgment: Veros implementation quirk → option, not canonical).
+    # When True, the triad assembly adds the diagonal (incl. its K_iso_steep
+    # floor) ONE extra time to F_x/F_y, and the realized SIGNED skew
+    # conversion carries the same extra diagonal in its skew fluxes (Veros's
+    # P_diss_skew includes its skew-pass K_11·∂T/∂x flux). Measured
+    # (global_4deg bridged yr-1 state, tier-2 component isolation): without
+    # it, lego/Veros TOTAL horizontal flux rms = 0.84 with 0.5-0.6 below
+    # 800 m; per-pass components match at 1.0. See
+    # .physics-validator/eke_global_runaway/RESULTS.md.
     # Prognostic EKE (Eden-Greatbatch 2008): when not None, kappa_GM becomes
     # prognostic (c_k·L·√E) from the evolving eddy-energy field E, instead of the
     # constant ``kappa_GM`` / Visbeck diagnostic. Selection is presence-based

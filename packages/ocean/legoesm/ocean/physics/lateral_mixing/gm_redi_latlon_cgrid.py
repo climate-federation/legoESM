@@ -180,6 +180,24 @@ def _fill_dry_cells_columnwise(q, z_coord):
     return extrapolate_below_seafloor(q, z_coord)
 
 
+def _per_level_face_acts(z_coord, grid, dtype):
+    """Per-level u/v-face activity masks for the W-face triad numerators.
+
+    ``(u_face_act, v_face_act)`` from ``compute_face_masks_3d`` on a
+    partial-cell coordinate, or ``(None, None)`` for pure z-star (flat
+    bottom) — the ``None`` path skips the numerator masking entirely
+    (bit-identical legacy).  Shared by ``compute_isoneutral_K33_latlon`` and
+    ``compute_realized_gm_skew_conversion`` so they kill the same coast/step
+    triads the tracer-tendency assembly kills (Veros's per-level
+    ``maskU``/``maskV``-masked gradients; see ``_w_triad_numerators``).
+    """
+    is_active = getattr(z_coord, "is_active", None)
+    if is_active is None:
+        return None, None
+    um3, vm3 = compute_face_masks_3d(is_active, grid)
+    return um3.astype(dtype), vm3.astype(dtype)
+
+
 def _neutral_drho_derivs(T, S, mask, z_coord, jacobian, eos_fn, rho_0, g):
     """Cell-centred EOS partials ``(∂ρ/∂T, ∂ρ/∂S)`` at the LOCAL cell pressure.
 
@@ -675,12 +693,26 @@ def _w_face_slope_density_inputs(
 
 def _w_triad_numerators(slope_density, drho_dx_u, drho_dy_v,
                         drdT_w, drdS_w, dTdx_u, dSdx_u, dTdy_v, dSdy_v,
-                        n_lat, n_lon, drdT_wb=None, drdS_wb=None):
+                        n_lat, n_lon, drdT_wb=None, drdS_wb=None,
+                        u_face_act=None, v_face_act=None):
     """The 8 W-face triad horizontal density-gradient *numerators* ``-∇_hρ``.
 
     Returns ``(nx_W, nx_E, nx_Wb, nx_Eb, ny_S, ny_N, ny_Sb, ny_Nb)`` where the
     A-suffix (W/E/S/N) is the upper-level (k) horizontal gradient and the
     b-suffix is the lower-level (k+1) one, all at the ``nlev-1`` w-faces.
+
+    ``u_face_act`` / ``v_face_act`` (optional, ``(n_lat, n_lon+1, nlev)`` /
+    ``(n_lat+1, n_lon, nlev)``) are the PER-LEVEL face-activity masks
+    (``compute_face_masks_3d``).  When given, each triad's horizontal numerator
+    is multiplied by the activity of ITS face at ITS level — Veros's mechanism
+    exactly (its ``dTdx``/``dTdy`` carry ``maskU``/``maskV`` per level,
+    ``isoneutral.py:64-95``, so a triad whose horizontal pair crosses a CLOSED
+    face — a coastline or a topographic step — has slope 0 and contributes
+    nothing to F_z / K_33 / the realized conversions).  Without this, the
+    Neumann-filled gradients leak a spurious nonzero triad flux across closed
+    faces (global_4deg tier-2 isolation: F_z rms 1.9-2.3× Veros at coast/step
+    faces, corr 0.62-0.69, vs 1.02-1.04 / 0.98 interior).  ``None`` (pure
+    z-star / flat bottom) skips the multiply — bit-identical legacy path.
 
     - ``"in_situ"`` (BIT-IDENTICAL): the corresponding slices of the in-situ
       face gradient ``drho_dx_u`` / ``drho_dy_v`` (exactly the slices the prior
@@ -693,6 +725,20 @@ def _w_triad_numerators(slope_density, drho_dx_u, drho_dy_v,
       ``drdT[..., kr]`` with ``dTdx[..., kr]`` for both ``drodxb`` and
       ``drodzb``.  (Before the kr-sum refinement all 8 used the upper cell.)
     """
+    if u_face_act is not None:
+        mxW = u_face_act[:, :n_lon, :-1]
+        mxE = u_face_act[:, 1:n_lon + 1, :-1]
+        mxWb = u_face_act[:, :n_lon, 1:]
+        mxEb = u_face_act[:, 1:n_lon + 1, 1:]
+    else:
+        mxW = mxE = mxWb = mxEb = None
+    if v_face_act is not None:
+        myS = v_face_act[:n_lat, :, :-1]
+        myN = v_face_act[1:n_lat + 1, :, :-1]
+        mySb = v_face_act[:n_lat, :, 1:]
+        myNb = v_face_act[1:n_lat + 1, :, 1:]
+    else:
+        myS = myN = mySb = myNb = None
     if slope_density == "neutral":
         if drdT_wb is None or drdS_wb is None:
             raise ValueError(
@@ -722,6 +768,16 @@ def _w_triad_numerators(slope_density, drho_dx_u, drho_dy_v,
         ny_N = drho_dy_v[1:n_lat + 1, :, :-1]
         ny_Sb = drho_dy_v[:n_lat, :, 1:]
         ny_Nb = drho_dy_v[1:n_lat + 1, :, 1:]
+    if mxW is not None:
+        nx_W = nx_W * mxW
+        nx_E = nx_E * mxE
+        nx_Wb = nx_Wb * mxWb
+        nx_Eb = nx_Eb * mxEb
+    if myS is not None:
+        ny_S = ny_S * myS
+        ny_N = ny_N * myN
+        ny_Sb = ny_Sb * mySb
+        ny_Nb = ny_Nb * myNb
     return nx_W, nx_E, nx_Wb, nx_Eb, ny_S, ny_N, ny_Sb, ny_Nb
 
 
@@ -730,7 +786,8 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
                            slope_density="in_situ",
                            drdT_w=None, drdS_w=None,
                            drdT_wb=None, drdS_wb=None, drho_dz_w_b=None,
-                           dTdx_u=None, dSdx_u=None, dTdy_v=None, dSdy_v=None):
+                           dTdx_u=None, dSdx_u=None, dTdy_v=None, dSdy_v=None,
+                           u_face_act=None, v_face_act=None):
     """W-face (vertical-flux) triad isopycnal slopes + DM95 tapers.
 
     Shared by the explicit ``F_z`` assembly (in
@@ -756,7 +813,8 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
     (nx_W, nx_E, nx_Wb, nx_Eb, ny_S, ny_N, ny_Sb, ny_Nb) = _w_triad_numerators(
         slope_density, drho_dx_u, drho_dy_v, drdT_w, drdS_w,
         dTdx_u, dSdx_u, dTdy_v, dSdy_v, n_lat, n_lon,
-        drdT_wb=drdT_wb, drdS_wb=drdS_wb)
+        drdT_wb=drdT_wb, drdS_wb=drdS_wb,
+        u_face_act=u_face_act, v_face_act=v_face_act)
     clip = slope_density != "neutral"
     # kr-sum: the B-triads divide by the LOWER cell's drodzb (Veros pairs the
     # same kr-cell derivatives in numerator and denominator).  in_situ has no
@@ -804,8 +862,24 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     rho_0: float = _RHO_0,
     g: float = constants.g,
     return_fluxes: bool = False,
+    double_diag_kappa=None,
+    double_diag_steep: float = 0.0,
+    veros_triad_weights: bool = False,
 ) -> jnp.ndarray:
     """Triad-based GM+Redi tracer tendency on the lat-lon C-grid.
+
+    ``double_diag_kappa`` (default None = off, bit-identical): when given (the
+    ``GMRediConfig.double_redi_diagonal`` option), the horizontal DIAGONAL flux
+    ``κ·taper·∇_h q`` (with its ``double_diag_steep`` K_iso_steep floor) is
+    added ONE extra time to ``F_x``/``F_y`` using this kappa — reproducing
+    Veros's double-counted ``K_11``/``K_22`` diagonal (its iso AND skew passes
+    each add the precomputed diagonal; see the ``GMRediConfig`` field doc).
+    Pass the Redi (K_iso) kappa here — Veros builds K_11/K_22 from ``K_iso``
+    regardless of which pass re-adds them.
+
+    ``veros_triad_weights`` (default False = bit-identical 1/N_valid legacy):
+    weight each u/v-face triad by ``dzw(pair)/(4·dzt)`` with NO boundary
+    renormalization, Veros's convention — see the ``GMRediConfig`` field doc.
 
     When ``return_fluxes`` is True (default False ⇒ unchanged single-array
     return), returns ``(tendency, F_x_u, F_y_v, F_z)`` — the assembled, masked
@@ -883,6 +957,40 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
         v_mask_lvl = jnp.ones((n_lat + 1, n_lon, 1), dtype=q.dtype)
         w_mask_if = jnp.ones((n_lat, n_lon, 1), dtype=q.dtype)
 
+    # PER-TRIAD activity (variable bathymetry only; None ⇒ legacy bit-identical
+    # path with zero added ops).  Veros kills triads PER LEVEL: a u/v-face
+    # triad whose VERTICAL pair crosses the seafloor has maskW-masked dTdz ⇒
+    # slope → ±∞ ⇒ dm_taper → 0 (isoneutral.py:117-130), and a W-face triad
+    # whose HORIZONTAL pair crosses a closed face has maskU/maskV-masked dTdx
+    # ⇒ slope 0 ⇒ zero contribution (isoneutral.py:182-217).  legoESM's
+    # Neumann-filled gradients otherwise leak spurious triad fluxes across
+    # coasts and topographic steps (tier-2 isolation: F_z 1.9-2.3× Veros at
+    # coast/step W-faces vs 1.02-1.04 interior).  Mechanisms mirrored here:
+    # u/v-face triads → multiply the per-triad TAPER by the vertical-pair
+    # interface activity (off-diagonal dies; the K_iso_steep diagonal floor
+    # survives at full strength, exactly Veros's max(K_iso_steep, K·taper));
+    # W-face triads → mask the horizontal slope NUMERATORS (threaded into
+    # _w_triad_slopes_tapers below).
+    if _is_active_3d is not None:
+        _zer1 = jnp.zeros((n_lat, n_lon, 1), dtype=q.dtype)
+        _act_below = jnp.concatenate([w_mask_if, _zer1], axis=-1)
+        _act_above = jnp.concatenate([_zer1, w_mask_if], axis=-1)
+        act_T1 = _to_uface_west(_act_below)
+        act_T2 = _to_uface_west(_act_above)
+        act_T3 = _to_uface_east(_act_below)
+        act_T4 = _to_uface_east(_act_above)
+        act_V1 = _to_vface_south(_act_below)
+        act_V2 = _to_vface_south(_act_above)
+        act_V3 = _to_vface_north(_act_below)
+        act_V4 = _to_vface_north(_act_above)
+        _u_face_act = u_mask_lvl
+        _v_face_act = v_mask_lvl
+    else:
+        act_T1 = act_T2 = act_T3 = act_T4 = None
+        act_V1 = act_V2 = act_V3 = act_V4 = None
+        _u_face_act = None
+        _v_face_act = None
+
     # Resolve kappa to its center / u-face / v-face / w-face forms (shared
     # helper, identical dispatch for kappa_GM, kappa_Redi, and the K_33 getter):
     #   * scalar / 2-D (n_lat, n_lon)  → cell-centred broadcast + horizontal
@@ -899,6 +1007,10 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     kappa_GM_c, kappa_GM_u, kappa_GM_v, kappa_GM_w = _kappa_center_uvw(kappa_GM, nlev)
     kappa_Redi_c, kappa_Redi_u, kappa_Redi_v, kappa_Redi_w = _kappa_center_uvw(
         kappa_Redi, nlev)
+    if double_diag_kappa is not None:
+        # Veros double-counted K_11/K_22 diagonal (see docstring): u/v-face
+        # forms of the kappa used for the EXTRA diagonal add below.
+        _, _ddk_u, _ddk_v, _ = _kappa_center_uvw(double_diag_kappa, nlev)
 
     # Neumann-fill BOTH rho and q so the gradients across coastlines do
     # not pick up jumps between ocean and land sentinel values.  This
@@ -1089,13 +1201,47 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     taper_T2 = dm95_taper_scalar(S_T2, S_max, transition_width_frac=taper_width_frac)[1]
     taper_T3 = dm95_taper_scalar(S_T3, S_max, transition_width_frac=taper_width_frac)[1]
     taper_T4 = dm95_taper_scalar(S_T4, S_max, transition_width_frac=taper_width_frac)[1]
+    if act_T1 is not None:
+        # Kill triads whose vertical pair crosses the seafloor (Veros taper→0
+        # via the maskW-ed dTdz; the in_situ slope-clip would otherwise pin
+        # the junk slope at S_max where the taper bottoms at 0.5).
+        taper_T1 = taper_T1 * act_T1
+        taper_T2 = taper_T2 * act_T2
+        taper_T3 = taper_T3 * act_T3
+        taper_T4 = taper_T4 * act_T4
 
-    N_valid_u = valid_T1 + valid_T2 + valid_T3 + valid_T4
-    N_valid_u_safe = jnp.maximum(N_valid_u, 1.0)
-    w_T1 = valid_T1 / N_valid_u_safe
-    w_T2 = valid_T2 / N_valid_u_safe
-    w_T3 = valid_T3 / N_valid_u_safe
-    w_T4 = valid_T4 / N_valid_u_safe
+    if veros_triad_weights:
+        # Veros triad weights dzw(pair)/(4·dzt) (GMRediConfig field doc): 1-D
+        # reference profiles broadcast over the horizontal axes.  The "below"
+        # pair uses the centre spacing under the level (0 at the global
+        # bottom — Veros's K_11 sumz updates [ki:] only, excluding the bottom
+        # cell's below triads entirely, isoneutral.py:123-129); the "above"
+        # pair uses the spacing above, with the SURFACE half-cell slot
+        # dzw_sfc = 2·dzt[0] − dzw[1] at the top (u_centered_grid line 21).
+        # Edge off-diagonal death: multiply the tapers by valid_* (Veros:
+        # dTdz=0 ⇒ slope→∞ ⇒ dm_taper→0); the K_iso_steep diagonal deficit
+        # then contributes steep·w for dead triads, exactly Veros's
+        # max(K_iso_steep, K·taper)·dzw.
+        _dzr_w = jnp.asarray(z_coord.dz_ref, dtype=q.dtype)
+        _dzh_w = jnp.asarray(z_coord.dz_half_ref, dtype=q.dtype)
+        _dzw_sfc = 2.0 * _dzr_w[:1] - _dzh_w[:1]
+        _w_below = (jnp.concatenate([_dzh_w, jnp.zeros((1,), dtype=q.dtype)])
+                    / (4.0 * _dzr_w))[jnp.newaxis, jnp.newaxis, :]
+        _w_above = (jnp.concatenate([_dzw_sfc, _dzh_w])
+                    / (4.0 * _dzr_w))[jnp.newaxis, jnp.newaxis, :]
+        w_T1 = w_T3 = _w_below
+        w_T2 = w_T4 = _w_above
+        taper_T1 = taper_T1 * valid_T1
+        taper_T2 = taper_T2 * valid_T2
+        taper_T3 = taper_T3 * valid_T3
+        taper_T4 = taper_T4 * valid_T4
+    else:
+        N_valid_u = valid_T1 + valid_T2 + valid_T3 + valid_T4
+        N_valid_u_safe = jnp.maximum(N_valid_u, 1.0)
+        w_T1 = valid_T1 / N_valid_u_safe
+        w_T2 = valid_T2 / N_valid_u_safe
+        w_T3 = valid_T3 / N_valid_u_safe
+        w_T4 = valid_T4 / N_valid_u_safe
 
     # Per-triad full flux (cancels exactly when q = f(ρ)).
     flux_T1 = kappa_Redi_u * dq_dx_u + (kappa_Redi_u - kappa_GM_u) * S_T1 * dq_dz_T1
@@ -1117,6 +1263,18 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
             + w_T2 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T2)
             + w_T3 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T3)
             + w_T4 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T4))
+    if double_diag_kappa is not None:
+        # Veros double-counted diagonal: + K_11·dq/dx once more (taper-weighted
+        # diagonal incl. its steep floor; see the GMRediConfig field doc).
+        F_x_u = F_x_u + dq_dx_u * (
+            w_T1 * taper_T1 + w_T2 * taper_T2
+            + w_T3 * taper_T3 + w_T4 * taper_T4) * _ddk_u
+        if double_diag_steep > 0.0:
+            F_x_u = F_x_u + dq_dx_u * (
+                w_T1 * jnp.maximum(0.0, double_diag_steep - _ddk_u * taper_T1)
+                + w_T2 * jnp.maximum(0.0, double_diag_steep - _ddk_u * taper_T2)
+                + w_T3 * jnp.maximum(0.0, double_diag_steep - _ddk_u * taper_T3)
+                + w_T4 * jnp.maximum(0.0, double_diag_steep - _ddk_u * taper_T4))
     F_x_u = F_x_u * u_mask[:, :, jnp.newaxis] * u_mask_lvl
 
     # -----------------------------------------------------------------
@@ -1151,13 +1309,29 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     taper_V2 = dm95_taper_scalar(S_V2, S_max, transition_width_frac=taper_width_frac)[1]
     taper_V3 = dm95_taper_scalar(S_V3, S_max, transition_width_frac=taper_width_frac)[1]
     taper_V4 = dm95_taper_scalar(S_V4, S_max, transition_width_frac=taper_width_frac)[1]
+    if act_V1 is not None:
+        # Vertical-pair seafloor kill, as for the u-face triads above.
+        taper_V1 = taper_V1 * act_V1
+        taper_V2 = taper_V2 * act_V2
+        taper_V3 = taper_V3 * act_V3
+        taper_V4 = taper_V4 * act_V4
 
-    N_valid_v = valid_V1 + valid_V2 + valid_V3 + valid_V4
-    N_valid_v_safe = jnp.maximum(N_valid_v, 1.0)
-    w_V1 = valid_V1 / N_valid_v_safe
-    w_V2 = valid_V2 / N_valid_v_safe
-    w_V3 = valid_V3 / N_valid_v_safe
-    w_V4 = valid_V4 / N_valid_v_safe
+    if veros_triad_weights:
+        # Veros dzw(pair)/(4·dzt) weights + edge taper kill, as for the
+        # u-face triads above (same 1-D profiles, broadcast).
+        w_V1 = w_V3 = _w_below
+        w_V2 = w_V4 = _w_above
+        taper_V1 = taper_V1 * valid_V1
+        taper_V2 = taper_V2 * valid_V2
+        taper_V3 = taper_V3 * valid_V3
+        taper_V4 = taper_V4 * valid_V4
+    else:
+        N_valid_v = valid_V1 + valid_V2 + valid_V3 + valid_V4
+        N_valid_v_safe = jnp.maximum(N_valid_v, 1.0)
+        w_V1 = valid_V1 / N_valid_v_safe
+        w_V2 = valid_V2 / N_valid_v_safe
+        w_V3 = valid_V3 / N_valid_v_safe
+        w_V4 = valid_V4 / N_valid_v_safe
 
     flux_V1 = kappa_Redi_v * dq_dy_v + (kappa_Redi_v - kappa_GM_v) * S_V1 * dq_dz_V1
     flux_V2 = kappa_Redi_v * dq_dy_v + (kappa_Redi_v - kappa_GM_v) * S_V2 * dq_dz_V2
@@ -1175,6 +1349,17 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
             + w_V2 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V2)
             + w_V3 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V3)
             + w_V4 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V4))
+    if double_diag_kappa is not None:
+        # Veros double-counted diagonal: + K_22·dq/dy once more (see F_x_u).
+        F_y_v = F_y_v + dq_dy_v * (
+            w_V1 * taper_V1 + w_V2 * taper_V2
+            + w_V3 * taper_V3 + w_V4 * taper_V4) * _ddk_v
+        if double_diag_steep > 0.0:
+            F_y_v = F_y_v + dq_dy_v * (
+                w_V1 * jnp.maximum(0.0, double_diag_steep - _ddk_v * taper_V1)
+                + w_V2 * jnp.maximum(0.0, double_diag_steep - _ddk_v * taper_V2)
+                + w_V3 * jnp.maximum(0.0, double_diag_steep - _ddk_v * taper_V3)
+                + w_V4 * jnp.maximum(0.0, double_diag_steep - _ddk_v * taper_V4))
     F_y_v = F_y_v * v_mask[:, :, jnp.newaxis] * v_mask_lvl
 
     # Horizontal divergence (single conservative call).
@@ -1211,7 +1396,8 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
         slope_density=slope_density, drdT_w=drdT_w, drdS_w=drdS_w,
         drdT_wb=drdT_wb, drdS_wb=drdS_wb,
         drho_dz_w_b=(drho_dz_w_b if slope_density == "neutral" else None),
-        dTdx_u=dTdx_u, dSdx_u=dSdx_u, dTdy_v=dTdy_v, dSdy_v=dSdy_v)
+        dTdx_u=dTdx_u, dSdx_u=dSdx_u, dTdy_v=dTdy_v, dSdy_v=dSdy_v,
+        u_face_act=_u_face_act, v_face_act=_v_face_act)
 
     # Per-triad vertical flux.  The off-diagonal skew (kR+kG)·S·dq/dx is ALWAYS
     # explicit.  The DIAGONAL K_33 term (kR·S²·dq/dz — the "enhanced vertical
@@ -1379,6 +1565,14 @@ def gm_redi_tracer_tendency_latlon(
     kappa_Redi_eff = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
 
     scheme = getattr(cfg, "slope_scheme", "triads")
+    _double_diag = bool(getattr(cfg, "double_redi_diagonal", False))
+    _vtw = bool(getattr(cfg, "veros_triad_weights", False))
+    if (_double_diag or _vtw) and scheme != "triads":
+        raise ValueError(
+            "GMRediConfig.double_redi_diagonal / veros_triad_weights (the "
+            "Veros-faithful triad options) are only supported by "
+            "slope_scheme='triads'.")
+    _ddk = kappa_Redi_eff if _double_diag else None
     if scheme == "triads":
         dT_dt = gm_redi_tracer_tendency_triads_latlon_cgrid(
             T, rho, mask, u_mask, v_mask,
@@ -1386,6 +1580,8 @@ def gm_redi_tracer_tendency_latlon(
             cfg.taper_width_frac, cfg.implicit_K33, cfg.K_iso_steep,
             slope_density=slope_density, T_tracer=T, S_tracer=S,
             eos_fn=eos_fn, rho_0=rho_0, g=g,
+            double_diag_kappa=_ddk, double_diag_steep=cfg.K_iso_steep,
+            veros_triad_weights=_vtw,
         )
         dS_dt = gm_redi_tracer_tendency_triads_latlon_cgrid(
             S, rho, mask, u_mask, v_mask,
@@ -1393,6 +1589,8 @@ def gm_redi_tracer_tendency_latlon(
             cfg.taper_width_frac, cfg.implicit_K33, cfg.K_iso_steep,
             slope_density=slope_density, T_tracer=T, S_tracer=S,
             eos_fn=eos_fn, rho_0=rho_0, g=g,
+            double_diag_kappa=_ddk, double_diag_steep=cfg.K_iso_steep,
+            veros_triad_weights=_vtw,
         )
     elif scheme == "centered":
         dT_dt = gm_redi_tracer_tendency_latlon_cgrid(
@@ -1502,10 +1700,12 @@ def compute_isoneutral_K33_latlon(
         rho_filled, T, S, mask, z_coord, jacobian, grid, slope_density,
         eos_fn, rho_0, g,
     )
+    _ufa, _vfa = _per_level_face_acts(z_coord, grid, T.dtype)
     (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
      tWx1, tWx2, tWx3, tWx4, tWy1, tWy2, tWy3, tWy4) = _w_triad_slopes_tapers(
         n_lat=n_lat, n_lon=n_lon, S_max=cfg.S_max,
-        taper_width_frac=cfg.taper_width_frac, **w_inputs)
+        taper_width_frac=cfg.taper_width_frac,
+        u_face_act=_ufa, v_face_act=_vfa, **w_inputs)
     K_33 = 0.25 * kappa_Redi_w * (
         tWx1 * S_Wx1 ** 2 + tWx2 * S_Wx2 ** 2 + tWx3 * S_Wx3 ** 2 + tWx4 * S_Wx4 ** 2
         + tWy1 * S_Wy1 ** 2 + tWy2 * S_Wy2 ** 2 + tWy3 * S_Wy3 ** 2 + tWy4 * S_Wy4 ** 2)
@@ -1743,10 +1943,12 @@ def compute_realized_gm_skew_conversion(
         eos_fn, rho_0, g,
     )
     drho_dz_w = w_inputs["drho_dz_w"]      # (n_lat, n_lon, nlev-1)
+    _ufa, _vfa = _per_level_face_acts(z_coord, grid, T.dtype)
     (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
      tWx1, tWx2, tWx3, tWx4, tWy1, tWy2, tWy3, tWy4) = _w_triad_slopes_tapers(
         n_lat=n_lat, n_lon=n_lon, S_max=cfg.S_max,
-        taper_width_frac=cfg.taper_width_frac, **w_inputs)
+        taper_width_frac=cfg.taper_width_frac,
+        u_face_act=_ufa, v_face_act=_vfa, **w_inputs)
     # Per-triad slope variance <S²>_triad = 0.25·Σ taper·S²  (= K_33/κ_Redi).
     S2_triad = 0.25 * (
         tWx1 * S_Wx1 ** 2 + tWx2 * S_Wx2 ** 2 + tWx3 * S_Wx3 ** 2 + tWx4 * S_Wx4 ** 2
@@ -1928,7 +2130,8 @@ def compute_realized_signed_conversions(
     zero_kappa = jnp.asarray(0.0, dtype=kappa_gm_w.dtype) \
         if isinstance(kappa_gm_w, jnp.ndarray) else 0.0
 
-    def _fluxes(q, kappa_GM_arg, kappa_Redi_arg, K_iso_steep=None):
+    def _fluxes(q, kappa_GM_arg, kappa_Redi_arg, K_iso_steep=None,
+                double_diag_kappa=None):
         # The K_iso_steep floor ``dq·max(0, K_iso_steep − kappa_Redi·taper)`` is
         # NONLINEAR in kappa_Redi: with kappa_Redi=0 it degenerates to a full
         # K_iso_steep horizontal diffusion. It is a REDI-diagonal term, never a
@@ -1942,15 +2145,31 @@ def compute_realized_signed_conversions(
             cfg.implicit_K33, _steep, slope_density=slope_density,
             T_tracer=T, S_tracer=S, eos_fn=eos_fn, rho_0=rho_0, g=g,
             return_fluxes=True,
+            double_diag_kappa=double_diag_kappa,
+            double_diag_steep=cfg.K_iso_steep,
+            veros_triad_weights=bool(
+                getattr(cfg, "veros_triad_weights", False)),
         )
         return Fx, Fy, Fz
+
+    # Veros's SKEW-pass fluxes carry the precomputed K_11/K_22 (K_iso-based)
+    # diagonal (diffusion.py:40-47 — unconditional), so its P_diss_skew
+    # includes that diagonal's dissipation.  With the double_redi_diagonal
+    # option the skew-only fluxes here carry the same extra diagonal (built
+    # from the Redi kappa + its steep floor), keeping the realized signed
+    # skew bookkeeping Veros-faithful.  Off (default): bit-identical.
+    _skew_ddk = None
+    if bool(getattr(cfg, "double_redi_diagonal", False)):
+        _skew_ddk = kappa_redi_w if kappa_redi_w is not None else cfg.kappa_Redi
 
     neg_skew = None
     if want_skew:
         # SKEW-only fluxes: kappa_Redi=0, kappa_GM=kappa_gm_w (Veros K_iso=0,
         # K_skew=K_gm) — with the Redi-diagonal K_iso_steep floor ZEROED.
-        FxT, FyT, FzT = _fluxes(T, kappa_gm_w, zero_kappa, K_iso_steep=0.0)
-        FxS, FyS, FzS = _fluxes(S, kappa_gm_w, zero_kappa, K_iso_steep=0.0)
+        FxT, FyT, FzT = _fluxes(T, kappa_gm_w, zero_kappa, K_iso_steep=0.0,
+                                double_diag_kappa=_skew_ddk)
+        FxS, FyS, FzS = _fluxes(S, kappa_gm_w, zero_kappa, K_iso_steep=0.0,
+                                double_diag_kappa=_skew_ddk)
         P_skew = (
             _dynamic_enthalpy_dissipation_wgrid(
                 int_drhodT, FxT, FyT, FzT, grid, dz_cell, mask, g, rho_0)
@@ -2149,6 +2368,66 @@ def eke_3d_vertical_diffusion(E, A_v_profile, dz_w, dz_half_w, dt, eke_cfg):
     return implicit_vertical_diffusion_ocean(E, K, dz_w, dz_half_w, dt)
 
 
+def _eke_stage1_fields(
+    T, S, eta, H_bathy, grid, z_coord, cfg, *,
+    eos="wright", eos_linear=None, mask=None, rho_0=_RHO_0, g=constants.g,
+    omega=constants.Omega, r_earth=constants.R_earth,
+):
+    """Stage-1 fields shared by the prognostic-EKE closures (Eden-Greatbatch
+    ``compute_eke_step_kappa`` and GEOMETRIC ``compute_geometric_step_kappa``):
+    density + isopycnal slopes via the SAME shared helpers GM/Redi uses
+    internally (a redundant recompute -- correct; compute-once is a future
+    optimization), the Coriolis field, the analytic beta = 2*Omega*cos(phi)/R,
+    and -- only when ``cfg.eke.n2_mode == "adiabatic"`` -- the cell-centre
+    hydrostatic pressure + EOS handles for the adiabatic N^2 (otherwise None,
+    byte-identical default).  Pure code motion from ``compute_eke_step_kappa``
+    (bit-identical numerics).
+
+    Returns ``(mask, jacobian, rho, S_x, S_y, f_coriolis, beta, T_eos, S_eos,
+    p_cell, eos_for_n2)``.
+    """
+    if mask is None:
+        mask = jnp.ones(T.shape[:2], dtype=T.dtype)
+    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    eos_fn = make_eos_fn(eos, eos_linear)
+    fill_fn = lambda field: neumann_fill_cgrid(field, mask)
+    rho, _rp, _pp = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
+    )
+    S_x, S_y, _taper = compute_isopycnal_slopes_latlon_cgrid(
+        rho, mask, z_coord, jacobian, grid, cfg,
+        T=T, S=S, eos_fn=eos_fn, rho_0=rho_0, g=g,
+    )
+    f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
+    # beta = df/dy = 2*Omega*cos(phi)/R (analytic; grid.cos_lat is cos(phi)).
+    # Broadcast (n_lat,) -> (n_lat, n_lon) to match f. Used only by the
+    # "rhines" eke_len scheme (the GEOMETRIC closure ignores it).
+    beta = jnp.broadcast_to(
+        (2.0 * omega * grid.cos_lat / r_earth)[:, None], mask.shape,
+    )
+    # Adiabatic static-stability N^2 (Veros EKE chain) needs the cell-centre
+    # hydrostatic pressure + the same EOS as the dynamical core. Only built
+    # when the EKE config opts in (``n2_mode="adiabatic"``) so the default
+    # ("insitu") path is byte-identical (kwargs stay None).
+    T_eos = S_eos = p_cell = eos_for_n2 = None
+    if getattr(cfg.eke, "n2_mode", "insitu") == "adiabatic":
+        from legoesm.ocean.vertical import (
+            OceanPartialCellCoordinate, compute_layer_thickness,
+        )
+        # Partial-cell thickness when applicable (matches k_profiles.py's
+        # adiabatic-N^2 path), else compute_hydrostatic_pressure falls back to
+        # dz_ref * jacobian internally.
+        h_actual = None
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            h_actual = compute_layer_thickness(eta, H_bathy, z_coord)
+        p_cell = compute_hydrostatic_pressure(
+            rho, eta, z_coord.dz_ref, jacobian, rho_0, h_actual=h_actual,
+        )
+        T_eos, S_eos, eos_for_n2 = T, S, eos_fn
+    return (mask, jacobian, rho, S_x, S_y, f_coriolis, beta,
+            T_eos, S_eos, p_cell, eos_for_n2)
+
+
 def compute_eke_step_kappa(
     T, S, eta, H_bathy, eke, grid, z_coord, cfg, *,
     eos="wright", eos_linear=None, mask=None, rho_0=_RHO_0, g=constants.g,
@@ -2187,47 +2466,158 @@ def compute_eke_step_kappa(
     come from the model constants (``omega``/``r_earth``; Veros-pinned in the ACC
     recipe), never literals. The ``"rossby"`` scheme ignores ``β``.
     """
-    if mask is None:
-        mask = jnp.ones(T.shape[:2], dtype=T.dtype)
-    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
-    eos_fn = make_eos_fn(eos, eos_linear)
-    fill_fn = lambda field: neumann_fill_cgrid(field, mask)
-    rho, _rp, _pp = iterate_eos_and_pressure_anomaly(
-        T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
+    (mask, jacobian, rho, S_x, S_y, f_coriolis, beta,
+     T_eos, S_eos, p_cell, eos_for_n2) = _eke_stage1_fields(
+        T, S, eta, H_bathy, grid, z_coord, cfg,
+        eos=eos, eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
+        omega=omega, r_earth=r_earth,
     )
-    S_x, S_y, _taper = compute_isopycnal_slopes_latlon_cgrid(
-        rho, mask, z_coord, jacobian, grid, cfg,
-        T=T, S=S, eos_fn=eos_fn, rho_0=rho_0, g=g,
-    )
-    f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
-    # β = df/dy = 2Ω cosφ/R (analytic; grid.cos_lat is cosφ). Broadcast (n_lat,)
-    # -> (n_lat, n_lon) to match f. Used only by the "rhines" eke_len scheme.
-    beta = jnp.broadcast_to(
-        (2.0 * omega * grid.cos_lat / r_earth)[:, None], mask.shape,
-    )
-    # Adiabatic static-stability N² (Veros EKE chain) needs the cell-centre
-    # hydrostatic pressure + the same EOS as the dynamical core. Only built
-    # when the EKE config opts in (``n2_mode="adiabatic"``) so the default
-    # ("insitu") path is byte-identical (kwargs stay None).
-    T_eos = S_eos = p_cell = eos_for_n2 = None
-    if getattr(cfg.eke, "n2_mode", "insitu") == "adiabatic":
-        from legoesm.ocean.eos import compute_hydrostatic_pressure
-        from legoesm.ocean.vertical import (
-            OceanPartialCellCoordinate, compute_layer_thickness,
-        )
-        # Partial-cell thickness when applicable (matches k_profiles.py's
-        # adiabatic-N² path), else compute_hydrostatic_pressure falls back to
-        # dz_ref * jacobian internally.
-        h_actual = None
-        if isinstance(z_coord, OceanPartialCellCoordinate):
-            h_actual = compute_layer_thickness(eta, H_bathy, z_coord)
-        p_cell = compute_hydrostatic_pressure(
-            rho, eta, z_coord.dz_ref, jacobian, rho_0, h_actual=h_actual,
-        )
-        T_eos, S_eos, eos_for_n2 = T, S, eos_fn
     return compute_eke_kappa_gm(
         eke, rho, S_x, S_y, z_coord, jacobian, f_coriolis,
         cfg.visbeck, cfg.eke, rho_ref=rho_0, beta=beta,
         depth_resolved=depth_resolved,
         T=T_eos, S=S_eos, p_cell=p_cell, eos_fn=eos_for_n2,
     )
+
+
+def compute_geometric_step_kappa(
+    T, S, eta, H_bathy, eke_int, grid, z_coord, cfg, *,
+    eos="wright", eos_linear=None, mask=None, rho_0=_RHO_0, g=constants.g,
+    omega=constants.Omega, r_earth=constants.R_earth,
+):
+    """GEOMETRIC (Torres et al. 2025, JAMES, doi:10.1029/2025MS005394) eddy
+    coefficients + EKE-budget pieces for the EKE-active model step.
+
+    The prognostic field is the DEPTH-INTEGRATED ``eke_int = ∫EKE dz``
+    [m³/s²] (paper Eq. 1).  Pass ``eke_int=None`` for a cold start: the
+    paper's depth-proportional initial condition ``e0_per_depth·H`` is built
+    from the column depth (Appendix E, p. 35; the static Python None-branch
+    mirrors the EG path's ``state.eke is None`` fill).
+
+    Reuses the SHARED stage-1 fields (``_eke_stage1_fields``: rho + tapered
+    isopycnal slopes via the same helpers the GM/Redi tendency uses) and the
+    shared column integrals (``compute_geometric_column_integrals``), then
+    the pure GEOMETRIC formulas from ``eke.py``:
+
+      kappa_gm  = alpha·∫E dz / max(∫M²/N dz, mn_floor)        (Eq. 6, 2-D)
+      kappa_n   = Gamma·min(R_d, l_mix_max)·√(2·∫E dz/H)       (Eq. 7, 2-D;
+                  ``None`` unless ``geometric.kappa_n_coupling``)
+      B_C       = kappa_gm·∫M⁴/N² dz                           (Eq. 2) [m³/s³]
+      L_eff     = R_d·√H  (the Eq.-4 dissipation folded as the
+                  ``eke_apply_local_source`` implicit rate
+                  ``c_eps_geometric·√I/L_eff = C_eps·√(I/H)/R_d``)
+      R_d       = clip(rossby_factor·∫N dz/|f|, 2-40 km)       (Appendix D)
+
+    Both kappas are wet-masked AFTER clipping (dry columns contribute exactly
+    zero diffusivity — the same convention as ``compute_visbeck_kappa_gm``).
+
+    Returns ``(eke_int, kappa_gm, kappa_n_or_None, production_bc, L_eff,
+    dz_actual)`` — the first five 2-D ``(n_lat, n_lon)``; ``dz_actual``
+    ``(n_lat, n_lon, nlev)`` is the cell-centre thickness measure
+    (``dz_ref·jacobian``) the step feeds to
+    :func:`geometric_barotropic_production`, so the B_T (Eq. 3) depth
+    integral uses the SAME measure as the other column integrals.
+    """
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        compute_geometric_column_integrals,
+    )
+    from legoesm.ocean.physics.lateral_mixing.eke import (
+        geometric_dissipation_length,
+        geometric_kappa_gm,
+        geometric_kappa_n,
+        geometric_rossby_radius,
+    )
+
+    geom = cfg.eke.geometric
+    (mask, jacobian, rho, S_x, S_y, f_coriolis, _beta,
+     T_eos, S_eos, p_cell, eos_for_n2) = _eke_stage1_fields(
+        T, S, eta, H_bathy, grid, z_coord, cfg,
+        eos=eos, eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
+        omega=omega, r_earth=r_earth,
+    )
+    int_sigma2_dz, int_sigma_dz, int_N_dz, H_col, wet_col = (
+        compute_geometric_column_integrals(
+            rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg.visbeck,
+            rho_ref=rho_0, n2_mode=getattr(cfg.eke, "n2_mode", "insitu"),
+            n2_over_dzw=getattr(cfg.eke, "n2_over_dzw", False),
+            T=T_eos, S=S_eos, p_cell=p_cell, eos_fn=eos_for_n2,
+        ))
+    if eke_int is None:
+        # Cold start: ∫EKE dz = e0_per_depth·H (Torres et al. 2025 App. E,
+        # p. 35: "10⁻⁶·h in m³/s²"), zero on land.
+        eke_int = geom.e0_per_depth * H_col * mask
+    r_d = geometric_rossby_radius(int_N_dz, f_coriolis, geom)
+    kappa_gm = geometric_kappa_gm(eke_int, int_sigma_dz, geom)
+    kappa_gm = jnp.where(wet_col, kappa_gm, 0.0)
+    kappa_n = None
+    if geom.kappa_n_coupling:
+        kappa_n = geometric_kappa_n(eke_int, H_col, r_d, geom)
+        kappa_n = jnp.where(wet_col, kappa_n, 0.0)
+    production_bc = kappa_gm * int_sigma2_dz          # Eq. 2 [m³/s³], ≥ 0
+    L_eff = geometric_dissipation_length(r_d, H_col)
+    # Cell-centre thickness measure for the B_T depth integral (the same
+    # metric assembly as compute_geometric_column_integrals).
+    dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
+    return eke_int, kappa_gm, kappa_n, production_bc, L_eff, dz_actual
+
+
+def geometric_barotropic_production(
+    u, v, grid, kappa_u, dz_actual, mask, u_mask, v_mask, *, z_coord=None,
+):
+    """GEOMETRIC barotropic EKE production ``B_T = ∫kappa_u·|∇h u_h|² dz``
+    (Torres et al. 2025, Eq. 3, p. 4; kappa_u = 1500 m²/s calibrated,
+    Appendix E p. 38) at cell centres [m³/s³], ≥ 0 by construction.
+
+    ``kappa_u·|∇h u_h|²`` is EXACTLY the positive-definite component-wise
+    flux-form dissipation density the K_diss_h machinery already provides
+    (``flux_divergence_viscosity_cgrid(want_dissipation=True)``, Veros
+    ``calc_diss_u``/``calc_diss_v`` analogue) with the viscosity replaced by
+    the eddy momentum diffusivity ``kappa_u`` and NO cos-power scaling
+    (kappa_u is constant in the paper) — reused, not re-derived.  The unused
+    viscous tendencies it also returns are discarded (a small constant-factor
+    overhead, once per step).  NOTE: that operator raises on tripolar grids;
+    the GEOMETRIC closure inherits the restriction (regular lat-lon only).
+
+    On a PARTIAL-CELL coordinate (``z_coord`` given) the gradients are
+    masked with the PER-LEVEL 3-D face masks (``compute_face_masks_3d``) and
+    per-level-masked velocities — the SAME fix as the K_diss_h flux-form
+    source (ocean_pe_latlon_cgrid): 2-D-only masks treat a face that is
+    closed at depth (topographic step) as a u=0 wall, crediting a spurious
+    no-slip shear ``|∇u|²`` to the EKE source (probe-measured +37% of the
+    production-path EKE source on the global_4deg yr-3 state).  Full-cell
+    coordinates: 3-D masks are all-ones ⇒ identical to the 2-D path.
+
+    Parameters
+    ----------
+    u, v : 3-D face velocities (n_lat, n_lon+1, nlev) / (n_lat+1, n_lon, nlev).
+    kappa_u : float (or traced scalar) — eddy momentum diffusivity [m²/s].
+    dz_actual : (n_lat, n_lon, nlev) cell-centre layer thicknesses [m]
+        (dz_ref·jacobian — the same measure as the other column integrals).
+    mask / u_mask / v_mask : 2-D wet masks (centres / u-faces / v-faces).
+    z_coord : optional vertical coordinate; when an
+        ``OceanPartialCellCoordinate``, its ``is_active`` drives the 3-D
+        face masks (free-slip at topographic steps).
+
+    Returns
+    -------
+    B_T : (n_lat, n_lon) ≥ 0 [m³/s³].
+    """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        flux_divergence_viscosity_cgrid,
+    )
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        um3, vm3 = compute_face_masks_3d(z_coord.is_active, grid)
+        um, vm = um3.astype(u.dtype), vm3.astype(v.dtype)
+        u_eff, v_eff = u * um, v * vm
+    else:
+        um, vm = u_mask, v_mask
+        u_eff, v_eff = u, v
+    _vu, _vv, diss = flux_divergence_viscosity_cgrid(
+        u_eff, v_eff, grid, kappa_u, cos_power=0,
+        mask=mask, u_mask=um, v_mask=vm, want_dissipation=True,
+    )
+    # Depth integral with the cell-centre thickness measure; diss is already
+    # centre-masked by the operator, the dz product re-applies the 2-D mask.
+    return jnp.sum(diss * dz_actual, axis=-1) * mask

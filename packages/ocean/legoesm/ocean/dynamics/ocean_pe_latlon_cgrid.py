@@ -1884,10 +1884,29 @@ def _bc_horizontal_viscosity(
                 "lateral_viscosity_operator='vector_laplacian'."
             )
         _cos_p = config.A_h_cos_power if config.A_h_lat_scaling else 0
+        # PER-LEVEL face masks (variable bathymetry): with only the 2-D
+        # u_mask/v_mask the operator computes a flux across faces that are
+        # CLOSED at depth at topographic steps — a spurious no-slip wall
+        # stress (momentum leak into rock) whose dissipation the K_diss_h
+        # diagnostic then credits to EKE (global_4deg yr-3 state: +6.7e12 W
+        # = 37% of the production-path EKE source; probe_kdiss_3dmask.py).
+        # Veros multiplies every flux by the per-level maskU/maskV
+        # (friction.py:390-403) — free-slip at steps, zero credit.  Pass the
+        # 3-D face masks (and per-level-masked velocities) instead.  Pure
+        # z-star / flat bottom: masks are all-ones ⇒ bit-identical.
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            _fd_um3, _fd_vm3 = compute_face_masks_3d(z_coord.is_active, grid)
+            _fd_um = _fd_um3.astype(u.dtype)
+            _fd_vm = _fd_vm3.astype(v.dtype)
+            _fd_u = u * _fd_um
+            _fd_v = v * _fd_vm
+        else:
+            _fd_um, _fd_vm = u_mask, v_mask
+            _fd_u, _fd_v = u, v
         diag_Ah_lap_u, diag_Ah_lap_v, _kdiss_fluxdiv_cell = (
             flux_divergence_viscosity_cgrid(
-                u, v, grid, config.A_h, cos_power=_cos_p,
-                mask=mask, u_mask=u_mask, v_mask=v_mask,
+                _fd_u, _fd_v, grid, config.A_h, cos_power=_cos_p,
+                mask=mask, u_mask=_fd_um, v_mask=_fd_vm,
                 want_dissipation=_want_kdiss_flux,
             )
         )
