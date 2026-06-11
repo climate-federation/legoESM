@@ -22,6 +22,7 @@ import pytest
 from legoesm.parallel.mesh import (
     staggered_blocks_to_face,
     staggered_tile_block,
+    tiled_face_block,
 )
 
 KTS = (2, 3)
@@ -56,6 +57,40 @@ def test_staggered_roundtrip_identity(kt, stag_axis):
 
     back = staggered_blocks_to_face(blocks, kt, stag_axis)
     np.testing.assert_array_equal(np.asarray(back), np.asarray(face))
+
+
+@pytest.mark.parametrize("kt", KTS)
+@pytest.mark.parametrize("shape_kind", ("cell", "corner", "edge_x", "edge_y"))
+def test_tiled_face_block_infers_staggering(kt, shape_kind):
+    """tiled_face_block must slice every cdgrid metric staggering with
+    the right local extents and reassemble (centered axes tile exactly;
+    staggered axes duplicate the shared entry)."""
+    n = kt * NL
+    dims = {
+        "cell": (n, n), "corner": (n + 1, n + 1),
+        "edge_x": (n, n + 1), "edge_y": (n + 1, n),
+    }[shape_kind]
+    rng = np.random.default_rng(5)
+    face = jnp.asarray(rng.standard_normal(dims + (2,)))
+
+    want_a = NL + (1 if dims[0] == n + 1 else 0)
+    want_b = NL + (1 if dims[1] == n + 1 else 0)
+    for ti in range(kt):
+        for tj in range(kt):
+            blk = tiled_face_block(face, ti, tj, NL, kt)
+            assert blk.shape == (want_a, want_b, 2), (
+                f"{shape_kind} kt={kt} tile ({ti},{tj}) wrong block shape")
+            # Interior cells must equal the global slice (no offset bug).
+            np.testing.assert_array_equal(
+                np.asarray(blk[:NL, :NL]),
+                np.asarray(face[ti * NL: ti * NL + NL,
+                                tj * NL: tj * NL + NL]))
+
+
+def test_tiled_face_block_rejects_bad_axis():
+    face = jnp.zeros((7, 8, 2))  # 7 is neither 2*3 nor 2*3+1
+    with pytest.raises(ValueError, match="neither"):
+        tiled_face_block(face, 0, 0, nl=3, kt=2)
 
 
 def test_shard_pytree_staggered_face_only_no_indivisible():

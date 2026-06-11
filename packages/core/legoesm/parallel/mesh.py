@@ -863,6 +863,40 @@ def shard_pytree(pytree, config: DeviceConfig):
 # 1..nl for ti > 0; tile 0 contributes rows 0..nl).
 
 
+def tiled_face_block(face_arr, ti: int, tj: int, nl: int, kt: int):
+    """Slice tile (ti, tj)'s block from ANY single-face metric array,
+    inferring per-axis staggering from the shape.
+
+    A cdgrid carries cell (n, n), corner (n+1, n+1), and edge
+    (n, n+1)/(n+1, n) face arrays.  Each horizontal axis is either
+    CENTERED (size kt*nl) -> nl local cells, or STAGGERED (size
+    kt*nl+1) -> nl+1 local cells DUPLICATING the shared boundary entry
+    between neighbouring tiles (Pace layout).  The single source of
+    truth for slicing every metric the tiled shard_map stage needs.
+
+    face_arr : (A, B, ...) with A, B in {kt*nl, kt*nl+1}.
+    Returns the (a, b, ...) tile block (a = nl[+1], b = nl[+1]).
+    """
+    a, b = face_arr.shape[0], face_arr.shape[1]
+    if a == kt * nl:
+        i0, i1 = ti * nl, (ti + 1) * nl
+    elif a == kt * nl + 1:
+        i0, i1 = ti * nl, ti * nl + nl + 1
+    else:
+        raise ValueError(
+            f"axis 0 size {a} is neither kt*nl={kt * nl} (centered) nor "
+            f"kt*nl+1={kt * nl + 1} (staggered) for kt={kt}, nl={nl}.")
+    if b == kt * nl:
+        j0, j1 = tj * nl, (tj + 1) * nl
+    elif b == kt * nl + 1:
+        j0, j1 = tj * nl, tj * nl + nl + 1
+    else:
+        raise ValueError(
+            f"axis 1 size {b} is neither kt*nl={kt * nl} (centered) nor "
+            f"kt*nl+1={kt * nl + 1} (staggered) for kt={kt}, nl={nl}.")
+    return face_arr[i0:i1, j0:j1]
+
+
 def staggered_tile_block(face_arr, ti: int, tj: int, nl: int,
                          stag_axis: int):
     """Slice tile (ti, tj)'s duplicated-row staggered block.
