@@ -79,3 +79,7 @@ class FastSBMConfig(NamedTuple):
     # Ice-spectrum reconstruction number floor [1/m^3] (carried q_i → ice
     # spectrum for melting; single-moment ice closure).
     ice_number_floor: float = 1.0e4
+    # Ice-ice aggregation (self-collection → snow) collection efficiency
+    # [-], scaling the Bott kernel. ~0.1 reflects the lower sticking
+    # efficiency of ice crystals vs liquid coalescence.
+    ice_aggregation_efficiency: float = 0.1

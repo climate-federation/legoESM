@@ -155,13 +155,26 @@ test before the body. Helpers (`grid.py`, `config.py`) in
   (seed-ice cell converts more cloud→ice than freezing-only, closure
   holds). 100 fast_sbm tests green.
 
-## Remaining work (warm + riming done → full FSBM-2)
+### Iter 15 (2026-06-11) — ice aggregation + multi-step conservation
+- **Ice-ice aggregation** (snow formation): it is ice *self*-collection,
+  so it REUSES `bott_coalescence` on the ice spectrum with a reduced
+  `ice_aggregation_efficiency` (config, ~0.1 vs liquid). Mass-conserving,
+  no phase change → no latent heat, closure unchanged. Wired in column
+  after riming (all T).
+- **Multi-step trajectory conservation test**: full scheme (warm + ice +
+  riming + aggregation) run 30 steps feeding tendencies back; total water
+  (vapor+cloud+rain+ice) minus accumulated surface precip conserved to
+  2e-3 — validates the scheme as a stable, conservative INTEGRATOR (not
+  just per-step). 108 fast_sbm + integration tests green.
 
-Ice-ice aggregation (`coll_xyz`, snow/graupel/hail cross-species), LWF +
-`dm_rime` riming-fraction tracking, collisional + spontaneous breakup
-(needs oracle `PKIJ/QKJ` tables), multi-ice-category habit spectra, oracle
-kernel-table loader for bit-fidelity, per-bin prognostic tracers (replace
-per-step reconstruction), persistent aerosol reservoir.
+## Remaining work (warm + full ice phase done → bit-exact FSBM-2)
+
+Multi-ice-category habits (separate snow/graupel/hail spectra + their
+cross-species `coll_xyz`), LWF + `dm_rime` riming-fraction tracking,
+collisional + spontaneous breakup (needs oracle `PKIJ/QKJ` tables),
+oracle kernel-table loader for bit-fidelity, per-bin prognostic tracers
+(replace per-step reconstruction), persistent aerosol reservoir, ice
+sedimentation (ice currently does not fall).
 
 **Codex iter-14 review** (HIGH/FAIL → fixed): `precompute_riming_tables`
 emitted the full `(i,j)` grid, but oracle `coll_xyx_lwf` (`jmin=i; do

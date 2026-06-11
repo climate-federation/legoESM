@@ -292,11 +292,19 @@ def fast_sbm_microphysics(
             g_from_f(f_ice_pre_rime, masses), g_from_f(f1_liq, masses),
             ck, masses, rime_tables)
         supercooled = T_c < constants.T_freeze
-        f_ice_final = jnp.where(supercooled, f_from_g(g_ice_r, masses),
+        f_ice_rimed = jnp.where(supercooled, f_from_g(g_ice_r, masses),
                                 f_ice_pre_rime)
         f1_liq = jnp.where(supercooled, f_from_g(g_liq_r, masses), f1_liq)
         rimed = (liq_before_rime - mass_density(f1_liq, masses)) / rho_c
         dT_rime = (constants.L_f / constants.c_pd) * rimed
+        # ICE-ICE AGGREGATION (ice self-collection → snow): the Bott
+        # self-collection operator on the ice spectrum, with a reduced
+        # ice-ice collection efficiency. Mass-conserving, no phase change
+        # (ice→ice), so no latent heat and the closure is unaffected.
+        ck_ice = ck * config.ice_aggregation_efficiency
+        f_ice_final = f_from_g(
+            bott_coalescence(g_from_f(f_ice_rimed, masses), ck_ice, masses,
+                             tables), masses)
         # Net ice change carried to q_i (melt consumes, freeze + rime
         # produce).
         dq_i_dt_c = (mass_density(f_ice_final, masses) / rho_c - qi_c) / dt

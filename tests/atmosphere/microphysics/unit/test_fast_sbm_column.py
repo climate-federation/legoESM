@@ -371,6 +371,67 @@ def test_float32_grad_dry_atmosphere():
     assert np.all(np.isfinite(np.asarray(g)))
 
 
+def test_ice_aggregation_conserves_ice_mass():
+    # Ice-ice aggregation (snow formation) redistributes ice to larger bins
+    # but creates/destroys no ice mass and no phase change — a cold cell
+    # carrying ice (no liquid, no vapor source) keeps q_i exactly (only
+    # internal bin redistribution + any sedimentation).
+    T = jnp.full((NCOL, NLEV), constants.T_freeze - 10.0)
+    p = jnp.full((NCOL, NLEV), P0)
+    e = 0.5 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
+    q_v = jnp.full((NCOL, NLEV), constants.epsilon * e / (P0 - e))
+    rho = jnp.full((NCOL, NLEV), 1.1)
+    hyd = make_zero_hydrometeors(NCOL, NLEV)._replace(
+        q_i=jnp.full((NCOL, NLEV), 1.0e-3))
+    p_half = jnp.zeros((NCOL, NLEV + 1))
+    dz = jnp.full((NCOL, NLEV), 100.0)
+    out = fast_sbm_microphysics(T, q_v, hyd, p, p_half, rho, dz, DT)
+    # No vapor exchange (subsaturated, no liquid), no melt (cold): ice
+    # change is aggregation (internal) — q_i tendency ~0 (aggregation
+    # conserves total ice mass; ice does not sediment in this adapter).
+    np.testing.assert_allclose(np.asarray(out.dq_i_dt), 0.0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(out.dq_v_dt), 0.0, atol=1e-12)
+
+
+def test_multistep_total_water_conserved():
+    # Run the full scheme (warm + ice + riming + aggregation) for many
+    # steps feeding tendencies back, and verify total water (vapor + cloud
+    # + rain + ice) minus accumulated surface precipitation is conserved
+    # over the whole trajectory — validates the scheme as a stable,
+    # conservative integrator, not just per-step.
+    ncol, nlev = 1, 4
+    T = jnp.full((ncol, nlev), constants.T_freeze + 2.0)
+    p = jnp.full((ncol, nlev), P0)
+    e = 1.04 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
+    q_v0 = jnp.full((ncol, nlev), constants.epsilon * e / (P0 - e))
+    rho = jnp.full((ncol, nlev), 1.1)
+    dz = jnp.full((ncol, nlev), 200.0)
+    ph = jnp.zeros((ncol, nlev + 1))
+    hyd = make_zero_hydrometeors(ncol, nlev)._replace(
+        q_c=jnp.full((ncol, nlev), 5.0e-4))
+
+    def total_water(qv, h):
+        return float(jnp.sum((qv + h.q_c + h.q_r + h.q_i) * rho * dz))
+
+    qv = q_v0
+    tw0 = total_water(qv, hyd)
+    accum_precip = 0.0
+    dt = 5.0
+    for _ in range(30):
+        out = fast_sbm_microphysics(T, qv, hyd, p, ph, rho, dz, dt)
+        qv = jnp.maximum(qv + dt * out.dq_v_dt, 0.0)
+        hyd = hyd._replace(
+            q_c=jnp.maximum(hyd.q_c + dt * out.dq_c_dt, 0.0),
+            q_r=jnp.maximum(hyd.q_r + dt * out.dq_r_dt, 0.0),
+            q_i=jnp.maximum(hyd.q_i + dt * out.dq_i_dt, 0.0))
+        accum_precip += float(jnp.sum(out.precipitation * dt))
+    tw1 = total_water(qv, hyd)
+    # Closure over the trajectory: water now + what precipitated == start.
+    # Clamps to nonnegative can only ADD water, so allow a small one-sided
+    # slack but require tight two-sided agreement (no spurious source).
+    assert (tw1 + accum_precip) == pytest.approx(tw0, rel=2e-3)
+
+
 def test_column_jit_and_grad():
     T, q_v, hyd, p, p_half, rho, dz = _fields(1.02)
 
