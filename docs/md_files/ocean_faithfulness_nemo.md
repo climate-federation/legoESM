@@ -623,6 +623,135 @@ seam-fixed tripole 2yr (8457733, NCAR fluxes + --ew-cyclic-overlap), latlon 1° 
 mpas ico6 2yr (8455138). PNG-on-completion promised to user. Each iter-H change: codex adversarial
 review + tests + smoke before production (CLAUDE.md).
 
+### iter-I (2026-06-11): RGB-chlorophyll SW penetration + NEMO under-ice SSS gate (warm-bias + Arctic)
+**Motivation (user: "address the remaining gaps + codex review before implementation"):** y2 residual
+band biases — SH-mid +1.13 / Antarctic +0.59 WARM, NH-mid −0.66 / Arctic −1.02 COLD, Arctic salty SSS
+lid (~33.3 vs NEMO ~30). Two faithful levers identified from NEMO source:
+- **RGB-chl SW penetration** — current scheme was a uniform 2-band Jerlov "Type II"; NEMO ORCA1 uses
+  `ln_qsr_rgb, nn_chldta=1, nn_chlprfl=1` (IR + R/G/B bands, chlorophyll-dependent extinction via the
+  Morel & Maritorena 61-class table + Morel-Berthon vertical profile). Clear low-Chl subtropical water
+  penetrates ~60 m (cools the WARM bias); productive high-Chl subpolar water traps light near the
+  surface (helps the COLD bias). The real monthly ESACCI Chl file is on disk (INPUTS copy; the EXP00
+  symlinks are broken to a build-host path): `CHLA(12,361,721)`, 0.5°, 0.007–6 mg/m³.
+- **SSS-restoring under-ice gate** — NEMO `sbcssr nn_sssr_ice=0` is exactly `coefice = 1 − fr_i`; our
+  default was a sharper tanh×(1−fr_i). New `ice_gate_mode="nemo_linear"`. NOTE (honest): this aligns
+  the gate but the Arctic salty lid is dominated by MISSING freshwater (Arctic rivers + ice-melt under
+  prescribed ice), so this is a faithfulness fix, not expected to close the lid alone — freshwater-
+  budget diagnosis is the higher-leverage follow-up.
+
+**Codex BEFORE implementation (design review, per user):** 4 BLOCKER + 12 HIGH/MED. Decisive fix —
+my closed-form-reference-depth shortcut was wrong over bathymetry (optical depths off ~11× on shelves);
+adopted NEMO's true per-level recursion with LIVE z*/partial-cell `dz` + `wmask` (cumulative optical
+depth), which resolves 4 findings at once and enables the Morel-Berthon profile. Codex POST-impl: all
+4 blockers confirmed resolved; 4 new findings fixed (test passed `dz` not `gdepw`; chl-regrid excludes
+non-positive source cells; symmetric scheme guard on the RGB kernel; combined.py rgb fails loud).
+
+**Implementation (faithful port):** `ocean/physics/shortwave_penetration.py` — NEMO 61×3 table
+(verbatim from `trc_oce.F90`), `_rgb_class_row` (NEMO `NINT(41+20log10 Chl)`, Chl∈[0.03,10]),
+`_morel_berthon_chl_column` (nn_chlprfl=1 polynomials), `shortwave_penetration_rgb_tendency` (live-dz
+recursion, no-flux bottom = 100% column heat closure), hardened `apply_shortwave_penetration`
+dispatcher + `__physics_contract__`. Wiring: `OceanSurfaceForcing.chl`; PE C-grid step switches to
+rgb_chl when chl is set (NO 0.94 skin split — NEMO partitions 100% of qsr); `run_omip_core2.py`
+`--sw-rgb-chl`/`--chl-file` + `load_nemo_chl_monthly` (reuses curvilinear IDW, monthly). SSS:
+`SSSRestoringConfig.ice_gate_mode` + `--sss-ice-gate-nemo`. Tests: `test_rgb_chl_penetration.py`
+(independent NumPy NEMO-recursion mirror, class-index regression, exact column closure, partial-wet
+bottom deposit, Morel-Berthon vs polynomial) + 3 SSS nemo-linear tests. latlon/tripole only.
+**Status: COMMITTED 39a8d165 (139 unit tests pass, codex-clean). Committed via index surgery —
+reconstructed my hunks on HEAD for the 2 files entangled with a concurrent MPI/PCG session
+(ocean_pe_latlon_cgrid.py, state.py), staged HEAD+mine, restored worktree; commit holds ONLY my 8
+files (843+/16−, 0 concurrent markers); the concurrent session's ~192 uncommitted edits untouched.
+NOT pushed (no PR requested this turn). Next production round: add `--sw-rgb-chl --sss-ice-gate-nemo`
+to the tripole stack once the ppm×BBL bisect resolves (full_tvd 8459834 is the day-360 discriminator;
+bblppm 120-d smoke too short to reproduce the day-360 NaN).**
+
+### Transport readers (2026-06-11, both runs): MHT reader confirmed suspect, NOT a clean fix
+latlon ACC@Drake 101.6 Sv / MHT-NH-peak 6.56 PW; mpas ACC 144.5 Sv / MHT 3.08 PW (obs ACC ~137,
+MHT ~1.8 PW). MHT 6.56 PW is unphysical (ocean NH peak ~1.3 PW); the factor-2 grid dependence
+(latlon vs mpas, same `meridional_heat_transport` formula) points to an unremoved per-latitude NET
+MASS FLUX — the degC-referenced integral `ρ0·cp·Σ v·θ_v·h_v·dx_v` is reference-independent ONLY if
+`Σ v·h·dx = 0` per latitude, which the free-surface/barotropic imbalance violates (worse on latlon).
+The textbook fix subtracts the section-mean v before the heat integral. CAVEAT blocking a quick fix:
+`diagnostics_streamfunction.meridional_heat_transport` docstring says it deliberately mirrors the
+offline `nemo_transports.mht_core` for apples-to-apples — so mass-balancing legoESM but not NEMO would
+break the comparison. Proper task = add mass-balancing to BOTH readers (+ codex + test), a focused
+follow-up, not a loop-idle edit. ACC@Drake reader: mpas 144 is good; latlon 101 low (Drake sectioning
+on the regular grid). Deferred together as the "curvilinear ACC/MHT reader audit".
+
+### mpas ico6 2yr NCAR SCORED (8455138 COMPLETED 730d, 2026-06-11): SST RMSE 1.598 "good"
+vs NEMO annual: bias +0.137, corr 0.988. Bands: Antarctic +0.77, SH-mid +1.11 WARM, tropics +0.35,
+NH-mid −1.24 / Arctic −1.38 COLD — **same SH-warm/NH-cold dipole as tripole+latlon** (RGB-chl targets
+all three). **SSS DRIFT DIAGNOSED (loop deliverable):** global mean SSS drifts DOWN 34.05→33.34 over
+the last 280 d (~0.7 psu/yr); the SSS map shows it is **Arctic OVER-FRESHENING** (diff −30 psu;
+legoESM Arctic ~0-15 vs NEMO ~30) — the OPPOSITE sign of latlon's salty Hudson Bay lid. Mechanism:
+restoring is gated OFF under the ice pack (tanh@0.9) + prescribed ice has NO brine-rejection/meltwater
+freshwater balance → P−E freshens the Arctic unbounded with nothing pulling it back to the WOA target.
+The two grids diverge because latlon's restoring holds toward a locally-salty WOA target while mpas's
+Arctic restoring is gated off. FIX needs ice-ocean freshwater coupling (or, stopgap, un-gate Arctic
+restoring) — NOT the nemo_linear gate alone (which would REDUCE under-ice restoring → worsen mpas's
+fresh drift). This is the Arctic-freshwater follow-up; higher-leverage than the gate. PNGs sent.
+max|u| 0.79 physical. cmp dir compare_mpas_y2_ncar.
+
+### latlon 2yr NCAR SCORED (8457282 COMPLETED 730d, 2026-06-11): SST RMSE 1.614 "good"
+vs NEMO annual: bias −0.199, corr 0.988 (tripole y2 was 1.230 excellent — latlon is worse). Bands:
+Antarctic +0.84, SH-mid +1.02 WARM, tropics −0.35, **NH-mid −1.70 / Arctic −1.22 COLD** (stronger
+than tripole). Seam-free (latlon has no ORCA cyclic overlap). Visual: clean SST; **SSS shows a big
+Arctic salty lid over Hudson Bay/Baffin (diff +25 psu)** — legoESM far too salty vs NEMO's fresh,
+plus a too-fresh Baltic spot. Same warm/cold dipole as tripole → the new RGB-chl lever targets both
+signs; the Hudson Bay salty lid needs the Arctic-freshwater follow-up (nemo_linear ice gate is partial).
+PNGs sent. max|u| 0.79 m/s physical (latlon is the calmest grid). cmp dir compare_latlon_y2_ncar.
+
+### iter-H bisect VERDICT trending (2026-06-11): ppm_fct front-sharpening is the day-360 NaN driver
+**Day-90 head-to-head (same full stack, only the tracer advection differs):**
+- `tripole_bblppm_smoke` (8459835, **ppm_fct**): max|u| 0.82→0.92→**1.42** (30/60/90 d), rising; TIMEOUT
+  at day-90 (2.5h walltime, NCAR host fluxes ~1.7 steps/s). Stable so far but the velocity is CLIMBING.
+- `tripole_2yr_full_tvd` (8459834, **tvd**): day-90 max|u| **0.71** — HALF the ppm value, calm.
+**Read:** ppm_fct sharpens fronts → higher velocities → the full-stack max|u| 3.15@day-270 → NaN@day-360.
+tvd is the calmer, safer advection. The queued `--visc-schedule` LOWERS viscosity (1e5→2e4), which would
+make ppm's fronts even livelier → tvd is the clear production choice. NOT yet conclusive — full_tvd must
+clear day-270 (where full-stack+ppm diverged) to confirm; it has ~15h walltime, reaches 2yr ~day-730.
+**Production plan crystallizing:** `--tracer-advection tvd` (NOT ppm_fct) + `--visc-schedule
+0:1e5:0.33,90:5e4:0.33,180:2e4:0.33` + `--sw-rgb-chl` + `--sss-ice-gate-nemo` + seam + runoff-spread +
+river-gate + BBL. Launch once full_tvd passes day-270.
+
+### iter-I BISECT VERDICT — ppm_fct CONFIRMED as the day-360 NaN driver (2026-06-11)
+**full_tvd 8459834 at day-270: max|u| 0.78 m/s, STABLE.** The smoking gun: the original full-stack+ppm
+run (8458811) hit max|u| **3.15 at the SAME day-270** (its NaN precursor → NaN day-360). Same stack,
+only the tracer advection differs (tvd vs ppm_fct) → tvd is **4× calmer** at the exact divergence point.
+ppm_fct's front-sharpening drove the velocity blowup; **tvd is the fix.** Full trajectory: tvd day-90
+0.71 / day-180 1.05 / day-270 0.78 — bounded, no runaway (ppm: day-270 3.15 → NaN day-360). day-360
+(~1.5h) will fully clinch but day-270 already decisive. CONSEQUENCE: the production stack (prod4) uses
+tvd → no day-360 NaN expected; the launch decision validated. ppm_fct retired for tripole OMIP
+production; tvd is the OMIP tracer scheme. (ppm remains available, just too lively at NEMO-class
+viscosity — and the visc-schedule LOWERS viscosity, compounding it.)
+
+### iter-I PRODUCTION 4-lever LAUNCHED (8460258 trp_prod4, 2026-06-11, user-directed "launch those 4")
+tripole 2yr, full_tvd base stack + the 4 levers: `--tracer-advection tvd` (ppm excluded → no day-360
+NaN) + `--visc-schedule 0:1e5:0.33,90:5e4:0.33,180:2e4:0.33` (de-fuzz WBCs, vramp-v3-validated) +
+`--sw-rgb-chl` (RGB chlorophyll SW penetration, commit 39a8d165) + `--sss-ice-gate-nemo`. Output
+`results/omip_nemo/tripole_2yr_prod4`, diag every 30 d, 20 h walltime. Runs ALONGSIDE the full_tvd
+bisect control (8459834) — if prod4 NaNs but full_tvd survives, blame is one of the 3 added levers
+(visc step-down / RGB-chl / SSS-gate); if both survive, the 4-lever stack is the new best. Watch
+windows: cold-start (day 0-30) and the A_h step-downs (day 90, 180). Caveat (told to user): 4 levers
+at once → a NaN won't pinpoint which; each was validated alone. On completion: score vs NEMO + PNGs.
+
+### iter-I MLD diagnostic SET UP (commit a92a21eb, 2026-06-11, user: GMD 16:3849 + codex review)
+Treguier et al. (2023, GMD 16:3849) / de Boyer Montegut (2022) density-threshold mixed-layer-depth
+diagnostic + NEMO `mldr10_1` comparison — a new faithfulness metric beyond SST/SSS.
+- `ocean/diagnostics.mixed_layer_depth`: MLD = shallowest depth below a 10 m reference where
+  sigma_theta exceeds the reference by `delta_sigma`, virtual-(10 m,0) anchor + linear crossing
+  interpolation; reuses `wright_eos` at p=0 (sigma_theta, no re-derivation); wet-aware; fully-mixed →
+  H_bathy; land → NaN. **THRESHOLD GOTCHA:** literature default 0.03 kg/m³, but NEMO ORCA1 `mldr10_1`
+  uses **0.01** wrt 10 m → the comparison uses 0.01 (larger threshold = DEEPER MLD).
+- `_save_snapshot` now stores `H_bathy` + `z_center_ref` (all final/yearNNN sites) → snapshots are
+  MLD-scoreable. **Existing snapshots (tripole/latlon/mpas) + the in-flight prod4 8460258 lack geometry
+  (old save code) → MLD skips for them; the FIRST real MLD-vs-NEMO result auto-activates on the next
+  production run** (post-bisect, new save code).
+- `compare_omip_nemo.py`: reads `mldr10_1`, computes legoESM MLD (0.01, nonlinear EOS), regrids, scores
+  raw RMSE/bias/corr + RMSE(log1p) + median-bias (robust to deep-convection tail), p99-capped maps.
+- Tests: `test_mixed_layer_depth.py` 11 analytic checks, all pass. Codex: design review (4 blockers:
+  threshold-sign, virtual-10m, all-False guard, snapshot geometry) + impl review (missed save site +
+  wet-aware fixes) + round-2 all PASS. No concurrent-session entanglement (clean direct commit).
+
 ## Open work toward maximal faithfulness
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
