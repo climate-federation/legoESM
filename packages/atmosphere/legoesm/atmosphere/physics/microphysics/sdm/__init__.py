@@ -42,6 +42,10 @@ from legoesm.atmosphere.physics.microphysics.sdm.kernels import (
     terminal_velocity_cloud_rain_shima,
     terminal_velocity_rogers_yau,
 )
+from legoesm.atmosphere.physics.microphysics.sdm.coalescence import (
+    coalescence_step,
+    represented_number,
+)
 
 __all__ = [
     "SDMConfig",
@@ -59,4 +63,6 @@ __all__ = [
     "terminal_velocity_rogers_yau",
     "terminal_velocity_atlas_ulbrich",
     "terminal_velocity_cloud_rain_shima",
+    "coalescence_step",
+    "represented_number",
 ]
