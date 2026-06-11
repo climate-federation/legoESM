@@ -2675,7 +2675,7 @@ def main() -> int:
                     return 1
             if snap_every > 0 and step % snap_every == 0 and step != n_steps:
                 _save_snapshot(out_dir, f"day{int(round(day)):04d}",
-                               state, lat2d, lon2d)
+                               state, lat2d, lon2d, z_coord=z_coord)
                 print(f"[snapshot] day {day:.0f} saved", flush=True)
             if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
                 yr = step // steps_per_year
@@ -2869,7 +2869,7 @@ def main() -> int:
                 return 1
         if snap_every > 0 and step % snap_every == 0 and step != n_steps:
             day = step * dt / _SEC_PER_DAY
-            _save_snapshot(out_dir, f"day{int(round(day)):04d}", state, lat2d, lon2d)
+            _save_snapshot(out_dir, f"day{int(round(day)):04d}", state, lat2d, lon2d, z_coord=z_coord)
             print(f"[snapshot] day {day:.0f} saved", flush=True)
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
