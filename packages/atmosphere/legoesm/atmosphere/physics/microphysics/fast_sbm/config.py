@@ -97,3 +97,6 @@ class FastSBMConfig(NamedTuple):
     fall_a_graupel: float = 124.0
     fall_b_graupel: float = 0.66
     rho_graupel: float = 400.0
+    # Foote-du Toit (ρ_ref/ρ_air)^½ density-correction reference [kg/m^3]
+    # (standard WRF near-surface value; the level where the correction = 1).
+    fall_rho_ref: float = 1.2

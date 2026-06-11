@@ -11,7 +11,9 @@ with ``a, b`` the Locatelli & Hobbs (1974) coefficients for that habit and
 ``ρ_cat`` its bulk density (pristine crystals / snow aggregates are low
 density and fall slowly; graupel/hail are dense and fall several times
 faster — the physical reason to carry them as separate categories). The
-``(ρ₀/ρ_air)^½`` Foote-du Toit density correction speeds fall in thin air.
+``(ρ_ref/ρ_air)^½`` Foote-du Toit density correction speeds fall in thin air
+(``fall_rho_ref = 1.2 kg/m³``, the standard WRF/Foote-du Toit near-surface
+reference where the correction is unity).
 
 Coefficients (SI, ``D`` in m, ``V`` in m/s) live in ``FastSBMConfig`` so
 they stay tunable/faithful without module-level magic numbers; the defaults
@@ -60,8 +62,6 @@ __physics_contract__ = {
     ),
 }
 
-# Reference air density for the (ρ₀/ρ)^½ correction [kg/m³].
-_RHO0 = 1.0
 _SIX_OVER_PI = 6.0 / math.pi
 
 
@@ -91,6 +91,6 @@ def ice_fall_speed(
             "(expected 'snow' or 'graupel')")
     diameter = (_SIX_OVER_PI * masses / rho_cat) ** (1.0 / 3.0)
     v_base = a * diameter ** b                       # (n_bins,)
-    rho_corr = jnp.sqrt(_RHO0 / rho_air)             # scalar or (...,)
+    rho_corr = jnp.sqrt(config.fall_rho_ref / rho_air)   # scalar or (...,)
     return v_base * jnp.expand_dims(rho_corr, -1) if jnp.ndim(rho_air) > 0 \
         else v_base * rho_corr

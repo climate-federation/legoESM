@@ -37,20 +37,26 @@ def test_graupel_faster_than_snow_in_precip_regime():
 
 
 def test_physical_magnitudes_at_mm_sizes():
-    # Locatelli-Hobbs range: snow ~0.5 m/s, graupel ~1-3 m/s at ~1-4 mm.
+    # Tight Locatelli-Hobbs SI check (codex iter-2: catch coefficient/unit
+    # errors, not just gross range). At D=1mm, ρ_air=ρ_ref (correction=1):
+    # snow a·(1e-3)^b and graupel a·(1e-3)^b to 1% — pins the exact LH
+    # coefficients, not a loose band.
     cfg = FastSBMConfig()
     m = mass_doubling_grid()
-    # Find a ~1 mm graupel-density particle.
     from legoesm.atmosphere.physics.microphysics.fast_sbm.ice_fall_speed import (
         _SIX_OVER_PI)
-    D_graupel = (_SIX_OVER_PI * np.asarray(m) / cfg.rho_graupel) ** (1 / 3)
-    k = int(np.argmin(np.abs(D_graupel - 1.0e-3)))
-    vg = float(ice_fall_speed(m, jnp.asarray(1.0), "graupel")[k])
-    assert 0.5 < vg < 5.0
-    D_snow = (_SIX_OVER_PI * np.asarray(m) / cfg.rho_snow) ** (1 / 3)
-    ks = int(np.argmin(np.abs(D_snow - 1.0e-3)))
-    vs = float(ice_fall_speed(m, jnp.asarray(1.0), "snow")[ks])
-    assert 0.1 < vs < 1.5
+    rho_ref = jnp.asarray(cfg.fall_rho_ref)        # correction == 1
+    snow_1mm = cfg.fall_a_snow * (1.0e-3) ** cfg.fall_b_snow
+    graupel_1mm = cfg.fall_a_graupel * (1.0e-3) ** cfg.fall_b_graupel
+    assert 0.65 < snow_1mm < 0.75                  # LH aggregate ~0.69 m/s
+    assert 1.25 < graupel_1mm < 1.35               # LH lump graupel ~1.30 m/s
+    # The function reproduces those at the matching bin.
+    D_g = (_SIX_OVER_PI * np.asarray(m) / cfg.rho_graupel) ** (1 / 3)
+    k = int(np.argmin(np.abs(D_g - 1.0e-3)))
+    vg = float(ice_fall_speed(m, rho_ref, "graupel")[k])
+    D_g_k = float((_SIX_OVER_PI * np.asarray(m)[k] / cfg.rho_graupel) ** (1 / 3))
+    assert vg == pytest.approx(
+        cfg.fall_a_graupel * D_g_k ** cfg.fall_b_graupel, rel=1e-12)
 
 
 def test_density_correction_speeds_thin_air():
