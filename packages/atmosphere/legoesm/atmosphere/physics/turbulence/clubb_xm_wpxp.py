@@ -21,8 +21,15 @@ pure / JIT-safe / differentiable.
 from __future__ import annotations
 
 import jax.numpy as jnp
+from legoesm.atmosphere.physics.turbulence.clubb_fill_holes import fill_holes_vertical
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, ddzt, zm2zt
+from legoesm.atmosphere.physics.turbulence.clubb_mfl import (
+    MFL_UM,
+    MFL_VM,
+    monotonic_turbulent_flux_limit,
+)
 from legoesm.atmosphere.physics.turbulence.clubb_moments import (
+    clip_covar,
     diffusion_zm_lhs,
     term_ma_zm_lhs,
     term_ma_zt_lhs_upwind,
@@ -101,6 +108,64 @@ def calc_xm_wpxp_lhs_terms(wm_zm, wm_zt, wp2, Kw6, nu6, C7_Skw_fnc,
         lhs_tp=wpxp_term_tp_lhs(wp2, gr),
         lhs_ac_pr2=wpxp_terms_ac_pr2_lhs(C7_Skw_fnc, wm_zt, gr),
     )
+
+
+def solve_xm_wpxp_with_single_lhs(wpxp, xm, wpxp_forcing, xm_forcing, C6_Skw_fnc,
+                                  C7_Skw_fnc, invrs_tau_C6_zm, lhs_ta_wpxp,
+                                  lhs_diff_zm, lhs_ma_zm, lhs_ma_zt, lhs_ta_xm,
+                                  lhs_tp, lhs_ac_pr2, thv_ds_zm, xpthvp, wm_zt,
+                                  dt, gr: CLUBBGrid, wp2=None, xp2_relaxed=None):
+    """Solve one xm/w'x' variable pair (``solve_xm_wpxp_with_single_lhs``).
+
+    Builds the field-specific pressure-1 LHS and buoyancy/pr3 RHS, assembles the
+    coupled penta system with the shared LHS terms, solves + de-interleaves, and
+    (if ``wp2``/``xp2_relaxed`` given) applies the Cauchy-Schwarz flux clip.
+    ``rhs_ta = 0`` for ADG1. Returns ``(wpxp_new, xm_new)``.
+    """
+    lhs_pr1 = wpxp_term_pr1_lhs(C6_Skw_fnc, invrs_tau_C6_zm)
+    rhs_bp_pr3 = wpxp_terms_bp_pr3_rhs(C7_Skw_fnc, thv_ds_zm, xpthvp)
+    rhs_ta = jnp.zeros_like(wpxp)
+    lhs = xm_wpxp_lhs(lhs_diff_zm, lhs_ma_zm, lhs_ma_zt, lhs_ta_wpxp, lhs_ta_xm,
+                      lhs_tp, lhs_ac_pr2, lhs_pr1, dt)
+    rhs = xm_wpxp_rhs(wpxp, xm, wpxp_forcing, xm_forcing, rhs_bp_pr3, rhs_ta,
+                      lhs_ta_wpxp, lhs_pr1, dt, k_lb_zm=0)
+    wpxp_new, xm_new = xm_wpxp_solve(lhs, rhs)
+    if wp2 is not None and xp2_relaxed is not None:
+        wpxp_new = clip_covar(wpxp_new, wp2, xp2_relaxed)
+    return wpxp_new, xm_new
+
+
+def xm_wpxp_clipping_and_stats(solve_type, xm, wpxp_preclip, xm_old, xp2, xp2_clip,
+                               wp2, wm_zt, xm_forcing, rho_ds_zm, rho_ds_zt,
+                               invrs_rho_ds_zm, invrs_rho_ds_zt, xp2_threshold,
+                               xm_tol, low_lev_effect, high_lev_effect, field_tol,
+                               fill_holes_type, l_mono_flux_lim, dt, gr: CLUBBGrid):
+    """Per-field post-solve clipping for advance_xm_wpxp (``xm_wpxp_clipping_and_stats``).
+
+    Applied once per scalar after its solve: (1) the monotonic turbulent-flux
+    limiter (no-op unless ``l_mono_flux_lim``; adjusts both ``xm`` and the flux),
+    (2) ``fill_holes_vertical`` on the mean field (gated ``fill_holes_type != 0``
+    and not a wind component), (3) the Cauchy-Schwarz flux clip (``clip_covar``,
+    bounded by ``wp2``/``xp2_clip``). ``solve_type``/``fill_holes_type``/
+    ``l_mono_flux_lim`` are static. Returns ``(xm, wpxp)``.
+
+    CAM gating: ``l_pos_def = .false.`` (the CLUBB default — absent from the CAM
+    namelist), so the Fortran's RTM ``pos_definite_adj`` branch (which would
+    adjust both ``xm`` and ``wpxp`` when the new mean goes negative) is OUT of the
+    CAM-default tree and not ported; CLUBB-JAX omits it identically (verified by
+    the bit-exact ``xm_wpxp_clipping_and_stats`` parity test).
+    """
+    if l_mono_flux_lim:
+        xm, wpxp_preclip = monotonic_turbulent_flux_limit(
+            solve_type, xm, wpxp_preclip, xm_old, xp2, wm_zt, xm_forcing,
+            rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
+            xp2_threshold, xm_tol, low_lev_effect, high_lev_effect, gr, dt)
+    if fill_holes_type != 0 and solve_type not in (MFL_UM, MFL_VM):
+        nzt = xm.shape[1]
+        xm = fill_holes_vertical(xm, rho_ds_zt, gr.dzt, field_tol, 0, nzt - 1,
+                                 fill_holes_type)
+    wpxp = clip_covar(wpxp_preclip, wp2, xp2_clip)
+    return xm, wpxp
 
 
 def diagnose_upxp(ypwp, xm, wpxp, ym, C6x_Skw_fnc, tau_C6_zm, C7_Skw_fnc, gr: CLUBBGrid):
@@ -281,5 +346,7 @@ __all__ = [
     "xpyp_term_ta_pdf_lhs_centered",
     "calc_xm_wpxp_ta_terms",
     "calc_xm_wpxp_lhs_terms",
+    "solve_xm_wpxp_with_single_lhs",
+    "xm_wpxp_clipping_and_stats",
     "diagnose_upxp",
 ]

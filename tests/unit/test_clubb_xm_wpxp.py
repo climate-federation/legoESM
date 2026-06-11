@@ -392,5 +392,117 @@ def test_centered_ta_uniform_grid_and_jit():
     assert jnp.all(jnp.isfinite(jax.grad(loss)(p["wp3_on_wp2_zt"])))
 
 
+# --------------------------------------------------------------------------
+# solve_xm_wpxp_with_single_lhs + xm_wpxp_clipping_and_stats
+# --------------------------------------------------------------------------
+
+def _solve_inputs(gr, ng, nzm, seed=12):
+    nzt = nzm - 1
+    rng = np.random.default_rng(seed)
+    return dict(
+        wpxp=jnp.asarray(0.02 * rng.standard_normal((ng, nzm))),
+        xm=jnp.asarray(290.0 + rng.standard_normal((ng, nzt))),
+        wpxp_forcing=jnp.asarray(1e-5 * rng.standard_normal((ng, nzm))),
+        xm_forcing=jnp.asarray(1e-4 * rng.standard_normal((ng, nzt))),
+        C6_Skw_fnc=jnp.asarray(4.0 + rng.random((ng, nzm))),
+        C7_Skw_fnc=jnp.asarray(0.3 + 0.2 * rng.random((ng, nzm))),
+        invrs_tau_C6_zm=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
+        lhs_ta_wpxp=jnp.asarray(rng.standard_normal((3, ng, nzm))),
+        lhs_diff_zm=jnp.asarray(rng.standard_normal((3, ng, nzm))),
+        lhs_ma_zm=jnp.asarray(rng.standard_normal((3, ng, nzm))),
+        lhs_ma_zt=jnp.asarray(rng.standard_normal((3, ng, nzt))),
+        lhs_ta_xm=jnp.asarray(rng.standard_normal((2, ng, nzt))),
+        lhs_tp=jnp.asarray(rng.standard_normal((2, ng, nzm))),
+        lhs_ac_pr2=jnp.asarray(rng.standard_normal((ng, nzm))),
+        thv_ds_zm=jnp.asarray(300.0 + rng.standard_normal((ng, nzm))),
+        xpthvp=jnp.asarray(0.02 * rng.standard_normal((ng, nzm))),
+        wm_zt=jnp.asarray(0.02 * rng.standard_normal((ng, nzt))),
+        dt=300.0,
+    )
+
+
+def test_solve_runs_and_shapes():
+    gr, ng, nzm = _gr()
+    p = _solve_inputs(gr, ng, nzm)
+    wpxp, xm = X.solve_xm_wpxp_with_single_lhs(gr=gr, **p)
+    assert wpxp.shape == (ng, nzm) and xm.shape == (ng, nzm - 1)
+    assert np.all(np.isfinite(np.asarray(wpxp))) and np.all(np.isfinite(np.asarray(xm)))
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_solve_parity():
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_xm_wpxp_module as R  # noqa: N812
+    from legoesm import constants
+    # wpxp_terms_bp_pr3_rhs binds grav as a def-time default kwarg (CLUBB 9.81);
+    # rebind it to legoESM g so parity isolates numerics from the constant basis.
+    R.wpxp_terms_bp_pr3_rhs.__defaults__ = (float(constants.g),)
+    gr, ng, nzm = _gr()
+    rg = _refgr(gr, ng, nzm)
+    p = _solve_inputs(gr, ng, nzm)
+    m_wp, m_xm = X.solve_xm_wpxp_with_single_lhs(gr=gr, **p)
+    r_wp, r_xm = R.solve_xm_wpxp_with_single_lhs(gr=rg, **p)
+    np.testing.assert_allclose(np.asarray(m_wp), np.asarray(r_wp), rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(m_xm), np.asarray(r_xm), rtol=1e-9, atol=1e-12)
+
+
+def _clip_inputs(gr, ng, nzm, seed=13):
+    nzt = nzm - 1
+    rng = np.random.default_rng(seed)
+    rho_zm = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzm)))
+    rho_zt = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzt)))
+    w1 = jnp.asarray(0.8 * rng.standard_normal((ng, nzm)))
+    w2 = jnp.asarray(0.8 * rng.standard_normal((ng, nzm)))
+    v1 = jnp.asarray(0.05 + 0.5 * rng.random((ng, nzm)))
+    v2 = jnp.asarray(0.05 + 0.5 * rng.random((ng, nzm)))
+    mf = jnp.asarray(0.3 + 0.4 * rng.random((ng, nzm)))
+    from legoesm.atmosphere.physics.turbulence.clubb_mfl import calc_turb_adv_range
+    lo, hi = calc_turb_adv_range(w1, w2, v1, v2, mf, gr, 300.0)
+    return dict(
+        solve_type="rtm",
+        xm=jnp.asarray(0.01 + 0.01 * rng.standard_normal((ng, nzt))),
+        wpxp_preclip=jnp.asarray(0.5 * rng.standard_normal((ng, nzm))),
+        xm_old=jnp.asarray(0.01 + 0.01 * rng.standard_normal((ng, nzt))),
+        xp2=jnp.asarray(0.01 + 0.5 * rng.random((ng, nzm))),
+        xp2_clip=jnp.asarray(0.01 + 0.5 * rng.random((ng, nzm))),
+        wp2=jnp.asarray(0.2 + 0.5 * rng.random((ng, nzm))),
+        wm_zt=jnp.asarray(0.02 * rng.standard_normal((ng, nzt))),
+        xm_forcing=jnp.asarray(1e-5 * rng.standard_normal((ng, nzt))),
+        rho_ds_zm=rho_zm, rho_ds_zt=rho_zt,
+        invrs_rho_ds_zm=1.0 / rho_zm, invrs_rho_ds_zt=1.0 / rho_zt,
+        xp2_threshold=1e-9, xm_tol=1e-4, low_lev_effect=lo, high_lev_effect=hi,
+        field_tol=1e-8, fill_holes_type=2, l_mono_flux_lim=True, dt=300.0,
+    )
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_clipping_and_stats_parity():
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.advance_xm_wpxp_module as R  # noqa: N812
+    gr, ng, nzm = _gr(ng=3, nzt=14)
+    rg = _refgr(gr, ng, nzm)
+    p = _clip_inputs(gr, ng, nzm)
+    m_xm, m_wp = X.xm_wpxp_clipping_and_stats(gr=gr, **p)
+    r_xm, r_wp = R.xm_wpxp_clipping_and_stats(gr=rg, **p)
+    np.testing.assert_allclose(np.asarray(m_xm), np.asarray(r_xm), rtol=1e-9, atol=1e-10)
+    np.testing.assert_allclose(np.asarray(m_wp), np.asarray(r_wp), rtol=1e-9, atol=1e-10)
+
+
+def test_clipping_jit_and_grad():
+    gr, ng, nzm = _gr()
+    p = _clip_inputs(gr, ng, nzm)
+
+    def loss(wpxp_preclip):
+        xm, wp = X.xm_wpxp_clipping_and_stats(gr=gr, **dict(p, wpxp_preclip=wpxp_preclip))
+        return jnp.sum(xm ** 2) + jnp.sum(wp ** 2)
+
+    assert jnp.isfinite(jax.jit(loss)(p["wpxp_preclip"]))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(p["wpxp_preclip"])))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
