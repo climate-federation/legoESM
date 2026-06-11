@@ -30,12 +30,20 @@ A supersaturated cell nucleates new droplets from a prescribed aerosol
 reservoir by Köhler activation (``nucleation.activate_ccn``) — so a clear
 supersaturated cell forms cloud, not nothing.
 
-**Documented limitations**: no ice (``dq_i/dq_s/dq_g = 0``) — lands with
-the ice iteration. Spectrum shape is re-imposed each step by
-reconstruction; the bin-resolved physics acts within the step. Fall
-speeds and collision kernels use a fixed warm-cloud reference state
-(the oracle pressure-interpolates its tables; per-level velocities come
-with a later iteration).
+**Documented limitations**:
+* No ice (``dq_i/dq_s/dq_g = 0``) — lands with the ice iteration.
+* Spectrum shape is re-imposed each step by reconstruction; the
+  bin-resolved physics acts within the step.
+* CCN activation is **deficit-diagnostic**, not a depleting aerosol
+  reservoir: the activated number relaxes toward the Köhler target
+  ``N_CCN·frac_above(r_crit)`` (self-limiting per cell), but there is no
+  persistent inter-step/inter-cell aerosol budget (the oracle carries
+  ``FCCNR`` and depletes it). Activated droplets are seeded into the
+  smallest bin (the oracle places them into bins 1–8 by aerosol size).
+* Sedimentation fall speeds ARE level-dependent (oracle ``VR1(K,KR)``);
+  the in-step **collision kernel** still uses a fixed warm-cloud
+  reference state (the oracle pressure-interpolates 3 kernel tables —
+  weak dependence; a later iteration can interpolate).
 """
 
 from __future__ import annotations
@@ -56,6 +64,7 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.condensation_driver import
 from legoesm.atmosphere.physics.microphysics.fast_sbm.config import FastSBMConfig
 from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import (
     KRDROP,
+    bin_mass_widths,
     bin_mixing_ratios_from_f,
     discretize_exponential,
     discretize_lognormal,
@@ -208,17 +217,22 @@ def fast_sbm_microphysics(
         # Pre-physics spectrum (the vapor/heat closure baseline).
         f_pre = _reconstruct_spectrum(qc_c, qr_c, Nc_c, Nr_c, rho_c, masses,
                                       config)
-        # CCN activation: a supersaturated cell nucleates new droplets from
-        # the aerosol reservoir into the smallest bins (fills the
-        # "clear cell stays clear" gap). The haze mass it adds is debited
-        # from vapor by the total-liquid closure below.
+        # CCN activation, DEFICIT form (codex review iters 8-9): the
+        # diagnosable activated number at this S is the TARGET cloud number
+        # N_target = N_CCN·frac_above(r_crit); we seed only the deficit
+        # max(0, N_target − N_existing). This is self-limiting in a
+        # multi-step column WITHOUT a persistent aerosol reservoir — at a
+        # steady cloud N_existing ≈ N_target so nothing re-activates,
+        # avoiding the spurious re-activation a `ccn_number − N_existing`
+        # reservoir would cause when reconstruction resets the count.
         S_c = relative_humidity(T_c, p_c, qv_c)
         n_existing = number_density(
             jnp.where(jnp.arange(masses.shape[0]) < cloud_bins, f_pre, 0.0),
             masses)
-        n_avail = jnp.maximum(config.ccn_number - n_existing, 0.0)
-        nucl = activate_ccn(S_c, T_c, n_avail, masses, config)
-        f_seed = f_pre + nucl.df
+        n_target = activate_ccn(S_c, T_c, jnp.asarray(config.ccn_number),
+                                masses, config).n_activated
+        n_new = jnp.maximum(n_target - n_existing, 0.0)
+        f_seed = f_pre.at[0].add(n_new / bin_mass_widths(masses)[0])
         cond = warm_condensation_step(
             f_seed, T_c, qv_c, p_c, rho_c, dt, masses, config=config)
         g1 = bott_coalescence(g_from_f(cond.f, masses), ck, masses, tables)
@@ -239,12 +253,15 @@ def fast_sbm_microphysics(
 
     # Sedimentation on the per-bin mixing ratios (oracle FALFLUXHUCM_Z;
     # couples levels, so it runs on the (ncol, nlev, n_bins) field).
-    v_fall = terminal_velocity_cloud_rain_shima(
-        radius_from_mass(masses), jnp.asarray(1.1), jnp.asarray(9.0e4),
-        jnp.asarray(283.0))
+    # Fall speeds are LEVEL-DEPENDENT (oracle VR1(K,KR)): density/pressure
+    # at each level set the bin terminal velocity (codex review iter 8-9).
+    r_bins = radius_from_mass(masses)
+    v_cell = jax.vmap(jax.vmap(
+        lambda rho_c, p_c, T_c: terminal_velocity_cloud_rain_shima(
+            r_bins, rho_c, p_c, T_c)))(rho, p_full, T)   # (ncol, nlev, nkr)
     q_bins = bin_mixing_ratios_from_f(f1, masses, rho)
     dq_bins_dt, precip = sediment_bins(
-        q_bins, rho, v_fall, dz, dt, config.n_fall_substeps)
+        q_bins, rho, v_cell, dz, dt, config.n_fall_substeps)
     f_final = f_from_bin_mixing_ratios(
         q_bins + dt * dq_bins_dt, masses, rho)
 

@@ -82,6 +82,29 @@ def test_positivity_at_high_cfl():
     assert col1 + float(precip[0]) * dt == pytest.approx(col0, rel=1e-12)
 
 
+def test_per_level_velocity_field():
+    # v_term as (ncol, nlev, n_bins): each level can fall at its own speed.
+    # Mass only leaves levels where v > 0 — confirms the field is used
+    # per-level, not collapsed to a single profile.
+    rho = jnp.full((1, NLEV), 1.0)
+    dz = jnp.full((1, NLEV), 100.0)
+    q = jnp.zeros((1, NLEV, NKR)).at[0, :, 12].set(1.0e-4)
+    v = jnp.zeros((1, NLEV, NKR))
+    v = v.at[0, 2, 12].set(3.0)        # only level 2 falls
+    dt = 10.0
+    dq_dt, precip = sediment_bins(q, rho, v, dz, dt)
+    q1 = q + dt * dq_dt
+    # Level 2 lost mass to level 3; the still levels (0,1,4,5) unchanged.
+    assert float(q1[0, 2, 12]) < 1.0e-4
+    assert float(q1[0, 3, 12]) > 1.0e-4      # gained from above
+    for k in (0, 1, 4, 5):
+        assert float(q1[0, k, 12]) == pytest.approx(1.0e-4, rel=1e-12)
+    # Column conserved (no precip — nothing reached the surface).
+    col0 = float(jnp.sum(q * 100.0))
+    col1 = float(jnp.sum(q1 * 100.0))
+    assert col1 + float(precip[0]) * dt == pytest.approx(col0, rel=1e-12)
+
+
 def test_differentiable_in_velocity():
     q, rho, dz = _column()
 

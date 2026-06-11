@@ -175,6 +175,25 @@ def test_clear_supersaturated_cell_activates_cloud():
         rtol=1e-9)
 
 
+def test_activation_self_limits_over_steps():
+    # Deficit activation (codex review iters 8-9): re-running a cell whose
+    # cloud number already meets the Köhler target must NOT keep adding
+    # droplets. Step a clear supersaturated cell once, feed the resulting
+    # N_c back, and check the second step's new-droplet production collapses.
+    T, q_v, hyd0, p, p_half, rho, dz = _fields(1.02, q_c=0.0, q_r=0.0)
+    out1 = fast_sbm_microphysics(T, q_v, hyd0, p, p_half, rho, dz, DT)
+    dNc1 = float(out1.dN_c_dt[0, 0])
+    assert dNc1 > 0.0
+    # Feed back the activated cloud (N_c and a matching q_c) and re-run at
+    # the SAME supersaturation.
+    hyd1 = hyd0._replace(
+        q_c=jnp.maximum(hyd0.q_c + DT * out1.dq_c_dt, 0.0),
+        N_c=jnp.maximum(DT * out1.dN_c_dt, 0.0))
+    out2 = fast_sbm_microphysics(T, q_v, hyd1, p, p_half, rho, dz, DT)
+    # Second-step activation is a small fraction of the first (target met).
+    assert float(out2.dN_c_dt[0, 0]) < 0.2 * dNc1
+
+
 def test_subsaturated_clear_cell_fixed_point():
     # A clear SUBsaturated cell activates nothing and stays put.
     T, q_v, hyd, p, p_half, rho, dz = _fields(0.8, q_c=0.0, q_r=0.0)

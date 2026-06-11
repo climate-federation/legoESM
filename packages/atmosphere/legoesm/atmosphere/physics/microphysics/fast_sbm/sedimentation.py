@@ -75,15 +75,25 @@ def sediment_bins(
 
     ``n_substeps`` is static (oracle's adaptive NSUB is not reverse-mode
     differentiable); per-substep CFL = ``v dt / (dz n_substeps)``.
+
+    ``v_term`` may be per-bin ``(n_bins,)`` (same fall speed at every level)
+    or per-cell-per-bin ``(ncol, nlev, n_bins)`` — the oracle's level-
+    dependent ``VR1(K,KR)``, recommended; the column adapter passes the
+    latter so density/pressure vary the fall speed with height.
     """
     dt_sub = dt / n_substeps
+    ncol, nlev, n_bins = q_bins.shape
+    if v_term.ndim == 1:
+        v_field = jnp.broadcast_to(v_term, (ncol, nlev, n_bins))
+    else:
+        v_field = v_term
 
     def one_bin(q_k, v_k):
+        # q_k, v_k: (ncol, nlev) — this bin's field and per-level fall speed.
         def body(carry, _):
             q, acc = carry
             tend, sflux = sedimentation_tendency(
-                q, rho, jnp.broadcast_to(v_k, q.shape), dz, dt_sub,
-                return_surface_flux=True)
+                q, rho, v_k, dz, dt_sub, return_surface_flux=True)
             return (q + dt_sub * tend, acc + sflux * dt_sub), None
 
         (q_end, precip_mass), _ = jax.lax.scan(
@@ -93,7 +103,8 @@ def sediment_bins(
 
     # Move bins to the front, scan the static substeps per bin.
     q_t = jnp.moveaxis(q_bins, -1, 0)            # (n_bins, ncol, nlev)
-    q_end_t, precip_t = jax.vmap(one_bin)(q_t, v_term)
+    v_t = jnp.moveaxis(v_field, -1, 0)           # (n_bins, ncol, nlev)
+    q_end_t, precip_t = jax.vmap(one_bin)(q_t, v_t)
     q_end = jnp.moveaxis(q_end_t, 0, -1)
     dq_dt = (q_end - q_bins) / dt
     surface_precip = jnp.sum(precip_t, axis=0) / dt     # (ncol,)
