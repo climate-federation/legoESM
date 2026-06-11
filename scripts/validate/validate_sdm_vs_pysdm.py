@@ -33,7 +33,7 @@ from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.sdm import (
     BoxState,
     SDMConfig,
-    SuperDropletState,
+    exponential_water_droplets,
     run_box,
 )
 
@@ -54,20 +54,15 @@ ENSEMBLE = 8                        # average our MC over a few seeds
 def run_legoesm_ensemble():
     cfg = SDMConfig(collision_kernel="golovin", golovin_b=B_GOLOVIN)
     x0 = _RHO_W * XBAR_M3           # mean droplet MASS [kg]
-    xi0 = N0_PER_M3 * V_CELL / N_SD
 
     results = {t: [] for t in SNAPS}
     for seed in range(ENSEMBLE):
         k_init, k_run = random.split(random.PRNGKey(seed))
-        U = random.uniform(k_init, (N_SD,), dtype=jnp.float64)
-        mass = -x0 * jnp.log(1.0 - U)          # exponential mass spectrum
-        R0 = (mass / (_FOUR_THIRDS_PI * _RHO_W)) ** (1.0 / 3.0)
-        droplets = SuperDropletState(
-            multiplicity=jnp.full((N_SD,), xi0), radius=R0,
-            solute_mass=jnp.zeros((N_SD,)), active=jnp.ones((N_SD,)))
+        droplets = exponential_water_droplets(k_init, N_SD, N0_PER_M3 * V_CELL, x0)
         box = BoxState(droplets=droplets, T=jnp.asarray(283.0),
                        p=jnp.asarray(9.0e4), q_v=jnp.asarray(0.0), key=k_run)
-        results[0].append((np.asarray(R0), np.asarray(droplets.multiplicity)))
+        results[0].append((np.asarray(droplets.radius),
+                           np.asarray(droplets.multiplicity)))
         t_prev = 0
         for t in SNAPS[1:]:
             box, _ = run_box(box, V_CELL, DT, int(round((t - t_prev) / DT)),

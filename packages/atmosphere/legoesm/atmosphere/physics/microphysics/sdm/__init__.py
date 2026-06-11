@@ -84,6 +84,12 @@ from legoesm.atmosphere.physics.microphysics.sdm.sedimentation import (
     column_rainout,
     sediment_step,
 )
+from legoesm.atmosphere.physics.microphysics.sdm.init import (
+    exponential_water_droplets,
+    lognormal_aerosol_droplets,
+    sample_exponential_mass,
+    sample_lognormal_radius,
+)
 
 __all__ = [
     "SDMConfig",
@@ -121,4 +127,8 @@ __all__ = [
     "sdm_microphysics",
     "sediment_step",
     "column_rainout",
+    "sample_exponential_mass",
+    "sample_lognormal_radius",
+    "exponential_water_droplets",
+    "lognormal_aerosol_droplets",
 ]
