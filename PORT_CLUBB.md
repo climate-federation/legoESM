@@ -110,121 +110,55 @@ finite gradients in float32 + float64.
 
 ---
 
-## Status
+## Status @ iter 60 — ✅ DONE (compressed; iter 11–59 detail in git history)
 
-- **P0 foundations** ✅ — grid operators + bridge, env, flag/constant tables.
-- **P1 config** ✅ — `CLUBBConfig`/`CLUBBFlags`/`CLUBBParams` (CAM defaults).
-- **P2 thermo/helpers** ✅ — Flatau saturation, sigma_sqd_w, Brunt–Väisälä.
-- **P3 mixing length** ✅ — skewness diagnostics + parcel `Lscale` (golden-locked).
-- **P4 ADG1 PDF closure** ✅ — params, cloud fraction+rcm, higher-order moments,
-  cloud-water fluxes, buoyancy flux `wpthvp`. (golden-locked + AD-hardened)
-- **P5 moment advance** ✅ — ALL 4 prognostic advances done with round-off/
-  composition parity: `advance_windm_edsclrm` (u/v), `advance_xp2_xpyp` (5
-  moments), `advance_wp2_wp3` (wp2/wp3 penta), `advance_xm_wpxp` (rtm/thlm +
-  wprtp/wpthlp). All clips/limiters: `fill_holes*`, `clip_variance`,
-  `clip_covar`, `clip_skewness`, full MFL (`clubb_mfl.py`).
-- **P6 orchestration** ✅ — `advance_clubb_core` (iter 46) + `compute_clubb_
-  diagnostics`/`compute_pdf_closure`; conservation-tested (iter 50). See the
-  iter-50 status block below.
-- **P7 integration** ✅ — `scheme="clubb"` dispatches (phase-1 diagnostic by
-  default; full prognostic with `CLUBBConfig.prognostic=True`), carries
-  `CLUBBMomentState` in `PhysicsState.clubb_moments`, and RUNS end-to-end through
-  `combined.make_physics` (iter 53). Wired into coupler `validate_strict` +
-  `physics_state` + `scm` + AMIP CLI.
-- **Audit-compliance (iter 58):** the formula-reimplementation CI ratchet
-  flagged that the port inlined two canonical formulas (Exner `(p/p_ref)^κ`;
-  `g/θ` buoyancy coef). Fixed per CLAUDE.md "never re-derive": created
-  `physics/_shared.exner_function`/`buoyancy_coefficient`, reused across the 6
-  clubb files, pointed the ratchet `canonical` to `_shared`. Numerics preserved
-  bit-exactly (89-test CLUBB-JAX parity unchanged). All CI ratchet/contract
-  gates pass (test_physics_contracts/no_hardcoded_constants/no_saturation_reimpl/
-  no_private_cross_imports/dispatch_hardening/validate_strict/federation/
-  no_formula_reimpl — 3943+25 tests).
-- **No-regression (iter 57):** the 98-test turbulence-integration suite
-  (`test_physics_turbulence` + `test_turbulence`) passes clean — the shared-infra
-  changes (PhysicsState.clubb_moments, the `_read_turb_carry` refactor across all
-  4 physics_fn paths, combined.py carry routing) left every other turbulence
-  scheme intact.
-- **P8 validation** ✅ — per-piece CLUBB-JAX parity + conservation + multi-step
-  prognostic stability (host-diffusion fix) + jit/grad + end-to-end pipeline run
-  + **end-to-end jax.grad through `make_physics`** (iter 59: the foundational
-  legoESM autodiff requirement — finite nonzero gradient w.r.t. T through the
-  full production pipeline incl. advance_clubb_core's penta solves).
-  Idealized physics (iter 54-55): (a) convective BL — surface heating develops
-  >3× the TKE of an unheated stable column with upward buoyancy flux; (b) cloud-
-  PDF moisture response — the ADG1 cloud fraction increases monotonically with
-  column moisture (the distinctive clubb_lite-lacks feature); (c) production
-  pipeline stability — the carried moments stay bounded over 15 `make_physics`
-  steps. Optional future: full BOMEX/DYCOMS profiles, fully-coupled long run.
+**legoESM can be run AND tested with the prognostic `clubb.py` scheme.**
+`scheme="clubb"` + `CLUBBConfig(prognostic=True)` dispatches the full CAM-default-
+tree CLUBB higher-order moment closure, carries `CLUBBMomentState` in
+`PhysicsState.clubb_moments`, and runs end-to-end through `combined.make_physics`
+on a cubed-sphere state. (Default `scheme="clubb"` stays the diagnostic phase-1
+path; prognostic is opt-in. Hydrostatic + mpas drivers supported; nonhydro/
+spectral_pe fail-fast since they drop phys_state — same as MYNN-2.5.)
 
----
+**Pipeline** (each piece bit/round-off parity-validated vs CLUBB-JAX):
+`compute_clubb_diagnostics` (Skw/σ²/em/tau/C6-C7/Kh) → `compute_pdf_closure` (CAM
+ADG1: wpthvp/HOM/cloud-water fluxes/cloud_frac/rcm) → `advance_clubb_core` (CAM
+order xm_wpxp→xp2_xpyp→wp2_wp3→windm, `clip_covars_denom` between, pre+post PDF) →
+`clubb_step` (legoESM column ↔ ascending host env + surface-flux BCs) →
+`clubb_turbulence_prognostic` (scheme entry; CAM `clubb_timestep` sub-cycling;
+pack/unpack carry). Standalone driver `integrate_clubb_column` (`lax.scan`).
+All 4 advances + clips/limiters + MFL + tau/Skw/C6-C7 ported. The distinctive
+fuller-than-lite features: ADG1 **double-Gaussian** cloud PDF + parcel buoyant-
+sorting `Lscale` + full prognostic moment transport (clubb_lite has none).
 
-## Status @ iter 50 (compressed; iter 11–50 detail in git history)
+**Validated** (full clubb suite + integration + audit gates, all green):
+- per-piece CLUBB-JAX parity; `advance_clubb_core` thlm/rtm **conservation** <1e-9.
+- multi-step + production-**pipeline stability**; **end-to-end jax.grad** through
+  `make_physics` (finite nonzero) — the foundational legoESM autodiff requirement.
+- idealized **physics**: convective-BL TKE response (>3× heated vs calm, upward
+  buoyancy flux); cloud-fraction monotone in moisture.
+- **no-regression**: 98-test turbulence-integration suite (the shared-infra carry
+  refactor left every other scheme intact); all CI ratchet/contract gates pass
+  (contracts/constants/saturation/private-imports/dispatch/validate-strict/
+  federation/formula-reimpl).
+- codex-adversarially-reviewed at every substantial step (real bugs caught+fixed:
+  CAM 3-C2 dissipation, surface-flux sign, variance-floor leak, sub-cycle moisture
+  contract, dispatch persistence guards, retrace hazard).
 
-**The full prognostic CLUBB closure is BUILT, RUNS multi-step, and is TESTED.**
-Pipeline (all in `clubb_core.py` unless noted), each piece parity-validated vs
-CLUBB-JAX bit/round-off:
-- `compute_clubb_diagnostics` (iter 43-44): Skw/σ²/em/tau-family/C6-C7/Kh.
-- `compute_pdf_closure` (iter 45): CAM ADG1 closure → wpthvp/wp2thvp/rtpthvp/
-  thlpthvp + HOM (wp4/wp2up2/…/wprtpthlp) + cloud-water fluxes + cloud_frac/rcm
-  + ADG1 w_*_zm. (codex caught a real variance-floor leak: rt/thl_tol² floors
-  feed ONLY the ADG1 driver; `calc_xpthvp_terms` gets RAW regrids.)
-- `advance_clubb_core` (iter 46): per-step closure on `CLUBBMomentState`/
-  `CLUBBForcing` pytrees, CAM order diagnostics→pre-PDF→xm_wpxp→xp2_xpyp→
-  wp2_wp3→windm (`clip_covars_denom` between)→post-PDF (`l_call_pdf_closure_twice`).
-- `clubb_step` (iter 47, `clubb.py`): legoESM top-down column → ascending host
-  env (exner/p/thv_ds/rho_ds/invrs zt+zm, dry N², Lscale≥lmin, wm=0, fcor=0,
-  ug=um/vg=vm) + surface-flux lower BCs → `advance_clubb_core` → du/dv/dT/dq.
-  New `CLUBBConfig.T0` (ref temp for N²).
-- `integrate_clubb_column` + `init_clubb_moments` (iter 48): `lax.scan` SCM-style
-  multi-step prognostic run. Validated: 40-step stable, TKE growth under heating,
-  jit+grad, returned-means consistency, q_v≥0 + density floor.
-- **Conservation (iter 50):** `advance_clubb_core` conserves column-integrated
-  ρ_ds-weighted thlm/rtm to <1e-9 over 5 steps (zero sfc flux + zero forcing) —
-  truth-tier proof the assembly has NO spurious source.
-- **CLUBB sub-cycling (iter 56):** `clubb_turbulence_prognostic` runs CLUBB at
-  `config.clubb_dt` (CAM `clubb_timestep`), sub-cycling `n_sub=ceil(dt/clubb_dt)`
-  sub-steps within the host `dt` and returning the net (raw, unclipped) tendency
-  + sub-cycled moments. n_sub=1 bit-identical to the single step. Codex caught a
-  moisture-contract mismatch (the sub-cycle's q-clip leaked into the host
-  tendency) → fixed to the raw-tendency contract (positivity is the host's job);
-  regression-tested.
-- **Production dispatch (iter 52-53):** `pack/unpack_clubb_moments` +
-  `PhysicsState.clubb_moments` carry (gated, gwd_spectrum-style); opt-in
-  `CLUBBConfig.prognostic`; `clubb_turbulence_prognostic` (the `(TurbulenceOutput,
-  packed-carry)` scheme entry); `get_turbulence_fn`/`turbulence_carry_field`/
-  `_read_turb_carry` route the carry; `combined.py` stores it under the matching
-  slot. nonhydro/spectral_pe fail-fast (don't persist phys_state); hydrostatic +
-  mpas allowed. **END-TO-END: `scheme="clubb", prognostic=True` RUNS through
-  `combined.make_physics` on a cubed-sphere state, carrying clubb_moments across
-  steps (moments evolve, tendencies finite).** Codex-approved (2 rounds).
+**Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
+experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz
+noise a coupled dycore damps — NOT a closure bug (conservation + per-piece parity
+hold). Fix: a conservative flux-form host-diffusion stand-in in
+`integrate_clubb_column` (`host_numerical_diffusion`, default 0.05; coupled path
+relies on the real dycore). Characterizer `scripts/validate/clubb_prognostic_stability.py`.
 
-**✅ RESOLVED — dry-regime instability (iter 48-51).** Root cause CONFIRMED by
-experiment: the standalone SCM driver advances the means with CLUBB ALONE, so it
-exposes grid-scale (2Δz) vertical noise a coupled model's dynamical-core
-numerical diffusion damps. Ruled out: Courant (smaller dt = worse), conservation/
-source bug (iter-50 conservation test), per-piece port error (all terms match
-CLUBB-JAX). FIX (iter 51): `integrate_clubb_column` gains `host_numerical_
-diffusion` (default 0.05) — a CONSERVATIVE flux-form 2nd-order vertical diffusion
-of the carried means (convex combo for nu≤0.5 → conserves column sum + preserves
-positivity); the q_v floor is applied to the CLUBB tendency BEFORE the diffusion
-so no water is created. A tiny nu removes the instability entirely (wp2max
-10.7→0.06). Dry-stress test now PASSES; tests pin the root cause + the diffusion's
-conservation/positivity. Codex-approved. Characterizer
-`scripts/validate/clubb_prognostic_stability.py`.
+**Audit (iter 58, 60):** created canonical `physics/_shared.exner_function`/
+`buoyancy_coefficient`, migrated the clubb files (+ sibling `clubb_lite`) off
+inline re-derivations, ratcheted the formula-debt budgets down.
 
-**✅ DONE — prognostic CLUBB runs+tested in legoESM (iter 53).** `scheme="clubb"`
-with `CLUBBConfig(prognostic=True)` dispatches the full prognostic higher-order
-moment closure, carries `CLUBBMomentState` in `PhysicsState.clubb_moments` across
-steps, and **runs end-to-end through `combined.make_physics`** on a cubed-sphere
-state (verified: moments persist+evolve, tendencies finite, 2 steps). Default
-`scheme="clubb"` (opt-out) remains the diagnostic phase-1 path. nonhydro/
-spectral_pe drivers fail-fast (don't persist phys_state — documented, same as
-MYNN-2.5); hydrostatic + mpas supported.
-
-**Optional future hardening (beyond run+test):** longer coupled aquaplanet/
-held-Suarez stability run; idealized BOMEX/DYCOMS validation; thread phys_state
-through the nonhydro/spectral_pe drivers to lift their fail-fast.
+**Optional future (beyond run+test):** BOMEX/DYCOMS profiles; long coupled run;
+thread phys_state through nonhydro/spectral_pe to lift their fail-fast; edsclr
+(passive-scalar) transport through CLUBB.
 
 ## CAM-vs-ARM caveats (CLUBB-JAX is ARM-wired; re-check the CAM NAMELIST per module)
 - Namelist OVERRIDES the Fortran flag defaults — always check the namelist.
