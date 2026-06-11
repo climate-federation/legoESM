@@ -246,6 +246,14 @@ exercising the scheme in float32 — a path no prior test covered.
   `test_diagnostic_clubb_runs_in_float32_no_dtype_promotion` for the DEFAULT
   diagnostic `scheme="clubb"` path (the prognostic float32 test only covered the
   opt-in path).
+- **iter 69 float32 numerical fidelity:** beyond finite/no-promotion, verified the
+  fix preserved VALUES — float32 `Lscale` matches the float64 reference to ~1e-7
+  (float32 eps) on an identical column (`test_clubb_mixing_length_float32_is_
+  numerically_faithful`); `Km`∝`Lscale` and the moisture tendency likewise agree
+  (~1e-3). Documented inherent float32 caveat: `dT_dt=Π·(θl_new−θl)/dt` is a
+  difference of two ~300 K values → ~5–10% float32 cancellation noise (shared by
+  clubb_lite + the diagnostic path; NOT a CLUBB defect; fixable only by a deep
+  perturbation-form solve refactor, not worth the risk).
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz

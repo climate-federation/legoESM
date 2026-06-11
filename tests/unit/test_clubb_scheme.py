@@ -1298,5 +1298,55 @@ def test_clubb_mixing_length_no_promotion_on_mixed_dtype_grid():
         assert jnp.all(jnp.isfinite(arr)) and jnp.all(arr >= 0.0)
 
 
+def test_clubb_mixing_length_float32_is_numerically_faithful():
+    """The float32 mixing length must be CORRECT, not merely finite.
+
+    The other float32 tests check no-crash / no-promotion. This one checks the
+    iter-67 dtype-normalization fix did not change the *values*: the parcel
+    buoyant-sorting Lscale computed in float32 must match the float64 reference
+    to float32 precision on an identical column. (A fix that silently altered the
+    algorithm — e.g. casting at the wrong place and dropping a term — would pass
+    the finiteness tests but fail here.) The eddy diffusivity Km = c_K·Lscale·√wp2
+    is linear in Lscale, so Lscale fidelity is the binding accuracy property.
+
+    Aside (not asserted): the *temperature tendency* dT_dt = Π·(θl_new − θl)/dt is
+    a difference of two ~300 K values, so in float32 it carries ~5–10 % relative
+    cancellation noise — inherent to any tendency-as-difference-of-large-T scheme
+    (clubb_lite and the diagnostic path share it), NOT a CLUBB defect. Lscale, Km
+    and the moisture tendency (small absolute values) do not suffer this."""
+    from legoesm.atmosphere.physics.turbulence.clubb_grid import (
+        make_clubb_grid_from_levels,
+    )
+    from legoesm.atmosphere.physics.turbulence.clubb_mixing_length import (
+        compute_mixing_length,
+        set_Lscale_max,
+    )
+
+    ncol, nzt = 2, 24
+    zf = np.tile(np.linspace(50.0, 15000.0, nzt), (ncol, 1))
+    zh = np.tile(np.linspace(0.0, 16000.0, nzt + 1), (ncol, 1))
+    thvm = 300.0 + 3e-3 * zf
+    rtm = 5e-3 * np.ones((ncol, nzt))
+    em = 0.4 * np.ones((ncol, nzt + 1))
+    pin = np.tile(np.linspace(1e5, 2e4, nzt), (ncol, 1))
+    exn = (pin / constants.p_ref) ** constants.kappa
+
+    def lscale(dtype):
+        j = lambda a: jnp.asarray(a, dtype=dtype)  # noqa: E731
+        gr = make_clubb_grid_from_levels(j(zf), j(zh))
+        mu = jnp.full((ncol,), 6e-4, dtype=dtype)
+        Ls, _, _ = compute_mixing_length(
+            j(thvm), j(thvm), j(rtm), j(em), set_Lscale_max(False, None, None, ncol),
+            j(pin), j(exn), j(thvm), mu, jnp.asarray(0.1, dtype), False, gr)
+        return np.asarray(Ls, np.float64)
+
+    L64 = lscale(jnp.float64)
+    L32 = lscale(jnp.float32)
+    # Float32 Lscale matches the float64 reference to float32 precision (~1e-7),
+    # not just "finite" — the fix preserved the algorithm exactly.
+    rel = np.max(np.abs(L32 - L64)) / np.max(np.abs(L64))
+    assert rel < 1e-4, f"float32 Lscale diverges from float64: rel={rel:.2e}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
