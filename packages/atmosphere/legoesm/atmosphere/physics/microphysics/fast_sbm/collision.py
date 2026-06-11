@@ -71,8 +71,10 @@ __physics_contract__ = {
     "idealized_test": (
         "Golovin-kernel box: N(t)/N(0)=exp(-b_m L t) and M2(t)/M2(0)="
         "exp(+2 b_m L t) analytic moment laws, mass conserved to ~1e-12; "
-        "empty spectrum is a fixed point; single-bin self-collection moves "
-        "mass to exactly bin k+1 (Courant c=0 on a doubling grid)."
+        "empty spectrum is a fixed point; single-bin self-collection "
+        "deposits into bin k+1 (Courant c=0 on a doubling grid), with later "
+        "pairs of the same Gauss-Seidel sweep advecting a small fraction "
+        "onward — deposited total exactly equals the donor loss."
     ),
 }
 
@@ -112,6 +114,12 @@ def precompute_collision_tables(masses) -> CollisionTables:
     for i in range(n - 1):          # oracle: do i = 1, nkr-1 (as source)
         for j in range(i, n - 1):
             x0 = m[i] + m[j]
+            # On the production doubling grid every source pair lands
+            # (x0 <= 2 m_j <= m_top). On FINER log grids the top source
+            # pairs can overflow the grid (x0 > m_top); the oracle never
+            # assigns those (its search just falls through), so they are
+            # skipped here too — coalesced mass beyond the grid top is not
+            # representable and the pair does not interact.
             for k in range(j, n):
                 if k == 0:
                     continue
@@ -243,7 +251,16 @@ def bott_coalescence(
         gkp = g[kp]
         gk_safe = jnp.where(full, gk, 1.0)
         x1 = jnp.log(gkp / gk_safe + 1.0e-15)
-        flux = gsk / x1 * (jnp.exp(0.5 * x1) - jnp.exp(x1 * (0.5 - c_ij)))
+        # x1 → 0 limit (g(kp) ≈ gk): the oracle's double-precision 1e-15
+        # offset keeps x1 nonzero, but in float32 log(1+1e-15) IS zero →
+        # 0/0 NaN (and exploding gradients near zero in any dtype). Use the
+        # analytic limit flux → gsk·c there; the threshold is far above
+        # f32 roundoff and far below any physically distinct x1.
+        x1_near_zero = jnp.abs(x1) < 1.0e-6
+        x1_safe = jnp.where(x1_near_zero, 1.0, x1)
+        flux_formula = gsk / x1_safe * (
+            jnp.exp(0.5 * x1_safe) - jnp.exp(x1_safe * (0.5 - c_ij)))
+        flux = jnp.where(x1_near_zero, gsk * c_ij, flux_formula)
         flux = jnp.minimum(flux, gsk)
         flux = jnp.minimum(flux, gk)
         # (oracle kp_flux_max=44 halving unreachable for NKR<=43 — omitted)

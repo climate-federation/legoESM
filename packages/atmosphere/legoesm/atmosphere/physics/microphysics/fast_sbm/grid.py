@@ -114,17 +114,19 @@ def f_from_bin_mixing_ratios(
     ``Σ_k q_k``). This inverts that: ``f_k = q_k ρ_air / (m_k dm_k)``
     — the oracle's ``ρ/(3 COL x²)`` conversion in SI.
 
-    ``q_bins``: ``(..., n_bins)``; ``rho_air``: broadcastable to ``(...,)``
-    (unsqueezed on the bin axis internally).
+    ``q_bins``: ``(..., n_bins)``; ``rho_air``: scalar or broadcastable to
+    ``(...,)`` (unsqueezed on the bin axis internally).
     """
-    return q_bins * rho_air[..., None] / (masses * bin_mass_widths(masses))
+    rho = jnp.asarray(rho_air)
+    return q_bins * rho[..., None] / (masses * bin_mass_widths(masses))
 
 
 def bin_mixing_ratios_from_f(
     f: jax.Array, masses: jax.Array, rho_air: jax.Array
 ) -> jax.Array:
     """Per-bin mass mixing ratios ``q_k = f_k m_k dm_k / ρ_air`` [kg/kg]."""
-    return f * masses * bin_mass_widths(masses) / rho_air[..., None]
+    rho = jnp.asarray(rho_air)
+    return f * masses * bin_mass_widths(masses) / rho[..., None]
 
 
 def discretize_exponential(

@@ -211,6 +211,25 @@ def test_coalescence_differentiable():
     assert float(gb) < 0.0
 
 
+def test_float32_no_nan_when_gkp_equals_gk():
+    # Codex review (iter 2): in float32 log(1 + 1e-15) == 0, so the raw
+    # Bott flux formula hits 0/0 when g(kp) == gk. The analytic-limit
+    # branch (flux → gsk·c) must keep values AND gradients finite.
+    m64, tables, kernel = _setup()
+    m = m64.astype(jnp.float32)
+    ck = collision_ck_matrix(kernel, 0.5).astype(jnp.float32)
+    # Uniform spectrum → many gkp == gk encounters exactly.
+    g0 = jnp.full_like(m, 1.0e-3)
+
+    def total_number(g):
+        return number_density_from_g(
+            bott_coalescence(g, ck, m, tables), m)
+
+    val, grad = jax.value_and_grad(total_number)(g0)
+    assert np.isfinite(float(val))
+    assert np.all(np.isfinite(np.asarray(grad)))
+
+
 def test_number_density_consistent_f_and_g():
     m, _, _ = _setup()
     f = discretize_exponential(m, N0, 1.0e-11)
