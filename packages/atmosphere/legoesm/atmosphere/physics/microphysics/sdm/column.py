@@ -15,8 +15,11 @@ mean droplet radius ``R = (q_c ρ / (cdnc · (4/3)π ρ_w))^{1/3}``; the SDM gro
 law (``condensation.integrate_radius``) advances ``R`` for one step at the
 cell's saturation ratio ``S = e/e_sat``; the regrown liquid is deposited back
 as ``dq_c``, with the condensed/evaporated mass exchanged with vapor (total
-water conserved) and released as latent heat. Donor clamps keep ``q_v`` and
-``q_c`` non-negative over an explicit step.
+water conserved) and released as latent heat. Given nonnegative inputs, the
+donor clamps keep ``q_v`` and ``q_c`` nonnegative over an explicit step — the
+operator never manufactures negatives (it clips its own inputs for the physics,
+like the other column schemes), but it does not repair a pre-existing negative
+tracer; that is the dynamical core's responsibility.
 
 **Documented limitations** (the faithful Lagrangian model is ``box_model.py``,
 and full coupling would need a particle-state-carrying interface):
@@ -72,7 +75,8 @@ __physics_contract__ = {
     "idealized_test": (
         "Clear/subsaturated column -> zero tendency; a supersaturated cloudy "
         "cell grows q_c and removes the same q_v (dq_v=-dq_c), dT=L_v/c_p·dq_c; "
-        "donor clamps keep q_v, q_c >= 0 over one explicit step."
+        "no-growth (S=1, no curvature) round-trip gives dq_c=0 exactly; donor "
+        "clamps keep q_v, q_c >= 0 over one explicit step for nonnegative inputs."
     ),
 }
 
@@ -137,17 +141,19 @@ def sdm_microphysics(
     # Saturation ratio S = e/e_sat (vapor-pressure based — NOT q_v/q_sat).
     S = relative_humidity(T, p_full, q_v)
 
-    # Grow the mean droplet by one step. Curvature/solute are sub-droplet-scale
-    # effects of resolved aerosol that the bulk q_c does not carry, so they are
-    # disabled for the reconstructed mean droplet (Maxwell diffusional growth).
-    cond_cfg = config._replace(include_curvature=False, include_solute=False)
+    # Grow the mean droplet by one step using the scheme config as-is. The
+    # reconstruction carries no aerosol, so ``solute_mass = 0`` makes the Raoult
+    # term identically zero regardless of ``cfg.include_solute``; the Kelvin
+    # curvature term is honored per ``cfg.include_curvature`` (it is negligible
+    # at cloud-droplet radii but correctly suppresses growth of sub-micron
+    # droplets, e.g. near ``qc_min``).
     droplets = SuperDropletState(
         multiplicity=jnp.ones_like(R),
         radius=R,
         solute_mass=jnp.zeros_like(R),
         active=jnp.where(cloudy, 1.0, 0.0).astype(_dtype),
     )
-    droplets = integrate_radius(droplets, S, T, dt, cond_cfg)
+    droplets = integrate_radius(droplets, S, T, dt, config)
     R_new = droplets.radius
 
     # Regrown cloud water; clear cells stay clear.

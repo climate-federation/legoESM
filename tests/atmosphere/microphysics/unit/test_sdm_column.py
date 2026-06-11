@@ -71,6 +71,23 @@ def test_clear_and_supersaturated_and_evaporating_cells():
     assert np.all(np.asarray(out.precipitation) == 0.0)
 
 
+def test_no_growth_roundtrip_at_saturation():
+    """At S=1 with no curvature the droplet does not grow, so the
+    q_c -> R -> q_c reconstruction/inverse must round-trip exactly (dq_c=0).
+    A broken reconstruction or inverse would leak a spurious source/sink that
+    the sign/conservation tests cannot see. Includes a cell just above qc_min
+    and a clear cell just below it (radius-floor artifacts)."""
+    cfg = SDMConfig(include_curvature=False, include_solute=False)
+    T, q_v, hyd, p_full, p_half, rho, dz = _columns(
+        S_list=[1.0, 1.0, 1.0],
+        q_c_list=[1.0e-4, 2.0e-12, 5.0e-13])  # normal, just-cloudy, clear
+    out = sdm_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 1.0, cfg)
+    dq_c = np.asarray(out.dq_c_dt).ravel()
+    assert np.allclose(dq_c, 0.0, atol=1e-18)
+    assert np.allclose(np.asarray(out.dq_v_dt).ravel(), -dq_c, atol=1e-18)
+    assert np.allclose(np.asarray(out.dT_dt).ravel(), 0.0, atol=1e-15)
+
+
 def test_donor_clamps_keep_water_nonnegative():
     """Extreme supersaturation cannot condense more than the available vapor;
     extreme subsaturation cannot evaporate more than the available cloud."""

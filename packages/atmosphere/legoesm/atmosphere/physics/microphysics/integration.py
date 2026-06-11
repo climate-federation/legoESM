@@ -474,7 +474,7 @@ _PLANE_MIN_TRACER_SLOTS = {
     "morrison": 9,          # q_{v,c,r,i,s,g} + N_{c,r,i}
     "thompson": 9,          # q_{v,c,r,i,s,g} + N_{c,r,i}
     "p3": 9,                # q_{v,c,r,i} + q_rim(s) + B_rim(g) + N_{c,r,i}
-    "sdm": 3,               # q_v, q_c, q_r (condensation adapter; uses q_v,q_c)
+    "sdm": 2,               # q_v, q_c (condensation adapter; dq_r is always 0)
     "ml_emulator": 9,       # generic full layout
     "none": 0,              # no-op
 }

@@ -123,6 +123,30 @@ particle-state-threading interface). Documented, not hidden.
 - per-leaf unit tests (tendencies directly).
 - conservation: water mass (vapor+liquid) under condensation; sum(xi*m) under coalescence.
 
+## Status (2026-06-11)
+Iterations 1-5 complete on branch `feat/sdm-microphysics`, each codex-reviewed +
+hardened. Modules: `particles`, `condensation`, `kernels`, `coalescence`,
+`coupling`, `box_model`, `column`. Validations passing:
+- **Golovin box (collision)**: ensemble number decay matches analytic
+  `N(t)=N0 exp(-(b/ρ_w)Lt)` to 0.36% and 2nd mass moment to 1.9%; `Σξm` conserved.
+- **Adiabatic parcel (condensation/activation)**: supersaturation peaks (~1.018)
+  then relaxes; droplets 1->9.5 um; LWC 0->0.16 g/kg; total water conserved ~1e-12;
+  moist adiabat.
+- **Column operator**: condensation/evaporation signs, total-water + latent-heat
+  consistency, donor-clamp positivity, S=1 round-trip, factory dispatch.
+`scheme="sdm"` is selectable, strict-validated, dispatched, and driver-buildable.
+
+### Column-adapter scope + exposure (codex iter-5)
+The stateless column path (`sdm/column.py`) does **diffusional condensation/
+evaporation only** on a mean droplet reconstructed from `q_c` + prescribed `cdnc`
+(donor-clamped, water-conserving). Collision-coalescence, sedimentation/precip,
+and aerosol activation/nucleation need a persistent droplet population → they
+live in `box_model.py` (and a future particle-state-threading interface), NOT in
+the column op. Consequently `scheme="sdm"` is registered + strict-valid but is
+**intentionally not exposed in the AMIP CLI** (`scripts/run/run_amip.py` choices)
+— same treatment as `p3`/`ml_emulator` — because a condensation-only scheme is
+not a complete precipitating microphysics for a full climate run.
+
 ## Faithfulness caveats (intentional deviations from the ERF oracle)
 - **Constants follow legoESM canonical values, not ERF's** (repo audit forbids
   hardcoded/duplicated physical constants): `R_v=461.51` (ERF 461.5),
