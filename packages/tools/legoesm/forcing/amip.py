@@ -363,6 +363,91 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
         sst_data = ds_sst[config.sst_var].values
         sic_data = ds_sic[config.sic_var].values
 
+        # Units-attribute consistency guard (audit 2026-06-11) — the
+        # same defense-in-depth the ozone (_ozone_unit_factor) and GHG
+        # (_GHG_UNIT_TO_MOLE_FRACTION) loaders carry.  ``sst_offset`` /
+        # ``sic_scale`` are CONFIG-driven, so a Kelvin SST file run with
+        # the default +273.15 offset (or a percent SIC file with
+        # scale=1.0) would silently corrupt the boundary condition
+        # (SST→~575 K, masked only on the low side by the freeze floor;
+        # SIC→100×, masked by the [0,1] clip).  Cross-check the file's
+        # ``units`` attribute against the configured conversion and
+        # raise a precise error instead of silently mis-forcing.
+        _norm = lambda s: s.strip().lower().replace("_", " ").replace("-", " ")
+        _sst_units = _norm(str(ds_sst[config.sst_var].attrs.get("units", "")))
+        _sic_units = _norm(str(ds_sic[config.sic_var].attrs.get("units", "")))
+        _sst_is_celsius = _sst_units in (
+            "degc", "deg c", "celsius", "c", "degrees celsius",
+            "degree celsius", "degreesc",
+        )
+        _sst_is_kelvin = _sst_units in (
+            "k", "kelvin", "degk", "deg k", "degrees kelvin",
+            "degree kelvin",
+        )
+        # A Celsius file needs the +273.15 K offset (tight tolerance,
+        # correct sign); anything else (wrong sign, 100, 150) is a
+        # misconfiguration, not a C->K conversion (codex review).
+        if _sst_is_celsius and abs(config.sst_offset - constants.T_freeze) > 1.0:
+            raise ValueError(
+                f"SST file {config.sst_var!r} has units={_sst_units!r} "
+                f"(Celsius) but sst_offset={config.sst_offset} is not the "
+                f"+{constants.T_freeze} K Celsius->Kelvin offset. Pass "
+                "--sst-offset 273.15 (constants.T_freeze)."
+            )
+        if _sst_is_kelvin and abs(config.sst_offset) > 1.0:
+            raise ValueError(
+                f"SST file {config.sst_var!r} has units={_sst_units!r} "
+                f"(Kelvin) but sst_offset={config.sst_offset} would add a "
+                "spurious +273.15. Pass --sst-offset 0 for a Kelvin file."
+            )
+        # Units-INDEPENDENT physical sanity on the CONVERTED SST: even a
+        # file with no/unknown units attribute is caught here.  A Kelvin
+        # file run with the default +273.15 offset lands at ~575 K; a
+        # Celsius file with offset=0 lands at ~0-30 K.  Both are
+        # unphysical for an ocean surface (the downstream T_freeze_ocean
+        # floor only catches the cold side, masking the hot Kelvin+offset
+        # failure).  Bounds are generous (ocean SST spans ~271-310 K).
+        _sst_max = float(np.nanmax(sst_data.astype(np.float64) + config.sst_offset))
+        _sst_min = float(np.nanmin(sst_data.astype(np.float64) + config.sst_offset))
+        if _sst_max > 340.0 or _sst_min < 240.0:
+            raise ValueError(
+                f"SST file {config.sst_var!r} converts to "
+                f"[{_sst_min:.1f}, {_sst_max:.1f}] K after "
+                f"sst_offset={config.sst_offset} (units={_sst_units!r}). "
+                "That is outside the physical ocean range (~240-340 K) — "
+                "likely a Kelvin file with a spurious +273.15 offset or a "
+                "Celsius file with offset=0. Set --sst-offset correctly."
+            )
+        # SIC: '%'/'percent' need scale 0.01; '1'/'fraction' need 1.0.
+        # Empty/unknown units are AMBIGUOUS (codex review): do not assume
+        # fraction — the converted-value sanity below catches a bad scale.
+        _sic_is_percent = _sic_units in ("%", "percent")
+        _sic_is_fraction = _sic_units in ("1", "fraction", "dimensionless")
+        if _sic_is_percent and abs(config.sic_scale - 0.01) > 1e-6:
+            raise ValueError(
+                f"SIC file {config.sic_var!r} has units={_sic_units!r} "
+                f"(percent) but sic_scale={config.sic_scale}. Pass "
+                "--sic-scale 0.01 for a percent SIC file."
+            )
+        if _sic_is_fraction and abs(config.sic_scale - 1.0) > 1e-6:
+            raise ValueError(
+                f"SIC file {config.sic_var!r} has units={_sic_units!r} "
+                f"(fraction) but sic_scale={config.sic_scale}. Pass "
+                "--sic-scale 1.0 for a fraction SIC file."
+            )
+        # Units-independent SIC sanity on the CONVERTED value: a percent
+        # file (0-100) scaled by 1.0 lands at ~50-100 (then silently
+        # clipped to 1.0, masking it).  Flag the pre-clip magnitude.
+        _sic_max = float(np.nanmax(np.abs(sic_data.astype(np.float64)
+                                          * config.sic_scale)))
+        if _sic_max > 1.5:
+            raise ValueError(
+                f"SIC file {config.sic_var!r} reaches {_sic_max:.1f} "
+                f"after sic_scale={config.sic_scale} (units={_sic_units!r}) "
+                "— a fraction must be <=1. Likely a percent file needing "
+                "--sic-scale 0.01."
+            )
+
         if sst_data.ndim == 2:
             sst_data = sst_data[None, ...]
         if sic_data.ndim == 2:

@@ -117,6 +117,10 @@ def run_one(label: str, *, days: int, resolution: int | None,
             "--days", str(days),
             "--diag-days", "1",
             "--radiation", "gray",
+            # Dycore + forcing smoke (not a realism run): use the cheap
+            # uniform-IC so no ERA5 data is required.  The deck default
+            # is now --ic era5 for production realism.
+            "--ic", "default",
             "--no-aerosol", "--no-volcanic",
             "--output", str(out),
         ]

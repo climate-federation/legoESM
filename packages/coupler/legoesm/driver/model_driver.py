@@ -895,6 +895,7 @@ class ModelDriver:
                 load_era5_ic,
                 era5_to_cubedsphere_carry,
                 era5_to_spectral_carry,
+                era5_to_latlon_carry,
             )
             logger.info(
                 f"  IC: loading ERA5 from {cfg.ic_path} "
@@ -910,12 +911,23 @@ class ModelDriver:
                 carry = era5_to_spectral_carry(
                     era5_slice, self.grid, self.sigma
                 )
+            elif cfg.grid.grid_type == "latlon":
+                carry = era5_to_latlon_carry(
+                    era5_slice, self.grid, self.sigma
+                )
             else:
+                # MPAS Voronoi needs an edge-normal wind projection (ERA5
+                # cell-centred u/v -> mesh edge velocities) not yet
+                # implemented + validated; fail loudly rather than
+                # silently mis-initialise.  Use --ic default there until
+                # era5_to_mpas_carry lands.
                 raise NotImplementedError(
                     f"ERA5 IC not yet supported for "
                     f"grid_type={cfg.grid.grid_type!r} / "
                     f"discretization={cfg.dycore.discretization!r}. "
-                    "Use --grid-type cubed_sphere or --discretization spectral."
+                    "Supported: cubed_sphere, latlon, gaussian/spectral. "
+                    "For voronoi/mpas use --ic default (era5_to_mpas_carry "
+                    "is a tracked follow-up)."
                 )
 
             self.state = self.state._replace(

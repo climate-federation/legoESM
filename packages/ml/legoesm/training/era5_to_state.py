@@ -443,6 +443,93 @@ def era5_to_cubedsphere_carry(
     )
 
 
+def era5_to_latlon_carry(
+    era5: ERA5Slice,
+    grid,
+    sigma,
+):
+    """Convert ERA5 slice to a SegmentCarry on the lat-lon C-grid.
+
+    The driver-level lat-lon state stores u, v, T at CELL CENTRES
+    ``(n_lat, n_lon, nlev)`` — the Arakawa C-grid face staggering
+    (u at lon interfaces, v at lat interfaces) is internal to the
+    ``CGridLatLonPrimitiveEquationModel`` step, which re-staggers the
+    cell-centred winds on the first integration.  So the IC carry is
+    built exactly like the spectral path: regrid the ERA5 lat-lon
+    fields onto the model lat-lon grid (a plain 2-D interpolation,
+    since both are lat-lon), vertically interpolate to sigma, and
+    convert ERA5 specific humidity to the model's mixing-ratio
+    convention.  No face interpolation is applied here — doing so
+    would double-stagger against the dycore's own re-staggering.
+
+    Parameters
+    ----------
+    era5 : ERA5Slice
+    grid : LatLonGrid  (exposes ``.lat`` / ``.lon`` in radians)
+    sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    SegmentCarry
+    """
+    from legoesm.driver.compiled_segments import pack_carry
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticState
+
+    sigma_full = np.asarray(sigma.sigma_full)
+
+    # ERA5 lat-lon → model lat-lon grid (reuses the generic
+    # grid.lat/grid.lon interpolator shared with the Gaussian path).
+    T_ll, u_ll, v_ll, q_ll, p_s_ll = regrid_latlon_to_gaussian(era5, grid)
+
+    p_s_jax = jnp.asarray(p_s_ll)
+    plev = jnp.asarray(era5.plev_Pa)
+    sigma_f = jnp.asarray(sigma_full)
+
+    T_model = interp_pressure_to_sigma(jnp.asarray(T_ll), plev, p_s_jax, sigma_f)
+    u_model = interp_pressure_to_sigma(jnp.asarray(u_ll), plev, p_s_jax, sigma_f)
+    v_model = interp_pressure_to_sigma(jnp.asarray(v_ll), plev, p_s_jax, sigma_f)
+    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING
+    # RATIO r = q / (1 − q) (see the spectral path for the rationale).
+    q_specific = jnp.clip(
+        jnp.maximum(
+            interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f),
+            0.0,
+        ),
+        0.0, 0.99,
+    )
+    q_model = q_specific / (1.0 - q_specific)
+
+    phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
+    phis_jax = jnp.asarray(phis_ll)
+
+    dims_3d = ("lat", "lon", "level")
+    dims_2d = ("lat", "lon")
+    state = HydrostaticState(
+        u=Field(u_model, name="u", dims=dims_3d, units="m/s"),
+        v=Field(v_model, name="v", dims=dims_3d, units="m/s"),
+        T=Field(T_model, name="T", dims=dims_3d, units="K"),
+        p_s=Field(p_s_jax, name="p_s", dims=dims_2d, units="Pa"),
+        phis=Field(phis_jax, name="phis", dims=dims_2d, units="m2/s2"),
+    )
+
+    shape_3d = T_model.shape
+    shape_2d = p_s_jax.shape
+    return pack_carry(
+        state,
+        q_v=q_model,
+        q_c=jnp.zeros(shape_3d),
+        q_r=jnp.zeros(shape_3d),
+        held_dT_rad=jnp.zeros(shape_3d),
+        held_sw_net_sfc=jnp.zeros(shape_2d),
+        held_lw_net_sfc=jnp.zeros(shape_2d),
+        held_sw_up_toa=jnp.zeros(shape_2d),
+        held_lw_up_toa=jnp.zeros(shape_2d),
+        held_sw_down_toa=jnp.zeros(shape_2d),
+        step_index=0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
