@@ -132,8 +132,10 @@ finite gradients in float32 + float64.
   `combined.make_physics` (iter 53). Wired into coupler `validate_strict` +
   `physics_state` + `scm` + AMIP CLI.
 - **P8 validation** ✅ — per-piece CLUBB-JAX parity + conservation + multi-step
-  prognostic stability (host-diffusion fix) + jit/grad + end-to-end pipeline run.
-  Optional future: idealized BOMEX/DYCOMS, longer coupled stability run.
+  prognostic stability (host-diffusion fix) + jit/grad + end-to-end pipeline run
+  + idealized convective-BL physics (iter 54: surface heating develops >3× the
+  TKE of an unheated stable column, with upward buoyancy flux driving it).
+  Optional future: full BOMEX/DYCOMS profiles, longer coupled stability run.
 
 ---
 
