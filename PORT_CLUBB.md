@@ -147,13 +147,17 @@ finite gradients in float32 + float64.
 above = the live builder ledger; per-module CAM-vs-ARM caveats are in each
 module's docstring.)*
 
-**Status:** The full per-step prognostic closure is ASSEMBLED & codex-approved:
-`advance_clubb_core` (iter 46, `clubb_core.py`) runs diagnostics → pre-PDF →
-the 4 advances (xm_wpxp→xp2_xpyp→wp2_wp3→windm) with `clip_covars_denom`
-between → post-PDF, on a `CLUBBMomentState`/`CLUBBForcing` pytree; one step is
-finite/shape-stable/positive-definite/jit+grad-clean. The remaining DONE-gate
-piece is wiring `advance_clubb_core` into `clubb.py`'s live tendency path
-(replacing the phase-1 Lscale eddy diffusion with the prognostic moment carry).
+**Status:** The full per-step prognostic closure is ASSEMBLED & the column
+BRIDGE is built (iter 47). `advance_clubb_core` (iter 46) runs diagnostics →
+pre-PDF → the 4 advances (xm_wpxp→xp2_xpyp→wp2_wp3→windm) with `clip_covars_denom`
+between → post-PDF. `clubb_step` (iter 47, `clubb.py`) bridges legoESM top-down
+column inputs to it: builds the ascending-grid host env, sets surface-flux BCs,
+calls `advance_clubb_core`, maps advanced means back to du/dv/dT/dq tendencies —
+codex-approved, finite/jit+grad-clean, drag-sign-tested. The ONE remaining
+DONE-gate piece is the **state-persistence plumbing**: carry `CLUBBMomentState`
+across steps (extend `PhysicsState` + the coupler `physics_pipeline`, restart
+I/O) and flip the `scheme="clubb"` dispatch from the stateless `clubb_turbulence`
+to `clubb_step`.
 
 **CAM-vs-ARM rule of thumb (verified the hard way):** CLUBB-JAX is wired for ARM;
 re-check the CAM namelist/Fortran per module. Caught: wp2/wp3 UPWIND MA
@@ -183,10 +187,21 @@ TA CENTERED; wp2_dp1 + wp3_pr_turb CAM branches from CESM Fortran;
    per-moment LHS+solve; dropped the `Cn` arg (now owned from config). Verified
    FALSE POSITIVE: windm uses start-of-step `Kh_zm` by design (reference computes
    Kh once in "Block M", same array to wp2_wp3 + windm).
-4. ☐ **Wire into `clubb.py`**: carry the `CLUBBMomentState` as scheme state;
-   build the host env (rho_ds/thv_ds/invrs/wm/fcor/ug/vg + Lscale + N²) and call
-   `advance_clubb_core`, returning du/dv/dT/dq tendencies from the advanced means
-   (replace the phase-1 eddy-diffusion mean advance). DONE gate.
+4. ✅ **Column bridge `clubb_step`** (iter 47, `clubb.py`): builds the ascending
+   host env (exner/p/thv_ds/rho_ds/invrs zt+zm, dry N², Lscale floored at lmin,
+   wm=0, fcor=0, ug=um/vg=vm), sets surface-flux lower BCs (kinematic:
+   wpthlp_sfc=shflx/(ρ·cp·exner), wprtp_sfc=lhflx/(ρ·Lv), **upwp_sfc=tau_x/ρ** —
+   codex caught the sign), resets means from the live column, calls
+   `advance_clubb_core`, maps means back to du/dv/dT/dq. New `CLUBBConfig.T0`
+   (ref temp for N²). Codex-approved. Bug fixed: Lscale_zm=0→invrs_tau=inf
+   (floor Lscale at lmin; grid-consistent test columns). Verified CAM
+   `l_diag_Lscale_from_tau=.false.` → simple tau model is the CAM path (Fortran
+   default is .true.; the CAM namelist overrides — per-module namelist check).
+5. ☐ **State persistence + dispatch flip** (DONE gate): extend `PhysicsState`
+   with a `CLUBBMomentState` carry (mind the zm=nlev+1 vs tke-slot nlev grid),
+   thread it through `coupler/physics_pipeline.py` + restart I/O, and switch the
+   `scheme="clubb"` path in `integration.py` from `clubb_turbulence` (stateless)
+   to `clubb_step`. Precedent: `gwd_spectrum` (3D) / `qke` scheme-specific slots.
 
 Each chunk: analytic/self-consistency oracle (CI) + golden/round-off parity vs
 CLUBB-JAX (patch reference physical constants to isolate algorithm) + codex review.
@@ -199,7 +214,17 @@ main, clubb_tau, clubb_skewness, clubb_coefficients) carry parity/analytic/
 jit-grad self-validation + the iter-41 gold-standard full-main reference-parity
 test for advance_xm_wpxp.
 
-**CAM-vs-ARM caught this iter:** xp2 dp1 dissipation uses 3 distinct C2
+**CAM-vs-ARM caught (iter 46):** xp2 dp1 dissipation uses 3 distinct C2
 (C2rt/C2thl/C2rtthl); CLUBB-JAX hardwires single C2rt (ARM). Single shared-LHS
 solve valid only when all equal. Pattern reminder: even "shared-LHS" optimizations
 in CLUBB-JAX can encode ARM-specific coefficient-equality assumptions.
+
+**CAM-flag re-verified (iter 47):** `l_diag_Lscale_from_tau` — Fortran
+model_flags default `.true.` BUT the CAM namelist overrides to `.false.`, so CAM
+uses the SIMPLE `tau = Lscale/sqrt(em)` model (my `compute_tau_family`), not the
+complex `invrs_tau_bkgnd+sfc+shear+N²` path in `mixing_length.py:calc_Lscale`.
+Always check the CAM NAMELIST, not just the Fortran flag default.
+
+**Surface-flux signs (iter 47, `clubb_step`):** stress `tau=-ρ·Cd·|V|·u` so the
+kinematic momentum BC is `u'w'_sfc = tau_x/ρ` (negative for u>0 = drag). Heat/
+moisture BCs positive-up: `wpthlp_sfc=shflx/(ρ·cp·exner)`, `wprtp_sfc=lhflx/(ρ·Lv)`.
