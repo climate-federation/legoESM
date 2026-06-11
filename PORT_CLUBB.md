@@ -197,6 +197,16 @@ sorting `Lscale` + full prognostic moment transport (clubb_lite has none).
   residual ~10× (0.28%→0.028%), proving the interior is exact and the surface
   term is the sole O(Δt) discrepancy (NOT a ρ-vs-ρ_ds weighting error, which
   would be Δt-independent). codex-reviewed.
+- **moist-chain differentiability (iter 65):** `jax.grad` flows end-to-end through
+  the coupled prognostic-CLUBB → `sundqvist` chain, incl. the `max(q_v−q_sat,0)`
+  condensation kink (subgradient). The core legoESM autodiff requirement, for the
+  coupled moist path. Tested two ways so it can't pass with a dead condensation
+  path: an aggregate smoke check AND a **microphysics-only** objective
+  (`Σ precip²+Σ dT_μ²`) whose nonzero grad can only come through the kink, guarded
+  by a forward check that the column actually condenses (`max(dq_c)`, precip>0).
+  codex-reviewed (first pass flagged the aggregate-only grad could be satisfied by
+  the CLUBB term alone → added the microphysics-specific gradient + active-branch
+  guard).
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz

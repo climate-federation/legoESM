@@ -620,6 +620,81 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
     assert np.all(np.abs(combined_resid) * dt / col_water < 1e-12)
 
 
+def test_clubb_microphysics_chain_is_differentiable():
+    """The prognostic-CLUBB → microphysics moist chain is end-to-end
+    differentiable — the foundational legoESM autodiff requirement, here for the
+    coupled path (which the forward-budget test does not exercise).
+
+    The chain runs CLUBB (θl/rt transport), applies its tendencies, then runs
+    ``sundqvist`` condensation, which contains a ``max(q_v − q_sat, 0)`` kink.
+    ``jax.grad`` must still produce a finite, nonzero gradient — the subgradient
+    is well-defined and flows through the kink. The spun-up moment state is held
+    fixed (a constant), isolating the grad of the one-step coupling itself (the
+    multi-step ``lax.scan`` grad is covered by
+    ``test_integrate_clubb_column_jit_and_grad``).
+
+    Crucially the gradient is checked TWO ways so it cannot pass while the
+    condensation path is dead: (1) an aggregate end-to-end smoke check, and (2) a
+    **microphysics-specific** objective (``Σ precip² + Σ dT_μ²``) whose nonzero
+    gradient can ONLY come through the condensation branch — guarded by a forward
+    assertion that the column actually condenses (so the ``max`` is on its active
+    side, not the flat side where d/dq ≡ 0)."""
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
+    from legoesm.atmosphere.physics.microphysics.output import make_zero_hydrometeors
+    from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
+    from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
+    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+
+    kw = _scm_column(ncol=2, nlev=16, dtheta_dz=4e-3)
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    dt = 150.0
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=dt, nsteps=30, config=cfg)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    carry = pack_clubb_moments(m_f)
+    dz = jnp.abs(kw["z_half"][:, :-1] - kw["z_half"][:, 1:])
+    ncol, nlev = T_f.shape
+    hyd = make_zero_hydrometeors(ncol, nlev, dtype=T_f.dtype)
+
+    def _run(q_in):
+        out, _ = clubb_turbulence_prognostic(
+            u_f, v_f, T_f, q_in, carry, kw["p_full"], kw["p_half"], kw["z_full"],
+            kw["z_half"], T_f[:, -1], q_in[:, -1], rho, dt, cfg)
+        t1 = T_f + dt * out.dT_dt
+        q1 = q_in + dt * out.dq_v_dt
+        mp = sundqvist_microphysics(
+            t1, q1, hyd, kw["p_full"], kw["p_half"], rho, dz, dt, SundqvistConfig())
+        return out, mp
+
+    # Forward: the condensation branch is ACTIVE for this column (max on its
+    # non-flat side), so a microphysics gradient is not zero-by-construction.
+    out0, mp0 = _run(q_f)
+    assert float(jnp.max(mp0.dq_c_dt)) > 1e-7
+    assert float(jnp.max(mp0.precipitation)) > 1e-4
+
+    # (1) Aggregate end-to-end smoke check: finite value + finite gradient.
+    def loss_total(q_in):
+        out, mp = _run(q_in)
+        return jnp.sum((out.dT_dt + mp.dT_dt) ** 2) + jnp.sum(mp.precipitation ** 2)
+
+    assert jnp.isfinite(jax.jit(loss_total)(q_f))
+    g_total = jax.grad(loss_total)(q_f)
+    assert g_total.shape == q_f.shape and jnp.all(jnp.isfinite(g_total))
+
+    # (2) Microphysics-ONLY objective: a nonzero gradient here can come ONLY
+    # through the sundqvist condensation kink — proves that path is differentiated.
+    def loss_micro(q_in):
+        _, mp = _run(q_in)
+        return jnp.sum(mp.precipitation ** 2) + jnp.sum(mp.dT_dt ** 2)
+
+    g_micro = jax.grad(loss_micro)(q_f)
+    assert g_micro.shape == q_f.shape
+    assert jnp.all(jnp.isfinite(g_micro))
+    assert float(jnp.max(jnp.abs(g_micro))) > 0.0    # grad flows THROUGH the kink
+
+
 def test_clubb_turbulence_prognostic_carry_roundtrip_multistep():
     """The prognostic scheme entry carries the packed CLUBBMomentState
     (ncol,15,nlev+1) in/out of the tke-slot interface and runs stably multi-step
