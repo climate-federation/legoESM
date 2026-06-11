@@ -218,6 +218,27 @@ def clip_covar(wpxp, wp2, xp2, max_mag_corr=_MAX_MAG_CORRELATION):
     return clipped
 
 
+def clip_covars_denom(wprtp, wpthlp, upwp, vpwp, wp2, rtp2, thlp2, up2, vp2,
+                      l_tke_aniso=True):
+    """Cauchy-Schwarz clip of the four w-fluxes after the solves (``clip_covars_denom``).
+
+    Clips ``wprtp``/``wpthlp`` against ``wp2``·rtp2/thlp2 with the flux
+    correlation bound, and the momentum fluxes ``upwp``/``vpwp`` against
+    ``wp2``·up2/vp2 (CAM ``l_tke_aniso = True``; the ``False`` branch clips
+    against ``wp2``·wp2) with the (default) correlation bound. Applied between the
+    advances in ``advance_clubb_core``. Returns ``(wprtp, wpthlp, upwp, vpwp)``.
+    """
+    wprtp_new = clip_covar(wprtp, wp2, rtp2, _MAX_MAG_CORRELATION_FLUX)
+    wpthlp_new = clip_covar(wpthlp, wp2, thlp2, _MAX_MAG_CORRELATION_FLUX)
+    if l_tke_aniso:
+        upwp_new = clip_covar(upwp, wp2, up2)
+        vpwp_new = clip_covar(vpwp, wp2, vp2)
+    else:
+        upwp_new = clip_covar(upwp, wp2, wp2)
+        vpwp_new = clip_covar(vpwp, wp2, wp2)
+    return wprtp_new, wpthlp_new, upwp_new, vpwp_new
+
+
 def compute_uv_tndcy(fcor, ug, vg, um, vm, um_forcing, vm_forcing):
     """Coriolis + geostrophic + prescribed-forcing wind tendencies (``compute_uv_tndcy``).
 
@@ -832,6 +853,7 @@ __all__ = [
     "calc_up2_vp2_lhs",
     "calc_xpwp",
     "clip_covar",
+    "clip_covars_denom",
     "compute_uv_tndcy",
     "windm_edsclrm_rhs",
     "windm_edsclrm_lhs",

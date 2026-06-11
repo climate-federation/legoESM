@@ -23,6 +23,7 @@ from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # 
 from legoesm.atmosphere.physics.turbulence.clubb_moments import (  # noqa: E402
     advance_windm_edsclrm,
     advance_xp2_xpyp,
+    clip_covars_denom,
     calc_up2_vp2_lhs,
     calc_xp2_xpyp_lhs,
     calc_xp2_xpyp_ta_lhs,
@@ -879,6 +880,44 @@ def test_advance_xp2_xpyp_parity():
     mine = advance_xp2_xpyp(**kw)
     for a, b in zip(mine, ref):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-9, atol=1e-12)
+
+
+def test_clip_covars_denom_bounds():
+    """Cauchy-Schwarz: each clipped flux interior <= 0.99*sqrt(wp2*xp2)."""
+    ng, nzm = 3, 11
+    rng = np.random.default_rng(81)
+    wp2 = jnp.asarray(0.2 + 0.5 * rng.random((ng, nzm)))
+    rtp2 = jnp.asarray(1e-6 + 1e-6 * rng.random((ng, nzm)))
+    thlp2 = jnp.asarray(0.05 + 0.05 * rng.random((ng, nzm)))
+    up2 = jnp.asarray(0.3 + 0.3 * rng.random((ng, nzm)))
+    vp2 = jnp.asarray(0.3 + 0.3 * rng.random((ng, nzm)))
+    big = jnp.asarray(10.0 * rng.standard_normal((ng, nzm)))
+    wprtp, wpthlp, upwp, vpwp = clip_covars_denom(big, big, big, big, wp2, rtp2,
+                                                  thlp2, up2, vp2)
+    for flux, xp2 in [(wprtp, rtp2), (wpthlp, thlp2), (upwp, up2), (vpwp, vp2)]:
+        bound = 0.99 * np.sqrt(np.asarray(wp2) * np.asarray(xp2))
+        assert np.all(np.abs(np.asarray(flux))[:, 1:-1] <= bound[:, 1:-1] + 1e-12)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_clip_covars_denom_parity():
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.clip_explicit as RC  # noqa: N812
+    ng, nzm = 3, 11
+    rng = np.random.default_rng(82)
+    a = lambda s=1.0, b=0.0: jnp.asarray(b + s * rng.standard_normal((ng, nzm)))  # noqa: E731
+    args = (a(0.1), a(0.1), a(0.05), a(0.05),
+            jnp.asarray(0.2 + 0.5 * rng.random((ng, nzm))),
+            jnp.asarray(1e-6 + 1e-6 * rng.random((ng, nzm))),
+            jnp.asarray(0.05 + 0.05 * rng.random((ng, nzm))),
+            jnp.asarray(0.3 + 0.3 * rng.random((ng, nzm))),
+            jnp.asarray(0.3 + 0.3 * rng.random((ng, nzm))))
+    mine = clip_covars_denom(*args)
+    ref = RC.clip_covars_denom(*args)
+    for m, r in zip(mine, ref):
+        np.testing.assert_allclose(np.asarray(m), np.asarray(r), rtol=1e-12, atol=1e-14)
 
 
 if __name__ == "__main__":
