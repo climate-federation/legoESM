@@ -14,8 +14,9 @@ review per substantial change.
 `make_turbulence_physics(...)`, producing a valid `TurbulenceOutput`, with
 passing unit+integration tests and an idealized-case sanity check.
 
-*(Compressed at iter 10; verbose iter 1–9 logs dropped — see git history. The
-reference facts + per-phase status below are the live source of truth.)*
+*(Compressed at iter 10/20/30/40; verbose per-iter logs dropped — see git
+history. The reference facts + module table + status below are the live source
+of truth.)*
 
 ---
 
@@ -116,23 +117,18 @@ finite gradients in float32 + float64.
 - **P3 mixing length** ✅ — skewness diagnostics + parcel `Lscale` (golden-locked).
 - **P4 ADG1 PDF closure** ✅ — params, cloud fraction+rcm, higher-order moments,
   cloud-water fluxes, buoyancy flux `wpthvp`. (golden-locked + AD-hardened)
-- **P5 moment advance** 🟡 — ✅ `advance_windm_edsclrm` (u/v), ✅ `advance_xp2_xpyp`
-  (rtp2/thlp2/rtpthlp/up2/vp2), ✅ `advance_wp2_wp3` (wp2/wp3 penta — full main,
-  composition round-off parity), ✅ `fill_holes`/`clip_variance`/`clip_covar`/
-  `clip_skewness`. 🟡 `advance_xm_wpxp` (rtm/thlm + wprtp/wpthlp): ✅ iter 27 the
-  5 LHS/RHS term builders + ✅ iter 28 `xm_wpxp_lhs/rhs/solve` penta assembly
-  (interleaved wpxp[2k]/xm[2k+1]; CAM `l_diffuse_rtm_and_thlm=False`) + ✅ iter 29
-  `calc_xm_wpxp_ta_terms` (centered TA), `calc_xm_wpxp_lhs_terms`, `diagnose_upxp`.
-  ☐ remaining: the clipping (`xm_wpxp_clipping_and_stats` + `mono_flux_limiter`,
-  CAM `l_mono_flux_lim_*=True`) + the `advance_xm_wpxp` main.
-- **MFL** ✅ — `clubb_mfl.py` fully ported (iter 30-32): the erf velocity helpers,
-  `calc_turb_adv_range` (masked `fori_loop`), and `monotonic_turbulent_flux_limit`
-  (masked windowed min/max + `lax.scan` sequential clip + xm re-solve + top
-  spike-fix), all round-off parity + differentiable. ☐ `xm_wpxp_clipping_and_stats`
-  (the per-field wrapper: MFL + `fill_holes_vertical` + `clip_covar`) — trivial glue.
-- **P6 orchestration** ☐ — assemble the `advance_clubb_core`-equivalent for the
-  CAM flag subset; pack/unpack carried moment state (wp2/wp3/thlp2/rtp2/rtpthlp/
-  wpthlp/wprtp/up2/vp2). `l_call_pdf_closure_twice=True` → PDF pre+post.
+- **P5 moment advance** ✅ — ALL 4 prognostic advances done with round-off/
+  composition parity: `advance_windm_edsclrm` (u/v), `advance_xp2_xpyp` (5
+  moments), `advance_wp2_wp3` (wp2/wp3 penta), `advance_xm_wpxp` (rtm/thlm +
+  wprtp/wpthlp). All clips/limiters: `fill_holes*`, `clip_variance`,
+  `clip_covar`, `clip_skewness`, full MFL (`clubb_mfl.py`).
+- **P6 orchestration** 🟡 — the `advance_clubb_core`-equivalent. Done: tau family
+  (`clubb_tau.py`: `compute_tke`/`compute_tau_family`/`calc_stability_correction`),
+  `Skw`/`wp3_on_wp2` diagnostics, C6/C7 `_Skw_fnc` (`clubb_coefficients.py`).
+  ☐ remaining: `sigma_sqd_w`/`brunt_vaisala_freq_sqd` wiring (helpers exist), the
+  pre+post ADG1 PDF closure (`l_call_pdf_closure_twice=True`) producing the
+  4th-order moments (wp4/wp2up2/wp2thvp/rtpthvp/…) + PDF `w_1/w_2/varnce_w/
+  mixt_frac`, and pack/unpack of the carried moment state.
 - **P7 integration** 🟡 — ✅ iter 16: `clubb.py` entry + `TurbulenceOutput`;
   `"clubb"` wired into `get_turbulence_fn` dispatch + 4× `needs_tke` +
   `TurbulenceConfig.clubb` (None default, TYPE_CHECKING annotation — no import
@@ -145,46 +141,40 @@ finite gradients in float32 + float64.
 
 ---
 
-## Next (iter 31+)
-*(Compressed at iter 30. iter 11–30 detail in git history + the module table
-above, which is the live builder ledger. Key per-module CAM-vs-ARM caveats are
-recorded in each module's docstring.)*
+## Next (iter 41+)
+*(Compressed at iter 40. iter 11–40 detail in git history + the module table
+above = the live builder ledger; per-module CAM-vs-ARM caveats are in each
+module's docstring.)*
 
-**Done so far — ALL 4 prognostic advances + their machinery:**
-`advance_windm_edsclrm` (u/v) ✅, `advance_xp2_xpyp` (5 moments) ✅,
-`advance_wp2_wp3` (wp2/wp3 penta) ✅, `advance_xm_wpxp` (rtm/thlm + wprtp/wpthlp)
-✅ — all with round-off/composition parity. All clips
-(`fill_holes*`/`clip_variance`/`clip_covar`/`clip_skewness`) + the full MFL ✅.
+**Status:** ALL 4 prognostic advances + all clips/limiter + the tau/Skw/C6-C7
+orchestration pieces are ported & parity-validated. The scheme is runnable+tested
+(phase-1 Lscale eddy diffusion + ADG1-PDF diagnostic buoyancy). The DONE gate is
+wiring the *prognostic* closure into `clubb.py`'s live tendency path.
 
-**CAM-vs-ARM rule of thumb (verified the hard way):** CLUBB-JAX is wired for ARM.
-For each module re-check the CAM namelist/Fortran. Caught so far: wp2/wp3 use
-UPWIND MA (`l_upwind_xm_ma=True`) but xp2/xpyp & wp2/wp3 TA differ from xm/wpxp TA
-(xp2/xpyp UPWIND `l_upwind_xpyp_ta=True`; xm/wpxp CENTERED); wp2_dp1 + wp3_pr_turb
-CAM branches came from the CESM Fortran; `l_damp_wp3_Skw_squared=False`→C8b=0.
+**CAM-vs-ARM rule of thumb (verified the hard way):** CLUBB-JAX is wired for ARM;
+re-check the CAM namelist/Fortran per module. Caught: wp2/wp3 UPWIND MA
+(`l_upwind_xm_ma=True`); xp2/xpyp TA UPWIND (`l_upwind_xpyp_ta=True`) but xm/wpxp
+TA CENTERED; wp2_dp1 + wp3_pr_turb CAM branches from CESM Fortran;
+`l_damp_wp3_Skw_squared=False`→C8b=0; C6/C7 are skewness fns not Richardson;
+`l_use_invrs_tau_N2_iso/l_pos_def/l_enable_relaxed_clipping=False`.
 
-**Remaining to the DONE gate (full prognostic closure in the live path):**
-1. **MFL completion** (`clubb_mfl.py`): pure-JAX `calc_turb_adv_range`
-   (masked `lax` loop — the host-numpy level-range search is not JIT/AD-safe) +
-   the limiter core + `xm_wpxp_clipping_and_stats`.
-2. **`advance_xm_wpxp` main** — orchestrate the iter-27-29 pieces + clipping.
-3. **P6 orchestration** `advance_clubb_core` (in progress): ✅ iter 35 tau family
-   (`clubb_tau.py`); ✅ iter 36 `Skw`/`wp3_on_wp2` diagnostics (`clubb_skewness`).
-   ✅ iter 37 the C6/C7 `_Skw_fnc` family (`clubb_coefficients.py`, CAM skewness
-   functions + Lscale damping). ☐ remaining: C1/C11 are computed inside
-   `advance_wp2_wp3`; `sigma_sqd_w` (have `compute_sigma_sqd_w`); the pre+post PDF
-   closure (`l_call_pdf_closure_twice=True`) producing the 4th-order moments
-   (wp4/wp2up2/wp2thvp/rtpthvp/…) + the PDF `w_1/w_2/varnce_w/mixt_frac`; em (TKE)
-   + brunt_vaisala_freq_sqd; and the carried moment state.
-4. **Wire into `clubb.py`**: carry the full moment set as state, replace the
-   phase-1 eddy-diffusion mean advance with the prognostic advances.
-
-**⚠ Pending codex review** (external rate limit until ~19:37 MDT): iter-34
-`advance_xm_wpxp` main, iter-35/38 `clubb_tau`, iter-36 `clubb_skewness`, iter-37
-`clubb_coefficients`. All small, parity/analytic/jit-grad self-validated. iter-38
-was a **self-audit hardening pass** (AD-guarded the `1/em` stability-correction
-division in `compute_tau_family`; the other 3 modules' divisions are all guarded
-+ reference-consistent). Run the batch the moment codex resets.
+**Remaining to DONE:**
+1. **PDF-closure outputs**: the pre+post ADG1 closure (`l_call_pdf_closure_twice
+   =True`) producing the 4th-order moments (wp4/wp2up2/wp2vp2/wpup2/wpvp2/wp2thvp/
+   rtpthvp/thlpthvp) + PDF velocity params (`w_1/w_2/varnce_w/mixt_frac`). Have
+   `ADG1_pdf_driver`/`calc_pdf_higher_order_moments` — needs the input wiring.
+2. **sigma_sqd_w + brunt** wiring (helpers exist: `compute_sigma_sqd_w`,
+   `calc_brunt_vaisala_freq_sqd`).
+3. **`advance_clubb_core` assembly** + carried moment state (wp2/wp3/up2/vp2/
+   rtp2/thlp2/rtpthlp/wprtp/wpthlp), with the pre/post PDF placement.
+4. **Wire into `clubb.py`**: carry the moment set as state; replace the phase-1
+   eddy-diffusion mean advance with the prognostic advances.
 
 Each chunk: analytic/self-consistency oracle (CI) + golden/round-off parity vs
-CLUBB-JAX (patch reference physical constants to isolate algorithm) + codex
-adversarial review.
+CLUBB-JAX (patch reference physical constants to isolate algorithm) + codex review.
+
+**⚠ Pending codex batch** (external rate limit, resets ~19:37 MDT): iter-34→39
+(`advance_xm_wpxp` main, `clubb_tau` incl. iter-38 AD-hardening + iter-39
+`compute_tke`, `clubb_skewness` diagnostics, `clubb_coefficients`). All small,
+parity/analytic/jit-grad self-validated. RUN THE BATCH the moment codex resets,
+before tackling the (larger) PDF-closure wiring.
