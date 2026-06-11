@@ -1627,6 +1627,50 @@ def test_prognostic_clubb_prescribed_heat_flux_closes_column_budget():
     assert np.all(rel < 1e-9), f"prescribed-heat-flux budget not closed: rel={rel}"
 
 
+def test_prognostic_clubb_prescribed_moisture_flux_closes_column_budget():
+    """Companion to the heat-flux closure for the total-water channel: a prescribed
+    surface kinematic moisture flux ``sfc_wprtp`` is applied as an EXACT flux-form
+    Neumann lower-BC, so the mass-weighted column total-water tendency equals it to
+    round-off (``sum_k (rho_k dz_k) dq_v_dt_k = rho_sfc * w'rt'_sfc``; ``q_v = rtm``,
+    no exner factor).
+
+    Completes the prescribed-flux conservation triad (heat exact, momentum
+    magnitude-only drag, moisture exact). ``rtm`` advances on the same
+    ``advance_xm_wpxp`` path as ``thlm`` but carries a positivity floor
+    (``rt_tol``); for a normal moist column (``q_v ~ 1e-3 >> rt_tol``) the floor
+    never engages, so the closure stays exact — this pins that."""
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
+    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    ncol, nlev = kw["T"].shape
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=150.0, nsteps=40, config=cfg)
+    carry = pack_clubb_moments(m_f)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
+    mass = np.asarray(rho) * dz
+
+    Wq = 5.0e-5                                    # prescribed w'rt'_sfc [kg/kg m/s]
+    wqv = jnp.full((ncol,), Wq)
+    zero = jnp.zeros((ncol,))
+    # Prescribe moisture (Wq) + zero heat flux; momentum on bulk (irrelevant here).
+    out, _ = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, carry, kw["p_full"], kw["p_half"], kw["z_full"],
+        kw["z_half"], T_f[:, -1], q_f[:, -1], rho, 150.0, cfg, zero, wqv, None, None)
+
+    col_dq = np.sum(mass * np.asarray(out.dq_v_dt), axis=1)
+    expected = np.asarray(rho)[:, -1] * Wq                       # rho_sfc * w'rt'_sfc
+    # (1) Non-vacuous: the prescribed flux genuinely moistens the column.
+    assert np.all(col_dq > 1e-6) and np.all(expected > 1e-6)
+    # (2) Exact flux-form closure to round-off (correct magnitude, no double-count).
+    rel = np.abs(col_dq - expected) / np.abs(expected)
+    assert np.all(rel < 1e-9), f"prescribed-moisture-flux budget not closed: rel={rel}"
+
+
 def test_prognostic_clubb_prescribed_momentum_flux_is_magnitude_only_drag():
     """Pin the (CAM-faithful) momentum semantics of the prescribed-flux interface:
     ``sfc_upwp``/``sfc_vpwp`` set only the surface-stress MAGNITUDE, not a vector.

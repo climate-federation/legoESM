@@ -235,6 +235,18 @@ jitted `integrate_clubb_column` for efficient multi-step testing.
   `(u'w'²+v'w'²)^¼` round-trip, magnitude scaling + drag sign). **Codex [medium] caught a
   real formula slip** (docstring dropped the sqrt: wrote `u_*²=u'w'²+v'w'²` instead of
   `sqrt(...)`); fixed both docstrings, re-review approve. No behavior change.
+- **Prescribed MOISTURE-flux closure — triad complete (iter 79):** `test_prognostic_
+  clubb_prescribed_moisture_flux_closes_column_budget` mirrors the heat closure for the
+  total-water channel: a prescribed `sfc_wprtp` is an exact flux-form Neumann BC, so
+  `Σ_k (ρ_k dz_k) dq_v_dt_k = ρ_sfc·w'rt'_sfc` to round-off (rel<1e-9; non-vacuous
+  moistening >1e-6; `q_v=rtm`, no exner). Pins that the `rt_tol` positivity floor (which
+  `thlm` lacks) does NOT break closure for a normal moist column (`q_v~1e-3 >> rt_tol`).
+  Completes the prescribed-flux conservation triad: heat exact (77), momentum magnitude-
+  only drag (78), moisture exact (79). Codex review: approve, no findings. (Also ruled out
+  a CBL-growth integration test: a diagnostic showed `integrate_clubb_column`'s bare-column
+  driver goes grid-scale-UNSTABLE under strong sustained surface heating — `wp2`~16, θ
+  profile non-monotone — the iter-48 instability; the SCM stand-in is unfit for long
+  strong-forcing evolution, so that route was correctly NOT pursued.)
 - **GABLS1 stable-BL — shipped (iter 72):** the correctly-coupled SCM benchmark.
   GABLS1 uses `prescribe="T_s"` (cooling surface temperature) with the bulk
   transfer ACTIVE (`Ch_neutral=1.5e-3`), so the surface heat flux is computed from
