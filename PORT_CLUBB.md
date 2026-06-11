@@ -205,6 +205,19 @@ jitted `integrate_clubb_column` for efficient multi-step testing.
   CLUBB surface moment BC (a scheme-specific prescribed-flux bypass) + use a
   physically-calibrated `wp2` gate (the `1e-3` floor is too weak). Tracked as a
   follow-up.
+- **GABLS1 stable-BL — shipped (iter 72):** the correctly-coupled SCM benchmark.
+  GABLS1 uses `prescribe="T_s"` (cooling surface temperature) with the bulk
+  transfer ACTIVE (`Ch_neutral=1.5e-3`), so the surface heat flux is computed from
+  the prescribed `T_sfc` by CLUBB's OWN bulk formula → CLUBB's native `wpthlp_sfc`
+  coupling drives the stable BL (verified: `_resolve_T_sfc` reads the injected
+  `surface_T_sfc_override` → `clubb_step`→`compute_surface_fluxes`). Added
+  `--turbulence clubb` to `scripts/scm/gabls1.py`; a 20-step run is finite,
+  `T_low`=263.8 K (cooled), `wp2max`=0.105 (weak/bounded, as a stable BL should be).
+  The pass gate was made RESPONSE-based (codex-flagged): requires genuine cooling
+  (`T_low<T_low_init−0.05·hours`) + turbulence above the rest floor and bounded
+  (`1e-4<tke_max<5`), so an unchanged/no-op column can no longer pass. mynn25
+  default unchanged; existing `test_scm_gabls1.py` (calls `build_scm`/`scm.run`
+  directly) unaffected.
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz
