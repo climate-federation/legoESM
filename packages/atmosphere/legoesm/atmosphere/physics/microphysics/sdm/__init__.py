@@ -32,6 +32,16 @@ from legoesm.atmosphere.physics.microphysics.sdm.condensation import (
     drsq_dt,
     integrate_radius,
 )
+from legoesm.atmosphere.physics.microphysics.sdm.kernels import (
+    collision_kernel,
+    golovin_kernel,
+    long_kernel,
+    sedimentation_kernel,
+    terminal_velocity,
+    terminal_velocity_atlas_ulbrich,
+    terminal_velocity_cloud_rain_shima,
+    terminal_velocity_rogers_yau,
+)
 
 __all__ = [
     "SDMConfig",
@@ -41,4 +51,12 @@ __all__ = [
     "water_mass_per_droplet",
     "drsq_dt",
     "integrate_radius",
+    "collision_kernel",
+    "golovin_kernel",
+    "sedimentation_kernel",
+    "long_kernel",
+    "terminal_velocity",
+    "terminal_velocity_rogers_yau",
+    "terminal_velocity_atlas_ulbrich",
+    "terminal_velocity_cloud_rain_shima",
 ]

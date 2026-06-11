@@ -38,6 +38,17 @@ class SDMConfig(NamedTuple):
         (NaCl -> 2). Used to convert solute mass to effective solute moles.
     solute_molar_mass : float
         Molar mass of the dissolved aerosol [kg/mol] (NaCl -> 0.05844).
+    collision_kernel : str
+        Collision-coalescence kernel: ``"golovin"`` (analytic test kernel,
+        default), ``"sedimentation"`` (geometric sweep-out), or ``"long"``
+        (Long 1974 polynomial efficiency). Unknown values raise.
+    terminal_velocity : str
+        Droplet terminal-velocity law: ``"rogers_yau"`` (Stokes R²,
+        default), ``"atlas_ulbrich"`` (rain power law), or
+        ``"cloud_rain_shima"`` (SCALE-SDM piecewise). Unknown values raise.
+    golovin_b : float
+        Golovin kernel coefficient ``b`` [1/s] (K = b(X_i+X_j); Shima 2009
+        Golovin box test uses b = 1.5e3).
     """
 
     n_substeps_condensation: int = 1
@@ -46,3 +57,6 @@ class SDMConfig(NamedTuple):
     include_solute: bool = True
     solute_ionization: float = 2.0        # van't Hoff i for NaCl
     solute_molar_mass: float = 0.05844    # [kg/mol] NaCl
+    collision_kernel: str = "golovin"
+    terminal_velocity: str = "rogers_yau"
+    golovin_b: float = 1.5e3              # [1/s] Golovin kernel coefficient
