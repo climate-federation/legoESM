@@ -90,6 +90,7 @@ from legoesm.atmosphere.physics.microphysics.sdm.init import (
     sample_exponential_mass,
     sample_lognormal_radius,
 )
+from legoesm.atmosphere.physics.microphysics.sdm.recycling import recycle_inactive
 
 __all__ = [
     "SDMConfig",
@@ -131,4 +132,5 @@ __all__ = [
     "sample_lognormal_radius",
     "exponential_water_droplets",
     "lognormal_aerosol_droplets",
+    "recycle_inactive",
 ]
