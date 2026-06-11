@@ -275,7 +275,16 @@ def _veros_buoyancy_length(
     (the ``maximum``/``minimum`` floors are sub-gradient-safe).
     """
     n_int = e.shape[-1]
-    sqrttke = jnp.sqrt(jnp.maximum(0.0, e))
+    # AD-safe sqrt at the negative-TKE energy debt: ``sqrt(max(0, e))`` has a
+    # NaN derivative wherever e <= 0 (``d sqrt`` at 0 is inf; the ``max``
+    # tangent there is 0; 0·inf = NaN — it poisons BOTH jvp and vjp through
+    # any state carrying Veros's negative interior TKE, e.g. every parameter
+    # gradient across >= 2 steps of the ACC recipe).  The double-``where``
+    # keeps the primal BIT-IDENTICAL (sqrt is only evaluated where e > 0)
+    # and makes the debt-branch derivative exactly 0 (the correct one-sided
+    # derivative of the clamped primal).  Same pattern as the documented
+    # N²-floor note in ``_gm_redi_common._eady_growth_and_length``.
+    sqrttke = jnp.where(e > 0.0, jnp.sqrt(jnp.where(e > 0.0, e, 1.0)), 0.0)
     # Raw length: huge where N2 <= 0 (denominator -> sqrt(1e-12)).
     mxl = jnp.sqrt(2.0) * sqrttke / jnp.sqrt(jnp.maximum(1e-12, N2))
 
@@ -631,8 +640,12 @@ def _solve_tke_backward_euler(
     if veros_positivity:
         # Veros linearisation point: sqrttke = sqrt(max(0, e)) (tke.py:30)
         # — zero where the carried TKE is negative (energy debt), so the
-        # dissipation shuts off there exactly as in Veros.
-        e_sqrt = jnp.sqrt(jnp.maximum(e_old, 0.0))
+        # dissipation shuts off there exactly as in Veros.  Double-``where``
+        # for an AD-safe sqrt at the debt branch (primal BIT-IDENTICAL;
+        # ``sqrt(max(0,e))`` itself has a NaN derivative at e <= 0 — see
+        # the note in ``_veros_buoyancy_length``).
+        e_sqrt = jnp.where(
+            e_old > 0.0, jnp.sqrt(jnp.where(e_old > 0.0, e_old, 1.0)), 0.0)
     else:
         e_sqrt = jnp.sqrt(jnp.maximum(e_old, cfg.tke_background))
     # Linearised dissipation rate (per unit e_new):
@@ -887,7 +900,11 @@ def compute_K_from_tke(
         K_M = cfg.c_k * l_k * jnp.sqrt(
             2.0 * jnp.maximum(e, cfg.tke_background))
     elif kappa_convention == "veros_sqrte":
-        K_M = cfg.c_k * l_k * jnp.sqrt(jnp.maximum(e, 0.0))
+        # Double-``where`` for an AD-safe sqrt where the carried TKE is
+        # negative (primal BIT-IDENTICAL to sqrt(max(0,e)); see the note in
+        # ``_veros_buoyancy_length``).
+        K_M = cfg.c_k * l_k * jnp.where(
+            e > 0.0, jnp.sqrt(jnp.where(e > 0.0, e, 1.0)), 0.0)
     else:
         raise ValueError(
             f"Unknown TKEConfig.kappa_convention={kappa_convention!r}; "
@@ -1236,7 +1253,13 @@ def tke_set_diffusivities(
         tke_old, l_k, cfg, N2=N2, shear_sq=shear_sq, z_interface=z_interface)
     ctx = TKEPostMixingContext(
         K_M_old=K_M, K_H_old=K_H, mxl=l_k,
-        sqrttke=jnp.sqrt(jnp.maximum(tke_old, 0.0)),
+        # Double-``where`` for an AD-safe sqrt at the negative-TKE energy
+        # debt (primal BIT-IDENTICAL to sqrt(max(0,e)); the plain form has a
+        # NaN derivative at e <= 0 — see the note in
+        # ``_veros_buoyancy_length``).
+        sqrttke=jnp.where(
+            tke_old > 0.0,
+            jnp.sqrt(jnp.where(tke_old > 0.0, tke_old, 1.0)), 0.0),
         shear_sq=shear_sq, tke_old=tke_old, surface_flux=surface_flux,
         dz_half=dz_half, dz_cell=dz_cell,
         dz_surface=jnp.asarray(dz_surface, dtype=rho_cell.dtype),

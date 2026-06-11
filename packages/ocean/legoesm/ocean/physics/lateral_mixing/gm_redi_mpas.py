@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -43,6 +44,7 @@ from legoesm.ocean.eos import make_eos_fn, rho_0 as _RHO_0
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     compute_visbeck_kappa_gm,
     dm95_taper_scalar,
+    validate_adjoint_stabilization,
     vertical_flux_divergence,
 )
 from legoesm.ocean.vertical import compute_ocean_jacobian
@@ -211,11 +213,19 @@ def compute_isopycnal_slopes_mpas(
     S_n_raw = -drho_dn_half / drho_dz_edge                    # (nEdges, nlev-1)
     S_n_clipped = jnp.clip(S_n_raw, -cfg.S_max, cfg.S_max)
 
+    # Adjoint stabilization (primal-invisible; see _gm_redi_common note and
+    # the GMRediConfig field doc). Static Python gating on the config literal.
+    adj_stab = getattr(cfg, "adjoint_stabilization", "none")
+    validate_adjoint_stabilization(adj_stab)
+    if adj_stab == "stop_gradient_slopes":
+        S_n_clipped = jax.lax.stop_gradient(S_n_clipped)
+
     # DM95 scalar taper (single-component variant — see _gm_redi_common).
     # ``taper_width_frac`` maps to Veros's ``iso_dslope / iso_slopec``.
     return dm95_taper_scalar(
         S_n_clipped, cfg.S_max,
         transition_width_frac=cfg.taper_width_frac,
+        stop_gradient_taper=(adj_stab == "stop_gradient_taper"),
     )
 
 

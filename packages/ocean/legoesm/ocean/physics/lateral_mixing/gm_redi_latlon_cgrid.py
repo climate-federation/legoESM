@@ -19,6 +19,7 @@ References
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -50,6 +51,7 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     compute_visbeck_kappa_gm,
     dm95_taper,
     dm95_taper_scalar,
+    validate_adjoint_stabilization,
     vertical_flux_divergence,
 )
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
@@ -394,8 +396,21 @@ def compute_isopycnal_slopes_latlon_cgrid(
         S_x_raw = jnp.clip(S_x_raw, -cfg.S_max, cfg.S_max)
         S_y_raw = jnp.clip(S_y_raw, -cfg.S_max, cfg.S_max)
 
+    # Adjoint stabilization (primal-invisible; see _gm_redi_common note):
+    # "stop_gradient_slopes" freezes the raw slopes (the tapers computed from
+    # them then carry no gradient either); "stop_gradient_taper" freezes only
+    # the DM95 taper factor inside dm95_taper.  Static Python gating.
+    adj_stab = getattr(cfg, "adjoint_stabilization", "none")
+    validate_adjoint_stabilization(adj_stab)
+    if adj_stab == "stop_gradient_slopes":
+        S_x_raw = jax.lax.stop_gradient(S_x_raw)
+        S_y_raw = jax.lax.stop_gradient(S_y_raw)
+
     # DM95 tapering via shared helper (identical formula across grids).
-    return dm95_taper(S_x_raw, S_y_raw, cfg.S_max, EPS, cfg.taper_width_frac)
+    return dm95_taper(
+        S_x_raw, S_y_raw, cfg.S_max, EPS, cfg.taper_width_frac,
+        stop_gradient_taper=(adj_stab == "stop_gradient_taper"),
+    )
 
 
 # =====================================================================
@@ -787,7 +802,8 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
                            drdT_w=None, drdS_w=None,
                            drdT_wb=None, drdS_wb=None, drho_dz_w_b=None,
                            dTdx_u=None, dSdx_u=None, dTdy_v=None, dSdy_v=None,
-                           u_face_act=None, v_face_act=None):
+                           u_face_act=None, v_face_act=None,
+                           adjoint_stabilization="none"):
     """W-face (vertical-flux) triad isopycnal slopes + DM95 tapers.
 
     Shared by the explicit ``F_z`` assembly (in
@@ -810,6 +826,7 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
     S_max value (0.5) and inflate K_33 ~10× over Veros — the unclipped taper is
     what makes the neutral K_33 track Veros (ratio ~1.0 at the thermocline).
     """
+    validate_adjoint_stabilization(adjoint_stabilization)
     (nx_W, nx_E, nx_Wb, nx_Eb, ny_S, ny_N, ny_Sb, ny_Nb) = _w_triad_numerators(
         slope_density, drho_dx_u, drho_dy_v, drdT_w, drdS_w,
         dTdx_u, dSdx_u, dTdy_v, dSdy_v, n_lat, n_lon,
@@ -821,10 +838,17 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
     # per-cell derivative, so both levels share the single face denominator
     # (a neutral call without the b-variant already raised in the numerators).
     drho_dz_w_B = drho_dz_w_b if drho_dz_w_b is not None else drho_dz_w
+    # Adjoint stabilization (primal-invisible; see _gm_redi_common note):
+    # freeze the per-triad slopes ("stop_gradient_slopes" — the tapers built
+    # from frozen slopes then carry no gradient) or only the tapers
+    # ("stop_gradient_taper").  Static Python gating.
+    _sg_slopes = adjoint_stabilization == "stop_gradient_slopes"
+    _sg_taper = adjoint_stabilization == "stop_gradient_taper"
 
     def _slope(num, dz=drho_dz_w):
         s = -num / dz
-        return jnp.clip(s, -S_max, S_max) if clip else s
+        s = jnp.clip(s, -S_max, S_max) if clip else s
+        return jax.lax.stop_gradient(s) if _sg_slopes else s
 
     S_Wx1 = _slope(nx_W)                    # W,A
     S_Wx2 = _slope(nx_E)                    # E,A
@@ -834,7 +858,9 @@ def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
     S_Wy2 = _slope(ny_N)                    # N,A
     S_Wy3 = _slope(ny_Sb, drho_dz_w_B)      # S,B
     S_Wy4 = _slope(ny_Nb, drho_dz_w_B)      # N,B
-    tw = lambda s: dm95_taper_scalar(s, S_max, transition_width_frac=taper_width_frac)[1]
+    tw = lambda s: dm95_taper_scalar(
+        s, S_max, transition_width_frac=taper_width_frac,
+        stop_gradient_taper=_sg_taper)[1]
     return (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
             tw(S_Wx1), tw(S_Wx2), tw(S_Wx3), tw(S_Wx4),
             tw(S_Wy1), tw(S_Wy2), tw(S_Wy3), tw(S_Wy4))
@@ -865,8 +891,15 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     double_diag_kappa=None,
     double_diag_steep: float = 0.0,
     veros_triad_weights: bool = False,
+    adjoint_stabilization: str = "none",
 ) -> jnp.ndarray:
     """Triad-based GM+Redi tracer tendency on the lat-lon C-grid.
+
+    ``adjoint_stabilization`` (default "none" = exact AD, bit-identical):
+    reverse-mode gradient stabilization via ``stop_gradient`` on the DM95
+    tapers ("stop_gradient_taper") or the per-triad slopes
+    ("stop_gradient_slopes") — PRIMAL-INVISIBLE by construction; see the
+    ``GMRediConfig`` field doc and the note in ``_gm_redi_common``.
 
     ``double_diag_kappa`` (default None = off, bit-identical): when given (the
     ``GMRediConfig.double_redi_diagonal`` option), the horizontal DIAGONAL flux
@@ -933,6 +966,10 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     tendency : (n_lat, n_lon, nlev)
     """
     _validate_slope_density(slope_density)
+    validate_adjoint_stabilization(adjoint_stabilization)
+    # Adjoint stabilization (primal-invisible; static Python gating).
+    _sg_slopes = adjoint_stabilization == "stop_gradient_slopes"
+    _sg_taper = adjoint_stabilization == "stop_gradient_taper"
     n_lat, n_lon, nlev = q.shape
     dz_actual = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
     dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
@@ -1190,17 +1227,22 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
 
     def _uvslope(num, dz):
         s = -num / dz
-        return jnp.clip(s, -S_max, S_max) if _clip_slope else s
+        s = jnp.clip(s, -S_max, S_max) if _clip_slope else s
+        # Adjoint stabilization: frozen-coefficient slopes (primal-invisible).
+        return jax.lax.stop_gradient(s) if _sg_slopes else s
 
     S_T1 = _uvslope(drho_dx_u_west, drho_dz_T1)
     S_T2 = _uvslope(drho_dx_u_west, drho_dz_T2)
     S_T3 = _uvslope(drho_dx_u_east, drho_dz_T3)
     S_T4 = _uvslope(drho_dx_u_east, drho_dz_T4)
 
-    taper_T1 = dm95_taper_scalar(S_T1, S_max, transition_width_frac=taper_width_frac)[1]
-    taper_T2 = dm95_taper_scalar(S_T2, S_max, transition_width_frac=taper_width_frac)[1]
-    taper_T3 = dm95_taper_scalar(S_T3, S_max, transition_width_frac=taper_width_frac)[1]
-    taper_T4 = dm95_taper_scalar(S_T4, S_max, transition_width_frac=taper_width_frac)[1]
+    _tw_uv = lambda s: dm95_taper_scalar(
+        s, S_max, transition_width_frac=taper_width_frac,
+        stop_gradient_taper=_sg_taper)[1]
+    taper_T1 = _tw_uv(S_T1)
+    taper_T2 = _tw_uv(S_T2)
+    taper_T3 = _tw_uv(S_T3)
+    taper_T4 = _tw_uv(S_T4)
     if act_T1 is not None:
         # Kill triads whose vertical pair crosses the seafloor (Veros taper→0
         # via the maskW-ed dTdz; the in_situ slope-clip would otherwise pin
@@ -1305,10 +1347,10 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     S_V3 = _uvslope(drho_dy_v_north, drho_dz_V3)
     S_V4 = _uvslope(drho_dy_v_north, drho_dz_V4)
 
-    taper_V1 = dm95_taper_scalar(S_V1, S_max, transition_width_frac=taper_width_frac)[1]
-    taper_V2 = dm95_taper_scalar(S_V2, S_max, transition_width_frac=taper_width_frac)[1]
-    taper_V3 = dm95_taper_scalar(S_V3, S_max, transition_width_frac=taper_width_frac)[1]
-    taper_V4 = dm95_taper_scalar(S_V4, S_max, transition_width_frac=taper_width_frac)[1]
+    taper_V1 = _tw_uv(S_V1)
+    taper_V2 = _tw_uv(S_V2)
+    taper_V3 = _tw_uv(S_V3)
+    taper_V4 = _tw_uv(S_V4)
     if act_V1 is not None:
         # Vertical-pair seafloor kill, as for the u-face triads above.
         taper_V1 = taper_V1 * act_V1
@@ -1397,7 +1439,8 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
         drdT_wb=drdT_wb, drdS_wb=drdS_wb,
         drho_dz_w_b=(drho_dz_w_b if slope_density == "neutral" else None),
         dTdx_u=dTdx_u, dSdx_u=dSdx_u, dTdy_v=dTdy_v, dSdy_v=dSdy_v,
-        u_face_act=_u_face_act, v_face_act=_v_face_act)
+        u_face_act=_u_face_act, v_face_act=_v_face_act,
+        adjoint_stabilization=adjoint_stabilization)
 
     # Per-triad vertical flux.  The off-diagonal skew (kR+kG)·S·dq/dx is ALWAYS
     # explicit.  The DIAGONAL K_33 term (kR·S²·dq/dz — the "enhanced vertical
@@ -1567,6 +1610,8 @@ def gm_redi_tracer_tendency_latlon(
     scheme = getattr(cfg, "slope_scheme", "triads")
     _double_diag = bool(getattr(cfg, "double_redi_diagonal", False))
     _vtw = bool(getattr(cfg, "veros_triad_weights", False))
+    _adj_stab = getattr(cfg, "adjoint_stabilization", "none")
+    validate_adjoint_stabilization(_adj_stab)
     if (_double_diag or _vtw) and scheme != "triads":
         raise ValueError(
             "GMRediConfig.double_redi_diagonal / veros_triad_weights (the "
@@ -1582,6 +1627,7 @@ def gm_redi_tracer_tendency_latlon(
             eos_fn=eos_fn, rho_0=rho_0, g=g,
             double_diag_kappa=_ddk, double_diag_steep=cfg.K_iso_steep,
             veros_triad_weights=_vtw,
+            adjoint_stabilization=_adj_stab,
         )
         dS_dt = gm_redi_tracer_tendency_triads_latlon_cgrid(
             S, rho, mask, u_mask, v_mask,
@@ -1591,6 +1637,7 @@ def gm_redi_tracer_tendency_latlon(
             eos_fn=eos_fn, rho_0=rho_0, g=g,
             double_diag_kappa=_ddk, double_diag_steep=cfg.K_iso_steep,
             veros_triad_weights=_vtw,
+            adjoint_stabilization=_adj_stab,
         )
     elif scheme == "centered":
         dT_dt = gm_redi_tracer_tendency_latlon_cgrid(
@@ -1705,7 +1752,9 @@ def compute_isoneutral_K33_latlon(
      tWx1, tWx2, tWx3, tWx4, tWy1, tWy2, tWy3, tWy4) = _w_triad_slopes_tapers(
         n_lat=n_lat, n_lon=n_lon, S_max=cfg.S_max,
         taper_width_frac=cfg.taper_width_frac,
-        u_face_act=_ufa, v_face_act=_vfa, **w_inputs)
+        u_face_act=_ufa, v_face_act=_vfa,
+        adjoint_stabilization=getattr(cfg, "adjoint_stabilization", "none"),
+        **w_inputs)
     K_33 = 0.25 * kappa_Redi_w * (
         tWx1 * S_Wx1 ** 2 + tWx2 * S_Wx2 ** 2 + tWx3 * S_Wx3 ** 2 + tWx4 * S_Wx4 ** 2
         + tWy1 * S_Wy1 ** 2 + tWy2 * S_Wy2 ** 2 + tWy3 * S_Wy3 ** 2 + tWy4 * S_Wy4 ** 2)
@@ -1948,7 +1997,9 @@ def compute_realized_gm_skew_conversion(
      tWx1, tWx2, tWx3, tWx4, tWy1, tWy2, tWy3, tWy4) = _w_triad_slopes_tapers(
         n_lat=n_lat, n_lon=n_lon, S_max=cfg.S_max,
         taper_width_frac=cfg.taper_width_frac,
-        u_face_act=_ufa, v_face_act=_vfa, **w_inputs)
+        u_face_act=_ufa, v_face_act=_vfa,
+        adjoint_stabilization=getattr(cfg, "adjoint_stabilization", "none"),
+        **w_inputs)
     # Per-triad slope variance <S²>_triad = 0.25·Σ taper·S²  (= K_33/κ_Redi).
     S2_triad = 0.25 * (
         tWx1 * S_Wx1 ** 2 + tWx2 * S_Wx2 ** 2 + tWx3 * S_Wx3 ** 2 + tWx4 * S_Wx4 ** 2
@@ -2149,6 +2200,8 @@ def compute_realized_signed_conversions(
             double_diag_steep=cfg.K_iso_steep,
             veros_triad_weights=bool(
                 getattr(cfg, "veros_triad_weights", False)),
+            adjoint_stabilization=getattr(
+                cfg, "adjoint_stabilization", "none"),
         )
         return Fx, Fy, Fz
 

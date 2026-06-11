@@ -33,6 +33,7 @@ References
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm.core.operators_3d import gradient_x_3d, gradient_y_3d, divergence_3d
@@ -58,6 +59,7 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     EPS,
     compute_visbeck_kappa_gm,
     dm95_taper,
+    validate_adjoint_stabilization,
     vertical_flux_divergence,
 )
 from legoesm.ocean.vertical import OceanZStarCoordinate
@@ -103,9 +105,20 @@ def _compute_tapered_slopes(
     S_x = jnp.clip(-drho_dx_half / drho_dz_safe, -cfg.S_max, cfg.S_max)
     S_y = jnp.clip(-drho_dy_half / drho_dz_safe, -cfg.S_max, cfg.S_max)
 
+    # Adjoint stabilization (primal-invisible; see _gm_redi_common note and
+    # the GMRediConfig field doc). Static Python gating on the config literal.
+    adj_stab = getattr(cfg, "adjoint_stabilization", "none")
+    validate_adjoint_stabilization(adj_stab)
+    if adj_stab == "stop_gradient_slopes":
+        S_x = jax.lax.stop_gradient(S_x)
+        S_y = jax.lax.stop_gradient(S_y)
+
     # DM95 tapering: smooth taper near S_max. ``taper_width_frac`` maps
     # to Veros's ``iso_dslope / iso_slopec``.
-    return dm95_taper(S_x, S_y, cfg.S_max, eps, cfg.taper_width_frac)
+    return dm95_taper(
+        S_x, S_y, cfg.S_max, eps, cfg.taper_width_frac,
+        stop_gradient_taper=(adj_stab == "stop_gradient_taper"),
+    )
 
 
 def _tracer_tendency_gm_redi(

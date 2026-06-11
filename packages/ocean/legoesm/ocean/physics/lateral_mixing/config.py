@@ -227,6 +227,42 @@ class GMRediConfig(NamedTuple):
     # (None = off). The Rossby-radius length uses the ``visbeck`` length params.
     # Veros ACC runs with EKE on (enable_eke=True).
     eke: EKEConfig | None = None
+    adjoint_stabilization: str = "none"
+    # ^ Long-horizon REVERSE-MODE gradient stabilization for the isoneutral
+    # operator (default "none" = exact AD, bit-identical legacy). MECHANISM
+    # (probe-verified, .physics-validator/gm_adjoint_stab/RESULTS.md): the
+    # slope saturation (DM95 taper; and the ±S_max clip on the in-situ path)
+    # bounds the PRIMAL fluxes but the taper does NOT bound the LINEARIZED
+    # operator — d(taper·S)/d(state) exceeds the primal coefficient bound via
+    # (a) the taper-derivative term S·taper' in the transition band
+    # (~1/(2·taper_width_frac) excess; dense-Jacobian rho 1.0→2.4 in band at
+    # the ACC kappa, scaling with kappa·dt/dz²) and (b) the UNCLIPPED neutral
+    # slope tangent ∂S/∂(∇ρ) ∝ 1/∂_zρ in weakly-stratified cells (the
+    # dominant path on the real ACC state; EOS-independent). The tangent/
+    # adjoint propagator then has per-step amplification |G| ≫ 1 where the
+    # primal is stable (full ACC step: |G| ≈ 78 at constant kappa=1000, vs
+    # 1.02 with GM/Redi removed) — parameter adjoints grow ~×2-5/step beyond
+    # ~1 model day. NB the legacy slope_density="in_situ" CLIP saturates the
+    # tangent as well (clip gradient = 0 outside ±S_max): the in-situ path
+    # measures |G| ≈ 1.02 with NO stabilization — the instability is specific
+    # to the Veros-faithful UNCLIPPED "neutral" slope path.
+    # Options (both PRIMAL-INVISIBLE by construction — stop_gradient only):
+    # - "stop_gradient_slopes" (RECOMMENDED, probe-validated): stop_gradient
+    #   on the slopes themselves (and hence the tapers computed from them) —
+    #   the frozen-coefficient (Picard) linearization of the isoneutral
+    #   tensor. Gradients keep the full tracer-flux linearization and the
+    #   kappa sensitivity, dropping only the density→tensor feedback. Full
+    #   ACC step |G|: 78 → 1.020 (constant kappa), full recipe → 1.002.
+    # - "stop_gradient_taper": stop_gradient on the DM95 taper FACTORS only
+    #   (the textbook differentiable-solver flux-limiter trick). Kills
+    #   mechanism (a) — sufficient on healthily-stratified configs — but NOT
+    #   mechanism (b): on the faithful ACC stack |G| stays ≈ 75. Kept as the
+    #   finer-grained option; prefer "stop_gradient_slopes".
+    # Applies to the tracer-tendency triads (u/v/w), the centered scheme, the
+    # implicit-K33 coefficient, and the slope chain feeding Visbeck/EKE.
+    # NOT for forward-only runs (no effect); select it for long-horizon
+    # gradient-based calibration/DA through GM/Redi. Validated fail-fast by
+    # ``validate_adjoint_stabilization`` at every GM/Redi entry point.
 
 
 class LateralMixingConfig(NamedTuple):
