@@ -1162,6 +1162,42 @@ def test_clubb_turbulence_prognostic_jit_and_grad():
     assert g.shape == kw["T"].shape and jnp.all(jnp.isfinite(g))
 
 
+def test_diagnostic_clubb_runs_in_float32_no_dtype_promotion():
+    """Cross-backend (float32 / Metal) robustness for the DEFAULT diagnostic
+    ``scheme="clubb"`` entry — the path most users get (prognostic is opt-in).
+
+    Complements ``test_prognostic_clubb_runs_in_float32_no_dtype_promotion``: the
+    diagnostic phase-1 path shares the parcel-Lscale mixing length (fixed in
+    iter-67) and the ADG1-PDF closure, so it must likewise return float32 outputs
+    with no silent float64 promotion. Feeds an all-float32 column and asserts every
+    field of the ``TurbulenceOutput`` plus the carried ``wp2`` stays float32 and
+    finite."""
+    f32 = jnp.float32
+    ncol, nlev = 2, 16
+    rng = np.random.default_rng(0)
+    p_half = jnp.asarray(
+        np.linspace(2e4, 1e5, nlev + 1)[None, :] * np.ones((ncol, nlev + 1)), dtype=f32)
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    z_half = jnp.asarray(
+        np.tile(np.linspace(16000.0, 0.0, nlev + 1), (ncol, 1)), dtype=f32)
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    exner = (p_full / jnp.asarray(constants.p_ref, f32)) ** jnp.asarray(constants.kappa, f32)
+    T = jnp.asarray(290.0 + 4e-3 * np.asarray(z_full), dtype=f32) * exner
+    u = jnp.asarray(8.0 + 4.0 * rng.standard_normal((ncol, nlev)), dtype=f32)
+    v = jnp.asarray(2.0 * rng.standard_normal((ncol, nlev)), dtype=f32)
+    q_v = jnp.asarray(2e-3 + 4e-3 * rng.random((ncol, nlev)), dtype=f32)
+    tke = jnp.full((ncol, nlev), 0.4, dtype=f32)
+    rho = p_full / (jnp.asarray(constants.R_d, f32)
+                    * jnp.maximum(T * (1.0 + 0.61 * q_v), jnp.asarray(150.0, f32)))
+    out, wp2 = clubb_turbulence(
+        u, v, T, q_v, tke, p_full, p_half, z_full, z_half, T[:, -1], q_v[:, -1],
+        rho, jnp.asarray(150.0, f32), CLUBBConfig())
+    for arr in (out.du_dt, out.dv_dt, out.dT_dt, out.dq_v_dt, out.Km, out.Kh,
+                out.shflx, out.lhflx, out.ustar, out.h_pbl, wp2):
+        assert arr.dtype == f32                          # NO silent float64 promotion
+        assert jnp.all(jnp.isfinite(arr))
+
+
 def test_prognostic_clubb_runs_in_float32_no_dtype_promotion():
     """Cross-backend (float32 / Metal) robustness: the prognostic scheme must run
     in float32 WITHOUT silently promoting to float64.

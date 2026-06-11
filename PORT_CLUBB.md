@@ -238,6 +238,14 @@ float64, identical to before). New regression test
 `test_prognostic_clubb_runs_in_float32_no_dtype_promotion` (asserts every output +
 moment carry stays float32 and finite, single-step + multistep). Found by
 exercising the scheme in float32 — a path no prior test covered.
+- **iter 68 completeness sweep:** swept ALL `clubb_*.py` for the same bug class
+  and confirmed `clubb_mixing_length.py` was the ONLY strong-float64 source — every
+  other module uses dtype-preserving `jnp.zeros_like`/`ones_like` or weak
+  `jnp.full(.., py_float)`/`jnp.asarray(py_float)` (which don't promote float32).
+  Both clubb entry points verified float32-clean; added
+  `test_diagnostic_clubb_runs_in_float32_no_dtype_promotion` for the DEFAULT
+  diagnostic `scheme="clubb"` path (the prognostic float32 test only covered the
+  opt-in path).
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz
