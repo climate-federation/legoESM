@@ -222,3 +222,44 @@ faster — equilibration-rate difference, characterized not closed), EKE 2.5×,
 and the documented-deferred minor items. NEXT: the first data-backed
 transfer target, Veros `global_4deg` (monthly forcing, real bathymetry, ice
 mask — harness glue only, no new numerics expected).
+
+## Phase H (cont.): transfer test #2 — global_4deg, the first data-backed oracle (2026-06-10/11)
+
+**Pre-validation — the ACC two-flip mini-transfer** (`.physics-validator/acc_two_flip/`):
+global_4deg's two new options (gsw EOS `9d11dd09`, TKE W-grid superbee advection
+`8fdd20db`) flipped on BOTH models in the already-matched ACC config. Cross-model
+two-flip: KE 0.967, transport 0.931 — same class as the matched baseline (0.914 /
+0.892), slightly tighter. Delta axis: Veros climate-neutral (1.002); legoESM yearly
+traces ≤1.2% through yr 7 (the +6% endpoint is eddy-spindown phase). Attribution:
+the EOS carries the endpoint sensitivity; TKE advection verified-active but
+climate-inert in both models. A fresh stock run at HEAD reproduced the banked
+baseline exactly — all session commits confirmed default-inert.
+
+**Transfer test #2 — global_4deg (`f4d93945`).** "No new numerics expected" was
+wrong by exactly two (gsw EOS, TKE superbee advection — both now canonical
+config options) plus one forcing form (`flux_feedback`: prescribed flux +
+qnec·(SST−T) feedback + ice mask, `2ca8d21f`). The recipe itself is pure config
+with ONE physics flip vs ACC (`isopycnal_diffusion=False` = the Veros default
+for the absent setting). `eke_diss_surfbot` proven inert (idemix-gated).
+
+**The composition surface was the real discovery: NINE variable-bathymetry
+bugs, all flat-bottom no-ops** (ACC could never see them), each independently
+review-proven (flat-bottom bit-identity by 22-leaf sha256; manufactured
+stepped-bathymetry conservation probes). Headline: GM/Redi triad fluxes
+crossed closed faces and the seafloor → −6%/yr volume-salt leak (now −3e-17),
+which alone drove the downstream instability cascade. Also: AB2 closed-face
+recurrence |r|=1.13/step, face-A_v seafloor momentum leak (w 100× oracle),
+sub-seafloor velocity consumption in TKE/EKE advection, rock-cell GM/convection
+artifacts, gsw grad NaN at dry cells, island 4→8 connectivity (4-conn produced
+11 islands with 5 contradictory ψ constraints; Veros island.py:18 verbatim).
+
+**10-yr verdict vs the banked Veros oracle** (26-min CPU oracle; legoESM 45 s
+on a V100S):
+- EKE-off (Veros's constant-K branch): **ψ_range 0.99, vol-S 1.002 — PASS**;
+  transients converge from opposite sides (Veros spins down 240→212 Sv from
+  data IC, legoESM spins up from rest 187→211 Sv). vol-T +0.16 K and KE 1.62×
+  = the known equilibration class.
+- Fully-faithful (prognostic 3-D EKE): yr-1 transport ratio 1.00, then the
+  EKE equilibration RUNS AWAY on the global domain (×18 by yr 8, NaN at 8.9).
+  The ACC's 2.4× EKE overshoot is hereby confirmed as THE single open
+  residual of the oracle program — and it now has a 45-s/10-yr GPU testbed.
