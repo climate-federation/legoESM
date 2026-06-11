@@ -373,6 +373,40 @@ def test_be_exact_for_pure_maxwell():
     assert float(out.radius[0]) ** 2 > R0**2 + 0.5 * dt * rhs  # grew sensibly
 
 
+@pytest.mark.parametrize("method", ["rk4_adaptive", "be", "cn", "dirk2"])
+def test_all_adaptive_integrators_agree_on_stiff_kohler(method):
+    """The whole ERF adaptive family (explicit rk4, BE, CN, DIRK2) must land on
+    the same dense-Euler reference for the stiff sub-micron Köhler droplet."""
+    cfg0 = SDMConfig(include_curvature=True, include_solute=True)
+    st = make_monodisperse(n_sd=1, radius=2.0e-7, multiplicity=1.0,
+                           solute_mass=1.0e-16)
+    S, T, dt = 0.99, 283.0, 5.0
+    ref = float(integrate_radius(
+        st, S, T, dt, cfg0._replace(condensation_integrator="euler",
+                                    n_substeps_condensation=200000)).radius[0])
+    got = float(integrate_radius(
+        st, S, T, dt, cfg0._replace(condensation_integrator=method)).radius[0])
+    assert got == pytest.approx(ref, rel=2e-3)
+
+
+@pytest.mark.parametrize("method", ["cn", "dirk2"])
+def test_cn_dirk2_steady_noop_and_growth(method):
+    cfg = SDMConfig(include_curvature=False, include_solute=False,
+                    condensation_integrator=method)
+    st = make_monodisperse(n_sd=2, radius=8.0e-6, multiplicity=1.0)
+    out = integrate_radius(st, 1.0, 283.0, 100.0, cfg)
+    assert jnp.allclose(out.radius, st.radius, rtol=0.0, atol=0.0)  # S=1 no-op
+    out2 = integrate_radius(st, 1.02, 283.0, 2.0, cfg)
+    assert bool(jnp.all(out2.radius > st.radius))                    # grows
+    # matches the dense reference for the smooth case
+    ref = float(integrate_radius(
+        st, 1.02, 283.0, 2.0,
+        SDMConfig(include_curvature=False, include_solute=False,
+                  condensation_integrator="euler",
+                  n_substeps_condensation=100000)).radius[0])
+    assert float(out2.radius[0]) == pytest.approx(ref, rel=1e-4)
+
+
 def test_be_steady_and_haze_equilibrium():
     """BE at S=1 (no curvature/solute) is an exact no-op; a soluble haze
     droplet at S<1 relaxes toward its stable Köhler equilibrium."""
@@ -403,7 +437,7 @@ def test_adaptive_jit_and_unknown_integrator():
     assert bool(jnp.all(out.radius > st.radius))   # supersaturated -> grew
     with pytest.raises(ValueError, match="Unknown SDM condensation_integrator"):
         integrate_radius(st, 1.0, 283.0, 1.0,
-                         cfg._replace(condensation_integrator="dirk2"))
+                         cfg._replace(condensation_integrator="rk3bs"))
 
 
 # --------------------------------------------------------------------------
