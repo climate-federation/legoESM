@@ -88,3 +88,4 @@ def test_routed_differentiable():
 
     g = jax.grad(hail_mass)(jnp.asarray(constants.T_freeze - 20.0))
     assert np.isfinite(float(g))
+    assert float(g) != 0.0      # colder → more frozen → more hail (non-zero)

@@ -153,6 +153,10 @@ def freeze_step_routed(
     df = f_liquid * frozen_frac
     f_liquid_new = f_liquid - df
     # Bin split: bins 0..KRFREEZ-1 (0-based) → crystals, ≥ KRFREEZ → hail.
+    # Oracle routes crystals to FF2(:,ICE_TYPE=2) (plates) at this call site;
+    # collapsing the three oracle ice-crystal habits (ICEMAX=3 — columns,
+    # plates, dendrites) into one habitless `f_crystals` is an intentional
+    # simplification (per-habit spectra are a later multi-ice iteration).
     is_crystal = jnp.arange(masses.shape[0]) < config.krfreeze
     f_crystals = jnp.where(is_crystal, df, 0.0)
     f_hail = jnp.where(is_crystal, 0.0, df)
