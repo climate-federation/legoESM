@@ -197,11 +197,12 @@ N_A = 6.02214076e23             # [1/mol] particles per mole
 # Used by biochemistry / photosynthesis (Arrhenius temperature factors)
 # and any other code that needs R independent of a specific gas (R_d,
 # R_v are gas-specific = R / M).
-R_universal = 8.314462618       # [J/(mol·K)] = N_A · k_B
-# Boltzmann constant, derived from the two exact SI constants above so the
-# identity R = N_A·k_B holds to machine precision (Brownian coagulation,
-# molecular diffusion).
-k_B = R_universal / N_A         # [J/K] ≈ 1.380649e-23
+R_universal = 8.314462618       # [J/(mol·K)] ≈ N_A·k_B (value truncated at
+                                # 10 digits; exact product is 8.31446261815324)
+# Boltzmann constant — exact by SI definition (2019 redefinition). Defined as
+# its own literal rather than R_universal/N_A because the R_universal literal
+# above is truncated (deriving would be off by ~2e-11 relative).
+k_B = 1.380649e-23              # [J/K] (exact, SI)
 
 # ==============================================================================
 # Mathematical Constants

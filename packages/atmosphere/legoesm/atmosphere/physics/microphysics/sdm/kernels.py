@@ -284,17 +284,22 @@ def brownian_kernel(
     ``8k_BT/3μ`` equal-size limit.
 
     Parameters: radii [m], total droplet masses [kg], pressure [Pa],
-    temperature [K]. Elementwise; AD-safe at zero radius (K→finite·0 paths are
-    where-guarded by the caller's mass/radius floors — radii here must be > 0,
-    enforced by flooring below).
+    temperature [K]. Elementwise. A pair with any zero radius/mass returns
+    K = 0 with a finite gradient (where-substituted dummy inputs on the
+    inactive branch — the where-in/where-out AD-safe pattern).
     """
     dtype = jnp.result_type(r_i, r_j)
-    # Floors: a zero-radius/mass droplet has no Brownian cross-section; floor
-    # to keep every 1/d and 1/m finite (caller multiplicity gates real use).
-    d1 = jnp.maximum(2.0 * r_i, _DIAM_FLOOR_CM / 100.0)
-    d2 = jnp.maximum(2.0 * r_j, _DIAM_FLOOR_CM / 100.0)
-    m1 = jnp.maximum(m_i, 1.0e-300)
-    m2 = jnp.maximum(m_j, 1.0e-300)
+    # A zero-radius/zero-mass pair has no Brownian cross-section: gate it out
+    # with where-substituted PHYSICAL dummies (1 um, its water mass) so every
+    # 1/d, 1/m, and the VJP stay finite on the inactive branch, then return 0
+    # there (a plain max-floor at a tiny d makes D ~ 1/d explode instead).
+    valid = (r_i > 0.0) & (r_j > 0.0) & (m_i > 0.0) & (m_j > 0.0)
+    r_dummy = jnp.asarray(1.0e-6, dtype=dtype)
+    m_dummy = 4.0 / 3.0 * jnp.pi * constants.rho_water * r_dummy**3
+    d1 = 2.0 * jnp.where(valid, r_i, r_dummy)
+    d2 = 2.0 * jnp.where(valid, r_j, r_dummy)
+    m1 = jnp.where(valid, m_i, m_dummy)
+    m2 = jnp.where(valid, m_j, m_dummy)
     kB = constants.k_B
 
     # Dynamic viscosity [Pa·s] (Pruppacher & Klett; SI twin of _visc_air_cgs).
@@ -337,7 +342,8 @@ def brownian_kernel(
     sumg = jnp.sqrt(2.0 * g1 * g1 + 2.0 * g2 * g2)
 
     denom = sumdia / (sumdia + 2.0 * sumg) + (8.0 * sumd) / (sumdia * sumc)
-    return (2.0 * jnp.pi * sumdia * sumd / denom).astype(dtype)
+    K12 = 2.0 * jnp.pi * sumdia * sumd / denom
+    return jnp.where(valid, K12, 0.0).astype(dtype)
 
 
 def collision_kernel(

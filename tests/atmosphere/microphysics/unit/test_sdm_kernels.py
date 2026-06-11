@@ -190,8 +190,10 @@ def test_brownian_kernel_matches_independent_oracle(r1, r2):
 
 def test_brownian_continuum_limit_equal_spheres():
     """Large equal spheres (slip->1, g->0): K -> 8 k_B T / (3 mu), the classic
-    continuum Brownian coagulation coefficient."""
-    r = 2.0e-6
+    continuum Brownian coagulation coefficient. r=10 um is deep enough into the
+    continuum for the residual ERF slip correction (inflated oracle lambda) to
+    be ~4-5%; abs=0.0 because K ~ 1e-16 << pytest.approx's default abs."""
+    r = 1.0e-5
     p, T = 1.01325e5, 293.15
     m = 4.0 / 3.0 * np.pi * constants.rho_water * r**3
     K = float(brownian_kernel(jnp.asarray(r), jnp.asarray(r),
@@ -199,7 +201,27 @@ def test_brownian_continuum_limit_equal_spheres():
                               jnp.asarray(p), jnp.asarray(T)))
     visc = (1.718 + 4.9e-3 * (T - constants.T_freeze)) * 1e-5
     K_continuum = 8.0 * constants.k_B * T / (3.0 * visc)
-    assert K == pytest.approx(K_continuum, rel=0.15)   # within slip/Fuchs corrections
+    assert K == pytest.approx(K_continuum, rel=0.10, abs=0.0)
+    assert K > K_continuum                      # slip enhancement is one-sided
+
+
+def test_brownian_zero_inputs_value_and_grad_safe():
+    """Zero radius/mass pairs return K=0 with finite gradients (the max-floor
+    version exploded to ~1e82 and NaN'd the VJP)."""
+    p, T = jnp.asarray(9.0e4), jnp.asarray(283.0)
+    K0 = brownian_kernel(jnp.asarray(0.0), jnp.asarray(0.0),
+                         jnp.asarray(0.0), jnp.asarray(0.0), p, T)
+    assert float(K0) == 0.0
+
+    def k_of_r(r):
+        m = 4.0 / 3.0 * jnp.pi * constants.rho_water * r**3
+        return brownian_kernel(r, r, m, m, p, T)
+
+    g = jax.grad(k_of_r)(jnp.asarray(0.0))
+    assert bool(jnp.isfinite(g))
+    g_m = jax.grad(lambda m: brownian_kernel(
+        jnp.asarray(0.0), jnp.asarray(0.0), m, m, p, T))(jnp.asarray(0.0))
+    assert bool(jnp.isfinite(g_m))
 
 
 def test_brownian_additive_in_coalescence():
