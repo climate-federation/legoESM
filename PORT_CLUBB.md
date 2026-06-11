@@ -207,6 +207,16 @@ jitted `integrate_clubb_column` for efficient multi-step testing.
   `--turbulence clubb` benchmark: wire the SCM `prescribe="fluxes"` `w_th_s`/`w_qv_s`
   into those args (small SCM-driver plumbing) + a physically-calibrated `wp2` gate
   (the `1e-3` floor is too weak). Tracked as a follow-up.
+- **Prescribed heat-flux column-budget closure (iter 77):** the strongest contract
+  on the iter-76 prescribed-flux BC — `test_prognostic_clubb_prescribed_heat_flux_
+  closes_column_budget` verifies a prescribed constant `sfc_wpthlp=W` is applied as an
+  EXACT flux-form Neumann lower-BC: `Σ_k (ρ_k dz_k)(dT_dt_k/Π_k) = ρ_sfc·W` to round-off
+  (measured rel ~1e-11, assert <1e-9; non-vacuous warming >1e-3). Unlike the iter-64
+  surface-stress momentum budget (state-dependent `τ=−ρC_d|V|u` → O(Δt) semi-implicit
+  residual), a prescribed *constant* flux is state-independent → closure is EXACT with no
+  Δt dependence. Confirms correct magnitude + no double-counting (a doubled application
+  would give 2×). Codex adversarial review: approve, no findings. (Test-only iteration;
+  no production code changed.)
 - **GABLS1 stable-BL — shipped (iter 72):** the correctly-coupled SCM benchmark.
   GABLS1 uses `prescribe="T_s"` (cooling surface temperature) with the bulk
   transfer ACTIVE (`Ch_neutral=1.5e-3`), so the surface heat flux is computed from

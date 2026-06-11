@@ -1575,5 +1575,57 @@ def test_prognostic_clubb_accepts_prescribed_surface_fluxes():
     assert np.array_equal(np.asarray(mom_base), np.asarray(mom_expl))
 
 
+def test_prognostic_clubb_prescribed_heat_flux_closes_column_budget():
+    """A prescribed surface heat flux is applied as an EXACT flux-form Neumann
+    lower-BC: the mass-weighted column potential-temperature tendency equals the
+    prescribed surface kinematic heat flux to round-off.
+
+    Companion to ``..._accepts_prescribed_surface_fluxes`` (round-trip + sign) and
+    the strongest check that the prescribed BC enters with the correct MAGNITUDE
+    and is NOT double-counted. In flux form, integrating
+    ``d(thlm)/dt = -(1/rho) d(rho w'thl')/dz`` over the column telescopes to the
+    surface value (the top flux is ~0, verified by the zero-flux conservation
+    test), so ``sum_k (rho_k dz_k) (dT_dt_k/Pi_k) = rho_sfc * w'thl'_sfc``.
+
+    Unlike the SURFACE-STRESS momentum budget (state-dependent
+    ``tau=-rho C_d |V| u`` → an O(Δt) semi-implicit residual), a *prescribed*
+    surface flux is a fixed Neumann BC independent of the evolving state, so the
+    closure is EXACT (round-off), with no Δt dependence — a sharper contract."""
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
+    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    ncol, nlev = kw["T"].shape
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=150.0, nsteps=40, config=cfg)
+    carry = pack_clubb_moments(m_f)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
+    mass = np.asarray(rho) * dz
+    exner = (np.asarray(kw["p_full"]) / constants.p_ref) ** constants.kappa
+
+    W = 0.1                                        # prescribed w'thl'_sfc [K m/s]
+    whl = jnp.full((ncol,), W)
+    zero = jnp.zeros((ncol,))
+    # Prescribe heat (W) + zero moisture flux; leave momentum on the bulk drag
+    # (irrelevant to the heat budget). T_sfc/q_sfc are unused for the heat BC.
+    out, _ = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, carry, kw["p_full"], kw["p_half"], kw["z_full"],
+        kw["z_half"], T_f[:, -1], q_f[:, -1], rho, 150.0, cfg, whl, zero, None, None)
+
+    # Mass-weighted column potential-temperature tendency (dT_dt/Pi = d(thlm)/dt).
+    col_dtheta = np.sum(mass * (np.asarray(out.dT_dt) / exner), axis=1)
+    expected = np.asarray(rho)[:, -1] * W                       # rho_sfc * w'thl'_sfc
+    # (1) Non-vacuous: the prescribed flux genuinely warms the column.
+    assert np.all(col_dtheta > 1e-3) and np.all(expected > 1e-3)
+    # (2) Exact flux-form closure to round-off (NOT O(Δt)): the prescribed flux is
+    # applied with the correct magnitude and is not double-counted.
+    rel = np.abs(col_dtheta - expected) / np.abs(expected)
+    assert np.all(rel < 1e-9), f"prescribed-heat-flux budget not closed: rel={rel}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
