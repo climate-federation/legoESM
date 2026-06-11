@@ -102,7 +102,11 @@ def compute_upup_cells(mesh: VoronoiMesh) -> tuple[jnp.ndarray, jnp.ndarray]:
 # Canonical Van Leer limiter from core (redundancy audit) — the same kernel the
 # lat-lon TVD path uses; aliased to the local private name so call sites are
 # unchanged.
-from legoesm.core.flux_limiters import van_leer_limiter as _van_leer_limiter
+from legoesm.core.flux_limiters import (
+    grad_safe_ratio,
+    ratio_grad_floor,
+    van_leer_limiter as _van_leer_limiter,
+)
 
 
 def tvd_tracer_to_edges(
@@ -161,9 +165,13 @@ def tvd_tracer_to_edges(
     if cell_active is not None:
         active_upup_pos = cell_active[upup_pos]      # (nEdges, nlev)
         tr_upup_pos = jnp.where(active_upup_pos > 0.5, tr_upup_pos, tr_c1)
+    t_grad = ratio_grad_floor(tr.dtype)
     delta_pos = tr_c2 - tr_c1                        # downstream - donor
-    r_pos = (tr_c1 - tr_upup_pos) / jnp.where(
-        jnp.abs(delta_pos) > eps, delta_pos, eps)
+    r_pos = grad_safe_ratio(
+        tr_c1 - tr_upup_pos,
+        jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps),
+        jnp.abs(delta_pos) > t_grad,
+    )
     tr_face_pos = tr_c1 + 0.5 * limiter_fn(r_pos) * delta_pos
 
     # --- Negative flow (c2 → c1): donor = c2 ---
@@ -172,8 +180,11 @@ def tvd_tracer_to_edges(
         active_upup_neg = cell_active[upup_neg]      # (nEdges, nlev)
         tr_upup_neg = jnp.where(active_upup_neg > 0.5, tr_upup_neg, tr_c2)
     delta_neg = tr_c1 - tr_c2                        # downstream - donor
-    r_neg = (tr_c2 - tr_upup_neg) / jnp.where(
-        jnp.abs(delta_neg) > eps, delta_neg, eps)
+    r_neg = grad_safe_ratio(
+        tr_c2 - tr_upup_neg,
+        jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps),
+        jnp.abs(delta_neg) > t_grad,
+    )
     tr_face_neg = tr_c2 + 0.5 * limiter_fn(r_neg) * delta_neg
 
     # Select based on mass flux direction

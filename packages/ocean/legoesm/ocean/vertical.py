@@ -1297,7 +1297,11 @@ def flux_form_vertical_tracer_advection_centered(
 
 # Canonical Van Leer limiter from core (redundancy audit), aliased to the local
 # vertical-advection private name so call sites are unchanged.
-from legoesm.core.flux_limiters import van_leer_limiter as _van_leer_limiter_vert
+from legoesm.core.flux_limiters import (
+    grad_safe_ratio as _grad_safe_ratio,
+    ratio_grad_floor as _ratio_grad_floor,
+    van_leer_limiter as _van_leer_limiter_vert,
+)
 
 
 def flux_form_vertical_tracer_advection_tvd(
@@ -1381,7 +1385,9 @@ def flux_form_vertical_tracer_advection_tvd(
     h_below = h_k[..., 1:]            # h[k]   for k=1..nlev-1
     h_above = h_k[..., :-1]           # h[k-1] for k=1..nlev-1
     h_donor = jnp.where(w_interior > 0.0, h_below, h_above)
-    CFL = jnp.abs(w_interior) * dt / jnp.maximum(h_donor, eps)
+    t_grad = _ratio_grad_floor(field.dtype)
+    CFL = _grad_safe_ratio(
+        jnp.abs(w_interior) * dt, jnp.maximum(h_donor, eps), h_donor > t_grad)
     CFL = jnp.minimum(CFL, 1.0)
 
     # --- Smoothness ratio r ---
@@ -1406,7 +1412,11 @@ def flux_form_vertical_tracer_advection_tvd(
     delta_upwind = jnp.where(w_interior > 0.0, delta_upwind_up, delta_upwind_down)
 
     # r = upwind_gradient / local_gradient
-    r = delta_upwind / jnp.where(jnp.abs(delta) > eps, delta, eps)
+    r = _grad_safe_ratio(
+        delta_upwind,
+        jnp.where(jnp.abs(delta) > eps, delta, eps),
+        jnp.abs(delta) > t_grad,
+    )
 
     # --- Flux limiter and TVD correction ---
     phi = limiter_fn(r)

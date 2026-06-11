@@ -23,6 +23,7 @@ where:
 import jax.numpy as jnp
 from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
 from legoesm.grids.latlon import LatLonGrid
+from legoesm.core.flux_limiters import grad_safe_ratio, ratio_grad_floor
 from legoesm.ocean.dynamics._flux_limiters import (
     sweby_limiter as _superbee_limiter,
 )
@@ -128,7 +129,9 @@ def dst3_to_u_points(
     # Face j sits between cell (j-1) mod n_lon and cell j.
     # mass_flux interior: first n_lon faces
     mf = mass_flux_u[:, :n_lon, :]
-    vel = mf / jnp.maximum(h_u[:, :n_lon, :], eps)
+    t_grad = ratio_grad_floor(f.dtype)
+    h_face = h_u[:, :n_lon, :]
+    vel = grad_safe_ratio(mf, jnp.maximum(h_face, eps), h_face > t_grad)
     cfl = jnp.minimum(jnp.abs(vel) * dt / dx_3d, 1.0)
 
     # 5-point stencil (periodic in longitude)
@@ -142,7 +145,11 @@ def dst3_to_u_points(
     # Donor = f_jm1, Downstream = f_j, Upwind-of-donor = f_jm2
     delta_pos = f_j - f_jm1              # local gradient across face
     delta_uu_pos = f_jm1 - f_jm2         # upwind gradient
-    r_pos = delta_uu_pos / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    r_pos = grad_safe_ratio(
+        delta_uu_pos,
+        jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps),
+        jnp.abs(delta_pos) > t_grad,
+    )
     psi_pos = _van_leer_limiter(r_pos)
     d0_pos = _dst3_d0(cfl)
     d1_pos = _dst3_d1(cfl)
@@ -157,7 +164,11 @@ def dst3_to_u_points(
     # Match TVD convention: r = (f_{j+1}-f_j) / (f_{j-1}-f_j)
     # This makes negative flow default to upwind at smooth monotone fields,
     # providing essential implicit diffusion for forward-Euler stability.
-    r_neg = (f_jp1 - f_j) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    r_neg = grad_safe_ratio(
+        f_jp1 - f_j,
+        jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps),
+        jnp.abs(delta_neg) > t_grad,
+    )
     psi_neg = _van_leer_limiter(r_neg)
     d0_neg = _dst3_d0(cfl)
     d1_neg = _dst3_d1(cfl)
@@ -222,7 +233,9 @@ def dst3_to_v_points(
     # Face i sits between cell i-1 (south) and cell i (north).
     mf_int = mass_flux_v[1:-1, :, :]   # (n_lat-1, n_lon, nlev)
     h_v_int = h_v[1:-1, :, :]
-    vel_int = mf_int / jnp.maximum(h_v_int, eps)
+    t_grad = ratio_grad_floor(f.dtype)
+    vel_int = grad_safe_ratio(
+        mf_int, jnp.maximum(h_v_int, eps), h_v_int > t_grad)
     cfl = jnp.minimum(jnp.abs(vel_int) * dt / dy_v_int[:, jnp.newaxis, jnp.newaxis], 1.0)
 
     # Build stencil with ghost cells at boundaries (Neumann: copy boundary value)
@@ -247,7 +260,11 @@ def dst3_to_v_points(
 
     # --- Positive flow (south to north): donor = f_south, downstream = f_north ---
     delta_pos = f_north - f_south
-    r_pos = (f_south - f_south2) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    r_pos = grad_safe_ratio(
+        f_south - f_south2,
+        jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps),
+        jnp.abs(delta_pos) > t_grad,
+    )
     psi_pos = _van_leer_limiter(r_pos)
     d0_pos = _dst3_d0(cfl)
     d1_pos = _dst3_d1(cfl)
@@ -259,7 +276,11 @@ def dst3_to_v_points(
     # --- Negative flow (north to south): donor = f_north, downstream = f_south ---
     delta_neg = f_south - f_north
     # Match TVD convention for implicit diffusion stability
-    r_neg = (f_north2 - f_north) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    r_neg = grad_safe_ratio(
+        f_north2 - f_north,
+        jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps),
+        jnp.abs(delta_neg) > t_grad,
+    )
     psi_neg = _van_leer_limiter(r_neg)
     d0_neg = _dst3_d0(cfl)
     d1_neg = _dst3_d1(cfl)
@@ -326,7 +347,12 @@ def flux_form_vertical_tracer_advection_dst3(
     h_below = h_k[..., 1:]
     h_above = h_k[..., :-1]
     h_donor = jnp.where(w_int > 0.0, h_below, h_above)
-    cfl = jnp.minimum(jnp.abs(w_int) * dt / jnp.maximum(h_donor, eps), 1.0)
+    t_grad = ratio_grad_floor(field.dtype)
+    cfl = jnp.minimum(
+        grad_safe_ratio(jnp.abs(w_int) * dt,
+                        jnp.maximum(h_donor, eps),
+                        h_donor > t_grad),
+        1.0)
 
     # --- DST-3 coefficients ---
     d0 = _dst3_d0(cfl)
@@ -361,13 +387,21 @@ def flux_form_vertical_tracer_advection_dst3(
     # r = (donor - upup) / (downstream - donor)
     # = (T_below - T_below_below) / (T_above - T_below)
     delta_up = T_above - T_below  # across-face gradient (downstream - donor)
-    r_up = (T_below - T_below_below) / jnp.where(jnp.abs(delta_up) > eps, delta_up, eps)
+    r_up = grad_safe_ratio(
+        T_below - T_below_below,
+        jnp.where(jnp.abs(delta_up) > eps, delta_up, eps),
+        jnp.abs(delta_up) > t_grad,
+    )
 
     # Smoothness ratio for downward flow (donor=above=field[k-1]):
     # r = (donor - upup) / (downstream - donor)
     # = (T_above - T_above_above) / (T_below - T_above)
     delta_down = T_below - T_above  # across-face gradient (downstream - donor)
-    r_down = (T_above - T_above_above) / jnp.where(jnp.abs(delta_down) > eps, delta_down, eps)
+    r_down = grad_safe_ratio(
+        T_above - T_above_above,
+        jnp.where(jnp.abs(delta_down) > eps, delta_down, eps),
+        jnp.abs(delta_down) > t_grad,
+    )
 
     # --- Select by flow direction ---
     r = jnp.where(w_int > 0.0, r_up, r_down)
@@ -859,14 +893,14 @@ def fct_tracer_advection(
     # zero buffer and concatenating it on both ends.
     pad_axes_v = ((0, 0),) * (F_vert_low_int.ndim - 1)
     F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
-    F_vert_hi = jnp.pad(F_vert_hi_int, (*pad_axes_v, (1, 1)))
     vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
-    vert_div_hi = F_vert_hi[..., :-1] - F_vert_hi[..., 1:]
 
-    # Total tendencies for Zalesak bounds
-    dq_low = -(div_h_low + vert_div_low) / jnp.maximum(h_k, eps)
-    dq_hi_h = divergence_cgrid(flux_u_hi, flux_v_hi, grid)
-    -(dq_hi_h + vert_div_hi) / jnp.maximum(h_k, eps)
+    # Total low-order tendency for the Zalesak bounds
+    dq_low = grad_safe_ratio(
+        -(div_h_low + vert_div_low),
+        jnp.maximum(h_k, eps),
+        h_k > ratio_grad_floor(tracer.dtype),
+    )
 
     # --- Step 3: True sign-split Zalesak (1979) limiter (issue #212) ---
     # Anti-diffusive face fluxes:
@@ -1306,15 +1340,25 @@ def _zalesak_signsplit_face_alphas(
     P_in_w  = F_w_neg_full[..., :-1] + F_w_pos_full[..., 1:]
     P_out_w = F_w_pos_full[..., :-1] + F_w_neg_full[..., 1:]
 
+    # Gradient-underflow gates (grad_safe_ratio): the eps floors keep the
+    # PRIMAL finite, but in float32 compute the division derivative's
+    # 1/den**2 underflows (den ~ 1e-30..1e-20 -> den**2 = 0 -> inf*0 = NaN)
+    # whenever a tracer is near-uniform (Q, inc -> 0) or h_k -> 0. The
+    # all-NaN reverse gradients of ppm_fct rollouts pinned in
+    # tests/ocean/unit/test_advection_grad_underflow.py came from here.
+    t_grad = ratio_grad_floor(q_td.dtype)
     h_safe = jnp.maximum(h_k, eps)
-    inc_in = (P_in_h + P_in_w) * dt / h_safe
-    inc_out = (P_out_h + P_out_w) * dt / h_safe
+    h_ok = h_k > t_grad
+    inc_in = grad_safe_ratio((P_in_h + P_in_w) * dt, h_safe, h_ok)
+    inc_out = grad_safe_ratio((P_out_h + P_out_w) * dt, h_safe, h_ok)
 
     # Per-cell budgets and ratios.
     Q_up = jnp.maximum(q_max - q_td, 0.0)
     Q_dn = jnp.maximum(q_td - q_min, 0.0)
-    R_in = jnp.minimum(1.0, Q_up / jnp.maximum(inc_in, eps))
-    R_out = jnp.minimum(1.0, Q_dn / jnp.maximum(inc_out, eps))
+    R_in = jnp.minimum(1.0, grad_safe_ratio(
+        Q_up, jnp.maximum(inc_in, eps), inc_in > t_grad))
+    R_out = jnp.minimum(1.0, grad_safe_ratio(
+        Q_dn, jnp.maximum(inc_out, eps), inc_out > t_grad))
 
     # ---- Per-face alpha selection ----
     # u-face j: cell L = (j-1)%n_lon (west), cell R = j (east).
@@ -1466,10 +1510,11 @@ def _veros_superbee_face_flux(vel, var_m1, var_0, var_1, var_2,
     rjp = (var_2 - var_1) * fm_1
     rj = (var_1 - var_0) * fm_0
     rjm = (var_0 - var_m1) * fm_m1
-    cr = _superbee_limiter(
-        jnp.where(vel > 0.0, rjm, rjp)
-        / jnp.where(jnp.abs(rj) < _SUPERBEE_CR_EPS, _SUPERBEE_CR_EPS, rj)
-    )
+    cr = _superbee_limiter(grad_safe_ratio(
+        jnp.where(vel > 0.0, rjm, rjp),
+        jnp.where(jnp.abs(rj) < _SUPERBEE_CR_EPS, _SUPERBEE_CR_EPS, rj),
+        jnp.abs(rj) > ratio_grad_floor(rj.dtype),
+    ))
     return (vel * (var_1 + var_0) * 0.5
             - jnp.abs(vel) * ((1.0 - cr) + u_cfl * cr) * rj * 0.5)
 
