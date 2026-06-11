@@ -224,6 +224,21 @@ sorting `Lscale` + full prognostic moment transport (clubb_lite has none).
   surfaced: a cooled-surface 'stable' control is unusable — fixed cold `T_sfc`
   over-cools the air and flips to convection.
 
+**Key fixed bug — float32 dtype promotion in `clubb_mixing_length.py` (iter 67):**
+the parcel buoyant-sorting Lscale (golden-locked vs CLUBB-JAX) carried hardcoded
+`jnp.float64(0.0)` scan/while carry inits + default-dtype (float64-under-x64)
+`jnp.zeros` pads / `jnp.full` `_ZLMIN` col / `set_Lscale_max` 1e5 cap. With a
+float32 column these promote to float64 and CRASH `lax.scan`'s carry-type check
+(float32 in / float64 out) — breaking the Apple-Silicon/GPU float32 path
+(CLAUDE.md cross-backend requirement). Fix: anchor `dt_f=thlm.dtype` in
+`compute_mixing_length`, cast `Lscale_max`, and make every scan/while carry init +
+padded concat use `dt_f`/`tke_0.dtype`/`zt.dtype`. Preserves float64 EXACTLY (8
+golden-parity mixing-length tests still pass; under float64 inputs the anchors are
+float64, identical to before). New regression test
+`test_prognostic_clubb_runs_in_float32_no_dtype_promotion` (asserts every output +
+moment carry stays float32 and finite, single-step + multistep). Found by
+exercising the scheme in float32 — a path no prior test covered.
+
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz
 noise a coupled dycore damps — NOT a closure bug (conservation + per-piece parity

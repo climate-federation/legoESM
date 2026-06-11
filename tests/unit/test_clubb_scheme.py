@@ -1162,5 +1162,105 @@ def test_clubb_turbulence_prognostic_jit_and_grad():
     assert g.shape == kw["T"].shape and jnp.all(jnp.isfinite(g))
 
 
+def test_prognostic_clubb_runs_in_float32_no_dtype_promotion():
+    """Cross-backend (float32 / Metal) robustness: the prognostic scheme must run
+    in float32 WITHOUT silently promoting to float64.
+
+    legoESM targets Apple-Silicon/GPU float32 paths (CLAUDE.md). A stray strong
+    float64 literal or default-dtype array construction in a hot loop both breaks
+    those backends AND — under ``JAX_ENABLE_X64`` (this suite) with a float32
+    column — makes ``lax.scan`` reject the carry on a dtype mismatch. This test
+    feeds an all-float32 column and asserts every output (tendencies, diffusivities,
+    the packed moment carry) stays float32 and finite, single-step and multi-step.
+
+    Regression guard for the iter-66 fix in ``clubb_mixing_length.py``: the parcel
+    buoyant-sorting Lscale scans had ``jnp.float64(0.0)`` carry inits and
+    default-dtype (float64-under-x64) ``jnp.zeros``/``jnp.full`` pads + Lscale cap,
+    which promoted the float32 column and crashed the ``lax.scan`` carry check."""
+    f32 = jnp.float32
+    ncol, nlev = 2, 16
+    rng = np.random.default_rng(0)
+    p_half = jnp.asarray(
+        np.linspace(2e4, 1e5, nlev + 1)[None, :] * np.ones((ncol, nlev + 1)), dtype=f32)
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    z_half = jnp.asarray(
+        np.tile(np.linspace(16000.0, 0.0, nlev + 1), (ncol, 1)), dtype=f32)
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    exner = (p_full / jnp.asarray(constants.p_ref, f32)) ** jnp.asarray(constants.kappa, f32)
+    T = jnp.asarray(290.0 + 4e-3 * np.asarray(z_full), dtype=f32) * exner
+    u = jnp.asarray(8.0 + 4.0 * rng.standard_normal((ncol, nlev)), dtype=f32)
+    v = jnp.asarray(2.0 * rng.standard_normal((ncol, nlev)), dtype=f32)
+    q_v = jnp.asarray(2e-3 + 4e-3 * rng.random((ncol, nlev)), dtype=f32)
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    carry = init_clubb_moments(ncol, nlev, cfg, dtype=f32)
+    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    rho = p_full / (jnp.asarray(constants.R_d, f32)
+                    * jnp.maximum(T * (1.0 + 0.61 * q_v), jnp.asarray(150.0, f32)))
+
+    out, carry_new = clubb_turbulence_prognostic(
+        u, v, T, q_v, pack_clubb_moments(carry), p_full, p_half, z_full, z_half,
+        T[:, -1], q_v[:, -1], rho, jnp.asarray(150.0, f32), cfg)
+    for arr in (out.du_dt, out.dv_dt, out.dT_dt, out.dq_v_dt, out.Km, out.Kh, carry_new):
+        assert arr.dtype == f32                       # NO silent float64 promotion
+        assert jnp.all(jnp.isfinite(arr))
+    # Multi-step driver (exercises the lax.scan carry that the bug crashed) in f32.
+    u_f, _, T_f, q_f, m_f, _ = integrate_clubb_column(
+        u, v, T, q_v, p_full, p_half, z_full, z_half, T[:, -1], q_v[:, -1],
+        dt=jnp.asarray(150.0, f32), nsteps=10, config=cfg)
+    for arr in (u_f, T_f, q_f, m_f.wp2, m_f.wp3):
+        assert arr.dtype == f32
+        assert jnp.all(jnp.isfinite(arr))
+
+
+def test_clubb_mixing_length_no_promotion_on_mixed_dtype_grid():
+    """``compute_mixing_length`` must not promote on a MIXED-dtype column.
+
+    The Lscale compute touches both the thermodynamic state and the grid
+    geometry. A float32 state combined with a float64 grid (or vice-versa) must
+    still return a single dtype (the thermo-state dtype) — not silently promote
+    to float64 and poison a downstream float32/Metal path. Guards the iter-67 fix
+    that normalizes ALL float inputs (state + ``CLUBBGrid`` fields) to one working
+    dtype at the top of ``compute_mixing_length``."""
+    from legoesm.atmosphere.physics.turbulence.clubb_grid import (
+        make_clubb_grid_from_levels,
+    )
+    from legoesm.atmosphere.physics.turbulence.clubb_mixing_length import (
+        compute_mixing_length,
+        set_Lscale_max,
+    )
+
+    f32, f64 = jnp.float32, jnp.float64
+    ncol, nzt = 2, 20
+    # Grid built from float64 heights → all CLUBBGrid fields float64.
+    z_full64 = jnp.asarray(np.tile(np.linspace(50.0, 15000.0, nzt), (ncol, 1)), dtype=f64)
+    z_half64 = jnp.asarray(
+        np.tile(np.linspace(0.0, 16000.0, nzt + 1), (ncol, 1)), dtype=f64)
+    gr64 = make_clubb_grid_from_levels(z_full64, z_half64)
+    assert gr64.zt.dtype == f64                              # mixed: grid is f64
+
+    # Thermodynamic state in float32 (the "working" dtype we expect back).
+    thvm = jnp.asarray(300.0 + 3e-3 * np.asarray(z_full64), dtype=f32)
+    thlm = thvm
+    rtm = jnp.asarray(5e-3 * np.ones((ncol, nzt)), dtype=f32)
+    em = jnp.asarray(0.4 * np.ones((ncol, nzt + 1)), dtype=f32)
+    p_in = jnp.asarray(np.tile(np.linspace(1e5, 2e4, nzt), (ncol, 1)), dtype=f32)
+    exner = (p_in / jnp.asarray(constants.p_ref, f32)) ** jnp.asarray(constants.kappa, f32)
+    thv_ds = thvm
+    mu = jnp.full((ncol,), 6e-4, dtype=f32)
+    lscale_max = set_Lscale_max(False, None, None, ncol)     # float64 default cap
+    lmin = jnp.asarray(0.1, dtype=f64)                       # strong float64 scalar
+
+    Lscale, Lup, Ldn = compute_mixing_length(
+        thvm, thlm, rtm, em, lscale_max, p_in, exner, thv_ds, mu,
+        lmin, False, gr64)
+    # All outputs come back in the float32 state dtype — no float64 promotion.
+    # (Dtype is the property under test; physical Lscale validity is covered by
+    # the golden-parity tests in test_clubb_mixing_length.py. This synthetic
+    # mixed column only needs to be finite and non-negative.)
+    for arr in (Lscale, Lup, Ldn):
+        assert arr.dtype == f32
+        assert jnp.all(jnp.isfinite(arr)) and jnp.all(arr >= 0.0)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

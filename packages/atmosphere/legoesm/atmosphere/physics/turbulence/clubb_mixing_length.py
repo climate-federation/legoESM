@@ -109,7 +109,8 @@ def _upward_inner_while(
     """Upward parcel trajectory from ``k_py+2`` (ascending). See module docstring."""
     init_state = (
         k_py + 2, tke_0, thl_init, rt_init, dCAPE_init,
-        jnp.bool_(False), k_py + 1, tke_0, dCAPE_init, jnp.float64(0.0),
+        jnp.bool_(False), k_py + 1, tke_0, dCAPE_init,
+        jnp.zeros((), dtype=tke_0.dtype),
     )
 
     def cond_fn(state):
@@ -194,8 +195,9 @@ def _compute_lscale_up_col(
         new_max_alt = jnp.where(k_alt < max_alt, max_alt, k_alt)
         return new_max_alt, Lscale_up_k_smooth
 
-    _, vals = jax.lax.scan(outer_step, jnp.float64(0.0), jnp.arange(nzt - 2))
-    return jnp.concatenate([vals, jnp.full(2, _ZLMIN)])
+    _, vals = jax.lax.scan(
+        outer_step, jnp.zeros((), dtype=zt.dtype), jnp.arange(nzt - 2))
+    return jnp.concatenate([vals, jnp.full(2, _ZLMIN, dtype=zt.dtype)])
 
 
 def _downward_inner_while(
@@ -207,7 +209,8 @@ def _downward_inner_while(
     """Downward parcel trajectory from ``k_py-2`` (ascending). See module docstring."""
     init_state = (
         k_py - 2, tke_0, thl_init, rt_init, dCAPE_init,
-        jnp.bool_(False), k_py - 1, tke_0, dCAPE_init, jnp.float64(0.0),
+        jnp.bool_(False), k_py - 1, tke_0, dCAPE_init,
+        jnp.zeros((), dtype=tke_0.dtype),
     )
 
     def cond_fn(state):
@@ -294,7 +297,7 @@ def _compute_lscale_down_col(
 
     init_min_alt = zt[k_ub_zt_py]
     _, (k_indices, vals) = jax.lax.scan(outer_step, init_min_alt, jnp.arange(nzt - 1))
-    col = jnp.full(nzt, _ZLMIN)
+    col = jnp.full(nzt, _ZLMIN, dtype=zt.dtype)
     return col.at[k_indices].set(vals)
 
 
@@ -332,6 +335,30 @@ def compute_mixing_length(
     ngrdcol, nzt = thvm.shape
     k_ub_zt_py = nzt - 1
     k_lb_zt_py = 0
+    # Working float dtype = the thermodynamic-state dtype. Normalize EVERY float
+    # input (state, grid, params) to it up front so the whole compute path — scan
+    # carries, padded concatenations, the returned Lscale — stays in one dtype.
+    # Without this a float32 column silently promotes to float64 (breaking
+    # float32/Metal) AND, under JAX_ENABLE_X64, makes lax.scan reject a float32
+    # carry against a float64 body. Anchoring to a single dtype also covers MIXED
+    # inputs (e.g. float32 state with a float64 grid, or vice-versa). Under an
+    # all-float64 column every cast is a no-op → byte-identical to before (the
+    # golden-parity Lscale tests still pass).
+    dt_f = thlm.dtype
+    thvm = thvm.astype(dt_f)
+    thlm = thlm.astype(dt_f)
+    rtm = rtm.astype(dt_f)
+    em = em.astype(dt_f)
+    p_in_Pa = p_in_Pa.astype(dt_f)
+    exner = exner.astype(dt_f)
+    thv_ds = thv_ds.astype(dt_f)
+    Lscale_max = jnp.asarray(Lscale_max).astype(dt_f)
+    mu = jnp.asarray(mu).astype(dt_f)
+    lmin = jnp.asarray(lmin).astype(dt_f)   # scalar surface-layer floor coeff
+    gr = gr._replace(
+        zm=gr.zm.astype(dt_f), zt=gr.zt.astype(dt_f),
+        invrs_dzm=gr.invrs_dzm.astype(dt_f), invrs_dzt=gr.invrs_dzt.astype(dt_f),
+        dzm=gr.dzm.astype(dt_f), dzt=gr.dzt.astype(dt_f))
 
     # ---- Shared precomputations (vectorized over columns) ----
     tke_i = zm2zt(em, gr)                                  # (ngrdcol, nzt)
@@ -341,8 +368,8 @@ def compute_mixing_length(
     exp_mu_dzm = jnp.exp(-mu[:, None] * gr.dzm)            # (ngrdcol, nzm)
     entrain_coef = (1.0 - exp_mu_dzm) * gr.invrs_dzm / mu[:, None]
 
-    _pad0 = jnp.zeros((ngrdcol, 1))
-    _pad2 = jnp.zeros((ngrdcol, 2))
+    _pad0 = jnp.zeros((ngrdcol, 1), dtype=dt_f)
+    _pad2 = jnp.zeros((ngrdcol, 2), dtype=dt_f)
 
     # Upward precalcs (parcel-from-below recurrence coefficients).
     thl_mid, thl_blw = thlm[:, 1:nzt - 1], thlm[:, 0:nzt - 2]
