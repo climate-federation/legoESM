@@ -1,6 +1,17 @@
-"""Prognostic eddy-kinetic-energy (EKE) closure — Eden & Greatbatch (2008).
+"""Prognostic eddy-kinetic-energy (EKE) closures.
 
-A 2-D (depth-integrated) eddy-energy field ``E`` whose budget is
+Two selectable closures (``EKEConfig.closure``):
+
+1. ``"eden_greatbatch"`` (default) — Eden & Greatbatch (2008), the original
+   legoESM prognostic EKE (2-D specific energy or 3-D W-grid field).
+2. ``"geometric"`` — the Torres et al. (2025, JAMES, 10.1029/2025MS005394)
+   energetically-constrained GEOMETRIC extension (their Eqs. 1-7; the
+   GEOMETRIC ``kappa_gm = alpha·∫EKE dz / ∫(M²/N) dz`` of Mak, Marshall et
+   al. 2022 / D. P. Marshall et al. 2012, with EKE in place of total eddy
+   energy).  Depth-INTEGRATED 2-D budget — see :class:`GeometricConfig`.
+
+Eden & Greatbatch (2008): a 2-D (depth-integrated) eddy-energy field ``E``
+whose budget is
 
     dE/dt + advection(E) = iso-diffusion(E) + P - eps
 
@@ -34,6 +45,103 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax.numpy as jnp
+
+
+class GeometricConfig(NamedTuple):
+    """Torres et al. (2025, JAMES, doi:10.1029/2025MS005394) GEOMETRIC
+    mesoscale-EKE closure parameters — the authors' hand-calibrated values
+    (their OMIP2 EKE-GM / EKE-GM+N experiments with structure function
+    ``phi(z) = 1``).  All defaults carry page/equation provenance from the
+    paper.  These are TUNABLE closure parameters (the explicit targets of a
+    future differentiable calibration), so they live here in the scheme
+    config — NOT in ``legoesm.constants`` — and every formula below accepts
+    them as traced JAX values (no Python control flow on their magnitudes).
+
+    The prognostic variable of this closure is the DEPTH-INTEGRATED eddy
+    kinetic energy ``∫EKE dz`` [m³/s²] (paper Eq. 1, p. 4):
+
+        ∂t∫E dz + ∇h·(u_h ∫E dz) = B_C + B_T − D_e + T_e
+
+    with (phi(z) = 1 throughout; the paper's optional 3-D structure-function
+    variant EKE-GM+N3D reads a static netCDF mode map and is NOT implemented):
+
+      B_C = kappa_gm·∫M⁴/N² dz       (Eq. 2, p. 4; = kappa_gm·∫(N|S|)² dz)
+      B_T = kappa_u·∫|∇h u_h|² dz    (Eq. 3, p. 4)
+      D_e = (C_eps/R_d)·∫EKE^{3/2} dz  (Eq. 4, p. 5; with phi=1 this is
+                                        C_eps·(∫E dz)^{3/2}/(R_d·√H))
+      T_e = kappa_e·∇²h ∫E dz        (Eq. 5, p. 5)
+      kappa_gm = alpha·∫E dz / max(∫M²/N dz, mn_floor)   (Eq. 6, p. 6)
+      kappa_n  = gamma_n·min(R_d, l_mix_max)·√(2·∫E dz/H)  (Eq. 7, p. 6)
+      R_d = rossby_factor·∫N dz/|f|, clipped to [r_d_min, r_d_max]
+                                      (Appendix D, p. 32)
+    """
+
+    # Eddy efficiency alpha (Eq. 6, p. 6): kappa_gm = alpha·∫EKE dz/∫(M²/N)dz.
+    # Calibrated 0.04 (Sect. 2.1.2 / Appendix E; NOT bounded by 1, since the
+    # paper's alpha uses EKE only — distinct from Marshall et al. 2012's
+    # alpha_geom ≤ 1 for the TOTAL eddy energy, Appendix D p. 31-32).
+    alpha: float = 0.04
+    # Dissipation coefficient C_eps (Eq. 4, p. 5): calibrated 0.022 with
+    # phi(z)=1 (0.013 for the N3D structure-function run, Sect. 2.3.2 p. 8;
+    # plausible literature range 0.001-0.1, Table E1).  Named distinctly from
+    # the Eden-Greatbatch ``EKEConfig.c_eps`` (different closure, different
+    # dimensional role).
+    c_eps_geometric: float = 0.022
+    # Eddy momentum diffusivity kappa_u [m²/s] for the barotropic production
+    # B_T (Eq. 3, p. 4): calibrated 1500 to match the equatorial
+    # domain-integrated EKE (Appendix E p. 38; range 500-5000 sampled).
+    kappa_u: float = 1500.0
+    # EKE lateral-diffusion coefficient kappa_E [m²/s] (Eq. 5, p. 5): 500,
+    # kept from GEOMETRIC/Mak et al. (2018) (low sensitivity, Fig. E2-E3).
+    kappa_e: float = 500.0
+    # Rossby-radius prefactor: R_d = rossby_factor·∫N dz/|f| (Appendix D,
+    # p. 32).  0.4 in the paper's NEMO v3.6 (replaced by 0.5 in NEMO v4);
+    # NOTE this is the paper's chosen consistency factor, not the WKB 1/pi.
+    rossby_factor: float = 0.4
+    # Dissipation/mixing length-scale bounds on R_d [m]: "the dissipation
+    # length scale is bounded between 2 and 40 km" (Appendix D, p. 32).
+    r_d_min: float = 2.0e3
+    r_d_max: float = 4.0e4
+    # Lower bound on the kappa_gm denominator ∫M²/N dz [m/s] (Eq. 6, p. 6):
+    # "∫M²/N dz is lower-bounded to 10⁻¹⁰" (avoids division by zero where
+    # isopycnals are flat).
+    mn_floor: float = 1.0e-10
+    # kappa_gm bounds [m²/s].  The paper's experiments floor at 10 (Table 1,
+    # p. 8: min-max 10-12,716) and RELAX the DEFAULT run's 1000 upper cap
+    # (Sect. 2.3.2, p. 7) — no upper cap is STATED.  legoESM defaults the cap
+    # to 1.5e4: ABOVE the paper's realized maximum (12,716, Table 1), so it
+    # would not have bound in their eORCA1 experiments, but finite because
+    # Eq. 6 is otherwise unbounded where ∫M²/N dz collapses to its 1e-10
+    # floor (flat isopycnals — e.g. an idealized cold start), where it
+    # produced kappa ~ alpha·∫E/1e-10 ~ 1e6 m²/s > the explicit GM CFL limit
+    # (probe: ACC blowup at day ~200; .physics-validator/geometric_build/).
+    # A legoESM forward-stability safety, calibration-tunable.
+    kappa_gm_min: float = 10.0
+    kappa_gm_max: float = 1.5e4
+    # --- kappa_n (neutral/Redi diffusivity) coupling, Eq. 7 (p. 6) ---
+    # When True, the Redi tracer isopycnal diffusivity follows
+    # kappa_n = gamma_n·L_mix·√(2·EKE_0) (the paper's EKE-GM+N experiment);
+    # when False, the Redi diffusivity is left at the GM/Redi config value
+    # (the paper's EKE-GM experiment).
+    kappa_n_coupling: bool = False
+    # Mixing efficiency Gamma = 0.35 (Eq. 7, p. 6; Groeskamp et al. 2020;
+    # literature range 0.1-0.5, Table E1).
+    gamma_n: float = 0.35
+    # L_mix cap [m]: "L_mix is defined as the local Rossby radius R_d but
+    # capped at 40 km to avoid singularity and large values near the
+    # equator" (Sect. 2.1.2, p. 6).
+    l_mix_max: float = 4.0e4
+    # kappa_n bounds [m²/s]: floor 10 per Table 1 (p. 8: min-max 10-5,291 in
+    # EKE-GM+N, up to 10,604 in N3D); no paper cap stated — legoESM defaults
+    # 1.5e4 (above the realized range; the same forward-stability rationale
+    # as kappa_gm_max, since the explicit Redi triads share the GM CFL
+    # bound).  Calibration-tunable.
+    kappa_n_min: float = 10.0
+    kappa_n_max: float = 1.5e4
+    # Cold-start initial condition: ∫EKE dz |_{t=0} = e0_per_depth·H [m³/s²]
+    # ("setting the small value of 10⁻⁶·h (in m³/s²) to each cell, where h
+    # denotes the depth of the water column", Appendix E, p. 35).
+    e0_per_depth: float = 1.0e-6
 
 
 class EKEConfig(NamedTuple):
@@ -156,6 +264,18 @@ class EKEConfig(NamedTuple):
     #     through the EOS; raises otherwise. (For "rhines" eke_len this directly
     #     corrects the deformation radius c₁ = ∫N dz / π.)
     n2_mode: str = "insitu"
+    # --- Closure dispatch (appended LAST: positional construction stable) ---
+    # "eden_greatbatch" (default, bit-identical legacy): everything above.
+    # "geometric": the Torres et al. (2025) GEOMETRIC depth-integrated EKE
+    #   budget (requires ``geometric`` below; 2-D only — eke_3d must be False;
+    #   the EG-specific knobs c_k/c_eps/mixing_length/source-augmentation are
+    #   unused).  The prognostic ``state.eke`` field then carries ∫EKE dz
+    #   [m³/s²] (depth-integrated), NOT the EG specific energy [m²/s²].
+    closure: str = "eden_greatbatch"
+    # GEOMETRIC closure parameters (Torres et al. 2025); must be a
+    # :class:`GeometricConfig` when ``closure="geometric"`` and None otherwise
+    # (a set-but-unused GeometricConfig is rejected — no silent ignoring).
+    geometric: GeometricConfig | None = None
 
 
 def eke_mixing_length(L_rossby: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
@@ -389,6 +509,159 @@ def eke_apply_local_source(
     return E_new
 
 
+# ---------------------------------------------------------------------------
+# GEOMETRIC closure (Torres et al. 2025, JAMES, doi:10.1029/2025MS005394) —
+# pure, shape-agnostic formulas.  The prognostic variable is the
+# depth-integrated ∫EKE dz [m³/s²]; column integrals (∫M⁴/N² dz, ∫M²/N dz,
+# ∫N dz, H) come from the SHARED GM/Redi Eady machinery
+# (``_gm_redi_common.compute_geometric_column_integrals``) — this module never
+# recomputes N²/slopes.  All GeometricConfig parameters are usable as traced
+# JAX values (calibration-ready: pure jnp arithmetic, no Python branching on
+# parameter magnitudes).
+# ---------------------------------------------------------------------------
+
+
+def geometric_rossby_radius(
+    int_N_dz: jnp.ndarray, f_coriolis: jnp.ndarray, geom: GeometricConfig,
+) -> jnp.ndarray:
+    """Local Rossby deformation radius of the GEOMETRIC closure (Torres et al.
+    2025, Appendix D, p. 32):
+
+        R_d = rossby_factor · ∫N dz / |f|,   clipped to [r_d_min, r_d_max]
+
+    with ``rossby_factor = 0.4`` (the paper's NEMO v3.6 consistency value;
+    0.5 in NEMO v4) and the bounds 2-40 km ("the dissipation length scale is
+    bounded between 2 and 40 km").  Used as BOTH the dissipation length of
+    D_e (Eq. 4) and — capped again at ``l_mix_max`` — the kappa_n mixing
+    length (Eq. 7).  ``|f|`` is floored like the other reciprocals in this
+    module; the clip makes the equatorial limit benign anyway.
+    """
+    f_safe = jnp.maximum(jnp.abs(f_coriolis), _DENOM_FLOOR)
+    r_d = geom.rossby_factor * jnp.maximum(int_N_dz, 0.0) / f_safe
+    return jnp.clip(r_d, geom.r_d_min, geom.r_d_max)
+
+
+def geometric_kappa_gm(
+    int_E: jnp.ndarray, int_M2_over_N_dz: jnp.ndarray, geom: GeometricConfig,
+) -> jnp.ndarray:
+    """GEOMETRIC GM coefficient (Torres et al. 2025, Eq. 6, p. 6):
+
+        kappa_gm = alpha · ∫EKE dz / max(∫M²/N dz, mn_floor)
+
+    clipped to ``[kappa_gm_min, kappa_gm_max]`` (paper: floor 10 m²/s per
+    Table 1; no upper cap — the DEFAULT run's 1000 m²/s cap is relaxed).
+    ``kappa_gm`` is depth-CONSTANT (2-D): the paper tested a phi(z)² vertical
+    structure and rejected it (Appendix D, p. 33, Fig. D4).
+
+    ``int_E = ∫EKE dz`` [m³/s²] (floored at 0 — the budget keeps it ≥ 0 by
+    construction, the floor only guards round-off); ``int_M2_over_N_dz =
+    ∫M²/N dz = ∫N|S| dz`` [m/s] from the shared slope/N machinery.
+    """
+    denom = jnp.maximum(int_M2_over_N_dz, geom.mn_floor)
+    kappa = geom.alpha * jnp.maximum(int_E, 0.0) / denom
+    return jnp.clip(kappa, geom.kappa_gm_min, geom.kappa_gm_max)
+
+
+def geometric_kappa_n(
+    int_E: jnp.ndarray, H_col: jnp.ndarray, r_d: jnp.ndarray,
+    geom: GeometricConfig,
+) -> jnp.ndarray:
+    """GEOMETRIC neutral (Redi) diffusivity (Torres et al. 2025, Eq. 7, p. 6),
+    with structure function ``phi(z) = 1`` (depth-constant kappa_n):
+
+        kappa_n = Gamma · L_mix · sqrt(2·EKE_0),
+        L_mix   = min(R_d, l_mix_max)            (40 km cap, Sect. 2.1.2)
+        EKE_0   = ∫EKE dz / ∫phi² dz = ∫EKE dz / H   (phi = 1)
+
+    clipped to ``[kappa_n_min, kappa_n_max]`` (floor 10 m²/s per Table 1).
+    ``H_col`` is the wet column depth [m]; dry columns (H=0) are guarded by
+    the eps floor and must be masked by the caller (the wet-column mask from
+    the shared machinery), exactly like the EG ``kappa_GM``.
+    """
+    l_mix = jnp.minimum(r_d, geom.l_mix_max)
+    eke0 = jnp.maximum(int_E, 0.0) / jnp.maximum(H_col, _DENOM_FLOOR)
+    # +1e-30 inside the sqrt: finite gradient at EKE_0 = 0 (the same
+    # regularisation as eke_kappa_gm / eke_rhines_length).
+    kappa = geom.gamma_n * l_mix * jnp.sqrt(2.0 * eke0 + 1.0e-30)
+    return jnp.clip(kappa, geom.kappa_n_min, geom.kappa_n_max)
+
+
+def geometric_dissipation_length(
+    r_d: jnp.ndarray, H_col: jnp.ndarray,
+) -> jnp.ndarray:
+    """Effective dissipation length ``L_eff = R_d·√H`` [m·√m] that maps the
+    GEOMETRIC dissipation (Torres et al. 2025, Eq. 4, p. 5) onto the shared
+    semi-implicit sink fold of :func:`eke_apply_local_source`.
+
+    With ``phi(z) = 1`` the depth-integrated dissipation of Eq. 4 is
+
+        D_e = (C_eps/R_d)·∫EKE^{3/2} dz = (C_eps/R_d)·H·(I/H)^{3/2}
+            = C_eps·√(I/H)/R_d · I        with  I = ∫EKE dz,
+
+    i.e. a linear-in-I sink with rate ``r = C_eps·√(I/H)/R_d`` [1/s].  The
+    shared fold computes ``rate = c_eps·√I/max(L, l_min)``, so passing
+    ``L = R_d·√H`` (and ``c_eps = c_eps_geometric``) reproduces ``r``
+    EXACTLY — the established unconditionally-positive backward-Euler
+    treatment (E_{n+1} = (E_n + dt·P)/(1 + dt·r) ≥ 0 by construction).  The
+    paper instead zeroes D_e wherever EKE < 0 (p. 5); the implicit fold is
+    strictly stronger (E never goes negative in the first place) and is the
+    module's standard treatment — a documented numerical-treatment deviation,
+    not a physics one.
+
+    NOTE the ``l_min`` floor of the fold (default 100 m) never binds here:
+    ``L_eff ≥ r_d_min·√H ≥ 2000·√H`` for any wet column.
+    """
+    return r_d * jnp.sqrt(jnp.maximum(H_col, 0.0) + 1.0e-30)
+
+
+def validate_geometric_config(geom: GeometricConfig) -> None:
+    """Fail-fast validation of the GEOMETRIC parameters (dispatch
+    discipline).  Raises ``ValueError`` on non-physical values."""
+    if geom.alpha <= 0.0:
+        raise ValueError(f"GeometricConfig.alpha must be > 0, got {geom.alpha!r}")
+    if geom.c_eps_geometric <= 0.0:
+        raise ValueError(
+            f"GeometricConfig.c_eps_geometric must be > 0, got "
+            f"{geom.c_eps_geometric!r}")
+    if geom.kappa_u < 0.0:
+        raise ValueError(
+            f"GeometricConfig.kappa_u must be >= 0, got {geom.kappa_u!r}")
+    if geom.kappa_e < 0.0:
+        raise ValueError(
+            f"GeometricConfig.kappa_e must be >= 0, got {geom.kappa_e!r}")
+    if geom.rossby_factor <= 0.0:
+        raise ValueError(
+            f"GeometricConfig.rossby_factor must be > 0, got "
+            f"{geom.rossby_factor!r}")
+    if not (0.0 < geom.r_d_min <= geom.r_d_max):
+        raise ValueError(
+            "GeometricConfig requires 0 < r_d_min <= r_d_max, got "
+            f"r_d_min={geom.r_d_min!r}, r_d_max={geom.r_d_max!r}")
+    if geom.mn_floor <= 0.0:
+        raise ValueError(
+            f"GeometricConfig.mn_floor must be > 0, got {geom.mn_floor!r}")
+    if not (0.0 <= geom.kappa_gm_min <= geom.kappa_gm_max):
+        raise ValueError(
+            "GeometricConfig requires 0 <= kappa_gm_min <= kappa_gm_max, got "
+            f"kappa_gm_min={geom.kappa_gm_min!r}, "
+            f"kappa_gm_max={geom.kappa_gm_max!r}")
+    if geom.gamma_n <= 0.0:
+        raise ValueError(
+            f"GeometricConfig.gamma_n must be > 0, got {geom.gamma_n!r}")
+    if geom.l_mix_max <= 0.0:
+        raise ValueError(
+            f"GeometricConfig.l_mix_max must be > 0, got {geom.l_mix_max!r}")
+    if not (0.0 <= geom.kappa_n_min <= geom.kappa_n_max):
+        raise ValueError(
+            "GeometricConfig requires 0 <= kappa_n_min <= kappa_n_max, got "
+            f"kappa_n_min={geom.kappa_n_min!r}, "
+            f"kappa_n_max={geom.kappa_n_max!r}")
+    if geom.e0_per_depth < 0.0:
+        raise ValueError(
+            f"GeometricConfig.e0_per_depth must be >= 0, got "
+            f"{geom.e0_per_depth!r}")
+
+
 def validate_eke_config(cfg: EKEConfig) -> None:
     """Fail-fast validation of EKE parameters (dispatch discipline). Raises
     ``ValueError`` on non-physical values."""
@@ -433,6 +706,51 @@ def validate_eke_config(cfg: EKEConfig) -> None:
             "consistent with the signed -P_diss_skew source; got gm_source_mode="
             f"{cfg.gm_source_mode!r})."
         )
+    if cfg.closure not in ("eden_greatbatch", "geometric"):
+        raise ValueError(
+            "EKEConfig.closure must be 'eden_greatbatch' or 'geometric', got "
+            f"{cfg.closure!r}"
+        )
+    if cfg.closure == "geometric":
+        if cfg.geometric is None:
+            raise ValueError(
+                "EKEConfig.closure='geometric' requires EKEConfig.geometric "
+                "(a GeometricConfig with the Torres et al. 2025 parameters); "
+                "got None."
+            )
+        validate_geometric_config(cfg.geometric)
+        if cfg.eke_3d:
+            raise ValueError(
+                "EKEConfig.closure='geometric' is the depth-INTEGRATED 2-D "
+                "budget (Torres et al. 2025 Eq. 1) and requires eke_3d=False; "
+                "the 3-D W-grid path is Eden-Greatbatch only."
+            )
+        if cfg.isopycnal_diffusion:
+            raise ValueError(
+                "EKEConfig.closure='geometric' with isopycnal_diffusion=True "
+                "is ambiguous: the GEOMETRIC Redi coupling is kappa_n (Eq. 7, "
+                "Torres et al. 2025), selected by "
+                "GeometricConfig.kappa_n_coupling=True — not the Veros "
+                "K_iso=K_gm flag. Set isopycnal_diffusion=False."
+            )
+        if (cfg.source_kdiss_h or cfg.kdiss_h_flux_form
+                or cfg.gm_source_mode != "parameterized"
+                or cfg.source_p_diss_iso):
+            raise ValueError(
+                "EKEConfig.closure='geometric' has its own source terms "
+                "(B_C Eq. 2 + B_T Eq. 3, Torres et al. 2025); the "
+                "Eden-Greatbatch source-augmentation flags (source_kdiss_h="
+                f"{cfg.source_kdiss_h!r}, kdiss_h_flux_form="
+                f"{cfg.kdiss_h_flux_form!r}, gm_source_mode="
+                f"{cfg.gm_source_mode!r}, source_p_diss_iso="
+                f"{cfg.source_p_diss_iso!r}) must stay at their defaults."
+            )
+    elif cfg.geometric is not None:
+        raise ValueError(
+            "EKEConfig.geometric is set but closure="
+            f"{cfg.closure!r} — it would be silently ignored. Set "
+            "closure='geometric' or drop the GeometricConfig."
+        )
     if cfg.kdiss_h_flux_form and not cfg.source_kdiss_h:
         # kdiss_h_flux_form selects the discretisation of the K_diss_h source; it
         # is a no-op unless the source itself is enabled. Reject the silent-ignore
@@ -447,6 +765,12 @@ def validate_eke_config(cfg: EKEConfig) -> None:
 
 __all__ = [
     "EKEConfig",
+    "GeometricConfig",
+    "geometric_rossby_radius",
+    "geometric_kappa_gm",
+    "geometric_kappa_n",
+    "geometric_dissipation_length",
+    "validate_geometric_config",
     "eke_mixing_length",
     "eke_rhines_length",
     "eke_deformation_radius",

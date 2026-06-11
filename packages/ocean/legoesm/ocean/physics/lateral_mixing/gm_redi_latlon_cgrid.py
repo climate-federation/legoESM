@@ -2368,6 +2368,66 @@ def eke_3d_vertical_diffusion(E, A_v_profile, dz_w, dz_half_w, dt, eke_cfg):
     return implicit_vertical_diffusion_ocean(E, K, dz_w, dz_half_w, dt)
 
 
+def _eke_stage1_fields(
+    T, S, eta, H_bathy, grid, z_coord, cfg, *,
+    eos="wright", eos_linear=None, mask=None, rho_0=_RHO_0, g=constants.g,
+    omega=constants.Omega, r_earth=constants.R_earth,
+):
+    """Stage-1 fields shared by the prognostic-EKE closures (Eden-Greatbatch
+    ``compute_eke_step_kappa`` and GEOMETRIC ``compute_geometric_step_kappa``):
+    density + isopycnal slopes via the SAME shared helpers GM/Redi uses
+    internally (a redundant recompute -- correct; compute-once is a future
+    optimization), the Coriolis field, the analytic beta = 2*Omega*cos(phi)/R,
+    and -- only when ``cfg.eke.n2_mode == "adiabatic"`` -- the cell-centre
+    hydrostatic pressure + EOS handles for the adiabatic N^2 (otherwise None,
+    byte-identical default).  Pure code motion from ``compute_eke_step_kappa``
+    (bit-identical numerics).
+
+    Returns ``(mask, jacobian, rho, S_x, S_y, f_coriolis, beta, T_eos, S_eos,
+    p_cell, eos_for_n2)``.
+    """
+    if mask is None:
+        mask = jnp.ones(T.shape[:2], dtype=T.dtype)
+    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    eos_fn = make_eos_fn(eos, eos_linear)
+    fill_fn = lambda field: neumann_fill_cgrid(field, mask)
+    rho, _rp, _pp = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
+    )
+    S_x, S_y, _taper = compute_isopycnal_slopes_latlon_cgrid(
+        rho, mask, z_coord, jacobian, grid, cfg,
+        T=T, S=S, eos_fn=eos_fn, rho_0=rho_0, g=g,
+    )
+    f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
+    # beta = df/dy = 2*Omega*cos(phi)/R (analytic; grid.cos_lat is cos(phi)).
+    # Broadcast (n_lat,) -> (n_lat, n_lon) to match f. Used only by the
+    # "rhines" eke_len scheme (the GEOMETRIC closure ignores it).
+    beta = jnp.broadcast_to(
+        (2.0 * omega * grid.cos_lat / r_earth)[:, None], mask.shape,
+    )
+    # Adiabatic static-stability N^2 (Veros EKE chain) needs the cell-centre
+    # hydrostatic pressure + the same EOS as the dynamical core. Only built
+    # when the EKE config opts in (``n2_mode="adiabatic"``) so the default
+    # ("insitu") path is byte-identical (kwargs stay None).
+    T_eos = S_eos = p_cell = eos_for_n2 = None
+    if getattr(cfg.eke, "n2_mode", "insitu") == "adiabatic":
+        from legoesm.ocean.vertical import (
+            OceanPartialCellCoordinate, compute_layer_thickness,
+        )
+        # Partial-cell thickness when applicable (matches k_profiles.py's
+        # adiabatic-N^2 path), else compute_hydrostatic_pressure falls back to
+        # dz_ref * jacobian internally.
+        h_actual = None
+        if isinstance(z_coord, OceanPartialCellCoordinate):
+            h_actual = compute_layer_thickness(eta, H_bathy, z_coord)
+        p_cell = compute_hydrostatic_pressure(
+            rho, eta, z_coord.dz_ref, jacobian, rho_0, h_actual=h_actual,
+        )
+        T_eos, S_eos, eos_for_n2 = T, S, eos_fn
+    return (mask, jacobian, rho, S_x, S_y, f_coriolis, beta,
+            T_eos, S_eos, p_cell, eos_for_n2)
+
+
 def compute_eke_step_kappa(
     T, S, eta, H_bathy, eke, grid, z_coord, cfg, *,
     eos="wright", eos_linear=None, mask=None, rho_0=_RHO_0, g=constants.g,
@@ -2406,47 +2466,157 @@ def compute_eke_step_kappa(
     come from the model constants (``omega``/``r_earth``; Veros-pinned in the ACC
     recipe), never literals. The ``"rossby"`` scheme ignores ``β``.
     """
-    if mask is None:
-        mask = jnp.ones(T.shape[:2], dtype=T.dtype)
-    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
-    eos_fn = make_eos_fn(eos, eos_linear)
-    fill_fn = lambda field: neumann_fill_cgrid(field, mask)
-    rho, _rp, _pp = iterate_eos_and_pressure_anomaly(
-        T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
+    (mask, jacobian, rho, S_x, S_y, f_coriolis, beta,
+     T_eos, S_eos, p_cell, eos_for_n2) = _eke_stage1_fields(
+        T, S, eta, H_bathy, grid, z_coord, cfg,
+        eos=eos, eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
+        omega=omega, r_earth=r_earth,
     )
-    S_x, S_y, _taper = compute_isopycnal_slopes_latlon_cgrid(
-        rho, mask, z_coord, jacobian, grid, cfg,
-        T=T, S=S, eos_fn=eos_fn, rho_0=rho_0, g=g,
-    )
-    f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
-    # β = df/dy = 2Ω cosφ/R (analytic; grid.cos_lat is cosφ). Broadcast (n_lat,)
-    # -> (n_lat, n_lon) to match f. Used only by the "rhines" eke_len scheme.
-    beta = jnp.broadcast_to(
-        (2.0 * omega * grid.cos_lat / r_earth)[:, None], mask.shape,
-    )
-    # Adiabatic static-stability N² (Veros EKE chain) needs the cell-centre
-    # hydrostatic pressure + the same EOS as the dynamical core. Only built
-    # when the EKE config opts in (``n2_mode="adiabatic"``) so the default
-    # ("insitu") path is byte-identical (kwargs stay None).
-    T_eos = S_eos = p_cell = eos_for_n2 = None
-    if getattr(cfg.eke, "n2_mode", "insitu") == "adiabatic":
-        from legoesm.ocean.eos import compute_hydrostatic_pressure
-        from legoesm.ocean.vertical import (
-            OceanPartialCellCoordinate, compute_layer_thickness,
-        )
-        # Partial-cell thickness when applicable (matches k_profiles.py's
-        # adiabatic-N² path), else compute_hydrostatic_pressure falls back to
-        # dz_ref * jacobian internally.
-        h_actual = None
-        if isinstance(z_coord, OceanPartialCellCoordinate):
-            h_actual = compute_layer_thickness(eta, H_bathy, z_coord)
-        p_cell = compute_hydrostatic_pressure(
-            rho, eta, z_coord.dz_ref, jacobian, rho_0, h_actual=h_actual,
-        )
-        T_eos, S_eos, eos_for_n2 = T, S, eos_fn
     return compute_eke_kappa_gm(
         eke, rho, S_x, S_y, z_coord, jacobian, f_coriolis,
         cfg.visbeck, cfg.eke, rho_ref=rho_0, beta=beta,
         depth_resolved=depth_resolved,
         T=T_eos, S=S_eos, p_cell=p_cell, eos_fn=eos_for_n2,
     )
+
+
+def compute_geometric_step_kappa(
+    T, S, eta, H_bathy, eke_int, grid, z_coord, cfg, *,
+    eos="wright", eos_linear=None, mask=None, rho_0=_RHO_0, g=constants.g,
+    omega=constants.Omega, r_earth=constants.R_earth,
+):
+    """GEOMETRIC (Torres et al. 2025, JAMES, doi:10.1029/2025MS005394) eddy
+    coefficients + EKE-budget pieces for the EKE-active model step.
+
+    The prognostic field is the DEPTH-INTEGRATED ``eke_int = ∫EKE dz``
+    [m³/s²] (paper Eq. 1).  Pass ``eke_int=None`` for a cold start: the
+    paper's depth-proportional initial condition ``e0_per_depth·H`` is built
+    from the column depth (Appendix E, p. 35; the static Python None-branch
+    mirrors the EG path's ``state.eke is None`` fill).
+
+    Reuses the SHARED stage-1 fields (``_eke_stage1_fields``: rho + tapered
+    isopycnal slopes via the same helpers the GM/Redi tendency uses) and the
+    shared column integrals (``compute_geometric_column_integrals``), then
+    the pure GEOMETRIC formulas from ``eke.py``:
+
+      kappa_gm  = alpha·∫E dz / max(∫M²/N dz, mn_floor)        (Eq. 6, 2-D)
+      kappa_n   = Gamma·min(R_d, l_mix_max)·√(2·∫E dz/H)       (Eq. 7, 2-D;
+                  ``None`` unless ``geometric.kappa_n_coupling``)
+      B_C       = kappa_gm·∫M⁴/N² dz                           (Eq. 2) [m³/s³]
+      L_eff     = R_d·√H  (the Eq.-4 dissipation folded as the
+                  ``eke_apply_local_source`` implicit rate
+                  ``c_eps_geometric·√I/L_eff = C_eps·√(I/H)/R_d``)
+      R_d       = clip(rossby_factor·∫N dz/|f|, 2-40 km)       (Appendix D)
+
+    Both kappas are wet-masked AFTER clipping (dry columns contribute exactly
+    zero diffusivity — the same convention as ``compute_visbeck_kappa_gm``).
+
+    Returns ``(eke_int, kappa_gm, kappa_n_or_None, production_bc, L_eff,
+    dz_actual)`` — the first five 2-D ``(n_lat, n_lon)``; ``dz_actual``
+    ``(n_lat, n_lon, nlev)`` is the cell-centre thickness measure
+    (``dz_ref·jacobian``) the step feeds to
+    :func:`geometric_barotropic_production`, so the B_T (Eq. 3) depth
+    integral uses the SAME measure as the other column integrals.
+    """
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        compute_geometric_column_integrals,
+    )
+    from legoesm.ocean.physics.lateral_mixing.eke import (
+        geometric_dissipation_length,
+        geometric_kappa_gm,
+        geometric_kappa_n,
+        geometric_rossby_radius,
+    )
+
+    geom = cfg.eke.geometric
+    (mask, jacobian, rho, S_x, S_y, f_coriolis, _beta,
+     T_eos, S_eos, p_cell, eos_for_n2) = _eke_stage1_fields(
+        T, S, eta, H_bathy, grid, z_coord, cfg,
+        eos=eos, eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
+        omega=omega, r_earth=r_earth,
+    )
+    int_sigma2_dz, int_sigma_dz, int_N_dz, H_col, wet_col = (
+        compute_geometric_column_integrals(
+            rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg.visbeck,
+            rho_ref=rho_0, n2_mode=getattr(cfg.eke, "n2_mode", "insitu"),
+            T=T_eos, S=S_eos, p_cell=p_cell, eos_fn=eos_for_n2,
+        ))
+    if eke_int is None:
+        # Cold start: ∫EKE dz = e0_per_depth·H (Torres et al. 2025 App. E,
+        # p. 35: "10⁻⁶·h in m³/s²"), zero on land.
+        eke_int = geom.e0_per_depth * H_col * mask
+    r_d = geometric_rossby_radius(int_N_dz, f_coriolis, geom)
+    kappa_gm = geometric_kappa_gm(eke_int, int_sigma_dz, geom)
+    kappa_gm = jnp.where(wet_col, kappa_gm, 0.0)
+    kappa_n = None
+    if geom.kappa_n_coupling:
+        kappa_n = geometric_kappa_n(eke_int, H_col, r_d, geom)
+        kappa_n = jnp.where(wet_col, kappa_n, 0.0)
+    production_bc = kappa_gm * int_sigma2_dz          # Eq. 2 [m³/s³], ≥ 0
+    L_eff = geometric_dissipation_length(r_d, H_col)
+    # Cell-centre thickness measure for the B_T depth integral (the same
+    # metric assembly as compute_geometric_column_integrals).
+    dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
+    return eke_int, kappa_gm, kappa_n, production_bc, L_eff, dz_actual
+
+
+def geometric_barotropic_production(
+    u, v, grid, kappa_u, dz_actual, mask, u_mask, v_mask, *, z_coord=None,
+):
+    """GEOMETRIC barotropic EKE production ``B_T = ∫kappa_u·|∇h u_h|² dz``
+    (Torres et al. 2025, Eq. 3, p. 4; kappa_u = 1500 m²/s calibrated,
+    Appendix E p. 38) at cell centres [m³/s³], ≥ 0 by construction.
+
+    ``kappa_u·|∇h u_h|²`` is EXACTLY the positive-definite component-wise
+    flux-form dissipation density the K_diss_h machinery already provides
+    (``flux_divergence_viscosity_cgrid(want_dissipation=True)``, Veros
+    ``calc_diss_u``/``calc_diss_v`` analogue) with the viscosity replaced by
+    the eddy momentum diffusivity ``kappa_u`` and NO cos-power scaling
+    (kappa_u is constant in the paper) — reused, not re-derived.  The unused
+    viscous tendencies it also returns are discarded (a small constant-factor
+    overhead, once per step).  NOTE: that operator raises on tripolar grids;
+    the GEOMETRIC closure inherits the restriction (regular lat-lon only).
+
+    On a PARTIAL-CELL coordinate (``z_coord`` given) the gradients are
+    masked with the PER-LEVEL 3-D face masks (``compute_face_masks_3d``) and
+    per-level-masked velocities — the SAME fix as the K_diss_h flux-form
+    source (ocean_pe_latlon_cgrid): 2-D-only masks treat a face that is
+    closed at depth (topographic step) as a u=0 wall, crediting a spurious
+    no-slip shear ``|∇u|²`` to the EKE source (probe-measured +37% of the
+    production-path EKE source on the global_4deg yr-3 state).  Full-cell
+    coordinates: 3-D masks are all-ones ⇒ identical to the 2-D path.
+
+    Parameters
+    ----------
+    u, v : 3-D face velocities (n_lat, n_lon+1, nlev) / (n_lat+1, n_lon, nlev).
+    kappa_u : float (or traced scalar) — eddy momentum diffusivity [m²/s].
+    dz_actual : (n_lat, n_lon, nlev) cell-centre layer thicknesses [m]
+        (dz_ref·jacobian — the same measure as the other column integrals).
+    mask / u_mask / v_mask : 2-D wet masks (centres / u-faces / v-faces).
+    z_coord : optional vertical coordinate; when an
+        ``OceanPartialCellCoordinate``, its ``is_active`` drives the 3-D
+        face masks (free-slip at topographic steps).
+
+    Returns
+    -------
+    B_T : (n_lat, n_lon) ≥ 0 [m³/s³].
+    """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        flux_divergence_viscosity_cgrid,
+    )
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        um3, vm3 = compute_face_masks_3d(z_coord.is_active, grid)
+        um, vm = um3.astype(u.dtype), vm3.astype(v.dtype)
+        u_eff, v_eff = u * um, v * vm
+    else:
+        um, vm = u_mask, v_mask
+        u_eff, v_eff = u, v
+    _vu, _vv, diss = flux_divergence_viscosity_cgrid(
+        u_eff, v_eff, grid, kappa_u, cos_power=0,
+        mask=mask, u_mask=um, v_mask=vm, want_dissipation=True,
+    )
+    # Depth integral with the cell-centre thickness measure; diss is already
+    # centre-masked by the operator, the dz product re-applies the 2-D mask.
+    return jnp.sum(diss * dz_actual, axis=-1) * mask

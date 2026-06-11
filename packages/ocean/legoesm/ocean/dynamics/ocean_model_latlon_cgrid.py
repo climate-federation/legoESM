@@ -75,6 +75,8 @@ from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,
+    compute_geometric_step_kappa,
+    geometric_barotropic_production,
     compute_realized_gm_skew_conversion,
     compute_realized_signed_conversions,
     eke_horizontal_transport,
@@ -506,6 +508,21 @@ class LatLonCGridOceanModel:
         self.z_coord = z_coord
         self.config = config or LatLonCGridOceanConfig()
         self._validate_config(self.config)
+        # GEOMETRIC EKE closure (Torres et al. 2025) needs the regular-grid
+        # B_T operator (flux_divergence_viscosity_cgrid raises on tripolar);
+        # fail at construction, not at the first traced step.
+        _gm = self.config.gm_redi
+        if (_gm is not None and getattr(_gm, "eke", None) is not None
+                and _gm.eke.closure == "geometric"):
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import is_tripolar
+            if is_tripolar(self.grid):
+                raise ValueError(
+                    "EKEConfig.closure='geometric' is not supported on "
+                    "tripolar grids (the B_T shear-production operator "
+                    "flux_divergence_viscosity_cgrid is regular-lat-lon "
+                    "only). Use a regular lat-lon grid or extend the "
+                    "operator."
+                )
         self._cfl_checked = False
         # Static rigid-lid data (islands, basis, depths), built eagerly from the
         # first concrete state (host-side flood-fill).  None until built.
@@ -1670,6 +1687,64 @@ class LatLonCGridOceanModel:
                         Ah_visc_u=tend.Ah_visc_u, Ah_visc_v=tend.Ah_visc_v,
                         Ah_kediss_cell=tend.Ah_kediss_cell,
                     )
+                elif eke_cfg.closure == "geometric":
+                    # GEOMETRIC closure (Torres et al. 2025, JAMES,
+                    # doi:10.1029/2025MS005394): depth-INTEGRATED 2-D EKE
+                    # budget (Eq. 1) — ``state.eke`` carries ∫EKE dz [m³/s²].
+                    # Static Python dispatch on the config literal (validated
+                    # at construction); the default closure is bit-identical.
+                    geom = eke_cfg.geometric
+                    E_in = state.eke.data if state.eke is not None else None
+                    (E, kappa_gm_override, kappa_n_geom, prod_bc, L_eff,
+                     dz_geom) = compute_geometric_step_kappa(
+                        T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                        E_in, self.grid, self.z_coord, gm_cfg,
+                        eos=self.config.eos, eos_linear=self.config.eos_linear,
+                        mask=lm,
+                        rho_0=self.config.constants.rho_0,
+                        g=self.config.constants.g,
+                        omega=self.config.constants.Omega,
+                        r_earth=self.config.constants.R_earth,
+                    )
+                    # Barotropic production B_T = ∫κ_u|∇h u_h|² dz (Eq. 3)
+                    # from the start-of-step velocities (the same time level
+                    # that advects E below).
+                    prod_bt = geometric_barotropic_production(
+                        state.u.data, state.v.data, self.grid, geom.kappa_u,
+                        dz_geom, lm, state.u_mask.data, state.v_mask.data,
+                        z_coord=self.z_coord,
+                    )
+                    # Shim config routing the GEOMETRIC coefficients through
+                    # the SHARED 2-D transport + semi-implicit fold:
+                    # k_iso←kappa_e (T_e diffusion, Eq. 5) and
+                    # c_eps←c_eps_geometric, which with L=L_eff=R_d·√H makes
+                    # the fold rate c_eps·√I/L_eff = C_ε·√(I/H)/R_d — the
+                    # EXACT Eq.-4 dissipation linearised implicitly (see
+                    # geometric_dissipation_length).  No duplicate numerics.
+                    shim_cfg = eke_cfg._replace(
+                        c_eps=geom.c_eps_geometric, k_iso=geom.kappa_e)
+                    # Advecting flow: ∇h·(u_h ∫E dz) with the depth-mean flow
+                    # (paper Eq. 1 / Appendix D "integrated transport" with
+                    # φ(z)=1) — the same level-mean U_bar construction as the
+                    # EG 2-D path (conserves the area integral of E).
+                    U_bar = jnp.mean(state.u.data, axis=-1) * state.u_mask.data
+                    V_bar = jnp.mean(state.v.data, axis=-1) * state.v_mask.data
+                    E_t = E + dt * eke_horizontal_transport(
+                        E, U_bar, V_bar, self.grid, shim_cfg,
+                        lm, state.u_mask.data, state.v_mask.data,
+                    )
+                    # B_C + B_T explicit (both ≥ 0), D_e implicit — E ≥ 0 by
+                    # construction (the paper instead zeroes D_e where E < 0,
+                    # p. 5; the fold is strictly stronger — documented).
+                    E_new = eke_apply_local_source(
+                        E_t, jnp.zeros_like(E_t), L_eff, shim_cfg, dt,
+                        production_override=prod_bc + prod_bt,
+                    )
+                    eke_new = Field(data=E_new * lm, name="eke",
+                                    dims=("lat", "lon"), units="m^3/s^2")
+                    # κ_n (Eq. 7) → Redi tracer diffusivity (EKE-GM+N).
+                    if geom.kappa_n_coupling:
+                        kappa_redi_override = kappa_n_geom
                 else:
                     if state.eke is not None:
                         E = state.eke.data
