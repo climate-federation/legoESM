@@ -422,6 +422,38 @@ def test_read_turb_carry_fails_fast_on_wrong_clubb_shape():
     assert seeded.shape == (4, 15, 25)
 
 
+def test_prognostic_clubb_convective_bl_physics():
+    """Idealized boundary-layer physics check (beyond runs-without-error): in a
+    moist, stably-stratified column, STRONG surface heating must drive a
+    convective response — the prognostic closure develops substantially more
+    turbulence (column-integrated wp2) than the same column with NO surface
+    heating, and the heated case has an UPWARD buoyancy flux (wpthvp>0) in the
+    lower BL (buoyancy production of TKE). This is the canonical turbulence-
+    scheme sanity check, on the genuinely-prognostic path."""
+    base = _scm_column(ncol=2, nlev=30, dtheta_dz=3e-3)   # stably stratified
+    cfg = CLUBBConfig()
+
+    def run(extra_heating):
+        kw = dict(base)
+        kw["T_sfc"] = base["T"][:, -1] + extra_heating
+        _, _, _, _, m_f, diags = integrate_clubb_column(
+            **kw, dt=120.0, nsteps=60, config=cfg)   # ~2 h
+        col_tke = float(np.sum(np.asarray(m_f.wp2)))
+        return col_tke, np.asarray(diags["wpthvp"])   # (nsteps, ncol, nzm)
+
+    tke_heated, wpthvp_heated = run(6.0)     # strong surface heating
+    tke_calm, _ = run(0.0)                    # no surface heating
+
+    # Convective forcing develops markedly more TKE than the unheated column.
+    assert tke_heated > 3.0 * tke_calm
+    # Upward buoyancy flux somewhere in the lower BL of the heated case (the
+    # buoyancy production that sustains convective TKE). Lower BL = top-down
+    # ascending zm: low indices are the surface side.
+    final_wpthvp = wpthvp_heated[-1]          # (ncol, nzm) last step
+    lower_bl = final_wpthvp[:, :final_wpthvp.shape[1] // 2]
+    assert float(np.max(lower_bl)) > 0.0
+
+
 def test_prognostic_clubb_runs_in_combined_physics_pipeline():
     """END-TO-END: scheme='clubb', prognostic=True runs through the real
     combined-physics pipeline (make_physics → hydrostatic physics_fn) on a
