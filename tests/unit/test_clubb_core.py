@@ -19,6 +19,9 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb_core import (  # noqa: E402
+    CLUBBForcing,
+    CLUBBMomentState,
+    advance_clubb_core,
     compute_clubb_diagnostics,
     compute_pdf_closure,
 )
@@ -132,6 +135,78 @@ def test_pdf_closure_jit_and_grad():
 
     assert jnp.isfinite(jax.jit(loss)(kw["wp2"]))
     assert jnp.all(jnp.isfinite(jax.grad(loss)(kw["wp2"])))
+
+
+def _core_state_env(gr, ng, nzm, seed=7):
+    """A physically-plausible start-of-step moment state + host env for one core step."""
+    nzt = nzm - 1
+    rng = np.random.default_rng(seed)
+
+    def zt(s=1.0, b=0.0):
+        return jnp.asarray(b + s * rng.standard_normal((ng, nzt)))
+
+    def zm_pos(lo, hi):
+        return jnp.asarray(lo + (hi - lo) * rng.random((ng, nzm)))
+
+    state = CLUBBMomentState(
+        rtm=zt(1e-3, 9e-3), thlm=zt(2.0, 298.0), um=zt(2.0, 4.0), vm=zt(2.0),
+        wp2=zm_pos(0.05, 0.6), wp3=jnp.asarray(0.05 * rng.standard_normal((ng, nzt))),
+        up2=zm_pos(0.1, 0.4), vp2=zm_pos(0.1, 0.4),
+        wprtp=jnp.asarray(1e-4 * rng.standard_normal((ng, nzm))),
+        wpthlp=jnp.asarray(1e-2 * rng.standard_normal((ng, nzm))),
+        upwp=jnp.asarray(1e-2 * rng.standard_normal((ng, nzm))),
+        vpwp=jnp.asarray(1e-2 * rng.standard_normal((ng, nzm))),
+        rtp2=zm_pos(1e-8, 2e-6), thlp2=zm_pos(1e-3, 0.1),
+        rtpthlp=jnp.asarray(1e-6 * rng.standard_normal((ng, nzm))))
+    zeros_zt, zeros_zm = jnp.zeros((ng, nzt)), jnp.zeros((ng, nzm))
+    forcing = CLUBBForcing(
+        rtm=zeros_zt, thlm=zeros_zt, um=zeros_zt, vm=zeros_zt, wprtp=zeros_zm,
+        wpthlp=zeros_zm, rtp2=zeros_zm, thlp2=zeros_zm, rtpthlp=zeros_zm)
+    rho = jnp.asarray(1.0 - 0.05 * np.linspace(0, 1, nzm)[None, :] + 0.0 * rng.random((ng, nzm)))
+    env = dict(
+        Lscale=jnp.asarray(50.0 + 150.0 * rng.random((ng, nzt))),
+        brunt_vaisala_freq_sqd=jnp.asarray(1e-4 + 1e-4 * rng.random((ng, nzm))),
+        exner_zt=jnp.asarray(0.9 + 0.05 * rng.random((ng, nzt))),
+        p_in_Pa_zt=jnp.asarray(7e4 + 2e4 * rng.random((ng, nzt))),
+        thv_ds_zt=zt(1.0, 300.0), thv_ds_zm=jnp.asarray(300.0 + rng.random((ng, nzm))),
+        rho_ds_zm=rho, rho_ds_zt=jnp.asarray(0.5 * (rho[:, 1:] + rho[:, :-1])),
+        invrs_rho_ds_zm=1.0 / rho,
+        invrs_rho_ds_zt=jnp.asarray(1.0 / (0.5 * (rho[:, 1:] + rho[:, :-1]))),
+        wm_zt=zeros_zt, wm_zm=zeros_zm, sfc_elevation=jnp.zeros((ng,)),
+        fcor=jnp.full((ng,), 1e-4), ug=zt(1.0, 5.0), vg=zt(1.0),
+        dt=300.0, gr=gr, config=CLUBBConfig())
+    return state, forcing, env
+
+
+def test_advance_clubb_core_one_step():
+    gr, ng, nzm = _gr()
+    state, forcing, env = _core_state_env(gr, ng, nzm)
+    new_state, diags = advance_clubb_core(state, forcing, **env)
+    # Every prognostic field stays finite and keeps its shape.
+    for name, v in new_state._asdict().items():
+        arr = np.asarray(v)
+        assert np.all(np.isfinite(arr)), name
+        assert arr.shape == np.asarray(getattr(state, name)).shape, name
+    # Positive-definite variances stay non-negative after the advance+clips.
+    for name in ("wp2", "up2", "vp2", "rtp2", "thlp2"):
+        assert np.all(np.asarray(getattr(new_state, name)) >= 0.0), name
+    # Cloud diagnostics physical.
+    cf = np.asarray(diags["cloud_frac"])
+    assert np.all((cf >= 0.0) & (cf <= 1.0)) and np.all(np.asarray(diags["rcm"]) >= 0.0)
+
+
+def test_advance_clubb_core_jit_and_grad():
+    gr, ng, nzm = _gr()
+    state, forcing, env = _core_state_env(gr, ng, nzm)
+
+    def loss(thlm):
+        s = state._replace(thlm=thlm)
+        new_state, _ = advance_clubb_core(s, forcing, **env)
+        return jnp.sum(new_state.thlm ** 2) + jnp.sum(new_state.wp2 ** 2)
+
+    assert jnp.isfinite(jax.jit(loss)(state.thlm))
+    g = jax.grad(loss)(state.thlm)
+    assert jnp.all(jnp.isfinite(g))
 
 
 def test_pdf_closure_buoyancy_uses_raw_not_floored_variance():

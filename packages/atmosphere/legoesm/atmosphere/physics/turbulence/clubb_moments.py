@@ -705,7 +705,7 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
                      wprtp, wpthlp, wpthvp, upwp, vpwp,
                      wp2, wp2_zt, wp3_on_wp2, wp3_on_wp2_zt,
                      sigma_sqd_w, thv_ds_zm, Kh_zt,
-                     Cn, invrs_tau_xp2_zm, invrs_tau_C4_zm, invrs_tau_C14_zm,
+                     invrs_tau_xp2_zm, invrs_tau_C4_zm, invrs_tau_C14_zm,
                      rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, wm_zm,
                      rtp2_forcing, thlp2_forcing, rtpthlp_forcing,
                      nu2, nu9, dt, gr: CLUBBGrid, config):
@@ -717,11 +717,17 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
 
       * shared turbulent-advection LHS (:func:`calc_xp2_xpyp_ta_lhs`, ADG1
         upwind) and centered mean-advection LHS (:func:`term_ma_zm_lhs`);
-      * rtp2/thlp2/rtpthlp: one shared implicit LHS (:func:`calc_xp2_xpyp_lhs`)
-        solved per moment (:func:`solve_xp2_xpyp`), then
-        :func:`pos_definite_variances` (hole-fill) + :func:`clip_variance` with
-        the ``l_min_xp2_from_corr_wx`` boosted floor, and :func:`clip_covar`
-        (Cauchy-Schwarz) on rtpthlp;
+      * rtp2/thlp2/rtpthlp: each solved with its OWN dissipation coefficient
+        (``C2rt``/``C2thl``/``C2rtthl``) in the dp1 pressure-damping term, so
+        each gets its own implicit LHS (:func:`calc_xp2_xpyp_lhs`) + solve
+        (:func:`solve_xp2_xpyp`). CAM defaults ``C2rt = C2thl = 1.0`` but
+        ``C2rtthl = 1.3`` differ, so the single shared-LHS solve (valid only when
+        all three are equal, ``advance_xp2_xpyp_module.F90:836``) is NOT taken;
+        ``l_C2_cloud_frac = .false.`` (CAM default) → the C2's are plain
+        constants (F90:595, 625-627). Then :func:`pos_definite_variances`
+        (hole-fill) + :func:`clip_variance` with the ``l_min_xp2_from_corr_wx``
+        boosted floor on the variances, and :func:`clip_covar` (Cauchy-Schwarz)
+        on rtpthlp;
       * up2/vp2: the up2/vp2 LHS (:func:`calc_up2_vp2_lhs`) with the
         pressure-rotation RHS (:func:`xp2_xpyp_uv_rhs`, with :func:`term_pr2`),
         solved with the shared LHS, then hole-fill + clip.
@@ -760,19 +766,31 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
     rhs_ta_rtpthlp = calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta,
                                           wprtp, wpthlp, rho_ds_zm, invrs_rho_ds_zm, gr)
 
-    lhs_x2, _lhs_diff, _dp1 = calc_xp2_xpyp_lhs(
-        lhs_ta, lhs_ma, Kh_zt, params.c_K2, nu2, invrs_rho_ds_zm, rho_ds_zt,
-        Cn, invrs_tau_xp2_zm, gamma, dt, gr)
+    # CAM uses 3 distinct dissipation coefficients (C2rt for rtp2, C2thl for
+    # thlp2, C2rtthl for rtpthlp). l_C2_cloud_frac = .false. (CAM default) → plain
+    # constants. Because C2rtthl (1.3) != C2rt = C2thl (1.0) the single shared-LHS
+    # solve is invalid (advance_xp2_xpyp_module.F90:836), so each moment gets its
+    # own dp1 term in BOTH the LHS assembly and the over-implicit solve correction.
+    Cn_rt = jnp.full((ng, nzm), params.C2rt, dtype=wp2.dtype)
+    Cn_thl = jnp.full((ng, nzm), params.C2thl, dtype=wp2.dtype)
+    Cn_rtthl = jnp.full((ng, nzm), params.C2rtthl, dtype=wp2.dtype)
 
-    soln_rtp2 = solve_xp2_xpyp(lhs_x2, lhs_ta, rhs_ta_rtp2, Cn, invrs_tau_xp2_zm,
-                               rt_thr, rtp2, rtm, rtm, wprtp, wprtp, invrs_dzm,
-                               rtp2_forcing, dt)
-    soln_thlp2 = solve_xp2_xpyp(lhs_x2, lhs_ta, rhs_ta_thlp2, Cn, invrs_tau_xp2_zm,
-                                thl_thr, thlp2, thlm, thlm, wpthlp, wpthlp, invrs_dzm,
-                                thlp2_forcing, dt)
-    soln_rtpthlp = solve_xp2_xpyp(lhs_x2, lhs_ta, rhs_ta_rtpthlp, Cn, invrs_tau_xp2_zm,
-                                  _ZERO_THRESHOLD, rtpthlp, rtm, thlm, wprtp, wpthlp,
-                                  invrs_dzm, rtpthlp_forcing, dt)
+    def _scalar_lhs(Cn_x):
+        lhs_x2, _lhs_diff, _dp1 = calc_xp2_xpyp_lhs(
+            lhs_ta, lhs_ma, Kh_zt, params.c_K2, nu2, invrs_rho_ds_zm, rho_ds_zt,
+            Cn_x, invrs_tau_xp2_zm, gamma, dt, gr)
+        return lhs_x2
+
+    soln_rtp2 = solve_xp2_xpyp(_scalar_lhs(Cn_rt), lhs_ta, rhs_ta_rtp2, Cn_rt,
+                               invrs_tau_xp2_zm, rt_thr, rtp2, rtm, rtm, wprtp,
+                               wprtp, invrs_dzm, rtp2_forcing, dt)
+    soln_thlp2 = solve_xp2_xpyp(_scalar_lhs(Cn_thl), lhs_ta, rhs_ta_thlp2, Cn_thl,
+                                invrs_tau_xp2_zm, thl_thr, thlp2, thlm, thlm,
+                                wpthlp, wpthlp, invrs_dzm, thlp2_forcing, dt)
+    soln_rtpthlp = solve_xp2_xpyp(_scalar_lhs(Cn_rtthl), lhs_ta, rhs_ta_rtpthlp,
+                                  Cn_rtthl, invrs_tau_xp2_zm, _ZERO_THRESHOLD,
+                                  rtpthlp, rtm, thlm, wprtp, wpthlp, invrs_dzm,
+                                  rtpthlp_forcing, dt)
 
     if flags.l_lmm_stepping:   # CAM default False (static gate)
         soln_rtp2 = 0.5 * (rtp2 + soln_rtp2)

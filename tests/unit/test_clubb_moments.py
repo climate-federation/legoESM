@@ -19,15 +19,16 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb_moments import (  # noqa: E402
     advance_windm_edsclrm,
     advance_xp2_xpyp,
-    clip_covars_denom,
     calc_up2_vp2_lhs,
     calc_xp2_xpyp_lhs,
     calc_xp2_xpyp_ta_lhs,
     calc_xp2_xpyp_ta_rhs,
+    clip_covars_denom,
     clip_variance,
     diffusion_zm_lhs,
     pos_definite_variances,
@@ -41,7 +42,6 @@ from legoesm.atmosphere.physics.turbulence.clubb_moments import (  # noqa: E402
     xp2_xpyp_rhs,
     xp2_xpyp_uv_rhs,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 
@@ -563,7 +563,7 @@ def test_calc_xp2_xpyp_lhs_parity():
     for a, b in zip(mine, ref):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12, atol=1e-14)
 
-    ng, nzm = p["ng"], p["nzm"]
+    ng = p["ng"]
     c_K9 = jnp.full((ng,), 0.13)
     C4, C14 = 5.2, 1.0
     itau_C14 = jnp.asarray(p["itau"]) * 1.3
@@ -766,7 +766,6 @@ def _advance_xp2_inputs(seed=70, ng=2, nzt=10):
         wp3_on_wp2=zmf(0.1), wp3_on_wp2_zt=ztf(0.1),
         sigma_sqd_w=sigma, thv_ds_zm=zmf(1.0, 300.0),
         Kh_zt=jnp.asarray(1.0 + 3.0 * rng.random((ng, nzt))),
-        Cn=jnp.asarray(np.full((ng, nzm), cfg.params.C2rt)),
         invrs_tau_xp2_zm=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
         invrs_tau_C4_zm=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
         invrs_tau_C14_zm=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
@@ -778,6 +777,28 @@ def _advance_xp2_inputs(seed=70, ng=2, nzt=10):
         nu2=jnp.full((ng,), cfg.params.nu2), nu9=jnp.full((ng,), cfg.params.nu9),
         dt=300.0, gr=gr, config=cfg,
     )
+
+
+def test_advance_xp2_xpyp_distinct_C2rtthl():
+    """CAM uses 3 distinct C2 (C2rt=C2thl=1.0, C2rtthl=1.3); the rtpthlp solve must
+    use C2rtthl, NOT C2rt. The dp1 pressure-damping drives the covariance toward 0,
+    so the larger C2rtthl=1.3 damps |rtpthlp| MORE than the single-C2 (1.0) case;
+    rtp2/thlp2 (which don't depend on C2rtthl) are unchanged."""
+    kw = _advance_xp2_inputs(seed=12)
+    cfg = kw["config"]
+    assert cfg.params.C2rtthl != cfg.params.C2rt   # CAM default 1.3 vs 1.0
+    # CAM 3-C2 result (rtpthlp damped by C2rtthl = 1.3).
+    rtp2_a, thlp2_a, rtpthlp_a, _, _ = advance_xp2_xpyp(**kw)
+    # Single-C2 result (rtpthlp damped by C2rt = 1.0).
+    kw_eq = dict(kw, config=cfg._replace(
+        params=cfg.params._replace(C2rtthl=cfg.params.C2rt)))
+    rtp2_b, thlp2_b, rtpthlp_b, _, _ = advance_xp2_xpyp(**kw_eq)
+    # rtp2/thlp2 are independent of C2rtthl → identical.
+    np.testing.assert_allclose(np.asarray(rtp2_a), np.asarray(rtp2_b), rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(thlp2_a), np.asarray(thlp2_b), rtol=0, atol=0)
+    # rtpthlp differs, and the stronger (1.3) damping shrinks its column magnitude.
+    assert not np.allclose(np.asarray(rtpthlp_a), np.asarray(rtpthlp_b))
+    assert np.sum(np.abs(np.asarray(rtpthlp_a))) < np.sum(np.abs(np.asarray(rtpthlp_b)))
 
 
 def test_advance_xp2_xpyp_runs_and_bounds():
@@ -831,7 +852,16 @@ def test_advance_xp2_xpyp_parity():
     )
 
     kw = _advance_xp2_inputs(seed=71)
+    # The CLUBB-JAX reference uses a SINGLE C2 (C2rt) for all three scalar moments
+    # (the ARM single-solve path; only iC2rt is populated below). To isolate the
+    # algorithm, equalize the CAM-default C2rt/C2thl/C2rtthl (which differ:
+    # C2rtthl=1.3) so my per-moment-C2 path reduces to the reference's single-C2
+    # form. The CAM 3-C2 behavior is checked separately
+    # (test_advance_xp2_xpyp_distinct_C2rtthl).
     cfg = kw["config"]
+    cfg = cfg._replace(params=cfg.params._replace(
+        C2thl=cfg.params.C2rt, C2rtthl=cfg.params.C2rt))
+    kw["config"] = cfg
     p = cfg.params
     gr = kw["gr"]
     ng, nzm = kw["wp2"].shape
