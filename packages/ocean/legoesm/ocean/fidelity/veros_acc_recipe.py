@@ -191,6 +191,14 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
     #                              the explicit F_z (the tier-2 dtemp_iso residual).
     K_iso_steep=500.0,           # ↔ Veros K_iso_steep (acc.py:41): horizontal-
     #                              diffusion floor on K_11/K_22 at steep slopes.
+    veros_triad_weights=True,    # ↔ Veros dzw(pair)/(4·dzt) triad weights with no
+    #                              boundary renormalization (see GMRediConfig doc).
+    double_redi_diagonal=True,   # ↔ Veros adds the precomputed K_11/K_22 diagonal
+    #                              in BOTH the iso and skew passes (diffusion.py:
+    #                              40-47 + thermodynamics.py:430-437; acc.py runs
+    #                              enable_neutral_diffusion AND enable_skew_
+    #                              diffusion) — the oracle's 2× horizontal
+    #                              diagonal (see the GMRediConfig field doc).
     slope_density="neutral",     # ↔ Veros isoneutral.py:40-41: build the slopes
     #                              from the LOCALLY-REFERENCED neutral density
     #                              gradient ∂ρ/∂T·∇T+∂ρ/∂S·∇S (get_drhodT/get_drhodS
@@ -344,9 +352,18 @@ def build_acc_z_coord() -> OceanZStarCoordinate:
         jnp.zeros(1, dtype=dz_ref.dtype),
         -jnp.cumsum(dz_ref),
     ])
-    # z_full_ref: cell centres
-    z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
-    # dz_half_ref: distance between adjacent cell centres
+    # z_full_ref: cell centres — Veros's u_centered_grid recursion, NOT
+    # midpoints (the ACC ddz/2.5 is stretched, so the two differ by up to
+    # 10 m and dz_half_ref — the vertical-gradient / implicit-solve metric —
+    # alternates around the midpoint value exactly as Veros's dzw does; see
+    # veros_u_centered_z_centres).  Interfaces above are identical either way.
+    from legoesm.ocean.fidelity.veros_state_bridge import (
+        veros_u_centered_z_centres,
+    )
+    z_full_ref = jnp.asarray(
+        veros_u_centered_z_centres(np.asarray(dz_ref)), dtype=dz_ref.dtype)
+    # dz_half_ref: distance between adjacent cell centres (== Veros dzw
+    # interior, z-flipped)
     dz_half_ref = jnp.abs(z_full_ref[:-1] - z_full_ref[1:])
 
     return OceanZStarCoordinate(

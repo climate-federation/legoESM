@@ -91,6 +91,10 @@ ACC_BASIC_GM_REDI_CONFIG = GMRediConfig(
     implicit_K33=True,           # Veros applies the vertical K_33 implicitly
     K_iso_steep=500.0,           # <-> Veros K_iso_steep (acc_basic.py:42)
     slope_density="neutral",     # Veros neutral (locally-referenced) slopes
+    veros_triad_weights=True,    # Veros dzw(pair)/(4 dzt) triad weights (see doc)
+    double_redi_diagonal=True,   # Veros adds K_11/K_22 in BOTH the iso and skew
+    #                              passes (acc_basic runs neutral+skew; see the
+    #                              GMRediConfig field doc) — 2× horiz. diagonal.
     eke=None,                    # enable_eke=False -> constant kappa, no EKE
 )
 
