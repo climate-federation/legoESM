@@ -33,6 +33,21 @@ from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput  # noq
 from legoesm import constants  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _release_jax_compilation_cache():
+    """Free JAX's compiled-executable cache after every test.
+
+    This file's prognostic-CLUBB pipeline / grad / sub-cycling tests each lower a
+    very large XLA program. Without releasing them, the compiled executables
+    accumulate across the ~40 tests and the XLA/LLVM compiler eventually aborts
+    mid-compile (``Fatal Python error: Aborted`` ~2/3 of the way through) on a
+    single-process run — even though every test passes in isolation. Tests do not
+    reuse each other's compiled functions, so clearing between them is free
+    (correctness-neutral) and keeps the whole suite runnable in one process."""
+    yield
+    jax.clear_caches()
+
+
 def _column(ncol=4, nlev=24, dtheta_dz=4e-3, seed=0):
     """Synthetic top-down column; dtheta_dz controls static stability."""
     rng = np.random.default_rng(seed)

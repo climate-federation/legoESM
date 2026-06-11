@@ -233,6 +233,16 @@ jitted `integrate_clubb_column` for efficient multi-step testing.
   `out.dT_dt[:,-1]` must respond with the matching sign (cold cools, warm warms,
   antisymmetric, ≫ the ~1e-8 zero-flux floor), proving the full chain
   `shflx→wpthlp_sfc BC→advance_clubb_core→dT_dt`. No SCM run, deterministic.
+- **full-suite single-process OOM fixed (iter 74):** a comprehensive regression
+  sweep revealed `test_clubb_scheme.py` cannot run all ~40 tests in one process —
+  it `Fatal Python error: Aborted`s mid-XLA-compile ~2/3 through (the heavy
+  prognostic-pipeline/grad/sub-cycling tests each lower a huge program and the
+  compiled executables accumulate). Confirmed environmental, NOT a regression:
+  every test passes in isolation (the aborted `subcycling_raw_moisture_contract`
+  passes alone in 89 s), and ~24 integration + ~240 module tests were green before
+  the abort. Fix: an autouse fixture calling `jax.clear_caches()` after each test
+  (correctness-neutral — tests don't reuse compiled fns) so the suite stays
+  runnable in one process. A real CI-runner hazard, now removed.
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz
