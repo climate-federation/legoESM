@@ -102,6 +102,44 @@ def test_unstable_mixes_more_than_stable():
     assert float(jnp.mean(out_unstable.Km)) > float(jnp.mean(out_stable.Km))
 
 
+def test_diagnostic_clubb_conserves_column_with_no_sfc_flux():
+    """The DEFAULT diagnostic ``scheme="clubb"`` conserves column moisture AND heat
+    under zero surface flux — the conservation contract of the path most users
+    get (the prognostic triad covers the opt-in path).
+
+    The phase-1 path advances the mean by flux-form ``implicit_vertical_diffusion``
+    (a dry ``rcm=0`` mapping, so ``θl=θ`` and ``rt=q_v``). With ``T_sfc`` and
+    ``q_sfc`` set to the near-surface values the bulk fluxes vanish
+    (``shflx==lhflx==0``), so the eddy diffusion only REDISTRIBUTES — the
+    mass-weighted (``ρ·dz``) column ``q_v`` and ``θ=T/Π`` totals are conserved to
+    round-off. Non-vacuous WITHOUT spin-up: unlike the prognostic rest state, the
+    diagnostic eddy diffusion is driven directly by the initial gradient, so it
+    moves a genuine ``max|dq·dt|``~1e-4 of moisture while still conserving."""
+    kw = _column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    kw["T_sfc"] = kw["T"][:, -1]        # zero surface sensible-heat flux
+    kw["q_sfc"] = kw["q_v"][:, -1]      # zero surface moisture flux
+    dt = kw["dt"]
+    out, _ = clubb_turbulence(**kw)
+    assert np.all(np.asarray(out.shflx) == 0.0)
+    assert np.all(np.asarray(out.lhflx) == 0.0)
+    dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
+    mass = np.asarray(kw["rho"]) * dz
+    exner = (np.asarray(kw["p_full"]) / constants.p_ref) ** constants.kappa
+    dq = np.asarray(out.dq_v_dt)
+    dth = np.asarray(out.dT_dt) / exner
+    col_dq = np.sum(mass * dq, axis=1)
+    col_q = np.sum(mass * np.asarray(kw["q_v"]), axis=1)
+    col_dth = np.sum(mass * dth, axis=1)
+    col_th = np.sum(mass * np.asarray(kw["T"]) / exner, axis=1)
+    # Non-vacuous redistribution of BOTH fields (a dead moisture- OR heat-diffusion
+    # path would zero its tendency and pass the conservation check trivially).
+    assert float(np.max(np.abs(dq) * dt)) > 1e-6        # moisture genuinely moves
+    assert float(np.max(np.abs(dth) * dt)) > 1e-3       # heat (θ) genuinely moves
+    # Yet the mass-weighted column totals are conserved to round-off.
+    assert np.all(np.abs(col_dq) * dt / col_q < 1e-12)
+    assert np.all(np.abs(col_dth) * dt / col_th < 1e-12)
+
+
 def test_custom_config_is_used():
     """A custom CLUBBConfig threads through TurbulenceConfig.clubb."""
     cfg = CLUBBConfig()

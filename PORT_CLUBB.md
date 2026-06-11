@@ -242,7 +242,14 @@ jitted `integrate_clubb_column` for efficient multi-step testing.
   passes alone in 89 s), and ~24 integration + ~240 module tests were green before
   the abort. Fix: an autouse fixture calling `jax.clear_caches()` after each test
   (correctness-neutral — tests don't reuse compiled fns) so the suite stays
-  runnable in one process. A real CI-runner hazard, now removed.
+  runnable in one process. A real CI-runner hazard, now removed. Full regression
+  after the iter-67 numerics change: 286 module + 39 integration tests all green.
+- **diagnostic-path conservation (iter 75):** the DEFAULT diagnostic `scheme="clubb"`
+  (what most users get; the prognostic triad only covered the opt-in path) conserves
+  column `q_v` AND `θ=T/Π` to round-off (rel<1e-12) under zero surface flux — its
+  flux-form `implicit_vertical_diffusion` (dry `rcm=0` mapping) only redistributes.
+  Non-vacuous WITHOUT spin-up (`max|dq·dt|`~1e-4; the diagnostic eddy diffusion is
+  driven directly by the initial gradient), so it's a fast (~9 s) guard.
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz
