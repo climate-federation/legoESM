@@ -559,22 +559,21 @@ def test_implicit_solver_equatorial_visc_boost_strongest_at_equator(
     )
 
 
-def test_mpas_implicit_cn_refuses_mpi(state, mesh, z_coord, monkeypatch):
-    """MPAS ``implicit_cn`` MUST fail-fast under MPI (single-rank only).
-
-    The Voronoi barotropic ``A_op`` does no halo exchange and its
-    reductions would double-count ghost cells, so a multi-rank run would
-    SILENTLY corrupt the solve.  The model step raises ``NotImplementedError``
-    when ``is_multi_process()`` is True.  (The distributed Voronoi PCG is
-    deferred — see barotropic_implicit_mpas.py Step-4 TODO.)  Patches the
-    ``reductions.is_multi_process`` the dispatch guard imports.
+def test_mpas_implicit_cn_refuses_mpi_without_layout(
+        state, mesh, z_coord, monkeypatch):
+    """MPAS ``implicit_cn`` under MPI WITHOUT the partition layout MUST
+    fail-fast (the stock-CG fallback would silently run rank-local).
+    With a layout armed the distributed PCG path is supported instead —
+    see tests/ocean/distributed/test_barotropic_pcg_mpas_mpi.py.
+    Patches ``reductions.is_multi_process`` the dispatch guard imports.
     """
     import legoesm.parallel.reductions as _red
 
     monkeypatch.setattr(_red, "is_multi_process", lambda: True)
     cfg = MPASOceanConfig(barotropic_solver="implicit_cn")
     model = MPASOceanModel(mesh, z_coord, cfg)
-    with pytest.raises(NotImplementedError, match="single-rank only on"):
+    with pytest.raises(NotImplementedError,
+                       match="requires the Voronoi partition layout"):
         model.step(state, dt=300.0)
 
 
@@ -591,9 +590,10 @@ class TestMultiRankRefusal:
         )
 
         monkeypatch.setattr(red, "mpi_world_size", lambda: 2)
-        with pytest.raises(NotImplementedError, match="single-rank only"):
+        with pytest.raises(NotImplementedError,
+                           match="requires the Voronoi partition layout"):
             # Entry guard fires before any state/mesh use, so dummies
-            # suffice.
+            # suffice (no layout armed in this process).
             barotropic_implicit_mpas(None, None, None, None, 600.0)
 
     def test_world_size_one_without_mpi4py_is_serial(self):

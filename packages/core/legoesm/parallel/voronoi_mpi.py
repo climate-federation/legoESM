@@ -351,7 +351,47 @@ def initialize_voronoi_mpi(
         layout.partition.n_owned_edges,
         layout.partition.n_local_edges - layout.partition.n_owned_edges,
     )
+    global _active_voronoi_layout
+    _active_voronoi_layout = layout
     return rank, n_ranks, layout
+
+
+# Module-level active layout (mirrors ``distributed._active_topology``):
+# the MPAS barotropic solver needs the partition (halo exchanger +
+# owned-cell mask) without threading a layout argument through the
+# grid-agnostic model/config plumbing.  Accessor-only — never import the
+# global directly (private-cross-import rule).
+_active_voronoi_layout: "VoronoiPartitionLayout | None" = None
+
+
+def get_active_voronoi_layout() -> "VoronoiPartitionLayout | None":
+    """Active :class:`VoronoiPartitionLayout`, or ``None`` pre-init."""
+    return _active_voronoi_layout
+
+
+def reset_voronoi_layout() -> None:
+    """Forget the active Voronoi layout (test isolation / multi-run)."""
+    global _active_voronoi_layout
+    _active_voronoi_layout = None
+
+
+def get_matching_voronoi_layout(mesh) -> "VoronoiPartitionLayout | None":
+    """Active layout IFF its local mesh matches ``mesh``, else ``None``.
+
+    The size check (cell count) guards against a STALE layout from a
+    previous run/test routing a global-mesh or different-mesh solve
+    into the distributed branch with the wrong partition/owned mask
+    (codex 2026-06-11 MAJOR).  Every distributed-MPAS consumer (the
+    implicit-PCG dispatch, the explicit-substep eta-floor clamps, the
+    conservation fixer) keys on THIS accessor, not the raw active
+    layout.
+    """
+    lay = _active_voronoi_layout
+    if lay is None:
+        return None
+    if int(lay.local_mesh.areaCell.shape[0]) != int(mesh.areaCell.shape[0]):
+        return None
+    return lay
 
 
 # ============================================================================

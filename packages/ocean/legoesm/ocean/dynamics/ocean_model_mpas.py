@@ -626,16 +626,24 @@ class MPASOceanModel:
                 is_multi_process,
                 mpi_world_size,
             )
-            if is_multi_process() or mpi_world_size() > 1:
+            # Multi-rank now SUPPORTED when the Voronoi partition layout
+            # is armed (distributed fixed-M PCG: halo-composed A_op +
+            # owned-masked area-weighted dots — see
+            # barotropic_implicit_mpas).  Refuse only the layout-LESS
+            # multi-rank launch, where the stock-CG fallback would
+            # silently run rank-local.
+            from legoesm.parallel.voronoi_mpi import (
+                get_active_voronoi_layout,
+            )
+            if (get_active_voronoi_layout() is None
+                    and (is_multi_process() or mpi_world_size() > 1)):
                 raise NotImplementedError(
-                    "barotropic_solver='implicit_cn' is single-rank only on "
-                    "MPAS: the Voronoi barotropic A_op lacks halo exchange "
-                    "and the reductions would double-count ghost cells under "
-                    "MPI, silently corrupting the solve.  Use "
-                    "'explicit_substep' for multi-rank MPAS, or the lat-lon "
-                    "C-grid (which HAS the distributed PCG).  See "
-                    "barotropic_implicit_mpas.py Step-4 "
-                    "TODO(distributed-mpas-pcg)."
+                    "barotropic_solver='implicit_cn' under multi-rank MPAS "
+                    "requires the Voronoi partition layout (call "
+                    "initialize_voronoi_mpi and build the model on "
+                    "layout.local_mesh); without it the solve would "
+                    "silently run rank-local.  Use 'explicit_substep' "
+                    "otherwise."
                 )
             eta_new, u_bar_new, Hu_avg = barotropic_implicit_mpas(
                 state_for_baro, mesh, z_coord, config, dt,
@@ -822,6 +830,20 @@ class MPASOceanModel:
             # rank, all cells owned) otherwise.
             owned_mask = getattr(self, "_owned_mask", None)
             if owned_mask is None:
+                # Distributed Voronoi runs arm a partition layout
+                # instead of setting ``self._owned_mask`` — pull the
+                # owned-cell mask from it (size-checked: the model must
+                # actually be built on that layout's local mesh).  With
+                # ``is_multi_process()`` now layout-aware, an unmasked
+                # local sum would double-count halo cells in the
+                # allreduce.
+                from legoesm.parallel.voronoi_mpi import (
+                    get_matching_voronoi_layout,
+                )
+                _vl = get_matching_voronoi_layout(mesh)
+                if _vl is not None:
+                    owned_mask = _vl.owned_mask_cells
+            if owned_mask is None:
                 eff_mask = mask
             else:
                 eff_mask = mask * owned_mask.astype(mask.dtype)
@@ -835,18 +857,13 @@ class MPASOceanModel:
             # Globally sum the locally-masked expected forcing so the
             # comparison against the globally-summed ``heat_old`` /
             # ``salt_old`` inside the fixer is consistent.
-            # TODO(voronoi-mpi-conservation): ``is_multi_process()`` is
-            # False on the Voronoi MPI path (partition layout, halo
-            # backend never armed), so a distributed MPAS run takes the
-            # rank-LOCAL branch and fixes against a rank-local mass
-            # target.  Not switched to a world-size predicate here
-            # because this is a silent dispatch (an mpirun ensemble of
-            # independent serial members would then allreduce across
-            # members and corrupt them); needs a layout-aware signal
-            # threaded from the driver instead.  REACHABLE today via a
-            # distributed explicit_substep MPAS run with the fixer on —
-            # pre-existing, tracked for the distributed-MPAS milestone
-            # alongside TODO(distributed-mpas-pcg).
+            # RESOLVED(voronoi-mpi-conservation, 2026-06-11):
+            # ``is_multi_process()`` is now layout-aware (it returns
+            # True when a Voronoi partition layout is armed — the
+            # distributed-MPAS-PCG triangulation caught the allreduce
+            # silently skipping), and the local sums above are
+            # owned-masked from the same layout, so this dispatch is
+            # globally correct on the partition path.
             from legoesm.parallel.reductions import is_multi_process
             if is_multi_process():
                 from legoesm.parallel.reductions import global_sum_mpi

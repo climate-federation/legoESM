@@ -113,6 +113,18 @@ def barotropic_substeps_mpas(
     # 0.5*(h[c1]+h[c2]) on a step edge lets phantom transport leak
     # through and drives the seamount rest-state explosion.
     partial_cells = isinstance(z_coord, OceanPartialCellCoordinate)
+
+    # Distributed Voronoi (codex 2026-06-11 CRITICAL): with a partition
+    # layout armed, ``is_multi_process()`` is now TRUE on this path, so
+    # the eta-floor clamp's global sums WOULD allreduce — its local
+    # arrays carry halo cells, which an unweighted sum double-counts.
+    # Wire the owned mask explicitly (mesh-matched accessor; ``None``
+    # on single-rank/global meshes keeps the legacy behavior).
+    from legoesm.parallel.voronoi_mpi import get_matching_voronoi_layout
+    _vl_clamp = get_matching_voronoi_layout(mesh)
+    _clamp_ow = (None if _vl_clamp is None
+                 else _vl_clamp.owned_mask_cells)
+    _clamp_fg = _vl_clamp is not None
     if partial_cells:
         h_e_k = min_cell_to_edge(h_k, mesh)
     else:
@@ -250,7 +262,10 @@ def barotropic_substeps_mpas(
         Hu_sum_new = Hu_sum_c + transport.astype(_eta_dtype)
 
         eta_next = eta_c - dt_baro * divergence_cell(transport, mesh) * mask + dt_baro * F_slow_eta * mask
-        eta_next = _clamp_redistribute(eta_next, eta_floor, mask, _area_cell)
+        eta_next = _clamp_redistribute(
+            eta_next, eta_floor, mask, _area_cell,
+            owned_weight=_clamp_ow, force_global=_clamp_fg,
+        )
 
         # Backward: update u_bar using new eta
         # BEBT: blend new/old eta for semi-implicit PGF (#205)
@@ -329,7 +344,10 @@ def barotropic_substeps_mpas(
             eta_next = (
                 eta_next + divergence_cell(diff_flux, mesh)
             ) * mask
-            eta_next = _clamp_redistribute(eta_next, eta_floor, mask, _area_cell)
+            eta_next = _clamp_redistribute(
+            eta_next, eta_floor, mask, _area_cell,
+            owned_weight=_clamp_ow, force_global=_clamp_fg,
+        )
 
         # Accumulate eta and u_bar with cosine filter weights
         eta_sum_new = eta_sum_c + w_i * eta_next.astype(_eta_dtype)
