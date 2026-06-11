@@ -394,13 +394,15 @@ def test_ice_aggregation_conserves_ice_mass():
 
 
 def test_multistep_total_water_conserved():
-    # Run the full scheme (warm + ice + riming + aggregation) for many
-    # steps feeding tendencies back, and verify total water (vapor + cloud
-    # + rain + ice) minus accumulated surface precipitation is conserved
-    # over the whole trajectory — validates the scheme as a stable,
-    # conservative integrator, not just per-step.
+    # Run the full scheme for many steps feeding tendencies back, and
+    # verify total water (vapor + cloud + rain + ice) minus accumulated
+    # surface precipitation is conserved over the whole trajectory —
+    # validates the scheme as a stable, conservative integrator, not just
+    # per-step. SUPERCOOLED + seeded ice so the trajectory genuinely
+    # exercises freezing, riming, aggregation and ice carry-through (a warm
+    # T>0 trajectory never forms ice); rain still forms and precipitates.
     ncol, nlev = 1, 4
-    T = jnp.full((ncol, nlev), constants.T_freeze + 2.0)
+    T = jnp.full((ncol, nlev), constants.T_freeze - 20.0)
     p = jnp.full((ncol, nlev), P0)
     e = 1.04 * float(saturation_vapor_pressure(jnp.asarray(float(T[0, 0]))))
     q_v0 = jnp.full((ncol, nlev), constants.epsilon * e / (P0 - e))
@@ -408,7 +410,8 @@ def test_multistep_total_water_conserved():
     dz = jnp.full((ncol, nlev), 200.0)
     ph = jnp.zeros((ncol, nlev + 1))
     hyd = make_zero_hydrometeors(ncol, nlev)._replace(
-        q_c=jnp.full((ncol, nlev), 5.0e-4))
+        q_c=jnp.full((ncol, nlev), 1.0e-3),
+        q_i=jnp.full((ncol, nlev), 3.0e-4))
 
     def total_water(qv, h):
         return float(jnp.sum((qv + h.q_c + h.q_r + h.q_i) * rho * dz))
@@ -426,9 +429,13 @@ def test_multistep_total_water_conserved():
             q_i=jnp.maximum(hyd.q_i + dt * out.dq_i_dt, 0.0))
         accum_precip += float(jnp.sum(out.precipitation * dt))
     tw1 = total_water(qv, hyd)
+    # Non-vacuous: the trajectory actually moved water through ice and out
+    # as precip (riming grew the seeded ice; rain reached the surface).
+    assert float(jnp.max(hyd.q_i)) > 3.0e-4      # ice grew via riming
+    assert accum_precip > 0.0                    # something precipitated
     # Closure over the trajectory: water now + what precipitated == start.
-    # Clamps to nonnegative can only ADD water, so allow a small one-sided
-    # slack but require tight two-sided agreement (no spurious source).
+    # Clamps to nonnegative can only ADD water, so the two-sided rel=2e-3
+    # constrains against a spurious source.
     assert (tw1 + accum_precip) == pytest.approx(tw0, rel=2e-3)
 
 
