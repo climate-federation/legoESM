@@ -1270,11 +1270,9 @@ def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
     """
     if ndim not in (3, 4):
         raise ValueError(f"ndim must be 3 or 4, got {ndim}")
-    if halo != 1:
+    if halo not in (1, 2):
         raise ValueError(
-            f"tiled ppermute exchange currently supports halo=1 only "
-            f"(halo=2 is the next phase), got {halo}."
-        )
+            f"tiled ppermute exchange supports halo 1/2, got {halo}.")
     shape = tuple(mesh.devices.shape)
     if (len(shape) != 3 or shape[0] != 6 or shape[1] != shape[2]
             or shape[1] < 2):
@@ -1319,13 +1317,18 @@ def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
         my_id = (fi * kt + ti_) * kt + tj_
 
         # Edge strips in the W/E/S/N (= i0, iN, j0, jN) face order.
-        if ndim == 3:
+        # halo=2 payload (2, n_loc[, C]): depth-0 = boundary cell,
+        # depth-1 = one cell inward (multiface convention).
+        if halo == 1:
             strips = jnp.stack(
-                [tile[0, :], tile[-1, :], tile[:, 0], tile[:, -1]], axis=0)
+                [tile[0], tile[-1], tile[:, 0], tile[:, -1]], axis=0)
         else:
-            strips = jnp.stack(
-                [tile[0, :, :], tile[-1, :, :],
-                 tile[:, 0, :], tile[:, -1, :]], axis=0)
+            strips = jnp.stack([
+                jnp.stack([tile[0], tile[1]], axis=0),
+                jnp.stack([tile[-1], tile[-2]], axis=0),
+                jnp.stack([tile[:, 0], tile[:, 1]], axis=0),
+                jnp.stack([tile[:, -1], tile[:, -2]], axis=0),
+            ], axis=0)
 
         # Strip rounds: every (device, edge) slot is provably covered
         # (table build asserts), so zeros init is dead weight only
@@ -1338,37 +1341,61 @@ def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
             halo_strips = halo_strips.at[tgt].set(
                 received[None], mode="drop")
 
-        # Receiver-side reversal (global strip orientation).
+        # Receiver-side reversal (global strip orientation).  Strip
+        # axis: 1 for halo=1 payloads (4, n_loc, ...), 2 for halo=2
+        # (4, 2, n_loc, ...).
+        strip_axis = 1 if halo == 1 else 2
         my_rev = rev_j[my_id].reshape((4,) + (1,) * (halo_strips.ndim - 1))
         halo_strips = jnp.where(
-            my_rev.astype(bool), jnp.flip(halo_strips, axis=1), halo_strips)
+            my_rev.astype(bool), jnp.flip(halo_strips, axis=strip_axis),
+            halo_strips)
 
         if with_offsets:
             # Guard slivers: ends of my (oriented) received strips go
             # to my strip-adjacent intra-face neighbours.  W/E strips
             # run along j (neighbours tj±1); S/N along i (ti±1).
-            we = halo_strips[0:2]          # (2, n_loc, ...)
+            sx = strip_axis
+            we = halo_strips[0:2]
             sn = halo_strips[2:4]
-            lo_from_jbwd = jax.lax.ppermute(we[:, -g:], AXES, j_fwd)
-            hi_from_jfwd = jax.lax.ppermute(we[:, :g], AXES, j_bwd)
-            lo_from_ibwd = jax.lax.ppermute(sn[:, -g:], AXES, i_fwd)
-            hi_from_ifwd = jax.lax.ppermute(sn[:, :g], AXES, i_bwd)
+
+            def _take(arr, sl):
+                idx = (slice(None),) * sx + (sl,)
+                return arr[idx]
+
+            lo_from_jbwd = jax.lax.ppermute(
+                _take(we, slice(-g, None)), AXES, j_fwd)
+            hi_from_jfwd = jax.lax.ppermute(
+                _take(we, slice(None, g)), AXES, j_bwd)
+            lo_from_ibwd = jax.lax.ppermute(
+                _take(sn, slice(-g, None)), AXES, i_fwd)
+            hi_from_ifwd = jax.lax.ppermute(
+                _take(sn, slice(None, g)), AXES, i_bwd)
             we_pad = jnp.concatenate(
-                [lo_from_jbwd, we, hi_from_jfwd], axis=1)
+                [lo_from_jbwd, we, hi_from_jfwd], axis=sx)
             sn_pad = jnp.concatenate(
-                [lo_from_ibwd, sn, hi_from_ifwd], axis=1)
+                [lo_from_ibwd, sn, hi_from_ifwd], axis=sx)
             guarded = jnp.concatenate([we_pad, sn_pad], axis=0)
 
             offs_dev = jax.lax.dynamic_slice_in_dim(
-                offsets, fi, 1, axis=0)[0]          # (4, n)
+                offsets, fi, 1, axis=0)[0]   # (4, n) h1 / (4, 2, n) h2
             out_strips = []
             for e in range(4):
                 pos = pos_j[my_id, e]
                 seg_start = pos * n_loc
-                offs_seg = jax.lax.dynamic_slice_in_dim(
-                    offs_dev[e], seg_start, n_loc, axis=0)
-                interp = _interp_strip_guarded(
-                    guarded[e], offs_seg, g, n_loc, seg_start, n)
+                if halo == 1:
+                    offs_seg = jax.lax.dynamic_slice_in_dim(
+                        offs_dev[e], seg_start, n_loc, axis=0)
+                    interp = _interp_strip_guarded(
+                        guarded[e], offs_seg, g, n_loc, seg_start, n)
+                else:
+                    depths = []
+                    for d in range(2):
+                        offs_seg = jax.lax.dynamic_slice_in_dim(
+                            offs_dev[e, d], seg_start, n_loc, axis=0)
+                        depths.append(_interp_strip_guarded(
+                            guarded[e, d], offs_seg, g, n_loc,
+                            seg_start, n))
+                    interp = jnp.stack(depths, axis=0)
                 raw = halo_strips[e]
                 out_strips.append(jnp.where(
                     cross_j[my_id, e].astype(bool), interp, raw))
@@ -1380,46 +1407,103 @@ def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
         if ndim == 4:
             pad_width = pad_width + ((0, 0),)
         padded = jnp.pad(tile, pad_width)
-        padded = _fill_halo_and_corners(padded, halo_list, n_loc)
+        if halo == 1:
+            padded = _fill_halo_and_corners(padded, halo_list, n_loc)
+        else:
+            padded = _fill_halo_and_corners_h2_local(
+                padded, halo_list, n_loc)
 
         # ---- P3: serial-exact tile corners ----
-        # The avg fill above is only the SERIAL value at true cube
-        # vertices.  At an interior x interior cut the serial padded
-        # face holds the plain DIAGONAL interior cell; where the
-        # corner row/col is a face-halo row cut along the strip it
-        # holds the strip-NEIGHBOUR's (interp'd) strip end.  Static
-        # per-(device, corner) modes select among the four candidates;
+        # The avg/cascade fill above is only the SERIAL value at true
+        # cube vertices.  At an interior x interior cut the serial
+        # padded face holds the plain DIAGONAL interior cells; where
+        # the corner rows/cols are face-halo rows cut along the strip
+        # it holds the strip-NEIGHBOUR's (interp'd) strip end.  Static
+        # per-(device, corner) modes select among the candidates;
         # ppermute non-targets receive zeros, masked by the mode.
-        final = jnp.stack(halo_list, axis=0)        # (4, n_loc[, C])
-        diag_send = (tile[-1, -1], tile[-1, 0], tile[0, -1], tile[0, 0])
+        final = jnp.stack(halo_list, axis=0)
+        h = halo
+        if halo == 1:
+            diag_send = (tile[-1, -1], tile[-1, 0],
+                         tile[0, -1], tile[0, 0])
+
+            def _ends(e, lo):
+                s = final[e]
+                return s[0] if lo else s[-1]
+        else:
+            # 2x2 interior corner blocks, rows/cols in face order.
+            diag_send = (tile[-2:, -2:], tile[-2:, :2],
+                         tile[:2, -2:], tile[:2, :2])
+
+            def _ends(e, lo):
+                s = final[e]              # (2, n_loc[, C]) = (depth, j)
+                return s[:, :h] if lo else s[:, -h:]
         diag_recv = [
             jax.lax.ppermute(diag_send[c], AXES, diag_perms[c])
             for c in range(4)
         ]
         sl_jf = jax.lax.ppermute(
-            jnp.stack([final[0, -1], final[1, -1]]), AXES, j_fwd)
+            jnp.stack([_ends(0, False), _ends(1, False)]), AXES, j_fwd)
         sl_jb = jax.lax.ppermute(
-            jnp.stack([final[0, 0], final[1, 0]]), AXES, j_bwd)
+            jnp.stack([_ends(0, True), _ends(1, True)]), AXES, j_bwd)
         sl_if = jax.lax.ppermute(
-            jnp.stack([final[2, -1], final[3, -1]]), AXES, i_fwd)
+            jnp.stack([_ends(2, False), _ends(3, False)]), AXES, i_fwd)
         sl_ib = jax.lax.ppermute(
-            jnp.stack([final[2, 0], final[3, 0]]), AXES, i_bwd)
+            jnp.stack([_ends(2, True), _ends(3, True)]), AXES, i_bwd)
         # Per corner (lo,lo),(lo,hi),(hi,lo),(hi,hi): the W/E-row
         # sliver candidate and the S/N-col sliver candidate.
         sliv_we = (sl_jf[0], sl_jb[0], sl_jf[1], sl_jb[1])
         sliv_sn = (sl_if[0], sl_if[1], sl_ib[0], sl_ib[1])
-        corner_ij = ((0, 0), (0, -1), (-1, 0), (-1, -1))
         my_mode = corner_mode_j[my_id]
-        for c, (ci, cj) in enumerate(corner_ij):
-            val = jnp.where(
-                my_mode[c] == 1, diag_recv[c],
-                jnp.where(
-                    my_mode[c] == 2, sliv_we[c],
-                    jnp.where(my_mode[c] == 3, sliv_sn[c],
-                              padded[ci, cj]),
-                ),
+
+        if halo == 1:
+            corner_ij = ((0, 0), (0, -1), (-1, 0), (-1, -1))
+            for c, (ci, cj) in enumerate(corner_ij):
+                val = jnp.where(
+                    my_mode[c] == 1, diag_recv[c],
+                    jnp.where(
+                        my_mode[c] == 2, sliv_we[c],
+                        jnp.where(my_mode[c] == 3, sliv_sn[c],
+                                  padded[ci, cj]),
+                    ),
+                )
+                padded = padded.at[ci, cj].set(val)
+        else:
+            # 2x2 corner regions.  Fill-layer depth layout: lo-side
+            # halo rows/cols are (outer=d1, inner=d0) = indices (0, 1);
+            # hi-side are (inner=d0, outer=d1) = (n+2, n+3).
+            # diag payload: already face-ordered rows/cols — place
+            # directly.  W/E sliver payload (depth, 2 strip cells):
+            # rows = depth mapped to the halo-row layout, cols = strip
+            # cells (j).  S/N sliver: cols = depth, rows = strip cells.
+            corner_rc = (
+                (slice(0, 2), slice(0, 2)),
+                (slice(0, 2), slice(-2, None)),
+                (slice(-2, None), slice(0, 2)),
+                (slice(-2, None), slice(-2, None)),
             )
-            padded = padded.at[ci, cj].set(val)
+            for c, (rs, cs) in enumerate(corner_rc):
+                row_lo = (c < 2)
+                col_lo = (c % 2 == 0)
+                # depth order along rows for W/E candidates:
+                d_rows = (1, 0) if row_lo else (0, 1)
+                we_blk = jnp.stack(
+                    [sliv_we[c][d] for d in d_rows], axis=0)
+                d_cols = (1, 0) if col_lo else (0, 1)
+                # S/N payload (depth, 2 strip cells): block rows =
+                # strip cells (i direction), cols = depth layout.
+                sn_blk = jnp.swapaxes(
+                    jnp.stack([sliv_sn[c][d] for d in d_cols], axis=0),
+                    0, 1)
+                blk = jnp.where(
+                    my_mode[c] == 1, diag_recv[c],
+                    jnp.where(
+                        my_mode[c] == 2, we_blk,
+                        jnp.where(my_mode[c] == 3, sn_blk,
+                                  padded[rs, cs]),
+                    ),
+                )
+                padded = padded.at[rs, cs].set(blk)
         return padded[None]
 
     return _exchange
