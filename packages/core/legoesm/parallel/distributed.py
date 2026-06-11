@@ -348,6 +348,25 @@ def initialize_distributed_latlon(
     """
     global _active_topology
     if _active_topology is not None:
+        from legoesm.parallel.latlon_mpi import LatLonBandLayout
+        if not isinstance(_active_topology, LatLonBandLayout):
+            # A prior NON-lat-lon distributed init (cubed-sphere
+            # CommTopology, Voronoi layout) left its topology in the
+            # shared ``_active_topology`` slot.  Silently returning it
+            # hands the lat-lon caller the wrong type
+            # (``AttributeError: 'CommTopology' object has no
+            # attribute 'lat_start'`` downstream — merge gate
+            # 8460562, mixed-grid test process).  Re-arm for lat-lon
+            # instead of the type-blind reuse.
+            warnings.warn(
+                "initialize_distributed_latlon() called after a "
+                "non-lat-lon distributed init; replacing the active "
+                "topology with a LatLonBandLayout and re-arming the "
+                "MPI halo backend.",
+                RuntimeWarning, stacklevel=2,
+            )
+            _active_topology = None
+    if _active_topology is not None:
         active_fold = getattr(_active_topology, "fold", None)
         active_on = (active_fold is not None
                      and getattr(active_fold, "is_active", False))
