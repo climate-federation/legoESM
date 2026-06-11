@@ -139,6 +139,77 @@ def test_cloud_rain_shima_magnitudes():
     assert 3.0 < v(1.0e-3) < 9.0           # 1 mm raindrop ~ 4-7 m/s
 
 
+def _cloud_rain_shima_oracle(r, rho, p, T):
+    """Independent scalar (numpy) re-implementation of SCALE-SDM CloudRainShima.
+
+    Uses its OWN copy of the Beard polynomial coefficients evaluated in explicit
+    ascending-power form ``sum(c*x**i)`` — so it cross-checks both the
+    coefficient values AND the module's Horner ``_poly`` ordering (a reversed
+    ``_poly`` would make the jax output disagree). Same physical constants
+    (values are policy, not under test) so the comparison is exact algebra.
+    """
+    VZ_B = (-3.18657, 0.9926960, -0.153193e-2, -0.987059e-3,
+            -0.578878e-3, 0.855176e-4, -0.327815e-5)
+    VZ_C = (-5.00015, 5.23778, -2.04914, 0.475294, -0.542819e-1, 0.238449e-2)
+
+    def poly(cs, x):
+        return sum(c * x**i for i, c in enumerate(cs))
+
+    Tc = T - constants.T_freeze
+    visc = ((1.718 + 4.9e-3 * Tc) * 1e-4 if Tc >= 0
+            else (1.718 + 4.9e-3 * Tc - 1.2e-5 * Tc * Tc) * 1e-4)
+    d = max(2.0 * r * 100.0, 1.0e-20)
+    P_hPa = p / 100.0
+    rho_mat = constants.rho_water / 1000.0
+    rho_air = rho / 1000.0
+    gx = (constants.g * 100.0) * (rho_mat - rho_air)
+    sd = 6.62e-6 * (visc / 1.818e-4) * (1013.25 / P_hPa) * np.sqrt(T / 293.15)
+    csc = 1.0 + 2.510 * (sd / d)
+    v1 = gx / (18.0 * visc) * csc * d * d
+    nda = rho_air * (4.0 * gx) / (3.0 * visc * visc) * d**3
+    nre2 = csc * np.exp(poly(VZ_B, np.log(max(nda, 1e-300))))
+    v2 = visc * nre2 / (rho_air * d)
+    tau = 1.0 - T / 647.096
+    sig = 0.2358 * np.exp(1.256 * np.log(max(tau, 1e-30))) * (1.0 - 0.625 * tau)
+    if T < 267.5:
+        sig = sig - 2.854e-3 * np.tanh((T - 243.9) / 35.35) + 1.666e-3
+    sig *= 1e3
+    bond = (4.0 * gx) / (3.0 * sig) * d * d
+    npp = (rho_air**2 * sig**3 / (gx * visc**4))
+    npp = np.exp(np.log(max(npp, 1e-300)) / 6.0)
+    nre3 = npp * np.exp(poly(VZ_C, np.log(max(bond * npp, 1e-300))))
+    v3 = visc * nre3 / (rho_air * d)
+    vc = v1 if d < 1.9e-3 else (v2 if d < 1.07e-1 else v3)
+    return vc / 100.0 if r > 0 else 0.0
+
+
+@pytest.mark.parametrize("r,rho,p,T", [
+    (1.0e-5, 1.0, 9.0e4, 283.0),    # regime 1 (small cloud)
+    (1.0e-4, 1.0, 9.0e4, 283.0),    # regime 2 (large cloud / small rain)
+    (1.0e-3, 1.05, 9.0e4, 283.0),   # regime 3 (large rain)
+    (9.4e-6, 1.0, 9.0e4, 283.0),    # just below d = 1.9e-3 cm boundary
+    (9.6e-6, 1.0, 9.0e4, 283.0),    # just above d = 1.9e-3 cm boundary
+    (5.3e-4, 1.0, 9.0e4, 283.0),    # just below d = 1.07e-1 cm boundary
+    (5.4e-4, 1.0, 9.0e4, 283.0),    # just above d = 1.07e-1 cm boundary
+    (8.0e-4, 1.0, 9.0e4, 260.0),    # cold (T<267.5) surface-tension correction
+])
+def test_cloud_rain_shima_matches_independent_oracle(r, rho, p, T):
+    got = float(terminal_velocity_cloud_rain_shima(
+        jnp.asarray(r), jnp.asarray(rho), jnp.asarray(p), jnp.asarray(T)))
+    expected = _cloud_rain_shima_oracle(r, rho, p, T)
+    assert got == pytest.approx(expected, rel=1e-9, abs=0.0)
+
+
+def test_cloud_rain_shima_zero_radius_is_safe():
+    """r <= 0 must give a finite 0 velocity and a finite gradient (no nan from
+    the eager 1/diameter branches)."""
+    args = (jnp.asarray(1.0), jnp.asarray(9.0e4), jnp.asarray(283.0))
+    v0 = terminal_velocity_cloud_rain_shima(jnp.asarray(0.0), *args)
+    assert float(v0) == 0.0 and jnp.isfinite(v0)
+    g = jax.grad(lambda r: terminal_velocity_cloud_rain_shima(r, *args))(jnp.asarray(0.0))
+    assert jnp.isfinite(g)
+
+
 def test_terminal_velocity_dispatch_and_unknown():
     cfg = SDMConfig()
     r = jnp.asarray(1.0e-5)

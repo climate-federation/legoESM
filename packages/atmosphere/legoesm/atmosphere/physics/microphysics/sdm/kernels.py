@@ -14,6 +14,14 @@ a collision probability per unit time (see ``coalescence.py``):
   ``K = E·π(R_i+R_j)²·|Δv|`` with ``E = ½p²/(1+p)²``, ``p = R_min/R_max``.
 * ``long``           — Long (1974) polynomial collision efficiency.
 
+The hydrodynamic kernels take ``dv``, the **relative speed** (a non-negative
+magnitude ``|v_i − v_j| = √Σ(v_i−v_j)²``). The oracle computes this Euclidean
+norm from the two velocity vectors *inside* the kernel; here the caller (the
+coalescence driver) computes the norm — including the terminal-velocity
+difference along the vertical, exactly as ERF — and passes the resulting scalar
+speed. The kernel value depends only on that magnitude, so this is equivalent;
+``dv`` must NOT be a per-component velocity vector.
+
 **Terminal velocity** ``v_t(R[, ρ, p, T])`` [m/s] (fall-speed magnitude, > 0):
 
 * ``rogers_yau``       — Stokes regime ``v = k₁R²`` (Rogers & Yau 1989).
@@ -44,7 +52,7 @@ __physics_contract__ = {
     "inputs": {
         "r_i": "m",
         "r_j": "m",
-        "dv": "m/s",
+        "dv": "m/s (relative speed |v_i - v_j|, a non-negative magnitude)",
         "r": "m",
         "rho": "kg/m^3",
         "p": "Pa",
@@ -90,6 +98,10 @@ _SD_TB4L = 293.15        # base temperature [K]
 _SD_SLIP = 2.510         # Cunningham slip coefficient
 _SD_D_SMALL_CM = 1.9e-3  # small-cloud upper diameter [cm]
 _SD_D_MED_CM = 1.07e-1   # large-cloud/small-rain upper diameter [cm]
+# Safety floor on the CGS diameter so the 1/d denominators stay finite for a
+# (non-physical) r -> 0 input; far below any real droplet so it never binds
+# for r > 0. The final velocity is forced to 0 for r <= 0.
+_DIAM_FLOOR_CM = 1.0e-20
 
 # Water surface-tension fit + critical temperature (SCALE-SDM large-rain regime)
 _SD_TCRIT = 647.096      # critical temperature of water [K]
@@ -122,6 +134,8 @@ def sedimentation_kernel(r_i: jax.Array, r_j: jax.Array, dv: jax.Array) -> jax.A
     """Geometric gravitational-settling kernel ``E·π(R_i+R_j)²·|Δv|``.
 
     ``E = ½ p² / (1+p)²`` with ``p = R_min/R_max`` (SCALE-SDM ``sedimentation``).
+    ``dv`` is the relative *speed* ``|v_i − v_j|`` (a non-negative magnitude the
+    caller computes); ``jnp.abs`` is a defensive guard, not a vector reduction.
     """
     r_min = jnp.minimum(r_i, r_j)
     r_max = jnp.maximum(r_i, r_j)
@@ -135,7 +149,8 @@ def long_kernel(r_i: jax.Array, r_j: jax.Array, dv: jax.Array) -> jax.Array:
 
     For the larger radius ``r_l <= 50 um`` the efficiency follows the cloud
     polynomial ``4.5e8·r_l²·(1 - 3e-6/max(3.01e-6, r_l))``; above that it is 1
-    (geometric). ``K = c_rate·π(r_l+r_s)²·|Δv|``.
+    (geometric). ``K = c_rate·π(r_l+r_s)²·|Δv|``. ``dv`` is the relative *speed*
+    ``|v_i − v_j|`` (non-negative magnitude the caller computes).
     """
     r_l = jnp.maximum(r_i, r_j)
     r_s = jnp.minimum(r_i, r_j)
@@ -210,7 +225,9 @@ def terminal_velocity_cloud_rain_shima(
     large rain), returned in SI. All three regime velocities are computed and
     selected by droplet diameter (data-dependent ``where``).
     """
-    diameter_cm = 2.0 * r * 100.0
+    # Floor the diameter for every 1/d denominator so r -> 0 stays finite (and
+    # grad-safe through the eager jnp.where branches); zeroed at the end for r<=0.
+    diameter_cm = jnp.maximum(2.0 * r * 100.0, _DIAM_FLOOR_CM)
     P_hPa = p / 100.0
     rho_mat_cgs = constants.rho_water / 1000.0
     rho_air_cgs = rho / 1000.0
@@ -250,7 +267,8 @@ def terminal_velocity_cloud_rain_shima(
         diameter_cm < _SD_D_SMALL_CM, v1,
         jnp.where(diameter_cm < _SD_D_MED_CM, v2, v3),
     )
-    return v_cgs / 100.0  # cm/s -> m/s
+    # cm/s -> m/s; a non-physical r <= 0 droplet has zero fall speed.
+    return jnp.where(r > 0.0, v_cgs / 100.0, 0.0)
 
 
 def terminal_velocity(
