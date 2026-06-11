@@ -32,10 +32,11 @@ supersaturated cell forms cloud, not nothing.
 
 The column carries TWO ice categories: crystal/snow (``q_i``) and
 graupel/hail (``q_g``). Habit-routed freezing sends small frozen drops to
-snow and frozen rain to graupel; both melt above 0 °C; riming and
-aggregation grow the snow category; each category sediments at its own
-computed fall speed (snow slow, graupel fast). Output ``dq_i_dt`` and
-``dq_g_dt`` are live.
+snow and frozen rain to graupel; both melt above 0 °C; both rime
+supercooled cloud (snow first, then graupel collects the remainder);
+snow self-aggregates; each category sediments at its own computed fall
+speed (snow slow, graupel fast). Output ``dq_i_dt`` and ``dq_g_dt`` are
+live.
 
 **Documented limitations**:
 * Riming uses the warm liquid collision kernel ``ck`` for both categories
