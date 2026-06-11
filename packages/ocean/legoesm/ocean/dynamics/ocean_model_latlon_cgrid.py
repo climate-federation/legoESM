@@ -3142,19 +3142,36 @@ class LatLonCGridOceanModel:
                 eos_fn=_tke_ctx.eos_fn, rho_ref=_tke_ctx.rho_0,
                 g=_tke_ctx.g, dz_half=_tke_ctx.dz_half,
             )
-            # Surface kinematic fluxes [K·m/s] from the implicit surface
-            # forcing RATE × the actual top-cell thickness (Veros
-            # forc_temp_surface = dzt·rate; thermodynamics.py:276). The
-            # penetrating-shortwave column below the top cell is NOT folded
-            # (Veros routes it via temp_source, not forc_temp_surface).
+            # Surface kinematic fluxes [K·m/s] (Veros forc_temp_surface =
+            # dzt·rate; thermodynamics.py:276), reconstructed as the COLUMN
+            # SUM of the implicit forcing RATE × the live thickness.  For
+            # surface-only rates this is bit-identical to rate[...,0]·dz_top
+            # (the deeper terms add exact zeros).  When the rate carries a
+            # penetrative-solar column (flux_feedback q_solar), the sum
+            # telescopes back to the solar-INCLUSIVE total — exactly Veros's
+            # forc_temp_surface, whose qnet includes the full qsol while the
+            # pen(0)=0 temp_source redistribution stays OUT of
+            # forc_rho_surface (top-cell rate alone would be short by
+            # qsol·I(z₁)).  Exact on full-depth columns; shallow columns
+            # differ only by the below-kbot leak (I(z_kbot)·qsol) — in the
+            # TKE buoyancy-flux CLOSURE TERM only; the temperature tendency
+            # itself stays Veros-faithful.  The leak is small for kbot deeper
+            # than ~30-50 m (~0.5% of qsol at 100 m) but reaches ~28% of qsol
+            # for the shallowest min_depth≈10 m single-cell shelf columns
+            # (review-quantified; second-order, accepted).
+            # CAVEAT (EXT-N2): a future column source that is NOT a surface
+            # flux (e.g. implicit sponge rates) must NOT ride
+            # surface_tracer_forcing through this sum — Veros keeps
+            # tempsalt_sources out of forc_rho_surface.
             _sfc_T = T_new[..., 0]
             _sfc_S = S_new[..., 0]
             if surface_tracer_forcing is not None:
-                _dz_top = dz_cell[..., 0]
-                _forc_T = (surface_tracer_forcing.dT_dt.data[..., 0]
-                           * _dz_top * state.land_mask.data)
-                _forc_S = (surface_tracer_forcing.dS_dt.data[..., 0]
-                           * _dz_top * state.land_mask.data)
+                _forc_T = (jnp.sum(
+                    surface_tracer_forcing.dT_dt.data * dz_cell, axis=-1)
+                    * state.land_mask.data)
+                _forc_S = (jnp.sum(
+                    surface_tracer_forcing.dS_dt.data * dz_cell, axis=-1)
+                    * state.land_mask.data)
             else:
                 _forc_T = jnp.zeros_like(_sfc_T)
                 _forc_S = jnp.zeros_like(_sfc_S)

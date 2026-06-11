@@ -122,8 +122,23 @@ def _make_flux_feedback(config: SurfaceForcingConfig) -> Callable:
         # the W/m² → K/s conversion is conservative on shallow top cells and
         # equals Veros's fixed dzt[-1] under a rigid lid with full top cells.
         h = compute_layer_thickness(state.eta.data, state.H_bathy.data, z_coord)
+        # Column geometry for the penetrative-shortwave (q_solar) channel:
+        # built only when the option is on (static config bool) so the
+        # default path is structurally untouched.  ``h > 0`` is the per-cell
+        # wet mask (Veros maskT; zero below kbot under partial cells).
+        solar_kwargs = {}
+        if cfg.penetrative_shortwave:
+            solar_kwargs = dict(
+                dz_ref=z_coord.dz_ref,
+                z_half_ref=z_coord.z_half_ref,
+                jacobian=compute_ocean_jacobian(
+                    state.eta.data, state.H_bathy.data, z_coord
+                ),
+                wet_3d=(h > 0.0).astype(state.T.data.dtype),
+            )
         out = flux_feedback_surface_forcing(
             state.T.data, state.S.data, h[..., 0], surface_forcing, cfg,
+            **solar_kwargs,
         )
         return wrap_ocean_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn

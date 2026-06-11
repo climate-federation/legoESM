@@ -123,6 +123,31 @@ class OceanSurfaceForcing(NamedTuple):
     S_restore_target : array or None
         Target SSS [PSU] for the ``flux_feedback`` scheme's surface-salinity
         restoring (Veros ``sss_clim``).
+    q_solar : array or None
+        Penetrative SOLAR component of the surface heat flux [W/m², positive
+        into ocean] consumed ONLY by the ``"flux_feedback"`` scheme when
+        ``FluxFeedbackConfig.penetrative_shortwave=True`` (Veros
+        global_flexible / global_1deg ``qsol``).  Deposited through the water
+        column with the shared two-band Jerlov profile
+        (``shortwave_penetration_tendency``, water type from
+        ``FluxFeedbackConfig.shortwave_water_type``; type "I" = exactly the
+        Veros literals R=0.58, ζ1=0.35 m, ζ2=23.0 m).
+
+        HEAT-OWNERSHIP CONTRACT (no double counting): when ``q_solar`` is
+        provided, ``q_prescribed`` must carry the NON-SOLAR remainder only
+        (harness: ``q_prescribed = qnet_total − qsol``).  legoESM deposits
+        100% of ``q_solar`` in the column with the I(0)=1 surface convention;
+        Veros instead keeps the solar-inclusive total in ``qnet`` and applies
+        a zero-column-sum redistribution built with pen(0)=0 — the two are
+        algebraically identical cell by cell (top cell receives
+        ``qnet_total − qsol·I(z₁)`` either way, deeper cells receive the same
+        interface-flux differences, and both catch the residual light in the
+        deepest grid cell).  The simple ice mask is evaluated on the TOTAL
+        flux ``q_prescribed + feedback + q_solar`` (= Veros's
+        ``forc_temp_surface`` whose qnet includes solar) and zeroes the
+        surface deposit AND the full solar column (Veros ``ice[..., None]``).
+        Mixing ``q_solar`` with the ``sw_down``/``q_net`` channels raises at
+        trace time.
     """
     sw_down: object = None       # jnp.ndarray | None
     q_net: object = None         # jnp.ndarray | None
@@ -136,6 +161,7 @@ class OceanSurfaceForcing(NamedTuple):
     q_feedback: object = None          # jnp.ndarray | None  [W/m²/K]
     T_feedback_target: object = None   # jnp.ndarray | None  [°C]
     S_restore_target: object = None    # jnp.ndarray | None  [PSU]
+    q_solar: object = None             # jnp.ndarray | None  [W/m²] (penetrative)
 
 
 class OceanConfig(NamedTuple):

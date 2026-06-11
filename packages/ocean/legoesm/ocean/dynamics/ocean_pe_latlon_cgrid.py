@@ -3011,6 +3011,32 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             "q_net simultaneously would double-count the surface heat flux. "
             "Leave q_net=None (route all prescribed heat via q_prescribed)."
         )
+    # Same hardening for the penetrative-solar channel: q_solar is consumed
+    # ONLY by the flux_feedback scheme (full-column Jerlov deposit).  Under
+    # any other scheme it would be silently ignored; combined with sw_down it
+    # would mix two solar conventions (this stage's q_net/sw_down split vs
+    # the scheme's q_prescribed/q_solar contract) and double-count the solar
+    # heat.  None-ness is static pytree structure ⇒ trace-time raise.
+    if (
+        surface_forcing is not None
+        and getattr(surface_forcing, "q_solar", None) is not None
+    ):
+        _scheme = getattr(_sf_cfg, "scheme", "none") if _sf_cfg is not None else "none"
+        if _scheme != "flux_feedback":
+            raise ValueError(
+                "OceanSurfaceForcing.q_solar is consumed only by the "
+                "'flux_feedback' surface-forcing scheme (got scheme="
+                f"{_scheme!r}); it would be silently ignored. Use "
+                "scheme='flux_feedback' with penetrative_shortwave=True, or "
+                "route solar through the q_net/sw_down channels."
+            )
+        if getattr(surface_forcing, "sw_down", None) is not None:
+            raise ValueError(
+                "flux_feedback penetrative shortwave consumes q_solar; "
+                "passing sw_down simultaneously would mix two solar "
+                "conventions and double-count the solar heat. Leave "
+                "sw_down=None (route the solar component via q_solar)."
+            )
     _sf_implicit = bool(getattr(config, "surface_forcing_implicit", False))
     du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat = _bc_external_surface_forcing(
         du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid,
