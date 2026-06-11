@@ -237,6 +237,28 @@ EXCLUDED.
   through the full operator. Ratchets green (2078), microphysics tree 180,
   hydrostatic integration 68.
 
+**Codex review iters 6-7** (verdict: 2 HIGH + 3 MEDIUM, all fixed in
+`<this iter>`):
+- HIGH item 6 — KRDROP off-by-one: oracle `IF(KRR<KRDROP=15)` (1-based) =
+  bins 1..14 cloud, so 0-based split is `< KRDROP-1` (bins 0..13 cloud,
+  14.. rain); the 50 µm bin is RAIN. Fixed `cloud_bins = KRDROP-1` + grid
+  docstring + boundary test.
+- HIGH item 17 — `fast_sbm` passed `validate_strict` but was absent from
+  the production `MICROPHYSICS_REGISTRY` → runtime `KeyError`. Added the
+  registry entry + `test_advertised_buildability` literal + a
+  resolves-through-registry test.
+- MEDIUM item 10 — prognostic `N_c` ignored: reconstruction now uses the
+  column's `N_c` when `>0` (else `cdnc`); test pins more rain at lower N_c.
+- MEDIUM item 15 — AMIP `--microphysics` choices missing fast_sbm (+sdm,
+  p3): added.
+- MEDIUM item 7 — fixed-reference fall speeds/kernels: documented as a
+  deviation (per-level velocities come with a later iteration).
+- LOW items 11/12 — strengthened tests beyond sign-only: magnitude pins
+  at the cloud/rain boundary, registry resolution, N_c sensitivity.
+- INFO items 1/2/4/5/8/9/16 — single-substep equivalence, JERDFUN/
+  JERDFUN_NEW equivalence, median-from-mean identity, MPAS slot
+  propagation: all CONFIRMED correct.
+
 ### Iter 8 (2026-06-11)
 - **`fast_sbm/sedimentation.py`** — oracle `FALFLUXHUCM_Z` per-bin
   settling, REUSING shared `output.sedimentation_tendency` (same upstream

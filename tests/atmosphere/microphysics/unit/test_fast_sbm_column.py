@@ -54,6 +54,16 @@ def test_dispatch_via_public_config():
         _get_microphysics_fn(MicrophysicsConfig(scheme="fast_sbmm"))
 
 
+def test_resolves_through_production_registry():
+    # Codex review item 17: validate_strict accepted fast_sbm but the
+    # production MICROPHYSICS_REGISTRY omitted it → runtime KeyError.
+    from legoesm.driver.kernel_registry import (
+        MICROPHYSICS_REGISTRY, resolve_kernel)
+    assert "fast_sbm" in MICROPHYSICS_REGISTRY
+    assert resolve_kernel(MICROPHYSICS_REGISTRY, "fast_sbm") \
+        is fast_sbm_microphysics
+
+
 def test_unknown_collision_kernel_raises():
     T, q_v, hyd, p, p_half, rho, dz = _fields(1.02)
     with pytest.raises(ValueError, match="collision_kernel"):
@@ -107,6 +117,46 @@ def test_emergent_autoconversion_dense_vs_thin():
         col(out_dense.dq_c_dt + out_dense.dq_r_dt)
         + float(out_dense.precipitation[0]),
         0.0, atol=5.0e-9 * float(jnp.sum((rho * dz)[0])))
+
+
+def test_cloud_rain_boundary_matches_oracle():
+    # Codex review item 6: oracle IF(KRR < KRDROP=15) (1-based) → bins
+    # 1..14 cloud, 15.. rain ⇒ 0-based bins 0..13 cloud, 14.. rain. Put a
+    # spectrum exactly at 0-based bin 14 (the 50 um bin) — its mass must
+    # land in RAIN, not cloud. Probe the projection directly.
+    from legoesm.atmosphere.physics.microphysics.fast_sbm import (
+        bin_mixing_ratios_from_f, mass_density, mass_doubling_grid)
+    from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import KRDROP
+    m = mass_doubling_grid()
+    assert KRDROP == 15
+    # Single delta at 0-based bin KRDROP-1 = 14 (1-based 15, the ~50um bin).
+    f = jnp.zeros_like(m).at[KRDROP - 1].set(1.0e12)
+    cloud_mask = jnp.arange(m.shape[0]) < (KRDROP - 1)
+    qc = float(mass_density(jnp.where(cloud_mask, f, 0.0), m))
+    qr = float(mass_density(jnp.where(~cloud_mask, f, 0.0), m))
+    assert qc == 0.0 and qr > 0.0      # the 50um bin is RAIN
+    # And bin 13 (1-based 14) is cloud.
+    f2 = jnp.zeros_like(m).at[KRDROP - 2].set(1.0e12)
+    qc2 = float(mass_density(jnp.where(cloud_mask, f2, 0.0), m))
+    assert qc2 > 0.0
+
+
+def test_prognostic_Nc_used_when_present():
+    # Codex review item 10: a column carrying N_c should drive cloud
+    # number, not the fixed cdnc. Two states, same q_c, different N_c →
+    # different droplet sizes → measurably different rain production.
+    T, q_v, hyd, p, p_half, rho, dz = _fields(1.0, q_c=1.0e-3)
+    cfg = FastSBMConfig(collision_kernel="hall")
+    low_N = hyd._replace(N_c=jnp.full((NCOL, NLEV), 3.0e7))   # big drops
+    high_N = hyd._replace(N_c=jnp.full((NCOL, NLEV), 6.0e8))  # small drops
+    out_low = fast_sbm_microphysics(T, q_v, low_N, p, p_half, rho, dz, DT,
+                                    cfg)
+    out_high = fast_sbm_microphysics(T, q_v, high_N, p, p_half, rho, dz, DT,
+                                     cfg)
+    col = lambda x, o: float(jnp.sum((x * rho * dz)[0])) \
+        + float(o.precipitation[0])
+    # Fewer/larger droplets coalesce faster → more rain.
+    assert col(out_low.dq_r_dt, out_low) > col(out_high.dq_r_dt, out_high)
 
 
 def test_clear_cell_fixed_point():

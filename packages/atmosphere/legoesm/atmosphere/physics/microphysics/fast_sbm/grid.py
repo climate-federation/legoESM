@@ -54,8 +54,10 @@ NKR_AEROSOL = 43
 # boundary (2 um * 2^(14/3) = 50.8 um) and the 3.25 mm spectrum top.
 R_MIN_LIQUID = 2.0e-6
 
-# Oracle cloud/rain split: bins 1..KRDROP are cloud drops, KRDROP+1..NKR rain
-# (``KRDROP=Bin 15 --> 50um``).
+# Oracle cloud/rain split (1-based): its diagnostic uses ``IF(KRR < KRDROP)``
+# with ``KRDROP=15`` (``Bin 15 --> 50um``), so 1-based bins 1..14 are cloud
+# and 15..NKR are rain. In 0-based indexing that is bins 0..KRDROP-2 cloud,
+# KRDROP-1.. rain (see column.py split).
 KRDROP = 15
 
 

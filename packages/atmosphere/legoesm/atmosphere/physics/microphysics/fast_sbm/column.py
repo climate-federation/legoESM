@@ -140,13 +140,21 @@ def _kernel_matrix(masses, config: FastSBMConfig):
         "(expected 'hall', 'long', or 'golovin')")
 
 
-def _reconstruct_spectrum(q_c, q_r, N_r, rho, masses, config: FastSBMConfig):
-    """Liquid spectrum f [m^-3 kg^-1] carrying exactly q_c+q_r of mass."""
-    # Cloud mode: lognormal at prescribed cdnc, mass-rescaled to q_c·ρ.
-    m_mean_c = q_c * rho / config.cdnc
+def _reconstruct_spectrum(q_c, q_r, N_c, N_r, rho, masses,
+                          config: FastSBMConfig):
+    """Liquid spectrum f [m^-3 kg^-1] carrying exactly q_c+q_r of mass.
+
+    Cloud number uses the dycore's PROGNOSTIC ``N_c`` when the column
+    carries one (``N_c > 0``); otherwise the prescribed ``config.cdnc``
+    closes a single-moment column (codex review item 10 — keeps cloud
+    number consistent with whatever the driver feeds back as ``dN_c_dt``).
+    """
+    # Cloud mode: lognormal at the cloud number, mass-rescaled to q_c·ρ.
+    n_c = jnp.where(N_c > 0.0, N_c, config.cdnc)
+    m_mean_c = q_c * rho / n_c
     r_med = radius_from_mass(jnp.maximum(m_mean_c, 1.0e-30)) \
         * jnp.exp(-1.5 * jnp.log(config.cloud_geom_std) ** 2)
-    f_c = discretize_lognormal(masses, config.cdnc, r_med,
+    f_c = discretize_lognormal(masses, n_c, r_med,
                                config.cloud_geom_std)
     mass_c = mass_density(f_c, masses)
     f_c = f_c * jnp.where(mass_c > 0.0, q_c * rho / jnp.where(
@@ -181,14 +189,18 @@ def fast_sbm_microphysics(
     tables = precompute_collision_tables(mass_doubling_grid_np())
     kernel = _kernel_matrix(masses, config)
     ck = collision_ck_matrix(kernel, dt)
-    cloud_bins = KRDROP   # oracle cloud/rain boundary (bin 15, ~50 um)
+    # Oracle diagnostic split is IF(KRR < KRDROP) with KRDROP=15 (1-based)
+    # → 1-based bins 1..14 are cloud, 15.. rain. In 0-based that is bins
+    # 0..13 (= KRDROP-1 of them) cloud, 14.. rain (codex review item 6).
+    cloud_bins = KRDROP - 1
 
     q_c = jnp.maximum(hydrometeors.q_c, 0.0)
     q_r = jnp.maximum(hydrometeors.q_r, 0.0)
     q_v_pos = jnp.maximum(q_v, 0.0)
 
-    def cell(T_c, qv_c, qc_c, qr_c, Nr_c, p_c, rho_c):
-        f0 = _reconstruct_spectrum(qc_c, qr_c, Nr_c, rho_c, masses, config)
+    def cell(T_c, qv_c, qc_c, qr_c, Nc_c, Nr_c, p_c, rho_c):
+        f0 = _reconstruct_spectrum(qc_c, qr_c, Nc_c, Nr_c, rho_c, masses,
+                                   config)
         cond = warm_condensation_step(
             f0, T_c, qv_c, p_c, rho_c, dt, masses, config=config)
         g1 = bott_coalescence(g_from_f(cond.f, masses), ck, masses, tables)
@@ -197,7 +209,7 @@ def fast_sbm_microphysics(
 
     cell_v = jax.vmap(jax.vmap(cell))
     dT_dt, dqv_dt, f0, f1 = cell_v(
-        T, q_v_pos, q_c, q_r, hydrometeors.N_r, p_full, rho)
+        T, q_v_pos, q_c, q_r, hydrometeors.N_c, hydrometeors.N_r, p_full, rho)
 
     # Sedimentation on the per-bin mixing ratios (oracle FALFLUXHUCM_Z;
     # couples levels, so it runs on the (ncol, nlev, n_bins) field).
