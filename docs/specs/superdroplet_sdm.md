@@ -151,6 +151,18 @@ aerosol activation / multi-species, particle recycling/injection. Validations pa
   consistency, donor-clamp positivity, S=1 round-trip, factory dispatch.
 `scheme="sdm"` is selectable, strict-validated, dispatched, and driver-buildable.
 
+### Cross-validation vs PySDM (`scripts/validate/validate_sdm_vs_pysdm.py`)
+PySDM (https://open-atmos.github.io/PySDM/, open-atmos — the reference
+open-source SDM, Shima lineage) run as an INDEPENDENT second oracle on the
+canonical Shima-2009 Golovin box (N0=2^23 m^-3, X̄=1.19e5 µm³, b=1500/s,
+2^15 super-droplets, 3600 s): **number density agrees to 0.0-1.6%** across
+three decades of decay, M2 to 0.6-7.4% (MC-tail noise), mass spectra to
+0.5-12% L1, LWC conserved by both (0.2% apart from sampling). Two-process
+harness (PySDM runs in its own venv, `pysdm_golovin_reference.py` dumps .npz;
+the repo-venv validator compares) so PySDM's numba stack never touches the
+jax env. Strongest consistency evidence: two independent Monte-Carlo
+implementations of the same algorithm agreeing within ensemble noise.
+
 ### Smoke / oracle-consistency validation (`scripts/validate/validate_sdm_smoke.py`)
 End-to-end ALL-PASS (stable, physically realistic, oracle-consistent):
 - **Golovin collision box vs analytic Scott (1968)** — the exact benchmark ERF /
