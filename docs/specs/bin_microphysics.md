@@ -30,8 +30,8 @@ Process inventory (oracle subroutine → port module → status):
 | Process | Oracle | Port | Status |
 |---|---|---|---|
 | Bin grid + moments | parameter block, QC/QNC diags | `fast_sbm/grid.py` | **done (iter 1)** |
-| Collision kernels (in-code, not files) | `Kernals_KS` (l. 6238) | `fast_sbm/kernels.py` | todo |
-| Collision-coalescence (Bott flux) | `coll_xxx_lwf` + `courant_bott_KS` | `fast_sbm/collision.py` | todo |
+| Collision kernels | `Kernals_KS` (l. 6238) — NOTE: only pressure-interpolates file-read `YW*` tables | computed kernels (reuse `sdm/kernels.py` Golovin/Hall/Long) + optional table load | Golovin **done (iter 2)**; Hall/efficiency todo |
+| Collision-coalescence (Bott flux) | `coll_xxx_lwf` + `courant_bott_KS` | `fast_sbm/collision.py` | **liquid self-collection done (iter 2)**; LWF variant (snow), xyx/xyz cross-species todo |
 | Diffusional growth (cond/evap dep/sub) | `JERRATE_KS`→`JERTIMESC_KS`→`JERSUPSAT_KS`→`JERDFUN_KS`/`JERNEWF_KS` | `fast_sbm/diffusional_growth.py` | todo |
 | Drop nucleation (CCN activation) | `JERNUCL01_KS`, `WATER_NUCLEATION`, `LogNormal_modes_Aerosol` | `fast_sbm/nucleation.py` | todo |
 | Freezing/melting | `FREEZ`, melting block in FAST_SBM | `fast_sbm/ice_phase.py` | todo |
@@ -83,3 +83,29 @@ EXCLUDED.
   pass before it hung; review re-run scheduled with iter 2.)
 - Codex adversarial review attempt 1 hung after ~40 min (no log progress);
   cancelled, findings up to hang folded in; full review re-runs at iter 2.
+
+### Iter 2 (2026-06-11)
+- **`fast_sbm/collision.py`** — Bott flux collision-coalescence port:
+  `precompute_collision_tables` (oracle `courant_bott_KS`; generalized
+  Courant `ln(x0/m_{k-1})/ln(m_k/m_{k-1})` so refinement studies reuse the
+  solver; ints/floats static NumPy), `bott_coalescence` (oracle
+  `coll_xxx_lwf` at `fl≡1` — mass-only liquid self-collection; exact
+  statement-order replication incl. `j==i`/`k==j` aliasing, salvage branch,
+  gmin floors; `lax.scan` over 561 pairs in oracle order), `g↔f`
+  converters, `collision_ck_matrix` (= `K·dt·dlnr`, oracle `Kernals_KS`
+  contract). Ships `__physics_contract__`.
+- `discretize_exponential` added to grid (Golovin init).
+- Kernel reuse: `sdm.kernels.golovin_kernel` (no re-derivation).
+- Validation (`test_fast_sbm_collision.py`, 8 tests): Courant-table
+  structure on the doubling grid (self-pairs → k=j+1 @ c=0; mixed → k=j,
+  c=ln(1+m_i/m_j)/ln2 exact), empty-spectrum fixed point, single-bin
+  Gauss-Seidel cascade conservation, mass conservation 1e-13 over 20 steps
+  + monotone number decay, Golovin box vs analytic moment laws
+  (N: −7% dt-converged spatial bias at NKR=33, M2: +22% broadening
+  overshoot — both bracketed + signed), **grid-refinement convergence**
+  (halving dlnm cuts N error ≥25%), `jax.grad` through the scan (dN/db<0
+  finite), f/g moment consistency.
+- Notable: WRF kernels are file-read tables (`YWLL_*` etc.), NOT computed
+  in-code — `Kernals_KS` only pressure-interpolates them. Port strategy
+  updated: computed kernels (reuse SDM Hall/Long/Golovin) as default;
+  optional oracle-table loader later for bit-level fidelity.

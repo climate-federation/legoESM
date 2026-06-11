@@ -127,6 +127,26 @@ def bin_mixing_ratios_from_f(
     return f * masses * bin_mass_widths(masses) / rho_air[..., None]
 
 
+def discretize_exponential(
+    masses: jax.Array,
+    n_total: float | jax.Array,
+    mass_mean: float | jax.Array,
+) -> jax.Array:
+    """Project an exponential mass spectrum ``n(m) = (N/m̄)e^{-m/m̄}`` onto
+    the bins via exact CDF differences over the geometric mass edges
+    ``m_k 2^(±1/2)`` (the canonical Golovin-test initial condition; cf.
+    ``sdm.init.sample_exponential_mass`` for the particle analogue).
+
+    Returns ``f`` ``(n_bins,)`` in ``[m^-3 kg^-1]``; number is exact up to
+    grid truncation, mass midpoint-approximate (same bias as the lognormal).
+    """
+    mbar = jnp.asarray(mass_mean, masses.dtype)
+    m_lo = masses * 2.0 ** (-0.5)
+    m_hi = masses * 2.0 ** (+0.5)
+    delta_n = n_total * (jnp.exp(-m_lo / mbar) - jnp.exp(-m_hi / mbar))
+    return delta_n / bin_mass_widths(masses)
+
+
 def discretize_lognormal(
     masses: jax.Array,
     n_total: float | jax.Array,
