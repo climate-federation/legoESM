@@ -422,6 +422,53 @@ def test_read_turb_carry_fails_fast_on_wrong_clubb_shape():
     assert seeded.shape == (4, 15, 25)
 
 
+def test_prognostic_clubb_runs_in_combined_physics_pipeline():
+    """END-TO-END: scheme='clubb', prognostic=True runs through the real
+    combined-physics pipeline (make_physics → hydrostatic physics_fn) on a
+    cubed-sphere state, carrying PhysicsState.clubb_moments across TWO steps —
+    the moments persist and evolve, tendencies stay finite. This is the
+    'legoESM can be run+tested with the prognostic clubb scheme' check."""
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+    from legoesm.core.field import Field
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.held_suarez import held_suarez_init
+
+    n, nlev = 3, 10
+    grid = create_cubed_sphere(n)
+    sigma = create_sigma_coordinate(nlev)
+    state = held_suarez_init(grid, sigma)
+    tracers = {"q_v": Field(5e-3 * jnp.ones((6, n, n, nlev)), name="q_v",
+                            dims=("face", "x", "y", "level"), units="kg/kg")}
+    state = state._replace(tracers=tracers)
+
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme="clubb", clubb=CLUBBConfig(prognostic=True)),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"))
+    ncol = 6 * n * n
+    phys_state = init_physics_state(ncol, nlev, cfg)
+    assert phys_state.clubb_moments.shape == (ncol, 15, nlev + 1)
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=300.0)
+
+    moments0 = np.asarray(phys_state.clubb_moments).copy()
+    for _ in range(2):
+        tend, phys_state = physics_fn(state, grid, sigma, phys_state)
+        assert np.all(np.isfinite(np.asarray(tend.dT_dt.data)))
+        assert np.all(np.isfinite(np.asarray(tend.du_dt.data)))
+        assert phys_state.clubb_moments.shape == (ncol, 15, nlev + 1)
+        assert np.all(np.isfinite(np.asarray(phys_state.clubb_moments)))
+    # The carried moments evolved away from the rest-state init (genuinely prognostic).
+    assert not np.allclose(np.asarray(phys_state.clubb_moments), moments0)
+
+
 def test_clubb_turbulence_prognostic_jit_and_grad():
     from legoesm.atmosphere.physics.turbulence.clubb_core import (
         init_clubb_moments,
