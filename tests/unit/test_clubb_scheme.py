@@ -422,6 +422,34 @@ def test_read_turb_carry_fails_fast_on_wrong_clubb_shape():
     assert seeded.shape == (4, 15, 25)
 
 
+def test_prognostic_clubb_cloud_fraction_responds_to_moisture():
+    """The distinctive CLUBB capability vs clubb_lite is the ADG1 double-Gaussian
+    assumed-PDF CLOUD closure. Physics check: the diagnosed cloud fraction must
+    increase monotonically as the column moistens toward/above saturation — a
+    near-dry column forms essentially no cloud; a supersaturated column forms
+    cloud. (RH set with the model's q_sat; CLUBB's own Flatau saturation drives
+    the closure, so the monotone response is the robust signal.)"""
+    from legoesm.thermo import saturation_mixing_ratio
+    base = _scm_column(ncol=2, nlev=24, dtheta_dz=3e-3)
+    qsat = saturation_mixing_ratio(base["T"], base["p_full"])
+    cfg = CLUBBConfig()
+
+    def total_cloud(rh):
+        kw = dict(base)
+        kw["q_v"] = rh * qsat
+        kw["q_sfc"] = rh * qsat[:, -1]
+        _, _, _, _, _, diags = integrate_clubb_column(
+            **kw, dt=120.0, nsteps=15, config=cfg)
+        cf = np.asarray(diags["cloud_frac"])
+        assert np.all((cf >= 0.0) & (cf <= 1.0))   # always a valid fraction
+        return float(np.sum(cf))
+
+    dry, moist, supersat = total_cloud(0.4), total_cloud(0.85), total_cloud(1.25)
+    assert supersat >= moist >= dry           # monotone in column moisture
+    assert supersat > 0.0                      # supersaturated column DOES cloud
+    assert dry < 0.05 * max(supersat, 1.0)     # near-dry column ~ cloud-free
+
+
 def test_prognostic_clubb_convective_bl_physics():
     """Idealized boundary-layer physics check (beyond runs-without-error): in a
     moist, stably-stratified column, STRONG surface heating must drive a
