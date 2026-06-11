@@ -11,7 +11,10 @@ steps), while SDM is Lagrangian. This adapter therefore implements the
 well-defined, differentiable part — **diffusional condensation/evaporation** —
 on a *reconstructed* mean cloud droplet: each cell's existing cloud water
 ``q_c`` and a prescribed cloud-droplet number concentration ``cdnc`` define a
-mean droplet radius ``R = (q_c ρ / (cdnc · (4/3)π ρ_w))^{1/3}``; the SDM growth
+mean droplet radius ``R = (q_c ρ / (cdnc · (4/3)π ρ_w))^{1/3}`` (floored at
+``r_min_reconstruct`` with a correspondingly reduced effective number for thin
+cloud, so the closure never manufactures sub-micron Kelvin artifacts and the
+tendency is continuous in ``q_c``); the SDM growth
 law (``condensation.integrate_radius``) advances ``R`` for one step at the
 cell's saturation ratio ``S = e/e_sat``; the regrown liquid is deposited back
 as ``dq_c``, with the condensed/evaporated mass exchanged with vapor (total
@@ -82,8 +85,6 @@ __physics_contract__ = {
 
 # (4/3)π — sphere volume prefactor (pure geometry).
 _FOUR_THIRDS_PI = 4.0 / 3.0 * jnp.pi
-# Floor radius [m] for clear cells (no droplet) — keeps the growth ODE finite.
-_R_FLOOR = 1.0e-9
 
 
 def sdm_microphysics(
@@ -130,13 +131,21 @@ def sdm_microphysics(
     q_c = jnp.clip(hydrometeors.q_c, 0.0, None)
     q_v_pos = jnp.clip(q_v, 0.0, None)
 
-    # Reconstruct a mean cloud droplet from q_c and the prescribed CDNC.
+    # Reconstruct a mean cloud droplet from q_c and the prescribed CDNC:
     # mass per droplet m = q_c ρ / N ; R = (m / ((4/3)π ρ_w))^{1/3}.
+    # THIN-CLOUD CLOSURE: when the fixed-cdnc inversion would give a droplet
+    # smaller than r_min_reconstruct (an nm-scale Kelvin-barrier *artifact* of
+    # the closure, not physics), hold the droplet at r_min_reconstruct and
+    # reduce the effective number instead (N_eff = q_c·ρ/m_min ∝ q_c). The
+    # round trip stays exact (N_eff·m/ρ = q_c in both branches) and the
+    # tendency vanishes continuously as q_c -> 0 (no jump at the qc_min gate).
     cdnc = config.cdnc
-    m_drop = q_c * rho / cdnc                       # [kg] per droplet
-    R = jnp.cbrt(jnp.maximum(m_drop, 0.0) / (_FOUR_THIRDS_PI * rho_w))
+    m_min = _FOUR_THIRDS_PI * rho_w * config.r_min_reconstruct**3
+    m_drop = q_c * rho / cdnc                       # [kg] per droplet at full cdnc
+    N_eff = jnp.where(m_drop >= m_min, cdnc, q_c * rho / m_min)   # [1/m^3]
+    R = jnp.cbrt(jnp.maximum(m_drop, m_min) / (_FOUR_THIRDS_PI * rho_w))
     cloudy = q_c > config.qc_min                    # cells with cloud water
-    R = jnp.where(cloudy, jnp.maximum(R, _R_FLOOR), _R_FLOOR)
+    R = jnp.where(cloudy, R, config.r_min_reconstruct)
 
     # Saturation ratio S = e/e_sat (vapor-pressure based — NOT q_v/q_sat).
     S = relative_humidity(T, p_full, q_v)
@@ -144,9 +153,10 @@ def sdm_microphysics(
     # Grow the mean droplet by one step using the scheme config as-is. The
     # reconstruction carries no aerosol, so ``solute_mass = 0`` makes the Raoult
     # term identically zero regardless of ``cfg.include_solute``; the Kelvin
-    # curvature term is honored per ``cfg.include_curvature`` (it is negligible
-    # at cloud-droplet radii but correctly suppresses growth of sub-micron
-    # droplets, e.g. near ``qc_min``).
+    # curvature term is honored per ``cfg.include_curvature`` and is harmless
+    # here because the reconstructed droplet is never smaller than
+    # ``r_min_reconstruct`` (1 um default), where the Kelvin barrier is
+    # ~0.1 % supersaturation.
     droplets = SuperDropletState(
         multiplicity=jnp.ones_like(R),
         radius=R,
@@ -156,8 +166,9 @@ def sdm_microphysics(
     droplets = integrate_radius(droplets, S, T, dt, config)
     R_new = droplets.radius
 
-    # Regrown cloud water; clear cells stay clear.
-    q_c_new = cdnc * _FOUR_THIRDS_PI * rho_w * R_new**3 / rho
+    # Regrown cloud water (same N_eff closure as the reconstruction, so the
+    # no-growth round trip is exact); clear cells stay clear.
+    q_c_new = N_eff * _FOUR_THIRDS_PI * rho_w * R_new**3 / rho
     q_c_new = jnp.where(cloudy, q_c_new, q_c)
 
     dq_c_dt = (q_c_new - q_c) / dt

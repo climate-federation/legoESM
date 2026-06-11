@@ -61,6 +61,13 @@ class SDMConfig(NamedTuple):
     qc_min : float
         Cloud-water floor [kg/kg] below which a cell is treated as clear (no
         droplet to grow) by the column operator.
+    r_min_reconstruct : float
+        Minimum radius [m] of the column operator's reconstructed mean cloud
+        droplet (1 um default). For thin cloud the closure reduces the
+        *effective droplet number* (``N_eff = min(cdnc, q_c·ρ/m(r_min))``)
+        instead of letting the fixed-cdnc inversion produce nm-scale droplets
+        — those would be Kelvin-barrier artifacts of the closure, and the
+        tendency now vanishes continuously as ``q_c -> 0``.
     """
 
     n_substeps_condensation: int = 1
@@ -75,3 +82,4 @@ class SDMConfig(NamedTuple):
     r_rain: float = 4.0e-5               # [m] cloud/rain radius threshold (40 um)
     cdnc: float = 1.0e8                  # [1/m^3] prescribed cloud-droplet number
     qc_min: float = 1.0e-12             # [kg/kg] clear-air cloud-water floor
+    r_min_reconstruct: float = 1.0e-6   # [m] min reconstructed mean-droplet radius

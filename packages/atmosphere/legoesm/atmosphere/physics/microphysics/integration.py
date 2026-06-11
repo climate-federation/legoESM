@@ -232,8 +232,11 @@ def _make_hydrostatic_microphysics(
         # Extract water vapor from tracers if available; else assume dry.
         q_v_col = _get_tracer("q_v")
 
-        rho = _compute_rho(T_col, p_full_col)
-        dz = _compute_heights_from_sigma(T_col, p_half_col)
+        # Moist (virtual-temperature) density and thickness — the helpers
+        # apply T_v = T(1+0.608 q_v); a dry rho overestimates density (and the
+        # SDM column's reconstructed droplet mass) by ~0.6·q_v.
+        rho = _compute_rho(T_col, p_full_col, q_v_col)
+        dz = _compute_heights_from_sigma(T_col, p_half_col, q_v_col)
 
         # Extract actual hydrometeor state from tracers (fall back to zero
         # for any species not present in the tracer registry).
@@ -966,8 +969,10 @@ def _make_spectral_pe_microphysics(
 
         q_v_col = _get_tracer("q_v")
 
-        rho = _compute_rho(T_col, p_full_col)
-        dz = _compute_heights_from_sigma(T_col, p_half_col)
+        # Moist (virtual-temperature) density/thickness — see the hydrostatic
+        # bridge note above.
+        rho = _compute_rho(T_col, p_full_col, q_v_col)
+        dz = _compute_heights_from_sigma(T_col, p_half_col, q_v_col)
 
         hydrometeors = HydrometeorState(
             q_c=_get_tracer("q_c"),

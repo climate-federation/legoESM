@@ -110,7 +110,8 @@ def drsq_dt(
     r_sq : jax.Array
         Radius squared R² [m²].
     S : jax.Array
-        Saturation ratio (= RH, ``q_v/q_sat``) [-].
+        Saturation ratio ``S = e/e_sat`` [-] (vapor-pressure based WMO RH —
+        see :func:`legoesm.thermo.relative_humidity`; NOT ``q_v/q_sat``).
     T : jax.Array
         Temperature [K].
     e_s : jax.Array

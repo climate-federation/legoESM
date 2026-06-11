@@ -164,7 +164,11 @@ End-to-end ALL-PASS (stable, physically realistic, oracle-consistent):
 ### Column-adapter scope + exposure (codex iter-5)
 The stateless column path (`sdm/column.py`) does **diffusional condensation/
 evaporation only** on a mean droplet reconstructed from `q_c` + prescribed `cdnc`
-(donor-clamped, water-conserving). Collision-coalescence (`coalescence.py`) and
+(donor-clamped, water-conserving). Thin-cloud closure (fresh-review fix): when
+the fixed-cdnc inversion would give a sub-`r_min_reconstruct` (1 um) droplet,
+the closure holds the droplet at `r_min_reconstruct` and reduces the effective
+number (`N_eff = q_c·ρ/m(r_min)`), so no nm-scale Kelvin-barrier artifacts and
+the tendency is continuous in `q_c` (`dq_c ∝ q_c` for thin cloud). Collision-coalescence (`coalescence.py`) and
 aerosol activation need a persistent droplet population: the composed persistent
 path is `box_model.run_box` (condensation + Shima coalescence); sedimentation/
 precip of the particles is not yet implemented. None of these run in the column

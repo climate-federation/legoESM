@@ -33,6 +33,7 @@ from legoesm import constants
 from jax import random
 
 from legoesm.thermo import relative_humidity
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
 from legoesm.atmosphere.physics.microphysics.sdm.coalescence import coalescence_step
 from legoesm.atmosphere.physics.microphysics.sdm.condensation import integrate_radius
@@ -88,7 +89,9 @@ def parcel_step(
     """Advance the parcel by ``dt`` (operator split: lift, then condense).
 
     1. lift: ``z += w·dt``; dry-adiabatic cooling ``T -= (g/c_p)·w·dt``;
-       hydrostatic ``p -= ρ·g·w·dt`` with ``ρ = p/(R_d T)``;
+       hydrostatic ``p -= ρ·g·w·dt`` with the moist density
+       ``ρ = p/(R_d T_v)`` (virtual temperature — dry density from total
+       pressure would overestimate ρ and the pressure drop by ~0.6·q_v);
     2. condense: grow droplets at the current saturation ratio ``S = e/e_sat``,
        then move the condensed mass from vapor to liquid and release its latent
        heat (total water conserved).
@@ -101,7 +104,7 @@ def parcel_step(
     dt = jnp.asarray(dt, dtype=parcel.T.dtype)
 
     # 1. adiabatic lift
-    rho_air = parcel.p / (R_d * parcel.T)
+    rho_air = parcel.p / (R_d * virtual_temperature(parcel.T, parcel.q_v))
     dz = w * dt
     T_lift = parcel.T - (g / c_p) * dz
     p_lift = parcel.p - rho_air * g * dz
@@ -132,8 +135,9 @@ def run_parcel(
     so ``multiplicity`` is the real-droplet count per kg of air). Returns
     ``(final_parcel, history)`` where ``history`` stacks the saturation ratio
     ``S``, liquid mixing ratio ``q_l``, temperature ``T``, total water
-    ``q_t = q_v + q_l``, and mean droplet radius at every step (length
-    ``n_steps`` arrays) for diagnostics/validation.
+    ``q_t = q_v + q_l``, and the *number*-mean active-droplet radius
+    (``ΣξR/Σξ`` over active; NOTE: :func:`run_box` reports the *mass*-weighted
+    mean instead) at every step (length ``n_steps`` arrays).
 
     When wrapping in ``jax.jit`` use
     ``static_argnames=("n_steps", "cfg")`` — ``n_steps`` is the ``lax.scan``
@@ -143,8 +147,9 @@ def run_parcel(
         parcel = parcel_step(parcel, w, dt, cfg, M_air)
         d = parcel.droplets
         q_l = liquid_mixing_ratio(d, M_air)
-        active = d.active
-        mean_r = jnp.sum(active * d.radius) / jnp.maximum(jnp.sum(active), 1.0)
+        # ξ-weighted number-mean radius ΣξR/Σξ over active droplets.
+        nw = d.active * d.multiplicity
+        mean_r = jnp.sum(nw * d.radius) / jnp.maximum(jnp.sum(nw), 1e-300)
         diag = {
             "S": saturation_ratio(parcel),
             "q_l": q_l,

@@ -139,7 +139,8 @@ def sedimentation_kernel(r_i: jax.Array, r_j: jax.Array, dv: jax.Array) -> jax.A
     """
     r_min = jnp.minimum(r_i, r_j)
     r_max = jnp.maximum(r_i, r_j)
-    p = r_min / r_max
+    # 0/0 guard: two zero-radius droplets have zero cross-section -> K = 0.
+    p = jnp.where(r_max > 0.0, r_min / jnp.maximum(r_max, 1.0e-300), 0.0)
     E = 0.5 * p * p / ((1.0 + p) * (1.0 + p))
     return jnp.pi * (r_i + r_j) ** 2 * E * jnp.abs(dv)
 
