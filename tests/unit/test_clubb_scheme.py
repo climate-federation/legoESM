@@ -1671,6 +1671,78 @@ def test_prognostic_clubb_prescribed_moisture_flux_closes_column_budget():
     assert np.all(rel < 1e-9), f"prescribed-moisture-flux budget not closed: rel={rel}"
 
 
+def test_prognostic_clubb_prescribed_heat_flux_applied_through_subcycling():
+    """The prescribed surface heat flux is applied on EVERY CLUBB sub-step, so the
+    realistic coupled regime ``dt > clubb_dt`` (``n_sub > 1``) still closes the
+    column θl budget for a well-conditioned column.
+
+    The ``..._closes_column_budget`` test runs ``n_sub=1`` (exact, round-off). The
+    coupled host step is larger (``clubb_dt`` ~300 s, host ``dt`` ~1800 s →
+    ``n_sub=6``), driving the ``lax.scan`` sub-cycle in
+    :func:`clubb_turbulence_prognostic`, which holds the prescribed flux constant
+    and applies it each sub-step. Closure is then APPROXIMATE: the surface density
+    ``ρ_sfc(t)`` is recomputed from the evolving column, so the net heating is
+    ``W·Σ_sub ρ_sfc(t)·dt_sub`` not the ``n_sub=1`` idealisation ``ρ_sfc·W·dt``.
+
+    IMPORTANT — column conditioning: the sub-cycle advances a LOCAL mean by
+    forward-Euler WITHOUT the host numerical diffusion (the coupled dycore supplies
+    that between physics calls, not within one ``dt``). On a strongly-SHEARED column
+    over a long ``dt`` the bare sub-cycle drifts (the iter-48 grid-scale 2Δz
+    characteristic; the ``_scm_column`` random-wind state gives O(1) budget residuals
+    at ``dt=1800``). So this test uses a low-shear, weakly-stratified column for which
+    the sub-cycle stays stable and the budget closure stays tight (~6e-4 at
+    ``n_sub=6``) — pinning that the prescribed flux genuinely reaches the advance on
+    every sub-step (a dropped/double-counted flux would be off by an O(1) or
+    ``n_sub`` factor, not ~1e-3)."""
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
+    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+
+    # Low-shear, weakly-stratified column → the bare forward-Euler sub-cycle stays
+    # stable over a long dt (see docstring). Built inline (not _scm_column, whose
+    # random shear destabilises the long-dt bare sub-cycle).
+    ncol, nlev = 2, 24
+    p_half = jnp.asarray(np.linspace(2.0e4, 1.0e5, nlev + 1)[None, :]
+                         * np.ones((ncol, nlev + 1)))
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    z_half = jnp.asarray(np.tile(np.linspace(16000.0, 0.0, nlev + 1), (ncol, 1)))
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    exner = (np.asarray(p_full) / constants.p_ref) ** constants.kappa
+    theta = 290.0 + 4e-3 * np.asarray(z_full)
+    T0 = jnp.asarray(theta * exner)
+    u0 = jnp.full((ncol, nlev), 3.0)               # low, uniform → low shear
+    v0 = jnp.zeros((ncol, nlev))
+    q0 = jnp.full((ncol, nlev), 3e-3)
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        u0, v0, T0, q0, p_full, p_half, z_full, z_half, T0[:, -1], q0[:, -1],
+        dt=150.0, nsteps=40, config=cfg)
+    carry = pack_clubb_moments(m_f)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = p_full / (constants.R_d * tv)
+    dz = np.abs(np.asarray(z_half)[:, :-1] - np.asarray(z_half)[:, 1:])
+    mass = np.asarray(rho) * dz
+
+    W = 0.05
+    whl = jnp.full((ncol,), W)
+    zero = jnp.zeros((ncol,))
+    dt = 1800.0                                    # n_sub = ceil(1800/300) = 6
+    assert int(np.ceil(dt / cfg.clubb_dt)) == 6    # guard the sub-cycle is exercised
+    out, _ = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, carry, p_full, p_half, z_full, z_half,
+        T_f[:, -1], q_f[:, -1], rho, dt, cfg, whl, zero, None, None)
+
+    col_dtheta = np.sum(mass * (np.asarray(out.dT_dt) / exner), axis=1)
+    expected = np.asarray(rho)[:, -1] * W
+    assert np.all(np.isfinite(np.asarray(out.dT_dt)))
+    # (1) Non-vacuous: the prescribed flux genuinely warms the column.
+    assert np.all(col_dtheta > 1e-3) and np.all(expected > 1e-3)
+    # (2) Sub-cycled closure is approximate but well-bounded (<1%) — the flux is
+    # applied each sub-step; the small residual is the expected ρ_sfc(t) drift.
+    rel = np.abs(col_dtheta - expected) / np.abs(expected)
+    assert np.all(rel < 5e-3), f"sub-cycled prescribed-flux budget off: rel={rel}"
+
+
 def test_prognostic_clubb_prescribed_momentum_flux_is_magnitude_only_drag():
     """Pin the (CAM-faithful) momentum semantics of the prescribed-flux interface:
     ``sfc_upwp``/``sfc_vpwp`` set only the surface-stress MAGNITUDE, not a vector.

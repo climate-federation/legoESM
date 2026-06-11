@@ -201,6 +201,17 @@ efficient multi-step testing.
   `..._is_magnitude_only_drag` (momentum). (Aside iter 79: a CBL-growth integration test
   was ruled out — `integrate_clubb_column`'s bare-column driver goes grid-scale-unstable
   under strong sustained heating, the iter-48 instability.)
+- **Sub-cycled prescribed-flux application (iter 81):** the prescribed heat flux is
+  applied on EVERY sub-step of the `dt>clubb_dt` sub-cycling `lax.scan` in
+  `clubb_turbulence_prognostic` (the realistic coupled regime; iters 77/79 only tested
+  `n_sub=1`). `..._applied_through_subcycling` (dt=1800, clubb_dt=300 → n_sub=6) closes
+  the column θl budget to ~6e-4 (a dropped/double-counted flux would be off by O(1) or
+  an `n_sub` factor). Closure is APPROXIMATE not exact (vs n_sub=1 round-off): `ρ_sfc(t)`
+  drift across sub-steps → residual grows ~linearly with `n_sub` (measured 2e-11/6e-4/2e-3
+  at n_sub=1/6/12). NOTE: the sub-cycle is bare forward-Euler WITHOUT host diffusion (the
+  dycore supplies that BETWEEN physics dt, not within one), so a strongly-SHEARED column
+  destabilises over a long bare `dt` (O(1) residuals on `_scm_column`; iter-48 again) —
+  the test uses a low-shear column where the sub-cycle stays stable. Codex: approve.
 - **GABLS1 stable-BL — shipped (iter 72):** correctly-coupled SCM benchmark via
   `prescribe="T_s"` + ACTIVE bulk transfer (`Ch_neutral=1.5e-3`) so CLUBB's own bulk
   formula computes the surface heat flux → native `wpthlp_sfc` coupling drives the SBL
