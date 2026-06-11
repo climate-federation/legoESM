@@ -131,6 +131,15 @@ finite gradients in float32 + float64.
   `CLUBBMomentState` in `PhysicsState.clubb_moments`, and RUNS end-to-end through
   `combined.make_physics` (iter 53). Wired into coupler `validate_strict` +
   `physics_state` + `scm` + AMIP CLI.
+- **Audit-compliance (iter 58):** the formula-reimplementation CI ratchet
+  flagged that the port inlined two canonical formulas (Exner `(p/p_ref)^κ`;
+  `g/θ` buoyancy coef). Fixed per CLAUDE.md "never re-derive": created
+  `physics/_shared.exner_function`/`buoyancy_coefficient`, reused across the 6
+  clubb files, pointed the ratchet `canonical` to `_shared`. Numerics preserved
+  bit-exactly (89-test CLUBB-JAX parity unchanged). All CI ratchet/contract
+  gates pass (test_physics_contracts/no_hardcoded_constants/no_saturation_reimpl/
+  no_private_cross_imports/dispatch_hardening/validate_strict/federation/
+  no_formula_reimpl — 3943+25 tests).
 - **No-regression (iter 57):** the 98-test turbulence-integration suite
   (`test_physics_turbulence` + `test_turbulence`) passes clean — the shared-infra
   changes (PhysicsState.clubb_moments, the `_read_turb_carry` refactor across all
