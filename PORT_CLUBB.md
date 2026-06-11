@@ -14,7 +14,7 @@ review per substantial change.
 `make_turbulence_physics(...)`, producing a valid `TurbulenceOutput`, with
 passing unit+integration tests and an idealized-case sanity check.
 
-*(Compressed at iter 10/20/30/40/60/70; verbose per-iter logs dropped — see git
+*(Compressed at iter 10/20/30/40/60/70/80; verbose per-iter logs dropped — see git
 history. The reference facts + module table + status below are the live source
 of truth.)*
 
@@ -110,7 +110,7 @@ finite gradients in float32 + float64.
 
 ---
 
-## Status @ iter 70 — ✅ DONE (compressed; iter 11–69 detail in git history)
+## Status @ iter 80 — ✅ DONE (compressed at iter 10/20/.../70/80; iter 11–79 detail in git history)
 
 **legoESM can be run AND tested with the prognostic `clubb.py` scheme.**
 `scheme="clubb"` + `CLUBBConfig(prognostic=True)` dispatches the full CAM-default-
@@ -145,176 +145,92 @@ sorting `Lscale` + full prognostic moment transport (clubb_lite has none).
   CAM 3-C2 dissipation, surface-flux sign, variance-floor leak, sub-cycle moisture
   contract, dispatch persistence guards, retrace hazard).
 
-**Validation hardening (iter 61–69; compressed at iter 70 — detail in git history).**
+**Validation hardening (iter 61–79; compressed at iter 70/80 — detail in git history).**
 All in `tests/unit/test_clubb_scheme.py`; each codex-adversarially-reviewed to
 clean. Common technique: spin up real moments via `integrate_clubb_column`
 (dt=150,nsteps=40) so the property is **non-vacuous** (the rest/floor state gives
 ~round-off tendencies any scheme trivially passes).
-- **Conservation triad @ scheme entry, zero surface flux:** column **rt** (moisture,
-  iter 61) and **θl** (heat, iter 62) conserved to round-off (`<1e-12` rel/step,
-  `ρ·dz` weight); **momentum** `Σ mass·du/dt = τ_x` (iter 64) — closes to **O(Δt)**
-  (surface stress applied semi-implicitly; Richardson: Δt 10× → residual 10×;
-  confirms interior flux-form conservation + the surface-stress SIGN, the iter-47
-  bug). Winds use `advance_windm_edsclrm`, scalars use `advance_xm_wpxp`.
-- **Bridge convention (iter 62, surfaced by codex):** `clubb_step` maps the mean
-  back as `T_new = thlm·exner`, so reported `dT_dt/exner` is EXACTLY the prognostic
-  **θl** tendency and `q_v`=`rtm` (total water) — prognostic CLUBB returns θl/rt,
-  NOT a saturation-adjusted (T,q_v) split (cloud partition deferred to microphysics,
-  per `l_rcm_supersat_adj=.false.`).
-- **Turbulence→microphysics coupling (iter 63):** that θl/rt return is CORRECT for
-  the legoESM pipeline (modules run on the same state, tendencies summed; `sundqvist`
-  does the saturation adjustment `f·max(q_v−q_sat,0)`, `dT=L_v·net_cond/c_pd`).
-  Verified CLUBB→sundqvist closes the column water budget to the surface-precip sink
-  (rel<1e-12) with nonzero precip, condensation enthalpy-consistent (`c_pd·dT+L_v·dq_v`~0).
-- **Moist-chain differentiability (iter 65):** `jax.grad` flows end-to-end through
-  CLUBB→sundqvist incl. the `max(q_v−q_sat,0)` kink; guarded by a microphysics-only
-  objective + active-condensation forward check (so a dead kink can't pass).
-- **The defining fuller-than-clubb_lite signature (iter 66):** under surface heating
-  prognostic CLUBB develops buoyancy-driven vertical-velocity SKEWNESS (`wp3`>0 in
-  the upper mixed layer, ~+0.06–0.15) — the third moment driving non-local transport;
-  the test EXECUTES `clubb_lite_turbulence` and asserts it has no `wp3` (down-gradient,
-  no 3rd moment). Contrast vs a verified near-neutral control. (Aside: a cooled-surface
-  'stable' control is unusable — fixed cold `T_sfc` over-cools the air → convection.)
-- **float32 / Metal cross-backend (iter 67–69):** FIXED a real bug — the parcel-Lscale
-  `compute_mixing_length` had strong-float64 sources (`jnp.float64(0.0)` scan carries,
-  default-dtype `jnp.zeros` pads / `jnp.full` col / `set_Lscale_max` cap) that promoted
-  a float32 column and CRASHED `lax.scan`'s carry-type check under x64. Fix: normalize
-  EVERY float input (state, `Lscale_max`, `mu`, `lmin`, all `CLUBBGrid` fields) to
-  `dt_f=thlm.dtype` at function top — preserves float64 EXACTLY (8 golden-parity tests
-  pass). Swept all `clubb_*.py` → this was the ONLY strong-float64 source (others use
-  dtype-preserving `zeros_like` or weak `full(py_float)`). Both entry points verified
-  float32-finite, no-promotion, AND numerically faithful (float32 Lscale matches f64
-  to ~1e-7). Caveat (documented, inherent, not a defect): `dT_dt=Π·(θl_new−θl)/dt` is
-  a difference of two ~300 K values → ~5–10% float32 cancellation noise (shared by
-  clubb_lite + diagnostic path); Lscale/Km/moisture unaffected.
+- **Conservation triad @ scheme entry, zero surface flux:** column **rt** (iter 61)
+  and **θl** (iter 62) conserved to round-off (`<1e-12` rel/step, `ρ·dz` weight);
+  **momentum** `Σ mass·du/dt = τ_x` (iter 64) closes to **O(Δt)** (semi-implicit
+  surface stress; Richardson Δt 10×→residual 10×; confirms interior flux-form + the
+  surface-stress SIGN). Winds via `advance_windm_edsclrm`, scalars via `advance_xm_wpxp`.
+- **Bridge convention (iter 62):** `clubb_step` maps mean back as `T_new=thlm·exner`,
+  so `dT_dt/exner` IS the θl tendency and `q_v=rtm` — prognostic CLUBB returns θl/rt,
+  NOT a sat-adjusted (T,q_v) split (cloud partition deferred to microphysics,
+  `l_rcm_supersat_adj=.false.`). **Turbulence→microphysics coupling (iter 63):** that
+  return is correct — CLUBB→sundqvist closes the column water budget to the precip sink
+  (rel<1e-12), condensation enthalpy-consistent. **Moist-chain differentiability
+  (iter 65):** `jax.grad` flows end-to-end through CLUBB→sundqvist incl. the
+  `max(q_v−q_sat,0)` kink (microphysics-only objective + active-branch guard).
+- **Fuller-than-clubb_lite signature (iter 66):** under surface heating prognostic
+  CLUBB develops vertical-velocity SKEWNESS (`wp3`>0, ~+0.06–0.15, non-local transport);
+  the test executes `clubb_lite_turbulence` and asserts it has no `wp3`.
+- **float32/Metal (iter 67–69):** FIXED a real bug — `compute_mixing_length` had
+  strong-float64 sources (`jnp.float64(0.0)` scan carries, default-dtype `zeros`/`full`,
+  `set_Lscale_max`) that promoted a float32 column and crashed `lax.scan`'s carry check.
+  Fix: normalize every float input to `dt_f=thlm.dtype` (preserves float64 EXACTLY; 8
+  golden tests pass). Both entries float32-finite/faithful. Caveat (inherent): `dT_dt=
+  Π·(θl_new−θl)/dt` differences two ~300 K values → ~5–10% float32 cancellation noise.
 
-**Production-SCM runnability (iter 71):** confirmed prognostic CLUBB RUNS through
-the real `SingleColumnModel` driver (not just the standalone `integrate_clubb_column`)
-on a Wangara-style convective-BL setup — 40 steps finite, `T_low`=277.5 K (physical),
-`wp2` develops. `clubb` is registered in the SCM's `stateful_turb` set, so the
-production single-column driver supports it. NOTE: SCM `.run()` is an EAGER Python
-loop (~8 s/step with full prognostic CLUBB, ~50 s first-step compile) → use the
-jitted `integrate_clubb_column` for efficient multi-step testing.
-- **Deferred (codex-flagged, NOT shipped):** packaging this as a selectable
-  `--turbulence clubb` option for the Wangara *benchmark* needs proper surface-flux
-  coupling first. The SCM `prescribe="fluxes"` path injects the kinematic flux as a
-  lowest-cell HOST tendency and zeroes the scheme's bulk flux (`Ch_neutral=0`, same
-  for the existing mynn25 case), so CLUBB's native `wpthlp_sfc`/`wprtp_sfc` moment
-  lower-BC is 0 — the scheme responds only to the host-warmed gradient, not its
-  surface-flux BC. The scheme-side half is now DONE (iter 76): the CLUBB driver
-  accepts prescribed kinematic surface fluxes directly (`sfc_wpthlp`/`sfc_wprtp`/
-  `sfc_upwp`/`sfc_vpwp` feed its native moment lower-BC). Remaining for a Wangara
-  `--turbulence clubb` benchmark: wire the SCM `prescribe="fluxes"` `w_th_s`/`w_qv_s`
-  into those args (small SCM-driver plumbing) + a physically-calibrated `wp2` gate
-  (the `1e-3` floor is too weak). Tracked as a follow-up.
-- **Prescribed heat-flux column-budget closure (iter 77):** the strongest contract
-  on the iter-76 prescribed-flux BC — `test_prognostic_clubb_prescribed_heat_flux_
-  closes_column_budget` verifies a prescribed constant `sfc_wpthlp=W` is applied as an
-  EXACT flux-form Neumann lower-BC: `Σ_k (ρ_k dz_k)(dT_dt_k/Π_k) = ρ_sfc·W` to round-off
-  (measured rel ~1e-11, assert <1e-9; non-vacuous warming >1e-3). Unlike the iter-64
-  surface-stress momentum budget (state-dependent `τ=−ρC_d|V|u` → O(Δt) semi-implicit
-  residual), a prescribed *constant* flux is state-independent → closure is EXACT with no
-  Δt dependence. Confirms correct magnitude + no double-counting (a doubled application
-  would give 2×). Codex adversarial review: approve, no findings. (Test-only iteration;
-  no production code changed.)
-- **Prescribed MOMENTUM semantics corrected + pinned (iter 78):** investigating a
-  momentum analogue of the iter-77 budget revealed the prescribed momentum BC behaves
-  fundamentally differently from heat/moisture — a Δt-INDEPENDENT non-closure (col_dv≈0
-  for a cross-wind-prescribed stress). Root cause: CAM's `l_imp_sfc_momentum_flux=.true.`
-  wind advance (`advance_windm_edsclrm`/`windm_edsclrm_lhs`) consumes ONLY the stress-
-  vector MAGNITUDE `u_*^2 = sqrt(u'w'_sfc²+v'w'_sfc²)` and re-applies it as an implicit
-  drag ANTIPARALLEL to the near-surface wind — the prescribed AZIMUTH is discarded
-  (confirmed: prescribing `(W,0)` vs `(0,W)` gives bit-identical `du_dt`/`dv_dt`). Heat/
-  moisture, by contrast, enter `advance_xm_wpxp` directly as exact directional flux BCs
-  (iter-77). This is faithful CAM physics (correct for prescribed-`u_*` LES forcing; exact
-  for the bulk drag, which is already wind-antiparallel) — NOT a bug — but the iter-76
-  docstring misleadingly implied directional component prescription. Fixed: corrected the
-  `clubb_step` contract docstring (heat/moisture = exact directional; momentum = magnitude-
-  only wind-opposing drag, azimuth discarded) + added `test_prognostic_clubb_prescribed_
-  momentum_flux_is_magnitude_only_drag` (direction-independence bit-identity, ustar=
-  `(u'w'²+v'w'²)^¼` round-trip, magnitude scaling + drag sign). **Codex [medium] caught a
-  real formula slip** (docstring dropped the sqrt: wrote `u_*²=u'w'²+v'w'²` instead of
-  `sqrt(...)`); fixed both docstrings, re-review approve. No behavior change.
-- **Prescribed MOISTURE-flux closure — triad complete (iter 79):** `test_prognostic_
-  clubb_prescribed_moisture_flux_closes_column_budget` mirrors the heat closure for the
-  total-water channel: a prescribed `sfc_wprtp` is an exact flux-form Neumann BC, so
-  `Σ_k (ρ_k dz_k) dq_v_dt_k = ρ_sfc·w'rt'_sfc` to round-off (rel<1e-9; non-vacuous
-  moistening >1e-6; `q_v=rtm`, no exner). Pins that the `rt_tol` positivity floor (which
-  `thlm` lacks) does NOT break closure for a normal moist column (`q_v~1e-3 >> rt_tol`).
-  Completes the prescribed-flux conservation triad: heat exact (77), momentum magnitude-
-  only drag (78), moisture exact (79). Codex review: approve, no findings. (Also ruled out
-  a CBL-growth integration test: a diagnostic showed `integrate_clubb_column`'s bare-column
-  driver goes grid-scale-UNSTABLE under strong sustained surface heating — `wp2`~16, θ
-  profile non-monotone — the iter-48 instability; the SCM stand-in is unfit for long
-  strong-forcing evolution, so that route was correctly NOT pursued.)
-- **GABLS1 stable-BL — shipped (iter 72):** the correctly-coupled SCM benchmark.
-  GABLS1 uses `prescribe="T_s"` (cooling surface temperature) with the bulk
-  transfer ACTIVE (`Ch_neutral=1.5e-3`), so the surface heat flux is computed from
-  the prescribed `T_sfc` by CLUBB's OWN bulk formula → CLUBB's native `wpthlp_sfc`
-  coupling drives the stable BL (verified: `_resolve_T_sfc` reads the injected
-  `surface_T_sfc_override` → `clubb_step`→`compute_surface_fluxes`). Added
-  `--turbulence clubb` to `scripts/scm/gabls1.py`; a 20-step run is finite,
-  `T_low`=263.8 K (cooled), `wp2max`=0.105 (weak/bounded, as a stable BL should be).
-  The pass gate was made RESPONSE-based (codex-flagged): requires genuine cooling
-  (`T_low<T_low_init−0.05·hours`) + turbulence above the rest floor and bounded
-  (`1e-4<tke_max<5`), so an unchanged/no-op column can no longer pass. mynn25
-  default unchanged; existing `test_scm_gabls1.py` (calls `build_scm`/`scm.run`
-  directly) unaffected.
-- **native surface-flux coupling test (iter 73):** `test_prognostic_clubb_surface_
-  heat_flux_tracks_surface_temperature` — a DIRECT, fast, deterministic check that
-  CLUBB's surface sensible-heat flux responds to the air–surface contrast (the
-  coupling GABLS1 relies on): cold surface (`T_sfc<T_air`) ⇒ `shflx<0` (downward,
-  cools/stabilises the SBL), warm ⇒ `shflx>0`, equal ⇒ 0, and antisymmetric
-  (`shflx(+ΔT)=−shflx(−ΔT)`). codex first caught a SLOW SCM-run version as unsound
-  — its "near-surface cooling ⇒ coupling live" inference was false (over a short
-  window GABLS1's `T_s`≈265 K is initially WARMER than the ~264.6 K air, so the
-  early surface flux is upward; the observed cooling came from turbulent mixing,
-  not the surface sink). Replaced with this direct assertion. A 2nd codex pass then
-  noted asserting only `out.shflx` proves the *diagnostic* flux but not that it's
-  *coupled* into the prognostic tendency → added a 2nd layer: the near-surface
-  `out.dT_dt[:,-1]` must respond with the matching sign (cold cools, warm warms,
-  antisymmetric, ≫ the ~1e-8 zero-flux floor), proving the full chain
-  `shflx→wpthlp_sfc BC→advance_clubb_core→dT_dt`. No SCM run, deterministic.
-- **full-suite single-process OOM fixed (iter 74):** a comprehensive regression
-  sweep revealed `test_clubb_scheme.py` cannot run all ~40 tests in one process —
-  it `Fatal Python error: Aborted`s mid-XLA-compile ~2/3 through (the heavy
-  prognostic-pipeline/grad/sub-cycling tests each lower a huge program and the
-  compiled executables accumulate). Confirmed environmental, NOT a regression:
-  every test passes in isolation (the aborted `subcycling_raw_moisture_contract`
-  passes alone in 89 s), and ~24 integration + ~240 module tests were green before
-  the abort. Fix: an autouse fixture calling `jax.clear_caches()` after each test
-  (correctness-neutral — tests don't reuse compiled fns) so the suite stays
-  runnable in one process. A real CI-runner hazard, now removed. Full regression
-  after the iter-67 numerics change: 286 module + 39 integration tests all green.
-- **diagnostic-path conservation (iter 75):** the DEFAULT diagnostic `scheme="clubb"`
-  (what most users get; the prognostic triad only covered the opt-in path) conserves
-  column `q_v` AND `θ=T/Π` to round-off (rel<1e-12) under zero surface flux — its
-  flux-form `implicit_vertical_diffusion` (dry `rcm=0` mapping) only redistributes.
-  Non-vacuous WITHOUT spin-up (`max|dq·dt|`~1e-4; the diagnostic eddy diffusion is
-  driven directly by the initial gradient), so it's a fast (~9 s) guard.
-- **Prescribed surface fluxes — CLUBB's LES/SCM-intercomparison interface (iter 76):**
-  added optional `sfc_wpthlp`/`sfc_wprtp`/`sfc_upwp`/`sfc_vpwp` (kinematic surface
-  fluxes, each `(ncol,)` or `None`) to `clubb_step` + `clubb_turbulence_prognostic`
-  + `integrate_clubb_column`. When given, each OVERRIDES CLUBB's bulk lower-BC for
-  that moment (`w'thl'` [K m/s], `w'rt'` [kg/kg m/s], `u'w'`/`v'w'` [m²/s²]); `None`
-  falls back to the bulk formula (the `None`-test is a static Python branch, CLAUDE.md
-  feature-gating exception — never a traced `jnp.where`). This is exactly the BC that
-  the standard prescribed-flux LES cases (BOMEX/DYCOMS/ARM) specify, which the prior
-  `prescribe="T_s"`-only coupling could not drive (the iter-71 Wangara deferral). The
-  bulk formula is skipped entirely only when all four are prescribed → the result is
-  then independent of `T_sfc`/`q_sfc`. Reported `shflx`/`lhflx`/`ustar` are made
-  consistent: bulk values pass through bit-unchanged (verified back-compat), prescribed
-  kinematic fluxes are converted to W/m² (`shflx=wpthlp·ρ·c_pd·Π`, `lhflx=wprtp·ρ·L_v`)
-  and `ustar=(u'w'²+v'w'²)^¼`. **Codex [medium], fixed:** the bare fourth-root has +∞
-  slope at zero stress, so `jax.grad` through `ustar` at the valid `sfc_upwp=sfc_vpwp=0`
-  BC was non-finite → floored the radicand with a `1e-30` AD safety floor (gradient 0
-  there, physical stresses bit-unchanged); codex re-review: approve, no findings. Test
-  `test_prognostic_clubb_accepts_prescribed_surface_fluxes` (one shared spin-up via the
-  grid-consistent `_scm_column`+`integrate_clubb_column`, then 6 checks): W/m²+ustar
-  round-trip; `T_sfc`-independence (bulk bypass); grad-coupling of the heat-flux BC into
-  the prognostic advance; the zero-stress ustar grad-finiteness regression; surface-heat
-  sign; explicit-`None`==omitted back-compat. The default (no-arg) path is bit-identical
-  to before (7-test existing-prognostic regression subset stays green).
+**Production-SCM runnability (iter 71):** prognostic CLUBB RUNS through the real
+`SingleColumnModel` driver (registered in the SCM `stateful_turb` set) on a Wangara
+convective-BL setup (40 steps finite, physical `T_low`, `wp2` develops). NOTE: SCM
+`.run()` is an EAGER loop (~8 s/step) → use the jitted `integrate_clubb_column` for
+efficient multi-step testing.
+- **LIVE follow-up — SCM `prescribe="fluxes"` → CLUBB native BC:** the SCM
+  prescribed-flux path injects the kinematic flux as a lowest-cell HOST mean-tendency
+  and zeroes `Ch_neutral`, so CLUBB's native `wpthlp_sfc`/`wprtp_sfc` moment BC is 0
+  (scheme responds only to the host-warmed gradient). The scheme-side half is DONE
+  (iter 76 — `clubb_step` accepts `sfc_*` kinematic fluxes). Remaining: route the SCM
+  `w_th_s`/`w_qv_s` into those args. CROSS-CUTTING (needs `PhysicsState` surface-flux-
+  override fields + the SHARED generic `turb_fn` dispatch in `integration.py`, which has
+  a fixed signature across all schemes + `scm.py`) → deferred to a human-directed PR, not
+  done autonomously (iter 78/80 re-confirmed the risk).
+- **Prescribed-flux conservation triad (iters 77/78/79), all codex-approved:** for the
+  iter-76 prescribed `sfc_*` BCs — **heat** (77) and **moisture** (79) are applied as
+  EXACT flux-form Neumann lower-BCs (`Σ_k (ρ_k dz_k)(dT_dt/Π or dq_v_dt)_k = ρ_sfc·flux`
+  to round-off, rel<1e-9, non-vacuous; constant prescribed flux is state-independent →
+  EXACT, unlike the iter-64 O(Δt) bulk stress). **Momentum** (78) is fundamentally
+  different: CAM's `l_imp_sfc_momentum_flux=.true.` (`advance_windm_edsclrm`) consumes
+  ONLY the stress MAGNITUDE `u_*²=√(u'w'²+v'w'²)` and re-applies it as a drag
+  ANTIPARALLEL to the wind — the prescribed AZIMUTH is discarded (`(W,0)`≡`(0,W)`, bit-
+  identical tendencies; verified). Faithful CAM physics (exact for the wind-antiparallel
+  bulk drag) — NOT a bug; the iter-76 docstring was corrected to say so (codex caught a
+  dropped-`sqrt` slip in the fix). Tests: `..._closes_column_budget` (heat/moisture),
+  `..._is_magnitude_only_drag` (momentum). (Aside iter 79: a CBL-growth integration test
+  was ruled out — `integrate_clubb_column`'s bare-column driver goes grid-scale-unstable
+  under strong sustained heating, the iter-48 instability.)
+- **GABLS1 stable-BL — shipped (iter 72):** correctly-coupled SCM benchmark via
+  `prescribe="T_s"` + ACTIVE bulk transfer (`Ch_neutral=1.5e-3`) so CLUBB's own bulk
+  formula computes the surface heat flux → native `wpthlp_sfc` coupling drives the SBL
+  (`_resolve_T_sfc`→`surface_T_sfc_override`→`clubb_step`). `--turbulence clubb` in
+  `scripts/scm/gabls1.py`; RESPONSE-based pass gate (genuine cooling + bounded TKE, no
+  no-op pass). mynn25 default unchanged.
+- **Native coupling test (iter 73):** `..._surface_heat_flux_tracks_surface_temperature`
+  — fast deterministic check that CLUBB's surface sensible flux tracks the air–surface
+  contrast (cold⇒`shflx<0`, warm⇒>0, equal⇒0, antisymmetric) AND that it is COUPLED into
+  the prognostic tendency (near-surface `dT_dt[:,-1]` responds with matching sign, ≫ the
+  zero-flux floor — proving `shflx→wpthlp_sfc BC→advance_clubb_core→dT_dt`).
+- **Full-suite single-process OOM fixed (iter 74):** an autouse fixture calling
+  `jax.clear_caches()` after each test (correctness-neutral) lets the whole
+  `test_clubb_scheme.py` run in one process (it `Fatal Python error: Aborted`'d
+  mid-XLA-compile ~2/3 through as compiled executables accumulated). Full regression:
+  286 module + 39 integration tests green.
+- **Diagnostic-path conservation (iter 75):** the DEFAULT diagnostic `scheme="clubb"`
+  (the opt-out path most users get) conserves column `q_v` AND `θ=T/Π` to round-off
+  (rel<1e-12) under zero surface flux; non-vacuous without spin-up (fast guard).
+- **Prescribed-flux feature (iter 76) — CLUBB's LES/SCM-intercomparison interface:**
+  optional `sfc_wpthlp`/`sfc_wprtp`/`sfc_upwp`/`sfc_vpwp` (kinematic, `(ncol,)` or
+  `None`) on `clubb_step`/`clubb_turbulence_prognostic`/`integrate_clubb_column`
+  OVERRIDE the bulk lower-BC per moment (`None`→bulk, a static Python branch); reported
+  `shflx`/`lhflx`/`ustar` made consistent (bulk passes through bit-unchanged; prescribed
+  → W/m² + `ustar=(u'w'²+v'w'²)^¼`). **Codex [medium] fixed:** the bare fourth-root has
+  +∞ slope at zero stress → floored the radicand with a `1e-30` AD safety floor (grad 0
+  there, physical stresses bit-unchanged). Test `..._accepts_prescribed_surface_fluxes`
+  (6 checks: round-trip, `T_sfc`-bypass, grad-coupling, zero-stress ustar grad-finiteness,
+  sign, `None`==omitted back-compat). Default no-arg path bit-identical to before. The
+  conservation contract for these BCs is the iter-77/78/79 triad above.
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz
