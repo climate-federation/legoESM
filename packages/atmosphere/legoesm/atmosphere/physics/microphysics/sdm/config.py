@@ -52,6 +52,15 @@ class SDMConfig(NamedTuple):
     r_rain : float
         Radius threshold [m] separating cloud water from rain when depositing
         super-droplet liquid to grid mixing ratios (ERF default 40 um).
+    cdnc : float
+        Prescribed cloud-droplet number concentration [1/m^3] used by the
+        stateless column operator to reconstruct a mean cloud droplet from the
+        grid ``q_c`` (1e8 = maritime). The full Lagrangian model carries
+        per-droplet multiplicities instead; this is only the single-step
+        column-condensation adapter's closure.
+    qc_min : float
+        Cloud-water floor [kg/kg] below which a cell is treated as clear (no
+        droplet to grow) by the column operator.
     """
 
     n_substeps_condensation: int = 1
@@ -64,3 +73,5 @@ class SDMConfig(NamedTuple):
     terminal_velocity: str = "rogers_yau"
     golovin_b: float = 1.5e3              # [1/s] Golovin kernel coefficient
     r_rain: float = 4.0e-5               # [m] cloud/rain radius threshold (40 um)
+    cdnc: float = 1.0e8                  # [1/m^3] prescribed cloud-droplet number
+    qc_min: float = 1.0e-12             # [kg/kg] clear-air cloud-water floor

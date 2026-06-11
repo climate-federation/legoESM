@@ -37,7 +37,7 @@ CONVECTION_LITERALS = (
 )
 MICROPHYSICS_LITERALS = (
     "none", "kessler", "sundqvist", "seifert_beheng",
-    "morrison", "thompson", "p3", "ml_emulator",
+    "morrison", "thompson", "p3", "sdm", "ml_emulator",
 )
 TURBULENCE_LITERALS = (
     "smagorinsky", "louis", "tke", "mynn25", "clubb_lite",

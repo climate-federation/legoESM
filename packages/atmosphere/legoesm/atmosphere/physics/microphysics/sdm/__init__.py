@@ -58,6 +58,7 @@ from legoesm.atmosphere.physics.microphysics.sdm.box_model import (
     run_parcel,
     saturation_ratio,
 )
+from legoesm.atmosphere.physics.microphysics.sdm.column import sdm_microphysics
 
 __all__ = [
     "SDMConfig",
@@ -85,4 +86,5 @@ __all__ = [
     "run_parcel",
     "liquid_mixing_ratio",
     "saturation_ratio",
+    "sdm_microphysics",
 ]

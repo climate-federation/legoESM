@@ -439,7 +439,7 @@ class ExperimentConfig(NamedTuple):
             )
         _valid_microphysics = (
             "none", "kessler", "sundqvist", "seifert_beheng",
-            "morrison", "thompson", "p3", "ml_emulator",
+            "morrison", "thompson", "p3", "sdm", "ml_emulator",
         )
         if self.microphysics not in _valid_microphysics:
             errors.append(

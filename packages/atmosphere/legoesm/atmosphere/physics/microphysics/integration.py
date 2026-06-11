@@ -50,6 +50,7 @@ from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_behen
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
+from legoesm.atmosphere.physics.microphysics.sdm import sdm_microphysics
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     ml_microphysics,
     MicrophysicsEmulator,
@@ -82,6 +83,8 @@ def _get_microphysics_fn(config: MicrophysicsConfig):
         return "thompson", thompson_microphysics, config.thompson
     elif config.scheme == "p3":
         return "p3", p3_microphysics, config.p3
+    elif config.scheme == "sdm":
+        return "sdm", sdm_microphysics, config.sdm
     elif config.scheme == "ml_emulator":
         return "ml_emulator", ml_microphysics, config.ml_emulator
     elif config.scheme == "none":
@@ -471,6 +474,7 @@ _PLANE_MIN_TRACER_SLOTS = {
     "morrison": 9,          # q_{v,c,r,i,s,g} + N_{c,r,i}
     "thompson": 9,          # q_{v,c,r,i,s,g} + N_{c,r,i}
     "p3": 9,                # q_{v,c,r,i} + q_rim(s) + B_rim(g) + N_{c,r,i}
+    "sdm": 3,               # q_v, q_c, q_r (condensation adapter; uses q_v,q_c)
     "ml_emulator": 9,       # generic full layout
     "none": 0,              # no-op
 }
