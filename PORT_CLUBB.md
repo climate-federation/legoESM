@@ -147,13 +147,13 @@ finite gradients in float32 + float64.
 above = the live builder ledger; per-module CAM-vs-ARM caveats are in each
 module's docstring.)*
 
-**Status:** ALL 4 prognostic advances + all clips/limiter + the tau/Skw/C6-C7
-orchestration + the diagnostics bundle (`compute_clubb_diagnostics`) + the full
-ADG1 PDF closure (`compute_pdf_closure`, iter 45) are ported & parity/codex-
-validated. The scheme is runnable+tested (phase-1 Lscale eddy diffusion +
-ADG1-PDF diagnostic buoyancy). Two pieces remain to the DONE gate: the
-`advance_clubb_core` assembly (diagnostics→PDF→4 advances) and wiring the
-*prognostic* closure into `clubb.py`'s live tendency path.
+**Status:** The full per-step prognostic closure is ASSEMBLED & codex-approved:
+`advance_clubb_core` (iter 46, `clubb_core.py`) runs diagnostics → pre-PDF →
+the 4 advances (xm_wpxp→xp2_xpyp→wp2_wp3→windm) with `clip_covars_denom`
+between → post-PDF, on a `CLUBBMomentState`/`CLUBBForcing` pytree; one step is
+finite/shape-stable/positive-definite/jit+grad-clean. The remaining DONE-gate
+piece is wiring `advance_clubb_core` into `clubb.py`'s live tendency path
+(replacing the phase-1 Lscale eddy diffusion with the prognostic moment carry).
 
 **CAM-vs-ARM rule of thumb (verified the hard way):** CLUBB-JAX is wired for ARM;
 re-check the CAM namelist/Fortran per module. Caught: wp2/wp3 UPWIND MA
@@ -173,19 +173,33 @@ TA CENTERED; wp2_dp1 + wp3_pr_turb CAM branches from CESM Fortran;
    bundle. **Codex-reviewed & approved** (caught + fixed a real variance-floor
    leak: rt_tol²/thl_tol² floors feed ONLY the ADG1 driver, calc_xpthvp_terms
    gets RAW regrids — regression-tested).
-3. ☐ **`advance_clubb_core` assembly** + carried moment state (wp2/wp3/up2/vp2/
-   rtp2/thlp2/rtpthlp/wprtp/wpthlp), running compute_clubb_diagnostics →
-   compute_pdf_closure → the 4 advances in CAM order (xm_wpxp→xp2_xpyp→wp2_wp3→
-   windm) with `clip_covars_denom` between. All sub-pieces now exist.
-4. ☐ **Wire into `clubb.py`**: carry the moment set as state; replace the phase-1
-   eddy-diffusion mean advance with the prognostic advances (DONE gate).
+3. ✅ **`advance_clubb_core` assembly** (iter 46, `clubb_core.py`): the full
+   per-step closure on `CLUBBMomentState`/`CLUBBForcing` pytrees, CAM order with
+   `clip_covars_denom` between, pre+post PDF (`l_call_pdf_closure_twice=True`).
+   Codex-approved (3 rounds). **CAM 3-C2 fix**: `advance_xp2_xpyp` inherited the
+   ARM single-C2 shared-LHS solve from CLUBB-JAX; CAM uses 3 distinct dp1
+   dissipation coefficients (C2rt=C2thl=1.0, C2rtthl=1.3) — a shared solve is
+   valid only when equal (`advance_xp2_xpyp_module.F90:836`). Refactored to
+   per-moment LHS+solve; dropped the `Cn` arg (now owned from config). Verified
+   FALSE POSITIVE: windm uses start-of-step `Kh_zm` by design (reference computes
+   Kh once in "Block M", same array to wp2_wp3 + windm).
+4. ☐ **Wire into `clubb.py`**: carry the `CLUBBMomentState` as scheme state;
+   build the host env (rho_ds/thv_ds/invrs/wm/fcor/ug/vg + Lscale + N²) and call
+   `advance_clubb_core`, returning du/dv/dT/dq tendencies from the advanced means
+   (replace the phase-1 eddy-diffusion mean advance). DONE gate.
 
 Each chunk: analytic/self-consistency oracle (CI) + golden/round-off parity vs
 CLUBB-JAX (patch reference physical constants to isolate algorithm) + codex review.
 
-**Codex status:** rate limit reset; iter-45 ran a fresh adversarial-review on
-`compute_pdf_closure` (needs-attention → fixed → approve). Earlier pending batch
-(iter-34→39: advance_xm_wpxp main, clubb_tau, clubb_skewness diagnostics,
-clubb_coefficients) all carry parity/analytic/jit-grad self-validation + the
-iter-41 gold-standard full-main reference-parity test for advance_xm_wpxp;
-re-run opportunistically when building advance_clubb_core touches them.
+**Codex status:** rate limit reset. iter-45 reviewed `compute_pdf_closure`
+(needs-attention→fix→approve, variance-floor leak). iter-46 reviewed
+`advance_clubb_core` + the CAM 3-C2 fix (3 rounds: Kh_zm false-positive verified,
+C2rtthl bug fixed → approve). Earlier pending batch (iter-34→39: advance_xm_wpxp
+main, clubb_tau, clubb_skewness, clubb_coefficients) carry parity/analytic/
+jit-grad self-validation + the iter-41 gold-standard full-main reference-parity
+test for advance_xm_wpxp.
+
+**CAM-vs-ARM caught this iter:** xp2 dp1 dissipation uses 3 distinct C2
+(C2rt/C2thl/C2rtthl); CLUBB-JAX hardwires single C2rt (ARM). Single shared-LHS
+solve valid only when all equal. Pattern reminder: even "shared-LHS" optimizations
+in CLUBB-JAX can encode ARM-specific coefficient-equality assumptions.
