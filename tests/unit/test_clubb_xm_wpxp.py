@@ -504,5 +504,111 @@ def test_clipping_jit_and_grad():
     assert jnp.all(jnp.isfinite(jax.grad(loss)(p["wpxp_preclip"])))
 
 
+# --------------------------------------------------------------------------
+# advance_xm_wpxp main
+# --------------------------------------------------------------------------
+
+def _main_inputs(gr, ng, nzm, seed=20):
+    from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig
+    nzt = nzm - 1
+    rng = np.random.default_rng(seed)
+
+    def zm(s=1.0, b=0.0):
+        return jnp.asarray(b + s * rng.standard_normal((ng, nzm)))
+
+    def zt(s=1.0, b=0.0):
+        return jnp.asarray(b + s * rng.standard_normal((ng, nzt)))
+
+    rho_zm = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzm)))
+    rho_zt = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzt)))
+    return dict(
+        rtm=zt(1e-3, 8e-3), thlm=zt(0.5, 290.0), wprtp=zm(1e-4), wpthlp=zm(1e-2),
+        rtm_forcing=zt(1e-8), thlm_forcing=zt(1e-5),
+        wprtp_forcing=zm(1e-8), wpthlp_forcing=zm(1e-5),
+        C6rt_Skw_fnc=zm(0.5, 4.0), C6thl_Skw_fnc=zm(0.5, 4.0),
+        C7_Skw_fnc=jnp.asarray(0.3 + 0.2 * rng.random((ng, nzm))),
+        invrs_tau_C6_zm=jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm))),
+        sigma_sqd_w=jnp.asarray(0.1 + 0.3 * rng.random((ng, nzm))),
+        wp3_on_wp2_zt=zt(0.1), wp2=jnp.asarray(0.2 + 0.5 * rng.random((ng, nzm))),
+        Kh_zt=jnp.asarray(1.0 + 3.0 * rng.random((ng, nzt))),
+        rtp2=jnp.asarray(1e-7 + 1e-6 * rng.random((ng, nzm))),
+        thlp2=jnp.asarray(0.05 + 0.05 * rng.random((ng, nzm))),
+        rtpthvp=zm(1e-3), thlpthvp=zm(1e-2), thv_ds_zm=zm(1.0, 300.0),
+        wm_zm=zm(0.02), wm_zt=zt(0.02), rho_ds_zm=rho_zm, rho_ds_zt=rho_zt,
+        invrs_rho_ds_zm=1.0 / rho_zm, invrs_rho_ds_zt=1.0 / rho_zt,
+        w_1_zm=zm(0.8), w_2_zm=zm(0.8),
+        varnce_w_1_zm=jnp.asarray(0.05 + 0.5 * rng.random((ng, nzm))),
+        varnce_w_2_zm=jnp.asarray(0.05 + 0.5 * rng.random((ng, nzm))),
+        mixt_frac_zm=jnp.asarray(0.3 + 0.4 * rng.random((ng, nzm))),
+        dt=300.0, gr=gr, config=CLUBBConfig(),
+    )
+
+
+def test_advance_xm_wpxp_runs_and_shapes():
+    gr, ng, nzm = _gr()
+    kw = _main_inputs(gr, ng, nzm)
+    wprtp, rtm, wpthlp, thlm = X.advance_xm_wpxp(**kw)
+    nzt = nzm - 1
+    assert wprtp.shape == (ng, nzm) and rtm.shape == (ng, nzt)
+    assert wpthlp.shape == (ng, nzm) and thlm.shape == (ng, nzt)
+    for f in (wprtp, rtm, wpthlp, thlm):
+        assert np.all(np.isfinite(np.asarray(f)))
+
+
+def test_advance_xm_wpxp_wiring():
+    """Independent wiring check: each pair's output reproduces a from-scratch
+    solve+clip with explicitly-transcribed per-field args (catches swapped
+    xpthvp/C6/forcing/xp2/tol between the rt and thl pairs)."""
+    from legoesm.atmosphere.physics.turbulence.clubb_mfl import (
+        MFL_RTM, MFL_THLM, calc_turb_adv_range)
+    gr, ng, nzm = _gr()
+    kw = _main_inputs(gr, ng, nzm)
+    cfg = kw["config"]
+    p = cfg.params
+    lhs_ta = X.calc_xm_wpxp_ta_terms(kw["sigma_sqd_w"], kw["wp3_on_wp2_zt"],
+                                     kw["rho_ds_zt"], kw["invrs_rho_ds_zm"], gr)
+    sh = X.calc_xm_wpxp_lhs_terms(
+        kw["wm_zm"], kw["wm_zt"], kw["wp2"], p.c_K6 * kw["Kh_zt"], p.nu6,
+        kw["C7_Skw_fnc"], kw["invrs_rho_ds_zm"], kw["rho_ds_zt"], kw["rho_ds_zm"],
+        kw["invrs_rho_ds_zt"], gr)
+    lo, hi = calc_turb_adv_range(kw["w_1_zm"], kw["w_2_zm"], kw["varnce_w_1_zm"],
+                                 kw["varnce_w_2_zm"], kw["mixt_frac_zm"], gr, 300.0)
+
+    def pair(wpxp, xm, wpf, xmf, C6, xpthvp, xp2, mfl, xm_tol, tol_mfl, l_mfl):
+        wp_pre, xm_new = X.solve_xm_wpxp_with_single_lhs(
+            wpxp, xm, wpf, xmf, C6, kw["C7_Skw_fnc"], kw["invrs_tau_C6_zm"], lhs_ta,
+            sh["lhs_diff_zm"], sh["lhs_ma_zm"], sh["lhs_ma_zt"], sh["lhs_ta_xm"],
+            sh["lhs_tp"], sh["lhs_ac_pr2"], kw["thv_ds_zm"], xpthvp, kw["wm_zt"], 300.0, gr)
+        return X.xm_wpxp_clipping_and_stats(
+            mfl, xm_new, wp_pre, xm, xp2, xp2, kw["wp2"], kw["wm_zt"], xmf,
+            kw["rho_ds_zm"], kw["rho_ds_zt"], kw["invrs_rho_ds_zm"], kw["invrs_rho_ds_zt"],
+            xm_tol ** 2, tol_mfl, lo, hi, xm_tol, cfg.flags.fill_holes_type, l_mfl, 300.0, gr)
+
+    exp_rtm, exp_wprtp = pair(kw["wprtp"], kw["rtm"], kw["wprtp_forcing"], kw["rtm_forcing"],
+                              kw["C6rt_Skw_fnc"], kw["rtpthvp"], kw["rtp2"], MFL_RTM,
+                              cfg.rt_tol, 1.0e-4, cfg.flags.l_mono_flux_lim_rtm)
+    exp_thlm, exp_wpthlp = pair(kw["wpthlp"], kw["thlm"], kw["wpthlp_forcing"], kw["thlm_forcing"],
+                                kw["C6thl_Skw_fnc"], kw["thlpthvp"], kw["thlp2"], MFL_THLM,
+                                cfg.thl_tol, 0.2, cfg.flags.l_mono_flux_lim_thlm)
+
+    wprtp, rtm, wpthlp, thlm = X.advance_xm_wpxp(**kw)
+    np.testing.assert_array_equal(np.asarray(rtm), np.asarray(exp_rtm))
+    np.testing.assert_array_equal(np.asarray(wprtp), np.asarray(exp_wprtp))
+    np.testing.assert_array_equal(np.asarray(thlm), np.asarray(exp_thlm))
+    np.testing.assert_array_equal(np.asarray(wpthlp), np.asarray(exp_wpthlp))
+
+
+def test_advance_xm_wpxp_jit_grad():
+    gr, ng, nzm = _gr()
+    kw = _main_inputs(gr, ng, nzm)
+
+    def loss(wprtp):
+        out = X.advance_xm_wpxp(**dict(kw, wprtp=wprtp))
+        return sum(jnp.sum(f ** 2) for f in out)
+
+    assert jnp.isfinite(jax.jit(loss)(kw["wprtp"]))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(kw["wprtp"])))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

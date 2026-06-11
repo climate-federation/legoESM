@@ -24,8 +24,11 @@ import jax.numpy as jnp
 from legoesm.atmosphere.physics.turbulence.clubb_fill_holes import fill_holes_vertical
 from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, ddzt, zm2zt
 from legoesm.atmosphere.physics.turbulence.clubb_mfl import (
+    MFL_RTM,
+    MFL_THLM,
     MFL_UM,
     MFL_VM,
+    calc_turb_adv_range,
     monotonic_turbulent_flux_limit,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_moments import (
@@ -39,6 +42,12 @@ from legoesm.atmosphere.physics.turbulence.clubb_solve import penta_solve
 from legoesm import constants
 
 _GAMMA = 1.5   # gamma_over_implicit_ts (constants_clubb)
+# Monotonic-flux-limiter xm tolerances (constants_clubb):
+_RT_TOL_MFL = 1.0e-4    # [kg/kg]
+_THL_TOL_MFL = 0.2      # [K]
+# Relaxed-clipping variance floors (advance_xm_wpxp; only if l_enable_relaxed_clipping):
+_RTP2_RELAXED_FLOOR = 1.0e-7
+_THLP2_RELAXED_FLOOR = 1.0e-2
 
 
 def _weights_zm2zt(gr: CLUBBGrid):
@@ -334,6 +343,76 @@ def xm_wpxp_solve(lhs, rhs):
     return soln[:, 0::2], soln[:, 1::2]
 
 
+def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
+                    wprtp_forcing, wpthlp_forcing, C6rt_Skw_fnc, C6thl_Skw_fnc,
+                    C7_Skw_fnc, invrs_tau_C6_zm, sigma_sqd_w, wp3_on_wp2_zt,
+                    wp2, Kh_zt, rtp2, thlp2, rtpthvp, thlpthvp, thv_ds_zm,
+                    wm_zm, wm_zt, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm,
+                    invrs_rho_ds_zt, w_1_zm, w_2_zm, varnce_w_1_zm,
+                    varnce_w_2_zm, mixt_frac_zm, dt, gr: CLUBBGrid, config):
+    """Advance the coupled xm/w'x' scalar pairs one step (``advance_xm_wpxp``).
+
+    Faithful port of the core (CAM-default) path of
+    ``advance_xm_wpxp_module.F90:advance_xm_wpxp``: advances rtm/wprtp and
+    thlm/wpthlp. CAM ``l_predict_upwp_vpwp = .false.`` so the wind fluxes
+    upwp/vpwp are NOT advanced here (they are diagnosed; um/vm go through
+    ``advance_windm_edsclrm``). Builds the shared ADG1 TA + LHS operators once
+    (:func:`calc_xm_wpxp_ta_terms` / :func:`calc_xm_wpxp_lhs_terms`), then for
+    each scalar: solve (:func:`solve_xm_wpxp_with_single_lhs`) → per-field
+    clipping (:func:`xm_wpxp_clipping_and_stats`: MFL → fill_holes → clip_covar).
+
+    The skewness-dependent coefficients ``C6rt_Skw_fnc``/``C6thl_Skw_fnc``/
+    ``C7_Skw_fnc`` and ``invrs_tau_C6_zm`` come from the orchestration (CAM
+    ``l_use_C7_Richardson = .false.`` / ``l_diag_Lscale_from_tau = .false.`` make
+    these skewness functions, NOT the ARM Richardson/constant the hard-wired
+    reference uses — so they are explicit inputs here). The MFL turbulent-
+    advection range is field-independent → computed once. Returns
+    ``(wprtp, rtm, wpthlp, thlm)``.
+    """
+    params = config.params
+    flags = config.flags
+    Kw6 = params.c_K6 * Kh_zt
+    nu6 = params.nu6
+    rt_tol, thl_tol, fht = config.rt_tol, config.thl_tol, flags.fill_holes_type
+
+    lhs_ta = calc_xm_wpxp_ta_terms(sigma_sqd_w, wp3_on_wp2_zt, rho_ds_zt,
+                                   invrs_rho_ds_zm, gr)
+    sh = calc_xm_wpxp_lhs_terms(wm_zm, wm_zt, wp2, Kw6, nu6, C7_Skw_fnc,
+                                invrs_rho_ds_zm, rho_ds_zt, rho_ds_zm,
+                                invrs_rho_ds_zt, gr)
+
+    if flags.l_enable_relaxed_clipping:   # CAM default False (static gate)
+        rtp2_clip = jnp.maximum(rtp2, _RTP2_RELAXED_FLOOR)
+        thlp2_clip = jnp.maximum(thlp2, _THLP2_RELAXED_FLOOR)
+    else:
+        rtp2_clip, thlp2_clip = rtp2, thlp2
+
+    # Field-independent MFL reachable-level range (shared by rt/thl).
+    lo, hi = calc_turb_adv_range(w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm,
+                                 mixt_frac_zm, gr, dt)
+
+    def _advance(wpxp, xm, wpxp_forcing, xm_forcing, C6, xpthvp, xp2, xp2_clip,
+                 mfl_id, xm_tol, tol_mfl, field_tol, l_mfl):
+        wpxp_pre, xm_new = solve_xm_wpxp_with_single_lhs(
+            wpxp, xm, wpxp_forcing, xm_forcing, C6, C7_Skw_fnc, invrs_tau_C6_zm,
+            lhs_ta, sh["lhs_diff_zm"], sh["lhs_ma_zm"], sh["lhs_ma_zt"],
+            sh["lhs_ta_xm"], sh["lhs_tp"], sh["lhs_ac_pr2"], thv_ds_zm, xpthvp,
+            wm_zt, dt, gr)
+        return xm_wpxp_clipping_and_stats(
+            mfl_id, xm_new, wpxp_pre, xm, xp2, xp2_clip, wp2, wm_zt, xm_forcing,
+            rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
+            xm_tol ** 2, tol_mfl, lo, hi, field_tol, fht, l_mfl, dt, gr)
+
+    rtm_new, wprtp_new = _advance(
+        wprtp, rtm, wprtp_forcing, rtm_forcing, C6rt_Skw_fnc, rtpthvp, rtp2,
+        rtp2_clip, MFL_RTM, rt_tol, _RT_TOL_MFL, rt_tol, flags.l_mono_flux_lim_rtm)
+    thlm_new, wpthlp_new = _advance(
+        wpthlp, thlm, wpthlp_forcing, thlm_forcing, C6thl_Skw_fnc, thlpthvp, thlp2,
+        thlp2_clip, MFL_THLM, thl_tol, _THL_TOL_MFL, thl_tol, flags.l_mono_flux_lim_thlm)
+
+    return wprtp_new, rtm_new, wpthlp_new, thlm_new
+
+
 __all__ = [
     "xm_term_ta_lhs",
     "wpxp_term_tp_lhs",
@@ -349,4 +428,5 @@ __all__ = [
     "solve_xm_wpxp_with_single_lhs",
     "xm_wpxp_clipping_and_stats",
     "diagnose_upxp",
+    "advance_xm_wpxp",
 ]

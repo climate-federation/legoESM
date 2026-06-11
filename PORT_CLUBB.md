@@ -89,7 +89,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_moments.py` | `advance_windm_edsclrm` ✅12; xp2_xpyp builders/TA/combiners ✅13-19; **`advance_xp2_xpyp` main** (full 5-moment advance, round-off parity) ✅20 | ✅ |
 | `clubb_wp23.py` | coupled wp2/wp3 penta advance: 8 LHS + 9 RHS builders ✅21-22; `wp23_rhs/lhs/solve` ✅23; `compute_a1_a3_coef`/`compute_skw_fnc` ✅24; `clip_skewness` ✅25; **`advance_wp2_wp3` main** ✅26 (composition round-off parity; **CAM uses UPWIND wp3 MA** — `l_upwind_xm_ma=True`) | ✅ |
 | `clubb_fill_holes.py` | `fill_holes_*` ✅19; `fill_holes_wp2_from_horz_tke` (TKE-conserving wp2 fill, CAM) ✅25 | ✅ |
-| `clubb_xm_wpxp.py` | coupled xm/wpxp advance: 5 builders ✅27; `xm_wpxp_lhs/rhs/solve` ✅28; centered TA + `calc_xm_wpxp_ta_terms/lhs_terms` + `diagnose_upxp` ✅29; `solve_xm_wpxp_with_single_lhs` + `xm_wpxp_clipping_and_stats` ✅33 (parity; CAM `l_pos_def=False` → pos_definite_adj not ported); `advance_xm_wpxp` main ☐ | 🟡 P5 |
+| `clubb_xm_wpxp.py` | coupled xm/wpxp advance: builders + assembly ✅27-28; TA/LHS pre-computes + `diagnose_upxp` ✅29; `solve_xm_wpxp_with_single_lhs` + `xm_wpxp_clipping_and_stats` ✅33; **`advance_xm_wpxp` main** (rtm/wprtp + thlm/wpthlp; CAM `l_predict_upwp_vpwp=False`; C6/C7_Skw_fnc as inputs) ✅34 (wiring check + sub-piece parity; codex pending rate-limit) | ✅ |
 | `clubb_mfl.py` | monotonic-flux-limiter JAX port: erf velocity + `mfl_xm_*` ✅30; `calc_turb_adv_range` (masked `fori_loop`) ✅31; **`monotonic_turbulent_flux_limit`** core (masked windowed min/max + `lax.scan` sequential clip + xm re-solve + top spike-fix, round-off parity all 4 fields, differentiable) ✅32 | ✅ |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
@@ -148,13 +148,11 @@ finite gradients in float32 + float64.
 above, which is the live builder ledger. Key per-module CAM-vs-ARM caveats are
 recorded in each module's docstring.)*
 
-**Done so far (the 3 prognostic advances + their machinery):**
+**Done so far — ALL 4 prognostic advances + their machinery:**
 `advance_windm_edsclrm` (u/v) ✅, `advance_xp2_xpyp` (5 moments) ✅,
-`advance_wp2_wp3` (wp2/wp3 penta) ✅ — all with round-off composition parity.
-`advance_xm_wpxp` (rtm/thlm + wprtp/wpthlp): all builders + assembly/solve +
-TA/LHS pre-computes ✅; clipping + main ☐. All clips ported
-(`fill_holes*`/`clip_variance`/`clip_covar`/`clip_skewness`) + the MFL JAX
-helpers ✅.
+`advance_wp2_wp3` (wp2/wp3 penta) ✅, `advance_xm_wpxp` (rtm/thlm + wprtp/wpthlp)
+✅ — all with round-off/composition parity. All clips
+(`fill_holes*`/`clip_variance`/`clip_covar`/`clip_skewness`) + the full MFL ✅.
 
 **CAM-vs-ARM rule of thumb (verified the hard way):** CLUBB-JAX is wired for ARM.
 For each module re-check the CAM namelist/Fortran. Caught so far: wp2/wp3 use
