@@ -115,6 +115,18 @@ class FluxFeedbackConfig(NamedTuple):
     literal ``−1.8`` only to ~4.6e-14 (float representation of the
     subtraction). It selects a comparison branch, so the gap is physically
     inert; documented for bit-level oracle work.
+
+    Penetrative shortwave (Veros global_flexible / global_1deg ``qsol``):
+    with ``penetrative_shortwave=True`` the scheme consumes the optional
+    ``OceanSurfaceForcing.q_solar`` channel [W/m²] and deposits it through
+    the water column via the SHARED two-band Jerlov kernel
+    (``shortwave_penetration_tendency``; ``shortwave_water_type="I"`` is
+    exactly the Veros literals R=0.58, ζ1=0.35 m, ζ2=23.0 m), converted with
+    THIS config's ``c_sw``/``rho_0`` (Veros cp_0 ownership — not the eos
+    module global).  Heat-ownership contract + ice gating are documented on
+    ``OceanSurfaceForcing.q_solar``.  Passing ``q_solar`` while
+    ``penetrative_shortwave=False`` raises (never a silent top-cell fallback
+    or a silently ignored channel).
     """
     c_sw: float = constants.c_sw        # seawater specific heat [J/(kg·K)] — see note
     rho_0: float = constants.rho_ocean  # Boussinesq reference density [kg/m³]
@@ -125,6 +137,13 @@ class FluxFeedbackConfig(NamedTuple):
     # Minimum top-cell thickness [m] discriminating ocean vs land columns
     # (same convention as PrescribedForcingConfig).
     min_wet_cell_thickness_m: float = 1.0e-3
+    # Penetrative-shortwave channel (Veros global_flexible/global_1deg qsol):
+    # consume OceanSurfaceForcing.q_solar through the shared two-band Jerlov
+    # column.  OFF by default ⇒ bit-identical existing paths.
+    penetrative_shortwave: bool = False
+    # Jerlov water type for the q_solar column ("I" ≡ the Veros setup
+    # literals 0.58/0.35/23.0; see shortwave_penetration.JERLOV_TYPES).
+    shortwave_water_type: str = "I"
 
 
 class BulkFormulaConfig(NamedTuple):

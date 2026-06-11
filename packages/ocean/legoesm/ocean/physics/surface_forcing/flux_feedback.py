@@ -46,12 +46,38 @@ solve (``surface_tracer_forcing_fn`` seam, ``ocean_pe_latlon_cgrid.py`` stage
 10b''), matching Veros's implicit placement.  Masking semantics are unchanged
 by the routing: the ice mask is applied to the RATE inside this scheme, before
 the seam multiplies by the land mask.
+
+Penetrative shortwave (``FluxFeedbackConfig.penetrative_shortwave``, the Veros
+global_flexible / global_1deg ``qsol`` channel — set_forcing_kernel solar
+block, global_flexible.py:392-405 / global_1deg.py:333-346): the optional
+``OceanSurfaceForcing.q_solar`` [W/m²] is deposited through the FULL column
+via the shared two-band Jerlov kernel (``shortwave_penetration_tendency``,
+type "I" ≡ the Veros literals 0.58/0.35/23.0), converted with cfg's
+``c_sw``/``rho_0``.  Heat-ownership contract: ``q_prescribed`` then carries
+the NON-SOLAR remainder only (legoESM I(0)=1 full-deposition convention; the
+Veros pen(0)=0 zero-column-sum redistribution on the solar-inclusive qnet is
+cell-by-cell algebraically identical — see ``OceanSurfaceForcing.q_solar``).
+The ice mask is evaluated on the TOTAL flux (non-solar + feedback + solar,
+matching Veros's ``forc_temp_surface`` whose qnet includes solar) and zeroes
+the surface deposit AND the full solar column (Veros ``ice[..., None]``).
+The column rate flows through the SAME implicit/explicit placement seam as
+the surface heat: under ``surface_forcing_implicit=True`` it reaches the
+solve input at weight 1.0 — Veros's forward-Euler-at-taup1-before-vmix
+``temp_source`` placement (thermodynamics.py:419 → diffusion.py:142).
+Per-column seafloor masking (Veros ``maskT``) is the caller-supplied
+``wet_3d``; the W/m²→K/s division uses the REFERENCE dz (Veros divides by the
+full ``dzt`` too — Veros has no partial cells, and the 4deg-recipe kbot snap
+makes columns full cells).
 """
 
 from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm.ocean.physics.shortwave_penetration import (
+    ShortwavePenetrationConfig,
+    shortwave_penetration_tendency,
+)
 from legoesm.ocean.physics.surface_forcing.config import FluxFeedbackConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 
@@ -68,22 +94,30 @@ __physics_contract__ = {
         "T": "degC",
         "S": "PSU",
         "dz_0": "m (actual top-layer thickness; 0 on land)",
-        "surface_forcing.q_prescribed": "W/m^2 (positive into ocean)",
+        "surface_forcing.q_prescribed": "W/m^2 (positive into ocean; NON-solar when q_solar given)",
         "surface_forcing.q_feedback": "W/m^2/K (>=0 damps SST anomalies)",
         "surface_forcing.T_feedback_target": "degC",
         "surface_forcing.S_restore_target": "PSU",
+        "surface_forcing.q_solar": "W/m^2 (positive into ocean; penetrative Jerlov column)",
         "cfg.c_sw": "J/(kg K)",
         "cfg.rho_0": "kg/m^3",
         "cfg.tau_restore_s": "s",
         "cfg.ice_threshold_C": "degC",
+        "dz_ref": "m", "z_half_ref": "m", "jacobian": "1", "wet_3d": "1",
     },
-    "outputs": {"dT_dt": "K/s (surface layer only)", "dS_dt": "PSU/s (surface layer only)"},
+    "outputs": {
+        "dT_dt": "K/s (surface layer; plus the full Jerlov column when q_solar is given)",
+        "dS_dt": "PSU/s (surface layer only)",
+    },
     "sign_convention": (
         "Heat flux positive INTO the ocean = surface warming (dT_dt > 0); the "
         "feedback term q_feedback*(T_target - T_surf) warms when the surface is "
         "colder than the target; salinity restoring drives S toward the target. "
-        "Ice mask zeroes BOTH tendencies where (T_surf < ice_threshold_C) AND "
-        "(net heat flux < 0)."
+        "Ice mask zeroes BOTH tendencies (and the solar column) where "
+        "(T_surf < ice_threshold_C) AND (total heat flux incl. q_solar < 0). "
+        "q_solar >= 0 deposits 100% of its energy in the wet column "
+        "(rho_0*c_sw*sum_k dz_k*dT_k == q_solar on full-depth columns, the "
+        "shared Jerlov kernel's closure)."
     ),
     # Boundary source/sink of heat and salt by construction (air-sea exchange
     # + restoring): interior-conservation does not apply.
@@ -92,13 +126,20 @@ __physics_contract__ = {
     "reference": (
         "Veros global_4deg set_forcing_kernel "
         "(veros/setups/global_4deg/global_4deg.py:249-266) + implicit source "
-        "placement in veros/core/thermodynamics.py:276-282."
+        "placement in veros/core/thermodynamics.py:276-282; penetrative solar: "
+        "global_flexible.py:292-301,392-405 / global_1deg.py:229-240,333-346 "
+        "(qsol * divpen_shortwave * ice * maskT / cp_0 / rho_0, applied at "
+        "taup1 pre-vmix via thermodynamics.py:419 -> diffusion.py:142)."
     ),
     "idealized_test": (
         "All channels None -> zero tendencies; uniform q_prescribed=Q with "
         "q_feedback=0 -> dT_dt = Q/(rho_0 c_sw dz_0) in every wet surface cell; "
         "T_surf = T_target and S_surf = S_target -> only the prescribed part "
-        "remains; cold surface (T < -1.8 degC) under cooling -> both zeroed."
+        "remains; cold surface (T < -1.8 degC) under cooling -> both zeroed. "
+        "Solar channel (tests/ocean/unit/test_flux_feedback_solar.py): Jerlov "
+        "column vs hand two-band exponential, exact column heat closure, ice "
+        "quadrants gating the full column, Veros global-setup kernel replica "
+        "to 1e-14, double-count guards, implicit/explicit placement equality."
     ),
 }
 
@@ -109,6 +150,11 @@ def flux_feedback_surface_forcing(
     dz_0: jnp.ndarray,
     surface_forcing,
     cfg: FluxFeedbackConfig,
+    *,
+    dz_ref: jnp.ndarray | None = None,
+    z_half_ref: jnp.ndarray | None = None,
+    jacobian: jnp.ndarray | None = None,
+    wet_3d: jnp.ndarray | None = None,
 ) -> SurfaceForcingOutput:
     """Compute the flux+feedback surface tracer forcing rates.
 
@@ -127,16 +173,33 @@ def flux_feedback_surface_forcing(
         so only the standalone ``Q_net`` diagnostic differs over land.
     surface_forcing : OceanSurfaceForcing or None
         Carries ``q_prescribed`` / ``q_feedback`` / ``T_feedback_target`` /
-        ``S_restore_target`` (any may be None ⇒ that term is inert).
+        ``S_restore_target`` / ``q_solar`` (any may be None ⇒ that term is
+        inert; ``q_solar`` additionally requires
+        ``cfg.penetrative_shortwave=True`` and the column arguments below).
     cfg : FluxFeedbackConfig
+    dz_ref : array, shape (nlev,), optional
+        Reference layer thicknesses [m] for the q_solar Jerlov column
+        (``z_coord.dz_ref``).  Required iff the solar channel is active.
+    z_half_ref : array, shape (nlev+1,), optional
+        Reference interface depths [m, negative; z_half_ref[0]=0]
+        (``z_coord.z_half_ref``).  Required iff the solar channel is active.
+    jacobian : array, shape (...), optional
+        z* column Jacobian (eta + H)/H (``compute_ocean_jacobian``; ≡ 1
+        under a rigid lid).  Required iff the solar channel is active.
+    wet_3d : array, shape (..., nlev), optional
+        Per-cell wet mask in {0,1} (Veros maskT; e.g.
+        ``compute_layer_thickness(...) > 0``) zeroing the solar deposit
+        below the local seafloor.  Required iff the solar channel is active.
 
     Returns
     -------
     SurfaceForcingOutput
-        ``dT_dt`` [K/s] / ``dS_dt`` [PSU/s] non-zero only in the surface
-        layer; ``du_dt``/``dv_dt`` are zero (wind stress is a separate
+        ``dT_dt`` [K/s] non-zero in the surface layer (plus the full Jerlov
+        column when ``q_solar`` is active); ``dS_dt`` [PSU/s] surface layer
+        only; ``du_dt``/``dv_dt`` are zero (wind stress is a separate
         channel).  ``Q_net`` carries the ice-masked total heat flux [W/m²]
-        as a diagnostic.
+        (including ``q_solar``, 100% of which enters the column) as a
+        diagnostic.
     """
     nlev = T.shape[-1]
     dtype = T.dtype
@@ -151,7 +214,24 @@ def flux_feedback_surface_forcing(
     q_f = getattr(surface_forcing, "q_feedback", None) if surface_forcing else None
     T_t = getattr(surface_forcing, "T_feedback_target", None) if surface_forcing else None
     S_t = getattr(surface_forcing, "S_restore_target", None) if surface_forcing else None
+    q_sol = getattr(surface_forcing, "q_solar", None) if surface_forcing else None
 
+    if q_sol is not None and not cfg.penetrative_shortwave:
+        raise ValueError(
+            "flux_feedback: q_solar was provided but "
+            "FluxFeedbackConfig.penetrative_shortwave is False — the channel "
+            "would be silently ignored (and a top-cell fallback would change "
+            "the heat-ownership contract). Set penetrative_shortwave=True or "
+            "fold the solar flux into q_prescribed."
+        )
+    if q_sol is not None and (
+        dz_ref is None or z_half_ref is None or jacobian is None or wet_3d is None
+    ):
+        raise ValueError(
+            "flux_feedback: the q_solar penetrative-shortwave column requires "
+            "dz_ref, z_half_ref, jacobian and wet_3d (supplied by the "
+            "make_surface_forcing_physics factory from z_coord/state)."
+        )
     if q_f is not None and T_t is None:
         raise ValueError(
             "flux_feedback: q_feedback requires T_feedback_target "
@@ -189,6 +269,28 @@ def flux_feedback_surface_forcing(
     ).astype(dtype)
     dT_top = q_total * inv_rho_csw_dz
 
+    # --- Penetrative solar column [K/s] (Veros qsol·divpen·maskT/cp_0/rho_0):
+    #     100% of q_solar through the SHARED two-band Jerlov kernel (type "I"
+    #     ≡ the Veros literals), cfg-pinned cp/rho_0, per-cell wet (maskT)
+    #     gating.  Python-if on channel None-ness (static pytree structure):
+    #     the default path is structurally untouched. ---
+    if q_sol is not None:
+        q_sol_m = jnp.asarray(q_sol, dtype) * mask
+        dT_solar = shortwave_penetration_tendency(
+            q_sol_m,
+            jnp.asarray(dz_ref, dtype),
+            jnp.asarray(z_half_ref, dtype),
+            jnp.asarray(jacobian, dtype),
+            ShortwavePenetrationConfig(
+                scheme="jerlov_2band", water_type=cfg.shortwave_water_type,
+            ),
+            rho_0=cfg.rho_0,
+            c_sw=cfg.c_sw,
+        ) * jnp.asarray(wet_3d, dtype)
+    else:
+        q_sol_m = None
+        dT_solar = None
+
     # --- SSS restoring [PSU/s]: Veros's ×dzt[-1] (setup) / ÷dzt[-1] (core)
     #     cancel exactly ⇒ the plain rate. ---
     if S_t is not None:
@@ -197,18 +299,29 @@ def flux_feedback_surface_forcing(
         dS_top = zT
 
     # --- Simple ice mask (Veros order: evaluated on the PRE-ZEROING heat
-    #     flux; zeroes BOTH heat and salt).  State-dependent ⇒ jnp.where. ---
+    #     flux; zeroes BOTH heat and salt).  The mask quantity is the TOTAL
+    #     flux INCLUDING q_solar: Veros's ``forc_temp_surface > 0`` uses the
+    #     solar-inclusive qnet, and the open-water indicator multiplies the
+    #     full 3-D solar source (``ice[..., None]``).  State-dependent ⇒
+    #     jnp.where. ---
     if cfg.ice_mask:
+        q_for_ice = q_total if q_sol_m is None else q_total + q_sol_m
         ice = jnp.logical_and(
-            T_surf * mask < cfg.ice_threshold_C, q_total < 0.0
+            T_surf * mask < cfg.ice_threshold_C, q_for_ice < 0.0
         )
         dT_top = jnp.where(ice, 0.0, dT_top)
         dS_top = jnp.where(ice, 0.0, dS_top)
         q_total = jnp.where(ice, 0.0, q_total)
+        if dT_solar is not None:
+            dT_solar = jnp.where(ice[..., None], 0.0, dT_solar)
+            q_sol_m = jnp.where(ice, 0.0, q_sol_m)
 
     pad_T = ((0, 0),) * (len(shape_3d) - 1)
     dT_dt = jnp.pad(dT_top[..., None], (*pad_T, (0, nlev - 1)))
     dS_dt = jnp.pad(dS_top[..., None], (*pad_T, (0, nlev - 1)))
+    if dT_solar is not None:
+        dT_dt = dT_dt + dT_solar
+        q_total = q_total + q_sol_m  # Q_net diagnostic = true total heat in
     z3 = jnp.zeros(shape_3d, dtype=dtype)
 
     return SurfaceForcingOutput(
