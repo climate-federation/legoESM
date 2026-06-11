@@ -511,7 +511,7 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
     if config.gravity_wave_drag.scheme != "none":
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, "spectral_pe", dt), True, "gwd_spectrum"))
 
-    def physics_fn(state, grid, sigma_coord, phys_state=None):
+    def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
         if not tagged_fns:
             zero_3d = jnp.zeros_like(state.vor_hat.data)
             zero_2d = jnp.zeros_like(state.lnps_hat.data)
@@ -534,8 +534,10 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
         phys_updates = {}
 
         fn0, accepts_ps, field_name = tagged_fns[0]
+        _fwd0 = ({"forcing": forcing}
+                 if getattr(fn0, "_wants_forcing", False) else {})
         if accepts_ps:
-            first, field_val = fn0(state, grid, sigma_coord, grid_fields=shared_fields, phys_state=phys_state)
+            first, field_val = fn0(state, grid, sigma_coord, grid_fields=shared_fields, phys_state=phys_state, **_fwd0)
             if field_val is not None and field_name is not None:
                 # Multi-field updates (e.g., Bechtold's conv_prog_profile
                 # and conv_stoch_state) are returned as a dict, which
@@ -545,7 +547,7 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
                 else:
                     phys_updates[field_name] = field_val
         else:
-            first = fn0(state, grid, sigma_coord, grid_fields=shared_fields)
+            first = fn0(state, grid, sigma_coord, grid_fields=shared_fields, **_fwd0)
         vor_hat = first.vor_hat.data
         div_hat = first.div_hat.data
         T_hat = first.T_hat.data
@@ -567,8 +569,10 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
             }
 
         for fn, accepts_ps, field_name in tagged_fns[1:]:
+            _fwd = ({"forcing": forcing}
+                    if getattr(fn, "_wants_forcing", False) else {})
             if accepts_ps:
-                t, field_val = fn(state, grid, sigma_coord, grid_fields=shared_fields, phys_state=phys_state)
+                t, field_val = fn(state, grid, sigma_coord, grid_fields=shared_fields, phys_state=phys_state, **_fwd)
                 if field_val is not None and field_name is not None:
                     # Match the first-iteration branch: dict updates
                     # (e.g., Bechtold's conv_prog_profile +
@@ -580,7 +584,7 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
                     else:
                         phys_updates[field_name] = field_val
             else:
-                t = fn(state, grid, sigma_coord, grid_fields=shared_fields)
+                t = fn(state, grid, sigma_coord, grid_fields=shared_fields, **_fwd)
             vor_hat = vor_hat + t.vor_hat.data
             div_hat = div_hat + t.div_hat.data
             T_hat = T_hat + t.T_hat.data
@@ -660,6 +664,12 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
     physics_fn.reset_state = reset_state
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override
+    # Marker: the combined fn consumes a per-step traced ``forcing``
+    # dict when any sub-physics advertises ``_wants_forcing`` (currently
+    # the spectral_pe radiation factory: T_sfc/o3_vmr/aerosol_od/ghg_vmr).
+    physics_fn._wants_forcing = any(
+        getattr(fn, "_wants_forcing", False) for fn, _, _ in tagged_fns
+    )
     return physics_fn
 
 

@@ -536,6 +536,45 @@ class RRTMGP:
       q_v = q_v.astype(_table_dtype)
       sfc_temperature = jnp.asarray(sfc_temperature).astype(_table_dtype)
       cos_zenith = jnp.asarray(cos_zenith).astype(_table_dtype)
+      # Optional external-forcing arrays must match the working dtype
+      # too: under ``compute_fp32`` a float64 ozone / aerosol column
+      # (built by the driver under JAX x64) would re-promote the optical
+      # depth and break the RTE ``lax.scan`` carry dtype — exactly the
+      # PR #343 leak class, resurfaced when the MPAS/spectral paths
+      # started threading per-step o3_vmr / aerosol_od (2026-06-10).
+      if o3_vmr is not None:
+          o3_vmr = jnp.asarray(o3_vmr).astype(_table_dtype)
+      if aerosol_optical_depth is not None:
+          aerosol_optical_depth = jnp.asarray(
+              aerosol_optical_depth).astype(_table_dtype)
+      if aerosol_absorption_optical_depth_lw is not None:
+          aerosol_absorption_optical_depth_lw = jnp.asarray(
+              aerosol_absorption_optical_depth_lw).astype(_table_dtype)
+      if cloud_path_liq is not None:
+          cloud_path_liq = jnp.asarray(cloud_path_liq).astype(_table_dtype)
+      if cloud_path_ice is not None:
+          cloud_path_ice = jnp.asarray(cloud_path_ice).astype(_table_dtype)
+      if cloud_r_eff_liq is not None:
+          cloud_r_eff_liq = jnp.asarray(cloud_r_eff_liq).astype(_table_dtype)
+      if cloud_r_eff_ice is not None:
+          cloud_r_eff_ice = jnp.asarray(cloud_r_eff_ice).astype(_table_dtype)
+      if cloud_fraction is not None:
+          cloud_fraction = jnp.asarray(cloud_fraction).astype(_table_dtype)
+      if ghg_vmr_override is not None:
+          # Cast every numeric override (array, Python float/int, list)
+          # to the working dtype; only floating leaves are retyped so
+          # integer flags (if any ever appear) pass through unchanged.
+          def _cast_ghg(v):
+              arr = jnp.asarray(v)
+              if jnp.issubdtype(arr.dtype, jnp.floating):
+                  return arr.astype(_table_dtype)
+              return arr
+          ghg_vmr_override = {
+              k: _cast_ghg(v) for k, v in ghg_vmr_override.items()
+          }
+      if solar_spectral_fraction is not None:
+          solar_spectral_fraction = jnp.asarray(
+              solar_spectral_fraction).astype(_table_dtype)
 
       # --- 1. Reshape (ncol, nlev) -> (ncol, 1, nlev+2) with halos ---
       T_3d = _add_halos(T[:, None, ::-1])

@@ -145,6 +145,15 @@ class DycoreConfig(NamedTuple):
     # Default ``"ssp_rk3"`` preserves bit-equivalent behaviour for
     # the existing scientific validation suite.  ``"ssp_rk3_scan"``
     # is the opt-in for production at scale.
+    #
+    # ``"auto"`` (the run_amip CLI default since 2026-06-10) selects
+    # each dycore's own stable default in ``component_factory``:
+    # cube / lat-lon keep ``ssp_rk3``; MPAS gets ``ssp_rk54_scan``
+    # (its biharmonic hyperdiffusion eigenvalues at production dt fall
+    # outside the ssp_rk3 stability region — the former "hidden CFL"
+    # blow-up); spectral keeps ``ssp_rk54``.  Any explicit scheme name
+    # (including ``ssp_rk3`` on MPAS) is forwarded verbatim, so
+    # deliberate integrator-sensitivity runs are still possible.
     time_integrator: str = "ssp_rk3"
 
 
@@ -238,6 +247,12 @@ class ExperimentConfig(NamedTuple):
     # Clouds & Microphysics
     cloud_scheme: str = "none"
     microphysics: str = "none"
+    # Aerosol-CCN coupling: diagnose the specified cloud-droplet number
+    # from the prescribed aerosol optical depth (Andreae 2009 AOT–CCN
+    # inversion) instead of the scheme's constant Nc_0.  Requires
+    # aerosol_forcing="external" and a specified-Nc double-moment
+    # microphysics (morrison); validated in build_physics_pipeline.
+    nc_from_aerosol: bool = False
 
     # Convection / Turbulence / GWD
     convection: str = "sbm"            # sbm, dca, kuo, mass_flux, edmf, none

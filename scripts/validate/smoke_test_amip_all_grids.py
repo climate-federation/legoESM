@@ -64,15 +64,18 @@ _GRID_RESOLUTIONS = {
     # MPAS-specific overrides:
     # - ``--turbulence none``: the TKE bridge isn't implemented (TKE
     #   expects cell-centered winds; MPAS stores edge-normal winds).
-    # - ``--dt 60``: the MPAS hydrostatic dycore is unstable at the
-    #   default 600 s step *despite* the CFL diagnostic reporting 0.09.
-    #   Empirically dt=60 s holds at level=4 for at least 1 day; the
-    #   dt-vs-stability discrepancy is tracked in AMIP.md "Known
-    #   issues" #2 (MPAS dycore stability — hidden CFL constraint).
+    #
+    # The historical ``--dt 60`` workaround ("hidden CFL constraint",
+    # AMIP.md Known issues #2) is RESOLVED 2026-06-10: the instability
+    # was the run_amip global ``--time-integrator ssp_rk3`` default
+    # silently overriding the MPAS dycore's ssp_rk54_scan default —
+    # the biharmonic hyperdiffusion eigenvalues at dt=600 fall outside
+    # ssp_rk3's stability region (primitive_eq_mpas.py stability
+    # notes).  ``component_factory`` now maps the no-choice default to
+    # the MPAS dycore default, so the standard dt=600 holds.
     "voronoi":          dict(grid_type="voronoi",        resolution=4,
                               discretization="mpas",
-                              extra=["--turbulence", "none",
-                                      "--dt", "60"]),
+                              extra=["--turbulence", "none"]),
 }
 
 
