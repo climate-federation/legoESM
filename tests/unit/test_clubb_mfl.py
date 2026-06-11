@@ -175,6 +175,109 @@ def test_turb_adv_range_parity():
             np.testing.assert_array_equal(np.asarray(mhi), np.asarray(rhi))
 
 
+def _limiter_inputs(gr, ng, nzm, solve_type="rtm", seed=8):
+    nzt = nzm - 1
+    rng = np.random.default_rng(seed)
+    base = 290.0 if solve_type in ("rtm", "thlm") else 0.0
+    xm = jnp.asarray(base + 2.0 * rng.standard_normal((ng, nzt)))
+    rho_zm = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzm)))
+    rho_zt = jnp.asarray(1.0 + 0.1 * rng.random((ng, nzt)))
+    w1 = jnp.asarray(0.8 * rng.standard_normal((ng, nzm)))
+    w2 = jnp.asarray(0.8 * rng.standard_normal((ng, nzm)))
+    v1 = jnp.asarray(0.05 + 0.5 * rng.random((ng, nzm)))
+    v2 = jnp.asarray(0.05 + 0.5 * rng.random((ng, nzm)))
+    mf = jnp.asarray(0.3 + 0.4 * rng.random((ng, nzm)))
+    lo, hi = M.calc_turb_adv_range(w1, w2, v1, v2, mf, gr, 300.0)
+    thr, tol = (1e-9, 1e-4) if solve_type in ("rtm",) else (1e-4, 0.2)
+    return dict(
+        solve_type=solve_type, xm=xm,
+        xm_old=jnp.asarray(np.asarray(xm) + 0.1 * rng.standard_normal((ng, nzt))),
+        wpxp=jnp.asarray(0.5 * rng.standard_normal((ng, nzm))),
+        xp2=jnp.asarray(0.01 + 0.5 * rng.random((ng, nzm))),
+        wm_zt=jnp.asarray(0.02 * rng.standard_normal((ng, nzt))),
+        xm_forcing=jnp.asarray(1e-4 * rng.standard_normal((ng, nzt))),
+        rho_ds_zm=rho_zm, rho_ds_zt=rho_zt,
+        invrs_rho_ds_zm=1.0 / rho_zm, invrs_rho_ds_zt=1.0 / rho_zt,
+        xp2_threshold=thr, xm_tol=tol, low_lev_effect=lo, high_lev_effect=hi,
+        gr=gr, dt=300.0,
+    )
+
+
+def test_limiter_matches_golden():
+    gr, ng, nzm = _gr()
+    p = _limiter_inputs(gr, ng, nzm)
+    xm, wpxp = M.monotonic_turbulent_flux_limit(**p)
+    g = np.load(_FIX / "clubb_mfl_limiter_golden.npz")
+    np.testing.assert_allclose(np.asarray(xm), g["xm"], rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(wpxp), g["wpxp"], rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_limiter_parity():
+    """Round-off parity vs the host-numpy limiter for all 4 field types."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.mono_flux_limiter as R  # noqa: N812
+    for st in ("rtm", "thlm", "um", "vm"):
+        gr, ng, nzm = _gr(ng=3, nzt=14)
+        rg = _refgr(gr, ng, nzm)
+        p = _limiter_inputs(gr, ng, nzm, solve_type=st, seed=hash(st) % 100)
+        xm, wpxp = M.monotonic_turbulent_flux_limit(**p)
+        rxm, rwp = R._monotonic_turbulent_flux_limit_numpy(
+            st, np.asarray(p["xm"]), np.asarray(p["wpxp"]), np.asarray(p["xm_old"]),
+            np.asarray(p["xp2"]), np.asarray(p["wm_zt"]), np.asarray(p["xm_forcing"]),
+            np.asarray(p["rho_ds_zm"]), np.asarray(p["rho_ds_zt"]),
+            np.asarray(p["invrs_rho_ds_zm"]), np.asarray(p["invrs_rho_ds_zt"]),
+            p["xp2_threshold"], p["xm_tol"], np.asarray(p["low_lev_effect"]),
+            np.asarray(p["high_lev_effect"]), rg, 300.0)
+        np.testing.assert_allclose(np.asarray(xm), np.asarray(rxm), rtol=1e-9, atol=1e-10)
+        np.testing.assert_allclose(np.asarray(wpxp), np.asarray(rwp), rtol=1e-9, atol=1e-10)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_limiter_nan_xp2_matches_reference():
+    """With a NaN variance the AD-safe sqrt must match the reference (no
+    masking-to-0 that would clip with spurious finite bounds) — codex review.
+    A NaN variance makes the level bounds NaN, so the clip comparisons are False
+    and the flux is left unchanged in BOTH implementations."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.mono_flux_limiter as R  # noqa: N812
+    gr, ng, nzm = _gr(ng=3, nzt=14)
+    rg = _refgr(gr, ng, nzm)
+    p = _limiter_inputs(gr, ng, nzm, solve_type="thlm", seed=1)
+    xp2 = np.asarray(p["xp2"]).copy()
+    xp2[0, 3] = np.nan
+    p = dict(p, xp2=jnp.asarray(xp2))
+    xm, wpxp = M.monotonic_turbulent_flux_limit(**p)
+    rxm, rwp = R._monotonic_turbulent_flux_limit_numpy(
+        "thlm", np.asarray(p["xm"]), np.asarray(p["wpxp"]), np.asarray(p["xm_old"]),
+        xp2, np.asarray(p["wm_zt"]), np.asarray(p["xm_forcing"]),
+        np.asarray(p["rho_ds_zm"]), np.asarray(p["rho_ds_zt"]),
+        np.asarray(p["invrs_rho_ds_zm"]), np.asarray(p["invrs_rho_ds_zt"]),
+        p["xp2_threshold"], p["xm_tol"], np.asarray(p["low_lev_effect"]),
+        np.asarray(p["high_lev_effect"]), rg, 300.0)
+    # finite entries match (round-off); NaN pattern matches
+    m_x, r_x = np.asarray(xm), np.asarray(rxm)
+    np.testing.assert_array_equal(np.isnan(m_x), np.isnan(r_x))
+    fin = ~np.isnan(m_x)
+    np.testing.assert_allclose(m_x[fin], r_x[fin], rtol=1e-9, atol=1e-10)
+
+
+def test_limiter_jit_and_grad():
+    gr, ng, nzm = _gr()
+    p = _limiter_inputs(gr, ng, nzm)
+
+    def loss(wpxp):
+        xm, wp = M.monotonic_turbulent_flux_limit(**dict(p, wpxp=wpxp))
+        return jnp.sum(xm ** 2) + jnp.sum(wp ** 2)
+
+    assert jnp.isfinite(jax.jit(loss)(p["wpxp"]))
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(p["wpxp"])))
+
+
 def test_jit_and_grad():
     gr, ng, nzm = _gr()
     p = _vel_inputs(ng, nzm)

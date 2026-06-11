@@ -24,7 +24,7 @@ import math
 
 import jax
 import jax.numpy as jnp
-from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid
+from legoesm.atmosphere.physics.turbulence.clubb_grid import CLUBBGrid, zm2zt, zt2zm
 from legoesm.atmosphere.physics.turbulence.clubb_moments import term_ma_zt_lhs_upwind
 from legoesm.atmosphere.physics.turbulence.clubb_solve import tridiag_solve
 
@@ -34,6 +34,21 @@ _MAX_XP2 = {MFL_RTM: 5.0e-6, MFL_THLM: 5.0, MFL_UM: 10.0, MFL_VM: 10.0}
 
 _SQRT_2 = math.sqrt(2.0)
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
+_F64_EPS = float(jnp.finfo(jnp.float64).eps)
+
+
+def _safe_sqrt(x):
+    """AD-safe ``sqrt`` with a finite gradient at ``x<=0``, propagating NaN.
+
+    ``sqrt`` is never evaluated at ``<=0`` in the primal (finite VJP), giving 0
+    where ``x==0``; a NaN input is passed through (rather than masked to 0) so a
+    corrupted variance field surfaces instead of being silently clipped — matches
+    the reference ``sqrt(NaN)=NaN`` propagation.
+    """
+    is_pos = x > 0.0
+    safe = jnp.where(is_pos, x, 1.0)
+    root = jnp.where(is_pos, jnp.sqrt(safe), 0.0)
+    return jnp.where(jnp.isnan(x), x, root)
 
 
 def calc_mean_w_up_down_component(w_i, varnce_w_i, wm):
@@ -186,6 +201,101 @@ def mfl_xm_solve(lhs, rhs):
     return tridiag_solve(lhs, rhs)
 
 
+def monotonic_turbulent_flux_limit(
+    solve_type, xm, wpxp, xm_old, xp2, wm_zt, xm_forcing,
+    rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
+    xp2_threshold, xm_tol, low_lev_effect, high_lev_effect,
+    gr: CLUBBGrid, dt, l_mono_flux_lim_spikefix=True,
+):
+    """Monotonic turbulent-flux limiter core (``monotonic_turbulent_flux_limit``).
+
+    Pure-JAX reformulation of the host-numpy ``_monotonic_turbulent_flux_limit``:
+    bounds the turbulent flux ``wpxp`` so the mean field ``xm`` stays within
+    ``±max(2·sqrt(x'^2), xm_tol)`` of its no-flux value over the
+    turbulent-advection-reachable level window ``[low_lev_effect,
+    high_lev_effect]`` (the masked min/max), then re-advances ``xm`` implicitly
+    with the limited flux. The sequential per-level flux clip (each level's bound
+    uses the already-clipped level below) is a :func:`lax.scan`; the level window
+    is a mask; the top spike-fix conserves the column. ``solve_type`` (static MFL
+    id) selects the variance cap, the ``rtm`` spike-fix, and the wind (uv)
+    non-negativity skip. Returns ``(xm, wpxp)``. Differentiable in the field
+    inputs (the integer level bounds are stop-gradient masks).
+    """
+    ng, nzt = xm.shape
+    nzm = nzt + 1
+    is_uv = solve_type in (MFL_UM, MFL_VM)
+    max_xp2 = _MAX_XP2[solve_type]
+    spikefix_rtm = bool(l_mono_flux_lim_spikefix) and solve_type == MFL_RTM
+    invrs_dt = 1.0 / dt
+    gd = 1.0   # grid_dir, ascending
+    dzt = gr.dzt
+    invrs_dzt = gr.invrs_dzt
+
+    xm_enter = xm
+
+    xp2_zt = jnp.clip(zm2zt(xp2, gr), xp2_threshold, max_xp2)
+    max_dev = jnp.maximum(2.0 * _safe_sqrt(xp2_zt), xm_tol)
+    xm_without_ta = xm_old + dt * xm_forcing
+    min_x_lev = xm_without_ta - max_dev
+    if not is_uv:
+        min_x_lev = jnp.maximum(min_x_lev, 0.0)
+    max_x_lev = xm_without_ta + max_dev
+
+    # Windowed min/max over the reachable level window [low, high] (masked).
+    j = jnp.arange(nzt)[None, None, :]
+    in_win = (j >= low_lev_effect[:, :, None]) & (j <= high_lev_effect[:, :, None])
+    min_x_allowable = jnp.min(jnp.where(in_win, min_x_lev[:, None, :], jnp.inf), axis=2)
+    max_x_allowable = jnp.max(jnp.where(in_win, max_x_lev[:, None, :], -jnp.inf), axis=2)
+
+    thr_term_zt = invrs_dt * gd * dzt * (xm_without_ta - min_x_allowable)
+    mfl_max_term_zt = rho_ds_zt * thr_term_zt
+    mfl_min_term_zt = rho_ds_zt * invrs_dt * gd * dzt * (xm_without_ta - max_x_allowable)
+    thr_term_zm = zt2zm(thr_term_zt, gr)   # (ng, nzm)
+
+    # Sequential clip of wpxp over interior zm levels k=1..nzm-2 (scan over levels).
+    # step s -> k=s+1, k_zt=s, k-1=s. Each step's bound uses the clipped k-1 flux.
+    def step(wp_prev, xs):
+        max_term, min_term, thr_km1, irho_k, rho_km1, wp_k = xs
+        spikefix_cond = (spikefix_rtm & (jnp.abs(wp_prev) > thr_km1) & (wp_prev < 0.0))
+        mfl_max = jnp.where(spikefix_cond, 0.0,
+                            irho_k * (max_term + rho_km1 * wp_prev))
+        mfl_min = irho_k * (min_term + rho_km1 * wp_prev)
+        clipped = jnp.where(wp_k > mfl_max, mfl_max,
+                            jnp.where(wp_k < mfl_min, mfl_min, wp_k))
+        needed = jnp.abs(clipped - wp_k) > _F64_EPS
+        return clipped, (clipped, needed)
+
+    xs = (mfl_max_term_zt[:, :nzm - 2].T, mfl_min_term_zt[:, :nzm - 2].T,
+          thr_term_zm[:, :nzm - 2].T, invrs_rho_ds_zm[:, 1:nzm - 1].T,
+          rho_ds_zm[:, :nzm - 2].T, wpxp[:, 1:nzm - 1].T)
+    _, (clipped_T, needed_T) = jax.lax.scan(step, wpxp[:, 0], xs)
+    clipped_interior = clipped_T.T          # (ng, nzm-2)
+    wpxp_new = jnp.concatenate([wpxp[:, :1], clipped_interior, wpxp[:, -1:]], axis=1)
+    adj_needed = jnp.any(needed_T.T, axis=1)   # (ng,)
+
+    # Re-solve xm implicitly with the limited flux (applied where adjustment fired).
+    lhs = mfl_xm_lhs(wm_zt, invrs_dt, gr)
+    rhs = mfl_xm_rhs(xm_old, wpxp_new, xm_forcing, invrs_dt, invrs_rho_ds_zt,
+                     invrs_dzt, rho_ds_zm)
+    xm_mfl = mfl_xm_solve(lhs, rhs)
+    xm = jnp.where(adj_needed[:, None], xm_mfl, xm)
+
+    # Top spike-fix: conserve column xm if the top level moved a lot.
+    dz_top = gr.zm[:, -1] - gr.zm[:, -2]
+    moved = jnp.abs(xm[:, -1] - xm_enter[:, -1]) > 10.0 * xm_tol
+    xm_dw = rho_ds_zt[:, -1] * (xm[:, -1] - xm_enter[:, -1]) * dz_top
+    k_idx = jnp.arange(nzt)[None, :]
+    below_top = k_idx < (nzt - 1)
+    xm_vint = jnp.sum(jnp.where(below_top, rho_ds_zt * xm * gd * dzt, 0.0), axis=1)
+    small_vint = jnp.abs(xm_vint) < _F64_EPS
+    coef = jnp.maximum(xm_dw / jnp.where(small_vint, 1.0, xm_vint), -0.99)
+    xm_scaled = (xm * (1.0 + coef[:, None])).at[:, -1].set(xm_enter[:, -1])
+    xm_smallv = xm.at[:, -1].set(xm_enter[:, -1])
+    xm_fixed = jnp.where(small_vint[:, None], xm_smallv, xm_scaled)
+    xm = jnp.where(moved[:, None], xm_fixed, xm)
+    return xm, wpxp_new
+
+
 __all__ = [
     "MFL_RTM", "MFL_THLM", "MFL_UM", "MFL_VM",
     "calc_mean_w_up_down_component",
@@ -194,4 +304,5 @@ __all__ = [
     "mfl_xm_lhs",
     "mfl_xm_rhs",
     "mfl_xm_solve",
+    "monotonic_turbulent_flux_limit",
 ]
