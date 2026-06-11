@@ -214,6 +214,15 @@ efficient multi-step testing.
   (same-carry baseline vs half-wind, `max|du_base−du_half|>1e-5`) so the Perot edge↔cell
   reconstruction/projection is genuinely exercised. Codex flagged the same input-
   sensitivity gap as iter-82 (proactively-missed; fixed) → re-review approve.
+- **`_safe_sqrt` de-duplication (iter 85, codex-approved):** the AD-safe double-where
+  sqrt was copy-pasted byte-identically in 5 modules (clubb_wp23/mixing_length/moments/
+  pdf_moments/pdf) → promoted to one public `clubb_helpers.safe_sqrt` (per CLAUDE.md
+  "no duplicate numerics / use shared utilities") + re-pointed all 5 (behavior-preserving;
+  108-test parity/oracle suites unchanged). `clubb_mfl._safe_sqrt` left local on purpose —
+  it is a distinct NaN-PROPAGATING variant (verify-first caught this; consolidating would
+  change behavior). Added `test_safe_sqrt_value_and_ad_safety`. NOTE (environment): the
+  uncommitted de-dup was externally reverted mid-iteration once; re-applied and committed
+  immediately — uncommitted work does NOT persist across this loop's resets, only commits do.
 - **Prescribed-flux conservation triad (iters 77/78/79), all codex-approved:** for the
   iter-76 prescribed `sfc_*` BCs — **heat** (77) and **moisture** (79) are applied as
   EXACT flux-form Neumann lower-BCs (`Σ_k (ρ_k dz_k)(dT_dt/Π or dq_v_dt)_k = ρ_sfc·flux`
