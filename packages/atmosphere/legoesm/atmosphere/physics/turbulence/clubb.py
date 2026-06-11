@@ -42,6 +42,7 @@ from legoesm.atmosphere.physics.turbulence.clubb_core import (
     CLUBBForcing,
     CLUBBMomentState,
     advance_clubb_core,
+    init_clubb_moments,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_diagnostic import (
     diagnose_cloud_and_buoyancy,
@@ -349,3 +350,85 @@ def clubb_step(
     dq_v_dt = (q_new - q_v) / dt
     diags = dict(diags, ustar=ustar, shflx=shflx, lhflx=lhflx)
     return du_dt, dv_dt, dT_dt, dq_v_dt, new_state, diags
+
+
+def integrate_clubb_column(
+    u: jax.Array,
+    v: jax.Array,
+    T: jax.Array,
+    q_v: jax.Array,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    z_full: jax.Array,
+    z_half: jax.Array,
+    T_sfc: jax.Array,
+    q_sfc: jax.Array,
+    dt: float,
+    nsteps: int,
+    config: CLUBBConfig,
+    moments: CLUBBMomentState | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
+    """Integrate a single-column prognostic CLUBB run for ``nsteps`` steps.
+
+    A self-contained SCM-style driver: ``lax.scan`` over :func:`clubb_step`,
+    carrying the full :class:`CLUBBMomentState` *and* the mean state
+    ``(u, v, T, q_v)`` (forward-Euler updated by the CLUBB tendencies each step;
+    ``rho`` is recomputed hydrostatically from the evolving ``T``/``q_v`` on the
+    fixed pressure grid). This exercises the genuinely-prognostic higher-order
+    moment closure end-to-end — the moments persist and evolve across steps,
+    unlike the diagnostic phase-1 entry — and is the multi-step stability/AD
+    test bed for the scheme. All column fields are top-down ``(ncol, nlev)``.
+
+    **Scope / regime limit (important).** This is a *research / test* driver, not
+    a production integrator. It is validated in the moist, stably/unstably
+    stratified regime (see the passing multi-step tests). A long (~hours),
+    *near-dry, weakly-stratified* column currently develops a multi-step
+    numerical instability (grid-scale ``T`` extremes; ``wp2`` growth with step
+    count) — tracked in ``PORT_CLUBB.md`` as an open investigation. The density
+    floor / moisture clip below keep the integrator FINITE but do **not** make a
+    divergent dry run physical, and deliberately do **not** floor ``T`` itself (a
+    ``T`` clamp would mask the instability rather than fix it). Do not use this
+    driver for production runs in untested regimes until that growth is resolved.
+
+    ``moments`` defaults to a rest state (:func:`clubb_core.init_clubb_moments`).
+    ``nsteps`` is a **static** Python int (the ``lax.scan`` length, fixed at trace
+    time); jit callers close over it (it is not a traced argument).
+    Returns the final ``(u, v, T, q_v, moments)`` and a dict of per-step stacked
+    diagnostics (``cloud_frac``/``rcm``/``wpthvp``/``ustar``/...), shape
+    ``(nsteps, ...)``. The returned ``moments`` means (rtm/thlm/um/vm) are kept
+    consistent with the returned ``(u, v, T, q_v)``.
+    """
+    ncol, nlev = T.shape
+    if moments is None:
+        moments = init_clubb_moments(ncol, nlev, config, dtype=T.dtype)
+    exner_td = (p_full / constants.p_ref) ** constants.kappa
+    # Safety floor for the recomputed virtual temperature so the prognostic
+    # density stays strictly positive even if a long/dry SCM run drifts T low
+    # (mirrors the shared compute_rho floor; finite-gradient via max).
+    tv_floor = config.T0 * 0.5
+
+    def _step(carry, _):
+        u_c, v_c, T_c, q_c, m_c = carry
+        tv = jnp.maximum(virtual_temperature(T_c, q_c), tv_floor)
+        rho_c = p_full / (constants.R_d * tv)
+        du, dv, dT, dq, m_new, diag = clubb_step(
+            u_c, v_c, T_c, q_c, m_c, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho_c, dt, config)
+        # Moisture positivity: negative specific humidity is unphysical; clip the
+        # mean to >= 0 before it feeds next step's density / saturation closure.
+        u_n = u_c + dt * du
+        v_n = v_c + dt * dv
+        T_n = T_c + dt * dT
+        q_n = jnp.maximum(q_c + dt * dq, 0.0)
+        # Keep the carried CLUBBMomentState means consistent with the updated mean
+        # state (they are reset from the column inside clubb_step each step, but a
+        # consistent returned state matters for callers/restart inspection).
+        m_new = m_new._replace(
+            um=flip_vertical(u_n), vm=flip_vertical(v_n),
+            thlm=flip_vertical(T_n / exner_td), rtm=flip_vertical(q_n))
+        carry = (u_n, v_n, T_n, q_n, m_new)
+        return carry, diag
+
+    (u_f, v_f, T_f, q_f, m_f), diags = jax.lax.scan(
+        _step, (u, v, T, q_v, moments), xs=None, length=nsteps)
+    return u_f, v_f, T_f, q_f, m_f, diags

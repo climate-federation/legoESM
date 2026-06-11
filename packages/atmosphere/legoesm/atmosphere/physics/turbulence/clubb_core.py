@@ -370,10 +370,32 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
     return new_state, diagnostics
 
 
+def init_clubb_moments(ncol: int, nlev: int, config, dtype=jnp.float64) -> CLUBBMomentState:
+    """Seed a fresh :class:`CLUBBMomentState` at rest (CAM-default floors).
+
+    Means are zero (the bridge resets them from the live column each step);
+    velocity variances start at the floor ``tke_min`` (``w_tol^2`` scale), scalar
+    variances at their tolerance-squared floors, all fluxes and ``wp3`` zero.
+    ``nlev`` thermo (zt) levels → ``nzm = nlev + 1`` momentum levels.
+    """
+    nzm = nlev + 1
+    zt = jnp.zeros((ncol, nlev), dtype=dtype)
+    zm0 = jnp.zeros((ncol, nzm), dtype=dtype)
+    wtol2 = jnp.full((ncol, nzm), config.tke_min, dtype=dtype)
+    return CLUBBMomentState(
+        rtm=zt, thlm=zt, um=zt, vm=zt,
+        wp2=wtol2, wp3=zt, up2=wtol2, vp2=wtol2,
+        wprtp=zm0, wpthlp=zm0, upwp=zm0, vpwp=zm0,
+        rtp2=jnp.full((ncol, nzm), config.rt_tol ** 2, dtype=dtype),
+        thlp2=jnp.full((ncol, nzm), config.thl_tol ** 2, dtype=dtype),
+        rtpthlp=zm0)
+
+
 __all__ = [
     "CLUBBForcing",
     "CLUBBMomentState",
     "advance_clubb_core",
     "compute_clubb_diagnostics",
     "compute_pdf_closure",
+    "init_clubb_moments",
 ]
