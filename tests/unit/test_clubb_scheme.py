@@ -391,6 +391,86 @@ def test_clubb_turbulence_prognostic_carry_roundtrip_multistep():
     assert float(np.max(wp2_final)) > CLUBBConfig().tke_min
 
 
+def test_prognostic_clubb_subcycling():
+    """CAM runs CLUBB at clubb_timestep, sub-cycling it within the host dt.
+    n_sub=1 (dt<=clubb_dt) is bit-identical to a single clubb_step; n_sub>1
+    (dt>clubb_dt) runs n_sub sub-steps and returns the NET tendency + sub-cycled
+    moments — finite, and the moments evolve."""
+    from legoesm.atmosphere.physics.turbulence.clubb_core import (
+        init_clubb_moments,
+        pack_clubb_moments,
+    )
+    kw = _column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    kw.pop("tke")
+    kw["z_full"] = 0.5 * (kw["z_half"][:, :-1] + kw["z_half"][:, 1:])
+    ncol, nlev = kw["T"].shape
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
+    args = (kw["u"], kw["v"], kw["T"], kw["q_v"], carry, kw["p_full"],
+            kw["p_half"], kw["z_full"], kw["z_half"], kw["T_sfc"], kw["q_sfc"],
+            kw["rho"])
+
+    # n_sub=1: dt == clubb_dt → bit-identical to a single clubb_step.
+    out1, c1 = clubb_turbulence_prognostic(*args, 300.0, cfg)
+    from legoesm.atmosphere.physics.turbulence.clubb_core import unpack_clubb_moments
+    du, dv, dT, dq, m_new, _ = clubb_step(
+        kw["u"], kw["v"], kw["T"], kw["q_v"], unpack_clubb_moments(carry),
+        kw["p_full"], kw["p_half"], kw["z_full"], kw["z_half"], kw["T_sfc"],
+        kw["q_sfc"], kw["rho"], 300.0, cfg)
+    np.testing.assert_array_equal(np.asarray(out1.dT_dt), np.asarray(dT))
+    np.testing.assert_array_equal(np.asarray(out1.du_dt), np.asarray(du))
+
+    # n_sub=6: dt=1800 > clubb_dt=300 → sub-cycled, finite, moments evolve.
+    out6, c6 = clubb_turbulence_prognostic(*args, 1800.0, cfg)
+    assert c6.shape == (ncol, 15, nlev + 1)
+    for t in (out6.du_dt, out6.dT_dt, out6.dq_v_dt):
+        assert np.all(np.isfinite(np.asarray(t)))
+    assert np.all(np.isfinite(np.asarray(c6)))
+    assert not np.allclose(np.asarray(c6), np.asarray(carry))   # moments evolved
+
+
+def test_prognostic_clubb_subcycling_raw_moisture_contract():
+    """Codex: the sub-cycled moisture tendency must be the RAW integrated CLUBB
+    tendency (no internal q_v positivity clip folded in), so dq_v_dt = (q_final -
+    q_initial)/dt where q evolves by the unclipped CLUBB tendency — the SAME
+    coupling contract as n_sub=1. Forced with a near-dry column + large dt so any
+    clip would show up as a contract divergence (positivity is the host's job)."""
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb_core import (
+        init_clubb_moments,
+        pack_clubb_moments,
+        unpack_clubb_moments,
+    )
+    kw = _column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    kw.pop("tke")
+    kw["z_full"] = 0.5 * (kw["z_half"][:, :-1] + kw["z_half"][:, 1:])
+    kw["q_v"] = jnp.full_like(kw["q_v"], 1e-6)       # near-dry: any clip would bite
+    kw["q_sfc"] = jnp.full_like(kw["q_sfc"], 1e-6)
+    ncol, nlev = kw["T"].shape
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
+    carry = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg))
+    base = (kw["u"], kw["v"], kw["T"], kw["q_v"], carry, kw["p_full"],
+            kw["p_half"], kw["z_full"], kw["z_half"], kw["T_sfc"], kw["q_sfc"], kw["rho"])
+
+    out, _ = clubb_turbulence_prognostic(*base, 1500.0, cfg)   # n_sub=5
+
+    # Reference: manually sub-cycle WITHOUT any clip and compare the net dq_v_dt.
+    n_sub, dt = 5, 1500.0
+    dt_sub = dt / n_sub
+    u_c, v_c, T_c, q_c, m_c = (kw["u"], kw["v"], kw["T"], kw["q_v"],
+                               unpack_clubb_moments(carry))
+    for _ in range(n_sub):
+        tv = jnp.maximum(virtual_temperature(T_c, q_c), cfg.T0 * 0.5)
+        rho_c = kw["p_full"] / (constants.R_d * tv)
+        du, dv, dT, dq, m_c, _ = clubb_step(
+            u_c, v_c, T_c, q_c, m_c, kw["p_full"], kw["p_half"], kw["z_full"],
+            kw["z_half"], kw["T_sfc"], kw["q_sfc"], rho_c, dt_sub, cfg)
+        u_c, v_c, T_c, q_c = (u_c + dt_sub * du, v_c + dt_sub * dv,
+                              T_c + dt_sub * dT, q_c + dt_sub * dq)   # NO clip
+    np.testing.assert_allclose(np.asarray(out.dq_v_dt),
+                               np.asarray((q_c - kw["q_v"]) / dt), rtol=1e-10, atol=0)
+
+
 def test_prognostic_clubb_blocked_on_non_persisting_drivers():
     """Prognostic CLUBB needs a driver that persists PhysicsState; the
     nonhydrostatic CD-grid + spectral PE factories drop it, so they fail fast

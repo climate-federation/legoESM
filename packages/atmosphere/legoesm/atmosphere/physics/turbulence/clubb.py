@@ -34,6 +34,8 @@ through diagnostics for now; the eddy-diffusion tendencies are the live output.
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 from legoesm.atmosphere.physics._shared import virtual_temperature
@@ -375,26 +377,71 @@ def clubb_turbulence_prognostic(
     Drop-in for :func:`clubb_turbulence` with the SAME carry-slot interface — the
     carried state is the packed :class:`CLUBBMomentState` ``(ncol, 15, nlev+1)``
     (``PhysicsState.clubb_moments``) instead of the single ``wp2`` slot. Unpacks
-    it, advances the full higher-order moment closure one step
-    (:func:`clubb_step` → :func:`clubb_core.advance_clubb_core`), and repacks the
-    new moments as the carry. No host numerical diffusion is added here: in a
-    coupled run the dynamical core supplies it (the bare-SCM stand-in lives in
+    it, advances the full higher-order moment closure, and repacks the new moments
+    as the carry. No host numerical diffusion is added here: in a coupled run the
+    dynamical core supplies it (the bare-SCM stand-in lives in
     :func:`integrate_clubb_column`).
+
+    **CLUBB sub-cycling (CAM fidelity):** CAM runs CLUBB at its own
+    ``clubb_timestep`` (``config.clubb_dt``, ~300 s) and sub-cycles it within the
+    larger host physics ``dt``. This advances a LOCAL copy of the mean state +
+    moments for ``n_sub = ceil(dt / clubb_dt)`` sub-steps of ``dt_sub = dt/n_sub``
+    and returns the NET (RAW, unclipped) mean tendency over ``dt`` plus the
+    sub-cycled final moments — the same coupling contract as the single-step path
+    (positivity limiting stays the host/moisture-fixer's job, not folded into the
+    physics tendency). For ``dt <= clubb_dt`` (``n_sub = 1``) it is the single
+    step, bit-identical to the un-sub-cycled path. Surface-flux diagnostics are
+    the sub-cycle mean; ``Kh`` the final sub-step's.
 
     Returns ``(TurbulenceOutput, clubb_moments_new)``; the second element flows
     back into ``PhysicsState.clubb_moments`` via the carry machinery.
     """
     moments = unpack_clubb_moments(clubb_moments)
-    du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
-        u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
-        T_sfc, q_sfc, rho, dt, config)
-    # Diffusivities for diagnostics (ascending zt → top-down (ncol, nlev)).
-    Kh_full = flip_vertical(diags["Kh_zt"])
+    n_sub = max(1, math.ceil(dt / config.clubb_dt))
+
+    if n_sub == 1:
+        du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
+            u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt, config)
+        shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
+        Kh_full = flip_vertical(diags["Kh_zt"])
+    else:
+        dt_sub = dt / n_sub
+        tv_floor = config.T0 * 0.5
+
+        def _sub(carry, _):
+            u_c, v_c, T_c, q_c, m_c = carry
+            # Density floor (only) guards a strictly-positive rho if q_c dips
+            # slightly negative mid-cycle; q itself is NOT clipped — the host
+            # applies the RAW integrated CLUBB tendency, identical to the n_sub=1
+            # contract (positivity limiting is the host/moisture-fixer's job, not
+            # folded into the physics tendency). clubb_step floors rt internally
+            # (rt_tol), so a slightly-negative mean rtm is robust (cloud → 0).
+            tv = jnp.maximum(virtual_temperature(T_c, q_c), tv_floor)
+            rho_c = p_full / (constants.R_d * tv)
+            du, dv, dT, dq, m_new, diag = clubb_step(
+                u_c, v_c, T_c, q_c, m_c, p_full, p_half, z_full, z_half,
+                T_sfc, q_sfc, rho_c, dt_sub, config)
+            carry = (u_c + dt_sub * du, v_c + dt_sub * dv, T_c + dt_sub * dT,
+                     q_c + dt_sub * dq, m_new)
+            return carry, diag
+
+        (u_f, v_f, T_f, q_f, new_moments), diag_stk = jax.lax.scan(
+            _sub, (u, v, T, q_v, moments), xs=None, length=n_sub)
+        du_dt = (u_f - u) / dt
+        dv_dt = (v_f - v) / dt
+        dT_dt = (T_f - T) / dt
+        dq_v_dt = (q_f - q_v) / dt
+        # Net surface exchange = sub-cycle-mean flux; Kh from the final sub-step.
+        shflx = jnp.mean(diag_stk["shflx"], axis=0)
+        lhflx = jnp.mean(diag_stk["lhflx"], axis=0)
+        ustar = jnp.mean(diag_stk["ustar"], axis=0)
+        Kh_full = flip_vertical(diag_stk["Kh_zt"][-1])
+
     h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
     output = TurbulenceOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dq_v_dt=dq_v_dt,
-        Km=Kh_full, Kh=Kh_full, shflx=diags["shflx"], lhflx=diags["lhflx"],
-        ustar=diags["ustar"], h_pbl=h_pbl)
+        Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx, ustar=ustar, h_pbl=h_pbl)
     return output, pack_clubb_moments(new_moments)
 
 
