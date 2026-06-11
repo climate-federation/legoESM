@@ -38,6 +38,7 @@ import jax.numpy as jnp
 
 from legoesm.grids.operator_adapters import latlon_cgrid_operators
 from legoesm.grids.operators_latlon_cgrid import (
+    get_band_mpi_cut_layout,
     vector_laplacian_cgrid,
     interp_cell_to_uface,
     interp_cell_to_vface,
@@ -97,6 +98,8 @@ def absolute_vorticity_coriolis(
     u: jnp.ndarray,
     v: jnp.ndarray,
     grid: LatLonGrid,
+    *,
+    u_lat_pad: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Coriolis-like acceleration using absolute vorticity (ζ+f).
 
@@ -118,21 +121,56 @@ def absolute_vorticity_coriolis(
     """
     is_3d = u.ndim == 3
 
+    # Static band-MPI dispatch (None ⟺ serial / single-rank band /
+    # non-band topology — the historical code path runs verbatim).
+    # Under latitude-band MPI with interior cuts, the band's end
+    # vertex/face rows are NOT poles, so the two pole-constant
+    # constructions below (planetary vorticity ±2Ω, u_at_v zero wall
+    # rows) must instead use the neighbour rank's rows.
+    _band = get_band_mpi_cut_layout()
+
     # --- Relative vorticity at vertices (via the B2 operator interface) ---
-    zeta = latlon_cgrid_operators(grid).vorticity(u, v)  # (n_lat+1, n_lon+1[, nlev])
+    # ``u_lat_pad`` (optional, exactly pad_with_pole_bc_lat(u, halo=1,
+    # 0, 0)) is shared between the curl's circulation pad and the
+    # 4-pt u->v-face average below — the atm tendency fuses it with
+    # its other entry-level pads (census probe 8460424: u was padded
+    # twice per RK stage).
+    zeta = latlon_cgrid_operators(grid).vorticity(
+        u, v, u_ext=u_lat_pad,
+    )  # (n_lat+1, n_lon+1[, nlev])
 
     # --- Planetary vorticity at vertices ---
-    # sin(±π/2) = ±1 exactly, so build f_vert directly from the
-    # interior sin via Pad with constant_values = ±2Ω.  Single
-    # Pad HLO op replaces alloc-2-singletons + concatenate-of-three +
-    # sin tower.
     lat = grid.lat  # cell-center latitudes
-    lat_int = 0.5 * (lat[:-1] + lat[1:])
     twoOmega = 2.0 * constants.Omega
-    f_vert = jnp.pad(
-        twoOmega * jnp.sin(lat_int),
-        (1, 1), constant_values=(-twoOmega, twoOmega),
-    )  # (n_lat+1,)
+    if _band is None:
+        # sin(±π/2) = ±1 exactly, so build f_vert directly from the
+        # interior sin via Pad with constant_values = ±2Ω.  Single
+        # Pad HLO op replaces alloc-2-singletons + concatenate-of-three
+        # + sin tower.
+        lat_int = 0.5 * (lat[:-1] + lat[1:])
+        f_vert = jnp.pad(
+            twoOmega * jnp.sin(lat_int),
+            (1, 1), constant_values=(-twoOmega, twoOmega),
+        )  # (n_lat+1,)
+    else:
+        # Band MPI: end vertex rows at interior cuts sit at the
+        # midpoint latitude ACROSS the cut.  Pad ``lat`` one row
+        # (1-D sendrecv at cuts; the constant ghost at a pole-touching
+        # end never reaches the output — overwritten below), midpoint
+        # to vertex rows, then restore the exact ±2Ω pole values at
+        # pole-touching ends.  Interior vertex rows evaluate the
+        # identical ``2Ω·sin(0.5·(lat[j-1]+lat[j]))`` chain — values
+        # bit-identical to the serial construction.
+        from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+        lat_pad = pad_with_pole_bc_lat(
+            lat, halo=1, south_value=0.0, north_value=0.0,
+        )
+        lat_vert = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat_local+1,)
+        f_vert = twoOmega * jnp.sin(lat_vert)
+        if _band.south_rank is None:
+            f_vert = f_vert.at[0].set(-twoOmega)
+        if _band.north_rank is None:
+            f_vert = f_vert.at[-1].set(twoOmega)
 
     # Absolute vorticity at vertices
     if is_3d:
@@ -158,14 +196,36 @@ def absolute_vorticity_coriolis(
     eta_at_v = 0.5 * (eta[:, :-1] + eta[:, 1:])  # (n_lat+1, n_lon[, nlev])
 
     # --- Average u to v-faces (4-point, same as coriolis_cgrid) ---
-    # Use ``jnp.pad`` on the leading axis instead of allocating
-    # ``zero_row`` twice and concatenating — one HLO Pad op vs
-    # alloc + concat.
-    u_avg_interior = 0.25 * (u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:])
-    if is_3d:
-        u_at_v = jnp.pad(u_avg_interior, ((1, 1), (0, 0), (0, 0)))
+    if _band is None:
+        # Use ``jnp.pad`` on the leading axis instead of allocating
+        # ``zero_row`` twice and concatenating — one HLO Pad op vs
+        # alloc + concat.  The zero end rows are the pole wall BC.
+        u_avg_interior = 0.25 * (u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:])
+        if is_3d:
+            u_at_v = jnp.pad(u_avg_interior, ((1, 1), (0, 0), (0, 0)))
+        else:
+            u_at_v = jnp.pad(u_avg_interior, ((1, 1), (0, 0)))
     else:
-        u_at_v = jnp.pad(u_avg_interior, ((1, 1), (0, 0)))
+        # Band MPI: the end v-face rows at interior cuts carry the
+        # genuine 4-point average spanning the cut, not the pole wall
+        # zero.  Pad ``u`` one lat row (sendrecv at cuts; u-face
+        # fields with the n_lon+1 wrap column are supported by the
+        # exchange), average on the padded array — interior rows are
+        # the identical operand chain as serial — then restore the
+        # zero wall rows at pole-touching ends only.
+        from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+        if u_lat_pad is None:
+            u_lat_pad = pad_with_pole_bc_lat(
+                u, halo=1, south_value=0.0, north_value=0.0,
+            )  # (n_lat_local+2, n_lon+1[, nlev])
+        u_at_v = 0.25 * (
+            u_lat_pad[:-1, :-1] + u_lat_pad[:-1, 1:]
+            + u_lat_pad[1:, :-1] + u_lat_pad[1:, 1:]
+        )  # (n_lat_local+1, n_lon[, nlev])
+        if _band.south_rank is None:
+            u_at_v = u_at_v.at[0].set(jnp.zeros_like(u_at_v[0]))
+        if _band.north_rank is None:
+            u_at_v = u_at_v.at[-1].set(jnp.zeros_like(u_at_v[-1]))
 
     # --- Coriolis terms ---
     cor_u = eta_at_u * v_at_u
