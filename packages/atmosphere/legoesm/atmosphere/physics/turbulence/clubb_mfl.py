@@ -81,6 +81,80 @@ def mean_vert_vel_up_down(w_1, w_2, varnce_w_1, varnce_w_2, mixt_frac, wm):
     return mean_w_down, mean_w_up
 
 
+def calc_turb_adv_range(w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm,
+                        mixt_frac_zm, gr: CLUBBGrid, dt):
+    """Range of zt levels reachable by turbulent advection in one step (``calc_turb_adv_range``).
+
+    Pure-JAX (masked ``lax.fori_loop``) reformulation of the host-numpy
+    level-range search (``l_constant_thickness=False``, ascending grid): from
+    each zt level ``k`` it walks down (using the mean **up** velocity ``vvu``) and
+    up (using the mean **down** velocity ``vvd``) accumulating travel time until
+    it exceeds ``dt`` or hits a velocity-sign barrier. Returns integer index
+    arrays ``(low_lev_effect, high_lev_effect)``, each ``(ncol, nzt)``, that widen
+    the limiter's allowable min/max window. The integer outputs are used only as
+    masks downstream (no gradient flows through them). JIT-safe; the early-stops
+    are replaced by a ``done`` mask over the fixed ``nzt`` loop bound.
+    """
+    ng, nzm = w_1_zm.shape
+    nzt = nzm - 1
+    gd = 1.0   # grid_dir, ascending
+    dzm = gr.dzm
+    wm = gd * dzm / dt
+    vvd, vvu = mean_vert_vel_up_down(w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm,
+                                     mixt_frac_zm, wm)
+
+    def low_col(vvu_c, dzm_c):
+        def low_at_k(k):
+            def body(i, carry):
+                da, done, low = carry
+                j = k - 1 - i
+                active = (j >= 0) & jnp.logical_not(done)
+                ja = jnp.clip(j + 1, 1, nzm - 1)
+                vu = vvu_c[ja]
+                barrier = vu <= 0.0
+                contrib = gd * dzm_c[ja] / jnp.where(vu > 0.0, vu, 1.0)
+                new_da = jnp.where(active & jnp.logical_not(barrier), da + contrib, da)
+                time_stop = active & jnp.logical_not(barrier) & (new_da >= dt)
+                low_j = jnp.where(active, j, low)
+                new_low = jnp.where(active & barrier, jnp.minimum(j + 1, nzt - 1), low_j)
+                return (new_da, done | (active & (barrier | time_stop)), new_low)
+            _, _, low = jax.lax.fori_loop(0, nzt, body, (0.0, False, 0))
+            return low
+        return jax.vmap(low_at_k)(jnp.arange(nzt))
+
+    def high_col(vvd_c, dzm_c):
+        def high_at_k(k):
+            def body(i, carry):
+                da, done, high = carry
+                j = k + 1 + i
+                active = (j <= nzt - 1) & jnp.logical_not(done)
+                ja = jnp.clip(j, 0, nzm - 1)
+                vd = vvd_c[ja]
+                barrier = vd >= 0.0
+                contrib = -gd * dzm_c[ja] / jnp.where(vd < 0.0, vd, -1.0)
+                new_da = jnp.where(active & jnp.logical_not(barrier), da + contrib, da)
+                time_stop = active & jnp.logical_not(barrier) & (new_da >= dt)
+                high_j = jnp.where(active, j, high)
+                new_high = jnp.where(active & barrier, jnp.maximum(j - 1, 0), high_j)
+                return (new_da, done | (active & (barrier | time_stop)), new_high)
+            _, _, high = jax.lax.fori_loop(0, nzt, body, (0.0, False, k))
+            return high
+        return jax.vmap(high_at_k)(jnp.arange(nzt))
+
+    low = jax.vmap(low_col)(vvu, dzm)
+    high = jax.vmap(high_col)(vvd, dzm)
+
+    # Boundary levels are set explicitly (the reference does not search them).
+    k = jnp.arange(nzt)[None, :]
+    low = jnp.where(k == 0, 0, low)
+    low = jnp.where(k == nzt - 2, nzt - 2, low)
+    low = jnp.where(k == nzt - 1, nzt - 1, low)
+    high = jnp.where(k == 0, 0, high)
+    high = jnp.where(k == nzt - 2, nzt - 1, high)
+    high = jnp.where(k == nzt - 1, nzt - 1, high)
+    return low, high
+
+
 def mfl_xm_lhs(wm_zt, invrs_dt, gr: CLUBBGrid):
     """LHS of the MFL xm re-solve tridiagonal system (``mfl_xm_lhs``).
 
@@ -116,6 +190,7 @@ __all__ = [
     "MFL_RTM", "MFL_THLM", "MFL_UM", "MFL_VM",
     "calc_mean_w_up_down_component",
     "mean_vert_vel_up_down",
+    "calc_turb_adv_range",
     "mfl_xm_lhs",
     "mfl_xm_rhs",
     "mfl_xm_solve",

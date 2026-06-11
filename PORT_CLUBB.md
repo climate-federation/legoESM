@@ -90,7 +90,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_wp23.py` | coupled wp2/wp3 penta advance: 8 LHS + 9 RHS builders ✅21-22; `wp23_rhs/lhs/solve` ✅23; `compute_a1_a3_coef`/`compute_skw_fnc` ✅24; `clip_skewness` ✅25; **`advance_wp2_wp3` main** ✅26 (composition round-off parity; **CAM uses UPWIND wp3 MA** — `l_upwind_xm_ma=True`) | ✅ |
 | `clubb_fill_holes.py` | `fill_holes_*` ✅19; `fill_holes_wp2_from_horz_tke` (TKE-conserving wp2 fill, CAM) ✅25 | ✅ |
 | `clubb_xm_wpxp.py` | coupled xm/wpxp advance: 5 builders ✅27; `xm_wpxp_lhs/rhs/solve` ✅28; centered `xpyp_term_ta_pdf_lhs` + `calc_xm_wpxp_ta_terms`/`calc_xm_wpxp_lhs_terms` + `diagnose_upxp` ✅29 (parity+golden; **CAM wpxp TA is CENTERED** — `l_explicit_turbulent_adv_wpxp`/`l_godunov_upwind_wpxp_ta`=False, unlike xp2/xpyp UPWIND); clipping + `advance_xm_wpxp` main ☐ | 🟡 P5 |
-| `clubb_mfl.py` | monotonic-flux-limiter JAX helpers: erf mean up/down velocity + `mfl_xm_lhs/rhs/solve` re-solve ✅30; `calc_turb_adv_range` (needs pure-JAX masked-loop) + limiter core ☐ | 🟡 P5 |
+| `clubb_mfl.py` | monotonic-flux-limiter JAX helpers: erf mean up/down velocity + `mfl_xm_lhs/rhs/solve` ✅30; `calc_turb_adv_range` (pure-JAX masked `fori_loop`, bit-exact integer-index parity) ✅31; limiter core (windowed min/max + sequential clip scan) + `xm_wpxp_clipping_and_stats` ☐ | 🟡 P5 |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
 
@@ -123,9 +123,10 @@ finite gradients in float32 + float64.
   `calc_xm_wpxp_ta_terms` (centered TA), `calc_xm_wpxp_lhs_terms`, `diagnose_upxp`.
   ☐ remaining: the clipping (`xm_wpxp_clipping_and_stats` + `mono_flux_limiter`,
   CAM `l_mono_flux_lim_*=True`) + the `advance_xm_wpxp` main.
-- **MFL** 🟡 — ✅ iter 30 `clubb_mfl.py` JAX helpers (erf mean up/down velocity +
-  `mfl_xm_lhs/rhs/solve`). ☐ `calc_turb_adv_range` (host-numpy → needs pure-JAX
-  masked loop) + the limiter core.
+- **MFL** 🟡 — ✅ iter 30 `clubb_mfl.py` JAX helpers; ✅ iter 31 `calc_turb_adv_range`
+  (pure-JAX masked `fori_loop`, bit-exact integer-index parity). ☐ the limiter core
+  (windowed min/max over the [low,high] range via masking + the sequential per-level
+  wpxp clip via `lax.scan` + the xm re-solve + top spike-fix) + `xm_wpxp_clipping_and_stats`.
 - **P6 orchestration** ☐ — assemble the `advance_clubb_core`-equivalent for the
   CAM flag subset; pack/unpack carried moment state (wp2/wp3/thlp2/rtp2/rtpthlp/
   wpthlp/wprtp/up2/vp2). `l_call_pdf_closure_twice=True` → PDF pre+post.

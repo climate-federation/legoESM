@@ -121,6 +121,60 @@ def test_parity():
         rtol=1e-12, atol=1e-14)
 
 
+def _range_inputs(gr, ng, nzm, seed=3):
+    rng = np.random.default_rng(seed)
+    return dict(
+        w_1_zm=jnp.asarray(0.8 * rng.standard_normal((ng, nzm))),
+        w_2_zm=jnp.asarray(0.8 * rng.standard_normal((ng, nzm))),
+        varnce_w_1_zm=jnp.asarray(0.05 + 0.5 * rng.random((ng, nzm))),
+        varnce_w_2_zm=jnp.asarray(0.05 + 0.5 * rng.random((ng, nzm))),
+        mixt_frac_zm=jnp.asarray(0.3 + 0.4 * rng.random((ng, nzm))),
+    )
+
+
+def test_turb_adv_range_matches_golden():
+    """Non-skipped CI guard: the JAX level-range search vs the committed golden."""
+    gr, ng, nzm = _gr()
+    p = _range_inputs(gr, ng, nzm)
+    lo, hi = M.calc_turb_adv_range(gr=gr, dt=300.0, **p)
+    g = np.load(_FIX / "clubb_mfl_range_golden.npz")
+    np.testing.assert_array_equal(np.asarray(lo), g["low"])
+    np.testing.assert_array_equal(np.asarray(hi), g["high"])
+    # bounds are valid zt indices, low<=high
+    nzt = nzm - 1
+    assert np.all((np.asarray(lo) >= 0) & (np.asarray(lo) <= nzt - 1))
+    assert np.all((np.asarray(hi) >= 0) & (np.asarray(hi) <= nzt - 1))
+    assert np.all(np.asarray(lo) <= np.asarray(hi))
+
+
+def test_turb_adv_range_jit():
+    gr, ng, nzm = _gr()
+    p = _range_inputs(gr, ng, nzm)
+    jf = jax.jit(lambda **kw: M.calc_turb_adv_range(gr=gr, dt=300.0, **kw))
+    lo, hi = jf(**p)
+    assert lo.shape == (ng, nzm - 1) and hi.shape == (ng, nzm - 1)
+
+
+@pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
+                    reason="CLUBB-JAX reference tree not present")
+def test_turb_adv_range_parity():
+    """Bit-exact integer-index parity vs the host-numpy reference (multiple sizes)."""
+    if str(_CLUBB_JAX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
+    import clubb_jax.src.CLUBB_core.mono_flux_limiter as R  # noqa: N812
+    for seed in range(4):
+        for nzt in (8, 13):
+            gr, ng, nzm = _gr(ng=3, nzt=nzt)
+            rg = _refgr(gr, ng, nzm)
+            p = _range_inputs(gr, ng, nzm, seed=seed)
+            mlo, mhi = M.calc_turb_adv_range(gr=gr, dt=300.0, **p)
+            rlo, rhi = R.calc_turb_adv_range(p["w_1_zm"], p["w_2_zm"],
+                                             p["varnce_w_1_zm"], p["varnce_w_2_zm"],
+                                             p["mixt_frac_zm"], rg, 300.0)
+            np.testing.assert_array_equal(np.asarray(mlo), np.asarray(rlo))
+            np.testing.assert_array_equal(np.asarray(mhi), np.asarray(rhi))
+
+
 def test_jit_and_grad():
     gr, ng, nzm = _gr()
     p = _vel_inputs(ng, nzm)
