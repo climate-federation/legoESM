@@ -17,6 +17,9 @@ identical real droplets it stands for). The processes are:
 * **collision kernels + terminal velocities** (``kernels.py``).
 * **particle <-> grid coupling** — deposition, latent heating, total-water
   closure (``coupling.py``).
+* **sedimentation + surface rain accumulation** (``sedimentation.py``):
+  terminal-velocity fall with exact airborne-water + precipitation
+  conservation; ``column_rainout`` quiescent-column driver.
 * **drivers** (``box_model.py``): a composed persistent box
   (``box_step`` / ``run_box``, condensation + coalescence) and an adiabatic
   parcel (``parcel_step`` / ``run_parcel``).
@@ -24,7 +27,8 @@ identical real droplets it stands for). The processes are:
   ``sdm_microphysics``) — a stateless diffusional-condensation adapter for the
   Eulerian column-physics interface.
 
-Sedimentation/advection of the particles is not yet implemented.
+Flow advection of the particles (resolved-wind transport) is not implemented;
+the drivers are quiescent (0-D box / 1-D still column).
 """
 
 from __future__ import annotations
@@ -72,6 +76,10 @@ from legoesm.atmosphere.physics.microphysics.sdm.box_model import (
     saturation_ratio,
 )
 from legoesm.atmosphere.physics.microphysics.sdm.column import sdm_microphysics
+from legoesm.atmosphere.physics.microphysics.sdm.sedimentation import (
+    column_rainout,
+    sediment_step,
+)
 
 __all__ = [
     "SDMConfig",
@@ -105,4 +113,6 @@ __all__ = [
     "liquid_mixing_ratio",
     "saturation_ratio",
     "sdm_microphysics",
+    "sediment_step",
+    "column_rainout",
 ]
