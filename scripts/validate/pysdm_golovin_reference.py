@@ -41,7 +41,12 @@ SNAP_TIMES_S = (0, 1200, 2400, 3600)
 def main(out_path):
     spectrum = Exponential(norm_factor=N0_PER_M3 * DV, scale=XBAR)
     builder = Builder(n_sd=N_SD, backend=CPU(), environment=Box(dt=DT, dv=DV))
-    builder.add_dynamic(Coalescence(collision_kernel=Golovin(b=B_GOLOVIN)))
+    # adaptive=False: force the plain fixed-dt Shima update so the reference
+    # uses EXACTLY the same stepping as the legoESM side (PySDM defaults to
+    # adaptive coalescence sub-stepping, which would compare different
+    # algorithm variants).
+    builder.add_dynamic(Coalescence(collision_kernel=Golovin(b=B_GOLOVIN),
+                                    adaptive=False))
     attributes = {}
     sampled = ConstantMultiplicity(spectrum).sample(N_SD)
     attributes["volume"], attributes["multiplicity"] = sampled

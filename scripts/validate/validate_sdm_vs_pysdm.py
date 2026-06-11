@@ -98,6 +98,16 @@ def spectrum(radius, mult, V, lnr_edges):
 def main(ref_path):
     ref = np.load(ref_path)
     dv = float(ref["dv"])
+    # Handshake: the reference must have been generated with EXACTLY this
+    # setup — a stale/mismatched .npz must fail loudly, not validate silently.
+    assert abs(float(ref["n0_per_m3"]) - N0_PER_M3) / N0_PER_M3 < 1e-12, "N0 mismatch"
+    assert abs(float(ref["xbar_m3"]) - XBAR_M3) / XBAR_M3 < 1e-12, "Xbar mismatch"
+    assert abs(float(ref["b_golovin"]) - B_GOLOVIN) / B_GOLOVIN < 1e-12, "b mismatch"
+    assert tuple(int(t) for t in ref["snap_times"]) == SNAPS, "snapshot times mismatch"
+    for t in SNAPS:
+        assert ref[f"radius_{t}"].shape == ref[f"multiplicity_{t}"].shape, \
+            f"ragged reference arrays at t={t}"
+        assert np.all(np.isfinite(ref[f"radius_{t}"])), f"non-finite radii at t={t}"
     ours = run_legoesm_ensemble()
 
     lnr_edges = np.linspace(np.log(5e-6), np.log(5e-3), 50)
@@ -148,6 +158,10 @@ def main(ref_path):
         tol_N = 0.02 if t == 0 else 0.10
         tol_M2 = 0.05 if t == 0 else 0.35   # M2 is giant-drop-tail dominated
         ok = ok and (dN < tol_N) and (dM2 < tol_M2)
+        # spectrum gate: the distributions themselves must agree, not just low
+        # moments (t=0 tight — same IC; evolved within MC tail noise).
+        tol_spec = 0.05 if t == 0 else 0.30
+        ok = ok and np.isfinite(spec_err) and sig.any() and (spec_err < tol_spec)
 
         if have_plt:
             line = ax.plot(r_c * 1e6, g_l * 1e3, "o", ms=3,
