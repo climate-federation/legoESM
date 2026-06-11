@@ -201,10 +201,12 @@ jitted `integrate_clubb_column` for efficient multi-step testing.
   lowest-cell HOST tendency and zeroes the scheme's bulk flux (`Ch_neutral=0`, same
   for the existing mynn25 case), so CLUBB's native `wpthlp_sfc`/`wprtp_sfc` moment
   lower-BC is 0 — the scheme responds only to the host-warmed gradient, not its
-  surface-flux BC. To certify CLUBB on Wangara, plumb `w_th_s`/`w_qv_s` into the
-  CLUBB surface moment BC (a scheme-specific prescribed-flux bypass) + use a
-  physically-calibrated `wp2` gate (the `1e-3` floor is too weak). Tracked as a
-  follow-up.
+  surface-flux BC. The scheme-side half is now DONE (iter 76): the CLUBB driver
+  accepts prescribed kinematic surface fluxes directly (`sfc_wpthlp`/`sfc_wprtp`/
+  `sfc_upwp`/`sfc_vpwp` feed its native moment lower-BC). Remaining for a Wangara
+  `--turbulence clubb` benchmark: wire the SCM `prescribe="fluxes"` `w_th_s`/`w_qv_s`
+  into those args (small SCM-driver plumbing) + a physically-calibrated `wp2` gate
+  (the `1e-3` floor is too weak). Tracked as a follow-up.
 - **GABLS1 stable-BL — shipped (iter 72):** the correctly-coupled SCM benchmark.
   GABLS1 uses `prescribe="T_s"` (cooling surface temperature) with the bulk
   transfer ACTIVE (`Ch_neutral=1.5e-3`), so the surface heat flux is computed from
@@ -250,6 +252,29 @@ jitted `integrate_clubb_column` for efficient multi-step testing.
   flux-form `implicit_vertical_diffusion` (dry `rcm=0` mapping) only redistributes.
   Non-vacuous WITHOUT spin-up (`max|dq·dt|`~1e-4; the diagnostic eddy diffusion is
   driven directly by the initial gradient), so it's a fast (~9 s) guard.
+- **Prescribed surface fluxes — CLUBB's LES/SCM-intercomparison interface (iter 76):**
+  added optional `sfc_wpthlp`/`sfc_wprtp`/`sfc_upwp`/`sfc_vpwp` (kinematic surface
+  fluxes, each `(ncol,)` or `None`) to `clubb_step` + `clubb_turbulence_prognostic`
+  + `integrate_clubb_column`. When given, each OVERRIDES CLUBB's bulk lower-BC for
+  that moment (`w'thl'` [K m/s], `w'rt'` [kg/kg m/s], `u'w'`/`v'w'` [m²/s²]); `None`
+  falls back to the bulk formula (the `None`-test is a static Python branch, CLAUDE.md
+  feature-gating exception — never a traced `jnp.where`). This is exactly the BC that
+  the standard prescribed-flux LES cases (BOMEX/DYCOMS/ARM) specify, which the prior
+  `prescribe="T_s"`-only coupling could not drive (the iter-71 Wangara deferral). The
+  bulk formula is skipped entirely only when all four are prescribed → the result is
+  then independent of `T_sfc`/`q_sfc`. Reported `shflx`/`lhflx`/`ustar` are made
+  consistent: bulk values pass through bit-unchanged (verified back-compat), prescribed
+  kinematic fluxes are converted to W/m² (`shflx=wpthlp·ρ·c_pd·Π`, `lhflx=wprtp·ρ·L_v`)
+  and `ustar=(u'w'²+v'w'²)^¼`. **Codex [medium], fixed:** the bare fourth-root has +∞
+  slope at zero stress, so `jax.grad` through `ustar` at the valid `sfc_upwp=sfc_vpwp=0`
+  BC was non-finite → floored the radicand with a `1e-30` AD safety floor (gradient 0
+  there, physical stresses bit-unchanged); codex re-review: approve, no findings. Test
+  `test_prognostic_clubb_accepts_prescribed_surface_fluxes` (one shared spin-up via the
+  grid-consistent `_scm_column`+`integrate_clubb_column`, then 6 checks): W/m²+ustar
+  round-trip; `T_sfc`-independence (bulk bypass); grad-coupling of the heat-flux BC into
+  the prognostic advance; the zero-stress ustar grad-finiteness regression; surface-heat
+  sign; explicit-`None`==omitted back-compat. The default (no-arg) path is bit-identical
+  to before (7-test existing-prognostic regression subset stays green).
 
 **Key resolved issue — dry-regime instability (iter 48-51):** root-caused (by
 experiment) to the bare SCM driver advancing means with CLUBB alone, exposing 2Δz

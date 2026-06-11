@@ -1460,5 +1460,120 @@ def test_clubb_mixing_length_float32_is_numerically_faithful():
     assert rel < 1e-4, f"float32 Lscale diverges from float64: rel={rel:.2e}"
 
 
+def test_prognostic_clubb_accepts_prescribed_surface_fluxes():
+    """Prescribed kinematic surface fluxes (CLUBB's LES/SCM-intercomparison
+    interface for BOMEX/DYCOMS/ARM) OVERRIDE the bulk surface formula and drive
+    the prognostic moment advance.
+
+    Spins the moments up first via :func:`integrate_clubb_column` (the established
+    non-degenerate, grid-consistent driver) and then runs single prognostic-CLUBB
+    steps with prescribed fluxes from that state — five checks, each guarding a
+    distinct failure mode (one spin-up shared, so the suite stays fast):
+      (1) **Round-trip:** the reported W/m^2 ``shflx``/``lhflx`` and ``ustar`` equal
+          the prescribed kinematic flux mapped through the surface conversion.
+      (2) **Bulk bypass:** with all four components prescribed the result is
+          INDEPENDENT of ``T_sfc``/``q_sfc`` (the bulk formula is never reached) —
+          a 30 K warmer surface + doubled ``q_sfc`` give bit-identical tendencies.
+      (3) **Coupling (not just diagnostic):** ``jax.grad`` of a near-surface
+          temperature-tendency objective w.r.t. the prescribed heat flux is finite
+          and NONZERO — proving the prescribed BC feeds the prognostic advance, not
+          merely the reported ``shflx`` (the iter-73 diagnostic-vs-coupled lesson).
+      (4) **Sign/physics:** a prescribed upward surface heat flux warms the
+          near-surface air relative to a zero prescribed flux.
+      (5) **Back-compat:** passing the args explicitly as ``None`` is bit-identical
+          to omitting them (the default bulk path is untouched).
+    """
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+
+    kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
+    ncol, nlev = kw["T"].shape
+    cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
+    # Spin up real higher-order moments on a grid-consistent column (the proven-
+    # stable dt=150,nsteps=40 driver setting) so the closure is non-degenerate.
+    u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
+        **kw, dt=150.0, nsteps=40, config=cfg)
+    carry = pack_clubb_moments(m_f)
+    tv = jnp.maximum(virtual_temperature(T_f, q_f), cfg.T0 * 0.5)
+    rho = kw["p_full"] / (constants.R_d * tv)
+    rho_sfc = np.asarray(rho)[:, -1]
+    exner_sfc = (np.asarray(kw["p_full"])[:, -1] / constants.p_ref) ** constants.kappa
+
+    wpthlp = jnp.full((ncol,), 0.06)    # upward kinematic heat flux [K m/s]
+    wprtp = jnp.full((ncol,), 4.0e-5)   # upward kinematic moisture flux [kg/kg m/s]
+    upwp = jnp.full((ncol,), -0.05)     # downward momentum flux (drag) [m^2/s^2]
+    vpwp = jnp.full((ncol,), -0.01)
+
+    def run(T_sfc, q_sfc, sfc=(wpthlp, wprtp, upwp, vpwp)):
+        return clubb_turbulence_prognostic(
+            u_f, v_f, T_f, q_f, carry, kw["p_full"], kw["p_half"],
+            kw["z_full"], kw["z_half"], T_sfc, q_sfc, rho, 150.0, cfg, *sfc)
+
+    out, _ = run(T_f[:, -1] + 1.0, q_f[:, -1])
+    assert np.all(np.isfinite(np.asarray(out.dT_dt)))   # non-degenerate state
+
+    # (1) Round-trip the kinematic BC to the reported W/m^2 surface fluxes + ustar.
+    assert np.allclose(np.asarray(out.shflx),
+                       np.asarray(wpthlp) * rho_sfc * constants.c_pd * exner_sfc,
+                       rtol=1e-6)
+    assert np.allclose(np.asarray(out.lhflx),
+                       np.asarray(wprtp) * rho_sfc * constants.L_v, rtol=1e-6)
+    # ustar from the prescribed stress: |tau|/rho = sqrt(u'w'^2 + v'w'^2).
+    assert np.allclose(np.asarray(out.ustar),
+                       np.asarray((upwp ** 2 + vpwp ** 2) ** 0.25), rtol=1e-6)
+
+    # (2) Bulk bypass: a 30 K warmer surface + doubled q_sfc must not change a
+    # thing when every flux is prescribed (the bulk formula is unreachable).
+    out_hot, _ = run(T_f[:, -1] + 30.0, q_f[:, -1] * 2.0)
+    for a, b in ((out.shflx, out_hot.shflx), (out.lhflx, out_hot.lhflx),
+                 (out.dT_dt, out_hot.dT_dt), (out.dq_v_dt, out_hot.dq_v_dt)):
+        assert np.array_equal(np.asarray(a), np.asarray(b))
+
+    # (3) Coupling: grad of the near-surface heating w.r.t. the prescribed heat
+    # flux is finite and non-trivial (the BC reaches advance_clubb_core).
+    def heat_obj(whl):
+        o, _ = clubb_turbulence_prognostic(
+            u_f, v_f, T_f, q_f, carry, kw["p_full"], kw["p_half"],
+            kw["z_full"], kw["z_half"], T_f[:, -1] + 1.0, q_f[:, -1],
+            rho, 150.0, cfg, jnp.full((ncol,), whl), wprtp, upwp, vpwp)
+        return jnp.sum(o.dT_dt[:, -3:])
+
+    g = jax.grad(heat_obj)(0.06)
+    assert np.isfinite(g) and abs(g) > 1e-6, f"prescribed heat flux not coupled: g={g}"
+
+    # (3b) AD-safety at a valid ZERO-stress prescribed BC: ustar = (u'w'^2+v'w'^2)^
+    # (1/4) has +inf slope at the origin, so grad of sum(ustar) w.r.t. a prescribed
+    # momentum flux that is zero must stay finite (the 1e-30 floor). Differentiate
+    # w.r.t. the common stress component, evaluated AT zero.
+    def ustar_obj(s):
+        o, _ = clubb_turbulence_prognostic(
+            u_f, v_f, T_f, q_f, carry, kw["p_full"], kw["p_half"],
+            kw["z_full"], kw["z_half"], T_f[:, -1] + 1.0, q_f[:, -1],
+            rho, 150.0, cfg, wpthlp, wprtp, jnp.full((ncol,), s), jnp.full((ncol,), s))
+        return jnp.sum(o.ustar)
+
+    assert np.isfinite(jax.grad(ustar_obj)(0.0)), "ustar grad non-finite at zero stress"
+
+    # (4) Sign: a positive (upward) prescribed surface heat flux warms the
+    # near-surface air relative to zero prescribed flux (momentum/moisture fixed).
+    zero = jnp.zeros((ncol,))
+    out_warm, _ = run(T_f[:, -1] + 1.0, q_f[:, -1], sfc=(wpthlp, zero, upwp, vpwp))
+    out_zero, _ = run(T_f[:, -1] + 1.0, q_f[:, -1], sfc=(zero, zero, upwp, vpwp))
+    assert np.all(np.asarray(out_warm.dT_dt)[:, -1]
+                  > np.asarray(out_zero.dT_dt)[:, -1] + 1e-7)
+
+    # (5) Back-compat: explicit None == omitted (the default bulk path is intact).
+    base, mom_base = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, carry, kw["p_full"], kw["p_half"],
+        kw["z_full"], kw["z_half"], T_f[:, -1] + 1.0, q_f[:, -1], rho, 150.0, cfg)
+    expl, mom_expl = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, carry, kw["p_full"], kw["p_half"],
+        kw["z_full"], kw["z_half"], T_f[:, -1] + 1.0, q_f[:, -1], rho, 150.0, cfg,
+        None, None, None, None)
+    for a, b in zip(base, expl):
+        assert np.array_equal(np.asarray(a), np.asarray(b))
+    assert np.array_equal(np.asarray(mom_base), np.asarray(mom_expl))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

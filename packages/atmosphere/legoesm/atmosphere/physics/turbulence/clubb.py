@@ -236,6 +236,10 @@ def clubb_step(
     rho: jax.Array,
     dt: float,
     config: CLUBBConfig,
+    sfc_wpthlp: jax.Array | None = None,
+    sfc_wprtp: jax.Array | None = None,
+    sfc_upwp: jax.Array | None = None,
+    sfc_vpwp: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Bridge one prognostic CLUBB step from legoESM top-down column inputs.
 
@@ -258,6 +262,19 @@ def clubb_step(
       * Dry-static reference profiles ``thv_ds``/``rho_ds`` taken as the current
         ``thv``/``rho`` (a per-column Boussinesq-style reference).
       * Large-scale ``CLUBBForcing`` = 0 (other physics supply those tendencies).
+
+    **Prescribed surface fluxes** (``sfc_wpthlp``/``sfc_wprtp``/``sfc_upwp``/
+    ``sfc_vpwp``, each shape ``(ncol,)``): CLUBB's standard LES/SCM-intercomparison
+    interface. When a component is given it OVERRIDES the bulk lower-BC for that
+    moment with the prescribed **kinematic** surface flux (``w'thl'`` [K m/s],
+    ``w'rt'`` [kg/kg m/s], ``u'w'``/``v'w'`` [m^2/s^2] — same units/sign as the
+    internally-computed BCs); components left ``None`` fall back to CLUBB's own
+    bulk formula from the air-surface contrast (``T_sfc``/``q_sfc``). The ``None``
+    test is a compile-time static choice (CLAUDE.md feature-gating exception), not
+    a traced selection. Cases that prescribe all four (BOMEX/DYCOMS/ARM) never
+    touch the bulk formula, so the result is independent of ``T_sfc``/``q_sfc``.
+    The reported ``shflx``/``lhflx``/``ustar`` diagnostics are made consistent
+    with whichever BC was actually used.
 
     Returns ``(du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diagnostics)`` — the
     four mean tendencies (top-down ``(ncol, nlev)``), the advanced moment state,
@@ -310,18 +327,44 @@ def clubb_step(
     Lscale = jnp.maximum(Lscale, lmin)
 
     # ---- Surface turbulent-flux lower boundary conditions (kinematic) ----
-    tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
-        u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
-        T_sfc, q_sfc, rho[:, -1], config.surface)
     rho_sfc = rho[:, -1]
     exner_sfc = exner[:, -1]
-    wpthlp_sfc = shflx / (rho_sfc * constants.c_pd * exner_sfc)   # w'thl' [K m/s]
-    wprtp_sfc = lhflx / (rho_sfc * constants.L_v)                 # w'rt'  [kg/kg m/s]
-    # Surface stress convention is tau = -rho*Cd*|V|*u (compute_surface_fluxes),
-    # so the kinematic momentum flux is u'w'_sfc = tau_x/rho (NEGATIVE for u>0 —
-    # momentum transported downward / drag), NOT -tau_x/rho.
-    upwp_sfc = tau_x / rho_sfc                                    # u'w'   [m^2/s^2]
-    vpwp_sfc = tau_y / rho_sfc
+    # Each BC component is either prescribed (LES/SCM intercomparison cases) or
+    # computed by CLUBB's own bulk formula from the air-surface contrast. The
+    # bulk formula is evaluated only if at least one component still needs it
+    # (static Python branch on None-ness — never a traced selection).
+    need_bulk = (sfc_wpthlp is None or sfc_wprtp is None
+                 or sfc_upwp is None or sfc_vpwp is None)
+    if need_bulk:
+        tau_x, tau_y, shflx_b, lhflx_b, ustar_b = compute_surface_fluxes(
+            u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
+            T_sfc, q_sfc, rho_sfc, config.surface)
+        wpthlp_b = shflx_b / (rho_sfc * constants.c_pd * exner_sfc)  # w'thl' [K m/s]
+        wprtp_b = lhflx_b / (rho_sfc * constants.L_v)                # w'rt'  [kg/kg m/s]
+        # Surface stress convention is tau = -rho*Cd*|V|*u (compute_surface_fluxes),
+        # so the kinematic momentum flux is u'w'_sfc = tau_x/rho (NEGATIVE for u>0 —
+        # momentum transported downward / drag), NOT -tau_x/rho.
+        upwp_b = tau_x / rho_sfc                                     # u'w'   [m^2/s^2]
+        vpwp_b = tau_y / rho_sfc
+    # Resolve each BC: prescribed kinematic flux when given, else the bulk value.
+    wpthlp_sfc = wpthlp_b if sfc_wpthlp is None else sfc_wpthlp
+    wprtp_sfc = wprtp_b if sfc_wprtp is None else sfc_wprtp
+    upwp_sfc = upwp_b if sfc_upwp is None else sfc_upwp
+    vpwp_sfc = vpwp_b if sfc_vpwp is None else sfc_vpwp
+    # W/m^2 + ustar diagnostics consistent with the BC actually used: the bulk
+    # values pass through unchanged (exact back-compat); prescribed kinematic
+    # fluxes are converted back to W/m^2, and ustar from the prescribed stress
+    # (|tau|/rho = sqrt(u'w'^2 + v'w'^2), so ustar = (u'w'^2 + v'w'^2)^(1/4)).
+    # The 1e-30 inside the fourth root is a pure AD safety floor: at the valid
+    # zero-stress prescribed BC (sfc_upwp=sfc_vpwp=0) the bare (.)**0.25 has an
+    # +inf slope, so jax.grad of an objective through ustar would be non-finite;
+    # the floor pins the gradient to 0 there while leaving any physical stress
+    # (|u'w'| >> 1e-8) bit-unchanged.
+    shflx = shflx_b if sfc_wpthlp is None else (
+        sfc_wpthlp * (rho_sfc * constants.c_pd * exner_sfc))
+    lhflx = lhflx_b if sfc_wprtp is None else sfc_wprtp * (rho_sfc * constants.L_v)
+    ustar = ustar_b if (sfc_upwp is None and sfc_vpwp is None) else (
+        jnp.maximum(upwp_sfc ** 2 + vpwp_sfc ** 2, 1e-30) ** 0.25)
     # The mean state (rtm/thlm/um/vm) is owned by the model and re-read from the
     # live column each step; only the higher-order moments/fluxes persist in
     # ``moments``. Reset the means here, then set the surface flux BCs.
@@ -375,6 +418,10 @@ def clubb_turbulence_prognostic(
     rho: jax.Array,
     dt: float,
     config: CLUBBConfig,
+    sfc_wpthlp: jax.Array | None = None,
+    sfc_wprtp: jax.Array | None = None,
+    sfc_upwp: jax.Array | None = None,
+    sfc_vpwp: jax.Array | None = None,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Prognostic CLUBB scheme entry (``scheme="clubb"``, ``prognostic=True``).
 
@@ -397,6 +444,12 @@ def clubb_turbulence_prognostic(
     step, bit-identical to the un-sub-cycled path. Surface-flux diagnostics are
     the sub-cycle mean; ``Kh`` the final sub-step's.
 
+    **Prescribed surface fluxes** (``sfc_wpthlp``/``sfc_wprtp``/``sfc_upwp``/
+    ``sfc_vpwp``, each ``(ncol,)`` or ``None``) are forwarded to :func:`clubb_step`
+    unchanged — see its docstring. They are held constant across the sub-cycle
+    (steady surface forcing, as in BOMEX/DYCOMS/ARM), the natural contract for a
+    prescribed-flux case run within one host ``dt``.
+
     Returns ``(TurbulenceOutput, clubb_moments_new)``; the second element flows
     back into ``PhysicsState.clubb_moments`` via the carry machinery.
     """
@@ -406,7 +459,8 @@ def clubb_turbulence_prognostic(
     if n_sub == 1:
         du_dt, dv_dt, dT_dt, dq_v_dt, new_moments, diags = clubb_step(
             u, v, T, q_v, moments, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt, config)
+            T_sfc, q_sfc, rho, dt, config,
+            sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp)
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         Kh_full = flip_vertical(diags["Kh_zt"])
     else:
@@ -425,7 +479,8 @@ def clubb_turbulence_prognostic(
             rho_c = p_full / (constants.R_d * tv)
             du, dv, dT, dq, m_new, diag = clubb_step(
                 u_c, v_c, T_c, q_c, m_c, p_full, p_half, z_full, z_half,
-                T_sfc, q_sfc, rho_c, dt_sub, config)
+                T_sfc, q_sfc, rho_c, dt_sub, config,
+                sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp)
             carry = (u_c + dt_sub * du, v_c + dt_sub * dv, T_c + dt_sub * dT,
                      q_c + dt_sub * dq, m_new)
             return carry, diag
@@ -465,6 +520,10 @@ def integrate_clubb_column(
     config: CLUBBConfig,
     moments: CLUBBMomentState | None = None,
     host_numerical_diffusion: float = 0.05,
+    sfc_wpthlp: jax.Array | None = None,
+    sfc_wprtp: jax.Array | None = None,
+    sfc_upwp: jax.Array | None = None,
+    sfc_vpwp: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, CLUBBMomentState, dict]:
     """Integrate a single-column prognostic CLUBB run for ``nsteps`` steps.
 
@@ -489,6 +548,12 @@ def integrate_clubb_column(
     coefficient (0 ⇒ bare CLUBB, exposes the noise; default 0.05 ⇒ a coupled-
     model-like stand-in). Applied in **flux form** so it conserves the
     column-summed means exactly (zero-flux top/bottom).
+
+    **Prescribed surface fluxes** (``sfc_wpthlp``/``sfc_wprtp``/``sfc_upwp``/
+    ``sfc_vpwp``, each ``(ncol,)`` or ``None``) are forwarded to :func:`clubb_step`
+    unchanged (held constant across the run) — the standard way to drive a
+    prescribed-flux LES/SCM case (BOMEX/DYCOMS/ARM). ``None`` ⇒ CLUBB's bulk
+    surface formula from ``T_sfc``/``q_sfc`` (the default, back-compatible).
 
     ``moments`` defaults to a rest state (:func:`clubb_core.init_clubb_moments`).
     ``nsteps`` is a **static** Python int (the ``lax.scan`` length, fixed at trace
@@ -523,7 +588,8 @@ def integrate_clubb_column(
         rho_c = p_full / (constants.R_d * tv)
         du, dv, dT, dq, m_new, diag = clubb_step(
             u_c, v_c, T_c, q_c, m_c, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho_c, dt, config)
+            T_sfc, q_sfc, rho_c, dt, config,
+            sfc_wpthlp, sfc_wprtp, sfc_upwp, sfc_vpwp)
         # Moisture positivity is enforced on the CLUBB-tendency update FIRST (the
         # physical moisture-fixer; a non-conservative source, as in any model),
         # THEN the conservative host-stand-in diffusion is applied LAST. Because
