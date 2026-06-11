@@ -91,6 +91,7 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_fill_holes.py` | `fill_holes_*` ✅19; `fill_holes_wp2_from_horz_tke` (TKE-conserving wp2 fill, CAM) ✅25 | ✅ |
 | `clubb_xm_wpxp.py` | coupled xm/wpxp advance: builders + assembly ✅27-28; TA/LHS pre-computes + `diagnose_upxp` ✅29; `solve_xm_wpxp_with_single_lhs` + `xm_wpxp_clipping_and_stats` ✅33; **`advance_xm_wpxp` main** (rtm/wprtp + thlm/wpthlp; CAM `l_predict_upwp_vpwp=False`; C6/C7_Skw_fnc as inputs) ✅34 (wiring check + sub-piece parity; codex pending rate-limit) | ✅ |
 | `clubb_mfl.py` | monotonic-flux-limiter JAX port: erf velocity + `mfl_xm_*` ✅30; `calc_turb_adv_range` (masked `fori_loop`) ✅31; **`monotonic_turbulent_flux_limit`** core (masked windowed min/max + `lax.scan` sequential clip + xm re-solve + top spike-fix, round-off parity all 4 fields, differentiable) ✅32 | ✅ |
+| `clubb_tau.py` | CAM tau family: `calc_stability_correction` + `compute_tau_family` (`invrs_tau_C1/C4/C6/C14/xp2_zm`, `invrs_tau_wp3_zt` from parcel Lscale + N2 stability corr) ✅35 | ✅ |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
 
@@ -165,12 +166,16 @@ CAM branches came from the CESM Fortran; `l_damp_wp3_Skw_squared=False`→C8b=0.
    (masked `lax` loop — the host-numpy level-range search is not JIT/AD-safe) +
    the limiter core + `xm_wpxp_clipping_and_stats`.
 2. **`advance_xm_wpxp` main** — orchestrate the iter-27-29 pieces + clipping.
-3. **P6 orchestration** `advance_clubb_core`: the dissipation-timescale inputs
-   (`invrs_tau_*`/`Cn`/`tau`), `Skw`/`sigma_sqd_w`/`wp3_on_wp2`, the `C*_Skw_fnc`,
-   the pre+post PDF closure (`l_call_pdf_closure_twice=True`) producing the 4th-
-   order moments (wp4/wp2up2/…), and pack/unpack of the carried moment state.
+3. **P6 orchestration** `advance_clubb_core` (in progress): ✅ iter 35 the tau
+   family (`clubb_tau.py`). ☐ remaining: `Skw`/`sigma_sqd_w`/`wp3_on_wp2` +
+   `C*_Skw_fnc` wiring, the pre+post PDF closure (`l_call_pdf_closure_twice=True`)
+   producing the 4th-order moments (wp4/wp2up2/wp2thvp/rtpthvp/…) + the PDF
+   `w_1/w_2/varnce_w/mixt_frac`, and pack/unpack of the carried moment state.
 4. **Wire into `clubb.py`**: carry the full moment set as state, replace the
    phase-1 eddy-diffusion mean advance with the prognostic advances.
+
+**⚠ Pending codex review** (external rate limit until ~19:37 MDT): iter-34
+`advance_xm_wpxp` main + iter-35 `clubb_tau`. Run retroactively when available.
 
 Each chunk: analytic/self-consistency oracle (CI) + golden/round-off parity vs
 CLUBB-JAX (patch reference physical constants to isolate algorithm) + codex
