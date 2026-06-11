@@ -19,7 +19,16 @@ scheme folds that division in ONCE:
 
 i.e. for salinity the Veros ``× dzt[-1]`` (setup) and ``/ dzt[-1]`` (core)
 cancel EXACTLY — the net Veros salt forcing is the plain restoring rate, so no
-thickness factor appears here.  For heat, ``dz_0`` is the ACTUAL top-layer
+thickness factor appears here.  With the per-cell PISTON form
+(``FluxFeedbackConfig.salt_restore_piston`` + ``S_restore_piston`` [m/s];
+Veros north_atlantic ``sss_rest`` = file/100, north_atlantic.py:245-249) there
+is NO setup-side dzt factor to cancel, so the core's ``/ dzt[-1]`` REMAINS:
+
+    dS/dt = S_restore_piston · (S_target − S_surf) / dz_0              [PSU/s]
+
+(``forc_salt_surface = sss_rest·(sss_clim − S)·maskT`` [PSU·m/s],
+north_atlantic.py:336-340, divided by the top-cell thickness in the implicit
+RHS, core/thermodynamics.py:282).  For heat, ``dz_0`` is the ACTUAL top-layer
 thickness (partial-cell aware); under a rigid lid with a full top cell it
 equals ``dz_ref[0]`` = Veros's fixed ``dzt[-1]`` exactly.
 
@@ -98,6 +107,7 @@ __physics_contract__ = {
         "surface_forcing.q_feedback": "W/m^2/K (>=0 damps SST anomalies)",
         "surface_forcing.T_feedback_target": "degC",
         "surface_forcing.S_restore_target": "PSU",
+        "surface_forcing.S_restore_piston": "m/s (per-cell SSS restoring piston velocity, >=0 damps)",
         "surface_forcing.q_solar": "W/m^2 (positive into ocean; penetrative Jerlov column)",
         "cfg.c_sw": "J/(kg K)",
         "cfg.rho_0": "kg/m^3",
@@ -112,7 +122,9 @@ __physics_contract__ = {
     "sign_convention": (
         "Heat flux positive INTO the ocean = surface warming (dT_dt > 0); the "
         "feedback term q_feedback*(T_target - T_surf) warms when the surface is "
-        "colder than the target; salinity restoring drives S toward the target. "
+        "colder than the target; salinity restoring drives S toward the target "
+        "(scalar 1/tau_restore_s form, or piston*(S_target - S_surf)/dz_0 when "
+        "the per-cell piston channel is active). "
         "Ice mask zeroes BOTH tendencies (and the solar column) where "
         "(T_surf < ice_threshold_C) AND (total heat flux incl. q_solar < 0). "
         "q_solar >= 0 deposits 100% of its energy in the wet column "
@@ -129,13 +141,21 @@ __physics_contract__ = {
         "placement in veros/core/thermodynamics.py:276-282; penetrative solar: "
         "global_flexible.py:292-301,392-405 / global_1deg.py:229-240,333-346 "
         "(qsol * divpen_shortwave * ice * maskT / cp_0 / rho_0, applied at "
-        "taup1 pre-vmix via thermodynamics.py:419 -> diffusion.py:142)."
+        "taup1 pre-vmix via thermodynamics.py:419 -> diffusion.py:142); "
+        "piston SSS restoring: north_atlantic.py:245-249 (sss_rest = file/100 "
+        "[m/s]) + :336-344 (forc_salt_surface = sss_rest*(sss_clim - S)*maskT, "
+        "ice-masked) + core/thermodynamics.py:282 (/dzt[-1] in the implicit "
+        "RHS)."
     ),
     "idealized_test": (
         "All channels None -> zero tendencies; uniform q_prescribed=Q with "
         "q_feedback=0 -> dT_dt = Q/(rho_0 c_sw dz_0) in every wet surface cell; "
         "T_surf = T_target and S_surf = S_target -> only the prescribed part "
         "remains; cold surface (T < -1.8 degC) under cooling -> both zeroed. "
+        "Piston channel (tests/ocean/unit/test_flux_feedback_piston.py): "
+        "hand-computed piston*(S*-S)/dz_0, default-None bit-identity, "
+        "double-specification guards, ice gating, Veros NA kernel replica, "
+        "AD finiteness. "
         "Solar channel (tests/ocean/unit/test_flux_feedback_solar.py): Jerlov "
         "column vs hand two-band exponential, exact column heat closure, ice "
         "quadrants gating the full column, Veros global-setup kernel replica "
@@ -173,9 +193,12 @@ def flux_feedback_surface_forcing(
         so only the standalone ``Q_net`` diagnostic differs over land.
     surface_forcing : OceanSurfaceForcing or None
         Carries ``q_prescribed`` / ``q_feedback`` / ``T_feedback_target`` /
-        ``S_restore_target`` / ``q_solar`` (any may be None ⇒ that term is
-        inert; ``q_solar`` additionally requires
-        ``cfg.penetrative_shortwave=True`` and the column arguments below).
+        ``S_restore_target`` / ``q_solar`` / ``S_restore_piston`` (any may be
+        None ⇒ that term is inert; ``q_solar`` additionally requires
+        ``cfg.penetrative_shortwave=True`` and the column arguments below;
+        ``S_restore_piston`` [m/s] requires ``cfg.salt_restore_piston=True``
+        AND ``S_restore_target`` and replaces the scalar ``tau_restore_s``
+        rate with ``piston·(S* − S)/dz₀`` — Veros north_atlantic sss_rest).
     cfg : FluxFeedbackConfig
     dz_ref : array, shape (nlev,), optional
         Reference layer thicknesses [m] for the q_solar Jerlov column
@@ -215,6 +238,8 @@ def flux_feedback_surface_forcing(
     T_t = getattr(surface_forcing, "T_feedback_target", None) if surface_forcing else None
     S_t = getattr(surface_forcing, "S_restore_target", None) if surface_forcing else None
     q_sol = getattr(surface_forcing, "q_solar", None) if surface_forcing else None
+    S_p = (getattr(surface_forcing, "S_restore_piston", None)
+           if surface_forcing else None)
 
     if q_sol is not None and not cfg.penetrative_shortwave:
         raise ValueError(
@@ -246,6 +271,31 @@ def flux_feedback_surface_forcing(
         raise ValueError(
             f"flux_feedback: tau_restore_s must be > 0 s "
             f"(got {cfg.tau_restore_s!r})."
+        )
+    # --- Piston-velocity SSS restoring guards (EXT-N3): the gate and the
+    #     channel must be specified together — a channel without the gate
+    #     would be silently ignored; the gate without the channel would
+    #     silently fall back to the scalar tau_restore_s form (the
+    #     double-specification hazard). Trace-time (None-ness is static). ---
+    if S_p is not None and not cfg.salt_restore_piston:
+        raise ValueError(
+            "flux_feedback: S_restore_piston was provided but "
+            "FluxFeedbackConfig.salt_restore_piston is False — the channel "
+            "would be silently ignored and the scalar tau_restore_s rate "
+            "applied instead. Set salt_restore_piston=True (the Veros "
+            "north_atlantic per-cell sss_rest form) or drop the channel."
+        )
+    if S_p is not None and S_t is None:
+        raise ValueError(
+            "flux_feedback: S_restore_piston requires S_restore_target "
+            "(the restoring is piston*(S_target - S_surf)/dz_0)."
+        )
+    if cfg.salt_restore_piston and S_p is None and S_t is not None:
+        raise ValueError(
+            "flux_feedback: salt_restore_piston=True but no S_restore_piston "
+            "channel was provided while S_restore_target is given — the "
+            "restoring would silently fall back to the scalar tau_restore_s "
+            "form. Provide S_restore_piston, or set salt_restore_piston=False."
         )
 
     T_surf = T[..., 0]
@@ -291,10 +341,19 @@ def flux_feedback_surface_forcing(
         q_sol_m = None
         dT_solar = None
 
-    # --- SSS restoring [PSU/s]: Veros's ×dzt[-1] (setup) / ÷dzt[-1] (core)
-    #     cancel exactly ⇒ the plain rate. ---
+    # --- SSS restoring [PSU/s].  Scalar form: Veros's ×dzt[-1] (setup) /
+    #     ÷dzt[-1] (core) cancel exactly ⇒ the plain rate.  Piston form
+    #     (EXT-N3): no setup-side dzt factor, so the core's ÷dzt[-1] remains —
+    #     dz_0 here is the ACTUAL top-layer thickness, the same convention as
+    #     the heat conversion above (≡ Veros's fixed dzt[-1] under a rigid
+    #     lid with full top cells, e.g. the NA kbot snap). ---
     if S_t is not None:
-        dS_top = (jnp.asarray(S_t, dtype) - S_surf) / cfg.tau_restore_s * mask
+        if S_p is not None:
+            inv_dz = jnp.where(is_ocean, 1.0 / dz_safe, 0.0).astype(dtype)
+            dS_top = (jnp.asarray(S_p, dtype)
+                      * (jnp.asarray(S_t, dtype) - S_surf) * inv_dz)
+        else:
+            dS_top = (jnp.asarray(S_t, dtype) - S_surf) / cfg.tau_restore_s * mask
     else:
         dS_top = zT
 

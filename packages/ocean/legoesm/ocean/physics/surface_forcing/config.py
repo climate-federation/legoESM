@@ -144,6 +144,16 @@ class FluxFeedbackConfig(NamedTuple):
     # Jerlov water type for the q_solar column ("I" ≡ the Veros setup
     # literals 0.58/0.35/23.0; see shortwave_penetration.JERLOV_TYPES).
     shortwave_water_type: str = "I"
+    # Per-cell piston-velocity SSS restoring (EXT-N3; Veros north_atlantic
+    # ``sss_rest`` [m/s]): consume ``OceanSurfaceForcing.S_restore_piston``,
+    # replacing the scalar ``1/tau_restore_s`` rate with
+    # ``piston·(S* − S)/dz₀`` (Veros forc_salt_surface / dzt[-1],
+    # north_atlantic.py:336-340 + core/thermodynamics.py:282).  Gate +
+    # channel must be specified TOGETHER whenever ``S_restore_target`` is
+    # given (either alone raises at trace time — never a silently ignored
+    # channel, never a silent scalar-tau fallback).  OFF by default ⇒
+    # bit-identical existing paths.
+    salt_restore_piston: bool = False
 
 
 class BulkFormulaConfig(NamedTuple):
