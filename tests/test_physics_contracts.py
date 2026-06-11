@@ -176,6 +176,9 @@ EXCLUDED: frozenset[str] = frozenset(
         # CLUBB port: coupled xm/wpxp advance term builders — internal closure
         # dynamics, not a single column-physics tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_xm_wpxp.py",
+        # CLUBB port: monotonic turbulent-flux limiter helpers — a numerical
+        # flux-monotonicity utility, not a column-physics tendency scheme.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_mfl.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",

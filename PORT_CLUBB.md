@@ -86,10 +86,11 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_pdf.py` | ADG1 params (`ADG1_pdf_driver`), cloud fraction + rcm (`calc_pdf_liquid_cloud_frac[_components]`) | ✅ |
 | `clubb_pdf_moments.py` | PDF moment integrals, higher-order moments, cloud-water `x'rc'` fluxes, buoyancy flux `wpthvp` | ✅ |
 | `clubb_solve.py` | `tridiag_solve` (CLUBB band → legoESM `thomas_solve`) + `penta_solve` (verbatim CLUBB LU port, bit-exact) | ✅ iter 10-11 |
-| `clubb_moments.py` | `advance_windm_edsclrm` ✅12; xp2_xpyp terms/TA/combiners ✅13-15; `term_ma_zm_lhs`+`calc_xp2_xpyp_lhs`/`calc_up2_vp2_lhs` ✅18; `xp2_xpyp_uv_rhs`+`pos_definite_variances` ✅19; `clip_variance`+`solve_xp2_xpyp`+**`advance_xp2_xpyp` main** (full 5-moment advance, round-off parity) ✅20; `advance_wp2_wp3`, `advance_xm_wpxp` (penta), `mono_flux_limiter` ☐ | 🟡 P5 |
+| `clubb_moments.py` | `advance_windm_edsclrm` ✅12; xp2_xpyp builders/TA/combiners ✅13-19; **`advance_xp2_xpyp` main** (full 5-moment advance, round-off parity) ✅20 | ✅ |
 | `clubb_wp23.py` | coupled wp2/wp3 penta advance: 8 LHS + 9 RHS builders ✅21-22; `wp23_rhs/lhs/solve` ✅23; `compute_a1_a3_coef`/`compute_skw_fnc` ✅24; `clip_skewness` ✅25; **`advance_wp2_wp3` main** ✅26 (composition round-off parity; **CAM uses UPWIND wp3 MA** — `l_upwind_xm_ma=True`) | ✅ |
 | `clubb_fill_holes.py` | `fill_holes_*` ✅19; `fill_holes_wp2_from_horz_tke` (TKE-conserving wp2 fill, CAM) ✅25 | ✅ |
 | `clubb_xm_wpxp.py` | coupled xm/wpxp advance: 5 builders ✅27; `xm_wpxp_lhs/rhs/solve` ✅28; centered `xpyp_term_ta_pdf_lhs` + `calc_xm_wpxp_ta_terms`/`calc_xm_wpxp_lhs_terms` + `diagnose_upxp` ✅29 (parity+golden; **CAM wpxp TA is CENTERED** — `l_explicit_turbulent_adv_wpxp`/`l_godunov_upwind_wpxp_ta`=False, unlike xp2/xpyp UPWIND); clipping + `advance_xm_wpxp` main ☐ | 🟡 P5 |
+| `clubb_mfl.py` | monotonic-flux-limiter JAX helpers: erf mean up/down velocity + `mfl_xm_lhs/rhs/solve` re-solve ✅30; `calc_turb_adv_range` (needs pure-JAX masked-loop) + limiter core ☐ | 🟡 P5 |
 | `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
 
@@ -122,6 +123,9 @@ finite gradients in float32 + float64.
   `calc_xm_wpxp_ta_terms` (centered TA), `calc_xm_wpxp_lhs_terms`, `diagnose_upxp`.
   ☐ remaining: the clipping (`xm_wpxp_clipping_and_stats` + `mono_flux_limiter`,
   CAM `l_mono_flux_lim_*=True`) + the `advance_xm_wpxp` main.
+- **MFL** 🟡 — ✅ iter 30 `clubb_mfl.py` JAX helpers (erf mean up/down velocity +
+  `mfl_xm_lhs/rhs/solve`). ☐ `calc_turb_adv_range` (host-numpy → needs pure-JAX
+  masked loop) + the limiter core.
 - **P6 orchestration** ☐ — assemble the `advance_clubb_core`-equivalent for the
   CAM flag subset; pack/unpack carried moment state (wp2/wp3/thlp2/rtp2/rtpthlp/
   wpthlp/wprtp/up2/vp2). `l_call_pdf_closure_twice=True` → PDF pre+post.
@@ -137,37 +141,35 @@ finite gradients in float32 + float64.
 
 ---
 
-## Next (iter 21+)
-*(Compressed at iter 20. iter 11–20 detail in git history; `clubb_moments.py`
-table row above is the live builder ledger.)*
+## Next (iter 31+)
+*(Compressed at iter 30. iter 11–30 detail in git history + the module table
+above, which is the live builder ledger. Key per-module CAM-vs-ARM caveats are
+recorded in each module's docstring.)*
 
-Remaining to reach the DONE gate (full prognostic closure in the live path):
-1. **`advance_wp2_wp3`** (penta — `clubb_solve.penta_solve` ready). ✅ iter 21:
-   8 LHS term builders. ✅ iter 22: 9 RHS term builders (`clubb_wp23.py`).
-   **CAM≠ARM caveat:** CLUBB-JAX hardcodes ARM defaults; CAM sets
-   `l_damp_wp2_using_em=False` and `l_use_tke_in_wp3_pr_turb_term=False`, so those
-   two RHS terms were ported from the **CLUBB Fortran** (in CESM) — no JAX oracle,
-   validated by golden + analytic + Fortran formula. ✅ iter 23: the `wp23_rhs`/
-   `wp23_lhs` penta assembly (interleaved wp2[2k]/wp3[2k+1], bit-exact parity) +
-   `wp23_solve` (penta LU via `clubb_solve.penta_solve`, round-off parity).
-   ✅ iter 24: centered `term_ma_zt_lhs` (wp3 MA), `compute_a1_a3_coef`,
-   `compute_skw_fnc` (C1/C11; CAM `l_damp_wp2_using_em=False` → NO 1/3 on C1).
-   ✅ iter 25: `clip_skewness` (CAM non-smooth-Heaviside branch — parity vs
-   CLUBB-JAX `clip_skewness_core(...,False)`) + `fill_holes_wp2_from_horz_tke`
-   (TKE-conserving, `l_wp2_fill_holes_tke=.true.`).
-   ☐ remaining for the **main**: the orchestration (`Kw1=c_K1·Kh_zt`/
-   `Kw8=c_K8·Kh_zm`, `em_smth/wp2_smth=zm2zt2zm`, `dum/dvm_dz=ddzt`, the C12 scaling
-   of `lhs_diff_zt`, diffusion LHS, call builders+assembly+solve, post-clip).
-   CAM clip uses `l_min_wp2_from_corr_wx=.false.` (simple `wp2_min=w_tol²` floor).
-   **Note:** verify every CAM flag vs the namelist when assembling (the ARM-vs-CAM
-   divergence makes blind CLUBB-JAX reuse unsafe for this module).
-2. **`advance_xm_wpxp`** (penta — rtm/thlm + wprtp/wpthlp coupled solve;
-   `l_predict_upwp_vpwp=False` so upwp/vpwp stay diagnostic/eddy-diffusion).
-3. **`mono_flux_limiter`** (CAM `l_mono_flux_lim_*=True`).
-4. **P6 orchestration** `advance_clubb_core`: the dissipation-timescale inputs
-   (`invrs_tau_*`, `Cn`), `wp3_on_wp2`, `sigma_sqd_w`, the pre+post PDF closure
-   (`l_call_pdf_closure_twice=True`), and pack/unpack of the carried moment state.
-5. **Wire into `clubb.py`**: carry the full moment set as state, replace the
+**Done so far (the 3 prognostic advances + their machinery):**
+`advance_windm_edsclrm` (u/v) ✅, `advance_xp2_xpyp` (5 moments) ✅,
+`advance_wp2_wp3` (wp2/wp3 penta) ✅ — all with round-off composition parity.
+`advance_xm_wpxp` (rtm/thlm + wprtp/wpthlp): all builders + assembly/solve +
+TA/LHS pre-computes ✅; clipping + main ☐. All clips ported
+(`fill_holes*`/`clip_variance`/`clip_covar`/`clip_skewness`) + the MFL JAX
+helpers ✅.
+
+**CAM-vs-ARM rule of thumb (verified the hard way):** CLUBB-JAX is wired for ARM.
+For each module re-check the CAM namelist/Fortran. Caught so far: wp2/wp3 use
+UPWIND MA (`l_upwind_xm_ma=True`) but xp2/xpyp & wp2/wp3 TA differ from xm/wpxp TA
+(xp2/xpyp UPWIND `l_upwind_xpyp_ta=True`; xm/wpxp CENTERED); wp2_dp1 + wp3_pr_turb
+CAM branches came from the CESM Fortran; `l_damp_wp3_Skw_squared=False`→C8b=0.
+
+**Remaining to the DONE gate (full prognostic closure in the live path):**
+1. **MFL completion** (`clubb_mfl.py`): pure-JAX `calc_turb_adv_range`
+   (masked `lax` loop — the host-numpy level-range search is not JIT/AD-safe) +
+   the limiter core + `xm_wpxp_clipping_and_stats`.
+2. **`advance_xm_wpxp` main** — orchestrate the iter-27-29 pieces + clipping.
+3. **P6 orchestration** `advance_clubb_core`: the dissipation-timescale inputs
+   (`invrs_tau_*`/`Cn`/`tau`), `Skw`/`sigma_sqd_w`/`wp3_on_wp2`, the `C*_Skw_fnc`,
+   the pre+post PDF closure (`l_call_pdf_closure_twice=True`) producing the 4th-
+   order moments (wp4/wp2up2/…), and pack/unpack of the carried moment state.
+4. **Wire into `clubb.py`**: carry the full moment set as state, replace the
    phase-1 eddy-diffusion mean advance with the prognostic advances.
 
 Each chunk: analytic/self-consistency oracle (CI) + golden/round-off parity vs
