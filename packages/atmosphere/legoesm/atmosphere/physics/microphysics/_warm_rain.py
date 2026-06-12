@@ -132,8 +132,10 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0, q_c=None):
     """
     q_sat = saturation_mixing_ratio(T, p_full)
     excess = q_v - q_sat
+    dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)
+    psychrometric = 1.0 + dqsdt * constants.L_v / constants.c_pd
     cond_frac = jax.nn.sigmoid(sharpness * excess)
-    condensation = cond_frac * excess / dt
+    condensation = cond_frac * excess / (dt * psychrometric)
     if q_c is not None:
         # Evaporation rate (negative ``condensation``) is bounded by
         # the available cloud water: |condensation| × dt ≤ q_c, i.e.

@@ -189,6 +189,72 @@ def test_adapter_scheme_swappable_kessler():
     assert float(jnp.max(dth)) > 0.0
 
 
+# --------------------------------------------------------------------------- #
+# Monotone (van-Leer TVD) scalar transport — the moist-instability fix.        #
+# --------------------------------------------------------------------------- #
+def _div_free(g, key):
+    """A random divergence-free (u,v,w) for advection tests (project a noise)."""
+    ny, nx, nz = g.cfg.ny, g.cfg.nx, g.cfg.nz
+    u = jax.random.normal(jax.random.PRNGKey(key), (ny, nx, nz))
+    v = jax.random.normal(jax.random.PRNGKey(key + 1), (ny, nx, nz))
+    w = jnp.zeros((ny, nx, nz + 1)).at[..., 1:nz].set(
+        0.3 * jax.random.normal(jax.random.PRNGKey(key + 2), (ny, nx, nz - 1)))
+    return sl.project(u, v, w, dt=0.1, g=g)
+
+
+def test_monotone_advection_conserves_scalar_mass():
+    g = _grid(nz=24)
+    u, v, w = _div_free(g, 7)
+    phi = jnp.asarray(np.random.RandomState(0).rand(
+        g.cfg.ny, g.cfg.nx, g.cfg.nz))
+    div = sl._vanleer_flux_div(phi, u, v, w, g)            # ∇·(uφ)
+    # Conservative flux form (periodic x,y + zero wall flux) ⇒ Σ ∇·(uφ) ≈ 0.
+    assert abs(float(jnp.sum(div))) < 1e-8 * float(jnp.sum(jnp.abs(div)) + 1e-30)
+
+
+def test_monotone_scalar_rhs_preserves_constant_under_spectral_projection():
+    """The limiter's face velocities are not the projection's spectral
+    divergence operator.  The scalar RHS must therefore include the
+    ``φ·div_fv(u)`` correction; otherwise a uniform scalar develops artificial
+    anomalies under an otherwise divergence-free LES velocity."""
+    g = _grid(nz=24)
+    u, v, w = _div_free(g, 11)
+    phi = jnp.full((g.cfg.ny, g.cfg.nx, g.cfg.nz), 3.0)
+    rhs = sl.scalar_rhs_monotone(
+        phi, u, v, w, jnp.zeros_like(phi), g, sfc_flux=0.0)
+    assert float(jnp.max(jnp.abs(rhs))) < 1e-11
+
+
+def test_monotone_vertical_advection_is_TVD_no_new_extrema():
+    """Pure VERTICAL advection of a z top-hat (the moisture-inversion direction,
+    where the runaway originates) by constant w: van-Leer is strictly bounded;
+    the spectral/centred vertical advection overshoots (the Gibbs that the
+    latent-heat feedback amplifies). u=v=0, w=const ⇒ exact 1-D limiter test."""
+    g = _grid(nz=32)
+    ny, nx, nz = g.cfg.ny, g.cfg.nx, g.cfg.nz
+    zero = jnp.zeros((ny, nx, nz))
+    w = jnp.full((ny, nx, nz + 1), 0.5)                   # uniform upward
+    phi = jnp.where(jnp.arange(nz) < nz // 2, 1.0, 0.0)
+    phi = jnp.broadcast_to(phi, (ny, nx, nz)).astype(jnp.float64)
+    lo, hi = float(phi.min()), float(phi.max())
+    dt = 0.2 * g.dz / 0.5                                  # CFL 0.2
+    phi_vl = phi - dt * sl._vanleer_flux_div(phi, zero, zero, w, g)
+    assert lo - 1e-9 <= float(phi_vl.min()) and float(phi_vl.max()) <= hi + 1e-9
+    # spectral/centred vertical advection of the SAME top-hat overshoots:
+    dthdz_f = jnp.pad(sl.ddz_c2f(phi, g.dz), ((0, 0), (0, 0), (1, 1)))
+    phi_sp = phi - dt * sl.f2c(w * dthdz_f)
+    assert float(phi_sp.max()) > hi + 1e-2   # > 1% Gibbs overshoot (the bug)
+
+
+def test_dry_path_uses_spectral_advection_unchanged():
+    """monotone_scalars defaults False ⇒ rhs uses the spectral scalar_rhs (the
+    validated dry path), bit-identical."""
+    cfg = sl.SpectralLESConfig(nx=8, ny=8, nz=16, Lx=800.0, Ly=800.0, Lz=800.0,
+                               buoyancy=True, theta_ref0=300.0,
+                               spectral_filter=False)
+    assert cfg.monotone_scalars is False
+
+
 def test_adapter_rejects_too_few_slots():
     nz, dz = 8, 50.0
     ref = _ref_for(nz, dz)
