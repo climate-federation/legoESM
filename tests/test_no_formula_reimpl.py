@@ -235,13 +235,20 @@ CANONICAL_FORMULAS = {
             "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler.py": 5,
             "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_mpas.py": 1,
             "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_les_plane.py": 1,
+            # 1 -> 2: main grew a second inline N² site while this branch was
+            # in flight (rebase 2026-06-12 baseline re-seed, not branch debt).
+            "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_les_plane.py": 2,
             "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_nh.py": 2,
             "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/hines.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/lindzen.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/mcfarlane.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/prognostic_spectral.py": 1,
-                "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 3,
+            # clubb_lite keeps its single inline g/θ N² term by decision (the
+            # buoyancy_coefficient wrapper was judged superfluous there —
+            # PORT_CLUBB.md condensation goal); this restores the pre-CLUBB-port
+            # main baseline value, it is NOT new debt.
+            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_lite.py": 1,
+            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 3,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/holtslag_boville.py": 4,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/louis.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/mynn25.py": 3,
@@ -287,7 +294,10 @@ CANONICAL_FORMULAS = {
             "packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py": 3,
             "packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py": 3,
             "packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py": 3,
-                "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 2,
+            # New on main while this branch was in flight (rebase 2026-06-12
+            # baseline seed, not branch debt): 3 inline (p/p0)^κ sites.
+            "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_les_moist.py": 3,
+            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 2,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/holtslag_boville.py": 2,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/louis.py": 1,

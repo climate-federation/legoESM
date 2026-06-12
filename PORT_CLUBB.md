@@ -34,7 +34,7 @@ happens after the source consolidation settles.
 | 16 | `clubb_mixing_length.py` | 472 | compare vs `_shared` Blackadar (DIFFERENT — parcel buoyant-sorting) → absorb + file issue noting it could supplant `_shared`'s | ✅ C5 (iter 5, sec. 5; supplant-note in the section header) |
 | 17 | `clubb_saturation.py` | 87 | thin wrappers over `thermo` Flatau curves (shared module EXISTS) → wrappers into clubb.py | ✅ C5 (iter 5, sec. 3) |
 | 18 | `clubb_config.py` | 338 | `CLUBBParams`/`CLUBBConfig` → clubb.py; **drop `CLUBBFlags`** (CAM tree only), flag VALUES → comment block at END of clubb.py; prune dead non-CAM branches that the flag removal exposes | ✅ C6 (iter 6, sec. 2 + flag table at file end) |
-| 19 | `clubb_lite.py` | 328 | NOT absorbed (separate scheme). Retain `_shared.exner_function` use; REVERT its `buoyancy_coefficient` usage (superfluous per goal) | — |
+| 19 | `clubb_lite.py` | 328 | NOT absorbed (separate scheme). Retain `_shared.exner_function` use; REVERT its `buoyancy_coefficient` usage (superfluous per goal) | ✅ C7 (iter 7) |
 
 **Iteration log (condensation):**
 - **C1 (iter 1):** absorbed `clubb_diagnostic.py` + `clubb_core.py` into
@@ -110,10 +110,20 @@ happens after the source consolidation settles.
   Green: 265 + 7 + 12 tests; ruff clean; codex adversarial review → APPROVE
   (verified: 14/14 flag sites, 102/102 params identical, 65/65 table match,
   dead branches truly dead under CAM defaults).
-  **Remaining:** `clubb_lite.py` buoyancy_coefficient revert + retained
-  `_shared.exner_function`, final layout pass (line-numbered TOC; coefficient
-  constants placement review), test-file consolidation decision, full
-  test_clubb_scheme.py run.
+- **C7 (iter 7):** `clubb_lite.py` revert per goal — `N2_half` back to main's
+  inline `constants.g/θ_v` form (byte-identical, codex-verified),
+  `buoyancy_coefficient` import dropped; `exner_function`/`mixing_length`
+  retained. Formula-ratchet budget: clubb_lite buoyancy entry RESTORED to
+  main's baseline 1 (decision, not new debt — documented in the budget).
+  Also fixed pre-existing rebase fallout in `test_no_formula_reimpl.py`:
+  main-side files (`spectral_les_plane.py` buoyancy 1→2,
+  new `spectral_les_moist.py` exner=3) seeded at their measured main
+  baselines (gate was red at HEAD since the rebase). **FULL CLUBB suite
+  green: 335 passed across all 19 test files (32 min)** — the complete
+  condensed clubb.py validated end-to-end. Codex review → approve.
+  **Remaining:** final layout pass (line-numbered TOC at top; verify
+  coefficient-constants placement), test-file consolidation decision,
+  whole-repo gate sweep (ratchets/contracts/private-imports/integration).
 
 
 **Previous Goal:** `packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py`
