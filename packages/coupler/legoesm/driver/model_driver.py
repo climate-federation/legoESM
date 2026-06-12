@@ -2733,10 +2733,11 @@ class ModelDriver:
                            if k.startswith("physstate_")]:
                 del self._carry_aux[_stale]
             # ...and clear the SAVE channel (``_mpas_phys_state``, read by
-            # save_checkpoint) so a load-then-save with no intervening run
-            # (checkpoint rewrite/conversion) cannot emit a PRIOR run's
-            # carry on top of this checkpoint's dynamics.  _run_mpas
-            # rebuilds it from the carry_aux overlay below on the next run.
+            # save_checkpoint) so a stale carry from a PRIOR run on a
+            # reused driver cannot leak.  It is rebuilt from THIS
+            # checkpoint's carry immediately below (so a load-then-save
+            # with no intervening run preserves a complete carry) and
+            # again by _run_mpas's seed+overlay on the next run.
             self._mpas_phys_state = None
             _ps_keys = [k for k in d.files if k.startswith("physstate_")]
             if _ps_keys:
@@ -2762,6 +2763,28 @@ class ModelDriver:
                     "  Restored physics-state carry fields: %s",
                     sorted(k[len("physstate_"):] for k in _ps_keys),
                 )
+            # Rebuild the SAVE channel from THIS checkpoint's carry so a
+            # load-then-save with no intervening run (checkpoint rewrite /
+            # conversion) preserves a COMPLETE restored carry instead of
+            # silently emitting a physstate-free file the next restart
+            # would read as a fresh seed (codex round 12 follow-up).  Only
+            # a complete field set is adopted here; a partial / meta-only
+            # remnant leaves the channel None and is caught loudly by
+            # _run_mpas on the next run, and a truly empty carry stays the
+            # documented fresh-seed opt-out.  Under MPI the staged arrays
+            # are already rank-local (the save-side gather mirrors this),
+            # so the reconstructed PhysicsState feeds save_checkpoint
+            # unchanged.
+            from legoesm.atmosphere.physics.physics_state import PhysicsState
+            _staged = {
+                _k[len("physstate_"):]: jnp.asarray(_v)
+                for _k, _v in self._carry_aux.items()
+                if _k.startswith("physstate_")
+                and not _k[len("physstate_"):].startswith("meta_")
+                and _k[len("physstate_"):] in PhysicsState._fields
+            }
+            if _staged and all(_f in _staged for _f in PhysicsState._fields):
+                self._mpas_phys_state = PhysicsState(**_staged)
             step = int(d["step"])
             day = float(d["day"])
             logger.info(f"  Loaded MPAS checkpoint: step={step}, day={day:.2f}"

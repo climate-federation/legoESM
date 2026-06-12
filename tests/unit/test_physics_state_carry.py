@@ -877,11 +877,13 @@ def _mpas_driver_cfg(**overrides):
     return ExperimentConfig(**base)
 
 
-def test_mpas_load_clears_stale_save_channel(tmp_path):
-    """Codex adversarial round 2 (#413): load_checkpoint must clear the
-    ``_mpas_phys_state`` SAVE channel so a load-then-save with no
-    intervening run (checkpoint rewrite/conversion) cannot emit a PRIOR
-    run's carry on top of this checkpoint's dynamics."""
+def test_mpas_load_then_save_preserves_carry_and_drops_stale(tmp_path):
+    """Codex adversarial rounds 2+4 (#413): load_checkpoint must REPLACE
+    the ``_mpas_phys_state`` save channel with THIS checkpoint's carry —
+    dropping any stale carry from a prior run on a reused driver, yet
+    preserving a complete restored carry so a load-then-save with no
+    intervening run (checkpoint rewrite/conversion) rewrites the full
+    physstate_* set faithfully instead of emitting a fresh-seed file."""
     from legoesm.driver.model_driver import ModelDriver
 
     cfg = _mpas_driver_cfg()
@@ -889,6 +891,13 @@ def test_mpas_load_clears_stale_save_channel(tmp_path):
     driver_a.setup()
     assert driver_a.run() == "COMPLETED"
     ckpt = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))[-1]
+    with np.load(ckpt) as d:
+        orig_ps = {
+            k: np.asarray(d[k]) for k in d.files
+            if k.startswith("physstate_")
+            and not k.startswith("physstate_meta_")
+        }
+    assert orig_ps, "fixture checkpoint must carry physstate fields"
 
     driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
     driver_b.setup()
@@ -899,19 +908,33 @@ def test_mpas_load_clears_stale_save_channel(tmp_path):
     driver_b._mpas_phys_state = stale._replace(tke=stale.tke + 999.0)
 
     driver_b.load_checkpoint(ckpt)
-    assert driver_b._mpas_phys_state is None, (
-        "load_checkpoint left the stale _mpas_phys_state save channel "
-        "populated — a load-then-save would emit the prior run's carry "
-        "(issue #413)"
+    # Stale dropped, THIS checkpoint's carry adopted (not the +999 tke).
+    assert driver_b._mpas_phys_state is not None, (
+        "load_checkpoint dropped the restored carry — a load-then-save "
+        "would silently emit a fresh-seed checkpoint (issue #413)"
     )
-    # A save before any run now persists NO physstate (nothing to carry).
+    np.testing.assert_array_equal(
+        np.asarray(driver_b._mpas_phys_state.tke), orig_ps["physstate_tke"])
+    assert not np.array_equal(
+        np.asarray(driver_b._mpas_phys_state.tke),
+        np.asarray(stale.tke + 999.0)), "stale carry survived the load"
+
+    # Save before any run: the rewrite preserves the FULL carry faithfully.
     driver_b.save_checkpoint(0, 7.0)
     saved = tmp_path / "b" / "checkpoint_day_0007.npz"
     assert saved.exists()
     with np.load(saved) as d:
-        assert not any(k.startswith("physstate_") for k in d.files), (
-            "stale carry leaked into a post-load save (issue #413)"
+        saved_ps = {
+            k for k in d.files
+            if k.startswith("physstate_")
+            and not k.startswith("physstate_meta_")
+        }
+        assert saved_ps == set(orig_ps), (
+            "load-then-save dropped or altered the physstate field set — "
+            "the next restart would silently fresh-seed (issue #413)"
         )
+        np.testing.assert_array_equal(
+            np.asarray(d["physstate_tke"]), orig_ps["physstate_tke"])
 
 
 def test_mpas_partial_physstate_checkpoint_rejected(tmp_path):
