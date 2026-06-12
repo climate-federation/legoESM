@@ -479,10 +479,16 @@ def build_acc_state(grid: LatLonGrid,
         T_water_init_C=15.0, T_deep=0.0,
         S_uniform=35.0, H_max=H_max,
         land_mask_override=land_mask,
-        # Veros ACC: T = (1 - z/z_bottom)*15 -- LINEAR, not legoESM's default
-        # exponential T(z)=T_deep+(15-T_deep)*exp(z/1000) which leaves the
-        # deepest cell ~1.16 C too warm at t=0 (acc.py:117). Gate 4.
-        stratification="linear",
+        # Veros ACC IC: temp = (1 - zt/zw[0])*15 (acc.py:117) with BOTTOM-FIRST
+        # zw, so zw[0] = the top face of the BOTTOM cell (~-1724 m), NOT the
+        # bottom interface -H_max. Gate 4's earlier "linear" transcription
+        # normalised by -H_max, leaving the t=0 abyss +2.15 K vs Veros
+        # (lego +1.00 C vs Veros -1.15 C) — with the ~3 Sv deep ventilation
+        # that IC offset persisted as essentially THE ENTIRE 30-yr abyssal
+        # warm bias (2.33 vs 0.98 C). "veros_acc_linear" is the literal
+        # transcription; the matched-IC 5-yr abyss trajectories agree to
+        # ~0.01 K (.physics-validator/eke_acc_residual/spinup_abyss_*).
+        stratification="veros_acc_linear",
     )
     # Prognostic EKE: when the recipe runs EKE on (``ACC_GM_REDI_CONFIG.eke`` set),
     # the eddy-energy field must be a Field from step 0. The model step turns ``eke``
