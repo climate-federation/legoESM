@@ -31,6 +31,7 @@ from legoesm.core.fv3_sw_core import (
     d2a2c_uc_4th_local,
     d2a2c_vc_4th_local,
     d2a2c_ut_vt_local,
+    d2a2c_interior_local,
 )
 from legoesm.parallel.mesh import (
     tiled_face_block, tiled_padded_block, staggered_tile_block)
@@ -215,3 +216,51 @@ def test_ut_vt_base_tiles_exact(setup, kt):
                 vt_w = vt_b[f, ti * nl:(ti + 1) * nl, tj * nl: tj * nl + nl + 1]
                 np.testing.assert_array_equal(np.asarray(ut_t)[0], ut_w)
                 np.testing.assert_array_equal(np.asarray(vt_t)[0], vt_w)
+
+
+def test_d2a2c_interior_tile_full_parity():
+    """FULL tiled d2a2c on an INTERIOR tile == PRODUCTION d2a2c_vect.
+
+    kt=3 (interior tile (1,1) touches no face edge -> pure 4th-order,
+    no edge specials).  d2a2c_interior_local slices the CORRECT
+    per-output windows (asymmetric -1 for uc/vc on their staggered
+    axis); compared to the live d2a2c_vect outputs (NOT uc_4th) — the
+    check that the prior off-by-one version failed.  Host
+    slice-reassemble."""
+    set_halo_backend("local")
+    n, kt = 24, 3
+    nl = n // kt           # 8
+    npt = min(4, n // 2)   # 4
+    assert nl >= npt + 1
+    cdg = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    rng = np.random.default_rng(13)
+    u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+
+    ua_g, va_g, uc_g, vc_g, ut_g, vt_g = (
+        np.asarray(x) for x in d2a2c_vect(u_d, v_d, cdg))
+    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdg)
+    cos_sg5 = cdg.cos_sg[:, :, :, 4]
+    rsin2 = cdg.rsin2_cell
+
+    ti = tj = 1
+    a, b = ti * nl, (ti + 1) * nl
+    for f in range(6):
+        out = d2a2c_interior_local(
+            utmp_pad[f], vtmp_pad[f], ti, tj, nl,
+            staggered_tile_block(u_d[f], ti, tj, nl, 1)[None],   # (nl,nl+1)
+            staggered_tile_block(v_d[f], ti, tj, nl, 0)[None],   # (nl+1,nl)
+            tiled_face_block(cos_sg5[f], ti, tj, nl, kt)[None],
+            tiled_face_block(rsin2[f], ti, tj, nl, kt)[None],
+            staggered_tile_block(cdg.cosa_u[f], ti, tj, nl, 0)[None],
+            staggered_tile_block(cdg.rsin_u[f], ti, tj, nl, 0)[None],
+            staggered_tile_block(cdg.cosa_v[f], ti, tj, nl, 1)[None],
+            staggered_tile_block(cdg.rsin_v[f], ti, tj, nl, 1)[None],
+        )
+        ua_t, va_t, uc_t, vc_t, ut_t, vt_t = (np.asarray(x)[0] for x in out)
+        np.testing.assert_array_equal(ua_t, ua_g[f, a:b, a:b])
+        np.testing.assert_array_equal(va_t, va_g[f, a:b, a:b])
+        np.testing.assert_array_equal(uc_t, uc_g[f, a:b + 1, a:b])
+        np.testing.assert_array_equal(vc_t, vc_g[f, a:b, a:b + 1])
+        np.testing.assert_array_equal(ut_t, ut_g[f, a:b + 1, a:b])
+        np.testing.assert_array_equal(vt_t, vt_g[f, a:b, a:b + 1])

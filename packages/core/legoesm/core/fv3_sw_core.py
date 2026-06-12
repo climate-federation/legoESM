@@ -654,6 +654,53 @@ def d2a2c_ua_va_local(utmp, vtmp, cos_sg5, rsin2):
     return ua, va
 
 
+def d2a2c_interior_local(utmp_pad_face, vtmp_pad_face, ti, tj, nl,
+                         u_d, v_d, cos_sg5, rsin2,
+                         cosa_u, rsin_u, cosa_v, rsin_v):
+    """Full A→C d2a2c for an INTERIOR tile (0<ti<kt-1, 0<tj<kt-1) —
+    composes the approach-C pieces with the CORRECT per-output windows.
+
+    ``utmp_pad_face`` / ``vtmp_pad_face`` are this face's FULL h2-padded
+    covariant winds ``(n+4, n+4)`` (from d2a2c_d_to_a); the tile's
+    windows are sliced HERE so the index logic lives in one place.  The
+    other args are the tile's already-sliced staggered/cell metrics +
+    local D-winds.
+
+    Per-output windows (h=2; tile cells span global ``[ti*nl, (ti+1)*nl)``):
+      * ua/va — interior utmp/vtmp ``(nl, nl)`` at padded
+        ``[ti*nl+h : ti*nl+h+nl]`` (symmetric);
+      * uc — production ``uc[I] = A2*(utmp_pad[I-1]+utmp_pad[I+2]) +
+        A1*(utmp_pad[I]+utmp_pad[I+1])`` for u-faces ``I in
+        [ti*nl, ti*nl+nl]``, which needs ``utmp_pad`` rows
+        ``[ti*nl-1 : ti*nl+nl+3]`` — ASYMMETRIC -1 on the staggered i
+        axis (the prior symmetric window gave ``uc_4th[ti*nl+j] =
+        uc_prod[ti*nl+j+1]``, off by one); cols symmetric
+        ``[tj*nl : tj*nl+nl+4]`` (d2a2c_uc_4th_local trims ``[h:-h]``);
+      * vc — symmetric rows ``[ti*nl : ti*nl+nl+4]``, asymmetric -1
+        cols ``[tj*nl-1 : tj*nl+nl+3]`` (the j-staggered analogue);
+      * ut/vt — pointwise from uc/vc + the local D-winds/metrics.
+
+    Valid only for INTERIOR tiles, where ``ti*nl-1 >= 0`` and every
+    cell is in the 4th-order face interior (no edge specials); then it
+    is bit-identical to the global d2a2c_vect restricted to the tile.
+    Returns ``(ua, va, uc, vc, ut, vt)`` (leading singleton axis kept).
+    """
+    h = 2
+    a, b = ti * nl, tj * nl
+    utmp_int = utmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl]
+    vtmp_int = vtmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl]
+    ua, va = d2a2c_ua_va_local(utmp_int, vtmp_int, cos_sg5, rsin2)
+    # uc: asymmetric -1 i-window; symmetric j-window.
+    uc_win = utmp_pad_face[None, a - 1:a + nl + 3, b:b + nl + 4]
+    uc = d2a2c_uc_4th_local(uc_win)            # (1, nl+1, nl)
+    # vc: symmetric i-window; asymmetric -1 j-window.
+    vc_win = vtmp_pad_face[None, a:a + nl + 4, b - 1:b + nl + 3]
+    vc = d2a2c_vc_4th_local(vc_win)            # (1, nl, nl+1)
+    ut, vt = d2a2c_ut_vt_local(
+        uc, vc, u_d, v_d, cosa_u, rsin_u, cosa_v, rsin_v)
+    return ua, va, uc, vc, ut, vt
+
+
 def d2a2c_vect(u_d, v_d, cdgrid):
     """FV3 D-grid → A-grid → C-grid (covariant). FV3 sw_core.F90 d2a2c_vect.
 
