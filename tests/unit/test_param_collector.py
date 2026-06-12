@@ -100,6 +100,25 @@ def test_unknown_active_scheme_key_raises() -> None:
         build_trainable_params(active_scheme_keys={"land.soil_thermalX"})
 
 
+def test_uninstalled_spec_module_is_skipped(monkeypatch) -> None:
+    """A federation component that is not installed (ModuleNotFoundError on a
+    SPEC_MODULES import) is skipped, not fatal — ocean-only collection still
+    works without legoesm-land present."""
+    import legoesm.training.param_collector as pc
+
+    monkeypatch.setattr(
+        pc, "SPEC_MODULES",
+        ("legoesm.ocean.physics.shortwave_penetration", "legoesm.not_installed.xyz"),
+    )
+    skipped: list[str] = []
+    reg = pc.build_registry(skipped=skipped)
+    assert skipped == ["legoesm.not_installed.xyz"]
+    assert {m.scheme_key for m in reg} == {"ocean.sw_penetration"}
+    # ocean-only collection succeeds despite the missing module
+    p = pc.build_trainable_params(tier="extended", active_scheme_keys={"ocean.sw_penetration"})
+    assert {c.scheme_key for c in p.constraints} == {"ocean.sw_penetration"}
+
+
 # --- raw seeding round-trips to the default --------------------------------
 def test_seeded_values_recover_defaults() -> None:
     p = build_trainable_params(tier="extended")

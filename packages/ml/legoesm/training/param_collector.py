@@ -76,16 +76,28 @@ def _load_spec(module_path: str):
     return mod, spec
 
 
-def build_registry() -> list[ParamMeta]:
-    """Read every registered spec module into a flat ``ParamMeta`` list.
+def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
+    """Read every importable registered spec module into a flat ``ParamMeta`` list.
 
     Defaults are pulled from the live NamedTuple ``_field_defaults`` so they can
-    never drift from the class. Raises ``ValueError`` on a malformed registration
-    (missing class, field not on the NamedTuple)."""
+    never drift from the class. A spec module whose **component is not installed**
+    (federation members are separately installable) raises ``ModuleNotFoundError``
+    on import; such a module is SKIPPED (its path appended to ``skipped`` if
+    provided) so an e.g. ocean-only install can still collect ocean parameters
+    without ``legoesm-land`` present. The drift test
+    (``test_spec_modules_matches_gate_annotated_set``) runs under a full install,
+    so a genuinely wrong ``SPEC_MODULES`` path is still caught in CI. Raises
+    ``ValueError`` on a malformed registration (missing class, field not on the
+    NamedTuple)."""
     out: list[ParamMeta] = []
     seen_keys: dict[str, str] = {}
     for module_path in SPEC_MODULES:
-        mod, spec = _load_spec(module_path)
+        try:
+            mod, spec = _load_spec(module_path)
+        except ModuleNotFoundError:
+            if skipped is not None:
+                skipped.append(module_path)
+            continue
         for cls_name, entry in spec.items():
             cls = getattr(mod, cls_name, None)
             if cls is None:
@@ -191,7 +203,8 @@ def build_trainable_params(
         except Exception:
             dtype = jnp.float32
 
-    registry = build_registry()
+    skipped: list[str] = []
+    registry = build_registry(skipped=skipped)
     by_name = {m.qualified_name: m for m in registry}
     unknown_inc = [n for n in include if n not in by_name]
     unknown_exc = [n for n in exclude if n not in by_name]
@@ -199,15 +212,21 @@ def build_trainable_params(
         raise ValueError(
             f"include/exclude name unknown parameters: include={unknown_inc}, "
             f"exclude={unknown_exc}; known={sorted(by_name)}"
+            + (f" (uninstalled spec modules skipped: {skipped})" if skipped else "")
         )
     if active_scheme_keys is not None:
         known_schemes = {m.scheme_key for m in registry}
         unknown_schemes = sorted(set(active_scheme_keys) - known_schemes)
         if unknown_schemes:
+            hint = (
+                f" — some spec modules were not importable ({skipped}); the "
+                f"requested scheme may belong to a component that is not installed"
+                if skipped
+                else ". A typo/stale key would otherwise yield an empty set"
+            )
             raise ValueError(
                 f"active_scheme_keys names unknown scheme(s): {unknown_schemes}; "
-                f"known={sorted(known_schemes)}. A typo/stale key would otherwise "
-                f"yield an empty trainable set."
+                f"known={sorted(known_schemes)}{hint}."
             )
     include_set, exclude_set = set(include), set(exclude)
 
