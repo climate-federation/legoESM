@@ -695,6 +695,50 @@ def d2a2c_ut_vt_local(uc, vc, u_d, v_d, cosa_u, rsin_u, cosa_v, rsin_v):
     return ut, vt
 
 
+def d2a2c_vc_c123_local(vtmp_pad, at_high):
+    """One-sided C1/C2/C3 vc value at the FACE-edge cell j=1 (S) or
+    j=n-1 (N) — the j-axis transpose of :func:`d2a2c_uc_c123_local`
+    (sw_core.F90 vc C1/C2/C3).  n = vtmp_pad.shape[2]-4.  Returns the
+    (·, n) vc column."""
+    h = 2
+    n = vtmp_pad.shape[2] - 2 * h
+    if at_high:
+        return (_C1 * vtmp_pad[:, h:-h, n + h - 3]
+                + _C2 * vtmp_pad[:, h:-h, n + h - 2]
+                + _C3 * vtmp_pad[:, h:-h, n + h - 1])
+    return (_C1 * vtmp_pad[:, h:-h, h + 2]
+            + _C2 * vtmp_pad[:, h:-h, h + 1]
+            + _C3 * vtmp_pad[:, h:-h, h])
+
+
+def d2a2c_vc_edge_interp_local(va_pad, dy_pad, sn_pad, ss_pad, at_high):
+    """edge_interpolate4 + upwind sin_sg vc value at the FACE boundary
+    j=0 (S) / j=n (N) — the j-axis transpose of
+    :func:`d2a2c_uc_edge_interp_local` (sw_core.F90 vc face boundary).
+
+      va_pad : (·, n+4, n+4) tile contravariant va
+      dy_pad : (·, n, n+4)   tile dy, cols h2-padded / rows unpadded
+      sn_pad : (·, n+2, n+2) tile sin_sg N-component (cross-face h1 pad)
+      ss_pad : (·, n+2, n+2) tile sin_sg S-component
+    Returns the (·, n) vc boundary column.  Outer upwind sine is
+    cross-face (sn/ss globally padded then tile-sliced — approach C).
+    """
+    h = 2
+    n = va_pad.shape[2] - 2 * h
+    j_bdy = n if at_high else 0
+    j_p = j_bdy + h
+    va4 = jnp.stack([va_pad[:, h:-h, j_p - 1], va_pad[:, h:-h, j_p],
+                     va_pad[:, h:-h, j_p + 1], va_pad[:, h:-h, j_p + 2]],
+                    axis=-1)
+    dya4 = jnp.stack([dy_pad[:, :, j_p - 1], dy_pad[:, :, j_p],
+                      dy_pad[:, :, j_p + 1], dy_pad[:, :, j_p + 2]],
+                     axis=-1)
+    vt_bdy = _edge_interpolate4(va4, dya4)
+    sin_below = sn_pad[:, 1:-1, j_bdy]
+    sin_above = ss_pad[:, 1:-1, j_bdy + 1]
+    return jnp.where(vt_bdy > 0, vt_bdy * sin_below, vt_bdy * sin_above)
+
+
 def d2a2c_ua_va_local(utmp, vtmp, cos_sg5, rsin2):
     """A-grid contravariant winds from covariant utmp/vtmp — pointwise.
 
