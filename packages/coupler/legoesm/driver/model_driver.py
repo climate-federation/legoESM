@@ -5014,12 +5014,18 @@ class ModelDriver:
                 **_phys_carry_step_inputs(),
             )
         conv_prog = phys_out.conv_prog
+        # Stash into carry_aux at the warmup step too (codex round 4):
+        # a one-step run never enters the main loop, and _finalize_run
+        # would otherwise checkpoint stale/missing carries.
         if phys_out.tke is not None:
             phys_tke = phys_out.tke
+            self._carry_aux["tke"] = phys_tke
         if phys_out.qke is not None:
             phys_qke = phys_out.qke
+            self._carry_aux["qke"] = phys_qke
         if phys_out.gwd_spectrum is not None:
             phys_gwd_spectrum = phys_out.gwd_spectrum
+            self._carry_aux["gwd_spectrum"] = phys_gwd_spectrum
 
         # Apply warmup tendencies
         new_T = self.state.T.data + DT * phys_out.dT_dt
