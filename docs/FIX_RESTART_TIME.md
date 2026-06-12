@@ -171,6 +171,41 @@ prepare-context epoch.  Implemented per the amended plan:
   on T/u/p_s/q_v + held_dT_rad.  Verified it BITES: fails in 2:00 with
   the predicate forced True (old behavior), passes in 2:11 with the
   fix.
+- Committed as 2d560887 (codex round 3 CLEAN).
+
+## Iteration 3 — audits + CMIP attribution (2026-06-12)
+
+- **Coupled-driver restart audit (clean)**: `CoupledESMDriver.run`
+  delegates `(start_step, start_day)` verbatim to `self._atm.run`, and
+  the established restart convention (`tests/stress/
+  test_phase3_restart.py`, `test_phase7_multiyear.py`) calls
+  `driver._atm.load_checkpoint(...)` first — which records the
+  normalization hint on the SAME ModelDriver instance the coupled run
+  uses.  The coupled path therefore inherits the epoch normalization
+  with no further changes.
+- **CMIP e2e attribution**: the full `test_phase6_cmip_e2e.py` suite
+  cannot finish on a login node (killed at 90 min twice — the 30-day
+  runs).  Targeted subset (14 forcing-semantics tests): PASSED except
+  (a) `test_picontrol_ghg_is_none_or_constant` — environmental
+  run-manifest collision with the killed runs' leftovers, passes in
+  isolation; (b) `test_amip_baseline_ghg` (336.78 vs 348±1 ppm) —
+  fails IDENTICALLY on a clean `main` worktree @ 9a5b5cb9 ⇒
+  PRE-EXISTING, unrelated to this branch.
+- Spectral canonical-sampling change is analytically a no-op for
+  integer-day production starts with DT dividing 86400
+  ((step+1)*DT/86400 is exact in fp64 at day boundaries, so
+  float(bucket) == current_day at every refresh step).  PROVEN
+  bitwise: a 2-day transient-GHG (1pctCO2, spectral C8 L5, dt=600)
+  fresh run produces the IDENTICAL sha256 state digest
+  (ec211c7a…58df over T/u/v/p_s/q_v) on main @ 9a5b5cb9 and on this
+  branch.  (The 30-day e2e single test cannot finish on a login node
+  — killed at 90 min — and is superseded by this stronger check.)
+- **Gap found for iteration 4**: `_run_spectral` has NO direct
+  bit-exact restart continuation test (the legacy reproducibility test
+  is cubed_sphere/cdgrid = compiled path).  The spectral loop received
+  the epoch normalization + canonical bucket sampling; whether its
+  restart is actually bitwise needs a test mirroring the MPAS one
+  (gaussian grid, discretization="spectral").
 
 - **Codex round-2 finding (P2, fixed)**: the compiled cube/lat-lon loop
   only refreshed external forcing (ozone/aerosol/GHG + solar) for
