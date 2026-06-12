@@ -660,6 +660,15 @@ def test_sharded_wrapper_refuses_stateful_physics():
     with pytest.raises(NotImplementedError, match="405"):
         _refuse_stateful_physics_unthreaded_wrapper(stateful_fn)
 
+    # Wrapper-aware (codex round 10): a functools.partial that hides the
+    # tag must STILL be refused — the guard routes through the shared
+    # physics_requires_phys_state predicate, which the lat-lon MPI wrapper
+    # (make_latlon_mpi_step) now uses too.
+    import functools
+    with pytest.raises(NotImplementedError, match="405"):
+        _refuse_stateful_physics_unthreaded_wrapper(
+            functools.partial(stateful_fn))
+
 
 def test_integrate_mixin_refuses_and_threads_carry():
     """Codex round 2: IntegrationMixin.integrate must refuse a stateful

@@ -1973,7 +1973,12 @@ def make_latlon_mpi_step(
     # Issue #405/#413: this wrapper does not thread the PhysicsState
     # carry between steps — a stateful physics_fn would silently reseed
     # its prognostic fields every step.  Refuse loudly at build time.
-    if getattr(physics_fn, "_requires_phys_state", False):
+    # The shared predicate also sees a stateful physics through a
+    # functools.partial / __wrapped__ wrapper that hides the tag.
+    from legoesm.timestepping.integration import (
+        physics_requires_phys_state,
+    )
+    if physics_requires_phys_state(physics_fn):
         raise NotImplementedError(
             "make_latlon_mpi_step does not thread the PhysicsState "
             "carry yet, so a stateful physics_fn (prognostic TKE-family "

@@ -95,9 +95,14 @@ def _refuse_stateful_physics_unthreaded_wrapper(physics_fn) -> None:
     MYNN-2.5 turbulence, mass_flux/edmf/bechtold convection,
     prognostic-spectral GWD) would silently reseed its prognostic
     fields every step.  ``combined.make_physics`` tags its output with
-    ``_requires_phys_state``; refuse loudly when the tag is set.
+    ``_requires_phys_state``; refuse loudly when the tag is set.  Use
+    the shared wrapper-aware predicate so a ``functools.partial`` /
+    ``__wrapped__`` wrapper that hides the tag cannot slip through.
     """
-    if getattr(physics_fn, "_requires_phys_state", False):
+    from legoesm.timestepping.integration import (
+        physics_requires_phys_state,
+    )
+    if physics_requires_phys_state(physics_fn):
         raise NotImplementedError(
             "This sharded step wrapper does not thread the PhysicsState "
             "carry, so the configured stateful physics would silently "
