@@ -5235,6 +5235,17 @@ class ModelDriver:
                 # exactly on restart (#325 restart-safety).
                 if T_land is not None:
                     self._carry_aux["T_land"] = T_land
+                # Same restart-safety for the stateful-physics carries
+                # (#413, codex round 3): this rebuild would otherwise
+                # drop tke/qke/gwd_spectrum right before a checkpoint
+                # written on a diagnostic step, silently reseeding the
+                # physics memory on restart.
+                if phys_tke is not None:
+                    self._carry_aux["tke"] = phys_tke
+                if phys_qke is not None:
+                    self._carry_aux["qke"] = phys_qke
+                if phys_gwd_spectrum is not None:
+                    self._carry_aux["gwd_spectrum"] = phys_gwd_spectrum
 
                 # Segment callback for coupled integration
                 if self._segment_callback is not None:
