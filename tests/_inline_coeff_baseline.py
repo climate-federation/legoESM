@@ -512,17 +512,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
     'packages/ocean/legoesm/ocean/physics/mpas_physics.py': {
         'sw_absorbed = _sf_sw * 0.94 # 94% penetrates; 6% surface skin': 1,
     },
-    'packages/ocean/legoesm/ocean/physics/shortwave_penetration.py': {
-        'inv_delpsi = 1.0 / (0.710 + zlogc * (0.159 + zlogc * 0.021))': 3,
-        'x = 41.0 + 20.0 * jnp.log10(chl_c)': 2,
-        'zCb = 0.768 + zlogc * (0.087 - zlogc * (0.179 + zlogc * 0.025))': 4,
-        'zCmax = 0.299 - zlogc * (0.289 - zlogc * 0.579)': 3,
-        'zc1 = 0.113328685307 + 0.803 * zlogc # log(zCze)': 2,
-        'zc2 = 3.703768066608 + 0.459 * zlogc # log(zCtot)': 2,
-        'zc3 = 6.34247346942 - 0.746 * zc2 # log(zze)': 2,
-        'zc3 = jnp.where(zc3 > 4.62497281328, 5.298317366548 - 0.293 * zc2, zc3)': 3,
-        'zpsimax = 0.6 - zlogc * (0.640 - zlogc * (0.021 + zlogc * 0.115))': 4,
-    },
     'packages/ocean/legoesm/ocean/physics/surface_forcing/external.py': {
         'min_wet_cell_thickness_m: float = 1.0e-3,': 1,
     },

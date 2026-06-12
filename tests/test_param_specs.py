@@ -99,7 +99,6 @@ PARAM_SPEC_TODO: frozenset[str] = frozenset(
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/backscatter.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/eke.py",
-        "packages/ocean/legoesm/ocean/physics/shortwave_penetration.py",
         "packages/ocean/legoesm/ocean/physics/surface_forcing/config.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/tidal.py",
