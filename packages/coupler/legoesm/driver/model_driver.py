@@ -3460,20 +3460,26 @@ class ModelDriver:
                     )
             # Codex adversarial (#413): the MPAS save writes EVERY
             # PhysicsState field together (all are concrete arrays —
-            # init_physics_state never leaves one None).  A checkpoint
-            # carrying only a SUBSET of physstate_* (partial write, a
-            # hand-stripped or skewed writer) would overlay those and
-            # silently leave the rest at a FRESH seed — mixing restored
-            # and reseeded memory and branching the trajectory.  Require
-            # the full field set once ANY carry field is present;
-            # stripping ALL physstate_* stays the documented fresh-seed
-            # opt-out.
+            # init_physics_state never leaves one None) AND the
+            # ``physstate_meta_conv_scheme`` tag, all inside one
+            # ``if carry is not None`` block.  So the PRESENCE of ANY
+            # ``physstate_*`` key — including the meta tag alone — means
+            # the checkpoint intended to carry physics state; the full
+            # non-meta field set must then be present.  A subset (partial
+            # write / hand-stripped / skewed writer), or a meta-only
+            # remnant, would overlay what it has and silently leave the
+            # rest at a FRESH seed — mixing restored and reseeded memory
+            # and branching the trajectory.  Only ZERO physstate_* keys
+            # (the documented "strip ALL physstate_* entries") opts into a
+            # clean fresh seed.
+            _any_physstate = any(
+                k.startswith("physstate_") for k in self._carry_aux)
             _present_fields = {
                 k[len("physstate_"):] for k in self._carry_aux
                 if k.startswith("physstate_")
                 and not k[len("physstate_"):].startswith("meta_")
             }
-            if _present_fields:
+            if _any_physstate:
                 _missing = [f for f in _phys_state._fields
                             if f not in _present_fields]
                 if _missing:
@@ -3481,13 +3487,14 @@ class ModelDriver:
                         "MPAS restart physics-state carry is INCOMPLETE: "
                         f"present {sorted(_present_fields)}, missing "
                         f"{sorted(_missing)}.  The save writes every "
-                        "PhysicsState field together, so a subset is a "
-                        "partial / corrupted / hand-edited checkpoint; "
-                        "overlaying it would mix restored and freshly-"
-                        "seeded memory and silently branch the trajectory "
-                        "(issue #405/#413).  Restore a complete checkpoint, "
-                        "or strip ALL physstate_* entries to opt into a "
-                        "fresh seed."
+                        "PhysicsState field (and the scheme-tag) together, "
+                        "so a subset or a meta-only remnant is a partial / "
+                        "corrupted / hand-edited checkpoint; overlaying it "
+                        "would mix restored and freshly-seeded memory and "
+                        "silently branch the trajectory (issue #405/#413).  "
+                        "Restore a complete checkpoint, or strip ALL "
+                        "physstate_* entries (fields AND meta) to opt into "
+                        "a fresh seed."
                     )
             _restored_ps = {}
             for _k, _v in self._carry_aux.items():

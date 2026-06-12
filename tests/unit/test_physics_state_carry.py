@@ -940,3 +940,36 @@ def test_mpas_partial_physstate_checkpoint_rejected(tmp_path):
     driver_b.load_checkpoint(partial)   # load stages the subset
     with pytest.raises(ValueError, match="INCOMPLETE"):
         driver_b.run()
+
+
+def test_mpas_meta_only_physstate_checkpoint_rejected(tmp_path):
+    """Codex adversarial round 3 (#413): a checkpoint left with only the
+    physstate_meta_* scheme tag and NO carry fields is a corrupted
+    remnant (the save writes the tag only alongside the carry), so it
+    must be rejected loudly rather than silently fresh-seeding.  Only
+    stripping EVERY physstate_* key (fields AND meta) opts into a fresh
+    seed."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _mpas_driver_cfg()
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run() == "COMPLETED"
+    ckpt = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))[-1]
+
+    # Keep the meta tag, drop every actual physstate_<field>.
+    meta_only = tmp_path / "meta_only.npz"
+    with np.load(ckpt) as d:
+        assert any(k.startswith("physstate_meta_") for k in d.files)
+        kept = {
+            k: d[k] for k in d.files
+            if not (k.startswith("physstate_")
+                    and not k[len("physstate_"):].startswith("meta_"))
+        }
+    np.savez(meta_only, **kept)
+
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    driver_b.load_checkpoint(meta_only)
+    with pytest.raises(ValueError, match="INCOMPLETE"):
+        driver_b.run()
