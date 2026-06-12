@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -89,8 +91,12 @@ def mle_coefficient(ce: float, lat_ref_deg: float) -> float:
         raise ValueError(
             f"MLE lat_ref_deg={lat} too close to the equator: f0 -> 0 makes rc_f "
             "blow up. Use the NEMO default 20 deg.")
-    f0 = 2.0 * constants.Omega * jnp.sin(jnp.deg2rad(lat))
-    return float(ce / (5.0e3 * f0))
+    # Pure-Python (math, NOT jnp): rc_f is a config-derived CONSTANT computed once
+    # and used as a scalar multiplier inside the jitted step. Using jnp + float()
+    # here triggers ConcretizationTypeError under jit; math.sin keeps it a plain
+    # Python float.
+    f0 = 2.0 * float(constants.Omega) * math.sin(math.radians(lat))
+    return float(ce) / (5.0e3 * f0)
 
 
 def mle_vertical_structure(gdepw_over_H: jnp.ndarray) -> jnp.ndarray:
