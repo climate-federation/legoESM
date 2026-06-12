@@ -185,9 +185,6 @@ EXCLUDED: frozenset[str] = frozenset(
         # CLUBB port: skewness-dependent C-coefficient family — closure
         # coefficient diagnostics, not a single column-physics tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_coefficients.py",
-        # CLUBB port: core orchestration (diagnostics bundle + advance_clubb_core)
-        # — closure assembly, not a single column-physics tendency scheme.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_core.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",
@@ -262,9 +259,6 @@ CONTRACT_TODO: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp_radiation.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/solar.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py",
-        # CLUBB port: diagnostic ADG1-PDF closure (cloud frac / buoyancy flux)
-        # for the runnable scheme — closure plumbing, not a tendency scheme.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_diagnostic.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_lite.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/holtslag_boville.py",

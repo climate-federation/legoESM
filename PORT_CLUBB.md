@@ -1,6 +1,54 @@
 # PORT_CLUBB — Porting a fuller CLUBB turbulence scheme into legoESM
 
-**Goal:** `packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py`
+**New Goal:** The various clubb_*.py files need to be condensed into a single clubb.py. A table of contents citing line numbers should go at the top of this file to help organize the code. The values of the  CLUBB model flags, from clubb_config.py, can be appended as comments at the end of the file with the note that these come from the CAM defaults, but the flags themselves do not need to be defined because we will not implement any other tree. The constants, from clubb_coefficients.py, should go near the top of the single clubb.py file. The code from clubb_core.py, clubb_diagnostics.py, clubb_fill_holes.py, clubb_grid.py, clubb_helpers.py, clubb_mfl.py, clubb_moments.py, clubb_pdf.py, clubb_pdf_moments.py, clubb_skewness.py, clubb_solve.py,  clubb_tau.py, clubb_wp23.py, and clubb_xm_wpxp.py, needs to be integrated inside the single clubb.py. Some changes to clubb_lite.py can be retained, e.g. putting exner function together with mixing_length from physics._shared, but using the function buoyancy_coefficient is superfluous, revert those changes. If the mixing length computed by clubb_mixing_length.py is the same as that used in physics._shared that is also used by clubb_lite, only define it in _shared.py otherwise put it into clubb.py and we can make an issue noting that it could supplant the one computed in _shared. Replace clubb_saturation with one defined in a shared module if it exists, otherwise move to clubb.py. Don’t define a new saturation formula, even in the shared files, unless it really is the one used by CAM.
+
+## Condensation plan + status (live; updated each iteration)
+
+**Strategy — top-down absorption, always green:** repeatedly inline `clubb.py`'s
+*direct* dependencies into it (so `clubb.py` stays at the top of the import DAG —
+no cycles, no transitional stub modules), delete the absorbed module, re-point
+every importer (prod + tests) at `clubb.py`, run the absorbed modules' tests +
+the contracts gate, codex-review, commit. Sections in `clubb.py` accrete in
+call-tree order; the line-numbered TOC at the top is finalized once all modules
+are in (section names maintained meanwhile). Test files are re-pointed as their
+module is absorbed; test-file consolidation (into `tests/unit/test_clubb.py`)
+happens after the source consolidation settles.
+
+| # | module | LOC | plan | status |
+|---|--------|-----|------|--------|
+| 1 | `clubb_diagnostic.py` | 105 | absorb (sec. 1) | ✅ C1 (iter 1) |
+| 2 | `clubb_core.py` | 443 | absorb (sec. 2) | ✅ C1 (iter 1) |
+| 3 | `clubb_moments.py` | 885 | absorb | — |
+| 4 | `clubb_wp23.py` | 720 | absorb | — |
+| 5 | `clubb_xm_wpxp.py` | 431 | absorb | — |
+| 6 | `clubb_mfl.py` | 308 | absorb | — |
+| 7 | `clubb_pdf_moments.py` | 283 | absorb | — |
+| 8 | `clubb_pdf.py` | 368 | absorb | — |
+| 9 | `clubb_fill_holes.py` | 201 | absorb | — |
+| 10 | `clubb_tau.py` | 97 | absorb | — |
+| 11 | `clubb_skewness.py` | 211 | absorb | — |
+| 12 | `clubb_solve.py` | 151 | absorb | — |
+| 13 | `clubb_helpers.py` | 208 | absorb | — |
+| 14 | `clubb_grid.py` | 380 | absorb | — |
+| 15 | `clubb_coefficients.py` | 71 | constants → top of clubb.py | — |
+| 16 | `clubb_mixing_length.py` | 472 | compare vs `_shared` Blackadar (DIFFERENT — parcel buoyant-sorting) → absorb + file issue noting it could supplant `_shared`'s | — |
+| 17 | `clubb_saturation.py` | 87 | thin wrappers over `thermo` Flatau curves (shared module EXISTS) → wrappers into clubb.py | — |
+| 18 | `clubb_config.py` | 338 | `CLUBBParams`/`CLUBBConfig` → clubb.py; **drop `CLUBBFlags`** (CAM tree only), flag VALUES → comment block at END of clubb.py; prune dead non-CAM branches that the flag removal exposes | — |
+| 19 | `clubb_lite.py` | 328 | NOT absorbed (separate scheme). Retain `_shared.exner_function` use; REVERT its `buoyancy_coefficient` usage (superfluous per goal) | — |
+
+**Iteration log (condensation):**
+- **C1 (iter 1):** absorbed `clubb_diagnostic.py` + `clubb_core.py` into
+  `clubb.py` (sections 1-2 + section-comment scaffold for the future TOC),
+  byte-identical bodies (codex-verified vs `git show HEAD:` originals); deleted
+  both modules; re-pointed physics_state.py / integration.py /
+  test_clubb_core.py / test_clubb_diagnostic.py / test_clubb_scheme.py; removed
+  both filenames from test_physics_contracts EXCLUDED/CONTRACT_TODO (shrink-only
+  ok). Green: test_clubb_core + test_clubb_diagnostic + contracts (127) + 5
+  conservation tests from test_clubb_scheme; ruff clean on clubb.py; codex
+  adversarial review → only stale-doc nits (fixed here). 
+
+
+**Previous Goal:** `packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py`
 (+ `clubb_*.py` helpers) = a substantially fuller CLUBB than `clubb_lite.py`,
 ported from `../CLUBB-JAX/clubb_jax/src/CLUBB_core`, restricted to the call tree
 exercised by the **CAM-default `clubb_*` flags**
@@ -67,7 +115,7 @@ CLI + coupler `validate_strict` + `physics_state` carried-TKE + `scm`. Phase 1
 uses the golden-tested **parcel buoyant-sorting `Lscale`** for the eddy
 diffusivity (`Km = c_K·Lscale·√wp2`) + eddy-diffusion mean advance + a wp2
 budget. **Phase 2a (iter 17):** the **ADG1 double-Gaussian PDF** (vs lite's
-single Gaussian) is wired into the live path (`clubb_diagnostic.py`) — cloud
+single Gaussian) is wired into the live path (now section 1 of `clubb.py`) — cloud
 fraction + cloud water `rcm` + the moist buoyancy flux `wpthvp` (with the
 cloud-water latent-heat term) now drive the wp2 buoyancy production. Phase 2b+
 swaps the diagnostic moments for the full prognostic moment advances carried as
@@ -94,8 +142,8 @@ per-file-ignore for canonical CLUBB symbol names):
 | `clubb_mfl.py` | monotonic-flux-limiter JAX port: erf velocity + `mfl_xm_*` ✅30; `calc_turb_adv_range` (masked `fori_loop`) ✅31; **`monotonic_turbulent_flux_limit`** core (masked windowed min/max + `lax.scan` sequential clip + xm re-solve + top spike-fix, round-off parity all 4 fields, differentiable) ✅32 | ✅ |
 | `clubb_tau.py` | CAM tau family: `calc_stability_correction` + `compute_tau_family` (`invrs_tau_C1/C4/C6/C14/xp2_zm`, `invrs_tau_wp3_zt` from parcel Lscale + N2 stability corr) ✅35 | ✅ |
 | `clubb_coefficients.py` | C6rt/C6thl/C7 `_Skw_fnc` (CAM skewness functions, NOT ARM Richardson) + `damp_coefficient` (Lscale stable-region damping, from Fortran) ✅37 | ✅ |
-| `clubb_core.py` | `compute_clubb_diagnostics` ✅43; `compute_pdf_closure` ✅45; `advance_clubb_core` (PDF + 4-advance ordered loop, conservation-tested) ✅46/50; `CLUBBMomentState`/`CLUBBForcing`/`init_clubb_moments` | ✅ |
-| `clubb_diagnostic.py` | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ iter 17 |
+| ~~`clubb_core.py`~~ | `compute_clubb_diagnostics` ✅43; `compute_pdf_closure` ✅45; `advance_clubb_core` (PDF + 4-advance ordered loop, conservation-tested) ✅46/50; `CLUBBMomentState`/`CLUBBForcing`/`init_clubb_moments` | ✅ ABSORBED → clubb.py sec. 2 (C1) |
+| ~~`clubb_diagnostic.py`~~ | diagnostic ADG1-PDF closure → cloud frac + rcm + wpthvp (live path) | ✅ ABSORBED → clubb.py sec. 1 (C1) |
 | `clubb.py` | runnable scheme entry (parcel Lscale + ADG1-PDF moist buoyancy) | ✅ iter 16-17 |
 
 Also added (shared): `legoesm.thermo.saturation_vapor_pressure_flatau[_ice]`.

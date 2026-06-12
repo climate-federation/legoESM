@@ -93,7 +93,7 @@ class PhysicsState(NamedTuple):
         MYNN-2.5 (Phase C codex iter-1 medium finding).
     clubb_moments : jax.Array, shape (ncol, 15, nlev+1)
         Prognostic CLUBB higher-order moment state (the 15-field
-        :class:`~legoesm.atmosphere.physics.turbulence.clubb_core.CLUBBMomentState`
+        :class:`~legoesm.atmosphere.physics.turbulence.clubb.CLUBBMomentState`
         packed by ``pack_clubb_moments``) for the fuller ``scheme="clubb"``
         prognostic path. zm-level fields use the full ``nlev+1`` axis; zt-level
         means/``wp3`` use the first ``nlev`` slots (trailing slot zero).
@@ -184,7 +184,7 @@ def init_physics_state(
     # Carried only for the fuller prognostic clubb path; packed (ncol, 15, nzm).
     # Minimal (ncol, 1, 1) otherwise (like gwd_spectrum) — no wasted memory.
     if turb_cfg.scheme == "clubb" and getattr(turb_cfg.clubb, "prognostic", False):
-        from legoesm.atmosphere.physics.turbulence.clubb_core import (
+        from legoesm.atmosphere.physics.turbulence.clubb import (
             init_clubb_moments,
             pack_clubb_moments,
         )

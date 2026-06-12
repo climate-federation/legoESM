@@ -172,7 +172,7 @@ def _read_turb_carry(phys_state, carry_field, ncol, nlev, scheme_config, dtype):
     CLUBB. Re-seeds when ``phys_state`` is absent or the stored slot has the wrong
     shape (e.g. a minimal placeholder from a non-clubb init / scheme switch)."""
     if carry_field == "clubb_moments":
-        from legoesm.atmosphere.physics.turbulence.clubb_core import (
+        from legoesm.atmosphere.physics.turbulence.clubb import (
             init_clubb_moments,
             pack_clubb_moments,
         )

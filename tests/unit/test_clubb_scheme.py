@@ -22,7 +22,7 @@ from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     integrate_clubb_column,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
-from legoesm.atmosphere.physics.turbulence.clubb_core import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     CLUBBMomentState,
     init_clubb_moments,
 )
@@ -431,7 +431,7 @@ def test_prognostic_clubb_surface_heat_flux_tracks_surface_temperature():
          ``shflx → wpthlp_sfc lower-BC → advance_clubb_core → dT_dt`` is live. A
          regression that left ``shflx`` correct but zeroed/inverted the
          ``wpthlp_sfc`` boundary condition would pass (1) but fail (2)."""
-    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
     from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 
     kw = _column(ncol=2, nlev=16, dtheta_dz=4e-3)
@@ -493,7 +493,7 @@ def test_prognostic_clubb_conserves_column_moisture_no_sfc_flux():
     from legoesm.atmosphere.physics.turbulence.clubb import (
         integrate_clubb_column,
     )
-    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)   # moist, stably stratified
     cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)   # dt<=clubb_dt → n_sub=1
@@ -553,7 +553,7 @@ def test_prognostic_clubb_conserves_column_heat_no_sfc_flux():
         virtual_temperature,
     )
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
-    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
     cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
@@ -603,7 +603,7 @@ def test_prognostic_clubb_conserves_column_momentum_to_surface_stress():
        ρ-vs-ρ_ds weighting error would instead be Δt-independent)."""
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
-    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
     from legoesm.atmosphere.physics.turbulence.surface_layer import (
         compute_surface_fluxes,
     )
@@ -688,7 +688,7 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
     from legoesm.atmosphere.physics.microphysics.output import make_zero_hydrometeors
     from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
-    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
     cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
@@ -756,7 +756,7 @@ def test_clubb_microphysics_chain_is_differentiable():
     from legoesm.atmosphere.physics.microphysics.output import make_zero_hydrometeors
     from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
-    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     kw = _scm_column(ncol=2, nlev=16, dtheta_dz=4e-3)
     cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
@@ -909,7 +909,7 @@ def test_clubb_turbulence_prognostic_carry_roundtrip_multistep():
     """The prognostic scheme entry carries the packed CLUBBMomentState
     (ncol,15,nlev+1) in/out of the tke-slot interface and runs stably multi-step
     in a moist column (the model carry path; no host diffusion needed here)."""
-    from legoesm.atmosphere.physics.turbulence.clubb_core import (
+    from legoesm.atmosphere.physics.turbulence.clubb import (
         init_clubb_moments,
         pack_clubb_moments,
     )
@@ -945,7 +945,7 @@ def test_prognostic_clubb_subcycling():
     n_sub=1 (dt<=clubb_dt) is bit-identical to a single clubb_step; n_sub>1
     (dt>clubb_dt) runs n_sub sub-steps and returns the NET tendency + sub-cycled
     moments — finite, and the moments evolve."""
-    from legoesm.atmosphere.physics.turbulence.clubb_core import (
+    from legoesm.atmosphere.physics.turbulence.clubb import (
         init_clubb_moments,
         pack_clubb_moments,
     )
@@ -961,7 +961,7 @@ def test_prognostic_clubb_subcycling():
 
     # n_sub=1: dt == clubb_dt → bit-identical to a single clubb_step.
     out1, c1 = clubb_turbulence_prognostic(*args, 300.0, cfg)
-    from legoesm.atmosphere.physics.turbulence.clubb_core import unpack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import unpack_clubb_moments
     du, dv, dT, dq, m_new, _ = clubb_step(
         kw["u"], kw["v"], kw["T"], kw["q_v"], unpack_clubb_moments(carry),
         kw["p_full"], kw["p_half"], kw["z_full"], kw["z_half"], kw["T_sfc"],
@@ -985,7 +985,7 @@ def test_prognostic_clubb_subcycling_raw_moisture_contract():
     coupling contract as n_sub=1. Forced with a near-dry column + large dt so any
     clip would show up as a contract divergence (positivity is the host's job)."""
     from legoesm.atmosphere.physics._shared import virtual_temperature
-    from legoesm.atmosphere.physics.turbulence.clubb_core import (
+    from legoesm.atmosphere.physics.turbulence.clubb import (
         init_clubb_moments,
         pack_clubb_moments,
         unpack_clubb_moments,
@@ -1411,7 +1411,7 @@ def test_prognostic_clubb_pipeline_multistep_stable():
 
 
 def test_clubb_turbulence_prognostic_jit_and_grad():
-    from legoesm.atmosphere.physics.turbulence.clubb_core import (
+    from legoesm.atmosphere.physics.turbulence.clubb import (
         init_clubb_moments,
         pack_clubb_moments,
     )
@@ -1500,7 +1500,7 @@ def test_prognostic_clubb_runs_in_float32_no_dtype_promotion():
     q_v = jnp.asarray(2e-3 + 4e-3 * rng.random((ncol, nlev)), dtype=f32)
     cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
     carry = init_clubb_moments(ncol, nlev, cfg, dtype=f32)
-    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
     rho = p_full / (jnp.asarray(constants.R_d, f32)
                     * jnp.maximum(T * (1.0 + 0.61 * q_v), jnp.asarray(150.0, f32)))
 
@@ -1643,7 +1643,7 @@ def test_prognostic_clubb_accepts_prescribed_surface_fluxes():
           to omitting them (the default bulk path is untouched).
     """
     from legoesm.atmosphere.physics._shared import virtual_temperature
-    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
     ncol, nlev = kw["T"].shape
@@ -1752,7 +1752,7 @@ def test_prognostic_clubb_prescribed_heat_flux_closes_column_budget():
     closure is EXACT (round-off), with no Δt dependence — a sharper contract."""
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
-    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
     ncol, nlev = kw["T"].shape
@@ -1800,7 +1800,7 @@ def test_prognostic_clubb_prescribed_moisture_flux_closes_column_budget():
     never engages, so the closure stays exact — this pins that."""
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
-    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
     ncol, nlev = kw["T"].shape
@@ -1855,7 +1855,7 @@ def test_prognostic_clubb_prescribed_heat_flux_applied_through_subcycling():
     ``n_sub`` factor, not ~1e-3)."""
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
-    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     # Low-shear, weakly-stratified column → the bare forward-Euler sub-cycle stays
     # stable over a long dt (see docstring). Built inline (not _scm_column, whose
@@ -1923,7 +1923,7 @@ def test_prognostic_clubb_prescribed_momentum_flux_is_magnitude_only_drag():
     """
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
-    from legoesm.atmosphere.physics.turbulence.clubb_core import pack_clubb_moments
+    from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
     ncol, nlev = kw["T"].shape

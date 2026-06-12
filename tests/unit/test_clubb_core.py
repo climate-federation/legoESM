@@ -1,4 +1,4 @@
-"""Tests for the CLUBB core diagnostics bundle (``clubb_core.py``).
+"""Tests for the CLUBB core diagnostics bundle (now in ``clubb.py``).
 
 The constituents (Skw/sigma_sqd_w/em/tau/C6-C7) are each independently
 parity-tested; this validates the thin orchestration: the right keys, finite
@@ -18,7 +18,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
-from legoesm.atmosphere.physics.turbulence.clubb_core import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     CLUBBForcing,
     CLUBBMomentState,
     advance_clubb_core,

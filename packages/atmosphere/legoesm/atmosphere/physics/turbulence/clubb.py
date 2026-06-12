@@ -1,31 +1,40 @@
 """CLUBB higher-order turbulence closure (fuller port; ``scheme="clubb"``).
 
-This is the operational entry point for the fuller CLUBB port tracked in
-``PORT_CLUBB.md`` — substantially richer than :mod:`clubb_lite`. The supporting
-machinery (all golden-locked or parity-tested against CLUBB-JAX) is built up in
-the ``clubb_*.py`` modules: the staggered grid (:mod:`clubb_grid`), CAM-default
-config (:mod:`clubb_config`), Flatau saturation (:mod:`clubb_saturation`),
-``sigma_sqd_w``/Brunt-Vaisala (:mod:`clubb_helpers`), skewness diagnostics
-(:mod:`clubb_skewness`), the parcel buoyant-sorting mixing length
-(:mod:`clubb_mixing_length`), the ADG1 assumed-PDF cloud/buoyancy closure
-(:mod:`clubb_pdf`, :mod:`clubb_pdf_moments`), the implicit solvers
-(:mod:`clubb_solve`), and the moment advances (:mod:`clubb_moments`).
+This is the single-file home for the fuller CLUBB port tracked in
+``PORT_CLUBB.md`` — substantially richer than :mod:`clubb_lite` — restricted to
+the call tree exercised by the **CAM-default CLUBB flags** (every piece
+golden-locked or parity-tested against CLUBB-JAX). Per the legoESM
+one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
+being absorbed here section by section (see the table of contents below); the
+CAM-default model-flag values are recorded as comments at the end of the file.
+
+Table of contents (sections, in order)
+--------------------------------------
+  1. Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
+  2. Core orchestration (``compute_clubb_diagnostics`` /
+     ``compute_pdf_closure`` / ``advance_clubb_core`` + the
+     ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
+  3. Scheme entries (``clubb_turbulence`` diagnostic default /
+     ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
+     ``integrate_clubb_column`` SCM driver)
 
 Phasing (the scheme is wired in and runnable now; fidelity deepens per phase):
 
-  * **Phase 1 (this entry):** uses CLUBB's exact **parcel buoyant-sorting
-    length scale** ``Lscale`` (``compute_mixing_length``, golden-locked vs
-    CLUBB-JAX) to set the eddy diffusivity ``Km = c_K · Lscale · sqrt(em)`` —
-    the distinctive CLUBB feature, replacing clubb_lite's Blackadar length — and
-    diagnoses the cloud fraction from the ADG1 PDF. Mean fields (u, v, T, q_v)
-    are advanced by the implicit eddy diffusion shared with the other legoESM
-    schemes; ``wp2`` is carried (via the ``tke`` slot) with a production /
-    dissipation / diffusion budget whose dissipation time scale is
-    ``tau = Lscale / sqrt(em)``.
-  * **Phase 2+ (in progress):** replace the diagnostic moment budget with the
+  * **Phase 1 (diagnostic default):** uses CLUBB's exact **parcel
+    buoyant-sorting length scale** ``Lscale`` (``compute_mixing_length``,
+    golden-locked vs CLUBB-JAX) to set the eddy diffusivity
+    ``Km = c_K · Lscale · sqrt(em)`` — the distinctive CLUBB feature, replacing
+    clubb_lite's Blackadar length — and diagnoses the cloud fraction from the
+    ADG1 PDF. Mean fields (u, v, T, q_v) are advanced by the implicit eddy
+    diffusion shared with the other legoESM schemes; ``wp2`` is carried (via
+    the ``tke`` slot) with a production / dissipation / diffusion budget whose
+    dissipation time scale is ``tau = Lscale / sqrt(em)``.
+  * **Phase 2 (prognostic, opt-in via ``CLUBBConfig.prognostic=True``):** the
     full prognostic higher-order moment transport — ``advance_wp2_wp3``,
     ``advance_xp2_xpyp``, ``advance_xm_wpxp`` — coupled through the ADG1 PDF
-    buoyancy flux ``wpthvp`` and the implicit tridiag/penta solves.
+    buoyancy flux ``wpthvp`` and the implicit tridiag/penta solves, with the
+    15-field :class:`CLUBBMomentState` carried in
+    ``PhysicsState.clubb_moments``.
 
 The ``TurbulenceOutput`` contract carries no ``cloud_fraction`` field (see the
 clubb_lite docstring), so the PDF cloud fraction is computed and exposed only
@@ -35,6 +44,7 @@ through diagnostics for now; the eddy-diffusion tendencies are the live output.
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -43,30 +53,56 @@ from legoesm.atmosphere.physics._shared import (
     exner_function,
     virtual_temperature,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig, derive_lmin
-from legoesm.atmosphere.physics.turbulence.clubb_core import (
-    CLUBBForcing,
-    CLUBBMomentState,
-    advance_clubb_core,
-    init_clubb_moments,
-    pack_clubb_moments,
-    unpack_clubb_moments,
+from legoesm.atmosphere.physics.turbulence.clubb_coefficients import (
+    compute_C6_C7_Skw_fnc,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_diagnostic import (
-    diagnose_cloud_and_buoyancy,
+from legoesm.atmosphere.physics.turbulence.clubb_config import (
+    CLUBBConfig,
+    derive_lmin,
+    derive_mixt_frac_max_mag,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_grid import (
+    CLUBBGrid,
+    ddzt,
     flip_vertical,
     make_clubb_grid_from_levels,
+    zm2zt,
     zt2zm,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_helpers import (
     calc_brunt_vaisala_freq_sqd,
+    compute_sigma_sqd_w,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_mixing_length import (
     compute_mixing_length,
     set_Lscale_max,
 )
+from legoesm.atmosphere.physics.turbulence.clubb_moments import (
+    advance_windm_edsclrm,
+    advance_xp2_xpyp,
+    clip_covars_denom,
+)
+from legoesm.atmosphere.physics.turbulence.clubb_pdf import (
+    ADG1_pdf_driver,
+    calc_comp_corrs_binormal,
+    calc_pdf_liquid_cloud_frac,
+    calc_pdf_liquid_cloud_frac_components,
+)
+from legoesm.atmosphere.physics.turbulence.clubb_pdf_moments import (
+    calc_pdf_higher_order_moments,
+    calc_pdf_xprcp_fluxes,
+    calc_xpthvp_terms,
+)
+from legoesm.atmosphere.physics.turbulence.clubb_skewness import (
+    compute_gamma_Skw,
+    compute_skewness_diagnostics,
+)
+from legoesm.atmosphere.physics.turbulence.clubb_tau import (
+    compute_tau_family,
+    compute_tke,
+)
+from legoesm.atmosphere.physics.turbulence.clubb_wp23 import advance_wp2_wp3
+from legoesm.atmosphere.physics.turbulence.clubb_xm_wpxp import advance_xm_wpxp
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import compute_surface_fluxes
@@ -80,6 +116,494 @@ from legoesm import constants
 # Eddy-diffusivity and dissipation coefficients are read from CLUBBParams
 # (c_K, beta, ...) — no hardcoded tunables here.
 _PR_T = 1.0   # phase-1 turbulent Prandtl number (Kh = Km/_PR_T); refined in P2
+
+_EP1 = (1.0 - constants.epsilon) / constants.epsilon
+_EP2 = 1.0 / constants.epsilon
+_HUNDRED = 100.0
+
+
+# ===========================================================================
+# 1. Diagnostic ADG1-PDF closure
+# ===========================================================================
+# Given the column mean state and the carried ``wp2`` on the CLUBB grid, this
+# diagnoses the second moments with standard mixing-length / down-gradient
+# closures, runs the ADG1 double-Gaussian assumed-PDF closure — the
+# distinctive CLUBB feature absent from clubb_lite (single Gaussian) — and
+# returns the liquid cloud fraction, cloud water ``rcm``, and the moist
+# buoyancy flux ``wpthvp`` (including the cloud-water latent-heat term that
+# makes a cloudy layer more buoyant). This is the *diagnostic* coupling used
+# by the phase-1 runnable ``clubb_turbulence`` entry: skewness is taken
+# symmetric (``Skw = 0`` → ``mixt_frac = 1/2``) and the variances are
+# mixing-length closures. All fields are on thermodynamic (zt) levels of the
+# ascending CLUBB grid.
+
+
+def _grad_zt(field_zt, gr: CLUBBGrid):
+    """d/dz of a zt-level field, returned on zt (``zm2zt(ddzt(.))``)."""
+    return zm2zt(ddzt(field_zt, gr), gr)
+
+
+def diagnose_cloud_and_buoyancy(thlm, rtm, wp2, exner, p_in_Pa, thv_ds, Kh, Lscale,
+                                gr: CLUBBGrid, config: CLUBBConfig):
+    """ADG1-PDF cloud fraction, cloud water, and moist buoyancy flux (zt levels).
+
+    Parameters (all ``(ncol, nzt)`` on the ascending CLUBB grid)
+    ----------
+    thlm, rtm : jax.Array
+        Liquid-water potential temperature [K] and total water [kg/kg].
+    wp2 : jax.Array
+        Carried ``w'^2`` [m^2/s^2].
+    exner, p_in_Pa, thv_ds : jax.Array
+        Exner, pressure [Pa], dry-static virtual potential temperature [K].
+    Kh : jax.Array
+        Eddy diffusivity for scalars [m^2/s].
+    Lscale : jax.Array
+        CLUBB parcel mixing length [m].
+    gr : CLUBBGrid
+    config : CLUBBConfig
+
+    Returns
+    -------
+    tuple of jax.Array
+        ``(cloud_frac, rcm, wpthvp)`` on zt levels — liquid cloud fraction [-],
+        cloud water [kg/kg], and the buoyancy flux ``w'thv'`` [K m/s].
+    """
+    params = config.params
+    wp2 = jnp.maximum(wp2, config.tke_min)
+    sqrt_wp2 = jnp.sqrt(wp2)
+
+    ddz_thl = _grad_zt(thlm, gr)
+    ddz_rt = _grad_zt(rtm, gr)
+
+    # Down-gradient second-order fluxes and mixing-length variances.
+    wpthlp = -Kh * ddz_thl
+    wprtp = -Kh * ddz_rt
+    thlp2 = jnp.maximum((Lscale * ddz_thl) ** 2, config.thl_tol ** 2)
+    rtp2 = jnp.maximum((Lscale * ddz_rt) ** 2, config.rt_tol ** 2)
+    rtpthlp = Lscale ** 2 * ddz_thl * ddz_rt
+    up2 = vp2 = jnp.maximum(wp2, config.w_tol ** 2)
+
+    # sigma_sqd_w (Skw = 0 -> gamma = gamma_coef), computed directly on zt.
+    denom_thl = jnp.sqrt(wp2 * thlp2) + _HUNDRED * config.w_tol * config.thl_tol
+    denom_rt = jnp.sqrt(wp2 * rtp2) + _HUNDRED * config.w_tol * config.rt_tol
+    max_corr = jnp.maximum((wpthlp / denom_thl) ** 2, (wprtp / denom_rt) ** 2)
+    sigma_sqd_w = jnp.clip(params.gamma_coef * (1.0 - jnp.minimum(max_corr, 1.0)), 0.0, 0.99)
+
+    z = jnp.zeros_like(wp2)
+    mfmm = derive_mixt_frac_max_mag(params.Skw_max_mag)
+    adg1 = ADG1_pdf_driver(
+        z, rtm, thlm, z, z, wp2, rtp2, thlp2, up2, vp2, z,
+        wprtp, wpthlp, z, z, sqrt_wp2, sigma_sqd_w, params.beta, mfmm)
+
+    rcm, cloud_frac = calc_pdf_liquid_cloud_frac(adg1, rtpthlp, rtm, thlm, exner, p_in_Pa)
+
+    # Moist buoyancy flux: wpthvp = wpthlp + ep1*thv_ds*wprtp + rc_coef*wprcp,
+    # with a down-gradient cloud-water flux wprcp (rc_coef = Lv/(exner*Cp) - ep2*thv).
+    wprcp = -Kh * _grad_zt(rcm, gr)
+    rc_coef = constants.L_v / (exner * constants.c_pd) - _EP2 * thv_ds
+    wpthvp = wpthlp + _EP1 * thv_ds * wprtp + rc_coef * wprcp
+    return cloud_frac, rcm, wpthvp
+
+
+# ===========================================================================
+# 2. Core orchestration
+# ===========================================================================
+# Assembles the parity-tested building blocks into the per-step closure: the
+# diagnostics (``compute_clubb_diagnostics`` — skewness, ``sigma_sqd_w``, TKE,
+# the dissipation-time-scale family, and the C6/C7 coefficients) that feed the
+# ADG1 PDF closure and the four prognostic moment advances, which run in the
+# CAM order ``xm_wpxp(1) -> xp2_xpyp(2) -> wp2_wp3(3) -> windm(4)`` with
+# ``clip_covars_denom`` between. Each constituent is independently
+# bit-exact/round-off parity-tested vs CLUBB-JAX; this section is the thin
+# (pure / JIT-safe / differentiable) wiring.
+
+
+def compute_clubb_diagnostics(wp2, wp3, up2, vp2, thlp2, rtp2, wpthlp, wprtp,
+                              Lscale, brunt_vaisala_freq_sqd, gr: CLUBBGrid, config):
+    """Per-step CLUBB closure diagnostics (CAM-default tree).
+
+    Composes the parity-tested helpers into one bundle of the inputs the PDF
+    closure and the moment advances need:
+
+      * skewness (``Skw_zm``/``Skw_zt``) and the smoothed ``wp3_on_wp2`` ratio
+        (:func:`compute_skewness_diagnostics`);
+      * the skewness-dependent ``gamma_Skw`` (CAM ``l_gamma_Skw = .true.``) and
+        ``sigma_sqd_w`` (:func:`compute_sigma_sqd_w`);
+      * TKE ``em``/``sqrt_em_zt`` (:func:`compute_tke`);
+      * the ``invrs_tau_*`` family (:func:`compute_tau_family`);
+      * the xm/wpxp coefficients ``C6rt/C6thl/C7_Skw_fnc``
+        (:func:`compute_C6_C7_Skw_fnc`).
+
+    All moments/fluxes are zm-level (``wp3`` zt); ``Lscale`` is the parcel
+    buoyant-sorting length (zt); ``brunt_vaisala_freq_sqd`` is zm. Returns a dict
+    with the above (the tau-family keys + ``Skw_*``/``wp3_on_wp2*``/``wp2_zt``/
+    ``wp3_zm``/``em``/``sqrt_em_zt``/``sigma_sqd_w``/``gamma_Skw``/``Lscale_zm``/
+    ``C6rt_Skw_fnc``/``C6thl_Skw_fnc``/``C7_Skw_fnc``).
+    """
+    p = config.params
+    skw = compute_skewness_diagnostics(wp2, wp3, config.w_tol, p.Skw_denom_coef, gr)
+    # CAM l_gamma_Skw = .true. (CLUBB model_flags default).
+    gamma_Skw = compute_gamma_Skw(skw["Skw_zm"], p.gamma_coef, p.gamma_coefb,
+                                  p.gamma_coefc, True)
+    sigma_sqd_w = compute_sigma_sqd_w(
+        gamma_Skw, wp2, thlp2, rtp2, wpthlp, wprtp, gr,
+        w_tol=config.w_tol, thl_tol=config.thl_tol, rt_tol=config.rt_tol)
+    em, sqrt_em_zt = compute_tke(wp2, up2, vp2, gr, config)
+    tau = compute_tau_family(Lscale, em, sqrt_em_zt, brunt_vaisala_freq_sqd, gr, config)
+    Lscale_zm = jnp.maximum(zt2zm(Lscale, gr), 0.0)
+    C6rt, C6thl, C7 = compute_C6_C7_Skw_fnc(skw["Skw_zm"], Lscale_zm, config, gr)
+
+    # Eddy diffusivities Kh = c_K·Lscale·sqrt(em) (zt and zm levels).
+    em_min = 1.5 * config.w_tol ** 2
+    Kh_zt = config.params.c_K * Lscale * sqrt_em_zt
+    Kh_zm = config.params.c_K * Lscale_zm * jnp.sqrt(jnp.maximum(em, em_min))
+    return dict(
+        **skw, gamma_Skw=gamma_Skw, sigma_sqd_w=sigma_sqd_w, em=em,
+        sqrt_em_zt=sqrt_em_zt, Lscale_zm=Lscale_zm, Kh_zt=Kh_zt, Kh_zm=Kh_zm,
+        C6rt_Skw_fnc=C6rt, C6thl_Skw_fnc=C6thl, C7_Skw_fnc=C7, **tau,
+    )
+
+
+def compute_pdf_closure(diag, wp2, wp3, rtp2, thlp2, rtpthlp, up2, vp2,
+                        wprtp, wpthlp, upwp, vpwp,
+                        wm_zt, rtm, thlm, um, vm, exner_zt, p_in_Pa_zt, thv_ds_zt,
+                        gr: CLUBBGrid, config):
+    """ADG1 assumed-PDF closure (CAM-default tree, post-advance placement).
+
+    The CAM-default subset of ``pdf_closure_module.F90:pdf_closure_driver`` (and
+    its ``adg1_pdf_driver_zt_jax`` helper): given the post-advance moment state it
+    invokes the ADG1 double-Gaussian PDF and returns the **buoyancy fluxes**
+    (``wpthvp``/``wp2thvp``/``rtpthvp``/``thlpthvp``), the **higher-order velocity
+    moments** (``wp4``/``wp2up2``/``wp2vp2``/``wpup2``/``wpvp2``/``wp2rtp``/
+    ``wp2thlp``/``wp2up``/``wprtp2``/``wpthlp2``/``wprtpthlp``), the **cloud-water
+    turbulent fluxes** (``wprcp``/``rtprcp``/``thlprcp``/``uprcp``/``vprcp``), and
+    the **cloud diagnostics** (``cloud_frac``/``rcm``/``rc_coef_zm``) that the four
+    moment advances and the host model consume. The CAM-irrelevant pieces (the
+    stats writer, the non-ADG1 PDF branches, ice-supersat) are omitted; the
+    stats-only intermediates are not returned.
+
+    Inputs: ``diag`` is the :func:`compute_clubb_diagnostics` bundle for the SAME
+    (post-advance) state — its ``Skw_zt``/``wp2_zt``/``sigma_sqd_w`` are reused
+    rather than re-derived. Prognostic moments ``wp2``/``rtp2``/``thlp2``/
+    ``rtpthlp``/``up2``/``vp2`` and fluxes ``wprtp``/``wpthlp``/``upwp``/``vpwp``
+    are on zm; ``wp3`` is on zt. Means ``wm_zt``/``rtm``/``thlm``/``um``/``vm`` and
+    the thermo fields ``exner_zt``/``p_in_Pa_zt``/``thv_ds_zt`` are on zt.
+
+    Returns a dict (buoyancy/HOM on the levels the advances want: ``wpthvp_zm``
+    etc. on zm, ``wp2thvp_zt`` on zt).
+    """
+    p = config.params
+    w_tol_sqd = config.w_tol ** 2
+
+    # --- zt-level fields for the ADG1 driver (adg1_pdf_driver_zt_jax) ---
+    Skw_zt = diag["Skw_zt"]
+    wp2_zt = diag["wp2_zt"]
+    sigma_sqd_w_zt = jnp.maximum(zm2zt(diag["sigma_sqd_w"], gr), 0.0)
+    # Raw zt regrids feed the buoyancy assembly (calc_xpthvp_terms); the
+    # tolerance-floored ``*_adg`` versions feed ONLY the ADG1 driver. CLUBB-JAX
+    # pdf_closure_driver keeps these paths separate (the floor must not leak a
+    # tolerance-level variance into rtpthvp/thlpthvp in low-variance columns).
+    rtp2_zt = zm2zt(rtp2, gr)
+    thlp2_zt = zm2zt(thlp2, gr)
+    rtp2_zt_adg = jnp.maximum(rtp2_zt, config.rt_tol ** 2)
+    thlp2_zt_adg = jnp.maximum(thlp2_zt, config.thl_tol ** 2)
+    up2_zt = jnp.maximum(zm2zt(up2, gr), w_tol_sqd)
+    vp2_zt = jnp.maximum(zm2zt(vp2, gr), w_tol_sqd)
+    wprtp_zt = zm2zt(wprtp, gr)
+    wpthlp_zt = zm2zt(wpthlp, gr)
+    upwp_zt = zm2zt(upwp, gr)
+    vpwp_zt = zm2zt(vpwp, gr)
+    rtpthlp_zt = zm2zt(rtpthlp, gr)
+
+    mixt_frac_max_mag = derive_mixt_frac_max_mag(p.Skw_max_mag)
+    adg1 = ADG1_pdf_driver(
+        wm_zt, rtm, thlm, um, vm, wp2_zt, rtp2_zt_adg, thlp2_zt_adg, up2_zt, vp2_zt,
+        Skw_zt, wprtp_zt, wpthlp_zt, upwp_zt, vpwp_zt, jnp.sqrt(wp2_zt),
+        sigma_sqd_w_zt, p.beta, mixt_frac_max_mag)
+
+    # --- per-component rt-thl correlation + liquid cloud-fraction closure ---
+    corr_rt_thl_1, corr_rt_thl_2 = calc_comp_corrs_binormal(
+        rtpthlp_zt, rtm, thlm, adg1["rt_1"], adg1["rt_2"], adg1["thl_1"],
+        adg1["thl_2"], adg1["varnce_rt_1"], adg1["varnce_rt_2"],
+        adg1["varnce_thl_1"], adg1["varnce_thl_2"], adg1["mixt_frac"])
+    comp = calc_pdf_liquid_cloud_frac_components(
+        adg1, rtpthlp_zt, rtm, thlm, exner_zt, p_in_Pa_zt)
+    rcm_zt = comp["rcm"]
+
+    # --- cloud-water fluxes, higher-order velocity moments, buoyancy fluxes ---
+    xprcp = calc_pdf_xprcp_fluxes(adg1, comp, wm_zt, rtm, thlm, um, vm, rcm_zt, gr)
+    hom = calc_pdf_higher_order_moments(
+        adg1, wm_zt, rtm, thlm, um, vm, corr_rt_thl_1, corr_rt_thl_2, gr)
+    (wpthvp_zm, wp2thvp_zt, rtpthvp_zm, thlpthvp_zm,
+     _rc_coef_zt, rc_coef_zm) = calc_xpthvp_terms(
+        exner_zt, thv_ds_zt, xprcp["wprcp_zt"], xprcp["wp2rcp_zt"],
+        xprcp["rtprcp_zt"], xprcp["thlprcp_zt"], wpthlp_zt, wprtp_zt,
+        hom["wp2thlp"], hom["wp2rtp"], rtpthlp_zt, rtp2_zt, thlp2_zt, gr)
+
+    # ADG1 w-component PDF params regridded zt->zm (the MFL turbulent-advection
+    # range in advance_xm_wpxp reads these on zm; advance_clubb_core_module.F90).
+    w_1_zm = zt2zm(adg1["w_1"], gr)
+    w_2_zm = zt2zm(adg1["w_2"], gr)
+    varnce_w_1_zm = zt2zm(adg1["varnce_w_1"], gr)
+    varnce_w_2_zm = zt2zm(adg1["varnce_w_2"], gr)
+    mixt_frac_zm = zt2zm(adg1["mixt_frac"], gr)
+
+    return dict(
+        wpthvp=wpthvp_zm, wp2thvp=wp2thvp_zt, rtpthvp=rtpthvp_zm,
+        thlpthvp=thlpthvp_zm, rc_coef_zm=rc_coef_zm,
+        cloud_frac=comp["cloud_frac"], rcm=comp["rcm"],
+        wprcp=xprcp["wprcp_zm"], rtprcp=xprcp["rtprcp_zm"],
+        thlprcp=xprcp["thlprcp_zm"], uprcp=xprcp["uprcp_zm"],
+        vprcp=xprcp["vprcp_zm"], w_1_zm=w_1_zm, w_2_zm=w_2_zm,
+        varnce_w_1_zm=varnce_w_1_zm, varnce_w_2_zm=varnce_w_2_zm,
+        mixt_frac_zm=mixt_frac_zm, **hom,
+    )
+
+
+class CLUBBMomentState(NamedTuple):
+    """The carried CLUBB prognostic higher-order moment state (CAM-default tree).
+
+    The 15 fields advanced each step by :func:`advance_clubb_core`. Means are on
+    thermodynamic (zt) levels; second/third moments and fluxes on momentum (zm)
+    levels except ``wp3`` (zt). All ``(ngrdcol, nz*)``. CAM
+    ``l_predict_upwp_vpwp = .false.`` so ``upwp``/``vpwp`` are diagnosed inside
+    ``advance_windm_edsclrm`` rather than prognosed by ``advance_xm_wpxp``.
+    """
+    # Means (zt)
+    rtm: jax.Array
+    thlm: jax.Array
+    um: jax.Array
+    vm: jax.Array
+    # Velocity moments
+    wp2: jax.Array      # zm
+    wp3: jax.Array      # zt
+    up2: jax.Array      # zm
+    vp2: jax.Array      # zm
+    # Fluxes (zm)
+    wprtp: jax.Array
+    wpthlp: jax.Array
+    upwp: jax.Array
+    vpwp: jax.Array
+    # Scalar second moments (zm)
+    rtp2: jax.Array
+    thlp2: jax.Array
+    rtpthlp: jax.Array
+
+
+class CLUBBForcing(NamedTuple):
+    """Large-scale forcings (tendency sources) for the moment advances [units/s].
+
+    All on the same level as the advanced field: ``rtm``/``thlm``/``um``/``vm``
+    on zt; ``wprtp``/``wpthlp``/``rtp2``/``thlp2``/``rtpthlp`` on zm. Zero by
+    default for an isolated SCM driver (the host supplies them when coupled).
+    """
+    rtm: jax.Array
+    thlm: jax.Array
+    um: jax.Array
+    vm: jax.Array
+    wprtp: jax.Array
+    wpthlp: jax.Array
+    rtp2: jax.Array
+    thlp2: jax.Array
+    rtpthlp: jax.Array
+
+
+def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
+                       Lscale, brunt_vaisala_freq_sqd, exner_zt, p_in_Pa_zt,
+                       thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
+                       invrs_rho_ds_zm, invrs_rho_ds_zt, wm_zt, wm_zm,
+                       sfc_elevation, fcor, ug, vg, dt, gr: CLUBBGrid, config):
+    """One prognostic CLUBB step (the CAM-default ``advance_clubb_core`` core).
+
+    Runs, in the CAM order, ``compute_clubb_diagnostics`` -> the pre-advance ADG1
+    PDF closure (``l_call_pdf_closure_twice = .true.``) -> the four moment
+    advances ``advance_xm_wpxp -> advance_xp2_xpyp -> advance_wp2_wp3 ->
+    advance_windm_edsclrm`` with ``clip_covars_denom`` between the variance/flux
+    solves -> the post-advance PDF closure for the cloud/buoyancy diagnostics. The
+    advances mutate the shared moment set in sequence (each sees the previous
+    advance's update), exactly as the Fortran driver does.
+
+    Parameters
+    ----------
+    state : CLUBBMomentState
+        Start-of-step prognostic moments.
+    forcing : CLUBBForcing
+        Large-scale tendency sources.
+    Lscale : jax.Array
+        Parcel buoyant-sorting mixing length (zt) from ``compute_mixing_length``.
+    brunt_vaisala_freq_sqd : jax.Array
+        ``N^2`` (zm).
+    exner_zt, p_in_Pa_zt, thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
+    invrs_rho_ds_zm, invrs_rho_ds_zt, wm_zt, wm_zm, sfc_elevation, fcor, ug, vg :
+        Host thermodynamic / dry-static-density / geometry / Coriolis-geostrophic
+        fields on their noted grids (``fcor``/``sfc_elevation`` are ``(ngrdcol,)``).
+    dt : float
+        Time step [s].
+
+    Returns
+    -------
+    CLUBBMomentState
+        End-of-step prognostic moments.
+    dict
+        Diagnostics — ``cloud_frac``/``rcm`` (post-advance PDF) plus the
+        diffusivities ``Kh_zt``/``Kh_zm`` and ``wpthvp`` for the host.
+    """
+    p = config.params
+    ng = state.wp2.shape[0]
+    # Background eddy diffusivities are per-column arrays (vertical-resolution
+    # scaling is identity on a fixed grid); advance_xp2_xpyp indexes nu[:, None].
+    # (The per-moment C2 dissipation coefficients C2rt/C2thl/C2rtthl are owned by
+    # advance_xp2_xpyp itself, read from config — CAM uses 3 distinct values.)
+    nu2 = jnp.full((ng,), p.nu2)
+    nu9 = jnp.full((ng,), p.nu9)
+
+    # ---- (1) closure diagnostics on the start-of-step state ----
+    diag = compute_clubb_diagnostics(
+        state.wp2, state.wp3, state.up2, state.vp2, state.thlp2, state.rtp2,
+        state.wpthlp, state.wprtp, Lscale, brunt_vaisala_freq_sqd, gr, config)
+
+    # ---- (2) pre-advance ADG1 PDF closure -> buoyancy + higher-order moments ----
+    pdf = compute_pdf_closure(
+        diag, state.wp2, state.wp3, state.rtp2, state.thlp2, state.rtpthlp,
+        state.up2, state.vp2, state.wprtp, state.wpthlp, state.upwp, state.vpwp,
+        wm_zt, state.rtm, state.thlm, state.um, state.vm, exner_zt, p_in_Pa_zt,
+        thv_ds_zt, gr, config)
+
+    # ---- (3) advance_xm_wpxp: rtm/wprtp + thlm/wpthlp ----
+    wprtp, rtm, wpthlp, thlm = advance_xm_wpxp(
+        state.rtm, state.thlm, state.wprtp, state.wpthlp, forcing.rtm,
+        forcing.thlm, forcing.wprtp, forcing.wpthlp, diag["C6rt_Skw_fnc"],
+        diag["C6thl_Skw_fnc"], diag["C7_Skw_fnc"], diag["invrs_tau_C6_zm"],
+        diag["sigma_sqd_w"], diag["wp3_on_wp2_zt"], state.wp2, diag["Kh_zt"],
+        state.rtp2, state.thlp2, pdf["rtpthvp"], pdf["thlpthvp"], thv_ds_zm,
+        wm_zm, wm_zt, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
+        pdf["w_1_zm"], pdf["w_2_zm"], pdf["varnce_w_1_zm"], pdf["varnce_w_2_zm"],
+        pdf["mixt_frac_zm"], dt, gr, config)
+
+    # ---- (4) advance_xp2_xpyp: rtp2/thlp2/rtpthlp/up2/vp2 (uses pre-wp2_wp3 wp2) ----
+    rtp2, thlp2, rtpthlp, up2, vp2 = advance_xp2_xpyp(
+        rtm, thlm, state.um, state.vm, state.rtp2, state.thlp2, state.rtpthlp,
+        state.up2, state.vp2, wprtp, wpthlp, pdf["wpthvp"], state.upwp,
+        state.vpwp, state.wp2, diag["wp2_zt"], diag["wp3_on_wp2"],
+        diag["wp3_on_wp2_zt"], diag["sigma_sqd_w"], thv_ds_zm, diag["Kh_zt"],
+        diag["invrs_tau_xp2_zm"], diag["invrs_tau_C4_zm"],
+        diag["invrs_tau_C14_zm"], rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, wm_zm,
+        forcing.rtp2, forcing.thlp2, forcing.rtpthlp, nu2, nu9, dt, gr, config)
+
+    # ---- (5) Cauchy-Schwarz clip of the fluxes (pre-wp2_wp3 wp2) ----
+    wprtp, wpthlp, upwp, vpwp = clip_covars_denom(
+        wprtp, wpthlp, state.upwp, state.vpwp, state.wp2, rtp2, thlp2, up2, vp2,
+        l_tke_aniso=config.flags.l_tke_aniso)
+
+    # ---- (6) advance_wp2_wp3: wp2/wp3 (uses post-xp2 up2/vp2 + post-clip fluxes) ----
+    wp2, wp3, _wp2_zt = advance_wp2_wp3(
+        state.wp2, state.wp3, up2, vp2, diag["sigma_sqd_w"], diag["wp3_on_wp2"],
+        pdf["wpup2"], pdf["wpvp2"], pdf["wp2up2_zm"], pdf["wp2vp2_zm"],
+        pdf["wp4_zm"], pdf["wpthvp"], pdf["wp2thvp"], state.um, state.vm, upwp,
+        vpwp, wm_zm, wm_zt, diag["Kh_zm"], diag["Kh_zt"], diag["invrs_tau_C4_zm"],
+        diag["invrs_tau_wp3_zt"], diag["invrs_tau_C1_zm"], diag["Skw_zm"],
+        diag["Skw_zt"], rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
+        thv_ds_zm, thv_ds_zt, sfc_elevation, dt, gr, config)
+
+    # ---- (7) Cauchy-Schwarz clip with the new wp2 ----
+    wprtp, wpthlp, upwp, vpwp = clip_covars_denom(
+        wprtp, wpthlp, upwp, vpwp, wp2, rtp2, thlp2, up2, vp2,
+        l_tke_aniso=config.flags.l_tke_aniso)
+
+    # ---- (8) advance_windm_edsclrm: um/vm + diagnostic upwp/vpwp ----
+    # Kh_zm is the START-OF-STEP eddy diffusivity (advance_clubb_core_module.F90
+    # "Block M", computed once before the advance loop) and is intentionally NOT
+    # recomputed after wp2/wp3: the reference passes this same Kh_zm to BOTH
+    # advance_wp2_wp3 and advance_windm_edsclrm. The new (post-advance) wp2/up2/vp2
+    # are used only for the Cauchy-Schwarz flux clip inside windm, matching Fortran.
+    um, vm, upwp, vpwp = advance_windm_edsclrm(
+        state.um, state.vm, upwp, vpwp, wp2, up2, vp2, wm_zt, diag["Kh_zm"],
+        ug, vg, forcing.um, forcing.vm, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zt,
+        fcor, p.c_K10, p.nu10, dt, gr, l_tke_aniso=config.flags.l_tke_aniso)
+
+    new_state = CLUBBMomentState(
+        rtm=rtm, thlm=thlm, um=um, vm=vm, wp2=wp2, wp3=wp3, up2=up2, vp2=vp2,
+        wprtp=wprtp, wpthlp=wpthlp, upwp=upwp, vpwp=vpwp, rtp2=rtp2,
+        thlp2=thlp2, rtpthlp=rtpthlp)
+
+    # ---- (9) post-advance PDF closure for the cloud/buoyancy diagnostics ----
+    diag_post = compute_clubb_diagnostics(
+        wp2, wp3, up2, vp2, thlp2, rtp2, wpthlp, wprtp, Lscale,
+        brunt_vaisala_freq_sqd, gr, config)
+    pdf_post = compute_pdf_closure(
+        diag_post, wp2, wp3, rtp2, thlp2, rtpthlp, up2, vp2, wprtp, wpthlp,
+        upwp, vpwp, wm_zt, rtm, thlm, um, vm, exner_zt, p_in_Pa_zt, thv_ds_zt,
+        gr, config)
+
+    diagnostics = dict(
+        cloud_frac=pdf_post["cloud_frac"], rcm=pdf_post["rcm"],
+        wpthvp=pdf_post["wpthvp"], Kh_zt=diag["Kh_zt"], Kh_zm=diag["Kh_zm"])
+    return new_state, diagnostics
+
+
+def init_clubb_moments(ncol: int, nlev: int, config, dtype=jnp.float64) -> CLUBBMomentState:
+    """Seed a fresh :class:`CLUBBMomentState` at rest (CAM-default floors).
+
+    Means are zero (the bridge resets them from the live column each step);
+    velocity variances start at the floor ``tke_min`` (``w_tol^2`` scale), scalar
+    variances at their tolerance-squared floors, all fluxes and ``wp3`` zero.
+    ``nlev`` thermo (zt) levels → ``nzm = nlev + 1`` momentum levels.
+    """
+    nzm = nlev + 1
+    zt = jnp.zeros((ncol, nlev), dtype=dtype)
+    zm0 = jnp.zeros((ncol, nzm), dtype=dtype)
+    wtol2 = jnp.full((ncol, nzm), config.tke_min, dtype=dtype)
+    return CLUBBMomentState(
+        rtm=zt, thlm=zt, um=zt, vm=zt,
+        wp2=wtol2, wp3=zt, up2=wtol2, vp2=wtol2,
+        wprtp=zm0, wpthlp=zm0, upwp=zm0, vpwp=zm0,
+        rtp2=jnp.full((ncol, nzm), config.rt_tol ** 2, dtype=dtype),
+        thlp2=jnp.full((ncol, nzm), config.thl_tol ** 2, dtype=dtype),
+        rtpthlp=zm0)
+
+
+# Field layout for packing CLUBBMomentState into a single (ncol, NFIELDS, nzm)
+# array carried in PhysicsState (like gwd_spectrum). zt-level fields (nlev) use
+# the first nlev slots of the nzm axis with the trailing slot zero-padded.
+N_MOMENT_FIELDS = len(CLUBBMomentState._fields)   # 15
+_ZT_FIELD_NAMES = frozenset(("rtm", "thlm", "um", "vm", "wp3"))  # rest are zm
+
+
+def pack_clubb_moments(state: CLUBBMomentState) -> jax.Array:
+    """Pack a :class:`CLUBBMomentState` into one ``(ncol, 15, nzm)`` array.
+
+    zm-level fields (``wp2``/variances/fluxes) fill the full ``nzm`` axis; zt-level
+    fields (``rtm``/``thlm``/``um``/``vm``/``wp3``, length ``nlev = nzm-1``) fill
+    ``[:, :nlev]`` with a zero in the trailing slot. Inverse of
+    :func:`unpack_clubb_moments`. Used to carry the moment state in
+    ``PhysicsState`` as a single regular array.
+    """
+    cols = []
+    for name in CLUBBMomentState._fields:
+        f = getattr(state, name)
+        if name in _ZT_FIELD_NAMES:                       # (ncol, nlev) -> (ncol, nzm)
+            f = jnp.concatenate([f, jnp.zeros_like(f[:, :1])], axis=1)
+        cols.append(f[:, None, :])                        # (ncol, 1, nzm)
+    return jnp.concatenate(cols, axis=1)                  # (ncol, 15, nzm)
+
+
+def unpack_clubb_moments(arr: jax.Array) -> CLUBBMomentState:
+    """Unpack a ``(ncol, 15, nzm)`` array into a :class:`CLUBBMomentState`.
+
+    Inverse of :func:`pack_clubb_moments`: zt-level fields are sliced back to
+    ``nlev = nzm-1`` (dropping the zero pad).
+    """
+    nlev = arr.shape[2] - 1
+    fields = {}
+    for i, name in enumerate(CLUBBMomentState._fields):
+        col = arr[:, i, :]
+        fields[name] = col[:, :nlev] if name in _ZT_FIELD_NAMES else col
+    return CLUBBMomentState(**fields)
+
+
+# ===========================================================================
+# 3. Scheme entries
+# ===========================================================================
 
 
 def clubb_turbulence(
@@ -246,7 +770,7 @@ def clubb_step(
     This is the *full prognostic* path (phase 2): it builds the ascending-grid
     host environment CLUBB needs, sets the surface turbulent-flux lower boundary
     conditions, advances the complete higher-order moment set with
-    :func:`clubb_core.advance_clubb_core`, and maps the advanced means back to
+    :func:`advance_clubb_core`, and maps the advanced means back to
     top-down ``(ncol, nlev)`` tendencies. The 15-field :class:`CLUBBMomentState`
     (means on zt, moments/fluxes on zm, ``wp3`` zt) is carried in and out.
 
@@ -571,7 +1095,7 @@ def integrate_clubb_column(
     prescribed-flux LES/SCM case (BOMEX/DYCOMS/ARM). ``None`` ⇒ CLUBB's bulk
     surface formula from ``T_sfc``/``q_sfc`` (the default, back-compatible).
 
-    ``moments`` defaults to a rest state (:func:`clubb_core.init_clubb_moments`).
+    ``moments`` defaults to a rest state (:func:`init_clubb_moments`).
     ``nsteps`` is a **static** Python int (the ``lax.scan`` length, fixed at trace
     time); jit callers close over it (it is not a traced argument).
     Returns the final ``(u, v, T, q_v, moments)`` and a dict of per-step stacked
