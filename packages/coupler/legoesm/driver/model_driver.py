@@ -154,6 +154,13 @@ class ModelDriver:
         self._ensemble_size = 1
         self._device_config = None
         self._carry_aux: dict = {}  # held radiation + carry metadata for checkpoint
+        # (step, day) exactly as the last load_checkpoint returned them —
+        # lets the run loops distinguish the production restart convention
+        # (callers pass the CHECKPOINT day straight back into run()) from
+        # a caller-supplied EPOCH day (the legacy contract).  See the
+        # START_DAY normalization in _prepare_run_context / _run_spectral
+        # (FIX_RESTART_TIME).
+        self._loaded_checkpoint_step_day: tuple | None = None
 
         # MPI distributed state (populated by _setup_parallel)
         self._mpi_rank: int | None = None
@@ -2983,6 +2990,7 @@ class ModelDriver:
             logger.info(f"  Loaded MPAS checkpoint: step={step}, day={day:.2f}"
                         + ("" if "tracer_names" not in d
                            else f", tracers={[str(n) for n in d['tracer_names']]}"))
+            self._loaded_checkpoint_step_day = (step, day)
             return step, day
 
         # Distributed path: directory with per-rank .npz files
@@ -3036,6 +3044,7 @@ class ModelDriver:
                     f"  Loaded distributed restart: step={step}, day={day}, "
                     f"rank={topology.rank}"
                 )
+                self._loaded_checkpoint_step_day = (step, day)
                 return step, day
 
         # Lat-lon band MPI: rank 0 loads the global ``.npz`` against
@@ -3155,6 +3164,7 @@ class ModelDriver:
                     "per-rank distributed checkpoint format or run "
                     "single-process for stateful-physics lat-lon MPI runs."
                 )
+            self._loaded_checkpoint_step_day = (step, day)
             return step, day
 
         # Single-process path
@@ -3175,6 +3185,7 @@ class ModelDriver:
         if metadata:
             logger.info(f"  Loaded restart: step={step}, day={day}, "
                        f"digest={metadata.state_digest[:16]}...")
+        self._loaded_checkpoint_step_day = (step, day)
         return step, day
 
     def _maybe_wallclock_exit(self, ckpt_fn, step: int, day: float) -> None:
@@ -3819,13 +3830,26 @@ class ModelDriver:
                 _force_day = START_DAY + step * DT / 86400.0
                 _fd_int = int(_force_day)
                 if _fd_int != _last_force_day:
+                    # Sample the daily fields at the CANONICAL day boundary
+                    # (``float(_fd_int)``), NOT at the first step that
+                    # enters the day: a restart link's first step lands
+                    # mid-day, so sampling at ``_force_day`` gave a chained
+                    # run slightly different seasonal SST/ozone than the
+                    # straight run and broke bit-exact restart continuation
+                    # (FIX_RESTART_TIME; found by the restart validation
+                    # harness — T diverged ~1e-8 over 2 steps).  Runs
+                    # starting at integer days (all production configs) are
+                    # bit-identical to before.
+                    _force_day_canonical = float(_fd_int)
                     _forcing_daily = {}
                     if _sst_forcing:
-                        _forcing_daily["T_sfc"] = _compute_T_sfc(_force_day)
+                        _forcing_daily["T_sfc"] = _compute_T_sfc(
+                            _force_day_canonical)
                     if _ext_forcing:
                         _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
                         _o3, _aer, _ghg = self._precompute_external_forcing(
-                            _force_day, _ext_p_s, jnp.asarray(_ext_lat),
+                            _force_day_canonical, _ext_p_s,
+                            jnp.asarray(_ext_lat),
                         )
                         _forcing_daily["o3_vmr"] = _o3
                         _forcing_daily["aerosol_od"] = _aer
@@ -4073,6 +4097,25 @@ class ModelDriver:
         n_steps_total = int(N_DAYS * 86400.0 / DT)
         DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
         START_DAY = start_day if start_day is not None else cfg.start_day
+        # Restart-time normalization (FIX_RESTART_TIME, ported from
+        # fix/persist-physics where it is production-validated): these
+        # loops index time as ``START_DAY + ABSOLUTE_step * DT/86400``,
+        # so START_DAY must be the EPOCH day (day at step 0).  Every
+        # production caller (run_amip --restart-from, the coupled
+        # drivers) passes the CHECKPOINT day from load_checkpoint — which
+        # double-counted the already-elapsed time and ran every restarted
+        # link with forcing shifted forward by the checkpoint day
+        # (seasonally wrong SST / calendar; the restarted segment saw
+        # day_of_year 4 instead of 3 in the validation harness).
+        # Normalize ONLY when the caller passes back EXACTLY what this
+        # driver's load_checkpoint returned (the recorded hint) — a
+        # caller passing its own (e.g. epoch) start_day keeps the legacy
+        # epoch semantics verbatim.  The MPAS loop keeps its own
+        # local-step + checkpoint-day contract.
+        if (start_day is not None and start_step > 0
+                and self._loaded_checkpoint_step_day
+                == (start_step, start_day)):
+            START_DAY = start_day - start_step * DT / 86400.0
         a = self.grid.radius
 
         # Rayleigh friction profile
@@ -4583,6 +4626,25 @@ class ModelDriver:
         DT = cfg.dycore.dt
         N_DAYS = cfg.days
         START_DAY = start_day if start_day is not None else cfg.start_day
+        # Restart-time normalization (FIX_RESTART_TIME, ported from
+        # fix/persist-physics where it is production-validated): these
+        # loops index time as ``START_DAY + ABSOLUTE_step * DT/86400``,
+        # so START_DAY must be the EPOCH day (day at step 0).  Every
+        # production caller (run_amip --restart-from, the coupled
+        # drivers) passes the CHECKPOINT day from load_checkpoint — which
+        # double-counted the already-elapsed time and ran every restarted
+        # link with forcing shifted forward by the checkpoint day
+        # (seasonally wrong SST / calendar; the restarted segment saw
+        # day_of_year 4 instead of 3 in the validation harness).
+        # Normalize ONLY when the caller passes back EXACTLY what this
+        # driver's load_checkpoint returned (the recorded hint) — a
+        # caller passing its own (e.g. epoch) start_day keeps the legacy
+        # epoch semantics verbatim.  The MPAS loop keeps its own
+        # local-step + checkpoint-day contract.
+        if (start_day is not None and start_step > 0
+                and self._loaded_checkpoint_step_day
+                == (start_step, start_day)):
+            START_DAY = start_day - start_step * DT / 86400.0
         RAD_UPDATE_STEPS = cfg.rad_update_steps
 
         n_steps_total = int(N_DAYS * 86400 / DT)

@@ -57,3 +57,15 @@ physstate_* staging in `_carry_aux`, load-then-save laundering guards) —
 the hint recording must not disturb those; and the epoch normalization
 must not break main's `test_physics_state_carry.py` driver-loop tests
 (which may pass start_day conventions of their own).
+
+Plan amendment from the iteration-1 codex review (medium — adopted):
+- The `diag_days=0` premise was from the BRANCH scheduler; on MAIN,
+  `compute_segment_length(0,0,·)=1` (one-step segments) and
+  `(0,144,·)=144` — verified empirically.  The legacy test's cadence
+  mismatch on main is straight(1-step) vs leg1(144-step).  Fix the test
+  by aligning cadence with `checkpoint_days=1` on ALL THREE runs
+  (keeping `diag_days=0`), NOT by changing diag_days; plus the start_day
+  convention change.  Also pin `compute_segment_length` behavior for
+  these inputs with a unit test (if main lacks one) and reproduce the
+  legacy failure on main BEFORE changing it, attributing the divergence
+  precisely.

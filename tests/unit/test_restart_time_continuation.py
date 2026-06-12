@@ -1,0 +1,215 @@
+"""Bit-exact restart continuation (FIX_RESTART_TIME, docs/FIX_RESTART_TIME.md).
+
+The #413 series made the PhysicsState carry persist exactly through
+checkpoints, but the restart TRAJECTORY still diverged from an
+uninterrupted run because of two forcing-time bugs (found by the
+fix/persist-physics validation harness and ported here):
+
+1. The MPAS loop sampled the daily forcing at the restart link's FIRST
+   STEP (mid-day) instead of the canonical day boundary, so a chained
+   run saw slightly different seasonal SST than the straight run.
+2. The cube/lat-lon/spectral loops index time as
+   ``START_DAY + ABSOLUTE_step·DT/86400`` (epoch convention), but every
+   production caller passes the CHECKPOINT day from ``load_checkpoint``
+   back into ``run()`` — double-counting the pre-restart elapsed time and
+   running every restarted link with forcing shifted forward by the
+   checkpoint day.
+
+These tests assert the strongest property: an interrupted+restarted run
+equals the uninterrupted run BITWISE — prognostic state AND the physics
+carries.  Pre-port, both tests fail on main (cube ~4e-3 K, MPAS ~1e-8).
+
+Bitwise-equality preconditions (by design, documented):
+* MPAS: none — its forcing is daily-cadence + per-step traced scalars.
+* cube (compiled loop): the restart must land on a segment boundary and
+  all runs must share the same checkpoint/diag cadence — the compiled
+  loop samples per-SEGMENT forcing at the segment-end day, so mismatched
+  segmentation samples different forcing BY CONSTRUCTION (see the
+  ``compute_segment_length`` pins below).
+"""
+from __future__ import annotations
+
+import glob
+import os
+
+import numpy as np
+import pytest
+
+jax = pytest.importorskip("jax")
+import jax.numpy as jnp  # noqa: E402  (kept for parity with sibling tests)
+
+from legoesm.atmosphere.physics.physics_state import PhysicsState  # noqa: E402
+from legoesm.driver.compiled_segments import compute_segment_length  # noqa: E402
+from legoesm.driver.config import (  # noqa: E402
+    DycoreConfig,
+    ExperimentConfig,
+    GridConfig,
+    OutputConfig,
+)
+from legoesm.driver.model_driver import ModelDriver  # noqa: E402
+
+
+# ======================================================================
+# Scheduler pins the restart tests rely on (codex iteration-1 finding:
+# the cadence interaction must be asserted, not assumed)
+# ======================================================================
+
+def test_segment_length_disabled_cadences_pin():
+    """diag=ckpt=0 ⇒ 1-step segments; a checkpoint cadence alone sets the
+    segment length.  The continuation tests below align ALL runs on one
+    cadence because per-segment forcing makes mismatched cadences sample
+    different forcing days by construction."""
+    assert compute_segment_length(0, 0, 3) == 1
+    assert compute_segment_length(0, 144, 3) == 144
+    assert compute_segment_length(288, 288, 2) == 288
+
+
+# ======================================================================
+# MPAS: 2+2-step chain == 4-step straight run, bitwise
+# ======================================================================
+
+MPAS_RES, MPAS_NLEV, DT = 3, 20, 300.0  # icosahedral level 3 = 642 cells
+TWO_STEPS_DAYS = 601.0 / 86400.0   # int(601/300) = 2 steps, rounding-safe
+FOUR_STEPS_DAYS = 1201.0 / 86400.0
+
+
+def _build_mpas_driver(tmpdir: str, days: float) -> ModelDriver:
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=MPAS_RES,
+                        nlev=MPAS_NLEV, vertical_coord="hybrid"),
+        dycore=DycoreConfig(discretization="mpas", dt=DT),
+        output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=1),
+        days=days, dataset="analytical", radiation="gray",
+        # tke = stateful turbulence so the carry rides the chain; GWD
+        # stays "none" (prognostic_spectral still raises
+        # NotImplementedError on the MPAS bridge on main).
+        convection="none", turbulence="tke", precision="fp64",
+        distributed=False,
+    )
+    d = ModelDriver(cfg, output_dir=tmpdir)
+    d.setup()
+    return d
+
+
+def test_mpas_bitexact_restart_continuation(tmp_path):
+    """Interrupted+restarted MPAS run == uninterrupted run, BITWISE.
+
+    Fails pre-port: the link-start daily-forcing sampling gave the
+    chained run different seasonal SST (T diverged ~1e-8 over 2 steps
+    while every carry slot round-tripped 0.0).
+    """
+    dA = _build_mpas_driver(str(tmp_path / "straight"), FOUR_STEPS_DAYS)
+    assert dA.run() == "COMPLETED"
+
+    outB = str(tmp_path / "chain1")
+    dB = _build_mpas_driver(outB, TWO_STEPS_DAYS)
+    assert dB.run() == "COMPLETED"
+    ckpt = sorted(glob.glob(os.path.join(outB, "checkpoint_day_*.npz")))[-1]
+    # MPAS restart contract: cfg.days is the days THIS link advances.
+    dB2 = _build_mpas_driver(str(tmp_path / "chain2"), TWO_STEPS_DAYS)
+    step, day = dB2.load_checkpoint(ckpt)
+    assert dB2.run(start_step=step, start_day=day) == "COMPLETED"
+
+    for name, a, b in (
+        ("T", dA.state.T.data, dB2.state.T.data),
+        ("u", dA.state.u.data, dB2.state.u.data),
+        ("p_s", dA.state.p_s.data, dB2.state.p_s.data),
+    ):
+        np.testing.assert_array_equal(
+            np.asarray(a), np.asarray(b),
+            err_msg=f"{name}: chained restart != straight run (bitwise)",
+        )
+    psA = dA._mpas_phys_state
+    psB = dB2._mpas_phys_state
+    assert psA is not None and psB is not None
+    for f in PhysicsState._fields:
+        np.testing.assert_array_equal(
+            np.asarray(getattr(psA, f)), np.asarray(getattr(psB, f)),
+            err_msg=f"PhysicsState.{f}: chained restart != straight run",
+        )
+
+
+# ======================================================================
+# Cube compiled loop: 1+1-day chain == 2-day straight run, bitwise
+# ======================================================================
+
+def _build_cube_driver(tmpdir: str, days: float) -> ModelDriver:
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=10),
+        dycore=DycoreConfig(dt=300.0),
+        # Uniform cadence on every run (see the scheduler pins): 1-day
+        # checkpoints ⇒ 288-step segments; the restart lands exactly on
+        # the segment boundary so per-segment forcing aligns.
+        output=OutputConfig(output_dir="", diag_days=1, checkpoint_days=1),
+        days=days, dataset="analytical", radiation="gray",
+        rad_update_steps=2,
+        convection="none", turbulence="tke", precision="fp64",
+    )
+    d = ModelDriver(cfg, output_dir=tmpdir)
+    d.setup()
+    return d
+
+
+@pytest.mark.slow
+def test_cube_compiled_bitexact_restart_continuation(tmp_path):
+    """Compiled cube chain (1+1 day) == straight 2-day run, BITWISE.
+
+    Fails pre-port with ~4e-3 K divergence: the restarted run's
+    segment forcing ran a full day ahead (START_DAY double-count) while
+    the tke carry itself round-tripped 0.0.
+    """
+    dA = _build_cube_driver(str(tmp_path / "straight"), days=2.0)
+    assert dA.run() == "COMPLETED"
+
+    outB = str(tmp_path / "chain1")
+    dB = _build_cube_driver(outB, days=1.0)
+    assert dB.run() == "COMPLETED"
+    ckpt = sorted(glob.glob(os.path.join(outB, "checkpoint_day_*.npz")))[-1]
+    dB2 = _build_cube_driver(str(tmp_path / "chain2"), days=2.0)
+    step, day = dB2.load_checkpoint(ckpt)
+    assert step == 288, f"checkpoint not on the segment boundary: {step}"
+    assert dB2.run(start_step=step, start_day=day) == "COMPLETED"
+
+    comparisons = [
+        ("T", dA.state.T.data, dB2.state.T.data),
+        ("u", dA.state.u.data, dB2.state.u.data),
+        ("v", dA.state.v.data, dB2.state.v.data),
+        ("p_s", dA.state.p_s.data, dB2.state.p_s.data),
+        ("q_v", dA.q_v, dB2.q_v),
+        ("tke", dA._carry_aux["tke"], dB2._carry_aux["tke"]),
+    ]
+    for name, a, b in comparisons:
+        np.testing.assert_array_equal(
+            np.asarray(a), np.asarray(b),
+            err_msg=f"{name}: chained compiled restart != straight run "
+                    "(bitwise)",
+        )
+
+
+# ======================================================================
+# start_day convention disambiguation
+# ======================================================================
+
+def test_start_day_convention_disambiguation(tmp_path):
+    """Only the load_checkpoint convention is epoch-normalized.
+
+    A caller passing back EXACTLY what load_checkpoint returned gets the
+    checkpoint-day → epoch normalization (production restart paths); a
+    caller passing its own (e.g. epoch) start_day with start_step>0
+    keeps the legacy epoch semantics unchanged — never silently shift
+    epoch-passing callers (codex finding from the original review on
+    fix/persist-physics).
+    """
+    d = _build_cube_driver(str(tmp_path / "conv"), days=2.0)
+    # No checkpoint loaded: epoch semantics preserved verbatim.
+    ctx = d._prepare_run_context(288, 0.0, restore_carry=False)
+    assert ctx["START_DAY"] == 0.0
+    ctx = d._prepare_run_context(288, 5.0, restore_carry=False)
+    assert ctx["START_DAY"] == 5.0
+    # Simulate the load_checkpoint convention: matching (step, day) hint.
+    d._loaded_checkpoint_step_day = (288, 1.0)
+    ctx = d._prepare_run_context(288, 1.0, restore_carry=False)
+    assert ctx["START_DAY"] == 0.0  # 1.0 - 288*300/86400
+    # A non-matching day still means epoch.
+    ctx = d._prepare_run_context(288, 2.0, restore_carry=False)
+    assert ctx["START_DAY"] == 2.0
