@@ -1,6 +1,6 @@
 """Unit tests for CLUBB skewness diagnostics (now in ``clubb.py``).
 
-Part of the fuller CLUBB port — see ``PORT_CLUBB.md``.
+Part of the fuller CLUBB port — see ``docs/md_files/clubb.md``.
 """
 
 from __future__ import annotations

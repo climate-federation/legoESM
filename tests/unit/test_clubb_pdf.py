@@ -4,7 +4,7 @@ The ADG1 double-Gaussian must reproduce the input moments exactly — these are
 machine-precision analytic oracles (mean, variance, covariance, skewness). Plus
 derived-parameter values and a live bit-exact parity vs the CLUBB-JAX reference.
 
-Part of the fuller CLUBB port — see ``PORT_CLUBB.md``.
+Part of the fuller CLUBB port — see ``docs/md_files/clubb.md``.
 """
 
 from __future__ import annotations

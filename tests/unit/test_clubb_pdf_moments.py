@@ -2,7 +2,7 @@
 
 Bit-exact parity vs the CLUBB-JAX reference (the pure moment integrals have no
 constants; the buoyancy flux is constant-patched), committed golden fixtures for
-CI, and analytic non-negativity of even moments. See ``PORT_CLUBB.md``.
+CI, and analytic non-negativity of even moments. See ``docs/md_files/clubb.md``.
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@
 Currently covers ``advance_windm_edsclrm`` (the CAM ``l_predict_upwp_vpwp=False``
 u/v eddy-diffusion advance): a committed golden + live bit-exact parity vs the
 CLUBB-JAX reference, plus physical sanity (steady state, flux clipping) and
-AD/JIT. See ``PORT_CLUBB.md``.
+AD/JIT. See ``docs/md_files/clubb.md``.
 """
 
 from __future__ import annotations
