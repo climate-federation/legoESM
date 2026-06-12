@@ -266,10 +266,10 @@ hydrology parameters.
 > `multilayer_canopy_adapter.py` / `multilayer_canopy_config.py`. The CLM-ML
 > path is the single adapter `canopy/clm_ml_interface.py` (`origin/aya/land`)
 > against the external optional `clm_ml_jax` package. The only **new** module
-> the live plan still calls for is the scheme-agnostic **M5 loader**
-> `src/legoesm/land/global_surface_data.py` (see §8.2 and revised §10/M5).
-> Retained below for the adapter/PFT/config design reasoning, which still
-> informs the loader's per-scheme mappers.
+> the live plan still calls for is the **M5 geophysical-boundary-data loader**
+> `src/legoesm/land/global_surface_data.py` (see revised §10/M5) — soil
+> properties, surface-type fractions, vegetation state, and gridcell area; not
+> model parameters. Retained below for the adapter/config design reasoning.
 
 ### Vendored subpackage
 
@@ -646,31 +646,60 @@ Both done, independently, by the merged refactor and by `aya/land`:
   are not yet reconciled on one line; pick the AMIP-v1 scheme and ensure the
   three-way dispatch (Slab / two-leaf / CLM-ML) coexists where AMIP runs.
 
-### M5 — Global surface-data loader (scheme-agnostic, tile-ready) ◄ **NEXT**
-This is now the critical path. **Design directive (locked 2026-06-12): the
-loader is surface-scheme-agnostic.** It loads geophysical fields and maps them
-to the grid; it does *not* know or assume which scheme consumes them.
-- `src/legoesm/land/global_surface_data.py` per §8.2.
-- Load and regrid to the model grid:
-  - `(npft, ncol)` PFT fractions (CLM5 surfdata `PCT_NAT_PFT` / `PCT_CFT`)
-  - `(12, npft, ncol)` monthly LAI (CLM5 `MONTHLY_LAI`; MODIS MOD15A2H fallback)
-  - `(ncol,)` VIS + NIR **background (soil/snow-free) albedo** — drives Slab's
-    background term *and* the canopy `ALB_VIS`/`ALB_NIR` inputs
-  - `(npft, ncol)` canopy height (htop/hbot) + SAI
-- **Scheme-agnostic output contract.** The loader returns a single
-  `GlobalSurfaceData` container of raw geophysical fields. A *separate*, thin,
-  per-scheme mapper turns it into that scheme's params:
-  - Slab → `land_albedo` / background-albedo override
-  - DifferBESS two-leaf → `CanopyLandParams` (`ALB_VIS`, `ALB_NIR`, `LAI`,
-    `CI`, PFT→Vcmax25/canopy-height tables)
-  - CLM-ML → `LandSurfaceParams` canopy fields (LAI, SAI, htop, hbot)
-  No scheme-specific assumptions live in the loader itself.
-- `dominant_pft_collapse()` stays the *only* v1-only helper; everything
-  upstream preserves the PFT axis (§10a).
-- LMIP seasonal-cycle tests (Tier 2 in §9) at Amazon + Boreal Canada, run for
-  **each available scheme** to prove the loaded data drives all of them.
-- **Validation:** loader regression tests (regrid conservation, PFT-fraction
-  sums, LAI seasonal range) + tropical/boreal seasonal-cycle pass.
+### M5 — Global surface-data loader (geophysical boundary data) ◄ **NEXT**
+This is the critical path. **Scope correction (locked 2026-06-12): the loader
+provides geophysical BOUNDARY DATA, not model parameters.** It reads external
+NetCDF, regrids every field to the model grid **once** (host-side, weights
+cached), and assembles a single `GlobalSurfaceData` container. It does *not*
+derive `CanopyLandParams`/`LandSurfaceParams`/Vcmax25/albedo — those are
+downstream concerns (see "Downstream wiring" below). Three data categories:
+
+- **Static soil properties** (per model soil layer): `sand_frac`, `clay_frac`,
+  `organic`, `bulk_density` `(ncol, nlevsoi)`; `soil_color` `(ncol,)`.
+- **Dynamic surface-type fractions** (ANNUAL transient land-use): `f_land`,
+  `f_lake`, `f_glacier` `(nyear, ncol)` and within-land `pft_frac`
+  `(nyear, ncol, npft)`. PFT axis preserved (§10a). Land/lake/glacier only;
+  urban/wetland deferred.
+- **Dynamic vegetation state** (MONTHLY climatology): `lai_monthly`,
+  `sai_monthly`, `htop_monthly`, `hbot_monthly` `(12, ncol, npft)`.
+- **Static gridcell area**: `cell_area` `(ncol,)` [m²] (loaded for
+  source-consistency; `grid.grid_area` already provides the metric area, so
+  land area = `cell_area × f_land`).
+
+**Two time axes.** Annual transient cover fractions + monthly vegetation
+climatology → loader exposes `interp_annual(...)` and `interp_monthly(...)`
+(cheap, JAX-traceable, called per coupling step).
+
+- `src/legoesm/land/global_surface_data.py`:
+  `GlobalSurfaceDataConfig` (paths + surfdata var names + presets, mirrors
+  `AMIPForcingConfig`), `GlobalSurfaceData` (the container above),
+  `load_global_surface_data(config, grid)`, `interp_annual`, `interp_monthly`,
+  `dominant_pft_collapse` (the *only* v1-only helper, §10a),
+  `get_surfdata_preset(name)` (raise `ValueError` on unknown).
+- **Regrid policy.** Continuous fields (soil, height, LAI) → `regrid_scalar`
+  with cached weights. Cover fractions → conservative path **when the model
+  grid is lat-lon**; otherwise KDTree/IDW `regrid_scalar` + **per-cell
+  renormalize** so `f_land+f_lake+f_glacier ≤ 1` and PFT fractions sum to 1
+  (locally exact partition-of-unity; slightly non-conservative globally —
+  `compute_overlap_weights` is lat-lon→lat-lon only and cannot target the
+  cubed-sphere).
+- **Soil vertical mapping.** Surfdata soil layers → model `n_soil_layers` via a
+  small depth remap helper (linear/nearest in depth; not the atmosphere
+  pressure→sigma interp).
+- **Validation:** loader regression tests — regrid weight-sum, per-cell
+  fraction partition-of-unity, PFT-sum-to-1, LAI seasonal range, soil-layer
+  count; round-trip on a small synthetic surfdata fixture.
+
+**Downstream wiring enabled by M5 (separate, clearly-scoped sibling tasks — NOT
+in the loader module):**
+- **Pedotransfer**: `sand/clay/organic/bulk_density` → per-layer
+  `theta_sat, psi_sat, b_ch, K_sat` for `SoilHydraulicsConfig` (currently
+  scalar loam) + Johansen thermal. NEW.
+- **Color → albedo**: `soil_color` → VIS/NIR background albedo lookup. NEW.
+- **Glacier tile**: extend `coupler.TileConfig`/`TileFractions` (land/lake
+  today) with `f_glacier` + a glacier surface tile.
+- **Scheme feed**: `pft_frac` + monthly `lai/sai/htop/hbot` → the active
+  surface scheme (slab / two-leaf / CLM-ML).
 
 #### M5 — Existing infrastructure to reuse
 
@@ -686,12 +715,14 @@ bulk of the loader. Reuse, ranked by relevance:
    `era5_to_state.py` calls under the hood. Continuous fields (background
    albedo, canopy height) go through `regrid_scalar` with cached weights.
 
-2. **`grids/conservative_regrid.py` — for fractional fields (required for PFT).**
+2. **`grids/conservative_regrid.py` — for cover fractions (lat-lon target only).**
    `compute_overlap_weights` + `apply_conservative_regrid` do area-conserving
-   regridding. **PFT cover fractions** (must stay in [0,1] and sum to 1 per
-   cell) and area-weighted LAI must use this — bilinear/nearest violates the
-   partition-of-unity. Design rule for M5: continuous fields → (1); fractional
-   cover → conservative regrid here.
+   regridding. **Surface-type cover fractions** (`f_land/f_lake/f_glacier`,
+   `pft_frac` — must stay in [0,1] and partition correctly) want this — but it
+   is **lat-lon→lat-lon only** and cannot target cubed-sphere. Rule for M5:
+   conservative path when the model grid is lat-lon; else KDTree/IDW
+   `regrid_scalar` (1) + per-cell renormalize. Continuous soil/veg fields
+   always use (1).
 
 3. **`forcing/amip.py` — structural template + time interpolation.**
    The closest existing analog: loads *monthly* SST/sea-ice NetCDF, regrids to
@@ -721,16 +752,19 @@ bulk of the loader. Reuse, ranked by relevance:
    interp is **not** relevant to 2D surface fields; only the horizontal
    weight-caching is.
 
-6. **`land/param_providers.py` — home for the per-scheme mappers.**
-   Already models per-cell PFT weights → land params. The scheme-agnostic →
-   scheme-specific mappers (GlobalSurfaceData → `CanopyLandParams` / slab albedo
-   / CLM-ML `LandSurfaceParams`) extend this module rather than adding new files.
+6. **`coupler/tile_fractions.py` — fraction consumer (downstream of M5).**
+   `TileConfig(f_land, f_lake)` + `compute_tile_fractions` already blend
+   land/lake/ocean/ice tiles. The loaded `f_land/f_lake/f_glacier` feed this —
+   extend with `f_glacier` + a glacier tile (sibling task, not the loader).
 
 **Genuinely new work (the ~20%):**
-- A **CLM5 surfdata reader** — variable names (`PCT_NAT_PFT`, `PCT_CFT`,
-  `MONTHLY_LAI`, `MONTHLY_HEIGHT_TOP`) and the **PFT axis** are surfdata-specific;
-  no existing loader carries a PFT dimension.
-- The **per-scheme mappers** (small, in `param_providers.py`).
+- A **CLM5 surfdata reader** — variable names (`PCT_SAND`, `PCT_CLAY`,
+  `PCT_NAT_PFT`, `PCT_LAKE`, `PCT_GLACIER`, `MONTHLY_LAI`, `MONTHLY_HEIGHT_TOP`),
+  the **PFT axis**, the **soil-layer axis**, and the **annual transient** axis
+  are surfdata-specific; no existing loader carries these dimensions.
+- **Soil-layer depth remap** (surfdata layers → model `n_soil_layers`).
+- The **downstream consumers** (pedotransfer, color→albedo, glacier tile) —
+  separate sibling tasks, NOT in the loader module.
 - A **background VIS/NIR albedo** source (CLM5 `soil_color` → albedo lookup, or
   a MODIS white/black-sky product) — no existing loader pulls spectral albedo.
 
@@ -744,13 +778,16 @@ masked field).
 
 ### M6 — AMIP wiring + scheme selection + coupled spin-up ◄ **after M5**
 - `scripts/run_amip.py` gains a `--land-surface-scheme {slab,two_leaf,clm_ml}`
-  flag; the loaded `GlobalSurfaceData` feeds the selected scheme via its mapper.
+  flag. The loaded `GlobalSurfaceData` feeds: soil props → pedotransfer →
+  soil hydraulics/thermal; `f_land/f_lake/f_glacier` → `TileConfig`;
+  `pft_frac` + monthly `lai/sai/h*` → the selected scheme.
   Default = `two_leaf` (in-tree, no external dep); `slab` stays the fallback;
   `clm_ml` available when the `[canopy]` extra is installed.
-- Thread `lai(t)` (monthly, interpolated) through the coupler step.
+- Thread `interp_annual(fractions, year)` + `interp_monthly(lai, doy)` through
+  the coupler step.
 - Replace the current slab-land `dynamic_albedo=False` path so albedo comes
-  from loaded background albedo + snow feedback + (for canopy) prognostic
-  canopy albedo.
+  from `soil_color`-derived background albedo + snow feedback + (for canopy)
+  prognostic canopy albedo.
 - Cold-start `MultiLayerLandState` (soil + canopy) per §8.1.
 - 20-yr coupled spin-up with sparse monthly diagnostics (drift monitoring).
 - Coupler owns tile aggregation (no-op `ntile=1` in v1).
