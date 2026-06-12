@@ -1,4 +1,4 @@
-"""Unit tests for the CLUBB moment advances (``clubb_moments.py``).
+"""Unit tests for the CLUBB moment advances (now in ``clubb.py``).
 
 Currently covers ``advance_windm_edsclrm`` (the CAM ``l_predict_upwp_vpwp=False``
 u/v eddy-diffusion advance): a committed golden + live bit-exact parity vs the
@@ -21,7 +21,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
-from legoesm.atmosphere.physics.turbulence.clubb_moments import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     advance_windm_edsclrm,
     advance_xp2_xpyp,
     calc_up2_vp2_lhs,

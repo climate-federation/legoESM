@@ -18,10 +18,10 @@ happens after the source consolidation settles.
 |---|--------|-----|------|--------|
 | 1 | `clubb_diagnostic.py` | 105 | absorb (sec. 1) | ✅ C1 (iter 1) |
 | 2 | `clubb_core.py` | 443 | absorb (sec. 2) | ✅ C1 (iter 1) |
-| 3 | `clubb_moments.py` | 885 | absorb | — |
+| 3 | `clubb_moments.py` | 885 | absorb | ✅ C3 (iter 3, sec. 2) |
 | 4 | `clubb_wp23.py` | 720 | absorb | ✅ C2 (iter 2, sec. 3) |
 | 5 | `clubb_xm_wpxp.py` | 431 | absorb | ✅ C2 (iter 2, sec. 4) |
-| 6 | `clubb_mfl.py` | 308 | absorb | — |
+| 6 | `clubb_mfl.py` | 308 | absorb | ✅ C3 (iter 3, sec. 5) |
 | 7 | `clubb_pdf_moments.py` | 283 | absorb | — |
 | 8 | `clubb_pdf.py` | 368 | absorb | — |
 | 9 | `clubb_fill_holes.py` | 201 | absorb | — |
@@ -59,6 +59,18 @@ happens after the source consolidation settles.
   `git stash`/`pop` during the ruff-baseline check unstaged them; explicit-path
   `git add` missed deleted paths) — amended into C1. Lesson: after stash/pop,
   re-verify staged deletions with `git status` before committing.
+- **C3 (iter 3):** absorbed `clubb_moments.py` + `clubb_mfl.py` (1193 LOC) into
+  `clubb.py` as sections 2 (moment-advance building blocks + xp2_xpyp/windm
+  advances) and 5 (monotonic flux limiter), 8 sections total (3376 lines);
+  deduped the byte-identical `_EPS = 1.0e-10`; mfl's NaN-propagating local
+  `_safe_sqrt` kept local (intentional variant). Deleted both modules;
+  re-pointed test_clubb_moments/test_clubb_mfl + function-scope imports in
+  test_clubb_xm_wpxp/test_clubb_wp23; contracts entries removed. Documented
+  the intentional no-`__all__` policy in the clubb.py docstring (public API =
+  the 4 scheme entries; machinery stays importable for parity tests). Green:
+  215 tests (moments/mfl/wp23/xm_wpxp/core + contracts); ruff clean; codex
+  adversarial review → request-changes (3 doc nits + __all__ decision) →
+  fixed → approve.
 
 
 **Previous Goal:** `packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py`

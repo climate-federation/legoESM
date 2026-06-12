@@ -537,7 +537,7 @@ def test_term_ma_zt_lhs_flows_through_wp23_lhs_correctly():
     interleaved [wp2=0, wp3=field] vector reproduces the direct tridiagonal
     action of term_ma_zt_lhs_upwind on wp3 — proving the band mapping
     (super->band0/super2, sub->band4/sub2) end to end (codex review)."""
-    from legoesm.atmosphere.physics.turbulence.clubb_moments import term_ma_zt_lhs_upwind
+    from legoesm.atmosphere.physics.turbulence.clubb import term_ma_zt_lhs_upwind
     gr, ng, nzm = _gr(stretched=True)
     nzt = nzm - 1
     ndim = 2 * nzm - 1

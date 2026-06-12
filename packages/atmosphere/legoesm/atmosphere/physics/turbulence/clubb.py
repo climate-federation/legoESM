@@ -11,16 +11,21 @@ CAM-default model-flag values are recorded as comments at the end of the file.
 Table of contents (sections, in order)
 --------------------------------------
   1. Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2. Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  2. Moment-advance building blocks + the xp2_xpyp / windm advances
+     (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
+     ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
+  3. Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
      ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  3. Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  4. Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
      ``clip_skewness``)
-  4. Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  5. Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+     ``calc_turb_adv_range``)
+  6. Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
      coupling + ``solve_xm_wpxp_with_single_lhs``)
-  5. Core orchestration (``compute_clubb_diagnostics`` /
+  7. Core orchestration (``compute_clubb_diagnostics`` /
      ``compute_pdf_closure`` / ``advance_clubb_core`` + the
      ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  6. Scheme entries (``clubb_turbulence`` diagnostic default /
+  8. Scheme entries (``clubb_turbulence`` diagnostic default /
      ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
      ``integrate_clubb_column`` SCM driver)
 
@@ -45,6 +50,12 @@ Phasing (the scheme is wired in and runnable now; fidelity deepens per phase):
 The ``TurbulenceOutput`` contract carries no ``cloud_fraction`` field (see the
 clubb_lite docstring), so the PDF cloud fraction is computed and exposed only
 through diagnostics for now; the eddy-diffusion tendencies are the live output.
+
+No ``__all__`` is declared (intentional): the public scheme API is the four
+entries in the final section; everything else is closure machinery kept
+importable for the per-piece parity/oracle unit tests, which address symbols
+explicitly. (The absorbed helper modules' ``__all__`` lists were dropped with
+the modules.)
 """
 
 from __future__ import annotations
@@ -81,28 +92,9 @@ from legoesm.atmosphere.physics.turbulence.clubb_helpers import (
     compute_sigma_sqd_w,
     safe_sqrt,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_mfl import (
-    MFL_RTM,
-    MFL_THLM,
-    MFL_UM,
-    MFL_VM,
-    calc_turb_adv_range,
-    monotonic_turbulent_flux_limit,
-)
 from legoesm.atmosphere.physics.turbulence.clubb_mixing_length import (
     compute_mixing_length,
     set_Lscale_max,
-)
-from legoesm.atmosphere.physics.turbulence.clubb_moments import (
-    advance_windm_edsclrm,
-    advance_xp2_xpyp,
-    clip_covar,
-    clip_covars_denom,
-    clip_variance,
-    diffusion_zm_lhs,
-    diffusion_zt_lhs,
-    term_ma_zm_lhs,
-    term_ma_zt_lhs_upwind,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_pdf import (
     ADG1_pdf_driver,
@@ -119,7 +111,10 @@ from legoesm.atmosphere.physics.turbulence.clubb_skewness import (
     compute_gamma_Skw,
     compute_skewness_diagnostics,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_solve import penta_solve
+from legoesm.atmosphere.physics.turbulence.clubb_solve import (
+    penta_solve,
+    tridiag_solve,
+)
 from legoesm.atmosphere.physics.turbulence.clubb_tau import (
     compute_tau_family,
     compute_tke,
@@ -227,7 +222,843 @@ def diagnose_cloud_and_buoyancy(thlm, rtm, wp2, exner, p_in_Pa, thv_ds, Kh, Lsca
 
 
 # ===========================================================================
-# 2. Skewness-dependent C-coefficient family (CAM-default tree)
+# 2. Moment-advance building blocks + xp2_xpyp / windm advances
+# ===========================================================================
+# The shared implicit-advance machinery (diffusion/mean-advection LHS
+# builders, Cauchy-Schwarz clipping family) plus two of the four CAM-order
+# advances: ``advance_xp2_xpyp`` (rtp2/thlp2/rtpthlp/up2/vp2 — per-moment C2
+# dissipation, CAM's 3 distinct C2 values, UPWIND turbulent advection) and
+# ``advance_windm_edsclrm`` (um/vm eddy-diffusion advance with implicit
+# surface momentum flux + diagnosed upwp/vpwp; CAM
+# ``l_predict_upwp_vpwp = .false.``). Round-off parity-tested vs CLUBB-JAX.
+
+_MAX_MAG_CORRELATION = 0.99   # Cauchy-Schwarz correlation bound (constants_clubb)
+_MAX_MAG_CORRELATION_FLUX = 0.99  # flux correlation bound (constants_clubb)
+_ZERO_THRESHOLD = 0.0
+_ONE_THIRD = 1.0 / 3.0
+_GAMMA_OVER_IMPLICIT_TS = 1.5   # over-implicit weight (constants_clubb)
+
+
+
+
+# ---------------------------------------------------------------------------
+# LHS band builders
+# ---------------------------------------------------------------------------
+
+def diffusion_zt_lhs(K_zm, nu, invrs_rho_ds_zt, rho_ds_zm, gr: CLUBBGrid):
+    """Tridiagonal LHS for implicit eddy diffusion of a zt-level variable.
+
+    Faithful port of ``diffusion.F90:diffusion_zt_lhs`` (non-upwind path):
+    discretizes ``d/dz[(K_zm + nu) d(var_zt)/dz]`` at zt levels with zero-flux
+    boundaries. Returns ``(3, ngrdcol, nzt)`` = ``[super, main, sub]``.
+    """
+    K_zm_nu = K_zm + nu[:, None]
+    invrs_dzt = gr.invrs_dzt
+    invrs_dzm = gr.invrs_dzm
+
+    common_bot = (invrs_dzt[:, :1] * invrs_rho_ds_zt[:, :1]
+                  * K_zm_nu[:, 1:2] * rho_ds_zm[:, 1:2] * invrs_dzm[:, 1:2])
+    super_bot, main_bot, sub_bot = -common_bot, common_bot, jnp.zeros_like(common_bot)
+
+    scale_int = invrs_dzt[:, 1:-1] * invrs_rho_ds_zt[:, 1:-1]
+    super_int = -scale_int * K_zm_nu[:, 2:-1] * rho_ds_zm[:, 2:-1] * invrs_dzm[:, 2:-1]
+    sub_int = -scale_int * K_zm_nu[:, 1:-2] * rho_ds_zm[:, 1:-2] * invrs_dzm[:, 1:-2]
+    main_int = -(super_int + sub_int)
+
+    common_top = (invrs_dzt[:, -1:] * invrs_rho_ds_zt[:, -1:]
+                  * K_zm_nu[:, -2:-1] * rho_ds_zm[:, -2:-1] * invrs_dzm[:, -2:-1])
+    super_top, sub_top, main_top = jnp.zeros_like(common_top), -common_top, common_top
+
+    superdiag = jnp.concatenate([super_bot, super_int, super_top], axis=1)
+    maindiag = jnp.concatenate([main_bot, main_int, main_top], axis=1)
+    subdiag = jnp.concatenate([sub_bot, sub_int, sub_top], axis=1)
+    return jnp.stack([superdiag, maindiag, subdiag], axis=0)
+
+
+def diffusion_zm_lhs(K_zt, nu, invrs_rho_ds_zm, rho_ds_zt, gr: CLUBBGrid):
+    """Tridiagonal LHS for implicit eddy diffusion of a zm-level variable.
+
+    Faithful port of ``diffusion.F90:diffusion_zm_lhs`` (non-upwind): discretizes
+    ``d/dz[(K_zt + nu) d(var_zm)/dz]`` at zm levels with zero-flux boundaries.
+    Returns ``(3, ngrdcol, nzm)`` = ``[super, main, sub]``. (The k=0 row is not
+    used by the solver, per the Fortran note, but is filled for shape.)
+    """
+    K_zt_nu = K_zt + nu[:, None]
+    invrs_dzm = gr.invrs_dzm
+    invrs_dzt = gr.invrs_dzt
+
+    common_bot = (invrs_dzm[:, :1] * invrs_rho_ds_zm[:, :1]
+                  * K_zt_nu[:, :1] * rho_ds_zt[:, :1] * invrs_dzt[:, :1])
+    super_bot, main_bot, sub_bot = -common_bot, common_bot, jnp.zeros_like(common_bot)
+
+    scale_int = invrs_dzm[:, 1:-1] * invrs_rho_ds_zm[:, 1:-1]
+    super_int = -scale_int * K_zt_nu[:, 1:] * rho_ds_zt[:, 1:] * invrs_dzt[:, 1:]
+    sub_int = -scale_int * K_zt_nu[:, :-1] * rho_ds_zt[:, :-1] * invrs_dzt[:, :-1]
+    main_int = -(super_int + sub_int)
+
+    common_top = (invrs_dzm[:, -1:] * invrs_rho_ds_zm[:, -1:]
+                  * K_zt_nu[:, -1:] * rho_ds_zt[:, -1:] * invrs_dzt[:, -1:])
+    super_top, sub_top, main_top = jnp.zeros_like(common_top), -common_top, common_top
+
+    superdiag = jnp.concatenate([super_bot, super_int, super_top], axis=1)
+    maindiag = jnp.concatenate([main_bot, main_int, main_top], axis=1)
+    subdiag = jnp.concatenate([sub_bot, sub_int, sub_top], axis=1)
+    return jnp.stack([superdiag, maindiag, subdiag], axis=0)
+
+
+def term_ma_zt_lhs_upwind(wm_zt, gr: CLUBBGrid):
+    """Upwind mean-advection LHS for a zt-level variable (CAM ``l_upwind_xm_ma``).
+
+    Faithful port of the upwind branch of ``mean_adv.F90:term_ma_zt_lhs``
+    (ascending grid). ``(3, ngrdcol, nzt)`` = ``[super, main, sub]``. The
+    centered branch is out of the CAM-default tree and not ported.
+    """
+    ngrdcol, nzt = wm_zt.shape
+    invrs_dzm = gr.invrs_dzm
+
+    wm_int = wm_zt[:, 1:-1]
+    idzm_k = invrs_dzm[:, 1:-2]
+    idzm_kp1 = invrs_dzm[:, 2:-1]
+    mask = wm_int >= 0.0
+    sup_int = jnp.where(mask, 0.0, wm_int * idzm_kp1)
+    mid_int = jnp.where(mask, wm_int * idzm_k, -wm_int * idzm_kp1)
+    sub_int = jnp.where(mask, -wm_int * idzm_k, 0.0)
+
+    # Lower boundary k=0 (Fortran k=1): uses invrs_dzm[1]; the upward-wind
+    # contribution is dropped (zero-flux from below), matching mean_adv.F90.
+    wm0 = wm_zt[:, 0]
+    m0 = wm0 >= 0.0
+    idzm_2 = invrs_dzm[:, 1]
+    sup0 = jnp.where(m0, 0.0, wm0 * idzm_2)
+    mid0 = jnp.where(m0, 0.0, -wm0 * idzm_2)
+    sub0 = jnp.zeros_like(wm0)
+
+    # Upper boundary k=nzt-1 (Fortran k=nzt): uses invrs_dzm[nzm-2]=invrs_dzm[nzt-1];
+    # the downward-wind contribution is dropped (zero-flux from above).
+    wmt = wm_zt[:, -1]
+    mt = wmt >= 0.0
+    idzm_top = invrs_dzm[:, nzt - 1]
+    supt = jnp.zeros_like(wmt)
+    midt = jnp.where(mt, wmt * idzm_top, 0.0)
+    subt = jnp.where(mt, -wmt * idzm_top, 0.0)
+
+    sup = jnp.concatenate([sup0[:, None], sup_int, supt[:, None]], axis=1)
+    mid = jnp.concatenate([mid0[:, None], mid_int, midt[:, None]], axis=1)
+    sub = jnp.concatenate([sub0[:, None], sub_int, subt[:, None]], axis=1)
+    return jnp.stack([sup, mid, sub], axis=0)
+
+
+def term_ma_zm_lhs(wm_zm, gr: CLUBBGrid):
+    """Centered mean-advection LHS for a zm-level variable (``term_ma_zm_lhs``).
+
+    Faithful port of ``mean_adv.F90:term_ma_zm_lhs``: discretizes
+    ``w·d(var_zm)/dz`` implicitly at interior momentum levels with the
+    zm→zt interpolation weights. The xp2/xpyp moments live on zm, so their
+    mean advection always uses this centered form (the ``l_upwind_xm_ma`` flag
+    gates only the *zt*-level scalar/wind advance, not the zm-level moments).
+
+    The zm→zt weights are computed inline from the grid geometry — exactly
+    ``calc_zm2zt_weights`` (``grid_class.F90``), ascending grid (grid_dir=+1):
+
+      ``w_above[k] = (zt[k] - zm[k])   / (zm[k+1] - zm[k])``  (weight of zm[k]),
+      ``w_below[k] = (zm[k+1] - zt[k]) / (zm[k+1] - zm[k])``  (weight of zm[k+1]),
+
+    for ``k = 0 .. nzt-1``. On a uniform grid both are 1/2. Boundary rows
+    (k=0, k=nzm-1) are zero (fixed-value BCs applied by the assembler).
+    ``(3, ngrdcol, nzm)`` = ``[super, main, sub]``.
+    """
+    invrs_dzm = gr.invrs_dzm                       # (ng, nzm)
+    total_dist = (gr.zm[:, 1:] - gr.zm[:, :-1]) + 1.0e-30   # (ng, nzt)
+    w_above = (gr.zt - gr.zm[:, :-1]) / total_dist  # M_ABOVE, (ng, nzt)
+    w_below = (gr.zm[:, 1:] - gr.zt) / total_dist   # M_BELOW, (ng, nzt)
+
+    # Interior momentum levels k = 1 .. nzm-2 (Fortran k = 2 .. nzm-1).
+    fac = wm_zm[:, 1:-1] * invrs_dzm[:, 1:-1]       # (ng, nzm-2)
+    super_int = fac * w_above[:, 1:]                # weights_zm2zt[:, 1:, M_ABOVE]
+    main_int = fac * (w_below[:, 1:] - w_above[:, :-1])
+    sub_int = -fac * w_below[:, :-1]                # weights_zm2zt[:, :-1, M_BELOW]
+
+    zeros_bnd = jnp.zeros((wm_zm.shape[0], 1), dtype=wm_zm.dtype)
+    superdiag = jnp.concatenate([zeros_bnd, super_int, zeros_bnd], axis=1)
+    maindiag = jnp.concatenate([zeros_bnd, main_int, zeros_bnd], axis=1)
+    subdiag = jnp.concatenate([zeros_bnd, sub_int, zeros_bnd], axis=1)
+    return jnp.stack([superdiag, maindiag, subdiag], axis=0)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def calc_xpwp(Km_zm, xm, invrs_dzm):
+    """Down-gradient eddy flux ``x'w'`` on momentum levels (``calc_xpwp``).
+
+    ``xpwp[k] = Km_zm[k]*invrs_dzm[k]*(xm[k]-xm[k-1])`` for interior k; top and
+    bottom levels are zero. ``Km_zm``/``invrs_dzm`` are ``(ngrdcol, nzm)``;
+    ``xm`` is ``(ngrdcol, nzt)``.
+    """
+    ng, nzm = Km_zm.shape
+    interior = Km_zm[:, 1:nzm - 1] * invrs_dzm[:, 1:nzm - 1] * (xm[:, 1:] - xm[:, :-1])
+    return jnp.zeros((ng, nzm), dtype=xm.dtype).at[:, 1:nzm - 1].set(interior)
+
+
+def clip_covar(wpxp, wp2, xp2, max_mag_corr=_MAX_MAG_CORRELATION):
+    """Cauchy-Schwarz clip of a covariance after the solve (``clip_covar``).
+
+    Clips ``wpxp`` to ``±max_mag_corr·sqrt(wp2·xp2)`` at interior levels; the
+    top/bottom boundaries are left unchanged. ``safe_sqrt`` keeps the gradient
+    finite where a variance is zero (forward-identical, variances ≥ 0).
+    """
+    bound = max_mag_corr * safe_sqrt(wp2 * xp2)
+    clipped = jnp.clip(wpxp, -bound, bound)
+    clipped = clipped.at[:, 0].set(wpxp[:, 0])
+    clipped = clipped.at[:, -1].set(wpxp[:, -1])
+    return clipped
+
+
+def clip_covars_denom(wprtp, wpthlp, upwp, vpwp, wp2, rtp2, thlp2, up2, vp2,
+                      l_tke_aniso=True):
+    """Cauchy-Schwarz clip of the four w-fluxes after the solves (``clip_covars_denom``).
+
+    Clips ``wprtp``/``wpthlp`` against ``wp2``·rtp2/thlp2 with the flux
+    correlation bound, and the momentum fluxes ``upwp``/``vpwp`` against
+    ``wp2``·up2/vp2 (CAM ``l_tke_aniso = True``; the ``False`` branch clips
+    against ``wp2``·wp2) with the (default) correlation bound. Applied between the
+    advances in ``advance_clubb_core``. Returns ``(wprtp, wpthlp, upwp, vpwp)``.
+    """
+    wprtp_new = clip_covar(wprtp, wp2, rtp2, _MAX_MAG_CORRELATION_FLUX)
+    wpthlp_new = clip_covar(wpthlp, wp2, thlp2, _MAX_MAG_CORRELATION_FLUX)
+    if l_tke_aniso:
+        upwp_new = clip_covar(upwp, wp2, up2)
+        vpwp_new = clip_covar(vpwp, wp2, vp2)
+    else:
+        upwp_new = clip_covar(upwp, wp2, wp2)
+        vpwp_new = clip_covar(vpwp, wp2, wp2)
+    return wprtp_new, wpthlp_new, upwp_new, vpwp_new
+
+
+def compute_uv_tndcy(fcor, ug, vg, um, vm, um_forcing, vm_forcing):
+    """Coriolis + geostrophic + prescribed-forcing wind tendencies (``compute_uv_tndcy``).
+
+    ``d(um)/dt = -fcor·vg + fcor·vm + um_forcing``;
+    ``d(vm)/dt = +fcor·ug - fcor·um + vm_forcing``. ``fcor`` is ``(ngrdcol,)``.
+    """
+    f = fcor[:, None]
+    return (-f * vg + f * vm + um_forcing, f * ug - f * um + vm_forcing)
+
+
+def windm_edsclrm_rhs(lhs_diff, xm, xm_tndcy, dt):
+    """RHS of the um/vm tridiagonal solve (``windm_edsclrm_rhs``, implicit sfc flux).
+
+    ``rhs[k] = 0.5·explicit_diffusion[k] + xm_tndcy[k] + xm[k]/dt`` (no explicit
+    surface-flux term — it is implicit in the LHS).
+    """
+    invrs_dt = 1.0 / dt
+    rhs_bot = (0.5 * (-lhs_diff[1, :, 0] * xm[:, 0] - lhs_diff[0, :, 0] * xm[:, 1])
+               + xm_tndcy[:, 0] + invrs_dt * xm[:, 0])[:, None]
+    rhs_int = (0.5 * (-lhs_diff[2, :, 1:-1] * xm[:, :-2]
+                      - lhs_diff[1, :, 1:-1] * xm[:, 1:-1]
+                      - lhs_diff[0, :, 1:-1] * xm[:, 2:])
+               + xm_tndcy[:, 1:-1] + invrs_dt * xm[:, 1:-1])
+    rhs_top = (0.5 * (-lhs_diff[2, :, -1] * xm[:, -2] - lhs_diff[1, :, -1] * xm[:, -1])
+               + xm_tndcy[:, -1] + invrs_dt * xm[:, -1])[:, None]
+    return jnp.concatenate([rhs_bot, rhs_int, rhs_top], axis=1)
+
+
+def windm_edsclrm_lhs(lhs_diff, lhs_ma_zt, dt, invrs_rho_ds_zt, rho_ds_zm,
+                      u_star_sqd, wind_speed, gr: CLUBBGrid):
+    """Assemble the windm/edsclrm tridiagonal LHS (``windm_edsclrm_lhs``).
+
+    CN diffusion (0.5·lhs_diff) + 1/dt accumulation + mean advection (interior
+    only) + the implicit surface-momentum-flux term at the bottom level
+    (``l_imp_sfc_momentum_flux = .true.``). ``k_lb_zt = k_lb_zm = 0`` (ascending).
+    """
+    lhs = 0.5 * lhs_diff
+    lhs = lhs.at[1].add(1.0 / dt)
+    lhs = lhs.at[:, :, :-1].add(lhs_ma_zt[:, :, :-1])
+    sfc_term = (invrs_rho_ds_zt[:, 0] * gr.invrs_dzt[:, 0] * rho_ds_zm[:, 0]
+                * (u_star_sqd / wind_speed[:, 0]))
+    return lhs.at[1, :, 0].add(sfc_term)
+
+
+# ---------------------------------------------------------------------------
+# advance_windm_edsclrm
+# ---------------------------------------------------------------------------
+
+def advance_windm_edsclrm(um, vm, upwp, vpwp, wp2, up2, vp2, wm_zt, Kh_zm,
+                          ug, vg, um_forcing, vm_forcing,
+                          rho_ds_zm, rho_ds_zt, invrs_rho_ds_zt, fcor,
+                          c_K10, nu10, dt, gr: CLUBBGrid, l_tke_aniso=True):
+    """Advance um/vm (and the diagnostic upwp/vpwp) via eddy diffusion.
+
+    Faithful port of ``advance_windm_edsclrm`` for the CAM ``l_predict_upwp_vpwp
+    = .false.`` path (standalone, ascending grid, upwind MA, implicit surface
+    momentum flux). Two Crank-Nicholson half-steps update the momentum fluxes
+    around the implicit um/vm tridiagonal solve, then the fluxes are
+    Cauchy-Schwarz clipped (``l_tke_aniso`` selects up2/vp2 vs wp2).
+
+    Parameters (all ascending CLUBB grid)
+    ----------
+    um, vm, wm_zt, ug, vg, um_forcing, vm_forcing, rho_ds_zt, invrs_rho_ds_zt :
+        zt-level fields ``(ngrdcol, nzt)``.
+    upwp, vpwp, wp2, up2, vp2, Kh_zm, rho_ds_zm : zm-level fields ``(ngrdcol, nzm)``.
+    fcor : Coriolis parameter ``(ngrdcol,)``.
+    c_K10 : float
+        Momentum-diffusivity coefficient (``CLUBBParams.c_K10``; ``Km = c_K10·Kh``).
+    nu10 : float
+        Background momentum diffusivity (``CLUBBParams.nu10``).
+    dt : float
+        Time step [s].
+    l_tke_aniso : bool
+        CAM default True → clip upwp/vpwp against up2/vp2 (else against wp2).
+
+    Returns
+    -------
+    tuple of jax.Array
+        ``(um_new, vm_new, upwp_new, vpwp_new)``.
+    """
+    nzm = gr.zm.shape[1]
+    k_ub_zm = nzm - 1
+
+    Km_zm = Kh_zm * c_K10
+    Km_zm_p_nu10 = Km_zm + nu10
+
+    nu10_arr = jnp.full((um.shape[0],), nu10, dtype=um.dtype)
+    lhs_diff = diffusion_zt_lhs(Km_zm, nu10_arr, invrs_rho_ds_zt, rho_ds_zm, gr)
+    lhs_ma_zt = term_ma_zt_lhs_upwind(wm_zt, gr)
+
+    um_tndcy, vm_tndcy = compute_uv_tndcy(fcor, ug, vg, um, vm, um_forcing, vm_forcing)
+
+    # sqrt(max(s^2, eps^2)) is forward-identical to the reference's
+    # max(sqrt(s^2), eps) but AD-safe: it never differentiates through sqrt(0),
+    # so calm-wind columns (um=vm=0, which feed the implicit sfc-flux LHS term)
+    # keep finite gradients.
+    wind_speed = jnp.sqrt(jnp.maximum(um ** 2 + vm ** 2, _EPS ** 2))
+    u_star_sqd = safe_sqrt(upwp[:, 0] ** 2 + vpwp[:, 0] ** 2)
+
+    # First Crank-Nicholson half (explicit) for upwp/vpwp.
+    xpwp_u = calc_xpwp(Km_zm_p_nu10, um, gr.invrs_dzm)[:, 1:-1]
+    upwp_new = upwp.at[:, 1:-1].set(-0.5 * xpwp_u).at[:, k_ub_zm].set(0.0)
+    xpwp_v = calc_xpwp(Km_zm_p_nu10, vm, gr.invrs_dzm)[:, 1:-1]
+    vpwp_new = vpwp.at[:, 1:-1].set(-0.5 * xpwp_v).at[:, k_ub_zm].set(0.0)
+
+    lhs = windm_edsclrm_lhs(lhs_diff, lhs_ma_zt, dt, invrs_rho_ds_zt, rho_ds_zm,
+                            u_star_sqd, wind_speed, gr)
+    rhs_um = windm_edsclrm_rhs(lhs_diff, um, um_tndcy, dt)
+    rhs_vm = windm_edsclrm_rhs(lhs_diff, vm, vm_tndcy, dt)
+    um_new = tridiag_solve(lhs, rhs_um)
+    vm_new = tridiag_solve(lhs, rhs_vm)
+
+    # Second Crank-Nicholson half (implicit component) for upwp/vpwp.
+    xpwp_u_new = calc_xpwp(Km_zm_p_nu10, um_new, gr.invrs_dzm)[:, 1:-1]
+    xpwp_v_new = calc_xpwp(Km_zm_p_nu10, vm_new, gr.invrs_dzm)[:, 1:-1]
+    upwp_new = upwp_new.at[:, 1:-1].add(-0.5 * xpwp_u_new)
+    vpwp_new = vpwp_new.at[:, 1:-1].add(-0.5 * xpwp_v_new)
+
+    xp2_u = up2 if l_tke_aniso else wp2
+    xp2_v = vp2 if l_tke_aniso else wp2
+    upwp_new = clip_covar(upwp_new, wp2, xp2_u)
+    vpwp_new = clip_covar(vpwp_new, wp2, xp2_v)
+    return um_new, vm_new, upwp_new, vpwp_new
+
+
+# ---------------------------------------------------------------------------
+# advance_xp2_xpyp term builders (scalar/horizontal-velocity variance equations)
+# ---------------------------------------------------------------------------
+
+def term_dp1_lhs(Cn, invrs_tau_zm):
+    """Main-diagonal dissipation-term-1 coefficient for x_a'x_b' (``term_dp1_lhs``).
+
+    Implicit ``+(C_n/tau_zm)·x_a'x_b'(t+1)`` — main diagonal only, interior
+    levels; boundaries zero. ``Cn``/``invrs_tau_zm`` are ``(ngrdcol, nzm)``.
+    """
+    interior = Cn[:, 1:-1] * invrs_tau_zm[:, 1:-1]
+    zeros_bnd = jnp.zeros((Cn.shape[0], 1), dtype=Cn.dtype)
+    return jnp.concatenate([zeros_bnd, interior, zeros_bnd], axis=1)
+
+
+def term_dp1_rhs(Cn, invrs_tau_zm, threshold):
+    """Explicit dissipation-term-1 RHS for x'y' (``term_dp1_rhs``), all levels.
+
+    The explicit part of ``-(C_n/tau_zm)·(x'y' - threshold)`` is
+    ``+(C_n/tau_zm)·threshold``.
+    """
+    return Cn * invrs_tau_zm * threshold
+
+
+def term_tp_rhs(xam, xbm, wpxap, wpxbp, invrs_dzm):
+    """Turbulent production of x_a'x_b' (explicit) on interior zm levels (``term_tp_rhs``).
+
+    ``rhs = -w'x_b'·d(x_am)/dz - w'x_a'·d(x_bm)/dz``. ``x_am``/``x_bm`` are zt
+    (nzt); returns the interior slice ``(ngrdcol, nzm-2)``.
+    """
+    return (-wpxbp[:, 1:-1] * invrs_dzm[:, 1:-1] * (xam[:, 1:] - xam[:, :-1])
+            - wpxap[:, 1:-1] * invrs_dzm[:, 1:-1] * (xbm[:, 1:] - xbm[:, :-1]))
+
+
+def term_pr1(C4, C14, xbp2, wp2, invrs_tau_C4_zm, invrs_tau_C14_zm, w_tol_sqd):
+    """Explicit pressure/dissipation term 1 for up2/vp2 (``term_pr1``), interior.
+
+    ``rhs = (1/3)C4(xbp2+wp2)/tau_C4 - (1/3)C14(xbp2+wp2)/tau_C14
+            + C14·w_tol²/tau_C14``; ``xbp2`` is the *other* horizontal variance.
+    Returns the interior slice ``(ngrdcol, nzm-2)``.
+    """
+    return (_ONE_THIRD * C4 * (xbp2[:, 1:-1] + wp2[:, 1:-1]) * invrs_tau_C4_zm[:, 1:-1]
+            - _ONE_THIRD * C14 * (xbp2[:, 1:-1] + wp2[:, 1:-1]) * invrs_tau_C14_zm[:, 1:-1]
+            + C14 * invrs_tau_C14_zm[:, 1:-1] * w_tol_sqd)
+
+
+def term_pr2(C_uu_shr, C_uu_buoy, thv_ds_zm, wpthvp, upwp, vpwp, um, vm, gr: CLUBBGrid):
+    """Explicit pressure term 2 (PR2) for up2/vp2 (``term_pr2``), interior, floored ≥0.
+
+    ``rhs = (2/3)[C_uu_buoy·(g/thv_ds)·w'thv' + C_uu_shr·(-u'w'·d(um)/dz
+            - v'w'·d(vm)/dz)]`` clamped to 0. Uses ``constants.g``. Returns the
+    interior slice ``(ngrdcol, nzm-2)``.
+    """
+    invrs_dzm = gr.invrs_dzm
+    du_dz = invrs_dzm[:, 1:-1] * (um[:, 1:] - um[:, :-1])
+    dv_dz = invrs_dzm[:, 1:-1] * (vm[:, 1:] - vm[:, :-1])
+    pr2 = (2.0 / 3.0) * (
+        C_uu_buoy * buoyancy_coefficient(thv_ds_zm[:, 1:-1]) * wpthvp[:, 1:-1]
+        + C_uu_shr * (-upwp[:, 1:-1] * du_dz - vpwp[:, 1:-1] * dv_dz))
+    return jnp.maximum(pr2, _ZERO_THRESHOLD)
+
+
+# ---------------------------------------------------------------------------
+# Turbulent advection of xp2/xpyp (CAM l_upwind_xpyp_ta = True; ascending grid)
+# ---------------------------------------------------------------------------
+# CAM uses the upwind (Godunov-style one-sided) turbulent-advection operator on
+# the ascending grid (grid_dir = +1). The centered branch (needs weights_zm2zt)
+# is out of the CAM-default tree and not ported.
+
+
+def _xpyp_ta_pdf_lhs_upwind(coef_zm, sgn, rho_ds_zm, invrs_rho_ds_zm, gr: CLUBBGrid):
+    """Upwind turbulent-advection LHS for xp2/xpyp (``xpyp_term_ta_pdf_lhs``).
+
+    One-sided stencil keyed on ``sgn`` (grid_dir=+1): ``(3, ngrdcol, nzm)`` =
+    ``[super, main, sub]``; boundaries zero.
+    """
+    invrs_dzt = gr.invrs_dzt
+    irho = invrs_rho_ds_zm[:, 1:-1]
+    s = sgn[:, 1:-1]
+    rho_k, coef_k = rho_ds_zm[:, 1:-1], coef_zm[:, 1:-1]
+    rho_km1, coef_km1 = rho_ds_zm[:, :-2], coef_zm[:, :-2]
+    rho_kp1, coef_kp1 = rho_ds_zm[:, 2:], coef_zm[:, 2:]
+    idzt_km1, idzt_k = invrs_dzt[:, :-1], invrs_dzt[:, 1:]
+    zint = jnp.zeros_like(rho_k)
+
+    sup_up = zint
+    main_up = irho * idzt_km1 * rho_k * coef_k
+    sub_up = -irho * idzt_km1 * rho_km1 * coef_km1
+    sup_dn = irho * idzt_k * rho_kp1 * coef_kp1
+    main_dn = -irho * idzt_k * rho_k * coef_k
+    sub_dn = zint
+    is_up = s > 0.0
+    super_int = jnp.where(is_up, sup_up, sup_dn)
+    main_int = jnp.where(is_up, main_up, main_dn)
+    sub_int = jnp.where(is_up, sub_up, sub_dn)
+
+    zb = jnp.zeros((rho_ds_zm.shape[0], 1), dtype=rho_ds_zm.dtype)
+    return jnp.stack([jnp.concatenate([zb, super_int, zb], axis=1),
+                      jnp.concatenate([zb, main_int, zb], axis=1),
+                      jnp.concatenate([zb, sub_int, zb], axis=1)], axis=0)
+
+
+def _xpyp_ta_pdf_rhs_upwind(term_zm, sgn, rho_ds_zm, invrs_rho_ds_zm, gr: CLUBBGrid):
+    """Upwind turbulent-advection explicit RHS for xp2/xpyp (``xpyp_term_ta_pdf_rhs``).
+
+    Returns ``(ngrdcol, nzm)``; boundaries zero.
+    """
+    invrs_dzt = gr.invrs_dzt
+    irho = invrs_rho_ds_zm[:, 1:-1]
+    s = sgn[:, 1:-1]
+    rho_k, term_k = rho_ds_zm[:, 1:-1], term_zm[:, 1:-1]
+    rho_km1, term_km1 = rho_ds_zm[:, :-2], term_zm[:, :-2]
+    rho_kp1, term_kp1 = rho_ds_zm[:, 2:], term_zm[:, 2:]
+    idzt_km1, idzt_k = invrs_dzt[:, :-1], invrs_dzt[:, 1:]
+
+    rhs_up = -irho * idzt_km1 * (rho_k * term_k - rho_km1 * term_km1)
+    rhs_dn = -irho * idzt_k * (rho_kp1 * term_kp1 - rho_k * term_k)
+    rhs_int = jnp.where(s > 0.0, rhs_up, rhs_dn)
+    zb = jnp.zeros((rho_ds_zm.shape[0], 1), dtype=rho_ds_zm.dtype)
+    return jnp.concatenate([zb, rhs_int, zb], axis=1)
+
+
+def calc_xp2_xpyp_ta_lhs(wp3_on_wp2, sigma_sqd_w, beta, rho_ds_zm, invrs_rho_ds_zm,
+                         gr: CLUBBGrid):
+    """Shared implicit turbulent-advection LHS for xp2/xpyp (ADG1 upwind path).
+
+    The operator depends only on the w-PDF, so it is the SAME ``(3, ngrdcol,
+    nzm)`` for all five moments. ``beta`` is a scalar/per-column param.
+    """
+    beta_c = jnp.asarray(beta)
+    beta_c = beta_c[:, None] if beta_c.ndim == 1 else beta_c
+    a1 = 1.0 / (1.0 - sigma_sqd_w)
+    sgn = jnp.where(wp3_on_wp2 >= 0.0, 1.0, -1.0)
+    coef_zm = _ONE_THIRD * beta_c * a1 * wp3_on_wp2
+    return _xpyp_ta_pdf_lhs_upwind(coef_zm, sgn, rho_ds_zm, invrs_rho_ds_zm, gr)
+
+
+def calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta, flux_a_zm, flux_b_zm,
+                         rho_ds_zm, invrs_rho_ds_zm, gr: CLUBBGrid):
+    """Turbulent-advection explicit RHS for one xp2/xpyp moment (ADG1 upwind).
+
+    Explicit term ``wp_coef·<w'a'><w'b'>`` with ``wp_coef = (1 - beta/3)·a1²·
+    wp3_on_wp2 / wp2``; variance uses ``flux_a = flux_b``, covariance uses the
+    two distinct fluxes (e.g. rtpthlp: wprtp, wpthlp).
+    """
+    beta_c = jnp.asarray(beta)
+    beta_c = beta_c[:, None] if beta_c.ndim == 1 else beta_c
+    a1 = 1.0 / (1.0 - sigma_sqd_w)
+    sgn = jnp.where(wp3_on_wp2 >= 0.0, 1.0, -1.0)
+    wp_coef = (1.0 - _ONE_THIRD * beta_c) * a1 ** 2 * wp3_on_wp2 / wp2
+    return _xpyp_ta_pdf_rhs_upwind(wp_coef * flux_a_zm * flux_b_zm, sgn,
+                                   rho_ds_zm, invrs_rho_ds_zm, gr)
+
+
+def xp2_xpyp_lhs(lhs_ta, lhs_ma, lhs_diff, lhs_dp1, dt, gamma=_GAMMA_OVER_IMPLICIT_TS):
+    """Assemble the full xp2/xpyp tridiagonal LHS (``xp2_xpyp_lhs``).
+
+    Interior: ``diff + ma + gamma·ta`` (+ ``lhs_dp1`` + ``1/dt`` on the main
+    diagonal); boundaries are fixed-value BCs ``[0, 1, 0]``. ``lhs_dp1`` is the
+    dissipation main-diagonal pre-scaled by the caller. ``(3, ngrdcol, nzm)``.
+    """
+    super_int = lhs_diff[0, :, 1:-1] + lhs_ma[0, :, 1:-1] + lhs_ta[0, :, 1:-1] * gamma
+    main_int = (lhs_diff[1, :, 1:-1] + lhs_ma[1, :, 1:-1] + lhs_ta[1, :, 1:-1] * gamma
+                + lhs_dp1[:, 1:-1] + 1.0 / dt)
+    sub_int = lhs_diff[2, :, 1:-1] + lhs_ma[2, :, 1:-1] + lhs_ta[2, :, 1:-1] * gamma
+
+    ng = lhs_ta.shape[1]
+    zb = jnp.zeros((ng, 1), dtype=lhs_ta.dtype)
+    ob = jnp.ones((ng, 1), dtype=lhs_ta.dtype)
+    return jnp.stack([jnp.concatenate([zb, super_int, zb], axis=1),
+                      jnp.concatenate([ob, main_int, ob], axis=1),
+                      jnp.concatenate([zb, sub_int, zb], axis=1)], axis=0)
+
+
+def xp2_xpyp_rhs(lhs_ta, rhs_ta, Cn, invrs_tau_zm, threshold, xapxbp, xam, xbm,
+                 wpxap, wpxbp, invrs_dzm, xpyp_forcing, dt, gamma=_GAMMA_OVER_IMPLICIT_TS):
+    """Explicit RHS of the x'^2 / x'y' equations (``xp2_xpyp_rhs``).
+
+    Interior: ``rhs_ta + (1-gamma)·(over-implicit TA) + turbulent-production
+    + Cn/tau·threshold + (1-gamma)·(over-implicit DP1) + forcing + xapxbp/dt``.
+    BCs: lower carries the current value, upper is set to ``threshold``.
+    ``(ngrdcol, nzm)``.
+    """
+    one_minus_gamma = 1.0 - gamma
+    rhs_tp_int = term_tp_rhs(xam, xbm, wpxap, wpxbp, invrs_dzm)
+    rhs_dp1_int = Cn[:, 1:-1] * invrs_tau_zm[:, 1:-1] * threshold
+    lhs_dp1_int = Cn[:, 1:-1] * invrs_tau_zm[:, 1:-1]
+
+    rhs_int = (rhs_ta[:, 1:-1]
+               + one_minus_gamma * (-lhs_ta[0, :, 1:-1] * xapxbp[:, 2:]
+                                    - lhs_ta[1, :, 1:-1] * xapxbp[:, 1:-1]
+                                    - lhs_ta[2, :, 1:-1] * xapxbp[:, :-2])
+               + rhs_tp_int + rhs_dp1_int
+               + one_minus_gamma * (-lhs_dp1_int * xapxbp[:, 1:-1])
+               + xpyp_forcing[:, 1:-1] + (1.0 / dt) * xapxbp[:, 1:-1])
+
+    rhs_lb = xapxbp[:, 0:1]
+    rhs_ub = jnp.full((Cn.shape[0], 1), threshold, dtype=Cn.dtype)
+    return jnp.concatenate([rhs_lb, rhs_int, rhs_ub], axis=1)
+
+
+def calc_xp2_xpyp_lhs(lhs_ta, lhs_ma, Kh_zt, c_K2, nu2, invrs_rho_ds_zm,
+                      rho_ds_zt, Cn, invrs_tau_xp2_zm, gamma, dt, gr: CLUBBGrid):
+    """Shared implicit LHS for rtp2/thlp2/rtpthlp (``calc_xp2_xpyp_lhs``).
+
+    ``Kw2 = c_K2·Kh_zt`` eddy diffusion + the ``Cn`` pressure-damping (dp1) term,
+    combined with the shared turbulent-advection (``lhs_ta``) and mean-advection
+    (``lhs_ma``) operators. The SAME LHS solves all three second moments under
+    ADG1. ``Cn``/``invrs_tau_xp2_zm`` are ``(ngrdcol, nzm)``; ``nu2`` is
+    ``(ngrdcol,)``. Returns ``(lhs, lhs_diff, dp1)`` — ``lhs_diff``/``dp1`` are
+    reused by the budget diagnostics.
+    """
+    Kw2 = c_K2 * Kh_zt
+    lhs_diff = diffusion_zm_lhs(Kw2, nu2, invrs_rho_ds_zm, rho_ds_zt, gr)
+    dp1 = term_dp1_lhs(Cn, invrs_tau_xp2_zm)
+    lhs = xp2_xpyp_lhs(lhs_ta, lhs_ma, lhs_diff, dp1 * gamma, dt)
+    return lhs, lhs_diff, dp1
+
+
+def calc_up2_vp2_lhs(lhs_ta, lhs_ma, Kh_zt, c_K9, nu9, invrs_rho_ds_zm,
+                     rho_ds_zt, C4, C14, invrs_tau_C4_zm, invrs_tau_C14_zm,
+                     gamma, dt, gr: CLUBBGrid):
+    """Shared implicit LHS for up2/vp2 (``calc_up2_vp2_lhs``).
+
+    The shared TA/MA operators plus the up2/vp2-specific ``Kw9 = c_K9·Kh_zt``
+    eddy diffusion and the ``C4``/``C14`` pressure-damping (dp1) terms scaled by
+    ``gamma``. The same LHS solves both up2 and vp2 (ADG1). ``c_K9`` may be a
+    scalar or per-column ``(ngrdcol,)``. Returns
+    ``(lhs, lhs_diff, lhs_dp1_C4, lhs_dp1_C14)`` — the latter three are reused by
+    the up2/vp2 RHS build and the dp2 budget diagnostic.
+    """
+    c_K9 = jnp.asarray(c_K9)
+    c_K9 = c_K9[:, None] if c_K9.ndim == 1 else c_K9
+    Kw9_zt = c_K9 * Kh_zt
+    lhs_diff = diffusion_zm_lhs(Kw9_zt, nu9, invrs_rho_ds_zm, rho_ds_zt, gr)
+
+    ng, nzm = invrs_tau_C4_zm.shape
+    c4_1d = (2.0 / 3.0) * C4 * jnp.ones((ng, nzm), dtype=invrs_tau_C4_zm.dtype)
+    c14_1d = _ONE_THIRD * C14 * jnp.ones((ng, nzm), dtype=invrs_tau_C14_zm.dtype)
+    lhs_dp1_C4 = term_dp1_lhs(c4_1d, invrs_tau_C4_zm)
+    lhs_dp1_C14 = term_dp1_lhs(c14_1d, invrs_tau_C14_zm)
+    lhs_dp1 = (lhs_dp1_C4 + lhs_dp1_C14) * gamma
+    lhs = xp2_xpyp_lhs(lhs_ta, lhs_ma, lhs_diff, lhs_dp1, dt)
+    return lhs, lhs_diff, lhs_dp1_C4, lhs_dp1_C14
+
+
+def xp2_xpyp_uv_rhs(rhs_ta_this, this_pre, other_pre, this_wp, this_dvel_dz,
+                    lhs_splat, wp2, lhs_ta, C_uu_shr, C4, C14,
+                    invrs_tau_C4_zm, invrs_tau_C14_zm, lhs_dp1_C4, lhs_dp1_C14,
+                    pr2, omg, dt, w_tol_sqd, l_coriolis=False, fcor_y_col=None):
+    """Explicit RHS for the up2 (or vp2) equation (``xp2_xpyp_uv_rhs``).
+
+    The pressure-rotation (C_uu) form. Symmetric: for vp2 pass the v-quantities
+    as ``this_*``/``this_wp``/``this_dvel_dz`` and the *pre-solve* up2 as
+    ``other_pre`` (the C4/C14 isotropization couples the two horizontal
+    variances). Interior terms: shared turbulent advection (over-implicit
+    ``omg``), shear production ``(1-C_uu_shr)·(-2 u'w' d(vel)/dz)``, ``term_pr1``
+    (C4/C14 isotropization), over-implicit dp1 damping, ``pr2`` (buoyancy/shear
+    pressure), and ``xp2/dt``. The splat term ``½·lhs_splat·wp2`` is zero in the
+    CAM default (``C_wp2_splat = 0``) but kept for faithfulness.
+
+    ``l_coriolis`` (CAM default ``l_ho_nontrad_coriolis = .false.``) is a
+    **compile-time static** feature gate (Python branch, not ``jnp.where``):
+    when on, subtracts ``2·fcor_y·this_wp`` (``fcor_y_col`` is ``(ncol, 1)``).
+    In normal use it is a static ``CLUBBFlags`` field closed over by the
+    enclosing ``jax.jit``; if this helper is jitted directly, pass it via
+    ``static_argnums=(19,)`` / ``static_argnames=("l_coriolis",)``. BCs: lower
+    row carries the current value, upper row is ``w_tol_sqd``.
+    ``this_dvel_dz``/``pr2`` are interior slices ``(ncol, nzm-2)``. Returns
+    ``(ncol, nzm)``.
+    """
+    ng = this_pre.shape[0]
+    rhs_int = (
+        rhs_ta_this[:, 1:-1]
+        + 0.5 * lhs_splat[:, 1:-1] * wp2[:, 1:-1]
+        + omg * (-lhs_ta[0, :, 1:-1] * this_pre[:, 2:]
+                 - lhs_ta[1, :, 1:-1] * this_pre[:, 1:-1]
+                 - lhs_ta[2, :, 1:-1] * this_pre[:, :-2])
+        + (1.0 - C_uu_shr) * (-this_wp[:, 1:-1] * this_dvel_dz
+                              - this_wp[:, 1:-1] * this_dvel_dz)
+        + term_pr1(C4, C14, other_pre, wp2, invrs_tau_C4_zm, invrs_tau_C14_zm, w_tol_sqd)
+        + omg * (-lhs_dp1_C4[:, 1:-1] - lhs_dp1_C14[:, 1:-1]) * this_pre[:, 1:-1]
+        + pr2
+        + (1.0 / dt) * this_pre[:, 1:-1])
+    if l_coriolis:
+        rhs_int = rhs_int - 2.0 * fcor_y_col * this_wp[:, 1:-1]
+
+    rhs_lb = this_pre[:, 0:1]
+    rhs_ub = jnp.full((ng, 1), w_tol_sqd, dtype=this_pre.dtype)
+    return jnp.concatenate([rhs_lb, rhs_int, rhs_ub], axis=1)
+
+
+def pos_definite_variances(field, rho_ds_zm, dzm, threshold, hf_lower, hf_upper,
+                           fill_holes_type):
+    """Mass-conserving hole-fill of one variance field (``pos_definite_variances``).
+
+    Thin wrapper over :func:`clubb_fill_holes.fill_holes_vertical` (CAM default
+    ``fill_holes_type = 2``): restores ``field >= threshold`` over the zm
+    interior ``[hf_lower, hf_upper]`` while conserving ``sum(rho_ds·dz·field)``.
+    ``hf_lower``/``hf_upper``/``fill_holes_type`` are **compile-time static**
+    (closed over by the enclosing ``jax.jit``; if jitted directly, pass via
+    ``static_argnums=(4, 5, 6)``).
+    """
+    return fill_holes_vertical(field, rho_ds_zm, dzm, threshold,
+                               hf_lower, hf_upper, fill_holes_type)
+
+
+def clip_variance(xp2, threshold_lo, threshold_hi=None):
+    """Clamp a variance to ``[threshold_lo, threshold_hi]`` (``clip_variance``).
+
+    Faithful port of ``clip_explicit.F90:clip_variance``: floors (and optionally
+    caps) ``xp2`` over levels ``0 .. nzm-2`` — the bottom boundary is included,
+    the top level ``nzm-1`` is left unchanged. ``threshold_lo`` may be a scalar
+    or ``(ncol, nzm)`` array (the ``l_min_xp2_from_corr_wx`` boosted floor).
+    """
+    nzm = xp2.shape[1]
+    mask = jnp.arange(nzm)[None, :] < (nzm - 1)
+    out = jnp.where(mask, jnp.maximum(threshold_lo, xp2), xp2)
+    if threshold_hi is not None:
+        out = jnp.where(mask, jnp.minimum(threshold_hi, out), out)
+    return out
+
+
+def solve_xp2_xpyp(lhs_assembled, lhs_ta, rhs_ta, Cn, invrs_tau_zm, threshold,
+                   xapxbp, xam, xbm, wpxap, wpxbp, invrs_dzm, xpyp_forcing, dt,
+                   gamma=_GAMMA_OVER_IMPLICIT_TS):
+    """Build the explicit RHS and tridiag-solve one xp2/xpyp moment (``solve_xp2_xpyp``).
+
+    Combines :func:`xp2_xpyp_rhs` (turbulent advection + production + dissipation
+    + forcing + over-implicit terms) with the pre-assembled shared LHS via the
+    CLUBB-band Thomas solve. Returns the solution on zm levels ``(ncol, nzm)``.
+    """
+    rhs = xp2_xpyp_rhs(lhs_ta, rhs_ta, Cn, invrs_tau_zm, threshold, xapxbp, xam,
+                       xbm, wpxap, wpxbp, invrs_dzm, xpyp_forcing, dt, gamma)
+    return tridiag_solve(lhs_assembled, rhs)
+
+
+def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
+                     wprtp, wpthlp, wpthvp, upwp, vpwp,
+                     wp2, wp2_zt, wp3_on_wp2, wp3_on_wp2_zt,
+                     sigma_sqd_w, thv_ds_zm, Kh_zt,
+                     invrs_tau_xp2_zm, invrs_tau_C4_zm, invrs_tau_C14_zm,
+                     rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, wm_zm,
+                     rtp2_forcing, thlp2_forcing, rtpthlp_forcing,
+                     nu2, nu9, dt, gr: CLUBBGrid, config):
+    """Advance the five second moments rtp2/thlp2/rtpthlp/up2/vp2 one step.
+
+    Faithful port of the core (non-budget) path of
+    ``advance_xp2_xpyp_module.F90:advance_xp2_xpyp`` for the CAM-default tree.
+    Ties together the builders from section 2:
+
+      * shared turbulent-advection LHS (:func:`calc_xp2_xpyp_ta_lhs`, ADG1
+        upwind) and centered mean-advection LHS (:func:`term_ma_zm_lhs`);
+      * rtp2/thlp2/rtpthlp: each solved with its OWN dissipation coefficient
+        (``C2rt``/``C2thl``/``C2rtthl``) in the dp1 pressure-damping term, so
+        each gets its own implicit LHS (:func:`calc_xp2_xpyp_lhs`) + solve
+        (:func:`solve_xp2_xpyp`). CAM defaults ``C2rt = C2thl = 1.0`` but
+        ``C2rtthl = 1.3`` differ, so the single shared-LHS solve (valid only when
+        all three are equal, ``advance_xp2_xpyp_module.F90:836``) is NOT taken;
+        ``l_C2_cloud_frac = .false.`` (CAM default) → the C2's are plain
+        constants (F90:595, 625-627). Then :func:`pos_definite_variances`
+        (hole-fill) + :func:`clip_variance` with the ``l_min_xp2_from_corr_wx``
+        boosted floor on the variances, and :func:`clip_covar` (Cauchy-Schwarz)
+        on rtpthlp;
+      * up2/vp2: the up2/vp2 LHS (:func:`calc_up2_vp2_lhs`) with the
+        pressure-rotation RHS (:func:`xp2_xpyp_uv_rhs`, with :func:`term_pr2`),
+        solved with the shared LHS, then hole-fill + clip.
+
+    CAM gating (static): ``l_lmm_stepping = False`` (no LMM blend),
+    ``C_wp2_splat = 0`` (no splat), ``l_ho_nontrad_coriolis = False`` (no
+    nontraditional Coriolis), ``l_min_xp2_from_corr_wx = True``,
+    ``fill_holes_type = 2``. All means are on zt; all moments/fluxes/forcings on
+    zm; ``Kh_zt`` on zt. The budget/stats diagnostics (``l_sample`` branch) are
+    not part of the live tendency path and are omitted.
+
+    Returns ``(rtp2, thlp2, rtpthlp, up2, vp2)`` on zm levels.
+    """
+    params = config.params
+    flags = config.flags
+    beta = params.beta
+    gamma = _GAMMA_OVER_IMPLICIT_TS
+    rt_thr = config.rt_tol ** 2
+    thl_thr = config.thl_tol ** 2
+    w_tol_sqd = config.w_tol ** 2
+
+    ng, nzm = wp2.shape
+    invrs_dzm = gr.invrs_dzm
+    hf_lower, hf_upper = 1, nzm - 2     # ascending grid: k_lb_zm+dir, k_ub_zm-dir
+
+    # ---- shared operators (w-PDF only → same for all five moments) ----
+    lhs_ma = term_ma_zm_lhs(wm_zm, gr)
+    lhs_ta = calc_xp2_xpyp_ta_lhs(wp3_on_wp2, sigma_sqd_w, beta,
+                                  rho_ds_zm, invrs_rho_ds_zm, gr)
+
+    # ---- rtp2 / thlp2 / rtpthlp (shared LHS) ----
+    rhs_ta_rtp2 = calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta,
+                                       wprtp, wprtp, rho_ds_zm, invrs_rho_ds_zm, gr)
+    rhs_ta_thlp2 = calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta,
+                                        wpthlp, wpthlp, rho_ds_zm, invrs_rho_ds_zm, gr)
+    rhs_ta_rtpthlp = calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta,
+                                          wprtp, wpthlp, rho_ds_zm, invrs_rho_ds_zm, gr)
+
+    # CAM uses 3 distinct dissipation coefficients (C2rt for rtp2, C2thl for
+    # thlp2, C2rtthl for rtpthlp). l_C2_cloud_frac = .false. (CAM default) → plain
+    # constants. Because C2rtthl (1.3) != C2rt = C2thl (1.0) the single shared-LHS
+    # solve is invalid (advance_xp2_xpyp_module.F90:836), so each moment gets its
+    # own dp1 term in BOTH the LHS assembly and the over-implicit solve correction.
+    Cn_rt = jnp.full((ng, nzm), params.C2rt, dtype=wp2.dtype)
+    Cn_thl = jnp.full((ng, nzm), params.C2thl, dtype=wp2.dtype)
+    Cn_rtthl = jnp.full((ng, nzm), params.C2rtthl, dtype=wp2.dtype)
+
+    def _scalar_lhs(Cn_x):
+        lhs_x2, _lhs_diff, _dp1 = calc_xp2_xpyp_lhs(
+            lhs_ta, lhs_ma, Kh_zt, params.c_K2, nu2, invrs_rho_ds_zm, rho_ds_zt,
+            Cn_x, invrs_tau_xp2_zm, gamma, dt, gr)
+        return lhs_x2
+
+    soln_rtp2 = solve_xp2_xpyp(_scalar_lhs(Cn_rt), lhs_ta, rhs_ta_rtp2, Cn_rt,
+                               invrs_tau_xp2_zm, rt_thr, rtp2, rtm, rtm, wprtp,
+                               wprtp, invrs_dzm, rtp2_forcing, dt)
+    soln_thlp2 = solve_xp2_xpyp(_scalar_lhs(Cn_thl), lhs_ta, rhs_ta_thlp2, Cn_thl,
+                                invrs_tau_xp2_zm, thl_thr, thlp2, thlm, thlm,
+                                wpthlp, wpthlp, invrs_dzm, thlp2_forcing, dt)
+    soln_rtpthlp = solve_xp2_xpyp(_scalar_lhs(Cn_rtthl), lhs_ta, rhs_ta_rtpthlp,
+                                  Cn_rtthl, invrs_tau_xp2_zm, _ZERO_THRESHOLD,
+                                  rtpthlp, rtm, thlm, wprtp, wpthlp, invrs_dzm,
+                                  rtpthlp_forcing, dt)
+
+    if flags.l_lmm_stepping:   # CAM default False (static gate)
+        soln_rtp2 = 0.5 * (rtp2 + soln_rtp2)
+        soln_thlp2 = 0.5 * (thlp2 + soln_thlp2)
+        soln_rtpthlp = 0.5 * (rtpthlp + soln_rtpthlp)
+
+    rtp2_fh = pos_definite_variances(soln_rtp2, rho_ds_zm, gr.dzm, rt_thr,
+                                     hf_lower, hf_upper, flags.fill_holes_type)
+    thlp2_fh = pos_definite_variances(soln_thlp2, rho_ds_zm, gr.dzm, thl_thr,
+                                      hf_lower, hf_upper, flags.fill_holes_type)
+
+    if flags.l_min_xp2_from_corr_wx:   # CAM default True (static gate)
+        max_corr2 = _MAX_MAG_CORRELATION_FLUX ** 2
+        thr_thlp2 = jnp.maximum(thl_thr, wpthlp ** 2 / (wp2 * max_corr2))
+        thr_rtp2 = jnp.maximum(rt_thr, wprtp ** 2 / (wp2 * max_corr2))
+    else:
+        thr_thlp2, thr_rtp2 = thl_thr, rt_thr
+    thlp2_cv = clip_variance(thlp2_fh, thr_thlp2)
+    rtp2_cv = clip_variance(rtp2_fh, thr_rtp2)
+
+    # rtpthlp is a COVARIANCE (sign-indefinite): the reference applies neither
+    # pos_definite_variances nor clip_variance to it (those force positivity,
+    # valid only for variances) — only the Cauchy-Schwarz magnitude clip against
+    # the post-clipped variances (advance_xp2_xpyp_module.F90:824). Interior
+    # levels are bounded by |rtpthlp| <= 0.99·sqrt(rtp2·thlp2); the boundary
+    # levels carry the solve's BC values (lower = prior value, upper = 0),
+    # left unchanged by clip_covar, exactly as in the reference.
+    rtpthlp_clip = clip_covar(soln_rtpthlp, rtp2_cv, thlp2_cv, _MAX_MAG_CORRELATION)
+
+    # ---- up2 / vp2 (shared LHS; pressure-rotation RHS) ----
+    lhs_uv, _lhs_diff_uv, lhs_dp1_C4, lhs_dp1_C14 = calc_up2_vp2_lhs(
+        lhs_ta, lhs_ma, Kh_zt, params.c_K9, nu9, invrs_rho_ds_zm, rho_ds_zt,
+        params.C4, params.C14, invrs_tau_C4_zm, invrs_tau_C14_zm, gamma, dt, gr)
+    rhs_ta_up2 = calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta,
+                                      upwp, upwp, rho_ds_zm, invrs_rho_ds_zm, gr)
+    rhs_ta_vp2 = calc_xp2_xpyp_ta_rhs(wp3_on_wp2, sigma_sqd_w, wp2, beta,
+                                      vpwp, vpwp, rho_ds_zm, invrs_rho_ds_zm, gr)
+    pr2 = term_pr2(params.C_uu_shr, params.C_uu_buoy, thv_ds_zm, wpthvp,
+                   upwp, vpwp, um, vm, gr)
+    du_dz = invrs_dzm[:, 1:-1] * (um[:, 1:] - um[:, :-1])
+    dv_dz = invrs_dzm[:, 1:-1] * (vm[:, 1:] - vm[:, :-1])
+    lhs_splat = jnp.zeros((ng, nzm), dtype=wp2.dtype)   # C_wp2_splat = 0
+    omg = 1.0 - gamma
+
+    rhs_up2 = xp2_xpyp_uv_rhs(rhs_ta_up2, up2, vp2, upwp, du_dz, lhs_splat, wp2,
+                              lhs_ta, params.C_uu_shr, params.C4, params.C14,
+                              invrs_tau_C4_zm, invrs_tau_C14_zm, lhs_dp1_C4,
+                              lhs_dp1_C14, pr2, omg, dt, w_tol_sqd, False, None)
+    rhs_vp2 = xp2_xpyp_uv_rhs(rhs_ta_vp2, vp2, up2, vpwp, dv_dz, lhs_splat, wp2,
+                              lhs_ta, params.C_uu_shr, params.C4, params.C14,
+                              invrs_tau_C4_zm, invrs_tau_C14_zm, lhs_dp1_C4,
+                              lhs_dp1_C14, pr2, omg, dt, w_tol_sqd, False, None)
+    soln_up2 = tridiag_solve(lhs_uv, rhs_up2)
+    soln_vp2 = tridiag_solve(lhs_uv, rhs_vp2)
+
+    if flags.l_lmm_stepping:
+        soln_up2 = 0.5 * (up2 + soln_up2)
+        soln_vp2 = 0.5 * (vp2 + soln_vp2)
+
+    up2_fh = pos_definite_variances(soln_up2, rho_ds_zm, gr.dzm, w_tol_sqd,
+                                    hf_lower, hf_upper, flags.fill_holes_type)
+    vp2_fh = pos_definite_variances(soln_vp2, rho_ds_zm, gr.dzm, w_tol_sqd,
+                                    hf_lower, hf_upper, flags.fill_holes_type)
+    up2_cv = clip_variance(up2_fh, w_tol_sqd)
+    vp2_cv = clip_variance(vp2_fh, w_tol_sqd)
+
+    return rtp2_cv, thlp2_cv, rtpthlp_clip, up2_cv, vp2_cv
+
+
+# ===========================================================================
+# 3. Skewness-dependent C-coefficient family (CAM-default tree)
 # ===========================================================================
 # The xm/wpxp advance needs the pressure-term coefficients ``C6rt_Skw_fnc``,
 # ``C6thl_Skw_fnc`` and ``C7_Skw_fnc``. For the CAM-default flags
@@ -287,7 +1118,7 @@ def compute_C6_C7_Skw_fnc(Skw_zm, Lscale_zm, config, gr: CLUBBGrid):
 
 
 # ===========================================================================
-# 3. Coupled wp2/wp3 advance (pentadiagonal)
+# 4. Coupled wp2/wp3 advance (pentadiagonal)
 # ===========================================================================
 # The coupled wp2 (zm) / wp3 (zt) advance: interleaved band-matrix LHS
 # builders + RHS terms solved with the verbatim-port pentadiagonal LU
@@ -824,7 +1655,7 @@ def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
     Faithful port of the core (non-budget) path of
     ``advance_wp2_wp3_module.F90:advance_wp2_wp3`` for the CAM-default tree.
     Assembles the RHS/LHS term builders (section 3), the diffusion LHS
-    (:mod:`clubb_moments`) and the centered mean-advection operators, solves the
+    (section 2) and the centered mean-advection operators, solves the
     interleaved pentadiagonal system (:func:`wp23_solve`), then applies the
     post-solve chain: ``fill_holes_vertical`` → ``fill_holes_wp2_from_horz_tke``
     (``l_wp2_fill_holes_tke``) → ``clip_variance`` (``l_min_wp2_from_corr_wx =
@@ -944,12 +1775,291 @@ def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
 
 
 # ===========================================================================
-# 4. Coupled xm/wpxp advance (means + scalar fluxes)
+# 5. Monotonic turbulent-flux limiter (MFL)
+# ===========================================================================
+# JAX port of CLUBB's monotonic flux limiter (mono_flux_limiter.F90) applied
+# inside the xm/wpxp advance (CAM ``l_mono_flux_lim_{thlm,rtm,um,vm} =
+# .true.`` + the spike fix): windowed min/max turbulent-advection range
+# (masked fori_loop), lax.scan sequential clip, xm re-solve, top spike-fix.
+# NOTE: the local ``_safe_sqrt`` here is the intentionally NaN-PROPAGATING
+# variant (distinct from the AD-safe ``clubb_helpers.safe_sqrt`` — see the
+# iter-85 de-dup note in PORT_CLUBB.md; consolidating would change behavior).
+
+# Monotonic-flux-limiter field ids + their max-variance caps (constants_clubb).
+MFL_RTM, MFL_THLM, MFL_UM, MFL_VM = "rtm", "thlm", "um", "vm"
+_MAX_XP2 = {MFL_RTM: 5.0e-6, MFL_THLM: 5.0, MFL_UM: 10.0, MFL_VM: 10.0}
+
+_SQRT_2 = math.sqrt(2.0)
+_SQRT_2PI = math.sqrt(2.0 * math.pi)
+_F64_EPS = float(jnp.finfo(jnp.float64).eps)
+
+
+def _safe_sqrt(x):
+    """AD-safe ``sqrt`` with a finite gradient at ``x<=0``, propagating NaN.
+
+    ``sqrt`` is never evaluated at ``<=0`` in the primal (finite VJP), giving 0
+    where ``x==0``; a NaN input is passed through (rather than masked to 0) so a
+    corrupted variance field surfaces instead of being silently clipped — matches
+    the reference ``sqrt(NaN)=NaN`` propagation.
+    """
+    is_pos = x > 0.0
+    safe = jnp.where(is_pos, x, 1.0)
+    root = jnp.where(is_pos, jnp.sqrt(safe), 0.0)
+    return jnp.where(jnp.isnan(x), x, root)
+
+
+def calc_mean_w_up_down_component(w_i, varnce_w_i, wm):
+    """Mean down/up vertical velocity of one PDF component (``calc_mean_w_up_down_component``).
+
+    Returns ``(mean_w_down, mean_w_up)`` on the zm grid for the assumed-Gaussian
+    component ``(w_i, varnce_w_i)``: the truncated-Gaussian means split at
+    ``w = 0``, with three saturating branches (the component is too weak vs the
+    grid velocity ``wm``, all-down, or all-up). Domain boundaries zeroed.
+    Pure-jnp (erf/exp) → differentiable.
+    """
+    wi = w_i
+    # AD-safe sqrt: sqrt is never evaluated at <=0 in the primal, so the VJP
+    # stays finite (sqrt(0) has an infinite derivative). Forward-identical to
+    # sqrt(max(varnce,0)) since both give 0 where varnce<=0.
+    var_pos = varnce_w_i > 0.0
+    sig_raw = jnp.sqrt(jnp.where(var_pos, varnce_w_i, 1.0))
+    sig = jnp.where(var_pos, sig_raw, 0.0)
+    sig_s = jnp.where(var_pos, sig_raw, 1.0)
+    z = (0.0 - wi) / (_SQRT_2 * sig_s)
+    ev = jnp.exp(-z ** 2)
+    ef = jax.scipy.special.erf(z)
+    too_weak = jnp.abs(wi) + 3.0 * sig <= wm
+    all_dn = (~too_weak) & (wi + 3.0 * sig <= 0.0)
+    all_up = (~too_weak) & (~all_dn) & (wi - 3.0 * sig >= 0.0)
+    mwd_m = -sig / _SQRT_2PI * ev + wi * 0.5 * (1.0 + ef)
+    mwu_m = sig / _SQRT_2PI * ev + wi * 0.5 * (1.0 - ef)
+    mwd = jnp.where(too_weak, 0.0, jnp.where(all_dn, wi, jnp.where(all_up, 0.0, mwd_m)))
+    mwu = jnp.where(too_weak, 0.0, jnp.where(all_dn, 0.0, jnp.where(all_up, wi, mwu_m)))
+    mwd = mwd.at[:, 0].set(0.0).at[:, -1].set(0.0)
+    mwu = mwu.at[:, 0].set(0.0).at[:, -1].set(0.0)
+    return mwd, mwu
+
+
+def mean_vert_vel_up_down(w_1, w_2, varnce_w_1, varnce_w_2, mixt_frac, wm):
+    """Mixt-frac-weighted mean down/up vertical velocity (``mean_vert_vel_up_down``).
+
+    Combines the two PDF components' :func:`calc_mean_w_up_down_component` results.
+    Returns ``(mean_w_down, mean_w_up)`` on the zm grid.
+    """
+    mwd1, mwu1 = calc_mean_w_up_down_component(w_1, varnce_w_1, wm)
+    mwd2, mwu2 = calc_mean_w_up_down_component(w_2, varnce_w_2, wm)
+    mean_w_down = mixt_frac * mwd1 + (1.0 - mixt_frac) * mwd2
+    mean_w_up = mixt_frac * mwu1 + (1.0 - mixt_frac) * mwu2
+    return mean_w_down, mean_w_up
+
+
+def calc_turb_adv_range(w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm,
+                        mixt_frac_zm, gr: CLUBBGrid, dt):
+    """Range of zt levels reachable by turbulent advection in one step (``calc_turb_adv_range``).
+
+    Pure-JAX (masked ``lax.fori_loop``) reformulation of the host-numpy
+    level-range search (``l_constant_thickness=False``, ascending grid): from
+    each zt level ``k`` it walks down (using the mean **up** velocity ``vvu``) and
+    up (using the mean **down** velocity ``vvd``) accumulating travel time until
+    it exceeds ``dt`` or hits a velocity-sign barrier. Returns integer index
+    arrays ``(low_lev_effect, high_lev_effect)``, each ``(ncol, nzt)``, that widen
+    the limiter's allowable min/max window. The integer outputs are used only as
+    masks downstream (no gradient flows through them). JIT-safe; the early-stops
+    are replaced by a ``done`` mask over the fixed ``nzt`` loop bound.
+    """
+    ng, nzm = w_1_zm.shape
+    nzt = nzm - 1
+    gd = 1.0   # grid_dir, ascending
+    dzm = gr.dzm
+    wm = gd * dzm / dt
+    vvd, vvu = mean_vert_vel_up_down(w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm,
+                                     mixt_frac_zm, wm)
+
+    def low_col(vvu_c, dzm_c):
+        def low_at_k(k):
+            def body(i, carry):
+                da, done, low = carry
+                j = k - 1 - i
+                active = (j >= 0) & jnp.logical_not(done)
+                ja = jnp.clip(j + 1, 1, nzm - 1)
+                vu = vvu_c[ja]
+                barrier = vu <= 0.0
+                contrib = gd * dzm_c[ja] / jnp.where(vu > 0.0, vu, 1.0)
+                new_da = jnp.where(active & jnp.logical_not(barrier), da + contrib, da)
+                time_stop = active & jnp.logical_not(barrier) & (new_da >= dt)
+                low_j = jnp.where(active, j, low)
+                new_low = jnp.where(active & barrier, jnp.minimum(j + 1, nzt - 1), low_j)
+                return (new_da, done | (active & (barrier | time_stop)), new_low)
+            _, _, low = jax.lax.fori_loop(0, nzt, body, (0.0, False, 0))
+            return low
+        return jax.vmap(low_at_k)(jnp.arange(nzt))
+
+    def high_col(vvd_c, dzm_c):
+        def high_at_k(k):
+            def body(i, carry):
+                da, done, high = carry
+                j = k + 1 + i
+                active = (j <= nzt - 1) & jnp.logical_not(done)
+                ja = jnp.clip(j, 0, nzm - 1)
+                vd = vvd_c[ja]
+                barrier = vd >= 0.0
+                contrib = -gd * dzm_c[ja] / jnp.where(vd < 0.0, vd, -1.0)
+                new_da = jnp.where(active & jnp.logical_not(barrier), da + contrib, da)
+                time_stop = active & jnp.logical_not(barrier) & (new_da >= dt)
+                high_j = jnp.where(active, j, high)
+                new_high = jnp.where(active & barrier, jnp.maximum(j - 1, 0), high_j)
+                return (new_da, done | (active & (barrier | time_stop)), new_high)
+            _, _, high = jax.lax.fori_loop(0, nzt, body, (0.0, False, k))
+            return high
+        return jax.vmap(high_at_k)(jnp.arange(nzt))
+
+    low = jax.vmap(low_col)(vvu, dzm)
+    high = jax.vmap(high_col)(vvd, dzm)
+
+    # Boundary levels are set explicitly (the reference does not search them).
+    k = jnp.arange(nzt)[None, :]
+    low = jnp.where(k == 0, 0, low)
+    low = jnp.where(k == nzt - 2, nzt - 2, low)
+    low = jnp.where(k == nzt - 1, nzt - 1, low)
+    high = jnp.where(k == 0, 0, high)
+    high = jnp.where(k == nzt - 2, nzt - 1, high)
+    high = jnp.where(k == nzt - 1, nzt - 1, high)
+    return low, high
+
+
+def mfl_xm_lhs(wm_zt, invrs_dt, gr: CLUBBGrid):
+    """LHS of the MFL xm re-solve tridiagonal system (``mfl_xm_lhs``).
+
+    The re-solve advances ``xm`` alone (the flux ``w'x'`` is now known), so it is
+    a plain tridiagonal: the upwind mean-advection operator (CAM
+    ``l_upwind_xm_ma = True``) plus ``1/dt`` on the main diagonal.
+    ``(3, ncol, nzt)``.
+    """
+    return term_ma_zt_lhs_upwind(wm_zt, gr).at[1, :, :].add(invrs_dt)
+
+
+def mfl_xm_rhs(xm_old, wpxp, xm_forcing, invrs_dt, invrs_rho_ds_zt, invrs_dzt, rho_ds_zm):
+    """RHS of the MFL xm re-solve (``mfl_xm_rhs``), ``(ncol, nzt)``.
+
+    ``xm_old/dt + xm_forcing - (1/rho_ds_zt)·d(rho_ds_zm·w'x')/dz`` with the
+    limited flux ``wpxp``.
+    """
+    return (xm_old * invrs_dt + xm_forcing
+            - invrs_rho_ds_zt * invrs_dzt
+            * (rho_ds_zm[:, 1:] * wpxp[:, 1:] - rho_ds_zm[:, :-1] * wpxp[:, :-1]))
+
+
+def mfl_xm_solve(lhs, rhs):
+    """Solve the MFL xm re-solve tridiagonal system (``mfl_xm_solve``).
+
+    Implicit tridiagonal re-solve (``l_mfl_xm_imp_adj = True``) via the CLUBB-band
+    Thomas solver (:func:`clubb_solve.tridiag_solve`).
+    """
+    return tridiag_solve(lhs, rhs)
+
+
+def monotonic_turbulent_flux_limit(
+    solve_type, xm, wpxp, xm_old, xp2, wm_zt, xm_forcing,
+    rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
+    xp2_threshold, xm_tol, low_lev_effect, high_lev_effect,
+    gr: CLUBBGrid, dt, l_mono_flux_lim_spikefix=True,
+):
+    """Monotonic turbulent-flux limiter core (``monotonic_turbulent_flux_limit``).
+
+    Pure-JAX reformulation of the host-numpy ``_monotonic_turbulent_flux_limit``:
+    bounds the turbulent flux ``wpxp`` so the mean field ``xm`` stays within
+    ``±max(2·sqrt(x'^2), xm_tol)`` of its no-flux value over the
+    turbulent-advection-reachable level window ``[low_lev_effect,
+    high_lev_effect]`` (the masked min/max), then re-advances ``xm`` implicitly
+    with the limited flux. The sequential per-level flux clip (each level's bound
+    uses the already-clipped level below) is a :func:`lax.scan`; the level window
+    is a mask; the top spike-fix conserves the column. ``solve_type`` (static MFL
+    id) selects the variance cap, the ``rtm`` spike-fix, and the wind (uv)
+    non-negativity skip. Returns ``(xm, wpxp)``. Differentiable in the field
+    inputs (the integer level bounds are stop-gradient masks).
+    """
+    ng, nzt = xm.shape
+    nzm = nzt + 1
+    is_uv = solve_type in (MFL_UM, MFL_VM)
+    max_xp2 = _MAX_XP2[solve_type]
+    spikefix_rtm = bool(l_mono_flux_lim_spikefix) and solve_type == MFL_RTM
+    invrs_dt = 1.0 / dt
+    gd = 1.0   # grid_dir, ascending
+    dzt = gr.dzt
+    invrs_dzt = gr.invrs_dzt
+
+    xm_enter = xm
+
+    xp2_zt = jnp.clip(zm2zt(xp2, gr), xp2_threshold, max_xp2)
+    max_dev = jnp.maximum(2.0 * _safe_sqrt(xp2_zt), xm_tol)
+    xm_without_ta = xm_old + dt * xm_forcing
+    min_x_lev = xm_without_ta - max_dev
+    if not is_uv:
+        min_x_lev = jnp.maximum(min_x_lev, 0.0)
+    max_x_lev = xm_without_ta + max_dev
+
+    # Windowed min/max over the reachable level window [low, high] (masked).
+    j = jnp.arange(nzt)[None, None, :]
+    in_win = (j >= low_lev_effect[:, :, None]) & (j <= high_lev_effect[:, :, None])
+    min_x_allowable = jnp.min(jnp.where(in_win, min_x_lev[:, None, :], jnp.inf), axis=2)
+    max_x_allowable = jnp.max(jnp.where(in_win, max_x_lev[:, None, :], -jnp.inf), axis=2)
+
+    thr_term_zt = invrs_dt * gd * dzt * (xm_without_ta - min_x_allowable)
+    mfl_max_term_zt = rho_ds_zt * thr_term_zt
+    mfl_min_term_zt = rho_ds_zt * invrs_dt * gd * dzt * (xm_without_ta - max_x_allowable)
+    thr_term_zm = zt2zm(thr_term_zt, gr)   # (ng, nzm)
+
+    # Sequential clip of wpxp over interior zm levels k=1..nzm-2 (scan over levels).
+    # step s -> k=s+1, k_zt=s, k-1=s. Each step's bound uses the clipped k-1 flux.
+    def step(wp_prev, xs):
+        max_term, min_term, thr_km1, irho_k, rho_km1, wp_k = xs
+        spikefix_cond = (spikefix_rtm & (jnp.abs(wp_prev) > thr_km1) & (wp_prev < 0.0))
+        mfl_max = jnp.where(spikefix_cond, 0.0,
+                            irho_k * (max_term + rho_km1 * wp_prev))
+        mfl_min = irho_k * (min_term + rho_km1 * wp_prev)
+        clipped = jnp.where(wp_k > mfl_max, mfl_max,
+                            jnp.where(wp_k < mfl_min, mfl_min, wp_k))
+        needed = jnp.abs(clipped - wp_k) > _F64_EPS
+        return clipped, (clipped, needed)
+
+    xs = (mfl_max_term_zt[:, :nzm - 2].T, mfl_min_term_zt[:, :nzm - 2].T,
+          thr_term_zm[:, :nzm - 2].T, invrs_rho_ds_zm[:, 1:nzm - 1].T,
+          rho_ds_zm[:, :nzm - 2].T, wpxp[:, 1:nzm - 1].T)
+    _, (clipped_T, needed_T) = jax.lax.scan(step, wpxp[:, 0], xs)
+    clipped_interior = clipped_T.T          # (ng, nzm-2)
+    wpxp_new = jnp.concatenate([wpxp[:, :1], clipped_interior, wpxp[:, -1:]], axis=1)
+    adj_needed = jnp.any(needed_T.T, axis=1)   # (ng,)
+
+    # Re-solve xm implicitly with the limited flux (applied where adjustment fired).
+    lhs = mfl_xm_lhs(wm_zt, invrs_dt, gr)
+    rhs = mfl_xm_rhs(xm_old, wpxp_new, xm_forcing, invrs_dt, invrs_rho_ds_zt,
+                     invrs_dzt, rho_ds_zm)
+    xm_mfl = mfl_xm_solve(lhs, rhs)
+    xm = jnp.where(adj_needed[:, None], xm_mfl, xm)
+
+    # Top spike-fix: conserve column xm if the top level moved a lot.
+    dz_top = gr.zm[:, -1] - gr.zm[:, -2]
+    moved = jnp.abs(xm[:, -1] - xm_enter[:, -1]) > 10.0 * xm_tol
+    xm_dw = rho_ds_zt[:, -1] * (xm[:, -1] - xm_enter[:, -1]) * dz_top
+    k_idx = jnp.arange(nzt)[None, :]
+    below_top = k_idx < (nzt - 1)
+    xm_vint = jnp.sum(jnp.where(below_top, rho_ds_zt * xm * gd * dzt, 0.0), axis=1)
+    small_vint = jnp.abs(xm_vint) < _F64_EPS
+    coef = jnp.maximum(xm_dw / jnp.where(small_vint, 1.0, xm_vint), -0.99)
+    xm_scaled = (xm * (1.0 + coef[:, None])).at[:, -1].set(xm_enter[:, -1])
+    xm_smallv = xm.at[:, -1].set(xm_enter[:, -1])
+    xm_fixed = jnp.where(small_vint[:, None], xm_smallv, xm_scaled)
+    xm = jnp.where(moved[:, None], xm_fixed, xm)
+    return xm, wpxp_new
+
+
+# ===========================================================================
+# 6. Coupled xm/wpxp advance (means + scalar fluxes)
 # ===========================================================================
 # The coupled xm (zt) / wpxp (zm) advance for rtm/wprtp and thlm/wpthlp
 # (CAM ``l_predict_upwp_vpwp = .false.`` → winds go through
 # advance_windm_edsclrm instead). Semi-implicit single-LHS solve, CENTERED
-# turbulent advection for wpxp, monotonic turbulent-flux limiter (clubb_mfl)
+# turbulent advection for wpxp, monotonic turbulent-flux limiter (section 5)
 # + hole filling on the means, and the Cauchy-Schwarz clipping family.
 
 # Monotonic-flux-limiter xm tolerances (constants_clubb):
@@ -1324,7 +2434,7 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
 
 
 # ===========================================================================
-# 5. Core orchestration
+# 7. Core orchestration
 # ===========================================================================
 # Assembles the parity-tested building blocks into the per-step closure: the
 # diagnostics (``compute_clubb_diagnostics`` — skewness, ``sigma_sqd_w``, TKE,
@@ -1720,7 +2830,7 @@ def unpack_clubb_moments(arr: jax.Array) -> CLUBBMomentState:
 
 
 # ===========================================================================
-# 6. Scheme entries
+# 8. Scheme entries
 # ===========================================================================
 
 

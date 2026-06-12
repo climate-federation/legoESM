@@ -51,8 +51,8 @@ def safe_sqrt(x: jax.Array) -> jax.Array:
     ``jnp.sqrt`` is never evaluated at ``<=0`` in either the primal or the VJP, so
     the gradient stays finite (0) at the boundary instead of the ``+inf`` slope of
     a bare ``sqrt`` at 0. A ``NaN`` input maps to 0 (``NaN > 0`` is False).
-    (NOTE: ``clubb_mfl._safe_sqrt`` is a deliberate variant that PROPAGATES ``NaN``
-    instead -- kept local there; do not collapse it into this one.)
+    (NOTE: the MFL section of :mod:`clubb` keeps a local ``_safe_sqrt`` that is a
+    deliberate variant PROPAGATING ``NaN`` instead; do not collapse it into this one.)
     """
     xp = jnp.maximum(x, 0.0)
     safe = jnp.where(xp > 0.0, xp, 1.0)

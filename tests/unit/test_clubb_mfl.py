@@ -1,4 +1,4 @@
-"""Tests for the CLUBB monotonic-flux-limiter JAX helpers (``clubb_mfl.py``).
+"""Tests for the CLUBB monotonic-flux-limiter JAX helpers (now in ``clubb.py``).
 
 Bit-exact/round-off parity vs CLUBB-JAX ``mono_flux_limiter`` for the erf-based
 mean up/down velocity and the xm re-solve, a committed golden for CI coverage
@@ -18,7 +18,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
-from legoesm.atmosphere.physics.turbulence import clubb_mfl as M  # noqa: E402, N812
+from legoesm.atmosphere.physics.turbulence import clubb as M  # noqa: E402, N812
 
 _CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
 _FIX = Path(__file__).resolve().parent / "clubb_fixtures"

@@ -459,7 +459,7 @@ def _clip_inputs(gr, ng, nzm, seed=13):
     v1 = jnp.asarray(0.05 + 0.5 * rng.random((ng, nzm)))
     v2 = jnp.asarray(0.05 + 0.5 * rng.random((ng, nzm)))
     mf = jnp.asarray(0.3 + 0.4 * rng.random((ng, nzm)))
-    from legoesm.atmosphere.physics.turbulence.clubb_mfl import calc_turb_adv_range
+    from legoesm.atmosphere.physics.turbulence.clubb import calc_turb_adv_range
     lo, hi = calc_turb_adv_range(w1, w2, v1, v2, mf, gr, 300.0)
     return dict(
         solve_type="rtm",
@@ -560,7 +560,7 @@ def test_advance_xm_wpxp_wiring():
     """Independent wiring check: each pair's output reproduces a from-scratch
     solve+clip with explicitly-transcribed per-field args (catches swapped
     xpthvp/C6/forcing/xp2/tol between the rt and thl pairs)."""
-    from legoesm.atmosphere.physics.turbulence.clubb_mfl import (
+    from legoesm.atmosphere.physics.turbulence.clubb import (
         MFL_RTM, MFL_THLM, calc_turb_adv_range)
     gr, ng, nzm = _gr()
     kw = _main_inputs(gr, ng, nzm)

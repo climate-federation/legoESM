@@ -163,16 +163,9 @@ EXCLUDED: frozenset[str] = frozenset(
         # CLUBB port: tridiagonal-solve adapter (band storage -> thomas_solve)
         # for the implicit moment advance — a linear-solver helper, not a scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_solve.py",
-        # CLUBB port: prognostic moment advances (implicit eddy-diffusion /
-        # higher-moment solves) — internal closure dynamics, not a single
-        # column-physics tendency scheme with a units/sign contract.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_moments.py",
         # CLUBB port: mass-conserving vertical hole-filling — a numerical
         # positivity utility, not a column-physics tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_fill_holes.py",
-        # CLUBB port: monotonic turbulent-flux limiter helpers — a numerical
-        # flux-monotonicity utility, not a column-physics tendency scheme.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_mfl.py",
         # CLUBB port: dissipation time-scale (tau) family — closure timescale
         # diagnostics, not a single column-physics tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_tau.py",
