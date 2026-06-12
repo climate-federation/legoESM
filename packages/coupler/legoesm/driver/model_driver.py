@@ -267,6 +267,15 @@ class ModelDriver:
         dm = self._double_moment_step_inputs()
         for k, v in dm.items():
             base[f"dmtr_{k}"] = v
+        # Tag the convection carry with its scheme (codex round 8): a
+        # scheme change that keeps the carry SHAPE (mass_flux<->edmf
+        # both carry (ncol,); the profile-prognostic schemes all carry
+        # (ncol, nlev)) would otherwise silently feed one scheme's
+        # memory to another on restart.  Stored as a plain string; the
+        # npz loader passes it through un-cast.
+        if "conv_prog" in base:
+            base["conv_prog_scheme"] = np.asarray(
+                str(getattr(self.config, "convection", "none")))
         return base if base else None
 
     def _restore_dm_tracers_from_carry_aux(self) -> None:
@@ -2312,6 +2321,7 @@ class ModelDriver:
         if self.config.grid.grid_type == "mpas":
             ckpt_path = self._output_dir / f"checkpoint_day_{int(round(day)):04d}.npz"
             s = self.state
+            _ps_carry = getattr(self, "_mpas_phys_state", None)
             # Under MPAS cell-partition MPI each rank holds only its owned+halo
             # band; gather the owned cells/edges into the GLOBAL field on rank 0
             # so the restart chain reads a single canonical global checkpoint
@@ -2327,6 +2337,28 @@ class ModelDriver:
                 trc_d = (None if s.tracers is None else {
                     _k: gather_voronoi_field(s.tracers[_k].data, part, "cell")
                     for _k in s.tracers})
+                # Stateful-physics carry (#413): every PhysicsState field
+                # except the (replicated) PRNG key is cell-dimensioned —
+                # gather owned cells like the state.  The 3-D GWD
+                # spectrum gathers through a (nCells, az*wn) reshape.
+                ps_d_carry = None
+                if _ps_carry is not None:
+                    ps_d_carry = {}
+                    for _name in _ps_carry._fields:
+                        _val = getattr(_ps_carry, _name)
+                        if _name == "prng_key":
+                            ps_d_carry[_name] = _val
+                        elif _val.ndim == 3:
+                            _az_wn = _val.shape[1:]
+                            _flat = gather_voronoi_field(
+                                _val.reshape(_val.shape[0], -1),
+                                part, "cell",
+                            )
+                            ps_d_carry[_name] = _flat.reshape(
+                                (-1,) + _az_wn)
+                        else:
+                            ps_d_carry[_name] = gather_voronoi_field(
+                                _val, part, "cell")
                 if self._mpi_rank != 0:
                     return
             else:
@@ -2334,11 +2366,24 @@ class ModelDriver:
                     s.u.data, s.T.data, s.p_s.data, s.phis.data)
                 trc_d = (None if s.tracers is None
                          else {_k: s.tracers[_k].data for _k in s.tracers})
+                ps_d_carry = (None if _ps_carry is None
+                              else _ps_carry._asdict())
             _save = dict(
                 u=np.asarray(u_d), T=np.asarray(T_d),
                 p_s=np.asarray(ps_d), phis=np.asarray(phis_d),
                 step=np.asarray(int(step)), day=np.asarray(float(day)),
             )
+            # Stateful-physics carry (#413): persisted under
+            # ``physstate_<field>`` so a chained restart resumes the
+            # prognostic physics memory instead of silently reseeding.
+            # The convection scheme tag travels with it (codex round 8:
+            # the profile-prognostic schemes share the carry shape, so
+            # shape checks alone cannot catch a cross-scheme restore).
+            if ps_d_carry is not None:
+                for _name, _val in ps_d_carry.items():
+                    _save[f"physstate_{_name}"] = np.asarray(_val)
+                _save["physstate_meta_conv_scheme"] = np.asarray(
+                    str(getattr(self.config, "convection", "none")))
             # Persist moisture tracers too (moist MPAS runs), so a chained
             # restart does not silently drop water.  The ``trc_`` prefix avoids
             # colliding with u/T/p_s/phis; ``tracer_names`` lets load rebuild
@@ -2420,6 +2465,33 @@ class ModelDriver:
                         "into the global checkpoint — a restart would corrupt "
                         "them. Use the per-rank distributed checkpoint format "
                         "or run single-process for double-moment lat-lon MPI "
+                        "runs."
+                    )
+                # Same limitation for the stateful-physics carries (#413):
+                # tke/qke/gwd_spectrum — and conv_prog when the configured
+                # convection is a real carry (scalar-/profile-prognostic
+                # or stochastic; codex round 7) — ride carry_aux
+                # rank-locally and are not gathered; a restart would
+                # corrupt the physics memory.
+                from legoesm.atmosphere.physics.convection.integration \
+                    import convection_scheme_traits as _conv_traits
+                _ct = _conv_traits(getattr(self.config, "convection", "none"))
+                _conv_is_carry = (_ct.is_scalar_prognostic
+                                  or _ct.is_profile_prognostic
+                                  or _ct.is_stochastic)
+                if (isinstance(self._carry_aux, dict)
+                        and (any(k in self._carry_aux
+                                 for k in ("tke", "qke", "gwd_spectrum"))
+                             or (_conv_is_carry
+                                 and "conv_prog" in self._carry_aux))):
+                    raise ValueError(
+                        "Lat-lon MPI checkpointing does not yet gather the "
+                        "rank-local stateful-physics carries "
+                        "(tke/qke/gwd_spectrum/conv_prog) into the global "
+                        "checkpoint — a restart would corrupt the "
+                        "prognostic physics memory (issue #405/#413). Use "
+                        "the per-rank distributed checkpoint format or run "
+                        "single-process for stateful-physics lat-lon MPI "
                         "runs."
                     )
                 state_g, tracers_g = self._gather_state_for_global_checkpoint()
@@ -2506,6 +2578,33 @@ class ModelDriver:
                 "carry_aux, which the zarr backend does not round-trip, so a "
                 "restart would silently reinitialize them. Use "
                 "checkpoint_format='npz' for double-moment runs."
+            )
+        # Same zarr carry_aux limitation for the stateful-physics carries
+        # (issue #413): tke/qke/gwd_spectrum — and conv_prog when the
+        # configured convection is a real carry (codex round 7) — ride
+        # carry_aux, so a zarr restart would silently reseed the
+        # prognostic physics memory.
+        from legoesm.atmosphere.physics.convection.integration import (
+            convection_scheme_traits as _conv_traits,
+        )
+        _ct = _conv_traits(getattr(self.config, "convection", "none"))
+        _conv_is_carry = (_ct.is_scalar_prognostic
+                          or _ct.is_profile_prognostic
+                          or _ct.is_stochastic)
+        if (
+            backend == "zarr"
+            and isinstance(self._carry_aux, dict)
+            and (any(k in self._carry_aux
+                     for k in ("tke", "qke", "gwd_spectrum"))
+                 or (_conv_is_carry and "conv_prog" in self._carry_aux))
+        ):
+            raise ValueError(
+                "checkpoint_format='zarr' cannot persist the stateful-"
+                "physics carries (tke/qke/gwd_spectrum/conv_prog) — they "
+                "ride carry_aux, which the zarr backend does not "
+                "round-trip, so a restart would silently reseed the "
+                "prognostic physics state (issue #405/#413). Use "
+                "checkpoint_format='npz' for stateful-physics runs."
             )
 
         save_restart(
@@ -2616,6 +2715,36 @@ class ModelDriver:
                         name=_k, dims=("nCells", "nlev"), units="kg/kg")
                     for _k in _names
                 })
+            # Restore the stateful-physics carry (#413): stash the
+            # ``physstate_<field>`` arrays into carry_aux for the
+            # _run_mpas seed overlay.  Cell-dimensioned fields scatter to
+            # the rank-local band under MPI (the replicated PRNG key does
+            # not); the 3-D GWD spectrum scatters via a (nCells, az*wn)
+            # reshape, mirroring the save-side gather.
+            _ps_keys = [k for k in d.files if k.startswith("physstate_")]
+            if _ps_keys:
+                for _k in _ps_keys:
+                    _name = _k[len("physstate_"):]
+                    if _name.startswith("meta_"):
+                        # Plain-string metadata (scheme tag) — no jnp,
+                        # no scatter.
+                        self._carry_aux[_k] = str(d[_k])
+                        continue
+                    _val = jnp.asarray(d[_k])
+                    if _mpi and _name != "prng_key":
+                        if _val.ndim == 3:
+                            _az_wn = _val.shape[1:]
+                            _val = scatter_to_local(
+                                _val.reshape(_val.shape[0], -1),
+                                part, "cell",
+                            ).reshape((-1,) + _az_wn)
+                        else:
+                            _val = scatter_to_local(_val, part, "cell")
+                    self._carry_aux[_k] = _val
+                logger.info(
+                    "  Restored physics-state carry fields: %s",
+                    sorted(k[len("physstate_"):] for k in _ps_keys),
+                )
             step = int(d["step"])
             day = float(d["day"])
             logger.info(f"  Loaded MPAS checkpoint: step={step}, day={day:.2f}"
@@ -2764,6 +2893,34 @@ class ModelDriver:
                     "tracers (q_i/q_s/q_g/N_c/N_r/N_i) from a global checkpoint "
                     "— use the per-rank distributed checkpoint format or run "
                     "single-process for double-moment lat-lon MPI runs."
+                )
+            # Same limitation for the stateful-physics carries (#413):
+            # the broadcast hands every rank the writer's (global or
+            # other-rank) flattened-column fields; restoring them would
+            # corrupt or (via the fail-fast shape check in
+            # _prepare_run_context) abort the run.  Fail fast HERE with
+            # the actionable message.  conv_prog included when the
+            # configured convection is a real carry (codex round 7).
+            from legoesm.atmosphere.physics.convection.integration import (
+                convection_scheme_traits as _conv_traits,
+            )
+            _ct = _conv_traits(getattr(self.config, "convection", "none"))
+            _conv_is_carry = (_ct.is_scalar_prognostic
+                              or _ct.is_profile_prognostic
+                              or _ct.is_stochastic)
+            if isinstance(self._carry_aux, dict) and (
+                any(k in self._carry_aux
+                    for k in ("tke", "qke", "gwd_spectrum"))
+                or (_conv_is_carry and "conv_prog" in self._carry_aux)
+            ):
+                raise ValueError(
+                    "Lat-lon MPI restart cannot band-scatter the "
+                    "stateful-physics carries "
+                    "(tke/qke/gwd_spectrum/conv_prog) from a global "
+                    "checkpoint — the prognostic physics memory would be "
+                    "silently reseeded (issue #405/#413). Use the "
+                    "per-rank distributed checkpoint format or run "
+                    "single-process for stateful-physics lat-lon MPI runs."
                 )
             return step, day
 
@@ -3222,9 +3379,98 @@ class ModelDriver:
         )
         # Operator-split physics carry (prognostic TKE / convection state).
         # ``model.step`` stashes the OUT state on ``self.model._phys_state``;
-        # feed it back next step.  None on the first step ⇒ physics initialises
-        # its own state.
-        _phys_state = None
+        # feed it back next step.  SEEDED here (issue #405): starting from
+        # ``None`` is NOT lazy-init — ``update_physics_state(None, ...)``
+        # returns ``None``, so the carry would stay ``None`` forever and
+        # every stateful scheme (tke/mynn25/bechtold/prognostic GWD) would
+        # silently reseed its prognostic fields each timestep.
+        from legoesm.atmosphere.physics.physics_state import (
+            init_physics_state,
+        )
+        from legoesm.core.precision import get_policy as _get_policy
+        _ncol_phys = int(self.state.T.data.shape[0])
+        _nlev_phys = int(self.state.T.data.shape[1])
+        # Storage dtype for the persistent carry — EXCEPT when the
+        # prognostic-spectral GWD is active: its wave-action spectrum
+        # integration wants the default/compute dtype (codex review;
+        # see the GWD integration note in physics_state.init docs).
+        _seed_dtype = (
+            None
+            if phys_cfg.gravity_wave_drag.scheme == "prognostic_spectral"
+            else _get_policy().storage
+        )
+        _phys_state = init_physics_state(
+            _ncol_phys, _nlev_phys, phys_cfg, dtype=_seed_dtype,
+        )
+        # Checkpoint restore (#413): the MPAS load path stashes the
+        # persisted PhysicsState fields in carry_aux under
+        # ``physstate_<field>``.  Overlay them onto the fresh seed and
+        # cast to the seed dtype so the carry honours the GWD dtype
+        # rule above.  A PRESENT field with the wrong shape means a
+        # corrupted / wrong-resolution / wrong-config restart — fail
+        # fast rather than silently reseed the prognostic physics
+        # memory (codex review: a warning is the #405 silent-wrong bug
+        # class again; deliberately switching schemes across restart
+        # should drop the stale physstate_* entries from the
+        # checkpoint, not rely on a silent fallback).
+        if isinstance(self._carry_aux, dict):
+            # Cross-scheme convection restore check (codex round 8):
+            # the profile-prognostic schemes share the carry shape, so
+            # the per-field shape check below cannot catch a scheme
+            # change.  Tag absent = legacy checkpoint (warn + accept).
+            _saved_conv = self._carry_aux.get("physstate_meta_conv_scheme")
+            _has_conv_carry = any(
+                k in self._carry_aux
+                for k in ("physstate_conv_prog_profile",
+                          "physstate_conv_stoch_state")
+            )
+            if _has_conv_carry:
+                if _saved_conv is None:
+                    logger.warning(
+                        "  Restored MPAS convection carry has no scheme "
+                        "tag (legacy checkpoint) — assuming it matches "
+                        "convection=%r", cfg.convection,
+                    )
+                elif str(_saved_conv) != str(cfg.convection):
+                    raise ValueError(
+                        f"Restored MPAS convection carry was written by "
+                        f"scheme {str(_saved_conv)!r} but this run "
+                        f"configures convection={cfg.convection!r} — "
+                        "reusing it would feed one scheme's memory to "
+                        "another (issue #405/#413).  Fix the config or "
+                        "strip the physstate_* entries to opt into a "
+                        "fresh seed."
+                    )
+            _restored_ps = {}
+            for _k, _v in self._carry_aux.items():
+                if not _k.startswith("physstate_"):
+                    continue
+                _name = _k[len("physstate_"):]
+                if _name not in _phys_state._fields:
+                    continue
+                _seed_field = getattr(_phys_state, _name)
+                _val = jnp.asarray(_v)
+                if tuple(_val.shape) != tuple(_seed_field.shape):
+                    raise ValueError(
+                        f"Restart physics-state field {_name!r} has "
+                        f"shape {tuple(_val.shape)} but the configured "
+                        f"run expects {tuple(_seed_field.shape)} — the "
+                        "checkpoint does not match this configuration "
+                        "(resolution / scheme config change or a "
+                        "corrupted file).  Silently reseeding would "
+                        "branch the trajectory (issue #405/#413); fix "
+                        "the config or strip the physstate_* entries "
+                        "from the checkpoint to opt into a fresh seed."
+                    )
+                _restored_ps[_name] = _val.astype(_seed_field.dtype)
+            if _restored_ps:
+                _phys_state = _phys_state._replace(**_restored_ps)
+                logger.info(
+                    "  Restored physics state from checkpoint: %s",
+                    sorted(_restored_ps),
+                )
+        # Latest carry for save_checkpoint (#413) — updated every step.
+        self._mpas_phys_state = _phys_state
 
         # MPAS cell-partition MPI: swap the serial ``model.step`` for the
         # halo-exchanging MPI step.  Same operator-split as the serial step
@@ -3288,6 +3534,9 @@ class ModelDriver:
                     self.state, DT, physics_fn=physics_fn, forcing=_forcing,
                     phys_state=_phys_state)
                 _phys_state = self.model._phys_state
+            # Keep the persisted-carry handle fresh for save_checkpoint
+            # (#413) — reference assignment, no device work.
+            self._mpas_phys_state = _phys_state
 
             # Diagnostics at intervals
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
@@ -3410,6 +3659,64 @@ class ModelDriver:
     # ==================================================================
     # Spectral execution path (Held-Suarez + radiation on Gaussian grid)
     # ==================================================================
+
+    @staticmethod
+    def _refuse_stateful_physics_unthreaded(cfg) -> None:
+        """Refuse prognostic-carry physics on loops that drop the carry.
+
+        Issue #405: ``update_physics_state(None, ...)`` returns ``None``,
+        so a loop that never seeds/threads ``PhysicsState`` silently
+        reseeds every stateful scheme each timestep — the run "succeeds"
+        with physics that has no memory.  Loud refusal beats silent
+        wrong numbers.  Lifted (#413) from ``_run_mpas`` (seeds/threads
+        ``PhysicsState``), ``_run_compiled`` (tke/qke/gwd_spectrum ride
+        the ``SegmentCarry``), and ``_run_per_step`` (carries threaded
+        through ``step_unified``) — each with a stateful-memory test.
+        Remaining caller: ``_run_spectral``, whose physics closure does
+        not thread a carry yet; remove that call only together with
+        real carry plumbing (and a stateful-memory test).
+
+        The stateful-turbulence check comes from the shared
+        ``turbulence_scheme_traits`` so this guard cannot drift from
+        the seeding/dispatch sites (the hand-written set omitted
+        ``clubb_lite``, which also carries TKE).
+        """
+        from legoesm.atmosphere.physics.turbulence.integration import (
+            turbulence_scheme_traits,
+        )
+        from legoesm.atmosphere.physics.convection.integration import (
+            convection_scheme_traits,
+        )
+        _turb = getattr(cfg, "turbulence", "none")
+        _conv = getattr(cfg, "convection", "none")
+        # Accept both driver CLI configs (plain scheme strings) and
+        # PhysicsConfig-style objects (sub-config with .scheme).
+        _turb = getattr(_turb, "scheme", _turb)
+        _conv = getattr(_conv, "scheme", _conv)
+        _gwd = getattr(cfg, "gravity_wave_drag", "none")
+        _gwd = getattr(_gwd, "scheme", _gwd)
+        # Convection: scalar-prognostic (mass_flux/edmf M_c / a_u),
+        # profile-prognostic (ZM/KF/Emanuel/Tiedtke/Bechtold read and
+        # relax conv_prog_profile — Tiedtke concretely carries updraft
+        # mass-flux memory; codex round 5 widened this from the
+        # hand-written bechtold/mass_flux/edmf set), and stochastic
+        # (Bechtold AR1 state).
+        _ct = convection_scheme_traits(_conv)
+        if (turbulence_scheme_traits(_turb).carries_energy
+                or _ct.is_scalar_prognostic
+                or _ct.is_profile_prognostic
+                or _ct.is_stochastic
+                or _gwd == "prognostic_spectral"):
+            raise NotImplementedError(
+                f"turbulence={_turb!r} / convection={_conv!r} / "
+                f"gwd={_gwd!r} carry prognostic physics state, which "
+                "this run loop does not thread between steps yet "
+                "(issue #405) — the carry would silently reseed every "
+                "timestep.  Use a diagnostic scheme (louis / "
+                "holtslag_boville; sbm / kuo / dca; linear GWD), or a "
+                "driver path that threads PhysicsState (the MPAS, "
+                "compiled, and per-step loops)."
+            )
 
     def _run_spectral(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run spectral PE model with physics coupling.
@@ -3598,17 +3905,7 @@ class ModelDriver:
             # returns the state).  Prognostic-carry schemes would
             # silently re-initialize their carry every step — refuse
             # loudly instead of degrading.
-            _stateful_turb = ("tke", "mynn25", "edmf")
-            _stateful_conv = ("bechtold",)
-            if cfg.turbulence in _stateful_turb or cfg.convection in _stateful_conv:
-                raise NotImplementedError(
-                    f"turbulence={cfg.turbulence!r} / "
-                    f"convection={cfg.convection!r} carry prognostic "
-                    "physics state, which the spectral PE step does not "
-                    "thread between steps yet.  Use a diagnostic scheme "
-                    "(louis / holtslag_boville; sbm / zhang_mcfarlane) "
-                    "on gaussian/spectral, or run cubed_sphere/latlon."
-                )
+            self._refuse_stateful_physics_unthreaded(cfg)
             phys_cfg = PhysicsConfig(
                 radiation=RadiationConfig(
                     scheme=_rad_scheme,
@@ -4035,11 +4332,47 @@ class ModelDriver:
         else:
             conv_prog_default = jnp.zeros(conv_shape, dtype=_sd)
         conv_prog = _aux.get("conv_prog", conv_prog_default)
+        # Scheme-tag check (codex round 8): a restored carry whose
+        # SCHEME differs from the configured one must not be reused
+        # even when the shape matches (mass_flux M_c fed as edmf a_u).
+        # Tag absent = legacy checkpoint — accept with a loud warning.
+        _restored_conv_scheme = _aux.get("conv_prog_scheme")
+        if "conv_prog" in _aux:
+            if _restored_conv_scheme is None:
+                if cfg.convection not in ("none",):
+                    logger.warning(
+                        "  Restored conv_prog carries no scheme tag "
+                        "(legacy checkpoint) — assuming it matches "
+                        "convection=%r", cfg.convection,
+                    )
+            elif str(_restored_conv_scheme) != str(cfg.convection):
+                raise ValueError(
+                    f"Restored convection carry was written by scheme "
+                    f"{str(_restored_conv_scheme)!r} but this run "
+                    f"configures convection={cfg.convection!r} — reusing "
+                    "it would feed one scheme's memory to another "
+                    "(issue #405/#413).  Fix the config or remove the "
+                    "conv_prog entries from the checkpoint to opt into "
+                    "a fresh seed."
+                )
         if tuple(conv_prog.shape) != conv_shape:
-            # Checkpoint from a different convection scheme (e.g. legacy
-            # (ncol,) carry restored into a profile-prognostic run):
-            # re-seed the default rather than crashing the scan trace.
-            conv_prog = conv_prog_default
+            # A RESTORED conv_prog with the wrong shape is a checkpoint/
+            # config mismatch — profile-prognostic convection is a real
+            # carry (Tiedtke relaxes the previous updraft profile), so
+            # silently reseeding here is the #405 bug class (codex
+            # round 6; mirrors the tke/qke/gwd_spectrum rule above).
+            # Legacy checkpoints written before the convection scheme
+            # changed must drop the stale carry_conv_prog entry to opt
+            # into a fresh seed.
+            raise ValueError(
+                f"Restored convection carry 'conv_prog' has shape "
+                f"{tuple(conv_prog.shape)} but convection="
+                f"{cfg.convection!r} expects {tuple(conv_shape)} — "
+                "checkpoint and configuration do not match (scheme or "
+                "resolution change, or corruption).  Fix the config or "
+                "remove the carry from the checkpoint to opt into a "
+                "fresh seed (issue #405/#413)."
+            )
 
         # Slab-land skin temperature — restored from the checkpoint when
         # available, otherwise initialized from the lowest model-level
@@ -4051,6 +4384,88 @@ class ModelDriver:
             )
         else:
             T_land = None
+
+        # Stateful-physics carries (issue #413): prognostic turbulent
+        # energy (tke / qke) and the prognostic-spectral GWD wave-action
+        # spectrum, seeded via the canonical ``init_physics_state`` and
+        # restored from the checkpoint's carry_aux when present.  All
+        # ``None`` (zero overhead, byte-identical carry) when every
+        # scheme is diagnostic.  Flattened-column rank-local layout like
+        # conv_prog; like conv_prog, a wrong-shape restore (scheme
+        # switch across restart) re-seeds the default rather than
+        # crashing the scan trace.
+        from legoesm.atmosphere.physics.turbulence.integration import (
+            turbulence_scheme_traits,
+        )
+        _turb_traits = turbulence_scheme_traits(cfg.turbulence)
+        _gwd_prognostic = cfg.gravity_wave_drag == "prognostic_spectral"
+        tke = qke = gwd_spectrum = None
+        if _turb_traits.carries_energy or _gwd_prognostic:
+            from legoesm.atmosphere.physics.combined import PhysicsConfig
+            from legoesm.atmosphere.physics.turbulence import (
+                TurbulenceConfig,
+            )
+            from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+                GravityWaveDragConfig,
+            )
+            from legoesm.atmosphere.physics.physics_state import (
+                init_physics_state,
+            )
+            # Seed dtype rule mirrors the MPAS loop (codex fix riding
+            # 128a037e): the prognostic-spectral GWD kernel's internal
+            # level scan promotes to the default float dtype (f64 under
+            # x64) via its config-derived wavelength grid, so an f32
+            # spectrum carry would change dtype across the scan.  Seed
+            # the default dtype when that scheme is active; storage
+            # dtype otherwise.
+            _seed_dtype = None if _gwd_prognostic else _sd
+            _seed_ps = init_physics_state(
+                conv_ncol, _nlev,
+                PhysicsConfig(
+                    turbulence=TurbulenceConfig(scheme=cfg.turbulence),
+                    gravity_wave_drag=GravityWaveDragConfig(
+                        scheme=cfg.gravity_wave_drag,
+                    ),
+                ),
+                dtype=_seed_dtype,
+            )
+
+            def _seed_carry(name, default):
+                if _ens > 1:
+                    default = jnp.tile(
+                        default[None], (_ens,) + (1,) * default.ndim,
+                    )
+                if name not in _aux:
+                    return default
+                restored = _aux[name]
+                if tuple(restored.shape) != tuple(default.shape):
+                    # A PRESENT carry with the wrong shape = checkpoint /
+                    # config mismatch.  Fail fast — silently reseeding
+                    # is the #405 bug class (codex review).
+                    raise ValueError(
+                        f"Restored stateful-physics carry {name!r} has "
+                        f"shape {tuple(restored.shape)} but this run "
+                        f"expects {tuple(default.shape)} — checkpoint "
+                        "and configuration do not match (resolution / "
+                        "scheme-config / ensemble change or corruption)."
+                        "  Fix the config or remove the carry from the "
+                        "checkpoint to opt into a fresh seed "
+                        "(issue #405/#413)."
+                    )
+                # Pin the restored carry to the seed dtype (the GWD
+                # dtype rule above survives older f32 checkpoints).
+                if restored.dtype != default.dtype:
+                    restored = restored.astype(default.dtype)
+                return restored
+
+            if _turb_traits.energy_field == "tke":
+                tke = _seed_carry("tke", _seed_ps.tke)
+            elif _turb_traits.energy_field == "qke":
+                qke = _seed_carry("qke", _seed_ps.qke)
+            if _gwd_prognostic:
+                gwd_spectrum = _seed_carry(
+                    "gwd_spectrum", _seed_ps.gwd_spectrum,
+                )
 
         # External forcing (rank-local p_s and lat for MPI)
         _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
@@ -4079,6 +4494,9 @@ class ModelDriver:
             "held_sw_down_toa": held_sw_down_toa,
             "conv_prog": conv_prog,
             "T_land": T_land,
+            "tke": tke,
+            "qke": qke,
+            "gwd_spectrum": gwd_spectrum,
             "o3_vmr": o3_vmr, "aerosol_od": aerosol_od, "ghg_vmr": ghg_vmr,
             "lat_deg_grid": lat_deg_grid,
             "_sd": _sd,
@@ -4126,6 +4544,12 @@ class ModelDriver:
 
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
         cfg = ctx["cfg"]
+        # Issue #405/#413: this loop now seeds and threads the
+        # stateful-physics carries (tke / qke / gwd_spectrum ride the
+        # SegmentCarry alongside conv_prog and persist via carry_aux),
+        # so the former stateful-physics refusal is lifted here.
+        # Stochastic Bechtold remains refused at pipeline build time
+        # (its PRNG-key carry is not threaded).
         DT = ctx["DT"]
         N_DAYS = ctx["N_DAYS"]
         START_DAY = ctx["START_DAY"]
@@ -4148,6 +4572,9 @@ class ModelDriver:
         held_sw_down_toa = ctx["held_sw_down_toa"]
         conv_prog = ctx["conv_prog"]
         T_land = ctx["T_land"]
+        phys_tke = ctx["tke"]
+        phys_qke = ctx["qke"]
+        phys_gwd_spectrum = ctx["gwd_spectrum"]
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -4339,6 +4766,9 @@ class ModelDriver:
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
                 T_land=T_land,
+                tke=phys_tke,
+                qke=phys_qke,
+                gwd_spectrum=phys_gwd_spectrum,
                 # Double-moment hydrometeors (None unless the moisture registry +
                 # microphysics carry them) so coupled/training radiation gets
                 # droplet-number-aware r_eff AND a double-moment scheme evolves
@@ -4418,6 +4848,18 @@ class ModelDriver:
             if carry.T_land is not None:
                 T_land = carry.T_land
                 self._carry_aux["T_land"] = T_land
+            # Stateful-physics carries (issue #413): thread the FULL
+            # (per-member under ensembles) fields to the next segment
+            # and persist them via carry_aux (mirrors T_land).
+            if carry.tke is not None:
+                phys_tke = carry.tke
+                self._carry_aux["tke"] = phys_tke
+            if carry.qke is not None:
+                phys_qke = carry.qke
+                self._carry_aux["qke"] = phys_qke
+            if carry.gwd_spectrum is not None:
+                phys_gwd_spectrum = carry.gwd_spectrum
+                self._carry_aux["gwd_spectrum"] = phys_gwd_spectrum
 
             current_step = seg_end_step
 
@@ -4590,6 +5032,12 @@ class ModelDriver:
         # restart-safety for the non-compiled reference path).
         ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
         cfg = ctx["cfg"]
+        # Issue #405/#413: this loop now seeds and threads the
+        # stateful-physics carries (tke / qke / gwd_spectrum, alongside
+        # conv_prog) through the unified physics step and persists them
+        # via carry_aux, so the former stateful-physics refusal is
+        # lifted here.  Stochastic Bechtold remains refused at pipeline
+        # build time (its PRNG-key carry is not threaded).
         DT = ctx["DT"]
         N_DAYS = ctx["N_DAYS"]
         START_DAY = ctx["START_DAY"]
@@ -4627,6 +5075,22 @@ class ModelDriver:
         # T_sfc consistently with the compiled-segment path.  ``None``
         # when the land tile is inactive.
         T_land = ctx["T_land"]
+        # Stateful-physics carries (issue #413), mirroring the compiled
+        # path: None for diagnostic schemes (zero overhead).
+        phys_tke = ctx["tke"]
+        phys_qke = ctx["qke"]
+        phys_gwd_spectrum = ctx["gwd_spectrum"]
+
+        def _phys_carry_step_inputs():
+            """Keyword inputs for the active stateful-physics carries."""
+            kw = {}
+            if phys_tke is not None:
+                kw["tke"] = phys_tke
+            if phys_qke is not None:
+                kw["qke"] = phys_qke
+            if phys_gwd_spectrum is not None:
+                kw["gwd_spectrum"] = phys_gwd_spectrum
+            return kw
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -4669,8 +5133,34 @@ class ModelDriver:
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
                 T_land=T_land, **_dm_step_in,
+                **_phys_carry_step_inputs(),
             )
         conv_prog = phys_out.conv_prog
+        # Stash the FULL restart-relevant carry set at the warmup step
+        # (codex rounds 4/6/8): a one-step run never enters the main
+        # loop, and _finalize_run would otherwise checkpoint stale or
+        # missing carries (held radiation and T_land included — they
+        # were historically only written at diagnostic boundaries).
+        self._carry_aux.update({
+            "held_dT_rad": held_dT_rad,
+            "held_sw_net_sfc": held_sw_net_sfc,
+            "held_lw_net_sfc": held_lw_net_sfc,
+            "held_sw_up_toa": held_sw_up_toa,
+            "held_lw_up_toa": held_lw_up_toa,
+            "held_sw_down_toa": held_sw_down_toa,
+            "conv_prog": conv_prog,
+        })
+        if T_land is not None:
+            self._carry_aux["T_land"] = T_land
+        if phys_out.tke is not None:
+            phys_tke = phys_out.tke
+            self._carry_aux["tke"] = phys_tke
+        if phys_out.qke is not None:
+            phys_qke = phys_out.qke
+            self._carry_aux["qke"] = phys_qke
+        if phys_out.gwd_spectrum is not None:
+            phys_gwd_spectrum = phys_out.gwd_spectrum
+            self._carry_aux["gwd_spectrum"] = phys_gwd_spectrum
 
         # Apply warmup tendencies
         new_T = self.state.T.data + DT * phys_out.dT_dt
@@ -4763,10 +5253,35 @@ class ModelDriver:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
                     T_land=T_land, **_dm_step_in,
+                    **_phys_carry_step_inputs(),
                 )
             conv_prog = phys_out.conv_prog
+            # Persist the full restart-relevant set per step (codex
+            # rounds 6/8): checkpoints can fire on any step, so the
+            # held-radiation fields and every carry must be current —
+            # not just whatever the last diagnostic boundary wrote.
+            self._carry_aux.update({
+                "held_dT_rad": held_dT_rad,
+                "held_sw_net_sfc": held_sw_net_sfc,
+                "held_lw_net_sfc": held_lw_net_sfc,
+                "held_sw_up_toa": held_sw_up_toa,
+                "held_lw_up_toa": held_lw_up_toa,
+                "held_sw_down_toa": held_sw_down_toa,
+                "conv_prog": conv_prog,
+            })
             if T_land is not None:
                 self._carry_aux["T_land"] = T_land
+            # Stateful-physics carries (issue #413): feed the updated
+            # values back next step + persist for checkpoints.
+            if phys_out.tke is not None:
+                phys_tke = phys_out.tke
+                self._carry_aux["tke"] = phys_tke
+            if phys_out.qke is not None:
+                phys_qke = phys_out.qke
+                self._carry_aux["qke"] = phys_qke
+            if phys_out.gwd_spectrum is not None:
+                phys_gwd_spectrum = phys_out.gwd_spectrum
+                self._carry_aux["gwd_spectrum"] = phys_gwd_spectrum
 
             # (c) Update state
             new_T = self.state.T.data + DT * phys_out.dT_dt
@@ -4861,19 +5376,20 @@ class ModelDriver:
                     run_status = error
                     break
 
-                # Store carry_aux for coupling access
-                self._carry_aux = {
+                # Refresh coupling-facing carry_aux entries.  UPDATE —
+                # never rebuild the dict (codex rounds 3/8): a rebuild
+                # dropped held_dT_rad / held_*_toa / T_land / the
+                # stateful-physics carries right before any checkpoint
+                # written on a diagnostic step, silently reseeding them
+                # on restart.  The per-step stash above keeps the full
+                # restart set current; this adds the diagnostics-only
+                # extras.
+                self._carry_aux.update({
                     "held_sw_net_sfc": phys_out.sw_net_sfc,
                     "held_lw_net_sfc": phys_out.lw_net_sfc,
                     "conv_prog": conv_prog,
                     "seg_precip": phys_out.precip,
-                }
-                # Preserve the prognostic slab-land skin temperature
-                # across this diagnostic-step refresh so a checkpoint
-                # written on a diagnostic step still restores T_land
-                # exactly on restart (#325 restart-safety).
-                if T_land is not None:
-                    self._carry_aux["T_land"] = T_land
+                })
 
                 # Segment callback for coupled integration
                 if self._segment_callback is not None:

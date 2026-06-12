@@ -15,7 +15,15 @@ import jax
 
 
 class PhysicsOutput(NamedTuple):
-    """Output from a single physics step."""
+    """Output from a single physics step.
+
+    ``conv_prog`` / ``tke`` / ``qke`` / ``gwd_spectrum`` are UPDATED
+    prognostic carries (not tendencies): the caller feeds them back on
+    the next step (issue #413).  The three stateful slots default to
+    ``None`` — populated only when the corresponding scheme is active
+    and the pipeline threads its carry, so legacy 19-field consumers
+    are unaffected.
+    """
     dT_dt: jax.Array
     dq_v_dt: jax.Array
     dq_c_dt: jax.Array
@@ -37,3 +45,6 @@ class PhysicsOutput(NamedTuple):
     conv_prog: jax.Array
     shflx: jax.Array | None = None   # surface sensible heat flux [W/m2]
     lhflx: jax.Array | None = None   # surface latent heat flux [W/m2]
+    tke: jax.Array | None = None     # updated prognostic TKE (ncol, nlev)
+    qke: jax.Array | None = None     # updated MYNN-2.5 qke=2*TKE (ncol, nlev)
+    gwd_spectrum: jax.Array | None = None  # updated GWD wave-action spectrum

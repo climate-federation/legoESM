@@ -335,10 +335,26 @@ def load_checkpoint(
     q_c = jnp.array(data["q_c"], dtype=_storage_dtype) if "q_c" in data.files else None
     q_r = jnp.array(data["q_r"], dtype=_storage_dtype) if "q_r" in data.files else None
 
-    # Restore carry auxiliary fields (held radiation, etc.)
+    # Restore carry auxiliary fields (held radiation, etc.).  The
+    # stateful-physics carries (issue #413) keep their STORED dtype:
+    # the prognostic-spectral GWD spectrum is persisted at the default
+    # float dtype (its kernel's internal scan breaks on a storage-
+    # downcast carry), and a storage cast here would also make the
+    # restart non-bit-exact for the physics memory.  Everything else
+    # (held radiation, conv_prog, T_land, …) keeps the legacy storage
+    # cast.
+    _keep_stored_dtype = ("tke", "qke", "gwd_spectrum")
     carry_aux = {}
     for key in data.files:
         if key.startswith("carry_"):
-            carry_aux[key[6:]] = jnp.array(data[key], dtype=_storage_dtype)
+            _name = key[6:]
+            if _name == "conv_prog_scheme":
+                # Scheme tag for the convection carry (issue #413) —
+                # a plain string, not a float array.
+                carry_aux[_name] = str(data[key])
+            elif _name in _keep_stored_dtype:
+                carry_aux[_name] = jnp.array(data[key])
+            else:
+                carry_aux[_name] = jnp.array(data[key], dtype=_storage_dtype)
 
     return state, q_v, step, day, config, diag_accumulators, q_c, q_r, carry_aux

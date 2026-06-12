@@ -133,7 +133,7 @@ class TestStage1SingleRankEquivalence:
         dt = 100.0
 
         # Serial step
-        serial_out = serial_model._step_cgrid(
+        serial_out, _ = serial_model._step_cgrid(
             perturbed_state, dt, target_mass=None, physics_fn=None,
         )
 
@@ -256,7 +256,7 @@ class TestStage2Tracers:
         grid = serial_model.grid
         dt = 100.0
 
-        serial_out = serial_model._step_cgrid(
+        serial_out, _ = serial_model._step_cgrid(
             perturbed_state_with_tracers, dt,
             target_mass=None, physics_fn=None,
         )

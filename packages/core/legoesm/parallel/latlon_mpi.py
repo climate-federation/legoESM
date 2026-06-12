@@ -1970,6 +1970,19 @@ def make_latlon_mpi_step(
         dt=_mpi_dt,
     )
 
+    # Issue #405/#413: this wrapper does not thread the PhysicsState
+    # carry between steps — a stateful physics_fn would silently reseed
+    # its prognostic fields every step.  Refuse loudly at build time.
+    if getattr(physics_fn, "_requires_phys_state", False):
+        raise NotImplementedError(
+            "make_latlon_mpi_step does not thread the PhysicsState "
+            "carry yet, so a stateful physics_fn (prognostic TKE-family "
+            "/ MYNN-2.5 turbulence, mass_flux/edmf/bechtold convection, "
+            "prognostic-spectral GWD) would silently reseed every step "
+            "(issue #405/#413).  Use a diagnostic scheme or the "
+            "ModelDriver loops, which thread the carry."
+        )
+
     def step_fn(local_state, dt, *, target_mass=None):
         # No pre-pad, no strip.  The operators inside ``_step_cgrid``
         # call backend-aware halo helpers that, under
@@ -1982,10 +1995,15 @@ def make_latlon_mpi_step(
         # evaluated inside each RK stage on the rank-local state —
         # identical calling convention to the serial
         # ``model.step(state, dt, physics_fn=...)`` delegate.
-        return mpi_model._step_cgrid(
+        # ``_step_cgrid`` returns ``(state_new, phys_state_out)`` since
+        # the #413 carry threading; no carry is threaded here (guarded
+        # above), so unpack and return the state to preserve this
+        # wrapper's documented contract.
+        state_new, _ = mpi_model._step_cgrid(
             local_state, dt,
             target_mass=target_mass,
             physics_fn=physics_fn,
         )
+        return state_new
 
     return step_fn

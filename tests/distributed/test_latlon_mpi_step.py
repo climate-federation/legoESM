@@ -280,7 +280,7 @@ class TestMPIStepEquivalence:
         # free (``is_distributed()`` is False at trace time), so every
         # rank computes the identical bit-exact serial result.
         set_halo_backend("local")
-        serial_out = global_serial_model._step_cgrid(
+        serial_out, _ = global_serial_model._step_cgrid(
             global_state, dt, target_mass=None, physics_fn=None,
         )
         # Materialize before arming MPI so no serial work interleaves
@@ -391,7 +391,7 @@ class TestMPIStepEquivalence:
         set_halo_backend("local")
         serial_out = global_state
         for _ in range(n_steps):
-            serial_out = global_serial_model._step_cgrid(
+            serial_out, _ = global_serial_model._step_cgrid(
                 serial_out, dt, target_mass=None, physics_fn=physics_fn,
             )
         serial_out = jax.block_until_ready(serial_out)

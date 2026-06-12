@@ -383,9 +383,9 @@ class TestStepFV3PCGFallback:
             import warnings
             with warnings.catch_warnings(record=True) as captured:
                 warnings.simplefilter("always")
-                s_pcg = model_pcg._step_fv3(state, dt)
+                s_pcg, _ = model_pcg._step_fv3(state, dt)
                 jax.block_until_ready(s_pcg.p_s.data)
-            s_nodamp = model_nodamp._step_fv3(state, dt)
+            s_nodamp, _ = model_nodamp._step_fv3(state, dt)
         finally:
             _scd.cg_helmholtz_solve = _orig_cg
 
@@ -450,9 +450,9 @@ class TestStepFV3PCGFallback:
         import warnings
         with warnings.catch_warnings(record=True) as captured:
             warnings.simplefilter("always")
-            s_pcg = model_pcg._step_fv3(state, dt)
+            s_pcg, _ = model_pcg._step_fv3(state, dt)
             jax.block_until_ready(s_pcg.p_s.data)
-        s_nodamp = model_nodamp._step_fv3(state, dt)
+        s_nodamp, _ = model_nodamp._step_fv3(state, dt)
 
         # In the converged path, the implicit update modifies p_s
         # away from the no-damping reference.
@@ -505,7 +505,7 @@ class TestImplicitStabilityHeadroom:
     def _run_n_steps(self, model, state, dt, n_steps):
         s = state
         for _ in range(n_steps):
-            s = model._step_fv3(s, dt)
+            s, _ = model._step_fv3(s, dt)
             jax.block_until_ready(s.p_s.data)
         return s
 

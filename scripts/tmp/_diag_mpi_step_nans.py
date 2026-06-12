@@ -151,7 +151,7 @@ def main():
     padded_model = CGridLatLonPrimitiveEquationModel(
         padded_grid, sigma, padded_cfg,
     )
-    padded_new = padded_model._step_cgrid(
+    padded_new, _ = padded_model._step_cgrid(
         padded_state, 100.0, target_mass=None, physics_fn=None,
     )
     _check("padded_step",

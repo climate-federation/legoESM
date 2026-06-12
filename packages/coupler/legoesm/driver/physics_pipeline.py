@@ -21,6 +21,21 @@ from legoesm.core.grid_adapters import make_adapter
 from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
 
 
+def _pin_carry_dtype(updated, carry_in):
+    """Pin an updated stateful-physics carry to its input dtype.
+
+    Keeps the per-step carry dtype-stable (lax.scan requirement and the
+    issue-#413 feed-back contract).  ``carry_in is None`` (fresh seed by
+    the pipeline's warm-start fallback) leaves the update unpinned — the
+    fallback seeds at the column dtype, which is then the stable dtype.
+    """
+    if updated is None or carry_in is None:
+        return updated
+    if updated.dtype != carry_in.dtype:
+        return updated.astype(carry_in.dtype)
+    return updated
+
+
 class PhysicsPipeline:
     """Encapsulates the full physics pipeline for operator-split stepping.
 
@@ -169,6 +184,15 @@ class PhysicsPipeline:
         self._conv_scheme = "none"
         self._grid = None
         self._sigma_coord = None
+        # Stateful-physics carry plumbing (issue #413).  Set by
+        # build_physics_pipeline from the experiment config; the
+        # defaults keep every carry slot inert (diagnostic schemes).
+        # ``_turb_energy_field`` is the kernel keyword AND PhysicsState
+        # slot ("tke" / "qke") from the shared turbulence_scheme_traits;
+        # ``_gwd_prognostic`` marks the spectral GWD scheme whose wave-
+        # action spectrum threads through ``gwd_spectrum``.
+        self._turb_energy_field = None
+        self._gwd_prognostic = False
 
     def _blend_land(self, ocean_field, land_field):
         """Blend an ocean/ice surface field with a land field by ``f_land``.
@@ -223,7 +247,8 @@ class PhysicsPipeline:
                             C_H=None, C_E=None,
                             q_i=None, q_s=None, q_g=None,
                             N_c=None, N_r=None, N_i=None,
-                            T_land=None, aerosol_od=None):
+                            T_land=None, aerosol_od=None,
+                            tke=None, qke=None, gwd_spectrum=None):
         """Convection + microphysics + BL exchange with held radiation.
 
         ``T_land`` is the slab-land skin temperature.  When the land tile
@@ -237,6 +262,18 @@ class PhysicsPipeline:
         column AOD is inverted to a specified droplet number
         (Andreae 2009, ``aerosol_activation.ccn_from_aod``) that fills
         ``hydrometeors.N_c`` for specified-Nc double-moment schemes.
+
+        ``tke`` / ``qke`` / ``gwd_spectrum`` are the stateful-physics
+        carries (issue #413), flattened-column layout like
+        ``conv_prog``: prognostic turbulent energy ``(ncol, nlev)`` for
+        the TKE-family / MYNN-2.5 schemes and the wave-action spectrum
+        ``(ncol, n_azimuths, n_wavenumbers)`` for the prognostic
+        spectral GWD.  The updated values ride the returned
+        ``PhysicsOutput`` (like ``conv_prog``); inactive slots pass
+        through unchanged.  A ``None`` or wrong-shape carry for an
+        ACTIVE scheme raises at trace time — a silent reseed here is
+        exactly the issue-#405 bug class.  Seed with
+        ``init_physics_state`` and feed the updated value back.
         """
         _C_H = self.C_H if C_H is None else C_H
         _C_E = self.C_E if C_E is None else C_E
@@ -309,6 +346,12 @@ class PhysicsPipeline:
             else:
                 conv_prog = jnp.zeros(_prog_shape, dtype=T_col.dtype)
         conv_prog_out = conv_prog
+
+        # Stateful turbulence / GWD carries (issue #413): pass through
+        # unchanged unless the active scheme advances them below.
+        tke_out = tke
+        qke_out = qke
+        gwd_spectrum_out = gwd_spectrum
 
         # --- Grid-operator-backed convection inputs ----------------------
         # Winds for CMT (ZM/Tiedtke/Bechtold), resolved w for the KF
@@ -704,13 +747,44 @@ class PhysicsPipeline:
             q_sat_sfc_col = ad.flatten_2d(
                 saturation_specific_humidity(T_sfc, p_s)
             )
-            turb_out = self.turbulence_fn(
+            _turb_kwargs = dict(
                 u=u_col, v=v_col, T=T_col, q_v=q_v_col,
                 p_full=p_full_col, p_half=p_half_col,
                 z_full=z_full_col, z_half=z_half_col,
                 T_sfc=T_sfc_col, q_sfc=q_sat_sfc_col,
                 rho=rho_col_phys, dt=dt, config=self.turbulence_config,
             )
+            if self._turb_energy_field is not None:
+                # Stateful scheme (issue #413): kernel takes the
+                # prognostic energy under its trait-named keyword
+                # ("tke" for the MY-2.5 family, "qke" for MYNN-2.5)
+                # and returns (TurbulenceOutput, energy_new).  A None
+                # or wrong-shape carry for the ACTIVE scheme means the
+                # caller dropped it — fail loudly at trace time rather
+                # than silently reseed every step (the #405 bug class;
+                # codex review).  Seed via ``init_physics_state`` and
+                # feed the ``PhysicsOutput`` value back each step.
+                _energy_in = tke if self._turb_energy_field == "tke" else qke
+                if (_energy_in is None
+                        or tuple(_energy_in.shape) != (ad.ncol, nlev)):
+                    raise ValueError(
+                        f"turbulence scheme carries prognostic "
+                        f"{self._turb_energy_field!r} but the caller "
+                        "passed "
+                        f"{None if _energy_in is None else tuple(_energy_in.shape)} "
+                        f"(expected {(ad.ncol, nlev)}) — the carry would "
+                        "silently reseed every step (issue #405/#413). "
+                        "Seed it with init_physics_state and thread the "
+                        "updated PhysicsOutput value back."
+                    )
+                _turb_kwargs[self._turb_energy_field] = _energy_in
+                turb_out, _energy_new = self.turbulence_fn(**_turb_kwargs)
+                if self._turb_energy_field == "tke":
+                    tke_out = _energy_new
+                else:
+                    qke_out = _energy_new
+            else:
+                turb_out = self.turbulence_fn(**_turb_kwargs)
             du_dt = du_dt + ad.unflatten_3d(turb_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(turb_out.dv_dt)
             dT_dt = dT_dt + ad.unflatten_3d(turb_out.dT_dt)
@@ -722,13 +796,39 @@ class PhysicsPipeline:
 
         if self.gwd_fn is not None:
             lat_col = ad.flatten_2d(lat)
-            gwd_out = self.gwd_fn(
+            _gwd_kwargs = dict(
                 u=u_col, v=v_col, T=T_col,
                 p_full=p_full_col, p_half=p_half_col,
                 z_full=z_full_col, z_half=z_half_col,
                 rho=rho_col_phys, lat=lat_col,
                 dt=dt, config=self.gwd_config,
             )
+            if self._gwd_prognostic:
+                # Prognostic spectral GWD (issue #413): the wave-action
+                # spectrum is the carry; kernel returns
+                # (GWDOutput, spectrum_new).  None / wrong shape for the
+                # ACTIVE scheme = dropped carry — fail loudly rather
+                # than silently reseed every step (the #405 bug class;
+                # codex review).
+                _sc = self.gwd_config
+                _spec_shape = (ad.ncol, _sc.n_azimuths, _sc.n_wavenumbers)
+                _spec_in = gwd_spectrum
+                if (_spec_in is None
+                        or tuple(_spec_in.shape) != _spec_shape):
+                    raise ValueError(
+                        "prognostic_spectral GWD carries a wave-action "
+                        "spectrum but the caller passed "
+                        f"{None if _spec_in is None else tuple(_spec_in.shape)} "
+                        f"(expected {_spec_shape}) — the carry would "
+                        "silently reseed every step (issue #405/#413). "
+                        "Seed it with init_physics_state and thread the "
+                        "updated PhysicsOutput value back."
+                    )
+                gwd_out, gwd_spectrum_out = self.gwd_fn(
+                    spectrum_in=_spec_in, **_gwd_kwargs,
+                )
+            else:
+                gwd_out = self.gwd_fn(**_gwd_kwargs)
             du_dt = du_dt + ad.unflatten_3d(gwd_out.du_dt)
             dv_dt = dv_dt + ad.unflatten_3d(gwd_out.dv_dt)
             dT_dt = dT_dt + ad.unflatten_3d(gwd_out.dT_dt)
@@ -755,6 +855,16 @@ class PhysicsPipeline:
             conv_prog=conv_prog_out,
             shflx=shflx,
             lhflx=lhflx,
+            # Carry dtype stability: pin each updated carry to its INPUT
+            # dtype so the value fed back next step (and the lax.scan
+            # carry) never changes dtype.  The prognostic-spectral GWD
+            # carry in particular must stay at the seed's default float
+            # dtype — its internal level scan promotes via the config-
+            # derived wavelength grid, so an f32 spectrum breaks the
+            # kernel under x64 (same dtype rule as the MPAS seed).
+            tke=_pin_carry_dtype(tke_out, tke),
+            qke=_pin_carry_dtype(qke_out, qke),
+            gwd_spectrum=_pin_carry_dtype(gwd_spectrum_out, gwd_spectrum),
         )
 
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
@@ -1052,7 +1162,8 @@ class PhysicsPipeline:
                          q_i=None, q_s=None, q_g=None,
                          N_c=None, N_r=None, N_i=None,
                          sfc_albedo_override=None,
-                         sfc_T_override=None):
+                         sfc_T_override=None,
+                         tke=None, qke=None, gwd_spectrum=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -1064,7 +1175,8 @@ class PhysicsPipeline:
                  C_H, C_E, albedo_ice, albedo_ocean,
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
-                 sfc_albedo_override, sfc_T_override) = args
+                 sfc_albedo_override, sfc_T_override,
+                 tke, qke, gwd_spectrum) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new) = \
@@ -1090,9 +1202,14 @@ class PhysicsPipeline:
                     C_H=C_H, C_E=C_E, T_land=T_land,
                     q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
                     aerosol_od=aerosol_od,
+                    tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                 )
 
-                # Cast to storage dtype so both lax.cond branches match
+                # Cast to storage dtype so both lax.cond branches match.
+                # The stateful-physics carries are EXEMPT: their dtype is
+                # pinned to the carry-in dtype by physics_step_no_rad
+                # (storage-downcasting the GWD spectrum here fed an f32
+                # carry back into the f64-internal kernel scan next step).
                 from legoesm.core.precision import get_policy
                 _dt = get_policy().storage
                 _cast = lambda x: x.astype(_dt) if hasattr(x, 'astype') else x
@@ -1100,7 +1217,13 @@ class PhysicsPipeline:
                     dT_dt_rad, sw_net_sfc, lw_net_sfc,
                     sw_up_toa, lw_up_toa, sw_down_toa,
                 ))
+                _carries = (physics_out.tke, physics_out.qke,
+                            physics_out.gwd_spectrum)
                 physics_out = jax.tree.map(_cast, physics_out)
+                physics_out = physics_out._replace(
+                    tke=_carries[0], qke=_carries[1],
+                    gwd_spectrum=_carries[2],
+                )
                 return physics_out, new_held, _cast(T_land_new)
 
             def _no_rad_branch(args):
@@ -1113,7 +1236,8 @@ class PhysicsPipeline:
                  C_H, C_E, albedo_ice, albedo_ocean,
                  ghg_vmr_override, T_land,
                  q_i, q_s, q_g, N_c, N_r, N_i,
-                 sfc_albedo_override, sfc_T_override) = args
+                 sfc_albedo_override, sfc_T_override,
+                 tke, qke, gwd_spectrum) = args
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
@@ -1123,9 +1247,11 @@ class PhysicsPipeline:
                     C_H=C_H, C_E=C_E, T_land=T_land,
                     q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
                     aerosol_od=aerosol_od,
+                    tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
+                # (including the stateful-carry exemption).
                 from legoesm.core.precision import get_policy
                 _dt = get_policy().storage
                 _cast = lambda x: x.astype(_dt) if hasattr(x, 'astype') else x
@@ -1133,7 +1259,13 @@ class PhysicsPipeline:
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ))
+                _carries = (physics_out.tke, physics_out.qke,
+                            physics_out.gwd_spectrum)
                 physics_out = jax.tree.map(_cast, physics_out)
+                physics_out = physics_out._replace(
+                    tke=_carries[0], qke=_carries[1],
+                    gwd_spectrum=_carries[2],
+                )
                 return physics_out, new_held, _cast(T_land)
 
             args = (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -1145,7 +1277,8 @@ class PhysicsPipeline:
                     C_H, C_E, albedo_ice, albedo_ocean,
                     ghg_vmr_override, T_land,
                     q_i, q_s, q_g, N_c, N_r, N_i,
-                    sfc_albedo_override, sfc_T_override)
+                    sfc_albedo_override, sfc_T_override,
+                    tke, qke, gwd_spectrum)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch
@@ -1760,4 +1893,15 @@ def build_physics_pipeline(grid, sigma, config):
     pipeline._conv_scheme = getattr(config, 'convection', 'none')
     pipeline._grid = grid
     pipeline._sigma_coord = sigma
+    # Stateful-physics carry plumbing (issue #413): energy slot from the
+    # shared traits (cannot drift from seeding/guard), prognostic GWD flag.
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        turbulence_scheme_traits,
+    )
+    pipeline._turb_energy_field = turbulence_scheme_traits(
+        getattr(config, 'turbulence', 'none'),
+    ).energy_field
+    pipeline._gwd_prognostic = (
+        getattr(config, 'gravity_wave_drag', 'none') == "prognostic_spectral"
+    )
     return pipeline
