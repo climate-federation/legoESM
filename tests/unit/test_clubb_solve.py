@@ -1,4 +1,4 @@
-"""Unit tests for the CLUBB tridiagonal-solve adapter (``clubb_solve.py``).
+"""Unit tests for the CLUBB tridiagonal-solve adapter (now in ``clubb.py``).
 
 Part of the fuller CLUBB port — see ``PORT_CLUBB.md``.
 """
@@ -15,7 +15,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.turbulence.clubb_solve import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     penta_solve,
     tridiag_solve,
 )

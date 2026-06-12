@@ -147,28 +147,9 @@ EXCLUDED: frozenset[str] = frozenset(
         # Vaisala frequency) — diagnostic helpers feeding the closure, not a
         # single-tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_helpers.py",
-        # CLUBB port: skewness diagnostics (gamma(Skw), Skx, LG05 ansatz) —
-        # pure closure helpers, not a single-tendency scheme.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_skewness.py",
         # CLUBB port: nonlocal mixing-length (Lscale) parcel buoyant-sorting —
         # a diagnostic length scale, not a single-tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_mixing_length.py",
-        # CLUBB port: ADG1 assumed-PDF parameter closure (double-Gaussian
-        # component means/variances/mixture fraction) — closure plumbing feeding
-        # the PDF moment integrals, not a single-tendency scheme.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_pdf.py",
-        # CLUBB port: ADG1 PDF moment integrals + buoyancy-flux assembly
-        # (higher-order moments, wpthvp) — closure plumbing, not a tendency.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_pdf_moments.py",
-        # CLUBB port: tridiagonal-solve adapter (band storage -> thomas_solve)
-        # for the implicit moment advance — a linear-solver helper, not a scheme.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_solve.py",
-        # CLUBB port: mass-conserving vertical hole-filling — a numerical
-        # positivity utility, not a column-physics tendency scheme.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_fill_holes.py",
-        # CLUBB port: dissipation time-scale (tau) family — closure timescale
-        # diagnostics, not a single column-physics tendency scheme.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_tau.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",

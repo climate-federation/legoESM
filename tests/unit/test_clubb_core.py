@@ -272,7 +272,7 @@ def test_pdf_closure_buoyancy_uses_raw_not_floored_variance():
     (un-floored) regridded variances; pinning them there proves the floor does
     not leak a tolerance-level covariance into rtpthvp/thlpthvp."""
     from legoesm.atmosphere.physics.turbulence.clubb_grid import zm2zt, zt2zm
-    from legoesm.atmosphere.physics.turbulence.clubb_pdf_moments import _EP1
+    from legoesm.atmosphere.physics.turbulence.clubb import _EP1
 
     gr, ng, nzm = _gr()
     nzt = nzm - 1

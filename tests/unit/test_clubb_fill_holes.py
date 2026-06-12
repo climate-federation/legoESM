@@ -18,7 +18,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.turbulence.clubb_fill_holes import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     fill_holes_global,
     fill_holes_sliding_window,
     fill_holes_vertical,

@@ -10,24 +10,35 @@ CAM-default model-flag values are recorded as comments at the end of the file.
 
 Table of contents (sections, in order)
 --------------------------------------
-  1. Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2. Moment-advance building blocks + the xp2_xpyp / windm advances
-     (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
-     ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  3. Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
-     ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  4. Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
-     ``clip_skewness``)
-  5. Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
-     ``calc_turb_adv_range``)
-  6. Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
-     coupling + ``solve_xm_wpxp_with_single_lhs``)
-  7. Core orchestration (``compute_clubb_diagnostics`` /
-     ``compute_pdf_closure`` / ``advance_clubb_core`` + the
-     ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  8. Scheme entries (``clubb_turbulence`` diagnostic default /
-     ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
-     ``integrate_clubb_column`` SCM driver)
+  1.  Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
+  2.  Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  3.  Mass-conserving hole filling (``fill_holes_vertical`` /
+      ``fill_holes_wp2_from_horz_tke``)
+  4.  Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+      ``compute_skewness_diagnostics``)
+  5.  Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  6.  ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+      cloud-fraction closure)
+  7.  ADG1 PDF moment integrals + buoyancy-flux assembly
+      (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
+      ``calc_xpthvp_terms``)
+  8.  Moment-advance building blocks + the xp2_xpyp / windm advances
+      (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
+      ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
+  9.  Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+      ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
+  10. Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+      ``clip_skewness``)
+  11. Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+      ``calc_turb_adv_range``)
+  12. Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+      coupling + ``solve_xm_wpxp_with_single_lhs``)
+  13. Core orchestration (``compute_clubb_diagnostics`` /
+      ``compute_pdf_closure`` / ``advance_clubb_core`` + the
+      ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
+  14. Scheme entries (``clubb_turbulence`` diagnostic default /
+      ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
+      ``integrate_clubb_column`` SCM driver)
 
 Phasing (the scheme is wired in and runnable now; fidelity deepens per phase):
 
@@ -65,6 +76,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from jax import lax
 from legoesm.atmosphere.physics._shared import (
     buoyancy_coefficient,
     exner_function,
@@ -74,10 +86,6 @@ from legoesm.atmosphere.physics.turbulence.clubb_config import (
     CLUBBConfig,
     derive_lmin,
     derive_mixt_frac_max_mag,
-)
-from legoesm.atmosphere.physics.turbulence.clubb_fill_holes import (
-    fill_holes_vertical,
-    fill_holes_wp2_from_horz_tke,
 )
 from legoesm.atmosphere.physics.turbulence.clubb_grid import (
     CLUBBGrid,
@@ -96,29 +104,6 @@ from legoesm.atmosphere.physics.turbulence.clubb_mixing_length import (
     compute_mixing_length,
     set_Lscale_max,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_pdf import (
-    ADG1_pdf_driver,
-    calc_comp_corrs_binormal,
-    calc_pdf_liquid_cloud_frac,
-    calc_pdf_liquid_cloud_frac_components,
-)
-from legoesm.atmosphere.physics.turbulence.clubb_pdf_moments import (
-    calc_pdf_higher_order_moments,
-    calc_pdf_xprcp_fluxes,
-    calc_xpthvp_terms,
-)
-from legoesm.atmosphere.physics.turbulence.clubb_skewness import (
-    compute_gamma_Skw,
-    compute_skewness_diagnostics,
-)
-from legoesm.atmosphere.physics.turbulence.clubb_solve import (
-    penta_solve,
-    tridiag_solve,
-)
-from legoesm.atmosphere.physics.turbulence.clubb_tau import (
-    compute_tau_family,
-    compute_tke,
-)
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import compute_surface_fluxes
@@ -126,6 +111,7 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
     implicit_vertical_diffusion_theta,
 )
+from legoesm.timestepping.tridiagonal import thomas_solve
 
 from legoesm import constants
 
@@ -222,7 +208,1152 @@ def diagnose_cloud_and_buoyancy(thlm, rtm, wp2, exner, p_in_Pa, thv_ds, Kh, Lsca
 
 
 # ===========================================================================
-# 2. Moment-advance building blocks + xp2_xpyp / windm advances
+# 2. Implicit band solvers
+# ===========================================================================
+# ``tridiag_solve`` adapts CLUBB's band storage to the shared legoESM Thomas
+# solver (legoesm.timestepping.tridiagonal.thomas_solve); ``penta_solve`` is a
+# verbatim, bit-exact port of CLUBB's pentadiagonal LU (penta_lu_solve).
+
+def tridiag_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
+    """Solve the CLUBB-band tridiagonal system ``lhs @ x = rhs`` per column.
+
+    Parameters
+    ----------
+    lhs : jax.Array
+        Band-stored LHS, shape ``(3, ngrdcol, ndim)`` with rows
+        ``[super, main, sub]`` (see module docstring).
+    rhs : jax.Array
+        Right-hand side, shape ``(ngrdcol, ndim)``.
+
+    Returns
+    -------
+    jax.Array
+        Solution, shape ``(ngrdcol, ndim)``.
+    """
+    sup = lhs[0]   # super (couples to k+1) -> Thomas c
+    mid = lhs[1]   # main diagonal          -> Thomas b
+    sub = lhs[2]   # sub (couples to k-1)   -> Thomas a
+    return thomas_solve(sub, mid, sup, rhs)
+
+
+def penta_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
+    """Solve a pentadiagonal system ``lhs @ x = rhs`` via LU (CLUBB band storage).
+
+    Faithful port of ``penta_lu_solver.F90`` /
+    ``CLUBB-JAX/.../penta_lu_solver.py`` (``penta_lu_solve``). legoESM has no
+    pentadiagonal solver; this is the one used by the coupled moment advances
+    (``advance_wp2_wp3``, ``advance_xm_wpxp``), whose interleaved 2-field systems
+    are pentadiagonal of size ``2*nzm-1``. Pure ``lax.scan`` LU (no module-scope
+    JIT — the caller JITs the physics step); reverse-mode differentiable.
+
+    Parameters
+    ----------
+    lhs : jax.Array
+        Band-stored LHS, shape ``(5, ngrdcol, ndim)`` with rows
+        ``[super2, super1, diag, sub1, sub2]`` (Fortran ``lhs(-2:2)``):
+        ``super2``/``super1`` couple level ``k`` to ``k+2``/``k+1``;
+        ``sub1``/``sub2`` couple to ``k-1``/``k-2``. Requires ``ndim >= 3``.
+    rhs : jax.Array
+        Right-hand side, shape ``(ngrdcol, ndim)``.
+
+    Returns
+    -------
+    jax.Array
+        Solution, shape ``(ngrdcol, ndim)``.
+    """
+    super2_t = lhs[0].T   # (ndim, ngrdcol)
+    super1_t = lhs[1].T
+    diag_t = lhs[2].T
+    sub1_t = lhs[3].T
+    sub2_t = lhs[4].T
+    rhs_t = rhs.T
+    ndim = lhs.shape[2]
+
+    # ---- LU decomposition ----
+    ldi_0 = 1.0 / diag_t[0]
+    u1_0 = ldi_0 * super1_t[0]
+    u2_0 = ldi_0 * super2_t[0]
+    l1_0 = jnp.zeros_like(ldi_0)
+    l2_0 = jnp.zeros_like(ldi_0)
+
+    l1_1 = sub1_t[1]
+    l2_1 = jnp.zeros_like(ldi_0)
+    ldi_1 = 1.0 / (diag_t[1] - l1_1 * u1_0)
+    u1_1 = ldi_1 * (super1_t[1] - l1_1 * u2_0)
+    u2_1 = ldi_1 * super2_t[1]
+
+    def lu_scan_step(carry, x):
+        u1_km1, u1_km2, u2_km1, u2_km2 = carry
+        s2, s1, d, sb1, sb2 = x
+        l2 = sb2
+        l1 = sb1 - l2 * u1_km2
+        ldi = 1.0 / (d - l2 * u2_km2 - l1 * u1_km1)
+        u1 = ldi * (s1 - l1 * u2_km1)
+        u2 = ldi * s2
+        return (u1, u1_km1, u2, u2_km1), (ldi, l1, l2, u1, u2)
+
+    _, (ldi_rest, l1_rest, l2_rest, u1_rest, u2_rest) = lax.scan(
+        lu_scan_step, (u1_1, u1_0, u2_1, u2_0),
+        (super2_t[2:], super1_t[2:], diag_t[2:], sub1_t[2:], sub2_t[2:]))
+
+    ldi_t = jnp.concatenate([ldi_0[None], ldi_1[None], ldi_rest], axis=0)
+    l1_t = jnp.concatenate([l1_0[None], l1_1[None], l1_rest], axis=0)
+    l2_t = jnp.concatenate([l2_0[None], l2_1[None], l2_rest], axis=0)
+    u1_t = jnp.concatenate([u1_0[None], u1_1[None], u1_rest], axis=0)
+    u2_t = jnp.concatenate([u2_0[None], u2_1[None], u2_rest], axis=0)
+
+    # ---- Forward substitution: L y = rhs ----
+    soln_0 = ldi_t[0] * rhs_t[0]
+    soln_1 = ldi_t[1] * (rhs_t[1] - l1_t[1] * soln_0)
+
+    def fwd_scan_step(carry, x):
+        soln_km2, soln_km1 = carry
+        rhs_k, ldi_k, l1_k, l2_k = x
+        soln_k = ldi_k * (rhs_k - l2_k * soln_km2 - l1_k * soln_km1)
+        return (soln_km1, soln_k), soln_k
+
+    _, soln_rest = lax.scan(
+        fwd_scan_step, (soln_0, soln_1),
+        (rhs_t[2:], ldi_t[2:], l1_t[2:], l2_t[2:]))
+    soln_t = jnp.concatenate([soln_0[None], soln_1[None], soln_rest], axis=0)
+
+    # ---- Backward substitution: U x = y ----
+    soln_nm2 = soln_t[ndim - 2] - u1_t[ndim - 2] * soln_t[ndim - 1]
+
+    def bwd_scan_step(carry, x):
+        soln_kp1, soln_kp2 = carry
+        soln_k_fwd, u1_k, u2_k = x
+        soln_k = soln_k_fwd - u1_k * soln_kp1 - u2_k * soln_kp2
+        return (soln_k, soln_kp1), soln_k
+
+    _, soln_bwd_rev = lax.scan(
+        bwd_scan_step, (soln_nm2, soln_t[ndim - 1]),
+        (soln_t[:ndim - 2][::-1], u1_t[:ndim - 2][::-1], u2_t[:ndim - 2][::-1]))
+
+    soln_final_t = jnp.concatenate(
+        [soln_bwd_rev[::-1], soln_nm2[None], soln_t[ndim - 1:ndim]], axis=0)
+    return soln_final_t.T
+
+
+# ===========================================================================
+# 3. Mass-conserving hole filling
+# ===========================================================================
+# fill_holes.F90 ports: the sliding-window / global hole fillers used on the
+# advanced means (CAM ``fill_holes_type = 2``) and the TKE-conserving
+# wp2-from-horizontal-TKE fill (``l_wp2_fill_holes_tke = .true.``).
+
+_NUM_HF_DRAW = 2       # num_hf_draw_points (constants_clubb): sliding-window half-width
+
+
+def fill_holes_global(field, rho_dz, threshold, lower_k, upper_k):
+    """Mass-conserving global hole-fill over ``[lower_k, upper_k]`` (``fill_holes_global``).
+
+    Redistributes mass across the whole column-interval so every level reaches
+    at least ``threshold`` while preserving ``sum(rho_dz * field)``. ``field``,
+    ``rho_dz`` are ``(ngrdcol, nz)``; ``lower_k``/``upper_k`` are static 0-based
+    inclusive bounds. Returns the filled field (unchanged in columns with no
+    hole).
+    """
+    nz = field.shape[1]
+    k_idx = jnp.arange(nz)[None, :]
+    mask = (k_idx >= lower_k) & (k_idx <= upper_k)
+
+    rho_dz_m = jnp.where(mask, rho_dz, 0.0)
+    denom = jnp.sum(rho_dz_m, axis=1, keepdims=True)
+    field_avg = jnp.sum(rho_dz_m * field, axis=1, keepdims=True) / denom
+
+    field_clipped = jnp.where(
+        field_avg >= threshold,
+        jnp.maximum(threshold, field),
+        jnp.minimum(threshold, field),
+    )
+    field_clipped_avg = jnp.sum(rho_dz_m * field_clipped, axis=1, keepdims=True) / denom
+
+    safe = (jnp.abs(field_clipped_avg - threshold)
+            > jnp.abs(field_clipped_avg + threshold) * _EPS / 2.0)
+    mass_frac = jnp.where(
+        safe,
+        (field_avg - threshold) / jnp.where(safe, field_clipped_avg - threshold, 1.0),
+        1.0,
+    )
+    field_new = jnp.where(mask,
+                          threshold + mass_frac * (field_clipped - threshold),
+                          field)
+
+    any_hole = jnp.any(jnp.where(mask, field < threshold, False),
+                       axis=1, keepdims=True)
+    return jnp.where(any_hole, field_new, field)
+
+
+def fill_holes_sliding_window(field, rho_dz, threshold, lower_k, upper_k,
+                              num_draw=_NUM_HF_DRAW):
+    """Sliding-window fill with global fallback (``fill_holes_type = 2``).
+
+    Sweeps a window of width ``2*num_draw + 1`` over the interior, locally
+    redistributing mass to fill holes; if any hole survives the sweep the
+    mass-conserving :func:`fill_holes_global` runs over the full interval. The
+    window length is static (compile-time) so the ``fori_loop`` body has a fixed
+    ``dynamic_slice`` shape. ``lower_k``/``upper_k`` are static 0-based inclusive
+    bounds.
+    """
+    wlen = 2 * num_draw + 1
+
+    def body(k, field_carry):
+        start = k - num_draw
+        field_win = jax.lax.dynamic_slice(
+            field_carry, (0, start), (field_carry.shape[0], wlen))
+        rho_dz_win = jax.lax.dynamic_slice(
+            rho_dz, (0, start), (rho_dz.shape[0], wlen))
+
+        denom = jnp.sum(rho_dz_win, axis=1, keepdims=True)
+        field_avg = jnp.sum(rho_dz_win * field_win, axis=1, keepdims=True) / denom
+        any_hole = jnp.any(field_win < threshold, axis=1, keepdims=True)
+
+        field_clipped = jnp.where(
+            field_avg >= threshold,
+            jnp.maximum(threshold, field_win),
+            jnp.minimum(threshold, field_win),
+        )
+        field_clipped_avg = jnp.sum(rho_dz_win * field_clipped, axis=1, keepdims=True) / denom
+
+        safe = (jnp.abs(field_clipped_avg - threshold)
+                > jnp.abs(field_clipped_avg + threshold) * _EPS / 2.0)
+        mass_frac = jnp.where(
+            safe,
+            (field_avg - threshold) / jnp.where(safe, field_clipped_avg - threshold, 1.0),
+            1.0,
+        )
+        field_win_new = threshold + mass_frac * (field_clipped - threshold)
+        field_win_out = jnp.where(any_hole, field_win_new, field_win)
+        return jax.lax.dynamic_update_slice(field_carry, field_win_out, (0, start))
+
+    start_k = lower_k + num_draw
+    end_k = upper_k - num_draw + 1
+    field_sw = jax.lax.fori_loop(start_k, end_k, body, field)
+
+    return jax.lax.cond(
+        jnp.any(field_sw < threshold),
+        lambda f: fill_holes_global(f, rho_dz, threshold, lower_k, upper_k),
+        lambda f: f,
+        field_sw,
+    )
+
+
+def fill_holes_vertical(field, rho_ds, dz, threshold, lower_k, upper_k,
+                        fill_holes_type, grid_dir_indx=1):
+    """Mass-conserving vertical hole-fill (``fill_holes_vertical_api``).
+
+    Dispatches on the static ``fill_holes_type``: 1 = global, 2 = sliding-window
+    + global fallback (CAM default). ``field``/``rho_ds``/``dz`` are
+    ``(ngrdcol, nz)``; ``lower_k``/``upper_k`` are static 0-based inclusive
+    bounds. Returns a filled copy (input not mutated). Unknown types raise
+    (no silent default).
+
+    JIT contract: ``fill_holes_type``, ``lower_k``, ``upper_k`` and
+    ``grid_dir_indx`` are **compile-time static** (they drive Python branching
+    and the window/slice shapes). In normal use they come from the static
+    ``CLUBBFlags``/grid config and are closed over by the enclosing ``jax.jit``;
+    if this function is jitted directly they must be passed via
+    ``static_argnums=(4, 5, 6, 7)`` (or the matching ``static_argnames``). The
+    array inputs (``field``/``rho_ds``/``dz``) and ``threshold`` are traced and
+    differentiable. ``grid_dir_indx`` is accepted for reference-signature parity
+    but currently unused (the CAM-default ascending grid is grid_dir = +1).
+    """
+    rho_dz = rho_ds * dz
+    if fill_holes_type == 1:
+        return fill_holes_global(field, rho_dz, threshold, lower_k, upper_k)
+    elif fill_holes_type == 2:
+        return fill_holes_sliding_window(field, rho_dz, threshold, lower_k, upper_k)
+    raise ValueError(f"fill_holes_type={fill_holes_type} not supported "
+                     "(CAM-default tree implements 1 and 2)")
+
+
+
+
+def fill_holes_wp2_from_horz_tke(wp2, up2, vp2, threshold, lower_k, upper_k):
+    """TKE-conserving wp2 hole-fill from the horizontal variances (CAM default).
+
+    Faithful port of ``fill_holes.F90:fill_holes_wp2_from_horz_tke``
+    (``l_wp2_fill_holes_tke = .true.``): where ``wp2 < threshold`` and there is
+    available TKE in ``up2``/``vp2`` (``> threshold``), borrow from up2/vp2 to
+    fill the wp2 hole, conserving total ``wp2 + up2 + vp2``. If the available
+    TKE is insufficient (case 1) wp2 takes all of it (up2/vp2 floored to
+    ``threshold``); otherwise (case 2) the deficit is drawn proportionally, with
+    one-sided fallbacks when a component has no surplus. Only levels in the
+    static ``[lower_k, upper_k]`` range are modified. ``wp2``/``up2``/``vp2`` are
+    ``(ncol, nzm)``. Returns ``(wp2, up2, vp2)``.
+    """
+    nzm = wp2.shape[1]
+    k_idx = jnp.arange(nzm)[None, :]
+    in_range = (k_idx >= lower_k) & (k_idx <= upper_k)
+
+    do_fill = in_range & (wp2 < threshold) & ((up2 > threshold) | (vp2 > threshold))
+    missing = threshold - wp2
+    up2_avail = jnp.maximum(up2 - threshold, 0.0)
+    vp2_avail = jnp.maximum(vp2 - threshold, 0.0)
+    total_avail = up2_avail + vp2_avail
+
+    case1 = do_fill & (missing >= total_avail)        # not enough TKE
+    wp2_c1 = wp2 + total_avail
+    up2_c1 = jnp.minimum(up2, threshold)
+    vp2_c1 = jnp.minimum(vp2, threshold)
+
+    case2 = do_fill & (missing < total_avail)          # enough TKE
+    eps_thr = _F64_EPS * 1000.0
+    case2a = case2 & (jnp.abs(up2_avail) < eps_thr)    # take all from vp2
+    case2b = case2 & (~case2a) & (jnp.abs(vp2_avail) < eps_thr)  # take all from up2
+    ratio = jnp.where(
+        total_avail > 0.0, missing / jnp.where(total_avail > 0.0, total_avail, 1.0), 0.0)
+
+    up2_2c = threshold + up2_avail * (1.0 - ratio)
+    vp2_2c = threshold + vp2_avail * (1.0 - ratio)
+    up2_c2 = jnp.where(case2a, up2, jnp.where(case2b, up2 - missing, up2_2c))
+    vp2_c2 = jnp.where(case2a, vp2 - missing, jnp.where(case2b, vp2, vp2_2c))
+
+    wp2_new = jnp.where(case1, wp2_c1, jnp.where(case2, threshold, wp2))
+    up2_new = jnp.where(case1, up2_c1, jnp.where(case2, up2_c2, up2))
+    vp2_new = jnp.where(case1, vp2_c1, jnp.where(case2, vp2_c2, vp2))
+    return wp2_new, up2_new, vp2_new
+
+
+# ===========================================================================
+# 4. Skewness diagnostics
+# ===========================================================================
+# Skx_func / gamma(Skw) / the LG 2005 xp3 ansatz (CAM
+# ``l_advance_xp3 = .false.`` → xp3 diagnosed, not prognosed) and the
+# smoothed wp3_on_wp2 ratio bundle feeding the closure.
+
+# CLUBB ``eps`` = max(1e-10, machine-eps); used only in the degenerate-gamma
+# guard below. A safety tolerance, not a physical constant.
+_WP3_ON_WP2_CLIP = 1000.0   # bound on the wp3/wp2 ratio (calc_wp3_on_wp2)
+
+
+def Skx_func(
+    xp2: jax.Array,
+    xp3: jax.Array,
+    x_tol: float,
+    Skw_denom_coef: float,
+) -> jax.Array:
+    """Skewness of ``x`` with the LG05 sensitivity-reduction denominator.
+
+    ``Skx = xp3 * (xp2 + Skw_denom_coef * x_tol^2)^(-3/2)``
+    (``Skx_module.F90:Skx_func``). With the CAM default ``Skw_denom_coef = 0``
+    this reduces to ``xp3 / xp2^(3/2)``.
+
+    Parameters
+    ----------
+    xp2, xp3 : jax.Array
+        Second and third moments of ``x``.
+    x_tol : float
+        Tolerance for ``x`` (e.g. ``w_tol``/``rt_tol``/``thl_tol``).
+    Skw_denom_coef : float
+        Sensitivity-reduction coefficient (``CLUBBParams.Skw_denom_coef``).
+
+    Returns
+    -------
+    jax.Array
+        Skewness of ``x``.
+    """
+    denom_tol = Skw_denom_coef * x_tol ** 2
+    return xp3 * (xp2 + denom_tol) ** (-1.5)
+
+
+def compute_gamma_Skw(
+    Skw: jax.Array,
+    gamma_coef: float,
+    gamma_coefb: float,
+    gamma_coefc: float,
+    l_gamma_Skw: bool = True,
+) -> jax.Array:
+    """Gamma coefficient as a Gaussian function of w-skewness.
+
+    ``Skx_module.F90:compute_gamma_Skw``. With ``l_gamma_Skw`` on and the two
+    coefficients meaningfully different::
+
+        gamma = gamma_coefb + (gamma_coef - gamma_coefb)
+                              * exp(-0.5 * (Skw / gamma_coefc)^2)
+
+    otherwise ``gamma = gamma_coef`` (constant). The degenerate-coefficient
+    branch is data-independent (depends only on the coefficients), so it is a
+    ``jnp.where`` rather than a Python ``if`` — keeping the coefficients
+    differentiable. ``l_gamma_Skw`` is a static model flag (Python ``if``).
+
+    Parameters
+    ----------
+    Skw : jax.Array
+        Skewness of w (zm or zt levels), shape ``(ngrdcol, nz)``.
+    gamma_coef, gamma_coefb, gamma_coefc : float
+        Tunable gamma coefficients (``CLUBBParams``).
+    l_gamma_Skw : bool, default True
+        Static flag; when False, returns the constant ``gamma_coef``.
+
+    Returns
+    -------
+    jax.Array
+        ``gamma_Skw_fnc`` with ``Skw``'s shape.
+    """
+    if not l_gamma_Skw:
+        return gamma_coef + jnp.zeros_like(Skw)
+    gc = jnp.asarray(gamma_coef)
+    gb = jnp.asarray(gamma_coefb)
+    gcf = jnp.asarray(gamma_coefc)
+    cond = jnp.abs(gc - gb) > jnp.abs(gc + gb) * _EPS / 2.0
+    varying = gb + (gc - gb) * jnp.exp(-0.5 * (Skw / gcf) ** 2)
+    return jnp.where(cond, varying, gc + jnp.zeros_like(Skw))
+
+
+def LG_2005_ansatz(
+    Skw: jax.Array,
+    wpxp: jax.Array,
+    wp2: jax.Array,
+    xp2: jax.Array,
+    sigma_sqd_w: jax.Array,
+    beta: float,
+    x_tol: float,
+    w_tol: float,
+) -> jax.Array:
+    """Skewness of ``x`` from skewness of ``w`` (LG05 eqs. 11, 16, 33).
+
+    ``Skx_module.F90:LG_2005_ansatz``.
+
+    Parameters
+    ----------
+    Skw : jax.Array
+        Skewness of w.
+    wpxp, wp2, xp2 : jax.Array
+        ``w'x'`` flux, w-variance, x-variance.
+    sigma_sqd_w : jax.Array
+        PDF width parameter (< 1).
+    beta : float
+        Tunable LG05 coefficient (``CLUBBParams.beta``).
+    x_tol, w_tol : float
+        Tolerances for ``x`` and ``w`` (floors on the variances).
+
+    Returns
+    -------
+    jax.Array
+        Skewness of ``x``.
+    """
+    one_minus_ssw = 1.0 - sigma_sqd_w
+    nrmlzd_corr_wx = wpxp / jnp.sqrt(
+        jnp.maximum(wp2, w_tol ** 2) * jnp.maximum(xp2, x_tol ** 2) * one_minus_ssw
+    )
+    nrmlzd_Skw = Skw / (one_minus_ssw * jnp.sqrt(one_minus_ssw))
+    return nrmlzd_Skw * nrmlzd_corr_wx * (beta + (1.0 - beta) * nrmlzd_corr_wx ** 2)
+
+
+def xp3_LG_2005_ansatz(
+    Skw_zt: jax.Array,
+    wpxp_zt: jax.Array,
+    wp2_zt: jax.Array,
+    xp2_zt: jax.Array,
+    sigma_sqd_w_zt: jax.Array,
+    beta: float,
+    x_tol: float,
+    w_tol: float,
+    Skw_denom_coef: float,
+) -> jax.Array:
+    """``<x'^3>`` from the LG05 skewness ansatz (inverse of :func:`Skx_func`).
+
+    ``Skx_module.F90:xp3_LG_2005_ansatz``: ``xp3 = Skx * (xp2 + denom_tol)^(3/2)``
+    with ``Skx`` from :func:`LG_2005_ansatz`. Used to diagnose ``xp3`` when
+    ``l_advance_xp3 = .false.`` (CAM default).
+    """
+    Skx_denom_tol = Skw_denom_coef * x_tol ** 2
+    Skx_zt = LG_2005_ansatz(
+        Skw_zt, wpxp_zt, wp2_zt, xp2_zt, sigma_sqd_w_zt, beta, x_tol, w_tol
+    )
+    xp2_safe = xp2_zt + Skx_denom_tol
+    return Skx_zt * xp2_safe * jnp.sqrt(xp2_safe)
+
+
+def calc_wp3_on_wp2(wp2, wp3, w_tol, gr: CLUBBGrid):
+    """Smoothed ``wp3/wp2`` ratio on zm and zt levels (``calc_wp3_on_wp2``).
+
+    ``wp2`` is floored to ``w_tol^2`` on zt, the ratio clipped to ``[-1000,
+    1000]``, then round-tripped zt->zm->zt to suppress spikes. ``wp2`` is
+    zm-level, ``wp3`` zt-level. Returns ``(wp3_on_wp2, wp3_on_wp2_zt)``.
+    """
+    w_tol_sqd = w_tol ** 2
+    wp2_zt = jnp.maximum(zm2zt(wp2, gr), w_tol_sqd)
+    wp3_on_wp2_zt = jnp.clip(wp3 / jnp.maximum(wp2_zt, w_tol_sqd),
+                             -_WP3_ON_WP2_CLIP, _WP3_ON_WP2_CLIP)
+    wp3_on_wp2 = zt2zm(wp3_on_wp2_zt, gr)
+    wp3_on_wp2_zt = zm2zt(wp3_on_wp2, gr)
+    return wp3_on_wp2, wp3_on_wp2_zt
+
+
+def compute_skewness_diagnostics(wp2, wp3, w_tol, Skw_denom_coef, gr: CLUBBGrid):
+    """Skewness + wp3/wp2-ratio diagnostics for the moment advances.
+
+    Assembles ``Skw`` on both grids (:func:`Skx_func`) and the smoothed
+    ``wp3_on_wp2`` ratio (:func:`calc_wp3_on_wp2`) from the carried ``wp2`` (zm)
+    and ``wp3`` (zt). Returns a dict with ``Skw_zm``, ``Skw_zt``, ``wp2_zt``
+    (floored), ``wp3_zm``, ``wp3_on_wp2``, ``wp3_on_wp2_zt`` — the diagnostics the
+    wp2/wp3, xp2/xpyp and xm/wpxp advances consume.
+    """
+    w_tol_sqd = w_tol ** 2
+    wp2_zt = jnp.maximum(zm2zt(wp2, gr), w_tol_sqd)
+    wp3_zm = zt2zm(wp3, gr)
+    Skw_zt = Skx_func(wp2_zt, wp3, w_tol, Skw_denom_coef)
+    Skw_zm = Skx_func(wp2, wp3_zm, w_tol, Skw_denom_coef)
+    wp3_on_wp2, wp3_on_wp2_zt = calc_wp3_on_wp2(wp2, wp3, w_tol, gr)
+    return dict(Skw_zm=Skw_zm, Skw_zt=Skw_zt, wp2_zt=wp2_zt, wp3_zm=wp3_zm,
+                wp3_on_wp2=wp3_on_wp2, wp3_on_wp2_zt=wp3_on_wp2_zt)
+
+
+# ===========================================================================
+# 5. Dissipation time-scale (tau) family
+# ===========================================================================
+# CAM tau family (``l_diag_Lscale_from_tau = .false.`` → SIMPLE
+# ``tau = Lscale/sqrt(em)`` with the N^2 stability correction,
+# ``l_stability_correct_tau_zm = .true.``): TKE em, invrs_tau_C1/C4/C6/C14/
+# xp2_zm and invrs_tau_wp3_zt.
+
+_MAX_STABILITY_CORR = 3.0   # cap on the N2 stability enhancement (advance_helper)
+_EM_MIN_COEF = 1.5          # em_min = 1.5 * w_tol^2 (constants_clubb)
+
+
+def compute_tke(wp2, up2, vp2, gr: CLUBBGrid, config):
+    """Turbulent kinetic energy ``em`` (zm) and ``sqrt_em_zt`` (zt).
+
+    CAM ``l_tke_aniso = .true.`` → ``em = 0.5·(wp2 + vp2 + up2)`` (the anisotropic
+    TKE); the ``.false.`` branch uses ``em = 1.5·wp2``. ``sqrt_em_zt =
+    sqrt(max(zm2zt(em), em_min))`` with ``em_min = 1.5·w_tol^2``. All moment
+    inputs are zm-level. Returns ``(em, sqrt_em_zt)`` — the TKE the tau model and
+    MFL consume.
+    """
+    if config.flags.l_tke_aniso:
+        em = 0.5 * (wp2 + vp2 + up2)
+    else:
+        em = 1.5 * wp2
+    em_min = _EM_MIN_COEF * config.w_tol ** 2
+    sqrt_em_zt = jnp.sqrt(jnp.maximum(zm2zt(em, gr), em_min))
+    return em, sqrt_em_zt
+
+
+def calc_stability_correction(brunt_vaisala_freq_sqd, Lscale_zm, em,
+                              lambda0_stability_coef):
+    """Brunt-Vaisala stability correction factor (``calc_stability_correction``).
+
+    ``1 + min(lambda0·N^2·Lscale_zm^2/em, 3)`` where ``lambda0`` is zeroed in
+    unstable layers (``N^2 <= 0``). All zm-level ``(ncol, nzm)``;
+    ``lambda0_stability_coef`` is the tunable coefficient (scalar or per-column).
+    """
+    lambda0_eff = jnp.where(brunt_vaisala_freq_sqd > 0.0, lambda0_stability_coef, 0.0)
+    return 1.0 + jnp.minimum(
+        lambda0_eff * brunt_vaisala_freq_sqd * Lscale_zm ** 2 / em, _MAX_STABILITY_CORR)
+
+
+def compute_tau_family(Lscale, em, sqrt_em_zt, brunt_vaisala_freq_sqd, gr: CLUBBGrid,
+                       config):
+    """CAM-default ``invrs_tau_*`` family from the parcel ``Lscale`` and TKE.
+
+    ``tau_zt = min(Lscale/sqrt_em_zt, taumax)``, ``tau_zm =
+    min(Lscale_zm/sqrt(max(em_min, em)), taumax)`` with ``Lscale_zm = max(zt2zm
+    (Lscale), 0)``. The stability correction (``l_stability_correct_tau_zm =
+    True``) scales the C1/C6 branch; C4/C14/xp2 use the plain wp2 tau
+    (``l_use_invrs_tau_N2_iso = False``); wp3 uses the zt tau. ``Lscale``/
+    ``sqrt_em_zt`` are zt-level; ``em`` (TKE) / ``brunt_vaisala_freq_sqd`` are
+    zm-level. Returns a dict of the inverse time-scales the advances consume.
+    """
+    params = config.params
+    taumax = params.taumax
+    em_min = _EM_MIN_COEF * config.w_tol ** 2
+
+    tau_zt = jnp.minimum(Lscale / sqrt_em_zt, taumax)
+    Lscale_zm = jnp.maximum(zt2zm(Lscale, gr), 0.0)
+    tau_zm = jnp.minimum(Lscale_zm / jnp.sqrt(jnp.maximum(em_min, em)), taumax)
+    invrs_tau_zm = 1.0 / tau_zm
+    invrs_tau_zt = 1.0 / tau_zt
+
+    # em is floored to em_min here for the stability-correction division (em is
+    # physically TKE >= em_min, so this is forward-identical to the reference's
+    # raw-em form, but keeps the 1/em gradient finite at the floor — AD safety).
+    stability_correction = calc_stability_correction(
+        brunt_vaisala_freq_sqd, Lscale_zm, jnp.maximum(em, em_min),
+        params.lambda0_stability_coef)
+    invrs_tau_N2_zm = invrs_tau_zm * stability_correction
+
+    return dict(
+        invrs_tau_zm=invrs_tau_zm, invrs_tau_zt=invrs_tau_zt,
+        invrs_tau_C1_zm=invrs_tau_N2_zm, invrs_tau_C6_zm=invrs_tau_N2_zm,
+        invrs_tau_C4_zm=invrs_tau_zm, invrs_tau_C14_zm=invrs_tau_zm,
+        invrs_tau_xp2_zm=invrs_tau_zm, invrs_tau_wp3_zt=invrs_tau_zt,
+        tau_zm=tau_zm, tau_zt=tau_zt, stability_correction=stability_correction,
+    )
+
+
+# ===========================================================================
+# 6. ADG1 assumed-PDF parameter closure
+# ===========================================================================
+# The ADG1 double-Gaussian PDF parameters (CAM ``iiPDF_type = ADG1``):
+# component means/variances/mixture fraction, the binormal component
+# correlations, and the liquid cloud-fraction / cloud-water closure (Flatau
+# saturation via clubb_saturation -> legoesm.thermo).
+
+_ZERO = 0.0
+_SKW_TOL = 1.0e-5   # |Skw| below which mixt_frac is pinned to 0.5
+
+# Numerical tolerances / smoothing magnitudes (CLUBB constants_clubb.F90) — not
+# physical constants and not tunable scheme params (safety/smoothing scales).
+_CHI_TOL = max(1.0e-8, jnp.finfo(jnp.float64).eps)   # chi tolerance [kg/kg]
+_MIN_MAX_SMTH_MAG = 1.0e-9        # smoothing magnitude for smooth_max
+_MAX_NUM_STDEVS = 5.0             # PDF truncation range for cloud-frac limits
+
+
+
+
+def ADG1_w_closure(wm, wp2, Skw, sigma_sqd_w, sqrt_wp2, mixt_frac_max_mag):
+    """Mixture fraction and w PDF component parameters (``ADG1_w_closure``).
+
+    Returns ``(w_1, w_2, w_1_n, w_2_n, varnce_w_1, varnce_w_2, mixt_frac)``.
+    ``w_1_n``/``w_2_n`` are the normalized component means
+    (``w_i = wm + sqrt_wp2 * w_i_n``). By construction the two Gaussians
+    reproduce ``wm``, ``wp2``, and ``Skw`` exactly.
+
+    Parameters
+    ----------
+    wm, wp2, Skw, sigma_sqd_w, sqrt_wp2 : jax.Array
+        Mean w, w-variance, w-skewness, PDF width parameter, ``sqrt(wp2)``.
+    mixt_frac_max_mag : float
+        Cap on the mixture fraction (``clubb_config.derive_mixt_frac_max_mag``).
+    """
+    denom_sq = 4.0 * (1.0 - sigma_sqd_w) ** 3 + Skw ** 2
+    mf_formula = 0.5 * (1.0 - Skw / jnp.sqrt(denom_sq))
+    mixt_frac = jnp.where(jnp.abs(Skw) <= _SKW_TOL, 0.5, mf_formula)
+    mixt_frac = jnp.clip(mixt_frac, 1.0 - mixt_frac_max_mag, mixt_frac_max_mag)
+
+    one_minus_mf = 1.0 - mixt_frac
+    sigma_factor = 1.0 - sigma_sqd_w
+    # safe_sqrt: 1-sigma_sqd_w -> 0 in well-mixed/surface layers -> bare sqrt
+    # has an inf reverse-mode gradient there (forward-identical, arg >= 0).
+    w_1_n = safe_sqrt(one_minus_mf / mixt_frac * sigma_factor)
+    w_2_n = -safe_sqrt(mixt_frac / one_minus_mf * sigma_factor)
+
+    w_1 = wm + sqrt_wp2 * w_1_n
+    w_2 = wm + sqrt_wp2 * w_2_n
+    varnce_w_1 = sigma_sqd_w * wp2
+    varnce_w_2 = sigma_sqd_w * wp2
+    return w_1, w_2, w_1_n, w_2_n, varnce_w_1, varnce_w_2, mixt_frac
+
+
+def ADG1_ADG2_responder_params(xm, xp2, wp2, sqrt_wp2, wpxp,
+                               w_1_n, w_2_n, mixt_frac, sigma_sqd_w, beta):
+    """Bi-normal component params for a responder ``x`` (rt/thl/u/v).
+
+    ``ADG1_ADG2_responder_params``. Returns
+    ``(x_1, x_2, varnce_x_1, varnce_x_2, alpha_x)``. By construction the
+    bi-normal reproduces ``xm`` and the covariance ``w'x'`` (``wpxp``) exactly.
+
+    Parameters
+    ----------
+    xm, xp2, wp2, sqrt_wp2, wpxp : jax.Array
+        Mean/variance of x, w-variance, ``sqrt(wp2)``, ``w'x'`` covariance.
+    w_1_n, w_2_n, mixt_frac, sigma_sqd_w : jax.Array
+        ADG1 w-closure outputs.
+    beta : float or jax.Array
+        Tunable parameter (``CLUBBParams.beta``); scalar or per-column
+        ``(ngrdcol,)``.
+    """
+    x_1 = xm - wpxp / (sqrt_wp2 * w_2_n)
+    x_2 = xm - wpxp / (sqrt_wp2 * w_1_n)
+
+    alpha_x = 0.5 * (1.0 - wpxp ** 2 / ((1.0 - sigma_sqd_w) * wp2 * xp2))
+    alpha_x = jnp.clip(alpha_x, _ZERO, 1.0)
+
+    beta_arr = jnp.asarray(beta)
+    beta_bc = beta_arr[:, None] if beta_arr.ndim == 1 else beta_arr
+    two_thirds_beta = (2.0 / 3.0) * beta_bc
+    width_factor_1 = two_thirds_beta + 2.0 * mixt_frac * (1.0 - two_thirds_beta)
+
+    varnce_x_1 = width_factor_1 * xp2 * alpha_x / mixt_frac
+    varnce_x_2 = (2.0 - width_factor_1) * xp2 * alpha_x / (1.0 - mixt_frac)
+    return x_1, x_2, varnce_x_1, varnce_x_2, alpha_x
+
+
+def ADG1_pdf_driver(wm, rtm, thlm, um, vm, wp2, rtp2, thlp2, up2, vp2,
+                    Skw, wprtp, wpthlp, upwp, vpwp, sqrt_wp2, sigma_sqd_w,
+                    beta, mixt_frac_max_mag):
+    """Top-level ADG1 PDF parameter driver (``ADG1_pdf_driver``).
+
+    Closes the ``w`` PDF then the rt/thl/u/v responders. All inputs on zt
+    levels, shape ``(ngrdcol, nzt)``.
+
+    Returns
+    -------
+    dict
+        Component means/variances and mixture fraction for w and each
+        responder (keys ``w_1``/``w_2``/``varnce_w_*``/``mixt_frac``,
+        ``rt_1``/``rt_2``/``varnce_rt_*``/``alpha_rt``, and likewise for
+        ``thl``, ``u``, ``v``).
+    """
+    (w_1, w_2, w_1_n, w_2_n,
+     varnce_w_1, varnce_w_2, mixt_frac) = ADG1_w_closure(
+        wm, wp2, Skw, sigma_sqd_w, sqrt_wp2, mixt_frac_max_mag)
+
+    rt_1, rt_2, varnce_rt_1, varnce_rt_2, alpha_rt = ADG1_ADG2_responder_params(
+        rtm, rtp2, wp2, sqrt_wp2, wprtp, w_1_n, w_2_n, mixt_frac, sigma_sqd_w, beta)
+    thl_1, thl_2, varnce_thl_1, varnce_thl_2, alpha_thl = ADG1_ADG2_responder_params(
+        thlm, thlp2, wp2, sqrt_wp2, wpthlp, w_1_n, w_2_n, mixt_frac, sigma_sqd_w, beta)
+    u_1, u_2, varnce_u_1, varnce_u_2, alpha_u = ADG1_ADG2_responder_params(
+        um, up2, wp2, sqrt_wp2, upwp, w_1_n, w_2_n, mixt_frac, sigma_sqd_w, beta)
+    v_1, v_2, varnce_v_1, varnce_v_2, alpha_v = ADG1_ADG2_responder_params(
+        vm, vp2, wp2, sqrt_wp2, vpwp, w_1_n, w_2_n, mixt_frac, sigma_sqd_w, beta)
+
+    return {
+        "w_1": w_1, "w_2": w_2,
+        "w_1_n": w_1_n, "w_2_n": w_2_n,
+        "varnce_w_1": varnce_w_1, "varnce_w_2": varnce_w_2,
+        "mixt_frac": mixt_frac,
+        "rt_1": rt_1, "rt_2": rt_2,
+        "varnce_rt_1": varnce_rt_1, "varnce_rt_2": varnce_rt_2, "alpha_rt": alpha_rt,
+        "thl_1": thl_1, "thl_2": thl_2,
+        "varnce_thl_1": varnce_thl_1, "varnce_thl_2": varnce_thl_2, "alpha_thl": alpha_thl,
+        "u_1": u_1, "u_2": u_2,
+        "varnce_u_1": varnce_u_1, "varnce_u_2": varnce_u_2, "alpha_u": alpha_u,
+        "v_1": v_1, "v_2": v_2,
+        "varnce_v_1": varnce_v_1, "varnce_v_2": varnce_v_2, "alpha_v": alpha_v,
+    }
+
+
+# ===========================================================================
+# Liquid cloud fraction / cloud water from the ADG1 PDF (pdf_closure_module)
+# ===========================================================================
+
+
+def smooth_corr_quotient(numerator, denominator, denom_thresh):
+    """Smoothly bounded correlation quotient ``num/den`` (``pdf_utilities.F90``).
+
+    Two ``smooth_max`` lifts keep the result a valid correlation: the
+    denominator is raised to at least ``|num|/max_mag_correlation`` (so
+    ``|quotient| <= max_mag_correlation``) and then to ``denom_thresh`` (never
+    divides by ~0). Pure-jnp, differentiable.
+    """
+    num = jnp.asarray(numerator)
+    den = jnp.asarray(denominator)
+    coef = jnp.minimum(_MIN_MAX_SMTH_MAG, denom_thresh)
+
+    def _smax(a, b):
+        return 0.5 * ((a + b) + jnp.sqrt((a - b) ** 2 + coef ** 2))
+
+    tmp = _smax(jnp.abs(num) / _MAX_MAG_CORRELATION, den)
+    tmp = _smax(tmp, denom_thresh)
+    return num / tmp
+
+
+def calc_comp_corrs_binormal(xpyp, xm, ym, mu_x_1, mu_x_2, mu_y_1, mu_y_2,
+                             sigma_x_1_sqd, sigma_x_2_sqd, sigma_y_1_sqd,
+                             sigma_y_2_sqd, mixt_frac):
+    """Shared PDF-component correlation of two bi-normal variables x, y.
+
+    ``pdf_utilities.F90:calc_comp_corrs_binormal``. Both components share one
+    correlation, solved from the overall covariance
+    ``<x'y'> = sum_i w_i[(mu_x_i-<x>)(mu_y_i-<y>) + corr*sigma_x_i*sigma_y_i]``
+    and bounded by :func:`smooth_corr_quotient`. Returns ``(corr, corr)``.
+    """
+    a = jnp.asarray(mixt_frac)
+    numerator = (xpyp - a * (mu_x_1 - xm) * (mu_y_1 - ym)
+                 - (1.0 - a) * (mu_x_2 - xm) * (mu_y_2 - ym))
+    denominator = (a * safe_sqrt(sigma_x_1_sqd * sigma_y_1_sqd)
+                   + (1.0 - a) * safe_sqrt(sigma_x_2_sqd * sigma_y_2_sqd))
+    corr = smooth_corr_quotient(numerator, denominator, _EPS)
+    return corr, corr
+
+
+def transform_pdf_chi_eta_component(tl, rsatl, rt, exner_in,
+                                    varnce_rt, varnce_thl, corr_rt_thl):
+    """Sommeria-Deardorff (rt, thl) -> (chi, eta) transform for one PDF component.
+
+    ``pdf_closure_module.F90:transform_pdf_chi_eta_component``. ``chi`` is the
+    extended liquid water (saturation excess). The local ``cc_slope`` is the
+    Clausius-Clapeyron sensitivity ``eps*L_v^2/(R_d*c_pd*tl^2)`` (NOT the tunable
+    ``beta``). Returns ``(chi, crt, cthl, stdev_chi, stdev_eta, covar_chi_eta,
+    corr_chi_eta)``.
+    """
+    cc_slope = constants.epsilon * constants.L_v ** 2 / (constants.R_d * constants.c_pd * tl ** 2)
+    invrs = 1.0 / (1.0 + cc_slope * rsatl)
+    chi = (rt - rsatl) * invrs
+    crt = invrs
+    cthl = ((1.0 + cc_slope * rt) * invrs ** 2
+            * (constants.c_pd / constants.L_v) * cc_slope * rsatl * exner_in)
+    vrnc_rt_t = crt ** 2 * varnce_rt
+    vrnc_thl_t = cthl ** 2 * varnce_thl
+    # safe_sqrt: component variances can be exactly 0 (e.g. alpha_x clipped to 0
+    # for perfectly-correlated columns), and a bare sqrt has a singular VJP
+    # there. Forward-identical (variances >= 0).
+    corr_t = 2.0 * corr_rt_thl * crt * cthl * safe_sqrt(varnce_rt * varnce_thl)
+    vrnc_chi = vrnc_rt_t - corr_t + vrnc_thl_t
+    vrnc_eta = vrnc_rt_t + corr_t + vrnc_thl_t
+    stdev_chi = safe_sqrt(vrnc_chi)
+    stdev_eta = safe_sqrt(vrnc_eta)
+    covar_chi_eta = vrnc_rt_t - vrnc_thl_t
+    # smooth_corr_quotient (pdf_utilities) bounding corr_chi_eta to [-0.99, 0.99].
+    corr_chi_eta = smooth_corr_quotient(covar_chi_eta, stdev_chi * stdev_eta, _CHI_TOL ** 2)
+    return chi, crt, cthl, stdev_chi, stdev_eta, covar_chi_eta, corr_chi_eta
+
+
+def calc_liquid_cloud_frac_component(mean_chi, stdev_chi):
+    """Liquid cloud fraction + cloud water of one PDF component (Gaussian CDF of chi).
+
+    ``pdf_closure_module.F90:calc_liquid_cloud_frac_component``, with
+    +-``max_num_stdevs`` truncation to the clear / fully-cloudy limits.
+    Returns ``(cloud_frac, rc)``.
+    """
+    mean_chi = jnp.asarray(mean_chi)
+    stdev_chi = jnp.asarray(stdev_chi)
+    is_clear = (((jnp.abs(mean_chi) <= _EPS) & (stdev_chi <= _CHI_TOL))
+                | (mean_chi < -_MAX_NUM_STDEVS * stdev_chi))
+    is_full = mean_chi > _MAX_NUM_STDEVS * stdev_chi
+    # Double-where denominator guard (AD-safe in any precision). Where the PDF
+    # component has resolvable width (``stdev_chi > floor``) the quotient uses
+    # the true stdev (in float64 ``floor`` is below the reference 1e-100, so
+    # active cells are bit-identical to the reference); elsewhere it uses a
+    # dummy denominator of 1, so neither the quotient nor its tangent
+    # ``-mean/safe_s^2`` can overflow regardless of ``mean_chi`` magnitude. Such
+    # zero-width cells are always selected as clear or fully-cloudy below, so the
+    # forward result is unchanged. ``floor = sqrt(tiny)`` keeps ``stdev_chi^2``
+    # representable for the resolvable cells too.
+    dt = stdev_chi.dtype
+    floor = jnp.sqrt(jnp.finfo(dt).tiny)
+    resolvable = stdev_chi > floor
+    safe_s = jnp.where(resolvable, stdev_chi, jnp.asarray(1.0, dt))
+    zeta = mean_chi / safe_s
+    # The Gaussian (cf_mid/rc_mid) is the SELECTED output only on partial-cloud
+    # cells (``partial``), where |zeta| <= max_num_stdevs already — there it uses
+    # the RAW zeta, so the active-cell value AND gradient are reference-identical
+    # (including exactly at the cutoff mean_chi = +-max_num_stdevs*stdev_chi,
+    # which the strict clear/full comparisons keep in the partial branch).
+    # On masked clear/full cells the Gaussian is discarded, so zeta is clamped
+    # there only to stop ``exp(-0.5*zeta^2)`` from overflowing (-> NaN VJP) in
+    # float32 where the masked zeta can be enormous.
+    partial = ~(is_clear | is_full)
+    zeta_g = jnp.where(partial, zeta, jnp.clip(zeta, -_MAX_NUM_STDEVS, _MAX_NUM_STDEVS))
+    cf_mid = 0.5 * (1.0 + jax.scipy.special.erf(zeta_g / _SQRT_2))
+    rc_mid = mean_chi * cf_mid + stdev_chi * jnp.exp(-0.5 * zeta_g ** 2) / _SQRT_2PI
+    cf = jnp.where(is_clear, 0.0, jnp.where(is_full, 1.0, cf_mid))
+    rc = jnp.where(is_clear, 0.0, jnp.where(is_full, mean_chi, rc_mid))
+    return cf, rc
+
+
+def calc_pdf_liquid_cloud_frac(adg1, rtpthlp, rtm, thlm, exner, p_in_Pa):
+    """Liquid cloud fraction and cloud water from the ADG1 PDF components.
+
+    Derives the bi-normal rt-thl component correlation from the resolved
+    covariance ``rtpthlp``, applies the chi-eta transform per component, the
+    Gaussian cloud-fraction integral per component, and combines by mixture
+    fraction (``pdf_closure_module.F90`` pre-advance path). Saturation is Flatau
+    (CAM default) via :mod:`clubb_saturation`.
+
+    Parameters
+    ----------
+    adg1 : dict
+        Output of :func:`ADG1_pdf_driver` (component means/variances + mixt_frac).
+    rtpthlp, rtm, thlm, exner, p_in_Pa : jax.Array
+        ``r_t' theta_l'`` covariance, mean total water, mean theta_l, Exner, and
+        pressure [Pa], all on zt levels, shape ``(ngrdcol, nzt)``.
+
+    Returns
+    -------
+    tuple of jax.Array
+        ``(rcm, cloud_frac)`` on zt levels — cloud water [kg/kg] and liquid
+        cloud fraction [-].
+    """
+    comp = calc_pdf_liquid_cloud_frac_components(
+        adg1, rtpthlp, rtm, thlm, exner, p_in_Pa)
+    return comp["rcm"], comp["cloud_frac"]
+
+
+def calc_pdf_liquid_cloud_frac_components(adg1, rtpthlp, rtm, thlm, exner, p_in_Pa):
+    """Per-component liquid cloud-fraction PDF closure (the full intermediates).
+
+    Like :func:`calc_pdf_liquid_cloud_frac` but returns every per-component
+    intermediate (``chi``/``crt``/``cthl``/``stdev_chi``/``stdev_eta``/
+    ``corr_ce``/``cf``/``rc`` for components 1 and 2, plus ``mixt_frac``,
+    ``cloud_frac`` and ``rcm``). The cloud-water flux assembly
+    (:func:`calc_pdf_xprcp_fluxes`) consumes these.
+    Mirrors ``pdf_closure_module.F90:calc_pdf_liquid_cloud_frac_components``.
+    """
+    from legoesm.atmosphere.physics.turbulence.clubb_saturation import sat_mixrat_liq
+
+    corr_1, corr_2 = calc_comp_corrs_binormal(
+        rtpthlp, rtm, thlm, adg1["rt_1"], adg1["rt_2"], adg1["thl_1"], adg1["thl_2"],
+        adg1["varnce_rt_1"], adg1["varnce_rt_2"], adg1["varnce_thl_1"],
+        adg1["varnce_thl_2"], adg1["mixt_frac"])
+
+    mf = adg1["mixt_frac"]
+    tl_1 = adg1["thl_1"] * exner
+    tl_2 = adg1["thl_2"] * exner
+    rsatl_1 = sat_mixrat_liq(p_in_Pa, tl_1)
+    rsatl_2 = sat_mixrat_liq(p_in_Pa, tl_2)
+
+    (chi_1, crt_1, cthl_1, schi_1, seta_1, _, corr_ce_1) = transform_pdf_chi_eta_component(
+        tl_1, rsatl_1, adg1["rt_1"], exner, adg1["varnce_rt_1"], adg1["varnce_thl_1"], corr_1)
+    (chi_2, crt_2, cthl_2, schi_2, seta_2, _, corr_ce_2) = transform_pdf_chi_eta_component(
+        tl_2, rsatl_2, adg1["rt_2"], exner, adg1["varnce_rt_2"], adg1["varnce_thl_2"], corr_2)
+
+    cf_1, rc_1 = calc_liquid_cloud_frac_component(chi_1, schi_1)
+    cf_2, rc_2 = calc_liquid_cloud_frac_component(chi_2, schi_2)
+
+    cloud_frac = mf * cf_1 + (1.0 - mf) * cf_2
+    rcm = jnp.maximum(0.0, mf * rc_1 + (1.0 - mf) * rc_2)
+    return {
+        "mixt_frac": mf, "cloud_frac": cloud_frac, "rcm": rcm,
+        "chi_1": chi_1, "chi_2": chi_2,
+        "crt_1": crt_1, "crt_2": crt_2, "cthl_1": cthl_1, "cthl_2": cthl_2,
+        "stdev_chi_1": schi_1, "stdev_chi_2": schi_2,
+        "stdev_eta_1": seta_1, "stdev_eta_2": seta_2,
+        "corr_ce_1": corr_ce_1, "corr_ce_2": corr_ce_2,
+        "cf_1": cf_1, "cf_2": cf_2, "rc_1": rc_1, "rc_2": rc_2,
+    }
+
+
+# ===========================================================================
+# 7. ADG1 PDF moment integrals + buoyancy-flux assembly
+# ===========================================================================
+# PDF moment integrals over the ADG1 components: higher-order velocity
+# moments (wp4, wp2up2, ...), cloud-water turbulent fluxes (x'rc'), and the
+# buoyancy-flux assembly wpthvp / wp2thvp / rtpthvp / thlpthvp.
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# Two-/tri-normal PDF moment integrals (pure; no physical constants)
+# ---------------------------------------------------------------------------
+
+def calc_wp2xp_pdf(wm, xm, w_1, w_2, x_1, x_2, varnce_w_1, varnce_w_2,
+                   varnce_x_1, varnce_x_2, corr_w_x_1, corr_w_x_2, mixt_frac):
+    """``<w'^2 x'>`` over the binormal (w, x) PDF (``calc_wp2xp_pdf``)."""
+    a = mixt_frac
+    dw1, dw2 = w_1 - wm, w_2 - wm
+    dx1, dx2 = x_1 - xm, x_2 - xm
+    return (a * ((dw1 ** 2 + varnce_w_1) * dx1
+                 + 2.0 * corr_w_x_1 * safe_sqrt(varnce_w_1 * varnce_x_1) * dw1)
+            + (1.0 - a) * ((dw2 ** 2 + varnce_w_2) * dx2
+                           + 2.0 * corr_w_x_2 * safe_sqrt(varnce_w_2 * varnce_x_2) * dw2))
+
+
+def calc_wpxp2_pdf(wm, xm, w_1, w_2, x_1, x_2, varnce_w_1, varnce_w_2,
+                   varnce_x_1, varnce_x_2, corr_w_x_1, corr_w_x_2, mixt_frac):
+    """``<w'x'^2>`` over the binormal (w, x) PDF (``calc_wpxp2_pdf``)."""
+    a = mixt_frac
+    dw1, dw2 = w_1 - wm, w_2 - wm
+    dx1, dx2 = x_1 - xm, x_2 - xm
+    return (a * (dw1 * (dx1 ** 2 + varnce_x_1)
+                 + 2.0 * corr_w_x_1 * safe_sqrt(varnce_w_1 * varnce_x_1) * dx1)
+            + (1.0 - a) * (dw2 * (dx2 ** 2 + varnce_x_2)
+                           + 2.0 * corr_w_x_2 * safe_sqrt(varnce_w_2 * varnce_x_2) * dx2))
+
+
+def calc_wp2xp2_pdf(wm, xm, w_1, w_2, x_1, x_2, varnce_w_1, varnce_w_2,
+                    varnce_x_1, varnce_x_2, corr_w_x_1, corr_w_x_2, mixt_frac):
+    """``<w'^2 x'^2>`` over the binormal (w, x) PDF (``calc_wp2xp2_pdf``)."""
+    a = mixt_frac
+    dw1, dw2 = w_1 - wm, w_2 - wm
+    dx1, dx2 = x_1 - xm, x_2 - xm
+    term1 = (dw1 ** 2 * (dx1 ** 2 + varnce_x_1)
+             + 4.0 * corr_w_x_1 * safe_sqrt(varnce_w_1 * varnce_x_1) * dx1 * dw1
+             + (dx1 ** 2 + (1.0 + 2.0 * corr_w_x_1 ** 2) * varnce_x_1) * varnce_w_1)
+    term2 = (dw2 ** 2 * (dx2 ** 2 + varnce_x_2)
+             + 4.0 * corr_w_x_2 * safe_sqrt(varnce_w_2 * varnce_x_2) * dx2 * dw2
+             + (dx2 ** 2 + (1.0 + 2.0 * corr_w_x_2 ** 2) * varnce_x_2) * varnce_w_2)
+    return a * term1 + (1.0 - a) * term2
+
+
+def calc_wp4_pdf(wm, w_1, w_2, varnce_w_1, varnce_w_2, mixt_frac):
+    """``<w'^4>`` over the two-component normal w-PDF (``calc_wp4_pdf``)."""
+    a = mixt_frac
+    d1, d2 = w_1 - wm, w_2 - wm
+    return (a * (3.0 * varnce_w_1 ** 2 + 6.0 * d1 ** 2 * varnce_w_1 + d1 ** 4)
+            + (1.0 - a) * (3.0 * varnce_w_2 ** 2 + 6.0 * d2 ** 2 * varnce_w_2 + d2 ** 4))
+
+
+def calc_wpxpyp_pdf(wm, xm, ym, w_1, w_2, x_1, x_2, y_1, y_2,
+                    varnce_w_1, varnce_w_2, varnce_x_1, varnce_x_2, varnce_y_1, varnce_y_2,
+                    corr_w_x_1, corr_w_x_2, corr_w_y_1, corr_w_y_2,
+                    corr_x_y_1, corr_x_y_2, mixt_frac):
+    """``<w'x'y'>`` over the trinormal (w, x, y) PDF (``calc_wpxpyp_pdf``)."""
+    a = mixt_frac
+    dw1, dw2 = w_1 - wm, w_2 - wm
+    dx1, dx2 = x_1 - xm, x_2 - xm
+    dy1, dy2 = y_1 - ym, y_2 - ym
+    comp1 = (dw1 * dx1 * dy1 + corr_x_y_1 * safe_sqrt(varnce_x_1 * varnce_y_1) * dw1
+             + corr_w_y_1 * safe_sqrt(varnce_w_1 * varnce_y_1) * dx1
+             + corr_w_x_1 * safe_sqrt(varnce_w_1 * varnce_x_1) * dy1)
+    comp2 = (dw2 * dx2 * dy2 + corr_x_y_2 * safe_sqrt(varnce_x_2 * varnce_y_2) * dw2
+             + corr_w_y_2 * safe_sqrt(varnce_w_2 * varnce_y_2) * dx2
+             + corr_w_x_2 * safe_sqrt(varnce_w_2 * varnce_x_2) * dy2)
+    return a * comp1 + (1.0 - a) * comp2
+
+
+# ---------------------------------------------------------------------------
+# Higher-order-moment orchestration (ADG1: velocity-scalar corrs = 0)
+# ---------------------------------------------------------------------------
+
+def calc_pdf_higher_order_moments(adg1, wm_zt, rtm, thlm, um, vm,
+                                  corr_rt_thl_1, corr_rt_thl_2, gr: CLUBBGrid):
+    """Integrate the ADG1 PDF for the velocity-scalar higher-order moments.
+
+    Returns a dict with the Fortran moment names (``wp2rtp``, ``wp2thlp``,
+    ``wp2up``, ``wpup2``, ``wpvp2``, ``wp2up2_zm``, ``wp2vp2_zm``, ``wp4_zm``,
+    ``wprtp2``, ``wpthlp2``, ``wprtpthlp``). For ADG1 the w-scalar correlations
+    are zero; only ``corr_rt_thl`` (per component) is nonzero.
+    """
+    mf = adg1["mixt_frac"]
+    z = jnp.zeros_like(mf)
+    w1, w2 = adg1["w_1"], adg1["w_2"]
+    vw1, vw2 = adg1["varnce_w_1"], adg1["varnce_w_2"]
+    nzm = gr.zm.shape[1]
+    k_ub = nzm - 1
+    k_lb = 0
+
+    def _wp2xp(xm, x1, x2, vx1, vx2):
+        return calc_wp2xp_pdf(wm_zt, xm, w1, w2, x1, x2, vw1, vw2, vx1, vx2, z, z, mf)
+
+    def _wpxp2(xm, x1, x2, vx1, vx2):
+        return calc_wpxp2_pdf(wm_zt, xm, w1, w2, x1, x2, vw1, vw2, vx1, vx2, z, z, mf)
+
+    def _wp2xp2(xm, x1, x2, vx1, vx2):
+        return calc_wp2xp2_pdf(wm_zt, xm, w1, w2, x1, x2, vw1, vw2, vx1, vx2, z, z, mf)
+
+    wp2rtp = _wp2xp(rtm, adg1["rt_1"], adg1["rt_2"], adg1["varnce_rt_1"], adg1["varnce_rt_2"])
+    wp2thlp = _wp2xp(thlm, adg1["thl_1"], adg1["thl_2"], adg1["varnce_thl_1"], adg1["varnce_thl_2"])
+    wp2up = _wp2xp(um, adg1["u_1"], adg1["u_2"], adg1["varnce_u_1"], adg1["varnce_u_2"])
+    wpup2 = _wpxp2(um, adg1["u_1"], adg1["u_2"], adg1["varnce_u_1"], adg1["varnce_u_2"])
+    wpvp2 = _wpxp2(vm, adg1["v_1"], adg1["v_2"], adg1["varnce_v_1"], adg1["varnce_v_2"])
+
+    wp2up2_zt = _wp2xp2(um, adg1["u_1"], adg1["u_2"], adg1["varnce_u_1"], adg1["varnce_u_2"])
+    wp2vp2_zt = _wp2xp2(vm, adg1["v_1"], adg1["v_2"], adg1["varnce_v_1"], adg1["varnce_v_2"])
+    wp2up2_zm = zt2zm(wp2up2_zt, gr).at[:, k_ub].set(0.0)
+    wp2vp2_zm = zt2zm(wp2vp2_zt, gr).at[:, k_ub].set(0.0)
+
+    wp4_zt = calc_wp4_pdf(wm_zt, w1, w2, vw1, vw2, mf)
+    wp4_zm = zt2zm(wp4_zt, gr, zm_min=0.0).at[:, k_lb].set(0.0).at[:, k_ub].set(0.0)
+
+    wprtp2 = _wpxp2(rtm, adg1["rt_1"], adg1["rt_2"], adg1["varnce_rt_1"], adg1["varnce_rt_2"])
+    wpthlp2 = _wpxp2(thlm, adg1["thl_1"], adg1["thl_2"], adg1["varnce_thl_1"], adg1["varnce_thl_2"])
+
+    wprtpthlp = calc_wpxpyp_pdf(
+        wm_zt, rtm, thlm, w1, w2, adg1["rt_1"], adg1["rt_2"], adg1["thl_1"], adg1["thl_2"],
+        vw1, vw2, adg1["varnce_rt_1"], adg1["varnce_rt_2"],
+        adg1["varnce_thl_1"], adg1["varnce_thl_2"],
+        z, z, z, z, corr_rt_thl_1, corr_rt_thl_2, mf)
+
+    return {
+        "wp2rtp": wp2rtp, "wp2thlp": wp2thlp, "wp2up": wp2up,
+        "wpup2": wpup2, "wpvp2": wpvp2,
+        "wp2up2_zm": wp2up2_zm, "wp2vp2_zm": wp2vp2_zm, "wp4_zm": wp4_zm,
+        "wprtp2": wprtp2, "wpthlp2": wpthlp2, "wprtpthlp": wprtpthlp,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cloud-water fluxes x'rc' (ADG1: corr_w_chi = 0)
+# ---------------------------------------------------------------------------
+
+def calc_xprcp_component(wm, rtm, thlm, um, vm, rcm,
+                         w_i, rt_i, thl_i, u_i, v_i, varnce_w_i,
+                         stdev_chi_i, stdev_eta_i, corr_chi_eta_i, crt_i, cthl_i,
+                         rc_i, cloud_frac_i):
+    """Per-component cloud-water covariances (``calc_xprcp_component``, ADG1).
+
+    Returns ``(wprcp, wp2rcp, rtprcp, thlprcp, uprcp, vprcp)``. ``crt_i``/``cthl_i``
+    are the chi sensitivities from the chi/eta transform; the ``cthl=0`` (rsatl=0)
+    limit is guarded (the result is masked by ``cloud_frac=0`` there).
+    """
+    drc = rc_i - rcm
+    wprcp = (w_i - wm) * drc
+    wp2rcp = ((w_i - wm) ** 2 + varnce_w_i) * drc
+    crt_safe = jnp.where(crt_i == 0.0, 1.0, crt_i)
+    rtprcp = ((rt_i - rtm) * drc
+              + (corr_chi_eta_i * stdev_eta_i + stdev_chi_i) / (2.0 * crt_safe)
+              * stdev_chi_i * cloud_frac_i)
+    cthl_safe = jnp.where(cthl_i == 0.0, 1.0, cthl_i)
+    thlprcp = ((thl_i - thlm) * drc
+               + (corr_chi_eta_i * stdev_eta_i - stdev_chi_i) / (2.0 * cthl_safe)
+               * stdev_chi_i * cloud_frac_i)
+    uprcp = (u_i - um) * drc
+    vprcp = (v_i - vm) * drc
+    return wprcp, wp2rcp, rtprcp, thlprcp, uprcp, vprcp
+
+
+def calc_pdf_xprcp_fluxes(adg1, comp, wm_zt, rtm, thlm, um, vm, rcm_zt, gr: CLUBBGrid):
+    """Mixed cloud-water turbulent fluxes from the ADG1 PDF (``calc_pdf_xprcp_fluxes``).
+
+    Calls :func:`calc_xprcp_component` for each PDF component, mixes the six
+    fluxes (``w'rc'``, ``w'^2 rc'``, ``rt'rc'``, ``thl'rc'``, ``u'rc'``,
+    ``v'rc'``) by ``mixt_frac`` on zt, then regrids the five zm-output fluxes
+    zt->zm with the top momentum level (``k_ub_zm``) zeroed (corr_w_chi = 0 for
+    ADG1). ``comp`` is the per-component dict from
+    :func:`calc_pdf_liquid_cloud_frac_components`.
+
+    Returns a dict with the zt-grid fluxes (consumed by the buoyancy-flux
+    assembly, which wants the native pdf-grid values) and the regridded zm fluxes.
+    """
+    mf = comp["mixt_frac"]
+    k_ub = gr.zm.shape[1] - 1
+
+    c1 = calc_xprcp_component(
+        wm_zt, rtm, thlm, um, vm, rcm_zt,
+        adg1["w_1"], adg1["rt_1"], adg1["thl_1"], adg1["u_1"], adg1["v_1"],
+        adg1["varnce_w_1"], comp["stdev_chi_1"], comp["stdev_eta_1"],
+        comp["corr_ce_1"], comp["crt_1"], comp["cthl_1"], comp["rc_1"], comp["cf_1"])
+    c2 = calc_xprcp_component(
+        wm_zt, rtm, thlm, um, vm, rcm_zt,
+        adg1["w_2"], adg1["rt_2"], adg1["thl_2"], adg1["u_2"], adg1["v_2"],
+        adg1["varnce_w_2"], comp["stdev_chi_2"], comp["stdev_eta_2"],
+        comp["corr_ce_2"], comp["crt_2"], comp["cthl_2"], comp["rc_2"], comp["cf_2"])
+
+    wprcp_zt, wp2rcp_zt, rtprcp_zt, thlprcp_zt, uprcp_zt, vprcp_zt = (
+        mf * a + (1.0 - mf) * b for a, b in zip(c1, c2))
+
+    def _to_zm(field_zt):
+        return zt2zm(field_zt, gr).at[:, k_ub].set(0.0)
+
+    return {
+        "wprcp_zt": wprcp_zt, "wp2rcp_zt": wp2rcp_zt, "rtprcp_zt": rtprcp_zt,
+        "thlprcp_zt": thlprcp_zt, "uprcp_zt": uprcp_zt, "vprcp_zt": vprcp_zt,
+        "wprcp_zm": _to_zm(wprcp_zt), "rtprcp_zm": _to_zm(rtprcp_zt),
+        "thlprcp_zm": _to_zm(thlprcp_zt), "uprcp_zm": _to_zm(uprcp_zt),
+        "vprcp_zm": _to_zm(vprcp_zt),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Buoyancy fluxes x'thv' (uses legoesm.constants)
+# ---------------------------------------------------------------------------
+
+def calc_xpthvp_terms(exner, thv_ds_zt, wprcp_zt, wp2rcp_zt, rtprcp_zt, thlprcp_zt,
+                      wpthlp_zt, wprtp_zt, wp2thlp_zt, wp2rtp_zt,
+                      rtpthlp_zt, rtp2_zt, thlp2_zt, gr: CLUBBGrid):
+    """Virtual-potential-temperature (buoyancy) fluxes (``calc_xpthvp_terms``).
+
+    ``rc_coef = L_v/(exner*c_pd) - ep2*thv_ds`` and
+    ``x'thv' = x'thl' + ep1*thv_ds*x'rt' + rc_coef*x'rc'`` for ``x in {w, w^2,
+    rt, thl}``. The three zm-output fluxes (and ``rc_coef``) are regridded zt->zm
+    with the top momentum level zeroed; ``wp2thvp`` stays on zt.
+
+    Returns ``(wpthvp_zm, wp2thvp_zt, rtpthvp_zm, thlpthvp_zm, rc_coef_zt,
+    rc_coef_zm)``.
+    """
+    lv, cp = constants.L_v, constants.c_pd
+    rc_coef_zt = lv / (exner * cp) - _EP2 * thv_ds_zt
+    wpthvp_zt = wpthlp_zt + _EP1 * thv_ds_zt * wprtp_zt + rc_coef_zt * wprcp_zt
+    wp2thvp_zt = wp2thlp_zt + _EP1 * thv_ds_zt * wp2rtp_zt + rc_coef_zt * wp2rcp_zt
+    rtpthvp_zt = rtpthlp_zt + _EP1 * thv_ds_zt * rtp2_zt + rc_coef_zt * rtprcp_zt
+    thlpthvp_zt = thlp2_zt + _EP1 * thv_ds_zt * rtpthlp_zt + rc_coef_zt * thlprcp_zt
+    k_ub = gr.zm.shape[1] - 1
+    wpthvp_zm = zt2zm(wpthvp_zt, gr).at[:, k_ub].set(0.0)
+    rtpthvp_zm = zt2zm(rtpthvp_zt, gr).at[:, k_ub].set(0.0)
+    thlpthvp_zm = zt2zm(thlpthvp_zt, gr).at[:, k_ub].set(0.0)
+    rc_coef_zm = zt2zm(rc_coef_zt, gr).at[:, k_ub].set(0.0)
+    return wpthvp_zm, wp2thvp_zt, rtpthvp_zm, thlpthvp_zm, rc_coef_zt, rc_coef_zm
+
+
+# ===========================================================================
+# 8. Moment-advance building blocks + xp2_xpyp / windm advances
 # ===========================================================================
 # The shared implicit-advance machinery (diffusion/mean-advection LHS
 # builders, Cauchy-Schwarz clipping family) plus two of the four CAM-order
@@ -857,7 +1988,7 @@ def pos_definite_variances(field, rho_ds_zm, dzm, threshold, hf_lower, hf_upper,
                            fill_holes_type):
     """Mass-conserving hole-fill of one variance field (``pos_definite_variances``).
 
-    Thin wrapper over :func:`clubb_fill_holes.fill_holes_vertical` (CAM default
+    Thin wrapper over :func:`fill_holes_vertical` (CAM default
     ``fill_holes_type = 2``): restores ``field >= threshold`` over the zm
     interior ``[hf_lower, hf_upper]`` while conserving ``sum(rho_ds·dz·field)``.
     ``hf_lower``/``hf_upper``/``fill_holes_type`` are **compile-time static**
@@ -1058,7 +2189,7 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
 
 
 # ===========================================================================
-# 3. Skewness-dependent C-coefficient family (CAM-default tree)
+# 9. Skewness-dependent C-coefficient family (CAM-default tree)
 # ===========================================================================
 # The xm/wpxp advance needs the pressure-term coefficients ``C6rt_Skw_fnc``,
 # ``C6thl_Skw_fnc`` and ``C7_Skw_fnc``. For the CAM-default flags
@@ -1118,7 +2249,7 @@ def compute_C6_C7_Skw_fnc(Skw_zm, Lscale_zm, config, gr: CLUBBGrid):
 
 
 # ===========================================================================
-# 4. Coupled wp2/wp3 advance (pentadiagonal)
+# 10. Coupled wp2/wp3 advance (pentadiagonal)
 # ===========================================================================
 # The coupled wp2 (zm) / wp3 (zt) advance: interleaved band-matrix LHS
 # builders + RHS terms solved with the verbatim-port pentadiagonal LU
@@ -1636,7 +2767,7 @@ def wp23_solve(lhs, rhs):
     """Pentadiagonal solve + de-interleave (``wp23_solve``).
 
     Solves the coupled system with the CLUBB-band penta LU
-    (:func:`clubb_solve.penta_solve`) and splits the solution: wp2 on even
+    (:func:`penta_solve`) and splits the solution: wp2 on even
     slots, wp3 on odd. Returns ``(wp2_new, wp3_new)``.
     """
     solution = penta_solve(lhs, rhs)
@@ -1775,7 +2906,7 @@ def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
 
 
 # ===========================================================================
-# 5. Monotonic turbulent-flux limiter (MFL)
+# 11. Monotonic turbulent-flux limiter (MFL)
 # ===========================================================================
 # JAX port of CLUBB's monotonic flux limiter (mono_flux_limiter.F90) applied
 # inside the xm/wpxp advance (CAM ``l_mono_flux_lim_{thlm,rtm,um,vm} =
@@ -1953,7 +3084,7 @@ def mfl_xm_solve(lhs, rhs):
     """Solve the MFL xm re-solve tridiagonal system (``mfl_xm_solve``).
 
     Implicit tridiagonal re-solve (``l_mfl_xm_imp_adj = True``) via the CLUBB-band
-    Thomas solver (:func:`clubb_solve.tridiag_solve`).
+    Thomas solver (:func:`tridiag_solve`).
     """
     return tridiag_solve(lhs, rhs)
 
@@ -2054,7 +3185,7 @@ def monotonic_turbulent_flux_limit(
 
 
 # ===========================================================================
-# 6. Coupled xm/wpxp advance (means + scalar fluxes)
+# 12. Coupled xm/wpxp advance (means + scalar fluxes)
 # ===========================================================================
 # The coupled xm (zt) / wpxp (zm) advance for rtm/wprtp and thlm/wpthlp
 # (CAM ``l_predict_upwp_vpwp = .false.`` → winds go through
@@ -2356,7 +3487,7 @@ def xm_wpxp_rhs(wpxp, xm, wpxp_forcing, xm_forcing, rhs_bp_pr3, rhs_ta,
 def xm_wpxp_solve(lhs, rhs):
     """Pentadiagonal solve + de-interleave (``xm_wpxp_solve``).
 
-    Solves with the CLUBB-band penta LU (:func:`clubb_solve.penta_solve`) and
+    Solves with the CLUBB-band penta LU (:func:`penta_solve`) and
     splits: wpxp on even slots, xm on odd. Returns ``(wpxp_new, xm_new)``.
     """
     soln = penta_solve(lhs, rhs)
@@ -2434,7 +3565,7 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
 
 
 # ===========================================================================
-# 7. Core orchestration
+# 13. Core orchestration
 # ===========================================================================
 # Assembles the parity-tested building blocks into the per-step closure: the
 # diagnostics (``compute_clubb_diagnostics`` — skewness, ``sigma_sqd_w``, TKE,
@@ -2830,7 +3961,7 @@ def unpack_clubb_moments(arr: jax.Array) -> CLUBBMomentState:
 
 
 # ===========================================================================
-# 8. Scheme entries
+# 14. Scheme entries
 # ===========================================================================
 
 

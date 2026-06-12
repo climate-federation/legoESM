@@ -22,11 +22,11 @@ from legoesm.atmosphere.physics.turbulence.clubb_config import (
     derive_mixt_frac_max_mag,  # noqa: E402
 )
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
-from legoesm.atmosphere.physics.turbulence.clubb_pdf import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     ADG1_pdf_driver,
     calc_pdf_liquid_cloud_frac_components,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_pdf_moments import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     _EP1,
     _EP2,
     calc_pdf_higher_order_moments,

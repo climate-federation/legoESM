@@ -1,4 +1,4 @@
-"""Unit tests for the CLUBB ADG1 PDF parameter closure (``clubb_pdf.py``).
+"""Unit tests for the CLUBB ADG1 PDF parameter closure (now in ``clubb.py``).
 
 The ADG1 double-Gaussian must reproduce the input moments exactly — these are
 machine-precision analytic oracles (mean, variance, covariance, skewness). Plus
@@ -23,7 +23,7 @@ from legoesm.atmosphere.physics.turbulence.clubb_config import (  # noqa: E402
     derive_lmin,
     derive_mixt_frac_max_mag,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_pdf import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     ADG1_pdf_driver,
     ADG1_w_closure,
     calc_liquid_cloud_frac_component,

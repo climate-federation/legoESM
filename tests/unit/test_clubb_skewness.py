@@ -1,4 +1,4 @@
-"""Unit tests for CLUBB skewness diagnostics (``clubb_skewness.py``).
+"""Unit tests for CLUBB skewness diagnostics (now in ``clubb.py``).
 
 Part of the fuller CLUBB port — see ``PORT_CLUBB.md``.
 """
@@ -16,7 +16,7 @@ import sys  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid, zm2zt  # noqa: E402
-from legoesm.atmosphere.physics.turbulence.clubb_skewness import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     LG_2005_ansatz,
     Skx_func,
     calc_wp3_on_wp2,

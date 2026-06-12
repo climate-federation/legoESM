@@ -22,12 +22,12 @@ happens after the source consolidation settles.
 | 4 | `clubb_wp23.py` | 720 | absorb | ✅ C2 (iter 2, sec. 3) |
 | 5 | `clubb_xm_wpxp.py` | 431 | absorb | ✅ C2 (iter 2, sec. 4) |
 | 6 | `clubb_mfl.py` | 308 | absorb | ✅ C3 (iter 3, sec. 5) |
-| 7 | `clubb_pdf_moments.py` | 283 | absorb | — |
-| 8 | `clubb_pdf.py` | 368 | absorb | — |
-| 9 | `clubb_fill_holes.py` | 201 | absorb | — |
-| 10 | `clubb_tau.py` | 97 | absorb | — |
-| 11 | `clubb_skewness.py` | 211 | absorb | — |
-| 12 | `clubb_solve.py` | 151 | absorb | — |
+| 7 | `clubb_pdf_moments.py` | 283 | absorb | ✅ C4 (iter 4, sec. 7) |
+| 8 | `clubb_pdf.py` | 368 | absorb | ✅ C4 (iter 4, sec. 6) |
+| 9 | `clubb_fill_holes.py` | 201 | absorb | ✅ C4 (iter 4, sec. 3) |
+| 10 | `clubb_tau.py` | 97 | absorb | ✅ C4 (iter 4, sec. 5) |
+| 11 | `clubb_skewness.py` | 211 | absorb | ✅ C4 (iter 4, sec. 4) |
+| 12 | `clubb_solve.py` | 151 | absorb | ✅ C4 (iter 4, sec. 2) |
 | 13 | `clubb_helpers.py` | 208 | absorb | — |
 | 14 | `clubb_grid.py` | 380 | absorb | — |
 | 15 | `clubb_coefficients.py` | 71 | constants → top of clubb.py | ✅ C2 (iter 2, sec. 2; the module is FUNCTIONS not constants — placed as a section; the true scalar constants land near the top in the final-layout pass) |
@@ -71,6 +71,16 @@ happens after the source consolidation settles.
   215 tests (moments/mfl/wp23/xm_wpxp/core + contracts); ruff clean; codex
   adversarial review → request-changes (3 doc nits + __all__ decision) →
   fixed → approve.
+- **C4 (iter 4):** absorbed the 6 remaining leaf closure modules (1311 LOC) —
+  `clubb_solve` + `clubb_fill_holes` + `clubb_skewness` + `clubb_tau` +
+  `clubb_pdf` + `clubb_pdf_moments` — as sections 2-7 (14 sections, 4512
+  lines). Deduped byte-identical-value constants (`_EPS`/`_MAX_MAG_CORRELATION`/
+  `_SQRT_2`/`_SQRT_2PI`/`_EP1`/`_EP2`); `_F64_EPS` deduped raw-numpy→float()
+  form (bool-only use sites — codex-verified value-equivalent). Caught by
+  tests: the absorbed solve body needed `from jax import lax` (carried imports
+  must be re-derived per batch, not assumed). 6 modules deleted; test imports
+  re-pointed; contracts entries removed. Green: 202 tests; ruff clean; codex
+  AST-level adversarial review → APPROVE (first pass).
 
 
 **Previous Goal:** `packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py`
