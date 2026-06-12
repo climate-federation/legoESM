@@ -864,3 +864,146 @@ def test_anchored_step_supports_jax_grad_mpas_nh():
         assert grad.dtype == jnp.float64
     finally:
         set_policy(saved)
+
+
+# ---------------------------------------------------------------------------
+# gh-417: the three MPAS dycores carried the same lazy-cache-inside-step
+# tracer leak as the cdgrid A1-gate bug above (and the ocean rigid-lid
+# island cache, PR #416): step() under an OUTER jit cached a traced
+# _target_mass (and, for MPAS PE, a traced _phys_state) on self, so the
+# next trace read a dead tracer -> UnexpectedTracerError.  Fix = the
+# cdgrid pattern: thread the per-call pre-step mass, never cache traced
+# values; PE additionally skips the _phys_state stash under trace.
+# ---------------------------------------------------------------------------
+
+def _assert_no_traced_cache(model, state, step_once, scan_two):
+    """Shared body: traced first-use must not cache; reuse must retrace
+    cleanly; a later eager call still caches the sticky concrete snapshot."""
+    out_a = step_once(state)
+    assert model._target_mass is None, (
+        "step() under an outer jit cached a traced _target_mass — the next "
+        "trace would read a dead tracer (UnexpectedTracerError; gh-417)")
+    out_b = scan_two(state)  # historic crash site: second, separate trace
+    leaves = jax.tree_util.tree_leaves(out_b)
+    assert all(bool(jnp.all(jnp.isfinite(l))) for l in leaves
+               if hasattr(l, "dtype") and jnp.issubdtype(l.dtype, jnp.floating))
+    return out_a, out_b
+
+
+def test_anchored_step_no_tracer_leak_mpas_sw():
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        MPASShallowWaterModel, MPASShallowWaterConfig,
+    )
+    from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
+        williamson_test5_mpas,
+    )
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        mesh = create_voronoi_mesh(2)
+        cfg = MPASShallowWaterConfig(
+            nu_del4=0.0, fix_mass=True, anchor_mass_to_initial=True)
+        model = MPASShallowWaterModel(mesh, cfg)
+        state = williamson_test5_mpas(mesh)
+
+        step_once = jax.jit(lambda s: model.step(s, 300.0))
+
+        @jax.jit
+        def scan_two(s):
+            def body(c, _):
+                return model.step(c, 300.0), None
+            return jax.lax.scan(body, s, None, length=2)[0]
+
+        _assert_no_traced_cache(model, state, step_once, scan_two)
+        # eager call afterwards: sticky concrete snapshot
+        model.step(state, 300.0)
+        assert model._target_mass is not None
+        assert not isinstance(model._target_mass, jax.core.Tracer)
+    finally:
+        set_policy(saved)
+
+
+def test_anchored_step_no_tracer_leak_mpas_pe():
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        mesh = create_voronoi_mesh(2)
+        sigma = create_sigma_coordinate(8)
+        cfg = MPASPrimitiveEquationConfig(
+            fix_mass=True, anchor_mass_to_initial=True)
+        model = MPASPrimitiveEquationModel(mesh, sigma, cfg)
+        state = held_suarez_init_mpas(mesh, sigma)
+
+        step_once = jax.jit(lambda s: model.step(s, 200.0))
+
+        @jax.jit
+        def scan_two(s):
+            def body(c, _):
+                return model.step(c, 200.0), None
+            return jax.lax.scan(body, s, None, length=2)[0]
+
+        _assert_no_traced_cache(model, state, step_once, scan_two)
+        # the _phys_state side-channel must not hold a tracer either
+        assert not any(
+            isinstance(l, jax.core.Tracer)
+            for l in jax.tree_util.tree_leaves(model._phys_state))
+        model.step(state, 200.0)
+        assert model._target_mass is not None
+        assert not isinstance(model._target_mass, jax.core.Tracer)
+    finally:
+        set_policy(saved)
+
+
+def test_anchored_step_no_tracer_leak_mpas_nh():
+    from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
+    from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+        MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
+    )
+    from tests.unit.test_mpas_atmosphere import (
+        _make_mesh, _make_nh_state, _add_perturbation_nh,
+    )
+    from legoesm.grids.vertical import (
+        compute_terrain_metric,
+        create_height_coordinate,
+    )
+
+    saved = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        nlev = 5
+        mesh = _make_mesh(level=2)
+        hc = create_height_coordinate(nlev, 30000.0)
+        z_s = jnp.zeros(mesh.nCells, dtype=jnp.float64)
+        tm = compute_terrain_metric(z_s, hc)
+        cfg = MPASCompressibleEulerConfig(
+            nu_del2=1e4, n_acoustic_substeps=4,
+            fix_mass=True, anchor_mass_to_initial=True)
+        model = MPASCompressibleEulerModel(mesh, hc, tm, cfg)
+        state = _add_perturbation_nh(
+            _make_nh_state(mesh, hc, tm, nlev), mesh, nlev)
+
+        step_once = jax.jit(lambda s: model.step(s, 5.0))
+
+        @jax.jit
+        def scan_two(s):
+            def body(c, _):
+                return model.step(c, 5.0), None
+            return jax.lax.scan(body, s, None, length=2)[0]
+
+        _assert_no_traced_cache(model, state, step_once, scan_two)
+        model.step(state, 5.0)
+        assert model._target_mass is not None
+        assert not isinstance(model._target_mass, jax.core.Tracer)
+    finally:
+        set_policy(saved)
