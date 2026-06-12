@@ -798,6 +798,9 @@ def sharded_step_with_halo(
     -------
     Updated state (same sharding as input).
     """
+    if physics_fn is not None:
+        _refuse_stateful_physics_unthreaded_wrapper(physics_fn)
+
     if config.mesh is None:
         # Single device — no sharding needed
         if physics_fn is not None and hasattr(model, "step_with_physics"):

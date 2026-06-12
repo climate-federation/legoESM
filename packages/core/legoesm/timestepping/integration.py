@@ -11,7 +11,8 @@ class IntegrationMixin:
     integrate() will delegate to it when a physics_fn is supplied.
     """
 
-    def integrate(self, state, duration, dt, save_every=1, physics_fn=None):
+    def integrate(self, state, duration, dt, save_every=1, physics_fn=None,
+                  phys_state=None):
         """Integrate forward for a given duration.
 
         Parameters
@@ -24,6 +25,13 @@ class IntegrationMixin:
             Physics forcing function. If provided and the model has
             a ``step_with_physics`` method, that method is used;
             otherwise falls back to ``self.step``.
+        phys_state : PhysicsState, optional
+            Stateful-physics carry (issue #405/#413).  Required when
+            *physics_fn* is tagged ``_requires_phys_state`` (stateful
+            schemes) — seed it with
+            ``legoesm.atmosphere.physics.physics_state.init_physics_state``.
+            The loop feeds the model's updated ``_phys_state`` back
+            each step so the prognostic physics keeps its memory.
 
         Returns
         -------
@@ -32,9 +40,27 @@ class IntegrationMixin:
         n_steps = int(duration / dt)
         trajectory = [state]
         use_physics = physics_fn is not None and hasattr(self, "step_with_physics")
+        # Issue #405/#413: looping a stateful physics_fn WITHOUT a carry
+        # silently reseeds its prognostic fields every step.  Refuse
+        # loudly; with a carry supplied, thread it through the models'
+        # step_with_physics(..., phys_state=...) contract.
+        if (physics_fn is not None
+                and getattr(physics_fn, "_requires_phys_state", False)
+                and phys_state is None):
+            raise NotImplementedError(
+                "integrate() received a stateful physics_fn but no "
+                "phys_state carry — the prognostic physics would "
+                "silently reseed every step (issue #405/#413).  Seed "
+                "one with init_physics_state and pass phys_state=."
+            )
         for i in range(n_steps):
             if use_physics:
-                state = self.step_with_physics(state, dt, physics_fn)
+                if phys_state is not None:
+                    state = self.step_with_physics(
+                        state, dt, physics_fn, phys_state=phys_state)
+                    phys_state = getattr(self, "_phys_state", phys_state)
+                else:
+                    state = self.step_with_physics(state, dt, physics_fn)
             else:
                 state = self.step(state, dt)
             if (i + 1) % save_every == 0:

@@ -122,7 +122,9 @@ def _time_compile(model, state, dt, n_calls: int = 2):
     times = []
     for i in range(n_calls):
         t0 = time.perf_counter()
-        out = model._step_cgrid(state, dt)
+        # `_step_cgrid` returns (state_new, phys_state_out) since the
+        # #413 carry threading; no carry threaded in this benchmark.
+        out, _ = model._step_cgrid(state, dt)
         # Block until execution completes — `_step_cgrid` is `@jax.jit`
         # so the return is a deferred array.  Block to measure true
         # compile+execute time.

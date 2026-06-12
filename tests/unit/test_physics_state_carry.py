@@ -549,6 +549,36 @@ def test_sharded_wrapper_refuses_stateful_physics():
         _refuse_stateful_physics_unthreaded_wrapper(stateful_fn)
 
 
+def test_integrate_mixin_refuses_and_threads_carry():
+    """Codex round 2: IntegrationMixin.integrate must refuse a stateful
+    physics_fn without a carry, and thread the carry when supplied."""
+    from legoesm.atmosphere.physics.combined import make_physics
+
+    model, state, _ = _cdgrid_setup(n=4, nlev=4)
+    cfg = _tke_physics_config()
+    fn = make_physics(cfg, model_type="hydrostatic", dt=1.0)
+    with pytest.raises(NotImplementedError, match="405"):
+        model.integrate(state, duration=2.0, dt=1.0, physics_fn=fn)
+
+    shp = state.T.data.shape
+    seed = init_physics_state(shp[0] * shp[1] * shp[2], shp[3], cfg)
+    # Rest state at the TKE floor is a fixed point — memory is pinned by
+    # comparing two DIFFERENT seeds under identical dynamics (a
+    # reseeding loop would erase the difference).
+    _ = model.integrate(
+        state, duration=2.0, dt=1.0, physics_fn=fn, phys_state=seed)
+    ps_a = model._phys_state
+    assert ps_a is not None
+    seed_pert = seed._replace(tke=seed.tke.at[0, :].set(1e-2))
+    _ = model.integrate(
+        state, duration=2.0, dt=1.0, physics_fn=fn, phys_state=seed_pert)
+    ps_b = model._phys_state
+    assert not np.array_equal(np.asarray(ps_b.tke), np.asarray(ps_a.tke)), (
+        "integrate() final carry is independent of the seeded carry — "
+        "the loop is reseeding the physics state (issue #405)"
+    )
+
+
 def test_make_physics_tags_requires_phys_state():
     """make_physics output advertises statefulness so wrappers that
     drop the carry can refuse at build time."""
