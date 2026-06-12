@@ -28,6 +28,33 @@ Reuse:
 Everything here is **host-side, load-once** (NumPy / xarray / scipy); the file
 I/O is *not* differentiable.  The per-step time-interpolation helpers
 (:func:`interp_annual`, :func:`interp_monthly`) are pure-JAX and traceable.
+
+Call pattern — regrid ONCE, interpolate per step
+------------------------------------------------
+:func:`load_global_surface_data` is the **only** function that regrids, and it
+runs **once at initialization**, outside the time loop / ``lax.scan``.  It must
+NOT be called from inside a land step or any JIT/scan body — it uses xarray +
+scipy KD-trees and cannot be traced.  No land subroutine should import it into
+the hot loop.
+
+After that one call, every field in :class:`GlobalSurfaceData` already lives on
+the model grid:
+
+  - **Soil properties** are static — extracted once, then frozen into the land
+    params/state.  Never touched again, even for a transient run.
+  - **LAI / SAI / canopy height** are stored as the 12 pre-regridded monthly
+    maps ``(12, ncol, npft)``.  Per timestep you call
+    ``interp_monthly(gsd.lai_monthly, day_of_year)`` — a cheap pure-JAX gather
+    + linear blend of those stored slices (``O(ncol*npft)``).  **No regridding
+    happens per step.**
+  - **Transient cover fractions** ``(nyear, ncol, ...)`` are blended per year
+    via ``interp_annual`` — again indexing pre-regridded slices, no regrid.
+
+Recommended wiring (mirrors :class:`legoesm.forcing.amip.AMIPForcing` /
+``SegmentForcing``): load once at setup, carry the monthly/annual arrays as an
+explicit *traced argument* into the scan, and call ``interp_*`` inside the step.
+Passing the arrays as args (not closure captures) avoids recompiles as time
+advances.
 """
 
 from __future__ import annotations
