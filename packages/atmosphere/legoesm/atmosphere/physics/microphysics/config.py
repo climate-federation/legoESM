@@ -404,6 +404,18 @@ class ThompsonConfig(NamedTuple):
     evap_coeff: float = 1.0
     saturation_sharpness: float = 100.0
     autoconversion_sharpness: float = 10.0  # See SB config — iter-97/99
+    # Relative-humidity-deficit resolution floor for rain evaporation: rain
+    # does not evaporate where the liquid sub-saturation is below ~RH 99.995 %.
+    # Suppresses the spurious in-cloud evaporation that rectifies float32
+    # round-off and inflated the cloudy-column LWP (18-24 % DYCOMS fp32-vs-fp64
+    # spread). Applied to the deficit itself, so resolved deficits (WBF ~0.1,
+    # sub-cloud downdrafts) lose only the ≲ floor/deficit fraction (≲0.05 %).
+    # Calibrated: the measured float32 in-cloud deficit-noise band is ~9e-6
+    # (max), and the DYCOMS cold-variant in-cloud evaporation sits at deficit
+    # ~1e-5-5e-5; 5e-5 is the smallest floor that clears BOTH (a 1-2e-5 floor
+    # bisects that band and makes the cold-case fp32-vs-fp64 spread WORSE).
+    # See _warm_rain.rain_evaporation.
+    rain_evap_rh_floor: float = 5.0e-5
     N_i0: float = 5e3
     cooper_a: float = 0.304
     # SAM "limit to 500 L⁻¹" cap on Cooper-nucleated ice number. Without it
