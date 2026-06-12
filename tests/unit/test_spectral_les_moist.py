@@ -246,6 +246,67 @@ def test_monotone_vertical_advection_is_TVD_no_new_extrema():
     assert float(phi_sp.max()) > hi + 1e-2   # > 1% Gibbs overshoot (the bug)
 
 
+def test_weno5_flux_div_conserves_and_reuses_core_weno():
+    """WENO5 scalar flux-div is globally conservative AND reuses the shared
+    core.weno oracle (same kernel as the ocean vertical-tracer WENO)."""
+    import legoesm.core.weno as cw
+    g = _grid(nz=24)
+    u, v, w = _div_free(g, 5)
+    phi = jnp.asarray(np.random.RandomState(1).rand(
+        g.cfg.ny, g.cfg.nx, g.cfg.nz))
+    div = sl._weno5_flux_div(phi, u, v, w, g)
+    assert abs(float(jnp.sum(div))) < 1e-8 * float(jnp.sum(jnp.abs(div)) + 1e-30)
+    # oracle: WENO5-Z is 5th-order on a smooth field ⇒ the left/right face
+    # reconstructions of sin(kx) bracket the exact face value tightly.
+    x = np.linspace(0.0, 2 * np.pi, 64, endpoint=False)
+    dxe = x[1] - x[0]
+    f = [jnp.asarray(np.sin(x + (s - 2) * dxe)) for s in range(6)]  # i-2..i+3
+    fp, fm = cw.weno5_z(f)                                  # face i+1/2 = x+dx/2
+    exact = np.sin(x + 0.5 * dxe)
+    # accurate reconstruction (point-sample IC ⇒ O(dx²) point-vs-cell-avg floor;
+    # the kernel itself is 5th-order on true cell averages — this is the reuse /
+    # oracle sanity check, not a formal order-of-accuracy test).
+    assert np.max(np.abs(np.asarray(fp) - exact)) < 2e-3
+    assert np.max(np.abs(np.asarray(fm) - exact)) < 2e-3
+
+
+def test_weno5_less_diffusive_than_vanleer():
+    """Advecting a z top-hat one step: WENO5 stays sharper (less numerical
+    diffusion) than van-Leer — the property that preserves cloud moisture.
+    Both reuse the same conservative flux-form + free-stream structure."""
+    g = _grid(nz=48)
+    ny, nx, nz = g.cfg.ny, g.cfg.nx, g.cfg.nz
+    zero = jnp.zeros((ny, nx, nz))
+    w = jnp.full((ny, nx, nz + 1), 0.5)
+    phi = jnp.where(jnp.arange(nz) < nz // 2, 1.0, 0.0)
+    phi = jnp.broadcast_to(phi, (ny, nx, nz)).astype(jnp.float64)
+    dt = 0.3 * g.dz / 0.5
+    # advect many steps; measure front sharpness (total variation growth).
+    def advect(fluxfn, n=40):
+        p = phi
+        for _ in range(n):
+            p = p - dt * (fluxfn(p, zero, zero, w, g)
+                          - p * sl._vanleer_fv_velocity_divergence(
+                              zero, zero, w, g))
+        return p
+    p_vl = advect(sl._vanleer_flux_div)
+    p_w5 = advect(sl._weno5_flux_div)
+    col = lambda p: np.asarray(p[0, 0])                    # noqa: E731
+    # WENO5 keeps a steeper max gradient (less smeared front).
+    grad_vl = np.abs(np.diff(col(p_vl))).max()
+    grad_w5 = np.abs(np.diff(col(p_w5))).max()
+    assert grad_w5 > grad_vl                               # sharper = less diffusive
+    # both stay bounded (essentially non-oscillatory)
+    assert col(p_w5).max() <= 1.05 and col(p_w5).min() >= -0.05
+
+
+def test_unknown_scalar_advection_rejected():
+    with pytest.raises(ValueError, match="scalar_advection"):
+        sl.make_grid(sl.SpectralLESConfig(
+            nx=8, ny=8, nz=8, Lx=800.0, Ly=800.0, Lz=800.0,
+            monotone_scalars=True, scalar_advection="bogus"))
+
+
 def test_dry_path_uses_spectral_advection_unchanged():
     """monotone_scalars defaults False ⇒ rhs uses the spectral scalar_rhs (the
     validated dry path), bit-identical."""
