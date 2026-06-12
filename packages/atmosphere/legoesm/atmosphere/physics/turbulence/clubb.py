@@ -8,45 +8,45 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order)
---------------------------------------
-  1.  Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2.  Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
+Table of contents (sections, in order; flag reference table at line 5707)
+-----------------------------------------------------------------------------
+  1.  [line  121] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
+  2.  [line  204] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3.  Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3.  [line  429] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4.  Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4.  [line  760] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5.  Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5.  [line  814] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6.  Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6.  [line  988] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7.  Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8.  Mass-conserving hole filling (``fill_holes_vertical`` /
+  7.  [line 1422] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8.  [line 1550] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9.  Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9.  [line 1731] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line 1917] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line 1998] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line 2320] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``)
-  13. Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line 2564] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line 3389] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line 3449] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line 4105] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line 4384] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line 4758] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``advance_clubb_core`` + the
       ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line 5154] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 

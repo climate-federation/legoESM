@@ -121,9 +121,20 @@ happens after the source consolidation settles.
   baselines (gate was red at HEAD since the rebase). **FULL CLUBB suite
   green: 335 passed across all 19 test files (32 min)** — the complete
   condensed clubb.py validated end-to-end. Codex review → approve.
-  **Remaining:** final layout pass (line-numbered TOC at top; verify
-  coefficient-constants placement), test-file consolidation decision,
-  whole-repo gate sweep (ratchets/contracts/private-imports/integration).
+- **C8 (iter 8):** line-numbered TOC shipped — every TOC entry in the
+  clubb.py docstring now cites the exact section-header line
+  (`N.  [line  L] Title`, patched in place so the numbers stay valid), plus
+  a flag-table pointer in the TOC header. New tripwire
+  `test_toc_line_numbers_accurate` (codex-verified non-vacuous: a single
+  inserted line fails it loudly) — future edits must regenerate the TOC.
+  Coefficient-constants placement: clubb_coefficients had FUNCTIONS only
+  (no module constants), so "constants near top" is satisfied by the
+  config/derived-constants section 2; noted in the plan table (C2 row).
+  Codex review → APPROVE (one [warn]: TOC title-text drift not policed —
+  acceptable; line-number drift is).
+  **Remaining:** test-file consolidation decision, whole-repo gate sweep
+  (ratchets/contracts/private-imports/turbulence-integration suite),
+  PORT_CLUBB.md compression at iter 10.
 
 
 **Previous Goal:** `packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py`

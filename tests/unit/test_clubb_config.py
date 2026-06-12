@@ -237,5 +237,33 @@ def test_overrides_compose():
     assert cfg2.surface is cfg.surface     # untouched
 
 
+def test_toc_line_numbers_accurate():
+    """Tripwire: the line-numbered TOC at the top of clubb.py must be exact.
+
+    Each ``N.  [line  L] Title`` TOC row must point at the actual
+    ``# N. Title`` section header line, and the flag-table pointer in the TOC
+    header must point at the reference-table banner. Any edit that shifts the
+    file must regenerate the TOC numbers (cheap: they are asserted here, so
+    drift fails loudly instead of silently lying to readers).
+    """
+    lines = _CLUBB_PY.read_text().splitlines()
+    toc_rows = []
+    flag_ptr = None
+    for ln in lines[:80]:
+        m = re.match(r"  (\d+)\.\s+\[line\s+(\d+)\]", ln)
+        if m:
+            toc_rows.append((int(m.group(1)), int(m.group(2))))
+        m2 = re.search(r"flag reference table at line (\d+)", ln)
+        if m2:
+            flag_ptr = int(m2.group(1))
+    assert len(toc_rows) == 19, f"expected 19 TOC rows, parsed {len(toc_rows)}"
+    for n, cited in toc_rows:
+        actual = lines[cited - 1]
+        assert re.match(rf"# {n}\. ", actual), (
+            f"TOC row {n} cites line {cited}, but that line is: {actual!r}")
+    assert flag_ptr is not None, "flag-table pointer missing from TOC header"
+    assert "CAM-default CLUBB model-flag values" in lines[flag_ptr - 1]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
