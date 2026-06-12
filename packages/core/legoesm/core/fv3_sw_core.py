@@ -624,6 +624,22 @@ def d2a2c_vc_4th_local(vtmp_pad):
                      + vtmp_pad[:, h:-h, h:n + h + 1]))
 
 
+def d2a2c_ut_vt_local(uc, vc, u_d, v_d, cosa_u, rsin_u, cosa_v, rsin_v):
+    """A→C contravariant transport winds ut/vt — pure pointwise CORE.
+
+    ``ut = (uc - v_d*cosa_u)*rsin_u`` (and symmetric ``vt``).  No halo —
+    a tile computes its own staggered ut ``(nl+1, nl)`` / vt
+    ``(nl, nl+1)`` from its uc/vc + LOCAL v_d/u_d + sliced metrics (P4
+    phase-1b approach C; codex: ut/vt need only the local staggered
+    D-winds, no staggered halo).  The production d2a2c_vect applies
+    this base then overlays face-boundary + adjacent-strip overrides
+    (edge specials) — those stay in d2a2c_vect for boundary cells.
+    """
+    ut = (uc - v_d * cosa_u) * rsin_u
+    vt = (vc - u_d * cosa_v) * rsin_v
+    return ut, vt
+
+
 def d2a2c_ua_va_local(utmp, vtmp, cos_sg5, rsin2):
     """A-grid contravariant winds from covariant utmp/vtmp — pointwise.
 
