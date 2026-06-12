@@ -112,8 +112,16 @@ def thompson_microphysics(
         N_r, q_r, rho, config.k_sc, config.breakup_sharpness, config.D_eq,
     )
 
-    # Rain evaporation
-    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff, dt=dt)
+    # Rain evaporation.  ``rain_evap_rh_floor`` suppresses evaporation where the
+    # liquid sub-saturation is below the float32 saturation resolution
+    # (RH ≳ 99.995 %): the ungated ``clip(q_sat−q_v,0)`` term rectifies float32
+    # round-off into spurious in-cloud evaporation that recycles
+    # rain→vapour→cloud and inflated the float32 LWP (18-24% DYCOMS fp32-vs-fp64
+    # spread). Applied to the deficit, so resolved deficits (WBF, sub-cloud
+    # downdrafts) evaporate normally; no-op at float64 for a saturated cloud.
+    # See _warm_rain.
+    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff, dt=dt,
+                                   rh_deficit_floor=config.rain_evap_rh_floor)
 
     # === ICE PHASE (Morrison processes) ===
     T_freeze = constants.T_freeze
