@@ -40,6 +40,7 @@ from legoesm.core.fv3_sw_core import (
     d2a2c_edge_e_local,
     d2a2c_edge_s_local,
     d2a2c_edge_n_local,
+    d2a2c_corner_local,
     _A1 as _FV3_A1,
 )
 from legoesm.parallel.mesh import (
@@ -726,3 +727,75 @@ def test_d2a2c_edge_sn_full_parity(side):
                  else slice(b, b + nl - 1))
         np.testing.assert_allclose(
             ut_t[:, keep], ut_g[f, a:a + nl + 1, gkeep], rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize("kt,ti,tj", [
+    (2, 0, 0), (2, 1, 0), (2, 0, 1), (2, 1, 1),   # kt=2: ALL tiles are corners
+    (4, 0, 0), (4, 3, 3), (4, 0, 3), (4, 3, 0),   # kt=4: the 4 face-corners
+])
+def test_d2a2c_corner_full_parity(kt, ti, tj):
+    """Full corner-tile d2a2c == production d2a2c_vect, every output EXCEPT
+    the two deferred adjacent strips (vt i-strip row + ut j-strip column,
+    each a stage-level transport-wind halo).  kt=2 -> all 4 tiles are corners
+    (the np=24 sub-face unlock); kt=4 -> the 4 face-corner tiles."""
+    from legoesm.grids.halo import pad_halo
+    set_halo_backend("local")
+    n = 24
+    nl = n // kt
+    h = 2
+    cdg = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    grid = cdg.base
+    rng = np.random.default_rng(80 + kt * 16 + ti * 4 + tj)
+    u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    ua_g, va_g, uc_g, vc_g, ut_g, vt_g = (
+        np.asarray(x) for x in d2a2c_vect(u_d, v_d, cdg))
+
+    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdg)
+    cos_sg5 = cdg.cos_sg[:, :, :, 4]
+    rsin2 = cdg.rsin2_cell
+    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
+    va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
+    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
+    dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
+    offsets = grid.halo_interp_offsets
+    se_pad_x = pad_halo(cdg.sin_sg[:, :, :, 2], interp_offsets=offsets)
+    sw_pad_x = pad_halo(cdg.sin_sg[:, :, :, 0], interp_offsets=offsets)
+    sn_pad_y = pad_halo(cdg.sin_sg[:, :, :, 3], interp_offsets=offsets)
+    ss_pad_y = pad_halo(cdg.sin_sg[:, :, :, 1], interp_offsets=offsets)
+
+    a, b = ti * nl, tj * nl
+    i_strip = 0 if ti == 0 else nl - 1
+    j_strip = 0 if tj == 0 else nl - 1
+    for f in range(6):
+        sb = lambda arr, ax: staggered_tile_block(arr[f], ti, tj, nl, ax)
+        fb = lambda arr: tiled_face_block(arr[f], ti, tj, nl, kt)
+        out = d2a2c_corner_local(
+            utmp_pad[f], vtmp_pad[f], ti, tj, nl, n,
+            sb(u_d, 1)[None], sb(v_d, 0)[None],
+            fb(cos_sg5)[None], fb(rsin2)[None],
+            sb(cdg.cosa_u, 0)[None], sb(cdg.rsin_u, 0)[None],
+            sb(cdg.cosa_v, 1)[None], sb(cdg.rsin_v, 1)[None],
+            ua_pad[f], dxc_pad_x[f], se_pad_x[f], sw_pad_x[f],
+            va_pad[f], dyc_pad_y[f], sn_pad_y[f], ss_pad_y[f])
+        ua_t, va_t, uc_t, vc_t, ut_t, vt_t = (np.asarray(x)[0] for x in out)
+        np.testing.assert_allclose(ua_t, ua_g[f, a:a + nl, b:b + nl],
+                                   rtol=0, atol=1e-12)
+        np.testing.assert_allclose(va_t, va_g[f, a:a + nl, b:b + nl],
+                                   rtol=0, atol=1e-12)
+        np.testing.assert_allclose(uc_t, uc_g[f, a:a + nl + 1, b:b + nl],
+                                   rtol=0, atol=1e-12)
+        np.testing.assert_allclose(vc_t, vc_g[f, a:a + nl, b:b + nl + 1],
+                                   rtol=0, atol=1e-12)
+        # vt: exclude the deferred i-strip row.
+        vt_rows = [m for m in range(nl) if m != i_strip]
+        np.testing.assert_allclose(
+            vt_t[vt_rows], vt_g[f, a:a + nl, b:b + nl + 1][vt_rows],
+            rtol=0, atol=1e-12)
+        # ut: exclude the deferred j-strip column.
+        ut_cols = [m for m in range(nl) if m != j_strip]
+        np.testing.assert_allclose(
+            ut_t[:, ut_cols], ut_g[f, a:a + nl + 1, b:b + nl][:, ut_cols],
+            rtol=0, atol=1e-12)
