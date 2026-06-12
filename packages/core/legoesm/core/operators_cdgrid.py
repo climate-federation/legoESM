@@ -495,16 +495,43 @@ def dgrid_vorticity(u_d, v_d, cdgrid):
 # C-grid divergence
 # ==============================================================================
 
-def cgrid_divergence(u_c, v_c, cdgrid):
-    """Exact flux-form divergence at cell centres. 2D and 3D."""
-    dy = _broadcast_metric(cdgrid.dy_edge_x, u_c)
-    dx = _broadcast_metric(cdgrid.dx_edge_y, v_c)
+def cgrid_divergence_local(u_c, v_c, dy_edge_x, dx_edge_y, area):
+    """Exact flux-form divergence — leading-axis-agnostic CORE.
+
+    Operates on whatever leading structure the caller supplies: the
+    global ``(6, n, n)`` cube (``cgrid_divergence``) OR a SINGLE
+    ``(nl, nl)`` tile inside the tiled ``shard_map`` stage (P4
+    phase-1b), where the staggered ``u_c (nl+1, nl)`` / ``v_c (nl,
+    nl+1)`` blocks already carry the tile's boundary faces (duplicated
+    shared face, Pace layout) so NO halo exchange is needed — flux-form
+    divergence reads only a cell's own four surrounding faces.
+
+    Shapes (``...`` = leading axes; last two are horizontal, trailing
+    optional vertical):
+      u_c        (..., A+1, B[, nlev])   x-face normal velocity
+      v_c        (..., A,   B+1[, nlev]) y-face normal velocity
+      dy_edge_x  (..., A+1, B)   x-face length
+      dx_edge_y  (..., A,   B+1) y-face length
+      area       (..., A,   B)   cell area
+    Returns div (..., A, B[, nlev]).
+    """
+    dy = _broadcast_metric(dy_edge_x, u_c)
+    dx = _broadcast_metric(dx_edge_y, v_c)
     flux_x = u_c * dy
     flux_y = v_c * dx
     net_x = flux_x[:, 1:] - flux_x[:, :-1]
     net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
-    area = _broadcast_metric(cdgrid.base.area, net_x)
-    return (net_x + net_y) / area
+    area_b = _broadcast_metric(area, net_x)
+    return (net_x + net_y) / area_b
+
+
+def cgrid_divergence(u_c, v_c, cdgrid):
+    """Exact flux-form divergence at cell centres. 2D and 3D.
+
+    Thin wrapper over :func:`cgrid_divergence_local` (one shared body —
+    the tiled stage calls the local core with per-tile metrics)."""
+    return cgrid_divergence_local(
+        u_c, v_c, cdgrid.dy_edge_x, cdgrid.dx_edge_y, cdgrid.base.area)
 
 
 def cgrid_wet_face_masks(wet_cc, cdgrid):
