@@ -145,6 +145,165 @@ def test_mpas_step_threads_seeded_carry():
     assert np.all(np.isfinite(np.asarray(ps2.tke)))
 
 
+def _toy_carry_physics_fn():
+    """Toy stateful physics: zero tendencies; carry advance tke += 1.
+
+    Pins the issue-#413 carry contract on the RK-stage dycores: every
+    stage receives the STEP-INPUT carry and the carry-out comes from
+    ONE extra post-step evaluation — so after one step tke must equal
+    seed + 1 exactly (not +n_stages, not +n_stages+1).
+    """
+    from legoesm.core.state import HydrostaticTendencies
+
+    def physics_fn(hs, grid, sigma_coord, phys_state=None):
+        zero = HydrostaticTendencies(
+            du_dt=hs.u.replace(data=jnp.zeros_like(hs.u.data)),
+            dv_dt=(None if hs.v is None
+                   else hs.v.replace(data=jnp.zeros_like(hs.v.data))),
+            dT_dt=hs.T.replace(data=jnp.zeros_like(hs.T.data)),
+            dp_s_dt=hs.p_s.replace(data=jnp.zeros_like(hs.p_s.data)),
+            dphis_dt=hs.p_s.replace(data=jnp.zeros_like(hs.p_s.data)),
+        )
+        ps_out = (None if phys_state is None
+                  else phys_state._replace(tke=phys_state.tke + 1.0))
+        return zero, ps_out
+
+    return physics_fn
+
+
+def _cdgrid_setup(n=6, nlev=6):
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init
+
+    grid = create_cubed_sphere(n)
+    sigma = create_sigma_coordinate(nlev)
+    model = CDGridPrimitiveEquationModel(
+        grid, sigma, CDGridPrimitiveEquationConfig())
+    state = held_suarez_init(grid, sigma)
+    return model, state, sigma
+
+
+def test_cdgrid_step_threads_seeded_carry():
+    """CDGrid PE step with real TKE turbulence: output carry depends on
+    the input carry (memory), perturbation survives, chained steps keep
+    it — mirror of the MPAS memory test (issue #413 lift)."""
+    from legoesm.atmosphere.physics.combined import make_physics
+
+    model, state, sigma = _cdgrid_setup()
+    cfg = _tke_physics_config()
+    physics_fn = make_physics(cfg, model_type="hydrostatic", dt=1.0)
+
+    shp = state.T.data.shape           # (6, n, n, nlev)
+    ncol = shp[0] * shp[1] * shp[2]
+    nlev = shp[3]
+    seed = init_physics_state(ncol, nlev, cfg)
+    seed_pert = seed._replace(tke=seed.tke.at[0, :].set(1e-2))
+
+    _ = model.step(state, 1.0, physics_fn=physics_fn, phys_state=seed)
+    ps_a = model._phys_state
+    _ = model.step(state, 1.0, physics_fn=physics_fn, phys_state=seed_pert)
+    ps_b = model._phys_state
+
+    assert ps_a is not None and ps_b is not None, (
+        "CDGrid step dropped the seeded carry (model._phys_state is None)"
+    )
+    assert not np.array_equal(np.asarray(ps_b.tke), np.asarray(ps_a.tke)), (
+        "Output carry is independent of the input carry — the scheme "
+        "is being reseeded every step (issue #405/#413)"
+    )
+    assert (float(np.max(np.asarray(ps_b.tke)[0]))
+            > float(np.max(np.asarray(ps_a.tke)[0]))), (
+        "Perturbed TKE column lost its memory through the step"
+    )
+    # Chain a second step on the perturbed branch: memory persists.
+    s1 = model.step(state, 1.0, physics_fn=physics_fn, phys_state=seed_pert)
+    _ = model.step(s1, 1.0, physics_fn=physics_fn,
+                   phys_state=model._phys_state)
+    ps2 = model._phys_state
+    assert ps2 is not None
+    assert np.all(np.isfinite(np.asarray(ps2.tke)))
+
+
+def test_cdgrid_carry_advances_exactly_once_per_step():
+    """Toy +1 carry: after one CDGrid step the carry must be seed+1 —
+    stages share the step-input carry; one post-step eval produces the
+    carry-out (the documented #413 semantics)."""
+    model, state, _ = _cdgrid_setup(n=4, nlev=4)
+    cfg = _tke_physics_config()
+    shp = state.T.data.shape
+    seed = init_physics_state(shp[0] * shp[1] * shp[2], shp[3], cfg)
+
+    _ = model.step(state, 600.0, physics_fn=_toy_carry_physics_fn(),
+                   phys_state=seed)
+    ps_out = model._phys_state
+    assert ps_out is not None
+    np.testing.assert_allclose(
+        np.asarray(ps_out.tke), np.asarray(seed.tke) + 1.0,
+        rtol=0, atol=0,
+        err_msg="carry must advance exactly once per step "
+                "(per-RK-stage accumulation or a dropped carry detected)",
+    )
+    # No carry threaded -> stash resets to None (legacy contract).
+    _ = model.step(state, 600.0, physics_fn=_toy_carry_physics_fn())
+    assert model._phys_state is None
+
+
+def test_latlon_step_threads_seeded_carry():
+    """Lat-lon C-grid PE: carry threads through step / step_with_physics
+    and advances exactly once per step (issue #413 lift)."""
+    from legoesm import constants
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        CGridLatLonHydrostaticState,
+        CGridLatLonPrimitiveEquationModel,
+        CGridLatLonPrimitiveEquationConfig,
+    )
+
+    grid = create_latlon_grid(
+        n_lat=16, radius=constants.R_earth, omega=constants.Omega)
+    sigma = create_sigma_coordinate(n_levels=5)
+    model = CGridLatLonPrimitiveEquationModel(
+        grid, sigma, CGridLatLonPrimitiveEquationConfig())
+    n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, sigma.n_levels
+    state = CGridLatLonHydrostaticState(
+        u=jnp.zeros((n_lat, n_lon + 1, nlev)),
+        v=jnp.zeros((n_lat + 1, n_lon, nlev)),
+        T=jnp.full((n_lat, n_lon, nlev), 300.0),
+        p_s=jnp.full((n_lat, n_lon), 1.0e5),
+        phis=jnp.zeros((n_lat, n_lon)),
+    )
+
+    cfg = _tke_physics_config()
+    seed = init_physics_state(n_lat * n_lon, nlev, cfg)
+    seed_pert = seed._replace(tke=seed.tke.at[0, :].set(1e-2))
+    fn = _toy_carry_physics_fn()
+
+    _ = model.step_with_physics(state, 600.0, physics_fn=fn,
+                                phys_state=seed)
+    ps_a = model._phys_state
+    assert ps_a is not None, "lat-lon step dropped the seeded carry"
+    np.testing.assert_allclose(
+        np.asarray(ps_a.tke), np.asarray(seed.tke) + 1.0, rtol=0, atol=0,
+        err_msg="carry must advance exactly once per step",
+    )
+
+    _ = model.step_with_physics(state, 600.0, physics_fn=fn,
+                                phys_state=seed_pert)
+    ps_b = model._phys_state
+    assert not np.array_equal(np.asarray(ps_b.tke), np.asarray(ps_a.tke)), (
+        "Output carry is independent of the input carry (silent reseed)"
+    )
+    # Memory: the perturbed column rides the carry through the step.
+    assert float(np.max(np.asarray(ps_b.tke)[0])) > float(
+        np.max(np.asarray(ps_a.tke)[0]))
+
+
 @pytest.mark.parametrize(
     "turb,conv,gwd,should_raise",
     [
