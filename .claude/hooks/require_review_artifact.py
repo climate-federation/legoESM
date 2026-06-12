@@ -105,10 +105,12 @@ def main() -> None:
         "uncommitted (touched " + listed + ") and no Codex review "
         "patch was produced in the last 2h. CLAUDE.md requires the iterate-with-"
         "codex loop (/codex:adversarial-review --wait -> fix -> /codex:review --wait) "
-        "before declaring done. If you have already reviewed (or this is a WIP "
-        "stop), you may stop now — this fires once per session."
+        "before declaring done. This advisory fires once per session."
     )
-    print(json.dumps({"decision": "block", "reason": reason}))
+    # Advisory, NOT a block: ``decision: block`` made every session open
+    # with a "Stop hook blocking error" banner (2026-06-12 user request).
+    # The reminder still surfaces via systemMessage; the stop proceeds.
+    print(json.dumps({"systemMessage": reason}))
     sys.exit(0)
 
 
