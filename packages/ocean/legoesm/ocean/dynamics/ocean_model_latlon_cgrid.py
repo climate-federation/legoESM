@@ -732,15 +732,39 @@ class LatLonCGridOceanModel:
         concrete bathymetry/masks — ``integrate``/``integrate_scan`` pre-build it
         before the (jitted) scan so the captured data is a compile-time
         constant.  A standalone ``step`` on a concrete state builds it lazily.
+
+        ``ensure_compile_time_eval``: when the lazy build instead happens
+        inside a USER's jit trace (e.g. ``jax.jit(value_and_grad(loss))``
+        whose loss takes the first-ever rigid-lid step, with the state a
+        closure constant), the masks are concrete but omnistaging would
+        stage the ``jnp`` parts of the build and CACHE TRACERS on the model
+        — a leaked-tracer error on reuse (2026-06-11 differentiability
+        audit). Forcing compile-time eval builds concrete arrays in that
+        context too. If the masks themselves are traced (state passed as a
+        jit argument on first use), the host-side ``np.asarray`` in the
+        builder raises ``TracerArrayConversionError`` — re-raised with an
+        actionable message.
         """
         if self.rigid_lid_data is not None:
             return self.rigid_lid_data
         from legoesm.ocean.dynamics.rigid_lid_islands import build_rigid_lid_data
-        self.rigid_lid_data = build_rigid_lid_data(
-            state.H_bathy.data, state.land_mask.data,
-            state.u_mask.data, state.v_mask.data,
-            self.config, self.grid, periodic_x=True,
-        )
+        try:
+            with jax.ensure_compile_time_eval():
+                self.rigid_lid_data = build_rigid_lid_data(
+                    state.H_bathy.data, state.land_mask.data,
+                    state.u_mask.data, state.v_mask.data,
+                    self.config, self.grid, periodic_x=True,
+                )
+        except jax.errors.TracerArrayConversionError as e:
+            raise RuntimeError(
+                "rigid-lid island decomposition must be built from CONCRETE "
+                "bathymetry/masks, but the state reaching the first rigid-lid "
+                "step is traced (it was passed as an argument into a "
+                "jit/grad-transformed function). Warm the cache once before "
+                "transforming: call model.step(state, dt) eagerly, or "
+                "model._ensure_rigid_lid_data(state) on the concrete initial "
+                "state."
+            ) from e
         return self.rigid_lid_data
 
     @staticmethod
