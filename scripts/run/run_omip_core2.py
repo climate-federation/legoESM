@@ -485,7 +485,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   smag_cfl_safety=None, convection="none",
                   convection_K_conv=1.0, convection_K_bg=1e-5,
                   freeze_floor=None, ew_cyclic_overlap=None,
-                  runoff_depth_spread_m=None, tracer_advection=None):
+                  runoff_depth_spread_m=None, tracer_advection=None,
+                  mle=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -544,13 +545,15 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("tracer_advection", tracer_advection),
                               ) if v is not None}
     # Grid-agnostic convective adjustment (Oceananigans-style enhanced
-    # vertical diffusivity where N^2 < 0).  The tripole base config ships
-    # physics=None; opting in attaches an OceanPhysicsConfig whose
-    # convective K flows through the SAME grid-agnostic
-    # compute_vertical_K_profiles -> implicit backward-Euler vertical solve
-    # the cubed-sphere / lat-lon-bathy paths already use.  Default "none"
-    # leaves the validated faithful config untouched.
-    if convection and convection != "none":
+    # vertical diffusivity where N^2 < 0) and/or the Fox-Kemper MLE
+    # restratification.  The tripole base config ships physics=None; opting in
+    # attaches an OceanPhysicsConfig.  Convective K flows through the SAME
+    # grid-agnostic compute_vertical_K_profiles -> implicit backward-Euler
+    # vertical solve; MLE adds an explicit bolus tracer tendency through the
+    # same physics_fn pipeline.  Default (both off) leaves the validated
+    # faithful config untouched.
+    _use_convection = bool(convection and convection != "none")
+    if _use_convection or mle is not None:
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
         from legoesm.ocean.physics.convection.config import (
             OceanConvectionConfig, EnhancedDiffusionConfig,
@@ -565,35 +568,41 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             SurfaceForcingConfig,
         )
         from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
-        # CONVECTION-ONLY physics pipeline.  Every other module is
-        # explicitly disabled: the OceanPhysicsConfig defaults are NOT
-        # inert (lateral_mixing defaults to harmonic -- assumes a
-        # cubed-sphere 4-D layout and would crash on the tripole 3-D
-        # state; shortwave_penetration defaults ON -- would double-count
-        # the shortwave that the dynamics-core external-tau block already
-        # applies).  The C-grid model's own config-level A_h/B_h/K_h,
-        # bottom_drag_r and the external CORE-II forcing are untouched;
-        # the pipeline contributes ONLY the convective K.
+        # CONVECTION/MLE physics pipeline.  Every other module is explicitly
+        # disabled: the OceanPhysicsConfig defaults are NOT inert
+        # (lateral_mixing defaults to harmonic -- assumes a cubed-sphere 4-D
+        # layout and would crash on the tripole 3-D state; shortwave_penetration
+        # defaults ON -- would double-count the shortwave that the dynamics-core
+        # external-tau block already applies).  The C-grid model's own
+        # config-level A_h/B_h/K_h, bottom_drag_r and the external CORE-II
+        # forcing are untouched; the pipeline contributes ONLY the convective K
+        # and/or the MLE bolus tracer tendency.
+        _conv_cfg = OceanConvectionConfig(
+            scheme=convection,
+            enhanced_diffusion=EnhancedDiffusionConfig(
+                K_conv=convection_K_conv, K_bg=convection_K_bg,
+            ),
+        ) if _use_convection else OceanConvectionConfig(scheme="none")
         _ovr["physics"] = OceanPhysicsConfig(
             vertical_mixing=VerticalMixingConfig(scheme="none"),
             lateral_mixing=LateralMixingConfig(scheme="none"),
             surface_forcing=SurfaceForcingConfig(scheme="none"),
             bottom_drag=BottomDragConfig(scheme="none"),
-            convection=OceanConvectionConfig(
-                scheme=convection,
-                enhanced_diffusion=EnhancedDiffusionConfig(
-                    K_conv=convection_K_conv, K_bg=convection_K_bg,
-                ),
-            ),
+            convection=_conv_cfg,
             shortwave_penetration=None,
+            mle=mle,
         )
         # Convective adjustment must apply through the implicit vertical
         # solve (backward-Euler is unconditionally stable; an explicit
-        # K_conv would violate CFL at ocean dt).
-        _ovr["implicit_vertical_mixing"] = True
-        print(f"[setup] tripole convection ENABLED (convection-only physics): "
-              f"scheme={convection} K_conv={convection_K_conv} "
-              f"K_bg={convection_K_bg}")
+        # K_conv would violate CFL at ocean dt).  MLE adds only an explicit
+        # tracer tendency (no K_v), so it does NOT itself require the implicit
+        # solve; only enable it when convection is on.
+        if _use_convection:
+            _ovr["implicit_vertical_mixing"] = True
+        print(f"[setup] tripole physics ENABLED: "
+              f"convection={convection if _use_convection else 'none'} "
+              f"(K_conv={convection_K_conv} K_bg={convection_K_bg}) "
+              f"MLE={'ce=%g' % mle.ce if mle is not None else 'off'}")
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -684,7 +693,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   use_polar_filter=None, polar_filter_cutoff_lat_deg=None,
                   polar_filter_max_wave_speed=None,
                   polar_filter_safety_factor=None,
-                  runoff_depth_spread_m=None, tracer_advection=None):
+                  runoff_depth_spread_m=None, tracer_advection=None,
+                  mle=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -739,6 +749,21 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         config = config._replace(**_ovr)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         print(f"[setup] latlon config override: {_ovr}")
+    if mle is not None:
+        # Merge the Fox-Kemper MLE into the EXISTING latlon-bathy physics
+        # (KPP + enhanced-diffusion convection); do NOT replace it (that would
+        # drop KPP/convection).  The bolus tracer tendency rides the same
+        # physics_fn pipeline.
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        if config.physics is None:
+            raise ValueError(
+                "--mle on latlon_bathy expected a physics config (KPP/"
+                "convection) but config.physics is None.")
+        config = config._replace(physics=config.physics._replace(mle=mle))
+        model = LatLonCGridOceanModel(grid, z_coord, config)
+        print(f"[setup] latlon MLE ENABLED: ce={mle.ce:g}")
     e_mask, e_H = read_mesh_mask_bathy(mesh_path)
     ds = xr.open_dataset(mesh_path)
     src_lat = _squeeze2d(ds["gphit"].values)
@@ -2062,6 +2087,16 @@ def main() -> int:
                         "--convection enhanced_diffusion (default 1.0).")
     p.add_argument("--convection-K-bg", type=float, default=1e-5,
                    help="Background diffusivity K_bg [m^2/s] for convection.")
+    p.add_argument("--mle", action="store_true",
+                   help="Enable the Fox-Kemper mixed-layer-eddy (MLE) "
+                        "restratification (NEMO tramle nn_mle=1): a bolus "
+                        "overturning streamfunction that flattens mixed-layer "
+                        "isopycnals (restratifying, shoaling the MLD) in "
+                        "mode-water regions. Lat-lon / tripole C-grid only "
+                        "(--grid mpas raises). Default off.")
+    p.add_argument("--mle-ce", type=float, default=0.06,
+                   help="MLE efficiency coefficient rn_ce (NEMO ORCA1 0.06; "
+                        "typical 0.06-0.08). For --mle.")
     p.add_argument("--div-damp-2", type=float, default=None,
                    help="2nd-order divergence damping [m^2/s] -- suppresses "
                         "grid-scale divergent (checkerboard) modes at small "
@@ -2154,6 +2189,18 @@ def main() -> int:
             "--sss-ice-gate-nemo requires --sss-restore (it only changes the "
             "under-ice weighting of the SSS restoring; with no restoring it "
             "would silently do nothing).")
+    # Fox-Kemper MLE: lat-lon / tripole C-grid only (the bolus streamfunction
+    # uses the C-grid operators; the cube/MPAS port is a separate follow-up).
+    mle_cfg = None
+    if args.mle:
+        if args.grid in ("mpas", "cubed_sphere"):
+            raise ValueError(
+                f"--mle is not yet implemented for --grid {args.grid!r}; it "
+                "supports the lat-lon / tripole C-grid only (MPAS/cube MLE is a "
+                "separate follow-up). Use --grid tripole or latlon_bathy.")
+        from legoesm.ocean.physics.lateral_mixing.mle import MLEConfig
+        mle_cfg = MLEConfig(ce=args.mle_ce)
+        print(f"[setup] Fox-Kemper MLE requested: ce={args.mle_ce:g}")
     if args.grid == "tripole":
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
@@ -2185,6 +2232,7 @@ def main() -> int:
             convection_K_bg=args.convection_K_bg,
             ew_cyclic_overlap=(True if args.ew_cyclic_overlap else None),
             tracer_advection=args.tracer_advection,
+            mle=mle_cfg,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -2252,6 +2300,7 @@ def main() -> int:
             polar_filter_cutoff_lat_deg=args.polar_filter_cutoff_lat,
             polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
             polar_filter_safety_factor=args.polar_filter_safety,
+            mle=mle_cfg,
         )
         app_grid_type = "latlon"
 

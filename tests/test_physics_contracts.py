@@ -226,6 +226,10 @@ CONTRACT_TODO: frozenset[str] = frozenset(
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/biharmonic.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/eke.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi.py",
+        # MLE shared core: config + Fox-Kemper formulas/helpers (coefficient,
+        # vertical structure, MLE-MLD + buoyancy), NOT a single-tendency scheme.
+        # The scheme (mle_latlon_cgrid.py) carries the __physics_contract__.
+        "packages/ocean/legoesm/ocean/physics/lateral_mixing/mle.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_mpas.py",
         "packages/ocean/legoesm/ocean/physics/lateral_mixing/harmonic.py",

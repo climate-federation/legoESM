@@ -20,6 +20,7 @@ from legoesm.ocean.physics.tendencies import zero_ocean_tendencies
 
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+from legoesm.ocean.physics.lateral_mixing.mle import MLEConfig
 from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
@@ -46,11 +47,70 @@ class OceanPhysicsConfig(NamedTuple):
     bottom_drag: BottomDragConfig = BottomDragConfig()
     convection: OceanConvectionConfig = OceanConvectionConfig()
     shortwave_penetration: ShortwavePenetrationConfig | None = ShortwavePenetrationConfig()
+    # Fox-Kemper mixed-layer-eddy (MLE) restratification (NEMO tramle nn_mle=1).
+    # ``None`` = disabled (default).  When set, a bolus-tracer-tendency physics_fn
+    # is appended; it is implemented for the lat-lon / tripole C-grid only and
+    # raises ``NotImplementedError`` on a CubedSphereGrid (MPAS/cube MLE is a
+    # separate follow-up).  See ``lateral_mixing.mle_latlon_cgrid``.
+    mle: MLEConfig | None = None
     # Ocean-scoped physical constants (Phase G, G-C2). Defaults reference
     # legoesm.constants -> zero behaviour change. Gives the physics factories
     # access to recipe-pinned constants so the inline `constants.g` buoyancy
     # reads (KPP/TKE/k_profiles) can be de-mirrored to read config.constants.g.
     constants: ConstantsConfig = ConstantsConfig()
+
+
+def _make_mle(cfg: MLEConfig) -> Callable:
+    """Create the Fox-Kemper MLE bolus-tracer physics function.
+
+    Lat-lon / tripole C-grid ONLY.  The returned ``physics_fn`` computes the
+    in-situ density, N^2 and the C-grid face masks the MLE adapter needs, then
+    calls :func:`mle_tracer_tendency_latlon_cgrid`.  A ``CubedSphereGrid`` (the
+    cube / MPAS layout) raises ``NotImplementedError`` — MLE on those grids is a
+    separate follow-up (the cube ocean is a 4-D ``(face, x, y, level)`` layout
+    that the C-grid operators do not handle).
+    """
+    def physics_fn(state: OceanState, grid: CubedSphereGrid,
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing: OceanSurfaceForcing | None = None,
+                   ) -> OceanTendencies:
+        if isinstance(grid, CubedSphereGrid):
+            raise NotImplementedError(
+                "Fox-Kemper MLE (OceanPhysicsConfig.mle) is implemented for the "
+                "lat-lon / tripole C-grid only; the CubedSphereGrid (cube / MPAS) "
+                "path is a separate follow-up. Disable MLE (mle=None) for this grid."
+            )
+        # Deferred imports (avoid a module-load cycle through the C-grid
+        # operators, and keep the cube/MPAS import path free of them).
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+        from legoesm.ocean.eos import (
+            compute_buoyancy_frequency,
+            compute_ocean_rho,
+        )
+        from legoesm.ocean.physics.lateral_mixing.mle_latlon_cgrid import (
+            mle_tracer_tendency_latlon_cgrid,
+        )
+        from legoesm.ocean.physics.tendencies import wrap_ocean_tendencies
+        from legoesm.ocean.vertical import (
+            compute_layer_thickness,
+            compute_ocean_jacobian,
+        )
+
+        J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
+        rho = compute_ocean_rho(state, z_coord, J)
+        N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, J)
+        # Actual partial-cell-aware live thickness (IDENTICAL to compute_ocean_rho)
+        # so the MLE MLD/buoyancy/volume are consistent over real bathymetry.
+        h_k = compute_layer_thickness(state.eta.data, state.H_bathy.data, z_coord)
+        mask = state.land_mask.data
+        u_mask, v_mask = compute_face_masks(mask, grid)
+        dT_dt, dS_dt = mle_tracer_tendency_latlon_cgrid(
+            state.T.data, state.S.data, rho, N2,
+            mask, u_mask, v_mask, z_coord, J, grid, cfg, h_k=h_k,
+        )
+        return wrap_ocean_tendencies(None, None, dT_dt, dS_dt, state)
+
+    return physics_fn
 
 
 def make_ocean_physics(
@@ -147,6 +207,9 @@ def make_ocean_physics(
             apply_diffusion=apply_vertical_diffusion,
             emit_momentum_viscosity=(config.vertical_mixing.scheme != "kpp"),
         ))
+
+    if config.mle is not None:
+        fns.append(_make_mle(config.mle))
 
     sw_config = config.shortwave_penetration
 
