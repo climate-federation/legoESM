@@ -7,6 +7,8 @@ Lin 2004; Mouallem, Harris & Chen 2023.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -1112,6 +1114,83 @@ def d2a2c_corner_local(utmp_pad_face, vtmp_pad_face, ti, tj, nl, n,
     return ua, va, uc, vc, ut, vt
 
 
+class _D2A2CFields(NamedTuple):
+    """Global padded fields the A→C d2a2c step consumes (output of
+    :func:`d2a2c_global_fields`)."""
+    utmp_pad: jnp.ndarray      # (6, n+4, n+4) D→A covariant u
+    vtmp_pad: jnp.ndarray      # (6, n+4, n+4) D→A covariant v
+    cos_sg5: jnp.ndarray       # (6, n, n) cell-centre cos_sg
+    rsin2: jnp.ndarray         # (6, n, n) cell-centre rsin2
+    ua_pad: jnp.ndarray        # (6, n+4, n+4) A-grid contravariant u
+    va_pad: jnp.ndarray        # (6, n+4, n+4) A-grid contravariant v
+    dxc_pad_x: jnp.ndarray     # (6, n+4, n) dx, h2-padded on i
+    dyc_pad_y: jnp.ndarray     # (6, n, n+4) dy, h2-padded on j
+    se_pad_x: jnp.ndarray      # (6, n+2, n+2) sin_sg E, h1 halo
+    sw_pad_x: jnp.ndarray      # (6, n+2, n+2) sin_sg W, h1 halo
+    sn_pad_y: jnp.ndarray      # (6, n+2, n+2) sin_sg N, h1 halo
+    ss_pad_y: jnp.ndarray      # (6, n+2, n+2) sin_sg S, h1 halo
+
+
+def d2a2c_global_fields(u_d, v_d, cdgrid):
+    """Compute the global padded fields the A→C step (and the tiled stage)
+    consume: D→A covariant winds (:func:`d2a2c_d_to_a`), the A-grid
+    contravariant ua/va, the staggered dx/dy, and the halo-padded sin_sg
+    edge components.  Single source for both d2a2c_vect and the tiled
+    per-tile kernels (P4 phase-1b approach C — the tiled stage runs the cheap
+    D→A globally then shards these into the per-tile A→C)."""
+    grid = cdgrid.base
+    h = 2
+    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdgrid)
+    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
+    rsin2 = cdgrid.rsin2_cell
+    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
+    va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
+    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
+    dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
+    offsets = grid.halo_interp_offsets
+    se_pad_x = pad_halo(cdgrid.sin_sg[:, :, :, 2], interp_offsets=offsets)
+    sw_pad_x = pad_halo(cdgrid.sin_sg[:, :, :, 0], interp_offsets=offsets)
+    sn_pad_y = pad_halo(cdgrid.sin_sg[:, :, :, 3], interp_offsets=offsets)
+    ss_pad_y = pad_halo(cdgrid.sin_sg[:, :, :, 1], interp_offsets=offsets)
+    return _D2A2CFields(utmp_pad, vtmp_pad, cos_sg5, rsin2, ua_pad, va_pad,
+                        dxc_pad_x, dyc_pad_y, se_pad_x, sw_pad_x,
+                        sn_pad_y, ss_pad_y)
+
+
+def d2a2c_adjacent_strips(uc, vc, ut, vt, cosa_u, cosa_v, n):
+    """Non-duogrid adjacent-strip recompute of the transport winds at the
+    face edges (FV3 sw_core.F90:670-722): vt at i=0/n-1 and ut at j=0/n-1,
+    each over the [2,n-2] interior strip, blending the cross-component
+    transport wind from the two adjacent cells.  Shared by d2a2c_vect and the
+    tiled stage's global post-gather pass.  vt strips run first; the ut strips
+    read the updated vt but only at i-cells [1,n-2] (the West/East vt strips
+    touch i-cell 0/n-1 only — no overlap, FV3 ordering preserved).  Returns
+    (ut, vt).  P4 phase-1b.
+    """
+    if n >= 4:
+        j_lo, j_hi = 2, n - 1  # j_face range [2, n-2]
+        ut_w = (ut[:, 0, j_lo - 1:j_hi - 1] + ut[:, 1, j_lo - 1:j_hi - 1]
+                + ut[:, 0, j_lo:j_hi] + ut[:, 1, j_lo:j_hi])
+        vt = vt.at[:, 0, j_lo:j_hi].set(
+            vc[:, 0, j_lo:j_hi] - 0.25 * cosa_v[:, 0, j_lo:j_hi] * ut_w)
+        ut_e = (ut[:, n - 1, j_lo - 1:j_hi - 1] + ut[:, n, j_lo - 1:j_hi - 1]
+                + ut[:, n - 1, j_lo:j_hi] + ut[:, n, j_lo:j_hi])
+        vt = vt.at[:, n - 1, j_lo:j_hi].set(
+            vc[:, n - 1, j_lo:j_hi] - 0.25 * cosa_v[:, n - 1, j_lo:j_hi] * ut_e)
+        i_lo, i_hi = 2, n - 1  # i_face range [2, n-2]
+        vt_s = (vt[:, i_lo - 1:i_hi - 1, 0] + vt[:, i_lo:i_hi, 0]
+                + vt[:, i_lo - 1:i_hi - 1, 1] + vt[:, i_lo:i_hi, 1])
+        ut = ut.at[:, i_lo:i_hi, 0].set(
+            uc[:, i_lo:i_hi, 0] - 0.25 * cosa_u[:, i_lo:i_hi, 0] * vt_s)
+        vt_n = (vt[:, i_lo - 1:i_hi - 1, n - 1] + vt[:, i_lo:i_hi, n - 1]
+                + vt[:, i_lo - 1:i_hi - 1, n] + vt[:, i_lo:i_hi, n])
+        ut = ut.at[:, i_lo:i_hi, n - 1].set(
+            uc[:, i_lo:i_hi, n - 1] - 0.25 * cosa_u[:, i_lo:i_hi, n - 1] * vt_n)
+    return ut, vt
+
+
 def d2a2c_vect(u_d, v_d, cdgrid):
     """FV3 D-grid → A-grid → C-grid (covariant). FV3 sw_core.F90 d2a2c_vect.
 
@@ -1141,22 +1220,17 @@ def d2a2c_vect(u_d, v_d, cdgrid):
     # Extracted to d2a2c_d_to_a (P4 phase-1b approach C): the tiled
     # stage runs THIS step in the global view (cheap averages + one
     # vector halo) and shards utmp_pad/vtmp_pad into the per-tile A→C.
-    grid = cdgrid.base
     h = 2
-    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdgrid)  # each (6, n+4, n+4)
+    # Steps 1-3 global fields (D→A covariant winds + halo, A-grid
+    # contravariant ua/va, staggered dx/dy, halo-padded sin_sg) — the single
+    # source shared with the tiled per-tile stage (d2a2c_global_fields).
+    F = d2a2c_global_fields(u_d, v_d, cdgrid)
+    utmp_pad, vtmp_pad = F.utmp_pad, F.vtmp_pad  # each (6, n+4, n+4)
 
     # iter-938: Fortran cube-corner sign-flip overrides (sw_core.F90:3527-3545, 3620-3639) available
     # as _apply_fortran_d2a2c_corner_overrides but output-dead without edge_interpolate4 j-slice extension.
 
-    # Step 3: Contravariant at cell centres
-    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
-    rsin2 = cdgrid.rsin2_cell
-    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
-    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
-
-    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
-    va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
-
+    ua_pad, va_pad = F.ua_pad, F.va_pad
     ua = ua_pad[:, h:-h, h:-h]  # (6, n, n)
     va = va_pad[:, h:-h, h:-h]
 
@@ -1181,12 +1255,8 @@ def d2a2c_vect(u_d, v_d, cdgrid):
 
     # Face boundary (i=0, i=n): edge_interpolate4 on ua (FV3:3587,3603); halo=2 straddles boundary.
     # Upwind sin_sg from halo cell: ut>0 → sin_sg(i-1,j,3); ut<=0 → sin_sg(i,j,1)
-    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
-    sin_east = cdgrid.sin_sg[:, :, :, 2]   # E-edge
-    sin_west = cdgrid.sin_sg[:, :, :, 0]   # W-edge
-    offsets = grid.halo_interp_offsets
-    se_pad_x = pad_halo(sin_east, interp_offsets=offsets)  # (6, n+2, n+2)
-    sw_pad_x = pad_halo(sin_west, interp_offsets=offsets)
+    dxc_pad_x = F.dxc_pad_x
+    se_pad_x, sw_pad_x = F.se_pad_x, F.sw_pad_x  # (6, n+2, n+2)
     for i_bdy in ([0, n] if n >= 2 else []):
         i_p = i_bdy + h  # padded offset: cell i → padded index i+h
         # ua_pad stencil: 4 cells centred on u-face i_bdy
@@ -1234,11 +1304,8 @@ def d2a2c_vect(u_d, v_d, cdgrid):
             + _C3 * vtmp_pad[:, h:-h, n + h - 1])
 
     # Face boundary y-dir: edge_interpolate4 on va (symmetric to x-dir)
-    dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
-    sin_north = cdgrid.sin_sg[:, :, :, 3]  # N-edge
-    sin_south = cdgrid.sin_sg[:, :, :, 1]  # S-edge
-    sn_pad_y = pad_halo(sin_north, interp_offsets=offsets)
-    ss_pad_y = pad_halo(sin_south, interp_offsets=offsets)
+    dyc_pad_y = F.dyc_pad_y
+    sn_pad_y, ss_pad_y = F.sn_pad_y, F.ss_pad_y
     for j_bdy in ([0, n] if n >= 2 else []):
         j_p = j_bdy + h
         va4 = jnp.stack([va_pad[:, h:-h, j_p - 1], va_pad[:, h:-h, j_p],
@@ -1265,43 +1332,10 @@ def d2a2c_vect(u_d, v_d, cdgrid):
         vt = vt.at[:, :, j_bdy].set(
             vc[:, :, j_bdy] / jnp.maximum(sin_upwind, _EPS))
 
-    # Non-duogrid adjacent-strip vt recomputation at i=0/n-1 (FV3 sw_core.F90:670-691).
-    # j_face ∈ [2, n-2] (Fortran max(3,js), min(npy-2,je+1)).
-    if n >= 4:
-        j_lo, j_hi = 2, n - 1  # j_face range [j_lo, j_hi) → [2, n-2]
-        # West: Fortran vt(1, j) → Python vt[:, 0, j_lo:j_hi]
-        ut_w = (ut[:, 0, j_lo - 1:j_hi - 1] + ut[:, 1, j_lo - 1:j_hi - 1]
-                + ut[:, 0, j_lo:j_hi] + ut[:, 1, j_lo:j_hi])
-        vt_w_new = (vc[:, 0, j_lo:j_hi]
-                    - 0.25 * cdgrid.cosa_v[:, 0, j_lo:j_hi] * ut_w)
-        vt = vt.at[:, 0, j_lo:j_hi].set(vt_w_new)
-        # East: Fortran vt(npx-1, j) → Python vt[:, n-1, j_lo:j_hi]
-        ut_e = (ut[:, n - 1, j_lo - 1:j_hi - 1]
-                + ut[:, n, j_lo - 1:j_hi - 1]
-                + ut[:, n - 1, j_lo:j_hi]
-                + ut[:, n, j_lo:j_hi])
-        vt_e_new = (vc[:, n - 1, j_lo:j_hi]
-                    - 0.25 * cdgrid.cosa_v[:, n - 1, j_lo:j_hi] * ut_e)
-        vt = vt.at[:, n - 1, j_lo:j_hi].set(vt_e_new)
-
-    # Non-duogrid adjacent-strip ut recomputation at j=0/n-1 (FV3:701-707, 716-722).
-    # West/east blocks write vt[i_cell=0,n-1]; south/north read vt at i_cell∈[1,n-3] (no overlap).
-    if n >= 4:
-        i_lo, i_hi = 2, n - 1
-        # South: Fortran ut(i, 1) → Python ut[:, i_lo:i_hi, 0]
-        vt_s = (vt[:, i_lo - 1:i_hi - 1, 0] + vt[:, i_lo:i_hi, 0]
-                + vt[:, i_lo - 1:i_hi - 1, 1] + vt[:, i_lo:i_hi, 1])
-        ut_s_new = (uc[:, i_lo:i_hi, 0]
-                    - 0.25 * cdgrid.cosa_u[:, i_lo:i_hi, 0] * vt_s)
-        ut = ut.at[:, i_lo:i_hi, 0].set(ut_s_new)
-        # North: Fortran ut(i, npy-1) → Python ut[:, i_lo:i_hi, n-1]
-        vt_n = (vt[:, i_lo - 1:i_hi - 1, n - 1]
-                + vt[:, i_lo:i_hi, n - 1]
-                + vt[:, i_lo - 1:i_hi - 1, n]
-                + vt[:, i_lo:i_hi, n])
-        ut_n_new = (uc[:, i_lo:i_hi, n - 1]
-                    - 0.25 * cdgrid.cosa_u[:, i_lo:i_hi, n - 1] * vt_n)
-        ut = ut.at[:, i_lo:i_hi, n - 1].set(ut_n_new)
+    # Non-duogrid adjacent-strip recompute of ut/vt at the face edges
+    # (FV3 sw_core.F90:670-722) — extracted so the tiled stage reuses it.
+    ut, vt = d2a2c_adjacent_strips(
+        uc, vc, ut, vt, cdgrid.cosa_u, cdgrid.cosa_v, n)
 
     return ua, va, uc, vc, ut, vt
 
