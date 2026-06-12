@@ -1612,6 +1612,9 @@ class ModelDriver:
         rc = bootstrap(
             precision=self.config.precision,
             distributed=self.config.distributed,
+            distributed_mode=getattr(
+                self.config, "distributed_mode", "mpi",
+            ),
             grid_type=self.config.grid.grid_type,
             n_devices=self.config.n_devices,
             allow_level_fallback=getattr(
@@ -1624,6 +1627,22 @@ class ModelDriver:
         )
         self._device_config = rc.device_config
 
+        # Multi-controller SPMD (distributed_mode='spmd'): rank/world
+        # come from jax.distributed — no mpi4jax topology exists (and
+        # must never be armed in this mode).  The DeviceConfig keeps
+        # is_distributed=False so _setup_parallel routes the SPMD shard
+        # branch; only the process-0 output guards need the rank.
+        if (rc.distributed and getattr(
+                self.config, "distributed_mode", "mpi") == "spmd"):
+            import jax as _jax
+            self._mpi_rank = _jax.process_index()
+            self._mpi_world_size = _jax.process_count()
+            logger.info(
+                "  Runtime: multi-controller SPMD — process %d/%d, "
+                "%d global devices",
+                self._mpi_rank, self._mpi_world_size,
+                getattr(rc.device_config, "n_devices", 1),
+            )
         # Detect MPI rank early for output guards and logging.
         # Two topology shapes coexist in the codebase:
         #   - cubed-sphere ``MPITopology``       → ``.n_processes``
@@ -1631,7 +1650,7 @@ class ModelDriver:
         # Use ``getattr`` so this early hook works for both without
         # needing to import either type here.  ``_setup_parallel``
         # later overwrites these values with the type-specific path.
-        if rc.distributed:
+        elif rc.distributed:
             from legoesm.parallel.distributed import get_active_topology
             topo = get_active_topology()
             if topo is not None:
@@ -1829,7 +1848,12 @@ class ModelDriver:
                     f"physics shape {local_shape_2d}"
                 )
         else:
-            # Multi-GPU single-node: SPMD sharding
+            # SPMD sharding: multi-GPU single-node, AND multi-controller
+            # jax.distributed (distributed_mode='spmd' — the DeviceConfig
+            # mesh spans the GLOBAL device set, so the same shard +
+            # halo-backend activation gives true cubed-sphere domain
+            # decomposition across processes; bench --cs-spmd receipts
+            # jobs 8462928/8465445).
             from legoesm.parallel.sharded_dynamics import shard_state
             self.state = shard_state(self.state, self._device_config)
 
@@ -4481,6 +4505,38 @@ class ModelDriver:
             # --- Host-side actions at segment boundaries ---
             elapsed_day = day - START_DAY
 
+            # Stability check at EVERY segment boundary, BEFORE diagnostics
+            # / segment-callback / adaptive-dt (codex round-2/3 MAJORs:
+            # spmd forces diag_days=0 which previously skipped this check
+            # entirely, and a coupled segment_callback must never observe
+            # an unstable state).  Read-only on state, cheap vs a segment.
+            # All ranks must agree on the verdict to avoid divergent loop
+            # exits:
+            #   - multi-controller SPMD (distributed_mode='spmd'): EVERY
+            #     process runs the check itself — the state is globally
+            #     sharded and jit-level reductions are SPMD-global, so the
+            #     verdict is process-identical by construction; mpi4py here
+            #     would be a second control plane beside jax.distributed
+            #     (and under a non-MPI launcher COMM_WORLD is size-1 per
+            #     process, leaving nonzero ranks with error=None).
+            #   - mpi4jax topologies: root checks, mpi4py bcasts.
+            _is_root_seg = (self._mpi_rank is None or self._mpi_rank == 0)
+            _spmd_mc = (self._mpi_rank is not None
+                        and self._device_config is not None
+                        and not self._device_config.is_distributed)
+            if _is_root_seg or _spmd_mc:
+                error = self.diagnostics.check_stability(self.state, elapsed_day)
+            else:
+                error = None
+            if self._mpi_rank is not None and not _spmd_mc:
+                from mpi4py import MPI
+                error = MPI.COMM_WORLD.bcast(error, root=0)
+            if error:
+                if _is_root_seg:
+                    logger.warning(f"  {error}")
+                run_status = error
+                break
+
             # Diagnostics
             if diag_interval > 0 and current_step % diag_interval == 0:
                 # Convert accumulated quantities to rates over segment duration.
@@ -4544,21 +4600,6 @@ class ModelDriver:
                     )
                     if _seg_max_cfl > 0:
                         logger.info(f"    CFL max: {_seg_max_cfl:.2f}")
-
-                # Stability check (all ranks must agree to avoid deadlock)
-                if _is_root:
-                    error = self.diagnostics.check_stability(self.state, elapsed_day)
-                else:
-                    error = None
-                # Broadcast stability error to all ranks
-                if self._mpi_rank is not None:
-                    from mpi4py import MPI
-                    error = MPI.COMM_WORLD.bcast(error, root=0)
-                if error:
-                    if _is_root:
-                        logger.warning(f"  {error}")
-                    run_status = error
-                    break
 
                 # Segment callback for coupled integration (e.g., coupler step)
                 if self._segment_callback is not None:
@@ -4893,9 +4934,10 @@ class ModelDriver:
                 v=self.state.v.replace(data=self.state.v.data * self._fric_decay),
             )
 
-            # Diagnostics
+            # Diagnostics (diag_interval == 0 = writer disabled — guard the
+            # modulo; spmd configs FORCE diag_days=0, codex round-2 MAJOR)
             elapsed_day = day - START_DAY
-            if (step + 1) % diag_interval == 0:
+            if diag_interval > 0 and (step + 1) % diag_interval == 0:
                 diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
                     day=day,
