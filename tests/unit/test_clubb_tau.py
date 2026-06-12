@@ -16,7 +16,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid, zm2zt, zt2zm  # noqa: E402
 from legoesm.atmosphere.physics.turbulence import clubb as T  # noqa: E402, N812
 

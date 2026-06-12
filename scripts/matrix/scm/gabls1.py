@@ -42,7 +42,7 @@ from legoesm.atmosphere.physics import (
     RadiationConfig,
     TurbulenceConfig,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig
+from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
 from legoesm.atmosphere.physics.turbulence.config import (
     MYNN25Config,
     SurfaceLayerConfig,

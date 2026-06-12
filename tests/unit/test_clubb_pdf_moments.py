@@ -18,7 +18,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.turbulence.clubb_config import (
+from legoesm.atmosphere.physics.turbulence.clubb import (
     derive_mixt_frac_max_mag,  # noqa: E402
 )
 from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid  # noqa: E402

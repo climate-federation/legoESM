@@ -32,8 +32,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
 
-if TYPE_CHECKING:  # avoid a config <-> clubb_config import cycle at runtime
-    from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig
+if TYPE_CHECKING:  # avoid a config <-> clubb import cycle at runtime
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
 
 
 class SurfaceLayerConfig(NamedTuple):
@@ -505,7 +505,7 @@ class TurbulenceConfig(NamedTuple):
     clubb : CLUBBConfig or None
         Configuration for the fuller CLUBB scheme (``scheme="clubb"``). ``None``
         selects the CAM-default ``CLUBBConfig()`` (resolved in the dispatcher);
-        kept as ``None`` here to avoid a config <-> clubb_config import cycle.
+        kept as ``None`` here to avoid a config <-> clubb import cycle.
     holtslag_boville : HoltslagBovilleConfig
         Configuration for Holtslag-Boville scheme.
     ysu : YSUConfig

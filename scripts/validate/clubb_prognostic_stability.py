@@ -33,7 +33,7 @@ import numpy as np
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column  # noqa: E402
-from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 

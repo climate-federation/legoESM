@@ -11,40 +11,42 @@ CAM-default model-flag values are recorded as comments at the end of the file.
 Table of contents (sections, in order)
 --------------------------------------
   1.  Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2.  Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  2.  Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
+      model flags fixed at CAM defaults — reference table at file end)
+  3.  Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  3.  Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4.  Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  4.  Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5.  Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  5.  Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6.  Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  6.  Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  7.  Mass-conserving hole filling (``fill_holes_vertical`` /
+  7.  Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8.  Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  8.  Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9.  Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  9.  Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  10. ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  11. ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``)
-  12. Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  13. Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  14. Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  15. Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  16. Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  17. Core orchestration (``compute_clubb_diagnostics`` /
+  18. Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``advance_clubb_core`` + the
       ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  18. Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -90,11 +92,7 @@ from legoesm.atmosphere.physics._shared import (
     exner_function,
     virtual_temperature,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_config import (
-    CLUBBConfig,
-    derive_lmin,
-    derive_mixt_frac_max_mag,
-)
+from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import compute_surface_fluxes
@@ -203,7 +201,232 @@ def diagnose_cloud_and_buoyancy(thlm, rtm, wp2, exner, p_in_Pa, thv_ds, Kh, Lsca
 
 
 # ===========================================================================
-# 2. Staggered CLUBB grid
+# 2. Configuration (CAM-default flavour)
+# ===========================================================================
+# CLUBBParams = the tunable closure coefficients (the CLUBB ``clubb_params``
+# vector): library defaults (parameters_tunable.F90:set_default_parameters)
+# with the CAM namelist overrides applied (``# lib X -> Y`` marks an
+# override). Scheme-tunable params live HERE, not in legoesm.constants
+# (CLAUDE.md). CLUBBConfig = the top-level scheme config (params, shared
+# surface-layer config, tolerances, CLUBB sub-step, prognostic switch).
+# Physical constants are deliberately absent — pulled from legoesm.constants.
+# The model FLAGS are fixed at their CAM defaults (table at end of file).
+
+
+class CLUBBParams(NamedTuple):
+    """CLUBB tunable closure coefficients (CAM-effective defaults).
+
+    Library defaults from ``parameters_tunable.F90:set_default_parameters``
+    (the ``_DEFAULTS`` dict in the CLUBB-JAX port), with CAM namelist overrides
+    applied. ``# lib X -> Y`` marks a CAM override of the library default.
+    """
+
+    # ── Return-to-isotropy / pressure-correlation C-coefficients ──────────
+    C1: float = 1.0
+    C1b: float = 1.0
+    C1c: float = 1.0
+    C2rt: float = 1.0          # lib 2.0 -> 1.0
+    C2thl: float = 1.0         # lib 2.0 -> 1.0
+    C2rtthl: float = 1.3       # lib 2.0 -> 1.3
+    C4: float = 5.2            # lib 2.0 -> 5.2
+    C_uu_shr: float = 0.3      # lib 0.4 -> 0.3   (cam7: 0.1)
+    C_uu_buoy: float = 0.3
+    C6rt: float = 4.0          # lib 2.0 -> 4.0
+    C6rtb: float = 6.0         # lib 2.0 -> 6.0
+    C6rtc: float = 1.0
+    C6thl: float = 4.0         # lib 2.0 -> 4.0
+    C6thlb: float = 6.0        # lib 2.0 -> 6.0
+    C6thlc: float = 1.0
+    C7: float = 0.5            # (cam7: 0.1)
+    C7b: float = 0.5
+    C7c: float = 0.5
+    C8: float = 4.2            # lib 0.5 -> 4.2   (cam7: 4.6)
+    C8b: float = 0.0           # lib 0.02 -> 0.0
+    C10: float = 3.3
+    C11: float = 0.7           # lib 0.4 -> 0.7
+    C11b: float = 0.35         # lib 0.4 -> 0.35
+    C11c: float = 0.5
+    C12: float = 1.0
+    C13: float = 0.1
+    C14: float = 2.2           # lib 1.0 -> 2.2
+    C_wp2_pr_dfsn: float = 0.0
+    C_wp3_pr_tp: float = 0.0
+    C_wp3_pr_turb: float = 0.4    # lib 0.0 -> 0.4
+    C_wp3_pr_dfsn: float = 0.0
+    C_wp2_splat: float = 0.0      # lib 2.0 -> 0.0
+
+    # ── Lscale-zero blending coefficients ─────────────────────────────────
+    C6rt_Lscale0: float = 14.0
+    C6thl_Lscale0: float = 14.0
+    C7_Lscale0: float = 0.85
+    wpxp_L_thresh: float = 60.0
+
+    # ── Eddy-diffusion (c_K*) and background-diffusion (nu*) coefficients ──
+    c_K: float = 0.2
+    c_K1: float = 0.75         # lib 0.2 -> 0.75
+    nu1: float = 20.0
+    c_K2: float = 0.125        # lib 0.025 -> 0.125
+    nu2: float = 5.0           # lib 1.0 -> 5.0
+    c_K6: float = 0.375
+    nu6: float = 5.0
+    c_K8: float = 1.25         # lib 5.0 -> 1.25
+    nu8: float = 20.0
+    c_K9: float = 0.25         # lib 0.1 -> 0.25
+    nu9: float = 20.0          # lib 10.0 -> 20.0
+    nu10: float = 0.0
+    c_K10: float = 0.5         # lib 1.0 -> 0.5
+    c_K10h: float = 0.3        # lib 1.0 -> 0.3  (cam7: 0.280)
+
+    # ── Hydrometeor-diffusion (OFF in CAM default; kept for completeness) ──
+    c_K_hm: float = 0.75
+    c_K_hmb: float = 0.75
+    K_hm_min_coef: float = 0.1
+    nu_hm: float = 1.5
+
+    # ── PDF (ADG1) spread / skewness coefficients ─────────────────────────
+    slope_coef_spread_DG_means_w: float = 21.0
+    pdf_component_stdev_factor_w: float = 1.0
+    coef_spread_DG_means_rt: float = 0.8
+    coef_spread_DG_means_thl: float = 0.8
+    gamma_coef: float = 0.308       # lib 0.25 -> 0.308 (cam7: 0.3)
+    gamma_coefb: float = 0.32       # lib 0.25 -> 0.32  (cam7: 0.3)
+    gamma_coefc: float = 5.0
+    Skw_denom_coef: float = 0.0     # lib 4.0 -> 0.0
+    Skw_max_mag: float = 4.5        # lib 10.0 -> 4.5
+
+    # ── Mixing length / time scale ────────────────────────────────────────
+    mu: float = 1.0e-3
+    beta: float = 2.4               # lib 1.0 -> 2.4
+    lmin_coef: float = 0.1          # lib 0.5 -> 0.1
+    Lscale_mu_coef: float = 2.0
+    Lscale_pert_coef: float = 0.1
+    lambda0_stability_coef: float = 0.04   # lib 0.03 -> 0.04
+    mult_coef: float = 1.0          # lib 0.5 -> 1.0
+    taumin: float = 90.0
+    taumax: float = 3600.0
+    alpha_corr: float = 0.15
+
+    # ── Inverse-tau (dissipation time scale) coefficients ─────────────────
+    C_invrs_tau_bkgnd: float = 1.0          # lib 1.1 -> 1.0
+    C_invrs_tau_sfc: float = 0.1
+    C_invrs_tau_shear: float = 0.02         # lib 0.15 -> 0.02
+    C_invrs_tau_N2: float = 0.1             # lib 0.4 -> 0.1
+    C_invrs_tau_N2_wp2: float = 0.2
+    C_invrs_tau_N2_xp2: float = 0.2         # lib 0.05 -> 0.2
+    C_invrs_tau_N2_wpxp: float = 0.0
+    C_invrs_tau_N2_clear_wp3: float = 0.0   # lib 1.0 -> 0.0
+    C_invrs_tau_wpxp_Ri: float = 0.35
+    C_invrs_tau_wpxp_N2_thresh: float = 3.3e-4
+
+    # ── Misc closure / clipping / Richardson coefficients ─────────────────
+    omicron: float = 0.5
+    zeta_vrnce_rat: float = 0.0
+    upsilon_precip_frac_rat: float = 0.55
+    thlp2_rad_coef: float = 1.0
+    thlp2_rad_cloud_frac_thresh: float = 0.1
+    up2_sfc_coef: float = 2.0               # lib 4.0 -> 2.0
+    xp3_coef_base: float = 0.25
+    xp3_coef_slope: float = 0.01
+    altitude_threshold: float = 100.0
+    rtp2_clip_coef: float = 0.5
+    Cx_min: float = 0.33
+    Cx_max: float = 0.95
+    Richardson_num_min: float = 0.25
+    Richardson_num_max: float = 400.0
+    a3_coef_min: float = 1.0
+    a_const: float = 1.8
+    bv_efold: float = 5.0
+    wpxp_Ri_exp: float = 0.5
+    z_displace: float = 25.0
+
+
+class CLUBBConfig(NamedTuple):
+    """Top-level configuration for the fuller CLUBB turbulence scheme.
+
+    The CLUBB model FLAGS are not configurable: only the CAM-default flag
+    tree is implemented (see the reference table at the end of this file).
+
+    Fields
+    ------
+    params : CLUBBParams
+        Tunable closure coefficients (CAM-effective defaults).
+    surface : SurfaceLayerConfig
+        Bulk surface-flux configuration (shared with the other turbulence
+        schemes).
+    clubb_dt : float
+        CLUBB internal sub-step [s] (``clubb_timestep`` namelist default
+        300 s). The host physics ``dt`` may be sub-cycled to this.
+    w_tol : float
+        Tolerance / floor for w-moments ``sqrt(wp2)`` [m/s] (``w_tol``).
+    rt_tol : float
+        Tolerance for total water mixing ratio [kg/kg] (``rt_tol``).
+    thl_tol : float
+        Tolerance for liquid-water potential temperature [K] (``thl_tol``).
+    wp2_max : float
+        Upper clip for ``wp2`` [m^2/s^2] (``wp2_max``).
+    tke_min : float
+        Floor for the carried TKE/wp2 state slot [m^2/s^2] (mirrors the other
+        prognostic-moment schemes so ``integration.py`` can seed the state).
+    T0 : float
+        Reference temperature [K] for the dry Brunt-Vaisala frequency
+        ``N^2 = (g/T0) d(thlm)/dz`` (CLUBB ``T0``; CAM standard 300 K). A fixed
+        reference (not a tunable closure coefficient), passed to
+        ``calc_brunt_vaisala_freq_sqd``.
+    prognostic : bool
+        Select the FULL prognostic higher-order moment closure
+        (``advance_clubb_core`` via ``clubb_step``, carrying ``CLUBBMomentState``
+        in ``PhysicsState.clubb_moments``) instead of the default diagnostic
+        phase-1 path (parcel ``Lscale`` eddy diffusion + ADG1-PDF buoyancy). Opt-
+        in (default ``False``) so existing ``scheme="clubb"`` runs are unchanged.
+        Read only at setup/dispatch time (a static Python branch), never in
+        traced code, so it stays a valid plain pytree-leaf field.
+    """
+
+    params: CLUBBParams = CLUBBParams()
+    surface: SurfaceLayerConfig = SurfaceLayerConfig()
+    clubb_dt: float = 300.0
+    w_tol: float = 2.0e-2
+    rt_tol: float = 1.0e-8
+    thl_tol: float = 1.0e-2
+    wp2_max: float = 1000.0
+    tke_min: float = 1.0e-6
+    T0: float = 300.0
+    prognostic: bool = False
+
+
+# Derived parameters (recomputed from base config, never stored as magic
+# numbers). Faithful to ``parameters_tunable.F90:setup_parameters``.
+# Reference sigma_sqd_w used in the mixt_frac cap derivation (NOT a tunable):
+_MIXT_FRAC_CAP_SIGMA_REF = 0.4
+# Reference layer depth [m] scaling lmin (parameters_tunable.F90 ``lmin_deltaz``).
+_LMIN_DELTAZ = 40.0
+# CAM ``fill_holes_type = 2`` (sliding window) — the only ported hole-fill
+# dispatch value (see the flag table at the end of the file).
+_CAM_FILL_HOLES_TYPE = 2
+
+
+def derive_mixt_frac_max_mag(Skw_max_mag: float) -> float:
+    """Maximum |mixt_frac - 0.5| + 0.5 cap, derived from ``Skw_max_mag``.
+
+    ``1 - 0.5*(1 - Skw_max/sqrt(4*(1-0.4)^3 + Skw_max^2))`` — the ADG1 mixture
+    fraction evaluated at the maximum allowed w-skewness (so the runtime
+    ``mixt_frac`` clip is consistent with ``Skw_max_mag``). With the CAM default
+    ``Skw_max_mag = 4.5`` this is ~0.9897.
+    """
+    inner = 4.0 * (1.0 - _MIXT_FRAC_CAP_SIGMA_REF) ** 3 + Skw_max_mag ** 2
+    return 1.0 - 0.5 * (1.0 - Skw_max_mag / math.sqrt(inner))
+
+
+def derive_lmin(lmin_coef: float) -> float:
+    """Minimum mixing length [m] = ``lmin_coef * lmin_deltaz`` (40 m).
+
+    With the CAM default ``lmin_coef = 0.1`` this is 4 m.
+    """
+    return lmin_coef * _LMIN_DELTAZ
+
+
+# ===========================================================================
+# 3. Staggered CLUBB grid
 # ===========================================================================
 # The ascending zt/zm staggered-grid pytree (CLUBBGrid) with the
 # interpolation (zm2zt/zt2zm), derivative (ddzm/ddzt) and smoothing
@@ -534,7 +757,7 @@ def make_clubb_grid_from_levels(z_full: jax.Array, z_half: jax.Array) -> CLUBBGr
 
 
 # ===========================================================================
-# 3. Flatau saturation adapters
+# 4. Flatau saturation adapters
 # ===========================================================================
 # Thin adapters over the CANONICAL Flatau (1992) saturation curves in
 # legoesm.thermo (per the CLAUDE.md no-saturation-reimpl rule): saturation
@@ -588,7 +811,7 @@ def sat_mixrat_ice(p: jax.Array, T: jax.Array) -> jax.Array:
 
 
 # ===========================================================================
-# 4. Closure helpers (sigma_sqd_w, Brunt-Vaisala, safe_sqrt)
+# 5. Closure helpers (sigma_sqd_w, Brunt-Vaisala, safe_sqrt)
 # ===========================================================================
 # The AD-safe square root shared across the scheme (safe_sqrt; the MFL
 # section keeps its deliberate NaN-propagating local variant), the PDF-width
@@ -762,7 +985,7 @@ def calc_brunt_vaisala_freq_sqd(
 
 
 # ===========================================================================
-# 5. Parcel buoyant-sorting mixing length (Lscale)
+# 6. Parcel buoyant-sorting mixing length (Lscale)
 # ===========================================================================
 # CLUBB's nonlocal parcel buoyant-sorting length scale (mixing_length.F90,
 # golden-locked vs CLUBB-JAX) — the distinctive CLUBB feature replacing
@@ -1196,7 +1419,7 @@ def compute_mixing_length(
 
 
 # ===========================================================================
-# 6. Implicit band solvers
+# 7. Implicit band solvers
 # ===========================================================================
 # ``tridiag_solve`` adapts CLUBB's band storage to the shared legoESM Thomas
 # solver (legoesm.timestepping.tridiagonal.thomas_solve); ``penta_solve`` is a
@@ -1324,7 +1547,7 @@ def penta_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
 
 
 # ===========================================================================
-# 7. Mass-conserving hole filling
+# 8. Mass-conserving hole filling
 # ===========================================================================
 # fill_holes.F90 ports: the sliding-window / global hole fillers used on the
 # advanced means (CAM ``fill_holes_type = 2``) and the TKE-conserving
@@ -1440,7 +1663,7 @@ def fill_holes_vertical(field, rho_ds, dz, threshold, lower_k, upper_k,
     JIT contract: ``fill_holes_type``, ``lower_k``, ``upper_k`` and
     ``grid_dir_indx`` are **compile-time static** (they drive Python branching
     and the window/slice shapes). In normal use they come from the static
-    ``CLUBBFlags``/grid config and are closed over by the enclosing ``jax.jit``;
+    fixed CAM flag values/grid config, closed over by the enclosing ``jax.jit``;
     if this function is jitted directly they must be passed via
     ``static_argnums=(4, 5, 6, 7)`` (or the matching ``static_argnames``). The
     array inputs (``field``/``rho_ds``/``dz``) and ``threshold`` are traced and
@@ -1505,7 +1728,7 @@ def fill_holes_wp2_from_horz_tke(wp2, up2, vp2, threshold, lower_k, upper_k):
 
 
 # ===========================================================================
-# 8. Skewness diagnostics
+# 9. Skewness diagnostics
 # ===========================================================================
 # Skx_func / gamma(Skw) / the LG 2005 xp3 ansatz (CAM
 # ``l_advance_xp3 = .false.`` → xp3 diagnosed, not prognosed) and the
@@ -1691,7 +1914,7 @@ def compute_skewness_diagnostics(wp2, wp3, w_tol, Skw_denom_coef, gr: CLUBBGrid)
 
 
 # ===========================================================================
-# 9. Dissipation time-scale (tau) family
+# 10. Dissipation time-scale (tau) family
 # ===========================================================================
 # CAM tau family (``l_diag_Lscale_from_tau = .false.`` → SIMPLE
 # ``tau = Lscale/sqrt(em)`` with the N^2 stability correction,
@@ -1711,10 +1934,9 @@ def compute_tke(wp2, up2, vp2, gr: CLUBBGrid, config):
     inputs are zm-level. Returns ``(em, sqrt_em_zt)`` — the TKE the tau model and
     MFL consume.
     """
-    if config.flags.l_tke_aniso:
-        em = 0.5 * (wp2 + vp2 + up2)
-    else:
-        em = 1.5 * wp2
+    # CAM l_tke_aniso = True (fixed; flags table at file end). The isotropic
+    # False branch (em = 1.5*wp2) is not ported.
+    em = 0.5 * (wp2 + vp2 + up2)
     em_min = _EM_MIN_COEF * config.w_tol ** 2
     sqrt_em_zt = jnp.sqrt(jnp.maximum(zm2zt(em, gr), em_min))
     return em, sqrt_em_zt
@@ -1773,7 +1995,7 @@ def compute_tau_family(Lscale, em, sqrt_em_zt, brunt_vaisala_freq_sqd, gr: CLUBB
 
 
 # ===========================================================================
-# 10. ADG1 assumed-PDF parameter closure
+# 11. ADG1 assumed-PDF parameter closure
 # ===========================================================================
 # The ADG1 double-Gaussian PDF parameters (CAM ``iiPDF_type = ADG1``):
 # component means/variances/mixture fraction, the binormal component
@@ -1805,7 +2027,7 @@ def ADG1_w_closure(wm, wp2, Skw, sigma_sqd_w, sqrt_wp2, mixt_frac_max_mag):
     wm, wp2, Skw, sigma_sqd_w, sqrt_wp2 : jax.Array
         Mean w, w-variance, w-skewness, PDF width parameter, ``sqrt(wp2)``.
     mixt_frac_max_mag : float
-        Cap on the mixture fraction (``clubb_config.derive_mixt_frac_max_mag``).
+        Cap on the mixture fraction (``derive_mixt_frac_max_mag``).
     """
     denom_sq = 4.0 * (1.0 - sigma_sqd_w) ** 3 + Skw ** 2
     mf_formula = 0.5 * (1.0 - Skw / jnp.sqrt(denom_sq))
@@ -2095,7 +2317,7 @@ def calc_pdf_liquid_cloud_frac_components(adg1, rtpthlp, rtm, thlm, exner, p_in_
 
 
 # ===========================================================================
-# 11. ADG1 PDF moment integrals + buoyancy-flux assembly
+# 12. ADG1 PDF moment integrals + buoyancy-flux assembly
 # ===========================================================================
 # PDF moment integrals over the ADG1 components: higher-order velocity
 # moments (wp4, wp2up2, ...), cloud-water turbulent fluxes (x'rc'), and the
@@ -2339,7 +2561,7 @@ def calc_xpthvp_terms(exner, thv_ds_zt, wprcp_zt, wp2rcp_zt, rtprcp_zt, thlprcp_
 
 
 # ===========================================================================
-# 12. Moment-advance building blocks + xp2_xpyp / windm advances
+# 13. Moment-advance building blocks + xp2_xpyp / windm advances
 # ===========================================================================
 # The shared implicit-advance machinery (diffusion/mean-advection LHS
 # builders, Cauchy-Schwarz clipping family) plus two of the four CAM-order
@@ -2942,7 +3164,7 @@ def xp2_xpyp_uv_rhs(rhs_ta_this, this_pre, other_pre, this_wp, this_dvel_dz,
     ``l_coriolis`` (CAM default ``l_ho_nontrad_coriolis = .false.``) is a
     **compile-time static** feature gate (Python branch, not ``jnp.where``):
     when on, subtracts ``2·fcor_y·this_wp`` (``fcor_y_col`` is ``(ncol, 1)``).
-    In normal use it is a static ``CLUBBFlags`` field closed over by the
+    In normal use it is a fixed CAM-default value closed over by the
     enclosing ``jax.jit``; if this helper is jitted directly, pass it via
     ``static_argnums=(19,)`` / ``static_argnames=("l_coriolis",)``. BCs: lower
     row carries the current value, upper row is ``w_tol_sqd``.
@@ -3056,7 +3278,6 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
     Returns ``(rtp2, thlp2, rtpthlp, up2, vp2)`` on zm levels.
     """
     params = config.params
-    flags = config.flags
     beta = params.beta
     gamma = _GAMMA_OVER_IMPLICIT_TS
     rt_thr = config.rt_tol ** 2
@@ -3106,22 +3327,16 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
                                   rtpthlp, rtm, thlm, wprtp, wpthlp, invrs_dzm,
                                   rtpthlp_forcing, dt)
 
-    if flags.l_lmm_stepping:   # CAM default False (static gate)
-        soln_rtp2 = 0.5 * (rtp2 + soln_rtp2)
-        soln_thlp2 = 0.5 * (thlp2 + soln_thlp2)
-        soln_rtpthlp = 0.5 * (rtpthlp + soln_rtpthlp)
-
     rtp2_fh = pos_definite_variances(soln_rtp2, rho_ds_zm, gr.dzm, rt_thr,
-                                     hf_lower, hf_upper, flags.fill_holes_type)
+                                     hf_lower, hf_upper, _CAM_FILL_HOLES_TYPE)
     thlp2_fh = pos_definite_variances(soln_thlp2, rho_ds_zm, gr.dzm, thl_thr,
-                                      hf_lower, hf_upper, flags.fill_holes_type)
+                                      hf_lower, hf_upper, _CAM_FILL_HOLES_TYPE)
 
-    if flags.l_min_xp2_from_corr_wx:   # CAM default True (static gate)
-        max_corr2 = _MAX_MAG_CORRELATION_FLUX ** 2
-        thr_thlp2 = jnp.maximum(thl_thr, wpthlp ** 2 / (wp2 * max_corr2))
-        thr_rtp2 = jnp.maximum(rt_thr, wprtp ** 2 / (wp2 * max_corr2))
-    else:
-        thr_thlp2, thr_rtp2 = thl_thr, rt_thr
+    # CAM l_min_xp2_from_corr_wx = True (fixed): variance floors from the
+    # maximum-correlation bound.
+    max_corr2 = _MAX_MAG_CORRELATION_FLUX ** 2
+    thr_thlp2 = jnp.maximum(thl_thr, wpthlp ** 2 / (wp2 * max_corr2))
+    thr_rtp2 = jnp.maximum(rt_thr, wprtp ** 2 / (wp2 * max_corr2))
     thlp2_cv = clip_variance(thlp2_fh, thr_thlp2)
     rtp2_cv = clip_variance(rtp2_fh, thr_rtp2)
 
@@ -3160,14 +3375,10 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
     soln_up2 = tridiag_solve(lhs_uv, rhs_up2)
     soln_vp2 = tridiag_solve(lhs_uv, rhs_vp2)
 
-    if flags.l_lmm_stepping:
-        soln_up2 = 0.5 * (up2 + soln_up2)
-        soln_vp2 = 0.5 * (vp2 + soln_vp2)
-
     up2_fh = pos_definite_variances(soln_up2, rho_ds_zm, gr.dzm, w_tol_sqd,
-                                    hf_lower, hf_upper, flags.fill_holes_type)
+                                    hf_lower, hf_upper, _CAM_FILL_HOLES_TYPE)
     vp2_fh = pos_definite_variances(soln_vp2, rho_ds_zm, gr.dzm, w_tol_sqd,
-                                    hf_lower, hf_upper, flags.fill_holes_type)
+                                    hf_lower, hf_upper, _CAM_FILL_HOLES_TYPE)
     up2_cv = clip_variance(up2_fh, w_tol_sqd)
     vp2_cv = clip_variance(vp2_fh, w_tol_sqd)
 
@@ -3175,7 +3386,7 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
 
 
 # ===========================================================================
-# 13. Skewness-dependent C-coefficient family (CAM-default tree)
+# 14. Skewness-dependent C-coefficient family (CAM-default tree)
 # ===========================================================================
 # The xm/wpxp advance needs the pressure-term coefficients ``C6rt_Skw_fnc``,
 # ``C6thl_Skw_fnc`` and ``C7_Skw_fnc``. For the CAM-default flags
@@ -3235,7 +3446,7 @@ def compute_C6_C7_Skw_fnc(Skw_zm, Lscale_zm, config, gr: CLUBBGrid):
 
 
 # ===========================================================================
-# 14. Coupled wp2/wp3 advance (pentadiagonal)
+# 15. Coupled wp2/wp3 advance (pentadiagonal)
 # ===========================================================================
 # The coupled wp2 (zm) / wp3 (zt) advance: interleaved band-matrix LHS
 # builders + RHS terms solved with the verbatim-port pentadiagonal LU
@@ -3791,7 +4002,6 @@ def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
     positive-definite wp2 interpolated to zt.
     """
     params = config.params
-    flags = config.flags
     ng, nzm = wp2.shape
     nzt = nzm - 1
     ndim = 2 * nzm - 1
@@ -3882,9 +4092,9 @@ def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
 
     # ---- post-solve fill_holes / clip ----
     wp2_c = fill_holes_vertical(wp2_new, rho_ds_zm, gr.dzm, w_tol_sqd,
-                                1, nzm - 2, flags.fill_holes_type)
-    if flags.l_wp2_fill_holes_tke:
-        wp2_c, _, _ = fill_holes_wp2_from_horz_tke(wp2_c, up2, vp2, w_tol_sqd, 0, nzm - 3)
+                                1, nzm - 2, _CAM_FILL_HOLES_TYPE)
+    # CAM l_wp2_fill_holes_tke = True (fixed): TKE-conserving wp2 fill.
+    wp2_c, _, _ = fill_holes_wp2_from_horz_tke(wp2_c, up2, vp2, w_tol_sqd, 0, nzm - 3)
     wp2_c = clip_variance(wp2_c, w_tol_sqd)
     wp2_zt = jnp.maximum(zm2zt(wp2_c, gr), w_tol_sqd)
     wp3_c = clip_skewness(wp3_new, wp2_zt, gr.zt, sfc_elevation, skw_max)
@@ -3892,7 +4102,7 @@ def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
 
 
 # ===========================================================================
-# 15. Monotonic turbulent-flux limiter (MFL)
+# 16. Monotonic turbulent-flux limiter (MFL)
 # ===========================================================================
 # JAX port of CLUBB's monotonic flux limiter (mono_flux_limiter.F90) applied
 # inside the xm/wpxp advance (CAM ``l_mono_flux_lim_{thlm,rtm,um,vm} =
@@ -4171,7 +4381,7 @@ def monotonic_turbulent_flux_limit(
 
 
 # ===========================================================================
-# 16. Coupled xm/wpxp advance (means + scalar fluxes)
+# 17. Coupled xm/wpxp advance (means + scalar fluxes)
 # ===========================================================================
 # The coupled xm (zt) / wpxp (zm) advance for rtm/wprtp and thlm/wpthlp
 # (CAM ``l_predict_upwp_vpwp = .false.`` → winds go through
@@ -4183,8 +4393,6 @@ def monotonic_turbulent_flux_limit(
 _RT_TOL_MFL = 1.0e-4    # [kg/kg]
 _THL_TOL_MFL = 0.2      # [K]
 # Relaxed-clipping variance floors (advance_xm_wpxp; only if l_enable_relaxed_clipping):
-_RTP2_RELAXED_FLOOR = 1.0e-7
-_THLP2_RELAXED_FLOOR = 1.0e-2
 
 
 def _weights_zm2zt(gr: CLUBBGrid):
@@ -4507,10 +4715,9 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
     ``(wprtp, rtm, wpthlp, thlm)``.
     """
     params = config.params
-    flags = config.flags
     Kw6 = params.c_K6 * Kh_zt
     nu6 = params.nu6
-    rt_tol, thl_tol, fht = config.rt_tol, config.thl_tol, flags.fill_holes_type
+    rt_tol, thl_tol, fht = config.rt_tol, config.thl_tol, _CAM_FILL_HOLES_TYPE
 
     lhs_ta = calc_xm_wpxp_ta_terms(sigma_sqd_w, wp3_on_wp2_zt, rho_ds_zt,
                                    invrs_rho_ds_zm, gr)
@@ -4518,11 +4725,8 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
                                 invrs_rho_ds_zm, rho_ds_zt, rho_ds_zm,
                                 invrs_rho_ds_zt, gr)
 
-    if flags.l_enable_relaxed_clipping:   # CAM default False (static gate)
-        rtp2_clip = jnp.maximum(rtp2, _RTP2_RELAXED_FLOOR)
-        thlp2_clip = jnp.maximum(thlp2, _THLP2_RELAXED_FLOOR)
-    else:
-        rtp2_clip, thlp2_clip = rtp2, thlp2
+    # CAM l_enable_relaxed_clipping = False (fixed): clip on the raw variances.
+    rtp2_clip, thlp2_clip = rtp2, thlp2
 
     # Field-independent MFL reachable-level range (shared by rt/thl).
     lo, hi = calc_turb_adv_range(w_1_zm, w_2_zm, varnce_w_1_zm, varnce_w_2_zm,
@@ -4542,16 +4746,16 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
 
     rtm_new, wprtp_new = _advance(
         wprtp, rtm, wprtp_forcing, rtm_forcing, C6rt_Skw_fnc, rtpthvp, rtp2,
-        rtp2_clip, MFL_RTM, rt_tol, _RT_TOL_MFL, rt_tol, flags.l_mono_flux_lim_rtm)
+        rtp2_clip, MFL_RTM, rt_tol, _RT_TOL_MFL, rt_tol, True)  # CAM l_mono_flux_lim_rtm
     thlm_new, wpthlp_new = _advance(
         wpthlp, thlm, wpthlp_forcing, thlm_forcing, C6thl_Skw_fnc, thlpthvp, thlp2,
-        thlp2_clip, MFL_THLM, thl_tol, _THL_TOL_MFL, thl_tol, flags.l_mono_flux_lim_thlm)
+        thlp2_clip, MFL_THLM, thl_tol, _THL_TOL_MFL, thl_tol, True)  # CAM l_mono_flux_lim_thlm
 
     return wprtp_new, rtm_new, wpthlp_new, thlm_new
 
 
 # ===========================================================================
-# 17. Core orchestration
+# 18. Core orchestration
 # ===========================================================================
 # Assembles the parity-tested building blocks into the per-step closure: the
 # diagnostics (``compute_clubb_diagnostics`` — skewness, ``sigma_sqd_w``, TKE,
@@ -4838,7 +5042,7 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
     # ---- (5) Cauchy-Schwarz clip of the fluxes (pre-wp2_wp3 wp2) ----
     wprtp, wpthlp, upwp, vpwp = clip_covars_denom(
         wprtp, wpthlp, state.upwp, state.vpwp, state.wp2, rtp2, thlp2, up2, vp2,
-        l_tke_aniso=config.flags.l_tke_aniso)
+        l_tke_aniso=True)  # CAM l_tke_aniso = True (fixed)
 
     # ---- (6) advance_wp2_wp3: wp2/wp3 (uses post-xp2 up2/vp2 + post-clip fluxes) ----
     wp2, wp3, _wp2_zt = advance_wp2_wp3(
@@ -4853,7 +5057,7 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
     # ---- (7) Cauchy-Schwarz clip with the new wp2 ----
     wprtp, wpthlp, upwp, vpwp = clip_covars_denom(
         wprtp, wpthlp, upwp, vpwp, wp2, rtp2, thlp2, up2, vp2,
-        l_tke_aniso=config.flags.l_tke_aniso)
+        l_tke_aniso=True)  # CAM l_tke_aniso = True (fixed)
 
     # ---- (8) advance_windm_edsclrm: um/vm + diagnostic upwp/vpwp ----
     # Kh_zm is the START-OF-STEP eddy diffusivity (advance_clubb_core_module.F90
@@ -4864,7 +5068,7 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
     um, vm, upwp, vpwp = advance_windm_edsclrm(
         state.um, state.vm, upwp, vpwp, wp2, up2, vp2, wm_zt, diag["Kh_zm"],
         ug, vg, forcing.um, forcing.vm, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zt,
-        fcor, p.c_K10, p.nu10, dt, gr, l_tke_aniso=config.flags.l_tke_aniso)
+        fcor, p.c_K10, p.nu10, dt, gr, l_tke_aniso=True)  # CAM l_tke_aniso
 
     new_state = CLUBBMomentState(
         rtm=rtm, thlm=thlm, um=um, vm=vm, wp2=wp2, wp3=wp3, up2=up2, vp2=vp2,
@@ -4947,7 +5151,7 @@ def unpack_clubb_moments(arr: jax.Array) -> CLUBBMomentState:
 
 
 # ===========================================================================
-# 18. Scheme entries
+# 19. Scheme entries
 # ===========================================================================
 
 
@@ -5497,3 +5701,89 @@ def integrate_clubb_column(
     (u_f, v_f, T_f, q_f, m_f), diags = jax.lax.scan(
         _step, (u, v, T, q_v, moments), xs=None, length=nsteps)
     return u_f, v_f, T_f, q_f, m_f, diags
+
+
+# ---------------------------------------------------------------------------
+# CAM-default CLUBB model-flag values (reference table)
+# ---------------------------------------------------------------------------
+# This scheme implements ONLY the call tree selected by the CAM-default CLUBB
+# model flags (namelist_defaults_cam.xml ``clubb_*`` base values, falling back
+# to the CLUBB library defaults in model_flags.F90 where the namelist is
+# silent — marked "absent->lib"). The flags are therefore NOT defined as
+# runtime configuration: no other tree is implemented, and every former
+# ``flags.l_*`` branch in the code is hardcoded to the value below (with a
+# "CAM <flag> = <value>" comment at the site). Where the CAM namelist
+# OVERRIDES the library default the entry is marked "lib X -> CAM Y".
+# Integer flags use the enum codes from ``model_flags.F90``.
+# ``tests/unit/test_clubb_config.py`` parses this table and checks it against
+# the CAM namelist source when the CESM tree is present.
+#
+#
+# ── Integer / enum flags ─────────────────────────────────────────────
+#   iiPDF_type = 1   # ADG1                 (absent->lib)
+#   ipdf_call_placement = 2   # ipdf_post_advance_fields
+#   saturation_formula = 3   # flatau               (absent->lib)
+#   penta_solve_method = 1   # lib 2 -> CAM 1
+#   tridiag_solve_method = 1   # lib 2 -> CAM 1
+#   grid_remap_method = 1   # lib 2(ppm) -> CAM 1
+#   grid_adapt_in_time_method = 0   # no grid adaptation
+#   fill_holes_type = 2   # sliding_window
+#
+# ── Logical flags — CAM namelist base values (⚠ several differ from lib) ──
+#   l_use_precip_frac = True
+#   l_predict_upwp_vpwp = False   # lib True -> CAM False
+#   l_min_wp2_from_corr_wx = False
+#   l_min_xp2_from_corr_wx = True
+#   l_C2_cloud_frac = False
+#   l_diffuse_rtm_and_thlm = False
+#   l_stability_correct_Kh_N2_zm = False
+#   l_calc_thlp2_rad = True
+#   l_upwind_xpyp_ta = True
+#   l_upwind_xm_ma = True
+#   l_uv_nudge = False   # absent->lib
+#   l_rtm_nudge = False
+#   l_tke_aniso = True
+#   l_vert_avg_closure = True   # lib False -> CAM True
+#   l_trapezoidal_rule_zt = True   # lib False -> CAM True
+#   l_trapezoidal_rule_zm = True   # lib False -> CAM True
+#   l_call_pdf_closure_twice = True   # lib False -> CAM True
+#   l_standard_term_ta = False
+#   l_partial_upwind_wp3 = False
+#   l_godunov_upwind_wpxp_ta = False
+#   l_godunov_upwind_xpyp_ta = False
+#   l_use_cloud_cover = True   # lib False -> CAM True
+#   l_diagnose_correlations = False
+#   l_calc_w_corr = False
+#   l_const_Nc_in_cloud = False
+#   l_fix_w_chi_eta_correlations = True
+#   l_stability_correct_tau_zm = True   # lib False -> CAM True
+#   l_damp_wp2_using_em = False   # lib True -> CAM False
+#   l_do_expldiff_rtm_thlm = False
+#   l_Lscale_plume_centered = False
+#   l_diag_Lscale_from_tau = False   # lib True -> CAM False
+#   l_use_C7_Richardson = False   # lib True -> CAM False
+#   l_use_C11_Richardson = False
+#   l_use_shear_Richardson = False
+#   l_brunt_vaisala_freq_moist = False
+#   l_use_thvm_in_bv_freq = False
+#   l_rcm_supersat_adj = False   # lib True -> CAM False
+#   l_damp_wp3_Skw_squared = False   # lib True -> CAM False
+#   l_prescribed_avg_deltaz = False
+#   l_lmm_stepping = False
+#   l_e3sm_config = False
+#   l_vary_convect_depth = False
+#   l_use_tke_in_wp3_pr_turb_term = False   # lib True -> CAM False
+#   l_use_tke_in_wp2_wp3_K_dfsn = False
+#   l_smooth_Heaviside_tau_wpxp = False
+#   l_enable_relaxed_clipping = False
+#   l_mono_flux_lim_thlm = True
+#   l_mono_flux_lim_rtm = True
+#   l_mono_flux_lim_um = True
+#   l_mono_flux_lim_vm = True
+#   l_mono_flux_lim_spikefix = True
+#   l_host_applies_sfc_fluxes = False   # absent->lib
+#   l_wp2_fill_holes_tke = True   # absent->lib
+#   l_add_dycore_grid = False
+#   l_ascending_grid = False   # CAM namelist
+#   l_c14_ml = False   # CAM namelist (neural C14, OFF)
+#   l_intr_sfc_flux_smooth = False   # CAM namelist (clubb_intr smoothing)

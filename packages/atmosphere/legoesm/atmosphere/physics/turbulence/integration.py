@@ -128,7 +128,7 @@ def get_turbulence_fn(config: TurbulenceConfig):
     elif config.scheme == "clubb_lite":
         return "clubb_lite", clubb_lite_turbulence, config.clubb_lite
     elif config.scheme == "clubb":
-        from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig
+        from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
         clubb_cfg = config.clubb if config.clubb is not None else CLUBBConfig()
         if getattr(clubb_cfg, "prognostic", False):
             from legoesm.atmosphere.physics.turbulence.clubb import (

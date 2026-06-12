@@ -17,7 +17,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     CLUBBForcing,
     CLUBBMomentState,
@@ -331,7 +331,7 @@ def test_sigma_sqd_w_cam_form_matches_reference():
     if str(_CLUBB_JAX_ROOT) not in sys.path:
         sys.path.insert(0, str(_CLUBB_JAX_ROOT))
     import clubb_jax.src.CLUBB_core.sigma_sqd_w_module as R  # noqa: N812
-    from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
     from legoesm.atmosphere.physics.turbulence.clubb import compute_sigma_sqd_w
 
     gr, ng, nzm = _gr()

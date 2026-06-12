@@ -133,9 +133,6 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/config.py",
-        # CLUBB port: scheme configuration NamedTuples (flags/params/tolerances),
-        # no tendencies — config plumbing, like config.py.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",

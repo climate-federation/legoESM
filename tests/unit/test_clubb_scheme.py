@@ -21,7 +21,7 @@ from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     clubb_turbulence_prognostic,
     integrate_clubb_column,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     CLUBBMomentState,
     init_clubb_moments,

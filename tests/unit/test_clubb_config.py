@@ -1,7 +1,11 @@
-"""Unit tests for the CLUBB scheme configuration (``clubb_config.py``).
+"""Unit tests for the CLUBB scheme configuration (the config section of ``clubb.py``).
 
-Guards the CAM-default flag/parameter values (the authoritative settings the
-port targets) against accidental drift, and checks pytree/typing hygiene.
+Guards the CAM-default parameter values and the CAM-default model-FLAG
+reference table (the authoritative settings the port targets) against
+accidental drift, and checks pytree/typing hygiene. The flags are no longer a
+runtime config class — only the CAM-default tree is implemented — so the flag
+tests parse the reference comment table at the end of ``clubb.py`` (keeping
+the namelist source-of-truth tripwire alive on the comments themselves).
 
 Part of the fuller CLUBB port — see ``PORT_CLUBB.md``.
 """
@@ -12,11 +16,10 @@ import re
 from pathlib import Path
 
 import jax
-import jax.numpy as jnp
 import pytest
-from legoesm.atmosphere.physics.turbulence.clubb_config import (
+from legoesm.atmosphere.physics.turbulence import clubb as clubb_mod
+from legoesm.atmosphere.physics.turbulence.clubb import (
     CLUBBConfig,
-    CLUBBFlags,
     CLUBBParams,
 )
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
@@ -29,24 +32,44 @@ _NAMELIST = (
     / "CESM/components/cam/bld/namelist_files/namelist_defaults_cam.xml"
 )
 
+_CLUBB_PY = Path(clubb_mod.__file__)
+
+
+def _parse_flag_reference_table():
+    """Parse the CAM-default flag table from the comment block in clubb.py.
+
+    The table rows are ``#   <name> = <value>`` lines after the
+    "CAM-default CLUBB model-flag values (reference table)" header. Values are
+    Python literals (True/False/int). Returns dict name -> value.
+    """
+    text = _CLUBB_PY.read_text()
+    m = re.search(r"# CAM-default CLUBB model-flag values \(reference table\)\n(.*)\Z",
+                  text, re.S)
+    assert m, "flag reference table header missing from clubb.py"
+    out = {}
+    for row in re.finditer(r"^#   (\w+) = (True|False|\d+)", m.group(1), re.M):
+        name, val = row.group(1), row.group(2)
+        out[name] = {"True": True, "False": False}.get(val, None)
+        if out[name] is None:
+            out[name] = int(val)
+    return out
+
 
 def test_config_constructs_with_defaults():
     cfg = CLUBBConfig()
-    assert isinstance(cfg.flags, CLUBBFlags)
     assert isinstance(cfg.params, CLUBBParams)
     assert isinstance(cfg.surface, SurfaceLayerConfig)
     assert cfg.clubb_dt == 300.0
+    # The flags field is GONE by design (only the CAM tree is implemented).
+    assert "flags" not in cfg._fields
 
 
-def test_flags_are_static_no_leaves():
-    """CLUBBFlags must contribute NO dynamic JAX leaves (static pytree node).
+def test_config_has_no_flag_leaves():
+    """The config's leaves are exactly params + surface + the scalar fields.
 
-    This is the contract that lets kernels branch on flags with Python ``if``
-    under jit. The flag values live in the treedef, not the leaves.
+    (The former CLUBBFlags static node is removed; nothing flag-like may leak
+    into the pytree leaves.)
     """
-    flag_leaves = jax.tree_util.tree_leaves(CLUBBFlags())
-    assert flag_leaves == [], f"flags leaked dynamic leaves: {flag_leaves}"
-    # Within a full config, the only leaves are params/surface/tolerances.
     cfg = CLUBBConfig()
     cfg_leaves = jax.tree_util.tree_leaves(cfg)
     param_leaves = jax.tree_util.tree_leaves(CLUBBParams())
@@ -54,30 +77,6 @@ def test_flags_are_static_no_leaves():
     # clubb_dt + w_tol + rt_tol + thl_tol + wp2_max + tke_min + T0 + prognostic
     # = 8 scalar fields on CLUBBConfig itself.
     assert len(cfg_leaves) == len(param_leaves) + len(surface_leaves) + 8
-
-
-def test_flags_hashable_and_branchable_under_jit():
-    """A jitted fn can branch on a static flag without tracer errors.
-
-    Mirrors the real legoESM pattern: the scheme config is CLOSURE-captured by
-    the physics factory (it also carries a ``str`` leaf, ``surface.bulk_scheme``,
-    so it cannot be a traced arg), and only arrays cross the jit boundary. The
-    static flag is then a concrete Python bool inside the trace.
-    """
-    assert hash(CLUBBFlags()) == hash(CLUBBFlags())
-
-    def make_step(cfg):
-        @jax.jit
-        def step(x):
-            if cfg.flags.l_use_cloud_cover:   # Python `if` on a static flag
-                return x * 2.0
-            return x * 3.0
-        return step
-
-    cfg = CLUBBConfig()
-    assert float(make_step(cfg)(jnp.asarray(1.0))) == 2.0   # default True
-    cfg_off = cfg._replace(flags=CLUBBFlags(l_use_cloud_cover=False))
-    assert float(make_step(cfg_off)(jnp.asarray(1.0))) == 3.0
 
 
 def test_is_pytree_round_trip():
@@ -130,7 +129,8 @@ def test_cam_default_param_overrides(field, expected):
 @pytest.mark.parametrize(
     "field, expected",
     [
-        # CAM namelist flag values that DIFFER from the CLUBB library defaults.
+        # CAM namelist flag values that DIFFER from the CLUBB library defaults
+        # (now reference-table rows, not config fields).
         ("l_predict_upwp_vpwp", False),     # lib True
         ("l_use_cloud_cover", True),        # lib False
         ("l_use_C7_Richardson", False),     # lib True
@@ -153,11 +153,25 @@ def test_cam_default_param_overrides(field, expected):
         ("fill_holes_type", 2),
     ],
 )
-def test_cam_default_flag_values(field, expected):
-    val = getattr(CLUBBFlags(), field)
+def test_cam_default_flag_table_values(field, expected):
+    table = _parse_flag_reference_table()
+    assert field in table, f"{field} missing from the clubb.py flag table"
+    val = table[field]
     assert val == expected
-    # bool/int distinction matters for downstream gating; verify exact type.
+    # bool/int distinction matters; the table must keep exact literal types.
     assert type(val) is type(expected)
+
+
+def test_flag_table_complete():
+    """The reference table keeps all 65 flags (8 enum + 57 logical)."""
+    table = _parse_flag_reference_table()
+    assert len(table) == 65, f"flag table has {len(table)} rows, expected 65"
+
+
+def test_cam_fill_holes_type_constant_matches_table():
+    """The hardcoded dispatch constant must agree with the reference table."""
+    table = _parse_flag_reference_table()
+    assert clubb_mod._CAM_FILL_HOLES_TYPE == table["fill_holes_type"]
 
 
 def _parse_namelist_clubb_base_defaults(text):
@@ -185,8 +199,8 @@ def _parse_namelist_clubb_base_defaults(text):
 
 
 @pytest.mark.skipif(not _NAMELIST.exists(), reason="CESM namelist not in tree")
-def test_flags_match_cam_namelist_source():
-    """Source-of-truth check: CLUBBFlags == namelist_defaults_cam.xml base.
+def test_flag_table_matches_cam_namelist_source():
+    """Source-of-truth check: the clubb.py flag table == namelist base values.
 
     Non-vacuous: compares against the actual XML, not transcribed values. Only
     flags PRESENT in the namelist are checked (others fall back to library
@@ -195,16 +209,16 @@ def test_flags_match_cam_namelist_source():
     text = _NAMELIST.read_text()
     nl = _parse_namelist_clubb_base_defaults(text)
     assert nl, "parsed no clubb defaults — parser/namelist format drift"
-    flags = CLUBBFlags()
+    table = _parse_flag_reference_table()
     mismatches = []
     for nl_name, nl_val in nl.items():
         field = nl_name[len("clubb_"):]
-        if not hasattr(flags, field):
+        if field not in table:
             continue  # flag not modeled (e.g. host-side); skip
-        got = getattr(flags, field)
+        got = table[field]
         if bool(got) != bool(nl_val) if isinstance(nl_val, bool) else got != nl_val:
             mismatches.append((field, got, nl_val))
-    assert not mismatches, f"CLUBBFlags disagree with CAM namelist: {mismatches}"
+    assert not mismatches, f"clubb.py flag table disagrees with CAM namelist: {mismatches}"
 
 
 def test_all_params_are_float():
@@ -220,7 +234,7 @@ def test_overrides_compose():
     cfg2 = cfg._replace(params=cfg.params._replace(C8=9.9))
     assert cfg2.params.C8 == 9.9
     assert cfg2.params.C4 == 5.2          # untouched
-    assert cfg2.flags is cfg.flags         # untouched
+    assert cfg2.surface is cfg.surface     # untouched
 
 
 if __name__ == "__main__":

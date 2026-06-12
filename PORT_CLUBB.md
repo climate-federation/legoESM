@@ -33,7 +33,7 @@ happens after the source consolidation settles.
 | 15 | `clubb_coefficients.py` | 71 | constants → top of clubb.py | ✅ C2 (iter 2, sec. 2; the module is FUNCTIONS not constants — placed as a section; the true scalar constants land near the top in the final-layout pass) |
 | 16 | `clubb_mixing_length.py` | 472 | compare vs `_shared` Blackadar (DIFFERENT — parcel buoyant-sorting) → absorb + file issue noting it could supplant `_shared`'s | ✅ C5 (iter 5, sec. 5; supplant-note in the section header) |
 | 17 | `clubb_saturation.py` | 87 | thin wrappers over `thermo` Flatau curves (shared module EXISTS) → wrappers into clubb.py | ✅ C5 (iter 5, sec. 3) |
-| 18 | `clubb_config.py` | 338 | `CLUBBParams`/`CLUBBConfig` → clubb.py; **drop `CLUBBFlags`** (CAM tree only), flag VALUES → comment block at END of clubb.py; prune dead non-CAM branches that the flag removal exposes | — |
+| 18 | `clubb_config.py` | 338 | `CLUBBParams`/`CLUBBConfig` → clubb.py; **drop `CLUBBFlags`** (CAM tree only), flag VALUES → comment block at END of clubb.py; prune dead non-CAM branches that the flag removal exposes | ✅ C6 (iter 6, sec. 2 + flag table at file end) |
 | 19 | `clubb_lite.py` | 328 | NOT absorbed (separate scheme). Retain `_shared.exner_function` use; REVERT its `buoyancy_coefficient` usage (superfluous per goal) | — |
 
 **Iteration log (condensation):**
@@ -94,11 +94,26 @@ happens after the source consolidation settles.
   contracts entries removed. Green: 197 + 5 conservation tests; ruff clean;
   codex review → approve (2 [low] flags were the intentional test-header
   updates, same sanctioned class as C1-C4).
-  **Remaining:** `clubb_config.py` (C6: CLUBBConfig/Params into clubb.py,
-  CLUBBFlags → CAM-defaults comment block at file end, prune dead non-CAM
-  branches; consumers: integration.py/config.py/2 scripts/many tests),
-  `clubb_lite.py` buoyancy_coefficient revert, final layout pass (coefficient
-  constants near top + line-numbered TOC), test-file consolidation decision.
+- **C6 (iter 6) — config endgame:** `CLUBBParams`/`CLUBBConfig`/derive fns →
+  clubb.py section 2 (19 sections, 5789 lines); **`CLUBBFlags` class REMOVED**
+  (only the CAM tree is implemented): all 14 former `config.flags.*` sites
+  hardcoded to CAM defaults with "CAM <flag> = <val>" site comments — dead
+  branches DELETED (`l_lmm_stepping` x2, `l_enable_relaxed_clipping` True-arm
+  + its 2 floor constants), True-branches made unconditional
+  (`l_min_xp2_from_corr_wx`, `l_wp2_fill_holes_tke`, `l_tke_aniso`),
+  `fill_holes_type` → `_CAM_FILL_HOLES_TYPE = 2`. The 65 flag VALUES live as
+  a machine-parseable reference table at the END of clubb.py;
+  test_clubb_config.py REWRITTEN to parse that table (the CAM-namelist
+  source-of-truth tripwire survives on the comment block + new
+  table-completeness and constant-vs-table consistency gates). clubb_config
+  deleted; config.py keeps a TYPE_CHECKING-only import (no runtime cycle).
+  Green: 265 + 7 + 12 tests; ruff clean; codex adversarial review → APPROVE
+  (verified: 14/14 flag sites, 102/102 params identical, 65/65 table match,
+  dead branches truly dead under CAM defaults).
+  **Remaining:** `clubb_lite.py` buoyancy_coefficient revert + retained
+  `_shared.exner_function`, final layout pass (line-numbered TOC; coefficient
+  constants placement review), test-file consolidation decision, full
+  test_clubb_scheme.py run.
 
 
 **Previous Goal:** `packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py`

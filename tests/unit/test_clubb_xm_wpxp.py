@@ -510,7 +510,7 @@ def test_clipping_jit_and_grad():
 # --------------------------------------------------------------------------
 
 def _main_inputs(gr, ng, nzm, seed=20):
-    from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
     nzt = nzm - 1
     rng = np.random.default_rng(seed)
 
@@ -583,14 +583,14 @@ def test_advance_xm_wpxp_wiring():
         return X.xm_wpxp_clipping_and_stats(
             mfl, xm_new, wp_pre, xm, xp2, xp2, kw["wp2"], kw["wm_zt"], xmf,
             kw["rho_ds_zm"], kw["rho_ds_zt"], kw["invrs_rho_ds_zm"], kw["invrs_rho_ds_zt"],
-            xm_tol ** 2, tol_mfl, lo, hi, xm_tol, cfg.flags.fill_holes_type, l_mfl, 300.0, gr)
+            xm_tol ** 2, tol_mfl, lo, hi, xm_tol, 2, l_mfl, 300.0, gr)
 
     exp_rtm, exp_wprtp = pair(kw["wprtp"], kw["rtm"], kw["wprtp_forcing"], kw["rtm_forcing"],
                               kw["C6rt_Skw_fnc"], kw["rtpthvp"], kw["rtp2"], MFL_RTM,
-                              cfg.rt_tol, 1.0e-4, cfg.flags.l_mono_flux_lim_rtm)
+                              cfg.rt_tol, 1.0e-4, True)
     exp_thlm, exp_wpthlp = pair(kw["wpthlp"], kw["thlm"], kw["wpthlp_forcing"], kw["thlm_forcing"],
                                 kw["C6thl_Skw_fnc"], kw["thlpthvp"], kw["thlp2"], MFL_THLM,
-                                cfg.thl_tol, 0.2, cfg.flags.l_mono_flux_lim_thlm)
+                                cfg.thl_tol, 0.2, True)
 
     wprtp, rtm, wpthlp, thlm = X.advance_xm_wpxp(**kw)
     np.testing.assert_array_equal(np.asarray(rtm), np.asarray(exp_rtm))

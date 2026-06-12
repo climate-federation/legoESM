@@ -672,7 +672,7 @@ def test_clip_skewness_jit_grad():
 # --------------------------------------------------------------------------
 
 def _wp23_main_inputs(seed=30, ng=2, nzt=10):
-    from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
     nzm = nzt + 1
     rng = np.random.default_rng(seed)
     gr, _, _ = _gr(ng=ng, nzt=nzt, stretched=True)
