@@ -1262,8 +1262,17 @@ def _interp_strip_guarded(seg_padded, offsets_seg, g, n_loc, seg_start, n):
     ).astype(seg_padded.dtype)
 
 
-def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
-    """Tiled (6*kt^2-device) ppermute shard_map exchange — halo 1/2.
+def _build_tiled_pad(mesh, ndim, halo=1, with_offsets=False):
+    """Shared tiled-pad builder — validate + static tables + the
+    body-side pad function.  Returns ``(_pad_body, in_sp, in_sp_data)``.
+
+    ``_pad_body(tile, offsets)`` pads a SINGLE device's local tile via
+    ``lax.ppermute`` over (face, tile_i, tile_j) — valid inside ANY
+    shard_map over those axes, so both the wrapped exchange and the
+    unwrapped tiled tendency stage share this ONE body (zero
+    duplication / parity drift).
+
+    Original tiled exchange semantics — halo 1/2.
 
     One tile per device on mesh axes ("face", "tile_i", "tile_j").
     Schedule: 4 strip ppermute rounds (every tile edge is remote) +
@@ -1309,16 +1318,8 @@ def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
     pos_j = jnp.asarray(tables.offs_pos)
     n_rounds = len(tables.perms)
 
-    @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=in_sp_data,
-             check_vma=False)
-    def _exchange(*args):
-        if with_offsets:
-            local_shard, offsets = args
-        else:
-            (local_shard,) = args
-            offsets = None
-
-        tile = local_shard[0]              # (n_loc, n_loc[, C])
+    def _pad_body(tile, offsets):
+        # tile: (n_loc, n_loc[, C]) — a SINGLE device's local block.
         n_loc = tile.shape[0]
         n = kt * n_loc
         fi = jax.lax.axis_index("face")
@@ -1514,9 +1515,51 @@ def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
                     ),
                 )
                 padded = padded.at[rs, cs].set(blk)
-        return padded[None]
+        return padded
+
+    return _pad_body, in_sp, in_sp_data
+
+
+def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
+    """Tiled (6*kt^2-device) ppermute shard_map exchange — halo 1/2.
+
+    Wraps the shared body-side pad (:func:`_build_tiled_pad`) in a
+    ``shard_map`` over (face, tile_i, tile_j); bit-identical serial
+    parity (0.0 vs pad_halo_local/pad_halo, h1+h2 x offsets+raw, job
+    8464648).
+    """
+    _pad_body, in_sp, in_sp_data = _build_tiled_pad(
+        mesh, ndim, halo=halo, with_offsets=with_offsets)
+
+    @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=in_sp_data,
+             check_vma=False)
+    def _exchange(*args):
+        if with_offsets:
+            local_shard, offsets = args
+        else:
+            (local_shard,) = args
+            offsets = None
+        return _pad_body(local_shard[0], offsets)[None]
 
     return _exchange
+
+
+def make_tiled_pad_body(mesh, ndim, halo=1, with_offsets=False):
+    """Unwrapped tiled pad body for use INSIDE an outer shard_map over
+    the same (face, tile_i, tile_j) axes — the tiled FV3 tendency
+    stage.
+
+    Takes one device's local ``(n_loc, n_loc[, C])`` tile plus optional
+    replicated ``offsets`` and returns the ``(n_loc+2h, ...)`` padded
+    block via ``lax.ppermute`` directly.  A nested ``shard_map`` (what
+    the operators' ``explicit_pad_halo`` SPMD branch does) is illegal
+    inside an outer ``shard_map``, so the stage routes its metric/state
+    pads through THIS body instead.  Bit-identical to the wrapped
+    :func:`_make_exchange_ppermute_tiled` body (same code).
+    """
+    _pad_body, _in_sp, _out_sp = _build_tiled_pad(
+        mesh, ndim, halo=halo, with_offsets=with_offsets)
+    return _pad_body
 
 
 def _make_exchange_ppermute_multiface(mesh, ndim, halo=1, with_offsets=False):
