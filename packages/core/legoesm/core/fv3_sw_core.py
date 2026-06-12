@@ -635,6 +635,38 @@ def d2a2c_uc_c123_local(utmp_pad, at_high):
             + _C3 * utmp_pad[:, h, h:-h])
 
 
+def d2a2c_uc_edge_interp_local(ua_pad, dx_pad, se_pad, sw_pad, at_high):
+    """edge_interpolate4 + upwind sin_sg uc value at the FACE boundary
+    i=0 (W) / i=n (E) — the d2a2c_vect edge special
+    (sw_core.F90:3587/3589-3592), leading-axis-agnostic.
+
+    Exact mirror of d2a2c_vect lines 779-794 for one ``i_bdy``:
+      ua_pad : (·, n+4, n+4) tile contravariant ua (h2-padded both axes)
+      dx_pad : (·, n+4, n)   tile dx, rows h2-padded / cols unpadded
+      se_pad : (·, n+2, n+2) tile sin_sg E-component (cross-face h1 pad)
+      sw_pad : (·, n+2, n+2) tile sin_sg W-component
+    ``n = ua_pad.shape[1]-4``.  Returns the (·, n) uc boundary row
+    ``uc_bdy = where(ut_bdy>0, ut_bdy*sin_left, ut_bdy*sin_right)``.
+    The outer upwind sine cell is CROSS-FACE (se/sw must be globally
+    padded then tile-sliced — P4 phase-1b approach C; codex
+    sin_sg-halo verdict).
+    """
+    h = 2
+    n = ua_pad.shape[1] - 2 * h
+    i_bdy = n if at_high else 0
+    i_p = i_bdy + h
+    ua4 = jnp.stack([ua_pad[:, i_p - 1, h:-h], ua_pad[:, i_p, h:-h],
+                     ua_pad[:, i_p + 1, h:-h], ua_pad[:, i_p + 2, h:-h]],
+                    axis=-1)
+    dxa4 = jnp.stack([dx_pad[:, i_p - 1, :], dx_pad[:, i_p, :],
+                      dx_pad[:, i_p + 1, :], dx_pad[:, i_p + 2, :]],
+                     axis=-1)
+    ut_bdy = _edge_interpolate4(ua4, dxa4)
+    sin_left = se_pad[:, i_bdy, 1:-1]
+    sin_right = sw_pad[:, i_bdy + 1, 1:-1]
+    return jnp.where(ut_bdy > 0, ut_bdy * sin_left, ut_bdy * sin_right)
+
+
 def d2a2c_vc_4th_local(vtmp_pad):
     """A→C y-dir 4th-order interior stencil — symmetric to
     :func:`d2a2c_uc_4th_local`.  Returns (·, n, n+1)

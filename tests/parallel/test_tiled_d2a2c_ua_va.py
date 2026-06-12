@@ -33,6 +33,8 @@ from legoesm.core.fv3_sw_core import (
     d2a2c_ut_vt_local,
     d2a2c_interior_local,
     d2a2c_uc_c123_local,
+    d2a2c_uc_edge_interp_local,
+    _A1 as _FV3_A1,
 )
 from legoesm.parallel.mesh import (
     tiled_face_block, tiled_padded_block, staggered_tile_block)
@@ -289,3 +291,44 @@ def test_uc_c123_edge_matches_production():
         win_e = tiled_padded_block(utmp_pad[f], kt - 1, tj, nl, kt)
         c1_e = np.asarray(d2a2c_uc_c123_local(win_e[None], True))[0]
         np.testing.assert_array_equal(c1_e, uc_g[f, n - 1, b:b + nl])
+
+
+def test_uc_edge_interp_west_matches_production():
+    """edge_interpolate4 + upwind sin_sg uc at the W face boundary
+    (i=0) matches production d2a2c_vect, tile-local (kt=3 W tile
+    (0,1)).  The outer upwind sine is cross-face -> sin_sg pads are
+    computed globally (pad_halo) and sliced per tile (approach C)."""
+    from legoesm.grids.halo import pad_halo
+    set_halo_backend("local")
+    n, kt = 24, 3
+    nl = n // kt
+    h = 2
+    cdg = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    grid = cdg.base
+    rng = np.random.default_rng(31)
+    u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    uc_g = np.asarray(d2a2c_vect(u_d, v_d, cdg)[2])
+
+    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdg)
+    cos_sg5 = cdg.cos_sg[:, :, :, 4]
+    rsin2 = cdg.rsin2_cell
+    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad   # (6,n+4,n+4)
+    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
+    offsets = grid.halo_interp_offsets
+    se_pad_x = pad_halo(cdg.sin_sg[:, :, :, 2], interp_offsets=offsets)
+    sw_pad_x = pad_halo(cdg.sin_sg[:, :, :, 0], interp_offsets=offsets)
+
+    ti, tj = 0, 1
+    b = tj * nl
+    for f in range(6):
+        ua_w = ua_pad[f, 0:nl + 4, b:b + nl + 4]
+        dx_w = dxc_pad_x[f, 0:nl + 4, b:b + nl]
+        se_w = se_pad_x[f, 0:nl + 2, b:b + nl + 2]
+        sw_w = sw_pad_x[f, 0:nl + 2, b:b + nl + 2]
+        uc_b = np.asarray(d2a2c_uc_edge_interp_local(
+            ua_w[None], dx_w[None], se_w[None], sw_w[None], False))[0]
+        np.testing.assert_allclose(
+            uc_b, uc_g[f, 0, b:b + nl], rtol=0, atol=1e-12)
