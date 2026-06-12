@@ -195,7 +195,17 @@ def _bougeault_lacarrere_lengths(
     # closed-form approximation used in Gaspar 1990 / Veros — full
     # integral is more expensive and only marginally improves K profiles.
     N2_safe = jnp.maximum(N2, _EPS)
-    l_up_raw = jnp.sqrt(2.0 * e / N2_safe + _EPS)
+    # AD-safe sqrt: the closed form ``sqrt(2e/N²_safe + eps)`` is NaN in BOTH
+    # value and gradient once the argument goes negative (e < 0, the energy
+    # debt). The double-``where`` keeps the primal BIT-IDENTICAL where the
+    # argument is positive (the only regime any shipped recipe reaches — this
+    # legacy in-situ/non-signed-N² branch clips N² ≥ 0 and runs with
+    # positivity='floor' so e ≥ tke_background > 0) and yields a finite 0
+    # (with 0 gradient) otherwise. Mirrors the choice=1 / ``veros_sqrte``
+    # fix; closes the same NaN class on this branch.
+    _bl_arg = 2.0 * e / N2_safe + _EPS
+    l_up_raw = jnp.where(
+        _bl_arg > 0.0, jnp.sqrt(jnp.where(_bl_arg > 0.0, _bl_arg, 1.0)), 0.0)
     l_dn_raw = l_up_raw   # symmetric under the closed-form approximation
 
     # Apply mxl_min floor. ``dz_int`` is also used as a per-cell upper
@@ -338,6 +348,69 @@ def _veros_buoyancy_length(
     return jnp.maximum(mxl, mxl_min)
 
 
+def veros_mxl_choice1_boundary_cap(
+    z_interface: jnp.ndarray,
+    dz_half: jnp.ndarray,
+    column_depth: jnp.ndarray,
+) -> jnp.ndarray:
+    r"""Veros ``tke_mxl_choice=1`` distance-to-boundary cap (tke.py:39-47).
+
+    Veros bounds the buoyancy mixing length by the geometric distance to the
+    nearest boundary so a parcel can never mix across more than its distance
+    to the surface or the seafloor:
+
+    .. math::
+
+        l \leftarrow \min\!\big(l,\; -zw + \tfrac12 dzw,\; ht + zw\big),
+        \qquad l \leftarrow \max(l, mxl\_min)
+
+    (``veros/core/tke.py:43-47``). This is the ``mxl_choice=1`` limiter; the
+    ``mxl_choice=2`` MITgcm/OPA two-pass recursion lives in
+    :func:`_veros_buoyancy_length`. Without it the raw length
+    ``\sqrt{2e}/\sqrt{\max(10^{-12},N^2)}`` is UNBOUNDED where ``N^2 -> 0``
+    (a statically-unstable surface interface): it overflows to ``+inf``,
+    driving ``K_M``/``l_eps`` non-finite and the implicit momentum solve to
+    NaN the first step the near-surface column convects (the measured
+    global_1deg south-Pacific step-2 blowup). Only global_1deg selects
+    ``mxl_choice=1``; the 4deg/flexible/acc setups use ``mxl_choice=2`` and
+    never exercised this path.
+
+    legoESM grid mapping (interior W-grid). legoESM carries TKE at the
+    ``nlev-1`` INTERIOR interfaces, so Veros's per-W-point geometry maps as:
+
+    - ``-zw`` -> ``-z_interface`` (depth below surface, ``z_interface`` is the
+      static reference interface height ``z_half_ref[1:-1] < 0``);
+    - ``dzw`` -> ``dz_half`` (static centre-to-centre spacing ``dz_half_ref``);
+    - ``ht`` -> ``column_depth`` (per-column ocean depth ``H_bathy > 0``).
+
+    The cap uses the STATIC reference geometry (as Veros does — the limiter
+    reads the fixed ``zw``/``dzw``/``ht``, not the free-surface-perturbed
+    layer thicknesses). Sub-seafloor interfaces get ``ht + zw < 0`` -> the
+    ``min`` goes negative -> floored to ``mxl_min`` (matching Veros's
+    ``maskW`` zeroing; those interfaces are masked downstream anyway).
+
+    Parameters
+    ----------
+    z_interface : (nlev-1,)
+        Static interior interface heights (negative, ``= z_half_ref[1:-1]``).
+    dz_half : (nlev-1,)
+        Static centre-to-centre spacing (positive, ``= dz_half_ref``).
+    column_depth : (...,)
+        Per-column ocean depth ``ht`` (positive metres, ``= H_bathy``).
+
+    Returns
+    -------
+    bound : (..., nlev-1)
+        ``min(-zw + dzw/2, ht + zw)`` — the per-interface upper bound for the
+        mixing length BEFORE the ``mxl_min`` floor (applied by the caller).
+        Pure arithmetic -> differentiable.
+    """
+    depth = -z_interface                          # (nlev-1,), >0   (= -zw)
+    dist_surf = depth + 0.5 * dz_half             # (nlev-1,)       (-zw + dzw/2)
+    dist_bot = column_depth[..., jnp.newaxis] + z_interface   # (...,nlev-1) ht+zw
+    return jnp.minimum(dist_surf, dist_bot)
+
+
 def compute_mixing_lengths(
     e: jnp.ndarray,
     N2: jnp.ndarray,
@@ -346,6 +419,7 @@ def compute_mixing_lengths(
     *,
     signed_n2: bool = False,
     dz_cell: jnp.ndarray | None = None,
+    boundary_cap: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute (l_k, l_eps) for the chosen ``tke_mxl_choice``.
 
@@ -380,12 +454,34 @@ def compute_mixing_lengths(
         l_k = jnp.sqrt(jnp.maximum(l_up * l_dn, cfg.mxl_min ** 2))
         l_eps = jnp.maximum(l_up, l_dn)
     elif cfg.tke_mxl_choice == 1:
-        # Simple parabolic / linear length scale.
-        # l = max(mxl_min, min(kappa_vk * z, sqrt(2e / max(N2, eps))))
-        # We use the closed-form sqrt(2e/N^2) consistent with choice=2
-        # but without the symmetric average.
-        N2_safe = jnp.maximum(N2, _EPS)
-        l_k = jnp.maximum(jnp.sqrt(2.0 * e / N2_safe + _EPS), cfg.mxl_min)
+        # Veros buoyancy length, ``tke_mxl_choice=1`` (veros/core/tke.py:30-47):
+        #   sqrttke = sqrt(max(0, e));  mxl = sqrt(2)·sqrttke / sqrt(max(1e-12, N²))
+        #   mxl = min(mxl, -zw + dzw/2, ht + zw);  mxl = max(mxl, mxl_min)
+        # Two clamps, BOTH required to be debt-safe:
+        #  (1) AD-safe ``sqrt(max(0, e))`` — the carried TKE holds Veros's
+        #      interior NEGATIVE-energy debt; the clamp goes on ``sqrttke``
+        #      BEFORE the division (the old ``sqrt(2·e/N²_safe)`` put raw e
+        #      inside the sqrt ⇒ NaN derivative / NaN at e<0). Double-``where``
+        #      keeps the primal == sqrt(max(0,e)) with a 0 debt-branch
+        #      derivative (same idiom as line 287 / ``veros_sqrte``).
+        #  (2) The Veros DISTANCE-TO-BOUNDARY cap (``boundary_cap``,
+        #      :func:`veros_mxl_choice1_boundary_cap`). Without it the raw
+        #      length is UNBOUNDED where N²→0 at the surface (denominator →
+        #      sqrt(1e-12)) and overflows to +inf ⇒ K_M/l_eps non-finite ⇒
+        #      momentum-solve NaN at the first convecting step (the measured
+        #      global_1deg south-Pacific step-2 blowup). choice=2 is bounded
+        #      by ``_veros_buoyancy_length``'s recursion, so 4deg/flexible/ACC
+        #      never hit this. ``boundary_cap`` is computed once by the
+        #      orchestrator (static zw/dzw + per-column H_bathy); None only on
+        #      bare-call test paths (then the floor alone is kept, matching the
+        #      pre-cap primal for already-bounded synthetic columns).
+        sqrttke = jnp.where(
+            e > 0.0, jnp.sqrt(jnp.where(e > 0.0, e, 1.0)), 0.0)
+        N2_safe = jnp.maximum(N2, 1.0e-12)
+        l_k = jnp.sqrt(2.0) * sqrttke / jnp.sqrt(N2_safe)
+        if boundary_cap is not None:
+            l_k = jnp.minimum(l_k, boundary_cap)
+        l_k = jnp.maximum(l_k, cfg.mxl_min)
         l_eps = l_k
     else:
         raise ValueError(
@@ -967,6 +1063,7 @@ def tke_vertical_mixing(
     z_interface: jnp.ndarray | None = None,
     external_source: jnp.ndarray | None = None,
     dz_surface: jnp.ndarray | None = None,
+    boundary_cap: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -1055,18 +1152,18 @@ def tke_vertical_mixing(
             f"Unknown TKEConfig.positivity={positivity!r}; expected 'floor' "
             f"or 'veros_surface_correction'."
         )
-    if positivity == "veros_surface_correction" and (
-            cfg.n2_mode != "adiabatic" or cfg.tke_mxl_choice != 2):
-        # The non-Veros mixing-length branches (Bougeault-Lacarrere /
-        # mxl_choice=1) evaluate sqrt(2e/N²) on the RAW TKE, which is NaN
-        # once the interior is allowed to go negative; only the Veros
-        # buoyancy length (signed-N² adiabatic, mxl_choice=2) handles the
-        # energy debt via sqrt(max(0,e)). Fail loudly at config time.
+    if positivity == "veros_surface_correction" and cfg.n2_mode != "adiabatic":
+        # The Veros surface correction lets the interior TKE carry a negative
+        # energy debt; only the signed-N² adiabatic buoyancy length handles
+        # it (sqrt(max(0,e)) clamp). Both tke_mxl_choice ∈ {1, 2} are
+        # debt-safe on the adiabatic path: choice=2 via _veros_buoyancy_length's
+        # recursion, choice=1 via the distance-to-boundary cap
+        # (veros_mxl_choice1_boundary_cap, supplied by the orchestrator). The
+        # in-situ N² branch (n2_mode != 'adiabatic') is NOT debt-safe (raw e
+        # inside the closed-form sqrt) — fail loudly at config time.
         raise ValueError(
             "TKEConfig.positivity='veros_surface_correction' requires "
-            "n2_mode='adiabatic' and tke_mxl_choice=2 (the Veros buoyancy "
-            f"length); got n2_mode={cfg.n2_mode!r}, "
-            f"tke_mxl_choice={cfg.tke_mxl_choice!r}."
+            f"n2_mode='adiabatic'; got n2_mode={cfg.n2_mode!r}."
         )
 
     veros_slots = bool(getattr(cfg, "veros_dz_slots", False))
@@ -1117,7 +1214,7 @@ def tke_vertical_mixing(
     for _ in range(max(1, int(n_iterations))):
         l_k, l_eps = compute_mixing_lengths(
             tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
-            dz_cell=dz_cell)
+            dz_cell=dz_cell, boundary_cap=boundary_cap)
         K_M_curr, K_H_curr = compute_K_from_tke(
             tke_curr, l_k, cfg, N2=N2, shear_sq=shear_sq,
             z_interface=z_interface)
@@ -1137,7 +1234,7 @@ def tke_vertical_mixing(
     # Final K from converged TKE.
     l_k_final, l_eps_final = compute_mixing_lengths(
         tke_curr, N2, dz_half, cfg, signed_n2=signed_n2,
-        dz_cell=dz_cell)
+        dz_cell=dz_cell, boundary_cap=boundary_cap)
     K_M, K_H = compute_K_from_tke(
         tke_curr, l_k_final, cfg, N2=N2, shear_sq=shear_sq,
         z_interface=z_interface)
@@ -1180,6 +1277,12 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
                 f"{cfg.n2_mode!r}, positivity="
                 f"{getattr(cfg, 'positivity', 'floor')!r}."
             )
+        # tke_mxl_choice ∈ {1, 2} are both debt-safe under the post-mixing
+        # surface correction. choice=2 is bounded by the MITgcm/OPA recursion
+        # (_veros_buoyancy_length); choice=1 is bounded by the Veros
+        # distance-to-boundary cap (veros_mxl_choice1_boundary_cap, wired in by
+        # the orchestrator). Both match Veros (only global_1deg selects
+        # choice=1). compute_mixing_lengths raises on any other value.
     elif shear == "realized_veros":
         raise ValueError(
             "TKEConfig.shear_production='realized_veros' requires "
@@ -1209,6 +1312,7 @@ def tke_set_diffusivities(
     eos_fn,
     z_interface: jnp.ndarray,
     dz_surface: jnp.ndarray,
+    boundary_cap: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, TKEPostMixingContext]:
     """Veros ``set_tke_diffusivities`` (tke.py:20-113) from the CARRIED TKE.
 
@@ -1248,7 +1352,8 @@ def tke_set_diffusivities(
         surface_flux = (jnp.sqrt(tx * tx + ty * ty) / rho_0) ** 1.5
 
     l_k, _l_eps = compute_mixing_lengths(
-        tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell)
+        tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,
+        boundary_cap=boundary_cap)
     K_M, K_H = compute_K_from_tke(
         tke_old, l_k, cfg, N2=N2, shear_sq=shear_sq, z_interface=z_interface)
     ctx = TKEPostMixingContext(

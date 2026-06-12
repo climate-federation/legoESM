@@ -303,6 +303,25 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         dz_surface = None
         if getattr(tke_cfg, "veros_dz_slots", False):
             dz_surface = (-z_coord.z_full_ref[0]) * J
+        # Veros tke_mxl_choice=1 distance-to-boundary cap (tke.py:43-47):
+        # the buoyancy mixing length may not exceed the distance to the
+        # surface / seafloor. Computed once from the STATIC reference geometry
+        # (interior interface heights + centre spacing) and the per-column
+        # ocean depth (H_bathy = Veros ``ht``). Only choice=1 needs it;
+        # choice=2 is bounded by the MITgcm/OPA recursion in
+        # _veros_buoyancy_length. Without it the choice=1 length overflows to
+        # +inf where N²→0 at a convecting surface (the global_1deg blowup).
+        # Shared by the prognostic (post- and pre-mixing) and the Mode-B
+        # diagnostic paths below.
+        _mxl1_cap = None
+        if getattr(tke_cfg, "tke_mxl_choice", 2) == 1:
+            from legoesm.ocean.physics.vertical_mixing.tke import (
+                veros_mxl_choice1_boundary_cap,
+            )
+            _mxl1_cap = veros_mxl_choice1_boundary_cap(
+                z_coord.z_half_ref[1:-1], z_coord.dz_half_ref,
+                state.H_bathy.data,
+            )
         if prognostic:
             # PROGNOSTIC mode (Veros enable_tke): ONE backward-Euler step per
             # model step, seeded from the carried ``tke_old``, with dt = the
@@ -348,7 +367,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     rho_0=constants_config.rho_0, g=constants_config.g,
                     p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J,
                     eos_fn=eos_fn, z_interface=z_coord.z_half_ref[1:-1],
-                    dz_surface=dz_surface,
+                    dz_surface=dz_surface, boundary_cap=_mxl1_cap,
                 )
                 return K_H_old, K_M_old, _tke_ctx
             tke_out = tke_vertical_mixing(
@@ -361,7 +380,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J, eos_fn=eos_fn,
                 z_interface=z_coord.z_half_ref[1:-1],
                 external_source=tke_source,
-                dz_surface=dz_surface,
+                dz_surface=dz_surface, boundary_cap=_mxl1_cap,
             )
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at
@@ -381,7 +400,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             # floor (Veros enable_kappaH_profile); z_half_ref is negative
             # downward, interior interfaces drop the surface (k=0) + bottom.
             z_interface=z_coord.z_half_ref[1:-1],
-            dz_surface=dz_surface,
+            dz_surface=dz_surface, boundary_cap=_mxl1_cap,
         )
         return tke_out.K_H, tke_out.K_M, None
 
