@@ -38,6 +38,8 @@ from legoesm.core.fv3_sw_core import (
     d2a2c_vc_edge_interp_local,
     d2a2c_edge_w_local,
     d2a2c_edge_e_local,
+    d2a2c_edge_s_local,
+    d2a2c_edge_n_local,
     _A1 as _FV3_A1,
 )
 from legoesm.parallel.mesh import (
@@ -663,3 +665,64 @@ def test_d2a2c_edge_we_small_tile_vc_parity(side):
                  else slice(a, a + nl - 1))
         np.testing.assert_allclose(
             vt_t[keep], vt_g[f, gkeep, b:b + nl + 1], rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize("side", ["S", "N"])
+def test_d2a2c_edge_sn_full_parity(side):
+    """Full S/N-edge-tile d2a2c == production d2a2c_vect (kt=3, ti=1),
+    every output EXCEPT the adjacent-strip ut (which needs a neighbour vt
+    i-halo — stage-level).  j-axis transpose of the W/E full-parity tests."""
+    from legoesm.grids.halo import pad_halo
+    set_halo_backend("local")
+    n, kt = 24, 3
+    nl = n // kt
+    h = 2
+    cdg = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    grid = cdg.base
+    rng = np.random.default_rng(53 if side == "S" else 54)
+    u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    ua_g, va_g, uc_g, vc_g, ut_g, vt_g = (
+        np.asarray(x) for x in d2a2c_vect(u_d, v_d, cdg))
+
+    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdg)
+    cos_sg5 = cdg.cos_sg[:, :, :, 4]
+    rsin2 = cdg.rsin2_cell
+    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+    va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
+    dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
+    offsets = grid.halo_interp_offsets
+    sn_pad_y = pad_halo(cdg.sin_sg[:, :, :, 3], interp_offsets=offsets)
+    ss_pad_y = pad_halo(cdg.sin_sg[:, :, :, 1], interp_offsets=offsets)
+
+    fn = d2a2c_edge_s_local if side == "S" else d2a2c_edge_n_local
+    ti, tj = 1, (0 if side == "S" else kt - 1)
+    a, b = ti * nl, tj * nl
+    for f in range(6):
+        sb = lambda arr, ax: staggered_tile_block(arr[f], ti, tj, nl, ax)
+        fb = lambda arr: tiled_face_block(arr[f], ti, tj, nl, kt)
+        out = fn(
+            utmp_pad[f], vtmp_pad[f], ti, nl, n,
+            sb(u_d, 1)[None], sb(v_d, 0)[None],
+            fb(cos_sg5)[None], fb(rsin2)[None],
+            sb(cdg.cosa_u, 0)[None], sb(cdg.rsin_u, 0)[None],
+            sb(cdg.cosa_v, 1)[None], sb(cdg.rsin_v, 1)[None],
+            va_pad[f], dyc_pad_y[f], sn_pad_y[f], ss_pad_y[f])
+        ua_t, va_t, uc_t, vc_t, ut_t, vt_t = (np.asarray(x)[0] for x in out)
+        np.testing.assert_allclose(ua_t, ua_g[f, a:a + nl, b:b + nl],
+                                   rtol=0, atol=1e-12)
+        np.testing.assert_allclose(va_t, va_g[f, a:a + nl, b:b + nl],
+                                   rtol=0, atol=1e-12)
+        np.testing.assert_allclose(uc_t, uc_g[f, a:a + nl + 1, b:b + nl],
+                                   rtol=0, atol=1e-12)
+        np.testing.assert_allclose(vc_t, vc_g[f, a:a + nl, b:b + nl + 1],
+                                   rtol=0, atol=1e-12)
+        np.testing.assert_allclose(vt_t, vt_g[f, a:a + nl, b:b + nl + 1],
+                                   rtol=0, atol=1e-12)
+        # ut: exclude the deferred adjacent strip (S->local j=0, N->j=nl-1).
+        keep = slice(1, nl) if side == "S" else slice(0, nl - 1)
+        gkeep = (slice(b + 1, b + nl) if side == "S"
+                 else slice(b, b + nl - 1))
+        np.testing.assert_allclose(
+            ut_t[:, keep], ut_g[f, a:a + nl + 1, gkeep], rtol=0, atol=1e-12)

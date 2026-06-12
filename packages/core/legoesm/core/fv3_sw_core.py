@@ -958,6 +958,129 @@ def d2a2c_edge_e_local(utmp_pad_face, vtmp_pad_face, tj, nl, n,
     return ua, va, uc, vc, ut, vt
 
 
+def d2a2c_edge_s_local(utmp_pad_face, vtmp_pad_face, ti, nl, n,
+                       u_d, v_d, cos_sg5, rsin2,
+                       cosa_u, rsin_u, cosa_v, rsin_v,
+                       va_pad_face, dy_pad_face, sn_pad_face, ss_pad_face):
+    """A→C d2a2c for a S-EDGE, i-interior tile (tj=0, 0<ti<kt-1) — the
+    j-axis transpose of :func:`d2a2c_edge_w_local` (b=tj*nl=0):
+
+    vc = 2nd-order base + 4th-order overlay on the global j-band [npt+1:n-npt)
+    + C1/C2/C3 at j=1 + edge_interpolate4 at j=0; uc = 2nd base + clamped 4th
+    overlay (ti interior, no W/E specials); vt = base + the j=0 face boundary
+    override (vc/sin_upwind); ut = pointwise base.  Outputs
+    (ua, va, uc, vc, ut, vt); ut[:, :, 0] is the base (NOT the South
+    adjacent-strip, which reads a neighbour vt i-halo at stage level) and is
+    excluded from the parity gate.  P4 phase-1b.
+    """
+    h = 2
+    npt = min(4, n // 2)
+    j_lo, j_hi = npt + 1, n - npt
+    a = ti * nl
+    # ua/va interior (b=0).
+    ua, va = d2a2c_ua_va_local(
+        utmp_pad_face[None, a + h:a + h + nl, h:h + nl],
+        vtmp_pad_face[None, a + h:a + h + nl, h:h + nl], cos_sg5, rsin2)
+    # uc: ti-interior i-axis -> 2nd base + clamped 4th overlay (asymmetric -1
+    # i-window, no W/E specials).
+    w = utmp_pad_face[None, a - 1:a + nl + 3, 0:nl + 4]
+    uc = 0.5 * (w[:, 2:nl + 3, h:-h] + w[:, 3:nl + 4, h:-h])   # 2nd base
+    uc4 = d2a2c_uc_4th_local(w)
+    k_lo = max(0, (npt + 1) - a)
+    k_hi = min(nl + 1, j_hi - a)
+    if n > 2 * npt + 2 and k_lo < k_hi:
+        uc = uc.at[:, k_lo:k_hi, :].set(uc4[:, k_lo:k_hi, :])
+    # vc: j-axis EDGE (tj=0) -> 2nd base + 4th overlay (symmetric j-window,
+    # +1 shift) + C123 at j=1 + edge_interp at j=0.
+    wv = vtmp_pad_face[None, a:a + nl + 4, 0:nl + 4]
+    vc = 0.5 * (wv[:, h:-h, h - 1:nl + h] + wv[:, h:-h, h:nl + h + 1])
+    vc4 = (_A2 * (wv[:, h:-h, 0:nl + 1] + wv[:, h:-h, 3:nl + 4])
+           + _A1 * (wv[:, h:-h, 1:nl + 2] + wv[:, h:-h, 2:nl + 3]))
+    m_hi = min(j_hi, nl + 1)
+    if n > 2 * npt + 2 and j_lo < m_hi:
+        vc = vc.at[:, :, j_lo:m_hi].set(vc4[:, :, j_lo - 1:m_hi - 1])
+    # C1/C2/C3 at j=1.
+    vc = vc.at[:, :, 1].set(d2a2c_vc_c123_local(wv, False))
+    # edge_interpolate4 + upwind at j=0.
+    va_s = va_pad_face[None, a:a + nl + 4, 0:nl + 4]
+    dy_s = dy_pad_face[None, a:a + nl, 0:nl + 4]
+    sn_s = sn_pad_face[None, a:a + nl + 2, 0:nl + 2]
+    ss_s = ss_pad_face[None, a:a + nl + 2, 0:nl + 2]
+    vc = vc.at[:, :, 0].set(
+        d2a2c_vc_edge_interp_local(va_s, dy_s, sn_s, ss_s, False))
+    # vt: base, then the j=0 face-boundary override (vc/sin_upwind).
+    vt = (vc - u_d * cosa_v) * rsin_v
+    sin_below = sn_s[:, 1:-1, 0]
+    sin_above = ss_s[:, 1:-1, 1]
+    sin_up = jnp.where(vc[:, :, 0] > 0, sin_below, sin_above)
+    vt = vt.at[:, :, 0].set(vc[:, :, 0] / jnp.maximum(sin_up, _EPS))
+    # ut: pointwise base (ut[:,:,0] is base, NOT the South adjacent strip).
+    ut = (uc - v_d * cosa_u) * rsin_u
+    return ua, va, uc, vc, ut, vt
+
+
+def d2a2c_edge_n_local(utmp_pad_face, vtmp_pad_face, ti, nl, n,
+                       u_d, v_d, cos_sg5, rsin2,
+                       cosa_u, rsin_u, cosa_v, rsin_v,
+                       va_pad_face, dy_pad_face, sn_pad_face, ss_pad_face):
+    """A→C d2a2c for a N-EDGE, i-interior tile (tj=kt-1, 0<ti<kt-1) — the
+    j-axis transpose of :func:`d2a2c_edge_e_local` (b=tj*nl=n-nl):
+
+    vc = 2nd base + clamped 4th overlay on the tile's LOW j-faces +
+    C1/C2/C3 at j=n-1 + edge_interpolate4 at j=n; uc = 2nd base + clamped 4th
+    overlay (ti interior); vt = base + the j=n face boundary override; ut =
+    pointwise base.  Outputs (ua, va, uc, vc, ut, vt); ut[:, :, nl-1] is the
+    base (NOT the North adjacent-strip) and is excluded from the parity gate.
+    Like the E tile, the low j-faces are 4th-order interior cuts needing the
+    asymmetric -1 j-window (no overlay shift).  P4 phase-1b.
+    """
+    h = 2
+    npt = min(4, n // 2)
+    j_hi = n - npt
+    a, b = ti * nl, n - nl
+    # ua/va interior.
+    ua, va = d2a2c_ua_va_local(
+        utmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl],
+        vtmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl], cos_sg5, rsin2)
+    # uc: ti-interior i-axis -> 2nd base + clamped 4th overlay (asymmetric -1
+    # i-window, no W/E specials).
+    w = utmp_pad_face[None, a - 1:a + nl + 3, b:b + nl + 4]
+    uc = 0.5 * (w[:, 2:nl + 3, h:-h] + w[:, 3:nl + 4, h:-h])   # 2nd base
+    uc4 = d2a2c_uc_4th_local(w)
+    k_lo = max(0, (npt + 1) - a)
+    k_hi = min(nl + 1, j_hi - a)
+    if n > 2 * npt + 2 and k_lo < k_hi:
+        uc = uc.at[:, k_lo:k_hi, :].set(uc4[:, k_lo:k_hi, :])
+    # vc: j-axis EDGE (tj=kt-1, high) -> 2nd base + clamped 4th overlay
+    # (asymmetric -1 j-window, NO shift) + C123 at j=n-1 + edge_interp at j=n.
+    wv = vtmp_pad_face[None, a:a + nl + 4, b - 1:b + nl + 3]
+    vc = 0.5 * (wv[:, h:-h, 2:nl + 3] + wv[:, h:-h, 3:nl + 4])   # 2nd base
+    vc4 = d2a2c_vc_4th_local(wv)                                 # vc4[m]==prod
+    m_lo = max(0, (npt + 1) - b)
+    m_hi = min(nl + 1, j_hi - b)
+    if n > 2 * npt + 2 and m_lo < m_hi:
+        vc = vc.at[:, :, m_lo:m_hi].set(vc4[:, :, m_lo:m_hi])
+    # C1/C2/C3 at j=n-1 (local nl-1) — symmetric window via the helper.
+    wsv = vtmp_pad_face[None, a:a + nl + 4, b:b + nl + 4]
+    vc = vc.at[:, :, nl - 1].set(d2a2c_vc_c123_local(wsv, True))
+    # edge_interpolate4 + upwind at j=n (local nl).
+    va_n = va_pad_face[None, a:a + nl + 4, b:b + nl + 4]
+    dy_n = dy_pad_face[None, a:a + nl, b:b + nl + 4]
+    sn_n = sn_pad_face[None, a:a + nl + 2, b:b + nl + 2]
+    ss_n = ss_pad_face[None, a:a + nl + 2, b:b + nl + 2]
+    vc = vc.at[:, :, nl].set(
+        d2a2c_vc_edge_interp_local(va_n, dy_n, sn_n, ss_n, True))
+    # vt: base, then the j=n face-boundary override (vc/sin_upwind).
+    vt = (vc - u_d * cosa_v) * rsin_v
+    sin_below = sn_n[:, 1:-1, nl]
+    sin_above = ss_n[:, 1:-1, nl + 1]
+    sin_up = jnp.where(vc[:, :, nl] > 0, sin_below, sin_above)
+    vt = vt.at[:, :, nl].set(vc[:, :, nl] / jnp.maximum(sin_up, _EPS))
+    # ut: pointwise base (ut[:,:,nl-1] is base, NOT the North adjacent strip).
+    ut = (uc - v_d * cosa_u) * rsin_u
+    return ua, va, uc, vc, ut, vt
+
+
 def d2a2c_vect(u_d, v_d, cdgrid):
     """FV3 D-grid → A-grid → C-grid (covariant). FV3 sw_core.F90 d2a2c_vect.
 
