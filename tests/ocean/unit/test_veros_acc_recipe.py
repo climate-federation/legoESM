@@ -596,3 +596,32 @@ def test_free_run_ships_faithful_stepping_composition():
     assert probe.coriolis_scheme == "matsuno_split"
     assert probe.ab2_scope == "total"
     assert probe.momentum_friction_additive is False
+
+
+def test_initial_condition_is_veros_exact_linear():
+    """The recipe IC must be the LITERAL Veros ACC profile
+    temp = (1 - zt/zw[0])*15 with Veros's bottom-first zw[0] = the top face
+    of the BOTTOM cell (~-1724 m) — NOT the bottom interface -H_max. The
+    earlier 'linear' transcription normalised by -H_max, starting the abyss
+    +2.15 K warm (lego +1.00 vs Veros -1.15 C at t=0); with the ~3 Sv deep
+    ventilation that IC offset persisted as essentially the entire 30-yr
+    abyssal warm bias (2.33 vs 0.98 C). Matched-IC 5-yr abyss trajectories
+    agree to ~0.01 K."""
+    import numpy as np
+    recipe = build_acc_recipe(with_surface_forcing=True)
+    z = recipe.z_coord
+    st = recipe.initial_state
+    lm = np.asarray(st.land_mask.data)
+    T = np.asarray(st.T.data)
+    zt = np.asarray(z.z_full_ref)
+    zw0 = float(np.asarray(z.z_half_ref)[-2])     # Veros bottom-first zw[0]
+    expected = 15.0 * (1.0 - zt / zw0)
+    # the profile is z-only: check a wet column exactly
+    j, i = np.argwhere(lm > 0.5)[0]
+    np.testing.assert_allclose(T[j, i, :], expected, rtol=1e-6, atol=0)  # storage-precision (float32) tolerance
+    # the defining signatures: a COLD (negative) bottom cell, matching Veros's
+    # measured t=0 abyss of -1.15 C on this grid
+    assert expected[-1] < 0.0
+    assert abs(expected[-1] - (-1.147)) < 0.05
+    # surface ~14.9 C (not exactly 15: zt[0] != 0)
+    assert 14.5 < expected[0] < 15.0
