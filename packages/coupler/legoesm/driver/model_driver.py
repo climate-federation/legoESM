@@ -2454,18 +2454,29 @@ class ModelDriver:
                         "runs."
                     )
                 # Same limitation for the stateful-physics carries (#413):
-                # tke/qke/gwd_spectrum ride carry_aux rank-locally and are
-                # not gathered; a restart would corrupt the physics memory.
+                # tke/qke/gwd_spectrum — and conv_prog when the configured
+                # convection is a real carry (scalar-/profile-prognostic
+                # or stochastic; codex round 7) — ride carry_aux
+                # rank-locally and are not gathered; a restart would
+                # corrupt the physics memory.
+                from legoesm.atmosphere.physics.convection.integration \
+                    import convection_scheme_traits as _conv_traits
+                _ct = _conv_traits(getattr(self.config, "convection", "none"))
+                _conv_is_carry = (_ct.is_scalar_prognostic
+                                  or _ct.is_profile_prognostic
+                                  or _ct.is_stochastic)
                 if (isinstance(self._carry_aux, dict)
-                        and any(k in self._carry_aux
-                                for k in ("tke", "qke", "gwd_spectrum"))):
+                        and (any(k in self._carry_aux
+                                 for k in ("tke", "qke", "gwd_spectrum"))
+                             or (_conv_is_carry
+                                 and "conv_prog" in self._carry_aux))):
                     raise ValueError(
                         "Lat-lon MPI checkpointing does not yet gather the "
                         "rank-local stateful-physics carries "
-                        "(tke/qke/gwd_spectrum) into the global checkpoint "
-                        "— a restart would corrupt the prognostic physics "
-                        "memory (issue #405/#413). Use the per-rank "
-                        "distributed checkpoint format or run "
+                        "(tke/qke/gwd_spectrum/conv_prog) into the global "
+                        "checkpoint — a restart would corrupt the "
+                        "prognostic physics memory (issue #405/#413). Use "
+                        "the per-rank distributed checkpoint format or run "
                         "single-process for stateful-physics lat-lon MPI "
                         "runs."
                     )
@@ -2555,20 +2566,30 @@ class ModelDriver:
                 "checkpoint_format='npz' for double-moment runs."
             )
         # Same zarr carry_aux limitation for the stateful-physics carries
-        # (issue #413): tke/qke/gwd_spectrum ride carry_aux, so a zarr
-        # restart would silently reseed the prognostic physics memory.
+        # (issue #413): tke/qke/gwd_spectrum — and conv_prog when the
+        # configured convection is a real carry (codex round 7) — ride
+        # carry_aux, so a zarr restart would silently reseed the
+        # prognostic physics memory.
+        from legoesm.atmosphere.physics.convection.integration import (
+            convection_scheme_traits as _conv_traits,
+        )
+        _ct = _conv_traits(getattr(self.config, "convection", "none"))
+        _conv_is_carry = (_ct.is_scalar_prognostic
+                          or _ct.is_profile_prognostic
+                          or _ct.is_stochastic)
         if (
             backend == "zarr"
             and isinstance(self._carry_aux, dict)
-            and any(k in self._carry_aux
-                    for k in ("tke", "qke", "gwd_spectrum"))
+            and (any(k in self._carry_aux
+                     for k in ("tke", "qke", "gwd_spectrum"))
+                 or (_conv_is_carry and "conv_prog" in self._carry_aux))
         ):
             raise ValueError(
                 "checkpoint_format='zarr' cannot persist the stateful-"
-                "physics carries (tke/qke/gwd_spectrum) — they ride "
-                "carry_aux, which the zarr backend does not round-trip, "
-                "so a restart would silently reseed the prognostic "
-                "physics state (issue #405/#413). Use "
+                "physics carries (tke/qke/gwd_spectrum/conv_prog) — they "
+                "ride carry_aux, which the zarr backend does not "
+                "round-trip, so a restart would silently reseed the "
+                "prognostic physics state (issue #405/#413). Use "
                 "checkpoint_format='npz' for stateful-physics runs."
             )
 
@@ -2856,18 +2877,30 @@ class ModelDriver:
                 )
             # Same limitation for the stateful-physics carries (#413):
             # the broadcast hands every rank the writer's (global or
-            # other-rank) flattened-column fields; the wrong-shape
-            # fallback in _prepare_run_context would then silently
-            # reseed the physics memory.  Fail fast instead.
-            if isinstance(self._carry_aux, dict) and any(
-                k in self._carry_aux for k in ("tke", "qke", "gwd_spectrum")
+            # other-rank) flattened-column fields; restoring them would
+            # corrupt or (via the fail-fast shape check in
+            # _prepare_run_context) abort the run.  Fail fast HERE with
+            # the actionable message.  conv_prog included when the
+            # configured convection is a real carry (codex round 7).
+            from legoesm.atmosphere.physics.convection.integration import (
+                convection_scheme_traits as _conv_traits,
+            )
+            _ct = _conv_traits(getattr(self.config, "convection", "none"))
+            _conv_is_carry = (_ct.is_scalar_prognostic
+                              or _ct.is_profile_prognostic
+                              or _ct.is_stochastic)
+            if isinstance(self._carry_aux, dict) and (
+                any(k in self._carry_aux
+                    for k in ("tke", "qke", "gwd_spectrum"))
+                or (_conv_is_carry and "conv_prog" in self._carry_aux)
             ):
                 raise ValueError(
                     "Lat-lon MPI restart cannot band-scatter the "
-                    "stateful-physics carries (tke/qke/gwd_spectrum) from "
-                    "a global checkpoint — the prognostic physics memory "
-                    "would be silently reseeded (issue #405/#413). Use "
-                    "the per-rank distributed checkpoint format or run "
+                    "stateful-physics carries "
+                    "(tke/qke/gwd_spectrum/conv_prog) from a global "
+                    "checkpoint — the prognostic physics memory would be "
+                    "silently reseeded (issue #405/#413). Use the "
+                    "per-rank distributed checkpoint format or run "
                     "single-process for stateful-physics lat-lon MPI runs."
                 )
             return step, day
