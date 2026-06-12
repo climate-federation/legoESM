@@ -2322,16 +2322,16 @@ class ModelDriver:
             ckpt_path = self._output_dir / f"checkpoint_day_{int(round(day)):04d}.npz"
             s = self.state
             _ps_carry = getattr(self, "_mpas_phys_state", None)
-            # Codex adversarial (#413): never LAUNDER a bad restart.  A
-            # load_checkpoint stages physstate_* into _carry_aux and adopts
-            # it into _mpas_phys_state ONLY when the carry is complete AND
-            # its convection-scheme tag matches this run.  If staged carry
-            # is present but was NOT adopted (incomplete / meta-only /
-            # scheme mismatch) and no run has since rebuilt the channel,
-            # saving now would emit either a physstate-free file (read as a
-            # fresh seed next restart) or a carry relabelled with the wrong
-            # scheme — silently branching the trajectory.  Refuse instead;
-            # run the model (which validates + overlays the carry) before
+            # Codex adversarial (#413): never LAUNDER a bad restart.
+            # ``load_checkpoint`` stages physstate_* into _carry_aux but
+            # does NOT validate/adopt it into the save channel — only a run
+            # (``_run_mpas``, which seeds + shape/dtype/scheme/completeness-
+            # validates the overlay) sets ``_mpas_phys_state``.  So if
+            # staged carry is present but the channel is still None, no run
+            # has validated it; saving now would emit either a
+            # physstate-free file (read as a fresh seed next restart) or an
+            # unvalidated/relabelled carry — silently branching the
+            # trajectory.  Refuse instead: run the model before
             # checkpointing, or strip ALL physstate_* to opt into a fresh
             # seed.
             if (_ps_carry is None
@@ -2761,10 +2761,10 @@ class ModelDriver:
                 del self._carry_aux[_stale]
             # ...and clear the SAVE channel (``_mpas_phys_state``, read by
             # save_checkpoint) so a stale carry from a PRIOR run on a
-            # reused driver cannot leak.  It is rebuilt from THIS
-            # checkpoint's carry immediately below (so a load-then-save
-            # with no intervening run preserves a complete carry) and
-            # again by _run_mpas's seed+overlay on the next run.
+            # reused driver cannot leak.  It is left None until a run
+            # validates + overlays this checkpoint's staged carry
+            # (_run_mpas); a save before then is refused (see
+            # save_checkpoint) rather than emitting an unvalidated carry.
             self._mpas_phys_state = None
             _ps_keys = [k for k in d.files if k.startswith("physstate_")]
             if _ps_keys:
@@ -2790,27 +2790,15 @@ class ModelDriver:
                     "  Restored physics-state carry fields: %s",
                     sorted(k[len("physstate_"):] for k in _ps_keys),
                 )
-            # Rebuild the SAVE channel from THIS checkpoint's carry so a
-            # load-then-save with no intervening run (checkpoint rewrite /
-            # conversion) preserves a COMPLETE restored carry instead of
-            # silently emitting a physstate-free file the next restart
-            # would read as a fresh seed (codex round 12 follow-up).  Only
-            # a complete field set is adopted here; a partial / meta-only
-            # remnant leaves the channel None and is caught loudly by
-            # _run_mpas on the next run, and a truly empty carry stays the
-            # documented fresh-seed opt-out.  Under MPI the staged arrays
-            # are already rank-local (the save-side gather mirrors this),
-            # so the reconstructed PhysicsState feeds save_checkpoint
-            # unchanged.
+            # Version-skew guard: a checkpoint carrying a non-meta
+            # physstate_* field this build does not know would be SILENTLY
+            # dropped by _run_mpas's schema-filtered overlay — an older
+            # binary could thus rewrite a newer checkpoint, losing
+            # prognostic carry a future reader then fresh-seeds (a silent
+            # trajectory branch).  Refuse loudly at the load boundary so
+            # BOTH the run and save consumers are protected at one
+            # chokepoint.
             from legoesm.atmosphere.physics.physics_state import PhysicsState
-            # Version-skew guard (codex round 14 follow-up): a checkpoint
-            # carrying a non-meta physstate_* field this build does not
-            # know would be SILENTLY dropped by the schema filter below and
-            # by _run_mpas's overlay — so an older binary could rewrite a
-            # newer checkpoint, losing prognostic carry a future reader
-            # then fresh-seeds (a silent trajectory branch).  Refuse loudly
-            # at the load boundary instead; this protects every consumer
-            # (run AND save) at one chokepoint.
             _unknown = sorted(
                 _k[len("physstate_"):] for _k in self._carry_aux
                 if _k.startswith("physstate_")
@@ -2828,28 +2816,19 @@ class ModelDriver:
                     "the checkpoint, or strip the unknown physstate_* "
                     "entries to accept the loss explicitly."
                 )
-            _staged = {
-                _k[len("physstate_"):]: jnp.asarray(_v)
-                for _k, _v in self._carry_aux.items()
-                if _k.startswith("physstate_")
-                and not _k[len("physstate_"):].startswith("meta_")
-                and _k[len("physstate_"):] in PhysicsState._fields
-            }
-            # Adopt the restored carry ONLY when it is complete AND its
-            # convection-scheme tag matches this run (or is absent/legacy).
-            # A complete-but-mismatched carry must NOT be adopted, else a
-            # load-then-save would relabel one scheme's prognostic memory
-            # as another's; left None it is refused by save_checkpoint and
-            # raised by _run_mpas's scheme-tag guard on the next run.
-            _saved_conv = self._carry_aux.get("physstate_meta_conv_scheme")
-            _scheme_ok = (
-                _saved_conv is None
-                or str(_saved_conv) == str(
-                    getattr(self.config, "convection", "none"))
-            )
-            if (_staged and _scheme_ok
-                    and all(_f in _staged for _f in PhysicsState._fields)):
-                self._mpas_phys_state = PhysicsState(**_staged)
+            # The staged carry is deliberately NOT reconstructed into the
+            # SAVE channel (``_mpas_phys_state``) here.  Validating it
+            # faithfully needs the seeded reference — per-field shape +
+            # dtype + the GWD-dtype rule + the convection-scheme tag —
+            # which _run_mpas already builds; duplicating that at the load
+            # boundary led to a string of partial/scheme/version/shape
+            # bypasses where a load-then-save would launder a bad carry.
+            # Instead the channel stays None after a load that carries
+            # physstate_*, and ``save_checkpoint`` REFUSES to emit until a
+            # run has validated + overlaid the carry (the authoritative
+            # path).  A run-then-save and the fresh-seed opt-out (zero
+            # physstate_*) are unaffected; this closes the whole
+            # load-then-save laundering class at the save boundary.
             step = int(d["step"])
             day = float(d["day"])
             logger.info(f"  Loaded MPAS checkpoint: step={step}, day={day:.2f}"
