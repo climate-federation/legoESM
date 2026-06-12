@@ -94,6 +94,12 @@ def test_unknown_include_raises() -> None:
         build_trainable_params(include=("does.not.exist",))
 
 
+def test_unknown_active_scheme_key_raises() -> None:
+    # a typo/stale scheme key must raise, not silently yield an empty set
+    with pytest.raises(ValueError, match="unknown scheme"):
+        build_trainable_params(active_scheme_keys={"land.soil_thermalX"})
+
+
 # --- raw seeding round-trips to the default --------------------------------
 def test_seeded_values_recover_defaults() -> None:
     p = build_trainable_params(tier="extended")

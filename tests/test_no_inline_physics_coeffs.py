@@ -16,11 +16,13 @@ numerics floors are not false-positives. It composes with — and does not overl
 ``test_no_hardcoded_constants`` (bans a *value set*) and ``test_no_saturation_reimpl``
 (bans re-derived *expressions*); this one bans a *context*.
 
-**Tripwire, not a proof.** Documented gaps: a coefficient typed as a bare ``int``
-(``1350``) escapes the float-only rule; a published exponent ``x ** 1.5`` exempts
-the exponent (its prefactor is still caught); a value aliased through a module-level
-name is compliant *by design* (module level is the target home). Review + the
-physics contract/conservation gates cover the rest.
+**Tripwire, not a proof.** Coefficients written as a bare ``int`` are also caught
+when ``|v| > _INT_INDEX_MAX`` (so ``1350``/``2700`` do not escape via the integer
+spelling); small ints stay exempt as indices/counts. Remaining documented gaps: a
+published exponent ``x ** 1.5`` exempts the exponent (its prefactor is still
+caught); a small (<=16) integer coefficient; a value aliased through a
+module-level name is compliant *by design* (module level is the target home).
+Review + the physics contract/conservation gates cover the rest.
 
 Detection (reuses ``tests/_ratchet_audit.py`` verbatim):
   * AST: only ``float`` ``Constant`` nodes lexically inside a ``FunctionDef`` /
@@ -95,6 +97,10 @@ _CONVERSION_ALLOW = frozenset(
 # are numerics, not physics (CLAUDE.md exempt category).
 _FLOOR_MAX = 1e-6
 _GUARD_MIN = 1e20
+# Integer constants with |v| <= this are indices/axes/small counts/dims, not
+# empirical coefficients; above it an int literal in a body is treated like a
+# float coefficient (closes the "write 1350 not 1350.0" escape hatch).
+_INT_INDEX_MAX = 16
 # Math exponents that legitimately appear as literals in ``x ** e``.
 _MATH_EXPONENTS = (2.0, 3.0, 4.0, 0.5, 0.25, 1.5, 1.0 / 3.0, 2.0 / 3.0)
 # ``# coeff-ok: <reason>`` — the colon and a non-space reason are REQUIRED.
@@ -159,12 +165,27 @@ def coeff_hits(src: str) -> list[tuple[int, float, str]]:
             if id(node) in seen or id(node) in exempt_ids:
                 continue
             seen.add(id(node))
-            if not (isinstance(node, ast.Constant) and type(node.value) is float):
+            if not isinstance(node, ast.Constant):
                 continue
-            v = node.value
-            if v in _MATH_ALLOW or v in _CONVERSION_ALLOW:
-                continue
-            if abs(v) <= _FLOOR_MAX or abs(v) >= _GUARD_MIN:
+            kind = type(node.value)  # exact type: bool is not int here
+            if kind is float:
+                v = node.value
+                if v in _MATH_ALLOW or v in _CONVERSION_ALLOW:
+                    continue
+                if abs(v) <= _FLOOR_MAX or abs(v) >= _GUARD_MIN:
+                    continue
+            elif kind is int:
+                # Close the "write the coefficient as an int" escape hatch
+                # (1350 instead of 1350.0). Small ints are indices/counts/axes/
+                # small dims, not empirical coefficients -> exempt below the
+                # threshold; exact conversions and overflow guards stay exempt.
+                iv = node.value
+                if abs(iv) <= _INT_INDEX_MAX:
+                    continue
+                v = float(iv)
+                if v in _CONVERSION_ALLOW or abs(v) >= _GUARD_MIN:
+                    continue
+            else:
                 continue
             if node.lineno in ok_lines:
                 continue
@@ -263,6 +284,15 @@ def test_detector_ignores_math_and_indices() -> None:
     assert coeff_hits("def f(a, b, x):\n    return 0.5 * (a + b) + x[0] + x ** 2\n") == []
     assert coeff_hits("def f(x):\n    return x ** (1.0 / 3.0)\n") == []
     assert coeff_hits("def f(a, b):\n    return 2.0 * a - 0.25 * b\n") == []
+
+
+def test_detector_flags_large_int_but_not_small() -> None:
+    # large int coefficient (escape-hatch spelling) is caught
+    assert _vals("def f(q):\n    return 1350 * q\n") == [1350.0]
+    # small ints (indices/counts/axes/dims) are exempt
+    assert coeff_hits("def f(x):\n    return x.reshape(6, 12).sum(axis=1)[0]\n") == []
+    # int exponent and small int loop count stay exempt
+    assert coeff_hits("def f(x):\n    return sum(x ** 2 for _ in range(3))\n") == []
 
 
 def test_detector_ignores_module_and_class_level() -> None:

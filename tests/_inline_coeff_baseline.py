@@ -1,8 +1,9 @@
 """Seed baseline for the inline-physics-coefficient ratchet.
 
 ``COEFF_BUDGET`` is the per-file allowance of *sanctioned* inline empirical-float
-sites measured from the tree when the gate (``tests/test_no_inline_physics_coeffs``)
-was introduced. Format: ``{repo_rel_path: {normalized_source_line: count}}``.
+(and large-int) sites measured from the tree when the gate
+(``tests/test_no_inline_physics_coeffs``) was introduced. Format:
+``{repo_rel_path: {normalized_source_line: count}}``.
 
 Lifecycle (enforced by the gate):
   * Every entry is EXACT (ratchet-down): migrating a file's coefficients into a
@@ -23,8 +24,9 @@ change).
 
 from __future__ import annotations
 
-# Seeded 2026-06-12 from the measured tree (233 files, 87 dirty, 496 sites).
+# Seeded 2026-06-12 from the measured tree (float + large-int coefficients).
 # Sorted by (file, fingerprint).
+
 COEFF_BUDGET: dict[str, dict[str, int]] = {
     'packages/atmosphere/legoesm/atmosphere/physics/_shared.py': {
         'return -omega / jnp.clip(rho * g, 1e-3, None)': 1,
@@ -89,6 +91,7 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
         'damps = config.damp_coefficient * dt / 300.0': 1,
     },
     'packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py': {
+        'bechtold_key, 0xBEC4,': 3,
         'dt: float = 300.0,': 1,
     },
     'packages/atmosphere/legoesm/atmosphere/physics/convection/kain_fritsch.py': {
@@ -141,6 +144,7 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
         'intrinsic_abs = jnp.clip(jnp.abs(intrinsic), 0.1, None)': 1,
     },
     'packages/atmosphere/legoesm/atmosphere/physics/learned_column.py': {
+        'hidden_dim: int = 256,': 1,
         'residual_scale: float = 0.01,': 1,
     },
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py': {
@@ -264,6 +268,7 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
         'c_cloud = 4.5e8 * (r_l * r_l) * (1.0 - 3.0e-6 / jnp.maximum(3.01e-6, r_l))': 3,
         'c_rate = jnp.where(r_l <= 5.0e-5, c_cloud, 1.0)': 1,
         'denom = sumdia / (sumdia + 2.0 * sumg) + (8.0 * sumd) / (sumdia * sumc)': 1,
+        'iqq = jnp.clip(jnp.searchsorted(rat, ratio, side="left"), 1, 20)': 1,
         'lam1 = (8.0 / jnp.pi) * D1 / cb1': 1,
         'lam2 = (8.0 / jnp.pi) * D2 / cb2': 1,
         'lam_air = (2.0 * visc) / (p * jnp.sqrt(8.0 * M_air_kg / (jnp.pi * constants.R_d * T)))': 1,
@@ -285,6 +290,9 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
     },
     'packages/atmosphere/legoesm/atmosphere/physics/neural_physics.py': {
         'T / 300.0,': 1,
+        'hidden_dim: int = 256,': 1,
+        'if len(args) == 19:': 1,
+        'if len(args) == 20:': 1,
         'jnp.atleast_1d(solar / 1400.0),': 1,
         'residual_scale: float = 0.01,': 1,
         'u / 30.0,': 1,
@@ -347,7 +355,10 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
         '& (jnp.real(roots) > 0.0) & (jnp.real(roots) < 5.0),': 1,
         'e1 = pm((8.0*L2**2)*(_TFR**2)*S_h*(S11h*SS11h+S22h*SS22h+S33h*SS33h': 1,
         'e2 = pm((8.0*L2**2)*(_TFR**4)*S_d*(S11d*SS11d+S22d*SS22d+S33d*SS33d': 1,
+        'first_of_next = sr(top, jnp.zeros_like(top), nxt, prev, 701, 701, comm)': 2,
         'guesses = jnp.array([0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.5], cdtype)': 4,
+        'last_of_prev = sr(bot, tmpl, prev, nxt, 700, 700, comm)': 2,
+        'n_deg, tol, max_iter = 5, 1e-6, 20': 1,
     },
     'packages/atmosphere/legoesm/atmosphere/physics/turbulence/mynn25.py': {
         '1.0 + 5.0 * _safe_pow_pos(q_c / jnp.maximum(L_T * N, eps), 0.5)': 1,
@@ -395,6 +406,8 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
         'C_ai: float = 1.3e-3,': 3,
         'C_oi: float = 5.5e-3,': 3,
         'C_strength: float = 20.0,': 2,
+        'N_evp: int = 120,': 1,
+        'N_mevp: int = 120,': 1,
         'P_star: float = 2.75e4,': 2,
         'T_evp: float = 0.36,': 1,
         'alpha_mevp: float = 500.0,': 1,
@@ -463,6 +476,8 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
         'theta_fc[:, None] - theta_wp[:, None], 1e-3,': 2,
     },
     'packages/land/legoesm/land/param_providers.py': {
+        'hidden_dim: int = 48,': 2,
+        'n_input: int = 20,': 2,
         'parts.append(((mean_temp - 273.0) / 40.0)[:, None])': 2,
         'parts.append((elevation / 5000.0)[:, None])': 1,
         'parts.append((forest_age / 200.0)[:, None])': 1,
@@ -546,7 +561,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
     },
 }
 
-
 # The exact set of files that carried a budget at seed time. ``COEFF_BUDGET`` may
 # only ever be a subset of this — a new file must be clean, never budgeted.
 _SEED_FILES: frozenset[str] = frozenset({
@@ -623,14 +637,12 @@ _SEED_FILES: frozenset[str] = frozenset({
     'packages/land/legoesm/land/scm.py',
     'packages/land/legoesm/land/snow_budget.py',
     'packages/land/legoesm/land/soil_hydraulics.py',
-    'packages/land/legoesm/land/soil_thermal.py',
     'packages/land/legoesm/land/surface_params.py',
     'packages/ocean/legoesm/ocean/physics/bbl_adv.py',
     'packages/ocean/legoesm/ocean/physics/lateral_mixing/_gm_redi_common.py',
     'packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py',
     'packages/ocean/legoesm/ocean/physics/mixing.py',
     'packages/ocean/legoesm/ocean/physics/mpas_physics.py',
-    'packages/ocean/legoesm/ocean/physics/shortwave_penetration.py',
     'packages/ocean/legoesm/ocean/physics/surface_forcing/external.py',
     'packages/ocean/legoesm/ocean/physics/surface_forcing/wind_profiles.py',
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py',

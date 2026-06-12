@@ -50,6 +50,7 @@ import collections
 import pytest
 
 from tests import _ratchet_audit as ra
+from tests._param_spec_baseline import PARAM_SPEC_FIELD_BASELINE
 
 # --- scope -----------------------------------------------------------------
 # Physics scheme trees across all model components (driver-level ExperimentConfig
@@ -394,6 +395,69 @@ def test_todo_files_exist() -> None:
     assert not missing, f"PARAM_SPEC_TODO names non-existent files: {missing}"
 
 
+def _specced_fields(spec) -> dict[str, set[str]]:
+    """``{ClassName: {classified_field, ...}}`` from a (possibly partial) spec."""
+    out: dict[str, set[str]] = {}
+    if not isinstance(spec, dict):
+        return out
+    for cls, entry in spec.items():
+        if isinstance(entry, dict):
+            params = entry.get("params", {}) if isinstance(entry.get("params"), dict) else {}
+            excluded = entry.get("excluded", {}) if isinstance(entry.get("excluded"), dict) else {}
+            out[cls] = set(params) | set(excluded)
+    return out
+
+
+def test_field_baseline_in_sync_with_todo() -> None:
+    stale = sorted(set(PARAM_SPEC_FIELD_BASELINE) - PARAM_SPEC_TODO)
+    assert not stale, (
+        f"PARAM_SPEC_FIELD_BASELINE has entries for modules no longer in "
+        f"PARAM_SPEC_TODO (a graduated module must drop its field baseline): {stale}"
+    )
+    missing = sorted(PARAM_SPEC_TODO - set(PARAM_SPEC_FIELD_BASELINE))
+    assert not missing, (
+        f"PARAM_SPEC_TODO modules missing a field baseline (additions would be "
+        f"unguarded): {missing}"
+    )
+
+
+def unspecced_additions(required, specced, baseline) -> list[str]:
+    """``Class.field`` names that are float-default + unspecced + not in the seed
+    baseline (i.e. newly-added tunables that dodged classification)."""
+    current = {
+        f"{cls}.{fld}"
+        for cls, flds in required.items()
+        for fld in flds
+        if fld not in specced.get(cls, set())
+    }
+    return sorted(current - set(baseline))
+
+
+def test_todo_modules_gain_no_unspecced_float_field() -> None:
+    """Field-level floor: a TODO module must not GAIN a new float-default field
+    without classifying it (spec entry or exclusion). Closes the module-granular
+    escape hatch — adding a tunable to a pre-existing config can no longer slip
+    through unspecced just because the whole module is allowlisted."""
+    errors: list[str] = []
+    for rel in sorted(PARAM_SPEC_TODO):
+        path = ra.repo_root() / rel
+        if not path.is_file():
+            continue
+        src = path.read_text()
+        new_unspecced = unspecced_additions(
+            spec_required_classes(src),
+            _specced_fields(extract_param_spec(src)),
+            PARAM_SPEC_FIELD_BASELINE.get(rel, frozenset()),
+        )
+        if new_unspecced:
+            errors.append(
+                f"{rel}: new unclassified float field(s) {new_unspecced} — add a "
+                f"__param_spec__ entry (units/bounds/tunable_tier) or list it in "
+                f"'excluded' with a reason."
+            )
+    assert not errors, "param-spec field ratchet failed:\n  " + "\n  ".join(errors)
+
+
 # ---------------------------------------------------------------------------
 # Non-vacuity self-tests
 # ---------------------------------------------------------------------------
@@ -471,6 +535,16 @@ def test_extractor_handles_assign_annassign_and_nonliteral() -> None:
     assert extract_param_spec("__param_spec__: dict = {'a': 1}\n") == {"a": 1}
     assert extract_param_spec("x = 1\n") is None
     assert extract_param_spec("__param_spec__ = dict(a=1)\n") == "__UNPARSEABLE__"
+
+
+def test_field_ratchet_flags_new_field_but_not_specced_or_baselined() -> None:
+    req = {"C": {"a": 1.0, "b": 2.0}}
+    # b is a new float field, not specced, not in baseline -> flagged
+    assert unspecced_additions(req, {}, frozenset({"C.a"})) == ["C.b"]
+    # b classified by a (partial) spec -> not flagged
+    assert unspecced_additions(req, {"C": {"b"}}, frozenset({"C.a"})) == []
+    # both in baseline (seed) -> not flagged; a removed field never flags
+    assert unspecced_additions(req, {}, frozenset({"C.a", "C.b", "C.gone"})) == []
 
 
 def test_inclusion_predicate_excludes_constants_and_nonfloat() -> None:

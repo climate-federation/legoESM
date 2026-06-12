@@ -200,6 +200,15 @@ def build_trainable_params(
             f"include/exclude name unknown parameters: include={unknown_inc}, "
             f"exclude={unknown_exc}; known={sorted(by_name)}"
         )
+    if active_scheme_keys is not None:
+        known_schemes = {m.scheme_key for m in registry}
+        unknown_schemes = sorted(set(active_scheme_keys) - known_schemes)
+        if unknown_schemes:
+            raise ValueError(
+                f"active_scheme_keys names unknown scheme(s): {unknown_schemes}; "
+                f"known={sorted(known_schemes)}. A typo/stale key would otherwise "
+                f"yield an empty trainable set."
+            )
     include_set, exclude_set = set(include), set(exclude)
 
     raw: dict[str, jax.Array] = {}
