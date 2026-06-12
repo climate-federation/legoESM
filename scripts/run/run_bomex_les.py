@@ -103,6 +103,12 @@ def parse_args():
     p.add_argument("--n-tracers", type=int, default=9,
                    help="standard slot layout; 9 covers the double-moment "
                         "schemes (morrison/thompson/sb).")
+    p.add_argument("--scalar-advection",
+                   choices=["van_leer", "weno5", "weno5_hv"], default="van_leer",
+                   help="monotone scalar reconstruction: van_leer (diffusive, "
+                        "stable), weno5 (sharp, can destabilize moist conv.), "
+                        "weno5_hv (WENO5 horizontal + van-Leer vertical — sharp "
+                        "cloud field, stable inversion; default).")
     p.add_argument("--dynamic", action="store_true", default=True,
                    help="LASD dynamic SGS (default on; near-iso dx/dz).")
     p.add_argument("--static", dest="dynamic", action="store_false")
@@ -148,6 +154,7 @@ def build(args, dtype):
         time_scheme=args.time_scheme, nu_floor=args.nu_floor,
         buoyancy=True, theta_ref0=300.0, pr_sgs=1.0,
         moist=True, n_tracers=args.n_tracers, monotone_scalars=True,
+        scalar_advection=args.scalar_advection,
         filter_monotone_qv=args.filter_monotone_qv,
         filter_monotone_scalars=args.filter_monotone_scalars)
     g = sl.make_grid(cfg, dtype=dtype)

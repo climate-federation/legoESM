@@ -99,6 +99,8 @@ def parse_args():
     p.add_argument("--f32", action="store_true")
     p.add_argument("--microphysics", default="morrison")
     p.add_argument("--n-tracers", type=int, default=9)
+    p.add_argument("--scalar-advection", choices=["van_leer","weno5","weno5_hv"], default="van_leer",
+                   help="monotone scalar reconstruction (weno5=less diffusive).")
     p.add_argument("--dynamic", action="store_true", default=True)
     p.add_argument("--static", dest="dynamic", action="store_false")
     p.add_argument("--sgs-model", choices=["smagorinsky", "vreman"],
@@ -141,7 +143,8 @@ def build(args, dtype):
         smagorinsky_dynamic=args.dynamic, sgs_model=args.sgs_model,
         time_scheme=args.time_scheme, nu_floor=args.nu_floor,
         buoyancy=True, theta_ref0=290.0, pr_sgs=1.0,
-        moist=True, n_tracers=args.n_tracers, monotone_scalars=True)
+        moist=True, n_tracers=args.n_tracers, monotone_scalars=True,
+        scalar_advection=args.scalar_advection)
     g = sl.make_grid(cfg, dtype=dtype)
     case = Path(args.case_dir)
     snd = read_sam_snd(case / "snd")

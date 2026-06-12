@@ -115,6 +115,13 @@ class SpectralLESConfig(NamedTuple):
     #                                 buoyancy=True and a state with tracers. θ stays
     #                                 the FULL potential temperature (the microphysics
     #                                 coupling applies the latent heating to it).
+    scalar_advection: str = "van_leer"  # face reconstruction for the monotone
+    #                                 flux-form scalar transport: "van_leer" (2nd
+    #                                 order TVD, robust but diffusive) or "weno5"
+    #                                 (5th-order WENO-Z, reuses core.weno — far
+    #                                 less numerical diffusion ⇒ preserves the
+    #                                 cloud-layer moisture van-Leer erodes). Only
+    #                                 used when monotone_scalars.
     monotone_scalars: bool = False  # use the conservative van-Leer (TVD) flux-form
     #                                 scalar transport for θ + tracers instead of the
     #                                 spectral/centred advection. REQUIRED for moist
@@ -198,6 +205,19 @@ def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64,
         raise ValueError(
             f"SGS constants must be >= 0: c_s={cfg.c_s}, c_vreman={cfg.c_vreman}, "
             f"nu_floor={cfg.nu_floor} (negative ν_t is anti-diffusive).")
+    if cfg.scalar_advection not in ("van_leer", "weno5", "weno5_hv"):
+        raise ValueError(
+            f"scalar_advection must be 'van_leer', 'weno5' or 'weno5_hv', got "
+            f"{cfg.scalar_advection!r}.")
+    if layout is not None and cfg.monotone_scalars:
+        # The monotone flux operators use a LOCAL jnp.roll in y, which wraps
+        # within each MPI slab instead of exchanging halos at the slab boundary
+        # (codex 2026-06-12; serial-vs-2-slab probe diverged by ~46). Reject
+        # until a y-halo exchange is added for the face stencils + velocities.
+        raise NotImplementedError(
+            "monotone_scalars is not yet MPI-safe (the y-roll wraps per slab; "
+            "needs a halo exchange). Run monotone moist cases single-rank, or "
+            "use the spectral scalar advection under MPI.")
     nx, ny, nz = cfg.nx, cfg.ny, cfg.nz
     # The rfft Nyquist-zeroing and the 3/2-rule de-aliasing (drop the single
     # Nyquist row/column) assume EVEN nx, ny. Odd sizes would silently use a
@@ -740,6 +760,84 @@ def _vanleer_fv_velocity_divergence(u, v, w, g: SpectralLESGrid):
     return divx + divy + divz
 
 
+def _weno5_flux_div(phi, u, v, w, g: SpectralLESGrid):
+    """Conservative WENO5-Z flux-form advection divergence ``∇·(uφ)``.
+
+    Identical flux-form structure to :func:`_vanleer_flux_div` (same arithmetic
+    face velocities, same conservative differencing, same free-stream caveat —
+    pair with ``_vanleer_fv_velocity_divergence``), but the face value is the
+    6-cell WENO5-Z upwind reconstruction from the SHARED ``core.weno`` kernels
+    (the oracle: identical to the ocean's vertical-tracer WENO). WENO5 is ~5th-
+    order in smooth flow and only steepens near discontinuities ⇒ far less
+    numerical diffusion than van-Leer, so it preserves the cloud-layer moisture
+    that van-Leer over-mixes, while staying essentially non-oscillatory.
+
+    Stencil for face i+1/2: ``[φ_{i-2},φ_{i-1},φ_i,φ_{i+1},φ_{i+2},φ_{i+3}]``
+    (``weno5_z`` convention). Periodic x, y via roll; z edge-padded by 3 with
+    the rigid-wall zero advective flux (w=0 at surface + lid)."""
+    from legoesm.core.weno import weno5_z, weno_upwind
+    dx, dy, dz = g.dx, g.dy, g.dz
+    nz = phi.shape[-1]
+
+    def faces_periodic(ax):
+        st = [jnp.roll(phi, s, axis=ax) for s in (2, 1, 0, -1, -2, -3)]
+        return weno5_z(st)                                 # (f_plus, f_minus)
+
+    # x faces (axis=1)
+    u_xf = 0.5 * (u + jnp.roll(u, -1, axis=1))
+    fp, fm = faces_periodic(1)
+    Fx = u_xf * weno_upwind(fp, fm, u_xf)
+    divx = (Fx - jnp.roll(Fx, 1, axis=1)) / dx
+
+    # y faces (axis=0)
+    v_yf = 0.5 * (v + jnp.roll(v, -1, axis=0))
+    fp, fm = faces_periodic(0)
+    Fy = v_yf * weno_upwind(fp, fm, v_yf)
+    divy = (Fy - jnp.roll(Fy, 1, axis=0)) / dy
+
+    # z faces (axis=2, walls). Edge-pad by 3 for the 6-cell boundary stencils.
+    phip = jnp.pad(phi, ((0, 0), (0, 0), (3, 3)), mode="edge")
+    st = [phip[..., j:j + nz + 1] for j in range(6)]       # φ_{k-3..k+2}, faces 0..nz
+    fp, fm = weno5_z(st)
+    Fz = w * weno_upwind(fp, fm, w)                        # w=0 at walls ⇒ Fz=0
+    divz = (Fz[..., 1:nz + 1] - Fz[..., 0:nz]) / dz
+    return divx + divy + divz
+
+
+def _weno5_hv_flux_div(phi, u, v, w, g: SpectralLESGrid):
+    """HYBRID scalar advection divergence: 5th-order WENO-Z in the HORIZONTAL
+    (x, y) + 2nd-order van-Leer in the VERTICAL (z).
+
+    The moist instability lives at the sharp VERTICAL moisture inversion
+    (∂q/∂z) — WENO5 there is too weakly dissipative and the latent-heat feedback
+    blows up; van-Leer's diffusion at the inversion is stabilising. But the
+    HORIZONTAL cloud field (cover, plume structure) wants WENO5's low diffusion
+    — pure van-Leer over-mixes it and under-predicts cloud cover. This hybrid
+    keeps each direction's right scheme. Conservative + free-stream-paired with
+    ``_vanleer_fv_velocity_divergence`` (same arithmetic face velocities)."""
+    from legoesm.core.weno import weno5_z, weno_upwind
+    from legoesm.core.flux_limiters import van_leer_face_values
+    dx, dy, dz = g.dx, g.dy, g.dz
+    nz = phi.shape[-1]
+    # x, y: WENO5
+    u_xf = 0.5 * (u + jnp.roll(u, -1, axis=1))
+    fp, fm = weno5_z([jnp.roll(phi, s, axis=1) for s in (2, 1, 0, -1, -2, -3)])
+    Fx = u_xf * weno_upwind(fp, fm, u_xf)
+    divx = (Fx - jnp.roll(Fx, 1, axis=1)) / dx
+    v_yf = 0.5 * (v + jnp.roll(v, -1, axis=0))
+    fp, fm = weno5_z([jnp.roll(phi, s, axis=0) for s in (2, 1, 0, -1, -2, -3)])
+    Fy = v_yf * weno_upwind(fp, fm, v_yf)
+    divy = (Fy - jnp.roll(Fy, 1, axis=0)) / dy
+    # z: van-Leer (stable at the inversion)
+    phip = jnp.pad(phi, ((0, 0), (0, 0), (2, 2)), mode="edge")
+    pp, pn = van_leer_face_values(
+        phip[..., 0:nz + 1], phip[..., 1:nz + 2],
+        phip[..., 2:nz + 3], phip[..., 3:nz + 4])
+    Fz = w * jnp.where(w >= 0.0, pp, pn)
+    divz = (Fz[..., 1:nz + 1] - Fz[..., 0:nz]) / dz
+    return divx + divy + divz
+
+
 def scalar_rhs_monotone(phi, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux):
     """Scalar tendency with MONOTONE (van-Leer TVD) advection + the SAME SGS
     diffusion + surface-flux BC as :func:`scalar_rhs`.
@@ -752,7 +850,9 @@ def scalar_rhs_monotone(phi, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux):
     microphysics/buoyancy feedback explosively amplifies.
     """
     dz = g.dz
-    adv = (_vanleer_flux_div(phi, u, v, w, g)
+    flux_div = {"weno5": _weno5_flux_div, "weno5_hv": _weno5_hv_flux_div,
+                "van_leer": _vanleer_flux_div}[g.cfg.scalar_advection]
+    adv = (flux_div(phi, u, v, w, g)
            - phi * _vanleer_fv_velocity_divergence(u, v, w, g))
     dthdx, dthdy = ddx(phi, g), ddy(phi, g)
     Kh = nu_t / g.cfg.pr_sgs

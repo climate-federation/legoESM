@@ -94,6 +94,8 @@ def parse_args():
     p.add_argument("--f32", action="store_true")
     p.add_argument("--microphysics", default="morrison")
     p.add_argument("--n-tracers", type=int, default=9)
+    p.add_argument("--scalar-advection", choices=["van_leer","weno5","weno5_hv"], default="van_leer",
+                   help="monotone scalar reconstruction (weno5=less diffusive).")
     # Shared with bx.build (the moist-stability switches; defaults match BOMEX).
     p.add_argument("--filter-monotone-scalars", action="store_true")
     p.add_argument("--filter-monotone-qv", action="store_true")
