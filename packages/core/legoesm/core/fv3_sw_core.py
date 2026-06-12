@@ -1321,6 +1321,76 @@ def d2a2c_adjacent_strips(uc, vc, ut, vt, cosa_u, cosa_v, n):
     return ut, vt
 
 
+def d2a2c_tile_strips(uc, vc, ut, vt, ut_lo, ut_hi, vt_lo, vt_hi,
+                      cosa_u, cosa_v, a, b, n, nl,
+                      is_lo_i, is_hi_i, is_lo_j, is_hi_j):
+    """Per-tile form of :func:`d2a2c_adjacent_strips` (the tiled stage's
+    step 2a — removes the global post-gather strip pass).
+
+    Inputs are one tile's kernel outputs (``uc``/``ut`` ``(1, nl+1, nl)``,
+    ``vc``/``vt`` ``(1, nl, nl+1)``) plus the four 1-cell same-face
+    neighbour halos (each ``(1, nl+1)``):
+
+    - ``ut_lo``/``ut_hi``: neighbour ut CELL columns ``b-1`` / ``b+nl``
+      (tile ``tile_j∓1``'s local column ``nl-1`` / ``0``),
+    - ``vt_lo``/``vt_hi``: neighbour vt CELL rows ``a-1`` / ``a+nl``
+      (tile ``tile_i∓1``'s local row ``nl-1`` / ``0``).
+
+    The strip masks (global range ``[2, n-2]``) provably exclude every
+    position whose halo would be the wrapped/garbage value at a face
+    boundary, so the stage can feed periodic-``ppermute`` halos
+    unconditionally.  Writes cover the FULL local staggered range
+    (including the duplicated shared faces), so neighbouring tiles'
+    duplicated copies remain bit-identical — same global cells, same
+    fp ops — and downstream consumers never depend on tile ownership.
+    Production-order equivalence: the in-mask vt-strip reads
+    (post-face-override ut at cell cols ``[1, n-2]``) and ut-strip reads
+    (vt at cell rows ``[1, n-2]``) are disjoint from all strip writes
+    (i/j cells ``{0, n-1}``), so applying both from the PRE-strip fields
+    matches :func:`d2a2c_adjacent_strips` exactly.  ``a``/``b`` and the
+    side flags may be traced (shard_map ``axis_index``).  Returns
+    ``(ut, vt)``.  P4 phase-1b.
+    """
+    # Extended cell-axis views: [lo halo | local | hi halo].
+    ut_ext = jnp.concatenate(
+        [ut_lo[:, :, None], ut, ut_hi[:, :, None]], axis=2)  # (1,nl+1,nl+2)
+    vt_ext = jnp.concatenate(
+        [vt_lo[:, None, :], vt, vt_hi[:, None, :]], axis=1)  # (1,nl+2,nl+1)
+    mm = jnp.arange(nl + 1)[None, :]
+    j_in = (b + mm >= 2) & (b + mm <= n - 2)   # vt-strip staggered cols
+    i_in = (a + mm >= 2) & (a + mm <= n - 2)   # ut-strip staggered rows
+
+    # vt strips first (FV3 order; reads PRE-strip ut).
+    # West (cell row 0 of an is_lo_i tile): vt[0, j] = vc[0, j]
+    #   - 0.25*cosa_v[0, j]*(ut[0:2, j-1] + ut[0:2, j]).
+    sum_w = (ut_ext[:, 0, :-1] + ut_ext[:, 1, :-1]
+             + ut_ext[:, 0, 1:] + ut_ext[:, 1, 1:])
+    val_w = vc[:, 0, :] - 0.25 * cosa_v[:, 0, :] * sum_w
+    vt = vt.at[:, 0, :].set(jnp.where(is_lo_i & j_in, val_w, vt[:, 0, :]))
+    # East (cell row nl-1 == global n-1 of an is_hi_i tile).
+    sum_e = (ut_ext[:, nl - 1, :-1] + ut_ext[:, nl, :-1]
+             + ut_ext[:, nl - 1, 1:] + ut_ext[:, nl, 1:])
+    val_e = vc[:, nl - 1, :] - 0.25 * cosa_v[:, nl - 1, :] * sum_e
+    vt = vt.at[:, nl - 1, :].set(
+        jnp.where(is_hi_i & j_in, val_e, vt[:, nl - 1, :]))
+
+    # ut strips (read vt at interior cell rows only — disjoint from the
+    # vt-strip writes above, so vt_ext built from the PRE-strip vt is
+    # production-exact at every in-mask position).
+    # South (cell col 0 of an is_lo_j tile).
+    sum_s = (vt_ext[:, :-1, 0] + vt_ext[:, 1:, 0]
+             + vt_ext[:, :-1, 1] + vt_ext[:, 1:, 1])
+    val_s = uc[:, :, 0] - 0.25 * cosa_u[:, :, 0] * sum_s
+    ut = ut.at[:, :, 0].set(jnp.where(is_lo_j & i_in, val_s, ut[:, :, 0]))
+    # North (cell col nl-1 == global n-1 of an is_hi_j tile).
+    sum_n = (vt_ext[:, :-1, nl - 1] + vt_ext[:, 1:, nl - 1]
+             + vt_ext[:, :-1, nl] + vt_ext[:, 1:, nl])
+    val_n = uc[:, :, nl - 1] - 0.25 * cosa_u[:, :, nl - 1] * sum_n
+    ut = ut.at[:, :, nl - 1].set(
+        jnp.where(is_hi_j & i_in, val_n, ut[:, :, nl - 1]))
+    return ut, vt
+
+
 def d2a2c_vect(u_d, v_d, cdgrid):
     """FV3 D-grid → A-grid → C-grid (covariant). FV3 sw_core.F90 d2a2c_vect.
 

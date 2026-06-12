@@ -46,6 +46,7 @@ from legoesm.core.fv3_sw_core import (
     d2a2c_uc_tile_unified,
     d2a2c_vc_tile_unified,
     d2a2c_tile_unified,
+    d2a2c_tile_strips,
     _A1 as _FV3_A1,
 )
 from legoesm.parallel.mesh import (
@@ -915,6 +916,133 @@ def test_tiled_d2a2c_assemble_matches_production(kt, unified):
                                            f"unified={unified})")
 
 
+def _tile_blocks(F, uxp, vxp, cdg, u_d, v_d, f, a, b, nl):
+    """The (a,b)-anchored tile blocks the shard_map stage dynamic_slices
+    (host-slice mirror of make_tiled_d2a2c_stage's ``ds``)."""
+    return (
+        uxp[f, a:a + nl + 5, b:b + nl + 4][None],
+        vxp[f, a:a + nl + 4, b:b + nl + 5][None],
+        F.ua_pad[f, a:a + nl + 4, b:b + nl + 4][None],
+        F.dxc_pad_x[f, a:a + nl + 4, b:b + nl][None],
+        F.se_pad_x[f, a:a + nl + 2, b:b + nl + 2][None],
+        F.sw_pad_x[f, a:a + nl + 2, b:b + nl + 2][None],
+        F.va_pad[f, a:a + nl + 4, b:b + nl + 4][None],
+        F.dyc_pad_y[f, a:a + nl, b:b + nl + 4][None],
+        F.sn_pad_y[f, a:a + nl + 2, b:b + nl + 2][None],
+        F.ss_pad_y[f, a:a + nl + 2, b:b + nl + 2][None],
+        u_d[f, a:a + nl, b:b + nl + 1][None],
+        v_d[f, a:a + nl + 1, b:b + nl][None],
+        F.cos_sg5[f, a:a + nl, b:b + nl][None],
+        F.rsin2[f, a:a + nl, b:b + nl][None],
+        cdg.cosa_u[f, a:a + nl + 1, b:b + nl][None],
+        cdg.rsin_u[f, a:a + nl + 1, b:b + nl][None],
+        cdg.cosa_v[f, a:a + nl, b:b + nl + 1][None],
+        cdg.rsin_v[f, a:a + nl, b:b + nl + 1][None],
+    )
+
+
+@pytest.mark.parametrize("kt", [2, 3])
+def test_d2a2c_tile_strips_matches_production(kt):
+    """Per-tile strip application (d2a2c_tile_strips fed 1-cell neighbour
+    halos — the host-slice mirror of the stage's 4 ppermutes) makes the
+    assembled tiled output equal production d2a2c_vect EXACTLY with NO
+    global strip pass, and keeps the duplicated shared-staggered-face
+    copies of neighbouring tiles bit-identical (the symmetric-exchange
+    invariant downstream consumers rely on)."""
+    set_halo_backend("local")
+    n = 24
+    nl = n // kt
+    npt = min(4, n // 2)
+    cdg = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    rng = np.random.default_rng(70 + kt)
+    u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    g = [np.asarray(x) for x in d2a2c_vect(u_d, v_d, cdg)]
+    F = d2a2c_global_fields(u_d, v_d, cdg)
+    uxp = jnp.pad(F.utmp_pad, [(0, 0), (1, 0), (0, 0)], mode='edge')
+    vxp = jnp.pad(F.vtmp_pad, [(0, 0), (0, 0), (1, 0)], mode='edge')
+
+    # Pass 1: every tile's PRE-strip kernel output.
+    pre = {}
+    for f in range(6):
+        for ti in range(kt):
+            for tj in range(kt):
+                a, b = ti * nl, tj * nl
+                blocks = _tile_blocks(F, uxp, vxp, cdg, u_d, v_d, f, a, b, nl)
+                pre[(f, ti, tj)] = d2a2c_tile_unified(
+                    *blocks, a, b, n, npt,
+                    ti == 0, ti == kt - 1, tj == 0, tj == kt - 1)
+
+    # Pass 2: per-tile strips with halos sliced from the neighbours'
+    # PRE-strip ut/vt (cell axes partition cleanly — no dedup question).
+    zcol = jnp.zeros((1, nl + 1))
+    post = {}
+    for f in range(6):
+        for ti in range(kt):
+            for tj in range(kt):
+                a, b = ti * nl, tj * nl
+                ua_t, va_t, uc_t, vc_t, ut_t, vt_t = pre[(f, ti, tj)]
+                ut_hi = (pre[(f, ti, tj + 1)][4][:, :, 0]
+                         if tj + 1 < kt else zcol)
+                ut_lo = (pre[(f, ti, tj - 1)][4][:, :, nl - 1]
+                         if tj - 1 >= 0 else zcol)
+                vt_hi = (pre[(f, ti + 1, tj)][5][:, 0, :]
+                         if ti + 1 < kt else zcol)
+                vt_lo = (pre[(f, ti - 1, tj)][5][:, nl - 1, :]
+                         if ti - 1 >= 0 else zcol)
+                ut_s, vt_s = d2a2c_tile_strips(
+                    uc_t, vc_t, ut_t, vt_t, ut_lo, ut_hi, vt_lo, vt_hi,
+                    cdg.cosa_u[f, a:a + nl + 1, b:b + nl][None],
+                    cdg.cosa_v[f, a:a + nl, b:b + nl + 1][None],
+                    a, b, n, nl,
+                    ti == 0, ti == kt - 1, tj == 0, tj == kt - 1)
+                post[(f, ti, tj)] = (ua_t, va_t, uc_t, vc_t, ut_s, vt_s)
+
+    # Duplicated shared-face copies bit-identical (i-staggered: uc/ut;
+    # j-staggered: vc/vt).
+    for f in range(6):
+        for ti in range(kt - 1):
+            for tj in range(kt):
+                for idx in (2, 4):   # uc, ut
+                    lo = np.asarray(post[(f, ti, tj)][idx])[0]
+                    hi = np.asarray(post[(f, ti + 1, tj)][idx])[0]
+                    np.testing.assert_array_equal(
+                        lo[nl, :], hi[0, :],
+                        err_msg=f"i-shared face copy mismatch idx={idx} "
+                                f"(f={f}, ti={ti}, tj={tj})")
+        for ti in range(kt):
+            for tj in range(kt - 1):
+                for idx in (3, 5):   # vc, vt
+                    lo = np.asarray(post[(f, ti, tj)][idx])[0]
+                    hi = np.asarray(post[(f, ti, tj + 1)][idx])[0]
+                    np.testing.assert_array_equal(
+                        lo[:, nl], hi[:, 0],
+                        err_msg=f"j-shared face copy mismatch idx={idx} "
+                                f"(f={f}, ti={ti}, tj={tj})")
+
+    # Assemble (lower tile owns the shared face) == d2a2c_vect EXACTLY,
+    # with NO global strip pass.
+    ua = np.zeros((6, n, n)); va = np.zeros((6, n, n))
+    uc = np.zeros((6, n + 1, n)); vc = np.zeros((6, n, n + 1))
+    ut = np.zeros((6, n + 1, n)); vt = np.zeros((6, n, n + 1))
+    for f in range(6):
+        for ti in reversed(range(kt)):
+            for tj in reversed(range(kt)):
+                a, b = ti * nl, tj * nl
+                ua_t, va_t, uc_t, vc_t, ut_s, vt_s = (
+                    np.asarray(x)[0] for x in post[(f, ti, tj)])
+                ua[f, a:a + nl, b:b + nl] = ua_t
+                va[f, a:a + nl, b:b + nl] = va_t
+                uc[f, a:a + nl + 1, b:b + nl] = uc_t
+                vc[f, a:a + nl, b:b + nl + 1] = vc_t
+                ut[f, a:a + nl + 1, b:b + nl] = ut_s
+                vt[f, a:a + nl, b:b + nl + 1] = vt_s
+    for name, tt, gg in zip(["ua", "va", "uc", "vc", "ut", "vt"],
+                            (ua, va, uc, vc, ut, vt), g):
+        np.testing.assert_array_equal(
+            tt, gg, err_msg=f"{name} mismatch (kt={kt}, in-tile strips)")
+
+
 @pytest.mark.parametrize("kt,ti,tj", [
     (3, 1, 1), (3, 0, 1), (3, 2, 1), (3, 1, 0), (3, 1, 2),  # interior + edges
     (3, 0, 0), (3, 2, 2), (3, 0, 2), (3, 2, 0),             # kt=3 corners
@@ -988,70 +1116,41 @@ def test_d2a2c_vc_tile_unified_matches_production(kt, ti, tj):
                                    rtol=0, atol=1e-12)
 
 
-def test_d2a2c_tile_unified_in_shardmap():
-    """d2a2c_tile_unified run under a REAL (6,kt,kt) shard_map (24 host
-    devices, kt=2 -> all corners) == production d2a2c_vect per tile (every
+@pytest.mark.parametrize("kt", [2, 3])
+def test_d2a2c_tile_unified_in_shardmap(kt):
+    """d2a2c_tile_unified run under a REAL (6,kt,kt) shard_map (6*kt^2 host
+    devices; kt=2 -> all corners) == production d2a2c_vect per tile (every
     output except the two deferred adjacent strips, which the stage adds via
     the ppermute halo).  Approach C: the global fields are face-REPLICATED;
     each device dynamic_slices its tile's wide block (a=axis_index*nl) and
     runs the single device-uniform kernel -> the A->C compute is sharded with
-    NO dynamic wind halo (the strip ppermute is the only exchange, deferred to
-    step 2).  This is the np=24 sub-face stage, step 1."""
-    if len(jax.devices()) < 24:
-        pytest.skip("needs --xla_force_host_platform_device_count=24")
-    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-    try:
-        from jax import shard_map
-    except ImportError:  # pragma: no cover
-        from jax.experimental.shard_map import shard_map
+    NO dynamic wind halo (the strip ppermute is the only exchange).  kt=3 is
+    the lane that pins the ppermute DIRECTION: at kt=2 perm_hi == perm_lo
+    (both [(0,1),(1,0)]), so only kt>=3 distinguishes a swapped
+    perm/payload pair (codex review MINOR, 2026-06-12)."""
+    ndev = 6 * kt * kt
+    if len(jax.devices()) < ndev:
+        pytest.skip(f"needs --xla_force_host_platform_device_count={ndev}")
+    from jax.sharding import Mesh
+    from legoesm.parallel.tiled_d2a2c import make_tiled_d2a2c_stage
     set_halo_backend("local")
-    n, kt = 24, 2
+    n = 24
     nl = n // kt
-    npt = min(4, n // 2)
     cdg = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
     rng = np.random.default_rng(300)
     u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
     v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
     g = [np.asarray(x) for x in d2a2c_vect(u_d, v_d, cdg)]
     F = d2a2c_global_fields(u_d, v_d, cdg)
-    uxp = jnp.pad(F.utmp_pad, [(0, 0), (1, 0), (0, 0)], mode='edge')
-    vxp = jnp.pad(F.vtmp_pad, [(0, 0), (0, 0), (1, 0)], mode='edge')
 
-    dev = np.array(jax.devices()[:24]).reshape(6, kt, kt)
+    dev = np.array(jax.devices()[:ndev]).reshape(6, kt, kt)
     mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
-    fo = P("face", None, None)
-    co = P("face", "tile_i", "tile_j")
-    arrays = (uxp, vxp, F.ua_pad, F.dxc_pad_x, F.se_pad_x, F.sw_pad_x,
-              F.va_pad, F.dyc_pad_y, F.sn_pad_y, F.ss_pad_y,
-              F.cos_sg5, F.rsin2, cdg.cosa_u, cdg.rsin_u, cdg.cosa_v,
-              cdg.rsin_v, u_d, v_d)
-    sh = [jax.device_put(x, NamedSharding(mesh, fo)) for x in arrays]
-
-    @partial(shard_map, mesh=mesh, in_specs=(fo,) * 18,
-             out_specs=(co,) * 6, check_vma=False)
-    def _stage(uxp, vxp, ua, dx, se, sw, va, dy, sn, ss,
-               cos_sg5, rsin2, cosa_u, rsin_u, cosa_v, rsin_v, ud, vd):
-        ti = jax.lax.axis_index("tile_i")
-        tj = jax.lax.axis_index("tile_j")
-        a, b = ti * nl, tj * nl
-
-        def ds(arr, si, sj):
-            return jax.lax.dynamic_slice(arr[0], (a, b), (si, sj))[None]
-
-        out = d2a2c_tile_unified(
-            ds(uxp, nl + 5, nl + 4), ds(vxp, nl + 4, nl + 5),
-            ds(ua, nl + 4, nl + 4), ds(dx, nl + 4, nl),
-            ds(se, nl + 2, nl + 2), ds(sw, nl + 2, nl + 2),
-            ds(va, nl + 4, nl + 4), ds(dy, nl, nl + 4),
-            ds(sn, nl + 2, nl + 2), ds(ss, nl + 2, nl + 2),
-            ds(ud, nl, nl + 1), ds(vd, nl + 1, nl),
-            ds(cos_sg5, nl, nl), ds(rsin2, nl, nl),
-            ds(cosa_u, nl + 1, nl), ds(rsin_u, nl + 1, nl),
-            ds(cosa_v, nl, nl + 1), ds(rsin_v, nl, nl + 1),
-            a, b, n, npt, ti == 0, ti == kt - 1, tj == 0, tj == kt - 1)
-        return out
-
-    ua_t, va_t, uc_t, vc_t, ut_t, vt_t = (np.asarray(x) for x in _stage(*sh))
+    # apply_strips=False lane: per-tile kernel outputs with the strips
+    # deferred (validates the kernel-under-shard_map + the global
+    # post-gather strip pass).
+    stage = make_tiled_d2a2c_stage(mesh, cdg, kt, apply_strips=False)
+    ua_t, va_t, uc_t, vc_t, ut_t, vt_t = (
+        np.asarray(x) for x in stage(u_d, v_d, F))
     for f in range(6):
         for ti in range(kt):
             for tj in range(kt):
@@ -1070,6 +1169,11 @@ def test_d2a2c_tile_unified_in_shardmap():
                     vc_t[f, ti * nl:(ti + 1) * nl,
                          tj * (nl + 1):(tj + 1) * (nl + 1)],
                     g[3][f, a:a + nl, b:b + nl + 1], rtol=0, atol=1e-12)
+                if kt != 2:
+                    # ut/vt per-tile checks below use the kt=2 (all-
+                    # corners) strip-exclusion geometry; for kt>=3 the
+                    # dedup lanes below pin ut/vt (incl. strips).
+                    continue
                 # ut/vt: blank the deferred strip segments (kt=2 -> corners).
                 i_strip = 0 if ti == 0 else nl - 1
                 j_strip = 0 if tj == 0 else nl - 1
@@ -1114,7 +1218,30 @@ def test_d2a2c_tile_unified_in_shardmap():
     ut_s, vt_s = d2a2c_adjacent_strips(
         jnp.asarray(uc_re), jnp.asarray(vc_re),
         jnp.asarray(ut_re), jnp.asarray(vt_re), cdg.cosa_u, cdg.cosa_v, n)
-    stage = [ua_t, va_t, uc_re, vc_re, np.asarray(ut_s), np.asarray(vt_s)]
-    for name, arr, gg in zip(["ua", "va", "uc", "vc", "ut", "vt"], stage, g):
+    deferred = [ua_t, va_t, uc_re, vc_re, np.asarray(ut_s), np.asarray(vt_s)]
+    for name, arr, gg in zip(["ua", "va", "uc", "vc", "ut", "vt"],
+                             deferred, g):
         np.testing.assert_allclose(arr, gg, rtol=0, atol=1e-12,
                                    err_msg=f"SPMD stage {name} != d2a2c_vect")
+
+    # PRODUCTION lane (apply_strips=True, the default): the 4-ppermute
+    # 1-cell strip halo + d2a2c_tile_strips run IN-stage, so dedup
+    # reassembly alone == d2a2c_vect — no global post-pass — and the
+    # duplicated shared-staggered-face copies are bit-identical.
+    stage_p = make_tiled_d2a2c_stage(mesh, cdg, kt)
+    ua_p, va_p, uc_p, vc_p, ut_p, vt_p = (
+        np.asarray(x) for x in stage_p(u_d, v_d, F))
+    for arr, ax, nm in ((uc_p, 1, "uc"), (ut_p, 1, "ut"),
+                        (vc_p, 2, "vc"), (vt_p, 2, "vt")):
+        for t in range(kt - 1):
+            lo = np.take(arr, t * (nl + 1) + nl, axis=ax)
+            hi = np.take(arr, (t + 1) * (nl + 1), axis=ax)
+            np.testing.assert_array_equal(
+                lo, hi, err_msg=f"{nm} duplicated shared-face copies "
+                                f"differ (t={t})")
+    full = [ua_p, va_p, _dedup_stag(uc_p, 1), _dedup_stag(vc_p, 2),
+            _dedup_stag(ut_p, 1), _dedup_stag(vt_p, 2)]
+    for name, arr, gg in zip(["ua", "va", "uc", "vc", "ut", "vt"], full, g):
+        np.testing.assert_allclose(arr, gg, rtol=0, atol=1e-12,
+                                   err_msg=f"SPMD stage(strips) {name} "
+                                           f"!= d2a2c_vect")
