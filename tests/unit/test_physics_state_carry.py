@@ -1152,3 +1152,20 @@ def test_carry_guard_sees_through_partial_and_wraps():
     model, state, _ = _cdgrid_setup(n=4, nlev=4)
     with pytest.raises(NotImplementedError, match="405"):
         model.step(state, 1.0, physics_fn=functools.partial(fn))
+
+
+def test_voronoi_mpi_step_refuses_stateful_physics_without_carry():
+    """Codex adversarial round 11 (#413): make_voronoi_mpi_step with the
+    default state-only contract (return_phys_state=False) drops the
+    PhysicsState carry, so it must refuse a stateful physics_fn — even one
+    hidden behind a functools.partial — at build time, before the
+    model/layout are touched."""
+    import functools
+    from legoesm.parallel.voronoi_mpi import make_voronoi_mpi_step
+
+    fn = _stateful_make_physics()
+    with pytest.raises(NotImplementedError, match="405"):
+        make_voronoi_mpi_step(None, None, None, physics_fn=fn)
+    with pytest.raises(NotImplementedError, match="405"):
+        make_voronoi_mpi_step(
+            None, None, None, physics_fn=functools.partial(fn))

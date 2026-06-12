@@ -2158,6 +2158,11 @@ def make_voronoi_sharded_step(
         """Sharded Voronoi step.  ``physics_fn`` is closure-captured into
         the jitted executable (selected by object identity) — it is never
         passed to ``jax.jit`` as a traced argument."""
+        # Issue #405/#413: this wrapper has no PhysicsState carry channel,
+        # so a stateful physics_fn would silently reseed every step.
+        # Refuse loudly (the predicate also sees a partial/__wrapped__
+        # wrapper that hides the tag).
+        _refuse_stateful_physics_unthreaded_wrapper(physics_fn)
         key = None if physics_fn is None else id(physics_fn)
         fn = _step_cache.get(key)
         if fn is None:

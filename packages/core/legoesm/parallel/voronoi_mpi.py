@@ -525,6 +525,24 @@ def make_voronoi_mpi_step(
     -------
     callable : ``(state, dt) -> state``
     """
+    # Issue #405/#413: the state-only contract (return_phys_state=False)
+    # drops the PhysicsState carry — a stateful physics_fn would silently
+    # reseed its prognostic fields every step.  Refuse loudly at build
+    # time.  With return_phys_state=True the caller threads phys_state, so
+    # it is allowed.  The shared predicate also sees a partial / __wrapped__
+    # wrapper that hides the _requires_phys_state tag.
+    if not return_phys_state:
+        from legoesm.timestepping.integration import (
+            physics_requires_phys_state,
+        )
+        if physics_requires_phys_state(physics_fn):
+            raise NotImplementedError(
+                "make_voronoi_mpi_step(return_phys_state=False) does not "
+                "thread the PhysicsState carry, so the configured stateful "
+                "physics would silently reseed every step (issue "
+                "#405/#413).  Pass return_phys_state=True and thread the "
+                "returned carry, or use a diagnostic scheme."
+            )
     if config is None:
         config = model.config
 
