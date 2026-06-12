@@ -563,6 +563,51 @@ def _apply_fortran_d2a2c_corner_overrides(utmp_pad, vtmp_pad, n):
     return utmp_pad, vtmp_pad
 
 
+def d2a2c_d_to_a(u_d, v_d, cdgrid):
+    """D-grid → A-grid covariant step of d2a2c (Steps 1+2), verbatim.
+
+    utmp/vtmp = covariant cell-centre winds (2nd-order base, 4th-order
+    interior npt-band) then a halo=2 vector exchange.  Returns
+    ``(utmp_pad, vtmp_pad)`` each ``(6, n+4, n+4)``.  P4 phase-1b
+    approach C runs this in the GLOBAL GSPMD view (cheap) and feeds the
+    padded result into the tiled A→C; the per-tile block is a
+    ``tiled_padded_block`` (h2) slice — no staggered D-wind halo needed.
+    """
+    n = cdgrid.n
+    npt = min(4, n // 2)
+    utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
+    vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
+    if n > 2 * npt and npt > 0:
+        u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
+              + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
+        utmp = utmp.at[:, :, npt:n - npt].set(u4[:, :, npt - 1:n - npt - 1])
+        v4 = (_A2 * (v_d[:, :-3, :] + v_d[:, 3:, :])
+              + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
+        vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
+    grid = cdgrid.base
+    return pad_halo_vector(
+        utmp, vtmp,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+        interp_offsets=grid.halo_interp_offsets_h2,
+        halo=2,
+    )
+
+
+def d2a2c_ua_va_local(utmp, vtmp, cos_sg5, rsin2):
+    """A-grid contravariant winds from covariant utmp/vtmp — pointwise.
+
+    ``ua = (utmp - vtmp*cos_sg5)*rsin2`` (symmetric ``va``).  No halo,
+    so a tile computes its own ``(nl, nl)`` ua/va from sliced interior
+    utmp/vtmp + cos_sg5/rsin2 — the global d2a2c pads utmp/vtmp then
+    trims, which is pointwise-identical to operating on the interior
+    (P4 phase-1b approach C, first A→C output).
+    """
+    ua = (utmp - vtmp * cos_sg5) * rsin2
+    va = (vtmp - utmp * cos_sg5) * rsin2
+    return ua, va
+
+
 def d2a2c_vect(u_d, v_d, cdgrid):
     """FV3 D-grid → A-grid → C-grid (covariant). FV3 sw_core.F90 d2a2c_vect.
 
@@ -588,29 +633,13 @@ def d2a2c_vect(u_d, v_d, cdgrid):
     # _d2a2c_vect_duogrid is unaffected — Fortran also skips these via
     # dg%is_initialized.)
 
-    # Step 1: D-grid → covariant cell centres
-    utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
-    vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
-
-    # 4th-order interior (npt cells from each edge; needs n > 2*npt)
-    if n > 2 * npt and npt > 0:
-        u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
-              + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
-        utmp = utmp.at[:, :, npt:n - npt].set(u4[:, :, npt - 1:n - npt - 1])
-        v4 = (_A2 * (v_d[:, :-3, :] + v_d[:, 3:, :])
-              + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
-        vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
-
-    # Step 2: Halo-exchange covariant utmp/vtmp (halo=2 for edge_interpolate4, FV3:3587)
+    # Steps 1+2: D→A covariant utmp/vtmp + halo=2 vector exchange.
+    # Extracted to d2a2c_d_to_a (P4 phase-1b approach C): the tiled
+    # stage runs THIS step in the global view (cheap averages + one
+    # vector halo) and shards utmp_pad/vtmp_pad into the per-tile A→C.
     grid = cdgrid.base
     h = 2
-    utmp_pad, vtmp_pad = pad_halo_vector(
-        utmp, vtmp,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        interp_offsets=grid.halo_interp_offsets_h2,
-        halo=h,
-    )  # each (6, n+4, n+4)
+    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdgrid)  # each (6, n+4, n+4)
 
     # iter-938: Fortran cube-corner sign-flip overrides (sw_core.F90:3527-3545, 3620-3639) available
     # as _apply_fortran_d2a2c_corner_overrides but output-dead without edge_interpolate4 j-slice extension.
