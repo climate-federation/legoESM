@@ -815,6 +815,42 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         # way, so gate it on with_surface_forcing to keep the probe path
         # unambiguous.
         surface_forcing_implicit=with_surface_forcing,
+        # --- Veros-faithful STEPPING COMPOSITION (free-run default) ---
+        # These were historically applied as DRIVER OVERRIDES (run_acc_freerun /
+        # attractor_drop), so "the faithful recipe" silently required remembering
+        # six flags — and the un-overridden recipe ran the matsuno_split/"total"
+        # composition, which a realized 90-day energy audit (2026-06-12,
+        # .physics-validator/eke_acc_residual/traj_energy_*) showed LEAKS
+        # ~+1.8 GW of spurious kinetic energy (0.6% of the 282 GW wind
+        # throughput, continuously) where Veros closes to ±0.03 GW. Under this
+        # bundle the realized budget matches Veros channel-by-channel to ~1-3%
+        # (wind 284 vs 282, bottom drag 22.0 vs 22.1, lateral 58 vs 56,
+        # vertical 102.4 vs 102.2, baroclinic conversion 101.6 vs 101.1 GW) and
+        # the 30-yr free run lands at KE 0.950x / mean_eke 1.37x the Veros
+        # equilibrium (was 1.53x / 4.6x). Gated on with_surface_forcing exactly
+        # like surface_forcing_implicit above: the frozen-state tendency-probe
+        # path (with_surface_forcing=False) keeps the legoESM defaults and
+        # stays bit-identical.
+        #
+        # The bundle (each ↔ its Veros counterpart; all phase-G options):
+        #   outer_integrator="ab2"        ↔ Veros AB2 (AB_eps=0.1 = config
+        #                                   default ab2_epsilon, not repeated)
+        #   dt_mom_ratio=9.0              ↔ dt_mom=4800 / dt_tracer=43200
+        #                                   (pass dt=43200 as the step dt)
+        #   barotropic_solver="rigid_lid" ↔ enable_streamfunction
+        #   coriolis_scheme="explicit_ab2"↔ tend_coriolisf in du (the energy
+        #                                   lever — see the audit note above)
+        #   ab2_scope="advective"         ↔ dissipative tendencies at weight
+        #                                   1.0 (solve_stream.py placement)
+        #   momentum_friction_additive=True ↔ explicit additive du_mix
+        outer_integrator="ab2" if with_surface_forcing else "forward_euler",
+        dt_mom_ratio=9.0 if with_surface_forcing else 1.0,
+        barotropic_solver=("rigid_lid" if with_surface_forcing
+                           else "explicit_substep"),
+        coriolis_scheme=("explicit_ab2" if with_surface_forcing
+                         else "matsuno_split"),
+        ab2_scope="advective" if with_surface_forcing else "total",
+        momentum_friction_additive=with_surface_forcing,
         physics=build_acc_physics_config(
             grid, with_surface_forcing=with_surface_forcing),
     )
