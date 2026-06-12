@@ -2,7 +2,7 @@
 
 **Status:** proposal, 2026-06-11 (Dhruv + Claude session). Companion to the
 staged GEOMETRIC plan (Torres et al. 2025 reference notes) and the 2026-06-11
-ocean differentiability audit. Open questions for Pierre at the bottom.
+ocean differentiability audit. Key protocol decisions recorded in §5.
 
 ## 1. Goal
 
@@ -154,24 +154,41 @@ Caveats stated up front:
   scalars as the baseline/prior. This is where the differentiable stack
   is the only practical tool.
 
-## 5. Open questions (for Pierre)
+## 5. Decisions (2026-06-12; revisit with Pierre if he objects)
 
-1. Should `TrainableOceanParams` (GeometricConfig knobs + future KPP/GM
-   scalars) live in the AIMIP training framework
-   (`packages/ml/legoesm/training/`) with `trainable_constraints_for_scheme`
-   extended to ocean schemes — or stay ocean-local? (Proposal: shared
-   framework; the dead-DOF filter and audit-test pattern should be the
-   single mechanism.)
-2. ETKI implementation: call `EnsembleKalmanProcesses.jl`, or keep a
-   minimal Python ETKI in-repo (update rule is ~20 lines; avoids a Julia
-   dependency; loses the package's schedulers/diagnostics)?
-3. AIMIP status: which loss-recipe version is current "best" and are the
-   bias-penalty / multi-lead lessons stable enough to cite as defaults?
-4. Eddy-resolving ACC reference (Stage-1 follow-on): worth scoping now
-   (storage + GPU budget), or after Stage-1 results?
-5. Ensemble execution: ETKI members are embarrassingly parallel single-GPU
-   jobs — run via the experiment-manifest system (#376/#381) or a thin
-   SLURM array under `scripts/cluster/`?
+Originally posed as open questions; decided to keep the campaign moving.
+
+1. **`TrainableOceanParams` lives in the shared training framework**
+   (`packages/ml/legoesm/training/`), extending
+   `trainable_constraints_for_scheme` and the `test_physics_params_audit`
+   liveness-test pattern to ocean schemes. One dead-DOF mechanism for the
+   whole repo, not a parallel ocean-local system (consistent with the
+   recipe-architecture direction: extend the existing modules).
+2. **ETKI: minimal in-repo JAX/numpy implementation.** The ETKI update +
+   ensemble-shrink rule is ~20 lines; no Julia dependency in the
+   environment. API mirrors `EnsembleKalmanProcesses.jl` (θ-ensemble in,
+   g-ensemble in, updated ensemble out; δt scheduler explicit) so a swap
+   to the package remains trivial if its diagnostics are wanted later.
+   Home: `packages/ml/legoesm/training/etki.py` + unit test (linear
+   forward model: ETKI must reproduce the analytic posterior-mean
+   trajectory).
+3. **Loss recipe: start from the Perezhogin loss, not the AIMIP one.**
+   Equal-weighted normalized mean+std maps (Eq. 9-style, R = I) is the
+   proven design for THIS problem class; the AIMIP recipes (bias
+   penalties, CRPS, multi-lead) are forecast-error tooling and are
+   consulted only if Stage-0 exposes a need (their documented
+   over-correction failure modes are reason for restraint).
+4. **Eddy-resolving ACC reference: deferred until Stage-1 results.**
+   Stage 1 against the Veros oracle answers the residual question first;
+   the eddy-resolving truth is scoped only if Stage 1 succeeds and the
+   effective-parameter caveat needs lifting for publication.
+5. **Ensemble execution: local-first via the experiment-manifest system.**
+   Stage-0/1 members are tiny (exact-IC, ~800-day windows at 2°: ~3-4 min
+   GPU each ⇒ a full ne=100 × 5-iteration calibration ≈ 30 GPU-hours),
+   so the 2× V100S box with `CUDA_VISIBLE_DEVICES` pinning (one member
+   per GPU, sequential batches) suffices; manifest entries (#376/#381)
+   for provenance. A thin SLURM array under `scripts/cluster/` becomes
+   the scale-out path only at Stage 2 / eddy-resolving scoping.
 
 ## 6. References / provenance
 
