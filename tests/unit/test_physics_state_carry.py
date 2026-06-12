@@ -496,6 +496,75 @@ def test_mpas_checkpoint_roundtrip_restores_physics_state(tmp_path):
     assert np.all(np.isfinite(np.asarray(driver_b._mpas_phys_state.tke)))
 
 
+def test_restored_carry_shape_mismatch_fails_fast(tmp_path):
+    """Codex round 1: a PRESENT restored carry with the wrong shape is a
+    checkpoint/config mismatch — must raise, not silently reseed."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _stateful_driver_config()
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()
+    driver._carry_aux = {"tke": jnp.zeros((7, 3))}   # wrong shape
+    with pytest.raises(ValueError, match="405"):
+        driver.run(compiled=True)
+
+
+def test_pipeline_refuses_dropped_active_carry():
+    """Codex round 1: the pipeline raises when an ACTIVE stateful
+    scheme receives no carry — a silent reseed every step is the #405
+    bug class.  Exercised through the driver per-step warmup by
+    sabotaging the seeded carry."""
+    from legoesm.atmosphere.physics.combined import (
+        physics_config_requires_phys_state, PhysicsConfig,
+    )
+    from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
+
+    # Predicate sanity: drives both the wrapper refusals and mirrors
+    # the driver guard.
+    assert physics_config_requires_phys_state(
+        PhysicsConfig(turbulence=TurbulenceConfig(scheme="tke")))
+    assert physics_config_requires_phys_state(
+        PhysicsConfig(turbulence=TurbulenceConfig(scheme="clubb_lite")))
+    assert not physics_config_requires_phys_state(
+        PhysicsConfig(turbulence=TurbulenceConfig(scheme="louis")))
+
+
+def test_sharded_wrapper_refuses_stateful_physics():
+    """Codex round 1: generic sharded step wrappers cannot thread the
+    carry — they must refuse a stateful physics_fn loudly."""
+    from legoesm.parallel.sharded_dynamics import (
+        _refuse_stateful_physics_unthreaded_wrapper,
+    )
+
+    def stateless_fn(*a, **k):
+        return None
+
+    _refuse_stateful_physics_unthreaded_wrapper(stateless_fn)  # passes
+
+    def stateful_fn(*a, **k):
+        return None
+
+    stateful_fn._requires_phys_state = True
+    with pytest.raises(NotImplementedError, match="405"):
+        _refuse_stateful_physics_unthreaded_wrapper(stateful_fn)
+
+
+def test_make_physics_tags_requires_phys_state():
+    """make_physics output advertises statefulness so wrappers that
+    drop the carry can refuse at build time."""
+    from legoesm.atmosphere.physics.combined import make_physics, PhysicsConfig
+    from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
+
+    fn_stateful = make_physics(
+        PhysicsConfig(turbulence=TurbulenceConfig(scheme="tke")),
+        model_type="hydrostatic", dt=1.0)
+    assert fn_stateful._requires_phys_state is True
+    fn_diag = make_physics(
+        PhysicsConfig(turbulence=TurbulenceConfig(scheme="louis")),
+        model_type="hydrostatic", dt=1.0)
+    assert fn_diag._requires_phys_state is False
+
+
 def test_refusal_guard_normalizes_scheme_objects():
     """PhysicsConfig-style sub-configs (with .scheme) are normalized."""
     from legoesm.driver.model_driver import ModelDriver

@@ -3352,10 +3352,15 @@ class ModelDriver:
         )
         # Checkpoint restore (#413): the MPAS load path stashes the
         # persisted PhysicsState fields in carry_aux under
-        # ``physstate_<field>``.  Overlay them onto the fresh seed,
-        # shape-checked per field (a scheme switch across restart falls
-        # back to the seed default, mirroring conv_prog), and cast to
-        # the seed dtype so the carry honours the GWD dtype rule above.
+        # ``physstate_<field>``.  Overlay them onto the fresh seed and
+        # cast to the seed dtype so the carry honours the GWD dtype
+        # rule above.  A PRESENT field with the wrong shape means a
+        # corrupted / wrong-resolution / wrong-config restart — fail
+        # fast rather than silently reseed the prognostic physics
+        # memory (codex review: a warning is the #405 silent-wrong bug
+        # class again; deliberately switching schemes across restart
+        # should drop the stale physstate_* entries from the
+        # checkpoint, not rely on a silent fallback).
         if isinstance(self._carry_aux, dict):
             _restored_ps = {}
             for _k, _v in self._carry_aux.items():
@@ -3367,12 +3372,17 @@ class ModelDriver:
                 _seed_field = getattr(_phys_state, _name)
                 _val = jnp.asarray(_v)
                 if tuple(_val.shape) != tuple(_seed_field.shape):
-                    logger.warning(
-                        "  Restart physics-state field %r has shape %s "
-                        "(expected %s) — reseeding the scheme default",
-                        _name, tuple(_val.shape), tuple(_seed_field.shape),
+                    raise ValueError(
+                        f"Restart physics-state field {_name!r} has "
+                        f"shape {tuple(_val.shape)} but the configured "
+                        f"run expects {tuple(_seed_field.shape)} — the "
+                        "checkpoint does not match this configuration "
+                        "(resolution / scheme config change or a "
+                        "corrupted file).  Silently reseeding would "
+                        "branch the trajectory (issue #405/#413); fix "
+                        "the config or strip the physstate_* entries "
+                        "from the checkpoint to opt into a fresh seed."
                     )
-                    continue
                 _restored_ps[_name] = _val.astype(_seed_field.dtype)
             if _restored_ps:
                 _phys_state = _phys_state._replace(**_restored_ps)
@@ -4303,9 +4313,23 @@ class ModelDriver:
                     default = jnp.tile(
                         default[None], (_ens,) + (1,) * default.ndim,
                     )
-                restored = _aux.get(name, default)
+                if name not in _aux:
+                    return default
+                restored = _aux[name]
                 if tuple(restored.shape) != tuple(default.shape):
-                    restored = default
+                    # A PRESENT carry with the wrong shape = checkpoint /
+                    # config mismatch.  Fail fast — silently reseeding
+                    # is the #405 bug class (codex review).
+                    raise ValueError(
+                        f"Restored stateful-physics carry {name!r} has "
+                        f"shape {tuple(restored.shape)} but this run "
+                        f"expects {tuple(default.shape)} — checkpoint "
+                        "and configuration do not match (resolution / "
+                        "scheme-config / ensemble change or corruption)."
+                        "  Fix the config or remove the carry from the "
+                        "checkpoint to opt into a fresh seed "
+                        "(issue #405/#413)."
+                    )
                 # Pin the restored carry to the seed dtype (the GWD
                 # dtype rule above survives older f32 checkpoints).
                 if restored.dtype != default.dtype:

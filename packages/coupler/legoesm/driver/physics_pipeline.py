@@ -271,9 +271,9 @@ class PhysicsPipeline:
         spectral GWD.  The updated values ride the returned
         ``PhysicsOutput`` (like ``conv_prog``); inactive slots pass
         through unchanged.  A ``None`` or wrong-shape carry for an
-        ACTIVE scheme re-seeds the scheme default (mirroring the
-        ``conv_prog`` warm-start fallback) — inside ``lax.scan`` the
-        caller must seed correct shapes up front.
+        ACTIVE scheme raises at trace time — a silent reseed here is
+        exactly the issue-#405 bug class.  Seed with
+        ``init_physics_state`` and feed the updated value back.
         """
         _C_H = self.C_H if C_H is None else C_H
         _C_E = self.C_E if C_E is None else C_E
@@ -758,16 +758,24 @@ class PhysicsPipeline:
                 # Stateful scheme (issue #413): kernel takes the
                 # prognostic energy under its trait-named keyword
                 # ("tke" for the MY-2.5 family, "qke" for MYNN-2.5)
-                # and returns (TurbulenceOutput, energy_new).
+                # and returns (TurbulenceOutput, energy_new).  A None
+                # or wrong-shape carry for the ACTIVE scheme means the
+                # caller dropped it — fail loudly at trace time rather
+                # than silently reseed every step (the #405 bug class;
+                # codex review).  Seed via ``init_physics_state`` and
+                # feed the ``PhysicsOutput`` value back each step.
                 _energy_in = tke if self._turb_energy_field == "tke" else qke
                 if (_energy_in is None
                         or tuple(_energy_in.shape) != (ad.ncol, nlev)):
-                    # Warm start / scheme switch: re-seed the scheme
-                    # floor, mirroring the conv_prog fallback above.
-                    _energy_in = jnp.full(
-                        (ad.ncol, nlev),
-                        getattr(self.turbulence_config, "tke_min", 1e-6),
-                        dtype=T_col.dtype,
+                    raise ValueError(
+                        f"turbulence scheme carries prognostic "
+                        f"{self._turb_energy_field!r} but the caller "
+                        "passed "
+                        f"{None if _energy_in is None else tuple(_energy_in.shape)} "
+                        f"(expected {(ad.ncol, nlev)}) — the carry would "
+                        "silently reseed every step (issue #405/#413). "
+                        "Seed it with init_physics_state and thread the "
+                        "updated PhysicsOutput value back."
                     )
                 _turb_kwargs[self._turb_energy_field] = _energy_in
                 turb_out, _energy_new = self.turbulence_fn(**_turb_kwargs)
@@ -798,16 +806,23 @@ class PhysicsPipeline:
             if self._gwd_prognostic:
                 # Prognostic spectral GWD (issue #413): the wave-action
                 # spectrum is the carry; kernel returns
-                # (GWDOutput, spectrum_new).
+                # (GWDOutput, spectrum_new).  None / wrong shape for the
+                # ACTIVE scheme = dropped carry — fail loudly rather
+                # than silently reseed every step (the #405 bug class;
+                # codex review).
                 _sc = self.gwd_config
                 _spec_shape = (ad.ncol, _sc.n_azimuths, _sc.n_wavenumbers)
                 _spec_in = gwd_spectrum
                 if (_spec_in is None
                         or tuple(_spec_in.shape) != _spec_shape):
-                    # Warm start / scheme switch: re-seed launch flux
-                    # (mirrors init_physics_state).
-                    _spec_in = jnp.full(
-                        _spec_shape, _sc.launch_flux, dtype=T_col.dtype,
+                    raise ValueError(
+                        "prognostic_spectral GWD carries a wave-action "
+                        "spectrum but the caller passed "
+                        f"{None if _spec_in is None else tuple(_spec_in.shape)} "
+                        f"(expected {_spec_shape}) — the carry would "
+                        "silently reseed every step (issue #405/#413). "
+                        "Seed it with init_physics_state and thread the "
+                        "updated PhysicsOutput value back."
                     )
                 gwd_out, gwd_spectrum_out = self.gwd_fn(
                     spectrum_in=_spec_in, **_gwd_kwargs,

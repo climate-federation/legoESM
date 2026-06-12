@@ -139,20 +139,57 @@ def make_physics(
     -------
     Callable
         Physics function with the correct signature for *model_type*.
+        Carries a ``_requires_phys_state`` attribute: ``True`` when the
+        configured schemes are stateful (prognostic TKE-family /
+        MYNN-2.5 turbulence, prognostic-spectral GWD, prognostic
+        convection), so step wrappers that cannot thread the
+        ``PhysicsState`` carry can refuse loudly instead of silently
+        reseeding every step (issue #405/#413).
     """
     if model_type == "hydrostatic":
-        return _make_hydrostatic_combined(config, dt, column_mesh=column_mesh)
+        fn = _make_hydrostatic_combined(config, dt, column_mesh=column_mesh)
     elif model_type == "nonhydrostatic":
-        return _make_nonhydrostatic_combined(config, dt)
+        fn = _make_nonhydrostatic_combined(config, dt)
     elif model_type == "spectral_pe":
-        return _make_spectral_pe_combined(config, dt)
+        fn = _make_spectral_pe_combined(config, dt)
     elif model_type == "mpas":
-        return _make_mpas_combined(config, dt, column_mesh=column_mesh)
+        fn = _make_mpas_combined(config, dt, column_mesh=column_mesh)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
             f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
+    fn._requires_phys_state = physics_config_requires_phys_state(config)
+    return fn
+
+
+def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
+    """True when *config* selects any scheme with a prognostic carry.
+
+    Single predicate for step wrappers (sharded dynamics, lat-lon MPI)
+    that cannot thread ``PhysicsState`` and must refuse loudly rather
+    than silently reseed (issue #405/#413).  Mirrors the driver guard:
+    energy-carrying turbulence (shared traits), prognostic/stochastic
+    convection, prognostic-spectral GWD.
+    """
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        turbulence_scheme_traits,
+    )
+    from legoesm.atmosphere.physics.convection.integration import (
+        convection_scheme_traits,
+    )
+    # Convection set matches the driver guard exactly (scalar-prognostic
+    # mass_flux/edmf + stochastic-capable bechtold); the remaining
+    # profile-prognostic schemes (ZM/KF/emanuel/tiedtke) are tolerated
+    # there as effectively-diagnostic relaxation carries — keep the two
+    # predicates aligned rather than diverging.
+    conv = convection_scheme_traits(config.convection.scheme)
+    return bool(
+        turbulence_scheme_traits(config.turbulence.scheme).carries_energy
+        or conv.is_scalar_prognostic
+        or conv.is_stochastic
+        or config.gravity_wave_drag.scheme == "prognostic_spectral"
+    )
 
 
 # ======================================================================
