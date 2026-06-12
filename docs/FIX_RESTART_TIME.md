@@ -273,6 +273,31 @@ gaps the plan addresses).  Implemented:
   convention, compiled spy, per-step off-boundary, spectral).
 - Codex review round 4: CLEAN.
 
+## Conclusion — goal met (2026-06-12)
+
+legoESM can be run with bit-exact restart continuation on every
+ModelDriver run path:
+
+| path | restart bit-exactness | evidence |
+|---|---|---|
+| `_run_mpas` | state + every PhysicsState carry, 0.0 | `test_mpas_bitexact_restart_continuation`, negative-epoch chain test, PBS 4524510 (L5 production) |
+| `_run_compiled` (production default) | state + tke/qke/gwd carries, 0.0 | slow cube test, legacy reproducibility test, PBS 4524510 (r16, tke + prognostic_spectral), forcing-refresh spy test |
+| `_run_per_step` (compiled=False) | state + held radiation, incl. off-radiation-boundary checkpoints | `test_per_step_bitexact_restart_off_radiation_boundary` |
+| `_run_spectral` | all five spectral coefficient fields | `test_spectral_bitexact_restart_continuation` (checkpointing itself added in iteration 4) |
+
+Fresh-run trajectories are bitwise UNCHANGED vs main (sha256 digest
+proof, 2-day transient-GHG spectral run).  Four codex review rounds:
+two adversarial plan reviews (findings adopted), two clean reviews of
+the committed diffs.  Regression sweeps: carry/compiled-segments 93,
+port sweep 95, time_utils 73 (incl. a floor-semantics pin verified to
+bite), forcing dispatch 9, legacy reproducibility — all green.
+
+Known adjacent gaps, deliberately out of scope (feature gaps, not
+restart-continuation defects): prognostic_spectral GWD still raises
+NotImplementedError on MPAS (cannot run ⇒ cannot restart);
+checkpoint_format='zarr' refuses stateful carries (pre-existing
+fail-loud guard).
+
 - **Codex round-2 finding (P2, fixed)**: the compiled cube/lat-lon loop
   only refreshed external forcing (ozone/aerosol/GHG + solar) for
   `seg_idx > 0`, so a RESUMED run's first segment kept the
