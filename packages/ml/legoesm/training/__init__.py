@@ -16,6 +16,11 @@ from legoesm.training.vertical_interp import (  # noqa: F401
 )
 from legoesm.training.losses import LossConfig, combined_loss  # noqa: F401
 from legoesm.training.trainable_params import TrainablePhysicsParams  # noqa: F401
+from legoesm.training.trainable_ocean_params import (  # noqa: F401
+    GEOMETRIC_TRAINABLE,
+    TrainableOceanParams,
+)
+from legoesm.training.etki import etki_update, run_etki  # noqa: F401
 from legoesm.training.aimip_params import (  # noqa: F401
     AIMIP_CLASSICAL_CONSTRAINTS,
     AIMIPClassicalParams,
