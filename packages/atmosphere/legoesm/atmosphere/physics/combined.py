@@ -178,15 +178,16 @@ def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
     from legoesm.atmosphere.physics.convection.integration import (
         convection_scheme_traits,
     )
-    # Convection set matches the driver guard exactly (scalar-prognostic
-    # mass_flux/edmf + stochastic-capable bechtold); the remaining
-    # profile-prognostic schemes (ZM/KF/emanuel/tiedtke) are tolerated
-    # there as effectively-diagnostic relaxation carries — keep the two
-    # predicates aligned rather than diverging.
+    # Profile-prognostic convection counts as stateful (codex round 5):
+    # the bridge reads phys_state.conv_prog_profile for ZM/KF/Emanuel/
+    # Tiedtke/Bechtold and falls back to zeros when the carry is absent
+    # — Tiedtke concretely relaxes the previous profile into M_u_new,
+    # so a dropped carry silently erases that memory every step.
     conv = convection_scheme_traits(config.convection.scheme)
     return bool(
         turbulence_scheme_traits(config.turbulence.scheme).carries_energy
         or conv.is_scalar_prognostic
+        or conv.is_profile_prognostic
         or conv.is_stochastic
         or config.gravity_wave_drag.scheme == "prognostic_spectral"
     )

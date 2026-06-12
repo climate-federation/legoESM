@@ -3605,11 +3605,9 @@ class ModelDriver:
         from legoesm.atmosphere.physics.turbulence.integration import (
             turbulence_scheme_traits,
         )
-        # mass_flux / edmf convection carry a prognostic scalar in
-        # conv_prog_profile[:, -1]; bechtold additionally carries the
-        # AR1 stochastic state (codex review — bechtold alone was
-        # under-inclusive).
-        _stateful_conv = ("bechtold", "mass_flux", "edmf")
+        from legoesm.atmosphere.physics.convection.integration import (
+            convection_scheme_traits,
+        )
         _turb = getattr(cfg, "turbulence", "none")
         _conv = getattr(cfg, "convection", "none")
         # Accept both driver CLI configs (plain scheme strings) and
@@ -3618,8 +3616,17 @@ class ModelDriver:
         _conv = getattr(_conv, "scheme", _conv)
         _gwd = getattr(cfg, "gravity_wave_drag", "none")
         _gwd = getattr(_gwd, "scheme", _gwd)
+        # Convection: scalar-prognostic (mass_flux/edmf M_c / a_u),
+        # profile-prognostic (ZM/KF/Emanuel/Tiedtke/Bechtold read and
+        # relax conv_prog_profile — Tiedtke concretely carries updraft
+        # mass-flux memory; codex round 5 widened this from the
+        # hand-written bechtold/mass_flux/edmf set), and stochastic
+        # (Bechtold AR1 state).
+        _ct = convection_scheme_traits(_conv)
         if (turbulence_scheme_traits(_turb).carries_energy
-                or _conv in _stateful_conv
+                or _ct.is_scalar_prognostic
+                or _ct.is_profile_prognostic
+                or _ct.is_stochastic
                 or _gwd == "prognostic_spectral"):
             raise NotImplementedError(
                 f"turbulence={_turb!r} / convection={_conv!r} / "
@@ -3627,9 +3634,9 @@ class ModelDriver:
                 "this run loop does not thread between steps yet "
                 "(issue #405) — the carry would silently reseed every "
                 "timestep.  Use a diagnostic scheme (louis / "
-                "holtslag_boville; sbm / zhang_mcfarlane; linear GWD), "
-                "or run the MPAS driver path, which seeds and threads "
-                "PhysicsState."
+                "holtslag_boville; sbm / kuo / dca; linear GWD), or a "
+                "driver path that threads PhysicsState (the MPAS, "
+                "compiled, and per-step loops)."
             )
 
     def _run_spectral(self, start_step: int = 0, start_day: float | None = None) -> str:

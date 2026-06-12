@@ -316,8 +316,14 @@ def test_latlon_step_threads_seeded_carry():
         ("none", "bechtold", "none", True),
         ("none", "mass_flux", "none", True),
         ("none", "edmf", "none", True),
+        # Profile-prognostic convection reads/relaxes conv_prog_profile
+        # (Tiedtke carries genuine updraft mass-flux memory) — codex
+        # round 5 widened the guard beyond the hand-written set.
+        ("none", "tiedtke", "none", True),
+        ("none", "zhang_mcfarlane", "none", True),
         ("none", "none", "prognostic_spectral", True),
         ("louis", "sbm", "none", False),
+        ("louis", "kuo", "none", False),
         ("holtslag_boville", "none", "none", False),
         ("none", "none", "linear", False),
     ],
@@ -585,14 +591,26 @@ def test_make_physics_tags_requires_phys_state():
     from legoesm.atmosphere.physics.combined import make_physics, PhysicsConfig
     from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
 
+    from legoesm.atmosphere.physics.convection import ConvectionConfig
+
     fn_stateful = make_physics(
         PhysicsConfig(turbulence=TurbulenceConfig(scheme="tke")),
         model_type="hydrostatic", dt=1.0)
     assert fn_stateful._requires_phys_state is True
+    # Profile-prognostic convection (Tiedtke relaxes the previous
+    # updraft mass-flux profile) is stateful too — codex round 5.
+    fn_conv = make_physics(
+        PhysicsConfig(convection=ConvectionConfig(scheme="tiedtke")),
+        model_type="hydrostatic", dt=1.0)
+    assert fn_conv._requires_phys_state is True
     fn_diag = make_physics(
         PhysicsConfig(turbulence=TurbulenceConfig(scheme="louis")),
         model_type="hydrostatic", dt=1.0)
     assert fn_diag._requires_phys_state is False
+    fn_kuo = make_physics(
+        PhysicsConfig(convection=ConvectionConfig(scheme="kuo")),
+        model_type="hydrostatic", dt=1.0)
+    assert fn_kuo._requires_phys_state is False
 
 
 def test_refusal_guard_normalizes_scheme_objects():
