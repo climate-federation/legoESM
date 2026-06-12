@@ -337,6 +337,80 @@ def test_refusal_guard(turb, conv, gwd, should_raise):
         ModelDriver._refuse_stateful_physics_unthreaded(_Cfg())
 
 
+def _stateful_driver_config(**overrides):
+    from legoesm.driver.config import (
+        ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
+    )
+    # dt=1 s: at production dt a rest-state TKE perturbation legitimately
+    # dissipates to the scheme floor within a step (same caveat as the
+    # MPAS memory test), which would mask a dropped carry.
+    kwargs = dict(
+        grid=GridConfig(resolution=8, nlev=5),
+        dycore=DycoreConfig(dt=1.0),
+        output=OutputConfig(diag_days=1),
+        days=6.0 / 86400.0,             # 6 steps at dt=1
+        dataset="analytical",
+        turbulence="tke",
+        gravity_wave_drag="prognostic_spectral",
+    )
+    kwargs.update(overrides)
+    return ExperimentConfig(**kwargs)
+
+
+@pytest.mark.parametrize("compiled", [True, False],
+                         ids=["run_compiled", "run_per_step"])
+def test_driver_loops_thread_and_persist_stateful_carries(
+        tmp_path, compiled):
+    """Issue #413 lift: the compiled and per-step driver loops now RUN
+    stateful schemes (formerly refused), seed the carries via
+    init_physics_state, thread them through the unified physics step,
+    persist them in carry_aux for checkpointing, and RESTORE a
+    carry_aux seed (the checkpoint-restart path).  Memory pin: a
+    perturbed restored carry must produce a different final carry than
+    the default seed under identical dynamics."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _stateful_driver_config()
+    driver = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver.setup()
+    status = driver.run(compiled=compiled)
+    assert status == "COMPLETED", (
+        "stateful schemes must RUN on this loop now (guard lifted #413)"
+    )
+
+    assert "tke" in driver._carry_aux, (
+        "tke carry not persisted in carry_aux (checkpoint would reseed)"
+    )
+    assert "gwd_spectrum" in driver._carry_aux
+    tke_a = np.asarray(driver._carry_aux["tke"])
+    spec_a = np.asarray(driver._carry_aux["gwd_spectrum"])
+    nlev = cfg.grid.nlev
+    assert tke_a.shape[-1] == nlev and tke_a.ndim == 2
+    assert spec_a.ndim == 3
+    assert np.all(np.isfinite(tke_a)) and np.all(np.isfinite(spec_a))
+
+    # Second run, identical dynamics, PERTURBED restored carry (the
+    # restart path: carry_aux seeds _prepare_run_context).  The final
+    # carry must remember the perturbation — if the loop reseeded every
+    # step (issue #405) both runs would end identical.
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    tke_seed = jnp.asarray(tke_a)
+    driver_b._carry_aux = {
+        "tke": tke_seed.at[0, :].set(tke_seed[0, :] + 1e-2),
+    }
+    status_b = driver_b.run(compiled=compiled)
+    assert status_b == "COMPLETED"
+    tke_b = np.asarray(driver_b._carry_aux["tke"])
+    assert not np.array_equal(tke_b, tke_a), (
+        "final tke is independent of the seeded carry — the loop is "
+        "reseeding the physics state every step (issue #405)"
+    )
+    assert float(np.max(tke_b[0])) > float(np.max(tke_a[0])), (
+        "perturbed TKE column lost its memory through the run"
+    )
+
+
 def test_refusal_guard_normalizes_scheme_objects():
     """PhysicsConfig-style sub-configs (with .scheme) are normalized."""
     from legoesm.driver.model_driver import ModelDriver
