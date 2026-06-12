@@ -1562,6 +1562,46 @@ def make_tiled_pad_body(mesh, ndim, halo=1, with_offsets=False):
     return _pad_body
 
 
+def make_tiled_pad_vector_body(mesh, ndim, halo=1, with_offsets=True):
+    """Tiled VECTOR halo pad for use inside the tiled tendency stage.
+
+    Grid-aligned wind components rotate across cube-face seams, so a
+    SCALAR tiled pad of (u, v) would be wrong at panel boundaries.
+    Mirrors :func:`legoesm.grids.halo.pad_halo_vector` (orthogonal
+    rotation): (1) rotate grid→geographic with the tile's
+    ``cos/sin_angle`` (geographic components are continuous across
+    seams), (2) scalar-pad each via the shared :func:`make_tiled_pad_body`
+    (serial-exact for scalars), (3) rotate back with the tile's
+    ``cos/sin_angle_padded`` (the per-tile padded angle slice).
+
+    Returns ``_vbody(u_tile, v_tile, cos_angle, sin_angle,
+    cos_angle_padded, sin_angle_padded, offsets)`` ->
+    ``(u_pad, v_pad)``, each ``(n_loc+2h, n_loc+2h[, C])``.  All metric
+    args are this device's tile blocks (cos/sin_angle: (n_loc,n_loc)
+    interior; *_padded: (n_loc+2h,...) via mesh.tiled_padded_block) —
+    supplied by the stage from the stacked metrics.  Orthogonal
+    rotation only (no duogrid / non-orthogonality) for the first cut.
+    """
+    scalar_body = make_tiled_pad_body(
+        mesh, ndim, halo=halo, with_offsets=with_offsets)
+
+    def _vbody(u_tile, v_tile, cos_angle, sin_angle,
+               cos_angle_padded, sin_angle_padded, offsets):
+        # 1. grid -> geographic (east, north): continuous across seams.
+        u_east = cos_angle * u_tile - sin_angle * v_tile
+        v_north = sin_angle * u_tile + cos_angle * v_tile
+        # 2. scalar tiled pad of each geographic component.
+        u_east_pad = scalar_body(u_east, offsets)
+        v_north_pad = scalar_body(v_north, offsets)
+        # 3. geographic -> grid with the PADDED angle (inverse of step 1).
+        cap, sap = cos_angle_padded, sin_angle_padded
+        u_pad = cap * u_east_pad + sap * v_north_pad
+        v_pad = -sap * u_east_pad + cap * v_north_pad
+        return u_pad, v_pad
+
+    return _vbody
+
+
 def _make_exchange_ppermute_multiface(mesh, ndim, halo=1, with_offsets=False):
     """Build the multi-face ppermute shard_map exchange.
 
