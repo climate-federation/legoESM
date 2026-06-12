@@ -292,7 +292,7 @@ def test_cloud_frac_parity_vs_clubb_jax_reference():
     if str(_CLUBB_JAX_ROOT) not in sys.path:
         sys.path.insert(0, str(_CLUBB_JAX_ROOT))
     import clubb_jax.src.CLUBB_core.pdf_closure_module as refmod
-    from legoesm.atmosphere.physics.turbulence.clubb_saturation import (
+    from legoesm.atmosphere.physics.turbulence.clubb import (
         sat_mixrat_liq as my_sat,
     )
 

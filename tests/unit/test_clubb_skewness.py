@@ -15,7 +15,7 @@ jax.config.update("jax_enable_x64", True)
 import sys  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid, zm2zt  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid, zm2zt  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     LG_2005_ansatz,
     Skx_func,

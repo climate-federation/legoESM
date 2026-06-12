@@ -375,7 +375,7 @@ def test_integrate_clubb_column_jit_and_grad():
 def test_integrate_clubb_column_returns_consistent_means():
     """The returned CLUBBMomentState means must match the returned mean state:
     rtm == flip(q_v), um == flip(u), vm == flip(v) (codex consistency guard)."""
-    from legoesm.atmosphere.physics.turbulence.clubb_grid import flip_vertical
+    from legoesm.atmosphere.physics.turbulence.clubb import flip_vertical
     kw = _scm_column(ncol=2, nlev=20)
     u_f, v_f, T_f, q_f, m_f, _ = integrate_clubb_column(
         **kw, dt=150.0, nsteps=12, config=CLUBBConfig())
@@ -1528,10 +1528,10 @@ def test_clubb_mixing_length_no_promotion_on_mixed_dtype_grid():
     to float64 and poison a downstream float32/Metal path. Guards the iter-67 fix
     that normalizes ALL float inputs (state + ``CLUBBGrid`` fields) to one working
     dtype at the top of ``compute_mixing_length``."""
-    from legoesm.atmosphere.physics.turbulence.clubb_grid import (
+    from legoesm.atmosphere.physics.turbulence.clubb import (
         make_clubb_grid_from_levels,
     )
-    from legoesm.atmosphere.physics.turbulence.clubb_mixing_length import (
+    from legoesm.atmosphere.physics.turbulence.clubb import (
         compute_mixing_length,
         set_Lscale_max,
     )
@@ -1585,10 +1585,10 @@ def test_clubb_mixing_length_float32_is_numerically_faithful():
     cancellation noise — inherent to any tendency-as-difference-of-large-T scheme
     (clubb_lite and the diagnostic path share it), NOT a CLUBB defect. Lscale, Km
     and the moisture tendency (small absolute values) do not suffer this."""
-    from legoesm.atmosphere.physics.turbulence.clubb_grid import (
+    from legoesm.atmosphere.physics.turbulence.clubb import (
         make_clubb_grid_from_levels,
     )
-    from legoesm.atmosphere.physics.turbulence.clubb_mixing_length import (
+    from legoesm.atmosphere.physics.turbulence.clubb import (
         compute_mixing_length,
         set_Lscale_max,
     )

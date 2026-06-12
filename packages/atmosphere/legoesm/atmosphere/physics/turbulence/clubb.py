@@ -11,32 +11,40 @@ CAM-default model-flag values are recorded as comments at the end of the file.
 Table of contents (sections, in order)
 --------------------------------------
   1.  Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2.  Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  3.  Mass-conserving hole filling (``fill_holes_vertical`` /
+  2.  Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+      ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
+  3.  Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+      the canonical ``legoesm.thermo`` curves)
+  4.  Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+      ``calc_brunt_vaisala_freq_sqd``)
+  5.  Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+      ``set_Lscale_max``)
+  6.  Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  7.  Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  4.  Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  8.  Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  5.  Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  6.  ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  9.  Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  10. ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  7.  ADG1 PDF moment integrals + buoyancy-flux assembly
+  11. ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``)
-  8.  Moment-advance building blocks + the xp2_xpyp / windm advances
+  12. Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  9.  Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  13. Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  10. Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  14. Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  11. Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  15. Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  12. Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  16. Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  13. Core orchestration (``compute_clubb_diagnostics`` /
+  17. Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``advance_clubb_core`` + the
       ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  14. Scheme entries (``clubb_turbulence`` diagnostic default /
+  18. Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -87,29 +95,16 @@ from legoesm.atmosphere.physics.turbulence.clubb_config import (
     derive_lmin,
     derive_mixt_frac_max_mag,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_grid import (
-    CLUBBGrid,
-    ddzt,
-    flip_vertical,
-    make_clubb_grid_from_levels,
-    zm2zt,
-    zt2zm,
-)
-from legoesm.atmosphere.physics.turbulence.clubb_helpers import (
-    calc_brunt_vaisala_freq_sqd,
-    compute_sigma_sqd_w,
-    safe_sqrt,
-)
-from legoesm.atmosphere.physics.turbulence.clubb_mixing_length import (
-    compute_mixing_length,
-    set_Lscale_max,
-)
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import compute_surface_fluxes
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
     implicit_vertical_diffusion_theta,
+)
+from legoesm.thermo import (
+    saturation_vapor_pressure_flatau,
+    saturation_vapor_pressure_ice_flatau,
 )
 from legoesm.timestepping.tridiagonal import thomas_solve
 
@@ -208,7 +203,1000 @@ def diagnose_cloud_and_buoyancy(thlm, rtm, wp2, exner, p_in_Pa, thv_ds, Kh, Lsca
 
 
 # ===========================================================================
-# 2. Implicit band solvers
+# 2. Staggered CLUBB grid
+# ===========================================================================
+# The ascending zt/zm staggered-grid pytree (CLUBBGrid) with the
+# interpolation (zm2zt/zt2zm), derivative (ddzm/ddzt) and smoothing
+# operators, the constructors (make_clubb_grid[_from_levels]) and the
+# top-down <-> ascending flip helper. Pure grid plumbing (grid_class.F90).
+
+class CLUBBGrid(NamedTuple):
+    """Ascending staggered vertical grid for the CLUBB closure (a JAX pytree).
+
+    All arrays are shape ``(ngrdcol, nz*)`` with ascending levels (index 0 is
+    the lowest, nearest the surface). ``nzm == nzt + 1`` in the standard CLUBB
+    layout (momentum levels bracket thermodynamic levels), but the operators
+    here only require the shape relationships noted per function, so the
+    container does not hard-enforce it.
+
+    Attributes
+    ----------
+    zm : jax.Array
+        Momentum-level heights [m], shape ``(ngrdcol, nzm)``.
+    zt : jax.Array
+        Thermodynamic-level heights [m], shape ``(ngrdcol, nzt)``.
+    invrs_dzm : jax.Array
+        ``1 / (zt[k] - zt[k-1])`` evaluated at momentum levels [1/m], shape
+        ``(ngrdcol, nzm)``. Used by :func:`ddzt`.
+    invrs_dzt : jax.Array
+        ``1 / (zm[k+1] - zm[k])`` evaluated at thermodynamic levels [1/m],
+        shape ``(ngrdcol, nzt)``. Used by :func:`ddzm`.
+    dzm : jax.Array
+        Momentum-level spacing [m], shape ``(ngrdcol, nzm)`` (reciprocal of
+        ``invrs_dzm`` away from degenerate levels). Consumed by the
+        mixing-length parcel integrals.
+    dzt : jax.Array
+        Thermodynamic-level spacing ``zm[k+1] - zm[k]`` [m], shape
+        ``(ngrdcol, nzt)``.
+    """
+
+    zm: jax.Array
+    zt: jax.Array
+    invrs_dzm: jax.Array
+    invrs_dzt: jax.Array
+    dzm: jax.Array
+    dzt: jax.Array
+
+
+def zm2zt(azm: jax.Array, gr: CLUBBGrid) -> jax.Array:
+    """Interpolate a momentum-level field to thermodynamic levels (linear).
+
+    Faithful port of Fortran ``linear_interpolated_azt_2D``. For each thermo
+    level ``k`` (ascending grid)::
+
+        azt[k] = w_above * azm[k+1] + w_below * azm[k]
+        w_above = (zt[k] - zm[k])   / (zm[k+1] - zm[k])
+        w_below = (zm[k+1] - zt[k]) / (zm[k+1] - zm[k])
+
+    Parameters
+    ----------
+    azm : jax.Array
+        Field on momentum levels, shape ``(ngrdcol, nzm)``.
+    gr : CLUBBGrid
+        Grid; uses ``gr.zm`` ``(ngrdcol, nzm)`` and ``gr.zt`` ``(ngrdcol,
+        nzt)`` with ``nzt = nzm - 1``.
+
+    Returns
+    -------
+    jax.Array
+        Field on thermodynamic levels, shape ``(ngrdcol, nzt)``.
+    """
+    zm = gr.zm
+    zt = gr.zt
+    dzt = zm[:, 1:] - zm[:, :-1]          # (ngrdcol, nzt), = nzm-1
+    w_above = (zt - zm[:, :-1]) / dzt
+    w_below = (zm[:, 1:] - zt) / dzt
+    return w_above * azm[:, 1:] + w_below * azm[:, :-1]
+
+
+def zt2zm(azt: jax.Array, gr: CLUBBGrid, zm_min: float | None = None) -> jax.Array:
+    """Interpolate a thermodynamic-level field to momentum levels (linear).
+
+    Faithful port of Fortran ``linear_interpolated_azm_2D`` (ascending grid).
+
+    Interior ``k = 1 .. nzm-2``::
+
+        azm[k] = w_above * azt[k] + w_below * azt[k-1]
+        w_above = (zm[k] - zt[k-1]) / (zt[k] - zt[k-1])
+        w_below = (zt[k] - zm[k])   / (zt[k] - zt[k-1])
+
+    Boundaries (ascending grid):
+      * lower ``k=0``: ``azm[0] = azt[0]`` (Fortran sets it directly);
+      * upper ``k=nzm-1``: linear extension from ``zt[-2], zt[-1]``.
+
+    Parameters
+    ----------
+    azt : jax.Array
+        Field on thermodynamic levels, shape ``(ngrdcol, nzt)``.
+    gr : CLUBBGrid
+        Grid; uses ``gr.zm`` ``(ngrdcol, nzm)`` and ``gr.zt`` ``(ngrdcol,
+        nzt)`` with ``nzm = nzt + 1``.
+    zm_min : float, optional
+        Lower clamp applied after interpolation (e.g. positivity floor for
+        variances). ``None`` leaves the field unclamped.
+
+    Returns
+    -------
+    jax.Array
+        Field on momentum levels, shape ``(ngrdcol, nzm)``.
+    """
+    zm = gr.zm
+    zt = gr.zt
+
+    # Interior k = 1 .. nzm-2 (zt[k-1] < zm[k] < zt[k] for ascending grids).
+    denom_int = zt[:, 1:] - zt[:, :-1]       # (ngrdcol, nzt-1) = (ngrdcol, nzm-2)
+    zm_int = zm[:, 1:-1]                       # (ngrdcol, nzm-2)
+    w_above_int = (zm_int - zt[:, :-1]) / denom_int
+    w_below_int = (zt[:, 1:] - zm_int) / denom_int
+    azm_int = w_above_int * azt[:, 1:] + w_below_int * azt[:, :-1]
+
+    # Lower boundary: azm[0] = azt[0].
+    azm_bot = azt[:, :1]
+
+    # Upper boundary: linear extension above zt[-1].
+    denom_top = zt[:, -1:] - zt[:, -2:-1]
+    w_above_top = (zm[:, -1:] - zt[:, -2:-1]) / denom_top
+    w_below_top = (zt[:, -1:] - zm[:, -1:]) / denom_top
+    azm_top = w_above_top * azt[:, -1:] + w_below_top * azt[:, -2:-1]
+
+    azm = jnp.concatenate([azm_bot, azm_int, azm_top], axis=1)
+    if zm_min is not None:
+        azm = jnp.maximum(azm, zm_min)
+    return azm
+
+
+def ddzm(azm: jax.Array, gr: CLUBBGrid) -> jax.Array:
+    """Vertical derivative of a momentum-level field, at thermodynamic levels.
+
+    Faithful port of Fortran ``gradzm_2D``::
+
+        dazm_dz[k] = (azm[k+1] - azm[k]) * invrs_dzt[k]   for k = 0 .. nzt-1
+
+    Parameters
+    ----------
+    azm : jax.Array
+        Field on momentum levels, shape ``(ngrdcol, nzm)``.
+    gr : CLUBBGrid
+        Grid; uses ``gr.invrs_dzt`` ``(ngrdcol, nzt)``.
+
+    Returns
+    -------
+    jax.Array
+        Derivative on thermodynamic levels, shape ``(ngrdcol, nzt)``.
+    """
+    return (azm[:, 1:] - azm[:, :-1]) * gr.invrs_dzt
+
+
+def ddzt(azt: jax.Array, gr: CLUBBGrid) -> jax.Array:
+    """Vertical derivative of a thermodynamic-level field, at momentum levels.
+
+    Faithful port of Fortran ``gradzt_2D``::
+
+        interior k = 1 .. nzm-2: dazt_dz[k] = (azt[k] - azt[k-1]) * invrs_dzm[k]
+        boundaries: dazt_dz[0] = dazt_dz[1],  dazt_dz[nzm-1] = dazt_dz[nzm-2]
+
+    Parameters
+    ----------
+    azt : jax.Array
+        Field on thermodynamic levels, shape ``(ngrdcol, nzt)``.
+    gr : CLUBBGrid
+        Grid; uses ``gr.invrs_dzm`` ``(ngrdcol, nzm)``.
+
+    Returns
+    -------
+    jax.Array
+        Derivative on momentum levels, shape ``(ngrdcol, nzm)``.
+    """
+    interior = (azt[:, 1:] - azt[:, :-1]) * gr.invrs_dzm[:, 1:-1]  # (ngrdcol, nzm-2)
+    bottom = interior[:, :1]
+    top = interior[:, -1:]
+    return jnp.concatenate([bottom, interior, top], axis=1)
+
+
+def zm2zt2zm(azm: jax.Array, gr: CLUBBGrid, zm_min: float | None = None) -> jax.Array:
+    """Round-trip smoother ``zm -> zt -> zm`` (Fortran ``zm2zt2zm``)."""
+    return zt2zm(zm2zt(azm, gr), gr, zm_min=zm_min)
+
+
+def zt2zm2zt(azt: jax.Array, gr: CLUBBGrid, zt_min: float | None = None) -> jax.Array:
+    """Round-trip smoother ``zt -> zm -> zt`` (Fortran ``zt2zm2zt``)."""
+    result = zm2zt(zt2zm(azt, gr), gr)
+    if zt_min is not None:
+        result = jnp.maximum(result, zt_min)
+    return result
+
+
+def _safe_invrs(dz: jax.Array, floor: float = 1.0e-30) -> jax.Array:
+    """Reciprocal with the reference's zero-spacing guard (``setup_grid``).
+
+    Faithful to ``_calc_grid_spacings``: ``invrs = 1/dz`` where ``|dz| >
+    floor`` else ``0``. Degenerate (zero) spacings therefore yield ``0`` rather
+    than ``inf`` — the same graceful failure mode as the Fortran/JAX reference,
+    and JIT/autodiff-safe (no data-dependent host control flow).
+    """
+    return jnp.where(jnp.abs(dz) > floor, 1.0 / jnp.where(jnp.abs(dz) > floor, dz, 1.0), 0.0)
+
+
+def make_clubb_grid(zm: jax.Array, zt: jax.Array) -> CLUBBGrid:
+    """Build a :class:`CLUBBGrid` from ascending ``zm``/``zt`` height arrays.
+
+    Faithful to the canonical CLUBB grid construction
+    (``grid_class.F90:setup_grid_heights`` /
+    ``derived_types/grid_class.py:_calc_grid_spacings``) for an **ascending**
+    grid:
+
+      * ``dzt[k]  = zm[k+1] - zm[k]``                       (thermo levels, nzt)
+      * interior ``dzm[k] = zt[k] - zt[k-1]``, ``k = 1 .. nzm-2``
+      * lower boundary ``dzm[0]    = 2 * (zt[0] - zm[0])``  (NOT a copy of the
+        adjacent interior spacing — the host grid's lowest thermo level need
+        not be the midpoint of the two lowest momentum levels)
+      * upper boundary ``dzm[nzm-1] = dzm[nzm-2]``          (copy adjacent)
+
+    Inverses use the reference zero-spacing guard (:func:`_safe_invrs`). Only
+    the *structural* preconditions (2-D, ``nzt == nzm - 1``, ``nzt >= 2``) are
+    enforced here — these are static (shape-level) so they remain JIT-safe and
+    fail before tracing array values. Strict-ascending monotonicity is a
+    documented precondition; a violated (e.g. duplicate) level yields a ``0``
+    inverse spacing there rather than a spurious ``inf`` (matching the
+    reference), instead of a data-dependent runtime exception.
+
+    Parameters
+    ----------
+    zm : jax.Array
+        Ascending momentum-level heights [m], shape ``(ngrdcol, nzm)``.
+    zt : jax.Array
+        Ascending thermodynamic-level heights [m], shape ``(ngrdcol, nzt)``,
+        with ``nzt = nzm - 1`` and ``nzt >= 2``.
+
+    Returns
+    -------
+    CLUBBGrid
+    """
+    if zm.ndim != 2 or zt.ndim != 2:
+        raise ValueError(
+            f"zm and zt must be 2-D (ngrdcol, nz); got zm.ndim={zm.ndim}, "
+            f"zt.ndim={zt.ndim}."
+        )
+    ngrdcol_m, nzm = zm.shape
+    ngrdcol_t, nzt = zt.shape
+    if ngrdcol_m != ngrdcol_t:
+        raise ValueError(
+            f"zm and zt must share ngrdcol; got {ngrdcol_m} vs {ngrdcol_t}."
+        )
+    if nzt != nzm - 1:
+        raise ValueError(
+            f"CLUBB staggered grid requires nzt == nzm - 1; got nzm={nzm}, "
+            f"nzt={nzt}."
+        )
+    if nzt < 2:
+        raise ValueError(
+            f"CLUBB grid needs nzt >= 2 (nzm >= 3) for the staggered "
+            f"interpolation/derivative stencils; got nzt={nzt}."
+        )
+
+    dzt = zm[:, 1:] - zm[:, :-1]                          # (ngrdcol, nzt)
+    dzm_int = zt[:, 1:] - zt[:, :-1]                       # (ngrdcol, nzt-1) = (nzm-2)
+    dzm_lower = 2.0 * (zt[:, :1] - zm[:, :1])              # (ngrdcol, 1)
+    dzm_upper = dzm_int[:, -1:]                            # (ngrdcol, 1), copy adjacent
+    dzm = jnp.concatenate([dzm_lower, dzm_int, dzm_upper], axis=1)  # (ngrdcol, nzm)
+
+    return CLUBBGrid(
+        zm=zm,
+        zt=zt,
+        invrs_dzm=_safe_invrs(dzm),
+        invrs_dzt=_safe_invrs(dzt),
+        dzm=dzm,
+        dzt=dzt,
+    )
+
+
+# ---------------------------------------------------------------------------
+# legoESM <-> CLUBB orientation bridge
+# ---------------------------------------------------------------------------
+# legoESM stores columns TOP-DOWN (index 0 = model top, index -1 = surface;
+# ``z_half[:, -1] == 0``). CLUBB stores them ASCENDING (index 0 = surface).
+# The flip is its own inverse, so one helper serves both directions.
+
+
+def flip_vertical(field: jax.Array) -> jax.Array:
+    """Flip a column field along the vertical axis (axis 1).
+
+    Converts between legoESM top-down ordering and CLUBB ascending ordering.
+    Self-inverse: ``flip_vertical(flip_vertical(x)) == x``. Operates on the
+    last axis of a ``(ngrdcol, nz)`` array.
+    """
+    return field[:, ::-1]
+
+
+def make_clubb_grid_from_levels(z_full: jax.Array, z_half: jax.Array) -> CLUBBGrid:
+    """Build an ascending :class:`CLUBBGrid` from legoESM level heights.
+
+    legoESM level semantics (see ``_shared.compute_heights_from_sigma``):
+      * ``z_full`` — full-level (layer-midpoint) heights [m], shape
+        ``(ncol, nlev)``, TOP-DOWN (index 0 = top).
+      * ``z_half`` — half-level (interface) heights [m], shape
+        ``(ncol, nlev+1)``, TOP-DOWN, with ``z_half[:, -1] == 0`` (surface).
+
+    CLUBB staggering: thermodynamic levels ``zt`` carry means (T, q, u, v) ->
+    legoESM full levels; momentum levels ``zm`` carry fluxes/w-moments ->
+    legoESM half levels. Hence ``nzt = nlev`` and ``nzm = nlev + 1`` (so
+    ``nzt == nzm - 1`` as :func:`make_clubb_grid` requires), with the surface
+    momentum level ``zm[0] == 0``. Each legoESM full level lands exactly at the
+    midpoint of its two bracketing half levels, so ``zt[k]`` lies between
+    ``zm[k]`` and ``zm[k+1]`` — the CLUBB interior staggering.
+
+    Parameters
+    ----------
+    z_full : jax.Array
+        Top-down full-level heights [m], shape ``(ncol, nlev)``.
+    z_half : jax.Array
+        Top-down half-level heights [m], shape ``(ncol, nlev+1)``.
+
+    Returns
+    -------
+    CLUBBGrid
+        Ascending staggered grid with ``zt`` from ``z_full`` and ``zm`` from
+        ``z_half``.
+    """
+    zt = flip_vertical(z_full)   # ascending thermodynamic levels (nlev)
+    zm = flip_vertical(z_half)   # ascending momentum levels (nlev+1), zm[0]=surface
+    return make_clubb_grid(zm, zt)
+
+
+# ===========================================================================
+# 3. Flatau saturation adapters
+# ===========================================================================
+# Thin adapters over the CANONICAL Flatau (1992) saturation curves in
+# legoesm.thermo (per the CLAUDE.md no-saturation-reimpl rule): saturation
+# mixing ratio over liquid / ice with CLUBB's denominator guard
+# (saturation.F90, CAM ``saturation_formula = flatau``).
+
+_SAT_DENOM_MIN_PA = 1.0  # p - esat floor [Pa] (saturation.F90 convention)
+
+
+def _mixrat_from_esat(p: jax.Array, esat: jax.Array) -> jax.Array:
+    """Assemble rsat = ep*esat/(p-esat) with CLUBB's AD-safe denominator guard."""
+    safe = (p - esat) >= _SAT_DENOM_MIN_PA
+    denom_safe = jnp.where(safe, p - esat, 1.0)
+    return jnp.where(safe, constants.epsilon * esat / denom_safe, constants.epsilon)
+
+
+def sat_mixrat_liq(p: jax.Array, T: jax.Array) -> jax.Array:
+    """Saturation mixing ratio over liquid water (Flatau), [kg/kg].
+
+    Parameters
+    ----------
+    p : jax.Array
+        Pressure [Pa].
+    T : jax.Array
+        Temperature [K] (same shape as ``p``).
+
+    Returns
+    -------
+    jax.Array
+        Saturation mixing ratio over liquid [kg/kg].
+    """
+    return _mixrat_from_esat(p, saturation_vapor_pressure_flatau(T))
+
+
+def sat_mixrat_ice(p: jax.Array, T: jax.Array) -> jax.Array:
+    """Saturation mixing ratio over ice (Flatau), [kg/kg].
+
+    Parameters
+    ----------
+    p : jax.Array
+        Pressure [Pa].
+    T : jax.Array
+        Temperature [K] (same shape as ``p``).
+
+    Returns
+    -------
+    jax.Array
+        Saturation mixing ratio over ice [kg/kg].
+    """
+    return _mixrat_from_esat(p, saturation_vapor_pressure_ice_flatau(T))
+
+
+# ===========================================================================
+# 4. Closure helpers (sigma_sqd_w, Brunt-Vaisala, safe_sqrt)
+# ===========================================================================
+# The AD-safe square root shared across the scheme (safe_sqrt; the MFL
+# section keeps its deliberate NaN-propagating local variant), the PDF-width
+# parameter sigma_sqd_w (CAM ``l_gamma_Skw = .true.`` path), and the moist
+# Brunt-Vaisala frequency N^2 (T0-referenced, CAM-default form).
+
+_ONE_HUNDRED = 100.0
+# bv_mixed clip: Fortran min(bv, 1e8*|bv|^3) (advance_helper_module.F90).
+_BV_CLIP_COEF = 1.0e8
+
+
+def safe_sqrt(x: jax.Array) -> jax.Array:
+    """``sqrt(max(x,0))`` with a finite (0) gradient at ``x<=0`` (double-where).
+
+    The canonical AD-safe square root shared across the CLUBB modules: the
+    ``jnp.sqrt`` is never evaluated at ``<=0`` in either the primal or the VJP, so
+    the gradient stays finite (0) at the boundary instead of the ``+inf`` slope of
+    a bare ``sqrt`` at 0. A ``NaN`` input maps to 0 (``NaN > 0`` is False).
+    (NOTE: the MFL section of :mod:`clubb` keeps a local ``_safe_sqrt`` that is a
+    deliberate variant PROPAGATING ``NaN`` instead; do not collapse it into this one.)
+    """
+    xp = jnp.maximum(x, 0.0)
+    safe = jnp.where(xp > 0.0, xp, 1.0)
+    return jnp.where(xp > 0.0, jnp.sqrt(safe), 0.0)
+
+
+def compute_sigma_sqd_w(
+    gamma_Skw_fnc: jax.Array,
+    wp2: jax.Array,
+    thlp2: jax.Array,
+    rtp2: jax.Array,
+    wpthlp: jax.Array,
+    wprtp: jax.Array,
+    gr: CLUBBGrid,
+    *,
+    w_tol: float,
+    thl_tol: float,
+    rt_tol: float,
+) -> jax.Array:
+    """PDF width parameter ``sigma_sqd_w`` (CAM default, l_predict_upwp_vpwp=F).
+
+    ``sigma_sqd_w = gamma_Skw_fnc * (1 - min(max_x corr_wx^2, 1))`` smoothed
+    zm->zt->zm with a zero floor (``sigma_sqd_w_module.F90``). All fields are on
+    momentum (zm) levels, shape ``(ngrdcol, nzm)``.
+
+    Parameters
+    ----------
+    gamma_Skw_fnc : jax.Array
+        Skewness-dependent gamma coefficient on zm levels.
+    wp2, thlp2, rtp2 : jax.Array
+        w, thl, rt variances on zm levels.
+    wpthlp, wprtp : jax.Array
+        w'thl', w'rt' fluxes on zm levels.
+    gr : CLUBBGrid
+        CLUBB staggered grid (for the zm->zt->zm smoother).
+    w_tol, thl_tol, rt_tol : float
+        Tolerances (from ``CLUBBConfig``) regularizing the correlation
+        denominators (``100 * w_tol * x_tol``).
+
+    Returns
+    -------
+    jax.Array
+        ``sigma_sqd_w`` on zm levels, shape ``(ngrdcol, nzm)``.
+    """
+    denom_thl = jnp.sqrt(wp2 * thlp2) + _ONE_HUNDRED * w_tol * thl_tol
+    denom_rtp = jnp.sqrt(wp2 * rtp2) + _ONE_HUNDRED * w_tol * rt_tol
+
+    corr_thl_sqd = (wpthlp / denom_thl) ** 2
+    corr_rtp_sqd = (wprtp / denom_rtp) ** 2
+    max_corr = jnp.maximum(corr_thl_sqd, corr_rtp_sqd)
+
+    sigma_sqd_w_tmp = gamma_Skw_fnc * (1.0 - jnp.minimum(max_corr, 1.0))
+    return zm2zt2zm(sigma_sqd_w_tmp, gr, zm_min=_ZERO_THRESHOLD)
+
+
+def calc_brunt_vaisala_freq_sqd(
+    thlm: jax.Array,
+    exner: jax.Array,
+    rtm: jax.Array,
+    rcm: jax.Array,
+    p_in_Pa: jax.Array,
+    ice_supersat_frac: jax.Array,
+    bv_efold: jax.Array | float,
+    T0: float,
+    gr: CLUBBGrid,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Brunt-Vaisala frequency squared (CAM-default branch).
+
+    CAM defaults assumed: ``l_use_thvm_in_bv_freq = .false.``,
+    ``l_brunt_vaisala_freq_moist = .false.``,
+    ``l_modify_limiters_for_cnvg_test = .false.``. The returned
+    ``brunt_vaisala_freq_sqd`` is therefore the dry form ``(g/T0) d(thlm)/dz``;
+    ``bv_moist``/``bv_mixed``/``bv_smth`` are still computed (downstream
+    mixing-length/Ri consume them).
+
+    All thermodynamic inputs are on thermodynamic (zt) levels,
+    shape ``(ngrdcol, nzt)``; outputs are on momentum (zm) levels,
+    shape ``(ngrdcol, nzm)`` (the ``ddzt``/``zt2zm`` operators move zt->zm).
+
+    Parameters
+    ----------
+    thlm : jax.Array
+        Liquid-water potential temperature [K] (zt).
+    exner : jax.Array
+        Exner function [-] (zt).
+    rtm : jax.Array
+        Total water mixing ratio [kg/kg] (zt).
+    rcm : jax.Array
+        Cloud water mixing ratio [kg/kg] (zt) (from the PDF closure).
+    p_in_Pa : jax.Array
+        Pressure [Pa] (zt).
+    ice_supersat_frac : jax.Array
+        Ice supersaturation fraction [-] (zt).
+    bv_efold : jax.Array or float
+        e-folding coefficient for the dry<->moist blend [-]; per-column
+        ``(ngrdcol,)`` or scalar (``CLUBBParams.bv_efold``).
+    T0 : float
+        Reference absolute temperature [K] for the dry BV frequency.
+    gr : CLUBBGrid
+        CLUBB staggered grid.
+
+    Returns
+    -------
+    tuple of jax.Array
+        ``(brunt_vaisala_freq_sqd, bv_mixed, bv_smth, bv_dry, bv_moist)``,
+        each on zm levels [1/s^2].
+    """
+    g = constants.g
+    cp = constants.c_pd
+    lv = constants.L_v
+    rd = constants.R_d
+    ep = constants.epsilon
+
+    ddzt_thlm = ddzt(thlm, gr)
+    bv_dry_main = (g / T0) * ddzt_thlm   # l_use_thvm_in_bv_freq = False
+
+    T_in_K = thlm * exner + (lv / cp) * rcm
+    T_in_K_zm = zt2zm(T_in_K, gr, zm_min=_ZERO_THRESHOLD)
+
+    rsat = sat_mixrat_liq(p_in_Pa, T_in_K)
+    rsat_zm = zt2zm(rsat, gr, zm_min=_ZERO_THRESHOLD)
+    ddzt_rsat = ddzt(rsat, gr)
+
+    thm = thlm + (lv / (cp * exner)) * rcm
+    thm_zm = zt2zm(thm, gr, zm_min=_ZERO_THRESHOLD)
+    ddzt_thm = ddzt(thm, gr)
+    ddzt_rtm = ddzt(rtm, gr)
+
+    bv_dry = (g / thm_zm) * ddzt_thm
+
+    num_fac = 1.0 + lv * rsat_zm / (rd * T_in_K_zm)
+    den_fac = 1.0 + ep * lv ** 2 * rsat_zm / (cp * rd * T_in_K_zm ** 2)
+    bv_moist = g * (
+        (num_fac / den_fac) * (ddzt_thm / thm_zm + (lv / (cp * T_in_K_zm)) * ddzt_rsat)
+        - ddzt_rtm
+    )
+
+    bv_efold_arr = jnp.asarray(bv_efold)
+    if bv_efold_arr.ndim == 1:
+        bv_efold_arr = bv_efold_arr[:, None]
+    ice_supersat_frac_zm = zt2zm(ice_supersat_frac, gr, zm_min=_ZERO_THRESHOLD)
+    bv_mixed = bv_moist + jnp.exp(-bv_efold_arr * ice_supersat_frac_zm) * (bv_dry - bv_moist)
+
+    # l_modify_limiters_for_cnvg_test = False -> clip then smooth (no min clamp).
+    bv_clipped = jnp.minimum(bv_mixed, _BV_CLIP_COEF * jnp.abs(bv_mixed) ** 3)
+    bv_smth = zm2zt2zm(bv_clipped, gr)
+
+    # l_brunt_vaisala_freq_moist = False -> return the dry form.
+    brunt_vaisala_freq_sqd = bv_dry_main
+    return brunt_vaisala_freq_sqd, bv_mixed, bv_smth, bv_dry, bv_moist
+
+
+# ===========================================================================
+# 5. Parcel buoyant-sorting mixing length (Lscale)
+# ===========================================================================
+# CLUBB's nonlocal parcel buoyant-sorting length scale (mixing_length.F90,
+# golden-locked vs CLUBB-JAX) — the distinctive CLUBB feature replacing
+# Blackadar-type lengths: an entraining parcel ascends/descends until its
+# buoyancy is exhausted; Lscale_up/down are averaged geometrically.
+# NOTE: DIFFERENT numerics from the simple mixing length in
+# atmosphere/physics/_shared.py used by clubb_lite (issue: the parcel length
+# could eventually supplant the _shared one — see PORT_CLUBB.md).
+
+# Derived thermodynamic ratios (legoESM constants).
+_EP = constants.epsilon
+_LV2_COEF = _EP * constants.L_v ** 2 / (constants.R_d * constants.c_pd)  # K^2
+
+_ZLMIN = 0.1                   # minimum Lscale [m]
+_LSCALE_SFCLYR_DEPTH = 500.0   # surface-layer depth for lminh [m]
+
+
+
+
+def _bounded_while(cond_fn, body_fn, init_state, max_iters):
+    """Reverse-mode-differentiable fixed-length replacement for ``lax.while_loop``.
+
+    Runs ``max_iters`` ``lax.scan`` steps; each applies ``body_fn`` only where
+    ``cond_fn`` is still true (pytree select), freezing the state otherwise. For
+    a body that no-ops once its ``done`` flag is set this reproduces the
+    ``while_loop`` final state bit-exactly when ``max_iters >= true trip count``;
+    unlike ``while_loop`` it supports ``jax.grad``.
+    """
+    def step(state, _):
+        run = cond_fn(state)
+        new = body_fn(state)
+        state2 = jax.tree_util.tree_map(lambda o, n: jnp.where(run, n, o), state, new)
+        return state2, None
+
+    final, _ = jax.lax.scan(step, init_state, None, length=max_iters)
+    return final
+
+
+def set_Lscale_max(l_implemented: bool, host_dx, host_dy, ngrdcol: int) -> jax.Array:
+    """Maximum allowable ``Lscale`` [m] (``mixing_length.F90:set_Lscale_max``).
+
+    In a host model the cap is ``0.25 * min(host_dx, host_dy)``; standalone it is
+    ``1e5``. Returns a ``(ngrdcol,)`` array.
+    """
+    if l_implemented:
+        return 0.25 * jnp.minimum(jnp.asarray(host_dx), jnp.asarray(host_dy))
+    return jnp.full((ngrdcol,), 1.0e5)
+
+
+def _parcel_thv(thl_par, rt_par, exner_j, p_j, thv_ds_j, Lv_coef_j):
+    """Virtual potential temperature of the parcel at one level (Lewellen-Yoh 1993)."""
+    tl_j = thl_par * exner_j
+    rsat_j = sat_mixrat_liq(p_j, tl_j)
+    tl_sqd = tl_j ** 2
+    s_j = (rt_par - rsat_j) * tl_sqd / (tl_sqd + _LV2_COEF * rsat_j)
+    rc_j = jnp.maximum(s_j, _ZERO)
+    return thl_par + _EP1 * thv_ds_j * rt_par + Lv_coef_j * rc_j
+
+
+def _upward_inner_while(
+    k_py, tke_0, thl_init, rt_init, dCAPE_init,
+    thl_precalc_up, rt_precalc_up, exp_mu_dzm,
+    grav_on_thvm, Lv_coef, thv_ds, exner, p, thvm,
+    dzm, invrs_dzm, zt, k_ub_zt_py,
+):
+    """Upward parcel trajectory from ``k_py+2`` (ascending). See module docstring."""
+    init_state = (
+        k_py + 2, tke_0, thl_init, rt_init, dCAPE_init,
+        jnp.bool_(False), k_py + 1, tke_0, dCAPE_init,
+        jnp.zeros((), dtype=tke_0.dtype),
+    )
+
+    def cond_fn(state):
+        j, _tke, _thl, _rt, _dcp, done, _jl, _tex, _dep, _dej = state
+        return ~done & (j < k_ub_zt_py)
+
+    def body_fn(state):
+        j, tke, thl, rt, dCAPE_prev, done, j_last, tke_exit, dep, dej = state
+        thl_new = thl_precalc_up[j] + thl * exp_mu_dzm[j]
+        rt_new = rt_precalc_up[j] + rt * exp_mu_dzm[j]
+        thv_new = _parcel_thv(thl_new, rt_new, exner[j], p[j], thv_ds[j], Lv_coef[j])
+        dCAPE_j = grav_on_thvm[j] * (thv_new - thvm[j])
+        CAPE_incr = 0.5 * (dCAPE_j + dCAPE_prev) * dzm[j]
+
+        new_tke = tke + CAPE_incr
+        exhausted = new_tke <= 0.0
+        newly_ex = exhausted & ~done
+
+        tke_exit_out = jnp.where(newly_ex, tke, tke_exit)
+        dep_out = jnp.where(newly_ex, dCAPE_prev, dep)
+        dej_out = jnp.where(newly_ex, dCAPE_j, dej)
+
+        j_out = jnp.where(exhausted, j, j + 1)
+        tke_out = jnp.where(exhausted, tke, new_tke)
+        thl_out = jnp.where(exhausted, thl, thl_new)
+        rt_out = jnp.where(exhausted, rt, rt_new)
+        dCAPE_out = jnp.where(exhausted, dCAPE_prev, dCAPE_j)
+        j_last_out = jnp.where(exhausted, j_last, j)
+        done_out = done | exhausted
+        return (j_out, tke_out, thl_out, rt_out, dCAPE_out, done_out,
+                j_last_out, tke_exit_out, dep_out, dej_out)
+
+    final = _bounded_while(cond_fn, body_fn, init_state, k_ub_zt_py)
+    j_final, _tke, _thl, _rt, _dcp, done_final, j_last, tke_exit, dep, dej = final
+    return j_last, done_final, j_final, tke_exit, dep, dej
+
+
+def _compute_lscale_up_col(
+    tke_i_col, thl_par_1_up, rt_par_1_up, dCAPE_dz_1_up, CAPE_incr_1_up,
+    thl_precalc_up, rt_precalc_up, exp_mu_dzm,
+    grav_on_thvm, Lv_coef, thv_ds, exner, p, thvm,
+    dzm, invrs_dzm, zt, k_ub_zt_py, nzt,
+):
+    """``Lscale_up`` for a single column (outer scan over launch levels)."""
+    def outer_step(max_alt, k_py):
+        tke_i_k = tke_i_col[k_py]
+        tke_0 = tke_i_k + CAPE_incr_1_up[k_py + 1]
+
+        # Case A: TKE exhausted before reaching k+1.
+        dCAPE_1_kp1 = dCAPE_dz_1_up[k_py + 1]
+        safe_dCAPE_a = jnp.where(jnp.abs(dCAPE_1_kp1) > 0.0, dCAPE_1_kp1, 1.0)
+        frac_a = -safe_sqrt(-2.0 * tke_i_k * dzm[k_py + 1] * dCAPE_1_kp1) / safe_dCAPE_a
+
+        # Case B/C: parcel survives the initial step -> inner ascent.
+        j_last, exited_early, j_final, tke_exit, dCAPE_exit_prev, dCAPE_exit_j = (
+            _upward_inner_while(
+                k_py, tke_0, thl_par_1_up[k_py + 1], rt_par_1_up[k_py + 1],
+                dCAPE_dz_1_up[k_py + 1], thl_precalc_up, rt_precalc_up, exp_mu_dzm,
+                grav_on_thvm, Lv_coef, thv_ds, exner, p, thvm,
+                dzm, invrs_dzm, zt, k_ub_zt_py,
+            )
+        )
+
+        base_dist = zt[j_last] - zt[k_py]
+        dCAPE_diff = dCAPE_exit_j - dCAPE_exit_prev
+        linear_case = (jnp.abs(dCAPE_diff) * 2.0
+                       <= jnp.abs(dCAPE_exit_j + dCAPE_exit_prev) * _EPS)
+        safe_dCAPE_j = jnp.where(jnp.abs(dCAPE_exit_j) > 0.0, dCAPE_exit_j, 1.0)
+        frac_linear = -tke_exit / safe_dCAPE_j
+        safe_diff = jnp.where(jnp.abs(dCAPE_diff) > 0.0, dCAPE_diff, 1.0)
+        invrs_diff = 1.0 / safe_diff
+        disc = dCAPE_exit_prev ** 2 - 2.0 * tke_exit * invrs_dzm[j_final] * dCAPE_diff
+        frac_quad = (-dCAPE_exit_prev * invrs_diff * dzm[j_final]
+                     - safe_sqrt(disc) * invrs_diff * dzm[j_final])
+        frac_inner = jnp.where(linear_case, frac_linear, frac_quad)
+        frac_bc = jnp.where(exited_early, frac_inner, 0.0)
+
+        Lscale_up_k = jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
+
+        k_alt = zt[k_py] + Lscale_up_k
+        Lscale_up_k_smooth = jnp.where(k_alt < max_alt, max_alt - zt[k_py], Lscale_up_k)
+        new_max_alt = jnp.where(k_alt < max_alt, max_alt, k_alt)
+        return new_max_alt, Lscale_up_k_smooth
+
+    _, vals = jax.lax.scan(
+        outer_step, jnp.zeros((), dtype=zt.dtype), jnp.arange(nzt - 2))
+    return jnp.concatenate([vals, jnp.full(2, _ZLMIN, dtype=zt.dtype)])
+
+
+def _downward_inner_while(
+    k_py, tke_0, thl_init, rt_init, dCAPE_init,
+    thl_precalc_down, rt_precalc_down, exp_mu_dzm,
+    grav_on_thvm, Lv_coef, thv_ds, exner, p, thvm,
+    dzm, invrs_dzm, zt, k_lb_zt_py, max_iters,
+):
+    """Downward parcel trajectory from ``k_py-2`` (ascending). See module docstring."""
+    init_state = (
+        k_py - 2, tke_0, thl_init, rt_init, dCAPE_init,
+        jnp.bool_(False), k_py - 1, tke_0, dCAPE_init,
+        jnp.zeros((), dtype=tke_0.dtype),
+    )
+
+    def cond_fn(state):
+        j, _tke, _thl, _rt, _dcp, done, _jl, _tex, _dep1, _dej = state
+        return ~done & (j >= k_lb_zt_py)
+
+    def body_fn(state):
+        j, tke, thl, rt, dCAPE_plus1, done, j_last, tex, dep1, dej = state
+        thl_new = thl_precalc_down[j] + thl * exp_mu_dzm[j + 1]
+        rt_new = rt_precalc_down[j] + rt * exp_mu_dzm[j + 1]
+        thv_new = _parcel_thv(thl_new, rt_new, exner[j], p[j], thv_ds[j], Lv_coef[j])
+        dCAPE_j = grav_on_thvm[j] * (thv_new - thvm[j])
+        CAPE_incr = 0.5 * (dCAPE_j + dCAPE_plus1) * dzm[j + 1]
+
+        new_tke = tke - CAPE_incr
+        exhausted = new_tke <= 0.0
+        newly_ex = exhausted & ~done
+
+        tex_out = jnp.where(newly_ex, tke, tex)
+        dep1_out = jnp.where(newly_ex, dCAPE_plus1, dep1)
+        dej_out = jnp.where(newly_ex, dCAPE_j, dej)
+
+        j_out = jnp.where(exhausted, j, j - 1)
+        tke_out = jnp.where(exhausted, tke, new_tke)
+        thl_out = jnp.where(exhausted, thl, thl_new)
+        rt_out = jnp.where(exhausted, rt, rt_new)
+        dCAPE_out = jnp.where(exhausted, dCAPE_plus1, dCAPE_j)
+        j_last_out = jnp.where(exhausted, j_last, j)
+        done_out = done | exhausted
+        return (j_out, tke_out, thl_out, rt_out, dCAPE_out, done_out,
+                j_last_out, tex_out, dep1_out, dej_out)
+
+    final = _bounded_while(cond_fn, body_fn, init_state, max_iters)
+    j_final, _tke, _thl, _rt, _dcp, done_final, j_last, tke_exit, dep1, dej = final
+    return j_last, done_final, j_final, tke_exit, dep1, dej
+
+
+def _compute_lscale_down_col(
+    tke_i_col, thl_par_1_down, rt_par_1_down, dCAPE_dz_1_down, CAPE_incr_1_down,
+    thl_precalc_down, rt_precalc_down, exp_mu_dzm,
+    grav_on_thvm, Lv_coef, thv_ds, exner, p, thvm,
+    dzm, invrs_dzm, zt, k_ub_zt_py, k_lb_zt_py, nzt,
+):
+    """``Lscale_down`` for a single column (outer scan descending from the top)."""
+    def outer_step(min_alt, i):
+        k_py = nzt - 1 - i
+
+        tke_i_k = tke_i_col[k_py]
+        tke_0 = tke_i_k - CAPE_incr_1_down[k_py - 1]
+
+        dCAPE_1_km1 = dCAPE_dz_1_down[k_py - 1]
+        safe_dCAPE_a = jnp.where(jnp.abs(dCAPE_1_km1) > 0.0, dCAPE_1_km1, 1.0)
+        frac_a = safe_sqrt(2.0 * tke_i_k * dzm[k_py] * dCAPE_1_km1) / safe_dCAPE_a
+
+        j_last, exited_early, j_final, tke_exit, dCAPE_exit_plus1, dCAPE_exit_j = (
+            _downward_inner_while(
+                k_py, tke_0, thl_par_1_down[k_py - 1], rt_par_1_down[k_py - 1],
+                dCAPE_dz_1_down[k_py - 1], thl_precalc_down, rt_precalc_down, exp_mu_dzm,
+                grav_on_thvm, Lv_coef, thv_ds, exner, p, thvm,
+                dzm, invrs_dzm, zt, k_lb_zt_py, k_ub_zt_py,
+            )
+        )
+
+        base_dist = zt[k_py] - zt[j_last]
+        dCAPE_diff = dCAPE_exit_j - dCAPE_exit_plus1
+        linear_case = (jnp.abs(dCAPE_diff) * 2.0
+                       <= jnp.abs(dCAPE_exit_j + dCAPE_exit_plus1) * _EPS)
+        safe_dCAPE_j = jnp.where(jnp.abs(dCAPE_exit_j) > 0.0, dCAPE_exit_j, 1.0)
+        frac_linear = tke_exit / safe_dCAPE_j
+        safe_diff = jnp.where(jnp.abs(dCAPE_diff) > 0.0, dCAPE_diff, 1.0)
+        invrs_diff = 1.0 / safe_diff
+        disc = dCAPE_exit_plus1 ** 2 + 2.0 * tke_exit * invrs_dzm[j_final + 1] * dCAPE_diff
+        frac_quad = (-dCAPE_exit_plus1 * invrs_diff * dzm[j_final + 1]
+                     + safe_sqrt(disc) * invrs_diff * dzm[j_final + 1])
+        frac_inner = jnp.where(linear_case, frac_linear, frac_quad)
+        frac_bc = jnp.where(exited_early, frac_inner, 0.0)
+
+        Lscale_down_k = jnp.where(tke_0 > 0.0, _ZLMIN + base_dist + frac_bc, _ZLMIN + frac_a)
+
+        k_alt = zt[k_py] - Lscale_down_k
+        Lscale_down_k_smooth = jnp.where(k_alt > min_alt, zt[k_py] - min_alt, Lscale_down_k)
+        new_min_alt = jnp.where(k_alt > min_alt, min_alt, k_alt)
+        return new_min_alt, (k_py, Lscale_down_k_smooth)
+
+    init_min_alt = zt[k_ub_zt_py]
+    _, (k_indices, vals) = jax.lax.scan(outer_step, init_min_alt, jnp.arange(nzt - 1))
+    col = jnp.full(nzt, _ZLMIN, dtype=zt.dtype)
+    return col.at[k_indices].set(vals)
+
+
+def compute_mixing_length(
+    thvm, thlm, rtm, em, Lscale_max, p_in_Pa, exner, thv_ds,
+    mu, lmin, l_implemented, gr: CLUBBGrid,
+):
+    """Nonlocal parcel mixing length (``mixing_length.F90:compute_mixing_length``).
+
+    Parameters
+    ----------
+    thvm, thlm, rtm, p_in_Pa, exner, thv_ds : jax.Array
+        Virtual potential temp, liquid-water potential temp, total water,
+        pressure [Pa], Exner, dry-static virtual potential temp; all on
+        thermodynamic (zt) levels, shape ``(ngrdcol, nzt)``.
+    em : jax.Array
+        TKE on momentum (zm) levels, shape ``(ngrdcol, nzm)``.
+    Lscale_max : jax.Array
+        Per-column cap [m], shape ``(ngrdcol,)`` (see :func:`set_Lscale_max`).
+    mu : jax.Array
+        Entrainment rate [1/m], shape ``(ngrdcol,)`` (``CLUBBParams.mu``).
+    lmin : float
+        Surface-layer minimum length [m] (``CLUBBParams.lmin_coef``-scaled).
+    l_implemented : bool
+        True when CLUBB runs inside a host model (surface layer above ground).
+    gr : CLUBBGrid
+        Ascending CLUBB staggered grid (provides ``zt``/``zm``/``dzm``/
+        ``invrs_dzm``).
+
+    Returns
+    -------
+    tuple of jax.Array
+        ``(Lscale, Lscale_up, Lscale_down)`` on zt levels, ``(ngrdcol, nzt)``.
+    """
+    ngrdcol, nzt = thvm.shape
+    k_ub_zt_py = nzt - 1
+    k_lb_zt_py = 0
+    # Working float dtype = the thermodynamic-state dtype. Normalize EVERY float
+    # input (state, grid, params) to it up front so the whole compute path — scan
+    # carries, padded concatenations, the returned Lscale — stays in one dtype.
+    # Without this a float32 column silently promotes to float64 (breaking
+    # float32/Metal) AND, under JAX_ENABLE_X64, makes lax.scan reject a float32
+    # carry against a float64 body. Anchoring to a single dtype also covers MIXED
+    # inputs (e.g. float32 state with a float64 grid, or vice-versa). Under an
+    # all-float64 column every cast is a no-op → byte-identical to before (the
+    # golden-parity Lscale tests still pass).
+    dt_f = thlm.dtype
+    thvm = thvm.astype(dt_f)
+    thlm = thlm.astype(dt_f)
+    rtm = rtm.astype(dt_f)
+    em = em.astype(dt_f)
+    p_in_Pa = p_in_Pa.astype(dt_f)
+    exner = exner.astype(dt_f)
+    thv_ds = thv_ds.astype(dt_f)
+    Lscale_max = jnp.asarray(Lscale_max).astype(dt_f)
+    mu = jnp.asarray(mu).astype(dt_f)
+    lmin = jnp.asarray(lmin).astype(dt_f)   # scalar surface-layer floor coeff
+    gr = gr._replace(
+        zm=gr.zm.astype(dt_f), zt=gr.zt.astype(dt_f),
+        invrs_dzm=gr.invrs_dzm.astype(dt_f), invrs_dzt=gr.invrs_dzt.astype(dt_f),
+        dzm=gr.dzm.astype(dt_f), dzt=gr.dzt.astype(dt_f))
+
+    # ---- Shared precomputations (vectorized over columns) ----
+    tke_i = zm2zt(em, gr)                                  # (ngrdcol, nzt)
+    grav_on_thvm = buoyancy_coefficient(thvm)
+    Lv_coef = constants.L_v / (exner * constants.c_pd) - _EP2 * thv_ds
+
+    exp_mu_dzm = jnp.exp(-mu[:, None] * gr.dzm)            # (ngrdcol, nzm)
+    entrain_coef = (1.0 - exp_mu_dzm) * gr.invrs_dzm / mu[:, None]
+
+    _pad0 = jnp.zeros((ngrdcol, 1), dtype=dt_f)
+    _pad2 = jnp.zeros((ngrdcol, 2), dtype=dt_f)
+
+    # Upward precalcs (parcel-from-below recurrence coefficients).
+    thl_mid, thl_blw = thlm[:, 1:nzt - 1], thlm[:, 0:nzt - 2]
+    rt_mid, rt_blw = rtm[:, 1:nzt - 1], rtm[:, 0:nzt - 2]
+    emu_up, ec_up = exp_mu_dzm[:, 1:nzt - 1], entrain_coef[:, 1:nzt - 1]
+    thl_precalc_up = jnp.concatenate(
+        [_pad0, thl_mid - thl_blw * emu_up - (thl_mid - thl_blw) * ec_up, _pad2], axis=1)
+    rt_precalc_up = jnp.concatenate(
+        [_pad0, rt_mid - rt_blw * emu_up - (rt_mid - rt_blw) * ec_up, _pad2], axis=1)
+
+    ec_init_up = entrain_coef[:, 1:nzt]
+    thl_par_1_up_int = thlm[:, 1:] - (thlm[:, 1:] - thlm[:, :-1]) * ec_init_up
+    rt_par_1_up_int = rtm[:, 1:] - (rtm[:, 1:] - rtm[:, :-1]) * ec_init_up
+    tl_par_1_up_int = thl_par_1_up_int * exner[:, 1:]
+    rsat_1_up_int = sat_mixrat_liq(p_in_Pa[:, 1:], tl_par_1_up_int)
+    tl_sqd_up = tl_par_1_up_int ** 2
+    s_1_up = (rt_par_1_up_int - rsat_1_up_int) * tl_sqd_up / (tl_sqd_up + _LV2_COEF * rsat_1_up_int)
+    rc_1_up = jnp.maximum(s_1_up, _ZERO)
+    thv_1_up = (thl_par_1_up_int + _EP1 * thv_ds[:, 1:] * rt_par_1_up_int
+                + Lv_coef[:, 1:] * rc_1_up)
+    dCAPE_dz_1_up_int = grav_on_thvm[:, 1:] * (thv_1_up - thvm[:, 1:])
+    CAPE_incr_1_up_int = 0.5 * dCAPE_dz_1_up_int * gr.dzm[:, 1:nzt]
+
+    thl_par_1_up = jnp.concatenate([_pad0, thl_par_1_up_int], axis=1)
+    rt_par_1_up = jnp.concatenate([_pad0, rt_par_1_up_int], axis=1)
+    dCAPE_dz_1_up = jnp.concatenate([_pad0, dCAPE_dz_1_up_int], axis=1)
+    CAPE_incr_1_up = jnp.concatenate([_pad0, CAPE_incr_1_up_int], axis=1)
+
+    # Downward precalcs (parcel-from-above recurrence coefficients).
+    thl_abv, thl_at_j = thlm[:, 1:], thlm[:, :-1]
+    rt_abv, rt_at_j = rtm[:, 1:], rtm[:, :-1]
+    emu_dn, ec_dn = exp_mu_dzm[:, 1:nzt], entrain_coef[:, 1:nzt]
+    thl_precalc_down = jnp.concatenate(
+        [thl_at_j - thl_abv * emu_dn - (thl_at_j - thl_abv) * ec_dn, _pad2], axis=1)
+    rt_precalc_down = jnp.concatenate(
+        [rt_at_j - rt_abv * emu_dn - (rt_at_j - rt_abv) * ec_dn, _pad2], axis=1)
+
+    ec_init_dn = entrain_coef[:, 1:nzt]
+    thl_par_1_dn_int = thlm[:, :-1] - (thlm[:, :-1] - thlm[:, 1:]) * ec_init_dn
+    rt_par_1_dn_int = rtm[:, :-1] - (rtm[:, :-1] - rtm[:, 1:]) * ec_init_dn
+    tl_par_1_dn_int = thl_par_1_dn_int * exner[:, :-1]
+    rsat_1_dn_int = sat_mixrat_liq(p_in_Pa[:, :-1], tl_par_1_dn_int)
+    tl_sqd_dn = tl_par_1_dn_int ** 2
+    s_1_dn = (rt_par_1_dn_int - rsat_1_dn_int) * tl_sqd_dn / (tl_sqd_dn + _LV2_COEF * rsat_1_dn_int)
+    rc_1_dn = jnp.maximum(s_1_dn, _ZERO)
+    thv_1_dn = (thl_par_1_dn_int + _EP1 * thv_ds[:, :-1] * rt_par_1_dn_int
+                + Lv_coef[:, :-1] * rc_1_dn)
+    dCAPE_dz_1_dn_int = grav_on_thvm[:, :-1] * (thv_1_dn - thvm[:, :-1])
+    CAPE_incr_1_dn_int = 0.5 * dCAPE_dz_1_dn_int * gr.dzm[:, 1:nzt]
+
+    thl_par_1_down = jnp.concatenate([thl_par_1_dn_int, _pad0], axis=1)
+    rt_par_1_down = jnp.concatenate([rt_par_1_dn_int, _pad0], axis=1)
+    dCAPE_dz_1_down = jnp.concatenate([dCAPE_dz_1_dn_int, _pad0], axis=1)
+    CAPE_incr_1_down = jnp.concatenate([CAPE_incr_1_dn_int, _pad0], axis=1)
+
+    # ---- Per-column up/down via vmap over the column axis ----
+    def up_col(args):
+        (tke_i_c, thl1_c, rt1_c, dcap1_c, cap1_c, thlpc_c, rtpc_c, emu_c,
+         got_c, lvc_c, thvds_c, exner_c, p_c, thvm_c, dzm_c, idzm_c, zt_c) = args
+        return _compute_lscale_up_col(
+            tke_i_c, thl1_c, rt1_c, dcap1_c, cap1_c, thlpc_c, rtpc_c, emu_c,
+            got_c, lvc_c, thvds_c, exner_c, p_c, thvm_c, dzm_c, idzm_c, zt_c,
+            k_ub_zt_py, nzt)
+
+    def down_col(args):
+        (tke_i_c, thl1_c, rt1_c, dcap1_c, cap1_c, thlpc_c, rtpc_c, emu_c,
+         got_c, lvc_c, thvds_c, exner_c, p_c, thvm_c, dzm_c, idzm_c, zt_c) = args
+        return _compute_lscale_down_col(
+            tke_i_c, thl1_c, rt1_c, dcap1_c, cap1_c, thlpc_c, rtpc_c, emu_c,
+            got_c, lvc_c, thvds_c, exner_c, p_c, thvm_c, dzm_c, idzm_c, zt_c,
+            k_ub_zt_py, k_lb_zt_py, nzt)
+
+    up_args = (tke_i, thl_par_1_up, rt_par_1_up, dCAPE_dz_1_up, CAPE_incr_1_up,
+               thl_precalc_up, rt_precalc_up, exp_mu_dzm,
+               grav_on_thvm, Lv_coef, thv_ds, exner, p_in_Pa, thvm,
+               gr.dzm, gr.invrs_dzm, gr.zt)
+    down_args = (tke_i, thl_par_1_down, rt_par_1_down, dCAPE_dz_1_down, CAPE_incr_1_down,
+                 thl_precalc_down, rt_precalc_down, exp_mu_dzm,
+                 grav_on_thvm, Lv_coef, thv_ds, exner, p_in_Pa, thvm,
+                 gr.dzm, gr.invrs_dzm, gr.zt)
+
+    Lscale_up_all = jax.vmap(up_col)(up_args)
+    Lscale_down_all = jax.vmap(down_col)(down_args)
+
+    # ---- Surface-layer floor lminh + Lscale_max cap ----
+    invrs_sfclyr = 1.0 / _LSCALE_SFCLYR_DEPTH
+    if l_implemented:
+        zm_sfc = gr.zm[:, 0]   # ascending: bottom zm level = ground
+        lminh = (jnp.maximum(0.0, _LSCALE_SFCLYR_DEPTH - (gr.zt - zm_sfc[:, None]))
+                 * lmin * invrs_sfclyr)
+    else:
+        lminh = jnp.maximum(0.0, _LSCALE_SFCLYR_DEPTH - gr.zt) * lmin * invrs_sfclyr
+
+    Lscale_up = jnp.maximum(lminh, Lscale_up_all)
+    Lscale_down = jnp.maximum(lminh, Lscale_down_all)
+    Lscale = safe_sqrt(Lscale_up * Lscale_down)
+
+    # Upper boundary: Lscale[k_ub] = Lscale[k_ub - 1].
+    Lscale = Lscale.at[:, k_ub_zt_py].set(Lscale[:, k_ub_zt_py - 1])
+    Lscale = jnp.minimum(Lscale, Lscale_max[:, None])
+    return Lscale, Lscale_up, Lscale_down
+
+
+# ===========================================================================
+# 6. Implicit band solvers
 # ===========================================================================
 # ``tridiag_solve`` adapts CLUBB's band storage to the shared legoESM Thomas
 # solver (legoesm.timestepping.tridiagonal.thomas_solve); ``penta_solve`` is a
@@ -336,7 +1324,7 @@ def penta_solve(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
 
 
 # ===========================================================================
-# 3. Mass-conserving hole filling
+# 7. Mass-conserving hole filling
 # ===========================================================================
 # fill_holes.F90 ports: the sliding-window / global hole fillers used on the
 # advanced means (CAM ``fill_holes_type = 2``) and the TKE-conserving
@@ -517,7 +1505,7 @@ def fill_holes_wp2_from_horz_tke(wp2, up2, vp2, threshold, lower_k, upper_k):
 
 
 # ===========================================================================
-# 4. Skewness diagnostics
+# 8. Skewness diagnostics
 # ===========================================================================
 # Skx_func / gamma(Skw) / the LG 2005 xp3 ansatz (CAM
 # ``l_advance_xp3 = .false.`` → xp3 diagnosed, not prognosed) and the
@@ -703,7 +1691,7 @@ def compute_skewness_diagnostics(wp2, wp3, w_tol, Skw_denom_coef, gr: CLUBBGrid)
 
 
 # ===========================================================================
-# 5. Dissipation time-scale (tau) family
+# 9. Dissipation time-scale (tau) family
 # ===========================================================================
 # CAM tau family (``l_diag_Lscale_from_tau = .false.`` → SIMPLE
 # ``tau = Lscale/sqrt(em)`` with the N^2 stability correction,
@@ -785,7 +1773,7 @@ def compute_tau_family(Lscale, em, sqrt_em_zt, brunt_vaisala_freq_sqd, gr: CLUBB
 
 
 # ===========================================================================
-# 6. ADG1 assumed-PDF parameter closure
+# 10. ADG1 assumed-PDF parameter closure
 # ===========================================================================
 # The ADG1 double-Gaussian PDF parameters (CAM ``iiPDF_type = ADG1``):
 # component means/variances/mixture fraction, the binormal component
@@ -1074,8 +2062,6 @@ def calc_pdf_liquid_cloud_frac_components(adg1, rtpthlp, rtm, thlm, exner, p_in_
     (:func:`calc_pdf_xprcp_fluxes`) consumes these.
     Mirrors ``pdf_closure_module.F90:calc_pdf_liquid_cloud_frac_components``.
     """
-    from legoesm.atmosphere.physics.turbulence.clubb_saturation import sat_mixrat_liq
-
     corr_1, corr_2 = calc_comp_corrs_binormal(
         rtpthlp, rtm, thlm, adg1["rt_1"], adg1["rt_2"], adg1["thl_1"], adg1["thl_2"],
         adg1["varnce_rt_1"], adg1["varnce_rt_2"], adg1["varnce_thl_1"],
@@ -1109,7 +2095,7 @@ def calc_pdf_liquid_cloud_frac_components(adg1, rtpthlp, rtm, thlm, exner, p_in_
 
 
 # ===========================================================================
-# 7. ADG1 PDF moment integrals + buoyancy-flux assembly
+# 11. ADG1 PDF moment integrals + buoyancy-flux assembly
 # ===========================================================================
 # PDF moment integrals over the ADG1 components: higher-order velocity
 # moments (wp4, wp2up2, ...), cloud-water turbulent fluxes (x'rc'), and the
@@ -1353,7 +2339,7 @@ def calc_xpthvp_terms(exner, thv_ds_zt, wprcp_zt, wp2rcp_zt, rtprcp_zt, thlprcp_
 
 
 # ===========================================================================
-# 8. Moment-advance building blocks + xp2_xpyp / windm advances
+# 12. Moment-advance building blocks + xp2_xpyp / windm advances
 # ===========================================================================
 # The shared implicit-advance machinery (diffusion/mean-advection LHS
 # builders, Cauchy-Schwarz clipping family) plus two of the four CAM-order
@@ -2189,7 +3175,7 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
 
 
 # ===========================================================================
-# 9. Skewness-dependent C-coefficient family (CAM-default tree)
+# 13. Skewness-dependent C-coefficient family (CAM-default tree)
 # ===========================================================================
 # The xm/wpxp advance needs the pressure-term coefficients ``C6rt_Skw_fnc``,
 # ``C6thl_Skw_fnc`` and ``C7_Skw_fnc``. For the CAM-default flags
@@ -2249,7 +3235,7 @@ def compute_C6_C7_Skw_fnc(Skw_zm, Lscale_zm, config, gr: CLUBBGrid):
 
 
 # ===========================================================================
-# 10. Coupled wp2/wp3 advance (pentadiagonal)
+# 14. Coupled wp2/wp3 advance (pentadiagonal)
 # ===========================================================================
 # The coupled wp2 (zm) / wp3 (zt) advance: interleaved band-matrix LHS
 # builders + RHS terms solved with the verbatim-port pentadiagonal LU
@@ -2906,7 +3892,7 @@ def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
 
 
 # ===========================================================================
-# 11. Monotonic turbulent-flux limiter (MFL)
+# 15. Monotonic turbulent-flux limiter (MFL)
 # ===========================================================================
 # JAX port of CLUBB's monotonic flux limiter (mono_flux_limiter.F90) applied
 # inside the xm/wpxp advance (CAM ``l_mono_flux_lim_{thlm,rtm,um,vm} =
@@ -3185,7 +4171,7 @@ def monotonic_turbulent_flux_limit(
 
 
 # ===========================================================================
-# 12. Coupled xm/wpxp advance (means + scalar fluxes)
+# 16. Coupled xm/wpxp advance (means + scalar fluxes)
 # ===========================================================================
 # The coupled xm (zt) / wpxp (zm) advance for rtm/wprtp and thlm/wpthlp
 # (CAM ``l_predict_upwp_vpwp = .false.`` → winds go through
@@ -3565,7 +4551,7 @@ def advance_xm_wpxp(rtm, thlm, wprtp, wpthlp, rtm_forcing, thlm_forcing,
 
 
 # ===========================================================================
-# 13. Core orchestration
+# 17. Core orchestration
 # ===========================================================================
 # Assembles the parity-tested building blocks into the per-step closure: the
 # diagnostics (``compute_clubb_diagnostics`` — skewness, ``sigma_sqd_w``, TKE,
@@ -3961,7 +4947,7 @@ def unpack_clubb_moments(arr: jax.Array) -> CLUBBMomentState:
 
 
 # ===========================================================================
-# 14. Scheme entries
+# 18. Scheme entries
 # ===========================================================================
 
 

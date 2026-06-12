@@ -136,20 +136,6 @@ EXCLUDED: frozenset[str] = frozenset(
         # CLUBB port: scheme configuration NamedTuples (flags/params/tolerances),
         # no tendencies — config plumbing, like config.py.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_config.py",
-        # CLUBB port: pure staggered-grid interpolation/derivative operators
-        # (no units/signs/conserved quantity — it is grid plumbing, like a
-        # _shared helper), so it carries no single-tendency physics contract.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_grid.py",
-        # CLUBB port: saturation mixing-ratio adapter over legoesm.thermo's
-        # canonical Flatau curves (a thermo helper, not a tendency scheme).
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_saturation.py",
-        # CLUBB port: advance-helper kernels (sigma_sqd_w PDF width, Brunt-
-        # Vaisala frequency) — diagnostic helpers feeding the closure, not a
-        # single-tendency scheme.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_helpers.py",
-        # CLUBB port: nonlocal mixing-length (Lscale) parcel buoyant-sorting —
-        # a diagnostic length scale, not a single-tendency scheme.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_mixing_length.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",

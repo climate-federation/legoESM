@@ -1,4 +1,4 @@
-"""Unit tests for the CLUBB nonlocal mixing length (``clubb_mixing_length.py``).
+"""Unit tests for the CLUBB nonlocal mixing length (now in ``clubb.py``).
 
 Idealized-profile checks: a neutral column mixes over a far larger length scale
 than a strongly stable column; shapes, positivity, the Lscale_max cap, and
@@ -20,15 +20,15 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
-from legoesm.atmosphere.physics.turbulence.clubb_mixing_length import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     _EP1,
     _EP2,
     _LV2_COEF,
     compute_mixing_length,
     set_Lscale_max,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_saturation import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     sat_mixrat_liq as _my_sat,
 )
 

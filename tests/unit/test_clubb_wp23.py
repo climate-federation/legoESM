@@ -19,7 +19,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid  # noqa: E402
 from legoesm.atmosphere.physics.turbulence import clubb as W  # noqa: E402, N812
 
 _CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
@@ -582,7 +582,7 @@ def test_compute_a1_a3_coef_formula():
     exp_a3 = np.maximum(-2.0 * one_minus ** 2 + 3.0, np.asarray(a3_min)[:, None])
     np.testing.assert_allclose(np.asarray(a3), exp_a3, rtol=1e-12, atol=1e-14)
     # zt interpolation matches the grid operator
-    from legoesm.atmosphere.physics.turbulence.clubb_grid import zm2zt
+    from legoesm.atmosphere.physics.turbulence.clubb import zm2zt
     np.testing.assert_array_equal(np.asarray(a1_zt), np.asarray(zm2zt(a1, gr)))
     np.testing.assert_array_equal(np.asarray(a3_zt), np.asarray(zm2zt(a3, gr)))
 

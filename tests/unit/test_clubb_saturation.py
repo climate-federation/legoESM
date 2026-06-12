@@ -16,7 +16,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.turbulence.clubb_saturation import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     sat_mixrat_ice,
     sat_mixrat_liq,
 )

@@ -28,11 +28,11 @@ happens after the source consolidation settles.
 | 10 | `clubb_tau.py` | 97 | absorb | ✅ C4 (iter 4, sec. 5) |
 | 11 | `clubb_skewness.py` | 211 | absorb | ✅ C4 (iter 4, sec. 4) |
 | 12 | `clubb_solve.py` | 151 | absorb | ✅ C4 (iter 4, sec. 2) |
-| 13 | `clubb_helpers.py` | 208 | absorb | — |
-| 14 | `clubb_grid.py` | 380 | absorb | — |
+| 13 | `clubb_helpers.py` | 208 | absorb | ✅ C5 (iter 5, sec. 4) |
+| 14 | `clubb_grid.py` | 380 | absorb | ✅ C5 (iter 5, sec. 2) |
 | 15 | `clubb_coefficients.py` | 71 | constants → top of clubb.py | ✅ C2 (iter 2, sec. 2; the module is FUNCTIONS not constants — placed as a section; the true scalar constants land near the top in the final-layout pass) |
-| 16 | `clubb_mixing_length.py` | 472 | compare vs `_shared` Blackadar (DIFFERENT — parcel buoyant-sorting) → absorb + file issue noting it could supplant `_shared`'s | — |
-| 17 | `clubb_saturation.py` | 87 | thin wrappers over `thermo` Flatau curves (shared module EXISTS) → wrappers into clubb.py | — |
+| 16 | `clubb_mixing_length.py` | 472 | compare vs `_shared` Blackadar (DIFFERENT — parcel buoyant-sorting) → absorb + file issue noting it could supplant `_shared`'s | ✅ C5 (iter 5, sec. 5; supplant-note in the section header) |
+| 17 | `clubb_saturation.py` | 87 | thin wrappers over `thermo` Flatau curves (shared module EXISTS) → wrappers into clubb.py | ✅ C5 (iter 5, sec. 3) |
 | 18 | `clubb_config.py` | 338 | `CLUBBParams`/`CLUBBConfig` → clubb.py; **drop `CLUBBFlags`** (CAM tree only), flag VALUES → comment block at END of clubb.py; prune dead non-CAM branches that the flag removal exposes | — |
 | 19 | `clubb_lite.py` | 328 | NOT absorbed (separate scheme). Retain `_shared.exner_function` use; REVERT its `buoyancy_coefficient` usage (superfluous per goal) | — |
 
@@ -81,6 +81,24 @@ happens after the source consolidation settles.
   must be re-derived per batch, not assumed). 6 modules deleted; test imports
   re-pointed; contracts entries removed. Green: 202 tests; ruff clean; codex
   AST-level adversarial review → APPROVE (first pass).
+- **C5 (iter 5):** absorbed the geometry/thermo helper layer (1147 LOC) —
+  `clubb_grid` + `clubb_saturation` + `clubb_helpers` + `clubb_mixing_length`
+  — as sections 2-5 (18 sections, 5499 lines). Saturation = thin adapters over
+  the canonical `legoesm.thermo` Flatau curves (per goal: shared module
+  exists, wrappers move in). Mixing length CONFIRMED different numerics from
+  `_shared`'s Blackadar (parcel buoyant-sorting) → absorbed with a
+  could-supplant-_shared note in its section header. Deduped
+  `_ZERO_THRESHOLD`/`_EP1`/`_EP2`/`_ZERO`/`_EPS` (kept mixing_length's unique
+  `_EP`/`_LV2_COEF`); pdf section's function-scope saturation import now a
+  direct module-level reference. 4 modules deleted; importers re-pointed;
+  contracts entries removed. Green: 197 + 5 conservation tests; ruff clean;
+  codex review → approve (2 [low] flags were the intentional test-header
+  updates, same sanctioned class as C1-C4).
+  **Remaining:** `clubb_config.py` (C6: CLUBBConfig/Params into clubb.py,
+  CLUBBFlags → CAM-defaults comment block at file end, prune dead non-CAM
+  branches; consumers: integration.py/config.py/2 scripts/many tests),
+  `clubb_lite.py` buoyancy_coefficient revert, final layout pass (coefficient
+  constants near top + line-numbered TOC), test-file consolidation decision.
 
 
 **Previous Goal:** `packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py`

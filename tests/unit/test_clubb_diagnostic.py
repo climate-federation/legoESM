@@ -18,7 +18,7 @@ from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # no
 from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     diagnose_cloud_and_buoyancy,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 

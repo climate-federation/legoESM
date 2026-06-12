@@ -28,7 +28,7 @@ from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     pack_clubb_moments,
     unpack_clubb_moments,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid  # noqa: E402
 
 
 def _gr(ng=2, nzt=12):
@@ -271,7 +271,7 @@ def test_pdf_closure_buoyancy_uses_raw_not_floored_variance():
     (``rcm=0``) column the x'thv' fluxes reduce to closed form in the RAW
     (un-floored) regridded variances; pinning them there proves the floor does
     not leak a tolerance-level covariance into rtpthvp/thlpthvp."""
-    from legoesm.atmosphere.physics.turbulence.clubb_grid import zm2zt, zt2zm
+    from legoesm.atmosphere.physics.turbulence.clubb import zm2zt, zt2zm
     from legoesm.atmosphere.physics.turbulence.clubb import _EP1
 
     gr, ng, nzm = _gr()
@@ -332,7 +332,7 @@ def test_sigma_sqd_w_cam_form_matches_reference():
         sys.path.insert(0, str(_CLUBB_JAX_ROOT))
     import clubb_jax.src.CLUBB_core.sigma_sqd_w_module as R  # noqa: N812
     from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig
-    from legoesm.atmosphere.physics.turbulence.clubb_helpers import compute_sigma_sqd_w
+    from legoesm.atmosphere.physics.turbulence.clubb import compute_sigma_sqd_w
 
     gr, ng, nzm = _gr()
     cfg = CLUBBConfig()

@@ -12,11 +12,11 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.turbulence.clubb_grid import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     ddzt,
     make_clubb_grid,
 )
-from legoesm.atmosphere.physics.turbulence.clubb_helpers import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     calc_brunt_vaisala_freq_sqd,
     compute_sigma_sqd_w,
     safe_sqrt,

@@ -1,4 +1,4 @@
-"""Unit tests for the CLUBB staggered-grid operators (``clubb_grid.py``).
+"""Unit tests for the CLUBB staggered-grid operators (now in ``clubb.py``).
 
 Analytic checks (the strongest available for linear interpolation/derivative
 operators): linear fields are reproduced/differentiated exactly, round-trip
@@ -16,7 +16,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.turbulence.clubb_grid import (  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     CLUBBGrid,
     ddzm,
     ddzt,
