@@ -207,6 +207,72 @@ prepare-context epoch.  Implemented per the amended plan:
   restart is actually bitwise needs a test mirroring the MPAS one
   (gaussian grid, discretization="spectral").
 
+## Iteration 4 — plan (2026-06-12)
+
+Probe result: the spectral path writes NO checkpoints at all —
+`_run_spectral` never calls `save_checkpoint` or `_finalize_run`, so a
+`--spectral` AMIP run with `--checkpoint-days N` silently produces
+nothing and `--restart-from` is impossible (`run_amip.py` wires both
+flags for every discretization).  The epoch normalization ported into
+`_run_spectral` is currently unreachable.  "Bit-exact restart
+continuation" therefore requires basic spectral checkpointing first.
+
+Favorable scope facts (verified):
+- `_run_spectral` REFUSES stateful physics
+  (`_refuse_stateful_physics_unthreaded`) and holds no held-radiation
+  carry — the restart payload is exactly the 5 spectral coefficient
+  Fields (`vor_hat/div_hat/T_hat/lnps_hat/phis_hat`, complex128 — npz
+  handles complex natively) + optional grid-space `tracers` + (step,
+  day).
+- Loop indexing: `for step in range(start_step, n_steps_total)`,
+  `self._current_day = START_DAY + (step+1)*DT/86400` — ABSOLUTE steps
+  with epoch START_DAY (cube convention: cfg.days is the TOTAL).
+
+Plan:
+1. `save_checkpoint`: spectral branch (mirroring the MPAS branch) when
+   `discretization == "spectral"`: write the 5 coefficient arrays +
+   tracers + step/day + a `spectral_layout` marker to
+   `checkpoint_day_NNNN.npz` (absolute-day filename like MPAS).
+2. `load_checkpoint`: spectral branch reconstructing
+   `SpectralHydrostaticState` (Field metadata from the current
+   `self.state`), shape-guarded, records the
+   `_loaded_checkpoint_step_day` hint, returns (step, day).
+3. `_run_spectral`: periodic checkpoint at
+   `(step+1) % CHECKPOINT_INTERVAL == 0` (absolute cadence — aligned
+   between straight and resumed runs by construction) with the MPAS
+   finiteness-guard pattern, + final checkpoint on COMPLETED when the
+   last step is off-cadence.
+4. Bit-exact continuation test: gaussian T8 L5 gray dry, 1+1 vs 2
+   days, bitwise on the spectral coefficients.
+Out of scope (documented): full-physics spectral restart carries
+nothing extra today (stateless schemes only, no held radiation), so no
+additional payload; MPAS-style physstate channels don't apply.
+
+## Iteration 4 — done (2026-06-12)
+
+Adversarial review of the plan: endorsed (both findings restate the
+gaps the plan addresses).  Implemented:
+
+- `save_checkpoint` spectral branch (before the generic `save_restart`
+  tail, which reads `state.v.data` and would crash on spectral): five
+  complex coefficient arrays + tracer payload + (step, day) +
+  `spectral_layout` marker, absolute-day filename.
+- `load_checkpoint` spectral branch: marker-validated, per-array shape
+  guard, Field metadata from current state, tracer round-trip with a
+  refusal to silently drop checkpoint tracers, records the
+  normalization hint.
+- `_run_spectral`: `CHECKPOINT_INTERVAL` on absolute steps + in-loop
+  periodic checkpoint with complex-aware finiteness guard (both real
+  AND imag — NaN can live in either part) + final off-cadence
+  checkpoint on COMPLETED.
+- `test_spectral_bitexact_restart_continuation` (gaussian T8 L5 gray
+  dry, 1+1 vs 2 days): all five coefficient fields BITWISE equal.
+  Probe-verified RED→GREEN (pre-wiring the run wrote no checkpoint at
+  all; post-wiring maxdiff 0.0 everywhere).
+- Full continuation suite: 7 passed (MPAS ×2, scheduler pin,
+  convention, compiled spy, per-step off-boundary, spectral).
+- Codex review round 4: CLEAN.
+
 - **Codex round-2 finding (P2, fixed)**: the compiled cube/lat-lon loop
   only refreshed external forcing (ozone/aerosol/GHG + solar) for
   `seg_idx > 0`, so a RESUMED run's first segment kept the

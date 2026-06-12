@@ -303,6 +303,56 @@ def test_resumed_segment_zero_refreshes_external_forcing(tmp_path):
 
 
 # ======================================================================
+# Spectral path: checkpointing exists at all + bitwise continuation
+# ======================================================================
+
+def test_spectral_bitexact_restart_continuation(tmp_path):
+    """Spectral 1+1-day chain == 2-day straight run, BITWISE on the
+    spectral coefficients.
+
+    Until FIX_RESTART_TIME iteration 4 the spectral loop wrote NO
+    checkpoints at all — a --spectral AMIP run silently ignored
+    --checkpoint-days and --restart-from was impossible.  This pins
+    both the new spectral save/load branch and the (now reachable)
+    epoch normalization in _run_spectral.
+    """
+
+    def build(tmpdir: str, days: float) -> ModelDriver:
+        cfg = ExperimentConfig(
+            grid=GridConfig(grid_type="gaussian", resolution=8, nlev=5),
+            dycore=DycoreConfig(discretization="spectral", dt=600.0),
+            output=OutputConfig(output_dir="", diag_days=1,
+                                checkpoint_days=1),
+            days=days, dataset="analytical", radiation="gray",
+            convection="none", turbulence="none", precision="fp64",
+        )
+        d = ModelDriver(cfg, output_dir=tmpdir)
+        d.setup()
+        return d
+
+    dA = build(str(tmp_path / "straight"), days=2.0)
+    assert dA.run() == "COMPLETED"
+
+    outB = str(tmp_path / "chain1")
+    dB = build(outB, days=1.0)
+    assert dB.run() == "COMPLETED"
+    ckpts = sorted(glob.glob(os.path.join(outB, "checkpoint_day_*.npz")))
+    assert ckpts, "spectral run wrote no checkpoints (iteration-4 gap)"
+    dB2 = build(str(tmp_path / "chain2"), days=2.0)
+    step, day = dB2.load_checkpoint(ckpts[-1])
+    assert (step, day) == (144, 1.0)
+    assert dB2.run(start_step=step, start_day=day) == "COMPLETED"
+
+    for name in ("vor_hat", "div_hat", "T_hat", "lnps_hat", "phis_hat"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(dA.state, name).data),
+            np.asarray(getattr(dB2.state, name).data),
+            err_msg=f"{name}: spectral chained restart != straight run "
+                    "(bitwise)",
+        )
+
+
+# ======================================================================
 # Per-step (compiled=False) path: warmup radiation cadence
 # ======================================================================
 

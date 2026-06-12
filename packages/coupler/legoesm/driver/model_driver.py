@@ -2580,6 +2580,39 @@ class ModelDriver:
             logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
             return
 
+        # Spectral path (FIX_RESTART_TIME iteration 4): the spectral PE
+        # state is five complex coefficient Fields (vor/div/T/lnps/phis
+        # ``_hat``) + an optional grid-space tracers dict — the shared
+        # ``save_restart`` assumes the cube/lat-lon layout (reads
+        # ``state.v.data``, infers resolution from the T-shape) and
+        # cannot serialise it.  Write the coefficient arrays directly
+        # (npz handles complex128 natively) under the absolute-day
+        # filename the restart chain globs (MPAS convention).  The
+        # spectral loop refuses stateful physics and holds no
+        # held-radiation carry, so this payload is complete for
+        # bit-exact continuation.  Single-process only (spectral
+        # transforms are global; the path is never MPI-sharded).
+        if self.config.dycore.discretization == "spectral":
+            ckpt_path = (self._output_dir
+                         / f"checkpoint_day_{int(round(day)):04d}.npz")
+            s = self.state
+            _save = dict(
+                vor_hat=np.asarray(s.vor_hat.data),
+                div_hat=np.asarray(s.div_hat.data),
+                T_hat=np.asarray(s.T_hat.data),
+                lnps_hat=np.asarray(s.lnps_hat.data),
+                phis_hat=np.asarray(s.phis_hat.data),
+                step=np.asarray(int(step)), day=np.asarray(float(day)),
+                spectral_layout=np.asarray(1),
+            )
+            if s.tracers is not None:
+                _save["tracer_names"] = np.asarray(sorted(s.tracers.keys()))
+                for _k in s.tracers:
+                    _save[f"trc_{_k}"] = np.asarray(s.tracers[_k].data)
+            np.savez(ckpt_path, **_save)
+            logger.info(f"  Checkpoint: {ckpt_path.name} (spectral)")
+            return
+
         # Distributed path
         if (self._device_config is not None
                 and self._device_config.is_distributed):
@@ -2990,6 +3023,64 @@ class ModelDriver:
             logger.info(f"  Loaded MPAS checkpoint: step={step}, day={day:.2f}"
                         + ("" if "tracer_names" not in d
                            else f", tracers={[str(n) for n in d['tracer_names']]}"))
+            self._loaded_checkpoint_step_day = (step, day)
+            return step, day
+
+        # Spectral path (FIX_RESTART_TIME iteration 4): mirror of the
+        # spectral branch in ``save_checkpoint``.  Reconstruct the
+        # ``SpectralHydrostaticState`` (five complex coefficient Fields
+        # + optional grid-space tracers) with Field metadata taken from
+        # the current state; the generic ``load_restart`` reads
+        # grid-layout fields and cannot deserialise it.
+        if self.config.dycore.discretization == "spectral":
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"spectral checkpoint not found (or is a directory): "
+                    f"{path}"
+                )
+            import jax.numpy as jnp
+            from legoesm.core.field import Field
+            d = np.load(path)
+            if "spectral_layout" not in d:
+                raise ValueError(
+                    f"{path} is not a spectral checkpoint (missing the "
+                    "spectral_layout marker) — it cannot restore a "
+                    "discretization='spectral' run."
+                )
+            s = self.state
+            new_fields = {}
+            for _name in ("vor_hat", "div_hat", "T_hat", "lnps_hat",
+                          "phis_hat"):
+                _cur = getattr(s, _name)
+                _arr = d[_name]
+                if _arr.shape != _cur.data.shape:
+                    raise ValueError(
+                        f"spectral checkpoint {_name} shape {_arr.shape} "
+                        f"!= configured state {_cur.data.shape} "
+                        f"(resolution/nlev mismatch): {path}"
+                    )
+                new_fields[_name] = _cur.replace(data=jnp.asarray(_arr))
+            tracers = None
+            if "tracer_names" in d:
+                if s.tracers is None:
+                    raise ValueError(
+                        f"spectral checkpoint {path} carries tracers "
+                        f"{[str(n) for n in d['tracer_names']]} but the "
+                        "configured run has none — refusing to silently "
+                        "drop water."
+                    )
+                tracers = {}
+                for _k in (str(n) for n in d["tracer_names"]):
+                    _cur_t = s.tracers[_k]
+                    tracers[_k] = _cur_t.replace(
+                        data=jnp.asarray(d[f"trc_{_k}"]))
+            elif s.tracers is not None:
+                tracers = s.tracers
+            self.state = s._replace(tracers=tracers, **new_fields)
+            step = int(d["step"])
+            day = float(d["day"])
+            logger.info(
+                f"  Loaded spectral checkpoint: step={step}, day={day:.2f}")
             self._loaded_checkpoint_step_day = (step, day)
             return step, day
 
@@ -4103,6 +4194,17 @@ class ModelDriver:
         N_DAYS = cfg.days
         n_steps_total = int(N_DAYS * 86400.0 / DT)
         DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        # ``checkpoint_days`` → step cadence (FIX_RESTART_TIME iteration
+        # 4: the spectral loop historically wrote NO checkpoints, so a
+        # --spectral AMIP run silently ignored --checkpoint-days and
+        # --restart-from was impossible).  The cadence is on ABSOLUTE
+        # steps — this loop runs ``range(start_step, n_steps_total)`` —
+        # so straight and resumed runs checkpoint at identical steps by
+        # construction.  0 ⇒ no checkpointing (historical behavior).
+        CHECKPOINT_INTERVAL = (
+            int(cfg.output.checkpoint_days * 86400.0 / DT)
+            if cfg.output.checkpoint_days > 0 else 0
+        )
         START_DAY = start_day if start_day is not None else cfg.start_day
         # Restart-time normalization (FIX_RESTART_TIME, ported from
         # fix/persist-physics where it is production-validated): these
@@ -4472,6 +4574,42 @@ class ModelDriver:
                     run_status = f"BLOWUP at day {elapsed_day:.1f}"
                     logger.error(run_status)
                     break
+
+            # Periodic checkpoint (FIX_RESTART_TIME iteration 4) —
+            # cadence on ABSOLUTE steps, independent of the diagnostic
+            # interval.  Guard finiteness FIRST (MPAS pattern): the
+            # checkpoint cadence need not align with the diagnostic
+            # cadence, so a NaN can occur between diagnostic steps —
+            # never persist a blown-up state (it would poison every
+            # subsequent chain link).
+            if (CHECKPOINT_INTERVAL > 0
+                    and (step + 1) % CHECKPOINT_INTERVAL == 0):
+                _s = self.state
+
+                def _all_finite_c(arr):
+                    # Complex coefficients: finite iff BOTH parts are.
+                    return (jnp.all(jnp.isfinite(arr.real))
+                            & jnp.all(jnp.isfinite(arr.imag)))
+
+                _finite = (_all_finite_c(_s.vor_hat.data)
+                           & _all_finite_c(_s.div_hat.data)
+                           & _all_finite_c(_s.T_hat.data)
+                           & _all_finite_c(_s.lnps_hat.data))
+                if not bool(_finite):
+                    run_status = (
+                        f"BLOWUP at day {self._current_day - START_DAY:.1f}")
+                    logger.error(
+                        f"{run_status} (caught at checkpoint; not written)")
+                    break
+                self.save_checkpoint(step + 1, self._current_day)
+
+        # Final checkpoint so the next chain link resumes from the exact
+        # end state — skipped on blow-up and when the last step already
+        # hit the periodic cadence (identical file).
+        if (CHECKPOINT_INTERVAL > 0 and run_status == "COMPLETED"
+                and n_steps_total % CHECKPOINT_INTERVAL != 0):
+            _final_day = START_DAY + n_steps_total * DT / 86400.0
+            self.save_checkpoint(n_steps_total, _final_day)
 
         elapsed = time.time() - t_start
         logger.info(f"Spectral run {run_status} in {elapsed:.1f}s")
