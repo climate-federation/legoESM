@@ -1,0 +1,1250 @@
+Reading additional input from stdin...
+OpenAI Codex v0.133.0
+--------
+workdir: /burg-archive/glab/users/pg2328/legoESM
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: none
+reasoning summaries: none
+session id: 019eba75-9ad7-7fd2-9195-21735a60bac2
+--------
+user
+P4 phase-1b d2a2c FACE-EDGE specials design (legoESM, no edits). I have a working tile-local d2a2c for INTERIOR tiles (d2a2c_interior_local, codex-clean, parity-exact). Now the edge tiles (at kt=2 every tile; gatable in isolation at kt=3 via e.g. tile (0,1)=W-edge-but-j-interior). READ d2a2c_vect non-duogrid path fully (packages/core/legoesm/core/fv3_sw_core.py ~657-820) and enumerate EVERY face-edge special with exact indices: (1) uc C1/C2/C3 one-sided at i=1 and i=n-1 (the _C1*utmp_pad[h+2]+_C2*utmp_pad[h+1]+_C3*utmp_pad[h] form); (2) ut edge_interpolate4 + upwind sin_sg at i=0,n face boundary (the ua4 4-pt stencil, dxa4, sin_east/sin_west pad_halo, _edge_interpolate4, the jnp.where upwind); (3) vc C1/C2/C3 at j=1,n-1; (4) vt edge_interpolate4+upwind at j=0,n; (5) adjacent-strip vt recompute at i=0,n-1 (West/East) and any ut adjacent-strip at j=0,n-1. For EACH: the exact utmp_pad/vtmp_pad/ua/va/sin_sg cells it reads, the output cells it writes, and WHICH tile sides need it (ti==0→ i=0,1 W specials; ti==kt-1→ i=n-1,n E; tj==0→ S; tj==kt-1→ N). DESIGN: a d2a2c_edge_local(... , is_w, is_e, is_s, is_n) that starts from the interior base (uc_4th/vc_4th/ut/vt base) and OVERLAYS the per-side specials only where the boolean side-flag is set, using jnp.where or .at[].set on static positions (no data-dependent shapes). KEY index question: at a W-edge tile, the C1 special writes GLOBAL i=1 = the tile's LOCAL i=1 (since tile owns global [0:nl]); the edge_interpolate4 at GLOBAL i=0 = tile local i=0. Confirm the local↔global index map for each special at each side. Also: does edge_interpolate4 / upwind sin_sg need a sin_sg HALO (pad_halo) that under tiling needs the tiled scalar pad, or are the sin_sg cells it reads LOCAL to the edge tile? Quantify. Output: per-special table (reads/writes/side/local-index), the d2a2c_edge_local signature + overlay structure, the sin_sg-halo verdict, and the gating plan (which kt=3 tile isolates each side: W=(0,1),E=(kt-1,1),S=(1,0),N=(1,kt-1); corner=(0,0)). End with token count.
+codex
+I’ll read the vector implementation and nearby helpers, then map the global index cases onto tile-local coordinates without touching files.
+exec
+/usr/bin/bash -lc "sed -n '620,860p' packages/core/legoesm/core/fv3_sw_core.py" in /burg-archive/glab/users/pg2328/legoESM
+ succeeded in 0ms:
+    n = vtmp_pad.shape[2] - 2 * h
+    return (_A2 * (vtmp_pad[:, h:-h, h - 2:n + h - 1]
+                   + vtmp_pad[:, h:-h, h + 1:n + h + 2])
+            + _A1 * (vtmp_pad[:, h:-h, h - 1:n + h]
+                     + vtmp_pad[:, h:-h, h:n + h + 1]))
+
+
+def d2a2c_ut_vt_local(uc, vc, u_d, v_d, cosa_u, rsin_u, cosa_v, rsin_v):
+    """A→C contravariant transport winds ut/vt — pure pointwise CORE.
+
+    ``ut = (uc - v_d*cosa_u)*rsin_u`` (and symmetric ``vt``).  No halo —
+    a tile computes its own staggered ut ``(nl+1, nl)`` / vt
+    ``(nl, nl+1)`` from its uc/vc + LOCAL v_d/u_d + sliced metrics (P4
+    phase-1b approach C; codex: ut/vt need only the local staggered
+    D-winds, no staggered halo).  The production d2a2c_vect applies
+    this base then overlays face-boundary + adjacent-strip overrides
+    (edge specials) — those stay in d2a2c_vect for boundary cells.
+    """
+    ut = (uc - v_d * cosa_u) * rsin_u
+    vt = (vc - u_d * cosa_v) * rsin_v
+    return ut, vt
+
+
+def d2a2c_ua_va_local(utmp, vtmp, cos_sg5, rsin2):
+    """A-grid contravariant winds from covariant utmp/vtmp — pointwise.
+
+    ``ua = (utmp - vtmp*cos_sg5)*rsin2`` (symmetric ``va``).  No halo,
+    so a tile computes its own ``(nl, nl)`` ua/va from sliced interior
+    utmp/vtmp + cos_sg5/rsin2 — the global d2a2c pads utmp/vtmp then
+    trims, which is pointwise-identical to operating on the interior
+    (P4 phase-1b approach C, first A→C output).
+    """
+    ua = (utmp - vtmp * cos_sg5) * rsin2
+    va = (vtmp - utmp * cos_sg5) * rsin2
+    return ua, va
+
+
+def d2a2c_interior_local(utmp_pad_face, vtmp_pad_face, ti, tj, nl,
+                         u_d, v_d, cos_sg5, rsin2,
+                         cosa_u, rsin_u, cosa_v, rsin_v):
+    """Full A→C d2a2c for an INTERIOR tile (0<ti<kt-1, 0<tj<kt-1) —
+    composes the approach-C pieces with the CORRECT per-output windows.
+
+    ``utmp_pad_face`` / ``vtmp_pad_face`` are this face's FULL h2-padded
+    covariant winds ``(n+4, n+4)`` (from d2a2c_d_to_a); the tile's
+    windows are sliced HERE so the index logic lives in one place.  The
+    other args are the tile's already-sliced staggered/cell metrics +
+    local D-winds.
+
+    Per-output windows (h=2; tile cells span global ``[ti*nl, (ti+1)*nl)``):
+      * ua/va — interior utmp/vtmp ``(nl, nl)`` at padded
+        ``[ti*nl+h : ti*nl+h+nl]`` (symmetric);
+      * uc — production ``uc[I] = A2*(utmp_pad[I-1]+utmp_pad[I+2]) +
+        A1*(utmp_pad[I]+utmp_pad[I+1])`` for u-faces ``I in
+        [ti*nl, ti*nl+nl]``, which needs ``utmp_pad`` rows
+        ``[ti*nl-1 : ti*nl+nl+3]`` — ASYMMETRIC -1 on the staggered i
+        axis (the prior symmetric window gave ``uc_4th[ti*nl+j] =
+        uc_prod[ti*nl+j+1]``, off by one); cols symmetric
+        ``[tj*nl : tj*nl+nl+4]`` (d2a2c_uc_4th_local trims ``[h:-h]``);
+      * vc — symmetric rows ``[ti*nl : ti*nl+nl+4]``, asymmetric -1
+        cols ``[tj*nl-1 : tj*nl+nl+3]`` (the j-staggered analogue);
+      * ut/vt — pointwise from uc/vc + the local D-winds/metrics.
+
+    Valid only for INTERIOR tiles, where ``ti*nl-1 >= 0`` and every
+    cell is in the 4th-order face interior (no edge specials); then it
+    is bit-identical to the global d2a2c_vect restricted to the tile.
+    Returns ``(ua, va, uc, vc, ut, vt)`` (leading singleton axis kept).
+    """
+    h = 2
+    a, b = ti * nl, tj * nl
+    utmp_int = utmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl]
+    vtmp_int = vtmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl]
+    ua, va = d2a2c_ua_va_local(utmp_int, vtmp_int, cos_sg5, rsin2)
+    # uc: asymmetric -1 i-window; symmetric j-window.
+    uc_win = utmp_pad_face[None, a - 1:a + nl + 3, b:b + nl + 4]
+    uc = d2a2c_uc_4th_local(uc_win)            # (1, nl+1, nl)
+    # vc: symmetric i-window; asymmetric -1 j-window.
+    vc_win = vtmp_pad_face[None, a:a + nl + 4, b - 1:b + nl + 3]
+    vc = d2a2c_vc_4th_local(vc_win)            # (1, nl, nl+1)
+    ut, vt = d2a2c_ut_vt_local(
+        uc, vc, u_d, v_d, cosa_u, rsin_u, cosa_v, rsin_v)
+    return ua, va, uc, vc, ut, vt
+
+
+def d2a2c_vect(u_d, v_d, cdgrid):
+    """FV3 D-grid → A-grid → C-grid (covariant). FV3 sw_core.F90 d2a2c_vect.
+
+    Dispatches to _d2a2c_vect_duogrid when dg.ng>=2 (FV3 dg%is_initialized branch).
+    Returns ua/va (A-cov), uc/vc (C-cov), ut/vt (C-contravariant transport).
+    """
+    # Duogrid path: 4th-order everywhere, skip edge/corner specials (FV3 sw_core.F90:3419)
+    dg = cdgrid.base.duogrid
+    if dg is not None and dg.ng >= 2:
+        return _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+    n = cdgrid.n
+    npt = min(4, n // 2)
+
+    # iter-108 faithfulness gap (Priority 3): Fortran's cube-vertex corner
+    # overrides for utmp/vtmp and ua/va (sw_core.F90:3527-3545 and 3620-3640 —
+    # sign-flipped copies of the OTHER component from the adjacent face) are
+    # NOT PORTED to this non-duogrid path.  Python instead uses pad_halo_vector
+    # + fill_corners_h1/fill_corners_h2 (2-point edge-halo AVERAGE) — a
+    # DIFFERENT convention that gives DIFFERENT values at cube-vertex cells
+    # (O(1) on random input, O(dx^2) on smooth fields).  The numerical impact
+    # on the non-duogrid FB path has NOT been quantified.  (Duogrid path via
+    # _d2a2c_vect_duogrid is unaffected — Fortran also skips these via
+    # dg%is_initialized.)
+
+    # Steps 1+2: D→A covariant utmp/vtmp + halo=2 vector exchange.
+    # Extracted to d2a2c_d_to_a (P4 phase-1b approach C): the tiled
+    # stage runs THIS step in the global view (cheap averages + one
+    # vector halo) and shards utmp_pad/vtmp_pad into the per-tile A→C.
+    grid = cdgrid.base
+    h = 2
+    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdgrid)  # each (6, n+4, n+4)
+
+    # iter-938: Fortran cube-corner sign-flip overrides (sw_core.F90:3527-3545, 3620-3639) available
+    # as _apply_fortran_d2a2c_corner_overrides but output-dead without edge_interpolate4 j-slice extension.
+
+    # Step 3: Contravariant at cell centres
+    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
+    rsin2 = cdgrid.rsin2_cell
+    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+
+    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
+    va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
+
+    ua = ua_pad[:, h:-h, h:-h]  # (6, n, n)
+    va = va_pad[:, h:-h, h:-h]
+
+    # Step 4a: A→C x-dir. u-face i ↔ padded indices i+h-1, i+h
+    uc = 0.5 * (utmp_pad[:, h-1:n+h, h:-h]
+                + utmp_pad[:, h:n+h+1, h:-h])  # (6, n+1, n)
+
+    if n > 2 * npt + 2:
+        uc_4th = d2a2c_uc_4th_local(utmp_pad)  # (6, n+1, n)
+        i_lo = npt + 1
+        i_hi = n - npt
+        uc = uc.at[:, i_lo:i_hi, :].set(uc_4th[:, i_lo - 1:i_hi - 1, :])
+
+    # One-sided c1/c2/c3 stencil at i=1, n-1 (FV3 sw_core.F90:3586,3594)
+    if n > 3:
+        uc = uc.at[:, 1, :].set(
+            _C1 * utmp_pad[:, h + 2, h:-h] + _C2 * utmp_pad[:, h + 1, h:-h]
+            + _C3 * utmp_pad[:, h, h:-h])
+        uc = uc.at[:, n - 1, :].set(
+            _C1 * utmp_pad[:, n + h - 3, h:-h] + _C2 * utmp_pad[:, n + h - 2, h:-h]
+            + _C3 * utmp_pad[:, n + h - 1, h:-h])
+
+    # Face boundary (i=0, i=n): edge_interpolate4 on ua (FV3:3587,3603); halo=2 straddles boundary.
+    # Upwind sin_sg from halo cell: ut>0 → sin_sg(i-1,j,3); ut<=0 → sin_sg(i,j,1)
+    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
+    sin_east = cdgrid.sin_sg[:, :, :, 2]   # E-edge
+    sin_west = cdgrid.sin_sg[:, :, :, 0]   # W-edge
+    offsets = grid.halo_interp_offsets
+    se_pad_x = pad_halo(sin_east, interp_offsets=offsets)  # (6, n+2, n+2)
+    sw_pad_x = pad_halo(sin_west, interp_offsets=offsets)
+    for i_bdy in ([0, n] if n >= 2 else []):
+        i_p = i_bdy + h  # padded offset: cell i → padded index i+h
+        # ua_pad stencil: 4 cells centred on u-face i_bdy
+        ua4 = jnp.stack([ua_pad[:, i_p - 1, h:-h], ua_pad[:, i_p, h:-h],
+                         ua_pad[:, i_p + 1, h:-h], ua_pad[:, i_p + 2, h:-h]],
+                        axis=-1)
+        dxa4 = jnp.stack([dxc_pad_x[:, i_p - 1, :], dxc_pad_x[:, i_p, :],
+                          dxc_pad_x[:, i_p + 1, :], dxc_pad_x[:, i_p + 2, :]],
+                         axis=-1)
+        ut_bdy = _edge_interpolate4(ua4, dxa4)
+
+        # FV3:3589-3592 upwind sin_sg from halo cell
+        sin_left = se_pad_x[:, i_bdy, 1:-1]
+        sin_right = sw_pad_x[:, i_bdy + 1, 1:-1]  # W-edge of cell to RIGHT of face i_bdy
+        uc_bdy = jnp.where(ut_bdy > 0, ut_bdy * sin_left, ut_bdy * sin_right)
+        uc = uc.at[:, i_bdy, :].set(uc_bdy)
+
+    # Contravariant ut (rsin_u = 1/sin²)
+    ut = (uc - v_d * cdgrid.cosa_u) * cdgrid.rsin_u
+
+    # Face boundary: ut = uc/sin_upwind to recover edge_interpolate4 result (FV3:3587,3603)
+    for i_bdy in ([0, n] if n >= 2 else []):
+        sin_left = se_pad_x[:, i_bdy, 1:-1]
+        sin_right = sw_pad_x[:, i_bdy + 1, 1:-1]
+        sin_upwind = jnp.where(uc[:, i_bdy, :] > 0, sin_left, sin_right)
+        ut = ut.at[:, i_bdy, :].set(
+            uc[:, i_bdy, :] / jnp.maximum(sin_upwind, _EPS))
+
+    # Step 4b: A→C y-dir. v-face j ↔ padded j+h-1, j+h
+    vc = 0.5 * (vtmp_pad[:, h:-h, h-1:n+h] + vtmp_pad[:, h:-h, h:n+h+1])  # (6, n, n+1)
+
+    if n > 2 * npt + 2:
+        vc_4th = d2a2c_vc_4th_local(vtmp_pad)  # (6, n, n+1)
+        j_lo = npt + 1
+        j_hi = n - npt
+        vc = vc.at[:, :, j_lo:j_hi].set(vc_4th[:, :, j_lo - 1:j_hi - 1])
+
+    # One-sided c1/c2/c3 at j=1, n-1
+    if n > 3:
+        vc = vc.at[:, :, 1].set(
+            _C1 * vtmp_pad[:, h:-h, h + 2] + _C2 * vtmp_pad[:, h:-h, h + 1]
+            + _C3 * vtmp_pad[:, h:-h, h])
+        vc = vc.at[:, :, n - 1].set(
+            _C1 * vtmp_pad[:, h:-h, n + h - 3] + _C2 * vtmp_pad[:, h:-h, n + h - 2]
+            + _C3 * vtmp_pad[:, h:-h, n + h - 1])
+
+    # Face boundary y-dir: edge_interpolate4 on va (symmetric to x-dir)
+    dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
+    sin_north = cdgrid.sin_sg[:, :, :, 3]  # N-edge
+    sin_south = cdgrid.sin_sg[:, :, :, 1]  # S-edge
+    sn_pad_y = pad_halo(sin_north, interp_offsets=offsets)
+    ss_pad_y = pad_halo(sin_south, interp_offsets=offsets)
+    for j_bdy in ([0, n] if n >= 2 else []):
+        j_p = j_bdy + h
+        va4 = jnp.stack([va_pad[:, h:-h, j_p - 1], va_pad[:, h:-h, j_p],
+                         va_pad[:, h:-h, j_p + 1], va_pad[:, h:-h, j_p + 2]],
+                        axis=-1)
+        dya4 = jnp.stack([dyc_pad_y[:, :, j_p - 1], dyc_pad_y[:, :, j_p],
+                          dyc_pad_y[:, :, j_p + 1], dyc_pad_y[:, :, j_p + 2]],
+                         axis=-1)
+        vt_bdy = _edge_interpolate4(va4, dya4)
+
+        # Upwind sin_sg from halo cell
+        sin_below = sn_pad_y[:, 1:-1, j_bdy]
+        sin_above = ss_pad_y[:, 1:-1, j_bdy + 1]
+        vc_bdy = jnp.where(vt_bdy > 0, vt_bdy * sin_below, vt_bdy * sin_above)
+        vc = vc.at[:, :, j_bdy].set(vc_bdy)
+
+    vt = (vc - u_d * cdgrid.cosa_v) * cdgrid.rsin_v
+
+    # Override at face boundary: vt = vc/sin_upwind
+    for j_bdy in [0, n]:
+        sin_below = sn_pad_y[:, 1:-1, j_bdy]
+        sin_above = ss_pad_y[:, 1:-1, j_bdy + 1]
+        sin_upwind = jnp.where(vc[:, :, j_bdy] > 0, sin_below, sin_above)
+        vt = vt.at[:, :, j_bdy].set(
+            vc[:, :, j_bdy] / jnp.maximum(sin_upwind, _EPS))
+
+    # Non-duogrid adjacent-strip vt recomputation at i=0/n-1 (FV3 sw_core.F90:670-691).
+    # j_face ∈ [2, n-2] (Fortran max(3,js), min(npy-2,je+1)).
+    if n >= 4:
+        j_lo, j_hi = 2, n - 1  # j_face range [j_lo, j_hi) → [2, n-2]
+
+exec
+/usr/bin/bash -lc 'rg -n "def d2a2c_vect|edge_interpolate4|pad_halo|sin_sg|_C1|_C2|_C3|ua4|va4|dxa4|dya4" packages/core/legoesm/core/fv3_sw_core.py' in /burg-archive/glab/users/pg2328/legoESM
+ succeeded in 0ms:
+3:GFDL sw_core.F90 port (c_sw 79-488, d2a2c_vect 3006-3345). Covariant velocity + sin_sg flux scaling.
+20:    pad_halo_auto,
+29:    pad_halo,
+30:    pad_halo_vector,
+38:def _pad_halo_dgrid_for_ppm(u_d, v_d, cdgrid, halo: int = 2):
+51:            f"_pad_halo_dgrid_for_ppm: requires duogrid with ng>={h}, "
+85:def _pad_halo_uc_vc_via_d2a2c(u_d, v_d, cdgrid):
+98:            f"_pad_halo_uc_vc_via_d2a2c: requires duogrid with ng>=3 "
+162:def _pad_halo_uc_vc_new_via_old_delta(uc, vc, u_d, v_d, cdgrid):
+177:    uc_old_jhalo, vc_old_ihalo = _pad_halo_uc_vc_via_d2a2c(u_d, v_d, cdgrid)
+205:    4-cell cross-vel avg + face-boundary sin_sg upwind + adjacent strip + corner 2x2 solve.
+216:    sg = cdgrid.sin_sg
+220:    # iter-947: NEW-corrected duogrid halo via _pad_halo_uc_vc_new_via_old_delta (carries OLD cross-face delta).
+224:        uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(
+238:    # iter-953/954 NEGATIVE: Parts 2-4 on duogrid regress v_ll_Linf (sin_sg padding conflicts; Part 2 drops cosa_u term)
+242:    # Part 2: Non-duogrid face-boundary overrides (ut = uc / sin_sg(upwind))
+247:    se_pad = pad_halo(sin_w_left, interp_offsets=offsets)
+248:    sw_pad = pad_halo(sin_w_right, interp_offsets=offsets)
+265:    sn_pad = pad_halo(sin_s_below, interp_offsets=offsets)
+266:    ss_pad = pad_halo(sin_s_above, interp_offsets=offsets)
+374:def _edge_interpolate4(ua4, dxa4):
+377:    Exact port of ``edge_interpolate4`` from sw_core.F90.
+379:    t1 = dxa4[..., 0] + dxa4[..., 1]
+380:    t2 = dxa4[..., 2] + dxa4[..., 3]
+382:        ((t1 + dxa4[..., 1]) * ua4[..., 1] - dxa4[..., 1] * ua4[..., 0]) / t1
+383:        + ((t2 + dxa4[..., 2]) * ua4[..., 2] - dxa4[..., 2] * ua4[..., 3]) / t2
+390:_C1 = -2.0 / 14.0  # one-sided cubic at face boundary
+391:_C2 = 11.0 / 14.0
+392:_C3 = 5.0 / 14.0
+502:    halo row/col.  Our Python pad_halo_vector(halo=2) only provides
+516:    halo cells.  This matches our intent of correcting `pad_halo_vector`'s
+526:    utmp_pad : (6, n+4, n+4) — pad_halo_vector output
+527:    vtmp_pad : (6, n+4, n+4) — pad_halo_vector output
+588:    return pad_halo_vector(
+604:    face-edge specials (C1/C2/C3, edge_interpolate4) — those stay in
+704:def d2a2c_vect(u_d, v_d, cdgrid):
+721:    # NOT PORTED to this non-duogrid path.  Python instead uses pad_halo_vector
+738:    # as _apply_fortran_d2a2c_corner_overrides but output-dead without edge_interpolate4 j-slice extension.
+765:            _C1 * utmp_pad[:, h + 2, h:-h] + _C2 * utmp_pad[:, h + 1, h:-h]
+766:            + _C3 * utmp_pad[:, h, h:-h])
+768:            _C1 * utmp_pad[:, n + h - 3, h:-h] + _C2 * utmp_pad[:, n + h - 2, h:-h]
+769:            + _C3 * utmp_pad[:, n + h - 1, h:-h])
+771:    # Face boundary (i=0, i=n): edge_interpolate4 on ua (FV3:3587,3603); halo=2 straddles boundary.
+772:    # Upwind sin_sg from halo cell: ut>0 → sin_sg(i-1,j,3); ut<=0 → sin_sg(i,j,1)
+774:    sin_east = cdgrid.sin_sg[:, :, :, 2]   # E-edge
+775:    sin_west = cdgrid.sin_sg[:, :, :, 0]   # W-edge
+777:    se_pad_x = pad_halo(sin_east, interp_offsets=offsets)  # (6, n+2, n+2)
+778:    sw_pad_x = pad_halo(sin_west, interp_offsets=offsets)
+782:        ua4 = jnp.stack([ua_pad[:, i_p - 1, h:-h], ua_pad[:, i_p, h:-h],
+785:        dxa4 = jnp.stack([dxc_pad_x[:, i_p - 1, :], dxc_pad_x[:, i_p, :],
+788:        ut_bdy = _edge_interpolate4(ua4, dxa4)
+790:        # FV3:3589-3592 upwind sin_sg from halo cell
+799:    # Face boundary: ut = uc/sin_upwind to recover edge_interpolate4 result (FV3:3587,3603)
+819:            _C1 * vtmp_pad[:, h:-h, h + 2] + _C2 * vtmp_pad[:, h:-h, h + 1]
+820:            + _C3 * vtmp_pad[:, h:-h, h])
+822:            _C1 * vtmp_pad[:, h:-h, n + h - 3] + _C2 * vtmp_pad[:, h:-h, n + h - 2]
+823:            + _C3 * vtmp_pad[:, h:-h, n + h - 1])
+825:    # Face boundary y-dir: edge_interpolate4 on va (symmetric to x-dir)
+827:    sin_north = cdgrid.sin_sg[:, :, :, 3]  # N-edge
+828:    sin_south = cdgrid.sin_sg[:, :, :, 1]  # S-edge
+829:    sn_pad_y = pad_halo(sin_north, interp_offsets=offsets)
+830:    ss_pad_y = pad_halo(sin_south, interp_offsets=offsets)
+833:        va4 = jnp.stack([va_pad[:, h:-h, j_p - 1], va_pad[:, h:-h, j_p],
+836:        dya4 = jnp.stack([dyc_pad_y[:, :, j_p - 1], dyc_pad_y[:, :, j_p],
+839:        vt_bdy = _edge_interpolate4(va4, dya4)
+841:        # Upwind sin_sg from halo cell
+903:def _sina_u_v_from_sin_sg(cdgrid):
+905:    from FV3 sub-grid `sin_sg` per ``fv_grid_utils.F90:505-518``.
+908:      sina_u(i,j) = 0.5*(sin_sg(i-1,j,3) + sin_sg(i,j,1))
+909:      sina_v(i,j) = 0.5*(sin_sg(i,j-1,4) + sin_sg(i,j,2))
+911:    Panel-edge faces: use the single-side sin_sg at the outermost cell,
+920:    sg = cdgrid.sin_sg  # (6, n, n, 9): 0=W, 1=S, 2=E, 3=N, 4=center, ...
+943:    Non-duogrid path applies sin_sg/cos_sg conversion at face boundaries.
+950:        sg = cdgrid.sin_sg
+952:        # West edge (cell 0, ua > 0): uc*sin_sg(W) + v*cos_sg(W)
+956:        # East edge (cell n-1, ua <= 0): uc*sin_sg(E) + v*cos_sg(E)
+960:        # South edge (cell j=0, va > 0): vc*sin_sg(S) + u*cos_sg(S)
+964:        # North edge (cell j=n-1, va <= 0): vc*sin_sg(N) + u*cos_sg(N)
+980:    sg = cdgrid.sin_sg
+995:    d2_pad = pad_halo(d2, interp_offsets=_offs, duogrid=dg)
+1000:    se_pad = pad_halo(sin_E, interp_offsets=_offs, duogrid=dg)
+1001:    sw_pad = pad_halo(sin_W, interp_offsets=_offs, duogrid=dg)
+1002:    sn_pad = pad_halo(sin_N, interp_offsets=_offs, duogrid=dg)
+1003:    ss_pad = pad_halo(sin_S, interp_offsets=_offs, duogrid=dg)
+1014:        d2_pad = pad_halo(d2, interp_offsets=_offs, duogrid=dg)
+1028:    Cross-velocity correction via cos_sg/sin_sg. Face-boundary zeroing + 0.25 attenuation.
+1031:    sg = cdgrid.sin_sg
+1188:    # iter-87: shared helper sin_sg sub-grid form (Fortran-faithful vs sqrt(1-cosa²))
+1189:    sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+1198:        # del-2 divergence damping (FV3:1644-1724). iter-655: pad_halo cross-face for nord=0
+1201:        ua_full = pad_halo(ua, halo=1, interp_offsets=_offs, duogrid=dg)
+1202:        va_full = pad_halo(va, halo=1, interp_offsets=_offs, duogrid=dg)
+1323:        # iter-837: uc/vc are FV3 COVARIANT — pass cos_theta/sin_theta for pad_halo_vector covariant branch
+1324:        uc_cc_pad, vc_cc_pad = pad_halo_vector(
+1408:    `sina_u` / `sina_v` come from the sin_sg sub-grid as
+1409:    ``0.5*(sin_sg(i-1,j,3) + sin_sg(i,j,1))`` (matching
+1416:    sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+1447:    # 2. Scale transport: ut/vt * dt2 * edge_length * sin_sg_upwind (FV3 fv_grid_utils.F90:570)
+1450:    sg = cdgrid.sin_sg
+1458:    se_pad = pad_halo(sin_east, interp_offsets=_offs, duogrid=_dg)
+1459:    sw_pad = pad_halo(sin_west, interp_offsets=_offs, duogrid=_dg)
+1467:    sn_pad = pad_halo(sin_north, interp_offsets=_offs, duogrid=_dg)
+1468:    ss_pad = pad_halo(sin_south, interp_offsets=_offs, duogrid=_dg)
+1474:    h_pad = pad_halo_auto(h, cdgrid)
+1504:    ke_pad = pad_halo_auto(ke_total, cdgrid)
+1543:    B_pad = pad_halo_auto(B, cdgrid)
+1559:        div_pad = pad_halo_auto(div_field, cdgrid)
+1571:    duc_pad, dvc_pad = pad_halo_vector(
+1626:    p_pad = pad_halo_auto(p, cdgrid)
+1915:    # iter-947: NEW-corrected cross-face halo via _pad_halo_uc_vc_new_via_old_delta (ng>=3)
+1917:        uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(
+1927:    # iter-945: cross-face halo for (u_d, v_d) PPM sweep via _pad_halo_dgrid_for_ppm
+1931:        u_d_ihalo, v_d_jhalo = _pad_halo_dgrid_for_ppm(
+1988:    # iter-947: forward OLD u_d/v_d for duogrid NEW-corrected halo via _pad_halo_uc_vc_new_via_old_delta
+
+codex
+I have the main block. I’m checking the remainder for the adjacent-strip recomputes and constants so the tables include the output ranges exactly.
+exec
+/usr/bin/bash -lc "sed -n '360,395p' packages/core/legoesm/core/fv3_sw_core.py" in /burg-archive/glab/users/pg2328/legoESM
+ succeeded in 0ms:
+    ut = ut.at[:, 1, n-1].set(
+        (uc[:, 1, n-1] - 0.25 * cu[:, 1, n-1] * (
+            vt[:, 0, n] + vt[:, 1, n] + vt[:, 1, n-1] + vc[:, 0, n-1]
+            - 0.25 * cv[:, 0, n-1] * (ut[:, 0, n-1] + ut[:, 0, n-2] + ut[:, 1, n-2])
+        )) * damp)
+    vt = vt.at[:, 0, n-1].set(
+        (vc[:, 0, n-1] - 0.25 * cv[:, 0, n-1] * (
+            ut[:, 0, n-1] + ut[:, 0, n-2] + ut[:, 1, n-2] + uc[:, 1, n-1]
+            - 0.25 * cu[:, 1, n-1] * (vt[:, 0, n] + vt[:, 1, n] + vt[:, 1, n-1])
+        )) * damp)
+
+    return ut, vt
+
+
+def _edge_interpolate4(ua4, dxa4):
+    """FV3 non-uniform 4-point interpolation to the interface between cells 2 and 3.
+
+    Exact port of ``edge_interpolate4`` from sw_core.F90.
+    """
+    t1 = dxa4[..., 0] + dxa4[..., 1]
+    t2 = dxa4[..., 2] + dxa4[..., 3]
+    return 0.5 * (
+        ((t1 + dxa4[..., 1]) * ua4[..., 1] - dxa4[..., 1] * ua4[..., 0]) / t1
+        + ((t2 + dxa4[..., 2]) * ua4[..., 2] - dxa4[..., 2] * ua4[..., 3]) / t2
+    )
+
+
+# FV3 interpolation constants (from sw_core.F90)
+_A1 = 0.5625     # 4th-order Lagrange
+_A2 = -0.0625
+_C1 = -2.0 / 14.0  # one-sided cubic at face boundary
+_C2 = 11.0 / 14.0
+_C3 = 5.0 / 14.0
+
+
+# ==============================================================================
+
+exec
+/usr/bin/bash -lc "sed -n '860,915p' packages/core/legoesm/core/fv3_sw_core.py" in /burg-archive/glab/users/pg2328/legoESM
+ succeeded in 0ms:
+        j_lo, j_hi = 2, n - 1  # j_face range [j_lo, j_hi) → [2, n-2]
+        # West: Fortran vt(1, j) → Python vt[:, 0, j_lo:j_hi]
+        ut_w = (ut[:, 0, j_lo - 1:j_hi - 1] + ut[:, 1, j_lo - 1:j_hi - 1]
+                + ut[:, 0, j_lo:j_hi] + ut[:, 1, j_lo:j_hi])
+        vt_w_new = (vc[:, 0, j_lo:j_hi]
+                    - 0.25 * cdgrid.cosa_v[:, 0, j_lo:j_hi] * ut_w)
+        vt = vt.at[:, 0, j_lo:j_hi].set(vt_w_new)
+        # East: Fortran vt(npx-1, j) → Python vt[:, n-1, j_lo:j_hi]
+        ut_e = (ut[:, n - 1, j_lo - 1:j_hi - 1]
+                + ut[:, n, j_lo - 1:j_hi - 1]
+                + ut[:, n - 1, j_lo:j_hi]
+                + ut[:, n, j_lo:j_hi])
+        vt_e_new = (vc[:, n - 1, j_lo:j_hi]
+                    - 0.25 * cdgrid.cosa_v[:, n - 1, j_lo:j_hi] * ut_e)
+        vt = vt.at[:, n - 1, j_lo:j_hi].set(vt_e_new)
+
+    # Non-duogrid adjacent-strip ut recomputation at j=0/n-1 (FV3:701-707, 716-722).
+    # West/east blocks write vt[i_cell=0,n-1]; south/north read vt at i_cell∈[1,n-3] (no overlap).
+    if n >= 4:
+        i_lo, i_hi = 2, n - 1
+        # South: Fortran ut(i, 1) → Python ut[:, i_lo:i_hi, 0]
+        vt_s = (vt[:, i_lo - 1:i_hi - 1, 0] + vt[:, i_lo:i_hi, 0]
+                + vt[:, i_lo - 1:i_hi - 1, 1] + vt[:, i_lo:i_hi, 1])
+        ut_s_new = (uc[:, i_lo:i_hi, 0]
+                    - 0.25 * cdgrid.cosa_u[:, i_lo:i_hi, 0] * vt_s)
+        ut = ut.at[:, i_lo:i_hi, 0].set(ut_s_new)
+        # North: Fortran ut(i, npy-1) → Python ut[:, i_lo:i_hi, n-1]
+        vt_n = (vt[:, i_lo - 1:i_hi - 1, n - 1]
+                + vt[:, i_lo:i_hi, n - 1]
+                + vt[:, i_lo - 1:i_hi - 1, n]
+                + vt[:, i_lo:i_hi, n])
+        ut_n_new = (uc[:, i_lo:i_hi, n - 1]
+                    - 0.25 * cdgrid.cosa_u[:, i_lo:i_hi, n - 1] * vt_n)
+        ut = ut.at[:, i_lo:i_hi, n - 1].set(ut_n_new)
+
+    return ua, va, uc, vc, ut, vt
+
+
+# ==============================================================================
+# Shared FV3 c_sw helpers (used by both _c_sw and fv3_csw_tendencies)
+# ==============================================================================
+
+
+def _sina_u_v_from_sin_sg(cdgrid):
+    """Return `sina_u` (6, n+1, n) and `sina_v` (6, n, n+1) constructed
+    from FV3 sub-grid `sin_sg` per ``fv_grid_utils.F90:505-518``.
+
+    Interior faces:
+      sina_u(i,j) = 0.5*(sin_sg(i-1,j,3) + sin_sg(i,j,1))
+      sina_v(i,j) = 0.5*(sin_sg(i,j-1,4) + sin_sg(i,j,2))
+
+    Panel-edge faces: use the single-side sin_sg at the outermost cell,
+    matching the sina_u/sina_v construction in `cubed_sphere_cdgrid.py`
+    and `d_sw5_corner_divergence`.
+
+    Using this formulation instead of ``sqrt(1 - cosa_u**2)`` is the
+
+exec
+/usr/bin/bash -lc "rg -n \"def pad_halo\\(|def pad_halo_vector\\(|halo_interp_offsets\" packages/core/legoesm -g '*.py'" in /burg-archive/glab/users/pg2328/legoESM
+ succeeded in 221ms:
+packages/core/legoesm/grids/cubed_sphere.py:34:    compute_halo_interp_offsets,
+packages/core/legoesm/grids/cubed_sphere.py:35:    compute_halo_interp_offsets_h2,
+packages/core/legoesm/grids/cubed_sphere.py:36:    compute_halo_interp_offsets_h3,
+packages/core/legoesm/grids/cubed_sphere.py:105:    halo_interp_offsets_h2 : jax.Array
+packages/core/legoesm/grids/cubed_sphere.py:107:    halo_interp_offsets_h3 : jax.Array
+packages/core/legoesm/grids/cubed_sphere.py:146:    halo_interp_offsets: jax.Array
+packages/core/legoesm/grids/cubed_sphere.py:151:    halo_interp_offsets_h2: jax.Array
+packages/core/legoesm/grids/cubed_sphere.py:152:    halo_interp_offsets_h3: jax.Array
+packages/core/legoesm/grids/cubed_sphere.py:291:            compute_halo_interp_offsets, compute_halo_interp_offsets_h2,
+packages/core/legoesm/grids/cubed_sphere.py:292:            compute_halo_interp_offsets_h3)
+packages/core/legoesm/grids/cubed_sphere.py:295:            compute_halo_interp_offsets_ed, compute_halo_interp_offsets_ed_h2,
+packages/core/legoesm/grids/cubed_sphere.py:296:            compute_halo_interp_offsets_ed_h3)
+packages/core/legoesm/grids/cubed_sphere.py:301:            compute_halo_interp_offsets_ed, compute_halo_interp_offsets_ed_h2,
+packages/core/legoesm/grids/cubed_sphere.py:302:            compute_halo_interp_offsets_ed_h3)
+packages/core/legoesm/grids/cubed_sphere.py:439:        halo_interp_offsets=halo_offsets.astype(_dt),
+packages/core/legoesm/grids/cubed_sphere.py:444:        halo_interp_offsets_h2=halo_offsets_h2.astype(_dt),
+packages/core/legoesm/grids/cubed_sphere.py:445:        halo_interp_offsets_h3=halo_offsets_h3.astype(_dt),
+packages/core/legoesm/grids/cubed_sphere.py:4092:        halo_interp_offsets=None,  # not needed — wall BC
+packages/core/legoesm/grids/cubed_sphere.py:4097:        halo_interp_offsets_h2=None,  # not needed — wall BC
+packages/core/legoesm/grids/cubed_sphere.py:4098:        halo_interp_offsets_h3=None,  # not needed — wall BC
+packages/core/legoesm/grids/cubed_sphere_cdgrid.py:1183:    _pos_offs = None if _base_dg is not None else base.halo_interp_offsets
+packages/core/legoesm/parallel/halo_exchange.py:105:    :func:`compute_halo_interp_offsets`.
+packages/core/legoesm/grids/halo.py:158:def compute_halo_interp_offsets(n: int) -> jnp.ndarray:
+packages/core/legoesm/grids/halo.py:252:def _compute_halo_interp_offsets_ed_hN(n: int, halo: int) -> jnp.ndarray:
+packages/core/legoesm/grids/halo.py:301:def compute_halo_interp_offsets_ed(n: int) -> jnp.ndarray:
+packages/core/legoesm/grids/halo.py:302:    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets` —
+packages/core/legoesm/grids/halo.py:303:    ``(6, 4, n)`` (halo=1, squeezed).  See :func:`_compute_halo_interp_offsets_ed_hN`."""
+packages/core/legoesm/grids/halo.py:304:    return _compute_halo_interp_offsets_ed_hN(n, 1)[:, :, 0, :]
+packages/core/legoesm/grids/halo.py:307:def compute_halo_interp_offsets_ed_h2(n: int) -> jnp.ndarray:
+packages/core/legoesm/grids/halo.py:308:    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets_h2` — ``(6, 4, 2, n)``."""
+packages/core/legoesm/grids/halo.py:309:    return _compute_halo_interp_offsets_ed_hN(n, 2)
+packages/core/legoesm/grids/halo.py:312:def compute_halo_interp_offsets_ed_h3(n: int) -> jnp.ndarray:
+packages/core/legoesm/grids/halo.py:313:    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets_h3` — ``(6, 4, 3, n)``."""
+packages/core/legoesm/grids/halo.py:314:    return _compute_halo_interp_offsets_ed_hN(n, 3)
+packages/core/legoesm/grids/halo.py:317:def compute_halo_interp_offsets_h2(n: int) -> jnp.ndarray:
+packages/core/legoesm/grids/halo.py:320:    Like :func:`compute_halo_interp_offsets` but returns offsets for
+packages/core/legoesm/grids/halo.py:335:    return _compute_halo_interp_offsets_hN(n, halo=2)
+packages/core/legoesm/grids/halo.py:338:def compute_halo_interp_offsets_h3(n: int) -> jnp.ndarray:
+packages/core/legoesm/grids/halo.py:341:    Like :func:`compute_halo_interp_offsets_h2` but returns offsets for
+packages/core/legoesm/grids/halo.py:359:    return _compute_halo_interp_offsets_hN(n, halo=3)
+packages/core/legoesm/grids/halo.py:362:def _compute_halo_interp_offsets_hN(n: int, halo: int) -> jnp.ndarray:
+packages/core/legoesm/grids/halo.py:365:    Shared implementation for :func:`compute_halo_interp_offsets_h2`
+packages/core/legoesm/grids/halo.py:366:    and :func:`compute_halo_interp_offsets_h3` — folded into a single
+packages/core/legoesm/grids/halo.py:595:def pad_halo(
+packages/core/legoesm/grids/halo.py:1088:        :func:`compute_halo_interp_offsets_h3`).
+packages/core/legoesm/grids/halo.py:1215:        # this path with `interp_offsets=base.halo_interp_offsets`).
+packages/core/legoesm/grids/halo.py:1404:        :func:`compute_halo_interp_offsets_h3`).
+packages/core/legoesm/grids/halo.py:2050:def pad_halo_vector(
+packages/core/legoesm/grids/halo.py:3211:        Halo interpolation offsets (``grid.halo_interp_offsets``) for the
+packages/core/legoesm/core/operators_3d.py:46:    offsets = None if dg is not None else grid.halo_interp_offsets
+packages/core/legoesm/core/operators_3d.py:84:        offsets = None if dg is not None else grid.halo_interp_offsets
+packages/core/legoesm/core/operators_3d.py:109:        offsets = None if dg is not None else grid.halo_interp_offsets
+packages/core/legoesm/core/operators_3d.py:130:    offsets = None if dg is not None else grid.halo_interp_offsets
+packages/core/legoesm/core/operators_3d.py:189:    offsets = None if dg is not None else grid.halo_interp_offsets
+packages/core/legoesm/core/operators_3d.py:220:        offsets = None if dg is not None else grid.halo_interp_offsets
+packages/core/legoesm/core/operators_fv.py:387:    q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
+packages/core/legoesm/core/operators_fv.py:392:        interp_offsets=grid.halo_interp_offsets_h2, halo=2,
+packages/core/legoesm/core/operators_fv.py:482:    q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
+packages/core/legoesm/core/operators_fv.py:508:    q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
+packages/core/legoesm/core/operators.py:28:    offsets = None if dg is not None else grid.halo_interp_offsets
+packages/core/legoesm/core/operators.py:35:    offsets = None if dg is not None else grid.halo_interp_offsets
+packages/core/legoesm/core/operators.py:223:    offsets = None if dg is not None else grid.halo_interp_offsets
+packages/core/legoesm/core/fv_tp_2d.py:773:    _offs = None if _use_dg else grid.halo_interp_offsets
+packages/core/legoesm/core/fv_tp_2d.py:861:    _offs = None if _use_dg else grid.halo_interp_offsets
+packages/core/legoesm/core/fv_tp_2d.py:962:    offsets_h2 = grid.halo_interp_offsets_h2
+packages/core/legoesm/core/fv_tp_2d.py:986:    # because `cubed_sphere.py:783` sets `halo_interp_offsets_h2=None`
+packages/core/legoesm/core/fv3_del6_vt_flux.py:131:    offsets = None if dg is not None else cdgrid.base.halo_interp_offsets
+packages/core/legoesm/core/operators_cdgrid.py:34:    offsets = None if dg is not None else cdgrid.base.halo_interp_offsets
+packages/core/legoesm/core/operators_cdgrid.py:43:    offsets = None if dg is not None else cdgrid.base.halo_interp_offsets_h2
+packages/core/legoesm/core/operators_cdgrid.py:280:    offsets = None if dg is not None else grid.halo_interp_offsets
+packages/core/legoesm/core/operators_cdgrid.py:282:                  else getattr(grid, "halo_interp_offsets_h2", None))
+packages/core/legoesm/core/operators_cdgrid.py:1385:    offsets = None if dg is not None else grid.halo_interp_offsets
+packages/core/legoesm/core/operators_cdgrid.py:1433:    offsets = None if dg is not None else grid.halo_interp_offsets
+packages/core/legoesm/core/operators_cdgrid.py:1576:    offsets = None if dg is not None else grid.halo_interp_offsets
+
+codex
+The adjacent-strip logic is limited to `vt[:, 0|n-1, 2:n-1]` and `ut[:, 2:n-1, 0|n-1]`. I’m checking scalar halo padding only to decide whether the sine inputs can be sliced from a local tile or require a face/global padded scalar.
+exec
+/usr/bin/bash -lc "sed -n '595,690p' packages/core/legoesm/grids/halo.py" in /burg-archive/glab/users/pg2328/legoESM
+ succeeded in 0ms:
+def pad_halo(
+    data: jax.Array,
+    halo: int = 1,
+    interp_offsets: jax.Array | None = None,
+    duogrid=None,
+    monotone_clip: bool = False,
+    monotone_clip_slack: float = 0.0,
+) -> jax.Array:
+    """Pad a scalar field with inter-face halo data.
+
+    Creates an array of shape (6, n+2*halo, n+2*halo) where the interior
+    contains the original data and the halo cells contain data from
+    neighboring faces, correctly handling axis swaps and reversals.
+
+    When *interp_offsets* is provided (shape ``(6, 4, n)``), the neighbour
+    strip is linearly interpolated to the correct physical position of
+    each halo cell instead of using a nearest-index copy.  This removes
+    the O(Δα) position mismatch near cube corners that otherwise
+    degrades operator accuracy from second to first order.
+
+    When *duogrid* is provided (a ``DuoGridData``), the standard copy is
+    followed by a kinked-to-extended Lagrange remap (cube_rmp) and corner
+    fill. This is mutually exclusive with *interp_offsets*.
+
+    Parameters
+    ----------
+    data : jax.Array, shape (6, n, n)
+        Scalar field on the cubed-sphere.
+    halo : int
+        Halo width (default 1).
+    interp_offsets : jax.Array or None
+        Precomputed fractional-index offsets, shape (6, 4, n).
+        When ``None``, the standard nearest-index copy is used.
+    duogrid : DuoGridData or None
+        Duo-Grid remapping data. Mutually exclusive with interp_offsets.
+
+    Returns
+    -------
+    padded : jax.Array, shape (6, n+2*halo, n+2*halo)
+    """
+    if interp_offsets is not None and duogrid is not None:
+        raise ValueError(
+            "interp_offsets and duogrid are mutually exclusive"
+        )
+    if halo not in (1, 2, 3):
+        raise NotImplementedError(
+            f"Only halo=1, halo=2, and halo=3 are supported, got {halo}")
+
+    # Validate interp_offsets shape for halo=3 (the new path added in
+    # iter-499).  Without this guard, a wrongly-shaped offsets array
+    # would fail with a cryptic IndexError deep inside
+    # `_pad_halo_local_h3`.  halo=1/2 are intentionally *not* checked
+    # here because several existing callers pass the h1 shape
+    # `(6, 4, n)` together with `halo=2`; that usage is silently
+    # reduced to nearest-neighbour-like interpolation by
+    # `_pad_halo_local_h2` and any pure tightening would be a broader
+    # refactor outside iter-500's Codex-driven guardrail scope.  The
+    # halo=3 path has no legacy callers so we lock it down now.
+    #
+    # iter-501 (Codex stop-time review of iter-500): the ndim + depth
+    # check alone is not strict — it accepts (10, 7, 3, 100) which
+    # would then fail cryptically in the loop for face=6..9 / edge=4..6,
+    # and even if it survived the indexing loop a strip shape
+    # mismatch against `data.shape[1]` (the grid size `n`) would give
+    # silently-wrong interpolation.  Now every axis is validated.
+    if interp_offsets is not None and halo == 3:
+        n = data.shape[1]
+        expected = (6, 4, 3, n)
+        if tuple(interp_offsets.shape) != expected:
+            raise ValueError(
+                f"halo=3 expects interp_offsets of shape {expected} "
+                f"(6 faces, 4 edges, 3 halo depths, n = data.shape[1]); "
+                f"got shape={tuple(interp_offsets.shape)}.")
+
+    # When duogrid is active, suppress interp_offsets (use nearest copy + remap)
+    offsets = None if duogrid is not None else interp_offsets
+
+    # Single-face (regional panel) dispatch: wall boundary conditions.
+    # Iter 29: gate the wall-BC fast path on the *non-MPI* backends.
+    # When MPI is active and a rank owns exactly one face (compact
+    # local layout), ``data.shape[0] == 1`` is the *normal* state and
+    # we still need to exchange halos with neighbouring ranks — taking
+    # the wall-BC branch silently zeroed out the inter-face coupling.
+    if data.shape[0] == 1 and _halo_backend != "mpi":
+        return _pad_halo_wall(data, halo)
+
+    # MPI dispatch.
+    if _halo_backend == "mpi":
+        # iter-630: MPI halo=3 is now supported end-to-end.  The 2D scalar
+        # (`_pad_halo_mpi_face_only` / `_pad_halo_mpi_tiled`) and 4D tensor
+        # (`_pad_halo_mpi_4d_face_only` / `_pad_halo_mpi_4d_tiled`) paths
+        # all handle three halo depths, and corner cells are filled by
+        # `fill_corners_h3`.
+        #
+        # FV3_3D 2026-05-27: option (a) implemented — `pad_halo_mpi`
+        # now carries `interp_offsets` through to the face-only receive
+
+exec
+/usr/bin/bash -lc "sed -n '158,245p' packages/core/legoesm/grids/halo.py" in /burg-archive/glab/users/pg2328/legoESM
+ succeeded in 0ms:
+def compute_halo_interp_offsets(n: int) -> jnp.ndarray:
+    """Precompute fractional-index offsets for the interpolated halo exchange.
+
+    The standard halo exchange copies the j-th cell of the neighbour's
+    edge strip into the j-th halo slot.  On a gnomonic cubed sphere the
+    physical position of the halo slot (from the face's own extended
+    gnomonic grid) does NOT coincide with the neighbour's j-th cell —
+    the mismatch grows toward cube corners (up to ~0.5 grid cells at C48).
+
+    This function computes, for every halo cell, the true fractional index
+    on the neighbour strip so that ``pad_halo`` can linearly interpolate
+    instead of doing a nearest-index copy.
+
+    Parameters
+    ----------
+    n : int
+        Number of cells per face edge.
+
+    Returns
+    -------
+    offsets : jax.Array, shape (6, 4, n)
+        ``offsets[face, edge_idx, j]`` is the correction δ such that
+        the true fractional index on the (possibly reversed) neighbour
+        strip is ``j + δ``.  Edge indices: 0=WEST, 1=EAST, 2=SOUTH, 3=NORTH.
+    """
+    dalpha = np.pi / (2 * n)
+    alpha = np.linspace(-np.pi / 4, np.pi / 4, n, endpoint=False) + dalpha / 2
+
+    edges = [WEST, EAST, SOUTH, NORTH]
+    offsets = np.zeros((6, 4, n), dtype=np.float64)
+
+    for face in range(6):
+        for edge_idx, edge in enumerate(edges):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+
+            for j in range(n):
+                # ---- halo cell position on extended gnomonic grid ----
+                if edge == WEST:
+                    ax_h, ay_h = -np.pi / 4 - dalpha / 2, alpha[j]
+                elif edge == EAST:
+                    ax_h, ay_h = np.pi / 4 + dalpha / 2, alpha[j]
+                elif edge == SOUTH:
+                    ax_h, ay_h = alpha[j], -np.pi / 4 - dalpha / 2
+                else:  # NORTH
+                    ax_h, ay_h = alpha[j], np.pi / 4 + dalpha / 2
+
+                xyz_h = _face_to_xyz_np(face, ax_h, ay_h)
+
+                # ---- map to neighbour-face gnomonic coordinates ----
+                ax_n, ay_n = _xyz_to_gnomonic_np(
+                    nbr_face, xyz_h[0], xyz_h[1], xyz_h[2],
+                )
+
+                # ---- fractional index along the strip ----
+                # The strip varies along the "transverse" gnomonic axis.
+                if nbr_edge in (WEST, EAST):
+                    frac = (ay_n - alpha[0]) / dalpha
+                else:  # SOUTH, NORTH
+                    frac = (ax_n - alpha[0]) / dalpha
+
+                if is_reversed:
+                    frac = (n - 1) - frac
+
+                offsets[face, edge_idx, j] = frac - j
+
+    return jnp.array(offsets, dtype=jnp.float64)
+
+
+def _ed_indomain_boundary_strip(arr, edge, n, ext):
+    """In-domain boundary strip (length n, ascending array order) of an
+    ``(M, M)`` padded gnomonic_ed face, in-domain block ``[ext:ext+n]``."""
+    if edge == WEST:
+        return arr[ext, ext:ext + n]
+    elif edge == EAST:
+        return arr[ext + n - 1, ext:ext + n]
+    elif edge == SOUTH:
+        return arr[ext:ext + n, ext]
+    else:  # NORTH
+        return arr[ext:ext + n, ext + n - 1]
+
+
+def _ed_halo_strip(arr, edge, n, ext, depth):
+    """Halo strip at ``depth`` cells beyond ``edge`` (depth 0 = adjacent to the
+    in-domain boundary), length n, ascending array order."""
+    if edge == WEST:
+        return arr[ext - 1 - depth, ext:ext + n]
+    elif edge == EAST:
+        return arr[ext + n + depth, ext:ext + n]
+
+exec
+/usr/bin/bash -lc "sed -n '245,420p' packages/core/legoesm/grids/halo.py" in /burg-archive/glab/users/pg2328/legoESM
+ succeeded in 0ms:
+        return arr[ext + n + depth, ext:ext + n]
+    elif edge == SOUTH:
+        return arr[ext:ext + n, ext - 1 - depth]
+    else:  # NORTH
+        return arr[ext:ext + n, ext + n + depth]
+
+
+def _compute_halo_interp_offsets_ed_hN(n: int, halo: int) -> jnp.ndarray:
+    """gnomonic_ed cross-face halo interp offsets, ``(6, 4, halo, n)``.
+
+    Position-matching on the actual extended gnomonic_ed cell centres
+    (`gnomonic_ed_padded_centers`, which extend cleanly into the halo): each
+    halo cell (depth 0..halo-1 beyond an edge) is matched to its neighbour's
+    in-domain edge strip via a parabola-vertex fit on great-circle distance,
+    giving the true fractional index; ``δ = frac − j``.  gnomonic_ed-specific
+    (the equiangular analytic offsets are the wrong geometry — codex gating
+    blocker).
+    """
+    from legoesm.grids.cubed_sphere import gnomonic_ed_padded_centers
+
+    ext = halo + 1
+    lon, lat = gnomonic_ed_padded_centers(n, halo)  # (6, M, M), M=n+2*halo+2
+    lon = np.asarray(lon)
+    lat = np.asarray(lat)
+    xyz = np.stack([
+        np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)
+    ], axis=-1)
+
+    edges = [WEST, EAST, SOUTH, NORTH]
+    offsets = np.zeros((6, 4, halo, n), dtype=np.float64)
+
+    for face in range(6):
+        for edge_idx, edge in enumerate(edges):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+            nbr_strip = _ed_indomain_boundary_strip(xyz[nbr_face], nbr_edge, n, ext)
+            for depth in range(halo):
+                halo_strip = _ed_halo_strip(xyz[face], edge, n, ext, depth)
+                for j in range(n):
+                    d2 = np.sum((nbr_strip - halo_strip[j][None, :]) ** 2, axis=1)
+                    k = int(np.argmin(d2))
+                    if 0 < k < n - 1:
+                        dl, dc, dr = d2[k - 1], d2[k], d2[k + 1]
+                        denom = dl - 2.0 * dc + dr
+                        delta = (0.5 * (dl - dr) / denom
+                                 if abs(denom) > 1e-30 else 0.0)
+                        delta = float(np.clip(delta, -1.0, 1.0))
+                    else:
+                        delta = 0.0
+                    frac = k + delta
+                    if is_reversed:
+                        frac = (n - 1) - frac
+                    offsets[face, edge_idx, depth, j] = frac - j
+
+    return jnp.array(offsets, dtype=jnp.float64)
+
+
+def compute_halo_interp_offsets_ed(n: int) -> jnp.ndarray:
+    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets` —
+    ``(6, 4, n)`` (halo=1, squeezed).  See :func:`_compute_halo_interp_offsets_ed_hN`."""
+    return _compute_halo_interp_offsets_ed_hN(n, 1)[:, :, 0, :]
+
+
+def compute_halo_interp_offsets_ed_h2(n: int) -> jnp.ndarray:
+    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets_h2` — ``(6, 4, 2, n)``."""
+    return _compute_halo_interp_offsets_ed_hN(n, 2)
+
+
+def compute_halo_interp_offsets_ed_h3(n: int) -> jnp.ndarray:
+    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets_h3` — ``(6, 4, 3, n)``."""
+    return _compute_halo_interp_offsets_ed_hN(n, 3)
+
+
+def compute_halo_interp_offsets_h2(n: int) -> jnp.ndarray:
+    """Precompute fractional-index offsets for halo=2 exchange.
+
+    Like :func:`compute_halo_interp_offsets` but returns offsets for
+    two halo depths (depth 0 = adjacent to interior, depth 1 = outer).
+
+    Parameters
+    ----------
+    n : int
+        Number of cells per face edge.
+
+    Returns
+    -------
+    offsets : jax.Array, shape (6, 4, 2, n)
+        ``offsets[face, edge_idx, depth, j]`` is the correction δ such
+        that the true fractional index on the neighbour strip at that
+        depth is ``j + δ``.
+    """
+    return _compute_halo_interp_offsets_hN(n, halo=2)
+
+
+def compute_halo_interp_offsets_h3(n: int) -> jnp.ndarray:
+    """Precompute fractional-index offsets for halo=3 exchange.
+
+    Like :func:`compute_halo_interp_offsets_h2` but returns offsets for
+    three halo depths (depth 0 = adjacent to interior, depth 2 = outer).
+
+    This supports the FB-path stability work that requires deeper halos
+    to reach stable c_sw/d_sw stencils at C36 resolution.
+
+    Parameters
+    ----------
+    n : int
+        Number of cells per face edge.
+
+    Returns
+    -------
+    offsets : jax.Array, shape (6, 4, 3, n)
+        ``offsets[face, edge_idx, depth, j]`` is the correction δ such
+        that the true fractional index on the neighbour strip at that
+        depth is ``j + δ``.
+    """
+    return _compute_halo_interp_offsets_hN(n, halo=3)
+
+
+def _compute_halo_interp_offsets_hN(n: int, halo: int) -> jnp.ndarray:
+    """General N-depth halo interp-offset precomputation.
+
+    Shared implementation for :func:`compute_halo_interp_offsets_h2`
+    and :func:`compute_halo_interp_offsets_h3` — folded into a single
+    function so the per-depth gnomonic→neighbour mapping logic is in
+    one place.
+    """
+    if halo < 1:
+        raise ValueError(f"halo must be >= 1, got {halo}")
+
+    dalpha = np.pi / (2 * n)
+    alpha = np.linspace(-np.pi / 4, np.pi / 4, n, endpoint=False) + dalpha / 2
+
+    edges = [WEST, EAST, SOUTH, NORTH]
+    offsets = np.zeros((6, 4, halo, n), dtype=np.float64)
+
+    for face in range(6):
+        for edge_idx, edge in enumerate(edges):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+
+            for depth in range(halo):
+                # Distance from boundary: depth=0 → dα/2, depth=k → (2k+1)dα/2
+                d = dalpha / 2 + depth * dalpha
+
+                for j in range(n):
+                    if edge == WEST:
+                        ax_h, ay_h = -np.pi / 4 - d, alpha[j]
+                    elif edge == EAST:
+                        ax_h, ay_h = np.pi / 4 + d, alpha[j]
+                    elif edge == SOUTH:
+                        ax_h, ay_h = alpha[j], -np.pi / 4 - d
+                    else:  # NORTH
+                        ax_h, ay_h = alpha[j], np.pi / 4 + d
+
+                    xyz_h = _face_to_xyz_np(face, ax_h, ay_h)
+                    ax_n, ay_n = _xyz_to_gnomonic_np(
+                        nbr_face, xyz_h[0], xyz_h[1], xyz_h[2],
+                    )
+
+                    if nbr_edge in (WEST, EAST):
+                        frac = (ay_n - alpha[0]) / dalpha
+                    else:
+                        frac = (ax_n - alpha[0]) / dalpha
+
+                    if is_reversed:
+                        frac = (n - 1) - frac
+
+                    offsets[face, edge_idx, depth, j] = frac - j
+
+    return jnp.array(offsets, dtype=jnp.float64)
+
+
+def interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
+    """Interpolate *strip* at positions ``j + offsets_1d[j]``.
+
+    Uses 3-point quadratic Lagrange interpolation, giving O(dx^3) value
+    accuracy and O(dx^2) gradient accuracy.  Falls back to linear for
+    very short strips (n < 3).
+
+codex
+**Scope Read**
+
+Read [fv3_sw_core.py](/burg-archive/glab/users/pg2328/legoESM/packages/core/legoesm/core/fv3_sw_core.py:657) non-duogrid `d2a2c_vect` through the adjacent-strip overrides. No edits made.
+
+Let `h=2`, face size `n`, tile size `nl=n//kt`, tile origin `a=ti*nl`, `b=tj*nl`.
+
+Tile-local maps:
+
+```text
+cell i local li = global i - a        for ua/va/vt cell-i axes
+cell j local lj = global j - b        for ua/va/ut cell-j axes
+u-face i local li = global i - a      uc/ut i axis: 0..nl
+v-face j local lj = global j - b      vc/vt j axis: 0..nl
+```
+
+So your key question is correct:
+
+```text
+W edge: global i=1 -> local i=1; global i=0 -> local i=0
+E edge: global i=n-1 -> local i=nl-1; global i=n -> local i=nl
+S edge: global j=1 -> local j=1; global j=0 -> local j=0
+N edge: global j=n-1 -> local j=nl-1; global j=n -> local j=nl
+```
+
+**Face-Edge Specials**
+
+| Special | Side flag | Writes | Reads |
+|---|---:|---|---|
+| `uc` C1/C2/C3 west | `is_w` / `ti==0` | `uc[:, local i=1, local j=0:nl]` | `utmp_pad[:, h+2, h+b:h+b+nl]`, `utmp_pad[:, h+1, h+b:h+b+nl]`, `utmp_pad[:, h, h+b:h+b+nl]` = global source i `2,1,0`, j `b:b+nl-1` |
+| `uc` C1/C2/C3 east | `is_e` / `ti==kt-1` | `uc[:, local i=nl-1, local j=0:nl]` | `utmp_pad[:, n+h-3, h+b:h+b+nl]`, `n+h-2`, `n+h-1` = global source i `n-3,n-2,n-1`, j `b:b+nl-1` |
+| `ut/uc` edge interp west | `is_w` | `uc[:,0,:]`, then `ut[:,0,:]` | `ua_pad[:, h-1:h+3, h+b:h+b+nl]` = global i `-1,0,1,2`, j `b:b+nl-1`; `dxc_pad_x` same i positions; sine: `se_pad_x[:,0,1+b:1+b+nl]` and `sw_pad_x[:,1,1+b:1+b+nl]` |
+| `ut/uc` edge interp east | `is_e` | `uc[:,nl,:]`, then `ut[:,nl,:]` | source code indices `ua_pad[:, n+h-1:n+h+3, h+b:h+b+nl]` = intended global i `n-1,n,n+1,n+2`; `dxc_pad_x` same. Note last syntactic index is `n+4`, beyond a halo-2 array’s max valid `n+3` under normal Python indexing; JAX gather semantics clamp OOB. Sine: `se_pad_x[:,n,1+b:1+b+nl]`, `sw_pad_x[:,n+1,1+b:1+b+nl]` |
+| `vc` C1/C2/C3 south | `is_s` / `tj==0` | `vc[:, local i=0:nl, local j=1]` | `vtmp_pad[:, h+a:h+a+nl, h+2]`, `h+1`, `h` = global j `2,1,0`, i `a:a+nl-1` |
+| `vc` C1/C2/C3 north | `is_n` / `tj==kt-1` | `vc[:, local i=0:nl, local j=nl-1]` | `vtmp_pad[:, h+a:h+a+nl, n+h-3]`, `n+h-2`, `n+h-1` = global j `n-3,n-2,n-1`, i `a:a+nl-1` |
+| `vt/vc` edge interp south | `is_s` | `vc[:,:,0]`, then `vt[:,:,0]` | `va_pad[:, h+a:h+a+nl, h-1:h+3]` = global j `-1,0,1,2`, i `a:a+nl-1`; `dyc_pad_y` same j positions; sine: `sn_pad_y[:,1+a:1+a+nl,0]`, `ss_pad_y[:,1+a:1+a+nl,1]` |
+| `vt/vc` edge interp north | `is_n` | `vc[:,:,nl]`, then `vt[:,:,nl]` | source code indices `va_pad[:, h+a:h+a+nl, n+h-1:n+h+3]` = intended global j `n-1,n,n+1,n+2`; same halo-2/OOB caveat as east. Sine: `sn_pad_y[:,1+a:1+a+nl,n]`, `ss_pad_y[:,1+a:1+a+nl,n+1]` |
+
+**Adjacent Strips**
+
+Global production ranges:
+
+```text
+vt west:  vt[:, 0, 2:n-1]       writes global i=0, j=2..n-2
+vt east:  vt[:, n-1, 2:n-1]     writes global i=n-1, j=2..n-2
+ut south: ut[:, 2:n-1, 0]       writes global i=2..n-2, j=0
+ut north: ut[:, 2:n-1, n-1]     writes global i=2..n-2, j=n-1
+```
+
+Tile-local overlay ranges are intersections with the tile-owned axis:
+
+```text
+W vt strip:
+  if is_w:
+    j0=max(2,b), j1=min(n-1,b+nl+1) on vt j-face axis
+    local writes vt[:,0,j0-b:j1-b]
+    reads ut local/global i 0,1 and j faces j0-1:j1
+
+E vt strip:
+  if is_e:
+    j0=max(2,b), j1=min(n-1,b+nl+1)
+    local writes vt[:,nl-1,j0-b:j1-b]
+    reads ut global i n-1,n and j faces j0-1:j1
+
+S ut strip:
+  if is_s:
+    i0=max(2,a), i1=min(n-1,a+nl+1) on ut i-face axis
+    local writes ut[:,i0-a:i1-a,0]
+    reads vt global j 0,1 and i cells/faces i0-1:i1
+
+N ut strip:
+  if is_n:
+    i0=max(2,a), i1=min(n-1,a+nl+1)
+    local writes ut[:,i0-a:i1-a,nl-1]
+    reads vt global j n-1,n and i cells/faces i0-1:i1
+```
+
+For isolated side tests at `kt=3`, the middle edge tiles avoid corner truncation, so these adjacent-strip ranges are the full local transverse range in practice.
+
+**Proposed Signature**
+
+```python
+def d2a2c_edge_local(
+    utmp_pad_face, vtmp_pad_face,
+    ti, tj, nl,
+    u_d, v_d,
+    cos_sg5, rsin2,
+    cosa_u, rsin_u, cosa_v, rsin_v,
+    dx, dy,
+    sin_sg,
+    halo_interp_offsets,
+    is_w: bool, is_e: bool, is_s: bool, is_n: bool,
+):
+    ...
+```
+
+Overlay structure:
+
+```text
+1. Compute base exactly like interior-local:
+   ua, va from local cell slice
+   uc/vc from 4th-order/local base windows
+   ut/vt pointwise from uc/vc
+
+2. If is_w/is_e:
+   overlay uc C1 at local i=1 or nl-1
+   overlay uc boundary at local i=0 or nl using edge_interpolate4
+   overlay ut boundary at same local i using uc / sin_upwind
+
+3. If is_s/is_n:
+   overlay vc C1 at local j=1 or nl-1
+   overlay vc boundary at local j=0 or nl using edge_interpolate4
+   overlay vt boundary at same local j using vc / sin_upwind
+
+4. After boundary ut/vt overlays:
+   overlay adjacent-strip vt for W/E
+   overlay adjacent-strip ut for S/N
+```
+
+Use static `.at[..., fixed_index, slice].set(...)` or `jnp.where(is_side, new, old)` with static-shaped slices. For corner tiles, keep the adjacent-strip range static by computing full local candidates and masking global indices against `[2, n-2]`.
+
+**sin_sg Halo Verdict**
+
+`edge_interpolate4` upwind sine requires scalar `pad_halo(..., halo=1)` of `sin_sg` components. It is not purely local to the edge tile.
+
+Quantified:
+
+```text
+W i=0:
+  positive/upwind-left reads se_pad_x[:,0,1+b:1+b+nl] = west halo, global i=-1
+  negative/right reads sw_pad_x[:,1,1+b:1+b+nl] = local interior cell i=0
+
+E i=n:
+  positive/left reads se_pad_x[:,n,1+b:1+b+nl] = local interior cell i=n-1
+  negative/right reads sw_pad_x[:,n+1,1+b:1+b+nl] = east halo, global i=n
+
+S j=0:
+  positive/below reads sn_pad_y[:,1+a:1+a+nl,0] = south halo, global j=-1
+  negative/above reads ss_pad_y[:,1+a:1+a+nl,1] = local interior cell j=0
+
+N j=n:
+  positive/below reads sn_pad_y[:,1+a:1+a+nl,n] = local interior cell j=n-1
+  negative/above reads ss_pad_y[:,1+a:1+a+nl,n+1] = north halo, global j=n
+```
+
+So tiled phase-1b needs either precomputed face/global scalar pads for `sin_east/sin_west/sin_north/sin_south`, then slice them per tile, or an equivalent tiled scalar halo exchange with interpolation offsets. Interior-side sine is local; outer-side sine is cross-face halo.
+
+**Gating Plan**
+
+```text
+W isolated: kt=3 tile (0,1), flags is_w=True only
+E isolated: kt=3 tile (kt-1,1), flags is_e=True only
+S isolated: kt=3 tile (1,0), flags is_s=True only
+N isolated: kt=3 tile (1,kt-1), flags is_n=True only
+corner:     kt=3 tile (0,0), flags is_w=True,is_s=True
+```
+
+Token count: ~1,250 final-output tokens.
+tokens used
+27,353
+**Scope Read**
+
+Read [fv3_sw_core.py](/burg-archive/glab/users/pg2328/legoESM/packages/core/legoesm/core/fv3_sw_core.py:657) non-duogrid `d2a2c_vect` through the adjacent-strip overrides. No edits made.
+
+Let `h=2`, face size `n`, tile size `nl=n//kt`, tile origin `a=ti*nl`, `b=tj*nl`.
+
+Tile-local maps:
+
+```text
+cell i local li = global i - a        for ua/va/vt cell-i axes
+cell j local lj = global j - b        for ua/va/ut cell-j axes
+u-face i local li = global i - a      uc/ut i axis: 0..nl
+v-face j local lj = global j - b      vc/vt j axis: 0..nl
+```
+
+So your key question is correct:
+
+```text
+W edge: global i=1 -> local i=1; global i=0 -> local i=0
+E edge: global i=n-1 -> local i=nl-1; global i=n -> local i=nl
+S edge: global j=1 -> local j=1; global j=0 -> local j=0
+N edge: global j=n-1 -> local j=nl-1; global j=n -> local j=nl
+```
+
+**Face-Edge Specials**
+
+| Special | Side flag | Writes | Reads |
+|---|---:|---|---|
+| `uc` C1/C2/C3 west | `is_w` / `ti==0` | `uc[:, local i=1, local j=0:nl]` | `utmp_pad[:, h+2, h+b:h+b+nl]`, `utmp_pad[:, h+1, h+b:h+b+nl]`, `utmp_pad[:, h, h+b:h+b+nl]` = global source i `2,1,0`, j `b:b+nl-1` |
+| `uc` C1/C2/C3 east | `is_e` / `ti==kt-1` | `uc[:, local i=nl-1, local j=0:nl]` | `utmp_pad[:, n+h-3, h+b:h+b+nl]`, `n+h-2`, `n+h-1` = global source i `n-3,n-2,n-1`, j `b:b+nl-1` |
+| `ut/uc` edge interp west | `is_w` | `uc[:,0,:]`, then `ut[:,0,:]` | `ua_pad[:, h-1:h+3, h+b:h+b+nl]` = global i `-1,0,1,2`, j `b:b+nl-1`; `dxc_pad_x` same i positions; sine: `se_pad_x[:,0,1+b:1+b+nl]` and `sw_pad_x[:,1,1+b:1+b+nl]` |
+| `ut/uc` edge interp east | `is_e` | `uc[:,nl,:]`, then `ut[:,nl,:]` | source code indices `ua_pad[:, n+h-1:n+h+3, h+b:h+b+nl]` = intended global i `n-1,n,n+1,n+2`; `dxc_pad_x` same. Note last syntactic index is `n+4`, beyond a halo-2 array’s max valid `n+3` under normal Python indexing; JAX gather semantics clamp OOB. Sine: `se_pad_x[:,n,1+b:1+b+nl]`, `sw_pad_x[:,n+1,1+b:1+b+nl]` |
+| `vc` C1/C2/C3 south | `is_s` / `tj==0` | `vc[:, local i=0:nl, local j=1]` | `vtmp_pad[:, h+a:h+a+nl, h+2]`, `h+1`, `h` = global j `2,1,0`, i `a:a+nl-1` |
+| `vc` C1/C2/C3 north | `is_n` / `tj==kt-1` | `vc[:, local i=0:nl, local j=nl-1]` | `vtmp_pad[:, h+a:h+a+nl, n+h-3]`, `n+h-2`, `n+h-1` = global j `n-3,n-2,n-1`, i `a:a+nl-1` |
+| `vt/vc` edge interp south | `is_s` | `vc[:,:,0]`, then `vt[:,:,0]` | `va_pad[:, h+a:h+a+nl, h-1:h+3]` = global j `-1,0,1,2`, i `a:a+nl-1`; `dyc_pad_y` same j positions; sine: `sn_pad_y[:,1+a:1+a+nl,0]`, `ss_pad_y[:,1+a:1+a+nl,1]` |
+| `vt/vc` edge interp north | `is_n` | `vc[:,:,nl]`, then `vt[:,:,nl]` | source code indices `va_pad[:, h+a:h+a+nl, n+h-1:n+h+3]` = intended global j `n-1,n,n+1,n+2`; same halo-2/OOB caveat as east. Sine: `sn_pad_y[:,1+a:1+a+nl,n]`, `ss_pad_y[:,1+a:1+a+nl,n+1]` |
+
+**Adjacent Strips**
+
+Global production ranges:
+
+```text
+vt west:  vt[:, 0, 2:n-1]       writes global i=0, j=2..n-2
+vt east:  vt[:, n-1, 2:n-1]     writes global i=n-1, j=2..n-2
+ut south: ut[:, 2:n-1, 0]       writes global i=2..n-2, j=0
+ut north: ut[:, 2:n-1, n-1]     writes global i=2..n-2, j=n-1
+```
+
+Tile-local overlay ranges are intersections with the tile-owned axis:
+
+```text
+W vt strip:
+  if is_w:
+    j0=max(2,b), j1=min(n-1,b+nl+1) on vt j-face axis
+    local writes vt[:,0,j0-b:j1-b]
+    reads ut local/global i 0,1 and j faces j0-1:j1
+
+E vt strip:
+  if is_e:
+    j0=max(2,b), j1=min(n-1,b+nl+1)
+    local writes vt[:,nl-1,j0-b:j1-b]
+    reads ut global i n-1,n and j faces j0-1:j1
+
+S ut strip:
+  if is_s:
+    i0=max(2,a), i1=min(n-1,a+nl+1) on ut i-face axis
+    local writes ut[:,i0-a:i1-a,0]
+    reads vt global j 0,1 and i cells/faces i0-1:i1
+
+N ut strip:
+  if is_n:
+    i0=max(2,a), i1=min(n-1,a+nl+1)
+    local writes ut[:,i0-a:i1-a,nl-1]
+    reads vt global j n-1,n and i cells/faces i0-1:i1
+```
+
+For isolated side tests at `kt=3`, the middle edge tiles avoid corner truncation, so these adjacent-strip ranges are the full local transverse range in practice.
+
+**Proposed Signature**
+
+```python
+def d2a2c_edge_local(
+    utmp_pad_face, vtmp_pad_face,
+    ti, tj, nl,
+    u_d, v_d,
+    cos_sg5, rsin2,
+    cosa_u, rsin_u, cosa_v, rsin_v,
+    dx, dy,
+    sin_sg,
+    halo_interp_offsets,
+    is_w: bool, is_e: bool, is_s: bool, is_n: bool,
+):
+    ...
+```
+
+Overlay structure:
+
+```text
+1. Compute base exactly like interior-local:
+   ua, va from local cell slice
+   uc/vc from 4th-order/local base windows
+   ut/vt pointwise from uc/vc
+
+2. If is_w/is_e:
+   overlay uc C1 at local i=1 or nl-1
+   overlay uc boundary at local i=0 or nl using edge_interpolate4
+   overlay ut boundary at same local i using uc / sin_upwind
+
+3. If is_s/is_n:
+   overlay vc C1 at local j=1 or nl-1
+   overlay vc boundary at local j=0 or nl using edge_interpolate4
+   overlay vt boundary at same local j using vc / sin_upwind
+
+4. After boundary ut/vt overlays:
+   overlay adjacent-strip vt for W/E
+   overlay adjacent-strip ut for S/N
+```
+
+Use static `.at[..., fixed_index, slice].set(...)` or `jnp.where(is_side, new, old)` with static-shaped slices. For corner tiles, keep the adjacent-strip range static by computing full local candidates and masking global indices against `[2, n-2]`.
+
+**sin_sg Halo Verdict**
+
+`edge_interpolate4` upwind sine requires scalar `pad_halo(..., halo=1)` of `sin_sg` components. It is not purely local to the edge tile.
+
+Quantified:
+
+```text
+W i=0:
+  positive/upwind-left reads se_pad_x[:,0,1+b:1+b+nl] = west halo, global i=-1
+  negative/right reads sw_pad_x[:,1,1+b:1+b+nl] = local interior cell i=0
+
+E i=n:
+  positive/left reads se_pad_x[:,n,1+b:1+b+nl] = local interior cell i=n-1
+  negative/right reads sw_pad_x[:,n+1,1+b:1+b+nl] = east halo, global i=n
+
+S j=0:
+  positive/below reads sn_pad_y[:,1+a:1+a+nl,0] = south halo, global j=-1
+  negative/above reads ss_pad_y[:,1+a:1+a+nl,1] = local interior cell j=0
+
+N j=n:
+  positive/below reads sn_pad_y[:,1+a:1+a+nl,n] = local interior cell j=n-1
+  negative/above reads ss_pad_y[:,1+a:1+a+nl,n+1] = north halo, global j=n
+```
+
+So tiled phase-1b needs either precomputed face/global scalar pads for `sin_east/sin_west/sin_north/sin_south`, then slice them per tile, or an equivalent tiled scalar halo exchange with interpolation offsets. Interior-side sine is local; outer-side sine is cross-face halo.
+
+**Gating Plan**
+
+```text
+W isolated: kt=3 tile (0,1), flags is_w=True only
+E isolated: kt=3 tile (kt-1,1), flags is_e=True only
+S isolated: kt=3 tile (1,0), flags is_s=True only
+N isolated: kt=3 tile (1,kt-1), flags is_n=True only
+corner:     kt=3 tile (0,0), flags is_w=True,is_s=True
+```
+
+Token count: ~1,250 final-output tokens.

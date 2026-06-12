@@ -1626,6 +1626,11 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None):
     # MPAS has no separate v field; the scorer reads T/S/land_mask/lat_T/lon_T only.
     if getattr(state, "v", None) is not None:
         save_kw["v"] = np.asarray(state.v.data)
+    # Free surface: needed to RESTART a run from this snapshot (--restart-from)
+    # without a barotropic-adjustment shock; the scorer ignores it.
+    eta = getattr(state, "eta", None)
+    if eta is not None:
+        save_kw["eta"] = np.asarray(eta.data)
     # Geometry for the offline mixed-layer-depth diagnostic (de Boyer Montegut /
     # Treguier 2023): sea-floor depth + level-centre reference depths.  The MLD
     # scorer derives the per-level wet mask from ``z_center_ref < H_bathy``.
