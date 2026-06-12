@@ -1159,6 +1159,91 @@ def d2a2c_uc_tile_unified(u_block, ua_block, dx_block, se_block, sw_block,
     return uc
 
 
+def d2a2c_vc_tile_unified(v_block, va_block, dy_block, sn_block, ss_block,
+                          b, n, npt, is_lo_j, is_hi_j):
+    """vc for ONE tile in the GSPMD/shard_map form — the j-axis transpose of
+    :func:`d2a2c_uc_tile_unified`.  ``v_block`` is the WIDE low-j-padded
+    covariant-v block ``(1, nl+4, nl+5)`` with ``v_block[:, :, q] =
+    vtmp_pad[..., b-1+q]`` (the extra low-j cell feeds the no-shift 4th
+    overlay; for a low-j-edge tile, b=0, it is garbage but overwritten by the
+    j=0/1 specials).  ``vsym = v_block[:, :, 1:]`` is the symmetric
+    ``[b:b+nl+4]`` block.  ``b``/``is_lo_j``/``is_hi_j`` may be traced.
+    Returns ``(1, nl, nl+1)`` vc, equal to the specific S/N/interior kernel's
+    vc for the matching tile (P4 phase-1b)."""
+    h = 2
+    nl = v_block.shape[2] - 5
+    vsym = v_block[:, :, 1:]            # (1, nl+4, nl+4) == [b:b+nl+4]
+    vc = 0.5 * (vsym[:, h:-h, h - 1:nl + h] + vsym[:, h:-h, h:nl + h + 1])
+    vc4 = (_A2 * (v_block[:, h:-h, 0:nl + 1] + v_block[:, h:-h, 3:nl + 4])
+           + _A1 * (v_block[:, h:-h, 1:nl + 2] + v_block[:, h:-h, 2:nl + 3]))
+    faces = b + jnp.arange(nl + 1)
+    in_band = ((faces >= npt + 1) & (faces < n - npt)
+               & (n > 2 * npt + 2))[None, None, :]
+    vc = jnp.where(in_band, vc4, vc)
+    c123_lo = d2a2c_vc_c123_local(vsym, False)[:, :, None]
+    c123_hi = d2a2c_vc_c123_local(vsym, True)[:, :, None]
+    mm = jnp.arange(nl + 1)[None, None, :]
+    vc = jnp.where(is_lo_j & (mm == 1), c123_lo, vc)
+    vc = jnp.where(is_hi_j & (mm == nl - 1), c123_hi, vc)
+    ei_lo = d2a2c_vc_edge_interp_local(
+        va_block, dy_block, sn_block, ss_block, False)[:, :, None]
+    ei_hi = d2a2c_vc_edge_interp_local(
+        va_block, dy_block, sn_block, ss_block, True)[:, :, None]
+    vc = jnp.where(is_lo_j & (mm == 0), ei_lo, vc)
+    vc = jnp.where(is_hi_j & (mm == nl), ei_hi, vc)
+    return vc
+
+
+def d2a2c_tile_unified(u_block, v_block, ua_block, dx_block, se_block, sw_block,
+                       va_block, dy_block, sn_block, ss_block,
+                       u_d, v_d, cos_sg5, rsin2, cosa_u, rsin_u, cosa_v, rsin_v,
+                       a, b, n, npt, is_lo_i, is_hi_i, is_lo_j, is_hi_j):
+    """Full per-tile A→C d2a2c in the GSPMD/shard_map form — the SINGLE traced
+    body the (6,kt,kt) shard_map runs on every device.  Composes
+    :func:`d2a2c_ua_va_local` + the flag-driven :func:`d2a2c_uc_tile_unified`
+    / :func:`d2a2c_vc_tile_unified` + flag-driven ut/vt face overrides.  The
+    two adjacent strips (vt at i=0/n-1, ut at j=0/n-1) are DEFERRED — the
+    stage applies them via the same-face-neighbour ppermute / global
+    post-gather — so this matches the specific per-tile kernels EXACTLY except
+    at the deferred strip cells.  ``u_block``/``v_block`` are the wide
+    low-padded covariant blocks; the symmetric blocks are ``u_block[:,1:,:]``
+    / ``v_block[:,:,1:]``.  Position/flags may be traced.  P4 phase-1b."""
+    h = 2
+    nl = u_block.shape[1] - 5
+    usym = u_block[:, 1:, :]
+    vsym = v_block[:, :, 1:]
+    ua, va = d2a2c_ua_va_local(
+        usym[:, h:h + nl, h:h + nl], vsym[:, h:h + nl, h:h + nl],
+        cos_sg5, rsin2)
+    uc = d2a2c_uc_tile_unified(u_block, ua_block, dx_block, se_block, sw_block,
+                               a, n, npt, is_lo_i, is_hi_i)
+    vc = d2a2c_vc_tile_unified(v_block, va_block, dy_block, sn_block, ss_block,
+                               b, n, npt, is_lo_j, is_hi_j)
+    kk = jnp.arange(nl + 1)[None, :, None]
+    mm = jnp.arange(nl + 1)[None, None, :]
+    # ut: base + the i-face boundary override (uc/sin_upwind), flag-gated.
+    ut = (uc - v_d * cosa_u) * rsin_u
+    sin_lo = jnp.where(uc[:, 0, :] > 0,
+                       se_block[:, 0, 1:-1], sw_block[:, 1, 1:-1])
+    ut_lo = (uc[:, 0, :] / jnp.maximum(sin_lo, _EPS))[:, None, :]
+    ut = jnp.where(is_lo_i & (kk == 0), ut_lo, ut)
+    sin_hi = jnp.where(uc[:, nl, :] > 0,
+                       se_block[:, nl, 1:-1], sw_block[:, nl + 1, 1:-1])
+    ut_hi = (uc[:, nl, :] / jnp.maximum(sin_hi, _EPS))[:, None, :]
+    ut = jnp.where(is_hi_i & (kk == nl), ut_hi, ut)
+    # vt: base + the j-face boundary override, flag-gated.
+    vt = (vc - u_d * cosa_v) * rsin_v
+    sin_lo_j = jnp.where(vc[:, :, 0] > 0,
+                         sn_block[:, 1:-1, 0], ss_block[:, 1:-1, 1])
+    vt_lo = (vc[:, :, 0] / jnp.maximum(sin_lo_j, _EPS))[:, :, None]
+    vt = jnp.where(is_lo_j & (mm == 0), vt_lo, vt)
+    sin_hi_j = jnp.where(vc[:, :, nl] > 0,
+                         sn_block[:, 1:-1, nl], ss_block[:, 1:-1, nl + 1])
+    vt_hi = (vc[:, :, nl] / jnp.maximum(sin_hi_j, _EPS))[:, :, None]
+    vt = jnp.where(is_hi_j & (mm == nl), vt_hi, vt)
+    return ua, va, uc, vc, ut, vt
+
+
 class _D2A2CFields(NamedTuple):
     """Global padded fields the A→C d2a2c step consumes (output of
     :func:`d2a2c_global_fields`)."""

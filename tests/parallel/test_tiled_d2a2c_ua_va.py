@@ -44,6 +44,8 @@ from legoesm.core.fv3_sw_core import (
     d2a2c_global_fields,
     d2a2c_adjacent_strips,
     d2a2c_uc_tile_unified,
+    d2a2c_vc_tile_unified,
+    d2a2c_tile_unified,
     _A1 as _FV3_A1,
 )
 from legoesm.parallel.mesh import (
@@ -812,17 +814,22 @@ def test_d2a2c_corner_full_parity(kt, ti, tj):
         np.testing.assert_allclose(ut_cmp, ut_ref, rtol=0, atol=1e-12)
 
 
-def _assemble_tiled_d2a2c(u_d, v_d, cdg, kt):
+def _assemble_tiled_d2a2c(u_d, v_d, cdg, kt, unified=False):
     """Single-device reference for the tiled A->C stage: run every (ti,tj)
     sub-face tile's LOCAL kernel on the shared global fields, gather into the
     global staggered uc/vc/ut/vt, then apply the adjacent strips GLOBALLY (the
     single-device stand-in for the shard_map stage's deferred-strip neighbour
-    halo).  Must equal d2a2c_vect bit-for-bit."""
+    halo).  Must equal d2a2c_vect bit-for-bit.  ``unified=True`` routes EVERY
+    tile through the single flag/mask-driven d2a2c_tile_unified (the body the
+    shard_map runs) instead of the per-type specific kernels."""
     n = cdg.n
     nl = n // kt
+    npt = min(4, n // 2)
     F = d2a2c_global_fields(u_d, v_d, cdg)
     up, vp = F.utmp_pad, F.vtmp_pad
     cos_sg5, rsin2 = F.cos_sg5, F.rsin2
+    uxp = jnp.pad(up, [(0, 0), (1, 0), (0, 0)], mode='edge')   # wide low-i
+    vxp = jnp.pad(vp, [(0, 0), (0, 0), (1, 0)], mode='edge')   # wide low-j
     ua = np.zeros((6, n, n)); va = np.zeros((6, n, n))
     uc = np.zeros((6, n + 1, n)); vc = np.zeros((6, n, n + 1))
     ut = np.zeros((6, n + 1, n)); vt = np.zeros((6, n, n + 1))
@@ -844,7 +851,21 @@ def _assemble_tiled_d2a2c(u_d, v_d, cdg, kt):
                 )
                 lo_i, hi_i = ti == 0, ti == kt - 1
                 lo_j, hi_j = tj == 0, tj == kt - 1
-                if (lo_i or hi_i) and (lo_j or hi_j):
+                if unified:
+                    ub = uxp[f, a:a + nl + 5, b:b + nl + 4][None]
+                    vb = vxp[f, a:a + nl + 4, b:b + nl + 5][None]
+                    out = d2a2c_tile_unified(
+                        ub, vb,
+                        xf[0][a:a + nl + 4, b:b + nl + 4][None],
+                        xf[1][a:a + nl + 4, b:b + nl][None],
+                        xf[2][a:a + nl + 2, b:b + nl + 2][None],
+                        xf[3][a:a + nl + 2, b:b + nl + 2][None],
+                        yf[0][a:a + nl + 4, b:b + nl + 4][None],
+                        yf[1][a:a + nl, b:b + nl + 4][None],
+                        yf[2][a:a + nl + 2, b:b + nl + 2][None],
+                        yf[3][a:a + nl + 2, b:b + nl + 2][None],
+                        *cb, a, b, n, npt, lo_i, hi_i, lo_j, hi_j)
+                elif (lo_i or hi_i) and (lo_j or hi_j):
                     out = d2a2c_corner_local(up[f], vp[f], ti, tj, nl, n,
                                              *cb, *xf, *yf)
                 elif lo_i or hi_i:
@@ -869,13 +890,17 @@ def _assemble_tiled_d2a2c(u_d, v_d, cdg, kt):
     return ua, va, uc, vc, np.asarray(ut_g), np.asarray(vt_g)
 
 
+@pytest.mark.parametrize("unified", [False, True])
 @pytest.mark.parametrize("kt", [2, 3, 4])
-def test_tiled_d2a2c_assemble_matches_production(kt):
-    """FULL tiled assembly (every (ti,tj) tile's local kernel gathered +
-    adjacent strips applied globally) == production d2a2c_vect, bit-for-bit.
-    The end-to-end proof that the 6 tile kernels COMPOSE into the global A->C
-    field — the single-device stand-in for the shard_map stage.  kt=2 routes
-    only corners (np=24), kt=3/4 exercise interior + edge + corner tiles."""
+def test_tiled_d2a2c_assemble_matches_production(kt, unified):
+    """FULL tiled assembly (every (ti,tj) tile's kernel gathered + adjacent
+    strips applied globally) == production d2a2c_vect, bit-for-bit.  The
+    end-to-end proof that the tile kernels COMPOSE into the global A->C field
+    — the single-device stand-in for the shard_map stage.  ``unified=False``
+    routes the per-type specific kernels; ``unified=True`` routes EVERY tile
+    through the single flag/mask-driven d2a2c_tile_unified (the device-uniform
+    body the shard_map will run).  kt=2 routes only corners (np=24), kt=3/4
+    exercise interior + edge + corner tiles."""
     set_halo_backend("local")
     n = 24
     cdg = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
@@ -883,10 +908,11 @@ def test_tiled_d2a2c_assemble_matches_production(kt):
     u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
     v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
     g = [np.asarray(x) for x in d2a2c_vect(u_d, v_d, cdg)]
-    t = _assemble_tiled_d2a2c(u_d, v_d, cdg, kt)
+    t = _assemble_tiled_d2a2c(u_d, v_d, cdg, kt, unified=unified)
     for name, tt, gg in zip(["ua", "va", "uc", "vc", "ut", "vt"], t, g):
         np.testing.assert_allclose(tt, gg, rtol=0, atol=1e-12,
-                                   err_msg=f"{name} mismatch (kt={kt})")
+                                   err_msg=f"{name} mismatch (kt={kt}, "
+                                           f"unified={unified})")
 
 
 @pytest.mark.parametrize("kt,ti,tj", [
@@ -924,4 +950,39 @@ def test_d2a2c_uc_tile_unified_matches_production(kt, ti, tj):
             u_block, ua_block, dx_block, se_block, sw_block,
             a, n, npt, is_lo_i, is_hi_i))[0]
         np.testing.assert_allclose(uc_t, uc_g[f, a:a + nl + 1, b:b + nl],
+                                   rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize("kt,ti,tj", [
+    (3, 1, 1), (3, 0, 1), (3, 2, 1), (3, 1, 0), (3, 1, 2),  # interior + edges
+    (3, 0, 0), (3, 2, 2), (3, 0, 2), (3, 2, 0),             # kt=3 corners
+    (2, 0, 0), (2, 1, 0), (2, 0, 1), (2, 1, 1),             # kt=2 (all corners)
+])
+def test_d2a2c_vc_tile_unified_matches_production(kt, ti, tj):
+    """The flag/mask-driven UNIFIED vc kernel (j-axis transpose of the uc
+    unified kernel) == production d2a2c_vect vc on the tile, for every tile
+    position.  Wide low-j-padded v-block + flag-selected S/N specials."""
+    set_halo_backend("local")
+    n = 24
+    nl = n // kt
+    npt = min(4, n // 2)
+    cdg = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    rng = np.random.default_rng(200 + kt * 16 + ti * 4 + tj)
+    u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    vc_g = np.asarray(d2a2c_vect(u_d, v_d, cdg)[3])   # (6, n, n+1)
+    F = d2a2c_global_fields(u_d, v_d, cdg)
+    vtmp_xpad = jnp.pad(F.vtmp_pad, [(0, 0), (0, 0), (1, 0)], mode='edge')
+    a, b = ti * nl, tj * nl
+    is_lo_j, is_hi_j = tj == 0, tj == kt - 1
+    for f in range(6):
+        v_block = vtmp_xpad[f, a:a + nl + 4, b:b + nl + 5][None]
+        va_block = F.va_pad[f, a:a + nl + 4, b:b + nl + 4][None]
+        dy_block = F.dyc_pad_y[f, a:a + nl, b:b + nl + 4][None]
+        sn_block = F.sn_pad_y[f, a:a + nl + 2, b:b + nl + 2][None]
+        ss_block = F.ss_pad_y[f, a:a + nl + 2, b:b + nl + 2][None]
+        vc_t = np.asarray(d2a2c_vc_tile_unified(
+            v_block, va_block, dy_block, sn_block, ss_block,
+            b, n, npt, is_lo_j, is_hi_j))[0]
+        np.testing.assert_allclose(vc_t, vc_g[f, a:a + nl, b:b + nl + 1],
                                    rtol=0, atol=1e-12)
