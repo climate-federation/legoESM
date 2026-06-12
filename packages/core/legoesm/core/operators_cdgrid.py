@@ -577,19 +577,34 @@ def cgrid_wet_face_masks(wet_cc, cdgrid):
 # C-grid compact gradient (cell centre → edge midpoints)
 # ==============================================================================
 
-def cgrid_gradient_2d(eta, cdgrid):
-    """Compact C-grid gradient cc → edge midpoints (FV3 Bernoulli stencil using dxc/dyc)."""
-    eta_pad = pad_halo_auto(eta, cdgrid)
-    # eta_pad shape: (6, n+2, n+2)  (1-cell halo on each side)
+def cgrid_gradient_2d_local(eta_pad, rdxc, rdyc):
+    """Compact C-grid gradient CORE — leading-axis-agnostic.
 
-    # x-gradient at u-points: (eta[i,j] - eta[i-1,j]) / dxc
-    # In padded coords: interior is [1:-1, 1:-1], so u-faces run 0..n
-    deta_dx = (eta_pad[:, 1:, 1:-1] - eta_pad[:, :-1, 1:-1]) * cdgrid.rdxc
+    Takes an ALREADY-halo-padded ``eta_pad`` (..., A+2, B+2) and the
+    inverse edge lengths; differences cc -> edge midpoints.  Shared by
+    the global cube (:func:`cgrid_gradient_2d`, which pads the whole
+    (6,n,n) then calls this) and a single (1, nl+2, nl+2) tile inside
+    the tiled ``shard_map`` stage (P4 phase-1b), where ``eta_pad`` is
+    the tile's padded block from ``make_tiled_pad_body`` (the halo is a
+    scalar pad — eta is a scalar field, so no rotation).
 
-    # y-gradient at v-points: (eta[i,j] - eta[i,j-1]) / dyc
-    deta_dy = (eta_pad[:, 1:-1, 1:] - eta_pad[:, 1:-1, :-1]) * cdgrid.rdyc
-
+      eta_pad (..., A+2, B+2)
+      rdxc    (..., A+1, B)   1/dxc at u-faces
+      rdyc    (..., A,   B+1) 1/dyc at v-faces
+    Returns ``(deta_dx (..., A+1, B), deta_dy (..., A, B+1))``.
+    """
+    deta_dx = (eta_pad[:, 1:, 1:-1] - eta_pad[:, :-1, 1:-1]) * rdxc
+    deta_dy = (eta_pad[:, 1:-1, 1:] - eta_pad[:, 1:-1, :-1]) * rdyc
     return deta_dx, deta_dy
+
+
+def cgrid_gradient_2d(eta, cdgrid):
+    """Compact C-grid gradient cc → edge midpoints (FV3 Bernoulli stencil using dxc/dyc).
+
+    Thin wrapper over :func:`cgrid_gradient_2d_local` (one shared body —
+    the tiled stage calls the local core with per-tile metrics)."""
+    eta_pad = pad_halo_auto(eta, cdgrid)  # (6, n+2, n+2)
+    return cgrid_gradient_2d_local(eta_pad, cdgrid.rdxc, cdgrid.rdyc)
 
 
 # ==============================================================================
