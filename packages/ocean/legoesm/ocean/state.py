@@ -902,7 +902,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     #                     np32 weak growth was allreduce-latency-bound).
     # Equivalent in exact arithmetic; differs at round-off (solver-
     # tolerance lane, not bit-exact).  Validated at solver dispatch
-    # (unknown ⇒ ValueError).
+    # (unknown ⇒ ValueError).  FLIP-PENDING: drift-controlled A/B/A/B
+    # job 8470723 measured single_reduce 3-7% faster at np=2/4 (both
+    # interleaved reps), never measurably slower (np=1 wash, np=8 rep-1
+    # even; the lone counter-signal was a 1-rep outlier), np32 2-node
+    # 1.03-1.06x — making it the default is approved by the 2026-06-12
+    # codex scaling review but DEFERRED to a coordinated commit: the
+    # distributed-MPAS session's config-contract tests pin both grids'
+    # defaults to "standard" and the two must flip together (latlon
+    # here + MPASOceanConfig) with their pin tests.
     barotropic_implicit_pcg_variant: str = "standard"
     # Rigid-lid streamfunction solver knobs (only used when
     # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
