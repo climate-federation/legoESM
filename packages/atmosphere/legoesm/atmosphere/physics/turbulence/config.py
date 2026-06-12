@@ -30,7 +30,10 @@ References
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:  # avoid a config <-> clubb import cycle at runtime
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
 
 
 class SurfaceLayerConfig(NamedTuple):
@@ -499,6 +502,10 @@ class TurbulenceConfig(NamedTuple):
         Configuration for MYNN-2.5 scheme (Nakanishi-Niino 2009).
     clubb_lite : CLUBBLiteConfig
         Configuration for CLUBB-lite scheme.
+    clubb : CLUBBConfig or None
+        Configuration for the fuller CLUBB scheme (``scheme="clubb"``). ``None``
+        selects the CAM-default ``CLUBBConfig()`` (resolved in the dispatcher);
+        kept as ``None`` here to avoid a config <-> clubb import cycle.
     holtslag_boville : HoltslagBovilleConfig
         Configuration for Holtslag-Boville scheme.
     ysu : YSUConfig
@@ -517,4 +524,5 @@ class TurbulenceConfig(NamedTuple):
     holtslag_boville: HoltslagBovilleConfig = HoltslagBovilleConfig()
     ysu: YSUConfig = YSUConfig()
     edmf: TurbulentEDMFConfig = TurbulentEDMFConfig()
+    clubb: CLUBBConfig | None = None
     update_interval_steps: int = 1

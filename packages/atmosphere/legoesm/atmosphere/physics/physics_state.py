@@ -91,6 +91,16 @@ class PhysicsState(NamedTuple):
         the wrong moment as energy — the active scheme reads its own
         field.  Zero-filled when the active turbulence scheme is not
         MYNN-2.5 (Phase C codex iter-1 medium finding).
+    clubb_moments : jax.Array, shape (ncol, 15, nlev+1)
+        Prognostic CLUBB higher-order moment state (the 15-field
+        :class:`~legoesm.atmosphere.physics.turbulence.clubb.CLUBBMomentState`
+        packed by ``pack_clubb_moments``) for the fuller ``scheme="clubb"``
+        prognostic path. zm-level fields use the full ``nlev+1`` axis; zt-level
+        means/``wp3`` use the first ``nlev`` slots (trailing slot zero).
+        Minimally allocated ``(ncol, 1, 1)`` when CLUBB is not the active scheme
+        (like :attr:`gwd_spectrum`).  Distinct from :attr:`tke` so the diagnostic
+        phase-1 CLUBB (``tke``) and the prognostic CLUBB (``clubb_moments``)
+        cannot cross-feed on a restart scheme switch.
     """
     tke: jnp.ndarray
     conv_prog_profile: jnp.ndarray
@@ -99,6 +109,7 @@ class PhysicsState(NamedTuple):
     prng_key: jnp.ndarray
     surface_T_sfc_override: jnp.ndarray
     qke: jnp.ndarray
+    clubb_moments: jnp.ndarray
 
 
 def init_physics_state(
@@ -169,6 +180,20 @@ def init_physics_state(
     else:
         qke = jnp.zeros((ncol, nlev), dtype=dtype)
 
+    # --- CLUBB prognostic higher-order moment state ---
+    # Carried only for the fuller prognostic clubb path; packed (ncol, 15, nzm).
+    # Minimal (ncol, 1, 1) otherwise (like gwd_spectrum) — no wasted memory.
+    if turb_cfg.scheme == "clubb" and getattr(turb_cfg.clubb, "prognostic", False):
+        from legoesm.atmosphere.physics.turbulence.clubb import (
+            init_clubb_moments,
+            pack_clubb_moments,
+        )
+        _dt = dtype if dtype is not None else jnp.float64
+        clubb_moments = pack_clubb_moments(
+            init_clubb_moments(ncol, nlev, turb_cfg.clubb, dtype=_dt))
+    else:
+        clubb_moments = jnp.zeros((ncol, 1, 1), dtype=dtype)
+
     # --- Convection prognostic profile ---
     conv_cfg = physics_config.convection
     conv_prog_profile = jnp.zeros((ncol, nlev), dtype=dtype)
@@ -217,6 +242,7 @@ def init_physics_state(
         prng_key=prng_key,
         surface_T_sfc_override=surface_T_sfc_override,
         qke=qke,
+        clubb_moments=clubb_moments,
     )
 
 
@@ -257,4 +283,5 @@ def update_physics_state(phys_state, updates):
             "surface_T_sfc_override", phys_state.surface_T_sfc_override,
         ),
         qke=updates.get("qke", phys_state.qke),
+        clubb_moments=updates.get("clubb_moments", phys_state.clubb_moments),
     )

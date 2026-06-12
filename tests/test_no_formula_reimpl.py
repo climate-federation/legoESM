@@ -221,10 +221,13 @@ def detect_brunt_vaisala_tp_form(src: str) -> list[int]:
 CANONICAL_FORMULAS = {
     "buoyancy_term_g_over_theta": {
         "detect": detect_buoyancy_term,
-        "canonical": None,  # no shared helper yet — every site below is DEBT
+        # Canonical home: ``physics._shared.buoyancy_coefficient(θ) = g/θ`` (the
+        # CLUBB port factored its ``g/θ`` sites into it; remaining files below are
+        # DEBT to migrate to the helper).
+        "canonical": "packages/atmosphere/legoesm/atmosphere/physics/_shared.py",
         "fix": (
-            "factor ``g/θ·∂θ/∂z`` into a shared buoyancy/Brunt-Väisälä helper "
-            "(e.g. atmosphere/physics/_shared) and reuse it; ratchet this budget down"
+            "use ``physics._shared.buoyancy_coefficient(θ)`` (= g/θ) instead of an "
+            "inline ``g/θ·(flux or ∂θ/∂z)``; ratchet this budget down"
         ),
         # Per-file count, seeded from the measured baseline (iter 2026-06-09):
         # 33 inline buoyancy/N² re-derivations across 18 modules.
@@ -232,12 +235,18 @@ CANONICAL_FORMULAS = {
             "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler.py": 5,
             "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_mpas.py": 1,
             "packages/atmosphere/legoesm/atmosphere/dynamics/compressible_euler_plane.py": 2,
-            "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_les_plane.py": 1,
+            # 1 -> 2: main grew a second inline N² site while this branch was
+            # in flight (rebase 2026-06-12 baseline re-seed, not branch debt).
+            "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_les_plane.py": 2,
             "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_nh.py": 2,
             "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/hines.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/lindzen.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/mcfarlane.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/prognostic_spectral.py": 1,
+            # clubb_lite keeps its single inline g/θ N² term by decision (the
+            # buoyancy_coefficient wrapper was judged superfluous there —
+            # PORT_CLUBB.md condensation goal); this restores the pre-CLUBB-port
+            # main baseline value, it is NOT new debt.
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_lite.py": 1,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 3,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/holtslag_boville.py": 4,
@@ -260,11 +269,13 @@ CANONICAL_FORMULAS = {
     },
     "exner_potential_temperature": {
         "detect": detect_exner_potential_temperature,
-        "canonical": None,  # no shared exner/θ helper exists yet — DEBT ratchet
+        # Canonical home: ``physics._shared.exner_function(p) = (p/p_ref)^κ`` (the
+        # CLUBB port factored its sites into it; remaining files below are DEBT to
+        # migrate to the helper).
+        "canonical": "packages/atmosphere/legoesm/atmosphere/physics/_shared.py",
         "fix": (
-            "create a canonical Exner/potential-temperature helper (e.g. in "
-            "thermo or atmosphere/physics/_shared) and reuse it; ratchet this "
-            "42-site debt to zero"
+            "use ``physics._shared.exner_function(p)`` (= (p/p_ref)^κ) instead of "
+            "an inline power; ratchet this debt to zero"
         ),
         # 42 inline (p/p0)^κ sites across 29 modules (iter 2026-06-09).
         "budget": {
@@ -283,7 +294,9 @@ CANONICAL_FORMULAS = {
             "packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py": 3,
             "packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py": 3,
             "packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py": 3,
-            "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_lite.py": 1,
+            # New on main while this branch was in flight (rebase 2026-06-12
+            # baseline seed, not branch debt): 3 inline (p/p0)^κ sites.
+            "packages/atmosphere/legoesm/atmosphere/dynamics/spectral_les_moist.py": 3,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py": 2,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/holtslag_boville.py": 2,
             "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py": 1,
