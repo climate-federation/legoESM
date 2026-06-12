@@ -267,6 +267,15 @@ class ModelDriver:
         dm = self._double_moment_step_inputs()
         for k, v in dm.items():
             base[f"dmtr_{k}"] = v
+        # Tag the convection carry with its scheme (codex round 8): a
+        # scheme change that keeps the carry SHAPE (mass_flux<->edmf
+        # both carry (ncol,); the profile-prognostic schemes all carry
+        # (ncol, nlev)) would otherwise silently feed one scheme's
+        # memory to another on restart.  Stored as a plain string; the
+        # npz loader passes it through un-cast.
+        if "conv_prog" in base:
+            base["conv_prog_scheme"] = np.asarray(
+                str(getattr(self.config, "convection", "none")))
         return base if base else None
 
     def _restore_dm_tracers_from_carry_aux(self) -> None:
@@ -2367,9 +2376,14 @@ class ModelDriver:
             # Stateful-physics carry (#413): persisted under
             # ``physstate_<field>`` so a chained restart resumes the
             # prognostic physics memory instead of silently reseeding.
+            # The convection scheme tag travels with it (codex round 8:
+            # the profile-prognostic schemes share the carry shape, so
+            # shape checks alone cannot catch a cross-scheme restore).
             if ps_d_carry is not None:
                 for _name, _val in ps_d_carry.items():
                     _save[f"physstate_{_name}"] = np.asarray(_val)
+                _save["physstate_meta_conv_scheme"] = np.asarray(
+                    str(getattr(self.config, "convection", "none")))
             # Persist moisture tracers too (moist MPAS runs), so a chained
             # restart does not silently drop water.  The ``trc_`` prefix avoids
             # colliding with u/T/p_s/phis; ``tracer_names`` lets load rebuild
@@ -2711,6 +2725,11 @@ class ModelDriver:
             if _ps_keys:
                 for _k in _ps_keys:
                     _name = _k[len("physstate_"):]
+                    if _name.startswith("meta_"):
+                        # Plain-string metadata (scheme tag) — no jnp,
+                        # no scatter.
+                        self._carry_aux[_k] = str(d[_k])
+                        continue
                     _val = jnp.asarray(d[_k])
                     if _mpi and _name != "prng_key":
                         if _val.ndim == 3:
@@ -3395,6 +3414,33 @@ class ModelDriver:
         # should drop the stale physstate_* entries from the
         # checkpoint, not rely on a silent fallback).
         if isinstance(self._carry_aux, dict):
+            # Cross-scheme convection restore check (codex round 8):
+            # the profile-prognostic schemes share the carry shape, so
+            # the per-field shape check below cannot catch a scheme
+            # change.  Tag absent = legacy checkpoint (warn + accept).
+            _saved_conv = self._carry_aux.get("physstate_meta_conv_scheme")
+            _has_conv_carry = any(
+                k in self._carry_aux
+                for k in ("physstate_conv_prog_profile",
+                          "physstate_conv_stoch_state")
+            )
+            if _has_conv_carry:
+                if _saved_conv is None:
+                    logger.warning(
+                        "  Restored MPAS convection carry has no scheme "
+                        "tag (legacy checkpoint) — assuming it matches "
+                        "convection=%r", cfg.convection,
+                    )
+                elif str(_saved_conv) != str(cfg.convection):
+                    raise ValueError(
+                        f"Restored MPAS convection carry was written by "
+                        f"scheme {str(_saved_conv)!r} but this run "
+                        f"configures convection={cfg.convection!r} — "
+                        "reusing it would feed one scheme's memory to "
+                        "another (issue #405/#413).  Fix the config or "
+                        "strip the physstate_* entries to opt into a "
+                        "fresh seed."
+                    )
             _restored_ps = {}
             for _k, _v in self._carry_aux.items():
                 if not _k.startswith("physstate_"):
@@ -4286,6 +4332,29 @@ class ModelDriver:
         else:
             conv_prog_default = jnp.zeros(conv_shape, dtype=_sd)
         conv_prog = _aux.get("conv_prog", conv_prog_default)
+        # Scheme-tag check (codex round 8): a restored carry whose
+        # SCHEME differs from the configured one must not be reused
+        # even when the shape matches (mass_flux M_c fed as edmf a_u).
+        # Tag absent = legacy checkpoint — accept with a loud warning.
+        _restored_conv_scheme = _aux.get("conv_prog_scheme")
+        if "conv_prog" in _aux:
+            if _restored_conv_scheme is None:
+                if cfg.convection not in ("none",):
+                    logger.warning(
+                        "  Restored conv_prog carries no scheme tag "
+                        "(legacy checkpoint) — assuming it matches "
+                        "convection=%r", cfg.convection,
+                    )
+            elif str(_restored_conv_scheme) != str(cfg.convection):
+                raise ValueError(
+                    f"Restored convection carry was written by scheme "
+                    f"{str(_restored_conv_scheme)!r} but this run "
+                    f"configures convection={cfg.convection!r} — reusing "
+                    "it would feed one scheme's memory to another "
+                    "(issue #405/#413).  Fix the config or remove the "
+                    "conv_prog entries from the checkpoint to opt into "
+                    "a fresh seed."
+                )
         if tuple(conv_prog.shape) != conv_shape:
             # A RESTORED conv_prog with the wrong shape is a checkpoint/
             # config mismatch — profile-prognostic convection is a real
@@ -5067,11 +5136,22 @@ class ModelDriver:
                 **_phys_carry_step_inputs(),
             )
         conv_prog = phys_out.conv_prog
-        # Stash into carry_aux at the warmup step too (codex round 4):
-        # a one-step run never enters the main loop, and _finalize_run
-        # would otherwise checkpoint stale/missing carries.  conv_prog
-        # included (codex round 6) — it is a real convection carry.
-        self._carry_aux["conv_prog"] = conv_prog
+        # Stash the FULL restart-relevant carry set at the warmup step
+        # (codex rounds 4/6/8): a one-step run never enters the main
+        # loop, and _finalize_run would otherwise checkpoint stale or
+        # missing carries (held radiation and T_land included — they
+        # were historically only written at diagnostic boundaries).
+        self._carry_aux.update({
+            "held_dT_rad": held_dT_rad,
+            "held_sw_net_sfc": held_sw_net_sfc,
+            "held_lw_net_sfc": held_lw_net_sfc,
+            "held_sw_up_toa": held_sw_up_toa,
+            "held_lw_up_toa": held_lw_up_toa,
+            "held_sw_down_toa": held_sw_down_toa,
+            "conv_prog": conv_prog,
+        })
+        if T_land is not None:
+            self._carry_aux["T_land"] = T_land
         if phys_out.tke is not None:
             phys_tke = phys_out.tke
             self._carry_aux["tke"] = phys_tke
@@ -5176,11 +5256,19 @@ class ModelDriver:
                     **_phys_carry_step_inputs(),
                 )
             conv_prog = phys_out.conv_prog
-            # Persist per step (codex round 6): the diagnostic-boundary
-            # refresh below is the only other writer, so a checkpoint on
-            # a non-diagnostic step would otherwise persist a stale
-            # convection carry.
-            self._carry_aux["conv_prog"] = conv_prog
+            # Persist the full restart-relevant set per step (codex
+            # rounds 6/8): checkpoints can fire on any step, so the
+            # held-radiation fields and every carry must be current —
+            # not just whatever the last diagnostic boundary wrote.
+            self._carry_aux.update({
+                "held_dT_rad": held_dT_rad,
+                "held_sw_net_sfc": held_sw_net_sfc,
+                "held_lw_net_sfc": held_lw_net_sfc,
+                "held_sw_up_toa": held_sw_up_toa,
+                "held_lw_up_toa": held_lw_up_toa,
+                "held_sw_down_toa": held_sw_down_toa,
+                "conv_prog": conv_prog,
+            })
             if T_land is not None:
                 self._carry_aux["T_land"] = T_land
             # Stateful-physics carries (issue #413): feed the updated
@@ -5288,30 +5376,20 @@ class ModelDriver:
                     run_status = error
                     break
 
-                # Store carry_aux for coupling access
-                self._carry_aux = {
+                # Refresh coupling-facing carry_aux entries.  UPDATE —
+                # never rebuild the dict (codex rounds 3/8): a rebuild
+                # dropped held_dT_rad / held_*_toa / T_land / the
+                # stateful-physics carries right before any checkpoint
+                # written on a diagnostic step, silently reseeding them
+                # on restart.  The per-step stash above keeps the full
+                # restart set current; this adds the diagnostics-only
+                # extras.
+                self._carry_aux.update({
                     "held_sw_net_sfc": phys_out.sw_net_sfc,
                     "held_lw_net_sfc": phys_out.lw_net_sfc,
                     "conv_prog": conv_prog,
                     "seg_precip": phys_out.precip,
-                }
-                # Preserve the prognostic slab-land skin temperature
-                # across this diagnostic-step refresh so a checkpoint
-                # written on a diagnostic step still restores T_land
-                # exactly on restart (#325 restart-safety).
-                if T_land is not None:
-                    self._carry_aux["T_land"] = T_land
-                # Same restart-safety for the stateful-physics carries
-                # (#413, codex round 3): this rebuild would otherwise
-                # drop tke/qke/gwd_spectrum right before a checkpoint
-                # written on a diagnostic step, silently reseeding the
-                # physics memory on restart.
-                if phys_tke is not None:
-                    self._carry_aux["tke"] = phys_tke
-                if phys_qke is not None:
-                    self._carry_aux["qke"] = phys_qke
-                if phys_gwd_spectrum is not None:
-                    self._carry_aux["gwd_spectrum"] = phys_gwd_spectrum
+                })
 
                 # Segment callback for coupled integration
                 if self._segment_callback is not None:

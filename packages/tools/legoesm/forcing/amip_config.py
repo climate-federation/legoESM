@@ -348,7 +348,11 @@ def load_checkpoint(
     for key in data.files:
         if key.startswith("carry_"):
             _name = key[6:]
-            if _name in _keep_stored_dtype:
+            if _name == "conv_prog_scheme":
+                # Scheme tag for the convection carry (issue #413) —
+                # a plain string, not a float array.
+                carry_aux[_name] = str(data[key])
+            elif _name in _keep_stored_dtype:
                 carry_aux[_name] = jnp.array(data[key])
             else:
                 carry_aux[_name] = jnp.array(data[key], dtype=_storage_dtype)
