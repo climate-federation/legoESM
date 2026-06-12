@@ -94,6 +94,10 @@ def parse_args():
     p.add_argument("--f32", action="store_true")
     p.add_argument("--microphysics", default="morrison")
     p.add_argument("--n-tracers", type=int, default=9)
+    # Shared with bx.build (the moist-stability switches; defaults match BOMEX).
+    p.add_argument("--filter-monotone-scalars", action="store_true")
+    p.add_argument("--filter-monotone-qv", action="store_true")
+    p.add_argument("--micro-order", choices=["pre", "post"], default="pre")
     p.add_argument("--dynamic", action="store_true", default=True)
     p.add_argument("--static", dest="dynamic", action="store_false")
     p.add_argument("--sgs-model", choices=["smagorinsky", "vreman"],
