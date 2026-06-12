@@ -36,115 +36,48 @@ happens after the source consolidation settles.
 | 18 | `clubb_config.py` | 338 | `CLUBBParams`/`CLUBBConfig` → clubb.py; **drop `CLUBBFlags`** (CAM tree only), flag VALUES → comment block at END of clubb.py; prune dead non-CAM branches that the flag removal exposes | ✅ C6 (iter 6, sec. 2 + flag table at file end) |
 | 19 | `clubb_lite.py` | 328 | NOT absorbed (separate scheme). Retain `_shared.exner_function` use; REVERT its `buoyancy_coefficient` usage (superfluous per goal) | ✅ C7 (iter 7) |
 
-**Iteration log (condensation):**
-- **C1 (iter 1):** absorbed `clubb_diagnostic.py` + `clubb_core.py` into
-  `clubb.py` (sections 1-2 + section-comment scaffold for the future TOC),
-  byte-identical bodies (codex-verified vs `git show HEAD:` originals); deleted
-  both modules; re-pointed physics_state.py / integration.py /
-  test_clubb_core.py / test_clubb_diagnostic.py / test_clubb_scheme.py; removed
-  both filenames from test_physics_contracts EXCLUDED/CONTRACT_TODO (shrink-only
-  ok). Green: test_clubb_core + test_clubb_diagnostic + contracts (127) + 5
-  conservation tests from test_clubb_scheme; ruff clean on clubb.py; codex
-  adversarial review → only stale-doc nits (fixed here).
-- **C2 (iter 2):** absorbed `clubb_coefficients.py` + `clubb_wp23.py` +
-  `clubb_xm_wpxp.py` (1222 LOC) into `clubb.py` as sections 2-4 (coefficients
-  co-absorbed to resolve its `compute_skw_fnc` edge into wp23 without a cycle);
-  deduped the byte-identical `_GAMMA = 1.5` (gamma_over_implicit_ts) shared by
-  the wp23/xm_wpxp advances; deleted the 3 modules; re-pointed the module-alias
-  test imports (`import clubb as W/X/C`); contracts EXCLUDED entries removed.
-  clubb.py now 2272 lines, 6 sections. Green: wp23+xm_wpxp+coefficients+core
-  tests + contracts (174) + 5 conservation tests; ruff clean; codex AST-level
-  adversarial review → APPROVE (body fidelity, imports, no stale refs).
-  ALSO fixed: the C1 commit had silently lost the two `git rm` deletions (a
-  `git stash`/`pop` during the ruff-baseline check unstaged them; explicit-path
-  `git add` missed deleted paths) — amended into C1. Lesson: after stash/pop,
-  re-verify staged deletions with `git status` before committing.
-- **C3 (iter 3):** absorbed `clubb_moments.py` + `clubb_mfl.py` (1193 LOC) into
-  `clubb.py` as sections 2 (moment-advance building blocks + xp2_xpyp/windm
-  advances) and 5 (monotonic flux limiter), 8 sections total (3376 lines);
-  deduped the byte-identical `_EPS = 1.0e-10`; mfl's NaN-propagating local
-  `_safe_sqrt` kept local (intentional variant). Deleted both modules;
-  re-pointed test_clubb_moments/test_clubb_mfl + function-scope imports in
-  test_clubb_xm_wpxp/test_clubb_wp23; contracts entries removed. Documented
-  the intentional no-`__all__` policy in the clubb.py docstring (public API =
-  the 4 scheme entries; machinery stays importable for parity tests). Green:
-  215 tests (moments/mfl/wp23/xm_wpxp/core + contracts); ruff clean; codex
-  adversarial review → request-changes (3 doc nits + __all__ decision) →
-  fixed → approve.
-- **C4 (iter 4):** absorbed the 6 remaining leaf closure modules (1311 LOC) —
-  `clubb_solve` + `clubb_fill_holes` + `clubb_skewness` + `clubb_tau` +
-  `clubb_pdf` + `clubb_pdf_moments` — as sections 2-7 (14 sections, 4512
-  lines). Deduped byte-identical-value constants (`_EPS`/`_MAX_MAG_CORRELATION`/
-  `_SQRT_2`/`_SQRT_2PI`/`_EP1`/`_EP2`); `_F64_EPS` deduped raw-numpy→float()
-  form (bool-only use sites — codex-verified value-equivalent). Caught by
-  tests: the absorbed solve body needed `from jax import lax` (carried imports
-  must be re-derived per batch, not assumed). 6 modules deleted; test imports
-  re-pointed; contracts entries removed. Green: 202 tests; ruff clean; codex
-  AST-level adversarial review → APPROVE (first pass).
-- **C5 (iter 5):** absorbed the geometry/thermo helper layer (1147 LOC) —
-  `clubb_grid` + `clubb_saturation` + `clubb_helpers` + `clubb_mixing_length`
-  — as sections 2-5 (18 sections, 5499 lines). Saturation = thin adapters over
-  the canonical `legoesm.thermo` Flatau curves (per goal: shared module
-  exists, wrappers move in). Mixing length CONFIRMED different numerics from
-  `_shared`'s Blackadar (parcel buoyant-sorting) → absorbed with a
-  could-supplant-_shared note in its section header. Deduped
-  `_ZERO_THRESHOLD`/`_EP1`/`_EP2`/`_ZERO`/`_EPS` (kept mixing_length's unique
-  `_EP`/`_LV2_COEF`); pdf section's function-scope saturation import now a
-  direct module-level reference. 4 modules deleted; importers re-pointed;
-  contracts entries removed. Green: 197 + 5 conservation tests; ruff clean;
-  codex review → approve (2 [low] flags were the intentional test-header
-  updates, same sanctioned class as C1-C4).
-- **C6 (iter 6) — config endgame:** `CLUBBParams`/`CLUBBConfig`/derive fns →
-  clubb.py section 2 (19 sections, 5789 lines); **`CLUBBFlags` class REMOVED**
-  (only the CAM tree is implemented): all 14 former `config.flags.*` sites
-  hardcoded to CAM defaults with "CAM <flag> = <val>" site comments — dead
-  branches DELETED (`l_lmm_stepping` x2, `l_enable_relaxed_clipping` True-arm
-  + its 2 floor constants), True-branches made unconditional
-  (`l_min_xp2_from_corr_wx`, `l_wp2_fill_holes_tke`, `l_tke_aniso`),
-  `fill_holes_type` → `_CAM_FILL_HOLES_TYPE = 2`. The 65 flag VALUES live as
-  a machine-parseable reference table at the END of clubb.py;
-  test_clubb_config.py REWRITTEN to parse that table (the CAM-namelist
-  source-of-truth tripwire survives on the comment block + new
-  table-completeness and constant-vs-table consistency gates). clubb_config
-  deleted; config.py keeps a TYPE_CHECKING-only import (no runtime cycle).
-  Green: 265 + 7 + 12 tests; ruff clean; codex adversarial review → APPROVE
-  (verified: 14/14 flag sites, 102/102 params identical, 65/65 table match,
-  dead branches truly dead under CAM defaults).
-- **C7 (iter 7):** `clubb_lite.py` revert per goal — `N2_half` back to main's
-  inline `constants.g/θ_v` form (byte-identical, codex-verified),
-  `buoyancy_coefficient` import dropped; `exner_function`/`mixing_length`
-  retained. Formula-ratchet budget: clubb_lite buoyancy entry RESTORED to
-  main's baseline 1 (decision, not new debt — documented in the budget).
-  Also fixed pre-existing rebase fallout in `test_no_formula_reimpl.py`:
-  main-side files (`spectral_les_plane.py` buoyancy 1→2,
-  new `spectral_les_moist.py` exner=3) seeded at their measured main
-  baselines (gate was red at HEAD since the rebase). **FULL CLUBB suite
-  green: 335 passed across all 19 test files (32 min)** — the complete
-  condensed clubb.py validated end-to-end. Codex review → approve.
-- **C8 (iter 8):** line-numbered TOC shipped — every TOC entry in the
-  clubb.py docstring now cites the exact section-header line
-  (`N.  [line  L] Title`, patched in place so the numbers stay valid), plus
-  a flag-table pointer in the TOC header. New tripwire
-  `test_toc_line_numbers_accurate` (codex-verified non-vacuous: a single
-  inserted line fails it loudly) — future edits must regenerate the TOC.
-  Coefficient-constants placement: clubb_coefficients had FUNCTIONS only
-  (no module constants), so "constants near top" is satisfied by the
-  config/derived-constants section 2; noted in the plan table (C2 row).
-  Codex review → APPROVE (one [warn]: TOC title-text drift not policed —
-  acceptable; line-number drift is).
-- **C9 (iter 9) — whole-repo gate sweep (validation only, no code change):**
-  ratchet/contract gates: contracts + no_hardcoded_constants +
-  no_saturation_reimpl + no_formula_reimpl + dispatch_hardening +
-  validate_strict_coverage + federation_plan = **4139 passed**. Turbulence
-  no-regression + physics-state carry + smoke suites = **168 passed**.
-  ONE pre-existing failure, OUT OF SCOPE: `test_no_private_cross_imports`
-  flags `ocean/dynamics/barotropic_implicit_latlon_cgrid.py` importing
-  `_global_rel_residual` — both file and test come verbatim from MAIN
-  (branch has zero ocean changes; verified via `git log`/`git diff
-  main...HEAD`); main is red on its own gate. Fix belongs on main (promote
-  the symbol), not this branch.
-  **Remaining:** iter-10 PORT_CLUBB.md compression + test-file consolidation
-  decision.
+**Condensation result (iters 1-10 / C1-C9, compressed at iter 10; per-iter
+detail in git history `b5a8c87b..cb580bf7`):**
+
+- **DONE — all 18 `clubb_*` helper modules absorbed into `clubb.py`** (5789
+  lines, 19 sections, line-numbered TOC + drift tripwire, CAM-default flag
+  reference table at file end). Strategy: top-down absorption (clubb.py stays
+  atop the import DAG → no cycles, no stubs, every iteration green+committed),
+  byte-identical bodies (codex AST-verified per batch), value-identical module
+  constants deduped, each batch codex-adversarially reviewed to approve.
+- **CLUBBFlags removed** (C6): only the CAM tree is implemented; all 14 flag
+  sites hardcoded with site comments, dead non-CAM branches deleted, 65 flag
+  values live as a machine-parseable reference table parsed by
+  `test_clubb_config.py` (CAM-namelist source-of-truth tripwire preserved,
+  + table-completeness, constant-vs-table, TOC-line-number gates).
+- **`clubb_lite.py` reverted per goal** (C7): inline `g/θ_v` N² restored
+  byte-identical to main (`buoyancy_coefficient` judged superfluous there);
+  `exner_function`/`mixing_length` retentions kept; buoyancy formula-budget
+  entry restored to main's baseline 1 (documented decision, not new debt).
+- **Saturation**: thin adapters in clubb.py over the canonical
+  `legoesm.thermo` Flatau curves (no re-derivation). **Mixing length**:
+  parcel buoyant-sorting CONFIRMED different from `_shared`'s Blackadar →
+  lives in clubb.py with a could-supplant-`_shared` note.
+- **Validation**: full CLUBB suite 335 passed (19 test files, 32 min);
+  ratchet/contract gates 4139 passed; turbulence no-regression + carry +
+  smoke 168 passed. ONE pre-existing failure is MAIN-side rebase fallout
+  (`test_no_private_cross_imports` on ocean barotropic `_global_rel_residual`
+  — zero ocean changes on this branch; fix belongs on main).
+- **Done-criterion audit (git diff main...HEAD)**: `clubb.py` is the ONLY new
+  source file; limited additions to shared files (`thermo.py` Flatau curves,
+  `_shared.py` exner/buoyancy/mixing helpers, physics_state/integration/
+  combined/config/scm carry+dispatch wiring, 2-line `driver/config.py`);
+  19 per-section test files + golden fixtures + 1 validation script under
+  tests/scripts.
+- **Test-file decision**: the 19 `test_clubb_*.py` files are KEPT (not merged
+  into one): they map 1:1 onto clubb.py's TOC sections, keep pytest sharding
+  effective, and avoid a ~10k-line test file; every file's imports point at
+  `clubb.py`. (Hygiene rule satisfied: clubb.py has direct unit tests.)
+- **Process lessons**: re-verify staged deletions after any stash/pop before
+  committing (C1); carried imports must be re-derived per absorption batch
+  (C4 `lax`); rebase fallout in ratchet baselines = re-seed at main's
+  measured values, never silently loosen (C7/C9).
+
 
 
 **Previous Goal:** `packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py`
