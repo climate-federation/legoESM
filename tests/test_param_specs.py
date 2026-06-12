@@ -110,7 +110,6 @@ PARAM_SPEC_TODO: frozenset[str] = frozenset(
         "packages/land/legoesm/land/richards.py",
         "packages/land/legoesm/land/soil_grid.py",
         "packages/land/legoesm/land/soil_hydraulics.py",
-        "packages/land/legoesm/land/soil_thermal.py",
         # --- ice -----------------------------------------------------------
         "packages/ice/legoesm/ice/config.py",
         # --- coupler -------------------------------------------------------
