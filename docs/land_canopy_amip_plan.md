@@ -672,6 +672,76 @@ to the grid; it does *not* know or assume which scheme consumes them.
 - **Validation:** loader regression tests (regrid conservation, PFT-fraction
   sums, LAI seasonal range) + tropical/boreal seasonal-cycle pass.
 
+#### M5 — Existing infrastructure to reuse
+
+M5 is mostly *assembly of existing parts*: the repo already solves "read
+external NetCDF → regrid to the model grid → time-interpolate," which is the
+bulk of the loader. Reuse, ranked by relevance:
+
+1. **`grids/regridding.py` — the regridding engine (use directly).**
+   Grid-agnostic lat-lon → cubed-sphere / Gaussian / Voronoi-MPAS, matching our
+   full grid list. Public API: `compute_gauss_to_cs_weights`,
+   `compute_cs_to_gauss_weights`, `compute_latlon_to_voronoi_weights`,
+   `RegridWeights`, `regrid_scalar`, `regrid_vector`. This is what
+   `era5_to_state.py` calls under the hood. Continuous fields (background
+   albedo, canopy height) go through `regrid_scalar` with cached weights.
+
+2. **`grids/conservative_regrid.py` — for fractional fields (required for PFT).**
+   `compute_overlap_weights` + `apply_conservative_regrid` do area-conserving
+   regridding. **PFT cover fractions** (must stay in [0,1] and sum to 1 per
+   cell) and area-weighted LAI must use this — bilinear/nearest violates the
+   partition-of-unity. Design rule for M5: continuous fields → (1); fractional
+   cover → conservative regrid here.
+
+3. **`forcing/amip.py` — structural template + time interpolation.**
+   The closest existing analog: loads *monthly* SST/sea-ice NetCDF, regrids to
+   the model grid, and linearly time-interpolates during integration — the same
+   pipeline monthly LAI needs. Directly reusable:
+   - `_time_coord_to_days` — numeric / numpy-datetime / cftime calendars (needed
+     for the monthly-LAI climatology).
+   - `AMIPForcingConfig` (path + var-name fields) / `AMIPForcing`
+     (loaded+regridded) NamedTuple pattern → mirror as
+     `GlobalSurfaceDataConfig` / `GlobalSurfaceData`.
+   - `get_amip_preset` preset system → presets for "CLM5 surfdata" vs "MODIS."
+   - The ICON KD-tree path shows the unstructured-source fallback.
+
+4. **`grids/topography.py` — static-field template (best fit for the static maps).**
+   `TopographyConfig` loads an external NetCDF, **auto-detects variables**
+   (`_detect_variables` among `sftlf`/`lsm`/`land_sea_mask`/…), and bilinear-
+   regrids with longitude wrapping (`_regrid_to_target`). Exactly the shape of
+   the PFT-map / background-albedo static loader, and it already does land-mask
+   loading (the `--land-mask-file` path) — the loader can consume the same mask
+   to define land cells.
+
+5. **`training/era5_to_state.py` — weight-caching idiom (the ERA5 IC path).**
+   Confirms ERA5 IC loading is lat-lon → Gaussian/cubed-sphere with a cached
+   weight table (`_get_cs_weights`, module-level `_CS_WEIGHT_CACHE`) and
+   `ensure_local_cache` / Zarr caching. Reuse the weight-caching pattern (regrid
+   weights are expensive — compute once per grid). Its *vertical* pressure→sigma
+   interp is **not** relevant to 2D surface fields; only the horizontal
+   weight-caching is.
+
+6. **`land/param_providers.py` — home for the per-scheme mappers.**
+   Already models per-cell PFT weights → land params. The scheme-agnostic →
+   scheme-specific mappers (GlobalSurfaceData → `CanopyLandParams` / slab albedo
+   / CLM-ML `LandSurfaceParams`) extend this module rather than adding new files.
+
+**Genuinely new work (the ~20%):**
+- A **CLM5 surfdata reader** — variable names (`PCT_NAT_PFT`, `PCT_CFT`,
+  `MONTHLY_LAI`, `MONTHLY_HEIGHT_TOP`) and the **PFT axis** are surfdata-specific;
+  no existing loader carries a PFT dimension.
+- The **per-scheme mappers** (small, in `param_providers.py`).
+- A **background VIS/NIR albedo** source (CLM5 `soil_color` → albedo lookup, or
+  a MODIS white/black-sky product) — no existing loader pulls spectral albedo.
+
+**Caveat — host-side, load-once.** All of the above are host-side
+NumPy/xarray/scipy (`xr.open_dataset`, `cKDTree`), run **once** at setup, then
+pushed to device. That is the correct pattern for M5 (boundary data loaded once,
+time-interpolated cheaply per step) and keeps the loader out of the JIT/autodiff
+path. The file I/O must not be made differentiable. Templates to lean on
+hardest: `forcing/amip.py` (monthly field) and `grids/topography.py` (static
+masked field).
+
 ### M6 — AMIP wiring + scheme selection + coupled spin-up ◄ **after M5**
 - `scripts/run_amip.py` gains a `--land-surface-scheme {slab,two_leaf,clm_ml}`
   flag; the loaded `GlobalSurfaceData` feeds the selected scheme via its mapper.
