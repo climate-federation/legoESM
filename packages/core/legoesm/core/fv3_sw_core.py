@@ -594,6 +594,36 @@ def d2a2c_d_to_a(u_d, v_d, cdgrid):
     )
 
 
+def d2a2c_uc_4th_local(utmp_pad):
+    """A→C x-dir 4th-order interior stencil on the h2-padded covariant
+    utmp — leading-axis-agnostic.  Returns the full (·, n+1, n) 4th-order
+    uc (n = utmp_pad.shape[1]-4).  The global d2a2c overlays this onto
+    its 2nd-order base in the [npt+1:n-npt] face-interior band; under
+    tiling, an INTERIOR tile is entirely 4th-order, so its uc IS this
+    core on the tile's padded utmp (P4 phase-1b approach C).  No
+    face-edge specials (C1/C2/C3, edge_interpolate4) — those stay in
+    d2a2c_vect for face-boundary cells.
+    """
+    h = 2
+    n = utmp_pad.shape[1] - 2 * h
+    return (_A2 * (utmp_pad[:, h - 2:n + h - 1, h:-h]
+                   + utmp_pad[:, h + 1:n + h + 2, h:-h])
+            + _A1 * (utmp_pad[:, h - 1:n + h, h:-h]
+                     + utmp_pad[:, h:n + h + 1, h:-h]))
+
+
+def d2a2c_vc_4th_local(vtmp_pad):
+    """A→C y-dir 4th-order interior stencil — symmetric to
+    :func:`d2a2c_uc_4th_local`.  Returns (·, n, n+1)
+    (n = vtmp_pad.shape[2]-4)."""
+    h = 2
+    n = vtmp_pad.shape[2] - 2 * h
+    return (_A2 * (vtmp_pad[:, h:-h, h - 2:n + h - 1]
+                   + vtmp_pad[:, h:-h, h + 1:n + h + 2])
+            + _A1 * (vtmp_pad[:, h:-h, h - 1:n + h]
+                     + vtmp_pad[:, h:-h, h:n + h + 1]))
+
+
 def d2a2c_ua_va_local(utmp, vtmp, cos_sg5, rsin2):
     """A-grid contravariant winds from covariant utmp/vtmp — pointwise.
 
@@ -661,10 +691,7 @@ def d2a2c_vect(u_d, v_d, cdgrid):
                 + utmp_pad[:, h:n+h+1, h:-h])  # (6, n+1, n)
 
     if n > 2 * npt + 2:
-        uc_4th = (_A2 * (utmp_pad[:, h-2:n+h-1, h:-h]
-                         + utmp_pad[:, h+1:n+h+2, h:-h])
-                  + _A1 * (utmp_pad[:, h-1:n+h, h:-h]
-                           + utmp_pad[:, h:n+h+1, h:-h]))
+        uc_4th = d2a2c_uc_4th_local(utmp_pad)  # (6, n+1, n)
         i_lo = npt + 1
         i_hi = n - npt
         uc = uc.at[:, i_lo:i_hi, :].set(uc_4th[:, i_lo - 1:i_hi - 1, :])
@@ -718,10 +745,7 @@ def d2a2c_vect(u_d, v_d, cdgrid):
     vc = 0.5 * (vtmp_pad[:, h:-h, h-1:n+h] + vtmp_pad[:, h:-h, h:n+h+1])  # (6, n, n+1)
 
     if n > 2 * npt + 2:
-        vc_4th = (_A2 * (vtmp_pad[:, h:-h, h-2:n+h-1]
-                         + vtmp_pad[:, h:-h, h+1:n+h+2])
-                  + _A1 * (vtmp_pad[:, h:-h, h-1:n+h]
-                           + vtmp_pad[:, h:-h, h:n+h+1]))
+        vc_4th = d2a2c_vc_4th_local(vtmp_pad)  # (6, n, n+1)
         j_lo = npt + 1
         j_hi = n - npt
         vc = vc.at[:, :, j_lo:j_hi].set(vc_4th[:, :, j_lo - 1:j_hi - 1])

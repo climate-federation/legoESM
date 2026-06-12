@@ -28,8 +28,10 @@ from legoesm.core.fv3_sw_core import (
     d2a2c_vect,
     d2a2c_d_to_a,
     d2a2c_ua_va_local,
+    d2a2c_uc_4th_local,
+    d2a2c_vc_4th_local,
 )
-from legoesm.parallel.mesh import tiled_face_block
+from legoesm.parallel.mesh import tiled_face_block, tiled_padded_block
 
 N = 24
 KT = 2
@@ -115,3 +117,49 @@ def test_tiled_ua_va_in_shardmap(setup):
     ua_t, va_t = _stage(*args)
     np.testing.assert_array_equal(np.asarray(ua_t), ua_g)
     np.testing.assert_array_equal(np.asarray(va_t), va_g)
+
+
+def test_uc_vc_4th_core_matches_production_interior(setup):
+    """The extracted 4th-order uc/vc core matches the production
+    d2a2c_vect uc/vc in the face-interior 4th-order band [npt+1:n-npt]
+    (regression on the uc_4th/vc_4th extraction + ties the core to the
+    live operator).  d2a2c_vect returns ua,va,uc,vc,ut,vt."""
+    cdg, u_d, v_d, _ua, _va = setup
+    _, _, uc_g, vc_g, _, _ = d2a2c_vect(u_d, v_d, cdg)
+    uc_g, vc_g = np.asarray(uc_g), np.asarray(vc_g)
+    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdg)
+    uc4 = np.asarray(d2a2c_uc_4th_local(utmp_pad))   # (6, n+1, n)
+    vc4 = np.asarray(d2a2c_vc_4th_local(vtmp_pad))   # (6, n, n+1)
+    npt = min(4, N // 2)
+    lo, hi = npt + 1, N - npt
+    # Global overlays uc_4th[lo-1:hi-1] into uc[lo:hi].
+    np.testing.assert_array_equal(uc_g[:, lo:hi, :], uc4[:, lo - 1:hi - 1, :])
+    np.testing.assert_array_equal(vc_g[:, :, lo:hi], vc4[:, :, lo - 1:hi - 1])
+
+
+@pytest.mark.parametrize("kt", (2, 3))
+def test_uc_vc_4th_core_tiles_exact(setup, kt):
+    """The 4th-order core tiles EXACTLY: d2a2c_uc_4th_local on a tile's
+    h2-padded utmp block (tiled_padded_block) == the global 4th-order uc
+    restricted to that tile's u-faces (the stencil is local; the padded
+    slice supplies the exact halo window)."""
+    cdg, u_d, v_d, _ua, _va = setup
+    nl = N // kt
+    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdg)
+    uc4_g = np.asarray(d2a2c_uc_4th_local(utmp_pad))   # (6, n+1, n)
+    vc4_g = np.asarray(d2a2c_vc_4th_local(vtmp_pad))   # (6, n, n+1)
+    for f in range(6):
+        upf = utmp_pad[f]
+        vpf = vtmp_pad[f]
+        for ti in range(kt):
+            for tj in range(kt):
+                ub = tiled_padded_block(upf, ti, tj, nl, kt)   # (nl+4,nl+4)
+                vb = tiled_padded_block(vpf, ti, tj, nl, kt)
+                uc_t = np.asarray(d2a2c_uc_4th_local(ub[None]))[0]  # (nl+1,nl)
+                vc_t = np.asarray(d2a2c_vc_4th_local(vb[None]))[0]  # (nl,nl+1)
+                uc_w = uc4_g[f, ti * nl: ti * nl + nl + 1,
+                             tj * nl:(tj + 1) * nl]
+                vc_w = vc4_g[f, ti * nl:(ti + 1) * nl,
+                             tj * nl: tj * nl + nl + 1]
+                np.testing.assert_array_equal(uc_t, uc_w)
+                np.testing.assert_array_equal(vc_t, vc_w)
