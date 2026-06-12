@@ -857,3 +857,86 @@ def test_mpas_repeated_load_clears_stale_physstate(tmp_path):
         "stale physstate_* survived a physstate-free reload — _run_mpas "
         "would resume carry from the WRONG checkpoint (issue #413)"
     )
+
+
+def _mpas_driver_cfg(**overrides):
+    """MPAS driver config for the restart-safety regressions (#413)."""
+    from legoesm.driver.config import (
+        ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
+    )
+    base = dict(
+        grid=GridConfig(grid_type="mpas", resolution=3, nlev=5),
+        dycore=DycoreConfig(dt=1.0, discretization="mpas"),
+        output=OutputConfig(diag_days=1, checkpoint_days=3.0 / 86400.0),
+        days=4.0 / 86400.0,
+        dataset="analytical",
+        radiation="none",
+        turbulence="tke",
+    )
+    base.update(overrides)
+    return ExperimentConfig(**base)
+
+
+def test_mpas_load_clears_stale_save_channel(tmp_path):
+    """Codex adversarial round 2 (#413): load_checkpoint must clear the
+    ``_mpas_phys_state`` SAVE channel so a load-then-save with no
+    intervening run (checkpoint rewrite/conversion) cannot emit a PRIOR
+    run's carry on top of this checkpoint's dynamics."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _mpas_driver_cfg()
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run() == "COMPLETED"
+    ckpt = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))[-1]
+
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    # Simulate a stale carry left by a prior run on this reused driver.
+    ncol = int(driver_b.state.T.data.shape[0])
+    nlev = int(driver_b.state.T.data.shape[1])
+    stale = init_physics_state(ncol, nlev, _tke_physics_config())
+    driver_b._mpas_phys_state = stale._replace(tke=stale.tke + 999.0)
+
+    driver_b.load_checkpoint(ckpt)
+    assert driver_b._mpas_phys_state is None, (
+        "load_checkpoint left the stale _mpas_phys_state save channel "
+        "populated — a load-then-save would emit the prior run's carry "
+        "(issue #413)"
+    )
+    # A save before any run now persists NO physstate (nothing to carry).
+    driver_b.save_checkpoint(0, 7.0)
+    saved = tmp_path / "b" / "checkpoint_day_0007.npz"
+    assert saved.exists()
+    with np.load(saved) as d:
+        assert not any(k.startswith("physstate_") for k in d.files), (
+            "stale carry leaked into a post-load save (issue #413)"
+        )
+
+
+def test_mpas_partial_physstate_checkpoint_rejected(tmp_path):
+    """Codex adversarial round 2 (#413): a checkpoint carrying only a
+    SUBSET of the physstate_* fields must be REJECTED loudly at restart —
+    overlaying it would mix restored and freshly-seeded carry and branch
+    the trajectory.  (Stripping ALL physstate_* stays the documented
+    fresh-seed opt-out, covered by the repeated-load test.)"""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _mpas_driver_cfg()
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run() == "COMPLETED"
+    ckpt = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))[-1]
+
+    # Drop ONE carry field (keep the meta tag and every other field).
+    partial = tmp_path / "partial.npz"
+    with np.load(ckpt) as d:
+        assert "physstate_tke" in d.files, "fixture must have a tke carry"
+        kept = {k: d[k] for k in d.files if k != "physstate_tke"}
+    np.savez(partial, **kept)
+
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    driver_b.load_checkpoint(partial)   # load stages the subset
+    with pytest.raises(ValueError, match="INCOMPLETE"):
+        driver_b.run()

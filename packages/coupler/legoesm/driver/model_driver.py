@@ -2732,6 +2732,12 @@ class ModelDriver:
             for _stale in [k for k in self._carry_aux
                            if k.startswith("physstate_")]:
                 del self._carry_aux[_stale]
+            # ...and clear the SAVE channel (``_mpas_phys_state``, read by
+            # save_checkpoint) so a load-then-save with no intervening run
+            # (checkpoint rewrite/conversion) cannot emit a PRIOR run's
+            # carry on top of this checkpoint's dynamics.  _run_mpas
+            # rebuilds it from the carry_aux overlay below on the next run.
+            self._mpas_phys_state = None
             _ps_keys = [k for k in d.files if k.startswith("physstate_")]
             if _ps_keys:
                 for _k in _ps_keys:
@@ -3450,6 +3456,37 @@ class ModelDriver:
                         "reusing it would feed one scheme's memory to "
                         "another (issue #405/#413).  Fix the config or "
                         "strip the physstate_* entries to opt into a "
+                        "fresh seed."
+                    )
+            # Codex adversarial (#413): the MPAS save writes EVERY
+            # PhysicsState field together (all are concrete arrays —
+            # init_physics_state never leaves one None).  A checkpoint
+            # carrying only a SUBSET of physstate_* (partial write, a
+            # hand-stripped or skewed writer) would overlay those and
+            # silently leave the rest at a FRESH seed — mixing restored
+            # and reseeded memory and branching the trajectory.  Require
+            # the full field set once ANY carry field is present;
+            # stripping ALL physstate_* stays the documented fresh-seed
+            # opt-out.
+            _present_fields = {
+                k[len("physstate_"):] for k in self._carry_aux
+                if k.startswith("physstate_")
+                and not k[len("physstate_"):].startswith("meta_")
+            }
+            if _present_fields:
+                _missing = [f for f in _phys_state._fields
+                            if f not in _present_fields]
+                if _missing:
+                    raise ValueError(
+                        "MPAS restart physics-state carry is INCOMPLETE: "
+                        f"present {sorted(_present_fields)}, missing "
+                        f"{sorted(_missing)}.  The save writes every "
+                        "PhysicsState field together, so a subset is a "
+                        "partial / corrupted / hand-edited checkpoint; "
+                        "overlaying it would mix restored and freshly-"
+                        "seeded memory and silently branch the trajectory "
+                        "(issue #405/#413).  Restore a complete checkpoint, "
+                        "or strip ALL physstate_* entries to opt into a "
                         "fresh seed."
                     )
             _restored_ps = {}
