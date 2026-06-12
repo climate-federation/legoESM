@@ -36,6 +36,7 @@ from legoesm.core.fv3_sw_core import (
     d2a2c_uc_edge_interp_local,
     d2a2c_vc_c123_local,
     d2a2c_vc_edge_interp_local,
+    d2a2c_edge_w_local,
     _A1 as _FV3_A1,
 )
 from legoesm.parallel.mesh import (
@@ -434,3 +435,60 @@ def test_vc_edge_specials_south_north_match_production():
             va_w[None], dy_w[None], sn_w[None], ss_w[None], True))[0]
         np.testing.assert_allclose(vc_b, vc_g[f, a:a + nl, n],
                                    rtol=0, atol=1e-12)
+
+
+def test_d2a2c_edge_w_full_parity():
+    """Full W-edge-tile d2a2c == production d2a2c_vect (kt=3 W tile
+    (0,1)), every output EXCEPT the adjacent-strip vt[0] (which needs a
+    neighbour ut j-halo — stage-level).  Host slice-reassemble."""
+    from legoesm.grids.halo import pad_halo
+    set_halo_backend("local")
+    n, kt = 24, 3
+    nl = n // kt
+    h = 2
+    cdg = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    grid = cdg.base
+    rng = np.random.default_rng(51)
+    u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    ua_g, va_g, uc_g, vc_g, ut_g, vt_g = (
+        np.asarray(x) for x in d2a2c_vect(u_d, v_d, cdg))
+
+    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdg)
+    cos_sg5 = cdg.cos_sg[:, :, :, 4]
+    rsin2 = cdg.rsin2_cell
+    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
+    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
+    offsets = grid.halo_interp_offsets
+    se_pad_x = pad_halo(cdg.sin_sg[:, :, :, 2], interp_offsets=offsets)
+    sw_pad_x = pad_halo(cdg.sin_sg[:, :, :, 0], interp_offsets=offsets)
+
+    ti, tj = 0, 1
+    a, b = ti * nl, tj * nl
+    for f in range(6):
+        sb = lambda arr, ax: staggered_tile_block(arr[f], ti, tj, nl, ax)
+        fb = lambda arr: tiled_face_block(arr[f], ti, tj, nl, kt)
+        out = d2a2c_edge_w_local(
+            utmp_pad[f], vtmp_pad[f], tj, nl, n,
+            sb(u_d, 1)[None], sb(v_d, 0)[None],
+            fb(cos_sg5)[None], fb(rsin2)[None],
+            sb(cdg.cosa_u, 0)[None], sb(cdg.rsin_u, 0)[None],
+            sb(cdg.cosa_v, 1)[None], sb(cdg.rsin_v, 1)[None],
+            ua_pad[f], dxc_pad_x[f], se_pad_x[f], sw_pad_x[f])
+        ua_t, va_t, uc_t, vc_t, ut_t, vt_t = (np.asarray(x)[0] for x in out)
+        np.testing.assert_allclose(ua_t, ua_g[f, a:a + nl, b:b + nl],
+                                   rtol=0, atol=1e-12)
+        np.testing.assert_allclose(va_t, va_g[f, a:a + nl, b:b + nl],
+                                   rtol=0, atol=1e-12)
+        np.testing.assert_allclose(uc_t, uc_g[f, a:a + nl + 1, b:b + nl],
+                                   rtol=0, atol=1e-12)
+        np.testing.assert_allclose(vc_t, vc_g[f, a:a + nl, b:b + nl + 1],
+                                   rtol=0, atol=1e-12)
+        np.testing.assert_allclose(ut_t, ut_g[f, a:a + nl + 1, b:b + nl],
+                                   rtol=0, atol=1e-12)
+        # vt: exclude i=0 (the adjacent-strip; deferred).
+        np.testing.assert_allclose(
+            vt_t[1:nl], vt_g[f, a + 1:a + nl, b:b + nl + 1],
+            rtol=0, atol=1e-12)
