@@ -5631,6 +5631,42 @@ class ModelDriver:
         day_of_year, seconds_of_day = day_to_calendar(day)
         sst, sic = self.get_sst_sic(day)
 
+        # Warmup radiation cadence (FIX_RESTART_TIME iteration-2 codex
+        # finding, high): the warmup executes step ``start_step``, so a
+        # RESUMED run must use the SAME need_rad predicate as the main
+        # loop — the straight run's step ``start_step`` was held-only
+        # unless (start_step+1) hit the radiation cadence, and an
+        # unconditional radiation solve here both overwrites the
+        # checkpoint-restored held tendencies and samples forcing at the
+        # wrong time.  Fresh starts (start_step == 0) and resumes
+        # without restored held tendencies keep the historical
+        # always-radiate warmup (zero-initialized held fields would be
+        # worse than a recompute).
+        warmup_need_rad = (
+            start_step == 0
+            or RAD_UPDATE_STEPS <= 1
+            or (start_step + 1) % RAD_UPDATE_STEPS == 0
+            or "held_dT_rad" not in self._carry_aux
+        )
+        if warmup_need_rad and start_step > 0:
+            # Mirror the straight run's refresh at the top of this
+            # step's body: solar + external forcing sampled at
+            # day(start_step+1), not the prepare-context epoch values.
+            solar_now = get_solar_forcing_at_time(self._solar_config, day)
+            current_s_0 = float(solar_now["tsi"])
+            if self._use_solar_spectral:
+                solar_weights = jnp.asarray(
+                    solar_now["solar_fraction_by_gpt"])
+            _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
+            o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
+                day, _phys_p_s, _phys_lat,
+            )
+        _warmup_step_fn = (
+            step_unified
+            if warmup_need_rad or step_unified_no_rad is None
+            else step_unified_no_rad
+        )
+
         self.state = self.model.step_with_physics(self.state, DT)
 
         # Double-moment hydrometeor inputs (None unless the registry carries
@@ -5638,8 +5674,8 @@ class ModelDriver:
         _dm_step_in = self._double_moment_step_inputs()
         phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
-            step_unified(
-                jnp.bool_(True),
+            _warmup_step_fn(
+                jnp.bool_(warmup_need_rad),
                 self.state.T.data, self.state.p_s.data,
                 self.q_v, self.q_c, self.q_r, conv_prog,
                 self.state.u.data, self.state.v.data,

@@ -303,6 +303,69 @@ def test_resumed_segment_zero_refreshes_external_forcing(tmp_path):
 
 
 # ======================================================================
+# Per-step (compiled=False) path: warmup radiation cadence
+# ======================================================================
+
+def test_per_step_bitexact_restart_off_radiation_boundary(tmp_path):
+    """Per-step chain == straight run, BITWISE, when the checkpoint step
+    is NOT a radiation boundary (codex iteration-2 finding, high).
+
+    dt=600 ⇒ 144 steps/day; checkpoint at step 144 with
+    rad_update_steps=3 ⇒ (144+1) % 3 == 1, so the straight run's step
+    144 reuses the held radiation tendencies.  The resumed warmup used
+    to call ``step_unified(jnp.bool_(True), ...)`` unconditionally —
+    recomputing radiation at the wrong step, overwriting the restored
+    held tendencies, and sampling forcing at the prepare-context epoch
+    day.  The warmup now honors the same need_rad predicate as the main
+    loop and refreshes forcing only when it radiates.
+    """
+
+    def build(tmpdir: str, days: float) -> ModelDriver:
+        cfg = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
+            dycore=DycoreConfig(dt=600.0),
+            output=OutputConfig(output_dir="", diag_days=1,
+                                checkpoint_days=1),
+            days=days, dataset="analytical", radiation="gray",
+            rad_update_steps=3,
+            convection="none", turbulence="none", precision="fp64",
+        )
+        d = ModelDriver(cfg, output_dir=tmpdir)
+        d.setup()
+        return d
+
+    dA = build(str(tmp_path / "straight"), days=2.0)
+    assert dA.run(compiled=False) == "COMPLETED"
+
+    outB = str(tmp_path / "chain1")
+    dB = build(outB, days=1.0)
+    assert dB.run(compiled=False) == "COMPLETED"
+    ckpt = sorted(glob.glob(os.path.join(outB, "checkpoint_day_*.npz")))[-1]
+    dB2 = build(str(tmp_path / "chain2"), days=2.0)
+    step, day = dB2.load_checkpoint(ckpt)
+    assert (step + 1) % 3 != 0, (
+        f"test setup: step {step} must NOT be a radiation boundary"
+    )
+    assert dB2.run(start_step=step, start_day=day,
+                   compiled=False) == "COMPLETED"
+
+    comparisons = [
+        ("T", dA.state.T.data, dB2.state.T.data),
+        ("u", dA.state.u.data, dB2.state.u.data),
+        ("p_s", dA.state.p_s.data, dB2.state.p_s.data),
+        ("q_v", dA.q_v, dB2.q_v),
+        ("held_dT_rad", dA._carry_aux["held_dT_rad"],
+         dB2._carry_aux["held_dT_rad"]),
+    ]
+    for name, a, b in comparisons:
+        np.testing.assert_array_equal(
+            np.asarray(a), np.asarray(b),
+            err_msg=f"{name}: per-step chained restart != straight run "
+                    "(bitwise) — warmup radiation cadence",
+        )
+
+
+# ======================================================================
 # start_day convention disambiguation
 # ======================================================================
 

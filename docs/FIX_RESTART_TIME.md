@@ -105,6 +105,73 @@ Commit 2 (this one) — codex iteration-1 findings + production verdict:
   Log: /glade/derecho/scratch/adac/restart_time/validate.log.
 - Local: time_utils 73 passed; continuation non-slow 4 passed;
   forcing dispatch 9 passed; legacy reproducibility passed (exit 0).
+- Committed as e1ae069a (codex round 2 CLEAN on this diff).
+
+## Iteration 2 — plan (2026-06-12)
+
+Residual gap of the SAME class as the compiled seg-0 fix, found by
+auditing every `_run_*` loop for stale-prepare-forcing windows:
+
+- **`_run_per_step` (uncompiled fallback, :5229)**: the JIT-warmup step
+  and every step before the next radiation boundary use the
+  prepare-context ozone/aerosol/GHG/solar sampled at the epoch
+  START_DAY.  The straight run's forcing for step k (k≥1) was sampled
+  at day(M+1) where M = largest m ≤ k with (m+1) % RAD_UPDATE_STEPS
+  == 0 (refresh at the top of the body for step m applies from step m
+  onward); step 0 uses prepare values at day(0).  A resumed run
+  (start_step = s > 0) must therefore initialize its forcing at
+  day(boundary), boundary = RAD_UPDATE_STEPS * ((s+1) //
+  RAD_UPDATE_STEPS), whenever boundary > 0 — this also covers
+  RAD_UPDATE_STEPS == 1 (straight refreshed every step at day(k+1)).
+  Fresh runs (s == 0) keep the historical prepare-at-epoch behavior.
+  Invisible to bit-exact tests with constant TSI / no CMIP datasets —
+  pin with the same spy pattern as
+  `test_resumed_segment_zero_refreshes_external_forcing`, forcing the
+  per-step path.
+- Audited and CLEAN: `_run_spectral` (daily-cadence refresh fires on
+  the first resumed step at the canonical bucket; gray radiation +
+  constant solar), `_run_mpas` (same daily pattern, fixed iteration 1),
+  `_run_compiled` (fixed this iteration).
+- Open question for the review: how does a config select
+  `_run_per_step` over `_run_compiled` (need the dispatch condition to
+  write the spy test), and do production restarts ever take that path?
+  → Answered: `run(compiled=False)` opt-in (debug/reference path,
+  default is compiled); `tests/validation/test_precision_amip.py` uses
+  it (fresh starts only — unaffected).
+
+## Iteration 2 — done (2026-06-12)
+
+Adversarial review of the plan returned **needs-attention (high)** and
+confirmed a SECOND defect beyond the stale forcing (independently
+spotted in the same audit): the `_run_per_step` warmup called
+`step_unified(jnp.bool_(True), ...)` unconditionally, so a resume from
+a checkpoint step that is NOT a radiation boundary recomputed radiation
+where the straight run was held-only — overwriting the
+checkpoint-restored held tendencies AND sampling forcing at the
+prepare-context epoch.  Implemented per the amended plan:
+
+- `warmup_need_rad` mirrors the main-loop predicate
+  (`(start_step+1) % RAD_UPDATE_STEPS == 0`), with fresh starts
+  (start_step == 0), RAD<=1, and resumes WITHOUT restored held
+  tendencies (`"held_dT_rad" not in self._carry_aux`) keeping the
+  historical always-radiate warmup (zero-init held would be worse).
+- When the warmup radiates on a resume, solar + external forcing are
+  re-sampled at day(start_step+1) — the day the straight run's body
+  refresh used — instead of the epoch prepare values.  When it does
+  not radiate, no refresh: non-radiation steps never read the forcing
+  arrays, and the first body radiation step refreshes at its own day
+  (this supersedes the plan's boundary-formula refresh; codex pointed
+  out only the radiating-warmup case needs it).
+- Warmup dispatches `step_unified` vs `step_unified_no_rad` exactly
+  like the body.
+- Regression test
+  `test_per_step_bitexact_restart_off_radiation_boundary`:
+  compiled=False, dt=600 (144 steps/day), checkpoint_days=1,
+  rad_update_steps=3 ⇒ resume at step 144 with (145)%3 != 0; bitwise
+  on T/u/p_s/q_v + held_dT_rad.  Verified it BITES: fails in 2:00 with
+  the predicate forced True (old behavior), passes in 2:11 with the
+  fix.
+
 - **Codex round-2 finding (P2, fixed)**: the compiled cube/lat-lon loop
   only refreshed external forcing (ozone/aerosol/GHG + solar) for
   `seg_idx > 0`, so a RESUMED run's first segment kept the
