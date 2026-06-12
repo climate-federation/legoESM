@@ -1,7 +1,39 @@
 """Shared integration methods for LegoESM model classes."""
 
+import functools
+
 import jax
 import jax.numpy as jnp
+
+
+def physics_requires_phys_state(physics_fn) -> bool:
+    """True if *physics_fn* (or a partial / ``functools.wraps`` wrapper of
+    it) is a ``combined.make_physics`` output tagged
+    ``_requires_phys_state`` (a prognostic, carry-bearing scheme).
+
+    The tag lives on the raw ``make_physics`` callable.  A
+    ``functools.partial`` (e.g. binding ``forcing=``) or an
+    ``@functools.wraps`` wrapper strips the direct attribute, so a plain
+    ``getattr`` would report a wrapped stateful physics as diagnostic and
+    let it bypass the carry contract (codex #413 review).  Follow the
+    ``functools.partial.func`` / ``__wrapped__`` chain before trusting a
+    ``False``.  Bare hand-written closures expose no such link and so MUST
+    propagate the tag explicitly — the in-repo radiation/forcing wrappers
+    set ``wrapper._requires_phys_state = physics_requires_phys_state(inner)``.
+    """
+    seen = 0
+    fn = physics_fn
+    while fn is not None and seen < 16:
+        if getattr(fn, "_requires_phys_state", False):
+            return True
+        if isinstance(fn, functools.partial):
+            fn = fn.func
+        elif getattr(fn, "__wrapped__", None) is not None:
+            fn = fn.__wrapped__
+        else:
+            return False
+        seen += 1
+    return False
 
 
 def refuse_unthreaded_stateful_physics(physics_fn, phys_state, *, where):
@@ -33,7 +65,7 @@ def refuse_unthreaded_stateful_physics(physics_fn, phys_state, *, where):
     """
     if (physics_fn is not None
             and phys_state is None
-            and getattr(physics_fn, "_requires_phys_state", False)):
+            and physics_requires_phys_state(physics_fn)):
         raise NotImplementedError(
             f"{where} received a stateful physics_fn but no phys_state "
             "carry — the prognostic physics (TKE / convection / GWD) "

@@ -1109,3 +1109,37 @@ def test_spectral_family_step_refuses_stateful_physics():
         key=jax.random.PRNGKey(0))
     with pytest.raises(NotImplementedError, match="405"):
         sfno.step_with_physics(None, 1.0, fn)
+
+
+def test_carry_guard_sees_through_partial_and_wraps():
+    """Codex adversarial round 9 (#413): a functools.partial / wraps
+    wrapper around a tagged stateful make_physics fn strips the direct
+    _requires_phys_state attribute; the carry guard must follow
+    .func / __wrapped__ so a wrapped stateful physics cannot bypass the
+    contract and silently reseed."""
+    import functools
+    from legoesm.timestepping.integration import physics_requires_phys_state
+
+    fn = _stateful_make_physics()
+    assert physics_requires_phys_state(fn)
+
+    # functools.partial (e.g. binding forcing=) strips the attribute.
+    p = functools.partial(fn, forcing=None)
+    assert not getattr(p, "_requires_phys_state", False)
+    assert physics_requires_phys_state(p)
+
+    # functools.wraps copies __wrapped__ -> must be followed.
+    @functools.wraps(fn)
+    def wrapped(*a, **k):
+        return fn(*a, **k)
+    assert physics_requires_phys_state(wrapped)
+
+    # A diagnostic (untagged) fn stays False through a partial.
+    assert not physics_requires_phys_state(
+        functools.partial(_toy_carry_physics_fn()))
+
+    # End-to-end: a partial-wrapped stateful fn on a direct CDGrid step
+    # (no phys_state) still refuses loudly.
+    model, state, _ = _cdgrid_setup(n=4, nlev=4)
+    with pytest.raises(NotImplementedError, match="405"):
+        model.step(state, 1.0, physics_fn=functools.partial(fn))

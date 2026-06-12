@@ -3412,6 +3412,17 @@ class ModelDriver:
             # forwards the traced ``forcing`` (T_sfc) through the HS wrapper.
             if getattr(_rrtmgp_fn, '_wants_forcing', False):
                 physics_fn._wants_forcing = True
+            # Propagate the stateful-carry tag (#413): this combine wrapper
+            # is a plain closure, so refuse_unthreaded_stateful_physics
+            # cannot unwrap it.  Forward the marker from the config (the
+            # source of truth) so the carry contract and the sharded /
+            # spectral refusals still see a stateful physics THROUGH this
+            # wrapper, not a deceptively diagnostic-looking callable.
+            from legoesm.atmosphere.physics.combined import (
+                physics_config_requires_phys_state,
+            )
+            if physics_config_requires_phys_state(phys_cfg):
+                physics_fn._requires_phys_state = True
 
         run_status = "COMPLETED"
         logger.info(f"Starting MPAS: {n_steps_total} steps, {N_DAYS} days "
