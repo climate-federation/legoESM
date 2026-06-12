@@ -1,7 +1,7 @@
 """CLUBB dissipation time-scale (tau) family for the CAM-default tree.
 
-The prognostic moment advances (:mod:`clubb_wp23`, :mod:`clubb_moments`,
-:mod:`clubb_xm_wpxp`) each need a dissipation inverse-time-scale
+The prognostic moment advances (the wp2/wp3 and xm/wpxp sections of
+:mod:`clubb`, plus :mod:`clubb_moments`) each need a dissipation inverse-time-scale
 (``invrs_tau_C1/C4/C6/C14/xp2_zm`` and ``invrs_tau_wp3_zt``). For the CAM-default
 ``l_diag_Lscale_from_tau = .false.`` the tau model is simple: ``tau =
 min(Lscale/sqrt(em), taumax)``, so all the base inverse time-scales equal

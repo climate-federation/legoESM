@@ -19,8 +19,8 @@ happens after the source consolidation settles.
 | 1 | `clubb_diagnostic.py` | 105 | absorb (sec. 1) | ✅ C1 (iter 1) |
 | 2 | `clubb_core.py` | 443 | absorb (sec. 2) | ✅ C1 (iter 1) |
 | 3 | `clubb_moments.py` | 885 | absorb | — |
-| 4 | `clubb_wp23.py` | 720 | absorb | — |
-| 5 | `clubb_xm_wpxp.py` | 431 | absorb | — |
+| 4 | `clubb_wp23.py` | 720 | absorb | ✅ C2 (iter 2, sec. 3) |
+| 5 | `clubb_xm_wpxp.py` | 431 | absorb | ✅ C2 (iter 2, sec. 4) |
 | 6 | `clubb_mfl.py` | 308 | absorb | — |
 | 7 | `clubb_pdf_moments.py` | 283 | absorb | — |
 | 8 | `clubb_pdf.py` | 368 | absorb | — |
@@ -30,7 +30,7 @@ happens after the source consolidation settles.
 | 12 | `clubb_solve.py` | 151 | absorb | — |
 | 13 | `clubb_helpers.py` | 208 | absorb | — |
 | 14 | `clubb_grid.py` | 380 | absorb | — |
-| 15 | `clubb_coefficients.py` | 71 | constants → top of clubb.py | — |
+| 15 | `clubb_coefficients.py` | 71 | constants → top of clubb.py | ✅ C2 (iter 2, sec. 2; the module is FUNCTIONS not constants — placed as a section; the true scalar constants land near the top in the final-layout pass) |
 | 16 | `clubb_mixing_length.py` | 472 | compare vs `_shared` Blackadar (DIFFERENT — parcel buoyant-sorting) → absorb + file issue noting it could supplant `_shared`'s | — |
 | 17 | `clubb_saturation.py` | 87 | thin wrappers over `thermo` Flatau curves (shared module EXISTS) → wrappers into clubb.py | — |
 | 18 | `clubb_config.py` | 338 | `CLUBBParams`/`CLUBBConfig` → clubb.py; **drop `CLUBBFlags`** (CAM tree only), flag VALUES → comment block at END of clubb.py; prune dead non-CAM branches that the flag removal exposes | — |
@@ -45,7 +45,20 @@ happens after the source consolidation settles.
   both filenames from test_physics_contracts EXCLUDED/CONTRACT_TODO (shrink-only
   ok). Green: test_clubb_core + test_clubb_diagnostic + contracts (127) + 5
   conservation tests from test_clubb_scheme; ruff clean on clubb.py; codex
-  adversarial review → only stale-doc nits (fixed here). 
+  adversarial review → only stale-doc nits (fixed here).
+- **C2 (iter 2):** absorbed `clubb_coefficients.py` + `clubb_wp23.py` +
+  `clubb_xm_wpxp.py` (1222 LOC) into `clubb.py` as sections 2-4 (coefficients
+  co-absorbed to resolve its `compute_skw_fnc` edge into wp23 without a cycle);
+  deduped the byte-identical `_GAMMA = 1.5` (gamma_over_implicit_ts) shared by
+  the wp23/xm_wpxp advances; deleted the 3 modules; re-pointed the module-alias
+  test imports (`import clubb as W/X/C`); contracts EXCLUDED entries removed.
+  clubb.py now 2272 lines, 6 sections. Green: wp23+xm_wpxp+coefficients+core
+  tests + contracts (174) + 5 conservation tests; ruff clean; codex AST-level
+  adversarial review → APPROVE (body fidelity, imports, no stale refs).
+  ALSO fixed: the C1 commit had silently lost the two `git rm` deletions (a
+  `git stash`/`pop` during the ruff-baseline check unstaged them; explicit-path
+  `git add` missed deleted paths) — amended into C1. Lesson: after stash/pop,
+  re-verify staged deletions with `git status` before committing.
 
 
 **Previous Goal:** `packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py`

@@ -1,4 +1,4 @@
-"""Tests for the CLUBB xm/wpxp advance term builders (``clubb_xm_wpxp.py``).
+"""Tests for the CLUBB xm/wpxp advance term builders (now in ``clubb.py``).
 
 Bit-exact parity vs CLUBB-JAX ``advance_xm_wpxp_module`` (the grav term patched
 to legoESM ``constants.g``), a committed golden for CI coverage without the
@@ -19,7 +19,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
-from legoesm.atmosphere.physics.turbulence import clubb_xm_wpxp as X  # noqa: E402, N812
+from legoesm.atmosphere.physics.turbulence import clubb as X  # noqa: E402, N812
 
 _CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
 _FIX = Path(__file__).resolve().parent / "clubb_fixtures"

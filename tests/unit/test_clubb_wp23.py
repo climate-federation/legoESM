@@ -1,4 +1,4 @@
-"""Tests for the CLUBB wp2/wp3 advance LHS term builders (``clubb_wp23.py``).
+"""Tests for the CLUBB wp2/wp3 advance LHS term builders (now in ``clubb.py``).
 
 Bit-exact parity vs CLUBB-JAX ``advance_wp2_wp3_module`` for the CAM-default
 tree, plus boundary/shape sanity that runs in CI without the reference. The
@@ -20,7 +20,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
-from legoesm.atmosphere.physics.turbulence import clubb_wp23 as W  # noqa: E402, N812
+from legoesm.atmosphere.physics.turbulence import clubb as W  # noqa: E402, N812
 
 _CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
 

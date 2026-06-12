@@ -1,4 +1,4 @@
-"""Tests for the CLUBB C6/C7 skewness-coefficient family (``clubb_coefficients.py``).
+"""Tests for the CLUBB C6/C7 skewness-coefficient family (now in ``clubb.py``).
 
 The CAM branch has no CLUBB-JAX oracle (the reference is ARM), so these validate
 the Fortran formula analytically: the damping ramp, the C7=C7b constant
@@ -17,7 +17,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.atmosphere.physics.turbulence.clubb_config import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb_grid import make_clubb_grid  # noqa: E402
-from legoesm.atmosphere.physics.turbulence import clubb_coefficients as C  # noqa: E402, N812
+from legoesm.atmosphere.physics.turbulence import clubb as C  # noqa: E402, N812
 
 
 def _gr(ng=2, nzt=12):

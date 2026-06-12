@@ -170,21 +170,12 @@ EXCLUDED: frozenset[str] = frozenset(
         # CLUBB port: mass-conserving vertical hole-filling — a numerical
         # positivity utility, not a column-physics tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_fill_holes.py",
-        # CLUBB port: coupled wp2/wp3 pentadiagonal advance LHS builders —
-        # internal closure dynamics, not a single column-physics tendency.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_wp23.py",
-        # CLUBB port: coupled xm/wpxp advance term builders — internal closure
-        # dynamics, not a single column-physics tendency scheme.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_xm_wpxp.py",
         # CLUBB port: monotonic turbulent-flux limiter helpers — a numerical
         # flux-monotonicity utility, not a column-physics tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_mfl.py",
         # CLUBB port: dissipation time-scale (tau) family — closure timescale
         # diagnostics, not a single column-physics tendency scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_tau.py",
-        # CLUBB port: skewness-dependent C-coefficient family — closure
-        # coefficient diagnostics, not a single column-physics tendency scheme.
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb_coefficients.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
         "packages/ocean/legoesm/ocean/physics/__init__.py",
