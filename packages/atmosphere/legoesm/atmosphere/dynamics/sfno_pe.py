@@ -42,6 +42,9 @@ from legoesm.ml.conservation import (
     correct_dry_air_mass,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import (
+    refuse_unthreaded_stateful_physics,
+)
 
 
 class SFNOPrimitiveEquationConfig(NamedTuple):
@@ -216,6 +219,11 @@ class SFNOPrimitiveEquationModel:
         -------
         SpectralHydrostaticState
         """
+        # SFNO PE has no PhysicsState carry slot — refuse a stateful
+        # ``make_physics`` fn (tagged _requires_phys_state) rather than
+        # silently reseed its prognostic fields every step (#405/#413).
+        refuse_unthreaded_stateful_physics(
+            physics_fn, None, where="SFNO PE step_with_physics()")
         if self.config.mode == "hybrid_tendencies":
             def combined_tendency(s):
                 sfno_tend = self._sfno_tendency(s)

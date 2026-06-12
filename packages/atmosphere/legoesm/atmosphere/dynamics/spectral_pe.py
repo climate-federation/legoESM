@@ -61,6 +61,9 @@ from legoesm.grids.vertical import (
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import (
+    refuse_unthreaded_stateful_physics,
+)
 from legoesm.timestepping.semi_implicit import (
     euler_si_step,
     leapfrog_si_step,
@@ -1426,6 +1429,14 @@ class SpectralPrimitiveEquationModel:
             3-arg ``physics_fn(state, grid, sigma_coord)`` API for
             backward compatibility.
         """
+        # The spectral PE cannot thread a PhysicsState carry (transform
+        # space has no per-column carry slot — the driver's _run_spectral
+        # refuses stateful physics for the same reason).  Refuse a
+        # ``make_physics`` output tagged _requires_phys_state here too so a
+        # direct ``model.step(physics_fn=...)`` / step_with_physics loop
+        # cannot silently reseed prognostic physics every step (#405/#413).
+        refuse_unthreaded_stateful_physics(
+            physics_fn, None, where="Spectral PE step()")
         # Iter-3: anchor mass on first call (outside JIT so the fp64
         # scalar becomes a closure constant).  Mirrors
         # ``primitive_eq_cdgrid.step()`` precompute pattern.

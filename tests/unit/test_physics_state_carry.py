@@ -1047,3 +1047,65 @@ def test_mpas_unknown_physstate_field_rejected(tmp_path):
     driver_b.setup()
     with pytest.raises(ValueError, match="unknown physstate"):
         driver_b.load_checkpoint(skewed)
+
+
+def test_spectral_family_step_refuses_stateful_physics():
+    """Codex adversarial round 8 (#413): the PE dycores that run column
+    physics but CANNOT thread a PhysicsState carry — spectral PE, U-Cast
+    PE, SFNO PE — must refuse a tagged stateful physics_fn on their direct
+    step APIs (the driver's _run_spectral refuses; the public API must too,
+    else a hand-written loop silently reseeds).  The guard fires before the
+    state is touched, so a placeholder state suffices."""
+    import jax
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.ml.channel_packing import PE3DChannelSpec
+
+    fn = _stateful_make_physics()
+    grid = create_gaussian_grid(n_max=8)
+    sigma = create_sigma_coordinate(n_levels=3)
+    n_ch = PE3DChannelSpec(nlev=sigma.n_levels).n_channels
+
+    from legoesm.atmosphere.dynamics.spectral_pe import (
+        SpectralPrimitiveEquationModel,
+        SpectralPEConfig,
+    )
+    spec = SpectralPrimitiveEquationModel(
+        grid, sigma, SpectralPEConfig())
+    with pytest.raises(NotImplementedError, match="405"):
+        spec.step(None, 1.0, physics_fn=fn)
+    with pytest.raises(NotImplementedError, match="405"):
+        spec.step_with_physics(None, 1.0, physics_fn=fn)
+
+    from legoesm.atmosphere.dynamics.ucast_pe import (
+        UCastPrimitiveEquationModel,
+        UCastPrimitiveEquationConfig,
+    )
+    from legoesm.ml.ucast import UCastConfig
+    ucast = UCastPrimitiveEquationModel(
+        grid=grid, sigma_coord=sigma,
+        config=UCastPrimitiveEquationConfig(
+            ucast_config=UCastConfig(
+                in_channels=n_ch, out_channels=n_ch, model_channels=8,
+                channel_mult=(1, 2), num_blocks=1, attn_levels=()),
+            mode="state_update", correct_mass=False),
+        key=jax.random.PRNGKey(0))
+    with pytest.raises(NotImplementedError, match="405"):
+        ucast.step_with_physics(None, 1.0, fn)
+
+    from legoesm.atmosphere.dynamics.sfno_pe import (
+        SFNOPrimitiveEquationModel,
+        SFNOPrimitiveEquationConfig,
+    )
+    from legoesm.ml.sfno import SFNOConfig
+    sfno = SFNOPrimitiveEquationModel(
+        grid=grid, sigma_coord=sigma,
+        config=SFNOPrimitiveEquationConfig(
+            sfno_config=SFNOConfig(
+                in_channels=n_ch, out_channels=n_ch, embed_dim=12,
+                n_blocks=2, mlp_expansion=2),
+            mode="state_update", correct_mass=False,
+            correct_moisture_budget=False),
+        key=jax.random.PRNGKey(0))
+    with pytest.raises(NotImplementedError, match="405"):
+        sfno.step_with_physics(None, 1.0, fn)
