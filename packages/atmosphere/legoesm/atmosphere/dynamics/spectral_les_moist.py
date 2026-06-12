@@ -44,6 +44,37 @@ from legoesm.atmosphere.physics.microphysics.integration import (
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 
 
+def conserving_positive(tracers, rho_c, dz, n_water=6):
+    """MASS-CONSERVING positivity fixer for the water tracers (slots 0..n_water-1).
+
+    The pseudo-spectral scalar transport is NON-MONOTONE: at the sharp trade /
+    stratocumulus moisture inversion it overshoots/undershoots (Gibbs), driving
+    small NEGATIVE q. A plain ``clip(q, 0)`` removes those negatives but ADDS the
+    deficit as spurious water — a continuous moisture source that feeds runaway
+    condensation (whole-column saturation). Instead, per column per species,
+    clip to zero THEN rescale the positive cells so the column-integrated
+    ``∫ρq dz`` is unchanged (hole-filling / borrowing; standard for
+    positive-definite-but-non-monotone scalar transport). Number slots
+    (≥ n_water) clip freely (their conservation is not physically required).
+
+    Returns ``(tracers_fixed, created_water)`` where ``created_water`` is the
+    column-summed water the OLD clip WOULD have created — a near-zero
+    monotonicity diagnostic, kept for the run log.
+    """
+    w = rho_c * dz                                       # (nz,) mass weight
+    q = tracers[..., :n_water]                           # (ny,nx,nz,n_water)
+    q_clip = jnp.clip(q, 0.0, None)
+    col_before = jnp.sum(q * w[None, None, :, None], axis=2, keepdims=True)
+    col_clip = jnp.sum(q_clip * w[None, None, :, None], axis=2, keepdims=True)
+    created = jnp.sum(jnp.clip(-q, 0.0, None) * w[None, None, :, None])
+    # factor ≤ 1 removes the borrowed mass from the positives; guard an
+    # all-nonpositive column (col_clip→0) by leaving it at zero.
+    factor = jnp.where(col_clip > 1e-30, col_before / col_clip, 0.0)
+    q_fixed = q_clip * jnp.clip(factor, 0.0, 1.0)
+    numbers = jnp.clip(tracers[..., n_water:], 0.0, None)
+    return jnp.concatenate([q_fixed, numbers], axis=-1), created
+
+
 class SpectralRefState(NamedTuple):
     """Fixed hydrostatic reference column on the LES grid (BOTTOM-UP, matching
     ``SpectralLESGrid.z_c``/``z_f``)."""

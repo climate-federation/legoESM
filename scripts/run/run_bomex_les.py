@@ -48,6 +48,7 @@ import jax.numpy as jnp  # noqa: E402
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
 from legoesm.atmosphere.dynamics.spectral_les_moist import (  # noqa: E402
+    conserving_positive,
     make_anelastic_reference,
     make_les_microphysics_fn,
 )
@@ -112,6 +113,25 @@ def parse_args():
     p.add_argument("--time-scheme", choices=["rk3", "ab2"], default="rk3")
     p.add_argument("--micro-every", type=int, default=1,
                    help="apply microphysics every N dycore steps (1 = each).")
+    p.add_argument("--micro-order", choices=["pre", "post"], default="pre",
+                   help="'pre' = forcing/microphysics before dycore so buoyancy "
+                        "sees the fresh latent heating in the same step "
+                        "(default); 'post' reproduces the old split order.")
+    p.add_argument("--micro-substeps", type=int, default=1,
+                   help="subcycle microphysics within each micro-every interval.")
+    p.add_argument("--micro-relax-factor", type=float, default=1.0,
+                   help="experimental: multiply the dt passed into the column "
+                        "microphysics, reducing saturation-adjustment stiffness "
+                        "while retaining the actual dycore update interval.")
+    p.add_argument("--positive-mode", choices=["conserving", "clip"],
+                   default="conserving",
+                   help="water-tracer non-negativity after microphysics.")
+    p.add_argument("--filter-monotone-scalars", action="store_true",
+                   help="reproduce the old behavior: apply the sharp spectral "
+                   "cutoff to monotone theta/tracers after each dycore step.")
+    p.add_argument("--filter-monotone-qv", action="store_true",
+                   help="apply the sharp spectral cutoff only to monotone q_v; "
+                        "hydrometeor tracers remain unfiltered.")
     p.add_argument("--print-every", type=int, default=500)
     p.add_argument("--record-frames", type=int, default=12)
     p.add_argument("--case-label", type=str, default="bomex")
@@ -127,7 +147,9 @@ def build(args, dtype):
         smagorinsky_dynamic=args.dynamic, sgs_model=args.sgs_model,
         time_scheme=args.time_scheme, nu_floor=args.nu_floor,
         buoyancy=True, theta_ref0=300.0, pr_sgs=1.0,
-        moist=True, n_tracers=args.n_tracers)
+        moist=True, n_tracers=args.n_tracers, monotone_scalars=True,
+        filter_monotone_qv=args.filter_monotone_qv,
+        filter_monotone_scalars=args.filter_monotone_scalars)
     g = sl.make_grid(cfg, dtype=dtype)
     case = Path(args.case_dir)
     snd = read_sam_snd(case / "snd")
@@ -240,6 +262,10 @@ def moist_profiles(st, g, ref):
 
 def main():
     args = parse_args()
+    if args.micro_substeps < 1:
+        raise ValueError("--micro-substeps must be >= 1")
+    if args.micro_relax_factor <= 0.0:
+        raise ValueError("--micro-relax-factor must be > 0")
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
     g, st, ref, forc, th_prof = build(args, dtype)
@@ -250,9 +276,12 @@ def main():
     dt0 = (select_dt(g.dx, max_wind_safe=args.max_wind, cfl_safe=args.cfl,
                      dt_cap=args.dt_max) if args.adaptive_dt
            else float(args.dt))
-    micro = make_les_microphysics_fn(micro_cfg, ref, g.dz,
-                                     dt0 * args.micro_every)
+    micro_dt = (
+        dt0 * args.micro_every / args.micro_substeps
+        * args.micro_relax_factor)
+    micro = make_les_microphysics_fn(micro_cfg, ref, g.dz, micro_dt)
     forcing = make_forcing_fn(g, ref, forc, dtype)
+    rho_c = jnp.asarray(ref.rho_c, dtype)            # for conserving positivity
 
     # Rayleigh sponge (top 25%, w + fluctuations) — BOMEX dodamping: absorb
     # gravity waves at the inversion-capped lid (same pattern as the dry
@@ -264,31 +293,47 @@ def main():
     spf = jnp.where(zf > z_sp, 0.5 * (1.0 - jnp.cos(
         jnp.pi * (zf - z_sp) / (args.Lz - z_sp))), 0.0).astype(dtype)
 
+    def _positive(tr):
+        if args.positive_mode == "clip":
+            q = jnp.clip(tr[..., :6], 0.0, None)
+            numbers = jnp.clip(tr[..., 6:], 0.0, None)
+            created = jnp.sum(jnp.clip(-tr[..., :6], 0.0, None)
+                              * rho_c[None, None, :, None] * g.dz)
+            return jnp.concatenate([q, numbers], axis=-1), created
+        return conserving_positive(tr, rho_c, g.dz)
+
+    def _apply_micro(state, dt):
+        created_tot = jnp.asarray(0.0, state.theta.dtype)
+        dt_sub = dt * args.micro_every / args.micro_substeps
+        for _ in range(args.micro_substeps):
+            dth, dtr, _pr = micro(state.theta, state.tracers)
+            tr = state.tracers + dt_sub * dtr
+            # MASS-CONSERVING positivity (NOT a plain clip): the non-monotone
+            # spectral scalar transport undershoots at the moisture inversion;
+            # a plain clip would convert those undershoots into spurious water
+            # and drive runaway whole-column condensation. Borrow instead.
+            tr, created = _positive(tr)
+            state = state._replace(
+                theta=state.theta + dt_sub * dth, tracers=tr)
+            created_tot = created_tot + created
+        return state, created_tot
+
     @partial(jax.jit, static_argnames=("first", "do_micro"))
     def step(state, dt, first=False, do_micro=True):
+        created = jnp.asarray(0.0, state.theta.dtype)
+        if args.micro_order == "pre":
+            state = forcing(state, dt)
+            if do_micro:
+                state, created = _apply_micro(state, dt)
         state, us = sl.step(state, g=g, dt=dt,
                             u_geo=(forc["ug"], forc["vg"]), f_cor=_FCOR,
                             first=first, force=(0.0, 0.0),
                             sfc_theta_flux=forc["th_flux"],
                             sfc_qv_flux=forc["qv_flux"])
-        state = forcing(state, dt)
-        if do_micro:
-            dth, dtr, _pr = micro(state.theta, state.tracers)
-            tr = state.tracers + dt * args.micro_every * dtr
-            # Positivity: numbers (slots 6+) clamp freely; WATER masses
-            # (slots 0–5) are clipped but the created water is tracked so the
-            # clamp cannot silently break the moisture budget (codex (g) —
-            # the spectral advection is non-monotone, so small undershoots in
-            # near-zero q regions are expected; the diagnostic stays ~round-off
-            # unless something is genuinely wrong).
-            wat = tr[..., :6]
-            created = jnp.sum(jnp.clip(-wat, 0.0, None))
-            tr = jnp.concatenate([jnp.clip(wat, 0.0, None),
-                                  jnp.clip(tr[..., 6:], 0.0, None)], axis=-1)
-            state = state._replace(
-                theta=state.theta + dt * args.micro_every * dth, tracers=tr)
-        else:
-            created = jnp.asarray(0.0, state.theta.dtype)
+        if args.micro_order == "post":
+            state = forcing(state, dt)
+            if do_micro:
+                state, created = _apply_micro(state, dt)
         rc = (dt / tau_sp) * spc
         rf = (dt / tau_sp) * spf
         u = state.u - rc * (state.u - state.u.mean((0, 1), keepdims=True))

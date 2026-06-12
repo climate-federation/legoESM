@@ -115,12 +115,33 @@ class SpectralLESConfig(NamedTuple):
     #                                 buoyancy=True and a state with tracers. θ stays
     #                                 the FULL potential temperature (the microphysics
     #                                 coupling applies the latent heating to it).
+    monotone_scalars: bool = False  # use the conservative van-Leer (TVD) flux-form
+    #                                 scalar transport for θ + tracers instead of the
+    #                                 spectral/centred advection. REQUIRED for moist
+    #                                 runs: the spectral scalar advection is
+    #                                 NON-MONOTONE and rings (Gibbs over/undershoot)
+    #                                 at the sharp moisture inversion, which the
+    #                                 saturation-adjustment latent heating amplifies
+    #                                 into a grid-scale instability (whole-column
+    #                                 runaway condensation). van-Leer is monotone +
+    #                                 conservative + positivity-friendly. Dry θ runs
+    #                                 keep the validated spectral advection (False).
     n_tracers: int = 0              # trailing water-tracer fields on the state, the
     #                                 STANDARD microphysics slot layout ([0]=q_v,
     #                                 [1]=q_c, [2]=q_r, [3]=q_i, [4]=q_s, [5]=q_g,
     #                                 [6]=N_c, [7]=N_r, [8]=N_i — see microphysics/
     #                                 integration._PLANE_MIN_TRACER_SLOTS) so ANY
     #                                 scheme swaps in unchanged. 0 ⇒ dry (unchanged).
+    filter_monotone_theta: bool = True  # filtering θ is useful buoyancy-noise
+    #                                 control and has no positivity contract.
+    filter_monotone_qv: bool = False  # optional vapor-only smoothing; hydrometeors
+    #                                 stay unfiltered to preserve monotonicity at
+    #                                 cloud edges.
+    filter_monotone_scalars: bool = False  # diagnostic/back-compat switch.  The
+    #                                 sharp spectral cutoff is non-monotone, so the
+    #                                 moist monotone scalar path leaves water
+    #                                 tracers unfiltered by default; set True only
+    #                                 to reproduce the old filtered-tracer behavior.
 
 
 class SpectralLESLayout(NamedTuple):
@@ -660,6 +681,90 @@ def scalar_rhs(theta, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux):
     return -adv + Hsgs + Vsgs
 
 
+def _vanleer_flux_div(phi, u, v, w, g: SpectralLESGrid):
+    """Conservative van-Leer (TVD, monotone) flux-form advection divergence
+    ``∇·(u φ)`` of a cell-centred scalar. u, v at centres, w at faces, ∇·u=0
+    (post-projection) so the flux form equals ``u·∇φ``. Periodic in x, y; rigid
+    walls in z (``w=0`` at the surface + lid ⇒ zero advective wall flux). Reuses
+    the shared 4-cell reconstruction ``core.flux_limiters.van_leer_face_values``
+    (single source of truth, same limiter as the plane CRM)."""
+    from legoesm.core.flux_limiters import van_leer_face_values
+    dx, dy, dz = g.dx, g.dy, g.dz
+    nz = phi.shape[-1]
+
+    # --- x faces (axis=1, periodic). Face i+1/2 from the 4-cell x-stencil. ---
+    u_xf = 0.5 * (u + jnp.roll(u, -1, axis=1))             # u at i+1/2
+    pp, pn = van_leer_face_values(
+        jnp.roll(phi, 1, axis=1), phi,
+        jnp.roll(phi, -1, axis=1), jnp.roll(phi, -2, axis=1))
+    phi_xf = jnp.where(u_xf >= 0.0, pp, pn)
+    Fx = u_xf * phi_xf
+    divx = (Fx - jnp.roll(Fx, 1, axis=1)) / dx            # F[i+1/2]-F[i-1/2]
+
+    # --- y faces (axis=0, periodic). ---
+    v_yf = 0.5 * (v + jnp.roll(v, -1, axis=0))
+    pp, pn = van_leer_face_values(
+        jnp.roll(phi, 1, axis=0), phi,
+        jnp.roll(phi, -1, axis=0), jnp.roll(phi, -2, axis=0))
+    phi_yf = jnp.where(v_yf >= 0.0, pp, pn)
+    Fy = v_yf * phi_yf
+    divy = (Fy - jnp.roll(Fy, 1, axis=0)) / dy
+
+    # --- z faces (axis=2, walls). Edge-pad φ by 2 for the boundary faces. ---
+    phip = jnp.pad(phi, ((0, 0), (0, 0), (2, 2)), mode="edge")
+    pp, pn = van_leer_face_values(
+        phip[..., 0:nz + 1], phip[..., 1:nz + 2],
+        phip[..., 2:nz + 3], phip[..., 3:nz + 4])         # faces 0..nz
+    phi_zf = jnp.where(w >= 0.0, pp, pn)                   # w upward ⇒ from below
+    Fz = w * phi_zf                                        # w=0 at walls ⇒ Fz=0
+    divz = (Fz[..., 1:nz + 1] - Fz[..., 0:nz]) / dz
+    return divx + divy + divz
+
+
+def _vanleer_fv_velocity_divergence(u, v, w, g: SpectralLESGrid):
+    """Finite-volume divergence seen by :func:`_vanleer_flux_div`.
+
+    The pressure projection enforces the SPECTRAL divergence
+    ``ddx(u)+ddy(v)+ddz(w)=0``.  The monotone flux operator uses arithmetic
+    horizontal face velocities instead, so its finite-volume divergence is not
+    exactly zero.  Scalar advection must subtract ``φ·div_fv(u)`` to preserve a
+    constant scalar under the spectral projection.
+    """
+    dx, dy, dz = g.dx, g.dy, g.dz
+    nz = u.shape[-1]
+    u_xf = 0.5 * (u + jnp.roll(u, -1, axis=1))
+    divx = (u_xf - jnp.roll(u_xf, 1, axis=1)) / dx
+    v_yf = 0.5 * (v + jnp.roll(v, -1, axis=0))
+    divy = (v_yf - jnp.roll(v_yf, 1, axis=0)) / dy
+    divz = (w[..., 1:nz + 1] - w[..., 0:nz]) / dz
+    return divx + divy + divz
+
+
+def scalar_rhs_monotone(phi, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux):
+    """Scalar tendency with MONOTONE (van-Leer TVD) advection + the SAME SGS
+    diffusion + surface-flux BC as :func:`scalar_rhs`.
+
+    ``_vanleer_flux_div`` is globally conservative, but its finite-volume face
+    velocities are not exactly divergence-free after the SPECTRAL pressure
+    projection.  Use the advective correction ``∇·(uφ) − φ∇_fv·u`` here so a
+    uniform θ/q field remains uniform.  Without this free-stream-preserving
+    correction, moist runs generate artificial saturation anomalies that the
+    microphysics/buoyancy feedback explosively amplifies.
+    """
+    dz = g.dz
+    adv = (_vanleer_flux_div(phi, u, v, w, g)
+           - phi * _vanleer_fv_velocity_divergence(u, v, w, g))
+    dthdx, dthdy = ddx(phi, g), ddy(phi, g)
+    Kh = nu_t / g.cfg.pr_sgs
+    Hsgs = ddx(Kh * dthdx, g) + ddy(Kh * dthdy, g)
+    Kh_f = c2f(Kh)
+    flux_int = Kh_f * ddz_c2f(phi, dz)
+    z = jnp.zeros_like(phi[..., :1])
+    flux_full = jnp.concatenate([-sfc_flux + z, flux_int, z], axis=-1)
+    Vsgs = ddz_f2c(flux_full, dz)
+    return -adv + Hsgs + Vsgs
+
+
 def virtual_theta(theta, tracers):
     """Virtual potential temperature with liquid-water loading:
     ``θ_v = θ·(1 + (1/ε−1)·q_v − q_c − q_r)``.
@@ -800,9 +905,10 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
     Ru = Cu + Fu + f_cor * (v - vg) + force[0]
     Rv = Cv + Fv - f_cor * (u - ug) + force[1]
     Rw = Cw + Fw
+    scalar_fn = scalar_rhs_monotone if g.cfg.monotone_scalars else scalar_rhs
     Rtheta = None
     if theta is not None:
-        Rtheta = scalar_rhs(theta, u, v, w, nu_t, g, sfc_flux)
+        Rtheta = scalar_fn(theta, u, v, w, nu_t, g, sfc_flux)
         if g.cfg.buoyancy:
             if g.cfg.moist:
                 # moist=True with no tracers would silently fall back to DRY
@@ -830,7 +936,7 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
         cols = []
         for k in range(tracers.shape[-1]):
             flx = sfc_qv_flux if k == 0 else 0.0
-            cols.append(scalar_rhs(tracers[..., k], u, v, w, nu_t, g, flx))
+            cols.append(scalar_fn(tracers[..., k], u, v, w, nu_t, g, flx))
         Rtracers = jnp.stack(cols, axis=-1)
     Rw = Rw.at[..., 0].set(0.0).at[..., -1].set(0.0)
     return Ru, Rv, Rw, u_star, Rtheta, Rtracers
@@ -855,12 +961,28 @@ def _filt_state(u, v, w, th, tr, g):
     u = _apply_filter(u, g)
     v = _apply_filter(v, g)
     w = _apply_filter(w, g).at[..., 0].set(0.0).at[..., -1].set(0.0)
-    th = None if th is None else _apply_filter(th, g)
-    if tr is not None and tr.shape[-1] > 0:
+    # When scalars are intentionally transported by the monotone FV path,
+    # do not follow that update with a non-monotone spectral cutoff: the
+    # cutoff rings at q_v/q_c edges, creates negatives, and hands the
+    # microphysics/positivity fixer spurious moisture anomalies to amplify.
+    filter_tracers = (
+        (not g.cfg.monotone_scalars) or g.cfg.filter_monotone_scalars)
+    filter_theta = (
+        (not g.cfg.monotone_scalars) or g.cfg.filter_monotone_scalars
+        or g.cfg.filter_monotone_theta)
+    th = None if th is None else (_apply_filter(th, g) if filter_theta else th)
+
+    if tr is not None and tr.shape[-1] > 0 and (
+        filter_tracers or (g.cfg.monotone_scalars and g.cfg.filter_monotone_qv)
+    ):
         # _apply_filter contracts over the horizontal axes; map it over the
         # trailing tracer axis (static unroll, small slot count).
-        tr = jnp.stack([_apply_filter(tr[..., k], g)
-                        for k in range(tr.shape[-1])], axis=-1)
+        cols = []
+        for k in range(tr.shape[-1]):
+            do_filter = filter_tracers or (k == 0 and g.cfg.filter_monotone_qv)
+            col = _apply_filter(tr[..., k], g) if do_filter else tr[..., k]
+            cols.append(col)
+        tr = jnp.stack(cols, axis=-1)
     return u, v, w, th, tr
 
 

@@ -141,7 +141,7 @@ def build(args, dtype):
         smagorinsky_dynamic=args.dynamic, sgs_model=args.sgs_model,
         time_scheme=args.time_scheme, nu_floor=args.nu_floor,
         buoyancy=True, theta_ref0=290.0, pr_sgs=1.0,
-        moist=True, n_tracers=args.n_tracers)
+        moist=True, n_tracers=args.n_tracers, monotone_scalars=True)
     g = sl.make_grid(cfg, dtype=dtype)
     case = Path(args.case_dir)
     snd = read_sam_snd(case / "snd")
