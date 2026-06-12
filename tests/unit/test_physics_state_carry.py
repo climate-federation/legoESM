@@ -1045,3 +1045,30 @@ def test_mpas_bad_carry_load_then_save_refused(tmp_path):
         lambda k: k.__setitem__(
             "physstate_meta_conv_scheme", np.asarray("some_other_scheme")),
     )
+
+
+def test_mpas_unknown_physstate_field_rejected(tmp_path):
+    """Codex adversarial round 6 (#413): a checkpoint carrying a
+    physstate_* field absent from this build's PhysicsState schema
+    (version skew) must be refused at the load boundary — silently
+    dropping it on a rewrite would branch the trajectory for a newer
+    reader that understands the field."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _mpas_driver_cfg()
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run() == "COMPLETED"
+    ckpt = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))[-1]
+
+    skewed = tmp_path / "skewed.npz"
+    with np.load(ckpt) as d:
+        kept = {k: np.asarray(d[k]) for k in d.files}
+    # A future build's extra prognostic carry, unknown to this schema.
+    kept["physstate_future_field"] = np.asarray(kept["physstate_tke"])
+    np.savez(skewed, **kept)
+
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    with pytest.raises(ValueError, match="unknown physstate"):
+        driver_b.load_checkpoint(skewed)

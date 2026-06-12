@@ -2803,6 +2803,31 @@ class ModelDriver:
             # so the reconstructed PhysicsState feeds save_checkpoint
             # unchanged.
             from legoesm.atmosphere.physics.physics_state import PhysicsState
+            # Version-skew guard (codex round 14 follow-up): a checkpoint
+            # carrying a non-meta physstate_* field this build does not
+            # know would be SILENTLY dropped by the schema filter below and
+            # by _run_mpas's overlay — so an older binary could rewrite a
+            # newer checkpoint, losing prognostic carry a future reader
+            # then fresh-seeds (a silent trajectory branch).  Refuse loudly
+            # at the load boundary instead; this protects every consumer
+            # (run AND save) at one chokepoint.
+            _unknown = sorted(
+                _k[len("physstate_"):] for _k in self._carry_aux
+                if _k.startswith("physstate_")
+                and not _k[len("physstate_"):].startswith("meta_")
+                and _k[len("physstate_"):] not in PhysicsState._fields
+            )
+            if _unknown:
+                raise ValueError(
+                    f"MPAS restart carries unknown physstate field(s) "
+                    f"{_unknown} absent from this build's PhysicsState "
+                    f"schema {list(PhysicsState._fields)} — this binary is "
+                    "too old to represent them and would silently DROP them "
+                    "on a rewrite, branching the trajectory for any newer "
+                    "reader (issue #405/#413).  Use a build that understands "
+                    "the checkpoint, or strip the unknown physstate_* "
+                    "entries to accept the loss explicitly."
+                )
             _staged = {
                 _k[len("physstate_"):]: jnp.asarray(_v)
                 for _k, _v in self._carry_aux.items()
