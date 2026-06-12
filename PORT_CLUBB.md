@@ -132,9 +132,19 @@ happens after the source consolidation settles.
   config/derived-constants section 2; noted in the plan table (C2 row).
   Codex review → APPROVE (one [warn]: TOC title-text drift not policed —
   acceptable; line-number drift is).
-  **Remaining:** test-file consolidation decision, whole-repo gate sweep
-  (ratchets/contracts/private-imports/turbulence-integration suite),
-  PORT_CLUBB.md compression at iter 10.
+- **C9 (iter 9) — whole-repo gate sweep (validation only, no code change):**
+  ratchet/contract gates: contracts + no_hardcoded_constants +
+  no_saturation_reimpl + no_formula_reimpl + dispatch_hardening +
+  validate_strict_coverage + federation_plan = **4139 passed**. Turbulence
+  no-regression + physics-state carry + smoke suites = **168 passed**.
+  ONE pre-existing failure, OUT OF SCOPE: `test_no_private_cross_imports`
+  flags `ocean/dynamics/barotropic_implicit_latlon_cgrid.py` importing
+  `_global_rel_residual` — both file and test come verbatim from MAIN
+  (branch has zero ocean changes; verified via `git log`/`git diff
+  main...HEAD`); main is red on its own gate. Fix belongs on main (promote
+  the symbol), not this branch.
+  **Remaining:** iter-10 PORT_CLUBB.md compression + test-file consolidation
+  decision.
 
 
 **Previous Goal:** `packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py`
