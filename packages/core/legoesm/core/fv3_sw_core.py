@@ -1114,6 +1114,51 @@ def d2a2c_corner_local(utmp_pad_face, vtmp_pad_face, ti, tj, nl, n,
     return ua, va, uc, vc, ut, vt
 
 
+def d2a2c_uc_tile_unified(u_block, ua_block, dx_block, se_block, sw_block,
+                          a, n, npt, is_lo_i, is_hi_i):
+    """uc for ONE tile in the GSPMD/shard_map form — fixed-shape masks + a
+    ``jnp.where`` on the boundary flags instead of per-tile static slices, so
+    a SINGLE traced function serves every tile under a (6,kt,kt) mesh.
+
+    ``u_block`` is the WIDE padded covariant-u block ``(1, nl+5, nl+4)`` with
+    ``u_block[:, p, :] = utmp_pad[a-1+p, b:b+nl+4]`` (the one extra low cell
+    feeds the no-shift 4th overlay for E/N/interior tiles; for a low-edge
+    tile, a=0, that cell is garbage but its faces 0/1 are overwritten by the
+    edge specials).  The symmetric block is ``u_block[:, 1:, :]``.
+    ``ua_block``/``dx_block``/``se_block``/``sw_block`` are the standard
+    symmetric tile blocks (``[a:a+nl+4]`` etc.) the edge_interpolate4 reads.
+    ``a``, ``is_lo_i``, ``is_hi_i`` may be traced (``lax.axis_index`` under
+    shard_map).  Returns ``(1, nl+1, nl)`` uc, equal to the specific
+    W/E/interior kernel's uc for the matching tile (P4 phase-1b)."""
+    h = 2
+    nl = u_block.shape[1] - 5
+    usym = u_block[:, 1:, :]            # (1, nl+4, nl+4) == [a:a+nl+4]
+    # 2nd-order base.
+    uc = 0.5 * (usym[:, h - 1:nl + h, h:-h] + usym[:, h:nl + h + 1, h:-h])
+    # 4th overlay (no shift) from the wide block; uc4[k] == production uc[a+k].
+    uc4 = (_A2 * (u_block[:, 0:nl + 1, h:-h] + u_block[:, 3:nl + 4, h:-h])
+           + _A1 * (u_block[:, 1:nl + 2, h:-h] + u_block[:, 2:nl + 3, h:-h]))
+    faces = a + jnp.arange(nl + 1)
+    in_band = ((faces >= npt + 1) & (faces < n - npt)
+               & (n > 2 * npt + 2))[None, :, None]
+    uc = jnp.where(in_band, uc4, uc)
+    # C1/C2/C3 one-sided value: at local i=1 when this is the low-i edge
+    # (global i=1), at local i=nl-1 when the high-i edge (global i=n-1).
+    c123_lo = d2a2c_uc_c123_local(usym, False)[:, None, :]
+    c123_hi = d2a2c_uc_c123_local(usym, True)[:, None, :]
+    kk = jnp.arange(nl + 1)[None, :, None]
+    uc = jnp.where(is_lo_i & (kk == 1), c123_lo, uc)
+    uc = jnp.where(is_hi_i & (kk == nl - 1), c123_hi, uc)
+    # edge_interpolate4 + upwind: at local i=0 (low edge) / i=nl (high edge).
+    ei_lo = d2a2c_uc_edge_interp_local(
+        ua_block, dx_block, se_block, sw_block, False)[:, None, :]
+    ei_hi = d2a2c_uc_edge_interp_local(
+        ua_block, dx_block, se_block, sw_block, True)[:, None, :]
+    uc = jnp.where(is_lo_i & (kk == 0), ei_lo, uc)
+    uc = jnp.where(is_hi_i & (kk == nl), ei_hi, uc)
+    return uc
+
+
 class _D2A2CFields(NamedTuple):
     """Global padded fields the A→C d2a2c step consumes (output of
     :func:`d2a2c_global_fields`)."""
