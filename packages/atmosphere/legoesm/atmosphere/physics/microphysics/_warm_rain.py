@@ -132,8 +132,10 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0, q_c=None):
     """
     q_sat = saturation_mixing_ratio(T, p_full)
     excess = q_v - q_sat
+    dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)
+    psychrometric = 1.0 + dqsdt * constants.L_v / constants.c_pd
     cond_frac = jax.nn.sigmoid(sharpness * excess)
-    condensation = cond_frac * excess / dt
+    condensation = cond_frac * excess / (dt * psychrometric)
     if q_c is not None:
         # Evaporation rate (negative ``condensation``) is bounded by
         # the available cloud water: |condensation| × dt ≤ q_c, i.e.
@@ -486,8 +488,8 @@ def rain_freezing_bigg(q_r, N_r, T, rho, config, dt=None):
         scale = jnp.minimum(
             1.0,
             jnp.minimum(
-                qr_pos / jnp.maximum(mnuccr * dt, 1.0e-30),
-                nr_pos / jnp.maximum(nnuccr * dt, 1.0e-30)))
+                qr_pos / jnp.maximum(mnuccr * dt, 1.0e-15),
+                nr_pos / jnp.maximum(nnuccr * dt, 1.0e-15)))
         mnuccr = mnuccr * scale
         nnuccr = nnuccr * scale
     return mnuccr, nnuccr
@@ -923,7 +925,7 @@ def snow_to_graupel_pgsacw(q_c, q_s, N_s, psacws, rho, config, dt):
     return pgsacw
 
 
-def rain_evaporation(q_v, q_r, q_sat, evap_coeff, dt=None):
+def rain_evaporation(q_v, q_r, q_sat, evap_coeff, dt=None, rh_deficit_floor=0.0):
     """Compute rain evaporation in subsaturated air.
 
     When ``dt`` is provided the returned evaporation rate is
@@ -945,12 +947,58 @@ def rain_evaporation(q_v, q_r, q_sat, evap_coeff, dt=None):
     dt : float, optional
         Physics step [s].  When provided, clamp the evaporation rate
         so ``evap · dt ≤ q_r`` (donor positivity).
+    rh_deficit_floor : float, default 0.0
+        Relative-humidity-deficit resolution floor (dimensionless,
+        ``(q_sat − q_v)/q_sat``) below which rain evaporation is
+        suppressed via a soft threshold ``clip(deficit − floor, 0)``.
+        ``0.0`` (default) reproduces the legacy ungated behaviour.  A
+        small positive value (~5e-5, i.e. RH > 99.995 %) is a documented
+        float32-robustness knob — see Notes.  Negative values are floored
+        to 0.
 
     Returns
     -------
     array : Evaporation rate [kg/kg/s].
+
+    Notes
+    -----
+    **Deficit-resolution floor (float32 robustness).**  In a saturated
+    cloud ``q_v = q_sat`` to float64 (the difference of two ~1e-2 numbers
+    is a true zero), so the ``clip(q_sat − q_v, 0)`` deficit — and the
+    evaporation — is exactly 0.  Under float32 the saturation curve has a
+    ~1e-5 *relative* noise floor (measured in-cloud band ~9e-6), so
+    ``q_sat − q_v`` jitters even in cloud; the one-sided ``clip(·, 0)``
+    RECTIFIES that symmetric noise into a net spurious in-cloud
+    evaporation (~2e-8 kg/kg/s) that recycles rain → vapour → cloud and
+    inflates the cloudy-column liquid-water path (an 18–24 %
+    float32-vs-float64 LWP divergence on DYCOMS-II).  A small
+    ``rh_deficit_floor`` (~5e-5) suppresses evaporation only where the
+    sub-saturation is below the float32 saturation resolution.  It is
+    applied to the DEFICIT itself, NOT gated on cloud presence: any
+    *resolved* liquid sub-saturation — including mixed-phase
+    Wegener–Bergeron–Findeisen cells (deficit ~0.1 ≫ floor) and sub-cloud
+    downdrafts — still evaporates, losing only the ``floor/deficit``
+    fraction (≲0.05 % at WBF/sub-cloud scales).  The suppression is
+    material only for genuinely near-saturated columns (RH ≳ 99.9 %),
+    where rain evaporation is itself marginal: a deficit of ``2·floor``
+    loses 50 %, of ``10·floor`` loses 10 %.
+
+    The float64 answer is unchanged for an exactly-saturated cloud (the
+    in-cloud deficit is already 0).  Where a float64 run holds rain in a
+    *persistently near-saturated* cloud (deficit ≲ floor, e.g. the DYCOMS
+    cold variant whose saturation-adjusted column sits at RH ~99.99 %),
+    the floor DOES lower its LWP — but that evaporation is at a deficit
+    float32 cannot represent, so removing it (identically in both
+    precisions) is what lets float32 converge to float64, and is
+    physically defensible: rain does not meaningfully evaporate at
+    RH > 99.99 %.
     """
-    subsaturation = jnp.clip(q_sat - q_v, 0.0) / jnp.clip(q_sat, 1e-10)
+    floor = jnp.maximum(rh_deficit_floor, 0.0)
+    deficit = jnp.clip(q_sat - q_v, 0.0) / jnp.clip(q_sat, 1e-10)
+    # Soft threshold: suppress sub-resolution (RH>99.99%) deficits, pass
+    # resolved ones (shifted by the constant ``floor``). At floor=0 this is
+    # ``clip(deficit, 0) = deficit`` — exactly the legacy behaviour.
+    subsaturation = jnp.clip(deficit - floor, 0.0)
     q_r_pos = jnp.clip(q_r, 0.0, None)
     # Marshall-Palmer ventilation factor q_r^0.525 — fractional power has
     # an unbounded derivative at q_r=0; safe_pow handles the AD guard.

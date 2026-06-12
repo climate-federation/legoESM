@@ -924,8 +924,22 @@ def mpas_ocean_baroclinic_tendencies(
             dT_dt_3d, dS_dt_3d, T_3d, S_3d, sponge, mask=mask,
             expand_gamma_axis=-1,
         )
-        # Edge velocity sponge (if reference velocity provided)
+        # Edge velocity sponge (if reference velocity provided).
+        # EXT-N1 guard (mirrors ocean_pe_latlon_cgrid._bc_sponge_relaxation):
+        # a full-rank (per-cell, z-varying) gamma supports TRACER relaxation
+        # only.  The momentum sponge below averages gamma to edges and then
+        # broadcasts over the vertical with ``gamma_edge[:, None]``; a
+        # ``(nCells, nlev)`` gamma would silently broadcast to
+        # ``(nEdges, nlev, nlev)`` (a wrong-shaped momentum increment) instead.
+        # Static shapes ⇒ trace-time error, never a silently wrong broadcast.
         if sponge.u_ref is not None:
+            if sponge.gamma.ndim == T_3d.ndim:
+                raise ValueError(
+                    "3-D (full-rank per-cell) SpongeForcing.gamma supports "
+                    "tracer relaxation only; u_ref requires a 1-D "
+                    "(nCells,) horizontal gamma (the MPAS momentum sponge "
+                    "averages gamma to edges and broadcasts over the "
+                    "vertical).")
             _dt = T_3d.dtype
             gamma_edge = 0.5 * (sponge.gamma.astype(_dt)[c1] + sponge.gamma.astype(_dt)[c2])
             gamma_edge_3d = gamma_edge[:, jnp.newaxis]

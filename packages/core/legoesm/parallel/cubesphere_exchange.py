@@ -859,6 +859,666 @@ def _get_multiface_tables(faces_per_shard: int) -> _MultifaceTables:
     return _MULTIFACE_TABLE_CACHE[faces_per_shard]
 
 
+# ===========================================================================
+# Sub-face tiling (6 * kt^2 devices) — STATIC TABLE LAYER
+# ===========================================================================
+# Breaks the 6-device cap of the face-only SPMD path: each face is split
+# into kt x kt tiles, one tile per device.  This layer is pure numpy —
+# the ppermute kernel consumes it.  Edge conventions are EXACTLY the
+# face-level ones (WEST/EAST = i boundaries varying along j; SOUTH/NORTH
+# = j boundaries varying along i; CONNECTIVITY involution), so the
+# receiver pipeline (reverse -> interpolate -> place) carries over with
+# strips of tile width n_loc = n // kt.
+
+
+def _tile_id(f: int, ti: int, tj: int, kt: int) -> int:
+    """Flattened tile id in (face, tile_i, tile_j) row-major order —
+    the mesh.py tiled-device layout."""
+    return f * kt * kt + ti * kt + tj
+
+
+def _build_tile_connectivity(kt: int):
+    """TILE_CONN[t][e] = (nbr_tile, nbr_edge, reversed, cross_face).
+
+    Interior tile edges connect (ti, tj) neighbours on the same face
+    with no reversal and NO interpolation (the grids align exactly —
+    a serial full-face array is contiguous across tile boundaries).
+    Face-border edges compose CONNECTIVITY[f][e] with the tile-index
+    map along the shared cube edge: source position p (tj for W/E
+    edges, ti for S/N) lands at neighbour position kt-1-p when the
+    face pair is reversed, else p.  Involution is asserted.
+    """
+    conn: dict[int, list] = {}
+    for f in range(6):
+        for ti in range(kt):
+            for tj in range(kt):
+                t = _tile_id(f, ti, tj, kt)
+                ent: list = [None] * 4
+                if ti > 0:
+                    ent[WEST] = (_tile_id(f, ti - 1, tj, kt), EAST, False,
+                                 False)
+                if ti < kt - 1:
+                    ent[EAST] = (_tile_id(f, ti + 1, tj, kt), WEST, False,
+                                 False)
+                if tj > 0:
+                    ent[SOUTH] = (_tile_id(f, ti, tj - 1, kt), NORTH, False,
+                                  False)
+                if tj < kt - 1:
+                    ent[NORTH] = (_tile_id(f, ti, tj + 1, kt), SOUTH, False,
+                                  False)
+                for e in range(4):
+                    if ent[e] is not None:
+                        continue
+                    nf, ne, rv = CONNECTIVITY[f][e]
+                    p = tj if e in (WEST, EAST) else ti
+                    p2 = (kt - 1 - p) if rv else p
+                    if ne in (WEST, EAST):
+                        # neighbour edge is an i boundary: its strip
+                        # runs along j, so p2 selects tile column; the
+                        # tile row is pinned to the boundary side.
+                        nti = 0 if ne == WEST else kt - 1
+                        ntj = p2
+                    else:
+                        nti = p2
+                        ntj = 0 if ne == SOUTH else kt - 1
+                    ent[e] = (_tile_id(nf, nti, ntj, kt), ne, bool(rv), True)
+                conn[t] = ent
+
+    # Involution: a's edge e points at (b, e2) => b's edge e2 points
+    # back at (a, e) with the same reversal flag.  Loud failure here
+    # beats silent halo junk downstream.
+    for t, ents in conn.items():
+        for e in range(4):
+            b, e2, rv, _x = ents[e]
+            b2, e3, rv2, _x2 = conn[b][e2]
+            if (b2, e3, rv2) != (t, e, rv):
+                raise RuntimeError(
+                    f"tile connectivity not involutive at kt={kt}: "
+                    f"tile {t} edge {e} -> ({b},{e2},{rv}) but "
+                    f"tile {b} edge {e2} -> ({b2},{e3},{rv2})"
+                )
+    return conn
+
+
+class _TiledTables(NamedTuple):
+    """Static schedule for the tiled ppermute exchange (1 tile/device).
+
+    Every tile edge is cross-device (kt >= 2), and two tiles share at
+    most one edge, so max_slots == 1: round r either sends one strip to
+    one destination or idles.
+
+    perms : tuple of rounds; each round = tuple of (src, dst) device
+        pairs forming a partial permutation over the 6*kt^2 devices.
+    send_edge : (n_rounds, n_dev) int32 — which of my 4 edge strips I
+        transmit in round r (garbage when idle; the partner table
+        defines who actually receives).
+    recv_tgt : (n_rounds, n_dev) int32 — flattened halo slot (edge id)
+        the received strip fills, or sentinel 4 (mode="drop").
+    rev : (n_dev, 4) int32 — receiver-side strip reversal per edge.
+    cross_face : (n_dev, 4) int32 — 1 when the edge crosses a cube
+        face boundary (Lagrange offsets apply), 0 for interior tile
+        edges (exact copy).
+    offs_pos : (n_dev, 4) int32 — receiver tile's segment index along
+        its own face edge (slice offsets[gf, e, pos*n_loc:(pos+1)*n_loc]);
+        only meaningful where cross_face == 1.
+    """
+
+    kt: int
+    perms: tuple
+    send_edge: np.ndarray
+    recv_tgt: np.ndarray
+    rev: np.ndarray
+    cross_face: np.ndarray
+    offs_pos: np.ndarray
+
+
+def _peel_bipartite_matchings(pairs, n_rounds):
+    """Decompose a regular bipartite directed-pair multigraph into
+    ``n_rounds`` perfect matchings (rounds), deterministically.
+
+    ``pairs`` must form an ``n_rounds``-regular bipartite graph between
+    the src and dst copies of the device set (every device appears
+    exactly ``n_rounds`` times as src and as dst).  Each peel finds a
+    perfect matching with Kuhn's augmenting paths (sorted adjacency =
+    deterministic), removes it, and recurses on the (r-1)-regular rest.
+    Raises when a peel comes up short — regularity violated upstream.
+    """
+    from collections import defaultdict
+
+    remaining: set[int] = set(range(len(pairs)))
+    adj: dict[int, list[int]] = defaultdict(list)
+    for j, (s, _d) in enumerate(pairs):
+        adj[s].append(j)
+    srcs = sorted({s for s, _ in pairs})
+
+    rounds = []
+    for r in range(n_rounds):
+        match_d: dict[int, int] = {}   # dst -> pair index
+
+        # Kuhn's: process each src EXACTLY once; a displaced src is
+        # re-matched inside the recursion (that is the augmenting
+        # path).  ``visited`` marks DSTS, not pairs — marking pairs
+        # admits dst revisits through parallel edges, which builds a
+        # non-simple alternating path and can match one src twice
+        # (matching size still looks right; the leftover graph goes
+        # irregular and a later peel dies — observed at kt=2 round 2).
+        def _augment(s, visited_d):
+            for j in adj[s]:
+                if j not in remaining:
+                    continue
+                d = pairs[j][1]
+                if d in visited_d:
+                    continue
+                visited_d.add(d)
+                holder = match_d.get(d)
+                if holder is None or _augment(pairs[holder][0], visited_d):
+                    match_d[d] = j
+                    return True
+            return False
+
+        for s in srcs:
+            if not _augment(s, set()):
+                raise RuntimeError(
+                    f"bipartite peel {r}: no perfect matching — the "
+                    f"pair multigraph is not {n_rounds}-regular."
+                )
+        matched_srcs = [pairs[j][0] for j in match_d.values()]
+        if (len(match_d) != len(srcs)
+                or len(set(matched_srcs)) != len(matched_srcs)):
+            raise RuntimeError(
+                f"bipartite peel {r}: not a perfect matching "
+                f"({len(match_d)} pairs, "
+                f"{len(set(matched_srcs))} distinct srcs)."
+            )
+        rnd = sorted(pairs[j] for j in match_d.values())
+        remaining -= set(match_d.values())
+        rounds.append(rnd)
+    if remaining:
+        raise RuntimeError(
+            f"bipartite peel left {len(remaining)} pairs uncovered "
+            f"after {n_rounds} rounds."
+        )
+    return rounds
+
+
+def _build_tiled_tables(kt: int) -> _TiledTables:
+    if kt < 2:
+        raise ValueError(
+            f"_build_tiled_tables needs kt >= 2 (kt=1 is the existing "
+            f"face-only path), got {kt}."
+        )
+    conn = _build_tile_connectivity(kt)
+    n_dev = 6 * kt * kt
+
+    rev = np.zeros((n_dev, 4), dtype=np.int32)
+    cross_face = np.zeros((n_dev, 4), dtype=np.int32)
+    offs_pos = np.zeros((n_dev, 4), dtype=np.int32)
+    # Directed pairs: I RECEIVE my edge e's halo from conn[t][e] — the
+    # sender transmits its OWN edge e2 strip (unreversed); reversal is
+    # receiver-side, as in the multiface kernel.
+    pair_payload: dict[tuple[int, int], tuple[int, int]] = {}
+    for t in range(n_dev):
+        f = t // (kt * kt)
+        ti = (t % (kt * kt)) // kt
+        tj = t % kt
+        for e in range(4):
+            b, e2, rv, xf = conn[t][e]
+            rev[t, e] = int(rv)
+            cross_face[t, e] = int(xf)
+            offs_pos[t, e] = tj if e in (WEST, EAST) else ti
+            key = (b, t)
+            if key in pair_payload:
+                raise RuntimeError(
+                    f"tiled tables kt={kt}: device pair {key} carries "
+                    f"two strips — max_slots=1 assumption broken."
+                )
+            pair_payload[key] = (e2, e)
+
+    pairs = sorted(pair_payload.keys())
+    out_deg = Counter(s for s, _ in pairs)
+    in_deg = Counter(d for _, d in pairs)
+    r_min = max(max(out_deg.values()), max(in_deg.values()))
+    # The multiface backtracking colorer is exponential on the tiled
+    # graph (384 directed pairs at kt=4 hung a 20-min job); the tiled
+    # send/recv multigraph is r_min-regular bipartite, so peel r_min
+    # perfect matchings instead (König/Hall — each peel is Kuhn's
+    # augmenting-path matching, polynomial and deterministic).
+    rounds = _peel_bipartite_matchings(pairs, r_min)
+
+    n_rounds = len(rounds)
+    send_edge = np.zeros((n_rounds, n_dev), dtype=np.int32)
+    recv_tgt = np.full((n_rounds, n_dev), 4, dtype=np.int32)
+    covered = set()
+    for r, rnd in enumerate(rounds):
+        if (len({s for s, _ in rnd}) != len(rnd)
+                or len({d for _, d in rnd}) != len(rnd)):
+            raise RuntimeError(
+                f"tiled schedule round {r} is not a partial "
+                f"permutation: {rnd}"
+            )
+        for (s, d) in rnd:
+            src_edge, dst_edge = pair_payload[(s, d)]
+            send_edge[r, s] = src_edge
+            recv_tgt[r, d] = dst_edge
+            covered.add((d, dst_edge))
+
+    want = {(d, e) for d in range(n_dev) for e in range(4)}
+    if covered != want:
+        raise RuntimeError(
+            f"tiled tables kt={kt}: halo coverage broken — "
+            f"{len(covered)}/{len(want)} (device, edge) slots filled."
+        )
+    if sorted(p for rnd in rounds for p in rnd) != pairs:
+        raise RuntimeError(
+            f"tiled schedule kt={kt} does not cover every directed "
+            f"device pair exactly once."
+        )
+
+    return _TiledTables(
+        kt=kt,
+        perms=tuple(tuple(rnd) for rnd in rounds),
+        send_edge=send_edge,
+        recv_tgt=recv_tgt,
+        rev=rev,
+        cross_face=cross_face,
+        offs_pos=offs_pos,
+    )
+
+
+_TILED_TABLE_CACHE: dict[int, _TiledTables] = {}
+
+
+def _get_tiled_tables(kt: int) -> _TiledTables:
+    if kt not in _TILED_TABLE_CACHE:
+        _TILED_TABLE_CACHE[kt] = _build_tiled_tables(kt)
+    return _TILED_TABLE_CACHE[kt]
+
+
+def _tiled_corner_modes(kt: int) -> np.ndarray:
+    """Static per-(device, corner) selection for the P3 corner fill.
+
+    Corner order: (lo,lo), (lo,hi), (hi,lo), (hi,hi) in padded-block
+    (i, j).  Modes — derived from where the corner lands in the SERIAL
+    padded face:
+      0 = avg        true cube vertex (serial averages too)
+      1 = diagonal   interior x interior cut: serial holds the plain
+                     diagonal interior cell -> diagonal-tile ppermute
+      2 = j-sliver   corner row is a W/E halo row, cut along j: serial
+                     holds the strip-neighbour's interp'd W/E strip end
+      3 = i-sliver   corner col is a S/N halo col, cut along i: same
+                     with the S/N strip
+    """
+    n_dev = 6 * kt * kt
+    modes = np.zeros((n_dev, 4), dtype=np.int32)
+    for f in range(6):
+        for ti in range(kt):
+            for tj in range(kt):
+                t = _tile_id(f, ti, tj, kt)
+                for c, (ci_lo, cj_lo) in enumerate(
+                        ((True, True), (True, False),
+                         (False, True), (False, False))):
+                    border_i = (ti == 0) if ci_lo else (ti == kt - 1)
+                    border_j = (tj == 0) if cj_lo else (tj == kt - 1)
+                    if border_i and border_j:
+                        modes[t, c] = 0
+                    elif not border_i and not border_j:
+                        modes[t, c] = 1
+                    elif border_i:
+                        modes[t, c] = 2
+                    else:
+                        modes[t, c] = 3
+    return modes
+
+
+def _tiled_diag_perms(kt: int):
+    """Four intra-face diagonal partial permutations (towards the
+    (lo,lo)/(lo,hi)/(hi,lo)/(hi,hi) corners of the RECEIVER): receiver
+    corner (lo,lo) needs the (ti-1, tj-1) tile's (hi,hi) interior cell,
+    i.e. that tile SENDS towards (+i, +j)."""
+    to_ll, to_lh, to_hl, to_hh = [], [], [], []
+    for f in range(6):
+        for ti in range(kt):
+            for tj in range(kt):
+                t = _tile_id(f, ti, tj, kt)
+                if ti > 0 and tj > 0:
+                    to_ll.append((_tile_id(f, ti - 1, tj - 1, kt), t))
+                if ti > 0 and tj < kt - 1:
+                    to_lh.append((_tile_id(f, ti - 1, tj + 1, kt), t))
+                if ti < kt - 1 and tj > 0:
+                    to_hl.append((_tile_id(f, ti + 1, tj - 1, kt), t))
+                if ti < kt - 1 and tj < kt - 1:
+                    to_hh.append((_tile_id(f, ti + 1, tj + 1, kt), t))
+    # Receiver corner (lo,lo) gets the diagonal tile's (hi,hi) cell:
+    # sender (ti-1,tj-1) -> receiver t is exactly the to_ll list.
+    return tuple(map(tuple, (to_ll, to_lh, to_hl, to_hh)))
+
+
+def _tiled_guard_perms(kt: int):
+    """Static perms for the guard-sliver rounds along each tile axis.
+
+    After the cross-face strip rounds, every tile's received segment
+    needs g=2 donor cells past each interior segment end for the
+    quadratic ``interp_strip`` stencil (offsets are bounded |δ| <~ 0.5
+    cells, so the {jc-1, jc, jc+1} stencil reaches at most 2 cells
+    outside).  Those cells are the END cells of the segment held by the
+    strip-adjacent INTRA-FACE neighbour (global strip ends self-clamp,
+    matching the serial stencil-centre clamp).  Returns four partial
+    permutations: (j_fwd, j_bwd, i_fwd, i_bwd) over the flattened
+    (face, tile_i, tile_j) device order.
+    """
+    j_fwd, j_bwd, i_fwd, i_bwd = [], [], [], []
+    for f in range(6):
+        for ti in range(kt):
+            for tj in range(kt):
+                t = _tile_id(f, ti, tj, kt)
+                if tj + 1 < kt:
+                    j_fwd.append((t, _tile_id(f, ti, tj + 1, kt)))
+                if tj > 0:
+                    j_bwd.append((t, _tile_id(f, ti, tj - 1, kt)))
+                if ti + 1 < kt:
+                    i_fwd.append((t, _tile_id(f, ti + 1, tj, kt)))
+                if ti > 0:
+                    i_bwd.append((t, _tile_id(f, ti - 1, tj, kt)))
+    return tuple(map(tuple, (j_fwd, j_bwd, i_fwd, i_bwd)))
+
+
+def _interp_strip_guarded(seg_padded, offsets_seg, g, n_loc, seg_start, n):
+    """Quadratic Lagrange interp of a guarded tile segment.
+
+    ``seg_padded``: (n_loc + 2g[, C]) — [lo guards | segment | hi
+    guards] in GLOBAL strip orientation.  ``offsets_seg``: (n_loc,)
+    fractional corrections δ for this tile's targets.  Indexing runs in
+    GLOBAL edge coordinates with the serial stencil-centre clamp to
+    [1, n-2], so tiles at the global strip ends reproduce the serial
+    boundary stencils exactly (their guards there are never read).
+    """
+    # Bit-parity with halo.interp_strip: int stencil centre, then the
+    # fractional part PROMOTED to the data dtype before the Lagrange
+    # weights (f32 offsets + f64 data would give sum(w)=1±1e-7 — the
+    # documented ~0.06 Pa error on 6e5 Pa fields).
+    j_glob = jnp.arange(n_loc, dtype=offsets_seg.dtype) + seg_start
+    idx = jnp.clip(j_glob + offsets_seg, 0.0, float(n - 1))
+    jc = jnp.clip(jnp.round(idx).astype(jnp.int32), 1, n - 2)
+    f = (idx - jc.astype(offsets_seg.dtype)).astype(seg_padded.dtype)
+    w_m = 0.5 * f * (f - 1.0)
+    w_0 = 1.0 - f * f
+    w_p = 0.5 * f * (f + 1.0)
+    # g=2 covers the documented gnomonic offsets (|delta| <~ 0.5) plus
+    # the quadratic stencil reach; clip defensively so a future grid
+    # variant with larger offsets reads a clamped guard cell instead of
+    # out-of-bounds garbage (codex MAJOR — loud is better, but traced
+    # indices cannot assert; the parity probe is the loud gate).
+    base = jnp.clip(
+        jc - jnp.int32(seg_start) + jnp.int32(g),
+        1, n_loc + 2 * g - 2,
+    )
+    if seg_padded.ndim > 1:
+        shp = (-1,) + (1,) * (seg_padded.ndim - 1)
+        w_m, w_0, w_p = (w.reshape(shp) for w in (w_m, w_0, w_p))
+    return (
+        w_m * seg_padded[base - 1]
+        + w_0 * seg_padded[base]
+        + w_p * seg_padded[base + 1]
+    ).astype(seg_padded.dtype)
+
+
+def _make_exchange_ppermute_tiled(mesh, ndim, halo=1, with_offsets=False):
+    """Tiled (6*kt^2-device) ppermute shard_map exchange — halo 1/2.
+
+    One tile per device on mesh axes ("face", "tile_i", "tile_j").
+    Schedule: 4 strip ppermute rounds (every tile edge is remote) +
+    4 guard-sliver rounds feeding the cross-face Lagrange interp +
+    the P3 corner rounds (4 diagonal + 4 post-interp sliver) that make
+    tile corners serial-exact: plain diagonal cells at interior cuts,
+    the strip-neighbour's interp'd strip end where a corner row/col is
+    a face-halo strip cut, and the avg/cascade fill only at true cube
+    vertices (where the serial pad averages too).  Receiver pipeline
+    order matches the face kernels: reverse → (guards) → interpolate →
+    place; interior tile edges are exact copies.  Parity: 0.0 vs
+    pad_halo_local/pad_halo on all lanes (h1+h2 x offsets+raw, full
+    padded blocks), 24 processes at C48 kt=2 (job 8464648).
+    """
+    if ndim not in (3, 4):
+        raise ValueError(f"ndim must be 3 or 4, got {ndim}")
+    if halo not in (1, 2):
+        raise ValueError(
+            f"tiled ppermute exchange supports halo 1/2, got {halo}.")
+    shape = tuple(mesh.devices.shape)
+    if (len(shape) != 3 or shape[0] != 6 or shape[1] != shape[2]
+            or shape[1] < 2):
+        raise ValueError(
+            f"tiled exchange needs a (6, kt, kt) device mesh with "
+            f"kt >= 2; got {shape}."
+        )
+    kt = shape[1]
+    tables = _get_tiled_tables(kt)
+    g = 2  # guard depth: |offsets| <~ 0.5 + quadratic stencil reach
+    j_fwd, j_bwd, i_fwd, i_bwd = _tiled_guard_perms(kt)
+    diag_perms = _tiled_diag_perms(kt)
+    corner_mode_j = jnp.asarray(_tiled_corner_modes(kt))
+    AXES = ("face", "tile_i", "tile_j")
+
+    P = jax.sharding.PartitionSpec
+    in_sp_data = P(*AXES, *((None,) * (ndim - 3)))
+    in_sp = (in_sp_data, P()) if with_offsets else in_sp_data
+
+    send_edge_j = jnp.asarray(tables.send_edge)
+    recv_tgt_j = jnp.asarray(tables.recv_tgt)
+    rev_j = jnp.asarray(tables.rev)
+    cross_j = jnp.asarray(tables.cross_face)
+    pos_j = jnp.asarray(tables.offs_pos)
+    n_rounds = len(tables.perms)
+
+    @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=in_sp_data,
+             check_vma=False)
+    def _exchange(*args):
+        if with_offsets:
+            local_shard, offsets = args
+        else:
+            (local_shard,) = args
+            offsets = None
+
+        tile = local_shard[0]              # (n_loc, n_loc[, C])
+        n_loc = tile.shape[0]
+        n = kt * n_loc
+        fi = jax.lax.axis_index("face")
+        ti_ = jax.lax.axis_index("tile_i")
+        tj_ = jax.lax.axis_index("tile_j")
+        my_id = (fi * kt + ti_) * kt + tj_
+
+        # Edge strips in the W/E/S/N (= i0, iN, j0, jN) face order.
+        # halo=2 payload (2, n_loc[, C]): depth-0 = boundary cell,
+        # depth-1 = one cell inward (multiface convention).
+        if halo == 1:
+            strips = jnp.stack(
+                [tile[0], tile[-1], tile[:, 0], tile[:, -1]], axis=0)
+        else:
+            strips = jnp.stack([
+                jnp.stack([tile[0], tile[1]], axis=0),
+                jnp.stack([tile[-1], tile[-2]], axis=0),
+                jnp.stack([tile[:, 0], tile[:, 1]], axis=0),
+                jnp.stack([tile[:, -1], tile[:, -2]], axis=0),
+            ], axis=0)
+
+        # Strip rounds: every (device, edge) slot is provably covered
+        # (table build asserts), so zeros init is dead weight only
+        # until overwritten.
+        halo_strips = jnp.zeros_like(strips)
+        for r in range(n_rounds):
+            send_buf = strips[send_edge_j[r, my_id]]
+            received = jax.lax.ppermute(send_buf, AXES, tables.perms[r])
+            tgt = recv_tgt_j[r, my_id][None]
+            halo_strips = halo_strips.at[tgt].set(
+                received[None], mode="drop")
+
+        # Receiver-side reversal (global strip orientation).  Strip
+        # axis: 1 for halo=1 payloads (4, n_loc, ...), 2 for halo=2
+        # (4, 2, n_loc, ...).
+        strip_axis = 1 if halo == 1 else 2
+        my_rev = rev_j[my_id].reshape((4,) + (1,) * (halo_strips.ndim - 1))
+        halo_strips = jnp.where(
+            my_rev.astype(bool), jnp.flip(halo_strips, axis=strip_axis),
+            halo_strips)
+
+        if with_offsets:
+            # Guard slivers: ends of my (oriented) received strips go
+            # to my strip-adjacent intra-face neighbours.  W/E strips
+            # run along j (neighbours tj±1); S/N along i (ti±1).
+            sx = strip_axis
+            we = halo_strips[0:2]
+            sn = halo_strips[2:4]
+
+            def _take(arr, sl):
+                idx = (slice(None),) * sx + (sl,)
+                return arr[idx]
+
+            lo_from_jbwd = jax.lax.ppermute(
+                _take(we, slice(-g, None)), AXES, j_fwd)
+            hi_from_jfwd = jax.lax.ppermute(
+                _take(we, slice(None, g)), AXES, j_bwd)
+            lo_from_ibwd = jax.lax.ppermute(
+                _take(sn, slice(-g, None)), AXES, i_fwd)
+            hi_from_ifwd = jax.lax.ppermute(
+                _take(sn, slice(None, g)), AXES, i_bwd)
+            we_pad = jnp.concatenate(
+                [lo_from_jbwd, we, hi_from_jfwd], axis=sx)
+            sn_pad = jnp.concatenate(
+                [lo_from_ibwd, sn, hi_from_ifwd], axis=sx)
+            guarded = jnp.concatenate([we_pad, sn_pad], axis=0)
+
+            offs_dev = jax.lax.dynamic_slice_in_dim(
+                offsets, fi, 1, axis=0)[0]   # (4, n) h1 / (4, 2, n) h2
+            out_strips = []
+            for e in range(4):
+                pos = pos_j[my_id, e]
+                seg_start = pos * n_loc
+                if halo == 1:
+                    offs_seg = jax.lax.dynamic_slice_in_dim(
+                        offs_dev[e], seg_start, n_loc, axis=0)
+                    interp = _interp_strip_guarded(
+                        guarded[e], offs_seg, g, n_loc, seg_start, n)
+                else:
+                    depths = []
+                    for d in range(2):
+                        offs_seg = jax.lax.dynamic_slice_in_dim(
+                            offs_dev[e, d], seg_start, n_loc, axis=0)
+                        depths.append(_interp_strip_guarded(
+                            guarded[e, d], offs_seg, g, n_loc,
+                            seg_start, n))
+                    interp = jnp.stack(depths, axis=0)
+                raw = halo_strips[e]
+                out_strips.append(jnp.where(
+                    cross_j[my_id, e].astype(bool), interp, raw))
+            halo_list = out_strips
+        else:
+            halo_list = [halo_strips[e] for e in range(4)]
+
+        pad_width = ((halo, halo), (halo, halo))
+        if ndim == 4:
+            pad_width = pad_width + ((0, 0),)
+        padded = jnp.pad(tile, pad_width)
+        if halo == 1:
+            padded = _fill_halo_and_corners(padded, halo_list, n_loc)
+        else:
+            padded = _fill_halo_and_corners_h2_local(
+                padded, halo_list, n_loc)
+
+        # ---- P3: serial-exact tile corners ----
+        # The avg/cascade fill above is only the SERIAL value at true
+        # cube vertices.  At an interior x interior cut the serial
+        # padded face holds the plain DIAGONAL interior cells; where
+        # the corner rows/cols are face-halo rows cut along the strip
+        # it holds the strip-NEIGHBOUR's (interp'd) strip end.  Static
+        # per-(device, corner) modes select among the candidates;
+        # ppermute non-targets receive zeros, masked by the mode.
+        final = jnp.stack(halo_list, axis=0)
+        h = halo
+        if halo == 1:
+            diag_send = (tile[-1, -1], tile[-1, 0],
+                         tile[0, -1], tile[0, 0])
+
+            def _ends(e, lo):
+                s = final[e]
+                return s[0] if lo else s[-1]
+        else:
+            # 2x2 interior corner blocks, rows/cols in face order.
+            diag_send = (tile[-2:, -2:], tile[-2:, :2],
+                         tile[:2, -2:], tile[:2, :2])
+
+            def _ends(e, lo):
+                s = final[e]              # (2, n_loc[, C]) = (depth, j)
+                return s[:, :h] if lo else s[:, -h:]
+        diag_recv = [
+            jax.lax.ppermute(diag_send[c], AXES, diag_perms[c])
+            for c in range(4)
+        ]
+        sl_jf = jax.lax.ppermute(
+            jnp.stack([_ends(0, False), _ends(1, False)]), AXES, j_fwd)
+        sl_jb = jax.lax.ppermute(
+            jnp.stack([_ends(0, True), _ends(1, True)]), AXES, j_bwd)
+        sl_if = jax.lax.ppermute(
+            jnp.stack([_ends(2, False), _ends(3, False)]), AXES, i_fwd)
+        sl_ib = jax.lax.ppermute(
+            jnp.stack([_ends(2, True), _ends(3, True)]), AXES, i_bwd)
+        # Per corner (lo,lo),(lo,hi),(hi,lo),(hi,hi): the W/E-row
+        # sliver candidate and the S/N-col sliver candidate.
+        sliv_we = (sl_jf[0], sl_jb[0], sl_jf[1], sl_jb[1])
+        sliv_sn = (sl_if[0], sl_if[1], sl_ib[0], sl_ib[1])
+        my_mode = corner_mode_j[my_id]
+
+        if halo == 1:
+            corner_ij = ((0, 0), (0, -1), (-1, 0), (-1, -1))
+            for c, (ci, cj) in enumerate(corner_ij):
+                val = jnp.where(
+                    my_mode[c] == 1, diag_recv[c],
+                    jnp.where(
+                        my_mode[c] == 2, sliv_we[c],
+                        jnp.where(my_mode[c] == 3, sliv_sn[c],
+                                  padded[ci, cj]),
+                    ),
+                )
+                padded = padded.at[ci, cj].set(val)
+        else:
+            # 2x2 corner regions.  Fill-layer depth layout: lo-side
+            # halo rows/cols are (outer=d1, inner=d0) = indices (0, 1);
+            # hi-side are (inner=d0, outer=d1) = (n+2, n+3).
+            # diag payload: already face-ordered rows/cols — place
+            # directly.  W/E sliver payload (depth, 2 strip cells):
+            # rows = depth mapped to the halo-row layout, cols = strip
+            # cells (j).  S/N sliver: cols = depth, rows = strip cells.
+            corner_rc = (
+                (slice(0, 2), slice(0, 2)),
+                (slice(0, 2), slice(-2, None)),
+                (slice(-2, None), slice(0, 2)),
+                (slice(-2, None), slice(-2, None)),
+            )
+            for c, (rs, cs) in enumerate(corner_rc):
+                row_lo = (c < 2)
+                col_lo = (c % 2 == 0)
+                # depth order along rows for W/E candidates:
+                d_rows = (1, 0) if row_lo else (0, 1)
+                we_blk = jnp.stack(
+                    [sliv_we[c][d] for d in d_rows], axis=0)
+                d_cols = (1, 0) if col_lo else (0, 1)
+                # S/N payload (depth, 2 strip cells): block rows =
+                # strip cells (i direction), cols = depth layout.
+                sn_blk = jnp.swapaxes(
+                    jnp.stack([sliv_sn[c][d] for d in d_cols], axis=0),
+                    0, 1)
+                blk = jnp.where(
+                    my_mode[c] == 1, diag_recv[c],
+                    jnp.where(
+                        my_mode[c] == 2, we_blk,
+                        jnp.where(my_mode[c] == 3, sn_blk,
+                                  padded[rs, cs]),
+                    ),
+                )
+                padded = padded.at[rs, cs].set(blk)
+        return padded[None]
+
+    return _exchange
+
+
 def _make_exchange_ppermute_multiface(mesh, ndim, halo=1, with_offsets=False):
     """Build the multi-face ppermute shard_map exchange.
 
@@ -1119,6 +1779,13 @@ def _select_variant(use_ppermute, halo, n_devices):
     * every other ppermute combination (halo=2 at any count; halo=1 at
       1/2/3 devices) → the multiface ppermute kernel.
     """
+    if n_devices > 6:
+        # 6*kt^2 sub-face tiling — the tiled kernel is the ONLY
+        # exchange that understands tile cuts (allgather/multiface
+        # would silently mis-route strips), so it wins regardless of
+        # the use_ppermute flag (the activation pre-warm loop also
+        # iterates the allgather combos).
+        return "ppermute_tiled"
     if not use_ppermute:
         return "allgather_h2" if halo == 2 else "allgather"
     if halo == 1 and n_devices == 6:
@@ -1158,16 +1825,27 @@ def _get_exchange(mesh, ndim, use_ppermute, halo=1, with_offsets=False):
     and multiface kernels.
     """
     n_devices = len(mesh.devices.flat)
-    if n_devices < 1 or 6 % n_devices != 0:
+    mesh_shape = tuple(mesh.devices.shape)
+    is_tiled = (
+        len(mesh_shape) == 3 and mesh_shape[0] == 6
+        and mesh_shape[1] == mesh_shape[2] and mesh_shape[1] >= 2
+    )
+    if not is_tiled and (n_devices < 1 or 6 % n_devices != 0):
         raise ValueError(
             f"SPMD cubed-sphere halo exchange requires a face-axis mesh "
-            f"whose device count divides 6, got {n_devices}."
+            f"whose device count divides 6, or a (6, kt, kt) tiled "
+            f"mesh; got {n_devices} devices, shape {mesh_shape}."
         )
-    faces_per_shard = 6 // n_devices
+    faces_per_shard = 1 if is_tiled else 6 // n_devices
     variant = _select_variant(use_ppermute, halo, n_devices)
-    key = (id(mesh), ndim, variant, halo, with_offsets, faces_per_shard)
+    key = (id(mesh), ndim, variant, halo, with_offsets, faces_per_shard,
+           mesh_shape)
     if key not in _cache:
-        if variant == "allgather_h2":
+        if variant == "ppermute_tiled":
+            _cache[key] = _make_exchange_ppermute_tiled(
+                mesh, ndim, halo=halo, with_offsets=with_offsets,
+            )
+        elif variant == "allgather_h2":
             _cache[key] = _make_exchange_allgather_h2(
                 mesh, ndim, with_offsets=with_offsets,
             )
@@ -1532,16 +2210,32 @@ def activate_spmd_halo_backend(
             f"serial path. Call set_corner_fill_mode('avg'), or use the mpi4jax "
             f"backend for non-avg corner fills.")
     n_devices = len(mesh.devices.flat)
-    if n_devices < 1 or 6 % n_devices != 0:
+    _mshape = tuple(mesh.devices.shape)
+    _is_tiled = (
+        len(_mshape) == 3 and _mshape[0] == 6
+        and _mshape[1] == _mshape[2] and _mshape[1] >= 2
+    )
+    if not _is_tiled and (n_devices < 1 or 6 % n_devices != 0):
         raise ValueError(
             f"SPMD halo backend requires a face-axis mesh whose device "
-            f"count divides 6 (1, 2, 3 or 6), got {n_devices}."
+            f"count divides 6 (1, 2, 3 or 6) or a (6, kt, kt) tiled "
+            f"mesh, got {n_devices} devices, shape {_mshape}."
         )
+    if _is_tiled and (force_allgather
+                      or os.environ.get(_FORCE_ALLGATHER_ENV) == "1"):
+        # Checked BEFORE any global mutation: tiled meshes have no
+        # allgather diagnostic kernel, and a partially-armed backend
+        # is worse than a refusal (codex CRITICAL 2).
+        raise ValueError(
+            "tiled (6*kt^2) meshes have no allgather diagnostic kernel "
+            f"— unset {_FORCE_ALLGATHER_ENV} for tiled runs.")
     _spmd_mesh = mesh
     halo._halo_backend = "spmd"
     halo._spmd_mesh = mesh
 
-    if force_allgather is None:
+    if _is_tiled:
+        use_pp = True  # only kernel that understands tile cuts
+    elif force_allgather is None:
         use_pp = select_exchange_backend(n, nlev, n_devices)
     else:
         use_pp = not force_allgather
@@ -1549,8 +2243,11 @@ def activate_spmd_halo_backend(
     backend_name = "ppermute" if use_pp else "all_gather(DIAGNOSTIC)"
     logger.info(
         "SPMD halo backend activated (mesh=%s, %d devices, "
-        "faces/shard=%d, n=%d, nlev=%d, exchange=%s)",
-        mesh.axis_names, n_devices, 6 // n_devices, n, nlev, backend_name,
+        "layout=%s, n=%d, nlev=%d, exchange=%s)",
+        mesh.axis_names, n_devices,
+        f"tiled kt={_mshape[1]}" if _is_tiled
+        else f"faces/shard={6 // n_devices}",
+        n, nlev, backend_name,
     )
 
     # Pre-warm the exchange kernel cache so the factories are never

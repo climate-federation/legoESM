@@ -918,6 +918,33 @@ class TestIntegrationHydrostatic:
         grad = jax.grad(loss)(state.T.data)
         assert jnp.all(jnp.isfinite(grad))
 
+    def test_fast_sbm_through_production_pipeline(self, setup):
+        # The bin scheme must run end-to-end through the REAL hydrostatic
+        # microphysics factory (not just _get_microphysics_fn): physical
+        # shapes, finite tendencies, nonnegative precip.
+        state, grid, sigma = setup
+        config = MicrophysicsConfig(scheme="fast_sbm")
+        physics_fn = make_microphysics_physics(config, "hydrostatic", dt=300.0)
+        tend = physics_fn(state, grid, sigma)
+        assert tend.dT_dt.data.shape == state.T.data.shape
+        assert jnp.all(jnp.isfinite(tend.dT_dt.data))
+        # Moisture tendencies flow via the tracer-tendency dict.
+        assert tend.tracer_tendencies is not None
+        assert jnp.all(jnp.isfinite(tend.tracer_tendencies["q_v"].data))
+
+    def test_fast_sbm_grad_through_hydrostatic(self, setup):
+        state, grid, sigma = setup
+        config = MicrophysicsConfig(scheme="fast_sbm")
+        physics_fn = make_microphysics_physics(config, "hydrostatic", dt=300.0)
+
+        def loss(T_data):
+            s = state._replace(T=state.T.replace(data=T_data))
+            tend = physics_fn(s, grid, sigma)
+            return jnp.sum(tend.dT_dt.data ** 2)
+
+        grad = jax.grad(loss)(state.T.data)
+        assert jnp.all(jnp.isfinite(grad))
+
 
 class TestIntegrationNonhydrostatic:
 

@@ -372,14 +372,39 @@ def cgrid_latlon_hydrostatic_tendencies(
     # The u-face (longitude) direction never needs a halo variant: lon
     # is periodic and fully rank-local under band decomposition.
     # Fused entry-level lat pads (audit lever O4; atm census probe
-    # 8460424): ONE sendrecv pair per cut carries T's v-face-interp
-    # ghost rows AND u's ghost rows — and the padded u is consumed
-    # TWICE downstream (curl circulation + the absolute-vorticity
-    # 4-pt u->v-face average), so this single exchange replaces three
-    # per tendency evaluation.  Serial/local backend: two jnp.pads,
-    # value-identical (unused ones are dead-code-eliminated).
+    # 8460424, fusion-completion round 8463739): ONE sendrecv pair per
+    # cut carries every ENTRY-KNOWN field needing v-face-interp ghost
+    # rows — T, u (consumed twice: curl circulation + the
+    # absolute-vorticity 4-pt u->v-face average), the layer thickness
+    # dp (hybrid: dA+dB*p_s from entry; sigma: p_s*dsigma built here),
+    # and on the hybrid lane also hybrid_factor and p_s.  Only the
+    # sigma_dot / mass-flux v-interps stay separate: they depend on
+    # div(dp*v), which needs the padded dp first.  Census (np=2 LL32
+    # dry): 9 -> 6 per-step exchanges on the sigma path.  Serial/local
+    # backend: per-field jnp.pads, value-identical (unused ones are
+    # dead-code-eliminated).
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
-    _T_lat_pad, _u_lat_pad = pad_with_pole_bc_lat_multi((T, u), halo=1)
+    if _hybrid:
+        # (B*p_s/p) pressure-gradient correction factor — entry-known.
+        hybrid_factor = (
+            sigma_coord.B_full * p_s[..., jnp.newaxis] / p_full
+        )
+        _ps3 = p_s[..., jnp.newaxis]
+        (_T_lat_pad, _u_lat_pad, _dp_lat_pad, _hf_lat_pad,
+         _ps_lat_pad) = pad_with_pole_bc_lat_multi(
+            (T, u, dp, hybrid_factor, _ps3), halo=1)
+    else:
+        # Sigma-coord layer thickness, hoisted from the continuity
+        # branch below so its ghost rows ride the entry exchange.
+        # dtype-pinned to p_s: under the default fp32 PrecisionPolicy
+        # the sigma arrays are float32 while the state is float64, and
+        # a stray f32 dp SPLITS the fused exchange into two dtype
+        # groups (census 8463821: fused[3f/2g|f64,f64,f32]) — one
+        # extra sendrecv pair per cut per stage.  astype is a no-op
+        # when dtypes already match.
+        dp = p_s[..., jnp.newaxis] * sigma_coord.dsigma.astype(p_s.dtype)
+        _T_lat_pad, _u_lat_pad, _dp_lat_pad = pad_with_pole_bc_lat_multi(
+            (T, u, dp), halo=1)
 
     T_u = interp_cell_to_uface(T)
     T_v = interp_cell_to_vface_halo(T, f_pad=_T_lat_pad)
@@ -390,10 +415,8 @@ def cgrid_latlon_hydrostatic_tendencies(
     # Hybrid coordinate correction: in sigma coords grad_eta(ln p) = grad(ln p_s),
     # but in hybrid coords grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
     if _hybrid:
-        B_coeff = sigma_coord.B_full  # (nlev,)
-        hybrid_factor = B_coeff * p_s[..., jnp.newaxis] / p_full
         hf_u = interp_cell_to_uface(hybrid_factor)
-        hf_v = interp_cell_to_vface_halo(hybrid_factor)
+        hf_v = interp_cell_to_vface_halo(hybrid_factor, f_pad=_hf_lat_pad)
         pg_corr_x = pg_corr_x * hf_u
         pg_corr_y = pg_corr_y * hf_v
 
@@ -421,19 +444,21 @@ def cgrid_latlon_hydrostatic_tendencies(
     if _hybrid:
         # Hybrid closure: dp = dA + dB * p_s varies horizontally.
         dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
-        dp_v = interp_cell_to_vface_halo(dp)  # (n_lat+1, n_lon, nlev)
+        dp_v = interp_cell_to_vface_halo(  # (n_lat+1, n_lon, nlev)
+            dp, f_pad=_dp_lat_pad)
         div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
         _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
         D_total_p = _cumsum_dp[..., -1]
         dp_s_dt = -D_total_p / sigma_coord.B_range
     else:
-        dsigma = sigma_coord.dsigma
         sigma_top = sigma_coord.sigma_half[0]
         sigma_range = 1.0 - sigma_top
-        # Flux-form: div(dp_k * v) where dp_k = p_s * dsigma_k
-        dp = p_s[..., jnp.newaxis] * dsigma  # (n_lat, n_lon, nlev)
+        # Flux-form: div(dp_k * v); dp = p_s * dsigma_k built at the
+        # fused entry pad above so its ghost rows shared the entry
+        # exchange.
         dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
-        dp_v = interp_cell_to_vface_halo(dp)  # (n_lat+1, n_lon, nlev)
+        dp_v = interp_cell_to_vface_halo(  # (n_lat+1, n_lon, nlev)
+            dp, f_pad=_dp_lat_pad)
         div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
         _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
         D_total_p = _cumsum_dp[..., -1]
@@ -464,9 +489,11 @@ def cgrid_latlon_hydrostatic_tendencies(
         _pad_axes = ((0, 0),) * (_mf_inner.ndim - 1) + ((1, 1),)
         mass_flux = jnp.pad(_mf_inner[..., :-1], _pad_axes)
         mf_u = interp_cell_to_uface(mass_flux)
+        # mass_flux depends on div(dp*v) -> cannot join the entry pad.
         mf_v = interp_cell_to_vface_halo(mass_flux)
         ps_u = interp_cell_to_uface(p_s[..., jnp.newaxis])[..., 0]
-        ps_v = interp_cell_to_vface_halo(p_s[..., jnp.newaxis])[..., 0]
+        ps_v = interp_cell_to_vface_halo(
+            p_s[..., jnp.newaxis], f_pad=_ps_lat_pad)[..., 0]
         du_dt = du_dt + vertical_advection_hybrid(u, mf_u, ps_u, sigma_coord)
         dv_dt = dv_dt + vertical_advection_hybrid(v, mf_v, ps_v, sigma_coord)
         vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)

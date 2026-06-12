@@ -346,7 +346,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["none", "sundqvist", "xu_randall"])
     parser.add_argument("--microphysics", type=str, default="none",
                         choices=["none", "kessler", "sundqvist",
-                                 "seifert_beheng", "morrison", "thompson"])
+                                 "seifert_beheng", "morrison", "thompson",
+                                 "p3", "sdm", "fast_sbm"])
     parser.add_argument("--aerosol-ccn", action="store_true", default=False,
                         help="Diagnose the specified cloud-droplet number "
                              "from the prescribed aerosol optical depth "

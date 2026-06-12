@@ -28,9 +28,16 @@ class SpongeForcing(NamedTuple):
     Parameters
     ----------
     gamma : array
-        Relaxation rate [1/s].  Shape ``(n_lat, n_lon)`` for lat-lon
-        or ``(nCells,)`` for MPAS.  Zero in the interior, ramping to
-        ``1/tau`` near boundaries.
+        Relaxation rate [1/s].  Either HORIZONTAL — shape
+        ``(n_lat, n_lon)`` for lat-lon or ``(nCells,)`` for MPAS,
+        broadcast over the vertical — or FULL-RANK per-cell — shape
+        ``(n_lat, n_lon, nlev)`` / ``(nCells, nlev)`` for z-varying /
+        partial-column restoring zones (e.g. the Veros north_atlantic
+        ``rest_tscl(x, y, z)`` field).  Zero in the interior, ramping
+        to ``1/tau`` near boundaries.  A full-rank gamma supports
+        TRACER relaxation only (``u_ref``/``v_ref`` must be None: the
+        momentum sponge interpolates gamma to velocity faces, which is
+        defined for the horizontal form only).
     T_ref : array
         Reference temperature, same shape as the model T field.
     S_ref : array

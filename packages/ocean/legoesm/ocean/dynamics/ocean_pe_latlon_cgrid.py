@@ -224,7 +224,11 @@ def interp_to_v_points_multi(fields, grid=None) -> tuple:
 
 # Canonical Van Leer limiter from core (redundancy audit), aliased to the local
 # private name so call sites are unchanged.
-from legoesm.core.flux_limiters import van_leer_limiter as _van_leer_limiter
+from legoesm.core.flux_limiters import (
+    grad_safe_ratio,
+    ratio_grad_floor,
+    van_leer_limiter as _van_leer_limiter,
+)
 
 
 def tvd_to_u_points(
@@ -240,14 +244,23 @@ def tvd_to_u_points(
     Veros-compatible superbee (``tracer_advection="superbee"``).
     """
     eps = 1e-30
+    t_grad = ratio_grad_floor(f.dtype)
     f_left = jnp.roll(f, 1, axis=1)
     f_right = f
     f_left2 = jnp.roll(f, 2, axis=1)
     f_right2 = jnp.roll(f, -1, axis=1)
     delta_pos = f_right - f_left
-    r_pos = (f_left - f_left2) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    r_pos = grad_safe_ratio(
+        f_left - f_left2,
+        jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps),
+        jnp.abs(delta_pos) > t_grad,
+    )
     delta_neg = f_left - f_right
-    r_neg = (f_right2 - f_right) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    r_neg = grad_safe_ratio(
+        f_right2 - f_right,
+        jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps),
+        jnp.abs(delta_neg) > t_grad,
+    )
     f_pos = f_left + 0.5 * limiter_fn(r_pos) * delta_pos
     f_neg = f_right + 0.5 * limiter_fn(r_neg) * delta_neg
     n_lon = f.shape[1]
@@ -338,10 +351,19 @@ def tvd_to_v_points(
             f_north2 = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
         else:
             f_north2 = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
+    t_grad = ratio_grad_floor(f.dtype)
     delta_pos = f_north - f_south
-    r_pos = (f_south - f_south2) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    r_pos = grad_safe_ratio(
+        f_south - f_south2,
+        jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps),
+        jnp.abs(delta_pos) > t_grad,
+    )
     delta_neg = f_south - f_north
-    r_neg = (f_north2 - f_north) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    r_neg = grad_safe_ratio(
+        f_north2 - f_north,
+        jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps),
+        jnp.abs(delta_neg) > t_grad,
+    )
     f_pos = f_south + 0.5 * limiter_fn(r_pos) * delta_pos
     f_neg = f_north + 0.5 * limiter_fn(r_neg) * delta_neg
     f_tvd = jnp.where(mass_flux_v > 0, f_pos, f_neg)
@@ -2570,19 +2592,41 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
     return du_dt, dv_dt, dT_dt, dS_dt, dT_surf
 
 
-def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid):
+def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
+                          *, include_tracers=True):
     """Stage 10c: sponge-layer relaxation of T/S (and optionally u/v) toward
     reference fields. Pure verbatim extraction (Q8). Returns ``(du_dt, dv_dt,
-    dT_dt, dS_dt, diag_sponge_u, diag_sponge_v)``."""
+    dT_dt, dS_dt, diag_sponge_u, diag_sponge_v)``.
+
+    ``include_tracers=False`` (static Python bool) skips the T/S relaxation —
+    used by the ``sponge_forcing_implicit`` placement (EXT-N2), which WITHHOLDS
+    the tracer sponge rates from the explicit tendency and routes them through
+    the weight-1.0 implicit-vmix seam instead (Veros ``tempsalt_sources``
+    placement).  The momentum sponge (``u_ref``/``v_ref``) is ALWAYS explicit
+    (Veros has no momentum sponge; tempsalt_sources is tracer-only).
+    """
     diag_sponge_u = jnp.zeros_like(du_dt)
     diag_sponge_v = jnp.zeros_like(dv_dt)
     # --- 10c. Sponge layer relaxation ---
     # Cast sponge arrays to state dtype to prevent float64 promotion when
     # the precision policy stores state in float32 (crashes barotropic scan).
     if sponge is not None:
-        dT_dt, dS_dt = apply_sponge_tracer_relaxation(
-            dT_dt, dS_dt, T, S, sponge, mask=None, expand_gamma_axis=-1,
-        )
+        # EXT-N1 guard: a full-rank (3-D) per-cell gamma is defined for the
+        # TRACER relaxation only — the momentum sponge below interpolates
+        # gamma to u/v faces with the 2-D helpers and then broadcasts over
+        # the vertical, which is ill-defined for a z-varying rate.  Static
+        # shapes ⇒ trace-time error, never a silently wrong broadcast.
+        if sponge.gamma.ndim == T.ndim and (
+                sponge.u_ref is not None or sponge.v_ref is not None):
+            raise ValueError(
+                "3-D (full-rank per-cell) SpongeForcing.gamma supports "
+                "tracer relaxation only; u_ref/v_ref require a 2-D "
+                "horizontal gamma (the momentum sponge interpolates gamma "
+                "to velocity faces).")
+        if include_tracers:
+            dT_dt, dS_dt = apply_sponge_tracer_relaxation(
+                dT_dt, dS_dt, T, S, sponge, mask=None, expand_gamma_axis=-1,
+            )
         _dt = T.dtype
         if sponge.u_ref is not None:
             gamma_u = interp_cell_to_uface(sponge.gamma.astype(_dt))[..., jnp.newaxis]
@@ -3069,9 +3113,36 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         )
 
     # --- Stage 10c: sponge-layer relaxation. ---
+    # ``sponge_forcing_implicit`` (EXT-N2, Veros tempsalt_sources placement):
+    # the TRACER sponge rates are WITHHELD from the explicit (AB2'd)
+    # dT_dt/dS_dt and routed — masked, full-column, weight 1.0 — onto
+    # ``tendencies.tracer_source`` for the implicit-vmix seam (Veros
+    # thermodynamics.py:419 → diffusion.py:132-141: forward-Euler at taup1
+    # BEFORE the implicit solve, NOT AB2'd).  The momentum sponge stays
+    # explicit either way.  Static config bool ⇒ default path untouched.
+    _sponge_implicit = (sponge is not None
+                        and bool(getattr(config, "sponge_forcing_implicit",
+                                         False)))
     du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v = _bc_sponge_relaxation(
         du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
+        include_tracers=not _sponge_implicit,
     )
+    tracer_source = None
+    if _sponge_implicit:
+        # Same kernel as the explicit path (rate evaluated on the PRE-STEP
+        # tracers, like Veros's set_forcing at tau), masked like stage 11
+        # masks the explicit tendencies (Veros multiplies temp_source by
+        # maskT, diffusion.py:140-141).
+        _sp_dT, _sp_dS = apply_sponge_tracer_relaxation(
+            jnp.zeros_like(dT_dt), jnp.zeros_like(dS_dt), T, S, sponge,
+            mask=None, expand_gamma_axis=-1,
+        )
+        tracer_source = SurfaceTracerForcing(
+            dT_dt=Field(data=_sp_dT * mask_3d, name="dT_source_rate",
+                        dims=("lat", "lon", "level"), units="degC/s"),
+            dS_dt=Field(data=_sp_dS * mask_3d, name="dS_source_rate",
+                        dims=("lat", "lon", "level"), units="PSU/s"),
+        )
 
     # --- 11. Land masking ---
     du_dt = du_dt * u_mask_3d
@@ -3185,6 +3256,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dv_diss=dv_diss,
         dT_diss=dT_diss,
         dS_diss=dS_diss,
+        tracer_source=tracer_source,
     )
 
     if not diagnose_momentum:

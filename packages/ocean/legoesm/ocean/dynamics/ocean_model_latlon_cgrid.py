@@ -732,15 +732,39 @@ class LatLonCGridOceanModel:
         concrete bathymetry/masks — ``integrate``/``integrate_scan`` pre-build it
         before the (jitted) scan so the captured data is a compile-time
         constant.  A standalone ``step`` on a concrete state builds it lazily.
+
+        ``ensure_compile_time_eval``: when the lazy build instead happens
+        inside a USER's jit trace (e.g. ``jax.jit(value_and_grad(loss))``
+        whose loss takes the first-ever rigid-lid step, with the state a
+        closure constant), the masks are concrete but omnistaging would
+        stage the ``jnp`` parts of the build and CACHE TRACERS on the model
+        — a leaked-tracer error on reuse (2026-06-11 differentiability
+        audit). Forcing compile-time eval builds concrete arrays in that
+        context too. If the masks themselves are traced (state passed as a
+        jit argument on first use), the host-side ``np.asarray`` in the
+        builder raises ``TracerArrayConversionError`` — re-raised with an
+        actionable message.
         """
         if self.rigid_lid_data is not None:
             return self.rigid_lid_data
         from legoesm.ocean.dynamics.rigid_lid_islands import build_rigid_lid_data
-        self.rigid_lid_data = build_rigid_lid_data(
-            state.H_bathy.data, state.land_mask.data,
-            state.u_mask.data, state.v_mask.data,
-            self.config, self.grid, periodic_x=True,
-        )
+        try:
+            with jax.ensure_compile_time_eval():
+                self.rigid_lid_data = build_rigid_lid_data(
+                    state.H_bathy.data, state.land_mask.data,
+                    state.u_mask.data, state.v_mask.data,
+                    self.config, self.grid, periodic_x=True,
+                )
+        except jax.errors.TracerArrayConversionError as e:
+            raise RuntimeError(
+                "rigid-lid island decomposition must be built from CONCRETE "
+                "bathymetry/masks, but the state reaching the first rigid-lid "
+                "step is traced (it was passed as an argument into a "
+                "jit/grad-transformed function). Warm the cache once before "
+                "transforming: call model.step(state, dt) eagerly, or "
+                "model._ensure_rigid_lid_data(state) on the concrete initial "
+                "state."
+            ) from e
         return self.rigid_lid_data
 
     @staticmethod
@@ -1033,6 +1057,23 @@ class LatLonCGridOceanModel:
                 "mixing there is no implicit solve to host the source. Set "
                 "implicit_vertical_mixing=True, or surface_forcing_implicit=False "
                 "to keep the explicit surface-forcing placement.")
+
+        # Implicit SPONGE placement (EXT-N2, Veros tempsalt_sources) likewise
+        # lives in the backward-Euler vertical-mixing solve; with explicit
+        # vertical mixing there is no implicit solve to host the source —
+        # reject rather than silently dropping the sponge or silently applying
+        # it explicitly (dispatch discipline).
+        if (getattr(config, "sponge_forcing_implicit", False)
+                and not config.implicit_vertical_mixing):
+            raise ValueError(
+                "sponge_forcing_implicit=True requires "
+                "implicit_vertical_mixing=True: the sponge T/S relaxation is "
+                "applied at weight 1.0 inside the backward-Euler "
+                "vertical-mixing solve (Veros's tempsalt_sources placement, "
+                "core/thermodynamics.py:419 -> core/diffusion.py:132-141). "
+                "Set implicit_vertical_mixing=True, or "
+                "sponge_forcing_implicit=False to keep the explicit "
+                "stage-10c sponge placement.")
 
         # Additive momentum vertical-friction placement (Veros solve_stream.py)
         # is defined relative to the AB2 outer integrator (the increment is
@@ -2271,6 +2312,7 @@ class LatLonCGridOceanModel:
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
                     K33_iso=k33_implicit, dt_mom=dt_mom,
                     surface_tracer_forcing=tend.surface_tracer_forcing,
+                    tracer_source=tend.tracer_source,
                     tke_old=_tke_old, tke_source=_tke_source, return_tke=True,
                 )
             else:
@@ -2279,6 +2321,7 @@ class LatLonCGridOceanModel:
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
                     K33_iso=k33_implicit, dt_mom=dt_mom,
                     surface_tracer_forcing=tend.surface_tracer_forcing,
+                    tracer_source=tend.tracer_source,
                 )
         if tke_new is not None:
             # Veros order (integrate_tke): the implicit solve writes
@@ -2325,9 +2368,12 @@ class LatLonCGridOceanModel:
             _diss_incr = (None if _diss_dT_incr is None else
                           (_diss_dT_incr, _diss_dS_incr,
                            _diss_du_incr, _diss_dv_incr))
+            # NB: ``tracer_source`` (EXT-N2) is APPENDED so the positional
+            # contract of the first six slots is unchanged (consumed by
+            # _ab2_step and tests/ocean/unit/test_ab2_scope.py).
             return state_new, (tend.K_v, tend.A_v, k33_implicit,
                                tend.surface_tracer_forcing, _tke_src,
-                               _diss_incr)
+                               _diss_incr, tend.tracer_source)
         return state_new
 
     def _tke_prognostic_active(self) -> bool:
@@ -2775,6 +2821,7 @@ class LatLonCGridOceanModel:
         *,
         dt_mom=None,
         surface_tracer_forcing=None,
+        tracer_source=None,
         do_tracers: bool = True,
         do_momentum: bool = True,
         tke_old=None,
@@ -2813,6 +2860,17 @@ class LatLonCGridOceanModel:
         implicit surface-forcing placement (``core/thermodynamics.py``).  ``dt``
         here is dt_tracer (the tracer timestep), matching Veros.  ``None`` ⇒
         no surface source ⇒ bit-identical.
+
+        ``tracer_source`` (same container type, or ``None``) is the WITHHELD
+        full-COLUMN tracer source rate — the implicit SPONGE placement
+        (``config.sponge_forcing_implicit``, EXT-N2; Veros ``tempsalt_sources``,
+        ``core/thermodynamics.py:419`` → ``core/diffusion.py:132-141``).  It is
+        added to the solve INPUT exactly like ``surface_tracer_forcing``
+        (``dt·rate`` at weight 1.0, dt = dt_tracer) but — the documented
+        EXT-N2 caveat — it is EXCLUDED from the post-mixing TKE surface
+        buoyancy-flux reconstruction, which column-sums only
+        ``surface_tracer_forcing`` (Veros keeps tempsalt_sources out of
+        ``forc_rho_surface``).  ``None`` ⇒ bit-identical.
 
         ``do_tracers`` / ``do_momentum`` (static Python bools) select which
         prognostic fields the solve acts on — the additive momentum-friction
@@ -2992,6 +3050,19 @@ class LatLonCGridOceanModel:
                 _dS_surf = surface_tracer_forcing.dS_dt.data.astype(state.S.data.dtype)
                 T_solve_in = state.T.data + dt * _dT_surf * mask_3d
                 S_solve_in = state.S.data + dt * _dS_surf * mask_3d
+            # IMPLICIT COLUMN tracer source (sponge, EXT-N2): same weight-1.0
+            # RHS-source seam as the surface forcing — Veros applies
+            # tempsalt_sources to temp[taup1] BEFORE the vmix solve
+            # (thermodynamics.py:419), which is algebraically this same
+            # ``X_old + dt·S`` solve input.  dt is dt_tracer (Veros
+            # dt_tracer·temp_source).  Kept OUT of the TKE forc_temp
+            # reconstruction below (Veros: tempsalt_sources never enters
+            # forc_rho_surface).  ``None`` ⇒ bit-identical.
+            if tracer_source is not None:
+                _dT_src = tracer_source.dT_dt.data.astype(state.T.data.dtype)
+                _dS_src = tracer_source.dS_dt.data.astype(state.S.data.dtype)
+                T_solve_in = T_solve_in + dt * _dT_src * mask_3d
+                S_solve_in = S_solve_in + dt * _dS_src * mask_3d
 
         # ---- Momentum coefficient inputs (u at u-faces, v at v-faces) ----
         # Interpolate A_v and dz from cell centers to face centers.  The
@@ -3159,10 +3230,12 @@ class LatLonCGridOceanModel:
             # than ~30-50 m (~0.5% of qsol at 100 m) but reaches ~28% of qsol
             # for the shallowest min_depth≈10 m single-cell shelf columns
             # (review-quantified; second-order, accepted).
-            # CAVEAT (EXT-N2): a future column source that is NOT a surface
-            # flux (e.g. implicit sponge rates) must NOT ride
-            # surface_tracer_forcing through this sum — Veros keeps
-            # tempsalt_sources out of forc_rho_surface.
+            # CAVEAT (EXT-N2, realized): a column source that is NOT a
+            # surface flux must NOT ride surface_tracer_forcing through this
+            # sum — Veros keeps tempsalt_sources out of forc_rho_surface.
+            # The implicit SPONGE rates therefore arrive on the SEPARATE
+            # ``tracer_source`` argument, which this reconstruction
+            # deliberately ignores.
             _sfc_T = T_new[..., 0]
             _sfc_S = S_new[..., 0]
             if surface_tracer_forcing is not None:
@@ -3545,7 +3618,7 @@ class LatLonCGridOceanModel:
         # None ⇒ recomputed in _apply_implicit_vertical_mixing, as the FE path).
         state_expl, (K_v_phys, A_v_phys, k33_implicit,
                      surface_tracer_forcing, tke_source,
-                     diss_incr) = self._step_impl(
+                     diss_incr, tracer_source) = self._step_impl(
             state, dt, freshwater=freshwater,
             surface_forcing=surface_forcing, sponge=sponge,
             _apply_implicit_vmix=False)
@@ -3706,6 +3779,7 @@ class LatLonCGridOceanModel:
                     K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
                     dt_mom=dt_mom,
                     surface_tracer_forcing=surface_tracer_forcing,
+                    tracer_source=tracer_source,
                     do_momentum=False,
                     tke_old=_tke_old, tke_source=tke_source,
                     return_tke=_tke_prog,
@@ -3728,6 +3802,7 @@ class LatLonCGridOceanModel:
                     K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
                     dt_mom=dt_mom,
                     surface_tracer_forcing=surface_tracer_forcing,
+                    tracer_source=tracer_source,
                     tke_old=_tke_old, tke_source=tke_source,
                     return_tke=_tke_prog,
                 )

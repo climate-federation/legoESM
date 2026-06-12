@@ -50,6 +50,9 @@ from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_behen
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
+from legoesm.atmosphere.physics.microphysics.fast_sbm.column import (
+    fast_sbm_microphysics,
+)
 from legoesm.atmosphere.physics.microphysics.sdm import sdm_microphysics
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     ml_microphysics,
@@ -85,12 +88,28 @@ def _get_microphysics_fn(config: MicrophysicsConfig):
         return "p3", p3_microphysics, config.p3
     elif config.scheme == "sdm":
         return "sdm", sdm_microphysics, config.sdm
+    elif config.scheme == "fast_sbm":
+        return "fast_sbm", fast_sbm_microphysics, config.fast_sbm
     elif config.scheme == "ml_emulator":
         return "ml_emulator", ml_microphysics, config.ml_emulator
     elif config.scheme == "none":
         return "none", None, None
     else:
         raise ValueError(f"Unknown microphysics scheme: {config.scheme!r}")
+
+
+def get_microphysics_fn(config: MicrophysicsConfig):
+    """Public scheme dispatch: ``config.scheme`` → ``(scheme_name, micro_fn,
+    scheme_config)``. The swappable per-scheme tendency interface — used by the
+    grid adapters here AND external dycores (e.g. the spectral plane LES) so no
+    caller imports the private ``_get_microphysics_fn``."""
+    return _get_microphysics_fn(config)
+
+
+def min_tracer_slots(scheme_name: str) -> int:
+    """Public lookup of the minimum tracer-slot count a scheme writes (standard
+    slot layout, see ``_PLANE_MIN_TRACER_SLOTS``)."""
+    return _PLANE_MIN_TRACER_SLOTS[scheme_name]
 
 
 from legoesm.atmosphere.physics._shared import (
@@ -478,6 +497,7 @@ _PLANE_MIN_TRACER_SLOTS = {
     "thompson": 9,          # q_{v,c,r,i,s,g} + N_{c,r,i}
     "p3": 9,                # q_{v,c,r,i} + q_rim(s) + B_rim(g) + N_{c,r,i}
     "sdm": 2,               # q_v, q_c (condensation adapter; dq_r is always 0)
+    "fast_sbm": 9,          # q_v,q_c,q_r + N_c,N_r live; ice slots zero
     "ml_emulator": 9,       # generic full layout
     "none": 0,              # no-op
 }
