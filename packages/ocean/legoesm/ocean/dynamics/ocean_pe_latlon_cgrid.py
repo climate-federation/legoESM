@@ -224,7 +224,11 @@ def interp_to_v_points_multi(fields, grid=None) -> tuple:
 
 # Canonical Van Leer limiter from core (redundancy audit), aliased to the local
 # private name so call sites are unchanged.
-from legoesm.core.flux_limiters import van_leer_limiter as _van_leer_limiter
+from legoesm.core.flux_limiters import (
+    grad_safe_ratio,
+    ratio_grad_floor,
+    van_leer_limiter as _van_leer_limiter,
+)
 
 
 def tvd_to_u_points(
@@ -240,14 +244,23 @@ def tvd_to_u_points(
     Veros-compatible superbee (``tracer_advection="superbee"``).
     """
     eps = 1e-30
+    t_grad = ratio_grad_floor(f.dtype)
     f_left = jnp.roll(f, 1, axis=1)
     f_right = f
     f_left2 = jnp.roll(f, 2, axis=1)
     f_right2 = jnp.roll(f, -1, axis=1)
     delta_pos = f_right - f_left
-    r_pos = (f_left - f_left2) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    r_pos = grad_safe_ratio(
+        f_left - f_left2,
+        jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps),
+        jnp.abs(delta_pos) > t_grad,
+    )
     delta_neg = f_left - f_right
-    r_neg = (f_right2 - f_right) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    r_neg = grad_safe_ratio(
+        f_right2 - f_right,
+        jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps),
+        jnp.abs(delta_neg) > t_grad,
+    )
     f_pos = f_left + 0.5 * limiter_fn(r_pos) * delta_pos
     f_neg = f_right + 0.5 * limiter_fn(r_neg) * delta_neg
     n_lon = f.shape[1]
@@ -338,10 +351,19 @@ def tvd_to_v_points(
             f_north2 = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
         else:
             f_north2 = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
+    t_grad = ratio_grad_floor(f.dtype)
     delta_pos = f_north - f_south
-    r_pos = (f_south - f_south2) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    r_pos = grad_safe_ratio(
+        f_south - f_south2,
+        jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps),
+        jnp.abs(delta_pos) > t_grad,
+    )
     delta_neg = f_south - f_north
-    r_neg = (f_north2 - f_north) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    r_neg = grad_safe_ratio(
+        f_north2 - f_north,
+        jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps),
+        jnp.abs(delta_neg) > t_grad,
+    )
     f_pos = f_south + 0.5 * limiter_fn(r_pos) * delta_pos
     f_neg = f_north + 0.5 * limiter_fn(r_neg) * delta_neg
     f_tvd = jnp.where(mass_flux_v > 0, f_pos, f_neg)
