@@ -80,7 +80,10 @@ from legoesm.grids.vertical import (
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
-from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.timestepping.integration import (
+    IntegrationMixin,
+    refuse_unthreaded_stateful_physics,
+)
 from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
 from legoesm.core.conservation import (
     zero_mean_tendency,
@@ -1091,6 +1094,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             the legacy path.
 
         """
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="lat-lon C-grid step()")
         # Anchor-to-initial: snapshot mass once outside JIT (mirrors
         # primitive_eq_cdgrid.step()).  Computed in fp64 via
         # ``compute_mass`` so it stays clean of the per-step

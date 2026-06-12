@@ -4,6 +4,45 @@ import jax
 import jax.numpy as jnp
 
 
+def refuse_unthreaded_stateful_physics(physics_fn, phys_state, *, where):
+    """Refuse a stateful physics_fn handed to a per-step entry without
+    its ``PhysicsState`` carry.
+
+    Issue #405/#413: ``combined.make_physics`` tags its output with
+    ``_requires_phys_state`` when the configured physics is prognostic
+    (TKE-family / MYNN-2.5 turbulence, mass_flux / edmf / bechtold /
+    profile convection, prognostic-spectral GWD).  Such a physics_fn
+    carries state across steps; calling a per-step ``step`` /
+    ``step_with_physics`` / ``step_cell_centre`` with ``phys_state=None``
+    silently reseeds that state every step — the exact failure class the
+    carry threading was built to remove.  A non-stateful (untagged)
+    physics_fn is unaffected, so the legacy ``phys_state=None`` call
+    stays byte-identical.
+
+    Centralised here (already imported by every dycore via
+    :class:`IntegrationMixin`) so the loud-contract guard is identical
+    across ``integrate()`` and the public per-step APIs of the CDGrid /
+    lat-lon / MPAS primitive-equation models.
+
+    Parameters
+    ----------
+    physics_fn : callable or None
+    phys_state : PhysicsState or None
+    where : str
+        Caller label for the error message (e.g. ``"CDGrid step()"``).
+    """
+    if (physics_fn is not None
+            and phys_state is None
+            and getattr(physics_fn, "_requires_phys_state", False)):
+        raise NotImplementedError(
+            f"{where} received a stateful physics_fn but no phys_state "
+            "carry — the prognostic physics (TKE / convection / GWD) "
+            "would silently reseed every step (issue #405/#413).  Seed "
+            "one with init_physics_state and thread it back via "
+            "phys_state=."
+        )
+
+
 class IntegrationMixin:
     """Mixin providing integrate() and integrate_scan() for any model with a .step() method.
 
@@ -62,15 +101,8 @@ class IntegrationMixin:
         # silently reseeds its prognostic fields every step.  Refuse
         # loudly; with a carry supplied, thread it through the models'
         # step/step_with_physics ``phys_state`` contract.
-        if (physics_fn is not None
-                and getattr(physics_fn, "_requires_phys_state", False)
-                and phys_state is None):
-            raise NotImplementedError(
-                "integrate() received a stateful physics_fn but no "
-                "phys_state carry — the prognostic physics would "
-                "silently reseed every step (issue #405/#413).  Seed "
-                "one with init_physics_state and pass phys_state=."
-            )
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="integrate()")
         for i in range(n_steps):
             if use_physics:
                 if phys_state is not None:

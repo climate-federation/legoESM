@@ -69,7 +69,10 @@ from legoesm.grids.vertical import (
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
-from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.timestepping.integration import (
+    IntegrationMixin,
+    refuse_unthreaded_stateful_physics,
+)
 from legoesm.core.operators_cdgrid import overlapped_arakawa_lamb_gradient
 from legoesm.grids.halo import (
     pad_halo_4d as _pad_halo_4d_module,
@@ -1238,6 +1241,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         accompanies into the next step.  ``phys_state=None`` (default)
         is byte-identical to the legacy 3-arg physics call.
         """
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="CDGrid step()")
         target_mass = None
         if (self.config.use_conservation_fixer and self.config.fix_mass
                 and self.config.anchor_mass_to_initial):
@@ -1718,6 +1723,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         """Public cell-centre step: returns the new state only (legacy
         contract); the updated physics carry is stashed on
         ``self._phys_state`` (issue #413, mirrors :meth:`step`)."""
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="CDGrid step_cell_centre()")
         state_new, self._phys_state = self._step_cell_centre(
             state, dt, physics_fn=physics_fn, target_mass=target_mass,
             phys_state=phys_state)

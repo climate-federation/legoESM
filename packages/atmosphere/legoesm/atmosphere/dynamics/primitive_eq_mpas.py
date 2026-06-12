@@ -64,7 +64,10 @@ from legoesm.grids.vertical import (
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
-from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.timestepping.integration import (
+    IntegrationMixin,
+    refuse_unthreaded_stateful_physics,
+)
 from legoesm.parallel.reductions import global_sum_mpi
 from legoesm import constants
 
@@ -586,6 +589,8 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         trace; gh-417), so traced callers must thread ``phys_state``
         explicitly through their own carry.
         """
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="MPAS step()")
         target_mass = self._target_mass
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial

@@ -2721,6 +2721,17 @@ class ModelDriver:
             # the rank-local band under MPI (the replicated PRNG key does
             # not); the 3-D GWD spectrum scatters via a (nCells, az*wn)
             # reshape, mirroring the save-side gather.
+            #
+            # Codex adversarial (#413 stale-persistence class): a driver
+            # reused across loads must DROP any physstate_* left from a
+            # prior checkpoint first, so a checkpoint with no (or only a
+            # subset of) physstate fields freshly seeds in _run_mpas
+            # instead of silently resuming carry from the WRONG file.
+            if not isinstance(self._carry_aux, dict):
+                self._carry_aux = {}
+            for _stale in [k for k in self._carry_aux
+                           if k.startswith("physstate_")]:
+                del self._carry_aux[_stale]
             _ps_keys = [k for k in d.files if k.startswith("physstate_")]
             if _ps_keys:
                 for _k in _ps_keys:

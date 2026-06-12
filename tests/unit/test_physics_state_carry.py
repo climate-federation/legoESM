@@ -188,6 +188,23 @@ def _cdgrid_setup(n=6, nlev=6):
     return model, state, sigma
 
 
+def _mpas_setup(n=3, nlev=8):
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        MPASPrimitiveEquationModel,
+        MPASPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
+
+    mesh = create_voronoi_mesh(n)
+    sigma = create_sigma_coordinate(nlev)
+    model = MPASPrimitiveEquationModel(
+        mesh, sigma, MPASPrimitiveEquationConfig())
+    state = held_suarez_init_mpas(mesh, sigma)
+    return model, state
+
+
 def test_cdgrid_step_threads_seeded_carry():
     """CDGrid PE step with real TKE turbulence: output carry depends on
     the input carry (memory), perturbation survives, chained steps keep
@@ -717,3 +734,126 @@ def test_refusal_guard_normalizes_scheme_objects():
 
     with pytest.raises(NotImplementedError, match="405"):
         ModelDriver._refuse_stateful_physics_unthreaded(_Cfg())
+
+
+# ---------------------------------------------------------------------------
+# Codex adversarial review (#413 follow-up): the loud carry contract must
+# also cover DIRECT public per-step calls (model.step(..., physics_fn=fn)
+# in a hand-written loop), not only integrate()/the sharded wrappers, and
+# a reused MPAS driver must not resume stale physstate_* from a prior load.
+# ---------------------------------------------------------------------------
+
+
+def _stateful_make_physics():
+    from legoesm.atmosphere.physics.combined import make_physics
+    fn = make_physics(_tke_physics_config(), model_type="hydrostatic", dt=1.0)
+    assert fn._requires_phys_state is True, "fixture must be a stateful fn"
+    return fn
+
+
+def test_cdgrid_step_refuses_stateful_physics_without_carry():
+    """A stateful physics_fn handed to the CDGrid public step APIs with
+    no phys_state must REFUSE loudly — silently reseeding every step is
+    the exact failure class #413 removes (the integrate()/sharded guards
+    did not cover direct step / step_with_physics / step_cell_centre)."""
+    model, state, _ = _cdgrid_setup(n=4, nlev=4)
+    fn = _stateful_make_physics()
+    with pytest.raises(NotImplementedError, match="405"):
+        model.step(state, 1.0, physics_fn=fn)
+    with pytest.raises(NotImplementedError, match="405"):
+        model.step_with_physics(state, 1.0, physics_fn=fn)
+    with pytest.raises(NotImplementedError, match="405"):
+        model.step_cell_centre(state, 1.0, physics_fn=fn)
+    # Untagged (legacy) physics_fn is unaffected: the no-carry call still
+    # runs byte-identically to the 3-arg path.
+    _ = model.step(state, 1.0, physics_fn=_toy_carry_physics_fn())
+    assert model._phys_state is None
+
+
+def test_latlon_step_refuses_stateful_physics_without_carry():
+    """Same loud refusal on the lat-lon C-grid public step APIs."""
+    from legoesm import constants
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        CGridLatLonHydrostaticState,
+        CGridLatLonPrimitiveEquationModel,
+        CGridLatLonPrimitiveEquationConfig,
+    )
+
+    grid = create_latlon_grid(
+        n_lat=16, radius=constants.R_earth, omega=constants.Omega)
+    sigma = create_sigma_coordinate(n_levels=5)
+    model = CGridLatLonPrimitiveEquationModel(
+        grid, sigma, CGridLatLonPrimitiveEquationConfig())
+    n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, sigma.n_levels
+    state = CGridLatLonHydrostaticState(
+        u=jnp.zeros((n_lat, n_lon + 1, nlev)),
+        v=jnp.zeros((n_lat + 1, n_lon, nlev)),
+        T=jnp.full((n_lat, n_lon, nlev), 300.0),
+        p_s=jnp.full((n_lat, n_lon), 1.0e5),
+        phis=jnp.zeros((n_lat, n_lon)),
+    )
+    fn = _stateful_make_physics()
+    with pytest.raises(NotImplementedError, match="405"):
+        model.step(state, 600.0, physics_fn=fn)
+    with pytest.raises(NotImplementedError, match="405"):
+        model.step_with_physics(state, 600.0, physics_fn=fn)
+    # Untagged toy fn with no carry still runs (legacy contract).
+    _ = model.step_with_physics(state, 600.0,
+                                physics_fn=_toy_carry_physics_fn())
+    assert model._phys_state is None
+
+
+def test_mpas_step_refuses_stateful_physics_without_carry():
+    """MPAS step shares the loud contract (doctrine: every dycore)."""
+    model, state = _mpas_setup()
+    fn = _stateful_make_physics()
+    with pytest.raises(NotImplementedError, match="405"):
+        model.step(state, 1.0, physics_fn=fn)
+
+
+def test_mpas_repeated_load_clears_stale_physstate(tmp_path):
+    """Codex adversarial (#413 stale-persistence class): reusing a driver
+    to load a checkpoint WITHOUT physstate_* must drop the carry from a
+    PRIOR load, so _run_mpas freshly seeds rather than resuming carry
+    from the wrong checkpoint."""
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.driver.config import (
+        ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
+    )
+
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=3, nlev=5),
+        dycore=DycoreConfig(dt=1.0, discretization="mpas"),
+        output=OutputConfig(diag_days=1, checkpoint_days=3.0 / 86400.0),
+        days=4.0 / 86400.0,
+        dataset="analytical",
+        radiation="none",
+        turbulence="tke",
+    )
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run() == "COMPLETED"
+    ckpts = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))
+    assert ckpts, "no MPAS checkpoint written"
+    ckpt = ckpts[-1]
+
+    # A "legacy" checkpoint: same mesh, physstate_* stripped out.
+    legacy = tmp_path / "legacy.npz"
+    with np.load(ckpt) as d:
+        kept = {k: d[k] for k in d.files if not k.startswith("physstate_")}
+    np.savez(legacy, **kept)
+
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    driver_b.load_checkpoint(ckpt)
+    assert any(k.startswith("physstate_") for k in driver_b._carry_aux), (
+        "first load should populate physstate_* carry"
+    )
+    # Reload a physstate-free checkpoint into the SAME driver.
+    driver_b.load_checkpoint(legacy)
+    assert not any(k.startswith("physstate_") for k in driver_b._carry_aux), (
+        "stale physstate_* survived a physstate-free reload — _run_mpas "
+        "would resume carry from the WRONG checkpoint (issue #413)"
+    )
