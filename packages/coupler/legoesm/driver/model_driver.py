@@ -4254,10 +4254,23 @@ class ModelDriver:
             conv_prog_default = jnp.zeros(conv_shape, dtype=_sd)
         conv_prog = _aux.get("conv_prog", conv_prog_default)
         if tuple(conv_prog.shape) != conv_shape:
-            # Checkpoint from a different convection scheme (e.g. legacy
-            # (ncol,) carry restored into a profile-prognostic run):
-            # re-seed the default rather than crashing the scan trace.
-            conv_prog = conv_prog_default
+            # A RESTORED conv_prog with the wrong shape is a checkpoint/
+            # config mismatch — profile-prognostic convection is a real
+            # carry (Tiedtke relaxes the previous updraft profile), so
+            # silently reseeding here is the #405 bug class (codex
+            # round 6; mirrors the tke/qke/gwd_spectrum rule above).
+            # Legacy checkpoints written before the convection scheme
+            # changed must drop the stale carry_conv_prog entry to opt
+            # into a fresh seed.
+            raise ValueError(
+                f"Restored convection carry 'conv_prog' has shape "
+                f"{tuple(conv_prog.shape)} but convection="
+                f"{cfg.convection!r} expects {tuple(conv_shape)} — "
+                "checkpoint and configuration do not match (scheme or "
+                "resolution change, or corruption).  Fix the config or "
+                "remove the carry from the checkpoint to opt into a "
+                "fresh seed (issue #405/#413)."
+            )
 
         # Slab-land skin temperature — restored from the checkpoint when
         # available, otherwise initialized from the lowest model-level
@@ -5023,7 +5036,9 @@ class ModelDriver:
         conv_prog = phys_out.conv_prog
         # Stash into carry_aux at the warmup step too (codex round 4):
         # a one-step run never enters the main loop, and _finalize_run
-        # would otherwise checkpoint stale/missing carries.
+        # would otherwise checkpoint stale/missing carries.  conv_prog
+        # included (codex round 6) — it is a real convection carry.
+        self._carry_aux["conv_prog"] = conv_prog
         if phys_out.tke is not None:
             phys_tke = phys_out.tke
             self._carry_aux["tke"] = phys_tke
@@ -5128,6 +5143,11 @@ class ModelDriver:
                     **_phys_carry_step_inputs(),
                 )
             conv_prog = phys_out.conv_prog
+            # Persist per step (codex round 6): the diagnostic-boundary
+            # refresh below is the only other writer, so a checkpoint on
+            # a non-diagnostic step would otherwise persist a stale
+            # convection carry.
+            self._carry_aux["conv_prog"] = conv_prog
             if T_land is not None:
                 self._carry_aux["T_land"] = T_land
             # Stateful-physics carries (issue #413): feed the updated
