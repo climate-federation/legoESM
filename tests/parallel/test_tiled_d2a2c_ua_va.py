@@ -789,13 +789,21 @@ def test_d2a2c_corner_full_parity(kt, ti, tj):
                                    rtol=0, atol=1e-12)
         np.testing.assert_allclose(vc_t, vc_g[f, a:a + nl, b:b + nl + 1],
                                    rtol=0, atol=1e-12)
-        # vt: exclude the deferred i-strip row.
-        vt_rows = [m for m in range(nl) if m != i_strip]
-        np.testing.assert_allclose(
-            vt_t[vt_rows], vt_g[f, a:a + nl, b:b + nl + 1][vt_rows],
-            rtol=0, atol=1e-12)
-        # ut: exclude the deferred j-strip column.
-        ut_cols = [m for m in range(nl) if m != j_strip]
-        np.testing.assert_allclose(
-            ut_t[:, ut_cols], ut_g[f, a:a + nl + 1, b:b + nl][:, ut_cols],
-            rtol=0, atol=1e-12)
+        # vt: exclude ONLY the deferred i-strip SEGMENT (production recomputes
+        # vt[i_strip, j_face in [2,n-2]] -> local [2:nl+1] for tj=0, [0:nl-1]
+        # for tj=kt-1).  Cells outside it (incl. the j-face override) ARE
+        # checked: blank the segment in both, then compare the full arrays.
+        vt_j0, vt_j1 = (2, nl + 1) if tj == 0 else (0, nl - 1)
+        vt_cmp = np.asarray(vt_t).copy()
+        vt_ref = np.asarray(vt_g[f, a:a + nl, b:b + nl + 1]).copy()
+        vt_cmp[i_strip, vt_j0:vt_j1] = 0.0
+        vt_ref[i_strip, vt_j0:vt_j1] = 0.0
+        np.testing.assert_allclose(vt_cmp, vt_ref, rtol=0, atol=1e-12)
+        # ut: exclude ONLY the deferred j-strip SEGMENT (ut[i_face in [2,n-2],
+        # j_strip] -> local rows [2:nl+1] for ti=0, [0:nl-1] for ti=kt-1).
+        ut_i0, ut_i1 = (2, nl + 1) if ti == 0 else (0, nl - 1)
+        ut_cmp = np.asarray(ut_t).copy()
+        ut_ref = np.asarray(ut_g[f, a:a + nl + 1, b:b + nl]).copy()
+        ut_cmp[ut_i0:ut_i1, j_strip] = 0.0
+        ut_ref[ut_i0:ut_i1, j_strip] = 0.0
+        np.testing.assert_allclose(ut_cmp, ut_ref, rtol=0, atol=1e-12)
