@@ -4235,10 +4235,28 @@ class ModelDriver:
         lat_deg_grid = ctx["lat_deg_grid"]
         _sd = ctx["_sd"]
 
-        # Segment computation
+        # Segment computation.  fallback: with diagnostics AND
+        # checkpoints disabled the GCD is empty — chunk at
+        # ``forcing_update_days`` (default one model day) so host
+        # boundaries (stability check, forcing update, multi-controller
+        # rendezvous) fire at that cadence, not every step.  Forcing is
+        # re-sampled ONLY at segment boundaries, so this knob is the
+        # forcing cadence for cadence-less runs — warn when the dataset
+        # is time-varying so the throttle is an explicit choice.
+        _fb_days = getattr(cfg, "forcing_update_days", 1.0)
         segment_length = compute_segment_length(
             diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
+            fallback_interval=int(_fb_days * 86400 / DT),
         )
+        if (diag_interval <= 0 and checkpoint_interval <= 0
+                and cfg.dataset != "analytical"):
+            logger.warning(
+                "No diagnostics/checkpoint cadence: time-varying forcing "
+                "(dataset=%r) is re-sampled only every "
+                "forcing_update_days=%.3g d (segment fallback).  Set "
+                "forcing_update_days or enable diagnostics for a finer "
+                "cadence.", cfg.dataset, _fb_days,
+            )
         n_steps_remaining = n_steps_total - start_step
         n_segments = (n_steps_remaining + segment_length - 1) // segment_length
 
@@ -4370,7 +4388,13 @@ class ModelDriver:
         t_jit = 0.0
         t_start = time.time()
 
-        for seg_idx in range(n_segments):
+        # while (not ``range(n_segments)``): the adaptive-dt path halves
+        # DT and recomputes ``n_steps_total``/``segment_length`` mid-run
+        # — a fixed segment count would TRUNCATE the run after a CFL
+        # halving (pre-existing; codex review 2026-06-12).
+        seg_idx = -1
+        while current_step < n_steps_total:
+            seg_idx += 1
             seg_steps = min(segment_length, n_steps_total - current_step)
             seg_end_step = current_step + seg_steps
             day = START_DAY + seg_end_step * DT / 86400.0
@@ -4621,6 +4645,9 @@ class ModelDriver:
                     )
                     segment_length = compute_segment_length(
                         diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
+                        fallback_interval=int(
+                            getattr(cfg, "forcing_update_days", 1.0)
+                            * 86400 / DT),
                     )
                     run_segment = build_segment_fn(
                         model=self.model, step_unified=step_unified,

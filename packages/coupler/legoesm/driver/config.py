@@ -333,6 +333,18 @@ class ExperimentConfig(NamedTuple):
     # reproducible from the seed recorded in the run manifest.
     seed: int = 0
 
+    # Segment/forcing cadence when NO host cadence exists (diag_days=0 AND
+    # checkpoint_days=0 — e.g. distributed_mode='spmd' milestone-1): the
+    # compiled-segment fallback length, which is ALSO how often
+    # time-varying forcing (SST/SIC, solar, ozone/aerosol, coupler
+    # overrides) is re-sampled — forcing updates only at segment
+    # boundaries.  Ignored whenever diagnostics or checkpoints set a
+    # finer cadence.  Without a fallback the segment collapses to 1 step
+    # and every step pays a host boundary (multi-controller: a
+    # cross-process rendezvous per step — the production-SPMD
+    # anti-scaling, job 8471423).
+    forcing_update_days: float = 1.0
+
     # Distributed
     distributed: bool = False
     # How multi-process runs federate (read only when distributed=True):
@@ -452,6 +464,11 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"days must be > 0, got {self.days}")
         if self.seed < 0:
             errors.append(f"seed must be >= 0, got {self.seed}")
+        if self.forcing_update_days <= 0:
+            errors.append(
+                f"forcing_update_days must be > 0, got "
+                f"{self.forcing_update_days}"
+            )
         if self.sbm_cape_threshold < 0:
             errors.append(
                 f"sbm_cape_threshold must be >= 0, got {self.sbm_cape_threshold}"
