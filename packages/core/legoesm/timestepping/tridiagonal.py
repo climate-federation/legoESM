@@ -527,3 +527,63 @@ def _thomas_solve_batched_legacy(
     d_flat = d.reshape(n_cols, n_sys)
     x_flat = jax.vmap(thomas_solve)(a_flat, b_flat, c_flat, d_flat)
     return x_flat.reshape(orig_shape)
+
+
+def cyclic_thomas_batched(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    d: jax.Array,
+) -> jax.Array:
+    """Batched PERIODIC (cyclic) tridiagonal solve via Sherman–Morrison.
+
+    Solves ``C x = d`` where ``C`` is tridiagonal with periodic wrap
+    terms: row ``0`` couples ``x[n-1]`` with coefficient ``a[..., 0]``
+    (the wrapped sub-diagonal) and row ``n-1`` couples ``x[0]`` with
+    coefficient ``c[..., -1]`` (the wrapped super-diagonal) — the
+    natural convention for a zonally periodic stencil where ``a[i]``
+    multiplies ``x[i-1 mod n]`` and ``c[i]`` multiplies ``x[i+1 mod n]``.
+
+    Standard Sherman–Morrison rank-1 reduction (Numerical Recipes §2.7):
+    two :func:`thomas_solve_batched` solves of the same modified
+    tridiagonal system plus a rank-1 correction.  Pure ``jnp`` ops —
+    JIT/scan/vmap/AD-safe; cost = 2 Thomas solves per call.
+
+    Parameters mirror :func:`thomas_solve_batched` (system on the LAST
+    axis, leading axes batched), except ``a[..., 0]`` and ``c[..., -1]``
+    are USED (the periodic wrap coefficients).  Requires ``n_sys >= 3``.
+    Diagonal dominance of the underlying operator keeps the modified
+    system (``b[...,0] - gamma``, ``b[...,-1] - a0*c_last/gamma`` with
+    ``gamma = -b[...,0]``) safely factorizable for the Helmholtz-class
+    matrices this serves (diag > 0, off-diag <= 0).
+    """
+    if a.shape != b.shape or a.shape != c.shape or a.shape != d.shape:
+        raise ValueError(
+            f"cyclic_thomas_batched expects a/b/c/d to share shape; got "
+            f"a={a.shape}, b={b.shape}, c={c.shape}, d={d.shape}"
+        )
+    if a.shape[-1] < 3:
+        raise ValueError(
+            f"cyclic_thomas_batched requires n_sys >= 3 on the trailing "
+            f"axis; got n_sys={a.shape[-1]}"
+        )
+    alpha = c[..., -1]            # row n-1 -> col 0 (wrapped super-diag)
+    beta = a[..., 0]              # row 0 -> col n-1 (wrapped sub-diag)
+    gamma = -b[..., 0]            # NR convention (avoids zero pivot)
+
+    b_mod = b.at[..., 0].add(-gamma)
+    b_mod = b_mod.at[..., -1].add(-alpha * beta / gamma)
+    # Zero the (unused-by-Thomas but validated) wrap entries.
+    a_mod = a.at[..., 0].set(0.0)
+    c_mod = c.at[..., -1].set(0.0)
+
+    y = thomas_solve_batched(a_mod, b_mod, c_mod, d)
+    u = jnp.zeros_like(d)
+    u = u.at[..., 0].set(gamma)
+    u = u.at[..., -1].set(alpha)
+    z = thomas_solve_batched(a_mod, b_mod, c_mod, u)
+
+    vy = y[..., 0] + beta * y[..., -1] / gamma
+    vz = z[..., 0] + beta * z[..., -1] / gamma
+    factor = vy / (1.0 + vz)
+    return y - z * factor[..., None]

@@ -239,6 +239,86 @@ def _make_helmholtz(
     return A_op
 
 
+def _helmholtz_coupling_pieces(
+    H_u: jnp.ndarray,
+    H_v: jnp.ndarray,
+    grid: LatLonGrid,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """FV coupling magnitudes of ``∇·(H·∇)`` at each cell (positive).
+
+    Returns ``(zonal_E, zonal_W, merid_sum)`` — the per-cell positive
+    coupling coefficients to the east/west zonal neighbours and the
+    summed meridional couplings, such that
+    ``diag(A) = 1 + coeff·(zonal_E + zonal_W + merid_sum)`` and the
+    zonal off-diagonals of ``A`` are ``-coeff·zonal_E`` /
+    ``-coeff·zonal_W``.  Serves the ZONAL-LINE preconditioner;
+    :func:`_helmholtz_inv_diag` keeps its own verbatim expression (its
+    fp grouping is baked into every existing implicit_cn trajectory —
+    rewiring through these pieces would regroup the arithmetic and
+    perturb bit-exact parity lanes).  The two are tied by a mechanical
+    consistency test (``test_zonal_line_preconditioner.py``): these
+    pieces must reconstruct ``1/inv_diag`` to fp tolerance.
+    """
+    area = grid.area                                     # (n_lat, n_lon)
+    inv_area = 1.0 / area
+
+    H_u_E = H_u[:, 1:]   # east face of cell j: u-face (j, i+1)
+    H_u_W = H_u[:, :-1]  # west face of cell j: u-face (j, i)
+    H_v_N = H_v[1:, :]   # north face of cell j: v-face (j+1, i)
+    H_v_S = H_v[:-1, :]  # south face of cell j: v-face (j, i)
+
+    if is_tripolar(grid):
+        # Tripolar: full per-face 2D metrics (longitude variation in the
+        # bipolar cap; column-0-only metrics made PCG diverge).
+        dy_u_E = grid.dy_u[:, 1:]    # (n_lat, n_lon)
+        dy_u_W = grid.dy_u[:, :-1]
+        dx_u_E = grid.dx_u[:, 1:]
+        dx_u_W = grid.dx_u[:, :-1]
+        dx_v_N = grid.dx_v[1:, :]    # (n_lat, n_lon)
+        dx_v_S = grid.dx_v[:-1, :]
+        dy_v_N = grid.dy_v[1:, :]
+        dy_v_S = grid.dy_v[:-1, :]
+
+        zonal_E = H_u_E * dy_u_E / jnp.maximum(dx_u_E, 1.0e-30) * inv_area
+        zonal_W = H_u_W * dy_u_W / jnp.maximum(dx_u_W, 1.0e-30) * inv_area
+        merid_sum = (
+            H_v_N * dx_v_N / jnp.maximum(dy_v_N, 1.0e-30)
+            + H_v_S * dx_v_S / jnp.maximum(dy_v_S, 1.0e-30)
+        ) * inv_area
+    else:
+        # Regular lat-lon or Mercator: variable-dy safe.
+        R = grid.radius
+        dlon = grid.dlon
+        cos_lat_c = grid.cos_lat
+        dx_u = R * dlon * cos_lat_c                      # (n_lat,)
+
+        # u-face meridional extent: cell row j's height.
+        dy_h = grid.dy * 0.5                             # (n_lat,)
+        dy_u = dy_h                                      # alias
+
+        # v-face cell-centre-to-cell-centre distance: row-pair dependent.
+        dy_v_int = 0.5 * (dy_h[1:] + dy_h[:-1])          # (n_lat-1,)
+        dy_v_face = jnp.pad(dy_v_int, (1, 1), mode='edge')  # (n_lat+1,)
+
+        lat = grid.lat
+        lat_v_int = 0.5 * (lat[:-1] + lat[1:])
+        lat_v = jnp.concatenate([
+            jnp.array([-jnp.pi / 2], dtype=lat.dtype),
+            lat_v_int,
+            jnp.array([jnp.pi / 2], dtype=lat.dtype),
+        ])
+        cos_lat_v = jnp.cos(lat_v)                      # (n_lat+1,)
+        dx_v = R * cos_lat_v * dlon                      # (n_lat+1,)
+
+        zonal_E = H_u_E * dy_u[:, None] / dx_u[:, None] * inv_area
+        zonal_W = H_u_W * dy_u[:, None] / dx_u[:, None] * inv_area
+        merid_sum = (
+            H_v_N * dx_v[1:, None] / dy_v_face[1:, None]
+            + H_v_S * dx_v[:-1, None] / dy_v_face[:-1, None]
+        ) * inv_area
+    return zonal_E, zonal_W, merid_sum
+
+
 def _helmholtz_inv_diag(
     H_u: jnp.ndarray,
     H_v: jnp.ndarray,
@@ -349,6 +429,110 @@ def _make_diag_preconditioner(
         return r * inv_diag.astype(r.dtype)
 
     return M_inv
+
+
+def _make_zonal_line_preconditioner(
+    H_u: jnp.ndarray,
+    H_v: jnp.ndarray,
+    coeff: jnp.ndarray,
+    grid: LatLonGrid,
+    mask: jnp.ndarray,
+):
+    """Zonal-line preconditioner: exact periodic-tridiagonal row solves.
+
+    ``M = I + coeff·(zonal part of -∇·(H·∇), EXACT) + coeff·diag(merid)``
+    — the meridional couplings stay on the diagonal (classic line
+    relaxation).  Each latitude row is an independent PERIODIC
+    tridiagonal system in longitude, solved exactly by
+    :func:`cyclic_thomas_batched` (Sherman–Morrison over two batched
+    Thomas sweeps).  Properties that matter here:
+
+    * **Communication-free under band MPI**: every rank owns its full
+      longitude rows, so applying M⁻¹ is rank-local — unlike a global
+      preconditioner it adds ZERO collectives to the PCG iteration
+      (the EVP-block-preconditioner principle, CESM POP GMD 9:4209:
+      trade cheap local FLOPs for fewer latency-bound iterations).
+    * **Targets the stiff direction**: on a lat-lon grid the zonal
+      spacing collapses near the poles (dx ∝ cos φ), so the polar rows
+      dominate the Helmholtz condition number — exactly the couplings
+      this M inverts exactly.
+    * **W-self-adjoint**: built from the SAME FV stencil pieces as
+      ``A`` (area-weighted), so M is self-adjoint in the
+      ``<x,y> = Σ x·y·area`` inner product like A itself — the
+      requirement the single_reduce (Chronopoulos–Gear) recurrences
+      impose on the preconditioner (the CG-CG inner-product lesson).
+      Verified numerically in ``test_zonal_line_preconditioner.py``.
+
+    Land cells: M⁻¹ rows are decoupled by zeroing the couplings across
+    masked faces and forcing identity on land (output additionally
+    masked, matching the Jacobi convention M⁻¹=0 on land).
+    """
+    from legoesm.timestepping.tridiagonal import cyclic_thomas_batched
+
+    if mask.shape[-1] < 3:
+        raise ValueError(
+            "zonal_line preconditioner needs n_lon >= 3 (periodic "
+            f"tridiagonal rows); got n_lon={mask.shape[-1]}.  Use "
+            "preconditioner='jacobi' on degenerate-longitude grids."
+        )
+    zonal_E, zonal_W, merid_sum = _helmholtz_coupling_pieces(H_u, H_v, grid)
+    wet = mask > 0.5
+    # Couplings across a land face must vanish: H on land faces is
+    # normally zero already (depth), but the neighbour-cell mask makes
+    # this robust to nonzero-H walls (same wet-coupling convention as
+    # A_op's u_mask/v_mask).
+    wet_E = jnp.roll(wet, shift=-1, axis=1)   # east neighbour wet
+    wet_W = jnp.roll(wet, shift=1, axis=1)    # west neighbour wet
+    zE = jnp.where(wet & wet_E, zonal_E, 0.0)
+    zW = jnp.where(wet & wet_W, zonal_W, 0.0)
+
+    diag = 1.0 + coeff * (zE + zW + merid_sum)
+    diag = jnp.where(wet, diag, 1.0)          # identity rows on land
+    off_E = jnp.where(wet, -coeff * zE, 0.0)  # couples x[i+1 mod n]
+    off_W = jnp.where(wet, -coeff * zW, 0.0)  # couples x[i-1 mod n]
+
+    def M_inv(r: jnp.ndarray) -> jnp.ndarray:
+        dt = r.dtype
+        x = cyclic_thomas_batched(
+            off_W.astype(dt), diag.astype(dt), off_E.astype(dt),
+            (r * mask).astype(dt),
+        )
+        return x * mask.astype(dt)
+
+    return M_inv
+
+
+def _select_preconditioner(
+    name: str,
+    inv_diag: jnp.ndarray,
+    H_u: jnp.ndarray,
+    H_v: jnp.ndarray,
+    coeff: jnp.ndarray,
+    grid: LatLonGrid,
+    mask: jnp.ndarray,
+):
+    """Dispatch the implicit-CN PCG preconditioner by config name.
+
+    "jacobi" — inverse diagonal (legacy default; reuses the caller's
+    ``inv_diag`` so the Jacobi path stays bit-identical).
+    "zonal_line" — exact periodic-tridiagonal row solves (comm-free
+    under band MPI; POP EVP-class iteration cutter — see
+    :func:`_make_zonal_line_preconditioner`).
+    Unknown names refuse loudly (dispatch-hardening convention).
+    """
+    if name == "jacobi":
+        def M_inv(r: jnp.ndarray) -> jnp.ndarray:
+            return r * inv_diag.astype(r.dtype)
+        return M_inv
+    if name == "zonal_line":
+        return _make_zonal_line_preconditioner(
+            H_u, H_v, coeff, grid, mask,
+        )
+    raise ValueError(
+        "barotropic_implicit_latlon_cgrid: unknown "
+        f"barotropic_implicit_preconditioner {name!r}; expected "
+        "'jacobi' or 'zonal_line'."
+    )
 
 
 def solve_helmholtz_freesurface(
@@ -700,8 +884,16 @@ def barotropic_implicit_latlon_cgrid(
         H_u_old, H_v_old, coeff, grid, mask, u_mask, v_mask,
     )
 
-    def M_inv(r: jnp.ndarray) -> jnp.ndarray:
-        return r * inv_diag.astype(r.dtype)
+    # Preconditioner dispatch (static config; validated at entry so a
+    # typo fails loudly, not as a silently-Jacobi run).  Applies to the
+    # fixed-M PCG branch below; the single-rank stock-CG branch keeps
+    # its internal Jacobi (the custom-VJP solver owns inv_diag for its
+    # exact adjoint).
+    M_inv = _select_preconditioner(
+        str(getattr(config, "barotropic_implicit_preconditioner",
+                    "jacobi")),
+        inv_diag, H_u_old, H_v_old, coeff, grid, mask,
+    )
 
     # Solve dispatch — MERGE COMPOSITION of the area-weighted-adjoint fix
     # (PR #394 branch, commit 625a5610) with the MPI-scaling refactor
@@ -740,6 +932,25 @@ def barotropic_implicit_latlon_cgrid(
     # multi-process, so the flag is safe pre-arming.
     _use_pcg = _is_distributed() or bool(config.barotropic_implicit_force_pcg)
     if not _use_pcg:
+        # The stock-CG branch solves with its INTERNAL Jacobi (the
+        # custom-VJP solver owns inv_diag for its exact adjoint) — a
+        # non-default preconditioner cannot take effect here.  Refuse
+        # loudly instead of silently running Jacobi (codex review MAJOR,
+        # 2026-06-12): the fixed-M PCG honors it — set
+        # barotropic_implicit_force_pcg=True for single-rank runs.
+        _precond_req = str(getattr(
+            config, "barotropic_implicit_preconditioner", "jacobi"))
+        if _precond_req != "jacobi":
+            raise ValueError(
+                "barotropic_implicit_latlon_cgrid: "
+                f"barotropic_implicit_preconditioner={_precond_req!r} "
+                "only applies to the fixed-M PCG path, but this "
+                "single-rank run dispatches the stock-CG solver "
+                "(internal Jacobi).  Set "
+                "barotropic_implicit_force_pcg=True (PCG is also the "
+                "faster single-rank solver, job 8458701) or use "
+                "preconditioner='jacobi'."
+            )
         pcg_tol = jnp.asarray(
             config.barotropic_implicit_pcg_tol, dtype=eta_dtype,
         )

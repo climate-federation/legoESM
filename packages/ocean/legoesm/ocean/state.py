@@ -912,6 +912,19 @@ class LatLonCGridOceanConfig(NamedTuple):
     # defaults to "standard" and the two must flip together (latlon
     # here + MPASOceanConfig) with their pin tests.
     barotropic_implicit_pcg_variant: str = "standard"
+    # Preconditioner for the implicit-CN Helmholtz PCG (validated at the
+    # solver entry; unknown ⇒ ValueError):
+    #   "jacobi"     — inverse diagonal (legacy default).
+    #   "zonal_line" — exact periodic-tridiagonal solves per latitude
+    #                  row (cyclic Thomas).  COMMUNICATION-FREE under
+    #                  band MPI (each rank owns full longitude rows) and
+    #                  inverts exactly the pole-tightened zonal
+    #                  couplings that dominate the lat-lon condition
+    #                  number — the EVP-block-preconditioner principle
+    #                  (CESM POP, GMD 9:4209: fewer latency-bound
+    #                  iterations for cheap local FLOPs).  W-self-adjoint
+    #                  by construction (single_reduce-compatible).
+    barotropic_implicit_preconditioner: str = "jacobi"
     # Rigid-lid streamfunction solver knobs (only used when
     # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
     # surface entirely: the depth-integrated flow is non-divergent and carried
