@@ -779,22 +779,42 @@ def d2a2c_interior_local(utmp_pad_face, vtmp_pad_face, ti, tj, nl,
         cols ``[tj*nl-1 : tj*nl+nl+3]`` (the j-staggered analogue);
       * ut/vt — pointwise from uc/vc + the local D-winds/metrics.
 
-    Valid only for INTERIOR tiles, where ``ti*nl-1 >= 0`` and every
-    cell is in the 4th-order face interior (no edge specials); then it
-    is bit-identical to the global d2a2c_vect restricted to the tile.
+    Valid for INTERIOR tiles (``ti*nl-1 >= 0``; no face-boundary cells, so
+    no C1/C2/C3 or edge_interpolate4 specials).  uc/vc carry the 2nd-order
+    base + a clamped 4th-order overlay on the global band ``[npt+1, n-npt)``;
+    for the realistic ``nl >= npt+1`` the band covers the whole tile (pure
+    4th), but the base/clamp also makes small tiles whose faces fall outside
+    the band bit-identical to global d2a2c_vect (which uses 2nd base there).
     Returns ``(ua, va, uc, vc, ut, vt)`` (leading singleton axis kept).
     """
     h = 2
+    n = utmp_pad_face.shape[0] - 2 * h
+    npt = min(4, n // 2)
+    i_hi = n - npt
     a, b = ti * nl, tj * nl
     utmp_int = utmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl]
     vtmp_int = vtmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl]
     ua, va = d2a2c_ua_va_local(utmp_int, vtmp_int, cos_sg5, rsin2)
-    # uc: asymmetric -1 i-window; symmetric j-window.
-    uc_win = utmp_pad_face[None, a - 1:a + nl + 3, b:b + nl + 4]
-    uc = d2a2c_uc_4th_local(uc_win)            # (1, nl+1, nl)
-    # vc: symmetric i-window; asymmetric -1 j-window.
-    vc_win = vtmp_pad_face[None, a:a + nl + 4, b - 1:b + nl + 3]
-    vc = d2a2c_vc_4th_local(vc_win)            # (1, nl, nl+1)
+    # uc: 2nd base + clamped 4th overlay; asymmetric -1 i-window, symmetric
+    # j-window.  uc4[r]==production uc[a+r] (no shift).  For nl>=npt+1 the
+    # band covers the whole interior tile so this reduces to pure 4th; the
+    # base only shows for small tiles whose faces fall outside [npt+1,n-npt).
+    w = utmp_pad_face[None, a - 1:a + nl + 3, b:b + nl + 4]
+    uc = 0.5 * (w[:, 2:nl + 3, h:-h] + w[:, 3:nl + 4, h:-h])    # 2nd base
+    uc4 = d2a2c_uc_4th_local(w)                # (1, nl+1, nl)
+    k_lo = max(0, (npt + 1) - a)
+    k_hi = min(nl + 1, i_hi - a)
+    if n > 2 * npt + 2 and k_lo < k_hi:
+        uc = uc.at[:, k_lo:k_hi, :].set(uc4[:, k_lo:k_hi, :])
+    # vc: 2nd base + clamped 4th overlay; symmetric i-window, asymmetric -1
+    # j-window.
+    wv = vtmp_pad_face[None, a:a + nl + 4, b - 1:b + nl + 3]
+    vc = 0.5 * (wv[:, h:-h, 2:nl + 3] + wv[:, h:-h, 3:nl + 4])  # 2nd base
+    vc4 = d2a2c_vc_4th_local(wv)               # (1, nl, nl+1)
+    j_lo = max(0, (npt + 1) - b)
+    j_hi = min(nl + 1, i_hi - b)
+    if n > 2 * npt + 2 and j_lo < j_hi:
+        vc = vc.at[:, :, j_lo:j_hi].set(vc4[:, :, j_lo:j_hi])
     ut, vt = d2a2c_ut_vt_local(
         uc, vc, u_d, v_d, cosa_u, rsin_u, cosa_v, rsin_v)
     return ua, va, uc, vc, ut, vt
@@ -833,7 +853,7 @@ def d2a2c_edge_w_local(utmp_pad_face, vtmp_pad_face, tj, nl, n,
     uc4 = (_A2 * (w[:, 0:nl + 1, h:-h] + w[:, 3:nl + 4, h:-h])
            + _A1 * (w[:, 1:nl + 2, h:-h] + w[:, 2:nl + 3, h:-h]))
     k_hi = min(i_hi, nl + 1)
-    if i_lo < k_hi:
+    if n > 2 * npt + 2 and i_lo < k_hi:   # production's overlay guard
         uc = uc.at[:, i_lo:k_hi, :].set(uc4[:, i_lo - 1:k_hi - 1, :])
     # C1/C2/C3 at i=1.
     uc = uc.at[:, 1, :].set(d2a2c_uc_c123_local(w, False))
@@ -844,9 +864,16 @@ def d2a2c_edge_w_local(utmp_pad_face, vtmp_pad_face, tj, nl, n,
     sw_w = sw_pad_face[None, 0:nl + 2, b:b + nl + 2]
     uc = uc.at[:, 0, :].set(
         d2a2c_uc_edge_interp_local(ua_w, dx_w, se_w, sw_w, False))
-    # vc: pure 4th (tj interior) — asymmetric -1 j-window.
-    vc_win = vtmp_pad_face[None, 0:nl + 4, b - 1:b + nl + 3]
-    vc = d2a2c_vc_4th_local(vc_win)
+    # vc: 2nd base + clamped 4th overlay on the global j-band (tj interior,
+    # no S/N specials) — asymmetric -1 j-window.  For nl>=npt+1 the band
+    # covers the whole tile (== pure 4th); base shows only for small tiles.
+    wv = vtmp_pad_face[None, 0:nl + 4, b - 1:b + nl + 3]
+    vc = 0.5 * (wv[:, h:-h, 2:nl + 3] + wv[:, h:-h, 3:nl + 4])   # 2nd base
+    vc4 = d2a2c_vc_4th_local(wv)                                 # vc4[k]==prod
+    j_lo = max(0, (npt + 1) - b)
+    j_hi = min(nl + 1, i_hi - b)
+    if n > 2 * npt + 2 and j_lo < j_hi:
+        vc = vc.at[:, :, j_lo:j_hi].set(vc4[:, :, j_lo:j_hi])
     # ut: base, then the i=0 face-boundary override (uc/sin_upwind).
     ut = (uc - v_d * cosa_u) * rsin_u
     sin_left = se_w[:, 0, 1:-1]
@@ -854,6 +881,79 @@ def d2a2c_edge_w_local(utmp_pad_face, vtmp_pad_face, tj, nl, n,
     sin_up = jnp.where(uc[:, 0, :] > 0, sin_left, sin_right)
     ut = ut.at[:, 0, :].set(uc[:, 0, :] / jnp.maximum(sin_up, _EPS))
     # vt: pointwise base (vt[:,0,:] is base, NOT the adjacent strip).
+    vt = (vc - u_d * cosa_v) * rsin_v
+    return ua, va, uc, vc, ut, vt
+
+
+def d2a2c_edge_e_local(utmp_pad_face, vtmp_pad_face, tj, nl, n,
+                       u_d, v_d, cos_sg5, rsin2,
+                       cosa_u, rsin_u, cosa_v, rsin_v,
+                       ua_pad_face, dx_pad_face, se_pad_face, sw_pad_face):
+    """A→C d2a2c for an E-EDGE, j-interior tile (ti=kt-1, 0<tj<kt-1) —
+    everything EXCEPT the adjacent-strip vt[nl-1] (which reads a neighbour
+    ut j-halo, a stage-level coupling).
+
+    Mirror of :func:`d2a2c_edge_w_local` on the high-i face (a=ti*nl=n-nl):
+    uc = 2nd-order base + 4th-order overlay on the global band [npt+1:n-npt)
+    (for the E tile only its LOW faces) + C1/C2/C3 at i=n-1 +
+    edge_interpolate4 at i=n; vc = pure 4th-order (tj interior, no S/N);
+    ut = base + the i=n face boundary override (uc/sin_upwind); vt =
+    pointwise base.  Outputs (ua, va, uc, vc, ut, vt); vt[:, nl-1, :] is the
+    base (NOT the adjacent-strip) and is excluded from the parity gate.
+
+    Unlike the W tile (symmetric window + a +1 overlay shift), the E tile's
+    low faces are 4th-order interior cuts that need the ASYMMETRIC -1
+    i-window ``w = utmp_pad[a-1:a+nl+3]`` — with it, ``d2a2c_uc_4th_local(w)``
+    row r equals production ``uc[a+r]`` directly (no shift).  P4 phase-1b.
+    """
+    h = 2
+    npt = min(4, n // 2)
+    i_hi = n - npt
+    a, b = n - nl, tj * nl
+    # ua/va interior (a = n-nl).
+    ua, va = d2a2c_ua_va_local(
+        utmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl],
+        vtmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl], cos_sg5, rsin2)
+    # uc: ASYMMETRIC -1 i-window [a-1:a+nl+3]; the -1 cell feeds uc4[0].
+    w = utmp_pad_face[None, a - 1:a + nl + 3, b:b + nl + 4]
+    uc = 0.5 * (w[:, 2:nl + 3, h:-h] + w[:, 3:nl + 4, h:-h])   # 2nd base
+    # 4th overlay: uc4[r] == production uc[a+r] (NO shift); clamp to the
+    # tile's slice of the global band [npt+1:n-npt).
+    uc4 = d2a2c_uc_4th_local(w)                                # (1, nl+1, nl)
+    k_lo = max(0, (npt + 1) - a)
+    k_hi = min(nl + 1, i_hi - a)
+    if n > 2 * npt + 2 and k_lo < k_hi:   # production's overlay guard
+        uc = uc.at[:, k_lo:k_hi, :].set(uc4[:, k_lo:k_hi, :])
+    # C1/C2/C3 at i=n-1 (local nl-1) — symmetric window via the canonical
+    # helper (the asymmetric w is off-by-one for the high-i c123 stencil).
+    ws = utmp_pad_face[None, a:a + nl + 4, b:b + nl + 4]
+    uc = uc.at[:, nl - 1, :].set(d2a2c_uc_c123_local(ws, True))
+    # edge_interpolate4 + upwind at i=n (local nl).  i_p+2 row clamps to the
+    # last padded row exactly as production does (symmetric E window).
+    ua_e = ua_pad_face[None, a:a + nl + 4, b:b + nl + 4]
+    dx_e = dx_pad_face[None, a:a + nl + 4, b:b + nl]
+    se_e = se_pad_face[None, a:a + nl + 2, b:b + nl + 2]
+    sw_e = sw_pad_face[None, a:a + nl + 2, b:b + nl + 2]
+    uc = uc.at[:, nl, :].set(
+        d2a2c_uc_edge_interp_local(ua_e, dx_e, se_e, sw_e, True))
+    # vc: 2nd base + clamped 4th overlay on the global j-band (tj interior,
+    # no S/N specials) — asymmetric -1 j-window.  For nl>=npt+1 the band
+    # covers the whole tile (== pure 4th); the base shows only for small
+    # tiles whose j-faces fall outside [npt+1, n-npt).
+    wv = vtmp_pad_face[None, a:a + nl + 4, b - 1:b + nl + 3]
+    vc = 0.5 * (wv[:, h:-h, 2:nl + 3] + wv[:, h:-h, 3:nl + 4])   # 2nd base
+    vc4 = d2a2c_vc_4th_local(wv)                                 # vc4[k]==prod
+    j_lo = max(0, (npt + 1) - b)
+    j_hi = min(nl + 1, i_hi - b)
+    if n > 2 * npt + 2 and j_lo < j_hi:
+        vc = vc.at[:, :, j_lo:j_hi].set(vc4[:, :, j_lo:j_hi])
+    # ut: base, then the i=n face-boundary override (uc/sin_upwind).
+    ut = (uc - v_d * cosa_u) * rsin_u
+    sin_left = se_e[:, nl, 1:-1]
+    sin_right = sw_e[:, nl + 1, 1:-1]
+    sin_up = jnp.where(uc[:, nl, :] > 0, sin_left, sin_right)
+    ut = ut.at[:, nl, :].set(uc[:, nl, :] / jnp.maximum(sin_up, _EPS))
+    # vt: pointwise base (vt[:,nl-1,:] is base, NOT the adjacent strip).
     vt = (vc - u_d * cosa_v) * rsin_v
     return ua, va, uc, vc, ut, vt
 
