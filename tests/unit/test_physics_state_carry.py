@@ -489,6 +489,10 @@ def test_mpas_checkpoint_roundtrip_restores_physics_state(tmp_path):
     driver_b.setup()
     driver_b.load_checkpoint(ckpts[-1])
     assert "physstate_tke" in driver_b._carry_aux
+    # Scheme tag round-trips as a string and is skipped by the overlay
+    # field loop (codex round 9).
+    assert (driver_b._carry_aux.get("physstate_meta_conv_scheme")
+            == str(cfg.convection))
     # The restored field matches the final checkpointed carry... note the
     # checkpoint may predate the END of run A (periodic cadence), so
     # compare against the FILE, the ground truth of what was persisted.
@@ -500,6 +504,91 @@ def test_mpas_checkpoint_roundtrip_restores_physics_state(tmp_path):
     # And the continued run consumes it (seed overlay) without error.
     assert driver_b.run() == "COMPLETED"
     assert np.all(np.isfinite(np.asarray(driver_b._mpas_phys_state.tke)))
+
+
+def test_pack_carry_preserves_f64_gwd_spectrum_dtype():
+    """Codex round 9 watch-item, pinned mechanically: pack_carry's
+    _promote is result_type-based (upcast-only), so the f64-seeded GWD
+    spectrum must SURVIVE an f32 storage policy — a downcast here would
+    reintroduce the kernel-internal scan dtype mismatch."""
+    from legoesm.driver.compiled_segments import pack_carry
+    from legoesm.core.field import Field
+    from legoesm.core.state import HydrostaticState
+
+    n = 2
+    s3 = (6, n, n, 3)
+    s2 = (6, n, n)
+    state = HydrostaticState(
+        u=Field(jnp.zeros(s3, jnp.float32), name="u",
+                dims=("face", "x", "y", "level"), units="m/s"),
+        v=Field(jnp.zeros(s3, jnp.float32), name="v",
+                dims=("face", "x", "y", "level"), units="m/s"),
+        T=Field(jnp.full(s3, 280.0, jnp.float32), name="T",
+                dims=("face", "x", "y", "level"), units="K"),
+        p_s=Field(jnp.full(s2, 1e5, jnp.float32), name="p_s",
+                  dims=("face", "x", "y"), units="Pa"),
+        phis=Field(jnp.zeros(s2, jnp.float32), name="phis",
+                   dims=("face", "x", "y"), units="m2/s2"),
+    )
+    spec64 = jnp.full((6 * n * n, 4, 20), 1e-3, dtype=jnp.float64)
+    carry = pack_carry(
+        state,
+        q_v=jnp.zeros(s3, jnp.float32),
+        q_c=jnp.zeros(s3, jnp.float32),
+        q_r=jnp.zeros(s3, jnp.float32),
+        held_dT_rad=jnp.zeros(s3, jnp.float32),
+        held_sw_net_sfc=jnp.zeros(s2, jnp.float32),
+        held_lw_net_sfc=jnp.zeros(s2, jnp.float32),
+        held_sw_up_toa=jnp.zeros(s2, jnp.float32),
+        held_lw_up_toa=jnp.zeros(s2, jnp.float32),
+        held_sw_down_toa=jnp.zeros(s2, jnp.float32),
+        step_index=0,
+        gwd_spectrum=spec64,
+    )
+    assert carry.gwd_spectrum.dtype == jnp.float64, (
+        "pack_carry downcast the f64 GWD spectrum — the prognostic-"
+        "spectral kernel's internal scan would break (issue #413)"
+    )
+
+
+def test_conv_prog_scheme_tag_roundtrip_and_rejection(tmp_path):
+    """Codex round 9: the conv_prog scheme tag round-trips the npz
+    checkpoint as a string and a same-shape cross-scheme restore is
+    rejected loudly."""
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.driver.config import OutputConfig
+
+    cfg = _stateful_driver_config(
+        convection="mass_flux",
+        output=OutputConfig(diag_days=1, checkpoint_days=3.0 / 86400.0),
+    )
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run(compiled=True) == "COMPLETED"
+    ckpts = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))
+    assert ckpts
+    with np.load(ckpts[-1]) as d:
+        assert "carry_conv_prog_scheme" in d.files
+        assert str(d["carry_conv_prog_scheme"]) == "mass_flux"
+
+    # Same shape, different scheme: edmf also carries (ncol,) — the
+    # tag must reject the restore.
+    cfg_b = _stateful_driver_config(
+        convection="edmf",
+        output=OutputConfig(diag_days=1, checkpoint_days=3.0 / 86400.0),
+    )
+    driver_b = ModelDriver(cfg_b, output_dir=tmp_path / "b")
+    driver_b.setup()
+    driver_b.load_checkpoint(ckpts[-1])
+    assert driver_b._carry_aux.get("conv_prog_scheme") == "mass_flux"
+    with pytest.raises(ValueError, match="mass_flux"):
+        driver_b.run(compiled=True)
+
+    # Matching scheme restores cleanly.
+    driver_c = ModelDriver(cfg, output_dir=tmp_path / "c")
+    driver_c.setup()
+    driver_c.load_checkpoint(ckpts[-1])
+    assert driver_c.run(compiled=True) == "COMPLETED"
 
 
 def test_restored_carry_shape_mismatch_fails_fast(tmp_path):
