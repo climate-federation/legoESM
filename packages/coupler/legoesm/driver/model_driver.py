@@ -2312,6 +2312,7 @@ class ModelDriver:
         if self.config.grid.grid_type == "mpas":
             ckpt_path = self._output_dir / f"checkpoint_day_{int(round(day)):04d}.npz"
             s = self.state
+            _ps_carry = getattr(self, "_mpas_phys_state", None)
             # Under MPAS cell-partition MPI each rank holds only its owned+halo
             # band; gather the owned cells/edges into the GLOBAL field on rank 0
             # so the restart chain reads a single canonical global checkpoint
@@ -2327,6 +2328,28 @@ class ModelDriver:
                 trc_d = (None if s.tracers is None else {
                     _k: gather_voronoi_field(s.tracers[_k].data, part, "cell")
                     for _k in s.tracers})
+                # Stateful-physics carry (#413): every PhysicsState field
+                # except the (replicated) PRNG key is cell-dimensioned —
+                # gather owned cells like the state.  The 3-D GWD
+                # spectrum gathers through a (nCells, az*wn) reshape.
+                ps_d_carry = None
+                if _ps_carry is not None:
+                    ps_d_carry = {}
+                    for _name in _ps_carry._fields:
+                        _val = getattr(_ps_carry, _name)
+                        if _name == "prng_key":
+                            ps_d_carry[_name] = _val
+                        elif _val.ndim == 3:
+                            _az_wn = _val.shape[1:]
+                            _flat = gather_voronoi_field(
+                                _val.reshape(_val.shape[0], -1),
+                                part, "cell",
+                            )
+                            ps_d_carry[_name] = _flat.reshape(
+                                (-1,) + _az_wn)
+                        else:
+                            ps_d_carry[_name] = gather_voronoi_field(
+                                _val, part, "cell")
                 if self._mpi_rank != 0:
                     return
             else:
@@ -2334,11 +2357,19 @@ class ModelDriver:
                     s.u.data, s.T.data, s.p_s.data, s.phis.data)
                 trc_d = (None if s.tracers is None
                          else {_k: s.tracers[_k].data for _k in s.tracers})
+                ps_d_carry = (None if _ps_carry is None
+                              else _ps_carry._asdict())
             _save = dict(
                 u=np.asarray(u_d), T=np.asarray(T_d),
                 p_s=np.asarray(ps_d), phis=np.asarray(phis_d),
                 step=np.asarray(int(step)), day=np.asarray(float(day)),
             )
+            # Stateful-physics carry (#413): persisted under
+            # ``physstate_<field>`` so a chained restart resumes the
+            # prognostic physics memory instead of silently reseeding.
+            if ps_d_carry is not None:
+                for _name, _val in ps_d_carry.items():
+                    _save[f"physstate_{_name}"] = np.asarray(_val)
             # Persist moisture tracers too (moist MPAS runs), so a chained
             # restart does not silently drop water.  The ``trc_`` prefix avoids
             # colliding with u/T/p_s/phis; ``tracer_names`` lets load rebuild
@@ -2649,6 +2680,31 @@ class ModelDriver:
                         name=_k, dims=("nCells", "nlev"), units="kg/kg")
                     for _k in _names
                 })
+            # Restore the stateful-physics carry (#413): stash the
+            # ``physstate_<field>`` arrays into carry_aux for the
+            # _run_mpas seed overlay.  Cell-dimensioned fields scatter to
+            # the rank-local band under MPI (the replicated PRNG key does
+            # not); the 3-D GWD spectrum scatters via a (nCells, az*wn)
+            # reshape, mirroring the save-side gather.
+            _ps_keys = [k for k in d.files if k.startswith("physstate_")]
+            if _ps_keys:
+                for _k in _ps_keys:
+                    _name = _k[len("physstate_"):]
+                    _val = jnp.asarray(d[_k])
+                    if _mpi and _name != "prng_key":
+                        if _val.ndim == 3:
+                            _az_wn = _val.shape[1:]
+                            _val = scatter_to_local(
+                                _val.reshape(_val.shape[0], -1),
+                                part, "cell",
+                            ).reshape((-1,) + _az_wn)
+                        else:
+                            _val = scatter_to_local(_val, part, "cell")
+                    self._carry_aux[_k] = _val
+                logger.info(
+                    "  Restored physics-state carry fields: %s",
+                    sorted(k[len("physstate_"):] for k in _ps_keys),
+                )
             step = int(d["step"])
             day = float(d["day"])
             logger.info(f"  Loaded MPAS checkpoint: step={step}, day={day:.2f}"
@@ -3294,6 +3350,38 @@ class ModelDriver:
         _phys_state = init_physics_state(
             _ncol_phys, _nlev_phys, phys_cfg, dtype=_seed_dtype,
         )
+        # Checkpoint restore (#413): the MPAS load path stashes the
+        # persisted PhysicsState fields in carry_aux under
+        # ``physstate_<field>``.  Overlay them onto the fresh seed,
+        # shape-checked per field (a scheme switch across restart falls
+        # back to the seed default, mirroring conv_prog), and cast to
+        # the seed dtype so the carry honours the GWD dtype rule above.
+        if isinstance(self._carry_aux, dict):
+            _restored_ps = {}
+            for _k, _v in self._carry_aux.items():
+                if not _k.startswith("physstate_"):
+                    continue
+                _name = _k[len("physstate_"):]
+                if _name not in _phys_state._fields:
+                    continue
+                _seed_field = getattr(_phys_state, _name)
+                _val = jnp.asarray(_v)
+                if tuple(_val.shape) != tuple(_seed_field.shape):
+                    logger.warning(
+                        "  Restart physics-state field %r has shape %s "
+                        "(expected %s) — reseeding the scheme default",
+                        _name, tuple(_val.shape), tuple(_seed_field.shape),
+                    )
+                    continue
+                _restored_ps[_name] = _val.astype(_seed_field.dtype)
+            if _restored_ps:
+                _phys_state = _phys_state._replace(**_restored_ps)
+                logger.info(
+                    "  Restored physics state from checkpoint: %s",
+                    sorted(_restored_ps),
+                )
+        # Latest carry for save_checkpoint (#413) — updated every step.
+        self._mpas_phys_state = _phys_state
 
         # MPAS cell-partition MPI: swap the serial ``model.step`` for the
         # halo-exchanging MPI step.  Same operator-split as the serial step
@@ -3357,6 +3445,9 @@ class ModelDriver:
                     self.state, DT, physics_fn=physics_fn, forcing=_forcing,
                     phys_state=_phys_state)
                 _phys_state = self.model._phys_state
+            # Keep the persisted-carry handle fresh for save_checkpoint
+            # (#413) — reference assignment, no device work.
+            self._mpas_phys_state = _phys_state
 
             # Diagnostics at intervals
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
@@ -4215,6 +4306,10 @@ class ModelDriver:
                 restored = _aux.get(name, default)
                 if tuple(restored.shape) != tuple(default.shape):
                     restored = default
+                # Pin the restored carry to the seed dtype (the GWD
+                # dtype rule above survives older f32 checkpoints).
+                if restored.dtype != default.dtype:
+                    restored = restored.astype(default.dtype)
                 return restored
 
             if _turb_traits.energy_field == "tke":

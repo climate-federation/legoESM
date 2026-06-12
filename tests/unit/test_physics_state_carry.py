@@ -411,6 +411,91 @@ def test_driver_loops_thread_and_persist_stateful_carries(
     )
 
 
+def test_checkpoint_roundtrip_restores_stateful_carries(tmp_path):
+    """#413 item 3 (cubed-sphere/npz path): tke + gwd_spectrum ride
+    carry_aux into the checkpoint and come back bit-identical through
+    load_checkpoint; the restarted run then CONTINUES from the restored
+    carry (no silent reseed across restart)."""
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.driver.config import OutputConfig
+
+    cfg = _stateful_driver_config(
+        output=OutputConfig(diag_days=1, checkpoint_days=3.0 / 86400.0),
+    )
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run(compiled=True) == "COMPLETED"
+    tke_saved = np.asarray(driver_a._carry_aux["tke"])
+    spec_saved = np.asarray(driver_a._carry_aux["gwd_spectrum"])
+
+    ckpts = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))
+    assert ckpts, "no checkpoint written"
+
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    driver_b.load_checkpoint(ckpts[-1])
+    assert "tke" in driver_b._carry_aux, (
+        "tke did not survive the checkpoint roundtrip — restart would "
+        "silently reseed the physics memory (issue #405/#413)"
+    )
+    np.testing.assert_array_equal(
+        np.asarray(driver_b._carry_aux["tke"]), tke_saved)
+    np.testing.assert_array_equal(
+        np.asarray(driver_b._carry_aux["gwd_spectrum"]), spec_saved)
+    # Restored carry actually seeds the continued run.
+    assert driver_b.run(compiled=True) == "COMPLETED"
+    assert np.all(np.isfinite(np.asarray(driver_b._carry_aux["tke"])))
+
+
+def test_mpas_checkpoint_roundtrip_restores_physics_state(tmp_path):
+    """#413 item 3 (MPAS/npz path): the full PhysicsState is persisted
+    as physstate_* fields and restored into the _run_mpas seed."""
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.driver.config import (
+        ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
+    )
+
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="mpas", resolution=3, nlev=5),
+        dycore=DycoreConfig(dt=1.0, discretization="mpas"),
+        output=OutputConfig(diag_days=1, checkpoint_days=3.0 / 86400.0),
+        days=4.0 / 86400.0,
+        dataset="analytical",
+        radiation="none",
+        turbulence="tke",
+    )
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run() == "COMPLETED"
+    ps_saved = driver_a._mpas_phys_state
+    assert ps_saved is not None
+
+    ckpts = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))
+    assert ckpts, "no MPAS checkpoint written"
+    with np.load(ckpts[-1]) as d:
+        ps_keys = [k for k in d.files if k.startswith("physstate_")]
+        assert "physstate_tke" in ps_keys, (
+            "PhysicsState not persisted in the MPAS checkpoint — a "
+            "chained restart would silently reseed (issue #405/#413)"
+        )
+
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
+    driver_b.setup()
+    driver_b.load_checkpoint(ckpts[-1])
+    assert "physstate_tke" in driver_b._carry_aux
+    # The restored field matches the final checkpointed carry... note the
+    # checkpoint may predate the END of run A (periodic cadence), so
+    # compare against the FILE, the ground truth of what was persisted.
+    with np.load(ckpts[-1]) as d:
+        np.testing.assert_array_equal(
+            np.asarray(driver_b._carry_aux["physstate_tke"]),
+            d["physstate_tke"],
+        )
+    # And the continued run consumes it (seed overlay) without error.
+    assert driver_b.run() == "COMPLETED"
+    assert np.all(np.isfinite(np.asarray(driver_b._mpas_phys_state.tke)))
+
+
 def test_refusal_guard_normalizes_scheme_objects():
     """PhysicsConfig-style sub-configs (with .scheme) are normalized."""
     from legoesm.driver.model_driver import ModelDriver
