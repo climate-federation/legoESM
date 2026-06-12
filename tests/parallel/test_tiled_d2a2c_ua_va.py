@@ -32,6 +32,7 @@ from legoesm.core.fv3_sw_core import (
     d2a2c_vc_4th_local,
     d2a2c_ut_vt_local,
     d2a2c_interior_local,
+    d2a2c_uc_c123_local,
 )
 from legoesm.parallel.mesh import (
     tiled_face_block, tiled_padded_block, staggered_tile_block)
@@ -264,3 +265,27 @@ def test_d2a2c_interior_tile_full_parity():
         np.testing.assert_array_equal(vc_t, vc_g[f, a:b, a:b + 1])
         np.testing.assert_array_equal(ut_t, ut_g[f, a:b + 1, a:b])
         np.testing.assert_array_equal(vt_t, vt_g[f, a:b, a:b + 1])
+
+
+def test_uc_c123_edge_matches_production():
+    """The one-sided C1/C2/C3 uc edge special matches production
+    d2a2c_vect at face i=1 (W edge tile) and i=n-1 (E edge tile).
+    kt=3: W tile (0,1), E tile (2,1).  First edge-special piece."""
+    set_halo_backend("local")
+    n, kt = 24, 3
+    nl = n // kt
+    cdg = create_cubed_sphere_cdgrid(create_cubed_sphere(n))
+    rng = np.random.default_rng(21)
+    u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    uc_g = np.asarray(d2a2c_vect(u_d, v_d, cdg)[2])  # (6, n+1, n)
+    utmp_pad, _ = d2a2c_d_to_a(u_d, v_d, cdg)
+    tj = 1
+    b = tj * nl
+    for f in range(6):
+        win_w = tiled_padded_block(utmp_pad[f], 0, tj, nl, kt)
+        c1_w = np.asarray(d2a2c_uc_c123_local(win_w[None], False))[0]  # (nl,)
+        np.testing.assert_array_equal(c1_w, uc_g[f, 1, b:b + nl])
+        win_e = tiled_padded_block(utmp_pad[f], kt - 1, tj, nl, kt)
+        c1_e = np.asarray(d2a2c_uc_c123_local(win_e[None], True))[0]
+        np.testing.assert_array_equal(c1_e, uc_g[f, n - 1, b:b + nl])

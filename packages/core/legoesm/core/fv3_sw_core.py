@@ -612,6 +612,29 @@ def d2a2c_uc_4th_local(utmp_pad):
                      + utmp_pad[:, h:n + h + 1, h:-h]))
 
 
+def d2a2c_uc_c123_local(utmp_pad, at_high):
+    """One-sided C1/C2/C3 uc value at the FACE-edge cell i=1 (W) or
+    i=n-1 (E) — the d2a2c_vect edge special (sw_core.F90:3586/3594),
+    leading-axis-agnostic on the h2-padded utmp (n = shape[1]-4).
+
+    ``at_high=False`` -> i=1: C1*utmp_pad[h+2] + C2*utmp_pad[h+1] +
+    C3*utmp_pad[h].  ``at_high=True`` -> i=n-1: C1*utmp_pad[n+h-3] +
+    C2*utmp_pad[n+h-2] + C3*utmp_pad[n+h-1].  Returns the (·, n) row of
+    uc.  Pure utmp_pad stencil — no halo; an edge tile overlays this on
+    its uc at the local i=1 / i=nl-1 face when the tile touches the
+    W/E face edge (P4 phase-1b edge specials, first piece).
+    """
+    h = 2
+    n = utmp_pad.shape[1] - 2 * h
+    if at_high:
+        return (_C1 * utmp_pad[:, n + h - 3, h:-h]
+                + _C2 * utmp_pad[:, n + h - 2, h:-h]
+                + _C3 * utmp_pad[:, n + h - 1, h:-h])
+    return (_C1 * utmp_pad[:, h + 2, h:-h]
+            + _C2 * utmp_pad[:, h + 1, h:-h]
+            + _C3 * utmp_pad[:, h, h:-h])
+
+
 def d2a2c_vc_4th_local(vtmp_pad):
     """A→C y-dir 4th-order interior stencil — symmetric to
     :func:`d2a2c_uc_4th_local`.  Returns (·, n, n+1)
