@@ -565,3 +565,34 @@ def test_build_acc_recipe_surface_forcing_flag():
     # dynamics/grid/IC unchanged by the forcing flag
     assert on.model_config.eos == off.model_config.eos
     assert on.grid.n_lat == off.grid.n_lat
+
+
+def test_free_run_ships_faithful_stepping_composition():
+    """The free-run recipe (with_surface_forcing=True) must ship the
+    Veros-faithful stepping composition WITHOUT driver overrides. The
+    matsuno_split/"total" composition leaks ~+1.8 GW of spurious KE
+    (0.6% of wind throughput; realized 90-day energy audit vs Veros's
+    built-in energy diagnostics, 2026-06-12) and equilibrated at KE 1.53x /
+    mean_eke 4.6x the Veros equilibrium; this bundle closes the budget
+    channel-by-channel to ~1-3% and lands the 30-yr free run at KE 0.950x.
+    The frozen-state probe path (with_surface_forcing=False) keeps the
+    legoESM defaults — bit-identical for every tendency probe."""
+    from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_model_config
+
+    free = build_acc_model_config(with_surface_forcing=True)
+    assert free.outer_integrator == "ab2"
+    assert free.dt_mom_ratio == 9.0          # dt_tracer 43200 / dt_mom 4800
+    assert free.barotropic_solver == "rigid_lid"
+    assert free.coriolis_scheme == "explicit_ab2"   # the energy lever
+    assert free.ab2_scope == "advective"
+    assert free.momentum_friction_additive is True
+    assert free.ab2_epsilon == 0.1           # Veros AB_eps (config default)
+    assert free.surface_forcing_implicit is True
+
+    probe = build_acc_model_config(with_surface_forcing=False)
+    assert probe.outer_integrator == "forward_euler"
+    assert probe.dt_mom_ratio == 1.0
+    assert probe.barotropic_solver == "explicit_substep"
+    assert probe.coriolis_scheme == "matsuno_split"
+    assert probe.ab2_scope == "total"
+    assert probe.momentum_friction_additive is False
