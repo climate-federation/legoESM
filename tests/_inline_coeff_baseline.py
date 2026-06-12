@@ -1,0 +1,569 @@
+"""Seed baseline for the inline-physics-coefficient ratchet.
+
+``COEFF_BUDGET`` is the per-file allowance of *sanctioned* inline empirical-float
+sites measured from the tree when the gate (``tests/test_no_inline_physics_coeffs``)
+was introduced. Format: ``{repo_rel_path: {normalized_source_line: count}}``.
+
+Lifecycle (enforced by the gate):
+  * Every entry is EXACT (ratchet-down): migrating a file's coefficients into a
+    ``*Config`` field / module-level provenance block / ``# coeff-ok: <reason>``
+    MUST delete that file's entry in the same commit — a leftover allowance with
+    no matching site goes red.
+  * A file absent from ``COEFF_BUDGET`` gets a zero budget, so every NEW physics
+    file is born clean.
+  * ``COEFF_BUDGET`` may only SHRINK: ``set(COEFF_BUDGET) <= _SEED_FILES`` is
+    asserted, so a new file cannot be granted an allowance — growth is a loud,
+    deliberate edit to ``_SEED_FILES`` (reviewed like a ``CONTRACT_TODO`` growth).
+
+Kept in its own module (not the test file) so batch-migration PRs churn only this
+file and produce disjoint diff hunks per component. Seeded by
+``scripts/tmp/_seed_coeff_baseline.py`` (re-run to regenerate after a sanctioned
+change).
+"""
+
+from __future__ import annotations
+
+# Seeded 2026-06-12 from the measured tree (233 files, 87 dirty, 496 sites).
+# Sorted by (file, fingerprint).
+COEFF_BUDGET: dict[str, dict[str, int]] = {
+    'packages/atmosphere/legoesm/atmosphere/physics/_shared.py': {
+        'return -omega / jnp.clip(rho * g, 1e-3, None)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py': {
+        '/ jnp.maximum(rho_air, 0.1))': 1,
+        'getattr(config, "Nc_default", 1.0e8))': 1,
+        'lamc = jnp.clip(lamc, (pgam + 1.0) / 60.0e-6, (pgam + 1.0) / 1.0e-6)': 1,
+        'r_eff_ice = jnp.where(has_ice, r_eff_ice_psd, 25.0e-6)': 1,
+        'r_eff_ice_psd = 1.5 / jnp.clip(lami, 1.0e-30)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/combined.py': {
+        'dt: float = 300.0,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/_emanuel_mixing.py': {
+        '(pf - mse_min_search_offset) / 2000.0': 1,
+        'Tg = jnp.maximum(Tg, 35.0)': 1,
+        'active_col = jax.nn.sigmoid(M_b / 1e-3)[:, None] # ~1 when M_b>0': 1,
+        'below_lcl = jax.nn.sigmoid((pf - p_lcl) / 200.0) # ~1 below LCL': 1,
+        'chi = T_nk / (1669.0 - 122.0 * rh - T_nk)': 2,
+        'dbo = jnp.abs(tv - tvp) + entp * 2.0e-4 * dp_first': 1,
+        'epmax: float = 0.999,': 1,
+        'rh = jnp.clip(q_nk / jnp.maximum(qs_nk, 1e-12), 1e-4, 1.0)': 1,
+        'strict_index_sharpness: float = 20.0,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/_plume.py': {
+        'GATE_SHARPNESS = 20.0': 1,
+        'RH = jnp.clip(q_parcel / jnp.maximum(q_sat, 1e-12), 1e-4, 1.0)': 1,
+        'T_lcl = 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / 2840.0) + 55.0': 2,
+        'T_minus_55 = jnp.maximum(T_parcel - 55.0, 1.0)': 1,
+        'c_d: float = 0.55,': 1,
+        'c_u: float = 0.55,': 1,
+        'crossing_sharpness: float = 0.001,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/_triggers.py': {
+        'no_cross_blend = jax.nn.sigmoid(20.0 * (total_first_cross - 0.5))': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/_zm_dilute.py': {
+        '* (1.0 + 1.608 * qstp)': 1,
+        '8.0 * (k_launch_smooth[:, None] - 1.0 - levels[None, :])': 1,
+        'LARGE = jnp.asarray(1.0e9, dtype=_dtype)': 1,
+        'Tv_env = T_env * (1.0 + 1.608 * q_v_env) / (1.0 + q_v_env)': 1,
+        'dT = 0.01': 1,
+        'dmpdz: float = -1.0e-3,': 1,
+        'launch_sharpness: float = 5.0e-4,': 1,
+        'pbl_top_pa: float = 7.0e4,': 1,
+        'return jnp.clip(T_new, 120.0, 360.0).astype(_dtype)': 1,
+        'supersat = jax.nn.sigmoid(1.0e4 * (new_q - qs_mix_k))': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py': {
+        'RH = jnp.clip(q_v / jnp.maximum(q_sat_env, 1e-12), 0.0, 1.3)': 1,
+        'rh_detr = jnp.clip(1.6 - RH, 0.0, None) # eq 6.8 / 6.9': 1,
+        'rh_entr = jnp.clip(1.3 - RH, 0.0, None) # eq 6.7': 1,
+        'rho_safe = jnp.clip(rho, 0.01, None)': 1,
+        'z, threshold=config.cape_pbl_depth, sharpness=2.0e-3,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py': {
+        'return cfg.a_mm_per_hr * rho_w / 3.6e6': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/emanuel.py': {
+        'cbmf_new = (1.0 - damps) * cbmf_old + 0.1 * config.alpha_closure * dtma': 1,
+        'damps = config.damp_coefficient * dt / 300.0': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py': {
+        'dt: float = 300.0,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/kain_fritsch.py': {
+        '-0.70034167 + cbh * (': 1,
+        '-1.2569798e-2 + cbh * (4.2772e-4 - cbh * 5.44e-6)': 3,
+        '0.162179896 + cbh * (': 1,
+        'cbh = (z_lcl) * 3.281e-3 # m -> kft': 1,
+        'low = jax.nn.sigmoid((3.0 - cbh) * 5.0)': 1,
+        'rcbh = low * 0.02 + (1.0 - low) * rcbh_poly': 1,
+        'rcbh_poly = 0.96729352 + cbh * (': 1,
+        's = 50.0': 1,
+        'sharpness_m: float = 200.0,': 1,
+        'width = 0.05 # smoothing width in units of the [0,1] ramp': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/kuo.py': {
+        'desat_dT = e_sat * (17.67 * 243.5) / (T_c + 243.5) ** 2': 3,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/mass_flux.py': {
+        'p_gate_sharpness: float = 1_500.0,': 2,
+        'p_min_convection: float = 10_000.0,': 2,
+        'rho_safe = jnp.clip(rho, 0.01, None)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py': {
+        'rho_safe = jnp.clip(rho, 0.01, None)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/e3sm_cam.py': {
+        'dca: float = 0.1):': 1,
+        'dca: float = 0.1,': 1,
+        'maxq0 = q0 * 24.0 * 3600.0 # K/day diagnostic': 1,
+        'tndmax_per_day = 500.0 if orographic_only else cfg.tndmax_per_day': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/hines.py': {
+        'rho[:, 1:] / jnp.clip(rho[:, :-1], 0.01, None), 1.0, None,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py': {
+        'dt: float = 300.0,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/lindzen.py': {
+        'U_proj_abs = jnp.clip(jnp.abs(U_proj), 0.1, None)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/mcfarlane.py': {
+        'U_proj_abs = jnp.clip(jnp.abs(U_proj), 1e-2, None)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/ml_emulator.py': {
+        'dT_dt = dT_dt * 0.01': 1,
+        'du_dt = du_dt * 0.01': 1,
+        'dv_dt = dv_dt * 0.01': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/prognostic_spectral.py': {
+        'intrinsic_abs = jnp.clip(jnp.abs(intrinsic), 0.1, None)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/learned_column.py': {
+        'residual_scale: float = 0.01,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py': {
+        'dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p_full, 1.0)': 2,
+        'ka = 2.3971e-2 + 7.078e-5 * (T - constants.T_freeze)': 2,
+        'mu_air = 1.458e-6 * safe_pow(T, 1.5) / (T + 110.4)': 3,
+        'return jnp.clip(V_s, 0.0, 5.0)': 1,
+        'rhof = jnp.sqrt(_RHO_NOT / jnp.clip(rho, 0.1))': 2,
+        't1 = 0.86': 1,
+        't2 = 0.28 * sc3 * jnp.sqrt(_AV_S)': 1,
+        'tc = jnp.clip(T - constants.T_freeze, -55.0, -0.1)': 2,
+        'vsc2 = jnp.sqrt(jnp.clip(rho, 0.01) / jnp.clip(mu_air, 1.0e-8))': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py': {
+        '(1.2 * umr - 0.95 * umg) ** 2 + 0.08 * umg * umr, 0.5)': 3,
+        '(qs_pos >= 1.0e-4) & (qc_pos >= 5.0e-4) & (psacws > 0.0), pgsacw, 0.0)': 2,
+        '* (nr_pos / jnp.clip(rho, 0.1)) * x / (lamr3 * lamr3))': 1,
+        '* config.rho_snow ** ((-2.0 - bs) / 3.0) / (4.0 * 720.0))': 1,
+        '/ (jnp.clip(rho, 0.1) * safe_pow(lams, 2.0 * bs + 2.0)))': 1,
+        '/ jnp.clip(rho, 0.1))': 1,
+        '2.0 * jnp.pi * n0g_m * jnp.clip(rho, 0.1) * dv': 1,
+        'agn = config.fall_a_g * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)': 6,
+        'arn = config.fall_a_r * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)': 2,
+        'asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)': 10,
+        'bracket = (5.0 / (safe_pow(lamr, 3.0) * lamg)': 1,
+        'cons15 = (1108.0 * config.snow_aggregation_eii': 1,
+        'cons34 = 2.5 + config.fall_b_r / 2.0': 1,
+        'cons35 = 2.5 + config.fall_b_s / 2.0': 2,
+        'cons36 = 2.5 + config.fall_b_g / 2.0': 2,
+        'dN_r_au = dq_c_au * rho / (x_star * 20.0)': 1,
+        'def autoconversion_sb(q_c, N_c_eff, rho, k_au, x_star, sharpness=50.0, gamma_norm=1.0):': 1,
+        'def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0, q_c=None):': 1,
+        'dum = safe_pow(config.rho_su / rho_eff, 0.54)': 1,
+        'dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p, 1.0)': 10,
+        'kap = 1.414e3 * mu': 1,
+        'kap = 1.414e3 * mu # air thermal conductivity': 1,
+        'mnuccr = (20.0 * jnp.pi ** 2 * constants.rho_water * bimm': 1,
+        'mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0)': 6,
+        'mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0) # Sutherland dyn. visc.': 9,
+        'n0g_m = config.n0_graupel / jnp.clip(rho, 0.1)': 1,
+        'prc = 1350.0 * safe_pow(q_c_pos, 2.47) * safe_pow(n_c_cm3, -1.79)': 3,
+        'rate = evap_coeff * subsaturation * safe_pow(q_r_pos, 0.525)': 1,
+        'return 67.0 * safe_pow(dum, 1.15)': 2,
+        'rho_eff = jnp.clip(rho, 0.1)': 2,
+        'umg = jnp.minimum(umg, 20.0 * dum)': 1,
+        'umr = jnp.minimum(umr, 9.1 * dum)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/column.py': {
+        '* jnp.exp(-1.5 * jnp.log(config.cloud_geom_std) ** 2)': 1,
+        'r, jnp.asarray(1.1), jnp.asarray(9.0e4), jnp.asarray(283.0))': 3,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/diffusional_growth.py': {
+        'f = jnp.where(reynolds < 2.5, 1.0 + 0.108 * x * x, 0.78 + 0.308 * x)': 4,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/remap.py': {
+        'rrs = jnp.concatenate([masses, masses[-1:] * 1024.0])': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/supersaturation.py': {
+        'small = jnp.abs(x) < 1.0e-4': 1,
+        'small, dt * dt * (0.5 - x / 6.0 + x * x / 24.0),': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py': {
+        'dt: float = 300.0,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/kessler.py': {
+        'accretion = config.accretion_coeff * q_c * safe_pow(q_r, 0.875)': 1,
+        'rho_sfc / jnp.clip(rho, 0.1)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/ml_emulator.py': {
+        'dT_dt = dT_dt * 0.01 # scale raw output': 1,
+        'precipitation = jax.nn.softplus(precip_raw[:, -1]) * 1e-3': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py': {
+        ') / jnp.clip(rho, 0.1)': 2,
+        '* jax.nn.sigmoid(config.nuc_T_sharpness * (265.15 - T))': 1,
+        'V_n_g = jnp.minimum(V_n_g, 20.0 * dum_g)': 1,
+        'V_n_r = jnp.minimum(V_n_r, 9.1 * dum)': 1,
+        'V_n_s = jnp.minimum(V_n_s, 1.2 * dum)': 1,
+        'V_t_g = jnp.minimum(V_t_g, 20.0 * dum_g)': 1,
+        'V_t_i = jnp.clip(V_t_i, 0.0, 5.0)': 1,
+        'V_t_r = jnp.clip(V_t_r, 0.0, 20.0)': 1,
+        'V_t_r = jnp.minimum(V_t_r, 9.1 * dum)': 1,
+        'V_t_s = jnp.clip(V_t_s, 0.0, 5.0)': 2,
+        'V_t_s = jnp.minimum(V_t_s, 1.2 * dum)': 1,
+        'dN_s_dt = (dN_i_autoconv + freeze_N_to_snow / jnp.clip(rho, 0.1)': 1,
+        'dum = safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)': 2,
+        'dum_g = safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)': 2,
+        'dum_i = safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.35)': 2,
+        'dum_i_cap = 1.2 * dum_i': 1,
+        'dv_vap = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p_full, 1.0)': 2,
+        'ferrier = (jnp.clip(q_i, 0.0) / 1080.0) * jnp.exp(-d_rat) \\': 1,
+        'freeze_N_to_graupel = (freeze_N_r / jnp.clip(rho, 0.1)': 1,
+        'gate_ice = jax.nn.sigmoid(config.nuc_rh_sharpness * (rh_ice - 1.08))': 1,
+        'jax.nn.sigmoid(config.nuc_rh_sharpness * (rh_liq - 0.999))': 1,
+        'jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), 80.0)': 1,
+        'lami_max=1.0 / 10.0e-6,': 1,
+        'n_hom_target = config.hom_ice_nuc_N / jnp.clip(rho, 0.1) # per-mass': 1,
+        'rho_eff = jnp.maximum(rho, 0.1)': 1,
+        'rho_ratio = rho / jnp.clip(rho_sfc, 0.1)': 1,
+        'rho_snow=250.0,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/p3.py': {
+        ') / jnp.clip(rho, 0.1)': 1,
+        '* jnp.exp(jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), 80.0)),': 1,
+        'V_t_r = jnp.clip(V_t_r, 0.0, 20.0)': 1,
+        'rho_ratio = rho / jnp.clip(rho_sfc, 0.1)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/condensation.py': {
+        'lambda_v = 2.0 * D / jnp.sqrt(8.0 * T * Rv / jnp.pi)': 2,
+        'out = out - 1.5 * gamma * R_inv5': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/kernels.py': {
+        '(_VISC_MU0 + _VISC_SLOPE * Tc - _VISC_CURV * Tc * Tc) * 1.0e-5,': 1,
+        '(_VISC_MU0 + _VISC_SLOPE * Tc) * 1.0e-5,': 1,
+        '- jnp.exp(1.5 * jnp.log(d1 * d1 + lam1 * lam1))) / (3.0 * d1 * lam1) - d1': 1,
+        '- jnp.exp(1.5 * jnp.log(d2 * d2 + lam2 * lam2))) / (3.0 * d2 * lam2) - d2': 1,
+        'M_air_kg = constants.M_air * 1.0e-3': 1,
+        'c1 = 1.2570 + 0.40 * jnp.exp(-0.550 * d1 / lam_air)': 3,
+        'c1 = gxdrow / (18.0 * visc)': 1,
+        'c2 = 1.2570 + 0.40 * jnp.exp(-0.550 * d2 / lam_air)': 3,
+        'c_cloud = 4.5e8 * (r_l * r_l) * (1.0 - 3.0e-6 / jnp.maximum(3.01e-6, r_l))': 3,
+        'c_rate = jnp.where(r_l <= 5.0e-5, c_cloud, 1.0)': 1,
+        'denom = sumdia / (sumdia + 2.0 * sumg) + (8.0 * sumd) / (sumdia * sumc)': 1,
+        'lam1 = (8.0 / jnp.pi) * D1 / cb1': 1,
+        'lam2 = (8.0 / jnp.pi) * D2 / cb2': 1,
+        'lam_air = (2.0 * visc) / (p * jnp.sqrt(8.0 * M_air_kg / (jnp.pi * constants.R_d * T)))': 1,
+        'vcoef = 8.0 * kB * T / jnp.pi': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/seifert_beheng.py': {
+        'V_t_r = jnp.clip(V_t_r, 0.0, 20.0)': 1,
+        'jnp.clip(q_r, 0.0) * rho / jnp.clip(rho_sfc, 0.1), config.b_v_r,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/thompson.py': {
+        ') / jnp.clip(rho, 0.1)': 1,
+        'V_t_g = jnp.clip(V_t_g, 0.0, 30.0)': 1,
+        'V_t_i = jnp.clip(V_t_i, 0.0, 5.0)': 1,
+        'V_t_r = jnp.clip(V_t_r, 0.0, 20.0)': 1,
+        'V_t_s = jnp.clip(V_t_s, 0.0, 5.0)': 1,
+        'dv_vap = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p_full, 1.0)': 2,
+        'jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), 80.0)': 1,
+        'rho_ratio = rho / jnp.clip(rho_sfc, 0.1)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/neural_physics.py': {
+        'T / 300.0,': 1,
+        'jnp.atleast_1d(solar / 1400.0),': 1,
+        'residual_scale: float = 0.01,': 1,
+        'u / 30.0,': 1,
+        'v / 30.0,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py': {
+        '+ 0.15 * (mu - 0.1) * (mu - 0.5) * (mu - 1.0)': 2,
+        '0.026 / (mu ** 1.7 + 0.065)': 3,
+        'T_sfc: jnp.ndarray | float = 300.0,': 1,
+        '_time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}': 2,
+        'a = jnp.where(jnp.asarray(T_sfc) > sea_ice_T, a_ocean, 0.75)': 1,
+        'day_of_year: float = 80.0,': 1,
+        'sea_ice_T: float = 271.0,': 1,
+        'seconds_of_day: float = 43200.0,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/radiation/ozone_ml.py': {
+        'lat_uk = -90.0 + 0.5 * dlat + dlat * np.arange(n_lat)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/radiation/ozone_mls.py': {
+        'log_p = jnp.log(jnp.clip(p_full, 1.0e-2) / 100.0) # Pa -> hPa -> log': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/interpolation.py': {
+        'c1, c2, c3 = 0.1, 0.6, 0.3 # Optimal linear weights for WENO5-JS.': 3,
+        'epsilon = 1e-5': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py': {
+        '"n2": 0.78084,': 1,
+        '"o2": 0.20948,': 1,
+        'o3_gauss = 9.0e-6 * jnp.exp(-0.5 * arg * arg)': 1,
+        'q_v_3d = jnp.clip(q_v_3d, 0.0, 0.99)': 1,
+        'sigma_strat = 1.5': 1,
+        'sigma_trop = 0.9': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rte/two_stream.py': {
+        '_ZENITH_MAX = jnp.arccos(jnp.asarray(0.01, dtype=temperature.dtype))': 1,
+        'aerosol_asymmetry_factor: float = 0.70,': 1,
+        'aerosol_single_scattering_albedo: float = 0.93,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/radiation/solar.py': {
+        'def solar_declination(day_of_year: float, obliquity: float = 23.45) -> float:': 1,
+        'h = 2.0 * jnp.pi * (hour / 24.0) + lon - jnp.pi': 1,
+        'obliquity: float = 23.45,': 3,
+        'return obliquity_rad * jnp.sin(2.0 * jnp.pi * (day_of_year - 80.0) / 365.0)': 2,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py': {
+        'RH = jnp.clip(q_v_base / jnp.maximum(q_sat_base, 1.0e-12), 1.0e-4, 1.0)': 1,
+        'T_minus_55 = jnp.maximum(T_base - 55.0, 1.0)': 1,
+        'T_new = jnp.clip(T_new, 100.0, 350.0).astype(_dtype)': 1,
+        'return 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / 2840.0) + 55.0': 2,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py': {
+        '(2.5 * ustar).astype(_dtype),': 1,
+        'return -dflux_dz / jnp.clip(rho, 0.01, None)': 1,
+        'ustar = jnp.clip(ustar, 1e-4, None)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py': {
+        'dt: float = 300.0,': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/lasd_core.py': {
+        '& (jnp.real(roots) > 0.0) & (jnp.real(roots) < 5.0),': 1,
+        'e1 = pm((8.0*L2**2)*(_TFR**2)*S_h*(S11h*SS11h+S22h*SS22h+S33h*SS33h': 1,
+        'e2 = pm((8.0*L2**2)*(_TFR**4)*S_d*(S11d*SS11d+S22d*SS22d+S33d*SS33d': 1,
+        'guesses = jnp.array([0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.5], cdtype)': 4,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/mynn25.py': {
+        '1.0 + 5.0 * _safe_pow_pos(q_c / jnp.maximum(L_T * N, eps), 0.5)': 1,
+        '1.0 - 100.0 * zeta, 0.2,': 1,
+        'L_S_stable_high = kappa * z_half_geom / 3.7': 1,
+        'L_S_stable_mid = kappa * z_half_geom / (1.0 + 2.7 * zeta)': 1,
+        'L_T_col = 0.23 * num / jnp.maximum(den, eps)': 1,
+        'phi_2 = 1.0 - 9.0 * alpha_c2 * A1 * A2 * (1.0 - C2) * G_H': 1,
+        'phi_3 = phi_1 + 9.0 * alpha_c2 * A2 * A2 * (1.0 - C2) * (1.0 - C5) * G_H': 1,
+        'phi_4 = phi_1 - 12.0 * alpha_c2 * A1 * A2 * (1.0 - C2) * G_H': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py': {
+        'blend = jax.nn.sigmoid(config.sharpness * (total_cross_weight - 0.1))': 1,
+        'dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/surface_layer.py': {
+        'wind_speed = jnp.sqrt(u ** 2 + v ** 2 + 1e-4)': 1,
+    },
+    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py': {
+        'dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4': 1,
+        'ustar = jnp.clip(ustar, 1e-4, None)': 1,
+    },
+    'packages/coupler/legoesm/coupler/coupler.py': {
+        'T_epi_init: float = 285.0,': 1,
+        'T_hypo_init: float = 278.0,': 1,
+        'T_ice_init: float = 260.0,': 1,
+        'T_soil_init: float = 280.0,': 1,
+        'W_bucket_init: float = 75.0,': 1,
+        'if config.blend_sharpness != 20.0:': 1,
+    },
+    'packages/coupler/legoesm/coupler/mpas_adapter.py': {
+        'T_epi_init: float = 285.0,': 1,
+        'T_hypo_init: float = 278.0,': 1,
+        'T_ice_init: float = 260.0,': 1,
+        'T_soil_init: float = 280.0,': 1,
+        'W_bucket_init: float = 75.0,': 1,
+    },
+    'packages/ice/legoesm/ice/_future/bitz_lipscomb.py': {
+        'dz = jnp.maximum(h, 1e-3) / n # layer thickness [m]': 1,
+    },
+    'packages/ice/legoesm/ice/brine.py': {
+        'S_ice_max: float = 12.0,': 1,
+    },
+    'packages/ice/legoesm/ice/dynamics.py': {
+        'C_ai: float = 1.3e-3,': 3,
+        'C_oi: float = 5.5e-3,': 3,
+        'C_strength: float = 20.0,': 2,
+        'P_star: float = 2.75e4,': 2,
+        'T_evp: float = 0.36,': 1,
+        'alpha_mevp: float = 500.0,': 1,
+        'beta_mevp: float = 500.0,': 1,
+        'drag_atm: float = 1.3e-3,': 1,
+        'drag_ocean: float = 5.5e-3,': 1,
+        'ice_mask = concentration > 0.01': 2,
+        'm_ice = rho_ice * jnp.maximum(h_ice, 0.01)': 2,
+    },
+    'packages/ice/legoesm/ice/itd.py': {
+        'G1 = jnp.where(has_ice, 12.0 * eta * a_new / (H ** 3), 0.0)': 1,
+    },
+    'packages/ice/legoesm/ice/ponds.py': {
+        'snow_block_threshold: float = 5.0e-3,': 1,
+    },
+    'packages/ice/legoesm/ice/rheology.py': {
+        'C_strength: float = 20.0,': 1,
+        'P_star: float = 2.75e4,': 1,
+    },
+    'packages/ice/legoesm/ice/ridging.py': {
+        ') * constants.rho_ice * 1.0e-3': 1,
+        'H_max = jnp.maximum(H_max, H_min + 1e-3)': 1,
+        'e_star: float = 0.36,': 1,
+        'raw = a_cat * jnp.exp(-h_cat / jnp.maximum(e_star, 1e-3))': 1,
+        'salt_donated_per_cat = S_ice_cat * dV_per_cat * constants.rho_ice * 1.0e-3': 1,
+        'salt_new / (V_safe * constants.rho_ice * 1.0e-3),': 1,
+        'salt_old_cat = S_ice_cat * V_cat * constants.rho_ice * 1.0e-3': 1,
+    },
+    'packages/ice/legoesm/ice/scm.py': {
+        'T_ice_init: float = 260.0, # noqa: N803 (physical symbol, project T_ convention)': 1,
+        'T_lowest: float = 250.0, # noqa: N803 (physical symbol, project T_ convention)': 1,
+        'co2_ppmv=jnp.asarray(400.0), has_radiation=jnp.asarray(1.0),': 1,
+        'concentration_init: float = 0.9,': 1,
+        'lw_down: float = 200.0,': 1,
+        'p_surface=full(1.0e5), rho_lowest=full(1.3), cos_zenith=full(0.0),': 2,
+        'precip_snow=full(0.0), T_lowest=full(T_lowest), q_lowest=full(1e-3),': 1,
+        'u_lowest=full(u_lowest), v_lowest=full(0.0), p_lowest=full(9.7e4),': 1,
+    },
+    'packages/ice/legoesm/ice/shortwave.py': {
+        'albedo_cold_bare: float = 0.7,': 1,
+        'f_vis: float = 0.52,': 1,
+        'h_pond_sat: float = 0.3,': 1,
+        'h_snow_mask: float = 0.02,': 1,
+        'h_snow_sat: float = 0.05,': 1,
+    },
+    'packages/ice/legoesm/ice/state.py': {
+        'T_ice=Field(data=jnp.full(shape, 260.0), name="T_ice", dims=dims, units="K"),': 1,
+    },
+    'packages/land/legoesm/land/carbon/carbon_cycle.py': {
+        'PAR_MJ = 0.48 * sw_down * 1e-6': 1,
+        'jnp.mod(doy_arr + 182.5, 365.25),': 2,
+        'phase = 2.0 * jnp.pi * (doy - config.nee_peak_day) / 365.0': 1,
+        'sf = 365.25 / jnp.pi': 1,
+    },
+    'packages/land/legoesm/land/carbon/stomata.py': {
+        'Ci = 0.7 * Ca': 1,
+        'Ci = Ca - 1.6 * A_pos / gs_safe': 1,
+        'VPD_safe = jnp.maximum(VPD_kPa, 0.05)': 1,
+        'Wj = J * (Ci_safe - Gamma_star) / (4.0 * Ci_safe + 8.0 * Gamma_star)': 1,
+        'config.g0 + 1.6 * (1.0 + config.g1_med / jnp.sqrt(VPD_safe))': 1,
+    },
+    'packages/land/legoesm/land/multilayer_land.py': {
+        'T_init: float = 280.0,': 1,
+        'denom = jnp.maximum(theta_fc - theta_wp, 1e-3)': 1,
+        'denom_new = jnp.maximum(theta_fc - theta_wp, 1e-3)': 1,
+        'theta_fc[:, None] - theta_wp[:, None], 1e-3,': 2,
+    },
+    'packages/land/legoesm/land/param_providers.py': {
+        'parts.append(((mean_temp - 273.0) / 40.0)[:, None])': 2,
+        'parts.append((elevation / 5000.0)[:, None])': 1,
+        'parts.append((forest_age / 200.0)[:, None])': 1,
+        'parts.append((mean_precip / 5e-5)[:, None])': 1,
+    },
+    'packages/land/legoesm/land/scm.py': {
+        'T_lowest: float = 280.0, # noqa: N803 (physical symbol, project T_ convention)': 1,
+        'T_soil_init: float = 280.0, # noqa: N803 (physical symbol, project T_ convention)': 1,
+        'W_bucket_init: float = 75.0, # noqa: N803': 1,
+        'co2_ppmv=jnp.asarray(400.0), has_radiation=jnp.asarray(1.0),': 1,
+        'lw_down: float = 300.0,': 1,
+        'p_surface: float = 1.0e5,': 1,
+        'p_surface=full(p_surface), rho_lowest=full(1.15), cos_zenith=full(0.5),': 1,
+        'precip_total: float = 1e-5,': 1,
+        'q_lowest: float = 5e-3,': 1,
+        'sw_down: float = 200.0,': 1,
+        'u_lowest=full(u_lowest), v_lowest=full(v_lowest), p_lowest=full(0.95 * p_surface),': 1,
+    },
+    'packages/land/legoesm/land/snow_budget.py': {
+        'snow_melt_rate: float = 5.0e-6,': 1,
+    },
+    'packages/land/legoesm/land/soil_hydraulics.py': {
+        'b0 = 0.1 * jnp.log(10.0)': 1,
+        'eps = 1e-4': 3,
+        'gamma_val = 0.75 + 0.25 * Gamma_h0': 1,
+    },
+    'packages/land/legoesm/land/soil_thermal.py': {
+        'K_e = 0.7 * jnp.log10(jnp.clip(Sr, 0.05, None)) + 1.0': 2,
+        'K_e = jnp.log10(jnp.clip(Sr, 0.1, None)) + 1.0': 1,
+        'Sr = jnp.clip((theta - theta_r) / (theta_sat - theta_r + 1e-10), 0.01, 1.0)': 1,
+        'k_dry = (0.135 * rho_b + 64.7) / (2700.0 - 0.947 * rho_b)': 4,
+    },
+    'packages/land/legoesm/land/surface_params.py': {
+        'C_soil = C_soil.C_soil if C_soil is not None else 2.0e6': 1,
+        'W_max = getattr(config, "W_max", 150.0)': 1,
+        'theta_fc = getattr(config, "theta_fc", 0.30)': 1,
+        'theta_wp = getattr(config, "theta_wp", 0.15)': 1,
+    },
+    'packages/ocean/legoesm/ocean/physics/bbl_adv.py': {
+        'V_bot = area * jnp.maximum(e3_bot, 1.0e-3)': 1,
+        'a3 = area[..., None] * jnp.maximum(h_k, 1.0e-3) # cell volumes (..., nl)': 1,
+        'wet3 = h > 1.0e-3': 1,
+    },
+    'packages/ocean/legoesm/ocean/physics/lateral_mixing/_gm_redi_common.py': {
+        'transition_width_frac: float = 0.1,': 2,
+    },
+    'packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py': {
+        'taper_width_frac: float = 0.1,': 1,
+    },
+    'packages/ocean/legoesm/ocean/physics/mixing.py': {
+        'cfl_safety: float = 0.45,': 2,
+    },
+    'packages/ocean/legoesm/ocean/physics/mpas_physics.py': {
+        'sw_absorbed = _sf_sw * 0.94 # 94% penetrates; 6% surface skin': 1,
+    },
+    'packages/ocean/legoesm/ocean/physics/shortwave_penetration.py': {
+        'inv_delpsi = 1.0 / (0.710 + zlogc * (0.159 + zlogc * 0.021))': 3,
+        'x = 41.0 + 20.0 * jnp.log10(chl_c)': 2,
+        'zCb = 0.768 + zlogc * (0.087 - zlogc * (0.179 + zlogc * 0.025))': 4,
+        'zCmax = 0.299 - zlogc * (0.289 - zlogc * 0.579)': 3,
+        'zc1 = 0.113328685307 + 0.803 * zlogc # log(zCze)': 2,
+        'zc2 = 3.703768066608 + 0.459 * zlogc # log(zCtot)': 2,
+        'zc3 = 6.34247346942 - 0.746 * zc2 # log(zze)': 2,
+        'zc3 = jnp.where(zc3 > 4.62497281328, 5.298317366548 - 0.293 * zc2, zc3)': 3,
+        'zpsimax = 0.6 - zlogc * (0.640 - zlogc * (0.021 + zlogc * 0.115))': 4,
+    },
+    'packages/ocean/legoesm/ocean/physics/surface_forcing/external.py': {
+        'min_wet_cell_thickness_m: float = 1.0e-3,': 1,
+    },
+    'packages/ocean/legoesm/ocean/physics/surface_forcing/wind_profiles.py': {
+        '-0.08 - 0.0397 * s2 + 1.9487 * s2**2 - 2.0397 * s2**3': 4,
+        'getattr(cfg, "tropical_wind_lat_deg", 15.0)': 1,
+        'phi_jet = jnp.radians(50.0)': 1,
+        'scale = cfg.tau_max / 0.1': 1,
+        'sigma_t = jnp.radians(15.0)': 1,
+        'sigma_w = jnp.radians(12.0)': 1,
+    },
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py': {
+        '/ jnp.maximum(1.0 + 5.0 * jnp.maximum(-zeta_kpp, 0.0), 1.0))': 1,
+        'base16 = jnp.maximum(1.0 + 16.0 * abs_zeta, 1.0)': 1,
+        'u_star = jnp.maximum(speed_sfc * 0.01, 1e-4)': 2,
+    },
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/mpas_integration.py': {
+        'S_w = jnp.where(m3 > 0.5, S_3d, 35.0)': 1,
+        'S_w = jnp.where(m3 > 0.5, S_3d, 35.0) # safe S for EOS': 1,
+    },
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tidal.py': {
+        'N_bottom_per_s: float = 1.0e-3,': 1,
+        'rms_roughness_m: float = 250.0,': 1,
+        'roughness_scale_m: float = 3000.0,': 1,
+        'u_tide_m_s: float = 0.02,': 1,
+    },
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py': {
+        '* jnp.arctan((depth - 2500.0) / 222.2)) * 1.0e-4': 3,
+        'eos_salinity_floor: float = 1.0e-3,': 1,
+        'return (0.8 + 1.05 / jnp.pi': 2,
+        'return jnp.maximum(1.0, jnp.minimum(10.0, 6.6 * Ri))': 1,
+    },
+}
+
+
+# The exact set of files that carried a budget at seed time. ``COEFF_BUDGET`` may
+# only ever be a subset of this — a new file must be clean, never budgeted.
+_SEED_FILES: frozenset[str] = frozenset(COEFF_BUDGET)
