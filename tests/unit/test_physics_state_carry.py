@@ -1169,3 +1169,36 @@ def test_voronoi_mpi_step_refuses_stateful_physics_without_carry():
     with pytest.raises(NotImplementedError, match="405"):
         make_voronoi_mpi_step(
             None, None, None, physics_fn=functools.partial(fn))
+
+
+def test_nonhydrostatic_cdgrid_step_refuses_stateful_physics():
+    """Codex adversarial round 13 (#413): the nonhydrostatic CD-grid
+    dycore does not thread a PhysicsState carry, so a tagged stateful
+    make_physics(model_type="nonhydrostatic") fn on its direct step APIs
+    must be refused, not silently reseeded.  (NH MPAS / NH plane share the
+    same helper-based guard.)  The guard fires before the state is
+    touched, so a placeholder suffices."""
+    from legoesm.atmosphere.physics.combined import make_physics
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import (
+        create_height_coordinate, compute_terrain_metric,
+    )
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+        CDGridCompressibleEulerModel,
+        CDGridCompressibleEulerConfig,
+    )
+
+    fn = make_physics(
+        _tke_physics_config(), model_type="nonhydrostatic", dt=1.0)
+    assert fn._requires_phys_state is True
+
+    grid = create_cubed_sphere(4)
+    hc = create_height_coordinate(5, 30000.0)
+    tm = compute_terrain_metric(jnp.zeros((6, grid.n, grid.n)), hc)
+    nh = CDGridCompressibleEulerModel(
+        grid, hc, tm, CDGridCompressibleEulerConfig())
+
+    with pytest.raises(NotImplementedError, match="405"):
+        nh.step(None, 1.0, physics_fn=fn)
+    with pytest.raises(NotImplementedError, match="405"):
+        nh.step_with_physics(None, 1.0, physics_fn=fn)

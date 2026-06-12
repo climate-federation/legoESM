@@ -63,6 +63,9 @@ from legoesm.timestepping.split_explicit import (
     SplitExplicitConfig,
     split_explicit_step,
 )
+from legoesm.timestepping.integration import (
+    refuse_unthreaded_stateful_physics,
+)
 
 
 # --------------------------------------------------------------------- #
@@ -2784,6 +2787,10 @@ class PlaneCompressibleEulerModel:
         PlaneNonHydrostaticState
             State after one full SSP-RK3 step with acoustic substeps.
         """
+        # NH plane does not thread a PhysicsState carry — refuse a stateful
+        # make_physics fn rather than silently reseed (#405/#413).
+        refuse_unthreaded_stateful_physics(
+            physics_fn, None, where="NH plane step()")
         if self.config.fix_mass and self.config.anchor_mass_to_initial:
             if self._target_mass is None:
                 self._target_mass = compute_dry_mass_plane(
