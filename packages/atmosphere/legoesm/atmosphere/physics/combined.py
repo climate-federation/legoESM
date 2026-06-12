@@ -186,9 +186,15 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # MYNN-2.5 writes its prognostic ``qke = 2·TKE`` into a
         # dedicated PhysicsState field so a restart-time scheme switch
         # cannot silently feed the wrong moment as energy (Phase C
-        # codex iter-1 medium finding).
+        # codex iter-1 medium finding).  Slot comes from the shared
+        # turbulence_scheme_traits; diagnostic schemes return None for
+        # the carry, so "tke" as the tag default is never written.
+        from legoesm.atmosphere.physics.turbulence.integration import (
+            turbulence_scheme_traits,
+        )
         _turb_field = (
-            "qke" if config.turbulence.scheme == "mynn25" else "tke"
+            turbulence_scheme_traits(config.turbulence.scheme).energy_field
+            or "tke"
         )
         tagged_fns.append((
             make_turbulence_physics(config.turbulence, model_type, dt),

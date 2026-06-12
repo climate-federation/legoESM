@@ -15,7 +15,7 @@ Supported model types:
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import jax.numpy as jnp
 
@@ -61,6 +61,56 @@ from legoesm.atmosphere.physics.thermodynamics import (
     reconstruct_half_level_pressure_hydrostatic,
     sanitize_theta_rho,
 )
+
+
+class TurbulenceSchemeTraits(NamedTuple):
+    """Static carry-plumbing traits for a turbulence scheme.
+
+    Single source of truth for "which schemes carry a prognostic
+    energy field, and in which ``PhysicsState`` slot" — consumed by
+    ``init_physics_state`` (seeding), the combined-physics dispatcher,
+    the driver physics pipeline, and the driver's stateful-physics
+    guard, so the four call paths cannot drift (issue #405: the guard
+    originally omitted ``clubb_lite`` because the set was re-derived
+    by hand).
+
+    Attributes
+    ----------
+    carries_energy : bool
+        True when the scheme threads a prognostic turbulent-energy
+        carry between steps (kernel takes the energy array as its 5th
+        positional argument and returns ``(TurbulenceOutput, energy_new)``).
+    energy_field : str or None
+        ``PhysicsState`` field holding the carry: ``"tke"`` for the
+        MY-2.5 family (tke / clubb_lite / edmf), ``"qke"`` for
+        MYNN-2.5 (``q² = 2·TKE`` — distinct slot so a restart-time
+        scheme switch cannot feed the wrong moment as energy).
+        ``None`` for diagnostic schemes.
+    """
+    carries_energy: bool
+    energy_field: str | None
+
+
+_ENERGY_FIELD_BY_SCHEME = {
+    "tke": "tke",
+    "clubb_lite": "tke",
+    "edmf": "tke",
+    "mynn25": "qke",
+}
+
+
+def turbulence_scheme_traits(scheme_name: str) -> TurbulenceSchemeTraits:
+    """Return the static carry traits for *scheme_name*.
+
+    Unknown schemes report ``carries_energy=False`` (mirrors
+    ``convection_scheme_traits``); :func:`get_turbulence_fn` is the
+    authority that rejects unknown scheme names.
+    """
+    field = _ENERGY_FIELD_BY_SCHEME.get(scheme_name)
+    return TurbulenceSchemeTraits(
+        carries_energy=field is not None,
+        energy_field=field,
+    )
 
 
 def get_turbulence_fn(config: TurbulenceConfig):
@@ -187,7 +237,7 @@ def _make_hydrostatic_turbulence(
     and the moisture tendency ``dq_v_dt`` is returned via ``tracer_tendencies``.
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
-    needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
+    needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
 
     def physics_fn(
         state: HydrostaticState,
@@ -340,7 +390,7 @@ def _make_mpas_turbulence(
     Audit 2026-05-12 finding MEDIUM #10.
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
-    needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
+    needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
         from legoesm.grids.voronoi import reconstruct_cell_velocity
@@ -491,7 +541,7 @@ def _make_nonhydrostatic_turbulence(
     element of the result tuple.
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
-    needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
+    needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     if scheme_name == "mynn25":
         # Phase C codex iter-3 high: the nonhydrostatic CD-grid dynamics
         # driver drops the returned ``PhysicsState`` after every
@@ -660,7 +710,7 @@ def _make_spectral_pe_turbulence(
     element of the result tuple.
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
-    needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
+    needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     if scheme_name == "mynn25":
         # Phase C codex iter-3 high: spectral PE dynamics drops the
         # returned ``PhysicsState`` (see spectral_pe.py:1556-1557), so

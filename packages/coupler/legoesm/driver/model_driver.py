@@ -3442,8 +3442,15 @@ class ModelDriver:
         wrong numbers.  The MPAS loop seeds and threads the carry and is
         exempt; remove a caller of this guard only together with real
         carry plumbing (and a stateful-memory test).
+
+        The stateful-turbulence check comes from the shared
+        ``turbulence_scheme_traits`` so this guard cannot drift from
+        the seeding/dispatch sites (the hand-written set omitted
+        ``clubb_lite``, which also carries TKE).
         """
-        _stateful_turb = ("tke", "mynn25", "edmf")
+        from legoesm.atmosphere.physics.turbulence.integration import (
+            turbulence_scheme_traits,
+        )
         # mass_flux / edmf convection carry a prognostic scalar in
         # conv_prog_profile[:, -1]; bechtold additionally carries the
         # AR1 stochastic state (codex review — bechtold alone was
@@ -3457,7 +3464,8 @@ class ModelDriver:
         _conv = getattr(_conv, "scheme", _conv)
         _gwd = getattr(cfg, "gravity_wave_drag", "none")
         _gwd = getattr(_gwd, "scheme", _gwd)
-        if (_turb in _stateful_turb or _conv in _stateful_conv
+        if (turbulence_scheme_traits(_turb).carries_energy
+                or _conv in _stateful_conv
                 or _gwd == "prognostic_spectral"):
             raise NotImplementedError(
                 f"turbulence={_turb!r} / convection={_conv!r} / "

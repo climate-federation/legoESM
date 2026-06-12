@@ -45,6 +45,40 @@ def test_update_physics_state_none_sentinel():
     assert isinstance(out, PhysicsState)
 
 
+def test_turbulence_scheme_traits_match_seeding():
+    """The shared traits agree with init_physics_state's seeding: every
+    energy-carrying scheme seeds its slot non-zero, every diagnostic
+    scheme leaves both slots zero."""
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        turbulence_scheme_traits,
+    )
+
+    for scheme in ("tke", "clubb_lite", "edmf", "mynn25",
+                   "louis", "smagorinsky", "holtslag_boville", "ysu"):
+        traits = turbulence_scheme_traits(scheme)
+        cfg = PhysicsConfig(turbulence=TurbulenceConfig(scheme=scheme))
+        ps = init_physics_state(4, 3, cfg)
+        seeded = {
+            "tke": bool(np.any(np.asarray(ps.tke) > 0)),
+            "qke": bool(np.any(np.asarray(ps.qke) > 0)),
+        }
+        if traits.carries_energy:
+            assert seeded[traits.energy_field], (
+                f"{scheme}: traits say energy in {traits.energy_field!r} "
+                "but init_physics_state seeded it zero"
+            )
+            other = "qke" if traits.energy_field == "tke" else "tke"
+            assert not seeded[other], (
+                f"{scheme}: the inactive energy slot {other!r} must stay zero"
+            )
+        else:
+            assert not seeded["tke"] and not seeded["qke"], (
+                f"{scheme}: diagnostic scheme must not seed an energy carry"
+            )
+
+
 def test_mpas_step_threads_seeded_carry():
     """Two MPAS steps with a seeded carry: the prognostic TKE evolves
     and step 2 consumes step 1's output (no silent reseed)."""
@@ -116,11 +150,16 @@ def test_mpas_step_threads_seeded_carry():
     [
         ("tke", "none", "none", True),
         ("mynn25", "none", "none", True),
+        # clubb_lite also carries TKE — the original hand-written set
+        # omitted it; the guard now reads turbulence_scheme_traits.
+        ("clubb_lite", "none", "none", True),
+        ("edmf", "none", "none", True),
         ("none", "bechtold", "none", True),
         ("none", "mass_flux", "none", True),
         ("none", "edmf", "none", True),
         ("none", "none", "prognostic_spectral", True),
         ("louis", "sbm", "none", False),
+        ("holtslag_boville", "none", "none", False),
         ("none", "none", "linear", False),
     ],
 )

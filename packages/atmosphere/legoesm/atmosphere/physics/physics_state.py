@@ -149,16 +149,21 @@ def init_physics_state(
     # EDMF carry TKE in ``tke``; MYNN-2.5 carries ``qke = 2·TKE`` in
     # ``qke``.  Inactive slots stay zero-filled with no per-step cost
     # because the dispatcher only reads the slot tied to the active
-    # scheme.
+    # scheme.  Which scheme uses which slot comes from the shared
+    # ``turbulence_scheme_traits`` (function-scope import: the
+    # integration module pulls the dynamics import chain).
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        turbulence_scheme_traits,
+    )
     turb_cfg = physics_config.turbulence
-    tke_schemes = ("tke", "clubb_lite", "edmf")
-    if turb_cfg.scheme in tke_schemes:
+    _turb_traits = turbulence_scheme_traits(turb_cfg.scheme)
+    if _turb_traits.energy_field == "tke":
         scheme_sub = getattr(turb_cfg, turb_cfg.scheme)
         tke_min = getattr(scheme_sub, "tke_min", 1e-6)
         tke = jnp.full((ncol, nlev), tke_min, dtype=dtype)
     else:
         tke = jnp.zeros((ncol, nlev), dtype=dtype)
-    if turb_cfg.scheme == "mynn25":
+    if _turb_traits.energy_field == "qke":
         qke_min = getattr(turb_cfg.mynn25, "tke_min", 1e-10)
         qke = jnp.full((ncol, nlev), qke_min, dtype=dtype)
     else:
