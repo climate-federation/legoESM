@@ -69,3 +69,52 @@ Plan amendment from the iteration-1 codex review (medium — adopted):
   these inputs with a unit test (if main lacks one) and reproduce the
   legacy failure on main BEFORE changing it, attributing the divergence
   precisely.
+
+## Iteration 1 — done (2026-06-12)
+
+Commit 1 (port): both forcing-time fixes on main's #413 architecture +
+legacy-test cadence alignment + 5 continuation tests + validation
+harness + PBS job.  Verified RED→GREEN: MPAS continuation test fails on
+main pre-port (stash check), passes post-port; legacy reproducibility
+1-failed→2-passed; regression sweep 95 passed (main's 45-test
+`test_physics_state_carry.py` + `test_compiled_segments.py` + legacy).
+
+Commit 2 (this one) — codex iteration-1 findings + production verdict:
+- **floor-vs-int daily bucket** (codex medium): `int(day)` truncates
+  toward zero, so a negative fractional day (restart chain crossing
+  day 0, pre-reference epoch) lands in bucket 0 instead of -1 and
+  samples wrong daily forcing.  Factored the bucket into
+  `legoesm.forcing.time_utils.daily_forcing_bucket()` (floor) and use
+  it at BOTH driver sites (MPAS `_run_mpas`, spectral `_full_physics`
+  loop).
+- **Spectral loop had the class-1 bug too**: `_precompute_external_
+  forcing` was sampled at `self._current_day` (a restart link's first
+  step = mid-day) — now sampled at the canonical bucket boundary
+  `float(_fd_int)`, same as the MPAS fix.
+- **Honest test design** (self-found): the negative-epoch CHAIN test
+  cannot discriminate floor from int — straight and chained runs bucket
+  identically under either semantics (verified: it passes with int()
+  reverted).  The semantics are pinned by a parametrized unit test
+  `test_daily_forcing_bucket_floor_semantics` (tests/unit/
+  test_time_utils.py) — verified it BITES: 3 cases fail under int().
+  The chain test docstring now states exactly what it covers.
+- **Production validation PASSED**: PBS job 4524510 (casper htc,
+  16 min) — MPAS L5 (tke): T/u/p_s + ALL PhysicsState fields
+  max|straight−chained| = 0.0; cube r16 compiled (tke +
+  prognostic_spectral): T/u/v/p_s/q_v/tke/gwd_spectrum all 0.0.
+  Log: /glade/derecho/scratch/adac/restart_time/validate.log.
+- Local: time_utils 73 passed; continuation non-slow 4 passed;
+  forcing dispatch 9 passed; legacy reproducibility passed (exit 0).
+- **Codex round-2 finding (P2, fixed)**: the compiled cube/lat-lon loop
+  only refreshed external forcing (ozone/aerosol/GHG + solar) for
+  `seg_idx > 0`, so a RESUMED run's first segment kept the
+  prepare-context values sampled at the epoch START_DAY — restarted
+  AMIP/CMIP runs with transient forcing diverge (invisible to the
+  bit-exact tests: constant TSI / no CMIP datasets make stale == fresh).
+  Fix: gate is now `seg_idx > 0 or start_step > 0`; fresh runs keep the
+  historical segment-0 behavior.  Regression test
+  `test_resumed_segment_zero_refreshes_external_forcing` spies on the
+  DAYS `_precompute_external_forcing` is called with (straight must ⊆
+  resumed after the restart point) — verified it bites: fails on the old
+  gate with "never sampled external forcing at day 2.0", passes with
+  the fix.

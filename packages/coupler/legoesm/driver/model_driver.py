@@ -19,7 +19,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.forcing.time_utils import day_to_calendar
+from legoesm.forcing.time_utils import daily_forcing_bucket, day_to_calendar
 
 from legoesm.core.conservation import (
     compute_global_moisture, fix_moisture_hydrostatic,
@@ -3824,11 +3824,18 @@ class ModelDriver:
             )
 
         _forcing_daily: dict = {}
-        from legoesm.forcing.time_utils import day_to_calendar
+        from legoesm.forcing.time_utils import (
+            daily_forcing_bucket,
+            day_to_calendar,
+        )
         for step in range(n_steps_total):
             if _sst_forcing or _ext_forcing:
                 _force_day = START_DAY + step * DT / 86400.0
-                _fd_int = int(_force_day)
+                # floor, not int() — see daily_forcing_bucket (negative
+                # fractional days land in the wrong bucket under
+                # truncation; day_to_calendar already handles negative
+                # days via modulo).
+                _fd_int = daily_forcing_bucket(_force_day)
                 if _fd_int != _last_force_day:
                     # Sample the daily fields at the CANONICAL day boundary
                     # (``float(_fd_int)``), NOT at the first step that
@@ -4373,12 +4380,16 @@ class ModelDriver:
                     sic_step = jnp.broadcast_to(sic_step[:, None], shape_2d)
                 _T_sfc_step = blend_surface_temperature(
                     sst_step, sic_step, T_ice).reshape(-1)
-                _fd_int = int(self._current_day)
+                _fd_int = daily_forcing_bucket(self._current_day)
                 if _ext_forcing and _fd_int != _last_ext_day:
                     _f_now = spectral_pe_to_grid(
                         self.state, self.grid, self.sigma)
+                    # Sample at the CANONICAL day boundary, not the first
+                    # step entering the day — a restart link's first step
+                    # lands mid-day (same bug class as the MPAS loop; see
+                    # daily_forcing_bucket / FIX_RESTART_TIME).
                     _o3, _aer, _ghg = self._precompute_external_forcing(
-                        self._current_day, _f_now['p_s'], _lat_2d_loop,
+                        float(_fd_int), _f_now['p_s'], _lat_2d_loop,
                     )
                     _ext_daily = {"o3_vmr": _o3, "aerosol_od": _aer}
                     # Volcanic LONGWAVE aerosol (gap #9): only when active
@@ -5168,9 +5179,16 @@ class ModelDriver:
             # constant GHG with no climatological ozone/aerosol); for runs with
             # transient or climatological forcing it (correctly) now follows the
             # calendar.  Matches the per-step path (_run_mpas / _run_spectral,
-            # ~line 5447) which already re-samples every radiation step.  seg 0
-            # keeps the START_DAY precompute unchanged.
-            if seg_idx > 0:
+            # ~line 5447) which already re-samples every radiation step.
+            #
+            # ``start_step > 0`` ALSO refreshes segment 0 of a RESUMED run
+            # (FIX_RESTART_TIME codex finding): the prepare-context values were
+            # sampled at the epoch START_DAY, but the straight run refreshed this
+            # (absolute) segment at its end day — without the refresh a restarted
+            # AMIP/CMIP run's first segment uses epoch-day ozone/aerosol/GHG/solar
+            # and diverges from the uninterrupted run.  Fresh runs (start_step ==
+            # 0) keep the START_DAY precompute for segment 0 unchanged.
+            if seg_idx > 0 or start_step > 0:
                 solar_now = get_solar_forcing_at_time(self._solar_config, day)
                 current_s_0 = float(solar_now["tsi"])
                 if self._use_solar_spectral:
