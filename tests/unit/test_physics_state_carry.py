@@ -996,3 +996,52 @@ def test_mpas_meta_only_physstate_checkpoint_rejected(tmp_path):
     driver_b.load_checkpoint(meta_only)
     with pytest.raises(ValueError, match="INCOMPLETE"):
         driver_b.run()
+
+
+def test_mpas_bad_carry_load_then_save_refused(tmp_path):
+    """Codex adversarial round 5 (#413): a load-then-save with no
+    intervening run must NOT launder a bad MPAS restart.  A partial,
+    meta-only, or convection-scheme-mismatched checkpoint stages carry
+    that is not adopted into the save channel, so save_checkpoint refuses
+    rather than emitting a fresh-seed (silent memory loss) or a relabelled
+    (cross-scheme) checkpoint."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _mpas_driver_cfg()
+    driver_a = ModelDriver(cfg, output_dir=tmp_path / "a")
+    driver_a.setup()
+    assert driver_a.run() == "COMPLETED"
+    ckpt = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))[-1]
+    with np.load(ckpt) as d:
+        files = {k: np.asarray(d[k]) for k in d.files}
+    assert "physstate_tke" in files and "physstate_meta_conv_scheme" in files
+
+    def _variant(name, mutate):
+        p = tmp_path / f"{name}.npz"
+        kept = dict(files)
+        mutate(kept)
+        np.savez(p, **kept)
+        drv = ModelDriver(cfg, output_dir=tmp_path / name)
+        drv.setup()
+        drv.load_checkpoint(p)
+        assert drv._mpas_phys_state is None, (
+            f"{name}: a bad carry was adopted into the save channel"
+        )
+        with pytest.raises(ValueError, match="launder"):
+            drv.save_checkpoint(0, 7.0)
+
+    # Partial: one carry field stripped (meta + the rest kept).
+    _variant("partial", lambda k: k.pop("physstate_tke"))
+    # Meta-only: every carry field stripped, scheme tag left behind.
+    _variant(
+        "meta_only",
+        lambda k: [k.pop(key) for key in list(k)
+                   if key.startswith("physstate_")
+                   and not key.startswith("physstate_meta_")],
+    )
+    # Complete carry but the scheme tag disagrees with this run.
+    _variant(
+        "mismatch",
+        lambda k: k.__setitem__(
+            "physstate_meta_conv_scheme", np.asarray("some_other_scheme")),
+    )

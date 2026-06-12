@@ -2322,6 +2322,33 @@ class ModelDriver:
             ckpt_path = self._output_dir / f"checkpoint_day_{int(round(day)):04d}.npz"
             s = self.state
             _ps_carry = getattr(self, "_mpas_phys_state", None)
+            # Codex adversarial (#413): never LAUNDER a bad restart.  A
+            # load_checkpoint stages physstate_* into _carry_aux and adopts
+            # it into _mpas_phys_state ONLY when the carry is complete AND
+            # its convection-scheme tag matches this run.  If staged carry
+            # is present but was NOT adopted (incomplete / meta-only /
+            # scheme mismatch) and no run has since rebuilt the channel,
+            # saving now would emit either a physstate-free file (read as a
+            # fresh seed next restart) or a carry relabelled with the wrong
+            # scheme — silently branching the trajectory.  Refuse instead;
+            # run the model (which validates + overlays the carry) before
+            # checkpointing, or strip ALL physstate_* to opt into a fresh
+            # seed.
+            if (_ps_carry is None
+                    and isinstance(self._carry_aux, dict)
+                    and any(k.startswith("physstate_")
+                            for k in self._carry_aux)):
+                raise ValueError(
+                    "save_checkpoint: the loaded MPAS checkpoint staged "
+                    "physstate_* carry that was NOT adopted into the save "
+                    "channel (incomplete, meta-only, or a convection-scheme "
+                    "mismatch with the configured run).  Saving now would "
+                    "launder a corrupted / mismatched restart into a "
+                    "plausible checkpoint and silently branch the trajectory "
+                    "(issue #405/#413).  Run the model before checkpointing, "
+                    "or strip ALL physstate_* entries to opt into a fresh "
+                    "seed."
+                )
             # Under MPAS cell-partition MPI each rank holds only its owned+halo
             # band; gather the owned cells/edges into the GLOBAL field on rank 0
             # so the restart chain reads a single canonical global checkpoint
@@ -2783,7 +2810,20 @@ class ModelDriver:
                 and not _k[len("physstate_"):].startswith("meta_")
                 and _k[len("physstate_"):] in PhysicsState._fields
             }
-            if _staged and all(_f in _staged for _f in PhysicsState._fields):
+            # Adopt the restored carry ONLY when it is complete AND its
+            # convection-scheme tag matches this run (or is absent/legacy).
+            # A complete-but-mismatched carry must NOT be adopted, else a
+            # load-then-save would relabel one scheme's prognostic memory
+            # as another's; left None it is refused by save_checkpoint and
+            # raised by _run_mpas's scheme-tag guard on the next run.
+            _saved_conv = self._carry_aux.get("physstate_meta_conv_scheme")
+            _scheme_ok = (
+                _saved_conv is None
+                or str(_saved_conv) == str(
+                    getattr(self.config, "convection", "none"))
+            )
+            if (_staged and _scheme_ok
+                    and all(_f in _staged for _f in PhysicsState._fields)):
                 self._mpas_phys_state = PhysicsState(**_staged)
             step = int(d["step"])
             day = float(d["day"])
