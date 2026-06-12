@@ -1087,3 +1087,34 @@ def test_d2a2c_tile_unified_in_shardmap():
                 utt[ut_i0:ut_i1, j_strip] = 0.0
                 utg[ut_i0:ut_i1, j_strip] = 0.0
                 np.testing.assert_allclose(utt, utg, rtol=0, atol=1e-12)
+
+    # FULL STAGE: reassemble the tiled outputs (dedup the duplicated shared
+    # staggered face between neighbouring tiles), apply the adjacent strips
+    # GLOBALLY (d2a2c_adjacent_strips) — the complete sub-face stage — and
+    # compare EVERY output to production d2a2c_vect with NO exclusion.
+    def _dedup_stag(arr, ax):
+        # arr stag axis ax (1 or 2) is kt*(nl+1); drop each tile's duplicated
+        # first slice (the shared boundary face, owned by the lower tile).
+        take = []
+        for t in range(kt):
+            sl = [slice(None)] * arr.ndim
+            sl[ax] = slice(t * (nl + 1), (t + 1) * (nl + 1))
+            blk = arr[tuple(sl)]
+            if t > 0:
+                sl2 = [slice(None)] * arr.ndim
+                sl2[ax] = slice(1, None)
+                blk = blk[tuple(sl2)]
+            take.append(blk)
+        return np.concatenate(take, axis=ax)
+
+    uc_re = _dedup_stag(uc_t, 1)   # (6, n+1, n)
+    vc_re = _dedup_stag(vc_t, 2)   # (6, n, n+1)
+    ut_re = _dedup_stag(ut_t, 1)
+    vt_re = _dedup_stag(vt_t, 2)
+    ut_s, vt_s = d2a2c_adjacent_strips(
+        jnp.asarray(uc_re), jnp.asarray(vc_re),
+        jnp.asarray(ut_re), jnp.asarray(vt_re), cdg.cosa_u, cdg.cosa_v, n)
+    stage = [ua_t, va_t, uc_re, vc_re, np.asarray(ut_s), np.asarray(vt_s)]
+    for name, arr, gg in zip(["ua", "va", "uc", "vc", "ut", "vt"], stage, g):
+        np.testing.assert_allclose(arr, gg, rtol=0, atol=1e-12,
+                                   err_msg=f"SPMD stage {name} != d2a2c_vect")
