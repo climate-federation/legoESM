@@ -2834,22 +2834,37 @@ def synchronize_bgrid_ne_corner_geo(u, v, z11, z12, z21, z22, n):
     -------
     u_sync, v_sync : jax.Array, shape (6, n+1, n+1)
     """
-    _EPS = float(jnp.finfo(jnp.float32).eps)
-    det = z11 * z22 - z21 * z12  # = sin(inter-axis angle) > 0, frame-consistent
-    inv = 1.0 / jnp.where(jnp.abs(det) > _EPS, det, 1.0)
-
-    # Exact non-orthogonal local → geographic
-    u_east = (z11 * u + z21 * v) * inv
-    u_north = (z12 * u + z22 * v) * inv
-
-    # Sync geo components independently (each is a frame-invariant scalar)
+    # Pointwise local→geo, cross-face scalar sync, pointwise geo→local.  The
+    # two pointwise conversions are factored (bgrid_ne_corner_to_geo /
+    # _from_geo) so a sub-face tiled corner-sync stage can run them PER TILE
+    # (approach-C) around the cross-tile scalar sync (task #3 cube tiling
+    # U3e); this global path is bit-identical (pure extraction).
+    u_east, u_north = bgrid_ne_corner_to_geo(u, v, z11, z12, z21, z22)
     u_east = synchronize_corner_scalar(u_east, n)
     u_north = synchronize_corner_scalar(u_north, n)
+    return bgrid_ne_corner_from_geo(u_east, u_north, z11, z12, z21, z22)
 
-    # Exact inverse (adjugate of M; the det cancels the forward 1/det)
+
+def bgrid_ne_corner_to_geo(u, v, z11, z12, z21, z22):
+    """Pointwise exact non-orthogonal local→geographic corner conversion
+    (the forward half of :func:`synchronize_bgrid_ne_corner_geo`, factored
+    for sub-face tiling — task #3 U3e).  ``u_east = (z11·u + z21·v)/detM``,
+    ``u_north = (z12·u + z22·v)/detM`` with ``detM = z11·z22 − z21·z12``.
+    Shape-generic (global ``(6,n+1,n+1)`` or a per-tile corner block); each
+    corner reads ONLY its own ``(u,v,z*)`` → tiles with no halo."""
+    _EPS = float(jnp.finfo(jnp.float32).eps)
+    det = z11 * z22 - z21 * z12  # = sin(inter-axis angle) > 0
+    inv = 1.0 / jnp.where(jnp.abs(det) > _EPS, det, 1.0)
+    return (z11 * u + z21 * v) * inv, (z12 * u + z22 * v) * inv
+
+
+def bgrid_ne_corner_from_geo(u_east, u_north, z11, z12, z21, z22):
+    """Pointwise exact geo→local corner conversion (the inverse half;
+    adjugate of M, the det cancels the forward 1/det).  ``u_sync =
+    z22·u_east − z21·u_north``, ``v_sync = −z12·u_east + z11·u_north``.
+    Shape-generic; no halo (per-corner)."""
     u_sync = z22 * u_east - z21 * u_north
     v_sync = -z12 * u_east + z11 * u_north
-
     return u_sync, v_sync
 
 
