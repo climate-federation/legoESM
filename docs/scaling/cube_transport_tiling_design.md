@@ -216,3 +216,28 @@ DELIBERATE multi-session work — NOT loop micro-turns. No measurable SYPD
 payoff until the full RK stage assembles, AND the np24 payoff is NOT
 Ginsburg-benchable (no 24 real devices; CPU-virtual oversubscribes) — it is
 a multi-GPU-node (A100/H100) capability validated for CORRECTNESS here.
+
+## U3d shapes — RESOLVED by runtime probe (job 8480355, C18 duogrid, n=18)
+
+`scripts/tmp/_probe_bgrid_shapes.py`. n+1=19, h_dg=2 → n+2h=22.
+- `u_d (6,n,n+1)=(6,18,19)`, `v_d (6,n+1,n)=(6,19,18)`
+- `uc (6,n+1,n)` → `uc_pad (6,n+1,n+2)`; `vc (6,n,n+1)` → `vc_pad (6,n+2,n+1)`
+- `vb=ub=(6,n+1,n+1)=(6,19,19)` (corner)
+- `u_d_ihalo (6,n+2h,n+1)=(6,22,19)`; `v_d_jhalo (6,n+1,n+2h)=(6,19,22)`
+- `dy_edge_x=(6,n+1,n)`; `dx_edge_y=(6,n,n+1)`
+
+ytp_v `_ppm_transport_1d(v_d_jhalo, vb, rdy=1/dy_edge_x, axis=2, ext=h_dg=2)`:
+**ALL share CROSS axis=1 = n+1 (corners)** — `v_d_jhalo[:,n+1,·]`,
+`vb[:,n+1,·]`, `rdy[:,n+1,·]`. Sweep axis=2: field n+2h, vb n+1 (interfaces),
+rdy n (cells). So the U3b `transport_jsweep_tile_2d` composes with the REAL
+arrays IF the **cross slice = nl+1 (corner ownership, shared corner), not
+nl** — NO field-vs-courant cross mismatch (my earlier worry was wrong; the
+field's cross is n+1, not n). xtp_u is the symmetric transpose (cross
+axis=2 = n+1).
+
+⇒ U3d impl (next): a corner-cross sweep tile = U3b j/i-sweep with cross
+slice nl+1 + the U2b global-pre-pad-to-h3 sweep handling, driven by the REAL
+vb/ub (from U3c on real cross-face-halo'd uc/vc) + real v_d_jhalo/u_d_ihalo.
+Reassemble: cross (corner) lower-tile-owns-shared nl+1→n+1; sweep
+lower-tile-owns-shared nl+1→n+1. Parity vs global transported_y/x (pre
+Step-5) on kt=3 interior + face-edge. Then Step-5 BGRID_NE corner sync.
