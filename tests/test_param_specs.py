@@ -88,17 +88,6 @@ _OPTIONAL_CLASS_KEYS = frozenset({"excluded"})
 PARAM_SPEC_TODO: frozenset[str] = frozenset(
     {
         # --- atmosphere ----------------------------------------------------
-        "packages/atmosphere/legoesm/atmosphere/physics/clouds/config.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/config.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/config.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/aerosol_activation.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/config.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/config.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/config.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/ml_parameterization.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/config.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/config.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py",
         # --- ocean ---------------------------------------------------------
         # --- land ----------------------------------------------------------
     }
@@ -358,7 +347,6 @@ def test_discovery_sane() -> None:
     )
     # sentinels: known config modules must be in scope
     for sentinel in (
-        "packages/atmosphere/legoesm/atmosphere/physics/convection/config.py",
         "packages/land/legoesm/land/soil_thermal.py",
         "packages/ice/legoesm/ice/config.py",
     ):

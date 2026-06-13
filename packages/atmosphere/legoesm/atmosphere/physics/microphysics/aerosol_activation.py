@@ -62,6 +62,22 @@ __physics_contract__ = {
 }
 
 
+__param_spec__ = {
+    "CCNFromAODConfig": {
+        "scheme_key": "atm.aerosol.CCNFromAODConfig",
+        "excluded": {
+        },
+        "params": {
+            # CCN = (AOT / c)^(1/b) inversion of the Andreae (2009) global fit AOT = 0.0027*CCN^0.640
+            "aot_coeff": {"units": "1", "bounds": (0.000891, 0.0081), "tunable_tier": 1, "transform": "sigmoid", "category": "ccn_activation", "reference": "Andreae (2009) AOD-CCN power law", "shape": None},
+            "aot_exponent": {"units": "1", "bounds": (0.2112, 1.92), "tunable_tier": 2, "transform": "sigmoid", "category": "ccn_activation", "reference": "Andreae (2009) AOD-CCN power law", "shape": None},
+            "n_ccn_max_cm3": {"units": "1/cm^3", "bounds": (3300.0, 30000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "ccn_bounds", "reference": "polluted-continental CCN upper clip", "shape": None},
+            "n_ccn_min_cm3": {"units": "1/cm^3", "bounds": (3.3, 30.0), "tunable_tier": 3, "transform": "sigmoid", "category": "ccn_bounds", "reference": "pristine-maritime CCN lower clip", "shape": None},
+        },
+    },
+}
+
+
 class CCNFromAODConfig(NamedTuple):
     """Configuration for the Andreae (2009) AOD → CCN inversion.
 

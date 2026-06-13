@@ -145,7 +145,15 @@ def test_transitive_import_failure_reraises(monkeypatch) -> None:
 
 # --- raw seeding round-trips to the default --------------------------------
 def test_seeded_values_recover_defaults() -> None:
-    p = build_trainable_params(tier="extended")
+    # "aggressive" = all tiers (1..3): every specced param must seed back to its
+    # default through the float32-pinned transform inverse. This is the tripwire
+    # that catches (a) a softplus param whose default is too small to round-trip
+    # in float32 (the inverse compresses small positives into large-negative
+    # seeds below float32 resolution) and (b) a sigmoid param whose default sits
+    # on a bound (logit -> +/-inf) or spans >~2 decades near a floor. Fix in the
+    # spec: bounded params use sigmoid with the default strictly interior, and
+    # ranges are kept narrow enough to stay float32-recoverable.
+    p = build_trainable_params(tier="aggressive")
     physical = p.as_dict()
     reg = {m.qualified_name: m for m in build_registry()}
     for name, val in physical.items():

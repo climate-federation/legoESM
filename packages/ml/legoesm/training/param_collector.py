@@ -61,6 +61,18 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.ocean.physics.surface_forcing.config",
     "legoesm.ocean.physics.vertical_mixing.config",
     "legoesm.ocean.physics.vertical_mixing.tidal",
+    # --- atmosphere physics (Phase 4 spec migration) ---
+    "legoesm.atmosphere.physics.gravity_wave_drag.config",
+    "legoesm.atmosphere.physics.clouds.config",
+    "legoesm.atmosphere.physics.convection.config",
+    "legoesm.atmosphere.physics.microphysics.config",
+    "legoesm.atmosphere.physics.microphysics.sdm.config",
+    "legoesm.atmosphere.physics.microphysics.fast_sbm.config",
+    "legoesm.atmosphere.physics.microphysics.aerosol_activation",
+    "legoesm.atmosphere.physics.turbulence.config",
+    "legoesm.atmosphere.physics.turbulence.pbl_height",
+    "legoesm.atmosphere.physics.radiation.config",
+    "legoesm.atmosphere.physics.ml_parameterization",
 )
 
 # Tier thresholds for the conservative<->broad continuum. ``build_trainable_params``
@@ -189,7 +201,18 @@ def _seed_raw(meta: ParamMeta, shape: tuple[int, ...], dtype) -> jax.Array:
         lo, hi = meta.bounds
         return range_to_sigmoid_array(base, lo, hi).astype(dtype)
     if meta.transform == "softplus":
-        return jnp.log(jnp.expm1(jnp.maximum(base, 1e-6))).astype(dtype)
+        # Exact inverse of the forward softplus (``as_dict`` uses
+        # ``jax.nn.softplus``): softplus_inv(y) = y + log1p(-e^{-y}).  The naive
+        # ``log(expm1(y))`` overflows in float32 for y >~ 88 (expm1 -> inf ->
+        # log -> inf), which corrupts the seed of every large-magnitude positive
+        # scale (averaging lengths AL ~ 1e5 m, number concentrations ~ 1e8 m^-3,
+        # relaxation timescales tau ~ 1e3-1e5 s).  Seeds are deliberately pinned
+        # to float32 (test_seed_raw_dtype_pinned) to dodge the float64->float32
+        # scan-carry hazard, so the inverse MUST be float32-overflow-safe.  The
+        # log1p(-e^{-y}) form is overflow-free (-> y for large y) and round-trips
+        # through ``jax.nn.softplus`` to float32 precision for all y.
+        y = jnp.maximum(base, 1e-6)
+        return (y + jnp.log1p(-jnp.exp(-y))).astype(dtype)
     return base
 
 

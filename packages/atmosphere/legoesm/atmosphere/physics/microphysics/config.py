@@ -31,6 +31,270 @@ from legoesm.atmosphere.physics.microphysics.fast_sbm.config import FastSBMConfi
 from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
 
 
+__param_spec__ = {
+    "KesslerConfig": {
+        "scheme_key": "atm.micro.KesslerConfig",
+        "excluded": {
+            "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+        },
+        "params": {
+            # PRIMARY warm-rain knobs (Kessler 1969).
+            "autoconversion_threshold": {"units": "kg/kg", "bounds": (0.0001, 0.003), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Kessler (1969)", "shape": None},
+            "autoconversion_rate": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Kessler (1969)", "shape": None},
+            "accretion_coeff": {"units": "1", "bounds": (0.5, 6.6), "tunable_tier": 1, "transform": "softplus", "category": "accretion", "reference": "Kessler (1969)", "shape": None},
+            "evaporation_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "softplus", "category": "evaporation", "reference": "Kessler (1969)", "shape": None},
+            "rain_fall_speed": {"units": "m/s", "bounds": (1.0, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Kessler (1969)", "shape": None},
+        },
+    },
+    "MicrophysicsMLEmulatorConfig": {
+        "scheme_key": "atm.micro.MicrophysicsMLEmulatorConfig",
+        "excluded": {
+            "norm_dt": "numerics: input normalisation scale (time-step), fixed feature-engineering constant",
+            "norm_T": "numerics: input normalisation scale (temperature), fixed feature-engineering constant",
+            "norm_dz": "numerics: input normalisation scale (layer thickness), fixed feature-engineering constant",
+            "norm_q_factor": "numerics: input normalisation scale (mixing ratio), fixed feature-engineering constant",
+            "norm_rho": "numerics: input normalisation scale (air density), fixed feature-engineering constant",
+        },
+        # The MLP weights are trained via the Equinox module, not via these
+        # NamedTuple float fields. The ``norm_*`` fields are fixed input-
+        # normalisation scales (feature engineering), not physical closures,
+        # so none are spec-eligible trainable params.
+        "params": {},
+    },
+    "MorrisonConfig": {
+        "scheme_key": "atm.micro.MorrisonConfig",
+        "excluded": {
+            "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "hom_freeze_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "hom_ice_nuc_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "homogeneous_freeze_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "ice_deposition_efficiency": "physics: default at domain boundary / not sigmoid-tunable (fix via config)",
+            "ice_sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "koop_s_hom_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "lamg_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "lami_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "lamr_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "lams_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "melt_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+        },
+        "params": {
+            # --- Warm rain (Seifert-Beheng + KK2000) ---
+            "k_au": {"units": "m^3 kg^-1 s^-1", "bounds": (50.0, 5000.0), "tunable_tier": 1, "transform": "softplus", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "k_ac": {"units": "m^3 kg^-1 s^-1", "bounds": (1.0, 20.0), "tunable_tier": 1, "transform": "softplus", "category": "accretion", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "x_star": {"units": "kg", "bounds": (5e-11, 1e-9), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "Nc_0": {"units": "1/m^3", "bounds": (1e7, 1e9), "tunable_tier": 2, "transform": "softplus", "category": "number_concentration", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "k_sc": {"units": "m^3 kg^-1 s^-1", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "D_eq": {"units": "m", "bounds": (0.0003, 0.0033), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "rain_selfcoll_k": {"units": "1", "bounds": (1.0, 20.0), "tunable_tier": 2, "transform": "softplus", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "rain_breakup_d0": {"units": "m", "bounds": (0.0001, 0.0009), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "rain_breakup_steepness": {"units": "1/m", "bounds": (500.0, 7000.0), "tunable_tier": 3, "transform": "softplus", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "evap_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "softplus", "category": "evaporation", "reference": "M2005 scheme default", "shape": None},
+            "rain_vent_f1": {"units": "1", "bounds": (0.3, 2.5), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Morrison et al. (2005)", "shape": None},
+            "rain_vent_f2": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Morrison et al. (2005)", "shape": None},
+            # --- Ice nucleation (Cooper 1986) ---
+            "N_i0": {"units": "1/m^3", "bounds": (1.0, 50.0), "tunable_tier": 2, "transform": "softplus", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            "N_i_nuc_max": {"units": "1/m^3", "bounds": (1e5, 5e6), "tunable_tier": 3, "transform": "softplus", "category": "ice_nucleation", "reference": "Morrison et al. (2005)", "shape": None},
+            "cooper_a": {"units": "1/K", "bounds": (0.1, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            "cooper_T_act": {"units": "K", "bounds": (255.0, 273.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            "ice_nuc_radius": {"units": "m", "bounds": (3e-06, 3e-05), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Morrison et al. (2005)", "shape": None},
+            # --- Homogeneous ice nucleation (Ren & MacKenzie 2005 / Koop 2000) ---
+            "koop_s_hom_a": {"units": "1", "bounds": (1.5, 7.0), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Ren & MacKenzie (2005)", "shape": None},
+            "koop_s_hom_b": {"units": "1/K", "bounds": (0.001, 0.012), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Ren & MacKenzie (2005)", "shape": None},
+            "koop_s_hom_max": {"units": "1", "bounds": (1.0, 5.1), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Ren & MacKenzie (2005)", "shape": None},
+            "hom_freeze_T_max": {"units": "K", "bounds": (225.0, 240.0), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Koop et al. (2000)", "shape": None},
+            "hom_ice_nuc_N": {"units": "1/m^3", "bounds": (1e4, 1e7), "tunable_tier": 3, "transform": "softplus", "category": "ice_nucleation", "reference": "Karcher & Lohmann (2002)", "shape": None},
+            # --- Rain freezing (Bigg 1953) ---
+            "bigg_aimm": {"units": "1/K", "bounds": (0.2, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Bigg (1953)", "shape": None},
+            "bigg_bimm": {"units": "1", "bounds": (33.0, 300.0), "tunable_tier": 3, "transform": "softplus", "category": "ice_nucleation", "reference": "Bigg (1953)", "shape": None},
+            "homogeneous_freeze_T": {"units": "K", "bounds": (228.0, 240.0), "tunable_tier": 3, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Morrison et al. (2005)", "shape": None},
+            # --- Ice depositional growth / WBF ---
+            "dep_coeff": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "Morrison et al. (2005)", "shape": None},
+            "q_i_min_growth": {"units": "kg/kg", "bounds": (3e-10, 3e-09), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Morrison et al. (2005)", "shape": None},
+            "rho_cloud_ice": {"units": "kg/m^3", "bounds": (100.0, 917.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison et al. (2005)", "shape": None},
+            "bergeron_rate": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "Morrison et al. (2005)", "shape": None},
+            "T_center": {"units": "K", "bounds": (248.0, 268.0), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Morrison et al. (2005)", "shape": None},
+            "T_width": {"units": "K", "bounds": (3.0, 30.0), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Morrison et al. (2005)", "shape": None},
+            # --- Riming ---
+            "rime_coeff": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "riming", "reference": "Morrison et al. (2005)", "shape": None},  # unclamped riming-rate multiplier (default 1.0 nominal), not a [0,1] probability
+            # --- Ice -> snow autoconversion / aggregation ---
+            "ice_snow_d_auto": {"units": "m", "bounds": (8e-05, 0.0008), "tunable_tier": 2, "transform": "sigmoid", "category": "aggregation", "reference": "Morrison et al. (2005)", "shape": None},
+            "agg_coeff": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "aggregation", "reference": "Morrison et al. (2005)", "shape": None},
+            "snow_aggregation_eii": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "aggregation", "reference": "Morrison et al. (2005)", "shape": None},
+            # --- Melting ---
+            "melt_rate": {"units": "1/s", "bounds": (0.0005, 0.05), "tunable_tier": 2, "transform": "sigmoid", "category": "melting", "reference": "Morrison et al. (2005)", "shape": None},
+            # --- Fall speeds (PSD mass-weighted moments) ---
+            "a_v_r": {"units": "m^(1-b)/s", "bounds": (40.0, 400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "b_v_r": {"units": "1", "bounds": (0.15, 1.5), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "a_v_i": {"units": "m^(1-b)/s", "bounds": (15.0, 150.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
+            "b_v_i": {"units": "1", "bounds": (0.08, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
+            "a_v_s": {"units": "m^(1-b)/s", "bounds": (9.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
+            "b_v_s": {"units": "1", "bounds": (0.09, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
+            "fall_a_r": {"units": "m^(1-b)/s", "bounds": (280.0, 2500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
+            "fall_b_r": {"units": "1", "bounds": (0.26, 2.4), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
+            "fall_a_i": {"units": "m^(1-b)/s", "bounds": (230.0, 2100.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "gSAM M2005 default", "shape": None},
+            "fall_b_i": {"units": "1", "bounds": (0.28, 2.6), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "gSAM M2005 default", "shape": None},
+            "fall_a_s": {"units": "m^(1-b)/s", "bounds": (3.8, 35.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
+            "fall_b_s": {"units": "1", "bounds": (0.13, 1.2), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
+            "fall_a_g": {"units": "m^(1-b)/s", "bounds": (6.3, 58.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
+            "fall_b_g": {"units": "1", "bounds": (0.12, 1.1), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
+            "lamr_max": {"units": "1/m", "bounds": (16500.0, 150000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison et al. (2005)", "shape": None},
+            "lami_max": {"units": "1/m", "bounds": (330000.0, 3000000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison et al. (2005)", "shape": None},
+            "lams_max": {"units": "1/m", "bounds": (33000.0, 300000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison et al. (2005)", "shape": None},
+            "lamg_max": {"units": "1/m", "bounds": (16500.0, 150000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison et al. (2005)", "shape": None},
+            # --- Snow / graupel bulk properties + processes ---
+            "rho_snow": {"units": "kg/m^3", "bounds": (33.0, 300.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison et al. (2005)", "shape": None},
+            "snow_vent_f1": {"units": "1", "bounds": (0.3, 2.6), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Morrison et al. (2005)", "shape": None},
+            "snow_vent_f2": {"units": "1", "bounds": (0.09, 0.84), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Morrison et al. (2005)", "shape": None},
+            "snow_collect_eff": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison et al. (2005)", "shape": None},
+            "rho_graupel": {"units": "kg/m^3", "bounds": (132.0, 1200.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison et al. (2005)", "shape": None},
+            "n0_graupel": {"units": "1/m^4", "bounds": (1.3e6, 1.2e7), "tunable_tier": 3, "transform": "softplus", "category": "size_distribution", "reference": "Morrison et al. (2005)", "shape": None},
+            "graupel_vent_f1": {"units": "1", "bounds": (0.3, 2.6), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Morrison et al. (2005)", "shape": None},
+            "graupel_vent_f2": {"units": "1", "bounds": (0.09, 0.84), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Morrison et al. (2005)", "shape": None},
+            "graupel_collect_eff": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison et al. (2005)", "shape": None},
+            "graupel_rain_collect_eff": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison et al. (2005)", "shape": None},  # unclamped collection-rate multiplier (default 1.0 nominal), not a [0,1] probability
+            "graupel_embryo_mass": {"units": "kg", "bounds": (5e-11, 5e-10), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison et al. (2005)", "shape": None},
+        },
+    },
+    "P3Config": {
+        "scheme_key": "atm.micro.P3Config",
+        "excluded": {
+            "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "ice_sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "melt_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "rho_rim_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+        },
+        "params": {
+            # --- Warm rain (Seifert-Beheng liquid phase) ---
+            "k_au": {"units": "m^3 kg^-1 s^-1", "bounds": (50.0, 5000.0), "tunable_tier": 1, "transform": "softplus", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "k_ac": {"units": "m^3 kg^-1 s^-1", "bounds": (1.0, 20.0), "tunable_tier": 1, "transform": "softplus", "category": "accretion", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "x_star": {"units": "kg", "bounds": (5e-11, 1e-9), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "Nc_0": {"units": "1/m^3", "bounds": (1e7, 1e9), "tunable_tier": 2, "transform": "softplus", "category": "number_concentration", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "k_sc": {"units": "m^3 kg^-1 s^-1", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "D_eq": {"units": "m", "bounds": (0.0003, 0.0033), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "evap_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "softplus", "category": "evaporation", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "a_v_r": {"units": "m^(1-b)/s", "bounds": (40.0, 400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "b_v_r": {"units": "1", "bounds": (0.15, 1.5), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
+            # --- Ice nucleation (Cooper 1986) ---
+            "N_i0": {"units": "1/m^3", "bounds": (1650.0, 15000.0), "tunable_tier": 2, "transform": "softplus", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            "N_i_nuc_max": {"units": "1/m^3", "bounds": (1e5, 5e6), "tunable_tier": 3, "transform": "softplus", "category": "ice_nucleation", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            "cooper_a": {"units": "1/K", "bounds": (0.1, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            "cooper_T_act": {"units": "K", "bounds": (255.0, 273.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            # --- Ice depositional growth ---
+            "dep_coeff": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            "q_i_min_growth": {"units": "kg/kg", "bounds": (3e-10, 3e-09), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            # --- Riming (collection efficiencies) ---
+            "rime_coeff": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "riming", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            "rain_rime_coeff": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "riming", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            # --- Aggregation / melting ---
+            "agg_coeff": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "aggregation", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            "melt_rate": {"units": "1/s", "bounds": (0.0005, 0.05), "tunable_tier": 2, "transform": "sigmoid", "category": "melting", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            # --- Ice fall speed (predicted-property power law) ---
+            "a_v_i": {"units": "m^(1-b)/s", "bounds": (13.0, 120.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            "b_v_i": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            "c_rim_fallspeed": {"units": "1", "bounds": (0.1, 1.2), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            # --- Rime density properties ---
+            "rho_rim_max": {"units": "kg/m^3", "bounds": (300.0, 917.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            "rho_rim_accrete": {"units": "kg/m^3", "bounds": (132.0, 900.0), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+            "rho_ice_ref": {"units": "kg/m^3", "bounds": (165.0, 917.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison & Milbrandt (2015) P3", "shape": None},
+        },
+    },
+    "SeifertBehengConfig": {
+        "scheme_key": "atm.micro.SeifertBehengConfig",
+        "excluded": {
+            "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+        },
+        "params": {
+            "k_au": {"units": "m^3 kg^-1 s^-1", "bounds": (50.0, 5000.0), "tunable_tier": 1, "transform": "softplus", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "k_ac": {"units": "m^3 kg^-1 s^-1", "bounds": (1.0, 20.0), "tunable_tier": 1, "transform": "softplus", "category": "accretion", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "x_star": {"units": "kg", "bounds": (5e-11, 1e-9), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "Nc_0": {"units": "1/m^3", "bounds": (1e7, 1e9), "tunable_tier": 2, "transform": "softplus", "category": "number_concentration", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "k_sc": {"units": "m^3 kg^-1 s^-1", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "D_eq": {"units": "m", "bounds": (0.0003, 0.0033), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "evap_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "softplus", "category": "evaporation", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "a_v_r": {"units": "m^(1-b)/s", "bounds": (40.0, 400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "b_v_r": {"units": "1", "bounds": (0.15, 1.5), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
+        },
+    },
+    "SundqvistConfig": {
+        "scheme_key": "atm.micro.SundqvistConfig",
+        "excluded": {
+            "sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+        },
+        "params": {
+            # PRIMARY large-scale-condensation knobs (Sundqvist et al. 1989).
+            "rh_crit": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_rh", "reference": "Sundqvist et al. (1989)", "shape": None},
+            "qc_crit": {"units": "kg/kg", "bounds": (0.0001, 0.0015), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist et al. (1989)", "shape": None},
+            "auto_rate": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Sundqvist et al. (1989)", "shape": None},
+            "evap_coeff": {"units": "1", "bounds": (0.0001, 0.0015), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Sundqvist et al. (1989)", "shape": None},
+        },
+    },
+    "ThompsonConfig": {
+        "scheme_key": "atm.micro.ThompsonConfig",
+        "excluded": {
+            "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "graupel_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "ice_deposition_efficiency": "physics: default at domain boundary / not sigmoid-tunable (fix via config)",
+            "ice_sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "melt_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "rain_evap_rh_floor": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+        },
+        "params": {
+            # --- Warm rain (Seifert-Beheng helpers, gamma-corrected) ---
+            "k_au": {"units": "m^3 kg^-1 s^-1", "bounds": (50.0, 5000.0), "tunable_tier": 1, "transform": "softplus", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "k_ac": {"units": "m^3 kg^-1 s^-1", "bounds": (1.0, 20.0), "tunable_tier": 1, "transform": "softplus", "category": "accretion", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "x_star": {"units": "kg", "bounds": (5e-11, 1e-9), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "Nc_0": {"units": "1/m^3", "bounds": (1e7, 1e9), "tunable_tier": 2, "transform": "softplus", "category": "number_concentration", "reference": "Thompson et al. (2008)", "shape": None},
+            "k_sc": {"units": "m^3 kg^-1 s^-1", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "D_eq": {"units": "m", "bounds": (0.0003, 0.0033), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "evap_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "softplus", "category": "evaporation", "reference": "Thompson et al. (2008)", "shape": None},
+            "a_v_r": {"units": "m^(1-b)/s", "bounds": (40.0, 400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "b_v_r": {"units": "1", "bounds": (0.15, 1.5), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Seifert & Beheng (2001)", "shape": None},
+            "mu_c": {"units": "1", "bounds": (0.99, 9.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Thompson et al. (2008)", "shape": None},
+            "mu_r": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Thompson et al. (2008)", "shape": None},
+            # --- Ice nucleation (Cooper 1986) ---
+            "N_i0": {"units": "1/m^3", "bounds": (1650.0, 15000.0), "tunable_tier": 2, "transform": "softplus", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            "N_i_nuc_max": {"units": "1/m^3", "bounds": (1e5, 5e6), "tunable_tier": 3, "transform": "softplus", "category": "ice_nucleation", "reference": "Thompson et al. (2008)", "shape": None},
+            "cooper_a": {"units": "1/K", "bounds": (0.1, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            "cooper_T_act": {"units": "K", "bounds": (255.0, 273.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_nucleation", "reference": "Cooper (1986)", "shape": None},
+            # --- Ice depositional growth / WBF ---
+            "dep_coeff": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "Thompson et al. (2008)", "shape": None},
+            "q_i_min_growth": {"units": "kg/kg", "bounds": (3e-10, 3e-09), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Thompson et al. (2008)", "shape": None},
+            "rho_cloud_ice": {"units": "kg/m^3", "bounds": (100.0, 917.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Thompson et al. (2008)", "shape": None},
+            "bergeron_rate": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "Thompson et al. (2008)", "shape": None},
+            "T_center": {"units": "K", "bounds": (248.0, 268.0), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Thompson et al. (2008)", "shape": None},
+            "T_width": {"units": "K", "bounds": (3.0, 30.0), "tunable_tier": 3, "transform": "sigmoid", "category": "condensation", "reference": "Thompson et al. (2008)", "shape": None},
+            # --- Riming ---
+            "rime_coeff": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "riming", "reference": "Thompson et al. (2008)", "shape": None},  # unclamped riming-rate multiplier (default 1.0 nominal), not a [0,1] probability
+            # --- Ice -> snow autoconversion / aggregation ---
+            "ice_snow_d_auto": {"units": "m", "bounds": (8e-05, 0.0008), "tunable_tier": 2, "transform": "sigmoid", "category": "aggregation", "reference": "Thompson et al. (2008)", "shape": None},
+            "agg_coeff": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 2, "transform": "sigmoid", "category": "aggregation", "reference": "Thompson et al. (2008)", "shape": None},
+            # --- Melting ---
+            "melt_rate": {"units": "1/s", "bounds": (0.0005, 0.05), "tunable_tier": 2, "transform": "sigmoid", "category": "melting", "reference": "Thompson et al. (2008)", "shape": None},
+            # --- Graupel formation from riming ---
+            "rime_to_graupel_threshold": {"units": "kg/kg/s", "bounds": (3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "riming", "reference": "Thompson et al. (2008)", "shape": None},
+            "rime_to_graupel_rate": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "riming", "reference": "Thompson et al. (2008)", "shape": None},
+            # --- Frozen-species fall speeds ---
+            "a_v_i": {"units": "m^(1-b)/s", "bounds": (15.0, 150.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
+            "b_v_i": {"units": "1", "bounds": (0.08, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
+            "a_v_s": {"units": "m^(1-b)/s", "bounds": (9.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
+            "b_v_s": {"units": "1", "bounds": (0.09, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
+            "a_v_g": {"units": "m^(1-b)/s", "bounds": (26.0, 240.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
+            "b_v_g": {"units": "1", "bounds": (0.13, 1.2), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Thompson et al. (2008)", "shape": None},
+        },
+    },
+}
+
+
 class KesslerConfig(NamedTuple):
     """Configuration for Kessler warm-rain microphysics."""
     autoconversion_threshold: float = 1.0e-3   # q_c threshold [kg/kg]

@@ -25,6 +25,64 @@ if TYPE_CHECKING:
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
 
 
+# Machine-readable tunable/fixed split for the radiation scheme configs.
+# Reviewed 2026-06-13 (placeholders replaced with physically-correct
+# classifications):
+#   * gray tau_equator/tau_pole are PRIMARY trained knobs (the legacy-8 set
+#     in training/trainable_params.py DEFAULT_TRAINABLE) -> tier 1 with their
+#     flat build_segment_fn aliases preserved as legacy_name;
+#   * surface albedo (the AIMIP-trained blended-surface knob that reaches the
+#     heating through both solvers) -> tier 1;
+#   * other closure knobs (LW/SW optical-depth shape, ozone profile,
+#     emissivity) -> tier 2;
+#   * RRTMGP gas concentrations and bulk aerosol optics are read into the
+#     optics-cache key (any flip rebuilds the solver instance, see
+#     RRTMGP._instance_cache_key) and are NOT meant to be trained -> tier 3.
+__param_spec__ = {
+    "GrayRadiationConfig": {
+        "scheme_key": "atm.rad.GrayRadiationConfig",
+        "excluded": {
+            "sfc_emissivity": "physics: surface boundary emissivity is a domain boundary condition, not a sigmoid-tunable closure (fix via config)",
+        },
+        "params": {
+            "tau_equator": {"units": "1", "bounds": (2.0, 15.0), "tunable_tier": 1, "transform": "sigmoid", "category": "optical_depth", "reference": "Frierson et al. (2006)", "shape": None, "legacy_name": "tau_equator"},
+            "tau_pole": {"units": "1", "bounds": (0.5, 5.0), "tunable_tier": 1, "transform": "sigmoid", "category": "optical_depth", "reference": "Frierson et al. (2006)", "shape": None, "legacy_name": "tau_pole"},
+            "linear_frac": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "longwave", "reference": "O'Gorman & Schneider (2008)", "shape": None},
+            "tau_moist_coeff": {"units": "m2/kg", "bounds": (0.0, 0.05), "tunable_tier": 2, "transform": "softplus", "category": "longwave", "reference": "Frierson et al. (2006)", "shape": None},
+            "lw_diff_factor": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "longwave", "reference": "Fu & Liou (1992) diffusivity factor", "shape": None},
+            "sw_tau_0": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "shortwave", "reference": "Frierson et al. (2006)", "shape": None},
+            "sw_exponent": {"units": "1", "bounds": (0.5, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "shortwave", "reference": "gray radiation scheme default", "shape": None},
+            "sfc_albedo": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "albedo", "reference": "gray radiation scheme default", "shape": None},
+            "obliquity": {"units": "degree", "bounds": (0.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "solar", "reference": "gray radiation scheme default", "shape": None},
+        },
+    },
+    "OzoneProfileConfig": {
+        "scheme_key": "atm.rad.OzoneProfileConfig",
+        "excluded": {
+        },
+        "params": {
+            "p_peak_hPa": {"units": "hPa", "bounds": (1.0, 100.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ozone_profile", "reference": "US Standard Atmosphere 1976 / analytical ozone profile default", "shape": None},
+            "o3_max_vmr": {"units": "mol/mol", "bounds": (1.0e-06, 2.0e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "ozone_profile", "reference": "US Standard Atmosphere 1976 / analytical ozone profile default", "shape": None},
+            "sigma_logp": {"units": "1", "bounds": (0.3, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ozone_profile", "reference": "analytical ozone profile default", "shape": None},
+        },
+    },
+    "RRTMGPConfig": {
+        "scheme_key": "atm.rad.RRTMGPConfig",
+        "excluded": {
+        },
+        "params": {
+            "sfc_albedo": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "albedo", "reference": "RRTMGP scheme default", "shape": None},
+            "sfc_emissivity": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "emissivity", "reference": "RRTMGP scheme default", "shape": None},
+            "co2_ppmv": {"units": "ppmv", "bounds": (150.0, 2000.0), "tunable_tier": 3, "transform": "softplus", "category": "gas_concentration", "reference": "Mlawer et al. (1997) RRTMG / Pincus et al. (2019) RRTMGP", "shape": None},
+            "ch4_ppbv": {"units": "ppbv", "bounds": (500.0, 6000.0), "tunable_tier": 3, "transform": "softplus", "category": "gas_concentration", "reference": "Mlawer et al. (1997) RRTMG / Pincus et al. (2019) RRTMGP", "shape": None},
+            "n2o_ppbv": {"units": "ppbv", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "softplus", "category": "gas_concentration", "reference": "Mlawer et al. (1997) RRTMG / Pincus et al. (2019) RRTMGP", "shape": None},
+            "aerosol_ssa": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "aerosol_optics", "reference": "RRTMGP bulk aerosol default", "shape": None},
+            "aerosol_g": {"units": "1", "bounds": (-1.0, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "aerosol_optics", "reference": "RRTMGP bulk aerosol default", "shape": None},
+        },
+    },
+}
+
+
 class GrayRadiationConfig(NamedTuple):
     """Configuration for two-stream gray radiation.
 

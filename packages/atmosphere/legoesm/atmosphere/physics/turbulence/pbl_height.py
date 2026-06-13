@@ -31,6 +31,21 @@ from legoesm import constants
 from legoesm.atmosphere.physics._shared import virtual_temperature
 
 
+__param_spec__ = {
+    "PBLHeightConfig": {
+        "scheme_key": "atm.pblh.PBLHeightConfig",
+        "excluded": {
+            "h_min": "numerics: lowest-layer PBL-height floor (avoids /0)",
+            "sharpness": "numerics: sigmoid-gate sharpness for the Ri-crossing detector",
+        },
+        "params": {
+            "Ri_crit": {"units": "1", "bounds": (0.0825, 0.75), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_richardson", "reference": "Vogelezang & Holtslag (1996) bulk-Ri PBL-height criterion", "shape": None},
+            "h_max": {"units": "m", "bounds": (1650.0, 15000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pbl_height", "reference": "diagnosed PBL-height upper cap", "shape": None},
+        },
+    },
+}
+
+
 class PBLHeightConfig(NamedTuple):
     """Configuration for PBL height diagnosis.
 
