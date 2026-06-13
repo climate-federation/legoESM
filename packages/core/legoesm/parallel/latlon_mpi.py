@@ -605,8 +605,12 @@ def exchange_halo_lon(
     # (sendtag=rank, recvtag=source) mismatches on the reverse ring at
     # proc_lon>=3 (codex review MAJOR 2026-06-13: gradients would hang).
     # With a single tag per phase, forward AND backward messages match
-    # for any ring size.  (Distinct from plane_mpi's 1000/2000 and from
-    # the N/S rank-tags so concurrent exchanges never cross-match.)
+    # for any ring size.  (Numerically distinct from plane_mpi's
+    # 1000/2000; not strictly distinct from the N/S rank-tags, but a
+    # cross-match would also need the same comm + same source + same
+    # dest + concurrent outstanding recvs — E/W and N/S neighbour pairs
+    # are disjoint at proc_lon>1, and proc_lon==1 uses the local-wrap
+    # fast path, so no cross-match path exists.)
     _TAG_LON = 3_000
 
     # UNIFORM-DIRECTION SHIFT (deadlock-free on a periodic RING).  The

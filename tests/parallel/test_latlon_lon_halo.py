@@ -94,8 +94,9 @@ def _mpi_ring_grad():
     """Run under mpirun -np N: gradient through exchange_halo_lon must
     (a) not hang (the AD tag bug for proc_lon>=3 would deadlock the
     backward sendrecv) and (b) match the serial periodic-pad reference —
-    the two wrap-seam global columns get 4*g (interior + ghost), the
-    rest 2*g."""
+    every BLOCK-boundary column (all 2n: each block's first + last) is a
+    neighbour's ghost so gets 4*g (interior read + ghost read), the rest
+    2*g (see the reads-accumulation below)."""
     from mpi4py import MPI
 
     comm = MPI.COMM_WORLD
