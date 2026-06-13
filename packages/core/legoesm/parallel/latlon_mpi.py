@@ -524,6 +524,131 @@ def exchange_halo_latlon(
     return jnp.concatenate([south_halo, field, north_halo], axis=0)
 
 
+def exchange_halo_lon(
+    field: jax.Array,
+    west_rank: int,
+    east_rank: int,
+    rank: int,
+    halo: int = 1,
+) -> jax.Array:
+    """Exchange ``halo`` ghost LONGITUDE columns on each side (W/E).
+
+    Increment 1 of the lat-lon 2-D pencil decomposition
+    (``docs/scaling/latlon_2d_decomposition_design.md``).  Longitude is
+    GLOBALLY PERIODIC, so — unlike the N/S :func:`exchange_halo_latlon`
+    — there are no pole/wall ends: every rank in the longitude ring
+    sends its west edge west and its east edge east, and the wrap is
+    just the ring topology (the rank owning the last lon block has the
+    rank owning the first as its east neighbour).  This is a STANDALONE
+    primitive (takes plain neighbour ranks, not a layout) so the future
+    ``LatLon2DLayout`` can call it with ``layout.west_rank`` etc.; it is
+    NOT yet wired into any step.
+
+    When the longitude ring has a single member (``west_rank == east_rank
+    == rank`` — i.e. ``proc_lon == 1``, the current 1-D latitude-band
+    case) the wrap is performed LOCALLY from the rank's own columns,
+    byte-identical to the existing ``jnp.roll`` periodic wrap and
+    runnable without mpi4jax.
+
+    Parameters
+    ----------
+    field : jax.Array, shape (n_lat_local, n_lon_local[, nlev])
+        Rank-local interior field, no lon halos in input.
+    west_rank, east_rank : int
+        MPI ranks of the western / eastern longitude neighbours (ring).
+    rank : int
+        This process's MPI rank.
+    halo : int, default 1
+        Number of ghost columns to add on each lon side.
+
+    Returns
+    -------
+    jax.Array, shape (n_lat_local, n_lon_local + 2*halo[, nlev])
+    """
+    if halo <= 0:
+        return field
+
+    n_lon_local = field.shape[1]
+    if halo > n_lon_local:
+        raise ValueError(
+            f"exchange_halo_lon: halo={halo} exceeds n_lon_local="
+            f"{n_lon_local} on rank {rank}.  Reduce proc_lon or "
+            "increase longitude resolution."
+        )
+
+    # Single-member lon ring (proc_lon == 1): local periodic wrap — the
+    # west ghost is the rank's own EAST edge, the east ghost its WEST
+    # edge.  Byte-identical to the legacy ``jnp.roll`` wrap; no MPI.
+    if west_rank == rank and east_rank == rank:
+        west_halo = field[:, -halo:]
+        east_halo = field[:, :halo]
+        return jnp.concatenate([west_halo, field, east_halo], axis=1)
+
+    try:
+        import mpi4jax
+        from mpi4py import MPI
+    except ImportError as exc:
+        raise ImportError(
+            "Lat-lon E/W MPI halo exchange (proc_lon>1) requires "
+            "mpi4jax and mpi4py."
+        ) from exc
+
+    comm = MPI.COMM_WORLD
+    sendrecv = get_sendrecv_vjp(mpi4jax)
+    trailing_lat = field.shape[0]
+    other = field.shape[2:]  # (nlev,) or ()
+
+    # PHASE-CONSTANT tags with sendtag == recvtag (one per shift
+    # direction, +1 for the opposite) — the AD-safe convention from
+    # plane_mpi._TAG_EW.  The shared sendrecv VJP's backward swaps
+    # source<->dest but KEEPS the tags, so a rank-as-tag scheme
+    # (sendtag=rank, recvtag=source) mismatches on the reverse ring at
+    # proc_lon>=3 (codex review MAJOR 2026-06-13: gradients would hang).
+    # With a single tag per phase, forward AND backward messages match
+    # for any ring size.  (Distinct from plane_mpi's 1000/2000 and from
+    # the N/S rank-tags so concurrent exchanges never cross-match.)
+    _TAG_LON = 3_000
+
+    # UNIFORM-DIRECTION SHIFT (deadlock-free on a periodic RING).  The
+    # same-neighbour pattern (source==dest) that the N/S
+    # ``exchange_halo_latlon`` uses only unwinds on a LINE — the poles
+    # terminate the chain.  Longitude is a closed ring with no ends, and
+    # the AD-safe sendrecv token serialises this rank's two exchanges,
+    # so a same-neighbour west-then-east pattern makes phase-1 wait on
+    # the neighbour's phase-2 → circular deadlock (observed: job
+    # 8476475 timed out in mpi_sendrecv).  Instead each phase is a
+    # UNIFORM shift where every send is matched by a recv IN THE SAME
+    # phase (a permutation), so no cross-phase ring dependency exists.
+
+    # Phase 1 — EASTWARD shift: send our EAST edge to the east neighbour,
+    # receive the west neighbour's east edge into our WEST halo.
+    send_e = field[:, -halo:].reshape(-1)
+    recv_w = sendrecv(
+        send_e, jnp.zeros_like(send_e),
+        west_rank,   # source (recv from west)
+        east_rank,   # dest   (send to east)
+        _TAG_LON,    # sendtag == recvtag (phase-constant, AD-safe)
+        _TAG_LON,
+        comm,
+    )
+    west_halo = recv_w.reshape((trailing_lat, halo) + other)
+
+    # Phase 2 — WESTWARD shift: send our WEST edge to the west neighbour,
+    # receive the east neighbour's west edge into our EAST halo.
+    send_w = field[:, :halo].reshape(-1)
+    recv_e = sendrecv(
+        send_w, jnp.zeros_like(send_w),
+        east_rank,     # source (recv from east)
+        west_rank,     # dest   (send to west)
+        _TAG_LON + 1,  # phase-2 tag (sendtag == recvtag)
+        _TAG_LON + 1,
+        comm,
+    )
+    east_halo = recv_e.reshape((trailing_lat, halo) + other)
+
+    return jnp.concatenate([west_halo, field, east_halo], axis=1)
+
+
 # ============================================================================
 # Backend-dispatched pad_halo_latlon implementation
 # ============================================================================
