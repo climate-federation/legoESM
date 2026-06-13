@@ -45,6 +45,8 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.ocean.physics.shortwave_penetration",
     "legoesm.ocean.physics.bottom_drag.config",
     "legoesm.ice.config",
+    "legoesm.coupler.config",
+    "legoesm.coupler.lake.config",
 )
 
 # Tier thresholds for the conservative<->broad continuum. ``build_trainable_params``

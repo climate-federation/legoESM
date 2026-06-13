@@ -6,6 +6,60 @@ from typing import NamedTuple
 
 from legoesm import constants
 
+__param_spec__ = {
+    "LakeConfig": {
+        "scheme_key": "coupler.lake",
+        "excluded": {"z_ref": "convention: reference height [m]"},
+        "params": {
+            "h_epi": {
+                "units": "m", "bounds": (1.0, 20.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "two-layer lake epilimnion depth", "shape": None,
+            },
+            "h_hypo": {
+                "units": "m", "bounds": (5.0, 100.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "two-layer lake hypolimnion depth", "shape": None,
+            },
+            "k_mix": {
+                "units": "m^2/s", "bounds": (1.0e-3, 1.0e-1), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "lake epi-hypo turbulent mixing coefficient", "shape": None,
+            },
+            "wind_mix_alpha": {
+                "units": "1", "bounds": (0.01, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "lake wind-driven mixing efficiency", "shape": None,
+            },
+            "Cd_lake": {
+                "units": "1", "bounds": (5.0e-4, 5.0e-3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "lake-atmosphere momentum drag coefficient", "shape": None,
+            },
+            "Ch_lake": {
+                "units": "1", "bounds": (5.0e-4, 5.0e-3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "lake-atmosphere heat transfer coefficient", "shape": None,
+            },
+            "albedo_lake": {
+                "units": "1", "bounds": (0.03, 0.2), "tunable_tier": 1,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "lake surface broadband albedo", "shape": None,
+            },
+            "emissivity_lake": {
+                "units": "1", "bounds": (0.9, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "lake surface longwave emissivity", "shape": None,
+            },
+            "z0_lake": {
+                "units": "m", "bounds": (1.0e-5, 1.0e-3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "lake aerodynamic roughness length", "shape": None,
+            },
+        },
+    },
+}
+
 
 class LakeConfig(NamedTuple):
     """Two-layer lake (epilimnion + hypolimnion) configuration."""
