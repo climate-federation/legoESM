@@ -1493,6 +1493,42 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
 # Top-level orchestrator (public API matching call site)
 # =====================================================================
 
+def gm_redi_density_and_jacobian(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    eta: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+    grid: LatLonGrid,
+    z_coord: OceanZStarCoordinate,
+    *,
+    eos: str = "wright",
+    eos_linear=None,
+    mask: jnp.ndarray | None = None,
+    rho_0: float = _RHO_0,
+    g: float = constants.g,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Shared GM/Redi in-situ density (2-iteration EOS coupling) + z* Jacobian.
+
+    Both :func:`gm_redi_tracer_tendency_latlon` and
+    :func:`compute_isoneutral_K33_latlon` need EXACTLY this ``rho`` (from the
+    same 2-iteration EOS coupling) and ``jacobian`` from the SAME
+    ``(T, S, eta, H_bathy)``.  When ``implicit_K33=True`` (the Veros/ACC
+    production recipe) the model step calls BOTH per step, so each was
+    recomputing the expensive 3-D EOS coupling independently — hoist it here,
+    compute once, and pass via the ``density_jacobian`` argument (scaling
+    review 2026-06-13 lever #3).  Pure; returns ``(rho, jacobian)``.
+    """
+    if mask is None:
+        mask = jnp.ones(T.shape[:2], dtype=T.dtype)
+    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    eos_fn = make_eos_fn(eos, eos_linear)
+    fill_fn = lambda field: neumann_fill_cgrid(field, mask)
+    rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
+    )
+    return rho, jacobian
+
+
 def gm_redi_tracer_tendency_latlon(
     T: jnp.ndarray,
     S: jnp.ndarray,
@@ -1512,6 +1548,7 @@ def gm_redi_tracer_tendency_latlon(
     g: float = constants.g,
     kappa_gm_override: jnp.ndarray | None = None,
     kappa_redi_override: jnp.ndarray | None = None,
+    density_jacobian: tuple[jnp.ndarray, jnp.ndarray] | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.
 
@@ -1548,17 +1585,24 @@ def gm_redi_tracer_tendency_latlon(
     if v_mask is None:
         v_mask = jnp.ones((T.shape[0] + 1, T.shape[1]), dtype=T.dtype)
 
-    # Jacobian.
-    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
-
-    # Density via 2-iteration EOS coupling.
+    # Jacobian + density via 2-iteration EOS coupling.  Hoistable: when the
+    # model step also computes K_33 (implicit_K33), it passes the SAME
+    # (rho, jacobian) here so the expensive 3-D EOS coupling runs once
+    # (scaling review lever #3).  density_jacobian=None => compute inline,
+    # bit-identical to the pre-hoist path.  Reuse invariant: ONLY
+    # (rho, jacobian) are hoisted; the function still receives the current
+    # eta/H_bathy and any other use of them (e.g. the Visbeck
+    # n2_mode="adiabatic" partial-cell h_actual/pressure path) recomputes
+    # independently from those same current values, so a precomputed
+    # density_jacobian never makes them stale.
     eos_fn = make_eos_fn(eos, eos_linear)
-    fill_fn = lambda field: neumann_fill_cgrid(field, mask)
-    rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
-        T, S, mask, fill_fn, eos_fn,
-        z_coord.dz_ref, rho_0, g,
-        n_iter=2,
-    )
+    if density_jacobian is None:
+        rho, jacobian = gm_redi_density_and_jacobian(
+            T, S, eta, H_bathy, grid, z_coord,
+            eos=eos, eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
+        )
+    else:
+        rho, jacobian = density_jacobian
 
     slope_density = getattr(cfg, "slope_density", "in_situ")
 
@@ -1710,6 +1754,7 @@ def compute_isoneutral_K33_latlon(
     rho_0: float = _RHO_0,
     g: float = constants.g,
     kappa_redi_override: jnp.ndarray | None = None,
+    density_jacobian: tuple[jnp.ndarray, jnp.ndarray] | None = None,
 ) -> jnp.ndarray:
     """Vertical isoneutral diffusivity K_33 at w-faces, for the implicit solve.
 
@@ -1729,12 +1774,19 @@ def compute_isoneutral_K33_latlon(
     """
     if mask is None:
         mask = jnp.ones(T.shape[:2], dtype=T.dtype)
-    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    # Jacobian + density (2-iteration EOS coupling).  When the model step
+    # already computed these for the GM/Redi tracer tendency from the SAME
+    # (T,S,eta,H_bathy) (implicit_K33 path), reuse them via density_jacobian
+    # so the expensive 3-D EOS coupling is not run twice; None => compute
+    # inline, bit-identical (scaling review lever #3).
     eos_fn = make_eos_fn(eos, eos_linear)
-    fill_fn = lambda field: neumann_fill_cgrid(field, mask)
-    rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
-        T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
-    )
+    if density_jacobian is None:
+        rho, jacobian = gm_redi_density_and_jacobian(
+            T, S, eta, H_bathy, grid, z_coord,
+            eos=eos, eos_linear=eos_linear, mask=mask, rho_0=rho_0, g=g,
+        )
+    else:
+        rho, jacobian = density_jacobian
     kappa_Redi = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
     nlev = T.shape[-1]
     # K_33 is evaluated at the nlev-1 w-faces, so kappa_Redi is needed there.
