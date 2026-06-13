@@ -1855,7 +1855,15 @@ class ModelDriver:
             # decomposition across processes; bench --cs-spmd receipts
             # jobs 8462928/8465445).
             from legoesm.parallel.sharded_dynamics import shard_state
-            self.state = shard_state(self.state, self._device_config)
+            # Pass grid_type so a lat-lon state shards on the LATITUDE
+            # axis, not the cubed-sphere 6-face rules (shard_state
+            # defaults to "cubed_sphere").  tracers already go through
+            # the grid-aware shard_pytree below; the main state must
+            # match or a single-node multi-GPU lat-lon run shards the
+            # state under the wrong layout (codex P1, 2026-06-13).
+            self.state = shard_state(
+                self.state, self._device_config,
+                grid_type=self.config.grid.grid_type)
 
             from legoesm.parallel.mesh import shard_pytree
             self.tracers = shard_pytree(self.tracers, self._device_config)
@@ -1872,8 +1880,10 @@ class ModelDriver:
             # only sharding (no sub-face tiling), a ``face`` mesh axis,
             # cubed-sphere grid type, and ``n_devices in (1, 2, 3, 6)``
             # because ppermute / all_gather kernels assume divisors of
-            # 6 faces.  Other tilings or device counts silently keep
-            # the local backend.
+            # 6 faces.  Non-cubed-sphere grids and unsupported device
+            # counts keep the local backend silently (they cannot
+            # benefit); sub-face tiling (>6 devices) keeps it with a
+            # LOUD warning (the tiled dycore step is unwired — P4).
             self._maybe_activate_spmd_halo_backend()
 
         logger.info(
@@ -1884,10 +1894,14 @@ class ModelDriver:
     def _maybe_activate_spmd_halo_backend(self) -> None:
         """Activate the explicit SPMD halo backend when supported.
 
-        Unsupported configurations (non-cubed-sphere grids, sub-face
-        tiling, unsupported device counts, no mesh) are skipped
-        silently — they cannot benefit from the SPMD halo collectives
-        in the first place.
+        Unsupported configurations are not activated.  Non-cubed-sphere
+        grids, unsupported device counts, and no-mesh are skipped
+        silently (they cannot benefit from the SPMD halo collectives).
+        Sub-face tiling (>6 devices) is skipped with a LOUD warning:
+        the tiled ppermute exchange exists but the tiled dycore STEP is
+        unwired (P4 milestone), so the run stays on the local backend
+        and will not strong-scale past 6 devices — surfaced, not
+        silent, so a tiled production run isn't quietly degraded.
 
         For supported configurations, activation must either succeed
         or fail loudly.  Both import failures and activation failures
@@ -1921,6 +1935,25 @@ class ModelDriver:
         if "face" not in dc.mesh.axis_names:
             return
         if getattr(dc, "tiling", (1, 1)) != (1, 1):
+            # Sub-face tiling (>6 devices — the production GPU strong-
+            # scaling regime).  The tiled ppermute EXCHANGE layer is
+            # parity-proven (cubesphere_exchange, 24-proc), but it is
+            # NOT yet wired into the production dycore STEP (the
+            # tile-aware operator stage is the P4 milestone; the dycore
+            # still slices full-face arrays).  So activating it here
+            # would be wrong — but SILENTLY keeping the local backend
+            # hides that a tiled run gets degraded (non-SPMD) halos.
+            # Warn loudly instead of returning silently (codex P1,
+            # 2026-06-13).
+            logger.warning(
+                "SPMD halo backend NOT activated for sub-face tiling "
+                "%s (%d devices): the tiled dycore STEP is unwired "
+                "(P4 milestone) — this run uses the LOCAL halo backend "
+                "and will NOT strong-scale past 6 devices.  Use "
+                "face-only sharding (1/2/3/6 devices) or multi-node "
+                "1-process-per-node SPMD for production strong scaling.",
+                dc.tiling, dc.n_devices,
+            )
             return
         if dc.n_devices not in (1, 2, 3, 6):
             return
