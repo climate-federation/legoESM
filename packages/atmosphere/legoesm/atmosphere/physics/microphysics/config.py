@@ -64,6 +64,16 @@ __param_spec__ = {
     "MorrisonConfig": {
         "scheme_key": "atm.micro.MorrisonConfig",
         "excluded": {
+            # Fall-speed power-law EXPONENTS feed math.gamma(4 + b) / math.gamma(1 + b)
+            # (morrison.py, _warm_rain.py) to precompute the cons* moment factors.
+            # math.gamma is a Python C function requiring a float, so a traced
+            # trainable leaf breaks JIT/grad. Fixed until those gamma calls use a
+            # JAX-traceable gamma (jax.scipy.special.gamma / exp(lgamma)); the
+            # fall-speed PREFACTORS fall_a_* stay trainable (plain multipliers).
+            "fall_b_r": "fall-speed exponent inside math.gamma(4+b) (non-traceable); fix via JAX gamma to train",
+            "fall_b_i": "fall-speed exponent inside math.gamma(4+b) (non-traceable); fix via JAX gamma to train",
+            "fall_b_s": "fall-speed exponent inside math.gamma(4+b) (non-traceable); fix via JAX gamma to train",
+            "fall_b_g": "fall-speed exponent inside math.gamma(4+b) (non-traceable); fix via JAX gamma to train",
             "autoconversion_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "breakup_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "hom_freeze_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -134,13 +144,9 @@ __param_spec__ = {
             "a_v_s": {"units": "m^(1-b)/s", "bounds": (9.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
             "b_v_s": {"units": "1", "bounds": (0.09, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
             "fall_a_r": {"units": "m^(1-b)/s", "bounds": (280.0, 2500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
-            "fall_b_r": {"units": "1", "bounds": (0.26, 2.4), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
             "fall_a_i": {"units": "m^(1-b)/s", "bounds": (230.0, 2100.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "gSAM M2005 default", "shape": None},
-            "fall_b_i": {"units": "1", "bounds": (0.28, 2.6), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "gSAM M2005 default", "shape": None},
             "fall_a_s": {"units": "m^(1-b)/s", "bounds": (3.8, 35.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
-            "fall_b_s": {"units": "1", "bounds": (0.13, 1.2), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
             "fall_a_g": {"units": "m^(1-b)/s", "bounds": (6.3, 58.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
-            "fall_b_g": {"units": "1", "bounds": (0.12, 1.1), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
             "lamr_max": {"units": "1/m", "bounds": (16500.0, 150000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison et al. (2005)", "shape": None},
             "lami_max": {"units": "1/m", "bounds": (330000.0, 3000000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison et al. (2005)", "shape": None},
             "lams_max": {"units": "1/m", "bounds": (33000.0, 300000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison et al. (2005)", "shape": None},
