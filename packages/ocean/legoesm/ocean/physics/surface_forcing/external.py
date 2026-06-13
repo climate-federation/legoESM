@@ -62,7 +62,7 @@ def external_surface_forcing(
     S: jnp.ndarray,
     dz_0: jnp.ndarray,
     surface_forcing,
-    min_wet_cell_thickness_m: float = 1.0e-3,
+    min_wet_cell_thickness_m: float = 1.0e-3,  # coeff-ok: wet-cell thickness floor [m]
 ) -> SurfaceForcingOutput:
     """Apply a coupler ``OceanSurfaceForcing`` to the top layer.  Returns zero
     tendencies for any channel that is ``None``.

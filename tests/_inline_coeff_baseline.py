@@ -359,55 +359,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
         'dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4': 1,
         'ustar = jnp.clip(ustar, 1e-4, None)': 1,
     },
-    'packages/ocean/legoesm/ocean/physics/bbl_adv.py': {
-        'V_bot = area * jnp.maximum(e3_bot, 1.0e-3)': 1,
-        'a3 = area[..., None] * jnp.maximum(h_k, 1.0e-3) # cell volumes (..., nl)': 1,
-        'wet3 = h > 1.0e-3': 1,
-    },
-    'packages/ocean/legoesm/ocean/physics/lateral_mixing/_gm_redi_common.py': {
-        'transition_width_frac: float = 0.1,': 2,
-    },
-    'packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py': {
-        'taper_width_frac: float = 0.1,': 1,
-    },
-    'packages/ocean/legoesm/ocean/physics/mixing.py': {
-        'cfl_safety: float = 0.45,': 2,
-    },
-    'packages/ocean/legoesm/ocean/physics/mpas_physics.py': {
-        'sw_absorbed = _sf_sw * 0.94 # 94% penetrates; 6% surface skin': 1,
-    },
-    'packages/ocean/legoesm/ocean/physics/surface_forcing/external.py': {
-        'min_wet_cell_thickness_m: float = 1.0e-3,': 1,
-    },
-    'packages/ocean/legoesm/ocean/physics/surface_forcing/wind_profiles.py': {
-        '-0.08 - 0.0397 * s2 + 1.9487 * s2**2 - 2.0397 * s2**3': 4,
-        'getattr(cfg, "tropical_wind_lat_deg", 15.0)': 1,
-        'phi_jet = jnp.radians(50.0)': 1,
-        'scale = cfg.tau_max / 0.1': 1,
-        'sigma_t = jnp.radians(15.0)': 1,
-        'sigma_w = jnp.radians(12.0)': 1,
-    },
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py': {
-        '/ jnp.maximum(1.0 + 5.0 * jnp.maximum(-zeta_kpp, 0.0), 1.0))': 1,
-        'base16 = jnp.maximum(1.0 + 16.0 * abs_zeta, 1.0)': 1,
-        'u_star = jnp.maximum(speed_sfc * 0.01, 1e-4)': 2,
-    },
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/mpas_integration.py': {
-        'S_w = jnp.where(m3 > 0.5, S_3d, 35.0)': 1,
-        'S_w = jnp.where(m3 > 0.5, S_3d, 35.0) # safe S for EOS': 1,
-    },
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tidal.py': {
-        'N_bottom_per_s: float = 1.0e-3,': 1,
-        'rms_roughness_m: float = 250.0,': 1,
-        'roughness_scale_m: float = 3000.0,': 1,
-        'u_tide_m_s: float = 0.02,': 1,
-    },
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py': {
-        '* jnp.arctan((depth - 2500.0) / 222.2)) * 1.0e-4': 3,
-        'eos_salinity_floor: float = 1.0e-3,': 1,
-        'return (0.8 + 1.05 / jnp.pi': 2,
-        'return jnp.maximum(1.0, jnp.minimum(10.0, 6.6 * Ri))': 1,
-    },
 }
 
 _SEED_FILES: frozenset[str] = frozenset({
@@ -465,15 +416,4 @@ _SEED_FILES: frozenset[str] = frozenset({
     'packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py',
     'packages/atmosphere/legoesm/atmosphere/physics/turbulence/surface_layer.py',
     'packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py',
-    'packages/ocean/legoesm/ocean/physics/bbl_adv.py',
-    'packages/ocean/legoesm/ocean/physics/lateral_mixing/_gm_redi_common.py',
-    'packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py',
-    'packages/ocean/legoesm/ocean/physics/mixing.py',
-    'packages/ocean/legoesm/ocean/physics/mpas_physics.py',
-    'packages/ocean/legoesm/ocean/physics/surface_forcing/external.py',
-    'packages/ocean/legoesm/ocean/physics/surface_forcing/wind_profiles.py',
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/kpp.py',
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/mpas_integration.py',
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tidal.py',
-    'packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py',
 })

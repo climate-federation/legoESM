@@ -45,6 +45,12 @@ import numpy as np
 from legoesm import constants
 
 
+# St Laurent (2002) tidal-mixing scheme reference defaults.
+_STLAURENT_RMS_ROUGHNESS_M = 250.0
+_STLAURENT_U_TIDE_M_S = 0.02
+_STLAURENT_N_BOTTOM_PER_S = 1.0e-3
+_STLAURENT_ROUGHNESS_SCALE_M = 3000.0
+
 class TidalMixingConfig(NamedTuple):
     """Configuration for the Jayne & St-Laurent abyssal tidal mixing scheme.
 
@@ -204,12 +210,12 @@ def compute_tidal_diffusivity(
 def synthetic_baroclinic_tide_energy_from_bathy(
     H_bathy_m: jnp.ndarray,
     *,
-    rms_roughness_m: float = 250.0,
-    u_tide_m_s: float = 0.02,
-    N_bottom_per_s: float = 1.0e-3,
+    rms_roughness_m: float = _STLAURENT_RMS_ROUGHNESS_M,
+    u_tide_m_s: float = _STLAURENT_U_TIDE_M_S,
+    N_bottom_per_s: float = _STLAURENT_N_BOTTOM_PER_S,
     rho_0: float = constants.rho_ocean,
     deep_threshold_m: float = 1000.0,
-    roughness_scale_m: float = 3000.0,
+    roughness_scale_m: float = _STLAURENT_ROUGHNESS_SCALE_M,
 ) -> jnp.ndarray:
     """Synthetic ``E_BT`` field for spin-up smoke runs.
 
