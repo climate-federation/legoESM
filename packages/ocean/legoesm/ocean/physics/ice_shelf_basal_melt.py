@@ -49,12 +49,8 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.ocean.physics.ice_shelf import freezing_point_C
 
-
-# --- Freezing-point coefficients (Jenkins 1991) ---
-_A_FREEZE: float = -5.73e-2     # K / (g/kg)
-_B_FREEZE: float = 8.32e-2      # K
-_C_FREEZE: float = -7.61e-4     # K / dbar
 
 # --- Thermodynamic constants ---
 # Latent heat of fusion: use the canonical substrate constant (redundancy audit)
@@ -62,7 +58,6 @@ _C_FREEZE: float = -7.61e-4     # K / dbar
 _L_F: float = constants.L_f    # J/kg latent heat of fusion
 _C_P_SW: float = 3974.0         # J/kg/K seawater heat capacity (Jenkins 1991)
 _RHO_FW: float = 1000.0         # kg/m^3 freshwater density
-_RHO_ICE: float = 918.0         # kg/m^3 ice density
 
 
 @dataclass
@@ -82,16 +77,6 @@ class IceShelfMeltConfig:
     L_f: float = _L_F
     c_p_sw: float = _C_P_SW
     rho_fw: float = _RHO_FW
-
-
-def freezing_point_C(salinity_psu, pressure_dbar):
-    """Pressure-dependent freezing point [deg C].
-
-    ``T_f = a S + b + c p`` (Jenkins 1991).
-    """
-    S = jnp.asarray(salinity_psu)
-    p = jnp.asarray(pressure_dbar)
-    return _A_FREEZE * S + _B_FREEZE + _C_FREEZE * p
 
 
 def basal_melt_rate_m_per_s(T_w_C, S_w_psu, p_b_dbar,

@@ -1753,8 +1753,10 @@ def train_sfno_full_spectral(
         mode="state_update",
         dt_sfno=dt_sfno,
         correct_mass=True,
-        correct_moisture_budget=True,
-        clip_q=True,
+        # Not yet wired in the SFNO PE bridge (spectral moisture tracer needs
+        # synthesis/clip/re-analysis); previously silently ignored.
+        correct_moisture_budget=False,
+        clip_q=False,
         use_normalization=False,
     )
 

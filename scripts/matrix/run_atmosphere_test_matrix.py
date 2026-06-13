@@ -2965,7 +2965,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
-            CGridLatLonShallowWaterState, cell_to_cgrid_winds)
+            CGridLatLonShallowWaterState)
+        from legoesm.grids.operators_latlon_cgrid import cell_to_cgrid_winds
         from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
         from legoesm.timestepping.dispatch import dispatch_integrator
 

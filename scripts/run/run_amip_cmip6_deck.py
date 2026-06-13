@@ -36,7 +36,7 @@ To target a specific grid type::
     --grid-type {cubed_sphere,gaussian,latlon,voronoi}
 
 The script always passes ``--monthly-means`` so post-run validation
-tools (``scripts/validate_amip.py``) can read zonal-mean diagnostics.
+tools (``scripts/validate/validate_amip_run.py``) can read zonal-mean diagnostics.
 """
 
 from __future__ import annotations

@@ -472,11 +472,11 @@ are available but not yet validated for AMIP-length runs.
 
 ## Post-run validation
 
-The `scripts/validate_amip.py` script checks run output against observational
+The `scripts/validate/validate_amip_run.py` script checks run output against observational
 targets:
 
 ```bash
-python scripts/validate_amip.py results/amip_run/ --spinup 365
+python scripts/validate/validate_amip_run.py results/amip_run/
 ```
 
 ### Validation targets

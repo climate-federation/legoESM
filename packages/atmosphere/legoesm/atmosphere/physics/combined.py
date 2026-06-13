@@ -9,8 +9,8 @@ can be independently enabled/disabled via its ``scheme`` field (set to
 Gravity wave drag is included as a first-class component on equal
 footing with the other parameterizations; the supported schemes are
 ``"rayleigh"``, ``"lindzen"``, ``"mcfarlane"``, ``"hines"``,
-``"prognostic_spectral"``, ``"ml_emulator"``, and ``"none"`` (see
-``GravityWaveDragConfig``).
+``"prognostic_spectral"``, ``"e3sm_cam"``, ``"ml_emulator"``, and
+``"none"`` (see ``GravityWaveDragConfig``).
 
 The combined function accepts an optional ``phys_state`` (``PhysicsState``)
 argument.  When provided, prognostic physics variables (TKE, convective
@@ -88,18 +88,23 @@ class PhysicsConfig(NamedTuple):
     Fields
     ------
     radiation : RadiationConfig
-        Radiation configuration (schemes: "gray", "rrtmgp").
+        Radiation configuration (schemes: "gray", "rrtmgp", "none").
     convection : ConvectionConfig
-        Convection configuration (schemes: "sbm", "dca", "none").
+        Convection configuration (schemes: "sbm", "dca", "kuo",
+        "mass_flux", "edmf", "zhang_mcfarlane", "kain_fritsch",
+        "emanuel", "tiedtke", "bechtold", "none").
     turbulence : TurbulenceConfig
         Turbulence configuration (schemes: "smagorinsky", "louis",
-        "tke", "clubb_lite", "none").
+        "tke", "mynn25", "clubb_lite", "clubb", "holtslag_boville",
+        "ysu", "edmf", "none").
     microphysics : MicrophysicsConfig
         Microphysics configuration (schemes: "kessler", "sundqvist",
-        "seifert_beheng", "morrison", "thompson", "ml_emulator", "none").
+        "seifert_beheng", "morrison", "thompson", "p3", "sdm",
+        "fast_sbm", "ml_emulator", "none").
     gravity_wave_drag : GravityWaveDragConfig
         Gravity wave drag configuration (schemes: "rayleigh", "lindzen",
-        "mcfarlane", "hines", "prognostic_spectral", "ml_emulator", "none").
+        "mcfarlane", "hines", "prognostic_spectral", "e3sm_cam",
+        "ml_emulator", "none").
     """
     radiation: RadiationConfig = RadiationConfig()
     convection: ConvectionConfig = ConvectionConfig()

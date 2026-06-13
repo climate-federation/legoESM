@@ -207,6 +207,11 @@ def step_sea_ice(
             f"dynamics={config.dynamics!r} requires a grid argument. "
             "Pass grid=<CubedSphereGrid> to step_sea_ice()."
         )
+    if config.transport not in ("none", "advect"):
+        raise ValueError(
+            f"Unknown sea-ice transport scheme: {config.transport!r}. "
+            "Expected one of: 'none', 'advect'."
+        )
     if config.transport == "advect" and grid is None:
         raise ValueError(
             "transport='advect' requires a grid argument. "

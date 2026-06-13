@@ -481,7 +481,7 @@ def _fixed_iteration_pcg_single_reduce(
     return final.x, final.rr
 
 
-def _global_rel_residual(
+def global_rel_residual(
     A_op: Callable[[jnp.ndarray], jnp.ndarray],
     x: jnp.ndarray,
     b: jnp.ndarray,
@@ -574,7 +574,7 @@ def solve_helmholtz_implicit(
             A_op, rhs, x0=x0, tol=stock_cg_tol,
             maxiter=int(stock_cg_maxiter), M=M_inv,
         )
-        rel = _global_rel_residual(A_op, eta_new, rhs)
+        rel = global_rel_residual(A_op, eta_new, rhs)
         return eta_new, HelmholtzSolveDiagnostics(
             rel_residual=rel, converged=rel <= residual_tol,
         )

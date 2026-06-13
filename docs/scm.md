@@ -33,7 +33,7 @@ always reproducible in the SCM in a few seconds.
 
 ```bash
 # 50-day tropical RCE with gray rad + Louis BL + Kessler + simple convection
-JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python scripts/run_scm_rce.py --days 50
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python scripts/matrix/run_scm_test_matrix.py rce --days 50
 ```
 
 Surface temperature should settle near the prescribed value

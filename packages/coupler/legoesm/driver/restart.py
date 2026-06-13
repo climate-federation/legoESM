@@ -658,7 +658,7 @@ def save_restart(
             q_r=q_r,
             diag_accumulators=diag_accumulators,
         )
-    else:
+    elif backend == "npz":
         save_checkpoint(
             path,
             state,
@@ -670,6 +670,10 @@ def save_restart(
             q_c=q_c,
             q_r=q_r,
             carry_aux=carry_aux,
+        )
+    else:
+        raise ValueError(
+            f"Unknown checkpoint backend {backend!r}; expected 'npz' or 'zarr'."
         )
 
     # 2. Compute integrity hashes

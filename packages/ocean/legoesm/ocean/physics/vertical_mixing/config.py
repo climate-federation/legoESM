@@ -14,19 +14,19 @@ __param_spec__ = {
         "excluded": {
         },
         "params": {
-            "A_v": {"units": "1", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
-            "K_v": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
+            "A_v": {"units": "m^2/s", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
+            "K_v": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
         },
     },
     "RichardsonVerticalMixingConfig": {
         "scheme_key": "ocean.vm.richardson",
         "excluded": {
+            "Pr_t": "dead field: the Pr-Ri scaling is built into the K formula; richardson.py only warns when Pr_t != default and never reads it — phantom trainable",
         },
         "params": {
-            "A_bg": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
-            "K_0": {"units": "1", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
-            "K_bg": {"units": "1", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
-            "Pr_t": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
+            "A_bg": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
+            "K_0": {"units": "m^2/s", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
+            "K_bg": {"units": "m^2/s", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
             "alpha": {"units": "1", "bounds": (1.65, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
         },
     },
@@ -67,11 +67,11 @@ __param_spec__ = {
             "zeta_s_abs": "Large 1994 fixed nondim constant",
         },
         "params": {
-            "A_bg": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
-            "K_0_shear": {"units": "1", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
-            "K_bg": {"units": "1", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
-            "K_conv": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
-            "K_max": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "A_bg": {"units": "m^2/s", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "K_0_shear": {"units": "m^2/s", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "K_bg": {"units": "m^2/s", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "K_conv": {"units": "m^2/s", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "K_max": {"units": "m^2/s", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
             "Ri_0": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
             "Ri_crit": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
         },
