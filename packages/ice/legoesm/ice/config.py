@@ -21,8 +21,21 @@ __param_spec__ = {
         "excluded": {
             "S_ice_min": "numerics: salinity floor",
             "S_ice_max": "numerics: salinity cap for stability",
+            # S_ocean_ref stays fixed: an environmental reference (ocean
+            # salinity), not a tunable ice closure; defaults to constants.
         },
-        "params": {},
+        "params": {
+            # Salinity of newly-frozen lead/basal ice — the brine-rejection
+            # closure that sets the ice<->ocean salt flux. Defaults to
+            # constants.S_ice_bulk_default (4 PSU) but is a calibratable physical
+            # closure, so it is exposed (eligible despite the constants default).
+            "S_ice_new": {
+                "units": "PSU", "bounds": (1.0, 12.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "bulk salinity of newly frozen sea ice (Notz/CICE ~4 PSU)",
+                "shape": None,
+            },
+        },
     },
     "RidgingConfig": {
         "scheme_key": "ice.ridging",
@@ -87,6 +100,7 @@ __param_spec__ = {
             "Delta_min": "numerics: deformation-rate regulariser floor",
             "alpha_mevp": "numerics: mEVP stress relaxation (stability-coupled to N_mevp)",
             "beta_mevp": "numerics: mEVP velocity relaxation (stability-coupled to N_mevp)",
+            "T_evp": "numerics: EVP damping ratio coupled to the N_evp subcycle count (E_factor = 1/(2*T_evp*N_evp))",
         },
         "params": {
             "albedo_ice": {
@@ -153,11 +167,6 @@ __param_spec__ = {
                 "units": "1", "bounds": (10.0, 30.0), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "rheology",
                 "reference": "ice-strength concentration decay constant", "shape": None,
-            },
-            "T_evp": {
-                "units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "rheology",
-                "reference": "EVP elastic damping timescale ratio", "shape": None,
             },
         },
     },

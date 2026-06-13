@@ -152,7 +152,8 @@ def _float_default_fields(cls: ast.ClassDef) -> dict[str, float]:
 
 def spec_required_classes(src: str) -> dict[str, dict[str, float]]:
     """``{ClassName: {float_field: default}}`` for module-level NamedTuple
-    subclasses that have at least one float-default field."""
+    subclasses that have at least one float-default (literal) field — the fields
+    a spec MUST classify."""
     tree = ast.parse(src)
     out: dict[str, dict[str, float]] = {}
     for node in tree.body:
@@ -160,6 +161,31 @@ def spec_required_classes(src: str) -> dict[str, dict[str, float]]:
             fields = _float_default_fields(node)
             if fields:
                 out[node.name] = fields
+    return out
+
+
+def all_float_field_names(src: str) -> dict[str, set[str]]:
+    """``{ClassName: {every ``: float`` field with a default}}`` — the spec-
+    ELIGIBLE set (superset of ``spec_required_classes``): also includes fields
+    whose default is a ``constants.X`` reference (not AST-foldable). A genuinely
+    tunable closure that defaults to a constant (``S_ice_new =
+    constants.S_ice_bulk_default``) may be listed in a spec's ``params`` without
+    being flagged as an orphan, but is not FORCED into the spec."""
+    tree = ast.parse(src)
+    out: dict[str, set[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and _is_namedtuple(node):
+            names = {
+                n.target.id
+                for n in node.body
+                if isinstance(n, ast.AnnAssign)
+                and isinstance(n.target, ast.Name)
+                and isinstance(n.annotation, ast.Name)
+                and n.annotation.id == "float"
+                and n.value is not None
+            }
+            if names:
+                out[node.name] = names
     return out
 
 
@@ -194,7 +220,10 @@ def _validate_bounds(bounds, default: float, tier: int, transform: str) -> list[
         lo, hi = float(bounds[0]), float(bounds[1])
         if not lo < hi:
             errs.append(f"bounds lo<hi violated: {bounds}")
-        elif transform == "sigmoid" and not (lo <= default <= hi):
+        elif transform == "sigmoid" and default is not None and not (lo <= default <= hi):
+            # default is None for a field whose default is a ``constants.X``
+            # reference (not AST-resolvable); the structural lo<hi check still
+            # runs, and the collector clamps the resolved value at seed time.
             errs.append(f"default {default} outside sigmoid bounds {bounds}")
     elif isinstance(bounds, tuple) and len(bounds) == 2 and all(
         isinstance(b, tuple) for b in bounds
@@ -208,18 +237,34 @@ def _validate_bounds(bounds, default: float, tier: int, transform: str) -> list[
     return errs
 
 
-def validate_param_spec(spec, required: dict[str, dict[str, float]]) -> list[str]:
-    """Schema + completeness errors for one module's ``__param_spec__``."""
+def validate_param_spec(
+    spec,
+    required: dict[str, dict[str, float]],
+    eligible: dict[str, set[str]] | None = None,
+) -> list[str]:
+    """Schema + completeness errors for one module's ``__param_spec__``.
+
+    ``required`` = ``{Class: {field: literal_default}}`` — float fields with a
+    *folding* (literal) default that MUST be classified. ``eligible`` =
+    ``{Class: {all float field names}}`` — any ``: float`` field (incl. those
+    whose default is a ``constants.X`` reference), which MAY appear in
+    ``params``/``excluded`` without being an orphan. This lets a genuinely
+    tunable closure that happens to default to a constant (e.g.
+    ``S_ice_new = constants.S_ice_bulk_default``) be exposed as a spec param,
+    while still not FORCING constants-default fields into the spec. When
+    ``eligible`` is omitted it falls back to ``required`` (the strict set)."""
     if spec == "__UNPARSEABLE__":
         return ["__param_spec__ is not a pure literal (AST literal-eval failed)"]
     if not isinstance(spec, dict):
         return ["__param_spec__ must be a dict keyed by Config class name"]
+    eligible = eligible or {}
     errors: list[str] = []
-    # Orphan classes: a spec entry for a class that is not spec-required.
+    # Orphan classes: a spec entry for a class with no spec-eligible float fields.
     for cls_name in spec:
-        if cls_name not in required:
-            errors.append(f"spec names class {cls_name!r} with no float-default fields")
+        if cls_name not in required and cls_name not in eligible:
+            errors.append(f"spec names class {cls_name!r} with no float fields")
     for cls_name, fields in required.items():
+        cls_eligible = eligible.get(cls_name, set(fields))
         if cls_name not in spec:
             errors.append(f"class {cls_name!r} is spec-required but absent from spec")
             continue
@@ -253,14 +298,14 @@ def validate_param_spec(spec, required: dict[str, dict[str, float]]) -> list[str
         both = sorted(set(params) & set(excluded))
         if both:
             errors.append(f"{cls_name}: fields in both params and excluded: {both}")
-        orphan = sorted(classified - set(fields))
+        orphan = sorted(classified - cls_eligible)
         if orphan:
             errors.append(f"{cls_name}: params/excluded name non-float fields: {orphan}")
         for ename, reason in excluded.items():
             if not isinstance(reason, str) or not reason.strip():
                 errors.append(f"{cls_name}.excluded[{ename!r}] must be a non-empty reason string")
         for pname, p in params.items():
-            if pname not in fields:
+            if pname not in cls_eligible:
                 continue  # already flagged as orphan
             if not isinstance(p, dict):
                 errors.append(f"{cls_name}.{pname}: param spec must be a dict")
@@ -286,9 +331,14 @@ def validate_param_spec(spec, required: dict[str, dict[str, float]]) -> list[str
                     f"{cls_name}.{pname}: shape must be None or one of {sorted(_VALID_SHAPE_KEYS)}"
                 )
             if "bounds" in p and isinstance(tier, int):
+                # default is known only for literal-default (``required``) fields;
+                # a ``constants.X``-default param passes default=None (structure
+                # checked, value-in-bounds skipped — see _validate_bounds).
                 errors.extend(
                     f"{cls_name}.{pname}: {e}"
-                    for e in _validate_bounds(p["bounds"], fields[pname], tier, p.get("transform"))
+                    for e in _validate_bounds(
+                        p["bounds"], fields.get(pname), tier, p.get("transform")
+                    )
                 )
     return errors
 
@@ -338,6 +388,7 @@ def test_todo_entries_are_in_scope() -> None:
 def test_config_module_has_valid_param_spec(rel: str) -> None:
     src = (ra.repo_root() / rel).read_text()
     required = spec_required_classes(src)
+    eligible = all_float_field_names(src)
     spec = extract_param_spec(src)
     if spec is None:
         assert rel in PARAM_SPEC_TODO, (
@@ -346,7 +397,7 @@ def test_config_module_has_valid_param_spec(rel: str) -> None:
             f"in PARAM_SPEC_TODO."
         )
         return
-    errors = validate_param_spec(spec, required)
+    errors = validate_param_spec(spec, required, eligible)
     assert not errors, f"{rel} has an invalid __param_spec__:\n  " + "\n  ".join(errors)
     assert rel not in PARAM_SPEC_TODO, (
         f"{rel} now has a complete valid __param_spec__ — remove it from "
@@ -365,7 +416,7 @@ def test_todo_entries_still_lack_complete_specs() -> None:
         spec = extract_param_spec(src)
         if spec is None:
             continue
-        if not validate_param_spec(spec, spec_required_classes(src)):
+        if not validate_param_spec(spec, spec_required_classes(src), all_float_field_names(src)):
             graduated.append(rel)
     assert not graduated, (
         "PARAM_SPEC_TODO entries now have complete specs — remove them "
@@ -570,6 +621,38 @@ def test_spec_cannot_classify_an_int_iteration_count() -> None:
     }
     errs = validate_param_spec(spec, required)
     assert any("non-float" in e or "not in params/excluded" in e for e in errs)
+
+
+def test_constants_default_field_is_spec_eligible_not_required() -> None:
+    """A ``: float`` field whose default is a ``constants.X`` reference is NOT
+    forced into the spec (not in ``required``) but MAY be classified as a tunable
+    param (it is ``eligible``) — e.g. a closure that defaults to a constant."""
+    src = (
+        "from legoesm import constants\n"
+        "class C(NamedTuple):\n"
+        "    s_new: float = constants.S_ice_bulk_default\n"
+        "    floor: float = 0.0\n"
+    )
+    assert spec_required_classes(src) == {"C": {"floor": 0.0}}        # only literal
+    assert all_float_field_names(src) == {"C": {"s_new", "floor"}}     # both eligible
+    required = spec_required_classes(src)
+    eligible = all_float_field_names(src)
+    good = {
+        "C": {
+            "scheme_key": "c", "excluded": {"floor": "numerics: floor"},
+            "params": {
+                "s_new": {
+                    "units": "PSU", "bounds": (1.0, 12.0), "tunable_tier": 2,
+                    "transform": "sigmoid", "category": "closure",
+                    "reference": "r", "shape": None,
+                },
+            },
+        }
+    }
+    assert validate_param_spec(good, required, eligible) == []          # s_new accepted
+    # a truly non-existent field is still an orphan
+    bad = {"C": {"scheme_key": "c", "excluded": {"floor": "x", "ghost": "y"}, "params": {}}}
+    assert any("non-float fields" in e for e in validate_param_spec(bad, required, eligible))
 
 
 def test_inclusion_predicate_excludes_constants_and_nonfloat() -> None:
