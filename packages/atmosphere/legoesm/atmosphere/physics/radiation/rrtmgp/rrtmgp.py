@@ -303,7 +303,19 @@ class RRTMGP:
                   # coerce to Python float.  'c' complex, 'O' object,
                   # 'U' unicode, etc. fall through to id().
                   if dtype_kind in ("f", "i", "b", "u"):
-                      return float(x)
+                      # A CONCRETE 0-D scalar value-hashes (two jnp.array(0.07)
+                      # share a key).  A TRACED 0-D scalar (jax.grad/jit, e.g. a
+                      # trained AIMIP ``rrtmgp_sfc_emissivity`` leaf) is NOT
+                      # concretizable: float(tracer) raises ConcretizationTypeError
+                      # (a TypeError) — which the OUTER ``except TypeError`` does
+                      # NOT catch because we are already inside it.  Guard here so
+                      # a traced scalar falls back to the same id-based key as
+                      # arrays (cache-correct under JAX immutability) instead of
+                      # crashing the radiation step.
+                      try:
+                          return float(x)
+                      except TypeError:
+                          return id(x)
               # N-D arrays (or 0-D with non-numeric dtype): id-based
               # key.  Safe under JAX immutability; a new array (e.g.
               # fresh AIMIP fit per epoch) gets a new id and

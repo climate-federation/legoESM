@@ -264,6 +264,24 @@ class TestAIMIPDefaultsInteriorization:
                 f"stay frozen at the default {getattr(base, field)}, got {getattr(cfg, field)}"
             )
 
+    def test_instance_cache_key_hashable_under_traced_surface_scalar(self):
+        """sfc_emissivity / sfc_albedo ARE wired into RRTMGPConfig from trained
+        AIMIP leaves (and routed through _hashable). _instance_cache_key must
+        therefore produce a HASHABLE key even when those fields are traced 0-D
+        scalars under jax.grad -- the _hashable float(x) coercion is guarded to
+        fall back to id() instead of raising ConcretizationTypeError. Regression
+        for the codex r6 RRTMGP fix."""
+        import jax
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        def f(e):
+            cfg = RRTMGPConfig()._replace(sfc_emissivity=e, sfc_albedo=e * 0.5)
+            hash(RRTMGP._instance_cache_key(cfg))  # must not raise
+            return e * 1.0
+
+        jax.grad(f)(jnp.asarray(0.95))  # raises if the cache key crashes on a tracer
+
 
 # ===========================================================================
 # Microphysics
