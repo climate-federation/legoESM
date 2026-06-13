@@ -17,3 +17,4 @@ date,commit,tag,grid,backend,mode,value,metric,job,note
 2026-06-13,cabd2819,latlon2d_halo,ocean_latlon,mpi,strong,1.73,halo_2dover1d_np16,8477039,2D 4x4 59.3ms vs 1D-band 34.2ms — 2D HURTS (latency fabric); DEFER 2D step integ
 2026-06-13,cabd2819,latlon2d_halo,ocean_latlon,mpi,strong,1.58,halo_2dover1d_np32,8477039,2D 8x4 68.0ms vs 1D-band 43.1ms — 2D HURTS; 1D band not exhausted till np>n_lat
 2026-06-13,0293f865,chebyshev,ocean_latlon,mpi,precond,2.31,speedup_iters_d8,8478404,cheby deg8 35 iters to rel1e-6 vs jacobi >80 (budget-censored lower bound); coastal 48x96; cuts latency-bound global reductions >=2.3x; deg4=72iters
+2026-06-13,7d153934,tridiag_lapack,atm_cpu,cpu,vmix,13.1,tridiag_lapack_cpu,8478438,LAPACK gtsv vs fori-loop Thomas CPU; C96-scale 55296col x72lev 4143ms->317ms; 8.4x@20k/32 13.0x@50k/64; parity 8.9e-16; opt-in LEGOESM_TRIDIAG=lapack

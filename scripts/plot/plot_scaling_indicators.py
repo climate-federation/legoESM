@@ -39,6 +39,8 @@ PANELS = [
     ("Multinode SPMD speedup (np6)", "speedup_np6", "higher better", None),
     ("Ocean barotropic precond speedup", "speedup", "higher better (1=neutral)",
      None),
+    ("CPU tridiag LAPACK speedup", "tridiag", "higher better (Ginsburg CPU)",
+     None),
 ]
 
 
@@ -66,7 +68,9 @@ def main() -> None:
     xpos = {k: i for i, k in enumerate(order)}
     xlabels = [f"{d[5:]}\n{t}" for (d, t) in order]
 
-    fig, axes = plt.subplots(2, 3, figsize=(17, 8.5))
+    fig, axes = plt.subplots(2, 4, figsize=(22, 8.5))
+    for ax in axes.flat[len(PANELS):]:
+        ax.set_visible(False)            # hide unused grid slots
     for ax, (title, metric_pref, direction, grids) in zip(
             axes.flat, PANELS):
         series = defaultdict(list)  # label -> [(x, value)]
