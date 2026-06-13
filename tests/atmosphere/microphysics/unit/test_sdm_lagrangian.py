@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -198,6 +203,33 @@ def test_cellwise_collision_isolates_cells_and_pairs_after_odd_cell():
     assert float(jnp.sum(num1)) == pytest.approx(2.0)
 
 
+def test_sorted_cell_collision_isolates_cells_conserves_and_certain_collision():
+    g = _grid(nx=2, ny=2, nz=2, L=2.0)
+    cfg = SDMConfig(collision_kernel="golovin", golovin_b=1.0e16)
+    n_sd = 16
+    active = np.zeros(n_sd)
+    active[:4] = 1.0
+    x = np.full(n_sd, 0.5)
+    x[2:4] = 1.5
+    xyz = (x, np.full(n_sd, 0.5), np.full(n_sd, 0.5))
+    radii = np.full(n_sd, 2.0e-5)
+    radii[2:4] = 3.0e-5
+    state = _lag_state_slots(g, radii, np.ones(n_sd), active, xyz)
+    mass0 = _cell_sums(state, g, represented_water_mass(state.droplets))
+
+    out = coalescence_cells_step(
+        state, g, rho=1.0, p=9.0e4, T=283.0, dt=1.0, cfg=cfg)
+
+    mass1 = _cell_sums(out, g, represented_water_mass(out.droplets))
+    num1 = _cell_sums(out, g, out.droplets.active * out.droplets.multiplicity)
+    np.testing.assert_allclose(np.asarray(mass1), np.asarray(mass0),
+                               rtol=1e-12, atol=1e-20)
+    assert float(num1[0]) == pytest.approx(1.0)
+    assert float(num1[2]) == pytest.approx(1.0)
+    assert float(jnp.max(out.droplets.radius)) == pytest.approx(
+        np.cbrt(2.0) * 3.0e-5, rel=1e-12)
+
+
 def test_condensation_two_way_coupling_conserves_water_and_energy():
     g = _grid(nx=2, ny=2, nz=2, L=2.0)
     ref = _ref(g, theta0=300.0, qv0=0.0)
@@ -274,6 +306,55 @@ def test_tiny_spectral_les_lagrangian_sdm_smoke_conserves_water():
     assert float(jnp.max(les.tracers[..., 1] + les.tracers[..., 2])) >= 0.0
 
 
+def test_lagrangian_sdm_deterministic_collision_step_has_finite_nonzero_grad():
+    g = _grid(nx=2, ny=2, nz=2, L=20.0, n_tracers=3)
+    ref = _ref(g, theta0=300.0, qv0=0.02)
+    cfg = SDMConfig(
+        include_curvature=False, include_solute=False,
+        condensation_integrator="euler", n_substeps_condensation=1,
+        terminal_velocity="rogers_yau", collision_kernel="golovin",
+        golovin_b=1.0e8, collision_mode="deterministic")
+    ny, nx, nz = g.cfg.ny, g.cfg.nx, g.cfg.nz
+    z = jnp.zeros((ny, nx, nz), dtype=jnp.float64)
+    theta = jnp.full((ny, nx, nz), 300.0, dtype=jnp.float64)
+    tracers = jnp.zeros((ny, nx, nz, 3), dtype=jnp.float64).at[..., 0].set(0.02)
+    les = sl.SpectralLESState(
+        u=z, v=z, w=jnp.zeros((ny, nx, nz + 1), dtype=jnp.float64),
+        rhs_u_prev=z, rhs_v_prev=z,
+        rhs_w_prev=jnp.zeros((ny, nx, nz + 1), dtype=jnp.float64),
+        theta=theta, rhs_theta_prev=jnp.zeros_like(theta),
+        tracers=tracers, rhs_tracers_prev=jnp.zeros_like(tracers))
+    step = make_lagrangian_sdm_les_step(
+        g, ref, cfg, u_geo=(0.0, 0.0), f_cor=0.0,
+        do_condensation=True, do_coalescence=True)
+
+    def total_rain_after_step(r_cloud):
+        droplets = SuperDropletState(
+            multiplicity=jnp.array([1.0e6, 1.0e6], dtype=jnp.float64),
+            radius=jnp.stack([
+                r_cloud,
+                jnp.asarray(5.0e-5, dtype=jnp.float64),
+            ]),
+            solute_mass=jnp.zeros((2,), dtype=jnp.float64),
+            active=jnp.ones((2,), dtype=jnp.float64),
+        )
+        sdm = make_lagrangian_sdm_state(
+            droplets,
+            jnp.array([5.0, 5.0], dtype=jnp.float64),
+            jnp.array([5.0, 5.0], dtype=jnp.float64),
+            jnp.array([5.0, 5.0], dtype=jnp.float64),
+            jax.random.PRNGKey(3),
+            g,
+        )
+        les1, _sdm1, _us, diag = step(
+            les, sdm, jnp.asarray(0.1, dtype=jnp.float64), first=True)
+        return jnp.sum(les1.tracers[..., 2]) + 0.0 * jnp.sum(diag["q_r"])
+
+    grad = jax.grad(total_rain_after_step)(jnp.asarray(2.0e-5, dtype=jnp.float64))
+    assert bool(jnp.isfinite(grad))
+    assert abs(float(grad)) > 0.0
+
+
 def test_lagrangian_sdm_les_step_factory_jits_static_objects():
     g = _grid(nx=2, ny=2, nz=2, L=20.0, n_tracers=3)
     ref = _ref(g, theta0=300.0, qv0=0.02)
@@ -305,3 +386,37 @@ def test_lagrangian_sdm_les_step_factory_jits_static_objects():
     assert bool(jnp.all(jnp.isfinite(les1.tracers)))
     assert bool(jnp.all(jnp.isfinite(sdm1.droplets.radius)))
     assert float(diag["n_active"]) == 8.0
+
+
+def test_run_bomex_lagrangian_sdm_driver_smoke(tmp_path):
+    repo = Path(__file__).resolve().parents[4]
+    case_dir = Path(os.environ.get(
+        "LEGOESM_GSAM_ROOT",
+        "/home/gentine/Documents/Code/gSAM/gsam1.8.7/gSAM1.8.7",
+    )) / "CASES" / "BOMEX"
+    if not (case_dir / "snd").exists():
+        pytest.skip(f"BOMEX gSAM case deck not found at {case_dir}")
+    py = repo / ".venv" / "bin" / "python"
+    if not py.exists():
+        py = Path(sys.executable)
+    env = os.environ.copy()
+    env.update({"JAX_PLATFORMS": "cpu", "JAX_ENABLE_X64": "1"})
+    cmd = [
+        str(py), "scripts/run/run_bomex_les.py",
+        "--case-dir", str(case_dir),
+        "--lagrangian-sdm",
+        "--nx", "4", "--ny", "4", "--nz", "4",
+        "--Lx", "200", "--Ly", "200", "--Lz", "200",
+        "--hours", "0.001", "--dt", "1.0",
+        "--n-sd", "16", "--collision-mode", "deterministic",
+        "--print-every", "1", "--record-frames", "0",
+        "--output", str(tmp_path / "bomex_lag_sdm"),
+    ]
+    proc = subprocess.run(
+        cmd, cwd=repo, env=env, text=True, capture_output=True, timeout=180)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "[DONE-LAGRANGIAN-SDM]" in proc.stdout
+    out = np.load(tmp_path / "bomex_lag_sdm" / "bomex_lagrangian_sdm_final.npz")
+    assert np.isfinite(out["water_final"])
+    assert float(out["max_sdm_water_error"]) < 1.0e-6
+    assert float(out["mean_particle_displacement"]) > 0.0

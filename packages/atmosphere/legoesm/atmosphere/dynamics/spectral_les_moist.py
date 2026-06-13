@@ -276,8 +276,14 @@ def step_lagrangian_sdm_les(
     configuration objects, so direct ``jax.jit(step_lagrangian_sdm_les)`` is not
     the supported entry point. Use :func:`make_lagrangian_sdm_les_step`, which
     closes over those objects and returns a jitted ``(state, sdm_state, dt)``
-    step. When ``do_coalescence=True`` the step is non-differentiable because
-    collision-coalescence is stochastic and uses scatter updates.
+    step. With the default ``sdm_config.collision_mode="stochastic"``,
+    coalescence is forward-only because pair order and integer collision counts
+    are random/discontinuous. With
+    ``sdm_config.collision_mode="deterministic"``, collision uses a mean-field
+    expected pair increment; for fixed particle-cell membership the full split
+    update has JAX VJPs with respect to droplet radii/multiplicities and
+    Eulerian thermodynamic fields. The floor-based particle-cell assignment is
+    still discrete with respect to particle positions.
     """
     from legoesm.atmosphere.dynamics import spectral_les_plane as sl
     from legoesm.atmosphere.physics.microphysics.sdm.lagrangian import (
@@ -311,8 +317,9 @@ def make_lagrangian_sdm_les_step(
 
     The returned function has signature ``step(state, sdm_state, dt, *,
     first=False)``. ``first`` is static because the AB2 LES integrator uses it
-    in a Python branch. With coalescence enabled, the closure is intended for
-    forward simulation rather than differentiation.
+    in a Python branch. Use ``SDMConfig(collision_mode="deterministic")`` for
+    reverse-mode sensitivities through Lagrangian coalescence; the stochastic
+    default is a forward simulation path.
     """
 
     @functools.partial(jax.jit, static_argnames=("first",))

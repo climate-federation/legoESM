@@ -81,6 +81,14 @@ class SDMConfig(NamedTuple):
         Add the Brownian (Seinfeld-Pandis) coagulation coefficient on top of
         the selected collision kernel (ERF ``include_brownian_coalescence``;
         additive, matters only for sub-micron droplets/haze).
+    collision_mode : str
+        Collision update mode. ``"stochastic"`` (default) is the Shima
+        Monte-Carlo integer-collision algorithm with random pairing/rounding.
+        ``"deterministic"`` is an opt-in mean-field update for the persistent
+        Lagrangian path: candidate pairs use the expected coalescence increment
+        with a smooth cap at the available multiplicity, no accept/reject draw,
+        and no PRNG consumption. It is intended for reverse-mode sensitivity
+        tests and deterministic optimization experiments.
     r_rain : float
         Radius threshold [m] separating cloud water from rain when depositing
         super-droplet liquid to grid mixing ratios (ERF default 40 um).
@@ -140,6 +148,7 @@ class SDMConfig(NamedTuple):
     terminal_velocity: str = "rogers_yau"
     golovin_b: float = 1.5e3              # [1/s] Golovin kernel coefficient
     include_brownian: bool = False        # add Brownian coagulation to the kernel
+    collision_mode: str = "stochastic"    # stochastic | deterministic
     r_rain: float = 4.0e-5               # [m] cloud/rain radius threshold (40 um)
     column_do_coalescence: bool = False  # opt-in reconstructed-box coalescence
     column_n_sd: int = 64                # [-] super-droplets per cell in column box

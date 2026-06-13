@@ -53,7 +53,8 @@ def _profiles(z, u3, v3, wc3, theta3, z0, case):
 
 
 def record_frame(out_dir, frame, t_hours, case, z, u3, v3, wc3, theta3,
-                 Lx, Ly, h_idx, h_z, z0, qc3=None, rho_z=None):
+                 Lx, Ly, h_idx, h_z, z0, qc3=None, rho_z=None, qr3=None,
+                 surface_precip=None):
     """Save one snapshot npz (height cross-sections) + one profile npz.
 
     ``u3, v3, wc3, theta3`` are host (numpy) arrays of shape (ny, nx, nz);
@@ -61,6 +62,8 @@ def record_frame(out_dir, frame, t_hours, case, z, u3, v3, wc3, theta3,
     (cloud-water mixing ratio, same shape) and ``rho_z`` ((nz,) reference
     density): the snapshot then also stores the q_c cross-sections + the
     liquid-water-path map [g/m²], and the profile gains q_c/cloud-fraction.
+    Lagrangian SDM runs may also pass ``qr3`` and cumulative
+    ``surface_precip`` [kg/m²].
     """
     out_dir = Path(out_dir)
     snap_dir = out_dir / "snapshots"; snap_dir.mkdir(parents=True, exist_ok=True)
@@ -74,6 +77,12 @@ def record_frame(out_dir, frame, t_hours, case, z, u3, v3, wc3, theta3,
             extra["lwp"] = (qc3 * rho_z[None, None, :]).sum(-1) * dz * 1e3
         prof_extra["qc"] = qc3.mean((0, 1))
         prof_extra["cloud_frac"] = (qc3 > 1.0e-5).mean(axis=(0, 1))
+    if qr3 is not None:
+        extra["qr"] = np.stack([qr3[:, :, k] for k in h_idx])
+        prof_extra["qr"] = qr3.mean((0, 1))
+    if surface_precip is not None:
+        extra["surface_precip"] = np.asarray(surface_precip)
+        prof_extra["surface_precip_mean"] = float(np.asarray(surface_precip).mean())
     np.savez(
         snap_dir / f"snap_{frame:03d}.npz",
         t_hours=t_hours, case=case, heights=h_z, dx=Lx / nx, Lx=Lx, Ly=Ly,
