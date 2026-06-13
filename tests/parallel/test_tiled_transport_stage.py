@@ -290,3 +290,66 @@ def test_u3d_real_ytp_v_corner_cross_tiling():
     np.testing.assert_allclose(
         reassembled, global_y, atol=1e-12, rtol=1e-12,
         err_msg="U3d corner-cross ytp_v tiling != global _bgrid_ke ytp_v")
+
+
+def test_u3d_real_xtp_u_corner_cross_tiling():
+    """Symmetric counterpart of the ytp_v U3d test: the corner-cross i-sweep
+    tile (cross_nl=nl+1, cross axis=2 = n+1 corners) reassembles bit-exactly
+    to the global xtp_u of _bgrid_ke_transport, driven by the REAL corner
+    Courant ub + the REAL cross-face-halo'd u_d_ihalo (shapes job 8480355:
+    u_d_ihalo (6,n+2h,n+1), ub (6,n+1,n+1), rdx (6,n,n+1) — all cross
+    axis=2 = n+1)."""
+    import numpy as np
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+    from legoesm.core.fv3_sw_core import (
+        _pad_halo_uc_vc_new_via_old_delta, _pad_halo_dgrid_for_ppm,
+        bgrid_corner_courant_local,
+    )
+    from tests.test_cases.cosine_bell import cosine_bell_cubesphere
+
+    kt, nl, h3, h_dg = 3, 6, 4, 2
+    n = kt * nl
+    grid = create_cubed_sphere(n=n, use_duogrid=True)
+    cd = create_cubed_sphere_cdgrid(grid)
+    state = cosine_bell_cubesphere(grid, cd)
+    u_d, v_d = state.u_d, state.v_d
+
+    rng = np.random.default_rng(41)
+    uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(uc, vc, u_d, v_d, cd)
+    dt5 = 0.5 * 1800.0
+    _vb, ub = bgrid_corner_courant_local(
+        uc_pad, vc_pad, cd.cosa_corner, cd.rsin2_corner, dt5)   # (6,n+1,n+1)
+
+    u_d_ihalo, _v = _pad_halo_dgrid_for_ppm(u_d, v_d, cd, halo=h_dg)  # (6,n+2h,n+1)
+    rdx = 1.0 / jnp.maximum(cd.dx_edge_y, 1.0e-30)             # (6,n,n+1)
+
+    global_x = np.asarray(_ppm_transport_1d(
+        u_d_ihalo, ub, rdx, 1, external_halo=h_dg))           # (6,n+1,n+1)
+
+    assert float(jnp.max(jnp.abs(
+        u_d_ihalo[:, :h_dg, :] - u_d_ihalo[:, h_dg:h_dg + 1, :]))) > 1e-9
+    assert float(jnp.std(np.asarray(ub))) > 1e-9
+
+    # Approach-C: pre-pad to h3 on the SWEEP axis=1; depth-1 rd pad on axis=1.
+    vp_g = jnp.pad(u_d_ihalo, [(0, 0), (h3 - h_dg, h3 - h_dg), (0, 0)],
+                   mode="edge")                                # (6,n+2h3,n+1)
+    rd_g = jnp.pad(rdx, [(0, 0), (1, 1), (0, 0)], mode="edge")  # (6,n+2,n+1)
+
+    cols = []
+    for tj in range(kt):                       # cross (axis=2, corner)
+        rows = []
+        for ti in range(kt):                   # sweep (axis=1, i)
+            blk = np.asarray(transport_sweep_tile_2d(
+                vp_g, ub, rd_g, ti * nl, tj * nl, nl, h3=h3, cross_nl=nl + 1))
+            r_hi = nl + 1 if ti == kt - 1 else nl   # sweep interface ownership
+            c_hi = nl + 1 if tj == kt - 1 else nl   # cross corner ownership
+            rows.append(blk[:, :r_hi, :c_hi])
+        cols.append(np.concatenate(rows, axis=1))  # along sweep (axis=1)
+    reassembled = np.concatenate(cols, axis=2)     # along cross (axis=2) -> (6,n+1,n+1)
+
+    np.testing.assert_allclose(
+        reassembled, global_x, atol=1e-12, rtol=1e-12,
+        err_msg="U3d corner-cross xtp_u tiling != global _bgrid_ke xtp_u")
