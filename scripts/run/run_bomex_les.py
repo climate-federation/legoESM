@@ -31,6 +31,7 @@ Example (GPU):
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 import time
 from functools import partial
@@ -49,12 +50,20 @@ from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
 from legoesm.atmosphere.dynamics.spectral_les_moist import (  # noqa: E402
     conserving_positive,
+    make_lagrangian_sdm_les_step,
     make_anelastic_reference,
     make_les_microphysics_fn,
 )
 from legoesm.atmosphere.physics.microphysics.config import (  # noqa: E402
     MicrophysicsConfig,
     MorrisonConfig,
+)
+from legoesm.atmosphere.physics.microphysics.sdm import (  # noqa: E402
+    SDMConfig,
+    diagnose_liquid_mixing_ratios,
+    initialize_lagrangian_sdm,
+    set_diagnostic_liquid_tracers,
+    total_water_mass,
 )
 from legoesm.atmosphere.sam_case_forcing import (  # noqa: E402
     read_sam_lsf,
@@ -100,6 +109,32 @@ def parse_args():
     p.add_argument("--microphysics", default="morrison",
                    help="any MicrophysicsConfig scheme (swappable; morrison "
                         "default, SAM flavor).")
+    p.add_argument("--lagrangian-sdm", action="store_true",
+                   help="OPT-IN persistent advected Lagrangian SDM instead of "
+                        "the Eulerian microphysics adapter.")
+    p.add_argument("--n-sd", type=int, default=4096,
+                   help="super-droplet slots for --lagrangian-sdm.")
+    p.add_argument("--collision-mode", choices=["stochastic", "deterministic"],
+                   default="stochastic",
+                   help="Lagrangian SDM collision mode; default preserves the "
+                        "stochastic Shima path.")
+    p.add_argument("--condensation-integrator",
+                   choices=["be", "dirk2", "rk4_adaptive", "cn", "rk4", "euler"],
+                   default="be",
+                   help="SDM droplet-growth ODE integrator; default 'be' "
+                        "(backward-Euler, unconditionally stable for the stiff "
+                        "Köhler terms). Explicit 'rk4'/'euler' can blow up at LES "
+                        "dt — use only with many --micro-substeps.")
+    p.add_argument("--sdm-cdnc", type=float, default=1.0e8,
+                   help="initial Lagrangian SDM number concentration [m^-3].")
+    p.add_argument("--sdm-radius", type=float, default=1.0e-6,
+                   help="initial wet super-droplet radius [m].")
+    p.add_argument("--sdm-dry-radius", type=float, default=5.0e-8,
+                   help="dry aerosol radius used to seed solute mass [m].")
+    p.add_argument("--sdm-solute-density", type=float, default=1770.0,
+                   help="dry aerosol material density [kg/m^3].")
+    p.add_argument("--sdm-seed", type=int, default=0,
+                   help="PRNG seed for initial particles and stochastic collisions.")
     p.add_argument("--n-tracers", type=int, default=9,
                    help="standard slot layout; 9 covers the double-moment "
                         "schemes (morrison/thompson/sb).")
@@ -109,6 +144,15 @@ def parse_args():
                         "stable), weno5 (sharp, can destabilize moist conv.), "
                         "weno5_hv (WENO5 horizontal + van-Leer vertical — sharp "
                         "cloud field, stable inversion; default).")
+    p.add_argument("--w-hyperdiff", type=float, default=0.0,
+                   help="OPT-IN horizontal w-hyperdiffusion ν₄ [m⁴/s] (momentum "
+                        "dissipation; ≈1e5 at dx=100/dt=2).")
+    p.add_argument("--theta-hyperdiff", type=float, default=0.0,
+                   help="OPT-IN scale-selective k4 hyperdiff on theta [m^4/s] "
+                        "(the operative WENO5 stabilizer; damps 2dx theta noise).")
+    p.add_argument("--div-damping", type=float, default=0.0,
+                   help="OPT-IN momentum divergence damping α [m²/s] (mostly "
+                        "redundant on this incompressible projection core).")
     p.add_argument("--dynamic", action="store_true", default=True,
                    help="LASD dynamic SGS (default on; near-iso dx/dz).")
     p.add_argument("--static", dest="dynamic", action="store_false")
@@ -153,6 +197,9 @@ def build(args, dtype):
         smagorinsky_dynamic=args.dynamic, sgs_model=args.sgs_model,
         time_scheme=args.time_scheme, nu_floor=args.nu_floor,
         buoyancy=True, theta_ref0=300.0, pr_sgs=1.0,
+        w_hyperdiff_coeff=args.w_hyperdiff,
+        div_damping_coeff=args.div_damping,
+        theta_hyperdiff_coeff=args.theta_hyperdiff,
         moist=True, n_tracers=args.n_tracers, monotone_scalars=True,
         scalar_advection=args.scalar_advection,
         filter_monotone_qv=args.filter_monotone_qv,
@@ -267,6 +314,166 @@ def moist_profiles(st, g, ref):
                 lwp=lwp)
 
 
+def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
+    """Run BOMEX with the opt-in persistent Lagrangian SDM coupling."""
+    if args.n_tracers < 3:
+        raise ValueError("--lagrangian-sdm needs --n-tracers >= 3")
+    if args.n_sd < 1:
+        raise ValueError("--n-sd must be >= 1")
+
+    dt0 = (select_dt(g.dx, max_wind_safe=args.max_wind, cfl_safe=args.cfl,
+                     dt_cap=args.dt_max) if args.adaptive_dt
+           else float(args.dt))
+    dry_r = max(float(args.sdm_dry_radius), 0.0)
+    solute_mass = (
+        4.0 / 3.0 * np.pi * float(args.sdm_solute_density) * dry_r ** 3)
+    sdm_cfg = SDMConfig(
+        n_substeps_condensation=max(1, int(args.micro_substeps)),
+        # The Köhler diffusional-growth ODE is STIFF at LES dt; explicit rk4 with
+        # few substeps overshoots catastrophically (codex 2026-06-13: a 1 µm
+        # droplet grew to 670 µm in 1 s at S=0.8 → LWP 853 g/m² runaway). Use the
+        # unconditionally-stable implicit backward-Euler integrator for the
+        # Lagrangian driver (overridable via --condensation-integrator).
+        condensation_integrator=args.condensation_integrator,
+        collision_mode=args.collision_mode,
+        cdnc=float(args.sdm_cdnc),
+    )
+    sdm = initialize_lagrangian_sdm(
+        jax.random.PRNGKey(args.sdm_seed), g, n_sd=args.n_sd,
+        number_concentration=args.sdm_cdnc, radius=args.sdm_radius,
+        solute_mass=solute_mass, dtype=dtype)
+    q_c0, q_r0 = diagnose_liquid_mixing_ratios(sdm, g, ref.rho_c, sdm_cfg.r_rain)
+    st = st._replace(tracers=set_diagnostic_liquid_tracers(st.tracers, q_c0, q_r0))
+
+    forcing = make_forcing_fn(g, ref, forc, dtype)
+    lag_step = make_lagrangian_sdm_les_step(
+        g, ref, sdm_cfg, u_geo=(forc["ug"], forc["vg"]), f_cor=_FCOR,
+        sfc_theta_flux=forc["th_flux"], sfc_qv_flux=forc["qv_flux"],
+        do_condensation=True, do_coalescence=True)
+
+    zc = g.z_c; z_sp = 0.75 * args.Lz; tau_sp = 60.0
+    spc = jnp.where(zc > z_sp, 0.5 * (1.0 - jnp.cos(
+        jnp.pi * (zc - z_sp) / (args.Lz - z_sp))), 0.0).astype(dtype)
+    zf = g.z_f
+    spf = jnp.where(zf > z_sp, 0.5 * (1.0 - jnp.cos(
+        jnp.pi * (zf - z_sp) / (args.Lz - z_sp))), 0.0).astype(dtype)
+
+    @partial(jax.jit, static_argnames=("first",))
+    def step(state, sdm_state, dt, first=False):
+        if args.micro_order == "pre":
+            state = forcing(state, dt)
+        state, sdm_state, us, diag = lag_step(
+            state, sdm_state, dt, first=first)
+        if args.micro_order == "post":
+            state = forcing(state, dt)
+        rc = (dt / tau_sp) * spc
+        rf = (dt / tau_sp) * spf
+        u = state.u - rc * (state.u - state.u.mean((0, 1), keepdims=True))
+        v = state.v - rc * (state.v - state.v.mean((0, 1), keepdims=True))
+        w = state.w - rf * state.w
+        u, v, w = sl.project(u, v, w, dt=dt, g=g)
+        return state._replace(u=u, v=v, w=w), sdm_state, us, diag
+
+    T = args.hours * 3600.0
+    n_steps = int(np.ceil(T / dt0 - 1.0e-12))
+    print(f"[BOMEX LES Lagrangian-SDM] {args.nx}x{args.ny}x{args.nz} "
+          f"dx={g.dx:.0f} dz={g.dz:.0f} dt={dt0:.2f}s {args.time_scheme} "
+          f"sgs={'LASD' if args.dynamic else args.sgs_model} "
+          f"n_sd={args.n_sd} collision={args.collision_mode} "
+          f"dtype={dtype.__name__}")
+    print(f"  sfc: SHF={forc['sfc']['shf']:.1f} LHF={forc['sfc']['lhf']:.1f} "
+          f"W/m²; CDNC={args.sdm_cdnc:.2e} m^-3, "
+          f"r_wet={args.sdm_radius:.2e} m, r_dry={dry_r:.2e} m; "
+          f"{n_steps} steps")
+
+    rec = args.record_frames > 0
+    zc_np = np.asarray(g.z_c)
+    if rec:
+        h_idx, h_z = les_record.select_heights(zc_np, args.Lz)
+        frame = 0
+
+        def _save(t_hours):
+            nonlocal frame
+            les_record.record_frame(
+                args.output, frame, t_hours, args.case_label, zc_np,
+                np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
+                np.asarray(st.theta), args.Lx, args.Ly, h_idx, h_z, args.z0,
+                qc3=np.asarray(st.tracers[..., 1]),
+                rho_z=np.asarray(ref.rho_c),
+                qr3=np.asarray(st.tracers[..., 2]),
+                surface_precip=np.asarray(sdm.surface_precip))
+            frame += 1
+
+    x0 = np.asarray(sdm.x)
+    y0 = np.asarray(sdm.y)
+    z0p = np.asarray(sdm.z)
+    water0 = float(total_water_mass(sdm, st.tracers, g, ref.rho_c))
+    dt = jnp.asarray(dt0, dtype)
+    if rec:
+        _save(0.0)
+    t = 0.0; i = 0
+    next_rec = T / args.record_frames if rec else np.inf
+    max_sdm_water_error = 0.0
+    t0_wall = time.time()
+    while t < T:
+        st, sdm, us, diag = step(st, sdm, dt, first=(i == 0))
+        max_sdm_water_error = max(
+            max_sdm_water_error, abs(float(diag["total_water_error"])))
+        t += dt0; i += 1
+        if i % args.print_every == 0:
+            mw = float(jnp.max(jnp.abs(st.w)))
+            if not np.isfinite(mw) or mw > 1e3:
+                print(f"[BLOWUP] step {i} max|w|={mw}"); return 1
+            d = moist_profiles(st, g, ref)
+            precip = float(jnp.mean(sdm.surface_precip))
+            print(f"{i:7d} {t/3600.0:5.2f}h max|w|={mw:5.2f} "
+                  f"cc={d['cloud_cover']:.3f} LWP={d['lwp']:6.2f} g/m² "
+                  f"qc_max={float(jnp.max(st.tracers[..., 1])):.2e} "
+                  f"qr_max={float(jnp.max(st.tracers[..., 2])):.2e} "
+                  f"Psurf={precip:.3e} kg/m² n_act={float(diag['n_active']):.0f} "
+                  f"sdm_dwater={float(diag['total_water_error']):.2e} "
+                  f"u*={float(us):.3f}", flush=True)
+        if rec and t >= next_rec and frame < args.record_frames:
+            _save(t / 3600.0); next_rec += T / args.record_frames
+    wall = time.time() - t0_wall
+    rate = i / wall if wall > 0.0 else np.inf
+    print(f"[DONE-LAGRANGIAN-SDM] wall={wall:.0f}s  {rate:.1f} steps/s")
+    if rec and frame < args.record_frames:
+        _save(t / 3600.0)
+    d = moist_profiles(st, g, ref)
+    water1 = float(total_water_mass(sdm, st.tracers, g, ref.rho_c))
+    dxp = (np.asarray(sdm.x) - x0 + 0.5 * args.Lx) % args.Lx - 0.5 * args.Lx
+    dyp = (np.asarray(sdm.y) - y0 + 0.5 * args.Ly) % args.Ly - 0.5 * args.Ly
+    dzp = np.asarray(sdm.z) - z0p
+    mean_disp = float(np.sqrt(np.mean(dxp * dxp + dyp * dyp + dzp * dzp)))
+    np.savez(args.output / "bomex_lagrangian_sdm_final.npz", z=zc_np, **{
+        k: v for k, v in d.items() if isinstance(v, np.ndarray)},
+        cloud_cover=d["cloud_cover"], lwp=d["lwp"],
+        surface_precip=np.asarray(sdm.surface_precip),
+        water_initial=water0, water_final=water1,
+        max_sdm_water_error=max_sdm_water_error,
+        mean_particle_displacement=mean_disp,
+        n_active=float(jnp.sum(sdm.droplets.active)))
+    print(f"  FINAL: cloud cover={d['cloud_cover']:.3f}, "
+          f"LWP={d['lwp']:.2f} g/m², "
+          f"surface precip={float(jnp.mean(sdm.surface_precip)):.3e} kg/m², "
+          f"max SDM water error={max_sdm_water_error:.3e} kg, "
+          f"mean particle displacement={mean_disp:.3e} m")
+    print(f"  profiles -> {args.output}/bomex_lagrangian_sdm_final.npz")
+    if rec:
+        plot_cmd = [
+            sys.executable, "scripts/plot/plot_les_diagnostics.py",
+            str(args.output),
+        ]
+        plot = subprocess.run(plot_cmd, check=False)
+        if plot.returncode != 0:
+            print(f"[WARN] plot command failed with rc={plot.returncode}: "
+                  f"{' '.join(plot_cmd)}")
+        else:
+            print(f"  plots -> {args.output}")
+    return 0
+
+
 def main():
     args = parse_args()
     if args.micro_substeps < 1:
@@ -276,10 +483,20 @@ def main():
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
     g, st, ref, forc, th_prof = build(args, dtype)
-    micro_cfg = (MicrophysicsConfig(
-        scheme="morrison", morrison=MorrisonConfig(morrison_flavor="sam"))
-        if args.microphysics == "morrison"
-        else MicrophysicsConfig(scheme=args.microphysics))
+    if args.lagrangian_sdm:
+        return run_lagrangian_sdm(args, dtype, g, st, ref, forc)
+    if args.microphysics == "morrison":
+        micro_cfg = MicrophysicsConfig(
+            scheme="morrison", morrison=MorrisonConfig(morrison_flavor="sam"))
+    elif args.microphysics == "sdm":
+        # Enable the reconstructed box-SDM collision-coalescence (cloud→rain) —
+        # not just condensation. Per-step reconstruction box-SDM (NOT advected
+        # Lagrangian; no sedimentation, so surface precip stays 0). Needs ≥8
+        # tracer slots for q_r/N_r (the driver default n_tracers=9 covers it).
+        micro_cfg = MicrophysicsConfig(scheme="sdm", sdm=SDMConfig(
+            column_do_coalescence=True, column_n_sd=64, column_seed=0))
+    else:
+        micro_cfg = MicrophysicsConfig(scheme=args.microphysics)
     dt0 = (select_dt(g.dx, max_wind_safe=args.max_wind, cfl_safe=args.cfl,
                      dt_cap=args.dt_max) if args.adaptive_dt
            else float(args.dt))

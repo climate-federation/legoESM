@@ -20,6 +20,11 @@ from legoesm.training.param_collector import (  # noqa: F401
     apply_param_overrides,
     build_trainable_params,
 )
+from legoesm.training.trainable_ocean_params import (  # noqa: F401
+    GEOMETRIC_TRAINABLE,
+    TrainableOceanParams,
+)
+from legoesm.training.etki import etki_update, run_etki  # noqa: F401
 from legoesm.training.aimip_params import (  # noqa: F401
     AIMIP_CLASSICAL_CONSTRAINTS,
     AIMIPClassicalParams,

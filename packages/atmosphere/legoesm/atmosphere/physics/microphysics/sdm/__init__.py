@@ -26,11 +26,18 @@ identical real droplets it stands for). The processes are:
   (``box_step`` / ``run_box``, condensation + coalescence) and an adiabatic
   parcel (``parcel_step`` / ``run_parcel``).
 * **switchable column scheme** ``scheme="sdm"`` (``column.py``,
-  ``sdm_microphysics``) — a stateless diffusional-condensation adapter for the
-  Eulerian column-physics interface.
+  ``sdm_microphysics``) — by default a stateless diffusional-condensation
+  adapter for the Eulerian column-physics interface; with
+  ``SDMConfig(column_do_coalescence=True)``, a per-step reconstructed box-SDM
+  closure that projects Shima coalescence back to bulk cloud/rain moments.
+* **advected Lagrangian LES coupling** (``lagrangian.py``) — an opt-in
+  persistent fixed-size particle population carried beside the spectral LES
+  state, advected by resolved wind with sedimentation, per-cell coalescence,
+  condensation, and two-way vapor/heat coupling.
 
-Flow advection of the particles (resolved-wind transport) is not implemented;
-the drivers are quiescent (0-D box / 1-D still column).
+The default Eulerian column path is still quiescent and stateless; resolved-wind
+particle transport is only active when callers explicitly carry a
+``LagrangianSDMState`` and invoke the Lagrangian coupling.
 """
 
 from __future__ import annotations
@@ -91,6 +98,20 @@ from legoesm.atmosphere.physics.microphysics.sdm.init import (
     sample_lognormal_radius,
 )
 from legoesm.atmosphere.physics.microphysics.sdm.recycling import recycle_inactive
+from legoesm.atmosphere.physics.microphysics.sdm.lagrangian import (
+    LagrangianSDMState,
+    advect_step,
+    apply_lagrangian_sdm_to_les_state,
+    coalescence_cells_step,
+    condensation_coupling_step,
+    diagnose_liquid_mixing_ratios,
+    initialize_lagrangian_sdm,
+    interpolate_wind,
+    make_lagrangian_sdm_state,
+    particle_cell_indices,
+    set_diagnostic_liquid_tracers,
+    total_water_mass,
+)
 
 __all__ = [
     "SDMConfig",
@@ -133,4 +154,16 @@ __all__ = [
     "exponential_water_droplets",
     "lognormal_aerosol_droplets",
     "recycle_inactive",
+    "LagrangianSDMState",
+    "make_lagrangian_sdm_state",
+    "initialize_lagrangian_sdm",
+    "particle_cell_indices",
+    "interpolate_wind",
+    "advect_step",
+    "coalescence_cells_step",
+    "condensation_coupling_step",
+    "diagnose_liquid_mixing_ratios",
+    "set_diagnostic_liquid_tracers",
+    "total_water_mass",
+    "apply_lagrangian_sdm_to_les_state",
 ]

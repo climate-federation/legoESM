@@ -189,15 +189,35 @@ def rest_state_latlon_cgrid_ocean(
         )
     elif stratification == "linear":
         # T linear from T_water_init_C at the surface (z=0) to T_deep at the
-        # deepest interface z_bottom (= z_half_ref[-1] = -H_max). Veros ACC:
-        # T = (1 - z/z_bottom)*15 (T_deep=0).
+        # deepest interface z_bottom (= z_half_ref[-1] = -H_max).
+        # NOTE: this is NOT Veros's ACC initial condition — see
+        # "veros_acc_linear" below (the earlier comment here claimed it was;
+        # the transcription misread Veros's bottom-first ``zw[0]``).
         z_bottom = z_coord.z_half_ref[-1]
         frac = z_coord.z_full_ref / z_bottom          # 0 (surface) -> ~1 (bottom)
         T_profile = T_water_init_C + (T_deep - T_water_init_C) * frac
+    elif stratification == "veros_acc_linear":
+        # The LITERAL Veros ACC initial condition (veros/setups/acc/acc.py:117):
+        #     temp = (1 - zt / zw[0]) * 15
+        # Veros's arrays are BOTTOM-FIRST, so ``zw[0]`` is the TOP FACE of the
+        # BOTTOM cell (~ -1724 m on the 15-level ACC grid), NOT the bottom
+        # interface -H_max. The profile therefore goes slightly NEGATIVE in
+        # the deepest cell (bottom-cell T ~ -1.15 C on the ACC grid) — a cold
+        # abyss at t=0. The "linear" option above normalises by -H_max
+        # instead, leaving the t=0 abyss ~2.15 K WARMER than Veros's; with the
+        # ~3 Sv deep ventilation (century-scale fill time) that offset
+        # persists essentially unreduced through any practical spin-up
+        # (measured: it was the whole 30-yr ACC abyss bias, 2.33 vs 0.98 C;
+        # with this profile the 5-yr abyss trajectories match to ~0.01 K).
+        # ``T_deep`` is unused — Veros's formula has no independent deep
+        # temperature. legoESM is surface-first: Veros zt = z_full_ref and
+        # zw[0] = z_half_ref[-2] (the second-deepest interface).
+        zw0 = z_coord.z_half_ref[-2]
+        T_profile = T_water_init_C * (1.0 - z_coord.z_full_ref / zw0)
     else:
         raise ValueError(
             f"Unknown stratification={stratification!r}; expected "
-            f"'exponential' or 'linear'."
+            f"'exponential', 'linear' or 'veros_acc_linear'."
         )
     dtype = get_policy().storage
     T_3d = jnp.broadcast_to(

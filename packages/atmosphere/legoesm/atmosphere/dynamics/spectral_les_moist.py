@@ -18,6 +18,11 @@ core change. Two pieces:
   to microphysics columns, calls the dispatched scheme, and maps the
   tendencies back. The latent heating is applied to θ via the reference Exner.
 
+* :func:`step_lagrangian_sdm_les` — opt-in stateful coupling for the advected
+  Lagrangian SDM path. It carries a persistent super-droplet state beside the
+  LES state and overwrites q_c/q_r with particle-binned diagnostics after each
+  split SDM update.
+
 VERTICAL ORDER: the microphysics column convention is TOP-DOWN (index 0 = model
 top; ``sedimentation_tendency`` propagates flux from index k−1 INTO k, and the
 "surface" precip flux leaves the LAST index). The spectral LES is BOTTOM-UP
@@ -30,6 +35,7 @@ the plane CRM's, enforced against ``_PLANE_MIN_TRACER_SLOTS`` at build time.
 """
 from __future__ import annotations
 
+import functools
 from typing import NamedTuple
 
 import jax
@@ -42,6 +48,45 @@ from legoesm.atmosphere.physics.microphysics.integration import (
     min_tracer_slots,
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+
+
+def moist_diagnostics(u, v, w_centre, theta, tracers, rho_c, dz, dx,
+                      dt, dy=None, qc_thresh=1.0e-5):
+    """Bundle of moist-LES diagnostics for the stabilization test matrix.
+
+    Host (numpy-on-jax) reductions; cheap, call per print. ``w_centre`` is the
+    cell-centred w. Returns a plain dict:
+
+    * ``cloud_frac``  projected cloud cover (any q_c > qc_thresh in a column)
+    * ``lwp``         domain-mean liquid-water path [g/m²]
+    * ``max_w``       max |w| [m/s]            ``w_var`` ⟨w'²⟩ peak [m²/s²]
+    * ``tke``         peak resolved 0.5⟨u'²+v'²+w'²⟩ [m²/s²]
+    * ``max_cfl``     max(|u|,|v|)·dt/dx, |w|·dt/dz
+    * ``total_water`` domain-mean column-integrated q_t = ∫ρ(q_v+q_c+q_r)dz [kg/m²]
+                      — track its drift for the total-water conservation error
+    * ``qv_min/qv_max/qc_max`` scalar bounds [kg/kg] (positivity monitor)
+    """
+    import numpy as np
+    u = np.asarray(u); v = np.asarray(v); wc = np.asarray(w_centre)
+    tr = np.asarray(tracers); rho = np.asarray(rho_c)
+    qv, qc = tr[..., 0], tr[..., 1]
+    qr = tr[..., 2] if tr.shape[-1] > 2 else np.zeros_like(qv)
+    up = u - u.mean((0, 1)); vp = v - v.mean((0, 1)); wp = wc - wc.mean((0, 1))
+    uu = (up * up).mean((0, 1)); vv = (vp * vp).mean((0, 1))
+    ww = (wp * wp).mean((0, 1))
+    cloudy = np.any(qc > qc_thresh, axis=-1)
+    lwp = float((qc * rho[None, None, :]).sum(-1).mean()) * dz * 1.0e3
+    qt_col = ((qv + qc + qr) * rho[None, None, :]).sum(-1) * dz  # (ny,nx) [kg/m²]
+    dy = dx if dy is None else dy
+    max_w = float(np.abs(wc).max())                          # cell-centred w
+    cfl = max(float(np.abs(u).max()) * dt / dx,
+              float(np.abs(v).max()) * dt / dy,
+              max_w * dt / dz)
+    return dict(
+        cloud_frac=float(cloudy.mean()), lwp=lwp, max_w=max_w,
+        w_var=float(ww.max()), tke=float((0.5 * (uu + vv + ww)).max()),
+        max_cfl=cfl, total_water=float(qt_col.mean()),
+        qv_min=float(qv.min()), qv_max=float(qv.max()), qc_max=float(qc.max()))
 
 
 def conserving_positive(tracers, rho_c, dz, n_water=6):
@@ -144,7 +189,7 @@ def make_les_microphysics_fn(micro_config: MicrophysicsConfig,
     if micro_fn is None:                                   # scheme "none"
         raise ValueError("microphysics scheme 'none' — build no adapter; run "
                          "the dry driver instead.")
-    min_slots = min_tracer_slots(scheme_name)
+    min_slots = min_tracer_slots(scheme_name, scheme_config)
 
     def micro(theta, tracers):
         ny, nx, nz = theta.shape
@@ -196,3 +241,105 @@ def make_les_microphysics_fn(micro_config: MicrophysicsConfig,
 
     micro.scheme_name = scheme_name
     return micro
+
+
+def step_lagrangian_sdm_les(
+    state,
+    sdm_state,
+    g,
+    ref: SpectralRefState,
+    dt: float,
+    sdm_config,
+    u_geo,
+    f_cor: float,
+    *,
+    first: bool = False,
+    force=(0.0, 0.0),
+    sfc_theta_flux=0.0,
+    t_sfc=None,
+    sfc_qv_flux=0.0,
+    do_condensation: bool = True,
+    do_coalescence: bool = True,
+):
+    """One opt-in spectral LES step coupled to persistent Lagrangian SDM.
+
+    This is a driver hook, not part of the default microphysics dispatch. The
+    normal spectral LES step advances the Eulerian velocity, θ and vapor tracer;
+    then the persistent super-droplets are advected/sedimented, collided within
+    cells, condensed/evaporated, and binned back to diagnostic q_c/q_r slots.
+
+    Returns ``(state_new, sdm_state_new, u_star, diagnostics)``. Existing dry and
+    Eulerian microphysics paths are unchanged unless callers explicitly use this
+    function and carry ``sdm_state``.
+
+    JIT usage: ``g``, ``ref`` and ``sdm_config`` are static Python/NestedTuple
+    configuration objects, so direct ``jax.jit(step_lagrangian_sdm_les)`` is not
+    the supported entry point. Use :func:`make_lagrangian_sdm_les_step`, which
+    closes over those objects and returns a jitted ``(state, sdm_state, dt)``
+    step. With the default ``sdm_config.collision_mode="stochastic"``,
+    coalescence is forward-only because pair order and integer collision counts
+    are random/discontinuous. With
+    ``sdm_config.collision_mode="deterministic"``, collision uses a mean-field
+    expected pair increment; for fixed particle-cell membership the full split
+    update has JAX VJPs with respect to droplet radii/multiplicities and
+    Eulerian thermodynamic fields. The floor-based particle-cell assignment is
+    still discrete with respect to particle positions.
+    """
+    from legoesm.atmosphere.dynamics import spectral_les_plane as sl
+    from legoesm.atmosphere.physics.microphysics.sdm.lagrangian import (
+        apply_lagrangian_sdm_to_les_state,
+    )
+
+    state_new, u_star = sl.step(
+        state, g=g, dt=dt, u_geo=u_geo, f_cor=f_cor, first=first, force=force,
+        sfc_theta_flux=sfc_theta_flux, t_sfc=t_sfc, sfc_qv_flux=sfc_qv_flux)
+    state_new, sdm_state_new, diagnostics = apply_lagrangian_sdm_to_les_state(
+        state_new, sdm_state, g, ref, dt, sdm_config,
+        do_condensation=do_condensation, do_coalescence=do_coalescence)
+    return state_new, sdm_state_new, u_star, diagnostics
+
+
+def make_lagrangian_sdm_les_step(
+    g,
+    ref: SpectralRefState,
+    sdm_config,
+    *,
+    u_geo,
+    f_cor: float,
+    force=(0.0, 0.0),
+    sfc_theta_flux=0.0,
+    t_sfc=None,
+    sfc_qv_flux=0.0,
+    do_condensation: bool = True,
+    do_coalescence: bool = True,
+):
+    """Return the supported jitted Lagrangian-SDM spectral-LES step closure.
+
+    The returned function has signature ``step(state, sdm_state, dt, *,
+    first=False)``. ``first`` is static because the AB2 LES integrator uses it
+    in a Python branch. Use ``SDMConfig(collision_mode="deterministic")`` for
+    reverse-mode sensitivities through Lagrangian coalescence; the stochastic
+    default is a forward simulation path.
+    """
+
+    @functools.partial(jax.jit, static_argnames=("first",))
+    def step(state, sdm_state, dt, *, first: bool = False):
+        return step_lagrangian_sdm_les(
+            state,
+            sdm_state,
+            g,
+            ref,
+            dt,
+            sdm_config,
+            u_geo=u_geo,
+            f_cor=f_cor,
+            first=first,
+            force=force,
+            sfc_theta_flux=sfc_theta_flux,
+            t_sfc=t_sfc,
+            sfc_qv_flux=sfc_qv_flux,
+            do_condensation=do_condensation,
+            do_coalescence=do_coalescence,
+        )
+
+    return step

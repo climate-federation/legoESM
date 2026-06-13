@@ -96,6 +96,12 @@ def parse_args():
     p.add_argument("--n-tracers", type=int, default=9)
     p.add_argument("--scalar-advection", choices=["van_leer","weno5","weno5_hv"], default="van_leer",
                    help="monotone scalar reconstruction (weno5=less diffusive).")
+    p.add_argument("--w-hyperdiff", type=float, default=0.0,
+                   help="OPT-IN horizontal w-hyperdiffusion nu4 [m^4/s].")
+    p.add_argument("--theta-hyperdiff", type=float, default=0.0,
+                   help="OPT-IN scale-selective k4 hyperdiff on theta [m^4/s].")
+    p.add_argument("--div-damping", type=float, default=0.0,
+                   help="OPT-IN momentum divergence damping alpha [m^2/s].")
     # Shared with bx.build (the moist-stability switches; defaults match BOMEX).
     p.add_argument("--filter-monotone-scalars", action="store_true")
     p.add_argument("--filter-monotone-qv", action="store_true")

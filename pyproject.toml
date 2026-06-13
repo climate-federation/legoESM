@@ -142,6 +142,29 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+# Fuller CLUBB port (PORT_CLUBB.md): the closure coefficients, model flags and
+# intermediate variables mirror CLUBB's canonical symbol names 1:1 (c_K1,
+# iiPDF_type, l_use_C7_Richardson, C2rt, Skw, wpthlp, Lscale, ...) as in
+# CLUBB-JAX, parameters_tunable.F90, and the CAM ``clubb_*`` namelist. Renaming
+# them to snake_case would destroy the cross-reference to the reference and the
+# tuning literature (the higher-priority correctness/faithfulness goal), so the
+# pep8-naming mixedCase rules are relaxed ONLY for these files.
+# Glob over all CLUBB turbulence modules (clubb.py, clubb_grid.py,
+# clubb_config.py, clubb_helpers.py, clubb_pdf.py, clubb_mixing_length.py,
+# clubb_moments.py, clubb_saturation.py, ...). Excludes the pre-existing
+# clubb_lite.py (already clean) only incidentally — relaxing naming there is
+# harmless. N815 covers the config symbol fields; N803/N806 the kernel args/vars.
+"packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb*.py" = ["N802", "N803", "N806", "N815"]
+# CLUBB port tests use the same physical symbol names as the modules under test
+# (T for temperature, Tc for deg C, etc.) — clearer than snake_case here. E402:
+# these tests set jax_enable_x64 before importing the modules under test (a
+# standard JAX-testing idiom), so module-level imports follow that call.
+"tests/unit/test_clubb_*.py" = ["E402", "N802", "N803", "N806"]
+# CLUBB validation/characterization scripts use the same physical symbol names
+# (T for temperature) and set jax_enable_x64 before importing (E402).
+"scripts/validate/clubb_*.py" = ["E402", "N802", "N803", "N806"]
+
 [tool.mypy]
 python_version = "3.11"
 warn_return_any = true

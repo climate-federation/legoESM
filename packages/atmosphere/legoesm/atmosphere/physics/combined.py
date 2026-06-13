@@ -60,7 +60,9 @@ from legoesm.atmosphere.physics.convection.integration import (
     make_convection_physics,
 )
 from legoesm.atmosphere.physics.turbulence.integration import (
+    get_turbulence_fn,
     make_turbulence_physics,
+    turbulence_carry_field,
 )
 from legoesm.atmosphere.physics.microphysics.integration import (
     make_microphysics_physics,
@@ -224,16 +226,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # MYNN-2.5 writes its prognostic ``qke = 2·TKE`` into a
         # dedicated PhysicsState field so a restart-time scheme switch
         # cannot silently feed the wrong moment as energy (Phase C
-        # codex iter-1 medium finding).  Slot comes from the shared
-        # turbulence_scheme_traits; diagnostic schemes return None for
-        # the carry, so "tke" as the tag default is never written.
-        from legoesm.atmosphere.physics.turbulence.integration import (
-            turbulence_scheme_traits,
-        )
-        _turb_field = (
-            turbulence_scheme_traits(config.turbulence.scheme).energy_field
-            or "tke"
-        )
+        # codex iter-1 medium finding).
+        # qke (MYNN-2.5) / clubb_moments (prognostic CLUBB) / tke — must match the
+        # slot the per-model physics_fn reads (turbulence_carry_field, the
+        # config-aware refinement of turbulence_scheme_traits.energy_field).
+        _turb_sn, _, _turb_sc = get_turbulence_fn(config.turbulence)
+        _turb_field = turbulence_carry_field(_turb_sn, _turb_sc)
         tagged_fns.append((
             make_turbulence_physics(config.turbulence, model_type, dt),
             True,
@@ -411,9 +409,10 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
         # Phase C codex iter-2 high: route MYNN-2.5 to ``qke``
         # (PhysicsState) so a non-SCM nonhydrostatic run also persists
         # qke across steps.
-        _turb_field = (
-            "qke" if config.turbulence.scheme == "mynn25" else "tke"
-        )
+        # qke (MYNN-2.5) / clubb_moments (prognostic CLUBB) / tke — must match the
+        # slot the per-model physics_fn reads (turbulence_carry_field).
+        _turb_sn, _, _turb_sc = get_turbulence_fn(config.turbulence)
+        _turb_field = turbulence_carry_field(_turb_sn, _turb_sc)
         tagged_fns.append((
             make_turbulence_physics(config.turbulence, "nonhydrostatic", dt),
             True,
@@ -542,9 +541,10 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
     if config.turbulence.scheme != "none":
         # Phase C codex iter-2 high: route MYNN-2.5 to ``qke`` on the
         # spectral PE combined path too.
-        _turb_field = (
-            "qke" if config.turbulence.scheme == "mynn25" else "tke"
-        )
+        # qke (MYNN-2.5) / clubb_moments (prognostic CLUBB) / tke — must match the
+        # slot the per-model physics_fn reads (turbulence_carry_field).
+        _turb_sn, _, _turb_sc = get_turbulence_fn(config.turbulence)
+        _turb_field = turbulence_carry_field(_turb_sn, _turb_sc)
         tagged_fns.append((
             make_turbulence_physics(config.turbulence, "spectral_pe", dt),
             True,

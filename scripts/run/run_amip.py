@@ -320,7 +320,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--turbulence", type=str, default="none",
                         choices=[
                             "none", "smagorinsky", "louis", "tke",
-                            "clubb_lite", "holtslag_boville", "ysu", "edmf",
+                            "clubb_lite", "clubb", "holtslag_boville", "ysu", "edmf",
                         ])
     parser.add_argument("--gravity-wave-drag", type=str, default="none",
                         choices=[

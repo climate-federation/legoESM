@@ -224,3 +224,24 @@ def test_frozen_state_probe_compatible():
     for name in probe._fields:
         arr = np.asarray(getattr(probe, name))
         assert np.all(np.isfinite(arr)), f"probe field {name} not finite"
+
+
+def test_acc_basic_free_run_ships_faithful_stepping_composition():
+    """acc_basic's own config builder is a copy of the acc config and missed
+    the PR #429 composition defaults — pin the same bundle here (free-run
+    path), with the frozen-probe path keeping legoESM defaults."""
+    from legoesm.ocean.fidelity.veros_acc_basic_recipe import (
+        build_acc_basic_model_config,
+    )
+    free = build_acc_basic_model_config(with_surface_forcing=True)
+    assert free.outer_integrator == "ab2"
+    assert free.dt_mom_ratio == 9.0           # DT_TRACER_S / DT_MOM_S
+    assert free.barotropic_solver == "rigid_lid"
+    assert free.coriolis_scheme == "explicit_ab2"
+    assert free.ab2_scope == "advective"
+    assert free.momentum_friction_additive is True
+
+    probe = build_acc_basic_model_config(with_surface_forcing=False)
+    assert probe.outer_integrator == "forward_euler"
+    assert probe.coriolis_scheme == "matsuno_split"
+    assert probe.ab2_scope == "total"

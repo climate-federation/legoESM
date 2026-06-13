@@ -49,6 +49,7 @@ from legoesm.atmosphere.physics.turbulence.smagorinsky import smagorinsky_turbul
 from legoesm.atmosphere.physics.turbulence.louis import louis_turbulence
 from legoesm.atmosphere.physics.turbulence.tke import tke_turbulence
 from legoesm.atmosphere.physics.turbulence.mynn25 import mynn25_turbulence
+from legoesm.atmosphere.physics.turbulence.clubb import clubb_turbulence
 from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_lite_turbulence
 from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
     holtslag_boville_turbulence,
@@ -94,6 +95,7 @@ class TurbulenceSchemeTraits(NamedTuple):
 _ENERGY_FIELD_BY_SCHEME = {
     "tke": "tke",
     "clubb_lite": "tke",
+    "clubb": "tke",
     "edmf": "tke",
     "mynn25": "qke",
 }
@@ -125,6 +127,15 @@ def get_turbulence_fn(config: TurbulenceConfig):
         return "mynn25", mynn25_turbulence, config.mynn25
     elif config.scheme == "clubb_lite":
         return "clubb_lite", clubb_lite_turbulence, config.clubb_lite
+    elif config.scheme == "clubb":
+        from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+        clubb_cfg = config.clubb if config.clubb is not None else CLUBBConfig()
+        if getattr(clubb_cfg, "prognostic", False):
+            from legoesm.atmosphere.physics.turbulence.clubb import (
+                clubb_turbulence_prognostic,
+            )
+            return "clubb", clubb_turbulence_prognostic, clubb_cfg
+        return "clubb", clubb_turbulence, clubb_cfg
     elif config.scheme == "holtslag_boville":
         return "holtslag_boville", holtslag_boville_turbulence, config.holtslag_boville
     elif config.scheme == "ysu":
@@ -135,6 +146,58 @@ def get_turbulence_fn(config: TurbulenceConfig):
         return "none", None, None
     else:
         raise ValueError(f"Unknown turbulence scheme: {config.scheme!r}")
+
+
+def turbulence_carry_field(scheme_name: str, scheme_config) -> str:
+    """PhysicsState field that carries this turbulence scheme's prognostic state.
+
+    ``mynn25`` → ``qke``; prognostic CLUBB (``scheme="clubb"`` with
+    ``CLUBBConfig.prognostic=True``) → ``clubb_moments`` (the packed
+    CLUBBMomentState); every other TKE-carrying scheme → ``tke``. Used by both the
+    per-model physics_fn (to READ the carry) and ``combined.py`` (to STORE it),
+    so the read/write slots always agree.
+    """
+    if scheme_name == "mynn25":
+        return "qke"
+    if scheme_name == "clubb" and getattr(scheme_config, "prognostic", False):
+        return "clubb_moments"
+    return "tke"
+
+
+def _read_turb_carry(phys_state, carry_field, ncol, nlev, scheme_config, dtype):
+    """Read (or freshly seed) the turbulence carry from ``phys_state``.
+
+    Returns the array passed as the carry arg to ``turb_fn`` — ``(ncol, nlev)``
+    TKE/qke, or the packed CLUBB moments ``(ncol, 15, nlev+1)`` for prognostic
+    CLUBB. Re-seeds when ``phys_state`` is absent or the stored slot has the wrong
+    shape (e.g. a minimal placeholder from a non-clubb init / scheme switch)."""
+    if carry_field == "clubb_moments":
+        from legoesm.atmosphere.physics.turbulence.clubb import (
+            init_clubb_moments,
+            pack_clubb_moments,
+        )
+        expected = (ncol, 15, nlev + 1)
+        stored = getattr(phys_state, "clubb_moments", None) if phys_state else None
+        if stored is not None and stored.shape == expected:
+            return stored
+        if stored is not None:
+            # A wrong-shape carry (e.g. the minimal (ncol,1,1) placeholder) means
+            # PhysicsState was NOT initialised for prognostic CLUBB. Fail fast at
+            # trace time rather than silently RESIZE the carry inside the JIT step
+            # (which would recompile next step) or silently re-seed the moments.
+            raise ValueError(
+                f"prognostic CLUBB expects PhysicsState.clubb_moments of shape "
+                f"{expected}, got {tuple(stored.shape)} — call init_physics_state "
+                f"with TurbulenceConfig(scheme='clubb', clubb=CLUBBConfig("
+                f"prognostic=True)) so the carry is seeded at the right shape.")
+        # No phys_state at all (a one-off, non-looped physics_fn call): seed fresh.
+        return pack_clubb_moments(
+            init_clubb_moments(ncol, nlev, scheme_config, dtype=dtype))
+    floor = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=dtype)
+    if phys_state is None:
+        return floor
+    carry = getattr(phys_state, carry_field)
+    return carry if carry.shape == (ncol, nlev) else floor
 
 
 from legoesm.atmosphere.physics._shared import (
@@ -238,6 +301,7 @@ def _make_hydrostatic_turbulence(
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
+    carry_field = turbulence_carry_field(scheme_name, scheme_config)
 
     def physics_fn(
         state: HydrostaticState,
@@ -306,18 +370,10 @@ def _make_hydrostatic_turbulence(
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
-            # Read TKE from explicit PhysicsState if provided.
-            if phys_state is not None:
-                tke_in = (
-                    phys_state.qke
-                    if scheme_name == "mynn25"
-                    else phys_state.tke
-                )
-                # Reshape if needed (PhysicsState stores flat columns).
-                if tke_in.shape != (ncol, nlev):
-                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
-            else:
-                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
+            # Read (or seed) the prognostic carry from PhysicsState — tke/qke, or
+            # the packed CLUBB moments (ncol,15,nlev+1) for prognostic clubb.
+            tke_in = _read_turb_carry(
+                phys_state, carry_field, ncol, nlev, scheme_config, _state_dtype)
 
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
@@ -391,6 +447,7 @@ def _make_mpas_turbulence(
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
+    carry_field = turbulence_carry_field(scheme_name, scheme_config)
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
         from legoesm.grids.voronoi import reconstruct_cell_velocity
@@ -452,16 +509,8 @@ def _make_mpas_turbulence(
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
-            if phys_state is not None:
-                tke_in = (
-                    phys_state.qke
-                    if scheme_name == "mynn25"
-                    else phys_state.tke
-                )
-                if tke_in.shape != (nCells, nlev):
-                    tke_in = jnp.full((nCells, nlev), scheme_config.tke_min, dtype=_state_dtype)
-            else:
-                tke_in = jnp.full((nCells, nlev), scheme_config.tke_min, dtype=_state_dtype)
+            tke_in = _read_turb_carry(
+                phys_state, carry_field, nCells, nlev, scheme_config, _state_dtype)
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
@@ -542,21 +591,23 @@ def _make_nonhydrostatic_turbulence(
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
-    if scheme_name == "mynn25":
+    carry_field = turbulence_carry_field(scheme_name, scheme_config)
+    if carry_field in ("qke", "clubb_moments"):
         # Phase C codex iter-3 high: the nonhydrostatic CD-grid dynamics
         # driver drops the returned ``PhysicsState`` after every
         # physics call (see ``slow_tendency_fn`` in
-        # ``compressible_euler_cdgrid.py``), so the evolved qke would
-        # silently re-initialise from ``qke_min`` on every step.  Fail
-        # fast at factory time until phys_state is threaded through the
-        # nonhydrostatic step path (out of Phase C scope).
+        # ``compressible_euler_cdgrid.py``), so an evolved prognostic carry
+        # (qke, or the prognostic-CLUBB moments) would silently re-initialise
+        # on every step.  Fail fast at factory time until phys_state is
+        # threaded through the nonhydrostatic step path (out of Phase C scope).
+        _what = "MYNN-2.5" if carry_field == "qke" else "prognostic CLUBB"
         raise NotImplementedError(
-            "MYNN-2.5 turbulence requires a dynamics driver that "
+            f"{_what} turbulence requires a dynamics driver that "
             "persists PhysicsState across steps.  The current "
             "nonhydrostatic CD-grid driver discards the returned "
-            "phys_state, which would silently re-initialise qke on "
-            "every step.  Use ``model_type='hydrostatic'`` "
-            "for MYNN-2.5 (MPAS turbulence is not yet wired up); tracking issue: thread "
+            f"phys_state, which would silently re-initialise the {carry_field} "
+            "carry on every step.  Use ``model_type='hydrostatic'`` "
+            f"for {_what} (MPAS turbulence is not yet wired up); tracking issue: thread "
             "PhysicsState through the nonhydrostatic step path."
         )
 
@@ -641,16 +692,8 @@ def _make_nonhydrostatic_turbulence(
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
-            if phys_state is not None:
-                tke_in = (
-                    phys_state.qke
-                    if scheme_name == "mynn25"
-                    else phys_state.tke
-                )
-                if tke_in.shape != (ncol, nlev):
-                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
-            else:
-                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
+            tke_in = _read_turb_carry(
+                phys_state, carry_field, ncol, nlev, scheme_config, _state_dtype)
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half, z_full, z_half,
@@ -711,17 +754,20 @@ def _make_spectral_pe_turbulence(
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
-    if scheme_name == "mynn25":
+    carry_field = turbulence_carry_field(scheme_name, scheme_config)
+    if carry_field in ("qke", "clubb_moments"):
         # Phase C codex iter-3 high: spectral PE dynamics drops the
-        # returned ``PhysicsState`` (see spectral_pe.py:1556-1557), so
-        # qke would silently re-initialise on every step.  Fail fast
-        # until phys_state is threaded through the spectral PE step.
+        # returned ``PhysicsState`` (see spectral_pe.py:1556-1557), so an
+        # evolved prognostic carry (qke, or the prognostic-CLUBB moments)
+        # would silently re-initialise on every step.  Fail fast until
+        # phys_state is threaded through the spectral PE step.
+        _what = "MYNN-2.5" if carry_field == "qke" else "prognostic CLUBB"
         raise NotImplementedError(
-            "MYNN-2.5 turbulence requires a dynamics driver that "
+            f"{_what} turbulence requires a dynamics driver that "
             "persists PhysicsState across steps.  The current "
             "spectral PE driver discards the returned phys_state, "
-            "which would silently re-initialise qke on every step.  "
-            "Use ``model_type='hydrostatic'`` for MYNN-2.5 (MPAS "
+            f"which would silently re-initialise the {carry_field} carry on "
+            f"every step.  Use ``model_type='hydrostatic'`` for {_what} (MPAS "
             "turbulence is not yet wired up); tracking issue: thread "
             "PhysicsState through the spectral PE step path."
         )
@@ -779,16 +825,8 @@ def _make_spectral_pe_turbulence(
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
-            if phys_state is not None:
-                tke_in = (
-                    phys_state.qke
-                    if scheme_name == "mynn25"
-                    else phys_state.tke
-                )
-                if tke_in.shape != (ncol, nlev):
-                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
-            else:
-                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
+            tke_in = _read_turb_carry(
+                phys_state, carry_field, ncol, nlev, scheme_config, _state_dtype)
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,

@@ -24,6 +24,7 @@ __param_spec__ = {
             "newton_atol": "numerics: Newton absolute-residual exit tolerance",
             "newton_rtol": "numerics: Newton relative-residual exit tolerance",
             "newton_stol": "numerics: Newton step-size exit tolerance (solver convergence)",
+            "column_n_rain_floor": "numerics: fallback rain number when reconstructed Nr<=0 (degenerate-case floor, not a closure)",
         },
         "params": {
             "cdnc": {"units": "1/m^3", "bounds": (33000000.0, 300000000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "droplet_number", "reference": "Shima et al. (2009) prescribed cloud-droplet number", "shape": None},
@@ -103,9 +104,40 @@ class SDMConfig(NamedTuple):
         Add the Brownian (Seinfeld-Pandis) coagulation coefficient on top of
         the selected collision kernel (ERF ``include_brownian_coalescence``;
         additive, matters only for sub-micron droplets/haze).
+    collision_mode : str
+        Collision update mode. ``"stochastic"`` (default) is the Shima
+        Monte-Carlo integer-collision algorithm with random pairing/rounding.
+        ``"deterministic"`` is an opt-in mean-field update for the persistent
+        Lagrangian path: candidate pairs use the expected coalescence increment
+        with a smooth cap at the available multiplicity, no accept/reject draw,
+        and no PRNG consumption. It is intended for reverse-mode sensitivity
+        tests and deterministic optimization experiments.
     r_rain : float
         Radius threshold [m] separating cloud water from rain when depositing
         super-droplet liquid to grid mixing ratios (ERF default 40 um).
+    column_do_coalescence : bool
+        Opt-in stateless Eulerian column adapter mode. False (default) keeps
+        the legacy condensation-only mean-droplet closure. True reconstructs a
+        per-cell super-droplet population from the Eulerian bulk liquid fields,
+        advances one ``box_step`` with condensation + Shima coalescence, and
+        projects back to bulk cloud/rain mass and number tendencies. This is a
+        per-step reconstructed well-mixed box, NOT faithful advected
+        Lagrangian SDM; the population and PRNG stream are reset every column
+        call.
+    column_n_sd : int
+        Number of super-droplet slots reconstructed per Eulerian cell in
+        ``column_do_coalescence`` mode. Half are initialized from the cloud
+        bulk mode and half from the rain mode. Must be >= 4 when coalescence is
+        enabled.
+    column_seed : int
+        Fixed PRNG seed for stateless column reconstruction/coalescence. Because
+        the microphysics dispatch is keyless and has no step counter, this is
+        deterministic for a given cell index and call. That makes the adapter
+        reproducible but can bias long integrations; faithful SDM needs a
+        threaded PRNG key with persistent particles.
+    column_n_rain_floor : float
+        Rain number concentration [1/m^3] used to reconstruct rain mass when
+        ``q_r > 0`` but the Eulerian ``N_r`` slot is zero or absent.
     cdnc : float
         Prescribed cloud-droplet number concentration [1/m^3] used by the
         stateless column operator to reconstruct a mean cloud droplet from the
@@ -139,6 +171,11 @@ class SDMConfig(NamedTuple):
     terminal_velocity: str = "rogers_yau"
     golovin_b: float = 1.5e3              # [1/s] Golovin kernel coefficient
     include_brownian: bool = False        # add Brownian coagulation to the kernel
+    collision_mode: str = "stochastic"    # stochastic | deterministic
     r_rain: float = 4.0e-5               # [m] cloud/rain radius threshold (40 um)
+    column_do_coalescence: bool = False  # opt-in reconstructed-box coalescence
+    column_n_sd: int = 64                # [-] super-droplets per cell in column box
+    column_seed: int = 0                 # [-] fixed key seed for keyless dispatch
+    column_n_rain_floor: float = 1.0e6   # [1/m^3] fallback rain number
     cdnc: float = 1.0e8                  # [1/m^3] prescribed cloud-droplet number
     r_min_reconstruct: float = 1.0e-6   # [m] min reconstructed mean-droplet radius

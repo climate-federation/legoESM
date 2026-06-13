@@ -24,7 +24,10 @@ from legoesm.atmosphere.physics.microphysics.output import (
 )
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
 from legoesm.atmosphere.physics.microphysics.sdm import SDMConfig, sdm_microphysics
-from legoesm.atmosphere.physics.microphysics.integration import _get_microphysics_fn
+from legoesm.atmosphere.physics.microphysics.integration import (
+    _get_microphysics_fn,
+    min_tracer_slots,
+)
 
 
 def _q_v_for_S(S, T, p):
@@ -105,6 +108,57 @@ def test_donor_clamps_keep_water_nonnegative():
     # q_v and q_c stay >= 0 after one explicit step
     assert q_v_arr[0] + np.asarray(out.dq_v_dt).ravel()[0] * dt >= -1e-15
     assert q_c_arr[1] + dq_c[1] * dt >= -1e-15
+
+
+def test_reconstructed_box_coalescence_produces_rain_and_conserves_liquid():
+    """Opt-in column_do_coalescence is a per-step reconstructed box-SDM path:
+    a broad low-N cloud near the rain split should transfer cloud mass to rain
+    while conserving total liquid in a saturated no-condensation cell."""
+    T, q_v, hyd, p_full, p_half, rho, dz = _columns(
+        S_list=[1.0], q_c_list=[2.0e-3])
+    hyd = hyd._replace(N_c=jnp.full((1, 1), 1.0e7))
+    cfg = SDMConfig(
+        column_do_coalescence=True,
+        column_n_sd=64,
+        column_seed=3,
+        include_curvature=False,
+        include_solute=False,
+        collision_kernel="golovin",
+        golovin_b=1.0e5,
+    )
+    out = sdm_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 10.0, cfg)
+    dqc = float(out.dq_c_dt[0, 0])
+    dqr = float(out.dq_r_dt[0, 0])
+    dqv = float(out.dq_v_dt[0, 0])
+    assert dqr > 0.0
+    assert dqc < 0.0
+    assert float(out.dN_r_dt[0, 0]) > 0.0
+    assert abs(dqc + dqr) < 1.0e-14
+    assert abs(dqv) < 1.0e-14
+    assert abs(float(out.dT_dt[0, 0])) < 1.0e-10
+
+
+def test_box_coalescence_activation_forms_cloud_and_clamps_positive():
+    """codex-flagged fixes: (4) activation — a SUPERSATURATED CLEAR cell
+    (q_c=0) must nucleate + grow cloud (dq_c>0) instead of staying clear;
+    (1) condensation never drives q_v negative; (2) number tendencies never
+    drive N_r negative. Water conserved."""
+    cfg = SDMConfig(column_do_coalescence=True, column_n_sd=32, column_seed=0,
+                    include_curvature=False, include_solute=False)
+    T, q_v, hyd, p_full, p_half, rho, dz = _columns(
+        S_list=[1.05], q_c_list=[0.0])              # clear + supersaturated
+    out = sdm_microphysics(T, q_v, hyd, p_full, p_half, rho, dz, 30.0, cfg)
+    dqc = float(out.dq_c_dt[0, 0]); dqv = float(out.dq_v_dt[0, 0]); dt = 30.0
+    assert dqc > 0.0                                   # (4) activation → cloud
+    assert float(q_v[0, 0]) + dqv * dt >= -1e-15       # (1) q_v stays ≥ 0
+    assert float(hyd.N_r[0, 0]) + float(out.dN_r_dt[0, 0]) * dt >= -1e-12  # (2)
+    assert abs(dqv + dqc + float(out.dq_r_dt[0, 0])) < 1e-13   # water conserved
+
+
+def test_sdm_slot_contract_is_config_aware():
+    assert min_tracer_slots("sdm") == 2
+    assert min_tracer_slots(
+        "sdm", SDMConfig(column_do_coalescence=True)) == 8
 
 
 def test_column_jit_and_grad():

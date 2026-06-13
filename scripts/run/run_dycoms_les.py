@@ -101,6 +101,12 @@ def parse_args():
     p.add_argument("--n-tracers", type=int, default=9)
     p.add_argument("--scalar-advection", choices=["van_leer","weno5","weno5_hv"], default="van_leer",
                    help="monotone scalar reconstruction (weno5=less diffusive).")
+    p.add_argument("--w-hyperdiff", type=float, default=0.0,
+                   help="OPT-IN horizontal w-hyperdiffusion nu4 [m^4/s].")
+    p.add_argument("--theta-hyperdiff", type=float, default=0.0,
+                   help="OPT-IN scale-selective k4 hyperdiff on theta [m^4/s].")
+    p.add_argument("--div-damping", type=float, default=0.0,
+                   help="OPT-IN momentum divergence damping alpha [m^2/s].")
     p.add_argument("--dynamic", action="store_true", default=True)
     p.add_argument("--static", dest="dynamic", action="store_false")
     p.add_argument("--sgs-model", choices=["smagorinsky", "vreman"],
@@ -144,7 +150,9 @@ def build(args, dtype):
         time_scheme=args.time_scheme, nu_floor=args.nu_floor,
         buoyancy=True, theta_ref0=290.0, pr_sgs=1.0,
         moist=True, n_tracers=args.n_tracers, monotone_scalars=True,
-        scalar_advection=args.scalar_advection)
+        scalar_advection=args.scalar_advection,
+        w_hyperdiff_coeff=args.w_hyperdiff, div_damping_coeff=args.div_damping,
+        theta_hyperdiff_coeff=args.theta_hyperdiff)
     g = sl.make_grid(cfg, dtype=dtype)
     case = Path(args.case_dir)
     snd = read_sam_snd(case / "snd")
