@@ -87,6 +87,33 @@ transpose §4 uses (gather full-lon for the boundary row, fold, scatter).
 Do the interior pad + guard as increment 3a (bounded, testable), the
 transpose boundary as 3b/4 (shared with the filter).
 
+### 3c. WALL-pole case SHIPPED — the separable half (2026-06-13)
+The §3 "interior and pole-fold are inseparable" finding is specific to
+the FOLD/TRIPOLE pole BC (which needs all-lon → transpose). The other
+pole BC — a constant WALL — IS separable: a wall ghost row is purely
+LOCAL (no lon dependency), so it composes cleanly with the interior
+sendrecv and the E/W ring. This is the REGULAR lat-lon BC and the
+ocean's closed poles. Shipped as `pad_halo_latlon_2d(..., pole_bc=
+"wall")` (`packages/core/legoesm/parallel/latlon_mpi.py`):
+  * pole-touching rows fill `south_value`/`north_value` locally;
+  * interior lat rows do same-neighbour sendrecv (rank-as-tag — the
+    LINE-safe pattern the 1-D band uses; NOT the ring, so no phase-tag
+    deadlock); EVERY non-pole rank posts its interior sendrecv (the line
+    terminates at the pole rows' local fill — fixes the reverted 3a
+    guard-and-skip deadlock);
+  * E/W via `exchange_halo_lon` on the lat-padded block → lon ghosts +
+    the 4 diagonal corners (N/S-then-E/W order; wall corner = wall
+    constant since the wall row is constant in lon).
+Fully AD-safe (sendrecv-VJP on both axes; wall is a no-grad constant),
+deadlock-free, no transpose. `pole_bc in {"fold","tripole"}` raises
+`NotImplementedError` (those still need §3b/§4's transpose — next
+increment), so a fold deck can't silently get a wall. Gated np=6 (3×2)
+parity vs serial lat-wall+lon-periodic ref + single-proc AD grad +
+raise test (`tests/parallel/test_latlon_2d_pad_wall.py`,
+`L2D_PAD_WALL_GATE_OK`). This unlocks the 2-D decomposition for the
+ocean and regular lat-lon atm NOW; the fold/tripole/polar-filter rows
+remain the transpose sub-project below.
+
 ### 4. Polar filter — THE hard part (transpose or local filter)
 `grids/polar_filter.py` does `jnp.fft.rfft(field, axis=lon)` per lat row
 — needs ALL longitudes. With lon split this breaks. Options, ranked:
@@ -121,6 +148,9 @@ a partitioner refinement after the 2-D path works.
    roundtrip test (scatter∘gather == id).
 3. Wire N/S+E/W into a 2-D step variant; serial-vs-2D parity (dry,
    atm + ocean) at proc=(2,2) on host devices.
+   3c DONE: `pad_halo_latlon_2d(pole_bc="wall")` — the full 2-D pad for
+   regular lat-lon / closed-pole ocean (no transpose). fold/tripole
+   raise pending §4. Gated `L2D_PAD_WALL_GATE_OK` (np=6 3×2).
 4. Polar filter transpose (atm only) + filtered-step parity.
 5. Ocean wet-cell partitioner + load-balance metric.
 6. Bench: 2-D vs 1-D strong scaling at high ranks (the payoff — 1-D

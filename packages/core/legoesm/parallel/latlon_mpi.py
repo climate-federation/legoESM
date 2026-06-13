@@ -867,6 +867,121 @@ def exchange_halo_lon(
     return jnp.concatenate([west_halo, field, east_halo], axis=1)
 
 
+def pad_halo_latlon_2d(
+    field: jax.Array,
+    layout: LatLon2DLayout,
+    halo: int = 1,
+    pole_bc: str = "wall",
+    south_value: float = 0.0,
+    north_value: float = 0.0,
+) -> jax.Array:
+    """Full 2-D halo pad (lat + lon) for ANY pencil row — the increment-3
+    integration of the 2-D building blocks.
+
+    N/S then E/W (corners ride the lat-padded edge columns into the E/W
+    exchange).  N/S: interior cuts MPI-sendrecv with the lat neighbour;
+    pole-touching rows fill the pole side per ``pole_bc``.  Every rank
+    participates in its interior-facing sendrecv (the line terminates at
+    the pole rows' local fill) so there is NO collective-line deadlock —
+    the failure of the earlier "guard-and-skip" interior-only attempt.
+    E/W: the periodic-ring :func:`exchange_halo_lon`.
+
+    ``pole_bc``:
+      * ``"wall"`` (default) — pole ghost rows = constant wall BC
+        (``south_value``/``north_value``).  This is the REGULAR lat-lon
+        case (and ocean, whose poles are closed walls).  Fully LOCAL at
+        the poles ⇒ no longitude transpose, and the whole pad is
+        DEADLOCK-FREE and AD-SAFE (sendrecv-VJP on both axes).
+      * ``"fold"`` / ``"tripole"`` — the atmospheric 180° pole-fold and
+        the ocean tripole north-fold need the FULL longitude axis at the
+        pole row (180° shift / permutation), so they require the
+        lat-pencil transpose (:func:`lon_gather_full`).  NOT YET wired
+        (next increment); raises so a fold deck can't silently get a
+        wall.
+
+    Returns ``(n_lat_local + 2*halo, n_lon_local + 2*halo[, nlev])``.
+    """
+    if pole_bc not in ("wall", "fold", "tripole"):
+        raise ValueError(
+            f"pad_halo_latlon_2d: pole_bc must be 'wall', 'fold', or "
+            f"'tripole', got {pole_bc!r}")
+    if pole_bc in ("fold", "tripole"):
+        raise NotImplementedError(
+            "pad_halo_latlon_2d: pole_bc='fold'/'tripole' needs the "
+            "lat-pencil transpose (lon_gather_full) to do the pole-fold's "
+            "global-longitude shift/permutation on a lon-split row — next "
+            "increment.  Use pole_bc='wall' for regular lat-lon / "
+            "closed-pole ocean."
+        )
+    if halo <= 0:
+        return field
+
+    # halo must fit the SMALLEST local block on BOTH axes — with an
+    # uneven split a neighbour can own fewer than `halo` rows/cols, so
+    # its send/recv would be shorter than this rank expects and the MPI
+    # exchange truncates/aborts/hangs before any reshape (codex MAJOR
+    # 2026-06-13). Smallest block on an even-ish split = floor(n/proc).
+    # _even_split gives the first (n % parts) blocks one extra row/col, so
+    # the SMALLEST block is exactly floor(n_global / parts).
+    min_lat_block = layout.n_lat_global // layout.proc_lat
+    min_lon_block = layout.n_lon_global // layout.proc_lon
+    if halo > min_lat_block or halo > min_lon_block:
+        raise ValueError(
+            f"pad_halo_latlon_2d: halo={halo} exceeds the smallest local "
+            f"block (lat {min_lat_block}=n_lat_global "
+            f"{layout.n_lat_global}//proc_lat {layout.proc_lat}, lon "
+            f"{min_lon_block}=n_lon_global {layout.n_lon_global}//proc_lon "
+            f"{layout.proc_lon}); a neighbour would send/recv a mismatched "
+            f"halo and the MPI exchange would abort/hang.")
+
+    trailing = field.shape[1:]
+    south_is_pole = layout.south_rank is None
+    north_is_pole = layout.north_rank is None
+
+    # Single-process lat (proc_lat==1, both poles local) without MPI:
+    # keep the path runnable serially.
+    if south_is_pole and north_is_pole:
+        south = jnp.full((halo,) + trailing, south_value, field.dtype)
+        north = jnp.full((halo,) + trailing, north_value, field.dtype)
+        ns = jnp.concatenate([south, field, north], axis=0)
+        return exchange_halo_lon(
+            ns, layout.west_rank, layout.east_rank, layout.rank, halo=halo)
+
+    import mpi4jax
+    from mpi4py import MPI
+
+    comm = MPI.COMM_WORLD
+    sendrecv = get_sendrecv_vjp(mpi4jax)
+
+    # N/S — interior sendrecv (rank-as-tag; the lat axis is a
+    # pole-terminated LINE, so this is the AD-safe pattern the 1-D band
+    # uses, NOT the ring case that needs phase tags), pole side wall.
+    if south_is_pole:
+        south = jnp.full((halo,) + trailing, south_value, field.dtype)
+    else:
+        send_s = field[:halo].reshape(-1)
+        recv_s = sendrecv(
+            send_s, jnp.zeros_like(send_s),
+            layout.south_rank, layout.south_rank,
+            layout.rank, layout.south_rank, comm)
+        south = recv_s.reshape((halo,) + trailing)
+
+    if north_is_pole:
+        north = jnp.full((halo,) + trailing, north_value, field.dtype)
+    else:
+        send_n = field[-halo:].reshape(-1)
+        recv_n = sendrecv(
+            send_n, jnp.zeros_like(send_n),
+            layout.north_rank, layout.north_rank,
+            layout.rank, layout.north_rank, comm)
+        north = recv_n.reshape((halo,) + trailing)
+
+    ns = jnp.concatenate([south, field, north], axis=0)
+    # E/W ring on the lat-padded block → fills lon ghosts + corners.
+    return exchange_halo_lon(
+        ns, layout.west_rank, layout.east_rank, layout.rank, halo=halo)
+
+
 # ============================================================================
 # Backend-dispatched pad_halo_latlon implementation
 # ============================================================================
