@@ -437,39 +437,32 @@ class AIMIPClassicalParams(eqx.Module):
         )
 
     def to_rrtmgp_config(self):
-        """Build a RRTMGPConfig with trained surface knobs.
+        """Build a RRTMGPConfig at the canonical defaults (no trained scalars).
 
-        Some RRTMGPConfig fields are folded into the solver-cache key in
-        ``rrtmgp.RRTMGP._instance_cache_key`` / ``_optics_cache_key`` and so
-        CANNOT carry a traced JAX leaf under ``eqx.filter_value_and_grad``.
-        Two distinct cases:
+        EVERY RRTMGPConfig field this class could set is folded into the
+        solver-cache key (``rrtmgp.RRTMGP._instance_cache_key`` /
+        ``_optics_cache_key``) and so cannot safely carry a traced JAX leaf
+        under ``eqx.filter_value_and_grad``:
 
-        - **Gas concentrations (CO2/CH4/N2O)** and **aerosol optics
-          (aerosol_ssa/aerosol_g)** appear as RAW tuple elements in the cache
-          key (not wrapped by ``_hashable``), so a traced leaf makes the key
-          tuple itself unhashable -> hard failure.  Both are frozen to the
-          canonical RRTMGP defaults here; their ``rrtmgp_co2_ppmv`` /
-          ``ch4_ppbv`` / ``n2o_ppbv`` / ``rrtmgp_aerosol_ssa`` /
-          ``rrtmgp_aerosol_g`` raw leaves remain for forward-compatibility but
-          are NOT wired in until RRTMGP consumes them as per-call traced inputs
-          outside the cache key.  (aerosol_ssa/aerosol_g freeze added 2026-06-13
-          after codex review: the gas-only freeze missed them.)
+        - Gas concentrations (CO2/CH4/N2O) and aerosol optics
+          (aerosol_ssa/aerosol_g) are RAW tuple elements -> a traced leaf makes
+          the key tuple unhashable (hard failure).
+        - sfc_emissivity/sfc_albedo go through ``_hashable``; a traced 0-D
+          scalar there is not concretizable (``float(tracer)`` raises) and even
+          the id-fallback would balloon the global instance cache by trace
+          identity.
 
-        - **sfc_emissivity / sfc_albedo** ARE routed through ``_hashable`` (which
-          falls back to ``id(...)`` for arrays / un-concretizable scalars) AND
-          are overridable per call by the spatial-surface ``(ncol,)`` arrays in
-          ``make_aimip_classical_spectral_physics`` — the intended trainable
-          surface path — so they stay wired.
+        So all of them are FROZEN to the RRTMGP defaults here.  The trained
+        surface knobs reach RRTMGP only through the per-call spatial-surface
+        path in ``make_aimip_classical_spectral_physics``: ``spatial_surface``
+        expands the ``rrtmgp_sfc_emissivity`` / ``rrtmgp_sfc_albedo`` leaves
+        (via ``as_dict()`` baselines) into ``(ncol,)`` fields that override the
+        config AFTER instance lookup — outside the scalar cache-key path.  The
+        gas/aerosol raw leaves persist only for forward-compatibility until
+        RRTMGP consumes them as per-call traced inputs.
         """
         from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
-        d = self.as_dict()
-        base = RRTMGPConfig()
-        return base._replace(
-            # Gas concentrations + aerosol optics frozen to scheme defaults
-            # (raw cache-key tuple elements; see docstring).
-            sfc_emissivity=d["rrtmgp_sfc_emissivity"],
-            sfc_albedo=d["rrtmgp_sfc_albedo"],
-        )
+        return RRTMGPConfig()
 
 
 def _canonical_scheme_defaults() -> dict[str, float]:
