@@ -7,6 +7,162 @@ from typing import NamedTuple
 from legoesm import constants
 from legoesm.surface_albedo import IceAlbedoConfig
 
+__param_spec__ = {
+    "SnowConfig": {
+        "scheme_key": "ice.snow",
+        "excluded": {
+            "h_snow_min": "numerics: min snow depth for active conductivity",
+            "sublim_partition": "physics: sublimation source partition (1.0 = snow-first mode)",
+        },
+        "params": {},
+    },
+    "BrineConfig": {
+        "scheme_key": "ice.brine",
+        "excluded": {
+            "S_ice_min": "numerics: salinity floor",
+            "S_ice_max": "numerics: salinity cap for stability",
+        },
+        "params": {},
+    },
+    "RidgingConfig": {
+        "scheme_key": "ice.ridging",
+        "excluded": {"closing_rate_max": "numerics: convergence-rate sanity cap"},
+        "params": {
+            "e_star": {
+                "units": "m", "bounds": (0.1, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "Lipscomb (2007) participation e-folding thickness", "shape": None,
+            },
+            "mu_rdg": {
+                "units": "1", "bounds": (2.0, 8.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "Lipscomb (2007) ridge-thickness multiplier", "shape": None,
+            },
+            "H_star": {
+                "units": "m", "bounds": (50.0, 200.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "Hibler/Lipscomb max ridge thickness scale", "shape": None,
+            },
+            "snow_fraction_retained": {
+                "units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "CICE donor-snow retention fraction in ridges", "shape": None,
+            },
+        },
+    },
+    "MeltPondConfig": {
+        "scheme_key": "ice.ponds",
+        "excluded": {
+            "refreeze_width_K": "numerics: refreeze-ramp smoothing half-width",
+        },
+        "params": {
+            "drainage_timescale": {
+                "units": "s", "bounds": (3600.0, 864000.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "CESM melt-pond drainage e-folding time", "shape": None,
+            },
+            "pond_to_ice_max_area": {
+                "units": "1", "bounds": (0.2, 0.9), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "CESM cap on pond area fraction per category", "shape": None,
+            },
+            "depth_to_area_ratio": {
+                "units": "1", "bounds": (0.3, 1.5), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "CICE pond volume->area conversion", "shape": None,
+            },
+            "snow_block_threshold": {
+                "units": "m", "bounds": (1.0e-3, 2.0e-2), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "CICE min snow depth blocking pond formation (~5 mm)", "shape": None,
+            },
+        },
+    },
+    "SeaIceConfig": {
+        "scheme_key": "ice.sea_ice",
+        "excluded": {
+            "h_ice_min": "numerics: min ice thickness for smooth ops",
+            "T_ice_min": "numerics: lower temperature bound for stability",
+            "z_ref": "convention: MOST reference height (10 m standard)",
+            "Delta_min": "numerics: deformation-rate regulariser floor",
+            "alpha_mevp": "numerics: mEVP stress relaxation (stability-coupled to N_mevp)",
+            "beta_mevp": "numerics: mEVP velocity relaxation (stability-coupled to N_mevp)",
+        },
+        "params": {
+            "albedo_ice": {
+                "units": "1", "bounds": (0.4, 0.85), "tunable_tier": 1,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "bare-ice broadband albedo (fallback constant)", "shape": None,
+            },
+            "albedo_ocean": {
+                "units": "1", "bounds": (0.03, 0.15), "tunable_tier": 1,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "open-water albedo for freezing calc", "shape": None,
+            },
+            "emissivity_ice": {
+                "units": "1", "bounds": (0.9, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "radiation",
+                "reference": "sea-ice longwave emissivity", "shape": None,
+            },
+            "z0_ice": {
+                "units": "m", "bounds": (1.0e-4, 5.0e-3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "ice aerodynamic roughness length", "shape": None,
+            },
+            "Cd_ice": {
+                "units": "1", "bounds": (5.0e-4, 5.0e-3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "ice-atmosphere momentum drag coefficient", "shape": None,
+            },
+            "Ch_ice": {
+                "units": "1", "bounds": (5.0e-4, 5.0e-3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "ice-atmosphere heat transfer coefficient", "shape": None,
+            },
+            "drag_ocean": {
+                "units": "1", "bounds": (1.0e-3, 1.0e-2), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "ocean-ice drag coefficient", "shape": None,
+            },
+            "drag_atm": {
+                "units": "1", "bounds": (5.0e-4, 5.0e-3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "surface",
+                "reference": "air-ice drag coefficient", "shape": None,
+            },
+            "ocean_heat_transfer_coeff": {
+                "units": "W/m^2/K", "bounds": (5.0, 50.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "ocean-ice sensible heat transfer", "shape": None,
+            },
+            "h_new_ice": {
+                "units": "m", "bounds": (0.01, 0.2), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "thickness of newly-formed lead ice", "shape": None,
+            },
+            "e_yield": {
+                "units": "1", "bounds": (1.5, 2.5), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "rheology",
+                "reference": "Hibler VP yield-curve eccentricity (=2)", "shape": None,
+            },
+            "P_star": {
+                "units": "N/m^2", "bounds": (1.0e4, 5.0e4), "tunable_tier": 1,
+                "transform": "sigmoid", "category": "rheology",
+                "reference": "Hunke & Dukowicz (1997) ice strength parameter", "shape": None,
+            },
+            "C_strength": {
+                "units": "1", "bounds": (10.0, 30.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "rheology",
+                "reference": "ice-strength concentration decay constant", "shape": None,
+            },
+            "T_evp": {
+                "units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "rheology",
+                "reference": "EVP elastic damping timescale ratio", "shape": None,
+            },
+        },
+    },
+}
+
 
 class SnowConfig(NamedTuple):
     """Snow-on-ice layer configuration.
