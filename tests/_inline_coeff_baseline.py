@@ -42,8 +42,15 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
     },
 }
 
-# Re-armed for exactly the three parallel-merge backlog files above: a future
-# commit that adds a budget for ANY OTHER file fails ``set(COEFF_BUDGET) <=
-# _SEED_FILES``. Shrink-only: as a backlog file is cleaned its COEFF_BUDGET entry
-# drops; once all three are clean, restore this to ``frozenset()``.
-_SEED_FILES: frozenset[str] = frozenset(COEFF_BUDGET)
+# IMMUTABLE EXPLICIT LITERAL (NOT ``frozenset(COEFF_BUDGET)`` — that would make
+# ``test_budget_only_shrinks`` tautological: any file later added to COEFF_BUDGET
+# would auto-appear here and ``set(COEFF_BUDGET) <= _SEED_FILES`` could never
+# catch it). Lists exactly the three parallel-merge backlog files, so a budget
+# for ANY OTHER file fails the assert (forward invariant: new files born clean).
+# Shrink-only: as a backlog file is cleaned its COEFF_BUDGET entry drops; once
+# all three are clean, restore this to ``frozenset()``.
+_SEED_FILES: frozenset[str] = frozenset({
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/column.py',
+    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/lagrangian.py',
+    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py',
+})
