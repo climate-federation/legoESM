@@ -96,6 +96,9 @@ _MASS_FLOOR = 1.0e-53
 _EXACT_MATCH_ATOL = 1.0e-19
 
 
+# Top mass-bin extension factor for the SBM mass grid (fixed).
+_MASS_GRID_TOP_FACTOR = 1024.0
+
 class RemapResult(NamedTuple):
     f_new: jax.Array     # remapped distribution (n_bins,)
     min_psi: jax.Array   # min of the remapped packet variable (diagnostic;
@@ -273,7 +276,7 @@ def remap_spectrum(
     m_new = jnp.where(dead, _MASS_FLOOR, m_new)
     f = jnp.where(dead, 0.0, f)
 
-    rrs = jnp.concatenate([masses, masses[-1:] * 1024.0])
+    rrs = jnp.concatenate([masses, masses[-1:] * _MASS_GRID_TOP_FACTOR])
     psi_packets = f * masses
 
     psinew = _ko_two_point(psi_packets, m_new, rrs, f, masses, n)

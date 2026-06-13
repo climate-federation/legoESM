@@ -60,6 +60,11 @@ from legoesm.atmosphere.physics.microphysics.output import (
 )
 
 
+# Fixed P3 nucleation / fall-speed constants.
+_RHO_FLOOR = 0.1
+_COOPER_EXP_CAP = 80.0
+_VT_CLIP_RAIN = 20.0
+
 def p3_microphysics(
     T: jax.Array,
     q_v: jax.Array,
@@ -170,9 +175,9 @@ def p3_microphysics(
     # the finite cap. Mirrors morrison.py / thompson.py.
     N_i_target = jnp.minimum(
         config.N_i0
-        * jnp.exp(jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), 80.0)),
+        * jnp.exp(jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), _COOPER_EXP_CAP)),
         config.N_i_nuc_max,
-    ) / jnp.clip(rho, 0.1)
+    ) / jnp.clip(rho, _RHO_FLOOR)
     dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_ice
 
     # 2. Vapour deposition on ice (subsaturated wrt ice: sublimation handled
@@ -282,11 +287,11 @@ def p3_microphysics(
     # SEDIMENTATION
     # =========================================================================
     rho_sfc    = rho[:, -1:]
-    rho_ratio  = rho / jnp.clip(rho_sfc, 0.1)
+    rho_ratio  = rho / jnp.clip(rho_sfc, _RHO_FLOOR)
 
     # Rain fall speed (Marshall-Palmer).
     V_t_r = config.a_v_r * safe_pow(jnp.clip(q_r, 0.0) * rho_ratio, config.b_v_r)
-    V_t_r = jnp.clip(V_t_r, 0.0, 20.0)
+    V_t_r = jnp.clip(V_t_r, 0.0, _VT_CLIP_RAIN)
 
     # Ice fall speed (P3: base power law × rime-density enhancement).
     V_t_i = (

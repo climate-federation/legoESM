@@ -133,12 +133,12 @@ def integrate_supersaturation(
     #   em/R           = dt·φ(x),  φ = (1−e^{−x})/x = 1 − x/2 + x²/6 − …
     #   (dt − em/R)/R  = dt²·ψ(x), ψ = (1−φ)/x     = 1/2 − x/6 + x²/24 − …
     # Truncation O(x³) < 1e-12 inside the |x| < 1e-4 window.
-    small = jnp.abs(x) < 1.0e-4
+    small = jnp.abs(x) < 1.0e-4  # coeff-ok: small-argument Taylor threshold
     R_safe = jnp.where(small, 1.0, R)
     em_over_R = jnp.where(
         small, dt * (1.0 - x / 2.0 + x * x / 6.0), em / R_safe)
     tail = jnp.where(
-        small, dt * dt * (0.5 - x / 6.0 + x * x / 24.0),
+        small, dt * dt * (0.5 - x / 6.0 + x * x / 24.0),  # coeff-ok: exp Taylor 1/3!,1/4!
         (dt - em / R_safe) / R_safe)
     S_new = S * (1.0 - em) + forcing * em_over_R
     S_int = S * em_over_R + forcing * tail

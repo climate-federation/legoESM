@@ -159,6 +159,9 @@ __physics_contract__ = {
 }
 
 
+# 3/2 lognormal-moment exponent.
+_LOGNORMAL_32 = 1.5
+
 def _kernel_matrix(masses, config: FastSBMConfig):
     """Collision kernel K(m_i, m_j) [m^3/s] from computed formulations
     (the oracle's YW* tables are file-read; CLAUDE-spec'd substitution —
@@ -171,7 +174,7 @@ def _kernel_matrix(masses, config: FastSBMConfig):
     # pressure interpolation of its tables is the analogue; refine when
     # the sedimentation iteration lands per-level velocities).
     v = terminal_velocity_cloud_rain_shima(
-        r, jnp.asarray(1.1), jnp.asarray(9.0e4), jnp.asarray(283.0))
+        r, jnp.asarray(1.1), jnp.asarray(9.0e4), jnp.asarray(283.0))  # coeff-ok: idealized parcel IC (rho,p,T)
     dv = jnp.abs(v[:, None] - v[None, :])
     if config.collision_kernel == "hall":
         return hall_kernel(ri, rj, dv)
@@ -205,7 +208,7 @@ def _reconstruct_spectrum(q_c, q_r, N_c, N_r, rho, masses,
     n_c = jnp.where(N_c > 0.0, N_c, config.cdnc)
     m_mean_c = jnp.maximum(q_c * rho / n_c, m_floor)
     r_med = radius_from_mass(m_mean_c) \
-        * jnp.exp(-1.5 * jnp.log(config.cloud_geom_std) ** 2)
+        * jnp.exp(-_LOGNORMAL_32 * jnp.log(config.cloud_geom_std) ** 2)
     f_c = discretize_lognormal(masses, n_c, r_med,
                                config.cloud_geom_std)
     mass_c = mass_density(f_c, masses)

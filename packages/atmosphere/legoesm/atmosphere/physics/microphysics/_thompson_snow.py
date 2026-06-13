@@ -68,6 +68,21 @@ _SB = (0.476221, -0.015896, 0.165977, 0.007468, -0.000141,
 _QS_SMALL = 1.0e-12      # snow mass floor below which rates vanish
 
 
+# Hall-Pruppacher diffusivity / conductivity / Sutherland viscosity + Thompson
+# snow ventilation constants (fixed published).
+_RHO_FLOOR = 0.1
+_RHO_VISC_FLOOR = 0.01
+_DV_PREFACTOR = 8.794e-5
+_DV_T_EXP = 1.81
+_KA_A = 2.3971e-2
+_KA_SLOPE = 7.078e-5
+_MU_PREFACTOR = 1.458e-6
+_MU_T_EXP = 1.5
+_MU_SUTHERLAND_T = 110.4
+_SNOW_VENT_F0 = 0.86
+_SNOW_VENT_F1 = 0.28
+_VT_CLIP_SNOW = 5.0
+
 def _field_moment(p, smo2, tc):
     """Field-2005 p-th snow moment from the 2nd moment ``smo2`` and ``tc`` [°C].
 
@@ -98,7 +113,7 @@ def _snow_moments(q_s, rho, T):
     # ~−83 °C, where the unclamped cubic extrapolates to wild moments (→ NaN
     # within a step). WRF clamps the UPPER end (min(-0.1,...)); we also clamp
     # the lower end so cold-tropopause snow stays physical.
-    tc = jnp.clip(T - constants.T_freeze, -55.0, -0.1)
+    tc = jnp.clip(T - constants.T_freeze, -55.0, -0.1)  # coeff-ok: snow-T physical clip [degC]
     smo2 = jnp.clip(q_s, 0.0) * rho / _AM_S          # = M2 (bm_s = 2)
     M3 = _field_moment(3.0, smo2, tc)
     ratio = smo2 / jnp.clip(M3, 1.0e-30)             # M2/M3  [1/m]
@@ -151,11 +166,11 @@ def snow_fall_speed(q_s, rho, T):
     den = (_KAP0 * gd0 / safe_pow(jnp.clip(lam0, 1.0e-30), _BM_S + 1.0)
            + _KAP1 * safe_pow(jnp.clip(ratio, 1.0e-30), _MU_S) * gd1
            / safe_pow(jnp.clip(lam1, 1.0e-30), _BM_S + _MU_S + 1.0))
-    rhof = jnp.sqrt(_RHO_NOT / jnp.clip(rho, 0.1))
+    rhof = jnp.sqrt(_RHO_NOT / jnp.clip(rho, _RHO_FLOOR))
     V_s = _AV_S * rhof * num / jnp.clip(den, 1.0e-30)
     # Gate on actual snow; cap at a realistic aggregate fall speed.
     V_s = jnp.where(jnp.clip(q_s, 0.0) > _QS_SMALL, V_s, 0.0)
-    return jnp.clip(V_s, 0.0, 5.0)
+    return jnp.clip(V_s, 0.0, _VT_CLIP_SNOW)
 
 
 def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
@@ -180,8 +195,8 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
     # Thermodynamic resistance A+B (ice): A = L_s²/(K_a R_v T²),
     # B = R_v T/(e_si·D_v); e_si ≈ q_sat_i·p/ε. D_v vapour diffusivity, K_a air
     # conductivity (standard Pruppacher-Klett forms).
-    dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p_full, 1.0)
-    ka = 2.3971e-2 + 7.078e-5 * (T - constants.T_freeze)
+    dv = _DV_PREFACTOR * safe_pow(T, _DV_T_EXP) / jnp.clip(p_full, 1.0)
+    ka = _KA_A + _KA_SLOPE * (T - constants.T_freeze)
     e_si = jnp.clip(q_sat_i, 1.0e-12) * p_full / constants.epsilon
     A = constants.L_s ** 2 / (jnp.clip(ka, 1.0e-6) * constants.R_v * T ** 2)
     B = constants.R_v * T / (jnp.clip(e_si, 1.0) * jnp.clip(dv, 1.0e-12))
@@ -199,14 +214,14 @@ def snow_deposition(q_v, q_s, q_sat_i, T, p_full, rho, dt):
         + _KAP1 * safe_pow(jnp.clip(ratio, 1.0e-30), _MU_S) * g1
         / safe_pow(jnp.clip(lam1 + 0.5 * _FV_S, 1.0e-30), c_vent + _MU_S + 1.0))
     sc3 = _SC ** (1.0 / 3.0)
-    t1 = 0.86
-    t2 = 0.28 * sc3 * jnp.sqrt(_AV_S)
-    rhof = jnp.sqrt(_RHO_NOT / jnp.clip(rho, 0.1))
+    t1 = _SNOW_VENT_F0
+    t2 = _SNOW_VENT_F1 * sc3 * jnp.sqrt(_AV_S)
+    rhof = jnp.sqrt(_RHO_NOT / jnp.clip(rho, _RHO_FLOOR))
     # Ventilation Reynolds factor (WRF ``rhof2*vsc2``): the dynamic-viscosity
     # term ``vsc2 = √(ρ/μ)`` was missing — WRF's t2 ventilation term is
     # ``t2_qs_sd·rhof2·vsc2·smof`` (codex/WRF audit). μ via Sutherland.
-    mu_air = 1.458e-6 * safe_pow(T, 1.5) / (T + 110.4)
-    vsc2 = jnp.sqrt(jnp.clip(rho, 0.01) / jnp.clip(mu_air, 1.0e-8))
+    mu_air = _MU_PREFACTOR * safe_pow(T, _MU_T_EXP) / (T + _MU_SUTHERLAND_T)
+    vsc2 = jnp.sqrt(jnp.clip(rho, _RHO_VISC_FLOOR) / jnp.clip(mu_air, 1.0e-8))
     vent = t1 * I1 + t2 * rhof * vsc2 * I_vent
     prds = 4.0 * jnp.pi * _C_SQRD * s_i / abi * vent
     # Cap deposition at available supersaturation; donor-clamp sublimation to q_s.

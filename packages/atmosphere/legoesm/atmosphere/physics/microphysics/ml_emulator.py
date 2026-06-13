@@ -23,6 +23,10 @@ from legoesm.atmosphere.physics.microphysics.output import (
 )
 
 
+# Emulator raw-output scaling.
+_OUTPUT_SCALE = 0.01
+_PRECIP_SCALE = 1e-3
+
 class MicrophysicsEmulator(eqx.Module):
     """Multi-layer perceptron microphysics emulator."""
     layers: list
@@ -95,7 +99,7 @@ def ml_microphysics(
 
     # Residual connection: add identity (no change) baseline
     if config.use_residual:
-        dT_dt = dT_dt * 0.01  # scale raw output
+        dT_dt = dT_dt * _OUTPUT_SCALE  # scale raw output
         dq_v_dt = dq_v_dt * 1e-6
         dq_c_dt = dq_c_dt * 1e-6
         dq_r_dt = dq_r_dt * 1e-6
@@ -103,7 +107,7 @@ def ml_microphysics(
         dq_s_dt = dq_s_dt * 1e-6
 
     # Surface precipitation from lowest level output
-    precipitation = jax.nn.softplus(precip_raw[:, -1]) * 1e-3
+    precipitation = jax.nn.softplus(precip_raw[:, -1]) * _PRECIP_SCALE
 
     # Pin dtype to the input precision so we never silently promote
     # the unused-species placeholders to f64 under x64 mode.
