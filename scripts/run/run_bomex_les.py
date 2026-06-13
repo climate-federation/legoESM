@@ -288,10 +288,19 @@ def main():
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
     g, st, ref, forc, th_prof = build(args, dtype)
-    micro_cfg = (MicrophysicsConfig(
-        scheme="morrison", morrison=MorrisonConfig(morrison_flavor="sam"))
-        if args.microphysics == "morrison"
-        else MicrophysicsConfig(scheme=args.microphysics))
+    if args.microphysics == "morrison":
+        micro_cfg = MicrophysicsConfig(
+            scheme="morrison", morrison=MorrisonConfig(morrison_flavor="sam"))
+    elif args.microphysics == "sdm":
+        # Enable the reconstructed box-SDM collision-coalescence (cloud→rain) —
+        # not just condensation. Per-step reconstruction box-SDM (NOT advected
+        # Lagrangian; no sedimentation, so surface precip stays 0). Needs ≥8
+        # tracer slots for q_r/N_r (the driver default n_tracers=9 covers it).
+        from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
+        micro_cfg = MicrophysicsConfig(scheme="sdm", sdm=SDMConfig(
+            column_do_coalescence=True, column_n_sd=64, column_seed=0))
+    else:
+        micro_cfg = MicrophysicsConfig(scheme=args.microphysics)
     dt0 = (select_dt(g.dx, max_wind_safe=args.max_wind, cfl_safe=args.cfl,
                      dt_cap=args.dt_max) if args.adaptive_dt
            else float(args.dt))
