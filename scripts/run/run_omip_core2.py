@@ -1051,7 +1051,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      bottom_drag_bbl_thickness=None, bottom_drag_bg_velocity=None,
                      partial_cell=False, n_barotropic_substeps=None,
                      barotropic_solver=None, freeze_floor=None,
-                     runoff_depth_spread_m=None):
+                     runoff_depth_spread_m=None, mle=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -1099,6 +1099,10 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
     if _ovr:
         config = config._replace(**_ovr)
         print(f"[setup] mpas config override: {_ovr}")
+    if mle is not None:
+        # Fox-Kemper MLE on the Voronoi mesh (NEMO nn_mle=1 bolus restratification).
+        config = config._replace(mle=mle)
+        print(f"[setup] mpas Fox-Kemper MLE enabled: ce={mle.ce:g}")
 
     # NEMO eORCA1 bathy/mask -> Voronoi cell centres (point-target IDW, the same
     # faithful geometry tripole/latlon/cube use).
@@ -2189,15 +2193,15 @@ def main() -> int:
             "--sss-ice-gate-nemo requires --sss-restore (it only changes the "
             "under-ice weighting of the SSS restoring; with no restoring it "
             "would silently do nothing).")
-    # Fox-Kemper MLE: lat-lon / tripole C-grid only (the bolus streamfunction
-    # uses the C-grid operators; the cube/MPAS port is a separate follow-up).
+    # Fox-Kemper MLE: lat-lon / tripole C-grid (mle_latlon_cgrid) AND MPAS
+    # Voronoi (mle_mpas, NEMO nn_mle=1 bolus port).  The cube stays unsupported
+    # (parked grid; no C-D-grid MLE adapter).
     mle_cfg = None
     if args.mle:
-        if args.grid in ("mpas", "cubed_sphere"):
+        if args.grid == "cubed_sphere":
             raise ValueError(
-                f"--mle is not yet implemented for --grid {args.grid!r}; it "
-                "supports the lat-lon / tripole C-grid only (MPAS/cube MLE is a "
-                "separate follow-up). Use --grid tripole or latlon_bathy.")
+                "--mle is not implemented for --grid 'cubed_sphere' (parked "
+                "grid; no C-D-grid MLE adapter). Use tripole, latlon_bathy or mpas.")
         from legoesm.ocean.physics.lateral_mixing.mle import MLEConfig
         mle_cfg = MLEConfig(ce=args.mle_ce)
         print(f"[setup] Fox-Kemper MLE requested: ce={args.mle_ce:g}")
@@ -2266,6 +2270,7 @@ def main() -> int:
             flat_bottom=args.flat_bottom, partial_cell=args.partial_cell,
             freeze_floor=(True if args.freeze_floor else None),
             runoff_depth_spread_m=args.runoff_depth_spread_m,
+            mle=mle_cfg,
         )
         app_grid_type = "mpas"
     else:

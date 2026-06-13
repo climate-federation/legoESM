@@ -67,7 +67,7 @@ def _not_implemented(name: str) -> None:
     )
 
 
-def _voronoi_neumann_fill(
+def voronoi_neumann_fill(
     f: jnp.ndarray,
     mask: jnp.ndarray,
     mesh: "VoronoiMesh",
@@ -187,7 +187,7 @@ def compute_isopycnal_slopes_mpas(
     taper : (nEdges, nlev-1)
         Danabasoglu-McWilliams 1995 taper factor in [0, 1].
     """
-    rho_filled = _voronoi_neumann_fill(rho, mask, mesh)
+    rho_filled = voronoi_neumann_fill(rho, mask, mesh)
 
     # --- Horizontal edge-normal density gradient at full levels ---
     drho_dn = gradient_edge_3d(rho_filled, mesh)             # (nEdges, nlev)
@@ -348,7 +348,7 @@ def gm_redi_tracer_tendency_centered_mpas(
         kappa_GM_edge = kappa_GM
 
     # --- Neumann-fill q before differencing across coastlines ---
-    q_filled = _voronoi_neumann_fill(q, mask, mesh)
+    q_filled = voronoi_neumann_fill(q, mask, mesh)
 
     # --- Edge-normal tracer gradient at full levels ---
     dq_dn = gradient_edge_3d(q_filled, mesh)                  # (nEdges, nlev)
@@ -578,7 +578,7 @@ def gm_redi_tracer_tendency_mpas(
 
     # In-situ density via the grid-agnostic 2-pass EOS iteration.
     eos_fn = make_eos_fn(eos, eos_linear)
-    fill_fn = lambda field: _voronoi_neumann_fill(field, mask, mesh)
+    fill_fn = lambda field: voronoi_neumann_fill(field, mask, mesh)
     rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
         T_fill, S_fill, mask, fill_fn, eos_fn,
         z_coord.dz_ref, _RHO_0, constants.g,
