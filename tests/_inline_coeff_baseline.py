@@ -13,82 +13,6 @@ _SEED_FILES`` is asserted so a new file can never be budgeted. Re-seed with
 from __future__ import annotations
 
 COEFF_BUDGET: dict[str, dict[str, int]] = {
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/_emanuel_mixing.py': {
-        '(pf - mse_min_search_offset) / 2000.0': 1,
-        'Tg = jnp.maximum(Tg, 35.0)': 1,
-        'active_col = jax.nn.sigmoid(M_b / 1e-3)[:, None] # ~1 when M_b>0': 1,
-        'below_lcl = jax.nn.sigmoid((pf - p_lcl) / 200.0) # ~1 below LCL': 1,
-        'chi = T_nk / (1669.0 - 122.0 * rh - T_nk)': 2,
-        'dbo = jnp.abs(tv - tvp) + entp * 2.0e-4 * dp_first': 1,
-        'epmax: float = 0.999,': 1,
-        'rh = jnp.clip(q_nk / jnp.maximum(qs_nk, 1e-12), 1e-4, 1.0)': 1,
-        'strict_index_sharpness: float = 20.0,': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/_plume.py': {
-        'GATE_SHARPNESS = 20.0': 1,
-        'RH = jnp.clip(q_parcel / jnp.maximum(q_sat, 1e-12), 1e-4, 1.0)': 1,
-        'T_lcl = 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / 2840.0) + 55.0': 2,
-        'T_minus_55 = jnp.maximum(T_parcel - 55.0, 1.0)': 1,
-        'c_d: float = 0.55,': 1,
-        'c_u: float = 0.55,': 1,
-        'crossing_sharpness: float = 0.001,': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/_triggers.py': {
-        'no_cross_blend = jax.nn.sigmoid(20.0 * (total_first_cross - 0.5))': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/_zm_dilute.py': {
-        '* (1.0 + 1.608 * qstp)': 1,
-        '8.0 * (k_launch_smooth[:, None] - 1.0 - levels[None, :])': 1,
-        'LARGE = jnp.asarray(1.0e9, dtype=_dtype)': 1,
-        'Tv_env = T_env * (1.0 + 1.608 * q_v_env) / (1.0 + q_v_env)': 1,
-        'dT = 0.01': 1,
-        'dmpdz: float = -1.0e-3,': 1,
-        'launch_sharpness: float = 5.0e-4,': 1,
-        'pbl_top_pa: float = 7.0e4,': 1,
-        'return jnp.clip(T_new, 120.0, 360.0).astype(_dtype)': 1,
-        'supersat = jax.nn.sigmoid(1.0e4 * (new_q - qs_mix_k))': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py': {
-        'RH = jnp.clip(q_v / jnp.maximum(q_sat_env, 1e-12), 0.0, 1.3)': 1,
-        'rh_detr = jnp.clip(1.6 - RH, 0.0, None) # eq 6.8 / 6.9': 1,
-        'rh_entr = jnp.clip(1.3 - RH, 0.0, None) # eq 6.7': 1,
-        'rho_safe = jnp.clip(rho, 0.01, None)': 1,
-        'z, threshold=config.cape_pbl_depth, sharpness=2.0e-3,': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py': {
-        'return cfg.a_mm_per_hr * rho_w / 3.6e6': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/emanuel.py': {
-        'cbmf_new = (1.0 - damps) * cbmf_old + 0.1 * config.alpha_closure * dtma': 1,
-        'damps = config.damp_coefficient * dt / 300.0': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py': {
-        'bechtold_key, 0xBEC4,': 3,
-        'dt: float = 300.0,': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/kain_fritsch.py': {
-        '-0.70034167 + cbh * (': 1,
-        '-1.2569798e-2 + cbh * (4.2772e-4 - cbh * 5.44e-6)': 3,
-        '0.162179896 + cbh * (': 1,
-        'cbh = (z_lcl) * 3.281e-3 # m -> kft': 1,
-        'low = jax.nn.sigmoid((3.0 - cbh) * 5.0)': 1,
-        'rcbh = low * 0.02 + (1.0 - low) * rcbh_poly': 1,
-        'rcbh_poly = 0.96729352 + cbh * (': 1,
-        's = 50.0': 1,
-        'sharpness_m: float = 200.0,': 1,
-        'width = 0.05 # smoothing width in units of the [0,1] ramp': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/kuo.py': {
-        'desat_dT = e_sat * (17.67 * 243.5) / (T_c + 243.5) ** 2': 3,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/mass_flux.py': {
-        'p_gate_sharpness: float = 1_500.0,': 2,
-        'p_min_convection: float = 10_000.0,': 2,
-        'rho_safe = jnp.clip(rho, 0.01, None)': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py': {
-        'rho_safe = jnp.clip(rho, 0.01, None)': 1,
-    },
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py': {
         'dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p_full, 1.0)': 2,
         'ka = 2.3971e-2 + 7.078e-5 * (T - constants.T_freeze)': 2,
@@ -226,18 +150,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
 }
 
 _SEED_FILES: frozenset[str] = frozenset({
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/_emanuel_mixing.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/_plume.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/_triggers.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/_zm_dilute.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/bechtold.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/dca.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/emanuel.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/integration.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/kain_fritsch.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/kuo.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/mass_flux.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py',
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py',
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py',
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/column.py',

@@ -60,6 +60,20 @@ from legoesm.atmosphere.physics.convection._plume import (
 __all__ = ("kain_fritsch_convection",)
 
 
+# Kain-Fritsch-Eta cloud-base-height -> precip-efficiency polynomial (fixed).
+_KF_SHARPNESS_M = 200.0
+_KF_RAMP_WIDTH = 0.05
+_M_TO_KFT = 3.281e-3
+_KF_RCBH_C0 = 0.96729352
+_KF_RCBH_C1 = 0.70034167
+_KF_RCBH_C2 = 0.162179896
+_KF_RCBH_C3 = 1.2569798e-2
+_KF_RCBH_C4 = 4.2772e-4
+_KF_RCBH_C5 = 5.44e-6
+_KF_LOW_SHARPNESS = 5.0
+_KF_RCBH_FLOOR = 0.02
+_KF_S_SHARPNESS = 50.0
+
 def _interpolate_at_smooth_level(
     profile: jax.Array,
     k_smooth: jax.Array,
@@ -86,7 +100,7 @@ def _interp_profile_at_height(
     z: jax.Array,
     z_target: jax.Array,
     *,
-    sharpness_m: float = 200.0,
+    sharpness_m: float = _KF_SHARPNESS_M,
 ) -> jax.Array:
     """Smooth interpolation of ``profile`` at a target height ``z_target``.
 
@@ -212,7 +226,7 @@ def _faithful_rad(
     so RAD is differentiable at both corners (codex review-1 #5).
     """
     x = wkl / config.rad_wkl_ref
-    width = 0.05  # smoothing width in units of the [0,1] ramp
+    width = _KF_RAMP_WIDTH  # smoothing width in units of the [0,1] ramp
     # smooth clamp to [0,1]: softplus rising edge minus softplus at x=1.
     lo = jax.nn.softplus(x / width) * width
     frac = lo - jax.nn.softplus((lo - 1.0) / width) * width
@@ -259,23 +273,23 @@ def _precip_efficiency(
     shear term contributes only its clamp).  Returns a value in
     ``[pef_min, pef_max]``.
     """
-    cbh = (z_lcl) * 3.281e-3  # m -> kft
-    rcbh_poly = 0.96729352 + cbh * (
-        -0.70034167 + cbh * (
-            0.162179896 + cbh * (
-                -1.2569798e-2 + cbh * (4.2772e-4 - cbh * 5.44e-6)
+    cbh = (z_lcl) * _M_TO_KFT  # m -> kft
+    rcbh_poly = _KF_RCBH_C0 + cbh * (
+        -_KF_RCBH_C1 + cbh * (
+            _KF_RCBH_C2 + cbh * (
+                -_KF_RCBH_C3 + cbh * (_KF_RCBH_C4 - cbh * _KF_RCBH_C5)
             )
         )
     )
     # Smooth low-CBH branch: oracle uses RCBH=0.02 for CBH<3 kft.
-    low = jax.nn.sigmoid((3.0 - cbh) * 5.0)
-    rcbh = low * 0.02 + (1.0 - low) * rcbh_poly
+    low = jax.nn.sigmoid((3.0 - cbh) * _KF_LOW_SHARPNESS)
+    rcbh = low * _KF_RCBH_FLOOR + (1.0 - low) * rcbh_poly
     # Smooth non-negativity on RCBH and a smooth clamp of PEFCBH to
     # [pef_min, pef_max] (codex review-2 #4: replace the hard jnp.maximum /
     # jnp.clip so the PEFF -> cloud-water-retention path is smooth-everywhere
     # like the RAD ramp).  ``softplus(s*x)/s`` is the smooth positive part;
     # the double-softplus clamps to the interval without a kink.
-    s = 50.0
+    s = _KF_S_SHARPNESS
     rcbh = jax.nn.softplus(s * rcbh) / s
     pefcbh = 1.0 / (1.0 + rcbh)
     # smooth clamp to [pef_min, pef_max]

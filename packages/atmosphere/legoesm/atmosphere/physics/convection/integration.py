@@ -223,7 +223,7 @@ def diagnose_w_grid_columns_hydrostatic(
 def make_convection_physics(
     convection_config: ConvectionConfig,
     model_type: str = "hydrostatic",
-    dt: float = 300.0,
+    dt: float = 300.0,  # coeff-ok: default physics timestep [s]
 ) -> Callable:
     """Create a physics function for convection matching a model's signature.
 
@@ -502,7 +502,7 @@ def _make_hydrostatic_convection(
                         phys_state.prng_key, 2,
                     )
                     bechtold_key = jax.random.fold_in(
-                        bechtold_key, 0xBEC4,
+                        bechtold_key, 0xBEC4,  # coeff-ok: PRNG fold-in key
                     )
                 else:
                     bechtold_key = None
@@ -872,7 +872,7 @@ def _make_nonhydrostatic_convection(
                         phys_state.prng_key, 2,
                     )
                     bechtold_key = jax.random.fold_in(
-                        bechtold_key, 0xBEC4,
+                        bechtold_key, 0xBEC4,  # coeff-ok: PRNG fold-in key
                     )
                 else:
                     bechtold_key = None
@@ -1192,7 +1192,7 @@ def _make_spectral_pe_convection(
                         phys_state.prng_key, 2,
                     )
                     bechtold_key = jax.random.fold_in(
-                        bechtold_key, 0xBEC4,
+                        bechtold_key, 0xBEC4,  # coeff-ok: PRNG fold-in key
                     )
                 else:
                     bechtold_key = None

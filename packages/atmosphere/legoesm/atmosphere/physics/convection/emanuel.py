@@ -65,6 +65,9 @@ from legoesm.atmosphere.physics.convection._emanuel_mixing import (
 __all__ = ("emanuel_convection",)
 
 
+# Cloud-base mass-flux relaxation coefficient (Emanuel closure).
+_CBMF_RELAX = 0.1
+
 def _mixture_buoyancy(T_e, q_e, T_u, q_u, q_c_u, p, fractions):
     """Buoyancy of cloud–environment mixtures across a mixing spectrum
     (Emanuel 1991 buoyancy sorting).
@@ -303,8 +306,8 @@ def emanuel_convection(
     dtma = cape_weight * (be_lcl + config.dtmax + dtpbl)
 
     # Prognostic relaxation (oracle line 565-567).  ``DAMPS = DAMP·dt/300``.
-    damps = config.damp_coefficient * dt / 300.0
-    cbmf_new = (1.0 - damps) * cbmf_old + 0.1 * config.alpha_closure * dtma
+    damps = config.damp_coefficient * dt / 300.0  # coeff-ok: reference timestep [s]
+    cbmf_new = (1.0 - damps) * cbmf_old + _CBMF_RELAX * config.alpha_closure * dtma
     cbmf_new = smooth_positive_part(cbmf_new, config.cbmf_positive_sharpness)
     # See ZhangMcFarlaneConfig.M_b_max.
     M_b = jnp.clip(cbmf_new, 0.0, config.M_b_max)

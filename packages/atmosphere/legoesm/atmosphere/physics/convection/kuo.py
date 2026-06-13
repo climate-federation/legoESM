@@ -88,6 +88,10 @@ _VT_COEFF = 1.0 / constants.epsilon - 1.0
 # Thermodynamic helpers (legoesm constants + thermo; no re-derived saturation)
 # ----------------------------------------------------------------------------
 
+# --- pspec autoblock
+_MAGNUS_A = 17.67
+_MAGNUS_B = 243.5
+
 def _latent_heat(T: jax.Array) -> jax.Array:
     """Temperature-dependent latent heat of vaporization [J/kg].
 
@@ -126,7 +130,7 @@ def _dqsat_dT(T: jax.Array, p: jax.Array) -> jax.Array:
     """
     e_sat = saturation_vapor_pressure(T)
     T_c = T - constants.T_freeze
-    desat_dT = e_sat * (17.67 * 243.5) / (T_c + 243.5) ** 2
+    desat_dT = e_sat * (_MAGNUS_A * _MAGNUS_B) / (T_c + _MAGNUS_B) ** 2
     denom = jnp.maximum(p - e_sat, 1.0) ** 2
     return constants.epsilon * p * desat_dT / denom
 

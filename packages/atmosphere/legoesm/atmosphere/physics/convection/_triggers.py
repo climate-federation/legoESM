@@ -55,6 +55,9 @@ __all__ = (
 # Scalar / elementwise smooth primitives
 # ---------------------------------------------------------------------------
 
+# --- pspec autoblock
+_FIRST_CROSS_SHARPNESS = 20.0
+
 def smooth_step(x: jax.Array, sharpness: float = 1.0) -> jax.Array:
     """Differentiable approximation of the unit step function.
 
@@ -318,7 +321,7 @@ def smooth_lowest_crossing_index(
     # ``total = 0`` and ``≈ 100%`` trust at ``total = 1``.  At total
     # values typical of a single firm crossing (~0.8–1.0) the gate
     # fully selects the weighted-average answer.
-    no_cross_blend = jax.nn.sigmoid(20.0 * (total_first_cross - 0.5))
+    no_cross_blend = jax.nn.sigmoid(_FIRST_CROSS_SHARPNESS * (total_first_cross - 0.5))
     fallback = jnp.full_like(idx_min_naive, 0.0)  # surface-first 0 = surface-last nlev-1
     idx_min_surface_first = (
         no_cross_blend * idx_min_naive
