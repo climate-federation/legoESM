@@ -168,7 +168,7 @@ _LONG_KERNEL_PREFACTOR = 4.5e8
 _LONG_R0 = 3.0e-6
 _LONG_R0_FLOOR = 3.01e-6
 _LONG_RADIUS_THRESHOLD = 5.0e-5
-_VISC_SCALE = 1.0e-5
+_VISC_SCALE_SI = 1.0e-5
 _KINETIC_8 = 8.0
 _CUNNINGHAM_A = 1.2570
 _CUNNINGHAM_B = 0.40
@@ -321,8 +321,8 @@ def brownian_kernel(
     Tc = T - constants.T_freeze
     visc = jnp.where(
         Tc >= 0.0,
-        (_VISC_MU0 + _VISC_SLOPE * Tc) * _VISC_SCALE,
-        (_VISC_MU0 + _VISC_SLOPE * Tc - _VISC_CURV * Tc * Tc) * _VISC_SCALE,
+        (_VISC_MU0 + _VISC_SLOPE * Tc) * _VISC_SCALE_SI,
+        (_VISC_MU0 + _VISC_SLOPE * Tc - _VISC_CURV * Tc * Tc) * _VISC_SCALE_SI,
     )
 
     # Air mean free path [m] — oracle expression (see docstring note).
