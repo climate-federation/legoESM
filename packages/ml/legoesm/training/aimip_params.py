@@ -648,16 +648,25 @@ def make_aimip_classical_spectral_physics(
     # (make_physics -> make_radiation_physics -> _call_radiation_backend ->
     # _resolve_surface_field) rather than written into the radiation config.
     # For RRTMGP this is REQUIRED: RRTMGPConfig.sfc_* are folded into RRTMGP's
-    # Python solver-cache key, so a trained ``(ncol,)`` array there would key the
-    # instance cache by tracer identity. Routing as an override keeps the trained
-    # surface field traceable+differentiable AND off the cache key. (None when no
-    # spatial surface is active -> the config default is used.)
+    # Python solver-cache key, so a trained value there would key the instance
+    # cache by tracer/array identity. Routing as an override keeps the trained
+    # surface field traceable+differentiable AND off the cache key.
     _sfc_albedo_override = None
     _sfc_emissivity_override = None
     if radiation == "rrtmgp":
         rrtmgp_cfg = params.to_rrtmgp_config()
-        _sfc_albedo_override = spatial_fields_col.get("sfc_albedo")
-        _sfc_emissivity_override = spatial_fields_col.get("sfc_emissivity")
+        # Spatial (ncol,) field if present, else the trained SCALAR knob — both
+        # routed as overrides so ``rrtmgp_sfc_albedo`` / ``rrtmgp_sfc_emissivity``
+        # are genuinely trainable in BOTH the spatial AND the default non-spatial
+        # path (without the scalar they would be dead leaves: to_rrtmgp_config
+        # returns defaults and nothing else consumes them).
+        _rr_d = params.as_dict()
+        _sfc_albedo_override = spatial_fields_col.get(
+            "sfc_albedo", _rr_d["rrtmgp_sfc_albedo"]
+        )
+        _sfc_emissivity_override = spatial_fields_col.get(
+            "sfc_emissivity", _rr_d["rrtmgp_sfc_emissivity"]
+        )
         # Derive the RRTMGP cloud gate from the selected cloud scheme.
         # ``include_clouds`` and ``cloud_scheme`` are independent knobs;
         # ``to_rrtmgp_config`` leaves ``include_clouds`` at its False default,

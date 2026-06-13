@@ -525,3 +525,46 @@ def test_make_physics_threads_sfc_override_combined_path():
     hi = float(t_tend_sum(jnp.full((ncol,), 0.8)))
     assert np.isfinite(lo) and np.isfinite(hi)
     assert abs(lo - hi) > 0.0, "make_physics combined path dropped the sfc_albedo override"
+
+
+def test_aimip_nonspatial_rrtmgp_sfc_albedo_is_trainable():
+    """Non-spatial (default) AIMIP RRTMGP: the SCALAR rrtmgp_sfc_albedo knob must
+    be genuinely trainable. With no spatial_surface, the builder routes the
+    trained scalar (params.as_dict()['rrtmgp_sfc_albedo']) as a per-call override
+    -> a finite nonzero gradient must reach its raw leaf. Guards against the knob
+    silently becoming a dead leaf (the failure codex flagged) -- a regression
+    here cannot hide behind the lower-level make_radiation_physics override
+    tests."""
+    import numpy as np
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams,
+        make_aimip_classical_spectral_physics,
+    )
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.spectral_pe import (
+        isothermal_rest_state_spectral,
+    )
+
+    grid = create_gaussian_grid(n_max=8)
+    sigma = create_sigma_coordinate(n_levels=3)
+    qv = jnp.full((grid.n_lat, grid.n_lon, sigma.n_levels), 5.0e-3)
+    state = isothermal_rest_state_spectral(grid, sigma, tracers={"q_v": qv})
+
+    params = AIMIPClassicalParams.from_defaults()  # spatial_surface=False
+    assert params.spatial_surface is None
+
+    def loss(p):
+        fn = make_aimip_classical_spectral_physics(
+            p, grid, dt=1800.0, radiation="rrtmgp",
+            convection_scheme="none", turbulence_scheme="none",
+            gwd_scheme="none", microphysics_scheme="none", cloud_scheme="none",
+        )
+        out = fn(state, grid, sigma)
+        return jnp.sum(jnp.abs(out.T_hat.data) ** 2)
+
+    val, grads = eqx.filter_value_and_grad(loss)(params)
+    assert np.isfinite(float(val))
+    g = np.asarray(grads.raw_values["rrtmgp_sfc_albedo"])
+    assert np.all(np.isfinite(g)), "non-finite gradient on the scalar rrtmgp_sfc_albedo"
+    assert np.any(g != 0.0), "rrtmgp_sfc_albedo is a dead leaf in the non-spatial RRTMGP path"
