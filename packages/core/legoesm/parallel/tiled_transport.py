@@ -87,3 +87,80 @@ def make_tiled_transport_sweep_stage(mesh, n: int, kt: int, h3: int = 4):
         return transport_sweep_tile(vp_g, courant, rd_g, a, nl, h3)
 
     return _stage
+
+
+# ---------------------------------------------------------------------------
+# U3b: full 2-D (6, kt, kt) tiling — BOTH the cross axis tiled AND the
+# symmetric j-sweep (ytp_v).  The two PPM sweeps are INDEPENDENT 1-D passes
+# (fv3_sw_core._bgrid_ke_transport: axis=2 ytp_v, axis=1 xtp_u — no coupling
+# at the sweep level), and each sweep is independent PER cross-row, so the
+# CROSS axis is sliced to the tile WITHOUT a halo (only the sweep axis carries
+# the h3 PPM halo).  np = 6*kt*kt (kt=2 → the np24 target).
+# ---------------------------------------------------------------------------
+
+def transport_sweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4):
+    """Per-tile i-sweep (xtp_u, axis=1) PPM flux on a 2-D ``(tile_i, tile_j)``
+    tiling.  Slice the SWEEP axis=1 to the window ``[a_i : a_i+nl+2*h3]`` AND
+    the CROSS axis=2 to the tile's j-cells ``[a_j : a_j+nl]`` (NO j-halo — the
+    i-sweep is an independent 1-D PPM per j-row).  ``vp_g`` is
+    ``(F, n+2*h3, n)``; returns ``(F, nl+1, nl)`` i-interface flux."""
+    from legoesm.core.fv3_sw_core import _ppm_transport_1d
+
+    vp_t = jax.lax.dynamic_slice_in_dim(vp_g, a_i, nl + 2 * h3, axis=1)
+    vp_t = jax.lax.dynamic_slice_in_dim(vp_t, a_j, nl, axis=2)
+    c_t = jax.lax.dynamic_slice_in_dim(courant, a_i, nl + 1, axis=1)
+    c_t = jax.lax.dynamic_slice_in_dim(c_t, a_j, nl, axis=2)
+    rd_t = jax.lax.dynamic_slice_in_dim(rd_g, a_i, nl + 2, axis=1)
+    rd_t = jax.lax.dynamic_slice_in_dim(rd_t, a_j, nl, axis=2)
+    return _ppm_transport_1d(
+        vp_t, c_t, rd_t, 1, external_halo=h3, rd_prepadded=True)
+
+
+def transport_jsweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4):
+    """Per-tile j-sweep (ytp_v, axis=2) PPM flux — the symmetric counterpart
+    of :func:`transport_sweep_tile_2d` with the sweep/cross axes swapped.
+    Slice the SWEEP axis=2 to ``[a_j : a_j+nl+2*h3]`` AND the CROSS axis=1 to
+    ``[a_i : a_i+nl]`` (NO i-halo).  ``vp_g`` is ``(F, n, n+2*h3)``; returns
+    ``(F, nl, nl+1)`` j-interface flux."""
+    from legoesm.core.fv3_sw_core import _ppm_transport_1d
+
+    vp_t = jax.lax.dynamic_slice_in_dim(vp_g, a_j, nl + 2 * h3, axis=2)
+    vp_t = jax.lax.dynamic_slice_in_dim(vp_t, a_i, nl, axis=1)
+    c_t = jax.lax.dynamic_slice_in_dim(courant, a_j, nl + 1, axis=2)
+    c_t = jax.lax.dynamic_slice_in_dim(c_t, a_i, nl, axis=1)
+    rd_t = jax.lax.dynamic_slice_in_dim(rd_g, a_j, nl + 2, axis=2)
+    rd_t = jax.lax.dynamic_slice_in_dim(rd_t, a_i, nl, axis=1)
+    return _ppm_transport_1d(
+        vp_t, c_t, rd_t, 2, external_halo=h3, rd_prepadded=True)
+
+
+def make_tiled_transport_sweep_stage_2d(
+    mesh, n: int, kt: int, h3: int = 4, sweep: str = "i",
+):
+    """Build a sharded PPM transport stage on a ``(6, kt, kt)`` mesh with axis
+    names ``("face", "tile_i", "tile_j")``.
+
+    ``sweep="i"`` tiles the i-sweep (xtp_u); ``sweep="j"`` the j-sweep
+    (ytp_v).  Inputs are FACE-REPLICATED, pre-padded to the PPM storage halo
+    h3 on the SWEEP axis (i: axis=1, j: axis=2).  Output is sharded
+    ``P("face","tile_i","tile_j")``; gathered extent
+    ``(6, kt*(nl+1), kt*nl)`` for ``i`` / ``(6, kt*nl, kt*(nl+1))`` for ``j``
+    — each tile DUPLICATES the shared sweep-interface with its neighbour
+    (reassembly: lower tile owns it → the global PPM sweep)."""
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if sweep not in ("i", "j"):
+        raise ValueError(f"sweep must be 'i' or 'j', got {sweep!r}")
+    nl = n // kt
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+    body = transport_sweep_tile_2d if sweep == "i" else transport_jsweep_tile_2d
+
+    @partial(shard_map, mesh=mesh, in_specs=(fo, fo, fo),
+             out_specs=co, check_vma=False)
+    def _stage(vp_g, courant, rd_g):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return body(vp_g, courant, rd_g, a_i, a_j, nl, h3)
+
+    return _stage
