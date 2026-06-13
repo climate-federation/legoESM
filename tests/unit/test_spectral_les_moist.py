@@ -300,6 +300,105 @@ def test_weno5_less_diffusive_than_vanleer():
     assert col(p_w5).max() <= 1.05 and col(p_w5).min() >= -0.05
 
 
+# --------------------------------------------------------------------------- #
+# Momentum-side stabilization operators (WENO5 enabler).                       #
+# --------------------------------------------------------------------------- #
+def test_w_hyperdiffusion_damps_2dx_not_smooth():
+    """Horizontal w-hyperdiffusion = −ν₄k⁴w: strongly damps the 2Δx mode,
+    leaves a smooth (low-k) mode almost untouched, exactly zero on a constant."""
+    g = _grid(nz=8)
+    g = g._replace(cfg=g.cfg._replace(w_hyperdiff_coeff=1.0e4))
+    ny, nx, nz = g.cfg.ny, g.cfg.nx, g.cfg.nz
+    x = jnp.arange(nx)
+    # highest NON-Nyquist mode (the core zeros the Nyquist kx) vs the lowest mode
+    khi = jnp.cos(2 * jnp.pi * (nx // 2 - 1) * x / nx)[None, :, None]
+    ksmooth = jnp.cos(2 * jnp.pi * x / nx)[None, :, None]  # lowest mode
+    w_hi = jnp.broadcast_to(khi, (ny, nx, nz + 1)).astype(jnp.float64)
+    w_lo = jnp.broadcast_to(ksmooth, (ny, nx, nz + 1)).astype(jnp.float64)
+    t_hi = np.abs(np.asarray(sl._w_hyperdiffusion(w_hi, g)))
+    t_lo = np.abs(np.asarray(sl._w_hyperdiffusion(w_lo, g)))
+    # k⁴ scaling ⇒ Nyquist tendency ≫ lowest-mode tendency.
+    assert t_hi.max() > 50.0 * t_lo.max()
+    # constant ⇒ k=0 ⇒ zero tendency
+    wc = jnp.ones((ny, nx, nz + 1))
+    assert np.max(np.abs(np.asarray(sl._w_hyperdiffusion(wc, g)))) < 1e-10
+
+
+def test_w_hyperdiffusion_spectral_k4():
+    """Single horizontal mode: tendency = −ν₄·k⁴·w exactly."""
+    g = _grid(nz=4); nu4 = 3.3e3
+    g = g._replace(cfg=g.cfg._replace(w_hyperdiff_coeff=nu4))
+    nx = g.cfg.nx
+    k = 2 * np.pi / g.cfg.Lx                                   # lowest x-mode
+    x = np.arange(nx) * g.dx
+    w = jnp.broadcast_to(jnp.asarray(np.cos(k * x))[None, :, None],
+                         (g.cfg.ny, nx, g.cfg.nz + 1)).astype(jnp.float64)
+    tend = np.asarray(sl._w_hyperdiffusion(w, g))
+    expect = -nu4 * (k ** 4) * np.asarray(w)
+    assert np.allclose(tend, expect, atol=1e-6, rtol=1e-4)
+
+
+def test_divergence_damping_zero_on_divfree():
+    """Div damping vanishes on a divergence-free field (its raison d'être is
+    only the divergent part — near-no-op post-projection)."""
+    g = _grid(nz=16)
+    g = g._replace(cfg=g.cfg._replace(div_damping_coeff=10.0))
+    u, v, w = _div_free(g, 3)
+    dRu, dRv, dRw = sl._divergence_damping(u, v, w, g)
+    sc = float(jnp.mean(jnp.abs(u)) + 1e-30)
+    assert float(jnp.max(jnp.abs(dRu))) < 1e-3 * sc
+    assert float(jnp.max(jnp.abs(dRw))) < 1e-3 * sc
+
+
+def test_divergence_damping_relaxes_divergent_mode():
+    """On a purely divergent u=sin(kx): du += α∇(∇·u) = −αk²u (damps it)."""
+    g = _grid(nz=8); a = 5.0
+    g = g._replace(cfg=g.cfg._replace(div_damping_coeff=a))
+    nx = g.cfg.nx; k = 2 * np.pi / g.cfg.Lx
+    x = np.arange(nx) * g.dx
+    u = jnp.broadcast_to(jnp.asarray(np.sin(k * x))[None, :, None],
+                         (g.cfg.ny, nx, g.cfg.nz)).astype(jnp.float64)
+    z = jnp.zeros_like(u)
+    dRu, _, _ = sl._divergence_damping(u, z, jnp.zeros((g.cfg.ny, nx,
+                                                        g.cfg.nz + 1)), g)
+    assert np.allclose(np.asarray(dRu), -a * k ** 2 * np.asarray(u),
+                       atol=1e-6, rtol=1e-4)
+
+
+def test_stabilization_flags_default_off_and_plumbed():
+    cfg = sl.SpectralLESConfig(nx=8, ny=8, nz=8, Lx=800.0, Ly=800.0, Lz=800.0)
+    assert cfg.w_hyperdiff_coeff == 0.0 and cfg.div_damping_coeff == 0.0
+    # with the flag on, rhs() Rw differs from the flag off (operator is wired).
+    g0 = _grid(nz=12)
+    g1 = g0._replace(cfg=g0.cfg._replace(w_hyperdiff_coeff=1.0e4))
+    st = _state(g0, qv0=0.01)
+    st = st._replace(w=st.w.at[:, :, 1:-1].set(
+        0.1 * jax.random.normal(jax.random.PRNGKey(3),
+                                (g0.cfg.ny, g0.cfg.nx, g0.cfg.nz - 1))))
+    _, _, Rw0, _, _, _ = sl.rhs(st.u, st.v, st.w, g0, (0.0, 0.0), 0.0,
+                                theta=st.theta, tracers=st.tracers)
+    _, _, Rw1, _, _, _ = sl.rhs(st.u, st.v, st.w, g1, (0.0, 0.0), 0.0,
+                                theta=st.theta, tracers=st.tracers)
+    assert not np.allclose(np.asarray(Rw0), np.asarray(Rw1))
+
+
+def test_moist_diagnostics_bundle():
+    from legoesm.atmosphere.dynamics.spectral_les_moist import moist_diagnostics
+    ny = nx = 6; nz = 10
+    u = np.zeros((ny, nx, nz)); v = np.zeros((ny, nx, nz))
+    wc = np.zeros((ny, nx, nz)); wc[0, 0, 5] = 2.0
+    th = np.full((ny, nx, nz), 300.0)
+    tr = np.zeros((ny, nx, nz, 9))
+    tr[0, 0, 5, 1] = 1.0e-3                                # one cloudy column
+    rho = np.ones(nz)
+    d = moist_diagnostics(u, v, wc, th, tr, rho, 40.0, 100.0, 2.0)
+    assert set(d) >= {"cloud_frac", "lwp", "max_w", "w_var", "tke",
+                      "max_cfl", "total_water", "qv_min", "qv_max", "qc_max"}
+    assert abs(d["cloud_frac"] - 1.0 / (ny * nx)) < 1e-9
+    assert abs(d["lwp"] - 1.0e-3 * 40.0 / (ny * nx) * 1e3) < 1e-6  # qc*rho*dz mean
+    assert d["max_w"] == 2.0 and d["max_cfl"] == 2.0 * 2.0 / 40.0
+
+
 def test_unknown_scalar_advection_rejected():
     with pytest.raises(ValueError, match="scalar_advection"):
         sl.make_grid(sl.SpectralLESConfig(

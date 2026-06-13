@@ -109,6 +109,15 @@ def parse_args():
                         "stable), weno5 (sharp, can destabilize moist conv.), "
                         "weno5_hv (WENO5 horizontal + van-Leer vertical — sharp "
                         "cloud field, stable inversion; default).")
+    p.add_argument("--w-hyperdiff", type=float, default=0.0,
+                   help="OPT-IN horizontal w-hyperdiffusion ν₄ [m⁴/s] (momentum "
+                        "dissipation; ≈1e5 at dx=100/dt=2).")
+    p.add_argument("--theta-hyperdiff", type=float, default=0.0,
+                   help="OPT-IN scale-selective k4 hyperdiff on theta [m^4/s] "
+                        "(the operative WENO5 stabilizer; damps 2dx theta noise).")
+    p.add_argument("--div-damping", type=float, default=0.0,
+                   help="OPT-IN momentum divergence damping α [m²/s] (mostly "
+                        "redundant on this incompressible projection core).")
     p.add_argument("--dynamic", action="store_true", default=True,
                    help="LASD dynamic SGS (default on; near-iso dx/dz).")
     p.add_argument("--static", dest="dynamic", action="store_false")
@@ -153,6 +162,9 @@ def build(args, dtype):
         smagorinsky_dynamic=args.dynamic, sgs_model=args.sgs_model,
         time_scheme=args.time_scheme, nu_floor=args.nu_floor,
         buoyancy=True, theta_ref0=300.0, pr_sgs=1.0,
+        w_hyperdiff_coeff=args.w_hyperdiff,
+        div_damping_coeff=args.div_damping,
+        theta_hyperdiff_coeff=args.theta_hyperdiff,
         moist=True, n_tracers=args.n_tracers, monotone_scalars=True,
         scalar_advection=args.scalar_advection,
         filter_monotone_qv=args.filter_monotone_qv,
