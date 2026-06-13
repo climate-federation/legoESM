@@ -98,38 +98,67 @@ def make_tiled_transport_sweep_stage(mesh, n: int, kt: int, h3: int = 4):
 # the h3 PPM halo).  np = 6*kt*kt (kt=2 → the np24 target).
 # ---------------------------------------------------------------------------
 
-def transport_sweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4):
+def transport_sweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4,
+                            cross_nl: int | None = None):
     """Per-tile i-sweep (xtp_u, axis=1) PPM flux on a 2-D ``(tile_i, tile_j)``
     tiling.  Slice the SWEEP axis=1 to the window ``[a_i : a_i+nl+2*h3]`` AND
-    the CROSS axis=2 to the tile's j-cells ``[a_j : a_j+nl]`` (NO j-halo — the
-    i-sweep is an independent 1-D PPM per j-row).  ``vp_g`` is
-    ``(F, n+2*h3, n)``; returns ``(F, nl+1, nl)`` i-interface flux."""
+    the CROSS axis=2 to the tile's ``[a_j : a_j+cross_nl]`` (NO j-halo — the
+    i-sweep is an independent 1-D PPM per j-row).  ``cross_nl`` defaults to
+    ``nl`` (CELL cross, the synthetic/U3b case); pass ``nl+1`` for the REAL
+    xtp_u whose cross axis is the ``n+1`` CORNER axis (U3d, shapes from job
+    8480355).  ``vp_g`` ``(F, n+2*h3, n_cross)``; returns ``(F, nl+1, cn)``."""
     from legoesm.core.fv3_sw_core import _ppm_transport_1d
 
+    cn = nl if cross_nl is None else cross_nl
+    # Static guards (codex U3d MED): the three inputs must share the CROSS
+    # axis (=2 here) size and ``cn`` must fit, else dynamic_slice_in_dim
+    # silently CLAMPS the start and mis-pairs cross rows instead of failing.
+    if not (vp_g.shape[2] == courant.shape[2] == rd_g.shape[2]):
+        raise ValueError(
+            f"transport_sweep_tile_2d: cross-axis(2) sizes must match; got "
+            f"vp_g={vp_g.shape[2]}, courant={courant.shape[2]}, "
+            f"rd_g={rd_g.shape[2]}")
+    if cn > vp_g.shape[2]:
+        raise ValueError(
+            f"transport_sweep_tile_2d: cross_nl={cn} exceeds cross dim "
+            f"{vp_g.shape[2]}")
     vp_t = jax.lax.dynamic_slice_in_dim(vp_g, a_i, nl + 2 * h3, axis=1)
-    vp_t = jax.lax.dynamic_slice_in_dim(vp_t, a_j, nl, axis=2)
+    vp_t = jax.lax.dynamic_slice_in_dim(vp_t, a_j, cn, axis=2)
     c_t = jax.lax.dynamic_slice_in_dim(courant, a_i, nl + 1, axis=1)
-    c_t = jax.lax.dynamic_slice_in_dim(c_t, a_j, nl, axis=2)
+    c_t = jax.lax.dynamic_slice_in_dim(c_t, a_j, cn, axis=2)
     rd_t = jax.lax.dynamic_slice_in_dim(rd_g, a_i, nl + 2, axis=1)
-    rd_t = jax.lax.dynamic_slice_in_dim(rd_t, a_j, nl, axis=2)
+    rd_t = jax.lax.dynamic_slice_in_dim(rd_t, a_j, cn, axis=2)
     return _ppm_transport_1d(
         vp_t, c_t, rd_t, 1, external_halo=h3, rd_prepadded=True)
 
 
-def transport_jsweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4):
+def transport_jsweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4,
+                             cross_nl: int | None = None):
     """Per-tile j-sweep (ytp_v, axis=2) PPM flux — the symmetric counterpart
     of :func:`transport_sweep_tile_2d` with the sweep/cross axes swapped.
     Slice the SWEEP axis=2 to ``[a_j : a_j+nl+2*h3]`` AND the CROSS axis=1 to
-    ``[a_i : a_i+nl]`` (NO i-halo).  ``vp_g`` is ``(F, n, n+2*h3)``; returns
-    ``(F, nl, nl+1)`` j-interface flux."""
+    ``[a_i : a_i+cross_nl]`` (NO i-halo).  ``cross_nl`` defaults to ``nl``;
+    pass ``nl+1`` for the REAL ytp_v (cross axis = ``n+1`` CORNER, U3d).
+    ``vp_g`` ``(F, n_cross, n+2*h3)``; returns ``(F, cn, nl+1)``."""
     from legoesm.core.fv3_sw_core import _ppm_transport_1d
 
+    cn = nl if cross_nl is None else cross_nl
+    # Static guards (codex U3d MED): cross axis here is =1.
+    if not (vp_g.shape[1] == courant.shape[1] == rd_g.shape[1]):
+        raise ValueError(
+            f"transport_jsweep_tile_2d: cross-axis(1) sizes must match; got "
+            f"vp_g={vp_g.shape[1]}, courant={courant.shape[1]}, "
+            f"rd_g={rd_g.shape[1]}")
+    if cn > vp_g.shape[1]:
+        raise ValueError(
+            f"transport_jsweep_tile_2d: cross_nl={cn} exceeds cross dim "
+            f"{vp_g.shape[1]}")
     vp_t = jax.lax.dynamic_slice_in_dim(vp_g, a_j, nl + 2 * h3, axis=2)
-    vp_t = jax.lax.dynamic_slice_in_dim(vp_t, a_i, nl, axis=1)
+    vp_t = jax.lax.dynamic_slice_in_dim(vp_t, a_i, cn, axis=1)
     c_t = jax.lax.dynamic_slice_in_dim(courant, a_j, nl + 1, axis=2)
-    c_t = jax.lax.dynamic_slice_in_dim(c_t, a_i, nl, axis=1)
+    c_t = jax.lax.dynamic_slice_in_dim(c_t, a_i, cn, axis=1)
     rd_t = jax.lax.dynamic_slice_in_dim(rd_g, a_j, nl + 2, axis=2)
-    rd_t = jax.lax.dynamic_slice_in_dim(rd_t, a_i, nl, axis=1)
+    rd_t = jax.lax.dynamic_slice_in_dim(rd_t, a_i, cn, axis=1)
     return _ppm_transport_1d(
         vp_t, c_t, rd_t, 2, external_halo=h3, rd_prepadded=True)
 

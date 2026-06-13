@@ -215,3 +215,78 @@ def test_tiled_transport_sweep_2d_in_shardmap(sweep):
     np.testing.assert_allclose(
         reassembled, global_flux, atol=1e-12, rtol=1e-12,
         err_msg=f"2-D tiled-in-shardmap {sweep}-sweep != global")
+
+
+# =====================================================================
+# U3d: REAL-Courant composition — the corner-cross sweep tile on the real
+# _bgrid_ke_transport ytp_v inputs (real cdgrid vb + v_d_jhalo).  Shapes
+# from job 8480355: ytp_v cross axis = n+1 (corners) ⇒ cross_nl = nl+1.
+# =====================================================================
+
+def test_u3d_real_ytp_v_corner_cross_tiling():
+    """The corner-cross j-sweep tile (cross_nl=nl+1) reassembles bit-exactly
+    to the global ytp_v of _bgrid_ke_transport, driven by the REAL corner
+    Courant vb (U3c on real cross-face-halo'd uc/vc) and the REAL
+    cross-face-halo'd D-wind v_d_jhalo.  Reassembly on BOTH axes: each
+    non-last tile contributes its first nl rows/interfaces and the final
+    shared boundary comes from the last tile (the boundary is duplicated
+    across adjacent tiles but bit-identical — PPM is independent per cross
+    row — so taking all-but-last from each tile is exact)."""
+    import numpy as np
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+    from legoesm.core.fv3_sw_core import (
+        _pad_halo_uc_vc_new_via_old_delta, _pad_halo_dgrid_for_ppm,
+        bgrid_corner_courant_local,
+    )
+    from tests.test_cases.cosine_bell import cosine_bell_cubesphere
+
+    kt, nl, h3, h_dg = 3, 6, 4, 2
+    n = kt * nl
+    grid = create_cubed_sphere(n=n, use_duogrid=True)
+    cd = create_cubed_sphere_cdgrid(grid)
+    state = cosine_bell_cubesphere(grid, cd)
+    u_d, v_d = state.u_d, state.v_d
+
+    # REAL corner Courant vb (from U3c on real cross-face-halo'd uc/vc).
+    rng = np.random.default_rng(31)
+    uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(uc, vc, u_d, v_d, cd)
+    dt5 = 0.5 * 1800.0
+    vb, _ub = bgrid_corner_courant_local(
+        uc_pad, vc_pad, cd.cosa_corner, cd.rsin2_corner, dt5)   # (6,n+1,n+1)
+
+    # REAL cross-face-halo'd D-wind + rdy, EXACTLY as _bgrid_ke_transport.
+    _u_ih, v_d_jhalo = _pad_halo_dgrid_for_ppm(u_d, v_d, cd, halo=h_dg)  # (6,n+1,n+2h)
+    rdy = 1.0 / jnp.maximum(cd.dy_edge_x, 1.0e-30)              # (6,n+1,n)
+
+    global_y = np.asarray(_ppm_transport_1d(
+        v_d_jhalo, vb, rdy, 2, external_halo=h_dg))            # (6,n+1,n+1)
+
+    # Non-vacuity: cross-face halo differs from edge-replication; vb varies.
+    assert float(jnp.max(jnp.abs(
+        v_d_jhalo[:, :, :h_dg] - v_d_jhalo[:, :, h_dg:h_dg + 1]))) > 1e-9
+    assert float(jnp.std(np.asarray(vb))) > 1e-9
+
+    # Approach-C global pre-pad to h3 on the SWEEP axis=2 (gap=h3-h_dg),
+    # depth-1 rd pad — then the corner-cross tile (cross_nl=nl+1).
+    vp_g = jnp.pad(v_d_jhalo, [(0, 0), (0, 0), (h3 - h_dg, h3 - h_dg)],
+                   mode="edge")                                # (6,n+1,n+2h3)
+    rd_g = jnp.pad(rdy, [(0, 0), (0, 0), (1, 1)], mode="edge")  # (6,n+1,n+2)
+
+    rows = []
+    for ti in range(kt):                       # cross (axis=1, corner)
+        cols = []
+        for tj in range(kt):                   # sweep (axis=2, j)
+            blk = np.asarray(transport_jsweep_tile_2d(
+                vp_g, vb, rd_g, ti * nl, tj * nl, nl, h3=h3, cross_nl=nl + 1))
+            r_hi = nl + 1 if ti == kt - 1 else nl   # cross corner ownership
+            c_hi = nl + 1 if tj == kt - 1 else nl   # sweep interface ownership
+            cols.append(blk[:, :r_hi, :c_hi])
+        rows.append(np.concatenate(cols, axis=2))
+    reassembled = np.concatenate(rows, axis=1)                 # (6,n+1,n+1)
+
+    np.testing.assert_allclose(
+        reassembled, global_y, atol=1e-12, rtol=1e-12,
+        err_msg="U3d corner-cross ytp_v tiling != global _bgrid_ke ytp_v")
