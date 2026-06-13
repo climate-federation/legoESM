@@ -209,3 +209,61 @@ Per-grid distance-to-limit verdicts:
   single-field (extend pad_with_pole_bc_lat_multi with per-field
   vector/fold flags = next mechanical item before production-OMIP
   scaling claims).
+
+## Addendum 6 (2026-06-12): tiled-d2a2c strip stage; codex scaling-review triage; production CS SPMD design
+
+Shipped this round (gates 8470688/8470707, codex PASS + kt=3 lane):
+- Tiled d2a2c production stage module `legoesm/parallel/tiled_d2a2c.py`
+  (`make_tiled_d2a2c_stage`): face-replicated `d2a2c_global_fields` +
+  per-tile `d2a2c_tile_unified` under a (6,kt,kt) shard_map, strips
+  applied IN-stage via 4 one-cell `lax.ppermute` halos feeding the new
+  `d2a2c_tile_strips` (fv3_sw_core.py).  Dedup reassembly == d2a2c_vect
+  at the fp floor (~1e-16), duplicated shared-face copies bit-identical
+  (symmetric exchange).  HONEST microbench: the isolated stage on 24
+  host devices is 0.06x serial (107 vs 6.7 ms, C96) — dispatch/
+  collective floor at single-op size; the stage exists to unlock the
+  full-tendency shard_map (np24 GSPMD-auto baseline 2253 ms), not to
+  win as a lone operator.
+- PCG variant evidence (job 8470723, drift-controlled A/B/A/B):
+  single_reduce 3-7% faster np=2/4 (both reps), never measurably
+  slower.  Default flip APPROVED but DEFERRED to a coordinated commit
+  with the distributed-MPAS session (its config-contract tests pin
+  "standard" on both grids).  `ocean_pcg_weak.sbatch` now runs the
+  interleaved variant lanes permanently.
+
+Codex scaling-review (2026-06-12) standing items:
+1. PRODUCTION cubed-sphere driver SPMD (the A1 production wiring) —
+   design pinned below.
+2. MPAS pcg_variant config gap — fixed by the concurrent ocean session.
+3. lat-lon 2-D decomposition — roadmap (big architectural).
+4. single_reduce default — evidence complete, flip deferred (above).
+5. voronoi batched-halo pack/scatter profiling — roadmap.
+
+### Production CS driver SPMD build plan (codex-1 / A1-production)
+
+Template: `run_cpu_mpi_scaling.py --cs-spmd` (proven: shard-local
+parity 6.7e-10@5 steps job 8462928; np24 4.4e-10 job 8465445; C96
+multinode 2.42x job ~e209bbb0-era).  Driver gaps, in build order:
+1. Bootstrap: a `cs_spmd` parallel mode in `_bootstrap_runtime` —
+   `jax.distributed.initialize()` BEFORE any JAX use (launcher-agnostic
+   env detect), DeviceConfig mesh from GLOBAL `jax.devices()` (NOT
+   local), cubed-sphere-only refusal, mpi4jax NEVER armed in this mode
+   (mixed-stack deadlock hazard).
+2. `_setup_parallel`: route the spmd-distributed case into the existing
+   single-node SPMD branch (`shard_state` + `shard_pytree(tracers)` +
+   `_maybe_activate_spmd_halo_backend` — gate already n-divisor-based);
+   skip the mpi4jax replicated-faces branch entirely.
+3. Physics: columns operate pointwise on (6,n,n,...) sharded arrays
+   inside the jitted step — GSPMD splits them; forcing arrays (SST/SIC,
+   ozone, aerosol) must be device_put with the SAME face sharding (a
+   replicated or mis-sharded forcing triggers GSPMD resharding storms).
+   ColumnAdapter stays GLOBAL-shaped (no rank-local rebuild — that
+   path is mpi4jax-specific).
+4. Conservation fixers: jnp-level global sums on sharded arrays are
+   SPMD-global by construction (parity receipt) — audit that no fixer
+   uses rank-local masks in this mode.
+5. Diagnostics/IO: gather via multihost process_allgather (or
+   addressable-shard assembly) with process-0-only writes; segment
+   machinery (SegmentCarry/scan) traces identically on all processes.
+6. Gates: 2-proc CPU short-AMIP parity vs serial (state + conservation
+   diagnostics), then a GPU pair; bench hook reuses a1_cs_spmd_*.sbatch.

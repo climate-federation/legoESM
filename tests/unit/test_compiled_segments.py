@@ -222,6 +222,22 @@ class TestComputeSegmentLength:
     def test_all_zero_returns_one(self):
         assert compute_segment_length(0, 0, 0) == 1
 
+    def test_no_host_cadence_uses_fallback(self):
+        # diag + checkpoint disabled (e.g. spmd milestone-1): without a
+        # fallback the segment collapses to 1 and EVERY step pays a host
+        # boundary — the production-SPMD anti-scaling (job 8471423; the
+        # driver passes one model day of steps).
+        assert compute_segment_length(0, 0, 0, fallback_interval=144) == 144
+
+    def test_fallback_ignored_when_cadence_exists(self):
+        assert compute_segment_length(10, 0, 0, fallback_interval=144) == 10
+
+    def test_fallback_zero_or_negative_keeps_one(self):
+        # DT > 86400 makes the driver's int(days*86400/DT) collapse to 0
+        # — must stay the legacy 1-step segment, never 0.
+        assert compute_segment_length(0, 0, 0, fallback_interval=0) == 1
+        assert compute_segment_length(0, 0, 0, fallback_interval=-5) == 1
+
     def test_rad_update_excluded_from_gcd(self):
         # rad_update_steps=4 should NOT constrain segment length;
         # only diag_interval=10 matters here (checkpoint=0 disabled).

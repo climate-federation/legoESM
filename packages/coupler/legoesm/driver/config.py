@@ -333,8 +333,32 @@ class ExperimentConfig(NamedTuple):
     # reproducible from the seed recorded in the run manifest.
     seed: int = 0
 
+    # Segment/forcing cadence when NO host cadence exists (diag_days=0 AND
+    # checkpoint_days=0 — e.g. distributed_mode='spmd' milestone-1): the
+    # compiled-segment fallback length, which is ALSO how often
+    # time-varying forcing (SST/SIC, solar, ozone/aerosol, coupler
+    # overrides) is re-sampled — forcing updates only at segment
+    # boundaries.  Ignored whenever diagnostics or checkpoints set a
+    # finer cadence.  Without a fallback the segment collapses to 1 step
+    # and every step pays a host boundary (multi-controller: a
+    # cross-process rendezvous per step — the production-SPMD
+    # anti-scaling, job 8471423).
+    forcing_update_days: float = 1.0
+
     # Distributed
     distributed: bool = False
+    # How multi-process runs federate (read only when distributed=True):
+    #   "mpi"  — mpi4jax halo backend: replicated cubed-sphere dynamics
+    #            (full 6-face state per rank, physics-only scatter),
+    #            lat-lon band, or Voronoi cell partition.  Legacy default.
+    #   "spmd" — multi-controller jax.distributed: ONE global device
+    #            mesh, true cubed-sphere domain decomposition (the bench
+    #            --cs-spmd path productionised; shard-local parity
+    #            6.7e-10 @5 steps, job 8462928).  Cubed-sphere only;
+    #            mpi4jax is NEVER armed in this mode — mpi4jax and
+    #            jax.distributed collectives in one program is the
+    #            documented mixed-stack deadlock.
+    distributed_mode: str = "mpi"
     ensemble_size: int = 1
     n_devices: int | str = "auto"  # number of GPUs, or "auto" for all visible
     # Issue #273 follow-up: opt-in horizontal-column sharding for the
@@ -399,10 +423,52 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"precision must be one of {_valid_precisions}, got {self.precision!r}"
             )
+        _valid_distributed_modes = ("mpi", "spmd")
+        if self.distributed_mode not in _valid_distributed_modes:
+            errors.append(
+                f"distributed_mode must be one of {_valid_distributed_modes}, "
+                f"got {self.distributed_mode!r}"
+            )
+        if (self.distributed and self.distributed_mode == "spmd"
+                and g.grid_type != "cubed_sphere"):
+            errors.append(
+                "distributed_mode='spmd' supports only "
+                "grid.grid_type='cubed_sphere' (got "
+                f"{g.grid_type!r}): the lat-lon/MPAS distributed paths "
+                "arm the mpi4jax halo backend, which must never coexist "
+                "with jax.distributed collectives in one program"
+            )
+        if self.distributed and self.distributed_mode == "spmd":
+            # Milestone-1 limitation (codex review MAJOR): checkpoint and
+            # diagnostics writers assume a single process or an mpi4jax
+            # topology — under multi-controller SPMD every process would
+            # hit the same output path (concurrent clobber) or call
+            # device_get on non-fully-addressable global arrays.  Refuse
+            # LOUDLY until the gathered root-only writers are wired.
+            if self.output.checkpoint_days > 0:
+                errors.append(
+                    "distributed_mode='spmd' does not support "
+                    "checkpointing yet (output.checkpoint_days="
+                    f"{self.output.checkpoint_days}); set "
+                    "checkpoint_days=0 — gathered root-only restart "
+                    "writes are a follow-up"
+                )
+            if self.output.diag_days > 0:
+                errors.append(
+                    "distributed_mode='spmd' does not support the "
+                    "diagnostics writer yet (output.diag_days="
+                    f"{self.output.diag_days}); set diag_days=0 — "
+                    "gathered root-only diagnostics are a follow-up"
+                )
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")
         if self.seed < 0:
             errors.append(f"seed must be >= 0, got {self.seed}")
+        if self.forcing_update_days <= 0:
+            errors.append(
+                f"forcing_update_days must be > 0, got "
+                f"{self.forcing_update_days}"
+            )
         if self.sbm_cape_threshold < 0:
             errors.append(
                 f"sbm_cape_threshold must be >= 0, got {self.sbm_cape_threshold}"

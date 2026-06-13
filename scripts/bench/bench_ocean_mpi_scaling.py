@@ -305,6 +305,7 @@ def _ensure_precision(precision: str) -> None:
 def _build_global_problem(
     n_lat: int, n_lon: int, nlev: int, baro_solver: str,
     *, force_pcg: bool = False, pcg_variant: str = "standard",
+    preconditioner: str = "jacobi", fixed_iters: int = 60,
 ):
     """Global grid + z-coordinate + config + perturbed global IC.
 
@@ -331,6 +332,8 @@ def _build_global_problem(
         barotropic_solver=baro_solver,
         barotropic_implicit_force_pcg=force_pcg,
         barotropic_implicit_pcg_variant=pcg_variant,
+        barotropic_implicit_preconditioner=preconditioner,
+        barotropic_implicit_pcg_fixed_iters=fixed_iters,
     )
     state_global = rest_state_latlon_cgrid_ocean(grid, z_coord)
     state_global = _perturb_state(state_global, grid)
@@ -346,6 +349,8 @@ def build_case(
     baro_solver: str,
     precision: str,
     pcg_variant: str = "standard",
+    preconditioner: str = "jacobi",
+    fixed_iters: int = 60,
 ):
     """Build (model, state, total_cells, layout) for one benchmark case.
 
@@ -364,6 +369,7 @@ def build_case(
     # (1) Global grid + IC with the LOCAL halo backend.
     grid, z_coord, config, state_global = _build_global_problem(
         n_lat, n_lon, nlev, baro_solver, pcg_variant=pcg_variant,
+        preconditioner=preconditioner, fixed_iters=fixed_iters,
     )
 
     total_cells = n_lat * n_lon * nlev
@@ -1993,6 +1999,19 @@ def build_parser() -> argparse.ArgumentParser:
              "per solve) — the multi-node weak-scaling lever.",
     )
     p.add_argument(
+        "--preconditioner", choices=["jacobi", "zonal_line"],
+        default="jacobi",
+        help="Implicit-CN PCG preconditioner: 'jacobi' (legacy) or "
+             "'zonal_line' (exact periodic-tridiagonal row solves; "
+             "comm-free under band MPI; M-sweep 8473872: equal "
+             "residual at ~M/3 — pair with --pcg-fixed-iters).",
+    )
+    p.add_argument(
+        "--pcg-fixed-iters", type=int, default=60,
+        help="Fixed-M for the distributed implicit-CN PCG (the "
+             "reduction count per solve is 2M+1 / M+1 by variant).",
+    )
+    p.add_argument(
         "--profile-phases", action="store_true",
         help="After the full-step timing, time EVERY major ocean-step "
              "sub-phase in ISOLATION (config-gated: baroclinic tendencies / "
@@ -2188,6 +2207,8 @@ def main() -> int:
         baro_solver=args.baro_solver,
         precision=args.precision,
         pcg_variant=args.pcg_variant,
+        preconditioner=args.preconditioner,
+        fixed_iters=int(args.pcg_fixed_iters),
     )
     cells_per_rank = total_cells // n_ranks
 

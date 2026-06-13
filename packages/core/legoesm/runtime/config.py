@@ -63,6 +63,7 @@ def bootstrap(
     backend: str | None = None,
     n_devices: int | str = "auto",
     distributed: bool = False,
+    distributed_mode: str = "mpi",
     grid_type: str = "cubed_sphere",
     configure_xla: bool = True,
     allow_level_fallback: bool = False,
@@ -89,7 +90,15 @@ def bootstrap(
     n_devices : int or ``"auto"``
         Number of devices.
     distributed : bool
-        Initialise multi-node MPI.
+        Initialise multi-process execution.
+    distributed_mode : str
+        ``"mpi"`` (default) — mpi4jax halo backend (replicated
+        cubed-sphere dynamics / lat-lon band / Voronoi partition).
+        ``"spmd"`` — multi-controller ``jax.distributed``: every
+        launched process joins ONE program and the device mesh spans
+        the GLOBAL device set (true cubed-sphere domain decomposition).
+        Cubed-sphere only; mpi4jax is never armed in this mode (the
+        two collective stacks deadlock when mixed).
     grid_type : str
         ``"cubed_sphere"``, ``"latlon"``, or ``"spectral"``.
     configure_xla : bool
@@ -106,6 +115,65 @@ def bootstrap(
     RuntimeConfig
     """
     global _active
+
+    if distributed_mode not in ("mpi", "spmd"):
+        raise ValueError(
+            f"bootstrap: distributed_mode must be 'mpi' or 'spmd', "
+            f"got {distributed_mode!r}"
+        )
+
+    # 0. Multi-controller federation (spmd mode) ------------------------------
+    # ``jax.distributed.initialize()`` must run before the BACKEND CLIENT
+    # is instantiated — i.e. before the first ``jax.devices()`` /
+    # ``device_put`` / trace — so every launched process joins one
+    # program (the --cs-spmd bench contract).  Plain ``import jax`` does
+    # NOT create the client, so module-level jax imports elsewhere are
+    # fine; the hazards are device queries before this point.  Steps 1-4
+    # below are the first client-touching code on the bootstrap path.
+    # Launcher-agnostic process count: SLURM (srun) or OpenMPI (mpirun)
+    # — gating on SLURM_NTASKS alone would silently skip initialize()
+    # under mpirun and leave N independent local meshes (replicated-
+    # serial numbers; bench gate run_cpu_mpi_scaling.py).
+    if distributed and distributed_mode == "spmd":
+        if grid_type != "cubed_sphere":
+            raise ValueError(
+                "bootstrap: distributed_mode='spmd' supports only "
+                f"grid_type='cubed_sphere' (got {grid_type!r}); the "
+                "lat-lon/MPAS distributed paths arm the mpi4jax halo "
+                "backend, which must never coexist with "
+                "jax.distributed collectives in one program."
+            )
+        import os as _os
+        import jax as _jax
+
+        # STEP-scoped variables first (codex CRITICAL): inside an sbatch
+        # allocation with --ntasks=N, an inner ``srun -n 1`` still sees
+        # the allocation-wide SLURM_NTASKS=N — keying on it would call
+        # initialize() in a 1-process step and hang waiting for N-way
+        # federation.  SLURM_STEP_NUM_TASKS / OMPI_COMM_WORLD_SIZE /
+        # PMI_SIZE describe the ACTIVE step; SLURM_NTASKS is the
+        # last-resort fallback (plain sbatch script body, no srun).
+        _nproc = 1
+        for _var in ("SLURM_STEP_NUM_TASKS", "OMPI_COMM_WORLD_SIZE",
+                     "PMI_SIZE", "SLURM_NTASKS"):
+            _val = _os.environ.get(_var)
+            if _val:
+                _nproc = int(_val)
+                break
+        if _nproc > 1:
+            try:
+                _jax.distributed.initialize()
+            except RuntimeError as e:  # second bootstrap in-process
+                if "already" not in str(e).lower():
+                    raise
+            if _jax.process_count() != _nproc:
+                raise RuntimeError(
+                    f"bootstrap: distributed_mode='spmd' launched with "
+                    f"{_nproc} processes but jax.process_count()="
+                    f"{_jax.process_count()} — jax.distributed did not "
+                    "federate them (unsupported launcher?).  Refusing "
+                    "to run N independent replicated-serial programs."
+                )
 
     # 1. Backend XLA flags ---------------------------------------------------
     from legoesm.runtime.backend import (
@@ -145,6 +213,7 @@ def bootstrap(
         n_devices=n_devices,
         backend=backend,
         distributed=distributed,
+        distributed_mode=distributed_mode,
         grid_type=grid_type,
         allow_level_fallback=allow_level_fallback,
         grid_n=grid_n,

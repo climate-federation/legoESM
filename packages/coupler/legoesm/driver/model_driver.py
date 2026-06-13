@@ -1621,6 +1621,9 @@ class ModelDriver:
         rc = bootstrap(
             precision=self.config.precision,
             distributed=self.config.distributed,
+            distributed_mode=getattr(
+                self.config, "distributed_mode", "mpi",
+            ),
             grid_type=self.config.grid.grid_type,
             n_devices=self.config.n_devices,
             allow_level_fallback=getattr(
@@ -1633,6 +1636,22 @@ class ModelDriver:
         )
         self._device_config = rc.device_config
 
+        # Multi-controller SPMD (distributed_mode='spmd'): rank/world
+        # come from jax.distributed — no mpi4jax topology exists (and
+        # must never be armed in this mode).  The DeviceConfig keeps
+        # is_distributed=False so _setup_parallel routes the SPMD shard
+        # branch; only the process-0 output guards need the rank.
+        if (rc.distributed and getattr(
+                self.config, "distributed_mode", "mpi") == "spmd"):
+            import jax as _jax
+            self._mpi_rank = _jax.process_index()
+            self._mpi_world_size = _jax.process_count()
+            logger.info(
+                "  Runtime: multi-controller SPMD — process %d/%d, "
+                "%d global devices",
+                self._mpi_rank, self._mpi_world_size,
+                getattr(rc.device_config, "n_devices", 1),
+            )
         # Detect MPI rank early for output guards and logging.
         # Two topology shapes coexist in the codebase:
         #   - cubed-sphere ``MPITopology``       → ``.n_processes``
@@ -1640,7 +1659,7 @@ class ModelDriver:
         # Use ``getattr`` so this early hook works for both without
         # needing to import either type here.  ``_setup_parallel``
         # later overwrites these values with the type-specific path.
-        if rc.distributed:
+        elif rc.distributed:
             from legoesm.parallel.distributed import get_active_topology
             topo = get_active_topology()
             if topo is not None:
@@ -1838,9 +1857,22 @@ class ModelDriver:
                     f"physics shape {local_shape_2d}"
                 )
         else:
-            # Multi-GPU single-node: SPMD sharding
+            # SPMD sharding: multi-GPU single-node, AND multi-controller
+            # jax.distributed (distributed_mode='spmd' — the DeviceConfig
+            # mesh spans the GLOBAL device set, so the same shard +
+            # halo-backend activation gives true cubed-sphere domain
+            # decomposition across processes; bench --cs-spmd receipts
+            # jobs 8462928/8465445).
             from legoesm.parallel.sharded_dynamics import shard_state
-            self.state = shard_state(self.state, self._device_config)
+            # Pass grid_type so a lat-lon state shards on the LATITUDE
+            # axis, not the cubed-sphere 6-face rules (shard_state
+            # defaults to "cubed_sphere").  tracers already go through
+            # the grid-aware shard_pytree below; the main state must
+            # match or a single-node multi-GPU lat-lon run shards the
+            # state under the wrong layout (codex P1, 2026-06-13).
+            self.state = shard_state(
+                self.state, self._device_config,
+                grid_type=self.config.grid.grid_type)
 
             from legoesm.parallel.mesh import shard_pytree
             self.tracers = shard_pytree(self.tracers, self._device_config)
@@ -1857,8 +1889,10 @@ class ModelDriver:
             # only sharding (no sub-face tiling), a ``face`` mesh axis,
             # cubed-sphere grid type, and ``n_devices in (1, 2, 3, 6)``
             # because ppermute / all_gather kernels assume divisors of
-            # 6 faces.  Other tilings or device counts silently keep
-            # the local backend.
+            # 6 faces.  Non-cubed-sphere grids and unsupported device
+            # counts keep the local backend silently (they cannot
+            # benefit); sub-face tiling (>6 devices) keeps it with a
+            # LOUD warning (the tiled dycore step is unwired — P4).
             self._maybe_activate_spmd_halo_backend()
 
         logger.info(
@@ -1869,10 +1903,14 @@ class ModelDriver:
     def _maybe_activate_spmd_halo_backend(self) -> None:
         """Activate the explicit SPMD halo backend when supported.
 
-        Unsupported configurations (non-cubed-sphere grids, sub-face
-        tiling, unsupported device counts, no mesh) are skipped
-        silently — they cannot benefit from the SPMD halo collectives
-        in the first place.
+        Unsupported configurations are not activated.  Non-cubed-sphere
+        grids, unsupported device counts, and no-mesh are skipped
+        silently (they cannot benefit from the SPMD halo collectives).
+        Sub-face tiling (>6 devices) is skipped with a LOUD warning:
+        the tiled ppermute exchange exists but the tiled dycore STEP is
+        unwired (P4 milestone), so the run stays on the local backend
+        and will not strong-scale past 6 devices — surfaced, not
+        silent, so a tiled production run isn't quietly degraded.
 
         For supported configurations, activation must either succeed
         or fail loudly.  Both import failures and activation failures
@@ -1906,6 +1944,25 @@ class ModelDriver:
         if "face" not in dc.mesh.axis_names:
             return
         if getattr(dc, "tiling", (1, 1)) != (1, 1):
+            # Sub-face tiling (>6 devices — the production GPU strong-
+            # scaling regime).  The tiled ppermute EXCHANGE layer is
+            # parity-proven (cubesphere_exchange, 24-proc), but it is
+            # NOT yet wired into the production dycore STEP (the
+            # tile-aware operator stage is the P4 milestone; the dycore
+            # still slices full-face arrays).  So activating it here
+            # would be wrong — but SILENTLY keeping the local backend
+            # hides that a tiled run gets degraded (non-SPMD) halos.
+            # Warn loudly instead of returning silently (codex P1,
+            # 2026-06-13).
+            logger.warning(
+                "SPMD halo backend NOT activated for sub-face tiling "
+                "%s (%d devices): the tiled dycore STEP is unwired "
+                "(P4 milestone) — this run uses the LOCAL halo backend "
+                "and will NOT strong-scale past 6 devices.  Use "
+                "face-only sharding (1/2/3/6 devices) or multi-node "
+                "1-process-per-node SPMD for production strong scaling.",
+                dc.tiling, dc.n_devices,
+            )
             return
         if dc.n_devices not in (1, 2, 3, 6):
             return
@@ -4714,10 +4771,28 @@ class ModelDriver:
         lat_deg_grid = ctx["lat_deg_grid"]
         _sd = ctx["_sd"]
 
-        # Segment computation
+        # Segment computation.  fallback: with diagnostics AND
+        # checkpoints disabled the GCD is empty — chunk at
+        # ``forcing_update_days`` (default one model day) so host
+        # boundaries (stability check, forcing update, multi-controller
+        # rendezvous) fire at that cadence, not every step.  Forcing is
+        # re-sampled ONLY at segment boundaries, so this knob is the
+        # forcing cadence for cadence-less runs — warn when the dataset
+        # is time-varying so the throttle is an explicit choice.
+        _fb_days = getattr(cfg, "forcing_update_days", 1.0)
         segment_length = compute_segment_length(
             diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
+            fallback_interval=int(_fb_days * 86400 / DT),
         )
+        if (diag_interval <= 0 and checkpoint_interval <= 0
+                and cfg.dataset != "analytical"):
+            logger.warning(
+                "No diagnostics/checkpoint cadence: time-varying forcing "
+                "(dataset=%r) is re-sampled only every "
+                "forcing_update_days=%.3g d (segment fallback).  Set "
+                "forcing_update_days or enable diagnostics for a finer "
+                "cadence.", cfg.dataset, _fb_days,
+            )
         n_steps_remaining = n_steps_total - start_step
         n_segments = (n_steps_remaining + segment_length - 1) // segment_length
 
@@ -4849,7 +4924,13 @@ class ModelDriver:
         t_jit = 0.0
         t_start = time.time()
 
-        for seg_idx in range(n_segments):
+        # while (not ``range(n_segments)``): the adaptive-dt path halves
+        # DT and recomputes ``n_steps_total``/``segment_length`` mid-run
+        # — a fixed segment count would TRUNCATE the run after a CFL
+        # halving (pre-existing; codex review 2026-06-12).
+        seg_idx = -1
+        while current_step < n_steps_total:
+            seg_idx += 1
             seg_steps = min(segment_length, n_steps_total - current_step)
             seg_end_step = current_step + seg_steps
             day = START_DAY + seg_end_step * DT / 86400.0
@@ -4999,6 +5080,38 @@ class ModelDriver:
             # --- Host-side actions at segment boundaries ---
             elapsed_day = day - START_DAY
 
+            # Stability check at EVERY segment boundary, BEFORE diagnostics
+            # / segment-callback / adaptive-dt (codex round-2/3 MAJORs:
+            # spmd forces diag_days=0 which previously skipped this check
+            # entirely, and a coupled segment_callback must never observe
+            # an unstable state).  Read-only on state, cheap vs a segment.
+            # All ranks must agree on the verdict to avoid divergent loop
+            # exits:
+            #   - multi-controller SPMD (distributed_mode='spmd'): EVERY
+            #     process runs the check itself — the state is globally
+            #     sharded and jit-level reductions are SPMD-global, so the
+            #     verdict is process-identical by construction; mpi4py here
+            #     would be a second control plane beside jax.distributed
+            #     (and under a non-MPI launcher COMM_WORLD is size-1 per
+            #     process, leaving nonzero ranks with error=None).
+            #   - mpi4jax topologies: root checks, mpi4py bcasts.
+            _is_root_seg = (self._mpi_rank is None or self._mpi_rank == 0)
+            _spmd_mc = (self._mpi_rank is not None
+                        and self._device_config is not None
+                        and not self._device_config.is_distributed)
+            if _is_root_seg or _spmd_mc:
+                error = self.diagnostics.check_stability(self.state, elapsed_day)
+            else:
+                error = None
+            if self._mpi_rank is not None and not _spmd_mc:
+                from mpi4py import MPI
+                error = MPI.COMM_WORLD.bcast(error, root=0)
+            if error:
+                if _is_root_seg:
+                    logger.warning(f"  {error}")
+                run_status = error
+                break
+
             # Diagnostics
             if diag_interval > 0 and current_step % diag_interval == 0:
                 # Convert accumulated quantities to rates over segment duration.
@@ -5063,21 +5176,6 @@ class ModelDriver:
                     if _seg_max_cfl > 0:
                         logger.info(f"    CFL max: {_seg_max_cfl:.2f}")
 
-                # Stability check (all ranks must agree to avoid deadlock)
-                if _is_root:
-                    error = self.diagnostics.check_stability(self.state, elapsed_day)
-                else:
-                    error = None
-                # Broadcast stability error to all ranks
-                if self._mpi_rank is not None:
-                    from mpi4py import MPI
-                    error = MPI.COMM_WORLD.bcast(error, root=0)
-                if error:
-                    if _is_root:
-                        logger.warning(f"  {error}")
-                    run_status = error
-                    break
-
                 # Segment callback for coupled integration (e.g., coupler step)
                 if self._segment_callback is not None:
                     dt_seg = float(seg_steps * DT)
@@ -5098,6 +5196,9 @@ class ModelDriver:
                     )
                     segment_length = compute_segment_length(
                         diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
+                        fallback_interval=int(
+                            getattr(cfg, "forcing_update_days", 1.0)
+                            * 86400 / DT),
                     )
                     run_segment = build_segment_fn(
                         model=self.model, step_unified=step_unified,
@@ -5476,9 +5577,10 @@ class ModelDriver:
                 v=self.state.v.replace(data=self.state.v.data * self._fric_decay),
             )
 
-            # Diagnostics
+            # Diagnostics (diag_interval == 0 = writer disabled — guard the
+            # modulo; spmd configs FORCE diag_days=0, codex round-2 MAJOR)
             elapsed_day = day - START_DAY
-            if (step + 1) % diag_interval == 0:
+            if diag_interval > 0 and (step + 1) % diag_interval == 0:
                 diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
                     day=day,

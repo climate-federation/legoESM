@@ -8,9 +8,11 @@ ocean cells (same pattern as ``legoesm.grids.regridding``, but for a *curvilinea
 area-weighted (cos-lat) global means, bias, RMSE and pattern correlation for SST
 and SSS, plus zonal means, and score against provisional tolerances.
 
-Faithfulness caveats (see OMIP_faithful.md): runoff=0 in the legoESM forcing, so
-SSS is gated (non-faithful) — reported for information, not pass/fail. Runs are
-short spinups (a few years), not 40-yr equilibrium.
+Faithfulness caveats (see OMIP_faithful.md): SSS is GATED (informational, not
+pass/fail) by default — a legacy of the original runoff=0 forcing. Dai-Trenberth
+runoff is now wired (latlon/tripole/mpas), so pass ``--sss-faithful`` for a run
+that actually applied ``--runoff`` to score SSS as a real verdict. Runs are short
+spinups (a few years), not 40-yr equilibrium.
 
 Usage:
     python scripts/compare_omip_nemo.py \
@@ -272,6 +274,13 @@ def main() -> int:
                         "(~-1.9 C). legoESM has no sea ice so high-lat cells "
                         "cool below freezing; this tests how much that inflates "
                         "the SST RMSE/bias vs NEMO.")
+    p.add_argument("--sss-faithful", action="store_true",
+                   help="Un-gate SSS: report it as a real pass/fail metric with a "
+                        "verdict (same excellent/good/poor logic as SST), NOT the "
+                        "legacy 'GATED: runoff=0' caveat. Set this when the run "
+                        "actually applied the freshwater closure (--runoff is now "
+                        "wired for latlon/tripole/mpas). Default off keeps the old "
+                        "informational-only behaviour for legacy no-runoff runs.")
     args = p.parse_args()
     out = args.output_dir; out.mkdir(parents=True, exist_ok=True)
 
@@ -300,7 +309,10 @@ def main() -> int:
     sst = _wstats(sstL, sstN, area)
     sss = _wstats(sssL, sssN, area)
     print(f"[SST] {sst}")
-    print(f"[SSS] {sss}  (GATED: runoff=0, informational)")
+    if args.sss_faithful:
+        print(f"[SSS] {sss}  (faithful: --runoff applied; scored)")
+    else:
+        print(f"[SSS] {sss}  (GATED: runoff=0, informational)")
     sst_bands = _band_breakdown(sstL, sstN, area, tgt_lat)
     print("[SST bands]")
     for bn, bs in sst_bands.items():
@@ -311,6 +323,8 @@ def main() -> int:
     def _verdict(rmse, exc, good):
         return ("excellent" if rmse < exc else "good" if rmse < good else "poor")
     sst_v = _verdict(sst["rmse"], _TOL["sst_rmse_excellent_C"], _TOL["sst_rmse_good_C"])
+    sss_v = (_verdict(sss["rmse"], _TOL["sss_rmse_excellent"], _TOL["sss_rmse_good"])
+             if args.sss_faithful else None)
 
     # Mixed-layer depth (de Boyer Montegut / Treguier 2023, GMD 16:3849).
     # Needs legoESM full T/S + geometry (z_center_ref, H_bathy from a snapshot
@@ -370,7 +384,10 @@ def main() -> int:
         "n_ocean_cells": int(ocean.sum()),
         "SST": sst, "SST_verdict": sst_v,
         "SST_bands": sst_bands,
-        "SSS_gated_runoff0": sss,
+        # SSS is a real scored metric when the run applied the freshwater closure
+        # (--sss-faithful); otherwise the legacy informational-only gated key.
+        **({"SSS": sss, "SSS_verdict": sss_v} if args.sss_faithful
+           else {"SSS_gated_runoff0": sss}),
         "MLD_dsigma0p01": mld_report,
         "tolerances": _TOL,
     }
@@ -378,6 +395,9 @@ def main() -> int:
     _plot(out, tgt_lat, tgt_lon, plot_fields, ocean, label=args.grid_label)
     print(f"[verdict] SST match = {sst_v} (RMSE {sst['rmse']:.3f} C, "
           f"bias {sst['bias']:.3f} C, corr {sst['corr']:.3f})")
+    if sss_v is not None:
+        print(f"[verdict] SSS match = {sss_v} (RMSE {sss['rmse']:.3f}, "
+              f"bias {sss['bias']:.3f}, corr {sss['corr']:.3f})")
     print(f"[done] report + plots -> {out}")
     return 0
 

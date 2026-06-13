@@ -780,7 +780,7 @@ def fv3_hydrostatic_tendencies(
     _pad_halo_4d = _pad_halo_4d_module
     _pe_dg = grid.duogrid
     ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1)
-    # Scalars T + ln(ps): packed halo (MPI) / per-field halo (single-device).
+    # Scalars T + ln(ps): packed halo (MPI/SPMD) / per-field (single-device).
     if _halo_backend == "mpi":
         from legoesm.grids.halo import get_mpi_topology
         # FV3_3D iter-1041: thread interp_offsets through the packed MPI
@@ -788,6 +788,17 @@ def fv3_hydrostatic_tendencies(
         _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
         _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
             T, ln_ps_3d, topology=get_mpi_topology(), duogrid=_pe_dg,
+            interp_offsets=_pe_offs,
+        )
+    elif _halo_backend == "spmd":
+        # Pack T + ln(ps) into ONE collective, mirroring the MPI branch
+        # (the SPMD path previously did 2 separate exchanges — each is a
+        # full cross-node latency on Gloo-TCP, clock job 8473330: 0.4-4.9
+        # ms/permute, no pipelining; same zeta/B/invT pattern above).
+        from legoesm.parallel.cubesphere_exchange import get_spmd_mesh
+        _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
+        _T_pad, _lnps_pad = packed_pad_halo_4d(
+            T, ln_ps_3d, mesh=get_spmd_mesh(), duogrid=_pe_dg,
             interp_offsets=_pe_offs,
         )
     else:

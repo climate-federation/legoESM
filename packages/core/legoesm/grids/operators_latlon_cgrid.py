@@ -1060,6 +1060,7 @@ def vector_laplacian_cgrid(
     mask: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
+    vertex_mask: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Vector Laplacian on the C-grid: grad(div) - k x grad(curl).
 
@@ -1106,9 +1107,15 @@ def vector_laplacian_cgrid(
     # 3. Curl at vertices
     zeta = curl_vertex_cgrid(u_eff, v_eff, grid)  # (n_lat+1, n_lon+1[, nlev])
 
-    # Mask curl at land-adjacent vertices
+    # Mask curl at land-adjacent vertices.  ``vertex_mask`` is the
+    # model-init precomputed mask (a closure CONSTANT — the per-step
+    # recompute paid an N-S exchange even though land_mask is constant
+    # per run, because state.land_mask is a step-input tracer; halo
+    # census 8474554).  Fallback recompute keeps standalone callers
+    # working unchanged.
     if mask is not None:
-        vmask = compute_vertex_mask(mask, grid=grid)
+        vmask = (vertex_mask if vertex_mask is not None
+                 else compute_vertex_mask(mask, grid=grid))
         zeta = zeta * _bcast(vmask, zeta)
 
     # 4. Tangential gradient of curl at faces

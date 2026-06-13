@@ -298,6 +298,7 @@ def compute_segment_length(
     diag_interval: int,
     checkpoint_interval: int,
     rad_update_steps: int = 0,
+    fallback_interval: int = 0,
 ) -> int:
     """Compute the optimal segment length.
 
@@ -336,6 +337,13 @@ def compute_segment_length(
         hold.  Passed through for API stability and for callers that
         log/inspect the radiation cadence alongside the segment
         length.
+    fallback_interval : int
+        Segment length when NO host cadence exists (``diag_interval``
+        and ``checkpoint_interval`` both <= 0).  The driver passes the
+        ``forcing_update_days`` cadence in steps; this is also the
+        forcing re-sampling cadence for such runs (forcing updates only
+        at segment boundaries).  Ignored whenever a real cadence is
+        present; <= 0 keeps the legacy 1-step segment.
 
     Returns
     -------
@@ -345,7 +353,16 @@ def compute_segment_length(
     intervals = [i for i in [diag_interval, checkpoint_interval]
                  if i > 0]
     if not intervals:
-        return 1
+        # No host cadence at all (diagnostics + checkpoints disabled —
+        # e.g. distributed_mode='spmd' milestone-1 forces both off):
+        # WITHOUT a fallback the segment collapses to 1 step and EVERY
+        # step pays a host boundary (stability check, CFL fetch,
+        # forcing re-pack).  Serial that is just slow; multi-controller
+        # each boundary is a cross-process rendezvous — measured as the
+        # production-SPMD anti-scaling (107 -> 206 ms/step np1->6, job
+        # 8471423, segment HLO collective-clean per census 8471432).
+        # Callers pass a sane chunk (the driver uses one day of steps).
+        return max(int(fallback_interval), 1)
     seg = intervals[0]
     for i in intervals[1:]:
         seg = math.gcd(seg, i)

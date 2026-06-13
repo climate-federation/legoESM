@@ -61,3 +61,29 @@ jobs:
             mpirun --oversubscribe -np "${n}" \
               python -m pytest -q tests/distributed/test_plane_pencil_mpi.py
           done
+
+      - name: Run Lat-Lon 2-D Pad (wall) MPI Tests (np=2,3,6)
+        # np=3 -> 1x3 drives the E/W periodic ring through proc_lon=3 in
+        # REVERSE (the phase-constant-tag VJP case); np=6 -> 2x3 drives the
+        # N/S reverse sendrecv AND the proc_lon=3 reverse ring together.
+        env:
+          MPI4JAX_NO_WARN_JAX_VERSION: "1"
+        run: |
+          for n in 2 3 6; do
+            echo "=== Lat-lon 2-D wall-pad MPI test, np=${n} ==="
+            mpirun --oversubscribe -np "${n}" \
+              python -m pytest -q tests/distributed/test_latlon_2d_pad_wall_mpi.py
+          done
+
+      - name: Run Lat-Lon transpose AD (lon_gather_full VJP) MPI Tests (np=2,3,6)
+        # Adjoint (dot-product identity) + grad-finiteness of the lat-pencil
+        # transpose custom VJP — the AD-safe gather for lon-split pole-fold /
+        # polar-filter.  proc_lon>=2 at every size gives a real lon ring.
+        env:
+          MPI4JAX_NO_WARN_JAX_VERSION: "1"
+        run: |
+          for n in 2 3 6; do
+            echo "=== Lat-lon transpose-AD MPI test, np=${n} ==="
+            mpirun --oversubscribe -np "${n}" \
+              python -m pytest -q tests/distributed/test_latlon_transpose_ad_mpi.py
+          done

@@ -752,7 +752,128 @@ diagnostic + NEMO `mldr10_1` comparison — a new faithfulness metric beyond SST
   threshold-sign, virtual-10m, all-False guard, snapshot geometry) + impl review (missed save site +
   wet-aware fixes) + round-2 all PASS. No concurrent-session entanglement (clean direct commit).
 
+### prod4 4-LEVER SCORED vs control (8460258 COMPLETED 2yr, 2026-06-11): RGB-chl is a MIXED lever
+prod4 = full_tvd + visc-schedule(1e5->2e4) + RGB-chl + SSS-gate. vs NEMO: **SST RMSE 1.266** (bias
+-0.010, corr 0.992) — SLIGHTLY WORSE than the full_tvd control (1.206). Band-by-band vs control:
+SH-mid +1.13 -> **+0.88** (warm bias CUT -0.25, the RGB-chl intended effect ✓), tropics +0.15 -> -0.02
+(✓), but **NH-mid -0.61 -> -1.06** (cold bias WORSENED -0.45 ✗), Antarctic/Arctic ~same. **Verdict:
+RGB-chl helps WARM-biased regions but HURTS COLD-biased ones** — deeper penetration uniformly cools
+the surface (modulated by chl), so it reduces SH-mid/tropics warm bias but amplifies the NH-mid cold
+bias; net SST RMSE slightly worse. The dipole was REDISTRIBUTED, not removed. CONFOUND: prod4 bundles
+RGB-chl + visc-schedule (lower A_h sharpens NH WBCs -> could cool NH-mid) + SSS-gate, so the NH-mid
+worsening is not cleanly attributable to RGB-chl alone; a tvd+RGB-chl-only run would isolate it.
+**Recommendation: full_tvd (tvd, fixed A_h=1e5, 1.206) is the better SST config; RGB-chl's value is
+the MLD/subsurface heat (trp_mld pending), not surface RMSE.** PNGs sent. MLD skipped (prod4 predates
+geometry save). cmp dir compare_prod4_y2.
+
+### full_tvd CONTROL SCORED (8459834 COMPLETED 2yr, 2026-06-11): SST RMSE 1.206 "excellent"
+Fixed A_h=1e5 + tvd, NO RGB-chl/visc-schedule/SSS-gate. vs NEMO annual: bias +0.155, corr 0.9934.
+Bands: Antarctic +0.59, **SH-mid +1.13, tropics +0.15, NH-mid -0.61, Arctic -1.01**. vs the old ppm
+baseline (tripole_eorca1_2yr_ncarovl, 1.230): tvd marginally better (1.206) AND stable (no day-360
+NaN) — the headline tvd win. The warm/cold DIPOLE is UNCHANGED by tvd (SH-mid +1.13 identical), so it
+is flux-driven → the RGB-chl test is prod4 (4-lever, ~7h) vs this control. PNGs sent. MLD skipped
+(full_tvd predates the geometry save). cmp dir compare_full_tvd_y2.
+
+### Treguier MLD tripole-1deg FINAL vs dBM (both seasons, 8462876 COMPLETE 2yr, 2026-06-12)
+trp_mld (4-lever, SST=prod4's 1.266). MLD(0.03) vs dBM: **NH March** global RMSE 125.6/median +2.9/corr
+0.48 — S.Ocean -4.8/35, SH-mid +3.5/13, tropics +0.4/13, NH-subtrop +41.4/65, **NH-subpolar +75.8/407**.
+**SH Sept** global RMSE 107.1/median +7.4/corr 0.40 — **S.Ocean -13.5/253**, SH-mid +13.2/62, tropics
+-1.9/15, NH-subtrop +11.8/19, NH-subpolar +27.5/32. **PATTERN:** each hemisphere's WINTER subpolar/
+polar zone (NH-March N.Atlantic, SH-Sept S.Ocean) has the deep-convection blowup (huge local RMSE
+253-407 m from runaway-deep cells); everything else EXCELLENT (median +3-7 m, bias <15 m). = the
+paper's exact OMIP signature. Mode-water over-deepening (NH-subtrop +41 March, SH-mid +13 Sept) = the
+Fox-Kemper-MLE gap. PNGs sent (March preview + Sept). ico7 high-res + ic6_mld pending for the
+resolution comparison. **CONCLUSION: legoESM 1deg behaves like a paper-class OMIP model.**
+
+### Treguier MLD PREVIEW vs dBM obs (NH March, day-420, 2026-06-12): legoESM lands WITHIN the OMIP envelope
+legoESM MLD (dsigma=0.03, paper method) vs de Boyer Montegut 2022, year-2 March (NH winter max):
+- **tripole**: global RMSE 125.6 m, bias +13.4, **median +2.9 m**, corr 0.479. Bands: S.Ocean -4.8/35,
+  SH-mid +3.5/13, tropics +0.4/13, NH-subtrop +41/65, **NH-subpolar +76/407**.
+- **ico6**: global RMSE 73.4 m, bias +13.7, **median +4.0 m**, corr 0.684. Bands: S.Ocean -5.6/23,
+  SH-mid +4.0/13, tropics +4.9/15, NH-subtrop +47/71, **NH-subpolar +51/221**. **ico6 beats tripole**
+  (RMSE 73 vs 126, corr 0.68 vs 0.48, subpolar +51 vs +76).
+**Verdict vs the paper:** tropics/subtropics/SH/Southern Ocean EXCELLENT (bias <5 m, RMSE 13-35 m,
+median bias +3-4 m) — within/better than the paper's OMIP model envelope. The deep bias is LOCALIZED
+to NH subpolar/Nordic winter convection (Labrador/Irminger, visible in the diff map) = the classic
+OMIP hard region; the huge subpolar RMSE (221-407 m) = a few runaway-deep convection cells (median is
+fine, so MOST cells match). The paper documents exactly this (low-res Irminger overestimate, spurious
+deep winter ML); legoESM is on the DEEP end of the OMIP spread there. **Net: legoESM behaves like a
+paper-class OMIP model** — well-behaved regions excellent, NH-subpolar deep-convection the shared
+failure mode. CAVEAT: year-2 March of a 2yr NYF run vs 1970-2021 climatology = preliminary. PNGs sent.
+SH winter (Sept, day-630) eval + full-completion confirmation pending (watchers armed). cmp dirs
+compare_mld_{trp,ic6}_m03.
+
+### iter-I HIGH-RES SMOKE VERDICTS (2026-06-12): ico7 STABLE, ¼° tripole REGRESSED (NaN day-2)
+- **ico7 8468249 STABLE** (mpas L7, 163842 cells, dt75, full mpas stack): day-8 max|u| 0.74, no NaN,
+  2.37 steps/s → reaches y1 March ~day-90 in ~12h. The clean 2x run WORKS — the high-res MLD test
+  proceeds on the icosahedral grid (also the cleaner test: no tripole WBC-cap issue).
+- **¼° tripole 8468248 NaN'd day-2** even with the VALIDATED bare e025_1mo config (which survived 1
+  month on the OLD pre-packages-merge code). Day-0 already at the 2.5 m/s velocity clip → immediate
+  WBC blowup. The current post-merge code (concurrent MPAS-PCG barotropic merge + my commits) has
+  REGRESSED the ¼° cold-start. Re-debugging it = the full ¼° cold-start saga again (research-grade),
+  NOT a quick fix. ⇒ ¼° high-res is PARKED; ico7 is the high-res answer for now.
+**FOX-KEMPER MLE finding (user flagged deep mode-water MLD south of WBCs):** legoESM has NO Fox-Kemper
+MLE restratification (only a Leith-viscosity citation); OMIP runs use scheme="harmonic" Laplacian +
+KPP, NO eddy restratification (not even GM/Redi, which exists but is off). This EXPLAINS the too-deep
+subtropical-gyre/mode-water MLD + matches the paper (those regions improve at high-res = resolved
+eddies). FIX = implement Fox-Kemper (2008) MLE (Psi=C_e·H²/|f|·(ẑ×∇b_ML)·μ(z), tunable C_e~0.06-0.08,
+REUSES the new MLD diagnostic) → shallows coarse-run mode-water MLD. The COARSE-grid complement to the
+high-res path. Proposed to user; pending go-ahead.
+
+### iter-I HIGH-RES MLD (2x resolution) — STAGED, stability smokes launched (2026-06-12, user request)
+User: "twice resolution runs for both ico and tripolar" + chose ¼° eORCA025 + full-2yr-via-checkpoint/
+restart. REALITY surfaced: (1) no ½° tripole mesh — only ¼° eORCA025 (4x, ~1wk/sim-yr); (2) NO restart
+feature in the driver (snapshots lacked eta — FIXED, commit 312617a0 saves eta = restart-capable
+checkpoint; --restart-from still TODO); (3) ¼° cold-start only validated BARE/1-month (run_e025_1mo:
+partial-cell+smc03+adaptive-vertadv+balanced-init+min-levels2+area·cos² smag-cap C3.0/cfl0.125), and
+¼°+full-OMIP-stack 2yr is RESEARCH-GRADE (untested config interactions; memory flags ¼° WBC as
+over-viscous/smag-capped → may MUDDY the paper's resolution signal); (4) full 2yr > 72h walltime →
+needs chained restart jobs (~2wk/grid). **STAGED PLAN (prudent, validate before GPU-weeks):**
+- **STABILITY SMOKES launched** (3mo each, reach y1 NH March): e025_tripole_mld 8468248 (¼°, the
+  validated bare config + NCAR fluxes — sss/ice/BBL/rgb DEFERRED as untested at ¼°) + ico7_mld 8468249
+  (mpas L7 = 2x ico6, 163842 cells, dt75, full mpas stack). Watchers armed.
+- IF stable → implement `--restart-from` (Field surgery + step-offset, for-loop path; sss-restore
+  disables the scan path) + codex review → chain 72h jobs to full 2yr.
+- IF NaN → report the ¼°/L7 config issue; ico7 likely the cleaner high-res test (icosahedral, no
+  tripole WBC-cap). Tests the paper's central finding: high-res → shallower MLD, esp. NH-subpolar.
+
+### iter-I Fox-Kemper MLE restratification IMPLEMENTED (commit 97855a07, 2026-06-12, user request)
+User flagged too-deep MLD in subtropical-gyre mode-water regions S of the WBCs. ROOT CAUSE: legoESM had
+NO submesoscale restratification (only harmonic Laplacian + KPP); NEMO ORCA1 runs ln_mle=.true.
+**Implemented Fox-Kemper MLE** (faithful NEMO tramle.F90 nn_mle=1 port) for the C-grid (tripole/latlon):
+shared core mle.py (rc_f=ce/(5km·2Ω·sin20°), μ(z), 0.01-in-situ-ρ MLE-MLD + ML-mean buoyancy) +
+mle_latlon_cgrid.py (Ψ at faces, FACE MLD in Ψ+μ, W-grid nlev+1, bolus dk[Ψ] → conservative
+centered-flux divergence dT/dt,dS/dt). Additive physics (OceanPhysicsConfig.mle); CLI --mle/--mle-ce
+(tunable C_e knob); tripole/latlon only (mpas rejected). Codex 2-round (design 2-blocker+7-HIGH; impl
+confirmed + fixed JIT-safe MLD index, partial-cell h_k [OMIP uses --partial-cell], ML-integrated
+convection gate). **115 unit tests pass** (exact tracer conservation Σ dT·vol≈0, μ(z), restratify sign,
+contract). NEMO oracle: ln_mle=T, nn_mle=1, rn_ce=0.06, rn_lat=20, rn_rho_c_mle=0.01.
+**VALIDATION IN FLIGHT:** tripole MLE 1-month model smoke 8468519 (trp_mld 4-lever + --mle); on stable
+→ full 2yr re-run tripole_2yr_mle (run_trp_mle.sbatch) → compare MLD-with-MLE vs the no-MLE baseline
+(NH-subtrop +41m March / SH-mid +13m Sept mode-water over-deepening — does MLE shoal it?).
+
+### iter-K (2026-06-13): MLE now on MPAS (Voronoi) — every faithful grid has Fox-Kemper (commit 6e081d3b)
+The "MPAS MLE = FOLLOW-UP, gm_redi_mpas is a skeleton" note is RESOLVED. The Voronoi GM/Redi *centered*
+scheme is functional + in production (ico7 ran kappa_GM=600), so the edge-slope + conservative
+bolus-divergence infra already existed → the MLE port is SMALL. New `mle_mpas.py`:
+`psim_e = rc_f·H_e²·dvEdge·(bm[c2]-bm[c1])/dcEdge·min(111km,dcEdge)·mu(z)` (dvEdge = the Voronoi
+cross-face width = NEMO e2u analogue) → bolus volume transport dk[Ψ] → centered tracer flux →
+conservative SIGNED-EDGE divergence over the live cell volume (`-Σ_e sign·F_e / (areaCell·h_k)`). Reuses
+`mle.py` grid-agnostic core (rc_f, μ(z), MLD+buoyancy) verbatim — NO re-derivation; promotes
+`voronoi_neumann_fill` public (shared w/ GM/Redi). Wired into `ocean_model_mpas` after GM/Redi
+(additive forward-Euler), `MPASOceanConfig.mle`, `--mle` (the mpas reject guard removed; cube still
+unsupported). **`--mle` now works on tripole, latlon AND mpas — every faithful grid.** `dz_live` uses the
+actual partial-cell `compute_layer_thickness` (h_k) so MLD/gdepw/Vol are exact and conservation is exact
+against the model mass `areaCell·h_k`. **8 unit tests pass** (exact + PARTIAL-CELL conservation,
+restratify reduces ML-buoyancy variance, equatorial-finite, convection gate, jit-stable, shared rc_f,
+contract); **133 regression pass** (GM rename, C-grid MLE, all physics contracts). Codex: 1 real bug
+(partial-cell dz_live) → fixed → re-review clean. **VALIDATION IN FLIGHT:** ico6 2-yr `--mle` (8477859,
+mpas_ico6_2yr_mle) → MLD@m03/m09 vs the no-MLE baseline (does it shoal the NH-subtrop/subpolar +47..51 m?).
+
 ## Open work toward maximal faithfulness
+0. **MLE equatorial robustness** — `tripole_2yr_mle` (1° dt600) blew day-240 near the equator; MPAS MLE
+   (iter-K) tested + conservative but its multi-year/equatorial stability under the full stack is the
+   in-flight ico6 validation (8477859). Watch the equatorial band.
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
    + sub-grid straits, OR shared-PGF overhaul w/ full all-grid re-validation).
@@ -761,3 +882,41 @@ diagnostic + NEMO `mldr10_1` comparison — a new faithfulness metric beyond SST
 ## Infra (tested + codex-reviewed)
 #353 tripolar MPI halo; grid-agnostic convection (`ocean/physics/column.py`, `--convection`); #354
 lax.scan forcing (tripole). `tests/ocean/unit/test_no_scheme_duplication.py` enforces no dycore dup.
+
+### iter-J (2026-06-13): HIGH-RES analysis — ico7 ~57 km scored; biases are NOT res-fixable at the surface
+High-res deliverable = **`ico7_mld`** (mpas icosahedral L7 ~57 km, full faithful stack, 91 days clean,
+max|u|~0.45). Properly **seasonally-matched** scored (`--nemo-month 3`, day-91 perpetual-NYF≈end-March):
+`compare_ico7_hr_m03/`.
+| ico7 ~57 km, day-91 vs NEMO Mar | value |
+|---|---|
+| **SST RMSE / corr / bias** | **0.909 / 0.996 / −0.057 — excellent** |
+| SST bands | antarctic 0.58, SH-mid 0.77, **tropics 1.06 (corr 0.875 = worst)**, NH-mid 1.02, arctic 0.77 |
+| SSS RMSE / corr | 0.903 / 0.946 — **GATED: runoff=0, informational, NOT a skill metric** |
+| MLD RMSE / corr | 82.8 m / **0.572 (weak pattern)** |
+- **2× refinement (ico6 ~115 km day-90 SST 0.84 → ico7 ~57 km 0.909) gave NO surface-SST benefit.**
+  Codex-corrected framing: this does NOT prove "param-limited not res-limited" — it proves **no
+  *demonstrated* SST benefit at a 90-day surface metric**; resolution payoff (if any) lives in
+  eddies/fronts/transports/interior stratification, which a fast-equilibrating surface SST at day-90
+  cannot expose. The day-90 protocol validates the surface, not the resolution-sensitive interior.
+- **Remaining biases (high-res, surface):** (a) **tropical SST pattern** (corr 0.875, worst band) =
+  equatorial cold-tongue / upwelling / shear-mixing; (b) **MLD pattern weak (corr 0.57) + NH winter MLD
+  too deep** (ico6 month-3: NH-subtrop +47 m, subpolar-N +51 m) = missing submesoscale restratification
+  on the run grid; (c) multi-year SSS fresh drift + AMOC are equilibration-/freshwater-closure issues,
+  not high-res-specific. SSS 0.90 is reported as **gated/informational** (runoff was off), NOT a bias.
+- **Missing / incomplete parameterizations** (codex-vetted priority): (1) **Fox-Kemper MLE on MPAS** —
+  MLE is implemented for C-grid (tripole/latlon, commit 97855a07) but **mpas was rejected** → the
+  high-res ico7 grid runs with **NO submesoscale restratification**; this is the single strongest
+  candidate explaining BOTH the too-deep NH winter MLD AND the tropical upper-ocean stratification /
+  SST-pattern error. MPAS MLE = a from-scratch Voronoi bolus port (`gm_redi_mpas` is a skeleton).
+  (2) **MLE equatorial robustness** — `tripole_2yr_mle` (1° eORCA1, dt600) blew up at **day-240 near the
+  equator** (max|u| 1.8→4.6→nan, umax_lat −4.8…8.5) under the weakest-viscosity window (visc 2e4 @ day180);
+  smoke (30 d) was stable. Investigate MLE Ψ behavior at low f / interaction with the late-run viscosity
+  drop before re-enabling. (3) **runoff not wired to mpas high-res** (exists; SSS 1.01→0.85 on ico6).
+  (4) **tidal mixing** (Simmons/St-Laurent bottom-intensified) — interior/abyssal, secondary for surface.
+  (5) **real sea-ice thermo/dynamics** (currently freeze-floor surrogate max(T,−1.8) + prescribed-siconc
+  albedo) — polar SST/SSS + brine rejection. (6) Langmuir/wave-enhanced KPP — mixed-layer/SST, lower prio.
+- **¼° (eORCA025) blowup was a CONFIG REGRESSION, not a high-res wall:** `e025_tripole_mld` blew at day-2
+  because its command DROPPED `--momentum-rk3` (the documented key to the corrected-WOA cold-start: RK3 +
+  implicit_cn barotropic). Relaunched WITH `--momentum-rk3` restored (`e025_tripole_rk3_hr`, glab1 A40,
+  job 8477016). Codex caveat: RK3 is the first fix, not proven sole cause (dt75/balanced-init/Smag can
+  still interact) — the relaunch may still blow; treat as a probe.

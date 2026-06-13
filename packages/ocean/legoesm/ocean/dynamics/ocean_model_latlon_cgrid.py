@@ -692,6 +692,20 @@ class LatLonCGridOceanModel:
         # Static rigid-lid data (islands, basis, depths), built eagerly from the
         # first concrete state (host-side flood-fill).  None until built.
         self.rigid_lid_data = None
+        # Build-once vertex mask (land-mask-derived, constant per run).
+        # Computing it per step paid an N-S halo exchange inside the
+        # traced tendencies (x2 sites) because state.land_mask is a
+        # step-input tracer even though its VALUE never changes (halo
+        # census job 8474554).  Filled eagerly by step()'s Python body
+        # on the first call; threaded into the tendencies as a closure
+        # constant.  Callers that trace _step_impl directly without ever
+        # calling step() keep the in-graph fallback (correct, no win).
+        # STALENESS CONTRACT: like the geometry itself, this assumes the
+        # land mask is fixed after construction (replace_land_mask is a
+        # construction-stage tool; a mid-run mask swap requires a new
+        # model instance).
+        self._vertex_mask = None
+        self._vertex_mask_src = None
 
         # Surface-forcing IMPLICIT routing (Veros placement): when enabled, the
         # combined physics is built with surface_forcing.scheme="none" so the
@@ -724,6 +738,64 @@ class LatLonCGridOceanModel:
             )
         else:
             self._physics_fn = None
+
+    def _ensure_vertex_mask(self, state) -> None:
+        """Fill (or refresh) the vertex-mask cache from CONCRETE state.
+
+        No-op on traced state (a jitted caller wrapping ``step`` traces
+        this Python body once with tracers — the in-graph fallback then
+        applies).  The cache is KEYED on the source land mask (codex
+        review MAJOR: an unkeyed cache silently served state A's mask to
+        state B on model reuse): identity fast-path, then a host value
+        compare — a different mask REFRESHES the cache.
+        """
+        import jax as _jax
+
+        m = state.land_mask.data
+        if isinstance(m, _jax.core.Tracer):
+            return
+        if self._vertex_mask is not None:
+            src = self._vertex_mask_src
+            if m is src:
+                return
+            import numpy as _np
+            if (src is not None and m.shape == src.shape
+                    and bool(_np.array_equal(_np.asarray(m),
+                                             _np.asarray(src)))):
+                self._vertex_mask_src = m   # adopt new identity, same value
+                return
+            # A DIFFERENT mask cannot be served by refreshing this
+            # attribute: the already-compiled ``_step_jitted`` baked the
+            # old mask as a closure CONSTANT (``self`` is a static
+            # argument — the jit cache would silently reuse the stale
+            # executable; codex round-2).  Enforce the per-instance
+            # contract mechanically instead of documenting it.
+            raise ValueError(
+                "LatLonCGridOceanModel: the land mask changed after the "
+                "first step on this model instance.  The vertex-mask "
+                "cache (and the compiled step that captured it) are "
+                "built once per model — construct a NEW model for a "
+                "different mask (replace_land_mask is a construction-"
+                "stage tool)."
+            )
+        from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask
+
+        self._vertex_mask = compute_vertex_mask(m, grid=self.grid)
+        self._vertex_mask_src = m
+
+    def prime_step_caches(self, state) -> None:
+        """Eagerly fill build-once step caches from CONCRETE state.
+
+        Public hook for drivers that integrate via ``_step_impl``
+        directly inside an outer ``lax.scan``/``jax.jit`` (the public
+        ``step`` shim does this automatically): call ONCE with the
+        concrete initial state BEFORE building/tracing the scan, so the
+        traced body captures the land-mask-derived vertex mask as a
+        constant instead of re-deriving it (with its N-S halo exchange)
+        every step.  Safe to call multiple times and with traced state
+        (no-op).
+        """
+        self._ensure_vertex_mask(state)
 
     def _ensure_rigid_lid_data(self, state):
         """Build + cache the static rigid-lid data from a CONCRETE state.
@@ -1280,6 +1352,7 @@ class LatLonCGridOceanModel:
             sponge=sponge,
             dt=dt,
             surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
+            vertex_mask=self._vertex_mask,
         )
 
     def tendencies_with_diagnostics(
@@ -1315,6 +1388,7 @@ class LatLonCGridOceanModel:
             dt=dt,
             diagnose_momentum=True,
             surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
+            vertex_mask=self._vertex_mask,
         )
 
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
@@ -1462,6 +1536,7 @@ class LatLonCGridOceanModel:
                 mask=state.land_mask.data,
                 u_mask=state.u_mask.data,
                 v_mask=state.v_mask.data,
+                vertex_mask=self._vertex_mask,
             )
             # cos^4(lat) scaling: lat-lon grid spacing shrinks as
             # cos(lat) near the poles, so a constant ν₄ would violate
@@ -3282,15 +3357,20 @@ class LatLonCGridOceanModel:
             return state_out, tke_new
         return state_out
 
-    @partial(jax.jit, static_argnums=(0,))
     def step(self, state: LatLonCGridOceanState, dt: float,
              freshwater=None, surface_forcing=None,
              sponge=None) -> LatLonCGridOceanState:
         """Advance one time step using split-explicit stepping.
 
-        JIT-compiled wrapper around ``_step_impl``.  For use inside an
-        outer JIT context (e.g. ``lax.scan``), call ``_step_impl``
-        directly to avoid nested JIT boundaries.
+        Eager Python shim over the JIT-compiled ``_step_jitted``: fills
+        the build-once vertex-mask cache from CONCRETE state BEFORE the
+        body traces (an in-jit fill is impossible — the state is a
+        tracer there), so the tendencies capture the mask as a closure
+        constant instead of re-deriving it (with its N-S halo exchange)
+        every step (census job 8474554).  For use inside an outer JIT
+        context (e.g. ``lax.scan``), call ``_step_impl`` directly to
+        avoid nested JIT boundaries (the in-graph vertex-mask fallback
+        then applies — correct, just without the constant-fold win).
 
         Parameters
         ----------
@@ -3306,6 +3386,16 @@ class LatLonCGridOceanModel:
         -------
         LatLonCGridOceanState
         """
+        self._ensure_vertex_mask(state)
+        return self._step_jitted(
+            state, dt, freshwater, surface_forcing, sponge)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_jitted(self, state: LatLonCGridOceanState, dt: float,
+                     freshwater=None, surface_forcing=None,
+                     sponge=None) -> LatLonCGridOceanState:
+        """JIT body of :meth:`step` (split out so the vertex-mask cache
+        fill runs eagerly — see the ``step`` docstring)."""
         _oi = getattr(self.config, "outer_integrator", "forward_euler")
         if _oi not in ("forward_euler", "ab2"):
             raise ValueError(
@@ -4031,6 +4121,9 @@ class LatLonCGridOceanModel:
         than the Euler fallback of 1.0.  At typical CFL values
         (≤ 0.3) this is stable.
         """
+        # Prime build-once caches from the CONCRETE input state before
+        # the scan traces step() with tracers (codex round-2 MINOR).
+        self.prime_step_caches(state)
         # Pre-initialize AB2 carry fields so the pytree structure
         # is stable across scan iterations (None → Field transition
         # would crash jax.lax.scan).

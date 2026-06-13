@@ -465,6 +465,22 @@ class MPASOceanModel:
             T_new = T_new + dt * dT_gm * active_3d
             S_new = S_new + dt * dS_gm * active_3d
 
+        # 2c. Fox-Kemper MLE submesoscale restratification (forward-Euler
+        # bolus tracer tendency, same additive pattern as GM/Redi above).
+        # Voronoi port of NEMO nn_mle=1 — see mle_mpas.py / the plan doc.
+        if config.mle is not None:
+            from legoesm.ocean.physics.lateral_mixing.mle_mpas import (
+                mle_tracer_tendency_mpas,
+            )
+            dT_mle, dS_mle = mle_tracer_tendency_mpas(
+                T_new, S_new, state.eta.data, state.H_bathy.data,
+                mesh, z_coord, config.mle,
+                eos=config.eos, eos_linear=config.eos_linear,
+                mask=mask,
+            )
+            T_new = T_new + dt * dT_mle * active_3d
+            S_new = S_new + dt * dS_mle * active_3d
+
         # 3. Update 3D velocity with baroclinic perturbation tendency.
         # tend.du_dt uses RELATIVE vorticity in the PV flux only (no
         # planetary Coriolis) — Coriolis on the 3D perturbation is
