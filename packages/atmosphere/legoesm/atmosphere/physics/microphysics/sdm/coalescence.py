@@ -118,21 +118,52 @@ def coalescence_step(
         Scheme configuration (selects the collision kernel; static argument).
     """
     xi = state.multiplicity
-    R = state.radius
-    s = state.solute_mass
-    active = state.active
     n = xi.shape[0]
 
     if n < 2:
         return state  # nothing to pair
 
-    dtype = R.dtype
+    dtype = state.radius.dtype
     L = n // 2  # number of candidate pairs
 
     k_perm, k_gamma = random.split(key)
     perm = random.permutation(k_perm, n)
     ia = perm[0:2 * L:2]   # first member of each pair
     ib = perm[1:2 * L:2]   # second member of each pair
+
+    # Shima scaled probability: ⌊n/2⌋ candidate pairs represent all C(n,2) pairs.
+    scaling = jnp.full((L,), 0.5 * n * (n - 1) / L, dtype=dtype)
+    valid_pair = jnp.ones((L,), dtype=dtype)
+    return _coalescence_step_pairs(
+        state, ia, ib, valid_pair, scaling, V_cell, rho, p, T, dt, k_gamma, cfg)
+
+
+def _coalescence_step_pairs(
+    state: SuperDropletState,
+    ia: jax.Array,
+    ib: jax.Array,
+    valid_pair: jax.Array,
+    pair_scaling: float | jax.Array,
+    V_cell: float | jax.Array,
+    rho: float | jax.Array,
+    p: float | jax.Array,
+    T: float | jax.Array,
+    dt: float | jax.Array,
+    key: jax.Array,
+    cfg: SDMConfig,
+) -> SuperDropletState:
+    """Apply the Shima update to a fixed set of non-overlapping candidate pairs.
+
+    ``valid_pair`` masks candidate pairs that should be skipped, while
+    ``pair_scaling`` supplies the local ``C(n,2)/floor(n/2)`` scale factor for
+    each candidate. Invalid pairs may overlap valid pairs; they contribute zero
+    additive updates and therefore cannot overwrite a real coalescence result.
+    """
+    xi = state.multiplicity
+    R = state.radius
+    s = state.solute_mass
+    active = state.active
+    dtype = R.dtype
 
     xi_a, xi_b = xi[ia], xi[ib]
     a_is_big = xi_a >= xi_b
@@ -145,11 +176,11 @@ def coalescence_step(
     R_small = R[small]
     s_big = s[big]
     s_small = s[small]
-    act_pair = active[big] * active[small]
+    act_pair = active[big] * active[small] * jnp.asarray(valid_pair, dtype=dtype)
 
     # Relative speed for hydrodynamic kernels (Golovin ignores it).
     if cfg.collision_kernel == "golovin":
-        dv = jnp.zeros((L,), dtype=dtype)
+        dv = jnp.zeros_like(R_big)
     else:
         rho_a = jnp.asarray(rho, dtype=dtype)
         p_a = jnp.asarray(p, dtype=dtype)
@@ -168,15 +199,16 @@ def coalescence_step(
         m_small = water_mass_per_droplet(state)[small] + s_small
         K = K + brownian_kernel(R_big, R_small, m_big, m_small, p_a, T_a)
 
-    # Shima scaled probability: ⌊n/2⌋ candidate pairs represent all C(n,2) pairs.
-    scaling = 0.5 * n * (n - 1) / L
+    scaling = jnp.asarray(pair_scaling, dtype=dtype)
+    V_cell = jnp.asarray(V_cell, dtype=dtype)
+    dt = jnp.asarray(dt, dtype=dtype)
     P = xi_big * (K / V_cell) * scaling * dt
     P = P * act_pair  # inactive pairs cannot coalesce
 
     # Stochastic integer collision count γ, capped so the prey is not over-consumed.
     floor_P = jnp.floor(P)
     frac = P - floor_P
-    u = random.uniform(k_gamma, (L,), dtype=dtype)
+    u = random.uniform(key, ia.shape, dtype=dtype)
     gamma = floor_P + (u < frac).astype(dtype)
     # Cap at ⌊ξ_big/ξ_small⌋ so the larger-multiplicity droplet is not
     # over-consumed. Guard the floating-point quotient against rounding up to a
@@ -218,10 +250,15 @@ def coalescence_step(
     s_small_new = jnp.where(has_coal, s_merged, s_small)
     s_big_new = jnp.where(case_split, s_merged, s_big)
 
-    # Conflict-free scatter back (candidate pairs are non-overlapping).
-    xi = xi.at[big].set(xi_big_new).at[small].set(xi_small_new)
-    R = R.at[big].set(R_big_new).at[small].set(R_small_new)
-    s = s.at[big].set(s_big_new).at[small].set(s_small_new)
+    # Additive scatter is robust to invalid overlapping pairs: their deltas are
+    # exactly zero, while valid Shima candidate pairs are non-overlapping.
+    xi = xi.at[big].add(jnp.where(has_coal, xi_big_new - xi_big, 0.0))
+    xi = xi.at[small].add(jnp.where(has_coal & case_split,
+                                    xi_small_new - xi_small, 0.0))
+    R = R.at[big].add(jnp.where(case_split, R_big_new - R_big, 0.0))
+    R = R.at[small].add(jnp.where(has_coal, R_small_new - R_small, 0.0))
+    s = s.at[big].add(jnp.where(case_split, s_big_new - s_big, 0.0))
+    s = s.at[small].add(jnp.where(has_coal, s_small_new - s_small, 0.0))
     # A droplet whose multiplicity has reached zero represents nothing -> inactive.
     active = jnp.where(xi > 0.0, active, 0.0)
 
