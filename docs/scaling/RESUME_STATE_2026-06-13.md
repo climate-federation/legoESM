@@ -25,7 +25,16 @@ pushed; this doc is the resume pointer). Full blow-by-blow is in the auto-memory
 | 1a0099a0 | barotropic levers documented OPT-IN (regime crossover) |
 | e39b027d | distance-to-limit assessment |
 | 7a7100d6 | neumann-fill field+mask halo packed via dtype cast (census 38→32) |
+| 36861ecb | lat-lon multi-GPU state shard_state grid_type fix + loud tiled-halo skip (codex P1) |
 | 512ab62b | parallelization literature review |
+
+## Codex review (2026-06-13) — all P0/P1 resolved
+
+- P0 MPAS `barotropic_implicit_pcg_variant`: already present (mpas_config.py:261, concurrent session).
+- P1 CS-atm replicated dynamics: shipped as `distributed_mode='spmd'` (48d5c8af).
+- P1 lat-lon multi-GPU state sharding + P1 tiled silent-slow: FIXED (36861ecb).
+- P2 single_reduce default: held OPT-IN (production-tile data: barotropic 6-10% of step, neutral).
+- P2 lat-lon 2-D decomp + voronoi batched-halo, P3 spectral label: roadmap (task #7; spectral already "by design").
 
 ## In flight at handoff
 
