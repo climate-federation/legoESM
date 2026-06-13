@@ -56,6 +56,8 @@ Per-step driver (DONE):
 
 from __future__ import annotations
 
+import functools
+
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
 import jax
@@ -347,6 +349,64 @@ def make_lon_row_comm(layout: LatLon2DLayout):
     return MPI.COMM_WORLD.Split(color=layout.proc_row, key=layout.proc_col)
 
 
+# custom_vjp on SCALAR lon metadata only (NOT the whole layout): the
+# layout's ``fold`` field can carry jax.Array permutations, which must
+# not become custom-VJP static args (codex MAJOR 2026-06-13).  The public
+# wrapper below extracts the scalar fields.  nondiff args = lon_start,
+# lon_end, n_lon_global, proc_lon, row_comm (indices 1..5).
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4, 5))
+def _lon_gather_full_p(local_block, lon_start, lon_end, n_lon_global,
+                       proc_lon, row_comm):
+    import mpi4jax
+
+    from legoesm.parallel.reductions import mpi4jax_array_result
+
+    if n_lon_global % proc_lon != 0:
+        raise ValueError(
+            f"lon_gather_full needs an equal lon split (n_lon="
+            f"{n_lon_global} % proc_lon={proc_lon} != 0) for the "
+            "allgather; non-uniform splits need alltoallv (not yet "
+            "implemented)."
+        )
+    # (proc_lon, n_lat_local, n_lon_local[, nlev]); key=proc_col ordered
+    # the sub-comm ranks west->east, so axis 0 IS lon-block order.
+    stacked = mpi4jax_array_result(mpi4jax.allgather(local_block, comm=row_comm))
+    return jnp.concatenate(
+        [stacked[i] for i in range(stacked.shape[0])], axis=1)
+
+
+def _lon_gather_full_p_fwd(local_block, lon_start, lon_end, n_lon_global,
+                           proc_lon, row_comm):
+    # No residual: the adjoint depends only on the (static) scalar args.
+    return _lon_gather_full_p(
+        local_block, lon_start, lon_end, n_lon_global, proc_lon, row_comm), None
+
+
+def _lon_gather_full_p_bwd(lon_start, lon_end, n_lon_global, proc_lon,
+                           row_comm, _res, g_full):
+    """Adjoint of the lat-pencil gather.
+
+    Forward ``G`` maps each rank's block ``x_s`` into the full-lon array
+    that is REPLICATED across the whole row ring (``y_r = concat_s x_s``
+    for every ring rank ``r``).  Hence ``x̄_s = Σ_r ȳ_r[:, block_s]`` —
+    sum the cotangent over the ring (``allreduce(SUM)``, the only AD-safe
+    collective), then slice this rank's lon block.  (``allgather``'s true
+    adjoint is a reduce-scatter; ``allreduce(SUM)`` + slice computes the
+    same value without a reduce-scatter primitive.)
+    """
+    import mpi4jax
+    from mpi4py import MPI
+
+    from legoesm.parallel.reductions import mpi4jax_array_result
+
+    summed = mpi4jax_array_result(
+        mpi4jax.allreduce(g_full, op=MPI.SUM, comm=row_comm))
+    return (summed[:, lon_start:lon_end],)
+
+
+_lon_gather_full_p.defvjp(_lon_gather_full_p_fwd, _lon_gather_full_p_bwd)
+
+
 def lon_gather_full(local_block: jax.Array, layout: LatLon2DLayout,
                     row_comm) -> jax.Array:
     """In-trace lat-pencil transpose: assemble the FULL longitude axis
@@ -360,27 +420,27 @@ def lon_gather_full(local_block: jax.Array, layout: LatLon2DLayout,
     ``(n_lat_local, n_lon_global[, nlev])``; apply the fold/filter on
     that, then :func:`lon_scatter_full` back to the rank's block.
 
-    FORWARD-ONLY (``mpi4jax.allgather`` has no VJP — reductions.py note):
-    correct for the scaling-bench forward path; the AD adjoint
-    (reduce-scatter) is a follow-on before this is used under
-    ``jax.grad``.  Requires an EQUAL lon split (``n_lon % proc_lon ==
-    0``) so the allgather blocks share a shape; non-uniform splits need
-    an ``alltoallv`` (future).
-    """
-    import mpi4jax
+    AD-SAFE (custom VJP on :func:`_lon_gather_full_p`): the forward is
+    ``allgather`` (no native VJP), but the gather is a linear map whose
+    adjoint is exact — a local block contributes to the full-lon array
+    on EVERY rank of the row ring, so the cotangent's adjoint is
+    ``allreduce(SUM)`` over the row ring (AD-safe) then a slice of this
+    rank's lon block.  Requires an EQUAL lon split (``n_lon % proc_lon
+    == 0``) so the allgather blocks share a shape; non-uniform splits
+    need an ``alltoallv`` (future).
 
-    if layout.n_lon_global % layout.proc_lon != 0:
-        raise ValueError(
-            f"lon_gather_full needs an equal lon split (n_lon="
-            f"{layout.n_lon_global} % proc_lon={layout.proc_lon} != 0) "
-            "for the allgather; non-uniform splits need alltoallv "
-            "(not yet implemented)."
-        )
-    # (proc_lon, n_lat_local, n_lon_local[, nlev]); key=proc_col ordered
-    # the sub-comm ranks west->east, so axis 0 IS lon-block order.
-    stacked = mpi4jax.allgather(local_block, comm=row_comm)
-    return jnp.concatenate(
-        [stacked[i] for i in range(stacked.shape[0])], axis=1)
+    COLLECTIVE PRECONDITION (deadlock safety): both the forward gather
+    AND its reverse-mode ``allreduce`` are collectives over ``row_comm``,
+    so EVERY rank of the row ring MUST execute both the primal and the
+    backward pass.  Do NOT place a ``lon_gather_full`` result behind
+    rank-dependent Python control flow (some ranks skipping the VJP while
+    others enter the backward ``allreduce`` deadlocks).  For
+    rank-selective use, keep the call in the traced graph on all ranks
+    and gate with arithmetic masks (zero cotangents where inactive).
+    """
+    return _lon_gather_full_p(
+        local_block, layout.lon_start, layout.lon_end,
+        layout.n_lon_global, layout.proc_lon, row_comm)
 
 
 def lon_scatter_full(full_field: jax.Array,

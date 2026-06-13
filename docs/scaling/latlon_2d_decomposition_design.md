@@ -114,6 +114,24 @@ raise test (`tests/parallel/test_latlon_2d_pad_wall.py`,
 ocean and regular lat-lon atm NOW; the fold/tripole/polar-filter rows
 remain the transpose sub-project below.
 
+### 3d. Lat-pencil transpose is now AD-SAFE (2026-06-13)
+`lon_gather_full` (the §3b/§4 transpose primitive) was forward-only
+(`mpi4jax.allgather` has no native VJP). Now wrapped in a `jax.custom_vjp`
+(`packages/core/legoesm/parallel/latlon_mpi.py`): the gather is a LINEAR
+map (each rank's lon block → the full-lon array, REPLICATED across the
+row ring), so its exact adjoint is `x̄_s = Σ_r ȳ_r[:, block_s]` =
+`allreduce(SUM)` over the row ring (the only AD-safe collective) then
+slice the rank's block — no reduce-scatter primitive needed.
+`lon_scatter_full` stays a plain slice (native pad-zeros adjoint;
+correct in the gather∘fold∘scatter chain because the gather VJP's
+allreduce does the ring summation). Verified by the dot-product adjoint
+identity `<Gx,y>==<x,Gᵀy>` (global) at np=2/3/6 + grad-finiteness through
+a block-mixing 180°-roll loss (`tests/distributed/
+test_latlon_transpose_ad_mpi.py`, `L2D_TRANSPOSE_AD_GATE_OK`). ⇒ the
+pole-fold and polar-filter built on the transpose (§3b/§4) can now be
+reverse-mode differentiable (the prior blocker for AD through the pole
+rows under lon-split is removed).
+
 ### 4. Polar filter — THE hard part (transpose or local filter)
 `grids/polar_filter.py` does `jnp.fft.rfft(field, axis=lon)` per lat row
 — needs ALL longitudes. With lon split this breaks. Options, ranked:
