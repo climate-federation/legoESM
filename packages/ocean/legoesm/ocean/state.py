@@ -902,15 +902,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     #                     np32 weak growth was allreduce-latency-bound).
     # Equivalent in exact arithmetic; differs at round-off (solver-
     # tolerance lane, not bit-exact).  Validated at solver dispatch
-    # (unknown ⇒ ValueError).  FLIP-PENDING: drift-controlled A/B/A/B
-    # job 8470723 measured single_reduce 3-7% faster at np=2/4 (both
-    # interleaved reps), never measurably slower (np=1 wash, np=8 rep-1
-    # even; the lone counter-signal was a 1-rep outlier), np32 2-node
-    # 1.03-1.06x — making it the default is approved by the 2026-06-12
-    # codex scaling review but DEFERRED to a coordinated commit: the
-    # distributed-MPAS session's config-contract tests pin both grids'
-    # defaults to "standard" and the two must flip together (latlon
-    # here + MPASOceanConfig) with their pin tests.
+    # (unknown ⇒ ValueError).  OPT-IN, NOT a default (regime-dependent,
+    # measured): single_reduce wins ONLY when the barotropic reductions
+    # dominate the step — small per-rank tiles / high rank counts /
+    # multi-node (LL12 rows/rank: +3-7% np2/4, job 8470723).  At a
+    # PRODUCTION tile (rows/rank=48, job 8475875) the barotropic solve
+    # is ~6-7% of the step (vmix dominates), so the variant is
+    # within-noise neutral — NOT worth flipping the default and risking
+    # the bit-repro lane.  Set it per deck when reduction-latency-bound.
     barotropic_implicit_pcg_variant: str = "standard"
     # Preconditioner for the implicit-CN Helmholtz PCG (validated at the
     # solver entry; unknown ⇒ ValueError):
@@ -924,6 +923,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     #                  (CESM POP, GMD 9:4209: fewer latency-bound
     #                  iterations for cheap local FLOPs).  W-self-adjoint
     #                  by construction (single_reduce-compatible).
+    # OPT-IN, regime-dependent (measured, same caveat as the variant
+    # above): zonal_line + M=20 is +20-26% at small/reduction-bound
+    # tiles (LL12 ≤8/node, job 8475325) but ~neutral at a production
+    # tile (rows/rank=48, job 8475875) where the barotropic solve is
+    # only ~6-7% of the step AND the cyclic-Thomas's sequential
+    # per-iteration FLOPs offset the M=60→20 iteration cut when
+    # compute-bound.  Use it on reduction-latency-bound decks; the
+    # default stays "jacobi".
     barotropic_implicit_preconditioner: str = "jacobi"
     # Rigid-lid streamfunction solver knobs (only used when
     # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
