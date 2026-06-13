@@ -386,19 +386,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
     'packages/ice/legoesm/ice/ponds.py': {
         'snow_block_threshold: float = 5.0e-3,': 1,
     },
-    'packages/ice/legoesm/ice/rheology.py': {
-        'C_strength: float = 20.0,': 1,
-        'P_star: float = 2.75e4,': 1,
-    },
-    'packages/ice/legoesm/ice/ridging.py': {
-        ') * constants.rho_ice * 1.0e-3': 1,
-        'H_max = jnp.maximum(H_max, H_min + 1e-3)': 1,
-        'e_star: float = 0.36,': 1,
-        'raw = a_cat * jnp.exp(-h_cat / jnp.maximum(e_star, 1e-3))': 1,
-        'salt_donated_per_cat = S_ice_cat * dV_per_cat * constants.rho_ice * 1.0e-3': 1,
-        'salt_new / (V_safe * constants.rho_ice * 1.0e-3),': 1,
-        'salt_old_cat = S_ice_cat * V_cat * constants.rho_ice * 1.0e-3': 1,
-    },
     'packages/ice/legoesm/ice/scm.py': {
         'T_ice_init: float = 260.0, # noqa: N803 (physical symbol, project T_ convention)': 1,
         'T_lowest: float = 250.0, # noqa: N803 (physical symbol, project T_ convention)': 1,
@@ -586,8 +573,6 @@ _SEED_FILES: frozenset[str] = frozenset({
     'packages/ice/legoesm/ice/brine.py',
     'packages/ice/legoesm/ice/itd.py',
     'packages/ice/legoesm/ice/ponds.py',
-    'packages/ice/legoesm/ice/rheology.py',
-    'packages/ice/legoesm/ice/ridging.py',
     'packages/ice/legoesm/ice/scm.py',
     'packages/ice/legoesm/ice/shortwave.py',
     'packages/ice/legoesm/ice/state.py',

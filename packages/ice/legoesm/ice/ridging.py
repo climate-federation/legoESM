@@ -37,7 +37,14 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.ice.config import RidgingConfig
 from legoesm.ice.itd import category_bounds, upper_bounds
+
+# Canonical ridging defaults live on RidgingConfig (single source of truth);
+# kwarg signatures default to these. Salt mass uses S [PSU = g/kg] x volume x
+# rho_ice [kg/m^3]; the 1e-3 converts g/kg -> kg/kg so salt is in kg.
+_RIDGE_DEFAULTS = RidgingConfig()
+_PSU_TO_FRACTION = 1.0e-3
 
 
 def participation_weights(
@@ -69,7 +76,7 @@ def participation_weights(
         trailing axis when there is any ice; zero everywhere when
         the column is ice-free).
     """
-    raw = a_cat * jnp.exp(-h_cat / jnp.maximum(e_star, 1e-3))
+    raw = a_cat * jnp.exp(-h_cat / jnp.maximum(e_star, 1e-3))  # coeff-ok: e_star divide-safety floor [m]
     total = jnp.sum(raw, axis=-1, keepdims=True)
     safe_total = jnp.where(total > 1e-30, total, 1.0)
     return jnp.where(total > 1e-30, raw / safe_total, 0.0)
@@ -143,7 +150,7 @@ def _ridging_column_kernel(
     # Ridge thickness range (Hibler / Lipscomb).
     H_min = 2.0 * h_part
     H_max = jnp.minimum(mu_rdg * jnp.sqrt(jnp.maximum(h_part, 1e-6)), H_star)
-    H_max = jnp.maximum(H_max, H_min + 1e-3)
+    H_max = jnp.maximum(H_max, H_min + 1e-3)  # coeff-ok: min ridge-thickness width [m]
     H_width = H_max - H_min
 
     # Snow donated by participating ice.  Fraction retained in
@@ -195,7 +202,7 @@ def _ridging_column_kernel(
     # Salt mass goes with V (per-cat ridge salt = S_part_mean * dV_ridge_to_cat).
     salt_donated_total = jnp.sum(
         S_ice_cat * dV_per_cat,
-    ) * constants.rho_ice * 1.0e-3
+    ) * constants.rho_ice * _PSU_TO_FRACTION
     salt_to_cat = jnp.where(
         V_ridge_total > 1e-30,
         salt_donated_total * dV_ridge_to_cat
@@ -210,8 +217,8 @@ def _ridging_column_kernel(
     # Donor pond water is drained (not redistributed into the ridge).
     Vpond_new = jnp.maximum(V_pond_cat - dVpond_per_cat, 0.0)
     # Salt remains with the ice mass that stays in donor cat:
-    salt_old_cat = S_ice_cat * V_cat * constants.rho_ice * 1.0e-3
-    salt_donated_per_cat = S_ice_cat * dV_per_cat * constants.rho_ice * 1.0e-3
+    salt_old_cat = S_ice_cat * V_cat * constants.rho_ice * _PSU_TO_FRACTION
+    salt_donated_per_cat = S_ice_cat * dV_per_cat * constants.rho_ice * _PSU_TO_FRACTION
     salt_remaining = jnp.maximum(salt_old_cat - salt_donated_per_cat, 0.0)
 
     # Add ridge contributions to fixed cats.
@@ -226,7 +233,7 @@ def _ridging_column_kernel(
     V_safe = jnp.where(V_new > 1e-30, V_new, 1.0)
     S_new = jnp.where(
         V_new > 1e-30,
-        salt_new / (V_safe * constants.rho_ice * 1.0e-3),
+        salt_new / (V_safe * constants.rho_ice * _PSU_TO_FRACTION),
         0.0,
     )
 
@@ -247,9 +254,9 @@ def apply_ridging(
     dt: float,
     *,
     V_pond_cat: jnp.ndarray | None = None,
-    e_star: float = 0.36,
-    mu_rdg: float = 4.0,
-    H_star: float = 100.0,
+    e_star: float = _RIDGE_DEFAULTS.e_star,
+    mu_rdg: float = _RIDGE_DEFAULTS.mu_rdg,
+    H_star: float = _RIDGE_DEFAULTS.H_star,
     snow_fraction_retained: float = 0.5,
 ) -> dict:
     """Apply Lipscomb 2007 mechanical ridging to a multi-category state.
