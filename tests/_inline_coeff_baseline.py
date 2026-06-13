@@ -17,4 +17,7 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
 
 # Baseline fully burned down: every physics roster file is clean. The gate is now
 # a pure new-code-clean tripwire (a new inline coefficient fails immediately).
-_SEED_FILES: frozenset[str] = frozenset(COEFF_BUDGET)
+# IMMUTABLE EMPTY (not derived from COEFF_BUDGET): so ``test_budget_only_shrinks``
+# stays non-vacuous — any future commit that re-adds a file allowance to
+# COEFF_BUDGET is now caught (set(COEFF_BUDGET) <= _SEED_FILES would fail).
+_SEED_FILES: frozenset[str] = frozenset()

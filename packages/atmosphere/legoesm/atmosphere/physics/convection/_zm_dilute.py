@@ -201,7 +201,7 @@ def _invert_entropy(
         fp_safe = jnp.where(jnp.abs(fp) > 1.0e-6, fp, 1.0e-6)
         T_new = T - f / fp_safe
         # Pin to input precision (fori_loop carry dtype invariant).
-        return jnp.clip(T_new, 120.0, 360.0)  # coeff-ok: physical T clip [K].astype(_dtype)
+        return jnp.clip(T_new, 120.0, 360.0).astype(_dtype)  # coeff-ok: physical T clip [K]
 
     return jax.lax.fori_loop(0, _NEWTON_ITERS, body, T_first_guess)
 
