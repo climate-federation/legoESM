@@ -60,9 +60,14 @@ def test_spec_modules_matches_gate_annotated_set() -> None:
 
 # --- tier continuum --------------------------------------------------------
 def test_tier_core_selects_only_tier1() -> None:
+    reg = {m.qualified_name: m for m in build_registry()}
     p = build_trainable_params(tier="core")
     names = {c.name for c in p.constraints}
-    assert names == {"land.soil_thermal.Q_geothermal"}
+    assert "land.soil_thermal.Q_geothermal" in names
+    # every collected param at tier=core must be tier 1 (robust to added specs)
+    assert names and all(reg[n].tunable_tier == 1 for n in names)
+    # a known tier-2 param must NOT be present at core
+    assert "land.soil_thermal.k_dry_coeff_a" not in names
 
 
 def test_tier_extended_adds_tier2() -> None:

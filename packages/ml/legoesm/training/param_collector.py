@@ -43,6 +43,7 @@ from legoesm.training.trainable_params import (
 SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.soil_thermal",
     "legoesm.ocean.physics.shortwave_penetration",
+    "legoesm.ocean.physics.bottom_drag.config",
 )
 
 # Tier thresholds for the conservative<->broad continuum. ``build_trainable_params``

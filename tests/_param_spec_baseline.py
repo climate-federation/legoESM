@@ -836,10 +836,6 @@ PARAM_SPEC_FIELD_BASELINE: dict[str, frozenset[str]] = {
         'SoilHydraulicsConfig.theta_r',
         'SoilHydraulicsConfig.theta_sat',
     }),
-    'packages/ocean/legoesm/ocean/physics/bottom_drag/config.py': frozenset({
-        'LinearDragConfig.r',
-        'QuadraticDragConfig.C_d',
-    }),
     'packages/ocean/legoesm/ocean/physics/convection/config.py': frozenset({
         'EnhancedDiffusionConfig.K_bg',
         'EnhancedDiffusionConfig.K_conv',
