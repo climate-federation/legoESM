@@ -71,3 +71,70 @@ def test_rd_prepadded_wrong_length_raises():
     with pytest.raises(ValueError, match="rd_prepadded expects"):
         _ppm_transport_1d(field, courant, bad_rd, 1, external_halo=eh,
                           rd_prepadded=True)
+
+
+def _global_vs_tiled_ppm(kt: int, nl: int) -> None:
+    """U2 approach-C: the global PPM sweep == per-tile (global pre-pad to
+    h3=4, strided tile slice, rd_prepadded) reassembled.  Single face
+    axis, axis=1, external_halo=0 (the global boundary edge-pads; INTERIOR
+    tile cuts pick up REAL contiguous neighbour cells from the pre-padded
+    array — the whole point).  Exact parity: each interface flux uses the
+    same cells + same arithmetic whether computed globally or per-tile.
+
+    SCOPE (codex U2 LOW): validates the INTERIOR same-face approach-C
+    tiling MECHANISM only.  The cross-face D-grid halo
+    (``_pad_halo_dgrid_for_ppm``, external_halo=2) + the staggered
+    ``u_d``/``v_d`` production path of ``_bgrid_ke_transport`` are a
+    SEPARATE sub-build (U2b/U3) — not proven here."""
+    h3 = 4
+    n, m = kt * nl, 4
+    rng = np.random.default_rng(2)
+    field = jnp.asarray(rng.standard_normal((6, n, m)))
+    courant = jnp.asarray(rng.standard_normal((6, n + 1, m)))
+    rd = jnp.asarray(np.abs(rng.standard_normal((6, n, m))) + 0.1)
+
+    global_flux = np.asarray(
+        _ppm_transport_1d(field, courant, rd, 1, external_halo=0))
+
+    # Global pre-pad EXACTLY as _ppm_transport_1d(external_halo=0) does
+    # internally (field→h3 edge-pad; rd→depth-1 edge-pad).
+    vp_g = jnp.pad(field, [(0, 0), (h3, h3), (0, 0)], mode="edge")
+    rd_g = jnp.pad(rd, [(0, 0), (1, 1), (0, 0)], mode="edge")
+
+    tiles = []
+    for t in range(kt):
+        vp_t = vp_g[:, t * nl: t * nl + nl + 2 * h3, :]   # (6, nl+2h3, m)
+        rd_t = rd_g[:, t * nl: t * nl + nl + 2, :]         # (6, nl+2, m)
+        c_t = courant[:, t * nl: t * nl + nl + 1, :]       # (6, nl+1, m)
+        f_t = _ppm_transport_1d(vp_t, c_t, rd_t, 1, external_halo=h3,
+                                rd_prepadded=True)
+        tiles.append(np.asarray(f_t))                      # (6, nl+1, m)
+
+    # Shared-interface consistency (codex U2 MEDIUM): tile t's last
+    # interface [nl] must equal tile t+1's first [0] — else the reassembly
+    # (which takes t+1's [0]) could pass while tile t's boundary flux is
+    # wrong.  Both compute the SAME global interface from their h3 halos.
+    for t in range(kt - 1):
+        np.testing.assert_allclose(
+            tiles[t][:, nl, :], tiles[t + 1][:, 0, :],
+            atol=1e-12, rtol=1e-12,
+            err_msg=f"shared PPM tile interface mismatch "
+                    f"(kt={kt} nl={nl} t={t})")
+
+    # Tile t produces interfaces [t*nl : t*nl+nl] (inclusive both ends);
+    # adjacent tiles SHARE the boundary interface, so take [0:nl] from each
+    # + the last tile's final interface → n+1 global interfaces.
+    reassembled = np.concatenate(
+        [tiles[t][:, :nl, :] for t in range(kt)]
+        + [tiles[-1][:, nl:nl + 1, :]], axis=1)            # (6, n+1, m)
+    np.testing.assert_allclose(
+        reassembled, global_flux, atol=1e-12, rtol=1e-12,
+        err_msg=f"approach-C tiled PPM sweep != global (kt={kt} nl={nl})")
+
+
+def test_ppm_sweep_tiling_approachC_kt2():
+    _global_vs_tiled_ppm(kt=2, nl=6)
+
+
+def test_ppm_sweep_tiling_approachC_kt3():
+    _global_vs_tiled_ppm(kt=3, nl=6)
