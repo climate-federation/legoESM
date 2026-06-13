@@ -2340,6 +2340,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     use_gpu_interp = (jra55_state is not None
                       and jra55_state.get("_gpu_interp", False))
     if use_scan_blocks:
+        # Scan blocks trace _step_impl directly (bypassing the public
+        # step shim) — prime the build-once caches from the CONCRETE
+        # initial state so the traced body captures the vertex mask as
+        # a constant (codex review MAJOR; census 8474554).
+        model.prime_step_caches(state)
         if use_gpu_interp:
             _get_block_fn_interp = _build_jra55_block_fn_interp(
                 model, jra55_state, dt)

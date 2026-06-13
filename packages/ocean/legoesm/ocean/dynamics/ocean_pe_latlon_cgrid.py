@@ -1408,6 +1408,7 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
 
 def _bc_pv_flux(
     du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
+    vertex_mask=None,
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
@@ -1572,7 +1573,8 @@ def _bc_pv_flux(
         _weno_order = {"weno5": 5, "weno7": 7}[_mom_adv]
         # Fill PV at land-adjacent vertices so WENO stencils see smooth
         # Neumann extrapolation instead of masked-zero discontinuities.
-        vtx_mask = compute_vertex_mask(mask, grid=grid)
+        vtx_mask = (vertex_mask if vertex_mask is not None
+                    else compute_vertex_mask(mask, grid=grid))
         q_filled = _neumann_fill_vertex(q, vtx_mask)
         q_at_u = _weno_zeta_at_u(
             q_filled, v, v_at_u, order=_weno_order, u_smooth=u)
@@ -1581,7 +1583,8 @@ def _bc_pv_flux(
         diag_vortcor_u = q_at_u * Fv_at_u
         diag_vortcor_v = -(q_at_v * Fu_at_v)
     else:
-        vtx_mask_va = compute_vertex_mask(mask, grid=grid)
+        vtx_mask_va = (vertex_mask if vertex_mask is not None
+                       else compute_vertex_mask(mask, grid=grid))
         diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
             zeta, h_vtx, h_v, v, h_u, u,
             u_mask_3d, v_mask_3d, vtx_mask_va,
@@ -1784,6 +1787,7 @@ def _bc_vertical_momentum_advection(
 
 def _bc_horizontal_viscosity(
     du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
+    vertex_mask=None,
 ):
     """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
     Smagorinsky + Leith, with cos(lat) / equatorial / polar-cap scaling and the
@@ -1940,7 +1944,8 @@ def _bc_horizontal_viscosity(
         # averaged viscous tendency damps the barotropic mode via F_slow.
         _vlap_u, _vlap_v = vector_laplacian_cgrid(
             u, v, grid,
-            mask=mask, u_mask=u_mask, v_mask=v_mask)
+            mask=mask, u_mask=u_mask, v_mask=v_mask,
+            vertex_mask=vertex_mask)
         if config.A_h_lat_scaling:
             _floor = config.A_h_floor / config.A_h if config.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
@@ -1989,7 +1994,8 @@ def _bc_horizontal_viscosity(
         dv_dt = dv_dt + diag_Ah_lap_v
         bilap_u, bilap_v = vector_laplacian_cgrid(
             _vlap_u, _vlap_v, grid,
-            mask=mask, u_mask=u_mask, v_mask=v_mask)
+            mask=mask, u_mask=u_mask, v_mask=v_mask,
+            vertex_mask=vertex_mask)
         if config.B_h_lat_scaling:
             scale_u, scale_v = biharmonic_scaling_factor(grid)
             diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
@@ -2003,7 +2009,8 @@ def _bc_horizontal_viscosity(
     elif config.A_h > 0:
         vlap_u, vlap_v = vector_laplacian_cgrid(
             u, v, grid,
-            mask=mask, u_mask=u_mask, v_mask=v_mask)
+            mask=mask, u_mask=u_mask, v_mask=v_mask,
+            vertex_mask=vertex_mask)
         if config.A_h_lat_scaling:
             _floor = config.A_h_floor / config.A_h if config.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
@@ -2053,7 +2060,8 @@ def _bc_horizontal_viscosity(
     elif config.B_h > 0:
         bilap_u, bilap_v = vector_bilaplacian_cgrid(
             u, v, grid,
-            mask=mask, u_mask=u_mask, v_mask=v_mask)
+            mask=mask, u_mask=u_mask, v_mask=v_mask,
+            vertex_mask=vertex_mask)
         if config.B_h_lat_scaling:
             # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
             # CFL violation near poles where dx shrinks (MOM6 convention).
@@ -2714,6 +2722,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dt: float = 300.0,
     diagnose_momentum: bool = False,
     surface_tracer_forcing_fn=None,
+    vertex_mask=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -2871,6 +2880,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     else:
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = _bc_pv_flux(
             du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
+            vertex_mask=vertex_mask,
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).
@@ -2948,6 +2958,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
      diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
      diag_Cl_leith_v, kdiss_h_cell) = _bc_horizontal_viscosity(
         du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
+        vertex_mask=vertex_mask,
     )
 
     # --- Bottom drag. ---

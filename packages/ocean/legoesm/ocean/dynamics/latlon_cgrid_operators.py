@@ -1010,6 +1010,7 @@ def vector_bilaplacian_cgrid(
     mask: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
+    vertex_mask: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Biharmonic (∇⁴) vector operator on the C-grid.
 
@@ -1032,9 +1033,11 @@ def vector_bilaplacian_cgrid(
         ∇⁴v component (biharmonic tendency for dv/dt).
     """
     vlap_u, vlap_v = vector_laplacian_cgrid(
-        u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+        u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
+        vertex_mask=vertex_mask)
     bilap_u, bilap_v = vector_laplacian_cgrid(
-        vlap_u, vlap_v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+        vlap_u, vlap_v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
+        vertex_mask=vertex_mask)
     return bilap_u, bilap_v
 
 

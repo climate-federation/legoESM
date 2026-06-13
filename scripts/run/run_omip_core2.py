@@ -2688,6 +2688,9 @@ def main() -> int:
         )
         f_stack, nn_i, nn_j, gshape = build_core2_forcing_device_stack(
             forcing, grid, "tripole")
+        # Scan blocks trace _step_impl directly — prime build-once
+        # caches from the concrete state first (vertex-mask constant).
+        model.prime_step_caches(state)
         block_fn = build_omip2_scan_block_fn(model, dt, gshape, ramp_s=ramp_s)
         bsz = int(args.scan_block)
         print(f"[run] lax.scan block-stepping: block<={bsz} steps, split at "
