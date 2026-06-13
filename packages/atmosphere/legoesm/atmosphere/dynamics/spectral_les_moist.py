@@ -183,7 +183,7 @@ def make_les_microphysics_fn(micro_config: MicrophysicsConfig,
     if micro_fn is None:                                   # scheme "none"
         raise ValueError("microphysics scheme 'none' — build no adapter; run "
                          "the dry driver instead.")
-    min_slots = min_tracer_slots(scheme_name)
+    min_slots = min_tracer_slots(scheme_name, scheme_config)
 
     def micro(theta, tracers):
         ny, nx, nz = theta.shape

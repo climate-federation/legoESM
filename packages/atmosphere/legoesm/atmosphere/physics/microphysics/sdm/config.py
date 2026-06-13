@@ -84,6 +84,29 @@ class SDMConfig(NamedTuple):
     r_rain : float
         Radius threshold [m] separating cloud water from rain when depositing
         super-droplet liquid to grid mixing ratios (ERF default 40 um).
+    column_do_coalescence : bool
+        Opt-in stateless Eulerian column adapter mode. False (default) keeps
+        the legacy condensation-only mean-droplet closure. True reconstructs a
+        per-cell super-droplet population from the Eulerian bulk liquid fields,
+        advances one ``box_step`` with condensation + Shima coalescence, and
+        projects back to bulk cloud/rain mass and number tendencies. This is a
+        per-step reconstructed well-mixed box, NOT faithful advected
+        Lagrangian SDM; the population and PRNG stream are reset every column
+        call.
+    column_n_sd : int
+        Number of super-droplet slots reconstructed per Eulerian cell in
+        ``column_do_coalescence`` mode. Half are initialized from the cloud
+        bulk mode and half from the rain mode. Must be >= 4 when coalescence is
+        enabled.
+    column_seed : int
+        Fixed PRNG seed for stateless column reconstruction/coalescence. Because
+        the microphysics dispatch is keyless and has no step counter, this is
+        deterministic for a given cell index and call. That makes the adapter
+        reproducible but can bias long integrations; faithful SDM needs a
+        threaded PRNG key with persistent particles.
+    column_n_rain_floor : float
+        Rain number concentration [1/m^3] used to reconstruct rain mass when
+        ``q_r > 0`` but the Eulerian ``N_r`` slot is zero or absent.
     cdnc : float
         Prescribed cloud-droplet number concentration [1/m^3] used by the
         stateless column operator to reconstruct a mean cloud droplet from the
@@ -118,5 +141,9 @@ class SDMConfig(NamedTuple):
     golovin_b: float = 1.5e3              # [1/s] Golovin kernel coefficient
     include_brownian: bool = False        # add Brownian coagulation to the kernel
     r_rain: float = 4.0e-5               # [m] cloud/rain radius threshold (40 um)
+    column_do_coalescence: bool = False  # opt-in reconstructed-box coalescence
+    column_n_sd: int = 64                # [-] super-droplets per cell in column box
+    column_seed: int = 0                 # [-] fixed key seed for keyless dispatch
+    column_n_rain_floor: float = 1.0e6   # [1/m^3] fallback rain number
     cdnc: float = 1.0e8                  # [1/m^3] prescribed cloud-droplet number
     r_min_reconstruct: float = 1.0e-6   # [m] min reconstructed mean-droplet radius
