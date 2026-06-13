@@ -31,7 +31,13 @@ reference, an optional array ``shape`` dimension key, and an optional flat
 **Inclusion is computed, not enumerated.** A class is *spec-required* iff it
 subclasses ``NamedTuple`` and has at least one ``: float``-annotated field whose
 default folds to a number (a ``constants.X`` / nested-config / int / str / bool
-default is auto-exempt — it cannot be a stray tunable). A module with at least one
+default is auto-exempt — it cannot be a stray tunable). **Only float fields are
+spec-eligible**, which is the structural guarantee that loop-iteration counts and
+other discrete integers (``N_evp``, ``bulk_n_iter``, ``n_categories``, ...) can
+NEVER be exposed to a tuning / backprop loop: they are non-differentiable control
+flow, an ``int`` field cannot appear in a spec's ``params`` (it is not in the
+float-default set, so it is flagged as an orphan), and the trainable collector
+only ever materialises float params. A module with at least one
 spec-required class must EITHER carry a ``__param_spec__`` covering every such
 class's every float field (in ``params`` or ``excluded``) OR appear in the
 SHRINK-ONLY ``PARAM_SPEC_TODO``. A NEW config module is in neither, so it FAILS
@@ -544,6 +550,28 @@ def test_field_ratchet_flags_new_field_but_not_specced_or_baselined() -> None:
     assert unspecced_additions(req, {"C": {"b"}}, frozenset({"C.a"})) == []
     # both in baseline (seed) -> not flagged; a removed field never flags
     assert unspecced_additions(req, {}, frozenset({"C.a", "C.b", "C.gone"})) == []
+
+
+def test_spec_cannot_classify_an_int_iteration_count() -> None:
+    """Guarantee: a discrete int field (loop-iteration count etc.) cannot be made
+    a trainable param. It is not in the float-default set, so naming it in
+    ``params`` is rejected as an orphan — keeping iteration counts out of any
+    tuning/backprop path by construction."""
+    required = {"C": {"tau": 7200.0}}  # only the float field is spec-eligible
+    spec = {
+        "C": {
+            "scheme_key": "c",
+            "params": {
+                "n_iter": {  # an int iteration count — must NOT be classifiable
+                    "units": "1", "bounds": (1.0, 100.0), "tunable_tier": 1,
+                    "transform": "sigmoid", "category": "numerics",
+                    "reference": "r", "shape": None,
+                },
+            },
+        }
+    }
+    errs = validate_param_spec(spec, required)
+    assert any("non-float" in e or "not in params/excluded" in e for e in errs)
 
 
 def test_inclusion_predicate_excludes_constants_and_nonfloat() -> None:
