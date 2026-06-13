@@ -180,7 +180,7 @@ def load_ml_ozone_coefficients(path: str | Path) -> MLOzoneCoefficients:
         # step 360/n_lon.  This matches CMIP6 UKESM1 NetCDF metadata.
         dlat = 180.0 / n_lat
         dlon = 360.0 / n_lon
-        lat_uk = -90.0 + 0.5 * dlat  # coeff-ok: latitude grid start [deg] + dlat * np.arange(n_lat)
+        lat_uk = -90.0 + 0.5 * dlat + dlat * np.arange(n_lat)  # coeff-ok: UKESM latitude grid [deg]
         lon_uk = 0.5 * dlon + dlon * np.arange(n_lon)
     if lat_uk.shape != (n_lat,) or lon_uk.shape != (n_lon,):
         raise ValueError(

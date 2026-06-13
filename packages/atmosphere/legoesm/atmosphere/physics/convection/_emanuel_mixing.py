@@ -848,7 +848,7 @@ def emanuel_mixing_tendencies(
     # Zero out tendencies outside the convecting column (where M_b≈0 the
     # whole matrix is ≈0, so this is automatic; we add an explicit gate on
     # the in-cloud + sub-cloud region for safety).
-    active_col = jax.nn.sigmoid(M_b / 1e-3)  # coeff-ok: M_b activation smoothing[:, None]       # ~1 when M_b>0
+    active_col = jax.nn.sigmoid(M_b / 1e-3)[:, None]  # ~1 when M_b>0; coeff-ok: activation smoothing
     ft = ft * active_col
     fq = fq * active_col
     dqc = dqc * active_col
