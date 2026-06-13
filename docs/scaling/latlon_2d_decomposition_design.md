@@ -186,3 +186,38 @@ a partitioner refinement after the 2-D path works.
   serialization means a divergent order deadlocks.
 - Keep `proc_lon==1` byte-identical to today (the existing 1-D path is a
   shipping production path — must not regress).
+
+## VERDICT (2026-06-13): fabric-blocked at ≤32 ranks — DEFER step integration
+
+A halo micro-bench on the shipped primitives
+(`scripts/bench/bench_latlon_2d_halo.py`, jobs 8477020/8477039,
+LL256×512 nlev=60 halo=2, 4 nodes ≤8/node, slowest-rank time per
+`pad_halo_latlon_2d`) measured EVERY `(proc_lat, proc_lon)`
+factorization. Result — the 2-D split LOSES at every reachable rank
+count:
+
+| np | 1D-band (pc=1, N/S only) | best balanced 2-D | lon-only (pr=1, E/W only) |
+|----|--------------------------|-------------------|---------------------------|
+| 16 | 34.2 ms                  | 4×4: 59.3 ms (1.73×)  | 32.3 ms (fastest) |
+| 32 | 43.1 ms                  | 8×4: 68.0 ms (1.58×)  | 40.2 ms (fastest) |
+
+Single-DIRECTION decompositions (pure lat `pc=1` or pure lon `pr=1`)
+beat any two-direction (2-D) split by 1.4–1.8×. **Why** (the recurring
+latency-bound-fabric law): cross-node Gloo-TCP (no IB/NVLink) makes halo
+cost ≈ (#collective calls) × latency, ~INDEPENDENT of message size
+(np16→32 halves the 1-D tile, 16→8 rows/rank, yet time only rises
+34→43 ms). The 2-D decomposition CUTS message SIZE but ADDS a second
+halo direction (E/W ring on top of N/S) ⇒ more collective calls ⇒ net
+LOSS. Worse, the 1-D band does not EXHAUST until `np > n_lat` (256 here)
+— far beyond Ginsburg's reachable ≤32 ranks — so the 2-D decomposition's
+raison d'être (decompose past `n_lat` ranks) never engages at our scale.
+
+⇒ **DEFER the 2-D STEP integration** (the full operator-backend wiring of
+items 3/4/5 above). It is NOT a near-term Ginsburg lever; it is a
+BANDWIDTH-fabric (NVLink/IB) / `np ≫ n_lat` capability — the same class
+as multinode-GPU SPMD. The 2-D FOUNDATION shipped this campaign
+(`exchange_halo_lon`, `LatLon2DLayout`, scatter/gather,
+`pad_halo_latlon_2d` wall, AD-safe `lon_gather_full`) STANDS as a
+validated, AD-safe capability for that future regime — no further
+near-term investment. Revisit when (a) an IB/NVLink fabric is available,
+or (b) a grid/rank-count regime with `np > n_lat` is the target.

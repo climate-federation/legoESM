@@ -14,3 +14,5 @@ date,commit,tag,grid,backend,mode,metric,value,unit,job,note
 2026-06-11,82093cfe,latlon_fuse,atm_latlon,mpi,halo,6,exch_per_step,8460429,atm latlon fused entry pads (15->6)
 2026-06-13,a3b9c597,zonal_line,ocean_latlon,mpi,precond,1.24,speedup_le8pernode,8475325,zonal_line+single_reduce vs jacobi M60 np16 <=8/node
 2026-06-13,a3b9c597,zonal_line,ocean_latlon,mpi,precond,1.00,speedup_prodtile,8475875,production tile (rows/rank=48): neutral (barotropic ~7% of step)
+2026-06-13,cabd2819,latlon2d_halo,ocean_latlon,mpi,strong,1.73,halo_2dover1d_np16,8477039,2D 4x4 59.3ms vs 1D-band 34.2ms — 2D HURTS (latency fabric); DEFER 2D step integ
+2026-06-13,cabd2819,latlon2d_halo,ocean_latlon,mpi,strong,1.58,halo_2dover1d_np32,8477039,2D 8x4 68.0ms vs 1D-band 43.1ms — 2D HURTS; 1D band not exhausted till np>n_lat
