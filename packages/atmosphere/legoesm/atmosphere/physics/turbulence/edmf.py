@@ -31,6 +31,9 @@ from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
 )
 
 
+# Convective velocity-scale coefficient w* ~ 2.5 u* (EDMF default).
+_EDMF_WSTAR_COEFF = 2.5
+
 def edmf_turbulence(
     u: jax.Array,
     v: jax.Array,
@@ -150,7 +153,7 @@ def edmf_turbulence(
         u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
         T_sfc, q_sfc, rho[:, -1], config.surface,
     )
-    ustar = jnp.clip(ustar, 1e-4, None)
+    ustar = jnp.clip(ustar, 1e-4, None)  # coeff-ok: u* floor [m/s]
 
     # Potential temperature for updraft.
     # ``exner_inv`` = (p / p_ref)^κ — divides T to give θ, multiplies
@@ -169,7 +172,7 @@ def edmf_turbulence(
     _dtype = T.dtype
     w_u_init = jnp.maximum(
         jnp.full(ncol, config.w_updraft_min, dtype=_dtype),
-        (2.5 * ustar).astype(_dtype),
+        (_EDMF_WSTAR_COEFF * ustar).astype(_dtype),
     )
     theta_u_init = (theta[:, -1] + config.parcel_dT).astype(_dtype)
     q_u_init = q_v[:, -1].astype(_dtype)  # same moisture
@@ -305,7 +308,7 @@ def edmf_turbulence(
         dflux_int = (flux[:, :-2] - flux[:, 2:]) / (2.0 * dz_layer[:, 1:-1])
         dflux_bot = (flux[:, -2:-1] - flux[:, -1:]) / dz_layer[:, -1:]
         dflux_dz = jnp.concatenate([dflux_top, dflux_int, dflux_bot], axis=1)
-        return -dflux_dz / jnp.clip(rho, 0.01, None)
+        return -dflux_dz / jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
 
     dtheta_dt_mf = _mf_tendency(theta, theta_u)
     dT_dt_mf = dtheta_dt_mf * exner_inv

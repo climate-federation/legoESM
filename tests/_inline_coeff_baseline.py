@@ -223,83 +223,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
         'jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), 80.0)': 1,
         'rho_ratio = rho / jnp.clip(rho_sfc, 0.1)': 1,
     },
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py': {
-        '+ 0.15 * (mu - 0.1) * (mu - 0.5) * (mu - 1.0)': 2,
-        '0.026 / (mu ** 1.7 + 0.065)': 3,
-        'T_sfc: jnp.ndarray | float = 300.0,': 1,
-        '_time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}': 2,
-        'a = jnp.where(jnp.asarray(T_sfc) > sea_ice_T, a_ocean, 0.75)': 1,
-        'day_of_year: float = 80.0,': 1,
-        'sea_ice_T: float = 271.0,': 1,
-        'seconds_of_day: float = 43200.0,': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/ozone_ml.py': {
-        'lat_uk = -90.0 + 0.5 * dlat + dlat * np.arange(n_lat)': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/ozone_mls.py': {
-        'log_p = jnp.log(jnp.clip(p_full, 1.0e-2) / 100.0) # Pa -> hPa -> log': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/interpolation.py': {
-        'c1, c2, c3 = 0.1, 0.6, 0.3 # Optimal linear weights for WENO5-JS.': 3,
-        'epsilon = 1e-5': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py': {
-        '"n2": 0.78084,': 1,
-        '"o2": 0.20948,': 1,
-        'o3_gauss = 9.0e-6 * jnp.exp(-0.5 * arg * arg)': 1,
-        'q_v_3d = jnp.clip(q_v_3d, 0.0, 0.99)': 1,
-        'sigma_strat = 1.5': 1,
-        'sigma_trop = 0.9': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rte/two_stream.py': {
-        '_ZENITH_MAX = jnp.arccos(jnp.asarray(0.01, dtype=temperature.dtype))': 1,
-        'aerosol_asymmetry_factor: float = 0.70,': 1,
-        'aerosol_single_scattering_albedo: float = 0.93,': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/solar.py': {
-        'def solar_declination(day_of_year: float, obliquity: float = 23.45) -> float:': 1,
-        'h = 2.0 * jnp.pi * (hour / 24.0) + lon - jnp.pi': 1,
-        'obliquity: float = 23.45,': 3,
-        'return obliquity_rad * jnp.sin(2.0 * jnp.pi * (day_of_year - 80.0) / 365.0)': 2,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py': {
-        '(2.5 * ustar).astype(_dtype),': 1,
-        'return -dflux_dz / jnp.clip(rho, 0.01, None)': 1,
-        'ustar = jnp.clip(ustar, 1e-4, None)': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py': {
-        'dt: float = 300.0,': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/lasd_core.py': {
-        '& (jnp.real(roots) > 0.0) & (jnp.real(roots) < 5.0),': 1,
-        'e1 = pm((8.0*L2**2)*(_TFR**2)*S_h*(S11h*SS11h+S22h*SS22h+S33h*SS33h': 1,
-        'e2 = pm((8.0*L2**2)*(_TFR**4)*S_d*(S11d*SS11d+S22d*SS22d+S33d*SS33d': 1,
-        'first_of_next = sr(top, jnp.zeros_like(top), nxt, prev, 701, 701, comm)': 2,
-        'guesses = jnp.array([0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.5], cdtype)': 4,
-        'last_of_prev = sr(bot, tmpl, prev, nxt, 700, 700, comm)': 2,
-        'n_deg, tol, max_iter = 5, 1e-6, 20': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/mynn25.py': {
-        '1.0 + 5.0 * _safe_pow_pos(q_c / jnp.maximum(L_T * N, eps), 0.5)': 1,
-        '1.0 - 100.0 * zeta, 0.2,': 1,
-        'L_S_stable_high = kappa * z_half_geom / 3.7': 1,
-        'L_S_stable_mid = kappa * z_half_geom / (1.0 + 2.7 * zeta)': 1,
-        'L_T_col = 0.23 * num / jnp.maximum(den, eps)': 1,
-        'phi_2 = 1.0 - 9.0 * alpha_c2 * A1 * A2 * (1.0 - C2) * G_H': 1,
-        'phi_3 = phi_1 + 9.0 * alpha_c2 * A2 * A2 * (1.0 - C2) * (1.0 - C5) * G_H': 1,
-        'phi_4 = phi_1 - 12.0 * alpha_c2 * A1 * A2 * (1.0 - C2) * G_H': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py': {
-        'blend = jax.nn.sigmoid(config.sharpness * (total_cross_weight - 0.1))': 1,
-        'dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/surface_layer.py': {
-        'wind_speed = jnp.sqrt(u ** 2 + v ** 2 + 1e-4)': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py': {
-        'dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4': 1,
-        'ustar = jnp.clip(ustar, 1e-4, None)': 1,
-    },
 }
 
 _SEED_FILES: frozenset[str] = frozenset({
@@ -330,18 +253,4 @@ _SEED_FILES: frozenset[str] = frozenset({
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/kernels.py',
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/seifert_beheng.py',
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/thompson.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/ozone_ml.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/ozone_mls.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/interpolation.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rte/two_stream.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/radiation/solar.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/lasd_core.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/mynn25.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/surface_layer.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py',
 })

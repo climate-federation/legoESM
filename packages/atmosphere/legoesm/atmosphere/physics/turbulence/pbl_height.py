@@ -107,7 +107,7 @@ def compute_bulk_richardson(
 
     # Wind shear squared from surface (NOT absolute wind speed)
     # A barotropic wind with no shear should not deepen the PBL.
-    dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4
+    dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4  # coeff-ok: wind-shear floor [m^2/s^2]
 
     # Bulk Richardson number
     Ri_bulk = (constants.g / jnp.clip(theta_v_sfc[:, None], 1.0, None)) * (
@@ -231,7 +231,7 @@ def diagnose_pbl_height_interp(
 
     # Blend with smooth-method fallback when no clear crossing exists
     total_cross_weight = jnp.sum(cross_weight, axis=1)
-    blend = jax.nn.sigmoid(config.sharpness * (total_cross_weight - 0.1))
+    blend = jax.nn.sigmoid(config.sharpness * (total_cross_weight - 0.1))  # coeff-ok: PBL-crossing weight threshold
     h_fallback = diagnose_pbl_height(T, q_v, u, v, p_full, z_full, config)
     h_pbl = blend * h_pbl + (1.0 - blend) * h_fallback
 

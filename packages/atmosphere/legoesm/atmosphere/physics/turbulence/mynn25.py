@@ -68,6 +68,15 @@ _L_FLOOR = 1.0            # m; floor on master length scale
 _SMOOTH_EPS = 1e-30       # used in safe sqrt / safe divide
 
 
+# MYNN Level-2.5 (Nakanishi-Niino 2009) fixed closure constants.
+_MYNN_LS_STABLE_FLOOR = 0.2
+_MYNN_LS_STABLE_MID = 2.7
+_MYNN_LS_STABLE_HIGH = 3.7
+_MYNN_LT_COEFF = 0.23
+_MYNN_LB_COEFF = 5.0
+_MYNN_PHI_C9 = 9.0
+_MYNN_PHI_C12 = 12.0
+
 def _safe_pow_pos(x: jax.Array, p: float) -> jax.Array:
     """Floored power for AD-safe ``x**p`` with ``p`` fractional and ``p < 1``.
 
@@ -132,10 +141,10 @@ def _compute_master_length(
 
     kappa = constants.kappa_vk
     L_S_unstable = kappa * z_half_geom * _safe_pow_pos(
-        1.0 - 100.0 * zeta, 0.2,
+        1.0 - 100.0 * zeta, _MYNN_LS_STABLE_FLOOR,
     )
-    L_S_stable_mid = kappa * z_half_geom / (1.0 + 2.7 * zeta)
-    L_S_stable_high = kappa * z_half_geom / 3.7
+    L_S_stable_mid = kappa * z_half_geom / (1.0 + _MYNN_LS_STABLE_MID * zeta)
+    L_S_stable_high = kappa * z_half_geom / _MYNN_LS_STABLE_HIGH
     L_S = jnp.where(
         zeta < 0.0,
         L_S_unstable,
@@ -148,7 +157,7 @@ def _compute_master_length(
     # per-column scalar broadcast across the half-level axis.
     num = jnp.sum(q_half * z_half_geom, axis=-1)
     den = jnp.sum(q_half, axis=-1)
-    L_T_col = 0.23 * num / jnp.maximum(den, eps)
+    L_T_col = _MYNN_LT_COEFF * num / jnp.maximum(den, eps)
     L_T = jnp.broadcast_to(
         L_T_col[:, None], q_half.shape,
     )
@@ -162,7 +171,7 @@ def _compute_master_length(
     )
     L_B_stable_pos = q_half / jnp.maximum(N, eps)
     L_B_unstable = (
-        1.0 + 5.0 * _safe_pow_pos(q_c / jnp.maximum(L_T * N, eps), 0.5)
+        1.0 + _MYNN_LB_COEFF * _safe_pow_pos(q_c / jnp.maximum(L_T * N, eps), 0.5)
     ) * q_half / jnp.maximum(N, eps)
     L_B = jnp.where(
         dthv_dz_half <= 0.0,
@@ -226,9 +235,9 @@ def _compute_SM_SH(
     alpha_c2 = alpha_c * alpha_c
 
     phi_1 = 1.0 - 3.0 * alpha_c2 * A2 * B2 * (1.0 - C3) * G_H
-    phi_2 = 1.0 - 9.0 * alpha_c2 * A1 * A2 * (1.0 - C2) * G_H
-    phi_3 = phi_1 + 9.0 * alpha_c2 * A2 * A2 * (1.0 - C2) * (1.0 - C5) * G_H
-    phi_4 = phi_1 - 12.0 * alpha_c2 * A1 * A2 * (1.0 - C2) * G_H
+    phi_2 = 1.0 - _MYNN_PHI_C9 * alpha_c2 * A1 * A2 * (1.0 - C2) * G_H
+    phi_3 = phi_1 + _MYNN_PHI_C9 * alpha_c2 * A2 * A2 * (1.0 - C2) * (1.0 - C5) * G_H
+    phi_4 = phi_1 - _MYNN_PHI_C12 * alpha_c2 * A1 * A2 * (1.0 - C2) * G_H
     phi_5 = 6.0 * alpha_c2 * A1 * A1 * G_M
 
     D25 = jnp.maximum(phi_2 * phi_4 + phi_5 * phi_3, _SMOOTH_EPS)

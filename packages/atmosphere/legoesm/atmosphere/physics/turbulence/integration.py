@@ -170,7 +170,7 @@ def _resolve_T_sfc(T_col, phys_state):
 def make_turbulence_physics(
     turbulence_config: TurbulenceConfig,
     model_type: str = "hydrostatic",
-    dt: float = 300.0,
+    dt: float = 300.0,  # coeff-ok: default physics timestep [s]
 ) -> Callable:
     """Create a physics function for turbulence matching a model's signature.
 

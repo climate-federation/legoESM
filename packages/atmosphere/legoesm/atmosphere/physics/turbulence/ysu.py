@@ -101,7 +101,7 @@ def ysu_turbulence(
         u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
         T_sfc, q_sfc, rho[:, -1], config.surface,
     )
-    ustar = jnp.clip(ustar, 1e-4, None)
+    ustar = jnp.clip(ustar, 1e-4, None)  # coeff-ok: u* floor [m/s]
 
     # ----- PBL height via smooth bulk-Ri -----
     theta_v_sfc = theta_v[:, -1]
@@ -111,7 +111,7 @@ def ysu_turbulence(
     dz_from_sfc = jnp.abs(z_full - z_sfc) + 1.0
     dtheta_v_bulk = theta_v - theta_v_sfc[:, None]
     # Wind shear from surface (not absolute wind)
-    dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4
+    dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4  # coeff-ok: wind-shear floor [m^2/s^2]
     Ri_bulk = (constants.g / jnp.clip(theta_v_sfc[:, None], 1.0, None)) * (
         dtheta_v_bulk * dz_from_sfc / dV2
     )
