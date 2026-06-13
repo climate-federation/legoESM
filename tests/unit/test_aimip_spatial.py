@@ -477,3 +477,51 @@ def test_rrtmgp_spectral_pe_sfc_albedo_override_consumed_and_differentiable():
     # RRTMGP instance-cache key stays keyed on the concrete default, never a
     # traced array.
     assert float(cfg.rrtmgp.sfc_albedo) == float(RRTMGPConfig().sfc_albedo)
+
+
+def test_make_physics_threads_sfc_override_combined_path():
+    """The combined (split_rad=False) path: make_physics must thread
+    sfc_albedo_override through _make_spectral_pe_combined ->
+    make_radiation_physics to the RRTMGP solve, so the heating responds to the
+    override without it touching RRTMGPConfig.sfc_*. Mirrors the split_rad path
+    (which calls make_radiation_physics directly, covered by the grad test)."""
+    import numpy as np
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.spectral_pe import (
+        isothermal_rest_state_spectral,
+    )
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        GravityWaveDragConfig,
+    )
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+
+    grid = create_gaussian_grid(n_max=8)
+    sigma = create_sigma_coordinate(n_levels=3)
+    qv = jnp.full((grid.n_lat, grid.n_lon, sigma.n_levels), 5.0e-3)
+    state = isothermal_rest_state_spectral(grid, sigma, tracers={"q_v": qv})
+    ncol = grid.n_lat * grid.n_lon
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="rrtmgp", diurnal_cycle=False),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+
+    def t_tend_sum(alb):
+        fn = make_physics(
+            cfg, model_type="spectral_pe", dt=1800.0, sfc_albedo_override=alb,
+        )
+        out = fn(state, grid, sigma)
+        out = out[0] if isinstance(out, tuple) else out
+        return jnp.sum(jnp.abs(out.T_hat.data) ** 2)
+
+    lo = float(t_tend_sum(jnp.full((ncol,), 0.1)))
+    hi = float(t_tend_sum(jnp.full((ncol,), 0.8)))
+    assert np.isfinite(lo) and np.isfinite(hi)
+    assert abs(lo - hi) > 0.0, "make_physics combined path dropped the sfc_albedo override"
