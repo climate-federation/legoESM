@@ -42,10 +42,14 @@ _H_SQRT_FLOOR = 1e-12  # m
 # user-facing tunable broadband albedo is SeaIceConfig.albedo_ice (spec tier 1);
 # these internal coefficients are fixed scheme defaults.
 _ALBEDO_COLD_BARE_DEFAULT = 0.7   # cold bare-ice broadband albedo (MU 1971)
+_ALBEDO_MELT_BARE_DEFAULT = 0.5   # melting bare-ice broadband albedo (MU 1971)
 _H_SNOW_SAT_M = 0.05              # snow depth saturating the snow-albedo ramp [m]
 _H_POND_SAT_M = 0.3               # pond depth saturating the pond-albedo ramp [m]
+_H_RAMP_M = 0.5                   # thickness saturating the thin-ice albedo ramp [m]
+_H_BARE_SAT_M = 0.5               # bare-ice thickness ramp saturation [m]
 _F_VIS = 0.52                     # visible-band fraction of incident SW (Briegleb-Light)
 _H_SNOW_MASK_M = 0.02             # snow depth fully masking bare-ice albedo [m]
+_T_MELT_WIDTH_K = 1.0            # smooth melt-transition half-width [K]
 
 
 # ==============================================================================
@@ -75,10 +79,10 @@ def maykut_untersteiner_albedo(
     h_ice: jnp.ndarray,
     *,
     albedo_cold_bare: float = _ALBEDO_COLD_BARE_DEFAULT,
-    albedo_melt_bare: float = 0.5,
-    h_ramp: float = 0.5,
+    albedo_melt_bare: float = _ALBEDO_MELT_BARE_DEFAULT,
+    h_ramp: float = _H_RAMP_M,
     T_melt: float = constants.T_freeze,
-    T_width: float = 1.0,
+    T_width: float = _T_MELT_WIDTH_K,
 ) -> jnp.ndarray:
     """Temperature- and thickness-dependent broadband ice albedo.
 
@@ -144,7 +148,7 @@ def _band_albedo_bare_ice(
     alpha_melt_vis: float,
     alpha_cold_nir: float,
     alpha_melt_nir: float,
-    h_sat: float = 0.5,
+    h_sat: float = _H_BARE_SAT_M,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Bare-ice two-band albedo with thickness ramp."""
     ramp = jnp.clip(
@@ -178,7 +182,7 @@ def delta_eddington_albedo(
     *,
     f_vis: float = _F_VIS,
     T_melt: float = constants.T_freeze,
-    T_width: float = 1.0,
+    T_width: float = _T_MELT_WIDTH_K,
     i0_vis: float = constants.i0_vis,
     i0_nir: float = constants.i0_nir,
     h_snow_mask: float = _H_SNOW_MASK_M,
