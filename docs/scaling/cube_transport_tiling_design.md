@@ -38,6 +38,38 @@ cross-face path at face edges + PPM's own edge-pad. This is far more
 tractable than extending `_build_tiled_pad` to a full h=4 (corner-cascade)
 exchange.
 
+## Corrections from codex design review (2026-06-13) — apply BEFORE coding
+
+1. **Depth is 3-sufficient, 4-safe.** The active flux at an interior tile
+   boundary reaches neighbour cell `N+2` (negative/upwind branch) and `-3`
+   (positive branch at a left cut), so **depth-3 real same-face halo is
+   sufficient**; depth-2 is INSUFFICIENT. Use depth-4 (safe, matches the
+   `h3=4` storage convention; the 4th cell is non-load-bearing).
+2. **rdelta (metric) ALSO needs an interior halo — MISSED in v1.**
+   `_ppm_transport_1d` edge-pads `rd=rdelta` (`fv3_sw_core.py:2519`) and
+   uses the UPWIND value for the CFL in BOTH flux branches
+   (`rd_pad[:nn+1]` / `rd_pad[1:nn+2]`, :2520-2521, used :2530-2534). At an
+   interior tile cut, edge-padding `rd` is WRONG for the branch whose
+   upwind cell is in the neighbour tile ⇒ **interior cuts need a depth-1
+   real `rdelta` halo along the sweep axis** (or a tile-specialised CFL
+   that supplies the global upwind `rdelta` at the boundary interface). At
+   true face edges, global edge-pads `rd` — MATCH that (no cross-face rd).
+3. **Face-edge field halo must be BIT-IDENTICAL to `_pad_halo_dgrid_for_ppm`**
+   (the depth-2 DGRID duogrid cross-face halo, `fv3_sw_core.py:40`), NOT a
+   generic "d2a2c-ish" halo — the D-grid wind cross-face halo has its own
+   rotation/interp; reproduce that exact function tile-locally, then PPM
+   edge-pads to 4.
+4. **Corners-free is `_bgrid_ke_transport`-ONLY (scope).** The two PPM
+   calls are independent 1-D sweeps (axis=2 ytp_v, axis=1 xtp_u) — no
+   diagonal read. But the LATER tendency transports do NOT generalise:
+   `transport_step` (mass) and `fv_tp_2d` (vorticity, Lin-Rood 2-D with
+   cross-sweep halo exchanges + del-n damping, `fv_tp_2d.py:922-1067`) ARE
+   2-D and WILL need corners — a separate (harder) sub-build later.
+
+Corrected STEP-1 halo spec: interior same-face FIELD depth-4 (≥3) real +
+RDELTA depth-1 real; face-edge FIELD = `_pad_halo_dgrid_for_ppm` depth-2 +
+PPM edge-pad, rdelta edge-pad (match global); NO corners (this op only).
+
 ## Plan (gate + codex EACH piece — user directive "be very careful")
 
 1. **depth-4 interior-cut strip exchange** (`make_tiled_ppm_halo` or a
