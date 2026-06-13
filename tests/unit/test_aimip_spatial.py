@@ -419,3 +419,61 @@ def test_spectral_rollout_rad_gating_one_step():
         out_combined.T_hat.data, out_gated.T_hat.data,
         atol=1.0e-2, rtol=1.0e-5,
     ), "Gated rollout should agree with combined at step 1 to substage-rad tolerance"
+
+
+def test_rrtmgp_spectral_pe_sfc_albedo_override_consumed_and_differentiable():
+    """Truly-tunable RRTMGP surface path (2026-06-13).
+
+    A build-time ``sfc_albedo_override`` (AIMIP's trained spatial ``(ncol,)``
+    field) must (1) reach the RRTMGP heating through
+    ``make_radiation_physics("spectral_pe", sfc_albedo_override=...)`` ->
+    ``_call_radiation_backend`` -> ``_resolve_surface_field`` and (2) be
+    reverse-mode differentiable -- WITHOUT ever being written into
+    ``RRTMGPConfig.sfc_*`` (RRTMGP's Python solver-cache key). This is the
+    plumbing that lets the AIMIP RRTMGP surface knobs be genuinely trainable
+    instead of riding the config cache key by tracer/array identity.
+    """
+    import numpy as np
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.spectral_pe import (
+        isothermal_rest_state_spectral,
+    )
+    from legoesm.atmosphere.physics.radiation.config import (
+        RadiationConfig,
+        RRTMGPConfig,
+    )
+    from legoesm.atmosphere.physics.radiation.integration import (
+        make_radiation_physics,
+    )
+
+    grid = create_gaussian_grid(n_max=8)
+    sigma = create_sigma_coordinate(n_levels=3)
+    qv = jnp.full((grid.n_lat, grid.n_lon, sigma.n_levels), 5.0e-3)
+    state = isothermal_rest_state_spectral(grid, sigma, tracers={"q_v": qv})
+    ncol = grid.n_lat * grid.n_lon
+    cfg = RadiationConfig(scheme="rrtmgp", diurnal_cycle=False)
+
+    def heating_sum(alb):
+        # Rebuilt inside the differentiated fn (the AIMIP pattern): the override
+        # is captured in the radiation closure while the config stays default.
+        fn = make_radiation_physics(cfg, "spectral_pe", sfc_albedo_override=alb)
+        out = fn(state, grid, sigma)
+        return jnp.sum(jnp.abs(out.T_hat.data) ** 2)
+
+    lo = float(heating_sum(jnp.full((ncol,), 0.1)))
+    hi = float(heating_sum(jnp.full((ncol,), 0.8)))
+    assert np.isfinite(lo) and np.isfinite(hi)
+    # SW absorption depends on surface albedo -> heating must respond.
+    assert abs(lo - hi) > 0.0, "RRTMGP heating did not respond to sfc_albedo override"
+
+    g = jax.grad(heating_sum)(jnp.full((ncol,), 0.3))
+    g = np.asarray(g)
+    assert g.shape == (ncol,)
+    assert np.all(np.isfinite(g)), "non-finite gradient through sfc_albedo override"
+    assert np.any(g != 0.0), "sfc_albedo override has zero gradient (not trainable)"
+
+    # The override path must NOT have mutated the config surface fields: the
+    # RRTMGP instance-cache key stays keyed on the concrete default, never a
+    # traced array.
+    assert float(cfg.rrtmgp.sfc_albedo) == float(RRTMGPConfig().sfc_albedo)

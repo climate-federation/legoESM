@@ -158,23 +158,21 @@ _SBM_TRAINABLE: list[ParamConstraint] = [
 ]
 
 # RRTMGP knobs (active when ``aimip_radiation=rrtmgp``).
-# v7: widened sfc_emissivity / sfc_albedo bounds (see _GRAY_RAD_TRAINABLE
-# comment); the same saturation problem hit the RRTMGP path at v6.
-# NOTE (2026-06-13, codex review): the co2/ch4/n2o AND aerosol_ssa/aerosol_g
-# leaves are RAW elements of RRTMGP's solver-cache key tuple, so a traced leaf
-# is unhashable under jax.grad. ``to_rrtmgp_config`` therefore freezes ALL FIVE
-# to the RRTMGP defaults (does not wire them); these constraints persist only as
-# forward-compatible raw leaves until RRTMGP consumes them as per-call traced
-# inputs. Only sfc_emissivity / sfc_albedo are actually wired (routed through
-# _hashable + the per-call spatial-surface override path).
+# TRULY-TUNABLE SET (2026-06-13): only sfc_emissivity / sfc_albedo are trainable
+# here. They reach the radiation solve as PER-CALL overrides
+# (make_aimip_classical_spectral_physics -> make_physics(sfc_*_override=...) ->
+# _resolve_surface_field), so the trained spatial field is differentiable AND
+# never written into RRTMGPConfig.sfc_* (which RRTMGP folds into its Python
+# solver-cache key). The CO2/CH4/N2O gas concentrations and aerosol_ssa/aerosol_g
+# are RAW elements of that cache-key tuple (unhashable when traced) and are NOT
+# trainable until RRTMGP consumes them as per-call traced inputs — they were
+# previously dead leaves (``to_rrtmgp_config`` froze them to defaults, zero
+# gradient), so they are removed from the trainable set rather than kept as dead
+# degrees of freedom. (sfc_emissivity bound 0.5-1.0 / sfc_albedo 0.03-0.6; v7
+# widened these, see _GRAY_RAD_TRAINABLE.)
 _RRTMGP_TRAINABLE: list[ParamConstraint] = [
-    ParamConstraint("rrtmgp_co2_ppmv", 200.0, 800.0, "sigmoid"),
-    ParamConstraint("rrtmgp_ch4_ppbv", 700.0, 3000.0, "sigmoid"),
-    ParamConstraint("rrtmgp_n2o_ppbv", 250.0, 400.0, "sigmoid"),
     ParamConstraint("rrtmgp_sfc_emissivity", 0.5, 1.0, "sigmoid"),
     ParamConstraint("rrtmgp_sfc_albedo", 0.03, 0.6, "sigmoid"),
-    ParamConstraint("rrtmgp_aerosol_ssa", 0.8, 1.0, "sigmoid"),
-    ParamConstraint("rrtmgp_aerosol_g", 0.5, 0.9, "sigmoid"),
 ]
 
 # Shared gray-radiation optical-depth knobs (``tau_equator`` /
@@ -437,39 +435,28 @@ class AIMIPClassicalParams(eqx.Module):
         )
 
     def to_rrtmgp_config(self):
-        """Build a RRTMGPConfig at the canonical defaults (no trained scalars).
+        """Build a RRTMGPConfig at the canonical defaults (no trained values).
 
-        EVERY RRTMGPConfig field this class could set is folded into the
-        solver-cache key (``rrtmgp.RRTMGP._instance_cache_key`` /
-        ``_optics_cache_key``) and so cannot safely carry a traced JAX leaf
-        under ``eqx.filter_value_and_grad``:
+        EVERY RRTMGPConfig field is folded into the RRTMGP solver-cache key
+        (``_instance_cache_key`` / ``_optics_cache_key``) and so cannot safely
+        carry a traced JAX leaf under ``eqx.filter_value_and_grad``: gas
+        concentrations (CO2/CH4/N2O) and aerosol optics (aerosol_ssa/aerosol_g)
+        are RAW tuple elements (unhashable when traced), and sfc_emissivity/
+        sfc_albedo route through ``_hashable`` (a traced 0-D scalar is not
+        concretizable; an array id-fallback would balloon the global instance
+        cache by trace identity). So this returns the unmodified defaults.
 
-        - Gas concentrations (CO2/CH4/N2O) and aerosol optics
-          (aerosol_ssa/aerosol_g) are RAW tuple elements -> a traced leaf makes
-          the key tuple unhashable (hard failure).
-        - sfc_emissivity/sfc_albedo go through ``_hashable``; a traced 0-D
-          scalar there is not concretizable (``float(tracer)`` raises) and even
-          the id-fallback would balloon the global instance cache by trace
-          identity.
-
-        So all of them are FROZEN to the RRTMGP defaults here, which removes the
-        crash-prone scalar wiring (the gas/aerosol raw leaves and the trained
-        scalar sfc_* that previously fed the cache key).
-
-        Spatial surface training: when ``spatial_surface`` is set,
-        ``make_aimip_classical_spectral_physics`` expands ``rrtmgp_sfc_emissivity``
-        / ``rrtmgp_sfc_albedo`` (via ``as_dict()`` baselines) into ``(ncol,)``
-        arrays and ``_replace``s them into ``RRTMGPConfig.sfc_*``. RRTMGP's
-        ``_hashable`` keys ARRAYS by ``id(...)`` (its documented design — arrays
-        are not value-hashable; see ``rrtmgp.py`` _instance_cache_key), so the
-        array path does NOT crash, but it DOES key the solver-instance cache by
-        per-trace array identity. PRE-EXISTING / out of scope for this
-        param-hygiene change: routing those arrays through the per-call
-        ``sfc_albedo_override`` / ``sfc_emissivity_override`` inputs of
-        ``make_radiation_physics`` (so they never touch the cache key) is a
-        cross-cutting radiation-pipeline change tracked separately. The
-        gas/aerosol raw leaves persist only for forward-compatibility until
-        RRTMGP consumes them as per-call traced inputs.
+        The trained surface knobs ``rrtmgp_sfc_emissivity`` / ``rrtmgp_sfc_albedo``
+        reach the radiation solve as PER-CALL OVERRIDES — never through this
+        config: ``make_aimip_classical_spectral_physics`` passes the spatial
+        ``(ncol,)`` fields (expanded from these leaves via ``as_dict()``
+        baselines) to ``make_physics(sfc_albedo_override=, sfc_emissivity_override=)``
+        -> ``make_radiation_physics`` -> ``_call_radiation_backend`` ->
+        ``_resolve_surface_field``. They stay differentiable while
+        ``RRTMGPConfig.sfc_*`` remains the concrete default, so the cache key is
+        never keyed on a tracer. The gas/aerosol fields are NOT trainable (they
+        would need RRTMGP to consume them as per-call traced inputs too) and were
+        dropped from the AIMIP trainable set rather than kept as dead leaves.
         """
         from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
         return RRTMGPConfig()
@@ -556,14 +543,11 @@ def _canonical_scheme_defaults() -> dict[str, float]:
         "sbm_tau_c": float(sbm.tau_c),
         "sbm_RH_ref": float(sbm.rh_ref),
         "sbm_CAPE_threshold": float(sbm.cape_threshold),
-        # RRTMGP
-        "rrtmgp_co2_ppmv": float(rr.co2_ppmv),
-        "rrtmgp_ch4_ppbv": float(rr.ch4_ppbv),
-        "rrtmgp_n2o_ppbv": float(rr.n2o_ppbv),
+        # RRTMGP — only the surface knobs are trainable (routed as per-call
+        # overrides, not config cache-key fields); gas/aerosol cache-key fields
+        # are not trainable, so they carry no canonical-default entry here.
         "rrtmgp_sfc_emissivity": float(rr.sfc_emissivity),
         "rrtmgp_sfc_albedo": float(rr.sfc_albedo),
-        "rrtmgp_aerosol_ssa": float(rr.aerosol_ssa),
-        "rrtmgp_aerosol_g": float(rr.aerosol_g),
         # Shared
         "tau_equator": 7.2,
         "tau_pole": 1.8,
@@ -660,22 +644,20 @@ def make_aimip_classical_spectral_physics(
         }
 
     # ---- Radiation ----
+    # Surface overrides routed to the radiation solve as PER-CALL inputs
+    # (make_physics -> make_radiation_physics -> _call_radiation_backend ->
+    # _resolve_surface_field) rather than written into the radiation config.
+    # For RRTMGP this is REQUIRED: RRTMGPConfig.sfc_* are folded into RRTMGP's
+    # Python solver-cache key, so a trained ``(ncol,)`` array there would key the
+    # instance cache by tracer identity. Routing as an override keeps the trained
+    # surface field traceable+differentiable AND off the cache key. (None when no
+    # spatial surface is active -> the config default is used.)
+    _sfc_albedo_override = None
+    _sfc_emissivity_override = None
     if radiation == "rrtmgp":
         rrtmgp_cfg = params.to_rrtmgp_config()
-        # Substitute spatial sfc_emissivity / sfc_albedo when present.
-        # ``rrtmgp_radiation`` accepts array overrides via the
-        # integration bridge (rrtmgp_radiation.py: sfc_albedo_override /
-        # sfc_emissivity_override), and ``RRTMGPConfig.sfc_*`` fields
-        # broadcast naturally over the column dimension when set to
-        # ``(ncol,)`` arrays here.
-        if "sfc_emissivity" in spatial_fields_col:
-            rrtmgp_cfg = rrtmgp_cfg._replace(
-                sfc_emissivity=spatial_fields_col["sfc_emissivity"],
-            )
-        if "sfc_albedo" in spatial_fields_col:
-            rrtmgp_cfg = rrtmgp_cfg._replace(
-                sfc_albedo=spatial_fields_col["sfc_albedo"],
-            )
+        _sfc_albedo_override = spatial_fields_col.get("sfc_albedo")
+        _sfc_emissivity_override = spatial_fields_col.get("sfc_emissivity")
         # Derive the RRTMGP cloud gate from the selected cloud scheme.
         # ``include_clouds`` and ``cloud_scheme`` are independent knobs;
         # ``to_rrtmgp_config`` leaves ``include_clouds`` at its False default,
@@ -816,7 +798,11 @@ def make_aimip_classical_spectral_physics(
     # so the caller can dispatch through the simple
     # ``spectral_rollout(state, physics_fn, ...)`` branch.
     if not split_rad:
-        combined_raw = make_physics(physics_config, model_type="spectral_pe", dt=dt)
+        combined_raw = make_physics(
+            physics_config, model_type="spectral_pe", dt=dt,
+            sfc_albedo_override=_sfc_albedo_override,
+            sfc_emissivity_override=_sfc_emissivity_override,
+        )
 
         def combined_fn(state, grid_, sigma_coord):
             result = combined_raw(state, grid_, sigma_coord)
@@ -850,7 +836,11 @@ def make_aimip_classical_spectral_physics(
         gravity_wave_drag=gwd_cfg,
     )
     non_rad_raw = make_physics(non_rad_cfg, model_type="spectral_pe", dt=dt)
-    rad_only_raw = make_radiation_physics(rad_cfg, "spectral_pe")
+    rad_only_raw = make_radiation_physics(
+        rad_cfg, "spectral_pe",
+        sfc_albedo_override=_sfc_albedo_override,
+        sfc_emissivity_override=_sfc_emissivity_override,
+    )
 
     def non_rad_fn(state, grid_, sigma_coord):
         result = non_rad_raw(state, grid_, sigma_coord)
