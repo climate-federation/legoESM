@@ -332,6 +332,64 @@ def gather_field_latlon_2d(local_field, layout: LatLon2DLayout):
     return out
 
 
+def make_lon_row_comm(layout: LatLon2DLayout):
+    """Create the longitude-ring sub-communicator for this rank's
+    ``proc_row`` (the ``proc_lon`` ranks that share a latitude band).
+
+    COLLECTIVE over ``COMM_WORLD`` (every rank must call it).  ``key=
+    proc_col`` orders the sub-comm ranks by longitude block, so an
+    ``allgather`` over it returns blocks in west->east order.  Build
+    this ONCE at layout/setup time and reuse — ``Split`` is not free.
+    Returns the row sub-communicator.
+    """
+    from mpi4py import MPI
+
+    return MPI.COMM_WORLD.Split(color=layout.proc_row, key=layout.proc_col)
+
+
+def lon_gather_full(local_block: jax.Array, layout: LatLon2DLayout,
+                    row_comm) -> jax.Array:
+    """In-trace lat-pencil transpose: assemble the FULL longitude axis
+    for this rank's latitude band from the ``proc_lon`` lon-ring blocks.
+
+    The crux primitive for any operation that needs all longitudes on a
+    lon-split grid — the N/S pole-fold (180° lon shift / tripole perm)
+    and the polar filter (per-row rfft) — design doc §3b/§4.  Uses
+    ``mpi4jax.allgather`` over the ``proc_row`` sub-comm
+    (:func:`make_lon_row_comm`), so each rank ends with
+    ``(n_lat_local, n_lon_global[, nlev])``; apply the fold/filter on
+    that, then :func:`lon_scatter_full` back to the rank's block.
+
+    FORWARD-ONLY (``mpi4jax.allgather`` has no VJP — reductions.py note):
+    correct for the scaling-bench forward path; the AD adjoint
+    (reduce-scatter) is a follow-on before this is used under
+    ``jax.grad``.  Requires an EQUAL lon split (``n_lon % proc_lon ==
+    0``) so the allgather blocks share a shape; non-uniform splits need
+    an ``alltoallv`` (future).
+    """
+    import mpi4jax
+
+    if layout.n_lon_global % layout.proc_lon != 0:
+        raise ValueError(
+            f"lon_gather_full needs an equal lon split (n_lon="
+            f"{layout.n_lon_global} % proc_lon={layout.proc_lon} != 0) "
+            "for the allgather; non-uniform splits need alltoallv "
+            "(not yet implemented)."
+        )
+    # (proc_lon, n_lat_local, n_lon_local[, nlev]); key=proc_col ordered
+    # the sub-comm ranks west->east, so axis 0 IS lon-block order.
+    stacked = mpi4jax.allgather(local_block, comm=row_comm)
+    return jnp.concatenate(
+        [stacked[i] for i in range(stacked.shape[0])], axis=1)
+
+
+def lon_scatter_full(full_field: jax.Array,
+                     layout: LatLon2DLayout) -> jax.Array:
+    """Slice this rank's longitude block ``[lon_start:lon_end]`` from a
+    full-longitude field — inverse of :func:`lon_gather_full`."""
+    return full_field[:, layout.lon_start:layout.lon_end]
+
+
 # ============================================================================
 # Halo exchange
 # ============================================================================
