@@ -254,3 +254,19 @@ def test_pytree_shapes_stable_across_two_builds() -> None:
     ta = jax.tree_util.tree_structure(a)
     tb = jax.tree_util.tree_structure(b)
     assert ta == tb
+
+
+def test_rrtmgp_cache_key_fields_never_trainable() -> None:
+    """RRTMGP keys its optics/solver instance cache on these Python config
+    floats (rrtmgp.py _optics_cache_key / _instance_cache_key). Exposing them
+    as trainable leaves would break the Python hash or rebuild the solver per
+    value, so they must be ``excluded`` (tier 0) and never appear in a built
+    trainable set -- not even at the broadest "aggressive" tier."""
+    cache_key_fields = {"co2_ppmv", "ch4_ppbv", "n2o_ppbv", "aerosol_ssa", "aerosol_g"}
+    p = build_trainable_params(tier="aggressive")
+    rrtmgp_fields = {c.field for c in p.constraints if c.scheme_key == "atm.rad.RRTMGPConfig"}
+    leaked = cache_key_fields & rrtmgp_fields
+    assert not leaked, f"RRTMGP cache-key fields leaked into trainables: {leaked}"
+    # also assert they are not present anywhere in the registry's param set
+    reg_fields = {(m.scheme_key, m.field) for m in build_registry()}
+    assert not any(("atm.rad.RRTMGPConfig", f) in reg_fields for f in cache_key_fields)

@@ -69,15 +69,20 @@ __param_spec__ = {
     "RRTMGPConfig": {
         "scheme_key": "atm.rad.RRTMGPConfig",
         "excluded": {
+            # RRTMGP optics/solver instances are cached keyed on these Python
+            # config floats (rrtmgp.py _optics_cache_key / _instance_cache_key).
+            # A traced trainable leaf here would break the Python hash or rebuild
+            # the solver per parameter value -- NOT trainable until RRTMGP
+            # consumes them as per-call traced inputs. Fixed (tier 0).
+            "co2_ppmv": "RRTMGP optics-cache key (Python-hashed); not trainable until consumed as a traced input",
+            "ch4_ppbv": "RRTMGP optics-cache key (Python-hashed); not trainable until consumed as a traced input",
+            "n2o_ppbv": "RRTMGP optics-cache key (Python-hashed); not trainable until consumed as a traced input",
+            "aerosol_ssa": "RRTMGP instance-cache key (Python-hashed); not trainable until consumed as a traced input",
+            "aerosol_g": "RRTMGP instance-cache key (Python-hashed); not trainable until consumed as a traced input",
         },
         "params": {
             "sfc_albedo": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "albedo", "reference": "RRTMGP scheme default", "shape": None},
             "sfc_emissivity": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "emissivity", "reference": "RRTMGP scheme default", "shape": None},
-            "co2_ppmv": {"units": "ppmv", "bounds": (150.0, 2000.0), "tunable_tier": 3, "transform": "softplus", "category": "gas_concentration", "reference": "Mlawer et al. (1997) RRTMG / Pincus et al. (2019) RRTMGP", "shape": None},
-            "ch4_ppbv": {"units": "ppbv", "bounds": (500.0, 6000.0), "tunable_tier": 3, "transform": "softplus", "category": "gas_concentration", "reference": "Mlawer et al. (1997) RRTMG / Pincus et al. (2019) RRTMGP", "shape": None},
-            "n2o_ppbv": {"units": "ppbv", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "softplus", "category": "gas_concentration", "reference": "Mlawer et al. (1997) RRTMG / Pincus et al. (2019) RRTMGP", "shape": None},
-            "aerosol_ssa": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "aerosol_optics", "reference": "RRTMGP bulk aerosol default", "shape": None},
-            "aerosol_g": {"units": "1", "bounds": (-1.0, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "aerosol_optics", "reference": "RRTMGP bulk aerosol default", "shape": None},
         },
     },
 }
