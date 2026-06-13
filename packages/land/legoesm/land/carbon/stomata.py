@@ -42,6 +42,11 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import saturation_vapor_pressure
 
+# Fixed Farquhar / gas-exchange constants (not tunable).
+_FARQUHAR_WJ_GAMMA_COEFF = 8.0      # 4*Ci + 8*Gamma* electron-transport denominator
+_DIFFUSIVITY_RATIO_H2O_CO2 = 1.6    # H2O:CO2 stomatal diffusivity ratio
+_CI_CA_INIT_RATIO = 0.7             # initial intercellular:ambient CO2 guess
+
 
 # =====================================================================
 # Constants
@@ -208,7 +213,7 @@ def farquhar_photosynthesis(
     J = (-b - jnp.sqrt(disc)) / (2.0 * a + 1e-20)
 
     # RuBP-regeneration-limited rate
-    Wj = J * (Ci_safe - Gamma_star) / (4.0 * Ci_safe + 8.0 * Gamma_star)
+    Wj = J * (Ci_safe - Gamma_star) / (4.0 * Ci_safe + _FARQUHAR_WJ_GAMMA_COEFF * Gamma_star)
 
     # Smooth minimum (differentiable)
     _eps = config.co_limitation_eps
@@ -253,9 +258,9 @@ def medlyn_gs(
     """
     A_pos = jnp.maximum(A, 0.0)
     Cs_safe = jnp.maximum(Cs, 1.0)
-    VPD_safe = jnp.maximum(VPD_kPa, 0.05)
+    VPD_safe = jnp.maximum(VPD_kPa, 0.05)  # coeff-ok: VPD floor [kPa]
     return jnp.maximum(
-        config.g0 + 1.6 * (1.0 + config.g1_med / jnp.sqrt(VPD_safe))
+        config.g0 + _DIFFUSIVITY_RATIO_H2O_CO2 * (1.0 + config.g1_med / jnp.sqrt(VPD_safe))
         * A_pos / Cs_safe,
         config.g0,
     )
@@ -360,7 +365,7 @@ def coupled_farquhar_stomata(
     RH = jnp.clip(e_air / jnp.maximum(e_sat, 1.0), 0.0, 1.0)
 
     # Initial guess for Ci (typical C3 ratio)
-    Ci = 0.7 * Ca
+    Ci = _CI_CA_INIT_RATIO * Ca
 
     # Fixed-point iteration (unrolled for JIT compatibility)
     for _ in range(config.n_iter_ags):
@@ -375,7 +380,7 @@ def coupled_farquhar_stomata(
         # Update Ci via stomatal diffusion (1.6 = H2O/CO2 ratio)
         gs_safe = jnp.maximum(gs, config.g0)
         A_pos = jnp.maximum(A_net, 0.0)
-        Ci = Ca - 1.6 * A_pos / gs_safe
+        Ci = Ca - _DIFFUSIVITY_RATIO_H2O_CO2 * A_pos / gs_safe
         Ci = jnp.clip(Ci, 1.0, Ca)
 
     # Final evaluation

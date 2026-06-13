@@ -36,6 +36,10 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+# Fixed hydraulic-fit coefficients (not tunable).
+_GAMMA_VAL_OFFSET = 0.75   # macroscopic capillary gamma offset
+_B0_LOG10_COEFF = 0.1      # Campbell b-exponent log10 slope
+
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Floor for denominators (~1.18e-38).
 # This is used as a static guard against division by zero.  It is safe
 # for both float32 and float64 because it is only ever compared to
@@ -226,7 +230,7 @@ def _pdi_ha(config: SoilHydraulicsConfig) -> float:
     m = 1.0 - 1.0 / config.n_vg
     Gamma_h0 = _pdi_Gamma(jnp.array(config.h0_pdi), config)
     # gamma = 0.75*(1 - Gamma(h0)) + Gamma(h0) = 0.75 + 0.25*Gamma(h0)
-    gamma_val = 0.75 + 0.25 * Gamma_h0
+    gamma_val = _GAMMA_VAL_OFFSET + 0.25 * Gamma_h0
     # ha = alpha^{-1} * (gamma^{-1/m} - 1)^{1/n}
     ha = (1.0 / config.alpha_vg) * (gamma_val ** (-1.0 / m) - 1.0) ** (1.0 / config.n_vg)
     return ha
@@ -255,7 +259,7 @@ def _pdi_Snc(h: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     # Smoothing parameter b (Iden & Durner 2014)
     theta_range = config.theta_sat - config.theta_r + _TINY
     b1 = (config.theta_r / theta_range) ** 2
-    b0 = 0.1 * jnp.log(10.0)
+    b0 = _B0_LOG10_COEFF * jnp.log(10.0)
     b = b0 * (1.0 + 2.0 * (1.0 - jnp.exp(-b1 * config.n_vg ** 2)))
 
     h_safe = jnp.clip(h, 1e-10, h0)
@@ -351,7 +355,7 @@ def pdi_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
 
 def pdi_C(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     """PDI specific moisture capacity dtheta/dpsi (finite difference)."""
-    eps = 1e-4
+    eps = 1e-4  # coeff-ok: finite-difference / safety epsilon
     theta_p = pdi_theta(psi + eps, config)
     theta_m = pdi_theta(psi - eps, config)
     return (theta_p - theta_m) / (2.0 * eps)
@@ -445,7 +449,7 @@ def lu_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
 
 def lu_C(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     """Lu (2016) specific moisture capacity (finite difference)."""
-    eps = 1e-4
+    eps = 1e-4  # coeff-ok: finite-difference / safety epsilon
     theta_p = lu_theta(psi + eps, config)
     theta_m = lu_theta(psi - eps, config)
     return (theta_p - theta_m) / (2.0 * eps)
@@ -524,7 +528,7 @@ def moisture_capacity(psi: jnp.ndarray, theta: jnp.ndarray,
         C = lu_C(psi, config)
     else:
         # Brooks-Corey: use finite difference approximation
-        eps = 1e-4
+        eps = 1e-4  # coeff-ok: finite-difference / safety epsilon
         theta_p = theta_from_psi(psi + eps, config)
         theta_m = theta_from_psi(psi - eps, config)
         C = (theta_p - theta_m) / (2.0 * eps)
