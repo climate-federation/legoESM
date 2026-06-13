@@ -241,3 +241,46 @@ vb/ub (from U3c on real cross-face-halo'd uc/vc) + real v_d_jhalo/u_d_ihalo.
 Reassemble: cross (corner) lower-tile-owns-shared nl+1→n+1; sweep
 lower-tile-owns-shared nl+1→n+1. Parity vs global transported_y/x (pre
 Step-5) on kt=3 interior + face-edge. Then Step-5 BGRID_NE corner sync.
+
+## U3f — tiled BGRID_NE corner SCALAR sync: KEY SIMPLIFICATION (2026-06-13)
+
+After U3e (pointwise local↔geo factored), the only remaining corner-sync
+piece is the cross-tile `synchronize_corner_scalar` (halo.py:2678). Reading
+it (verify-first) gives a MAJOR simplification for the tiled stage:
+
+**synchronize_corner_scalar modifies ONLY the FACE-BOUNDARY corners**
+(Pass 1: face EDGES i=0/n, j=0/n via CONNECTIVITY pairwise avg; Pass 2: the
+8 cube VERTICES, 3-face mean). The face-INTERIOR corners are UNTOUCHED.
+
+⇒ The tiling introduces interior cuts, but the sync does NOT average at
+interior corners — so the tiled stage needs **NO interior-cut corner sync**.
+Each interior corner is a single global value; approach-C (face-replicated /
+global-pre-synced input, per-tile slice) hands every sharing tile the SAME
+value automatically. This KILLS the hardest-feared part (the same-face
+interior-cut all-reduce / d2a2c diagonal+sliver rounds are NOT needed for the
+scalar sync).
+
+**Remaining tiled work = ONLY the cross-FACE part at FACE-BOUNDARY tiles:**
+- Pass 1 cross-face edge avg: only tiles with ti∈{0,kt-1} or tj∈{0,kt-1}
+  hold a face edge; exchange+avg that edge with the CONNECTIVITY neighbour
+  face's edge tile. O(n) per face edge.
+- Pass 2 vertex 3-face mean: only the 4 corner tiles (ti,tj ∈ {0,kt-1}²) per
+  face hold a cube vertex; 3-face mean across the corner tiles meeting there.
+- _tiled_corner_modes mode 0 (true cube vertex) already enumerates the
+  vertex-tile set; modes 2/3 (slivers) and 1 (diagonal) are NOT needed
+  (those are interior/halo-fill, irrelevant to the boundary-only scalar sync).
+
+**Cleanest approach-C implementation:** run synchronize_corner_scalar
+GLOBALLY on the (face-replicated) corner field BEFORE the per-tile slice —
+it is a cheap O(n) edge/vertex op, NOT per-cell. The full-field is already
+face-replicated in the stage inputs (P("face",None,None)), so the global
+sync needs NO collective beyond what the face-replication already provides;
+the tiled stage then slices the synced corners. I.e. the corner SCALAR sync
+can live in the GLOBAL pre-step (like the cross-face halo pre-pad), NOT
+inside the per-tile shard body — NO new tiled cross-face exchange required.
+Validate: synced-global-then-sliced == per-tile-of-(global sync). This is
+the same approach-C move as the d2a2c cross-face halo (global view → slice).
+
+⇒ U3f is therefore SMALL: thread the (already-global) corner scalar sync +
+the U3e pointwise geo conversion into the corner-sync wrapper so the stage
+consumes pre-synced corner Courant. Then Step-6 KE (pointwise) + assemble.
