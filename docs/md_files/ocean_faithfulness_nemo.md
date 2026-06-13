@@ -850,10 +850,30 @@ convection gate). **115 unit tests pass** (exact tracer conservation Σ dT·vol�
 contract). NEMO oracle: ln_mle=T, nn_mle=1, rn_ce=0.06, rn_lat=20, rn_rho_c_mle=0.01.
 **VALIDATION IN FLIGHT:** tripole MLE 1-month model smoke 8468519 (trp_mld 4-lever + --mle); on stable
 → full 2yr re-run tripole_2yr_mle (run_trp_mle.sbatch) → compare MLD-with-MLE vs the no-MLE baseline
-(NH-subtrop +41m March / SH-mid +13m Sept mode-water over-deepening — does MLE shoal it?). **MPAS (ico)
-MLE = FOLLOW-UP** (gm_redi_mpas is an unfinished skeleton → from-scratch Voronoi bolus-transport).
+(NH-subtrop +41m March / SH-mid +13m Sept mode-water over-deepening — does MLE shoal it?).
+
+### iter-K (2026-06-13): MLE now on MPAS (Voronoi) — every faithful grid has Fox-Kemper (commit 6e081d3b)
+The "MPAS MLE = FOLLOW-UP, gm_redi_mpas is a skeleton" note is RESOLVED. The Voronoi GM/Redi *centered*
+scheme is functional + in production (ico7 ran kappa_GM=600), so the edge-slope + conservative
+bolus-divergence infra already existed → the MLE port is SMALL. New `mle_mpas.py`:
+`psim_e = rc_f·H_e²·dvEdge·(bm[c2]-bm[c1])/dcEdge·min(111km,dcEdge)·mu(z)` (dvEdge = the Voronoi
+cross-face width = NEMO e2u analogue) → bolus volume transport dk[Ψ] → centered tracer flux →
+conservative SIGNED-EDGE divergence over the live cell volume (`-Σ_e sign·F_e / (areaCell·h_k)`). Reuses
+`mle.py` grid-agnostic core (rc_f, μ(z), MLD+buoyancy) verbatim — NO re-derivation; promotes
+`voronoi_neumann_fill` public (shared w/ GM/Redi). Wired into `ocean_model_mpas` after GM/Redi
+(additive forward-Euler), `MPASOceanConfig.mle`, `--mle` (the mpas reject guard removed; cube still
+unsupported). **`--mle` now works on tripole, latlon AND mpas — every faithful grid.** `dz_live` uses the
+actual partial-cell `compute_layer_thickness` (h_k) so MLD/gdepw/Vol are exact and conservation is exact
+against the model mass `areaCell·h_k`. **8 unit tests pass** (exact + PARTIAL-CELL conservation,
+restratify reduces ML-buoyancy variance, equatorial-finite, convection gate, jit-stable, shared rc_f,
+contract); **133 regression pass** (GM rename, C-grid MLE, all physics contracts). Codex: 1 real bug
+(partial-cell dz_live) → fixed → re-review clean. **VALIDATION IN FLIGHT:** ico6 2-yr `--mle` (8477859,
+mpas_ico6_2yr_mle) → MLD@m03/m09 vs the no-MLE baseline (does it shoal the NH-subtrop/subpolar +47..51 m?).
 
 ## Open work toward maximal faithfulness
+0. **MLE equatorial robustness** — `tripole_2yr_mle` (1° dt600) blew day-240 near the equator; MPAS MLE
+   (iter-K) tested + conservative but its multi-year/equatorial stability under the full stack is the
+   in-flight ico6 validation (8477859). Watch the equatorial band.
 1. **mpas runoff** (improve SSS 1.01) + transports (ACC@Drake, AMOC@26N) — deepen the faithful set.
 2. **cube ¼°** — the only geometry-grid that COULD match but doesn't; major effort (¼° + balanced-init
    + sub-grid straits, OR shared-PGF overhaul w/ full all-grid re-validation).
