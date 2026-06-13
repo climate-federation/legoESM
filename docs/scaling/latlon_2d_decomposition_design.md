@@ -51,6 +51,25 @@ or an explicit corner exchange; for a 5-point stencil corners are not
 read so order is free, for 9-point do E/W after N/S so the N/S ghost rows
 already carry the lon halo).
 
+### 3b. N/S POLE-FOLD under lon-split — same all-lon problem as the filter
+INCREMENT-3 FINDING (2026-06-13): the 2-D pad is NOT a clean "N/S then
+E/W".  Interior lat-cuts are simple sendrecv (exchange_halo_latlon's
+interior path) and compose fine with the E/W ring.  But the
+POLE/FOLD boundary rows are the catch: the atmospheric pole-fold mirrors
+across the pole with a 180° LONGITUDE shift (n_lon//2), and the ocean
+tripole north-fold is a global-longitude PERMUTATION (perm_T/perm_v) —
+BOTH need the FULL longitude axis, which a lon-split rank does not own.
+So a pole-row rank cannot pole-fold its lon-SUBSET locally (it would
+shift/permute within the subset = wrong).  Same all-lon dependency as
+the polar filter (§4).  Implementation path: (i) 2-D pad correct for
+INTERIOR lat rows now (build a band-like sub-layout with the 2-D
+lat-neighbour ranks → exchange_halo_latlon interior sendrecv + E/W
+exchange_halo_lon; corners via N/S-then-E/W ordering), with a LOUD
+guard on pole/fold rows; (ii) pole/fold rows via the SAME lat-pencil
+transpose §4 uses (gather full-lon for the boundary row, fold, scatter).
+Do the interior pad + guard as increment 3a (bounded, testable), the
+transpose boundary as 3b/4 (shared with the filter).
+
 ### 4. Polar filter — THE hard part (transpose or local filter)
 `grids/polar_filter.py` does `jnp.fft.rfft(field, axis=lon)` per lat row
 — needs ALL longitudes. With lon split this breaks. Options, ranked:
