@@ -51,6 +51,23 @@ or an explicit corner exchange; for a 5-point stencil corners are not
 read so order is free, for 9-point do E/W after N/S so the N/S ghost rows
 already carry the lon halo).
 
+### 3-COUPLING FINDING (2026-06-13, from an isolation attempt): interior pad is NOT separable
+Tried to ship an "interior-only" 2-D pad (N/S interior sendrecv + E/W
+ring, pole rows guarded out) — it DEADLOCKED (job 8476623 timed out)
+and the reason is structural, not a test bug: **the N/S exchange is
+COLLECTIVE over the entire lat line.**  An interior rank's sendrecv to
+its lat neighbours has no match if those neighbours are pole rows that
+took the guard and posted nothing.  And an artificial all-interior lat
+RING can't substitute (it would deadlock ``exchange_halo_latlon``,
+which — like the pre-fix lon halo — is only safe on a pole-terminated
+LINE, not a ring).  ⇒ the interior pad and the pole-fold CANNOT be
+separated: increment 3 must implement the WHOLE lat line at once
+(interior sendrecv for middle rows + pole-fold for end rows, the latter
+via the §4 lat-pencil transpose).  So 3 and 3b/4 are ONE unit; there is
+no shippable interior-only intermediate.  (Reverted the partial; incr 1
+exchange_halo_lon + incr 2 LatLon2DLayout remain the validated building
+blocks.)
+
 ### 3b. N/S POLE-FOLD under lon-split — same all-lon problem as the filter
 INCREMENT-3 FINDING (2026-06-13): the 2-D pad is NOT a clean "N/S then
 E/W".  Interior lat-cuts are simple sendrecv (exchange_halo_latlon's
