@@ -18,6 +18,11 @@ core change. Two pieces:
   to microphysics columns, calls the dispatched scheme, and maps the
   tendencies back. The latent heating is applied to θ via the reference Exner.
 
+* :func:`step_lagrangian_sdm_les` — opt-in stateful coupling for the advected
+  Lagrangian SDM path. It carries a persistent super-droplet state beside the
+  LES state and overwrites q_c/q_r with particle-binned diagnostics after each
+  split SDM update.
+
 VERTICAL ORDER: the microphysics column convention is TOP-DOWN (index 0 = model
 top; ``sedimentation_tendency`` propagates flux from index k−1 INTO k, and the
 "surface" precip flux leaves the LAST index). The spectral LES is BOTTOM-UP
@@ -30,6 +35,7 @@ the plane CRM's, enforced against ``_PLANE_MIN_TRACER_SLOTS`` at build time.
 """
 from __future__ import annotations
 
+import functools
 from typing import NamedTuple
 
 import jax
@@ -235,3 +241,98 @@ def make_les_microphysics_fn(micro_config: MicrophysicsConfig,
 
     micro.scheme_name = scheme_name
     return micro
+
+
+def step_lagrangian_sdm_les(
+    state,
+    sdm_state,
+    g,
+    ref: SpectralRefState,
+    dt: float,
+    sdm_config,
+    u_geo,
+    f_cor: float,
+    *,
+    first: bool = False,
+    force=(0.0, 0.0),
+    sfc_theta_flux=0.0,
+    t_sfc=None,
+    sfc_qv_flux=0.0,
+    do_condensation: bool = True,
+    do_coalescence: bool = True,
+):
+    """One opt-in spectral LES step coupled to persistent Lagrangian SDM.
+
+    This is a driver hook, not part of the default microphysics dispatch. The
+    normal spectral LES step advances the Eulerian velocity, θ and vapor tracer;
+    then the persistent super-droplets are advected/sedimented, collided within
+    cells, condensed/evaporated, and binned back to diagnostic q_c/q_r slots.
+
+    Returns ``(state_new, sdm_state_new, u_star, diagnostics)``. Existing dry and
+    Eulerian microphysics paths are unchanged unless callers explicitly use this
+    function and carry ``sdm_state``.
+
+    JIT usage: ``g``, ``ref`` and ``sdm_config`` are static Python/NestedTuple
+    configuration objects, so direct ``jax.jit(step_lagrangian_sdm_les)`` is not
+    the supported entry point. Use :func:`make_lagrangian_sdm_les_step`, which
+    closes over those objects and returns a jitted ``(state, sdm_state, dt)``
+    step. When ``do_coalescence=True`` the step is non-differentiable because
+    collision-coalescence is stochastic and uses scatter updates.
+    """
+    from legoesm.atmosphere.dynamics import spectral_les_plane as sl
+    from legoesm.atmosphere.physics.microphysics.sdm.lagrangian import (
+        apply_lagrangian_sdm_to_les_state,
+    )
+
+    state_new, u_star = sl.step(
+        state, g=g, dt=dt, u_geo=u_geo, f_cor=f_cor, first=first, force=force,
+        sfc_theta_flux=sfc_theta_flux, t_sfc=t_sfc, sfc_qv_flux=sfc_qv_flux)
+    state_new, sdm_state_new, diagnostics = apply_lagrangian_sdm_to_les_state(
+        state_new, sdm_state, g, ref, dt, sdm_config,
+        do_condensation=do_condensation, do_coalescence=do_coalescence)
+    return state_new, sdm_state_new, u_star, diagnostics
+
+
+def make_lagrangian_sdm_les_step(
+    g,
+    ref: SpectralRefState,
+    sdm_config,
+    *,
+    u_geo,
+    f_cor: float,
+    force=(0.0, 0.0),
+    sfc_theta_flux=0.0,
+    t_sfc=None,
+    sfc_qv_flux=0.0,
+    do_condensation: bool = True,
+    do_coalescence: bool = True,
+):
+    """Return the supported jitted Lagrangian-SDM spectral-LES step closure.
+
+    The returned function has signature ``step(state, sdm_state, dt, *,
+    first=False)``. ``first`` is static because the AB2 LES integrator uses it
+    in a Python branch. With coalescence enabled, the closure is intended for
+    forward simulation rather than differentiation.
+    """
+
+    @functools.partial(jax.jit, static_argnames=("first",))
+    def step(state, sdm_state, dt, *, first: bool = False):
+        return step_lagrangian_sdm_les(
+            state,
+            sdm_state,
+            g,
+            ref,
+            dt,
+            sdm_config,
+            u_geo=u_geo,
+            f_cor=f_cor,
+            first=first,
+            force=force,
+            sfc_theta_flux=sfc_theta_flux,
+            t_sfc=t_sfc,
+            sfc_qv_flux=sfc_qv_flux,
+            do_condensation=do_condensation,
+            do_coalescence=do_coalescence,
+        )
+
+    return step

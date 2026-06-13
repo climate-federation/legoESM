@@ -1,0 +1,307 @@
+"""Unit tests for the advected-Lagrangian SDM LES coupling."""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+jax.config.update("jax_enable_x64", True)
+
+from legoesm import constants
+from legoesm.atmosphere.dynamics import spectral_les_plane as sl
+from legoesm.atmosphere.dynamics.spectral_les_moist import (
+    make_lagrangian_sdm_les_step,
+    make_anelastic_reference,
+    step_lagrangian_sdm_les,
+)
+from legoesm.atmosphere.physics.microphysics.sdm import (
+    SDMConfig,
+    SuperDropletState,
+    advect_step,
+    coalescence_cells_step,
+    condensation_coupling_step,
+    diagnose_liquid_mixing_ratios,
+    initialize_lagrangian_sdm,
+    make_lagrangian_sdm_state,
+    particle_cell_indices,
+    represented_water_mass,
+    total_water_mass,
+)
+
+_PREF = 4.0 / 3.0 * np.pi * constants.rho_water
+
+
+def _grid(nx=4, ny=4, nz=4, L=4.0, n_tracers=3):
+    cfg = sl.SpectralLESConfig(
+        nx=nx, ny=ny, nz=nz, Lx=L, Ly=L, Lz=L,
+        z0=0.01, buoyancy=False, moist=False, n_tracers=n_tracers,
+        spectral_filter=False, time_scheme="ab2")
+    return sl.make_grid(cfg)
+
+
+def _ref(g, theta0=300.0, qv0=0.0):
+    return make_anelastic_reference(
+        np.asarray(g.z_c), np.asarray(g.z_f), 101500.0,
+        np.full(g.cfg.nz, theta0), np.full(g.cfg.nz, qv0))
+
+
+def _lag_state(g, radii, xi=1.0e6, xyz=None):
+    n = len(radii)
+    if xyz is None:
+        xyz = (np.full(n, 0.5), np.full(n, 0.5), np.full(n, 1.5))
+    x, y, z = [jnp.asarray(a, dtype=jnp.float64) for a in xyz]
+    o = jnp.ones((n,), dtype=jnp.float64)
+    droplets = SuperDropletState(
+        multiplicity=o * xi,
+        radius=jnp.asarray(radii, dtype=jnp.float64),
+        solute_mass=o * 0.0,
+        active=o,
+    )
+    return make_lagrangian_sdm_state(droplets, x, y, z, jax.random.PRNGKey(0), g)
+
+
+def _lag_state_slots(g, radii, xi, active, xyz, key=0):
+    n = len(radii)
+    x, y, z = [jnp.asarray(a, dtype=jnp.float64) for a in xyz]
+    droplets = SuperDropletState(
+        multiplicity=jnp.asarray(xi, dtype=jnp.float64),
+        radius=jnp.asarray(radii, dtype=jnp.float64),
+        solute_mass=jnp.zeros((n,), dtype=jnp.float64),
+        active=jnp.asarray(active, dtype=jnp.float64),
+    )
+    return make_lagrangian_sdm_state(droplets, x, y, z, jax.random.PRNGKey(key), g)
+
+
+def _cell_sums(state, g, values):
+    _, _, _, cell_id = particle_cell_indices(state, g)
+    n_cells = g.cfg.ny * g.cfg.nx * g.cfg.nz
+    return jnp.zeros((n_cells,), dtype=values.dtype).at[cell_id].add(values)
+
+
+def test_advection_moves_with_resolved_flow_and_wraps_periodic():
+    g = _grid(L=4.0)
+    cfg = SDMConfig(terminal_velocity="rogers_yau")
+    state = _lag_state(g, [0.0, 0.0], xyz=(
+        np.array([0.5, 3.8]), np.array([0.5, 0.5]), np.array([1.5, 1.5])))
+    u = jnp.ones((g.cfg.ny, g.cfg.nx, g.cfg.nz), dtype=jnp.float64)
+    v = jnp.zeros_like(u)
+    w = jnp.zeros((g.cfg.ny, g.cfg.nx, g.cfg.nz + 1), dtype=jnp.float64)
+
+    out, dp = advect_step(state, u, v, w, g, 0.5, cfg, rho=1.0, p=9.0e4, T=283.0)
+
+    np.testing.assert_allclose(np.asarray(out.x), np.array([1.0, 0.3]), atol=1e-12)
+    np.testing.assert_allclose(np.asarray(out.y), np.asarray(state.y), atol=1e-12)
+    np.testing.assert_allclose(np.asarray(out.z), np.asarray(state.z), atol=1e-12)
+    assert float(jnp.sum(out.droplets.active)) == 2.0
+    assert float(jnp.sum(dp)) == 0.0
+
+
+def test_sedimentation_crossing_accumulates_surface_precipitation():
+    g = _grid(L=4.0)
+    cfg = SDMConfig(terminal_velocity="rogers_yau")
+    R, xi = 1.0e-4, 5.0e5
+    state = _lag_state(g, [R], xi=xi, xyz=(
+        np.array([0.5]), np.array([0.5]), np.array([0.1])))
+    zero = jnp.zeros((g.cfg.ny, g.cfg.nx, g.cfg.nz), dtype=jnp.float64)
+    w = jnp.zeros((g.cfg.ny, g.cfg.nx, g.cfg.nz + 1), dtype=jnp.float64)
+
+    out, dp = advect_step(state, zero, zero, w, g, 1.0, cfg, 1.0, 9.0e4, 283.0)
+
+    expected_mass = xi * _PREF * R**3
+    area = g.dx * g.dy
+    assert float(out.droplets.active[0]) == 0.0
+    assert float(out.z[0]) == 0.0
+    assert float(jnp.sum(dp) * area) == pytest.approx(expected_mass, rel=1e-12)
+    assert float(jnp.sum(out.surface_precip) * area) == pytest.approx(
+        expected_mass, rel=1e-12)
+
+
+def test_top_wall_clamps_without_deactivating():
+    g = _grid(L=4.0)
+    cfg = SDMConfig(terminal_velocity="rogers_yau")
+    state = _lag_state(g, [0.0], xyz=(
+        np.array([0.5]), np.array([0.5]), np.array([3.8])))
+    zero = jnp.zeros((g.cfg.ny, g.cfg.nx, g.cfg.nz), dtype=jnp.float64)
+    w = jnp.ones((g.cfg.ny, g.cfg.nx, g.cfg.nz + 1), dtype=jnp.float64)
+
+    out, _ = advect_step(state, zero, zero, w, g, 1.0, cfg, 1.0, 9.0e4, 283.0)
+
+    assert float(out.z[0]) == pytest.approx(g.cfg.Lz)
+    assert float(out.droplets.active[0]) == 1.0
+
+
+def test_cellwise_collision_conserves_represented_water():
+    g = _grid(nx=2, ny=2, nz=2, L=2.0)
+    cfg = SDMConfig(collision_kernel="golovin", golovin_b=1.5e3)
+    n_sd = 128
+    state = _lag_state(g, np.full(n_sd, 1.4e-5), xi=1.0e6, xyz=(
+        np.full(n_sd, 0.5), np.full(n_sd, 0.5), np.full(n_sd, 0.5)))
+    m0 = float(jnp.sum(represented_water_mass(state.droplets)))
+
+    out = coalescence_cells_step(state, g, rho=1.0, p=9.0e4, T=283.0,
+                                 dt=1.0, cfg=cfg)
+
+    m1 = float(jnp.sum(represented_water_mass(out.droplets)))
+    assert m1 == pytest.approx(m0, rel=1e-9)
+    assert float(jnp.sum(out.droplets.active * out.droplets.multiplicity)) <= float(
+        jnp.sum(state.droplets.active * state.droplets.multiplicity))
+
+
+def test_cellwise_collision_two_active_padded_cell_collides():
+    g = _grid(nx=2, ny=2, nz=2, L=2.0)
+    cfg = SDMConfig(collision_kernel="golovin", golovin_b=1.0e16)
+    n_sd = 256
+    R = 2.0e-5
+    active = np.zeros(n_sd)
+    active[:2] = 1.0
+    xyz = (np.full(n_sd, 0.5), np.full(n_sd, 0.5), np.full(n_sd, 0.5))
+    state = _lag_state_slots(
+        g, np.full(n_sd, R), np.ones(n_sd), active, xyz)
+    m0 = float(jnp.sum(represented_water_mass(state.droplets)))
+
+    out = coalescence_cells_step(
+        state, g, rho=1.0, p=9.0e4, T=283.0, dt=1.0, cfg=cfg)
+
+    m1 = float(jnp.sum(represented_water_mass(out.droplets)))
+    num1 = float(jnp.sum(out.droplets.active * out.droplets.multiplicity))
+    assert m1 == pytest.approx(m0, rel=1e-12, abs=1e-20)
+    assert num1 == pytest.approx(1.0)
+    assert float(jnp.max(out.droplets.radius)) == pytest.approx(
+        np.cbrt(2.0) * R, rel=1e-12)
+
+
+def test_cellwise_collision_isolates_cells_and_pairs_after_odd_cell():
+    g = _grid(nx=2, ny=2, nz=2, L=2.0)
+    cfg = SDMConfig(collision_kernel="golovin", golovin_b=1.0e16)
+    n_sd = 16
+    active = np.zeros(n_sd)
+    active[:3] = 1.0
+    x = np.full(n_sd, 0.5)
+    x[1:3] = 1.5
+    xyz = (x, np.full(n_sd, 0.5), np.full(n_sd, 0.5))
+    radii = np.full(n_sd, 2.0e-5)
+    radii[0] = 1.0e-5
+    state = _lag_state_slots(g, radii, np.ones(n_sd), active, xyz)
+    mass0 = _cell_sums(state, g, represented_water_mass(state.droplets))
+
+    out = coalescence_cells_step(
+        state, g, rho=1.0, p=9.0e4, T=283.0, dt=1.0, cfg=cfg)
+
+    mass1 = _cell_sums(out, g, represented_water_mass(out.droplets))
+    num1 = _cell_sums(out, g, out.droplets.active * out.droplets.multiplicity)
+    np.testing.assert_allclose(np.asarray(mass1), np.asarray(mass0),
+                               rtol=1e-12, atol=1e-20)
+    assert float(num1[0]) == pytest.approx(1.0)
+    assert float(num1[2]) == pytest.approx(1.0)
+    assert float(jnp.sum(num1)) == pytest.approx(2.0)
+
+
+def test_condensation_two_way_coupling_conserves_water_and_energy():
+    g = _grid(nx=2, ny=2, nz=2, L=2.0)
+    ref = _ref(g, theta0=300.0, qv0=0.0)
+    cfg = SDMConfig(
+        include_curvature=False, include_solute=False,
+        condensation_integrator="euler", n_substeps_condensation=1)
+    state = _lag_state(g, [1.0e-5], xi=1.0e8, xyz=(
+        np.array([0.5]), np.array([0.5]), np.array([0.5])))
+    theta = jnp.full((g.cfg.ny, g.cfg.nx, g.cfg.nz), 300.0, dtype=jnp.float64)
+    tracers = jnp.zeros((g.cfg.ny, g.cfg.nx, g.cfg.nz, 3), dtype=jnp.float64)
+    tracers = tracers.at[..., 0].set(0.03)
+    water0 = total_water_mass(state, tracers, g, ref.rho_c)
+    T0 = theta * ref.exner_c[None, None, :]
+
+    out, theta1, tracers1, dq_liq = condensation_coupling_step(
+        state, theta, tracers, g, ref.exner_c, ref.p_c, ref.rho_c, 0.2, cfg)
+
+    water1 = total_water_mass(out, tracers1, g, ref.rho_c)
+    T1 = theta1 * ref.exner_c[None, None, :]
+    assert float(water1) == pytest.approx(float(water0), rel=2e-12, abs=1e-14)
+    np.testing.assert_allclose(
+        np.asarray(T1 - T0),
+        np.asarray((constants.L_v / constants.c_pd) * dq_liq),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert float(jnp.max(dq_liq)) > 0.0
+    assert float(jnp.min(tracers1[..., 0])) < 0.03
+
+
+def test_particle_binning_diagnoses_cloud_and_rain_slots():
+    g = _grid(nx=2, ny=2, nz=2, L=2.0)
+    state = _lag_state(g, [1.0e-5, 1.0e-4], xi=1.0e6, xyz=(
+        np.array([0.5, 0.5]), np.array([0.5, 0.5]), np.array([0.5, 0.5])))
+    qc, qr = diagnose_liquid_mixing_ratios(state, g, rho=1.0, r_rain=4.0e-5)
+    V = g.dx * g.dy * g.dz
+    assert float(qc[0, 0, 0]) == pytest.approx(1.0e6 * _PREF * (1.0e-5)**3 / V)
+    assert float(qr[0, 0, 0]) == pytest.approx(1.0e6 * _PREF * (1.0e-4)**3 / V)
+
+
+def test_tiny_spectral_les_lagrangian_sdm_smoke_conserves_water():
+    g = _grid(nx=4, ny=4, nz=4, L=200.0, n_tracers=3)
+    ref = _ref(g, theta0=300.0, qv0=0.02)
+    cfg = SDMConfig(
+        include_curvature=False, include_solute=False,
+        condensation_integrator="euler", n_substeps_condensation=1,
+        terminal_velocity="rogers_yau", collision_kernel="golovin")
+    ny, nx, nz = g.cfg.ny, g.cfg.nx, g.cfg.nz
+    z = jnp.zeros((ny, nx, nz), dtype=jnp.float64)
+    theta = jnp.full((ny, nx, nz), 300.0, dtype=jnp.float64)
+    tracers = jnp.zeros((ny, nx, nz, 3), dtype=jnp.float64).at[..., 0].set(0.02)
+    les = sl.SpectralLESState(
+        u=z, v=z, w=jnp.zeros((ny, nx, nz + 1), dtype=jnp.float64),
+        rhs_u_prev=z, rhs_v_prev=z,
+        rhs_w_prev=jnp.zeros((ny, nx, nz + 1), dtype=jnp.float64),
+        theta=theta, rhs_theta_prev=jnp.zeros_like(theta),
+        tracers=tracers, rhs_tracers_prev=jnp.zeros_like(tracers))
+    sdm = initialize_lagrangian_sdm(
+        jax.random.PRNGKey(7), g, n_sd=24,
+        number_concentration=1.0e5, radius=1.0e-6, dtype=jnp.float64)
+    water0 = total_water_mass(sdm, les.tracers, g, ref.rho_c)
+
+    for n in range(3):
+        les, sdm, _, diag = step_lagrangian_sdm_les(
+            les, sdm, g, ref, 0.1, cfg, u_geo=(0.0, 0.0), f_cor=0.0,
+            first=(n == 0), do_condensation=True, do_coalescence=True)
+        assert bool(jnp.all(jnp.isfinite(les.theta)))
+        assert bool(jnp.all(jnp.isfinite(les.tracers)))
+        assert bool(jnp.all(jnp.isfinite(sdm.droplets.radius)))
+        assert float(diag["n_active"]) == 24.0
+
+    water1 = total_water_mass(sdm, les.tracers, g, ref.rho_c)
+    assert float(water1) == pytest.approx(float(water0), rel=2e-10, abs=1e-10)
+    assert float(jnp.max(les.tracers[..., 1] + les.tracers[..., 2])) >= 0.0
+
+
+def test_lagrangian_sdm_les_step_factory_jits_static_objects():
+    g = _grid(nx=2, ny=2, nz=2, L=20.0, n_tracers=3)
+    ref = _ref(g, theta0=300.0, qv0=0.02)
+    cfg = SDMConfig(
+        include_curvature=False, include_solute=False,
+        condensation_integrator="euler", n_substeps_condensation=1,
+        terminal_velocity="rogers_yau", collision_kernel="golovin")
+    ny, nx, nz = g.cfg.ny, g.cfg.nx, g.cfg.nz
+    z = jnp.zeros((ny, nx, nz), dtype=jnp.float64)
+    theta = jnp.full((ny, nx, nz), 300.0, dtype=jnp.float64)
+    tracers = jnp.zeros((ny, nx, nz, 3), dtype=jnp.float64).at[..., 0].set(0.02)
+    les = sl.SpectralLESState(
+        u=z, v=z, w=jnp.zeros((ny, nx, nz + 1), dtype=jnp.float64),
+        rhs_u_prev=z, rhs_v_prev=z,
+        rhs_w_prev=jnp.zeros((ny, nx, nz + 1), dtype=jnp.float64),
+        theta=theta, rhs_theta_prev=jnp.zeros_like(theta),
+        tracers=tracers, rhs_tracers_prev=jnp.zeros_like(tracers))
+    sdm = initialize_lagrangian_sdm(
+        jax.random.PRNGKey(11), g, n_sd=8,
+        number_concentration=1.0e5, radius=1.0e-6, dtype=jnp.float64)
+    step = make_lagrangian_sdm_les_step(
+        g, ref, cfg, u_geo=(0.0, 0.0), f_cor=0.0,
+        do_condensation=False, do_coalescence=True)
+
+    les1, sdm1, _, diag = step(les, sdm, jnp.asarray(0.1, dtype=jnp.float64),
+                               first=True)
+
+    assert bool(jnp.all(jnp.isfinite(les1.theta)))
+    assert bool(jnp.all(jnp.isfinite(les1.tracers)))
+    assert bool(jnp.all(jnp.isfinite(sdm1.droplets.radius)))
+    assert float(diag["n_active"]) == 8.0
