@@ -58,7 +58,7 @@ __param_spec__ = {
         "params": {
             "E_max": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
             "c_bs": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
-            "efficiency": {"units": "1", "bounds": (0.297, 2.7), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
+            "efficiency": {"units": "1", "bounds": (0.3, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
             "tau_relax_days": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
         },
     },

@@ -61,7 +61,7 @@ __param_spec__ = {
             "C_D": {"units": "1", "bounds": (0.000495, 0.0045), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
             "C_E": {"units": "1", "bounds": (0.000495, 0.0045), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
             "C_H": {"units": "1", "bounds": (0.000495, 0.0045), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
-            "emissivity": {"units": "1", "bounds": (0.3201, 2.91), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
+            "emissivity": {"units": "1", "bounds": (0.85, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
             "z0": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
         },
     },

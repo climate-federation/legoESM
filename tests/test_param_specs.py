@@ -448,6 +448,15 @@ _PARAM_DOMAINS: dict[tuple[str, str], tuple[float | None, float | None]] = {
 }
 
 
+# Field-name tokens that mark a physically [0, 1]-bounded quantity (fraction,
+# efficiency, emissivity, albedo, probability). Such a param's sigmoid bounds must
+# stay within [0, 1] inclusive, else extended-tier training can produce
+# nonphysical values (e.g. super-blackbody emissivity, >100% backscatter).
+_FRACTION_NAME_RE = __import__("re").compile(
+    r"(emissiv|albedo|efficiency|fraction|_frac\b|\bfrac_)", __import__("re").I
+)
+
+
 def test_bounds_respect_hard_param_domains() -> None:
     errors: list[str] = []
     for rel in _SCOPE_MODULES:
@@ -458,18 +467,26 @@ def test_bounds_respect_hard_param_domains() -> None:
             if not isinstance(entry, dict):
                 continue
             for pname, p in entry.get("params", {}).items():
-                dom = _PARAM_DOMAINS.get((cls_name, pname))
-                if dom is None or not isinstance(p, dict):
+                if not isinstance(p, dict):
                     continue
                 b = p.get("bounds")
                 if not (isinstance(b, tuple) and len(b) == 2 and all(isinstance(x, (int, float)) for x in b)):
                     continue
-                lo_dom, hi_dom = dom
-                if lo_dom is not None and b[0] <= lo_dom:
-                    errors.append(f"{rel}:{cls_name}.{pname} bounds lo {b[0]} violates domain > {lo_dom}")
-                if hi_dom is not None and b[1] >= hi_dom:
-                    errors.append(f"{rel}:{cls_name}.{pname} bounds hi {b[1]} violates domain < {hi_dom}")
-    assert not errors, "spec bounds enter an invalid formula domain:\n  " + "\n  ".join(errors)
+                # 1) explicit formula domains (exclusive limits, e.g. van Genuchten n > 1)
+                dom = _PARAM_DOMAINS.get((cls_name, pname))
+                if dom is not None:
+                    lo_dom, hi_dom = dom
+                    if lo_dom is not None and b[0] <= lo_dom:
+                        errors.append(f"{rel}:{cls_name}.{pname} bounds lo {b[0]} violates domain > {lo_dom}")
+                    if hi_dom is not None and b[1] >= hi_dom:
+                        errors.append(f"{rel}:{cls_name}.{pname} bounds hi {b[1]} violates domain < {hi_dom}")
+                # 2) generic fraction/efficiency/emissivity/albedo -> [0, 1] inclusive
+                if _FRACTION_NAME_RE.search(pname):
+                    if b[0] < 0.0:
+                        errors.append(f"{rel}:{cls_name}.{pname} fraction bound lo {b[0]} < 0")
+                    if b[1] > 1.0:
+                        errors.append(f"{rel}:{cls_name}.{pname} fraction bound hi {b[1]} > 1")
+    assert not errors, "spec bounds enter an invalid physical domain:\n  " + "\n  ".join(errors)
 
 
 def _specced_fields(spec) -> dict[str, set[str]]:
