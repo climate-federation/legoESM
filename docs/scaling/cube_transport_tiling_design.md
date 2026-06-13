@@ -110,6 +110,35 @@ IMPLEMENTATION UNITS (gate + codex each):
 This is deliberate multi-hour work (a delicate dycore refactor kept
 bit-identical); do U1→U2→U3 as separate gated+codex commits.
 
+## U3 design (shard_map stage) — mirror make_tiled_d2a2c_stage (2026-06-13)
+
+U1 (rd_prepadded, 65fa25fe) + U2 (synthetic approach-C parity, 6779dcbf) +
+U2b (production cross-face/staggered i-sweep parity, 2150ce17) PROVE the
+per-tile PPM compute. U3 wires it into a `shard_map(face, tile_i, tile_j)`
+stage, mirroring `make_tiled_d2a2c_stage` (packages/core/legoesm/parallel/
+tiled_d2a2c.py) — the established APPROACH-C-under-shard_map pattern:
+* inputs FACE-REPLICATED `P("face", None, None)`: the GLOBAL h3=4 pre-padded
+  transport field (computed outside shard_map in the GSPMD view, e.g.
+  `_pad_halo_dgrid_for_ppm` then `jnp.pad` to h3), the courant, and the
+  depth-1 pre-padded rd;
+* inside `_stage`: `ti/tj = axis_index`; each device `lax.dynamic_slice`s
+  its tile's sweep window (i-window `[ti*nl : ti*nl+nl+2*h3]`, j-block) from
+  the replicated padded face — NO halo ppermute (the padded face already
+  carries the h3 halo, the d2a2c-stage insight), then
+  `_ppm_transport_1d(external_halo=4, rd_prepadded=True)` per tile;
+* output tile-sharded `P("face","tile_i","tile_j")`; reassembly dedups the
+  shared boundary interface (lower tile owns it), == global PPM sweep.
+
+CARE-POINT (regression risk, do carefully + gated): the STAGGERED j-axis
+slice (u_d j=n+1). Start with an i-ONLY mesh `(6, kt, 1)` (full j, no
+staggered-j tiling → np=6·kt, kt=4 gives np24) to prove the shard_map
+i-sweep first; then the full `(6, kt, kt)` with the staggered-j block slice
+(match `tiled_face_block`'s nl-vs-nl+1 convention) = U3b. Then ytp_v
+(axis=2 j-sweep, symmetric). Parity: in-shard_map vs global
+`_ppm_transport_1d` (pattern: tests/parallel/test_tiled_d2a2c_ua_va.py,
+XLA_FLAGS=--xla_force_host_platform_device_count). THEN real Courant
+(ub/vb from uc/vc) + B-grid corner sync = full `_bgrid_ke_transport` tiled.
+
 ## Plan (gate + codex EACH piece — user directive "be very careful")
 
 1. **depth-4 interior-cut strip exchange** (`make_tiled_ppm_halo` or a
