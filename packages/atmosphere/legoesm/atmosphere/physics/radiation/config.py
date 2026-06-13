@@ -48,7 +48,7 @@ __param_spec__ = {
             "tau_equator": {"units": "1", "bounds": (2.0, 15.0), "tunable_tier": 1, "transform": "sigmoid", "category": "optical_depth", "reference": "Frierson et al. (2006)", "shape": None, "legacy_name": "tau_equator"},
             "tau_pole": {"units": "1", "bounds": (0.5, 5.0), "tunable_tier": 1, "transform": "sigmoid", "category": "optical_depth", "reference": "Frierson et al. (2006)", "shape": None, "legacy_name": "tau_pole"},
             "linear_frac": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "longwave", "reference": "O'Gorman & Schneider (2008)", "shape": None},
-            "tau_moist_coeff": {"units": "m2/kg", "bounds": (0.0, 0.05), "tunable_tier": 2, "transform": "softplus", "category": "longwave", "reference": "Frierson et al. (2006)", "shape": None},
+            "tau_moist_coeff": {"units": "m2/kg", "bounds": (0.0, 0.05), "tunable_tier": 2, "transform": "sigmoid", "category": "longwave", "reference": "Frierson et al. (2006)", "shape": None},
             "lw_diff_factor": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "longwave", "reference": "Fu & Liou (1992) diffusivity factor", "shape": None},
             "sw_tau_0": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "shortwave", "reference": "Frierson et al. (2006)", "shape": None},
             "sw_exponent": {"units": "1", "bounds": (0.5, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "shortwave", "reference": "gray radiation scheme default", "shape": None},
@@ -79,10 +79,16 @@ __param_spec__ = {
             "n2o_ppbv": "RRTMGP optics-cache key (Python-hashed); not trainable until consumed as a traced input",
             "aerosol_ssa": "RRTMGP instance-cache key (Python-hashed); not trainable until consumed as a traced input",
             "aerosol_g": "RRTMGP instance-cache key (Python-hashed); not trainable until consumed as a traced input",
+            # sfc_albedo/sfc_emissivity are also folded into _instance_cache_key
+            # via _hashable() (which does float(x)); a traced leaf would fail the
+            # hash. The TRAINABLE surface-albedo path is the coupler's legacy-8
+            # albedo_ice/albedo_ocean -> albedo_col (a per-call traced input), not
+            # these config fields. Fixed (tier 0) until RRTMGP drops them from the
+            # Python cache key for the trainable path.
+            "sfc_albedo": "RRTMGP instance-cache key (_hashable/float); train via coupler albedo_col, not this config field",
+            "sfc_emissivity": "RRTMGP instance-cache key (_hashable/float); not trainable until removed from the Python cache key",
         },
         "params": {
-            "sfc_albedo": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "albedo", "reference": "RRTMGP scheme default", "shape": None},
-            "sfc_emissivity": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "emissivity", "reference": "RRTMGP scheme default", "shape": None},
         },
     },
 }

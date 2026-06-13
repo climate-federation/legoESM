@@ -25,7 +25,7 @@ __param_spec__ = {
             # --- critical_rh: primary cloud-onset RH (Sundqvist + Xu-Randall lower bound) ---
             "rh_crit": {"units": "1", "bounds": (0.5, 0.99), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_rh", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
             # --- cloud_fraction: Xu-Randall (1996) cf = RH^p_xr * (1 - exp(-alpha*q_c/((1-RH)q_sat)^gamma)) ---
-            "alpha_xr": {"units": "1", "bounds": (10.0, 1000.0), "tunable_tier": 1, "transform": "softplus", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
+            "alpha_xr": {"units": "1", "bounds": (10.0, 1000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "p_xr": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "gamma_xr": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             # --- condensate: diagnostic in-cloud water + resolved-cf condensate scale [kg/kg] ---
@@ -37,7 +37,7 @@ __param_spec__ = {
             "r_eff_liq": {"units": "m", "bounds": (4.0e-6, 30.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "cloud-optics fallback default", "shape": None},
             "r_eff_ice": {"units": "m", "bounds": (10.0e-6, 90.0e-6), "tunable_tier": 2, "transform": "sigmoid", "category": "optical_radius", "reference": "cloud-optics fallback default", "shape": None},
             # --- droplet_psd: Morrison M2005 liquid effective-radius PSD (gamma-shape from Nc) ---
-            "Nc_default": {"units": "1/m^3", "bounds": (1.0e7, 1.0e9), "tunable_tier": 2, "transform": "softplus", "category": "droplet_psd", "reference": "Morrison et al. (2005) M2005 (SAM Nc_0)", "shape": None},
+            "Nc_default": {"units": "1/m^3", "bounds": (1.0e7, 1.0e9), "tunable_tier": 2, "transform": "sigmoid", "category": "droplet_psd", "reference": "Morrison et al. (2005) M2005 (SAM Nc_0)", "shape": None},
             "martin_pgam_slope": {"units": "cm^3", "bounds": (1.0e-4, 2.0e-3), "tunable_tier": 3, "transform": "sigmoid", "category": "droplet_psd", "reference": "Martin et al. (1994)", "shape": None},
             "martin_pgam_intercept": {"units": "1", "bounds": (0.1, 0.8), "tunable_tier": 3, "transform": "sigmoid", "category": "droplet_psd", "reference": "Martin et al. (1994)", "shape": None},
             "pgam_max": {"units": "1", "bounds": (4.0, 30.0), "tunable_tier": 3, "transform": "sigmoid", "category": "droplet_psd", "reference": "Morrison module_mp_mg.F90 (gamma-PSD shape cap)", "shape": None},

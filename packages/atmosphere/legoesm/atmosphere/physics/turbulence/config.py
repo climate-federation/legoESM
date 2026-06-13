@@ -189,7 +189,7 @@ __param_spec__ = {
             # (edmf.py:173) and sets the velocity scale of the deactivation
             # gate (edmf.py:240). A physical minimum updraft velocity [m/s];
             # tier-3 because it is gate-coupled and primarily a robustness floor.
-            "w_updraft_min": {"units": "m/s", "bounds": (0.01, 1.0), "tunable_tier": 3, "transform": "softplus", "category": "mass_flux", "reference": "Siebesma et al. (2007) EDMF minimum updraft velocity", "shape": None},
+            "w_updraft_min": {"units": "m/s", "bounds": (0.01, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) EDMF minimum updraft velocity", "shape": None},
         },
     },
     "YSUConfig": {

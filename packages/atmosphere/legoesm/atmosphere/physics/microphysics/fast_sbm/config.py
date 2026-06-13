@@ -23,7 +23,7 @@ __param_spec__ = {
             # --- nucleation: Köhler CCN activation (oracle JERNUCL01_KS) ---
             # Total CCN reservoir; primary aerosol knob controlling activated
             # droplet number (the maritime↔continental lever).
-            "ccn_number": {"units": "m**-3", "bounds": (1.0e6, 5.0e9), "tunable_tier": 1, "transform": "softplus", "category": "nucleation", "reference": "Khain et al. (2004) JAS 61:2963", "shape": None},
+            "ccn_number": {"units": "m**-3", "bounds": (1.0e6, 5.0e9), "tunable_tier": 1, "transform": "sigmoid", "category": "nucleation", "reference": "Khain et al. (2004) JAS 61:2963", "shape": None},
             # Dry-aerosol log-normal mode: median radius + geometric std.
             "aerosol_dry_median": {"units": "m", "bounds": (1.0e-8, 5.0e-7), "tunable_tier": 2, "transform": "sigmoid", "category": "nucleation", "reference": "Khain & Pokrovsky (2002) JAS 59:2839", "shape": None},
             "aerosol_geom_std": {"units": "1", "bounds": (1.05, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "nucleation", "reference": "Khain & Pokrovsky (2002) JAS 59:2839", "shape": None},
@@ -38,11 +38,11 @@ __param_spec__ = {
             "bigg_b0": {"units": "K**-1", "bounds": (0.3, 1.2), "tunable_tier": 2, "transform": "sigmoid", "category": "freezing", "reference": "Bigg (1953) QJRMS 79:510", "shape": None},
             "bigg_b_max": {"units": "K**-1", "bounds": (0.3, 1.2), "tunable_tier": 3, "transform": "sigmoid", "category": "freezing", "reference": "Bigg (1953) QJRMS 79:510 (mass-dependent slope cap)", "shape": None},
             # --- melting: Jiwen-Fan constant-timescale (oracle J_W_MELT) ---
-            "melt_rate_mid": {"units": "s**-1", "bounds": (1.0e-3, 5.0e-2), "tunable_tier": 2, "transform": "softplus", "category": "melting", "reference": "Khain et al. (2004) JAS 61:2963 (J_W_MELT)", "shape": None},
+            "melt_rate_mid": {"units": "s**-1", "bounds": (1.0e-3, 5.0e-2), "tunable_tier": 2, "transform": "sigmoid", "category": "melting", "reference": "Khain et al. (2004) JAS 61:2963 (J_W_MELT)", "shape": None},
             "melt_rate_high": {"units": "s**-1", "bounds": (1.0e-3, 5.0e-2), "tunable_tier": 2, "transform": "sigmoid", "category": "melting", "reference": "Khain et al. (2004) JAS 61:2963 (J_W_MELT)", "shape": None},
             # --- collision_coalescence ---
             # Golovin analytic test-kernel coefficient K = b(m_i+m_j).
-            "golovin_b": {"units": "s**-1", "bounds": (1.0e2, 1.0e4), "tunable_tier": 2, "transform": "softplus", "category": "collision_coalescence", "reference": "Golovin (1963); Bott (1998) JAS 55:2284", "shape": None},
+            "golovin_b": {"units": "s**-1", "bounds": (1.0e2, 1.0e4), "tunable_tier": 2, "transform": "sigmoid", "category": "collision_coalescence", "reference": "Golovin (1963); Bott (1998) JAS 55:2284", "shape": None},
             # Ice self-collection (→ snow) sticking efficiency scaling the
             # Bott kernel; primary ice-aggregation knob (~0.1).
             "ice_aggregation_efficiency": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "collision_coalescence", "reference": "Khain et al. (2004) JAS 61:2963 (ice sticking efficiency)", "shape": None},
@@ -54,19 +54,19 @@ __param_spec__ = {
             # --- sedimentation: ice terminal velocity V = a·D^b·(ρ0/ρ)^½ ---
             # Power-law prefactor a [SI: D in m, V in m/s ⇒ m^(1-b)·s^-1] and
             # exponent b per category, plus category bulk density.
-            "fall_a_snow": {"units": "m**(1-b) s**-1", "bounds": (1.0, 100.0), "tunable_tier": 2, "transform": "softplus", "category": "sedimentation", "reference": "Locatelli & Hobbs (1974) JGR 79:2185 (unrimed aggregates)", "shape": None},
+            "fall_a_snow": {"units": "m**(1-b) s**-1", "bounds": (1.0, 100.0), "tunable_tier": 2, "transform": "sigmoid", "category": "sedimentation", "reference": "Locatelli & Hobbs (1974) JGR 79:2185 (unrimed aggregates)", "shape": None},
             "fall_b_snow": {"units": "1", "bounds": (0.2, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "sedimentation", "reference": "Locatelli & Hobbs (1974) JGR 79:2185 (unrimed aggregates)", "shape": None},
-            "rho_snow": {"units": "kg m**-3", "bounds": (20.0, 300.0), "tunable_tier": 2, "transform": "softplus", "category": "sedimentation", "reference": "Pruppacher & Klett (1997) (snow bulk density)", "shape": None},
-            "fall_a_graupel": {"units": "m**(1-b) s**-1", "bounds": (10.0, 500.0), "tunable_tier": 2, "transform": "softplus", "category": "sedimentation", "reference": "Locatelli & Hobbs (1974) JGR 79:2185 (lump graupel)", "shape": None},
+            "rho_snow": {"units": "kg m**-3", "bounds": (20.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "sedimentation", "reference": "Pruppacher & Klett (1997) (snow bulk density)", "shape": None},
+            "fall_a_graupel": {"units": "m**(1-b) s**-1", "bounds": (10.0, 500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "sedimentation", "reference": "Locatelli & Hobbs (1974) JGR 79:2185 (lump graupel)", "shape": None},
             "fall_b_graupel": {"units": "1", "bounds": (0.3, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "sedimentation", "reference": "Locatelli & Hobbs (1974) JGR 79:2185 (lump graupel)", "shape": None},
-            "rho_graupel": {"units": "kg m**-3", "bounds": (100.0, 900.0), "tunable_tier": 2, "transform": "softplus", "category": "sedimentation", "reference": "Pruppacher & Klett (1997) (graupel/hail bulk density)", "shape": None},
+            "rho_graupel": {"units": "kg m**-3", "bounds": (100.0, 900.0), "tunable_tier": 2, "transform": "sigmoid", "category": "sedimentation", "reference": "Pruppacher & Klett (1997) (graupel/hail bulk density)", "shape": None},
             # Foote-du Toit density-correction reference (level where the
             # (ρ_ref/ρ)^½ correction is unity); rarely retuned.
             "fall_rho_ref": {"units": "kg m**-3", "bounds": (0.8, 1.4), "tunable_tier": 3, "transform": "sigmoid", "category": "sedimentation", "reference": "Foote & du Toit (1969) J. Appl. Meteor. 8:249", "shape": None},
             # --- size_distribution: column-adapter spectrum reconstruction ---
             # Prescribed cloud-droplet number when the dycore carries none;
             # primary single-moment closure knob (maritime↔continental).
-            "cdnc": {"units": "m**-3", "bounds": (1.0e6, 5.0e9), "tunable_tier": 1, "transform": "softplus", "category": "size_distribution", "reference": "Seifert & Beheng (2006) (maritime N_c default)", "shape": None},
+            "cdnc": {"units": "m**-3", "bounds": (1.0e6, 5.0e9), "tunable_tier": 1, "transform": "sigmoid", "category": "size_distribution", "reference": "Seifert & Beheng (2006) (maritime N_c default)", "shape": None},
             # Geometric std of the reconstructed cloud-droplet lognormal.
             "cloud_geom_std": {"units": "1", "bounds": (1.05, 2.5), "tunable_tier": 2, "transform": "sigmoid", "category": "size_distribution", "reference": "FastSBM scheme default (reconstruction)", "shape": None},
         },

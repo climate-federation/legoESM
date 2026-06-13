@@ -262,7 +262,13 @@ def test_rrtmgp_cache_key_fields_never_trainable() -> None:
     as trainable leaves would break the Python hash or rebuild the solver per
     value, so they must be ``excluded`` (tier 0) and never appear in a built
     trainable set -- not even at the broadest "aggressive" tier."""
-    cache_key_fields = {"co2_ppmv", "ch4_ppbv", "n2o_ppbv", "aerosol_ssa", "aerosol_g"}
+    # All RRTMGP config floats that _optics_cache_key / _instance_cache_key
+    # fold into the Python solver-cache key (gas concentrations, bulk aerosol
+    # optics, and the surface albedo/emissivity routed through _hashable/float).
+    cache_key_fields = {
+        "co2_ppmv", "ch4_ppbv", "n2o_ppbv", "aerosol_ssa", "aerosol_g",
+        "sfc_albedo", "sfc_emissivity",
+    }
     p = build_trainable_params(tier="aggressive")
     rrtmgp_fields = {c.field for c in p.constraints if c.scheme_key == "atm.rad.RRTMGPConfig"}
     leaked = cache_key_fields & rrtmgp_fields
@@ -270,3 +276,33 @@ def test_rrtmgp_cache_key_fields_never_trainable() -> None:
     # also assert they are not present anywhere in the registry's param set
     reg_fields = {(m.scheme_key, m.field) for m in build_registry()}
     assert not any(("atm.rad.RRTMGPConfig", f) in reg_fields for f in cache_key_fields)
+
+
+def test_as_dict_respects_declared_finite_bounds() -> None:
+    """Every collected trainable's constrained value must stay within its
+    declared (lo, hi) for any raw input. ``sigmoid`` enforces this; bare
+    ``softplus``/``none`` do NOT (softplus is unbounded above, none is the
+    identity), so a finite-bounded param MUST use a bounds-respecting transform.
+    Drive raw to +/-1e4 and assert as_dict() never escapes the declared range --
+    the tripwire for the false-bounds class codex flagged."""
+    import equinox as eqx
+
+    p = build_trainable_params(tier="aggressive")
+    bounds = {c.name: (c.min_val, c.max_val, c.transform) for c in p.constraints}
+    for sign in (1.0, -1.0):
+        extreme = {k: jnp.full_like(v, sign * 1.0e4) for k, v in p.raw_values.items()}
+        q = eqx.tree_at(lambda t: t.raw_values, p, extreme)
+        for name, val in q.as_dict().items():
+            lo, hi, transform = bounds[name]
+            if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
+                continue  # per-element / open bounds checked elsewhere
+            arr = np.asarray(val)
+            # tolerance scaled to the bound magnitude: float32 cannot represent
+            # an O(10-100) bound exactly, so saturated sigmoid output rounds a
+            # few ULP past it. This still catches the gross escapes (softplus ->
+            # +inf, identity "none" -> raw) the tripwire targets.
+            tol = 1e-4 * max(1.0, abs(lo), abs(hi))
+            assert np.all(arr >= lo - tol) and np.all(arr <= hi + tol), (
+                f"{name} ({transform}) -> {arr.reshape(-1)[:3]} escaped declared "
+                f"bounds [{lo}, {hi}] at raw={sign:+}e4"
+            )

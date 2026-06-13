@@ -36,16 +36,16 @@ __param_spec__ = {
         },
         "params": {
             # --- convective source amplitude (Beres et al. 2004) ---
-            "cf": {"units": "1", "bounds": (5.0, 60.0), "tunable_tier": 1, "transform": "softplus", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM gw_convect_hcf", "shape": None},
-            "al": {"units": "m", "bounds": (1.0e4, 1.0e6), "tunable_tier": 1, "transform": "softplus", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM AL", "shape": None},
-            "hdepth_scaling_factor": {"units": "1", "bounds": (0.25, 4.0), "tunable_tier": 2, "transform": "softplus", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM hdepth_scaling_factor", "shape": None},
+            "cf": {"units": "1", "bounds": (5.0, 60.0), "tunable_tier": 1, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM gw_convect_hcf", "shape": None},
+            "al": {"units": "m", "bounds": (1.0e4, 1.0e6), "tunable_tier": 1, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM AL", "shape": None},
+            "hdepth_scaling_factor": {"units": "1", "bounds": (0.25, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM hdepth_scaling_factor", "shape": None},
             # --- convective source triggering / search window ---
             "hdepth_min_km": {"units": "km", "bounds": (0.5, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM hdepth_min", "shape": None},
             "z_heat_max": {"units": "m", "bounds": (5.0e3, 4.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004) scheme default", "shape": None},
             "source_wind_p": {"units": "Pa", "bounds": (4.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_beres_src k700 source-wind level", "shape": None},
             # --- analytic stand-in spectrum surrogate (not Beres-faithful) ---
-            "mfcc_peak": {"units": "Pa", "bounds": (1.0e-4, 1.0e-1), "tunable_tier": 2, "transform": "softplus", "category": "source_spectrum", "reference": "stand-in mfcc surrogate (E3SM mfcc table replacement)", "shape": None},
-            "mfcc_c0": {"units": "m/s", "bounds": (5.0, 90.0), "tunable_tier": 2, "transform": "softplus", "category": "source_spectrum", "reference": "stand-in mfcc surrogate phase-speed width", "shape": None},
+            "mfcc_peak": {"units": "Pa", "bounds": (1.0e-4, 1.0e-1), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "stand-in mfcc surrogate (E3SM mfcc table replacement)", "shape": None},
+            "mfcc_c0": {"units": "m/s", "bounds": (5.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "stand-in mfcc surrogate phase-speed width", "shape": None},
             "mfcc_hdepth_growth": {"units": "1/km", "bounds": (0.0, 0.5), "tunable_tier": 3, "transform": "sigmoid", "category": "source_spectrum", "reference": "stand-in mfcc surrogate depth-growth slope", "shape": None},
         },
     },
@@ -69,14 +69,13 @@ __param_spec__ = {
             "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "wave_breaking", "reference": "Scinocca (2003); E3SM gw_common umcfac", "shape": None},
             # --- saturation floors ---
             "n2min": {"units": "1/s^2", "bounds": (1.0e-9, 1.0e-7), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "E3SM gw_prof N^2 floor", "shape": None},
-            "n2min": {"units": "1/s^2", "bounds": (1.0e-9, 1.0e-7), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "E3SM gw_prof N^2 floor", "shape": None},
             "taumin": {"units": "Pa", "bounds": (1.0e-12, 1.0e-8), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "E3SM gw_common minimum-stress floor", "shape": None},
-            "ubmc2mn": {"units": "m^2/s^2", "bounds": (1.0e-3, 1.0e-1), "tunable_tier": 3, "transform": "softplus", "category": "numerics", "reference": "E3SM gw_common (u-c)^2 floor", "shape": None},
+            "ubmc2mn": {"units": "m^2/s^2", "bounds": (1.0e-3, 1.0e-1), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "E3SM gw_common (u-c)^2 floor", "shape": None},
             "tndmax_per_day": {"units": "m/s/day", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common tendency ceiling", "shape": None},
             # --- GW-induced eddy diffusion ---
             "dback": {"units": "m^2/s", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "saturation", "reference": "E3SM gw_common background diffusivity dback", "shape": None},
             "prndl": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "saturation", "reference": "E3SM gw_diffusion inverse Prandtl number", "shape": None},
-            "egwd_max": {"units": "m^2/s", "bounds": (10.0, 500.0), "tunable_tier": 3, "transform": "softplus", "category": "saturation", "reference": "E3SM gw_diffusion eddy-diffusivity cap", "shape": None},
+            "egwd_max": {"units": "m^2/s", "bounds": (10.0, 500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "saturation", "reference": "E3SM gw_diffusion eddy-diffusivity cap", "shape": None},
             "ediff_kbot_p": {"units": "Pa", "bounds": (3.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_diffusion kbotbg eddy-diffusion bottom level", "shape": None},
         },
     },
@@ -89,7 +88,7 @@ __param_spec__ = {
             # --- frontal source amplitude / triggering ---
             "taubgnd": {"units": "Pa", "bounds": (1.0e-4, 1.0e-2), "tunable_tier": 1, "transform": "sigmoid", "category": "momentum_flux", "reference": "Charron & Manzini (2002); CAM taubgnd", "shape": None},
             "frontgfc": {"units": "K^2/(m^2 s)", "bounds": (1.0e-11, 1.0e-9), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "Charron & Manzini (2002); CAM frontgfc trigger threshold", "shape": None},
-            "c0": {"units": "m/s", "bounds": (10.0, 90.0), "tunable_tier": 2, "transform": "softplus", "category": "source_spectrum", "reference": "CAM gw_front Gaussian phase-speed width c0", "shape": None},
+            "c0": {"units": "m/s", "bounds": (10.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "CAM gw_front Gaussian phase-speed width c0", "shape": None},
             # --- launch / trigger levels ---
             "launch_p": {"units": "Pa", "bounds": (3.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_front kbotbg launch interface", "shape": None},
             "front_p": {"units": "Pa", "bounds": (4.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_front kfront trigger level", "shape": None},
@@ -124,10 +123,10 @@ __param_spec__ = {
         },
         "params": {
             # --- launch source spectrum (Hines 1997) ---
-            "total_rms_wind": {"units": "m/s", "bounds": (0.5, 10.0), "tunable_tier": 1, "transform": "softplus", "category": "source_spectrum", "reference": "Hines (1997) launch rms wind", "shape": None},
-            "rms_gw_speed": {"units": "m/s", "bounds": (0.25, 5.0), "tunable_tier": 2, "transform": "softplus", "category": "source_spectrum", "reference": "Hines (1997) rms gravity-wave speed", "shape": None},
+            "total_rms_wind": {"units": "m/s", "bounds": (0.5, 10.0), "tunable_tier": 1, "transform": "sigmoid", "category": "source_spectrum", "reference": "Hines (1997) launch rms wind", "shape": None},
+            "rms_gw_speed": {"units": "m/s", "bounds": (0.25, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "Hines (1997) rms gravity-wave speed", "shape": None},
             # --- saturation / momentum-flux cap ---
-            "Fmax": {"units": "Pa", "bounds": (0.01, 1.0), "tunable_tier": 1, "transform": "softplus", "category": "saturation", "reference": "Hines (1997) saturation momentum-flux cap", "shape": None},
+            "Fmax": {"units": "Pa", "bounds": (0.01, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "saturation", "reference": "Hines (1997) saturation momentum-flux cap", "shape": None},
             # --- tendency limiters ---
             "tndmax_per_day": {"units": "m/s/day", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common tendency ceiling", "shape": None},
             "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common umcfac no-reversal limiter", "shape": None},
@@ -142,7 +141,7 @@ __param_spec__ = {
         },
         "params": {
             # --- orographic launch amplitude ---
-            "h_topo": {"units": "m", "bounds": (50.0, 2000.0), "tunable_tier": 1, "transform": "softplus", "category": "orographic", "reference": "Lindzen (1981) subgrid topographic height", "shape": None},
+            "h_topo": {"units": "m", "bounds": (50.0, 2000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "orographic", "reference": "Lindzen (1981) subgrid topographic height", "shape": None},
             # --- saturation / wave breaking ---
             "critical_Fr": {"units": "1", "bounds": (0.5, 2.0), "tunable_tier": 1, "transform": "sigmoid", "category": "saturation", "reference": "Lindzen (1981) critical Froude number", "shape": None},
             "N_ref": {"units": "1/s", "bounds": (0.005, 0.03), "tunable_tier": 3, "transform": "sigmoid", "category": "saturation", "reference": "Lindzen (1981) reference Brunt-Vaisala frequency", "shape": None},
@@ -161,16 +160,16 @@ __param_spec__ = {
         },
         "params": {
             # --- orographic launch amplitude / efficiency ---
-            "G_0": {"units": "1", "bounds": (0.1, 2.0), "tunable_tier": 1, "transform": "softplus", "category": "orographic", "reference": "McFarlane (1987)/Palmer et al. (1986) launch-flux factor E", "shape": None},
+            "G_0": {"units": "1", "bounds": (0.1, 2.0), "tunable_tier": 1, "transform": "sigmoid", "category": "orographic", "reference": "McFarlane (1987)/Palmer et al. (1986) launch-flux factor E", "shape": None},
             "efficiency": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "efficiency", "reference": "McFarlane (1987) breaking efficiency", "shape": None},
-            "h_topo": {"units": "m", "bounds": (50.0, 2000.0), "tunable_tier": 1, "transform": "softplus", "category": "orographic", "reference": "McFarlane (1987) subgrid topographic height", "shape": None},
+            "h_topo": {"units": "m", "bounds": (50.0, 2000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "orographic", "reference": "McFarlane (1987) subgrid topographic height", "shape": None},
             # --- saturation / wave breaking ---
             "fcrit2": {"units": "1", "bounds": (0.5, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "saturation", "reference": "McFarlane (1987); E3SM fcrit2 Froude cap", "shape": None},
-            "envelope_scale": {"units": "1", "bounds": (0.25, 4.0), "tunable_tier": 2, "transform": "softplus", "category": "saturation", "reference": "McFarlane (1987) vertical envelope scale", "shape": None},
-            "directional_spread": {"units": "1", "bounds": (0.25, 4.0), "tunable_tier": 2, "transform": "softplus", "category": "source_spectrum", "reference": "McFarlane (1987) multi-directional spreading factor", "shape": None},
+            "envelope_scale": {"units": "1", "bounds": (0.25, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "saturation", "reference": "McFarlane (1987) vertical envelope scale", "shape": None},
+            "directional_spread": {"units": "1", "bounds": (0.25, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "McFarlane (1987) multi-directional spreading factor", "shape": None},
             # --- source activation / clips / tendency limiters ---
             "min_wind": {"units": "m/s", "bounds": (0.5, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "orographic", "reference": "McFarlane (1987) minimum source-level wind", "shape": None},
-            "tau_max": {"units": "Pa", "bounds": (1.0, 50.0), "tunable_tier": 3, "transform": "softplus", "category": "numerics", "reference": "McFarlane scheme launch-stress clip", "shape": None},
+            "tau_max": {"units": "Pa", "bounds": (1.0, 50.0), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "McFarlane scheme launch-stress clip", "shape": None},
             "tndmax_per_day": {"units": "m/s/day", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common tendency ceiling (orographic)", "shape": None},
             "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common umcfac no-reversal limiter", "shape": None},
         },
@@ -186,7 +185,7 @@ __param_spec__ = {
             # --- saturation / wave breaking ---
             "breaking_threshold": {"units": "1", "bounds": (0.5, 2.0), "tunable_tier": 1, "transform": "sigmoid", "category": "saturation", "reference": "Lindzen (1981) Froude breaking threshold", "shape": None},
             # --- prognostic relaxation timescale ---
-            "tau_decay": {"units": "s", "bounds": (3.6e3, 2.592e5), "tunable_tier": 2, "transform": "softplus", "category": "damping", "reference": "prognostic-spectral relaxation timescale", "shape": None},
+            "tau_decay": {"units": "s", "bounds": (3.6e3, 2.592e5), "tunable_tier": 2, "transform": "sigmoid", "category": "damping", "reference": "prognostic-spectral relaxation timescale", "shape": None},
         },
     },
     "RayleighConfig": {
