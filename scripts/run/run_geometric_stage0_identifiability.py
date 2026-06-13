@@ -12,7 +12,10 @@ sensitivity matrix ``G = ∂g/∂θ`` of the (per-field-normalized) observable m
 w.r.t. the UNCONSTRAINED (logit) parameters — the same coordinates ETKI optimizes,
 so each param is auto-scaled by its prior range. ``g`` is the END-STATE map of
 T, S, ψ, EKE after a short exact-IC window from the truth attractor; ``G`` is
-formed by ``jax.jacfwd`` (forward-mode: n_param=5 ≪ n_obs). Then:
+formed by reverse-mode AD (see below). Then:
+
+``G`` is formed by ``jax.jacrev`` (reverse-mode — the rigid-lid CG solve is a
+``custom_vjp``, so forward-mode is unavailable) over a COMPACT scalar observable.
 
   * Fisher F = GᵀG (5×5). Eigenvalues = the identifiability SPECTRUM; the
     smallest-eigenvalue eigenvector = the sloppiest parameter COMBINATION
@@ -39,7 +42,8 @@ from pathlib import Path
 import numpy as np
 
 
-def run_identifiability(*, truth_dir: Path, out_dir: Path, windows_days, dt: float):
+def run_identifiability(*, truth_dir: Path, out_dir: Path, windows_days, dt: float,
+                        stabilization: str = "stop_gradient_slopes"):
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
@@ -70,7 +74,7 @@ def run_identifiability(*, truth_dir: Path, out_dir: Path, windows_days, dt: flo
         recipe = g0.build_geometric_recipe(true_geom)
         cfg = recipe.model_config._replace(
             gm_redi=recipe.model_config.gm_redi._replace(
-                adjoint_stabilization="stop_gradient_slopes"))
+                adjoint_stabilization=stabilization))
         model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
         state0 = g0.restore_state(recipe.initial_state, snap, model=model,
                                   cfg=cfg, grid=recipe.grid)
@@ -128,7 +132,19 @@ def run_identifiability(*, truth_dir: Path, out_dir: Path, windows_days, dt: flo
             n_steps = int(round(W * 86400.0 / dt))
             print(f"== window {W} d ({n_steps} steps): jacrev ∂g/∂θ ...", flush=True)
             g0_vals = np.asarray(packed_raw(raw_true, n_steps))        # scale per obs
-            scale = np.where(np.abs(g0_vals) > 1e-30, np.abs(g0_vals), 1.0)
+            ag = np.abs(g0_vals)
+            # Floor the per-observable scale RELATIVE to the largest |g| so a
+            # near-zero observable cannot get ~1/eps weight and hijack the Fisher
+            # spectrum (adversarial-review Q2); warn if any trips it.
+            floor = 1e-8 * float(ag.max())
+            tripped = [OBS_NAMES[j] for j in range(len(ag)) if ag[j] < floor]
+            if tripped:
+                print(f"  WARNING: near-zero observables at truth {tripped} "
+                      f"(|g| < {floor:.2e}) — scale floored, weight capped", flush=True)
+            scale = np.maximum(ag, floor)
+            print(f"  g(theta_true) = "
+                  f"{', '.join(f'{n}={v:.3e}' for n, v in zip(OBS_NAMES, g0_vals))}",
+                  flush=True)
             G_raw = np.asarray(jax.jacrev(lambda r: packed_raw(r, n_steps))(raw_true))
             G = G_raw / scale[:, None]            # dimensionless (n_obs, n_param)
             F = G.T @ G                            # normalized Fisher (5×5)
@@ -186,12 +202,18 @@ def main() -> int:
     ap.add_argument("--windows", type=float, nargs="+", default=[5.0, 30.0],
                     help="Window lengths [days] for the sensitivity (default 5 30).")
     ap.add_argument("--dt", type=float, default=43200.0)
+    ap.add_argument("--stabilization", default="stop_gradient_slopes",
+                    choices=("stop_gradient_slopes", "stop_gradient_taper", "none"),
+                    help="GM/Redi adjoint stabilization. 'none' = exact adjoint "
+                         "(use at SHORT windows only) for the gate-invariance "
+                         "cross-check.")
     args = ap.parse_args()
 
     import jax
     jax.config.update("jax_enable_x64", True)
     run_identifiability(truth_dir=args.truth, out_dir=args.out,
-                        windows_days=args.windows, dt=args.dt)
+                        windows_days=args.windows, dt=args.dt,
+                        stabilization=args.stabilization)
     return 0
 
 
