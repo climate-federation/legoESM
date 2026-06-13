@@ -133,7 +133,7 @@ from legoesm.atmosphere.physics._shared import (
 def make_microphysics_physics(
     microphysics_config: MicrophysicsConfig,
     model_type: str = "hydrostatic",
-    dt: float = 300.0,
+    dt: float = 300.0,  # coeff-ok: default physics timestep [s]
 ) -> Callable:
     """Create a physics function for microphysics matching a model's signature.
 

@@ -246,6 +246,29 @@ class TestAIMIPDefaultsInteriorization:
         name = "tiedtke_cape_threshold"
         assert abs(float(vals[name]) - defaults[name]) < 1e-4 * defaults[name]
 
+    def test_to_rrtmgp_config_freezes_all_cache_key_fields(self):
+        """EVERY RRTMGPConfig field that ``_instance_cache_key`` /
+        ``_optics_cache_key`` folds into the Python solver-cache key must stay at
+        its default in ``to_rrtmgp_config()`` -- a traced trainable leaf there is
+        either unhashable (gas/aerosol are raw tuple elements) or pollutes the
+        global instance cache by trace identity (sfc_* via _hashable). The
+        trained surface knobs reach RRTMGP only through the per-call
+        spatial-surface override path, never through the scalar config wiring.
+        (codex review 2026-06-13, rounds 5-7.)"""
+        from legoesm.training.aimip_params import AIMIPClassicalParams
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        base = RRTMGPConfig()
+        cfg = AIMIPClassicalParams.from_defaults().to_rrtmgp_config()
+        for field in (
+            "co2_ppmv", "ch4_ppbv", "n2o_ppbv", "aerosol_ssa", "aerosol_g",
+            "sfc_emissivity", "sfc_albedo", "sfc_albedo_direct",
+        ):
+            got, want = getattr(cfg, field), getattr(base, field)
+            assert got == want, (
+                f"RRTMGPConfig.{field} is a solver-cache-key field and must stay "
+                f"frozen at the default {want!r}, got {got!r}"
+            )
+
 
 # ===========================================================================
 # Microphysics

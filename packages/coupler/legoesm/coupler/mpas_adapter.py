@@ -52,11 +52,11 @@ def make_mpas_tile_config(
 
 def init_mpas_surface_state(
     nCells: int,
-    T_soil_init: float = 280.0,
-    W_bucket_init: float = 75.0,
-    T_epi_init: float = 285.0,
-    T_hypo_init: float = 278.0,
-    T_ice_init: float = 260.0,
+    T_soil_init: float = 280.0,  # coeff-ok: initial condition [K]
+    W_bucket_init: float = 75.0,  # coeff-ok: initial condition [kg/m^2]
+    T_epi_init: float = 285.0,  # coeff-ok: initial condition [K]
+    T_hypo_init: float = 278.0,  # coeff-ok: initial condition [K]
+    T_ice_init: float = 260.0,  # coeff-ok: initial condition [K]
     land_config=None,
 ):
     """Initialize surface state for MPAS-shaped fields.

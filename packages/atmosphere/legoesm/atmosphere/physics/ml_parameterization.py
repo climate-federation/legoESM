@@ -35,6 +35,18 @@ from legoesm.ml.physics.model import (
 )
 
 
+__param_spec__ = {
+    "PhysicsParameterizationAssets": {
+        "scheme_key": "atm.ml_param.PhysicsParameterizationAssets",
+        "excluded": {
+        },
+        "params": {
+            "max_diffusivity": {"units": "m^2/s", "bounds": (165.0, 1500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "diffusivity", "reference": "stability clip on ML-predicted vertical eddy diffusivity", "shape": None},
+        },
+    },
+}
+
+
 class PhysicsParameterizationAssets(NamedTuple):
     """Loaded joint ML model and normalization stats."""
 

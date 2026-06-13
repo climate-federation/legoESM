@@ -43,6 +43,15 @@ from legoesm.atmosphere.physics.microphysics.output import (
 )
 
 
+# Diffusivity + Cooper nucleation + fall-speed caps (fixed).
+_RHO_FLOOR = 0.1
+_DV_PREFACTOR = 8.794e-5
+_DV_T_EXP = 1.81
+_COOPER_EXP_CAP = 80.0
+_VT_CLIP_FROZEN = 5.0
+_VT_CLIP_GRAUPEL = 30.0
+_VT_CLIP_RAIN = 20.0
+
 def _gamma_ratio(mu):
     """Gamma(mu+4)/Gamma(mu+1) = (mu+3)(mu+2)(mu+1) for integer-like mu."""
     return (mu + 3.0) * (mu + 2.0) * (mu + 1.0)
@@ -142,10 +151,10 @@ def thompson_microphysics(
     # finite cap. Mirrors ``morrison.py`` (which has always capped here).
     N_i_target = jnp.minimum(
         config.N_i0 * jnp.exp(
-            jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), 80.0)
+            jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), _COOPER_EXP_CAP)
         ),
         config.N_i_nuc_max,
-    ) / jnp.clip(rho, 0.1)
+    ) / jnp.clip(rho, _RHO_FLOOR)
     dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_ice
 
     # === Ice depositional growth / sublimation ===
@@ -157,7 +166,7 @@ def thompson_microphysics(
     #   ABI = 1 + (dq_sat_i/dT)·L_s/c_p  psychrometric correction
     #   CONS12 = ρ_ci·π  (mass–size for spherical ice, m = (ρ_ci·π/6)·D³)
     cons12_cbrt = (config.rho_cloud_ice * jnp.pi) ** (1.0 / 3.0)
-    dv_vap = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p_full, 1.0)
+    dv_vap = _DV_PREFACTOR * safe_pow(T, _DV_T_EXP) / jnp.clip(p_full, 1.0)
     dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)
     abi = 1.0 + dqsidt * constants.L_s / constants.c_pd
     if config.ice_growth_scheme == "capacitance":
@@ -373,11 +382,11 @@ def thompson_microphysics(
     # Marshall-Palmer fall speeds use fractional exponents (b_v_x in
     # [0.25, 0.5]); guard the AD path with safe_pow.
     rho_sfc = rho[:, -1:]
-    rho_ratio = rho / jnp.clip(rho_sfc, 0.1)
+    rho_ratio = rho / jnp.clip(rho_sfc, _RHO_FLOOR)
     V_t_r = config.a_v_r * safe_pow(jnp.clip(q_r, 0.0) * rho_ratio, config.b_v_r)
-    V_t_r = jnp.clip(V_t_r, 0.0, 20.0)
+    V_t_r = jnp.clip(V_t_r, 0.0, _VT_CLIP_RAIN)
     V_t_i = config.a_v_i * safe_pow(jnp.clip(q_i, 0.0) * rho_ratio, config.b_v_i)
-    V_t_i = jnp.clip(V_t_i, 0.0, 5.0)
+    V_t_i = jnp.clip(V_t_i, 0.0, _VT_CLIP_FROZEN)
     if config.snow_scheme == "thompson2008":
         # FAITHFUL Thompson-2008 mass-weighted snow fall speed from the bimodal
         # PSD (Field-2005 moments + density correction) — replaces the capped
@@ -386,9 +395,9 @@ def thompson_microphysics(
         V_t_s = _thompson_snow_fall_speed(q_s, rho, T)
     else:
         V_t_s = config.a_v_s * safe_pow(jnp.clip(q_s, 0.0) * rho_ratio, config.b_v_s)
-        V_t_s = jnp.clip(V_t_s, 0.0, 5.0)
+        V_t_s = jnp.clip(V_t_s, 0.0, _VT_CLIP_FROZEN)
     V_t_g = config.a_v_g * safe_pow(jnp.clip(q_g, 0.0) * rho_ratio, config.b_v_g)
-    V_t_g = jnp.clip(V_t_g, 0.0, 30.0)
+    V_t_g = jnp.clip(V_t_g, 0.0, _VT_CLIP_GRAUPEL)
 
     # Joint donor caps: each `extra_sink` is the in-column sink that
     # shares the same explicit-Euler step as sedimentation.  Without

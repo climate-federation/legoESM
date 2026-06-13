@@ -73,6 +73,9 @@ _EPS_DIV = 1e-10
 _S_GRAD_FLOOR = 1.0e-3
 
 
+# Default GM/Redi taper transition width (fraction of taper range).
+_DEFAULT_TAPER_WIDTH_FRAC = 0.1
+
 def _kappa_is_interface_3d(kappa, nlev: int) -> bool:
     """True iff ``kappa`` is a depth-resolved *interface* (W-grid) diffusivity.
 
@@ -878,7 +881,7 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     kappa_GM,
     kappa_Redi,
     S_max: float,
-    taper_width_frac: float = 0.1,
+    taper_width_frac: float = _DEFAULT_TAPER_WIDTH_FRAC,
     implicit_K33: bool = False,
     K_iso_steep: float = 0.0,
     slope_density: str = "in_situ",

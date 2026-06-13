@@ -47,6 +47,48 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 
+__param_spec__ = {
+    "GeometricConfig": {
+        "scheme_key": "ocean.eke.geometric",
+        "excluded": {
+            "e0_per_depth": "numerics: floor/cap",
+            "mn_floor": "numerics: floor/cap",
+        },
+        "params": {
+            "alpha": {"units": "1", "bounds": (0.0132, 0.12), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "c_eps_geometric": {"units": "1", "bounds": (0.00726, 0.066), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "gamma_n": {"units": "1", "bounds": (0.1155, 1.05), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "kappa_e": {"units": "1", "bounds": (165.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "kappa_gm_max": {"units": "1", "bounds": (4950.0, 45000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "kappa_gm_min": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "kappa_n_max": {"units": "1", "bounds": (4950.0, 45000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "kappa_n_min": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "kappa_u": {"units": "1", "bounds": (495.0, 4500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "l_mix_max": {"units": "1", "bounds": (13200.0, 120000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "r_d_max": {"units": "1", "bounds": (13200.0, 120000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "r_d_min": {"units": "1", "bounds": (660.0, 6000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+            "rossby_factor": {"units": "1", "bounds": (0.132, 1.2), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "GEOMETRIC eddy energy (Marshall et al. 2012)", "shape": None},
+        },
+    },
+    "EKEConfig": {
+        "scheme_key": "ocean.eke.eke",
+        "excluded": {
+            "e_min": "numerics: floor/cap",
+            "l_min": "numerics: floor/cap",
+        },
+        "params": {
+            "alpha_eke": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
+            "c_eps": {"units": "1", "bounds": (0.165, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
+            "c_k": {"units": "1", "bounds": (0.132, 1.2), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
+            "eke_crhin": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
+            "eke_cross": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
+            "k_iso": {"units": "1", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
+            "kappa_gm_max": {"units": "1", "bounds": (3300.0, 30000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "prognostic EKE", "shape": None},
+        },
+    },
+}
+
+
 class GeometricConfig(NamedTuple):
     """Torres et al. (2025, JAMES, doi:10.1029/2025MS005394) GEOMETRIC
     mesoscale-EKE closure parameters — the authors' hand-calibrated values

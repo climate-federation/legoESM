@@ -17,11 +17,21 @@ from legoesm.tuning import TUNING_PARAMETERS
 
 
 class ParamConstraint(NamedTuple):
-    """Constraint for a single parameter."""
+    """Constraint for a single trainable parameter.
+
+    ``min_val``/``max_val`` are scalars for a scalar parameter, or equal-length
+    tuples for per-element bounds on an array parameter. ``shape`` is the resolved
+    concrete array shape (``()`` = scalar). ``scheme_key``/``field`` carry the
+    parameter's scheme-qualified identity so trained values can be routed back to
+    the owning ``*Config`` via :meth:`TrainablePhysicsParams.to_overrides`
+    (empty for the legacy flat parameters, which use ``to_segment_kwargs``)."""
     name: str
-    min_val: float
-    max_val: float
+    min_val: float | tuple[float, ...]
+    max_val: float | tuple[float, ...]
     transform: str  # "softplus" (positive), "sigmoid" (bounded), "none"
+    shape: tuple[int, ...] = ()
+    scheme_key: str = ""
+    field: str = ""
 
 
 # Default trainable parameters (the ones already traced through build_segment_fn)
@@ -120,17 +130,34 @@ def trainable_constraints_for_scheme(
     return constraints
 
 
-def sigmoid_to_range(raw: jax.Array, lo: float, hi: float) -> jax.Array:
-    """Map unconstrained raw value to [lo, hi] via sigmoid."""
+def sigmoid_to_range(raw: jax.Array, lo, hi) -> jax.Array:
+    """Map unconstrained raw value(s) to [lo, hi] via sigmoid.
+
+    ``lo``/``hi`` may be scalars (broadcast over an array ``raw``) or tuples /
+    arrays of per-element bounds; conversion through ``jnp.asarray`` keeps the
+    transform elementwise and differentiable for array parameters."""
+    lo = jnp.asarray(lo, dtype=raw.dtype)
+    hi = jnp.asarray(hi, dtype=raw.dtype)
     return lo + (hi - lo) * jax.nn.sigmoid(raw)
 
 
 def range_to_sigmoid(val: float, lo: float, hi: float) -> float:
-    """Inverse: map [lo, hi] value to unconstrained raw (logit)."""
+    """Inverse (scalar): map a [lo, hi] value to unconstrained raw (logit)."""
     t = (val - lo) / (hi - lo)
     t = max(min(t, 0.999), 0.001)  # clamp for numerical stability
     import math
     return math.log(t / (1.0 - t))
+
+
+def range_to_sigmoid_array(val: jax.Array, lo, hi) -> jax.Array:
+    """Inverse (array-safe): map [lo, hi] value(s) to unconstrained raw (logit),
+    elementwise, with the same 0.001/0.999 clamp as the scalar form. Used by the
+    spec collector to seed array-valued raw parameters."""
+    val = jnp.asarray(val)
+    lo = jnp.asarray(lo, dtype=val.dtype)
+    hi = jnp.asarray(hi, dtype=val.dtype)
+    t = jnp.clip((val - lo) / (hi - lo), 0.001, 0.999)
+    return jnp.log(t / (1.0 - t))
 
 
 class TrainablePhysicsParams(eqx.Module):
@@ -200,5 +227,35 @@ class TrainablePhysicsParams(eqx.Module):
         return result
 
     def to_segment_kwargs(self) -> dict[str, jax.Array]:
-        """Return kwargs compatible with build_segment_fn."""
-        return self.as_dict()
+        """Return kwargs compatible with ``build_segment_fn`` (legacy flat path).
+
+        Emits ``{legacy_flat_name: value}``. A spec-collected parameter that has
+        no flat ``build_segment_fn`` alias (``scheme_key`` set, no legacy name)
+        cannot be injected this way — use :meth:`to_overrides` +
+        ``param_collector.apply_param_overrides`` instead. Such a parameter raises
+        ``ValueError`` here rather than being silently dropped."""
+        values = self.as_dict()
+        scheme_qualified = [c.name for c in self.constraints if c.scheme_key]
+        if scheme_qualified:
+            raise ValueError(
+                "to_segment_kwargs() cannot inject scheme-qualified parameters "
+                f"{scheme_qualified}; use to_overrides() with "
+                "param_collector.apply_param_overrides(). Only legacy flat "
+                "parameters (no scheme_key) are routable as segment kwargs."
+            )
+        return values
+
+    def to_overrides(self) -> dict[str, dict[str, jax.Array]]:
+        """Return ``{scheme_key: {config_field: constrained_value}}`` for the
+        spec-collected parameters, ready for
+        ``param_collector.apply_param_overrides(physics_config, overrides)`` to
+        splice into the owning ``*Config`` NamedTuples inside the loss. Legacy
+        flat parameters (no ``scheme_key``) are skipped (they use
+        :meth:`to_segment_kwargs`)."""
+        values = self.as_dict()
+        out: dict[str, dict[str, jax.Array]] = {}
+        for c in self.constraints:
+            if not c.scheme_key or not c.field:
+                continue
+            out.setdefault(c.scheme_key, {})[c.field] = values[c.name]
+        return out

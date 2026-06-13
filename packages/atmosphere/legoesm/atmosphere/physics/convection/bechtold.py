@@ -65,6 +65,11 @@ from legoesm.atmosphere.physics.convection._plume import (
 __all__ = ("bechtold_convection",)
 
 
+# --- pspec autoblock
+_BECHTOLD_RH_CAP = 1.3
+_BECHTOLD_RH_ENTR = 1.3
+_BECHTOLD_RH_DETR = 1.6
+
 def bechtold_convection(
     T: jax.Array,
     q_v: jax.Array,
@@ -135,7 +140,7 @@ def bechtold_convection(
     # parcel is not actually mass weighted").
     dp_full = p_half[:, 1:] - p_half[:, :-1]
     pbl_weight = smooth_level_indicator(
-        z, threshold=config.cape_pbl_depth, sharpness=2.0e-3,
+        z, threshold=config.cape_pbl_depth, sharpness=2.0e-3,  # coeff-ok: CAPE PBL-depth gate sharpness
         direction="below",
     )                                                       # (ncol, nlev)
     pbl_mass_weight = pbl_weight * dp_full
@@ -292,7 +297,7 @@ def bechtold_convection(
     # troposphere and detrains near cloud top instead of diluting the
     # updraught to neutral buoyancy in the lower troposphere.
     q_sat_env = saturation_mixing_ratio(T, p_full)               # (ncol, nlev)
-    RH = jnp.clip(q_v / jnp.maximum(q_sat_env, 1e-12), 0.0, 1.3)
+    RH = jnp.clip(q_v / jnp.maximum(q_sat_env, 1e-12), 0.0, _BECHTOLD_RH_CAP)
     # Saturation at the lowest model level (surface-last index −1) is the
     # IFS departure-level base for the f_scale vertical scaling.  This is
     # the lowest-model-level convention, not the LCL/cloud-base level; the
@@ -302,8 +307,8 @@ def bechtold_convection(
     # base would give.
     q_sat_base = q_sat_env[:, -1:]
     f_scale = jnp.clip(q_sat_env / jnp.maximum(q_sat_base, 1e-12), 0.0, 1.0) ** 3
-    rh_entr = jnp.clip(1.3 - RH, 0.0, None)                       # eq 6.7
-    rh_detr = jnp.clip(1.6 - RH, 0.0, None)                       # eq 6.8 / 6.9
+    rh_entr = jnp.clip(_BECHTOLD_RH_ENTR - RH, 0.0, None)                       # eq 6.7
+    rh_detr = jnp.clip(_BECHTOLD_RH_DETR - RH, 0.0, None)                       # eq 6.8 / 6.9
     entr_factor = rh_entr * f_scale                              # (ncol, nlev)
     # Per-class entrainment ε₀ (shallow carries the f_ε=2 factor in its
     # config default); every class entrains with the same height factor
@@ -378,7 +383,7 @@ def bechtold_convection(
         plume.T_u, plume.q_u, plume.q_c_u, M_u_new,
         z, rho, dlt_profile, M_u_max=config.M_b_max,
     )
-    rho_safe = jnp.clip(rho, 0.01, None)
+    rho_safe = jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
     p_gate_qc = stratosphere_mass_flux_gate(p_full)
     dq_c_conv_dt = (
         dlt_profile * M_u_new * p_gate_qc * plume.q_c_u / rho_safe

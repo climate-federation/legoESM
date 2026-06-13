@@ -26,7 +26,12 @@ _POLE_THRESHOLD = 1.0e-7
 from legoesm import constants
 
 
-def solar_declination(day_of_year: float, obliquity: float = 23.45) -> float:
+# Earth orbital / calendar constants (fixed).
+_EARTH_OBLIQUITY_DEG = 23.45
+_SOLSTICE_OFFSET_DAYS = 80.0
+_DAYS_PER_YEAR = 365.0
+
+def solar_declination(day_of_year: float, obliquity: float = _EARTH_OBLIQUITY_DEG) -> float:
     """Compute solar declination angle.
 
     delta = obliquity * sin(2*pi * (day_of_year - 80) / 365)
@@ -46,7 +51,7 @@ def solar_declination(day_of_year: float, obliquity: float = 23.45) -> float:
         Solar declination [radians].
     """
     obliquity_rad = obliquity * constants.DEG_TO_RAD
-    return obliquity_rad * jnp.sin(2.0 * jnp.pi * (day_of_year - 80.0) / 365.0)
+    return obliquity_rad * jnp.sin(2.0 * jnp.pi * (day_of_year - _SOLSTICE_OFFSET_DAYS) / _DAYS_PER_YEAR)
 
 
 def cos_zenith_angle(
@@ -54,7 +59,7 @@ def cos_zenith_angle(
     lon: jnp.ndarray,
     day_of_year: float,
     hour: float,
-    obliquity: float = 23.45,
+    obliquity: float = _EARTH_OBLIQUITY_DEG,
 ) -> jnp.ndarray:
     """Compute cosine of the solar zenith angle.
 
@@ -82,7 +87,7 @@ def cos_zenith_angle(
     """
     delta = solar_declination(day_of_year, obliquity)
     # Hour angle: h = 2*pi * (hour/24 + lon/(2*pi)) - pi
-    h = 2.0 * jnp.pi * (hour / 24.0) + lon - jnp.pi
+    h = 2.0 * jnp.pi * (hour / 24.0) + lon - jnp.pi  # coeff-ok: hours/day diurnal phase
 
     cos_z = (
         jnp.sin(lat) * jnp.sin(delta)
@@ -95,7 +100,7 @@ def daily_mean_insolation(
     lat: jnp.ndarray,
     day_of_year: float,
     S_0: float = constants.S_0,
-    obliquity: float = 23.45,
+    obliquity: float = _EARTH_OBLIQUITY_DEG,
 ) -> jnp.ndarray:
     """Compute daily-mean insolation at the top of atmosphere.
 
@@ -184,7 +189,7 @@ def daily_mean_insolation(
 def daylight_fraction(
     lat: jnp.ndarray,
     day_of_year: float,
-    obliquity: float = 23.45,
+    obliquity: float = _EARTH_OBLIQUITY_DEG,
 ) -> jnp.ndarray:
     """Fraction of the day with sunlight (h_s / pi).
 

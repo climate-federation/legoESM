@@ -561,7 +561,7 @@ def _a_si(cfg: AhmedNeelinDCAConfig) -> float:
     """
     rho_w = constants.rho_water  # density of liquid water [kg/m³]
     # 1 mm/h of rain = (rho_w * 1e-3 m) / 3600 s = rho_w / 3.6e6 kg/m²/s
-    return cfg.a_mm_per_hr * rho_w / 3.6e6
+    return cfg.a_mm_per_hr * rho_w / 3.6e6  # coeff-ok: mm/hr -> kg/m^2/s
 
 
 def _precip_from_BL(

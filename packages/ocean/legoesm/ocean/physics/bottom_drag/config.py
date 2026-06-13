@@ -4,6 +4,33 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+__param_spec__ = {
+    "LinearDragConfig": {
+        "scheme_key": "ocean.bottom_drag.linear",
+        "excluded": {},
+        "params": {
+            "r": {
+                "units": "m/s", "bounds": (1.0e-4, 5.0e-3), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "MITgcm bottomDragLinear (default 1.1e-3 m/s)",
+                "shape": None,
+            },
+        },
+    },
+    "QuadraticDragConfig": {
+        "scheme_key": "ocean.bottom_drag.quadratic",
+        "excluded": {},
+        "params": {
+            "C_d": {
+                "units": "1", "bounds": (1.0e-3, 5.0e-3), "tunable_tier": 1,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "quadratic bottom-drag coefficient (default 2.5e-3)",
+                "shape": None,
+            },
+        },
+    },
+}
+
 
 class LinearDragConfig(NamedTuple):
     """Linear bottom drag: du/dt = -r * u / dz_bottom.

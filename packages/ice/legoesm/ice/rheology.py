@@ -48,6 +48,12 @@ from legoesm.grids.halo import pad_halo_vector
 from legoesm.grids.halo_latlon import pad_halo_vector_latlon
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh
+from legoesm.ice.config import SeaIceConfig
+
+# Canonical EVP rheology defaults live on SeaIceConfig (single source of truth
+# callers pass in); kwarg signatures default to these so no empirical literal is
+# buried in a signature.
+_RHEO_DEFAULTS = SeaIceConfig()
 
 
 def _is_latlon_grid(grid) -> bool:
@@ -143,8 +149,8 @@ def _strain_rates_voronoi(
 def ice_strength(
     h: jnp.ndarray,
     A: jnp.ndarray,
-    P_star: float = 2.75e4,
-    C_strength: float = 20.0,
+    P_star: float = _RHEO_DEFAULTS.P_star,
+    C_strength: float = _RHEO_DEFAULTS.C_strength,
 ) -> jnp.ndarray:
     """Compute ice strength following Hibler (1979).
 

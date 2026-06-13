@@ -127,7 +127,7 @@ def bbl_static_geometry(h_ref: jnp.ndarray, land_mask: jnp.ndarray
     """
     h = jnp.asarray(h_ref, dtype=jnp.float64)
     mask = jnp.asarray(land_mask, dtype=jnp.float64)
-    wet3 = h > 1.0e-3
+    wet3 = h > 1.0e-3  # coeff-ok: wet-cell thickness floor [m]
     n_active = jnp.sum(wet3.astype(jnp.int32), axis=-1)          # (ny, nx)
     bot_k = jnp.maximum(n_active - 1, 0)                          # bottom index
     # mid-cell depths + bottom-cell depth/thickness per column
@@ -234,7 +234,7 @@ def apply_bbl_adv_tendency(dT_dt, dS_dt, T, S, h_k, area, geom: BBLGeometry,
     ``nlev`` must be a static Python int (the per-level loop is unrolled).
     All scatter updates use ``.at[].add`` — pure JAX, jit/grad safe.
     """
-    a3 = area[..., None] * jnp.maximum(h_k, 1.0e-3)   # cell volumes (..., nl)
+    a3 = area[..., None] * jnp.maximum(h_k, 1.0e-3)   # cell volumes — coeff-ok: thickness floor [m]
     inv_v = 1.0 / a3
 
     def _apply(dpt, pt, tr, axis):
@@ -348,7 +348,7 @@ def apply_bbl_adv_step(state, geom: BBLGeometry, dt: float, *,
     # pathological tiny-area/extreme-drho faces. Sign/zero pattern kept.
     area = jnp.asarray(area_2d, dtype=jnp.float64)
     e3_bot = jnp.take_along_axis(h_k, geom.bot_k[..., None], axis=-1)[..., 0]
-    V_bot = area * jnp.maximum(e3_bot, 1.0e-3)
+    V_bot = area * jnp.maximum(e3_bot, 1.0e-3)  # coeff-ok: bottom-cell thickness floor [m]
     cap_u = 0.25 * jnp.minimum(V_bot[:, :-1], V_bot[:, 1:]) / dt
     cap_v = 0.25 * jnp.minimum(V_bot[:-1, :], V_bot[1:, :]) / dt
     utr = jnp.sign(utr) * jnp.minimum(jnp.abs(utr), cap_u)

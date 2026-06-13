@@ -99,6 +99,12 @@ __physics_contract__ = {
 _FOUR_PI = 4.0 * jnp.pi
 
 
+# Beard-Pruppacher ventilation factor constants (fixed).
+_VENT_RE_THRESHOLD = 2.5
+_VENT_LOW_C = 0.108
+_VENT_HIGH_C0 = 0.78
+_VENT_HIGH_C1 = 0.308
+
 def vapor_diffusivity(
     T: jax.Array, p: jax.Array, config: FastSBMConfig = FastSBMConfig()
 ) -> jax.Array:
@@ -136,7 +142,7 @@ def ventilation_factor(
     r = radius_from_mass(masses, rho_bulk)
     reynolds = 2.0 * r * v_term / nu
     x = jnp.sqrt(reynolds) * schmidt ** (1.0 / 3.0)
-    f = jnp.where(reynolds < 2.5, 1.0 + 0.108 * x * x, 0.78 + 0.308 * x)
+    f = jnp.where(reynolds < _VENT_RE_THRESHOLD, 1.0 + _VENT_LOW_C * x * x, _VENT_HIGH_C0 + _VENT_HIGH_C1 * x)
     return jnp.minimum(f, config.ventilation_max)
 
 

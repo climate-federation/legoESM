@@ -15,6 +15,29 @@ from __future__ import annotations
 from typing import NamedTuple
 
 
+__param_spec__ = {
+    "SDMConfig": {
+        "scheme_key": "atm.sdm.SDMConfig",
+        "excluded": {
+            "adaptive_cfl": "numerics: adaptive-substep CFL (dt = cfl/|tau|), solver control",
+            "adaptive_stol": "numerics: ERF steady-state exit tolerance (solver convergence)",
+            "newton_atol": "numerics: Newton absolute-residual exit tolerance",
+            "newton_rtol": "numerics: Newton relative-residual exit tolerance",
+            "newton_stol": "numerics: Newton step-size exit tolerance (solver convergence)",
+            "column_n_rain_floor": "numerics: fallback rain number when reconstructed Nr<=0 (degenerate-case floor, not a closure)",
+        },
+        "params": {
+            "cdnc": {"units": "1/m^3", "bounds": (33000000.0, 300000000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "droplet_number", "reference": "Shima et al. (2009) prescribed cloud-droplet number", "shape": None},
+            "golovin_b": {"units": "1/s", "bounds": (495.0, 4500.0), "tunable_tier": 1, "transform": "sigmoid", "category": "collision_coalescence", "reference": "Golovin (1963) additive coalescence kernel coefficient", "shape": None},
+            "r_rain": {"units": "m", "bounds": (1.32e-05, 0.00012), "tunable_tier": 2, "transform": "sigmoid", "category": "size_threshold", "reference": "cloud/rain droplet-radius partition (40 um)", "shape": None},
+            "r_min_reconstruct": {"units": "m", "bounds": (3.3e-07, 3e-06), "tunable_tier": 3, "transform": "sigmoid", "category": "size_reconstruction", "reference": "minimum reconstructed mean-droplet radius", "shape": None},
+            "solute_ionization": {"units": "1", "bounds": (0.66, 6.0), "tunable_tier": 3, "transform": "sigmoid", "category": "kohler", "reference": "van 't Hoff factor i (NaCl=2)", "shape": None},
+            "solute_molar_mass": {"units": "kg/mol", "bounds": (0.0192852, 0.17532), "tunable_tier": 3, "transform": "sigmoid", "category": "kohler", "reference": "aerosol solute molar mass (NaCl=0.05844)", "shape": None},
+        },
+    },
+}
+
+
 class SDMConfig(NamedTuple):
     """Super-Droplet Method configuration.
 

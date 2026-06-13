@@ -16,6 +16,14 @@ import jax.numpy as jnp
 from legoesm.ocean.physics.surface_forcing.config import PrescribedForcingConfig
 
 
+# Idealized analytic wind-stress profile constants (fixed scheme defaults).
+_TAU_MAX_NORM = 0.1
+_JET_LAT_DEG = 50.0
+_JET_WIDTH_DEG = 12.0
+_TROPICAL_WIDTH_DEG = 15.0
+_TROPICAL_LAT_DEG = 15.0
+_WP_C0, _WP_C1, _WP_C2, _WP_C3 = 0.08, 0.0397, 1.9487, 2.0397  # zonal-stress polynomial
+
 def compute_wind_stress(
     lat: jnp.ndarray,
     cfg: PrescribedForcingConfig,
@@ -162,9 +170,9 @@ def compute_wind_stress(
         # Scaled by tau_max/0.1 so the default tau_max=0.1 gives
         # the reference amplitudes above.
         s2 = jnp.sin(lat) ** 2
-        scale = cfg.tau_max / 0.1
+        scale = cfg.tau_max / _TAU_MAX_NORM
         tau_x = scale * (
-            -0.08 - 0.0397 * s2 + 1.9487 * s2**2 - 2.0397 * s2**3
+            -_WP_C0 - _WP_C1 * s2 + _WP_C2 * s2**2 - _WP_C3 * s2**3
         ) * jnp.cos(lat)
         tau_y = jnp.zeros_like(tau_x)
     elif cfg.wind_profile == "two_belt":
@@ -184,9 +192,9 @@ def compute_wind_stress(
         #   - Smooth Gaussian decay toward poles (no polar easterlies)
         #   - Zero crossing at ~27 deg latitude
         #   - Meaningful wind stress over Drake Passage (55-80 deg S)
-        phi_jet = jnp.radians(50.0)
-        sigma_w = jnp.radians(12.0)
-        sigma_t = jnp.radians(15.0)
+        phi_jet = jnp.radians(_JET_LAT_DEG)
+        sigma_w = jnp.radians(_JET_WIDTH_DEG)
+        sigma_t = jnp.radians(_TROPICAL_WIDTH_DEG)
         abs_lat = jnp.abs(lat)
         tau_trade = -0.5 * cfg.tau_max * jnp.exp(-(lat / sigma_t) ** 2)
         tau_west = cfg.tau_max * jnp.exp(
@@ -203,7 +211,7 @@ def compute_wind_stress(
     _tw_scale = getattr(cfg, "tropical_wind_scale", 1.0)
     if _tw_scale != 1.0:
         _tw_sigma = jnp.radians(
-            getattr(cfg, "tropical_wind_lat_deg", 15.0)
+            getattr(cfg, "tropical_wind_lat_deg", _TROPICAL_LAT_DEG)
         )
         # Gaussian: 1 at equator → 0 at ±sigma.
         # scale_factor = 1 + (tropical_wind_scale - 1) * exp(-lat²/sigma²)

@@ -38,6 +38,10 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
 )
 
 
+# Fixed SB fall-speed constants.
+_RHO_FLOOR = 0.1
+_VT_CLIP_RAIN = 20.0
+
 def seifert_beheng_microphysics(
     T: jax.Array,
     q_v: jax.Array,
@@ -122,9 +126,9 @@ def seifert_beheng_microphysics(
     # has fractional exponent (b_v_r=0.5); guard the AD path with safe_pow.
     rho_sfc = rho[:, -1:]
     V_t_r = config.a_v_r * safe_pow(
-        jnp.clip(q_r, 0.0) * rho / jnp.clip(rho_sfc, 0.1), config.b_v_r,
+        jnp.clip(q_r, 0.0) * rho / jnp.clip(rho_sfc, _RHO_FLOOR), config.b_v_r,
     )
-    V_t_r = jnp.clip(V_t_r, 0.0, 20.0)
+    V_t_r = jnp.clip(V_t_r, 0.0, _VT_CLIP_RAIN)
     # Joint q_r donor cap: pass evaporation as ``extra_sink`` so sed +
     # evap together cannot remove more rain than is locally available
     # (codex iter-29 #1).

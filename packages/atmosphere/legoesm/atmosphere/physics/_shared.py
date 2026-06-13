@@ -514,4 +514,4 @@ def diagnose_grid_w_from_omega(
         eps = R_d / constants.R_v
         T_v = T * (1.0 + (1.0 / eps - 1.0) * q_v)
     rho = p_full / (R_d * jnp.clip(T_v, 1.0, None))
-    return -omega / jnp.clip(rho * g, 1e-3, None)
+    return -omega / jnp.clip(rho * g, 1e-3, None)  # coeff-ok: rho*g floor for w-from-omega

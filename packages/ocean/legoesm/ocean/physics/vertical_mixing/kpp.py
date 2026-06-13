@@ -40,6 +40,11 @@ from legoesm.ocean.vertical import OceanZStarCoordinate
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
 
+# Monin-Obukhov similarity (Businger-Dyer) + surface u* constants (fixed).
+_USTAR_SPEED_RATIO = 0.01
+_BUSINGER_UNSTABLE_COEFF = 16.0
+_BUSINGER_STABLE_COEFF = 5.0
+
 def _boundary_layer_depth(
     rho: jnp.ndarray,
     u: jnp.ndarray,
@@ -208,7 +213,7 @@ def kpp_vertical_mixing(
     else:
         # Simplified proxy: u_star ~ 0.01 * |U_surface|
         speed_sfc = jnp.sqrt(u[..., 0]**2 + v[..., 0]**2 + eps)
-        u_star = jnp.maximum(speed_sfc * 0.01, 1e-4)
+        u_star = jnp.maximum(speed_sfc * _USTAR_SPEED_RATIO, 1e-4)  # coeff-ok: u_star floor [m/s]
 
     # --- Surface buoyancy flux ---
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
@@ -279,7 +284,7 @@ def kpp_vertical_mixing(
     Bf_pos = jnp.maximum(B_f[..., jnp.newaxis], 0.0)
     is_unstable = B_f[..., jnp.newaxis] > 0.0
 
-    base16 = jnp.maximum(1.0 + 16.0 * abs_zeta, 1.0)
+    base16 = jnp.maximum(1.0 + _BUSINGER_UNSTABLE_COEFF * abs_zeta, 1.0)
     w_m_weak = kappa * ustar_e * jnp.power(base16, 0.25)
     w_s_weak = kappa * ustar_e * jnp.power(base16, 0.5)
     # Convective scales (kappa OUTSIDE the cube root).  The floored base
@@ -301,7 +306,7 @@ def kpp_vertical_mixing(
     # so ``zeta_kpp < 0``; ``max(-zeta_kpp, 0)`` lets the magnitude of
     # zeta drive the suppression (codex review iter-1 finding #4).
     w_stable = (kappa * ustar_e
-                / jnp.maximum(1.0 + 5.0 * jnp.maximum(-zeta_kpp, 0.0), 1.0))
+                / jnp.maximum(1.0 + _BUSINGER_STABLE_COEFF * jnp.maximum(-zeta_kpp, 0.0), 1.0))
     w_m = jnp.maximum(jnp.where(is_unstable, w_m_unstable, w_stable), 1e-10)
     w_s = jnp.maximum(jnp.where(is_unstable, w_s_unstable, w_stable), 1e-10)
 
