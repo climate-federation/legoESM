@@ -263,11 +263,16 @@ def validate_param_spec(
     for cls_name in spec:
         if cls_name not in required and cls_name not in eligible:
             errors.append(f"spec names class {cls_name!r} with no float fields")
-    for cls_name, fields in required.items():
+    # Validate every class that is required OR eligible (the latter covers a class
+    # whose float fields all default to ``constants.X`` — it is not FORCED into the
+    # spec, but if it appears it must still be fully schema-validated, not skipped).
+    for cls_name in sorted(set(required) | set(eligible)):
+        fields = required.get(cls_name, {})
         cls_eligible = eligible.get(cls_name, set(fields))
         if cls_name not in spec:
-            errors.append(f"class {cls_name!r} is spec-required but absent from spec")
-            continue
+            if cls_name in required:
+                errors.append(f"class {cls_name!r} is spec-required but absent from spec")
+            continue  # an eligible-only class is optional in the spec
         entry = spec[cls_name]
         if not isinstance(entry, dict):
             errors.append(f"{cls_name}: entry must be a dict")
@@ -653,6 +658,29 @@ def test_constants_default_field_is_spec_eligible_not_required() -> None:
     # a truly non-existent field is still an orphan
     bad = {"C": {"scheme_key": "c", "excluded": {"floor": "x", "ghost": "y"}, "params": {}}}
     assert any("non-float fields" in e for e in validate_param_spec(bad, required, eligible))
+
+
+def test_eligible_only_class_is_still_fully_validated() -> None:
+    """A class whose float fields ALL default to constants.X (required={}, but
+    eligible) must still be schema-validated when it appears in the spec — not
+    silently skipped (else a malformed entry passes CI then fails the collector)."""
+    required: dict = {}
+    eligible = {"C": {"s_new"}}
+    bad = {"C": {"scheme_key": "c", "params": {"s_new": {"units": "PSU"}}}}
+    assert any("missing keys" in e for e in validate_param_spec(bad, required, eligible))
+    good = {
+        "C": {
+            "scheme_key": "c",
+            "params": {
+                "s_new": {
+                    "units": "PSU", "bounds": (1.0, 12.0), "tunable_tier": 2,
+                    "transform": "sigmoid", "category": "closure",
+                    "reference": "r", "shape": None,
+                },
+            },
+        }
+    }
+    assert validate_param_spec(good, required, eligible) == []
 
 
 def test_inclusion_predicate_excludes_constants_and_nonfloat() -> None:
