@@ -374,18 +374,27 @@ def diagnose_liquid_mixing_ratios(
     grid,
     rho: float | jax.Array,
     r_rain: float,
+    r_cloud: float | jax.Array = 0.0,
 ) -> tuple[jax.Array, jax.Array]:
-    """Bin represented liquid to diagnostic ``(q_c, q_r)`` fields [kg/kg]."""
+    """Bin represented liquid to diagnostic ``(q_c, q_r)`` fields [kg/kg].
+
+    ``r_cloud`` excludes unactivated haze from Eulerian cloud diagnostics while
+    leaving that liquid in the particle state for conservation and growth.
+    """
     dtype = state.x.dtype
     rho_grid = _broadcast_cell_field(rho, grid, dtype)
     _, _, _, cell_id = _particle_cell_indices(state, grid)
     mass = represented_water_mass(state.droplets)
-    is_cloud = state.droplets.radius < r_rain
+    r_cloud = jnp.asarray(r_cloud, dtype=dtype)
+    r_rain = jnp.asarray(r_rain, dtype=dtype)
+    is_haze = state.droplets.radius < r_cloud
+    is_rain = state.droplets.radius >= r_rain
+    is_cloud = (~is_haze) & (~is_rain)
     n_cells = grid.cfg.ny * grid.cfg.nx * grid.cfg.nz
     cloud_mass = jnp.zeros((n_cells,), dtype=dtype).at[cell_id].add(
         jnp.where(is_cloud, mass, 0.0))
     rain_mass = jnp.zeros((n_cells,), dtype=dtype).at[cell_id].add(
-        jnp.where(is_cloud, 0.0, mass))
+        jnp.where(is_rain, mass, 0.0))
     cell_air = rho_grid.reshape(-1) * jnp.asarray(
         grid.dx * grid.dy * grid.dz, dtype=dtype)
     qc = (cloud_mass / cell_air).reshape((grid.cfg.ny, grid.cfg.nx, grid.cfg.nz))
@@ -663,7 +672,8 @@ def apply_lagrangian_sdm_to_les_state(
     else:
         dq_liquid = jnp.zeros_like(tracers[..., 0])
 
-    q_c, q_r = diagnose_liquid_mixing_ratios(sdm_state, grid, rho, cfg.r_rain)
+    q_c, q_r = diagnose_liquid_mixing_ratios(
+        sdm_state, grid, rho, cfg.r_rain, r_cloud=cfg.r_cloud)
     tracers = set_diagnostic_liquid_tracers(tracers, q_c, q_r)
     les_state = les_state._replace(theta=theta, tracers=tracers)
     total_water_after = total_water_mass(sdm_state, tracers, grid, rho)

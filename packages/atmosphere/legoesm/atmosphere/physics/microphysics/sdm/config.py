@@ -92,6 +92,12 @@ class SDMConfig(NamedTuple):
     r_rain : float
         Radius threshold [m] separating cloud water from rain when depositing
         super-droplet liquid to grid mixing ratios (ERF default 40 um).
+    r_cloud : float
+        Minimum activated-droplet radius [m] counted as diagnostic Eulerian
+        cloud water by the advected Lagrangian SDM path. Smaller wet aerosol
+        and haze still carry liquid mass, exchange vapor/heat, collide, and
+        conserve total water, but are not written to ``q_c`` where they would
+        make clear air appear cloudy.
     column_do_coalescence : bool
         Opt-in stateless Eulerian column adapter mode. False (default) keeps
         the legacy condensation-only mean-droplet closure. True reconstructs a
@@ -156,3 +162,4 @@ class SDMConfig(NamedTuple):
     column_n_rain_floor: float = 1.0e6   # [1/m^3] fallback rain number
     cdnc: float = 1.0e8                  # [1/m^3] prescribed cloud-droplet number
     r_min_reconstruct: float = 1.0e-6   # [m] min reconstructed mean-droplet radius
+    r_cloud: float = 2.0e-6             # [m] activated-cloud diagnostic threshold

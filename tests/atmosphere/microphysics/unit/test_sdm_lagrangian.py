@@ -270,6 +270,47 @@ def test_particle_binning_diagnoses_cloud_and_rain_slots():
     assert float(qr[0, 0, 0]) == pytest.approx(1.0e6 * _PREF * (1.0e-4)**3 / V)
 
 
+def test_lagrangian_diagnostic_excludes_haze_from_cloud_smear_metric():
+    g = _grid(nx=8, ny=8, nz=4, L=8.0)
+    cfg = SDMConfig()
+    xs, ys, zs = np.meshgrid(
+        (np.arange(g.cfg.nx) + 0.5) * g.dx,
+        (np.arange(g.cfg.ny) + 0.5) * g.dy,
+        np.asarray(g.z_c),
+        indexing="xy",
+    )
+    xyz_haze = (xs.ravel(), ys.ravel(), zs.ravel())
+    xyz = (
+        np.concatenate([xyz_haze[0], [0.5]]),
+        np.concatenate([xyz_haze[1], [0.5]]),
+        np.concatenate([xyz_haze[2], [float(g.z_c[0])]]),
+    )
+    n_haze = xyz_haze[0].size
+    state = _lag_state_slots(
+        g,
+        np.concatenate([np.full(n_haze, 1.0e-6), [3.0e-6]]),
+        np.ones(n_haze + 1) * 1.0e8,
+        np.ones(n_haze + 1),
+        xyz,
+    )
+
+    qc_legacy, _ = diagnose_liquid_mixing_ratios(
+        state, g, rho=1.0, r_rain=cfg.r_rain, r_cloud=0.0)
+    qc_fixed, _ = diagnose_liquid_mixing_ratios(
+        state, g, rho=1.0, r_rain=cfg.r_rain, r_cloud=cfg.r_cloud)
+
+    def intermediate_fraction(qc):
+        peak = jnp.max(qc)
+        return jnp.mean(((qc > 0.01 * peak) & (qc < 0.5 * peak)).astype(jnp.float64))
+
+    assert float(intermediate_fraction(qc_legacy)) > 0.95
+    assert float(intermediate_fraction(qc_fixed)) < 0.05
+    assert float(jnp.count_nonzero(qc_fixed)) == 1.0
+    cell_air = g.dx * g.dy * g.dz
+    assert float(jnp.sum(qc_fixed)) == pytest.approx(
+        1.0e8 * _PREF * (3.0e-6)**3 / cell_air, rel=1e-12)
+
+
 def test_tiny_spectral_les_lagrangian_sdm_smoke_conserves_water():
     g = _grid(nx=4, ny=4, nz=4, L=200.0, n_tracers=3)
     ref = _ref(g, theta0=300.0, qv0=0.02)
