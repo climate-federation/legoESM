@@ -100,14 +100,6 @@ PARAM_SPEC_TODO: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/pbl_height.py",
         # --- ocean ---------------------------------------------------------
-        "packages/ocean/legoesm/ocean/physics/convection/config.py",
-        "packages/ocean/legoesm/ocean/physics/ice_shelf.py",
-        "packages/ocean/legoesm/ocean/physics/lateral_mixing/backscatter.py",
-        "packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py",
-        "packages/ocean/legoesm/ocean/physics/lateral_mixing/eke.py",
-        "packages/ocean/legoesm/ocean/physics/surface_forcing/config.py",
-        "packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py",
-        "packages/ocean/legoesm/ocean/physics/vertical_mixing/tidal.py",
         # --- land ----------------------------------------------------------
     }
 )

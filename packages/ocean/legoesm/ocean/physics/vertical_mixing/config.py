@@ -8,6 +8,77 @@ from legoesm import constants
 from legoesm.ocean.physics.vertical_mixing.tidal import TidalMixingConfig
 
 
+__param_spec__ = {
+    "ConstantVerticalMixingConfig": {
+        "scheme_key": "ocean.vm.constant",
+        "excluded": {
+        },
+        "params": {
+            "A_v": {"units": "1", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
+            "K_v": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "constant vertical mixing", "shape": None},
+        },
+    },
+    "RichardsonVerticalMixingConfig": {
+        "scheme_key": "ocean.vm.richardson",
+        "excluded": {
+        },
+        "params": {
+            "A_bg": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
+            "K_0": {"units": "1", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
+            "K_bg": {"units": "1", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
+            "Pr_t": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
+            "alpha": {"units": "1", "bounds": (1.65, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Pacanowski-Philander Richardson mixing", "shape": None},
+        },
+    },
+    "TKEConfig": {
+        "scheme_key": "ocean.vm.tke",
+        "excluded": {
+            "kappaH_min": "numerics: floor/cap",
+            "kappaM_max": "numerics: floor/cap",
+            "kappaM_min": "numerics: floor/cap",
+            "mxl_min": "numerics: floor/cap",
+            "tke_background": "numerics: floor/cap",
+            "tke_surface_min": "numerics: floor/cap",
+        },
+        "params": {
+            "Prandtl_tke0": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
+            "alpha_tke": {"units": "1", "bounds": (9.9, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
+            "c_eps": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
+            "c_k": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Gaspar TKE vertical mixing", "shape": None},
+        },
+    },
+    "KPPConfig": {
+        "scheme_key": "ocean.vm.kpp",
+        "excluded": {
+            "Cv": "Large 1994 fixed nondim constant",
+            "Ri_conv": "default 0 = disabled/off (enable via config, not training)",
+            "a_m": "Large 1994 fixed nondim constant",
+            "a_s": "Large 1994 fixed nondim constant",
+            "c_b": "Large 1994 fixed nondim constant",
+            "c_m": "Large 1994 fixed nondim constant",
+            "c_s": "Large 1994 fixed nondim constant",
+            "cfl_cap_dt_s": "numerics: solver/CFL/smoothing parameter",
+            "crossing_sharpness": "numerics: solver/CFL/smoothing parameter",
+            "crossing_threshold": "numerics: solver/CFL/smoothing parameter",
+            "epsilon_lmd": "numerics: floor/cap",
+            "gamma_S": "Large 1994 fixed nondim constant",
+            "gamma_T": "Large 1994 fixed nondim constant",
+            "zeta_m_abs": "Large 1994 fixed nondim constant",
+            "zeta_s_abs": "Large 1994 fixed nondim constant",
+        },
+        "params": {
+            "A_bg": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "K_0_shear": {"units": "1", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "K_bg": {"units": "1", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "K_conv": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "K_max": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "Ri_0": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+            "Ri_crit": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KPP (Large et al. 1994)", "shape": None},
+        },
+    },
+}
+
+
 class ConstantVerticalMixingConfig(NamedTuple):
     """Constant-coefficient vertical mixing."""
     A_v: float = 1e-3   # Vertical viscosity [m^2/s]

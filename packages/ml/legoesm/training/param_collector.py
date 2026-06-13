@@ -53,6 +53,14 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.richards",
     "legoesm.land.soil_grid",
     "legoesm.land.soil_hydraulics",
+    "legoesm.ocean.physics.convection.config",
+    "legoesm.ocean.physics.ice_shelf",
+    "legoesm.ocean.physics.lateral_mixing.backscatter",
+    "legoesm.ocean.physics.lateral_mixing.config",
+    "legoesm.ocean.physics.lateral_mixing.eke",
+    "legoesm.ocean.physics.surface_forcing.config",
+    "legoesm.ocean.physics.vertical_mixing.config",
+    "legoesm.ocean.physics.vertical_mixing.tidal",
 )
 
 # Tier thresholds for the conservative<->broad continuum. ``build_trainable_params``

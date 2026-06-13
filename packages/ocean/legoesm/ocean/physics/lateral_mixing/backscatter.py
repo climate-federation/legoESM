@@ -49,6 +49,22 @@ from legoesm.core.operators_voronoi import vector_laplacian_del2_3d
 _EPS = float(jnp.finfo(jnp.float32).eps)
 
 
+__param_spec__ = {
+    "BackscatterConfig": {
+        "scheme_key": "ocean.backscatter",
+        "excluded": {
+            "E_min": "default 0 = disabled/off (enable via config, not training)",
+        },
+        "params": {
+            "E_max": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
+            "c_bs": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
+            "efficiency": {"units": "1", "bounds": (0.297, 2.7), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
+            "tau_relax_days": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Jansen-Held energy backscatter", "shape": None},
+        },
+    },
+}
+
+
 class BackscatterConfig(NamedTuple):
     """Configuration for the Jansen–Held (2014) energy-backscatter closure.
 

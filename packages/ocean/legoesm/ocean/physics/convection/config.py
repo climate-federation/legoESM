@@ -5,6 +5,36 @@ from __future__ import annotations
 from typing import NamedTuple
 
 
+__param_spec__ = {
+    "EnhancedDiffusionConfig": {
+        "scheme_key": "ocean.conv.enhanced_diffusion",
+        "excluded": {
+            "cfl_dt_estimate": "numerics: solver/CFL/smoothing parameter",
+            "cfl_safety": "numerics: solver/CFL/smoothing parameter",
+            "nu_bg": "default 0 = disabled/off (enable via config, not training)",
+            "nu_conv": "default 0 = disabled/off (enable via config, not training)",
+            "sigmoid_sharpness": "numerics: solver/CFL/smoothing parameter",
+        },
+        "params": {
+            "K_bg": {"units": "1", "bounds": (3.3e-06, 3e-05), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "convective enhanced diffusion", "shape": None},
+            "K_conv": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing", "reference": "convective enhanced diffusion", "shape": None},
+        },
+    },
+    "PlumeConfig": {
+        "scheme_key": "ocean.conv.plume",
+        "excluded": {
+            "active_sigmoid_sharpness": "numerics: solver/CFL/smoothing parameter",
+            "w_plume_min": "numerics: floor/cap",
+        },
+        "params": {
+            "T_excess": {"units": "1", "bounds": (0.0165, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "convection", "reference": "convective plume", "shape": None},
+            "alpha_plume": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "convection", "reference": "convective plume", "shape": None},
+            "epsilon": {"units": "1", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "convection", "reference": "convective plume", "shape": None},
+        },
+    },
+}
+
+
 class EnhancedDiffusionConfig(NamedTuple):
     """Enhanced diffusion where N^2 < 0.
 

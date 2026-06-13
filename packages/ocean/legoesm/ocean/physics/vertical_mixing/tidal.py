@@ -51,6 +51,22 @@ _STLAURENT_U_TIDE_M_S = 0.02
 _STLAURENT_N_BOTTOM_PER_S = 1.0e-3
 _STLAURENT_ROUGHNESS_SCALE_M = 3000.0
 
+__param_spec__ = {
+    "TidalMixingConfig": {
+        "scheme_key": "ocean.vm.tidal",
+        "excluded": {
+            "N_squared_min": "numerics: floor/cap",
+        },
+        "params": {
+            "Gamma": {"units": "1", "bounds": (0.066, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "St Laurent (2002) tidal mixing", "shape": None},
+            "K_max": {"units": "1", "bounds": (0.00165, 0.015), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "St Laurent (2002) tidal mixing", "shape": None},
+            "h_decay_m": {"units": "1", "bounds": (165.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "St Laurent (2002) tidal mixing", "shape": None},
+            "q_local": {"units": "1", "bounds": (0.11, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "St Laurent (2002) tidal mixing", "shape": None},
+        },
+    },
+}
+
+
 class TidalMixingConfig(NamedTuple):
     """Configuration for the Jayne & St-Laurent abyssal tidal mixing scheme.
 

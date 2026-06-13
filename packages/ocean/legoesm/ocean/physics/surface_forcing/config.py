@@ -7,6 +7,67 @@ from typing import NamedTuple
 from legoesm import constants
 
 
+__param_spec__ = {
+    "PrescribedForcingConfig": {
+        "scheme_key": "ocean.sf.prescribed",
+        "excluded": {
+            "E_minus_P": "forcing: prescribed E-P",
+            "Q_net": "forcing: prescribed net heat flux",
+            "lat_north_deg": "forcing: idealized profile geometry [deg]",
+            "lat_south_deg": "forcing: idealized profile geometry [deg]",
+            "min_wet_cell_thickness_m": "numerics: floor/cap",
+            "tau_x": "forcing: prescribed zonal stress",
+            "tau_y": "forcing: prescribed meridional stress",
+            "tropical_wind_lat_deg": "forcing: idealized profile geometry [deg]",
+            "wind_buffer_deg": "forcing: idealized profile geometry [deg]",
+        },
+        "params": {
+            "tau_max": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "idealized prescribed surface forcing", "shape": None},
+            "tropical_wind_scale": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "idealized prescribed surface forcing", "shape": None},
+        },
+    },
+    "RestoringConfig": {
+        "scheme_key": "ocean.sf.restoring",
+        "excluded": {
+            "S_star": "forcing: restoring target salinity [PSU]",
+            "T_star_eq": "forcing: restoring target temperature [degC]",
+            "T_star_pole": "forcing: restoring target temperature [degC]",
+        },
+        "params": {
+            "tau_S": {"units": "1", "bounds": (855360.0, 7776000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "surface restoring", "shape": None},
+            "tau_T": {"units": "1", "bounds": (855360.0, 7776000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "surface restoring", "shape": None},
+        },
+    },
+    "FluxFeedbackConfig": {
+        "scheme_key": "ocean.sf.flux_feedback",
+        "excluded": {
+            "min_wet_cell_thickness_m": "numerics: floor/cap",
+        },
+        "params": {
+            "tau_restore_s": {"units": "1", "bounds": (855360.0, 7776000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "flux feedback restoring", "shape": None},
+        },
+    },
+    "BulkFormulaConfig": {
+        "scheme_key": "ocean.sf.bulk",
+        "excluded": {
+            "LW_down": "forcing: prescribed downwelling longwave [W/m2]",
+            "SW_down": "forcing: prescribed downwelling shortwave [W/m2]",
+            "T_a": "forcing: prescribed air temperature [K]",
+            "U_a": "forcing: prescribed wind speed [m/s]",
+            "q_a": "forcing: prescribed air humidity [kg/kg]",
+            "z_ref": "convention: reference height [m]",
+        },
+        "params": {
+            "C_D": {"units": "1", "bounds": (0.000495, 0.0045), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
+            "C_E": {"units": "1", "bounds": (0.000495, 0.0045), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
+            "C_H": {"units": "1", "bounds": (0.000495, 0.0045), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
+            "emissivity": {"units": "1", "bounds": (0.3201, 2.91), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
+            "z0": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
+        },
+    },
+}
+
+
 class PrescribedForcingConfig(NamedTuple):
     """Fixed wind stress and heat/freshwater fluxes."""
     tau_x: float = 0.0           # Zonal wind stress [N/m^2]
