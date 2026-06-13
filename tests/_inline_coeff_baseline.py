@@ -374,38 +374,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
         'T_soil_init: float = 280.0,': 1,
         'W_bucket_init: float = 75.0,': 1,
     },
-    'packages/ice/legoesm/ice/_future/bitz_lipscomb.py': {
-        'dz = jnp.maximum(h, 1e-3) / n # layer thickness [m]': 1,
-    },
-    'packages/ice/legoesm/ice/brine.py': {
-        'S_ice_max: float = 12.0,': 1,
-    },
-    'packages/ice/legoesm/ice/itd.py': {
-        'G1 = jnp.where(has_ice, 12.0 * eta * a_new / (H ** 3), 0.0)': 1,
-    },
-    'packages/ice/legoesm/ice/ponds.py': {
-        'snow_block_threshold: float = 5.0e-3,': 1,
-    },
-    'packages/ice/legoesm/ice/scm.py': {
-        'T_ice_init: float = 260.0, # noqa: N803 (physical symbol, project T_ convention)': 1,
-        'T_lowest: float = 250.0, # noqa: N803 (physical symbol, project T_ convention)': 1,
-        'co2_ppmv=jnp.asarray(400.0), has_radiation=jnp.asarray(1.0),': 1,
-        'concentration_init: float = 0.9,': 1,
-        'lw_down: float = 200.0,': 1,
-        'p_surface=full(1.0e5), rho_lowest=full(1.3), cos_zenith=full(0.0),': 2,
-        'precip_snow=full(0.0), T_lowest=full(T_lowest), q_lowest=full(1e-3),': 1,
-        'u_lowest=full(u_lowest), v_lowest=full(0.0), p_lowest=full(9.7e4),': 1,
-    },
-    'packages/ice/legoesm/ice/shortwave.py': {
-        'albedo_cold_bare: float = 0.7,': 1,
-        'f_vis: float = 0.52,': 1,
-        'h_pond_sat: float = 0.3,': 1,
-        'h_snow_mask: float = 0.02,': 1,
-        'h_snow_sat: float = 0.05,': 1,
-    },
-    'packages/ice/legoesm/ice/state.py': {
-        'T_ice=Field(data=jnp.full(shape, 260.0), name="T_ice", dims=dims, units="K"),': 1,
-    },
     'packages/land/legoesm/land/carbon/carbon_cycle.py': {
         'PAR_MJ = 0.48 * sw_down * 1e-6': 1,
         'jnp.mod(doy_arr + 182.5, 365.25),': 2,
@@ -511,7 +479,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
     },
 }
 
-
 _SEED_FILES: frozenset[str] = frozenset({
     'packages/atmosphere/legoesm/atmosphere/physics/_shared.py',
     'packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py',
@@ -569,13 +536,6 @@ _SEED_FILES: frozenset[str] = frozenset({
     'packages/atmosphere/legoesm/atmosphere/physics/turbulence/ysu.py',
     'packages/coupler/legoesm/coupler/coupler.py',
     'packages/coupler/legoesm/coupler/mpas_adapter.py',
-    'packages/ice/legoesm/ice/_future/bitz_lipscomb.py',
-    'packages/ice/legoesm/ice/brine.py',
-    'packages/ice/legoesm/ice/itd.py',
-    'packages/ice/legoesm/ice/ponds.py',
-    'packages/ice/legoesm/ice/scm.py',
-    'packages/ice/legoesm/ice/shortwave.py',
-    'packages/ice/legoesm/ice/state.py',
     'packages/land/legoesm/land/carbon/carbon_cycle.py',
     'packages/land/legoesm/land/carbon/stomata.py',
     'packages/land/legoesm/land/multilayer_land.py',
