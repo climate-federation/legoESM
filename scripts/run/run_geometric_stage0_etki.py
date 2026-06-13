@@ -47,7 +47,8 @@ import numpy as np
 
 def run_etki_recovery(*, truth_dir: Path, out_dir: Path, ne: int, iterations: int,
                       member_days: float, sample_every_days: float,
-                      rel_spread: float, dt: float, etki_dt: float, seed: int):
+                      rel_spread: float, dt: float, etki_dt: float, seed: int,
+                      param_names=None):
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
@@ -59,6 +60,18 @@ def run_etki_recovery(*, truth_dir: Path, out_dir: Path, ne: int, iterations: in
     from legoesm.training.trainable_ocean_params import (
         GEOMETRIC_TRAINABLE, constrain, ensemble_from_priors,
     )
+    # Calibrate a SUBSET of the GEOMETRIC params (the rest stay at their truth
+    # defaults). The identifiability analysis drops rossby_factor (structurally
+    # unidentifiable) and kappa_u (un-constrainable from these observables).
+    if param_names:
+        specs = tuple(sp for sp in GEOMETRIC_TRAINABLE
+                      if sp.constraint.name in param_names)
+        missing = set(param_names) - {sp.constraint.name for sp in specs}
+        if missing:
+            raise ValueError(f"unknown --params {sorted(missing)}; valid: "
+                             f"{[sp.constraint.name for sp in GEOMETRIC_TRAINABLE]}")
+    else:
+        specs = GEOMETRIC_TRAINABLE
     from legoesm.ocean.fidelity import geometric_stage0 as g0
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -87,7 +100,7 @@ def run_etki_recovery(*, truth_dir: Path, out_dir: Path, ne: int, iterations: in
         # --- Forward model: one exact-IC member window -> packed observable g ---
         def _member_g(raw_vec: np.ndarray) -> np.ndarray:
             vals = {sp.constraint.name: float(constrain(jnp.asarray(raw_vec[i]), sp))
-                    for i, sp in enumerate(GEOMETRIC_TRAINABLE)}
+                    for i, sp in enumerate(specs)}
             geom = GeometricConfig(**vals)
             recipe = g0.build_geometric_recipe(geom)
             cfg = recipe.model_config
@@ -120,12 +133,12 @@ def run_etki_recovery(*, truth_dir: Path, out_dir: Path, ne: int, iterations: in
 
         # --- ETKI ensemble + loop ---
         key = jax.random.PRNGKey(seed)
-        theta0 = ensemble_from_priors(key, ne, GEOMETRIC_TRAINABLE,
+        theta0 = ensemble_from_priors(key, ne, specs,
                                       rel_spread=rel_spread)
         history = {"misfit": [], "n_valid": [], "params": [], "held_transport": []}
 
         def _callback(it, step):
-            errs = g0.relative_param_error(step.theta, true_geom, GEOMETRIC_TRAINABLE)
+            errs = g0.relative_param_error(step.theta, true_geom, specs)
             history["misfit"].append(step.misfit)
             history["n_valid"].append(step.n_valid)
             history["params"].append({k: v[0] for k, v in errs.items()})
@@ -142,8 +155,7 @@ def run_etki_recovery(*, truth_dir: Path, out_dir: Path, ne: int, iterations: in
             r_diag=r_diag, callback=_callback)
 
         # --- Persist ---
-        final_errs = g0.relative_param_error(theta_final, true_geom,
-                                             GEOMETRIC_TRAINABLE)
+        final_errs = g0.relative_param_error(theta_final, true_geom, specs)
         result = {
             "truth_dir": str(truth_dir),
             "true_params": true_meta["geometric_true_params"],
@@ -185,6 +197,11 @@ def main() -> int:
     ap.add_argument("--etki-dt", type=float, default=1.0,
                     help="ETKI scheduler step (Iglesias & Yang 2021).")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--params", nargs="+", default=None,
+                    help="Subset of GEOMETRIC params to calibrate (rest held at "
+                         "truth defaults). Identifiability → the recoverable set is "
+                         "'alpha c_eps_geometric kappa_e' (rossby/kappa_u are "
+                         "un-constrainable). Default: all 5.")
     ap.add_argument("--smoke", action="store_true",
                     help="Tiny wiring smoke: ne=4, 2 iters, 60-day members.")
     args = ap.parse_args()
@@ -201,7 +218,7 @@ def main() -> int:
     run_etki_recovery(
         truth_dir=args.truth, out_dir=args.out, ne=ne, iterations=iters,
         member_days=mdays, sample_every_days=severy, rel_spread=args.rel_spread,
-        dt=args.dt, etki_dt=args.etki_dt, seed=args.seed)
+        dt=args.dt, etki_dt=args.etki_dt, seed=args.seed, param_names=args.params)
     return 0
 
 
