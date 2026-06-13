@@ -280,6 +280,67 @@ def _is_amd_gpu() -> bool:
     return "amd" in kind or "instinct" in kind
 
 
+def _cc_major(cc) -> int | None:
+    """Parse the compute-capability MAJOR version from a jaxlib value.
+
+    ``device.compute_capability`` is a CUDA-only attribute whose string
+    format varies across jaxlib builds: dotted ``"8.0"`` / ``"8.6"`` /
+    ``"10.0"``, packed ``"80"`` / ``"86"`` / ``"100"``, or ``"sm_80"``.
+    Returns the major version, or ``None`` for anything unrecognised so the
+    caller can fail CLOSED.  STRICTLY validates that the whole token is
+    numeric — ``"8x"`` / ``"sm_8x"`` must NOT slip through as major 8 (the
+    naive ``s[:-1]`` form did; codex 2026-06-13 MEDIUM).
+    """
+    if cc is None:
+        return None
+    s = str(cc).lower().strip()
+    if s.startswith("sm_"):
+        s = s[3:]
+    if "." in s:
+        parts = s.split(".")
+        if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+            return None
+        return int(parts[0])
+    # Packed form (major+minor, no separator) needs >= 2 digits: "80"->8,
+    # "100"->10.  A lone "8" is ambiguous/unreal for CUDA CC -> reject.
+    if not s.isdigit() or len(s) < 2:
+        return None
+    return int(s[:-1])
+
+
+def _nvidia_tf32_supported() -> bool:
+    """Return ``True`` only if EVERY CUDA device has TF32 tensor cores.
+
+    TF32 is an Ampere (sm_80) and later feature; Turing (RTX 8000, sm_75)
+    and earlier have NO TF32 hardware, so requesting
+    ``jax_default_matmul_precision="tensorfloat32"`` there is a silent
+    no-op at best.  Because that config is PROCESS-GLOBAL, a heterogeneous
+    fleet (e.g. ``[sm_80, sm_75]``) must NOT enable it — it would degrade
+    the Turing card's matmuls incorrectly.  So gate on the MINIMUM compute
+    capability across all CUDA devices being >= 8 (codex 2026-06-13 MAJOR:
+    the previous ``devices()[0]``-only check missed the mixed fleet).
+
+    Fails CLOSED (no TF32) when there are no devices, or ANY device's
+    compute capability is missing or unparseable.  The call site already
+    guards ``vendor == "nvidia"``, so every device here is expected to be a
+    CUDA device with a parseable CC; a ``None`` (missing OR unparseable) is
+    an anomaly (an unknown CUDA device alongside Ampere) that must NOT
+    silently enable the process-global TF32 setting (codex 2026-06-13:
+    skipping ``None`` majors was a partial-unknown fail-OPEN).
+    """
+    import jax
+    devices = jax.devices()
+    if not devices:
+        return False
+    majors = []
+    for d in devices:
+        m = _cc_major(getattr(d, "compute_capability", None))
+        if m is None:
+            return False  # missing/unparseable CC on an NVIDIA device
+        majors.append(m)
+    return min(majors) >= 8
+
+
 def gpu_vendor() -> str:
     """Return the GPU vendor: ``"nvidia"``, ``"amd"``, or ``"unknown"``.
 
@@ -410,10 +471,15 @@ def configure_backend(backend: str | None = None) -> str:
                     "latency-hiding flags.",
                 )
 
-        # TensorFloat32 is an NVIDIA Ampere+ feature (19-bit mantissa).
-        # AMD GPUs do not have TF32 hardware; use default float32.
-        if vendor == "nvidia":
+        # TensorFloat32 is an NVIDIA Ampere+ (sm_80) feature (19-bit
+        # mantissa).  AMD GPUs and pre-Ampere NVIDIA (Turing sm_75, e.g.
+        # RTX 8000) have NO TF32 hardware, so only enable it where the
+        # compute capability actually supports it — otherwise it is a
+        # silent no-op (Turing) or a mixed-fleet correctness foot-gun.
+        if vendor == "nvidia" and _nvidia_tf32_supported():
             jax.config.update("jax_default_matmul_precision", "tensorfloat32")
+            logger.info("TF32 matmul precision enabled (compute capability "
+                        ">= 8.0)")
         logger.info("GPU vendor: %s (%d device(s))", vendor, len(devices))
 
     elif backend == "metal":
