@@ -385,8 +385,8 @@ def evp_solver(
     rho_ocean: float = constants.rho_ocean,
     C_ai: float = _DYN_DEFAULTS.drag_atm,
     C_oi: float = _DYN_DEFAULTS.drag_ocean,
-    h_ice_min: float = _DYN_DEFAULTS.h_ice_min,
     differentiable: bool = False,
+    h_ice_min: float = _DYN_DEFAULTS.h_ice_min,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the EVP subcycled momentum solver.
 
@@ -560,8 +560,8 @@ def mevp_solver(
     rho_ocean: float = constants.rho_ocean,
     C_ai: float = _DYN_DEFAULTS.drag_atm,
     C_oi: float = _DYN_DEFAULTS.drag_ocean,
-    h_ice_min: float = _DYN_DEFAULTS.h_ice_min,
     differentiable: bool = False,
+    h_ice_min: float = _DYN_DEFAULTS.h_ice_min,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     r"""Run the modified-EVP pseudo-time momentum solver.
 
