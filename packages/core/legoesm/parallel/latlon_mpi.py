@@ -176,6 +176,162 @@ def make_latlon_band_layout(
     )
 
 
+class LatLon2DLayout(NamedTuple):
+    """2-D pencil (lat × lon) decomposition layout for MPI.
+
+    Increment 2 of the lat-lon 2-D decomposition
+    (``docs/scaling/latlon_2d_decomposition_design.md``).  Generalises
+    :class:`LatLonBandLayout` from a 1-D latitude band to a 2-D
+    ``(proc_lat, proc_lon)`` process grid (row-major rank =
+    ``proc_row * proc_lon + proc_col``).  Latitude is a LINE (poles
+    terminate it ⇒ ``south_rank``/``north_rank`` are ``None`` at the
+    grid's top/bottom rows); longitude is a periodic RING (``west_rank``/
+    ``east_rank`` are ALWAYS defined, wrapping ``proc_col`` modulo
+    ``proc_lon``).  ``proc_lon == 1`` reproduces the 1-D band exactly
+    (west==east==rank ⇒ the :func:`exchange_halo_lon` local-wrap path).
+
+    The N/S neighbours feed :func:`exchange_halo_latlon`; the W/E
+    neighbours feed :func:`exchange_halo_lon` (increment 1).
+    """
+    rank: int
+    n_ranks: int
+    proc_lat: int
+    proc_lon: int
+    proc_row: int
+    proc_col: int
+    n_lat_global: int
+    n_lon_global: int
+    n_lat_local: int
+    n_lon_local: int
+    lat_start: int
+    lat_end: int
+    lon_start: int
+    lon_end: int
+    south_rank: int | None
+    north_rank: int | None
+    west_rank: int
+    east_rank: int
+    fold: "FoldDescriptor | None" = None
+
+
+def _even_split(n: int, parts: int, idx: int) -> tuple[int, int]:
+    """Block ``idx`` of an even-as-possible split of ``n`` into ``parts``
+    (first ``n % parts`` blocks get one extra).  Returns ``(start, len)``."""
+    base, rem = n // parts, n % parts
+    if idx < rem:
+        return idx * (base + 1), base + 1
+    return rem * (base + 1) + (idx - rem) * base, base
+
+
+def make_latlon_2d_layout(
+    rank: int,
+    proc_lat: int,
+    proc_lon: int,
+    n_lat: int,
+    n_lon: int,
+    fold: "FoldDescriptor | None" = None,
+) -> LatLon2DLayout:
+    """Build a 2-D pencil decomposition layout for ``rank``.
+
+    ``rank = proc_row * proc_lon + proc_col`` (row-major).  Latitude is
+    split over ``proc_lat`` (line, pole-terminated), longitude over
+    ``proc_lon`` (periodic ring).  ``proc_lat * proc_lon`` must equal the
+    world size; ``proc_lon == 1`` gives the 1-D-band-equivalent layout.
+    """
+    if proc_lat < 1 or proc_lon < 1:
+        raise ValueError(
+            f"proc_lat and proc_lon must be >=1, got "
+            f"proc_lat={proc_lat}, proc_lon={proc_lon}")
+    n_ranks = proc_lat * proc_lon
+    if rank < 0 or rank >= n_ranks:
+        raise ValueError(f"rank {rank} out of range [0, {n_ranks})")
+    if n_lat < proc_lat:
+        raise ValueError(
+            f"cannot split {n_lat} lat rows over proc_lat={proc_lat} "
+            "(>=1 row/block required for a 1-cell halo)."
+        )
+    if n_lon < proc_lon:
+        raise ValueError(
+            f"cannot split {n_lon} lon cols over proc_lon={proc_lon} "
+            "(>=1 col/block required for a 1-cell halo)."
+        )
+
+    proc_row, proc_col = divmod(rank, proc_lon)
+    lat_start, n_lat_local = _even_split(n_lat, proc_lat, proc_row)
+    lon_start, n_lon_local = _even_split(n_lon, proc_lon, proc_col)
+
+    def _rank_at(r, c):
+        return r * proc_lon + c
+
+    # Latitude = pole-terminated line: None at the grid's top/bottom row.
+    south_rank = _rank_at(proc_row - 1, proc_col) if proc_row > 0 else None
+    north_rank = (_rank_at(proc_row + 1, proc_col)
+                  if proc_row < proc_lat - 1 else None)
+    # Longitude = periodic ring: always defined (wrap modulo proc_lon).
+    west_rank = _rank_at(proc_row, (proc_col - 1) % proc_lon)
+    east_rank = _rank_at(proc_row, (proc_col + 1) % proc_lon)
+
+    return LatLon2DLayout(
+        rank=rank, n_ranks=n_ranks, proc_lat=proc_lat, proc_lon=proc_lon,
+        proc_row=proc_row, proc_col=proc_col,
+        n_lat_global=n_lat, n_lon_global=n_lon,
+        n_lat_local=n_lat_local, n_lon_local=n_lon_local,
+        lat_start=lat_start, lat_end=lat_start + n_lat_local,
+        lon_start=lon_start, lon_end=lon_start + n_lon_local,
+        south_rank=south_rank, north_rank=north_rank,
+        west_rank=west_rank, east_rank=east_rank, fold=fold,
+    )
+
+
+def scatter_field_latlon_2d(
+    global_field: jax.Array, layout: LatLon2DLayout,
+) -> jax.Array:
+    """Slice the rank's 2-D block ``[lat_start:lat_end, lon_start:lon_end]``
+    from a global (n_lat, n_lon[, ...]) field.  Deterministic slice (every
+    rank derives the identical global field) — no MPI."""
+    return global_field[
+        layout.lat_start:layout.lat_end,
+        layout.lon_start:layout.lon_end,
+    ]
+
+
+def gather_field_latlon_2d(local_field, layout: LatLon2DLayout):
+    """Reassemble the global field from every rank's 2-D block (I/O only).
+
+    mpi4py ``allgather`` of host blocks, placed by (proc_row, proc_col).
+    Returns a numpy array on every rank; single-rank returns the input
+    as numpy.
+    """
+    import numpy as _np
+
+    local_np = _np.asarray(local_field)
+    if layout.n_ranks == 1:
+        return local_np
+
+    from mpi4py import MPI
+
+    comm = MPI.COMM_WORLD
+    if comm.Get_size() != layout.n_ranks:
+        # The constructor takes proc_lat/proc_lon explicitly; this guard
+        # catches a layout built for a different world size than the one
+        # actually running (would silently mis-assemble the global field;
+        # codex review 2026-06-13).
+        raise ValueError(
+            f"gather_field_latlon_2d: layout n_ranks={layout.n_ranks} "
+            f"(proc_lat={layout.proc_lat} x proc_lon={layout.proc_lon}) "
+            f"!= MPI world size {comm.Get_size()}."
+        )
+    blocks = comm.allgather(
+        (layout.lat_start, layout.lon_start, local_np))
+    trailing = local_np.shape[2:]
+    out = _np.zeros(
+        (layout.n_lat_global, layout.n_lon_global) + trailing,
+        dtype=local_np.dtype)
+    for ls, los, blk in blocks:
+        out[ls:ls + blk.shape[0], los:los + blk.shape[1]] = blk
+    return out
+
+
 # ============================================================================
 # Halo exchange
 # ============================================================================

@@ -1,0 +1,16 @@
+date,commit,tag,grid,backend,mode,metric,value,unit,job,note
+2026-06-10,pre,baseline,ocean_latlon,mpi,halo,63,exch_per_step,,pre-campaign N/S exchanges/step (LL64 implicit_cn)
+2026-06-10,8459326,fused_halo,ocean_latlon,mpi,halo,39,exch_per_step,8459326,fused multi-field + static-fold
+2026-06-13,1f142625,vmask_hoist,ocean_latlon,mpi,halo,37,exch_per_step,8475102,vertex-mask hoisted out of step
+2026-06-13,7a7100d6,neumann_cast,ocean_latlon,mpi,halo,32,exch_per_step,8475945,neumann field+mask dtype-pack
+2026-06-10,pre,baseline,ocean_latlon,mpi,strong,0.35,eff_np8,,LL128 f64 strong eff np8 pre-fix
+2026-06-10,8459326,fused_halo,ocean_latlon,mpi,strong,0.55,eff_np8,8459326,LL128 f64 strong eff np8 post fused+fold
+2026-06-10,pre,baseline,ocean_latlon,mpi,weak,4.65,growth_np1to8,,weak band rows/rank=48 growth np1->8 (lower better)
+2026-06-10,8459326,fused_halo,ocean_latlon,mpi,weak,2.95,growth_np1to8,8459326,post fused+fold
+2026-06-10,pre,baseline,atm_cube,gpu,strong,0.46,eff_2gpu_f32,,C96 f32 1->2 GPU pre-fix
+2026-06-10,multiface,ppermute_fix,atm_cube,gpu,strong,0.64,eff_2gpu_f32,8457520,C192 f32 post multiface-ppermute
+2026-06-10,multiface,ppermute_fix,atm_cube,gpu,strong,0.73,eff_2gpu_f64,8457520,C192 f64 (PCIe roofline)
+2026-06-11,e209bbb0,a1_spmd,atm_cube,spmd,multinode,2.42,speedup_np6,8460192,C96 1proc/node multinode SPMD vs serial
+2026-06-11,82093cfe,latlon_fuse,atm_latlon,mpi,halo,6,exch_per_step,8460429,atm latlon fused entry pads (15->6)
+2026-06-13,a3b9c597,zonal_line,ocean_latlon,mpi,precond,1.24,speedup_le8pernode,8475325,zonal_line+single_reduce vs jacobi M60 np16 <=8/node
+2026-06-13,a3b9c597,zonal_line,ocean_latlon,mpi,precond,1.00,speedup_prodtile,8475875,production tile (rows/rank=48): neutral (barotropic ~7% of step)
