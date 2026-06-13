@@ -64,7 +64,10 @@ from legoesm.grids.vertical import (
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
-from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.timestepping.integration import (
+    IntegrationMixin,
+    refuse_unthreaded_stateful_physics,
+)
 from legoesm.parallel.reductions import global_sum_mpi
 from legoesm import constants
 
@@ -581,14 +584,32 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         (prognostic TKE / convection state); pass back ``model._phys_state``
         from the previous step.  ``step`` returns just the dynamical state
         (backward-compatible) and stashes the physics-state OUT on
-        ``self._phys_state``.
+        ``self._phys_state`` — EAGER calls only: under an outer trace the
+        side-channel is skipped (a stashed tracer leaks into the next
+        trace; gh-417), so traced callers must thread ``phys_state``
+        explicitly through their own carry.
         """
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="MPAS step()")
+        target_mass = self._target_mass
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
-                and self._target_mass is None):
-            self._target_mass = self.compute_mass(state)
-        state_new, self._phys_state = self._step_jit(
-            state, dt, physics_fn, self._target_mass, forcing, phys_state)
+                and target_mass is None):
+            target_mass = self.compute_mass(state)
+            if not isinstance(target_mass, jax.core.Tracer):
+                # Designed eager path: cache the concrete t=0 mass so
+                # later segments keep anchoring to the same constant.
+                self._target_mass = target_mass
+            # Traced path (step() inside an OUTER jit/grad/scan): NEVER
+            # cache — a tracer stored on self leaks into the next trace
+            # (UnexpectedTracerError; gh-417, same class as the
+            # primitive_eq_cdgrid A1-gate bug).  Thread the per-call
+            # pre-step mass instead (telescoping fixer semantics).
+        state_new, phys_out = self._step_jit(
+            state, dt, physics_fn, target_mass, forcing, phys_state)
+        if not any(isinstance(leaf, jax.core.Tracer)
+                   for leaf in jax.tree_util.tree_leaves(phys_out)):
+            self._phys_state = phys_out
         return state_new
 
     @partial(jax.jit, static_argnums=(0, 3))

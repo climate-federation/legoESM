@@ -583,7 +583,7 @@ class SingleColumnModel:
         # the same combinations as the RK paths until a proper coupled
         # AB2 lands (Phase D codex iter-1 medium finding).
         stateful_turb = physics_config.turbulence.scheme in (
-            "tke", "mynn25", "clubb_lite", "edmf"
+            "tke", "mynn25", "clubb_lite", "clubb", "edmf"
         )
         # Schemes that *read* the previous ``conv_prog_profile`` or
         # ``conv_stoch_state`` — and therefore must not be advanced

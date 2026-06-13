@@ -186,11 +186,22 @@ class MPASShallowWaterModel(IntegrationMixin):
     def step(self, state: MPASShallowWaterState, dt: float) -> MPASShallowWaterState:
         """Outer wrapper: snapshots initial mass on first call when
         ``anchor_mass_to_initial`` is on (fp64, outside JIT)."""
+        target_mass = self._target_mass
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
-                and self._target_mass is None):
-            self._target_mass = self.compute_mass(state)
-        return self._step_jit(state, dt, self._target_mass)
+                and target_mass is None):
+            target_mass = self.compute_mass(state)
+            if not isinstance(target_mass, jax.core.Tracer):
+                # Designed eager path: cache the concrete t=0 mass so
+                # later segments keep anchoring to the same constant.
+                self._target_mass = target_mass
+            # Traced path (step() called inside an OUTER jit/grad/scan):
+            # NEVER cache — a tracer stored on self leaks into the next
+            # trace (UnexpectedTracerError; gh-417, same class as the
+            # primitive_eq_cdgrid A1-gate bug).  Thread the per-call
+            # pre-step mass instead; the fixer telescopes post-step mass
+            # back to pre-step mass, matching the non-anchor semantics.
+        return self._step_jit(state, dt, target_mass)
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_jit(

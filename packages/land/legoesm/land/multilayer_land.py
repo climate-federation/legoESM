@@ -138,14 +138,14 @@ def step_multilayer_land(
     # ``beta_root ∈ [0, 1]``.  Audit finding #6.
     if lp is not None:
         denom = jnp.maximum(
-            theta_fc[:, None] - theta_wp[:, None], 1e-3,
+            theta_fc[:, None] - theta_wp[:, None], 1e-3,  # coeff-ok: theta-range divide-safety floor
         )
         beta_root = jnp.clip(
             (theta - theta_wp[:, None]) / denom,
             0.0, 1.0,
         )
     else:
-        denom = jnp.maximum(theta_fc - theta_wp, 1e-3)
+        denom = jnp.maximum(theta_fc - theta_wp, 1e-3)  # coeff-ok: theta-range divide-safety floor
         beta_root = jnp.clip(
             (theta - theta_wp) / denom,
             0.0, 1.0,
@@ -424,14 +424,14 @@ def step_multilayer_land(
     theta_new = richards_out.theta_new
     if lp is not None:
         denom_new = jnp.maximum(
-            theta_fc[:, None] - theta_wp[:, None], 1e-3,
+            theta_fc[:, None] - theta_wp[:, None], 1e-3,  # coeff-ok: theta-range divide-safety floor
         )
         beta_root_new = jnp.clip(
             (theta_new - theta_wp[:, None]) / denom_new,
             0.0, 1.0,
         )
     else:
-        denom_new = jnp.maximum(theta_fc - theta_wp, 1e-3)
+        denom_new = jnp.maximum(theta_fc - theta_wp, 1e-3)  # coeff-ok: theta-range divide-safety floor
         beta_root_new = jnp.clip(
             (theta_new - theta_wp) / denom_new,
             0.0, 1.0,
@@ -507,7 +507,7 @@ def step_multilayer_land(
 def init_multilayer_land_state(
     ncol: int,
     config: MultiLayerLandConfig,
-    T_init: float = 280.0,
+    T_init: float = 280.0,  # coeff-ok: initial soil temperature [K]
     theta_init: float | None = None,
 ) -> MultiLayerLandState:
     """Create initial multi-layer land state.

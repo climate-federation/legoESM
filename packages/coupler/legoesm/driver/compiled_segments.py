@@ -111,6 +111,17 @@ class SegmentCarry(NamedTuple):
         for warm-rain runs (kessler / diagnostic clouds) — then byte-identical
         to the legacy carry. Evolved each step from the matching
         ``PhysicsOutput.dq_*_dt`` / ``dN_*_dt`` like q_c/q_r.
+    tke, qke, gwd_spectrum : jax.Array or None
+        Stateful-physics carries (issue #413), flattened-column layout
+        like ``conv_prog``: prognostic turbulent energy ``(ncol, nlev)``
+        for the TKE-family (``tke``) / MYNN-2.5 (``qke``) turbulence
+        schemes, and the wave-action spectrum
+        ``(ncol, n_azimuths, n_wavenumbers)`` for the prognostic
+        spectral GWD.  ``None`` when the corresponding scheme is
+        diagnostic — then byte-identical to the legacy carry.  Replaced
+        each step by the updated values riding ``PhysicsOutput`` (the
+        kernels return REPLACEMENT values, e.g. the implicit TKE
+        solve — these are not Euler-integrated tendencies).
     """
     u: jax.Array
     v: jax.Array
@@ -141,6 +152,9 @@ class SegmentCarry(NamedTuple):
     N_c: jax.Array = None
     N_r: jax.Array = None
     N_i: jax.Array = None
+    tke: jax.Array = None
+    qke: jax.Array = None
+    gwd_spectrum: jax.Array = None
 
 
 def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
@@ -152,6 +166,7 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
                shflx_accum=None, lhflx_accum=None,
                T_land=None, q_i=None, q_s=None, q_g=None,
                N_c=None, N_r=None, N_i=None,
+               tke=None, qke=None, gwd_spectrum=None,
                conv_prog_nlev=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
@@ -235,6 +250,12 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
         N_c=None if N_c is None else _promote(N_c, storage),
         N_r=None if N_r is None else _promote(N_r, storage),
         N_i=None if N_i is None else _promote(N_i, storage),
+        # Stateful-physics carries (issue #413): kept None for diagnostic
+        # schemes (identical legacy carry).
+        tke=None if tke is None else _promote(tke, storage),
+        qke=None if qke is None else _promote(qke, storage),
+        gwd_spectrum=(None if gwd_spectrum is None
+                      else _promote(gwd_spectrum, storage)),
     )
 
 
@@ -753,6 +774,14 @@ def build_segment_fn(
                     _fld = getattr(carry, _nm)
                     if _fld is not None:
                         _dm_in[_nm] = _fld[_ofi]
+                # Stateful-physics carries (issue #413): rank-local
+                # owned-column layout like conv_prog — passed whole,
+                # by keyword (None fields omitted; legacy wrappers
+                # route unknown keywords through **kwargs unchanged).
+                for _nm in ("tke", "qke", "gwd_spectrum"):
+                    _fld = getattr(carry, _nm)
+                    if _fld is not None:
+                        _dm_in[_nm] = _fld
                 _ret = _step_unified(
                     need_rad,
                     T_new[_ofi], p_s_new[_ofi],
@@ -838,7 +867,8 @@ def build_segment_fn(
                 )
             else:
                 _dm_in = {}
-                for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
+                for _nm in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
+                            "tke", "qke", "gwd_spectrum"):
                     _fld = getattr(carry, _nm)
                     if _fld is not None:
                         _dm_in[_nm] = _fld
@@ -968,6 +998,27 @@ def build_segment_fn(
                      else _match_dtype(N_r_upd, carry.N_r)),
                 N_i=(None if carry.N_i is None
                      else _match_dtype(N_i_upd, carry.N_i)),
+                # Stateful-physics carries (issue #413): REPLACED by the
+                # updated values riding PhysicsOutput.  A legacy 2-tuple
+                # wrapper (neural / SFNO training) that rebuilds
+                # PhysicsOutput without the carry fields returns None —
+                # carry the input through unchanged rather than break
+                # the scan pytree (those paths only build with
+                # diagnostic turbulence, so the carry is inert there).
+                tke=(None if carry.tke is None
+                     else _match_dtype(
+                         phys_out.tke if phys_out.tke is not None
+                         else carry.tke, carry.tke)),
+                qke=(None if carry.qke is None
+                     else _match_dtype(
+                         phys_out.qke if phys_out.qke is not None
+                         else carry.qke, carry.qke)),
+                gwd_spectrum=(None if carry.gwd_spectrum is None
+                              else _match_dtype(
+                                  phys_out.gwd_spectrum
+                                  if phys_out.gwd_spectrum is not None
+                                  else carry.gwd_spectrum,
+                                  carry.gwd_spectrum)),
             )
             return new_carry, None
         return _single_step

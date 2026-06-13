@@ -132,6 +132,70 @@ def _mock_step_unified(
     return phys_out, held_new, kwargs.get("T_land")
 
 
+# Optional carry fields that are None in the legacy warm-rain/diagnostic
+# carries — skipped by the field-by-field equivalence comparisons below.
+_OPTIONAL_CARRY_FIELDS = (
+    "q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
+    "tke", "qke", "gwd_spectrum",
+)
+
+
+def _assert_carries_match(compiled_result, python_result, atol, rtol,
+                          context=""):
+    """Field-by-field carry comparison; optional fields compared only
+    when present (non-None) on both sides."""
+    for field_name in SegmentCarry._fields:
+        c_val = getattr(compiled_result, field_name)
+        p_val = getattr(python_result, field_name)
+        if field_name in _OPTIONAL_CARRY_FIELDS and (
+                c_val is None or p_val is None):
+            assert c_val is None and p_val is None, (
+                f"{field_name} present on one side only {context}"
+            )
+            continue
+        np.testing.assert_allclose(
+            np.asarray(c_val), np.asarray(p_val),
+            atol=atol, rtol=rtol,
+            err_msg=f"Mismatch in {field_name} {context}",
+        )
+
+
+def _mock_step_unified_stateful(
+    need_rad,
+    T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+    sst, sic, lat, lon,
+    day_of_year, seconds_of_day, dt,
+    solar_weights, s_0,
+    o3_vmr, aerosol_od,
+    held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+    **kwargs,
+):
+    """Stateful mock physics (issue #413): advances a prognostic tke
+    carry by the AR1-like map ``tke_new = 0.9*tke + 1e-3`` so memory of
+    the input carry is observable across steps; everything else matches
+    the stateless mock."""
+    phys_out, held_new, _T_land = _mock_step_unified(
+        need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+        sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+        solar_weights, s_0, o3_vmr, aerosol_od,
+        held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+        **kwargs,
+    )
+    tke = kwargs.get("tke")
+    if tke is not None:
+        phys_out = phys_out._replace(
+            tke=(0.9 * tke + 1e-3).astype(tke.dtype),
+        )
+    gwd_spectrum = kwargs.get("gwd_spectrum")
+    if gwd_spectrum is not None:
+        phys_out = phys_out._replace(
+            gwd_spectrum=(0.5 * gwd_spectrum).astype(gwd_spectrum.dtype),
+        )
+    return phys_out, held_new, _T_land
+
+
 # ===========================================================================
 # 1. compute_segment_length
 # ===========================================================================
@@ -462,9 +526,10 @@ class TestBuildSegmentFn:
         result = run_segment(carry, 5, _FORCING)
 
         for field_name in SegmentCarry._fields:
-            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                continue  # optional double-moment fields: None in warm-rain carries
-            arr = np.asarray(getattr(result, field_name))
+            val = getattr(result, field_name)
+            if field_name in _OPTIONAL_CARRY_FIELDS and val is None:
+                continue  # optional fields: None in legacy carries
+            arr = np.asarray(val)
             assert np.all(np.isfinite(arr)), f"{field_name} has non-finite values"
 
     def test_moisture_stays_non_negative(self):
@@ -537,6 +602,13 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
         # Physics
         need_rad = jnp.bool_(True) if args["rad_update_steps"] <= 1 else \
             ((step_idx + 1) % args["rad_update_steps"]) == 0
+        # Stateful-physics carries (issue #413): pass active (non-None)
+        # carries by keyword, mirroring _single_step.
+        _phys_carry_in = {
+            k: getattr(carry, k)
+            for k in ("tke", "qke", "gwd_spectrum")
+            if getattr(carry, k) is not None
+        }
         phys_out, held_new, _T_land_ref = step_unified(
             need_rad,
             T_new, p_s_new,
@@ -553,6 +625,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             forcing.aerosol_od,
             carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
             carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
+            **_phys_carry_in,
         )
 
         # State update
@@ -605,6 +678,19 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             shflx_accum=carry.shflx_accum,
             lhflx_accum=carry.lhflx_accum,
             T_land=carry.T_land,
+            # Stateful-physics carries (#413): replaced by the updated
+            # values riding PhysicsOutput (None falls back to the input,
+            # mirroring _single_step).
+            tke=(None if carry.tke is None
+                 else (phys_out.tke if phys_out.tke is not None
+                       else carry.tke)),
+            qke=(None if carry.qke is None
+                 else (phys_out.qke if phys_out.qke is not None
+                       else carry.qke)),
+            gwd_spectrum=(None if carry.gwd_spectrum is None
+                          else (phys_out.gwd_spectrum
+                                if phys_out.gwd_spectrum is not None
+                                else carry.gwd_spectrum)),
         )
     return carry
 
@@ -644,16 +730,8 @@ class TestEquivalence:
             args["model"], args["step_unified"], 1, carry_init, args,
         )
 
-        for field_name in SegmentCarry._fields:
-            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                continue  # optional double-moment fields: None in warm-rain carries
-            compiled_arr = np.asarray(getattr(compiled_result, field_name))
-            python_arr = np.asarray(getattr(python_result, field_name))
-            np.testing.assert_allclose(
-                compiled_arr, python_arr,
-                atol=1e-5, rtol=1e-5,
-                err_msg=f"Mismatch in {field_name} after 1 step",
-            )
+        _assert_carries_match(compiled_result, python_result,
+                              atol=1e-5, rtol=1e-5, context="after 1 step")
 
     def test_five_step_equivalence(self):
         """Five-step compiled == five-step Python."""
@@ -667,16 +745,8 @@ class TestEquivalence:
             args["model"], args["step_unified"], 5, carry_init, args,
         )
 
-        for field_name in SegmentCarry._fields:
-            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                continue  # optional double-moment fields: None in warm-rain carries
-            compiled_arr = np.asarray(getattr(compiled_result, field_name))
-            python_arr = np.asarray(getattr(python_result, field_name))
-            np.testing.assert_allclose(
-                compiled_arr, python_arr,
-                atol=1e-4, rtol=1e-4,
-                err_msg=f"Mismatch in {field_name} after 5 steps",
-            )
+        _assert_carries_match(compiled_result, python_result,
+                              atol=1e-4, rtol=1e-4, context="after 5 steps")
 
     def test_segmented_matches_single_segment(self):
         """Running 2 segments of 3 == 1 segment of 6."""
@@ -691,16 +761,8 @@ class TestEquivalence:
         result_3a = run_segment(_copy_carry(carry_init), 3, _FORCING)
         result_3b = run_segment(result_3a, 3, _FORCING)
 
-        for field_name in SegmentCarry._fields:
-            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                continue  # optional double-moment fields: None in warm-rain carries
-            arr_6 = np.asarray(getattr(result_6, field_name))
-            arr_3b = np.asarray(getattr(result_3b, field_name))
-            np.testing.assert_allclose(
-                arr_6, arr_3b,
-                atol=1e-5, rtol=1e-5,
-                err_msg=f"Segmented vs single mismatch in {field_name}",
-            )
+        _assert_carries_match(result_6, result_3b, atol=1e-5, rtol=1e-5,
+                              context="segmented vs single")
 
     def test_step_index_continuity(self):
         """Step index is correctly incremented across segments."""
@@ -713,6 +775,98 @@ class TestEquivalence:
 
         r2 = run_segment(r1, 3, _FORCING)
         assert r2.step_index == 7
+
+
+class TestStatefulPhysicsCarry:
+    """Issue #413: tke / qke / gwd_spectrum ride the SegmentCarry.
+
+    The stateful mock advances ``tke_new = 0.9*tke + 1e-3`` (and halves
+    the GWD spectrum), so a dropped or reseeded carry is observable:
+    after n steps tke must equal the n-fold composition of that map
+    applied to the SEED — which is only possible if every step consumed
+    the previous step's output.
+    """
+
+    def _make_stateful_carry(self, tke_seed=1.0e-2):
+        state = _make_hydrostatic_state()
+        shape_3d = (N_FACES, N, N, NLEV)
+        shape_2d = (N_FACES, N, N)
+        ncol = N_FACES * N * N
+        return pack_carry(
+            state,
+            q_v=jnp.ones(shape_3d) * 0.01,
+            q_c=jnp.zeros(shape_3d),
+            q_r=jnp.zeros(shape_3d),
+            held_dT_rad=jnp.zeros(shape_3d),
+            held_sw_net_sfc=jnp.zeros(shape_2d),
+            held_lw_net_sfc=jnp.zeros(shape_2d),
+            held_sw_up_toa=jnp.zeros(shape_2d),
+            held_lw_up_toa=jnp.zeros(shape_2d),
+            held_sw_down_toa=jnp.zeros(shape_2d),
+            step_index=0,
+            tke=jnp.full((ncol, NLEV), tke_seed, dtype=jnp.float32),
+            gwd_spectrum=jnp.full((ncol, 2, 3), 1.0, dtype=jnp.float32),
+        )
+
+    def _stateful_args(self):
+        args = _make_segment_fn_args()
+        args["step_unified"] = _mock_step_unified_stateful
+        return args
+
+    @staticmethod
+    def _tke_after(seed, n):
+        x = seed
+        for _ in range(n):
+            x = 0.9 * x + 1e-3
+        return x
+
+    def test_carry_advances_across_scan_steps(self):
+        """n compiled steps == n-fold map of the SEED (memory, no reseed)."""
+        run_segment = build_segment_fn(**self._stateful_args())
+        carry = self._make_stateful_carry(tke_seed=1.0e-2)
+        out = run_segment(_copy_carry(carry), 5, _FORCING)
+        np.testing.assert_allclose(
+            np.asarray(out.tke),
+            self._tke_after(1.0e-2, 5),
+            rtol=1e-6,
+            err_msg="tke after 5 scan steps is not the 5-fold map of the "
+                    "seed — the carry was dropped or reseeded inside scan",
+        )
+        np.testing.assert_allclose(
+            np.asarray(out.gwd_spectrum), 1.0 * 0.5 ** 5, rtol=1e-6,
+        )
+
+    def test_carry_memory_two_seeds_differ(self):
+        """Same dynamics, two different input carries ⇒ outputs differ."""
+        run_segment = build_segment_fn(**self._stateful_args())
+        out_a = run_segment(self._make_stateful_carry(1.0e-2), 3, _FORCING)
+        out_b = run_segment(self._make_stateful_carry(5.0e-2), 3, _FORCING)
+        assert not np.array_equal(np.asarray(out_a.tke),
+                                  np.asarray(out_b.tke)), (
+            "Output carry is independent of the input carry (issue #405)"
+        )
+
+    def test_segmented_matches_single_segment_stateful(self):
+        """2 segments of 3 == 1 segment of 6 with the carry active."""
+        run_segment = build_segment_fn(**self._stateful_args())
+        r6 = run_segment(self._make_stateful_carry(), 6, _FORCING)
+        r3a = run_segment(self._make_stateful_carry(), 3, _FORCING)
+        r3b = run_segment(r3a, 3, _FORCING)
+        _assert_carries_match(r6, r3b, atol=1e-6, rtol=1e-6,
+                              context="stateful segmented vs single")
+
+    def test_compiled_matches_python_reference_stateful(self):
+        """Compiled scan == per-step Python reference with the carry."""
+        args = self._stateful_args()
+        carry_init = self._make_stateful_carry()
+        run_segment = build_segment_fn(**args)
+        compiled_result = run_segment(_copy_carry(carry_init), 4, _FORCING)
+        python_result = _run_per_step_python(
+            args["model"], args["step_unified"], 4, carry_init, args,
+        )
+        _assert_carries_match(compiled_result, python_result,
+                              atol=1e-5, rtol=1e-5,
+                              context="stateful after 4 steps")
 
 
 # ===========================================================================
@@ -929,8 +1083,8 @@ class TestRadiationSubcycle:
         jax.block_until_ready(subcycle_out.T)
 
         for field_name in SegmentCarry._fields:
-            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                continue  # optional double-moment fields: None in warm-rain carries
+            if field_name in _OPTIONAL_CARRY_FIELDS:
+                continue  # optional stateful/DM fields: None in legacy carries
             a = np.asarray(getattr(legacy_out, field_name))
             b = np.asarray(getattr(subcycle_out, field_name))
             np.testing.assert_allclose(
@@ -962,8 +1116,8 @@ class TestRadiationSubcycle:
         subcycle_out = run_subcycle(_copy_carry(carry_init), 7, _FORCING)
 
         for field_name in SegmentCarry._fields:
-            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                continue  # optional double-moment fields: None in warm-rain carries
+            if field_name in _OPTIONAL_CARRY_FIELDS:
+                continue  # optional stateful/DM fields: None in legacy carries
             np.testing.assert_allclose(
                 np.asarray(getattr(legacy_out, field_name)),
                 np.asarray(getattr(subcycle_out, field_name)),
@@ -1002,8 +1156,8 @@ class TestRadiationSubcycle:
         a = run_subcycle(_copy_carry(carry_init), 5, _FORCING)
         b = run_legacy(_copy_carry(carry_init), 5, _FORCING)
         for field_name in SegmentCarry._fields:
-            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                continue  # optional double-moment fields: None in warm-rain carries
+            if field_name in _OPTIONAL_CARRY_FIELDS:
+                continue  # optional stateful/DM fields: None in legacy carries
             np.testing.assert_allclose(
                 np.asarray(getattr(a, field_name)),
                 np.asarray(getattr(b, field_name)),
@@ -1079,8 +1233,8 @@ class TestRadiationSubcycle:
         # When the alignment guard is correct, build_segment_fn falls
         # back to the legacy body and the two outputs are identical.
         for field_name in SegmentCarry._fields:
-            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                continue  # optional double-moment fields: None in warm-rain carries
+            if field_name in _OPTIONAL_CARRY_FIELDS:
+                continue  # optional stateful/DM fields: None in legacy carries
             np.testing.assert_allclose(
                 np.asarray(getattr(out_legacy, field_name)),
                 np.asarray(getattr(out_subcycle, field_name)),
@@ -1301,8 +1455,8 @@ class TestRadiationSubcycle:
         out_legacy = run_legacy(_copy_carry(carry_init), n_steps, _FORCING)
         out_subcycle = run_subcycle(_copy_carry(carry_init), n_steps, _FORCING)
         for field_name in SegmentCarry._fields:
-            if field_name in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
-                continue  # optional double-moment fields: None in warm-rain carries
+            if field_name in _OPTIONAL_CARRY_FIELDS:
+                continue  # optional stateful/DM fields: None in legacy carries
             np.testing.assert_allclose(
                 np.asarray(getattr(out_legacy, field_name)),
                 np.asarray(getattr(out_subcycle, field_name)),

@@ -115,7 +115,7 @@ def hines_gwd(
     rho_ratio_step = jnp.ones_like(rho)
     rho_ratio_step = rho_ratio_step.at[:, :-1].set(
         jnp.sqrt(jnp.clip(
-            rho[:, 1:] / jnp.clip(rho[:, :-1], 0.01, None), 1.0, None,
+            rho[:, 1:] / jnp.clip(rho[:, :-1], 0.01, None), 1.0, None,  # coeff-ok: density-ratio floor
         ))
     )
 

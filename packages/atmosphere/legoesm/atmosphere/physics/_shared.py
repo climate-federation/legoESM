@@ -8,13 +8,12 @@ column-physics inputs each scheme expects.
 from __future__ import annotations
 
 import jax.numpy as jnp
+from legoesm.core.operators_3d import fv_flux_divergence_3d
+from legoesm.core.operators_fv_latlon_3d import fv_flux_divergence_latlon_3d
+from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.gaussian import sh_synthesis_3d, vordiv_from_uv_3d
 
 from legoesm import constants
-from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.core.operators_3d import fv_flux_divergence_3d
-from legoesm.grids.gaussian import sh_synthesis_3d, vordiv_from_uv_3d
-from legoesm.core.operators_fv_latlon_3d import fv_flux_divergence_latlon_3d
-
 
 # ---------------------------------------------------------------------------
 # AD-safe arithmetic helpers
@@ -213,6 +212,52 @@ def virtual_temperature(T, q_v):
     """
     coeff = 1.0 / constants.epsilon - 1.0           # ≈ 0.6078
     return T * (1.0 + coeff * q_v)
+
+
+def exner_function(p):
+    """Exner function ``Π = (p / p_ref)^κ`` (potential-temperature scaling).
+
+    Canonical home for the Poisson-exponent power ``(p/p₀)^κ`` (``θ = T/Π``,
+    ``T = θ·Π``) — use this instead of an inline ``(p/constants.p_ref) **
+    constants.kappa`` so the formula lives in one place (CLAUDE.md "shared
+    utilities — never re-derive"; the ``exner_potential_temperature`` ratchet).
+
+    Parameters
+    ----------
+    p : array
+        Pressure [Pa].
+
+    Returns
+    -------
+    array
+        Exner function [-], same shape as ``p``.
+    """
+    poisson_exponent = constants.kappa
+    return (p / constants.p_ref) ** poisson_exponent
+
+
+def buoyancy_coefficient(theta):
+    """Buoyancy coefficient ``g / θ`` [m s⁻² K⁻¹] for buoyancy / N² terms.
+
+    Canonical home for the gravity-over-potential-temperature factor that
+    appears in buoyancy production (``(g/θ_v)·w'θ_v'``) and the Brunt-Väisälä
+    frequency (``(g/θ)·∂θ/∂z``) — callers multiply the returned coefficient by
+    their flux or gradient. Factors the ``g/θ`` re-derivation into one place
+    (CLAUDE.md "shared utilities — never re-derive"; the
+    ``buoyancy_term_g_over_theta`` ratchet). ``theta`` is the (virtual)
+    potential temperature [K]; clip/floor it at the call site if needed.
+
+    Parameters
+    ----------
+    theta : array
+        (Virtual) potential temperature [K].
+
+    Returns
+    -------
+    array
+        ``g / θ``, same shape as ``theta``.
+    """
+    return constants.g / theta
 
 
 def mixing_length(z, l_mix_max, z_floor=1.0):
@@ -469,4 +514,4 @@ def diagnose_grid_w_from_omega(
         eps = R_d / constants.R_v
         T_v = T * (1.0 + (1.0 / eps - 1.0) * q_v)
     rho = p_full / (R_d * jnp.clip(T_v, 1.0, None))
-    return -omega / jnp.clip(rho * g, 1e-3, None)
+    return -omega / jnp.clip(rho * g, 1e-3, None)  # coeff-ok: rho*g floor for w-from-omega

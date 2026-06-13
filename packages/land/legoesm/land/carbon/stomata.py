@@ -42,6 +42,11 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import saturation_vapor_pressure
 
+# Fixed Farquhar / gas-exchange constants (not tunable).
+_FARQUHAR_WJ_GAMMA_COEFF = 8.0      # 4*Ci + 8*Gamma* electron-transport denominator
+_DIFFUSIVITY_RATIO_H2O_CO2 = 1.6    # H2O:CO2 stomatal diffusivity ratio
+_CI_CA_INIT_RATIO = 0.7             # initial intercellular:ambient CO2 guess
+
 
 # =====================================================================
 # Constants
@@ -58,6 +63,47 @@ _MC = 12.0e-6      # g C per umol CO2
 # =====================================================================
 # Configuration
 # =====================================================================
+
+__param_spec__ = {
+    "StomataConfig": {
+        "scheme_key": "land.stomata",
+        "excluded": {
+            "Gamma_star25": "CO2 compensation point at 25C (Bernacchi 2001 fixed) [umol/mol]",
+            "Ha_Gamma": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Ha_J": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Ha_Kc": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Ha_Ko": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Ha_Rd": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Ha_Vc": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Hd_J": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Kc25": "kinetic constant at 25C (Bernacchi 2001 fixed) [umol/mol]",
+            "Ko25": "kinetic constant at 25C (Bernacchi 2001 fixed) [umol/mol]",
+            "O2_conc": "atmospheric O2 (environmental constant) [umol/mol]",
+            "S_J": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "co_limitation_eps": "numerics: smooth-min co-limitation width",
+        },
+        "params": {
+            "beta_soil_min": {"units": "1", "bounds": (0.001, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CLM soil-water stress floor", "shape": None},
+            "f_VPD_min": {"units": "1", "bounds": (0.001, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CLM VPD stress floor", "shape": None},
+            "J_max25": {"units": "1", "bounds": (39.6, 360.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "K_PAR": {"units": "1", "bounds": (66.0, 600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "Rd25": {"units": "1", "bounds": (0.495, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "T_opt_jarvis": {"units": "1", "bounds": (8.25, 75.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "T_range_jarvis": {"units": "1", "bounds": (6.6, 60.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "Vc_max25": {"units": "1", "bounds": (19.8, 180.0), "tunable_tier": 1, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "a_vpd": {"units": "1", "bounds": (0.0165, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "alpha_q": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "g0": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "g1_bb": {"units": "1", "bounds": (2.97, 27.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "g1_med": {"units": "1", "bounds": (1.32, 12.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "gs_max": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "gs_ref": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "k_ext": {"units": "1", "bounds": (0.165, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "theta_j": {"units": "1", "bounds": (0.297, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+        },
+    },
+}
+
 
 class StomataConfig(NamedTuple):
     """Stomatal conductance and plant physiology configuration.
@@ -208,7 +254,7 @@ def farquhar_photosynthesis(
     J = (-b - jnp.sqrt(disc)) / (2.0 * a + 1e-20)
 
     # RuBP-regeneration-limited rate
-    Wj = J * (Ci_safe - Gamma_star) / (4.0 * Ci_safe + 8.0 * Gamma_star)
+    Wj = J * (Ci_safe - Gamma_star) / (4.0 * Ci_safe + _FARQUHAR_WJ_GAMMA_COEFF * Gamma_star)
 
     # Smooth minimum (differentiable)
     _eps = config.co_limitation_eps
@@ -253,9 +299,9 @@ def medlyn_gs(
     """
     A_pos = jnp.maximum(A, 0.0)
     Cs_safe = jnp.maximum(Cs, 1.0)
-    VPD_safe = jnp.maximum(VPD_kPa, 0.05)
+    VPD_safe = jnp.maximum(VPD_kPa, 0.05)  # coeff-ok: VPD floor [kPa]
     return jnp.maximum(
-        config.g0 + 1.6 * (1.0 + config.g1_med / jnp.sqrt(VPD_safe))
+        config.g0 + _DIFFUSIVITY_RATIO_H2O_CO2 * (1.0 + config.g1_med / jnp.sqrt(VPD_safe))
         * A_pos / Cs_safe,
         config.g0,
     )
@@ -360,7 +406,7 @@ def coupled_farquhar_stomata(
     RH = jnp.clip(e_air / jnp.maximum(e_sat, 1.0), 0.0, 1.0)
 
     # Initial guess for Ci (typical C3 ratio)
-    Ci = 0.7 * Ca
+    Ci = _CI_CA_INIT_RATIO * Ca
 
     # Fixed-point iteration (unrolled for JIT compatibility)
     for _ in range(config.n_iter_ags):
@@ -375,7 +421,7 @@ def coupled_farquhar_stomata(
         # Update Ci via stomatal diffusion (1.6 = H2O/CO2 ratio)
         gs_safe = jnp.maximum(gs, config.g0)
         A_pos = jnp.maximum(A_net, 0.0)
-        Ci = Ca - 1.6 * A_pos / gs_safe
+        Ci = Ca - _DIFFUSIVITY_RATIO_H2O_CO2 * A_pos / gs_safe
         Ci = jnp.clip(Ci, 1.0, Ca)
 
     # Final evaluation

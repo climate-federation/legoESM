@@ -95,6 +95,14 @@ __all__ = (
 # Lifting condensation level (Bolton 1980)
 # ---------------------------------------------------------------------------
 
+# --- pspec autoblock
+_LCL_T_OFFSET_K = 55.0
+_LCL_BOLTON_DENOM = 2840.0
+_CROSSING_SHARPNESS = 0.001
+_PLUME_GATE_SHARPNESS = 20.0
+_PLUME_C_U = 0.55
+_PLUME_C_D = 0.55
+
 class LCL(NamedTuple):
     """LCL diagnostics for one column.
 
@@ -120,7 +128,7 @@ def compute_lcl(
     p_parcel: jax.Array,
     p_full: jax.Array,
     *,
-    crossing_sharpness: float = 0.001,
+    crossing_sharpness: float = _CROSSING_SHARPNESS,
 ) -> LCL:
     """Lifting condensation level via Bolton (1980) Eq. 22.
 
@@ -163,13 +171,13 @@ def compute_lcl(
     q_sat = saturation_mixing_ratio(T_parcel, p_parcel)
     # RH = q / q_sat, clipped to (0, 1] so log is well-defined and
     # supersaturated parcels produce LCL at parcel level.
-    RH = jnp.clip(q_parcel / jnp.maximum(q_sat, 1e-12), 1e-4, 1.0)
+    RH = jnp.clip(q_parcel / jnp.maximum(q_sat, 1e-12), 1e-4, 1.0)  # coeff-ok: RH floor
 
     # Bolton (1980) Eq. 22.  ``T - 55`` floored to avoid singularity
     # at very cold parcels (defensively — convective parcels are rarely
     # below 200 K, but the formula is sensitive in pathological cases).
-    T_minus_55 = jnp.maximum(T_parcel - 55.0, 1.0)
-    T_lcl = 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / 2840.0) + 55.0
+    T_minus_55 = jnp.maximum(T_parcel - _LCL_T_OFFSET_K, 1.0)
+    T_lcl = 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / _LCL_BOLTON_DENOM) + _LCL_T_OFFSET_K
 
     # Poisson: dry-adiabatic descent from parcel to LCL.
     p_lcl = p_parcel * (T_lcl / T_parcel) ** (constants.c_pd / constants.R_d)
@@ -254,7 +262,7 @@ def compute_lfc_lnb(
     # and monotonises the profile so no upward-crossing is detected
     # (LNB then collapses onto the surface fallback).  Use ~20 so the
     # transition spans ~0.1 level.
-    GATE_SHARPNESS = 20.0
+    GATE_SHARPNESS = _PLUME_GATE_SHARPNESS
     above_lfc_weight = smooth_level_indicator(
         jnp.broadcast_to(jnp.arange(nlev, dtype=buoyancy.dtype), buoyancy.shape),
         threshold=k_lfc[:, None],
@@ -807,8 +815,8 @@ def cmt_gregory_1997(
     p_half: jax.Array,
     rho: jax.Array,
     *,
-    c_u: float = 0.55,
-    c_d: float = 0.55,
+    c_u: float = _PLUME_C_U,
+    c_d: float = _PLUME_C_D,
 ) -> tuple[jax.Array, jax.Array]:
     """Gregory et al. 1997 convective momentum transport closure.
 

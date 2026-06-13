@@ -22,6 +22,11 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm.ice.config import MeltPondConfig
+
+# Canonical melt-pond defaults (single source of truth callers pass in).
+_POND_DEFAULTS = MeltPondConfig()
+
 
 def step_ponds(
     pond_area: jnp.ndarray,
@@ -37,7 +42,7 @@ def step_ponds(
     refreeze_threshold: float,
     pond_to_ice_max_area: float,
     depth_to_area_ratio: float,
-    snow_block_threshold: float = 5.0e-3,
+    snow_block_threshold: float = _POND_DEFAULTS.snow_block_threshold,
     refreeze_width_K: float = 0.5,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advance pond area + depth one time step.

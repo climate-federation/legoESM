@@ -62,6 +62,14 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 
 
+# Briegleb (1992) clear-sky ocean-albedo formula constants + ice fallback (fixed).
+_OCEAN_ALB_A = 0.026
+_OCEAN_ALB_B = 0.065
+_OCEAN_ALB_MU_EXP = 1.7
+_OCEAN_ALB_POLY = 0.15
+_OCEAN_ALB_ROOT1 = 0.1
+_ICE_ALBEDO_FALLBACK = 0.75
+
 def _apply_T_sfc_override(T_sfc, override):
     """Apply a per-column ``T_sfc`` override over an arbitrary-shape T_sfc.
 
@@ -126,7 +134,7 @@ def _make_time_state():
     Returns ``(_time, set_time)`` where *_time* is the mutable dict and
     *set_time* is a function that updates it in-place.
     """
-    _time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}
+    _time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}  # coeff-ok: idealized time (spring equinox, noon)
 
     def set_time(day_of_year: float, seconds_of_day: float):
         _time["day_of_year"] = day_of_year
@@ -152,8 +160,8 @@ def _compute_insolation(
     lat: jnp.ndarray,
     config: RadiationConfig,
     lon: jnp.ndarray | None = None,
-    day_of_year: float = 80.0,
-    seconds_of_day: float = 43200.0,
+    day_of_year: float = 80.0,  # coeff-ok: idealized default (spring equinox)
+    seconds_of_day: float = 43200.0,  # coeff-ok: idealized default (local noon)
 ) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None]:
     """Compute TOA insolation and (optionally) cosine zenith angle.
 
@@ -197,8 +205,8 @@ def _compute_insolation(
 
 def sam_ocean_albedo(
     cos_zenith: jnp.ndarray | float,
-    T_sfc: jnp.ndarray | float = 300.0,
-    sea_ice_T: float = 271.0,
+    T_sfc: jnp.ndarray | float = 300.0,  # coeff-ok: idealized default surface T [K]
+    sea_ice_T: float = 271.0,  # coeff-ok: sea-ice albedo threshold T [K]
 ) -> jnp.ndarray:
     """SAM RAD_RRTM surface albedo over ocean (Briegleb 1986 direct beam).
 
@@ -222,10 +230,10 @@ def sam_ocean_albedo(
     """
     mu = jnp.clip(cos_zenith, 0.0, 1.0)
     a_ocean = (
-        0.026 / (mu ** 1.7 + 0.065)
-        + 0.15 * (mu - 0.1) * (mu - 0.5) * (mu - 1.0)
+        _OCEAN_ALB_A / (mu ** _OCEAN_ALB_MU_EXP + _OCEAN_ALB_B)
+        + _OCEAN_ALB_POLY * (mu - _OCEAN_ALB_ROOT1) * (mu - 0.5) * (mu - 1.0)
     )
-    a = jnp.where(jnp.asarray(T_sfc) > sea_ice_T, a_ocean, 0.75)
+    a = jnp.where(jnp.asarray(T_sfc) > sea_ice_T, a_ocean, _ICE_ALBEDO_FALLBACK)
     return jnp.where(jnp.asarray(cos_zenith) > 0.0, a, 0.0)
 
 

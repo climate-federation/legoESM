@@ -53,7 +53,10 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
     sponge_profile,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
-from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.timestepping.integration import (
+    IntegrationMixin,
+    refuse_unthreaded_stateful_physics,
+)
 from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
@@ -582,11 +585,26 @@ class MPASCompressibleEulerModel(IntegrationMixin):
     ) -> MPASNonHydrostaticState:
         """Outer wrapper: snapshots dry mass on first call when
         ``anchor_mass_to_initial`` is on (fp64, outside JIT)."""
+        # NH MPAS does not thread a PhysicsState carry — refuse a stateful
+        # make_physics(model_type="nonhydrostatic") fn rather than silently
+        # reseed its prognostic fields every step (#405/#413).
+        refuse_unthreaded_stateful_physics(
+            physics_fn, None, where="NH MPAS step()")
+        target_mass = self._target_mass
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
-                and self._target_mass is None):
-            self._target_mass = self.compute_dry_mass(state)
-        return self._step_jit(state, dt, physics_fn, self._target_mass)
+                and target_mass is None):
+            target_mass = self.compute_dry_mass(state)
+            if not isinstance(target_mass, jax.core.Tracer):
+                # Designed eager path: cache the concrete t=0 mass so
+                # later segments keep anchoring to the same constant.
+                self._target_mass = target_mass
+            # Traced path (step() inside an OUTER jit/grad/scan): NEVER
+            # cache — a tracer stored on self leaks into the next trace
+            # (UnexpectedTracerError; gh-417, same class as the
+            # primitive_eq_cdgrid A1-gate bug).  Thread the per-call
+            # pre-step mass instead (telescoping fixer semantics).
+        return self._step_jit(state, dt, physics_fn, target_mass)
 
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_jit(

@@ -69,7 +69,10 @@ from legoesm.grids.vertical import (
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
-from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.timestepping.integration import (
+    IntegrationMixin,
+    refuse_unthreaded_stateful_physics,
+)
 from legoesm.core.operators_cdgrid import overlapped_arakawa_lamb_gradient
 from legoesm.grids.halo import (
     pad_halo_4d as _pad_halo_4d_module,
@@ -1194,6 +1197,11 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         validate_corner_div_damp_nord(self.config.corner_div_damp_nord)
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
         self._target_mass = None
+        # Operator-split physics carry (issue #413, mirrors the MPAS PE):
+        # ``step(..., phys_state=...)`` stashes the updated ``PhysicsState``
+        # here so the caller can feed it back next step, while ``step``
+        # keeps returning the state only (public contract unchanged).
+        self._phys_state = None
 
     def reset_target_mass(self) -> None:
         """Clear the anchored mass target (iter-20; mirrors iter-18 API)."""
@@ -1228,8 +1236,24 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             self.config, physics_tendency,
         )
 
-    def step(self, state, dt, physics_fn=None):
-        """Advance one step. Accepts FV3HydrostaticState or HydrostaticState."""
+    def step(self, state, dt, physics_fn=None, phys_state=None):
+        """Advance one step. Accepts FV3HydrostaticState or HydrostaticState.
+
+        ``phys_state`` is the operator-split physics carry (prognostic
+        TKE / convection / GWD ``PhysicsState``, issue #413).  When
+        supplied, ``physics_fn`` is called with it (4-arg contract) and
+        the updated carry is stashed on ``self._phys_state`` for the
+        caller to feed back next step — mirroring the MPAS PE.  Carry
+        semantics: every RK stage's physics evaluation receives the
+        STEP-INPUT carry; the carry-out comes from one extra physics
+        evaluation on the post-step state (its tendencies are
+        discarded), so the prognostic fields advance exactly once per
+        ``dt`` and the carry-out is consistent with the state it
+        accompanies into the next step.  ``phys_state=None`` (default)
+        is byte-identical to the legacy 3-arg physics call.
+        """
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="CDGrid step()")
         target_mass = None
         if (self.config.use_conservation_fixer and self.config.fix_mass
                 and self.config.anchor_mass_to_initial):
@@ -1249,11 +1273,14 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 # matching the non-anchor branch's semantics.
 
         if isinstance(state, FV3HydrostaticState):
-            return self._step_fv3(
-                state, dt, physics_fn=physics_fn, target_mass=target_mass)
+            state_new, self._phys_state = self._step_fv3(
+                state, dt, physics_fn=physics_fn, target_mass=target_mass,
+                phys_state=phys_state)
+            return state_new
         # Legacy cell-centre state path
-        return self._step_cell_centre(
-            state, dt, physics_fn=physics_fn, target_mass=target_mass)
+        return self.step_cell_centre(
+            state, dt, physics_fn=physics_fn, target_mass=target_mass,
+            phys_state=phys_state)
 
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_fv3(
@@ -1262,17 +1289,31 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         dt: float,
         physics_fn=None,
         target_mass=None,
-    ) -> FV3HydrostaticState:
-        """Advance one time step with D-grid prognostic winds."""
+        phys_state=None,
+    ) -> tuple:
+        """Advance one time step with D-grid prognostic winds.
+
+        Returns ``(state_new, phys_state_out)``.  ``phys_state_out`` is
+        the input carry when no carry/physics is active; see
+        :meth:`step` for the per-RK-stage carry semantics.
+        """
         state = cast_pytree(state, None, "compute")
         cdgrid = self.cdgrid
+
+        def _eval_physics(s_cc):
+            """Physics with the step-input carry (4-arg contract when
+            a carry is threaded; legacy 3-arg call otherwise)."""
+            if phys_state is not None:
+                return physics_fn(s_cc, self.grid, self.sigma_coord,
+                                  phys_state)
+            return physics_fn(s_cc, self.grid, self.sigma_coord)
 
         def tendency_fn(s):
             phys_cc = None
             if physics_fn is not None:
                 # Iter-65: pass cc physics via physics_tendency_cc (rides iter-64 batched corner interp)
                 s_cc = fv3_to_hydrostatic(s, cdgrid)
-                _phys_result = physics_fn(s_cc, self.grid, self.sigma_coord)
+                _phys_result = _eval_physics(s_cc)
                 phys_cc = _phys_result[0] if type(_phys_result) is tuple else _phys_result
 
             # iter-189: dt_actual for corner-div adaptive cap
@@ -1627,7 +1668,24 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 ),
             )
 
-        return cast_pytree(state_new, None, "storage")
+        state_out = cast_pytree(state_new, None, "storage")
+
+        # Operator-split physics carry (issue #413): one extra physics
+        # evaluation on the POST-STEP state produces the carry-out
+        # (tendencies discarded) — the prognostic fields advance exactly
+        # once per dt and the carry-out is consistent with the returned
+        # state.  Threading the carry through the RK combination instead
+        # would be wrong: stateful kernels return REPLACEMENT values
+        # (e.g. the implicit TKE solve), which RK stage weights would
+        # corrupt.  Python-level gate: with no carry this block is never
+        # traced and the step is byte-identical to the legacy path.
+        phys_state_out = phys_state
+        if physics_fn is not None and phys_state is not None:
+            _pr = _eval_physics(fv3_to_hydrostatic(state_out, cdgrid))
+            if type(_pr) is tuple and len(_pr) > 1:
+                phys_state_out = _pr[1]
+
+        return state_out, phys_state_out
 
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_cell_centre(
@@ -1636,8 +1694,13 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         dt: float,
         physics_fn=None,
         target_mass=None,
-    ) -> HydrostaticState:
-        """Cell-centre wrapper: cc winds → D-grid corners (entry); back to cc (exit)."""
+        phys_state=None,
+    ) -> tuple:
+        """Cell-centre wrapper: cc winds → D-grid corners (entry); back to cc (exit).
+
+        Returns ``(state_new, phys_state_out)`` — internal contract;
+        the public :meth:`step_cell_centre` unpacks it.
+        """
         # cc → D-grid interp for (u, v).
         # fv3_faithful (iter-14): the winds are a VECTOR, so the cc→corner
         # interp must rotate face-local components across panel seams.  The
@@ -1661,15 +1724,27 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             phis=state.phis,
             tracers=state.tracers,
         )
-        fv3_new = self._step_fv3(
-            fv3_state, dt, physics_fn=physics_fn, target_mass=target_mass)
-        return fv3_to_hydrostatic(fv3_new, self.cdgrid)
+        fv3_new, phys_state_out = self._step_fv3(
+            fv3_state, dt, physics_fn=physics_fn, target_mass=target_mass,
+            phys_state=phys_state)
+        return fv3_to_hydrostatic(fv3_new, self.cdgrid), phys_state_out
 
-    # Backward-compatible aliases
-    step_cell_centre = _step_cell_centre
+    def step_cell_centre(self, state, dt, physics_fn=None,
+                         target_mass=None, phys_state=None):
+        """Public cell-centre step: returns the new state only (legacy
+        contract); the updated physics carry is stashed on
+        ``self._phys_state`` (issue #413, mirrors :meth:`step`)."""
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="CDGrid step_cell_centre()")
+        state_new, self._phys_state = self._step_cell_centre(
+            state, dt, physics_fn=physics_fn, target_mass=target_mass,
+            phys_state=phys_state)
+        return state_new
 
-    def step_with_physics(self, state, dt, physics_fn=None):
-        return self.step(state, dt, physics_fn=physics_fn)
+    def step_with_physics(self, state, dt, physics_fn=None,
+                          phys_state=None):
+        return self.step(state, dt, physics_fn=physics_fn,
+                         phys_state=phys_state)
 
 
 # ==============================================================================

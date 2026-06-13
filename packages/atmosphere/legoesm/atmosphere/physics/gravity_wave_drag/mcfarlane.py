@@ -107,7 +107,7 @@ def mcfarlane_gwd(
     # the surface wind) and a critical level is where it falls to zero / reverses
     # (the orographic phase speed is c = 0).
     U_proj = u * cos_a[:, None] + v * sin_a[:, None]
-    U_proj_abs = jnp.clip(jnp.abs(U_proj), 1e-2, None)
+    U_proj_abs = jnp.clip(jnp.abs(U_proj), 1e-2, None)  # coeff-ok: projected-wind floor [m/s]
 
     # Launch flux: orographic gravity-wave stress
     #     tau_0 = G_0 * rho * N * k * h^2 * U

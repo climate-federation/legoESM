@@ -85,6 +85,29 @@ The import-boundary contracts in `pyproject.toml` enforce this.
 necessary but not sufficient for cubed-sphere ops, halo exchange, and diffusion —
 inspect the W2 v-wind / W5 wind-speed PNGs against baselines.
 
+**Gradient work requires the fp64 compute policy.** `JAX_ENABLE_X64=1` does NOT
+make the finite-volume models compute in double precision — they cast state to
+their compute dtype (float32 by default) via `legoesm.core.precision`. Any
+AD-vs-FD check, adjoint study, or calibration script that skips
+
+```python
+from legoesm.core.precision import PrecisionPolicy, set_policy
+set_policy(PrecisionPolicy.fp64())
+```
+
+silently measures float32 noise floors (AD-vs-FD plateaus near 1e-2,
+reverse-vs-forward near 1e-7) instead of gradient correctness — the 2026-06-11
+ocean differentiability audit initially mismeasured an entire probe matrix this
+way. Production *training* may still run float32 deliberately; the float32
+gradient-NaN hazards found by that audit (limiter/FCT eps-ratio underflow on
+near-uniform tracers) are guarded in-code with a dedicated underflow pin test
+(PR #415, `grad_safe_ratio`). The step-level gradient
+health of the lat-lon ocean config space is gated by
+`tests/ocean/validation/test_step_gradient_matrix.py` (fp64,
+reverse-vs-forward agreement — the kink-immune transpose check; finite-
+difference agreement saturates on C⁰ limiter landscapes and is only a
+secondary gate there).
+
 ## Internal development notes
 
 Working notes, plans, audits, and review trackers live in

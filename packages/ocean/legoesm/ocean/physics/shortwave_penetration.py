@@ -87,6 +87,27 @@ __physics_contract__ = {
     ),
 }
 
+__param_spec__ = {
+    "ShortwavePenetrationConfig": {
+        "scheme_key": "ocean.sw_penetration",
+        "excluded": {},
+        "params": {
+            "rgb_ir_fraction": {
+                "units": "1", "bounds": (0.4, 0.7), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "NEMO rn_abs (ORCA1 default 0.58); Paulson & Simpson (1977)",
+                "shape": None,
+            },
+            "rgb_ir_extinction_m": {
+                "units": "m", "bounds": (0.1, 1.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "closure",
+                "reference": "NEMO rn_si0 (ORCA1 default 0.35 m); Paulson & Simpson (1977)",
+                "shape": None,
+            },
+        },
+    },
+}
+
 
 # ==============================================================================
 # Jerlov water type parameters
@@ -218,6 +239,40 @@ _RGB_ATTENUATION_BGR: tuple = (
 _CHL_MIN: float = 0.03
 _CHL_MAX: float = 10.0
 
+# RGB class-index formula (NEMO trc_oce.F90): itab = NINT(offset + slope*log10(Chl)).
+# Fixed published constants — not tunable.
+_RGB_CLASS_INDEX_OFFSET: float = 41.0
+_RGB_CLASS_INDEX_SLOPE: float = 20.0
+
+# --- Morel & Berthon (1989) analytical vertical Chl profile coefficients ----
+# Verbatim from NEMO 5.0.1 src/OCE/TRA/traqsr.F90 qsr_RGBc CASE(1) (nn_chlprfl=1).
+# Horner-form polynomial fits in zlogc = ln(Chl): log(zCze), log(zCtot), log(zze)
+# with a high-Chl branch, 1/delpsi, zCb, zCmax, zpsimax. Published fixed fit
+# constants (Morel & Berthon 1989, Limnol. Oceanogr. 34 1545-1562) — not tunable.
+_MB89_ZCZE_C0: float = 0.113328685307
+_MB89_ZCZE_C1: float = 0.803
+_MB89_ZCTOT_C0: float = 3.703768066608
+_MB89_ZCTOT_C1: float = 0.459
+_MB89_ZZE_C0: float = 6.34247346942
+_MB89_ZZE_C1: float = 0.746
+_MB89_ZZE_BRANCH: float = 4.62497281328
+_MB89_ZZE_ALT_C0: float = 5.298317366548
+_MB89_ZZE_ALT_C1: float = 0.293
+_MB89_DELPSI_C0: float = 0.710
+_MB89_DELPSI_C1: float = 0.159
+_MB89_DELPSI_C2: float = 0.021
+_MB89_ZCB_C0: float = 0.768
+_MB89_ZCB_C1: float = 0.087
+_MB89_ZCB_C2: float = 0.179
+_MB89_ZCB_C3: float = 0.025
+_MB89_ZCMAX_C0: float = 0.299
+_MB89_ZCMAX_C1: float = 0.289
+_MB89_ZCMAX_C2: float = 0.579
+_MB89_ZPSIMAX_C0: float = 0.6
+_MB89_ZPSIMAX_C1: float = 0.640
+_MB89_ZPSIMAX_C2: float = 0.021
+_MB89_ZPSIMAX_C3: float = 0.115
+
 
 def _rgb_class_row(chl: jnp.ndarray) -> jnp.ndarray:
     """0-based row into the RGB table for chlorophyll ``chl`` [mg/m^3].
@@ -228,7 +283,7 @@ def _rgb_class_row(chl: jnp.ndarray) -> jnp.ndarray:
     ``floor(x + 0.5)`` rather than ``jnp.round`` (banker's rounding).
     """
     chl_c = jnp.clip(chl, _CHL_MIN, _CHL_MAX)
-    x = 41.0 + 20.0 * jnp.log10(chl_c)
+    x = _RGB_CLASS_INDEX_OFFSET + _RGB_CLASS_INDEX_SLOPE * jnp.log10(chl_c)
     itab = jnp.floor(x + 0.5)            # NEMO NINT for positive x
     row = jnp.clip(itab - 1.0, 0.0, 60.0)
     return row.astype(jnp.int32)
@@ -260,16 +315,18 @@ def _morel_berthon_chl_column(
     """
     chl_c = jnp.clip(chl_surface, _CHL_MIN, _CHL_MAX)
     zlogc = jnp.log(chl_c)                                   # natural log
-    zc1 = 0.113328685307 + 0.803 * zlogc                    # log(zCze)
-    zc2 = 3.703768066608 + 0.459 * zlogc                    # log(zCtot)
-    zc3 = 6.34247346942 - 0.746 * zc2                       # log(zze)
-    zc3 = jnp.where(zc3 > 4.62497281328, 5.298317366548 - 0.293 * zc2, zc3)
+    zc1 = _MB89_ZCZE_C0 + _MB89_ZCZE_C1 * zlogc             # log(zCze)
+    zc2 = _MB89_ZCTOT_C0 + _MB89_ZCTOT_C1 * zlogc          # log(zCtot)
+    zc3 = _MB89_ZZE_C0 - _MB89_ZZE_C1 * zc2                 # log(zze)
+    zc3 = jnp.where(zc3 > _MB89_ZZE_BRANCH, _MB89_ZZE_ALT_C0 - _MB89_ZZE_ALT_C1 * zc2, zc3)
     zCze = jnp.exp(zc1)
-    inv_delpsi = 1.0 / (0.710 + zlogc * (0.159 + zlogc * 0.021))
+    inv_delpsi = 1.0 / (_MB89_DELPSI_C0 + zlogc * (_MB89_DELPSI_C1 + zlogc * _MB89_DELPSI_C2))
     inv_zze = jnp.exp(-zc3)
-    zCb = 0.768 + zlogc * (0.087 - zlogc * (0.179 + zlogc * 0.025))
-    zCmax = 0.299 - zlogc * (0.289 - zlogc * 0.579)
-    zpsimax = 0.6 - zlogc * (0.640 - zlogc * (0.021 + zlogc * 0.115))
+    zCb = _MB89_ZCB_C0 + zlogc * (_MB89_ZCB_C1 - zlogc * (_MB89_ZCB_C2 + zlogc * _MB89_ZCB_C3))
+    zCmax = _MB89_ZCMAX_C0 - zlogc * (_MB89_ZCMAX_C1 - zlogc * _MB89_ZCMAX_C2)
+    zpsimax = _MB89_ZPSIMAX_C0 - zlogc * (
+        _MB89_ZPSIMAX_C1 - zlogc * (_MB89_ZPSIMAX_C2 + zlogc * _MB89_ZPSIMAX_C3)
+    )
     # Dimensionless depth psi = gdepw / zze, broadcast over levels.
     zpsi = inv_zze[..., jnp.newaxis] * gdepw_bottom
     chl_z = zCze[..., jnp.newaxis] * (

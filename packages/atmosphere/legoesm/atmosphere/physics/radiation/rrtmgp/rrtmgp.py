@@ -41,6 +41,13 @@ _ZARR_DIR = Path(__file__).parent.parent.parent.parent / "data" / "zarr"
 _NC_DIR = Path(__file__).parent / "optics" / "rrtmgp_data"
 
 
+# Idealized ozone Gaussian profile + well-mixed gas mole fractions (fixed).
+_O3_SIGMA_TROP = 0.9
+_O3_SIGMA_STRAT = 1.5
+_O3_PEAK_VMR = 9.0e-6
+_O2_MOLE_FRACTION = 0.20948
+_N2_MOLE_FRACTION = 0.78084
+
 def _default_data_path(basename_nc: str) -> str:
     """Return path to Zarr store if available, else fall back to NetCDF."""
     zarr_path = _ZARR_DIR / basename_nc.replace(".nc", ".zarr")
@@ -112,11 +119,11 @@ def _standard_o3_profile(p_full):
     p_hPa = p_full / 100.0
     log_p = jnp.log(p_hPa)
     log_p_peak = jnp.log(10.0)
-    sigma_trop = 0.9
-    sigma_strat = 1.5
+    sigma_trop = _O3_SIGMA_TROP
+    sigma_strat = _O3_SIGMA_STRAT
     sigma = jnp.where(log_p > log_p_peak, sigma_trop, sigma_strat)
     arg = (log_p - log_p_peak) / sigma
-    o3_gauss = 9.0e-6 * jnp.exp(-0.5 * arg * arg)
+    o3_gauss = _O3_PEAK_VMR * jnp.exp(-0.5 * arg * arg)
     # 20 ppb tropospheric background (US Std Atm 1976 surface value).
     o3_background = 2.0e-8
     o3 = jnp.maximum(o3_gauss, o3_background)
@@ -354,8 +361,8 @@ class RRTMGP:
               "co2": config.co2_ppmv * 1.0e-6,
               "ch4": config.ch4_ppbv * 1.0e-9,
               "n2o": config.n2o_ppbv * 1.0e-9,
-              "o2": 0.20948,
-              "n2": 0.78084,
+              "o2": _O2_MOLE_FRACTION,
+              "n2": _N2_MOLE_FRACTION,
               "co": 1.5e-7,
               "ccl4": 7.5e-11,
               "cfc11": 2.2e-10,
@@ -594,7 +601,7 @@ class RRTMGP:
       # enough — the halo cells are passed straight to the RRTMGP
       # solve.  Codex iter-79 stop-time review.
       q_v_3d = _add_halos(q_v[:, None, ::-1])
-      q_v_3d = jnp.clip(q_v_3d, 0.0, 0.99)
+      q_v_3d = jnp.clip(q_v_3d, 0.0, 0.99)  # coeff-ok: specific-humidity cap
 
       # --- 2. Build VMR fields ---
       mol_ratio = constants.R_V / constants.R_D

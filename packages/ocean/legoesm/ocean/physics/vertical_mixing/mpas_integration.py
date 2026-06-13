@@ -43,6 +43,9 @@ from legoesm.ocean.vertical import (
 )
 
 
+# Placeholder salinity for dry cells so the EOS stays well-defined [PSU].
+_EOS_SAFE_SALINITY_PSU = 35.0
+
 def _vertical_diffusion_edge_partial(
     field: jnp.ndarray,
     h_e: jnp.ndarray,
@@ -234,7 +237,7 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig) -> Callable:
         u_east_w = jnp.where(m3 > 0.5, u_east_raw, 0.0)
         v_north_w = jnp.where(m3 > 0.5, v_north_raw, 0.0)
         T_w = jnp.where(m3 > 0.5, T_3d, 0.0)
-        S_w = jnp.where(m3 > 0.5, S_3d, 35.0)  # safe S for EOS
+        S_w = jnp.where(m3 > 0.5, S_3d, _EOS_SAFE_SALINITY_PSU)  # safe S for EOS
         if hasattr(z_coord, 'is_active'):
             # Fill sub-seafloor T/S/u/v by extending the deepest active
             # value downward.  Without this, KPP sees a discontinuity at
@@ -491,7 +494,7 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig) -> Callable:
         u_east_w = jnp.where(m3 > 0.5, u_east_raw, 0.0)
         v_north_w = jnp.where(m3 > 0.5, v_north_raw, 0.0)
         T_w = jnp.where(m3 > 0.5, T_3d, 0.0)
-        S_w = jnp.where(m3 > 0.5, S_3d, 35.0)
+        S_w = jnp.where(m3 > 0.5, S_3d, _EOS_SAFE_SALINITY_PSU)
         if hasattr(z_coord, 'is_active'):
             _active = z_coord.is_active
             _bot_lev = z_coord.bottom_level

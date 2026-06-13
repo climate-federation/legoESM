@@ -14,6 +14,9 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 
+# Default condensation/autoconversion sigmoid sharpness (used in signatures).
+_DEFAULT_SAT_SHARPNESS = 50.0
+
 
 def safe_pow(x, p):
     """Differentiable ``x ** p`` with grad=0 wherever ``x <= 0``.
@@ -88,7 +91,34 @@ def donor_clamp_scale(q_avail, sink_total, dt, divisor_floor=1.0e-15):
     return jnp.minimum(1.0, q_avail / sink_dt_safe)
 
 
-def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0, q_c=None):
+# --- air transport properties (SAM M2005 module_mp_graupel.f90; fixed) -------
+# Hall & Pruppacher (1976) water-vapour diffusivity in air, Sutherland dynamic
+# viscosity, and the derived Schmidt number / air thermal conductivity — shared
+# by every ventilation-limited ice process (snow + graupel deposition / melting
+# and rain evaporation). Published transport-property constants, not tunable.
+_DV_PREFACTOR = 8.794e-5          # DV = _DV_PREFACTOR * T**_DV_T_EXPONENT / p
+_DV_T_EXPONENT = 1.81
+_MU_PREFACTOR = 1.496e-6          # mu = _MU_PREFACTOR * T**_MU_T_EXPONENT / (T + _MU_SUTHERLAND_T)
+_MU_T_EXPONENT = 1.5
+_MU_SUTHERLAND_T = 120.0          # Sutherland temperature offset [K]
+_AIR_CONDUCTIVITY_MU_FACTOR = 1.414e3   # air thermal conductivity KAP = factor * mu [-]
+
+
+def _air_transport_props(T, p, rho):
+    """Shared ventilation transport coefficients ``(DV, mu, SC)``.
+
+    DV = vapour diffusivity [m^2/s], mu = Sutherland dynamic viscosity [kg/m/s],
+    SC = mu/(rho*DV) the Schmidt number. Factored out of the five SAM ice
+    processes that recompute the identical block (snow/graupel deposition +
+    melting, rain evaporation); callers needing the air thermal conductivity use
+    ``_AIR_CONDUCTIVITY_MU_FACTOR * mu``."""
+    dv = _DV_PREFACTOR * safe_pow(T, _DV_T_EXPONENT) / jnp.clip(p, 1.0)
+    mu = _MU_PREFACTOR * safe_pow(T, _MU_T_EXPONENT) / (T + _MU_SUTHERLAND_T)
+    sc = mu / (rho * dv)
+    return dv, mu, sc
+
+
+def saturation_adjustment(T, q_v, p_full, dt, sharpness=_DEFAULT_SAT_SHARPNESS, q_c=None):
     """Compute smooth saturation adjustment (condensation tendency).
 
     Parameters
@@ -132,8 +162,10 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0, q_c=None):
     """
     q_sat = saturation_mixing_ratio(T, p_full)
     excess = q_v - q_sat
+    dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)
+    psychrometric = 1.0 + dqsdt * constants.L_v / constants.c_pd
     cond_frac = jax.nn.sigmoid(sharpness * excess)
-    condensation = cond_frac * excess / dt
+    condensation = cond_frac * excess / (dt * psychrometric)
     if q_c is not None:
         # Evaporation rate (negative ``condensation``) is bounded by
         # the available cloud water: |condensation| × dt ≤ q_c, i.e.
@@ -199,7 +231,7 @@ def effective_Nc(N_c, Nc_0, *, predict_Nc=True, nc_specified_field=False):
     return jnp.where(N_c > 1.0, N_c, Nc_0 * jnp.ones_like(N_c))
 
 
-def autoconversion_sb(q_c, N_c_eff, rho, k_au, x_star, sharpness=50.0, gamma_norm=1.0):
+def autoconversion_sb(q_c, N_c_eff, rho, k_au, x_star, sharpness=_DEFAULT_SAT_SHARPNESS, gamma_norm=1.0):
     """Seifert-Beheng mass-dependent autoconversion.
 
     Parameters
@@ -248,7 +280,7 @@ def autoconversion_sb(q_c, N_c_eff, rho, k_au, x_star, sharpness=50.0, gamma_nor
     # canonical SB 2001 / Seifert 2008 switch behaviour.
     onset = jax.nn.sigmoid(sharpness * (x_c / x_star - 1.0))
     dq_c_au = k_au * q_c_pos ** 2 * onset * gamma_norm * rho
-    dN_r_au = dq_c_au * rho / (x_star * 20.0)
+    dN_r_au = dq_c_au * rho / (x_star * _SB_RAIN_NUMBER_FACTOR)
     return dq_c_au, dN_r_au, x_c
 
 
@@ -280,6 +312,31 @@ _KK2000_DROP_RADIUS = 25.0e-6  # [m]
 _KK2000_CONS29 = (
     (4.0 / 3.0) * jnp.pi * constants.rho_water * _KK2000_DROP_RADIUS ** 3
 )
+
+# KK2000 warm-rain rate constants (SAM M2005 module_mp_graupel.f90:1813 / :1952):
+#   PRC = 1350·q_c^2.47·N_c[#/cm^3]^-1.79   (autoconversion, kg/kg/s)
+#   PRA = 67·(q_c·q_r)^1.15                  (accretion, kg/kg/s)
+# Published fixed coefficients (Khairoutdinov & Kogan 2000), not tunable here.
+_KK2000_AUTOCONV_PREFACTOR = 1350.0
+_KK2000_AUTOCONV_QC_EXPONENT = 2.47
+_KK2000_AUTOCONV_NC_EXPONENT = -1.79
+_KK2000_ACCRETION_PREFACTOR = 67.0
+_KK2000_ACCRETION_EXPONENT = 1.15
+
+# --- shared PSD / fall-speed / ventilation structural constants (SAM M2005) ---
+_RHO_FLOOR = 0.1                 # air-density floor in PSD/fall-speed divisions [kg/m^3]
+_FALL_RHO_EXPONENT = 0.54        # (rho_su/rho)^0.54 fall-speed density correction
+_VENT_CONS_OFFSET = 2.5          # 5/2 in ventilation gamma argument 5/2 + b/2
+_SB_RAIN_NUMBER_FACTOR = 20.0    # SB autoconversion rain-number divisor (x_star*20)
+_BIGG_MNUCCR_PREFACTOR = 20.0    # Bigg freezing mass prefactor (20 pi^2 rho_w)
+_UMR_FALL_CAP = 9.1              # rain mass-weighted fall-speed cap [m/s]
+_UMG_FALL_CAP = 20.0             # graupel mass-weighted fall-speed cap [m/s]
+_VDIFF_C1, _VDIFF_C2, _VDIFF_C3 = 1.2, 0.95, 0.08  # Wisner two-PSD VDIFF coeffs
+_PRACG_BRACKET_C = 5.0           # PRACG collection-integral leading bracket coeff
+_NSAGG_CONS15_PREFACTOR = 1108.0  # snow self-aggregation CONS15 prefactor
+_NSAGG_GAMMA_DENOM = 720.0       # snow self-aggregation gamma denominator (4*720)
+_RAIN_EVAP_VENT_EXP = 0.525      # Marshall-Palmer rain-evaporation ventilation exponent
+
 
 
 def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
@@ -317,7 +374,11 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
     """
     q_c_pos = jnp.clip(q_c, 0.0)
     n_c_cm3 = jnp.clip(N_c_eff, 1.0) / 1.0e6        # #/cm³
-    prc = 1350.0 * safe_pow(q_c_pos, 2.47) * safe_pow(n_c_cm3, -1.79)
+    prc = (
+        _KK2000_AUTOCONV_PREFACTOR
+        * safe_pow(q_c_pos, _KK2000_AUTOCONV_QC_EXPONENT)
+        * safe_pow(n_c_cm3, _KK2000_AUTOCONV_NC_EXPONENT)
+    )
     x_c = q_c_pos * rho / jnp.clip(N_c_eff, 1.0)
     # SAM's two-level cap (module_mp_graupel.f90:1823-1828), in per-volume:
     #   NPRC  = PRC·N_c/q_c   (cloud-number autoconv sink), ≤ N_c/dt
@@ -342,7 +403,7 @@ def accretion_kk2000(q_c, q_r):
     A mixing-ratio rate (no ``rho`` factor, unlike :func:`accretion`).
     """
     dum = jnp.clip(q_c, 0.0) * jnp.clip(q_r, 0.0)
-    return 67.0 * safe_pow(dum, 1.15)
+    return _KK2000_ACCRETION_PREFACTOR * safe_pow(dum, _KK2000_ACCRETION_EXPONENT)
 
 
 def self_collection_breakup(N_r, q_r, rho, k_sc, breakup_sharpness, D_eq):
@@ -473,8 +534,8 @@ def rain_freezing_bigg(q_r, N_r, T, rho, config, dt=None):
     bimm = config.bigg_bimm
     lamr3 = lamr * lamr * lamr
     nnuccr = jnp.pi * nr_pos * bimm * x / lamr3
-    mnuccr = (20.0 * jnp.pi ** 2 * constants.rho_water * bimm
-              * (nr_pos / jnp.clip(rho, 0.1)) * x / (lamr3 * lamr3))
+    mnuccr = (_BIGG_MNUCCR_PREFACTOR * jnp.pi ** 2 * constants.rho_water * bimm
+              * (nr_pos / jnp.clip(rho, _RHO_FLOOR)) * x / (lamr3 * lamr3))
     gate = (qr_pos > 1.0e-14) & (dT_sc > 0.0)            # supercooled rain only
     mnuccr = jnp.where(gate, mnuccr, 0.0)
     nnuccr = jnp.where(gate, nnuccr, 0.0)
@@ -486,8 +547,8 @@ def rain_freezing_bigg(q_r, N_r, T, rho, config, dt=None):
         scale = jnp.minimum(
             1.0,
             jnp.minimum(
-                qr_pos / jnp.maximum(mnuccr * dt, 1.0e-30),
-                nr_pos / jnp.maximum(nnuccr * dt, 1.0e-30)))
+                qr_pos / jnp.maximum(mnuccr * dt, 1.0e-15),
+                nr_pos / jnp.maximum(nnuccr * dt, 1.0e-15)))
         mnuccr = mnuccr * scale
         nnuccr = nnuccr * scale
     return mnuccr, nnuccr
@@ -515,11 +576,9 @@ def snow_deposition_m2005(q_v, q_s, N_s, q_sat_i, T, p, rho, config, dt=None):
         / jnp.maximum(qs_pos, 1.0e-20), 1.0 / 3.0)
     lams = jnp.clip(lams, config.lams_min, config.lams_max)
     n0s = ns_pos * lams
-    dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p, 1.0)
-    mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0)        # Sutherland dyn. visc.
-    sc = mu / (rho * dv)
-    asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
-    cons35 = 2.5 + config.fall_b_s / 2.0
+    dv, mu, sc = _air_transport_props(T, p, rho)
+    asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
+    cons35 = _VENT_CONS_OFFSET + config.fall_b_s / 2.0
     cons10 = math.gamma(cons35)
     dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)
     abi = 1.0 + dqsidt * constants.L_s / constants.c_pd
@@ -563,7 +622,7 @@ def snow_riming_psacws(q_c, q_s, N_s, T, rho, config, dt=None):
         / jnp.maximum(qs_pos, 1.0e-20), 1.0 / 3.0)
     lams = jnp.clip(lams, config.lams_min, config.lams_max)
     n0s = ns_pos * lams
-    asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
+    asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
     bs = config.fall_b_s
     cons13 = math.gamma(bs + 3.0) * jnp.pi / 4.0 * config.snow_collect_eff
     psacws = cons13 * asn * qc_pos * rho * n0s / safe_pow(lams, bs + 3.0)
@@ -602,12 +661,10 @@ def snow_melting_psmlt(q_s, N_s, T, p, rho, config, dt=None):
         / jnp.maximum(qs_pos, 1.0e-20), 1.0 / 3.0)
     lams = jnp.clip(lams, config.lams_min, config.lams_max)
     n0s = ns_pos * lams
-    dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p, 1.0)
-    mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0)
-    kap = 1.414e3 * mu                                   # air thermal conductivity
-    sc = mu / (rho * dv)
-    asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
-    cons35 = 2.5 + config.fall_b_s / 2.0
+    dv, mu, sc = _air_transport_props(T, p, rho)
+    kap = _AIR_CONDUCTIVITY_MU_FACTOR * mu               # air thermal conductivity
+    asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
+    cons35 = _VENT_CONS_OFFSET + config.fall_b_s / 2.0
     cons10 = math.gamma(cons35)
     vent = (config.snow_vent_f1 / (lams * lams)
             + config.snow_vent_f2 * cons10 * safe_pow(asn * rho / mu, 0.5)
@@ -643,16 +700,16 @@ def snow_self_aggregation_nsagg(q_s, N_s, rho, config, dt=None):
     qs_pos = jnp.clip(q_s, 0.0)
     ns_pos = jnp.clip(N_s, 0.0)
     bs = config.fall_b_s
-    asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
-    cons15 = (1108.0 * config.snow_aggregation_eii
+    asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
+    cons15 = (_NSAGG_CONS15_PREFACTOR * config.snow_aggregation_eii
               * safe_pow(jnp.pi, (1.0 - bs) / 3.0)
-              * config.rho_snow ** ((-2.0 - bs) / 3.0) / (4.0 * 720.0))
+              * config.rho_snow ** ((-2.0 - bs) / 3.0) / (4.0 * _NSAGG_GAMMA_DENOM))
     # |NSAGG| with CONS15's sign folded in (return the positive loss directly).
     loss = (cons15 * asn
             * safe_pow(rho, (2.0 + bs) / 3.0)
             * safe_pow(qs_pos, (2.0 + bs) / 3.0)
             * safe_pow(ns_pos * rho, (4.0 - bs) / 3.0)
-            / jnp.clip(rho, 0.1))
+            / jnp.clip(rho, _RHO_FLOOR))
     loss = jnp.where(qs_pos >= 1.0e-8, loss, 0.0)
     if dt is not None:
         # The instantaneous rate is super-linear in N_s (loss ∝ N_s^p,
@@ -683,7 +740,7 @@ def graupel_lamg(q_g, rho, config, N_g=None):
     ρ_air since N_g is per-mass — same convention as N_s).
     """
     qg_pos = jnp.clip(q_g, 0.0)
-    rho_eff = jnp.clip(rho, 0.1)
+    rho_eff = jnp.clip(rho, _RHO_FLOOR)
     if N_g is None:
         lamg = safe_pow(
             jnp.pi * config.rho_graupel * config.n0_graupel
@@ -706,7 +763,7 @@ def graupel_lamg_n0g(q_g, rho, config, N_g=None):
     """
     lamg = graupel_lamg(q_g, rho, config, N_g=N_g)
     if N_g is None:
-        n0g_m = config.n0_graupel / jnp.clip(rho, 0.1)
+        n0g_m = config.n0_graupel / jnp.clip(rho, _RHO_FLOOR)
     else:
         n0g_m = jnp.clip(N_g, 0.0) * lamg
     return lamg, n0g_m
@@ -729,12 +786,10 @@ def graupel_melting_pgmlt(q_g, T, p, rho, config, dt=None, N_g=None):
     """
     qg_pos = jnp.clip(q_g, 0.0)
     lamg, n0g_m = graupel_lamg_n0g(q_g, rho, config, N_g=N_g)
-    dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p, 1.0)
-    mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0)
-    kap = 1.414e3 * mu
-    sc = mu / (rho * dv)
-    agn = config.fall_a_g * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
-    cons36 = 2.5 + config.fall_b_g / 2.0
+    dv, mu, sc = _air_transport_props(T, p, rho)
+    kap = _AIR_CONDUCTIVITY_MU_FACTOR * mu
+    agn = config.fall_a_g * safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
+    cons36 = _VENT_CONS_OFFSET + config.fall_b_g / 2.0
     cons11 = math.gamma(cons36)
     vent = (config.graupel_vent_f1 / (lamg * lamg)
             + config.graupel_vent_f2 * cons11 * safe_pow(agn * rho / mu, 0.5)
@@ -766,7 +821,7 @@ def graupel_riming_psacwg(q_c, q_g, T, rho, config, dt=None, N_g=None):
     qc_pos = jnp.clip(q_c, 0.0)
     qg_pos = jnp.clip(q_g, 0.0)
     lamg, n0g_m = graupel_lamg_n0g(q_g, rho, config, N_g=N_g)
-    agn = config.fall_a_g * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
+    agn = config.fall_a_g * safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
     bg = config.fall_b_g
     cons14 = math.gamma(bg + 3.0) * jnp.pi / 4.0 * config.graupel_collect_eff
     psacwg = cons14 * agn * qc_pos * rho * n0g_m / safe_pow(lamg, bg + 3.0)
@@ -798,18 +853,16 @@ def graupel_deposition_prdg(q_v, q_g, q_sat_i, T, p, rho, config, dt=None,
     """
     qg_pos = jnp.clip(q_g, 0.0)
     lamg, n0g_m = graupel_lamg_n0g(q_g, rho, config, N_g=N_g)
-    dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p, 1.0)
-    mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0)        # Sutherland dyn. visc.
-    sc = mu / (rho * dv)
-    agn = config.fall_a_g * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
-    cons36 = 2.5 + config.fall_b_g / 2.0
+    dv, mu, sc = _air_transport_props(T, p, rho)
+    agn = config.fall_a_g * safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
+    cons36 = _VENT_CONS_OFFSET + config.fall_b_g / 2.0
     cons11 = math.gamma(cons36)
     dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)
     abi = 1.0 + dqsidt * constants.L_s / constants.c_pd
     # EPSG = 2π·N0G_m·ρ·DV·[vent] (SAM per-mass form). Single-moment: N0G_m·ρ =
     # N0G_vol; double-moment: N0G_m·ρ = N_g·LAMG·ρ.
     epsg = (
-        2.0 * jnp.pi * n0g_m * jnp.clip(rho, 0.1) * dv
+        2.0 * jnp.pi * n0g_m * jnp.clip(rho, _RHO_FLOOR) * dv
         * (config.graupel_vent_f1 / (lamg * lamg)
            + config.graupel_vent_f2 * cons11
            * safe_pow(agn * rho / mu, 0.5) * safe_pow(sc, 1.0 / 3.0)
@@ -852,8 +905,8 @@ def graupel_rain_accretion_pracg(q_r, N_r, q_g, T, rho, config, dt=None,
     nr_pos = jnp.clip(N_r, 0.0)
     # Single ρ_eff basis for LAMR, N0RR, N0G and the explicit PRACG ρ — ρ_eff is
     # a numerical floor only (= ρ in all valid cells), codex iter-37 A.
-    rho_eff = jnp.clip(rho, 0.1)
-    dum = safe_pow(config.rho_su / rho_eff, 0.54)
+    rho_eff = jnp.clip(rho, _RHO_FLOOR)
+    dum = safe_pow(config.rho_su / rho_eff, _FALL_RHO_EXPONENT)
     # Rain PSD (per-mass: N_r per-volume ⇒ /ρ in LAMR), same as the sed block.
     lamr = safe_pow(
         jnp.pi * constants.rho_water * nr_pos
@@ -864,13 +917,13 @@ def graupel_rain_accretion_pracg(q_r, N_r, q_g, T, rho, config, dt=None,
     cons4 = math.gamma(4.0 + config.fall_b_r) / 6.0
     cons7g = math.gamma(4.0 + config.fall_b_g) / 6.0
     umr = config.fall_a_r * cons4 * safe_pow(lamr, -config.fall_b_r) * dum
-    umr = jnp.minimum(umr, 9.1 * dum)
+    umr = jnp.minimum(umr, _UMR_FALL_CAP * dum)
     umg = config.fall_a_g * cons7g * safe_pow(lamg, -config.fall_b_g) * dum
-    umg = jnp.minimum(umg, 20.0 * dum)
+    umg = jnp.minimum(umg, _UMG_FALL_CAP * dum)
     vdiff = safe_pow(
-        (1.2 * umr - 0.95 * umg) ** 2 + 0.08 * umg * umr, 0.5)
+        (_VDIFF_C1 * umr - _VDIFF_C2 * umg) ** 2 + _VDIFF_C3 * umg * umr, 0.5)
     cons41 = jnp.pi ** 2 * config.graupel_rain_collect_eff * constants.rho_water
-    bracket = (5.0 / (safe_pow(lamr, 3.0) * lamg)
+    bracket = (_PRACG_BRACKET_C / (safe_pow(lamr, 3.0) * lamg)
                + 2.0 / (lamr * lamr * lamg * lamg)
                + 0.5 / (lamr * safe_pow(lamg, 3.0)))
     pracg = (cons41 * vdiff * rho_eff * n0rr * n0g_m
@@ -909,21 +962,21 @@ def snow_to_graupel_pgsacw(q_c, q_s, N_s, psacws, rho, config, dt):
         / jnp.maximum(qs_pos, 1.0e-20), 1.0 / 3.0)
     lams = jnp.clip(lams, config.lams_min, config.lams_max)
     n0s = ns_pos * lams
-    asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
+    asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
     bs = config.fall_b_s
     cons17 = (3.0 * config.rho_su * jnp.pi * config.snow_collect_eff ** 2
               * math.gamma(2.0 * bs + 2.0)
               / (config.rho_graupel - config.rho_snow))
     rate = (cons17 * dt * n0s * qc_pos * qc_pos * asn * asn
-            / (jnp.clip(rho, 0.1) * safe_pow(lams, 2.0 * bs + 2.0)))
+            / (jnp.clip(rho, _RHO_FLOOR) * safe_pow(lams, 2.0 * bs + 2.0)))
     pgsacw = jnp.minimum(jnp.clip(psacws, 0.0), rate)
     # Rutledge-Hobbs 1984 gate: enough snow AND cloud water, and active riming.
     pgsacw = jnp.where(
-        (qs_pos >= 1.0e-4) & (qc_pos >= 5.0e-4) & (psacws > 0.0), pgsacw, 0.0)
+        (qs_pos >= 1.0e-4) & (qc_pos >= 5.0e-4) & (psacws > 0.0), pgsacw, 0.0)  # coeff-ok: Rutledge-Hobbs riming gates
     return pgsacw
 
 
-def rain_evaporation(q_v, q_r, q_sat, evap_coeff, dt=None):
+def rain_evaporation(q_v, q_r, q_sat, evap_coeff, dt=None, rh_deficit_floor=0.0):
     """Compute rain evaporation in subsaturated air.
 
     When ``dt`` is provided the returned evaporation rate is
@@ -945,16 +998,62 @@ def rain_evaporation(q_v, q_r, q_sat, evap_coeff, dt=None):
     dt : float, optional
         Physics step [s].  When provided, clamp the evaporation rate
         so ``evap · dt ≤ q_r`` (donor positivity).
+    rh_deficit_floor : float, default 0.0
+        Relative-humidity-deficit resolution floor (dimensionless,
+        ``(q_sat − q_v)/q_sat``) below which rain evaporation is
+        suppressed via a soft threshold ``clip(deficit − floor, 0)``.
+        ``0.0`` (default) reproduces the legacy ungated behaviour.  A
+        small positive value (~5e-5, i.e. RH > 99.995 %) is a documented
+        float32-robustness knob — see Notes.  Negative values are floored
+        to 0.
 
     Returns
     -------
     array : Evaporation rate [kg/kg/s].
+
+    Notes
+    -----
+    **Deficit-resolution floor (float32 robustness).**  In a saturated
+    cloud ``q_v = q_sat`` to float64 (the difference of two ~1e-2 numbers
+    is a true zero), so the ``clip(q_sat − q_v, 0)`` deficit — and the
+    evaporation — is exactly 0.  Under float32 the saturation curve has a
+    ~1e-5 *relative* noise floor (measured in-cloud band ~9e-6), so
+    ``q_sat − q_v`` jitters even in cloud; the one-sided ``clip(·, 0)``
+    RECTIFIES that symmetric noise into a net spurious in-cloud
+    evaporation (~2e-8 kg/kg/s) that recycles rain → vapour → cloud and
+    inflates the cloudy-column liquid-water path (an 18–24 %
+    float32-vs-float64 LWP divergence on DYCOMS-II).  A small
+    ``rh_deficit_floor`` (~5e-5) suppresses evaporation only where the
+    sub-saturation is below the float32 saturation resolution.  It is
+    applied to the DEFICIT itself, NOT gated on cloud presence: any
+    *resolved* liquid sub-saturation — including mixed-phase
+    Wegener–Bergeron–Findeisen cells (deficit ~0.1 ≫ floor) and sub-cloud
+    downdrafts — still evaporates, losing only the ``floor/deficit``
+    fraction (≲0.05 % at WBF/sub-cloud scales).  The suppression is
+    material only for genuinely near-saturated columns (RH ≳ 99.9 %),
+    where rain evaporation is itself marginal: a deficit of ``2·floor``
+    loses 50 %, of ``10·floor`` loses 10 %.
+
+    The float64 answer is unchanged for an exactly-saturated cloud (the
+    in-cloud deficit is already 0).  Where a float64 run holds rain in a
+    *persistently near-saturated* cloud (deficit ≲ floor, e.g. the DYCOMS
+    cold variant whose saturation-adjusted column sits at RH ~99.99 %),
+    the floor DOES lower its LWP — but that evaporation is at a deficit
+    float32 cannot represent, so removing it (identically in both
+    precisions) is what lets float32 converge to float64, and is
+    physically defensible: rain does not meaningfully evaporate at
+    RH > 99.99 %.
     """
-    subsaturation = jnp.clip(q_sat - q_v, 0.0) / jnp.clip(q_sat, 1e-10)
+    floor = jnp.maximum(rh_deficit_floor, 0.0)
+    deficit = jnp.clip(q_sat - q_v, 0.0) / jnp.clip(q_sat, 1e-10)
+    # Soft threshold: suppress sub-resolution (RH>99.99%) deficits, pass
+    # resolved ones (shifted by the constant ``floor``). At floor=0 this is
+    # ``clip(deficit, 0) = deficit`` — exactly the legacy behaviour.
+    subsaturation = jnp.clip(deficit - floor, 0.0)
     q_r_pos = jnp.clip(q_r, 0.0, None)
     # Marshall-Palmer ventilation factor q_r^0.525 — fractional power has
     # an unbounded derivative at q_r=0; safe_pow handles the AD guard.
-    rate = evap_coeff * subsaturation * safe_pow(q_r_pos, 0.525)
+    rate = evap_coeff * subsaturation * safe_pow(q_r_pos, _RAIN_EVAP_VENT_EXP)
     if dt is not None:
         max_rate = q_r_pos / jnp.maximum(dt, 1.0e-12)
         rate = jnp.minimum(rate, max_rate)
@@ -988,11 +1087,9 @@ def rain_evaporation_m2005(q_v, q_r, N_r, q_sat, T, p, rho, config, dt=None):
         / jnp.maximum(rho * qr_pos, 1.0e-20), 1.0 / 3.0)
     lamr = jnp.clip(lamr, config.lamr_min, config.lamr_max)
     n0r = nr_pos * lamr
-    dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p, 1.0)
-    mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0)        # Sutherland dyn. visc.
-    sc = mu / (rho * dv)
-    arn = config.fall_a_r * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
-    cons34 = 2.5 + config.fall_b_r / 2.0
+    dv, mu, sc = _air_transport_props(T, p, rho)
+    arn = config.fall_a_r * safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
+    cons34 = _VENT_CONS_OFFSET + config.fall_b_r / 2.0
     cons9 = math.gamma(cons34)
     dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)
     ab = 1.0 + dqsdt * constants.L_v / constants.c_pd

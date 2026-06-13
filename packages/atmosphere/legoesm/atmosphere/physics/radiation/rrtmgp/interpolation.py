@@ -27,6 +27,9 @@ Array: TypeAlias = jax.Array
 # (centered, WENO3-JS, WENO5-JS/Z) that had zero callers in legoESM.
 #
 
+# WENO5-JS optimal linear weights (Jiang-Shu, fixed).
+_WENO5_C1, _WENO5_C2, _WENO5_C3 = 0.1, 0.6, 0.3
+
 def _weno5_nonlinear_weights(
     f_node: Array, dim: Literal[0, 1, 2], wall_bc: bool
 ) -> tuple[Array, Array, Array, Array, Array, Array]:
@@ -66,8 +69,8 @@ def _weno5_nonlinear_weights(
       + 1 / 4 * (f_iminus2 - 4 * f_iminus1 + 3 * f) ** 2
   )
 
-  c1, c2, c3 = 0.1, 0.6, 0.3  # Optimal linear weights for WENO5-JS.
-  epsilon = 1e-5
+  c1, c2, c3 = _WENO5_C1, _WENO5_C2, _WENO5_C3  # Optimal linear weights for WENO5-JS.
+  epsilon = 1e-5  # coeff-ok: WENO smoothness-indicator epsilon
 
   alpha1_plus = c1 / (beta1_plus + epsilon)**2
   alpha2_plus = c2 / (beta2_plus + epsilon)**2

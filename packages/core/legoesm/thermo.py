@@ -81,6 +81,88 @@ def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
     )
 
 
+# ---------------------------------------------------------------------------
+# Flatau et al. (1992) polynomial saturation vapor pressure
+# ---------------------------------------------------------------------------
+# CLUBB (and CAM, via ``saturation_formula = flatau``) closes its assumed-PDF
+# cloud scheme on the Flatau 8th-order polynomial fit to the SVP curve rather
+# than Tetens. These are the CANONICAL Flatau curves (added here, in the shared
+# thermo module, so the CLUBB port consumes saturation only from ``thermo`` per
+# the CLAUDE.md "no saturation re-impl" rule — the curves are NOT re-derived
+# inside the physics tree). Faithful to ``saturation.F90`` /
+# ``CLUBB-JAX/.../saturation.py`` (coefficients verbatim). Reference:
+# Flatau, P. J., Walko, R. L., & Cotton, W. R. (1992). Polynomial fits to
+# saturation vapor pressure. J. Appl. Meteorol., 31, 1507-1513, Tables 3-4.
+
+_FLATAU_MIN_T_C = -85.0       # liquid polynomial valid range floor [deg C]
+_FLATAU_ICE_MIN_T_C = -90.0   # ice polynomial valid range floor [deg C]
+
+# Flatau ice polynomial coefficients (Table 4), x100 as in saturation.F90.
+_FLATAU_ICE_A = (
+    100.0 * 6.09868993,
+    100.0 * 0.499320233,
+    100.0 * 0.184672631e-1,
+    100.0 * 0.402737184e-3,
+    100.0 * 0.565392987e-5,
+    100.0 * 0.521693933e-7,
+    100.0 * 0.307839583e-9,
+    100.0 * 0.105785160e-11,
+    100.0 * 0.161444444e-14,
+)
+
+
+def saturation_vapor_pressure_flatau(T: jax.Array) -> jax.Array:
+    """Flatau (1992) polynomial saturation vapor pressure over liquid water.
+
+    8th-order factored polynomial fit, valid roughly -85 to +50 deg C. This is
+    the SVP curve CLUBB/CAM use by default (``saturation_formula = flatau``).
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+
+    Returns
+    -------
+    jax.Array
+        Saturation vapor pressure over liquid [Pa].
+    """
+    T_c = jnp.clip(T - constants.T_freeze, _FLATAU_MIN_T_C, None)
+    T_sqd = T_c ** 2
+    return (
+        -3.21582393e-14
+        * (T_c - 646.5835252598777)
+        * (T_c + 90.72381630364440)
+        * (T_sqd + 111.0976961559954 * T_c + 6459.629194243118)
+        * (T_sqd + 152.3131930092453 * T_c + 6499.774954705265)
+        * (T_sqd + 174.4279584934021 * T_c + 7721.679732114084)
+    )
+
+
+def saturation_vapor_pressure_ice_flatau(T: jax.Array) -> jax.Array:
+    """Flatau (1992) polynomial saturation vapor pressure over ice.
+
+    8th-order Horner polynomial (Table 4), valid roughly -90 to 0 deg C.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+
+    Returns
+    -------
+    jax.Array
+        Saturation vapor pressure over ice [Pa].
+    """
+    T_c = jnp.clip(T - constants.T_freeze, _FLATAU_ICE_MIN_T_C, None)
+    a = _FLATAU_ICE_A
+    return (
+        a[0] + T_c * (a[1] + T_c * (a[2] + T_c * (
+            a[3] + T_c * (a[4] + T_c * (a[5] + T_c * (
+                a[6] + T_c * (a[7] + T_c * a[8])))))))
+    )
+
+
 def saturation_mixing_ratio(
     T: jax.Array,
     p: jax.Array,

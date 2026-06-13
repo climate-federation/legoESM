@@ -88,6 +88,52 @@ def test_mixing_length_grows_with_tke():
     assert abs(ratio - float(jnp.sqrt(2.0))) < 0.05
 
 
+def test_mixing_length_choice1_negative_tke_is_finite():
+    """``tke_mxl_choice=1`` must stay FINITE when the prognostic TKE carries
+    Veros's interior NEGATIVE-energy debt (``e < 0``).
+
+    Regression for the global_1deg south-wall step-2 blowup: the choice=1
+    length scale used to be ``sqrt(2·e / max(N², eps))`` — with the RAW
+    (possibly negative) ``e`` INSIDE the sqrt, so ``sqrt(negative) = NaN``
+    the first step the prognostic TKE went negative.  The faithful Veros form
+    (tke.py:30,34) clamps ``sqrttke = sqrt(max(0, e))`` BEFORE the division.
+    Choice=2 already clamped (via ``_veros_buoyancy_length``), so the 4° /
+    flexible / ACC recipes never hit it; only the choice=1 global_1deg path
+    did.
+
+    NON-VACUOUS: with the pre-fix ``sqrt(2·e/N²)`` body this assertion FAILS
+    (the negative-``e`` interfaces are NaN); the manufactured column mirrors
+    the real blowup cell (mixed-sign interior TKE, small positive N²)."""
+    n_int = 6
+    # Mixed-sign carried TKE — exactly the Veros interior debt that triggered
+    # the blowup (s1.tke had min ≈ -1.7e-5 at the south wall).
+    e = jnp.array([1.0e-4, -1.7e-5, 2.0e-4, -5.0e-6, 8.0e-5, 1.0e-6])
+    N2 = jnp.full((n_int,), 5.0e-6)            # finite, statically stable
+    dz_half = jnp.full((n_int,), 50.0)
+    dz_cell = jnp.full((n_int + 1,), 50.0)
+    cfg = TKEConfig(tke_mxl_choice=1, mxl_min=1.0e-8)
+
+    l_k, l_eps = compute_mixing_lengths(
+        e, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell)
+    assert jnp.all(jnp.isfinite(l_k)), l_k
+    assert jnp.all(jnp.isfinite(l_eps)), l_eps
+    # Negative-TKE interfaces collapse to the floor (sqrttke = 0 there).
+    assert float(l_k[1]) == pytest.approx(cfg.mxl_min)
+    assert float(l_k[3]) == pytest.approx(cfg.mxl_min)
+    # Positive-TKE interfaces follow the Veros buoyancy length sqrt(2e/N²).
+    expected = float(jnp.sqrt(2.0 * e[0] / N2[0]))
+    assert float(l_k[0]) == pytest.approx(expected, rel=1e-6)
+
+    # AD-safe: the double-``where`` must give a FINITE gradient through the
+    # negative-TKE debt (a plain sqrt(max(0,e)) has a NaN derivative at e<=0).
+    def _loss(ev):
+        lk, _ = compute_mixing_lengths(
+            ev, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell)
+        return jnp.sum(lk)
+    grad = jax.grad(_loss)(e)
+    assert jnp.all(jnp.isfinite(grad)), grad
+
+
 # ---------------------------------------------------------------------------
 # 2. Shear production
 # ---------------------------------------------------------------------------

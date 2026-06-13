@@ -50,10 +50,22 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanMode
 
 @pytest.fixture(autouse=True)
 def _enable_x64():
+    # Pin BOTH jax x64 AND the legoESM storage precision policy to fp64.
+    # Toggling jax_enable_x64 alone is insufficient: the model's
+    # cast_pytree storage policy still downcasts to float32, so the
+    # thickness-weighted tracer integral conserves only to ~3e-7
+    # (float32 epsilon) and the 1e-8 conservation assert fails spuriously
+    # (issue #396).  Under the fp64 policy the model conserves to ~1e-14.
+    from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
     orig = jax.config.jax_enable_x64
+    prev_policy = get_policy()
     jax.config.update("jax_enable_x64", True)
-    yield
-    jax.config.update("jax_enable_x64", orig)
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(prev_policy)
+        jax.config.update("jax_enable_x64", orig)
 
 
 @pytest.fixture

@@ -136,6 +136,14 @@ MICROPHYSICS_REGISTRY: dict[str, _Entry] = {
         "legoesm.atmosphere.physics.microphysics.sdm",
         "sdm_microphysics",
     ),
+    # Fast spectral-bin (WRF FSBM-2 port) column adapter: reconstructs the
+    # 33-bin liquid spectrum from bulk (q_c, q_r, N_r), runs oracle
+    # condensation + Bott coalescence + per-bin sedimentation. See
+    # microphysics/fast_sbm/ and docs/specs/bin_microphysics.md.
+    "fast_sbm": (
+        "legoesm.atmosphere.physics.microphysics.fast_sbm.column",
+        "fast_sbm_microphysics",
+    ),
     # The ML emulator kernel takes the Equinox network as a trailing
     # extra argument; ``physics_pipeline._resolve_microphysics`` builds
     # the network from the scheme config and binds it into a

@@ -525,6 +525,23 @@ def make_voronoi_mpi_step(
     -------
     callable : ``(state, dt) -> state``
     """
+    # Issue #405/#413: never silently run stateful physics without a carry.
+    # The shared predicates also see a partial / __wrapped__ wrapper that
+    # hides the _requires_phys_state tag.
+    from legoesm.timestepping.integration import (
+        physics_requires_phys_state,
+        refuse_unthreaded_stateful_physics,
+    )
+    # ``return_phys_state=False`` is a state-only contract that DROPS the
+    # carry — refuse a stateful physics_fn at build time.
+    if not return_phys_state and physics_requires_phys_state(physics_fn):
+        raise NotImplementedError(
+            "make_voronoi_mpi_step(return_phys_state=False) does not "
+            "thread the PhysicsState carry, so the configured stateful "
+            "physics would silently reseed every step (issue #405/#413).  "
+            "Pass return_phys_state=True and thread the returned carry, or "
+            "use a diagnostic scheme."
+        )
     if config is None:
         config = model.config
 
@@ -817,7 +834,18 @@ def make_voronoi_mpi_step(
         # Full AMIP contract: ``(state, dt, forcing=None, phys_state=None)``
         # -> ``(state, phys_state_out)`` so the driver can thread the
         # operator-split physics carry (TKE / convection state) across steps.
-        return _step
+        # This contract CAN thread the carry, but a caller that forgets to
+        # pass ``phys_state`` for a stateful physics_fn would still silently
+        # reseed every step.  Guard at CALL time (mirroring the dycore step
+        # APIs) via a thin Python wrapper around the jitted ``_step`` — the
+        # check is Python-level (static physics_fn, ``phys_state is None``),
+        # so it adds no retrace and runs even under an outer trace.
+        def _step_carry(state, dt, forcing=None, phys_state=None):
+            refuse_unthreaded_stateful_physics(
+                physics_fn, phys_state,
+                where="make_voronoi_mpi_step(return_phys_state=True)")
+            return _step(state, dt, forcing, phys_state)
+        return _step_carry
 
     # Backward-compatible contract for the dynamics / stateless-physics
     # callers (test_voronoi_mpi, the scaling benches): ``step(state, dt)``

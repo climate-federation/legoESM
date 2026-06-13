@@ -34,6 +34,10 @@ AbstractLookupGasOptics: TypeAlias = (
 AtmosphericState: TypeAlias = atmospheric_state.AtmosphericState
 
 
+# Default aerosol optical properties (fixed scheme defaults).
+_AEROSOL_SSA_DEFAULT = 0.93
+_AEROSOL_ASYM_DEFAULT = 0.70
+
 def _compute_local_properties_lw(
     pressure: Array,
     temperature: Array,
@@ -477,8 +481,8 @@ def solve_sw(
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
     aerosol_optical_depth: Array | None = None,
-    aerosol_single_scattering_albedo: float = 0.93,
-    aerosol_asymmetry_factor: float = 0.70,
+    aerosol_single_scattering_albedo: float = _AEROSOL_SSA_DEFAULT,
+    aerosol_asymmetry_factor: float = _AEROSOL_ASYM_DEFAULT,
     solar_fraction_by_gpt: Array | None = None,
     use_scan: bool | None = None,
     gpoint_batch_size: int = 0,
@@ -535,7 +539,7 @@ def solve_sw(
   # ``exp(-tau / cos(zenith))`` for nighttime columns (cos(zenith) ~ 0),
   # we clamp the zenith used in the solve to at most ~89.4 degrees
   # (cos > 0.01).  After the solve, nighttime columns are zeroed out.
-  _ZENITH_MAX = jnp.arccos(jnp.asarray(0.01, dtype=temperature.dtype))
+  _ZENITH_MAX = jnp.arccos(jnp.asarray(0.01, dtype=temperature.dtype))  # coeff-ok: min cos(zenith) floor
   safe_zenith = jnp.minimum(zenith, _ZENITH_MAX)
 
   # Build a per-column boolean mask that is True for daytime columns.

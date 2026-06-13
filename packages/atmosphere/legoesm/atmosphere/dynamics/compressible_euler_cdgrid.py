@@ -40,7 +40,10 @@ from legoesm.grids.cubed_sphere_cdgrid import (
     create_cubed_sphere_cdgrid,
 )
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
-from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.timestepping.integration import (
+    IntegrationMixin,
+    refuse_unthreaded_stateful_physics,
+)
 from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
@@ -1097,6 +1100,11 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
 
     def step(self, state: NonHydrostaticState, dt: float, physics_fn=None) -> NonHydrostaticState:
         """Advance one step using split-explicit RK3 with C-D grid transport."""
+        # NH CD-grid does not thread a PhysicsState carry — refuse a
+        # stateful make_physics(model_type="nonhydrostatic") fn rather than
+        # silently reseed its prognostic fields every step (#405/#413).
+        refuse_unthreaded_stateful_physics(
+            physics_fn, None, where="NH CDGrid step()")
         # Precompute target mass outside JIT boundary
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial

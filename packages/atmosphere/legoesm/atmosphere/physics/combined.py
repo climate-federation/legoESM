@@ -60,7 +60,9 @@ from legoesm.atmosphere.physics.convection.integration import (
     make_convection_physics,
 )
 from legoesm.atmosphere.physics.turbulence.integration import (
+    get_turbulence_fn,
     make_turbulence_physics,
+    turbulence_carry_field,
 )
 from legoesm.atmosphere.physics.microphysics.integration import (
     make_microphysics_physics,
@@ -109,7 +111,7 @@ class PhysicsConfig(NamedTuple):
 def make_physics(
     config: PhysicsConfig,
     model_type: str = "hydrostatic",
-    dt: float = 300.0,
+    dt: float = 300.0,  # coeff-ok: default physics timestep [s]
     column_mesh=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
@@ -139,20 +141,58 @@ def make_physics(
     -------
     Callable
         Physics function with the correct signature for *model_type*.
+        Carries a ``_requires_phys_state`` attribute: ``True`` when the
+        configured schemes are stateful (prognostic TKE-family /
+        MYNN-2.5 turbulence, prognostic-spectral GWD, prognostic
+        convection), so step wrappers that cannot thread the
+        ``PhysicsState`` carry can refuse loudly instead of silently
+        reseeding every step (issue #405/#413).
     """
     if model_type == "hydrostatic":
-        return _make_hydrostatic_combined(config, dt, column_mesh=column_mesh)
+        fn = _make_hydrostatic_combined(config, dt, column_mesh=column_mesh)
     elif model_type == "nonhydrostatic":
-        return _make_nonhydrostatic_combined(config, dt)
+        fn = _make_nonhydrostatic_combined(config, dt)
     elif model_type == "spectral_pe":
-        return _make_spectral_pe_combined(config, dt)
+        fn = _make_spectral_pe_combined(config, dt)
     elif model_type == "mpas":
-        return _make_mpas_combined(config, dt, column_mesh=column_mesh)
+        fn = _make_mpas_combined(config, dt, column_mesh=column_mesh)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
             f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
+    fn._requires_phys_state = physics_config_requires_phys_state(config)
+    return fn
+
+
+def physics_config_requires_phys_state(config: PhysicsConfig) -> bool:
+    """True when *config* selects any scheme with a prognostic carry.
+
+    Single predicate for step wrappers (sharded dynamics, lat-lon MPI)
+    that cannot thread ``PhysicsState`` and must refuse loudly rather
+    than silently reseed (issue #405/#413).  Mirrors the driver guard:
+    energy-carrying turbulence (shared traits), prognostic/stochastic
+    convection, prognostic-spectral GWD.
+    """
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        turbulence_scheme_traits,
+    )
+    from legoesm.atmosphere.physics.convection.integration import (
+        convection_scheme_traits,
+    )
+    # Profile-prognostic convection counts as stateful (codex round 5):
+    # the bridge reads phys_state.conv_prog_profile for ZM/KF/Emanuel/
+    # Tiedtke/Bechtold and falls back to zeros when the carry is absent
+    # — Tiedtke concretely relaxes the previous profile into M_u_new,
+    # so a dropped carry silently erases that memory every step.
+    conv = convection_scheme_traits(config.convection.scheme)
+    return bool(
+        turbulence_scheme_traits(config.turbulence.scheme).carries_energy
+        or conv.is_scalar_prognostic
+        or conv.is_profile_prognostic
+        or conv.is_stochastic
+        or config.gravity_wave_drag.scheme == "prognostic_spectral"
+    )
 
 
 # ======================================================================
@@ -187,9 +227,11 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # dedicated PhysicsState field so a restart-time scheme switch
         # cannot silently feed the wrong moment as energy (Phase C
         # codex iter-1 medium finding).
-        _turb_field = (
-            "qke" if config.turbulence.scheme == "mynn25" else "tke"
-        )
+        # qke (MYNN-2.5) / clubb_moments (prognostic CLUBB) / tke — must match the
+        # slot the per-model physics_fn reads (turbulence_carry_field, the
+        # config-aware refinement of turbulence_scheme_traits.energy_field).
+        _turb_sn, _, _turb_sc = get_turbulence_fn(config.turbulence)
+        _turb_field = turbulence_carry_field(_turb_sn, _turb_sc)
         tagged_fns.append((
             make_turbulence_physics(config.turbulence, model_type, dt),
             True,
@@ -367,9 +409,10 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
         # Phase C codex iter-2 high: route MYNN-2.5 to ``qke``
         # (PhysicsState) so a non-SCM nonhydrostatic run also persists
         # qke across steps.
-        _turb_field = (
-            "qke" if config.turbulence.scheme == "mynn25" else "tke"
-        )
+        # qke (MYNN-2.5) / clubb_moments (prognostic CLUBB) / tke — must match the
+        # slot the per-model physics_fn reads (turbulence_carry_field).
+        _turb_sn, _, _turb_sc = get_turbulence_fn(config.turbulence)
+        _turb_field = turbulence_carry_field(_turb_sn, _turb_sc)
         tagged_fns.append((
             make_turbulence_physics(config.turbulence, "nonhydrostatic", dt),
             True,
@@ -498,9 +541,10 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
     if config.turbulence.scheme != "none":
         # Phase C codex iter-2 high: route MYNN-2.5 to ``qke`` on the
         # spectral PE combined path too.
-        _turb_field = (
-            "qke" if config.turbulence.scheme == "mynn25" else "tke"
-        )
+        # qke (MYNN-2.5) / clubb_moments (prognostic CLUBB) / tke — must match the
+        # slot the per-model physics_fn reads (turbulence_carry_field).
+        _turb_sn, _, _turb_sc = get_turbulence_fn(config.turbulence)
+        _turb_field = turbulence_carry_field(_turb_sn, _turb_sc)
         tagged_fns.append((
             make_turbulence_physics(config.turbulence, "spectral_pe", dt),
             True,

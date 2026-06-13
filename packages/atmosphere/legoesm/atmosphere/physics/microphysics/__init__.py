@@ -34,6 +34,7 @@ from legoesm.atmosphere.physics.microphysics.config import (
     ThompsonConfig,
     P3Config,
     SDMConfig,
+    FastSBMConfig,
     MicrophysicsMLEmulatorConfig,
 )
 from legoesm.atmosphere.physics.microphysics.output import (
@@ -50,6 +51,9 @@ from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysi
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
 from legoesm.atmosphere.physics.microphysics.sdm import sdm_microphysics
+from legoesm.atmosphere.physics.microphysics.fast_sbm.column import (
+    fast_sbm_microphysics,
+)
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     ml_microphysics,
     MicrophysicsEmulator,

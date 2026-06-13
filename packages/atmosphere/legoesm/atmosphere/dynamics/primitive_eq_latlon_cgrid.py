@@ -80,7 +80,10 @@ from legoesm.grids.vertical import (
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
-from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.timestepping.integration import (
+    IntegrationMixin,
+    refuse_unthreaded_stateful_physics,
+)
 from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
 from legoesm.core.conservation import (
     zero_mean_tendency,
@@ -742,6 +745,12 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         self._cgrid_cache_key: tuple | None = None
         self._cgrid_cache: CGridLatLonHydrostaticState | None = None
 
+        # Operator-split physics carry (issue #413, mirrors the MPAS and
+        # CDGrid PEs): ``step(..., phys_state=...)`` stashes the updated
+        # ``PhysicsState`` here for the caller to feed back next step,
+        # while ``step`` keeps returning the state only.
+        self._phys_state = None
+
         # Anchored mass target (lazy: filled on first step when
         # ``anchor_mass_to_initial`` is True). Mirrors the cubed-sphere
         # ``CDGridPrimitiveEquationModel`` pattern so the per-step
@@ -778,25 +787,36 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
     # Internal C-grid stepping (raw-array CGridLatLonHydrostaticState)
     # ------------------------------------------------------------------
 
-    def _call_physics(self, physics_fn, hs):
+    def _call_physics(self, physics_fn, hs, phys_state=None):
         """Call physics_fn with the correct contract and unwrap tuples.
 
         Supports both calling conventions used in the repo:
         - Legacy 3-arg: ``physics_fn(state, grid, sigma_coord)``
         - 1-arg closure: ``physics_fn(state)``
 
+        When *phys_state* is supplied the 4-arg carry contract
+        ``physics_fn(state, grid, sigma_coord, phys_state)`` is used
+        (issue #413); a 3-arg-only physics_fn then fails loudly rather
+        than silently dropping the carry.
+
         Also unwraps ``(tendencies, aux)`` tuple returns from
         PhysicsModuleProtocol-style callables.
         """
-        sig = inspect.signature(physics_fn)
-        n_params = len(sig.parameters)
-        if n_params >= 3:
-            result = physics_fn(hs, self.grid, self.sigma_coord)
-        else:
-            result = physics_fn(hs)
+        result = self._call_physics_raw(physics_fn, hs, phys_state)
         if type(result) is tuple:
             return result[0]
         return result
+
+    def _call_physics_raw(self, physics_fn, hs, phys_state=None):
+        """As :meth:`_call_physics` but WITHOUT unwrapping the result —
+        the carry-out evaluation needs ``result[1]``."""
+        if phys_state is not None:
+            return physics_fn(hs, self.grid, self.sigma_coord, phys_state)
+        sig = inspect.signature(physics_fn)
+        n_params = len(sig.parameters)
+        if n_params >= 3:
+            return physics_fn(hs, self.grid, self.sigma_coord)
+        return physics_fn(hs)
 
     @partial(jax.jit, static_argnums=(0, 4))
     def _step_cgrid(
@@ -805,11 +825,15 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         dt: float,
         target_mass: jax.Array | None = None,
         physics_fn=None,
-    ) -> CGridLatLonHydrostaticState:
+        phys_state=None,
+    ) -> tuple:
         """Internal: advance one step on C-grid state (raw arrays).
 
         Physics is evaluated inside each RK stage (matching the CDGrid
-        PE contract), not as a post-step Euler update.
+        PE contract), not as a post-step Euler update.  Every stage
+        receives the STEP-INPUT ``phys_state``; the carry-out comes
+        from one extra physics evaluation on the post-step state (see
+        :meth:`step`).  Returns ``(state_new, phys_state_out)``.
         """
         state_c = cast_pytree(state, None, "compute")
 
@@ -821,7 +845,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             # --- Physics coupling (inside RK stage) ---
             if physics_fn is not None:
                 hs = cgrid_to_hydrostatic(s, self.grid)
-                phys_tend = self._call_physics(physics_fn, hs)
+                phys_tend = self._call_physics(physics_fn, hs, phys_state)
 
                 dT = dT + phys_tend.dT_dt.data
                 dps = dps + phys_tend.dp_s_dt.data
@@ -919,7 +943,25 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # Safety rails: T floor, p_s floor, mass fixer
         state_new = self._apply_safety_rails(state_new, target_mass, state)
 
-        return cast_pytree(state_new, None, "storage")
+        state_out = cast_pytree(state_new, None, "storage")
+
+        # Operator-split physics carry (issue #413): one extra physics
+        # evaluation on the POST-STEP state yields the carry-out
+        # (tendencies discarded) — prognostic fields advance exactly
+        # once per dt, consistent with the returned state.  RK-weight
+        # combination of carries would corrupt replacement-semantics
+        # values (e.g. the implicit TKE solve).  Never traced when no
+        # carry is threaded (byte-identical legacy path).
+        phys_state_out = phys_state
+        if physics_fn is not None and phys_state is not None:
+            _pr = self._call_physics_raw(
+                physics_fn, cgrid_to_hydrostatic(state_out, self.grid),
+                phys_state,
+            )
+            if type(_pr) is tuple and len(_pr) > 1:
+                phys_state_out = _pr[1]
+
+        return state_out, phys_state_out
 
     # ------------------------------------------------------------------
     # Public API — matches the driver contract
@@ -1019,6 +1061,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         dt: float,
         target_mass: jax.Array | None = None,
         physics_fn=None,
+        phys_state=None,
     ):
         """Advance one time step.
 
@@ -1041,8 +1084,18 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         physics_fn : callable or None
             Evaluated at each RK stage alongside dynamics (3-arg legacy
             or 1-arg closure, tuple returns unwrapped).
+        phys_state : PhysicsState or None
+            Operator-split physics carry (issue #413, mirrors the MPAS
+            and CDGrid PEs).  Every RK stage's physics evaluation
+            receives this STEP-INPUT carry; the carry-out comes from
+            one extra physics evaluation on the post-step state and is
+            stashed on ``self._phys_state`` for the caller to feed
+            back next step.  ``None`` (default) is byte-identical to
+            the legacy path.
 
         """
+        refuse_unthreaded_stateful_physics(
+            physics_fn, phys_state, where="lat-lon C-grid step()")
         # Anchor-to-initial: snapshot mass once outside JIT (mirrors
         # primitive_eq_cdgrid.step()).  Computed in fp64 via
         # ``compute_mass`` so it stays clean of the per-step
@@ -1068,7 +1121,9 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             target_mass = self._target_mass
 
         if isinstance(state, CGridLatLonHydrostaticState):
-            return self._step_cgrid(state, dt, target_mass, physics_fn)
+            state_new, self._phys_state = self._step_cgrid(
+                state, dt, target_mass, physics_fn, phys_state)
+            return state_new
 
         # HydrostaticState input: use cached face-staggered winds from
         # the previous step to avoid lossy cell→face re-projection.
@@ -1081,7 +1136,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         else:
             cgrid_in = hydrostatic_to_cgrid(state, self.grid)
 
-        cgrid_out = self._step_cgrid(cgrid_in, dt, target_mass, physics_fn)
+        cgrid_out, self._phys_state = self._step_cgrid(
+            cgrid_in, dt, target_mass, physics_fn, phys_state)
 
         # Cache the output and convert to HydrostaticState
         hs_out = cgrid_to_hydrostatic(cgrid_out, self.grid)
@@ -1107,12 +1163,16 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 key.append(id(f.data if hasattr(f, 'data') else f))
         return tuple(key)
 
-    def step_with_physics(self, state, dt, physics_fn=None):
+    def step_with_physics(self, state, dt, physics_fn=None,
+                          phys_state=None):
         """Advance one step, optionally applying physics.
 
         This is the entry point used by ``ModelDriver``.  It accepts
         both ``HydrostaticState`` and ``CGridLatLonHydrostaticState``
         and returns the same type as the input.  ``physics_fn=None``
-        runs dynamics only (no physics).
+        runs dynamics only (no physics).  ``phys_state`` threads the
+        operator-split physics carry (issue #413); the updated carry
+        is stashed on ``self._phys_state``.
         """
-        return self.step(state, dt, physics_fn=physics_fn)
+        return self.step(state, dt, physics_fn=physics_fn,
+                         phys_state=phys_state)

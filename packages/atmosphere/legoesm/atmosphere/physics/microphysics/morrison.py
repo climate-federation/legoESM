@@ -56,6 +56,23 @@ from legoesm.atmosphere.physics.microphysics.output import (
 )
 
 
+# --- fixed M2005 PSD / fall-speed / nucleation / transport constants ---
+_RHO_FLOOR = 0.1                 # air-density floor in divisions [kg/m^3]
+_FALL_RHO_EXP = 0.54             # (rho_su/rho)^0.54 fall-speed density correction (r/s/g)
+_FALL_RHO_EXP_ICE = 0.35         # ice fall-speed density correction exponent
+_VT_CAP_RAIN = 9.1               # rain fall-speed cap [m/s]
+_VT_CAP_GRAUPEL = 20.0           # graupel fall-speed cap [m/s]
+_VT_CLIP_RAIN = 20.0             # rain fall-speed clip ceiling [m/s]
+_VT_CLIP_FROZEN = 5.0            # snow/ice fall-speed clip ceiling [m/s]
+_VT_CAP_SNOW_ICE = 1.2           # snow/ice-cap fall-speed factor [m/s]
+_DV_PREFACTOR = 8.794e-5         # Hall-Pruppacher vapour diffusivity prefactor
+_DV_T_EXPONENT = 1.81
+_COOPER_EXP_CAP = 80.0           # Cooper ice-nuclei exp argument cap
+_NUC_T_THRESHOLD_K = 265.15      # heterogeneous ice-nucleation T threshold [K]
+_NUC_RH_ICE_THRESHOLD = 1.08     # ice-nucleation RH_ice gate
+_NUC_RH_LIQ_THRESHOLD = 0.999    # liquid-nucleation RH_liq gate
+_FERRIER_ICE_NUMBER_DENOM = 1080.0  # Ferrier ice-number diagnostic denominator
+
 def resolve_morrison_flavor(config: MorrisonConfig) -> MorrisonConfig:
     """Resolve ``morrison_flavor`` into the concrete parameter set.
 
@@ -78,9 +95,9 @@ def resolve_morrison_flavor(config: MorrisonConfig) -> MorrisonConfig:
     """
     if config.morrison_flavor == "mg":
         return config._replace(
-            lami_max=1.0 / 10.0e-6,
+            lami_max=1.0 / 10.0e-6,  # coeff-ok: max ice slope (1/10um)
             snow_aggregation_eii=0.5,
-            rho_snow=250.0,
+            rho_snow=250.0,  # coeff-ok: snow bulk density default [kg/m^3]
             fall_b_i=1.0,
             ice_to_snow_scheme="mg_ferrier",
         )
@@ -212,10 +229,10 @@ def morrison_microphysics(
     q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
     N_i_target = jnp.minimum(
         config.N_i0 * jnp.exp(
-            config.cooper_a * jnp.maximum(T_freeze - T, 0.0)
+            jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), _COOPER_EXP_CAP)
         ),
         config.N_i_nuc_max,
-    ) / jnp.clip(rho, 0.1)
+    ) / jnp.clip(rho, _RHO_FLOOR)
     # SAM compares kc2 to NI3D+NS3D+NG3D (ice+snow+graupel number); legoESM
     # carries single-moment snow/graupel (no N_s, N_g) so the target is
     # reduced by N_i only. Limitation: where prognostic snow/graupel number
@@ -229,10 +246,10 @@ def morrison_microphysics(
     rh_liq = q_v / jnp.clip(q_sat, 1.0e-12)
     rh_ice = q_v / jnp.clip(q_sat_i, 1.0e-12)
     gate_liq = (
-        jax.nn.sigmoid(config.nuc_rh_sharpness * (rh_liq - 0.999))
-        * jax.nn.sigmoid(config.nuc_T_sharpness * (265.15 - T))
+        jax.nn.sigmoid(config.nuc_rh_sharpness * (rh_liq - _NUC_RH_LIQ_THRESHOLD))
+        * jax.nn.sigmoid(config.nuc_T_sharpness * (_NUC_T_THRESHOLD_K - T))
     )
-    gate_ice = jax.nn.sigmoid(config.nuc_rh_sharpness * (rh_ice - 1.08))
+    gate_ice = jax.nn.sigmoid(config.nuc_rh_sharpness * (rh_ice - _NUC_RH_ICE_THRESHOLD))
     nuc_gate = jnp.maximum(gate_liq, gate_ice)
     dN_i_nuc = (
         jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * nuc_gate
@@ -271,7 +288,7 @@ def morrison_microphysics(
             * jax.nn.sigmoid(
                 config.hom_freeze_T_sharpness * (config.hom_freeze_T_max - T))
         )
-        n_hom_target = config.hom_ice_nuc_N / jnp.clip(rho, 0.1)  # per-mass
+        n_hom_target = config.hom_ice_nuc_N / jnp.clip(rho, _RHO_FLOOR)  # per-mass
         dN_i_hom = (
             jnp.clip(n_hom_target - jnp.clip(N_i, 0.0), 0.0)
             / jnp.clip(dt, 1.0) * hom_gate
@@ -326,7 +343,7 @@ def morrison_microphysics(
         #         dq_sat_i/dT = L_s·q_sat_i/(R_v·T²)   (Clausius–Clapeyron).
         # (q_v − q_sat_i) < 0 ⇒ SUBLIMATION (negative). Tuned by the
         # dimensionless ``ice_deposition_efficiency``.
-        dv_vap = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p_full, 1.0)
+        dv_vap = _DV_PREFACTOR * safe_pow(T, _DV_T_EXPONENT) / jnp.clip(p_full, 1.0)
         dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)
         abi = 1.0 + dqsidt * constants.L_s / constants.c_pd
         epsi = (
@@ -491,11 +508,17 @@ def morrison_microphysics(
         #   d_rat = LAMI·DCS;  NPRCI = N0I/(LAMI·180)·exp(−d_rat);
         #   m_ip  = (ρ_ci·π/6)/LAMI³;
         #   PRCI  = m_ip·NPRCI·(((d_rat+3)·d_rat+6)·d_rat+6).
+        # The product is algebraically PRCI = (ρ_ci π/6)·N0I/(180·LAMI⁴)·…;
+        # with q_i = (ρ_ci π)·N0I/LAMI⁴ (Γ(4)=6 inverse-exponential PSD),
+        # N0I/LAMI⁴ = q_i/(ρ_ci π) cancels the LAMI³/LAMI⁴ entirely:
+        #   PRCI = (q_i/1080)·exp(−d_rat)·(((d_rat+3)d_rat+6)d_rat+6).
+        # This avoids forming 1/LAMI³ (= 1/safe_pow(1e-30,3) = 1/1e-90, which
+        # UNDERFLOWS float32 → Inf·0 = NaN when N_i→0; codex precision review),
+        # is identical for N_i>0, and stays finite at LAMI=0 (→ q_i/180, the
+        # bare 180-s timescale).
         d_rat = lami_ac * dcs
-        nprci = n0i_ac / (jnp.clip(lami_ac, 1.0e-30) * 180.0) * jnp.exp(-d_rat)
-        m_ip = (config.rho_cloud_ice * jnp.pi / 6.0) / safe_pow(
-            jnp.clip(lami_ac, 1.0e-30), 3.0)
-        ferrier = m_ip * nprci * (((d_rat + 3.0) * d_rat + 6.0) * d_rat + 6.0)
+        ferrier = (jnp.clip(q_i, 0.0) / _FERRIER_ICE_NUMBER_DENOM) * jnp.exp(-d_rat) \
+            * (((d_rat + 3.0) * d_rat + 6.0) * d_rat + 6.0)
         aggregation = jnp.where(
             (jnp.clip(q_i, 0.0) > 1.0e-14) & (T <= T_freeze), ferrier, 0.0)
     elif config.ice_to_snow_scheme == "heuristic":
@@ -691,7 +714,7 @@ def morrison_microphysics(
         # the proven-stable ~5e6 /kg scale.
         homo_target_N = jnp.minimum(
             jnp.clip(N_c_eff, 0.0), config.N_i_nuc_max
-        ) / jnp.clip(rho, 0.1)
+        ) / jnp.clip(rho, _RHO_FLOOR)
         homo_freeze_N = jnp.where(
             jnp.clip(q_c, 0.0) > 1.0e-14,
             homo_frac * jnp.clip(homo_target_N - jnp.clip(N_i, 0.0), 0.0)
@@ -816,7 +839,7 @@ def morrison_microphysics(
 
     # === SEDIMENTATION ===
     rho_sfc = rho[:, -1:]
-    rho_ratio = rho / jnp.clip(rho_sfc, 0.1)
+    rho_ratio = rho / jnp.clip(rho_sfc, _RHO_FLOOR)
     if config.fall_speed_scheme == "m2005_psd":
         # Faithful SAM M2005 mass-weighted PSD fall speeds for the DOUBLE-
         # MOMENT species (rain via N_r, cloud ice via N_i; slopes
@@ -827,13 +850,13 @@ def morrison_microphysics(
         # clamped to SAM's slope + "realistic fallspeed" limits. Snow has NO
         # prognostic N_s (single-moment), so it keeps the legacy bulk q-power
         # V_t — the same double-moment-snow gap that defers faithful PRDS/riming.
-        dum = safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
+        dum = safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXP)
         # Cloud ICE uses the Ikawa-Saito 1991 density exponent 0.35 (gSAM
         # AIN=(RHOSU/RHO)^0.35·AI, module_mp_graupel.f90:1542/4230), NOT the
         # 0.54 Heymsfield-Bensemer that rain/snow use (ARN/ASN=DUM·a) — so ice
         # falls slightly SLOWER in thin upper-trop air than the 0.54 form (the
         # 0.54 over-sped the anvil ice ~20-30%; iter-209 fix, pairs with #6).
-        dum_i = safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.35)
+        dum_i = safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXP_ICE)
         cons4 = math.gamma(4.0 + config.fall_b_r) / 6.0
         cons28 = math.gamma(4.0 + config.fall_b_i) / 6.0
         qr_pos = jnp.clip(q_r, 0.0)
@@ -852,14 +875,14 @@ def morrison_microphysics(
             / jnp.maximum(rho * qr_pos, 1.0e-20), 1.0 / 3.0)
         lamr = jnp.clip(lamr, config.lamr_min, config.lamr_max)
         V_t_r = config.fall_a_r * cons4 * safe_pow(lamr, -config.fall_b_r) * dum
-        V_t_r = jnp.minimum(V_t_r, 9.1 * dum)
+        V_t_r = jnp.minimum(V_t_r, _VT_CAP_RAIN * dum)
         V_t_r = jnp.where(qr_pos > 1.0e-14, V_t_r, 0.0)
         lami = safe_pow(
             config.rho_cloud_ice * jnp.pi * jnp.clip(N_i, 0.0)
             / jnp.maximum(qi_pos, 1.0e-20), 1.0 / 3.0)
         lami = jnp.clip(lami, config.lami_min, config.lami_max)
         V_t_i = config.fall_a_i * cons28 * safe_pow(lami, -config.fall_b_i) * dum_i
-        dum_i_cap = 1.2 * dum_i
+        dum_i_cap = _VT_CAP_SNOW_ICE * dum_i
         V_t_i = jnp.minimum(V_t_i, dum_i_cap)
         V_t_i = jnp.where(qi_pos > 1.0e-14, V_t_i, 0.0)
         if snow_double_moment:
@@ -876,16 +899,16 @@ def morrison_microphysics(
             cons5_s = math.gamma(1.0 + config.fall_b_s)
             V_t_s = config.fall_a_s * cons3_s * safe_pow(
                 lams, -config.fall_b_s) * dum
-            V_t_s = jnp.minimum(V_t_s, 1.2 * dum)
+            V_t_s = jnp.minimum(V_t_s, _VT_CAP_SNOW_ICE * dum)
             V_t_s = jnp.where(qs_pos > 1.0e-14, V_t_s, 0.0)
             V_n_s = config.fall_a_s * cons5_s * safe_pow(
                 lams, -config.fall_b_s) * dum
-            V_n_s = jnp.minimum(V_n_s, 1.2 * dum)
+            V_n_s = jnp.minimum(V_n_s, _VT_CAP_SNOW_ICE * dum)
             V_n_s = jnp.where(qs_pos > 1.0e-14, V_n_s, 0.0)
         else:
             V_t_s = config.a_v_s * safe_pow(
                 jnp.clip(q_s, 0.0) * rho_ratio, config.b_v_s)
-            V_t_s = jnp.clip(V_t_s, 0.0, 5.0)
+            V_t_s = jnp.clip(V_t_s, 0.0, _VT_CLIP_FROZEN)
             V_n_s = V_t_s
         # NUMBER-weighted fall speeds UNR/UNI (SAM module_mp_graupel.f90:
         # 1857/4237 rain, 4230 ice; caps 4268-4271): UN = a·Γ(1+b)/6·… no —
@@ -896,7 +919,7 @@ def morrison_microphysics(
         cons6 = math.gamma(1.0 + config.fall_b_r)
         cons27 = math.gamma(1.0 + config.fall_b_i)
         V_n_r = config.fall_a_r * cons6 * safe_pow(lamr, -config.fall_b_r) * dum
-        V_n_r = jnp.minimum(V_n_r, 9.1 * dum)
+        V_n_r = jnp.minimum(V_n_r, _VT_CAP_RAIN * dum)
         V_n_r = jnp.where(qr_pos > 1.0e-14, V_n_r, 0.0)
         V_n_i = config.fall_a_i * cons27 * safe_pow(lami, -config.fall_b_i) * dum_i
         V_n_i = jnp.minimum(V_n_i, dum_i_cap)
@@ -905,11 +928,11 @@ def morrison_microphysics(
         # Legacy Marshall-Palmer bulk: V_t = a_v·(q·ρ/ρ_sfc)^b_v with
         # fractional exponents; safe_pow guards cold-start (q=0) AD.
         V_t_r = config.a_v_r * safe_pow(jnp.clip(q_r, 0.0) * rho_ratio, config.b_v_r)
-        V_t_r = jnp.clip(V_t_r, 0.0, 20.0)
+        V_t_r = jnp.clip(V_t_r, 0.0, _VT_CLIP_RAIN)
         V_t_i = config.a_v_i * safe_pow(jnp.clip(q_i, 0.0) * rho_ratio, config.b_v_i)
-        V_t_i = jnp.clip(V_t_i, 0.0, 5.0)
+        V_t_i = jnp.clip(V_t_i, 0.0, _VT_CLIP_FROZEN)
         V_t_s = config.a_v_s * safe_pow(jnp.clip(q_s, 0.0) * rho_ratio, config.b_v_s)
-        V_t_s = jnp.clip(V_t_s, 0.0, 5.0)
+        V_t_s = jnp.clip(V_t_s, 0.0, _VT_CLIP_FROZEN)
         # Bulk scheme: number sediments at the mass fall speed (no PSD size-
         # sorting available without the PSD slope).
         V_n_r, V_n_i, V_n_s = V_t_r, V_t_i, V_t_s
@@ -924,19 +947,19 @@ def morrison_microphysics(
     # UMG = AG·Γ(4+BG)/6·LAMG^(−BG)·(ρ_su/ρ)^0.54, capped at a realistic
     # graupel terminal velocity (graupel falls FAST — denser than snow).
     if config.do_graupel:
-        dum_g = safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
+        dum_g = safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXP)
         lamg = graupel_lamg(q_g, rho, config, N_g=N_g_arg)
         cons7_g = math.gamma(4.0 + config.fall_b_g) / 6.0
         V_t_g = config.fall_a_g * cons7_g * safe_pow(
             lamg, -config.fall_b_g) * dum_g
-        V_t_g = jnp.minimum(V_t_g, 20.0 * dum_g)
+        V_t_g = jnp.minimum(V_t_g, _VT_CAP_GRAUPEL * dum_g)
         V_t_g = jnp.where(jnp.clip(q_g, 0.0) > 1.0e-14, V_t_g, 0.0)
         # NUMBER-weighted graupel fall speed UNG = AG·Γ(1+BG)·LAMG^(−BG)·dum
         # (slower than mass ⇒ size-sorting), only needed for double-moment N_g.
         cons8_g = math.gamma(1.0 + config.fall_b_g)
         V_n_g = config.fall_a_g * cons8_g * safe_pow(
             lamg, -config.fall_b_g) * dum_g
-        V_n_g = jnp.minimum(V_n_g, 20.0 * dum_g)
+        V_n_g = jnp.minimum(V_n_g, _VT_CAP_GRAUPEL * dum_g)
         V_n_g = jnp.where(jnp.clip(q_g, 0.0) > 1.0e-14, V_n_g, 0.0)
     else:
         V_t_g = jnp.zeros_like(jnp.clip(q_g, 0.0))
@@ -976,7 +999,7 @@ def morrison_microphysics(
     # layers (codex iter-23 A — a bare clip in only the divide would corrupt
     # the flux where ρ<0.1). ρ_eff is constant over the step ⇒ ρ·d(N_r/ρ)/dt =
     # dN_r/dt and the per-volume flux divergence is exact.
-    rho_eff = jnp.maximum(rho, 0.1)
+    rho_eff = jnp.maximum(rho, _RHO_FLOOR)
     sed_N_r = rho_eff * sedimentation_tendency(
         jnp.clip(N_r, 0.0) / rho_eff, rho_eff, V_n_r, dz, dt=dt)
     sed_N_i = sedimentation_tendency(
@@ -1147,7 +1170,7 @@ def morrison_microphysics(
         nsagg = (snow_self_aggregation_nsagg(q_s, N_s, rho, config, dt=dt)
                  if config.do_snow_aggregation
                  else jnp.zeros_like(q_s))
-        dN_s_dt = (dN_i_autoconv + freeze_N_to_snow / jnp.clip(rho, 0.1)
+        dN_s_dt = (dN_i_autoconv + freeze_N_to_snow / jnp.clip(rho, _RHO_FLOOR)
                    - dN_s_melt + dN_s_subl - nsagg - nscng + sed_N_s)
         # SAM N_s consistency limiter (module_mp_graupel.f90:1727-1737): clamp
         # N_s so the snow PSD slope LAMS stays in [lams_min, lams_max]. Uses
@@ -1178,7 +1201,7 @@ def morrison_microphysics(
                      * jnp.clip(N_g, 0.0) / jnp.clip(q_g, 1e-15))
         # Frozen rain drops → graupel particles (per-volume freeze_N_r ⇒ /ρ for
         # per-mass N_g); the snow→graupel embryos NSCNG (already per-mass).
-        freeze_N_to_graupel = (freeze_N_r / jnp.clip(rho, 0.1)
+        freeze_N_to_graupel = (freeze_N_r / jnp.clip(rho, _RHO_FLOOR)
                                if config.do_graupel
                                else jnp.zeros_like(q_g))
         dN_g_dt = (freeze_N_to_graupel + nscng

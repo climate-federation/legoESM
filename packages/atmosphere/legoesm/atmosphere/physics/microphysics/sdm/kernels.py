@@ -162,6 +162,21 @@ _HALL_ECOLL = jnp.array([
 # ==========================================================================
 # Collision kernels  K(R_i, R_j[, Δv])  [m^3/s]
 # ==========================================================================
+# Fixed collision-coalescence / kinetic-theory constants (Long 1974, Cunningham
+# slip, Beard 1976, Stokes settling).
+_LONG_KERNEL_PREFACTOR = 4.5e8
+_LONG_R0 = 3.0e-6
+_LONG_R0_FLOOR = 3.01e-6
+_LONG_RADIUS_THRESHOLD = 5.0e-5
+_VISC_SCALE_SI = 1.0e-5
+_KINETIC_8 = 8.0
+_CUNNINGHAM_A = 1.2570
+_CUNNINGHAM_B = 0.40
+_CUNNINGHAM_C = 0.550
+_BEARD_32 = 1.5
+_BEARD_COLLISION_8 = 8.0
+_STOKES_18 = 18.0
+
 def golovin_kernel(r_i: jax.Array, r_j: jax.Array, b: float) -> jax.Array:
     """Golovin (1963) additive kernel ``K = b(X_i + X_j)``, ``X = (4/3)πR³``."""
     X_i = _FOUR_THIRDS_PI * r_i**3
@@ -196,8 +211,8 @@ def long_kernel(r_i: jax.Array, r_j: jax.Array, dv: jax.Array) -> jax.Array:
     r_l = jnp.maximum(r_i, r_j)
     r_s = jnp.minimum(r_i, r_j)
     sumr = r_l + r_s
-    c_cloud = 4.5e8 * (r_l * r_l) * (1.0 - 3.0e-6 / jnp.maximum(3.01e-6, r_l))
-    c_rate = jnp.where(r_l <= 5.0e-5, c_cloud, 1.0)
+    c_cloud = _LONG_KERNEL_PREFACTOR * (r_l * r_l) * (1.0 - _LONG_R0 / jnp.maximum(_LONG_R0_FLOOR, r_l))
+    c_rate = jnp.where(r_l <= _LONG_RADIUS_THRESHOLD, c_cloud, 1.0)
     return c_rate * (jnp.pi * sumr * sumr) * jnp.abs(dv)
 
 
@@ -231,7 +246,7 @@ def hall_kernel(r_i: jax.Array, r_j: jax.Array, dv: jax.Array) -> jax.Array:
     # Oracle index search: irr = first i with r_um <= r0[i] (15 if beyond);
     # iqq = first i in 1..20 with ratio <= rat[i].
     irr = jnp.searchsorted(r0, r_um, side="left")          # 0..15
-    iqq = jnp.clip(jnp.searchsorted(rat, ratio, side="left"), 1, 20)
+    iqq = jnp.clip(jnp.searchsorted(rat, ratio, side="left"), 1, 20)  # coeff-ok: collision-table index bound
 
     q = (ratio - rat[iqq - 1]) / (rat[iqq] - rat[iqq - 1])
 
@@ -306,17 +321,17 @@ def brownian_kernel(
     Tc = T - constants.T_freeze
     visc = jnp.where(
         Tc >= 0.0,
-        (_VISC_MU0 + _VISC_SLOPE * Tc) * 1.0e-5,
-        (_VISC_MU0 + _VISC_SLOPE * Tc - _VISC_CURV * Tc * Tc) * 1.0e-5,
+        (_VISC_MU0 + _VISC_SLOPE * Tc) * _VISC_SCALE_SI,
+        (_VISC_MU0 + _VISC_SLOPE * Tc - _VISC_CURV * Tc * Tc) * _VISC_SCALE_SI,
     )
 
     # Air mean free path [m] — oracle expression (see docstring note).
-    M_air_kg = constants.M_air * 1.0e-3
-    lam_air = (2.0 * visc) / (p * jnp.sqrt(8.0 * M_air_kg / (jnp.pi * constants.R_d * T)))
+    M_air_kg = constants.M_air * 1.0e-3  # coeff-ok: g/mol -> kg/mol
+    lam_air = (2.0 * visc) / (p * jnp.sqrt(_KINETIC_8 * M_air_kg / (jnp.pi * constants.R_d * T)))
 
     # Cunningham slip corrections.
-    c1 = 1.2570 + 0.40 * jnp.exp(-0.550 * d1 / lam_air)
-    c2 = 1.2570 + 0.40 * jnp.exp(-0.550 * d2 / lam_air)
+    c1 = _CUNNINGHAM_A + _CUNNINGHAM_B * jnp.exp(-_CUNNINGHAM_C * d1 / lam_air)
+    c2 = _CUNNINGHAM_A + _CUNNINGHAM_B * jnp.exp(-_CUNNINGHAM_C * d2 / lam_air)
     slip1 = 1.0 + 2.0 * lam_air * c1 / d1
     slip2 = 1.0 + 2.0 * lam_air * c2 / d2
 
@@ -324,24 +339,24 @@ def brownian_kernel(
     dcoef = kB * T / (3.0 * jnp.pi * visc)
     D1 = dcoef * slip1 / d1
     D2 = dcoef * slip2 / d2
-    vcoef = 8.0 * kB * T / jnp.pi
+    vcoef = _KINETIC_8 * kB * T / jnp.pi
     cb1 = jnp.sqrt(vcoef / m1)
     cb2 = jnp.sqrt(vcoef / m2)
 
     # Droplet mean free paths and Fuchs g length terms.
-    lam1 = (8.0 / jnp.pi) * D1 / cb1
-    lam2 = (8.0 / jnp.pi) * D2 / cb2
+    lam1 = (_KINETIC_8 / jnp.pi) * D1 / cb1
+    lam2 = (_KINETIC_8 / jnp.pi) * D2 / cb2
     g1 = ((d1 + lam1) ** 3
-          - jnp.exp(1.5 * jnp.log(d1 * d1 + lam1 * lam1))) / (3.0 * d1 * lam1) - d1
+          - jnp.exp(_BEARD_32 * jnp.log(d1 * d1 + lam1 * lam1))) / (3.0 * d1 * lam1) - d1
     g2 = ((d2 + lam2) ** 3
-          - jnp.exp(1.5 * jnp.log(d2 * d2 + lam2 * lam2))) / (3.0 * d2 * lam2) - d2
+          - jnp.exp(_BEARD_32 * jnp.log(d2 * d2 + lam2 * lam2))) / (3.0 * d2 * lam2) - d2
 
     sumdia = d1 + d2
     sumd = D1 + D2
     sumc = jnp.sqrt(cb1 * cb1 + cb2 * cb2)
     sumg = jnp.sqrt(2.0 * g1 * g1 + 2.0 * g2 * g2)
 
-    denom = sumdia / (sumdia + 2.0 * sumg) + (8.0 * sumd) / (sumdia * sumc)
+    denom = sumdia / (sumdia + 2.0 * sumg) + (_BEARD_COLLISION_8 * sumd) / (sumdia * sumc)
     K12 = 2.0 * jnp.pi * sumdia * sumd / denom
     return jnp.where(valid, K12, 0.0).astype(dtype)
 
@@ -427,7 +442,7 @@ def terminal_velocity_cloud_rain_shima(
     csc = 1.0 + _SD_SLIP * (sd_l / diameter_cm)
 
     # regime 1: small cloud droplets (Stokes + slip)
-    c1 = gxdrow / (18.0 * visc)
+    c1 = gxdrow / (_STOKES_18 * visc)
     v1 = c1 * csc * diameter_cm * diameter_cm
 
     # regime 2: large cloud droplets / small raindrops (Beard via vz_b)

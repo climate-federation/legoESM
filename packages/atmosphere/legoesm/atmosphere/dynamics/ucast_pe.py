@@ -58,6 +58,9 @@ from legoesm.ml.conservation import (
     correct_dry_air_mass,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import (
+    refuse_unthreaded_stateful_physics,
+)
 
 
 class UCastPrimitiveEquationConfig(NamedTuple):
@@ -277,6 +280,11 @@ class UCastPrimitiveEquationModel:
         before RK integration.  In state_update mode, physics tendencies are
         applied additively after the U-Cast state update.
         """
+        # U-Cast PE has no PhysicsState carry slot — refuse a stateful
+        # ``make_physics`` fn (tagged _requires_phys_state) rather than
+        # silently reseed its prognostic fields every step (#405/#413).
+        refuse_unthreaded_stateful_physics(
+            physics_fn, None, where="U-Cast PE step_with_physics()")
         if self.config.mode == "hybrid_tendencies":
             def combined_tendency(s):
                 ucast_tend = self._ucast_tendency(s)

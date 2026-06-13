@@ -337,7 +337,8 @@ def test_positivity_validation():
     cfg, kw = _column_inputs()
     with pytest.raises(ValueError, match="positivity"):
         tke_vertical_mixing(cfg=cfg._replace(positivity="bogus"), **kw)
-    # veros_surface_correction requires the Veros chain (adiabatic + mxl 2):
+    # veros_surface_correction requires the signed-N² adiabatic chain
+    # (both mxl_choice ∈ {1,2} are debt-safe on it); the in-situ branch raises:
     with pytest.raises(ValueError, match="veros_surface_correction"):
         tke_vertical_mixing(
             cfg=cfg._replace(positivity="veros_surface_correction",

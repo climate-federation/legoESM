@@ -24,6 +24,9 @@ _TFR = 2.0   # test-filter ratio (FGR=1): level-1 = 2Δ, level-2 = 4Δ
 
 
 # --------------------------------------------------------------------------- #
+# Lilly (1992) dynamic-SGS error-functional coefficient.
+_LASD_LILLY_COEFF = 8.0
+
 def spectral_test_filter(field_yxz: jax.Array, cut_y: int, cut_x: int,
                          layout=None):
     """Sharp spectral cutoff TEST filter over the periodic ``(y, x)`` plane
@@ -70,9 +73,9 @@ def _y_ring_rows(fx, layout):
     top, bot = fx[0:1], fx[-1:]
     tmpl = jnp.zeros_like(bot)
     # send my last row to next, receive prev's last row from prev
-    last_of_prev = sr(bot, tmpl, prev, nxt, 700, 700, comm)
+    last_of_prev = sr(bot, tmpl, prev, nxt, 700, 700, comm)  # coeff-ok: MPI halo message tags
     # send my first row to prev, receive next's first row from next
-    first_of_next = sr(top, jnp.zeros_like(top), nxt, prev, 701, 701, comm)
+    first_of_next = sr(top, jnp.zeros_like(top), nxt, prev, 701, 701, comm)  # coeff-ok: MPI halo message tags
     return last_of_prev, first_of_next
 
 
@@ -98,8 +101,8 @@ def laguerre_max_real_root_beta(coeffs6: jax.Array) -> jax.Array:
     ``ComputeBeta1``). Fixed-trip ``lax.scan`` (freeze-on-convergence) ⇒
     reverse-mode differentiable. ``coeffs6`` is ``(..., 6)`` DESCENDING degree."""
     cdtype = jnp.complex128 if jax.config.jax_enable_x64 else jnp.complex64
-    guesses = jnp.array([0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.5], cdtype)
-    n_deg, tol, max_iter = 5, 1e-6, 20
+    guesses = jnp.array([0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.5], cdtype)  # coeff-ok: dynamic-coeff root-search initial guesses
+    n_deg, tol, max_iter = 5, 1e-6, 20  # coeff-ok: polynomial degree / tol / max iterations
 
     def one_root(coeffs, x0):
         coeffs = coeffs.astype(cdtype)
@@ -130,7 +133,7 @@ def laguerre_max_real_root_beta(coeffs6: jax.Array) -> jax.Array:
         roots = jax.vmap(lambda g: one_root(coeffs, g))(guesses)
         valid = jnp.where(
             (jnp.abs(jnp.imag(roots)) < 1e-6)
-            & (jnp.real(roots) > 0.0) & (jnp.real(roots) < 5.0),
+            & (jnp.real(roots) > 0.0) & (jnp.real(roots) < 5.0),  # coeff-ok: physical-root upper bound
             jnp.real(roots), jnp.nan)
         mx = jnp.nanmax(valid)
         return jnp.where(jnp.isnan(mx), 1.0, mx)
@@ -210,9 +213,9 @@ def lasd_cs2(uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag,
                                             + 2.0*(S12h**2+S13h**2+S23h**2)))
     d2 = pm((4.0*L2**2)*(_TFR**8)*(S_d**2)*(S11d**2+S22d**2+S33d**2
                                             + 2.0*(S12d**2+S13d**2+S23d**2)))
-    e1 = pm((8.0*L2**2)*(_TFR**2)*S_h*(S11h*SS11h+S22h*SS22h+S33h*SS33h
+    e1 = pm((_LASD_LILLY_COEFF*L2**2)*(_TFR**2)*S_h*(S11h*SS11h+S22h*SS22h+S33h*SS33h
                                        + 2.0*(S12h*SS12h+S13h*SS13h+S23h*SS23h)))
-    e2 = pm((8.0*L2**2)*(_TFR**4)*S_d*(S11d*SS11d+S22d*SS22d+S33d*SS33d
+    e2 = pm((_LASD_LILLY_COEFF*L2**2)*(_TFR**4)*S_d*(S11d*SS11d+S22d*SS22d+S33d*SS33d
                                        + 2.0*(S12d*SS12d+S13d*SS13d+S23d*SS23d)))
 
     aa = a1*c2 - a2*c1

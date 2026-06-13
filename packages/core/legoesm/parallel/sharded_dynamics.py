@@ -86,6 +86,32 @@ from legoesm.grids.halo import pad_halo, pad_halo_4d
 logger = logging.getLogger(__name__)
 
 
+def _refuse_stateful_physics_unthreaded_wrapper(physics_fn) -> None:
+    """Refuse stateful physics on step wrappers that drop the carry.
+
+    Issue #405/#413: these generic sharded wrappers call
+    ``model.step_with_physics(s, dt, physics_fn)`` with no
+    ``phys_state`` — a stateful physics_fn (prognostic TKE-family /
+    MYNN-2.5 turbulence, mass_flux/edmf/bechtold convection,
+    prognostic-spectral GWD) would silently reseed its prognostic
+    fields every step.  ``combined.make_physics`` tags its output with
+    ``_requires_phys_state``; refuse loudly when the tag is set.  Use
+    the shared wrapper-aware predicate so a ``functools.partial`` /
+    ``__wrapped__`` wrapper that hides the tag cannot slip through.
+    """
+    from legoesm.timestepping.integration import (
+        physics_requires_phys_state,
+    )
+    if physics_requires_phys_state(physics_fn):
+        raise NotImplementedError(
+            "This sharded step wrapper does not thread the PhysicsState "
+            "carry, so the configured stateful physics would silently "
+            "reseed every step (issue #405/#413).  Use a diagnostic "
+            "scheme, or the ModelDriver loops / MPAS step, which thread "
+            "the carry."
+        )
+
+
 # ======================================================================
 # Sharding specification helpers
 # ======================================================================
@@ -461,6 +487,7 @@ class CompiledShardedStep:
         # to trace it as an array argument.  The phys_id in the cache
         # key ensures we compile separate programs for distinct callables.
         if physics_fn is not None and hasattr(model, "step_with_physics"):
+            _refuse_stateful_physics_unthreaded_wrapper(physics_fn)
             _phys = physics_fn
 
             @partial(jax.jit, in_shardings=in_shardings,
@@ -581,6 +608,7 @@ class _SingleDeviceStep:
             model = self._model
             t0 = time.monotonic()
             if physics_fn is not None and hasattr(model, "step_with_physics"):
+                _refuse_stateful_physics_unthreaded_wrapper(physics_fn)
                 # Capture physics_fn in the closure so JAX doesn't
                 # try to trace it as an array argument.
                 _phys = physics_fn
@@ -786,6 +814,9 @@ def sharded_step_with_halo(
     -------
     Updated state (same sharding as input).
     """
+    if physics_fn is not None:
+        _refuse_stateful_physics_unthreaded_wrapper(physics_fn)
+
     if config.mesh is None:
         # Single device — no sharding needed
         if physics_fn is not None and hasattr(model, "step_with_physics"):
@@ -2138,6 +2169,11 @@ def make_voronoi_sharded_step(
         """Sharded Voronoi step.  ``physics_fn`` is closure-captured into
         the jitted executable (selected by object identity) — it is never
         passed to ``jax.jit`` as a traced argument."""
+        # Issue #405/#413: this wrapper has no PhysicsState carry channel,
+        # so a stateful physics_fn would silently reseed every step.
+        # Refuse loudly (the predicate also sees a partial/__wrapped__
+        # wrapper that hides the tag).
+        _refuse_stateful_physics_unthreaded_wrapper(physics_fn)
         key = None if physics_fn is None else id(physics_fn)
         fn = _step_cache.get(key)
         if fn is None:

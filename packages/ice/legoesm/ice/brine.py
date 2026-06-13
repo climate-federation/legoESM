@@ -33,8 +33,11 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.ice.config import BrineConfig
 
 PSU_TO_KG_PER_KG = 1.0e-3  # 1 PSU ≈ 1 g/kg = 1e-3 kg of salt per kg of seawater
+# Canonical brine defaults (single source of truth callers pass in).
+_BRINE_DEFAULTS = BrineConfig()
 
 
 class SaltBudgetResult(NamedTuple):
@@ -65,7 +68,7 @@ def update_salinity_and_salt_flux(
     delta_V_fresh_refreeze: jnp.ndarray | float = 0.0,
     S_fresh_ice: float = 0.0,
     S_ice_min: float = 0.0,
-    S_ice_max: float = 12.0,
+    S_ice_max: float = _BRINE_DEFAULTS.S_ice_max,
 ) -> SaltBudgetResult:
     """Update bulk ice salinity and emit ocean salt-flux diagnostic.
 
