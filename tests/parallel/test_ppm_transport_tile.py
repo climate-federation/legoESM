@@ -138,3 +138,73 @@ def test_ppm_sweep_tiling_approachC_kt2():
 
 def test_ppm_sweep_tiling_approachC_kt3():
     _global_vs_tiled_ppm(kt=3, nl=6)
+
+
+def test_ppm_sweep_tiling_real_crossface_kt3():
+    """U2b: approach-C sweep tiling on the REAL cross-face-halo'd D-grid
+    field (``_pad_halo_dgrid_for_ppm``, external_halo=2) + staggered cross
+    axis (n+1) — exact parity vs the global PPM sweep.
+
+    SCOPE (codex U2b MEDIUM): validates the production-shaped i-sweep
+    (``xtp_u``) PPM tiling ONLY — real cross-face halo + staggered M +
+    external_halo=2 pre-pad.  The j-sweep (``ytp_v`` axis=2), the REAL
+    Courant (ub/vb built from uc/vc), and the B-grid corner sync of the
+    full ``_bgrid_ke_transport`` remain U3."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+    from legoesm.core.fv3_sw_core import _pad_halo_dgrid_for_ppm
+    from tests.test_cases.cosine_bell import cosine_bell_cubesphere
+
+    kt, nl, h3, eh = 3, 6, 4, 2
+    n = kt * nl
+    grid = create_cubed_sphere(n=n, use_duogrid=True)
+    cdgrid = create_cubed_sphere_cdgrid(grid)
+    state = cosine_bell_cubesphere(grid, cdgrid)
+
+    # Real cross-face D-grid halo for the i-sweep field (xtp_u path).
+    u_d_ihalo, _ = _pad_halo_dgrid_for_ppm(
+        state.u_d, state.v_d, cdgrid, halo=eh)        # (6, n+2eh, n+1)
+    M = u_d_ihalo.shape[2]
+    rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, 1.0e-30)  # (6, n, n+1)=(6,N,M)
+    # Synthetic but sign-varying courant (parity is structural; both flux
+    # branches c>0 / c<=0 must be exercised).
+    ub = jnp.asarray(
+        np.random.default_rng(3).standard_normal((6, n + 1, M)) * 0.1)
+
+    # Non-vacuity guards (codex U2b LOW): the cross-face halo must DIFFER
+    # from a naive edge-replication of the first interior cell (else the
+    # test couldn't catch a wrong/missing cross-face halo), and the courant
+    # must exercise BOTH flux branches (c>0 and c<=0).
+    assert float(jnp.max(jnp.abs(
+        u_d_ihalo[:, :eh, :] - u_d_ihalo[:, eh:eh + 1, :]))) > 1e-9, \
+        "cross-face i-halo == edge-replication (test would be vacuous)"
+    assert bool(jnp.any(ub > 0)) and bool(jnp.any(ub <= 0)), \
+        "courant must exercise both PPM flux branches"
+
+    global_x = np.asarray(
+        _ppm_transport_1d(u_d_ihalo, ub, rdx, 1, external_halo=eh))
+
+    # Pre-pad to h3=4 EXACTLY as _ppm_transport_1d(external_halo=eh) does
+    # internally (gap = h3-eh each side), then slice the sweep axis.
+    vp_g = jnp.pad(u_d_ihalo, [(0, 0), (h3 - eh, h3 - eh), (0, 0)],
+                   mode="edge")                         # (6, n+2h3, M)
+    rd_g = jnp.pad(rdx, [(0, 0), (1, 1), (0, 0)], mode="edge")  # (6, n+2, M)
+    tiles = []
+    for t in range(kt):
+        vp_t = vp_g[:, t * nl: t * nl + nl + 2 * h3, :]
+        rd_t = rd_g[:, t * nl: t * nl + nl + 2, :]
+        c_t = ub[:, t * nl: t * nl + nl + 1, :]
+        f_t = _ppm_transport_1d(vp_t, c_t, rd_t, 1, external_halo=h3,
+                                rd_prepadded=True)
+        tiles.append(np.asarray(f_t))
+
+    for t in range(kt - 1):
+        np.testing.assert_allclose(
+            tiles[t][:, nl, :], tiles[t + 1][:, 0, :], atol=1e-12,
+            rtol=1e-12, err_msg=f"U2b shared interface mismatch t={t}")
+    reassembled = np.concatenate(
+        [tiles[t][:, :nl, :] for t in range(kt)]
+        + [tiles[-1][:, nl:nl + 1, :]], axis=1)
+    np.testing.assert_allclose(
+        reassembled, global_x, atol=1e-12, rtol=1e-12,
+        err_msg="U2b cross-face tiled PPM sweep != global")
