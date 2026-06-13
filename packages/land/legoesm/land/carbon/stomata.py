@@ -64,6 +64,47 @@ _MC = 12.0e-6      # g C per umol CO2
 # Configuration
 # =====================================================================
 
+__param_spec__ = {
+    "StomataConfig": {
+        "scheme_key": "land.stomata",
+        "excluded": {
+            "Gamma_star25": "CO2 compensation point at 25C (Bernacchi 2001 fixed) [umol/mol]",
+            "Ha_Gamma": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Ha_J": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Ha_Kc": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Ha_Ko": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Ha_Rd": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Ha_Vc": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Hd_J": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "Kc25": "kinetic constant at 25C (Bernacchi 2001 fixed) [umol/mol]",
+            "Ko25": "kinetic constant at 25C (Bernacchi 2001 fixed) [umol/mol]",
+            "O2_conc": "atmospheric O2 (environmental constant) [umol/mol]",
+            "S_J": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
+            "beta_soil_min": "numerics: soil-water stress floor",
+            "co_limitation_eps": "numerics: smooth-min co-limitation width",
+            "f_VPD_min": "numerics: VPD stress floor",
+        },
+        "params": {
+            "J_max25": {"units": "1", "bounds": (39.6, 360.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "K_PAR": {"units": "1", "bounds": (66.0, 600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "Rd25": {"units": "1", "bounds": (0.495, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "T_opt_jarvis": {"units": "1", "bounds": (8.25, 75.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "T_range_jarvis": {"units": "1", "bounds": (6.6, 60.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "Vc_max25": {"units": "1", "bounds": (19.8, 180.0), "tunable_tier": 1, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "a_vpd": {"units": "1", "bounds": (0.0165, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "alpha_q": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "g0": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "g1_bb": {"units": "1", "bounds": (2.97, 27.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "g1_med": {"units": "1", "bounds": (1.32, 12.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "gs_max": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "gs_ref": {"units": "1", "bounds": (0.099, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "k_ext": {"units": "1", "bounds": (0.165, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+            "theta_j": {"units": "1", "bounds": (0.297, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
+        },
+    },
+}
+
+
 class StomataConfig(NamedTuple):
     """Stomatal conductance and plant physiology configuration.
 

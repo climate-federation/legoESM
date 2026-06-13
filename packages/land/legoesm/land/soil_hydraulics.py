@@ -47,6 +47,37 @@ _TINY = float(jnp.finfo(jnp.float32).tiny)  # Floor for denominators (~1.18e-38)
 # is a conservative (larger) floor that works in both precisions.
 
 
+__param_spec__ = {
+    "SoilHydraulicsConfig": {
+        "scheme_key": "land.soil_hydraulics",
+        "excluded": {
+            "S_s": "numerics: specific storage regulariser",
+        },
+        "params": {
+            "K_sat": {"units": "1", "bounds": (9.537e-07, 8.67e-06), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "alpha_vg": {"units": "1", "bounds": (1.188, 10.8), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "b_ch": {"units": "1", "bounds": (1.7787, 16.17), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "c_film": {"units": "1", "bounds": (4.455e-09, 4.05e-08), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "h0_pdi": {"units": "1", "bounds": (20790.0, 189000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "h_a": {"units": "1", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "h_cav": {"units": "1", "bounds": (16.5, 150.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "h_crit": {"units": "1", "bounds": (0.0198, 0.18), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "lambda_bc": {"units": "1", "bounds": (0.06138, 0.558), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "n_a": {"units": "1", "bounds": (0.165, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "n_vg": {"units": "1", "bounds": (0.5148, 4.68), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "omega_pdi": {"units": "1", "bounds": (0.165, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "psi_b": {"units": "1", "bounds": (-1.434, -0.15774), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "psi_sat": {"units": "1", "bounds": (-1.434, -0.15774), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "sigma_cav": {"units": "1", "bounds": (0.3, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "tau_s": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "theta_a": {"units": "1", "bounds": (0.0066, 0.06), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "theta_r": {"units": "1", "bounds": (0.02574, 0.234), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+            "theta_sat": {"units": "1", "bounds": (0.1419, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "material", "reference": "van Genuchten / Clapp-Hornberger / Brooks-Corey", "shape": None},
+        },
+    },
+}
+
+
 class SoilHydraulicsConfig(NamedTuple):
     """Configuration for soil hydraulic properties."""
     retention_curve: str = "van_genuchten"

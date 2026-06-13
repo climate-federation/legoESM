@@ -47,6 +47,12 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.ice.config",
     "legoesm.coupler.config",
     "legoesm.coupler.lake.config",
+    "legoesm.land.carbon.config",
+    "legoesm.land.carbon.stomata",
+    "legoesm.land.config",
+    "legoesm.land.richards",
+    "legoesm.land.soil_grid",
+    "legoesm.land.soil_hydraulics",
 )
 
 # Tier thresholds for the conservative<->broad continuum. ``build_trainable_params``

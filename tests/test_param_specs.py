@@ -109,12 +109,6 @@ PARAM_SPEC_TODO: frozenset[str] = frozenset(
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py",
         "packages/ocean/legoesm/ocean/physics/vertical_mixing/tidal.py",
         # --- land ----------------------------------------------------------
-        "packages/land/legoesm/land/carbon/config.py",
-        "packages/land/legoesm/land/carbon/stomata.py",
-        "packages/land/legoesm/land/config.py",
-        "packages/land/legoesm/land/richards.py",
-        "packages/land/legoesm/land/soil_grid.py",
-        "packages/land/legoesm/land/soil_hydraulics.py",
     }
 )
 

@@ -37,6 +37,18 @@ from legoesm.land.soil_hydraulics import (
 from legoesm.land.tridiag import thomas_solve_batch
 
 
+__param_spec__ = {
+    "RichardsConfig": {
+        "scheme_key": "land.richards",
+        "excluded": {
+            "theta_tol": "numerics: Newton convergence tolerance",
+        },
+        "params": {
+        },
+    },
+}
+
+
 class RichardsConfig(NamedTuple):
     """Configuration for the Richards equation solver.
 
