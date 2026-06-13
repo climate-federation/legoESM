@@ -2277,11 +2277,19 @@ def _p_grad_c(h_star, h_s, cdgrid, dt2, g):
 
 def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
                        apply_d_sw3_boundary_fix: bool = False,
-                       boundary_fix_dx_field=None):
+                       boundary_fix_dx_field=None, rd_prepadded: bool = False):
     """PPM hord=9 staggered-field transport (FV3 ytp_v/xtp_u, sw_core.F90:2897-3353, 2540-2894 jord=9).
 
     Used for B-grid KE transport in d_sw3. N cells → N+1 interface fluxes.
     external_halo (iter-945): when > 0, field already has cross-face halo on sweep axis.
+
+    rd_prepadded (cube tiled np>6 stage, task #3 U1): when True, ``rdelta``
+    is ALREADY the depth-1 edge-padded array of shape ``(6, N+2, M)`` along
+    the sweep axis (so the internal ``jnp.pad(rd, ((0,0),(1,1),(0,0)),
+    'edge')`` is SKIPPED).  A sub-face TILE supplies its own ``rd_pad`` with
+    a REAL depth-1 neighbour-tile halo at interior cuts (the global edge-pad
+    is wrong there — the upwind CFL cell lives in the neighbour tile).
+    Default False is BIT-IDENTICAL to the prior behaviour.
     """
     # Transpose so sweep axis is axis 1 for uniform indexing
     if axis == 1:
@@ -2294,6 +2302,15 @@ def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
         rd = jnp.swapaxes(rdelta, 1, 2)   # (6, N, M)
 
     nn = v.shape[1] - 2 * external_halo  # interior cells along sweep axis
+
+    # Fail loudly on a mis-sized prepadded rdelta (codex U1 MEDIUM): the
+    # flux slices rd_pad[:, :nn+1] / [:, 1:nn+2], so a too-LONG rd would be
+    # silently truncated.  Shapes are static at trace time → cheap check.
+    if rd_prepadded and rd.shape[1] != nn + 2:
+        raise ValueError(
+            f"_ppm_transport_1d: rd_prepadded expects rdelta depth-1 "
+            f"padded to length nn+2={nn + 2} on the sweep axis, got "
+            f"{rd.shape[1]}.")
 
     # Bring field to total halo h3=4 (external preserved; rest mode='edge')
     h3 = 4
@@ -2516,7 +2533,10 @@ def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
         br = br.at[:, k_nm2, :].set(br_nm2_new)
 
     # Flux evaluation (FV3 sw_core.F90:3339-3349). cfl = c*rdy_upwind
-    rd_pad = jnp.pad(rd, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    # rd_prepadded (task #3 U1): a sub-face tile supplies rd ALREADY depth-1
+    # edge-padded (real neighbour-tile halo at interior cuts); skip the pad.
+    rd_pad = rd if rd_prepadded else jnp.pad(
+        rd, [(0, 0), (1, 1), (0, 0)], mode='edge')
     rdy_pos = rd_pad[:, :nn+1, :]
     rdy_neg = rd_pad[:, 1:nn+2, :]
 
