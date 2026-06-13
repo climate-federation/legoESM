@@ -46,6 +46,30 @@ def build_geometric_recipe(geom):
                             eke_override=geometric_eke_config(geom))
 
 
+def clone_with_geometric(model, base_cfg, geom):
+    """Shallow-clone ``model`` with a (possibly TRACED) ``GeometricConfig``.
+
+    For the adjoint/identifiability path: the model is built ONCE with concrete
+    params (so ``validate_geometric_config`` runs eagerly at construction), then
+    this swaps in geometric params that may be jax tracers — the GEOMETRIC
+    formulas accept traced field values, and no per-step re-validation occurs, so
+    ``jax.grad``/``jax.jvp`` flows through them. The host-side rigid-lid island
+    cache (mask-derived, param-independent) is shared via the shallow copy, so
+    warm it once on the concrete model before transforming.
+
+    ``base_cfg`` should already carry ``gm_redi.adjoint_stabilization=
+    "stop_gradient_slopes"`` for horizons beyond ~1 day (frozen-coefficient
+    isoneutral linearization — the dc41c0a33 gate).
+    """
+    import copy
+
+    m2 = copy.copy(model)
+    m2.config = base_cfg._replace(
+        gm_redi=base_cfg.gm_redi._replace(
+            eke=base_cfg.gm_redi.eke._replace(geometric=geom)))
+    return m2
+
+
 def seed_freerun_carries(model, state, cfg, grid):
     """Seed AB2 + rigid-lid carries so the jitted scan keeps a constant pytree.
 
