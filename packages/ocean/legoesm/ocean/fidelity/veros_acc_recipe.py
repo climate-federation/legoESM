@@ -41,7 +41,7 @@ from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.lateral_mixing.config import (
     GMRediConfig, LateralMixingConfig,
 )
-from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
+from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig, GeometricConfig
 from legoesm.core.field import Field
 from legoesm.ocean.physics.surface_forcing.config import (
     RestoringConfig, SurfaceForcingConfig,
@@ -509,11 +509,25 @@ def build_acc_state(grid: LatLonGrid,
             eke0 = (eke_cfg.e_min * lm)[:, :, jnp.newaxis] * jnp.ones(
                 (1, 1, nlev - 1), dtype=lm.dtype)
             eke_dims = ("lat", "lon", "level")
+            eke_units = "m^2/s^2"            # specific eddy energy (W-grid)
         else:
-            eke0 = eke_cfg.e_min * lm
             eke_dims = ("lat", "lon")
+            if eke_cfg.closure == "geometric":
+                # GEOMETRIC prognoses the depth-INTEGRATED ∫E dz [m^3/s^2]. Honor
+                # the closure's OWN documented cold-start ∫E dz = e0_per_depth·H
+                # (GeometricConfig, Torres et al. 2025 Appendix E), NOT the
+                # Eden-Greatbatch specific-energy floor e_min [m^2/s^2]. Flat-bottom
+                # ACC ⇒ H = H_max on wet columns. The step writes units "m^3/s^2"
+                # (ocean_model_latlon_cgrid.py:1950); Field.units is static pytree
+                # metadata, so a seed/step mismatch breaks the jax.lax.scan
+                # constant-carry on the FIRST step.
+                eke0 = eke_cfg.geometric.e0_per_depth * H_max * lm
+                eke_units = "m^3/s^2"
+            else:
+                eke0 = eke_cfg.e_min * lm
+                eke_units = "m^2/s^2"
         state = state._replace(
-            eke=Field(data=eke0, name="eke", dims=eke_dims, units="m^2/s^2"))
+            eke=Field(data=eke0, name="eke", dims=eke_dims, units=eke_units))
         # eke_diss (Veros eke_diss_iw): the 3-D EKE step writes this every step;
         # seed it to zero so the None -> Field transition never happens mid-scan
         # (constant-pytree carry). Only the 3-D EKE path produces it.
@@ -717,6 +731,7 @@ def build_acc_physics_config(grid: LatLonGrid | None = None, *,
 
 def build_acc_model_config(grid: LatLonGrid | None = None, *,
                            with_surface_forcing: bool = False,
+                           gm_redi: GMRediConfig = ACC_GM_REDI_CONFIG,
                            ) -> LatLonCGridOceanConfig:
     """Veros ACC dynamics: harmonic lateral viscosity with cos(lat)
     scaling, linear bottom drag, implicit vertical viscosity,
@@ -810,7 +825,10 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         # GM/Redi is a TOP-LEVEL (dynamics) field on the lat-lon C-grid — this
         # is what the model actually reads (ocean_model_latlon_cgrid.py:998).
         # Setting it only in physics.lateral_mixing left GM/Redi inactive.
-        gm_redi=ACC_GM_REDI_CONFIG,
+        # ``gm_redi`` defaults to the Eden-Greatbatch ACC config; the GEOMETRIC
+        # calibration twin (Stage 0) passes a GMRediConfig whose ``.eke`` carries
+        # ``closure="geometric"`` (see ``build_acc_recipe(eke_override=...)``).
+        gm_redi=gm_redi,
         # Veros applies the surface TRACER forcing (forc_temp_surface restoring)
         # IMPLICITLY — it enters the backward-Euler vertical-mixing tridiagonal
         # RHS at weight 1.0 (core/thermodynamics.py), NOT as an AB2-extrapolated
@@ -862,7 +880,24 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
     )
 
 
-def build_acc_recipe(*, with_surface_forcing: bool = False) -> ACCRecipe:
+def geometric_eke_config(geom: GeometricConfig = GeometricConfig()) -> EKEConfig:
+    """Clean GEOMETRIC EKE closure config for the calibration twin (Stage 0).
+
+    The Eden-Greatbatch ACC config (:data:`ACC_GM_REDI_CONFIG`.eke) sets a stack
+    of EG-only flags (``eke_3d=True``, ``isopycnal_diffusion=True``,
+    ``gm_source_mode="realized_signed"``, ``source_kdiss_h``/``kdiss_h_flux_form``)
+    that the GEOMETRIC closure's cross-validation REJECTS (eke.py:730-763) — its
+    source terms (B_C, B_T) and Redi coupling (kappa_n) are self-contained. So the
+    twin uses a fresh ``EKEConfig`` carrying ONLY ``closure="geometric"`` + the
+    ``GeometricConfig`` (Torres et al. 2025); every other field stays at its
+    EKEConfig default. The depth-INTEGRATED 2-D budget requires ``eke_3d=False``
+    (the default), which routes the initial-state seeding (build_acc_state:504-516)
+    to the 2-D ``(lat, lon)`` eke field the geometric step consumes."""
+    return EKEConfig(closure="geometric", geometric=geom)
+
+
+def build_acc_recipe(*, with_surface_forcing: bool = False,
+                     eke_override: EKEConfig | None = None) -> ACCRecipe:
     """One-stop constructor. Use as::
 
         from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_recipe
@@ -880,15 +915,25 @@ def build_acc_recipe(*, with_surface_forcing: bool = False) -> ACCRecipe:
     as ``recipe.wind_forcing`` (pass to ``model.step(..., surface_forcing=
     recipe.wind_forcing)``). Default ``False`` is the frozen-state-probe recipe
     (no forcing), so the committed tier-2 tendency comparison is unchanged.
+
+    ``eke_override`` swaps the EKE closure config in ``model_config.gm_redi.eke``
+    (e.g. :func:`geometric_eke_config` for the GEOMETRIC calibration twin). It is
+    threaded into BOTH the model config (so the step runs the chosen closure) AND
+    ``build_acc_state`` (so the initial eke field is seeded with the matching
+    shape — 2-D for geometric/``eke_3d=False``, 3-D for Eden-Greatbatch). ``None``
+    keeps the Eden-Greatbatch ACC default, leaving the historical call
+    ``build_acc_recipe()`` bit-identical.
     """
     grid = build_acc_grid()
     z_coord = build_acc_z_coord()
     land_mask = build_acc_land_mask(grid)
-    initial_state = build_acc_state(grid, z_coord)
+    gm_redi = (ACC_GM_REDI_CONFIG if eke_override is None
+               else ACC_GM_REDI_CONFIG._replace(eke=eke_override))
+    initial_state = build_acc_state(grid, z_coord, gm_redi=gm_redi)
     wind_forcing = build_acc_wind_stress(grid) if with_surface_forcing else None
     return ACCRecipe(
         model_config=build_acc_model_config(
-            grid, with_surface_forcing=with_surface_forcing),
+            grid, with_surface_forcing=with_surface_forcing, gm_redi=gm_redi),
         physics_config=build_acc_physics_config(
             grid, with_surface_forcing=with_surface_forcing),
         grid=grid,
@@ -924,4 +969,5 @@ __all__ = (
     "build_acc_t_star",
     "build_acc_wind_stress",
     "build_acc_z_coord",
+    "geometric_eke_config",
 )
