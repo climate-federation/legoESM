@@ -25,10 +25,12 @@ independent and applied with conflict-free scatters.
 **Invariant:** the represented water mass ``Σ_i ξ_i m_i`` is conserved to
 floating-point round-off — the merge is algebraically exact in both branches,
 but mass recomputed from ``cbrt(γR_i³+R_j³)³`` carries ~1e-12 relative
-round-off — and the represented number ``Σ_i ξ_i`` is non-increasing. This is
-*not* differentiable (random permutation + stochastic integer γ); it is a pure
-function of an explicit ``jax.random`` key (user said differentiability is not
-required for coalescence).
+round-off — and the represented number ``Σ_i ξ_i`` is non-increasing. The
+default mode is *not* differentiable (random permutation + stochastic integer
+γ). The opt-in ``SDMConfig(collision_mode="deterministic")`` replaces integer
+γ with a smooth expected coalescence increment for fixed candidate pairs; it is
+reverse-mode differentiable with respect to particle radii/multiplicities and
+thermodynamic inputs, away from normal piecewise kernel/cap boundaries.
 
 References
 ----------
@@ -77,6 +79,9 @@ __physics_contract__ = {
         "decreases (or is unchanged), radii grow, multiplicities stay >= 0."
     ),
     "conserves": ["mass"],
+    # Contract bool = the DEFAULT (stochastic) path = forward-only. Opt-in
+    # deterministic mode uses expected pair increments + has JAX VJPs for radii/
+    # multiplicity/thermodynamics; pair selection stays discrete wrt order.
     "differentiable": False,
     "reference": "Shima et al. (2009) QJRMS 135:1307; ERF SuperDropletPCCoalescence",
     "idealized_test": (
@@ -126,19 +131,31 @@ def coalescence_step(
     dtype = state.radius.dtype
     L = n // 2  # number of candidate pairs
 
-    k_perm, k_gamma = random.split(key)
-    perm = random.permutation(k_perm, n)
+    if cfg.collision_mode == "stochastic":
+        k_perm, k_gamma = random.split(key)
+        perm = random.permutation(k_perm, n)
+    elif cfg.collision_mode == "deterministic":
+        k_gamma = key
+        perm = jnp.arange(n, dtype=jnp.int32)
+    else:
+        raise ValueError(
+            f"Unknown SDM collision_mode: {cfg.collision_mode!r} "
+            "(expected 'stochastic' or 'deterministic')"
+        )
     ia = perm[0:2 * L:2]   # first member of each pair
     ib = perm[1:2 * L:2]   # second member of each pair
 
     # Shima scaled probability: ⌊n/2⌋ candidate pairs represent all C(n,2) pairs.
     scaling = jnp.full((L,), 0.5 * n * (n - 1) / L, dtype=dtype)
     valid_pair = jnp.ones((L,), dtype=dtype)
+    if cfg.collision_mode == "deterministic":
+        return _coalescence_step_pairs_deterministic(
+            state, ia, ib, valid_pair, scaling, V_cell, rho, p, T, dt, cfg)
     return _coalescence_step_pairs(
         state, ia, ib, valid_pair, scaling, V_cell, rho, p, T, dt, k_gamma, cfg)
 
 
-def _coalescence_step_pairs(
+def _pair_kernel_probability_inputs(
     state: SuperDropletState,
     ia: jax.Array,
     ib: jax.Array,
@@ -149,16 +166,9 @@ def _coalescence_step_pairs(
     p: float | jax.Array,
     T: float | jax.Array,
     dt: float | jax.Array,
-    key: jax.Array,
     cfg: SDMConfig,
-) -> SuperDropletState:
-    """Apply the Shima update to a fixed set of non-overlapping candidate pairs.
-
-    ``valid_pair`` masks candidate pairs that should be skipped, while
-    ``pair_scaling`` supplies the local ``C(n,2)/floor(n/2)`` scale factor for
-    each candidate. Invalid pairs may overlap valid pairs; they contribute zero
-    additive updates and therefore cannot overwrite a real coalescence result.
-    """
+):
+    """Gather pair state and compute the Shima scaled coalescence probability."""
     xi = state.multiplicity
     R = state.radius
     s = state.solute_mass
@@ -203,7 +213,40 @@ def _coalescence_step_pairs(
     V_cell = jnp.asarray(V_cell, dtype=dtype)
     dt = jnp.asarray(dt, dtype=dtype)
     P = xi_big * (K / V_cell) * scaling * dt
-    P = P * act_pair  # inactive pairs cannot coalesce
+    P = P * act_pair
+    return (big, small, xi_big, xi_small, R_big, R_small, s_big, s_small,
+            act_pair, P)
+
+
+def _coalescence_step_pairs(
+    state: SuperDropletState,
+    ia: jax.Array,
+    ib: jax.Array,
+    valid_pair: jax.Array,
+    pair_scaling: float | jax.Array,
+    V_cell: float | jax.Array,
+    rho: float | jax.Array,
+    p: float | jax.Array,
+    T: float | jax.Array,
+    dt: float | jax.Array,
+    key: jax.Array,
+    cfg: SDMConfig,
+) -> SuperDropletState:
+    """Apply the Shima update to a fixed set of non-overlapping candidate pairs.
+
+    ``valid_pair`` masks candidate pairs that should be skipped, while
+    ``pair_scaling`` supplies the local ``C(n,2)/floor(n/2)`` scale factor for
+    each candidate. Invalid pairs may overlap valid pairs; they contribute zero
+    additive updates and therefore cannot overwrite a real coalescence result.
+    """
+    xi = state.multiplicity
+    R = state.radius
+    s = state.solute_mass
+    active = state.active
+    dtype = R.dtype
+    (big, small, xi_big, xi_small, R_big, R_small, s_big, s_small,
+     act_pair, P) = _pair_kernel_probability_inputs(
+        state, ia, ib, valid_pair, pair_scaling, V_cell, rho, p, T, dt, cfg)
 
     # Stochastic integer collision count γ, capped so the prey is not over-consumed.
     floor_P = jnp.floor(P)
@@ -261,6 +304,69 @@ def _coalescence_step_pairs(
     s = s.at[small].add(jnp.where(has_coal, s_small_new - s_small, 0.0))
     # A droplet whose multiplicity has reached zero represents nothing -> inactive.
     active = jnp.where(xi > 0.0, active, 0.0)
+
+    return state._replace(multiplicity=xi, radius=R, solute_mass=s, active=active)
+
+
+def _coalescence_step_pairs_deterministic(
+    state: SuperDropletState,
+    ia: jax.Array,
+    ib: jax.Array,
+    valid_pair: jax.Array,
+    pair_scaling: float | jax.Array,
+    V_cell: float | jax.Array,
+    rho: float | jax.Array,
+    p: float | jax.Array,
+    T: float | jax.Array,
+    dt: float | jax.Array,
+    cfg: SDMConfig,
+) -> SuperDropletState:
+    """Apply a deterministic mean-field coalescence update to candidate pairs.
+
+    For each non-overlapping pair, the Shima scaled probability ``P`` is used
+    as the expected collision count. To keep multiplicities non-negative while
+    preserving differentiability, the expected count is smoothly saturated at
+    the available ratio ``xi_big / xi_small``:
+
+    ``gamma = cap * (1 - exp(-P / cap))``.
+
+    In the normal rare-collision regime this is ``gamma ~= P``; in certain
+    collision probes it approaches the full available coalescence. The update is
+    algebraically mass-conserving for fractional ``gamma``.
+    """
+    xi = state.multiplicity
+    R = state.radius
+    s = state.solute_mass
+    active = state.active
+    dtype = R.dtype
+    (big, small, xi_big, xi_small, R_big, R_small, s_big, s_small,
+     act_pair, P) = _pair_kernel_probability_inputs(
+        state, ia, ib, valid_pair, pair_scaling, V_cell, rho, p, T, dt, cfg)
+
+    cap = jnp.where(xi_small > 0.0, xi_big / xi_small, 0.0)
+    cap = jnp.maximum(cap, 0.0)
+    # Deterministic γ = the TRUE capped Shima expectation E[γ] = min(P, cap)
+    # (codex 2026-06-13: the earlier smooth surrogate cap·(1−e^(−P/cap)) was
+    # BIASED low — P=0.7 gave 0.50 vs the stochastic mean 0.71). min() is a kink
+    # at P=cap but differentiable a.e. (sub-gradient), keeping the deterministic
+    # path jax.grad-able while now matching the stochastic ensemble mean.
+    gamma = jnp.where(
+        (cap > 0.0) & (act_pair > 0.0),
+        jnp.minimum(P, cap),
+        0.0,
+    )
+    gamma = jnp.minimum(gamma, cap)
+    has_coal = gamma > 0.0
+
+    xi_big_new = xi_big - gamma * xi_small
+    R_small_new = jnp.cbrt(gamma * R_big**3 + R_small**3)
+    s_small_new = s_small + gamma * s_big
+
+    xi = xi.at[big].add(jnp.where(has_coal, xi_big_new - xi_big, 0.0))
+    R = R.at[small].add(jnp.where(has_coal, R_small_new - R_small, 0.0))
+    s = s.at[small].add(jnp.where(has_coal, s_small_new - s_small, 0.0))
+    active = jnp.where(xi > jnp.asarray(0.0, dtype), active, 0.0)
+    xi = jnp.maximum(xi, jnp.asarray(0.0, dtype))
 
     return state._replace(multiplicity=xi, radius=R, solute_mass=s, active=active)
 

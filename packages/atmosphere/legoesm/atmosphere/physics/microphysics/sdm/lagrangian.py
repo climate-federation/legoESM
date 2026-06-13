@@ -11,15 +11,29 @@ existing ``scheme="sdm"`` column adapter remains a reconstructed box closure
 for the keyless Eulerian microphysics interface; this module is a stateful
 driver that must be carried by the caller.
 
-Simplifications relative to production SDM implementations such as PySDM or
-SuperDropGPU:
+Differentiability contract:
+
+* ``collision_mode="stochastic"`` (default) is forward-only: pairing consumes a
+  PRNG key, active particles are sorted into cell segments, and integer
+  accept/reject collision counts are discontinuous.
+* ``collision_mode="deterministic"`` keeps the same fixed candidate-pair layout
+  but replaces random integer collision counts with a smooth expected
+  mean-field increment. For fixed cell membership, advection interpolation,
+  terminal velocity, deterministic coalescence, condensation, vapor/latent-heat
+  coupling, and q_c/q_r scatter-add binning all have JAX reverse-mode VJPs with
+  respect to particle radii/multiplicities and Eulerian thermodynamic fields.
+  Particle-to-cell assignment itself uses floor/segment sorting, so gradients
+  with respect to positions across cell boundaries are not meaningful.
+
+Simplifications relative to full production SDM implementations such as PySDM
+or SuperDropGPU:
 
 * particles are stored in one global fixed-size pool. Per-cell coalescence
   sorts the active pool by cell each step and pairs adjacent droplets inside
-  each sorted cell block; this is fixed-size and JIT-friendly, but not a
-  high-performance persistent cell-list or GPU particle container;
-* stochastic coalescence and scatter/bin coupling are forward-only and
-  non-differentiable;
+  each sorted cell block; this is fixed-size and JIT-friendly, but still not a
+  persistent GPU-resident cell-list container;
+* stochastic coalescence is forward-only. Deterministic coalescence is
+  differentiable for fixed cell membership as described above;
 * aerosol activation is represented by initialized super-droplets (wet radius
   plus solute), not by a separate source/recycling operator.
 
@@ -42,6 +56,7 @@ from legoesm import constants
 from legoesm.thermo import relative_humidity
 from legoesm.atmosphere.physics.microphysics.sdm.coalescence import (
     _coalescence_step_pairs,
+    _coalescence_step_pairs_deterministic,
 )
 from legoesm.atmosphere.physics.microphysics.sdm.condensation import integrate_radius
 from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
@@ -81,6 +96,12 @@ __physics_contract__ = {
         "cools. q_c/q_r are diagnostic bins from particles."
     ),
     "conserves": ["moisture", "energy"],
+    # Contract bool = the DEFAULT (stochastic) path, which is forward-only.
+    # SDMConfig(collision_mode='deterministic') + fixed cell membership makes the
+    # whole step (advection, terminal velocity, mean-field coalescence,
+    # condensation, vapor/latent-heat coupling, q_c/q_r scatter-add) reverse-mode
+    # differentiable wrt radii/multiplicities/Eulerian fields — see the module
+    # docstring; floor-based cell assignment stays discrete wrt position.
     "differentiable": False,
     "reference": (
         "Shima et al. (2009) QJRMS 135:1307; PySDM/SuperDropGPU algorithmic "
@@ -427,8 +448,9 @@ def condensation_coupling_step(
     pos_raw = jnp.maximum(delta_raw, 0.0)
     pos_cell = jnp.zeros((n_cells,), dtype=dtype).at[cell_id].add(pos_raw)
     max_condense = jnp.maximum(flat_qv, 0.0) * flat_rho * cell_volume
+    pos_cell_safe = jnp.maximum(pos_cell, jnp.asarray(1.0e-30, dtype))
     scale_cell = jnp.where(
-        pos_cell > 0.0, jnp.minimum(1.0, max_condense / pos_cell), 1.0)
+        pos_cell > 0.0, jnp.minimum(1.0, max_condense / pos_cell_safe), 1.0)
     scale = scale_cell[cell_id]
     delta = jnp.where(delta_raw > 0.0, delta_raw * scale, delta_raw)
 
@@ -464,12 +486,15 @@ def coalescence_cells_step(
 ) -> LagrangianSDMState:
     """Apply Shima collision-coalescence independently in every Eulerian cell.
 
-    Active droplets are randomly ordered within each cell by first permuting the
-    global fixed-size pool and then stable-sorting by cell id. Adjacent droplets
-    inside each sorted active cell block form Shima candidate pairs. Cross-cell
-    and inactive pairs are masked, and each valid pair uses the local active
-    count ``n_local`` and local candidate count ``floor(n_local/2)`` in the
-    Shima probability scale ``C(n_local,2)/floor(n_local/2)``.
+    Active droplets are sorted by cell id once per call. In stochastic mode the
+    global pool is first randomly permuted, then stable-sorted by cell so each
+    segment has a random within-cell order. In deterministic mode no PRNG is
+    consumed; stable sorting by cell preserves slot order inside a segment.
+    Adjacent droplets inside each sorted active cell block form Shima candidate
+    pairs. Cross-cell and inactive pairs are masked, and each valid pair uses
+    the local active count ``n_local`` and local candidate count
+    ``floor(n_local/2)`` in the Shima probability scale
+    ``C(n_local,2)/floor(n_local/2)``.
     """
     dtype = state.x.dtype
     rho_grid = _broadcast_cell_field(rho, grid, dtype)
@@ -481,12 +506,9 @@ def coalescence_cells_step(
     cell_volume = jnp.asarray(grid.dx * grid.dy * grid.dz, dtype=dtype)
     _, _, _, cell_id = _particle_cell_indices(state, grid)
     n_cells = grid.cfg.ny * grid.cfg.nx * grid.cfg.nz
-    key_next, key_pairs = random.split(state.key)
-    k_perm, k_gamma = random.split(key_pairs)
-
     n_sd = state.droplets.radius.shape[0]
     if n_sd < 2:
-        return state._replace(key=key_next)
+        return state
 
     active_bool = (state.droplets.active > 0.0) & (state.droplets.multiplicity > 0.0)
     active_i = active_bool.astype(jnp.int32)
@@ -497,7 +519,19 @@ def coalescence_cells_step(
     # order within each cell.
     inactive_cell = jnp.asarray(n_cells, dtype=jnp.int32)
     sort_cell = jnp.where(active_bool, cell_id, inactive_cell)
-    perm = random.permutation(k_perm, n_sd)
+    if cfg.collision_mode == "stochastic":
+        key_next, key_pairs = random.split(state.key)
+        k_perm, k_gamma = random.split(key_pairs)
+        perm = random.permutation(k_perm, n_sd)
+    elif cfg.collision_mode == "deterministic":
+        key_next = state.key
+        k_gamma = state.key
+        perm = jnp.arange(n_sd, dtype=jnp.int32)
+    else:
+        raise ValueError(
+            f"Unknown SDM collision_mode: {cfg.collision_mode!r} "
+            "(expected 'stochastic' or 'deterministic')"
+        )
     order = jnp.argsort(sort_cell[perm], stable=True)
     sorted_idx = perm[order]
     sorted_cell = sort_cell[sorted_idx]
@@ -509,6 +543,12 @@ def coalescence_cells_step(
     ])
     starts = jnp.where(is_group_start, pos, jnp.zeros_like(pos))
     group_start = lax.associative_scan(jnp.maximum, starts)
+    is_group_stop = jnp.concatenate([
+        sorted_cell[:-1] != sorted_cell[1:],
+        jnp.ones((1,), dtype=bool),
+    ])
+    stops = jnp.where(is_group_stop, pos + 1, jnp.full_like(pos, n_sd))
+    group_stop = lax.associative_scan(jnp.minimum, stops[::-1])[::-1]
     local_rank = pos - group_start
 
     next_pos = jnp.minimum(pos + 1, n_sd - 1)
@@ -520,25 +560,41 @@ def coalescence_cells_step(
 
     safe_cell = jnp.minimum(sorted_cell, n_cells - 1)
     n_local = n_local_i[safe_cell].astype(dtype)
-    l_local = jnp.floor(n_local / 2.0)
+    segment_count = jnp.maximum(group_stop - group_start, 0).astype(dtype)
+    l_local = jnp.floor(segment_count / 2.0)
     pair_scaling = jnp.where(l_local > 0.0,
                              0.5 * n_local * (n_local - 1.0) / l_local,
                              0.0)
 
-    droplets = _coalescence_step_pairs(
-        state.droplets,
-        ia,
-        ib,
-        valid_pair.astype(dtype),
-        pair_scaling,
-        cell_volume,
-        flat_rho[safe_cell],
-        flat_p[safe_cell],
-        flat_T[safe_cell],
-        dt,
-        k_gamma,
-        cfg,
-    )
+    if cfg.collision_mode == "deterministic":
+        droplets = _coalescence_step_pairs_deterministic(
+            state.droplets,
+            ia,
+            ib,
+            valid_pair.astype(dtype),
+            pair_scaling,
+            cell_volume,
+            flat_rho[safe_cell],
+            flat_p[safe_cell],
+            flat_T[safe_cell],
+            dt,
+            cfg,
+        )
+    else:
+        droplets = _coalescence_step_pairs(
+            state.droplets,
+            ia,
+            ib,
+            valid_pair.astype(dtype),
+            pair_scaling,
+            cell_volume,
+            flat_rho[safe_cell],
+            flat_p[safe_cell],
+            flat_T[safe_cell],
+            dt,
+            k_gamma,
+            cfg,
+        )
     return state._replace(droplets=droplets, key=key_next)
 
 
@@ -589,6 +645,7 @@ def apply_lagrangian_sdm_to_les_state(
     p = ref.p_c
     rho = ref.rho_c
     T_grid = les_state.theta * jnp.asarray(exner, dtype=les_state.theta.dtype)[None, None, :]
+    total_water_before = total_water_mass(sdm_state, les_state.tracers, grid, rho)
 
     sdm_state, dprecip = advect_step(
         sdm_state, les_state.u, les_state.v, les_state.w, grid, dt, cfg,
@@ -609,6 +666,7 @@ def apply_lagrangian_sdm_to_les_state(
     q_c, q_r = diagnose_liquid_mixing_ratios(sdm_state, grid, rho, cfg.r_rain)
     tracers = set_diagnostic_liquid_tracers(tracers, q_c, q_r)
     les_state = les_state._replace(theta=theta, tracers=tracers)
+    total_water_after = total_water_mass(sdm_state, tracers, grid, rho)
     diagnostics = {
         "surface_precip_step": dprecip,
         "surface_precip": sdm_state.surface_precip,
@@ -616,7 +674,9 @@ def apply_lagrangian_sdm_to_les_state(
         "q_r": q_r,
         "dq_liquid": dq_liquid,
         "airborne_water": jnp.sum(represented_water_mass(sdm_state.droplets)),
-        "total_water": total_water_mass(sdm_state, tracers, grid, rho),
+        "total_water_before": total_water_before,
+        "total_water": total_water_after,
+        "total_water_error": total_water_after - total_water_before,
         "n_active": jnp.sum(sdm_state.droplets.active),
     }
     return les_state, sdm_state, diagnostics
