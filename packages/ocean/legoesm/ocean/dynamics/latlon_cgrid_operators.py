@@ -2376,8 +2376,19 @@ def neumann_fill_vertex(
         ``n_passes`` iterations; original value (typically zero) at
         fully-isolated land vertices.
     """
-    m = vtx_mask
     filled = f
+    # Cast the mask to the FIELD dtype so the fused (field, mask) lat
+    # halo packs as ONE message per cut, not two: a float64 derived
+    # vertex field + a float32 mask are distinct dtype groups and the
+    # multi-pad issues one sendrecv pair per group (halo census
+    # 8474554: 2 groups × 3 passes = 6 exchanges/site).  Cross-node
+    # halo is latency-bound, so 2→1 message/pass halves the count.
+    # For the supported BINARY vertex mask (compute_vertex_mask is a
+    # product of the 0/1 cell mask; 0/1 exact in f32 and f64) the
+    # up-cast is lossless and the fill arithmetic is bit-identical; a
+    # fractional out-of-contract mask would differ at round-off as the
+    # f32 path already did.
+    m = vtx_mask.astype(f.dtype)
 
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     south_is_pole, north_is_pole = lat_ends_are_poles()

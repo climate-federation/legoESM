@@ -477,8 +477,21 @@ def neumann_fill_cgrid(
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
     south_is_pole, north_is_pole = lat_ends_are_poles()
 
-    m = mask
     filled = f
+    # Cast the mask to the FIELD dtype so the fused (field, mask) lat
+    # halo packs as ONE message per cut instead of two: a float64
+    # derived field + a float32 mask are distinct dtype groups, and the
+    # multi-pad issues one sendrecv pair PER dtype group (halo census
+    # 8474554 showed neumann_fill at 2 groups × 3 passes = 6 exchanges/
+    # site).  Cross-node halo is latency-bound (clock 8473330), so
+    # collapsing 2 messages → 1 per pass halves the count.  For the
+    # supported BINARY ocean mask (1=wet/0=land, the documented
+    # contract — 0/1 are exact in both float32 and float64) the up-cast
+    # is lossless and the fill arithmetic (m_s·f_s, m<0.5,
+    # where(...,1.0,m)) is bit-identical; a fractional out-of-contract
+    # land_mask_override would differ at round-off, as the f32 path
+    # already did.
+    m = mask.astype(f.dtype)
     for _ in range(3):
         # N/S neighbours.  Cell rows partition WITHOUT overlap across
         # MPI bands, so one backend-dispatched halo=1 pad per array
