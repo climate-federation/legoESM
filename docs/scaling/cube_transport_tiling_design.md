@@ -70,6 +70,46 @@ Corrected STEP-1 halo spec: interior same-face FIELD depth-4 (≥3) real +
 RDELTA depth-1 real; face-edge FIELD = `_pad_halo_dgrid_for_ppm` depth-2 +
 PPM edge-pad, rdelta edge-pad (match global); NO corners (this op only).
 
+## APPROACH C + boundary-fix-OFF (2026-06-13 — the implementation approach)
+
+Two findings collapse the implementation to the proven d2a2c approach-C
+pattern (compute halo GLOBALLY in the GSPMD view, strided-slice per tile),
+NOT a new ppermute exchange:
+
+1. **`_pad_halo_dgrid_for_ppm` is a FULL-FACE op** (built on `ext_vector_dgrid`
+   — D→A avg + duogrid cross-face rotation, `fv3_sw_core.py:40-84`), NOT a
+   strip exchange. Reproducing it tile-locally is wrong-headed. Instead:
+   compute it GLOBALLY (cheap, once per face), pre-pad the field to the PPM
+   storage halo h3=4 exactly as `_ppm_transport_1d` does internally
+   (`_pad_halo_dgrid_for_ppm(halo=2)` then `jnp.pad(mode='edge', gap=2)`),
+   then each tile takes a strided window `[t·n_loc : t·n_loc + n_loc + 2·h3]`
+   (= `tiled_padded_block`, the d2a2c approach-C helper). Interior cuts get
+   real depth-4 from the contiguous global interior; face edges get the
+   ext_vector depth-2 + edge-pad — bit-faithful to global by construction.
+   Same for the courant `c` (interface-located, tile-sliceable) and `rdelta`
+   (global edge-pad depth-1 then slice — satisfies the rd-halo requirement).
+2. **Boundary-fix is OFF for THIS transport.** `_bgrid_ke_transport` calls
+   `_ppm_transport_1d` WITHOUT `apply_d_sw3_boundary_fix` (default False;
+   "iter-967 NEGATIVE: d_sw3 boundary fix conflicts with the iter-945
+   halo"). So the SOUTH/NORTH boundary-fix branch (`fv3_sw_core.py:2449-2516`
+   — the one-sided edge-PPM specials + pert_ppm) is DEAD here ⇒ the
+   reconstruction is UNIFORM PPM, NO edge specials. Unlike d2a2c (which had
+   intricate per-side edge specials), tiled transport is uniform — the only
+   tile-position-dependence is the halo slice, which approach-C handles.
+
+IMPLEMENTATION UNITS (gate + codex each):
+* U1: refactor `_ppm_transport_1d` → extract `_ppm_flux_core(vp_h3, c, rd_pad)`
+  taking a PRE-PADDED field (h3=4) + courant + pre-padded rd, with the public
+  `_ppm_transport_1d` calling it (BIT-IDENTICAL global path — sbatch parity
+  gate). This removes the internal edge-pad so a tile can supply real halo.
+* U2: `transport_tile` = global pre-pad (U1 inputs) → `tiled_padded_block`
+  slice per tile → `_ppm_flux_core` → tile interface fluxes. Parity: tiled
+  == global `_bgrid_ke_transport` PPM output, all tile positions, kt=3.
+* U3: wire into the tiled stage next to d2a2c; np-parity.
+
+This is deliberate multi-hour work (a delicate dycore refactor kept
+bit-identical); do U1→U2→U3 as separate gated+codex commits.
+
 ## Plan (gate + codex EACH piece — user directive "be very careful")
 
 1. **depth-4 interior-cut strip exchange** (`make_tiled_ppm_halo` or a
