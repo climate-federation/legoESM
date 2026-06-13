@@ -160,6 +160,13 @@ _SBM_TRAINABLE: list[ParamConstraint] = [
 # RRTMGP knobs (active when ``aimip_radiation=rrtmgp``).
 # v7: widened sfc_emissivity / sfc_albedo bounds (see _GRAY_RAD_TRAINABLE
 # comment); the same saturation problem hit the RRTMGP path at v6.
+# NOTE (2026-06-13, codex review): the co2/ch4/n2o AND aerosol_ssa/aerosol_g
+# leaves are RAW elements of RRTMGP's solver-cache key tuple, so a traced leaf
+# is unhashable under jax.grad. ``to_rrtmgp_config`` therefore freezes ALL FIVE
+# to the RRTMGP defaults (does not wire them); these constraints persist only as
+# forward-compatible raw leaves until RRTMGP consumes them as per-call traced
+# inputs. Only sfc_emissivity / sfc_albedo are actually wired (routed through
+# _hashable + the per-call spatial-surface override path).
 _RRTMGP_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("rrtmgp_co2_ppmv", 200.0, 800.0, "sigmoid"),
     ParamConstraint("rrtmgp_ch4_ppbv", 700.0, 3000.0, "sigmoid"),
@@ -430,32 +437,38 @@ class AIMIPClassicalParams(eqx.Module):
         )
 
     def to_rrtmgp_config(self):
-        """Build a RRTMGPConfig with trained surface + aerosol knobs.
+        """Build a RRTMGPConfig with trained surface knobs.
 
-        Gas concentrations (CO2, CH4, N2O) are intentionally NOT
-        pulled from the trained sigmoid leaves: the RRTMGP optics
-        cache (``rrtmgp.RRTMGP._optics_cache_key``) hashes them,
-        and a traced JAX array is unhashable under
-        ``eqx.filter_value_and_grad``.  Cold-bias closure under
-        AIMIP is driven by cloud-LW coupling + surface
-        emissivity/albedo, not by the modest gas-absorption
-        perturbations the sigmoid bounds would allow, so we freeze
-        gas concentrations to the canonical RRTMGP defaults and
-        keep surface + aerosol knobs trainable.  The corresponding
-        ``rrtmgp_co2_ppmv`` / ``ch4_ppbv`` / ``n2o_ppbv`` raw
-        leaves still exist for forward-compatibility but are not
-        wired into the radiation config until the cache-key bug is
-        addressed in ``radiation/rrtmgp/rrtmgp.py``.
+        Some RRTMGPConfig fields are folded into the solver-cache key in
+        ``rrtmgp.RRTMGP._instance_cache_key`` / ``_optics_cache_key`` and so
+        CANNOT carry a traced JAX leaf under ``eqx.filter_value_and_grad``.
+        Two distinct cases:
+
+        - **Gas concentrations (CO2/CH4/N2O)** and **aerosol optics
+          (aerosol_ssa/aerosol_g)** appear as RAW tuple elements in the cache
+          key (not wrapped by ``_hashable``), so a traced leaf makes the key
+          tuple itself unhashable -> hard failure.  Both are frozen to the
+          canonical RRTMGP defaults here; their ``rrtmgp_co2_ppmv`` /
+          ``ch4_ppbv`` / ``n2o_ppbv`` / ``rrtmgp_aerosol_ssa`` /
+          ``rrtmgp_aerosol_g`` raw leaves remain for forward-compatibility but
+          are NOT wired in until RRTMGP consumes them as per-call traced inputs
+          outside the cache key.  (aerosol_ssa/aerosol_g freeze added 2026-06-13
+          after codex review: the gas-only freeze missed them.)
+
+        - **sfc_emissivity / sfc_albedo** ARE routed through ``_hashable`` (which
+          falls back to ``id(...)`` for arrays / un-concretizable scalars) AND
+          are overridable per call by the spatial-surface ``(ncol,)`` arrays in
+          ``make_aimip_classical_spectral_physics`` — the intended trainable
+          surface path — so they stay wired.
         """
         from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
         d = self.as_dict()
         base = RRTMGPConfig()
         return base._replace(
-            # Gas concentrations frozen to scheme defaults (see docstring).
+            # Gas concentrations + aerosol optics frozen to scheme defaults
+            # (raw cache-key tuple elements; see docstring).
             sfc_emissivity=d["rrtmgp_sfc_emissivity"],
             sfc_albedo=d["rrtmgp_sfc_albedo"],
-            aerosol_ssa=d["rrtmgp_aerosol_ssa"],
-            aerosol_g=d["rrtmgp_aerosol_g"],
         )
 
 

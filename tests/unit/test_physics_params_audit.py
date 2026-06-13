@@ -246,6 +246,24 @@ class TestAIMIPDefaultsInteriorization:
         name = "tiedtke_cape_threshold"
         assert abs(float(vals[name]) - defaults[name]) < 1e-4 * defaults[name]
 
+    def test_to_rrtmgp_config_freezes_raw_hashed_cache_key_fields(self):
+        """RRTMGP folds gas concentrations + aerosol_ssa/aerosol_g into its
+        solver-cache key as RAW (non-_hashable) tuple elements, so a traced
+        trainable leaf there is unhashable under jax.grad. to_rrtmgp_config()
+        must freeze ALL of them to the RRTMGPConfig defaults (codex review
+        2026-06-13: the gas-only freeze missed aerosol). Only sfc_emissivity/
+        sfc_albedo (routed through _hashable + the per-call spatial override)
+        may carry trained values."""
+        from legoesm.training.aimip_params import AIMIPClassicalParams
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        base = RRTMGPConfig()
+        cfg = AIMIPClassicalParams.from_defaults().to_rrtmgp_config()
+        for field in ("co2_ppmv", "ch4_ppbv", "n2o_ppbv", "aerosol_ssa", "aerosol_g"):
+            assert float(getattr(cfg, field)) == float(getattr(base, field)), (
+                f"RRTMGPConfig.{field} is a raw cache-key tuple element and must "
+                f"stay frozen at the default {getattr(base, field)}, got {getattr(cfg, field)}"
+            )
+
 
 # ===========================================================================
 # Microphysics
