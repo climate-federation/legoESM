@@ -130,6 +130,7 @@ class GlobalSurfaceDataConfig(NamedTuple):
     # --- knobs ---
     pct_scale: float = 0.01             # percent -> fraction
     k_neighbors: int = 4                # IDW neighbours for regridding
+    area_scale: float = _KM2_TO_M2      # AREA source-unit -> m^2 (CLM km^2); 1.0 if m^2
 
 
 class GlobalSurfaceData(NamedTuple):
@@ -212,6 +213,21 @@ def get_surfdata_preset(name: str) -> GlobalSurfaceDataConfig:
     """
     if name == "clm5_surfdata":
         return GlobalSurfaceDataConfig(dataset="clm5_surfdata")
+    if name == "legoesm_surfdata":
+        # Native harmonized file written by legoesm.land.surface_data.schema.
+        # Clean 1-D lat/lon coords; cell_area already in m^2 (area_scale=1.0).
+        return GlobalSurfaceDataConfig(
+            dataset="legoesm_surfdata",
+            sand_var="sand_pct", clay_var="clay_pct", organic_var="organic",
+            bulk_density_var="bulk_density", color_var="soil_color",
+            soil_depth_var="soil_dz",
+            land_frac_var="f_land", lake_var="f_lake", glacier_var="f_glacier",
+            pft_frac_var="pft_frac", year_var="year",
+            lai_var="monthly_lai", sai_var="monthly_sai",
+            htop_var="monthly_height_top", hbot_var="monthly_height_bot",
+            area_var="cell_area", lat_var="lat", lon_var="lon",
+            area_scale=1.0,
+        )
     if name == "modis":
         # MODIS land-cover / LAI fallback (plan §12 open item #1).
         return GlobalSurfaceDataConfig(
@@ -547,7 +563,7 @@ def load_global_surface_data(
             sai=_veg(vds, config.sai_var),
             htop=_veg(vds, config.htop_var),
             hbot=_veg(vds, config.hbot_var),
-            cell_area=(_orient_latlon_last(sds[config.area_var], lat_dim, lon_dim) * _KM2_TO_M2
+            cell_area=(_orient_latlon_last(sds[config.area_var], lat_dim, lon_dim) * config.area_scale
                        if config.area_var in sds else None),
         )
         return build_global_surface_data(raw, grid, config, soil_grid=soil_grid)
