@@ -502,6 +502,88 @@ def _make_zonal_line_preconditioner(
     return M_inv
 
 
+def _make_chebyshev_preconditioner(A_op, inv_diag, mask, degree: int):
+    """Degree-``degree`` Chebyshev-polynomial preconditioner:
+    ``M⁻¹r ≈ p(A)·r`` via ``degree`` applications of the Helmholtz matvec
+    ``A_op`` with scalar Chebyshev coefficients on ``[λ_min, λ_max]``.
+
+    Why this (scaling review 2026-06-13, ocean lever #1): it cuts the OUTER
+    PCG iteration count using ONLY matvecs + scalar coefficients — NO extra
+    global reductions per iteration (one stop_gradient'd global_max at
+    setup for λ_max).  On the latency-bound cross-node fabric, trading a
+    reduction (all-ranks barrier) for a matvec (nearest-neighbour sendrecv
+    halo) is the right direction.  Cheaper than multigrid (~80 LOC, no
+    restriction/prolongation/coarse-grid-under-MPI), and it is the standard
+    smoother MPAS-O/CESM use inside multigrid anyway.
+
+    Eigenvalue window:
+      * ``λ_min = 1`` is ANALYTIC — ``A = I - coeff·∇·(H·∇)`` and
+        ``-coeff·∇·(H·∇)`` is positive-semidefinite (coeff,H ≥ 0), so every
+        eigenvalue of A is ≥ 1 (the free-surface identity floor; equality at
+        the k=0 mode).
+      * ``λ_max`` from the Gershgorin row-sum bound: for A's FV stencil the
+        off-diagonals sum to ``diag - 1``, so ``λ_max ≤ max(2·diag - 1)``.
+        ``diag = 1/inv_diag`` on wet cells.
+
+    W-self-adjoint: a polynomial in the area-weighted-self-adjoint A is
+    itself W-self-adjoint, so M⁻¹ composes with the single_reduce
+    (Chronopoulos–Gear) CG (the dot-weight requirement) — verified in
+    ``test_chebyshev_preconditioner.py``.  AD-safe: pure matvec + scalar
+    coeffs, no new custom_vjp (A_op's halo ``_sendrecv_vjp`` carries the
+    gradient; the eigenvalue bound is stop_gradient'd, as a preconditioner
+    parameter needs no gradient — the converged solution is unchanged).
+    """
+    import jax
+
+    from legoesm.parallel.reductions import global_max_mpi, is_multi_process
+
+    if degree < 1:
+        raise ValueError(
+            f"chebyshev preconditioner needs degree >= 1, got {degree}.")
+
+    wet = mask > 0.5
+    diag = jnp.where(wet, 1.0 / jnp.maximum(inv_diag, 1.0e-30), 0.0)
+    gersh = jnp.where(wet, 2.0 * diag - 1.0, -jnp.inf)
+    lmax_local = jnp.max(gersh)
+    lmax = global_max_mpi(lmax_local) if is_multi_process() else lmax_local
+    # stop_gradient: the preconditioner's spectral window is a tuning
+    # parameter (only affects convergence speed, not the converged answer),
+    # so the non-differentiable allreduce(MAX) is safe here.
+    lmax = jax.lax.stop_gradient(jnp.maximum(lmax, 1.0 + 1.0e-12))
+    lmin = 1.0
+    c = (lmax - lmin) / 2.0   # half-width of the spectral interval
+    d = (lmax + lmin) / 2.0   # centre
+
+    def M_inv(r: jnp.ndarray) -> jnp.ndarray:
+        dt = r.dtype
+        b = (r * mask).astype(dt)
+        x = jnp.zeros_like(b)
+        resid = b               # b - A·0
+        p = jnp.zeros_like(b)
+        alpha = (1.0 / d)
+        # Chebyshev iteration (Templates / Barrett et al.): a fixed-degree
+        # polynomial acceleration of Richardson on A; one A_op matvec per
+        # step, zero reductions.
+        for i in range(degree):
+            if i == 0:
+                p = resid
+                alpha = 1.0 / d
+            elif i == 1:
+                beta = 0.5 * (c * alpha) ** 2
+                alpha = 1.0 / (d - beta / alpha)
+                p = resid + beta * p
+            else:
+                beta = (c * alpha / 2.0) ** 2
+                alpha = 1.0 / (d - beta / alpha)
+                p = resid + beta * p
+            ap = A_op(p).astype(dt)
+            x = x + alpha * p
+            resid = resid - alpha * ap
+        return x * mask.astype(dt)
+
+    return M_inv
+
+
 def _select_preconditioner(
     name: str,
     inv_diag: jnp.ndarray,
@@ -510,6 +592,8 @@ def _select_preconditioner(
     coeff: jnp.ndarray,
     grid: LatLonGrid,
     mask: jnp.ndarray,
+    A_op=None,
+    cheby_degree: int = 4,
 ):
     """Dispatch the implicit-CN PCG preconditioner by config name.
 
@@ -518,6 +602,9 @@ def _select_preconditioner(
     "zonal_line" — exact periodic-tridiagonal row solves (comm-free
     under band MPI; POP EVP-class iteration cutter — see
     :func:`_make_zonal_line_preconditioner`).
+    "chebyshev" — degree-``cheby_degree`` Chebyshev polynomial of the
+    Helmholtz matvec ``A_op`` (iteration-count cut with NO per-iteration
+    reduction; see :func:`_make_chebyshev_preconditioner`).
     Unknown names refuse loudly (dispatch-hardening convention).
     """
     if name == "jacobi":
@@ -528,10 +615,18 @@ def _select_preconditioner(
         return _make_zonal_line_preconditioner(
             H_u, H_v, coeff, grid, mask,
         )
+    if name == "chebyshev":
+        if A_op is None:
+            raise ValueError(
+                "barotropic_implicit_latlon_cgrid: chebyshev preconditioner "
+                "requires the Helmholtz A_op (pass A_op=...).")
+        return _make_chebyshev_preconditioner(
+            A_op, inv_diag, mask, int(cheby_degree),
+        )
     raise ValueError(
         "barotropic_implicit_latlon_cgrid: unknown "
         f"barotropic_implicit_preconditioner {name!r}; expected "
-        "'jacobi' or 'zonal_line'."
+        "'jacobi', 'zonal_line', or 'chebyshev'."
     )
 
 
@@ -893,6 +988,8 @@ def barotropic_implicit_latlon_cgrid(
         str(getattr(config, "barotropic_implicit_preconditioner",
                     "jacobi")),
         inv_diag, H_u_old, H_v_old, coeff, grid, mask,
+        A_op=A_op,
+        cheby_degree=int(getattr(config, "barotropic_chebyshev_degree", 4)),
     )
 
     # Solve dispatch — MERGE COMPOSITION of the area-weighted-adjoint fix
