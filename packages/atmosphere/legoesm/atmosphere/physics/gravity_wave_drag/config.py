@@ -53,6 +53,13 @@ __param_spec__ = {
         "scheme_key": "atm.gwd.E3SMCAMConfig",
         "excluded": {
             "alpha_newtonian": "uniform Newtonian-cooling coefficient (default 0 = off); when used it is replaced by the E3SM height profile, not a single trained scalar",
+            # dc is the phase-speed bin width but the frontal source quadrature
+            # turns it into a Python integer sub-interval COUNT
+            # (e3sm_cam._front_fav: n_sub = int(math.floor(dc/dca + 0.5)) - 1,
+            # then jnp.arange(1, n_sub+1)). A traced trainable would hit int() on
+            # a tracer / fix a static, non-differentiable quadrature shape. Not
+            # trainable until the quadrature uses a fixed max grid with masking.
+            "dc": "phase-speed bin width -> Python int quadrature count (jnp.arange shape) in _front_fav; not traceable",
         },
         "params": {
             # --- efficiency (primary amplitude knob) ---
@@ -60,8 +67,8 @@ __param_spec__ = {
             # --- saturation / wave breaking ---
             "fcrit2": {"units": "1", "bounds": (0.5, 2.0), "tunable_tier": 1, "transform": "sigmoid", "category": "saturation", "reference": "Lindzen (1981)/McFarlane (1987); CAM fcrit2", "shape": None},
             "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "wave_breaking", "reference": "Scinocca (2003); E3SM gw_common umcfac", "shape": None},
-            # --- spectral discretisation / saturation floors ---
-            "dc": {"units": "m/s", "bounds": (1.0, 10.0), "tunable_tier": 3, "transform": "sigmoid", "category": "source_spectrum", "reference": "E3SM gw_common phase-speed bin width dc", "shape": None},
+            # --- saturation floors ---
+            "n2min": {"units": "1/s^2", "bounds": (1.0e-9, 1.0e-7), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "E3SM gw_prof N^2 floor", "shape": None},
             "n2min": {"units": "1/s^2", "bounds": (1.0e-9, 1.0e-7), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "E3SM gw_prof N^2 floor", "shape": None},
             "taumin": {"units": "Pa", "bounds": (1.0e-12, 1.0e-8), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "E3SM gw_common minimum-stress floor", "shape": None},
             "ubmc2mn": {"units": "m^2/s^2", "bounds": (1.0e-3, 1.0e-1), "tunable_tier": 3, "transform": "softplus", "category": "numerics", "reference": "E3SM gw_common (u-c)^2 floor", "shape": None},
