@@ -353,3 +353,72 @@ def test_u3d_real_xtp_u_corner_cross_tiling():
     np.testing.assert_allclose(
         reassembled, global_x, atol=1e-12, rtol=1e-12,
         err_msg="U3d corner-cross xtp_u tiling != global _bgrid_ke xtp_u")
+
+
+@pytest.mark.parametrize("sweep", ["i", "j"])
+def test_u3d_real_courant_in_shardmap(sweep):
+    """U3d under a REAL (6,kt,kt) shard_map at np24: the corner-cross stage
+    (cross_nl=nl+1) on the REAL _bgrid_ke_transport inputs reassembles
+    bit-exactly to the global xtp_u/ytp_v.  Proves the real-Courant tiling
+    runs in the SPMD stage (not just host-body)."""
+    kt = 2
+    ndev = 6 * kt * kt
+    if len(jax.devices()) < ndev:
+        pytest.skip(f"needs --xla_force_host_platform_device_count={ndev}")
+    import numpy as np
+    from jax.sharding import Mesh
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+    from legoesm.core.fv3_sw_core import (
+        _pad_halo_uc_vc_new_via_old_delta, _pad_halo_dgrid_for_ppm,
+        bgrid_corner_courant_local,
+    )
+    from tests.test_cases.cosine_bell import cosine_bell_cubesphere
+
+    nl, h3, h_dg = 12, 4, 2
+    n = kt * nl                                  # 24
+    grid = create_cubed_sphere(n=n, use_duogrid=True)
+    cd = create_cubed_sphere_cdgrid(grid)
+    state = cosine_bell_cubesphere(grid, cd)
+    u_d, v_d = state.u_d, state.v_d
+    rng = np.random.default_rng(53)
+    uc = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+    vc = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+    uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(uc, vc, u_d, v_d, cd)
+    vb, ub = bgrid_corner_courant_local(
+        uc_pad, vc_pad, cd.cosa_corner, cd.rsin2_corner, 0.5 * 1800.0)
+    u_d_ihalo, v_d_jhalo = _pad_halo_dgrid_for_ppm(u_d, v_d, cd, halo=h_dg)
+
+    if sweep == "j":
+        courant = vb
+        rdy = 1.0 / jnp.maximum(cd.dy_edge_x, 1.0e-30)
+        global_f = np.asarray(_ppm_transport_1d(v_d_jhalo, vb, rdy, 2, external_halo=h_dg))
+        vp_g = jnp.pad(v_d_jhalo, [(0, 0), (0, 0), (h3 - h_dg, h3 - h_dg)], mode="edge")
+        rd_g = jnp.pad(rdy, [(0, 0), (0, 0), (1, 1)], mode="edge")
+    else:
+        courant = ub
+        rdx = 1.0 / jnp.maximum(cd.dx_edge_y, 1.0e-30)
+        global_f = np.asarray(_ppm_transport_1d(u_d_ihalo, ub, rdx, 1, external_halo=h_dg))
+        vp_g = jnp.pad(u_d_ihalo, [(0, 0), (h3 - h_dg, h3 - h_dg), (0, 0)], mode="edge")
+        rd_g = jnp.pad(rdx, [(0, 0), (1, 1), (0, 0)], mode="edge")
+
+    dev = np.array(jax.devices()[:ndev]).reshape(6, kt, kt)
+    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
+    stage = make_tiled_transport_sweep_stage_2d(
+        mesh, n, kt, h3=h3, sweep=sweep, cross_nl=nl + 1)
+    flux = np.asarray(stage(vp_g, courant, rd_g))   # (6, kt*(nl+1), kt*(nl+1))
+
+    fb = flux.reshape(6, kt, nl + 1, kt, nl + 1)    # (f, ti, a, tj, b)
+    # axis-1 tile = tile_i, axis-2 tile = tile_j (both nl+1 per tile, corner).
+    rows = []
+    for ti in range(kt):
+        cols = []
+        for tj in range(kt):
+            a_hi = nl + 1 if ti == kt - 1 else nl
+            b_hi = nl + 1 if tj == kt - 1 else nl
+            cols.append(fb[:, ti, :a_hi, tj, :b_hi])
+        rows.append(np.concatenate(cols, axis=2))
+    reassembled = np.concatenate(rows, axis=1)      # (6, n+1, n+1)
+    np.testing.assert_allclose(
+        reassembled, global_f, atol=1e-12, rtol=1e-12,
+        err_msg=f"U3d real-Courant {sweep}-sweep in shard_map != global")

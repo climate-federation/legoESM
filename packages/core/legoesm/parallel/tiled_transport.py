@@ -165,6 +165,7 @@ def transport_jsweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4
 
 def make_tiled_transport_sweep_stage_2d(
     mesh, n: int, kt: int, h3: int = 4, sweep: str = "i",
+    cross_nl: int | None = None,
 ):
     """Build a sharded PPM transport stage on a ``(6, kt, kt)`` mesh with axis
     names ``("face", "tile_i", "tile_j")``.
@@ -172,15 +173,25 @@ def make_tiled_transport_sweep_stage_2d(
     ``sweep="i"`` tiles the i-sweep (xtp_u); ``sweep="j"`` the j-sweep
     (ytp_v).  Inputs are FACE-REPLICATED, pre-padded to the PPM storage halo
     h3 on the SWEEP axis (i: axis=1, j: axis=2).  Output is sharded
-    ``P("face","tile_i","tile_j")``; gathered extent
-    ``(6, kt*(nl+1), kt*nl)`` for ``i`` / ``(6, kt*nl, kt*(nl+1))`` for ``j``
-    — each tile DUPLICATES the shared sweep-interface with its neighbour
-    (reassembly: lower tile owns it → the global PPM sweep)."""
+    ``P("face","tile_i","tile_j")``.  ``cross_nl=None`` (the synthetic/U3b
+    case) → cross slice ``nl`` → gathered ``(6, kt*(nl+1), kt*nl)`` for ``i``
+    / ``(6, kt*nl, kt*(nl+1))`` for ``j``.  ``cross_nl=nl+1`` (the REAL
+    _bgrid_ke_transport case, cross axis = the ``n+1`` CORNER axis, U3d) →
+    gathered ``(6, kt*(nl+1), kt*(nl+1))``; both axes reassemble
+    lower-tile-owns-shared to ``(6, n+1, n+1)``."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
     if sweep not in ("i", "j"):
         raise ValueError(f"sweep must be 'i' or 'j', got {sweep!r}")
     nl = n // kt
+    # cross_nl is only meaningful as nl (CELL cross, tiles n) or nl+1 (CORNER
+    # cross, tiles n+1) — both tile EXACTLY across kt tiles.  Reject anything
+    # else so a stray value can't silently clamp the last tile's cross slice
+    # (codex U3d-wire LOW).
+    if cross_nl is not None and cross_nl not in (nl, nl + 1):
+        raise ValueError(
+            f"cross_nl must be nl={nl} (cell) or nl+1={nl + 1} (corner); "
+            f"got {cross_nl}")
     fo = P("face", None, None)
     co = P("face", "tile_i", "tile_j")
     body = transport_sweep_tile_2d if sweep == "i" else transport_jsweep_tile_2d
@@ -190,6 +201,6 @@ def make_tiled_transport_sweep_stage_2d(
     def _stage(vp_g, courant, rd_g):
         a_i = jax.lax.axis_index("tile_i") * nl
         a_j = jax.lax.axis_index("tile_j") * nl
-        return body(vp_g, courant, rd_g, a_i, a_j, nl, h3)
+        return body(vp_g, courant, rd_g, a_i, a_j, nl, h3, cross_nl=cross_nl)
 
     return _stage
