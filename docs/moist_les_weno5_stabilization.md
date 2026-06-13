@@ -72,7 +72,10 @@ Both default **off**; van-Leer remains the stable default. Turn them on only wit
 
 ## Tuning
 Let `Δ = min(dx, dy)` and `dt` the step. The hyperdiffusion damps the highest
-resolved mode at rate `γ = ν₄·(π/Δ)⁴`; explicit stability needs `γ·dt < 2`.
+resolved mode at rate `γ = ν₄·max(k⁴)` (`k²=kx²+ky²`); explicit stability needs
+`γ·dt < R`, R ≈ **2.51 (RK3)**, 1.0 (AB2), 2.0 (FE startup). NOTE `g.k2` has its
+Nyquist row/col zeroed (derivative consistency), so hyperdiff damps the retained
+non-Nyquist modes; the exact 2Δ mode is removed by `spectral_filter`, not here.
 
 * **`ν₄` (w_hyperdiff_coeff)** — start at
   `ν₄ ≈ 0.25 · Δ⁴ / (π⁴ · dt)` → **≈1×10⁵ m⁴/s** at `dx=100 m, dt=2 s`

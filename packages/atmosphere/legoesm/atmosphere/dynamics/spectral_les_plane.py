@@ -132,7 +132,9 @@ class SpectralLESConfig(NamedTuple):
     #                                 WENO5 scalars run stable WITHOUT broad scalar
     #                                 diffusion (which would erase WENO5's sharpness).
     #                                 Start ≈ 0.25·dx⁴/(π⁴·dt) (≈1e5 m⁴/s, dx=100,
-    #                                 dt=2). CFL: ν₄·(π/Δ)⁴·dt < 2. 0 ⇒ off.
+    #                                 dt=2). Explicit-stability radius λ_max·dt
+    #                                 with λ_max=ν₄·max(k⁴): ≈2.51 (RK3), ≈1.0
+    #                                 (AB2), 2.0 (FE start). 0 ⇒ off.
     theta_hyperdiff_coeff: float = 0.0  # OPT-IN SCALE-SELECTIVE horizontal k⁴
     #                                 hyperdiffusion on θ ONLY: dθ/dt −= ν₄θ·k⁴·θ̂.
     #                                 NOT broad scalar diffusion — k⁴ damps the 2Δ
@@ -140,10 +142,13 @@ class SpectralLESConfig(NamedTuple):
     #                                 injects (the actual instability SOURCE: grid-
     #                                 scale θ' → buoyancy → grid-scale w) while
     #                                 barely touching the resolved θ and leaving the
-    #                                 moisture q fully WENO5-sharp. The operative
-    #                                 lever for stable WENO5 moist runs (w_hyperdiff
-    #                                 alone is whack-a-mole on a θ-sourced
-    #                                 instability). Same scaling/CFL as w_hyperdiff.
+    #                                 moisture q fully WENO5-sharp. Same scaling/
+    #                                 CFL as w_hyperdiff. NOTE (codex 2026-06-13):
+    #                                 the k⁴ uses g.k2 whose Nyquist row/col are
+    #                                 zeroed (derivative consistency) ⇒ this damps
+    #                                 the RETAINED non-Nyquist modes; the exact 2Δ
+    #                                 Nyquist mode is removed by ``spectral_filter``
+    #                                 (the 2/3 cutoff), not here.
     div_damping_coeff: float = 0.0  # OPT-IN momentum divergence damping
     #                                 du/dt += α·∇(∇·u) (⇒ ∂δ/∂t += α·∇²δ, α>0 DAMPS
     #                                 divergence). On this INCOMPRESSIBLE core the
@@ -240,17 +245,20 @@ def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64,
             f"{cfg.scalar_advection!r}.")
     if (cfg.scalar_advection in ("weno5", "weno5_hv")
             and jnp.dtype(dtype) == jnp.float32):
-        # The WENO-Z smoothness indicators (β ∝ squared scalar differences) lose
-        # precision in float32 at a near-discontinuity (e.g. the DYCOMS θ_l
-        # inversion: ~9 K / cell) and the run NaNs at cloud onset. float64 WENO5
-        # is stable. (This — NOT a dynamical instability — was the earlier
-        # f32-WENO5 blow-up.) Warn rather than raise (coarse/smooth f32 runs may
-        # be fine); recommend JAX_ENABLE_X64=1 for WENO5 moist cases.
+        # WENO-Z float32 hazard (codex 2026-06-13): the smoothness indicators β
+        # are formed from RAW-VALUE squared differences; for fields with a large
+        # mean and small fluctuation (θ≈300 K + O(0.1 K) eddies, the moisture
+        # inversion) float32 cancellation makes β noisy/negative → the run NaNs
+        # at cloud onset. float64 WENO5 is stable (this, NOT a dynamical
+        # instability, was the earlier blow-up). The robust f32 fix is a common-
+        # shift of the stencil before β (reconstruct the original values) in
+        # core.weno — follow-up; for now WARN + recommend float64.
         import warnings
         warnings.warn(
-            "WENO5 scalar advection in float32 loses precision in the smoothness "
-            "indicators at sharp moisture/θ fronts and can NaN at cloud onset — "
-            "run WENO5 moist cases in float64 (omit --f32 / JAX_ENABLE_X64=1).",
+            "WENO5 scalar advection in float32: the WENO-Z smoothness indicators "
+            "suffer raw-value cancellation (large mean θ + small fluctuations) "
+            "and can NaN at cloud onset. Run WENO5 moist cases in float64 "
+            "(omit --f32 / JAX_ENABLE_X64=1), or add a common-shifted-β WENO.",
             stacklevel=2)
     if layout is not None and cfg.monotone_scalars:
         # The monotone flux operators use a LOCAL jnp.roll in y, which wraps

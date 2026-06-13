@@ -45,7 +45,7 @@ from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 
 
 def moist_diagnostics(u, v, w_centre, theta, tracers, rho_c, dz, dx,
-                      dt, qc_thresh=1.0e-5):
+                      dt, dy=None, qc_thresh=1.0e-5):
     """Bundle of moist-LES diagnostics for the stabilization test matrix.
 
     Host (numpy-on-jax) reductions; cheap, call per print. ``w_centre`` is the
@@ -71,9 +71,11 @@ def moist_diagnostics(u, v, w_centre, theta, tracers, rho_c, dz, dx,
     cloudy = np.any(qc > qc_thresh, axis=-1)
     lwp = float((qc * rho[None, None, :]).sum(-1).mean()) * dz * 1.0e3
     qt_col = ((qv + qc + qr) * rho[None, None, :]).sum(-1) * dz  # (ny,nx) [kg/m²]
-    max_w = float(np.abs(wc).max())
-    cfl = max(float(np.abs(u).max()), float(np.abs(v).max())) * dt / dx
-    cfl = max(cfl, max_w * dt / dz)
+    dy = dx if dy is None else dy
+    max_w = float(np.abs(wc).max())                          # cell-centred w
+    cfl = max(float(np.abs(u).max()) * dt / dx,
+              float(np.abs(v).max()) * dt / dy,
+              max_w * dt / dz)
     return dict(
         cloud_frac=float(cloudy.mean()), lwp=lwp, max_w=max_w,
         w_var=float(ww.max()), tke=float((0.5 * (uu + vv + ww)).max()),
