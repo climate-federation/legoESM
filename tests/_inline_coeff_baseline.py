@@ -13,19 +13,6 @@ _SEED_FILES`` is asserted so a new file can never be budgeted. Re-seed with
 from __future__ import annotations
 
 COEFF_BUDGET: dict[str, dict[str, int]] = {
-    'packages/atmosphere/legoesm/atmosphere/physics/_shared.py': {
-        'return -omega / jnp.clip(rho * g, 1e-3, None)': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py': {
-        '/ jnp.maximum(rho_air, 0.1))': 1,
-        'getattr(config, "Nc_default", 1.0e8))': 1,
-        'lamc = jnp.clip(lamc, (pgam + 1.0) / 60.0e-6, (pgam + 1.0) / 1.0e-6)': 1,
-        'r_eff_ice = jnp.where(has_ice, r_eff_ice_psd, 25.0e-6)': 1,
-        'r_eff_ice_psd = 1.5 / jnp.clip(lami, 1.0e-30)': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/combined.py': {
-        'dt: float = 300.0,': 1,
-    },
     'packages/atmosphere/legoesm/atmosphere/physics/convection/_emanuel_mixing.py': {
         '(pf - mse_min_search_offset) / 2000.0': 1,
         'Tg = jnp.maximum(Tg, 35.0)': 1,
@@ -101,36 +88,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
     },
     'packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py': {
         'rho_safe = jnp.clip(rho, 0.01, None)': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/e3sm_cam.py': {
-        'dca: float = 0.1):': 1,
-        'dca: float = 0.1,': 1,
-        'maxq0 = q0 * 24.0 * 3600.0 # K/day diagnostic': 1,
-        'tndmax_per_day = 500.0 if orographic_only else cfg.tndmax_per_day': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/hines.py': {
-        'rho[:, 1:] / jnp.clip(rho[:, :-1], 0.01, None), 1.0, None,': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py': {
-        'dt: float = 300.0,': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/lindzen.py': {
-        'U_proj_abs = jnp.clip(jnp.abs(U_proj), 0.1, None)': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/mcfarlane.py': {
-        'U_proj_abs = jnp.clip(jnp.abs(U_proj), 1e-2, None)': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/ml_emulator.py': {
-        'dT_dt = dT_dt * 0.01': 1,
-        'du_dt = du_dt * 0.01': 1,
-        'dv_dt = dv_dt * 0.01': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/prognostic_spectral.py': {
-        'intrinsic_abs = jnp.clip(jnp.abs(intrinsic), 0.1, None)': 1,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/learned_column.py': {
-        'hidden_dim: int = 256,': 1,
-        'residual_scale: float = 0.01,': 1,
     },
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py': {
         'dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p_full, 1.0)': 2,
@@ -266,16 +223,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
         'jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), 80.0)': 1,
         'rho_ratio = rho / jnp.clip(rho_sfc, 0.1)': 1,
     },
-    'packages/atmosphere/legoesm/atmosphere/physics/neural_physics.py': {
-        'T / 300.0,': 1,
-        'hidden_dim: int = 256,': 1,
-        'if len(args) == 19:': 1,
-        'if len(args) == 20:': 1,
-        'jnp.atleast_1d(solar / 1400.0),': 1,
-        'residual_scale: float = 0.01,': 1,
-        'u / 30.0,': 1,
-        'v / 30.0,': 1,
-    },
     'packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py': {
         '+ 0.15 * (mu - 0.1) * (mu - 0.5) * (mu - 1.0)': 2,
         '0.026 / (mu ** 1.7 + 0.065)': 3,
@@ -314,12 +261,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
         'h = 2.0 * jnp.pi * (hour / 24.0) + lon - jnp.pi': 1,
         'obliquity: float = 23.45,': 3,
         'return obliquity_rad * jnp.sin(2.0 * jnp.pi * (day_of_year - 80.0) / 365.0)': 2,
-    },
-    'packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py': {
-        'RH = jnp.clip(q_v_base / jnp.maximum(q_sat_base, 1.0e-12), 1.0e-4, 1.0)': 1,
-        'T_minus_55 = jnp.maximum(T_base - 55.0, 1.0)': 1,
-        'T_new = jnp.clip(T_new, 100.0, 350.0).astype(_dtype)': 1,
-        'return 1.0 / (1.0 / T_minus_55 - jnp.log(RH) / 2840.0) + 55.0': 2,
     },
     'packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py': {
         '(2.5 * ustar).astype(_dtype),': 1,
@@ -362,9 +303,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
 }
 
 _SEED_FILES: frozenset[str] = frozenset({
-    'packages/atmosphere/legoesm/atmosphere/physics/_shared.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/combined.py',
     'packages/atmosphere/legoesm/atmosphere/physics/convection/_emanuel_mixing.py',
     'packages/atmosphere/legoesm/atmosphere/physics/convection/_plume.py',
     'packages/atmosphere/legoesm/atmosphere/physics/convection/_triggers.py',
@@ -377,14 +315,6 @@ _SEED_FILES: frozenset[str] = frozenset({
     'packages/atmosphere/legoesm/atmosphere/physics/convection/kuo.py',
     'packages/atmosphere/legoesm/atmosphere/physics/convection/mass_flux.py',
     'packages/atmosphere/legoesm/atmosphere/physics/convection/tiedtke.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/e3sm_cam.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/hines.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/integration.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/lindzen.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/mcfarlane.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/ml_emulator.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/gravity_wave_drag/prognostic_spectral.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/learned_column.py',
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/_thompson_snow.py',
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py',
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/fast_sbm/column.py',
@@ -400,7 +330,6 @@ _SEED_FILES: frozenset[str] = frozenset({
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/kernels.py',
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/seifert_beheng.py',
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/thompson.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/neural_physics.py',
     'packages/atmosphere/legoesm/atmosphere/physics/radiation/integration.py',
     'packages/atmosphere/legoesm/atmosphere/physics/radiation/ozone_ml.py',
     'packages/atmosphere/legoesm/atmosphere/physics/radiation/ozone_mls.py',
@@ -408,7 +337,6 @@ _SEED_FILES: frozenset[str] = frozenset({
     'packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py',
     'packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/rte/two_stream.py',
     'packages/atmosphere/legoesm/atmosphere/physics/radiation/solar.py',
-    'packages/atmosphere/legoesm/atmosphere/physics/thermodynamics.py',
     'packages/atmosphere/legoesm/atmosphere/physics/turbulence/edmf.py',
     'packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py',
     'packages/atmosphere/legoesm/atmosphere/physics/turbulence/lasd_core.py',

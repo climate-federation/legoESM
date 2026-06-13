@@ -113,7 +113,7 @@ def lindzen_gwd(
     # ``1e-8`` clip floor in nearly neutral layers, where the prior
     # ``clip + divide`` form left ``-rho*U^3*k / N**2`` cotangents that
     # blow up under reverse-mode AD.
-    U_proj_abs = jnp.clip(jnp.abs(U_proj), 0.1, None)
+    U_proj_abs = jnp.clip(jnp.abs(U_proj), 0.1, None)  # coeff-ok: projected-wind floor [m/s]
     tau_sat = rho * U_proj_abs ** 3 * config.k_wave * safe_divide(
         jnp.ones_like(N_full), N_full, eps=1e-6,
     )

@@ -109,7 +109,7 @@ class PhysicsConfig(NamedTuple):
 def make_physics(
     config: PhysicsConfig,
     model_type: str = "hydrostatic",
-    dt: float = 300.0,
+    dt: float = 300.0,  # coeff-ok: default physics timestep [s]
     column_mesh=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
