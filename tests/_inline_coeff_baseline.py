@@ -12,7 +12,6 @@ _SEED_FILES`` is asserted so a new file can never be budgeted. Re-seed with
 
 from __future__ import annotations
 
-
 COEFF_BUDGET: dict[str, dict[str, int]] = {
     'packages/atmosphere/legoesm/atmosphere/physics/_shared.py': {
         'return -omega / jnp.clip(rho * g, 1e-3, None)': 1,
@@ -381,21 +380,6 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
     'packages/ice/legoesm/ice/brine.py': {
         'S_ice_max: float = 12.0,': 1,
     },
-    'packages/ice/legoesm/ice/dynamics.py': {
-        'C_ai: float = 1.3e-3,': 3,
-        'C_oi: float = 5.5e-3,': 3,
-        'C_strength: float = 20.0,': 2,
-        'N_evp: int = 120,': 1,
-        'N_mevp: int = 120,': 1,
-        'P_star: float = 2.75e4,': 2,
-        'T_evp: float = 0.36,': 1,
-        'alpha_mevp: float = 500.0,': 1,
-        'beta_mevp: float = 500.0,': 1,
-        'drag_atm: float = 1.3e-3,': 1,
-        'drag_ocean: float = 5.5e-3,': 1,
-        'ice_mask = concentration > 0.01': 2,
-        'm_ice = rho_ice * jnp.maximum(h_ice, 0.01)': 2,
-    },
     'packages/ice/legoesm/ice/itd.py': {
         'G1 = jnp.where(has_ice, 12.0 * eta * a_new / (H ** 3), 0.0)': 1,
     },
@@ -600,7 +584,6 @@ _SEED_FILES: frozenset[str] = frozenset({
     'packages/coupler/legoesm/coupler/mpas_adapter.py',
     'packages/ice/legoesm/ice/_future/bitz_lipscomb.py',
     'packages/ice/legoesm/ice/brine.py',
-    'packages/ice/legoesm/ice/dynamics.py',
     'packages/ice/legoesm/ice/itd.py',
     'packages/ice/legoesm/ice/ponds.py',
     'packages/ice/legoesm/ice/rheology.py',

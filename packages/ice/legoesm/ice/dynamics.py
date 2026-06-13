@@ -44,6 +44,27 @@ from legoesm.ice.rheology import (
     mevp_stress_update,
     cell_gradient_voronoi,
 )
+from legoesm.ice.config import SeaIceConfig
+
+# Canonical defaults for the dynamics solver kwargs live on ``SeaIceConfig`` (the
+# single source of truth callers pass in); the function signatures below default
+# to these so no empirical literal is buried in a signature. C_ai/C_oi are the
+# air-ice / ocean-ice drag coefficients (= drag_atm / drag_ocean).
+_DYN_DEFAULTS = SeaIceConfig()
+# Loop-iteration COUNTS are fixed module constants, never config/trainable
+# parameters: an integer subcycle count is a discrete control-flow / static
+# value, cannot be differentiated, and must not be exposed to a tuning or
+# backprop loop (it would also force a recompile if traced). The EVP and mEVP
+# solvers share the same default subcycle count.
+_N_EVP_DEFAULT = 120
+# mEVP pseudo-time relaxation parameters (Bouillon 2013 / Kimmritz 2015) — solver
+# numerics not carried on SeaIceConfig; declared here so they are not inline
+# signature literals. Stability requires alpha, beta >= ~2*N_mevp.
+_MEVP_ALPHA_DEFAULT = 500.0
+_MEVP_BETA_DEFAULT = 500.0
+# Ice-area presence threshold [-]: cells with concentration below this carry no
+# dynamics (distinct from the h_ice_min thickness floor).
+_ICE_PRESENCE_THRESHOLD = 0.01
 
 
 def _is_latlon_grid(grid) -> bool:
@@ -204,8 +225,8 @@ def free_drift_velocity(
     ocean_v: jnp.ndarray,
     wind_u: jnp.ndarray,
     wind_v: jnp.ndarray,
-    drag_ocean: float = 5.5e-3,
-    drag_atm: float = 1.3e-3,
+    drag_ocean: float = _DYN_DEFAULTS.drag_ocean,
+    drag_atm: float = _DYN_DEFAULTS.drag_atm,
     rho_air: float = constants.rho_air,
     rho_ocean: float = constants.rho_ocean,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -271,7 +292,7 @@ def air_ice_stress(
     wind_u: jnp.ndarray,
     wind_v: jnp.ndarray,
     rho_air: float = constants.rho_air,
-    C_ai: float = 1.3e-3,
+    C_ai: float = _DYN_DEFAULTS.drag_atm,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute air-ice drag stress.
 
@@ -306,7 +327,7 @@ def ocean_ice_stress(
     ocean_u: jnp.ndarray,
     ocean_v: jnp.ndarray,
     rho_ocean: float = constants.rho_ocean,
-    C_oi: float = 5.5e-3,
+    C_oi: float = _DYN_DEFAULTS.drag_ocean,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute ocean-ice drag stress.
 
@@ -353,17 +374,17 @@ def evp_solver(
     ocean_v: jnp.ndarray,
     grid,
     dt: float,
-    N_evp: int = 120,
+    N_evp: int = _N_EVP_DEFAULT,
     e_yield: float = 2.0,
-    P_star: float = 2.75e4,
-    C_strength: float = 20.0,
-    T_evp: float = 0.36,
+    P_star: float = _DYN_DEFAULTS.P_star,
+    C_strength: float = _DYN_DEFAULTS.C_strength,
+    T_evp: float = _DYN_DEFAULTS.T_evp,
     Delta_min: float = 2.0e-9,
     rho_ice: float = constants.rho_ice,
     rho_air: float = constants.rho_air,
     rho_ocean: float = constants.rho_ocean,
-    C_ai: float = 1.3e-3,
-    C_oi: float = 5.5e-3,
+    C_ai: float = _DYN_DEFAULTS.drag_atm,
+    C_oi: float = _DYN_DEFAULTS.drag_ocean,
     differentiable: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the EVP subcycled momentum solver.
@@ -430,7 +451,7 @@ def evp_solver(
     # iteration claimed the original ``rho_ice · max(h, 0.01)`` was
     # missing concentration weighting; Codex GPT-5 review caught the
     # bookkeeping mistake, and the original form is correct.
-    m_ice = rho_ice * jnp.maximum(h_ice, 0.01)
+    m_ice = rho_ice * jnp.maximum(h_ice, _DYN_DEFAULTS.h_ice_min)
 
     # Ice strength (constant during subcycling)
     P = ice_strength(h_ice, concentration, P_star, C_strength)
@@ -441,7 +462,7 @@ def evp_solver(
     coriolis_denom = 1.0 + alpha ** 2
 
     # Ice mask: only compute dynamics where ice exists
-    ice_mask = concentration > 0.01
+    ice_mask = concentration > _ICE_PRESENCE_THRESHOLD
 
     def substep_body(i, carry):
         u_c, v_c, s11_c, s22_c, s12_c = carry
@@ -526,18 +547,18 @@ def mevp_solver(
     ocean_v: jnp.ndarray,
     grid,
     dt: float,
-    N_mevp: int = 120,
+    N_mevp: int = _N_EVP_DEFAULT,
     e_yield: float = 2.0,
-    P_star: float = 2.75e4,
-    C_strength: float = 20.0,
-    alpha_mevp: float = 500.0,
-    beta_mevp: float = 500.0,
+    P_star: float = _DYN_DEFAULTS.P_star,
+    C_strength: float = _DYN_DEFAULTS.C_strength,
+    alpha_mevp: float = _MEVP_ALPHA_DEFAULT,
+    beta_mevp: float = _MEVP_BETA_DEFAULT,
     Delta_min: float = 2.0e-9,
     rho_ice: float = constants.rho_ice,
     rho_air: float = constants.rho_air,
     rho_ocean: float = constants.rho_ocean,
-    C_ai: float = 1.3e-3,
-    C_oi: float = 5.5e-3,
+    C_ai: float = _DYN_DEFAULTS.drag_atm,
+    C_oi: float = _DYN_DEFAULTS.drag_ocean,
     differentiable: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     r"""Run the modified-EVP pseudo-time momentum solver.
@@ -669,7 +690,7 @@ def mevp_solver(
     # Per-area ice mass.  See evp_solver for the bookkeeping note —
     # the bulk-stress functions already return stress per unit
     # ice-covered area, so m = rho_ice · h is the correct scaling.
-    m_ice = rho_ice * jnp.maximum(h_ice, 0.01)
+    m_ice = rho_ice * jnp.maximum(h_ice, _DYN_DEFAULTS.h_ice_min)
 
     # Ice strength is held fixed during the pseudo-time relaxation
     # (depends only on the start-of-step h, A).
@@ -689,7 +710,7 @@ def mevp_solver(
     v_n = v_ice
 
     # Ice mask — only update where ice exists
-    ice_mask = concentration > 0.01
+    ice_mask = concentration > _ICE_PRESENCE_THRESHOLD
 
     def substep_body(i, carry):
         u_p, v_p, s11_p, s22_p, s12_p = carry
