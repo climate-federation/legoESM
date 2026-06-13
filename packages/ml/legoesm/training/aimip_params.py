@@ -452,12 +452,22 @@ class AIMIPClassicalParams(eqx.Module):
           the id-fallback would balloon the global instance cache by trace
           identity.
 
-        So all of them are FROZEN to the RRTMGP defaults here.  The trained
-        surface knobs reach RRTMGP only through the per-call spatial-surface
-        path in ``make_aimip_classical_spectral_physics``: ``spatial_surface``
-        expands the ``rrtmgp_sfc_emissivity`` / ``rrtmgp_sfc_albedo`` leaves
-        (via ``as_dict()`` baselines) into ``(ncol,)`` fields that override the
-        config AFTER instance lookup — outside the scalar cache-key path.  The
+        So all of them are FROZEN to the RRTMGP defaults here, which removes the
+        crash-prone scalar wiring (the gas/aerosol raw leaves and the trained
+        scalar sfc_* that previously fed the cache key).
+
+        Spatial surface training: when ``spatial_surface`` is set,
+        ``make_aimip_classical_spectral_physics`` expands ``rrtmgp_sfc_emissivity``
+        / ``rrtmgp_sfc_albedo`` (via ``as_dict()`` baselines) into ``(ncol,)``
+        arrays and ``_replace``s them into ``RRTMGPConfig.sfc_*``. RRTMGP's
+        ``_hashable`` keys ARRAYS by ``id(...)`` (its documented design — arrays
+        are not value-hashable; see ``rrtmgp.py`` _instance_cache_key), so the
+        array path does NOT crash, but it DOES key the solver-instance cache by
+        per-trace array identity. PRE-EXISTING / out of scope for this
+        param-hygiene change: routing those arrays through the per-call
+        ``sfc_albedo_override`` / ``sfc_emissivity_override`` inputs of
+        ``make_radiation_physics`` (so they never touch the cache key) is a
+        cross-cutting radiation-pipeline change tracked separately. The
         gas/aerosol raw leaves persist only for forward-compatibility until
         RRTMGP consumes them as per-call traced inputs.
         """
