@@ -342,7 +342,8 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
         jax.random.PRNGKey(args.sdm_seed), g, n_sd=args.n_sd,
         number_concentration=args.sdm_cdnc, radius=args.sdm_radius,
         solute_mass=solute_mass, dtype=dtype)
-    q_c0, q_r0 = diagnose_liquid_mixing_ratios(sdm, g, ref.rho_c, sdm_cfg.r_rain)
+    q_c0, q_r0 = diagnose_liquid_mixing_ratios(
+        sdm, g, ref.rho_c, sdm_cfg.r_rain, r_cloud=sdm_cfg.r_cloud)
     st = st._replace(tracers=set_diagnostic_liquid_tracers(st.tracers, q_c0, q_r0))
 
     forcing = make_forcing_fn(g, ref, forc, dtype)
