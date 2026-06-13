@@ -122,6 +122,40 @@ class SpectralLESConfig(NamedTuple):
     #                                 less numerical diffusion ⇒ preserves the
     #                                 cloud-layer moisture van-Leer erodes). Only
     #                                 used when monotone_scalars.
+    w_hyperdiff_coeff: float = 0.0  # OPT-IN horizontal biharmonic hyperdiffusion on
+    #                                 w: dw/dt −= ν₄·(∇²_h)²w = −ν₄·k⁴·ŵ (spectral,
+    #                                 horizontal-only). This core has NO numerical
+    #                                 hyperdiffusion; the sharp latent heating of a
+    #                                 sharp (WENO5) cloud field drives a grid-scale w
+    #                                 mode the near-inviscid momentum dynamics cannot
+    #                                 dissipate → the MOMENTUM-side lever that lets
+    #                                 WENO5 scalars run stable WITHOUT broad scalar
+    #                                 diffusion (which would erase WENO5's sharpness).
+    #                                 Start ≈ 0.25·dx⁴/(π⁴·dt) (≈1e5 m⁴/s, dx=100,
+    #                                 dt=2). Explicit-stability radius λ_max·dt
+    #                                 with λ_max=ν₄·max(k⁴): ≈2.51 (RK3), ≈1.0
+    #                                 (AB2), 2.0 (FE start). 0 ⇒ off.
+    theta_hyperdiff_coeff: float = 0.0  # OPT-IN SCALE-SELECTIVE horizontal k⁴
+    #                                 hyperdiffusion on θ ONLY: dθ/dt −= ν₄θ·k⁴·θ̂.
+    #                                 NOT broad scalar diffusion — k⁴ damps the 2Δ
+    #                                 θ' noise that the sharp (WENO5) latent heating
+    #                                 injects (the actual instability SOURCE: grid-
+    #                                 scale θ' → buoyancy → grid-scale w) while
+    #                                 barely touching the resolved θ and leaving the
+    #                                 moisture q fully WENO5-sharp. Same scaling/
+    #                                 CFL as w_hyperdiff. NOTE (codex 2026-06-13):
+    #                                 the k⁴ uses g.k2 whose Nyquist row/col are
+    #                                 zeroed (derivative consistency) ⇒ this damps
+    #                                 the RETAINED non-Nyquist modes; the exact 2Δ
+    #                                 Nyquist mode is removed by ``spectral_filter``
+    #                                 (the 2/3 cutoff), not here.
+    div_damping_coeff: float = 0.0  # OPT-IN momentum divergence damping
+    #                                 du/dt += α·∇(∇·u) (⇒ ∂δ/∂t += α·∇²δ, α>0 DAMPS
+    #                                 divergence). On this INCOMPRESSIBLE core the
+    #                                 pressure projection already removes ∇·u each
+    #                                 step, so this is LARGELY REDUNDANT (kept for
+    #                                 completeness; prefer w_hyperdiff). Units m²/s;
+    #                                 start ≈ 0.05·dx²/dt. 0 ⇒ off.
     monotone_scalars: bool = False  # use the conservative van-Leer (TVD) flux-form
     #                                 scalar transport for θ + tracers instead of the
     #                                 spectral/centred advection. REQUIRED for moist
@@ -209,6 +243,23 @@ def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64,
         raise ValueError(
             f"scalar_advection must be 'van_leer', 'weno5' or 'weno5_hv', got "
             f"{cfg.scalar_advection!r}.")
+    if (cfg.scalar_advection in ("weno5", "weno5_hv")
+            and jnp.dtype(dtype) == jnp.float32):
+        # WENO-Z float32 hazard (codex 2026-06-13): the smoothness indicators β
+        # are formed from RAW-VALUE squared differences; for fields with a large
+        # mean and small fluctuation (θ≈300 K + O(0.1 K) eddies, the moisture
+        # inversion) float32 cancellation makes β noisy/negative → the run NaNs
+        # at cloud onset. float64 WENO5 is stable (this, NOT a dynamical
+        # instability, was the earlier blow-up). The robust f32 fix is a common-
+        # shift of the stencil before β (reconstruct the original values) in
+        # core.weno — follow-up; for now WARN + recommend float64.
+        import warnings
+        warnings.warn(
+            "WENO5 scalar advection in float32: the WENO-Z smoothness indicators "
+            "suffer raw-value cancellation (large mean θ + small fluctuations) "
+            "and can NaN at cloud onset. Run WENO5 moist cases in float64 "
+            "(omit --f32 / JAX_ENABLE_X64=1), or add a common-shifted-β WENO.",
+            stacklevel=2)
     if layout is not None and cfg.monotone_scalars:
         # The monotone flux operators use a LOCAL jnp.roll in y, which wraps
         # within each MPI slab instead of exchanging halos at the slab boundary
@@ -975,6 +1026,39 @@ def _thomas_complex(a, b, c, d):
 # --------------------------------------------------------------------------- #
 # One AB2 time step                                                            #
 # --------------------------------------------------------------------------- #
+def _horizontal_hyperdiff(f, nu4, g: SpectralLESGrid):
+    """Scale-selective horizontal biharmonic hyperdiffusion tendency
+    ``−ν₄·(∇²_h)²f = −ν₄·k⁴·f̂`` (k⁴=(kx²+ky²)²), applied per level in spectral
+    space. Works for cell-centred (nz) or face (nz+1) fields. k⁴ makes it damp
+    the 2Δ grid mode hard while barely touching the resolved scales — so it does
+    NOT act as broad diffusion (the WENO5 sharpness in the energy-containing
+    scales is preserved)."""
+    k4 = (g.k2 ** 2)[..., None]                            # (nyk, nxr, 1)
+    return _ifft(-nu4 * k4 * _fft(f, g), g)
+
+
+def _w_hyperdiffusion(w, g: SpectralLESGrid):
+    """OPT-IN momentum-side w-hyperdiffusion (see :func:`_horizontal_hyperdiff`).
+    Targets the grid-scale w mode; w on faces, walls re-zeroed by the caller."""
+    return _horizontal_hyperdiff(w, g.cfg.w_hyperdiff_coeff, g)
+
+
+def _divergence_damping(u, v, w, g: SpectralLESGrid):
+    """Momentum divergence damping tendency ``α·∇(∇·u)`` (OPT-IN). ``∇·u`` is
+    formed at centres (spectral horizontal + face→centre vertical); its gradient
+    is added back to u, v (centres) and w (faces). α>0 damps divergence
+    (∂δ/∂t += α∇²δ). On the incompressible projection core ∇·u≈0 already, so this
+    is mostly redundant — see the config note; ``_w_hyperdiffusion`` is the
+    operative momentum lever here."""
+    a = g.cfg.div_damping_coeff
+    dz = g.dz
+    div_c = ddx(u, g) + ddy(v, g) + ddz_f2c(w, dz)        # (ny,nx,nz) at centres
+    dRu = a * ddx(div_c, g)
+    dRv = a * ddy(div_c, g)
+    dRw = a * jnp.pad(ddz_c2f(div_c, dz), ((0, 0), (0, 0), (1, 1)))  # faces, 0 walls
+    return dRu, dRv, dRw
+
+
 def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
         theta=None, sfc_theta_flux=0.0, t_sfc=None,
         tracers=None, sfc_qv_flux=0.0):
@@ -1005,10 +1089,24 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
     Ru = Cu + Fu + f_cor * (v - vg) + force[0]
     Rv = Cv + Fv - f_cor * (u - ug) + force[1]
     Rw = Cw + Fw
+    # OPT-IN momentum-side dissipation (default off): the lever that lets the
+    # less-diffusive WENO5 scalars run stable on this near-inviscid core without
+    # diffusing the scalars themselves.
+    if g.cfg.w_hyperdiff_coeff > 0.0:
+        Rw = Rw + _w_hyperdiffusion(w, g)
+    if g.cfg.div_damping_coeff > 0.0:
+        dRu, dRv, dRw = _divergence_damping(u, v, w, g)
+        Ru = Ru + dRu; Rv = Rv + dRv; Rw = Rw + dRw
     scalar_fn = scalar_rhs_monotone if g.cfg.monotone_scalars else scalar_rhs
     Rtheta = None
     if theta is not None:
         Rtheta = scalar_fn(theta, u, v, w, nu_t, g, sfc_flux)
+        if g.cfg.theta_hyperdiff_coeff > 0.0:
+            # SCALE-SELECTIVE k⁴ damping of the 2Δ θ' noise the sharp latent
+            # heating injects — the instability SOURCE. Not broad diffusion: it
+            # leaves the resolved θ + the WENO5 moisture sharp.
+            Rtheta = Rtheta + _horizontal_hyperdiff(
+                theta, g.cfg.theta_hyperdiff_coeff, g)
         if g.cfg.buoyancy:
             if g.cfg.moist:
                 # moist=True with no tracers would silently fall back to DRY

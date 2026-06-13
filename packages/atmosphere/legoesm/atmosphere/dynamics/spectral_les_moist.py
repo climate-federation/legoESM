@@ -44,6 +44,45 @@ from legoesm.atmosphere.physics.microphysics.integration import (
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 
 
+def moist_diagnostics(u, v, w_centre, theta, tracers, rho_c, dz, dx,
+                      dt, dy=None, qc_thresh=1.0e-5):
+    """Bundle of moist-LES diagnostics for the stabilization test matrix.
+
+    Host (numpy-on-jax) reductions; cheap, call per print. ``w_centre`` is the
+    cell-centred w. Returns a plain dict:
+
+    * ``cloud_frac``  projected cloud cover (any q_c > qc_thresh in a column)
+    * ``lwp``         domain-mean liquid-water path [g/m²]
+    * ``max_w``       max |w| [m/s]            ``w_var`` ⟨w'²⟩ peak [m²/s²]
+    * ``tke``         peak resolved 0.5⟨u'²+v'²+w'²⟩ [m²/s²]
+    * ``max_cfl``     max(|u|,|v|)·dt/dx, |w|·dt/dz
+    * ``total_water`` domain-mean column-integrated q_t = ∫ρ(q_v+q_c+q_r)dz [kg/m²]
+                      — track its drift for the total-water conservation error
+    * ``qv_min/qv_max/qc_max`` scalar bounds [kg/kg] (positivity monitor)
+    """
+    import numpy as np
+    u = np.asarray(u); v = np.asarray(v); wc = np.asarray(w_centre)
+    tr = np.asarray(tracers); rho = np.asarray(rho_c)
+    qv, qc = tr[..., 0], tr[..., 1]
+    qr = tr[..., 2] if tr.shape[-1] > 2 else np.zeros_like(qv)
+    up = u - u.mean((0, 1)); vp = v - v.mean((0, 1)); wp = wc - wc.mean((0, 1))
+    uu = (up * up).mean((0, 1)); vv = (vp * vp).mean((0, 1))
+    ww = (wp * wp).mean((0, 1))
+    cloudy = np.any(qc > qc_thresh, axis=-1)
+    lwp = float((qc * rho[None, None, :]).sum(-1).mean()) * dz * 1.0e3
+    qt_col = ((qv + qc + qr) * rho[None, None, :]).sum(-1) * dz  # (ny,nx) [kg/m²]
+    dy = dx if dy is None else dy
+    max_w = float(np.abs(wc).max())                          # cell-centred w
+    cfl = max(float(np.abs(u).max()) * dt / dx,
+              float(np.abs(v).max()) * dt / dy,
+              max_w * dt / dz)
+    return dict(
+        cloud_frac=float(cloudy.mean()), lwp=lwp, max_w=max_w,
+        w_var=float(ww.max()), tke=float((0.5 * (uu + vv + ww)).max()),
+        max_cfl=cfl, total_water=float(qt_col.mean()),
+        qv_min=float(qv.min()), qv_max=float(qv.max()), qc_max=float(qc.max()))
+
+
 def conserving_positive(tracers, rho_c, dz, n_water=6):
     """MASS-CONSERVING positivity fixer for the water tracers (slots 0..n_water-1).
 
