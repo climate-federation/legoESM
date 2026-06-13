@@ -94,7 +94,19 @@ def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
     for module_path in SPEC_MODULES:
         try:
             mod, spec = _load_spec(module_path)
-        except ModuleNotFoundError:
+        except ModuleNotFoundError as exc:
+            # Only treat this as a not-installed federation component when the
+            # MISSING module is on the path TO the spec module (its own dotted
+            # path or an ancestor package). A ModuleNotFoundError naming some
+            # OTHER module is a broken transitive import inside an installed spec
+            # module (renamed internal dep, packaging error) — that must fail
+            # loudly, not silently drop the scheme's parameters.
+            missing = exc.name or ""
+            on_path = missing and (
+                module_path == missing or module_path.startswith(missing + ".")
+            )
+            if not on_path:
+                raise
             if skipped is not None:
                 skipped.append(module_path)
             continue

@@ -119,6 +119,25 @@ def test_uninstalled_spec_module_is_skipped(monkeypatch) -> None:
     assert {c.scheme_key for c in p.constraints} == {"ocean.sw_penetration"}
 
 
+def test_transitive_import_failure_reraises(monkeypatch) -> None:
+    """A ModuleNotFoundError for a dependency that is NOT on the spec module's
+    own path (a broken/renamed transitive import in an installed module) must
+    fail loudly, not silently drop the scheme's parameters."""
+    import legoesm.training.param_collector as pc
+
+    monkeypatch.setattr(pc, "SPEC_MODULES", ("legoesm.ocean.physics.shortwave_penetration",))
+
+    def boom(name):
+        raise ModuleNotFoundError(
+            "No module named 'legoesm.ocean.renamed_dep'",
+            name="legoesm.ocean.renamed_dep",
+        )
+
+    monkeypatch.setattr(pc.importlib, "import_module", boom)
+    with pytest.raises(ModuleNotFoundError, match="renamed_dep"):
+        pc.build_registry()
+
+
 # --- raw seeding round-trips to the default --------------------------------
 def test_seeded_values_recover_defaults() -> None:
     p = build_trainable_params(tier="extended")
