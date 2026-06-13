@@ -445,6 +445,41 @@ def test_todo_files_exist() -> None:
     assert not missing, f"PARAM_SPEC_TODO names non-existent files: {missing}"
 
 
+# Hard physical/mathematical DOMAINS for params whose formula breaks outside them
+# (the sigmoid bounds must stay inside the domain so training never enters an
+# invalid region — ``lo < default < hi`` alone does not guarantee this). Keyed
+# (Class, field) -> (domain_lo, domain_hi); None = unbounded on that side.
+# Extend when a new param has a formula-imposed domain (codex land round).
+_PARAM_DOMAINS: dict[tuple[str, str], tuple[float | None, float | None]] = {
+    # van Genuchten m = 1 - 1/n requires n > 1 (else m <= 0 -> NaN in Se**(-1/m)).
+    ("SoilHydraulicsConfig", "n_vg"): (1.0, None),
+}
+
+
+def test_bounds_respect_hard_param_domains() -> None:
+    errors: list[str] = []
+    for rel in _SCOPE_MODULES:
+        spec = extract_param_spec((ra.repo_root() / rel).read_text())
+        if not isinstance(spec, dict):
+            continue
+        for cls_name, entry in spec.items():
+            if not isinstance(entry, dict):
+                continue
+            for pname, p in entry.get("params", {}).items():
+                dom = _PARAM_DOMAINS.get((cls_name, pname))
+                if dom is None or not isinstance(p, dict):
+                    continue
+                b = p.get("bounds")
+                if not (isinstance(b, tuple) and len(b) == 2 and all(isinstance(x, (int, float)) for x in b)):
+                    continue
+                lo_dom, hi_dom = dom
+                if lo_dom is not None and b[0] <= lo_dom:
+                    errors.append(f"{rel}:{cls_name}.{pname} bounds lo {b[0]} violates domain > {lo_dom}")
+                if hi_dom is not None and b[1] >= hi_dom:
+                    errors.append(f"{rel}:{cls_name}.{pname} bounds hi {b[1]} violates domain < {hi_dom}")
+    assert not errors, "spec bounds enter an invalid formula domain:\n  " + "\n  ".join(errors)
+
+
 def _specced_fields(spec) -> dict[str, set[str]]:
     """``{ClassName: {classified_field, ...}}`` from a (possibly partial) spec."""
     out: dict[str, set[str]] = {}

@@ -80,11 +80,11 @@ __param_spec__ = {
             "Ko25": "kinetic constant at 25C (Bernacchi 2001 fixed) [umol/mol]",
             "O2_conc": "atmospheric O2 (environmental constant) [umol/mol]",
             "S_J": "Arrhenius activation/entropy energy (Bernacchi 2001 fixed) [J/mol]",
-            "beta_soil_min": "numerics: soil-water stress floor",
             "co_limitation_eps": "numerics: smooth-min co-limitation width",
-            "f_VPD_min": "numerics: VPD stress floor",
         },
         "params": {
+            "beta_soil_min": {"units": "1", "bounds": (0.001, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CLM soil-water stress floor", "shape": None},
+            "f_VPD_min": {"units": "1", "bounds": (0.001, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "CLM VPD stress floor", "shape": None},
             "J_max25": {"units": "1", "bounds": (39.6, 360.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
             "K_PAR": {"units": "1", "bounds": (66.0, 600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
             "Rd25": {"units": "1", "bounds": (0.495, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "photosynthesis", "reference": "Farquhar 1980 / Medlyn 2011 / Bernacchi 2001", "shape": None},
