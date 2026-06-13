@@ -385,6 +385,7 @@ def evp_solver(
     rho_ocean: float = constants.rho_ocean,
     C_ai: float = _DYN_DEFAULTS.drag_atm,
     C_oi: float = _DYN_DEFAULTS.drag_ocean,
+    h_ice_min: float = _DYN_DEFAULTS.h_ice_min,
     differentiable: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run the EVP subcycled momentum solver.
@@ -451,7 +452,7 @@ def evp_solver(
     # iteration claimed the original ``rho_ice · max(h, 0.01)`` was
     # missing concentration weighting; Codex GPT-5 review caught the
     # bookkeeping mistake, and the original form is correct.
-    m_ice = rho_ice * jnp.maximum(h_ice, _DYN_DEFAULTS.h_ice_min)
+    m_ice = rho_ice * jnp.maximum(h_ice, h_ice_min)
 
     # Ice strength (constant during subcycling)
     P = ice_strength(h_ice, concentration, P_star, C_strength)
@@ -559,6 +560,7 @@ def mevp_solver(
     rho_ocean: float = constants.rho_ocean,
     C_ai: float = _DYN_DEFAULTS.drag_atm,
     C_oi: float = _DYN_DEFAULTS.drag_ocean,
+    h_ice_min: float = _DYN_DEFAULTS.h_ice_min,
     differentiable: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     r"""Run the modified-EVP pseudo-time momentum solver.
@@ -690,7 +692,7 @@ def mevp_solver(
     # Per-area ice mass.  See evp_solver for the bookkeeping note —
     # the bulk-stress functions already return stress per unit
     # ice-covered area, so m = rho_ice · h is the correct scaling.
-    m_ice = rho_ice * jnp.maximum(h_ice, _DYN_DEFAULTS.h_ice_min)
+    m_ice = rho_ice * jnp.maximum(h_ice, h_ice_min)
 
     # Ice strength is held fixed during the pseudo-time relaxation
     # (depends only on the start-of-step h, A).

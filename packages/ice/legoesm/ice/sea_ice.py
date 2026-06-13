@@ -644,6 +644,7 @@ def _step_dynamic(
             rho_ocean=config.rho_ocean_ref,
             C_ai=config.drag_atm,
             C_oi=config.drag_ocean,
+            h_ice_min=config.h_ice_min,
             differentiable=config.differentiable_dynamics,
         )
     elif config.dynamics == "mevp" and grid is not None:
@@ -665,6 +666,7 @@ def _step_dynamic(
             rho_ocean=config.rho_ocean_ref,
             C_ai=config.drag_atm,
             C_oi=config.drag_ocean,
+            h_ice_min=config.h_ice_min,
             differentiable=config.differentiable_dynamics,
         )
     elif config.dynamics == "free_drift":
