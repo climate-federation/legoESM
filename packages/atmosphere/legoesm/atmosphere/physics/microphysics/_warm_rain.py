@@ -88,6 +88,33 @@ def donor_clamp_scale(q_avail, sink_total, dt, divisor_floor=1.0e-15):
     return jnp.minimum(1.0, q_avail / sink_dt_safe)
 
 
+# --- air transport properties (SAM M2005 module_mp_graupel.f90; fixed) -------
+# Hall & Pruppacher (1976) water-vapour diffusivity in air, Sutherland dynamic
+# viscosity, and the derived Schmidt number / air thermal conductivity — shared
+# by every ventilation-limited ice process (snow + graupel deposition / melting
+# and rain evaporation). Published transport-property constants, not tunable.
+_DV_PREFACTOR = 8.794e-5          # DV = _DV_PREFACTOR * T**_DV_T_EXPONENT / p
+_DV_T_EXPONENT = 1.81
+_MU_PREFACTOR = 1.496e-6          # mu = _MU_PREFACTOR * T**_MU_T_EXPONENT / (T + _MU_SUTHERLAND_T)
+_MU_T_EXPONENT = 1.5
+_MU_SUTHERLAND_T = 120.0          # Sutherland temperature offset [K]
+_AIR_CONDUCTIVITY_MU_FACTOR = 1.414e3   # air thermal conductivity KAP = factor * mu [-]
+
+
+def _air_transport_props(T, p, rho):
+    """Shared ventilation transport coefficients ``(DV, mu, SC)``.
+
+    DV = vapour diffusivity [m^2/s], mu = Sutherland dynamic viscosity [kg/m/s],
+    SC = mu/(rho*DV) the Schmidt number. Factored out of the five SAM ice
+    processes that recompute the identical block (snow/graupel deposition +
+    melting, rain evaporation); callers needing the air thermal conductivity use
+    ``_AIR_CONDUCTIVITY_MU_FACTOR * mu``."""
+    dv = _DV_PREFACTOR * safe_pow(T, _DV_T_EXPONENT) / jnp.clip(p, 1.0)
+    mu = _MU_PREFACTOR * safe_pow(T, _MU_T_EXPONENT) / (T + _MU_SUTHERLAND_T)
+    sc = mu / (rho * dv)
+    return dv, mu, sc
+
+
 def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0, q_c=None):
     """Compute smooth saturation adjustment (condensation tendency).
 
@@ -283,6 +310,16 @@ _KK2000_CONS29 = (
     (4.0 / 3.0) * jnp.pi * constants.rho_water * _KK2000_DROP_RADIUS ** 3
 )
 
+# KK2000 warm-rain rate constants (SAM M2005 module_mp_graupel.f90:1813 / :1952):
+#   PRC = 1350·q_c^2.47·N_c[#/cm^3]^-1.79   (autoconversion, kg/kg/s)
+#   PRA = 67·(q_c·q_r)^1.15                  (accretion, kg/kg/s)
+# Published fixed coefficients (Khairoutdinov & Kogan 2000), not tunable here.
+_KK2000_AUTOCONV_PREFACTOR = 1350.0
+_KK2000_AUTOCONV_QC_EXPONENT = 2.47
+_KK2000_AUTOCONV_NC_EXPONENT = -1.79
+_KK2000_ACCRETION_PREFACTOR = 67.0
+_KK2000_ACCRETION_EXPONENT = 1.15
+
 
 def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
     """Khairoutdinov–Kogan (2000) warm-rain autoconversion — the SAM
@@ -319,7 +356,11 @@ def autoconversion_kk2000(q_c, N_c_eff, rho, dt):
     """
     q_c_pos = jnp.clip(q_c, 0.0)
     n_c_cm3 = jnp.clip(N_c_eff, 1.0) / 1.0e6        # #/cm³
-    prc = 1350.0 * safe_pow(q_c_pos, 2.47) * safe_pow(n_c_cm3, -1.79)
+    prc = (
+        _KK2000_AUTOCONV_PREFACTOR
+        * safe_pow(q_c_pos, _KK2000_AUTOCONV_QC_EXPONENT)
+        * safe_pow(n_c_cm3, _KK2000_AUTOCONV_NC_EXPONENT)
+    )
     x_c = q_c_pos * rho / jnp.clip(N_c_eff, 1.0)
     # SAM's two-level cap (module_mp_graupel.f90:1823-1828), in per-volume:
     #   NPRC  = PRC·N_c/q_c   (cloud-number autoconv sink), ≤ N_c/dt
@@ -344,7 +385,7 @@ def accretion_kk2000(q_c, q_r):
     A mixing-ratio rate (no ``rho`` factor, unlike :func:`accretion`).
     """
     dum = jnp.clip(q_c, 0.0) * jnp.clip(q_r, 0.0)
-    return 67.0 * safe_pow(dum, 1.15)
+    return _KK2000_ACCRETION_PREFACTOR * safe_pow(dum, _KK2000_ACCRETION_EXPONENT)
 
 
 def self_collection_breakup(N_r, q_r, rho, k_sc, breakup_sharpness, D_eq):
@@ -517,9 +558,7 @@ def snow_deposition_m2005(q_v, q_s, N_s, q_sat_i, T, p, rho, config, dt=None):
         / jnp.maximum(qs_pos, 1.0e-20), 1.0 / 3.0)
     lams = jnp.clip(lams, config.lams_min, config.lams_max)
     n0s = ns_pos * lams
-    dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p, 1.0)
-    mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0)        # Sutherland dyn. visc.
-    sc = mu / (rho * dv)
+    dv, mu, sc = _air_transport_props(T, p, rho)
     asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
     cons35 = 2.5 + config.fall_b_s / 2.0
     cons10 = math.gamma(cons35)
@@ -604,10 +643,8 @@ def snow_melting_psmlt(q_s, N_s, T, p, rho, config, dt=None):
         / jnp.maximum(qs_pos, 1.0e-20), 1.0 / 3.0)
     lams = jnp.clip(lams, config.lams_min, config.lams_max)
     n0s = ns_pos * lams
-    dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p, 1.0)
-    mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0)
-    kap = 1.414e3 * mu                                   # air thermal conductivity
-    sc = mu / (rho * dv)
+    dv, mu, sc = _air_transport_props(T, p, rho)
+    kap = _AIR_CONDUCTIVITY_MU_FACTOR * mu               # air thermal conductivity
     asn = config.fall_a_s * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
     cons35 = 2.5 + config.fall_b_s / 2.0
     cons10 = math.gamma(cons35)
@@ -731,10 +768,8 @@ def graupel_melting_pgmlt(q_g, T, p, rho, config, dt=None, N_g=None):
     """
     qg_pos = jnp.clip(q_g, 0.0)
     lamg, n0g_m = graupel_lamg_n0g(q_g, rho, config, N_g=N_g)
-    dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p, 1.0)
-    mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0)
-    kap = 1.414e3 * mu
-    sc = mu / (rho * dv)
+    dv, mu, sc = _air_transport_props(T, p, rho)
+    kap = _AIR_CONDUCTIVITY_MU_FACTOR * mu
     agn = config.fall_a_g * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
     cons36 = 2.5 + config.fall_b_g / 2.0
     cons11 = math.gamma(cons36)
@@ -800,9 +835,7 @@ def graupel_deposition_prdg(q_v, q_g, q_sat_i, T, p, rho, config, dt=None,
     """
     qg_pos = jnp.clip(q_g, 0.0)
     lamg, n0g_m = graupel_lamg_n0g(q_g, rho, config, N_g=N_g)
-    dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p, 1.0)
-    mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0)        # Sutherland dyn. visc.
-    sc = mu / (rho * dv)
+    dv, mu, sc = _air_transport_props(T, p, rho)
     agn = config.fall_a_g * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
     cons36 = 2.5 + config.fall_b_g / 2.0
     cons11 = math.gamma(cons36)
@@ -1036,9 +1069,7 @@ def rain_evaporation_m2005(q_v, q_r, N_r, q_sat, T, p, rho, config, dt=None):
         / jnp.maximum(rho * qr_pos, 1.0e-20), 1.0 / 3.0)
     lamr = jnp.clip(lamr, config.lamr_min, config.lamr_max)
     n0r = nr_pos * lamr
-    dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p, 1.0)
-    mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0)        # Sutherland dyn. visc.
-    sc = mu / (rho * dv)
+    dv, mu, sc = _air_transport_props(T, p, rho)
     arn = config.fall_a_r * safe_pow(config.rho_su / jnp.clip(rho, 0.1), 0.54)
     cons34 = 2.5 + config.fall_b_r / 2.0
     cons9 = math.gamma(cons34)

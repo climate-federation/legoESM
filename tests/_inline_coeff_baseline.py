@@ -1,31 +1,17 @@
 """Seed baseline for the inline-physics-coefficient ratchet.
 
-``COEFF_BUDGET`` is the per-file allowance of *sanctioned* inline empirical-float
+``COEFF_BUDGET`` is the per-file allowance of sanctioned inline empirical-float
 (and large-int) sites measured from the tree when the gate
 (``tests/test_no_inline_physics_coeffs``) was introduced. Format:
-``{repo_rel_path: {normalized_source_line: count}}``.
-
-Lifecycle (enforced by the gate):
-  * Every entry is EXACT (ratchet-down): migrating a file's coefficients into a
-    ``*Config`` field / module-level provenance block / ``# coeff-ok: <reason>``
-    MUST delete that file's entry in the same commit — a leftover allowance with
-    no matching site goes red.
-  * A file absent from ``COEFF_BUDGET`` gets a zero budget, so every NEW physics
-    file is born clean.
-  * ``COEFF_BUDGET`` may only SHRINK: ``set(COEFF_BUDGET) <= _SEED_FILES`` is
-    asserted, so a new file cannot be granted an allowance — growth is a loud,
-    deliberate edit to ``_SEED_FILES`` (reviewed like a ``CONTRACT_TODO`` growth).
-
-Kept in its own module (not the test file) so batch-migration PRs churn only this
-file and produce disjoint diff hunks per component. Seeded by
-``scripts/tmp/_seed_coeff_baseline.py`` (re-run to regenerate after a sanctioned
-change).
+``{repo_rel_path: {normalized_source_line: count}}``. EXACT / shrink-only: a
+migrated file must drop (or reduce) its entry in the same commit; a file absent
+here gets a zero budget (new files born clean); ``set(COEFF_BUDGET) <=
+_SEED_FILES`` is asserted so a new file can never be budgeted. Re-seed with
+``scripts/tmp/_seed_coeff_baseline.py``.
 """
 
 from __future__ import annotations
 
-# Seeded 2026-06-12 from the measured tree (float + large-int coefficients).
-# Sorted by (file, fingerprint).
 
 COEFF_BUDGET: dict[str, dict[str, int]] = {
     'packages/atmosphere/legoesm/atmosphere/physics/_shared.py': {
@@ -178,16 +164,9 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
         'def autoconversion_sb(q_c, N_c_eff, rho, k_au, x_star, sharpness=50.0, gamma_norm=1.0):': 1,
         'def saturation_adjustment(T, q_v, p_full, dt, sharpness=50.0, q_c=None):': 1,
         'dum = safe_pow(config.rho_su / rho_eff, 0.54)': 1,
-        'dv = 8.794e-5 * safe_pow(T, 1.81) / jnp.clip(p, 1.0)': 10,
-        'kap = 1.414e3 * mu': 1,
-        'kap = 1.414e3 * mu # air thermal conductivity': 1,
         'mnuccr = (20.0 * jnp.pi ** 2 * constants.rho_water * bimm': 1,
-        'mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0)': 6,
-        'mu = 1.496e-6 * safe_pow(T, 1.5) / (T + 120.0) # Sutherland dyn. visc.': 9,
         'n0g_m = config.n0_graupel / jnp.clip(rho, 0.1)': 1,
-        'prc = 1350.0 * safe_pow(q_c_pos, 2.47) * safe_pow(n_c_cm3, -1.79)': 3,
         'rate = evap_coeff * subsaturation * safe_pow(q_r_pos, 0.525)': 1,
-        'return 67.0 * safe_pow(dum, 1.15)': 2,
         'rho_eff = jnp.clip(rho, 0.1)': 2,
         'umg = jnp.minimum(umg, 20.0 * dum)': 1,
         'umr = jnp.minimum(umr, 9.1 * dum)': 1,
@@ -561,8 +540,7 @@ COEFF_BUDGET: dict[str, dict[str, int]] = {
     },
 }
 
-# The exact set of files that carried a budget at seed time. ``COEFF_BUDGET`` may
-# only ever be a subset of this — a new file must be clean, never budgeted.
+
 _SEED_FILES: frozenset[str] = frozenset({
     'packages/atmosphere/legoesm/atmosphere/physics/_shared.py',
     'packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py',
