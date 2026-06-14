@@ -168,6 +168,12 @@ class OutputConfig(NamedTuple):
     checkpoint_format: str = "npz"  # npz, zarr
     diagnostics_perf_mode: str = "auto"  # auto, always, never
     cmip_resolution_deg: float = 5.0  # lat-lon grid spacing for CMIP output [degrees]
+    # Wallclock-aware mid-job checkpointing for long (century-scale) HPC chains.
+    # ``max_wallclock_seconds=0`` disables it (default); set it to the SLURM
+    # ``--time`` budget so the run checkpoints and exits cleanly with
+    # ``restart_buffer_seconds`` to spare, letting a dependency chain resume.
+    max_wallclock_seconds: float = 0.0
+    restart_buffer_seconds: float = 600.0
 
 
 class ExperimentConfig(NamedTuple):
