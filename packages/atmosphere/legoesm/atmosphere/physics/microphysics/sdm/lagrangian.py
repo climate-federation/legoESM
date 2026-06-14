@@ -170,7 +170,10 @@ def initialize_lagrangian_sdm(
 
     ``number_concentration`` is interpreted as real droplets per m³. If it is a
     vertical profile ``(nz,)``, ``radius`` and ``solute_mass`` may also be
-    scalars or ``(nz,)`` profiles sampled at the droplet's initial cell.
+    scalars or ``(nz,)`` profiles sampled at the droplet's initial cell. The
+    latter two also accept per-super-droplet arrays ``(n_sd,)`` so callers can
+    provide an aerosol size/solute spectrum while reusing this routine's
+    conservative spatial placement and multiplicity normalization.
 
     ``spatial_sampling="uniform"`` keeps the original whole-volume Monte-Carlo
     placement: each super-droplet receives the local concentration times the
@@ -225,19 +228,23 @@ def initialize_lagrangian_sdm(
             "(expected 'uniform' or 'cell_stratified')"
         )
 
-    def sample_profile(value):
+    def sample_profile(value, name: str, *, allow_per_particle: bool = False):
         arr = jnp.asarray(value, dtype=dtype)
         if arr.ndim == 0:
             return jnp.full((n_sd,), arr, dtype=dtype)
+        if allow_per_particle and arr.shape == (n_sd,):
+            return arr
         if arr.shape != (grid.cfg.nz,):
+            extra = f", or per-super-droplet shape ({n_sd},)" if allow_per_particle else ""
             raise ValueError(
-                f"profile inputs must be scalar or shape ({grid.cfg.nz},), "
+                f"{name} must be scalar, shape ({grid.cfg.nz},){extra}, "
                 f"got {arr.shape}")
         return arr[iz]
 
-    n_local = sample_profile(number_concentration)
-    radius_local = sample_profile(radius)
-    solute_local = sample_profile(solute_mass)
+    n_local = sample_profile(number_concentration, "number_concentration")
+    radius_local = sample_profile(radius, "radius", allow_per_particle=True)
+    solute_local = sample_profile(
+        solute_mass, "solute_mass", allow_per_particle=True)
     if slot_count is None:
         divisor = jnp.asarray(n_sd, dtype)
     else:

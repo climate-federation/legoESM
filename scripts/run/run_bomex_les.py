@@ -62,6 +62,7 @@ from legoesm.atmosphere.physics.microphysics.sdm import (  # noqa: E402
     SDMConfig,
     diagnose_liquid_mixing_ratios,
     initialize_lagrangian_sdm,
+    sample_lognormal_radius,
     set_diagnostic_liquid_tracers,
     total_water_mass,
 )
@@ -86,6 +87,10 @@ _FCOR = 0.376e-4                       # CASES/BOMEX/prm fcor [1/s]
 _DEFAULT_LAGRANGIAN_SD_PER_CELL = 64
 _DEFAULT_LAGRANGIAN_INIT_SAMPLING = "cell_stratified"
 _DEFAULT_LAGRANGIAN_DIAGNOSTIC_ASSIGNMENT = "cic"
+_DEFAULT_LAGRANGIAN_AEROSOL_SPECTRUM = "lognormal"
+_DEFAULT_LAGRANGIAN_AEROSOL_GEOM_STD = 2.0
+_DEFAULT_LAGRANGIAN_DRY_RADIUS_MIN = 1.0e-8
+_DEFAULT_LAGRANGIAN_DRY_RADIUS_MAX = 5.0e-7
 
 
 def parse_args():
@@ -133,6 +138,27 @@ def parse_args():
                    choices=["nearest", "cic"],
                    default=_DEFAULT_LAGRANGIAN_DIAGNOSTIC_ASSIGNMENT,
                    help="particle-to-mesh assignment for diagnostic q_c/q_r.")
+    p.add_argument("--sdm-aerosol-spectrum",
+                   choices=["lognormal", "monodisperse"],
+                   default=_DEFAULT_LAGRANGIAN_AEROSOL_SPECTRUM,
+                   help="initial Lagrangian SDM aerosol mode. 'lognormal' "
+                        "samples dry CCN radii and starts near-dry; "
+                        "'monodisperse' preserves the legacy single wet radius.")
+    p.add_argument("--sdm-aerosol-geom-std", type=float,
+                   default=_DEFAULT_LAGRANGIAN_AEROSOL_GEOM_STD,
+                   help="geometric standard deviation of the lognormal dry "
+                        "aerosol mode for --sdm-aerosol-spectrum=lognormal.")
+    p.add_argument("--sdm-dry-radius-min", type=float,
+                   default=_DEFAULT_LAGRANGIAN_DRY_RADIUS_MIN,
+                   help="lower truncation radius [m] for the lognormal dry "
+                        "aerosol sampler.")
+    p.add_argument("--sdm-dry-radius-max", type=float,
+                   default=_DEFAULT_LAGRANGIAN_DRY_RADIUS_MAX,
+                   help="upper truncation radius [m] for the lognormal dry "
+                        "aerosol sampler.")
+    p.add_argument("--sdm-wet-radius-factor", type=float, default=1.0,
+                   help="initial wet water-equivalent radius divided by dry "
+                        "radius for lognormal aerosol seeding.")
     p.add_argument("--collision-mode", choices=["stochastic", "deterministic"],
                    default="stochastic",
                    help="Lagrangian SDM collision mode; default preserves the "
@@ -147,9 +173,11 @@ def parse_args():
     p.add_argument("--sdm-cdnc", type=float, default=1.0e8,
                    help="initial Lagrangian SDM number concentration [m^-3].")
     p.add_argument("--sdm-radius", type=float, default=1.0e-6,
-                   help="initial wet super-droplet radius [m].")
+                   help="legacy monodisperse initial wet super-droplet radius "
+                        "[m], used when --sdm-aerosol-spectrum=monodisperse.")
     p.add_argument("--sdm-dry-radius", type=float, default=5.0e-8,
-                   help="dry aerosol radius used to seed solute mass [m].")
+                   help="dry aerosol median radius [m] for lognormal seeding, "
+                        "or dry radius used to seed monodisperse solute mass.")
     p.add_argument("--sdm-solute-density", type=float, default=1770.0,
                    help="dry aerosol material density [kg/m^3].")
     p.add_argument("--sdm-seed", type=int, default=0,
@@ -351,8 +379,30 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
                      dt_cap=args.dt_max) if args.adaptive_dt
            else float(args.dt))
     dry_r = max(float(args.sdm_dry_radius), 0.0)
-    solute_mass = (
-        4.0 / 3.0 * np.pi * float(args.sdm_solute_density) * dry_r ** 3)
+    if args.sdm_aerosol_spectrum == "lognormal":
+        if args.sdm_wet_radius_factor < 1.0:
+            raise ValueError("--sdm-wet-radius-factor must be >= 1")
+        if args.sdm_dry_radius_min <= 0.0:
+            raise ValueError("--sdm-dry-radius-min must be > 0")
+        if args.sdm_dry_radius_max <= args.sdm_dry_radius_min:
+            raise ValueError("--sdm-dry-radius-max must be > --sdm-dry-radius-min")
+        k_init, k_aero = jax.random.split(jax.random.PRNGKey(args.sdm_seed))
+        dry_radii = sample_lognormal_radius(
+            k_aero, n_sd, dry_r, float(args.sdm_aerosol_geom_std),
+            r_min=float(args.sdm_dry_radius_min),
+            r_max=float(args.sdm_dry_radius_max),
+            dtype=dtype)
+        solute_mass = (
+            4.0 / 3.0 * jnp.pi * float(args.sdm_solute_density) * dry_radii ** 3)
+        initial_radius = float(args.sdm_wet_radius_factor) * dry_radii
+    elif args.sdm_aerosol_spectrum == "monodisperse":
+        k_init = jax.random.PRNGKey(args.sdm_seed)
+        solute_mass = (
+            4.0 / 3.0 * np.pi * float(args.sdm_solute_density) * dry_r ** 3)
+        initial_radius = args.sdm_radius
+    else:  # pragma: no cover - argparse choices guard this path.
+        raise ValueError(
+            f"unknown --sdm-aerosol-spectrum {args.sdm_aerosol_spectrum!r}")
     sdm_cfg = SDMConfig(
         n_substeps_condensation=max(1, int(args.micro_substeps)),
         # The Köhler diffusional-growth ODE is STIFF at LES dt; explicit rk4 with
@@ -366,8 +416,8 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
         lagrangian_diagnostic_assignment=args.sdm_diagnostic_assignment,
     )
     sdm = initialize_lagrangian_sdm(
-        jax.random.PRNGKey(args.sdm_seed), g, n_sd=n_sd,
-        number_concentration=args.sdm_cdnc, radius=args.sdm_radius,
+        k_init, g, n_sd=n_sd,
+        number_concentration=args.sdm_cdnc, radius=initial_radius,
         solute_mass=solute_mass, dtype=dtype,
         spatial_sampling=args.sdm_init_sampling)
     q_c0, q_r0 = diagnose_liquid_mixing_ratios(
@@ -415,7 +465,10 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
           f"dtype={dtype.__name__}")
     print(f"  sfc: SHF={forc['sfc']['shf']:.1f} LHF={forc['sfc']['lhf']:.1f} "
           f"W/m²; CDNC={args.sdm_cdnc:.2e} m^-3, "
-          f"r_wet={args.sdm_radius:.2e} m, r_dry={dry_r:.2e} m; "
+          f"aerosol={args.sdm_aerosol_spectrum}, "
+          f"r_dry={dry_r:.2e} m, "
+          f"gstd={args.sdm_aerosol_geom_std:.2f}, "
+          f"wet_factor={args.sdm_wet_radius_factor:.2f}; "
           f"{n_steps} steps")
 
     rec = args.record_frames > 0
@@ -487,6 +540,10 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
         mean_particle_displacement=mean_disp,
         n_sd=n_sd,
         sd_per_cell=n_sd / n_cells,
+        aerosol_spectrum=args.sdm_aerosol_spectrum,
+        dry_radius_median=dry_r,
+        aerosol_geom_std=float(args.sdm_aerosol_geom_std),
+        wet_radius_factor=float(args.sdm_wet_radius_factor),
         n_active=float(jnp.sum(sdm.droplets.active)))
     print(f"  FINAL: cloud cover={d['cloud_cover']:.3f}, "
           f"LWP={d['lwp']:.2f} g/m², "

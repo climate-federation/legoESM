@@ -15,6 +15,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
+from legoesm.thermo import saturation_vapor_pressure
 from legoesm.atmosphere.dynamics import spectral_les_plane as sl
 from legoesm.atmosphere.dynamics.spectral_les_moist import (
     make_lagrangian_sdm_les_step,
@@ -32,6 +33,7 @@ from legoesm.atmosphere.physics.microphysics.sdm import (
     make_lagrangian_sdm_state,
     particle_cell_indices,
     represented_water_mass,
+    sample_lognormal_radius,
     total_water_mass,
 )
 
@@ -346,6 +348,38 @@ def test_cell_stratified_initializer_gives_per_cell_floor_and_exact_number():
     assert int(jnp.min(iy)) >= 0 and int(jnp.max(iy)) < g.cfg.ny
 
 
+def test_cell_stratified_initializer_accepts_per_particle_aerosol_spectrum():
+    g = _grid(nx=4, ny=2, nz=2, L=8.0)
+    n_per_cell = 4
+    n_cells = g.cfg.ny * g.cfg.nx * g.cfg.nz
+    n_sd = n_per_cell * n_cells
+    radius = jnp.linspace(2.0e-8, 2.0e-7, n_sd, dtype=jnp.float64)
+    solute = jnp.linspace(1.0e-20, 1.0e-18, n_sd, dtype=jnp.float64)
+
+    state = initialize_lagrangian_sdm(
+        jax.random.PRNGKey(24),
+        g,
+        n_sd=n_sd,
+        number_concentration=1.0e6,
+        radius=radius,
+        solute_mass=solute,
+        dtype=jnp.float64,
+        spatial_sampling="cell_stratified",
+    )
+
+    counts = _cell_sums(state, g, state.droplets.active)
+    represented_number = _cell_sums(
+        state, g, state.droplets.active * state.droplets.multiplicity)
+    expected_number = np.full(n_cells, 1.0e6 * g.dx * g.dy * g.dz)
+
+    np.testing.assert_array_equal(np.asarray(counts), np.full(n_cells, n_per_cell))
+    np.testing.assert_allclose(np.asarray(state.droplets.radius), np.asarray(radius))
+    np.testing.assert_allclose(
+        np.asarray(state.droplets.solute_mass), np.asarray(solute))
+    np.testing.assert_allclose(
+        np.asarray(represented_number), expected_number, rtol=1e-12)
+
+
 def test_cic_diagnostic_conserves_and_spreads_single_particle():
     g = _grid(nx=2, ny=2, nz=2, L=2.0)
     state = _lag_state(
@@ -370,6 +404,55 @@ def test_cic_diagnostic_conserves_and_spreads_single_particle():
     assert int(jnp.count_nonzero(qc_cic)) == 8
     assert float(jnp.max(qc_cic)) == pytest.approx(
         float(jnp.max(qc_nearest)) / 8.0, rel=1e-12)
+
+
+def test_supersaturated_lagrangian_sdm_aerosol_forms_cloud_and_conserves_water():
+    g = _grid(nx=2, ny=2, nz=2, L=200.0, n_tracers=3)
+    ref = _ref(g, theta0=290.0, qv0=0.0)
+    n_sd = 64 * g.cfg.nx * g.cfg.ny * g.cfg.nz
+    r_dry = sample_lognormal_radius(
+        jax.random.PRNGKey(5), n_sd, 5.0e-8, 2.0,
+        r_min=1.0e-8, r_max=5.0e-7, dtype=jnp.float64)
+    solute_mass = 4.0 / 3.0 * jnp.pi * 1770.0 * r_dry**3
+    sdm = initialize_lagrangian_sdm(
+        jax.random.PRNGKey(6),
+        g,
+        n_sd=n_sd,
+        number_concentration=1.0e8,
+        radius=r_dry,
+        solute_mass=solute_mass,
+        dtype=jnp.float64,
+        spatial_sampling="cell_stratified",
+    )
+
+    T0 = jnp.full((g.cfg.nz,), 290.0, dtype=jnp.float64)
+    e = 1.02 * saturation_vapor_pressure(T0)
+    qv = constants.epsilon * e / (ref.p_c - e)
+    theta = jnp.broadcast_to((T0 / ref.exner_c)[None, None, :],
+                             (g.cfg.ny, g.cfg.nx, g.cfg.nz))
+    tracers = jnp.zeros((g.cfg.ny, g.cfg.nx, g.cfg.nz, 3), dtype=jnp.float64)
+    tracers = tracers.at[..., 0].set(qv[None, None, :])
+    cfg = SDMConfig(condensation_integrator="be",
+                    lagrangian_diagnostic_assignment="cic")
+    water0 = total_water_mass(sdm, tracers, g, ref.rho_c)
+
+    for _ in range(20):
+        sdm, theta, tracers, _ = condensation_coupling_step(
+            sdm, theta, tracers, g, ref.exner_c, ref.p_c, ref.rho_c,
+            2.0, cfg)
+
+    qc, qr = diagnose_liquid_mixing_ratios(
+        sdm, g, ref.rho_c, cfg.r_rain, cfg.r_cloud,
+        assignment=cfg.lagrangian_diagnostic_assignment)
+    water1 = total_water_mass(sdm, tracers, g, ref.rho_c)
+    lwp = jnp.mean(jnp.sum(qc * ref.rho_c[None, None, :], axis=-1) * g.dz)
+    cloud_cover = jnp.mean(jnp.any(qc > 1.0e-5, axis=-1))
+
+    assert float(water1) == pytest.approx(float(water0), rel=1e-12, abs=1e-8)
+    assert float(lwp * 1.0e3) == pytest.approx(20.0, rel=0.25)
+    assert float(cloud_cover) == pytest.approx(1.0)
+    assert float(jnp.max(qr)) == pytest.approx(0.0)
+    assert float(jnp.mean(sdm.droplets.radius >= cfg.r_cloud)) > 0.95
 
 
 def test_stratified_cic_cloud_patch_is_compact_and_not_speckled():
