@@ -365,10 +365,22 @@ def fv3_hydrostatic_tendencies(
         # (the cube-edge halo error propagates through the dynamics).  This
         # broke the 16 ``test_cubed_sphere_spmd_step`` parity cases.
         _pe_offs_zeta = None if _pe_dg is not None else grid.halo_interp_offsets
-        _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
-            zeta, B, inv_T, mesh=_spmd_mesh, duogrid=_pe_dg,
+        # iter-58/60: ln_ps_3d (+ hybrid_factor when hybrid) RIDE this stage
+        # pack so the sec-8 PGF gradient + sec-8 hybrid-coord correction reuse
+        # the merged halo instead of taking 1-2 SEPARATE collectives/substep
+        # — reviving the iter-59/60 _lnps_pad/_hf_pad reuse branches below, which
+        # were dead because the slots were never filled (the comment at the
+        # ln_ps_3d definition said it "rides the pack" but it did not).  Mirrors
+        # the NH sibling compressible_euler_cdgrid.py:320 {K, pi_prime} pack.
+        _pe_pack = [zeta, B, inv_T, ln_ps_3d]
+        if _hybrid:
+            _pe_pack.append(_hybrid_factor)
+        _pe_pieces = packed_pad_halo_4d(
+            *_pe_pack, mesh=_spmd_mesh, duogrid=_pe_dg,
             interp_offsets=_pe_offs_zeta,
         )
+        _zeta_pad, _B_pad, _invT_pad, _lnps_pad = _pe_pieces[:4]
+        _hf_pad = _pe_pieces[4] if _hybrid else None
     elif _halo_backend == "mpi":
         from legoesm.grids.halo import get_mpi_topology
         # FV3_3D iter-1041: pass interp_offsets when duogrid is off so the
@@ -376,16 +388,22 @@ def fv3_hydrostatic_tendencies(
         # copying — matches the single-device path which threads
         # ``grid.halo_interp_offsets`` here.
         _pe_offs_zeta = None if _pe_dg is not None else grid.halo_interp_offsets
-        _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
-            zeta, B, inv_T, topology=get_mpi_topology(), duogrid=_pe_dg,
+        # iter-58/60: ride ln_ps_3d (+ hybrid_factor) on this pack — see SPMD note.
+        _pe_pack = [zeta, B, inv_T, ln_ps_3d]
+        if _hybrid:
+            _pe_pack.append(_hybrid_factor)
+        _pe_pieces = packed_pad_halo_mpi_4d(
+            *_pe_pack, topology=get_mpi_topology(), duogrid=_pe_dg,
             interp_offsets=_pe_offs_zeta,
         )
+        _zeta_pad, _B_pad, _invT_pad, _lnps_pad = _pe_pieces[:4]
+        _hf_pad = _pe_pieces[4] if _hybrid else None
     else:
-        _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
+        # operators do own exchange (single-device); no merged stage halo.
+        _zeta_pad = _B_pad = _invT_pad = _lnps_pad = _hf_pad = None
 
-    # Pre-pad slots for section 11 (T/ln_ps_3d/u_cell/v_cell); None falls back to per-op halo
-    _lnps_pad = None
-    _hf_pad = None
+    # _lnps_pad/_hf_pad are now filled by the stage pack above (SPMD/MPI) or
+    # None (single-device); _div_v_pad is still per-op (see div-damp below).
     _div_v_pad = None
 
     # FV3_3D iter 14/190: optional a2b_ord4 for ζ_corner; shared with iter-187 smag_vort cap (sw_core.F90:1795)
