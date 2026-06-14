@@ -39,7 +39,9 @@ import numpy as np
 import pytest
 
 from legoesm.grids.halo_latlon import pad_halo_latlon
-from legoesm.ocean.dynamics.barotropic_common import _fixed_iteration_pcg
+from legoesm.ocean.dynamics.barotropic_common import (
+    _fixed_iteration_pcg, _global_dot_batch,
+)
 from legoesm.parallel.latlon_spmd import (
     activate_latlon_spmd_halo, deactivate_latlon_spmd_halo,
 )
@@ -225,3 +227,23 @@ def test_spmd_pcg_negative_control(monkeypatch):
     assert worst > 1e-4, (
         f"negative control FAILED to diverge ({worst:.3e}) — the parity "
         f"test may be vacuous (psum not actually exercised)")
+
+
+def test_global_dot_batch_spmd_without_mesh_raises():
+    """FAIL FAST (codex LOW): backend armed 'spmd' but NO mesh set (an
+    invalid state reachable only via the public set_halo_backend) must
+    RAISE in _global_dot_batch, not silently return unreduced partial sums
+    inside a sharded solve."""
+    from legoesm.grids.halo import (
+        get_halo_backend, set_halo_backend, set_spmd_mesh,
+    )
+    prev = get_halo_backend()
+    set_halo_backend("spmd")
+    set_spmd_mesh(None)
+    try:
+        a = jnp.ones((4, 4))
+        with pytest.raises(RuntimeError, match="no SPMD mesh"):
+            _global_dot_batch([(a, a)])
+    finally:
+        set_spmd_mesh(None)
+        set_halo_backend(prev)

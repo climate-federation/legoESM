@@ -222,6 +222,17 @@ def _global_dot_batch(
     from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
     if get_halo_backend() == "spmd":
         mesh = get_spmd_mesh()
+        if mesh is None:
+            # backend armed "spmd" but no mesh set: an invalid state
+            # reachable only via the public set_halo_backend("spmd")
+            # without a matching set_spmd_mesh.  FAIL FAST rather than
+            # silently return unreduced partial sums inside a sharded
+            # solve (codex LOW) — the supported activators
+            # (activate_latlon_spmd_halo / the cube equivalent) always set
+            # the mesh together with the backend.
+            raise RuntimeError(
+                "_global_dot_batch: halo backend is 'spmd' but no SPMD mesh "
+                "is set; arm it via activate_latlon_spmd_halo(mesh).")
         # Route to psum ONLY for the lat-band ocean SPMD mesh, keyed on the
         # ``"lat"`` axis BY NAME (activate_latlon_spmd_halo guarantees it).
         # The cube atm SPMD backend ALSO sets backend=="spmd" but with a
@@ -232,7 +243,7 @@ def _global_dot_batch(
         # not the lat-band one, fall through to the MPI/local logic below
         # (ocean fields are never cube-sharded, so the local/allreduce sum
         # is the correct reduction there).
-        if mesh is not None and "lat" in tuple(mesh.axis_names):
+        if "lat" in tuple(mesh.axis_names):
             from legoesm.parallel.reductions import batch_psum_spmd
             return batch_psum_spmd(local, "lat")
     # Function-scope import: ``reductions`` pulls in mpi4jax lazily and
