@@ -327,6 +327,7 @@ def _build_global_problem(
     n_lat: int, n_lon: int, nlev: int, baro_solver: str,
     *, force_pcg: bool = False, pcg_variant: str = "standard",
     preconditioner: str = "jacobi", fixed_iters: int = 60,
+    cheby_degree: int = 4,
 ):
     """Global grid + z-coordinate + config + perturbed global IC.
 
@@ -356,6 +357,11 @@ def _build_global_problem(
         barotropic_implicit_preconditioner=preconditioner,
         barotropic_implicit_pcg_fixed_iters=fixed_iters,
     )
+    # chebyshev degree: the config has no degree field (the factory reads
+    # getattr(config, "barotropic_chebyshev_degree", 4)); the bench uses the
+    # default degree-4 path (no shared-config change). cheby_degree kept in
+    # the signature for callers that set the attr explicitly.
+    _ = cheby_degree
     state_global = rest_state_latlon_cgrid_ocean(grid, z_coord)
     state_global = _perturb_state(state_global, grid)
     return grid, z_coord, config, state_global
@@ -2035,12 +2041,16 @@ def build_parser() -> argparse.ArgumentParser:
              "per solve) — the multi-node weak-scaling lever.",
     )
     p.add_argument(
-        "--preconditioner", choices=["jacobi", "zonal_line"],
+        "--preconditioner", choices=["jacobi", "zonal_line", "chebyshev"],
         default="jacobi",
-        help="Implicit-CN PCG preconditioner: 'jacobi' (legacy) or "
+        help="Implicit-CN PCG preconditioner: 'jacobi' (legacy), "
              "'zonal_line' (exact periodic-tridiagonal row solves; "
-             "comm-free under band MPI; M-sweep 8473872: equal "
-             "residual at ~M/3 — pair with --pcg-fixed-iters).",
+             "comm-free under band MPI; M-sweep 8473872: equal residual at "
+             "~M/3) or 'chebyshev' (degree-4 polynomial of A; cuts outer M "
+             "with NO per-iter reduction but +4 matvec-halos/iter; conv "
+             "8486241: reaches jacobi-M60 accuracy at ~M40 = 80 vs 120 "
+             "reductions — pair with --pcg-fixed-iters; wins only where "
+             "allreduce log-N latency > halo, i.e. high rank counts).",
     )
     p.add_argument(
         "--pcg-fixed-iters", type=int, default=60,
