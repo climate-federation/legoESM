@@ -51,6 +51,16 @@ def _is_regular_latlon(grid) -> bool:
     )
 
 
+def _is_voronoi(grid) -> bool:
+    """True if ``grid`` is an MPAS Voronoi mesh (duck-typed)."""
+    return (
+        hasattr(grid, "verticesOnCell")
+        and hasattr(grid, "nEdgesOnCell")
+        and hasattr(grid, "xCell")
+        and hasattr(grid, "nCells")
+    )
+
+
 def make_latlon_remapper(src_grid, dst_grid) -> ConservativeRegridWeights:
     """Conservative, differentiable remap weights ``src_grid -> dst_grid``.
 
@@ -171,6 +181,17 @@ def make_grid_remapper(atm_grid, ocean_grid) -> GridRemapper:
             o2a=make_latlon_remapper(ocean_grid, atm_grid),
             identity=False,
         )
+    # Same-family MPAS Voronoi <-> Voronoi: a DIRECT conservative remap (never
+    # routed through an intermediate lat-lon grid).
+    if _is_voronoi(atm_grid) and _is_voronoi(ocean_grid):
+        from legoesm.grids.conservative_regrid_unstructured import (
+            compute_mpas_to_mpas_weights,
+        )
+        return GridRemapper(
+            a2o=compute_mpas_to_mpas_weights(atm_grid, ocean_grid),
+            o2a=compute_mpas_to_mpas_weights(ocean_grid, atm_grid),
+            identity=False,
+        )
     same_family = type(atm_grid) is type(ocean_grid)
     raise NotImplementedError(
         f"Differentiable atm<->ocean coupling between "
@@ -190,8 +211,9 @@ def make_grid_remapper(atm_grid, ocean_grid) -> GridRemapper:
 def remap_field(field, weights: ConservativeRegridWeights | None):
     """Apply remap ``weights`` to ``field`` (differentiable); pass-through if None.
 
-    ``field`` has its last two axes equal to ``weights.src_shape``; leading axes
-    (levels, tracers, ensemble) are vmap-broadcast by the underlying kernel.
+    ``field`` has its TRAILING axes equal to ``weights.src_shape`` (rank 1 MPAS,
+    2 lat-lon, or 3 cube); leading axes (levels, tracers, ensemble) are
+    vmap-broadcast by the underlying kernel.
     """
     if weights is None:
         return field
@@ -210,12 +232,16 @@ def remap_surface_fields(obj, weights: ConservativeRegridWeights | None):
     if weights is None:
         return obj
     src_shape = tuple(weights.src_shape)
+    nd = len(src_shape)
 
     def _maybe(x):
+        # Remap a leaf iff its trailing axes are the source grid (rank 1 for
+        # MPAS (nCells,), 2 for lat-lon, 3 for cube (6,n,n)); scalars, vertical
+        # profiles, and other shapes pass through unchanged.
         if (
             hasattr(x, "shape")
-            and getattr(x, "ndim", 0) >= 2
-            and tuple(x.shape[-2:]) == src_shape
+            and getattr(x, "ndim", 0) >= nd
+            and tuple(x.shape[-nd:]) == src_shape
         ):
             return apply_conservative_regrid(x, weights)
         return x

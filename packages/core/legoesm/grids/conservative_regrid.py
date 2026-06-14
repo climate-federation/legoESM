@@ -306,26 +306,32 @@ def apply_conservative_regrid(
     Parameters
     ----------
     field : jax.Array
-        Source field with last two axes equal to ``weights.src_shape``,
-        i.e. shape ``(*leading, n_src_lat, n_src_lon)``.  Leading axes
-        (e.g. time) are vmap-broadcast.
+        Source field whose TRAILING axes equal ``weights.src_shape`` — rank 1
+        ``(nCells,)`` (unstructured/MPAS), rank 2 ``(n_src_lat, n_src_lon)``
+        (lat-lon), or rank 3 ``(6, n, n)`` (cubed-sphere).  Any remaining leading
+        axes (levels, tracers, ensemble) are vmap-broadcast.
     weights : ConservativeRegridWeights
-        From :func:`compute_overlap_weights`.
+        From :func:`compute_overlap_weights` (lat-lon) or an unstructured weight
+        generator (e.g. ``conservative_regrid_unstructured``).
 
     Returns
     -------
     jax.Array
-        Regridded field with shape ``(*leading, n_dst_lat, n_dst_lon)``.
+        Regridded field with shape ``(*leading, *weights.dst_shape)``.
     """
-    if field.shape[-2:] != weights.src_shape:
+    # ``src_shape`` may be rank 1 (unstructured/MPAS, ``(nCells,)``), rank 2
+    # (regular lat-lon), or rank 3 (cubed-sphere, ``(6, n, n)``).  Match the
+    # trailing axes against it and vmap over any remaining leading axes.
+    nd = len(weights.src_shape)
+    if tuple(field.shape[-nd:]) != tuple(weights.src_shape):
         raise ValueError(
-            f"field last-2 shape {field.shape[-2:]} does not match "
+            f"field trailing shape {field.shape[-nd:]} does not match "
             f"weights.src_shape {weights.src_shape}"
         )
-    if field.ndim == 2:
+    if field.ndim == nd:
         return _apply_2d(field, weights)
     # Generic ND: flatten leading axes, vmap, unflatten.
-    leading = field.shape[:-2]
-    flat = field.reshape((-1,) + weights.src_shape)
+    leading = field.shape[:-nd]
+    flat = field.reshape((-1,) + tuple(weights.src_shape))
     out = jax.vmap(_apply_2d, in_axes=(0, None))(flat, weights)
-    return out.reshape(leading + weights.dst_shape)
+    return out.reshape(leading + tuple(weights.dst_shape))

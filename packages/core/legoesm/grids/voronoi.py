@@ -343,6 +343,14 @@ def _spherical_triangle_area(a, b, c, radius=1.0):
     return E * radius**2
 
 
+# Public names for the spherical-geometry primitives reused by the unstructured
+# conservative-remap weight generator (grids.conservative_regrid_unstructured).
+# Promotion only — identical implementations, no behaviour change — so cross-
+# module callers do not import the underscore-private symbols.
+spherical_triangle_area = _spherical_triangle_area
+shift_near = _shift_near
+
+
 def _angle_from_east(x, y, z, dx, dy, dz):
     """Angle of direction vector (dx,dy,dz) relative to local east at (x,y,z).
 
