@@ -1826,67 +1826,33 @@ def fill_corners_h2(padded: jax.Array) -> jax.Array:
         # reduction) remains active.
         pass  # fall through to legacy avg path
 
-    # Legacy inside-out 2-point average path.
-    for f in range(6):
-        # --- SW corner (rows 0-1, cols 0-1) ---
-        # Inner corner (1,1): adjacent cells (1,2) and (2,1) are filled
-        padded = padded.at[f, 1, 1].set(
-            0.5 * (padded[f, 1, 2] + padded[f, 2, 1])
-        )
-        # (0,1): adjacent to (0,2) [WEST halo, filled] and (1,1) [just filled]
-        padded = padded.at[f, 0, 1].set(
-            0.5 * (padded[f, 0, 2] + padded[f, 1, 1])
-        )
-        # (1,0): adjacent to (2,0) [SOUTH halo, filled] and (1,1) [just filled]
-        padded = padded.at[f, 1, 0].set(
-            0.5 * (padded[f, 2, 0] + padded[f, 1, 1])
-        )
-        # Outer corner (0,0)
-        padded = padded.at[f, 0, 0].set(
-            0.5 * (padded[f, 0, 1] + padded[f, 1, 0])
-        )
-
-        # --- SE corner (rows n+2..n+3, cols 0-1) ---
-        padded = padded.at[f, -2, 1].set(
-            0.5 * (padded[f, -2, 2] + padded[f, -3, 1])
-        )
-        padded = padded.at[f, -1, 1].set(
-            0.5 * (padded[f, -1, 2] + padded[f, -2, 1])
-        )
-        padded = padded.at[f, -2, 0].set(
-            0.5 * (padded[f, -3, 0] + padded[f, -2, 1])
-        )
-        padded = padded.at[f, -1, 0].set(
-            0.5 * (padded[f, -1, 1] + padded[f, -2, 0])
-        )
-
-        # --- NW corner (rows 0-1, cols n+2..n+3) ---
-        padded = padded.at[f, 1, -2].set(
-            0.5 * (padded[f, 1, -3] + padded[f, 2, -2])
-        )
-        padded = padded.at[f, 0, -2].set(
-            0.5 * (padded[f, 0, -3] + padded[f, 1, -2])
-        )
-        padded = padded.at[f, 1, -1].set(
-            0.5 * (padded[f, 2, -1] + padded[f, 1, -2])
-        )
-        padded = padded.at[f, 0, -1].set(
-            0.5 * (padded[f, 0, -2] + padded[f, 1, -1])
-        )
-
-        # --- NE corner (rows n+2..n+3, cols n+2..n+3) ---
-        padded = padded.at[f, -2, -2].set(
-            0.5 * (padded[f, -2, -3] + padded[f, -3, -2])
-        )
-        padded = padded.at[f, -1, -2].set(
-            0.5 * (padded[f, -1, -3] + padded[f, -2, -2])
-        )
-        padded = padded.at[f, -2, -1].set(
-            0.5 * (padded[f, -3, -1] + padded[f, -2, -2])
-        )
-        padded = padded.at[f, -1, -1].set(
-            0.5 * (padded[f, -1, -2] + padded[f, -2, -1])
-        )
+    # Legacy inside-out 2-point average path — VECTORISED over the 6-face axis.
+    # Was a ``for f in range(6)`` loop = 96 serialised ``.at[f,i,j]`` scatters;
+    # now 16 batched ``.at[:,i,j]`` scatters (bit-identical: each face reads
+    # ONLY its own cells so the faces are independent, and the inner->outer
+    # dependency WITHIN each corner is preserved by the statement order).
+    # Mirrors the already-vectorised fv3_agrid_xdir branch above (per-device
+    # kernel-count reduction; deep-dive 2026-06-14 lever #1).
+    # --- SW corner (rows 0-1, cols 0-1) --- inner (1,1) first, then outward.
+    padded = padded.at[:, 1, 1].set(0.5 * (padded[:, 1, 2] + padded[:, 2, 1]))
+    padded = padded.at[:, 0, 1].set(0.5 * (padded[:, 0, 2] + padded[:, 1, 1]))
+    padded = padded.at[:, 1, 0].set(0.5 * (padded[:, 2, 0] + padded[:, 1, 1]))
+    padded = padded.at[:, 0, 0].set(0.5 * (padded[:, 0, 1] + padded[:, 1, 0]))
+    # --- SE corner (rows n+2..n+3, cols 0-1) ---
+    padded = padded.at[:, -2, 1].set(0.5 * (padded[:, -2, 2] + padded[:, -3, 1]))
+    padded = padded.at[:, -1, 1].set(0.5 * (padded[:, -1, 2] + padded[:, -2, 1]))
+    padded = padded.at[:, -2, 0].set(0.5 * (padded[:, -3, 0] + padded[:, -2, 1]))
+    padded = padded.at[:, -1, 0].set(0.5 * (padded[:, -1, 1] + padded[:, -2, 0]))
+    # --- NW corner (rows 0-1, cols n+2..n+3) ---
+    padded = padded.at[:, 1, -2].set(0.5 * (padded[:, 1, -3] + padded[:, 2, -2]))
+    padded = padded.at[:, 0, -2].set(0.5 * (padded[:, 0, -3] + padded[:, 1, -2]))
+    padded = padded.at[:, 1, -1].set(0.5 * (padded[:, 2, -1] + padded[:, 1, -2]))
+    padded = padded.at[:, 0, -1].set(0.5 * (padded[:, 0, -2] + padded[:, 1, -1]))
+    # --- NE corner (rows n+2..n+3, cols n+2..n+3) ---
+    padded = padded.at[:, -2, -2].set(0.5 * (padded[:, -2, -3] + padded[:, -3, -2]))
+    padded = padded.at[:, -1, -2].set(0.5 * (padded[:, -1, -3] + padded[:, -2, -2]))
+    padded = padded.at[:, -2, -1].set(0.5 * (padded[:, -3, -1] + padded[:, -2, -2]))
+    padded = padded.at[:, -1, -1].set(0.5 * (padded[:, -1, -2] + padded[:, -2, -1]))
 
     return padded
 
