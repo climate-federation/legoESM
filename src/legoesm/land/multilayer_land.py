@@ -464,6 +464,15 @@ def _step_multilayer_land_impl(
         u_ocean_sfc=jnp.zeros(ncol),
         v_ocean_sfc=jnp.zeros(ncol),
         co2_flux=co2_flux,
+        # Coupler fields (land-tile values, mirroring slab_land): water leaving
+        # the column to the ocean is runoff; surface mass flux is evaporation;
+        # ocean-stress / heat-extraction / salt are not applicable to land.
+        freshwater_flux=richards_out.runoff_surface + richards_out.runoff_subsurface,
+        ocean_heat_extraction=jnp.zeros(ncol),
+        ocean_stress_x=jnp.zeros(ncol),
+        ocean_stress_y=jnp.zeros(ncol),
+        surface_mass_flux=lhflx_actual / L_eff,
+        salt_flux=jnp.zeros(ncol),
     )
 
     return new_state, response, carbon_state_new, surface_out
