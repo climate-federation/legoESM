@@ -1,0 +1,26 @@
+# legoESM experiment template — wind-driven baroclinic gyre.
+#
+# Names the procedural `baroclinic_gyre` experiment via the `setup:` selector
+# (#388 Ask#2): a regional, wind-driven double/single gyre that spins up a
+# baroclinic circulation. Cubed-sphere is excluded (face-boundary instability,
+# #100); primary targets are the regional grids. Routed to
+# run_ocean_test_matrix.py.
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: regional
+  maturity: structurally_validated
+  description: >
+    Wind-driven baroclinic gyre (regional): a steady wind stress spins up a
+    stratified gyre, testing the baroclinic pressure-gradient and lateral
+    boundary handling on a regional lat-lon C-grid.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "ocean-baroclinic-gyre"
+  type: ocean_only
+setup:
+  name: baroclinic_gyre
+  grid: latlon_regional
+output:
+  path: output/ocean/baroclinic_gyre/

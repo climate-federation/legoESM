@@ -7965,6 +7965,11 @@ def main():
     DEFAULT_DT = args.dt
 
     tests = filter_tests(TEST_MATRIX, args)
+    # Global match count BEFORE any MPI slicing — the exact-selector guard
+    # below keys off this so every rank makes the SAME decision (a per-rank
+    # empty slice when matches < ranks must not make non-owning ranks raise
+    # while owning ranks block at the barrier).
+    _n_matched_global = len(tests)
 
     # MPI case-split: each rank takes a disjoint slice of the filtered
     # test list.  Each case writes to its own (case, grid, resolution)
@@ -7997,8 +8002,30 @@ def main():
         return
 
     if not tests:
-        print("No tests match the given filters.")
-        return
+        # An EXACT selector (``--only =name``, the form emitted by ocean
+        # `setup:` templates / OceanExperimentConfig.run_command) that matches
+        # nothing GLOBALLY is a hard error: the named (case, grid) is not an
+        # instantiated matrix case, so the run would otherwise silently do
+        # nothing.  A bare substring / ``all`` filter that matches nothing
+        # stays a graceful no-op (backward-compatible matrix usage).  Both
+        # decisions key off the GLOBAL pre-slice count so every MPI rank agrees.
+        if _n_matched_global == 0:
+            if str(args.only).startswith("="):
+                raise SystemExit(
+                    f"ERROR: no ocean test case matches --only {args.only!r} "
+                    f"--grid {args.grid!r}. Run `--list` to see valid "
+                    f"(case, grid) pairs."
+                )
+            print("No tests match the given filters.")
+            return
+        # Otherwise the global filter matched but THIS rank's MPI slice is
+        # empty (matches < ranks).  Do NOT return: fall through with
+        # ``tests == []`` so the rank still reaches the collective
+        # barrier/gather below (returning here would deadlock the ranks that
+        # do hold work).  The run loop is a no-op on an empty list.
+        if mpi_comm is not None:
+            print(f"[rank {mpi_rank}/{mpi_size}] no cases assigned; "
+                  "continuing to barrier")
 
     if args.resolution:
         # iter-102 fix: ``--resolution N`` (integer) was previously

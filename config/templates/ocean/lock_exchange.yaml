@@ -1,0 +1,25 @@
+# legoESM experiment template — lock-exchange gravity current.
+#
+# Names the procedural `lock_exchange` experiment via the `setup:` selector
+# (#388 Ask#2): a dense/light water column released to form opposing gravity
+# currents (Petersen et al. 2015). Reference Potential Energy (RPE) is the
+# spurious-mixing diagnostic. Routed to run_ocean_test_matrix.py.
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: idealized
+  maturity: structurally_validated
+  description: >
+    Lock-exchange gravity current (Petersen 2015): a density front collapses
+    into two opposing gravity currents. RPE growth quantifies spurious
+    diapycnal mixing of the advection scheme.
+  data: []
+  conservation_gates: [rpe, volume]
+model:
+  name: "ocean-lock-exchange"
+  type: ocean_only
+setup:
+  name: lock_exchange
+  grid: latlon
+output:
+  path: output/ocean/lock_exchange/
