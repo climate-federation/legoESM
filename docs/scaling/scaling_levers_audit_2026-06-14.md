@@ -53,3 +53,45 @@ Pivot the campaign's ACHIEVABLE-scaling effort to **ocean lat-lon 2-GPU SPMD**
 (lever 1) — attacks unused hardware, benchable on the RTX8000 PCIe pair. The
 cube-3D tiling (future-HW capability) continues as a secondary track. MPAS
 batched-halo repair (lever 2) is the next CPU-MPI lever after a profiling pass.
+
+## MEASURED OUTCOMES (2026-06-14, lever #1 executed end-to-end + remaining-headroom re-audit)
+
+Lever #1 (ocean lat-lon 2-GPU SPMD) executed in full via **route-A** (overlay
+venv: cuda jax 0.9.1 + CUDA-built mpi4jax + mpi4py over the RTX8000 PCIe pair;
+existing validated MPI harness, near-zero new code) rather than the pure-jax
+shard_map (blocked: `LatLonCGridOceanModel` is not a pytree and `step()` does
+host-side CFL `float()` logic). Foundation also shipped: lat-band SPMD halo +
+barotropic-PCG `psum` routing (commits b51f58b9→246df03f).
+
+**2-GPU strong (route-A, host-staged MPI = lower bound):**
+- Ocean full-step: eff 0.62 (180×360 n30) → **0.92** (360×720 n60). NEAR-IDEAL
+  at production scale — the 3D baroclinic+tracer compute (barotropic only
+  12.4%/7.4% of the step at n30/n60, phase-profile 8486138) amortizes the
+  PCIe barotropic-PCG penalty. The barotropic-PCG KERNEL alone anti-scales
+  (eff 0.31) — confirming the wall is the global reduction, hidden at scale.
+- Atm lat-lon FV PE: eff 0.72 (90) → **0.82** (180×360 n26). Halo-bound, no
+  ocean-style barotropic reduction wall.
+
+**2-GPU weak (ocean):** eff 0.46 (n30) → 0.57 (n60) — lower than strong; weak
+exposes the fixed 2M-allreduce/step barotropic latency (the Amdahl term).
+
+**Levers ruled OUT (measured):**
+- cuda-aware MPI: env-blocked (conda mpi4py bundles its own openmpi that
+  shadows the cuda-aware module + segfaults in mca_coll_cuda; needs a full
+  MPI-stack rebuild — not worth it, production already 0.92-0.95).
+- Reduction-cutting preconditioners (zonal_line/chebyshev M-cut, codex
+  remaining-headroom audit's "last lever"): the M-cut is real (zonal_line &
+  cheby8 reach jacobi-M60 accuracy at ~M/3 = 3× fewer reductions, conv
+  8486241) but it does NOT win wall-time on this HW — zonal_line/M20 np2
+  13.20ms vs jacobi/M60 12.68ms (job 8486251): the per-iter cyclic-Thomas
+  LOCAL cost exceeds the reduction-latency saved (roofline: halos≈reductions
+  on Gloo/TCP at moderate ranks). chebyshev adds halos (worse) + a
+  bench-scan dtype bug.
+
+**VERDICT: all Ginsburg-measurable scaling axes at their practical limit.**
+2-GPU near-ideal at production scale; per-device at JAX-peer; CPU-multinode
+reduction-latency-bound with no cheap M-cut. The only remaining THEORETICAL
+lever is a **MULTIGRID barotropic preconditioner** (cut M to ~O(log n) with
+cheap V-cycle restriction/prolongation halos instead of the heavy
+cyclic-Thomas) — a major multi-week build, surfaced as a DECISION. Further
+gains otherwise need NVLink/IB hardware.
