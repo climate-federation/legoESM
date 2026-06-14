@@ -98,6 +98,11 @@ reference runs in CI without the external oracle installed.
   block that *also* clears tiers 0–2. The truth tiers catch bugs inherited *from* the
   oracle; the oracle catches wiring/convention bugs the truth tiers miss. A bug survives
   only in the intersection.
+  - **Machine-enforced (#388 Ask#4):** `legoesm.ocean.fidelity.precedence.evaluate_precedence`
+    turns this into a checked verdict — any *failing* truth tier (0–2) LOCKS the oracle
+    tiers (≥3) so their match no longer counts. The scorecard generator
+    `scripts/validate/ocean_fidelity/build_fidelity_scorecard.py` reports the verdict and
+    exits non-zero on a violation (oracle present + truth-tier failure).
 
 ---
 
