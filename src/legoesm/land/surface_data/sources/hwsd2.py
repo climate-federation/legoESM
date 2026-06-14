@@ -21,6 +21,12 @@ Pipeline (host-side, run once):
 Units harmonized to the schema: sand/clay as percent (loader applies
 ``pct_scale``); organic carbon as mass percent; bulk density converted
 g/cm^3 -> kg/m^3.
+
+References
+----------
+- FAO & IIASA (2023): Harmonized World Soil Database version 2.0. Rome and
+  Laxenburg. ISBN 978-92-5-137499-3. https://doi.org/10.4060/cc3823en
+  Data hub: https://www.fao.org/soils-portal/data-hub/soil-maps-and-databases/harmonized-world-soil-database-v20/en/
 """
 
 from __future__ import annotations

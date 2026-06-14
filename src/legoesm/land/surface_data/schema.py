@@ -47,10 +47,14 @@ SURFDATA_VARS: dict[str, tuple[str, str]] = {
     "cell_area": ("m2", "grid cell area"),
     # cover fractions (annual transient)
     "year": ("year", "calendar year of transient slice"),
-    "f_land": ("percent", "natural-vegetated land fraction of gridcell"),
-    "f_lake": ("percent", "lake fraction of gridcell"),
-    "f_glacier": ("percent", "glacier fraction of gridcell"),
-    "pft_frac": ("percent", "within-land PFT cover fraction"),
+    "f_land": ("percent", "land-surface (soil+vegetation) fraction of gridcell"),
+    "f_lake": ("percent", "inland water fraction of gridcell"),
+    "f_glacier": ("percent", "snow/ice (glacier) fraction of gridcell"),
+    # pft_frac axis is the ESA-native land composition (bare + 10 veg PFTs;
+    # LAND_PFT_NAMES), NOT CLM5's climate-zoned 17 PFTs.
+    "pft_frac": ("percent", "within-land PFT cover fraction (ESA taxonomy)"),
+    # C3/C4 is a continuous pathway field, not a cover split (Still et al.-type).
+    "c4_fraction": ("1", "fraction of grass that is C4 (0-1)"),
     # vegetation state (monthly climatology)
     "monthly_lai": ("m2 m-2", "monthly leaf area index"),
     "monthly_sai": ("m2 m-2", "monthly stem area index"),
@@ -81,6 +85,7 @@ def write_surfdata(
     bulk_density: np.ndarray | None = None,
     soil_color: np.ndarray | None = None,      # (lat, lon)
     cell_area: np.ndarray | None = None,       # (lat, lon)
+    c4_fraction: np.ndarray | None = None,     # (lat, lon) [0-1]
     # cover group
     year: np.ndarray | None = None,            # (year,)
     f_land: np.ndarray | None = None,          # (year, lat, lon)
@@ -115,6 +120,8 @@ def write_surfdata(
         data_vars["soil_color"] = _da(("lat", "lon"), soil_color, "soil_color")
     if cell_area is not None:
         data_vars["cell_area"] = _da(("lat", "lon"), cell_area, "cell_area")
+    if c4_fraction is not None:
+        data_vars["c4_fraction"] = _da(("lat", "lon"), c4_fraction, "c4_fraction")
     if soil_dz is not None:
         data_vars["soil_dz"] = _da(("soil_layer",), soil_dz, "soil_dz")
 

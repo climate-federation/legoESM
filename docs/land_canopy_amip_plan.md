@@ -931,3 +931,92 @@ deliverable when vendoring was the plan:)*
    canopy at its native cadence inside `step_multilayer_land`, or accept the
    legoesm atmosphere `dt` and let `MultiLayerCanopyConfig.n_substeps` absorb
    the difference. Decide in M3/M4 once we measure stability sensitivity.
+
+## 13. Data Sources and References
+
+Primary geophysical datasets used by the surface-data **producer** library
+(`src/legoesm/land/surface_data/`) to build the harmonized `legoesm_surfdata`
+boundary file. Each source is processed by a `sources/*.py` module that reuses
+the shared `raster`/`aggregate`/`schema` machinery; the runtime loader
+(`global_surface_data.py`) regrids the harmonized file to the model grid.
+
+**Soil (texture, organic carbon, bulk density) — FAO HWSD v2.0**
+- FAO & IIASA (2023): *Harmonized World Soil Database version 2.0.* Rome and
+  Laxenburg. ISBN 978-92-5-137499-3. https://doi.org/10.4060/cc3823en
+- Data hub: https://www.fao.org/soils-portal/data-hub/soil-maps-and-databases/harmonized-world-soil-database-v20/en/
+- 30 arc-second SMU raster (`HWSD2.bil`) + `HWSD2.mdb` attribute table
+  (`HWSD2_LAYERS`), SHARE-weighted over soil components; module
+  `sources/hwsd2.py`.
+
+**Land cover / plant functional types — ESA CCI PFT v2.0.8**
+- Harper, K. L., Lamarche, C., Hartley, A., Peylin, P., Ottlé, C., Bastrikov, V.,
+  San Martín, R., Bohnenstengel, S. I., Kirches, G., Boettcher, M., Shevchuk, R.,
+  Brockmann, C., and Defourny, P. (2023): *A 29-year time series of annual 300 m
+  resolution plant-functional-type maps for climate models.* Earth Syst. Sci.
+  Data, 15, 1465–1499. https://doi.org/10.5194/essd-15-1465-2023
+- Portal: https://climate.esa.int/en/odp/#/project/land-cover ;
+  viewer: https://maps.elie.ucl.ac.be/CCI/viewer/
+- 14 fractional-cover layers at 300 m, annual 1992–2020. legoESM adopts the ESA
+  taxonomy as canonical (no CLM5-17 crosswalk); v1 uses the **2010** map held
+  **stationary** across all simulated years. Module `sources/esa_cci_pft.py`.
+
+**C3/C4 distribution (continuous pathway field, not a cover split)**
+- Luo, X., Zhou, H., Satriawan, T. W., Tian, J., Zhao, R., Keenan, T. F.,
+  Griffith, D. M., Sitch, S., Smith, N. G., and Still, C. J. (2024): *Mapping the
+  global distribution of C4 vegetation using observations and optimality theory.*
+  Nature Communications, 15, 1219. https://doi.org/10.1038/s41467-024-45606-3
+- File `C4_distribution_NUS_v2.2.nc`: 0.5° global, 2001–2019. Variables
+  `C4_area`, `C4_grass_area`, `C4_crop_area` (+ `_un` uncertainty) in **percent
+  of land-surface area** (0–100). For v1 we take a single year (2010) held
+  stationary, consistent with the ESA PFT map. Stored as continuous C4 area
+  fields; the C4-fraction *of grass* is formed at runtime by dividing the C4
+  grass area by the ESA grass cover (faithful data, ratio in the physics).
+  Module `sources/c4_fraction.py` (planned).
+
+Note: per repo policy the source PDFs/extracts are **not** committed
+(`docs/references/` is git-ignored); cite by DOI/filename only.
+
+## 14. Surface-data v1 composition and v2 path (decided 2026-06-13)
+
+The surface-data producer (`src/legoesm/land/surface_data/`) writes one
+harmonized `legoesm_surfdata` NetCDF that the runtime loader
+(`global_surface_data.load_global_surface_data`, preset `"legoesm_surfdata"`)
+regrids to the model grid. Two interchangeable ways to fill it:
+
+### v1 (current, shipping): CLM5 cover/PFT/LAI + HWSD soil
+- **Cover + PFT + LAI from a CLM5 surfdata file** (`sources/clm5_surfdata.py`).
+  Chosen because CLM5 `MONTHLY_LAI` is **internally consistent** with its
+  `PCT_NAT_PFT` cover (same source/distribution/PFT axis) and the PFTs are
+  already climate-zoned — so it needs no ERA5 climatology and avoids transplanting
+  per-PFT LAI across mismatched cover maps. PFT axis = CLM5's 17
+  (`surface_params.CLM5_PFT_NAMES`); the loader reuses the existing CLM5 PFT
+  parameter table. Landunit reconstruction: `w[0:15]=PCT_NATVEG·PCT_NAT_PFT`,
+  `w[15:17]=PCT_CROP·PCT_CFT`. Single (stationary) year.
+- **Soil from HWSD v2.0** (`sources/hwsd2.py`), regridded onto the CLM grid and
+  overriding CLM's soil (HWSD has better texture + bulk density; CLM surfdata has
+  none). Capped at CLM/model resolution — fine for ~2° AMIP land.
+- Assembly: `surface_data/assemble.build_v1_surfdata(clm_path, hwsd_soil_nc, out)`.
+
+### v2 (built and tested, ready to swap in): observational cover/PFT/LAI
+All pieces exist; only the cover/PFT/LAI *inputs* to the assembly change — soil,
+schema, and loader are unchanged.
+- **Cover/PFT** from ESA CCI PFT (`sources/esa_cci_pft.py`): observed
+  leaf-form × phenology × growth-form fractions (`aggregate_esa_pft`,
+  `derive_cover_and_pft`). Either keep **ESA-native PFTs** (preferred long-term:
+  no climate baked into plant identity; well suited to a differentiable model that
+  *learns* climate response) or crosswalk to CLM5 via `esa_to_clm5_pft` +
+  `bioclimate` — the crosswalk needs a **temperature climatology** (coldest-month
+  temp + GDD; ERA5 was the intended source but is not currently available).
+- **C3/C4** from Luo et al. 2024 (`sources/c4_fraction.py`): observational C4
+  grass/crop *area*; the C4 fraction *of grass* is formed at assembly/runtime
+  (`c4_fraction_of_grass`), never a hard cover split. Stored as the continuous
+  `c4_fraction` field.
+- **PFT-specific LAI** (the open v2 problem): GIMMS is observational but
+  total-LAI only. Options: (a) disaggregate GIMMS total LAI by per-PFT relative
+  leaf-area weights `r_p` (definable on ESA PFTs; `r_p` become **learnable**
+  parameters; CLM5 per-PFT LAI usable only as a prior for the *ratios*, never its
+  spatial field — that would mis-assign LAI where cover maps disagree); (b) add
+  per-PFT seasonal *shapes* for phenology. Not yet built.
+
+Switch trigger (per the user): adopt the observational/ESA-native path once the
+model is differentiable and being used to learn parameters.
