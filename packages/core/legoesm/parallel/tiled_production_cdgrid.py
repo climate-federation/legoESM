@@ -147,6 +147,138 @@ def make_tiled_dgrid_vorticity_stage_2d(mesh, cdgrid, n: int, kt: int,
 
 
 # ---------------------------------------------------------------------------
+# P-3D-vel: the 3D PE-dycore velocity transforms — BOTH PURELY LOCAL (the 3D
+# fv3_hydrostatic_tendencies uses dgrid_to_cgrid (D->C, within-face projection)
+# + dgrid_to_center_vector (D->cc, box-avg), NOT the SW fv3_d2cc/fv3_cc2c
+# vector-halo path).  Both read only adjacent corners (i,i+1)/(j,j+1) within the
+# corner block, so the staggered (nl+1) tile slice already carries every needed
+# value — NO halo, NO cross-face rotation.  4D-native cores; metrics 2D-face.
+# ---------------------------------------------------------------------------
+
+def dgrid_to_cgrid_tile_2d(u_d, v_d, cosa_u, a_i, a_j, nl: int):
+    """Per-tile ``dgrid_to_cgrid`` (3D PE D->C).  ``u_d``/``v_d``
+    ``(F, n+1, n+1[, nlev])`` corner winds, ``cosa_u`` ``(F, n+1, n)`` metric —
+    FACE-REPLICATED.  Slices the ``(nl+1, nl+1)`` corner block at ``(a_i, a_j)``
+    + ``cosa_u`` ``(nl+1, nl)``; returns ``u_c`` ``(F, nl+1, nl)`` (x-face) +
+    ``v_c`` ``(F, nl, nl+1)`` (y-face) — staggered, reassembly lower-owns-shared
+    each."""
+    from legoesm.core.operators_cdgrid import dgrid_to_cgrid_core
+
+    nfc = u_d.shape[1]
+    if u_d.shape[1:3] != (nfc, nfc) or v_d.shape[1:3] != (nfc, nfc):
+        raise ValueError(
+            f"dgrid_to_cgrid_tile_2d: u_d/v_d must be square corners; got "
+            f"u_d={u_d.shape[1:3]}, v_d={v_d.shape[1:3]}")
+    if cosa_u.shape[1:3] != (nfc, nfc - 1):
+        raise ValueError(
+            f"dgrid_to_cgrid_tile_2d: cosa_u must be {(nfc, nfc - 1)}; got "
+            f"{cosa_u.shape[1:3]}")
+
+    def _sc(arr, si, sj):
+        arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+        return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+    u_blk = _sc(u_d, nl + 1, nl + 1)
+    v_blk = _sc(v_d, nl + 1, nl + 1)
+    cosa_blk = _sc(cosa_u, nl + 1, nl)
+    return dgrid_to_cgrid_core(u_blk, v_blk, cosa_blk)
+
+
+def dgrid_to_center_vector_tile_2d(u_d, v_d, a_i, a_j, nl: int):
+    """Per-tile ``dgrid_to_center_vector`` (3D PE D->cc, box-avg).  ``u_d``/
+    ``v_d`` ``(F, n+1, n+1[, nlev])`` corner winds (FACE-REPLICATED).  cc tile
+    ``[a:a+nl]`` from the ``(nl+1, nl+1)`` corner block; returns ``(u_cc, v_cc)``
+    ``(F, nl, nl[, nlev])`` — cc cells partition exactly (no halo, no trim)."""
+    from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+
+    if (u_d.shape[1] != u_d.shape[2] or u_d.shape[1:3] != v_d.shape[1:3]
+            or nl + 1 > u_d.shape[1]):
+        raise ValueError(
+            f"dgrid_to_center_vector_tile_2d: u_d/v_d must be equal square "
+            f"corners with extent >= nl+1={nl + 1}; got u_d={u_d.shape[1:3]}, "
+            f"v_d={v_d.shape[1:3]}")
+
+    def _sc(arr):
+        arr = jax.lax.dynamic_slice_in_dim(arr, a_i, nl + 1, axis=1)
+        return jax.lax.dynamic_slice_in_dim(arr, a_j, nl + 1, axis=2)
+
+    return dgrid_to_center_vector(_sc(u_d), _sc(v_d))
+
+
+def make_tiled_dgrid_to_cgrid_stage_2d(mesh, cdgrid, n: int, kt: int,
+                                       nlev: int | None = None):
+    """Sharded ``dgrid_to_cgrid`` (3D PE D->C) on a ``(6, kt, kt)`` mesh.
+    ``stage(u_d, v_d) -> (u_c, v_c)``; corner winds FACE-REPLICATED, ``cosa_u``
+    a face-sharded input (NOT closed over -> codex U4a HIGH).  Outputs
+    tile-sharded, gathered ``(6, kt*(nl+1), kt*nl)`` / ``(6, kt*nl, kt*(nl+1))``
+    reassembling lower-owns-shared to ``(6, n+1, n)`` / ``(6, n, n+1)``.
+    ``nlev`` -> 4D winds (vertical replicated); ``cosa_u`` stays 2D-face."""
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_dgrid_to_cgrid_stage_2d: n={n} != cdgrid.n={cdgrid.n}")
+    nl = n // kt
+    cosa_u = cdgrid.cosa_u
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+    fw = P("face", None, None, None) if nlev else fo
+    cz = P("face", "tile_i", "tile_j", None) if nlev else co
+
+    @partial(shard_map, mesh=mesh, in_specs=(fw, fw, fo), out_specs=(cz, cz),
+             check_vma=False)
+    def _body(u_d, v_d, cu):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return dgrid_to_cgrid_tile_2d(u_d, v_d, cu, a_i, a_j, nl)
+
+    def stage(u_d, v_d):
+        # Fail-loud stage-entry guard (codex MED): a mis-sized input would
+        # otherwise dynamic_slice-CLAMP silently inside the shard body.
+        if u_d.shape[1:3] != (n + 1, n + 1) or v_d.shape[1:3] != (n + 1, n + 1):
+            raise ValueError(
+                f"dgrid_to_cgrid stage: corner winds must be (n+1,n+1)="
+                f"{(n + 1, n + 1)}; got u_d={u_d.shape[1:3]}, "
+                f"v_d={v_d.shape[1:3]}")
+        return _body(u_d, v_d, cosa_u)
+
+    return stage
+
+
+def make_tiled_dgrid_to_center_vector_stage_2d(mesh, n: int, kt: int,
+                                               nlev: int | None = None):
+    """Sharded ``dgrid_to_center_vector`` (3D PE D->cc box-avg) on a
+    ``(6, kt, kt)`` mesh.  ``stage(u_d, v_d) -> (u_cc, v_cc)`` (corner winds
+    FACE-REPLICATED; tile-sharded cc out, gathered ``(6, n, n)`` exact).
+    ``nlev`` -> 4D (vertical replicated)."""
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    nl = n // kt
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+    fw = P("face", None, None, None) if nlev else fo
+    cz = P("face", "tile_i", "tile_j", None) if nlev else co
+
+    @partial(shard_map, mesh=mesh, in_specs=(fw, fw), out_specs=(cz, cz),
+             check_vma=False)
+    def _body(u_d, v_d):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return dgrid_to_center_vector_tile_2d(u_d, v_d, a_i, a_j, nl)
+
+    def stage(u_d, v_d):
+        # Fail-loud stage-entry guard (codex MED).
+        if u_d.shape[1:3] != (n + 1, n + 1) or v_d.shape[1:3] != (n + 1, n + 1):
+            raise ValueError(
+                f"dgrid_to_center_vector stage: corner winds must be "
+                f"(n+1,n+1)={(n + 1, n + 1)}; got u_d={u_d.shape[1:3]}, "
+                f"v_d={v_d.shape[1:3]}")
+        return _body(u_d, v_d)
+
+    return stage
+
+
+# ---------------------------------------------------------------------------
 # P-ii: the two production 4-point box interps.
 #   interp_corner_to_center (corner -> cc): PURELY LOCAL (cc cell reads its 2x2
 #     corner block) — like dgrid_vorticity, no halo, exact cc partition.

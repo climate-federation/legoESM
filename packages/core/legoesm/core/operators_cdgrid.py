@@ -419,20 +419,36 @@ def cubed_to_latlon(u_d, v_d, cdgrid):
 # D-grid -> C-grid interpolation (d2a2c)
 # ==============================================================================
 
-def dgrid_to_cgrid(u_d, v_d, cdgrid):
-    """D-grid corner → C-grid edge-normal. u_c = u_d*sin(α) - v_d*cos(α); v_c = v_d (e_perp = y-normal)."""
-    # x-face (at constant i): average along j, then project onto face normal
+def dgrid_to_cgrid_core(u_d, v_d, cosa_u_metric):
+    """Pure-array core of :func:`dgrid_to_cgrid` — D-grid corner -> C-grid
+    edge-normal with the ``cosa_u`` metric passed explicitly.  Leading-axis-
+    agnostic and PURELY LOCAL (x-face = j-avg of adjacent corners + the face-
+    normal projection; y-face = i-avg), so it is shared by the global wrapper
+    AND the sub-face tile kernel
+    (``legoesm.parallel.tiled_production_cdgrid.dgrid_to_cgrid_tile_2d``) — no
+    halo, no cross-face rotation (within-face projection).  Shapes (``...``
+    leading + optional trailing nlev): ``u_d``/``v_d`` ``(F, A+1, B+1)`` corners;
+    ``cosa_u_metric`` ``(F, A+1, B)``; returns ``u_c`` ``(F, A+1, B)`` (x-face) +
+    ``v_c`` ``(F, A, B+1)`` (y-face)."""
     _u = u_d.data if hasattr(u_d, 'data') else u_d
     _v = v_d.data if hasattr(v_d, 'data') else v_d
     u_avg = 0.5 * (_u[:, :, :-1] + _u[:, :, 1:])    # (6, n+1, n[, nlev])
     v_avg_x = 0.5 * (_v[:, :, :-1] + _v[:, :, 1:])  # (6, n+1, n[, nlev])
-    cosa_u = _broadcast_metric(cdgrid.cosa_u, u_avg)
+    cosa_u = _broadcast_metric(cosa_u_metric, u_avg)
     sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
     u_c = u_avg * sina_u - v_avg_x * cosa_u
 
     # y-face (at constant j): e_perp is the outward normal, so v_c = v_d
     v_c = 0.5 * (_v[:, :-1, :] + _v[:, 1:, :])      # (6, n, n+1[, nlev])
     return u_c, v_c
+
+
+def dgrid_to_cgrid(u_d, v_d, cdgrid):
+    """D-grid corner → C-grid edge-normal. u_c = u_d*sin(α) - v_d*cos(α); v_c = v_d (e_perp = y-normal).
+
+    Thin wrapper over :func:`dgrid_to_cgrid_core` (the tile kernel reuses the
+    core with a per-tile ``cosa_u`` slice — no dup numerics)."""
+    return dgrid_to_cgrid_core(u_d, v_d, cdgrid.cosa_u)
 
 
 def cgrid_to_dgrid(u_c, v_c, cdgrid):
