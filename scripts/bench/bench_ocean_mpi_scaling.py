@@ -164,6 +164,27 @@ from run_levante_gpu_scaling import (  # noqa: E402
     write_json,
 )
 
+
+def _configure_jax_gpu(precision: str) -> None:
+    """Pin THIS MPI rank to one local GPU and run JAX on cuda.
+
+    The ocean lat-lon multi-GPU path: each rank owns a latitude band on its
+    OWN GPU; halos cross the PCIe pair via the same mpi4jax sendrecv as the
+    CPU path.  Must run BEFORE any JAX import (sets CUDA_VISIBLE_DEVICES +
+    JAX_PLATFORMS).  Local rank from the MPI launcher env (OpenMPI / SLURM).
+    """
+    local = (os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+             or os.environ.get("SLURM_LOCALID")
+             or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK")
+             or "0")
+    os.environ["CUDA_VISIBLE_DEVICES"] = local   # one GPU visible per rank
+    os.environ["JAX_PLATFORMS"] = "cuda"
+    if precision == "float64":
+        os.environ["JAX_ENABLE_X64"] = "1"
+    # Do NOT preallocate the whole GPU (two ranks share a node; each takes
+    # its own device but the allocator must not grab 90% up front).
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
 # Benchmark-excitation parameters (NOT physics tunables): a small
 # deterministic, mask-aware perturbation of the rest state so the timed
 # step exercises non-trivial dynamics (gravity waves + advection) and
@@ -1971,6 +1992,14 @@ def build_parser() -> argparse.ArgumentParser:
              "any JAX import / model build.",
     )
     p.add_argument(
+        "--device", choices=["cpu", "gpu"], default="cpu",
+        help="cpu (default): CPU-MPI, 1 thread/rank. gpu: each MPI rank "
+             "pins to ONE local GPU (CUDA_VISIBLE_DEVICES=local-rank) and "
+             "runs JAX on cuda — the ocean lat-lon multi-GPU path "
+             "(mpi4jax halos over the PCIe pair). Launch e.g. "
+             "`mpirun -np 2 ... --device gpu` on a 2-GPU node.",
+    )
+    p.add_argument(
         "--baro-solver", choices=list(BARO_SOLVER_CHOICES),
         default="implicit_cn",
         help="Barotropic solver. implicit_cn matches the serial "
@@ -2109,8 +2138,11 @@ def main() -> int:
             "LatLonCGridOceanModel.step MPI-vs-serial parity case first."
         )
 
-    # --- Configure JAX for CPU BEFORE any JAX import ---
-    _configure_jax_cpu(args.precision)
+    # --- Configure JAX BEFORE any JAX import (CPU or per-rank GPU) ---
+    if args.device == "gpu":
+        _configure_jax_gpu(args.precision)
+    else:
+        _configure_jax_cpu(args.precision)
 
     # --- MPI init ---
     rank, n_ranks = _init_mpi()
