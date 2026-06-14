@@ -45,6 +45,67 @@ _USTAR_SPEED_RATIO = 0.01
 _BUSINGER_UNSTABLE_COEFF = 16.0
 _BUSINGER_STABLE_COEFF = 5.0
 
+
+def _kpp_velocity_scales(u_star, B_f, d, h_bl_col, cfg, eps):
+    """LMD94 (Appendix B) turbulent velocity scales at depth(s) ``d``.
+
+    Returns the momentum (``w_m``) and scalar (``w_s``) similarity velocity
+    scales for a boundary layer of depth ``h_bl_col``.  Factored so the
+    bulk-Richardson ``V_t^2`` (in ``_boundary_layer_depth``) and the
+    boundary-layer diffusivities (in ``kpp_vertical_mixing``) share ONE
+    velocity-scale implementation instead of duplicating it.
+
+    Parameters
+    ----------
+    u_star, B_f : (...,) friction velocity [m/s] and surface buoyancy forcing
+        [m^2/s^3] (positive = destabilising, this module's sign convention).
+    d : (..., nlev) depth(s) below the surface [m, positive down].
+    h_bl_col : (..., 1) boundary-layer depth [m].
+    eps : small positive floor.
+
+    Returns
+    -------
+    (w_m, w_s) : each (..., nlev) [m/s].
+    """
+    kappa = cfg.kappa_vk
+    # Surface-layer cap d_eff = min(d, epsilon*h): the similarity scale is held
+    # constant below sigma = epsilon (LMD94 App. A/B).
+    d_eff = jnp.minimum(d, cfg.epsilon_lmd * h_bl_col)
+    B_f_e = B_f[..., jnp.newaxis]
+    # copysign(eps, B_f) preserves the stability sign near zero (issue #168).
+    B_f_safe = jnp.where(
+        jnp.abs(B_f_e) > eps, B_f_e, jnp.copysign(eps, B_f_e),
+    )
+    ustar_e = u_star[..., jnp.newaxis]
+    L_MO = ustar_e ** 3 / (kappa * B_f_safe)
+    zeta = d_eff / L_MO
+    abs_zeta = jnp.abs(zeta)
+    Bf_pos = jnp.maximum(B_f_e, 0.0)
+    is_unstable = B_f_e > 0.0
+    base16 = jnp.maximum(1.0 + _BUSINGER_UNSTABLE_COEFF * abs_zeta, 1.0)
+    w_m_weak = kappa * ustar_e * jnp.power(base16, 0.25)
+    w_s_weak = kappa * ustar_e * jnp.power(base16, 0.5)
+    # Convective scales (kappa OUTSIDE the cube root); floored base keeps the
+    # cube root + gradient finite near the join (F-OCEAN-2 pattern).
+    w_m_conv = kappa * jnp.power(
+        jnp.maximum(cfg.a_m * ustar_e ** 3 + cfg.c_m * kappa * Bf_pos * d_eff, 1e-30),
+        1.0 / 3.0,
+    )
+    w_s_conv = kappa * jnp.power(
+        jnp.maximum(cfg.a_s * ustar_e ** 3 + cfg.c_s * kappa * Bf_pos * d_eff, 1e-30),
+        1.0 / 3.0,
+    )
+    w_m_unstable = jnp.where(abs_zeta <= cfg.zeta_m_abs, w_m_weak, w_m_conv)
+    w_s_unstable = jnp.where(abs_zeta <= cfg.zeta_s_abs, w_s_weak, w_s_conv)
+    # Shared stable suppression: zeta < 0 for stable forcing under this sign
+    # convention, so max(-zeta, 0) drives the suppression.
+    w_stable = (kappa * ustar_e
+                / jnp.maximum(1.0 + _BUSINGER_STABLE_COEFF * jnp.maximum(-zeta, 0.0), 1.0))
+    w_m = jnp.maximum(jnp.where(is_unstable, w_m_unstable, w_stable), 1e-10)
+    w_s = jnp.maximum(jnp.where(is_unstable, w_s_unstable, w_stable), 1e-10)
+    return w_m, w_s
+
+
 def _boundary_layer_depth(
     rho: jnp.ndarray,
     u: jnp.ndarray,
@@ -76,38 +137,30 @@ def _boundary_layer_depth(
     delta_v = v - v[..., :1]
     delta_V2 = delta_u**2 + delta_v**2
 
-    # FIXME(KPP V_t^2 — dimensional, needs a BL-depth benchmark before fixing):
-    #   The canonical LMD94 Eq.23 unresolved-shear variance is
-    #     V_t^2(d) = (Cv*(-beta_T)^1/2)/(Ri_c*kappa^2) * (c_s*eps)^-1/2 * d*N*w_s(d)
-    #   which is [m^2/s^2] BECAUSE of the d*N*w_s(d) factor (m * 1/s * m/s).
-    #   The form below keeps N and a LENGTH-valued shape factor
-    #   max(Ri_crit*h - d,0)*d/h but DROPS the turbulent velocity scale w_s(d),
-    #   so it is [1/s]*[m] = [m/s] and is then added to delta_V2 [m^2/s^2]
-    #   below — a dimensional inconsistency.  The faithful fix is to multiply
-    #   by the LMD94 velocity scale w_s(d) (computable here from the available
-    #   ``u_star`` and ``B_f``, evaluated at d with ``h_safe`` to keep the
-    #   h_bl_prev decoupling) — but that changes the boundary-layer depth of a
-    #   scheme exercised in the ocean matrix, so it must be validated against a
-    #   KPP BL-depth benchmark (convective w_s dominates exactly where V_t^2
-    #   matters most), not just unit tests.  Left as-is pending that benchmark.
-    # CURRENT (non-canonical) form:
-    # V_t^2 = Cv * sqrt(|N2|) / sqrt(c_s * epsilon) * max(Ri_crit*h - d, 0)*d/h
-    # Uses h_bl from the previous time step to break the coupling.
+    # LMD94 Eq. 23 unresolved-shear variance:
+    #   V_t^2(d) = Cv * (-beta_T)^1/2 / (Ri_c * kappa^2) * (c_s*eps)^-1/2
+    #              * d * N * w_s(d)                                  [m^2/s^2]
+    # ((-beta_T)^1/2 is folded into Cv.)  The d*N*w_s(d) factor — m * (1/s) *
+    # (m/s) — makes V_t^2 a velocity-squared, dimensionally additive with
+    # delta_V2 = du^2 + dv^2 [m^2/s^2].  The turbulent velocity scale w_s(d)
+    # [m/s] is essential and was previously dropped (the old non-canonical
+    # form max(Ri_c*h - d, 0)*d/h was a LENGTH, giving V_t^2 in [m/s]).  w_s
+    # is evaluated with the previous-step boundary-layer depth (h_bl_prev) so
+    # V_t^2 does not depend on the very h it helps to compute.  N is floored
+    # at sqrt(1e-30) for an AD-safe gradient (no max()-induced 0*inf).
     N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
     N2_full = jnp.concatenate([N2[..., :1], N2], axis=-1)
+    # N = sqrt(max(N^2, 0)): only STABLE stratification (N^2 > 0) contributes to
+    # the unresolved-shear variance (LMD94 / CVMix); convective layers (N^2 < 0)
+    # give V_t^2 = 0 there.  (Floored at 1e-30 for an AD-safe gradient.)
+    N_full = jnp.sqrt(jnp.maximum(N2_full, 1e-30))  # [1/s]
     max_depth = z_depth[..., -1]
     h_est = max_depth if h_bl_prev is None else h_bl_prev
     h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
-    # ``sqrt(0)`` has an infinite backward derivative; combined with
-    # ``maximum(., 0)`` whose VJP is zero on the masked side, JAX
-    # produces ``0 * inf = NaN``.  Use a tiny positive floor instead
-    # so the gradient is finite (very large) and gets multiplied by
-    # zero through ``maximum`` to a well-defined zero.  Forward
-    # error is at most ``sqrt(1e-30) ≈ 1e-15``, negligible.
-    V_t2 = (cfg.Cv * jnp.sqrt(jnp.maximum(jnp.abs(N2_full), 1e-30))
-            / jnp.sqrt(jnp.maximum(cfg.c_s * cfg.epsilon_lmd, eps))
-            * jnp.maximum(cfg.Ri_crit * h_safe - z_depth, 0.0)
-            * z_depth / h_safe)
+    _, w_s_vt = _kpp_velocity_scales(u_star, B_f, z_depth, h_safe, cfg, eps)
+    V_t2 = (cfg.Cv * N_full * z_depth * w_s_vt
+            / (cfg.Ri_crit * cfg.kappa_vk ** 2
+               * jnp.sqrt(jnp.maximum(cfg.c_s * cfg.epsilon_lmd, eps))))
 
     # Bulk Richardson number
     Ri_b = (g * delta_rho * z_depth) / (
@@ -258,70 +311,15 @@ def kpp_vertical_mixing(
     sigma_clip = jnp.clip(sigma, 0.0, 1.0)
     G = sigma_clip * (1.0 - sigma_clip) ** 2
 
-    # --- Turbulent velocity scale w_s(sigma) (LMD94 Appendix B) ---
-    # w_s depends on stability (B_f) and depth d = sigma * h_bl
+    # --- Turbulent velocity scales w_m (momentum) / w_s (scalar) ---
+    # LMD94 Appendix B; shared with the bulk-Richardson V_t^2 via
+    # _kpp_velocity_scales (one implementation, no duplication).  The scalar
+    # scale w_s uses the steeper unstable exponent so K_v > A_v (Pr_t < 1) in
+    # convection (F-OCEAN-1), while w_m feeds the momentum viscosity.
     d = sigma_clip * h_bl[..., jnp.newaxis]
-    # LMD94 surface-layer limit: the similarity scale is evaluated only
-    # within the surface layer (σ ≤ ε) and held constant below it, i.e.
-    # the velocity-scale depth is capped at d_eff = min(d, ε·h_bl).
-    # Without this, w keeps varying through the whole boundary layer
-    # instead of holding constant beneath the surface layer (LMD94 §A/B).
-    d_eff = jnp.minimum(d, cfg.epsilon_lmd * h_bl[..., jnp.newaxis])
-    # Monin-Obukhov length: L_MO = u_star^3 / (kappa * B_f)
-    # Use copysign(eps, B_f) to preserve the sign of B_f near zero,
-    # preventing a stability classification flip (issue #168 bug 1).
-    B_f_safe = jnp.where(
-        jnp.abs(B_f[..., jnp.newaxis]) > eps,
-        B_f[..., jnp.newaxis],
-        jnp.copysign(eps, B_f[..., jnp.newaxis]),
+    w_m, w_s = _kpp_velocity_scales(
+        u_star, B_f, d, h_bl[..., jnp.newaxis], cfg, eps,
     )
-    L_MO = u_star[..., jnp.newaxis]**3 / (cfg.kappa_vk * B_f_safe)
-    zeta_kpp = d_eff / L_MO
-
-    # LMD94 Appendix B SEPARATE momentum (w_m) and scalar (w_s) velocity
-    # scales (F-OCEAN-1).  They share the stable form (phi_m = phi_s =
-    # 1 + 5*zeta) but the unstable similarity functions differ — scalars
-    # mix more efficiently than momentum:
-    #   weakly unstable:  w_m = k·u*·(1+16|z|)^{1/4},
-    #                     w_s = k·u*·(1+16|z|)^{1/2}
-    #   convective:       w_x = k·(a_x·u*³ + c_x·k·B_f·d)^{1/3}
-    # joined continuously at |zeta| = zeta_{m,s}_abs (LMD94 chose
-    # a_x/c_x so the convective branch matches the weakly branch there).
-    # The previous code used the momentum 1/4 power for the single scale
-    # feeding BOTH A_v and K_v, so the boundary layer carried Pr_t ≡ 1;
-    # the steeper scalar exponent now gives K_v > A_v ⇒ Pr_t < 1 in
-    # unstable conditions, as observed.
-    kappa = cfg.kappa_vk
-    ustar_e = u_star[..., jnp.newaxis]
-    abs_zeta = jnp.abs(zeta_kpp)
-    Bf_pos = jnp.maximum(B_f[..., jnp.newaxis], 0.0)
-    is_unstable = B_f[..., jnp.newaxis] > 0.0
-
-    base16 = jnp.maximum(1.0 + _BUSINGER_UNSTABLE_COEFF * abs_zeta, 1.0)
-    w_m_weak = kappa * ustar_e * jnp.power(base16, 0.25)
-    w_s_weak = kappa * ustar_e * jnp.power(base16, 0.5)
-    # Convective scales (kappa OUTSIDE the cube root).  The floored base
-    # keeps the cube root and its gradient finite even if the argument
-    # would dip ≤ 0 numerically near the join (F-OCEAN-2 pattern).
-    w_m_conv = kappa * jnp.power(
-        jnp.maximum(cfg.a_m * ustar_e ** 3 + cfg.c_m * kappa * Bf_pos * d_eff, 1e-30),
-        1.0 / 3.0,
-    )
-    w_s_conv = kappa * jnp.power(
-        jnp.maximum(cfg.a_s * ustar_e ** 3 + cfg.c_s * kappa * Bf_pos * d_eff, 1e-30),
-        1.0 / 3.0,
-    )
-    w_m_unstable = jnp.where(abs_zeta <= cfg.zeta_m_abs, w_m_weak, w_m_conv)
-    w_s_unstable = jnp.where(abs_zeta <= cfg.zeta_s_abs, w_s_weak, w_s_conv)
-
-    # Shared stable suppression.  Under this sign convention (B_f > 0 =
-    # unstable) ``L_MO = u*³/(kappa·B_f)`` is NEGATIVE for stable forcing,
-    # so ``zeta_kpp < 0``; ``max(-zeta_kpp, 0)`` lets the magnitude of
-    # zeta drive the suppression (codex review iter-1 finding #4).
-    w_stable = (kappa * ustar_e
-                / jnp.maximum(1.0 + _BUSINGER_STABLE_COEFF * jnp.maximum(-zeta_kpp, 0.0), 1.0))
-    w_m = jnp.maximum(jnp.where(is_unstable, w_m_unstable, w_stable), 1e-10)
-    w_s = jnp.maximum(jnp.where(is_unstable, w_s_unstable, w_stable), 1e-10)
 
     # --- BL viscosity (momentum, w_m) and diffusivity (scalar, w_s) ---
     K_bl_m_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_m * G, cfg.K_max)
