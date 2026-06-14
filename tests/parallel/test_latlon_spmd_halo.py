@@ -1,0 +1,73 @@
+"""Lat-lon band SPMD halo (multi-GPU, no mpi4jax) — bit-identity vs serial.
+
+The foundation for the ocean lat-lon multi-GPU SPMD step: lat-band ppermute +
+local lon-wrap + pole fold at the end bands.  Each band's padded block must
+equal the serial ``pad_halo_latlon_local`` (scalar) / ``..._vector_local``
+(vector, v sign-flip at pole) window for that band.  Runs on host CPU devices
+(``XLA_FLAGS=--xla_force_host_platform_device_count=4``); the production target
+is 2 GPUs but the shard_map/ppermute logic is device-agnostic.
+"""
+from __future__ import annotations
+
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from legoesm.grids.halo_latlon import (
+    pad_halo_latlon_local, pad_halo_latlon_vector_local,
+    pad_halo_latlon_3d_local, pad_halo_latlon_vector_3d_local,
+)
+from legoesm.parallel.latlon_spmd import pad_halo_latlon_band_spmd
+
+N_DEV = 4
+N_LAT = 16
+NL = N_LAT // N_DEV
+N_LON = 8
+
+
+def _mesh():
+    if len(jax.devices()) < N_DEV:
+        pytest.skip(f"needs --xla_force_host_platform_device_count={N_DEV}")
+    from jax.sharding import Mesh
+    dev = np.array(jax.devices()[:N_DEV])
+    return Mesh(dev, axis_names=("lat",))
+
+
+@pytest.mark.parametrize("negate", [False, True])
+@pytest.mark.parametrize("nlev", [None, 5])
+def test_latlon_band_pad_matches_serial(negate, nlev):
+    mesh = _mesh()
+    from jax.sharding import NamedSharding, PartitionSpec as P
+
+    rng = np.random.default_rng(91 + int(negate) + (0 if nlev is None else 100))
+    shp = (N_LAT, N_LON) if nlev is None else (N_LAT, N_LON, nlev)
+    field = jnp.asarray(rng.standard_normal(shp))
+
+    # Serial reference must be lon=axis-1 aware: the generic 2D helpers pad the
+    # LAST axis as lon (wrong for (lat,lon,nlev)), so use the 3D-aware helpers
+    # when nlev is present (codex HIGH).
+    if nlev is None:
+        serial_fn = pad_halo_latlon_vector_local if negate else pad_halo_latlon_local
+    else:
+        serial_fn = (pad_halo_latlon_vector_3d_local if negate
+                     else pad_halo_latlon_3d_local)
+    ref = np.asarray(serial_fn(field, halo=1))            # (N_LAT+2, N_LON+2[,lev])
+
+    isp = P("lat", *((None,) * (field.ndim - 1)))
+    field_sh = jax.device_put(field, NamedSharding(mesh, isp))
+    out = np.asarray(pad_halo_latlon_band_spmd(mesh, halo=1, negate=negate)(field_sh))
+
+    blk = NL + 2                                          # per-band padded lat
+    assert out.shape[0] == N_DEV * blk
+    worst = 0.0
+    for b in range(N_DEV):
+        t = out[b * blk:(b + 1) * blk]
+        g = ref[b * NL: b * NL + NL + 2]
+        worst = max(worst, float(np.max(np.abs(t - g))))
+    assert worst < 1e-12, (
+        f"latlon band SPMD halo vs serial (negate={negate}, nlev={nlev}): "
+        f"{worst:.3e}")
