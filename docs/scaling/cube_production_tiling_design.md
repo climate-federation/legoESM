@@ -84,17 +84,32 @@ numerics).
   is done: P-v (cc/C winds) -> Bernoulli (pointwise) -> P-iii (A-L grad) + P-ii
   (corner winds + interp_corner_to_center) -> P-i (dgrid_vorticity) ->
   cgrid_divergence (Jun-11, div damp).
-- **REMAINING (both U3-scale HARD + future-HW, the genuine deferred-deep work):**
-  - **mass `cgrid_mass_flux_divergence` (PPM)** — HARDEST op. `_ppm_reconstruct_1d`
-    has FACE-EXTENT-dependent boundary logic (`n_interior=n` + xppm-boundary) that
-    does NOT sub-face-tile trivially, + cross-face `synchronize_cgrid_fluxes`.
-    Needs the U3 external-halo + face-boundary approach (cf. experimental
-    `_ppm_transport_1d` U3a-f) = multi-increment.
-  - **ASSEMBLY: full `fv3_sw_tendencies` np24 shard_map** — the genuine np24
-    unlock. Hard because INTERMEDIATES (u_cc->u_c->B->dB...) are computed
-    IN-STAGE, so chaining the per-op tiles needs IN-STAGE halo exchanges
-    (ppermute) for the intermediates (approach-C pre-pad covers only the STAGE
-    INPUTS). Same reason the experimental U3/U4 chain was never assembled.
-  - Bernoulli (`KE`, `B`) is pointwise -> inline in the assembly (no kernel).
+- **ASSEMBLY: tiled `fv3_sw_tendencies` MOMENTUM stage SHIPPED** —
+  `make_tiled_fv3_sw_momentum_stage_2d` (tiled_production_cdgrid.py). The
+  genuine np24 momentum unlock: chains fv3_d2cc -> Bernoulli (inline pointwise)
+  -> [B SCALAR in-stage halo] -> A-L grad -> [u_cc/v_cc VECTOR in-stage halo]
+  -> corner winds -> dgrid_vorticity -> interp_corner_to_center -> du_cc/dv_cc
+  -> [VECTOR in-stage halo] -> D-grid project. The INTERMEDIATE halos (B; cc
+  winds; cc tendencies — no global pre-pad) are exchanged IN-STAGE via the
+  EXISTING `make_tiled_pad_body` (scalar) / `make_tiled_pad_vector_body`
+  (vector) — the foundational sub-face halo (incl. the mode-1 diagonal corner
+  ppermute) was already built (U3). Base case only: div_damp=0, hyperdiff=0,
+  boundary_fix=False, fortran_*=False, non-duogrid. Bit-identity vs global
+  `fv3_sw_tendencies` (du_d_dt, dv_d_dt) at kt=2 (np24) + kt=3 (np54),
+  rel<1e-10; codex-clean (7/7 vectors). Gate: `test_tiled_fv3_sw_momentum.py`.
+- **REMAINING (U3-scale HARD + future-HW, the genuine deferred-deep work):**
+  - **mass `cgrid_mass_flux_divergence` (PPM)** — HARDEST op. BASE case
+    (apply_fortran_xppm_boundary=False, non-duogrid) reduces to: halo=2 in-stage
+    scalar exchange of h (`make_tiled_pad_body(halo=2)`) + the cc-wind VECTOR
+    halo + `fv3_cc2c_core` (u_c/v_c are intermediates too) -> `_ppm_reconstruct_1d`
+    (xppm boundary OFF -> `n_interior` unused) -> upwind face -> flux ->
+    divergence; NO `synchronize_cgrid_fluxes` (non-duogrid). The face-extent
+    boundary logic (`n_interior=n`) only bites with the Fortran xppm overrides
+    (a later increment). NEXT unit.
+  - Optional momentum terms (div damp / hyperdiff / boundary smoothing /
+    Fortran corner specials) — each rides the shipped per-op kernels + one more
+    in-stage halo; their own increments.
+  - With dh_dt tiled, the FULL `fv3_sw_tendencies` np24 stage = momentum
+    assembly + mass assembly sharing the cc-wind vector halo.
 - LESSON: a prior session built tiling infra; ALWAYS grep `tests/parallel/
   test_tiled_*` + `parallel.mesh` before tiling a cube op.
