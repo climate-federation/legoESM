@@ -498,6 +498,75 @@ def batch_allreduce_mpi(
     return results
 
 
+def batch_psum_spmd(
+    values: list[jax.Array],
+    axis_name: str | tuple[str, ...],
+) -> list[jax.Array]:
+    """Batch multiple SPMD reductions into a single ``jax.lax.psum``.
+
+    The single-controller (``shard_map``) analogue of
+    :func:`batch_allreduce_mpi`: instead of ``mpi4jax.allreduce`` it sums
+    the packed buffer with :func:`jax.lax.psum` over the mesh ``axis_name``
+    (the device-shard axis).  Used by the lat-lon band SPMD ocean step
+    (route-B, pure-jax multi-GPU — no mpi4jax), where the barotropic PCG's
+    inner products are local PARTIAL sums over each device's latitude band
+    and must be summed across the ``"lat"`` axis to obtain the global dot.
+
+    MUST be called INSIDE a ``shard_map`` whose mesh carries ``axis_name``
+    (``jax.lax.psum`` needs the axis in scope); the lat-lon ocean step
+    arms it via :func:`legoesm.parallel.latlon_spmd.activate_latlon_spmd_halo`.
+
+    **Differentiable**: ``jax.lax.psum`` is self-transposing (its VJP is a
+    ``psum`` of the cotangents), so unrolling the fixed-M PCG and
+    differentiating straight through these reductions is AD-safe — the same
+    property ``allreduce(SUM)`` has in the MPI path (CLAUDE.md MPI-AD
+    doctrine).
+
+    Parameters
+    ----------
+    values : list[jax.Array]
+        Local partial values (per-device) to sum across ``axis_name``.
+        Each may be a scalar or array of any shape; shapes need not match.
+    axis_name : str | tuple[str, ...]
+        The ``shard_map`` mesh axis (or axes) over which the field is
+        sharded — the device dimension the partial sums must combine over.
+
+    Returns
+    -------
+    list[jax.Array]
+        Globally-summed values, original shapes and dtypes restored.
+    """
+    if not values:
+        return []
+
+    import jax.numpy as jnp
+
+    # Pack -> ONE psum -> unpack (mirrors batch_allreduce_mpi so a single
+    # collective carries all CG scalars of an iteration).
+    dtypes = [v.dtype for v in values]
+    common_dtype = jnp.result_type(*dtypes)
+    promoted = [v.astype(common_dtype) for v in values]
+
+    shapes = [v.shape for v in values]
+    sizes = [int(v.size) for v in promoted]
+
+    flat_parts = [v.reshape(-1) for v in promoted]
+    packed = jnp.concatenate(flat_parts, axis=0)
+
+    global_packed = jax.lax.psum(packed, axis_name)
+
+    results = []
+    offset = 0
+    for i, (shape, size) in enumerate(zip(shapes, sizes)):
+        chunk = global_packed[offset : offset + size].reshape(shape)
+        if dtypes[i] != common_dtype:
+            chunk = chunk.astype(dtypes[i])
+        results.append(chunk)
+        offset += size
+
+    return results
+
+
 def broadcast_mpi(value: jax.Array, root: int = 0) -> jax.Array:
     """Broadcast an array from one rank to all others.
 

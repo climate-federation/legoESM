@@ -208,6 +208,26 @@ def _global_dot_batch(
     PCG and differentiating straight through these reductions is AD-safe.
     """
     local = [jnp.sum(a * b) for (a, b) in pairs]
+    # SPMD (single-controller shard_map, route-B multi-GPU — no mpi4jax)
+    # path: each ``local`` sum is a PARTIAL sum over this device's shard
+    # (one latitude band) and must be summed across the mesh shard axis
+    # with ``jax.lax.psum``.  Checked FIRST because ``is_multi_process()``
+    # is FALSE under one process — otherwise the partial sum would be
+    # silently returned as the "global" dot and every band would converge
+    # to its own sub-system (the MPAS analogue of this bug was job
+    # 8460616).  Backend is ``"spmd"`` ONLY when armed by
+    # ``activate_latlon_spmd_halo`` (cube SPMD does not call this), so this
+    # branch is inert for the serial and MPI paths.  ``psum`` is
+    # self-transposing => AD-safe, same as ``allreduce(SUM)``.
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() == "spmd":
+        mesh = get_spmd_mesh()
+        if mesh is None:
+            raise RuntimeError(
+                "_global_dot_batch: halo backend is 'spmd' but no SPMD mesh "
+                "is set; call activate_latlon_spmd_halo(mesh) first.")
+        from legoesm.parallel.reductions import batch_psum_spmd
+        return batch_psum_spmd(local, mesh.axis_names[0])
     # Function-scope import: ``reductions`` pulls in mpi4jax lazily and
     # ``core.operators`` (cross-package), so keep it out of module top.
     from legoesm.parallel.reductions import (
