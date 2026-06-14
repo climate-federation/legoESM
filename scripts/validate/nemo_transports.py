@@ -167,10 +167,9 @@ def nemo_mht(grid_v_path, grid_t_path, domain_cfg_path):
         if "time_counter" in vo_da.dims:
             vo_da = vo_da.mean("time_counter")
         voe3 = _sq3(vo_da.values) * _sq3(dc["e3v_0"].values)
-    tname = ("thetao" if "thetao" in dT else
-             ("toce" if "toce" in dT else ("votemper" if "votemper" in dT else None)))
+    tname = next((n for n in ("thetao", "toce", "votemper", "to") if n in dT), None)
     if tname is None:
-        raise KeyError("grid_T has none of 'thetao'/'toce'/'votemper'")
+        raise KeyError("grid_T has none of 'thetao'/'toce'/'votemper'/'to'")
     t_da = dT[tname]
     if "time_counter" in t_da.dims:
         t_da = t_da.mean("time_counter")

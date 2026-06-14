@@ -2101,6 +2101,17 @@ def main() -> int:
     p.add_argument("--mle-ce", type=float, default=0.06,
                    help="MLE efficiency coefficient rn_ce (NEMO ORCA1 0.06; "
                         "typical 0.06-0.08). For --mle.")
+    p.add_argument("--geothermal", action="store_true",
+                   help="Geothermal bottom heat-flux boundary condition (NEMO "
+                        "ln_trabbc, Emile-Geay & Madec 2009): warm the deepest "
+                        "wet cell of each column by the seafloor heat flux. "
+                        "Grid-agnostic. Tiny + abyssal -- structural NEMO "
+                        "faithfulness, NOT a surface-SST lever on spin-up "
+                        "timescales. Default off.")
+    p.add_argument("--geothermal-flux-wm2", type=float, default=None,
+                   help="Constant seafloor geothermal heat flux [W/m^2] for "
+                        "--geothermal. Default = GeothermalConfig default "
+                        "(NEMO rn_geoflx_cst).")
     p.add_argument("--div-damp-2", type=float, default=None,
                    help="2nd-order divergence damping [m^2/s] -- suppresses "
                         "grid-scale divergent (checkerboard) modes at small "
@@ -2680,14 +2691,15 @@ def main() -> int:
         # reachable only with --no-emp AND no --runoff/--sss-restore/--ice-albedo
         # (a pure momentum/heat tripole perf run, issue #354).
         if (args.emp_freshwater or args.runoff or args.sss_restore
-                or args.ice_albedo or args.ice_thermo):
+                or args.ice_albedo or args.ice_thermo or args.geothermal):
             raise SystemExit(
                 "[scan] --scan-block applies no surface salinity/albedo/ice forcing "
-                "(P - E / runoff / SSS restoring / ice-albedo / ice-thermo are "
-                "host-loop only), so it cannot run a faithful integration.  Use the "
-                "host Python loop (omit --scan-block), or drop "
-                "--runoff/--sss-restore/--ice-albedo/--ice-thermo and pass --no-emp "
-                "for the momentum/heat-only scan path.")
+                "or geothermal BC (P - E / runoff / SSS restoring / ice-albedo / "
+                "ice-thermo / geothermal are host-loop only), so it cannot run a "
+                "faithful integration.  Use the host Python loop (omit "
+                "--scan-block), or drop "
+                "--runoff/--sss-restore/--ice-albedo/--ice-thermo/--geothermal and "
+                "pass --no-emp for the momentum/heat-only scan path.")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
@@ -2880,6 +2892,30 @@ def main() -> int:
             state = state._replace(
                 T=Field(jnp.asarray(Tn), name=state.T.name,
                         dims=state.T.dims, units=state.T.units))
+        if args.geothermal:
+            # Geothermal bottom heat-flux BC (NEMO ln_trabbc): warm the deepest
+            # wet cell of each column by the seafloor heat flux Q_geo. Live
+            # partial-cell thickness from compute_layer_thickness (true h_k);
+            # wet = h_k > 1e-3 m (below-seafloor rock cells carry h_k = 0). Grid-
+            # agnostic (..., nlev) host post-step update, like the SSS/ice-thermo
+            # paths. Explicit + unconditionally stable (no inter-level coupling).
+            from legoesm.ocean.coupler import apply_geothermal_step
+            from legoesm.ocean.physics.geothermal import GeothermalConfig
+            from legoesm.ocean.vertical import compute_layer_thickness
+            _eta = getattr(state, "eta", None)
+            _eta_arr = (state.eta.data if _eta is not None
+                        else jnp.zeros_like(jnp.asarray(H_bathy)))
+            _dz = compute_layer_thickness(_eta_arr, jnp.asarray(H_bathy), z_coord)
+            # Wet = positive live thickness AND ocean (the 2-D land mask): on a
+            # pure-z* grid a land column with nonzero eta has dz>0 but must NOT
+            # be geothermally heated (codex). land_mask is (...,) -> broadcast.
+            _lm = jnp.asarray(state.land_mask.data)[..., None] > 0.5
+            _wet = ((_dz > 1e-3) & _lm).astype(_dz.dtype)
+            _geo_cfg = GeothermalConfig(enabled=True)
+            if args.geothermal_flux_wm2 is not None:
+                _geo_cfg = _geo_cfg._replace(flux_wm2=args.geothermal_flux_wm2)
+            state = apply_geothermal_step(
+                state, dz_live=_dz, wet_cell=_wet, dt=dt, config=_geo_cfg)
         if bbl_geom is not None:
             # NEMO advective BBL (Campin-Goosse): dense shelf bottom water
             # descends the slope. Host post-step exchange, exactly tracer-

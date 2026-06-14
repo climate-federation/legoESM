@@ -20,6 +20,7 @@ from .ice_shelf_apply import (
     apply_ice_shelf_basal_step_mpas,
 )
 from .tidal_mixing_apply import apply_tidal_mixing_step
+from .geothermal_apply import apply_geothermal_step
 
 __all__ = [
     "apply_omip2_surface_fluxes",
@@ -32,4 +33,5 @@ __all__ = [
     "apply_ice_shelf_basal_step",
     "apply_ice_shelf_basal_step_mpas",
     "apply_tidal_mixing_step",
+    "apply_geothermal_step",
 ]

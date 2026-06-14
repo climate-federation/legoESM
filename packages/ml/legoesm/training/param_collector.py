@@ -54,6 +54,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.soil_grid",
     "legoesm.land.soil_hydraulics",
     "legoesm.ocean.physics.convection.config",
+    "legoesm.ocean.physics.geothermal",
     "legoesm.ocean.physics.ice_shelf",
     "legoesm.ocean.physics.lateral_mixing.backscatter",
     "legoesm.ocean.physics.lateral_mixing.config",

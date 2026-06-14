@@ -6,6 +6,30 @@ commit messages; `OMIP_faithful.md`. Memories: [[omip-faithful-project]], [[omip
 [[omip-pipeline-coordinate-bugs]], [[omip-smag-cap-stabilizer]], [[omip-postmerge-packages-layout]],
 [[omip-cube-cdgrid-pivot]]. Branch `omip-faithful-nemo-comparison`.
 
+## UPDATE 2026-06-14 (iter-L — interior-diagnostic battery + geothermal BC + 2-res matrix)
+**Diagnosis-driven.** The surface scorer hid the interior; built the **interior battery**
+`scripts/validate/diag_omip_nemo_battery.py` (horizontal T/S depth snapshots @ 0/100/300/1000 m,
+zonal-mean T/S sections model|NEMO|Δ, + NEMO AMOC@26.5N/ACC@Drake/MHT refs via `nemo_transports`),
+reusing the scorer's IDW regrid + the model AMOC/baro-SF helpers. 8 unit tests. **Per-level wet mask**
+(`z<H_bathy ∧ ocean`, NOT the 2-D land mask) — codex HIGH: the model fills below-seafloor cells with the
+deepest-active value (finite, not NaN), so a 2-D mask regrids rock as ocean in deep slices/sections.
+NEMO 3-D vars are `to`/`so` (5.0.x), not thetao — fixed in the battery AND `nemo_transports.nemo_mht`.
+**Key bias finding (drove the matrix):** the dominant residual is a **NH-cold / SH-warm dipole in the
+COARSE runs** (latlon 1°/mpas 115 km 2-yr: NH-mid −1.7/−1.2, Arctic −1.2/−1.4, SH-mid +1.0/+1.1) that
+**ico7 (57 km) nearly erases** (NH-mid +0.15, SH-mid −0.23) ⇒ unresolved-WBC error, **resolution is the
+lever**, not a missing param. Tropical pattern (corr 0.82→0.875) + too-deep NH-winter MLD (MLE, job
+8477859) are the resolution-residuals.
+**New parameterization shipped — geothermal bottom heat-flux BC** (`ocean/physics/geothermal.py` +
+`coupler/geothermal_apply.py`, NEMO `ln_trabbc`, Emile-Geay & Madec 2009): warms the SINGLE deepest wet
+cell, `Q/(ρ₀ c_sw h)`, grid-agnostic `(...,nlev)`, `--geothermal`/`--geothermal-flux-wm2`. Genuinely
+MISSING (tidal mixing already exists in `vertical_mixing/tidal.py` but is OFF). Contract+param_spec+12
+tests; codex r1 (1 MED one-hot interior-gap → reverse-cumsum, Field-metadata-drop → `T.replace`,
+wet∧land_mask) fixed. HONEST: abyssal signal, ~zero surface SST on <5 yr — structural faithfulness, not
+a score-mover. **2-resolution matrix launched** (each grid ×2 res, +geothermal where fresh): mpas
+ico6+ico7 (battery now, season-matched day-90), latlon 1°+½° (jobs), tripole ¼° (8477016) + 1° re-test
+(RK3+smag-cap may now hold the WBC that forward-Euler couldn't). Geothermal end-to-end smoke + battery
+PNG jobs queued. See [[omip-faithful-project]].
+
 ## HONEST ACCOUNTING — 5 grids considered: 3 FAITHFUL, 1 parked, 1 ill-posed
 | grid | status | SST RMSE vs NEMO Mar (day-90) |
 |---|---|---|
