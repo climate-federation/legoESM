@@ -1,0 +1,22 @@
+# legoESM experiment template — ice-thickness-distribution remap round-trip.
+#
+# Names the `itd_roundtrip` sea-ice matrix case via `setup:` (#388).
+experiment:
+  tier: tier1
+  complexity: itd
+  extent: column
+  maturity: structurally_validated
+  description: >
+    Ice-thickness-distribution (ITD) linear-remap round-trip: advecting the ITD
+    forward then back recovers the initial distribution — a conservation/
+    reversibility check on the Lipscomb (2001) remapping.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "sea-ice-itd-roundtrip"
+  type: sea_ice_only
+setup:
+  name: itd_roundtrip
+  grid: column
+output:
+  path: output/sea_ice/itd_roundtrip/

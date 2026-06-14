@@ -54,7 +54,12 @@ class MatrixRunnerSpec:
 
     runner_path: str
     valid_grids: tuple[str, ...]
-    case_flag: str = "--only"        # the exact-case-name filter
+    case_flag: str = "--only"        # the exact-case-name filter flag
+    # Prefix the case name with this to request EXACT match.  ocean / atmosphere
+    # filters strip a leading ``=`` to switch from substring to exact, so they
+    # use ``"="``; a runner whose case flag is ALREADY exact (sea-ice ``--test``,
+    # ``tc.case == args.test``) uses ``""``.
+    exact_prefix: str = "="
     grid_flag: str = "--grid"
     levels_flag: str | None = "--levels"
     dt_flag: str | None = "--dt"
@@ -151,7 +156,7 @@ def build_matrix_command(spec: MatrixRunnerSpec, setup, *, output_path=None) -> 
     """
     parts = [
         f"python {spec.runner_path}",
-        f"{spec.case_flag} {shlex.quote('=' + str(setup['name']))}",
+        f"{spec.case_flag} {shlex.quote(spec.exact_prefix + str(setup['name']))}",
         f"{spec.grid_flag} {shlex.quote(str(setup['grid']))}",
     ]
     if setup.get("levels") is not None and spec.levels_flag:

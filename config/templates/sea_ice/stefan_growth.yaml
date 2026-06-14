@@ -1,0 +1,23 @@
+# legoESM experiment template — Stefan ice-growth column benchmark.
+#
+# Names the `stefan_growth` idealized sea-ice matrix case via the `setup:`
+# selector (#388). Routes (exact) to:
+#   run_sea_ice_test_matrix.py --test stefan_growth --grid column
+experiment:
+  tier: tier1
+  complexity: thermodynamic
+  extent: column
+  maturity: structurally_validated
+  description: >
+    Stefan problem: analytic ice-growth rate under a fixed cold surface — the
+    canonical single-column thermodynamic sea-ice benchmark (growth ∝ √t).
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "sea-ice-stefan-growth"
+  type: sea_ice_only
+setup:
+  name: stefan_growth
+  grid: column
+output:
+  path: output/sea_ice/stefan_growth/

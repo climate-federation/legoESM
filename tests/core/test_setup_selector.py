@@ -19,6 +19,12 @@ OCEAN = MatrixRunnerSpec(runner_path="scripts/matrix/run_ocean_test_matrix.py",
 ATM = MatrixRunnerSpec(runner_path="scripts/matrix/run_atmosphere_test_matrix.py",
                        valid_grids=("cubed_sphere", "latlon", "spectral"),
                        case_flag="--test", levels_flag=None, dt_flag=None)
+# sea-ice-like spec: case flag is --test and ALREADY exact (no `=` prefix)
+ICE = MatrixRunnerSpec(runner_path="scripts/matrix/run_sea_ice_test_matrix.py",
+                       valid_grids=("cubed_sphere", "column"),
+                       case_flag="--test", exact_prefix="",
+                       levels_flag=None, dt_flag=None, days_flag=None,
+                       resolution_flag=None)
 
 
 class TestValidate:
@@ -89,6 +95,14 @@ class TestCommand:
         assert "--test =williamson2" in cmd          # case flag is --test
         assert "--only" not in cmd                    # not the equation-set flag
         assert "--grid cubed_sphere" in cmd
+
+    def test_sea_ice_exact_no_prefix(self):
+        # sea-ice --test is already exact: no leading `=`.
+        cmd = build_matrix_command(ICE, {"name": "stefan_growth", "grid": "column"})
+        assert "run_sea_ice_test_matrix.py" in cmd
+        assert "--test stefan_growth" in cmd
+        assert "=stefan_growth" not in cmd        # NO `=` prefix
+        assert "--grid column" in cmd
 
     def test_overrides_mapped(self):
         cmd = build_matrix_command(OCEAN, {
