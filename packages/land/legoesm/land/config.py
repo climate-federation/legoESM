@@ -118,3 +118,19 @@ class MultiLayerLandConfig(NamedTuple):
     # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
     # Runtime dispatch via ``isinstance`` inside ``step_multilayer_land``.
     surface_scheme: Any = SimpleSEBConfig()
+
+
+def resolve_land_config(land_mode: str, land_config=None):
+    """Return the land config object matching ``land_mode``.
+
+    Single source of truth for the ``land_mode`` -> config-type mapping used by
+    the coupled driver and the ``run_lmip_smoke`` driver: ``"multilayer"`` ->
+    :class:`MultiLayerLandConfig`, ``"slab"``/``"none"`` -> :class:`LandConfig`.
+    A ``land_config`` of the wrong type for the mode is replaced with the
+    mode's default (so the runtime type always matches the selected model).
+    """
+    if land_mode == "multilayer":
+        return land_config if isinstance(land_config, MultiLayerLandConfig) else MultiLayerLandConfig()
+    if land_mode == "none":
+        return LandConfig()
+    return land_config if isinstance(land_config, LandConfig) else LandConfig()
