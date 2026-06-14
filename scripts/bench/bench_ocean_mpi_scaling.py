@@ -174,9 +174,19 @@ def _configure_jax_gpu(precision: str) -> None:
     JAX_PLATFORMS).  Local rank from the MPI launcher env (OpenMPI / SLURM).
     """
     local = (os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
-             or os.environ.get("SLURM_LOCALID")
-             or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK")
-             or "0")
+             or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK"))
+    if local is None:
+        # SLURM_LOCALID is exported even in a plain sbatch step (ntasks=1, no
+        # srun); pinning on it THERE hides all but GPU 0 from a single-process
+        # multi-GPU run (the documented silent eff=0.5 bug, jobs 8454397/
+        # 8454737). Only honor it for a genuine multi-task launch (codex
+        # capstone LOW).
+        slid = os.environ.get("SLURM_LOCALID")
+        nt = os.environ.get("SLURM_NTASKS", "1")
+        if slid is not None and nt.isdigit() and int(nt) > 1:
+            local = slid
+    if local is None:
+        local = "0"
     os.environ["CUDA_VISIBLE_DEVICES"] = local   # one GPU visible per rank
     os.environ["JAX_PLATFORMS"] = "cuda"
     if precision == "float64":
