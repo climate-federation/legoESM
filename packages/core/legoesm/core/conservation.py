@@ -37,6 +37,55 @@ from legoesm.grids.vertical import compute_geopotential
 # top level (re-enters their __init__ mid-load, breaks isolated pytest; CLAUDE.md).
 
 
+def energy_consistent_moisture_floor(q_v_raw, T):
+    """Floor ``q_v`` at zero while conserving moist static energy.
+
+    Issue #323.  The per-step physics tracer update
+    ``q_v_raw = q_v + dt * dq_v_dt`` can go negative when the combined
+    convective (SBM) + microphysical (Kessler) vapour sink exceeds the
+    available vapour in a column.  A plain ``max(q_v_raw, 0)`` floor
+    truncates the vapour sink but leaves the matching condensation latent
+    heat already added to ``T`` in full, injecting spurious heat that
+    accumulates under organised convection and drives the wind blow-up.
+
+    This floors ``q_v`` AND removes the latent heat tied to the clipped
+    (un-removed) vapour, so the floor is moist-static-energy neutral::
+
+        deficit = max(-q_v_raw, 0)            # vapour the sink could not remove
+        q_v_out = q_v_raw + deficit = max(q_v_raw, 0)
+        T_out   = T - (L_v / c_pd) * deficit
+
+    Hence ``c_pd*T_out + L_v*q_v_out == c_pd*T + L_v*q_v_raw`` to roundoff
+    (the map is piecewise-linear in ``q_v_raw``), whereas the plain floor
+    leaves a residual ``+L_v*deficit`` of spurious energy.
+
+    Scope / limitations (deliberate; this targets the *energy* blow-up).
+    ------------------------------------------------------------------
+    * **Conserves moist static energy, NOT total water.**  It does not touch
+      ``q_c``/``q_r``: if the over-removed vapour had been routed to condensate
+      (``dq_c > 0``), that condensate is still created, so column total water
+      ``q_v + q_c + q_r`` rises by ``deficit``.  Removing the spurious *heat*
+      is what stops the wind blow-up; full total-water closure needs a
+      per-scheme limiter that caps each scheme's vapour sink AND its matching
+      condensate/rain source together (a larger change, see Issue #323).
+    * **First-order latent-heat attribution.**  ``deficit`` is taken from the
+      *summed* ``dq_v_dt``, which also carries non-condensational sinks
+      (turbulent mixing, surface evaporation) that release no latent heat.
+      Attributing the whole overshoot to condensation slightly over-cools
+      when those are present.  This is a good approximation for the
+      condensation-dominated drying it is meant for (kessler+sbm) and is why
+      it is opt-in (default off) rather than always on.
+
+    Pure ``jnp``; differentiable (subgradient at the ``q_v_raw = 0`` kink).
+    Returns ``(q_v_out, T_out)`` with the dtypes of the inputs preserved by
+    the caller's downstream ``_match_dtype`` cast.
+    """
+    deficit = jnp.maximum(-q_v_raw, 0.0)
+    q_v_out = q_v_raw + deficit
+    T_out = T - (constants.L_v / constants.c_pd) * deficit
+    return q_v_out, T_out
+
+
 def _accumulation_dtype():
     """Return the dtype for accumulation in conservation fixers.
 

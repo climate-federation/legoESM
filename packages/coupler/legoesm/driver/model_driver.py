@@ -21,7 +21,10 @@ from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.forcing.time_utils import day_to_calendar
 
-from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic
+from legoesm.core.conservation import (
+    compute_global_moisture, fix_moisture_hydrostatic,
+    energy_consistent_moisture_floor,
+)
 from legoesm.core.tracers import (
     TracerRegistry,
     init_tracers,
@@ -5053,6 +5056,7 @@ class ModelDriver:
             owned_face_ids=self._owned_face_ids,
             hs_newtonian_relax=self._hs_newtonian_relax,
             device_config=_seg_device_config,
+            energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
         )
 
         logger.info(
@@ -5380,6 +5384,7 @@ class ModelDriver:
                         owned_face_ids=self._owned_face_ids,
                         hs_newtonian_relax=self._hs_newtonian_relax,
                         device_config=_seg_device_config,
+                        energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
                     )
 
             # Checkpoint (a coupled run routes this through its own
@@ -5568,7 +5573,14 @@ class ModelDriver:
         if self._hs_newtonian_relax is not None:
             new_T = new_T + DT * self._hs_newtonian_relax(
                 self.state.T.data, self.state.p_s.data, self._grid_lat)
-        self.q_v = jnp.maximum(self.q_v + DT * phys_out.dq_v_dt, 0.0)
+        # Issue #323: keep the q_v floor moist-static-energy neutral when the
+        # opt-in flag is set (mirror the compiled-segment path so the flag is
+        # not a silent no-op in the per-step driver).
+        _qv_raw = self.q_v + DT * phys_out.dq_v_dt
+        if self.config.energy_consistent_moisture_clip:
+            self.q_v, new_T = energy_consistent_moisture_floor(_qv_raw, new_T)
+        else:
+            self.q_v = jnp.maximum(_qv_raw, 0.0)
         self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
         self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
         self._apply_double_moment_tendencies(phys_out, DT)
@@ -5693,7 +5705,12 @@ class ModelDriver:
                 new_T = new_T + DT * self._hs_newtonian_relax(
                     self.state.T.data, self.state.p_s.data, self._grid_lat)
 
-            self.q_v = jnp.maximum(self.q_v + DT * phys_out.dq_v_dt, 0.0)
+            # Issue #323: energy-consistent q_v floor (see warmup path).
+            _qv_raw = self.q_v + DT * phys_out.dq_v_dt
+            if self.config.energy_consistent_moisture_clip:
+                self.q_v, new_T = energy_consistent_moisture_floor(_qv_raw, new_T)
+            else:
+                self.q_v = jnp.maximum(_qv_raw, 0.0)
             self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
             self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
 
