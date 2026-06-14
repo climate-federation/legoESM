@@ -34,7 +34,7 @@ PANELS = [
     ("Strong-scaling efficiency (np8)", "eff_np8", "higher better", None),
     ("Weak-scaling growth np1->8", "growth_np1to8", "lower better (1=flat)",
      None),
-    ("GPU 2-device strong eff", "eff_2gpu", "higher better (PCIe~0.73)",
+    ("GPU 2-device strong/weak eff", "eff_2gpu", "higher better (PCIe~0.73)",
      None),
     ("Multinode SPMD speedup (np6)", "speedup_np6", "higher better", None),
     ("Ocean barotropic precond speedup", "speedup", "higher better (1=neutral)",
