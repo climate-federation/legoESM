@@ -87,6 +87,28 @@ def _configure_jax_cpu(precision: str) -> None:
     os.environ["XLA_FLAGS"] = xla_flags
 
 
+def _configure_jax_gpu(precision: str) -> None:
+    """Pin THIS MPI rank to one local GPU and run JAX on cuda (route-A).
+
+    Single-node multi-GPU via mpi4jax (the SAME mpi4jax halo machinery as the
+    CPU path — make_latlon_mpi_step / cube — just on cuda devices over the
+    PCIe pair).  Must run BEFORE any JAX import.  Local rank from the launcher
+    env (OpenMPI / SLURM).  Mirrors the ocean harness ``_configure_jax_gpu``
+    (bench_ocean_mpi_scaling.py) so the atm lat-lon dycore gets a 2-GPU
+    number via the proven overlay-venv route-A (cuda jax + CUDA-built
+    mpi4jax)."""
+    local = (os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+             or os.environ.get("SLURM_LOCALID")
+             or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK")
+             or "0")
+    os.environ["CUDA_VISIBLE_DEVICES"] = local   # one GPU per rank
+    os.environ["JAX_PLATFORMS"] = "cuda"
+    if precision == "float64":
+        os.environ["JAX_ENABLE_X64"] = "1"
+    # Two ranks share the node; do not let the allocator grab the whole GPU.
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+
 def _init_mpi() -> tuple[int, int]:
     """Initialize MPI and return (rank, n_ranks)."""
     try:
@@ -978,6 +1000,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--precision", choices=["float32", "float64"], default="float64",
         help="Floating-point precision.",
     )
+    p.add_argument(
+        "--device", choices=["cpu", "gpu"], default="cpu",
+        help="cpu (default, CPU-MPI) or gpu (route-A: pin each rank to one "
+             "local GPU, run the SAME mpi4jax dycore on the PCIe pair). "
+             "Needs the overlay venv (cuda jax + CUDA-built mpi4jax).",
+    )
     p.add_argument("--n-levels", type=int, default=26)
     p.add_argument("--n-warmup", type=int, default=5)
     p.add_argument("--n-timing", type=int, default=50)
@@ -1032,8 +1060,11 @@ def main() -> int:
             print(json.dumps(asdict(c)))
         return 0
 
-    # --- Configure JAX for CPU ---
-    _configure_jax_cpu(args.precision)
+    # --- Configure JAX for the target device ---
+    if getattr(args, "device", "cpu") == "gpu":
+        _configure_jax_gpu(args.precision)
+    else:
+        _configure_jax_cpu(args.precision)
 
     # --- A1 SPMD mode: federate processes into ONE multi-controller JAX
     # program BEFORE any other JAX use.  jax.distributed only — the
