@@ -8,9 +8,14 @@ from legoesm.land.surface_params import CLM5_PFT_NAMES, N_PFT_CLM5
 from legoesm.land.surface_data.land_inputs import (
     build_canopy_params,
     build_soil_hydraulics,
+    build_land_surface_params,
+    surface_data_to_land_params,
     dominant_pft_index,
     glacier_mask,
 )
+from legoesm.land.surface_params import LandSurfaceParams
+from legoesm.land.canopy.config import CanopyLandParams
+from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
 
 
 def _gsd(ncol=2, nlayer=4):
@@ -86,3 +91,29 @@ def test_soil_hydraulics_percolumn_and_fallback():
     # col0 from 40% sand; col1 fell back to sandy default -> higher K_sat, lower b
     assert float(hy.K_sat[1, 0]) > float(hy.K_sat[0, 0])
     assert float(hy.b_ch[1, 0]) < float(hy.b_ch[0, 0])
+
+
+def test_slab_seb_adapter_returns_land_surface_params():
+    gsd = _gsd()
+    p = build_land_surface_params(gsd, day_of_year=196.0, theta_top=jnp.full(2, 0.2))
+    assert isinstance(p, LandSurfaceParams)
+    # every field is per-column (ncol=2) and physical
+    assert p.albedo_veg.shape == (2,) and p.z0.shape == (2,)
+    assert np.all((np.asarray(p.albedo_veg) > 0) & (np.asarray(p.albedo_veg) < 1))
+    assert np.all(np.asarray(p.theta_fc) > np.asarray(p.theta_wp))
+
+
+def test_slab_seb_adapter_glacier_albedo():
+    gsd = _gsd()._replace(f_land=jnp.array([1.0, 0.0]), f_lake=jnp.zeros(2),
+                          f_glacier=jnp.array([0.0, 1.0]))
+    p = build_land_surface_params(gsd, 196.0, jnp.full(2, 0.2))
+    assert np.isclose(float(p.albedo_veg[1]), 0.6)        # glacier ice albedo
+    assert float(p.albedo_veg[0]) < 0.6
+
+
+def test_dispatch_by_surface_scheme():
+    gsd = _gsd()
+    seb = surface_data_to_land_params(gsd, SimpleSEBConfig(), 196.0, jnp.full(2, 0.2))
+    can = surface_data_to_land_params(gsd, TwoLeafCanopyConfig(), 196.0, jnp.full(2, 0.2))
+    assert isinstance(seb, LandSurfaceParams)
+    assert isinstance(can, CanopyLandParams)

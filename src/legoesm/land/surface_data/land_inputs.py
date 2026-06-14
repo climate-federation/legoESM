@@ -22,7 +22,9 @@ from __future__ import annotations
 import numpy as np
 import jax.numpy as jnp
 
-from legoesm.land.surface_params import CLM5_PFT_NAMES, N_PFT_CLM5
+from legoesm.land.surface_params import (
+    CLM5_PFT_NAMES, N_PFT_CLM5, clm5_pft_table, array_to_params, PARAM_NAMES,
+)
 from legoesm.land.canopy.config import (
     CanopyLandParams,
     PFT_VCMAX25_C3,
@@ -30,7 +32,7 @@ from legoesm.land.canopy.config import (
     PFT_AERO_PARAMS,
     PFT_CANOPY_HEIGHT,
 )
-from legoesm.land.soil_albedo import soil_albedo
+from legoesm.land.soil_albedo import soil_albedo, soil_albedo_broadband
 from legoesm.land.pedotransfer import cosby_hydraulic_params
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.global_surface_data import interp_monthly
@@ -203,3 +205,82 @@ def build_soil_hydraulics(
         theta_sat=col(p.theta_sat), psi_sat=col(p.psi_sat),
         b_ch=col(p.b_ch), K_sat=col(p.K_sat), theta_r=0.0,
     )
+
+
+# ===========================================================================
+# Scheme-agnostic adapters: GlobalSurfaceData -> per-scheme land parameters
+# ===========================================================================
+def build_land_surface_params(
+    gsd,
+    day_of_year: float,
+    theta_top: jnp.ndarray,
+    *,
+    glacier_albedo: float = 0.6,
+):
+    """Per-column :class:`LandSurfaceParams` for the SLAB / multilayer-SimpleSEB
+    schemes, from the dominant CLM5 PFT.
+
+    Physical parameters (emissivity, z0, W_max, C_soil, d_soil, root_depth,
+    theta_wp/fc, Vcmax25, LCMA, g1) are the dominant PFT's row of the CLM5 table;
+    ``albedo_veg`` is the soil-colour background blended with the PFT veg albedo by
+    canopy cover ``1-exp(-0.5*LAI)``, with glacier columns set to ice albedo.
+    """
+    dom = dominant_pft_index(gsd)                       # (ncol,) CLM5 17-PFT axis
+    ncol = dom.shape[0]
+    params = array_to_params(jnp.asarray(np.asarray(clm5_pft_table())[dom]), PARAM_NAMES)
+
+    lai_m = np.asarray(interp_monthly(gsd.lai_monthly, jnp.asarray(float(day_of_year))))
+    LAI = np.nan_to_num(lai_m[np.arange(ncol), dom], nan=0.0)
+    soil_bg = np.asarray(
+        soil_albedo_broadband(jnp.asarray(np.asarray(gsd.soil_color)), jnp.asarray(theta_top)))
+    f_veg = 1.0 - np.exp(-0.5 * LAI)
+    alb = np.asarray(params.albedo_veg) * f_veg + soil_bg * (1.0 - f_veg)
+    alb = np.where(glacier_mask(gsd), glacier_albedo, alb)
+    return params._replace(albedo_veg=jnp.asarray(alb))
+
+
+def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top):
+    """Dispatch to the right per-column land-params object for ``surface_scheme``.
+
+    ``TwoLeafCanopyConfig`` -> :class:`CanopyLandParams`; ``SimpleSEBConfig`` (slab
+    or multilayer) -> :class:`LandSurfaceParams`.  (clm-ml is an external plugin
+    with its own input contract; feed it ``gsd`` directly.)
+    """
+    from legoesm.land.canopy import CanopyConfig
+    if isinstance(surface_scheme, CanopyConfig):
+        return build_canopy_params(gsd, day_of_year, theta_top)
+    return build_land_surface_params(gsd, day_of_year, theta_top)
+
+
+def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *, theta_top=None):
+    """Load the surfdata, regrid to ``grid``, and adapt to ``land_config``'s scheme.
+
+    The single entry a driver calls at simulation start.  Returns
+    ``(land_config, land_params, gsd)``: for a multilayer config the returned
+    config also carries the Cosby soil hydraulics derived from the surfdata
+    (global-mean texture for now; see solve_richards shape-hardening TODO).
+    ``theta_top`` (top-layer wetness for the soil-colour albedo) defaults to a
+    nominal 0.2 when no state exists yet.
+    """
+    import warnings
+    from legoesm.land.config import MultiLayerLandConfig
+    from legoesm.land.pedotransfer import soil_hydraulics_config_from_texture
+    from legoesm.land.global_surface_data import get_surfdata_preset, load_global_surface_data
+
+    cfg_sd = get_surfdata_preset("legoesm_surfdata")._replace(surf_path=surfdata_path)
+    gsd = load_global_surface_data(cfg_sd, grid)
+    ncol = int(np.asarray(gsd.soil_color).shape[0])
+    if theta_top is None:
+        theta_top = jnp.full(ncol, 0.2)
+
+    if isinstance(land_config, MultiLayerLandConfig):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            mean_sand = float(np.nanmean(np.asarray(gsd.sand_frac) * 100.0))
+            mean_clay = float(np.nanmean(np.asarray(gsd.clay_frac) * 100.0))
+        land_config = land_config._replace(
+            hydraulics=soil_hydraulics_config_from_texture(mean_sand, mean_clay))
+
+    land_params = surface_data_to_land_params(
+        gsd, land_config.surface_scheme, day_of_year, theta_top)
+    return land_config, land_params, gsd

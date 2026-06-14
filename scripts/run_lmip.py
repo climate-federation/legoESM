@@ -42,14 +42,16 @@ import numpy as np
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.coupler.coupling_fields import AtmToSurface
-from legoesm.land.config import MultiLayerLandConfig
+from legoesm.land.config import MultiLayerLandConfig, LandConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.canopy import CanopyConfig
+from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
-from legoesm.land.global_surface_data import get_surfdata_preset, load_global_surface_data
+from legoesm.land.slab_land import step_land
+from legoesm.land.global_surface_data import interp_monthly
+from legoesm.land.soil_albedo import soil_albedo_broadband
 from legoesm.land.surface_data.land_inputs import (
-    build_canopy_params, dominant_pft_index, glacier_mask)
-from legoesm.land.pedotransfer import soil_hydraulics_config_from_texture
+    dominant_pft_index, glacier_mask, surface_data_to_land_params, init_land_surface_data)
 
 U_MIN = 1.0
 
@@ -105,6 +107,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--surfdata", default="data/legoesm_surfdata_v1.nc")
+    ap.add_argument("--land-scheme", default="multilayer-canopy",
+                    choices=["multilayer-canopy", "multilayer-seb", "slab"],
+                    help="land surface scheme to drive with the surfdata")
     ap.add_argument("--nlat", type=int, default=48)
     ap.add_argument("--nlon", type=int, default=96)
     ap.add_argument("--doy", type=float, default=196.0, help="day-of-year (LAI + solar)")
@@ -119,46 +124,50 @@ def main() -> None:
 
     out_dir = Path(args.output); out_dir.mkdir(parents=True, exist_ok=True)
     grid = _LatLonGrid(args.nlat, args.nlon)
-    print(f"grid {grid.nlat}x{grid.nlon} = {grid.ncol} columns; loading {args.surfdata}")
-
-    # --- surface data on the model grid ---
-    cfg_sd = get_surfdata_preset("legoesm_surfdata")._replace(surf_path=args.surfdata)
-    gsd = load_global_surface_data(cfg_sd, grid)
-
-    # --- config: Cosby soil hydraulics + two-leaf canopy scheme ---
-    # v1 uses a global-mean (uniform) texture: solve_richards mixes column-level
-    # (ncol,) and profile (ncol,nlayer) ops, so per-column (ncol,1) hydraulic
-    # params don't broadcast cleanly yet.  Spatially-varying soil (the tested
-    # land_inputs.build_soil_hydraulics) awaits a richards shape-hardening pass.
-    import warnings
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        mean_sand = float(np.nanmean(np.asarray(gsd.sand_frac) * 100.0))
-        mean_clay = float(np.nanmean(np.asarray(gsd.clay_frac) * 100.0))
-    soil_hyd = soil_hydraulics_config_from_texture(mean_sand, mean_clay)
-    print(f"soil (global-mean texture): sand={mean_sand:.0f}% clay={mean_clay:.0f}%")
-    config = MultiLayerLandConfig(
-        surface_scheme=CanopyConfig(max_iters=50, tol=1e-2),
-        soil_grid=SoilGridConfig(n_layers=gsd.sand_frac.shape[1]),
-        hydraulics=soil_hyd,
-    )
-
-    # --- forcing + state (soil initialised near the local air temperature) ---
+    print(f"grid {grid.nlat}x{grid.nlon} = {grid.ncol} columns | scheme={args.land_scheme}")
     lat_rad = jnp.asarray(grid.lat2d.ravel())
     lon_rad = jnp.asarray(grid.lon2d.ravel())
     forcing = make_global_forcing(lat_rad, lon_rad, args.doy, args.hour)
-    state = init_multilayer_land_state(grid.ncol, config, T_init=288.0)
-    state = state._replace(
-        T_soil=jnp.broadcast_to(forcing.T_lowest[:, None], state.T_soil.shape)
-    )
 
-    # --- canopy params (LAI/height/albedo/PFT) at this day-of-year ---
-    theta_top = state.theta_soil[:, 0]
-    canopy = build_canopy_params(gsd, args.doy, theta_top)
+    # --- base config + step function for the chosen scheme ---
+    if args.land_scheme == "slab":
+        base_cfg = LandConfig()
+        step_fn = step_land
+    else:
+        surf = (CanopyConfig(max_iters=50, tol=1e-2)
+                if args.land_scheme == "multilayer-canopy" else SimpleSEBConfig())
+        base_cfg = MultiLayerLandConfig(surface_scheme=surf, soil_grid=SoilGridConfig())
+        step_fn = step_multilayer_land
+
+    # --- run the surface-data loader at simulation start: regrid to this grid,
+    #     derive scheme-appropriate config (soil hydraulics) + land params. ---
+    config, _params_nominal, gsd = init_land_surface_data(
+        args.surfdata, grid, base_cfg, args.doy)
+
+    # --- state (soil/skin T initialised near the local air temperature) ---
+    if args.land_scheme == "slab":
+        from legoesm.core.field import Field
+        from legoesm.land.state import LandState
+        z = lambda: jnp.zeros(grid.ncol)
+        state = LandState(
+            T_soil=Field(forcing.T_lowest, name="T_soil", units="K"),
+            W_bucket=Field(jnp.full(grid.ncol, 100.0), name="W_bucket", units="kg/m2"),
+            snow_depth=Field(z(), name="snow_depth", units="kg/m2"),
+            snow_age=Field(z(), name="snow_age", units="s"),
+        )
+        theta_top = jnp.full(grid.ncol, 0.2)          # slab has no soil profile
+    else:
+        state = init_multilayer_land_state(grid.ncol, config, T_init=288.0)
+        state = state._replace(
+            T_soil=jnp.broadcast_to(forcing.T_lowest[:, None], state.T_soil.shape))
+        theta_top = state.theta_soil[:, 0]
+
+    # land params with the actual top-layer wetness (accurate soil-colour albedo)
+    land_params = surface_data_to_land_params(gsd, config.surface_scheme, args.doy, theta_top)
 
     print("stepping one timestep ...")
-    step = jax.jit(lambda s, f: step_multilayer_land(
-        s, f, config, U_MIN, args.dt, lat=lat_rad, land_params=canopy, doy=args.doy))
+    step = jax.jit(lambda s, f: step_fn(
+        s, f, config, U_MIN, args.dt, lat=lat_rad, land_params=land_params, doy=args.doy))
     new_state, resp, _ = step(state, forcing)
 
     # --- land mask, reshape, validate, write ---
@@ -181,8 +190,12 @@ def main() -> None:
             warnings.simplefilter("ignore", RuntimeWarning)   # all-NaN soil cols
             return np.nanmean(np.asarray(a), axis=1)
 
-    # Surfdata-derived spatial inputs (these vary per column) + model outputs.
+    # Surfdata-derived spatial inputs (scheme-agnostic — straight from gsd).
     dom = dominant_pft_index(gsd)
+    lai_dom = np.asarray(interp_monthly(gsd.lai_monthly, jnp.asarray(args.doy)))[
+        np.arange(grid.ncol), dom]
+    soil_bg = np.asarray(soil_albedo_broadband(
+        jnp.asarray(np.asarray(gsd.soil_color)), jnp.full(grid.ncol, 0.2)))
     fields = {
         # --- surface inputs from the surfdata pipeline ---
         "sand_pct":     (grid2d(layer_mean(gsd.sand_frac) * 100.0), "YlOrBr", "sand %"),
@@ -190,9 +203,9 @@ def main() -> None:
         "organic":      (grid2d(layer_mean(gsd.organic)), "YlGn", "organic"),
         "bulk_density": (grid2d(layer_mean(gsd.bulk_density)), "cividis", "bulk density kg/m3"),
         "soil_color":   (grid2d(gsd.soil_color), "viridis", "soil colour class"),
-        "LAI":          (grid2d(canopy.LAI), "YlGn", "LAI (dominant PFT)"),
+        "LAI":          (grid2d(lai_dom), "YlGn", "LAI (dominant PFT)"),
         "dominant_pft": (grid2d(dom), "tab20", "dominant CLM5 PFT index"),
-        "albedo_vis":   (grid2d(canopy.ALB_VIS), "Greys_r", "soil background albedo (VIS)"),
+        "albedo_bg":    (grid2d(soil_bg), "Greys_r", "soil background albedo (broadband)"),
         "land_fraction": (land_fraction, "Blues", "land fraction (veg+lake+glacier)"),
         "f_soil_veg":   (grid2d(f_soil_veg), "YlGn", "soil/veg fraction (natveg+crop)"),
         "glacier":      (grid2d(glacier_mask(gsd).astype(float)), "cool", "glacier (ice) mask"),
