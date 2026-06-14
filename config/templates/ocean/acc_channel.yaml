@@ -1,0 +1,25 @@
+# legoESM experiment template — ACC-like reentrant channel.
+#
+# Names the procedural `acc_channel` experiment via the `setup:` selector
+# (#388 Ask#2): a zonally-reentrant Southern-Ocean-like channel with a
+# Gaussian ridge and Abernathey-style stratification, wind- and buoyancy-
+# forced. Runs only on channel grids. Routed to run_ocean_test_matrix.py.
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: channel
+  maturity: structurally_validated
+  description: >
+    ACC-like zonally-reentrant channel (Abernathey-style): wind- and
+    buoyancy-forced eddying jet over a Gaussian ridge. Exercises the
+    reentrant-channel topology and mesoscale eddy energetics.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "ocean-acc-channel"
+  type: ocean_only
+setup:
+  name: acc_channel
+  grid: latlon_channel
+output:
+  path: output/ocean/acc_channel/

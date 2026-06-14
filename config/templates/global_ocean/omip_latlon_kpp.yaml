@@ -1,0 +1,74 @@
+# legoESM experiment template — OMIP global lat-lon ocean with the full physics
+# pipeline configured via nested YAML (#382).
+#
+# Same OMIP setup as omip_latlon.yaml, but the vertical-mixing / convection /
+# shortwave-penetration pipeline and the GM/Redi lateral mixing are expressed
+# directly in YAML via the nested `ocean.physics` / `ocean.gm_redi` sections
+# (previously Python-only). Demonstrates KPP vertical mixing with a custom
+# Ri_crit, enhanced-diffusion convection, Jerlov type-II shortwave penetration,
+# and triad GM/Redi.
+#
+# On the lat-lon C-grid, horizontal/lateral mixing is selected via the flat
+# `ocean.A_h`/`ocean.B_h` fields and the top-level `ocean.gm_redi` block —
+# `physics.lateral_mixing.scheme` must stay `none` (the physics lateral-mixing
+# factory is cubed-sphere-only; the runtime validator rejects anything else).
+experiment:
+  tier: tier3
+  complexity: primitive_equation
+  extent: global
+  maturity: structurally_validated   # config passes validate_strict; not run end-to-end
+  description: >
+    OMIP-style forced global ocean (lat-lon C-grid) with the physics pipeline
+    configured via nested YAML: KPP vertical mixing (Ri_crit=0.3),
+    enhanced-diffusion convection, Jerlov-II shortwave penetration, and triad
+    GM/Redi (kappa_GM=kappa_Redi=1000). Requires CORE-II forcing + WOA18 IC.
+  data: [core2_nyf, woa18]
+  conservation_gates: [volume, heat, salt]
+model:
+  name: "OMIP-latlon-kpp"
+  type: ocean_only
+grid:
+  type: latlon_cgrid
+  n_lat: 180
+  n_lon: 360
+  nlev: 30
+ocean:
+  A_h: 30000.0                # lateral viscosity [m^2/s] (flat field; see header)
+  A_h_lat_scaling: true       # cos(lat) scaling for uniform grid Reynolds number
+  bottom_drag_r: 0.0025       # linear bottom drag
+  eos: wright
+  pgf_scheme: smc03           # density-Jacobian PGF over partial cells
+  barotropic_solver: implicit_cn
+  implicit_vertical_mixing: true
+  tracer_advection: tvd
+  momentum_advection: vector_invariant
+  # --- nested physics pipeline (#382) ---
+  physics:
+    vertical_mixing:
+      scheme: kpp
+      kpp:
+        Ri_crit: 0.3          # critical bulk Richardson number (Large et al. 1994)
+    lateral_mixing:
+      scheme: none            # lat-lon: lateral mixing via A_h / gm_redi (see header)
+    convection:
+      scheme: enhanced_diffusion
+    shortwave_penetration:
+      water_type: "II"        # Jerlov water type
+  # --- GM/Redi lateral mixing (top-level on the lat-lon C-grid) ---
+  gm_redi:
+    kappa_GM: 1000.0
+    kappa_Redi: 1000.0
+    S_max: 0.01
+    slope_scheme: triads
+time:
+  dt_seconds: 1800            # 30 min
+  duration_days: 365          # 1 year
+  output_interval_days: 30
+init:
+  woa_init: true              # WOA18 cold-start IC (see experiment.data: woa18)
+forcing:
+  dataset: core2_nyf
+  path: ""
+output:
+  format: zarr
+  path: output/omip_latlon_kpp/

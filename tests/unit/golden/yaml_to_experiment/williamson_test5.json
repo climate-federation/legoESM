@@ -20,6 +20,7 @@
   "days": 15,
   "debug_precision": false,
   "distributed": false,
+  "distributed_mode": "mpi",
   "diurnal_cycle": false,
   "dycore": {
     "conservation_fixer": true,
@@ -38,10 +39,12 @@
   },
   "dynamic_albedo": false,
   "emissivity_ice": 0.95,
+  "energy_consistent_moisture_clip": false,
   "ensemble_size": 1,
   "experiment": "",
   "fix_moisture": false,
   "forcing_path": "",
+  "forcing_update_days": 1.0,
   "ghg_file": "",
   "ghg_forcing": "constant",
   "gradient_checkpoint": false,
@@ -65,6 +68,7 @@
   "microphysics": "none",
   "n2o_ppbv": 332.0,
   "n_devices": "auto",
+  "nc_from_aerosol": false,
   "output": {
     "checkpoint_days": 0,
     "checkpoint_format": "npz",

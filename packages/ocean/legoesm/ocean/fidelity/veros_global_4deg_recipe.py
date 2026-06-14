@@ -567,6 +567,7 @@ def build_global_4deg_model_config() -> LatLonCGridOceanConfig:
         dt_mom_ratio=DT_MOM_RATIO,                  # 48 (dt arg IS dt_tracer)
         momentum_friction_additive=True,
         coriolis_scheme="explicit_ab2",             # |f|·dt_mom ≈ 0.26 @78°
+        implicit_vmix_dzw_slot=True,                 # Veros dzw implicit slot (#428)
         physics=build_global_4deg_physics_config(),
     )
 

@@ -1,0 +1,22 @@
+# legoESM experiment template — Stommel gyre with passive tracer.
+#
+# Names the procedural `stommel_gyre_tracer` experiment via `setup:` (#388 Ask#2).
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: idealized
+  maturity: structurally_validated
+  description: >
+    Stommel wind-driven gyre with a passive tracer: linear bottom friction sets
+    the western-intensified Sverdrup interior; the tracer probes advective
+    transport and numerical diffusion.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "ocean-stommel-gyre-tracer"
+  type: ocean_only
+setup:
+  name: stommel_gyre_tracer
+  grid: latlon
+output:
+  path: output/ocean/stommel_gyre_tracer/

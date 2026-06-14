@@ -875,6 +875,11 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
                          else "matsuno_split"),
         ab2_scope="advective" if with_surface_forcing else "total",
         momentum_friction_additive=with_surface_forcing,
+        # implicit_vmix_dzw_slot ↔ Veros dzw divisor of the implicit T/S +
+        # friction solves (#428): the ACC z-coordinate is u_centered, so the
+        # dz_half_ref·J slot differs from the midpoint reconstruction. Gated like
+        # the rest of the bundle — the frozen-state probe stays bit-identical.
+        implicit_vmix_dzw_slot=with_surface_forcing,
         physics=build_acc_physics_config(
             grid, with_surface_forcing=with_surface_forcing),
     )
