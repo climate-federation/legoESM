@@ -25,7 +25,9 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
-    implicit_vertical_diffusion_theta,
+)
+from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
+    diffuse_theta_with_countergradient,
 )
 
 
@@ -221,25 +223,31 @@ def ysu_turbulence(
     sflx_q = lhflx / constants.L_v
 
     # ----- Nonlocal countergradient (Troen-Mahrt 1986 / Hong et al. 2006) -----
-    # γ_c = b·(w'θ')_0 / (w_s·h)  [K/m], YSU's defining nonlocal upward
-    # heat transport in the convective BL.  Gated to unstable surface
-    # forcing via max(w'θ', 0) (zero for neutral/stable), with the
-    # convective velocity scale w* in the denominator (⇒ the usual
-    # γ_c ∝ (w'θ')^{2/3} convective scaling).  Applied as an enhanced
-    # heat surface flux (same convention as the Holtslag-Boville scheme).
-    # The previous YSU had only the local K-profile + entrainment K, so
-    # the nonlocal countergradient (the whole point of the scheme) was
-    # absent.
+    # γ_c = b·(w'θ')_0 / (w_*·h)  [K/m] (Troen & Mahrt 1986; Hong et al. 2006),
+    # YSU's defining nonlocal upward heat transport in the convective BL.  Gated
+    # to unstable surface forcing via max(w'θ', 0) (zero for neutral/stable),
+    # with the convective velocity scale w* in the denominator (⇒ the usual
+    # γ_c ∝ (w'θ')^{2/3} convective scaling).  The previous YSU lumped the
+    # entire countergradient into the lowest-level surface BC (an enhanced
+    # surface flux with a single column-mean Kh), depositing all the nonlocal
+    # heating in the surface-adjacent layer instead of distributing it through
+    # the mixed layer.  Per Troen-Mahrt/Hong the nonlocal term enters the heat
+    # equation as the modified flux F = −Kh·(∂θ/∂z − γ_c) whose vertical
+    # divergence redistributes heat across the BL — apply it that way via the
+    # shared HB countergradient diffusion, with γ_c as a half-level field gated
+    # to inside the PBL (1 − blend_pbl ≈ 1 below h_pbl, ≈ 0 above).
     counter_grad = config.countergrad_coeff * jnp.maximum(wtheta_sfc, 0.0) / (
         jnp.clip(w_star, 1e-6, None) * h_pbl
     )  # (ncol,) [K/m]
-    sflx_T_enhanced = sflx_T + rho[:, -1] * jnp.mean(Kh_half, axis=1) * counter_grad
+    gamma_theta_half = counter_grad[:, None] * (1.0 - blend_pbl)  # (ncol, nlev-1) [K/m]
 
-    # Implicit vertical diffusion.  Heat in θ-space (dry-adiabat neutral).
+    # Implicit vertical diffusion.  Heat in θ-space (dry-adiabat neutral),
+    # with the nonlocal countergradient applied as a distributed flux
+    # divergence (shared with Holtslag-Boville).
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
-    T_new = implicit_vertical_diffusion_theta(
-        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T_enhanced,
+    T_new = diffuse_theta_with_countergradient(
+        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T, gamma_theta_half,
     )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 
