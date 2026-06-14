@@ -28,6 +28,22 @@ except ImportError:  # pragma: no cover
     from jax.experimental.shard_map import shard_map
 
 
+def _check_shapes(n, **named):
+    """Fail-loud stage-entry shape guard for the assembly/full stages.
+
+    The leaf tile kernels guard their slice inputs (a mis-sized array would make
+    ``dynamic_slice_in_dim`` silently CLAMP -> wrong answer), but the composed
+    momentum/mass/full stages slice many inputs inline; validate them ONCE at
+    the stage boundary instead.  ``named`` maps name -> (array, expected
+    trailing-2D shape) with ``n`` the global cube extent.  Leading axis 0 (6
+    faces) is not checked (it is 6 in a host call, 1 per face-shard)."""
+    for name, (arr, want) in named.items():
+        got = tuple(arr.shape[1:])
+        if got != want:
+            raise ValueError(
+                f"{name}: expected trailing shape {want} (n={n}); got {got}")
+
+
 def dgrid_vorticity_tile_2d(u_d, v_d, cosa_corner, dx_edge_y, dy_edge_x, area,
                             a_i, a_j, nl: int):
     """Per-tile ``dgrid_vorticity`` (P-i) on a 2-D ``(tile_i, tile_j)`` tiling.
@@ -546,6 +562,8 @@ def make_tiled_fv3_sw_momentum_stage_2d(mesh, cdgrid, n: int, kt: int,
         return du_d_dt, dv_d_dt
 
     def stage(h, u_d, v_d, h_s):
+        _check_shapes(n, h=(h, (n, n)), u_d=(u_d, (n, n + 1)),
+                      v_d=(v_d, (n + 1, n)), h_s=(h_s, (n, n)))
         return _body(h, u_d, v_d, h_s,
                      cosa_corner, dx_edge_y, dy_edge_x, area, f_cor,
                      gc00, gc01, gc10, gc11,
@@ -571,7 +589,7 @@ def make_tiled_fv3_sw_momentum_stage_2d(mesh, cdgrid, n: int, kt: int,
 # real neighbour -> the tile carries ONE ring deeper (halo_in=3).  The deep
 # pad's outer ring is edge-extended from the halo=2 pad, so a FACE-edge tile
 # reproduces the global's `mode='edge'` value exactly.  The shared
-# `_cgrid_ppm_fluxes_core(halo_in=3)` reuses the production numerics verbatim.
+# `cgrid_ppm_fluxes_core(halo_in=3)` reuses the production numerics verbatim.
 #
 # Scope: base case (apply_fortran_xppm_boundary=False -> the `n_interior`
 # face-edge override is OFF; non-duogrid -> NO `synchronize_cgrid_fluxes`).
@@ -589,7 +607,7 @@ def cgrid_mass_divergence_tile_2d(h_deep, u_c, v_c, dy, dx, area,
     ``h_deep[a:a+nl+6]`` (global cells ``[a-3..a+nl+2]``) and the staggered
     wind/metric blocks.  Returns ``dh_dt`` ``(F, nl, nl)`` — cc cells
     partition exactly (no shared face, no trim)."""
-    from legoesm.core.operators_cdgrid import _cgrid_ppm_fluxes_core
+    from legoesm.core.operators_cdgrid import cgrid_ppm_fluxes_core
 
     nfc = h_deep.shape[1]                       # n + 6
     nf = nfc - 6                                # n
@@ -629,7 +647,7 @@ def cgrid_mass_divergence_tile_2d(h_deep, u_c, v_c, dy, dx, area,
     dx_t = _stag(dx, nl, nl + 1)
     area_t = _stag(area, nl, nl)
 
-    flux_x, flux_y = _cgrid_ppm_fluxes_core(
+    flux_x, flux_y = cgrid_ppm_fluxes_core(
         hw, u_c_t, v_c_t, dy_t, dx_t, nl, halo_in=3,
         effective_xppm_boundary=False)
     net_x = flux_x[:, 1:] - flux_x[:, :-1]
@@ -651,7 +669,7 @@ def make_tiled_cgrid_mass_divergence_stage_2d(mesh, cdgrid, n: int, kt: int):
     Base case only: non-duogrid (no ``synchronize_cgrid_fluxes``) and
     apply_fortran_xppm_boundary=False (the ``n_interior`` face-edge override is
     off; tiling a GLOBAL-index-keyed override is a later increment)."""
-    from legoesm.core.operators_cdgrid import _pad_halo_auto_h2
+    from legoesm.core.operators_cdgrid import pad_halo_auto_h2
     import jax.numpy as jnp
 
     if n % kt:
@@ -680,10 +698,12 @@ def make_tiled_cgrid_mass_divergence_stage_2d(mesh, cdgrid, n: int, kt: int):
             h_deep, u_c, v_c, dy, dx, ar, a_i, a_j, nl)
 
     def stage(h, u_c, v_c):
+        _check_shapes(n, h=(h, (n, n)), u_c=(u_c, (n + 1, n)),
+                      v_c=(v_c, (n, n + 1)))
         # GLOBAL deep pre-pad: halo=2 cross-face pad + 1 edge ring (matches the
         # production op's internal mode='edge' ghost at the cube edge), built
         # ONCE outside the shard_map (approach-C cross-face pre-pad).
-        h_pad2 = _pad_halo_auto_h2(h, cdgrid)            # (6, n+4, n+4)
+        h_pad2 = pad_halo_auto_h2(h, cdgrid)            # (6, n+4, n+4)
         h_deep = jnp.pad(h_pad2, ((0, 0), (1, 1), (1, 1)), mode="edge")
         return _body(h_deep, u_c, v_c, dy_edge_x, dx_edge_y, area)
 
@@ -724,8 +744,8 @@ def make_tiled_fv3_sw_tendencies_stage_2d(mesh, cdgrid, n: int, kt: int,
     from legoesm import constants
     from legoesm.core.operators_cdgrid import (
         fv3_d2cc, fv3_cc2c_core, arakawa_lamb_gradient_core,
-        dgrid_vorticity_core, interp_corner_to_center, _cgrid_ppm_fluxes_core,
-        _pad_halo_auto_h2)
+        dgrid_vorticity_core, interp_corner_to_center, cgrid_ppm_fluxes_core,
+        pad_halo_auto_h2)
     from legoesm.parallel.cubesphere_exchange import (
         make_tiled_pad_body, make_tiled_pad_vector_body)
     import jax.numpy as jnp
@@ -799,7 +819,7 @@ def make_tiled_fv3_sw_tendencies_stage_2d(mesh, cdgrid, n: int, kt: int,
         dy_t = _s(dye, nl + 1, nl)
         dx_t = _s(dxe, nl, nl + 1)
         area_t = _s(ar, nl, nl)
-        flux_x, flux_y = _cgrid_ppm_fluxes_core(
+        flux_x, flux_y = cgrid_ppm_fluxes_core(
             hw, u_c, v_c, dy_t, dx_t, nl, halo_in=3,
             effective_xppm_boundary=False)
         dh_dt = -((flux_x[:, 1:] - flux_x[:, :-1])
@@ -843,8 +863,10 @@ def make_tiled_fv3_sw_tendencies_stage_2d(mesh, cdgrid, n: int, kt: int,
         return dh_dt, du_d_dt, dv_d_dt
 
     def stage(h, u_d, v_d, h_s):
+        _check_shapes(n, h=(h, (n, n)), u_d=(u_d, (n, n + 1)),
+                      v_d=(v_d, (n + 1, n)), h_s=(h_s, (n, n)))
         # GLOBAL deep-h pre-pad (mass): halo=2 cross-face + 1 edge ring.
-        h_deep = jnp.pad(_pad_halo_auto_h2(h, cdgrid),
+        h_deep = jnp.pad(pad_halo_auto_h2(h, cdgrid),
                          ((0, 0), (1, 1), (1, 1)), mode="edge")
         return _body(h_deep, u_d, v_d, h_s,
                      cosa_corner, dx_edge_y, dy_edge_x, area, f_cor, cosa_u,

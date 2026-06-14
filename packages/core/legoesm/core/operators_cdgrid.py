@@ -46,6 +46,13 @@ def _pad_halo_auto_h2(field, cdgrid):
     return pad_halo_4d(field, halo=2, interp_offsets=offsets, duogrid=dg)
 
 
+# Public alias of the halo=2 cc pad (companion to the public ``pad_halo_auto``):
+# the sub-face tiled stage (legoesm.parallel.tiled_production_cdgrid) needs it
+# cross-package for the deep-h mass pre-pad, and the no-private-cross-import CI
+# ratchet forbids importing the ``_``-prefixed name.
+pad_halo_auto_h2 = _pad_halo_auto_h2
+
+
 def _broadcast_metric(metric, field):
     """Broadcast a 2D metric (6, ...) to match field's trailing nlev dim."""
     if field.ndim > metric.ndim:
@@ -626,7 +633,7 @@ def cgrid_gradient_2d(eta, cdgrid):
 # C-grid mass flux with PPM transport
 # ==============================================================================
 
-def _cgrid_ppm_fluxes_core(
+def cgrid_ppm_fluxes_core(
     h_pad, u_c, v_c, dy, dx, n_local, *, halo_in=2,
     effective_xppm_boundary=False,
     fortran_faithful_ppm_left=False,
@@ -712,14 +719,14 @@ def _cgrid_ppm_fluxes_2d_no_sync(
     stacked 4D fluxes (one MPI sendrecv exchange total, vs ``nlev``
     inside vmap which mpi4jax's batch-axis rule refuses).
 
-    Thin wrapper over :func:`_cgrid_ppm_fluxes_core` (``halo_in=2``); no
+    Thin wrapper over :func:`cgrid_ppm_fluxes_core` (``halo_in=2``); no
     dup numerics (the tiled stage reuses the core with ``halo_in=3``).
     """
     effective_xppm_boundary = (
         apply_fortran_xppm_boundary
         and not cdgrid.base.bounded_domain
     )
-    return _cgrid_ppm_fluxes_core(
+    return cgrid_ppm_fluxes_core(
         h_pad, u_c, v_c, cdgrid.dy_edge_x, cdgrid.dx_edge_y, cdgrid.n,
         halo_in=2,
         effective_xppm_boundary=effective_xppm_boundary,
@@ -801,7 +808,7 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
     # PPM upwind C-grid fluxes via the shared core (halo_in=2 = the
     # production halo=2 pad; the sub-face tile kernel reuses the SAME core
     # with halo_in=3).  Bit-identical to the prior inline x/y reconstruction.
-    flux_x, flux_y = _cgrid_ppm_fluxes_core(
+    flux_x, flux_y = cgrid_ppm_fluxes_core(
         h_pad, u_c, v_c, cdgrid.dy_edge_x, cdgrid.dx_edge_y, n,
         halo_in=2,
         effective_xppm_boundary=effective_xppm_boundary,

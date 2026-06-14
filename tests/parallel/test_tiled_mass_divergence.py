@@ -7,7 +7,7 @@ reconstruction of its boundary cell carries the real diagonal/-3 neighbour at
 interior cuts, while a FACE-edge tile reproduces the global's mode='edge'
 ghost); the per-tile reconstruction is LOCAL (no in-stage ppermute).  The cc
 winds u_c/v_c are staggered stage inputs (flux divergence reads only a cell's
-own bounding faces -> no halo).  The shared `_cgrid_ppm_fluxes_core(halo_in=3)`
+own bounding faces -> no halo).  The shared `cgrid_ppm_fluxes_core(halo_in=3)`
 reuses the production numerics verbatim (the same core, halo_in=2, drives the
 global op).
 
@@ -52,6 +52,10 @@ def setup():
     h = jnp.asarray(1.0e3 + rng.standard_normal((6, N, N)))
     u_c = jnp.asarray(rng.standard_normal((6, N + 1, N)))
     v_c = jnp.asarray(rng.standard_normal((6, N, N + 1)))
+    # Both upwind branches (where(u_c>0,...)) must be exercised — assert, not
+    # just comment (codex audit LOW): standard-normal winds straddle 0.
+    assert bool((u_c > 0).any()) and bool((u_c < 0).any()), "u_c needs both signs"
+    assert bool((v_c > 0).any()) and bool((v_c < 0).any()), "v_c needs both signs"
     dh_g = cgrid_mass_flux_divergence(h, u_c, v_c, cdg)  # base case (defaults)
     return cdg, h, u_c, v_c, np.asarray(dh_g)
 

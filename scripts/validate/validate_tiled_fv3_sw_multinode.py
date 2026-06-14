@@ -48,6 +48,15 @@ def main() -> int:
     if pidx == 0:
         log(f"process {pidx}/{pcount}  global_devices={len(gdev)} "
             f"local_devices={len(ldev)}")
+    # This validator's POINT is real multi-process execution (the in-stage
+    # ppermutes -> cross-process collective-permute).  A single-process run with
+    # N virtual devices would pass vacuously, so require >1 process unless an
+    # explicit escape is set (codex audit LOW).
+    if pcount <= 1 and os.environ.get("ALLOW_SINGLE_PROCESS") != "1":
+        log("REFUSING single-process run: this validates MULTI-process/node "
+            "execution.  Launch via srun -n <6*kt*kt>, or set "
+            "ALLOW_SINGLE_PROCESS=1 to override (e.g. host-device smoke).")
+        return 4
     if len(gdev) <= len(ldev) and pcount > 1:
         log("WARNING: global<=local — jax.distributed did NOT federate "
             "processes (multi-controller not active).")

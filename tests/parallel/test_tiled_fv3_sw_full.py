@@ -99,3 +99,44 @@ def test_tiled_full_tendencies_match_global(setup, KT):
     assert rh < 1e-10, f"kt={KT} dh_dt: abs={worst_h:.3e} rel={rh:.3e}"
     assert rdu < 1e-10, f"kt={KT} du_d_dt: abs={worst_du:.3e} rel={rdu:.3e}"
     assert rdv < 1e-10, f"kt={KT} dv_d_dt: abs={worst_dv:.3e} rel={rdv:.3e}"
+
+
+def test_tiled_full_is_differentiable(setup):
+    """End-to-end jax.grad through the tiled full stage (kt=2, np24).
+
+    Bit-identity parity proves the FORWARD pass; it does NOT prove transpose
+    safety of the in-stage halo ppermutes (codex audit MED).  This drives
+    reverse-mode AD through the whole chain (scalar B halo + 2 vector halos +
+    PPM + the *_core ops) — the ppermute VJP is a ppermute with the inverse
+    permutation — and checks the gradient is finite and non-trivial.  End-to-end
+    differentiability is a first-class repo goal."""
+    if len(jax.devices()) < 24:
+        pytest.skip("needs --xla_force_host_platform_device_count=24")
+    cdg, h, u_d, v_d, h_s, *_ = setup
+
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    dev = np.array(jax.devices()[:24]).reshape(6, 2, 2)
+    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
+    stage = make_tiled_fv3_sw_tendencies_stage_2d(mesh, cdg, N, 2)
+    sh = NamedSharding(mesh, P("face", None, None))
+    h_sh = jax.device_put(h, sh)
+    u_sh = jax.device_put(u_d, sh)
+    v_sh = jax.device_put(v_d, sh)
+    hs_sh = jax.device_put(h_s, sh)
+
+    def loss(hh, uu, vv, hs):
+        dh, du, dv = stage(hh, uu, vv, hs)
+        return jnp.sum(dh ** 2) + jnp.sum(du ** 2) + jnp.sum(dv ** 2)
+
+    # Grad w.r.t. ALL FOUR inputs (not just h): the wind grads route through the
+    # SHARED u_cc/v_cc vector halo, so this exercises that halo's transpose too
+    # (codex audit MED — grad-wrt-h alone leaves u_d/v_d closed-over constants).
+    grads = jax.grad(loss, argnums=(0, 1, 2, 3))(h_sh, u_sh, v_sh, hs_sh)
+    for name, g in zip(("h", "u_d", "v_d", "h_s"), grads):
+        ga = np.asarray(g)
+        assert np.all(np.isfinite(ga)), f"non-finite gradient w.r.t. {name}"
+    # The wind gradients (gu, gv) flow through the shared vector halo; require
+    # them non-trivial (h/h_s could be near-zero in a contrived case, winds not).
+    assert max(float(np.max(np.abs(np.asarray(g)))) for g in grads[1:3]) > 0.0, \
+        "wind gradients all-zero (vector-halo transpose broke)"
