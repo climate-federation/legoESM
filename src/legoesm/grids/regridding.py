@@ -273,6 +273,45 @@ def regrid_scalar(
         return result.reshape(regrid_weights.target_shape + extra_dims)
 
 
+def regrid_scalar_nan_aware(
+    field: jnp.ndarray,
+    regrid_weights: RegridWeights,
+) -> jnp.ndarray:
+    """NaN-aware version of :func:`regrid_scalar` (KD-tree IDW).
+
+    Missing source cells (``NaN``) are dropped from each target's neighbour set
+    and the inverse-distance weights renormalised over the valid neighbours, so a
+    target becomes ``NaN`` only when *all* its neighbours are missing.  For
+    land-only source data (ocean = NaN) this stops ocean NaN bleeding into coastal
+    target cells — the same role conservative regridding plays for regular
+    lat-lon, but for arbitrary (cubed-sphere / MPAS) targets via point neighbours.
+    """
+    spatial_size = regrid_weights.src_flat_size
+    if field.size == spatial_size:
+        flat = field.ravel(); extra_dims = ()
+    else:
+        n_trailing = field.size // spatial_size
+        flat = field.reshape(spatial_size, n_trailing); extra_dims = flat.shape[1:]
+
+    idx = regrid_weights.src_indices               # (n_target, k)
+    w = regrid_weights.weights                     # (n_target, k)
+    gathered = flat[idx]                            # (..., k[, n_extra])
+    if len(extra_dims) == 0:
+        valid = jnp.isfinite(gathered)             # (n_target, k)
+        wv = w * valid
+        num = jnp.sum(jnp.where(valid, gathered, 0.0) * wv, axis=-1)
+        den = jnp.sum(wv, axis=-1)
+        res = jnp.where(den > 0.0, num / jnp.where(den > 0.0, den, 1.0), jnp.nan)
+        return res.reshape(regrid_weights.target_shape)
+    else:
+        valid = jnp.isfinite(gathered)             # (n_target, k, n_extra)
+        wv = w[..., None] * valid
+        num = jnp.sum(jnp.where(valid, gathered, 0.0) * wv, axis=-2)
+        den = jnp.sum(wv, axis=-2)
+        res = jnp.where(den > 0.0, num / jnp.where(den > 0.0, den, 1.0), jnp.nan)
+        return res.reshape(regrid_weights.target_shape + extra_dims)
+
+
 def regrid_vector(
     u: jnp.ndarray,
     v: jnp.ndarray,

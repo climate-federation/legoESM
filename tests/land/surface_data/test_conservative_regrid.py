@@ -54,3 +54,23 @@ def test_layer_axis_and_coarsen_mean():
     assert out.shape == (2, 2, 2)
     assert np.allclose(out[..., 1], 1.0)           # constant layer preserved
     assert np.all(np.isfinite(out))
+
+
+def test_regrid_scalar_nan_aware_vs_plain():
+    import jax.numpy as jnp
+    from legoesm.grids.regridding import (
+        compute_latlon_to_voronoi_weights, regrid_scalar, regrid_scalar_nan_aware)
+    slat, slon = _grid(8, 16)
+    field = np.full((8, 16), 5.0); field[:, :8] = np.nan        # left half "ocean"
+    # target points: deep-valid, boundary, deep-ocean (lon in deg)
+    tlat = np.array([0.0, 0.0, 0.0]); tlon = np.array([280.0, 175.0, 70.0])
+    w = compute_latlon_to_voronoi_weights(
+        np.deg2rad(slat), np.deg2rad(slon), np.deg2rad(tlat), np.deg2rad(tlon), k_neighbors=4)
+    plain = np.asarray(regrid_scalar(jnp.asarray(field), w))
+    na = np.asarray(regrid_scalar_nan_aware(jnp.asarray(field), w))
+    # NaN-aware: any target with >=1 valid neighbour is finite and == 5 (all valid==5)
+    assert np.isfinite(na[0]) and np.isclose(na[0], 5.0)        # deep valid
+    assert np.isfinite(na[1]) and np.isclose(na[1], 5.0)        # boundary -> no bleed
+    assert np.isnan(na[2])                                      # deep ocean -> NaN
+    # plain IDW bleeds NaN at the boundary cell
+    assert np.isnan(plain[1])

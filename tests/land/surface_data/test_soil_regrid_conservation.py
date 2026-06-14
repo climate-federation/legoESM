@@ -93,3 +93,28 @@ def test_soil_regrid_does_not_bleed_ocean_nan_into_land():
     finite = np.isfinite(sand_t)
     assert np.allclose(sand_t[finite], 50.0, atol=1e-6)
     assert np.isnan(sand_t).any()                        # the ocean band remains NaN
+
+
+class _IrregularGrid(_RegularGrid):
+    """Regular lat-lon perturbed so it is NOT separable -> loader uses KD-tree."""
+
+    def __init__(self, nlat, nlon):
+        super().__init__(nlat, nlon)
+        self.lat2d = self.lat2d + 0.02 * np.sin(self.lon2d)   # break regularity
+
+
+def test_soil_regrid_irregular_grid_no_nan_bleed():
+    # On a non-lat-lon (KD-tree) target the NaN-aware path must not bleed ocean
+    # NaN into coastal cells (gap #3).
+    nlat_s, nlon_s = 18, 36
+    sand = np.full((nlat_s, nlon_s), 50.0); sand[:, 6:18] = np.nan   # ocean band
+    clay = np.where(np.isfinite(sand), 20.0, np.nan)
+    raw = _raw_with_soil(sand, clay, nlat_s, nlon_s)
+    grid = _IrregularGrid(12, 24)
+    gsd = build_global_surface_data(raw, grid, GlobalSurfaceDataConfig(),
+                                    soil_grid=make_soil_grid(SoilGridConfig()))
+    sand_t = _top_layer_2d(gsd.sand_frac, grid)
+    finite = np.isfinite(sand_t)
+    assert finite.any()                                # valid region present
+    assert np.allclose(sand_t[finite], 50.0, atol=1e-6)  # no bleed: only valid 50s
+    assert np.isnan(sand_t).any()                      # ocean band stays NaN

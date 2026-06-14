@@ -69,6 +69,7 @@ from legoesm.grids.regridding import (
     compute_latlon_to_voronoi_weights,
     conservative_regrid_latlon,
     regrid_scalar,
+    regrid_scalar_nan_aware,
 )
 from legoesm.land.soil_grid import SoilGrid, SoilGridConfig, make_soil_grid
 
@@ -431,8 +432,11 @@ def build_global_surface_data(
             flat = out.reshape(-1, ll)                      # (ncol, ll)
             return jnp.asarray(flat if trailing else flat[:, 0])
     else:
+        # Irregular target (cubed-sphere / MPAS): NaN-aware KD-tree IDW to cell
+        # centres (matches the model's point-based topography regrid, but won't
+        # bleed ocean NaN into coastal cells).
         def _rg(field):
-            return _regrid(field, w)
+            return regrid_scalar_nan_aware(jnp.asarray(field, dtype=jnp.float32), w)
 
     # --- soil: regrid (ncol, n_src_layer) then remap to model layers ---
     dst_depth = np.asarray(soil_grid.z_node)
