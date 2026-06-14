@@ -95,3 +95,37 @@ lever is a **MULTIGRID barotropic preconditioner** (cut M to ~O(log n) with
 cheap V-cycle restriction/prolongation halos instead of the heavy
 cyclic-Thomas) — a major multi-week build, surfaced as a DECISION. Further
 gains otherwise need NVLink/IB hardware.
+
+## MULTIGRID POC — last theoretical lever RULED OUT (2026-06-14, job 8486324)
+
+Built a recursive geometric 2-/4-grid V-cycle barotropic preconditioner POC
+(scripts/tmp/_poc_multigrid_barotropic.py; weighted-jacobi smoother,
+full-weighting restriction ~0.25·Pᵀ, piecewise-constant prolongation,
+re-discretized coarse Helmholtz) and measured M-to-tol vs jacobi on the stiff
+convergence-char operator.
+
+  rel-residual at M (96×192, coeff 5e7):
+    jacobi   M16=1.87e-2  M60=1.41e-3
+    4-lvl MG M16=2.74e-3  M60=3.83e-7   (≈ identical to 2-grid: M16=2.93e-3)
+
+MG reaches jacobi-M60 accuracy (1.4e-3) at only ~M18 — the SAME ~3× M-cut as
+zonal_line/chebyshev — and adding levels (2→4) barely helped. At 25 halos per
+outer iter, the cost at equal accuracy is ~450 halos+36 reductions (MG M18) vs
+60 halos+120 reductions (jacobi M60) ⇒ ~2.7× SLOWER on the Gloo/TCP/PCIe
+roofline (halo≈reduction).
+
+ROOT CAUSE: lat-lon POLAR ANISOTROPY (dx→0 near the poles) defeats the
+pointwise-jacobi smoother — the textbook failure mode of naive geometric
+multigrid on lat-lon grids. The O(log n) iteration cut needs LINE/ZEBRA
+smoothers + SEMI-COARSENING (the reason POP/MOM ship dedicated barotropic
+solvers) = research-grade, and its payoff is only the non-production small/weak
+comm-bound tail (production barotropic is already amortized to 7-12% of the
+step). NOT worth the build on this hardware.
+
+### FINAL VERDICT
+All Ginsburg-measurable scaling axes are at their practical limit. Every
+accessible barotropic preconditioner lever (jacobi/zonal_line/chebyshev/
+geometric-MG) gives ≤3× M-cut, none cheap enough to win on Gloo/TCP/PCIe.
+Production 2-GPU is near-ideal (ocean 0.92-0.95, atm 0.82). Further gains
+require NVLink/IB hardware or a research-grade anisotropic-MG solver with
+payoff only on the non-production tail.
