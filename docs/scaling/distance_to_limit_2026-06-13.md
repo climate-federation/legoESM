@@ -76,3 +76,58 @@ win; each is an explicit decision (deliberate session or hardware upgrade).
 The verify-first method this campaign paid off repeatedly — it killed
 fake speedups, the single-reduce overclaim, and (this session) the 2-D
 decomposition before a multi-week step build.
+
+---
+
+## 2026-06-13 PM UPDATE — after +16 codex-clean units (review levers + cube tiling)
+
+The levers this doc listed as "remaining/next" are now SHIPPED (PR #435),
+which TIGHTENS every at-limit verdict (the engineering debt is paid; the
+remaining gaps are hardware/algorithm-fundamental or future-hardware).
+
+**Shipped this campaign extension (all gate+codex-verified):**
+- Ocean barotropic weak-scaling: **Chebyshev preconditioner** (0293f865) —
+  ≥2.3× fewer PCG global-reduction rounds (deg8: 35 iters to 1e-6 vs jacobi
+  >80). The iteration-COUNT axis (the open one) now addressed via the cheap
+  reduction-free mechanism. Opt-in.
+- Ocean per-device vmix: **LAPACK gtsv FFI** (7d153934) — 8.4–13.1× CPU
+  vmix-solve vs the fori-loop legacy (C96-scale 4143→317ms). Opt-in
+  `LEGOESM_TRIDIAG=lapack`.
+- Ocean per-device baroclinic: **GM/Redi density+Jacobian hoist** (fb0116d6)
+  — removes the redundant 2-iter EOS coupling/step in the implicit_K33 path.
+- Atm per-device spectral: **batched-GEMM SH transform** (74f02cb4, opt-in)
+  — moves the Legendre step onto tensor-core dot_general (the one
+  compute-bound atm grid). Future-hardware (fp64 tensor cores; Turing/CPU
+  neutral) — correctness-validated here.
+- Correctness: **TF32-on-Turing gate** (cbd2796c) — only enable TF32 where
+  the hardware supports it (compute capability >= 8.0).
+- Tooling: **ledger-header bugfix** (c6a1f76b) — the scaling-indicator plot
+  was silently dropping all rows.
+- Atm cube np>6 (the one structural lever breaking the 6-rank ceiling):
+  **the ENTIRE FV3 transport+KE stack now tiles to sub-faces** — d2a2c
+  D→A→C (prior) + PPM transport (U3b 2-D sweeps) + real-Courant composition
+  both sweeps + np24 shard_map wiring (U3d) + B-grid corner Courant (U3c) +
+  corner geo-conversion (U3e) + the full d_sw3 _bgrid_ke_transport
+  (U3f capstone, bit-exact 1e-10 vs global).
+
+**Per-grid theoretical-limit verdict (updated):**
+- **Atm cube per-device / 2-GPU strong / spectral / latlon CPU-MPI**: AT
+  LIMIT (unchanged — hardware/algorithm-fundamental on Ginsburg). SH→GEMM
+  moves the spectral per-device roofline on Ampere+ (future).
+- **Atm cube np>6**: the transport+KE STACK is tiled (correctness-complete);
+  the np24 PERF payoff is NOT Ginsburg-benchable (no 24 real devices; CPU-
+  virtual oversubscribes) — it is a multi-GPU-node capability. Remaining to
+  a full RK tendency: d_sw1 mass transport, d_sw5 div-damp + vorticity
+  transport, d_sw6 KE-grad + wind-update + vort-damp (each tileable via the
+  same approach-C; DELIBERATE-deep, not loop-micro-turns; no near-term SYPD).
+- **Ocean barotropic / vmix / baroclinic / tracer**: AT LIMIT — every named
+  lever shipped; the residual gaps are phase-fraction-bounded or
+  hardware-bandwidth floors.
+
+**BOTTOM LINE: on Ginsburg hardware, legoESM is AT the practical theoretical
+limit on every MEASURABLE weak/strong × atm/ocean axis** — all implementable
+levers are shipped. The only remaining structural lever (cube np>6) has its
+transport+KE stack tiled and is gated on real multi-GPU-node hardware to
+bench; the rest (full RK-stage assembly, bf16 transport, SH→GEMM perf) is
+future-hardware or deliberate-deep capability work, not near-term Ginsburg
+SYPD.

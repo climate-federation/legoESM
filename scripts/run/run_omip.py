@@ -386,7 +386,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   no_lat_scaling: bool = False,
                   no_gm_redi: bool = False,
                   implicit_vertical_mixing: bool = False,
-                  forcing_mode: str = "restoring"):
+                  forcing_mode: str = "restoring",
+                  dz_ref_override=None):
     """Create grid, z_coord, config, model for any grid type.
 
     All grids use the SAME config-based diffusion (A_h, K_h, A_v, K_v)
@@ -395,10 +396,21 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
     OceanPhysicsConfig modules are enabled on cubed-sphere grids where
     the modular pipeline is supported.
 
+    ``dz_ref_override`` (1-D thicknesses [m], e.g. NEMO ``e3t_1d``) replaces the
+    stretched z* profile with an EXACT external vertical grid -- its length must
+    equal ``nlev`` (the IC / rest-state shapes are built at ``nlev``).
+
     Returns (grid, z_coord, config, model, coord_kind).
     """
     from legoesm.ocean.vertical import create_ocean_z_star
-    if use_bathymetry:
+    if dz_ref_override is not None:
+        from legoesm.ocean.vertical import create_z_star_from_thicknesses
+        if len(dz_ref_override) != nlev:
+            raise ValueError(
+                f"dz_ref_override has {len(dz_ref_override)} levels but nlev="
+                f"{nlev}; pass --nlev {len(dz_ref_override)} to match.")
+        z_coord = create_z_star_from_thicknesses(dz_ref_override)
+    elif use_bathymetry:
         # Partial cells with ETOPO: use the same vertical stretching
         # as the global-overturning production scripts (dz_surface=20,
         # dz_deep=500) to avoid degenerate thin layers.

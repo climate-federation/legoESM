@@ -671,6 +671,23 @@ class DiagnosticCollector:
             if r is not None:
                 fields_2d['rsdt'] = r
 
+            # tos / siconc: sea-surface temperature [K] (CMOR Omon) and
+            # sea-ice area fraction [%] (CMOR SImon).  sst/sic already arrive
+            # on the model grid (prescribed for AMIP; from the coupler /
+            # get_sst_sic override for a coupled run), so the same regridder
+            # used for atmosphere fields applies.  tos is in K (matching the
+            # repo CMOR table units), so no conversion; siconc is fraction*100.
+            # NOTE: emitted UNMASKED.  The coupled driver is slab-ocean today
+            # (no land/sea mask is in collect()'s scope), so these are not yet
+            # masked to "where sea" per the CMOR cell_methods.  Mask them when a
+            # prognostic ocean + land mask is wired through the coupled driver.
+            r = self._regrid_to_latlon_2d(sst)
+            if r is not None:
+                fields_2d['tos'] = r
+            r = self._regrid_to_latlon_2d(np.asarray(sic) * 100.0)
+            if r is not None:
+                fields_2d['siconc'] = r
+
             # NOTE: rsds/rlds (surface downwelling) are NOT computed here.
             # The runtime only provides sw_net_sfc/lw_net_sfc (net fluxes),
             # which are not equal to the downwelling component.  Publishing

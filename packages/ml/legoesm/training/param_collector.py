@@ -58,6 +58,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.ocean.physics.lateral_mixing.backscatter",
     "legoesm.ocean.physics.lateral_mixing.config",
     "legoesm.ocean.physics.lateral_mixing.eke",
+    "legoesm.ocean.physics.lateral_mixing.mle",
     "legoesm.ocean.physics.surface_forcing.config",
     "legoesm.ocean.physics.vertical_mixing.config",
     "legoesm.ocean.physics.vertical_mixing.tidal",

@@ -438,10 +438,22 @@ def thomas_solve_batched(
     # Backend selection priority (post iter-72):
     #   1. env LEGOESM_TRIDIAG=pcr      -> pure-JAX PCR (default on GPU)
     #   2. env LEGOESM_TRIDIAG=cusparse -> jax.lax.linalg.tridiagonal_solve (custom_call)
-    #   3. env LEGOESM_TRIDIAG=legacy   -> fori_loop Thomas (debug)
-    #   4. CUDA backend                  -> PCR (new default; +51% throughput
+    #   3. env LEGOESM_TRIDIAG=lapack   -> jax.lax.linalg.tridiagonal_solve on ANY
+    #                                       backend (CPU LAPACK ``gtsv`` / GPU
+    #                                       cuSPARSE); the CPU win over the
+    #                                       fori_loop legacy (~2000x). Opt-in
+    #                                       (scaling review 2026-06-13 lever #8).
+    #   4. env LEGOESM_TRIDIAG=legacy   -> fori_loop Thomas (debug)
+    #   5. CUDA backend                  -> PCR (new default; +51% throughput
     #                                       over cuSPARSE at peak via XLA fusion)
-    #   5. Else                          -> legacy fori_loop
+    #   6. Else                          -> legacy fori_loop
+    #
+    # The FFI primitive is AD-safe: jax registers a JVP + transpose +
+    # batching rule for ``tridiagonal_solve_p`` (reverse-mode differentiable,
+    # vmap-able).  Kept OPT-IN (not the CPU default) because the CPU LAPACK
+    # ``gtsv_ffi`` lowering requires a recent jaxlib (>= 0.4.35); the
+    # fori_loop legacy stays the universal, version-independent default so a
+    # contributor on an older jax is never broken by a missing lowering.
     #
     # NOTE: the env var is read at JIT trace time and baked into the
     # compiled graph; changing the env var after JIT compile has no
@@ -451,6 +463,8 @@ def thomas_solve_batched(
     forced = os.environ.get("LEGOESM_TRIDIAG", "").lower()
     if forced == "pcr":
         return pcr_solve_batched(a, b, c, d)
+    if forced == "lapack":
+        return _ffi_tridiagonal_solve(a, b, c, d)
     if forced == "cusparse":
         try:
             from jax.lax.linalg import tridiagonal_solve  # noqa: F401
@@ -458,7 +472,7 @@ def thomas_solve_batched(
         except (ImportError, AttributeError):
             on_gpu = False
         if on_gpu:
-            return _cusparse_solve(a, b, c, d)
+            return _ffi_tridiagonal_solve(a, b, c, d)
         return _thomas_solve_batched_legacy(a, b, c, d)
     if forced == "legacy":
         return _thomas_solve_batched_legacy(a, b, c, d)
@@ -475,17 +489,28 @@ def thomas_solve_batched(
     return _thomas_solve_batched_legacy(a, b, c, d)
 
 
-def _cusparse_solve(
+def _ffi_tridiagonal_solve(
     a: jax.Array,
     b: jax.Array,
     c: jax.Array,
     d: jax.Array,
 ) -> jax.Array:
-    """Batched cuSPARSE tridiagonal solve via jax.lax.linalg.tridiagonal_solve.
+    """Batched tridiagonal solve via ``jax.lax.linalg.tridiagonal_solve``.
 
-    Lowering: single batched cuSPARSE invocation via the natively-batched
-    primitive. Same numerical behavior as :func:`pcr_solve_batched` and
-    :func:`_thomas_solve_batched_legacy` to machine epsilon.
+    Backend-agnostic FFI primitive: lowers to LAPACK ``gtsv`` on CPU and to
+    cuSPARSE ``gtsv2`` on CUDA — both single, natively-batched invocations.
+    Same numerical behavior as :func:`pcr_solve_batched` and
+    :func:`_thomas_solve_batched_legacy` to machine epsilon (LAPACK ``gtsv``
+    uses partial pivoting, so it is at least as stable as the plain Thomas
+    sweep for well-conditioned vertical operators).
+
+    AD-safe: ``tridiagonal_solve_p`` carries a JVP + transpose rule, so this
+    is reverse-mode differentiable (``jax.grad``) and vmap-able.
+
+    Diagonal convention (matches :func:`thomas_solve_batched`): ``a`` is the
+    sub-diagonal (``a[...,0]`` unused), ``b`` the main diagonal, ``c`` the
+    super-diagonal (``c[...,-1]`` unused), ``d`` the RHS — passed as
+    ``tridiagonal_solve(dl=a, d=b, du=c, b=d)``.
     """
     from jax.lax.linalg import tridiagonal_solve
     import math
@@ -493,7 +518,11 @@ def _cusparse_solve(
     orig_shape = a.shape
     spatial_shape = orig_shape[:-1]
     n_sys = orig_shape[-1]
-    n_cols = max(1, math.prod(spatial_shape))
+    # ``math.prod(())`` is 1 (the scalar-leading 1D case reshapes to
+    # (1, n_sys)); a zero-size leading batch must stay 0, NOT be clamped to
+    # 1 — ``max(1, ...)`` tried to reshape a size-0 array into (1, n_sys)
+    # and crashed, unlike the legacy path (codex 2026-06-13 MED).
+    n_cols = math.prod(spatial_shape)
 
     a_flat = a.reshape(n_cols, n_sys)
     b_flat = b.reshape(n_cols, n_sys)

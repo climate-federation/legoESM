@@ -63,7 +63,7 @@ from legoesm.ice.state import (
 from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
 
 
-def _grid_supports_ice_dynamics(grid) -> bool:
+def grid_supports_ice_dynamics(grid) -> bool:
     """True when ``grid`` has implemented sea-ice dynamics/transport ops.
 
     Sea-ice dynamics (EVP/mEVP via ``strain_rates`` + ``stress_divergence``)
@@ -74,11 +74,19 @@ def _grid_supports_ice_dynamics(grid) -> bool:
     would otherwise crash with an ``AttributeError`` deep inside the EVP /
     FV kernels.  Function-scoped imports keep ``legoesm.ice`` importable in
     isolation (no eager ``legoesm.grids`` dependency at module load).
+
+    Public so an external coupler driver can pick a supported dynamics scheme
+    (or fall back to ``free_drift``) before calling :func:`step_sea_ice`.
     """
     from legoesm.grids.cubed_sphere import CubedSphereGrid
     from legoesm.grids.latlon import LatLonGrid
     from legoesm.grids.voronoi import VoronoiMesh
     return isinstance(grid, (CubedSphereGrid, LatLonGrid, VoronoiMesh))
+
+
+# Backward-compatible private alias (internal call sites below + any importer
+# predating the public promotion).
+_grid_supports_ice_dynamics = grid_supports_ice_dynamics
 
 
 def _base_spatial_ndim(grid):

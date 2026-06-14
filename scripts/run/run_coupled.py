@@ -78,6 +78,27 @@ def main():
     parser.add_argument("--co2-init", type=float, default=415.0,
                         help="Initial CO2 concentration [ppmv]")
 
+    # CMIP6 experiment / output
+    parser.add_argument(
+        "--experiment", default="",
+        help="CMIP6 experiment id (e.g. historical, ssp585, piControl, "
+             "1pctCO2). Selects the transient external-forcing trajectory "
+             "(GHG/ozone/aerosol/solar). Empty = idealized/constant (default).",
+    )
+    parser.add_argument(
+        "--start-year", type=int, default=1979,
+        help="Calendar start year used to index CMIP6 forcing "
+             "(e.g. 1850 for historical) (default: 1979)",
+    )
+    parser.add_argument(
+        "--cmip-output", action="store_true",
+        help="Write CMOR-style monthly NetCDF output (tas, pr, tos, siconc, ...)",
+    )
+    parser.add_argument(
+        "--cmip-resolution-deg", type=float, default=5.0,
+        help="Lat-lon grid spacing for CMIP output [deg] (default: 5.0)",
+    )
+
     # Devices
     parser.add_argument(
         "--n-devices", type=int, default=None, metavar="N",
@@ -97,6 +118,10 @@ def main():
     logger.info(f"  Resolution: C{args.resolution}/L{args.nlev}")
     logger.info(f"  Days:       {args.days}")
     logger.info(f"  Radiation:  {args.radiation}")
+    logger.info(f"  Experiment: {args.experiment or '(idealized/constant)'}"
+                f"  start_year={args.start_year}")
+    logger.info(f"  CMIP out:   {args.cmip_output}"
+                + (f" @ {args.cmip_resolution_deg}deg" if args.cmip_output else ""))
     logger.info(f"  Devices:    {args.n_devices if args.n_devices is not None else 'auto'}")
     logger.info(f"  Backend:    {jax.default_backend()}")
     logger.info(f"  X64:        {jax.config.jax_enable_x64}")
@@ -116,9 +141,15 @@ def main():
             nlev=args.nlev,
         ),
         dycore=DycoreConfig(dt=args.dt, model_type="hydrostatic"),
-        output=OutputConfig(diag_days=args.diag_days),
+        output=OutputConfig(
+            diag_days=args.diag_days,
+            cmip_output=args.cmip_output,
+            cmip_resolution_deg=args.cmip_resolution_deg,
+        ),
         radiation=args.radiation,
         days=args.days,
+        experiment=args.experiment,
+        start_year=args.start_year,
         n_devices=args.n_devices if args.n_devices is not None else "auto",
     )
 

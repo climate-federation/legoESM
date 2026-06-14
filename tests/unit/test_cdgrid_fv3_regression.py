@@ -10473,7 +10473,7 @@ class TestXtpUYtpVEdgeGateAsymmetryIter729(unittest.TestCase):
           duogrid mode, breaking the symmetry across the four panel
           edges.
 
-    Python (`src/legoesm/core/fv3_sw_core.py::_ppm_transport_1d`) at
+    Python (`src/legoesm/core/fv3_sw_core.py::ppm_transport_1d`) at
     iter-729 commit:
       - Uses `mode='edge'` padding on BOTH sweep axes' BOTH panel
         edges (west/east for axis=1 xtp_u; south/north for axis=2
@@ -10505,7 +10505,7 @@ class TestXtpUYtpVEdgeGateAsymmetryIter729(unittest.TestCase):
     """
 
     def test_ppm_transport_1d_axis1_symmetric_at_panel_edges(self):
-        """Lock: `_ppm_transport_1d(axis=1)` produces bit-identical
+        """Lock: `ppm_transport_1d(axis=1)` produces bit-identical
         flux values at the west (first) and east (last) panel-edge
         interfaces given symmetric input.
 
@@ -10517,7 +10517,7 @@ class TestXtpUYtpVEdgeGateAsymmetryIter729(unittest.TestCase):
         """
         import numpy as np
         import jax.numpy as jnp
-        from legoesm.core.fv3_sw_core import _ppm_transport_1d
+        from legoesm.core.fv3_sw_core import ppm_transport_1d
 
         n = 12
         rng = np.random.default_rng(729)
@@ -10531,7 +10531,7 @@ class TestXtpUYtpVEdgeGateAsymmetryIter729(unittest.TestCase):
         c = jnp.asarray(c_mirrored)
         rd = jnp.ones((6, n, n), dtype=jnp.float64) * 0.5
 
-        flux = _ppm_transport_1d(u, c, rd, axis=1)
+        flux = ppm_transport_1d(u, c, rd, axis=1)
         # flux shape: (6, n+1, n)
         # With symmetric input, the flux should also be symmetric
         # along the sweep axis — THIS IS THE LOCK.  West interface
@@ -10549,9 +10549,9 @@ class TestXtpUYtpVEdgeGateAsymmetryIter729(unittest.TestCase):
         # Re-compute:
         max_diff = float(np.max(np.abs(flux_west - flux_east)))
         # Tolerance accounts for round-off in the symmetric
-        # reduction inside _ppm_transport_1d.
+        # reduction inside ppm_transport_1d.
         self.assertLess(max_diff, 1e-10,
-            msg="iter-729: _ppm_transport_1d(axis=1) west-east "
+            msg="iter-729: ppm_transport_1d(axis=1) west-east "
             "symmetry broken.  If an asymmetric Fortran-typo port "
             "has been applied to xtp_u east edge, this is EXPECTED "
             "— update the test and class docstring to reflect the "
@@ -10566,7 +10566,7 @@ class TestXtpUYtpVEdgeGateAsymmetryIter729(unittest.TestCase):
         """
         import numpy as np
         import jax.numpy as jnp
-        from legoesm.core.fv3_sw_core import _ppm_transport_1d
+        from legoesm.core.fv3_sw_core import ppm_transport_1d
 
         n = 12
         rng = np.random.default_rng(730)
@@ -10578,7 +10578,7 @@ class TestXtpUYtpVEdgeGateAsymmetryIter729(unittest.TestCase):
         c = jnp.asarray(c_mirrored)
         rd = jnp.ones((6, n, n), dtype=jnp.float64) * 0.5
 
-        flux = _ppm_transport_1d(v, c, rd, axis=2)
+        flux = ppm_transport_1d(v, c, rd, axis=2)
         # flux shape: (6, n, n+1).  South interface flux[:, :, 0]
         # vs north interface flux[:, :, n] pinned equal under
         # axis=2 mirror symmetry of the input.
@@ -10586,7 +10586,7 @@ class TestXtpUYtpVEdgeGateAsymmetryIter729(unittest.TestCase):
         flux_north = np.asarray(flux[:, :, n])
         max_diff = float(np.max(np.abs(flux_south - flux_north)))
         self.assertLess(max_diff, 1e-10,
-            msg="iter-729: _ppm_transport_1d(axis=2) south-north "
+            msg="iter-729: ppm_transport_1d(axis=2) south-north "
             "symmetry broken.  ytp_v should stay symmetric (both "
             "Fortran gates skip in duogrid); this lock must not "
             "move even if xtp_u east-edge port lands.")

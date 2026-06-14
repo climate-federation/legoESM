@@ -85,6 +85,7 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     eke_3d_horizontal_transport,
     eke_3d_vertical_diffusion,
     gm_redi_tracer_tendency_latlon,
+    gm_redi_density_and_jacobian,
     harmonic_lateral_kediss_eke_source,
     compute_isoneutral_K33_latlon,
 )
@@ -2061,6 +2062,22 @@ class LatLonCGridOceanModel:
                 # Redi tracer diffusivity from the same prognostic kappa as GM.
                 if eke_cfg.isopycnal_diffusion:
                     kappa_redi_override = kappa_gm_override
+            # Hoist the shared in-situ density (2-iteration EOS coupling) +
+            # z* Jacobian: when implicit_K33 the tracer tendency AND the K_33
+            # diagonal both need EXACTLY these from the same
+            # (T_mid,S_mid,eta,H_bathy), so compute once and thread into both
+            # (scaling review lever #3).  None when not implicit_K33 ⇒ the
+            # tracer tendency computes them inline, bit-identical to before.
+            _gm_dens_jac = None
+            if gm_cfg.implicit_K33:
+                _gm_dens_jac = gm_redi_density_and_jacobian(
+                    T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                    self.grid, self.z_coord,
+                    eos=self.config.eos, eos_linear=self.config.eos_linear,
+                    mask=state.land_mask.data,
+                    rho_0=self.config.constants.rho_0,
+                    g=self.config.constants.g,
+                )
             dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
                 T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
                 self.grid, self.z_coord, gm_cfg,
@@ -2071,6 +2088,7 @@ class LatLonCGridOceanModel:
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                 kappa_gm_override=kappa_gm_override,
                 kappa_redi_override=kappa_redi_override,
+                density_jacobian=_gm_dens_jac,
             )
             if gm_cfg.implicit_K33:
                 # Veros-faithful: K_33 (the vertical isoneutral diagonal ∝ S²) was
@@ -2085,6 +2103,7 @@ class LatLonCGridOceanModel:
                     mask=state.land_mask.data,
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                     kappa_redi_override=kappa_redi_override,
+                    density_jacobian=_gm_dens_jac,
                 )
             if _ab2_advective:
                 # AB2 "advective" scope: GM/Redi is a DISSIPATIVE (isoneutral +

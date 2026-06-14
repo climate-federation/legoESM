@@ -91,7 +91,9 @@ def discover_violations() -> dict[tuple[str, str, str], int]:
     )
     rels = {ra.rel(f) for f in files}
     sentinels = (
-        "src/legoesm/cli.py",
+        # post src/->packages PEP-420 migration: the legacy ``src/legoesm/cli.py``
+        # root is gone; pin a real CLI module under the ml namespace root instead.
+        "packages/ml/legoesm/ml/s2s/sfno_slab/cli.py",
         "packages/core/legoesm/grids/halo.py",
         "packages/atmosphere/legoesm/atmosphere/dynamics/primitive_eq_cdgrid.py",
         "packages/ocean/legoesm/ocean/eos.py",

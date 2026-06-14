@@ -1826,67 +1826,33 @@ def fill_corners_h2(padded: jax.Array) -> jax.Array:
         # reduction) remains active.
         pass  # fall through to legacy avg path
 
-    # Legacy inside-out 2-point average path.
-    for f in range(6):
-        # --- SW corner (rows 0-1, cols 0-1) ---
-        # Inner corner (1,1): adjacent cells (1,2) and (2,1) are filled
-        padded = padded.at[f, 1, 1].set(
-            0.5 * (padded[f, 1, 2] + padded[f, 2, 1])
-        )
-        # (0,1): adjacent to (0,2) [WEST halo, filled] and (1,1) [just filled]
-        padded = padded.at[f, 0, 1].set(
-            0.5 * (padded[f, 0, 2] + padded[f, 1, 1])
-        )
-        # (1,0): adjacent to (2,0) [SOUTH halo, filled] and (1,1) [just filled]
-        padded = padded.at[f, 1, 0].set(
-            0.5 * (padded[f, 2, 0] + padded[f, 1, 1])
-        )
-        # Outer corner (0,0)
-        padded = padded.at[f, 0, 0].set(
-            0.5 * (padded[f, 0, 1] + padded[f, 1, 0])
-        )
-
-        # --- SE corner (rows n+2..n+3, cols 0-1) ---
-        padded = padded.at[f, -2, 1].set(
-            0.5 * (padded[f, -2, 2] + padded[f, -3, 1])
-        )
-        padded = padded.at[f, -1, 1].set(
-            0.5 * (padded[f, -1, 2] + padded[f, -2, 1])
-        )
-        padded = padded.at[f, -2, 0].set(
-            0.5 * (padded[f, -3, 0] + padded[f, -2, 1])
-        )
-        padded = padded.at[f, -1, 0].set(
-            0.5 * (padded[f, -1, 1] + padded[f, -2, 0])
-        )
-
-        # --- NW corner (rows 0-1, cols n+2..n+3) ---
-        padded = padded.at[f, 1, -2].set(
-            0.5 * (padded[f, 1, -3] + padded[f, 2, -2])
-        )
-        padded = padded.at[f, 0, -2].set(
-            0.5 * (padded[f, 0, -3] + padded[f, 1, -2])
-        )
-        padded = padded.at[f, 1, -1].set(
-            0.5 * (padded[f, 2, -1] + padded[f, 1, -2])
-        )
-        padded = padded.at[f, 0, -1].set(
-            0.5 * (padded[f, 0, -2] + padded[f, 1, -1])
-        )
-
-        # --- NE corner (rows n+2..n+3, cols n+2..n+3) ---
-        padded = padded.at[f, -2, -2].set(
-            0.5 * (padded[f, -2, -3] + padded[f, -3, -2])
-        )
-        padded = padded.at[f, -1, -2].set(
-            0.5 * (padded[f, -1, -3] + padded[f, -2, -2])
-        )
-        padded = padded.at[f, -2, -1].set(
-            0.5 * (padded[f, -3, -1] + padded[f, -2, -2])
-        )
-        padded = padded.at[f, -1, -1].set(
-            0.5 * (padded[f, -1, -2] + padded[f, -2, -1])
-        )
+    # Legacy inside-out 2-point average path — VECTORISED over the 6-face axis.
+    # Was a ``for f in range(6)`` loop = 96 serialised ``.at[f,i,j]`` scatters;
+    # now 16 batched ``.at[:,i,j]`` scatters (bit-identical: each face reads
+    # ONLY its own cells so the faces are independent, and the inner->outer
+    # dependency WITHIN each corner is preserved by the statement order).
+    # Mirrors the already-vectorised fv3_agrid_xdir branch above (per-device
+    # kernel-count reduction; deep-dive 2026-06-14 lever #1).
+    # --- SW corner (rows 0-1, cols 0-1) --- inner (1,1) first, then outward.
+    padded = padded.at[:, 1, 1].set(0.5 * (padded[:, 1, 2] + padded[:, 2, 1]))
+    padded = padded.at[:, 0, 1].set(0.5 * (padded[:, 0, 2] + padded[:, 1, 1]))
+    padded = padded.at[:, 1, 0].set(0.5 * (padded[:, 2, 0] + padded[:, 1, 1]))
+    padded = padded.at[:, 0, 0].set(0.5 * (padded[:, 0, 1] + padded[:, 1, 0]))
+    # --- SE corner (rows n+2..n+3, cols 0-1) ---
+    padded = padded.at[:, -2, 1].set(0.5 * (padded[:, -2, 2] + padded[:, -3, 1]))
+    padded = padded.at[:, -1, 1].set(0.5 * (padded[:, -1, 2] + padded[:, -2, 1]))
+    padded = padded.at[:, -2, 0].set(0.5 * (padded[:, -3, 0] + padded[:, -2, 1]))
+    padded = padded.at[:, -1, 0].set(0.5 * (padded[:, -1, 1] + padded[:, -2, 0]))
+    # --- NW corner (rows 0-1, cols n+2..n+3) ---
+    padded = padded.at[:, 1, -2].set(0.5 * (padded[:, 1, -3] + padded[:, 2, -2]))
+    padded = padded.at[:, 0, -2].set(0.5 * (padded[:, 0, -3] + padded[:, 1, -2]))
+    padded = padded.at[:, 1, -1].set(0.5 * (padded[:, 2, -1] + padded[:, 1, -2]))
+    padded = padded.at[:, 0, -1].set(0.5 * (padded[:, 0, -2] + padded[:, 1, -1]))
+    # --- NE corner (rows n+2..n+3, cols n+2..n+3) ---
+    padded = padded.at[:, -2, -2].set(0.5 * (padded[:, -2, -3] + padded[:, -3, -2]))
+    padded = padded.at[:, -1, -2].set(0.5 * (padded[:, -1, -3] + padded[:, -2, -2]))
+    padded = padded.at[:, -2, -1].set(0.5 * (padded[:, -3, -1] + padded[:, -2, -2]))
+    padded = padded.at[:, -1, -1].set(0.5 * (padded[:, -1, -2] + padded[:, -2, -1]))
 
     return padded
 
@@ -2834,22 +2800,37 @@ def synchronize_bgrid_ne_corner_geo(u, v, z11, z12, z21, z22, n):
     -------
     u_sync, v_sync : jax.Array, shape (6, n+1, n+1)
     """
-    _EPS = float(jnp.finfo(jnp.float32).eps)
-    det = z11 * z22 - z21 * z12  # = sin(inter-axis angle) > 0, frame-consistent
-    inv = 1.0 / jnp.where(jnp.abs(det) > _EPS, det, 1.0)
-
-    # Exact non-orthogonal local → geographic
-    u_east = (z11 * u + z21 * v) * inv
-    u_north = (z12 * u + z22 * v) * inv
-
-    # Sync geo components independently (each is a frame-invariant scalar)
+    # Pointwise local→geo, cross-face scalar sync, pointwise geo→local.  The
+    # two pointwise conversions are factored (bgrid_ne_corner_to_geo /
+    # _from_geo) so a sub-face tiled corner-sync stage can run them PER TILE
+    # (approach-C) around the cross-tile scalar sync (task #3 cube tiling
+    # U3e); this global path is bit-identical (pure extraction).
+    u_east, u_north = bgrid_ne_corner_to_geo(u, v, z11, z12, z21, z22)
     u_east = synchronize_corner_scalar(u_east, n)
     u_north = synchronize_corner_scalar(u_north, n)
+    return bgrid_ne_corner_from_geo(u_east, u_north, z11, z12, z21, z22)
 
-    # Exact inverse (adjugate of M; the det cancels the forward 1/det)
+
+def bgrid_ne_corner_to_geo(u, v, z11, z12, z21, z22):
+    """Pointwise exact non-orthogonal local→geographic corner conversion
+    (the forward half of :func:`synchronize_bgrid_ne_corner_geo`, factored
+    for sub-face tiling — task #3 U3e).  ``u_east = (z11·u + z21·v)/detM``,
+    ``u_north = (z12·u + z22·v)/detM`` with ``detM = z11·z22 − z21·z12``.
+    Shape-generic (global ``(6,n+1,n+1)`` or a per-tile corner block); each
+    corner reads ONLY its own ``(u,v,z*)`` → tiles with no halo."""
+    _EPS = float(jnp.finfo(jnp.float32).eps)
+    det = z11 * z22 - z21 * z12  # = sin(inter-axis angle) > 0
+    inv = 1.0 / jnp.where(jnp.abs(det) > _EPS, det, 1.0)
+    return (z11 * u + z21 * v) * inv, (z12 * u + z22 * v) * inv
+
+
+def bgrid_ne_corner_from_geo(u_east, u_north, z11, z12, z21, z22):
+    """Pointwise exact geo→local corner conversion (the inverse half;
+    adjugate of M, the det cancels the forward 1/det).  ``u_sync =
+    z22·u_east − z21·u_north``, ``v_sync = −z12·u_east + z11·u_north``.
+    Shape-generic; no halo (per-corner)."""
     u_sync = z22 * u_east - z21 * u_north
     v_sync = -z12 * u_east + z11 * u_north
-
     return u_sync, v_sync
 
 

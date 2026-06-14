@@ -2275,9 +2275,9 @@ def _p_grad_c(h_star, h_s, cdgrid, dt2, g):
     return dp_x, dp_y
 
 
-def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
-                       apply_d_sw3_boundary_fix: bool = False,
-                       boundary_fix_dx_field=None, rd_prepadded: bool = False):
+def ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
+                      apply_d_sw3_boundary_fix: bool = False,
+                      boundary_fix_dx_field=None, rd_prepadded: bool = False):
     """PPM hord=9 staggered-field transport (FV3 ytp_v/xtp_u, sw_core.F90:2897-3353, 2540-2894 jord=9).
 
     Used for B-grid KE transport in d_sw3. N cells → N+1 interface fluxes.
@@ -2308,7 +2308,7 @@ def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
     # silently truncated.  Shapes are static at trace time → cheap check.
     if rd_prepadded and rd.shape[1] != nn + 2:
         raise ValueError(
-            f"_ppm_transport_1d: rd_prepadded expects rdelta depth-1 "
+            f"ppm_transport_1d: rd_prepadded expects rdelta depth-1 "
             f"padded to length nn+2={nn + 2} on the sweep axis, got "
             f"{rd.shape[1]}.")
 
@@ -2562,6 +2562,27 @@ def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
     return flux
 
 
+def bgrid_corner_courant_local(uc_pad, vc_pad, cosa, rsina, dt5):
+    """B-grid contravariant corner Courant numbers ``(vb, ub)`` — the
+    pointwise Step 1/3 of :func:`_bgrid_ke_transport`, factored so a sub-face
+    tile can compute its corner-block ``(vb, ub)`` from its slice of the
+    GLOBALLY cross-face-halo'd ``uc_pad``/``vc_pad`` + corner metrics
+    (approach-C cube tiling, task #3 — mirrors ``d2a2c_ua_va_local``: the
+    cross-face halo runs in the global view, this core is pure pointwise).
+
+    Shape-generic (global or per-tile):
+      ``uc_pad`` ``(.., A, B+1)`` j-padded uc; ``vc_pad`` ``(.., A+1, B)``
+      i-padded vc; ``cosa``/``rsina`` corner metrics ``(.., A, B)``; returns
+      ``vb, ub`` ``(.., A, B)``.  The two adjacent-sums collapse the padded
+      axis: ``vc_sum`` over i, ``uc_sum`` over j.
+    """
+    vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]
+    uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]
+    vb = dt5 * (vc_sum - uc_sum * cosa) * rsina
+    ub = dt5 * (uc_sum - vc_sum * cosa) * rsina
+    return vb, ub
+
+
 def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     """FV3 d_sw3: B-grid KE at corners via 1D PPM transport with contravariant Courant numbers.
 
@@ -2584,10 +2605,12 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     else:
         vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
         uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]  # (6, n+1, n+1)
-    uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]  # (6, n+1, n+1)
-
-    vb = dt5 * (vc_sum - uc_sum * cosa) * rsina  # (6, n+1, n+1)
+    # Corner Courant (vb, ub) — pointwise, factored to bgrid_corner_courant_local
+    # so the sub-face tiled stage reuses the EXACT core (task #3 cube tiling).
+    # Both are pure functions of (uc_sum, vc_sum, cosa, rsina); computing ub
+    # here (before the ytp_v sweep) instead of at the old Step-3 site is
+    # bit-identical — no data dependency on the sweep.
+    vb, ub = bgrid_corner_courant_local(uc_pad, vc_pad, cosa, rsina, dt5)  # (6,n+1,n+1)
 
     # iter-945: cross-face halo for (u_d, v_d) PPM sweep via _pad_halo_dgrid_for_ppm
     # (FV3 mpp_update_domains DGRID_NE analogue). iter-950 NEGATIVE: h_dg=3 regresses v_ll_Linf.
@@ -2602,15 +2625,15 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
 
     # Step 2: PPM ytp_v hord=9 (FV3:1315). iter-967 NEGATIVE: d_sw3 boundary fix conflicts with iter-945 halo.
     rdy = 1.0 / jnp.maximum(cdgrid.dy_edge_x, _EPS)  # (6, n+1, n)
-    transported_y = _ppm_transport_1d(
+    transported_y = ppm_transport_1d(
         v_d_jhalo, vb, rdy, axis=2, external_halo=h_dg)
 
     # --- Step 3: B-grid contravariant u-velocity (Courant number) ---
-    ub = dt5 * (uc_sum - vc_sum * cosa) * rsina  # (6, n+1, n+1)
+    # ub computed above with vb via bgrid_corner_courant_local (bit-identical).
 
     # --- Step 4: transport u_d in x-direction using ub (PPM hord=9) ---
     rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, _EPS)  # (6, n, n+1)
-    transported_x = _ppm_transport_1d(
+    transported_x = ppm_transport_1d(
         u_d_ihalo, ub, rdx, axis=1, external_halo=h_dg)
 
     # Step 5: BGRID_NE component sync (FV3 dyn_core.F90:968-1019). Fortran fires inside if(duogrid) block.

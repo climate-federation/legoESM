@@ -452,12 +452,18 @@ def cgrid_to_dgrid(u_c, v_c, cdgrid):
 # D-grid vorticity (circulation form)
 # ==============================================================================
 
-def dgrid_vorticity(u_d, v_d, cdgrid):
-    """Relative vorticity at cc from D-grid corners via exact circulation (avoids Hollingsworth-Kallberg).
+def dgrid_vorticity_core(u_d, v_d, cosa_corner, dx_edge_y, dy_edge_x, area):
+    """Pure-array core of :func:`dgrid_vorticity` — relative vorticity at cc
+    from D-grid corner winds via exact circulation, with the RAW metrics passed
+    explicitly (``cosa_corner``/``dx_edge_y``/``dy_edge_x``/``area``).  Shared by
+    the global wrapper and the sub-face tile kernel
+    (:func:`legoesm.parallel.tiled_production_cdgrid.dgrid_vorticity_tile_2d`)
+    so the circulation numerics are NOT duplicated.  Purely local: cc cell
+    ``(i,j)`` reads only the 2x2 corner block ``[i:i+2, j:j+2]``.
 
     Non-orthogonality: j-edges use v.e_j = u_d*cos(α) + v_d*sin(α).
     """
-    cosa = _broadcast_metric(cdgrid.cosa_corner, u_d)
+    cosa = _broadcast_metric(cosa_corner, u_d)
     sina = jnp.sqrt(jnp.maximum(1.0 - cosa**2, _EPS))
 
     # South edge (i-direction): v . e_i = u_d
@@ -479,16 +485,25 @@ def dgrid_vorticity(u_d, v_d, cdgrid):
     sina_west = 0.5 * (sina[:, :-1, :-1] + sina[:, :-1, 1:])
     v_cov_west = u_west_raw * cosa_west + v_west_raw * sina_west
 
-    dx_south = _broadcast_metric(cdgrid.dx_edge_y[:, :, :-1], u_d)
-    dx_north = _broadcast_metric(cdgrid.dx_edge_y[:, :, 1:], u_d)
-    dy_west = _broadcast_metric(cdgrid.dy_edge_x[:, :-1, :], u_d)
-    dy_east = _broadcast_metric(cdgrid.dy_edge_x[:, 1:, :], u_d)
+    dx_south = _broadcast_metric(dx_edge_y[:, :, :-1], u_d)
+    dx_north = _broadcast_metric(dx_edge_y[:, :, 1:], u_d)
+    dy_west = _broadcast_metric(dy_edge_x[:, :-1, :], u_d)
+    dy_east = _broadcast_metric(dy_edge_x[:, 1:, :], u_d)
 
     circ = (u_south * dx_south + v_cov_east * dy_east
             - u_north * dx_north - v_cov_west * dy_west)
 
-    area = _broadcast_metric(cdgrid.base.area, u_d)
-    return circ / area
+    area_b = _broadcast_metric(area, u_d)
+    return circ / area_b
+
+
+def dgrid_vorticity(u_d, v_d, cdgrid):
+    """Relative vorticity at cc from D-grid corners via exact circulation
+    (avoids Hollingsworth-Kallberg).  Thin wrapper over
+    :func:`dgrid_vorticity_core` with the cdgrid metrics."""
+    return dgrid_vorticity_core(
+        u_d, v_d, cdgrid.cosa_corner, cdgrid.dx_edge_y, cdgrid.dy_edge_x,
+        cdgrid.base.area)
 
 
 # ==============================================================================
@@ -970,6 +985,34 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
 # Arakawa-Lamb gradient at D-grid corners
 # ==============================================================================
 
+def _al_grad_matrix(dB_raw_x, dB_raw_y, grad_c00, grad_c01, grad_c10, grad_c11):
+    """Apply the precomputed 2x2 (3D Cartesian -> face-local) A-L gradient
+    matrix to the raw 4-pt finite differences.  Shared by every
+    arakawa_lamb_gradient branch + the sub-face tile kernel (no dup numerics)."""
+    c00 = _broadcast_metric(grad_c00, dB_raw_x)
+    c01 = _broadcast_metric(grad_c01, dB_raw_x)
+    c10 = _broadcast_metric(grad_c10, dB_raw_x)
+    c11 = _broadcast_metric(grad_c11, dB_raw_x)
+    return c00 * dB_raw_x + c01 * dB_raw_y, c10 * dB_raw_x + c11 * dB_raw_y
+
+
+def arakawa_lamb_gradient_core(B_pad, grad_c00, grad_c01, grad_c10, grad_c11):
+    """Default-path Arakawa-Lamb corner gradient (NO cube-vertex specials): the
+    2x2 box 4-pt finite-diff + :func:`_al_grad_matrix`.  ``B_pad[:, :-1, :-1]``
+    keeps the trailing axis so this is ndim-agnostic (3D + 4D — bit-identical to
+    the old explicit ``B.ndim`` branch).  Shared by the global wrapper
+    (default + a2b branches) and the sub-face tile kernel
+    (``tiled_production_cdgrid.arakawa_lamb_gradient_tile_2d``)."""
+    B_sw = B_pad[:, :-1, :-1]
+    B_se = B_pad[:, 1:, :-1]
+    B_nw = B_pad[:, :-1, 1:]
+    B_ne = B_pad[:, 1:, 1:]
+    dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)   # east - west
+    dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)   # north - south
+    return _al_grad_matrix(dB_raw_x, dB_raw_y, grad_c00, grad_c01, grad_c10,
+                           grad_c11)
+
+
 def arakawa_lamb_gradient(B, cdgrid, padded=None,
                            fortran_dir_aware_corners=False,
                            fortran_a2b_corner_avg=False):
@@ -1049,32 +1092,14 @@ def arakawa_lamb_gradient(B, cdgrid, padded=None,
             B_nw_y = p2[:, :-1, 1:, :];  B_ne_y = p2[:, 1:, 1:, :]
         dB_raw_x = (B_se_x + B_ne_x) - (B_sw_x + B_nw_x)
         dB_raw_y = (B_nw_y + B_ne_y) - (B_sw_y + B_se_y)
-    else:
-        if B.ndim == 3:
-            B_sw = B_pad[:, :-1, :-1]
-            B_se = B_pad[:, 1:, :-1]
-            B_nw = B_pad[:, :-1, 1:]
-            B_ne = B_pad[:, 1:, 1:]
-        else:
-            B_sw = B_pad[:, :-1, :-1, :]
-            B_se = B_pad[:, 1:, :-1, :]
-            B_nw = B_pad[:, :-1, 1:, :]
-            B_ne = B_pad[:, 1:, 1:, :]
+        return _al_grad_matrix(
+            dB_raw_x, dB_raw_y, cdgrid.grad_c00, cdgrid.grad_c01,
+            cdgrid.grad_c10, cdgrid.grad_c11)
 
-        # Raw 4-point finite-difference quantities
-        dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)  # east − west
-        dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)  # north − south
-
-    # Precomputed 2×2 gradient matrix (3D Cartesian → face-local)
-    c00 = _broadcast_metric(cdgrid.grad_c00, dB_raw_x)
-    c01 = _broadcast_metric(cdgrid.grad_c01, dB_raw_x)
-    c10 = _broadcast_metric(cdgrid.grad_c10, dB_raw_x)
-    c11 = _broadcast_metric(cdgrid.grad_c11, dB_raw_x)
-
-    dB_dx = c00 * dB_raw_x + c01 * dB_raw_y
-    dB_dy_perp = c10 * dB_raw_x + c11 * dB_raw_y
-
-    return dB_dx, dB_dy_perp
+    # Default path (no cube-vertex specials; a2b pre-mutated B_pad above).
+    return arakawa_lamb_gradient_core(
+        B_pad, cdgrid.grad_c00, cdgrid.grad_c01, cdgrid.grad_c10,
+        cdgrid.grad_c11)
 
 
 # ==============================================================================
@@ -1426,6 +1451,27 @@ def fv3_d2cc(u_d, v_d, cdgrid):
     return u_cc, v_cc
 
 
+def fv3_cc2c_core(u_pad, v_pad, cosa_u_metric):
+    """Pure-array core of :func:`fv3_cc2c` — the cc -> C-face avg + non-orthogonality
+    projection on the ALREADY vector-halo-padded cc winds.  Shared by the global
+    wrapper + the sub-face tile kernel
+    (``tiled_production_cdgrid.fv3_cc2c_tile_2d``); no dup numerics.
+
+    ``u_pad``/``v_pad`` ``(F, W, W[, nlev])`` (W=n+2 full, or nl+2 per tile —
+    the ``[1:-1]`` j-trim makes the same window slice tile cleanly);
+    ``cosa_u_metric`` ``(F, W-1, W-2)``.  Returns ``u_c`` ``(F, W-1, W-2)``
+    (x-face) + ``v_c`` ``(F, W-2, W-1)`` (y-face)."""
+    # cc -> C-face avg with non-orthogonality projection (matches dgrid_to_cgrid)
+    u_avg = 0.5 * (u_pad[:, :-1, 1:-1] + u_pad[:, 1:, 1:-1])
+    v_at_u = 0.5 * (v_pad[:, :-1, 1:-1] + v_pad[:, 1:, 1:-1])
+    cosa_u = _broadcast_metric(cosa_u_metric, u_avg)
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
+    u_c = u_avg * sina_u - v_at_u * cosa_u
+
+    v_c = 0.5 * (v_pad[:, 1:-1, :-1] + v_pad[:, 1:-1, 1:])
+    return u_c, v_c
+
+
 def fv3_cc2c(u_cc, v_cc, cdgrid):
     """cc → C-grid edge-normal. Vector halo + 2nd-order interp; duogrid scalar remap if active."""
     grid = cdgrid.base
@@ -1438,14 +1484,7 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
         interp_offsets=offsets, duogrid=dg,
     )
 
-    # cc → C-face avg with non-orthogonality projection (matches dgrid_to_cgrid corner D-grid)
-    u_avg = 0.5 * (u_pad[:, :-1, 1:-1] + u_pad[:, 1:, 1:-1])  # (6, n+1, n)
-    v_at_u = 0.5 * (v_pad[:, :-1, 1:-1] + v_pad[:, 1:, 1:-1])
-    cosa_u = _broadcast_metric(cdgrid.cosa_u, u_avg)
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
-    u_c = u_avg * sina_u - v_at_u * cosa_u
-
-    v_c = 0.5 * (v_pad[:, 1:-1, :-1] + v_pad[:, 1:-1, 1:])  # (6, n, n+1)
+    u_c, v_c = fv3_cc2c_core(u_pad, v_pad, cdgrid.cosa_u)  # (6,n+1,n) / (6,n,n+1)
 
     # iter-839: u_c face-normal projection / v_c plain avg asymmetry is LOAD-BEARING.
     # Symmetric v_c projection caused 230× W2 regression (test_boundary_fix_is_load_bearing_for_w2_l2 failure).
