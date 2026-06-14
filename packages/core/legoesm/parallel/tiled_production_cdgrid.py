@@ -203,3 +203,71 @@ def make_tiled_interp_center_to_corner_stage_2d(mesh, cdgrid, n: int, kt: int):
         return interp_center_to_corner_tile_2d(f_pad, cdgrid, a_i, a_j, nl)
 
     return _stage
+
+
+# ---------------------------------------------------------------------------
+# P-iii: arakawa_lamb_gradient (DEFAULT path — cc B -> D-grid corner gradient
+# (dB_dx, dB_dy_perp)).  Like interp_center_to_corner it tiles the GLOBAL
+# pad_halo_auto pre-pad ``B_pad`` (n+2), but the corner output ALSO needs the
+# precomputed face-local matrix grad_c00/c01/c10/c11 (n+1) sliced per tile, so
+# the kernel calls the extracted ``arakawa_lamb_gradient_core``.  Two staggered
+# corner outputs -> lower-owns-shared reassembly each.  (The cube-vertex
+# a2b/dir-aware diagnostics are OFF in production and not tiled.)
+# ---------------------------------------------------------------------------
+
+def arakawa_lamb_gradient_tile_2d(B_pad, grad_c00, grad_c01, grad_c10, grad_c11,
+                                  a_i, a_j, nl: int):
+    """Per-tile default-path ``arakawa_lamb_gradient`` (P-iii).  ``B_pad``
+    ``(F, n+2, n+2[, nlev])`` = global ``pad_halo_auto(B)`` (FACE-REPLICATED);
+    ``grad_c00..c11`` ``(F, n+1, n+1)`` the corner matrices.  Corner tile
+    ``[a:a+nl+1]`` reads ``B_pad[a:a+nl+2]`` and ``grad_*[a:a+nl+1]``.  Returns
+    ``(dB_dx, dB_dy_perp)`` ``(F, nl+1, nl+1[, nlev])`` — reassembly
+    lower-owns-shared each."""
+    from legoesm.core.operators_cdgrid import arakawa_lamb_gradient_core
+
+    if B_pad.shape[1] != grad_c00.shape[1] + 1:
+        raise ValueError(
+            f"arakawa_lamb_gradient_tile_2d: B_pad i-dim must be grad i-dim+1 "
+            f"(n+2 vs n+1); got B_pad={B_pad.shape[1]}, "
+            f"grad_c00={grad_c00.shape[1]}")
+
+    def _sb(arr, si):                       # B_pad block (nl+2)
+        arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+        return jax.lax.dynamic_slice_in_dim(arr, a_j, si, axis=2)
+
+    def _sg(arr):                           # grad block (nl+1)
+        arr = jax.lax.dynamic_slice_in_dim(arr, a_i, nl + 1, axis=1)
+        return jax.lax.dynamic_slice_in_dim(arr, a_j, nl + 1, axis=2)
+
+    return arakawa_lamb_gradient_core(
+        _sb(B_pad, nl + 2), _sg(grad_c00), _sg(grad_c01), _sg(grad_c10),
+        _sg(grad_c11))
+
+
+def make_tiled_arakawa_lamb_gradient_stage_2d(mesh, cdgrid, n: int, kt: int):
+    """Sharded default-path ``arakawa_lamb_gradient`` on a ``(6, kt, kt)`` mesh.
+    ``stage(B_pad) -> (dB_dx, dB_dy_perp)`` where ``B_pad`` is the GLOBAL
+    face-replicated ``pad_halo_auto(B)`` ``(6, n+2, n+2)``; the corner matrices
+    are passed as face-sharded inputs (NOT closed over -> codex U4a HIGH).  Both
+    outputs tile-sharded, gathered ``(6, kt*(nl+1), kt*(nl+1))`` reassembling
+    lower-owns-shared to ``(6, n+1, n+1)``."""
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    nl = n // kt
+    gc00, gc01 = cdgrid.grad_c00, cdgrid.grad_c01
+    gc10, gc11 = cdgrid.grad_c10, cdgrid.grad_c11
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+
+    @partial(shard_map, mesh=mesh, in_specs=(fo,) * 5, out_specs=(co, co),
+             check_vma=False)
+    def _body(B_pad, c00, c01, c10, c11):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return arakawa_lamb_gradient_tile_2d(
+            B_pad, c00, c01, c10, c11, a_i, a_j, nl)
+
+    def stage(B_pad):
+        return _body(B_pad, gc00, gc01, gc10, gc11)
+
+    return stage

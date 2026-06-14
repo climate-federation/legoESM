@@ -985,6 +985,34 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
 # Arakawa-Lamb gradient at D-grid corners
 # ==============================================================================
 
+def _al_grad_matrix(dB_raw_x, dB_raw_y, grad_c00, grad_c01, grad_c10, grad_c11):
+    """Apply the precomputed 2x2 (3D Cartesian -> face-local) A-L gradient
+    matrix to the raw 4-pt finite differences.  Shared by every
+    arakawa_lamb_gradient branch + the sub-face tile kernel (no dup numerics)."""
+    c00 = _broadcast_metric(grad_c00, dB_raw_x)
+    c01 = _broadcast_metric(grad_c01, dB_raw_x)
+    c10 = _broadcast_metric(grad_c10, dB_raw_x)
+    c11 = _broadcast_metric(grad_c11, dB_raw_x)
+    return c00 * dB_raw_x + c01 * dB_raw_y, c10 * dB_raw_x + c11 * dB_raw_y
+
+
+def arakawa_lamb_gradient_core(B_pad, grad_c00, grad_c01, grad_c10, grad_c11):
+    """Default-path Arakawa-Lamb corner gradient (NO cube-vertex specials): the
+    2x2 box 4-pt finite-diff + :func:`_al_grad_matrix`.  ``B_pad[:, :-1, :-1]``
+    keeps the trailing axis so this is ndim-agnostic (3D + 4D — bit-identical to
+    the old explicit ``B.ndim`` branch).  Shared by the global wrapper
+    (default + a2b branches) and the sub-face tile kernel
+    (``tiled_production_cdgrid.arakawa_lamb_gradient_tile_2d``)."""
+    B_sw = B_pad[:, :-1, :-1]
+    B_se = B_pad[:, 1:, :-1]
+    B_nw = B_pad[:, :-1, 1:]
+    B_ne = B_pad[:, 1:, 1:]
+    dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)   # east - west
+    dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)   # north - south
+    return _al_grad_matrix(dB_raw_x, dB_raw_y, grad_c00, grad_c01, grad_c10,
+                           grad_c11)
+
+
 def arakawa_lamb_gradient(B, cdgrid, padded=None,
                            fortran_dir_aware_corners=False,
                            fortran_a2b_corner_avg=False):
@@ -1064,32 +1092,14 @@ def arakawa_lamb_gradient(B, cdgrid, padded=None,
             B_nw_y = p2[:, :-1, 1:, :];  B_ne_y = p2[:, 1:, 1:, :]
         dB_raw_x = (B_se_x + B_ne_x) - (B_sw_x + B_nw_x)
         dB_raw_y = (B_nw_y + B_ne_y) - (B_sw_y + B_se_y)
-    else:
-        if B.ndim == 3:
-            B_sw = B_pad[:, :-1, :-1]
-            B_se = B_pad[:, 1:, :-1]
-            B_nw = B_pad[:, :-1, 1:]
-            B_ne = B_pad[:, 1:, 1:]
-        else:
-            B_sw = B_pad[:, :-1, :-1, :]
-            B_se = B_pad[:, 1:, :-1, :]
-            B_nw = B_pad[:, :-1, 1:, :]
-            B_ne = B_pad[:, 1:, 1:, :]
+        return _al_grad_matrix(
+            dB_raw_x, dB_raw_y, cdgrid.grad_c00, cdgrid.grad_c01,
+            cdgrid.grad_c10, cdgrid.grad_c11)
 
-        # Raw 4-point finite-difference quantities
-        dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)  # east − west
-        dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)  # north − south
-
-    # Precomputed 2×2 gradient matrix (3D Cartesian → face-local)
-    c00 = _broadcast_metric(cdgrid.grad_c00, dB_raw_x)
-    c01 = _broadcast_metric(cdgrid.grad_c01, dB_raw_x)
-    c10 = _broadcast_metric(cdgrid.grad_c10, dB_raw_x)
-    c11 = _broadcast_metric(cdgrid.grad_c11, dB_raw_x)
-
-    dB_dx = c00 * dB_raw_x + c01 * dB_raw_y
-    dB_dy_perp = c10 * dB_raw_x + c11 * dB_raw_y
-
-    return dB_dx, dB_dy_perp
+    # Default path (no cube-vertex specials; a2b pre-mutated B_pad above).
+    return arakawa_lamb_gradient_core(
+        B_pad, cdgrid.grad_c00, cdgrid.grad_c01, cdgrid.grad_c10,
+        cdgrid.grad_c11)
 
 
 # ==============================================================================
