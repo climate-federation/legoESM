@@ -124,6 +124,8 @@ class CanopyForcingBundle(NamedTuple):
     z0m: jax.Array       # roughness length [m]
     displa: jax.Array    # displacement height [m]
     z0: jax.Array        # reference height [m]
+    cv: jax.Array        # leaf BL forced-convection coefficient [m^-0.5 s^0.5]
+    d_leaf: jax.Array    # characteristic leaf width [m]
 
 
 # ---------------------------------------------------------------------------
@@ -160,16 +162,16 @@ def _canopy_residual(
         b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m)
 
     # ---- Boundary and below-canopy resistances ----
-    Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun)
+    Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
     rah_below, raw_below = compute_below_canopy_resistance(uav, b.CI, b.LAI)
 
-    # ---- Soil evaporation resistance ----
-    Rsoil = raw_below * (1.0 / jnp.maximum(b.fStress_soil, 1e-6) - 1.0)
+    # Soil evaporation uses the efficiency b.fStress_soil directly as a
+    # conductance multiplier (no 1/fStress dryness-resistance intermediate) —
+    # see soil_energy_balance_bt / canopy_air_update.
 
     # ---- Longwave radiation ----
-    Tf_mean = (Tf_Sun**4 * b.fSun + Tf_Sh**4 * (1.0 - b.fSun))**0.25
     lw_out  = canopy_longwave_rt(
-        b.LAI, b.SZA, Ts, Tf_mean, Tf_Sun, Tf_Sh, b.La, b.epsf, b.epss)
+        b.LAI, b.CI, b.SZA, Ts, Tf_Sun, Tf_Sh, b.La, b.epsf, b.epss)
     ALW_Sun, ALW_Sh, ALW_Soil = lw_out.ALW_Sun, lw_out.ALW_Sh, lw_out.ALW_Soil
 
     # ---- Photosynthesis ----
@@ -218,13 +220,13 @@ def _canopy_residual(
         _, LE_Soil, H_Soil, _G = soil_energy_balance_bt(
             Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
-            rah_below, raw_below, Rsoil,
+            rah_below, raw_below, b.fStress_soil,
             b.ASW_Soil, ALW_Soil)
     else:
         _, LE_Soil, H_Soil, _G = soil_energy_balance_pm(
             Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
-            rah_below, raw_below, Rsoil,
+            rah_below, raw_below, b.fStress_soil,
             b.ASW_Soil, ALW_Soil)
 
     # ---- Canopy air update (FULLY_COUPLED: soil included) ----
@@ -235,7 +237,7 @@ def _canopy_residual(
         Rb_Sun, Rb_Sh,
         rah_above, raw_above,
         rah_below, raw_below,
-        Rsoil, b.Ps)
+        b.fStress_soil, b.Ps)
 
     # ---- Sunlit-leaf anchor when fSun is too small for two-leaf split ----
     # When ``fSun`` is small, ``Rb_Sun = rb / (LAI · fSun)`` is large, the
@@ -295,15 +297,15 @@ def _canopy_forward(
     ustar, rah_above, raw_above, uav, zeta = monin_obukhov_stability(
         b.ur, b.Ta, b.Tv_atm, Tc, b.q_atm, q_c, zldis, b.z0m)
 
-    Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun)
+    Rb_Sun, Rb_Sh = compute_boundary_layer_resistance(uav, b.LAI, b.fSun, b.cv, b.d_leaf)
     rah_below, raw_below = compute_below_canopy_resistance(uav, b.CI, b.LAI)
-    Rsoil = raw_below * (1.0 / jnp.maximum(b.fStress_soil, 1e-6) - 1.0)
 
-    Tf_mean = (Tf_Sun**4 * b.fSun + Tf_Sh**4 * (1.0 - b.fSun))**0.25
     lw_out  = canopy_longwave_rt(
-        b.LAI, b.SZA, Ts, Tf_mean, Tf_Sun, Tf_Sh, b.La, b.epsf, b.epss)
+        b.LAI, b.CI, b.SZA, Ts, Tf_Sun, Tf_Sh, b.La, b.epsf, b.epss)
     ALW_Sun, ALW_Sh, ALW_Soil = lw_out.ALW_Sun, lw_out.ALW_Sh, lw_out.ALW_Soil
     Ls = lw_out.Ls
+    Lcanopy_up = lw_out.Lcanopy_up
+    gap_LW = lw_out.gap_LW
 
     T_phot_sun = b.Ta if use_ta_for_photosynthesis else Tf_Sun
     T_phot_sh  = b.Ta if use_ta_for_photosynthesis else Tf_Sh
@@ -348,13 +350,13 @@ def _canopy_forward(
         Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_bt(
             Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
-            rah_below, raw_below, Rsoil,
+            rah_below, raw_below, b.fStress_soil,
             b.ASW_Soil, ALW_Soil)
     else:
         Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_pm(
             Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
-            rah_below, raw_below, Rsoil,
+            rah_below, raw_below, b.fStress_soil,
             b.ASW_Soil, ALW_Soil)
 
     return dict(
@@ -362,13 +364,12 @@ def _canopy_forward(
         LE_Sun=LE_Sun, LE_Sh=LE_Sh, LE_Soil=LE_Soil,
         H_Sun=H_Sun,   H_Sh=H_Sh,   H_Soil=H_Soil,
         Rn_Sun=Rn_Sun, Rn_Sh=Rn_Sh, Rn_Soil=Rn_Soil,
-        G=G, Ls=Ls,
+        G=G, Ls=Ls, Lcanopy_up=Lcanopy_up, gap_LW=gap_LW,
         gs_Sun=gs_Sun, gs_Sh=gs_Sh,
         ustar=ustar, zeta=zeta,
         rah_above=rah_above, rah_below=rah_below,
         Rb_Sun=Rb_Sun, Rb_Sh=Rb_Sh,
         ALW_Sun=ALW_Sun, ALW_Sh=ALW_Sh, ALW_Soil=ALW_Soil,
-        Rsoil=Rsoil,
     )
 
 
@@ -431,18 +432,22 @@ def _make_implicit_newton_solver(
             ``dx*/dθ = −(∂F/∂x)⁻¹ · ∂F/∂θ``
         which gives the adjoint
             ``λ = (∂F/∂x)⁻ᵀ g_x``,  ``grad_θ = −(∂F/∂θ)ᵀ λ``.
-        Solved with ``jnp.linalg.lstsq(rcond=1e-4)`` for robustness against
-        the ill-conditioned Jacobians that occur at low fSun, near
-        freezing, or at the wilting point.  Without IFT-based gradients,
-        ``jax.grad`` through the scan-based Newton produces NaN due to
+        Solved with an exact ``jnp.linalg.solve`` (verified to match central
+        finite differences); the canopy Jacobian is stiff (cond ~ 1e5) but
+        nonsingular at converged columns, and the earlier ``lstsq(rcond=1e-4)``
+        truncation biased the gradient.  Without IFT-based gradients,
+        ``jax.grad`` through the scan-based Newton produces NaN from
         second-order tangents at near-singular Jacobians.
 
-    NaN guards (backward only):
-        * If ``x*`` has any NaN (Newton diverged), the backward pass
-          returns zero gradients rather than poisoning every parameter
-          via the adjoint solve.
-        * If ``λ`` or the resulting parameter cotangent has NaN/Inf, it
-          is zeroed.
+    Guards (backward only):
+        * Convergence: if Newton did not converge (hit max_iters), the IFT
+          identity F(x*)=0 does not hold, so all gradients are zeroed.
+        * Divergence: if ``x*`` is NaN or the adjoint ``λ`` is NaN/Inf, all
+          gradients are zeroed (the whole solve is invalid).
+        * Per-leaf: otherwise only individual non-finite cotangent leaves are
+          zeroed.  The Monin-Obukhov scan is not differentiable w.r.t. its
+          aerodynamic forcing (Ta/Tv_atm/q_atm/ur/z0m/displa/z0 come back NaN),
+          but every trainable physics-parameter gradient is finite and kept.
 
     Adapted from DifferBESS ``algo.newton_root._make_implicit_newton_solver``.
     """
@@ -475,52 +480,68 @@ def _make_implicit_newton_solver(
             new_converged = jnp.linalg.norm(delta) < tol
             return (x_new, i + 1, new_converged)
 
-        x_final, n_iters, _ = jax.lax.while_loop(
+        x_final, n_iters, converged = jax.lax.while_loop(
             cond, body, (x0, jnp.array(0), jnp.array(False)))
-        return x_final, n_iters
+        return x_final, n_iters, converged
 
     @jax.custom_vjp
     def solve(x0, bundle):
-        return _forward(x0, bundle)
+        x_final, n_iters, _converged = _forward(x0, bundle)
+        return x_final, n_iters
 
     def solve_fwd(x0, bundle):
-        result = _forward(x0, bundle)
-        return result, (result[0], bundle)
+        x_final, n_iters, converged = _forward(x0, bundle)
+        return (x_final, n_iters), (x_final, bundle, converged)
 
     def solve_bwd(res, g):
-        x_star, bundle = res
+        x_star, bundle, converged = res
         g_x, _ = g  # ignore cotangent for the integer iteration count
 
         # NaN / divergence guard: substitute zeros so the adjoint solve
         # is well-defined even if Newton diverged.
         x_safe = jnp.where(jnp.isnan(x_star), jnp.zeros_like(x_star), x_star)
         had_nan = jnp.any(jnp.isnan(x_star)) | jnp.any(jnp.isnan(g_x))
+        # Convergence guard: the IFT adjoint dx*/dθ = -(∂F/∂x)^{-1} ∂F/∂θ is
+        # only valid at a true root F(x*) = 0.  If the forward Newton hit
+        # max_iters without ||Δx|| < tol, x* is not a root and the adjoint is
+        # inconsistent — zero the cotangent (mirrors the NaN guard) rather than
+        # emit a misleading gradient.  ``converged`` is the forward loop's own
+        # convergence flag, so genuinely-converged columns are never masked.
+        not_converged = ~converged
 
         # Jacobian ∂F/∂x at the fixed point
         J = jax.jacfwd(partial(_F, bundle=bundle))(x_safe)
 
-        # Adjoint solve: J^T λ = g_x.  Use lstsq with finite rcond so
-        # ill-conditioned Jacobians (low fSun, wilting soil, freezing
-        # canopy air) don't blow up the gradient.
-        lam, _, _, _ = jnp.linalg.lstsq(J.T, g_x, rcond=1e-4)
+        # Adjoint solve: J^T λ = g_x.  Use an exact linear solve, not
+        # ``lstsq(rcond=1e-4)``: the canopy Jacobian is routinely stiff
+        # (cond(J) ~ 1e5 even at a well-converged midday column), and the
+        # rcond truncation silently *biased* the gradient (~5x too small vs
+        # central finite differences).  A genuinely singular J (low fSun,
+        # wilting, freezing) gives inf/nan here and is caught by the guard
+        # below.
+        lam = jnp.linalg.solve(J.T, g_x)
 
         # Gradient w.r.t. bundle via VJP of F at x_safe
         _, vjp_fn = jax.vjp(partial(_F, x_safe), bundle)
         grad_bundle = vjp_fn(-lam)[0]
 
-        # Zero out cotangent if any badness detected anywhere in the
-        # adjoint chain — keeps NaNs out of upstream parameters.
-        grad_bundle_bad = jnp.any(jnp.array([
-            jnp.any(jnp.isnan(v) | jnp.isinf(v))
-            for v in jax.tree.leaves(grad_bundle)
-        ]))
-        any_bad = (had_nan
-                   | jnp.any(jnp.isnan(lam)) | jnp.any(jnp.isinf(lam))
-                   | grad_bundle_bad)
-        grad_bundle = jax.tree.map(
-            lambda v: jnp.where(any_bad, jnp.zeros_like(v), v),
-            grad_bundle,
-        )
+        # ``solve_failed`` invalidates the WHOLE adjoint (Newton diverged, did
+        # not converge, or the adjoint solve produced inf/nan) → zero every
+        # gradient.  Otherwise mask only individual non-finite leaves: the
+        # Monin-Obukhov scan is not differentiable w.r.t. its aerodynamic
+        # forcing (Ta, Tv_atm, q_atm, ur, z0m, displa, z0), whose cotangents
+        # come back NaN — zero those alone and keep the finite gradients of
+        # every trainable physics parameter (Vcmax25, m, b0, TgC, CI, cv,
+        # d_leaf, emissivities, ...).  The old all-or-nothing mask let a single
+        # NaN forcing leaf zero the entire gradient (so jax.grad returned 0).
+        solve_failed = (had_nan | not_converged
+                        | jnp.any(jnp.isnan(lam)) | jnp.any(jnp.isinf(lam)))
+
+        def _mask_leaf(v):
+            bad = solve_failed | jnp.isnan(v) | jnp.isinf(v)
+            return jnp.where(bad, jnp.zeros_like(v), v)
+
+        grad_bundle = jax.tree.map(_mask_leaf, grad_bundle)
         return jnp.zeros_like(x_star), grad_bundle
 
     solve.defvjp(solve_fwd, solve_bwd)

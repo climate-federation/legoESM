@@ -19,28 +19,71 @@ import jax.numpy as jnp
 
 
 # ---------------------------------------------------------------------------
-# PFT Vcmax25 lookup table (Jiang & Ryu 2016, Table A1)
-# Columns: [warm, temperate, cold]  [μmol m-2 s-1]
-# Missing climate zones filled by replicating the closest available value.
+# PFT Vcmax25 lookup table [μmol m-2 s-1], columns [tropical, temperate, boreal]
+# (a.k.a. warm / temperate / cold).
+#
+# Authoritative CLM 4.5 Tech Note Table 8.1 entries blended with Jiang & Ryu
+# (2016) BESS v1 Table A1 where CLM has no direct PFT mapping (Mixed Forest,
+# savanna, warm-climate shrubs).  Mirrors the DifferBESS fallback table
+# (util/io.py ``_VCMAX25_C3_TABLE`` / ``_VCMAX25_C4_TABLE``).  IGBP->PFT-name
+# mapping: CSH+OSH -> SHR; WSA+SAV -> SAV; CRO+CNM -> CRO.  C4 grass uses the
+# CLM4.5 C4-grass value (51.6); C4 crop uses Jiang & Ryu (37.0) because the
+# CLM4.5 Corn value (100.7) is too aggressive for the Collatz C4 pathway here.
 # ---------------------------------------------------------------------------
 PFT_VCMAX25_C3: dict[str, list[float]] = {
-    "ENF":    [63.0,  63.0,  63.0 ],  # only warm published; replicated
-    "EBF":    [41.0,  62.0,  62.0 ],
-    "DNF":    [57.0,  57.0,  57.0 ],  # only warm published; replicated
-    "DBF":    [66.0,  62.0,  96.0 ],
-    "MF":     [54.0,  62.0,  63.0 ],
-    "SHR":    [62.0,  54.0,  54.0 ],  # OSH + CSH merged
-    "SAV":    [90.0, 120.0, 120.0 ],  # WSA + SAV merged
-    "GRA":    [78.0,  78.0, 142.0 ],  # C3 grassland
-    "CRO":    [101.0, 101.0, 101.0],  # C3 cropland; only warm published
-    "WET":    [78.0,  78.0, 142.0 ],
+    "ENF":    [ 62.5,  62.5,  62.6],  # [CLM45] NET Temperate/Boreal
+    "EBF":    [ 55.0,  61.5,  61.5],  # [CLM45] BET Tropical/Temperate
+    "DNF":    [ 39.1,  39.1,  39.1],  # [CLM45] NDT Boreal (only DNF entry)
+    "DBF":    [ 41.0,  57.7,  57.7],  # [CLM45] BDT Tropical/Temperate/Boreal
+    "MF":     [ 54.0,  62.0,  63.0],  # [JR] Mixed forest (no CLM MF PFT)
+    "SHR":    [ 54.0,  54.0,  54.0],  # [CLM45] BDS / [JR] shrub (OSH+CSH)
+    "SAV":    [ 90.0, 120.0, 120.0],  # [JR] savanna (WSA+SAV; no CLM PFT)
+    "GRA":    [ 78.2,  78.2,  78.2],  # [CLM45] C3 grass
+    "CRO":    [100.7, 100.7, 100.7],  # [CLM45] Crop (C3 unmanaged; CRO+CNM)
+    "WET":    [ 78.2,  78.2,  78.2],  # no DifferBESS entry — use C3 grass
 }
 
 PFT_VCMAX25_C4: dict[str, list[float]] = {
-    "GRA":    [40.0,  40.0,  40.0 ],  # C4 grassland; only temperate published
-    "CRO":    [37.0,  37.0,  37.0 ],  # C4 cropland; only warm published
-    "SAV":    [40.0,  40.0,  40.0 ],  # Savannas often mixed C3/C4; use GRA_C4
+    "GRA":    [51.6, 51.6, 51.6],  # [CLM45] C4 grass
+    "SAV":    [51.6, 51.6, 51.6],  # [CLM45] C4 grass (WSA+SAV)
+    "CRO":    [37.0, 37.0, 37.0],  # [JR] C4 crop (CLM4.5 Corn 100.7 too high)
 }
+
+# Climate-column indices for the PFT Vcmax25 tables above.
+_CLIM_TROPICAL, _CLIM_TEMPERATE, _CLIM_BOREAL = 0, 1, 2
+_CLIMATE_INDEX = {
+    "tropical": _CLIM_TROPICAL,
+    "temperate": _CLIM_TEMPERATE,
+    "boreal": _CLIM_BOREAL,
+}
+
+# No-PFT fallback Vcmax25 [μmol m-2 s-1] (used when no PFT is assigned):
+#   C3 -> DBF-temperate; C4 -> mean of the C4-grass and C4-crop temperate
+# values.  Derived from the tables so they stay in sync (not magic literals).
+VCMAX25_C3_DEFAULT: float = PFT_VCMAX25_C3["DBF"][_CLIM_TEMPERATE]            # 57.7
+VCMAX25_C4_DEFAULT: float = 0.5 * (PFT_VCMAX25_C4["GRA"][_CLIM_TEMPERATE]
+                                   + PFT_VCMAX25_C4["CRO"][_CLIM_TEMPERATE])  # 44.3
+
+
+def lookup_vcmax25(pft: str, climate: str = "temperate", c4: bool = False) -> float:
+    """Leaf Vcmax25 [μmol m-2 s-1] for a (PFT, climate), with a no-PFT default.
+
+    Parameters
+    ----------
+    pft     : PFT name key (ENF/EBF/DNF/DBF/MF/SHR/SAV/GRA/CRO/WET).  Unknown
+              PFTs return the no-PFT default (DBF-temperate for C3; mean C4
+              grass/crop for C4).
+    climate : "tropical" | "temperate" | "boreal".  Unknown -> ValueError.
+    c4      : select the C4 table instead of C3.
+    """
+    if climate not in _CLIMATE_INDEX:
+        raise ValueError(
+            f"unknown climate {climate!r}; expected one of {sorted(_CLIMATE_INDEX)}")
+    idx = _CLIMATE_INDEX[climate]
+    table = PFT_VCMAX25_C4 if c4 else PFT_VCMAX25_C3
+    default = VCMAX25_C4_DEFAULT if c4 else VCMAX25_C3_DEFAULT
+    entry = table.get(pft)
+    return float(entry[idx]) if entry is not None else float(default)
 
 # ---------------------------------------------------------------------------
 # PFT aerodynamic parameters (DifferBESS / Ryu et al. 2011)
@@ -58,6 +101,22 @@ PFT_AERO_PARAMS: dict[str, dict[str, float]] = {
     "GRA": {"rz0m": 0.12,  "rd": 0.68},
     "CRO": {"rz0m": 0.12,  "rd": 0.68},
     "WET": {"rz0m": 0.12,  "rd": 0.68},
+}
+
+# Characteristic leaf width per PFT [m] (Schuepp 1993 midrange; DifferBESS
+# aa6e8b9).  Drives the leaf boundary-layer resistance rb = 1/(cv*sqrt(uav/
+# d_leaf)).  Small needles vs broad leaves; default 0.025 when unspecified.
+PFT_LEAF_WIDTH: dict[str, float] = {
+    "ENF": 0.01,
+    "EBF": 0.04,
+    "DNF": 0.01,
+    "DBF": 0.025,
+    "MF":  0.025,
+    "SHR": 0.02,   # OSH + CSH
+    "SAV": 0.025,  # WSA + SAV
+    "GRA": 0.02,
+    "CRO": 0.025,
+    "WET": 0.02,
 }
 
 # Default canopy heights per PFT [m]  (used when gridded hc not provided)
@@ -121,6 +180,12 @@ class CanopyConfig(NamedTuple):
     epsf: float = 0.97   # leaf emissivity
     epss: float = 0.96   # soil emissivity
 
+    # Leaf boundary-layer forced-convection transfer coefficient
+    # [m^-0.5 s^0.5] in rb = 1 / (cv * sqrt(uav / d_leaf)).  CLM5-aligned
+    # default (Campbell & Norman 1998; Bonan 2019) replacing the older BESS
+    # value 0.01 — see DifferBESS aa6e8b9.  Paired with kB^-1 = 0 in MOST.
+    cv: float = 0.0135
+
     # Soil moisture stress thresholds (when no Richards state available)
     wilting_point: float = 0.15   # theta_wp [m3/m3]
     field_capacity: float = 0.30  # theta_fc [m3/m3]
@@ -173,6 +238,10 @@ class CanopyLandParams(NamedTuple):
     # rz0m and rd are PFT-specific ratios from PFT_AERO_PARAMS, replicated to (ncol,)
     rz0m: jax.Array             # z0m / hc ratio
     rd: jax.Array               # Displacement height / hc ratio
+    # Characteristic leaf width [m] from PFT_LEAF_WIDTH (Schuepp 1993).
+    # Trailing optional field — None falls back to the 0.025 m midrange so
+    # existing CanopyLandParams constructors need not be updated.
+    d_leaf: jax.Array | None = None
 
 
 # NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface

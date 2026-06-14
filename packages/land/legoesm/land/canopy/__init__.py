@@ -19,8 +19,12 @@ from legoesm.land.canopy.config import (
     CanopyLandParams,
     PFT_AERO_PARAMS,
     PFT_CANOPY_HEIGHT,
+    PFT_LEAF_WIDTH,
     PFT_VCMAX25_C3,
     PFT_VCMAX25_C4,
+    VCMAX25_C3_DEFAULT,
+    VCMAX25_C4_DEFAULT,
+    lookup_vcmax25,
 )
 
 __all__ = [
@@ -28,6 +32,10 @@ __all__ = [
     "CanopyLandParams",
     "PFT_AERO_PARAMS",
     "PFT_CANOPY_HEIGHT",
+    "PFT_LEAF_WIDTH",
     "PFT_VCMAX25_C3",
     "PFT_VCMAX25_C4",
+    "VCMAX25_C3_DEFAULT",
+    "VCMAX25_C4_DEFAULT",
+    "lookup_vcmax25",
 ]

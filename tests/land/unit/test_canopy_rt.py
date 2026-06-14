@@ -10,12 +10,33 @@ Checks:
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.land.canopy.radiative_transfer import (
+    canopy_longwave_rt,
     canopy_shortwave_rt,
     split_sw_components,
 )
+
+
+def _bulk_lw_reference(LAI, CI, SZA, Ts, Tf, La, epsf, epss):
+    """Independent bulk-canopy LW reference for the isothermal-canopy limit.
+
+    With ``Tf_Sun == Tf_Sh == Tf`` the per-class kernels must collapse to:
+        ALW_Sun + ALW_Sh = W_tot * (Ls + La - 2 Lf)
+        ALW_Soil         = W_tot * Lf + gap_LW * La - Ls
+    """
+    kd = 0.78
+    L_eff = LAI * CI
+    W_tot = 1.0 - jnp.exp(-kd * L_eff)
+    gap_LW = jnp.exp(-kd * L_eff)
+    Ls = epss * constants.sigma_sb * Ts ** 4
+    Lf = epsf * constants.sigma_sb * Tf ** 4
+    canopy = W_tot * (Ls + La - 2.0 * Lf)
+    soil = W_tot * Lf + gap_LW * La - Ls
+    return canopy, soil
 
 
 def test_split_sw_partitions_daytime():
@@ -77,3 +98,111 @@ def test_canopy_sw_night_zero():
     )
     assert float(out.APAR_Sun[0] + out.APAR_Sh[0]) == 0.0
     assert float(out.ASW_Sun[0] + out.ASW_Sh[0] + out.ASW_Soil[0]) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Longwave radiative transfer
+# ---------------------------------------------------------------------------
+
+def test_longwave_isothermal_blackbody_zero():
+    """Fully isothermal blackbody (leaves=soil=air, eps=1) → zero net LW.
+
+    Radiative-equilibrium / detailed-balance sanity: if every emitter is at
+    the same temperature and emissivity 1, the down-welling La exactly equals
+    every body's own emission, so each net absorbed flux is zero.  This relies
+    on the kernel identities ``W_*_sky + W_*_soil`` summing correctly and
+    ``W_tot + gap_LW == 1``.
+    """
+    T = jnp.array([295.0, 280.0])
+    La = constants.sigma_sb * T ** 4
+    out = canopy_longwave_rt(
+        LAI=jnp.array([3.0, 1.0]), CI=jnp.array([0.75, 0.9]),
+        SZA=jnp.array([30.0, 70.0]), Ts=T, Tf_Sun=T, Tf_Sh=T, La=La,
+        epsf=1.0, epss=1.0,
+    )
+    for v in (out.ALW_Sun, out.ALW_Sh, out.ALW_Soil):
+        assert jnp.allclose(v, 0.0, atol=1e-6)
+
+
+def test_longwave_isothermal_canopy_reduces_to_bulk():
+    """With Tf_Sun == Tf_Sh the per-class form collapses to the bulk form."""
+    LAI = jnp.array([2.5]); CI = jnp.array([0.7]); SZA = jnp.array([35.0])
+    Ts = jnp.array([305.0]); Tf = jnp.array([298.0]); La = jnp.array([340.0])
+    epsf, epss = 0.97, 0.96
+    out = canopy_longwave_rt(LAI, CI, SZA, Ts, Tf, Tf, La, epsf, epss)
+    canopy_ref, soil_ref = _bulk_lw_reference(LAI, CI, SZA, Ts, Tf, La, epsf, epss)
+    assert jnp.allclose(out.ALW_Sun + out.ALW_Sh, canopy_ref, rtol=1e-6, atol=1e-6)
+    assert jnp.allclose(out.ALW_Soil, soil_ref, rtol=1e-6, atol=1e-6)
+
+
+def test_longwave_clumping_reduces_canopy_absorption():
+    """Smaller clumping index → smaller effective LAI → less canopy LW exchange.
+
+    Net canopy LW exchange magnitude must shrink monotonically as CI falls
+    (clumped canopies are more transparent), and in the CI→0 limit the soil
+    sees nearly the full atmospheric LW (gap_LW→1).
+    """
+    LAI = jnp.array([3.0]); SZA = jnp.array([30.0])
+    Ts = jnp.array([305.0]); Tf_Sun = jnp.array([300.0]); Tf_Sh = jnp.array([297.0])
+    La = jnp.array([340.0])
+    mags = []
+    for ci in (1.0, 0.6, 0.2):
+        out = canopy_longwave_rt(
+            LAI, jnp.array([ci]), SZA, Ts, Tf_Sun, Tf_Sh, La, 0.97, 0.96)
+        mags.append(float(jnp.abs(out.ALW_Sun + out.ALW_Sh)[0]))
+    assert mags[0] > mags[1] > mags[2]
+
+
+def test_longwave_finite_and_smooth_across_kb_equals_kd():
+    """No NaN/Inf and C0-continuity through the SZA where kb == kd (~50°).
+
+    ``denom = kd - kb`` crosses zero near SZA≈50°; the guarded L'Hôpital
+    branch must keep the result finite and smooth (no spike).
+    """
+    SZA = jnp.linspace(45.0, 55.0, 41)
+    n = SZA.shape[0]
+    out = canopy_longwave_rt(
+        LAI=jnp.full(n, 3.0), CI=jnp.full(n, 0.75), SZA=SZA,
+        Ts=jnp.full(n, 305.0), Tf_Sun=jnp.full(n, 300.0),
+        Tf_Sh=jnp.full(n, 297.0), La=jnp.full(n, 340.0), epsf=0.97, epss=0.96,
+    )
+    for v in (out.ALW_Sun, out.ALW_Sh, out.ALW_Soil):
+        assert bool(jnp.all(jnp.isfinite(v)))
+        # No grid-scale spike: successive differences stay small/smooth.
+        assert float(jnp.max(jnp.abs(jnp.diff(v)))) < 5.0
+
+
+def test_longwave_differentiable_at_singular_sza():
+    """grad wrt Tf_Sun is finite even at kb≈kd (denom guard) and at night."""
+    def lw_sum(Tf_Sun_scalar, sza):
+        out = canopy_longwave_rt(
+            LAI=jnp.array([3.0]), CI=jnp.array([0.75]), SZA=jnp.array([sza]),
+            Ts=jnp.array([305.0]), Tf_Sun=jnp.array([Tf_Sun_scalar]),
+            Tf_Sh=jnp.array([297.0]), La=jnp.array([340.0]),
+            epsf=0.97, epss=0.96,
+        )
+        return jnp.sum(out.ALW_Sun + out.ALW_Sh + out.ALW_Soil)
+
+    for sza in (50.14, 89.0, 30.0):
+        g = jax.grad(lw_sum)(300.0, sza)
+        assert jnp.isfinite(g)
+
+
+def test_longwave_sza_gradient_matches_fd_through_kb_eq_kd():
+    """d(ALW_Sun)/d(SZA) matches finite differences across kb=kd (~50.14°).
+
+    The exprel formulation must give the correct, continuous SZA derivative
+    through the removable singularity (the old constant-limit guard zeroed it).
+    """
+    def alw_sun(sza):
+        out = canopy_longwave_rt(
+            LAI=jnp.array([3.0]), CI=jnp.array([0.75]), SZA=jnp.array([sza]),
+            Ts=jnp.array([305.0]), Tf_Sun=jnp.array([300.0]),
+            Tf_Sh=jnp.array([297.0]), La=jnp.array([340.0]), epsf=0.97, epss=0.96)
+        return out.ALW_Sun[0]
+
+    for sza in (50.14, 49.5, 50.8):
+        g_ad = jax.grad(alw_sun)(sza)
+        g_fd = (alw_sun(sza + 1e-3) - alw_sun(sza - 1e-3)) / 2e-3
+        assert jnp.isfinite(g_ad)
+        assert jnp.allclose(g_ad, g_fd, rtol=1e-4, atol=1e-6)

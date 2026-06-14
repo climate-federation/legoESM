@@ -14,9 +14,10 @@ All functions are pure JAX, JIT-compatible, and differentiable.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
-from typing import NamedTuple
 
 from legoesm import constants
 
@@ -44,10 +45,12 @@ class CanopySWOutput(NamedTuple):
 
 class CanopyLWOutput(NamedTuple):
     """Outputs of the longwave radiative transfer calculation."""
-    ALW_Sun: jax.Array   # Net absorbed LW by sunlit leaves [W m-2]
-    ALW_Sh: jax.Array    # Net absorbed LW by shaded leaves [W m-2]
-    ALW_Soil: jax.Array  # Net absorbed LW by soil [W m-2]
-    Ls: jax.Array        # Upward LW emitted by soil [W m-2]
+    ALW_Sun: jax.Array     # Net absorbed LW by sunlit leaves [W m-2 ground]
+    ALW_Sh: jax.Array      # Net absorbed LW by shaded leaves [W m-2 ground]
+    ALW_Soil: jax.Array    # Net absorbed LW by soil [W m-2 ground]
+    Ls: jax.Array          # Upward LW emitted by soil [W m-2]
+    Lcanopy_up: jax.Array  # Kernel-weighted canopy LW emitted upward [W m-2 ground]
+    gap_LW: jax.Array      # LW gap fraction exp(-kd L_eff) [-]
 
 
 # ---------------------------------------------------------------------------
@@ -333,9 +336,9 @@ def canopy_shortwave_rt(
 @jax.jit
 def canopy_longwave_rt(
     LAI: jax.Array,
+    CI: jax.Array,
     SZA: jax.Array,
     Ts: jax.Array,
-    Tf_mean: jax.Array,
     Tf_Sun: jax.Array,
     Tf_Sh: jax.Array,
     La: jax.Array,
@@ -344,14 +347,43 @@ def canopy_longwave_rt(
 ) -> CanopyLWOutput:
     """Absorbed longwave radiation by sunlit/shaded leaves and soil.
 
-    Uses the Beer-law extinction approach from Ryu et al. (2011).
+    Two-big-leaf longwave transfer with Beer-law extinction against the
+    **effective LAI** ``L_eff = LAI * CI`` (clumping correction, consistent
+    with the shortwave routine), following Ryu et al. (2011) / CABLE / CLM.
+
+    Sunlit and shaded leaves absorb sky and soil longwave through separate
+    depth-weighted two-stream kernels (``W_*_sky``, ``W_*_soil``) and emit
+    with their own temperature.  By Kirchhoff / detailed balance the same
+    kernels weight the canopy emission reaching the soil:
+
+        canopy LW reaching soil = W_sun_soil * Lf_Sun + W_sh_soil * Lf_Sh
+
+    which is exact (under the kd kernel) when ``Tf_Sun != Tf_Sh`` and reduces
+    to the bulk ``W_tot * Lf`` form in the isothermal limit.  This replaces
+    the earlier ``(1 - exp(-kd LAI)) (Ls + La - 2 Lf_Sh)`` shaded form, whose
+    ``2 Lf_Sh`` self-emission term spuriously warmed shaded leaves when
+    ``Tf_Sun > Tf_Sh`` over hot soil.  The canopy is always fully coupled to
+    the soil (no decoupling option).
+
+    Emissivity convention (inherited from DifferBESS / Ryu et al. 2011): each
+    surface emits ``eps * sigma * T^4`` but absorbs incident LW with unit
+    absorptivity and reflection is neglected (the "near-black" big-leaf
+    approximation, valid for the leaf/soil emissivities ~0.96-0.97).  This is
+    NOT a strict gray-body: at a hypothetical isothermal equilibrium with
+    eps < 1 the net flux is O(1 - eps) rather than exactly zero (the
+    ``test_longwave_isothermal_blackbody_zero`` check therefore uses eps = 1).
+    A strictly conservative formulation would track reflected/multiply-
+    scattered LW; that diverges from the DifferBESS oracle and is left as a
+    documented follow-up.  The top-of-canopy ``lw_net`` boundary diagnostic in
+    ``two_leaf_canopy`` IS gray-body consistent (applies the effective
+    emissivity to both up- and down-welling).
 
     Parameters
     ----------
-    LAI     : (ncol,) leaf area index [m2/m2]
+    LAI     : (ncol,) leaf area index [m2/m2] (one-sided, nominal)
+    CI      : (ncol,) clumping index [-]; effective LAI for radiation = LAI*CI
     SZA     : (ncol,) solar zenith angle [degrees]
     Ts      : (ncol,) soil surface temperature [K]
-    Tf_mean : (ncol,) mean foliage temperature [K] (area-weighted average)
     Tf_Sun  : (ncol,) sunlit leaf temperature [K]
     Tf_Sh   : (ncol,) shaded leaf temperature [K]
     La      : (ncol,) incoming atmospheric longwave [W m-2]
@@ -360,48 +392,85 @@ def canopy_longwave_rt(
 
     Returns
     -------
-    CanopyLWOutput NamedTuple.
+    CanopyLWOutput NamedTuple (fluxes per unit ground area [W m-2 ground]).
     """
     SZA_clamped = jnp.clip(SZA, 0.0, 89.0)
     cos_sza     = jnp.cos(jnp.radians(SZA_clamped))
 
     # Extinction coefficients (Ryu et al. 2011 Table A1)
-    kb = 0.5 / jnp.maximum(cos_sza, 0.01)
-    kd = 0.78
+    kb = 0.5 / jnp.maximum(cos_sza, 0.01)   # direct-beam
+    kd = 0.78                                # diffuse
 
-    # Stefan-Boltzmann emitted fluxes
-    Ls    = epss * constants.sigma_sb * Ts**4
+    # Effective LAI for radiation (clumping correction): clumped canopies
+    # have larger gap fractions, so LW transmission uses L_eff, not LAI.
+    L_eff    = LAI * CI
+    kd_L_eff = kd * L_eff
+
+    # Stefan-Boltzmann emitted flux densities (per unit one-sided leaf face)
+    Ls     = epss * constants.sigma_sb * Ts**4
     Lf_Sun = epsf * constants.sigma_sb * Tf_Sun**4
     Lf_Sh  = epsf * constants.sigma_sb * Tf_Sh**4
-    Lf     = epsf * constants.sigma_sb * Tf_mean**4
 
-    kd_LAI = kd * LAI
+    # Total one-sided diffuse-LW canopy interception weight.
+    W_tot = 1.0 - jnp.exp(-kd_L_eff)
 
-    # ``kd - kb`` is negative for SZA > ~50° (kb > 0.78) and positive below.
-    # The earlier ``max(kd - kb, 1e-6)`` was a safety against division by
-    # zero when ``kd == kb`` (SZA ≈ 50°), but it silently clipped any
-    # negative denominator to +1e-6 — which flips the sign and amplifies
-    # the sunlit LW term by ~1e6 at night (SZA → 90°, kb → 50).  This
-    # was the root cause of nocturnal Newton divergence for dense canopies.
-    # Use a sign-preserving guard that only intervenes at |kd - kb| < 1e-6.
-    kdb = kd - kb
-    kdb_safe = jnp.where(jnp.abs(kdb) < 1e-6, 1e-6, kdb)
+    # Sunlit absorption weights (per unit ground area, dimensionless):
+    #   sky-origin : kd * int_0^L exp(-(kb+kd)x) dx
+    #                  = kd (1 - exp(-(kb+kd) L_eff)) / (kb + kd)
+    #   soil-origin: kd * int_0^L exp(-kb x) exp(-kd (L-x)) dx
+    #                  = kd (exp(-kb L_eff) - exp(-kd L_eff)) / (kd - kb)
+    #                  (kb -> kd limit is L_eff * exp(-kd L_eff))
+    W_sun_sky = kd * (1.0 - jnp.exp(-(kb + kd) * L_eff)) / (kb + kd)
 
-    # Net absorbed LW by sunlit leaves
-    ALW_Sun = (
-        (Ls - Lf_Sun) * kd * (jnp.exp(-kd_LAI) - jnp.exp(-kb * LAI)) / kdb_safe
-        + kd * (La - Lf_Sun) * (1.0 - jnp.exp(-(kb + kd) * LAI)) / (kd + kb)
+    # The soil-origin integral has a removable singularity at kb = kd
+    # (SZA ~ 50°).  Write it via the relative exponential
+    #   ratio_soil = (exp(-kb L) - exp(-kd L)) / (kd - kb)
+    #              = exp(-kd L) * L * exprel((kd-kb) L),
+    #   exprel(y) = (exp(y) - 1) / y,   exprel(0) = 1,
+    # which is finite and SMOOTH through kb = kd.  A near-zero Taylor branch
+    # (exprel ≈ 1 + y/2) keeps both the value and its kb/SZA derivative correct
+    # there (the earlier constant-limit guard zeroed the kb derivative inside
+    # the window), with a guarded denominator so AD never sees 0/0.
+    y       = (kd - kb) * L_eff
+    y_safe  = jnp.where(jnp.abs(y) < 1.0e-6, 1.0, y)
+    exprel  = jnp.where(jnp.abs(y) < 1.0e-6, 1.0 + 0.5 * y, jnp.expm1(y) / y_safe)
+    W_sun_soil = kd * jnp.exp(-kd_L_eff) * L_eff * exprel
+
+    # Shaded weights are the residual interception weights.
+    W_sh_sky  = W_tot - W_sun_sky
+    W_sh_soil = W_tot - W_sun_soil
+
+    # Guard tiny negative roundoff outside [0, W_tot].
+    W_sun_sky  = jnp.clip(W_sun_sky,  0.0, W_tot)
+    W_sun_soil = jnp.clip(W_sun_soil, 0.0, W_tot)
+    W_sh_sky   = jnp.clip(W_sh_sky,   0.0, W_tot)
+    W_sh_soil  = jnp.clip(W_sh_soil,  0.0, W_tot)
+
+    # Net absorbed LW per leaf class: each class absorbs from the soil below
+    # and the sky above and emits with its own temperature.
+    ALW_Sun = W_sun_soil * (Ls - Lf_Sun) + W_sun_sky * (La - Lf_Sun)
+    ALW_Sh  = W_sh_soil  * (Ls - Lf_Sh)  + W_sh_sky  * (La - Lf_Sh)
+
+    # Soil absorbed LW: depth-weighted per-class canopy emission (detailed
+    # balance) + gap-transmitted atmospheric LW - soil's own emission.
+    gap_LW = jnp.exp(-kd_L_eff)
+    ALW_Soil = (
+        W_sun_soil * Lf_Sun
+        + W_sh_soil * Lf_Sh
+        + gap_LW * La
+        - Ls
     )
 
-    # Net absorbed LW by shaded leaves
-    ALW_Sh = (1.0 - jnp.exp(-kd_LAI)) * (Ls + La - 2.0 * Lf_Sh) - ALW_Sun
-
-    # Net absorbed LW by soil
-    ALW_Soil = (1.0 - jnp.exp(-kd_LAI)) * Lf + jnp.exp(-kd_LAI) * La - Ls
+    # Kernel-weighted canopy LW emitted upward to the atmosphere (for the
+    # top-of-canopy LST / lw_up diagnostic — uses the same sky kernels as the
+    # sky->leaf absorption, by detailed balance).
+    Lcanopy_up = W_sun_sky * Lf_Sun + W_sh_sky * Lf_Sh
 
     return CanopyLWOutput(
         ALW_Sun=ALW_Sun,
         ALW_Sh=ALW_Sh,
         ALW_Soil=ALW_Soil,
         Ls=Ls,
+        Lcanopy_up=Lcanopy_up,
+        gap_LW=gap_LW,
     )

@@ -270,7 +270,10 @@ def monin_obukhov_stability(
     uav      : mean wind speed within canopy (used for Rb) [m/s]
     zeta     : stability parameter [-]
     """
-    z0h  = z0m / jnp.exp(2.0)   # heat roughness length
+    # Heat roughness length.  CLM5 vegetation uses kB^-1 = 0 (z0h = z0m); the
+    # earlier BESS default kB^-1 = 2 (z0h = z0m / e^2) over-suppressed heat
+    # exchange and warm-biased canopy/skin temperature (DifferBESS aa6e8b9).
+    z0h  = z0m   # kB^-1 = 0
     dth  = Ta - Tc
     dq   = q_atm - q_c
     dthv = (Ta - Tc) * (1.0 + 0.61 * q_atm) + 0.61 * Ta * (q_atm - q_c)
@@ -307,26 +310,30 @@ def compute_boundary_layer_resistance(
     uav: jax.Array,
     LAI: jax.Array,
     fSun: jax.Array,
+    cv: jax.Array,
+    d_leaf: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
     """Leaf boundary-layer resistance for sunlit and shaded leaves.
 
-    Based on forced convection scaling (DifferBESS / CLM5):
+    Forced-convection scaling (Campbell & Norman 1998 / CLM5 / DifferBESS):
       rb = 1 / (cv * sqrt(uav / d_leaf))
       Rb_Sun = rb / max(LAI * fSun,   1e-6)
       Rb_Sh  = rb / max(LAI * (1-fSun), 1e-6)
 
     Parameters
     ----------
-    uav  : mean wind speed within/at canopy [m/s]
-    LAI  : leaf area index [m2/m2]
-    fSun : sunlit fraction [-]
+    uav    : mean wind speed within/at canopy [m/s]
+    LAI    : leaf area index [m2/m2]
+    fSun   : sunlit fraction [-]
+    cv     : forced-convection transfer coefficient [m^-0.5 s^0.5]
+             (CanopyConfig.cv, default 0.0135; was the hard-coded BESS 0.01)
+    d_leaf : characteristic leaf width [m] (per-column PFT_LEAF_WIDTH;
+             default 0.025; was the hard-coded BESS 0.04)
 
     Returns
     -------
     Rb_Sun, Rb_Sh : boundary-layer resistance [s/m]
     """
-    d_leaf = 0.04    # characteristic leaf dimension [m]
-    cv     = 0.01    # convective transfer coefficient
     rb     = 1.0 / (cv * jnp.sqrt(jnp.maximum(uav / d_leaf, 1e-9)))
 
     LAI_Sun = jnp.maximum(LAI * fSun,         1e-6)

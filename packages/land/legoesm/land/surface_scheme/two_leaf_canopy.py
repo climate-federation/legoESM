@@ -28,7 +28,11 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
-from legoesm.land.canopy.config import CanopyConfig
+from legoesm.land.canopy.config import (
+    CanopyConfig,
+    VCMAX25_C3_DEFAULT,
+    VCMAX25_C4_DEFAULT,
+)
 from legoesm.land.canopy.radiative_transfer import (
     split_sw_components, canopy_shortwave_rt,
 )
@@ -211,8 +215,11 @@ def compute_two_leaf_canopy_fluxes(
     FNonVeg    = _get(lp, "FNonVeg",  jnp.zeros(ncol))
     CI         = _get(lp, "CI",       jnp.full(ncol, 0.75))
     kn         = _get(lp, "kn",       jnp.full(ncol, 0.3))
-    Vc3_leaf   = _get(lp, "Vcmax25_C3_leaf", jnp.full(ncol, 60.0))
-    Vc4_leaf   = _get(lp, "Vcmax25_C4_leaf", jnp.full(ncol, 40.0))
+    # No-PFT fallback Vcmax25: DBF-temperate (C3) / mean C4 grass+crop (C4),
+    # not a flat 60/40.  A driver should pre-assign per-column Vcmax25 from
+    # ``lookup_vcmax25(pft, climate)`` (canopy.config) when PFTs are known.
+    Vc3_leaf   = _get(lp, "Vcmax25_C3_leaf", jnp.full(ncol, VCMAX25_C3_DEFAULT))
+    Vc4_leaf   = _get(lp, "Vcmax25_C4_leaf", jnp.full(ncol, VCMAX25_C4_DEFAULT))
     m_C3       = _get(lp, "m_C3",     jnp.full(ncol, 9.0))
     m_C4       = _get(lp, "m_C4",     jnp.full(ncol, 4.0))
     b0_C3      = _get(lp, "b0_C3",    jnp.full(ncol, 0.01))
@@ -224,6 +231,10 @@ def compute_two_leaf_canopy_fluxes(
     ALB_NIR    = _get(lp, "ALB_NIR",  jnp.full(ncol, 0.2))
     rz0m       = _get(lp, "rz0m",     jnp.full(ncol, 0.055))
     rd         = _get(lp, "rd",       jnp.full(ncol, 0.67))
+    # Characteristic leaf width [m]; None (field absent or unset) -> 0.025 m
+    # (Schuepp 1993 midrange), matching PFT_LEAF_WIDTH's default leaf class.
+    _d_leaf_in = _get(lp, "d_leaf", None)
+    d_leaf = jnp.full(ncol, 0.025) if _d_leaf_in is None else _d_leaf_in
     emissivity_per_col = _get(
         lp, "emissivity", jnp.full(ncol, land_config.emissivity_land))
 
@@ -307,6 +318,7 @@ def compute_two_leaf_canopy_fluxes(
             m=m_mix, b0=b0_mix, alf=alf, TgC=TgC,
             fC4=fC4, fStress_soil=fStress_soil,
             ur=wind_speed, CI=CI, z0m=z0m, displa=displa, z0=z_ref,
+            cv=_bcast(cc.cv), d_leaf=d_leaf,
         )
 
     def _solve_one_col(x0, bun):
@@ -379,13 +391,16 @@ def compute_two_leaf_canopy_fluxes(
         alpha_canopy)
 
     # ---- Emission-weighted surface T from canopy LW ----
-    a_soil = jnp.exp(-0.78 * LAI)
-    a_sun  = fSun * (1.0 - a_soil)
-    a_sh   = (1.0 - fSun) * (1.0 - a_soil)
-    Lw_up = (a_sun  * cc.epsf * constants.sigma_sb * Tf_Sun**4
-           + a_sh   * cc.epsf * constants.sigma_sb * Tf_Sh**4
-           + a_soil * cc.epss * constants.sigma_sb * Ts_cvg**4)
-    eps_eff = a_sun * cc.epsf + a_sh * cc.epsf + a_soil * cc.epss
+    # Consistent with the internal longwave RT: use the kd-kernel canopy
+    # upward emission (Lcanopy_up = W_sun_sky*Lf_Sun + W_sh_sky*Lf_Sh) and the
+    # LW gap fraction (gap_LW = exp(-kd*LAI*CI)) returned by
+    # ``canopy_longwave_rt`` — NOT a separate bulk exp(-0.78*LAI)/fSun form,
+    # which would disagree with the radiation that drove the solved energy
+    # balance (especially for clumped or non-isothermal canopies).
+    Lcanopy_up = fluxes_per_col["Lcanopy_up"]
+    gap_LW     = fluxes_per_col["gap_LW"]
+    Lw_up = Lcanopy_up + gap_LW * cc.epss * constants.sigma_sb * Ts_cvg**4
+    eps_eff = (1.0 - gap_LW) * cc.epsf + gap_LW * cc.epss
     T_surface = (Lw_up / jnp.maximum(eps_eff * constants.sigma_sb, 1e-12))**0.25
 
     # Downstream expects SW_net and LW_net: SW_net = (1-α) SW_down,
