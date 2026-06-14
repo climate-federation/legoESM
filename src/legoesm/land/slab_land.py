@@ -590,6 +590,18 @@ def _step_land_canopy(
         u_ocean_sfc=jnp.zeros_like(T_soil_new),
         v_ocean_sfc=jnp.zeros_like(T_soil_new),
         co2_flux=co2_flux,
+        # Slab land: freshwater leaving the column to the ocean is the
+        # bucket overflow ``runoff`` (kg/m²/s); mirrors the SimpleSEB branch.
+        freshwater_flux=runoff,
+        # Land does not extract heat from / exert stress on the ocean.
+        ocean_heat_extraction=jnp.zeros_like(T_soil_new),
+        ocean_stress_x=jnp.zeros_like(T_soil_new),
+        ocean_stress_y=jnp.zeros_like(T_soil_new),
+        # Phase-aware moisture mass flux: lhflx_actual used L_eff (L_s if
+        # snow-covered, L_v otherwise), so dividing by L_eff recovers mass.
+        surface_mass_flux=lhflx_actual_full / _unflat(L_eff),
+        # Land tile does not exchange salt with the ocean directly.
+        salt_flux=jnp.zeros_like(T_soil_new),
     )
 
     return new_state, response, carbon_state_new

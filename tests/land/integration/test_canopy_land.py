@@ -288,7 +288,13 @@ def test_slab_plus_canopy_1d_runs():
     for name, f in (("T_surface", response.T_surface),
                     ("lhflx", response.lhflx),
                     ("shflx", response.shflx),
-                    ("lw_up", response.lw_up)):
+                    ("lw_up", response.lw_up),
+                    # coupler-facing fields required by TileResponse (regression
+                    # guard: these 6 must be populated on the canopy branch too).
+                    ("freshwater_flux", response.freshwater_flux),
+                    ("surface_mass_flux", response.surface_mass_flux),
+                    ("ocean_heat_extraction", response.ocean_heat_extraction),
+                    ("salt_flux", response.salt_flux)):
         assert jnp.all(jnp.isfinite(f)), f"slab+canopy 1D non-finite {name}"
     # Midday: surface should transpire.
     assert float(response.lhflx[0]) > 0.0

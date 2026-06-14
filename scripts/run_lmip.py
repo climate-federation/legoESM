@@ -19,7 +19,7 @@ temperature) — no ERA5 needed for a single diagnostic step.
 Usage::
 
     JAX_ENABLE_X64=1 python scripts/run_lmip.py \\
-        --surfdata data/legoesm_surfdata_v1.nc --nlat 48 --nlon 96 \\
+        --surfdata data/legoesm_surfdata_v1.nc --grid-type latlon --resolution 48 \\
         --doy 196 --hour 12 --output lmip_global
 """
 
@@ -42,7 +42,7 @@ import numpy as np
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.coupler.coupling_fields import AtmToSurface
-from legoesm.land.config import MultiLayerLandConfig, LandConfig
+from legoesm.land.config import MultiLayerLandConfig, LandConfig, resolve_land_config
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.canopy import CanopyConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
@@ -57,8 +57,14 @@ from legoesm.land.surface_data.land_inputs import (
 U_MIN = 1.0
 
 
-def make_grid(grid_type: str, n_lat: int, n_lon: int, resolution: int):
-    """Build a model grid with the SAME factories ModelDriver uses."""
+def make_grid(grid_type: str, resolution: int):
+    """Build a model grid with the SAME factories + ``--resolution N``
+    convention ModelDriver/run_amip use (see driver.cli_resolution):
+
+      * cubed_sphere → ``CN``            (N cells per face edge)
+      * latlon       → ``N x 2N``        (n_lon defaults to 2*n_lat)
+      * gaussian     → ``TN`` truncation (n_max = N, e.g. T106)
+    """
     from legoesm.driver.config import normalize_grid_type
     gt = normalize_grid_type(grid_type)
     if gt == "cubed_sphere":
@@ -69,7 +75,7 @@ def make_grid(grid_type: str, n_lat: int, n_lon: int, resolution: int):
         return create_gaussian_grid(resolution)
     if gt == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        return create_latlon_grid(n_lat, n_lon)
+        return create_latlon_grid(resolution)        # n_lon = 2*resolution
     raise ValueError(f"unsupported grid_type {grid_type!r}")
 
 
@@ -121,16 +127,19 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--surfdata", default="data/legoesm_surfdata_v1.nc")
-    ap.add_argument("--land-scheme", default="multilayer-canopy",
-                    choices=["multilayer-canopy", "multilayer-seb", "slab"],
-                    help="land surface scheme to drive with the surfdata")
+    # Scheme is specified the same way the drivers' config does: land_mode +
+    # land_config (here the land_config's surface_scheme via --surface-scheme).
+    ap.add_argument("--land-mode", default="multilayer", choices=["multilayer", "slab"],
+                    help="land model (CoupledConfig land_mode convention)")
+    ap.add_argument("--surface-scheme", default="two_leaf_canopy",
+                    choices=["two_leaf_canopy", "simple_seb"],
+                    help="surface scheme inside the land config")
     ap.add_argument("--grid-type", default="latlon",
                     choices=["latlon", "gaussian", "cubed_sphere"],
                     help="model grid (same factories as ModelDriver)")
-    ap.add_argument("--nlat", type=int, default=48, help="latlon: latitude points")
-    ap.add_argument("--nlon", type=int, default=96, help="latlon: longitude points")
     ap.add_argument("--resolution", type=int, default=48,
-                    help="cubed_sphere: cells/face (n); gaussian: spectral truncation (n_max)")
+                    help="grid size N (run_amip convention): latlon -> N x 2N; "
+                         "cubed_sphere -> CN; gaussian -> TN truncation (e.g. 106)")
     ap.add_argument("--doy", type=float, default=196.0, help="day-of-year (LAI + solar)")
     ap.add_argument("--hour", type=float, default=12.0, help="UTC hour")
     ap.add_argument("--dt", type=float, default=1800.0)
@@ -146,21 +155,24 @@ def main() -> None:
     args = ap.parse_args()
 
     out_dir = Path(args.output); out_dir.mkdir(parents=True, exist_ok=True)
-    grid = make_grid(args.grid_type, args.nlat, args.nlon, args.resolution)
+    grid = make_grid(args.grid_type, args.resolution)
     lat_rad, lon_rad = grid_latlon_rad(grid)
     ncol = lat_rad.shape[0]
-    print(f"grid={args.grid_type} | {ncol} columns | scheme={args.land_scheme}")
+    print(f"grid={args.grid_type} | {ncol} columns | "
+          f"land_mode={args.land_mode} surface={args.surface_scheme}")
     forcing = make_global_forcing(lat_rad, lon_rad, args.doy, args.hour)
 
-    # --- base config + step function for the chosen scheme ---
-    if args.land_scheme == "slab":
-        base_cfg = LandConfig()
-        step_fn = step_land
-    else:
-        surf = (CanopyConfig(max_iters=50, tol=1e-2)
-                if args.land_scheme == "multilayer-canopy" else SimpleSEBConfig())
+    # --- land config from (land_mode, land_config), same convention as the
+    #     drivers; --surface-scheme sets the land_config's surface scheme. ---
+    surf = (CanopyConfig(max_iters=50, tol=1e-2)
+            if args.surface_scheme == "two_leaf_canopy" else SimpleSEBConfig())
+    if args.land_mode == "multilayer":
         base_cfg = MultiLayerLandConfig(surface_scheme=surf, soil_grid=SoilGridConfig())
         step_fn = step_multilayer_land
+    else:                                                  # slab
+        base_cfg = LandConfig(surface_scheme=surf)
+        step_fn = step_land
+    base_cfg = resolve_land_config(args.land_mode, base_cfg)
 
     # --- run the surface-data loader at simulation start: regrid to this grid,
     #     derive scheme-appropriate config (soil hydraulics) + land params. ---
@@ -168,7 +180,7 @@ def main() -> None:
         args.surfdata, grid, base_cfg, args.doy)
 
     # --- state (soil/skin T initialised near the local air temperature) ---
-    if args.land_scheme == "slab":
+    if args.land_mode == "slab":
         from legoesm.core.field import Field
         from legoesm.land.state import LandState
         z = lambda: jnp.zeros(ncol)
@@ -257,7 +269,8 @@ def main() -> None:
             {k: (("ncol",), v[0]) for k, v in fields.items()},
             coords={"lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)},
             attrs={"doy": args.doy, "hour": args.hour, "surfdata": args.surfdata,
-                   "grid_type": args.grid_type, "land_scheme": args.land_scheme},
+                   "grid_type": args.grid_type, "land_mode": args.land_mode,
+                   "surface_scheme": args.surface_scheme},
         )
         nc = out_dir / "lmip_global_step.nc"
         ds.to_netcdf(nc)
@@ -273,23 +286,49 @@ def main() -> None:
         sys.exit(1)
 
 
+def _column_to_dataarray(arr, lat_deg, lon_deg):
+    """Per-column field -> 2D (lat, lon) ``xr.DataArray`` for xarray plotting.
+
+    Regular lat-lon / Gaussian grids (ncol == n_uniq_lat * n_uniq_lon) are
+    reshaped exactly by scattering each column into its (lat, lon) cell.
+    Irregular grids (cubed-sphere) are interpolated to a 1° display grid.
+    """
+    import xarray as xr
+
+    arr = np.asarray(arr)
+    lon = np.where(lon_deg > 180.0, lon_deg - 360.0, lon_deg)   # [-180,180)
+    ulat, ilat = np.unique(np.round(lat_deg, 4), return_inverse=True)
+    ulon, ilon = np.unique(np.round(lon, 4), return_inverse=True)
+    if ulat.size * ulon.size == arr.size:                       # regular grid
+        grid = np.full((ulat.size, ulon.size), np.nan, dtype=float)
+        grid[ilat, ilon] = arr
+        return xr.DataArray(grid, coords={"lat": ulat, "lon": ulon},
+                            dims=("lat", "lon"))
+    from scipy.interpolate import griddata                      # cubed-sphere etc.
+    dlat = np.arange(-89.5, 90.0, 1.0)
+    dlon = np.arange(-179.5, 180.0, 1.0)
+    LON, LAT = np.meshgrid(dlon, dlat)
+    z = griddata((lon, lat_deg), arr, (LON, LAT), method="nearest")
+    return xr.DataArray(z, coords={"lat": dlat, "lon": dlon}, dims=("lat", "lon"))
+
+
 def _plot_maps(fields, lat_deg, lon_deg, path, *, doy, grid_type):
-    """Per-column scatter maps (works on any grid: lat-lon, gaussian, cubed-sphere)."""
+    """Filled maps via xarray ``.plot`` (pcolormesh); any grid."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    lon = np.where(lon_deg > 180.0, lon_deg - 360.0, lon_deg)   # -> [-180,180) for display
     items = list(fields.items())
     ncols = 3
     nrows = (len(items) + ncols - 1) // ncols
     fig, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 2.8 * nrows))
     for ax, (name, (arr, cmap, label)) in zip(axes.ravel(), items):
-        im = ax.scatter(lon, lat_deg, c=np.asarray(arr), s=4, cmap=cmap, marker="s")
+        da = _column_to_dataarray(arr, lat_deg, lon_deg)
+        da.plot(ax=ax, cmap=cmap, add_labels=False,
+                cbar_kwargs={"shrink": 0.8, "label": ""})
         ax.set_title(label, fontsize=10)
         ax.set_xlim(-180, 180); ax.set_ylim(-90, 90)
         ax.set_xticks([]); ax.set_yticks([])
-        fig.colorbar(im, ax=ax, shrink=0.8)
     for ax in axes.ravel()[len(items):]:
         ax.axis("off")
     fig.suptitle(f"run_lmip one step | grid={grid_type} | doy {doy:.0f}", fontsize=13)

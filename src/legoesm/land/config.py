@@ -76,3 +76,22 @@ class MultiLayerLandConfig(NamedTuple):
     # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
     # Runtime dispatch via ``isinstance`` inside ``step_multilayer_land``.
     surface_scheme: Any = SimpleSEBConfig()
+
+
+# ---------------------------------------------------------------------------
+# Land scheme resolution (shared by drivers and run_lmip)
+# ---------------------------------------------------------------------------
+def resolve_land_config(land_mode: str, land_config=None):
+    """Return the land config object for a ``land_mode`` (the driver convention).
+
+    Mirrors CoupledESMDriver: ``"multilayer"`` -> a MultiLayerLandConfig (the
+    supplied one if it is the right type, else a default); ``"none"`` -> a
+    placeholder LandConfig (unused when f_land=0); anything else (``"slab"``) ->
+    a LandConfig.  Keeps run_lmip and the drivers selecting the scheme the same
+    way from a single (land_mode, land_config) pair.
+    """
+    if land_mode == "multilayer":
+        return land_config if isinstance(land_config, MultiLayerLandConfig) else MultiLayerLandConfig()
+    if land_mode == "none":
+        return LandConfig()
+    return land_config if isinstance(land_config, LandConfig) else LandConfig()

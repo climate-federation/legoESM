@@ -126,7 +126,7 @@ class CoupledESMDriver:
         """Initialize coupler, land, ice, lake surface states."""
         from legoesm.coupler.coupler import make_coupler, init_surface_state
         from legoesm.coupler.config import CouplerConfig, TileConfig
-        from legoesm.land.config import LandConfig, MultiLayerLandConfig
+        from legoesm.land.config import resolve_land_config
         from legoesm.ice.config import SeaIceConfig
         from legoesm.coupler.lake.config import LakeConfig
         from legoesm.core.precision import get_policy
@@ -139,16 +139,8 @@ class CoupledESMDriver:
         ice_cfg = self._ice_config or SeaIceConfig()
         lake_cfg = self._lake_config or LakeConfig()
 
-        # Select land config based on mode
-        if cfg.land_mode == "none":
-            land_cfg = LandConfig()  # won't be used (f_land=0)
-        elif cfg.land_mode == "multilayer":
-            if isinstance(cfg.land_config, MultiLayerLandConfig):
-                land_cfg = cfg.land_config
-            else:
-                land_cfg = MultiLayerLandConfig()
-        else:
-            land_cfg = cfg.land_config if isinstance(cfg.land_config, LandConfig) else LandConfig()
+        # Select land config based on mode (shared with run_lmip).
+        land_cfg = resolve_land_config(cfg.land_mode, cfg.land_config)
 
         # Enable carbon in land config if carbon_active + differland
         if cfg.carbon_active and cfg.carbon_land == "differland":
