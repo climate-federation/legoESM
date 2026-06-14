@@ -77,13 +77,24 @@ numerics).
   `arakawa_lamb_gradient` (1ab7edae). All host-body 3D+4D + np24 shard_map,
   bit-identity-gated, codex-clean.
 - **DONE (Jun-11):** `cgrid_divergence` — reuse `cgrid_divergence_local`.
-- **REMAINING for the fv3_sw_tendencies np24 stage:**
-  - P-iv-mass: `cgrid_mass_flux_divergence` (h-weighted flux div → height
-    tendency) — NOT tiled yet.
-  - P-v: `fv3_d2cc` / `fv3_cc2c` (D→cc→C velocity, VECTOR — cube-edge rotation;
-    hardest) — NOT tiled yet.
-  - P-vi: Bernoulli `KE=0.5(u_cc²+v_cc²)` + `B=KE+g(h+h_s)` (pointwise; trivial).
-  - ASSEMBLY: wire the per-op tiled stages into the full `fv3_sw_tendencies`
-    np24 shard_map; bit-identity vs the global tendency.
+- **P-v `fv3_d2cc` + `fv3_cc2c` SHIPPED (406ddc6a)** — velocity transforms
+  (fv3_d2cc local 2-pt avg; fv3_cc2c VECTOR via the pad_halo_vector pre-pad +
+  the extracted fv3_cc2c_core; 3D-only, no 4D caller). host-body + np24, codex-clean.
+- **MOMENTUM tendency (du_d_dt/dv_d_dt) now FULLY tileable** — every op it needs
+  is done: P-v (cc/C winds) -> Bernoulli (pointwise) -> P-iii (A-L grad) + P-ii
+  (corner winds + interp_corner_to_center) -> P-i (dgrid_vorticity) ->
+  cgrid_divergence (Jun-11, div damp).
+- **REMAINING (both U3-scale HARD + future-HW, the genuine deferred-deep work):**
+  - **mass `cgrid_mass_flux_divergence` (PPM)** — HARDEST op. `_ppm_reconstruct_1d`
+    has FACE-EXTENT-dependent boundary logic (`n_interior=n` + xppm-boundary) that
+    does NOT sub-face-tile trivially, + cross-face `synchronize_cgrid_fluxes`.
+    Needs the U3 external-halo + face-boundary approach (cf. experimental
+    `_ppm_transport_1d` U3a-f) = multi-increment.
+  - **ASSEMBLY: full `fv3_sw_tendencies` np24 shard_map** — the genuine np24
+    unlock. Hard because INTERMEDIATES (u_cc->u_c->B->dB...) are computed
+    IN-STAGE, so chaining the per-op tiles needs IN-STAGE halo exchanges
+    (ppermute) for the intermediates (approach-C pre-pad covers only the STAGE
+    INPUTS). Same reason the experimental U3/U4 chain was never assembled.
+  - Bernoulli (`KE`, `B`) is pointwise -> inline in the assembly (no kernel).
 - LESSON: a prior session built tiling infra; ALWAYS grep `tests/parallel/
   test_tiled_*` + `parallel.mesh` before tiling a cube op.
