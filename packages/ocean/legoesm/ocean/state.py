@@ -1385,3 +1385,23 @@ class LatLonCGridOceanConfig(NamedTuple):
     # validation).  Default False ⇒ the explicit stage-10c placement ⇒
     # BIT-IDENTICAL.
     sponge_forcing_implicit: bool = False
+    # --- Veros u_centered dzw slot for the implicit vertical-diffusion solves ---
+    # Selects the GRADIENT divisor (the center-to-center spacing) used by the
+    # backward-Euler tracer (T/S) and momentum-friction vertical-diffusion solves:
+    #   False (DEFAULT, BIT-IDENTICAL) — the midpoint reconstruction
+    #     ``build_dz_half(dz_cell) = 0.5(dz_k + dz_{k+1})``.
+    #   True (VEROS-FAITHFUL) — the coordinate's center-to-center spacing
+    #     ``z_coord.dz_half_ref · J`` (Jacobian-scaled like every other
+    #     thickness), i.e. Veros's ``dzw`` (thermodynamics.py:267
+    #     ``delta = dt·kappaH/dzw``; same divisor for friction).  On a u_centered
+    #     z-coordinate (the Veros-faithful ACC recipe) dz_half_ref alternates
+    #     around the midpoint value exactly as Veros's dzw does (face ratios up to
+    #     2.0 at the top face, ±10% below), so at IDENTICAL diffusivity the
+    #     discrete flux differs per level.  This is the missed twin of the B3 slot
+    #     fixes (N²/TKE/GM were moved to dz_half_ref·J; the implicit solves were
+    #     not).  On a midpoint z-star coordinate dz_half_ref == build_dz_half(dz_ref)
+    #     so the flag is a NO-OP there.  The CONTROL volume (dz_cell / dz_u / dz_v)
+    #     is unchanged — only the gradient slot moves.  Requires
+    #     ``implicit_vertical_mixing=True`` (rejected otherwise at config
+    #     validation).  Default False ⇒ BIT-IDENTICAL for every existing config.
+    implicit_vmix_dzw_slot: bool = False
