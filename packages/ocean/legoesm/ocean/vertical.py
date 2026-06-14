@@ -19,6 +19,7 @@ import math
 from typing import NamedTuple
 
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.precision import get_policy
 from legoesm.timestepping.tridiagonal import thomas_solve
@@ -140,6 +141,65 @@ def create_ocean_z_star(
 
     # Distance between full levels
     dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]  # positive
+
+    return OceanZStarCoordinate(
+        n_levels=n_levels,
+        H_max=H_max,
+        z_full_ref=z_full_ref,
+        z_half_ref=z_half_ref,
+        dz_ref=dz_ref,
+        dz_half_ref=dz_half_ref,
+    )
+
+
+def create_z_star_from_thicknesses(dz_ref_m) -> OceanZStarCoordinate:
+    """Build a z* coordinate from EXPLICIT reference layer thicknesses.
+
+    Reproduces an external model's vertical grid EXACTLY -- pass another model's
+    1-D reference thicknesses (e.g. NEMO ``e3t_1d`` [m], surface ~1 m growing to
+    ~200 m for ORCA L75) and get back the identical level interfaces / centres,
+    with no stretching-parameter guessing.  Used by the OMIP runner's
+    ``--nemo-vertical`` to match NEMO ORCA1's 75-level grid so vertical gradients
+    (thermocline, mixed layer) are resolved comparably.
+
+    ``n_levels`` and ``H_max`` are inferred from the input (``len(dz)`` and
+    ``sum(dz)``).  Construction mirrors :func:`create_ocean_z_star` after its
+    thickness profile is fixed -- the same snap-to-``H_max`` and interface
+    recovery so the Hallberg-Adcroft column-sum identity holds to bit precision.
+
+    Parameters
+    ----------
+    dz_ref_m : 1-D array-like
+        Reference layer thicknesses [m], top -> bottom, all > 0.
+
+    Returns
+    -------
+    OceanZStarCoordinate
+    """
+    # Check ndim on the ORIGINAL array BEFORE any ravel -- a 2-D array would
+    # otherwise be silently flattened and accepted as 1-D (codex HIGH).
+    dz_np = np.asarray(dz_ref_m, dtype=np.float64)
+    if dz_np.ndim != 1 or dz_np.size < 2:
+        raise ValueError(
+            f"dz_ref_m must be a 1-D array of >= 2 thicknesses, got shape "
+            f"{dz_np.shape}")
+    if not np.all(dz_np > 0.0):
+        raise ValueError("dz_ref_m thicknesses must all be > 0")
+    n_levels = int(dz_np.size)
+    H_max = float(dz_np.sum())
+
+    dz_ref = jnp.asarray(dz_np, dtype=get_policy().control)
+    # Interfaces from cumulative sum (surface=0, bottom=-H_max); snap the bottom
+    # to exactly -H_max to kill cumsum drift, then recover dz from the snapped
+    # interfaces (identical pattern to create_ocean_z_star).
+    z_half_ref = jnp.concatenate([
+        jnp.array([0.0], dtype=dz_ref.dtype),
+        -jnp.cumsum(dz_ref),
+    ])
+    z_half_ref = z_half_ref.at[-1].set(-H_max)
+    z_full_ref = 0.5 * (z_half_ref[:-1] + z_half_ref[1:])
+    dz_ref = z_half_ref[:-1] - z_half_ref[1:]
+    dz_half_ref = z_full_ref[:-1] - z_full_ref[1:]
 
     return OceanZStarCoordinate(
         n_levels=n_levels,

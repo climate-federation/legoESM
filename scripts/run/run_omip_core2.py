@@ -486,7 +486,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   convection_K_conv=1.0, convection_K_bg=1e-5,
                   freeze_floor=None, ew_cyclic_overlap=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
-                  mle=None):
+                  mle=None, dz_ref_override=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -515,6 +515,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         "tripole", resolution, nlev, H_max,
         physics_preset="full", water_type="II",
         forcing_mode="jra55_do_tropical",
+        dz_ref_override=dz_ref_override,
     )
     # Optional dycore-stability overrides (for WOA cold-start tuning): rebuild
     # the config + model from run_omip's validated tripole base, changing only
@@ -694,7 +695,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   polar_filter_max_wave_speed=None,
                   polar_filter_safety_factor=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
-                  mle=None):
+                  mle=None, dz_ref_override=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -712,6 +713,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         "latlon", res, nlev, H_max, physics_preset="full", water_type="II",
         use_bathymetry=True, pgf_scheme=pgf_scheme,
         A_h_override=A_h, B_h_override=B_h,
+        dz_ref_override=dz_ref_override,
     )
     _ovr = {k: v for k, v in (("K_bih", K_bih),
                               ("ke_gradient_scheme", ke_gradient_scheme),
@@ -1049,7 +1051,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      A_h=None, B_h=None, K_bih=None, C_smag_lap=None,
                      pgf_scheme=None, bottom_drag_r=None,
                      bottom_drag_bbl_thickness=None, bottom_drag_bg_velocity=None,
-                     partial_cell=False, n_barotropic_substeps=None,
+                     partial_cell=False, dz_ref_override=None,
+                     n_barotropic_substeps=None,
                      barotropic_solver=None, freeze_floor=None,
                      runoff_depth_spread_m=None, mle=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
@@ -1075,6 +1078,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
     mesh, z_coord, config, _model0, _ = run_omip._create_setup(
         "mpas", f"ico{level}", nlev, H_max,
         physics_preset="full", water_type="II",
+        dz_ref_override=dz_ref_override,
     )
     # Faithful EXTERNAL surface-forcing contract: the CORE-II tau/q_net from
     # compute_omip2_surface_forcing is deposited by mpas_physics (it negates +
@@ -1177,6 +1181,30 @@ _SICONC_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/
 _CHL_NC = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
            "INPUTS/orca1_inputs/data_repository/input_fields/"
            "merged_ESACCI_BIOMER4V1R1_CHL_REG05.nc")
+# NEMO ORCA1 domain_cfg: source of the reference 75-level column (e3t_1d) for
+# --nemo-vertical, so legoESM matches NEMO's vertical resolution.
+_NEMO_DOMAIN_CFG = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/"
+                    "ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/"
+                    "domain_cfg.nc")
+
+
+def _load_nemo_e3t_1d(path: str):
+    """Read NEMO's 1-D reference layer thicknesses ``e3t_1d`` [m] (length jpk).
+
+    Falls back to differencing ``gdepw_1d`` (interface depths) if ``e3t_1d`` is
+    absent.  Returns a 1-D float64 NumPy array (top -> bottom), all > 0."""
+    import xarray as xr
+    ds = xr.open_dataset(path, decode_times=False)
+    if "e3t_1d" in ds:
+        dz = np.asarray(ds["e3t_1d"].values, dtype=np.float64).ravel()
+    elif "gdepw_1d" in ds:
+        w = np.asarray(ds["gdepw_1d"].values, dtype=np.float64).ravel()
+        dz = np.diff(np.concatenate([w, w[-1:] + (w[-1] - w[-2])]))
+    else:
+        raise KeyError(f"{path}: no e3t_1d or gdepw_1d for --nemo-vertical")
+    if dz.ndim != 1 or dz.size < 2 or not np.all(dz > 0):
+        raise ValueError(f"{path}: bad e3t_1d (shape {dz.shape}, must be 1-D >0)")
+    return dz
 # NEMO ORCA1 RUN_REF MONTHLY ocean grid_T (`tos` = SST [degC]) -> used to give the
 # annual-mean siconc a SEASONAL cycle (--ice-albedo-seasonal): NEMO sea ice sits
 # at the freezing point, so where the monthly SST is at/below freezing NEMO has
@@ -1716,6 +1744,16 @@ def main() -> int:
                    help="Timestep [s] (default 3600 = NEMO ORCA1).")
     p.add_argument("--nlev", type=int, default=20)
     p.add_argument("--H-max", type=float, default=5500.0)
+    p.add_argument("--nemo-vertical", action="store_true",
+                   help="Match NEMO ORCA1's vertical grid: build z_coord from "
+                        "NEMO's reference layer thicknesses e3t_1d (75 levels, "
+                        "~1 m surface -> ~204 m deep, Madec-Imbard L75) instead "
+                        "of the default tanh 20-level stretch. Overrides --nlev / "
+                        "--H-max to the NEMO column (better-resolved thermocline "
+                        "+ MLD, directly comparable to NEMO).")
+    p.add_argument("--nemo-vertical-file", type=str, default=None,
+                   help="NetCDF with e3t_1d for --nemo-vertical (default: the "
+                        "ORCA1 domain_cfg).")
     p.add_argument("--mesh", type=str, default=_MESH)
     p.add_argument("--grid", type=str, default="tripole",
                    choices=["tripole", "latlon_bathy", "cubed_sphere", "mpas"],
@@ -2216,6 +2254,25 @@ def main() -> int:
         from legoesm.ocean.physics.lateral_mixing.mle import MLEConfig
         mle_cfg = MLEConfig(ce=args.mle_ce)
         print(f"[setup] Fox-Kemper MLE requested: ce={args.mle_ce:g}")
+
+    # --nemo-vertical: replace the default 20-level tanh z* with NEMO ORCA1's
+    # 75-level reference column (e3t_1d) so vertical gradients (thermocline, MLD)
+    # are resolved comparably to NEMO. Overrides --nlev/--H-max to the NEMO column.
+    _nemo_dz = None
+    if args.nemo_vertical:
+        if args.grid == "cubed_sphere":
+            raise ValueError(
+                "--nemo-vertical is not wired for --grid cubed_sphere (parked "
+                "grid; build_cubed_sphere does not thread dz_ref_override). Use "
+                "tripole, latlon_bathy, or mpas.")
+        _vfile = args.nemo_vertical_file or _NEMO_DOMAIN_CFG
+        _nemo_dz = _load_nemo_e3t_1d(_vfile)
+        args.nlev = int(_nemo_dz.size)
+        args.H_max = float(_nemo_dz.sum())
+        print(f"[setup] --nemo-vertical: {args.nlev} levels from {_vfile} "
+              f"(dz {_nemo_dz[0]:.2f}->{_nemo_dz[-1]:.1f} m, H_max "
+              f"{args.H_max:.0f} m) -- matching NEMO ORCA1 L75.")
+
     if args.grid == "tripole":
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
@@ -2247,7 +2304,7 @@ def main() -> int:
             convection_K_bg=args.convection_K_bg,
             ew_cyclic_overlap=(True if args.ew_cyclic_overlap else None),
             tracer_advection=args.tracer_advection,
-            mle=mle_cfg,
+            mle=mle_cfg, dz_ref_override=_nemo_dz,
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -2281,7 +2338,7 @@ def main() -> int:
             flat_bottom=args.flat_bottom, partial_cell=args.partial_cell,
             freeze_floor=(True if args.freeze_floor else None),
             runoff_depth_spread_m=args.runoff_depth_spread_m,
-            mle=mle_cfg,
+            mle=mle_cfg, dz_ref_override=_nemo_dz,
         )
         app_grid_type = "mpas"
     else:
@@ -2316,7 +2373,7 @@ def main() -> int:
             polar_filter_cutoff_lat_deg=args.polar_filter_cutoff_lat,
             polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
             polar_filter_safety_factor=args.polar_filter_safety,
-            mle=mle_cfg,
+            mle=mle_cfg, dz_ref_override=_nemo_dz,
         )
         app_grid_type = "latlon"
 
