@@ -155,6 +155,10 @@ def test_spmd_pcg_matches_serial_pcg():
         @partial(shard_map, mesh=mesh, in_specs=(isp, isp),
                  out_specs=isp, check_vma=False)
         def _solve(bb, xx0):
+            # The body must see ONLY this device's latitude band (codex:
+            # a replicated in_spec would make the psum multiply dots by
+            # the device count; the shape pins that the field is sharded).
+            assert bb.shape[0] == NL, (bb.shape, NL)
             x, _rr = _fixed_iteration_pcg(
                 A_op, bb, M_inv, xx0, max_iter=MAX_ITER)
             return x
@@ -171,3 +175,53 @@ def test_spmd_pcg_matches_serial_pcg():
     # untested).  Residual of the converged serial solve must be small.
     resid = float(np.max(np.abs(np.asarray(A_op(jnp.asarray(x_serial))) - np.asarray(b))))
     assert resid < 1e-6, f"serial PCG did not converge: resid={resid:.3e}"
+
+
+def test_spmd_pcg_negative_control(monkeypatch):
+    """NON-VACUITY: if the cross-band reduction is a no-op the sharded PCG
+    must DIVERGE from serial.  Monkeypatch ``batch_psum_spmd`` to return the
+    per-band PARTIAL sums unchanged (the bug the psum routing prevents) and
+    assert the gathered solution misses serial by orders of magnitude — so
+    the parity test above is genuinely testing the cross-band sum (codex
+    LOW: add a negative control)."""
+    mesh = _mesh()
+    from functools import partial
+    from jax.sharding import NamedSharding, PartitionSpec as P
+    try:
+        from jax import shard_map
+    except ImportError:  # pragma: no cover
+        from jax.experimental.shard_map import shard_map
+
+    A_op, M_inv = _make_helmholtz_ops()
+    rng = np.random.default_rng(13)
+    b = jnp.asarray(rng.standard_normal((N_LAT, N_LON)))
+    x0 = jnp.zeros((N_LAT, N_LON))
+    x_serial = np.asarray(_fixed_iteration_pcg(
+        A_op, b, M_inv, x0, max_iter=MAX_ITER)[0])
+
+    # Break the reduction: _global_dot_batch imports batch_psum_spmd at
+    # function scope from this module, so patching the attribute here is
+    # picked up on the next call.
+    import legoesm.parallel.reductions as _red
+    monkeypatch.setattr(_red, "batch_psum_spmd",
+                        lambda local, axis_name: local)
+
+    isp = P("lat", None)
+    b_sh = jax.device_put(b, NamedSharding(mesh, isp))
+    x0_sh = jax.device_put(x0, NamedSharding(mesh, isp))
+    activate_latlon_spmd_halo(mesh)
+    try:
+        @partial(shard_map, mesh=mesh, in_specs=(isp, isp),
+                 out_specs=isp, check_vma=False)
+        def _solve(bb, xx0):
+            x, _rr = _fixed_iteration_pcg(
+                A_op, bb, M_inv, xx0, max_iter=MAX_ITER)
+            return x
+        x_bad = np.asarray(_solve(b_sh, x0_sh))
+    finally:
+        deactivate_latlon_spmd_halo()
+
+    worst = float(np.max(np.abs(x_bad - x_serial)))
+    assert worst > 1e-4, (
+        f"negative control FAILED to diverge ({worst:.3e}) — the parity "
+        f"test may be vacuous (psum not actually exercised)")
