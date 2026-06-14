@@ -372,6 +372,7 @@ def build_case(
     pcg_variant: str = "standard",
     preconditioner: str = "jacobi",
     fixed_iters: int = 60,
+    force_pcg: bool = False,
 ):
     """Build (model, state, total_cells, layout) for one benchmark case.
 
@@ -388,9 +389,15 @@ def build_case(
     _ensure_precision(precision)
 
     # (1) Global grid + IC with the LOCAL halo backend.
+    # ``force_pcg`` forces the fixed-M PCG even at a SINGLE rank so a 1-vs-N
+    # strong-scaling ratio compares the SAME barotropic solver both sides
+    # (else np=1 stock jax.scipy CG vs np>=2 fixed-M PCG is apples-to-oranges
+    # — codex route-A review Q5).  At n_ranks>1 the is_distributed dispatch
+    # already uses the PCG, so this only changes the np=1 baseline.
     grid, z_coord, config, state_global = _build_global_problem(
         n_lat, n_lon, nlev, baro_solver, pcg_variant=pcg_variant,
         preconditioner=preconditioner, fixed_iters=fixed_iters,
+        force_pcg=force_pcg,
     )
 
     total_cells = n_lat * n_lon * nlev
@@ -2041,6 +2048,13 @@ def build_parser() -> argparse.ArgumentParser:
              "reduction count per solve is 2M+1 / M+1 by variant).",
     )
     p.add_argument(
+        "--force-pcg", action="store_true",
+        help="Force the fixed-M PCG even at a SINGLE rank, so a 1-vs-N "
+             "strong-scaling ratio uses the SAME barotropic solver both "
+             "sides (else np=1 stock jax.scipy CG vs np>=2 fixed-M PCG is "
+             "apples-to-oranges). No effect at n_ranks>1 (PCG already used).",
+    )
+    p.add_argument(
         "--profile-phases", action="store_true",
         help="After the full-step timing, time EVERY major ocean-step "
              "sub-phase in ISOLATION (config-gated: baroclinic tendencies / "
@@ -2241,6 +2255,7 @@ def main() -> int:
         pcg_variant=args.pcg_variant,
         preconditioner=args.preconditioner,
         fixed_iters=int(args.pcg_fixed_iters),
+        force_pcg=args.force_pcg,
     )
     cells_per_rank = total_cells // n_ranks
 
