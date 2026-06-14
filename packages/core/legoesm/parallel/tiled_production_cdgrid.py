@@ -192,17 +192,23 @@ def interp_center_to_corner_tile_2d(f_pad, cdgrid, a_i, a_j, nl: int):
     return interp_center_to_corner(blk, cdgrid, padded=blk)
 
 
-def make_tiled_interp_corner_to_center_stage_2d(mesh, n: int, kt: int):
+def make_tiled_interp_corner_to_center_stage_2d(mesh, n: int, kt: int,
+                                                nlev: int | None = None):
     """Sharded ``interp_corner_to_center`` on a ``(6, kt, kt)`` mesh.
     ``stage(field_d) -> cc`` (face-replicated corner in; tile-sharded cc out,
-    gathered ``(6, n, n)`` — exact cc partition, no shared face)."""
+    gathered ``(6, n, n)`` — exact cc partition, no shared face).
+
+    ``nlev`` (3D PE dycore): when set, ``field_d`` is 4D ``(6, n+1, n+1, nlev)``
+    and ``cc`` is 4D ``(6, n, n, nlev)`` — a trailing replicated vertical axis
+    (the vertical is NOT tiled)."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
     nl = n // kt
-    fo = P("face", None, None)
-    co = P("face", "tile_i", "tile_j")
+    fi = P("face", None, None, None) if nlev else P("face", None, None)
+    co = (P("face", "tile_i", "tile_j", None) if nlev
+          else P("face", "tile_i", "tile_j"))
 
-    @partial(shard_map, mesh=mesh, in_specs=(fo,), out_specs=co,
+    @partial(shard_map, mesh=mesh, in_specs=(fi,), out_specs=co,
              check_vma=False)
     def _stage(field_d):
         a_i = jax.lax.axis_index("tile_i") * nl
@@ -274,23 +280,30 @@ def arakawa_lamb_gradient_tile_2d(B_pad, grad_c00, grad_c01, grad_c10, grad_c11,
         _sg(grad_c11))
 
 
-def make_tiled_arakawa_lamb_gradient_stage_2d(mesh, cdgrid, n: int, kt: int):
+def make_tiled_arakawa_lamb_gradient_stage_2d(mesh, cdgrid, n: int, kt: int,
+                                              nlev: int | None = None):
     """Sharded default-path ``arakawa_lamb_gradient`` on a ``(6, kt, kt)`` mesh.
     ``stage(B_pad) -> (dB_dx, dB_dy_perp)`` where ``B_pad`` is the GLOBAL
     face-replicated ``pad_halo_auto(B)`` ``(6, n+2, n+2)``; the corner matrices
     are passed as face-sharded inputs (NOT closed over -> codex U4a HIGH).  Both
     outputs tile-sharded, gathered ``(6, kt*(nl+1), kt*(nl+1))`` reassembling
-    lower-owns-shared to ``(6, n+1, n+1)``."""
+    lower-owns-shared to ``(6, n+1, n+1)``.
+
+    ``nlev`` (3D PE dycore): when set, ``B_pad`` is 4D ``(6, n+2, n+2, nlev)``
+    and the gradients are 4D ``(6, n+1, n+1, nlev)`` — a trailing replicated
+    vertical axis; the corner matrices stay 2D-face (broadcast over nlev)."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
     nl = n // kt
     gc00, gc01 = cdgrid.grad_c00, cdgrid.grad_c01
     gc10, gc11 = cdgrid.grad_c10, cdgrid.grad_c11
-    fo = P("face", None, None)
+    fo = P("face", None, None)                 # 2D-face matrix
     co = P("face", "tile_i", "tile_j")
+    fb = P("face", None, None, None) if nlev else fo            # B_pad
+    cz = (P("face", "tile_i", "tile_j", None) if nlev else co)  # grad outputs
 
-    @partial(shard_map, mesh=mesh, in_specs=(fo,) * 5, out_specs=(co, co),
-             check_vma=False)
+    @partial(shard_map, mesh=mesh, in_specs=(fb, fo, fo, fo, fo),
+             out_specs=(cz, cz), check_vma=False)
     def _body(B_pad, c00, c01, c10, c11):
         a_i = jax.lax.axis_index("tile_i") * nl
         a_j = jax.lax.axis_index("tile_j") * nl

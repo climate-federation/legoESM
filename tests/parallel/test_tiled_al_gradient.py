@@ -102,3 +102,33 @@ def test_al_gradient_shard_map_np24():
                                err_msg="P-iii dB_dx shard_map != global")
     np.testing.assert_allclose(ty, gy, rtol=0, atol=1e-12,
                                err_msg="P-iii dB_dy_perp shard_map != global")
+
+
+def test_al_gradient_shard_map_np24_4d():
+    """4D ``(F, n+2, n+2, nlev)`` B_pad shard_map np24 — the 3D PE dycore A-L
+    gradient (B and ln_ps PGF) on np=6*kt*kt devices (vertical replicated)."""
+    kt, nl, nlev = 2, 6, 4
+    ndev = 6 * kt * kt
+    if len(jax.devices()) < ndev:
+        pytest.skip(f"needs --xla_force_host_platform_device_count={ndev}")
+    from jax.sharding import Mesh
+
+    cd, n = _cube(kt, nl)
+    rng = np.random.default_rng(634)
+    B = jnp.asarray(rng.standard_normal((6, n, n, nlev)))
+    gx, gy = arakawa_lamb_gradient(B, cd)
+    gx, gy = np.asarray(gx), np.asarray(gy)            # (6, n+1, n+1, nlev)
+    B_pad = pad_halo_auto(B, cd)                        # (6, n+2, n+2, nlev)
+    dev = np.array(jax.devices()[:ndev]).reshape(6, kt, kt)
+    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
+    stage = make_tiled_arakawa_lamb_gradient_stage_2d(mesh, cd, n, kt, nlev=nlev)
+    sx, sy = stage(B_pad)
+    sx = np.asarray(sx).reshape(6, kt, nl + 1, kt, nl + 1, nlev)
+    sy = np.asarray(sy).reshape(6, kt, nl + 1, kt, nl + 1, nlev)
+    tx = _reassemble_corner(lambda ti, tj: sx[:, ti, :, tj, :, :], kt, nl)
+    ty = _reassemble_corner(lambda ti, tj: sy[:, ti, :, tj, :, :], kt, nl)
+    assert tx.shape == (6, n + 1, n + 1, nlev)
+    np.testing.assert_allclose(tx, gx, rtol=0, atol=1e-12,
+                               err_msg="P-iii dB_dx 4D shard_map != global")
+    np.testing.assert_allclose(ty, gy, rtol=0, atol=1e-12,
+                               err_msg="P-iii dB_dy_perp 4D shard_map != global")
