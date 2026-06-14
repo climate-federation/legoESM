@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +59,16 @@ def _meshes_compatible(a, b) -> bool:
         return ids_a == ids_b
     except Exception:  # noqa: BLE001 — opaque mesh objects must not crash
         return False
+
+
+def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
+    """True if the run should checkpoint and exit to fit the wallclock budget.
+
+    ``max_s <= 0`` disables the check.  Otherwise fire once the elapsed time is
+    within ``buffer_s`` of the budget, leaving time to write the checkpoint
+    before SLURM kills the job (so a dependency chain can resume).
+    """
+    return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
 
 
 class ModelDriver:
@@ -1207,6 +1218,17 @@ class ModelDriver:
                     "ch4_ppbv": ch4,
                     "n2o_ppbv": n2o,
                 })
+
+        # Interactive carbon-radiation coupling (#3 / C4MIP): when the coupled
+        # driver runs a prognostic CO2 tracer it sets ``self._co2_vmr_override``
+        # (a global-mean CO2 mole fraction) each segment; inject it into the
+        # radiation GHG so emitted / absorbed CO2 actually changes radiative
+        # forcing.  Gated on a gas-radiation scheme (gray ignores GHG) and on the
+        # override being present, so fixed-CO2 runs are byte-identical.
+        co2_vmr_override = getattr(self, "_co2_vmr_override", None)
+        if (co2_vmr_override is not None
+                and cfg.radiation in ("rrtmg", "rrtmgp")):
+            ghg_vmr = {**(ghg_vmr or {}), "co2": co2_vmr_override}
 
         return o3_vmr, aerosol_od, ghg_vmr
 
@@ -3085,8 +3107,32 @@ class ModelDriver:
                        f"digest={metadata.state_digest[:16]}...")
         return step, day
 
+    def _maybe_wallclock_exit(self, ckpt_fn, step: int, day: float) -> None:
+        """Checkpoint and ``exit(0)`` cleanly if the wallclock budget is nearly
+        spent, so a SLURM dependency chain resumes from this state.
+
+        Single-rank only: under MPI an independent per-rank ``sys.exit`` would
+        desync ranks (others block on the next collective), so a collective
+        decision (broadcast the flag) is required and is deferred — the run-start
+        warning notes it is inactive under MPI.
+        """
+        if self._mpi_world_size not in (None, 1):
+            return
+        max_wall = self.config.output.max_wallclock_seconds
+        if not _wallclock_exhausted(
+                time.time() - self._run_wallclock_start, max_wall,
+                self.config.output.restart_buffer_seconds):
+            return
+        logger.info(
+            f"Wallclock budget {max_wall:.0f}s nearly reached at day {day:.2f}; "
+            f"checkpointing and exiting cleanly for restart.")
+        ckpt_fn(step, day)
+        self.diagnostics.flush_to_disk(self._output_dir)
+        sys.exit(0)
+
     def run(self, start_step: int = 0, start_day: float | None = None,
-            compiled: bool = True, segment_callback=None) -> str:
+            compiled: bool = True, segment_callback=None,
+            checkpoint_callback=None) -> str:
         """Run the time integration.
 
         Parameters
@@ -3110,6 +3156,18 @@ class ModelDriver:
             Run status ("COMPLETED" or "BLOWUP at day ...").
         """
         self._segment_callback = segment_callback
+        # Checkpoint hook (a coupled driver passes its own save_checkpoint so
+        # the FULL coupled state — not just the atmosphere — is written on a
+        # periodic or wallclock-budget checkpoint).  Run-start wallclock anchor
+        # for the budget check.
+        self._checkpoint_callback = checkpoint_callback
+        self._run_wallclock_start = time.time()
+        if (self.config.output.max_wallclock_seconds > 0
+                and self._mpi_world_size not in (None, 1)):
+            logger.warning(
+                "max_wallclock_seconds is set but the run is MPI-sharded; "
+                "wallclock checkpoint-and-exit is single-rank only (a collective "
+                "exit is not yet implemented) and will NOT fire under MPI.")
         # Issue #275 fix A: ``try/finally`` here — not inside
         # ``_finalize_run`` — so that an exception thrown anywhere in
         # the time loop still triggers SPMD halo backend restoration.
@@ -3829,7 +3887,10 @@ class ModelDriver:
                     logger.error(f"{run_status} (caught at checkpoint; not written)")
                     break
                 _ckpt_day = START_DAY + (step + 1) * DT / 86400.0
-                self.save_checkpoint(start_step + step + 1, _ckpt_day)
+                _ckpt = getattr(self, "_checkpoint_callback", None) or self.save_checkpoint
+                _ckpt(start_step + step + 1, _ckpt_day)
+                # Wallclock-aware clean exit for long HPC dependency chains.
+                self._maybe_wallclock_exit(_ckpt, start_step + step + 1, _ckpt_day)
 
         # Final checkpoint so the next chain link resumes from the exact end
         # state.  Skipped (a) on blow-up — state is non-finite — and (b) when
@@ -5241,9 +5302,14 @@ class ModelDriver:
                         device_config=_seg_device_config,
                     )
 
-            # Checkpoint
+            # Checkpoint (a coupled run routes this through its own
+            # save_checkpoint so the coupled state is written too).
+            _ckpt = getattr(self, "_checkpoint_callback", None) or self.save_checkpoint
             if checkpoint_interval > 0 and current_step % checkpoint_interval == 0:
-                self.save_checkpoint(current_step, day)
+                _ckpt(current_step, day)
+
+            # Wallclock-aware clean exit for long HPC dependency chains.
+            self._maybe_wallclock_exit(_ckpt, current_step, day)
 
             # Periodic diagnostic flush (every ~365 days) to cap memory — rank 0 only
             if (elapsed_day > 0 and int(elapsed_day) % 365 == 0

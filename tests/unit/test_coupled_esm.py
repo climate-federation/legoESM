@@ -203,6 +203,33 @@ class TestCoupledCheckpointValidation(unittest.TestCase):
             self.assertEqual(tuple(driver._ocean_state.T_sfc.data.shape), cur)
 
 
+class TestWallclockExhausted(unittest.TestCase):
+    """Wallclock-budget checkpoint-and-exit predicate (#6)."""
+
+    def test_predicate(self):
+        from legoesm.driver.model_driver import _wallclock_exhausted
+        self.assertFalse(_wallclock_exhausted(0.0, 0.0, 600.0))      # disabled
+        self.assertFalse(_wallclock_exhausted(100.0, 3600.0, 600.0))  # plenty left
+        self.assertTrue(_wallclock_exhausted(3100.0, 3600.0, 600.0))  # within buffer
+        self.assertTrue(_wallclock_exhausted(3600.0, 3600.0, 600.0))  # at budget
+
+
+class TestCarbonRadiationCoupling(unittest.TestCase):
+    """Prognostic CO2 tracer feeds the atmosphere radiation GHG (#3 / C4MIP)."""
+
+    def test_co2_override_set_after_run(self):
+        driver = _make_driver("slab_carbon", days=1)
+        # No radiation override before the first coupled segment.
+        self.assertIsNone(getattr(driver._atm, "_co2_vmr_override", None))
+        driver.run()
+        # The coupled driver fed the prognostic CO2 to the atm radiation hook.
+        ov = getattr(driver._atm, "_co2_vmr_override", None)
+        self.assertIsNotNone(ov)
+        # Initial ~415 ppm => CO2 mole fraction ~4.15e-4 (physical range).
+        self.assertGreater(ov, 1e-4)
+        self.assertLess(ov, 1e-3)
+
+
 class TestSlabSimple(unittest.TestCase):
     """Slab ocean + slab bucket land."""
 

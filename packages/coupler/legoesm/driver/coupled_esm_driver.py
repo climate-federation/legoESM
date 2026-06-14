@@ -607,6 +607,16 @@ class CoupledESMDriver:
             # CO2 tracer update
             self._step_co2_tracer(sub_dt)
 
+        # Interactive carbon-radiation coupling (#3 / C4MIP): feed the prognostic
+        # CO2 back to atmospheric radiation.  The next atmosphere segment's GHG
+        # override uses this global-mean CO2 mole fraction, so the carbon cycle
+        # changes radiative forcing.  Gated on the tracer (and inert for gray
+        # radiation, which ignores GHG) => fixed-CO2 runs are byte-identical.
+        if self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field'):
+            co2_vmr = float(jnp.mean(self._co2_field)) / (
+                constants.M_CO2 / constants.M_air)
+            self._atm._co2_vmr_override = co2_vmr
+
         # Diagnostics (once per segment, not per sub-step)
         self._log_coupled_diag(day)
 
@@ -666,6 +676,9 @@ class CoupledESMDriver:
             start_step=start_step,
             start_day=start_day,
             segment_callback=self._segment_hook,
+            # Checkpoint the FULL coupled state (atm + ocean + surface + CO2),
+            # not just the atmosphere, on periodic and wallclock-budget saves.
+            checkpoint_callback=self.save_checkpoint,
         )
         logger.info(f"Coupled ESM run: {status}")
         return status
