@@ -20,8 +20,10 @@ EXACT-match case selector (a leading ``=`` avoids the substring filter over-
 matching, e.g. ``baroclinic`` → ``baroclinic_gyre*``), mapping any explicit
 overrides.
 
-Component matrix runners differ (the case-name flag is ``--only`` for ocean /
-sea-ice but ``--test`` for atmosphere; atmosphere has no ``--levels`` / ``--dt``).
+Component matrix runners differ: the case-name flag is ``--only`` for ocean but
+``--test`` for atmosphere and sea-ice; ocean/atmosphere switch substring→exact
+with a leading ``=`` while sea-ice ``--test`` is already exact (no prefix);
+atmosphere/sea-ice have no ``--levels`` / ``--dt``.
 A :class:`MatrixRunnerSpec` captures those per-component differences so the three
 adapters share ONE validation + command-building implementation instead of
 copy-pasting it.  Component-specific case-name validation (against a registry or

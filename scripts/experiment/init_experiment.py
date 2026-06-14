@@ -220,8 +220,14 @@ def main(argv: list[str] | None = None) -> int:
     # template's subdir, e.g. output/omip_latlon/ -> <bundle>/output/omip_latlon)
     # and leave an absolute path untouched. ``out_subdir`` is where the run
     # manifest lands, used for the reproduce hint below.
+    # A ``setup:`` template (#388) routes to a matrix runner (a repo-root-
+    # relative script) rather than the atmosphere ``legoesm run`` CLI — so it
+    # launches from the repo root just like the ocean recipe path, and its
+    # relative ``output.path`` is resolved to an absolute bundle path so results
+    # land in the bundle.
+    is_setup = bool(cfg.get("setup"))
     out_subdir = out / "output"
-    if not is_atm:
+    if not is_atm or is_setup:
         op = cfg.get("output.path")
         if isinstance(op, str) and Path(op).is_absolute():
             out_subdir = Path(op)
@@ -232,18 +238,19 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg.to_yaml(str(out / "config.yaml"))
     # Ocean runs need 64-bit (omip is x64 throughout); atmosphere keeps its
-    # template-/machine-driven precision (x32 default).  The atmosphere CLI is
-    # cwd-independent (cd into the bundle, relative config.yaml); the ocean
-    # runner is a repo-root-relative script, so launch from the repo root and
-    # pass the bundle's config.yaml by absolute path.
-    if is_atm:
+    # template-/machine-driven precision (x32 default).  The atmosphere ``legoesm
+    # run`` CLI is cwd-independent (cd into the bundle, relative config.yaml);
+    # the ocean runner AND every matrix-runner setup template are repo-root-
+    # relative scripts, so launch them from the repo root.
+    if is_atm and not is_setup:
         run_cmd = cfg.run_command("config.yaml")
         workdir = None
     else:
         run_cmd = cfg.run_command(str((out / "config.yaml").resolve()))
         workdir = str(_REPO_ROOT)
     (out / "run.sh").write_text(
-        render_run_sh(machine, run_cmd=run_cmd, enable_x64=not is_atm, workdir=workdir)
+        render_run_sh(machine, run_cmd=run_cmd, enable_x64=not is_atm,
+                      workdir=workdir)
     )
     (out / "run.sh").chmod(0o755)
 
@@ -271,7 +278,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    data required: {meta['data']} "
               f"(run scripts/experiment/fetch_data.py to stage)")
     print(f"  Run it:        cd {out} && bash run.sh")
-    if is_atm:
+    if is_setup:
+        # Matrix-runner setup template: no run_manifest.json / reproduce path —
+        # it runs an idealized matrix case and writes summary.json + per-case
+        # artifacts under the bundle's output dir.
+        print(f"  (setup template -> matrix runner)")
+        print(f"    {run_cmd}")
+        print(f"  Results:       {out_subdir} (summary.json + per-case artifacts)")
+    elif is_atm:
         print(f"  Reproduce it:  legoesm reproduce {out}/<output>/run_manifest.json --check")
     else:
         # No `--check`: ocean reproduce-rerun is not wired through the atmosphere
