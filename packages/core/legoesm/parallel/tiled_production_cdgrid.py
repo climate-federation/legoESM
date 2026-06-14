@@ -62,24 +62,27 @@ def dgrid_vorticity_tile_2d(u_d, v_d, cosa_corner, dx_edge_y, dy_edge_x, area,
     nf = nfc - 1                  # n   (cells)
     # Static guards (codex U3d/U4a pattern): a mis-sized input would make
     # dynamic_slice_in_dim silently CLAMP instead of failing.  F (axis 0) is 6
-    # in a host test, 1 in a face-shard; compare axes 1/2 only.
-    if not (v_d.shape[1:] == cosa_corner.shape[1:] == (nfc, nfc)):
+    # in a host test, 1 in a face-shard; compare the HORIZONTAL axes 1/2 only
+    # (``[1:3]``) so a trailing vertical ``nlev`` axis is allowed — u_d/v_d are
+    # 4D ``(F, n+1, n+1, nlev)`` in the 3D PE dycore while the metrics stay
+    # 2D-face (broadcast over nlev inside dgrid_vorticity_core).
+    if not (v_d.shape[1:3] == cosa_corner.shape[1:3] == (nfc, nfc)):
         raise ValueError(
             f"dgrid_vorticity_tile_2d: v_d/cosa_corner must be corners "
-            f"{(nfc, nfc)}; got v_d={v_d.shape[1:]}, "
-            f"cosa_corner={cosa_corner.shape[1:]}")
-    if dx_edge_y.shape[1:] != (nf, nfc):
+            f"{(nfc, nfc)}; got v_d={v_d.shape[1:3]}, "
+            f"cosa_corner={cosa_corner.shape[1:3]}")
+    if dx_edge_y.shape[1:3] != (nf, nfc):
         raise ValueError(
             f"dgrid_vorticity_tile_2d: dx_edge_y must be {(nf, nfc)}; got "
-            f"{dx_edge_y.shape[1:]}")
-    if dy_edge_x.shape[1:] != (nfc, nf):
+            f"{dx_edge_y.shape[1:3]}")
+    if dy_edge_x.shape[1:3] != (nfc, nf):
         raise ValueError(
             f"dgrid_vorticity_tile_2d: dy_edge_x must be {(nfc, nf)}; got "
-            f"{dy_edge_x.shape[1:]}")
-    if area.shape[1:] != (nf, nf):
+            f"{dy_edge_x.shape[1:3]}")
+    if area.shape[1:3] != (nf, nf):
         raise ValueError(
             f"dgrid_vorticity_tile_2d: area must be {(nf, nf)}; got "
-            f"{area.shape[1:]}")
+            f"{area.shape[1:3]}")
 
     def _s(arr, si, sj, ax_i=1, ax_j=2):
         arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=ax_i)
@@ -94,7 +97,8 @@ def dgrid_vorticity_tile_2d(u_d, v_d, cosa_corner, dx_edge_y, dy_edge_x, area,
     return dgrid_vorticity_core(u_t, v_t, cosa_t, dx_t, dy_t, area_t)
 
 
-def make_tiled_dgrid_vorticity_stage_2d(mesh, cdgrid, n: int, kt: int):
+def make_tiled_dgrid_vorticity_stage_2d(mesh, cdgrid, n: int, kt: int,
+                                        nlev: int | None = None):
     """Build the sharded ``dgrid_vorticity`` stage on a ``(6, kt, kt)`` mesh
     (axis names ``("face", "tile_i", "tile_j")``).
 
@@ -105,7 +109,13 @@ def make_tiled_dgrid_vorticity_stage_2d(mesh, cdgrid, n: int, kt: int):
     tile-sharded ``P("face","tile_i","tile_j")``, gathered extent
     ``(6, kt*nl, kt*nl)`` = ``(6, n, n)`` (cc cells partition exactly — NO
     duplicated shared face).
-    """
+
+    ``nlev`` (3D PE dycore): when given, ``u_d``/``v_d`` are 4D
+    ``(6, n+1, n+1, nlev)`` and ``zeta`` is 4D ``(6, n, n, nlev)`` — the wind
+    specs gain a trailing replicated axis (the vertical is NOT tiled), while the
+    metrics stay 2D-face (broadcast over nlev in the core).  ``dgrid_vorticity``
+    is the production cube vorticity op for BOTH fv3_sw_tendencies (2D) and
+    fv3_hydrostatic_tendencies (4D)."""
     if n % kt:
         raise ValueError(f"n={n} not divisible by kt={kt}")
     if getattr(cdgrid, "n", n) != n:
@@ -115,10 +125,14 @@ def make_tiled_dgrid_vorticity_stage_2d(mesh, cdgrid, n: int, kt: int):
     cosa_corner = cdgrid.cosa_corner
     dx_edge_y, dy_edge_x = cdgrid.dx_edge_y, cdgrid.dy_edge_x
     area = cdgrid.base.area
-    fo = P("face", None, None)
+    fo = P("face", None, None)                 # 2D-face metric / 2D wind
     co = P("face", "tile_i", "tile_j")
+    # 4D wind/output gain a trailing replicated (vertical) axis.
+    fw = P("face", None, None, None) if nlev else fo
+    cz = P("face", "tile_i", "tile_j", None) if nlev else co
 
-    @partial(shard_map, mesh=mesh, in_specs=(fo,) * 6, out_specs=co,
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fo, fo, fo, fo), out_specs=cz,
              check_vma=False)
     def _body(u_d, v_d, cosa_c, dxe, dye, ar):
         a_i = jax.lax.axis_index("tile_i") * nl
