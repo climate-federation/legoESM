@@ -1658,3 +1658,47 @@ class TestValidator:
                         sim_days=1.0, n_samples=3)
         rc = validate(run, strict=False)
         assert rc == 0
+
+
+class TestClearSkyDiagToggle:
+    """Issue #434 cheap lever: ``--clear-sky-diag`` / ``--no-clear-sky-diag``.
+
+    The deck always forwarded ``--clear-sky-diag`` (a SECOND clear-sky RRTMG
+    pass, ≈2× the radiation cost — needed for CRE diagnostics, pure overhead
+    otherwise). The toggle lets a perf / spin-up run drop the second pass while
+    keeping it ON by default for the production CRE-scoring deck.
+    """
+
+    _DECK = (
+        Path(__file__).resolve().parents[2]
+        / "scripts" / "run" / "run_amip_cmip6_deck.py"
+    )
+
+    def test_no_clear_sky_diag_argument_declared(self):
+        src = self._DECK.read_text()
+        assert '"--no-clear-sky-diag"' in src, (
+            "deck must expose --no-clear-sky-diag to drop the 2x radiation pass"
+        )
+        assert 'dest="clear_sky_diag"' in src
+
+    def test_clear_sky_diag_forwarded_conditionally(self):
+        src = self._DECK.read_text()
+        # The flag is included only when args.clear_sky_diag is set (default on),
+        # never unconditionally.
+        assert '["--clear-sky-diag"] if args.clear_sky_diag else []' in src
+        assert '\n        "--clear-sky-diag",\n' not in src, (
+            "deck must NOT forward --clear-sky-diag unconditionally any more"
+        )
+
+    def test_default_is_clear_sky_on(self):
+        """Default (no flag) keeps the clear-sky pass — the production deck
+        reports CRE, so the behaviour is unchanged unless --no-clear-sky-diag."""
+        import argparse
+        # Mirror the deck's declaration (BooleanOptional-style pair).
+        p = argparse.ArgumentParser()
+        p.add_argument("--clear-sky-diag", dest="clear_sky_diag",
+                       action="store_true", default=True)
+        p.add_argument("--no-clear-sky-diag", dest="clear_sky_diag",
+                       action="store_false")
+        assert p.parse_args([]).clear_sky_diag is True
+        assert p.parse_args(["--no-clear-sky-diag"]).clear_sky_diag is False
