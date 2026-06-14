@@ -121,8 +121,10 @@ def load_and_prepare(verify_against: str | None = None):
         T_REST_S,
         build_global_1deg_recipe,
         veros_full_axes_1deg,
-        veros_mit_tau_shift_1deg,
-        veros_xy_to_legoesm_1deg,
+    )
+    from legoesm.ocean.fidelity.veros_layout_common import (
+        veros_mit_tau_shift,
+        veros_xy_to_legoesm,
     )
     from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
     from legoesm.ocean.fidelity.veros_state_bridge import (
@@ -156,7 +158,7 @@ def load_and_prepare(verify_against: str | None = None):
     sss = _read_nc(FORCING_NC, "sss") * wet_surf[:, :, None]
 
     # MIT-grid one-cell tau shift (set_forcing_kernel), once at prep time.
-    taux_s, tauy_s = veros_mit_tau_shift_1deg(taux, tauy)
+    taux_s, tauy_s = veros_mit_tau_shift(taux, tauy, x_cyclic=False)
 
     # ---- verification gates vs the live oracle setup dump ----
     if verify_against:
@@ -251,7 +253,7 @@ def load_and_prepare(verify_against: str | None = None):
 
     def to_stack(arr_xy12):
         """(x, y, 12) -> (12, n_lat, n_lon) legoESM layout, wall rows 0."""
-        months_ll = [veros_xy_to_legoesm_1deg(arr_xy12[:, :, m])
+        months_ll = [veros_xy_to_legoesm(arr_xy12[:, :, m])
                      for m in range(arr_xy12.shape[2])]
         return jnp.asarray(np.stack(months_ll, axis=0))
 
@@ -272,13 +274,12 @@ def load_and_prepare(verify_against: str | None = None):
 
 
 def compute_metrics(state, recipe) -> dict:
-    from legoesm.ocean.fidelity.veros_global_1deg_recipe import (
-        veros_area_t_1deg,
-    )
+    from legoesm.ocean.fidelity.veros_global_1deg_recipe import DXT_DEG, DYT_DEG
+    from legoesm.ocean.fidelity.veros_layout_common import veros_area_t
 
     ia = np.asarray(recipe.z_coord.is_active)[1:-1, :, :]   # interior
     lat = np.degrees(np.asarray(recipe.grid.lat))[1:-1]
-    area = veros_area_t_1deg(lat)[:, None]                   # (NY, 1)
+    area = veros_area_t(lat, dx_deg=DXT_DEG, dyt_deg=DYT_DEG)[:, None]  # (NY, 1)
     dz = np.asarray(recipe.z_coord.dz_ref)                   # full-cell (snap)
     vol = area[:, :, None] * dz[None, None, :] * ia
 

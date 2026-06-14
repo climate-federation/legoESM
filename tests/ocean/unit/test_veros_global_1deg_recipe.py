@@ -55,6 +55,7 @@ from legoesm.ocean.fidelity.veros_global_1deg_recipe import (
     DT_MOM_RATIO, DT_S,
     GLOBAL_1DEG_A_H, GLOBAL_1DEG_EKE_CONFIG, GLOBAL_1DEG_GM_REDI_CONFIG,
     GLOBAL_1DEG_TKE_CONFIG,
+    DXT_DEG, DYT_DEG,
     NX, NY, NZ,
     build_global_1deg_grid,
     build_global_1deg_model_config,
@@ -62,11 +63,13 @@ from legoesm.ocean.fidelity.veros_global_1deg_recipe import (
     build_global_1deg_z_coord,
     kbot_to_mask_and_h_bathy_1deg,
     replicate_veros_kbot_1deg,
-    veros_area_t_1deg,
     veros_full_axes_1deg,
-    veros_mit_tau_shift_1deg,
-    veros_xy_to_legoesm_1deg,
-    veros_xyz_to_legoesm_1deg,
+)
+from legoesm.ocean.fidelity.veros_layout_common import (
+    veros_area_t,
+    veros_mit_tau_shift,
+    veros_xy_to_legoesm,
+    veros_xyz_to_legoesm,
 )
 from legoesm.ocean.fidelity.veros_state_bridge import veros_u_centered_z_centres
 
@@ -421,7 +424,7 @@ def test_mit_tau_shift():
     rng = np.random.default_rng(3)
     taux = rng.normal(size=(NX, NY, 12))
     tauy = rng.normal(size=(NX, NY, 12))
-    tx, ty = veros_mit_tau_shift_1deg(taux, tauy)
+    tx, ty = veros_mit_tau_shift(taux, tauy, x_cyclic=False)
     np.testing.assert_array_equal(tx[:-1], taux[1:])
     np.testing.assert_array_equal(tx[-1], 0.0)           # zero x ghost (!)
     np.testing.assert_array_equal(ty[:, :-1], tauy[:, 1:])
@@ -432,12 +435,12 @@ def test_layout_bridges():
     arr = np.zeros((NX, NY, NZ))
     arr[5, 7, NZ - 1] = 42.0            # SURFACE in Veros z-order
     arr[5, 7, 0] = -7.0                 # DEEPEST
-    out = veros_xyz_to_legoesm_1deg(arr)
+    out = veros_xyz_to_legoesm(arr)
     assert out.shape == (NY + 2, NX, NZ)
     assert out[8, 5, 0] == 42.0
     assert out[8, 5, NZ - 1] == -7.0
     assert (out[0] == 0).all() and (out[-1] == 0).all()
-    out2 = veros_xy_to_legoesm_1deg(
+    out2 = veros_xy_to_legoesm(
         np.arange(NX * NY, dtype=float).reshape(NX, NY))
     assert out2.shape == (NY + 2, NX)
     assert out2[1, 0] == 0.0 and out2[2, 0] == 1.0
@@ -445,7 +448,7 @@ def test_layout_bridges():
 
 def test_area_weights_uniform_1deg():
     _, yt, _ = veros_full_axes_1deg()
-    a = veros_area_t_1deg(yt[2:-2])
+    a = veros_area_t(yt[2:-2], dx_deg=DXT_DEG, dyt_deg=DYT_DEG)
     assert a.shape == (NY,)
     assert np.all(a > 0)
     degtom = VEROS_CONSTANTS_CONFIG.R_earth * np.pi / 180.0

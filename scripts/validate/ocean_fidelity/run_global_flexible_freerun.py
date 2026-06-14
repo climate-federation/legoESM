@@ -95,8 +95,10 @@ def load_and_prepare(verify_against: str | None = None):
         replicate_veros_kbot_flexible,
         veros_full_axes,
         veros_interpolate,
+    )
+    from legoesm.ocean.fidelity.veros_layout_common import (
         veros_mit_tau_shift,
-        veros_xy_to_legoesm_flex,
+        veros_xy_to_legoesm,
     )
     from legoesm.ocean.fidelity.veros_state_bridge import (
         veros_u_centered_z_centres,
@@ -158,7 +160,7 @@ def load_and_prepare(verify_against: str | None = None):
     sss = interp_t("sss") * wet_surf[:, :, None]
 
     # MIT-grid one-cell tau shift (set_forcing_kernel), once at prep time.
-    taux_s, tauy_s = veros_mit_tau_shift(taux, tauy)
+    taux_s, tauy_s = veros_mit_tau_shift(taux, tauy, x_cyclic=True)
 
     # ---- verification gate vs the live oracle setup dump ----
     if verify_against:
@@ -208,7 +210,7 @@ def load_and_prepare(verify_against: str | None = None):
 
     def to_stack(arr_xy12):
         """(x, y, 12) → (12, n_lat, n_lon) legoESM layout, wall rows 0."""
-        months_ll = [veros_xy_to_legoesm_flex(arr_xy12[:, :, m])
+        months_ll = [veros_xy_to_legoesm(arr_xy12[:, :, m])
                      for m in range(arr_xy12.shape[2])]
         return jnp.asarray(np.stack(months_ll, axis=0))
 
@@ -230,14 +232,14 @@ def load_and_prepare(verify_against: str | None = None):
 
 def compute_metrics(state, recipe) -> dict:
     from legoesm.ocean.fidelity.veros_global_flexible_recipe import (
-        global_flexible_dyt_deg, global_flexible_dzt_veros,
-        veros_area_t_flexible,
+        NX, global_flexible_dyt_deg, global_flexible_dzt_veros,
     )
+    from legoesm.ocean.fidelity.veros_layout_common import veros_area_t
 
     ia = np.asarray(recipe.z_coord.is_active)[1:-1, :, :]   # interior
     lat = np.degrees(np.asarray(recipe.grid.lat))[1:-1]
     dyt_deg = global_flexible_dyt_deg()
-    area = veros_area_t_flexible(lat, dyt_deg)[:, None]      # (NY, 1)
+    area = veros_area_t(lat, dx_deg=360.0 / NX, dyt_deg=dyt_deg)[:, None]  # (NY,1)
     dz = global_flexible_dzt_veros()[::-1]                   # full-cell (snap)
     vol = area[:, :, None] * dz[None, None, :] * ia
 

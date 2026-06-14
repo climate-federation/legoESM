@@ -20,27 +20,26 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import pytest
-
-from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.fidelity.veros_stepping_common import (
     VEROS_FAITHFUL_STEPPING_SIGNATURE,
     veros_faithful_stepping,
 )
+from legoesm.ocean.state import LatLonCGridOceanConfig
 
 
 def _freerun_configs():
     """The five Veros free-run model configs (acc/acc_basic on the free-run
     path; the three globals are native free-run)."""
-    from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_recipe
     from legoesm.ocean.fidelity.veros_acc_basic_recipe import build_acc_basic_recipe
+    from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_recipe
+    from legoesm.ocean.fidelity.veros_global_1deg_recipe import (
+        build_global_1deg_model_config,
+    )
     from legoesm.ocean.fidelity.veros_global_4deg_recipe import (
         build_global_4deg_model_config,
     )
     from legoesm.ocean.fidelity.veros_global_flexible_recipe import (
         build_global_flexible_model_config,
-    )
-    from legoesm.ocean.fidelity.veros_global_1deg_recipe import (
-        build_global_1deg_model_config,
     )
     return {
         "acc": build_acc_recipe(with_surface_forcing=True).model_config,
@@ -94,12 +93,9 @@ def test_freerun_recipe_carries_shared_fragment(name):
 
 
 def test_per_setup_dt_mom_ratios():
-    from legoesm.ocean.fidelity.veros_global_4deg_recipe import (
-        DT_MOM_RATIO as R4)
-    from legoesm.ocean.fidelity.veros_global_flexible_recipe import (
-        DT_MOM_RATIO as RF)
-    from legoesm.ocean.fidelity.veros_global_1deg_recipe import (
-        DT_MOM_RATIO as R1)
+    from legoesm.ocean.fidelity.veros_global_1deg_recipe import DT_MOM_RATIO as R1
+    from legoesm.ocean.fidelity.veros_global_4deg_recipe import DT_MOM_RATIO as R4
+    from legoesm.ocean.fidelity.veros_global_flexible_recipe import DT_MOM_RATIO as RF
     cfgs = _freerun_configs()
     assert cfgs["acc"].dt_mom_ratio == 9.0
     assert cfgs["global_4deg"].dt_mom_ratio == R4
@@ -114,8 +110,8 @@ def test_frozen_path_keeps_config_defaults(builder_name):
     """The acc/acc_basic frozen-state probe path (with_surface_forcing=False)
     must NOT carry the faithful composition — every signature field equals the
     LatLonCGridOceanConfig default (so omitting the splat is bit-identical)."""
-    from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_recipe
     from legoesm.ocean.fidelity.veros_acc_basic_recipe import build_acc_basic_recipe
+    from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_recipe
     build = {"acc": build_acc_recipe, "acc_basic": build_acc_basic_recipe}[
         builder_name]
     cfg = build(with_surface_forcing=False).model_config
