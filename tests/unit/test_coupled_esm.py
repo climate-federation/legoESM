@@ -168,6 +168,41 @@ class TestMixedGridCoupling(unittest.TestCase):
         self.assertLess(sst_mean, 320.0)
 
 
+class TestCoupledCheckpointValidation(unittest.TestCase):
+    """Coupled checkpoint restore validates ocean-grid shape (no silent
+    mis-mapping when the ocean_grid / config changed since the save)."""
+
+    def _write_coupled_npz(self, tmp, ocean_shape, version=1):
+        import numpy as np
+        from pathlib import Path
+        np.savez(
+            Path(tmp) / "coupled_day_0000.npz",
+            ocean_T_sfc=np.zeros(ocean_shape, dtype=np.float64),
+            ocean_T_deep=np.zeros(ocean_shape, dtype=np.float64),
+            _ckpt_version=np.asarray(version, dtype=np.int64),
+            _ckpt_ocean_shape=np.asarray(ocean_shape, dtype=np.int64),
+        )
+
+    def test_load_rejects_ocean_shape_mismatch(self):
+        import tempfile
+        driver = _make_driver("aquaplanet", days=1)
+        cur = tuple(driver._ocean_state.T_sfc.data.shape)
+        bad = (cur[0] + 1,) + cur[1:]  # a different ocean grid
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_coupled_npz(tmp, bad)
+            with self.assertRaises(ValueError):
+                driver.load_coupled_checkpoint(0.0, checkpoint_dir=tmp)
+
+    def test_load_accepts_matching_shape(self):
+        import tempfile
+        driver = _make_driver("aquaplanet", days=1)
+        cur = tuple(driver._ocean_state.T_sfc.data.shape)
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_coupled_npz(tmp, cur)
+            driver.load_coupled_checkpoint(0.0, checkpoint_dir=tmp)  # no raise
+            self.assertEqual(tuple(driver._ocean_state.T_sfc.data.shape), cur)
+
+
 class TestSlabSimple(unittest.TestCase):
     """Slab ocean + slab bucket land."""
 
