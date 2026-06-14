@@ -249,6 +249,11 @@ class ExperimentConfig(NamedTuple):
     aerosol_reference_aod: float = 0.03
     volcanic_aerosol_file: str = ""
     volcanic_aerosol_scale: float = 1.0
+    # Volcanic stratospheric LONGWAVE aerosol (gap #9): when True, ALSO
+    # load the ``ext_earth`` LW band from ``volcanic_aerosol_file`` and
+    # thread it into RRTMGP as the LW absorption optical depth.  Default
+    # OFF ⇒ no LW aerosol (byte-identical; zeros LW od is a solver no-op).
+    volcanic_aerosol_lw: bool = False
 
     # Clouds & Microphysics
     cloud_scheme: str = "none"
@@ -764,6 +769,7 @@ class ExperimentConfig(NamedTuple):
             aerosol_reference_aod=getattr(amip_cfg, 'aerosol_reference_aod', 0.03),
             volcanic_aerosol_file=getattr(amip_cfg, 'volcanic_aerosol_file', ''),
             volcanic_aerosol_scale=getattr(amip_cfg, 'volcanic_aerosol_scale', 1.0),
+            volcanic_aerosol_lw=getattr(amip_cfg, 'volcanic_aerosol_lw', False),
             cloud_scheme=amip_cfg.cloud_scheme,
             microphysics=amip_cfg.microphysics,
             convection=getattr(amip_cfg, 'convection', 'sbm'),

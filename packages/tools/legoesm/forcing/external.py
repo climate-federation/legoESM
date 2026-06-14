@@ -576,6 +576,115 @@ def _load_volcanic_cmip6_anchored(
 
 
 @lru_cache(maxsize=16)
+def _load_volcanic_lw_cmip6_anchored(
+    path: str,
+) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
+    """Load the LONGWAVE volcanic stratospheric extinction (gap #9).
+
+    Mirrors :func:`_load_volcanic_cmip6_anchored` but reads the
+    ``ext_earth(terrestrial_bands, lat, altitude, month)`` variable —
+    the per-band terrestrial-IR (LW) stratospheric extinction in [1/km]
+    on an altitude grid in km — instead of ``ext_sun`` (SW).  The
+    altitude integration and band-mean collapse are identical, yielding
+    a representative single-band broadband LW absorption optical depth
+    per (time, lat).
+
+    Returns ``(mid_days, first_date, lat, aod_lw)`` with ``aod_lw`` shape
+    ``(ntime, nlat)`` — the LW analogue of the SW loader's output, a
+    drop-in for the LW aerosol pipeline.
+
+    Raises ``ValueError`` if the file has no ``ext_earth`` LW band; the
+    caller (``get_aerosol_lw_at_time``) treats that as "no LW source"
+    and returns zeros so the run stays byte-identical.
+    """
+    ds = _open_forcing_dataset(path)
+    # Only the LW band (``ext_earth``) is valid here: reading the SW
+    # ``ext_sun`` as a LW quantity would inject shortwave extinction into
+    # the terrestrial-IR aerosol budget (the symmetric counterpart of the
+    # SW loader's guard, Codex review 2026-04-24).
+    if "ext_earth" in ds.data_vars:
+        ext_name = "ext_earth"
+    else:
+        ds.close()
+        raise ValueError(
+            f"No CMIP6 volcanic LW extinction variable 'ext_earth' in "
+            f"{path!r}. (Some CMIP6 volcanic files carry only the SW "
+            f"'ext_sun' band; that variable is not usable as a LW AOD "
+            f"source.)",
+        )
+    var = ds[ext_name]
+    ext = np.asarray(var.values, dtype=np.float64)
+    dims = list(var.dims)
+
+    alt_name = next(
+        (v for v in ("altitude", "alt", "height", "lev") if v in ds),
+        None,
+    )
+    if alt_name is None:
+        ds.close()
+        raise ValueError(
+            f"No altitude coordinate in CMIP6 volcanic file {path!r}",
+        )
+    alt = np.asarray(ds[alt_name].values, dtype=np.float64)
+
+    if "lat" in ds:
+        lat = np.asarray(ds["lat"].values, dtype=np.float64)
+    elif "latitude" in ds:
+        lat = np.asarray(ds["latitude"].values, dtype=np.float64)
+    else:
+        ds.close()
+        raise ValueError(
+            f"No 'lat'/'latitude' variable in CMIP6 volcanic file {path!r}",
+        )
+
+    # Month / time axis — CMIP6 volcanic may use ``month`` or ``time``.
+    if "time" in dims:
+        time_name = "time"
+        mid_days, first_date = _read_time_axis(ds)
+    elif "month" in dims:
+        time_name = "month"
+        nm = ext.shape[dims.index("month")]
+        mid_days = np.array([15.5 + 30.4375 * m for m in range(nm)])
+        first_date = None
+    else:
+        ds.close()
+        raise ValueError(
+            f"No time/month dimension in CMIP6 volcanic file {path!r}",
+        )
+    ds.close()
+
+    # Trapezoidal integral over altitude: ext [1/km] * dz [km] → AOD.
+    alt_axis = dims.index(alt_name)
+    _trapz = getattr(np, "trapezoid", None) or np.trapz
+    aod_with_bands = _trapz(ext, alt, axis=alt_axis)
+    dims_after = [d for i, d in enumerate(dims) if i != alt_axis]
+
+    # Collapse the spectral-band axis to a single broadband LW AOD via the
+    # mean over bands (not the sum) — same Kinne convention as the SW
+    # loader; summing the LW bands would inflate the per-wavelength optical
+    # depth into a band-count multiple that is not a broadband AOD.
+    band_dim_name = next(
+        (d for d in dims_after if d not in (time_name, "lat", "latitude")),
+        None,
+    )
+    if band_dim_name is not None:
+        band_axis = dims_after.index(band_dim_name)
+        aod_with_bands = np.nanmean(aod_with_bands, axis=band_axis)
+        dims_after.pop(band_axis)
+
+    lat_dim_name = "lat" if "lat" in dims_after else (
+        "latitude" if "latitude" in dims_after else None
+    )
+    order: list[int] = []
+    for dim_name in (time_name, lat_dim_name):
+        if dim_name in dims_after:
+            order.append(dims_after.index(dim_name))
+    order += [i for i in range(len(dims_after)) if i not in order]
+    aod = np.transpose(aod_with_bands, order)
+    return mid_days, first_date, lat, aod
+
+
+@lru_cache(maxsize=16)
 def _load_volcanic_auto(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Dispatch ``path`` to the right volcanic loader.
 
@@ -1517,6 +1626,15 @@ class AerosolConfig(NamedTuple):
         NetCDF path for volcanic AOD climatology/time-series (same schema as aerosol).
     volcanic_scale : float
         Multiplicative scaling applied to volcanic AOD.
+    volcanic_lw_enabled : bool
+        If True, ALSO load the LONGWAVE volcanic stratospheric extinction
+        (``ext_earth`` in CMIP6 ``bc_aeropt_cmip6_volc_*`` files) as a
+        column LW absorption optical depth, exposed via
+        :func:`get_aerosol_lw_at_time`.  Default OFF — when disabled (or
+        when the volcanic file has no LW band) the LW aerosol path returns
+        zeros / None and the run is byte-identical (zeros LW od is a no-op
+        in the RRTMGP solver).  Independent of the SHORTWAVE
+        ``volcanic_enabled`` path, which is unaffected.  (gap #9)
     """
     enabled: bool = False
     source: str = "climatology"
@@ -1527,6 +1645,7 @@ class AerosolConfig(NamedTuple):
     volcanic_enabled: bool = False
     volcanic_path: str = ""
     volcanic_scale: float = 1.0
+    volcanic_lw_enabled: bool = False
     # Calendar year of simulation day 0.  Required for the non-cyclic
     # dispatch in :func:`get_aerosol_at_time` so multi-year volcanic
     # files (e.g. 1850–2014 CMIP6 ``bc_aeropt_cmip6_volc_*`` with the
@@ -1663,6 +1782,83 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
         return {"lat": base_aod["lat"], "aod": np.clip(base_aod["aod"] + volc_aod, 0.0, None)}
 
     return base_aod
+
+
+def get_aerosol_lw_at_time(config: AerosolConfig, day: float,
+                           lat_grid: jnp.ndarray | None = None):
+    """Return the LONGWAVE volcanic aerosol optical depth at a sim day (gap #9).
+
+    Mirrors :func:`get_aerosol_at_time` but returns the volcanic
+    stratospheric LW (terrestrial-IR) column absorption optical depth,
+    loaded from the ``ext_earth`` band of the CMIP6
+    ``bc_aeropt_cmip6_volc_*`` file.  There is no background LW aerosol
+    climatology (only the volcanic stratospheric LW matters for the
+    longwave budget), so the baseline is zero and the result is the
+    volcanic LW AOD alone.
+
+    Parameters
+    ----------
+    config : AerosolConfig
+    day : float
+        Day of year (fractional).
+    lat_grid : jax array or None
+        If provided, interpolates LW AOD to model grid latitudes and
+        returns a jax array of that shape.  Otherwise returns a dict with
+        "lat"/"aod".
+
+    Returns
+    -------
+    None
+        If LW aerosol is disabled (``volcanic_lw_enabled`` False), or
+        enabled with no ``volcanic_path``, or the file carries no
+        ``ext_earth`` LW band.  Callers default a None to zeros, so the
+        run stays byte-identical to no volcanic LW aerosol.
+    jax array
+        If ``lat_grid`` provided: per-latitude column LW AOD (>= 0).
+    dict
+        Otherwise ``{"lat": ..., "aod": ...}``.
+    """
+    # Default OFF: only the explicit LW switch + a real volcanic file with
+    # an ``ext_earth`` band produces nonzero LW aerosol.  Anything else
+    # returns None ⇒ the driver fills zeros ⇒ no-op in RRTMGP.
+    if not config.volcanic_lw_enabled or not config.volcanic_path:
+        return None
+
+    try:
+        mid_days_v, first_date_v, lat_v, data_v = (
+            _load_volcanic_lw_cmip6_anchored(config.volcanic_path)
+        )
+    except ValueError:
+        # File has no LW (``ext_earth``) band — treat as "no LW source".
+        return None
+
+    if len(mid_days_v) > 12:
+        file_day_v = _simday_to_file_day(
+            day, config.start_year, first_date_v,
+        )
+        aod_v = (
+            _interp_monthly_noncyclic(mid_days_v, data_v, file_day_v)
+            * config.volcanic_scale
+        )
+    else:
+        aod_v = (
+            _interp_monthly_cyclic(mid_days_v, data_v, day)
+            * config.volcanic_scale
+        )
+
+    if lat_grid is not None:
+        volc = _interp_zonal_to_grid(lat_v, aod_v, lat_grid)
+        # Sum any trailing dims for multi-dimensional volcanic files,
+        # mirroring the SW path (the band axis is already collapsed in
+        # the loader, but guard defensively).
+        while volc.ndim > lat_grid.ndim:
+            volc = jnp.sum(volc, axis=-1)
+        return jnp.clip(volc, 0.0, None)
+
+    aod_v_flat = aod_v
+    while aod_v_flat.ndim > 1:
+        aod_v_flat = np.sum(aod_v_flat, axis=-1)
+    return {"lat": lat_v, "aod": np.clip(aod_v_flat, 0.0, None)}
 
 
 # ==============================================================================
