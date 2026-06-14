@@ -63,6 +63,7 @@ class LandAlbedoConfig(NamedTuple):
     alpha_snow_min: float = 0.50
     tau_snow_decay: float = 432000.0  # 5 days in seconds
     snow_depth_crit: float = 50.0     # kg/m2
+    canopy_extinction: float = 0.5    # Beer's-law k for canopy cover frac 1-exp(-k*LAI)
 
 
 class IceAlbedoConfig(NamedTuple):
@@ -198,20 +199,36 @@ def land_albedo(
     snow_depth: jnp.ndarray,
     snow_age: jnp.ndarray,
     config: LandAlbedoConfig = LandAlbedoConfig(),
+    *,
+    soil_albedo: jnp.ndarray | None = None,
+    lai: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
-    """Compute land surface albedo with snow feedback.
+    """Compute land surface albedo with optional soil background + snow feedback.
 
-    alpha_land = alpha_veg * (1 - f_snow) + alpha_snow * f_snow
+    Snow-free albedo blends the canopy and the background soil by the canopy
+    cover fraction ``f_veg = 1 - exp(-k * LAI)`` (Beer's law, ``k =
+    config.canopy_extinction``), then snow overlays it::
+
+        alpha_snowfree = alpha_veg * f_veg + alpha_soil * (1 - f_veg)
+        alpha_land      = alpha_snowfree * (1 - f_snow) + alpha_snow * f_snow
+
+    When ``soil_albedo`` / ``lai`` are not given the snow-free albedo is the
+    latitude-band vegetation albedo (original behaviour — callers that don't pass
+    them are unchanged).  Pass ``soil_albedo`` from
+    :func:`legoesm.land.soil_albedo.soil_albedo_broadband` (moisture-dependent,
+    from the surfdata soil-colour class) for the physically-complete blend.
 
     Parameters
     ----------
     lat : jnp.ndarray
         Latitude in radians.
-    snow_depth : jnp.ndarray
-        Snow water equivalent [kg/m2].
-    snow_age : jnp.ndarray
-        Time since last snowfall [s].
+    snow_depth, snow_age : jnp.ndarray
+        Snow water equivalent [kg/m2] and time since last snowfall [s].
     config : LandAlbedoConfig
+    soil_albedo : jnp.ndarray, optional
+        Background (bare-soil) albedo, broadband.
+    lai : jnp.ndarray, optional
+        Leaf area index for the canopy cover fraction.
 
     Returns
     -------
@@ -219,9 +236,14 @@ def land_albedo(
         Land surface albedo.
     """
     alpha_veg = land_vegetation_albedo(lat, config)
+    if soil_albedo is not None and lai is not None:
+        f_veg = 1.0 - jnp.exp(-config.canopy_extinction * jnp.asarray(lai))
+        alpha_snowfree = alpha_veg * f_veg + jnp.asarray(soil_albedo) * (1.0 - f_veg)
+    else:
+        alpha_snowfree = alpha_veg
     alpha_snow = snow_albedo(snow_age, config)
     f_snow = snow_cover_fraction(snow_depth, config)
-    return alpha_veg * (1.0 - f_snow) + alpha_snow * f_snow
+    return alpha_snowfree * (1.0 - f_snow) + alpha_snow * f_snow
 
 
 # =========================================================================
