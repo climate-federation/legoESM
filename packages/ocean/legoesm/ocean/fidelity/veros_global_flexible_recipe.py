@@ -130,6 +130,7 @@ from legoesm.ocean.fidelity.veros_global_4deg_recipe import (
     get_periodic_interval_weights,
 )
 from legoesm.ocean.fidelity.veros_state_bridge import veros_u_centered_z_centres
+from legoesm.ocean.fidelity.veros_stepping_common import veros_faithful_stepping
 
 __all__ = (
     "DT_MOM_RATIO",
@@ -743,13 +744,9 @@ def build_global_flexible_model_config() -> LatLonCGridOceanConfig:
         K_v=0.0,
         gm_redi=GLOBAL_FLEX_GM_REDI_CONFIG,
         surface_forcing_implicit=True,              # Veros source placement
-        outer_integrator="ab2",
-        ab2_scope="advective",
-        barotropic_solver="rigid_lid",
-        dt_mom_ratio=DT_MOM_RATIO,                  # 8 (dt arg IS dt_tracer)
-        momentum_friction_additive=True,
-        coriolis_scheme="explicit_ab2",             # |f|·dt_mom ≈ 0.25 @72°
-        implicit_vmix_dzw_slot=True,                 # Veros dzw implicit slot (#428)
+        # ---- Veros-faithful time stepping (shared composition, #433) ----
+        # dt_mom_ratio=8 (the dt arg IS dt_tracer); |f|·dt_mom ≈ 0.25 @72°.
+        **veros_faithful_stepping(dt_mom_ratio=DT_MOM_RATIO),
         physics=build_global_flexible_physics_config(),
     )
 

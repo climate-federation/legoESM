@@ -47,6 +47,7 @@ import jax.numpy as jnp
 
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
+from legoesm.ocean.fidelity.veros_stepping_common import veros_faithful_stepping
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
@@ -217,24 +218,16 @@ def build_acc_basic_model_config(grid: LatLonGrid | None = None, *,
         K_v=0.0,
         gm_redi=ACC_BASIC_GM_REDI_CONFIG,
         surface_forcing_implicit=with_surface_forcing,
-        # Veros-faithful STEPPING COMPOSITION (free-run default) — the exact
-        # twin of the acc recipe's bundle (veros_acc_recipe.py, PR #429): this
-        # builder predates that change and is its own copy, so the composition
-        # did NOT propagate; without it the free-run silently ran
-        # matsuno_split/"total" — the composition a realized energy audit
-        # showed leaks ~+1.8 GW of spurious KE on the acc twin. Gated on
-        # with_surface_forcing exactly like surface_forcing_implicit (the
-        # frozen-state probe path keeps legoESM defaults, bit-identical).
-        outer_integrator="ab2" if with_surface_forcing else "forward_euler",
-        dt_mom_ratio=(DT_TRACER_S / DT_MOM_S) if with_surface_forcing else 1.0,
-        barotropic_solver=("rigid_lid" if with_surface_forcing
-                           else "explicit_substep"),
-        coriolis_scheme=("explicit_ab2" if with_surface_forcing
-                         else "matsuno_split"),
-        ab2_scope="advective" if with_surface_forcing else "total",
-        momentum_friction_additive=with_surface_forcing,
-        # Veros dzw divisor of the implicit solves (#428); u_centered coord.
-        implicit_vmix_dzw_slot=with_surface_forcing,
+        # Veros-faithful STEPPING COMPOSITION (free-run default) from the SHARED
+        # fragment (veros_stepping_common.veros_faithful_stepping, #433) — the
+        # copy-paste of the acc bundle is exactly what silently diverged here
+        # before PR #432 (the leaky matsuno_split/"total" composition shipped for
+        # a day). Now there is one source of truth, ratchet-enforced. acc_basic's
+        # dt_mom_ratio = DT_TRACER_S/DT_MOM_S. Gated on with_surface_forcing like
+        # surface_forcing_implicit; the frozen-state probe path keeps the config
+        # defaults (== this composition's "off" values), so it omits the splat.
+        **(veros_faithful_stepping(dt_mom_ratio=DT_TRACER_S / DT_MOM_S)
+           if with_surface_forcing else {}),
         physics=build_acc_basic_physics_config(
             grid, with_surface_forcing=with_surface_forcing),
     )
