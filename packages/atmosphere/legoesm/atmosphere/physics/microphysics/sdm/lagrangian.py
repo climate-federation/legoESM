@@ -164,26 +164,66 @@ def initialize_lagrangian_sdm(
     radius: float | jax.Array = 1.0e-6,
     solute_mass: float | jax.Array = 0.0,
     dtype=jnp.float64,
+    spatial_sampling: str = "uniform",
 ) -> LagrangianSDMState:
     """Seed a fixed-size super-droplet pool from scalar or vertical profiles.
 
     ``number_concentration`` is interpreted as real droplets per m³. If it is a
-    vertical profile ``(nz,)``, each uniformly placed super-droplet receives the
-    local concentration times the domain volume divided by ``n_sd``. ``radius``
-    and ``solute_mass`` may also be scalars or ``(nz,)`` profiles sampled at the
-    droplet's initial cell. This is a compact initializer for BOMEX/RICO-style
-    aerosol or cloud profiles; callers needing importance sampling can build a
-    ``SuperDropletState`` directly and pass it to :func:`make_lagrangian_sdm_state`.
+    vertical profile ``(nz,)``, ``radius`` and ``solute_mass`` may also be
+    scalars or ``(nz,)`` profiles sampled at the droplet's initial cell.
+
+    ``spatial_sampling="uniform"`` keeps the original whole-volume Monte-Carlo
+    placement: each super-droplet receives the local concentration times the
+    domain volume divided by ``n_sd``. This is unbiased in expectation but
+    Poisson-samples the per-cell SD count.
+
+    ``spatial_sampling="cell_stratified"`` first assigns slots uniformly across
+    Eulerian cells, then jitters each slot within its assigned cell. Each cell's
+    represented droplet number is exact up to the integer slot count:
+    ``sum(ξ) = number_concentration(z) * cell_volume``. This removes the
+    occupancy noise that otherwise dominates particle-binned LES diagnostics.
+    Callers needing different importance sampling can still build a
+    ``SuperDropletState`` directly and pass it to
+    :func:`make_lagrangian_sdm_state`.
     """
     if n_sd < 1:
         raise ValueError(f"n_sd must be >= 1, got {n_sd}")
     k_pos, k_next = random.split(key)
-    kx, ky, kz = random.split(k_pos, 3)
-    x = random.uniform(kx, (n_sd,), dtype=dtype) * jnp.asarray(grid.cfg.Lx, dtype)
-    y = random.uniform(ky, (n_sd,), dtype=dtype) * jnp.asarray(grid.cfg.Ly, dtype)
-    z = random.uniform(kz, (n_sd,), dtype=dtype) * jnp.asarray(grid.cfg.Lz, dtype)
+    kx, ky, kz, k_cell = random.split(k_pos, 4)
 
-    iz = jnp.clip(jnp.floor(z / grid.dz).astype(jnp.int32), 0, grid.cfg.nz - 1)
+    n_cells = grid.cfg.ny * grid.cfg.nx * grid.cfg.nz
+    if spatial_sampling == "uniform":
+        x = random.uniform(kx, (n_sd,), dtype=dtype) * jnp.asarray(grid.cfg.Lx, dtype)
+        y = random.uniform(ky, (n_sd,), dtype=dtype) * jnp.asarray(grid.cfg.Ly, dtype)
+        z = random.uniform(kz, (n_sd,), dtype=dtype) * jnp.asarray(grid.cfg.Lz, dtype)
+        iz = jnp.clip(jnp.floor(z / grid.dz).astype(jnp.int32), 0, grid.cfg.nz - 1)
+        slot_count = None
+        slot_cell_id = None
+        represented_volume = jnp.asarray(grid.cfg.Lx * grid.cfg.Ly * grid.cfg.Lz, dtype)
+    elif spatial_sampling == "cell_stratified":
+        slot = jnp.arange(n_sd, dtype=jnp.int32)
+        cell_rank = slot % jnp.asarray(n_cells, dtype=jnp.int32)
+        cell_perm = random.permutation(k_cell, n_cells)
+        cell_id = cell_perm[cell_rank]
+        iz = cell_id % grid.cfg.nz
+        horizontal_id = cell_id // grid.cfg.nz
+        ix = horizontal_id % grid.cfg.nx
+        iy = horizontal_id // grid.cfg.nx
+
+        ux = random.uniform(kx, (n_sd,), dtype=dtype)
+        uy = random.uniform(ky, (n_sd,), dtype=dtype)
+        uz = random.uniform(kz, (n_sd,), dtype=dtype)
+        x = (ix.astype(dtype) + ux) * jnp.asarray(grid.dx, dtype)
+        y = (iy.astype(dtype) + uy) * jnp.asarray(grid.dy, dtype)
+        z = (iz.astype(dtype) + uz) * jnp.asarray(grid.dz, dtype)
+        slot_count = jnp.zeros((n_cells,), dtype=dtype).at[cell_id].add(1.0)
+        slot_cell_id = cell_id
+        represented_volume = jnp.asarray(grid.dx * grid.dy * grid.dz, dtype)
+    else:
+        raise ValueError(
+            f"unknown Lagrangian SDM spatial_sampling={spatial_sampling!r} "
+            "(expected 'uniform' or 'cell_stratified')"
+        )
 
     def sample_profile(value):
         arr = jnp.asarray(value, dtype=dtype)
@@ -198,8 +238,11 @@ def initialize_lagrangian_sdm(
     n_local = sample_profile(number_concentration)
     radius_local = sample_profile(radius)
     solute_local = sample_profile(solute_mass)
-    domain_volume = jnp.asarray(grid.cfg.Lx * grid.cfg.Ly * grid.cfg.Lz, dtype)
-    multiplicity = n_local * domain_volume / jnp.asarray(n_sd, dtype)
+    if slot_count is None:
+        divisor = jnp.asarray(n_sd, dtype)
+    else:
+        divisor = slot_count[slot_cell_id]
+    multiplicity = n_local * represented_volume / divisor
     active = jnp.where(multiplicity > 0.0, 1.0, 0.0).astype(dtype)
     droplets = SuperDropletState(
         multiplicity=multiplicity,
@@ -369,17 +412,57 @@ def advect_step(
     ), dprecip
 
 
+def _cic_deposit_liquid_mass(state, grid, cloud_particle, rain_particle):
+    """Conservative cell-centred cloud-in-cell liquid mass deposition."""
+    dtype = state.x.dtype
+    n_cells = grid.cfg.ny * grid.cfg.nx * grid.cfg.nz
+    x = jnp.mod(state.x, jnp.asarray(grid.cfg.Lx, dtype=dtype))
+    y = jnp.mod(state.y, jnp.asarray(grid.cfg.Ly, dtype=dtype))
+
+    rx = x / grid.dx - 0.5
+    ry = y / grid.dy - 0.5
+    ix0_raw = jnp.floor(rx).astype(jnp.int32)
+    iy0_raw = jnp.floor(ry).astype(jnp.int32)
+    fx = rx - ix0_raw.astype(dtype)
+    fy = ry - iy0_raw.astype(dtype)
+    ix0 = ix0_raw % grid.cfg.nx
+    iy0 = iy0_raw % grid.cfg.ny
+    ix1 = (ix0 + 1) % grid.cfg.nx
+    iy1 = (iy0 + 1) % grid.cfg.ny
+
+    rz = jnp.clip(state.z / grid.dz - 0.5, 0.0, grid.cfg.nz - 1.0)
+    iz0 = jnp.floor(rz).astype(jnp.int32)
+    iz1 = jnp.minimum(iz0 + 1, grid.cfg.nz - 1)
+    fz = rz - iz0.astype(dtype)
+
+    cloud_mass = jnp.zeros((n_cells,), dtype=dtype)
+    rain_mass = jnp.zeros((n_cells,), dtype=dtype)
+    for ix, wx in ((ix0, 1.0 - fx), (ix1, fx)):
+        for iy, wy in ((iy0, 1.0 - fy), (iy1, fy)):
+            for iz, wz in ((iz0, 1.0 - fz), (iz1, fz)):
+                weight = wx * wy * wz
+                cell_id = (iy * grid.cfg.nx + ix) * grid.cfg.nz + iz
+                cloud_mass = cloud_mass.at[cell_id].add(cloud_particle * weight)
+                rain_mass = rain_mass.at[cell_id].add(rain_particle * weight)
+    return cloud_mass, rain_mass
+
+
 def diagnose_liquid_mixing_ratios(
     state: LagrangianSDMState,
     grid,
     rho: float | jax.Array,
     r_rain: float,
     r_cloud: float | jax.Array = 0.0,
+    assignment: str = "nearest",
 ) -> tuple[jax.Array, jax.Array]:
     """Bin represented liquid to diagnostic ``(q_c, q_r)`` fields [kg/kg].
 
     ``r_cloud`` excludes unactivated haze from Eulerian cloud diagnostics while
     leaving that liquid in the particle state for conservation and growth.
+    ``assignment="nearest"`` preserves the legacy nearest-cell binning.
+    ``assignment="cic"`` uses conservative cell-centred cloud-in-cell
+    particle-mesh deposition, matching the smoother diagnostic assignment used
+    by production particle-mesh SDM implementations.
     """
     dtype = state.x.dtype
     rho_grid = _broadcast_cell_field(rho, grid, dtype)
@@ -391,10 +474,19 @@ def diagnose_liquid_mixing_ratios(
     is_rain = state.droplets.radius >= r_rain
     is_cloud = (~is_haze) & (~is_rain)
     n_cells = grid.cfg.ny * grid.cfg.nx * grid.cfg.nz
-    cloud_mass = jnp.zeros((n_cells,), dtype=dtype).at[cell_id].add(
-        jnp.where(is_cloud, mass, 0.0))
-    rain_mass = jnp.zeros((n_cells,), dtype=dtype).at[cell_id].add(
-        jnp.where(is_rain, mass, 0.0))
+    cloud_particle = jnp.where(is_cloud, mass, 0.0)
+    rain_particle = jnp.where(is_rain, mass, 0.0)
+    if assignment == "nearest":
+        cloud_mass = jnp.zeros((n_cells,), dtype=dtype).at[cell_id].add(cloud_particle)
+        rain_mass = jnp.zeros((n_cells,), dtype=dtype).at[cell_id].add(rain_particle)
+    elif assignment == "cic":
+        cloud_mass, rain_mass = _cic_deposit_liquid_mass(
+            state, grid, cloud_particle, rain_particle)
+    else:
+        raise ValueError(
+            f"unknown Lagrangian SDM diagnostic assignment={assignment!r} "
+            "(expected 'nearest' or 'cic')"
+        )
     cell_air = rho_grid.reshape(-1) * jnp.asarray(
         grid.dx * grid.dy * grid.dz, dtype=dtype)
     qc = (cloud_mass / cell_air).reshape((grid.cfg.ny, grid.cfg.nx, grid.cfg.nz))
@@ -673,7 +765,8 @@ def apply_lagrangian_sdm_to_les_state(
         dq_liquid = jnp.zeros_like(tracers[..., 0])
 
     q_c, q_r = diagnose_liquid_mixing_ratios(
-        sdm_state, grid, rho, cfg.r_rain, r_cloud=cfg.r_cloud)
+        sdm_state, grid, rho, cfg.r_rain, r_cloud=cfg.r_cloud,
+        assignment=cfg.lagrangian_diagnostic_assignment)
     tracers = set_diagnostic_liquid_tracers(tracers, q_c, q_r)
     les_state = les_state._replace(theta=theta, tracers=tracers)
     total_water_after = total_water_mass(sdm_state, tracers, grid, rho)
