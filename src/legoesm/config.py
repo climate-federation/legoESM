@@ -152,6 +152,25 @@ DEFAULT_CONFIG = {
 }
 
 
+def _atm_matrix_spec():
+    """Matrix-runner spec for an atmosphere ``setup:`` template (#388).
+
+    Atmosphere's case-name filter is ``--test`` (its ``--only`` selects the
+    equation-set sw/hydro/nh), and the runner has no ``--levels``/``--dt``
+    flags — captured here so the shared selector emits a valid command.
+    Deferred import keeps the federation DAG clean (meta -> core).
+    """
+    from legoesm.core.setup_selector import MatrixRunnerSpec
+    return MatrixRunnerSpec(
+        runner_path="scripts/matrix/run_atmosphere_test_matrix.py",
+        valid_grids=("cubed_sphere", "latlon", "icosahedral", "spectral"),
+        case_flag="--test",
+        levels_flag=None, dt_flag=None,
+        days_flag="--days", resolution_flag="--resolution",
+        output_flag="--output", quick_flag="--quick",
+    )
+
+
 class Config:
     """Configuration container with dot-access and YAML support."""
 
@@ -294,20 +313,79 @@ class Config:
         the resolved config is byte-identical).
         """
         try:
+            # A ``setup:`` template runs via the matrix runner; sign the
+            # command-effective invocation so a no-op override is flagged.
+            setup = self.get("setup")
+            if setup is not None:
+                from legoesm.core.setup_selector import setup_signature
+                return setup_signature(_atm_matrix_spec(), setup,
+                                       output_path=self.get("output.path"))
             return repr(self.to_experiment_config())
         except Exception as exc:  # noqa: BLE001
             return f"<unresolvable: {type(exc).__name__}: {exc}>"
 
     def validate_strict(self) -> None:
-        """Strict-validate through the canonical ``ExperimentConfig`` path."""
+        """Strict-validate the config (raises on invalid).
+
+        A ``setup:`` template (#388) names an idealized atmosphere matrix case
+        and routes to ``run_atmosphere_test_matrix.py``; it is validated through
+        the shared selector (the matrix runner's exact-match zero guard is the
+        runnability backstop, since the atmosphere case catalog is not an
+        importable registry).  Otherwise the canonical ``ExperimentConfig`` path.
+        """
+        setup = self.get("setup")
+        if setup is not None:
+            from legoesm.core.setup_selector import validate_setup
+            validate_setup(setup, _atm_matrix_spec())
+            # On the matrix-runner path only ``setup:`` + ``output.path`` are
+            # consumed; any other user-authored recipe / run-control section
+            # (``atmosphere:``, ``grid:``, ``time:``, ``forcing:`` …) would be
+            # SILENTLY IGNORED.  Reject a customised one (per-run controls
+            # belong in the ``setup:`` block).  Compare to DEFAULT_CONFIG (these
+            # sections are default-merged) — an untouched default is fine.
+            #   * ``output``: only ``output.path`` is consumed, so a non-path
+            #     ``output.*`` customisation is still flagged.
+            # (init_experiment skips its machine-precision ``hardware`` injection
+            # for setup: templates, so a customised ``hardware:`` here is
+            # genuinely user-authored and correctly flagged as ignored.)
+            _exempt = {"setup", "model", "experiment", "mode"}
+            ignored = []
+            for k, v in self._data.items():
+                if k in _exempt:
+                    continue
+                if k == "output":
+                    _strip = lambda d: ({kk: vv for kk, vv in d.items()
+                                         if kk != "path"} if isinstance(d, dict)
+                                        else d)
+                    if _strip(v) != _strip(DEFAULT_CONFIG.get("output", {})):
+                        ignored.append("output (only output.path is used)")
+                    continue
+                if v != DEFAULT_CONFIG.get(k):
+                    ignored.append(k)
+            if ignored:
+                raise ValueError(
+                    f"top-level section(s) {sorted(ignored)} are ignored by a "
+                    "`setup:` template (the matrix case defines the recipe; "
+                    "per-run controls go in the `setup:` block: levels/"
+                    "dt_seconds/duration_days/resolution/quick). Remove them, "
+                    "or drop `setup:` for a `legoesm run`."
+                )
+            return
         self.to_experiment_config().validate_strict()
 
     def run_command(self, config_path: str = "config.yaml") -> str:
         """Launcher command for the generated ``run.sh`` (atmosphere runner).
 
-        ``legoesm run`` is a cwd-independent installed CLI, so the run.sh can
+        A ``setup:`` template routes to the atmosphere matrix runner via an
+        EXACT ``--test =<case> --grid <grid>`` selector (#388).  Otherwise
+        ``legoesm run`` (a cwd-independent installed CLI), so the run.sh can
         ``cd`` into the bundle dir and pass the bundle-relative ``config.yaml``.
         """
+        setup = self.get("setup")
+        if setup is not None:
+            from legoesm.core.setup_selector import build_matrix_command
+            return build_matrix_command(_atm_matrix_spec(), setup,
+                                        output_path=self.get("output.path"))
         return f"legoesm run {shlex.quote(config_path)}"
 
     def __repr__(self) -> str:

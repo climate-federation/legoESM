@@ -7352,7 +7352,14 @@ def filter_tests(tests: list[TestCase], args) -> list[TestCase]:
     if args.grid != "all":
         filtered = [t for t in filtered if t.grid_type == args.grid]
     if args.test:
-        filtered = [t for t in filtered if args.test in t.case]
+        # ``=name`` selects the case by EXACT match (the form emitted by an
+        # atmosphere ``setup:`` template via legoesm.core.setup_selector); a
+        # bare ``--test name`` keeps the legacy substring filter.
+        if args.test.startswith("="):
+            exact = args.test[1:]
+            filtered = [t for t in filtered if t.case == exact]
+        else:
+            filtered = [t for t in filtered if args.test in t.case]
     return filtered
 
 
@@ -7430,6 +7437,19 @@ def main():
     _RES_DIR_WARNED.clear()
 
     tests = filter_tests(TEST_MATRIX, args)
+    # Global match count BEFORE any MPI slicing — the exact-selector guard
+    # below keys off this so every rank makes the SAME decision.
+    _n_matched_global = len(tests)
+
+    # An EXACT case selector (``--test =name``, emitted by a setup: template)
+    # that matches NOTHING is a hard error in EVERY mode — checked here, before
+    # the --list / --cross-grid-plots-only / run early returns, so none of them
+    # can silently swallow a typo'd exact selector.
+    if _n_matched_global == 0 and str(getattr(args, "test", "") or "").startswith("="):
+        raise SystemExit(
+            f"ERROR: no atmosphere test case matches --test {args.test!r} "
+            f"--grid {args.grid!r}. Run `--list` to see valid (case, grid) pairs."
+        )
 
     # MPI case-split: each rank takes a disjoint slice of the filtered
     # test list.  Cases write to distinct directories so no I/O
@@ -7526,8 +7546,16 @@ def main():
         return
 
     if not tests:
-        print("No tests match the given filters.")
-        return
+        # (An exact ``--test =name`` selector matching nothing globally already
+        # raised above.)  A bare/`all` filter matching nothing is a graceful
+        # no-op; under MPI a per-rank empty SLICE with global matches > 0 must
+        # NOT return (that would deadlock ranks holding work at the barrier).
+        if _n_matched_global == 0:
+            print("No tests match the given filters.")
+            return
+        if mpi_comm is not None:
+            print(f"[rank {mpi_rank}/{mpi_size}] no cases assigned; "
+                  "continuing to barrier")
 
     if args.resolution:
         # iter-95 fix: ``--resolution N`` (integer) was previously

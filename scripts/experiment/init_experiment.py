@@ -167,7 +167,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Machine-derived default precision, only if the user did not override it.
     # Atmosphere-only knob (ocean runs are x64 throughout, set on the runner).
-    if is_atm and not any(k == "hardware.precision.dynamics" for k, _ in overrides):
+    # NOT for a ``setup:`` template (#388): it routes to a matrix runner that
+    # does not consume config.yaml, and injecting hardware would trip the
+    # setup-template "ignored section" guard.
+    if (is_atm and cfg.get("setup") is None
+            and not any(k == "hardware.precision.dynamics" for k, _ in overrides)):
         if machine.get("precision"):
             cfg.set("hardware.precision.dynamics", machine["precision"])
 
