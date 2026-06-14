@@ -41,6 +41,8 @@ PANELS = [
      None),
     ("CPU tridiag LAPACK speedup", "tridiag", "higher better (Ginsburg CPU)",
      None),
+    ("Cube PE halo collectives cut/substep", "collective_cut",
+     "higher=more saved (multinode/MPI)", None),
 ]
 
 
