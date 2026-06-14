@@ -55,5 +55,35 @@ shipped) already tiles the HALO; the per-op stencils are the remaining tiling.
 - Duplicate-shared-face parity (validates lower-owns trim).
 - codex adversarial review each increment; smoke = the bit-identity gate.
 
-## Status
-- Design pinned (this doc). Increment P-i (`dgrid_vorticity`) next.
+## PRE-EXISTING tiling (Jun-11, via parallel.mesh staggered_tile_block + *_local cores) — DO NOT RE-DUP
+A prior session already tiled several cube ops (host-body + shard_map) using
+`staggered_tile_block`/`tiled_face_block` (parallel.mesh) + leading-axis-agnostic
+`*_local` cores, with tests `test_tiled_{cgrid_divergence,cgrid_gradient,
+d2a2c_ua_va,cdgrid_field_classification,staggered_layout}`:
+- **`cgrid_divergence`** (`cgrid_divergence_local`) — DONE, and it IS the
+  fv3_sw_tendencies mass/div-damp divergence → reuse it (do NOT re-tile; P-iv
+  cgrid_divergence was attempted then reverted as a dup 2026-06-14).
+- `cgrid_gradient_2d` (`cgrid_gradient_2d_local`) — DONE, but a DIFFERENT op
+  (NOT arakawa_lamb_gradient; not on the fv3_sw_tendencies path).
+- d2a2c / staggered-layout / field-classification — infra + experimental-d2a2c.
+The two slicing styles coexist: Jun-11 `staggered_tile_block` is STATIC-index
+(host-body); my `tiled_production_cdgrid` uses `dynamic_slice_in_dim` (works in
+shard_map too). Both call the shared `*_local`/`*_core` numerics (no dup of
+numerics).
+
+## Status (corrected after the Jun-11 reconciliation)
+- **DONE (my P-series, tiled_production_cdgrid.py, fv3_sw_tendencies-relevant):**
+  P-i `dgrid_vorticity` (f0246a46), P-ii box interps (79243312), P-iii
+  `arakawa_lamb_gradient` (1ab7edae). All host-body 3D+4D + np24 shard_map,
+  bit-identity-gated, codex-clean.
+- **DONE (Jun-11):** `cgrid_divergence` — reuse `cgrid_divergence_local`.
+- **REMAINING for the fv3_sw_tendencies np24 stage:**
+  - P-iv-mass: `cgrid_mass_flux_divergence` (h-weighted flux div → height
+    tendency) — NOT tiled yet.
+  - P-v: `fv3_d2cc` / `fv3_cc2c` (D→cc→C velocity, VECTOR — cube-edge rotation;
+    hardest) — NOT tiled yet.
+  - P-vi: Bernoulli `KE=0.5(u_cc²+v_cc²)` + `B=KE+g(h+h_s)` (pointwise; trivial).
+  - ASSEMBLY: wire the per-op tiled stages into the full `fv3_sw_tendencies`
+    np24 shard_map; bit-identity vs the global tendency.
+- LESSON: a prior session built tiling infra; ALWAYS grep `tests/parallel/
+  test_tiled_*` + `parallel.mesh` before tiling a cube op.
