@@ -41,11 +41,23 @@ from legoesm.land.surface_data.raster import open_bil_memmap
 from legoesm.land.surface_data.aggregate import aggregate_raster_streaming
 from legoesm.land.surface_data.schema import write_surfdata, HWSD2_LAYER_DZ
 
-# HWSD2 encodes non-soil / no-data units as NEGATIVE property codes (-1..-9:
-# dunes, salt flats, rock outcrop, water bodies, glaciers/ice, no data — see the
-# D_ADD_PROP domain).  Any negative value means "no valid soil property here", so
-# the mask is ``value >= 0`` rather than a single sentinel.
-HWSD2_NONSOIL_MAX = 0.0  # valid soil property values are >= 0
+# HWSD2 encodes special map units as NEGATIVE property codes whose WRB2 group
+# names the unit.  Several are *real soils* with no measured texture (their
+# texture is implied by the soil group), so rather than blanking them to NaN we
+# fill them with a representative texture — most importantly Arenosols (the great
+# sand seas, e.g. the Sahara), which are sandy.  Units that genuinely have no soil
+# (open water, glaciers, technosols/urban, no-data) stay missing.
+#   WRB2: AR=Arenosols, LP=Leptosols, SC=Solonchaks, WR=Open Water,
+#         GG=Glaciers, TC=Technosols, ND=No Data.
+# Representative texture (percent sand/clay, organic-carbon %, bulk g/cm^3) for the
+# soil-bearing misc units (documented category fill, exempt like a lookup table):
+_WRB_TEXTURE_FILL: dict[str, dict[str, float]] = {
+    "AR": {"SAND": 92.0, "CLAY": 3.0, "ORG_CARBON": 0.3, "BULK": 1.55},   # sandy / dunes
+    "LP": {"SAND": 45.0, "CLAY": 20.0, "ORG_CARBON": 2.0, "BULK": 1.40},  # shallow / rocky
+    "SC": {"SAND": 35.0, "CLAY": 25.0, "ORG_CARBON": 1.0, "BULK": 1.45},  # salt-affected
+}
+# WR / GG / TC / ND and any other negative code -> no soil -> stays NaN.
+HWSD2_NONSOIL_MAX = 0.0  # after the WRB fill, valid soil property values are >= 0
 # Fixed depth-layer labels D1..D7.
 HWSD2_LAYER_LABELS = ("D1", "D2", "D3", "D4", "D5", "D6", "D7")
 _N_LAYER = len(HWSD2_LAYER_LABELS)
@@ -63,7 +75,7 @@ _PROP_NAMES = tuple(spec[0] for spec in _PROP_SPEC)
 
 # Columns we actually read from the (wide) HWSD2_LAYERS table.
 _USECOLS = ["HWSD2_SMU_ID", "SEQUENCE", "SHARE", "LAYER", "SAND", "CLAY",
-            "ORG_CARBON", "BULK"]
+            "ORG_CARBON", "BULK", "WRB2"]
 
 
 class SmuLookup(NamedTuple):
@@ -101,8 +113,10 @@ def build_smu_lookup(df) -> SmuLookup:
     """Collapse the HWSD2_LAYERS component sets to a ``SHARE``-weighted lookup.
 
     For each ``(SMU, layer, property)`` the value is the ``SHARE``-weighted mean
-    over the soil components whose value is present (``!= -9`` and not NaN);
-    components missing that property are excluded from both numerator and weight.
+    over the soil components whose value is present.  Negative special-unit codes
+    are first replaced by a representative texture for soil-bearing WRB groups
+    (:data:`_WRB_TEXTURE_FILL`, e.g. Arenosols -> sand); remaining negatives
+    (water / glaciers / technosols / no-data) are excluded.
     """
     smu = df["HWSD2_SMU_ID"].to_numpy(dtype=np.int64)
     share = df["SHARE"].to_numpy(dtype=np.float64)
@@ -111,6 +125,8 @@ def build_smu_lookup(df) -> SmuLookup:
     lay = df["LAYER"].map(label_to_idx).to_numpy(dtype=np.float64)
     keep = np.isfinite(lay)
     smu, share, lay = smu[keep], share[keep], lay[keep].astype(np.int64)
+    wrb = (df["WRB2"].to_numpy()[keep] if "WRB2" in df.columns
+           else np.full(smu.shape, None, dtype=object))
 
     max_smu = int(smu.max())
     n_cell = (max_smu + 1) * _N_LAYER
@@ -119,6 +135,14 @@ def build_smu_lookup(df) -> SmuLookup:
     table = np.full((max_smu + 1, _N_LAYER, len(_PROP_SPEC)), np.nan, dtype=np.float32)
     for p, (_field, col, scale) in enumerate(_PROP_SPEC):
         v = df[col].to_numpy(dtype=np.float64)[keep]
+        # Fill negative special-unit codes for soil-bearing WRB groups with a
+        # representative texture; other negatives stay missing.
+        neg = v < 0.0
+        if neg.any():
+            fill = np.full(v.shape, np.nan)
+            for grp, props in _WRB_TEXTURE_FILL.items():
+                fill[wrb == grp] = props[col]
+            v = np.where(neg, fill, v)
         present = np.isfinite(v) & (v >= HWSD2_NONSOIL_MAX)
         wv = np.where(present, share * v, 0.0)
         wm = np.where(present, share, 0.0)

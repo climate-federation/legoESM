@@ -64,6 +64,27 @@ def test_share_weighted_join_and_missing():
     assert np.isnan(lut.table[0, 0, s])
 
 
+def test_wrb_negative_codes_filled_or_masked():
+    # Arenosol (AR, code -4) -> filled to sandy; Open Water (WR, -1) -> stays NaN.
+    rows = [
+        (20, 1, 100, "D1", -4, -4, -4.0, -4.0, "AR"),   # sandy fill
+        (21, 1, 100, "D1", -1, -1, -1.0, -1.0, "WR"),   # water -> no soil
+        (22, 1, 100, "D1", -3, -3, -3.0, -3.0, "LP"),   # leptosol fill
+    ]
+    df = pd.DataFrame(rows, columns=[
+        "HWSD2_SMU_ID", "SEQUENCE", "SHARE", "LAYER",
+        "SAND", "CLAY", "ORG_CARBON", "BULK", "WRB2"])
+    lut = build_smu_lookup(df)
+    s, b = 0, 3
+    # AR -> representative sand (92) and bulk 1.55 g/cm3 -> 1550 kg/m3
+    assert np.isclose(lut.table[20, 0, s], 92.0)
+    assert np.isclose(lut.table[20, 0, b], 1550.0, atol=1.0)
+    # WR (open water) -> no soil -> NaN
+    assert np.isnan(lut.table[21, 0, s])
+    # LP (leptosol) -> filled (not NaN), sandier-loam
+    assert np.isclose(lut.table[22, 0, s], 45.0)
+
+
 def _toy_raster(tmp_path, res=1.0):
     n_lat, n_lon = int(180 / res), int(360 / res)
     hdr = EnviBilHeader(

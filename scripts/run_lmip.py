@@ -47,7 +47,7 @@ from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.canopy import CanopyConfig
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
 from legoesm.land.global_surface_data import get_surfdata_preset, load_global_surface_data
-from legoesm.land.surface_data.land_inputs import build_canopy_params
+from legoesm.land.surface_data.land_inputs import build_canopy_params, dominant_pft_index
 from legoesm.land.pedotransfer import soil_hydraulics_config_from_texture
 
 U_MIN = 1.0
@@ -112,6 +112,8 @@ def main() -> None:
     ap.add_argument("--output", default="lmip_global")
     ap.add_argument("--land-frac-min", type=float, default=0.5,
                     help="cells with f_land below this are masked as ocean in output")
+    ap.add_argument("--no-plot", dest="plot", action="store_false",
+                    help="skip the maps PNG")
     args = ap.parse_args()
 
     out_dir = Path(args.output); out_dir.mkdir(parents=True, exist_ok=True)
@@ -158,31 +160,58 @@ def main() -> None:
         s, f, config, U_MIN, args.dt, lat=lat_rad, land_params=canopy, doy=args.doy))
     new_state, resp, _ = step(state, forcing)
 
-    # --- mask to land, reshape, validate, write ---
-    f_land_flat = np.asarray(gsd.f_land)
-    if f_land_flat.ndim == 2:           # (nyear, ncol) -> first year
-        f_land_flat = f_land_flat[0]
-    f_land = f_land_flat.reshape(grid.nlat, grid.nlon)
-    land = f_land >= args.land_frac_min
-    def grid2d(a):
-        return np.where(land, np.asarray(a).reshape(grid.nlat, grid.nlon), np.nan)
+    # --- land mask, reshape, validate, write ---
+    # The land-SEA mask is the total land fraction = soil/veg + lake + glacier
+    # (so ice sheets and lake-rich regions count as land).  gsd.f_land here is the
+    # CLM natveg+crop (soil/veg) fraction only — NOT the land mask.
+    def cover1d(a):
+        a = np.asarray(a)
+        return (a[0] if a.ndim == 2 else a)
+    f_soil_veg = cover1d(gsd.f_land)
+    land_frac_flat = f_soil_veg + cover1d(gsd.f_lake) + cover1d(gsd.f_glacier)
+    land_fraction = land_frac_flat.reshape(grid.nlat, grid.nlon)
+    land = land_fraction >= args.land_frac_min
 
-    T_sfc = grid2d(resp.T_surface); alb = grid2d(resp.albedo)
-    sh = grid2d(resp.shflx); lh = grid2d(resp.lhflx)
+    import warnings
+    def grid2d(a):
+        return np.where(land, np.asarray(a, dtype=np.float64).reshape(grid.nlat, grid.nlon), np.nan)
+    def layer_mean(a):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)   # all-NaN soil cols
+            return np.nanmean(np.asarray(a), axis=1)
+
+    # Surfdata-derived spatial inputs (these vary per column) + model outputs.
+    dom = dominant_pft_index(gsd)
+    fields = {
+        # --- surface inputs from the surfdata pipeline ---
+        "sand_pct":     (grid2d(layer_mean(gsd.sand_frac) * 100.0), "YlOrBr", "sand %"),
+        "clay_pct":     (grid2d(layer_mean(gsd.clay_frac) * 100.0), "BuPu", "clay %"),
+        "organic":      (grid2d(layer_mean(gsd.organic)), "YlGn", "organic"),
+        "bulk_density": (grid2d(layer_mean(gsd.bulk_density)), "cividis", "bulk density kg/m3"),
+        "soil_color":   (grid2d(gsd.soil_color), "viridis", "soil colour class"),
+        "LAI":          (grid2d(canopy.LAI), "YlGn", "LAI (dominant PFT)"),
+        "dominant_pft": (grid2d(dom), "tab20", "dominant CLM5 PFT index"),
+        "albedo_vis":   (grid2d(canopy.ALB_VIS), "Greys_r", "soil background albedo (VIS)"),
+        "land_fraction": (land_fraction, "Blues", "land fraction (veg+lake+glacier)"),
+        "f_soil_veg":   (grid2d(f_soil_veg), "YlGn", "soil/veg fraction (natveg+crop)"),
+        # --- model outputs (one step) ---
+        "T_sfc":        (grid2d(resp.T_surface), "magma", "surface T [K]"),
+        "shflx":        (grid2d(resp.shflx), "RdBu_r", "sensible heat [W/m2]"),
+        "lhflx":        (grid2d(resp.lhflx), "viridis", "latent heat [W/m2]"),
+    }
 
     n_land = int(land.sum())
-    nan_land = int(np.isnan(T_sfc[land]).sum())
+    nan_land = int(np.isnan(fields["T_sfc"][0][land]).sum())
     status = "PASS" if nan_land == 0 else "FAIL"
     print(f"land cells: {n_land} | NaN T_sfc over land: {nan_land} -> {status}")
     rng = lambda a: f"[{np.nanmin(a):.2f}, {np.nanmax(a):.2f}]"
-    print(f"  T_sfc {rng(T_sfc)} K | albedo {rng(alb)} | SH {rng(sh)} | LH {rng(lh)} W/m2")
+    for k in ("sand_pct", "clay_pct", "bulk_density", "LAI", "T_sfc"):
+        print(f"  {k:12s} {rng(fields[k][0])}")
 
     try:
         import xarray as xr
         ds = xr.Dataset(
-            {"T_sfc": (("lat", "lon"), T_sfc), "albedo": (("lat", "lon"), alb),
-             "shflx": (("lat", "lon"), sh), "lhflx": (("lat", "lon"), lh),
-             "f_land": (("lat", "lon"), f_land)},
+            {k: (("lat", "lon"), v[0]) for k, v in fields.items()},
             coords={"lat": grid.lat_deg, "lon": grid.lon_deg},
             attrs={"doy": args.doy, "hour": args.hour, "surfdata": args.surfdata},
         )
@@ -192,8 +221,35 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         print(f"(netcdf write skipped: {e})")
 
+    if args.plot:
+        _plot_maps(fields, grid.lat_deg, grid.lon_deg, out_dir / "lmip_global_maps.png",
+                   doy=args.doy)
+
     if status == "FAIL":
         sys.exit(1)
+
+
+def _plot_maps(fields, lat, lon, path, *, doy):
+    """Multi-panel global maps of the surfdata inputs + one-step outputs."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    items = list(fields.items())
+    ncols = 3
+    nrows = (len(items) + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 2.8 * nrows))
+    for ax, (name, (arr, cmap, label)) in zip(axes.ravel(), items):
+        im = ax.pcolormesh(lon, lat, arr, shading="auto", cmap=cmap)
+        ax.set_title(label, fontsize=10)
+        ax.set_xticks([]); ax.set_yticks([])
+        fig.colorbar(im, ax=ax, shrink=0.8)
+    for ax in axes.ravel()[len(items):]:
+        ax.axis("off")
+    fig.suptitle(f"run_lmip global one step (day-of-year {doy:.0f})", fontsize=13)
+    fig.tight_layout()
+    fig.savefig(path, dpi=95)
+    print(f"wrote {path}")
 
 
 if __name__ == "__main__":

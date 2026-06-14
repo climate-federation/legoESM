@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from legoesm.grids.regridding import compute_latlon_to_voronoi_weights, regrid_scalar
+from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
 from legoesm.land.surface_data.schema import write_surfdata
 from legoesm.land.surface_data.sources.clm5_surfdata import (
     read_clm5_cover_veg,
@@ -34,11 +34,26 @@ _SOIL_VARS = ("sand_pct", "clay_pct", "organic", "bulk_density")
 
 
 def _regrid_layered_latlon(field_lyx, weights, ny, nx):
-    """Regrid a ``(nlayer, slat, slon)`` regular field to ``(nlayer, ny, nx)``."""
-    a = np.moveaxis(np.asarray(field_lyx), 0, -1)             # (slat, slon, nlayer)
-    out = np.asarray(regrid_scalar(a.astype(np.float32), weights))   # (ntarget, nlayer)
-    nlayer = a.shape[-1]
-    return np.moveaxis(out.reshape(ny, nx, nlayer), -1, 0)    # (nlayer, ny, nx)
+    """NaN-aware IDW regrid of ``(nlayer, slat, slon)`` -> ``(nlayer, ny, nx)``.
+
+    HWSD has NaN over no-soil pixels (water/ice/urban/no-data); a plain weighted
+    sum would propagate one NaN neighbour into a NaN target.  Here NaN neighbours
+    are dropped and the weights renormalised over the valid ones, so a target only
+    becomes NaN when *all* its source neighbours are missing.  Reuses the
+    KD-tree weights from :func:`compute_latlon_to_voronoi_weights`.
+    """
+    a = np.moveaxis(np.asarray(field_lyx, dtype=np.float64), 0, -1)   # (slat, slon, L)
+    flat = a.reshape(-1, a.shape[-1])                        # (src_flat, L)
+    idx = np.asarray(weights.src_indices)                   # (ntgt, k)
+    w = np.asarray(weights.weights, dtype=np.float64)       # (ntgt, k)
+    vals = flat[idx]                                        # (ntgt, k, L)
+    valid = np.isfinite(vals)
+    wexp = w[:, :, None] * valid                            # (ntgt, k, L)
+    num = np.sum(np.where(valid, vals, 0.0) * wexp, axis=1)  # (ntgt, L)
+    den = wexp.sum(axis=1)                                  # (ntgt, L)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.where(den > 0.0, num / np.maximum(den, 1e-30), np.nan)
+    return np.moveaxis(out.reshape(ny, nx, a.shape[-1]), -1, 0)  # (L, ny, nx)
 
 
 def build_v1_surfdata(
