@@ -80,8 +80,9 @@ defaults; scoping §B):
      (:func:`replicate_veros_kbot_flexible`).
   8. Wind stress on the MIT grid: the Veros kernel shifts taux one cell in x
      and tauy one cell in y when loading ``surface_taux/y``
-     (:func:`veros_mit_tau_shift`).  Same half-cell u-face/T-point mimicry
-     note as the 4deg harness (climate-negligible).
+     (:func:`legoesm.ocean.fidelity.veros_layout_common.veros_mit_tau_shift`
+     with ``x_cyclic=True``).  Same half-cell u-face/T-point mimicry note as the
+     4deg harness (climate-negligible).
   9. Everything else — TKE block (incl. superbee advection, mxl_choice=2),
      prognostic 3-D EKE sources, eos="veros_gsw", rigid lid + faithful AB2
      stack, zero bottom drag, cp_0 kernel literal 3991.86795711963,
@@ -129,7 +130,9 @@ from legoesm.ocean.fidelity.veros_global_4deg_recipe import (
     VEROS_GLOBAL4_CP0,
     get_periodic_interval_weights,
 )
+from legoesm.ocean.fidelity.veros_layout_common import veros_xyz_to_legoesm
 from legoesm.ocean.fidelity.veros_state_bridge import veros_u_centered_z_centres
+from legoesm.ocean.fidelity.veros_stepping_common import veros_faithful_stepping
 
 __all__ = (
     "DT_MOM_RATIO",
@@ -158,14 +161,10 @@ __all__ = (
     "kbot_to_mask_and_h_bathy_flexible",
     "prepare_global_flexible_topography",
     "replicate_veros_kbot_flexible",
-    "veros_area_t_flexible",
     "veros_fill_holes",
     "veros_full_axes",
     "veros_interpolate",
-    "veros_mit_tau_shift",
     "veros_vinokur_grid_steps",
-    "veros_xy_to_legoesm_flex",
-    "veros_xyz_to_legoesm_flex",
 )
 
 
@@ -554,57 +553,6 @@ def kbot_to_mask_and_h_bathy_flexible(
 # ---------------------------------------------------------------------------
 
 
-def veros_xyz_to_legoesm_flex(arr_xyz: np.ndarray,
-                              fill: float = 0.0) -> np.ndarray:
-    """(x, y, z) VEROS z-order (k=0 deepest) → legoESM (lat, lon, z) with
-    k=0 SURFACE, plus the two wall rows (shape-generic twin of the 4deg
-    bridge — sizes derived from the input)."""
-    nx, ny, nz = arr_xyz.shape
-    out = np.full((ny + 2, nx, nz), fill, dtype=np.float64)
-    out[1:-1, :, :] = np.transpose(arr_xyz, (1, 0, 2))[:, :, ::-1]
-    return out
-
-
-def veros_xy_to_legoesm_flex(arr_xy: np.ndarray,
-                             fill: float = 0.0) -> np.ndarray:
-    """(x, y) → legoESM (lat, lon) with wall rows (2-D forcing fields)."""
-    nx, ny = arr_xy.shape
-    out = np.full((ny + 2, nx), fill, dtype=np.float64)
-    out[1:-1, :] = arr_xy.T
-    return out
-
-
-def veros_mit_tau_shift(taux_xym: np.ndarray,
-                        tauy_xym: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """The Veros set_forcing_kernel MIT-grid index shift
-    (global_flexible.py:368-369): ``surface_taux[i] = taux[i+1]`` (one cell
-    in x) and ``surface_tauy[j] = tauy[j+1]`` (one cell in y), applied ONCE
-    at data-prep time on the INTERIOR monthly stacks (x, y, 12).
-
-    With cyclic-x ghosts (``taux[nx+2] = taux[2]``) the x-shift is a roll by
-    −1; the y-shift pulls the zero NORTH GHOST row into the last interior
-    row (Veros's ``enforce_boundaries`` never fills y ghosts ⇒ tauy's
-    northernmost surface_tauy row is 0) — replicated, not smoothed."""
-    taux_shift = np.roll(taux_xym, -1, axis=0)
-    tauy_shift = np.concatenate(
-        [tauy_xym[:, 1:, :], np.zeros_like(tauy_xym[:, :1, :])], axis=1)
-    return taux_shift, tauy_shift
-
-
-def veros_area_t_flexible(
-    yt_deg: np.ndarray,
-    dyt_deg: np.ndarray,
-    nx: int = NX,
-    r_earth: float = VEROS_CONSTANTS_CONFIG.R_earth,
-) -> np.ndarray:
-    """Veros T-cell area column weights ``dxt·dyt·cost`` [m²] on the
-    STRETCHED grid (per-latitude row; broadcast over x)."""
-    degtom = r_earth * np.pi / 180.0
-    dx_deg = 360.0 / nx
-    return (dx_deg * degtom) * (np.asarray(dyt_deg) * degtom) * np.cos(
-        np.deg2rad(np.asarray(yt_deg)))
-
-
 # ---------------------------------------------------------------------------
 # Physics configs (scoping §B; deltas vs global_4deg documented at each line)
 # ---------------------------------------------------------------------------
@@ -743,13 +691,9 @@ def build_global_flexible_model_config() -> LatLonCGridOceanConfig:
         K_v=0.0,
         gm_redi=GLOBAL_FLEX_GM_REDI_CONFIG,
         surface_forcing_implicit=True,              # Veros source placement
-        outer_integrator="ab2",
-        ab2_scope="advective",
-        barotropic_solver="rigid_lid",
-        dt_mom_ratio=DT_MOM_RATIO,                  # 8 (dt arg IS dt_tracer)
-        momentum_friction_additive=True,
-        coriolis_scheme="explicit_ab2",             # |f|·dt_mom ≈ 0.25 @72°
-        implicit_vmix_dzw_slot=True,                 # Veros dzw implicit slot (#428)
+        # ---- Veros-faithful time stepping (shared composition, #433) ----
+        # dt_mom_ratio=8 (the dt arg IS dt_tracer); |f|·dt_mom ≈ 0.25 @72°.
+        **veros_faithful_stepping(dt_mom_ratio=DT_MOM_RATIO),
         physics=build_global_flexible_physics_config(),
     )
 
@@ -776,9 +720,9 @@ def build_global_flexible_recipe(
     kbot = replicate_veros_kbot_flexible(z_interp_topo_xy)
     land_mask, H_bathy = kbot_to_mask_and_h_bathy_flexible(kbot)
     z_coord = create_partial_cell_coordinate(z_ref, jnp.asarray(H_bathy))
-    T_init = (veros_xyz_to_legoesm_flex(temp_xyz)
+    T_init = (veros_xyz_to_legoesm(temp_xyz)
               if temp_xyz is not None else None)
-    S_init = (veros_xyz_to_legoesm_flex(salt_xyz)
+    S_init = (veros_xyz_to_legoesm(salt_xyz)
               if salt_xyz is not None else None)
     initial_state = build_global_flexible_state(
         grid, z_coord, land_mask, H_bathy, T_init=T_init, S_init=S_init)

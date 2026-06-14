@@ -65,14 +65,16 @@ from legoesm.ocean.fidelity.veros_global_flexible_recipe import (
     kbot_to_mask_and_h_bathy_flexible,
     prepare_global_flexible_topography,
     replicate_veros_kbot_flexible,
-    veros_area_t_flexible,
     veros_fill_holes,
     veros_full_axes,
     veros_interpolate,
-    veros_mit_tau_shift,
     veros_vinokur_grid_steps,
-    veros_xy_to_legoesm_flex,
-    veros_xyz_to_legoesm_flex,
+)
+from legoesm.ocean.fidelity.veros_layout_common import (
+    veros_area_t,
+    veros_mit_tau_shift,
+    veros_xy_to_legoesm,
+    veros_xyz_to_legoesm,
 )
 from legoesm.ocean.fidelity.veros_state_bridge import veros_u_centered_z_centres
 
@@ -415,7 +417,7 @@ def test_mit_tau_shift():
     rng = np.random.default_rng(3)
     taux = rng.normal(size=(NX, NY, 12))
     tauy = rng.normal(size=(NX, NY, 12))
-    tx, ty = veros_mit_tau_shift(taux, tauy)
+    tx, ty = veros_mit_tau_shift(taux, tauy, x_cyclic=True)
     np.testing.assert_array_equal(tx[:-1], taux[1:])
     np.testing.assert_array_equal(tx[-1], taux[0])       # cyclic wrap
     np.testing.assert_array_equal(ty[:, :-1], tauy[:, 1:])
@@ -445,12 +447,12 @@ def test_layout_bridges():
     arr = np.zeros((NX, NY, NZ))
     arr[5, 7, NZ - 1] = 42.0            # SURFACE in Veros z-order
     arr[5, 7, 0] = -7.0                 # DEEPEST
-    out = veros_xyz_to_legoesm_flex(arr)
+    out = veros_xyz_to_legoesm(arr)
     assert out.shape == (NY + 2, NX, NZ)
     assert out[8, 5, 0] == 42.0
     assert out[8, 5, NZ - 1] == -7.0
     assert (out[0] == 0).all() and (out[-1] == 0).all()
-    out2 = veros_xy_to_legoesm_flex(
+    out2 = veros_xy_to_legoesm(
         np.arange(NX * NY, dtype=float).reshape(NX, NY))
     assert out2.shape == (NY + 2, NX)
     assert out2[1, 0] == 0.0 and out2[2, 0] == 1.0
@@ -459,7 +461,7 @@ def test_layout_bridges():
 def test_area_weights_on_stretched_rows():
     _, yt, _ = veros_full_axes()
     dyt = global_flexible_dyt_deg()
-    a = veros_area_t_flexible(yt[2:-2], dyt)
+    a = veros_area_t(yt[2:-2], dx_deg=360.0 / NX, dyt_deg=dyt)
     assert a.shape == (NY,)
     assert np.all(a > 0)
     # equator rows have the SMALLEST dy but largest cos → compare exactly

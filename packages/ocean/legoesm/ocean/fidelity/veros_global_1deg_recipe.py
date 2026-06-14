@@ -88,7 +88,8 @@ scoping SS C — "= global_flexible row-for-row EXCEPT tke_mxl_choice=1"):
      solar-inclusive qnet.  Ice gating of the 3-D solar source is inside
      the scheme.
   9. Wind stress on the MIT grid: the kernel's one-cell x/y shift
-     (:func:`veros_mit_tau_shift_1deg`), applied once at data-prep time.
+     (:func:`legoesm.ocean.fidelity.veros_layout_common.veros_mit_tau_shift`
+     with ``x_cyclic=False``), applied once at data-prep time.
  10. Everything else — eos="veros_gsw", rigid lid + faithful AB2 stack,
      zero bottom drag, cp_0 kernel literal 3991.86795711963, 30-day SSS
      restore, ice mask, 360-day forcing year — is IDENTICAL to the matched
@@ -99,11 +100,10 @@ scoping SS C — "= global_flexible row-for-row EXCEPT tke_mxl_choice=1"):
 INERT with ``enable_idemix=False`` (4deg-verified) — unmapped.  The file's
 ``tidal_energy``/``wind_energy`` fields are idemix-only — unread.
 
-DEDUP NOTE: :func:`veros_mit_tau_shift_1deg`, the shape-generic layout
-bridges and :func:`veros_area_t_1deg` are the same constructions as the
-NOT-YET-MERGED global_flexible recipe carries (``/tmp`` worktree at the
-time of writing); whichever lands second must factor them into ONE shared
-fidelity helper module (this build stands alone on origin/main).
+The MIT-grid tau shift, the (x,y,z)/(x,y) layout bridges and the T-cell area
+weights are the shared harness glue in
+:mod:`legoesm.ocean.fidelity.veros_layout_common` (#433), consumed identically
+by this recipe and global_flexible (the former per-recipe twins are gone).
 """
 
 from __future__ import annotations
@@ -128,7 +128,9 @@ from legoesm.ocean.fidelity.veros_global_4deg_recipe import (
     VEROS_GLOBAL4_CP0,
     get_periodic_interval_weights,
 )
+from legoesm.ocean.fidelity.veros_layout_common import veros_xyz_to_legoesm
 from legoesm.ocean.fidelity.veros_state_bridge import veros_u_centered_z_centres
+from legoesm.ocean.fidelity.veros_stepping_common import veros_faithful_stepping
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -166,11 +168,7 @@ __all__ = (
     "get_periodic_interval_weights",
     "kbot_to_mask_and_h_bathy_1deg",
     "replicate_veros_kbot_1deg",
-    "veros_area_t_1deg",
     "veros_full_axes_1deg",
-    "veros_mit_tau_shift_1deg",
-    "veros_xy_to_legoesm_1deg",
-    "veros_xyz_to_legoesm_1deg",
 )
 
 
@@ -353,61 +351,6 @@ def kbot_to_mask_and_h_bathy_1deg(
 # ---------------------------------------------------------------------------
 
 
-def veros_xyz_to_legoesm_1deg(arr_xyz: np.ndarray,
-                              fill: float = 0.0) -> np.ndarray:
-    """(x, y, z) VEROS z-order (k=0 deepest) → legoESM (lat, lon, z) with
-    k=0 SURFACE, plus the two wall rows (shape-generic)."""
-    nx, ny, nz = arr_xyz.shape
-    out = np.full((ny + 2, nx, nz), fill, dtype=np.float64)
-    out[1:-1, :, :] = np.transpose(arr_xyz, (1, 0, 2))[:, :, ::-1]
-    return out
-
-
-def veros_xy_to_legoesm_1deg(arr_xy: np.ndarray,
-                             fill: float = 0.0) -> np.ndarray:
-    """(x, y) → legoESM (lat, lon) with wall rows (2-D forcing fields)."""
-    nx, ny = arr_xy.shape
-    out = np.full((ny + 2, nx), fill, dtype=np.float64)
-    out[1:-1, :] = arr_xy.T
-    return out
-
-
-def veros_mit_tau_shift_1deg(taux_xym: np.ndarray,
-                             tauy_xym: np.ndarray,
-                             ) -> tuple[np.ndarray, np.ndarray]:
-    """The Veros set_forcing_kernel MIT-grid index shift
-    (global_1deg.py:309-310): ``surface_taux[i] = taux[i+1]`` (one cell in
-    x) and ``surface_tauy[j] = tauy[j+1]`` (one cell in y), applied ONCE at
-    data-prep time on the INTERIOR monthly stacks (x, y, 12).
-
-    Ghost semantics (MEASURED on the live oracle dump, t=0 realized
-    ``surface_taux``): Veros NEVER fills the ghost cells of the custom
-    ``taux``/``tauy`` variables (they are assigned only at ``[2:-2, 2:-2]``
-    and ``enforce_boundaries`` is never called on them), so BOTH shifts
-    pull a ZERO ghost into the last interior column/row — the easternmost
-    ``surface_taux`` column and the northernmost ``surface_tauy`` row are
-    exactly 0 in the oracle.  Replicated, not smoothed (and NOT a cyclic
-    roll — the roll assumption fails the harness gate by 0.2 N/m²).  The
-    harness gate asserts this against ``surface_taux0``/``surface_tauy0``
-    bit-targets."""
-    taux_shift = np.concatenate(
-        [taux_xym[1:, :, :], np.zeros_like(taux_xym[:1, :, :])], axis=0)
-    tauy_shift = np.concatenate(
-        [tauy_xym[:, 1:, :], np.zeros_like(tauy_xym[:, :1, :])], axis=1)
-    return taux_shift, tauy_shift
-
-
-def veros_area_t_1deg(
-    yt_deg: np.ndarray,
-    r_earth: float = VEROS_CONSTANTS_CONFIG.R_earth,
-) -> np.ndarray:
-    """Veros T-cell area column weights ``dxt·dyt·cost`` [m**2] for the
-    uniform 1-degree grid (per-latitude row; broadcast over x)."""
-    degtom = r_earth * np.pi / 180.0
-    return (DXT_DEG * degtom) * (DYT_DEG * degtom) * np.cos(
-        np.deg2rad(np.asarray(yt_deg)))
-
-
 # ---------------------------------------------------------------------------
 # Physics configs (scoping SS C; deltas vs global_4deg documented per line)
 # ---------------------------------------------------------------------------
@@ -553,13 +496,9 @@ def build_global_1deg_model_config() -> LatLonCGridOceanConfig:
         K_v=0.0,
         gm_redi=GLOBAL_1DEG_GM_REDI_CONFIG,
         surface_forcing_implicit=True,              # Veros source placement
-        outer_integrator="ab2",
-        ab2_scope="advective",
-        barotropic_solver="rigid_lid",
-        dt_mom_ratio=DT_MOM_RATIO,                  # 1 — STOCK sync stepping
-        momentum_friction_additive=True,
-        coriolis_scheme="explicit_ab2",             # |f|·dt_mom ≈ 0.26 @79.5°
-        implicit_vmix_dzw_slot=True,                 # Veros dzw implicit slot (#428)
+        # ---- Veros-faithful time stepping (shared composition, #433) ----
+        # dt_mom_ratio=1 (STOCK sync stepping); |f|·dt_mom ≈ 0.26 @79.5°.
+        **veros_faithful_stepping(dt_mom_ratio=DT_MOM_RATIO),
         physics=build_global_1deg_physics_config(),
     )
 
@@ -586,9 +525,9 @@ def build_global_1deg_recipe(
     kbot = replicate_veros_kbot_1deg(bathymetry_xy, salt_xyz)
     land_mask, H_bathy = kbot_to_mask_and_h_bathy_1deg(kbot, z_ref)
     z_coord = create_partial_cell_coordinate(z_ref, jnp.asarray(H_bathy))
-    T_init = (veros_xyz_to_legoesm_1deg(temp_xyz)
+    T_init = (veros_xyz_to_legoesm(temp_xyz)
               if temp_xyz is not None else None)
-    S_init = veros_xyz_to_legoesm_1deg(salt_xyz)
+    S_init = veros_xyz_to_legoesm(salt_xyz)
     initial_state = build_global_1deg_state(
         grid, z_coord, land_mask, H_bathy, T_init=T_init, S_init=S_init)
     return ACCRecipe(
