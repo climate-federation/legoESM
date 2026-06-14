@@ -452,12 +452,18 @@ def cgrid_to_dgrid(u_c, v_c, cdgrid):
 # D-grid vorticity (circulation form)
 # ==============================================================================
 
-def dgrid_vorticity(u_d, v_d, cdgrid):
-    """Relative vorticity at cc from D-grid corners via exact circulation (avoids Hollingsworth-Kallberg).
+def dgrid_vorticity_core(u_d, v_d, cosa_corner, dx_edge_y, dy_edge_x, area):
+    """Pure-array core of :func:`dgrid_vorticity` — relative vorticity at cc
+    from D-grid corner winds via exact circulation, with the RAW metrics passed
+    explicitly (``cosa_corner``/``dx_edge_y``/``dy_edge_x``/``area``).  Shared by
+    the global wrapper and the sub-face tile kernel
+    (:func:`legoesm.parallel.tiled_production_cdgrid.dgrid_vorticity_tile_2d`)
+    so the circulation numerics are NOT duplicated.  Purely local: cc cell
+    ``(i,j)`` reads only the 2x2 corner block ``[i:i+2, j:j+2]``.
 
     Non-orthogonality: j-edges use v.e_j = u_d*cos(α) + v_d*sin(α).
     """
-    cosa = _broadcast_metric(cdgrid.cosa_corner, u_d)
+    cosa = _broadcast_metric(cosa_corner, u_d)
     sina = jnp.sqrt(jnp.maximum(1.0 - cosa**2, _EPS))
 
     # South edge (i-direction): v . e_i = u_d
@@ -479,16 +485,25 @@ def dgrid_vorticity(u_d, v_d, cdgrid):
     sina_west = 0.5 * (sina[:, :-1, :-1] + sina[:, :-1, 1:])
     v_cov_west = u_west_raw * cosa_west + v_west_raw * sina_west
 
-    dx_south = _broadcast_metric(cdgrid.dx_edge_y[:, :, :-1], u_d)
-    dx_north = _broadcast_metric(cdgrid.dx_edge_y[:, :, 1:], u_d)
-    dy_west = _broadcast_metric(cdgrid.dy_edge_x[:, :-1, :], u_d)
-    dy_east = _broadcast_metric(cdgrid.dy_edge_x[:, 1:, :], u_d)
+    dx_south = _broadcast_metric(dx_edge_y[:, :, :-1], u_d)
+    dx_north = _broadcast_metric(dx_edge_y[:, :, 1:], u_d)
+    dy_west = _broadcast_metric(dy_edge_x[:, :-1, :], u_d)
+    dy_east = _broadcast_metric(dy_edge_x[:, 1:, :], u_d)
 
     circ = (u_south * dx_south + v_cov_east * dy_east
             - u_north * dx_north - v_cov_west * dy_west)
 
-    area = _broadcast_metric(cdgrid.base.area, u_d)
-    return circ / area
+    area_b = _broadcast_metric(area, u_d)
+    return circ / area_b
+
+
+def dgrid_vorticity(u_d, v_d, cdgrid):
+    """Relative vorticity at cc from D-grid corners via exact circulation
+    (avoids Hollingsworth-Kallberg).  Thin wrapper over
+    :func:`dgrid_vorticity_core` with the cdgrid metrics."""
+    return dgrid_vorticity_core(
+        u_d, v_d, cdgrid.cosa_corner, cdgrid.dx_edge_y, cdgrid.dy_edge_x,
+        cdgrid.base.area)
 
 
 # ==============================================================================
