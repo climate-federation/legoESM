@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+from legoesm.grids.regridding import conservative_regrid_latlon
 from legoesm.land.surface_data.schema import write_surfdata
 from legoesm.land.surface_data.sources.clm5_surfdata import (
     read_clm5_cover_veg,
@@ -33,36 +33,12 @@ from legoesm.land.surface_data.sources.clm5_surfdata import (
 _SOIL_VARS = ("sand_pct", "clay_pct", "organic", "bulk_density")
 
 
-def _regrid_layered_latlon(field_lyx, weights, ny, nx):
-    """NaN-aware IDW regrid of ``(nlayer, slat, slon)`` -> ``(nlayer, ny, nx)``.
-
-    HWSD has NaN over no-soil pixels (water/ice/urban/no-data); a plain weighted
-    sum would propagate one NaN neighbour into a NaN target.  Here NaN neighbours
-    are dropped and the weights renormalised over the valid ones, so a target only
-    becomes NaN when *all* its source neighbours are missing.  Reuses the
-    KD-tree weights from :func:`compute_latlon_to_voronoi_weights`.
-    """
-    a = np.moveaxis(np.asarray(field_lyx, dtype=np.float64), 0, -1)   # (slat, slon, L)
-    flat = a.reshape(-1, a.shape[-1])                        # (src_flat, L)
-    idx = np.asarray(weights.src_indices)                   # (ntgt, k)
-    w = np.asarray(weights.weights, dtype=np.float64)       # (ntgt, k)
-    vals = flat[idx]                                        # (ntgt, k, L)
-    valid = np.isfinite(vals)
-    wexp = w[:, :, None] * valid                            # (ntgt, k, L)
-    num = np.sum(np.where(valid, vals, 0.0) * wexp, axis=1)  # (ntgt, L)
-    den = wexp.sum(axis=1)                                  # (ntgt, L)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        out = np.where(den > 0.0, num / np.maximum(den, 1e-30), np.nan)
-    return np.moveaxis(out.reshape(ny, nx, a.shape[-1]), -1, 0)  # (L, ny, nx)
-
-
 def build_v1_surfdata(
     clm_path: str,
     hwsd_soil_nc: str,
     out_path: str,
     *,
     clm_config: CLM5SurfdataConfig = CLM5SurfdataConfig(),
-    soil_k_neighbors: int = 4,
 ) -> str:
     """Build the v1 harmonized surfdata: CLM cover/PFT/LAI + HWSD soil.
 
@@ -81,13 +57,14 @@ def build_v1_surfdata(
     try:
         src_lat = np.asarray(hs["lat"].values, dtype=np.float64)
         src_lon = np.asarray(hs["lon"].values, dtype=np.float64)
-        lon2d, lat2d = np.meshgrid(tgt_lon, tgt_lat)
-        weights = compute_latlon_to_voronoi_weights(
-            np.deg2rad(src_lat), np.deg2rad(src_lon),
-            np.deg2rad(lat2d.ravel()), np.deg2rad(lon2d.ravel()),
-            k_neighbors=soil_k_neighbors,
-        )
-        soil = {v: _regrid_layered_latlon(hs[v].values, weights, ny, nx) for v in _SOIL_VARS}
+
+        def _regrid_soil(field_lyx):
+            # (nlayer, slat, slon) -> conservative -> (nlayer, ny, nx)
+            a = np.moveaxis(np.asarray(field_lyx, dtype=np.float64), 0, -1)  # (slat,slon,L)
+            out = conservative_regrid_latlon(a, src_lat, src_lon, tgt_lat, tgt_lon)
+            return np.moveaxis(out, -1, 0)
+
+        soil = {v: _regrid_soil(hs[v].values) for v in _SOIL_VARS}
         soil_dz = np.asarray(hs["soil_dz"].values, dtype=np.float64)
     finally:
         hs.close()

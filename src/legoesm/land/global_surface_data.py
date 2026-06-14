@@ -67,6 +67,7 @@ import jax.numpy as jnp
 from legoesm.grids.regridding import (
     RegridWeights,
     compute_latlon_to_voronoi_weights,
+    conservative_regrid_latlon,
     regrid_scalar,
 )
 from legoesm.land.soil_grid import SoilGrid, SoilGridConfig, make_soil_grid
@@ -274,6 +275,25 @@ def _target_latlon_flat(grid) -> tuple[np.ndarray, np.ndarray, tuple]:
     return lat.ravel(), lon.ravel(), tuple(int(s) for s in lat.shape)
 
 
+def _regular_latlon_1d(grid):
+    """Return ``(tgt_lat_deg, tgt_lon_deg)`` if ``grid`` is a regular lat-lon grid.
+
+    Regular means ``lat2d`` is constant along each row and ``lon2d`` constant down
+    each column.  ``grid.lat2d``/``lon2d`` are in **radians** (the regridder
+    convention); returns degrees.  ``None`` for irregular grids (cubed-sphere,
+    MPAS) which fall back to KD-tree IDW.
+    """
+    if not (hasattr(grid, "lat2d") and hasattr(grid, "lon2d")):
+        return None
+    lat2d = np.rad2deg(np.asarray(grid.lat2d, dtype=np.float64))
+    lon2d = np.rad2deg(np.asarray(grid.lon2d, dtype=np.float64))
+    if lat2d.ndim != 2:
+        return None
+    if np.allclose(lat2d, lat2d[:, :1]) and np.allclose(lon2d, lon2d[:1, :]):
+        return lat2d[:, 0], lon2d[0, :]
+    return None
+
+
 def _build_weights(
     src_lat_deg: np.ndarray,
     src_lon_deg: np.ndarray,
@@ -390,13 +410,35 @@ def build_global_surface_data(
 
     tgt_lat, tgt_lon, target_shape = _target_latlon_flat(grid)
     ncol = int(np.prod(target_shape))
+    # KD-tree weights are still used for the categorical soil-colour nearest pick.
     w = _build_weights(raw.src_lat, raw.src_lon, tgt_lat, tgt_lon, config.k_neighbors)
+
+    # Continuous fields use CONSERVATIVE, NaN-aware regridding when the target is a
+    # regular lat-lon grid (area-weighted; ocean NaNs never bleed into coastal
+    # cells).  Irregular targets (cubed-sphere/MPAS) fall back to KD-tree IDW.
+    _reg = _regular_latlon_1d(grid)
+    if _reg is not None:
+        _slat = np.asarray(raw.src_lat, dtype=np.float64)
+        _slon = np.asarray(raw.src_lon, dtype=np.float64)
+        _tlat, _tlon = _reg
+
+        def _rg(field):
+            a = np.asarray(field, dtype=np.float64)
+            trailing = a.shape[2:]
+            ll = int(np.prod(trailing)) if trailing else 1
+            out = conservative_regrid_latlon(
+                a.reshape(a.shape[0], a.shape[1], ll), _slat, _slon, _tlat, _tlon)
+            flat = out.reshape(-1, ll)                      # (ncol, ll)
+            return jnp.asarray(flat if trailing else flat[:, 0])
+    else:
+        def _rg(field):
+            return _regrid(field, w)
 
     # --- soil: regrid (ncol, n_src_layer) then remap to model layers ---
     dst_depth = np.asarray(soil_grid.z_node)
 
     def _soil(field):
-        regridded = _regrid(field, w)                       # (ncol, n_src_layer)
+        regridded = _rg(field)                              # (ncol, n_src_layer)
         return _remap_soil_layers(regridded, raw.src_soil_depth, dst_depth)
 
     sand = _soil(raw.sand)
@@ -409,7 +451,7 @@ def build_global_surface_data(
     # --- cover fractions (nyear, ncol) ---
     def _frac_annual(field):  # source (nyear, nlat, nlon) -> (ncol, nyear) -> (nyear, ncol)
         src = np.moveaxis(np.asarray(field), 0, -1)         # (nlat, nlon, nyear)
-        out = _regrid(src, w)                               # (ncol, nyear)
+        out = _rg(src)                                      # (ncol, nyear)
         return jnp.moveaxis(out, -1, 0)                     # (nyear, ncol)
 
     f_land = _frac_annual(raw.f_land)
@@ -421,14 +463,14 @@ def build_global_surface_data(
     # regrid_scalar collapses multi-dim trailing to one axis, so reshape back.
     pft_src = np.moveaxis(np.asarray(raw.pft_frac), 0, 2)   # (nlat, nlon, nyear, npft)
     nyear, npft = pft_src.shape[2], pft_src.shape[3]
-    pft_out = _regrid(pft_src, w).reshape((ncol, nyear, npft))
+    pft_out = _rg(pft_src).reshape((ncol, nyear, npft))
     pft_frac = _renorm_pft(jnp.moveaxis(pft_out, 0, 1))     # (nyear, ncol, npft)
 
     # --- vegetation state (12, ncol, npft) ---
     def _veg_monthly(field):  # source (12, nlat, nlon, npft) -> (12, ncol, npft)
         src = np.moveaxis(np.asarray(field), 0, 2)          # (nlat, nlon, 12, npft)
         npft_v = src.shape[3]
-        out = _regrid(src, w).reshape((ncol, _N_MONTH, npft_v))
+        out = _rg(src).reshape((ncol, _N_MONTH, npft_v))
         return jnp.moveaxis(out, 0, 1)                      # (12, ncol, npft)
 
     lai = _veg_monthly(raw.lai)
@@ -438,7 +480,7 @@ def build_global_surface_data(
 
     # --- gridcell area ---
     if raw.cell_area is not None:
-        cell_area = _regrid(raw.cell_area, w)               # (ncol,)
+        cell_area = _rg(raw.cell_area)                      # (ncol,)
     else:
         cell_area = jnp.asarray(grid.grid_area, dtype=jnp.float32).ravel()
         if cell_area.shape[0] != ncol:
