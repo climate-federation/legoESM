@@ -114,6 +114,52 @@ def _check_edges(edges: np.ndarray, name: str) -> None:
         raise ValueError(f"{name} must be strictly monotonically increasing")
 
 
+def cell_edges_1d(
+    centers: np.ndarray,
+    periodic_lon: bool = False,
+) -> np.ndarray:
+    """Cell-face edges (radians) from uniformly-spaced 1-D cell centres (radians).
+
+    Canonical helper for building the edge arrays that
+    :func:`compute_overlap_weights` consumes.  Assumes uniform spacing
+    (``dc = centers[1] - centers[0]``); interior edges are the midpoints and
+    the two boundary edges are half-cell extrapolations.
+
+    Parameters
+    ----------
+    centers : 1-D array
+        Cell-centre coordinates in **radians**.
+    periodic_lon : bool
+        If True, force the last edge to be exactly ``first_edge + 2*pi`` so the
+        longitude axis spans the full circle.  This prevents the conservative
+        regrid from under-weighting the seam column when the last centre is
+        slightly less than ``2*pi - dc/2`` (the radian analogue of the
+        +360 deg wrap used by the JRA55-do / OMIP forcing loaders).
+
+    Notes
+    -----
+    Two legacy degree-based private copies still exist
+    (``forcing/jra55_do.py:_grid_edges_from_centers`` and
+    ``ocean/coupler/omip2_applicator.py:_edges_from_centers_deg``); the latter's
+    ``periodic`` flag is a no-op and it instead pads the source with ghost
+    columns, so they are NOT drop-in replaceable by this helper without changing
+    their behaviour — unify them in a dedicated, separately-validated PR rather
+    than here.  For latitude prefer a grid's pole-clamped v-face coordinates
+    (e.g. ``LatLonGrid.lat_v``) over this helper, which would otherwise
+    extrapolate the first/last edge past +/-pi/2.
+    """
+    c = np.asarray(centers, dtype=np.float64)
+    if c.size < 2:
+        raise ValueError("Need >= 2 cell centres to infer edges")
+    dc = float(c[1] - c[0])
+    edges = np.empty(c.size + 1, dtype=np.float64)
+    edges[:-1] = c - 0.5 * dc
+    edges[-1] = c[-1] + 0.5 * dc
+    if periodic_lon:
+        edges[-1] = edges[0] + 2.0 * np.pi
+    return edges
+
+
 def compute_overlap_weights(
     src_lat_edges: np.ndarray,
     src_lon_edges: np.ndarray,

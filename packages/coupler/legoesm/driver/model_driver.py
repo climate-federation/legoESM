@@ -4937,8 +4937,28 @@ class ModelDriver:
             day_of_year, seconds_of_day = day_to_calendar(day)
             sst, sic = self.get_sst_sic(day)
 
-            # Update external forcing at segment boundary (if radiation-aligned)
-            if RAD_UPDATE_STEPS > 1 and seg_idx > 0:
+            # Re-sample time-varying external forcing at every segment
+            # boundary so transient CMIP6 runs (historical / SSP: GHG, ozone,
+            # aerosol, solar all vary year-to-year — and ozone/aerosol vary
+            # seasonally within a year) track the calendar.
+            #
+            # Previously gated behind ``RAD_UPDATE_STEPS > 1`` — but that knob
+            # is the intra-run radiation sub-step CADENCE, orthogonal to forcing
+            # transience.  With the default ``rad_update_steps=1`` the branch was
+            # dead, so the compiled path froze ALL external forcing at the
+            # START_DAY precompute (~line 4662): a 1850-2014 historical run saw
+            # 1850 CO2 (and START_DAY's ozone season) for all 165 years.
+            # ``_precompute_external_forcing`` is host-side numpy interpolation
+            # (cheap, not in the JIT); the SegmentForcing leaves
+            # (s_0/ghg_vmr/o3_vmr/aerosol_od/solar_weights) are traced arrays of
+            # FIXED shape, so re-sampling changes only leaf *values* — no retrace.
+            # Byte-identical for truly-constant forcing (gray radiation, or
+            # constant GHG with no climatological ozone/aerosol); for runs with
+            # transient or climatological forcing it (correctly) now follows the
+            # calendar.  Matches the per-step path (_run_mpas / _run_spectral,
+            # ~line 5447) which already re-samples every radiation step.  seg 0
+            # keeps the START_DAY precompute unchanged.
+            if seg_idx > 0:
                 solar_now = get_solar_forcing_at_time(self._solar_config, day)
                 current_s_0 = float(solar_now["tsi"])
                 if self._use_solar_spectral:

@@ -46,6 +46,7 @@ class CoupledESMDriver:
         coupler_config=None,
         ice_config=None,
         lake_config=None,
+        ocean_grid=None,
         output_dir=None,
     ):
         self.atm_config = atm_config
@@ -54,6 +55,10 @@ class CoupledESMDriver:
         self._coupler_config = coupler_config
         self._ice_config = ice_config
         self._lake_config = lake_config
+        # Ocean grid: None => ocean lives on the atmosphere grid (single-grid
+        # coupling, no remap).  A distinct grid object enables differentiable
+        # atm<->ocean regridding through the coupler (see coupler.grid_remap).
+        self._ocean_grid_arg = ocean_grid
 
         # Populated during setup()
         self._step_surface = None
@@ -62,6 +67,7 @@ class CoupledESMDriver:
         self._ocean_step = None
         self._last_sfc_response = None
         self._coupled_diag = []
+        self._sst_mean_init = None  # set on first diag — SST-drift reference
 
     @property
     def output_dir(self) -> Path:
@@ -98,14 +104,23 @@ class CoupledESMDriver:
                     f"carbon_active={self.coupled_cfg.carbon_active}")
 
     def _init_ocean(self):
-        """Initialize the slab/two-layer ocean."""
+        """Initialize the slab/two-layer ocean (on the ocean grid)."""
         from legoesm.ocean.simple_ocean import make_ocean, init_slab_state
+        from legoesm.coupler.grid_remap import make_grid_remapper, remap_field
 
         cfg = self.coupled_cfg
-        shape_2d = self._atm.grid.grid_shape_2d
+        # The ocean may live on a DIFFERENT grid than the atmosphere.  Build the
+        # differentiable atm<->ocean remap once here (host).  When the ocean
+        # defaults to the atmosphere grid the remapper is the identity and every
+        # remap below is a byte-identical pass-through (standard single-grid run).
+        self._ocean_grid = self._ocean_grid_arg or self._atm.grid
+        self._grid_remapper = make_grid_remapper(self._atm.grid, self._ocean_grid)
+        shape_2d = self._ocean_grid.grid_shape_2d
 
-        # Get initial SST from the atmosphere's SST source (day 0)
-        sst_init, _ = self._atm.get_sst_sic(0.0)
+        # Initial SST from the atmosphere's SST source (day 0), remapped onto
+        # the ocean grid (identity => unchanged).
+        sst_init_atm, _ = self._atm.get_sst_sic(0.0)
+        sst_init = remap_field(sst_init_atm, self._grid_remapper.a2o)
         T_sfc_mean = float(jnp.mean(sst_init))
 
         self._ocean_state = init_slab_state(
@@ -306,9 +321,14 @@ class CoupledESMDriver:
         self._original_get_sst_sic = self._atm.get_sst_sic
 
         def _coupled_get_sst_sic(day):
-            # SST from slab ocean
-            sst = self._ocean_state.T_sfc.data
-            # SIC from prognostic sea ice state (if available) or file
+            from legoesm.coupler.grid_remap import remap_field
+            # SST from the ocean, remapped onto the atmosphere grid (identity
+            # remapper => unchanged) so the atm physics always sees atm-grid SST
+            # even when the ocean runs on a different grid.
+            sst = remap_field(self._ocean_state.T_sfc.data,
+                              self._grid_remapper.o2a)
+            # SIC from prognostic sea ice (already on the atm grid, where the
+            # coupler runs) or the file fallback.
             if (self._sfc_state is not None
                     and hasattr(self._sfc_state, 'ice')
                     and self._sfc_state.ice is not None):
@@ -548,16 +568,27 @@ class CoupledESMDriver:
         n_sub = max(1, int(round(dt_segment / coupling_dt)))
         sub_dt = dt_segment / n_sub
 
+        from legoesm.coupler.grid_remap import remap_field, remap_surface_fields
+
         atm_forcing = self._build_atm_forcing(day)
+        # Surface forcing for the ocean step lives on the OCEAN grid; remap the
+        # atm-grid forcing fields onto it (identity remapper => unchanged, so the
+        # standard single-grid run is byte-identical).
+        ocean_forcing = remap_surface_fields(atm_forcing, self._grid_remapper.a2o)
 
         for _ in range(n_sub):
-            # Step slab ocean
-            self._step_ocean(atm_forcing, sub_dt)
+            # Step slab ocean (on the ocean grid)
+            self._step_ocean(ocean_forcing, sub_dt)
 
-            # Step coupler (land, ice, lake, ocean tile blending)
-            sst = self._ocean_state.T_sfc.data
-            u_sfc = getattr(self, '_ocean_u_sfc', jnp.zeros_like(sst))
-            v_sfc = getattr(self, '_ocean_v_sfc', jnp.zeros_like(sst))
+            # Ocean state is on the ocean grid; remap SST / surface currents onto
+            # the atmosphere grid for the coupler / surface step (identity =>
+            # pass-through).
+            sst_o = self._ocean_state.T_sfc.data
+            u_o = getattr(self, '_ocean_u_sfc', jnp.zeros_like(sst_o))
+            v_o = getattr(self, '_ocean_v_sfc', jnp.zeros_like(sst_o))
+            sst = remap_field(sst_o, self._grid_remapper.o2a)
+            u_sfc = remap_field(u_o, self._grid_remapper.o2a)
+            v_sfc = remap_field(v_o, self._grid_remapper.o2a)
 
             doy, _ = day_to_calendar(day)
 
@@ -604,6 +635,14 @@ class CoupledESMDriver:
             "sst_min": float(host[1]),
             "sst_max": float(host[2]),
         }
+        # SST drift vs run start — the headline slab-piControl drift metric.
+        # Cheap (reuses sst_mean; no new device sync) and gives operators
+        # long-run drift visibility for multi-decadal coupled runs.  A full
+        # global TOA energy-residual diagnostic needs the atmosphere's TOA
+        # fluxes plumbed into the coupled diag — deferred (see audit gap #4).
+        if self._sst_mean_init is None:
+            self._sst_mean_init = diag["sst_mean"]
+        diag["sst_drift_K"] = diag["sst_mean"] - self._sst_mean_init
         idx = 3
         if has_co2:
             diag["co2_ppmv_mean"] = (

@@ -99,6 +99,74 @@ class TestAquaplanet(unittest.TestCase):
         self.assertIn("sst_mean", diag[0])
         self.assertIn("day", diag[0])
 
+    def test_coupled_diag_has_sst_drift(self):
+        """SST-drift metric is logged and referenced to run start."""
+        driver = _make_driver("aquaplanet", days=2)
+        driver.run()
+        diag = driver.coupled_diagnostics
+        self.assertGreater(len(diag), 0)
+        # Every record carries the drift; the first is the reference (zero).
+        for d in diag:
+            self.assertIn("sst_drift_K", d)
+            self.assertTrue(jnp.isfinite(jnp.asarray(d["sst_drift_K"])))
+        self.assertEqual(diag[0]["sst_drift_K"], 0.0)
+        # Drift is consistent with the absolute means it is derived from.
+        self.assertAlmostEqual(
+            diag[-1]["sst_drift_K"],
+            diag[-1]["sst_mean"] - diag[0]["sst_mean"],
+            places=6,
+        )
+
+
+class TestMixedGridCoupling(unittest.TestCase):
+    """Atmosphere and ocean on DIFFERENT grids, coupled through the
+    differentiable conservative remap (coupler.grid_remap)."""
+
+    def _make_mixed_driver(self, atm_nlat=16, ocean_nlat=8, days=1):
+        from legoesm.driver.config import (
+            ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
+        )
+        from legoesm.driver.coupled_config import PRESETS
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        from legoesm.grids.latlon import create_latlon_grid
+
+        atm_config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=atm_nlat, nlev=5),
+            dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                                discretization="finite_volume"),
+            output=OutputConfig(diag_days=max(days, 1)),
+            radiation="gray", days=days,
+        )
+        ocean_grid = create_latlon_grid(n_lat=ocean_nlat, n_lon=2 * ocean_nlat)
+        driver = CoupledESMDriver(
+            atm_config, PRESETS["aquaplanet"](), ocean_grid=ocean_grid,
+        )
+        driver.setup()
+        return driver, ocean_grid
+
+    def test_ocean_state_on_ocean_grid(self):
+        """Slab ocean state is allocated on the (distinct) ocean grid."""
+        driver, ocean_grid = self._make_mixed_driver()
+        self.assertEqual(
+            tuple(driver.ocean_state.T_sfc.data.shape),
+            tuple(ocean_grid.grid_shape_2d),
+        )
+        self.assertFalse(driver._grid_remapper.identity)
+
+    def test_mixed_grid_coupled_run_stable(self):
+        """A coupled run with atm grid != ocean grid completes and stays finite."""
+        driver, ocean_grid = self._make_mixed_driver(days=1)
+        status = driver.run()
+        self.assertEqual(status, "COMPLETED")
+        # Ocean stayed on its grid; atm on its grid; both physical.
+        self.assertEqual(tuple(driver.ocean_state.T_sfc.data.shape),
+                         tuple(ocean_grid.grid_shape_2d))
+        self.assertTrue(jnp.all(jnp.isfinite(driver.ocean_state.T_sfc.data)))
+        self.assertTrue(jnp.all(jnp.isfinite(driver.state.T.data)))
+        sst_mean = float(jnp.mean(driver.ocean_state.T_sfc.data))
+        self.assertGreater(sst_mean, 250.0)
+        self.assertLess(sst_mean, 320.0)
+
 
 class TestSlabSimple(unittest.TestCase):
     """Slab ocean + slab bucket land."""
