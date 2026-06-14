@@ -422,6 +422,40 @@ def test_compute_omip2_freshwater_forcing_emp():
     assert np.allclose(np.asarray(fw_half.runoff), 0.5 * R, rtol=1e-10)
 
 
+def test_compute_omip2_freshwater_forcing_ice_export():
+    """``ice_freshwater_R`` (prescribed sea-ice freshwater export, vfxice+vfxsnw,
+    + INTO ocean) populates the ``ice_fw`` channel that ``net_freshwater_flux``
+    sums (P - E + runoff + ice_fw), is ramped like the other components, and is
+    additive to the net so a positive export freshens vs the no-ice baseline.
+    """
+    from legoesm.ocean.coupler import compute_omip2_freshwater_forcing
+    from legoesm.ocean.freshwater import net_freshwater_flux
+    state, grid, z, _ = _rest_state_latlon()
+    forcing = _emp_forcing(precip=5.0e-5, q_air=0.010)
+    shp = np.asarray(state.T.data)[..., 0].shape
+
+    ice_fw = np.full(shp, 2.0e-6)        # + INTO ocean (melt-dominated export)
+    fw = compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon",
+        ice_freshwater_R=ice_fw)
+    # Lands in the ice_fw channel (NOT runoff), and runoff stays zero.
+    assert np.allclose(np.asarray(fw.ice_fw), ice_fw, rtol=1e-10)
+    assert np.all(np.asarray(fw.runoff) == 0.0)
+
+    # Additive to the net: +ice_fw raises net freshwater vs the no-export run.
+    fw0 = compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon")
+    dnet = (np.asarray(net_freshwater_flux(fw))
+            - np.asarray(net_freshwater_flux(fw0)))
+    assert np.allclose(dnet, ice_fw, rtol=1e-9, atol=1e-15)
+
+    # Ramp scales the ice_fw channel linearly (single ramp, no double-count).
+    fw_half = compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon",
+        ice_freshwater_R=ice_fw, ramp=0.5)
+    assert np.allclose(np.asarray(fw_half.ice_fw), 0.5 * ice_fw, rtol=1e-10)
+
+
 @pytest.mark.parametrize("grid_type,res", [
     ("cubed_sphere", "C24"),
     ("mpas", "ico3"),

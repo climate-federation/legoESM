@@ -136,6 +136,92 @@ def test_siconc_at_step_month_indexing():
     assert rom._siconc_at_step(None, 0, dt, monthly=True) is None
 
 
+# ---------------------------------------------------------------------------
+# Sea-ice -> ocean SALT (sfxice) + FRESHWATER (vfxice+vfxsnw) export loader
+# (--ice-freshwater-export).  Real-file checks (skipped if absent) plus a
+# synthetic NaN/fill-handling + missing-variable test that needs no NEMO data.
+# ---------------------------------------------------------------------------
+
+def _write_synthetic_icemod(path, *, with_fluxes=True):
+    """A tiny 1-record curvilinear icemod: a regular lat-lon source with NaN
+    (``_FillValue``) land in the southern half.  ``sfxice`` POSITIVE everywhere
+    (brine), ``vfxice`` negative (growth/removal), ``vfxsnw`` positive (melt)."""
+    import xarray as xr
+    ny, nx = 20, 36
+    lat = np.linspace(-85.0, 85.0, ny)
+    lon = np.linspace(0.0, 350.0, nx)
+    lat2d = np.broadcast_to(lat[:, None], (ny, nx)).astype(np.float64)
+    lon2d = np.broadcast_to(lon[None, :], (ny, nx)).astype(np.float64)
+    land = lat2d < -40.0                       # NaN-filled "land" band
+    sfx = np.where(land, np.nan, 1.0e-7)        # +brine into ocean
+    vfi = np.where(land, np.nan, -3.0e-6)       # ice growth (neg = removal)
+    vfs = np.where(land, np.nan, 1.0e-6)        # snow melt (+ into ocean)
+    data = {
+        "nav_lat": (("y", "x"), lat2d),
+        "nav_lon": (("y", "x"), lon2d),
+        "sfxice": (("time_counter", "y", "x"), sfx[None]),
+        "vfxice": (("time_counter", "y", "x"), vfi[None]),
+        "vfxsnw": (("time_counter", "y", "x"), vfs[None]),
+    }
+    if not with_fluxes:
+        data = {k: v for k, v in data.items()
+                if k in ("nav_lat", "nav_lon", "sfxice")}  # drop vfx* only
+    xr.Dataset(data).to_netcdf(path)
+
+
+def test_load_nemo_ice_fluxes_synthetic_nan_and_sum(tmp_path):
+    """Synthetic loader test (no NEMO file): NaN land cells excluded as IDW
+    sources + zeroed on land, ``ice_fw == vfxice + vfxsnw``, sfxice sign
+    preserved (positive brine stays positive)."""
+    rom = _runner_module()
+    f = tmp_path / "icemod_synth.nc"
+    _write_synthetic_icemod(f)
+    lat2d, lon2d = _latlon_target(nlat=40, nlon=72)
+    # Target land = the same southern band; cells there must come back zero.
+    land_mask = (lat2d > -40.0).astype(np.float64)
+    sfxice, ice_fw = rom.load_nemo_ice_fluxes(
+        None, "latlon", lat2d, lon2d, icemod_file=str(f), land_mask=land_mask)
+
+    assert sfxice.shape == lat2d.shape and ice_fw.shape == lat2d.shape
+    assert np.isfinite(sfxice).all() and np.isfinite(ice_fw).all()
+    # Land cells (mask 0) zeroed for BOTH fields.
+    assert np.all(sfxice[land_mask <= 0.5] == 0.0)
+    assert np.all(ice_fw[land_mask <= 0.5] == 0.0)
+    # Ocean cells: sfxice keeps its positive (brine) sign; ice_fw == vfi+vfs =
+    # -3e-6 + 1e-6 = -2e-6 (net export/removal), so it is NEGATIVE there.
+    ocean = land_mask > 0.5
+    assert np.all(sfxice[ocean] > 0.0)
+    assert np.allclose(sfxice[ocean], 1.0e-7, rtol=1e-6)
+    assert np.allclose(ice_fw[ocean], -2.0e-6, rtol=1e-6)
+
+
+def test_load_nemo_ice_fluxes_missing_variable_raises(tmp_path):
+    """A file without sfxice/vfxice/vfxsnw fails EARLY with a clear KeyError
+    (e.g. a siconc-only file passed via --icemod-flux-file)."""
+    rom = _runner_module()
+    f = tmp_path / "icemod_nofluxes.nc"
+    _write_synthetic_icemod(f, with_fluxes=False)   # has sfxice, drops vfx*
+    lat2d, lon2d = _latlon_target(nlat=40, nlon=72)
+    with pytest.raises(KeyError, match=r"vfxice|vfxsnw|flux variable"):
+        rom.load_nemo_ice_fluxes(None, "latlon", lat2d, lon2d, icemod_file=str(f))
+
+
+def test_load_nemo_ice_fluxes_real_file():
+    """Real ORCA1 icemod (skipped if absent): shapes, finiteness, and the
+    Arctic salt-balance SIGN -- the >70N mean sfxice is POSITIVE (brine
+    rejection saltens, countering the rivers)."""
+    rom = _runner_module()
+    if not os.path.exists(rom._SICONC_NC):
+        pytest.skip(f"NEMO icemod file absent: {rom._SICONC_NC}")
+    lat2d, lon2d = _latlon_target()
+    sfxice, ice_fw = rom.load_nemo_ice_fluxes(None, "latlon", lat2d, lon2d)
+    assert sfxice.shape == lat2d.shape and ice_fw.shape == lat2d.shape
+    assert np.isfinite(sfxice).all() and np.isfinite(ice_fw).all()
+    # Arctic-mean sfxice > 0: net brine into the ocean (the oracle ~ +1.37e-7).
+    arctic = lat2d > 70.0
+    assert float(sfxice[arctic].mean()) > 0.0, "Arctic sfxice must saltens (>0)"
+
+
 def test_load_nemo_siconc_monthly_real_files():
     rom = _runner_module()
     if not (os.path.exists(rom._SICONC_NC) and os.path.exists(rom._TOS_MONTHLY_NC)):
