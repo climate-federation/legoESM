@@ -114,3 +114,92 @@ def make_tiled_dgrid_vorticity_stage_2d(mesh, cdgrid, n: int, kt: int):
         return _body(u_d, v_d, cosa_corner, dx_edge_y, dy_edge_x, area)
 
     return stage
+
+
+# ---------------------------------------------------------------------------
+# P-ii: the two production 4-point box interps.
+#   interp_corner_to_center (corner -> cc): PURELY LOCAL (cc cell reads its 2x2
+#     corner block) — like dgrid_vorticity, no halo, exact cc partition.
+#   interp_center_to_corner (cc -> corner): needs the cc 1-cell halo; tile the
+#     GLOBAL face-replicated pre-pad ``pad_halo_auto(field)`` (corner staggered
+#     -> lower-owns-shared reassembly).
+# Both tile kernels CALL the production ops on the sliced blocks (no dup
+# numerics — the box + its ndim handling live once in operators_cdgrid).
+# ---------------------------------------------------------------------------
+
+def interp_corner_to_center_tile_2d(field_d, a_i, a_j, nl: int):
+    """Per-tile ``interp_corner_to_center`` (P-ii): cc tile ``[a:a+nl]`` from the
+    ``nl+1`` corner block ``[a:a+nl+1]`` (no halo; cc cells partition exactly).
+    ``field_d`` ``(F, n+1, n+1[, nlev])`` corner, FACE-REPLICATED.  Returns the
+    cc tile ``(F, nl, nl[, nlev])``."""
+    from legoesm.core.operators_cdgrid import interp_corner_to_center
+
+    if field_d.shape[1] != field_d.shape[2]:
+        raise ValueError(
+            f"interp_corner_to_center_tile_2d: field_d must be square corners; "
+            f"got {field_d.shape[1:3]}")
+    blk = jax.lax.dynamic_slice_in_dim(field_d, a_i, nl + 1, axis=1)
+    blk = jax.lax.dynamic_slice_in_dim(blk, a_j, nl + 1, axis=2)
+    return interp_corner_to_center(blk)
+
+
+def interp_center_to_corner_tile_2d(f_pad, cdgrid, a_i, a_j, nl: int):
+    """Per-tile ``interp_center_to_corner`` (P-ii): corner tile (up to
+    ``nl+1`` staggered) from the GLOBAL pre-pad ``f_pad =
+    pad_halo_auto(field)`` ``(F, n+2, n+2[, nlev])`` (FACE-REPLICATED).  The
+    corner block ``[a:a+nl+1]`` reads ``f_pad[a:a+nl+2]``.  Calls the production
+    op with ``padded=blk`` (``field=blk`` only supplies ndim; cdgrid unused once
+    padded is given).  Returns ``(F, nl+1, nl+1[, nlev])``; reassembly is
+    lower-tile-owns-the-shared-corner-face."""
+    from legoesm.core.operators_cdgrid import interp_center_to_corner
+
+    if f_pad.shape[1] != f_pad.shape[2]:
+        raise ValueError(
+            f"interp_center_to_corner_tile_2d: f_pad must be square; got "
+            f"{f_pad.shape[1:3]}")
+    blk = jax.lax.dynamic_slice_in_dim(f_pad, a_i, nl + 2, axis=1)
+    blk = jax.lax.dynamic_slice_in_dim(blk, a_j, nl + 2, axis=2)
+    return interp_center_to_corner(blk, cdgrid, padded=blk)
+
+
+def make_tiled_interp_corner_to_center_stage_2d(mesh, n: int, kt: int):
+    """Sharded ``interp_corner_to_center`` on a ``(6, kt, kt)`` mesh.
+    ``stage(field_d) -> cc`` (face-replicated corner in; tile-sharded cc out,
+    gathered ``(6, n, n)`` — exact cc partition, no shared face)."""
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    nl = n // kt
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+
+    @partial(shard_map, mesh=mesh, in_specs=(fo,), out_specs=co,
+             check_vma=False)
+    def _stage(field_d):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return interp_corner_to_center_tile_2d(field_d, a_i, a_j, nl)
+
+    return _stage
+
+
+def make_tiled_interp_center_to_corner_stage_2d(mesh, cdgrid, n: int, kt: int):
+    """Sharded ``interp_center_to_corner`` on a ``(6, kt, kt)`` mesh.
+    ``stage(f_pad) -> corner`` where ``f_pad`` is the GLOBAL face-replicated
+    ``pad_halo_auto(field)`` ``(6, n+2, n+2)``; tile-sharded corner out, gathered
+    ``(6, kt*(nl+1), kt*(nl+1))`` reassembling lower-owns-shared to
+    ``(6, n+1, n+1)``.  cdgrid is closed over (unused — padded is always
+    supplied in the tile body, so no compute reads it)."""
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    nl = n // kt
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+
+    @partial(shard_map, mesh=mesh, in_specs=(fo,), out_specs=co,
+             check_vma=False)
+    def _stage(f_pad):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return interp_center_to_corner_tile_2d(f_pad, cdgrid, a_i, a_j, nl)
+
+    return _stage
