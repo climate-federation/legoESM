@@ -83,6 +83,9 @@ _GSAM_ROOT = _os.environ.get(
 )
 _DEFAULT_CASE = f"{_GSAM_ROOT}/CASES/BOMEX"
 _FCOR = 0.376e-4                       # CASES/BOMEX/prm fcor [1/s]
+_DEFAULT_LAGRANGIAN_SD_PER_CELL = 64
+_DEFAULT_LAGRANGIAN_INIT_SAMPLING = "cell_stratified"
+_DEFAULT_LAGRANGIAN_DIAGNOSTIC_ASSIGNMENT = "cic"
 
 
 def parse_args():
@@ -112,8 +115,24 @@ def parse_args():
     p.add_argument("--lagrangian-sdm", action="store_true",
                    help="OPT-IN persistent advected Lagrangian SDM instead of "
                         "the Eulerian microphysics adapter.")
-    p.add_argument("--n-sd", type=int, default=4096,
-                   help="super-droplet slots for --lagrangian-sdm.")
+    p.add_argument("--n-sd", type=int, default=None,
+                   help="total super-droplet slots for --lagrangian-sdm. If "
+                        "omitted, uses --sdm-sd-per-cell times nx*ny*nz.")
+    p.add_argument("--sdm-sd-per-cell", type=int,
+                   default=_DEFAULT_LAGRANGIAN_SD_PER_CELL,
+                   help="default Lagrangian SDM slots per Eulerian cell when "
+                        "--n-sd is omitted. Faithful LES diagnostics generally "
+                        "need O(32-128) SD/cell.")
+    p.add_argument("--sdm-init-sampling",
+                   choices=["uniform", "cell_stratified"],
+                   default=_DEFAULT_LAGRANGIAN_INIT_SAMPLING,
+                   help="initial Lagrangian SDM particle placement. "
+                        "cell_stratified gives an exact per-cell SD-count floor; "
+                        "uniform preserves the legacy whole-volume Monte Carlo.")
+    p.add_argument("--sdm-diagnostic-assignment",
+                   choices=["nearest", "cic"],
+                   default=_DEFAULT_LAGRANGIAN_DIAGNOSTIC_ASSIGNMENT,
+                   help="particle-to-mesh assignment for diagnostic q_c/q_r.")
     p.add_argument("--collision-mode", choices=["stochastic", "deterministic"],
                    default="stochastic",
                    help="Lagrangian SDM collision mode; default preserves the "
@@ -318,8 +337,15 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
     """Run BOMEX with the opt-in persistent Lagrangian SDM coupling."""
     if args.n_tracers < 3:
         raise ValueError("--lagrangian-sdm needs --n-tracers >= 3")
-    if args.n_sd < 1:
-        raise ValueError("--n-sd must be >= 1")
+    n_cells = g.cfg.nx * g.cfg.ny * g.cfg.nz
+    if args.n_sd is None:
+        if args.sdm_sd_per_cell < 1:
+            raise ValueError("--sdm-sd-per-cell must be >= 1")
+        n_sd = int(args.sdm_sd_per_cell) * n_cells
+    else:
+        if args.n_sd < 1:
+            raise ValueError("--n-sd must be >= 1")
+        n_sd = int(args.n_sd)
 
     dt0 = (select_dt(g.dx, max_wind_safe=args.max_wind, cfl_safe=args.cfl,
                      dt_cap=args.dt_max) if args.adaptive_dt
@@ -337,13 +363,16 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
         condensation_integrator=args.condensation_integrator,
         collision_mode=args.collision_mode,
         cdnc=float(args.sdm_cdnc),
+        lagrangian_diagnostic_assignment=args.sdm_diagnostic_assignment,
     )
     sdm = initialize_lagrangian_sdm(
-        jax.random.PRNGKey(args.sdm_seed), g, n_sd=args.n_sd,
+        jax.random.PRNGKey(args.sdm_seed), g, n_sd=n_sd,
         number_concentration=args.sdm_cdnc, radius=args.sdm_radius,
-        solute_mass=solute_mass, dtype=dtype)
+        solute_mass=solute_mass, dtype=dtype,
+        spatial_sampling=args.sdm_init_sampling)
     q_c0, q_r0 = diagnose_liquid_mixing_ratios(
-        sdm, g, ref.rho_c, sdm_cfg.r_rain, r_cloud=sdm_cfg.r_cloud)
+        sdm, g, ref.rho_c, sdm_cfg.r_rain, r_cloud=sdm_cfg.r_cloud,
+        assignment=sdm_cfg.lagrangian_diagnostic_assignment)
     st = st._replace(tracers=set_diagnostic_liquid_tracers(st.tracers, q_c0, q_r0))
 
     forcing = make_forcing_fn(g, ref, forc, dtype)
@@ -380,7 +409,9 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
     print(f"[BOMEX LES Lagrangian-SDM] {args.nx}x{args.ny}x{args.nz} "
           f"dx={g.dx:.0f} dz={g.dz:.0f} dt={dt0:.2f}s {args.time_scheme} "
           f"sgs={'LASD' if args.dynamic else args.sgs_model} "
-          f"n_sd={args.n_sd} collision={args.collision_mode} "
+          f"n_sd={n_sd} ({n_sd / n_cells:.1f}/cell) "
+          f"init={args.sdm_init_sampling} deposit={args.sdm_diagnostic_assignment} "
+          f"collision={args.collision_mode} "
           f"dtype={dtype.__name__}")
     print(f"  sfc: SHF={forc['sfc']['shf']:.1f} LHF={forc['sfc']['lhf']:.1f} "
           f"W/m²; CDNC={args.sdm_cdnc:.2e} m^-3, "
@@ -454,6 +485,8 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
         water_initial=water0, water_final=water1,
         max_sdm_water_error=max_sdm_water_error,
         mean_particle_displacement=mean_disp,
+        n_sd=n_sd,
+        sd_per_cell=n_sd / n_cells,
         n_active=float(jnp.sum(sdm.droplets.active)))
     print(f"  FINAL: cloud cover={d['cloud_cover']:.3f}, "
           f"LWP={d['lwp']:.2f} g/m², "

@@ -124,9 +124,10 @@ def plot_snapshot(npz_path: Path, out_png: Path | None = None) -> Path:
         im = None
         for c in range(nh):
             ax = axes[r][c]
+            interpolation = "nearest" if key == "qc" else "bilinear"
             im = ax.imshow(fld[c], origin="lower", extent=extent, cmap=cmap,
                            vmin=vmin, vmax=vmax, aspect="equal",
-                           interpolation="bilinear", rasterized=True)
+                           interpolation=interpolation, rasterized=True)
             if r == 0:
                 ax.set_title(f"z = {heights[c]:.0f} m"
                              + ("  (surface)" if c == 0 else ""), fontsize=9)

@@ -311,6 +311,109 @@ def test_lagrangian_diagnostic_excludes_haze_from_cloud_smear_metric():
         1.0e8 * _PREF * (3.0e-6)**3 / cell_air, rel=1e-12)
 
 
+def test_cell_stratified_initializer_gives_per_cell_floor_and_exact_number():
+    g = _grid(nx=4, ny=2, nz=2, L=8.0)
+    n_per_cell = 8
+    n_cells = g.cfg.ny * g.cfg.nx * g.cfg.nz
+    number_profile = jnp.array([1.0e6, 2.0e6], dtype=jnp.float64)
+    radius_profile = jnp.array([1.0e-6, 2.0e-6], dtype=jnp.float64)
+
+    state = initialize_lagrangian_sdm(
+        jax.random.PRNGKey(23),
+        g,
+        n_sd=n_per_cell * n_cells,
+        number_concentration=number_profile,
+        radius=radius_profile,
+        dtype=jnp.float64,
+        spatial_sampling="cell_stratified",
+    )
+
+    ix, iy, iz, _ = particle_cell_indices(state, g)
+    counts = _cell_sums(state, g, state.droplets.active)
+    represented_number = _cell_sums(
+        state, g, state.droplets.active * state.droplets.multiplicity)
+    expected_number = np.broadcast_to(
+        np.asarray(number_profile)[None, None, :] * g.dx * g.dy * g.dz,
+        (g.cfg.ny, g.cfg.nx, g.cfg.nz),
+    ).reshape(-1)
+
+    np.testing.assert_array_equal(np.asarray(counts), np.full(n_cells, n_per_cell))
+    np.testing.assert_allclose(
+        np.asarray(represented_number), expected_number, rtol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(state.droplets.radius), np.asarray(radius_profile)[np.asarray(iz)])
+    assert int(jnp.min(ix)) >= 0 and int(jnp.max(ix)) < g.cfg.nx
+    assert int(jnp.min(iy)) >= 0 and int(jnp.max(iy)) < g.cfg.ny
+
+
+def test_cic_diagnostic_conserves_and_spreads_single_particle():
+    g = _grid(nx=2, ny=2, nz=2, L=2.0)
+    state = _lag_state(
+        g,
+        [1.0e-5],
+        xi=1.0e6,
+        xyz=(np.array([1.0]), np.array([1.0]), np.array([1.0])),
+    )
+
+    qc_nearest, _ = diagnose_liquid_mixing_ratios(
+        state, g, rho=1.0, r_rain=4.0e-5, assignment="nearest")
+    qc_cic, _ = diagnose_liquid_mixing_ratios(
+        state, g, rho=1.0, r_rain=4.0e-5, assignment="cic")
+
+    represented = 1.0e6 * _PREF * (1.0e-5) ** 3
+    cell_air = g.dx * g.dy * g.dz
+    assert float(jnp.sum(qc_nearest) * cell_air) == pytest.approx(
+        represented, rel=1e-12)
+    assert float(jnp.sum(qc_cic) * cell_air) == pytest.approx(
+        represented, rel=1e-12)
+    assert int(jnp.count_nonzero(qc_nearest)) == 1
+    assert int(jnp.count_nonzero(qc_cic)) == 8
+    assert float(jnp.max(qc_cic)) == pytest.approx(
+        float(jnp.max(qc_nearest)) / 8.0, rel=1e-12)
+
+
+def test_stratified_cic_cloud_patch_is_compact_and_not_speckled():
+    g = _grid(nx=6, ny=6, nz=3, L=6.0)
+    source_cells = [(ix, iy, 1) for iy in (2, 3) for ix in (2, 3)]
+    offsets_xy = (0.125, 0.375, 0.625, 0.875)
+    offsets_z = (0.25, 0.75)
+    xyz = [[], [], []]
+    for ix, iy, iz in source_cells:
+        for ox in offsets_xy:
+            for oy in offsets_xy:
+                for oz in offsets_z:
+                    xyz[0].append((ix + ox) * g.dx)
+                    xyz[1].append((iy + oy) * g.dy)
+                    xyz[2].append((iz + oz) * g.dz)
+    n_sd = len(xyz[0])
+    state = _lag_state_slots(
+        g,
+        np.full(n_sd, 1.0e-5),
+        np.ones(n_sd) * 1.0e6,
+        np.ones(n_sd),
+        tuple(np.asarray(a) for a in xyz),
+    )
+
+    counts = np.asarray(_cell_sums(state, g, state.droplets.active)).reshape(
+        g.cfg.ny, g.cfg.nx, g.cfg.nz)
+    qc, _ = diagnose_liquid_mixing_ratios(
+        state, g, rho=1.0, r_rain=4.0e-5, assignment="cic")
+    qc_np = np.asarray(qc)
+    peak = float(qc_np.max())
+    nonzero_fraction = float(np.count_nonzero(qc_np) / qc_np.size)
+    intermediate_fraction = float(np.mean((qc_np > 0.01 * peak) & (qc_np < 0.5 * peak)))
+    source_mask = np.zeros_like(counts, dtype=bool)
+    for ix, iy, iz in source_cells:
+        source_mask[iy, ix, iz] = True
+
+    np.testing.assert_array_equal(counts[source_mask], np.full(len(source_cells), 32))
+    assert int(np.count_nonzero(counts[~source_mask])) == 0
+    assert 0.2 < nonzero_fraction < 0.6
+    assert intermediate_fraction > 0.1
+    assert float(jnp.sum(qc) * g.dx * g.dy * g.dz) == pytest.approx(
+        float(jnp.sum(represented_water_mass(state.droplets))), rel=1e-12)
+
+
 def test_tiny_spectral_les_lagrangian_sdm_smoke_conserves_water():
     g = _grid(nx=4, ny=4, nz=4, L=200.0, n_tracers=3)
     ref = _ref(g, theta0=300.0, qv0=0.02)

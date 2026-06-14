@@ -122,6 +122,12 @@ class SDMConfig(NamedTuple):
         and haze still carry liquid mass, exchange vapor/heat, collide, and
         conserve total water, but are not written to ``q_c`` where they would
         make clear air appear cloudy.
+    lagrangian_diagnostic_assignment : str
+        Particle-to-mesh assignment used when the advected Lagrangian LES path
+        bins particles back to diagnostic Eulerian ``q_c/q_r``. ``"cic"`` is
+        conservative cell-centred cloud-in-cell deposition and avoids
+        nearest-cell Monte-Carlo speckle; ``"nearest"`` preserves the original
+        cell-bin diagnostic for tests and debugging.
     column_do_coalescence : bool
         Opt-in stateless Eulerian column adapter mode. False (default) keeps
         the legacy condensation-only mean-droplet closure. True reconstructs a
@@ -187,3 +193,4 @@ class SDMConfig(NamedTuple):
     cdnc: float = 1.0e8                  # [1/m^3] prescribed cloud-droplet number
     r_min_reconstruct: float = 1.0e-6   # [m] min reconstructed mean-droplet radius
     r_cloud: float = 2.0e-6             # [m] activated-cloud diagnostic threshold
+    lagrangian_diagnostic_assignment: str = "cic"
