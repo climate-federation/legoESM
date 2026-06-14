@@ -22,10 +22,17 @@ from legoesm.forcing.time_utils import day_to_calendar
 
 from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic
 from legoesm.core.tracers import (
-    TracerRegistry, make_moisture_registry, make_full_moisture_registry, init_tracers,
+    TracerRegistry,
+    init_tracers,
+    make_full_moisture_registry,
+    make_moisture_registry,
 )
 from legoesm.driver.config import ExperimentConfig
-from legoesm.driver.physics_pipeline import build_physics_pipeline
+from legoesm.driver.physics_pipeline import (
+    build_physics_pipeline,
+    required_microphysics_tracer_slots,
+    validate_microphysics_tracer_slots,
+)
 from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.driver.restart import save_restart, load_restart
 
@@ -104,14 +111,17 @@ class ModelDriver:
         self.physics = None
         self.state = None
         self.tracers: dict[str, jax.Array] = {}
-        # Use full moisture registry for mixed-phase/two-moment microphysics
-        # (q_v,q_c,q_r,q_i,q_s,q_g,N_c,N_r,N_i). P3 reuses q_s→q_rim and
-        # q_g→B_rim but still needs the 9-slot layout.
-        _ice_schemes = {"morrison", "thompson", "seifert_beheng", "p3"}
-        if config.microphysics in _ice_schemes:
+        warm_registry = make_moisture_registry()
+        required_slots = required_microphysics_tracer_slots(config.microphysics)
+        if required_slots > warm_registry.n_tracers:
             self.tracer_registry: TracerRegistry = make_full_moisture_registry()
         else:
-            self.tracer_registry: TracerRegistry = make_moisture_registry()
+            self.tracer_registry: TracerRegistry = warm_registry
+        validate_microphysics_tracer_slots(
+            config.microphysics,
+            self.tracer_registry.n_tracers,
+            context="ModelDriver tracer registry",
+        )
         self.get_sst_sic = None
         # Optional per-segment surface-property feedback hook.  A coupled
         # driver sets this to a callable ``day -> (sfc_albedo, sfc_T)`` (each
@@ -288,6 +298,25 @@ class ModelDriver:
             return
         for key in [k for k in self._carry_aux if k.startswith("dmtr_")]:
             _tracers[key[len("dmtr_"):]] = self._carry_aux.pop(key)
+
+    def _validate_microphysics_tracer_state(
+        self,
+        *,
+        context: str = "ModelDriver tracer state",
+    ) -> int:
+        """Validate that the live tracer dict can hold scheme tendencies."""
+        tracers = getattr(self, "tracers", None)
+        have_slots = 0
+        if isinstance(tracers, dict):
+            for name in self.tracer_registry.names:
+                if tracers.get(name) is None:
+                    break
+                have_slots += 1
+        return validate_microphysics_tracer_slots(
+            self.config.microphysics,
+            have_slots,
+            context=context,
+        )
 
     def setup(self) -> None:
         """Initialize grid, dycore, physics, forcing, and state."""
@@ -801,6 +830,9 @@ class ModelDriver:
 
         # Initialize all tracers via registry
         self.tracers = init_tracers(self.tracer_registry, shape_3d)
+        self._validate_microphysics_tracer_state(
+            context="ModelDriver initialized tracer state",
+        )
 
         # Moisture initialization (spectral and MPAS use dry physics)
         if hasattr(self.state, 'p_s') and hasattr(self.state.p_s, 'data'):
