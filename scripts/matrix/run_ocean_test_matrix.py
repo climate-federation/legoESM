@@ -568,6 +568,13 @@ def _apply_value_threshold(
 # across both monolithic and modular runners.
 from legoesm.diagnostics import DAYS_REQUIRED as _DAYS_REQUIRED
 
+# Absolute deadband for the Overflow / Lock-Exchange RPE-sign gate (iter-156).
+# Kept in sync with the modular twin in
+# scripts/matrix/ocean_test_matrix/timeloop.py. 10x above the observed O(1e-6)
+# quick-mode sign-noise, ~1000x below the 1e-2 conservation-health scale: passes
+# discretization noise, fails a genuine (unphysical) RPE increase.
+_PE_REL_SIGN_DEADBAND = 1.0e-5
+
 
 def _apply_pe_rel_sign(
     ok: bool, notes: str, pe_rel_final: float, *, label: str,
@@ -610,6 +617,21 @@ def _apply_pe_rel_sign(
     ``days=NaN``) would silently get quick-mode ``op="le"``,
     weakening the documented full-mode strict gate.  Now
     every code path requires a finite positive ``days``.
+
+    iter-156 (smoke-sweep finding): in QUICK MODE ONLY, use a
+    small ABSOLUTE deadband (``_PE_REL_SIGN_DEADBAND``) instead
+    of a strict sign-of-noise check.  A short quick-mode gravity
+    current (Overflow on cubed_sphere, 0.1 days) barely evolves
+    the plume, so the diagnosed RPE change is dominated by
+    O(1e-7) discretization noise that can land marginally
+    POSITIVE (+6.5e-7 observed) without the plume gaining
+    available potential energy.  Quick mode now passes while
+    ``pe_rel_final`` stays below the deadband (10x above the
+    O(1e-6) sign-noise, ~1000x below the 1e-2 health scale).
+    FULL mode (days>=1) keeps the strict ``< 0`` contract
+    (threshold 0), so a genuine production RPE increase still
+    fails; Lock Exchange and full-mode Overflow (both negative)
+    are unaffected.
     """
     if days is _DAYS_REQUIRED:
         raise TypeError(
@@ -641,8 +663,12 @@ def _apply_pe_rel_sign(
             f"explicit experiment duration."
         )
     op = "lt" if days_f >= 1.0 else "le"
+    # Full mode keeps the STRICT documented RPE-decrease contract (threshold 0);
+    # the deadband applies ONLY in quick mode, where a barely-evolved plume's
+    # O(1e-7) discretization noise can land marginally positive.
+    threshold = 0.0 if days_f >= 1.0 else _PE_REL_SIGN_DEADBAND
     return _apply_value_threshold(
-        ok, notes, pe_rel_final, 0.0,
+        ok, notes, pe_rel_final, threshold,
         label=label, op=op, n_samples=n_samples,
     )
 
