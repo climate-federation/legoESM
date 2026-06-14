@@ -529,6 +529,7 @@ def build_segment_fn(
     hs_newtonian_relax=None,
     step_unified_no_rad=None,
     device_config=None,
+    energy_consistent_moisture_clip: bool = False,
 ):
     """Build a compiled segment function.
 
@@ -623,6 +624,16 @@ def build_segment_fn(
         behaviour is byte-identical to the legacy path: donating JIT
         kernels, and ``.raw`` stays the non-JIT, non-donating function
         that the training drivers differentiate through.
+    energy_consistent_moisture_clip : bool, optional
+        Issue #323.  When ``True``, the per-step ``max(q_v, 0)`` floor on
+        the physics tracer update also removes the latent heat tied to the
+        clipped (un-removed) vapour sink, so the floor conserves moist
+        static energy ``c_pd*T + L_v*q_v`` instead of injecting spurious
+        condensation heat.  This targets the kessler+sbm wind blow-up
+        (the combined vapour sink can exceed the available ``q_v`` under
+        organised convection; the existing floor truncates the sink but
+        keeps the full latent heating).  Default ``False`` =>
+        bit-identical to the legacy path.
 
     Returns
     -------
@@ -630,7 +641,10 @@ def build_segment_fn(
         ``run_segment(carry: SegmentCarry, n_steps: int,
         forcing: SegmentForcing) -> SegmentCarry``
     """
-    from legoesm.core.conservation import fix_moisture_hydrostatic, fix_ps_mass_target
+    from legoesm.core.conservation import (
+        fix_moisture_hydrostatic, fix_ps_mass_target,
+        energy_consistent_moisture_floor,
+    )
     from legoesm.core.cfl import estimate_min_dx_cubed_sphere
 
     # Precompute minimum grid spacing for CFL monitoring
@@ -816,10 +830,20 @@ def build_segment_fn(
                 if hs_newtonian_relax is not None:
                     _phys_dT = _phys_dT + hs_newtonian_relax(
                         T_new[_ofi], p_s_new[_ofi], lat[_ofi])
-                T_upd = T_new.at[_ofi].set(T_new[_ofi] + _dt * _phys_dT)
-                q_v_upd = carry.q_v.at[_ofi].set(
-                    jnp.maximum(carry.q_v[_ofi] + _dt * phys_out.dq_v_dt, 0.0)
-                )
+                _T_owned = T_new[_ofi] + _dt * _phys_dT
+                _qv_raw = carry.q_v[_ofi] + _dt * phys_out.dq_v_dt
+                if energy_consistent_moisture_clip:
+                    # Issue #323: keep the q_v floor moist-static-energy
+                    # neutral (remove the latent heat of the clipped vapour
+                    # sink) instead of injecting spurious condensation heat
+                    # -> the kessler+sbm wind blow-up.  Default off =>
+                    # bit-identical (plain ``max(q_v, 0)`` below).
+                    _qv_owned, _T_owned = energy_consistent_moisture_floor(
+                        _qv_raw, _T_owned)
+                else:
+                    _qv_owned = jnp.maximum(_qv_raw, 0.0)
+                T_upd = T_new.at[_ofi].set(_T_owned)
+                q_v_upd = carry.q_v.at[_ofi].set(_qv_owned)
                 q_c_upd = carry.q_c.at[_ofi].set(
                     jnp.maximum(carry.q_c[_ofi] + _dt * phys_out.dq_c_dt, 0.0)
                 )
@@ -904,7 +928,15 @@ def build_segment_fn(
                 if hs_newtonian_relax is not None:
                     _phys_dT_dt = _phys_dT_dt + hs_newtonian_relax(T_new, p_s_new, lat)
                 T_upd = T_new + _dt * _phys_dT_dt
-                q_v_upd = jnp.maximum(carry.q_v + _dt * phys_out.dq_v_dt, 0.0)
+                _qv_raw = carry.q_v + _dt * phys_out.dq_v_dt
+                if energy_consistent_moisture_clip:
+                    # Issue #323: see owned-face branch — keep the q_v floor
+                    # moist-static-energy neutral by removing the latent heat
+                    # of the clipped (un-removed) vapour sink.
+                    q_v_upd, T_upd = energy_consistent_moisture_floor(
+                        _qv_raw, T_upd)
+                else:
+                    q_v_upd = jnp.maximum(_qv_raw, 0.0)
                 q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
                 q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)
                 def _dm_upd(fld, tend):
