@@ -135,9 +135,16 @@ def validate_setup(setup, spec: MatrixRunnerSpec, *, known_names=None) -> None:
                 "(this matrix runner has no matching flag)"
             )
     res = setup.get("resolution")
-    if res is not None and (not isinstance(res, str) or not res.strip()):
+    # A non-empty string ("C48", "72x144") or a bare int (16) — the matrix
+    # runners' --resolution accepts both (build_matrix_command str()s it).
+    # Reject empty strings and other junk (bool/float/list/dict).
+    if res is not None and not (
+        (isinstance(res, str) and res.strip())
+        or (isinstance(res, int) and not isinstance(res, bool))
+    ):
         raise ValueError(
-            f"setup.resolution must be a non-empty string, got {res!r}")
+            f"setup.resolution must be a non-empty string or an int, got "
+            f"{res!r}")
     lv = setup.get("levels")
     if lv is not None and (isinstance(lv, bool) or not isinstance(lv, int)
                            or lv <= 0):

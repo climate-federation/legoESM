@@ -68,6 +68,14 @@ class TestValidate:
             with pytest.raises(ValueError):
                 validate_setup({"name": "c", "grid": "latlon", **bad}, OCEAN)
 
+    def test_resolution_accepts_str_or_int_rejects_junk(self):
+        # ocean accepts a bare int (16) or a string ("C48"/"72x144"); reject ""/junk
+        for ok in ("C48", "72x144", 16):
+            validate_setup({"name": "c", "grid": "latlon", "resolution": ok}, OCEAN)
+        for bad in ("", "   ", [], {}, True, 1.5):
+            with pytest.raises(ValueError, match="setup.resolution must be"):
+                validate_setup({"name": "c", "grid": "latlon", "resolution": bad}, OCEAN)
+
     def test_require_positive_finite(self):
         require_positive_finite("x", None)
         require_positive_finite("x", 3.0)
