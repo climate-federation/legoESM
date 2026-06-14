@@ -552,3 +552,139 @@ def make_tiled_fv3_sw_momentum_stage_2d(mesh, cdgrid, n: int, kt: int,
                      cos_a, sin_a, cap, sap, offsets)
 
     return stage
+
+
+# ---------------------------------------------------------------------------
+# MASS-PPM: the tiled `cgrid_mass_flux_divergence` height tendency (dh_dt) —
+# the design-doc HARDEST op.  Unlike the momentum assembly (in-stage halos on
+# intermediates), the PPM mass divergence tiles via the U3 DEEP-GLOBAL-PRE-PAD
+# pattern (cf. `tiled_transport.py` ppm_transport_1d(external_halo, rd_prepadded)):
+# `h` is a STAGE INPUT (cc height), so pre-pad it GLOBALLY (face-replicated)
+# one ring deeper than the production halo=2 and slice the deep window per tile
+# -> the per-tile PPM reconstruction is LOCAL (NO in-stage ppermute).  The cc
+# winds u_c/v_c are stage inputs too (staggered slice, NO halo: flux divergence
+# reads only a cell's own bounding faces, cf cgrid_divergence_local).
+#
+# The depth: PPM reconstruction of a tile-boundary cell (local -1) reads cells
+# [-3..1]; in the GLOBAL face that -3 is the cube edge (the production op's
+# internal `mode='edge'` pad supplies it), but at an INTERIOR tile cut -3 is a
+# real neighbour -> the tile carries ONE ring deeper (halo_in=3).  The deep
+# pad's outer ring is edge-extended from the halo=2 pad, so a FACE-edge tile
+# reproduces the global's `mode='edge'` value exactly.  The shared
+# `_cgrid_ppm_fluxes_core(halo_in=3)` reuses the production numerics verbatim.
+#
+# Scope: base case (apply_fortran_xppm_boundary=False -> the `n_interior`
+# face-edge override is OFF; non-duogrid -> NO `synchronize_cgrid_fluxes`).
+# The Fortran xppm overrides + duogrid flux-sync are later increments.
+# ---------------------------------------------------------------------------
+
+def cgrid_mass_divergence_tile_2d(h_deep, u_c, v_c, dy, dx, area,
+                                  a_i, a_j, nl: int):
+    """Per-tile ``cgrid_mass_flux_divergence`` (base case).  ``h_deep``
+    ``(F, n+6, n+6)`` = the GLOBAL deep pre-pad (halo=2 cross-face + 1 edge
+    ring; FACE-REPLICATED); ``u_c`` ``(F, n+1, n)``, ``v_c`` ``(F, n, n+1)``
+    C-grid winds; ``dy`` ``(F, n+1, n)`` (=dy_edge_x), ``dx`` ``(F, n, n+1)``
+    (=dx_edge_y) face lengths; ``area`` ``(F, n, n)`` — all FACE-REPLICATED.
+    The cc tile ``[a:a+nl]`` reads the ``nl+6`` deep h-window
+    ``h_deep[a:a+nl+6]`` (global cells ``[a-3..a+nl+2]``) and the staggered
+    wind/metric blocks.  Returns ``dh_dt`` ``(F, nl, nl)`` — cc cells
+    partition exactly (no shared face, no trim)."""
+    from legoesm.core.operators_cdgrid import _cgrid_ppm_fluxes_core
+
+    nfc = h_deep.shape[1]                       # n + 6
+    nf = nfc - 6                                # n
+    # Static guards (codex U3d/U4a pattern): a mis-sized input would make
+    # dynamic_slice_in_dim silently CLAMP instead of failing.
+    if h_deep.shape[1:] != (nf + 6, nf + 6):
+        raise ValueError(
+            f"cgrid_mass_divergence_tile_2d: h_deep must be the (n+6, n+6) "
+            f"deep pre-pad; got {h_deep.shape[1:]}")
+    if u_c.shape[1:] != (nf + 1, nf) or v_c.shape[1:] != (nf, nf + 1):
+        raise ValueError(
+            f"cgrid_mass_divergence_tile_2d: u_c/v_c must be C-grid "
+            f"{(nf + 1, nf)}/{(nf, nf + 1)}; got u_c={u_c.shape[1:]}, "
+            f"v_c={v_c.shape[1:]}")
+    if dy.shape[1:] != (nf + 1, nf) or dx.shape[1:] != (nf, nf + 1):
+        raise ValueError(
+            f"cgrid_mass_divergence_tile_2d: dy/dx must be {(nf + 1, nf)}/"
+            f"{(nf, nf + 1)}; got dy={dy.shape[1:]}, dx={dx.shape[1:]}")
+    if area.shape[1:] != (nf, nf):
+        raise ValueError(
+            f"cgrid_mass_divergence_tile_2d: area must be {(nf, nf)}; got "
+            f"{area.shape[1:]}")
+
+    # Deep h-window: global cells [a-3..a+nl+2] live at deep indices
+    # [a..a+nl+5] (global c at index c+3), so the slice start IS a (the +3
+    # halo offset is absorbed by the deep-pad index origin).
+    hw = jax.lax.dynamic_slice_in_dim(h_deep, a_i, nl + 6, axis=1)
+    hw = jax.lax.dynamic_slice_in_dim(hw, a_j, nl + 6, axis=2)
+
+    def _stag(arr, si, sj):
+        arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+        return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+    u_c_t = _stag(u_c, nl + 1, nl)
+    v_c_t = _stag(v_c, nl, nl + 1)
+    dy_t = _stag(dy, nl + 1, nl)
+    dx_t = _stag(dx, nl, nl + 1)
+    area_t = _stag(area, nl, nl)
+
+    flux_x, flux_y = _cgrid_ppm_fluxes_core(
+        hw, u_c_t, v_c_t, dy_t, dx_t, nl, halo_in=3,
+        effective_xppm_boundary=False)
+    net_x = flux_x[:, 1:] - flux_x[:, :-1]
+    net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
+    return -(net_x + net_y) / area_t
+
+
+def make_tiled_cgrid_mass_divergence_stage_2d(mesh, cdgrid, n: int, kt: int):
+    """Build the sharded base-case ``cgrid_mass_flux_divergence`` (dh_dt) stage
+    on a ``(6, kt, kt)`` mesh.  Returns ``stage(h, u_c, v_c) -> dh_dt`` where
+    ``h`` cc ``(6,n,n)``, ``u_c`` ``(6,n+1,n)``, ``v_c`` ``(6,n,n+1)`` are
+    FACE-SHARDED, TILE-REPLICATED.  The deep pre-pad ``h_deep`` (the halo=2
+    cross-face pad + 1 edge ring) is built GLOBALLY in ``stage`` (approach-C:
+    a cheap cross-face pre-pad of the STAGE INPUT) and threaded as a
+    face-sharded input; the staggered metrics likewise (NOT closed over -> the
+    codex U4a face-broadcast HIGH).  Output tile-sharded, gathered ``(6,n,n)``
+    (cc cells partition exactly).
+
+    Base case only: non-duogrid (no ``synchronize_cgrid_fluxes``) and
+    apply_fortran_xppm_boundary=False (the ``n_interior`` face-edge override is
+    off; tiling a GLOBAL-index-keyed override is a later increment)."""
+    from legoesm.core.operators_cdgrid import _pad_halo_auto_h2
+    import jax.numpy as jnp
+
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_cgrid_mass_divergence_stage_2d: n={n} != cdgrid.n="
+            f"{cdgrid.n}")
+    if cdgrid.base.duogrid is not None:
+        raise ValueError(
+            "make_tiled_cgrid_mass_divergence_stage_2d: base cut supports the "
+            "non-duogrid cube only (duogrid needs synchronize_cgrid_fluxes, a "
+            "later increment).")
+    nl = n // kt
+    dy_edge_x, dx_edge_y = cdgrid.dy_edge_x, cdgrid.dx_edge_y
+    area = cdgrid.base.area
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+
+    @partial(shard_map, mesh=mesh, in_specs=(fo, fo, fo, fo, fo, fo),
+             out_specs=co, check_vma=False)
+    def _body(h_deep, u_c, v_c, dy, dx, ar):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return cgrid_mass_divergence_tile_2d(
+            h_deep, u_c, v_c, dy, dx, ar, a_i, a_j, nl)
+
+    def stage(h, u_c, v_c):
+        # GLOBAL deep pre-pad: halo=2 cross-face pad + 1 edge ring (matches the
+        # production op's internal mode='edge' ghost at the cube edge), built
+        # ONCE outside the shard_map (approach-C cross-face pre-pad).
+        h_pad2 = _pad_halo_auto_h2(h, cdgrid)            # (6, n+4, n+4)
+        h_deep = jnp.pad(h_pad2, ((0, 0), (1, 1), (1, 1)), mode="edge")
+        return _body(h_deep, u_c, v_c, dy_edge_x, dx_edge_y, area)
+
+    return stage

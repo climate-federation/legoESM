@@ -97,19 +97,39 @@ numerics).
   boundary_fix=False, fortran_*=False, non-duogrid. Bit-identity vs global
   `fv3_sw_tendencies` (du_d_dt, dv_d_dt) at kt=2 (np24) + kt=3 (np54),
   rel<1e-10; codex-clean (7/7 vectors). Gate: `test_tiled_fv3_sw_momentum.py`.
-- **REMAINING (U3-scale HARD + future-HW, the genuine deferred-deep work):**
-  - **mass `cgrid_mass_flux_divergence` (PPM)** — HARDEST op. BASE case
-    (apply_fortran_xppm_boundary=False, non-duogrid) reduces to: halo=2 in-stage
-    scalar exchange of h (`make_tiled_pad_body(halo=2)`) + the cc-wind VECTOR
-    halo + `fv3_cc2c_core` (u_c/v_c are intermediates too) -> `_ppm_reconstruct_1d`
-    (xppm boundary OFF -> `n_interior` unused) -> upwind face -> flux ->
-    divergence; NO `synchronize_cgrid_fluxes` (non-duogrid). The face-extent
-    boundary logic (`n_interior=n`) only bites with the Fortran xppm overrides
-    (a later increment). NEXT unit.
+- **MASS-PPM `cgrid_mass_flux_divergence` (dh_dt) SHIPPED** —
+  `make_tiled_cgrid_mass_divergence_stage_2d` (tiled_production_cdgrid.py). The
+  design-doc HARDEST op, tiled via the U3 DEEP-GLOBAL-PRE-PAD pattern (NOT an
+  in-stage halo): `h` is a STAGE INPUT, pre-padded one ring deeper than the
+  production halo=2 (`h_deep` = `_pad_halo_auto_h2` + 1 edge ring, n+6) and the
+  deep window sliced per tile -> the per-tile PPM reconstruction is LOCAL. The
+  cc winds u_c/v_c are staggered stage inputs (NO halo — divergence reads only a
+  cell's own bounding faces). Depth insight: PPM reconstruction of the
+  tile-boundary cell (local -1) reads cells [-3..1], so a tile needs `halo_in=3`
+  (one ring deeper than the global's halo=2); the deep pad's outer ring is
+  edge-extended, so a FACE-edge tile reproduces the global's internal
+  `mode='edge'` ghost. Achieved by `_cgrid_ppm_fluxes_core(h_pad, u_c, v_c, dy,
+  dx, n_local, *, halo_in)` extracted from `_cgrid_ppm_fluxes_2d_no_sync` — ONE
+  core, `halo_in=2` drives the global op (the inline 2D path + the 4D no_sync
+  wrapper both now call it, dedup), `halo_in=3` drives the tile; the face
+  indices `q_R[halo_in-1:...]`/`q_L[halo_in:...]` collapse to the exact historical
+  `[1:n+2]`/`[2:n+3]` at halo_in=2. Base case: non-duogrid (no
+  `synchronize_cgrid_fluxes`), `apply_fortran_xppm_boundary=False` (the
+  `n_interior` face-edge override stays a later increment). Bit-identity vs
+  global at kt=2 (np24) + kt=3 (np54), rel<1e-10; codex-clean (8/8 vectors).
+  Refactor proven bit-identical: clean-HEAD vs refactor isolated SW integration
+  runs give IDENTICAL results to 16 digits (test_fv_cubesphere 7/7,
+  test_shallow_water 11/11; test_boundary_fix mass-conservation is a PRE-EXISTING
+  2.51e-6-vs-1e-6 miss, identical on clean HEAD). Gate:
+  `test_tiled_mass_divergence.py`.
+- **REMAINING (later increments):**
   - Optional momentum terms (div damp / hyperdiff / boundary smoothing /
     Fortran corner specials) — each rides the shipped per-op kernels + one more
     in-stage halo; their own increments.
-  - With dh_dt tiled, the FULL `fv3_sw_tendencies` np24 stage = momentum
-    assembly + mass assembly sharing the cc-wind vector halo.
+  - The Fortran xppm boundary overrides (`n_interior` keyed to GLOBAL face
+    index) + duogrid `synchronize_cgrid_fluxes` for the mass tile.
+  - The FULL `fv3_sw_tendencies` np24 stage = the SHIPPED momentum assembly +
+    the SHIPPED mass divergence, sharing the cc-wind vector halo (momentum) and
+    the deep h pre-pad (mass) — both validated independently; composing is wiring.
 - LESSON: a prior session built tiling infra; ALWAYS grep `tests/parallel/
   test_tiled_*` + `parallel.mesh` before tiling a cube op.
