@@ -1102,6 +1102,15 @@ class ModelDriver:
         # Aerosol external forcing
         self._aerosol_active = (cfg.radiation in ("rrtmg", "rrtmgp")
                                 and cfg.aerosol_forcing == "external")
+        # Volcanic stratospheric LONGWAVE aerosol (gap #9): active only on a
+        # gas-radiation scheme (gray ignores aerosol) with the LW switch and
+        # a volcanic file present.  Default OFF ⇒ no LW aerosol path.
+        self._aerosol_lw_active = (
+            cfg.radiation in ("rrtmg", "rrtmgp")
+            and bool(getattr(cfg, "volcanic_aerosol_lw", False))
+            and bool(cfg.volcanic_aerosol_file)
+        )
+        self._aerosol_lw_od = None
         self._aerosol_config = AerosolConfig(
             enabled=self._aerosol_active,
             source="climatology", path=cfg.aerosol_file,
@@ -1110,6 +1119,13 @@ class ModelDriver:
             volcanic_enabled=bool(cfg.volcanic_aerosol_file),
             volcanic_path=cfg.volcanic_aerosol_file,
             volcanic_scale=cfg.volcanic_aerosol_scale,
+            # Volcanic stratospheric LONGWAVE aerosol (gap #9): only when
+            # the LW switch is set AND a volcanic file is present.  Default
+            # OFF ⇒ ``get_aerosol_lw_at_time`` returns None ⇒ zeros LW od
+            # ⇒ byte-identical (RRTMGP no-op).
+            volcanic_lw_enabled=(bool(getattr(cfg, "volcanic_aerosol_lw",
+                                              False))
+                                 and bool(cfg.volcanic_aerosol_file)),
             # Calendar anchor for the non-cyclic dispatch in
             # ``get_aerosol_at_time``.  Multi-year volcanic time-series
             # (e.g. 1850–2014 CMIP6 ``bc_aeropt_cmip6_volc_*``) are
@@ -1180,7 +1196,7 @@ class ModelDriver:
     def _precompute_external_forcing(self, day, p_s, lat):
         """Pre-compute ozone/aerosol/GHG fields outside JIT boundary."""
         from legoesm.forcing.external import (
-            get_ozone_at_time, get_aerosol_at_time,
+            get_ozone_at_time, get_aerosol_at_time, get_aerosol_lw_at_time,
             get_ghg_at_time, ghg_concentrations_to_vmr,
         )
         from legoesm.forcing.surface_utils import distribute_column_aod_to_layers
@@ -1224,6 +1240,25 @@ class ModelDriver:
             aerosol_od = distribute_column_aod_to_layers(
                 jnp.asarray(aerosol_col), p_half_col,
             )
+
+        # Volcanic stratospheric LONGWAVE aerosol (gap #9): same (ncol,
+        # nlev) shape as ``aerosol_od``, default zeros so the SegmentForcing
+        # / forcing-dict leaf is a concrete fixed-shape array (no retrace)
+        # and a run without volcanic LW aerosol is byte-identical (zeros LW
+        # od is a RRTMGP no-op).  Distributed to layers by the SAME
+        # pressure-thickness helper used for the SW aerosol.  Stored as an
+        # instance attribute (NOT added to the 3-tuple return) so the five
+        # existing unpack call sites keep their arity.
+        aerosol_lw_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
+        if self._aerosol_lw_active:
+            aerosol_lw_col = get_aerosol_lw_at_time(
+                self._aerosol_config, day, lat_grid=lat_col,
+            )
+            if aerosol_lw_col is not None:
+                aerosol_lw_od = distribute_column_aod_to_layers(
+                    jnp.asarray(aerosol_lw_col), p_half_col,
+                )
+        self._aerosol_lw_od = aerosol_lw_od
 
         # GHG VMR override (None for gray radiation / constant forcing)
         ghg_vmr = None
@@ -3791,6 +3826,13 @@ class ModelDriver:
                         )
                         _forcing_daily["o3_vmr"] = _o3
                         _forcing_daily["aerosol_od"] = _aer
+                        # Volcanic LONGWAVE aerosol (gap #9): set the key
+                        # only when the LW source is active (else omit ⇒
+                        # ``forcing.get("aerosol_lw_od")`` is None ⇒ RRTMGP
+                        # no-op ⇒ byte-identical).
+                        _aer_lw = getattr(self, "_aerosol_lw_od", None)
+                        if self._aerosol_lw_active and _aer_lw is not None:
+                            _forcing_daily["aerosol_lw_od"] = _aer_lw
                         if _ghg is not None:
                             _forcing_daily["ghg_vmr"] = {
                                 k: jnp.asarray(v) for k, v in _ghg.items()
@@ -4293,6 +4335,11 @@ class ModelDriver:
                         self._current_day, _f_now['p_s'], _lat_2d_loop,
                     )
                     _ext_daily = {"o3_vmr": _o3, "aerosol_od": _aer}
+                    # Volcanic LONGWAVE aerosol (gap #9): only when active
+                    # (omitted ⇒ None ⇒ RRTMGP no-op ⇒ byte-identical).
+                    _aer_lw = getattr(self, "_aerosol_lw_od", None)
+                    if self._aerosol_lw_active and _aer_lw is not None:
+                        _ext_daily["aerosol_lw_od"] = _aer_lw
                     if _ghg is not None:
                         _ext_daily["ghg_vmr"] = {
                             k: jnp.asarray(v) for k, v in _ghg.items()
@@ -5073,6 +5120,7 @@ class ModelDriver:
                 day_of_year=day_of_year, seconds_of_day=seconds_of_day,
                 solar_weights=solar_weights, s_0=current_s_0,
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
+                aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
                 ghg_vmr=ghg_vmr,
                 sfc_albedo_override=_sfc_albedo_ovr,
                 sfc_T_override=_sfc_T_ovr,
@@ -5484,6 +5532,7 @@ class ModelDriver:
                 held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
+                aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
                 T_land=T_land, **_dm_step_in,
                 **_phys_carry_step_inputs(),
             )
@@ -5604,6 +5653,7 @@ class ModelDriver:
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
+                    aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
                     T_land=T_land, **_dm_step_in,
                     **_phys_carry_step_inputs(),
                 )

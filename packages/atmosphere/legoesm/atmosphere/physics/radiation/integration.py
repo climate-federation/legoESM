@@ -488,6 +488,7 @@ def _call_radiation_backend(
     ml_ozone_coefs=None,
     o3_vmr_override: jnp.ndarray | None = None,
     aerosol_od: jnp.ndarray | None = None,
+    aerosol_lw_od: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
@@ -520,6 +521,13 @@ def _call_radiation_backend(
         forcing pipeline (Kinne climatology + volcanic), passed to the
         RRTMGP solver as ``aerosol_optical_depth``.  Ignored by gray
         radiation.
+    aerosol_lw_od : jnp.ndarray or None
+        Per-layer LONGWAVE aerosol absorption optical depth (ncol, nlev)
+        from the external forcing pipeline (volcanic stratospheric,
+        gap #9), passed to the RRTMGP solver as
+        ``aerosol_absorption_optical_depth_lw``.  ``None`` (default) is a
+        no-op in the solver — byte-identical to no volcanic LW aerosol.
+        Ignored by gray radiation.
     solar_spectral_fraction : jnp.ndarray or None
         Per-g-point solar weights for spectral solar-cycle forcing,
         passed through to ``solve_columns``.
@@ -617,6 +625,7 @@ def _call_radiation_backend(
         o3_vmr=o3_vmr,
         ghg_vmr_override=ghg_vmr_override,
         aerosol_optical_depth=aerosol_od,
+        aerosol_absorption_optical_depth_lw=aerosol_lw_od,
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
@@ -855,6 +864,9 @@ def _make_hydrostatic_radiation(
         #   ghg_vmr     : dict[str, scalar] transient GHG VMRs
         _o3_ext = forcing.get("o3_vmr") if forcing is not None else None
         _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
+        _aer_lw_ext = (
+            forcing.get("aerosol_lw_od") if forcing is not None else None
+        )
         _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
 
         # Calendar time: prefer per-step TRACED forcing values (the MPAS
@@ -934,6 +946,8 @@ def _make_hydrostatic_radiation(
                 _o3_ext = shard_columns(_o3_ext, column_mesh)
             if _aer_ext is not None:
                 _aer_ext = shard_columns(_aer_ext, column_mesh)
+            if _aer_lw_ext is not None:
+                _aer_lw_ext = shard_columns(_aer_lw_ext, column_mesh)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
@@ -955,6 +969,7 @@ def _make_hydrostatic_radiation(
             ml_ozone_coefs=ml_ozone_coefs,
             o3_vmr_override=_o3_ext,
             aerosol_od=_aer_ext,
+            aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
         )
 
@@ -1595,6 +1610,9 @@ def _make_spectral_pe_radiation(
         # (ncol, nlev) columns, ghg_vmr is a dict of traced scalars.
         _o3_ext = forcing.get("o3_vmr") if forcing is not None else None
         _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
+        _aer_lw_ext = (
+            forcing.get("aerosol_lw_od") if forcing is not None else None
+        )
         _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
 
         # Surface albedo / emissivity overrides: a per-step TRACED
@@ -1706,6 +1724,7 @@ def _make_spectral_pe_radiation(
             ml_ozone_coefs=ml_ozone_coefs,
             o3_vmr_override=_o3_ext,
             aerosol_od=_aer_ext,
+            aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
         )
 

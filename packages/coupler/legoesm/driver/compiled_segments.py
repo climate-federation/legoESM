@@ -407,6 +407,14 @@ class SegmentForcing(NamedTuple):
     s_0: jax.Array
     o3_vmr: jax.Array
     aerosol_od: jax.Array
+    # Per-layer LONGWAVE aerosol absorption optical depth (volcanic
+    # stratospheric, gap #9).  Mirrors ``aerosol_od`` (the SHORTWAVE
+    # extinction).  Always a concrete array of the SAME shape as
+    # ``aerosol_od`` (materialised to zeros by :func:`pack_forcing` when
+    # the caller passes None) so the JIT pytree is stable and a run with
+    # no volcanic LW aerosol is byte-identical (zeros LW od is a no-op in
+    # the RRTMGP solver, same as None).
+    aerosol_lw_od: jax.Array
     ghg_vmr: jax.Array  # shape (n_species,); empty (0,) when inactive
     # Coupler-provided dynamic surface overrides — the tile-blended surface
     # albedo / skin temperature fed back each segment by a coupled driver
@@ -455,6 +463,7 @@ def ghg_array_to_dict(ghg_arr: jax.Array, ghg_keys: tuple[str, ...]) -> dict | N
 def pack_forcing(
     sst, sic, day_of_year, seconds_of_day,
     solar_weights, s_0, o3_vmr, aerosol_od,
+    aerosol_lw_od=None,
     ghg_vmr=None,
     sfc_albedo_override=None,
     sfc_T_override=None,
@@ -478,6 +487,16 @@ def pack_forcing(
         _ghg = ghg_dict_to_array(ghg_vmr)
     else:
         _ghg = jnp.asarray(ghg_vmr)
+    # LONGWAVE volcanic aerosol absorption optical depth (gap #9).  Default
+    # to zeros of the SAME shape as ``aerosol_od`` when None so the
+    # SegmentForcing pytree leaf is always a concrete fixed-shape array
+    # (no JIT retrace) and a run without volcanic LW aerosol is
+    # byte-identical (zeros LW od is a RRTMGP no-op).
+    _aer_od = jnp.asarray(aerosol_od)
+    if aerosol_lw_od is None:
+        _aer_lw_od = jnp.zeros_like(_aer_od)
+    else:
+        _aer_lw_od = jnp.asarray(aerosol_lw_od)
     return SegmentForcing(
         sst=jnp.asarray(sst),
         sic=jnp.asarray(sic),
@@ -486,7 +505,8 @@ def pack_forcing(
         solar_weights=jnp.asarray(solar_weights),
         s_0=jnp.asarray(s_0),
         o3_vmr=jnp.asarray(o3_vmr),
-        aerosol_od=jnp.asarray(aerosol_od),
+        aerosol_od=_aer_od,
+        aerosol_lw_od=_aer_lw_od,
         ghg_vmr=_ghg,
         sfc_albedo_override=(
             None if sfc_albedo_override is None
@@ -801,6 +821,7 @@ def build_segment_fn(
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
+                    aerosol_lw_od=forcing.aerosol_lw_od,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
                     T_land=_T_land_in, **_dm_in,
@@ -888,6 +909,7 @@ def build_segment_fn(
                     C_H=_C_H, C_E=_C_E,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
+                    aerosol_lw_od=forcing.aerosol_lw_od,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
                     T_land=carry.T_land, **_dm_in,
