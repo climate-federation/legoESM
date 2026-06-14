@@ -1,6 +1,6 @@
 """Cube tiled np>6 stage (task #3) — PPM transport tiling tests.
 
-U1: ``_ppm_transport_1d(..., rd_prepadded=True)`` is BIT-IDENTICAL to the
+U1: ``ppm_transport_1d(..., rd_prepadded=True)`` is BIT-IDENTICAL to the
 default internal edge-pad when fed the same padded rdelta — the hook that
 lets a sub-face TILE supply a REAL depth-1 neighbour-tile rdelta halo at
 interior cuts (the internal edge-pad is wrong there: the upwind CFL cell
@@ -17,7 +17,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.core.fv3_sw_core import _ppm_transport_1d
+from legoesm.core.fv3_sw_core import ppm_transport_1d
 
 
 def _bit_identical_for_axis(axis: int) -> None:
@@ -33,7 +33,7 @@ def _bit_identical_for_axis(axis: int) -> None:
         courant = jnp.asarray(rng.standard_normal((6, m, n + 1)))
         rdelta = jnp.asarray(np.abs(rng.standard_normal((6, m, n))) + 0.1)
 
-    flux_def = _ppm_transport_1d(field, courant, rdelta, axis, external_halo=eh)
+    flux_def = ppm_transport_1d(field, courant, rdelta, axis, external_halo=eh)
 
     # Replicate the function's internal rd edge-pad (done in its axis-1
     # working frame), then map back to the caller's axis so rd_prepadded
@@ -42,7 +42,7 @@ def _bit_identical_for_axis(axis: int) -> None:
     rd_pad_w = jnp.pad(rd_w, [(0, 0), (1, 1), (0, 0)], mode="edge")
     rd_pad_caller = rd_pad_w if axis == 1 else jnp.swapaxes(rd_pad_w, 1, 2)
 
-    flux_pp = _ppm_transport_1d(
+    flux_pp = ppm_transport_1d(
         field, courant, rd_pad_caller, axis, external_halo=eh,
         rd_prepadded=True)
 
@@ -69,7 +69,7 @@ def test_rd_prepadded_wrong_length_raises():
     courant = jnp.zeros((6, n + 1, m))
     bad_rd = jnp.ones((6, n + 1, m))   # length nn+1=9, not nn+2=10
     with pytest.raises(ValueError, match="rd_prepadded expects"):
-        _ppm_transport_1d(field, courant, bad_rd, 1, external_halo=eh,
+        ppm_transport_1d(field, courant, bad_rd, 1, external_halo=eh,
                           rd_prepadded=True)
 
 
@@ -94,9 +94,9 @@ def _global_vs_tiled_ppm(kt: int, nl: int) -> None:
     rd = jnp.asarray(np.abs(rng.standard_normal((6, n, m))) + 0.1)
 
     global_flux = np.asarray(
-        _ppm_transport_1d(field, courant, rd, 1, external_halo=0))
+        ppm_transport_1d(field, courant, rd, 1, external_halo=0))
 
-    # Global pre-pad EXACTLY as _ppm_transport_1d(external_halo=0) does
+    # Global pre-pad EXACTLY as ppm_transport_1d(external_halo=0) does
     # internally (field→h3 edge-pad; rd→depth-1 edge-pad).
     vp_g = jnp.pad(field, [(0, 0), (h3, h3), (0, 0)], mode="edge")
     rd_g = jnp.pad(rd, [(0, 0), (1, 1), (0, 0)], mode="edge")
@@ -106,7 +106,7 @@ def _global_vs_tiled_ppm(kt: int, nl: int) -> None:
         vp_t = vp_g[:, t * nl: t * nl + nl + 2 * h3, :]   # (6, nl+2h3, m)
         rd_t = rd_g[:, t * nl: t * nl + nl + 2, :]         # (6, nl+2, m)
         c_t = courant[:, t * nl: t * nl + nl + 1, :]       # (6, nl+1, m)
-        f_t = _ppm_transport_1d(vp_t, c_t, rd_t, 1, external_halo=h3,
+        f_t = ppm_transport_1d(vp_t, c_t, rd_t, 1, external_halo=h3,
                                 rd_prepadded=True)
         tiles.append(np.asarray(f_t))                      # (6, nl+1, m)
 
@@ -182,9 +182,9 @@ def test_ppm_sweep_tiling_real_crossface_kt3():
         "courant must exercise both PPM flux branches"
 
     global_x = np.asarray(
-        _ppm_transport_1d(u_d_ihalo, ub, rdx, 1, external_halo=eh))
+        ppm_transport_1d(u_d_ihalo, ub, rdx, 1, external_halo=eh))
 
-    # Pre-pad to h3=4 EXACTLY as _ppm_transport_1d(external_halo=eh) does
+    # Pre-pad to h3=4 EXACTLY as ppm_transport_1d(external_halo=eh) does
     # internally (gap = h3-eh each side), then slice the sweep axis.
     vp_g = jnp.pad(u_d_ihalo, [(0, 0), (h3 - eh, h3 - eh), (0, 0)],
                    mode="edge")                         # (6, n+2h3, M)
@@ -194,7 +194,7 @@ def test_ppm_sweep_tiling_real_crossface_kt3():
         vp_t = vp_g[:, t * nl: t * nl + nl + 2 * h3, :]
         rd_t = rd_g[:, t * nl: t * nl + nl + 2, :]
         c_t = ub[:, t * nl: t * nl + nl + 1, :]
-        f_t = _ppm_transport_1d(vp_t, c_t, rd_t, 1, external_halo=h3,
+        f_t = ppm_transport_1d(vp_t, c_t, rd_t, 1, external_halo=h3,
                                 rd_prepadded=True)
         tiles.append(np.asarray(f_t))
 

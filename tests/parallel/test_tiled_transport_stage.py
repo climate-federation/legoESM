@@ -2,7 +2,7 @@
 sweep (task #3 cube tiled np>6 stage).
 
 Proves the approach-C tiling (U2/U2b: global pre-pad → per-tile slice →
-_ppm_transport_1d(external_halo=4, rd_prepadded=True)) holds INSIDE a
+ppm_transport_1d(external_halo=4, rd_prepadded=True)) holds INSIDE a
 ``(6, kt)`` ``(face, tile_i)`` shard_map (6*kt host devices) — the step
 where the np>6 perf actually materialises.  i-sweep only, synthetic
 field/courant (the cross-face/staggered FIELD faithfulness is U2b; this
@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.core.fv3_sw_core import _ppm_transport_1d
+from legoesm.core.fv3_sw_core import ppm_transport_1d
 from legoesm.parallel.tiled_transport import (
     make_tiled_transport_sweep_stage,
     make_tiled_transport_sweep_stage_2d,
@@ -42,7 +42,7 @@ def test_transport_sweep_tile_body_host():
     courant = jnp.asarray(rng.standard_normal((6, n + 1, m)))
     rd = jnp.asarray(np.abs(rng.standard_normal((6, n, m))) + 0.1)
     global_flux = np.asarray(
-        _ppm_transport_1d(field, courant, rd, 1, external_halo=0))
+        ppm_transport_1d(field, courant, rd, 1, external_halo=0))
     vp_g = jnp.pad(field, [(0, 0), (h3, h3), (0, 0)], mode="edge")
     rd_g = jnp.pad(rd, [(0, 0), (1, 1), (0, 0)], mode="edge")
     # a = t*nl is a Python int here (host); axis_index int32 in the stage.
@@ -77,9 +77,9 @@ def test_tiled_transport_sweep_in_shardmap(kt):
     rd = jnp.asarray(np.abs(rng.standard_normal((6, n, m))) + 0.1)
 
     global_flux = np.asarray(
-        _ppm_transport_1d(field, courant, rd, 1, external_halo=0))  # (6,n+1,m)
+        ppm_transport_1d(field, courant, rd, 1, external_halo=0))  # (6,n+1,m)
 
-    # Global pre-pad EXACTLY as _ppm_transport_1d(external_halo=0) does —
+    # Global pre-pad EXACTLY as ppm_transport_1d(external_halo=0) does —
     # these are the FACE-REPLICATED stage inputs.
     vp_g = jnp.pad(field, [(0, 0), (h3, h3), (0, 0)], mode="edge")
     rd_g = jnp.pad(rd, [(0, 0), (1, 1), (0, 0)], mode="edge")
@@ -119,7 +119,7 @@ def test_transport_sweep_tile_2d_body_host():
     courant = jnp.asarray(rng.standard_normal((6, n + 1, n)))
     rd = jnp.asarray(np.abs(rng.standard_normal((6, n, n))) + 0.1)
     global_flux = np.asarray(
-        _ppm_transport_1d(field, courant, rd, 1, external_halo=0))  # (6,n+1,n)
+        ppm_transport_1d(field, courant, rd, 1, external_halo=0))  # (6,n+1,n)
     vp_g = jnp.pad(field, [(0, 0), (h3, h3), (0, 0)], mode="edge")
     rd_g = jnp.pad(rd, [(0, 0), (1, 1), (0, 0)], mode="edge")
     cols = []
@@ -146,7 +146,7 @@ def test_transport_jsweep_tile_2d_body_host():
     courant = jnp.asarray(rng.standard_normal((6, n, n + 1)))
     rd = jnp.asarray(np.abs(rng.standard_normal((6, n, n))) + 0.1)
     global_flux = np.asarray(
-        _ppm_transport_1d(field, courant, rd, 2, external_halo=0))  # (6,n,n+1)
+        ppm_transport_1d(field, courant, rd, 2, external_halo=0))  # (6,n,n+1)
     vp_g = jnp.pad(field, [(0, 0), (0, 0), (h3, h3)], mode="edge")
     rd_g = jnp.pad(rd, [(0, 0), (0, 0), (1, 1)], mode="edge")
     rows = []
@@ -179,13 +179,13 @@ def test_tiled_transport_sweep_2d_in_shardmap(sweep):
     if sweep == "i":
         courant = jnp.asarray(rng.standard_normal((6, n + 1, n)))
         global_flux = np.asarray(
-            _ppm_transport_1d(field, courant, rd, 1, external_halo=0))
+            ppm_transport_1d(field, courant, rd, 1, external_halo=0))
         vp_g = jnp.pad(field, [(0, 0), (h3, h3), (0, 0)], mode="edge")
         rd_g = jnp.pad(rd, [(0, 0), (1, 1), (0, 0)], mode="edge")
     else:
         courant = jnp.asarray(rng.standard_normal((6, n, n + 1)))
         global_flux = np.asarray(
-            _ppm_transport_1d(field, courant, rd, 2, external_halo=0))
+            ppm_transport_1d(field, courant, rd, 2, external_halo=0))
         vp_g = jnp.pad(field, [(0, 0), (0, 0), (h3, h3)], mode="edge")
         rd_g = jnp.pad(rd, [(0, 0), (0, 0), (1, 1)], mode="edge")
 
@@ -261,7 +261,7 @@ def test_u3d_real_ytp_v_corner_cross_tiling():
     _u_ih, v_d_jhalo = _pad_halo_dgrid_for_ppm(u_d, v_d, cd, halo=h_dg)  # (6,n+1,n+2h)
     rdy = 1.0 / jnp.maximum(cd.dy_edge_x, 1.0e-30)              # (6,n+1,n)
 
-    global_y = np.asarray(_ppm_transport_1d(
+    global_y = np.asarray(ppm_transport_1d(
         v_d_jhalo, vb, rdy, 2, external_halo=h_dg))            # (6,n+1,n+1)
 
     # Non-vacuity: cross-face halo differs from edge-replication; vb varies.
@@ -326,7 +326,7 @@ def test_u3d_real_xtp_u_corner_cross_tiling():
     u_d_ihalo, _v = _pad_halo_dgrid_for_ppm(u_d, v_d, cd, halo=h_dg)  # (6,n+2h,n+1)
     rdx = 1.0 / jnp.maximum(cd.dx_edge_y, 1.0e-30)             # (6,n,n+1)
 
-    global_x = np.asarray(_ppm_transport_1d(
+    global_x = np.asarray(ppm_transport_1d(
         u_d_ihalo, ub, rdx, 1, external_halo=h_dg))           # (6,n+1,n+1)
 
     assert float(jnp.max(jnp.abs(
@@ -392,13 +392,13 @@ def test_u3d_real_courant_in_shardmap(sweep):
     if sweep == "j":
         courant = vb
         rdy = 1.0 / jnp.maximum(cd.dy_edge_x, 1.0e-30)
-        global_f = np.asarray(_ppm_transport_1d(v_d_jhalo, vb, rdy, 2, external_halo=h_dg))
+        global_f = np.asarray(ppm_transport_1d(v_d_jhalo, vb, rdy, 2, external_halo=h_dg))
         vp_g = jnp.pad(v_d_jhalo, [(0, 0), (0, 0), (h3 - h_dg, h3 - h_dg)], mode="edge")
         rd_g = jnp.pad(rdy, [(0, 0), (0, 0), (1, 1)], mode="edge")
     else:
         courant = ub
         rdx = 1.0 / jnp.maximum(cd.dx_edge_y, 1.0e-30)
-        global_f = np.asarray(_ppm_transport_1d(u_d_ihalo, ub, rdx, 1, external_halo=h_dg))
+        global_f = np.asarray(ppm_transport_1d(u_d_ihalo, ub, rdx, 1, external_halo=h_dg))
         vp_g = jnp.pad(u_d_ihalo, [(0, 0), (h3 - h_dg, h3 - h_dg), (0, 0)], mode="edge")
         rd_g = jnp.pad(rdx, [(0, 0), (1, 1), (0, 0)], mode="edge")
 

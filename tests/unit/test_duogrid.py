@@ -1816,7 +1816,7 @@ class TestBgridNeCornerSync:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.core.fv3_sw_core import (
-            _bgrid_ke_transport, _ppm_transport_1d, _pad_halo_dgrid_for_ppm,
+            _bgrid_ke_transport, ppm_transport_1d, _pad_halo_dgrid_for_ppm,
         )
         from legoesm.grids.halo import synchronize_corner_scalar
 
@@ -1857,8 +1857,8 @@ class TestBgridNeCornerSync:
         rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, 1e-30)
         h_dg = 2
         u_d_ihalo, v_d_jhalo = _pad_halo_dgrid_for_ppm(u_d, v_d, cdgrid, halo=h_dg)
-        ty_ctrl = _ppm_transport_1d(v_d_jhalo, vb_ctrl, rdy, axis=2, external_halo=h_dg)
-        tx_ctrl = _ppm_transport_1d(u_d_ihalo, ub_ctrl, rdx, axis=1, external_halo=h_dg)
+        ty_ctrl = ppm_transport_1d(v_d_jhalo, vb_ctrl, rdy, axis=2, external_halo=h_dg)
+        tx_ctrl = ppm_transport_1d(u_d_ihalo, ub_ctrl, rdx, axis=1, external_halo=h_dg)
         ke_scalar_sync = 0.5 * (ty_ctrl * vb_ctrl + ub_ctrl * tx_ctrl)
         ke_scalar_sync = synchronize_corner_scalar(ke_scalar_sync, n)
 
@@ -1954,7 +1954,7 @@ class TestBgridNeCornerSync:
 
         **Isolation**: the scalar-sync control is constructed from
         the EXACT same Courant/PPM transport code (imported from
-        `_ppm_transport_1d`) as the production `_bgrid_ke_transport`,
+        `ppm_transport_1d`) as the production `_bgrid_ke_transport`,
         with the only difference being (a) no component sync on
         (ubb, vbbtemp), (b) `synchronize_corner_scalar` applied on
         the final KE.  Any measured diff is strictly attributable to
@@ -1971,7 +1971,7 @@ class TestBgridNeCornerSync:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.core import fv3_sw_core as fv3_sw_core_mod
-        from legoesm.core.fv3_sw_core import fv3_fb_sw_step, _ppm_transport_1d
+        from legoesm.core.fv3_sw_core import fv3_fb_sw_step, ppm_transport_1d
         from legoesm.grids.halo import synchronize_corner_scalar
 
         n = 8
@@ -2010,8 +2010,8 @@ class TestBgridNeCornerSync:
             ub = dt5 * (uc_sum - vc_sum * cosa) * rsina
             rdy = 1.0 / jnp.maximum(cdgrid_local.dy_edge_x, 1e-30)
             rdx = 1.0 / jnp.maximum(cdgrid_local.dx_edge_y, 1e-30)
-            ty = _ppm_transport_1d(v_d, vb, rdy, axis=2)
-            tx = _ppm_transport_1d(u_d, ub, rdx, axis=1)
+            ty = ppm_transport_1d(v_d, vb, rdy, axis=2)
+            tx = ppm_transport_1d(u_d, ub, rdx, axis=1)
             ke = 0.5 * (ty * vb + ub * tx)
             nn = cdgrid_local.n
             ke = synchronize_corner_scalar(ke, nn)
