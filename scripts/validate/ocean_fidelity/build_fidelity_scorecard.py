@@ -160,8 +160,9 @@ def render_scorecard_md(rows: list[MatrixRow], verdict, *, sha: str) -> str:
             "| Tier | Pass | Fail | Green | Kind |",
             "|---|---|---|---|---|",
         ]
+        from legoesm.ocean.fidelity.precedence import ORACLE_TIER_FLOOR
         for t, st in sorted(verdict.tiers.items()):
-            kind = "truth" if t < 3 else "oracle"
+            kind = "truth" if t < ORACLE_TIER_FLOOR else "oracle"
             mark = "✅" if st.green else "❌"
             lines.append(
                 f"| {t} | {st.n_pass} | {st.n_fail} | {mark} | {kind} |")
