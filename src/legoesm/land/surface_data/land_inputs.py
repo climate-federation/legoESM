@@ -284,3 +284,58 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *, the
     land_params = surface_data_to_land_params(
         gsd, land_config.surface_scheme, day_of_year, theta_top)
     return land_config, land_params, gsd
+
+
+# ===========================================================================
+# Reconciliation with the authoritative land-sea mask
+# ===========================================================================
+# The driver's land-sea mask (sftlf / ERA5 lsm / topography) decides which cells
+# are land — NOT the surfdata.  Wherever the mask says land but the surfdata has
+# no coverage (small islands, coast mismatch, HWSD/ice gaps), the land model must
+# still get *finite* parameters.  These helpers fill such cells (and any residual
+# NaN) with a bare-soil fallback, so every column is valid regardless of the mask.
+def _bare_land_surface_params(ncol: int):
+    """Bare-soil :class:`LandSurfaceParams` (CLM5 PFT 0 row) broadcast to ncol."""
+    row = np.asarray(clm5_pft_table())[0]                    # bare_soil (12,)
+    return array_to_params(jnp.broadcast_to(jnp.asarray(row), (ncol, row.shape[0])), PARAM_NAMES)
+
+
+def _bare_canopy_params(ncol: int) -> CanopyLandParams:
+    """Bare (no-vegetation) :class:`CanopyLandParams` broadcast to ncol."""
+    full = lambda v: jnp.full(ncol, v)
+    return CanopyLandParams(
+        LAI=full(0.0), hc=full(0.1), fC4=full(0.0), FNonVeg=full(1.0),
+        CI=full(0.75), kn=full(0.3), Vcmax25_C3_leaf=full(0.0), Vcmax25_C4_leaf=full(0.0),
+        m_C3=full(9.0), m_C4=full(4.0), b0_C3=full(0.01), b0_C4=full(0.04),
+        alf=full(0.3), TgC=full(25.0), ALB_VIS=full(0.2), ALB_NIR=full(0.3),
+        emissivity=full(0.96), rz0m=full(0.01), rd=full(0.0),
+    )
+
+
+def surfdata_covered(gsd) -> np.ndarray:
+    """Boolean ``(ncol,)``: columns the surfdata actually covers (finite pft_frac)."""
+    pft = np.asarray(gsd.pft_frac)
+    pft0 = pft[0] if pft.ndim == 3 else pft                  # (ncol, npft)
+    return np.isfinite(pft0.sum(axis=-1))
+
+
+def fill_land_param_gaps(land_params, gsd):
+    """Replace surfdata-uncovered (and any non-finite) columns with a bare fallback.
+
+    Reconciles the surfdata with the driver's authoritative land mask: a column is
+    kept only where the surfdata covers it *and* the value is finite, otherwise it
+    falls back to bare soil.  Works for :class:`CanopyLandParams` or
+    :class:`LandSurfaceParams`.
+    """
+    import jax
+    covered = jnp.asarray(surfdata_covered(gsd))            # (ncol,)
+    ncol = covered.shape[0]
+    fb = (_bare_canopy_params(ncol) if isinstance(land_params, CanopyLandParams)
+          else _bare_land_surface_params(ncol))
+
+    def _fill(v, f):
+        v = jnp.asarray(v)
+        keep = covered.reshape(covered.shape + (1,) * (v.ndim - 1))
+        return jnp.where(keep & jnp.isfinite(v), v, jnp.asarray(f))
+
+    return jax.tree.map(_fill, land_params, fb)

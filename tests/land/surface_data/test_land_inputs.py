@@ -10,6 +10,8 @@ from legoesm.land.surface_data.land_inputs import (
     build_soil_hydraulics,
     build_land_surface_params,
     surface_data_to_land_params,
+    fill_land_param_gaps,
+    surfdata_covered,
     dominant_pft_index,
     glacier_mask,
 )
@@ -117,3 +119,20 @@ def test_dispatch_by_surface_scheme():
     can = surface_data_to_land_params(gsd, TwoLeafCanopyConfig(), 196.0, jnp.full(2, 0.2))
     assert isinstance(seb, LandSurfaceParams)
     assert isinstance(can, CanopyLandParams)
+
+
+def test_fill_land_param_gaps_uses_bare_fallback():
+    # mark column 1 as surfdata-uncovered (NaN pft_frac), like a coast/island the
+    # driver land-mask calls land but the surfdata does not cover.
+    gsd = _gsd()
+    pft = np.asarray(gsd.pft_frac).copy(); pft[0, 1, :] = np.nan
+    gsd = gsd._replace(pft_frac=jnp.asarray(pft))
+    assert surfdata_covered(gsd).tolist() == [True, False]
+
+    cp = fill_land_param_gaps(build_canopy_params(gsd, 196.0, jnp.full(2, 0.2)), gsd)
+    assert np.all(np.isfinite(np.asarray(cp.LAI)))
+    assert float(cp.FNonVeg[1]) == 1.0 and float(cp.LAI[1]) == 0.0   # col1 -> bare
+
+    sp = fill_land_param_gaps(build_land_surface_params(gsd, 196.0, jnp.full(2, 0.2)), gsd)
+    assert np.all(np.isfinite(np.asarray(sp.albedo_veg)))
+    np.testing.assert_allclose(float(sp.albedo_veg[1]), 0.30)        # bare-soil row

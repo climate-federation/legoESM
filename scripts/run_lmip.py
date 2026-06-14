@@ -51,7 +51,8 @@ from legoesm.land.slab_land import step_land
 from legoesm.land.global_surface_data import interp_monthly
 from legoesm.land.soil_albedo import soil_albedo_broadband
 from legoesm.land.surface_data.land_inputs import (
-    dominant_pft_index, glacier_mask, surface_data_to_land_params, init_land_surface_data)
+    dominant_pft_index, glacier_mask, surface_data_to_land_params,
+    init_land_surface_data, fill_land_param_gaps)
 
 U_MIN = 1.0
 
@@ -116,8 +117,12 @@ def main() -> None:
     ap.add_argument("--hour", type=float, default=12.0, help="UTC hour")
     ap.add_argument("--dt", type=float, default=1800.0)
     ap.add_argument("--output", default="lmip_global")
+    ap.add_argument("--land-mask-file", default="",
+                    help="land-sea mask NetCDF (CMIP6 sftlf / ERA5 lsm), as ModelDriver "
+                         "uses it; authoritative. When empty, the surfdata's own "
+                         "land fraction is used as a standalone fallback.")
     ap.add_argument("--land-frac-min", type=float, default=0.5,
-                    help="cells with f_land below this are masked as ocean in output")
+                    help="cells with land fraction below this are masked as ocean in output")
     ap.add_argument("--no-plot", dest="plot", action="store_false",
                     help="skip the maps PNG")
     args = ap.parse_args()
@@ -162,24 +167,32 @@ def main() -> None:
             T_soil=jnp.broadcast_to(forcing.T_lowest[:, None], state.T_soil.shape))
         theta_top = state.theta_soil[:, 0]
 
-    # land params with the actual top-layer wetness (accurate soil-colour albedo)
+    # land params with the actual top-layer wetness (accurate soil-colour albedo),
+    # then reconcile with the authoritative land mask: any cell the mask calls land
+    # but the surfdata doesn't cover falls back to bare soil (finite everywhere).
     land_params = surface_data_to_land_params(gsd, config.surface_scheme, args.doy, theta_top)
+    land_params = fill_land_param_gaps(land_params, gsd)
 
     print("stepping one timestep ...")
     step = jax.jit(lambda s, f: step_fn(
         s, f, config, U_MIN, args.dt, lat=lat_rad, land_params=land_params, doy=args.doy))
     new_state, resp, _ = step(state, forcing)
 
-    # --- land mask, reshape, validate, write ---
-    # The land-SEA mask is the total land fraction = soil/veg + lake + glacier
-    # (so ice sheets and lake-rich regions count as land).  gsd.f_land here is the
-    # CLM natveg+crop (soil/veg) fraction only — NOT the land mask.
+    # --- authoritative land-sea mask (matches ModelDriver) ---
+    # With a mask file (sftlf / ERA5 lsm) it is the authority, exactly as
+    # ModelDriver uses load_land_fraction(grid, land_mask_path).  Standalone (no
+    # file), fall back to the surfdata's own land fraction = soil/veg+lake+glacier.
     def cover1d(a):
         a = np.asarray(a)
         return (a[0] if a.ndim == 2 else a)
     f_soil_veg = cover1d(gsd.f_land)
-    land_frac_flat = f_soil_veg + cover1d(gsd.f_lake) + cover1d(gsd.f_glacier)
-    land_fraction = land_frac_flat.reshape(grid.nlat, grid.nlon)
+    if args.land_mask_file:
+        from legoesm.grids.topography import load_land_fraction
+        land_fraction = np.asarray(load_land_fraction(grid, args.land_mask_file)).reshape(
+            grid.nlat, grid.nlon)
+    else:
+        land_fraction = (f_soil_veg + cover1d(gsd.f_lake)
+                         + cover1d(gsd.f_glacier)).reshape(grid.nlat, grid.nlon)
     land = land_fraction >= args.land_frac_min
 
     import warnings
