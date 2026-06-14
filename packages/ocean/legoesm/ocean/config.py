@@ -103,23 +103,136 @@ DEFAULT_OCEAN_CONFIG: dict = {
 def _resolve_target(grid_type: str):
     """Return ``(ConfigClass, ModelClass)`` for *grid_type* (deferred imports)."""
     if grid_type == "latlon_cgrid":
-        from legoesm.ocean.state import LatLonCGridOceanConfig
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
         )
+        from legoesm.ocean.state import LatLonCGridOceanConfig
         return LatLonCGridOceanConfig, LatLonCGridOceanModel
     if grid_type == "cubed_sphere":
-        from legoesm.ocean.state import OceanConfig
         from legoesm.ocean.dynamics.ocean_model import OceanModel
+        from legoesm.ocean.state import OceanConfig
         return OceanConfig, OceanModel
     if grid_type == "spectral":
-        from legoesm.ocean.state import SpectralOceanConfig
         from legoesm.ocean.dynamics.spectral_ocean_pe import SpectralOceanModel
+        from legoesm.ocean.state import SpectralOceanConfig
         return SpectralOceanConfig, SpectralOceanModel
     # Dispatch discipline: never silently default an unknown grid type.
     raise ValueError(
         f"ocean grid.type must be one of {_GRID_TYPES}, got {grid_type!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Nested physics-pipeline YAML mapping (#382)
+# ---------------------------------------------------------------------------
+# The runtime config exposes three deeply-nested NamedTuple trees as top-level
+# fields annotated ``object`` (``eos_linear``/``gm_redi``/``physics`` — the
+# annotation carries no type, so it cannot drive reconstruction).  These are the
+# explicit YAML entry points; every level BELOW them is reconstructed generically
+# from the sub-field types (concrete annotations / NamedTuple defaults), so a new
+# scheme or sub-config becomes YAML-expressible with no change here.
+
+
+def _nested_ocean_entry_types() -> dict:
+    """``{yaml_key: NamedTuple type}`` for the object-typed nested entry points."""
+    from legoesm.ocean.eos import LinearEOSConfig
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    return {
+        "eos_linear": LinearEOSConfig,
+        "gm_redi": GMRediConfig,
+        "physics": OceanPhysicsConfig,
+    }
+
+
+def _is_config_namedtuple(t) -> bool:
+    """True if *t* is a NamedTuple subclass (a nestable config type)."""
+    return (
+        isinstance(t, type)
+        and issubclass(t, tuple)
+        and hasattr(t, "_fields")
+        and hasattr(t, "_field_defaults")
+    )
+
+
+def _nested_config_type(cls, field: str):
+    """The NamedTuple sub-config type for ``cls.<field>`` (or ``None``).
+
+    Prefers the runtime default's type (robust even when the field is annotated
+    ``object``); falls back to the field annotation for Optional sub-configs
+    whose default is ``None`` (e.g. ``eke: EKEConfig | None = None``).
+    """
+    import typing
+
+    default = cls._field_defaults.get(field)
+    if _is_config_namedtuple(type(default)):
+        return type(default)
+    try:
+        ann = typing.get_type_hints(cls).get(field)
+    except Exception:
+        return None
+    if _is_config_namedtuple(ann):
+        return ann
+    for arg in typing.get_args(ann):           # Optional[X] / Union[X, None]
+        if _is_config_namedtuple(arg):
+            return arg
+    return None
+
+
+def _field_allows_none(cls, field: str) -> bool:
+    """True if ``cls.<field>`` is genuinely Optional (``X | None``) — so an
+    explicit YAML ``null`` legitimately disables the sub-config rather than
+    smuggling a ``None`` into a required slot the factory later dereferences."""
+    import typing
+
+    if cls._field_defaults.get(field) is None:   # default None ⇒ Optional in practice
+        return True
+    try:
+        ann = typing.get_type_hints(cls).get(field)
+    except Exception:
+        return False
+    return type(None) in typing.get_args(ann)
+
+
+def _build_nested_config(cls, d: dict, *, path: str):
+    """Recursively build NamedTuple *cls* from mapping *d*.
+
+    Rejects unknown fields at EVERY level (``path`` is the dotted ``ocean.*``
+    location for the error message), and recurses into nested sub-config fields
+    whose YAML value is a mapping — the same typo-detection contract the flat
+    ``ocean:`` boundary uses, applied all the way down the physics tree.
+    """
+    if not isinstance(d, dict):
+        raise ValueError(
+            f"ocean.{path} must be a mapping, got {type(d).__name__}")
+    known = set(cls._fields)
+    unknown = sorted(k for k in d if k not in known)
+    if unknown:
+        raise ValueError(
+            f"unknown {cls.__name__} field(s) in the ocean scheme config at "
+            f"ocean.{path}: {unknown}. Valid fields: {sorted(known)}")
+    kwargs = {}
+    for key, val in d.items():
+        sub_type = _nested_config_type(cls, key)
+        if sub_type is None:
+            kwargs[key] = val                       # plain scalar/list/None field
+        elif isinstance(val, dict):
+            kwargs[key] = _build_nested_config(
+                sub_type, val, path=f"{path}.{key}")
+        elif val is None and _field_allows_none(cls, key):
+            kwargs[key] = None                      # explicit null disables an Optional sub-config
+        else:
+            # A sub-config position given a scalar/list (or a null on a REQUIRED
+            # sub-config) would build e.g. OceanPhysicsConfig(vertical_mixing=5
+            # or None) — silently invalid, crashing later in the factory when it
+            # dereferences .scheme/.enabled.  Fail fast at the boundary instead.
+            _allowed = ("a mapping (a {0} sub-config) or null".format(
+                sub_type.__name__) if _field_allows_none(cls, key)
+                else "a mapping (a {0} sub-config)".format(sub_type.__name__))
+            raise ValueError(
+                f"ocean.{path}.{key} must be {_allowed}, "
+                f"got {type(val).__name__}")
+    return cls(**kwargs)
 
 
 class OceanExperimentConfig:
@@ -136,9 +249,9 @@ class OceanExperimentConfig:
 
     # ------------------------------------------------------------------ I/O
     @classmethod
-    def from_yaml(cls, path: str) -> "OceanExperimentConfig":
+    def from_yaml(cls, path: str) -> OceanExperimentConfig:
         """Load an ocean configuration from a YAML file (merged onto defaults)."""
-        with open(path, "r") as f:
+        with open(path) as f:
             user_config = yaml.safe_load(f)
         config = copy.deepcopy(DEFAULT_OCEAN_CONFIG)
         if user_config:  # safe_load returns None for empty files
@@ -146,7 +259,7 @@ class OceanExperimentConfig:
         return cls(config)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "OceanExperimentConfig":
+    def from_dict(cls, d: dict) -> OceanExperimentConfig:
         """Create an ocean configuration from a dictionary (merged onto defaults)."""
         config = copy.deepcopy(DEFAULT_OCEAN_CONFIG)
         _deep_merge(config, d)
@@ -202,36 +315,49 @@ class OceanExperimentConfig:
         unknown = sorted(k for k in ocean if k not in known)
         if unknown:
             raise ValueError(
-                f"unknown ocean config field(s) for grid.type={grid_type!r}: "
-                f"{unknown}. Valid fields: {sorted(known)}"
+                f"unknown ocean config field(s) for grid.type={grid_type!r} "
+                f"(backend {ConfigClass.__name__}): {unknown}. "
+                f"Valid fields: {sorted(known)}"
             )
 
-        # Nested-config sections that the flat boundary builds explicitly.  The
-        # full OceanPhysicsConfig / GMRediConfig pipelines are not yet expressible
-        # in YAML (they are deep nested NamedTuples); reject them loudly rather
-        # than silently ignoring, so a user is never misled into thinking a
-        # physics block took effect.
-        for nested in ("physics", "gm_redi"):
-            if isinstance(ocean.get(nested), dict):
-                raise ValueError(
-                    f"ocean.{nested} (nested physics pipeline) is not yet "
-                    "configurable via YAML; construct it in Python and pass the "
-                    "runtime config directly. Scalar fields are supported."
-                )
+        # Lat-lon C-grid: the physics lateral-mixing factory is cubed-sphere-only
+        # (lateral mixing is selected via the flat ocean.A_h/B_h + the top-level
+        # ocean.gm_redi), so the only valid physics.lateral_mixing.scheme is
+        # "none".  The runtime OceanPhysicsConfig default is "harmonic" (the cube
+        # value), which would make a minimal lat-lon physics block (e.g. only
+        # vertical_mixing.kpp) fail validate_strict.  Default the scheme to "none"
+        # here UNLESS the user set it explicitly (an explicit "harmonic" still
+        # reaches validate_strict and gets the clear lat-lon error).
+        if grid_type == "latlon_cgrid" and isinstance(ocean.get("physics"), dict):
+            phys = ocean["physics"]
+            lm = phys.get("lateral_mixing")
+            # Default the scheme to "none" only when lateral_mixing is absent/null
+            # or a mapping without an explicit scheme.  A non-mapping value
+            # (e.g. ``lateral_mixing: harmonic``) is left untouched so the generic
+            # builder raises the proper "must be a mapping" error rather than a
+            # TypeError from splatting a scalar, or silently rewriting a falsey one.
+            if lm is None or (isinstance(lm, dict) and "scheme" not in lm):
+                ocean["physics"] = {
+                    **phys,
+                    "lateral_mixing": {**(lm or {}), "scheme": "none"},
+                }
 
-        eos_linear = ocean.pop("eos_linear", None)
-        if eos_linear is not None:
-            from legoesm.ocean.eos import LinearEOSConfig
-            if not isinstance(eos_linear, dict):
-                raise ValueError("ocean.eos_linear must be a mapping")
-            le_known = set(LinearEOSConfig._fields)
-            le_unknown = sorted(k for k in eos_linear if k not in le_known)
-            if le_unknown:
+        # Nested physics-pipeline sections (#382): build the deep NamedTuple
+        # trees (eos_linear / gm_redi / physics) from their YAML mappings, with
+        # the SAME typo-detection contract recursing to every level.  Only entry
+        # points that are actually fields of this grid's config are built (the
+        # unknown-field check above already rejected any that are not).  A scalar
+        # where a mapping is required raises rather than silently passing through.
+        for field, sub_type in _nested_ocean_entry_types().items():
+            if field not in known:
+                continue
+            val = ocean.get(field)
+            if val is None:
+                continue
+            if not isinstance(val, dict):
                 raise ValueError(
-                    f"unknown ocean.eos_linear field(s): {le_unknown}. "
-                    f"Valid fields: {sorted(le_known)}"
-                )
-            ocean["eos_linear"] = LinearEOSConfig(**eos_linear)
+                    f"ocean.{field} must be a mapping, got {type(val).__name__}")
+            ocean[field] = _build_nested_config(sub_type, val, path=field)
 
         return ConfigClass(**ocean)
 
@@ -371,7 +497,7 @@ _YAML_RUN_CONTROLS = ("dt", "years", "output", "nlev", "latlon_res")
 
 
 def resolve_ocean_run_controls(
-    adapter: "OceanExperimentConfig",
+    adapter: OceanExperimentConfig,
     args,
     cli_given: set,
 ) -> dict:

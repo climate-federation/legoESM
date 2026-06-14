@@ -9,8 +9,7 @@ from __future__ import annotations
 import textwrap
 
 import pytest
-
-from legoesm.ocean.config import OceanExperimentConfig, DEFAULT_OCEAN_CONFIG
+from legoesm.ocean.config import DEFAULT_OCEAN_CONFIG, OceanExperimentConfig
 from legoesm.ocean.state import (
     LatLonCGridOceanConfig,
     OceanConfig,
@@ -111,16 +110,185 @@ def test_eos_linear_unknown_field_raises():
     cfg = OceanExperimentConfig.from_dict(
         {"ocean": {"eos": "linear", "eos_linear": {"alpha_typo": 1.0}}}
     )
-    with pytest.raises(ValueError, match="unknown ocean.eos_linear field"):
+    with pytest.raises(ValueError,
+                       match=r"unknown LinearEOSConfig field.*ocean\.eos_linear"):
         cfg.to_ocean_config()
 
 
-def test_nested_physics_block_rejected():
-    cfg = OceanExperimentConfig.from_dict(
-        {"ocean": {"physics": {"vertical_mixing": {}}}}
+# ----------------------------------------------------- nested physics YAML (#382)
+
+def test_nested_physics_vertical_mixing_kpp_builds():
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        KPPConfig,
+        VerticalMixingConfig,
     )
-    with pytest.raises(ValueError, match="not yet configurable via YAML"):
-        cfg.to_ocean_config()
+
+    cfg = OceanExperimentConfig.from_dict({
+        "ocean": {"physics": {
+            "vertical_mixing": {
+                "scheme": "kpp",
+                "kpp": {"Ri_crit": 0.3},
+            },
+        }},
+    })
+    rt = cfg.to_ocean_config()
+    assert isinstance(rt.physics, OceanPhysicsConfig)
+    assert isinstance(rt.physics.vertical_mixing, VerticalMixingConfig)
+    assert rt.physics.vertical_mixing.scheme == "kpp"
+    assert isinstance(rt.physics.vertical_mixing.kpp, KPPConfig)
+    assert rt.physics.vertical_mixing.kpp.Ri_crit == 0.3
+    # untouched sub-configs keep their defaults
+    assert rt.physics.vertical_mixing.constant == \
+        VerticalMixingConfig().constant
+
+
+def test_nested_physics_multiple_sections_build():
+    cfg = OceanExperimentConfig.from_dict({
+        "ocean": {"physics": {
+            "convection": {"scheme": "enhanced_diffusion"},
+            "shortwave_penetration": {"water_type": "II"},
+        }},
+    })
+    rt = cfg.to_ocean_config()
+    assert rt.physics.convection.scheme == "enhanced_diffusion"
+    assert rt.physics.shortwave_penetration.water_type == "II"
+
+
+def test_nested_gm_redi_with_visbeck_and_eke_build():
+    from legoesm.ocean.physics.lateral_mixing.config import (
+        GMRediConfig,
+        VisbeckConfig,
+    )
+    from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
+
+    cfg = OceanExperimentConfig.from_dict({
+        "ocean": {"gm_redi": {
+            "kappa_GM": 1500.0,
+            "S_max": 0.02,
+            "visbeck": {"enabled": True},   # concrete-default sub-config
+            "eke": {"e_min": 1.0e-5},       # Optional (default None) sub-config
+        }},
+    })
+    rt = cfg.to_ocean_config()
+    assert isinstance(rt.gm_redi, GMRediConfig)
+    assert rt.gm_redi.kappa_GM == 1500.0
+    assert rt.gm_redi.S_max == 0.02
+    assert isinstance(rt.gm_redi.visbeck, VisbeckConfig)
+    assert rt.gm_redi.visbeck.enabled is True
+    assert isinstance(rt.gm_redi.eke, EKEConfig)   # resolved from `| None` annotation
+    assert rt.gm_redi.eke.e_min == 1.0e-5
+
+
+def test_nested_typo_detected_at_every_level():
+    # top-level physics sub-section field
+    with pytest.raises(ValueError, match="unknown OceanPhysicsConfig field"):
+        OceanExperimentConfig.from_dict(
+            {"ocean": {"physics": {"vertical_mixingg": {}}}}).to_ocean_config()
+    # scheme sub-config field (deepest level)
+    with pytest.raises(ValueError,
+                       match=r"unknown KPPConfig field.*Ri_crite"):
+        OceanExperimentConfig.from_dict({"ocean": {"physics": {
+            "vertical_mixing": {"scheme": "kpp", "kpp": {"Ri_crite": 0.3}}}}}
+        ).to_ocean_config()
+    # gm_redi nested sub-config field
+    with pytest.raises(ValueError,
+                       match=r"unknown VisbeckConfig field.*gm_redi\.visbeck"):
+        OceanExperimentConfig.from_dict({"ocean": {"gm_redi": {
+            "visbeck": {"enabledd": True}}}}).to_ocean_config()
+
+
+def test_minimal_latlon_physics_block_validates():
+    """A MINIMAL lat-lon physics block (only vertical_mixing) must pass
+    validate_strict: the adapter defaults physics.lateral_mixing.scheme to "none"
+    (the cube-only "harmonic" runtime default would otherwise be rejected on the
+    lat-lon C-grid).  #382 codex P2."""
+    cfg = OceanExperimentConfig.from_dict({
+        "grid": {"type": "latlon_cgrid"},
+        "ocean": {"physics": {
+            "vertical_mixing": {"scheme": "kpp", "kpp": {"Ri_crit": 0.3}}}},
+    })
+    cfg.validate_strict()  # must not raise
+    assert cfg.to_ocean_config().physics.lateral_mixing.scheme == "none"
+
+
+def test_latlon_explicit_harmonic_lateral_mixing_still_rejected():
+    """An EXPLICIT physics.lateral_mixing.scheme='harmonic' on the lat-lon grid
+    is not silently overridden — it reaches validate_strict and gets the clear
+    'cubed-sphere-only' error (respecting the user's explicit choice)."""
+    cfg = OceanExperimentConfig.from_dict({
+        "grid": {"type": "latlon_cgrid"},
+        "ocean": {"physics": {"lateral_mixing": {"scheme": "harmonic"}}},
+    })
+    assert cfg.to_ocean_config().physics.lateral_mixing.scheme == "harmonic"
+    with pytest.raises(ValueError, match="cubed-sphere-only"):
+        cfg.validate_strict()
+
+
+def test_latlon_nonmapping_lateral_mixing_rejected():
+    """A non-mapping ocean.physics.lateral_mixing on the lat-lon grid must raise
+    the generic 'must be a mapping' error (not a TypeError from the scheme-default
+    splat, nor a silent rewrite of a falsey value). #382 codex P2."""
+    for bad in ("harmonic", [1], 0):
+        with pytest.raises(
+                ValueError,
+                match=r"ocean\.physics\.lateral_mixing must be a mapping"):
+            OceanExperimentConfig.from_dict(
+                {"grid": {"type": "latlon_cgrid"},
+                 "ocean": {"physics": {"lateral_mixing": bad}}}).to_ocean_config()
+
+
+def test_nested_section_must_be_mapping():
+    with pytest.raises(ValueError, match=r"ocean\.physics must be a mapping"):
+        OceanExperimentConfig.from_dict(
+            {"ocean": {"physics": 5}}).to_ocean_config()
+
+
+def test_scalar_in_subconfig_position_rejected():
+    """A scalar where a sub-config NamedTuple is expected must fail fast at the
+    boundary (else it builds e.g. OceanPhysicsConfig(vertical_mixing=5) that
+    crashes later in the factory). #382 codex P2."""
+    with pytest.raises(ValueError,
+                       match=r"ocean\.physics\.vertical_mixing must be a mapping"):
+        OceanExperimentConfig.from_dict(
+            {"ocean": {"physics": {"vertical_mixing": 5}}}).to_ocean_config()
+
+
+def test_null_disables_optional_subconfig():
+    """An explicit null on an Optional sub-config (gm_redi.eke) disables it."""
+    rt = OceanExperimentConfig.from_dict(
+        {"ocean": {"gm_redi": {"eke": None}}}).to_ocean_config()
+    assert rt.gm_redi.eke is None
+
+
+def test_null_on_required_subconfig_rejected():
+    """null on a REQUIRED sub-config (physics.vertical_mixing) must fail fast —
+    not smuggle a None the factory later dereferences. #382 codex P2."""
+    with pytest.raises(ValueError,
+                       match=r"ocean\.physics\.vertical_mixing must be a mapping"):
+        OceanExperimentConfig.from_dict(
+            {"ocean": {"physics": {"vertical_mixing": None}}}).to_ocean_config()
+
+
+def test_nested_physics_none_is_legacy_mode():
+    # ocean.physics: null -> legacy (physics=None) path, not an error.
+    rt = OceanExperimentConfig.from_dict(
+        {"ocean": {"physics": None}}).to_ocean_config()
+    assert rt.physics is None
+
+
+def test_nested_physics_yaml_roundtrips_through_manifest_codec():
+    # The built nested config must survive the run-manifest codec (the #376
+    # serialize+reconstruct path) byte-for-byte.
+    from legoesm.ocean.config import (
+        ocean_config_from_dict,
+        ocean_config_to_dict,
+    )
+    rt = OceanExperimentConfig.from_dict({"ocean": {"physics": {
+        "vertical_mixing": {"scheme": "kpp", "kpp": {"Ri_crit": 0.3}}}}}
+    ).to_ocean_config()
+    rebuilt = ocean_config_from_dict(ocean_config_to_dict(rt))
+    assert rebuilt == rt
 
 
 def test_validate_strict_passes_for_default():
