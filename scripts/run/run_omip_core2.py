@@ -1766,7 +1766,12 @@ def _prognostic_ice_diag(ice_state, resp, grid, app_grid_type, ocean_mask):
     m = np.asarray(ocean_mask, dtype=np.float64) > 0.5
     conc = np.where(m, conc, 0.0)
     h = np.where(m, h, 0.0)
-    area = np.asarray(grid.area, dtype=np.float64)
+    # VoronoiMesh exposes cell area as ``areaCell``; the C-grid families as the
+    # ``.area`` property (see docstring) -- pick whichever this grid has.
+    _area = getattr(grid, "area", None)
+    if _area is None:
+        _area = grid.areaCell
+    area = np.asarray(_area, dtype=np.float64)
     ice_area_m2 = float(np.sum(conc * area))
     icy = conc > 1.0e-3
     salt = np.asarray(resp.salt_flux, dtype=np.float64)
