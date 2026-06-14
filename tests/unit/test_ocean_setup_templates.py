@@ -33,12 +33,11 @@ _NO_EXACT_MATRIX_CASE = {
 _PROCEDURAL_DEFERRED = {
     "dino", "neverworld2_lite", "isomip_plus",  # Levy grid / ice-shelf / grid-restricted
 }
-_EXACT_CASE_TODO = {
-    # exact-match experiments not yet templated (adding a template removes one)
-    "eady_instability", "geostrophic_adjustment", "global_barotropic_wind",
-    "held_larichev", "inertia_gravity_wave", "munk_gyre",
-    "phillips_two_layer", "stommel_gyre_tracer",
-}
+_EXACT_CASE_TODO: set[str] = set()
+# exact-match experiments not yet templated — now EMPTY: every experiment with a
+# single exact matrix case ships a template. Only the procedural-deferred and
+# no-exact-matrix-case experiments above remain unwired (with documented
+# reasons). Re-populate only if a NEW exact-match experiment is registered.
 
 
 def _ocean_template_paths() -> list[Path]:
@@ -207,12 +206,21 @@ class TestSetupTemplateCoverage:
             OceanExperimentConfig.from_yaml(str(p)).get("setup.name")
             for p in _ocean_template_paths()
         }
-        accounted = (shipped | _EXACT_CASE_TODO | _NO_EXACT_MATRIX_CASE
-                     | _PROCEDURAL_DEFERRED)
+        buckets = [shipped, _EXACT_CASE_TODO, _NO_EXACT_MATRIX_CASE,
+                   _PROCEDURAL_DEFERRED]
+        accounted = set().union(*buckets)
         missing = set(AVAILABLE_EXPERIMENTS) - accounted
         assert not missing, f"unaccounted ocean experiments: {sorted(missing)}"
-        # shipped + TODO must be mutually exclusive (a shipped case is not a TODO)
-        assert not (shipped & _EXACT_CASE_TODO), shipped & _EXACT_CASE_TODO
+        # The four buckets must PARTITION the registry — pairwise disjoint
+        # (sum of sizes == size of the union), so a name can never be both
+        # shipped and TODO/deferred, now or after a future edit.
+        assert sum(len(b) for b in buckets) == len(accounted), (
+            "coverage buckets overlap: "
+            f"{[sorted(a & b) for i, a in enumerate(buckets) for b in buckets[i + 1:] if a & b]}")
+        # and nothing extraneous beyond the registry
+        assert accounted <= set(AVAILABLE_EXPERIMENTS), (
+            f"unknown names in coverage buckets: "
+            f"{sorted(accounted - set(AVAILABLE_EXPERIMENTS))}")
 
     def test_validate_passing_but_not_instantiated_is_runner_guarded(self):
         """A (name, grid) can pass the package-level validate_strict (grid in
