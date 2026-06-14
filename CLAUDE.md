@@ -72,7 +72,7 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - Mimicry-only glue (halo strip, axis transpose, time-level handling) lives in the fidelity harness, never the model. Test: "would a user with a different goal ever select this?" No → harness.
 - Conventions handled only in the bridge, verified by equivariance tests (`physics(φ(x))=φ(physics(x))` to tol); a "convention" that changes the wet domain/answers is physics → config, not bridge.
 - Constants are config (`ConstantsConfig`), not module-global monkey-patches (no `override_constants` in shippable paths); defaults reference `legoesm.constants`; base only, derived (κ,ε) recomputed.
-- Oracle tendency-match (tier 3) trusted only for a block that also clears truth tiers (0–2).
+- Oracle tendency-match (tier 3) trusted only for a block that also clears truth tiers (0–2). MACHINE-ENFORCED (#388 Ask#4): `ocean/fidelity/precedence.py::evaluate_precedence` LOCKS oracle tiers (≥3) on any truth-tier (0–2) failure; surfaced + exit-gated by `scripts/validate/ocean_fidelity/build_fidelity_scorecard.py` (the one generated scorecard).
 
 ## Validation
 - Narrowest test after edits. Numerical changes: analytical/benchmark > unit tests alone. `JAX_ENABLE_X64=1` unless float32/Metal task.
