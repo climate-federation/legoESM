@@ -9,6 +9,7 @@ from legoesm.land.surface_data.land_inputs import (
     build_canopy_params,
     build_soil_hydraulics,
     dominant_pft_index,
+    glacier_mask,
 )
 
 
@@ -58,6 +59,23 @@ def test_canopy_params_from_dominant_pft():
     assert float(cp.Vcmax25_C3_leaf[0]) > 0                  # BE-trop is C3
     # soil-colour albedo present and ordered (darker class 18 < class 5)
     assert float(cp.ALB_VIS[1]) < float(cp.ALB_VIS[0])
+
+
+def test_glacier_columns_get_ice_surface():
+    gsd = _gsd()._replace(
+        f_land=jnp.array([1.0, 0.0]),
+        f_lake=jnp.zeros(2),
+        f_glacier=jnp.array([0.0, 1.0]),       # column 1 is glacier-dominant
+    )
+    assert glacier_mask(gsd).tolist() == [False, True]
+    cp = build_canopy_params(gsd, day_of_year=196.0, theta_top=jnp.full(2, 0.2))
+    # glacier column: no veg, high ice albedo
+    assert float(cp.LAI[1]) == 0.0
+    assert np.isclose(float(cp.FNonVeg[1]), 1.0)
+    assert np.isclose(float(cp.ALB_VIS[1]), 0.70)
+    assert np.isclose(float(cp.ALB_NIR[1]), 0.50)
+    # non-glacier column keeps its (darker) soil-colour background albedo
+    assert float(cp.ALB_VIS[0]) < 0.70
 
 
 def test_soil_hydraulics_percolumn_and_fallback():

@@ -88,12 +88,31 @@ def dominant_pft_index(gsd) -> np.ndarray:
     return np.argmax(mean_frac, axis=-1)                     # (ncol,)
 
 
+def _cover1d(a):
+    """A cover fraction as ``(ncol,)`` (squeeze a leading single-year axis)."""
+    a = np.asarray(a)
+    return a[0] if a.ndim == 2 else a
+
+
+def glacier_mask(gsd) -> np.ndarray:
+    """Boolean ``(ncol,)``: columns where glacier is the dominant surface type.
+
+    Greenland / Antarctica / mountain ice: ``f_glacier`` exceeds both the
+    soil/veg (``f_land``) and lake fractions.  These are treated as ice surfaces
+    (no vegetation, high albedo), not bare soil.
+    """
+    f_g = _cover1d(gsd.f_glacier)
+    return (f_g > _cover1d(gsd.f_land)) & (f_g > _cover1d(gsd.f_lake)) & (f_g > 0.0)
+
+
 def build_canopy_params(
     gsd,
     day_of_year: float,
     theta_top: jnp.ndarray,
     *,
     tgc_C: float = 25.0,
+    glacier_alb_vis: float = 0.70,
+    glacier_alb_nir: float = 0.50,
 ) -> CanopyLandParams:
     """Per-column :class:`CanopyLandParams` from surface data at ``day_of_year``.
 
@@ -102,6 +121,10 @@ def build_canopy_params(
     canopy height) is the dominant PFT's value; photosynthesis/aerodynamic params
     come from the PFT biome tables; ``ALB_VIS``/``ALB_NIR`` are the soil-colour
     background albedo.
+
+    Glacier-dominant columns (:func:`glacier_mask`) are set to a bare **ice
+    surface**: no vegetation (LAI=0, FNonVeg=1) and a high snow/ice albedo
+    (``glacier_alb_vis``/``glacier_alb_nir``) instead of the soil background.
     """
     dom = dominant_pft_index(gsd)                            # (ncol,)
     ncol = dom.shape[0]
@@ -119,8 +142,15 @@ def build_canopy_params(
     is_veg = lut["is_veg"][dom]
     LAI = np.where(is_veg > 0.0, np.nan_to_num(LAI, nan=0.0), 0.0)
 
-    alb_vis, alb_nir = soil_albedo(jnp.asarray(np.asarray(gsd.soil_color)),
-                                   jnp.asarray(theta_top))
+    _av, _an = soil_albedo(jnp.asarray(np.asarray(gsd.soil_color)), jnp.asarray(theta_top))
+    alb_vis, alb_nir = np.asarray(_av), np.asarray(_an)
+
+    # Glacier columns: ice surface — no vegetation, high snow/ice albedo.
+    ice = glacier_mask(gsd)
+    is_veg = np.where(ice, 0.0, is_veg)
+    LAI = np.where(ice, 0.0, LAI)
+    alb_vis = np.where(ice, glacier_alb_vis, alb_vis)
+    alb_nir = np.where(ice, glacier_alb_nir, alb_nir)
 
     full = lambda v: jnp.full(ncol, v)
     return CanopyLandParams(

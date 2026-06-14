@@ -47,7 +47,8 @@ from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.canopy import CanopyConfig
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
 from legoesm.land.global_surface_data import get_surfdata_preset, load_global_surface_data
-from legoesm.land.surface_data.land_inputs import build_canopy_params, dominant_pft_index
+from legoesm.land.surface_data.land_inputs import (
+    build_canopy_params, dominant_pft_index, glacier_mask)
 from legoesm.land.pedotransfer import soil_hydraulics_config_from_texture
 
 U_MIN = 1.0
@@ -194,7 +195,9 @@ def main() -> None:
         "albedo_vis":   (grid2d(canopy.ALB_VIS), "Greys_r", "soil background albedo (VIS)"),
         "land_fraction": (land_fraction, "Blues", "land fraction (veg+lake+glacier)"),
         "f_soil_veg":   (grid2d(f_soil_veg), "YlGn", "soil/veg fraction (natveg+crop)"),
+        "glacier":      (grid2d(glacier_mask(gsd).astype(float)), "cool", "glacier (ice) mask"),
         # --- model outputs (one step) ---
+        "albedo_out":   (grid2d(resp.albedo), "Greys_r", "surface albedo (model)"),
         "T_sfc":        (grid2d(resp.T_surface), "magma", "surface T [K]"),
         "shflx":        (grid2d(resp.shflx), "RdBu_r", "sensible heat [W/m2]"),
         "lhflx":        (grid2d(resp.lhflx), "viridis", "latent heat [W/m2]"),
