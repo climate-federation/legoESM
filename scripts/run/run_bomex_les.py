@@ -225,6 +225,21 @@ def build(args, dtype):
         filter_monotone_scalars=args.filter_monotone_scalars)
     g = sl.make_grid(cfg, dtype=dtype)
     case = Path(args.case_dir)
+    if not case.is_dir():
+        # The BOMEX forcing (snd/lsf/sfc) is read from a gSAM CASES checkout that
+        # is NOT bundled in this repo; the default path is a non-portable absolute
+        # path. Fail early with actionable guidance instead of a deep
+        # FileNotFoundError on the first read_sam_* call.
+        sys.exit(
+            f"[run_bomex_les] gSAM case directory not found: {case}\n"
+            f"  This case reads the gSAM CASES/BOMEX forcing deck, which is not "
+            f"bundled in the repo.\n"
+            f"  Point at your gSAM checkout via either:\n"
+            f"    LEGOESM_GSAM_ROOT=<root containing CASES/>   "
+            f"(current root: {_GSAM_ROOT})\n"
+            f"    --case-dir <path/to/CASES/BOMEX>\n"
+            f"  (Same applies to the sibling gate/lba/rico/dycoms LES drivers.)"
+        )
     snd = read_sam_snd(case / "snd")
     lsf = read_sam_lsf(case / "lsf")
     sfc0 = surface_at_day(read_sam_sfc(case / "sfc"), day=0.0)

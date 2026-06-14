@@ -33,8 +33,13 @@ Usage
 
    JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 .venv/bin/python \\
        scripts/run/run_les_plane.py --case gabls1 \\
-       --nx 32 --ny 32 --nlev 64 --dx 12.5 --H 400 --dz-sfc 6.25 \\
-       --dt 0.5 --hours 2 --output results/les_gabls1
+       --nx 32 --ny 32 --nlev 64 --dx 12.5 --H 400 --dz-sfc 6.0 \\
+       --dt 0.1 --hours 2 --output results/les_gabls1
+
+   (dz_sfc<H/nlev so the stretched grid builds; dt keeps the horizontal
+   acoustic CFL c·dt/(n·dx)<1 at the default --n-acoustic-substeps 8 — raise
+   dt only if you also raise n. These are also the per-case ``gabls1`` defaults,
+   so a bare ``--case gabls1`` runs without overrides.)
 """
 from __future__ import annotations
 
@@ -143,8 +148,14 @@ _CASES = {
         f_c=1.39e-4, ug=8.0, vg=0.0, z0=0.1,
         moist=False,
         # defaults (Beare 2006 domain is 400³ m @ dx=6.25 m; coarsened here).
-        nx=32, ny=32, nlev=64, dx=12.5, H=400.0, dz_sfc=6.25,
-        dt=0.5, hours=2.0,
+        # dz_sfc=6.0 not 6.25: create_stretched_height_coordinate requires
+        # dz_sfc·nlev < H (room to stretch); 6.25·64=400=H exactly is rejected,
+        # so 6.0·64=384<400 gives a near-uniform 6 m surface layer.
+        # dt=0.1 not 0.5: horizontal acoustic CFL = c·(dt/n)/dx with the default
+        # n_acoustic_substeps=8 and dx=12.5 ⇒ 340·0.5/(8·12.5)=1.70>1 (step-1
+        # blow-up); 0.1 ⇒ CFL=0.34. Raise dt only with a matching --n bump.
+        nx=32, ny=32, nlev=64, dx=12.5, H=400.0, dz_sfc=6.0,
+        dt=0.1, hours=2.0,
     ),
     "wangara": dict(
         theta_ref_fn=wangara_theta_ref,
