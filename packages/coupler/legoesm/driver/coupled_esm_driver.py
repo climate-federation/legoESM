@@ -694,6 +694,10 @@ class CoupledESMDriver:
     def coupled_diagnostics(self):
         return self._coupled_diag
 
+    # Coupled-checkpoint format version.  Bump when the saved layout changes so
+    # a stale restart is detected rather than silently mis-mapped.
+    _CKPT_VERSION = 1
+
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save atmosphere + ocean + surface + CO2 state."""
         self._atm.save_checkpoint(step, day)
@@ -702,6 +706,13 @@ class CoupledESMDriver:
         elapsed_day = day - self.atm_config.start_day
         coupled_path = self.output_dir / f"coupled_day_{int(elapsed_day):04d}.npz"
         arrays = {}
+        # Provenance for load-time validation (version + ocean grid shape so a
+        # checkpoint from a different ocean_grid / config is caught, not silently
+        # restored into a mismatched state — see load_coupled_checkpoint).
+        arrays["_ckpt_version"] = np.asarray(self._CKPT_VERSION, dtype=np.int64)
+        if self._ocean_state is not None:
+            arrays["_ckpt_ocean_shape"] = np.asarray(
+                self._ocean_state.T_sfc.data.shape, dtype=np.int64)
 
         # Ocean state (SlabOceanState is a NamedTuple of Fields)
         if self._ocean_state is not None:
@@ -748,6 +759,27 @@ class CoupledESMDriver:
 
         data = np.load(coupled_path)
 
+        # Validate provenance BEFORE restoring — a checkpoint from a different
+        # format version or a different ocean grid must NOT be silently mapped
+        # into a mismatched state (this is the failure mode the grid-coupling
+        # review flagged: ocean_grid != the run's ocean_grid).
+        saved_ver = int(data["_ckpt_version"]) if "_ckpt_version" in data.files else 0
+        if saved_ver != self._CKPT_VERSION:
+            logger.warning(
+                f"Coupled checkpoint {coupled_path.name}: format version "
+                f"{saved_ver} != current {self._CKPT_VERSION}; restore may be "
+                f"unreliable.")
+        if "ocean_T_sfc" in data.files and self._ocean_state is not None:
+            saved_shape = tuple(int(s) for s in data["ocean_T_sfc"].shape)
+            cur_shape = tuple(int(s) for s in self._ocean_state.T_sfc.data.shape)
+            if saved_shape != cur_shape:
+                raise ValueError(
+                    f"Coupled checkpoint {coupled_path.name}: saved ocean state "
+                    f"shape {saved_shape} != current ocean grid shape "
+                    f"{cur_shape}.  The ocean_grid / config changed since the "
+                    f"checkpoint was written; refusing to restore a mismatched "
+                    f"state.")
+
         if "ocean_T_sfc" in data and self._ocean_state is not None:
             self._ocean_state = self._ocean_state._replace(
                 T_sfc=Field(
@@ -777,6 +809,24 @@ class CoupledESMDriver:
             saved = {}
             for k in sfc_keys:
                 saved[k] = data[k]
+
+            # Detect surface-state structure drift: leaves expected now but
+            # absent from the checkpoint silently keep their fresh-init value
+            # (and vice-versa), which corrupts a restart if the CoupledConfig
+            # changed.  Warn loudly instead of failing silently.
+            expected_keys = {
+                "sfc_" + ".".join(str(p) for p in path_parts)
+                for path_parts, _ in leaves_with_path
+            }
+            missing = expected_keys - set(sfc_keys)
+            extra = set(sfc_keys) - expected_keys
+            if missing or extra:
+                logger.warning(
+                    f"Coupled checkpoint {coupled_path.name}: surface-state "
+                    f"structure drift — {len(missing)} expected leaf(s) absent "
+                    f"from the checkpoint (kept fresh-init), {len(extra)} "
+                    f"unused checkpoint leaf(s).  The CoupledConfig likely "
+                    f"changed since the checkpoint was written.")
 
             # Replace leaves in-order (same traversal as save)
             new_leaves = []
