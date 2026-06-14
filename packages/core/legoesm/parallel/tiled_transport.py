@@ -1,4 +1,12 @@
-"""Sub-face tiled FV3 PPM transport sweep SPMD stage (P4 phase-1b, task #3).
+"""Sub-face tiled FV3 d_sw-chain SPMD kernels (P4 phase-1b, task #3).
+
+Two operator families, both in the SAME approach-C form (cheap global
+face-replicated pre-pad, then per-tile ``dynamic_slice`` + a device-uniform
+body with NO in-stage halo ppermute):
+  * the PPM transport SWEEPS (d_sw3 ``xtp_u``/``ytp_v``), and
+  * the d_sw1 ut/vt transport-velocity RECOMPUTE
+    (:func:`dsw1_ut_vt_tile_2d`, U4a — a 2x2 box + pointwise, fully local
+    once uc/vc carry their 1-cell cross halo).
 
 Approach C (mirrors :func:`legoesm.parallel.tiled_d2a2c.make_tiled_d2a2c_stage`):
 the cross-face D-grid halo + the h3=4 PPM pre-pad run in the global
@@ -204,3 +212,156 @@ def make_tiled_transport_sweep_stage_2d(
         return body(vp_g, courant, rd_g, a_i, a_j, nl, h3, cross_nl=cross_nl)
 
     return _stage
+
+
+# ---------------------------------------------------------------------------
+# U4a: d_sw1 ut/vt transport-velocity RECOMPUTE (the start of the D-grid
+# stage).  ut/vt are re-derived from the UPDATED C-grid winds via a 4-cell
+# box average of the OTHER component:
+#     ut = (uc - 0.25*cosa_u*box(vc)) * rsin_u    # (6, n+1, n)
+#     vt = (vc - 0.25*cosa_v*box(uc)) * rsin_v    # (6, n, n+1)
+# (fv3_sw_core._d_sw1_recompute_ut_vt, duogrid Part 1, lines 220-242).  This
+# is DISTINCT from the d2a2c ut/vt (d2a2c_tile_unified:1225/1235 uses the
+# D-grid wind directly, `ut = (uc - v_d*cosa_u)*rsin_u`).  The box stencil is
+# fully LOCAL once uc/vc carry their 1-cell cross halo — supplied by the
+# GLOBAL face-replicated pre-pad `_pad_halo_uc_vc_new_via_old_delta` (the same
+# pre-pad proven in U3f) — so each tile only dynamic_slices, NO in-stage
+# exchange.  Reassembly: lower tile owns the shared staggered face (ut: i-axis
+# n+1; vt: j-axis n+1), the cell axis tiles exactly across kt.
+# ---------------------------------------------------------------------------
+
+def dsw1_ut_vt_tile_2d(uc, vc, uc_pad, vc_pad,
+                       cosa_u, rsin_u, cosa_v, rsin_v,
+                       a_i, a_j, nl: int):
+    """Per-tile d_sw1 ut/vt recompute on a 2-D ``(tile_i, tile_j)`` tiling.
+
+    ``uc`` ``(F, n+1, n)``, ``vc`` ``(F, n, n+1)`` are the (face-replicated)
+    UPDATED C-grid winds; ``uc_pad`` ``(F, n+1, n+2)`` / ``vc_pad``
+    ``(F, n+2, n+1)`` are their GLOBAL cross-halo pre-pad
+    (``_pad_halo_uc_vc_new_via_old_delta``).  ``cosa_u``/``rsin_u``
+    ``(F, n+1, n)`` and ``cosa_v``/``rsin_v`` ``(F, n, n+1)`` are the static
+    metrics.  Slices the tile at start ``(a_i, a_j)`` (``axis_index*nl`` in a
+    shard, ``t*nl`` in a host test) and returns the staggered tile blocks
+    ``ut_t`` ``(F, nl+1, nl)`` and ``vt_t`` ``(F, nl, nl+1)``.
+
+    The ``ut`` tile owns i-faces ``[a_i : a_i+nl+1]`` (the box reads vc_pad
+    rows ``[a_i : a_i+nl+2]``) and j-cells ``[a_j : a_j+nl]`` (vc_pad cols
+    ``[a_j : a_j+nl+1]``); ``vt`` is symmetric.  All slices fit the padded
+    extents EXACTLY at the last tile (start+size == dim) so none clamp.
+    """
+    # Static guards (codex U3d/U4a MED): a mis-sized input would make
+    # dynamic_slice_in_dim silently CLAMP a window instead of failing — check
+    # EVERY axis relationship.  ``F`` (axis 0) is 6 in a host test and 1 inside
+    # a face-shard; ALL inputs must share it, else a face-1 uc * face-6 metric
+    # would broadcast the output back to face 6 (codex U4a LOW).
+    F = uc.shape[0]
+    if not (vc.shape[0] == uc_pad.shape[0] == vc_pad.shape[0]
+            == cosa_u.shape[0] == rsin_u.shape[0] == cosa_v.shape[0]
+            == rsin_v.shape[0] == F):
+        raise ValueError(
+            "dsw1_ut_vt_tile_2d: all inputs must share the leading face-axis "
+            f"extent {F}; got vc={vc.shape[0]}, uc_pad={uc_pad.shape[0]}, "
+            f"vc_pad={vc_pad.shape[0]}, cosa_u={cosa_u.shape[0]}, "
+            f"rsin_u={rsin_u.shape[0]}, cosa_v={cosa_v.shape[0]}, "
+            f"rsin_v={rsin_v.shape[0]}")
+    # nfi = n+1 (u-faces on i), nf = n (cells).  uc (n+1, n); vc (n, n+1) =
+    # (nf, nfi); uc_pad (n+1, n+2) = (nfi, nf+2); vc_pad (n+2, n+1) =
+    # (nfi+1, nf+1); cosa_u/rsin_u (n+1, n) = (nfi, nf); cosa_v/rsin_v (n, n+1)
+    # = (nf, nfi).
+    nfi, nf = uc.shape[1], uc.shape[2]
+    if vc.shape[1:] != (nf, nfi):
+        raise ValueError(
+            f"dsw1_ut_vt_tile_2d: vc cross shape {vc.shape[1:]} inconsistent "
+            f"with uc {(nfi, nf)} (expected ({nf}, {nfi}))")
+    if uc_pad.shape[1:] != (nfi, nf + 2):
+        raise ValueError(
+            f"dsw1_ut_vt_tile_2d: uc_pad shape {uc_pad.shape[1:]} != "
+            f"({nfi}, {nf + 2}) (j-halo of uc)")
+    if vc_pad.shape[1:] != (nfi + 1, nf + 1):
+        raise ValueError(
+            f"dsw1_ut_vt_tile_2d: vc_pad shape {vc_pad.shape[1:]} != "
+            f"({nfi + 1}, {nf + 1}) (i-halo of vc)")
+    if not (cosa_u.shape[1:] == rsin_u.shape[1:] == (nfi, nf)):
+        raise ValueError(
+            f"dsw1_ut_vt_tile_2d: cosa_u/rsin_u must match uc {(nfi, nf)}; "
+            f"got {cosa_u.shape[1:]}, {rsin_u.shape[1:]}")
+    if not (cosa_v.shape[1:] == rsin_v.shape[1:] == (nf, nfi)):
+        raise ValueError(
+            f"dsw1_ut_vt_tile_2d: cosa_v/rsin_v must match vc {(nf, nfi)}; "
+            f"got {cosa_v.shape[1:]}, {rsin_v.shape[1:]}")
+
+    # --- ut tile: (F, nl+1, nl) from uc + 2x2 box of vc_pad ---
+    uc_t = jax.lax.dynamic_slice_in_dim(uc, a_i, nl + 1, axis=1)
+    uc_t = jax.lax.dynamic_slice_in_dim(uc_t, a_j, nl, axis=2)
+    cau_t = jax.lax.dynamic_slice_in_dim(cosa_u, a_i, nl + 1, axis=1)
+    cau_t = jax.lax.dynamic_slice_in_dim(cau_t, a_j, nl, axis=2)
+    rsu_t = jax.lax.dynamic_slice_in_dim(rsin_u, a_i, nl + 1, axis=1)
+    rsu_t = jax.lax.dynamic_slice_in_dim(rsu_t, a_j, nl, axis=2)
+    vcp_t = jax.lax.dynamic_slice_in_dim(vc_pad, a_i, nl + 2, axis=1)
+    vcp_t = jax.lax.dynamic_slice_in_dim(vcp_t, a_j, nl + 1, axis=2)
+    vc_avg = (vcp_t[:, :-1, :-1] + vcp_t[:, 1:, :-1]
+              + vcp_t[:, :-1, 1:] + vcp_t[:, 1:, 1:])          # (F, nl+1, nl)
+    ut_t = (uc_t - 0.25 * cau_t * vc_avg) * rsu_t
+
+    # --- vt tile: (F, nl, nl+1) from vc + 2x2 box of uc_pad ---
+    vc_t = jax.lax.dynamic_slice_in_dim(vc, a_i, nl, axis=1)
+    vc_t = jax.lax.dynamic_slice_in_dim(vc_t, a_j, nl + 1, axis=2)
+    cav_t = jax.lax.dynamic_slice_in_dim(cosa_v, a_i, nl, axis=1)
+    cav_t = jax.lax.dynamic_slice_in_dim(cav_t, a_j, nl + 1, axis=2)
+    rsv_t = jax.lax.dynamic_slice_in_dim(rsin_v, a_i, nl, axis=1)
+    rsv_t = jax.lax.dynamic_slice_in_dim(rsv_t, a_j, nl + 1, axis=2)
+    ucp_t = jax.lax.dynamic_slice_in_dim(uc_pad, a_i, nl + 1, axis=1)
+    ucp_t = jax.lax.dynamic_slice_in_dim(ucp_t, a_j, nl + 2, axis=2)
+    uc_avg = (ucp_t[:, :-1, :-1] + ucp_t[:, 1:, :-1]
+              + ucp_t[:, :-1, 1:] + ucp_t[:, 1:, 1:])          # (F, nl, nl+1)
+    vt_t = (vc_t - 0.25 * cav_t * uc_avg) * rsv_t
+
+    return ut_t, vt_t
+
+
+def make_tiled_dsw1_ut_vt_stage_2d(mesh, cdgrid, n: int, kt: int):
+    """Build the sharded d_sw1 ut/vt recompute stage on a ``(6, kt, kt)`` mesh
+    (axis names ``("face", "tile_i", "tile_j")``).
+
+    Closes over the static staggered metrics (``cosa_u``/``rsin_u``/
+    ``cosa_v``/``rsin_v``) like :func:`tiled_d2a2c.make_tiled_d2a2c_stage`.
+    Returns ``stage(uc, vc, uc_pad, vc_pad) -> (ut, vt)`` where the four
+    inputs are FACE-REPLICATED (``uc``/``vc`` the updated C-grid winds,
+    ``uc_pad``/``vc_pad`` their global ``_pad_halo_uc_vc_new_via_old_delta``
+    pre-pad) and the outputs are tile-sharded
+    ``P("face","tile_i","tile_j")`` with gathered extents
+    ``ut (6, kt*(nl+1), kt*nl)`` / ``vt (6, kt*nl, kt*(nl+1))`` (the staggered
+    axis DUPLICATES the shared face; reassembly = lower tile owns it →
+    ``(6, n+1, n)`` / ``(6, n, n+1)``).
+    """
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_dsw1_ut_vt_stage_2d: n={n} != cdgrid.n={cdgrid.n}")
+    nl = n // kt
+    cosa_u, rsin_u = cdgrid.cosa_u, cdgrid.rsin_u
+    cosa_v, rsin_v = cdgrid.cosa_v, cdgrid.rsin_v
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+
+    # The static metrics are passed as FACE-SHARDED inputs (in_specs=fo), NOT
+    # closed over: inside a face-sharded shard_map the local uc/vc have face
+    # extent 1, so a closed-over full (6,...) metric would broadcast the output
+    # back to face extent 6 and violate out_specs (codex U4a HIGH).  Mirror
+    # tiled_d2a2c.make_tiled_d2a2c_stage, which passes every array as an input.
+    @partial(shard_map, mesh=mesh, in_specs=(fo,) * 8,
+             out_specs=(co, co), check_vma=False)
+    def _body(uc, vc, uc_pad, vc_pad, cau, rsu, cav, rsv):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return dsw1_ut_vt_tile_2d(
+            uc, vc, uc_pad, vc_pad, cau, rsu, cav, rsv, a_i, a_j, nl)
+
+    def stage(uc, vc, uc_pad, vc_pad):
+        """uc/vc the updated C-grid winds; uc_pad/vc_pad their global
+        ``_pad_halo_uc_vc_new_via_old_delta`` pre-pad — all FACE-REPLICATED."""
+        return _body(uc, vc, uc_pad, vc_pad,
+                     cosa_u, rsin_u, cosa_v, rsin_v)
+
+    return stage
