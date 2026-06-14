@@ -1,0 +1,25 @@
+# legoESM experiment template — barotropic Rossby/gravity wave propagation.
+#
+# Names the procedural `barotropic_wave` experiment via the `setup:` selector
+# (#388 Ask#2): a single-layer barotropic wave that propagates and tests the
+# C-grid geostrophic-mode / dispersion behaviour. Routed (exact match) to
+# run_ocean_test_matrix.py --only =barotropic_wave.
+experiment:
+  tier: tier1
+  complexity: primitive_equation
+  extent: idealized
+  maturity: structurally_validated   # config validates; run via the matrix runner
+  description: >
+    Barotropic wave propagation: a single-layer wave tests the C-grid
+    dispersion relation and geostrophic-mode handling. A low-tier dynamical
+    sanity setup.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "ocean-barotropic-wave"
+  type: ocean_only
+setup:
+  name: barotropic_wave
+  grid: latlon
+output:
+  path: output/ocean/barotropic_wave/

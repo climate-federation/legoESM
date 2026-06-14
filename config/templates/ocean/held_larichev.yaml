@@ -1,0 +1,23 @@
+# legoESM experiment template — Held-Larichev geostrophic turbulence.
+#
+# Names the procedural `held_larichev` experiment via `setup:` (#388 Ask#2).
+# Channel grids only.
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: channel
+  maturity: structurally_validated
+  description: >
+    Held-Larichev geostrophic turbulence: a forced-dissipative channel
+    equilibrates a baroclinic eddy field — tests the mesoscale EKE / inverse-
+    cascade behaviour of the dynamics.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "ocean-held-larichev"
+  type: ocean_only
+setup:
+  name: held_larichev
+  grid: latlon_channel
+output:
+  path: output/ocean/held_larichev/

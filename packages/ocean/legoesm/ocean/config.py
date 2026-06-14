@@ -49,6 +49,7 @@ The ``ocean:`` section maps directly onto the runtime NamedTuple field names
 from __future__ import annotations
 
 import copy
+import math
 import shlex
 from typing import Any, NamedTuple
 
@@ -70,6 +71,26 @@ _GRID_TYPES = ("latlon_cgrid", "cubed_sphere", "spectral")
 _GRID_TYPE_TO_RUNNER = {
     "latlon_cgrid": "latlon_bathy",
 }
+
+# Allowed keys in the optional top-level ``setup:`` block (#388 Ask#2).  A
+# template that sets ``setup:`` names one of the procedural idealized ocean
+# experiments in ``legoesm.ocean.experiments`` (the "setup" axis), keeping the
+# case content in its own section distinct from the ``ocean:`` physics "recipe".
+# Such a template routes to the matrix runner (the existing, sole consumer of
+# AVAILABLE_EXPERIMENTS) rather than the OMIP ``run_omip_core2.py`` path.
+_SETUP_KEYS = ("name", "grid", "quick", "resolution", "levels",
+               "dt_seconds", "duration_days")
+_OCEAN_MATRIX_RUNNER = "scripts/matrix/run_ocean_test_matrix.py"
+# Mirror of ``run_ocean_test_matrix.py``'s ``--grid`` argparse choices (minus
+# ``all``).  Kept as a small, stable local set so a ``setup.grid`` typo fails at
+# the YAML boundary even for an experiment that declares no ``grid_support``
+# (which would otherwise only die later in the matrix runner's argparse).  The
+# per-template (name, grid) -> concrete case existence is verified against the
+# live matrix catalog by tests/unit/test_ocean_setup_templates.py.
+_MATRIX_GRIDS = (
+    "cubed_sphere", "latlon", "mpas", "mpas_regional", "latlon_regional",
+    "cs_regional", "latlon_channel", "mpas_channel", "spectral",
+)
 
 
 # Default ocean experiment config.  ``ocean: {}`` means "use every runtime
@@ -98,6 +119,20 @@ DEFAULT_OCEAN_CONFIG: dict = {
         "path": "output/",
     },
 }
+
+
+def _require_positive_finite(name: str, v) -> None:
+    """Raise ``ValueError`` unless *v* is a finite number > 0.
+
+    Rejects bools (``True`` would otherwise coerce to 1) and ``nan``/``inf``
+    (``float('nan') <= 0`` is False, so a naive check lets them through).
+    ``None`` is accepted (means "not set / use default").
+    """
+    if v is None:
+        return
+    if isinstance(v, bool) or not isinstance(v, (int, float)) \
+            or not math.isfinite(float(v)) or float(v) <= 0:
+        raise ValueError(f"{name} must be a finite number > 0, got {v!r}")
 
 
 def _resolve_target(grid_type: str):
@@ -236,28 +271,104 @@ class OceanExperimentConfig:
         return ConfigClass(**ocean)
 
     # ------------------------------------------------------- validation hooks
+    def _validate_setup(self, setup: Any) -> None:
+        """Validate the optional ``setup:`` selector (#388 Ask#2).
+
+        Checks the named experiment against the live ``AVAILABLE_EXPERIMENTS``
+        registry and the experiment's own ``grid_support`` (no second list to
+        drift), so a typo or an unsupported grid fails LOUDLY rather than
+        dispatching to nothing — the same dispatch discipline ``_resolve_target``
+        applies to ``grid.type``.
+        """
+        if not isinstance(setup, dict):
+            raise ValueError(
+                "`setup:` must be a mapping with `name:` and `grid:` "
+                f"(got {type(setup).__name__})"
+            )
+        unknown = sorted(k for k in setup if k not in _SETUP_KEYS)
+        if unknown:
+            raise ValueError(
+                f"unknown setup field(s): {unknown}. Valid: {list(_SETUP_KEYS)}"
+            )
+        name = setup.get("name")
+        grid = setup.get("grid")
+        from legoesm.ocean.experiments import AVAILABLE_EXPERIMENTS
+        if name not in AVAILABLE_EXPERIMENTS:
+            raise ValueError(
+                f"setup.name={name!r} is not a known ocean experiment. "
+                f"Valid: {sorted(AVAILABLE_EXPERIMENTS)}"
+            )
+        if not isinstance(grid, str) or not grid:
+            raise ValueError(
+                "setup.grid must be a non-empty string naming a matrix grid, "
+                f"got {grid!r}"
+            )
+        if grid not in _MATRIX_GRIDS:
+            raise ValueError(
+                f"setup.grid={grid!r} is not a valid ocean matrix grid; "
+                f"choose one of {list(_MATRIX_GRIDS)}"
+            )
+        # When the experiment declares grid_support, the grid must be a
+        # supported one (truthy).  Experiments without a grid_support dict are
+        # gated only by the matrix-grid membership above.
+        support = AVAILABLE_EXPERIMENTS[name].get("grid_support")
+        if support is not None and not support.get(grid, False):
+            supported = sorted(g for g, ok in support.items() if ok)
+            raise ValueError(
+                f"setup.grid={grid!r} is not supported by experiment "
+                f"{name!r}; supported grids: {supported}"
+            )
+        # Optional per-setup run-control overrides (kept in the setup block so
+        # the DEFAULT_OCEAN_CONFIG OMIP defaults never leak onto a setup run).
+        # Reject bools explicitly (``levels: true`` would coerce to 1) and
+        # require a finite, strictly-positive value.
+        lv = setup.get("levels")
+        if lv is not None:
+            if isinstance(lv, bool) or not isinstance(lv, int) or lv <= 0:
+                raise ValueError(f"setup.levels must be a positive int, got {lv!r}")
+        for fld in ("dt_seconds", "duration_days"):
+            _require_positive_finite(f"setup.{fld}", setup.get(fld))
+        q = setup.get("quick")
+        if q is not None and not isinstance(q, bool):
+            raise ValueError(f"setup.quick must be a bool, got {q!r}")
+
     def validate_strict(self) -> None:
         """Strict-validate the resolved ocean config (raises on invalid).
 
-        Delegates to the runtime model's ``_validate_config`` static method —
-        the single canonical validator for each grid (EOS / advection /
-        barotropic-solver membership, bound checks) — so the valid sets are
-        never duplicated at the YAML boundary.
+        Two paths:
+
+        * OMIP-style (no ``setup:``): delegates to the runtime model's
+          ``_validate_config`` static method — the single canonical validator
+          for each grid (EOS / advection / barotropic-solver membership, bound
+          checks) — so the valid sets are never duplicated at the YAML boundary.
+        * Idealized ``setup:`` (#388 Ask#2): validates the experiment-selector
+          against the registry + ``grid_support``; the procedural experiment
+          owns its physics recipe, so a flat ``ocean:`` override would be
+          silently ignored and is rejected loudly.
         """
-        grid_type = self.get("grid.type", "latlon_cgrid")
-        _, ModelClass = _resolve_target(grid_type)
-        cfg = self.to_ocean_config()
-        # _validate_config is a @staticmethod that takes only the config (no grid
-        # / state), the same check the model runs in __init__.
-        ModelClass._validate_config(cfg)
+        setup = self.get("setup")
+        if setup is not None:
+            self._validate_setup(setup)
+            if self.get("ocean"):
+                raise ValueError(
+                    "ocean: physics overrides are not applied to a named "
+                    "`setup:` experiment (the experiment defines its own "
+                    "recipe; per-run controls go in the `setup:` block). "
+                    "Remove the `ocean:` block, or drop `setup:` to configure "
+                    "an OMIP-style run."
+                )
+        else:
+            grid_type = self.get("grid.type", "latlon_cgrid")
+            _, ModelClass = _resolve_target(grid_type)
+            cfg = self.to_ocean_config()
+            # _validate_config is a @staticmethod that takes only the config (no
+            # grid / state), the same check the model runs in __init__.
+            ModelClass._validate_config(cfg)
 
         # Experiment-level (non-runtime-config) bounds on the time block.
-        dt = self.get("time.dt_seconds")
-        if dt is not None and float(dt) <= 0:
-            raise ValueError(f"time.dt_seconds must be > 0, got {dt}")
-        dur = self.get("time.duration_days")
-        if dur is not None and float(dur) <= 0:
-            raise ValueError(f"time.duration_days must be > 0, got {dur}")
+        _require_positive_finite("time.dt_seconds", self.get("time.dt_seconds"))
+        _require_positive_finite("time.duration_days",
+                                 self.get("time.duration_days"))
 
     def signature(self) -> str:
         """Deterministic signature of the RESOLVED runtime config.
@@ -268,7 +379,16 @@ class OceanExperimentConfig:
         differ (a no-op is only flagged on a byte-identical resolved config).
         """
         try:
-            # Fold in EVERY field the run consumes outside the runtime NamedTuple
+            # A ``setup:`` template runs via the matrix runner, which consumes
+            # only the setup block + output.path.  Signing the COMMAND-EFFECTIVE
+            # invocation (which drops disabled/default controls — quick=false,
+            # levels=null, empty resolution — and ignores OMIP-only sections)
+            # means exactly the no-op overrides are flagged by init_experiment,
+            # and the real ones register as changes.
+            if self.get("setup") is not None:
+                return repr(("setup", self.run_command()))
+            # OMIP path: fold in EVERY field the run consumes outside the runtime
+            # NamedTuple
             # (the run controls applied by resolve_ocean_run_controls), so a
             # legitimate override like ``-o output.path=...`` / ``-o grid.nlev=``
             # / ``-o grid.n_lat=`` is not mis-flagged as a no-op by
@@ -303,7 +423,39 @@ class OceanExperimentConfig:
         ``config.yaml`` (init_experiment passes that with ``workdir=repo_root``).
         Emits ``--grid`` mapped from ``grid.type`` so the template's grid backend
         actually runs (the runner otherwise defaults to ``tripole``).
+
+        A ``setup:`` template (#388 Ask#2) instead routes to the matrix runner —
+        the existing, sole consumer of ``AVAILABLE_EXPERIMENTS`` — via
+        ``--only <name> --grid <grid>``, mapping any explicit per-setup
+        run-controls onto its CLI and letting the experiment's own defaults
+        apply for the rest.  ``config_path`` is unused on this path (the setup
+        is fully specified by the selector, not the YAML body).
         """
+        setup = self.get("setup")
+        if setup is not None:
+            # ``=name`` selects the matrix case by EXACT match (the runner's
+            # bare ``--only name`` is a substring filter that would over-match
+            # e.g. ``baroclinic`` -> ``baroclinic_gyre*``).
+            parts = [
+                f"python {_OCEAN_MATRIX_RUNNER}",
+                f"--only {shlex.quote('=' + str(setup['name']))}",
+                f"--grid {shlex.quote(str(setup['grid']))}",
+            ]
+            if setup.get("levels") is not None:
+                parts.append(f"--levels {int(setup['levels'])}")
+            if setup.get("resolution"):
+                parts.append(f"--resolution {shlex.quote(str(setup['resolution']))}")
+            if setup.get("dt_seconds") is not None:
+                parts.append(f"--dt {float(setup['dt_seconds'])}")
+            if setup.get("duration_days") is not None:
+                parts.append(f"--days {float(setup['duration_days'])}")
+            out = self.get("output.path")
+            if out:
+                parts.append(f"--output {shlex.quote(str(out))}")
+            if setup.get("quick"):
+                parts.append("--quick")
+            return " ".join(parts)
+
         grid_type = self.get("grid.type", "latlon_cgrid")
         try:
             backend = _GRID_TYPE_TO_RUNNER[grid_type]

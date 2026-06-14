@@ -1,0 +1,24 @@
+# legoESM experiment template — inertia-gravity wave dispersion.
+#
+# Names the procedural `inertia_gravity_wave` experiment via the `setup:`
+# selector (#388 Ask#2). Exact match: run_ocean_test_matrix.py --only =inertia_gravity_wave.
+experiment:
+  tier: tier1
+  complexity: primitive_equation
+  extent: idealized
+  maturity: structurally_validated
+  description: >
+    Inertia-gravity (Poincaré) wave propagation: a barotropic-equivalent
+    shallow-water benchmark of the C-grid IGW dispersion relation and the
+    Coriolis / free-surface pressure-gradient coupling. A low-tier dynamical
+    sanity setup.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "ocean-inertia-gravity-wave"
+  type: ocean_only
+setup:
+  name: inertia_gravity_wave
+  grid: latlon
+output:
+  path: output/ocean/inertia_gravity_wave/
