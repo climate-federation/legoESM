@@ -871,6 +871,7 @@ class PhysicsPipeline:
                                day_of_year, seconds_of_day,
                                solar_weights, s_0,
                                o3_vmr_precomputed, aerosol_od_precomputed,
+                               aerosol_lw_od_precomputed=None,
                                tau_equator=None, tau_pole=None,
                                albedo_ice=None, albedo_ocean=None,
                                ghg_vmr_override=None,
@@ -1074,6 +1075,7 @@ class PhysicsPipeline:
             emis_col = _shard(emis_col)
             o3_vmr_precomputed = _shard(o3_vmr_precomputed)
             aerosol_od_precomputed = _shard(aerosol_od_precomputed)
+            aerosol_lw_od_precomputed = _shard(aerosol_lw_od_precomputed)
             if cloud_kwargs:
                 cloud_kwargs = {k: _shard(v) for k, v in cloud_kwargs.items()}
 
@@ -1086,6 +1088,7 @@ class PhysicsPipeline:
             solar_weights, s_0,
             tau_equator=tau_equator, tau_pole=tau_pole,
             ghg_vmr_override=ghg_vmr_override,
+            aerosol_lw_od_col=aerosol_lw_od_precomputed,
             **cloud_kwargs,
         )
 
@@ -1158,6 +1161,7 @@ class PhysicsPipeline:
                          albedo_ice=pipeline.albedo_ice,
                          albedo_ocean=pipeline.albedo_ocean,
                          ghg_vmr_override=None,
+                         aerosol_lw_od=None,
                          T_land=None,
                          q_i=None, q_s=None, q_g=None,
                          N_c=None, N_r=None, N_i=None,
@@ -1168,7 +1172,7 @@ class PhysicsPipeline:
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                  day_of_year, seconds_of_day, dt,
-                 solar_weights, s_0, o3_vmr, aerosol_od,
+                 solar_weights, s_0, o3_vmr, aerosol_od, aerosol_lw_od,
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
@@ -1184,6 +1188,7 @@ class PhysicsPipeline:
                         T, p_s, q_v, sst, sic, lat, lon,
                         day_of_year, seconds_of_day,
                         solar_weights, s_0, o3_vmr, aerosol_od,
+                        aerosol_lw_od_precomputed=aerosol_lw_od,
                         tau_equator=tau_equator, tau_pole=tau_pole,
                         albedo_ice=albedo_ice, albedo_ocean=albedo_ocean,
                         ghg_vmr_override=ghg_vmr_override,
@@ -1229,7 +1234,7 @@ class PhysicsPipeline:
             def _no_rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                  day_of_year, seconds_of_day, dt,
-                 solar_weights, s_0, o3_vmr, aerosol_od,
+                 solar_weights, s_0, o3_vmr, aerosol_od, aerosol_lw_od,
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
@@ -1270,7 +1275,7 @@ class PhysicsPipeline:
 
             args = (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                     day_of_year, seconds_of_day, dt,
-                    solar_weights, s_0, o3_vmr, aerosol_od,
+                    solar_weights, s_0, o3_vmr, aerosol_od, aerosol_lw_od,
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
@@ -1318,9 +1323,11 @@ def _build_none_radiation_fn(config):
                      solar_weights, s_0=0.0,
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
+                     aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
+        del aerosol_lw_od_col  # zero-radiation: LW aerosol is a no-op
         ncol, nlev = T_col.shape
         z_full = jnp.zeros((ncol, nlev), dtype=T_col.dtype)
         z_half = jnp.zeros((ncol, nlev + 1), dtype=T_col.dtype)
@@ -1363,10 +1370,12 @@ def _build_gray_radiation_fn(config):
                      solar_weights, s_0=S_0,
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
+                     aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
+        del aerosol_lw_od_col  # gray radiation does not use aerosol LW od
         del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
         # Rebuild config with traced tau values when provided
         _cfg = gray_config
@@ -1437,6 +1446,7 @@ def _build_rrtmgp_radiation_fn(config):
                      solar_weights, s_0=S_0,
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
+                     aerosol_lw_od_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
@@ -1475,6 +1485,7 @@ def _build_rrtmgp_radiation_fn(config):
             sfc_emissivity=emis_col,
             o3_vmr=o3_vmr_col,
             aerosol_optical_depth=aerosol_od_col,
+            aerosol_absorption_optical_depth_lw=aerosol_lw_od_col,
             solar_spectral_fraction=solar_weights if solar_weights.size > 0 else None,
             ghg_vmr_override=ghg_vmr_override,
             cloud_path_liq=cloud_path_liq,

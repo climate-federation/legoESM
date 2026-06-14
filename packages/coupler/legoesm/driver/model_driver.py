@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -65,6 +66,16 @@ def _meshes_compatible(a, b) -> bool:
         return ids_a == ids_b
     except Exception:  # noqa: BLE001 — opaque mesh objects must not crash
         return False
+
+
+def _wallclock_exhausted(elapsed_s: float, max_s: float, buffer_s: float) -> bool:
+    """True if the run should checkpoint and exit to fit the wallclock budget.
+
+    ``max_s <= 0`` disables the check.  Otherwise fire once the elapsed time is
+    within ``buffer_s`` of the budget, leaving time to write the checkpoint
+    before SLURM kills the job (so a dependency chain can resume).
+    """
+    return max_s > 0.0 and elapsed_s >= (max_s - buffer_s)
 
 
 class ModelDriver:
@@ -1091,6 +1102,15 @@ class ModelDriver:
         # Aerosol external forcing
         self._aerosol_active = (cfg.radiation in ("rrtmg", "rrtmgp")
                                 and cfg.aerosol_forcing == "external")
+        # Volcanic stratospheric LONGWAVE aerosol (gap #9): active only on a
+        # gas-radiation scheme (gray ignores aerosol) with the LW switch and
+        # a volcanic file present.  Default OFF ⇒ no LW aerosol path.
+        self._aerosol_lw_active = (
+            cfg.radiation in ("rrtmg", "rrtmgp")
+            and bool(getattr(cfg, "volcanic_aerosol_lw", False))
+            and bool(cfg.volcanic_aerosol_file)
+        )
+        self._aerosol_lw_od = None
         self._aerosol_config = AerosolConfig(
             enabled=self._aerosol_active,
             source="climatology", path=cfg.aerosol_file,
@@ -1099,6 +1119,13 @@ class ModelDriver:
             volcanic_enabled=bool(cfg.volcanic_aerosol_file),
             volcanic_path=cfg.volcanic_aerosol_file,
             volcanic_scale=cfg.volcanic_aerosol_scale,
+            # Volcanic stratospheric LONGWAVE aerosol (gap #9): only when
+            # the LW switch is set AND a volcanic file is present.  Default
+            # OFF ⇒ ``get_aerosol_lw_at_time`` returns None ⇒ zeros LW od
+            # ⇒ byte-identical (RRTMGP no-op).
+            volcanic_lw_enabled=(bool(getattr(cfg, "volcanic_aerosol_lw",
+                                              False))
+                                 and bool(cfg.volcanic_aerosol_file)),
             # Calendar anchor for the non-cyclic dispatch in
             # ``get_aerosol_at_time``.  Multi-year volcanic time-series
             # (e.g. 1850–2014 CMIP6 ``bc_aeropt_cmip6_volc_*``) are
@@ -1169,7 +1196,7 @@ class ModelDriver:
     def _precompute_external_forcing(self, day, p_s, lat):
         """Pre-compute ozone/aerosol/GHG fields outside JIT boundary."""
         from legoesm.forcing.external import (
-            get_ozone_at_time, get_aerosol_at_time,
+            get_ozone_at_time, get_aerosol_at_time, get_aerosol_lw_at_time,
             get_ghg_at_time, ghg_concentrations_to_vmr,
         )
         from legoesm.forcing.surface_utils import distribute_column_aod_to_layers
@@ -1214,6 +1241,25 @@ class ModelDriver:
                 jnp.asarray(aerosol_col), p_half_col,
             )
 
+        # Volcanic stratospheric LONGWAVE aerosol (gap #9): same (ncol,
+        # nlev) shape as ``aerosol_od``, default zeros so the SegmentForcing
+        # / forcing-dict leaf is a concrete fixed-shape array (no retrace)
+        # and a run without volcanic LW aerosol is byte-identical (zeros LW
+        # od is a RRTMGP no-op).  Distributed to layers by the SAME
+        # pressure-thickness helper used for the SW aerosol.  Stored as an
+        # instance attribute (NOT added to the 3-tuple return) so the five
+        # existing unpack call sites keep their arity.
+        aerosol_lw_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
+        if self._aerosol_lw_active:
+            aerosol_lw_col = get_aerosol_lw_at_time(
+                self._aerosol_config, day, lat_grid=lat_col,
+            )
+            if aerosol_lw_col is not None:
+                aerosol_lw_od = distribute_column_aod_to_layers(
+                    jnp.asarray(aerosol_lw_col), p_half_col,
+                )
+        self._aerosol_lw_od = aerosol_lw_od
+
         # GHG VMR override (None for gray radiation / constant forcing)
         ghg_vmr = None
         if self._ghg_active:
@@ -1239,6 +1285,17 @@ class ModelDriver:
                     "ch4_ppbv": ch4,
                     "n2o_ppbv": n2o,
                 })
+
+        # Interactive carbon-radiation coupling (#3 / C4MIP): when the coupled
+        # driver runs a prognostic CO2 tracer it sets ``self._co2_vmr_override``
+        # (a global-mean CO2 mole fraction) each segment; inject it into the
+        # radiation GHG so emitted / absorbed CO2 actually changes radiative
+        # forcing.  Gated on a gas-radiation scheme (gray ignores GHG) and on the
+        # override being present, so fixed-CO2 runs are byte-identical.
+        co2_vmr_override = getattr(self, "_co2_vmr_override", None)
+        if (co2_vmr_override is not None
+                and cfg.radiation in ("rrtmg", "rrtmgp")):
+            ghg_vmr = {**(ghg_vmr or {}), "co2": co2_vmr_override}
 
         return o3_vmr, aerosol_od, ghg_vmr
 
@@ -3117,8 +3174,32 @@ class ModelDriver:
                        f"digest={metadata.state_digest[:16]}...")
         return step, day
 
+    def _maybe_wallclock_exit(self, ckpt_fn, step: int, day: float) -> None:
+        """Checkpoint and ``exit(0)`` cleanly if the wallclock budget is nearly
+        spent, so a SLURM dependency chain resumes from this state.
+
+        Single-rank only: under MPI an independent per-rank ``sys.exit`` would
+        desync ranks (others block on the next collective), so a collective
+        decision (broadcast the flag) is required and is deferred — the run-start
+        warning notes it is inactive under MPI.
+        """
+        if self._mpi_world_size not in (None, 1):
+            return
+        max_wall = self.config.output.max_wallclock_seconds
+        if not _wallclock_exhausted(
+                time.time() - self._run_wallclock_start, max_wall,
+                self.config.output.restart_buffer_seconds):
+            return
+        logger.info(
+            f"Wallclock budget {max_wall:.0f}s nearly reached at day {day:.2f}; "
+            f"checkpointing and exiting cleanly for restart.")
+        ckpt_fn(step, day)
+        self.diagnostics.flush_to_disk(self._output_dir)
+        sys.exit(0)
+
     def run(self, start_step: int = 0, start_day: float | None = None,
-            compiled: bool = True, segment_callback=None) -> str:
+            compiled: bool = True, segment_callback=None,
+            checkpoint_callback=None) -> str:
         """Run the time integration.
 
         Parameters
@@ -3142,6 +3223,18 @@ class ModelDriver:
             Run status ("COMPLETED" or "BLOWUP at day ...").
         """
         self._segment_callback = segment_callback
+        # Checkpoint hook (a coupled driver passes its own save_checkpoint so
+        # the FULL coupled state — not just the atmosphere — is written on a
+        # periodic or wallclock-budget checkpoint).  Run-start wallclock anchor
+        # for the budget check.
+        self._checkpoint_callback = checkpoint_callback
+        self._run_wallclock_start = time.time()
+        if (self.config.output.max_wallclock_seconds > 0
+                and self._mpi_world_size not in (None, 1)):
+            logger.warning(
+                "max_wallclock_seconds is set but the run is MPI-sharded; "
+                "wallclock checkpoint-and-exit is single-rank only (a collective "
+                "exit is not yet implemented) and will NOT fire under MPI.")
         # Issue #275 fix A: ``try/finally`` here — not inside
         # ``_finalize_run`` — so that an exception thrown anywhere in
         # the time loop still triggers SPMD halo backend restoration.
@@ -3733,6 +3826,13 @@ class ModelDriver:
                         )
                         _forcing_daily["o3_vmr"] = _o3
                         _forcing_daily["aerosol_od"] = _aer
+                        # Volcanic LONGWAVE aerosol (gap #9): set the key
+                        # only when the LW source is active (else omit ⇒
+                        # ``forcing.get("aerosol_lw_od")`` is None ⇒ RRTMGP
+                        # no-op ⇒ byte-identical).
+                        _aer_lw = getattr(self, "_aerosol_lw_od", None)
+                        if self._aerosol_lw_active and _aer_lw is not None:
+                            _forcing_daily["aerosol_lw_od"] = _aer_lw
                         if _ghg is not None:
                             _forcing_daily["ghg_vmr"] = {
                                 k: jnp.asarray(v) for k, v in _ghg.items()
@@ -3861,7 +3961,10 @@ class ModelDriver:
                     logger.error(f"{run_status} (caught at checkpoint; not written)")
                     break
                 _ckpt_day = START_DAY + (step + 1) * DT / 86400.0
-                self.save_checkpoint(start_step + step + 1, _ckpt_day)
+                _ckpt = getattr(self, "_checkpoint_callback", None) or self.save_checkpoint
+                _ckpt(start_step + step + 1, _ckpt_day)
+                # Wallclock-aware clean exit for long HPC dependency chains.
+                self._maybe_wallclock_exit(_ckpt, start_step + step + 1, _ckpt_day)
 
         # Final checkpoint so the next chain link resumes from the exact end
         # state.  Skipped (a) on blow-up — state is non-finite — and (b) when
@@ -4232,6 +4335,11 @@ class ModelDriver:
                         self._current_day, _f_now['p_s'], _lat_2d_loop,
                     )
                     _ext_daily = {"o3_vmr": _o3, "aerosol_od": _aer}
+                    # Volcanic LONGWAVE aerosol (gap #9): only when active
+                    # (omitted ⇒ None ⇒ RRTMGP no-op ⇒ byte-identical).
+                    _aer_lw = getattr(self, "_aerosol_lw_od", None)
+                    if self._aerosol_lw_active and _aer_lw is not None:
+                        _ext_daily["aerosol_lw_od"] = _aer_lw
                     if _ghg is not None:
                         _ext_daily["ghg_vmr"] = {
                             k: jnp.asarray(v) for k, v in _ghg.items()
@@ -5012,6 +5120,7 @@ class ModelDriver:
                 day_of_year=day_of_year, seconds_of_day=seconds_of_day,
                 solar_weights=solar_weights, s_0=current_s_0,
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
+                aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
                 ghg_vmr=ghg_vmr,
                 sfc_albedo_override=_sfc_albedo_ovr,
                 sfc_T_override=_sfc_T_ovr,
@@ -5273,9 +5382,14 @@ class ModelDriver:
                         device_config=_seg_device_config,
                     )
 
-            # Checkpoint
+            # Checkpoint (a coupled run routes this through its own
+            # save_checkpoint so the coupled state is written too).
+            _ckpt = getattr(self, "_checkpoint_callback", None) or self.save_checkpoint
             if checkpoint_interval > 0 and current_step % checkpoint_interval == 0:
-                self.save_checkpoint(current_step, day)
+                _ckpt(current_step, day)
+
+            # Wallclock-aware clean exit for long HPC dependency chains.
+            self._maybe_wallclock_exit(_ckpt, current_step, day)
 
             # Periodic diagnostic flush (every ~365 days) to cap memory — rank 0 only
             if (elapsed_day > 0 and int(elapsed_day) % 365 == 0
@@ -5418,6 +5532,7 @@ class ModelDriver:
                 held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
+                aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
                 T_land=T_land, **_dm_step_in,
                 **_phys_carry_step_inputs(),
             )
@@ -5538,6 +5653,7 @@ class ModelDriver:
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
+                    aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
                     T_land=T_land, **_dm_step_in,
                     **_phys_carry_step_inputs(),
                 )

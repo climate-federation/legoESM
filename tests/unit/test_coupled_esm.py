@@ -168,6 +168,68 @@ class TestMixedGridCoupling(unittest.TestCase):
         self.assertLess(sst_mean, 320.0)
 
 
+class TestCoupledCheckpointValidation(unittest.TestCase):
+    """Coupled checkpoint restore validates ocean-grid shape (no silent
+    mis-mapping when the ocean_grid / config changed since the save)."""
+
+    def _write_coupled_npz(self, tmp, ocean_shape, version=1):
+        import numpy as np
+        from pathlib import Path
+        np.savez(
+            Path(tmp) / "coupled_day_0000.npz",
+            ocean_T_sfc=np.zeros(ocean_shape, dtype=np.float64),
+            ocean_T_deep=np.zeros(ocean_shape, dtype=np.float64),
+            _ckpt_version=np.asarray(version, dtype=np.int64),
+            _ckpt_ocean_shape=np.asarray(ocean_shape, dtype=np.int64),
+        )
+
+    def test_load_rejects_ocean_shape_mismatch(self):
+        import tempfile
+        driver = _make_driver("aquaplanet", days=1)
+        cur = tuple(driver._ocean_state.T_sfc.data.shape)
+        bad = (cur[0] + 1,) + cur[1:]  # a different ocean grid
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_coupled_npz(tmp, bad)
+            with self.assertRaises(ValueError):
+                driver.load_coupled_checkpoint(0.0, checkpoint_dir=tmp)
+
+    def test_load_accepts_matching_shape(self):
+        import tempfile
+        driver = _make_driver("aquaplanet", days=1)
+        cur = tuple(driver._ocean_state.T_sfc.data.shape)
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_coupled_npz(tmp, cur)
+            driver.load_coupled_checkpoint(0.0, checkpoint_dir=tmp)  # no raise
+            self.assertEqual(tuple(driver._ocean_state.T_sfc.data.shape), cur)
+
+
+class TestWallclockExhausted(unittest.TestCase):
+    """Wallclock-budget checkpoint-and-exit predicate (#6)."""
+
+    def test_predicate(self):
+        from legoesm.driver.model_driver import _wallclock_exhausted
+        self.assertFalse(_wallclock_exhausted(0.0, 0.0, 600.0))      # disabled
+        self.assertFalse(_wallclock_exhausted(100.0, 3600.0, 600.0))  # plenty left
+        self.assertTrue(_wallclock_exhausted(3100.0, 3600.0, 600.0))  # within buffer
+        self.assertTrue(_wallclock_exhausted(3600.0, 3600.0, 600.0))  # at budget
+
+
+class TestCarbonRadiationCoupling(unittest.TestCase):
+    """Prognostic CO2 tracer feeds the atmosphere radiation GHG (#3 / C4MIP)."""
+
+    def test_co2_override_set_after_run(self):
+        driver = _make_driver("slab_carbon", days=1)
+        # No radiation override before the first coupled segment.
+        self.assertIsNone(getattr(driver._atm, "_co2_vmr_override", None))
+        driver.run()
+        # The coupled driver fed the prognostic CO2 to the atm radiation hook.
+        ov = getattr(driver._atm, "_co2_vmr_override", None)
+        self.assertIsNotNone(ov)
+        # Initial ~415 ppm => CO2 mole fraction ~4.15e-4 (physical range).
+        self.assertGreater(ov, 1e-4)
+        self.assertLess(ov, 1e-3)
+
+
 class TestSlabSimple(unittest.TestCase):
     """Slab ocean + slab bucket land."""
 
