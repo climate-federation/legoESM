@@ -13,7 +13,7 @@ the cross-face D-grid halo + the h3=4 PPM pre-pad run in the global
 (face-replicated) view; the per-tile PPM sweep is sharded over the device
 mesh — each device slices its tile's sweep window from the replicated
 padded field and runs the device-uniform
-:func:`legoesm.core.fv3_sw_core._ppm_transport_1d` with
+:func:`legoesm.core.fv3_sw_core.ppm_transport_1d` with
 ``external_halo=h3, rd_prepadded=True`` (so the padded face already carries
 the halo — NO in-stage halo ppermute, the same insight as the d2a2c stage).
 
@@ -48,7 +48,7 @@ def transport_sweep_tile(vp_g, courant, rd_g, a, nl: int, h3: int = 4):
 
     Shared by the shard_map stage (``a = axis_index("tile_i") * nl``) and a
     non-shard body test (``a = t * nl``) so the exact slice shapes + the
-    ``_ppm_transport_1d`` call are CI-covered WITHOUT a multi-device mesh
+    ``ppm_transport_1d`` call are CI-covered WITHOUT a multi-device mesh
     (codex U3 MEDIUM — the shard_map test silently skips below 6*kt host
     devices).  ``vp_g`` is ``(F, n+2*h3, m)`` (F=1 inside the stage shard,
     F=6 in the host test); the tile's i-cells ``[a-h3 : a+nl+h3]`` live at
@@ -57,12 +57,12 @@ def transport_sweep_tile(vp_g, courant, rd_g, a, nl: int, h3: int = 4):
     int32/int64 index-tuple error from ``axis_index``).  Returns
     ``(F, nl+1, m)`` i-interface flux.
     """
-    from legoesm.core.fv3_sw_core import _ppm_transport_1d
+    from legoesm.core.fv3_sw_core import ppm_transport_1d
 
     vp_t = jax.lax.dynamic_slice_in_dim(vp_g, a, nl + 2 * h3, axis=1)
     c_t = jax.lax.dynamic_slice_in_dim(courant, a, nl + 1, axis=1)
     rd_t = jax.lax.dynamic_slice_in_dim(rd_g, a, nl + 2, axis=1)
-    return _ppm_transport_1d(
+    return ppm_transport_1d(
         vp_t, c_t, rd_t, 1, external_halo=h3, rd_prepadded=True)
 
 
@@ -115,7 +115,7 @@ def transport_sweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4,
     ``nl`` (CELL cross, the synthetic/U3b case); pass ``nl+1`` for the REAL
     xtp_u whose cross axis is the ``n+1`` CORNER axis (U3d, shapes from job
     8480355).  ``vp_g`` ``(F, n+2*h3, n_cross)``; returns ``(F, nl+1, cn)``."""
-    from legoesm.core.fv3_sw_core import _ppm_transport_1d
+    from legoesm.core.fv3_sw_core import ppm_transport_1d
 
     cn = nl if cross_nl is None else cross_nl
     # Static guards (codex U3d MED): the three inputs must share the CROSS
@@ -136,7 +136,7 @@ def transport_sweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4,
     c_t = jax.lax.dynamic_slice_in_dim(c_t, a_j, cn, axis=2)
     rd_t = jax.lax.dynamic_slice_in_dim(rd_g, a_i, nl + 2, axis=1)
     rd_t = jax.lax.dynamic_slice_in_dim(rd_t, a_j, cn, axis=2)
-    return _ppm_transport_1d(
+    return ppm_transport_1d(
         vp_t, c_t, rd_t, 1, external_halo=h3, rd_prepadded=True)
 
 
@@ -148,7 +148,7 @@ def transport_jsweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4
     ``[a_i : a_i+cross_nl]`` (NO i-halo).  ``cross_nl`` defaults to ``nl``;
     pass ``nl+1`` for the REAL ytp_v (cross axis = ``n+1`` CORNER, U3d).
     ``vp_g`` ``(F, n_cross, n+2*h3)``; returns ``(F, cn, nl+1)``."""
-    from legoesm.core.fv3_sw_core import _ppm_transport_1d
+    from legoesm.core.fv3_sw_core import ppm_transport_1d
 
     cn = nl if cross_nl is None else cross_nl
     # Static guards (codex U3d MED): cross axis here is =1.
@@ -167,7 +167,7 @@ def transport_jsweep_tile_2d(vp_g, courant, rd_g, a_i, a_j, nl: int, h3: int = 4
     c_t = jax.lax.dynamic_slice_in_dim(c_t, a_i, cn, axis=1)
     rd_t = jax.lax.dynamic_slice_in_dim(rd_g, a_j, nl + 2, axis=2)
     rd_t = jax.lax.dynamic_slice_in_dim(rd_t, a_i, cn, axis=1)
-    return _ppm_transport_1d(
+    return ppm_transport_1d(
         vp_t, c_t, rd_t, 2, external_halo=h3, rd_prepadded=True)
 
 
