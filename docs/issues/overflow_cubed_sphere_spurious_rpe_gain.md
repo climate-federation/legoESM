@@ -1,65 +1,59 @@
-# Overflow on cubed-sphere: small positive PE-proxy drift (strict-sign gate fail)
+# Overflow on cubed-sphere: small panel-edge surface-tracer overshoot (strict PE gate fail)
 
 ## Symptom
 `scripts/matrix/run_ocean_test_matrix.py --only overflow --grid cubed_sphere`
-fails the `pe_rel_final < 0` gate: the PE proxy drifts slightly POSITIVE
-instead of decreasing as the dense plume descends.
+fails `pe_rel_final < 0`: the PE proxy drifts slightly POSITIVE (PE_rel
++6.5e-7 quick / +1.04e-5 @1.0d). `latlon` overflow passes.
 
-| duration | PE_rel_final | mean-T drift | T range (init [0,20] °C) |
-|----------|--------------|--------------|--------------------------|
-| 0.10 d (quick) | +6.47e-7 | ~1e-15 | — |
-| 0.50 d (full)  | +4.48e-6 | ~5e-15 | [0.00, 20.04] |
-| 1.00 d         | +1.04e-5 | ~2e-14 | [0.00, 20.10] |
+## Precisely localized (instrumented, the real/monolithic stable path)
+T_max grows **slowly and monotonically** above the global initial max 20.0 °C:
+19.98 → 20.00 (step ~47) → 20.10 (step 288), **always at a cube PANEL EDGE
+(i=0), SURFACE layer (k=0)**. Tracer mean is conserved to **1e-14**; it is NOT a
+blowup (the run completes, `ok=True`). So this is a tiny, accumulating
+**panel-edge surface-tracer non-monotonicity** (~1e-4 °C/step), surfaced by a
+strict-sign gate on a crude domain-PE proxy (`_compute_rpe`,
+experiments.py:1236, integrates `rho(T)·z_ref·dz_ref`, an admitted
+approximation, not true sorted RPE).
 
-`latlon` overflow passes (PE_rel < 0, no overshoot).
+## Empirically ruled out — it is NOT the tracer transport
+Six fixes were each implemented, run through the matrix, and **reverted** —
+EVERY one left PE_rel byte-identical (≈1.0449e-05 @1.0d):
+1. Flux-form vertical tracer advection (÷h_k) vs advective −w·∂q/∂z.
+2. Thickness-weighted horizontal FCT (arithmetic h_face), ÷h_k.
+3. FCT reusing the EXACT synced PPM face mass flux from
+   `cgrid_mass_flux_divergence` (constant-tracer preservation by construction).
+4. C-face wet/rock masking (already present).
+5. True-geometry PE diagnostic (actual eta-stretched z* `h`/centroid vs `z_ref`).
+6. dt-aware Zalesak limiter (`q_td = q + dt·dq_low`, limit `dt·ad`).
 
-## What it is NOT (empirically ruled out, 2026-06-14, each tested + Codex-reviewed)
-The original "non-thickness-weighted tracer transport / non-conservation"
-hypothesis is **wrong**. Tracer **content is well conserved** (mean-T drift
-~1e-14). Four conservation fixes were implemented and each left PE_rel
-essentially unchanged (≈4.4e-6 @0.5d) — all reverted:
+(3) and (6) were Codex-confirmed as the root cause; the matrix disproved both.
+The byte-identical PE_rel across all six proves the overshoot does **not**
+originate in the horizontal FCT, the vertical advection, the limiter, or the
+thickness weighting — the FCT limiter likely never even fires for this case.
 
-1. **C-face wet/rock masking** — already present in the code; no effect on overflow.
-2. **Flux-form vertical tracer advection** (÷h_k vs advective −w·∂q/∂z): 4.4791e-6 → 4.4770e-6.
-3. **Thickness-weighted horizontal FCT** (arithmetic h_face, ÷h_k): 4.48e-6 → 4.38e-6.
-4. **Exact shared mass flux** (FCT reuses `cgrid_mass_flux_divergence`'s synced
-   PPM face flux so the tracer mass-flux divergence == the w-diagnosis one →
-   discrete continuity / constant-tracer preservation): 4.38e-6 — no further change.
+## Most likely actual cause (not yet fixed)
+A panel-edge effect UPSTREAM of the tracer limiter — a tiny seam-inconsistent
+**C-grid normal velocity** (`dgrid_to_cgrid` / duogrid vector exchange at i=0)
+or a **halo value** at the i=0 ghost cell that biases the upwind/PPM face value
+each step. Surface-only (k=0) points at the free-surface / rigid-lid edge
+coupling. This needs instrumented probing of `u_c` and the tracer halo AT the
+i=0 seam (not more transport-scheme changes), plus mandatory cube-imprint
+visual validation (CLAUDE.md) before any fix is trusted — neither closable
+headlessly.
 
-So the residual is NOT bulk horizontal/vertical advective non-conservation.
+## Separate bug found
+The **modular** `scripts/matrix/ocean_test_matrix/experiments.py:run_overflow`
+is a divergent DUPLICATE of the monolithic `run_ocean_test_matrix.py:5894`
+runner the CLI actually uses (`RUNNERS`, line 6261/8134). The modular one uses a
+different IC (`ov_ic` vs `_create_rest_state` + `_init_overflow`) that is
+**unstable — it blows up to NaN in ~6 steps**. It appears unused by the CLI;
+it should be removed or reconciled with the monolithic runner.
 
-## Most likely actual cause (narrowed, not yet fixed)
-A **tiny, growing non-monotone overshoot** (T_max 20.04 → 20.10 °C over 1 day,
-i.e. ~0.04→0.10 °C above the global initial max) — a *local monotonicity*
-violation, not a content-conservation one. The FCT limiter's local bounds
-(`operators_cdgrid.py` ~859-869) use only the **4 face-adjacent** neighbours
-(halo-1); at the 8 cube **corners / panel seams** a cell's diagonal/cross-seam
-neighbours are not in the bounds, so the PPM reconstruction can produce a small
-overshoot there that the limiter does not clip. Accumulated over the run this
-is the ~1e-5 positive drift in the PE proxy.
-
-Two compounding test-harness factors:
-- `_compute_rpe` (experiments.py:1236) is a **crude PE proxy**, NOT true sorted
-  RPE: it integrates `rho(T)·z_ref·dz_ref·area` on the REFERENCE (J=1) geometry,
-  ignoring the eta-stretched z* layer positions.
-- the gate is **strict-sign** (`pe_rel_final < 0`), so ANY positive drift —
-  including ~1e-5 cube-seam numerical noise — fails, while latlon (no seams)
-  squeaks negative.
-
-## Fix paths (deferred — need visual cube-imprint validation)
-- **(preferred) cube-corner-aware FCT limiter**: include the diagonal/cross-seam
-  neighbours in the `q_min`/`q_max` bounds (halo-2 corner fill) so monotonicity
-  holds at panel corners. Touches `_cgrid_fct_fluxes_2d` (`operators_cdgrid.py`);
-  per CLAUDE.md cube-tracer changes MUST be visually verified (cube imprint /
-  seam grid-scale noise is not caught by norms) — cannot be signed off headlessly.
-- **(diagnostic) replace the crude PE proxy with true sorted RPE on the actual
-  z* geometry** and reconsider the strict-sign gate vs a small tolerance, so the
-  test reflects real conservation rather than ~1e-5 seam noise. Do NOT merely
-  loosen the gate to mask a real corner-monotonicity residual.
-
-Until then `overflow/cubed_sphere` is a **known, documented** tiny-positive-drift
-limitation (tracer content conserved to ~1e-14; overshoot ~0.1 °C). The `latlon`
-overflow is the conservation-faithful reference.
+## Status
+overflow/cubed_sphere is a **known, documented** tiny panel-edge overshoot
+(content conserved to 1e-14; T_max ≤ ~20.1 °C). Root cause narrowed to the
+panel-edge velocity/halo (NOT the tracer transport — six transport fixes had
+zero effect). `latlon` is the conservation-faithful reference.
 
 ## Reproduce
 ```
@@ -67,5 +61,3 @@ JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu \
   .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --only overflow --grid cubed_sphere --days 1.0
 ```
-Watch `PE_rel` grow slightly positive and `T_max` exceed 20 °C by ~0.1 °C while
-the mean-T drift stays ~1e-14.
