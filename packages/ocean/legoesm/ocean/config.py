@@ -44,6 +44,12 @@ The ``ocean:`` section maps directly onto the runtime NamedTuple field names
 (no rename table — that keeps the boundary drift-free and lets the NamedTuple
 ``_fields`` set drive typo detection).  ``eos: linear`` reads an optional
 ``eos_linear:`` sub-dict into a :class:`~legoesm.ocean.eos.LinearEOSConfig`.
+
+``ocean.wiring`` (#388 Ask#3) is a named stepping-composition selector, e.g.
+``ocean: {wiring: veros_ab2}``, that expands to a documented set of operator-
+order / integrator / forcing-placement fields (the canonical Veros-faithful
+composition) and raises on a preset/explicit-flag conflict — keeping wiring as
+named, tested code that a config selects, distinct from the scalar dials.
 """
 
 from __future__ import annotations
@@ -122,6 +128,70 @@ def _resolve_target(grid_type: str):
     )
 
 
+def _ocean_wiring_presets() -> dict:
+    """Named ``ocean.wiring`` presets -> the field composition each expands to.
+
+    #388 Ask#3.  Each preset names a documented operator-order / integrator /
+    forcing-placement composition that a config *selects* (dials-vs-wiring: the
+    composition is named, tested code, not free-form data).  The table reuses
+    the canonical :data:`~legoesm.ocean.fidelity.veros_stepping_common.VEROS_FAITHFUL_STEPPING_SIGNATURE`
+    as the SINGLE source of truth (ratchet-tested by the Veros free-run recipes
+    in ``test_veros_faithful_stepping_shared``) — it is never re-listed here, so
+    a preset can never drift from the recipes' composition.
+
+    Deferred import: keep this boundary module cheap and avoid pulling the
+    fidelity layer at package-import time.
+    """
+    from legoesm.ocean.fidelity.veros_stepping_common import (
+        VEROS_FAITHFUL_STEPPING_SIGNATURE,
+    )
+    return {"veros_ab2": dict(VEROS_FAITHFUL_STEPPING_SIGNATURE)}
+
+
+def _apply_ocean_wiring(wiring, ocean: dict, grid_type: str) -> dict:
+    """Expand an ``ocean.wiring`` preset into *ocean*'s flat field dict.
+
+    Raises on an unknown preset, a non-applicable grid, or a preset/explicit-
+    flag conflict (a preset must never silently override — or be overridden by —
+    an explicitly-set flag).  Returns the merged field dict.
+    """
+    # YAML can yield a list/map for ``wiring:`` — reject non-strings with a
+    # clean boundary error (a raw ``TypeError: unhashable type`` from the dict
+    # membership below would be opaque).
+    if not isinstance(wiring, str):
+        raise ValueError(
+            f"ocean.wiring must be a string preset name, got "
+            f"{type(wiring).__name__} ({wiring!r})"
+        )
+    presets = _ocean_wiring_presets()
+    if wiring not in presets:
+        raise ValueError(
+            f"unknown ocean.wiring preset {wiring!r}; valid presets: "
+            f"{sorted(presets)} (omit, or use 'default', for the per-field "
+            "config)"
+        )
+    # The shipped presets are lat-lon C-grid stepping compositions (their
+    # fields are LatLonCGridOceanConfig fields); applying them elsewhere would
+    # only surface as a confusing "unknown field" later — fail clearly here.
+    if grid_type != "latlon_cgrid":
+        raise ValueError(
+            f"ocean.wiring={wiring!r} is a lat-lon C-grid stepping composition "
+            f"and does not apply to grid.type={grid_type!r}"
+        )
+    signature = presets[wiring]
+    conflicts = sorted(k for k in signature if k in ocean)
+    if conflicts:
+        raise ValueError(
+            f"ocean.wiring={wiring!r} sets {conflicts}, which are also set "
+            "explicitly in `ocean:`. Remove the explicit field(s) OR the "
+            "wiring preset — a preset must not silently conflict with an "
+            "explicit flag."
+        )
+    merged = dict(signature)
+    merged.update(ocean)  # disjoint (conflicts already rejected)
+    return merged
+
+
 class OceanExperimentConfig:
     """Ocean YAML configuration container with dot-access and YAML support.
 
@@ -198,6 +268,18 @@ class OceanExperimentConfig:
         ConfigClass, _ = _resolve_target(grid_type)
 
         ocean = dict(self.get("ocean") or {})
+
+        # Named wiring preset (#388 Ask#3): ``ocean.wiring: veros_ab2`` expands
+        # to a documented stepping composition and raises on a preset/explicit-
+        # flag conflict.  ``wiring`` is a selector, not a runtime field, so pop
+        # it BEFORE the typo check and inject the composition's fields.  The
+        # expansion reuses the canonical VEROS_FAITHFUL_STEPPING_SIGNATURE
+        # (single source of truth, #433) — the preset table never re-lists the
+        # values, so it can never drift from the recipes' composition.
+        wiring = ocean.pop("wiring", None)
+        if wiring is not None and wiring not in ("", "default"):
+            ocean = _apply_ocean_wiring(wiring, ocean, grid_type)
+
         known = set(ConfigClass._fields)
         unknown = sorted(k for k in ocean if k not in known)
         if unknown:
