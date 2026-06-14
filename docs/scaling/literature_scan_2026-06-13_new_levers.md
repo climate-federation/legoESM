@@ -62,3 +62,40 @@ find scaling levers NOT already shipped + transferable to Ginsburg
   codex mandatory). #2-tracer is the more-contained first slice; #1 is the
   higher-ROI-but-needs-stability-eval (and must resolve the MPAS-O caveat).
 - The XLA scheduling levers (#3/#4) are already optimal in backend.py.
+
+## VERIFY-FIRST VERDICT (2026-06-13, same day — both levers DEAD-END at our scale)
+Verified the two "new" levers against the actual codebase + measured ledger
+BEFORE building. Both collapse at production/Ginsburg scale:
+
+- **#2 precision-partition FV3 — MOOT.** `fv3_sw_core.py` has ZERO `astype`
+  calls: the cube SW dycore is dtype-POLYMORPHIC (inherits the input array
+  dtype) and ALREADY runs float32 (line 1636 carries an explicit "float32
+  overflow guard"). The lever's premise (fp32 flux off a fp64 baseline) does
+  not apply — flux is already fp32; there is nothing below fp32 to drop to.
+  The GRIST 44% was off a fp64 baseline. Ocean f32 path also already exists.
+- **#1 split-explicit wide-halo barotropic — ALREADY REALIZED + the novel
+  part is net-negative.** `explicit_substep` ALREADY EXISTS
+  (`barotropic_latlon_cgrid.py`, `barotropic.py`, `barotropic_mpas.py`) and
+  its substep body ALREADY avoids allreduces — it uses point-to-point
+  `pad_ns_*` halos (lines 318, 365), NOT global reductions. The PCG-allreduce
+  wall is `implicit_cn`-ONLY; the bench already runs `explicit_substep` as the
+  default lane. The ONLY genuinely-new part — wide-halo BATCHING (one
+  exchange/baroclinic step via an `n_substeps`-wide halo) — is:
+  (a) documented net-negative on a latency fabric (`crm_gpu_l2_tiling.md`:
+      "needs an `n_substeps`-wide halo (→ net-negative)"), and
+  (b) bounded by a tiny budget anyway: `scaling_indicators.csv` row
+      `8475875` measured the lat-lon barotropic at **~7% of the step** on the
+      production tile (rows/rank=48) — eliminating ALL of it caps at ~7%, and
+      this is exactly why the Chebyshev precond was NEUTRAL at production tile.
+  The one regime where barotropic dominates (MPAS-O, 67% of step,
+  `scaling_gpu.md:626`) is being handled by the implicit_cn MPAS work in the
+  CONCURRENT session (`barotropic_implicit_mpas.py`) — out of scope here.
+
+**Conclusion:** Ginsburg is at the practical theoretical limit on every
+*measurable* axis; the literature's "new" levers are already shipped, moot, or
+net-negative on this hardware. The remaining genuine in-domain engineering is
+NOT a Ginsburg-benchable number but a CAPABILITY: completing the cube >6-device
+sub-face tiling (the deferred d_sw1/d_sw5/d_sw6 RK-stage ops, task #3) so the
+cubed-sphere grid can use >6 devices AT ALL on future fast-interconnect HW
+(TPU pods, NVLink nodes). Resuming that, gated by the proven U3 bit-identity
+methodology.
