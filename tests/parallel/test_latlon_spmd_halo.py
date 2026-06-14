@@ -71,3 +71,43 @@ def test_latlon_band_pad_matches_serial(negate, nlev):
     assert worst < 1e-12, (
         f"latlon band SPMD halo vs serial (negate={negate}, nlev={nlev}): "
         f"{worst:.3e}")
+
+
+def test_pad_halo_latlon_backend_dispatch_matches_serial():
+    """The BACKEND routing: with the spmd backend armed, pad_halo_latlon called
+    INSIDE an outer shard_map routes through the band body and matches serial —
+    so the existing ocean/atm lat-lon step is backend-oblivious."""
+    mesh = _mesh()
+    from functools import partial
+    from jax.sharding import NamedSharding, PartitionSpec as P
+    try:
+        from jax import shard_map
+    except ImportError:  # pragma: no cover
+        from jax.experimental.shard_map import shard_map
+    from legoesm.grids.halo_latlon import pad_halo_latlon
+    from legoesm.parallel.latlon_spmd import (
+        activate_latlon_spmd_halo, deactivate_latlon_spmd_halo,
+    )
+
+    rng = np.random.default_rng(77)
+    field = jnp.asarray(rng.standard_normal((N_LAT, N_LON)))
+    ref = np.asarray(pad_halo_latlon(field, halo=1))      # local backend
+
+    isp = P("lat", None)
+    field_sh = jax.device_put(field, NamedSharding(mesh, isp))
+    activate_latlon_spmd_halo(mesh)
+    try:
+        @partial(shard_map, mesh=mesh, in_specs=isp, out_specs=isp,
+                 check_vma=False)
+        def _ex(tile):
+            return pad_halo_latlon(tile, halo=1)   # routes to the band body
+        out = np.asarray(_ex(field_sh))
+    finally:
+        deactivate_latlon_spmd_halo()
+
+    blk = NL + 2
+    worst = max(
+        float(np.max(np.abs(out[b * blk:(b + 1) * blk]
+                            - ref[b * NL: b * NL + NL + 2])))
+        for b in range(N_DEV))
+    assert worst < 1e-12, f"pad_halo_latlon spmd-backend dispatch vs serial: {worst:.3e}"

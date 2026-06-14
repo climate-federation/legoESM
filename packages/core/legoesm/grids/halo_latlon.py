@@ -88,6 +88,22 @@ def pad_halo_latlon_local(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     return padded
 
 
+def _try_spmd_latlon_pad(data: jnp.ndarray, halo: int, negate: bool):
+    """Route a lat-lon halo through the band SPMD ppermute body if the ``spmd``
+    backend + a ``"lat"`` mesh are active; else return ``None`` (caller falls
+    through to mpi/local).  Used by every ``pad_halo_latlon*`` dispatcher so the
+    ocean/atm lat-lon step is backend-oblivious — same pattern as the cube.
+    Handles 2-D and 3-D (the body's lon-pad is ndim-agnostic)."""
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() != "spmd":
+        return None
+    mesh = get_spmd_mesh()
+    if mesh is None or "lat" not in getattr(mesh, "axis_names", ()):
+        return None
+    from legoesm.parallel.latlon_spmd import make_latlon_band_pad_body
+    return make_latlon_band_pad_body(mesh, halo=halo, negate=negate)(data)
+
+
 def pad_halo_latlon(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     """Pad a scalar field with halo cells using pole-folding.
 
@@ -133,6 +149,9 @@ def pad_halo_latlon(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
             return pad_halo_latlon_mpi(
                 data, topology, halo=halo, is_vector_v=False,
             )
+    _spmd = _try_spmd_latlon_pad(data, halo, negate=False)
+    if _spmd is not None:
+        return _spmd
     return pad_halo_latlon_local(data, halo)
 
 
@@ -180,6 +199,9 @@ def pad_halo_latlon_vector(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
             return pad_halo_latlon_mpi(
                 data, topology, halo=halo, is_vector_v=True,
             )
+    _spmd = _try_spmd_latlon_pad(data, halo, negate=True)
+    if _spmd is not None:
+        return _spmd
     return pad_halo_latlon_vector_local(data, halo)
 
 
@@ -249,6 +271,9 @@ def pad_halo_latlon_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
             return pad_halo_latlon_mpi(
                 data, topology, halo=halo, is_vector_v=False,
             )
+    _spmd = _try_spmd_latlon_pad(data, halo, negate=False)
+    if _spmd is not None:
+        return _spmd
     return pad_halo_latlon_3d_local(data, halo)
 
 
@@ -275,6 +300,9 @@ def pad_halo_latlon_vector_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
             return pad_halo_latlon_mpi(
                 data, topology, halo=halo, is_vector_v=True,
             )
+    _spmd = _try_spmd_latlon_pad(data, halo, negate=True)
+    if _spmd is not None:
+        return _spmd
     return pad_halo_latlon_vector_3d_local(data, halo)
 
 

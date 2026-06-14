@@ -63,6 +63,40 @@ def _pole_fold(rows, negate: bool):
     return sign * jnp.roll(rows[::-1], half, axis=1)
 
 
+def activate_latlon_spmd_halo(mesh) -> None:
+    """Arm the lat-lon band SPMD halo backend on a 1-D ``"lat"`` mesh.
+
+    Sets the halo backend to ``"spmd"`` and stores ``mesh`` so the per-grid
+    ``pad_halo_latlon*`` dispatch routes through :func:`make_latlon_band_pad_body`
+    when called INSIDE a shard_map over the same ``"lat"`` axis (the ocean/atm
+    lat-lon SPMD step).  Mirrors the cube
+    ``cubesphere_exchange.activate_spmd_halo_backend``.
+    """
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    if tuple(mesh.devices.shape) != (mesh.devices.size,):
+        raise ValueError(
+            f"activate_latlon_spmd_halo: needs a 1-D lat-band mesh; got "
+            f"shape {tuple(mesh.devices.shape)}")
+    # The pad_halo_latlon dispatch routes on ``"lat" in mesh.axis_names``; a
+    # mesh named otherwise would activate but SILENTLY fall back to local
+    # padding inside the shard_map (wrong interior band halos) — fail loud
+    # (codex LOW).
+    if "lat" not in tuple(mesh.axis_names):
+        raise ValueError(
+            f"activate_latlon_spmd_halo: mesh axis must be named 'lat' (the "
+            f"pad_halo_latlon SPMD dispatch keys on it); got "
+            f"{tuple(mesh.axis_names)}")
+    set_spmd_mesh(mesh)
+    set_halo_backend("spmd")
+
+
+def deactivate_latlon_spmd_halo() -> None:
+    """Clear the SPMD halo backend (-> ``"local"``)."""
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    set_spmd_mesh(None)
+    set_halo_backend("local")
+
+
 def make_latlon_band_pad_body(mesh, halo: int = 1, negate: bool = False):
     """Unwrapped lat-lon band halo body for use INSIDE a shard_map over the
     ``"lat"`` axis (the ocean/atm lat-lon SPMD step).

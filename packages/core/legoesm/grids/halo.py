@@ -528,6 +528,25 @@ def get_mpi_topology():
     return _mpi_topology
 
 
+def get_spmd_mesh():
+    """Return the active SPMD ``jax.sharding.Mesh`` (or ``None``).
+
+    Set by the per-grid SPMD activators (cube
+    :func:`parallel.cubesphere_exchange.activate_spmd_halo_backend`; lat-lon
+    :func:`parallel.latlon_spmd.activate_latlon_spmd_halo`).  The per-grid
+    ``pad_halo*`` dispatch reads it when ``get_halo_backend() == "spmd"`` and
+    routes to the matching shard_map ppermute body (cube: face/tile axes;
+    lat-lon: a ``"lat"`` band axis)."""
+    return _spmd_mesh
+
+
+def set_spmd_mesh(mesh) -> None:
+    """Set/clear the active SPMD mesh (``None`` clears).  Public setter so the
+    SPMD activators need not write the private module global cross-package."""
+    global _spmd_mesh
+    _spmd_mesh = mesh
+
+
 # ==============================================================================
 # Scalar halo exchange
 # ==============================================================================
