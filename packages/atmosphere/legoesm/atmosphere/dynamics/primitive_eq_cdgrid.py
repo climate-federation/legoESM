@@ -373,14 +373,19 @@ def fv3_hydrostatic_tendencies(
         # ln_ps_3d definition said it "rides the pack" but it did not).  Mirrors
         # the NH sibling compressible_euler_cdgrid.py:320 {K, pi_prime} pack.
         _pe_pack = [zeta, B, inv_T, ln_ps_3d]
+        _pe_opt = []                       # names of optional trailing fields
         if _hybrid:
-            _pe_pack.append(_hybrid_factor)
+            _pe_pack.append(_hybrid_factor); _pe_opt.append("hf")
+        if _need_div_pad:                  # div_v rides too (div-damp AL grad)
+            _pe_pack.append(div_v); _pe_opt.append("div")
         _pe_pieces = packed_pad_halo_4d(
             *_pe_pack, mesh=_spmd_mesh, duogrid=_pe_dg,
             interp_offsets=_pe_offs_zeta,
         )
         _zeta_pad, _B_pad, _invT_pad, _lnps_pad = _pe_pieces[:4]
-        _hf_pad = _pe_pieces[4] if _hybrid else None
+        _opt = dict(zip(_pe_opt, _pe_pieces[4:]))
+        _hf_pad = _opt.get("hf")
+        _div_v_pad = _opt.get("div")
     elif _halo_backend == "mpi":
         from legoesm.grids.halo import get_mpi_topology
         # FV3_3D iter-1041: pass interp_offsets when duogrid is off so the
@@ -388,23 +393,29 @@ def fv3_hydrostatic_tendencies(
         # copying — matches the single-device path which threads
         # ``grid.halo_interp_offsets`` here.
         _pe_offs_zeta = None if _pe_dg is not None else grid.halo_interp_offsets
-        # iter-58/60: ride ln_ps_3d (+ hybrid_factor) on this pack — see SPMD note.
+        # iter-58/60/61: ride ln_ps_3d (+ hybrid_factor + div_v) on this pack —
+        # see SPMD note.
         _pe_pack = [zeta, B, inv_T, ln_ps_3d]
+        _pe_opt = []
         if _hybrid:
-            _pe_pack.append(_hybrid_factor)
+            _pe_pack.append(_hybrid_factor); _pe_opt.append("hf")
+        if _need_div_pad:
+            _pe_pack.append(div_v); _pe_opt.append("div")
         _pe_pieces = packed_pad_halo_mpi_4d(
             *_pe_pack, topology=get_mpi_topology(), duogrid=_pe_dg,
             interp_offsets=_pe_offs_zeta,
         )
         _zeta_pad, _B_pad, _invT_pad, _lnps_pad = _pe_pieces[:4]
-        _hf_pad = _pe_pieces[4] if _hybrid else None
+        _opt = dict(zip(_pe_opt, _pe_pieces[4:]))
+        _hf_pad = _opt.get("hf")
+        _div_v_pad = _opt.get("div")
     else:
         # operators do own exchange (single-device); no merged stage halo.
         _zeta_pad = _B_pad = _invT_pad = _lnps_pad = _hf_pad = None
+        _div_v_pad = None
 
-    # _lnps_pad/_hf_pad are now filled by the stage pack above (SPMD/MPI) or
-    # None (single-device); _div_v_pad is still per-op (see div-damp below).
-    _div_v_pad = None
+    # _lnps_pad/_hf_pad/_div_v_pad are now filled by the stage pack above
+    # (SPMD/MPI) or None (single-device → per-op halo).
 
     # FV3_3D iter 14/190: optional a2b_ord4 for ζ_corner; shared with iter-187 smag_vort cap (sw_core.F90:1795)
     _need_zeta_a2b_for_smag = (
