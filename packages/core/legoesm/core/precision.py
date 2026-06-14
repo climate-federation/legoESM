@@ -456,7 +456,6 @@ def compensated_sum(x: jax.Array, axis: int = 0) -> jax.Array:
         Compensated sum along the specified axis.
     """
     x = jnp.moveaxis(x, axis, 0)
-    x.shape[0]
     rest_shape = x.shape[1:]
 
     def _step(carry, xi):

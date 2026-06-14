@@ -15,8 +15,8 @@ __param_spec__ = {
             "cfl_safety": "numerics: solver/CFL/smoothing parameter",
         },
         "params": {
-            "A_h": {"units": "1", "bounds": (3300.0, 30000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "harmonic lateral viscosity/diffusivity", "shape": None},
-            "K_h": {"units": "1", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "harmonic lateral viscosity/diffusivity", "shape": None},
+            "A_h": {"units": "m^2/s", "bounds": (3300.0, 30000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "harmonic lateral viscosity/diffusivity", "shape": None},
+            "K_h": {"units": "m^2/s", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "harmonic lateral viscosity/diffusivity", "shape": None},
         },
     },
     "BiharmonicConfig": {
@@ -36,12 +36,12 @@ __param_spec__ = {
             "f_min": "numerics: floor/cap",
         },
         "params": {
-            "L_fixed": {"units": "1", "bounds": (33000.0, 300000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
-            "L_max": {"units": "1", "bounds": (66000.0, 600000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
-            "L_min": {"units": "1", "bounds": (1650.0, 15000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
+            "L_fixed": {"units": "m", "bounds": (33000.0, 300000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
+            "L_max": {"units": "m", "bounds": (66000.0, 600000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
+            "L_min": {"units": "m", "bounds": (1650.0, 15000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
             "alpha": {"units": "1", "bounds": (0.00495, 0.045), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
-            "kappa_max": {"units": "1", "bounds": (1320.0, 12000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
-            "kappa_min": {"units": "1", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
+            "kappa_max": {"units": "m^2/s", "bounds": (1320.0, 12000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
+            "kappa_min": {"units": "m^2/s", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
         },
     },
     "GMRediConfig": {
@@ -52,9 +52,9 @@ __param_spec__ = {
         },
         "params": {
             "S_max": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
-            "kappa_GM": {"units": "1", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
-            "kappa_Redi": {"units": "1", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
-            "surface_complement_depth": {"units": "1", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
+            "kappa_GM": {"units": "m^2/s", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
+            "kappa_Redi": {"units": "m^2/s", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
+            "surface_complement_depth": {"units": "m", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
         },
     },
 }

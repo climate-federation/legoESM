@@ -39,7 +39,13 @@ def bulk_formula_surface_forcing(
     dtype = T.dtype
 
     T_s = T[..., 0] + constants.T_freeze  # (6, n, n)
-    q_sat = saturation_specific_humidity(T_s, jnp.full_like(T_s, constants.p_atm_std))
+    # Surface saturation humidity over SALINE ocean water: Large & Yeager (2004)
+    # / OMIP prescribe q_s = 0.98 * q_sat(SST, p) (~2% reduction of saturation
+    # vapour pressure over seawater).  Omitting it biases the latent heat flux
+    # (and evaporative freshwater) high.
+    q_sat = cfg.q_sat_salinity_factor * saturation_specific_humidity(
+        T_s, jnp.full_like(T_s, constants.p_atm_std)
+    )
 
     # Upward longwave from a grey surface: surface emission PLUS the
     # reflected component of the incident longwave.  An earlier form

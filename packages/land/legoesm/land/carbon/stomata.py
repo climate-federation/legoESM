@@ -386,6 +386,12 @@ def coupled_farquhar_stomata(
     gs : Canopy stomatal conductance [mol H2O/m2/s].
     gpp : Gross primary production [gC/m2/s].
     """
+    if config.stomata_model not in ("ball_berry", "medlyn"):
+        raise ValueError(
+            f"Unknown stomata_model {config.stomata_model!r}; "
+            "expected one of: 'ball_berry', 'medlyn'."
+        )
+
     # PAR in umol photons/m2/s
     PAR_umol = _PAR_FRAC * sw_down * _PAR_CONV
 

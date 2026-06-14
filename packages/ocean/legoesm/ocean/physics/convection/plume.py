@@ -57,10 +57,15 @@ def plume_convection(
     # Detect unstable surface: rho(k=0) > rho(k=1)
     surface_unstable = rho[..., 0] > rho[..., 1]  # (6, n, n)
 
-    # Initialize plume properties at surface.  Cast to the state dtype so a
-    # float64-traced ``cfg.T_excess`` (under ``jax.grad``) cannot promote the
-    # scan-carry init relative to the in-loop carry (see scan_fn dtype note).
-    T_plume_init = (T[..., 0] + cfg.T_excess).astype(dtype)
+    # Initialize plume properties at surface.  This is a DOWNWARD (sinking)
+    # ocean convective plume, so the source parcel must be *denser* than the
+    # surface water that feeds it — i.e. COLDER by ``cfg.T_excess`` (a
+    # destabilizing magnitude), not warmer.  A positive (warm) perturbation
+    # would make the parcel lighter and oppose sinking.  Cast to the state
+    # dtype so a float64-traced ``cfg.T_excess`` (under ``jax.grad``) cannot
+    # promote the scan-carry init relative to the in-loop carry (see scan_fn
+    # dtype note).
+    T_plume_init = (T[..., 0] - cfg.T_excess).astype(dtype)
     S_plume_init = S[..., 0].astype(dtype)
 
     # Descend plume using scan over levels (starting from level 1)

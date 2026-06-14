@@ -158,7 +158,6 @@ def bechtold_convection(
     )  # (ncol, nlev, 4)
     _pbl_sums = jnp.sum(_pbl_sum_stack, axis=-2)  # (ncol, 4)
     pbl_norm_val = _pbl_sums[..., 0].clip(1e-6, None)
-    pbl_norm_val[..., None]  # (ncol, 1) — preserve keepdims shape
     T_pbl = _pbl_sums[..., 1] / pbl_norm_val
     q_pbl = _pbl_sums[..., 2] / pbl_norm_val
     # Mass-weighted PBL pressure for the LCL launch level when the

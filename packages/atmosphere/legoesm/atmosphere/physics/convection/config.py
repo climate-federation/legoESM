@@ -111,30 +111,34 @@ __param_spec__ = {
     "EmanuelConfig": {
         "scheme_key": "atm.conv.EmanuelConfig",
         "excluded": {
+            "beta_downdraft": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
             "cbmf_positive_sharpness": "numerics: softplus sharpness on the relaxed CBMF positive-part",
+            "coeffr": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "coeffs": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "cu_momentum": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "denom_floor": "numerics: SIJ denominator magnitude floor (oracle ABS(DENOM)<0.01)",
             "epsilon_0": "entrainment: near-undilute bulk-plume rate held fixed (mixing handled by the ensemble)",
             "level_window_sharpness": "numerics: sigmoid sharpness on the ICB/INB cloud-layer windows",
             "precip_efficiency_lcl": "default 0 = disabled/off (enable via config, not training)",
             "precip_efficiency_water": "precipitation_efficiency: default 1.0 at domain boundary (not sigmoid-tunable, fix via config)",
+            "precip_threshold_qc": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "sat_branch_sharpness": "numerics: sigmoid sharpness on the saturated-mixture re-solve switch",
+            "sigd": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "sigs": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
             "sij_gate_sharpness": "numerics: sigmoid sharpness on the 0<SIJ<0.9 entrainment band gate",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy-sort weighting",
             "strict_index_sharpness": "numerics: sigmoid sharpness on the strict integer-index inequalities",
+            "sub_cloud_relaxation": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
         },
         "params": {
             "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) stability cap", "shape": None},
             "alpha_closure": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c ALPHA", "shape": None},
-            "beta_downdraft": {"units": "1", "bounds": (3.3, 30.0), "tunable_tier": 3, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) CONVECT v4.3c BETA", "shape": None},
             "c_l_emanuel": {"units": "J/kg/K", "bounds": (2000.0, 4500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c CL", "shape": None},
             "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991)", "shape": None},
             "cbmf_carry_max": {"units": "kg/m^2/s", "bounds": (0.099, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) anti-runaway guard", "shape": None},
             "cloud_base_index_width": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Emanuel (1991) cloud-base selector width", "shape": None},
-            "coeffr": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) CONVECT v4.3c COEFFR", "shape": None},
-            "coeffs": {"units": "1", "bounds": (0.264, 2.4), "tunable_tier": 3, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) CONVECT v4.3c COEFFS", "shape": None},
             "cu_coefficient": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) alpha entrainment scale", "shape": None},
-            "cu_momentum": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CMT coefficient", "shape": None},
             "damp_coefficient": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c DAMP", "shape": None},
             "delta_0": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Emanuel (1991) bulk plume", "shape": None},
             "downdraft_efficiency": {"units": "1", "bounds": (0.0, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) downdraft re-evaporation", "shape": None},
@@ -145,11 +149,7 @@ __param_spec__ = {
             "parcel_perturb_T": {"units": "K", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991) sub-cloud perturbation", "shape": None},
             "parcel_perturb_q": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991) sub-cloud perturbation", "shape": None},
             "precip_efficiency_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c EPMAX", "shape": None},
-            "precip_threshold_qc": {"units": "kg/kg", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) cloud-water precip threshold", "shape": None},
-            "sigd": {"units": "1", "bounds": (0.0, 0.15), "tunable_tier": 3, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) CONVECT v4.3c SIGD", "shape": None},
-            "sigs": {"units": "1", "bounds": (0.0, 0.36), "tunable_tier": 3, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c SIGS", "shape": None},
             "sij_upper_gate": {"units": "1", "bounds": (0.297, 2.7), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c SIJ upper bound", "shape": None},
-            "sub_cloud_relaxation": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 3, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Emanuel (1991) sub-cloud mixing (legacy, unused with DTMA closure)", "shape": None},
             "tlcrit": {"units": "degC", "bounds": (-165.0, -18.15), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c TLCRIT", "shape": None},
         },
     },
@@ -1320,7 +1320,11 @@ class ConvectionConfig(NamedTuple):
     sbm, dca, kuo, mass_flux, edmf, zhang_mcfarlane :
         Per-scheme configuration NamedTuples.
     update_interval_steps : int
-        Recompute convection every N time steps (1 = every step).
+        NOT YET IMPLEMENTED in the production physics pipeline — convection
+        is recomputed EVERY step regardless of this value.  Only the SCM
+        enforces it (rejecting values != 1 for stateful/non-autonomous
+        integrators, see ``scm.py``).  Retained as a forward-looking config
+        knob; setting it != 1 in a production driver is a silent no-op.
     """
     scheme: str = "sbm"
     sbm: SBMConfig = SBMConfig()
@@ -1333,4 +1337,6 @@ class ConvectionConfig(NamedTuple):
     emanuel: EmanuelConfig = EmanuelConfig()
     tiedtke: TiedtkeConfig = TiedtkeConfig()
     bechtold: BechtoldConfig = BechtoldConfig()
+    # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
+    # convection runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1

@@ -98,7 +98,7 @@ See `docs/ai_guardrails/domain_architect_vs_syntax_engine.md`. Doctrine: the hum
 - Atm matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py`
 - Ocean matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py`
 - AMIP: `.venv/bin/python scripts/run/run_amip.py`
-- Dycore progression: `.venv/bin/python tests/validation/run_dycore_progression_suite.py`
+- Dycore progression: `JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py` (SW -> hydrostatic -> non-hydrostatic ladder; `--only sw|hydro|nh`). The old `tests/validation/run_dycore_progression_suite.py` is superseded — its per-case child scripts were removed.
 - GPU/MPI scaling: `.venv/bin/python scripts/bench/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (`docs/REAL_HARDWARE_SCALING.md`)
 - Scripts reorganized into buckets: `scripts/{run,matrix,bench,plot,validate,data,experiment,cluster}/`; debug in `scripts/tmp/`. See `scripts/README.md` + `## File Layout` below.
 - MPI tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/`

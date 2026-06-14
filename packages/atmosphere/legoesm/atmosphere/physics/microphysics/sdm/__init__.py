@@ -70,6 +70,8 @@ from legoesm.atmosphere.physics.microphysics.sdm.kernels import (
 )
 from legoesm.atmosphere.physics.microphysics.sdm.coalescence import (
     coalescence_step,
+    coalescence_step_pairs,
+    coalescence_step_pairs_deterministic,
     represented_number,
 )
 from legoesm.atmosphere.physics.microphysics.sdm.coupling import (
@@ -135,6 +137,8 @@ __all__ = [
     "terminal_velocity_atlas_ulbrich",
     "terminal_velocity_cloud_rain_shima",
     "coalescence_step",
+    "coalescence_step_pairs",
+    "coalescence_step_pairs_deterministic",
     "represented_number",
     "liquid_water_content",
     "cloud_rain_mixing_ratios",

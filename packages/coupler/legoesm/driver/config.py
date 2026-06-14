@@ -541,6 +541,14 @@ class ExperimentConfig(NamedTuple):
                 f"gravity_wave_drag must be one of {_valid_gwd}, "
                 f"got {self.gravity_wave_drag!r}"
             )
+        # Checkpoint serialization format (mirror the io/restart writer set so a
+        # typo fails here instead of silently writing the wrong format).
+        _valid_checkpoint_format = ("npz", "zarr")
+        if self.output.checkpoint_format not in _valid_checkpoint_format:
+            errors.append(
+                f"checkpoint_format must be one of {_valid_checkpoint_format}, "
+                f"got {self.output.checkpoint_format!r}"
+            )
         # Reject unsupported coupled/ESM modes with actionable errors.
         if self.carbon_cycle != "none":
             errors.append(

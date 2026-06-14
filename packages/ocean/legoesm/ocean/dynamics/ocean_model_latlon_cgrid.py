@@ -1049,6 +1049,11 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {config.barotropic_solver!r}")
+        _valid_time_filters = {"box", "cosine"}
+        if config.barotropic_time_filter not in _valid_time_filters:
+            raise ValueError(
+                f"barotropic_time_filter must be one of {_valid_time_filters}, "
+                f"got {config.barotropic_time_filter!r}")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
         if config.barotropic_implicit_pcg_fixed_iters < 1:
             raise ValueError(

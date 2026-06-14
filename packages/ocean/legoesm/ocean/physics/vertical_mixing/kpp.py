@@ -65,7 +65,6 @@ def _boundary_layer_depth(
     Returns shape (...) boundary layer depth [m, positive downward].
     """
     eps = _EPS
-    rho.shape[-1]
 
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
     # Depth of cell centers below surface (positive downward)
@@ -77,8 +76,22 @@ def _boundary_layer_depth(
     delta_v = v - v[..., :1]
     delta_V2 = delta_u**2 + delta_v**2
 
-    # LMD94 Eq. 23: V_t^2 = Cv * sqrt(|N2|) / sqrt(c_s * epsilon) *
-    #   max(Ri_crit * h - d, 0) * d / h
+    # FIXME(KPP V_t^2 — dimensional, needs a BL-depth benchmark before fixing):
+    #   The canonical LMD94 Eq.23 unresolved-shear variance is
+    #     V_t^2(d) = (Cv*(-beta_T)^1/2)/(Ri_c*kappa^2) * (c_s*eps)^-1/2 * d*N*w_s(d)
+    #   which is [m^2/s^2] BECAUSE of the d*N*w_s(d) factor (m * 1/s * m/s).
+    #   The form below keeps N and a LENGTH-valued shape factor
+    #   max(Ri_crit*h - d,0)*d/h but DROPS the turbulent velocity scale w_s(d),
+    #   so it is [1/s]*[m] = [m/s] and is then added to delta_V2 [m^2/s^2]
+    #   below — a dimensional inconsistency.  The faithful fix is to multiply
+    #   by the LMD94 velocity scale w_s(d) (computable here from the available
+    #   ``u_star`` and ``B_f``, evaluated at d with ``h_safe`` to keep the
+    #   h_bl_prev decoupling) — but that changes the boundary-layer depth of a
+    #   scheme exercised in the ocean matrix, so it must be validated against a
+    #   KPP BL-depth benchmark (convective w_s dominates exactly where V_t^2
+    #   matters most), not just unit tests.  Left as-is pending that benchmark.
+    # CURRENT (non-canonical) form:
+    # V_t^2 = Cv * sqrt(|N2|) / sqrt(c_s * epsilon) * max(Ri_crit*h - d, 0)*d/h
     # Uses h_bl from the previous time step to break the coupling.
     N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
     N2_full = jnp.concatenate([N2[..., :1], N2], axis=-1)

@@ -125,12 +125,33 @@ def ysu_turbulence(
     h_pbl = _h_pair[..., 0] / _h_pair[..., 1]
     h_pbl = jnp.clip(h_pbl, 100.0, None)
 
+    # ----- Convective velocity scale w* -----
+    # w* = (g · h · (w'θ')_sfc / θ_bar)^{1/3}, defined only for unstable
+    # (positive surface buoyancy flux).  Used by the mixed-layer velocity
+    # scale w_s (below), the PBL-top entrainment flux, and the nonlocal
+    # countergradient.
+    wtheta_sfc = shflx / (rho[:, -1] * constants.c_pd)  # kinematic (ncol,)
+    theta_bar = jnp.mean(theta_v, axis=1)  # (ncol,)
+    buoyancy_flux = constants.g * jnp.maximum(wtheta_sfc, 0.0) * h_pbl / jnp.clip(
+        theta_bar, 1.0, None
+    )
+    w_star = jnp.cbrt(jnp.maximum(buoyancy_flux, 1e-20))  # (ncol,)
+
     # ----- K-profile -----
     z_half_inner = 0.5 * (z_full[:, :-1] + z_full[:, 1:])
     z_norm = z_half_inner / h_pbl[:, None]
     z_norm_clip = jnp.clip(z_norm, 0.0, 1.0)
+    # Hong et al. (2006) mixed-layer velocity scale: blends mechanical (u*)
+    # and convective (w*) scaling, w_s = (u*³ + c·κ·w*³·z/h)^{1/3}.  The
+    # previous code used bare u*, so the convective mixed layer carried NO
+    # convective enhancement and was systematically under-mixed.
+    w_s = jnp.cbrt(
+        ustar[:, None] ** 3
+        + config.ws_conv_coeff * constants.kappa_vk
+        * w_star[:, None] ** 3 * z_norm_clip
+    )
     Km_profile = (
-        constants.kappa_vk * ustar[:, None] * z_half_inner * (1.0 - z_norm_clip) ** 2
+        constants.kappa_vk * w_s * z_half_inner * (1.0 - z_norm_clip) ** 2
     )
 
     # Local Ri-based Km above PBL
@@ -163,15 +184,7 @@ def ysu_turbulence(
     blend_pbl = jax.nn.sigmoid(config.blend_pbl_sharpness * (z_norm - 1.0))
 
     # ----- Entrainment flux at PBL top -----
-    # Convective velocity scale: w* = (g * h * (w'theta')_sfc / theta_bar)^(1/3)
-    wtheta_sfc = shflx / (rho[:, -1] * constants.c_pd)  # kinematic (ncol,)
-    theta_bar = jnp.mean(theta_v, axis=1)  # (ncol,)
-    # w_star only meaningful for unstable (positive wtheta)
-    buoyancy_flux = constants.g * jnp.maximum(wtheta_sfc, 0.0) * h_pbl / jnp.clip(
-        theta_bar, 1.0, None
-    )
-    w_star = jnp.cbrt(jnp.maximum(buoyancy_flux, 1e-20))  # (ncol,)
-
+    # (w*, wtheta_sfc, theta_bar computed above with the K-profile.)
     # Gaussian envelope for entrainment: K_ent = c_ent * w* * h * exp(-((z-h)/(f*h))^2)
     # Width fraction f (default 0.3) is used for robustness at GCM-typical
     # vertical resolution; exposed as config.entrainment_width_frac.

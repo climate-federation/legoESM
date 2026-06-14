@@ -921,7 +921,7 @@ def barotropic_implicit_latlon_cgrid(
     from legoesm.core.operators import is_distributed as _is_distributed
     from legoesm.ocean.dynamics.barotropic_common import (
         HelmholtzSolveDiagnostics,
-        _global_rel_residual as _rel_resid,
+        global_rel_residual as _rel_resid,
         solve_helmholtz_implicit,
     )
     _area_eta = grid.area.astype(eta_dtype)

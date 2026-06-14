@@ -55,8 +55,8 @@ from jax import lax, random
 from legoesm import constants
 from legoesm.thermo import relative_humidity
 from legoesm.atmosphere.physics.microphysics.sdm.coalescence import (
-    _coalescence_step_pairs,
-    _coalescence_step_pairs_deterministic,
+    coalescence_step_pairs,
+    coalescence_step_pairs_deterministic,
 )
 from legoesm.atmosphere.physics.microphysics.sdm.condensation import integrate_radius
 from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
@@ -576,7 +576,7 @@ def coalescence_cells_step(
                              0.0)
 
     if cfg.collision_mode == "deterministic":
-        droplets = _coalescence_step_pairs_deterministic(
+        droplets = coalescence_step_pairs_deterministic(
             state.droplets,
             ia,
             ib,
@@ -590,7 +590,7 @@ def coalescence_cells_step(
             cfg,
         )
     else:
-        droplets = _coalescence_step_pairs(
+        droplets = coalescence_step_pairs(
             state.droplets,
             ia,
             ib,

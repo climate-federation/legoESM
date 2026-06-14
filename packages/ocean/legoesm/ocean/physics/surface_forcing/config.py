@@ -62,7 +62,8 @@ __param_spec__ = {
             "C_E": {"units": "1", "bounds": (0.000495, 0.0045), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
             "C_H": {"units": "1", "bounds": (0.000495, 0.0045), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
             "emissivity": {"units": "1", "bounds": (0.85, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
-            "z0": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
+            "q_sat_salinity_factor": {"units": "1", "bounds": (0.95, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "Large & Yeager (2004); OMIP/CORE 0.98 saline q_sat reduction", "shape": None},
+            "z0": {"units": "m", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
         },
     },
 }
@@ -235,6 +236,9 @@ class BulkFormulaConfig(NamedTuple):
     z0: float = 1e-4        # Roughness length for MOST [m]
     bulk_n_iter: int = 5    # MOST iterations
     emissivity: float = 0.97  # Surface longwave emissivity
+    # Saturation humidity reduction over saline ocean water: q_s = factor *
+    # q_sat(SST) (Large & Yeager 2004; OMIP/CORE prescribe ~0.98).
+    q_sat_salinity_factor: float = 0.98
 
 
 class SurfaceForcingConfig(NamedTuple):

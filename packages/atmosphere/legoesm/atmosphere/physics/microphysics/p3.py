@@ -383,8 +383,6 @@ def p3_microphysics(
 
     precipitation = precip_r + precip_i
 
-    # Pin dtype so unused placeholders don't silently promote under x64.
-    jnp.zeros((ncol, nlev), dtype=T.dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
