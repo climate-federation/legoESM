@@ -1451,6 +1451,27 @@ def fv3_d2cc(u_d, v_d, cdgrid):
     return u_cc, v_cc
 
 
+def fv3_cc2c_core(u_pad, v_pad, cosa_u_metric):
+    """Pure-array core of :func:`fv3_cc2c` — the cc -> C-face avg + non-orthogonality
+    projection on the ALREADY vector-halo-padded cc winds.  Shared by the global
+    wrapper + the sub-face tile kernel
+    (``tiled_production_cdgrid.fv3_cc2c_tile_2d``); no dup numerics.
+
+    ``u_pad``/``v_pad`` ``(F, W, W[, nlev])`` (W=n+2 full, or nl+2 per tile —
+    the ``[1:-1]`` j-trim makes the same window slice tile cleanly);
+    ``cosa_u_metric`` ``(F, W-1, W-2)``.  Returns ``u_c`` ``(F, W-1, W-2)``
+    (x-face) + ``v_c`` ``(F, W-2, W-1)`` (y-face)."""
+    # cc -> C-face avg with non-orthogonality projection (matches dgrid_to_cgrid)
+    u_avg = 0.5 * (u_pad[:, :-1, 1:-1] + u_pad[:, 1:, 1:-1])
+    v_at_u = 0.5 * (v_pad[:, :-1, 1:-1] + v_pad[:, 1:, 1:-1])
+    cosa_u = _broadcast_metric(cosa_u_metric, u_avg)
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
+    u_c = u_avg * sina_u - v_at_u * cosa_u
+
+    v_c = 0.5 * (v_pad[:, 1:-1, :-1] + v_pad[:, 1:-1, 1:])
+    return u_c, v_c
+
+
 def fv3_cc2c(u_cc, v_cc, cdgrid):
     """cc → C-grid edge-normal. Vector halo + 2nd-order interp; duogrid scalar remap if active."""
     grid = cdgrid.base
@@ -1463,14 +1484,7 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
         interp_offsets=offsets, duogrid=dg,
     )
 
-    # cc → C-face avg with non-orthogonality projection (matches dgrid_to_cgrid corner D-grid)
-    u_avg = 0.5 * (u_pad[:, :-1, 1:-1] + u_pad[:, 1:, 1:-1])  # (6, n+1, n)
-    v_at_u = 0.5 * (v_pad[:, :-1, 1:-1] + v_pad[:, 1:, 1:-1])
-    cosa_u = _broadcast_metric(cdgrid.cosa_u, u_avg)
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
-    u_c = u_avg * sina_u - v_at_u * cosa_u
-
-    v_c = 0.5 * (v_pad[:, 1:-1, :-1] + v_pad[:, 1:-1, 1:])  # (6, n, n+1)
+    u_c, v_c = fv3_cc2c_core(u_pad, v_pad, cdgrid.cosa_u)  # (6,n+1,n) / (6,n,n+1)
 
     # iter-839: u_c face-normal projection / v_c plain avg asymmetry is LOAD-BEARING.
     # Symmetric v_c projection caused 230× W2 regression (test_boundary_fix_is_load_bearing_for_w2_l2 failure).

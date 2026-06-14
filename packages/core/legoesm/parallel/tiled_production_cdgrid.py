@@ -271,3 +271,108 @@ def make_tiled_arakawa_lamb_gradient_stage_2d(mesh, cdgrid, n: int, kt: int):
         return _body(B_pad, gc00, gc01, gc10, gc11)
 
     return stage
+
+
+# ---------------------------------------------------------------------------
+# P-v: the velocity transforms fv3_d2cc (D-grid edge-midpoint -> cc) +
+# fv3_cc2c (cc -> C-grid).  fv3_d2cc is PURELY LOCAL (2-pt avg, no halo, exact
+# cc partition).  fv3_cc2c is VECTOR — it tiles the GLOBAL pad_halo_vector
+# pre-pad (u_pad/v_pad carry the cube-edge rotation, face-replicated); a single
+# (nl+2)-window fed to fv3_cc2c_core's [1:-1] trim yields both staggered
+# C-grid outputs (lower-owns-shared each).
+# ---------------------------------------------------------------------------
+
+def fv3_d2cc_tile_2d(u_d, v_d, a_i, a_j, nl: int):
+    """Per-tile ``fv3_d2cc`` (P-v): D-grid edge-midpoint -> cc (local 2-pt avg).
+    ``u_d`` ``(F, n, n+1[, nlev])``, ``v_d`` ``(F, n+1, n[, nlev])``
+    FACE-REPLICATED.  cc tile ``[a:a+nl]`` reads ``u_d[a_i:a_i+nl, a_j:a_j+nl+1]``
+    + ``v_d[a_i:a_i+nl+1, a_j:a_j+nl]``.  Returns ``(u_cc, v_cc)`` ``(F, nl,
+    nl[, nlev])`` — cc exact partition (no trim)."""
+    from legoesm.core.operators_cdgrid import fv3_d2cc
+
+    nf = u_d.shape[1]                          # n (u_d is (n, n+1))
+    # compare only the spatial axes 1/2 (a trailing nlev is allowed: fv3_d2cc is
+    # a pure 2-pt avg, ndim-agnostic) — codex P-v HIGH.
+    if u_d.shape[2] != nf + 1 or v_d.shape[1:3] != (nf + 1, nf):
+        raise ValueError(
+            f"fv3_d2cc_tile_2d: shapes inconsistent; u_d {u_d.shape[1:3]} "
+            f"(expected ({nf}, {nf + 1})), v_d {v_d.shape[1:3]} "
+            f"(expected ({nf + 1}, {nf}))")
+    u_blk = jax.lax.dynamic_slice_in_dim(u_d, a_i, nl, axis=1)
+    u_blk = jax.lax.dynamic_slice_in_dim(u_blk, a_j, nl + 1, axis=2)
+    v_blk = jax.lax.dynamic_slice_in_dim(v_d, a_i, nl + 1, axis=1)
+    v_blk = jax.lax.dynamic_slice_in_dim(v_blk, a_j, nl, axis=2)
+    return fv3_d2cc(u_blk, v_blk, None)        # fv3_d2cc never reads cdgrid
+
+
+def fv3_cc2c_tile_2d(u_pad, v_pad, cosa_u, a_i, a_j, nl: int):
+    """Per-tile ``fv3_cc2c`` (P-v): cc -> C-grid (vector).  ``u_pad``/``v_pad``
+    ``(F, n+2, n+2[, nlev])`` = GLOBAL ``pad_halo_vector(u_cc, v_cc)``
+    (FACE-REPLICATED, carries the cube-edge rotation); ``cosa_u`` ``(F, n+1, n)``.
+    The ``[a:a+nl+2]`` window + ``fv3_cc2c_core``'s ``[1:-1]`` trim -> tile
+    outputs ``u_c`` ``(F, nl+1, nl)`` (x-face) + ``v_c`` ``(F, nl, nl+1)``
+    (y-face); reassembly lower-owns-shared each."""
+    from legoesm.core.operators_cdgrid import fv3_cc2c_core
+
+    if u_pad.shape[1] != u_pad.shape[2]:
+        raise ValueError(
+            f"fv3_cc2c_tile_2d: u_pad must be square; got {u_pad.shape[1:3]}")
+    if v_pad.shape[1:] != u_pad.shape[1:]:
+        raise ValueError(
+            f"fv3_cc2c_tile_2d: v_pad shape {v_pad.shape[1:]} != u_pad "
+            f"{u_pad.shape[1:]}")
+
+    def _w(arr):                               # (nl+2)x(nl+2) window
+        arr = jax.lax.dynamic_slice_in_dim(arr, a_i, nl + 2, axis=1)
+        return jax.lax.dynamic_slice_in_dim(arr, a_j, nl + 2, axis=2)
+
+    cu = jax.lax.dynamic_slice_in_dim(cosa_u, a_i, nl + 1, axis=1)
+    cu = jax.lax.dynamic_slice_in_dim(cu, a_j, nl, axis=2)
+    return fv3_cc2c_core(_w(u_pad), _w(v_pad), cu)
+
+
+def make_tiled_fv3_d2cc_stage_2d(mesh, n: int, kt: int):
+    """Sharded ``fv3_d2cc`` on a ``(6, kt, kt)`` mesh.  ``stage(u_d, v_d) ->
+    (u_cc, v_cc)`` (face-replicated D-grid in; tile-sharded cc out, gathered
+    ``(6, n, n)`` exact)."""
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    nl = n // kt
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+
+    @partial(shard_map, mesh=mesh, in_specs=(fo, fo), out_specs=(co, co),
+             check_vma=False)
+    def _stage(u_d, v_d):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return fv3_d2cc_tile_2d(u_d, v_d, a_i, a_j, nl)
+
+    return _stage
+
+
+def make_tiled_fv3_cc2c_stage_2d(mesh, cdgrid, n: int, kt: int):
+    """Sharded ``fv3_cc2c`` on a ``(6, kt, kt)`` mesh.  ``stage(u_pad, v_pad) ->
+    (u_c, v_c)`` where ``u_pad``/``v_pad`` are the GLOBAL face-replicated
+    ``pad_halo_vector`` output; ``cosa_u`` is a face-sharded input (NOT closed
+    over -> codex U4a HIGH).  Outputs tile-sharded, gathered
+    ``(6, kt*(nl+1), kt*nl)`` / ``(6, kt*nl, kt*(nl+1))`` -> lower-owns-shared
+    to ``(6, n+1, n)`` / ``(6, n, n+1)``."""
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    nl = n // kt
+    cosa_u = cdgrid.cosa_u
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+
+    @partial(shard_map, mesh=mesh, in_specs=(fo, fo, fo), out_specs=(co, co),
+             check_vma=False)
+    def _body(u_pad, v_pad, cu):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return fv3_cc2c_tile_2d(u_pad, v_pad, cu, a_i, a_j, nl)
+
+    def stage(u_pad, v_pad):
+        return _body(u_pad, v_pad, cosa_u)
+
+    return stage
