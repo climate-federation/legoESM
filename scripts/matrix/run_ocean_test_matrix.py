@@ -2303,47 +2303,23 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
 
         n = params["n"]
         grid = create_cubed_sphere(n)
-        # Cubed-sphere ocean: FV3 C-D grid backend (the deprecated FC-Gram
-        # A-grid was removed) + raised face-edge dissipation + FV3-faithful
-        # fv3sw barotropic.  The cd-grid A-L corner stencil's face-edge PGF
-        # amplification under horizontal density gradients is the documented
-        # cube cold-start gate (lock_exchange, phillips_two_layer, overflow,
-        # geostrophic_adjustment, stommel_gyre_tracer); raised A_h/K_h delay
-        # it for the matrix smoke.  ``cube_light_diffusion`` keeps lateral
-        # diffusion light for wave tests (barotropic_wave / inertia_gravity_
-        # wave carry no density gradient; K_h=5e6 would decay a 0.1 m wave to
-        # 0.04 m).  The a_grid barotropic is forbidden by the never-A-grid /
-        # FV3-faithfulness directive — use fv3sw (vector-invariant absolute-
-        # vorticity flux + RK3 + div-damp/hyperdiff).
-        kw = dict(
-            n_barotropic_substeps=60,
-            barotropic_diffusion_alpha=0.3,
-            use_conservation_fixer=True,
-            physics=physics,
-            barotropic_staggering="fv3sw",
-        )
-        if cube_light_diffusion:
-            if A_h is not None:
-                kw["A_h"] = A_h
-        elif A_h is None:
-            kw["A_h"] = 5.0e5
-            kw["K_h"] = 5.0e6
-        else:
-            kw["A_h"] = max(A_h, 5.0e5)
-            kw["K_h"] = 5.0e6
-        if A_v is not None:
-            kw["A_v"] = A_v
-        # Phase B.1 of the bulletproof-ocean validation plan added
-        # ``bottom_drag_r`` / ``bottom_drag_bg_velocity`` /
-        # ``bottom_drag_bbl_thickness`` to ``OceanConfig`` (mirroring
-        # ``LatLonCGridOceanConfig``); the cube tendency
-        # the cd-grid backend ``ocean_baroclinic_tendencies_cdgrid`` applies
-        # linear / quadratic-with-floor / distributed-BBL drag the
-        # same way the lat-lon C-grid does. The previous gate that
-        # raised ``NotImplementedError`` for ``bottom_drag_r > 0`` is
-        # removed; the kwarg is now plumbed straight through.
-        if bottom_drag_r is not None:
-            kw["bottom_drag_r"] = bottom_drag_r
+        # Cubed-sphere ocean: FV3 C-D grid backend + FV3-faithful fv3sw
+        # barotropic.  The cube cold-start stabilization (60 barotropic
+        # substeps, raised A_h/K_h, conservation fixer, ``cube_light_diffusion``
+        # for wave tests) is the single shared
+        # ``cube_matrix_ocean_config_kwargs`` block in
+        # ``ocean_test_matrix.setup`` — the monolithic and modular drivers MUST
+        # use the same source so they cannot diverge (the modular copy had
+        # silently dropped to 30 substeps and blew overflow up to NaN).
+        # ``bottom_drag_r`` is plumbed straight through (the old
+        # NotImplementedError gate is gone); the cd-grid backend
+        # ``ocean_baroclinic_tendencies_cdgrid`` applies linear / quadratic /
+        # BBL drag the same way the lat-lon C-grid does.
+        from ocean_test_matrix.setup import cube_matrix_ocean_config_kwargs
+        kw = cube_matrix_ocean_config_kwargs(
+            physics=physics, A_h=A_h, A_v=A_v,
+            bottom_drag_r=bottom_drag_r,
+            cube_light_diffusion=cube_light_diffusion)
         config = OceanConfig(**kw)
         model = OceanModel(grid, z_coord, config)
         coord_kind = "cube"
@@ -5826,71 +5802,6 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
 # equatorward over a mid-latitude bathymetric ridge.
 # ===========================================================================
 
-def _init_overflow(state, grid_type, grid, z_coord):
-    """Initialize overflow: dense water at high latitudes over bathymetric slope.
-
-    Adapted from Petersen et al. (2015):
-      - Poleward of 50 deg: cold (T=5 degC, dense)
-      - Equatorward of 50 deg: warm (T=20 degC, light)
-      - Smooth tanh transition at 50 deg latitude
-      - Bathymetric ridge at ~40 deg: shelf at 500m, deep basin at 2000m
-    """
-    from legoesm.core.field import Field
-
-    T_cold = 5.0
-    T_warm = 20.0
-    lat_front = np.radians(50.0)   # front position
-    sigma_front = np.radians(5.0)  # transition width
-
-    # Bathymetry: shelf (500m) poleward of 40 deg, deep (2000m) equatorward
-    lat_shelf = np.radians(40.0)
-    sigma_shelf = np.radians(7.0)
-    d_shallow = 500.0
-    d_deep = float(z_coord.H_max)
-
-    lat, lon = _get_cell_latlon_rad(grid_type, grid)
-    abs_lat = np.abs(lat)
-
-    # Temperature: tanh transition at lat_front
-    T_profile = T_warm + (T_cold - T_warm) * 0.5 * (
-        1.0 + np.tanh((abs_lat - lat_front) / sigma_front))
-
-    # Bathymetry: tanh transition at lat_shelf
-    H_bathy_new = d_shallow + (d_deep - d_shallow) * 0.5 * (
-        1.0 - np.tanh((abs_lat - lat_shelf) / sigma_shelf))
-
-    if grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
-        T_hat = state.T_hat.data
-        T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
-        nlev = T_grid.shape[-1]
-        mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
-        for k in range(nlev):
-            # Decay temperature perturbation with depth
-            depth_frac = float(z_coord.z_full_ref[k] / z_coord.z_full_ref[-1])
-            T_grid[..., k] = (T_profile * (1.0 - 0.5 * depth_frac) + 2.0 * depth_frac) * mask
-        new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
-        # Note: spectral model doesn't easily support variable bathymetry
-        return state._replace(T_hat=Field(new_T_hat))
-
-    else:
-        T_data = np.array(state.T.data, dtype=np.float64, copy=True)
-        mask = np.asarray(state.land_mask.data, dtype=np.float64)
-        nlev = T_data.shape[-1]
-        for k in range(nlev):
-            depth_frac = float(z_coord.z_full_ref[k] / z_coord.z_full_ref[-1])
-            T_data[..., k] = (T_profile * (1.0 - 0.5 * depth_frac) + 2.0 * depth_frac) * mask
-
-        # Update bathymetry
-        H_bathy_new_masked = H_bathy_new * mask
-        # Ensure minimum depth where ocean exists
-        H_bathy_new_masked = np.where(mask > 0.5, np.maximum(H_bathy_new_masked, 50.0), 0.0)
-
-        return state._replace(
-            T=Field(jnp.array(T_data)),
-            H_bathy=Field(jnp.array(H_bathy_new_masked)))
-
-
 def run_overflow(tc: TestCase, output_dir: Path, days: float
                  ) -> tuple[str, float, str]:
     """Overflow: dense water descending a bathymetric slope (Petersen et al. 2015).
@@ -5898,12 +5809,17 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     Cold dense water at high latitudes flows equatorward over a mid-latitude
     ridge. Monitors PE evolution and plume descent.
     """
-    H_max = 2000.0
-    nlev = 20
+    from legoesm.ocean.experiments.overflow import (
+        OverflowConfig, create_initial_conditions as _overflow_ic)
+    ov_config = OverflowConfig()
+    H_max = ov_config.H_max
+    nlev = ov_config.nlev
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc, nlev=nlev, H_max=H_max))
-    state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
-    state = _init_overflow(state, tc.grid_type, grid, z_coord)
+    # Single canonical overflow IC, shared with the modular driver.  The old
+    # script-local ``_create_rest_state`` + ``_init_overflow`` duplicated this
+    # library setup byte-for-byte (verified 2026-06-14 across all grids).
+    state = _overflow_ic(tc.grid_type, grid, z_coord, ov_config)
 
     pe_init = _compute_rpe(state, tc.grid_type, grid, z_coord)
 
