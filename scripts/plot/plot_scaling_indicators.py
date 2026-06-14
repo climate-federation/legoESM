@@ -45,6 +45,8 @@ PANELS = [
      "higher=more saved (multinode/MPI)", None),
     ("Cube SW dycore max validated devices", "tiled_np_validated",
      "higher = >6-device unlock (sub-face tiling)", None),
+    ("Cube 3D-PE dycore ops np24-tiled", "ops3d_np24",
+     "higher = more fv3_hydrostatic ops sub-face-tiled", None),
 ]
 
 
@@ -72,7 +74,7 @@ def main() -> None:
     xpos = {k: i for i, k in enumerate(order)}
     xlabels = [f"{d[5:]}\n{t}" for (d, t) in order]
 
-    fig, axes = plt.subplots(3, 3, figsize=(22, 12.5))
+    fig, axes = plt.subplots(4, 3, figsize=(22, 16.5))
     for ax in axes.flat[len(PANELS):]:
         ax.set_visible(False)            # hide unused grid slots
     for ax, (title, metric_pref, direction, grids) in zip(
