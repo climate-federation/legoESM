@@ -1153,6 +1153,22 @@ class LatLonCGridOceanModel:
                 "sponge_forcing_implicit=False to keep the explicit "
                 "stage-10c sponge placement.")
 
+        # Veros u_centered dzw slot for the implicit vertical-diffusion solves
+        # lives INSIDE the backward-Euler tracer/friction solve (it picks the
+        # gradient divisor there); with explicit vertical mixing there is no
+        # implicit solve to host it — reject rather than silently ignoring the
+        # flag (dispatch discipline).
+        if (getattr(config, "implicit_vmix_dzw_slot", False)
+                and not config.implicit_vertical_mixing):
+            raise ValueError(
+                "implicit_vmix_dzw_slot=True requires "
+                "implicit_vertical_mixing=True: the Veros dzw gradient slot is "
+                "the divisor of the backward-Euler tracer/momentum-friction "
+                "vertical-diffusion solve (thermodynamics.py:267 "
+                "delta = dt·kappaH/dzw). With explicit vertical mixing there is "
+                "no implicit solve to host it. Set implicit_vertical_mixing=True, "
+                "or implicit_vmix_dzw_slot=False to keep the midpoint slot.")
+
         # Additive momentum vertical-friction placement (Veros solve_stream.py)
         # is defined relative to the AB2 outer integrator (the increment is
         # added alongside the AB2-extrapolated explicit tendency) and needs the
@@ -3108,7 +3124,17 @@ class LatLonCGridOceanModel:
             state.eta.data, state.H_bathy.data, self.z_coord,
         )
         dz_cell = self.z_coord.dz_ref * J_cell[..., jnp.newaxis]
-        dz_half_cell = build_dz_half(dz_cell)
+        # Gradient (center-to-center) divisor of the implicit solve.  Default is
+        # the midpoint reconstruction 0.5(dz_k+dz_{k+1}); the Veros-faithful slot
+        # (config.implicit_vmix_dzw_slot, #428) uses the coordinate's
+        # center-to-center spacing dz_half_ref·J = Veros's dzw, which differs from
+        # the midpoint on a u_centered z-coordinate.  NO-OP on a midpoint z-star.
+        _dzw_slot = bool(getattr(self.config, "implicit_vmix_dzw_slot", False))
+        if _dzw_slot:
+            dz_half_cell = (self.z_coord.dz_half_ref
+                            * J_cell[..., jnp.newaxis]).astype(dz_cell.dtype)
+        else:
+            dz_half_cell = build_dz_half(dz_cell)
 
         mask_3d = state.land_mask.data[..., jnp.newaxis]
 
@@ -3192,8 +3218,18 @@ class LatLonCGridOceanModel:
                     self.z_coord.is_active, self.grid)
                 A_v_u = A_v_u * _act_u3.astype(A_v_u.dtype)[..., 1:]
                 A_v_v = A_v_v * _act_v3.astype(A_v_v.dtype)[..., 1:]
-            dz_half_u = build_dz_half(dz_u)
-            dz_half_v = build_dz_half(dz_v)
+            if _dzw_slot:
+                # Veros dzw at u/v-faces (#428): dz_half_ref·J interpolated to the
+                # faces with the SAME interp that built the control volumes
+                # dz_u/dz_v (J is level-independent, so dz_u = dz_ref·J_u and the
+                # gradient slot dz_half_ref·J_u stays consistent with it).
+                J_u = interp_cell_to_uface(J_cell[..., jnp.newaxis])
+                J_v = interp_to_v_points(J_cell[..., jnp.newaxis], self.grid)
+                dz_half_u = (self.z_coord.dz_half_ref * J_u).astype(dz_u.dtype)
+                dz_half_v = (self.z_coord.dz_half_ref * J_v).astype(dz_v.dtype)
+            else:
+                dz_half_u = build_dz_half(dz_u)
+                dz_half_v = build_dz_half(dz_v)
             u_mask_3d = state.u_mask.data[..., jnp.newaxis]
             v_mask_3d = state.v_mask.data[..., jnp.newaxis]
 

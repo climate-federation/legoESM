@@ -233,6 +233,8 @@ def build_acc_basic_model_config(grid: LatLonGrid | None = None, *,
                          else "matsuno_split"),
         ab2_scope="advective" if with_surface_forcing else "total",
         momentum_friction_additive=with_surface_forcing,
+        # Veros dzw divisor of the implicit solves (#428); u_centered coord.
+        implicit_vmix_dzw_slot=with_surface_forcing,
         physics=build_acc_basic_physics_config(
             grid, with_surface_forcing=with_surface_forcing),
     )
