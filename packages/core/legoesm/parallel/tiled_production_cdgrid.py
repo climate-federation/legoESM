@@ -688,3 +688,167 @@ def make_tiled_cgrid_mass_divergence_stage_2d(mesh, cdgrid, n: int, kt: int):
         return _body(h_deep, u_c, v_c, dy_edge_x, dx_edge_y, area)
 
     return stage
+
+
+# ---------------------------------------------------------------------------
+# CAPSTONE: the FULL tiled `fv3_sw_tendencies` np24 stage = the SHIPPED momentum
+# assembly + the SHIPPED mass divergence, COMPOSED.  The win of composing (vs
+# running the two stages separately) is that the cc-wind VECTOR halo is computed
+# ONCE and shared: the same `u_cc_pad`/`v_cc_pad` feeds BOTH `fv3_cc2c_core`
+# (-> the C-grid winds u_c/v_c for the mass PPM divergence) AND the momentum
+# corner winds (0.25 box).  So the full stage carries the SAME halo budget as
+# the momentum stage alone: 1 scalar (B) + 2 vector (shared u_cc/v_cc; the
+# du_cc/dv_cc tendency projection) in-stage halos, plus the GLOBAL deep-h
+# pre-pad (mass, a stage input).  Every numeric is a shared `*_core` op already
+# bit-identity-validated in isolation; this stage is the wiring + a full
+# 3-output bit-identity gate.
+#
+# Base case only (same as the two halves): div_damp=0, hyperdiff=0,
+# boundary_fix=False, fortran_*=False, non-duogrid.
+# ---------------------------------------------------------------------------
+
+def make_tiled_fv3_sw_tendencies_stage_2d(mesh, cdgrid, n: int, kt: int,
+                                          g: float | None = None):
+    """Build the FULL base-case tiled ``fv3_sw_tendencies`` stage on a
+    ``(6, kt, kt)`` mesh.  Returns ``stage(h, u_d, v_d, h_s) -> (dh_dt,
+    du_d_dt, dv_d_dt)`` (the three SW tendencies), FACE-SHARDED/TILE-REPLICATED
+    inputs, tile-sharded outputs (``dh_dt`` gathers ``(6,n,n)`` exact;
+    ``du_d_dt`` ``(6, kt*nl, kt*(nl+1))`` / ``dv_d_dt`` ``(6, kt*(nl+1), kt*nl)``
+    reassemble lower-owns-shared to ``(6,n,n+1)``/``(6,n+1,n)``).
+
+    Composes :func:`make_tiled_fv3_sw_momentum_stage_2d` (momentum) and
+    :func:`make_tiled_cgrid_mass_divergence_stage_2d` (mass), SHARING the
+    ``u_cc``/``v_cc`` vector halo.  All static metrics passed as face-sharded
+    in_specs (never closed over -> the codex U4a face-broadcast HIGH).  ``g``
+    defaults to ``constants.g``.  Base cut: non-duogrid orthogonal rotation."""
+    from legoesm import constants
+    from legoesm.core.operators_cdgrid import (
+        fv3_d2cc, fv3_cc2c_core, arakawa_lamb_gradient_core,
+        dgrid_vorticity_core, interp_corner_to_center, _cgrid_ppm_fluxes_core,
+        _pad_halo_auto_h2)
+    from legoesm.parallel.cubesphere_exchange import (
+        make_tiled_pad_body, make_tiled_pad_vector_body)
+    import jax.numpy as jnp
+
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_fv3_sw_tendencies_stage_2d: n={n} != cdgrid.n="
+            f"{cdgrid.n}")
+    grid = cdgrid.base
+    if grid.duogrid is not None:
+        raise ValueError(
+            "make_tiled_fv3_sw_tendencies_stage_2d: base cut supports the "
+            "non-duogrid orthogonal-rotation cube only.")
+    g = constants.g if g is None else g
+    nl = n // kt
+
+    cosa_corner = cdgrid.cosa_corner
+    dx_edge_y, dy_edge_x = cdgrid.dx_edge_y, cdgrid.dy_edge_x
+    area = grid.area
+    f_cor = grid.f
+    cosa_u = cdgrid.cosa_u
+    gc00, gc01 = cdgrid.grad_c00, cdgrid.grad_c01
+    gc10, gc11 = cdgrid.grad_c10, cdgrid.grad_c11
+    cos_a, sin_a = grid.cos_angle, grid.sin_angle
+    cap, sap = grid.cos_angle_padded, grid.sin_angle_padded
+    offsets = grid.halo_interp_offsets
+
+    scalar_body = make_tiled_pad_body(mesh, ndim=3, halo=1, with_offsets=True)
+    vector_body = make_tiled_pad_vector_body(
+        mesh, ndim=3, halo=1, with_offsets=True)
+
+    fo = P("face", None, None)
+    co = P("face", "tile_i", "tile_j")
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fo,) * 4         # h_deep, u_d, v_d, h_s
+                       + (fo,) * 6      # cosa_corner, dxe, dye, area, f, cosa_u
+                       + (fo,) * 4      # gc00..gc11
+                       + (fo,) * 4      # cos_a, sin_a, cap, sap
+                       + (P(),),        # offsets
+             out_specs=(co, co, co), check_vma=False)
+    def _body(h_deep, u_d, v_d, h_s,
+              cosa_c, dxe, dye, ar, fco, cosau,
+              c00, c01, c10, c11,
+              ca, sa, capf, sapf, offs):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        # ---- (a) cell-centre winds (LOCAL) ----
+        u_cc, v_cc = fv3_d2cc(_s(u_d, nl, nl + 1), _s(v_d, nl + 1, nl), None)
+
+        # ---- ONE shared cc-wind VECTOR halo (mass fv3_cc2c + momentum corners) ----
+        ca_t = _s(ca, nl, nl)[0]
+        sa_t = _s(sa, nl, nl)[0]
+        cap_t = _s(capf, nl + 2, nl + 2)[0]
+        sap_t = _s(sapf, nl + 2, nl + 2)[0]
+        u_cc_p, v_cc_p = vector_body(
+            u_cc[0], v_cc[0], ca_t, sa_t, cap_t, sap_t, offs)
+        u_cc_pad = u_cc_p[None]            # (1, nl+2, nl+2)
+        v_cc_pad = v_cc_p[None]
+
+        # ---- (b) MASS: cc -> C winds, then PPM upwind divergence ----
+        u_c, v_c = fv3_cc2c_core(u_cc_pad, v_cc_pad, _s(cosau, nl + 1, nl))
+        hw = _s(h_deep, nl + 6, nl + 6)            # deep h window (1, nl+6, nl+6)
+        dy_t = _s(dye, nl + 1, nl)
+        dx_t = _s(dxe, nl, nl + 1)
+        area_t = _s(ar, nl, nl)
+        flux_x, flux_y = _cgrid_ppm_fluxes_core(
+            hw, u_c, v_c, dy_t, dx_t, nl, halo_in=3,
+            effective_xppm_boundary=False)
+        dh_dt = -((flux_x[:, 1:] - flux_x[:, :-1])
+                  + (flux_y[:, :, 1:] - flux_y[:, :, :-1])) / area_t
+
+        # ---- (c) Bernoulli (h from the deep window interior; pointwise) ----
+        h_t = hw[:, 3:-3, 3:-3]                     # cc h tile (1, nl, nl)
+        B = 0.5 * (u_cc ** 2 + v_cc ** 2) + g * (h_t + _s(h_s, nl, nl))
+
+        # ---- (d) A-L gradient (in-stage SCALAR halo on B) ----
+        B_pad = scalar_body(B[0], offs)[None]
+        dB_dx, dB_dy_perp = arakawa_lamb_gradient_core(
+            B_pad, _s(c00, nl + 1, nl + 1), _s(c01, nl + 1, nl + 1),
+            _s(c10, nl + 1, nl + 1), _s(c11, nl + 1, nl + 1))
+
+        # ---- (e) corner winds (REUSE the shared u_cc/v_cc vector halo) ----
+        u_corner = 0.25 * (
+            u_cc_pad[:, :-1, :-1] + u_cc_pad[:, 1:, :-1]
+            + u_cc_pad[:, :-1, 1:] + u_cc_pad[:, 1:, 1:])
+        v_corner = 0.25 * (
+            v_cc_pad[:, :-1, :-1] + v_cc_pad[:, 1:, :-1]
+            + v_cc_pad[:, :-1, 1:] + v_cc_pad[:, 1:, 1:])
+
+        # ---- (f) vorticity ----
+        zeta = dgrid_vorticity_core(
+            u_corner, v_corner, _s(cosa_c, nl + 1, nl + 1),
+            _s(dxe, nl, nl + 1), _s(dye, nl + 1, nl), _s(ar, nl, nl))
+        zeta_abs = zeta + _s(fco, nl, nl)
+
+        # ---- (g) cc momentum tendency ----
+        du_cc = zeta_abs * v_cc - interp_corner_to_center(dB_dx)
+        dv_cc = -zeta_abs * u_cc - interp_corner_to_center(dB_dy_perp)
+
+        # ---- (k) project to D-grid (in-stage VECTOR halo) ----
+        du_cc_p, dv_cc_p = vector_body(
+            du_cc[0], dv_cc[0], ca_t, sa_t, cap_t, sap_t, offs)
+        du_d_dt = 0.5 * (du_cc_p[None][:, 1:-1, :-1]
+                         + du_cc_p[None][:, 1:-1, 1:])
+        dv_d_dt = 0.5 * (dv_cc_p[None][:, :-1, 1:-1]
+                         + dv_cc_p[None][:, 1:, 1:-1])
+        return dh_dt, du_d_dt, dv_d_dt
+
+    def stage(h, u_d, v_d, h_s):
+        # GLOBAL deep-h pre-pad (mass): halo=2 cross-face + 1 edge ring.
+        h_deep = jnp.pad(_pad_halo_auto_h2(h, cdgrid),
+                         ((0, 0), (1, 1), (1, 1)), mode="edge")
+        return _body(h_deep, u_d, v_d, h_s,
+                     cosa_corner, dx_edge_y, dy_edge_x, area, f_cor, cosa_u,
+                     gc00, gc01, gc10, gc11,
+                     cos_a, sin_a, cap, sap, offsets)
+
+    return stage

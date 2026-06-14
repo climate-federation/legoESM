@@ -122,14 +122,30 @@ numerics).
   test_shallow_water 11/11; test_boundary_fix mass-conservation is a PRE-EXISTING
   2.51e-6-vs-1e-6 miss, identical on clean HEAD). Gate:
   `test_tiled_mass_divergence.py`.
-- **REMAINING (later increments):**
+- **FULL `fv3_sw_tendencies` np24 STAGE SHIPPED (CAPSTONE)** —
+  `make_tiled_fv3_sw_tendencies_stage_2d` (tiled_production_cdgrid.py) ->
+  `stage(h,u_d,v_d,h_s) -> (dh_dt, du_d_dt, dv_d_dt)`. Composes the momentum
+  assembly + mass divergence, with the cc-wind VECTOR halo computed ONCE and
+  SHARED: one `vector_body(u_cc,v_cc)` feeds BOTH `fv3_cc2c_core` (-> u_c/v_c
+  for the mass PPM) AND the momentum corner winds — so the full stage carries
+  the SAME halo budget as momentum alone (1 scalar B + 2 vector + the global
+  deep-h pre-pad). h for Bernoulli is taken from the deep-window interior
+  (`hw[:, 3:-3, 3:-3]`). Bit-identity of ALL THREE tendencies vs global at kt=2
+  (np24) + kt=3 (np54), rel<1e-10; codex-clean (8/8 composition vectors). Gate:
+  `test_tiled_fv3_sw_full.py` (job 8482569: TILED_FULL_GATE_OK). The production
+  cube SW dycore tendency now runs on np=6*kt^2 devices.
+- **MULTI-NODE VALIDATION** — `scripts/validate/validate_tiled_fv3_sw_multinode.py`
+  + `scripts/cluster/scaling_ginsburg/tiled_fv3_sw_multinode.sbatch`: runs the
+  full stage under REAL multi-controller `jax.distributed` across 2 nodes (np24,
+  in-stage ppermutes -> cross-NODE collective-permute); each process
+  self-validates its local tile vs serial (rel<1e-9). Correctness, not a bench.
+- **REMAINING (later increments, NOT base-case-blocking):**
   - Optional momentum terms (div damp / hyperdiff / boundary smoothing /
     Fortran corner specials) — each rides the shipped per-op kernels + one more
     in-stage halo; their own increments.
   - The Fortran xppm boundary overrides (`n_interior` keyed to GLOBAL face
     index) + duogrid `synchronize_cgrid_fluxes` for the mass tile.
-  - The FULL `fv3_sw_tendencies` np24 stage = the SHIPPED momentum assembly +
-    the SHIPPED mass divergence, sharing the cc-wind vector halo (momentum) and
-    the deep h pre-pad (mass) — both validated independently; composing is wiring.
+  - 3D `fv3_hydrostatic_tendencies` (the `(F,n,n,nlev)` 4D analogue) — the same
+    ops + the vertical trailing axis (all kernels already 4D-native).
 - LESSON: a prior session built tiling infra; ALWAYS grep `tests/parallel/
   test_tiled_*` + `parallel.mesh` before tiling a cube op.
