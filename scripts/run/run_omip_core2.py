@@ -1312,98 +1312,6 @@ def load_nemo_siconc(grid, grid_type, lat2d_deg, lon2d_deg, siconc_file=None,
     return out
 
 
-def load_nemo_ice_fluxes(grid, grid_type, lat2d_deg, lon2d_deg,
-                         icemod_file=None, land_mask=None):
-    """Load NEMO ORCA1 sea-ice -> ocean SALT + FRESHWATER fluxes and IDW-regrid
-    onto the model grid (the prescribed "sea-ice freshwater/salt export").
-
-    legoESM has no interactive sea-ice model, so the brine-rejection /
-    melt fluxes an ice model would supply are read from the SAME NEMO
-    icemod diagnostic ``load_nemo_siconc`` reads (annual mean ->
-    time-INVARIANT climatology; load ONCE before the time loop) and
-    prescribed each step.  Returns ``(sfxice, ice_fw)``, each shaped
-    ``lat2d_deg.shape`` ((n_lat,n_lon) latlon/tripole; (nCells,) MPAS;
-    (6,n,n) cube), both [kg/m^2/s]:
-
-    * ``sfxice`` -- ice -> ocean SALT MASS flux [kg/m^2/s], POSITIVE =
-      net salt INTO ocean (brine rejection on freeze saltens; the term
-      countering the Arctic rivers).  -> the real-salt apply
-      (:func:`legoesm.ocean.coupler.ice_salt_apply.apply_ice_salt_flux_step`).
-    * ``ice_fw = vfxice + vfxsnw`` -- ice + snow -> ocean FRESHWATER
-      MASS flux [kg/m^2/s], POSITIVE = freshwater INTO ocean (NEMO sign:
-      growth removes, melt adds; net Arctic export pattern).  -> added to
-      the OMIP freshwater forcing's ``ice_fw`` channel.
-
-    Regrids from ALL NEMO ocean cells (incl. ice-free siconc=0) via the
-    SAME curvilinear IDW used for siconc/runoff/bathy; land/missing
-    source cells (``_FillValue`` -> NaN) are excluded from the IDW and
-    NaN/land DESTINATION cells are zeroed (via ``land_mask``).
-    """
-    import xarray as xr
-    _path = icemod_file or _SICONC_NC
-    ds = xr.open_dataset(_path, decode_times=False)
-    # Fail EARLY + clearly if the flux variables are absent (e.g. a siconc-only
-    # file was passed): IDW would otherwise crash deep in xarray on the missing
-    # key (codex LOW).
-    _missing = [v for v in ("sfxice", "vfxice", "vfxsnw") if v not in ds]
-    if _missing:
-        raise KeyError(
-            f"--ice-freshwater-export: {_path} is missing required NEMO icemod "
-            f"flux variable(s) {_missing}; pass an icemod file with "
-            f"sfxice/vfxice/vfxsnw via --icemod-flux-file.")
-    src_lat = _squeeze2d(ds["nav_lat"].values)
-    src_lon = _squeeze2d(ds["nav_lon"].values)
-
-    def _annual(varname):
-        """Annual-mean a NEMO icemod field, keeping a cell NaN if it is missing
-        in ANY time record so finiteness is the IDW source-validity
-        discriminator (land/missing -> excluded source).  Stricter than a bare
-        ``nanmean``, which would mark a cell valid on a single finite month and
-        leak a partially-missing source cell into the regrid (codex MED)."""
-        a = np.asarray(ds[varname].values, dtype=np.float64)
-        if a.ndim == 3:                        # (time, y, x) -> annual climatology
-            # A cell finite in every record averages normally; a cell NaN in any
-            # record stays NaN (np.mean propagates NaN), so land/partial-missing
-            # cells are dropped from the IDW source set below.
-            a = np.mean(a, axis=0)
-        return _squeeze2d(a)
-
-    sfx_src = _annual("sfxice")                            # salt-mass flux
-    # Net ice+snow freshwater = vfxice + vfxsnw (NEMO: + INTO ocean).
-    fw_src = _annual("vfxice") + _annual("vfxsnw")
-
-    def _regrid(field_src):
-        # Source ocean mask = finite cells (NEMO writes land as _FillValue ->
-        # NaN); ice-free OPEN ocean (flux=0, finite) is a valid IDW source.
-        src_valid = np.isfinite(field_src)
-        filled = np.nan_to_num(field_src, nan=0.0)
-        out, _ = _regrid_curv_to_points(
-            filled, src_lat, src_lon, src_valid,
-            lat2d_deg, lon2d_deg, k=4, max_deg=2.0)
-        out = np.nan_to_num(np.asarray(out, dtype=np.float64), nan=0.0)
-        if land_mask is not None:
-            out = np.where(np.asarray(land_mask) > 0.5, out, 0.0)
-        return out
-
-    sfxice = _regrid(sfx_src)
-    ice_fw = _regrid(fw_src)
-
-    def _arctic_mean(a):
-        # Area-unweighted >70N mean over wet cells (a coarse setup-log sanity:
-        # the oracle's Arctic >70N sfxice ~ +1.37e-7, ice_fw ~ -3.3e-6+5.5e-6).
-        la = np.broadcast_to(np.asarray(lat2d_deg), np.asarray(a).shape)
-        sel = la > 70.0
-        if land_mask is not None:
-            sel = sel & (np.asarray(land_mask) > 0.5)
-        return float(np.asarray(a)[sel].mean()) if sel.any() else float("nan")
-
-    print(f"[setup] sea-ice export: NEMO sfxice/ice_fw (annual) regridded onto "
-          f"{grid_type}; Arctic>70N mean sfxice={_arctic_mean(sfxice):.2e} "
-          f"kg/m^2/s (+=brine saltens), ice_fw={_arctic_mean(ice_fw):.2e} "
-          f"kg/m^2/s (+=freshwater in)")
-    return sfxice, ice_fw
-
-
 def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None):
     """Load the monthly ESACCI chlorophyll climatology and IDW-regrid onto the grid.
 
@@ -2113,24 +2021,6 @@ def main() -> int:
     p.add_argument("--ice-thermo-sw-trans", type=float, default=0.03,
                    help="Fraction of downwelling SW transmitted through ice into the "
                         "ocean (default 0.03; the albedo-only surrogate implies 0.35).")
-    p.add_argument("--ice-freshwater-export", action="store_true",
-                   help="Prescribe NEMO's sea-ice -> ocean SALT (sfxice) + FRESHWATER "
-                        "(vfxice+vfxsnw) export from the ORCA1 RUN_REF icemod.nc "
-                        "(annual mean). legoESM has no ice model, so without this the "
-                        "Arctic accumulates river runoff with no ice-driven export and "
-                        "the NH SSS collapses (~17 PSU/2yr). The salt flux is applied "
-                        "as a real top-cell salt-mass source each step (brine rejection "
-                        "saltens the Arctic, countering the rivers); the freshwater is "
-                        "added to the OMIP freshwater forcing. Requires --woa-init (the "
-                        "icemod is regridded onto the WOA-initialised grid). Host-loop "
-                        "only. Default off.")
-    p.add_argument("--icemod-flux-file", type=str, default=None,
-                   help="Override the NEMO icemod file read for "
-                        "--ice-freshwater-export (sfxice/vfxice/vfxsnw). Default = "
-                        "the ORCA1 RUN_REF annual icemod.nc (the same file "
-                        "--siconc-file defaults to; kept separate so a siconc-only "
-                        "override does not silently point the flux loader at a file "
-                        "without the flux variables).")
     p.add_argument("--sss-restore", action="store_true",
                    help="Apply OMIP-2 weak SSS restoring toward the WOA surface "
                         "salinity (the protocol NEMO ORCA1 uses) -> bounds the "
@@ -2166,16 +2056,6 @@ def main() -> int:
                    help="Use NEMO's exact under-ice SSS-restoring law (sbcssr "
                         "nn_sssr_ice=0: coefice = 1 - fr_i, zero under full ice) "
                         "instead of the legoESM tanh cutoff. Requires --sss-restore.")
-    p.add_argument("--sss-restore-under-ice", action="store_true",
-                   help="Keep SSS restoring ACTIVE under sea ice (ice_gate=False, "
-                        "= NEMO nn_sssr_ice=1). REQUIRED for a drift-free multi-year "
-                        "OMIP run because legoESM has NO sea-ice model: NEMO turns "
-                        "off under-ice restoring (nn_sssr_ice=0) since its sea ice "
-                        "exports the Arctic river freshwater, but legoESM has no such "
-                        "export, so gating restoring off under ice lets Arctic runoff "
-                        "accumulate unbounded (-> ~17 PSU Arctic crash over ~2 yr). "
-                        "Mutually exclusive with --sss-ice-gate-nemo. Requires "
-                        "--sss-restore.")
     p.add_argument("--woa-smoothing-passes", type=int, default=0,
                    help="Horizontal Laplacian smoothing passes/level on the WOA T,S IC "
                         "-- removes spurious grid-scale fronts from interpolating/flood-"
@@ -2362,16 +2242,6 @@ def main() -> int:
             "--sss-ice-gate-nemo requires --sss-restore (it only changes the "
             "under-ice weighting of the SSS restoring; with no restoring it "
             "would silently do nothing).")
-    if args.sss_restore_under_ice and not args.sss_restore:
-        raise ValueError(
-            "--sss-restore-under-ice requires --sss-restore (it disables the "
-            "under-ice gate of the restoring; with no restoring it would "
-            "silently do nothing).")
-    if args.sss_ice_gate_nemo and args.sss_restore_under_ice:
-        raise ValueError(
-            "--sss-restore-under-ice (restoring ON under ice) and "
-            "--sss-ice-gate-nemo (NEMO nn_sssr_ice=0, restoring OFF under ice) "
-            "are mutually exclusive.")
     # Fox-Kemper MLE: lat-lon / tripole C-grid (mle_latlon_cgrid) AND MPAS
     # Voronoi (mle_mpas, NEMO nn_mle=1 bolus port).  The cube stays unsupported
     # (parked grid; no C-D-grid MLE adapter).
@@ -2634,16 +2504,7 @@ def main() -> int:
         from legoesm.ocean.forcing.sss_restoring import SSSRestoringConfig
         from legoesm import constants
         _cfg_kwargs = {}
-        if args.sss_ice_gate_nemo and args.sss_restore_under_ice:
-            raise ValueError(
-                "--sss-restore-under-ice (restoring ON under ice) and "
-                "--sss-ice-gate-nemo (NEMO nn_sssr_ice=0, restoring OFF under "
-                "ice) are mutually exclusive.")
-        if args.sss_restore_under_ice:
-            # legoESM has no sea-ice freshwater export, so restoring MUST stay
-            # active under ice or Arctic runoff accumulates unbounded.
-            _cfg_kwargs["ice_gate"] = False
-        elif args.sss_ice_gate_nemo:
+        if args.sss_ice_gate_nemo:
             _cfg_kwargs["ice_gate_mode"] = "nemo_linear"
         if args.sss_restore_bound_mmday is not None:
             if not (float(args.sss_restore_bound_mmday) > 0.0):
@@ -2663,13 +2524,9 @@ def main() -> int:
         _bnd = (f"{args.sss_restore_bound_mmday:.1f} mm/day (NEMO ln_sssr_bnd)"
                 if args.sss_restore_bound_mmday is not None
                 else "200 mm/day safety cap")
-        _ice = ("UNDER-ICE ACTIVE (ice_gate off, NEMO nn_sssr_ice=1 -- no sea-ice "
-                "freshwater export in legoESM)" if args.sss_restore_under_ice
-                else "ice-gated (nemo_linear)" if args.sss_ice_gate_nemo
-                else "ice-gated (tanh)")
         print(f"[setup] SSS restoring ON: tau_default="
               f"{args.sss_restore_tau_days:.0f} d + OMIP-2 regional masks; "
-              f"flux bound {_bnd}; {_ice}; target = WOA surface SSS "
+              f"flux bound {_bnd}; target = WOA surface SSS "
               f"[{sss_restore_target[_wet].min():.1f},"
               f"{sss_restore_target[_wet].max():.1f}] PSU")
 
@@ -2740,25 +2597,6 @@ def main() -> int:
             siconc_clim = load_nemo_siconc(
                 grid, app_grid_type, lat2d, lon2d, siconc_file=args.siconc_file,
                 land_mask=np.asarray(state.land_mask.data))
-    # Prescribed sea-ice -> ocean SALT (sfxice) + FRESHWATER (vfxice+vfxsnw)
-    # export (--ice-freshwater-export).  legoESM has no ice model, so the
-    # brine/melt fluxes are read ONCE from the NEMO icemod (annual mean) and
-    # regridded onto the model grid; the salt flux is applied each step as a
-    # real top-cell salt-mass source (apply_ice_salt_flux_step) and the
-    # freshwater is fed into the OMIP freshwater forcing's ice_fw channel.
-    ice_sfxice = None
-    ice_export_fw = None
-    if args.ice_freshwater_export:
-        if app_grid_type == "cubed_sphere":
-            raise ValueError(
-                "--ice-freshwater-export: not wired for the cube (parked grid).")
-        if not args.woa_init:
-            raise ValueError(
-                "--ice-freshwater-export requires --woa-init (the NEMO icemod is "
-                "regridded onto the WOA-initialised model grid).")
-        ice_sfxice, ice_export_fw = load_nemo_ice_fluxes(
-            grid, app_grid_type, lat2d, lon2d, icemod_file=args.icemod_flux_file,
-            land_mask=np.asarray(state.land_mask.data))
     # Monthly chlorophyll for the RGB SW-penetration scheme (--sw-rgb-chl).  Loaded
     # once; indexed per step by calendar month, then attached to the surface
     # forcing as ``chl`` (the PE C-grid step switches to rgb_chl when chl is set).
@@ -2910,16 +2748,14 @@ def main() -> int:
         # reachable only with --no-emp AND no --runoff/--sss-restore/--ice-albedo
         # (a pure momentum/heat tripole perf run, issue #354).
         if (args.emp_freshwater or args.runoff or args.sss_restore
-                or args.ice_albedo or args.ice_thermo or args.geothermal
-                or args.ice_freshwater_export):
+                or args.ice_albedo or args.ice_thermo or args.geothermal):
             raise SystemExit(
                 "[scan] --scan-block applies no surface salinity/albedo/ice forcing "
                 "or geothermal BC (P - E / runoff / SSS restoring / ice-albedo / "
-                "ice-thermo / ice-freshwater-export / geothermal are host-loop "
-                "only), so it cannot run a faithful integration.  Use the host "
-                "Python loop (omit --scan-block), or drop "
-                "--runoff/--sss-restore/--ice-albedo/--ice-thermo/"
-                "--ice-freshwater-export/--geothermal and "
+                "ice-thermo / geothermal are host-loop only), so it cannot run a "
+                "faithful integration.  Use the host Python loop (omit "
+                "--scan-block), or drop "
+                "--runoff/--sss-restore/--ice-albedo/--ice-thermo/--geothermal and "
                 "pass --no-emp for the momentum/heat-only scan path.")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
@@ -3053,10 +2889,7 @@ def main() -> int:
         # passed (single application; avoids the double-count codex flagged).
         _R = (runoff_monthly[_runoff_month_idx(step, dt)]
               if runoff_monthly is not None else None)
-        # Prescribed sea-ice freshwater export (vfxice+vfxsnw): enters the
-        # freshwater forcing's ice_fw channel alongside P-E+runoff (the SALT
-        # half, sfxice, is applied separately post-step below).
-        _want_fw = args.emp_freshwater or (_R is not None) or (ice_export_fw is not None)
+        _want_fw = args.emp_freshwater or (_R is not None)
         if app_grid_type == "cubed_sphere":
             # CUBE is PARKED (cold-start blowup). Its 'external' physics applies
             # surface_forcing.freshwater ONCE as a virtual salt with the LOCAL
@@ -3069,7 +2902,6 @@ def main() -> int:
                 fw = compute_omip2_freshwater_forcing(
                     state, forcing=forcing, idx_t=it, grid=grid,
                     grid_type=app_grid_type, runoff_R=_R,
-                    ice_freshwater_R=ice_export_fw,
                     emp=args.emp_freshwater, ramp=ramp)
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
             state = model.step(state, dt, surface_forcing=sf)
@@ -3079,7 +2911,6 @@ def main() -> int:
                 fw = compute_omip2_freshwater_forcing(
                     state, forcing=forcing, idx_t=it, grid=grid,
                     grid_type=app_grid_type, runoff_R=_R,
-                    ice_freshwater_R=ice_export_fw,
                     emp=args.emp_freshwater, ramp=ramp)
             state = model.step(state, dt, surface_forcing=sf, freshwater=fw)
         if sss_restore_cfg is not None:
@@ -3104,25 +2935,6 @@ def main() -> int:
                     config=sss_restore_cfg, grid=grid, z_coord=z_coord, dt=dt,
                     lat2d_deg=lat2d, lon2d_deg=lon2d,
                     river_runoff=_R_gate)
-        if ice_sfxice is not None:
-            # Prescribed sea-ice -> ocean SALT flux (sfxice, +INTO ocean = brine
-            # rejection saltens): the real-salt half of the ice export (the
-            # freshwater half went through the freshwater forcing above).  NEMO
-            # trasbc.F90: dS/dt = sfxice/(rho0*h_top) (x1000 for the PSU mass
-            # flux).  Applied AFTER model.step + the SSS restoring, on the LIVE
-            # top-cell thickness the tracer update integrates mass against (same
-            # compute_layer_thickness path the geothermal/ice-thermo blocks use).
-            # Grid-agnostic top-cell host update; ramped with the cold-start scale.
-            from legoesm.ocean.coupler import apply_ice_salt_flux_step
-            from legoesm.ocean.vertical import compute_layer_thickness
-            _eta_i = getattr(state, "eta", None)
-            _eta_arr_i = (state.eta.data if _eta_i is not None
-                          else jnp.zeros_like(jnp.asarray(H_bathy)))
-            _h_top = compute_layer_thickness(
-                _eta_arr_i, jnp.asarray(H_bathy), z_coord)[..., 0]
-            state = apply_ice_salt_flux_step(
-                state, salt_flux_kg_m2_s=(ice_sfxice * ramp),
-                h_top=_h_top, dt=dt, rho_0=float(model.config.rho_0))
         if args.ice_thermo and _sic is not None:
             # Prescribed-ice freezing relaxation (the post-step half of the
             # thermodynamic boundary; the SW cut + (1-sic) flux suppression are in

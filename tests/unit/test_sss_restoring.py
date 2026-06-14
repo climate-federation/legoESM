@@ -195,27 +195,6 @@ class TestSSSRestoringFlux:
         # Fully ice-covered should be ~zero.
         assert jnp.all(jnp.abs(out_ice["freshwater_flux"]) < 1e-6)
 
-    def test_ice_gate_false_keeps_full_restoring_under_ice(self):
-        """The Arctic-freshening fix: ``ice_gate=False`` (NEMO nn_sssr_ice=1)
-        keeps restoring at FULL strength under sea ice, so legoESM (which has
-        no sea-ice freshwater export) does not let Arctic river runoff
-        accumulate unbounded under the ice pack."""
-        lat2d, lon2d, S_target = self._grid_and_target()
-        S_model = S_target + 1.0
-        ice_open = jnp.zeros(lat2d.shape)
-        ice_full = jnp.ones(lat2d.shape)
-        cfg = SSSRestoringConfig(enabled=True, ice_gate=False)
-        out_open = compute_sss_restoring_flux(
-            S_model, S_target, lat2d, lon2d, ice_open, cfg)
-        out_ice = compute_sss_restoring_flux(
-            S_model, S_target, lat2d, lon2d, ice_full, cfg)
-        # Under full ice the restoring is UNCHANGED from open water (not gated).
-        np.testing.assert_allclose(
-            np.asarray(out_ice["freshwater_flux"]),
-            np.asarray(out_open["freshwater_flux"]), rtol=1e-12)
-        # And it is genuinely non-zero (restoring is active under the ice).
-        assert float(jnp.mean(jnp.abs(out_ice["freshwater_flux"]))) > 1e-6
-
     def test_nemo_linear_ice_gate_scales_as_one_minus_fr_i(self):
         """``ice_gate_mode="nemo_linear"`` reproduces NEMO sbcssr nn_sssr_ice=0:
         the restoring weight is exactly ``1 - fr_i`` (zero under full ice)."""

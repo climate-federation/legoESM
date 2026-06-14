@@ -15,7 +15,6 @@ from .omip2_applicator import (
 )
 from .sss_apply import apply_sss_restoring_step, apply_sss_restoring_step_mpas
 from .runoff_apply import apply_runoff_step, apply_runoff_step_mpas
-from .ice_salt_apply import apply_ice_salt_flux_step
 from .ice_shelf_apply import (
     apply_ice_shelf_basal_step,
     apply_ice_shelf_basal_step_mpas,
@@ -31,7 +30,6 @@ __all__ = [
     "apply_sss_restoring_step_mpas",
     "apply_runoff_step",
     "apply_runoff_step_mpas",
-    "apply_ice_salt_flux_step",
     "apply_ice_shelf_basal_step",
     "apply_ice_shelf_basal_step_mpas",
     "apply_tidal_mixing_step",

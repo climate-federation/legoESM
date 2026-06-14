@@ -547,7 +547,6 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type):
 def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
                                      grid, grid_type: str,
                                      runoff_R=None,
-                                     ice_freshwater_R=None,
                                      emp: bool = True,
                                      ramp: float = 1.0,
                                      rho_air: float = constants.rho_air):
@@ -570,13 +569,6 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
       evaporating column has lh<0 and E = -lh/L_v >= 0).  ``net_freshwater_flux``
       forms ``precip - evap + runoff`` => ``precip + lh/L_v + runoff``.
     * ``runoff`` -- optional Dai-Trenberth river/ice-shelf/iceberg field.
-    * ``ice_fw`` -- optional PRESCRIBED sea-ice -> ocean freshwater mass flux
-      (``vfxice + vfxsnw`` from a NEMO icemod diagnostic, + INTO ocean): the
-      sea-ice freshwater EXPORT legoESM lacks without an interactive ice model.
-      Enters the SAME ``ice_fw`` channel ``net_freshwater_flux`` already sums
-      (``P - E + runoff + ice_fw``), so it is globally redistributed +
-      virtual-salt-applied exactly like the other physical freshwater
-      components (no double count, no new in-core wiring).
 
     Without P - E the ocean only sees runoff (a one-sided freshwater SOURCE) and
     freshens ~0.3 PSU/yr -- the multi-year drift that strong SSS restoring was
@@ -615,18 +607,13 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
         runoff = np.asarray(runoff_R, dtype=np.float64)
     else:
         runoff = np.zeros_like(precip)
-    # Prescribed sea-ice freshwater export (vfxice+vfxsnw, +INTO ocean).
-    if ice_freshwater_R is not None:
-        ice_fw = np.asarray(ice_freshwater_R, dtype=np.float64)
-    else:
-        ice_fw = np.zeros_like(precip)
     r = float(ramp)
     z = jnp.zeros_like(jnp.asarray(precip))
     return FreshwaterForcing(
         precip=jnp.asarray(precip * r),
         evap=jnp.asarray(evap * r),
         runoff=jnp.asarray(runoff * r),
-        ice_fw=jnp.asarray(ice_fw * r),
+        ice_fw=z,
         restoring=z,
     )
 
