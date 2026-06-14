@@ -1077,7 +1077,8 @@ def _build_microphysics_config(
     if scheme == "none":
         return None
     valid = ("kessler", "morrison", "sundqvist",
-             "seifert_beheng", "thompson", "p3", "ml_emulator")
+             "seifert_beheng", "thompson", "p3", "sdm", "fast_sbm",
+             "ml_emulator")
     if scheme not in valid:
         raise ValueError(
             f"Unknown --microphysics: {scheme!r}; "
@@ -1358,8 +1359,8 @@ def parse_args():
                         "(legacy, full S_0).")
     p.add_argument("--microphysics",
                    choices=["kessler", "morrison", "sundqvist",
-                            "seifert_beheng", "thompson", "p3", "ml_emulator",
-                            "none"],
+                            "seifert_beheng", "thompson", "p3", "sdm",
+                            "fast_sbm", "ml_emulator", "none"],
                    default="kessler",
                    help="Microphysics scheme. 'none' skips the branch.")
     p.add_argument("--homogeneous-ice-nucleation",
@@ -1684,7 +1685,8 @@ def main():
         # slot [9] = prognostic snow number, [10] = prognostic graupel number
         # ⇒ fully double-moment M2005 (snow + graupel).
         n_tracers = 11
-    elif args.microphysics in ("seifert_beheng", "p3", "thompson"):
+    elif args.microphysics in ("seifert_beheng", "p3", "thompson", "fast_sbm"):
+        # fast_sbm (FSBM-2): q_v,q_c,q_r + N_c,N_r live, ice slots zero ⇒ 9.
         n_tracers = 9
     else:
         n_tracers = 3
