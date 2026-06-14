@@ -17,7 +17,7 @@ import pytest
 # The ``ocean_test_matrix`` package lives under ``scripts/`` (sibling of
 # ``src/legoesm``); add it to sys.path so we can import its modules
 # directly in the tests.
-_SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts"
+_SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts" / "matrix"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 

@@ -36,8 +36,8 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
     SpectralPrimitiveEquationModel,
     SpectralHydrostaticState,
     isothermal_rest_state_spectral,
-    _apply_filter_to_tracers,
-    _compute_spectral_filter,
+    apply_filter_to_tracers,
+    compute_spectral_filter,
 )
 from legoesm.grids.gaussian import (
     create_gaussian_grid,
@@ -88,9 +88,9 @@ def _proper_hyperdiff(grid):
 class TestApplyFilterToTracers:
     def test_none_passthrough(self, grid, sigma_coord):
         # None tracers, None filter — both are no-ops.
-        sf = _compute_spectral_filter(grid.ls, grid.n_max)
-        assert _apply_filter_to_tracers(None, sf, grid) is None
-        assert _apply_filter_to_tracers({}, None, grid) == {}
+        sf = compute_spectral_filter(grid.ls, grid.n_max)
+        assert apply_filter_to_tracers(None, sf, grid) is None
+        assert apply_filter_to_tracers({}, None, grid) == {}
 
     def test_unit_filter_is_roundtrip(self, grid, sigma_coord):
         """Filter ≡ 1 at every mode → output equals input (band-limited
@@ -111,7 +111,7 @@ class TestApplyFilterToTracers:
         q_grid = sh_synthesis_3d(grid, q_hat)
 
         unit_filter = jnp.ones(grid.n_sh, dtype=jnp.float64)
-        out = _apply_filter_to_tracers(
+        out = apply_filter_to_tracers(
             {"q_v": _make_field(q_grid)}, unit_filter, grid,
         )
         assert "q_v" in out
@@ -130,7 +130,7 @@ class TestApplyFilterToTracers:
             (grid.n_lat, grid.n_lon, nlev), dtype=jnp.float64,
         )
         zero_filter = jnp.zeros(grid.n_sh, dtype=jnp.float64)
-        out = _apply_filter_to_tracers(
+        out = apply_filter_to_tracers(
             {"q_v": _make_field(q)}, zero_filter, grid,
         )
         new_q = out["q_v"].data
@@ -143,7 +143,7 @@ class TestApplyFilterToTracers:
             (grid.n_lat, grid.n_lon, nlev), dtype=jnp.float64,
         )
         unit_filter = jnp.ones(grid.n_sh, dtype=jnp.float64)
-        out = _apply_filter_to_tracers(
+        out = apply_filter_to_tracers(
             {"q_v": _make_field(q, "q_v")}, unit_filter, grid,
         )
         assert hasattr(out["q_v"], "data")
@@ -158,7 +158,7 @@ class TestApplyFilterToTracers:
             (grid.n_lat, grid.n_lon, nlev), dtype=jnp.float64,
         )
         unit_filter = jnp.ones(grid.n_sh, dtype=jnp.float64)
-        out = _apply_filter_to_tracers(
+        out = apply_filter_to_tracers(
             {"q_v": q}, unit_filter, grid,
         )
         assert not hasattr(out["q_v"], "data"), (
@@ -188,10 +188,10 @@ class TestApplyFilterToTracers:
 
         # Aggressive filter: 1 % retention at n_max → strong damping
         # at the truncation edge.
-        sf = _compute_spectral_filter(
+        sf = compute_spectral_filter(
             grid.ls, grid.n_max, order=8, cutoff_fraction=0.01,
         )
-        out = _apply_filter_to_tracers(
+        out = apply_filter_to_tracers(
             {"q_v": _make_field(q)}, sf, grid,
         )
         new_q = out["q_v"].data
@@ -273,7 +273,7 @@ class TestTracerFilterPrecomputation:
         # Reconstruct the components.
         eig = (grid.ls * (grid.ls + 1) / grid.radius ** 2) ** 2
         hyper = jnp.exp(-nu * eig * 300.0)
-        sf = _compute_spectral_filter(
+        sf = compute_spectral_filter(
             grid.ls, grid.n_max, order=8, cutoff_fraction=0.5,
         )
         expected = sf * hyper

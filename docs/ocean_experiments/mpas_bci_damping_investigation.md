@@ -255,6 +255,6 @@ For the current advection-scheme comparison work:
   - `results/ocean/eady_uniform/mpas_channel/20km/tvd_mpas_20km_U08_Bh2.3e11_Cs0.2_pvenergy_apvm300_80d/`
   - `results/ocean/eady_uniform/mpas_channel/20km/tvd_mpas_20km_U08_Bh2.3e11_Cs0.0_pvenergy_apvm3600_80d/`
 - CLI additions (committable as their own small PR): `--pv-scheme {enstrophy,energy}`
-  and `--apvm-dt <seconds>` on `scripts/run_ocean_test_matrix.py`.
+  and `--apvm-dt <seconds>` on `scripts/matrix/run_ocean_test_matrix.py`.
 - Drag-audit conclusions: see this doc above; the two audit reports are
   preserved in the session transcript.

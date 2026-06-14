@@ -189,7 +189,7 @@ ocean modelling:
   where chequerboard noise lives — see
   `docs/issues/barotropic_mode_noise.md`)
 
-`docs/ocean_boundary_conditions_analysis.md` already enumerates failure
+`docs/md_files/ocean_boundary_conditions_analysis.md` already enumerates failure
 modes our boundary-handling stack might exhibit under realistic
 geometry — corner cell inconsistencies at diagonal coastlines, metric
 amplification near steep topography, ordering dependencies between
@@ -376,7 +376,7 @@ class GlobalOverturningRealisticConfig(GlobalOverturningConfig):
   - `_apply_topology_fixes(land_mask)` — close known under-resolved
     straits if their resolution is below threshold; document each
     fix.
-- Diagnostic: `scripts/diagnose_realistic_geometry.py` produces
+- Diagnostic: `scripts/tmp/diagnose_realistic_geometry.py` produces
   `results/realistic_geometry_check/{bathymetry,coastline,slopes}.png`
   for visual inspection.
 
@@ -638,7 +638,7 @@ geometry.
 
 **Tasks:**
 
-- Write `scripts/global_overturning/run_global_overturning_realistic_implicit_spinup.py`
+- Write `scripts/run/global_overturning/run_global_overturning_realistic_implicit_spinup.py`
   (10 yr) and `..._50yr_implicit_continuation.py` (40 yr).  Same
   driver structure as the flat-bottom counterparts; only the geometry
   + initial T/S construction differs.
@@ -812,7 +812,7 @@ density-Jacobian PGF port becomes necessary, add ~2 weeks.
   z-coordinate models.
 - **Wolfe & Cessi (2010, 2011, 2014)** — the idealized global
   overturning configuration we already match in flat-bottom form.
-- `docs/ocean_boundary_conditions_analysis.md` — already enumerates
+- `docs/md_files/ocean_boundary_conditions_analysis.md` — already enumerates
   the failure modes this plan is designed to surface.
 - `docs/issues/barotropic_mode_noise.md` — Crit 2 chequerboard
   validation; this plan re-runs that diagnostic on realistic

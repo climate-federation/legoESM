@@ -1,0 +1,17 @@
+# DKRZ Levante GPU partition (A100). SLURM-scheduled multi-GPU runs.
+# See docs/REAL_HARDWARE_SCALING.md.
+machine:
+  name: levante-gpu
+  hostnames: ["*.levante.dkrz.de", "levante*"]
+  scheduler: slurm
+  jax_platforms: cuda
+  precision: float32
+  venv_activate: "source /work/$USER/legoesm-venv/bin/activate"
+  data_root: /work/$USER/legoesm-data
+  slurm:
+    partition: gpu
+    gpus: 4
+    nodes: 1
+    time: "08:00:00"
+    account: ""              # set per allocation
+    mem: "0"                 # 0 = whole node

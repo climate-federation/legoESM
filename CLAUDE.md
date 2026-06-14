@@ -22,6 +22,7 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 ## Operating Mode
 - Nontrivial task: short plan before edit. Read nearby impl+tests first. Ambiguous numerics/physics/API: ask.
 - Minimal diffs. No unrelated refactor in bug fix.
+- **Codex adversarial review MANDATORY after any major code implementation/change.** Trigger: new module/feature, dycore/physics/parallel/ocean/land/ice/coupler/training edit, >~50 LOC, multi-file, or anything touching numerics/AD/JIT/pytree/conservation. Run the **iterate-with-codex agent** loop below (`/codex:adversarial-review --wait` → fix flagged → `/codex:review --wait` → repeat until clean or 30 iter) BEFORE declaring done; report that review ran + verdict. Exempt: trivial/mechanical edits (typo, comment, rename, doc/markdown/`.tex`-only, single config value).
 - **Pre-impl search mandatory**: before new fn/helper/class/operator/diagnostic/init/load/loss/numerical routine, grep `src/legoesm/` for similar names/docstrings/formulas in `thermo.py`, `constants.py`, `eos.py`, `ml/loss.py`, `diagnostics/`, `core/`, `atmosphere/physics/_shared.py`. State searched+found. Similar exists → extend/factor.
 - **Shared utilities — never re-derive** (prod, scripts, validators, plotters, tests, notebooks, probes):
   - Constants: `from legoesm import constants` → `T_freeze`, `R_d`, `c_pd`, `L_v`, `R_v`, `epsilon`, `g`, `p_ref`, `kappa`, `sigma_sb`, `T_freeze_ocean`. No literals `273.15`/`287.0`/`1004.64`/`2.501e6`/`461.51`/`0.622`/`9.80616`/`6.371e6`/`7.292e-5`.
@@ -65,6 +66,14 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - **MPI halo AD**: all `sendrecv` via `_sendrecv_vjp` (`@jax.custom_vjp` in `halo_exchange.py`). Only `allreduce(SUM)` AD-safe; `MAX`/`MIN`/`allgather`/`bcast` = diagnostics only.
 - **Device mesh under MPI**: per-rank count to `create_device_mesh()`, not total.
 
+## Oracle-Recipe Fidelity (ocean) — see docs/ocean_fidelity/oracle_recipe_strategy.md
+- ADDITIVE to Validation Rules: oracle work NEVER replaces unit tests, the ocean matrix, conservation checks, or visual verification. Truth tiers (conservation/equivariance/analytic) outrank oracle-matching.
+- Recipe = pure config selecting shared canonical blocks (never a bespoke `veros_*` solver). Oracle-matching numerics go in the canonical module (`eos.py`, advection/limiter dispatch, `vertical_mixing/`, integrator dispatch) as selectable options.
+- Mimicry-only glue (halo strip, axis transpose, time-level handling) lives in the fidelity harness, never the model. Test: "would a user with a different goal ever select this?" No → harness.
+- Conventions handled only in the bridge, verified by equivariance tests (`physics(φ(x))=φ(physics(x))` to tol); a "convention" that changes the wet domain/answers is physics → config, not bridge.
+- Constants are config (`ConstantsConfig`), not module-global monkey-patches (no `override_constants` in shippable paths); defaults reference `legoesm.constants`; base only, derived (κ,ε) recomputed.
+- Oracle tendency-match (tier 3) trusted only for a block that also clears truth tiers (0–2).
+
 ## Validation
 - Narrowest test after edits. Numerical changes: analytical/benchmark > unit tests alone. `JAX_ENABLE_X64=1` unless float32/Metal task.
 - Dycore: Williamson, Galewsky, Jablonowski-Williamson, DCMIP, Held-Suarez, ocean benchmarks.
@@ -73,18 +82,37 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - Too expensive: say what ran/didn't, residual risk.
 - **CRITICAL — Visual verify spatial/grid artifacts**: passing tests+norms NECESSARY ≠ SUFFICIENT for cubed-sphere ops, halo exchange, diffusion coeffs, grid metrics. Edge artifacts/cube imprint/grid-scale noise only detected visually (v-wind W2, wind_speed W5). Run `--only sw --grid cubed_sphere --quick` + inspect PNGs vs baseline. Norms can improve while artifacts worsen. Never claim "tests pass, edge fixed" from pytest alone.
 - **Diffusion sensitivity**: div damping + hyperdiff AMPLIFY halo errors at cubed-sphere face boundaries. Check W2 v-wind visually when touching `_hyperdiff_cube`, `_div_damp_cube`, diffusion params.
+- **Visual-regression gate (cube imprint)**: `scripts/validate/visual_regression.py --check` numericises the W2 v-wind cube-imprint check (SSIM + per-panel perceptual hash + edge-artifact ratio vs tiny committed ref in `tests/visual_baselines/`). Deterministic metric math gated in CI (`tests/test_visual_regression_metrics.py`); full cube-SW `--check` runs as a NIGHTLY non-blocking CI job until tolerances are calibrated across CI hardware. Tiny numeric baselines (.npy+json) ARE tracked — the one carve-out to "no tracked visual baselines".
+
+## Domain Architect vs Syntax Engine (AI guardrails)
+See `docs/ai_guardrails/domain_architect_vs_syntax_engine.md`. Doctrine: the human dictates the *logic* (units, signs, conserved qty, valid scheme sets, references, acceptance criteria); AI fills the *body*; every declared invariant is checked **mechanically** so violations fail LOUDLY. Each gate is a **tripwire, not a proof** and ships a synthetic-violation self-test (provably non-vacuous). NON-NEGOTIABLE harness (extend, never weaken; budgets/TODOs shrink only):
+- **Spec-first physics contracts**: every physics scheme module declares `__physics_contract__` (units/signs/conserves/differentiable/reference/idealized_test); `tests/test_physics_contracts.py` partitions all `*/physics/*.py` into EXCLUDED / CONTRACT_TODO(shrink-only) / annotated — a NEW physics file must ship a contract or be classified. Author the contract + acceptance test BEFORE the body.
+- **CI ratchets** (AST + self-test, via shared `tests/_ratchet_audit.py`): `test_no_hardcoded_constants` (constants only from `legoesm.constants`), `test_no_saturation_reimpl` (saturation only from `thermo`), `test_dispatch_hardening` (no scheme guard silently deleted), `test_validate_strict_coverage` (no scheme field skips fail-early validation). Escape: real `# const-ok:`/`# satcurve-ok:` comment.
+- **Local hooks** (`.claude/hooks/`, wired in `settings.json`): PreToolUse blocks an edit adding a banned constant/saturation prefactor to a `.py` (fail-open); Stop reminds (once/session) to run the mandatory codex review on uncommitted numerics/physics. CI remains authoritative (a `Bash` heredoc bypasses the hook, not CI).
+- **Best coding practices = use the existing system**, not a parallel one: ruff/mypy, import-linter (`alerting="error"`), inline-import budgets, pre-impl grep + shared utilities (no re-derivation), every new `.py` gets a unit test, slopbuster sweeps, iterate-with-codex on substantial changes.
 
 ## Commands
 - Install: `pip install -e ".[dev]"`
 - Tests: `.venv/bin/python -m pytest tests/`
 - Sci tests: `JAX_ENABLE_X64=1 .venv/bin/python -m pytest <target>`
-- Atm matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py`
-- Ocean matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py`
-- AMIP: `.venv/bin/python scripts/run_amip.py`
+- Atm matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py`
+- Ocean matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py`
+- AMIP: `.venv/bin/python scripts/run/run_amip.py`
 - Dycore progression: `.venv/bin/python tests/validation/run_dycore_progression_suite.py`
-- GPU/MPI scaling: `.venv/bin/python scripts/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (`docs/REAL_HARDWARE_SCALING.md`)
+- GPU/MPI scaling: `.venv/bin/python scripts/bench/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (`docs/REAL_HARDWARE_SCALING.md`)
+- Scripts reorganized into buckets: `scripts/{run,matrix,bench,plot,validate,data,experiment,cluster}/`; debug in `scripts/tmp/`. See `scripts/README.md` + `## File Layout` below.
 - MPI tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/`
 - MPI diff: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py`
+
+## File Layout (audit — enforce on EVERY new file; no random files)
+- **New scripts go in the correct `scripts/` bucket — NEVER `scripts/` root or repo root.** Buckets: `run/` (prod drivers), `matrix/` (test-matrix registries), `bench/` (perf/profiling/scaling), `plot/` (plot/replot/regen), `validate/` (non-matrix validators/verifiers/conservation checks), `data/` (download/build/prepare forcing+IC), `experiment/` (init/reproduce/templates/machine-detect/fetch), `cluster/` (SLURM `.sbatch` job wrappers, e.g. `cluster/omip_nemo/`). Pick the bucket by what the script DOES. New bucket needs a real category, not a dumping ground. See `scripts/README.md`.
+- **Debug / throwaway / one-off → `scripts/tmp/` ONLY** (eventually deleted): `_*`-prefixed probes, `diag_*`/`diagnose_*`, per-iteration scratch. Never at `scripts/` root. `_probe_*.py` is gitignored.
+- **No new files dumped at repo root.** Root keeps ONLY: `README.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `FEDERATION.md`, `project_status.md` (generated), `pyproject.toml`/lockfile/dotfiles. Everything else has a home.
+- **No `.md` notes accumulating at repo root → `docs/`.** Dev-notes, change logs, faithfulness/audit trackers (`*_faithful.md`, `*_checks.md`, review logs) live under `docs/`. Reference by BASENAME so code comments survive the move.
+- **No runtime outputs in git.** `diagnostics/`, `logs/`, `**/logs/`, `results/`, `checkpoints/`, `output/`, `*.zarr`/`*.nc`, root `*.png`/`*.pdf`/`*.svg` gitignored. Visual-regression baselines stay in LOCAL working copies, regenerated on demand — not tracked. Never `git add -f` a runtime artifact.
+- **Source stays under `packages/<pkg>/legoesm/`** (federation namespace). Never add source at `src/`/repo root. New subpackage → update `tests/test_federation_plan.py` same PR.
+- **Tests mirror the package tree under `tests/`** (`tests/<component>/<tier>/...`). Curated dycore regressions in `tests/atmosphere/dycore/regression/`. No new `test_*.py` at repo root.
+- Staging: explicit pathspecs, NEVER `git add .`/`-A` — catches stray scratch + concurrent-session files.
 
 ## Bug Triage
 - Instability: CFL, boundary, metric, halo, pressure-gradient, diffusion, dtype.
@@ -99,7 +127,7 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - Removing module: also remove `__init__.py` re-export, `supported_matrix.py` entry, dispatch, test file, `__pycache__`.
 - No deprecated backward-compat wrappers — update call sites. No thin dispatch-only wrappers (`X_utils.py` re-exporting `X.py`) — inline/factor. Real branching across callers (`land/stomata_utils.py`) legit. Grid variants legit when genuinely different numerics; indexing-only copy-paste forbidden.
 - **No top-level cross-package imports from `core/` to `runtime/`/`parallel/`/`driver/`/`training/`/`experiments/`.** Why: `from legoesm.runtime.backend import ...` at top of `core/precision.py` triggered `runtime/__init__.py` → `runtime.precision` → `core.precision` mid-init, breaking isolated pytest. Use function-scope deferred imports.
-- **No import of private (`_`-prefixed) symbols across modules.** Promote (drop underscore + `__init__.py` re-export) or factor public wrapper. Audit: `grep -rE "from legoesm\.[^ ]+ import [^,]*\b_[a-z]" src/legoesm/` = 0.
+- **No import of private (`_`-prefixed) symbols across modules.** Promote (drop underscore + `__init__.py` re-export) or factor public wrapper. Mutable singletons (`grids.halo._halo_backend`/`_mpi_topology`, `cubesphere_exchange._spmd_mesh`): use accessors (`get_halo_backend`/`get_mpi_topology`/`get_spmd_mesh`), never import the global. Audit: `grep -rE "from legoesm\.[^ ]+ import [^,]*\b_[a-z]" src/legoesm/ packages/ | grep -v " as _"` = 0 (line-grep misses multi-line/function-scope/`_UPPER` imports); CI ratchet `tests/test_no_private_cross_imports.py` (AST, incl. function-scope; dunder-exempt; shrink-only allowlist EMPTY since 2026-06-10 — keep it empty).
 - **Test-only modules MUST be acknowledged.** Not wired into factory/`__init__.py`/prod driver: (a) wire same PR, (b) move to `_future/` + docstring + xfail/skip, or (c) delete.
 - **Never commit `docs/references/`.** Local research PDFs/extracts. Cite by filename/DOI. Notes elsewhere (`docs/ocean_experiments/`). Staging: explicit paths, never `git add .`/`-A`.
 - Slopbuster periodic: `/slopbuster audit all` or `/slopbuster review`.
@@ -114,6 +142,20 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - **Tests+scripts+plotters same rule.** `from legoesm import constants`. No `9.80616`, `7.292e-5`, `6.371e6` literals.
 - **Sigmoid sharpness/transition widths in JAX hot loops forbidden as magic numbers.** Inside `scan_step`/`cond`: fn kwarg with doc default OR scheme `*Config` field. Ex: `compute_moist_adiabat(lcl_sigmoid_width_pa=100.0)`, `PlumeConfig.active_sigmoid_sharpness=1e4`, DM95 `transition_width_frac=0.1` on `dm95_taper`/`dm95_taper_scalar`/`_triad_taper`.
 - **Saturation re-impl in forcing modules forbidden.** Use `legoesm.thermo.saturation_mixing_ratio`/`saturation_vapor_pressure`.
+
+### Parameter hygiene — declare per category at file top + machine-readable tunable/fixed split (gated)
+Two CI tripwires enforce this (extend, never weaken; baselines shrink-only): `tests/test_no_inline_physics_coeffs.py` (+`_inline_coeff_baseline.py`) and `tests/test_param_specs.py` (+`_param_spec_baseline.py`).
+- **No inline empirical coefficient in a physics function body OR signature default.** Across `*/physics/*`, `land/`, `ice/`, `coupler/`: every float literal (and int `|v|>16`) inside a function scope is flagged. Move it to (a) a scheme `*Config` NamedTuple field if tunable/scheme-defining, (b) a module-level `_UPPER_SNAKE` constant/table block (published fits/tables: Sutherland, Hall-Pruppacher, Morel-Berthon, Jerlov, KK2000) with a provenance comment if a fixed published constant, or (c) a real `# coeff-ok: <reason>` (reason REQUIRED) for a genuine numerics one-off. Exempt: math {0,0.25,0.5,1,2,3,4,6}, exact conversions, `|v|<=1e-6` floors, `|v|>=1e20` guards, subscript indices, Pow exponents, small ints (indices/counts).
+- **Per-file layout (consistent placement):** docstring → imports → `__physics_contract__` → `__param_spec__` → fixed `_UPPER_SNAKE` constant/table blocks (under `# --- <category> (<reference>) ---` comments) → `*Config` NamedTuple(s) with fields grouped by the same category comments (snake_case + unit suffixes) → functions whose bodies read ONLY `cfg.<field>` / `constants.*` / exempt math. Kwarg-default literals → reference a module constant or config field (a Name in the signature, not a literal).
+- **Every physics scheme `*Config` declares `__param_spec__`** (module-level pure dict literal next to the NamedTuple). Per float field: `units`, `bounds (lo,hi)`, `tunable_tier`, `transform` (sigmoid/softplus/none), `category`, `reference`, `shape` (None or dim key like `n_pft` for variable-size array params), optional `legacy_name`. A NEW config module must ship a spec or be classified in `PARAM_SPEC_TODO` (shrink-only). Inclusion is computed: only `:float`-annotated fields are spec-eligible.
+- **Tunable/fixed split (the continuum), classify the SAME way every time:**
+  - `tunable_tier 1` (**core**) = params already trained in practice / well-posed (surface albedos, ice strength `P_star`, gray optical depths, bulk exchange `C_H`/`C_E`).
+  - `tunable_tier 2` (**extended**) = clear closure knobs with literature bounds (relaxation timescales τ, entrainment/drag/autoconv rate coefficients, thresholds, emissivity, roughness).
+  - `tunable_tier 0` / `excluded` (with a reason string) = NOT trainable: numerics floors/caps/regularisers, smoothing widths, measurement conventions (e.g. MOST 10 m), and anything **iteration-coupled** (mEVP `alpha`/`beta`, EVP `T_evp` couple to the subcycle count).
+  - The collector selects tiers `1..N` (`build_trainable_params(config, tier="core"/"extended"/"aggressive", include=, exclude=)`); flip a param's status with a 1-line `tunable_tier` edit. See [[param-hygiene-spec-effort]].
+- **Loop-iteration COUNTS are never config/trainable** → module constant (e.g. `_N_EVP_DEFAULT = 120`), not a config field, not a kwarg-default literal. Structurally guaranteed: ints are not spec-eligible, so an iteration count can never reach the trainable collector. See [[loop-counts-never-trainable]].
+- **A tunable closure whose default is a `constants.X` reference** (e.g. `S_ice_new = constants.S_ice_bulk_default`) is *eligible* (may be a `__param_spec__` param with explicit bounds + tier) though not *required* (the AST gate won't force it). Expose genuine calibratable closures; keep environmental references (ocean salinity) fixed/excluded.
+- **Trained values inject via the config pytree, not new signatures:** `params.to_overrides()` → `param_collector.apply_param_overrides(physics_config, overrides)` (`NamedTuple._replace`) INSIDE the loss so leaves are TRACED (SegmentForcing doctrine); production keeps static Python-float leaves (constant-folded, no retrace). Register a newly-specced module in `param_collector.SPEC_MODULES` (drift-tested).
 
 ## Naming
 - Surface T = `T_sfc` everywhere. No new `T_surface`/`Ts`.
@@ -131,7 +173,7 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 ## Dispatch (audit)
 - **Every `scheme="..."` factory MUST `raise ValueError` on unknown.** Silent `else: <default>` masks typos+dead branches. Historical: `cloud_fraction.compute_cloud_properties` ran sundqvist on typo; `land/carbon/carbon_cycle.py:443` zero CO2; `ocean/biogeochemistry/carbon_cycle.py:108,209` silently disabled BGC; MPAS PV typos → enstrophy in `{compressible_euler_mpas,primitive_eq_mpas,shallow_water_mpas,ocean_pe_mpas}.py`; bulk-scheme typos → constant in `coupler.py:204`, `slab_land.py:156`, `multilayer_land.py:212`, `two_layer_lake.py:66`, `bulk_formulas.py:68`; `io/restart.py:232` silently wrote npz. HARDENED 2026-05-29 (now `raise ValueError`, validated at fn entry on static config): `carbon_cycle.py:step_carbon`, `coupler.py:ocean_tile_response`, `ice/sea_ice.py:_bulk_flux_dispatch`. STILL silent (follow-up): `slab_land.py`, `multilayer_land.py`, `coupler/lake/two_layer_lake.py`, `bulk_formulas.py`.
 - Dispatch in `lax.fori_loop`/`lax.cond` (`coupler/bulk_flux.py:222`): validate at fn entry on static Python val, not traced body.
-- Add membership-set assertions in `ExperimentConfig.validate_strict` for new scheme literals. GAP (2026-05-29 audit): `convection`/`turbulence`/`gravity_wave_drag` have NO validate_strict membership check — typos pass early validation, fail only at JIT inside `integration.py`. Add them.
+- Add membership-set assertions in `ExperimentConfig.validate_strict` for new scheme literals. RESOLVED 2026-06-09: `convection`/`turbulence`/`gravity_wave_drag` now HAVE validate_strict membership checks (`config.py:430-455`). Guarded + enforced going forward by `tests/test_validate_strict_coverage.py` (every scheme-like config field must be membership-validated or in its `KNOWN_UNVALIDATED` loader-validated allow-list; removing a guard or adding an unvalidated scheme field → red). Companion factory-level guard: `tests/test_dispatch_hardening.py` (an existing unknown-scheme `raise` may not be silently deleted; 76-entry grow-only baseline).
 
 ## Common Mistakes
 **NamedTuple fields**: verify actual field. `PhysicsOutput.precip` not `precipitation`. `hasattr` guard silently degrades. Adding field to `SegmentCarry`: update every call site. `grep -rn "SegmentCarry(" --include="*.py"`.

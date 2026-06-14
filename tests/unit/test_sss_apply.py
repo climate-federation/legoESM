@@ -217,3 +217,33 @@ class TestApplySSSRestoring:
         )
         # Ice-covered restoring must be weaker (less freshening).
         assert abs(dS_ice) < abs(dS_open)
+
+
+class TestLat2dOverride:
+    """The optional lat2d_deg/lon2d_deg override (the tripole path) must drive
+    the OMIP-2 region masks instead of the 1-D grid.lat/grid.lon broadcast."""
+
+    def test_override_coords_select_region_tau(self):
+        grid = _FakeGrid(n_lat=8, n_lon=8)
+        common = dict(
+            S_target=np.full((grid.n_lat, grid.n_lon), 34.0),
+            ice_concentration=None,
+            config=SSSRestoringConfig(enabled=True),   # default OMIP-2 regions
+            grid=grid, z_coord=_FakeZCoord(), dt=86400.0,
+        )
+        # All cells forced to 80 N / 0 E => Arctic region (tau=30 d, strong).
+        lat2d = np.full((grid.n_lat, grid.n_lon), 80.0)
+        lon2d = np.full((grid.n_lat, grid.n_lon), 0.0)
+        arc = apply_sss_restoring_step(
+            _FakeState(grid.n_lat, grid.n_lon, S_init=35.5),
+            lat2d_deg=lat2d, lon2d_deg=lon2d, **common)
+        # All cells forced to 5 N / 200 E => open tropics (default tau=365 d, weak).
+        lat2d_trop = np.full((grid.n_lat, grid.n_lon), 5.0)
+        lon2d_trop = np.full((grid.n_lat, grid.n_lon), 200.0)
+        trop = apply_sss_restoring_step(
+            _FakeState(grid.n_lat, grid.n_lon, S_init=35.5),
+            lat2d_deg=lat2d_trop, lon2d_deg=lon2d_trop, **common)
+        dS_arc = np.mean(35.5 - np.asarray(arc.S.data)[..., 0])
+        dS_trop = np.mean(35.5 - np.asarray(trop.S.data)[..., 0])
+        assert dS_arc > 0.0 and dS_trop > 0.0
+        assert dS_arc > 5.0 * dS_trop      # Arctic tau=30 d >> interior tau=365 d

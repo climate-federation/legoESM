@@ -197,7 +197,7 @@ class TestFV3PEStepMPIFidelity:
         """FV3_3D iter-1043 (codex claim-6): PE MPI with a2b_zeta_corner.
 
         The PE path had the same ``jax.vmap`` around
-        ``_interp_center_to_corner_a2b_ord4`` that crashed NH MPI.
+        ``interp_center_to_corner_a2b_ord4`` that crashed NH MPI.
         iter-1043 lifts it; this test guards.
         """
         rank = MPI.COMM_WORLD.Get_rank()

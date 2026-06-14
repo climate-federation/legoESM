@@ -20,7 +20,7 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerConfig,
 )
 from legoesm.atmosphere.dynamics.compressible_euler_plane import (
-    _sponge_profile, make_flat_plane_terrain_metric, make_rest_state,
+    sponge_profile, make_flat_plane_terrain_metric, make_rest_state,
     plane_compressible_euler_slow_tendencies,
 )
 from legoesm.grids.plane import create_plane_grid
@@ -65,7 +65,7 @@ def test_w_only_removes_uvtr_sponge_keeps_w():
     state = _perturbed_state(grid, hc)
     t5 = plane_compressible_euler_slow_tendencies(state, grid, hc, tm, cfg_5)
     tw = plane_compressible_euler_slow_tendencies(state, grid, hc, tm, cfg_w)
-    sponge_full = _sponge_profile(
+    sponge_full = sponge_profile(
         hc.z_full, hc.H, cfg_5.sponge_width, cfg_5.sponge_coeff)
     # the removed sponge term = sponge·field (positive where the profile bites)
     np.testing.assert_allclose(
@@ -91,7 +91,7 @@ def test_w_only_preserves_upper_level_wind_tendency():
     state = _perturbed_state(grid, hc)
     t5 = plane_compressible_euler_slow_tendencies(state, grid, hc, tm, cfg_5)
     tw = plane_compressible_euler_slow_tendencies(state, grid, hc, tm, cfg_w)
-    sponge_full = np.asarray(_sponge_profile(
+    sponge_full = np.asarray(sponge_profile(
         hc.z_full, hc.H, cfg_5.sponge_width, cfg_5.sponge_coeff))
     ktop = int(np.argmax(sponge_full > 0))   # first sponged level from the top
     # 5-field config drags u toward zero there (negative tendency contribution);
@@ -120,8 +120,8 @@ def test_sam_rational_profile_ramps_faster_than_sin2():
     H, width, coeff = 20_000.0, 8_000.0, 0.05
     base = H - width
     z = jnp.asarray([base, base + 0.1 * width, base + 0.5 * width, H])
-    sin2 = np.asarray(_sponge_profile(z, H, width, coeff, shape="sin2"))
-    rat = np.asarray(_sponge_profile(z, H, width, coeff, shape="sam_rational"))
+    sin2 = np.asarray(sponge_profile(z, H, width, coeff, shape="sin2"))
+    rat = np.asarray(sponge_profile(z, H, width, coeff, shape="sam_rational"))
     # base = 0 for both; top ≈ coeff for both
     assert sin2[0] == 0.0 and rat[0] == 0.0
     np.testing.assert_allclose(rat[3], coeff * 100.0 / 101.0, rtol=1e-12)
@@ -133,10 +133,10 @@ def test_sam_rational_profile_ramps_faster_than_sin2():
 
 
 def test_unknown_sponge_shape_raises():
-    from legoesm.atmosphere.dynamics.compressible_euler import _sponge_profile
+    from legoesm.atmosphere.dynamics.compressible_euler import sponge_profile
     import pytest
     with pytest.raises(ValueError, match="Unknown sponge profile shape"):
-        _sponge_profile(jnp.zeros(3), 1000.0, 500.0, 0.05, shape="bogus")
+        sponge_profile(jnp.zeros(3), 1000.0, 500.0, 0.05, shape="bogus")
 
 
 def test_crm_scripts_set_sam_faithful_sponge():
@@ -144,8 +144,8 @@ def test_crm_scripts_set_sam_faithful_sponge():
     SAM-faithful sponge (w-only + rational taper). A regression dropping either
     would silently un-faithful the top damping."""
     from pathlib import Path
-    import legoesm
-    repo = Path(legoesm.__file__).resolve().parents[2]
+    # namespace-safe repo root (legoesm is a PEP-420 namespace pkg, no __file__)
+    repo = Path(__file__).resolve().parents[2]
     for script in ("run_gate_plane.py", "run_lba_plane.py",
                    "run_rcemip_plane.py"):
         src = (repo / "scripts" / script).read_text()

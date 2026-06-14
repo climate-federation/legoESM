@@ -1,0 +1,64 @@
+# External-data catalog for experiment templates (lesommer data_catalog model).
+#
+# Each entry maps a dataset id (referenced by a template's `experiment.data`
+# list) to where it lives and how to obtain it. fetch_data.py reads this to
+# `check` availability under the machine's data_root and to `fetch` missing
+# datasets. Idealized templates list no data and need no catalog entry.
+#
+# Fields:
+#   target:      path under <data_root> where the dataset is expected/staged
+#   description: one line
+#   url:         optional fetchable source (gs:// for gsutil, http(s):// for curl);
+#                omit for datasets that need manual/credentialed download
+#   credentials: optional note on required auth (e.g. CMEMS_USER/CMEMS_PASS)
+
+datasets:
+  amip_sst_sic:
+    target: amip/sst_sic.nc
+    description: >
+      Prescribed observed SST + sea-ice concentration for AMIP forcing
+      (e.g. PCMDI AMIP II / input4MIPs boundary conditions).
+    url: ""                  # input4MIPs requires ESGF account; see below
+    min_bytes: 1048576       # integrity floor (1 MiB): reject empty/truncated files
+    credentials: "ESGF account (input4MIPs); download the AMIP II bcs SST/SIC files"
+
+  jra55_do:
+    target: ocean/jra55_do/
+    description: "JRA55-do surface forcing for OMIP ocean runs."
+    url: ""
+    marker: .complete        # write this sentinel after a verified manual stage
+    credentials: "JRA55-do registration (https://climate.mri-jma.go.jp/)"
+
+  eorca1_mesh:
+    target: ocean/eorca1/mesh_mask.nc
+    description: >
+      eORCA1.2 tripole mesh_mask (grid metrics glamt/e1t..., tmask, fold
+      descriptor) for the OMIP tripole ocean (run_omip_core2.py --grid tripole).
+    url: ""                   # NEMO/ESGF distribution; see credentials
+    min_bytes: 10485760       # 10 MiB floor: reject empty/truncated mesh
+    credentials: "NEMO eORCA1 mesh_mask (Zenodo / institutional NEMO config)"
+
+  woa18:
+    target: ocean/woa18/
+    description: >
+      World Ocean Atlas 2018 objectively-analyzed temperature + salinity
+      climatology, used for the WOA cold-start IC (run_omip_core2.py --woa-init
+      --woa-t/--woa-s).
+    url: ""                   # NCEI public; per-variable NetCDF files
+    marker: .complete
+    credentials: "Public (NCEI: https://www.ncei.noaa.gov/products/world-ocean-atlas)"
+
+  core2_nyf:
+    target: ocean/core2/nyf.zarr
+    description: >
+      CORE-II Normal-Year Forcing (Large & Yeager 2009) as a 6-hourly Zarr
+      store — the surface forcing for the OMIP normal-year ocean spin-up.
+    url: ""                   # derived/regridded store; stage locally
+    marker: .zmetadata        # zarr consolidated metadata = store-complete sentinel
+    credentials: "Derived from CORE-II NYF (GFDL/NCAR); build the Zarr locally"
+
+  era5_wb2:
+    target: era5/wb2.zarr
+    description: "ERA5 (WeatherBench2 1440x721 6h) for AMIP/ERA5-ingest tiers."
+    url: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+    marker: .zmetadata       # zarr consolidated metadata = store-complete sentinel

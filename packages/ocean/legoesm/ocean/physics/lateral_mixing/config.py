@@ -1,0 +1,326 @@
+"""Configuration for ocean lateral mixing schemes."""
+
+from __future__ import annotations
+
+from typing import NamedTuple
+
+from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
+
+
+__param_spec__ = {
+    "HarmonicConfig": {
+        "scheme_key": "ocean.lat.harmonic",
+        "excluded": {
+            "cfl_dt_estimate": "numerics: solver/CFL/smoothing parameter",
+            "cfl_safety": "numerics: solver/CFL/smoothing parameter",
+        },
+        "params": {
+            "A_h": {"units": "1", "bounds": (3300.0, 30000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "harmonic lateral viscosity/diffusivity", "shape": None},
+            "K_h": {"units": "1", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "harmonic lateral viscosity/diffusivity", "shape": None},
+        },
+    },
+    "BiharmonicConfig": {
+        "scheme_key": "ocean.lat.biharmonic",
+        "excluded": {
+            "B_h_momentum": "default 0 = disabled/off (enable via config, not training)",
+            "B_h_tracer": "default 0 = disabled/off (enable via config, not training)",
+            "cfl_dt_estimate": "numerics: solver/CFL/smoothing parameter",
+            "cfl_safety": "numerics: solver/CFL/smoothing parameter",
+        },
+        "params": {
+        },
+    },
+    "VisbeckConfig": {
+        "scheme_key": "ocean.lat.visbeck",
+        "excluded": {
+            "f_min": "numerics: floor/cap",
+        },
+        "params": {
+            "L_fixed": {"units": "1", "bounds": (33000.0, 300000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
+            "L_max": {"units": "1", "bounds": (66000.0, 600000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
+            "L_min": {"units": "1", "bounds": (1650.0, 15000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
+            "alpha": {"units": "1", "bounds": (0.00495, 0.045), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
+            "kappa_max": {"units": "1", "bounds": (1320.0, 12000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
+            "kappa_min": {"units": "1", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Visbeck et al. (1997)", "shape": None},
+        },
+    },
+    "GMRediConfig": {
+        "scheme_key": "ocean.lat.gm_redi",
+        "excluded": {
+            "K_iso_steep": "default 0 = disabled/off (enable via config, not training)",
+            "taper_width_frac": "numerics: solver/CFL/smoothing parameter",
+        },
+        "params": {
+            "S_max": {"units": "1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
+            "kappa_GM": {"units": "1", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
+            "kappa_Redi": {"units": "1", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
+            "surface_complement_depth": {"units": "1", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Gent-McWilliams / Redi", "shape": None},
+        },
+    },
+}
+
+
+class HarmonicConfig(NamedTuple):
+    """Laplacian (harmonic) lateral mixing.
+
+    The explicit 2-D Laplacian operator is stable only when
+    ``A_h · dt / dx² ≤ 1/4`` (2-D diffusive CFL, safety factor
+    incorporated).  ``cfl_dt_estimate`` lets the scheme cap the
+    diffusivity at the explicit limit without knowing the runtime dt;
+    set higher (=longer dt) for stricter caps.  The cap is opt-in via
+    ``enforce_cfl=True``.
+    """
+    A_h: float = 1e4   # Horizontal viscosity [m^2/s]
+    K_h: float = 1e3   # Horizontal tracer diffusivity [m^2/s]
+    enforce_cfl: bool = False         # Apply 2-D explicit CFL cap
+    cfl_dt_estimate: float = 3600.0   # Reference dt for the cap [s]
+    cfl_safety: float = 0.20          # Margin below 1/4 stability bound
+
+
+class BiharmonicConfig(NamedTuple):
+    """Biharmonic lateral mixing.
+
+    Explicit biharmonic CFL is ``B_h · dt / dx⁴ ≤ 1/16`` (2-D, with a
+    safety factor).  See ``HarmonicConfig`` for the analogous CFL knobs.
+    """
+    B_h_momentum: float = 0.0   # Biharmonic viscosity [m^4/s]
+    B_h_tracer: float = 0.0     # Biharmonic tracer diffusivity [m^4/s]
+    enforce_cfl: bool = False
+    cfl_dt_estimate: float = 3600.0
+    cfl_safety: float = 0.05    # Margin below 1/16 stability bound
+
+
+class VisbeckConfig(NamedTuple):
+    """Adaptive GM coefficient following Visbeck, Marshall, Haine & Spall 1997.
+
+    Replaces the constant ``kappa_GM`` with a flow-dependent, horizontally
+    varying coefficient
+
+        κ_Visbeck(x, y) = α · L² · ⟨N · |S|⟩_z
+
+    where ``α`` is a dimensionless tunable coefficient (Visbeck 97 suggest
+    ~0.015; MOM6 uses values between 0.005 and 0.1), ``L`` is a mixing
+    length — either a fixed width of the baroclinic zone or the local
+    first-baroclinic Rossby radius ``N̄·H/|f|`` — and
+    ``⟨N·|S|⟩_z`` is a depth-average of the local Eady-like growth rate
+    at isopycnal interfaces.  The final coefficient is clamped to
+    [``kappa_min``, ``kappa_max``] for numerical safety.
+
+    Using ``N·|S|`` as the growth rate follows from the Eady relation
+    ``σ = 0.31·|f|/√Ri`` combined with the thermal-wind identity
+    ``Ri = f² / (N²·|S|²)``, which gives ``σ ≈ 0.31·N·|S|``; the 0.31
+    factor is absorbed into the tunable ``α``.
+    """
+    enabled: bool = False
+    alpha: float = 0.015
+    L_fixed: float = 1.0e5               # Fixed mixing length [m]
+    use_rossby_radius: bool = True
+    L_min: float = 5.0e3                 # Length-scale floor [m]
+    L_max: float = 2.0e5                 # Length-scale ceiling [m]
+    kappa_min: float = 1.0e2             # κ floor [m²/s]
+    kappa_max: float = 4.0e3             # κ ceiling [m²/s]
+    f_min: float = 1.0e-6                # |f| floor for Rossby-radius denom
+    # Static-stability N² mode for the Eady-growth / Rossby-radius chain.
+    #   "insitu" (default, BIT-IDENTICAL legacy): N² from the in-situ density
+    #     gradient (compute_buoyancy_frequency). The in-situ ∂_zρ carries the
+    #     adiabatic compressibility term and is biased ~6x too stable, which
+    #     makes ∫N dz ~2.7x too large → L_def ~2.1x → eke_len ~23% too long.
+    #   "adiabatic": N² by adiabatic parcel displacement to the upper cell's
+    #     pressure (Veros thermodynamics.py:99-103, eke.py:50-54), the true
+    #     static stability used by the Veros EKE chain. Requires the caller to
+    #     supply T, S, an EOS and the cell-centre pressure (or its ingredients)
+    #     to displace parcels through the EOS; raises if any is missing.
+    n2_mode: str = "insitu"
+    # Veros dzw slot for the ADIABATIC N² divisor (mirrors
+    # ``EKEConfig.n2_over_dzw``; only consulted with ``n2_mode="adiabatic"``):
+    # divide the adiabatic density contrast by the actual centre spacing
+    # ``dz_half_ref·J`` (Veros ``dzw``) instead of the midpoint
+    # reconstruction. Default False ⇒ BIT-IDENTICAL legacy.
+    n2_over_dzw: bool = False
+
+
+class GMRediConfig(NamedTuple):
+    """Gent-McWilliams / Redi isopycnal mixing (small-slope formulation).
+
+    Implements the Griffies (1998) skew-flux form for GM and the full
+    Redi isopycnal diffusion tensor with DM95 slope tapering.
+
+    When kappa_GM == kappa_Redi (default), the horizontal off-diagonal
+    terms cancel and the scheme reduces to horizontal diffusion plus
+    an enhanced vertical mixing term proportional to S^2.
+
+    When ``visbeck.enabled = True`` the scalar ``kappa_GM`` is replaced
+    by a flow-dependent field computed from the local slope and
+    stratification (Visbeck et al. 1997).  ``kappa_Redi`` still
+    controls the isopycnal diffusivity.
+
+    ``slope_scheme`` selects the discretisation used to build the
+    isopycnal-tensor fluxes (lat-lon C-grid only — the cubed-sphere
+    implementation always uses centered):
+
+    - ``"triads"`` (default) — Griffies, Gnanadesikan, Pacanowski et
+      al. (1998) triad decomposition.  Each flux is built from four
+      quarter-cell triads that use the SAME three density / tracer
+      values for both slope and gradient, guaranteeing that the Redi
+      flux vanishes exactly for tracers constant along isopycnals
+      (e.g. T with a linear EOS).  Required for century-scale climate
+      runs and the recommended default for all production work.
+    - ``"centered"`` — face-then-interface averaging of centered
+      slopes (cheap, but the Redi tendency for ``q = f(ρ)`` retains a
+      small residual that accumulates through dynamical feedback).
+      Kept as a regression-coverage option and as a fallback for
+      cheap short integrations.
+    """
+    kappa_GM: float = 1e3       # GM bolus transport coefficient [m^2/s]
+    kappa_Redi: float = 1e3     # Redi isopycnal diffusivity [m^2/s]
+    S_max: float = 0.01         # Slope at which DM95 taper crosses 0.5.
+                                # Equivalent to Veros's ``iso_slopec``.
+    taper_width_frac: float = 0.1
+    # ^ Tanh transition half-width as a fraction of ``S_max``. Default
+    # 0.1 matches legoESM's pre-2026 hardcoded behavior. Veros's
+    # ``iso_dslope`` parameter maps via
+    # ``taper_width_frac = iso_dslope / iso_slopec``. For DINO's
+    # ``iso_slopec=0.01, iso_dslope=0.005`` this is ``0.5``.
+    visbeck: VisbeckConfig = VisbeckConfig()
+    slope_scheme: str = "triads"     # "triads" (default) or "centered"
+    slope_density: str = "in_situ"   # "in_situ" (default) or "neutral"
+    # ^ Density gradient used to build the isoneutral SLOPES (NOT the tracer
+    # gradients, which are always the raw T/S gradients).
+    # - "in_situ" (default): slope = -∇_h ρ / ∂_z ρ from the IN-SITU density ρ.
+    #   ∂_z ρ then carries the adiabatic compressibility term ∂ρ/∂p·∂p/∂z
+    #   (≈ g·ρ₀/c_s² ≈ 4.5e-3 kg/m³/m), making |∂_z ρ| ~4× too steep, S ~4× too
+    #   small, S² ~16×, and the vertical isoneutral diagonal K_33 ∝ S² 10–25×
+    #   too small (≫ near the surface). BIT-IDENTICAL to the pre-2026 scheme.
+    # - "neutral": build the slope-input density gradients from the LOCALLY-
+    #   REFERENCED NEUTRAL form ∂ρ/∂T·∇T + ∂ρ/∂S·∇S with ∂ρ/∂T, ∂ρ/∂S the EOS
+    #   partial derivatives at the LOCAL cell pressure (Veros get_drhodT /
+    #   get_drhodS at abs(zt); veros/core/isoneutral/isoneutral.py:40-41). This
+    #   removes the compressibility bias so the slope, S², and K_33 track Veros.
+    #   The stable-strat floor min(0,∂_zρ)-eps is applied to the NEUTRAL ∂_zρ.
+    #   ACC recipe opts in. Supported by both slope_scheme="triads" and
+    #   "centered" on the lat-lon C-grid.
+    #   FOLLOW-UP (documented, NOT built here): Veros sums BOTH kr triad levels
+    #   for drodzb and carries the exact metric factors dxu/dxt/dyu/dyt/cost in
+    #   the K_11/K_22/K_33 assembly; legoESM uses the upper-cell drdT for ∂_zρ
+    #   and the uniform-metric 0.25·Σ. Inert on the uniform ACC channel; a true
+    #   tripolar/variable-metric run would want the kr-sum + metric factors.
+    surface_complement: bool = True  # Add horizontal diffusion (kappa_Redi)
+                                      # in the surface layer where DM95 tapers
+                                      # Redi to zero.  Ferrari et al. (2008).
+                                      # Uses a fixed 100m depth proxy for the
+                                      # mixed layer (should be replaced with
+                                      # KPP boundary-layer depth when available).
+                                      # Only active for slope_scheme="centered".
+    surface_complement_depth: float = 100.0  # Depth [m] of the surface layer
+    # --- Veros-faithful isoneutral options (oracle-matching; default off) ---
+    implicit_K33: bool = False
+    # ^ When True, the vertical isoneutral diagonal K_33 = kappa_Redi·S² (the
+    # "enhanced vertical mixing ∝ S²" noted above) is REMOVED from the explicit
+    # F_z and folded into the IMPLICIT vertical-diffusion tridiagonal solve
+    # (backward-Euler), matching Veros (core/isoneutral/diffusion.py:
+    # delta = dt/dzw·K_33). The explicit F_z then carries ONLY the off-diagonal
+    # skew. Stiff-stable; required to reproduce Veros's dtemp_iso (which folds the
+    # implicit K_33 increment into the diagnosed isoneutral tendency). Supported
+    # only by slope_scheme="triads" on the lat-lon C-grid model.
+    K_iso_steep: float = 0.0
+    # ^ Steep-slope floor on the HORIZONTAL isoneutral diffusivity: the effective
+    # along-isopycnal diffusivity becomes max(K_iso_steep, kappa·taper) (Veros
+    # K_11/K_22, isoneutral.py:128/165; NOT applied to K_33). Default 0 = no floor.
+    # NB legoESM clips the slope to S_max BEFORE the DM95 taper, so the taper
+    # bottoms at 0.5 (its value at S_max) instead of →0; the floor therefore only
+    # bites for kappa < 2·K_iso_steep. At Veros ACC (kappa≈1000, K_iso_steep=500)
+    # the clipped-taper diagonal already equals K_iso_steep at steep slopes, so the
+    # floor is correct but INERT for ACC — it matches Veros either way. (A fully
+    # Veros-faithful steep-slope taper would need the UNCLIPPED slope; that is the
+    # deeper slope-stencil difference, deferred.)
+    veros_triad_weights: bool = False
+    # ^ Veros-faithful u/v-face TRIAD WEIGHTS (default False = bit-identical
+    # legacy). Veros weights each u/v-face triad by its vertical pair's W-cell
+    # thickness, ``dzw(pair)/(4·dzt(level))`` (isoneutral.py:123-129 sumz,
+    # diffusion.py:33-47 — the plain Δtr·dzw/(4·dzt) form), with NO
+    # renormalization where triads are missing: at the surface the two
+    # "above" triads use the half-cell ``dzw_sfc = dzt[0]/2`` and are DEAD
+    # for the off-diagonal (taper→0 via the zeroed dTdz) while their
+    # K_iso_steep diagonal floor survives; at the bottom the two "below"
+    # triads vanish entirely. legoESM's legacy convention instead
+    # renormalizes by the number of valid triads (1/N_valid, equal weights),
+    # keeping the boundary diagonal at full strength — a defensible
+    # discretization → option, not canonical. On a stretched vertical grid
+    # the two weightings differ at EVERY level (global_4deg z1: lego/Veros
+    # skew F_x = 1.29 with 1/N, ≈1.0 with dzw weights) and by ~2× in the
+    # off-diagonal at the surface level (the tier-2 z0 = 3.2× signature).
+    # Only meaningful with slope_density="neutral" (the in_situ slope-clip
+    # pins dead-triad tapers at 0.5 instead of 0); the faithful recipes are
+    # all neutral.
+    double_redi_diagonal: bool = False
+    # ^ Veros-faithful DOUBLE-COUNTED Redi horizontal diagonal (oracle quirk;
+    # default False = bit-identical single diagonal). Veros adds the
+    # PRE-computed diagonal flux ``K_11·∂T/∂x`` / ``K_22·∂T/∂y`` inside
+    # ``_calc_tracer_fluxes`` UNCONDITIONALLY (core/isoneutral/diffusion.py:
+    # 40-47, 67-77), and with ``enable_neutral_diffusion`` +
+    # ``enable_skew_diffusion`` both on (the ACC and global_4deg setups) that
+    # kernel runs TWICE per tracer per step (thermodynamics.py:430-437) — the
+    # iso pass AND the skew pass each add the full K_11/K_22 diagonal, so
+    # Veros's net horizontal isoneutral diffusion carries 2× the diagonal
+    # (≈ 2·K_iso_0 ≈ 2000 m²/s of along-isopycnal smoothing). legoESM's
+    # single diagonal is the textbook Redi tensor; matching the oracle
+    # requires reproducing the double-add, so this is a config-selectable
+    # OPTION (judgment: Veros implementation quirk → option, not canonical).
+    # When True, the triad assembly adds the diagonal (incl. its K_iso_steep
+    # floor) ONE extra time to F_x/F_y, and the realized SIGNED skew
+    # conversion carries the same extra diagonal in its skew fluxes (Veros's
+    # P_diss_skew includes its skew-pass K_11·∂T/∂x flux). Measured
+    # (global_4deg bridged yr-1 state, tier-2 component isolation): without
+    # it, lego/Veros TOTAL horizontal flux rms = 0.84 with 0.5-0.6 below
+    # 800 m; per-pass components match at 1.0. See
+    # .physics-validator/eke_global_runaway/RESULTS.md.
+    # Prognostic EKE (Eden-Greatbatch 2008): when not None, kappa_GM becomes
+    # prognostic (c_k·L·√E) from the evolving eddy-energy field E, instead of the
+    # constant ``kappa_GM`` / Visbeck diagnostic. Selection is presence-based
+    # (None = off). The Rossby-radius length uses the ``visbeck`` length params.
+    # Veros ACC runs with EKE on (enable_eke=True).
+    eke: EKEConfig | None = None
+    adjoint_stabilization: str = "none"
+    # ^ Long-horizon REVERSE-MODE gradient stabilization for the isoneutral
+    # operator (default "none" = exact AD, bit-identical legacy). MECHANISM
+    # (probe-verified, .physics-validator/gm_adjoint_stab/RESULTS.md): the
+    # slope saturation (DM95 taper; and the ±S_max clip on the in-situ path)
+    # bounds the PRIMAL fluxes but the taper does NOT bound the LINEARIZED
+    # operator — d(taper·S)/d(state) exceeds the primal coefficient bound via
+    # (a) the taper-derivative term S·taper' in the transition band
+    # (~1/(2·taper_width_frac) excess; dense-Jacobian rho 1.0→2.4 in band at
+    # the ACC kappa, scaling with kappa·dt/dz²) and (b) the UNCLIPPED neutral
+    # slope tangent ∂S/∂(∇ρ) ∝ 1/∂_zρ in weakly-stratified cells (the
+    # dominant path on the real ACC state; EOS-independent). The tangent/
+    # adjoint propagator then has per-step amplification |G| ≫ 1 where the
+    # primal is stable (full ACC step: |G| ≈ 78 at constant kappa=1000, vs
+    # 1.02 with GM/Redi removed) — parameter adjoints grow ~×2-5/step beyond
+    # ~1 model day. NB the legacy slope_density="in_situ" CLIP saturates the
+    # tangent as well (clip gradient = 0 outside ±S_max): the in-situ path
+    # measures |G| ≈ 1.02 with NO stabilization — the instability is specific
+    # to the Veros-faithful UNCLIPPED "neutral" slope path.
+    # Options (both PRIMAL-INVISIBLE by construction — stop_gradient only):
+    # - "stop_gradient_slopes" (RECOMMENDED, probe-validated): stop_gradient
+    #   on the slopes themselves (and hence the tapers computed from them) —
+    #   the frozen-coefficient (Picard) linearization of the isoneutral
+    #   tensor. Gradients keep the full tracer-flux linearization and the
+    #   kappa sensitivity, dropping only the density→tensor feedback. Full
+    #   ACC step |G|: 78 → 1.020 (constant kappa), full recipe → 1.002.
+    # - "stop_gradient_taper": stop_gradient on the DM95 taper FACTORS only
+    #   (the textbook differentiable-solver flux-limiter trick). Kills
+    #   mechanism (a) — sufficient on healthily-stratified configs — but NOT
+    #   mechanism (b): on the faithful ACC stack |G| stays ≈ 75. Kept as the
+    #   finer-grained option; prefer "stop_gradient_slopes".
+    # Applies to the tracer-tendency triads (u/v/w), the centered scheme, the
+    # implicit-K33 coefficient, and the slope chain feeding Visbeck/EKE.
+    # NOT for forward-only runs (no effect); select it for long-horizon
+    # gradient-based calibration/DA through GM/Redi. Validated fail-fast by
+    # ``validate_adjoint_stabilization`` at every GM/Redi entry point.
+
+
+class LateralMixingConfig(NamedTuple):
+    """Top-level lateral mixing configuration."""
+    scheme: str = "harmonic"  # "harmonic", "biharmonic", "gm_redi", "none"
+    harmonic: HarmonicConfig = HarmonicConfig()
+    biharmonic: BiharmonicConfig = BiharmonicConfig()
+    gm_redi: GMRediConfig = GMRediConfig()

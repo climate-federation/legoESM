@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.ocean.spinup import (
     SpinupHealth,
     ConvergenceCriteria,
@@ -16,6 +17,8 @@ from legoesm.ocean.spinup import (
     find_latest_restart,
     bryan_accelerated_dt,
     compute_amoc_from_state,
+    compute_acc_from_state,
+    compute_mht_from_state,
     atlantic_basin_mask,
     _grid_lat_v_deg,
 )
@@ -338,7 +341,7 @@ class TestBryanAcceleratedDt:
 class _FakeGrid:
     """Minimal LatLonGrid-like stub for moc_streamfunction + AMOC tests."""
 
-    def __init__(self, n_lat=36, n_lon=72, radius=6.371e6):
+    def __init__(self, n_lat=36, n_lon=72, radius=constants.R_earth):
         self.n_lat = n_lat
         self.n_lon = n_lon
         self.radius = radius
@@ -504,3 +507,121 @@ class TestComputeAMOCFromState:
             compute_amoc_from_state(
                 v, h, mask, grid, basin="indian",
             )
+
+
+# ==============================================================================
+# Drake-Passage ACC from a lat-lon C-grid state
+# ==============================================================================
+
+class _FakeGrid2DLat(_FakeGrid):
+    """_FakeGrid but with a 2-D (n_lat, n_lon) ``lat`` (constant per row) to
+    exercise compute_acc_from_state's curvilinear-lat row-reduction path."""
+
+    def __init__(self, n_lat=36, n_lon=72, radius=constants.R_earth):
+        super().__init__(n_lat=n_lat, n_lon=n_lon, radius=radius)
+        self.lat = np.broadcast_to(
+            np.asarray(self.lat)[:, None], (n_lat, n_lon)).copy()
+
+
+class TestComputeACCFromState:
+    """compute_acc_from_state = barotropic_streamfunction + acc_transport glue
+    (Sv<->m3/s round-trip + 2-D-lat reduction).  The streamfunction/transport
+    cores are already unit-tested elsewhere; here we pin the glue."""
+
+    def _make(self, *, u0=0.1, n_lat=60, n_lon=72, nlev=8, grid_cls=_FakeGrid):
+        grid = grid_cls(n_lat=n_lat, n_lon=n_lon)
+        # uniform eastward zonal flow at u-faces (n_lat, n_lon+1, nlev)
+        u = np.full((n_lat, n_lon + 1, nlev), u0, dtype=np.float64)
+        h = np.full((n_lat, n_lon, nlev), 100.0, dtype=np.float64)
+        mask = np.ones((n_lat, n_lon), dtype=np.float64)
+        return u, h, mask, grid
+
+    def test_uniform_eastward_gives_finite_nonzero(self):
+        u, h, mask, grid = self._make(u0=0.1)
+        acc = compute_acc_from_state(u, h, mask, grid)
+        assert np.isfinite(acc)
+        assert abs(acc) > 0.0
+
+    def test_zero_flow_zero_acc(self):
+        u, h, mask, grid = self._make(u0=0.0)
+        acc = compute_acc_from_state(u, h, mask, grid)
+        assert abs(acc) < 1e-12
+
+    def test_scales_linearly_with_velocity(self):
+        u1, h, mask, grid = self._make(u0=0.05)
+        u2, _, _, _ = self._make(u0=0.10)
+        a1 = compute_acc_from_state(u1, h, mask, grid)
+        a2 = compute_acc_from_state(u2, h, mask, grid)
+        assert abs(a2 - 2.0 * a1) < 1e-9 * max(1.0, abs(a2))
+
+    def test_2d_lat_matches_1d(self):
+        """A 2-D (row-constant) lat must reduce to the same ACC as 1-D lat."""
+        u, h, mask, g1 = self._make(u0=0.1, grid_cls=_FakeGrid)
+        _, _, _, g2 = self._make(u0=0.1, grid_cls=_FakeGrid2DLat)
+        a1 = compute_acc_from_state(u, h, mask, g1)
+        a2 = compute_acc_from_state(u, h, mask, g2)
+        assert abs(a1 - a2) < 1e-9 * max(1.0, abs(a1))
+
+    def test_drake_column_excludes_remote_flow(self):
+        """The single-meridian section method (vs whole-band max-min) must NOT
+        count zonal transport at a longitude far from the Drake meridian: flow
+        only near 90 E -> ~0 ACC at the Drake (-68) column."""
+        n_lat, n_lon, nlev = 60, 72, 4
+        grid = _FakeGrid(n_lat=n_lat, n_lon=n_lon)
+        u = np.zeros((n_lat, n_lon + 1, nlev), dtype=np.float64)
+        lon_deg = np.degrees(np.asarray(grid.lon))
+        i_far = int(np.argmin(np.abs(lon_deg - 90.0)))      # remote from -68=292
+        u[:, i_far, :] = 0.5                                 # strong remote flow
+        h = np.full((n_lat, n_lon, nlev), 100.0, dtype=np.float64)
+        mask = np.ones((n_lat, n_lon), dtype=np.float64)
+        acc = compute_acc_from_state(u, h, mask, grid, drake_lon_deg=-68.0)
+        assert abs(acc) < 1e-9       # nothing crosses the Drake meridian
+
+    def test_dlon_sentinel_estimates_spacing(self):
+        """A dlon=0 sentinel grid (tripole-style) still selects the Drake column
+        via the estimated local spacing -> remote-flow exclusion still holds and
+        the half-cell U-face shift is applied."""
+        n_lat, n_lon, nlev = 60, 72, 4
+        grid = _FakeGrid(n_lat=n_lat, n_lon=n_lon)
+        grid.dlon = 0.0                                      # tripole sentinel
+        u = np.zeros((n_lat, n_lon + 1, nlev), dtype=np.float64)
+        i_far = int(np.argmin(np.abs(np.degrees(np.asarray(grid.lon)) - 90.0)))
+        u[:, i_far, :] = 0.5
+        h = np.full((n_lat, n_lon, nlev), 100.0, dtype=np.float64)
+        mask = np.ones((n_lat, n_lon), dtype=np.float64)
+        acc = compute_acc_from_state(u, h, mask, grid, drake_lon_deg=-68.0)
+        assert abs(acc) < 1e-9
+
+
+class TestComputeMHTFromState:
+    """compute_mht_from_state (latlon/tripole) = meridional_heat_transport curve
+    reduced to NH-peak / SH-min.  Pin sign + zero (the geometry core is tested
+    via the diagnostics module)."""
+
+    def _make(self, *, v0=0.1, theta=10.0, n_lat=40, n_lon=72, nlev=6):
+        grid = _FakeGrid(n_lat=n_lat, n_lon=n_lon)
+        v = np.full((n_lat + 1, n_lon, nlev), v0, dtype=np.float64)  # v-faces
+        th = np.full((n_lat, n_lon, nlev), theta, dtype=np.float64)
+        h = np.full((n_lat, n_lon, nlev), 100.0, dtype=np.float64)
+        mask = np.ones((n_lat, n_lon), dtype=np.float64)
+        return v, th, h, mask, grid
+
+    def test_northward_warm_positive(self):
+        v, th, h, mask, grid = self._make(v0=0.1, theta=10.0)
+        r = compute_mht_from_state(v, th, h, mask, grid)
+        assert r["nh_peak_PW"] > 0.0
+        assert r["nh_peak_lat"] > 0.0
+
+    def test_sign_flips_with_velocity(self):
+        north = compute_mht_from_state(*self._make(v0=0.1, theta=10.0))
+        south = compute_mht_from_state(*self._make(v0=-0.1, theta=10.0))
+        # Northward warm -> poleward (NH +); southward warm -> SH transport
+        # negative.  (nh_peak is the NH maximum, which a uniform field pads with 0
+        # at the pole rows, so the robust sign discriminator is the SH min.)
+        assert north["nh_peak_PW"] > 0.0
+        assert south["sh_min_PW"] < 0.0
+        assert north["nh_peak_PW"] > south["nh_peak_PW"]
+
+    def test_zero_velocity_zero(self):
+        r = compute_mht_from_state(*self._make(v0=0.0, theta=10.0))
+        assert abs(r["nh_peak_PW"]) < 1e-12 and abs(r["sh_min_PW"]) < 1e-12

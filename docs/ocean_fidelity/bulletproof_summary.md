@@ -25,7 +25,7 @@ Plus **46 / 46 unit tests** across Phases C-F infrastructure:
 ### Veros peer comparison (5 % tolerance)
 
 Source: ``docs/ocean_fidelity/bulletproof_run_eady_dino.md``
-(``scripts/ocean_fidelity/compare_legoesm_vs_veros.py --cases eady,dino
+(``scripts/validate/ocean_fidelity/compare_legoesm_vs_veros.py --cases eady,dino
 --variants latlon,mpas --tolerance 0.05``).
 
 | variant | case | metrics | pass | notes |
@@ -39,7 +39,7 @@ Source: ``docs/ocean_fidelity/bulletproof_run_eady_dino.md``
 ### Cube vs lat-lon cross-grid (5 % tolerance)
 
 Source: ``docs/ocean_fidelity/bulletproof_run_cube_vs_latlon.md``
-(``scripts/ocean_fidelity/compare_legoesm_cube_vs_latlon.py
+(``scripts/validate/ocean_fidelity/compare_legoesm_cube_vs_latlon.py
 --tolerance 0.05``).
 
 | case | metrics | pass | notes |
@@ -102,18 +102,18 @@ boxes that need cluster compute are:
 
 ```bash
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python \
-  scripts/ocean_fidelity/compare_legoesm_vs_veros.py \
+  scripts/validate/ocean_fidelity/compare_legoesm_vs_veros.py \
   --cases eady,dino --variants latlon,mpas --tolerance 0.05 \
   --write-report docs/ocean_fidelity/bulletproof_run_eady_dino.md
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python \
-  scripts/ocean_fidelity/compare_legoesm_cube_vs_latlon.py \
+  scripts/validate/ocean_fidelity/compare_legoesm_cube_vs_latlon.py \
   --tolerance 0.05 \
   --write-report docs/ocean_fidelity/bulletproof_run_cube_vs_latlon.md
 
 for c in munk_gyre held_larichev neverworld2_lite isomip_plus; do
   JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python \
-    scripts/run_ocean_test_matrix.py --only "$c" --quick --days 0.1
+    scripts/matrix/run_ocean_test_matrix.py --only "$c" --quick --days 0.1
 done
 
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m pytest \

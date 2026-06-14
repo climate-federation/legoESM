@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.driver.component_factory import create_land_component
 from legoesm.land.canopy import CanopyConfig, CanopyLandParams
 from legoesm.land.config import MultiLayerLandConfig
@@ -73,13 +73,13 @@ def test_daytime_fluxes_and_gpp():
         state, forcing, cfg, U_min=1.0, dt=1800.0,
         lat=jnp.zeros(ncol), doy=180.0)
 
-    assert response.T_surface.shape == (ncol,)
-    for f in (response.T_surface, response.lhflx, response.shflx,
+    assert response.T_sfc.shape == (ncol,)
+    for f in (response.T_sfc, response.lhflx, response.shflx,
               response.albedo, response.co2_flux, response.lw_up, response.z0):
         assert jnp.all(jnp.isfinite(f)), f"non-finite in {f}"
     assert float(response.lhflx[0]) > 0.0
     # Carbon cycle off by default → co2_flux is zero.
-    assert 270.0 < float(response.T_surface[0]) < 330.0
+    assert 270.0 < float(response.T_sfc[0]) < 330.0
     assert 0.0 <= float(response.albedo[0]) <= 1.0
     assert cstate is None
 
@@ -112,8 +112,8 @@ def test_jit_compiles():
 
     ns1, r1, _ = _step(state, forcing)
     ns2, r2, _ = _step(ns1, forcing)
-    assert jnp.all(jnp.isfinite(r1.T_surface))
-    assert jnp.all(jnp.isfinite(r2.T_surface))
+    assert jnp.all(jnp.isfinite(r1.T_sfc))
+    assert jnp.all(jnp.isfinite(r2.T_sfc))
 
 
 def test_dispatch_via_component_factory():
@@ -168,14 +168,14 @@ def test_medlyn_stomatal_model_runs():
         state, forcing, cfg, U_min=1.0, dt=1800.0,
         lat=jnp.zeros(ncol), doy=180.0, land_params=params)
 
-    for name, f in (("T_surface", response.T_surface),
+    for name, f in (("T_surface", response.T_sfc),
                     ("lhflx", response.lhflx),
                     ("shflx", response.shflx),
                     ("co2_flux", response.co2_flux)):
         assert jnp.all(jnp.isfinite(f)), f"non-finite {name} under Medlyn"
 
     assert float(response.lhflx[0]) > 0.0
-    assert 265.0 < float(response.T_surface[0]) < 325.0
+    assert 265.0 < float(response.T_sfc[0]) < 325.0
 
 
 def test_medlyn_differs_from_ball_berry():
@@ -218,7 +218,7 @@ def test_simple_seb_default_still_runs():
         state, forcing, cfg, U_min=1.0, dt=1800.0,
         lat=jnp.zeros(ncol), doy=180.0)
 
-    for name, f in (("T_surface", response.T_surface),
+    for name, f in (("T_surface", response.T_sfc),
                     ("lhflx", response.lhflx),
                     ("shflx", response.shflx),
                     ("lw_up", response.lw_up)):
@@ -284,8 +284,8 @@ def test_slab_plus_canopy_1d_runs():
         state, forcing, cfg, U_min=1.0, dt=1800.0,
         lat=jnp.zeros(shape), doy=180.0)
 
-    assert response.T_surface.shape == shape
-    for name, f in (("T_surface", response.T_surface),
+    assert response.T_sfc.shape == shape
+    for name, f in (("T_surface", response.T_sfc),
                     ("lhflx", response.lhflx),
                     ("shflx", response.shflx),
                     ("lw_up", response.lw_up)):
@@ -293,7 +293,7 @@ def test_slab_plus_canopy_1d_runs():
     # Midday: surface should transpire.
     assert float(response.lhflx[0]) > 0.0
     # Skin T close to forcing T (within ±20 K).
-    assert 275.0 < float(response.T_surface[0]) < 315.0
+    assert 275.0 < float(response.T_sfc[0]) < 315.0
     assert jnp.all(jnp.isfinite(new_state.T_soil.data))
     assert jnp.all(jnp.isfinite(new_state.W_bucket.data))
 
@@ -316,16 +316,16 @@ def test_slab_plus_canopy_3d_runs():
         lat=jnp.zeros(shape), doy=180.0)
 
     # Shape preserved.
-    assert response.T_surface.shape == shape
+    assert response.T_sfc.shape == shape
     assert response.lhflx.shape == shape
     assert new_state.T_soil.data.shape == shape
     assert new_state.W_bucket.data.shape == shape
     # All-uniform forcing → all columns should give the same result.
-    for f in (response.T_surface, response.lhflx, response.shflx):
+    for f in (response.T_sfc, response.lhflx, response.shflx):
         assert jnp.allclose(f, f[0, 0, 0]), "non-uniform output for uniform forcing"
     # Finite and physically reasonable.
     assert float(response.lhflx[0, 0, 0]) > 0.0
-    assert 275.0 < float(response.T_surface[0, 0, 0]) < 315.0
+    assert 275.0 < float(response.T_sfc[0, 0, 0]) < 315.0
 
 
 def test_slab_simple_seb_default_unchanged():
@@ -341,7 +341,7 @@ def test_slab_simple_seb_default_unchanged():
     new_state, response, _ = step_land(
         state, forcing, cfg, U_min=1.0, dt=1800.0)
 
-    assert jnp.all(jnp.isfinite(response.T_surface))
+    assert jnp.all(jnp.isfinite(response.T_sfc))
     assert jnp.all(jnp.isfinite(response.lhflx))
     assert jnp.all(jnp.isfinite(new_state.T_soil.data))
 

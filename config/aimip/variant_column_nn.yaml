@@ -6,7 +6,7 @@
 # variants for fair intercomparison.
 #
 # See ``training_driver.train_neural_gcm`` for the existing training
-# entry point; ``scripts/run_aimip.py`` dispatches to it when
+# entry point; ``scripts/run/run_aimip.py`` dispatches to it when
 # ``aimip_variant == "column_nn"``.
 
 aimip_variant: "column_nn"

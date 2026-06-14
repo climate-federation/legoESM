@@ -22,7 +22,7 @@ What landed (session 2026-05-28):
   ``build_acc_recipe()`` matches ``veros.setups.acc.acc.ACCSetup``
   parameter-for-parameter. ``veros_snapshot_to_legoesm_state``
   handles halo strip / time-level selection / vertical reversal /
-  axis transpose. ``scripts/ocean_fidelity/compare_tendencies_acc.py``
+  axis transpose. ``scripts/validate/ocean_fidelity/compare_tendencies_acc.py``
   drives the end-to-end comparison.
 - **G.1a — TKE closure (Gaspar 1990 / Burchard 2002)** as
   ``vertical_mixing="tke"``, wired into the implicit-mixing path.
@@ -55,7 +55,7 @@ acceptance run:**
 
 ```bash
 .venv/bin/pip install -e /home/dbalwada/veros
-.venv/bin/python scripts/ocean_fidelity/compare_tendencies_acc.py \
+.venv/bin/python scripts/validate/ocean_fidelity/compare_tendencies_acc.py \
     --write-report docs/ocean_fidelity/veros_acc_tendency_comparison.md
 ```
 
@@ -256,7 +256,7 @@ test mirrors the production diagnostic-closure invariant.
 ``veros_snapshot_to_legoesm_state`` strips Veros's halos, selects
 the τ time level, reverses the vertical axis, transposes (x,y)
 ↔ (lat,lon).
-``scripts/ocean_fidelity/compare_tendencies_acc.py`` orchestrates
+``scripts/validate/ocean_fidelity/compare_tendencies_acc.py`` orchestrates
 the comparison and emits a Markdown report.
 
 **Acceptance gate (per-process, on a frozen ACC snapshot):**
@@ -353,11 +353,17 @@ acceptance metrics that prove it.
    block G.0 acceptance. It matters for tier-3 free-run match —
    tracked as a follow-up.
 4. **Recipe completeness.** EKE (Eden & Greatbatch 2008) is enabled
-   in Veros ACC; legoESM does not have an EKE closure. The current
-   recipe builder leaves EKE out; the eddy-induced transport
-   contribution is approximated by GM/Redi only, which understates
-   the eddy mixing the ACC paper-canonical recipe expects. The
-   first G.0c acceptance run will quantify how much this matters.
+   in Veros ACC. **UPDATE (2026-05-29):** legoESM now HAS the
+   Eden-Greatbatch prognostic-EKE closure (`lateral_mixing/eke.py` +
+   `GMRediConfig.eke`); its `kappa_GM=c_k·L·√E` formula + ACC params
+   were verified against Veros's `K_gm` to machine precision (gate E9;
+   see the strategy doc §8 EKE ledger). It is built + truth-tier
+   verified (E1–E8) but NOT yet flipped on in the recipe: legoESM's
+   mixing length `L` (Visbeck Rossby radius) does not yet match Veros's
+   `eke_len` (which adds the eddy-dependent Rhines limiting), so the
+   prognostic kappa_GM would be ~25× too large. Adoption is deferred
+   behind the `eke_len` mixing-length variant (§8 "next must-build").
+   The current recipe uses constant GM kappa (≈Veros's effective GM).
 5. **Cube and MPAS grids.** Phase G is lat-lon C-grid only for now
    (ACC uses lat-lon natively). Cube + MPAS recipes are a later
    sub-phase that needs the lat-lon → cube interpolation question
@@ -384,11 +390,11 @@ acceptance metrics that prove it.
 
 - **Predecessor**: Phases A–F (``docs/ocean_fidelity/bulletproof_summary.md``). Phase G
   strengthens, does not replace, the bulk-metric gate.
-- **Adjacent**: ``docs/ocean_validation_improvement_plan.md`` predates the recipe
+- **Adjacent**: ``docs/md_files/ocean_validation_improvement_plan.md`` predates the recipe
   framing; it remains as historical context and is not modified here.
-- **Existing harness reused**: ``scripts/ocean_fidelity/compare_legoesm_vs_veros.py``,
-  ``scripts/ocean_fidelity/compare_legoesm_cube_vs_latlon.py``, and
-  ``scripts/ocean_fidelity/run_comparison.py`` provide the reference-driver
+- **Existing harness reused**: ``scripts/validate/ocean_fidelity/compare_legoesm_vs_veros.py``,
+  ``scripts/validate/ocean_fidelity/compare_legoesm_cube_vs_latlon.py``, and
+  ``scripts/validate/ocean_fidelity/run_comparison.py`` provide the reference-driver
   scaffolding that G.0 will extend (snapshot dump-and-load) and G.1 will reuse
   end-to-end.
 - **Existing modules called**: ``ocean_tendency_common.py``,
@@ -408,10 +414,12 @@ acceptance metrics that prove it.
   ``outer_integrator="leapfrog_ab2"`` requires extending
   ``SegmentCarry`` with a τ-1 carry field. Tier-2 unaffected;
   needed for tier-3 free-run match.
-- **EKE closure (Eden & Greatbatch 2008).** Veros ACC enables it
-  but legoESM does not have an EKE module. Sequence after the
-  first G.0c acceptance run quantifies its impact on the
-  GM/Redi-only approximation.
+- **EKE closure (Eden & Greatbatch 2008).** **DONE (2026-05-29):**
+  built as a canonical block (`lateral_mixing/eke.py` + `GMRediConfig.eke`),
+  truth-tier verified (E1–E8), closure form + ACC params oracle-verified
+  vs Veros `K_gm` to machine precision (E9). Remaining: the `eke_len`
+  mixing-length variant (Rhines limiting) before recipe adoption — see
+  the strategy doc §8 EKE ledger.
 - **Veros gallery beyond ACC.** ``GlobalFourDegreeSetup``,
   ``global_1deg``, ``global_flexible``, ``north_atlantic``,
   ``wave_propagation``. Each is a new recipe builder analogous

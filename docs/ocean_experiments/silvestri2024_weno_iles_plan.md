@@ -434,7 +434,7 @@ Config dispatch: `tracer_advection = "weno5" | "weno7"`.
 
 #### 3a. Baroclinic Jet — Silvestri Configuration ✅ DONE
 
-Implemented in `scripts/run_silvestri_baroclinic_jet.py`. Matches paper setup:
+Implemented in `scripts/run/run_silvestri_baroclinic_jet.py`. Matches paper setup:
 60S-40S spherical sector, 1 km depth, N²=4e-6, tanh front, thermal-wind IC,
 sponge restoring, 50 vertical levels. Supports `centered`, `leith`, `weno5`,
 `weno5_leith` schemes. Validated at 40x40 for 100 days (centered vs weno5).

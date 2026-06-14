@@ -18,7 +18,7 @@ from legoesm.atmosphere.physics.microphysics.config import (
     SeifertBehengConfig,
     MorrisonConfig,
     ThompsonConfig,
-    MLEmulatorConfig,
+    MicrophysicsMLEmulatorConfig,
 )
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -377,7 +377,7 @@ class TestSundqvist:
         dz = jnp.full((ncol, nlev), 500.0)
         h = make_zero_hydrometeors(ncol, nlev)
         # Use very high sharpness to make the sigmoid effectively a step
-        config = SundqvistConfig(RH_crit=0.8, sigmoid_sharpness=200.0)
+        config = SundqvistConfig(rh_crit=0.8, sigmoid_sharpness=200.0)
         out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0, config=config)
         # Condensation should be much smaller than saturated case
         out_sat = sundqvist_microphysics(T, q_sat, h, p_full, p_half, rho, dz, dt=10.0, config=config)
@@ -816,7 +816,7 @@ class TestMLEmulator:
 
     def _make_model(self, config=None):
         if config is None:
-            config = MLEmulatorConfig()
+            config = MicrophysicsMLEmulatorConfig()
         key = jax.random.PRNGKey(config.seed)
         return MicrophysicsEmulator(
             config.n_input, config.n_hidden, config.n_layers,
@@ -825,7 +825,7 @@ class TestMLEmulator:
 
     def test_output_shapes(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        config = MLEmulatorConfig()
+        config = MicrophysicsMLEmulatorConfig()
         model = self._make_model(config)
         out = ml_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
                               config=config, model=model)
@@ -834,7 +834,7 @@ class TestMLEmulator:
 
     def test_precipitation_non_negative(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        config = MLEmulatorConfig()
+        config = MicrophysicsMLEmulatorConfig()
         model = self._make_model(config)
         out = ml_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
                               config=config, model=model)
@@ -842,7 +842,7 @@ class TestMLEmulator:
 
     def test_nonzero_tendencies(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        config = MLEmulatorConfig()
+        config = MicrophysicsMLEmulatorConfig()
         model = self._make_model(config)
         out = ml_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
                               config=config, model=model)
@@ -851,7 +851,7 @@ class TestMLEmulator:
 
     def test_finite_outputs(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        config = MLEmulatorConfig()
+        config = MicrophysicsMLEmulatorConfig()
         model = self._make_model(config)
         out = ml_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
                               config=config, model=model)
@@ -862,7 +862,7 @@ class TestMLEmulator:
 
     def test_differentiable(self):
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        config = MLEmulatorConfig()
+        config = MicrophysicsMLEmulatorConfig()
         model = self._make_model(config)
 
         def loss(T_in):
@@ -908,6 +908,33 @@ class TestIntegrationHydrostatic:
     def test_grad_through_hydrostatic(self, setup):
         state, grid, sigma = setup
         config = MicrophysicsConfig(scheme="kessler")
+        physics_fn = make_microphysics_physics(config, "hydrostatic", dt=300.0)
+
+        def loss(T_data):
+            s = state._replace(T=state.T.replace(data=T_data))
+            tend = physics_fn(s, grid, sigma)
+            return jnp.sum(tend.dT_dt.data ** 2)
+
+        grad = jax.grad(loss)(state.T.data)
+        assert jnp.all(jnp.isfinite(grad))
+
+    def test_fast_sbm_through_production_pipeline(self, setup):
+        # The bin scheme must run end-to-end through the REAL hydrostatic
+        # microphysics factory (not just _get_microphysics_fn): physical
+        # shapes, finite tendencies, nonnegative precip.
+        state, grid, sigma = setup
+        config = MicrophysicsConfig(scheme="fast_sbm")
+        physics_fn = make_microphysics_physics(config, "hydrostatic", dt=300.0)
+        tend = physics_fn(state, grid, sigma)
+        assert tend.dT_dt.data.shape == state.T.data.shape
+        assert jnp.all(jnp.isfinite(tend.dT_dt.data))
+        # Moisture tendencies flow via the tracer-tendency dict.
+        assert tend.tracer_tendencies is not None
+        assert jnp.all(jnp.isfinite(tend.tracer_tendencies["q_v"].data))
+
+    def test_fast_sbm_grad_through_hydrostatic(self, setup):
+        state, grid, sigma = setup
+        config = MicrophysicsConfig(scheme="fast_sbm")
         physics_fn = make_microphysics_physics(config, "hydrostatic", dt=300.0)
 
         def loss(T_data):

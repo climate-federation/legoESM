@@ -439,10 +439,10 @@ class TestCDGridOperators(unittest.TestCase):
 
     def test_gradient_constant_field(self):
         """Gradient of constant field should be zero."""
-        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        from legoesm.core.operators_cdgrid import arakawa_lamb_gradient
         n = self.n
         B = jnp.ones((6, n, n)) * 42.0
-        dB_dx, dB_dy = _arakawa_lamb_gradient(B, self.cdgrid)
+        dB_dx, dB_dy = arakawa_lamb_gradient(B, self.cdgrid)
         self.assertLess(float(jnp.max(jnp.abs(dB_dx))), 1e-6)
         self.assertLess(float(jnp.max(jnp.abs(dB_dy))), 1e-6)
 
@@ -875,10 +875,10 @@ class TestCDGrid3DOperators(unittest.TestCase):
         self.assertEqual(div.shape, (6, n, n, nlev))
 
     def test_gradient_3d_constant(self):
-        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        from legoesm.core.operators_cdgrid import arakawa_lamb_gradient
         n, nlev = self.n, self.nlev
         B = jnp.ones((6, n, n, nlev)) * 100.0
-        dB_dx, dB_dy = _arakawa_lamb_gradient(B, self.cdgrid)
+        dB_dx, dB_dy = arakawa_lamb_gradient(B, self.cdgrid)
         self.assertEqual(dB_dx.shape, (6, n + 1, n + 1, nlev))
         self.assertLess(float(jnp.max(jnp.abs(dB_dx))), 1e-5)
         self.assertLess(float(jnp.max(jnp.abs(dB_dy))), 1e-5)
@@ -895,7 +895,7 @@ class TestCDGrid3DOperators(unittest.TestCase):
 
 
 class TestInterpCornerToCenter(unittest.TestCase):
-    """Iter-544: regression lock for `_interp_corner_to_center`.
+    """Iter-544: regression lock for `interp_corner_to_center`.
 
     This helper (src/legoesm/core/operators_cdgrid.py:895-910) is
     load-bearing in the production A-L path: it is the final step that
@@ -932,22 +932,22 @@ class TestInterpCornerToCenter(unittest.TestCase):
 
     def test_shape_2d_and_3d(self):
         from legoesm.core.operators_cdgrid import (
-            _interp_corner_to_center)
+            interp_corner_to_center)
         n, _ = self._build()
         nlev = 5
         field_2d = jnp.zeros((6, n + 1, n + 1))
         field_3d = jnp.zeros((6, n + 1, n + 1, nlev))
         self.assertEqual(
-            _interp_corner_to_center(field_2d).shape, (6, n, n))
+            interp_corner_to_center(field_2d).shape, (6, n, n))
         self.assertEqual(
-            _interp_corner_to_center(field_3d).shape, (6, n, n, nlev))
+            interp_corner_to_center(field_3d).shape, (6, n, n, nlev))
 
     def test_constant_preservation(self):
         from legoesm.core.operators_cdgrid import (
-            _interp_corner_to_center)
+            interp_corner_to_center)
         n, _ = self._build()
         field = jnp.ones((6, n + 1, n + 1)) * 7.5
-        out = _interp_corner_to_center(field)
+        out = interp_corner_to_center(field)
         self.assertTrue(jnp.all(out == 7.5),
                         msg="Constant input must be preserved exactly.")
 
@@ -957,7 +957,7 @@ class TestInterpCornerToCenter(unittest.TestCase):
         """
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _interp_corner_to_center)
+            interp_corner_to_center)
         n, _ = self._build()
         # Build a field where each corner has a unique value so the
         # exact averaging formula is unambiguous.
@@ -965,7 +965,7 @@ class TestInterpCornerToCenter(unittest.TestCase):
         field_np = rng.standard_normal((6, n + 1, n + 1)).astype(
             np.float64)
         field = jnp.asarray(field_np)
-        out = np.asarray(_interp_corner_to_center(field),
+        out = np.asarray(interp_corner_to_center(field),
                          dtype=np.float64)
         expected = 0.25 * (
             field_np[:, :-1, :-1]      # SW corner
@@ -976,7 +976,7 @@ class TestInterpCornerToCenter(unittest.TestCase):
         max_diff = float(np.max(np.abs(out - expected)))
         self.assertLess(
             max_diff, 1e-10,
-            msg=(f"`_interp_corner_to_center` deviates from "
+            msg=(f"`interp_corner_to_center` deviates from "
                  f"`0.25*(SW+SE+NW+NE)` by {max_diff:.3e}.  If the "
                  f"implementation changed to an area-weighted or "
                  f"non-uniform average, UPDATE this test with the "
@@ -990,7 +990,7 @@ class TestInterpCornerToCenter(unittest.TestCase):
         cross-level mixing."""
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _interp_corner_to_center)
+            interp_corner_to_center)
         n, _ = self._build()
         nlev = 4
         rng = np.random.default_rng(1544)
@@ -1000,7 +1000,7 @@ class TestInterpCornerToCenter(unittest.TestCase):
             + np.zeros((6, n + 1, n + 1, nlev))
         )
         field_3d = jnp.asarray(per_level)
-        out = np.asarray(_interp_corner_to_center(field_3d))
+        out = np.asarray(interp_corner_to_center(field_3d))
         # Constant-per-level input must yield constant output matching
         # the level value (no cross-level averaging).
         for k in range(nlev):
@@ -1030,7 +1030,7 @@ class TestInterpCornerToCenter(unittest.TestCase):
         """
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _interp_corner_to_center)
+            interp_corner_to_center)
         n, _ = self._build()
         nlev = 3
         rng = np.random.default_rng(2544)
@@ -1049,7 +1049,7 @@ class TestInterpCornerToCenter(unittest.TestCase):
             msg="Test must exercise the ndim==4 branch.")
 
         out = np.asarray(
-            _interp_corner_to_center(field_4d), dtype=np.float64)
+            interp_corner_to_center(field_4d), dtype=np.float64)
         self.assertEqual(
             out.shape, (6, n, n, nlev),
             msg="4D output shape must collapse (n+1, n+1) -> (n, n).")
@@ -1063,7 +1063,7 @@ class TestInterpCornerToCenter(unittest.TestCase):
         max_diff = float(np.max(np.abs(out - expected)))
         self.assertLess(
             max_diff, 1e-10,
-            msg=(f"4D `_interp_corner_to_center` deviates from "
+            msg=(f"4D `interp_corner_to_center` deviates from "
                  f"per-level `0.25*(SW+SE+NW+NE)` by {max_diff:.3e}. "
                  f"The production SW-with-vertical paths assume "
                  f"plain arithmetic per-level averaging on 4D fields. "
@@ -1073,12 +1073,12 @@ class TestInterpCornerToCenter(unittest.TestCase):
 
         # Also verify that the 4D output at any single level matches
         # what we would get by pulling that level out to a 3D field
-        # and running `_interp_corner_to_center` on the 3D branch.
+        # and running `interp_corner_to_center` on the 3D branch.
         # Catches silent divergence between the two branches.
         for k in range(nlev):
             level_3d = field_4d[..., k]              # (6, n+1, n+1)
             out_3d = np.asarray(
-                _interp_corner_to_center(level_3d),
+                interp_corner_to_center(level_3d),
                 dtype=np.float64)
             max_diff_branch = float(
                 np.max(np.abs(out[..., k] - out_3d)))
@@ -1095,11 +1095,11 @@ class TestInterpCornerToCenter(unittest.TestCase):
         API surface has no hidden area weighting."""
         import inspect
         from legoesm.core.operators_cdgrid import (
-            _interp_corner_to_center)
-        sig = inspect.signature(_interp_corner_to_center)
+            interp_corner_to_center)
+        sig = inspect.signature(interp_corner_to_center)
         self.assertEqual(
             list(sig.parameters), ["field_d"],
-            msg=(f"`_interp_corner_to_center` signature = "
+            msg=(f"`interp_corner_to_center` signature = "
                  f"{list(sig.parameters)}.  If an area-weighted "
                  f"variant is introduced, it should live under a new "
                  f"name (e.g. `_interp_corner_to_center_weighted`) "
@@ -1359,10 +1359,10 @@ class TestCgridDivergenceBehavior(unittest.TestCase):
     `return jnp.zeros_like(u_c[..., :, :n])` would pass.
 
     Production-critical: used by `fv3_sw_tendencies` for
-    divergence damping and `_arakawa_lamb_gradient`-derived
+    divergence damping and `arakawa_lamb_gradient`-derived
     divergence diagnostics.
 
-    Locks (mirroring iter-572/573 for `_arakawa_lamb_gradient`):
+    Locks (mirroring iter-572/573 for `arakawa_lamb_gradient`):
       (a) 2D shape: u_c (6, n+1, n), v_c (6, n, n+1) →
           div (6, n, n)
       (b) 3D shape with nlev
@@ -1570,7 +1570,7 @@ class TestCgridDivergenceBehavior(unittest.TestCase):
 
 
 class TestArakawaLambGradient(unittest.TestCase):
-    """Iter-572: regression lock for `_arakawa_lamb_gradient`
+    """Iter-572: regression lock for `arakawa_lamb_gradient`
     (`src/legoesm/core/operators_cdgrid.py:811-861`).
 
     Production-critical helper used in `fv3_sw_tendencies` step (d)
@@ -1599,19 +1599,19 @@ class TestArakawaLambGradient(unittest.TestCase):
         return n, cdgrid
 
     def test_shape_2d(self):
-        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        from legoesm.core.operators_cdgrid import arakawa_lamb_gradient
         n, cdgrid = self._build(n=6)
         B = jnp.zeros((6, n, n))
-        dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)
+        dB_dx, dB_dy = arakawa_lamb_gradient(B, cdgrid)
         self.assertEqual(dB_dx.shape, (6, n + 1, n + 1))
         self.assertEqual(dB_dy.shape, (6, n + 1, n + 1))
 
     def test_shape_3d(self):
-        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        from legoesm.core.operators_cdgrid import arakawa_lamb_gradient
         n, cdgrid = self._build(n=6)
         nlev = 4
         B = jnp.zeros((6, n, n, nlev))
-        dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)
+        dB_dx, dB_dy = arakawa_lamb_gradient(B, cdgrid)
         self.assertEqual(dB_dx.shape, (6, n + 1, n + 1, nlev))
         self.assertEqual(dB_dy.shape, (6, n + 1, n + 1, nlev))
 
@@ -1620,13 +1620,13 @@ class TestArakawaLambGradient(unittest.TestCase):
         gradient — rules out a `return zeros_like(B)` refactor
         that would pass only the constant-field test."""
         import numpy as np
-        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        from legoesm.core.operators_cdgrid import arakawa_lamb_gradient
         n, cdgrid = self._build(n=6)
         lat = np.asarray(cdgrid.base.lat, dtype=np.float64)
         lon = np.asarray(cdgrid.base.lon, dtype=np.float64)
         B_np = 100.0 + 50.0 * np.cos(2 * lon) * np.sin(lat)
         B = jnp.asarray(B_np)
-        dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)
+        dB_dx, dB_dy = arakawa_lamb_gradient(B, cdgrid)
         max_grad = max(
             float(jnp.max(jnp.abs(dB_dx))),
             float(jnp.max(jnp.abs(dB_dy))))
@@ -1641,17 +1641,17 @@ class TestArakawaLambGradient(unittest.TestCase):
                  f"assertion fires."))
 
     def test_anti_symmetry_negation(self):
-        """_arakawa_lamb_gradient(B) == -_arakawa_lamb_gradient(-B).
+        """arakawa_lamb_gradient(B) == -arakawa_lamb_gradient(-B).
         Catches sign bugs in the 4-point stencil."""
         import numpy as np
-        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        from legoesm.core.operators_cdgrid import arakawa_lamb_gradient
         n, cdgrid = self._build(n=6)
         rng = np.random.default_rng(572)
         B_np = rng.standard_normal((6, n, n)).astype(np.float64)
         B_pos = jnp.asarray(B_np)
         B_neg = jnp.asarray(-B_np)
-        dx_pos, dy_pos = _arakawa_lamb_gradient(B_pos, cdgrid)
-        dx_neg, dy_neg = _arakawa_lamb_gradient(B_neg, cdgrid)
+        dx_pos, dy_pos = arakawa_lamb_gradient(B_pos, cdgrid)
+        dx_neg, dy_neg = arakawa_lamb_gradient(B_neg, cdgrid)
         # Constant offset in B would break this if the function
         # had a bias, but with -B being exact negation, the output
         # should be exact negation.
@@ -1670,15 +1670,15 @@ class TestArakawaLambGradient(unittest.TestCase):
         """grad(α*B) == α*grad(B).  Catches a non-linear
         refactor (e.g., if a clip or max operation was added)."""
         import numpy as np
-        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        from legoesm.core.operators_cdgrid import arakawa_lamb_gradient
         n, cdgrid = self._build(n=6)
         rng = np.random.default_rng(1572)
         B_np = rng.standard_normal((6, n, n)).astype(np.float64)
         B = jnp.asarray(B_np)
         B_5x = jnp.asarray(5.0 * B_np)
 
-        dx_1, dy_1 = _arakawa_lamb_gradient(B, cdgrid)
-        dx_5, dy_5 = _arakawa_lamb_gradient(B_5x, cdgrid)
+        dx_1, dy_1 = arakawa_lamb_gradient(B, cdgrid)
+        dx_5, dy_5 = arakawa_lamb_gradient(B_5x, cdgrid)
 
         diff_x = float(jnp.max(jnp.abs(
             jnp.asarray(dx_5) - 5.0 * jnp.asarray(dx_1))))
@@ -1700,17 +1700,17 @@ class TestArakawaLambGradient(unittest.TestCase):
         internal-padding path."""
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _arakawa_lamb_gradient, _pad_halo_auto)
+            arakawa_lamb_gradient, pad_halo_auto)
         n, cdgrid = self._build(n=6)
         rng = np.random.default_rng(2572)
         B_np = rng.standard_normal((6, n, n)).astype(np.float64)
         B = jnp.asarray(B_np)
 
         # Path A: internal pad
-        dx_a, dy_a = _arakawa_lamb_gradient(B, cdgrid)
-        # Path B: pre-padded via _pad_halo_auto
-        B_pad = _pad_halo_auto(B, cdgrid)
-        dx_b, dy_b = _arakawa_lamb_gradient(
+        dx_a, dy_a = arakawa_lamb_gradient(B, cdgrid)
+        # Path B: pre-padded via pad_halo_auto
+        B_pad = pad_halo_auto(B, cdgrid)
+        dx_b, dy_b = arakawa_lamb_gradient(
             B, cdgrid, padded=B_pad)
 
         diff_x = float(jnp.max(jnp.abs(
@@ -1738,7 +1738,7 @@ class TestArakawaLambGradient(unittest.TestCase):
         gradient.
         """
         import numpy as np
-        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        from legoesm.core.operators_cdgrid import arakawa_lamb_gradient
         n, cdgrid = self._build(n=6)
         nlev = 3
         lat = np.asarray(cdgrid.base.lat, dtype=np.float64)
@@ -1749,7 +1749,7 @@ class TestArakawaLambGradient(unittest.TestCase):
             B_np[..., k] = 100.0 + 50.0 * (k + 1) * np.cos(
                 (2 + k) * lon) * np.sin(lat)
         B = jnp.asarray(B_np)
-        dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)
+        dB_dx, dB_dy = arakawa_lamb_gradient(B, cdgrid)
         self.assertEqual(dB_dx.shape, (6, n + 1, n + 1, nlev))
         for k in range(nlev):
             max_grad_k = max(
@@ -1767,7 +1767,7 @@ class TestArakawaLambGradient(unittest.TestCase):
         level-routing bugs in the 4D branch: permutations,
         broadcast-one-level-to-all, or wrong axis."""
         import numpy as np
-        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        from legoesm.core.operators_cdgrid import arakawa_lamb_gradient
         n, cdgrid = self._build(n=6)
         nlev = 3
         rng = np.random.default_rng(3572)
@@ -1779,13 +1779,13 @@ class TestArakawaLambGradient(unittest.TestCase):
             B_np[..., k] = 100.0 * (k + 1) + 50.0 * B_np[..., k]
         B = jnp.asarray(B_np)
 
-        dx_4d, dy_4d = _arakawa_lamb_gradient(B, cdgrid)
+        dx_4d, dy_4d = arakawa_lamb_gradient(B, cdgrid)
         dx_4d_np = np.asarray(dx_4d)
         dy_4d_np = np.asarray(dy_4d)
 
         for k in range(nlev):
             slc = jnp.asarray(B_np[..., k])
-            dx_2d, dy_2d = _arakawa_lamb_gradient(slc, cdgrid)
+            dx_2d, dy_2d = arakawa_lamb_gradient(slc, cdgrid)
             diff_x = float(jnp.max(jnp.abs(
                 jnp.asarray(dx_4d_np[..., k]) - dx_2d)))
             diff_y = float(jnp.max(jnp.abs(
@@ -1831,7 +1831,7 @@ class TestArakawaLambGradient(unittest.TestCase):
         """
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _arakawa_lamb_gradient, _pad_halo_auto)
+            arakawa_lamb_gradient, pad_halo_auto)
         n, cdgrid = self._build(n=6)
         rng = np.random.default_rng(6576)
         B_np = rng.standard_normal((6, n, n)).astype(np.float32)
@@ -1839,10 +1839,10 @@ class TestArakawaLambGradient(unittest.TestCase):
 
         # Use the SAME pre-padded field for both paths so halo
         # precision cancels out.
-        B_pad = _pad_halo_auto(B, cdgrid)
+        B_pad = pad_halo_auto(B, cdgrid)
         B_pad_np = np.asarray(B_pad).astype(np.float32)
 
-        dx_prod, dy_prod = _arakawa_lamb_gradient(
+        dx_prod, dy_prod = arakawa_lamb_gradient(
             B, cdgrid, padded=B_pad)
         dx_prod_np = np.asarray(dx_prod).astype(np.float32)
         dy_prod_np = np.asarray(dy_prod).astype(np.float32)
@@ -1878,15 +1878,15 @@ class TestArakawaLambGradient(unittest.TestCase):
     def test_3d_anti_symmetry_negation(self):
         """Iter-573: anti-symmetry on the 4D branch."""
         import numpy as np
-        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
+        from legoesm.core.operators_cdgrid import arakawa_lamb_gradient
         n, cdgrid = self._build(n=6)
         nlev = 3
         rng = np.random.default_rng(4572)
         B_np = rng.standard_normal((6, n, n, nlev)).astype(np.float64)
         B_pos = jnp.asarray(B_np)
         B_neg = jnp.asarray(-B_np)
-        dx_pos, dy_pos = _arakawa_lamb_gradient(B_pos, cdgrid)
-        dx_neg, dy_neg = _arakawa_lamb_gradient(B_neg, cdgrid)
+        dx_pos, dy_pos = arakawa_lamb_gradient(B_pos, cdgrid)
+        dx_neg, dy_neg = arakawa_lamb_gradient(B_neg, cdgrid)
         diff_x = float(jnp.max(jnp.abs(
             jnp.asarray(dx_pos) + jnp.asarray(dx_neg))))
         diff_y = float(jnp.max(jnp.abs(
@@ -1900,7 +1900,7 @@ class TestArakawaLambGradient(unittest.TestCase):
 
 
 class TestPadHaloAutoWrappers(unittest.TestCase):
-    """Iter-565: regression lock for `_pad_halo_auto` and
+    """Iter-565: regression lock for `pad_halo_auto` and
     `_pad_halo_auto_h2` (`src/legoesm/core/operators_cdgrid.py:
     39-72`).
 
@@ -1934,18 +1934,18 @@ class TestPadHaloAutoWrappers(unittest.TestCase):
         return n, cdgrid
 
     def test_h1_2d_shape(self):
-        from legoesm.core.operators_cdgrid import _pad_halo_auto
+        from legoesm.core.operators_cdgrid import pad_halo_auto
         n, cdgrid = self._build(n=6)
         f = jnp.zeros((6, n, n))
-        out = _pad_halo_auto(f, cdgrid)
+        out = pad_halo_auto(f, cdgrid)
         self.assertEqual(out.shape, (6, n + 2, n + 2))
 
     def test_h1_4d_shape(self):
-        from legoesm.core.operators_cdgrid import _pad_halo_auto
+        from legoesm.core.operators_cdgrid import pad_halo_auto
         n, cdgrid = self._build(n=6)
         nlev = 4
         f = jnp.zeros((6, n, n, nlev))
-        out = _pad_halo_auto(f, cdgrid)
+        out = pad_halo_auto(f, cdgrid)
         self.assertEqual(out.shape, (6, n + 2, n + 2, nlev))
 
     def test_h2_2d_shape(self):
@@ -1969,10 +1969,10 @@ class TestPadHaloAutoWrappers(unittest.TestCase):
         halo) — the halo interpolation is linear and preserves
         constants exactly."""
         from legoesm.core.operators_cdgrid import (
-            _pad_halo_auto, _pad_halo_auto_h2)
+            pad_halo_auto, _pad_halo_auto_h2)
         n, cdgrid = self._build(n=6)
         f = jnp.full((6, n, n), 7.5, dtype=jnp.float64)
-        out_h1 = _pad_halo_auto(f, cdgrid)
+        out_h1 = pad_halo_auto(f, cdgrid)
         out_h2 = _pad_halo_auto_h2(f, cdgrid)
         max_dev_h1 = float(jnp.max(jnp.abs(out_h1 - 7.5)))
         max_dev_h2 = float(jnp.max(jnp.abs(out_h2 - 7.5)))
@@ -1991,13 +1991,13 @@ class TestPadHaloAutoWrappers(unittest.TestCase):
         interior cells."""
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _pad_halo_auto, _pad_halo_auto_h2)
+            pad_halo_auto, _pad_halo_auto_h2)
         n, cdgrid = self._build(n=6)
         rng = np.random.default_rng(565)
         f_np = rng.standard_normal((6, n, n)).astype(np.float64)
         f = jnp.asarray(f_np)
 
-        out_h1 = np.asarray(_pad_halo_auto(f, cdgrid))
+        out_h1 = np.asarray(pad_halo_auto(f, cdgrid))
         # h1: interior at [:, 1:n+1, 1:n+1]
         diff_h1 = float(np.max(np.abs(out_h1[:, 1:n+1, 1:n+1] - f_np)))
         self.assertLess(
@@ -2018,7 +2018,7 @@ class TestPadHaloAutoWrappers(unittest.TestCase):
         to all, or transposes the level axis)."""
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _pad_halo_auto, _pad_halo_auto_h2)
+            pad_halo_auto, _pad_halo_auto_h2)
         n, cdgrid = self._build(n=6)
         nlev = 3
         rng = np.random.default_rng(1565)
@@ -2031,7 +2031,7 @@ class TestPadHaloAutoWrappers(unittest.TestCase):
         f = jnp.asarray(f_np)
 
         for wrapper, h in [
-            (_pad_halo_auto, 1),
+            (pad_halo_auto, 1),
             (_pad_halo_auto_h2, 2),
         ]:
             out_4d = np.asarray(wrapper(f, cdgrid))
@@ -2433,7 +2433,7 @@ class TestCgridTracerAdvectionFct(unittest.TestCase):
 
 
 class TestLaplacianDgrid(unittest.TestCase):
-    """Iter-560: regression lock for `_laplacian_dgrid`
+    """Iter-560: regression lock for `laplacian_dgrid`
     (`src/legoesm/core/operators_cdgrid.py:921-956`).
 
     Computes a Laplacian of a D-grid `(6, n+1, n+1[, nlev])` field
@@ -2469,10 +2469,10 @@ class TestLaplacianDgrid(unittest.TestCase):
         return n, cdgrid
 
     def test_constant_field_zero_laplacian_2d(self):
-        from legoesm.core.operators_cdgrid import _laplacian_dgrid
+        from legoesm.core.operators_cdgrid import laplacian_dgrid
         n, cdgrid = self._build(n=6)
         u_d = jnp.full((6, n + 1, n + 1), 3.14, dtype=jnp.float64)
-        out = _laplacian_dgrid(u_d, cdgrid)
+        out = laplacian_dgrid(u_d, cdgrid)
         max_abs = float(jnp.max(jnp.abs(out)))
         self.assertLess(
             max_abs, 1e-6,
@@ -2481,18 +2481,18 @@ class TestLaplacianDgrid(unittest.TestCase):
                  f"halo-interpolation precision."))
 
     def test_shape_2d_preserved(self):
-        from legoesm.core.operators_cdgrid import _laplacian_dgrid
+        from legoesm.core.operators_cdgrid import laplacian_dgrid
         n, cdgrid = self._build(n=6)
         u_d = jnp.zeros((6, n + 1, n + 1))
-        out = _laplacian_dgrid(u_d, cdgrid)
+        out = laplacian_dgrid(u_d, cdgrid)
         self.assertEqual(out.shape, (6, n + 1, n + 1))
 
     def test_shape_3d_preserved(self):
-        from legoesm.core.operators_cdgrid import _laplacian_dgrid
+        from legoesm.core.operators_cdgrid import laplacian_dgrid
         n, cdgrid = self._build(n=6)
         nlev = 5
         u_d = jnp.zeros((6, n + 1, n + 1, nlev))
-        out = _laplacian_dgrid(u_d, cdgrid)
+        out = laplacian_dgrid(u_d, cdgrid)
         self.assertEqual(out.shape, (6, n + 1, n + 1, nlev))
 
     def test_3d_constant_per_level_yields_zero_per_level(self):
@@ -2500,7 +2500,7 @@ class TestLaplacianDgrid(unittest.TestCase):
         between levels) must produce zero Laplacian on EVERY level —
         catches cross-level mixing in the vmap dispatch."""
         import numpy as np
-        from legoesm.core.operators_cdgrid import _laplacian_dgrid
+        from legoesm.core.operators_cdgrid import laplacian_dgrid
         n, cdgrid = self._build(n=6)
         nlev = 4
         # Level k = constant value (k + 1.0) everywhere
@@ -2508,7 +2508,7 @@ class TestLaplacianDgrid(unittest.TestCase):
         for k in range(nlev):
             u_d_np[..., k] = float(k + 1)
         u_d = jnp.asarray(u_d_np)
-        out = np.asarray(_laplacian_dgrid(u_d, cdgrid))
+        out = np.asarray(laplacian_dgrid(u_d, cdgrid))
         for k in range(nlev):
             level_max = float(np.max(np.abs(out[..., k])))
             self.assertLess(
@@ -2531,7 +2531,7 @@ class TestLaplacianDgrid(unittest.TestCase):
         compared to the per-level 2D path.
         """
         import numpy as np
-        from legoesm.core.operators_cdgrid import _laplacian_dgrid
+        from legoesm.core.operators_cdgrid import laplacian_dgrid
         n, cdgrid = self._build(n=6)
         nlev = 3
         rng = np.random.default_rng(560)
@@ -2542,12 +2542,12 @@ class TestLaplacianDgrid(unittest.TestCase):
         u_d = jnp.asarray(u_d_np)
 
         out_3d = np.asarray(
-            _laplacian_dgrid(u_d, cdgrid), dtype=np.float64)
+            laplacian_dgrid(u_d, cdgrid), dtype=np.float64)
 
         for k in range(nlev):
             level = jnp.asarray(u_d_np[..., k])
             out_2d = np.asarray(
-                _laplacian_dgrid(level, cdgrid), dtype=np.float64)
+                laplacian_dgrid(level, cdgrid), dtype=np.float64)
             scale_k = max(float(np.max(np.abs(out_2d))), 1e-30)
             diff = float(np.max(np.abs(out_3d[..., k] - out_2d)))
             # Tolerance 1e-4 * scale: absorbs float32 vmap/grid
@@ -2562,7 +2562,7 @@ class TestLaplacianDgrid(unittest.TestCase):
 
 
 class TestExtrapolateBoundaryCorners(unittest.TestCase):
-    """Iter-558: regression lock for `_extrapolate_boundary_corners`
+    """Iter-558: regression lock for `extrapolate_boundary_corners`
     (`src/legoesm/core/operators_cdgrid.py:963-1006`).
 
     Applies bilinear extrapolation to the 4 cube-vertex corners of
@@ -2590,11 +2590,11 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
 
     def test_shape_preserved_2d(self):
         from legoesm.core.operators_cdgrid import (
-            _extrapolate_boundary_corners)
+            extrapolate_boundary_corners)
         n = self._build_n()
         du = jnp.zeros((6, n + 1, n + 1))
         dv = jnp.zeros((6, n + 1, n + 1))
-        du_out, dv_out = _extrapolate_boundary_corners(du, dv, n)
+        du_out, dv_out = extrapolate_boundary_corners(du, dv, n)
         self.assertEqual(du_out.shape, (6, n + 1, n + 1))
         self.assertEqual(dv_out.shape, (6, n + 1, n + 1))
 
@@ -2610,7 +2610,7 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
         coefficients."""
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _extrapolate_boundary_corners)
+            extrapolate_boundary_corners)
         n = self._build_n()
         rng = np.random.default_rng(558)
         i_idx, j_idx = np.meshgrid(
@@ -2634,7 +2634,7 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
             for cj in (0, n)
         }
 
-        du_out, dv_out = _extrapolate_boundary_corners(du, dv, n)
+        du_out, dv_out = extrapolate_boundary_corners(du, dv, n)
 
         for f in range(6):
             for ci in (0, n):
@@ -2658,7 +2658,7 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
         to the 3 source cells."""
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _extrapolate_boundary_corners)
+            extrapolate_boundary_corners)
         n = self._build_n()
         rng = np.random.default_rng(1558)
         du_np = rng.standard_normal((6, n + 1, n + 1)).astype(
@@ -2669,7 +2669,7 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
         dv = jnp.asarray(dv_np)
 
         du_out_np = np.asarray(
-            _extrapolate_boundary_corners(du, dv, n)[0],
+            extrapolate_boundary_corners(du, dv, n)[0],
             dtype=np.float64)
 
         # Check (0, 0): output[0, 0] == in[1, 0] + in[0, 1] - in[1, 1]
@@ -2705,7 +2705,7 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
         `dv` outputs."""
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _extrapolate_boundary_corners)
+            extrapolate_boundary_corners)
         n = self._build_n()
         rng = np.random.default_rng(2558)
         du_np = rng.standard_normal((6, n + 1, n + 1))
@@ -2713,7 +2713,7 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
         du = jnp.asarray(du_np)
         dv = jnp.asarray(dv_np)
 
-        du_out, dv_out = _extrapolate_boundary_corners(du, dv, n)
+        du_out, dv_out = extrapolate_boundary_corners(du, dv, n)
         du_out_np = np.asarray(du_out)
         dv_out_np = np.asarray(dv_out)
 
@@ -2742,7 +2742,7 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
         """
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _extrapolate_boundary_corners)
+            extrapolate_boundary_corners)
         n = self._build_n()
         rng = np.random.default_rng(3559)
         du_np = rng.standard_normal((6, n + 1, n + 1))
@@ -2752,7 +2752,7 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
         dv = jnp.asarray(dv_np)
 
         dv_out_np = np.asarray(
-            _extrapolate_boundary_corners(du, dv, n)[1],
+            extrapolate_boundary_corners(du, dv, n)[1],
             dtype=np.float64)
 
         specs = [
@@ -2784,7 +2784,7 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
         and that each level is handled independently."""
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _extrapolate_boundary_corners)
+            extrapolate_boundary_corners)
         n = self._build_n()
         nlev = 5
         rng = np.random.default_rng(4559)
@@ -2793,7 +2793,7 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
         du = jnp.asarray(du_np)
         dv = jnp.asarray(dv_np)
 
-        du_out, dv_out = _extrapolate_boundary_corners(du, dv, n)
+        du_out, dv_out = extrapolate_boundary_corners(du, dv, n)
         self.assertEqual(
             du_out.shape, (6, n + 1, n + 1, nlev),
             msg="4D du output shape does not preserve nlev axis.")
@@ -2807,7 +2807,7 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
         Checks BOTH du and dv on random 4D input."""
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _extrapolate_boundary_corners)
+            extrapolate_boundary_corners)
         n = self._build_n()
         nlev = 3
         rng = np.random.default_rng(5559)
@@ -2819,10 +2819,10 @@ class TestExtrapolateBoundaryCorners(unittest.TestCase):
         dv = jnp.asarray(dv_np)
 
         du_out_np = np.asarray(
-            _extrapolate_boundary_corners(du, dv, n)[0],
+            extrapolate_boundary_corners(du, dv, n)[0],
             dtype=np.float64)
         dv_out_np = np.asarray(
-            _extrapolate_boundary_corners(du, dv, n)[1],
+            extrapolate_boundary_corners(du, dv, n)[1],
             dtype=np.float64)
 
         specs = [
@@ -2870,7 +2870,7 @@ class TestBroadcastMetric(unittest.TestCase):
     Utility that inserts a trailing singleton axis on a 2D metric when
     the consumer field has a higher ndim (typically adding ``nlev``).
     Used on every 3D-compatible code path: `dgrid_vorticity`,
-    `_arakawa_lamb_gradient`, `cgrid_mass_flux_divergence`, etc.
+    `arakawa_lamb_gradient`, `cgrid_mass_flux_divergence`, etc.
     A silent refactor that inserted the axis at the WRONG position
     (e.g. `metric[None, ...]` instead of `metric[..., None]`) would
     produce broadcast errors or silently wrong element-wise products.
@@ -2956,10 +2956,10 @@ class TestBroadcastMetric(unittest.TestCase):
 
 
 class TestInterpCenterToCorner(unittest.TestCase):
-    """Iter-548: regression lock for `_interp_center_to_corner`
+    """Iter-548: regression lock for `interp_center_to_corner`
     (`src/legoesm/core/operators_cdgrid.py:868-892`).
 
-    The dual of `_interp_corner_to_center` (iter-544/545 lock):
+    The dual of `interp_corner_to_center` (iter-544/545 lock):
     averages a cell-centre field `(6, n, n[, nlev])` to D-grid corners
     `(6, n+1, n+1[, nlev])` via a 4-point average of the halo-padded
     field.  The helper supports an optional `padded=` argument for
@@ -2967,7 +2967,7 @@ class TestInterpCenterToCorner(unittest.TestCase):
     halo exchange) and the `padded=...` (bypass) paths need locks.
 
     Before iter-548 the function had NO direct tests.  Production
-    callers (e.g., `_d_sw5_corner_divergence` at fv3_sw_core.py:1024
+    callers (e.g., `d_sw5_corner_divergence` at fv3_sw_core.py:1024
     for the Smagorinsky vorticity-to-corner interpolation) rely on
     this helper's exact averaging formula.  A silent refactor to
     weighted/skewed averaging would propagate into the damping term
@@ -2995,13 +2995,13 @@ class TestInterpCenterToCorner(unittest.TestCase):
 
     def test_shape_2d_and_3d_with_internal_pad(self):
         from legoesm.core.operators_cdgrid import (
-            _interp_center_to_corner)
+            interp_center_to_corner)
         n, cdgrid = self._build(n=6)
         nlev = 5
         field_2d = jnp.zeros((6, n, n))
         field_3d = jnp.zeros((6, n, n, nlev))
-        out_2d = _interp_center_to_corner(field_2d, cdgrid)
-        out_3d = _interp_center_to_corner(field_3d, cdgrid)
+        out_2d = interp_center_to_corner(field_2d, cdgrid)
+        out_3d = interp_center_to_corner(field_3d, cdgrid)
         self.assertEqual(out_2d.shape, (6, n + 1, n + 1))
         self.assertEqual(out_3d.shape, (6, n + 1, n + 1, nlev))
 
@@ -3009,10 +3009,10 @@ class TestInterpCenterToCorner(unittest.TestCase):
         """Constant input must round-trip through halo + averaging to
         a constant output at every corner (no phase artifacts)."""
         from legoesm.core.operators_cdgrid import (
-            _interp_center_to_corner)
+            interp_center_to_corner)
         n, cdgrid = self._build(n=6)
         field = jnp.full((6, n, n), 3.75, dtype=jnp.float64)
-        out = _interp_center_to_corner(field, cdgrid)
+        out = interp_center_to_corner(field, cdgrid)
         max_dev = float(jnp.max(jnp.abs(out - 3.75)))
         # Allow small drift from duogrid halo interpolation; should be
         # exact for constant fields since the interpolation is linear.
@@ -3030,7 +3030,7 @@ class TestInterpCenterToCorner(unittest.TestCase):
         and asserting output = `0.25*(SW+SE+NW+NE)` from `padded`."""
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _interp_center_to_corner)
+            interp_center_to_corner)
         n, cdgrid = self._build(n=6)
         rng = np.random.default_rng(548)
         # Caller-supplied pad shape (6, n+2, n+2) with random unique
@@ -3043,7 +3043,7 @@ class TestInterpCenterToCorner(unittest.TestCase):
         field_dummy = jnp.zeros((6, n, n))
 
         out = np.asarray(
-            _interp_center_to_corner(
+            interp_center_to_corner(
                 field_dummy, cdgrid, padded=padded),
             dtype=np.float64)
         expected = 0.25 * (
@@ -3055,7 +3055,7 @@ class TestInterpCenterToCorner(unittest.TestCase):
         max_diff = float(np.max(np.abs(out - expected)))
         self.assertLess(
             max_diff, 1e-10,
-            msg=(f"`_interp_center_to_corner(field, cdgrid, "
+            msg=(f"`interp_center_to_corner(field, cdgrid, "
                  f"padded=...)` does not take the 4-point average "
                  f"directly from the provided `padded` array; max "
                  f"diff = {max_diff:.3e}.  Either a halo exchange is "
@@ -3069,7 +3069,7 @@ class TestInterpCenterToCorner(unittest.TestCase):
         per-level 4-point average."""
         import numpy as np
         from legoesm.core.operators_cdgrid import (
-            _interp_center_to_corner)
+            interp_center_to_corner)
         n, cdgrid = self._build(n=6)
         nlev = 3
         rng = np.random.default_rng(1548)
@@ -3082,7 +3082,7 @@ class TestInterpCenterToCorner(unittest.TestCase):
                          msg="Test must exercise ndim==4 branch.")
 
         out = np.asarray(
-            _interp_center_to_corner(
+            interp_center_to_corner(
                 field_dummy, cdgrid, padded=padded),
             dtype=np.float64)
         self.assertEqual(out.shape, (6, n + 1, n + 1, nlev))
@@ -3096,10 +3096,10 @@ class TestInterpCenterToCorner(unittest.TestCase):
         max_diff = float(np.max(np.abs(out - expected)))
         self.assertLess(
             max_diff, 1e-10,
-            msg=(f"4D branch of `_interp_center_to_corner(padded=)` "
+            msg=(f"4D branch of `interp_center_to_corner(padded=)` "
                  f"deviates from per-level `0.25*(SW+SE+NW+NE)` by "
                  f"{max_diff:.3e}.  Production caller "
-                 f"`_d_sw5_corner_divergence` assumes this formula."))
+                 f"`d_sw5_corner_divergence` assumes this formula."))
 
     def test_padded_argument_changes_output(self):
         """Sanity: `padded=` actually controls the output.  Supplying
@@ -3107,11 +3107,11 @@ class TestInterpCenterToCorner(unittest.TestCase):
         all-zero output even though the `field` argument has
         non-zero content."""
         from legoesm.core.operators_cdgrid import (
-            _interp_center_to_corner)
+            interp_center_to_corner)
         n, cdgrid = self._build(n=6)
         field = jnp.ones((6, n, n)) * 100.0   # non-trivial field
         zero_pad = jnp.zeros((6, n + 2, n + 2))
-        out = _interp_center_to_corner(field, cdgrid, padded=zero_pad)
+        out = interp_center_to_corner(field, cdgrid, padded=zero_pad)
         # With all-zero pad, the 0.25*(...) average must be zero.
         max_abs = float(jnp.max(jnp.abs(out)))
         self.assertEqual(
@@ -3159,10 +3159,9 @@ class TestDgridToCgridAsymmetryIsIntentional(unittest.TestCase):
         return funcs[0]
 
     def _read_operators_cdgrid(self):
-        import pathlib
-        root = pathlib.Path(__file__).resolve().parent.parent.parent
-        return (root / "src/legoesm/grids/__init__.py").exists() and (
-            root / "src/legoesm/core/operators_cdgrid.py").read_text()
+        from tests.legoesm_paths import legoesm_source_path
+        return legoesm_source_path("grids/__init__.py").exists() and (
+            legoesm_source_path("core/operators_cdgrid.py").read_text())
 
     def test_dgrid_to_cgrid_u_has_correction_v_does_not(self):
         """`dgrid_to_cgrid`: `u_c =` line must contain BOTH `sina_u`
@@ -3418,6 +3417,126 @@ class TestCellCentreAnglesFrom4Edge(unittest.TestCase):
         ca, sa = cell_centre_angles_from_4edge(cdgrid)
         self.assertEqual(ca.shape, (6, n, n))
         self.assertEqual(sa.shape, (6, n, n))
+
+
+class TestCgridCornerMin(unittest.TestCase):
+    """`cgrid_corner_min`: 4-cell MIN at D-grid corners (Adcroft PGF z_ref)."""
+
+    def _grids(self, n=8):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        grid = create_cubed_sphere(n)
+        return grid, create_cubed_sphere_cdgrid(grid)
+
+    def test_shape_2d_and_3d(self):
+        import numpy as np
+        from legoesm.core.operators_cdgrid import cgrid_corner_min
+        n = 8
+        _grid, cdgrid = self._grids(n)
+        f2 = jnp.asarray(np.random.RandomState(0).rand(6, n, n))
+        c2 = cgrid_corner_min(f2, cdgrid)
+        self.assertEqual(c2.shape, (6, n + 1, n + 1))
+        f3 = jnp.asarray(np.random.RandomState(1).rand(6, n, n, 5))
+        c3 = cgrid_corner_min(f3, cdgrid)
+        self.assertEqual(c3.shape, (6, n + 1, n + 1, 5))
+
+    def test_constant_field_is_preserved(self):
+        """MIN of a uniform field is that constant everywhere."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import cgrid_corner_min
+        n = 8
+        _grid, cdgrid = self._grids(n)
+        f = jnp.full((6, n, n), 3.5)
+        c = cgrid_corner_min(f, cdgrid)
+        np.testing.assert_allclose(np.asarray(c), 3.5, atol=1e-12)
+
+    def test_min_le_avg_and_interior_equals_4cell_min(self):
+        """corner_min <= corner_avg everywhere; each INTERIOR corner equals the
+        min of its 4 surrounding owned cells (halo-independent check)."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            cgrid_corner_min, interp_center_to_corner,
+        )
+        n = 8
+        _grid, cdgrid = self._grids(n)
+        f = jnp.asarray(np.random.RandomState(2).rand(6, n, n))
+        cmin = np.asarray(cgrid_corner_min(f, cdgrid))
+        cavg = np.asarray(interp_center_to_corner(f, cdgrid))
+        self.assertTrue(np.all(cmin <= cavg + 1e-12))
+        fa = np.asarray(f)
+        for face in range(6):
+            for i in range(n - 1):
+                for j in range(n - 1):
+                    expected = min(
+                        fa[face, i, j], fa[face, i + 1, j],
+                        fa[face, i, j + 1], fa[face, i + 1, j + 1],
+                    )
+                    self.assertAlmostEqual(
+                        float(cmin[face, i + 1, j + 1]), float(expected),
+                        places=6,
+                    )
+
+    def test_adcroft_decomposition_identity_all_corners(self):
+        """Core correctness of the cd-grid Adcroft PGF correction: the
+        linear-operator decomposition
+
+            raw(p_eff) == −raw(g·rho·centroid) + z_ref · raw(g·rho)
+
+        must hold at EVERY D-grid corner (interior + cube seams + vertices),
+        where p_eff = −g·rho·(centroid − z_ref), z_ref = 4-cell corner min, and
+        ``raw`` is the AL 4-cell finite difference on identically halo-padded
+        cells.  This is the identity ``ocean_pe_cdgrid`` relies on to add the
+        correction via two ``arakawa_lamb_gradient`` calls + ``cgrid_corner_min``
+        instead of building a per-corner p_eff field."""
+        import numpy as np
+        from legoesm.core.operators_cdgrid import (
+            cgrid_corner_min, pad_halo_auto,
+        )
+        n = 8
+        _grid, cdgrid = self._grids(n)
+        rng = np.random.RandomState(7)
+        grho = jnp.asarray(rng.rand(6, n, n))            # g*rho'
+        cent = jnp.asarray(rng.rand(6, n, n) * 4000.0)   # centroid depth
+        zref = cgrid_corner_min(cent, cdgrid)            # (6, n+1, n+1)
+
+        gp = np.asarray(pad_halo_auto(grho, cdgrid))     # (6, n+2, n+2)
+        cp = np.asarray(pad_halo_auto(cent, cdgrid))
+        gcp = np.asarray(pad_halo_auto(grho * cent, cdgrid))
+        zr = np.asarray(zref)
+
+        def raw(p):  # AL default-branch raw x/y differences on padded p
+            sw = p[:, :-1, :-1]; se = p[:, 1:, :-1]
+            nw = p[:, :-1, 1:];  ne = p[:, 1:, 1:]
+            return (se + ne) - (sw + nw), (nw + ne) - (sw + se)
+
+        # p_eff per padded cell uses the corner-common z_ref; build it per corner
+        # by broadcasting z_ref over the 4 cells of each corner.
+        sw_c = cp[:, :-1, :-1]; se_c = cp[:, 1:, :-1]
+        nw_c = cp[:, :-1, 1:];  ne_c = cp[:, 1:, 1:]
+        sw_g = gp[:, :-1, :-1]; se_g = gp[:, 1:, :-1]
+        nw_g = gp[:, :-1, 1:];  ne_g = gp[:, 1:, 1:]
+        peff_sw = -sw_g * (sw_c - zr); peff_se = -se_g * (se_c - zr)
+        peff_nw = -nw_g * (nw_c - zr); peff_ne = -ne_g * (ne_c - zr)
+        raw_x_peff = (peff_se + peff_ne) - (peff_sw + peff_nw)
+        raw_y_peff = (peff_nw + peff_ne) - (peff_sw + peff_se)
+
+        rgc_x, rgc_y = raw(gcp)   # raw(g*rho*centroid)
+        rg_x, rg_y = raw(gp)      # raw(g*rho)
+        decomp_x = -rgc_x + zr * rg_x
+        decomp_y = -rgc_y + zr * rg_y
+
+        # The identity is EXACT at interior corners (all 4 cells owned, so the
+        # padded product pad(g)*pad(c) used in raw_x_peff equals pad(g*c) used
+        # in the decomposition).  At seam/cube-vertex corners the two halo-fill
+        # orders [pad(g·c) vs pad(g)·pad(c)] differ by O(halo-interp-error) —
+        # the SAME interpolation the base AL gradient already incurs at seams,
+        # not a new error — so the strict identity is asserted on the interior
+        # corner block (indices 1..n-1 of the (n+1,n+1) corner grid).
+        sl = (slice(None), slice(1, n), slice(1, n))
+        np.testing.assert_allclose(
+            raw_x_peff[sl], decomp_x[sl], rtol=1e-11, atol=1e-9)
+        np.testing.assert_allclose(
+            raw_y_peff[sl], decomp_y[sl], rtol=1e-11, atol=1e-9)
 
 
 if __name__ == "__main__":

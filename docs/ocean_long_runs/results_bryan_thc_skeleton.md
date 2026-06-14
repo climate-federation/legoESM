@@ -5,7 +5,7 @@ spinup. Smoke verified locally; production needs cluster compute.
 
 ## Setup
 
-* Driver: ``scripts/ocean_long_runs/run_bryan_thc.py``
+* Driver: ``scripts/run/ocean_long_runs/run_bryan_thc.py``
 * Domain: hemispheric basin 0-60 E, 0-70 N, 4 km flat bottom
 * Forcing: CORE-II Normal-Year Forcing (perpetual climatology)
 * Bulk fluxes: Large & Yeager 2009

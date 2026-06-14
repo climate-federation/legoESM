@@ -6,7 +6,7 @@ Bit-exactness is the right contract here:
 
 * The single-rank layout has both pole flags True, so the rank-aware
   ``pole_v_bc`` reduces to the serial double-pole-zero pad.
-* No MPI reductions actually fire under ``_is_distributed() == False``
+* No MPI reductions actually fire under ``is_distributed() == False``
   (no halo backend activated for this serial test); the external mass
   fixer in the wrapper calls the same ``_apply_safety_rails`` as the
   internal serial fixer, with the same inputs.
@@ -43,6 +43,18 @@ from legoesm.parallel.latlon_mpi import (
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _restore_halo_backend():
+    """``make_latlon_mpi_step`` arms the GLOBAL halo backend
+    (``set_halo_backend("mpi", layout)``) and documents that the caller
+    deactivates it.  Without this teardown the armed backend leaks into
+    later test files (bisect job 8459341: the tripole-serial suite saw
+    ``prev == "mpi"`` and failed in its own restore)."""
+    yield
+    from legoesm.grids.halo import set_halo_backend
+    set_halo_backend("local")
 
 
 @pytest.fixture(scope="module")
@@ -121,7 +133,7 @@ class TestStage1SingleRankEquivalence:
         dt = 100.0
 
         # Serial step
-        serial_out = serial_model._step_cgrid(
+        serial_out, _ = serial_model._step_cgrid(
             perturbed_state, dt, target_mass=None, physics_fn=None,
         )
 
@@ -244,7 +256,7 @@ class TestStage2Tracers:
         grid = serial_model.grid
         dt = 100.0
 
-        serial_out = serial_model._step_cgrid(
+        serial_out, _ = serial_model._step_cgrid(
             perturbed_state_with_tracers, dt,
             target_mass=None, physics_fn=None,
         )

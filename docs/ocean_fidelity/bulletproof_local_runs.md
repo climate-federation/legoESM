@@ -14,7 +14,7 @@ produces the canonical AMOC / ACC / SST climate-diagnostic numbers.
 
 ### OMIP-2 forced ocean -- lat-lon 5 deg (36 x 72), 5 years
 
-Driver: ``scripts/ocean_long_runs/run_omip2.py``
+Driver: ``scripts/run/ocean_long_runs/run_omip2.py``
 Forcing: JRA55-do synthetic fallback (loader caches missing).
 Wall time: **5965 s ~ 100 min**.
 
@@ -37,7 +37,7 @@ End-of-year-5 climate diagnostics:
 
 ### Bryan 1987 THC spinup -- hemispheric basin 24 x 24, 30 years
 
-Driver: ``scripts/ocean_long_runs/run_bryan_thc.py``
+Driver: ``scripts/run/ocean_long_runs/run_bryan_thc.py``
 Forcing: CORE-II NYF synthetic fallback.
 Wall time: **2589 s ~ 43 min**.
 

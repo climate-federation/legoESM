@@ -31,7 +31,7 @@ All notable changes to legoESM. Format roughly follows
 
 - **Tripolar grid (eORCA1)** with NEMO mesh_mask loader, tensor
   pole-fold halo exchange, and full wiring through
-  `scripts/run_omip.py`. Also a `jra55_3way` run set (MPAS ico5 /
+  `scripts/run/run_omip.py`. Also a `jra55_3way` run set (MPAS ico5 /
   ico6 / tripole eORCA1).
 - **Ice-shelf cavity coupling**: Holland & Jenkins (1999) three-
   equation basal melt. Lat-lon C-grid and MPAS apply paths; ambient
@@ -136,7 +136,7 @@ All notable changes to legoESM. Format roughly follows
 - New: this CHANGELOG.
 - Updated: [README.md](README.md),
   [docs/cmip_readiness.md](docs/cmip_readiness.md),
-  [docs/ocean_experiments_reference.md](docs/ocean_experiments_reference.md),
+  [docs/md_files/ocean_experiments_reference.md](docs/md_files/ocean_experiments_reference.md),
   [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md).
 
 ---

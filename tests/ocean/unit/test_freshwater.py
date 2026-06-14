@@ -19,6 +19,9 @@ from legoesm.ocean.freshwater import (
     net_freshwater_flux,
     freshwater_eta_tendency,
     virtual_salt_flux,
+    virtual_salt_flux_from_net,
+    normalize_freshwater_net,
+    normalized_virtual_salt_flux,
     freshwater_from_coupler,
 )
 from legoesm.ocean.mpas_config import MPASOceanConfig
@@ -830,7 +833,7 @@ class TestCouplerAdapter:
 
     def test_compute_mpas_freshwater_basic(self):
         from legoesm.coupler.mpas_adapter import compute_mpas_freshwater
-        from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm
+        from legoesm.core.coupling_fields import AtmToSurface, SurfaceToAtm
 
         n = 10
         z = jnp.zeros(n)
@@ -845,7 +848,7 @@ class TestCouplerAdapter:
             cos_zenith=z, co2_ppmv=z, has_radiation=z, has_precipitation=ones,
         )
         sfc = SurfaceToAtm(
-            T_water_init_C=z, albedo=z, emissivity=z, z0=z,
+            T_sfc=z, albedo=z, emissivity=z, z0=z,
             q_surface=z, shflx=z,
             lhflx=ones * 100.0,  # 100 W/m2
             tau_x=z, tau_y=z, lw_up=z,
@@ -857,6 +860,7 @@ class TestCouplerAdapter:
             ocean_heat_extraction=z,
             ocean_stress_x=z, ocean_stress_y=z,
             surface_mass_flux=ones * 100.0 / constants.L_v,
+            salt_flux=z,
         )
         mask = ones
 
@@ -864,3 +868,152 @@ class TestCouplerAdapter:
         assert fw.precip.shape == (n,)
         assert jnp.allclose(fw.precip, 1e-4)
         assert jnp.allclose(fw.evap, 100.0 / constants.L_v)
+
+
+class TestFreshwaterSaltNormalization:
+    """Global-salt conservation via area-mean removal of the freshwater flux.
+
+    Without normalization an unbalanced ∮(P-E+R) drifts the global-mean salinity
+    even when volume is conserved; ``normalize_freshwater_net`` removes the
+    area-weighted ocean mean so the virtual-salt closure conserves global salt.
+    """
+
+    def test_normalize_freshwater_net_zero_area_mean(self):
+        n = 50
+        key = jax.random.PRNGKey(0)
+        F = jax.random.normal(key, (n,)) + 2.0      # nonzero-mean flux
+        area = 1.0 + jax.random.uniform(jax.random.PRNGKey(1), (n,))
+        mask = (jnp.arange(n) % 5 != 0).astype(F.dtype)   # 20% land
+        Fn = normalize_freshwater_net(F, area, mask)
+        # Area-weighted ocean integral of the normalized flux is ~0.
+        integ = float(jnp.sum(Fn * area * mask))
+        assert abs(integ) < 1e-9, f"normalized flux integral {integ} != 0"
+        # Land cells: the subtraction is masked, so the land flux is F - F_mean*0
+        # = F (untouched); only ocean cells are corrected.
+        assert jnp.allclose(Fn[mask < 0.5], F[mask < 0.5])
+
+    def test_apply_virtual_salt_normalize_conserves_global_salt(self):
+        """apply_freshwater_virtual_salt_top(normalize=True) -> the top-layer
+        salt-mass tendency integrates to ~0 over the ocean; normalize=False does
+        NOT (the budget is unbalanced)."""
+        from legoesm.ocean.dynamics.ocean_tendency_common import (
+            apply_freshwater_virtual_salt_top,
+        )
+        n, nlev = 60, 4
+        # Net freshwater = precip only -> strictly positive, nonzero global mean
+        # (the unbalanced case that drifts salinity).
+        P = 1e-4 * (1.0 + jax.random.uniform(jax.random.PRNGKey(2), (n,)))
+        fw = FreshwaterForcing(precip=P, evap=jnp.zeros(n), runoff=jnp.zeros(n),
+                               ice_fw=jnp.zeros(n), restoring=jnp.zeros(n))
+        area = 1.0 + jax.random.uniform(jax.random.PRNGKey(3), (n,))
+        mask = (jnp.arange(n) % 7 != 0).astype(P.dtype)
+        h_top = jnp.full((n,), 10.0)
+        rho_0, S_ref = 1025.0, 35.0
+
+        def salt_rate(normalize):
+            dS = jnp.zeros((n, nlev))
+            dS = apply_freshwater_virtual_salt_top(
+                dS, fw, S_ref, h_top, rho_0, mask,
+                area=area, normalize=normalize)
+            # salt-mass rate per area = dS_top * rho_0 * h_top; integrate over ocean
+            return float(jnp.sum(dS[:, 0] * rho_0 * h_top * area * mask))
+
+        r_norm = salt_rate(True)
+        r_raw = salt_rate(False)
+        assert abs(r_norm) < 1e-6, f"normalized salt rate {r_norm} != 0"
+        assert abs(r_raw) > 1e-3, f"raw salt rate {r_raw} should be nonzero"
+
+    def test_apply_virtual_salt_normalize_requires_area(self):
+        from legoesm.ocean.dynamics.ocean_tendency_common import (
+            apply_freshwater_virtual_salt_top,
+        )
+        n = 10
+        fw = zero_freshwater(n)
+        with pytest.raises(ValueError):
+            apply_freshwater_virtual_salt_top(
+                jnp.zeros((n, 3)), fw, 35.0, jnp.full((n,), 10.0), 1025.0,
+                jnp.ones(n), normalize=True)  # area=None -> error
+
+    def test_virtual_salt_flux_from_net_matches_wrapper(self):
+        n = 20
+        P = 1e-4 * jnp.ones(n)
+        fw = FreshwaterForcing(precip=P, evap=jnp.zeros(n), runoff=jnp.zeros(n),
+                               ice_fw=jnp.zeros(n), restoring=jnp.zeros(n))
+        h = jnp.full((n,), 10.0)
+        a = virtual_salt_flux(fw, 35.0, h, 1025.0)
+        b = virtual_salt_flux_from_net(net_freshwater_flux(fw), 35.0, h, 1025.0)
+        assert jnp.allclose(a, b)
+
+
+class TestNormalizedVirtualSaltFluxHelper:
+    """The shared global-salt-conserving helper used by BOTH the MPAS and lat-lon
+    cores (factored so the OMIP correction is implemented once)."""
+
+    def test_helper_conserves_global_salt(self):
+        n = 80
+        P = 1e-4 * (1.0 + jax.random.uniform(jax.random.PRNGKey(5), (n,)))
+        fw = FreshwaterForcing(precip=P, evap=jnp.zeros(n), runoff=jnp.zeros(n),
+                               ice_fw=jnp.zeros(n), restoring=jnp.zeros(n))
+        area = 1.0 + jax.random.uniform(jax.random.PRNGKey(6), (n,))
+        mask = (jnp.arange(n) % 6 != 0).astype(P.dtype)
+        h = jnp.full((n,), 10.0)
+        dS = normalized_virtual_salt_flux(fw, 35.0, h, 1025.0, area, mask)
+        wet = mask * (h > 1e-3)
+        # salt-mass rate = dS * rho * h; integrates to ~0 over the wet ocean.
+        rate = float(jnp.sum(dS * 1025.0 * h * area * wet))
+        assert abs(rate) < 1e-6, f"helper salt rate {rate} != 0"
+        # vs the raw flux: nonzero.
+        raw = virtual_salt_flux(fw, 35.0, h, 1025.0)
+        assert abs(float(jnp.sum(raw * 1025.0 * h * area * wet))) > 1e-3
+
+    def test_helper_excludes_restoring_channel(self):
+        """The restoring channel passes through UN-normalized (it is a local
+        relaxation, not a globally-redistributed physical freshwater flux)."""
+        n = 40
+        rstr = 1e-4 * jnp.ones(n)   # uniform restoring (nonzero mean)
+        fw = FreshwaterForcing(precip=jnp.zeros(n), evap=jnp.zeros(n),
+                               runoff=jnp.zeros(n), ice_fw=jnp.zeros(n),
+                               restoring=rstr)
+        area = jnp.ones(n)
+        mask = jnp.ones(n)
+        h = jnp.full((n,), 10.0)
+        dS = normalized_virtual_salt_flux(fw, 35.0, h, 1025.0, area, mask)
+        # Physical net is 0 -> normalization leaves only the restoring; dS equals
+        # the raw restoring-only virtual salt (restoring NOT zeroed by the mean).
+        dS_raw = virtual_salt_flux_from_net(rstr, 35.0, h, 1025.0)
+        assert jnp.allclose(dS, dS_raw)
+
+
+class TestLatLonSaltNormalizationWiring:
+    """The lat-lon config gained ``normalize_freshwater``; the core routes through
+    the same shared helper.  Smoke: a freshwater step runs + stays finite with the
+    flag on (the analytic conservation is covered by the helper test above)."""
+
+    def test_latlon_normalize_freshwater_step_runs(self):
+        nlat, nlon = 24, 48
+        grid = create_latlon_grid(n_lat=nlat, n_lon=nlon)
+        z = create_ocean_z_star(n_levels=4, H_max=4000.0)
+        st = rest_state_latlon_cgrid_ocean(grid, z, H_max=4000.0)
+        # STRONGLY NON-UNIFORM precip (SH-heavy) so normalization removes a
+        # nonzero global mean -> a clear, above-float32-noise difference from the
+        # raw path; large amplitude (2e-3) so a single step exceeds float32 eps
+        # at S~35 (~4e-6).
+        lat2d = jnp.broadcast_to(jnp.asarray(grid.lat)[:, None], (nlat, nlon))
+        precip = jnp.where(lat2d < 0.0, 2.0e-3, 0.0).astype(jnp.float64)
+        fw = FreshwaterForcing(
+            precip=precip, evap=jnp.zeros((nlat, nlon)),
+            runoff=jnp.zeros((nlat, nlon)), ice_fw=jnp.zeros((nlat, nlon)),
+            restoring=jnp.zeros((nlat, nlon)))
+
+        def step(normalize):
+            cfg = LatLonCGridOceanConfig(
+                freshwater_closure="virtual_salt_flux", normalize_freshwater=normalize)
+            return LatLonCGridOceanModel(grid, z, cfg).step(st, 600.0, freshwater=fw)
+
+        st_on = step(True)
+        st_off = step(False)
+        assert bool(jnp.isfinite(st_on.S.data).all())
+        # The flag MUST change the surface salinity (normalization removes the
+        # nonzero global mean of the flux), by well above float32 rounding noise.
+        dS = float(jnp.max(jnp.abs(st_on.S.data[..., 0] - st_off.S.data[..., 0])))
+        assert dS > 1e-4, f"normalize_freshwater had no effect on latlon S (dS={dS})"

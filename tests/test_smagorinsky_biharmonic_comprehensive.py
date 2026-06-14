@@ -31,7 +31,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     viscous_tendency_cgrid,
     vector_laplacian_cgrid,
     smagorinsky_biharmonic_tendency_cgrid,
-    _vertex_area,
+    vertex_area_1d,
 )
 
 # ============================================================================
@@ -124,7 +124,7 @@ def test_discrete_adjoint():
 
     grid, wall_mask, u_mask, v_mask = create_test_grid()
     area_h = grid.area
-    A_vert = _vertex_area(grid)
+    A_vert = vertex_area_1d(grid)
     area_u_dual, area_v_dual = compute_dual_areas(grid)
     n_lat = grid.n_lat
     n_lon = grid.n_lon

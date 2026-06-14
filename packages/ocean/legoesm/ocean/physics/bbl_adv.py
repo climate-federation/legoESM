@@ -1,0 +1,365 @@
+"""Advective bottom boundary layer (Campin & Goosse 1999) — NEMO trabbl
+``nn_bbl_adv=2``.
+
+At coarse resolution (1 deg), dense shelf/overflow water (Mediterranean at
+Gibraltar, Denmark Strait, Antarctic shelves) cannot descend the continental
+slope: the staircase topography mixes it horizontally at sill depth and the
+overflow stalls.  NEMO ORCA1 solves this with an ADVECTIVE bottom-boundary-
+layer scheme (``ln_trabbl``, ``nn_bbl_adv=2``, ``rn_gambbl=20 s``): wherever
+the up-slope (shelf) BOTTOM cell is denser than the down-slope (deep) BOTTOM
+cell at a common reference depth, a down-slope transport
+
+    tr_bbl = (face width) * e3_bbl * g * gamma * max(0, drho/rho0)
+
+carries the dense water from the shelf bottom to the DEEP column's bottom,
+with an upward return flow through the deep column and a horizontal return
+at shelf level — a closed, exactly tracer-conserving circulation cell
+(NEMO ``tra_bbl_adv``):
+
+    shelf bottom  (iis, ks):  += |tr| * (pt[deep, ks]  - pt[shelf, ks]) / V
+    deep interior (iid, k) :  += |tr| * (pt[k+1]       - pt[k])         / V
+                                          for ks <= k < kd
+    deep bottom   (iid, kd):  += |tr| * (pt[shelf, ks] - pt[deep, kd])  / V
+
+(V = cell area * thickness; the weighted sum telescopes to zero.)
+
+Geometry is STATIC (NEMO tra_bbl_init): per interior u/v face,
+``mgrh = sign(bottom-depth difference)`` (0 when flat), shelf/deep bottom
+level indices, and ``e3_bbl = min`` of the two columns' bottom-cell
+thicknesses.
+
+This module implements the lat-lon C-grid family version (regular lat-lon +
+ORCA tripole, array layout ``(n_lat, n_lon, nlev)``) as pure JAX with STATIC
+unrolled level loops — jit/grad safe.  East-west periodicity: faces are built
+for column pairs ``(i, i+1)`` for ``i in 0..n_lon-2`` (interior faces only;
+on the tripole the cyclic halo columns are slaved by ``ew_cyclic_overlap``
+so the seam exchange is represented through the overlap, and on a regular
+grid the wrap face is omitted — one face of ~360 at 1 deg, negligible and
+safe).  References: Beckmann & Doscher (1997) JPO; Campin & Goosse (1999)
+Tellus; NEMO 5.0.1 ``TRA/trabbl.F90``.
+"""
+
+from __future__ import annotations
+
+from typing import NamedTuple
+
+import jax.numpy as jnp
+
+from legoesm import constants
+
+
+__physics_contract__ = {
+    "summary": (
+        "Advective bottom boundary layer (Campin & Goosse 1999; NEMO trabbl "
+        "nn_bbl_adv=2): where the up-slope (shelf) bottom cell is denser "
+        "than the down-slope (deep) bottom cell at a common reference "
+        "depth, a down-slope transport tr = width*e3_bbl*g*gamma*"
+        "max(0, drho/rho0) exchanges tracers through a closed 3-leg "
+        "circulation cell (shelf bottom -> deep bottom, upward return in "
+        "the deep column, horizontal return at shelf level). Resolves the "
+        "1-deg overflow problem (Gibraltar/Med, Denmark Strait)."
+    ),
+    "inputs": {
+        "T": "degC", "S": "PSU", "h_ref": "m", "land_mask": "1",
+        "area": "m^2", "dy_u_faces": "m", "dx_v_faces": "m",
+        "gamma_s": "s", "rho_0": "kg/m^3", "dt": "s",
+    },
+    "outputs": {
+        "utr_bbl": "m^3/s", "vtr_bbl": "m^3/s",
+        "dT_dt": "degC/s", "dS_dt": "PSU/s",
+    },
+    "sign_convention": (
+        "Transports are signed down-slope (positive toward the larger "
+        "index when the neighbour is deeper, like NEMO mgrh), and are "
+        "non-zero only when the shelf bottom is DENSER; the tendency "
+        "moves the deep bottom cell toward the shelf water properties."
+    ),
+    # The 3-leg exchange telescopes to zero under the area*h volume
+    # weights: total heat and salt are conserved exactly (unit-tested to
+    # fp tolerance on a random staircase domain).
+    "conserves": ["tracer", "salt"],
+    "differentiable": True,
+    "reference": (
+        "Campin & Goosse (1999) Tellus 51A 412-430; Beckmann & Doscher "
+        "(1997) JPO 27 581-591; NEMO 5.0.1 TRA/trabbl.F90 (ORCA1 RUN_REF: "
+        "nn_bbl_adv=2, rn_gambbl=20 s)"
+    ),
+    "idealized_test": (
+        "tests/ocean/unit/test_bbl_adv.py: analytic 2-column dense-shelf "
+        "overflow (closed-form transport, down-slope sign), exact "
+        "conservation, flat-bottom/land inactivity, host-step bounds."
+    ),
+}
+
+
+class BBLGeometry(NamedTuple):
+    """Static BBL face geometry (NEMO tra_bbl_init).
+
+    All arrays are FACE-indexed: i-faces ``(n_lat, n_lon-1)`` between columns
+    ``(j, i)`` and ``(j, i+1)``; j-faces ``(n_lat-1, n_lon)`` between
+    ``(j, i)`` and ``(j+1, i)``.
+    """
+    mgrhu: jnp.ndarray      # i-face slope sign: +1 deeper at i+1, -1 deeper at i, 0 flat
+    mgrhv: jnp.ndarray      # j-face slope sign
+    ku_s: jnp.ndarray       # i-face SHELF (shallow) bottom level index
+    ku_d: jnp.ndarray       # i-face DEEP bottom level index
+    kv_s: jnp.ndarray       # j-face shelf bottom level
+    kv_d: jnp.ndarray       # j-face deep bottom level
+    e3u_bbl: jnp.ndarray    # i-face BBL thickness = min(bottom e3 of the 2 columns)
+    e3v_bbl: jnp.ndarray    # j-face BBL thickness
+    dep_bot: jnp.ndarray    # per-CELL bottom mid-cell depth [m] (n_lat, n_lon)
+    u_active: jnp.ndarray   # i-face both-columns-wet AND sloped (float 0/1)
+    v_active: jnp.ndarray   # j-face mask
+    bot_k: jnp.ndarray      # per-CELL bottom level index (n_lat, n_lon)
+    h_ref: jnp.ndarray      # per-cell reference thicknesses (n_lat, n_lon, nlev)
+
+
+def bbl_static_geometry(h_ref: jnp.ndarray, land_mask: jnp.ndarray
+                        ) -> BBLGeometry:
+    """Build the static BBL geometry from per-cell REFERENCE layer
+    thicknesses ``h_ref`` (n_lat, n_lon, nlev; 0 below the seafloor —
+    partial-cell aware) and the 2-D ocean ``land_mask``.
+
+    NEMO equivalents: ``mbkt`` (bottom level), ``gdept_0`` at the bottom
+    (here: cumulative mid-cell depth), ``mgrhu/v = sign(d_bot(i+1)-d_bot(i))``,
+    ``mbku_d = max(mbkt, mbkt_neighbour)``, ``e3u_bbl_0 = min`` of the two
+    bottom thicknesses.
+    """
+    h = jnp.asarray(h_ref, dtype=jnp.float64)
+    mask = jnp.asarray(land_mask, dtype=jnp.float64)
+    wet3 = h > 1.0e-3  # coeff-ok: wet-cell thickness floor [m]
+    n_active = jnp.sum(wet3.astype(jnp.int32), axis=-1)          # (ny, nx)
+    bot_k = jnp.maximum(n_active - 1, 0)                          # bottom index
+    # mid-cell depths + bottom-cell depth/thickness per column
+    cum = jnp.cumsum(h, axis=-1)
+    z_mid = cum - 0.5 * h                                         # (ny,nx,nl)
+    dep_bot = jnp.take_along_axis(z_mid, bot_k[..., None], axis=-1)[..., 0]
+    e3_bot = jnp.take_along_axis(h, bot_k[..., None], axis=-1)[..., 0]
+
+    def _faces(a_l, a_r):
+        return a_l, a_r
+
+    # --- i-faces: columns (j, i) vs (j, i+1) -------------------------------
+    dL, dR = dep_bot[:, :-1], dep_bot[:, 1:]
+    mgrhu = jnp.sign(dR - dL)
+    ku_s = jnp.where(mgrhu >= 0, bot_k[:, :-1], bot_k[:, 1:])     # shallow col
+    ku_d = jnp.maximum(bot_k[:, :-1], bot_k[:, 1:])               # NEMO mbku_d
+    e3u_bbl = jnp.minimum(e3_bot[:, :-1], e3_bot[:, 1:])
+    u_active = ((mask[:, :-1] > 0.5) & (mask[:, 1:] > 0.5)
+                & (mgrhu != 0)).astype(jnp.float64)
+
+    # --- j-faces: columns (j, i) vs (j+1, i) -------------------------------
+    dS_, dN = dep_bot[:-1, :], dep_bot[1:, :]
+    mgrhv = jnp.sign(dN - dS_)
+    kv_s = jnp.where(mgrhv >= 0, bot_k[:-1, :], bot_k[1:, :])
+    kv_d = jnp.maximum(bot_k[:-1, :], bot_k[1:, :])
+    e3v_bbl = jnp.minimum(e3_bot[:-1, :], e3_bot[1:, :])
+    v_active = ((mask[:-1, :] > 0.5) & (mask[1:, :] > 0.5)
+                & (mgrhv != 0)).astype(jnp.float64)
+
+    return BBLGeometry(
+        mgrhu=mgrhu, mgrhv=mgrhv, ku_s=ku_s.astype(jnp.int32),
+        ku_d=ku_d.astype(jnp.int32), kv_s=kv_s.astype(jnp.int32),
+        kv_d=kv_d.astype(jnp.int32), e3u_bbl=e3u_bbl, e3v_bbl=e3v_bbl,
+        dep_bot=dep_bot, u_active=u_active, v_active=v_active,
+        bot_k=bot_k.astype(jnp.int32), h_ref=h,
+    )
+
+
+def _bottom_ts(T, S, bot_k):
+    """Gather bottom-cell T, S per column."""
+    Tb = jnp.take_along_axis(T, bot_k[..., None], axis=-1)[..., 0]
+    Sb = jnp.take_along_axis(S, bot_k[..., None], axis=-1)[..., 0]
+    return Tb, Sb
+
+
+def bbl_transports(T: jnp.ndarray, S: jnp.ndarray, geom: BBLGeometry,
+                   dy_u: jnp.ndarray, dx_v: jnp.ndarray, *,
+                   gamma_s: float, rho_0: float):
+    """Campin-Goosse down-slope transports per face [m^3/s].
+
+        tr = facewidth * e3_bbl * (g*gamma) * max(0, zgdrho) * mgrh
+
+    with the EXACT NEMO trabbl gating (eos_rab form): alpha/beta evaluated
+    per column at ITS OWN bottom pressure (thermobaricity preserved — the
+    canonical Wright-EOS derivatives, ``thermal_expansion_coeff`` /
+    ``haline_contraction_coeff``), AVERAGED across the face, then
+
+        zgdrho = max(0, abar*(T_deep - T_shelf) - bbar*(S_deep - S_shelf))
+
+    which is the linearized (rho_shelf - rho_deep)/rho — positive only when
+    the shelf bottom cell is denser.  A naive direct-density difference at
+    the face-mean pressure misses the compressibility asymmetry across
+    steep shelf-to-deep faces (codex HIGH) — exactly the overflow faces
+    this scheme exists for.
+    """
+    from legoesm.ocean.eos import (
+        haline_contraction_coeff, thermal_expansion_coeff,
+    )
+    g_gamma = constants.g * gamma_s
+
+    Tb, Sb = _bottom_ts(T, S, geom.bot_k)
+    p_bot = rho_0 * constants.g * geom.dep_bot          # per-cell bottom p
+    alpha = thermal_expansion_coeff(Tb, Sb, p_bot)
+    beta = haline_contraction_coeff(Tb, Sb, p_bot)
+
+    def _face_tr(axis):
+        if axis == 0:   # j-faces
+            sl1 = (slice(0, -1), slice(None)); sl2 = (slice(1, None), slice(None))
+            mgrh, e3, act, width = (geom.mgrhv, geom.e3v_bbl,
+                                    geom.v_active, dx_v)
+        else:           # i-faces
+            sl1 = (slice(None), slice(0, -1)); sl2 = (slice(None), slice(1, None))
+            mgrh, e3, act, width = (geom.mgrhu, geom.e3u_bbl,
+                                    geom.u_active, dy_u)
+        T1, T2, S1, S2 = Tb[sl1], Tb[sl2], Sb[sl1], Sb[sl2]
+        a_bar = 0.5 * (alpha[sl1] + alpha[sl2])
+        b_bar = 0.5 * (beta[sl1] + beta[sl2])
+        # shelf = up-slope column, deep = down-slope column (by mgrh)
+        T_sh = jnp.where(mgrh >= 0, T1, T2)
+        T_dp = jnp.where(mgrh >= 0, T2, T1)
+        S_sh = jnp.where(mgrh >= 0, S1, S2)
+        S_dp = jnp.where(mgrh >= 0, S2, S1)
+        zgdrho = jnp.maximum(
+            a_bar * (T_dp - T_sh) - b_bar * (S_dp - S_sh), 0.0)
+        return width * e3 * g_gamma * zgdrho * mgrh * act
+
+    return _face_tr(1), _face_tr(0)
+
+
+def apply_bbl_adv_tendency(dT_dt, dS_dt, T, S, h_k, area, geom: BBLGeometry,
+                           utr, vtr, *, nlev: int):
+    """Add the NEMO ``tra_bbl_adv`` 3-leg exchange to the tracer tendencies.
+
+    ``nlev`` must be a static Python int (the per-level loop is unrolled).
+    All scatter updates use ``.at[].add`` — pure JAX, jit/grad safe.
+    """
+    a3 = area[..., None] * jnp.maximum(h_k, 1.0e-3)   # cell volumes — coeff-ok: thickness floor [m]
+    inv_v = 1.0 / a3
+
+    def _apply(dpt, pt, tr, axis):
+        if axis == 1:   # i-faces between (j,i) and (j,i+1)
+            mgrh, ks, kd, act = geom.mgrhu, geom.ku_s, geom.ku_d, geom.u_active
+            sl_L = (slice(None), slice(0, -1))
+            sl_R = (slice(None), slice(1, None))
+        else:           # j-faces
+            mgrh, ks, kd, act = geom.mgrhv, geom.kv_s, geom.kv_d, geom.v_active
+            sl_L = (slice(0, -1), slice(None))
+            sl_R = (slice(1, None), slice(None))
+        zu = jnp.abs(tr) * act
+        up = mgrh >= 0   # True: LEFT column is shelf, RIGHT is deep
+
+        # gathered shelf/deep columns (face-shaped, full nlev)
+        pt_L, pt_R = pt[sl_L], pt[sl_R]
+        iv_L, iv_R = inv_v[sl_L], inv_v[sl_R]
+        pt_sh = jnp.where(up[..., None], pt_L, pt_R)
+        pt_dp = jnp.where(up[..., None], pt_R, pt_L)
+        iv_sh = jnp.where(up[..., None], iv_L, iv_R)
+        iv_dp = jnp.where(up[..., None], iv_R, iv_L)
+
+        ks_ = ks.astype(jnp.int32)
+        kd_ = kd.astype(jnp.int32)
+        pt_sh_b = jnp.take_along_axis(pt_sh, ks_[..., None], axis=-1)[..., 0]
+        pt_dp_at_ks = jnp.take_along_axis(pt_dp, ks_[..., None], axis=-1)[..., 0]
+        pt_dp_b = jnp.take_along_axis(pt_dp, kd_[..., None], axis=-1)[..., 0]
+
+        # face-shaped tendency contributions for shelf + deep columns
+        d_sh = jnp.zeros_like(pt_sh)
+        d_dp = jnp.zeros_like(pt_dp)
+        # (1) shelf bottom: exchange with deep column at shelf level
+        ztra_sh = zu * (pt_dp_at_ks - pt_sh_b) * jnp.take_along_axis(
+            iv_sh, ks_[..., None], axis=-1)[..., 0]
+        d_sh = d_sh.at[
+            jnp.arange(d_sh.shape[0])[:, None], jnp.arange(d_sh.shape[1])[None, :],
+            ks_].add(ztra_sh)
+        # (2) deep interior return flow ks <= k < kd  (static unrolled loop)
+        for k in range(nlev - 1):
+            in_rng = ((k >= ks_) & (k < kd_)).astype(pt.dtype)
+            ztra = zu * in_rng * (pt_dp[..., k + 1] - pt_dp[..., k]) \
+                * iv_dp[..., k]
+            d_dp = d_dp.at[..., k].add(ztra)
+        # (3) deep bottom: receives the shelf bottom water
+        ztra_dp = zu * (pt_sh_b - pt_dp_b) * jnp.take_along_axis(
+            iv_dp, kd_[..., None], axis=-1)[..., 0]
+        d_dp = d_dp.at[
+            jnp.arange(d_dp.shape[0])[:, None], jnp.arange(d_dp.shape[1])[None, :],
+            kd_].add(ztra_dp)
+
+        # un-gather face contributions back onto LEFT/RIGHT cell columns
+        d_L = jnp.where(up[..., None], d_sh, d_dp)
+        d_R = jnp.where(up[..., None], d_dp, d_sh)
+        dpt = dpt.at[sl_L].add(d_L.astype(dpt.dtype))
+        dpt = dpt.at[sl_R].add(d_R.astype(dpt.dtype))
+        return dpt
+
+    for axis in (1, 0):
+        dT_dt = _apply(dT_dt, T, utr if axis == 1 else vtr, axis)
+        dS_dt = _apply(dS_dt, S, utr if axis == 1 else vtr, axis)
+    return dT_dt, dS_dt
+
+
+__all__ = [
+    "BBLGeometry",
+    "apply_bbl_adv_step",
+    "apply_bbl_adv_tendency",
+    "bbl_static_geometry",
+    "bbl_transports",
+]
+
+
+def apply_bbl_adv_step(state, geom: BBLGeometry, dt: float, *,
+                       gamma_s: float, rho_0: float,
+                       area_2d, dy_u_faces, dx_v_faces, nlev: int):
+    """HOST post-step BBL application (the faithful-runner pattern, like the
+    SSS restoring / ice-thermo nudges): recompute the Campin-Goosse
+    transports from the CURRENT bottom T/S and integrate one forward-Euler
+    exchange step ``pt += dt * d(pt)/dt``.
+
+    Operator-split with the dynamics exactly like NEMO applies trabbl within
+    its sequential tracer trends.  Stability: the exchange is a bounded
+    relaxation between cells; with NEMO's gamma=20 s and 1-deg cells the
+    per-step exchange fraction ``|tr|*dt/V`` is << 1 at any ocean dt (see the
+    unit test's magnitude check).
+
+    Parameters
+    ----------
+    state : LatLonCGridOceanState-like (T, S Fields with (..., nlev) data)
+    geom : BBLGeometry from :func:`bbl_static_geometry` (STATIC, build once)
+    dy_u_faces : (n_lat, n_lon-1) i-face widths [m] (NEMO e2u at the face)
+    dx_v_faces : (n_lat-1, n_lon) j-face widths [m] (NEMO e1v)
+    nlev : static Python int.
+
+    Returns the state with T, S updated.
+    """
+    T = jnp.asarray(state.T.data, dtype=jnp.float64)
+    S = jnp.asarray(state.S.data, dtype=jnp.float64)
+    # actual thicknesses for the volume weights: reuse the static reference
+    # h embedded in the geometry via the caller (h_k passed implicitly when
+    # the geometry was built from h_partial; eta-induced J deviation is
+    # O(eta/H) and irrelevant for an exchange tendency).
+    h_k = geom.h_ref
+    utr, vtr = bbl_transports(
+        T, S, geom, dy_u_faces, dx_v_faces,
+        gamma_s=gamma_s, rho_0=rho_0)
+    # Face-local exchange cap (codex MED): the host-split Euler exchange
+    # fraction |tr|*dt/V must stay << 1 for every touched cell.  Cap |tr|
+    # at 0.25*V_min/dt with V_min = min bottom-cell volume of the two
+    # columns — inactive at ORCA1 scales (fraction ~1e-2), engages only on
+    # pathological tiny-area/extreme-drho faces. Sign/zero pattern kept.
+    area = jnp.asarray(area_2d, dtype=jnp.float64)
+    e3_bot = jnp.take_along_axis(h_k, geom.bot_k[..., None], axis=-1)[..., 0]
+    V_bot = area * jnp.maximum(e3_bot, 1.0e-3)  # coeff-ok: bottom-cell thickness floor [m]
+    cap_u = 0.25 * jnp.minimum(V_bot[:, :-1], V_bot[:, 1:]) / dt
+    cap_v = 0.25 * jnp.minimum(V_bot[:-1, :], V_bot[1:, :]) / dt
+    utr = jnp.sign(utr) * jnp.minimum(jnp.abs(utr), cap_u)
+    vtr = jnp.sign(vtr) * jnp.minimum(jnp.abs(vtr), cap_v)
+    zero = jnp.zeros_like(T)
+    dT, dS = apply_bbl_adv_tendency(
+        zero, jnp.zeros_like(S), T, S, h_k, jnp.asarray(area_2d), geom,
+        utr, vtr, nlev=nlev)
+    T_new = (T + dt * dT).astype(state.T.data.dtype)
+    S_new = (S + dt * dS).astype(state.S.data.dtype)
+    return state._replace(
+        T=state.T.replace(data=T_new),
+        S=state.S.replace(data=S_new),
+    )

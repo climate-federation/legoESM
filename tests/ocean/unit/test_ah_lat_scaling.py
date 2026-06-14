@@ -24,6 +24,10 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     laplacian_scaling_factor,
     biharmonic_scaling_factor,
     vector_laplacian_cgrid,
+    vector_laplacian_dissipation_cgrid,
+    divergence_cgrid,
+    curl_vertex_cgrid,
+    compute_vertex_mask,
 )
 
 
@@ -189,3 +193,139 @@ def test_viscous_cfl_latitude_independent():
     cfl_unscaled_at_eq = cfl_unscaled[len(cfl_unscaled) // 2 - 1]
     # Pole CFL is at least 100× larger than equator CFL without scaling
     assert cfl_unscaled_at_pole / cfl_unscaled_at_eq > 100.0
+
+
+# ---------------------------------------------------------------------------
+# A_h_cos_power — configurable exponent for cos(lat) scaling. Matches
+# Veros's ``hor_friction_cosPower``; required for the Veros recipe.
+# ---------------------------------------------------------------------------
+
+def test_ah_cos_power_default_is_one():
+    """The new ``A_h_cos_power`` field defaults to 1 — the production
+    convention (constant grid Reynolds number) — so adding it does not
+    change behavior for any legacy config."""
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    cfg = LatLonCGridOceanConfig(A_h=1e5, A_h_lat_scaling=True)
+    assert cfg.A_h_cos_power == 1
+
+
+def test_ah_cos_power_one_matches_legacy_power_one():
+    """``power=1`` matches what was hardcoded in ocean_pe_latlon_cgrid.py
+    before A_h_cos_power was exposed: bit-exact regression guard."""
+    grid = create_latlon_grid(36, 72)
+    scale_u_n1, scale_v_n1 = laplacian_scaling_factor(grid, power=1)
+    cos_u = np.asarray(grid.cos_lat)
+    np.testing.assert_allclose(np.asarray(scale_u_n1), cos_u,
+                                rtol=1e-12, atol=1e-12)
+
+
+def test_ah_cos_power_two_gives_cos_squared():
+    """``power=2`` (Veros ``hor_friction_cosPower=2``) gives cos²(lat) —
+    the legacy constant-viscous-CFL convention."""
+    grid = create_latlon_grid(36, 72)
+    scale_u_n2, _ = laplacian_scaling_factor(grid, power=2)
+    cos_u = np.asarray(grid.cos_lat)
+    np.testing.assert_allclose(np.asarray(scale_u_n2), cos_u ** 2,
+                                rtol=1e-12, atol=1e-12)
+
+
+def test_ah_cos_power_zero_is_no_scaling():
+    """``power=0`` corresponds to Veros's ``enable_hor_friction_cos_scaling
+    =False``: cos⁰(lat)=1 everywhere, so the per-row scale is identity."""
+    grid = create_latlon_grid(36, 72)
+    scale_u_n0, scale_v_n0 = laplacian_scaling_factor(grid, power=0)
+    assert jnp.allclose(scale_u_n0, 1.0)
+    assert jnp.allclose(scale_v_n0, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# vector_laplacian_dissipation_cgrid: the positive-definite K_diss_h density.
+# ---------------------------------------------------------------------------
+
+
+def test_vector_laplacian_dissipation_nonneg_and_zero_for_no_flow():
+    """``A_h·(div²+<ζ²>)`` is ``>= 0`` everywhere by construction, and is exactly
+    zero for the rest state (u=v=0) — it credits only the energy the lateral
+    viscosity actually removes (div=ζ=0 ⇒ no KE removal)."""
+    grid = create_latlon_grid(24, 48)
+    n_lat, n_lon = 24, 48
+    A_h = 1.0e4
+    np.random.seed(3)
+    u = jnp.asarray(np.random.randn(n_lat, n_lon + 1, 2) * 0.05)
+    v = jnp.asarray(np.random.randn(n_lat + 1, n_lon, 2) * 0.05)
+    diss = vector_laplacian_dissipation_cgrid(u, v, grid, A_h)
+    assert diss.shape == (n_lat, n_lon, 2)
+    assert bool(jnp.all(jnp.isfinite(diss)))
+    assert float(jnp.min(diss)) >= 0.0
+    assert float(jnp.max(diss)) > 0.0
+    # Rest state: div = 0, ζ = 0 -> exactly zero dissipation.
+    diss0 = vector_laplacian_dissipation_cgrid(
+        jnp.zeros((n_lat, n_lon + 1, 2)), jnp.zeros((n_lat + 1, n_lon, 2)),
+        grid, A_h)
+    np.testing.assert_array_equal(np.asarray(diss0), 0.0)
+    # A constant zonal wind has only the (small) spherical-metric div/curl, so its
+    # dissipation is orders of magnitude below the sheared field's — confirming the
+    # density tracks genuine shear, not a constant offset.
+    u_uni = jnp.ones((n_lat, n_lon + 1, 2)) * 0.3
+    v_uni = jnp.zeros((n_lat + 1, n_lon, 2))
+    diss_uni = vector_laplacian_dissipation_cgrid(u_uni, v_uni, grid, A_h)
+    assert float(jnp.max(diss_uni)) < 0.05 * float(jnp.max(diss))
+
+
+def test_vector_laplacian_dissipation_linear_in_A_h_and_matches_div_curl():
+    """The dissipation is linear in ``A_h`` and equals an independent
+    ``A_h·(div² + <ζ²>_corners)`` reconstruction (locks the formula + the
+    4-corner ζ²→centre averaging)."""
+    grid = create_latlon_grid(24, 48)
+    n_lat, n_lon = 24, 48
+    np.random.seed(5)
+    u = jnp.asarray(np.random.randn(n_lat, n_lon + 1, 1) * 0.05)
+    v = jnp.asarray(np.random.randn(n_lat + 1, n_lon, 1) * 0.05)
+    d1 = vector_laplacian_dissipation_cgrid(u, v, grid, 1.0e4)
+    d2 = vector_laplacian_dissipation_cgrid(u, v, grid, 2.0e4)
+    np.testing.assert_allclose(np.asarray(d2), 2.0 * np.asarray(d1), rtol=1e-12)
+    # Independent reconstruction.
+    div = divergence_cgrid(u, v, grid)
+    zeta = curl_vertex_cgrid(u, v, grid)
+    z2 = zeta ** 2
+    z2c = 0.25 * (z2[:-1, :-1, :] + z2[1:, :-1, :] + z2[:-1, 1:, :] + z2[1:, 1:, :])
+    ref = 1.0e4 * (div ** 2 + z2c)
+    np.testing.assert_allclose(np.asarray(d1), np.asarray(ref), rtol=1e-12)
+
+
+def test_vector_laplacian_dissipation_energy_consistent_with_vlap_sink():
+    """On a periodic (no-land) grid the domain-integrated positive-definite
+    dissipation ``Σ A_h(div²+<ζ²>)·A_cell`` equals the mean KE removed by the
+    vector Laplacian ``-Σ (u·A_h∇²u + v·A_h∇²v)·A_dual`` to a few percent — the
+    Helmholtz energy identity that makes this the FAITHFUL, clamp-free K_diss_h.
+    Uses a smooth large-scale field so the discrete identity holds tightly."""
+    n_lat, n_lon = 40, 80
+    grid = create_latlon_grid(n_lat, n_lon)
+    A_h = 1.0e4
+    # Smooth large-scale velocity (low wavenumber) -> small discretisation error.
+    lat = np.asarray(grid.lat)[:, None]
+    lon = np.linspace(0, 2 * np.pi, n_lon, endpoint=False)[None, :]
+    lon_u = np.linspace(0, 2 * np.pi, n_lon + 1)[None, :]
+    u = jnp.asarray((np.sin(lon_u) * np.cos(lat))[:, :, None])
+    lat_v = np.linspace(float(grid.lat[0]) - float(grid.dlat) / 2,
+                        float(grid.lat[-1]) + float(grid.dlat) / 2, n_lat + 1)[:, None]
+    v = jnp.asarray((np.cos(2 * lon) * np.cos(lat_v))[:, :, None])
+
+    # Positive-definite dissipation density -> domain energy (area-weighted).
+    diss = vector_laplacian_dissipation_cgrid(u, v, grid, A_h)
+    area = np.asarray(grid.area)
+    E_diss = float((np.asarray(diss)[:, :, 0] * area).sum())
+
+    # Mean-KE sink of the vector Laplacian: -Σ u·(A_h ∇²u) over u-faces (×dual
+    # area) - Σ v·(A_h ∇²v) over v-faces. The u-face dual area ~ cell area
+    # interpolated to the face; for the periodic smooth field the cell-centred
+    # contraction -[u·vlap_u]|_centre·area + ... is the consistent discrete energy.
+    vlap_u, vlap_v = vector_laplacian_cgrid(u, v, grid)
+    pu = -np.asarray(u * (A_h * vlap_u))
+    pv = -np.asarray(v * (A_h * vlap_v))
+    sink_cell = 0.5 * (pu[:, :-1, 0] + pu[:, 1:, 0]) + 0.5 * (pv[:-1, :, 0] + pv[1:, :, 0])
+    E_sink = float((sink_cell * area).sum())
+
+    assert E_diss > 0.0 and E_sink > 0.0
+    rel = abs(E_diss - E_sink) / E_sink
+    assert rel < 0.05, f"energy mismatch {rel:.4f} (diss={E_diss:.4e}, sink={E_sink:.4e})"

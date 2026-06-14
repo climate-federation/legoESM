@@ -77,7 +77,7 @@ def _make_config(
         microphysics="none",
         topography="flat",
         T_init=300.0,
-        RH_init=0.7,
+        rh_init=0.7,
         precision="fp64",
     )
 

@@ -113,6 +113,96 @@ def test_rain_evaporation(column_state):
     assert float(jnp.mean(evap)) > 0.0
 
 
+def test_rain_evaporation_rh_deficit_floor(column_state):
+    """``rh_deficit_floor`` suppresses only sub-resolution near-saturation evap.
+
+    The floor is applied to the RELATIVE sub-saturation deficit
+    ``(q_sat−q_v)/q_sat`` via a soft threshold ``clip(deficit−floor, 0)``.
+    ``floor=0`` is exactly the legacy behaviour; a small floor (~1e-4) removes
+    the spurious in-cloud evaporation that rectifies float32 saturation
+    round-off (RH > 99.99 %) while leaving RESOLVED deficits — sub-cloud
+    downdrafts and mixed-phase WBF (deficit ≫ floor) — essentially untouched.
+    """
+    T, p, _, _, _, q_r, _, _ = column_state
+    q_v_low = 1.0e-3 * jnp.ones_like(q_r)          # strongly subsaturated
+    _, q_sat = saturation_adjustment(T, q_v_low, p, dt=300.0)
+
+    evap_legacy = rain_evaporation(q_v_low, q_r, q_sat, evap_coeff=1.0e-3)
+    # floor=0 reproduces the legacy ungated result exactly.
+    evap_floor0 = rain_evaporation(q_v_low, q_r, q_sat, evap_coeff=1.0e-3,
+                                   rh_deficit_floor=0.0)
+    assert jnp.array_equal(evap_floor0, evap_legacy)
+
+    # Large RESOLVED deficit: q_v_low is far subsaturated (deficit ~1, ≫ floor),
+    # so a 1e-4 floor changes the rate by < 0.1 % — WBF/sub-cloud preserved.
+    evap_floored = rain_evaporation(q_v_low, q_r, q_sat, evap_coeff=1.0e-3,
+                                    rh_deficit_floor=1.0e-4)
+    assert jnp.all(evap_floored <= evap_legacy)
+    rel = jnp.max(jnp.abs(evap_floored - evap_legacy)
+                  / jnp.clip(evap_legacy, 1e-30))
+    assert float(rel) < 1.0e-3
+
+    # Near-saturation (deficit below the floor) is fully suppressed.
+    q_v_near = q_sat * (1.0 - 5.0e-5)              # RH 99.995 %, deficit < floor
+    evap_near = rain_evaporation(q_v_near, q_r, q_sat, evap_coeff=1.0e-3,
+                                 rh_deficit_floor=1.0e-4)
+    assert jnp.all(evap_near == 0.0)
+    # …but the same near-saturation column evaporates without the floor.
+    evap_near_legacy = rain_evaporation(q_v_near, q_r, q_sat, evap_coeff=1.0e-3)
+    assert float(jnp.max(evap_near_legacy)) > 0.0
+
+    # The floor is genuinely WIRED into the computation graph (not a dead
+    # kwarg): differentiate the rate w.r.t. ``rh_deficit_floor`` itself. On a
+    # resolved-subsaturation column the soft threshold ``clip(deficit−floor,0)``
+    # is active, so d(evap)/d(floor) = −evap_coeff·q_r^0.525 < 0 — strictly
+    # negative and finite. A revert of the ``deficit − floor`` behaviour (the
+    # e72e4aea fix) would zero this gradient and fail the assertion.
+    devap_dfloor = jax.grad(lambda fl: jnp.sum(
+        rain_evaporation(q_v_low, q_r, q_sat, evap_coeff=1.0e-3,
+                         rh_deficit_floor=fl)))(1.0e-4)
+    assert jnp.isfinite(devap_dfloor)
+    assert float(devap_dfloor) < 0.0
+
+    # Negative floor is clamped to 0 (no spurious evaporation boost / NaN).
+    evap_neg = rain_evaporation(q_v_low, q_r, q_sat, evap_coeff=1.0e-3,
+                                rh_deficit_floor=-1.0)
+    assert jnp.array_equal(evap_neg, evap_legacy)
+
+    # Boundary kink: deficit == floor exactly → soft threshold gives 0, and the
+    # rate (and its q_v gradient) stay finite at the clip kink.
+    floor = 1.0e-4
+    q_v_at = q_sat * (1.0 - floor)                 # deficit == floor exactly
+    evap_at = rain_evaporation(q_v_at, q_r, q_sat, evap_coeff=1.0e-3,
+                               rh_deficit_floor=floor)
+    assert jnp.allclose(evap_at, 0.0)
+    g_at = jax.grad(lambda qv: jnp.sum(
+        rain_evaporation(qv, q_r, q_sat, evap_coeff=1.0e-3,
+                         rh_deficit_floor=floor)))(q_v_at)
+    assert jnp.all(jnp.isfinite(g_at))
+
+    # Very small q_sat (cold cirrus / tropopause): the 1e-10 denominator guard
+    # keeps the rate and gradient finite (no Inf/NaN from deficit/q_sat).
+    q_sat_tiny = jnp.full_like(q_r, 1.0e-12)
+    q_v_tiny = jnp.zeros_like(q_r)
+    evap_tiny = rain_evaporation(q_v_tiny, q_r, q_sat_tiny, evap_coeff=1.0e-3,
+                                 rh_deficit_floor=floor)
+    assert jnp.all(jnp.isfinite(evap_tiny)) and jnp.all(evap_tiny >= 0.0)
+    # Differentiate w.r.t. the tiny q_sat itself so the clip(q_sat, 1e-10)
+    # denominator floor is exercised under reverse-mode AD (zero subgradient at
+    # the floor must not produce NaN/Inf).
+    g_tiny = jax.grad(lambda qs: jnp.sum(
+        rain_evaporation(q_v_tiny, q_r, qs, evap_coeff=1.0e-3,
+                         rh_deficit_floor=floor)))(q_sat_tiny)
+    assert jnp.all(jnp.isfinite(g_tiny))
+
+    # Gradient w.r.t. q_v stays finite (clip-based floor is AD-safe).
+    def _loss(qv):
+        return jnp.sum(rain_evaporation(qv, q_r, q_sat, evap_coeff=1.0e-3,
+                                        rh_deficit_floor=1.0e-4))
+    g = jax.grad(_loss)(q_v_low)
+    assert jnp.all(jnp.isfinite(g))
+
+
 def test_jit_compiles(column_state):
     T, p, rho, q_v, q_c, q_r, N_c, N_r = column_state
 

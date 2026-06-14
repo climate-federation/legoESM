@@ -212,8 +212,8 @@
 8. [Software Engineering](#8-software-engineering)
 9. [API Design](#9-api-design)
 10. [Testing & Validation](#10-testing--validation)
-11. [Milestone Roadmap](#11-milestone-roadmap)
-12. [Repository Structure](#12-repository-structure)
+11. [Milestone Roadmap](#11-milestone-roadmap-detailed)
+12. [Repository Structure](#12-repository-structure-actual)
 
 ---
 
@@ -1614,7 +1614,7 @@ Full AMIP simulation on the spectral PE dycore with operator-split physics:
 
 Clear seasonal cycle in all diagnostics; zonal-mean structure with ITCZ precipitation, midlatitude jets, and realistic radiative balance.
 
-#### 4.6.5 AMIP FV Cubed-Sphere Experiment (`scripts/run_amip.py`)
+#### 4.6.5 AMIP FV Cubed-Sphere Experiment (`scripts/run/run_amip.py`)
 
 Full AMIP simulation on the FV cubed-sphere dycore with operator-split physics:
 
@@ -2617,7 +2617,7 @@ legoESM/
 │   ├── REAL_HARDWARE_SCALING.md            # Multi-GPU/MPI scaling guide
 │   ├── amip.md                             # AMIP experiment guide (CLI, radiation, diagnostics)
 │   ├── cmip_readiness.md                   # CMIP readiness checklist (all components)
-│   ├── implementation_summary.md           # Comprehensive summary of all implementations
+│   ├── md_files/implementation_summary.md  # Comprehensive summary of all implementations
 │   └── legoesm_documentation.tex           # LaTeX technical documentation (equations)
 │
 └── notebooks/                              # Jupyter notebooks

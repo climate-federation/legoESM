@@ -27,7 +27,7 @@ from legoesm.atmosphere.physics.convection.config import (
     DCAConfig,
     KuoConfig,
     MassFluxConfig,
-    EDMFConfig,
+    ConvectiveEDMFConfig,
     ConvectionConfig,
 )
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
@@ -64,10 +64,10 @@ def _make_unstable_columns(ncol=4, nlev=10):
 
     # Temperature: warm surface, decreasing faster than moist adiabat
     # (conditionally unstable)
-    T_surface = 300.0
+    T_sfc = 300.0
     T_top = 200.0
     T = jnp.broadcast_to(
-        jnp.linspace(T_top, T_surface, nlev)[None, :],
+        jnp.linspace(T_top, T_sfc, nlev)[None, :],
         (ncol, nlev),
     )
 
@@ -421,8 +421,8 @@ class TestSBM:
         T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
         config = SBMConfig(
             tau_c=jnp.array([3600.0, 7200.0, 14400.0]),
-            RH_ref=jnp.array([0.65, 0.75, 0.85]),
-            CAPE_threshold=jnp.array([10.0, 70.0, 150.0]),
+            rh_ref=jnp.array([0.65, 0.75, 0.85]),
+            cape_threshold=jnp.array([10.0, 70.0, 150.0]),
         )
 
         out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
@@ -960,38 +960,57 @@ class TestKuo:
         assert jnp.all(out.dq_c_conv_dt >= 0)
 
     def test_nonzero_tendencies(self):
-        """Supersaturated unstable columns should produce nonzero tendencies.
-
-        Kuo only fires when there is column moisture excess
-        (``MC > 0``). The default ``_make_unstable_columns`` builds
-        an undersaturated profile (RH ≤ 0.9), so we locally
-        supersaturate the lower troposphere here to give Kuo
-        something to convect — otherwise the scheme correctly stays
-        off (which would be a different test).
+        """Canonical Kuo fires under a positive large-scale moisture-
+        convergence source (the faithful Kuo source), producing nonzero
+        heating.  Without convergence Kuo is correctly quiescent (a
+        single column has no resolved ascent) — a different test.
         """
         T, q_v, p_full, p_half = _make_unstable_columns()
-        q_sat = saturation_mixing_ratio(T, p_full)
-        # 5% supersaturation in the lower half of the column → MC > 0.
         nlev = q_v.shape[-1]
-        moist_mask = (jnp.arange(nlev) >= nlev // 2)
-        q_v = jnp.where(moist_mask[None, :], 1.05 * q_sat, q_v)
+        # Positive convergence in the lower/mid troposphere.
+        ptenq = jnp.broadcast_to(
+            (2.0e-8 * (jnp.arange(nlev) >= nlev // 3))[None, :], q_v.shape,
+        ).astype(q_v.dtype)
         config = KuoConfig()
-        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
-        assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-6
+        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config,
+                             moisture_convergence=ptenq)
+        assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-7
+
+    def test_quiescent_without_convergence(self):
+        """No large-scale convergence → zero Kuo tendency (correct)."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0,
+                             config=KuoConfig(), moisture_convergence=None)
+        assert float(jnp.max(jnp.abs(out.dT_dt))) == 0.0
+        assert float(jnp.max(jnp.abs(out.dq_v_dt))) == 0.0
 
     def test_differentiable(self):
-        """jax.grad should work through Kuo convection."""
+        """jax.grad should work through Kuo convection (with and without
+        a convergence source)."""
         ncol, nlev = 2, 8
         T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
         config = KuoConfig()
+        ptenq = jnp.broadcast_to(
+            (2.0e-8 * (jnp.arange(nlev) >= nlev // 3))[None, :], q_v.shape,
+        ).astype(q_v.dtype)
 
         def loss(T_in):
-            out = kuo_convection(T_in, q_v, p_full, p_half, dt=300.0, config=config)
+            out = kuo_convection(T_in, q_v, p_full, p_half, dt=300.0,
+                                 config=config, moisture_convergence=ptenq)
             return jnp.sum(out.dT_dt ** 2)
 
         grad_T = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(grad_T))
         assert grad_T.shape == T.shape
+
+        # Quiescent path also has a finite (zero) gradient.
+        def loss0(T_in):
+            out = kuo_convection(T_in, q_v, p_full, p_half, dt=300.0,
+                                 config=config, moisture_convergence=None)
+            return jnp.sum(out.dT_dt ** 2) + jnp.sum(out.dq_v_dt ** 2)
+
+        grad0 = jax.grad(loss0)(T)
+        assert jnp.all(jnp.isfinite(grad0))
 
 
 # ===========================================================================
@@ -1157,7 +1176,7 @@ class TestEDMF:
         """EDMF output should have correct shapes."""
         ncol, nlev = 4, 10
         T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
-        config = EDMFConfig()
+        config = ConvectiveEDMFConfig()
         a_u = jnp.full(ncol, config.a_u_init)
         out, a_u_new = edmf_convection(
             T, q_v, p_full, p_half, a_u, dt=300.0, config=config,
@@ -1174,7 +1193,7 @@ class TestEDMF:
         """a_u_new should be in [0, 0.5]."""
         T, q_v, p_full, p_half = _make_unstable_columns()
         ncol = T.shape[0]
-        config = EDMFConfig()
+        config = ConvectiveEDMFConfig()
         a_u = jnp.full(ncol, config.a_u_init)
         _, a_u_new = edmf_convection(
             T, q_v, p_full, p_half, a_u, dt=300.0, config=config,
@@ -1186,7 +1205,7 @@ class TestEDMF:
         """a_u should change across calls when starting away from equilibrium."""
         T, q_v, p_full, p_half = _make_unstable_columns()
         ncol = T.shape[0]
-        config = EDMFConfig()
+        config = ConvectiveEDMFConfig()
         # Start far from equilibrium to see evolution
         a_u_0 = jnp.full(ncol, 0.01)
 
@@ -1204,7 +1223,7 @@ class TestEDMF:
         """Unstable columns should produce nonzero tendencies."""
         T, q_v, p_full, p_half = _make_unstable_columns()
         ncol = T.shape[0]
-        config = EDMFConfig()
+        config = ConvectiveEDMFConfig()
         a_u = jnp.full(ncol, config.a_u_init)
         out, _ = edmf_convection(
             T, q_v, p_full, p_half, a_u, dt=300.0, config=config,
@@ -1215,7 +1234,7 @@ class TestEDMF:
         """jax.grad should work through EDMF convection."""
         ncol, nlev = 2, 8
         T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
-        config = EDMFConfig()
+        config = ConvectiveEDMFConfig()
         a_u = jnp.full(ncol, config.a_u_init)
 
         def loss(T_in):
@@ -1314,7 +1333,7 @@ class TestEDMFPhysics:
     def test_subsidence_warms_troposphere(self):
         """Compensating subsidence should warm the mid-troposphere."""
         T, q_v, p_full, p_half = _make_unstable_columns(ncol=4, nlev=20)
-        config = EDMFConfig(
+        config = ConvectiveEDMFConfig(
             a_u_init=0.1, cape_threshold=0.0,
             delta_0=0.0,  # disable detrainment to isolate subsidence
         )
@@ -1332,7 +1351,7 @@ class TestEDMFPhysics:
     def test_detrainment_warms_where_updraft_warmer(self):
         """Detrainment of warm updraft air should warm the environment."""
         T, q_v, p_full, p_half = _make_unstable_columns(ncol=4, nlev=20)
-        config = EDMFConfig(
+        config = ConvectiveEDMFConfig(
             a_u_init=0.1, cape_threshold=0.0,
             epsilon_0=0.0,  # no entrainment: T_u stays on moist adiabat
         )
@@ -1351,15 +1370,15 @@ class TestEDMFPhysics:
         a_u = jnp.full(ncol, 0.1)
 
         # Subsidence only
-        cfg_sub = EDMFConfig(a_u_init=0.1, cape_threshold=0.0, delta_0=0.0)
+        cfg_sub = ConvectiveEDMFConfig(a_u_init=0.1, cape_threshold=0.0, delta_0=0.0)
         out_sub, _ = edmf_convection(T, q_v, p_full, p_half, a_u, 300.0, cfg_sub)
 
         # Detrainment only (epsilon_0=0 makes T_u=T_moist, strong detrainment)
-        cfg_det = EDMFConfig(a_u_init=0.1, cape_threshold=0.0, epsilon_0=0.0)
+        cfg_det = ConvectiveEDMFConfig(a_u_init=0.1, cape_threshold=0.0, epsilon_0=0.0)
         out_det, _ = edmf_convection(T, q_v, p_full, p_half, a_u, 300.0, cfg_det)
 
         # Both active
-        cfg_both = EDMFConfig(a_u_init=0.1, cape_threshold=0.0)
+        cfg_both = ConvectiveEDMFConfig(a_u_init=0.1, cape_threshold=0.0)
         out_both, _ = edmf_convection(T, q_v, p_full, p_half, a_u, 300.0, cfg_both)
 
         # RMS of combined should generally be larger than either alone
@@ -1373,7 +1392,7 @@ class TestEDMFPhysics:
     def test_subsidence_dries_troposphere(self):
         """Compensating subsidence should dry the mid-troposphere."""
         T, q_v, p_full, p_half = _make_unstable_columns(ncol=4, nlev=20)
-        config = EDMFConfig(
+        config = ConvectiveEDMFConfig(
             a_u_init=0.1, cape_threshold=0.0,
             delta_0=0.0,  # isolate subsidence
         )
@@ -1392,7 +1411,7 @@ class TestEDMFPhysics:
         """Convective cloud-water source should always be >= 0."""
         T, q_v, p_full, p_half = _make_unstable_columns()
         ncol = T.shape[0]
-        config = EDMFConfig()
+        config = ConvectiveEDMFConfig()
         a_u = jnp.full(ncol, config.a_u_init)
         out, _ = edmf_convection(
             T, q_v, p_full, p_half, a_u, dt=300.0, config=config,

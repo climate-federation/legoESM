@@ -1,6 +1,63 @@
 # Scripts
 
 Canonical run scripts for legoESM validation, benchmarking, and production runs.
+See `docs/TESTING.md` for the overarching tiered test & experiment strategy.
+
+## `experiment/` — the experiment harness
+
+Versioned templates + provenance ergonomics layered on `legoesm run` /
+`legoesm reproduce` (see `docs/TESTING.md` §4 and `config/templates/`):
+
+| Script | Purpose |
+|--------|---------|
+| `experiment/wizard.py` (or `legoesm wizard`) | Interactive wizard: pick component(s), region/model type, grid, integrator, duration, precision, device, physics-vs-ML — option menus derived live from the model registries (so it versions with the model) — then emit a runnable bundle (`config.yaml`/`run.sh`/`wizard.yaml`, version-stamped) and optionally run it. Needs `pip install 'legoesm[wizard]'`. Pure logic in `wizard_core.py`. |
+| `experiment/init_experiment.py <category/name> --name N --output-dir D [-o k=v]` | Resolve a `config/templates/` template + overrides + machine profile → runnable dir (`config.yaml`, `run.sh`, `run.yaml`). Strict-validates before writing. |
+| `experiment/validate_templates.py [--write-status]` | Validate every template through `Config…validate_strict`; regenerate `project_status.md`. |
+| `experiment/lego_detect_machine.py` | Resolve the `config/machines/` profile for the current host. |
+| `experiment/fetch_data.py check\|fetch <template>` | Check/stage a template's external datasets (`config/data_catalog.yaml`). |
+
+## `tmp/` — throwaway staging (NOT for production)
+
+Debug/diagnostic/iteration scripts and archived artifacts live under
+`scripts/tmp/` (e.g. `tmp/dycore_iter_archive/`, the non-curated ralph-loop
+dycore tests). Nothing here is wired into CI; the directory is slated for
+eventual deletion. Do not add production scripts here.
+
+## Layout
+
+Scripts are organized into bucket subdirs (the `scripts/` root holds only
+`__init__.py`). The tables below name scripts by basename — find each under its
+bucket:
+
+| Bucket | Contents |
+|--------|----------|
+| `run/` | Production experiment drivers (`run_amip`, `run_omip`, `run_rce`, `run_held_suarez*`, `run_dino`, `run_coupled`, `run_aimip*`, the cross-grid `.sh` wrappers, …). |
+| `matrix/` | The complexity-tiered test-matrix runners (`run_{atmosphere,ocean,sea_ice,scm}_test_matrix`, `summarize_matrix_results`, `validate_matrix_report`, `check_conservation_all`). See `docs/TESTING.md`. |
+| `experiment/` | The template/provenance harness (see above). |
+| `bench/` | Benchmarking, scaling, profiling (`bench_*`, `profile_*`, `*scaling*`, `analyze_*`). |
+| `plot/` | Plotting / figure regeneration (`plot_*`, `replot_*`, `regen_*`). |
+| `validate/` | Validators + intercomparison (`validate_*`, `verify_*`, `eval_*`, `audit_*`, `compare_*`). |
+| `data/` | Forcing/data prep + environment setup (`download_*`, `prepare_*`, `generate_*`, `build_*`, `make_ryf`, `setup_*`). |
+| `cluster/` | SLURM job wrappers (e.g. `cluster/omip_nemo/`). |
+| `tmp/` | Throwaway (above) — slated for deletion. |
+
+Campaign suites and script packages live as subdirs of the bucket matching
+their dominant function (enforced by `tests/test_scripts_layout.py`):
+`run/{global_overturning,mpas_realistic_geometry,ocean_long_runs,s2s}/`,
+`matrix/{scm,ocean_test_matrix}/`,
+`validate/{ocean_fidelity,realistic_geometry,pgf_validation}/`,
+`bench/jit_profile/`.
+
+## Data-path environment variables
+
+Scripts that read large external datasets take a CLI flag first and fall back
+to an environment variable (machine-portable; no personal paths):
+
+| Variable | Used by | Meaning |
+|----------|---------|---------|
+| `LEGOESM_ETOPO_PATH` | `run/global_overturning/run_{comparison_latlon,comparison_mpas,tripole_20yr,global_overturning_mpas_etopo}.py` (`--etopo`) | ETOPO bathymetry NetCDF (default `data/bathymetry/etopo_1deg.nc`). |
+| `LEGOESM_GSAM_ROOT` | `run/run_lba_plane.py`, `run/run_gate_plane.py` (`--case-dir`) | gSAM checkout root holding `CASES/`. |
+| `LEGOESM_CMIP7_RAW` | `data/inspect_cmip7_forcing.py` | Raw CMIP7 forcing staging root (Levante default). |
 
 ## Atmosphere
 

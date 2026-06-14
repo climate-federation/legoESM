@@ -10,14 +10,19 @@ import ast
 import pathlib
 import pytest
 
-# Base path for source code
-SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "legoesm"
+# Repo root — offender paths are reported relative to it so they stay readable
+# whether a file lives under src/legoesm or packages/<member>/src/legoesm.
+SRC = pathlib.Path(__file__).resolve().parents[2]
 
 
 def _python_files(*subdirs):
-    """Yield all .py files under given subdirectories."""
+    """Yield all .py files under given subdirectories (carve-aware)."""
+    from tests.legoesm_paths import legoesm_source_path
     for sub in subdirs:
-        d = SRC / sub
+        try:
+            d = legoesm_source_path(sub)
+        except FileNotFoundError:
+            continue
         if d.exists():
             yield from d.rglob("*.py")
 

@@ -242,9 +242,9 @@ JAX_ENABLE_X64=1 python -m pytest tests/ocean/unit/test_gm_redi_latlon_cgrid.py 
     tests/ocean/unit/test_gm_redi_eady_physics.py tests/ocean/unit/test_visbeck_gm.py -v
 
 # Ocean test matrix (Eady GM/Redi visual validation)
-JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only eady_gm_redi_gm_only
-JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only eady_gm_redi_redi_only
-JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only eady_gm_redi
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py --only eady_gm_redi_gm_only
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py --only eady_gm_redi_redi_only
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py --only eady_gm_redi
 ```
 
 ---
@@ -422,7 +422,7 @@ Implemented as a separate code path in `gm_redi_latlon_cgrid.py`:
   through the triad path.  4 new physics tests confirm the per-kappa
   cancellation, equivalence-or-better with centered, and the orchestrator
   end-to-end.
-- Three triad-variant Eady cases added to `scripts/run_ocean_test_matrix.py`
+- Three triad-variant Eady cases added to `scripts/matrix/run_ocean_test_matrix.py`
   (`eady_gm_redi_*_triads`); all pass.
 
 #### Taper-on-flux (vs taper-on-slope)
@@ -463,7 +463,7 @@ Effect on the **production** Eady setup (22×10×20, κ_R = 5×10⁴):
 
 #### 120-day Eady validation (κ_R = 5×10⁴)
 
-`scripts/validate_triad_redi_120day.py` compares baseline (no GM/Redi)
+`scripts/validate/validate_triad_redi_120day.py` compares baseline (no GM/Redi)
 against Redi-only with both schemes.  The original framing of the test
 ("the Redi-only simulation should stay unchanged from baseline") relies
 on `q = f(ρ)` being maintained throughout the integration — which in
@@ -505,9 +505,9 @@ issue with the β_S = 0 thermal-wind balance at this resolution); the
 | `src/legoesm/ocean/experiments/global_overturning.py` | DONE |
 | `tests/ocean/unit/test_gm_redi_latlon_cgrid.py` | DONE (21 tests) |
 | `tests/ocean/unit/test_gm_redi_eady_physics.py` | DONE (4 tests) |
-| `scripts/ocean_test_matrix/experiments.py` | DONE (3 Eady cases) |
-| `scripts/ocean_test_matrix/testcase.py` | DONE |
-| `scripts/ocean_test_matrix/setup.py` | DONE (gm_redi param) |
+| `scripts/matrix/ocean_test_matrix/experiments.py` | DONE (3 Eady cases) |
+| `scripts/matrix/ocean_test_matrix/testcase.py` | DONE |
+| `scripts/matrix/ocean_test_matrix/setup.py` | DONE (gm_redi param) |
 
 ---
 

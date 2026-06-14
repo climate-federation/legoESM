@@ -51,7 +51,12 @@ def _run(T=250.0, p=4.0e4, q_i=1.0e-4, N_i=1.0e5, ssat=0.1,
         jnp.full((1, 1), T), jnp.full((1, 1), q_v), hm,
         jnp.full((1, 1), p), jnp.full((1, 2), p),
         jnp.full((1, 1), rho), jnp.full((1, 1), 300.0), 20.0,
-        MorrisonConfig(ice_to_snow_scheme=scheme, N_i0=0.0),
+        # morrison_flavor="sam" leaves ice_to_snow_scheme untouched; the
+        # default "mg" flavor would clobber it to mg_ferrier in
+        # resolve_morrison_flavor and these tests pin the SAM PRCI / heuristic
+        # paths and the unknown-scheme guard directly.
+        MorrisonConfig(
+            ice_to_snow_scheme=scheme, N_i0=0.0, morrison_flavor="sam"),
     )
     return float(out.dq_s_dt[0, 0]), float(out.dq_i_dt[0, 0])
 

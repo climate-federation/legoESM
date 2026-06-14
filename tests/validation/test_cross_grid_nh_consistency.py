@@ -37,7 +37,7 @@ Full RCEMIP-style physics equivalence (matching OLR / surface flux
 / precipitation / MSE budget between the three dycores at
 equilibrium) requires multi-day integrations of each grid's own
 RCE harness. That validation runs outside this CI suite — the
-plane harness lives at ``scripts/run_rcemip_plane.py`` (PR4);
+plane harness lives at ``scripts/run/run_rcemip_plane.py`` (PR4);
 cubed-sphere + MPAS RCE wiring is documented separately. This
 file's scope is the **dynamical-core contract**, not the
 parametrised-physics equilibrium.

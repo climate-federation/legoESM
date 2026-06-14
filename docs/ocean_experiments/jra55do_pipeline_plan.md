@@ -19,7 +19,7 @@ A repo survey found the following directly reusable infrastructure:
 | **Zarr/NetCDF dispatch** (`decode_times=False`, format-agnostic open) | `forcing/external.py:_open_forcing_dataset` | Use as-is |
 | **Variable-alias normalization** (CMIP names → repo names) | `_WB2_VAR_ALIASES` in `era5_loader.py` | Pattern copy |
 | **Linear-in-time forcing dispatch** (`get_forcing_at_time(forcing, day)`) | `forcing/amip.py` | Pattern copy |
-| **AMIP-style driver structure** | `scripts/run_amip.py` | Pattern copy |
+| **AMIP-style driver structure** | `scripts/run/run_amip.py` | Pattern copy |
 | **`FreshwaterForcing` namedtuple + `model.step(freshwater=...)`** | `ocean/freshwater.py`, `ocean_model_latlon_cgrid.py:363,482,806` | Use as-is |
 | **`AtmToSurface` 2D struct + `ocean_tile_response`** | `coupler/coupling_fields.py`, `coupler/coupler.py` | Use as-is |
 
@@ -220,12 +220,12 @@ def jra55_to_freshwater(slice, lhflx, dt) -> FreshwaterForcing:
 
 Mentioned here for completeness but not built in Item 2.
 
-### Phase 5 — `scripts/prepare_omip_forcing.py` (~½ day)
+### Phase 5 — `scripts/data/prepare_omip_forcing.py` (~½ day)
 
 Thin CLI wrapper:
 
 ```bash
-python scripts/prepare_omip_forcing.py \
+python scripts/data/prepare_omip_forcing.py \
     --source gs://noresm-jra55do/v1.4/corrected \
     --years 1958 2018 \
     --target-grid latlon_1deg \

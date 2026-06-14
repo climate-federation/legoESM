@@ -25,8 +25,8 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.halo import (
-    _fill_corners_h1,
-    _fill_corners_h2,
+    fill_corners_h1,
+    fill_corners_h2,
     get_corner_fill_mode,
     set_corner_fill_mode,
 )
@@ -55,12 +55,12 @@ def test_bgrid_xdir_h1_uses_depth2_mirror():
     n = 6
     padded = jnp.zeros((6, n + 2, n + 2))
     padded = padded.at[:, 0, 2].set(33.0)   # depth-2 along XDir
-    out = _fill_corners_h1(padded)
+    out = fill_corners_h1(padded)
     np.testing.assert_array_equal(np.asarray(out[:, 0, 0]), 33.0 * np.ones(6))
     # NE corner: q[-1, -1] = q[-1, -3]
     padded2 = jnp.zeros((6, n + 2, n + 2))
     padded2 = padded2.at[:, -1, -3].set(77.0)
-    out2 = _fill_corners_h1(padded2)
+    out2 = fill_corners_h1(padded2)
     np.testing.assert_array_equal(np.asarray(out2[:, -1, -1]), 77.0 * np.ones(6))
 
 
@@ -81,9 +81,9 @@ def test_bgrid_xdir_h2_falls_through_to_avg():
     padded = jnp.asarray(padded_np)
 
     set_corner_fill_mode("avg")
-    out_avg = _fill_corners_h2(padded)
+    out_avg = fill_corners_h2(padded)
     set_corner_fill_mode("fv3_bgrid_xdir")
-    out_bgrid = _fill_corners_h2(padded)
+    out_bgrid = fill_corners_h2(padded)
 
     np.testing.assert_array_equal(np.asarray(out_avg), np.asarray(out_bgrid))
 
@@ -95,11 +95,11 @@ def test_bgrid_xdir_modes_differ_from_other_modes():
     padded = jnp.asarray(rng.uniform(-1.0, 1.0, size=(6, n + 2, n + 2)))
 
     set_corner_fill_mode("avg")
-    out_avg = np.asarray(_fill_corners_h1(padded))
+    out_avg = np.asarray(fill_corners_h1(padded))
     set_corner_fill_mode("fv3_agrid_xdir")
-    out_agrid = np.asarray(_fill_corners_h1(padded))
+    out_agrid = np.asarray(fill_corners_h1(padded))
     set_corner_fill_mode("fv3_bgrid_xdir")
-    out_bgrid = np.asarray(_fill_corners_h1(padded))
+    out_bgrid = np.asarray(fill_corners_h1(padded))
 
     assert float(np.max(np.abs(out_avg - out_bgrid))) > 0
     assert float(np.max(np.abs(out_agrid - out_bgrid))) > 0
@@ -114,7 +114,7 @@ def test_avg_mode_preserves_legacy_2point_average():
     padded = jnp.zeros((6, n + 2, n + 2))
     padded = padded.at[:, 0, 1].set(10.0)   # west halo, j=1
     padded = padded.at[:, 1, 0].set(20.0)   # south halo, i=1
-    out = _fill_corners_h1(padded)
+    out = fill_corners_h1(padded)
     # SW corner should be 0.5 * (10.0 + 20.0) = 15.0
     np.testing.assert_array_equal(np.asarray(out[:, 0, 0]), 15.0 * np.ones(6))
 
@@ -126,13 +126,13 @@ def test_fv3_agrid_xdir_uses_diagonal_mirror():
     padded = jnp.zeros((6, n + 2, n + 2))
     padded = padded.at[:, 0, 1].set(10.0)   # west halo, j=1
     padded = padded.at[:, 1, 0].set(20.0)   # south halo, i=1
-    out = _fill_corners_h1(padded)
+    out = fill_corners_h1(padded)
     # SW corner should be padded[0, 1] = 10.0 (NOT the average).
     np.testing.assert_array_equal(np.asarray(out[:, 0, 0]), 10.0 * np.ones(6))
     # NW corner should be padded[0, n] = padded[0, -2].
     padded_check = jnp.zeros((6, n + 2, n + 2))
     padded_check = padded_check.at[:, 0, -2].set(7.0)
-    out2 = _fill_corners_h1(padded_check)
+    out2 = fill_corners_h1(padded_check)
     np.testing.assert_array_equal(
         np.asarray(out2[:, 0, -1]), 7.0 * np.ones(6),
     )
@@ -146,9 +146,9 @@ def test_modes_give_different_results_on_random_input():
     padded = jnp.asarray(padded_np)
 
     set_corner_fill_mode("avg")
-    out_avg = _fill_corners_h1(padded)
+    out_avg = fill_corners_h1(padded)
     set_corner_fill_mode("fv3_agrid_xdir")
-    out_xdir = _fill_corners_h1(padded)
+    out_xdir = fill_corners_h1(padded)
 
     # The two modes must differ at the cube vertices (24 cells per
     # 6 faces × 4 corners = 24, always).
@@ -172,13 +172,13 @@ def test_round_trip_mode_change_restores_legacy():
     padded = jnp.asarray(rng.uniform(-1.0, 1.0, size=(6, n + 2, n + 2)))
 
     set_corner_fill_mode("avg")
-    out_before = _fill_corners_h1(padded)
+    out_before = fill_corners_h1(padded)
 
     set_corner_fill_mode("fv3_agrid_xdir")
-    _ = _fill_corners_h1(padded)
+    _ = fill_corners_h1(padded)
 
     set_corner_fill_mode("avg")
-    out_after = _fill_corners_h1(padded)
+    out_after = fill_corners_h1(padded)
 
     np.testing.assert_array_equal(out_before, out_after)
 
@@ -196,7 +196,7 @@ def test_h2_default_mode_is_avg_legacy():
     # Zero out the SW 2x2 block to verify the fill writes them.
     padded_np[:, 0:2, 0:2] = 0.0
     padded = jnp.asarray(padded_np)
-    out = _fill_corners_h2(padded)
+    out = fill_corners_h2(padded)
     out_np = np.asarray(out)
 
     # Inside-out: (1,1) ← 0.5*(padded[1,2] + padded[2,1])
@@ -221,7 +221,7 @@ def test_h2_xdir_mode_uses_diagonal_mirror():
     rng = np.random.default_rng(seed=23)
     padded_np = rng.uniform(-1.0, 1.0, size=(6, n + 4, n + 4))
     padded = jnp.asarray(padded_np)
-    out = _fill_corners_h2(padded)
+    out = fill_corners_h2(padded)
     out_np = np.asarray(out)
 
     # FV3 AGRID-XDir for ng=2 (Fortran q(1-i, 1-j) = q(1-j, i)
@@ -243,10 +243,10 @@ def test_h2_modes_differ_on_random_input():
     padded = jnp.asarray(rng.uniform(-1.0, 1.0, size=(6, n + 4, n + 4)))
 
     set_corner_fill_mode("avg")
-    out_avg = _fill_corners_h2(padded)
+    out_avg = fill_corners_h2(padded)
 
     set_corner_fill_mode("fv3_agrid_xdir")
-    out_xdir = _fill_corners_h2(padded)
+    out_xdir = fill_corners_h2(padded)
 
     diff = float(jnp.max(jnp.abs(out_avg - out_xdir)))
     assert diff > 0.0, "h2 modes must differ on random input"

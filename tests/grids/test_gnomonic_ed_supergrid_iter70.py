@@ -15,7 +15,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.cubed_sphere import (  # noqa: E402
     gnomonic_ed_supergrid_lonlat, make_fv3_native_grid,
-    _gnomonic_ed_remap_to_create,
+    gnomonic_ed_remap_to_create,
 )
 
 
@@ -36,7 +36,7 @@ def test_even_nodes_match_corners():
     """Refinement consistency: supergrid[::2, ::2] == gnomonic_ed corners."""
     n = 24
     lon_sg, lat_sg = (np.asarray(a) for a in gnomonic_ed_supergrid_lonlat(n))
-    lon_c, lat_c = (np.asarray(a) for a in _gnomonic_ed_remap_to_create(
+    lon_c, lat_c = (np.asarray(a) for a in gnomonic_ed_remap_to_create(
         *make_fv3_native_grid(n, grid_type=0)))
     sep = _gcd(lat_c, lon_c, lat_sg[:, ::2, ::2], lon_sg[:, ::2, ::2])
     assert sep.max() < 1e-10, (

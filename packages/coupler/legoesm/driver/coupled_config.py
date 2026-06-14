@@ -1,0 +1,258 @@
+"""Configuration for the fully coupled Earth System Model.
+
+Defines ``CoupledConfig`` which selects ocean, land, and carbon cycle
+modes, and preset factories for standard configurations.
+"""
+
+from __future__ import annotations
+
+from typing import NamedTuple
+
+from legoesm.ocean.simple_ocean import SimpleOceanConfig
+from legoesm.land.config import LandConfig, MultiLayerLandConfig
+from legoesm.land.carbon.config import CarbonConfig
+from legoesm.land.richards import RichardsConfig  # noqa: F401 (used in docstring)
+
+
+class CoupledConfig(NamedTuple):
+    """Configuration for the coupled ESM driver.
+
+    Selects ocean mode, land complexity, and carbon cycle options.
+    Each field maps to an existing component — no new physics is
+    introduced; this is purely wiring configuration.
+
+    Parameters
+    ----------
+    ocean_mode : str
+        ``"slab"`` (default), ``"two_layer"``, or ``"dynamic"`` (3D ocean).
+    ocean_config : SimpleOceanConfig
+        Slab/two-layer ocean parameters (ignored when ``ocean_mode="dynamic"``).
+    land_mode : str
+        ``"none"`` (aquaplanet), ``"slab"`` (bucket), or ``"multilayer"``
+        (Richards' equation soil hydrology).
+    land_config : LandConfig or MultiLayerLandConfig
+        Land parameters.  Type should match ``land_mode``:
+        ``LandConfig`` for ``"slab"``, ``MultiLayerLandConfig`` for
+        ``"multilayer"``.  Ignored when ``land_mode="none"``.
+    use_pft : bool
+        Use PFT-weighted land parameters instead of scalar defaults.
+    carbon_active : bool
+        Master switch for the carbon cycle.
+    carbon_land : str
+        Land carbon scheme: ``"none"``, ``"differland"`` (DALEC 6-pool),
+        ``"seasonal"`` (prescribed NEE cycle).
+    carbon_ocean : bool
+        Enable ocean biogeochemistry CO2 exchange.
+    co2_tracer : bool
+        Enable prognostic atmospheric CO2 transport.
+    co2_ppmv_init : float
+        Initial atmospheric CO2 concentration [ppmv].
+    f_land_mode : str
+        ``"zero"`` (aquaplanet), ``"analytical"`` (default land mask),
+        ``"file"`` (external land mask).
+    coupling_dt : float
+        Surface coupling interval [s].
+    """
+    # Ocean
+    ocean_mode: str = "slab"
+    ocean_config: SimpleOceanConfig = SimpleOceanConfig(mode="slab")
+    # Land
+    land_mode: str = "slab"
+    land_config: LandConfig | MultiLayerLandConfig = LandConfig()
+    use_pft: bool = False
+    # Carbon cycle
+    carbon_active: bool = False
+    carbon_land: str = "none"
+    carbon_ocean: bool = False
+    co2_tracer: bool = False
+    co2_ppmv_init: float = 415.0
+    # Tile fractions
+    f_land_mode: str = "analytical"
+    # Coupling
+    coupling_dt: float = 3600.0
+    # Dynamic surface → radiation feedback.  When True, the coupler's
+    # tile-blended surface albedo and skin temperature (which carry the
+    # sea-ice albedo feedback, zenith ocean albedo, snow brightening, and the
+    # ice/land prognostic skin temperature) are fed back to the atmosphere's
+    # radiation each segment instead of the frozen config scalars.  Default
+    # False keeps existing coupled runs byte-identical; enable it together with
+    # the dynamic surface schemes (IceConfig.temp_dependent_albedo,
+    # OceanAlbedoConfig.method='zenith', LandConfig.snow_albedo_feedback), whose
+    # effect on radiation is otherwise silently dropped.
+    couple_surface_radiation: bool = False
+
+
+# ============================================================================
+# Preset factories
+# ============================================================================
+
+def preset_aquaplanet(**overrides) -> CoupledConfig:
+    """Slab ocean everywhere, no land, no carbon."""
+    defaults = dict(
+        ocean_mode="slab",
+        ocean_config=SimpleOceanConfig(mode="slab", h_mix=50.0),
+        land_mode="none",
+        f_land_mode="zero",
+        carbon_active=False,
+    )
+    defaults.update(overrides)
+    return CoupledConfig(**defaults)
+
+
+def preset_slab_simple(**overrides) -> CoupledConfig:
+    """Slab ocean + slab bucket land, no carbon."""
+    defaults = dict(
+        ocean_mode="slab",
+        ocean_config=SimpleOceanConfig(mode="slab", h_mix=50.0),
+        land_mode="slab",
+        land_config=LandConfig(),
+        f_land_mode="analytical",
+        carbon_active=False,
+    )
+    defaults.update(overrides)
+    return CoupledConfig(**defaults)
+
+
+#: CoupledConfig.ocean_mode is a coarse, decorative *log label* (only logged by
+#: the coupled driver, never dispatched — the real ocean is make_ocean(ocean_config)).
+#: Map each simple-ocean mode onto the field's documented domain {slab, two_layer}.
+_OCEAN_MODE_LABEL = {"fixed": "slab", "slab": "slab", "two_layer": "two_layer"}
+
+
+def preset_complexity(level, **overrides) -> CoupledConfig:
+    """Build a ``CoupledConfig`` from a model-wide ``ModelComplexity`` level.
+
+    The model-wide complexity dial reaching the coupled driver: a user writes
+    ``preset_complexity("idealized")`` instead of hand-assembling
+    ``ocean_config`` + ``land_mode`` + ``land_config``.  Maps the level's ocean
+    and land rungs (``components.model_complexity_rungs``) onto the coupled
+    config:
+
+    ===============  =================================  =========================
+    level            ocean                              land
+    ===============  =================================  =========================
+    ``idealized``    fixed-SST slab                     slab bucket
+    ``intermediate`` slab mixed layer                   multi-layer Richards column
+    ===============  =================================  =========================
+
+    Scoped to the simple-ocean levels: the coupled driver's ocean is ALWAYS the
+    simple ocean (``_init_ocean`` calls ``make_ocean(ocean_config)``;
+    ``CoupledConfig.ocean_config`` is a ``SimpleOceanConfig``), so ``full`` (a
+    prognostic 3-D ``OceanModel``) is NOT representable here and raises — build a
+    full-3-D ocean run via ``driver.component_factory.resolve_model_complexity``
+    + the ocean component factory instead.  ``overrides`` are applied last (e.g.
+    ``carbon_active=True``, ``f_land_mode=``).
+    """
+    from legoesm.components import (
+        LandComplexity,
+        ModelComplexity,
+        OceanComplexity,
+        model_complexity_rungs,
+        ocean_simple_mode,
+    )
+
+    rungs = model_complexity_rungs(level)
+    if rungs.ocean is OceanComplexity.FULL_3D:
+        raise ValueError(
+            f"{ModelComplexity(level)!s} complexity has a full-3D ocean that is not "
+            "representable in CoupledConfig (which holds a SimpleOceanConfig; the "
+            "coupled driver's ocean is always make_ocean).  Build a full-3D ocean "
+            "run via driver.component_factory.resolve_model_complexity + the ocean "
+            "component factory instead."
+        )
+
+    ocean_mode = ocean_simple_mode(rungs.ocean)  # "fixed" | "slab" | "two_layer"
+    ocean_config = SimpleOceanConfig(mode=ocean_mode)
+    if rungs.land is LandComplexity.MULTILAYER:
+        land_mode, land_config = "multilayer", MultiLayerLandConfig()
+    else:
+        land_mode, land_config = "slab", LandConfig()
+
+    defaults = dict(
+        ocean_mode=_OCEAN_MODE_LABEL[ocean_mode],
+        ocean_config=ocean_config,
+        land_mode=land_mode,
+        land_config=land_config,
+    )
+    defaults.update(overrides)
+    return CoupledConfig(**defaults)
+
+
+def preset_slab_pft(**overrides) -> CoupledConfig:
+    """Slab ocean + slab land with PFT-weighted parameters."""
+    defaults = dict(
+        ocean_mode="slab",
+        ocean_config=SimpleOceanConfig(mode="slab", h_mix=50.0),
+        land_mode="slab",
+        land_config=LandConfig(),
+        use_pft=True,
+        f_land_mode="analytical",
+        carbon_active=False,
+    )
+    defaults.update(overrides)
+    return CoupledConfig(**defaults)
+
+
+def preset_slab_richards(**overrides) -> CoupledConfig:
+    """Slab ocean + multi-layer Richards' equation land, no carbon."""
+    defaults = dict(
+        ocean_mode="slab",
+        ocean_config=SimpleOceanConfig(mode="slab", h_mix=50.0),
+        land_mode="multilayer",
+        land_config=MultiLayerLandConfig(
+            # Richards equation is always active in multilayer mode
+        ),
+        f_land_mode="analytical",
+        carbon_active=False,
+    )
+    defaults.update(overrides)
+    return CoupledConfig(**defaults)
+
+
+def preset_slab_carbon(**overrides) -> CoupledConfig:
+    """Slab ocean + Richards' land + DifferLand carbon + atm CO2 tracer."""
+    defaults = dict(
+        ocean_mode="slab",
+        ocean_config=SimpleOceanConfig(mode="slab", h_mix=50.0),
+        land_mode="multilayer",
+        land_config=MultiLayerLandConfig(
+            # Richards equation is always active in multilayer mode
+            carbon=CarbonConfig(scheme="differland"),
+        ),
+        f_land_mode="analytical",
+        carbon_active=True,
+        carbon_land="differland",
+        co2_tracer=True,
+    )
+    defaults.update(overrides)
+    return CoupledConfig(**defaults)
+
+
+def preset_full_coupled(**overrides) -> CoupledConfig:
+    """Slab ocean + Richards' land + land & ocean carbon + atm CO2."""
+    defaults = dict(
+        ocean_mode="slab",
+        ocean_config=SimpleOceanConfig(mode="slab", h_mix=50.0),
+        land_mode="multilayer",
+        land_config=MultiLayerLandConfig(
+            # Richards equation is always active in multilayer mode
+            carbon=CarbonConfig(scheme="differland"),
+        ),
+        f_land_mode="analytical",
+        carbon_active=True,
+        carbon_land="differland",
+        carbon_ocean=True,
+        co2_tracer=True,
+    )
+    defaults.update(overrides)
+    return CoupledConfig(**defaults)
+
+
+PRESETS = {
+    "aquaplanet": preset_aquaplanet,
+    "slab_simple": preset_slab_simple,
+    "slab_pft": preset_slab_pft,
+    "slab_richards": preset_slab_richards,
+    "slab_carbon": preset_slab_carbon,
+    "full_coupled": preset_full_coupled,
+}

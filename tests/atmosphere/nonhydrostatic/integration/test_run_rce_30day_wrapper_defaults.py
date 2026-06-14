@@ -2,7 +2,7 @@
 and post-run summarizer failure propagation behaviour.
 
 Locks the iter-14 production-measured config as a contract on
-``scripts/run_rce_30day.sh`` env-var defaults. iter-58 found this
+``scripts/run/run_rce_30day.sh`` env-var defaults. iter-58 found this
 wrapper still had ``DT=1.0`` + ``N_ACOUSTIC=24`` in its
 documentation (citing the iter-1 F1 ladder pre-F10 fix), while the
 iter-14 production measurement + iter-38 structural regression
@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-WRAPPER = REPO_ROOT / "scripts" / "run_rce_30day.sh"
+WRAPPER = REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"
 
 
 def _parse_env_default(text: str, name: str) -> str | None:
@@ -326,7 +326,7 @@ def _strip_bash_comments(text: str) -> str:
 
 def test_wrapper_invokes_post_run_summarizer(wrapper_text):
     """iter-99: ``run_rce_30day.sh`` must call
-    ``scripts/summarize_rce_trajectory.py`` AFTER the mpirun line so
+    ``scripts/validate/summarize_rce_trajectory.py`` AFTER the mpirun line so
     every production run emits ``<OUTPUT>/trajectory.csv``. Three
     invariants (iter-99 Codex review hardened):
 
@@ -363,7 +363,7 @@ def test_wrapper_invokes_post_run_summarizer(wrapper_text):
     # MEDIUM#4 — comments stripped above, but anchoring belt-and-
     # braces against an executable heredoc / dead branch).
     summary_match = re.search(
-        r'^\s*"\$PYBIN"\s+"\$REPO_ROOT/scripts/summarize_rce_trajectory\.py"\s+"\$OUTPUT"',
+        r'^\s*"\$PYBIN"\s+"\$REPO_ROOT/scripts/validate/summarize_rce_trajectory\.py"\s+"\$OUTPUT"',
         code,
         re.MULTILINE,
     )
@@ -374,7 +374,7 @@ def test_wrapper_invokes_post_run_summarizer(wrapper_text):
     )
     assert summary_match is not None, (
         "run_rce_30day.sh missing the post-run "
-        "``\"$PYBIN\" \"$REPO_ROOT/scripts/summarize_rce_trajectory.py\" "
+        "``\"$PYBIN\" \"$REPO_ROOT/scripts/validate/summarize_rce_trajectory.py\" "
         "\"$OUTPUT\"`` call in executable code (only matched in "
         "comments?). Production runs would land snapshots but no "
         "aggregated per-day trajectory CSV (iter-99 contract)."
@@ -466,7 +466,7 @@ def _run_wrapper_with_stubs(
     allow_summary_failure: str = "0",
     days: str = "0",
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``scripts/run_rce_30day.sh`` with stubbed mpirun + Python
+    """Run ``scripts/run/run_rce_30day.sh`` with stubbed mpirun + Python
     interpreter so the wrapper exercises its post-run branch logic
     against synthetic exit codes.
 
@@ -500,7 +500,7 @@ def _run_wrapper_with_stubs(
     # Provide an explicit output dir so the wrapper doesn't pollute
     # results/.
     return subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env,
         cwd=str(REPO_ROOT),
@@ -712,7 +712,7 @@ def test_wrapper_evaluate_dod_final_threads_final_dod_flag(tmp_path):
     env["ALLOW_SUMMARY_FAILURE"] = "0"
     env["EVALUATE_DOD"] = "final"
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env,
         cwd=str(REPO_ROOT),
@@ -759,7 +759,7 @@ def test_wrapper_evaluate_dod_1_threads_evaluate_flag(tmp_path):
     env["ALLOW_SUMMARY_FAILURE"] = "0"
     env["EVALUATE_DOD"] = "1"
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=30,
@@ -791,7 +791,7 @@ def test_wrapper_evaluate_dod_rejects_typo(tmp_path):
     env["ALLOW_SUMMARY_FAILURE"] = "0"
     env["EVALUATE_DOD"] = "Final"  # typo: capital F
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=30,
@@ -832,7 +832,7 @@ def test_wrapper_prints_final_dod_hint_on_30day_default(tmp_path):
     env["ALLOW_SUMMARY_FAILURE"] = "0"
     env["EVALUATE_DOD"] = "0"  # the default — DOD not auto-gated
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=30,
@@ -874,7 +874,7 @@ def test_wrapper_no_hint_on_short_run(tmp_path):
     env["ALLOW_SUMMARY_FAILURE"] = "0"
     env["EVALUATE_DOD"] = "0"
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=30,
@@ -906,7 +906,7 @@ def test_wrapper_no_hint_when_evaluate_dod_set(tmp_path):
     env["ALLOW_SUMMARY_FAILURE"] = "0"
     env["EVALUATE_DOD"] = "final"  # already grading
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=30,
@@ -953,14 +953,14 @@ def test_wrapper_emit_trajectory_png_default_off(wrapper_text):
 
 def test_wrapper_emit_trajectory_png_invokes_plot_rce_log(wrapper_text):
     """iter-125: when the EMIT_TRAJECTORY_PNG=1 branch fires, it
-    must invoke scripts/plot_rce_log.py against $OUTPUT."""
+    must invoke scripts/plot/plot_rce_log.py against $OUTPUT."""
     code = _strip_bash_comments(wrapper_text)
     assert re.search(
-        r'"\$PYBIN"\s+"\$REPO_ROOT/scripts/plot_rce_log\.py"\s+"\$OUTPUT"',
+        r'"\$PYBIN"\s+"\$REPO_ROOT/scripts/plot/plot_rce_log\.py"\s+"\$OUTPUT"',
         code,
     ), (
         "run_rce_30day.sh EMIT_TRAJECTORY_PNG=1 branch must call "
-        "``\"$PYBIN\" \"$REPO_ROOT/scripts/plot_rce_log.py\" "
+        "``\"$PYBIN\" \"$REPO_ROOT/scripts/plot/plot_rce_log.py\" "
         "\"$OUTPUT\"``."
     )
 
@@ -1012,7 +1012,7 @@ def _run_wrapper_quick(tmp_path, *, days, evaluate_dod):
     env["ALLOW_SUMMARY_FAILURE"] = "0"
     env["EVALUATE_DOD"] = evaluate_dod
     return subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=30,
@@ -1117,7 +1117,7 @@ def test_wrapper_emit_trajectory_png_strict_propagates(tmp_path):
     env["EVALUATE_DOD"] = "0"
     env["EMIT_TRAJECTORY_PNG"] = "strict"
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=30,
@@ -1150,7 +1150,7 @@ def test_wrapper_evaluate_dod_stability_threads_no_plateau_check(tmp_path):
     env["ALLOW_SUMMARY_FAILURE"] = "0"
     env["EVALUATE_DOD"] = "stability"
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=30,
@@ -1198,7 +1198,7 @@ def test_wrapper_help_flag_prints_usage_and_exits_zero(tmp_path):
     and the wrapper would write garbage to that literal path."""
     for flag in ("--help", "-h"):
         res = subprocess.run(
-            ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+            ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
              flag],
             cwd=str(REPO_ROOT), capture_output=True, text=True,
             check=False, timeout=10,
@@ -1268,7 +1268,7 @@ def test_wrapper_check_log_max_w_subprocess_threads_flag(tmp_path):
     env["EVALUATE_DOD"] = "0"
     env["CHECK_LOG_MAX_W"] = "1"
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=30,
@@ -1306,7 +1306,7 @@ def test_wrapper_evaluate_dod_final_plus_check_log_max_w_threads_both(tmp_path):
     env["EVALUATE_DOD"] = "final"
     env["CHECK_LOG_MAX_W"] = "1"
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=30,
@@ -1344,7 +1344,7 @@ def test_wrapper_emit_trajectory_png_rejects_typo(tmp_path):
     env["ALLOW_SUMMARY_FAILURE"] = "0"
     env["EMIT_TRAJECTORY_PNG"] = "Strict"  # typo: capital S
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=30,
@@ -1382,7 +1382,7 @@ def test_wrapper_check_log_max_w_default_off(tmp_path):
     env["EVALUATE_DOD"] = "0"
     # CHECK_LOG_MAX_W unset → falls back to 0.
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          str(out_dir)],
         env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=30,
@@ -1401,7 +1401,7 @@ def test_wrapper_help_lists_all_env_vars(tmp_path):
     A future env var addition that doesn't widen the range would
     be caught here."""
     res = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+        ["bash", str(REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh"),
          "--help"],
         cwd=str(REPO_ROOT), capture_output=True, text=True,
         check=False, timeout=10,

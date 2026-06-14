@@ -21,7 +21,7 @@ from legoesm.ice.itd import (
     aggregate_state,
     distribute_to_categories,
 )
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 

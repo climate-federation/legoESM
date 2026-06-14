@@ -352,17 +352,23 @@ def probe_plume_convection():
 
     out = plume_convection(T, S, rho, p, z_coord, jacobian, cfg)
 
+    # NOTE loss = sum(dT_dt**2), NOT sum(dT_dt): the scheme is heat-
+    # CONSERVING, so with uniform dz the plain column sum is identically
+    # zero for ANY input and its gradient is a vacuous all-zeros (the
+    # original probe "passed" on exactly that degenerate loss — 2026-06-11
+    # differentiability audit, Finding 2).
     def loss(T_):
         rho_ = wright_eos(T_, S, jnp.zeros_like(T_))
         out_ = plume_convection(T_, S, rho_, p, z_coord, jacobian, cfg)
-        return out_.dT_dt.sum()
+        return (out_.dT_dt ** 2).sum()
 
     g = jax.grad(loss)(T)
     finite = bool(jnp.all(jnp.isfinite(g)))
+    nonzero_frac = float(jnp.mean(jnp.abs(g) > 0))
     report(
-        "plume_convection grad finite",
-        finite,
-        f"max|g|={float(jnp.max(jnp.abs(g))):.3e}",
+        "plume_convection grad finite + nonzero",
+        finite and nonzero_frac > 0.5,
+        f"max|g|={float(jnp.max(jnp.abs(g))):.3e}, nonzero={nonzero_frac:.0%}",
     )
 
     # Physics sanity: this column is statically UNSTABLE (cold/dense surface

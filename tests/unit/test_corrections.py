@@ -939,7 +939,7 @@ class TestLargeYeager:
 
     def test_monotonic_drag_with_wind(self):
         """Drag should increase monotonically with wind speed."""
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import compute_most_fluxes
         winds = jnp.array([2.0, 5.0, 10.0, 15.0, 20.0])
         taus = []
         for w in winds:
@@ -961,7 +961,7 @@ class TestLargeYeager:
 
     def test_height_dependence(self):
         """Results should differ for z_ref=10 vs z_ref=20."""
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import compute_most_fluxes
         args = self._make_flux_inputs()
         _, _, _, _, u_star_10 = compute_most_fluxes(*args, z_ref=10.0,
                                                       scheme="large_yeager")
@@ -972,7 +972,7 @@ class TestLargeYeager:
 
     def test_stable_vs_unstable(self):
         """Stable and unstable cases should give different heat fluxes."""
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import compute_most_fluxes
         n = 4
         u = jnp.ones(n) * 8.0
         v = jnp.zeros(n)
@@ -994,7 +994,7 @@ class TestLargeYeager:
 
     def test_reference_values(self):
         """Spot-check LY drag coefficient at moderate wind."""
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import compute_most_fluxes
         u = jnp.ones(1) * 10.0
         v = jnp.zeros(1)
         T_atm = jnp.ones(1) * 290.0

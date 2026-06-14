@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.canopy import CanopyLandParams
 from legoesm.land.carbon import CarbonConfig, init_carbon_state
 from legoesm.land.config import LandConfig, MultiLayerLandConfig
@@ -436,7 +436,7 @@ def test_prognostic_lai_overrides_prescribed_lai():
     assert not jnp.allclose(r_prog.lhflx, r_fixed.lhflx, atol=1e-3), (
         "prognostic LAI must change canopy fluxes relative to LAI=1.5")
     assert not jnp.allclose(r_prog.shflx, r_fixed.shflx, atol=1e-3)
-    assert not jnp.allclose(r_prog.T_surface, r_fixed.T_surface, atol=1e-4)
+    assert not jnp.allclose(r_prog.T_sfc, r_fixed.T_sfc, atol=1e-4)
 
 
 def test_prognostic_lai_responds_to_c_fol_changes():

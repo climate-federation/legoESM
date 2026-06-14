@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "matrix"))  # for `import run_ocean_test_matrix`
 
 from legoesm.ocean.experiments.lock_exchange import (  # noqa: E402
     EXPERIMENT_CONFIG,
@@ -41,8 +41,8 @@ def test_config_default_H_max_is_petersen_fig5():
 
 def test_config_default_temperatures_match_petersen_fig5():
     cfg = LockExchangeConfig()
-    assert cfg.T_cold == 5.0
-    assert cfg.T_warm == 30.0
+    assert cfg.T_cold_C == 5.0
+    assert cfg.T_warm_C == 30.0
 
 
 def test_special_config_H_max_matches_dataclass():

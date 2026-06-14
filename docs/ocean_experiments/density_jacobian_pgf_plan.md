@@ -379,7 +379,7 @@ only on the PGF computation; nothing else changes.
 
 ### Phase 5: BH stress-test validation
 
-Run `scripts/realistic_geometry_validation/run_phase3a_seamount.py`
+Run `scripts/validate/realistic_geometry/run_phase3a_seamount.py`
 with `--pgf-scheme smc03` (add the script flag) at smoothing 0, 2, 5,
 10, with bottom_drag_r ∈ {0, 1e-3, 5e-3}.
 

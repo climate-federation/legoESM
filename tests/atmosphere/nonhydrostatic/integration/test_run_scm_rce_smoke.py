@@ -1,4 +1,4 @@
-"""Smoke test for ``scripts/run_scm_test_matrix.py rce``.
+"""Smoke test for ``scripts/matrix/run_scm_test_matrix.py rce``.
 
 iter-300: 10th previously-untested CRM-adjacent script. SCM RCE
 is a single-column radiative-convective equilibrium harness
@@ -12,7 +12,7 @@ prescribed initial T_sfc ≈ 300 K, T_top near gray-radiation
 equilibrium ≈ 200 K. The script exits non-zero if final state
 fails finite + coarse RCE checks.
 
-The actual gates in ``scripts/scm/rce.py`` (iter-304 audit):
+The actual gates in ``scripts/matrix/scm/rce.py`` (iter-304 audit):
 * ``jnp.all(jnp.isfinite(T_final))``
 * ``240 < T_sfc_final < 320`` K
 * ``150 < T_top_final < 270`` K
@@ -37,7 +37,7 @@ from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
 )
 
 
-SCRIPT = REPO_ROOT / "scripts" / "run_scm_test_matrix.py"
+SCRIPT = REPO_ROOT / "scripts" / "matrix" / "run_scm_test_matrix.py"
 
 
 _T_SFC_RE = re.compile(r"T_sfc_final\s*=\s*([\d.eE+-]+)\s*K")

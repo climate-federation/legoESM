@@ -22,11 +22,42 @@ from legoesm.parallel.device_config import (
     get_optimal_mesh,
     _estimate_device_memory,
     _recommended_batch_size,
-    _set_xla_flags,
-    _TPU_XLA_FLAGS,
-    _NVIDIA_GPU_XLA_FLAGS,
-    _AMD_GPU_XLA_FLAGS,
 )
+# The XLA-flag helpers live in runtime.backend (device_config imports them from
+# there); import from their actual home, not the module they moved out of.
+from legoesm.runtime.backend import (
+    set_xla_flags,
+    TPU_XLA_FLAGS,
+    NVIDIA_GPU_XLA_FLAGS,
+    AMD_GPU_XLA_FLAGS,
+)
+
+
+def _docstring_line_numbers(src: str) -> set[int]:
+    """1-based line numbers spanned by module/class/function docstrings.
+
+    The reintroduction guards below scan source text for forbidden XLA
+    flag / config names.  The fix that removed those names left
+    explanatory docstrings that *cite* them by name (so a future reader
+    understands why they are gone); a docstring mention is NOT an
+    executable emission and must not trip the guard.  ``#`` comments are
+    already handled by ``line.split('#')`` at the call site — this only
+    covers triple-quoted docstrings, which that split cannot see.
+    """
+    import ast as _ast
+
+    lines: set[int] = set()
+    for node in _ast.walk(_ast.parse(src)):
+        if not isinstance(
+            node,
+            (_ast.Module, _ast.ClassDef, _ast.FunctionDef, _ast.AsyncFunctionDef),
+        ):
+            continue
+        if _ast.get_docstring(node, clean=False) is None:
+            continue
+        doc = node.body[0].value  # the docstring Constant node
+        lines.update(range(doc.lineno, (doc.end_lineno or doc.lineno) + 1))
+    return lines
 
 
 # ============================================================================
@@ -221,14 +252,14 @@ class TestBatchSize:
 # ============================================================================
 
 class TestXLAFlags:
-    """Tests for _set_xla_flags and configure_jax_for_device."""
+    """Tests for set_xla_flags and configure_jax_for_device."""
 
     def test_set_xla_flags_adds_to_env(self):
-        """_set_xla_flags appends flags to XLA_FLAGS."""
+        """set_xla_flags appends flags to XLA_FLAGS."""
         old = os.environ.get("XLA_FLAGS", "")
         try:
             os.environ["XLA_FLAGS"] = ""
-            _set_xla_flags({"test_flag_abc": "true"})
+            set_xla_flags({"test_flag_abc": "true"})
             assert "test_flag_abc=true" in os.environ["XLA_FLAGS"]
         finally:
             if old:
@@ -237,11 +268,11 @@ class TestXLAFlags:
                 os.environ.pop("XLA_FLAGS", None)
 
     def test_set_xla_flags_does_not_duplicate(self):
-        """_set_xla_flags does not duplicate existing flags."""
+        """set_xla_flags does not duplicate existing flags."""
         old = os.environ.get("XLA_FLAGS", "")
         try:
             os.environ["XLA_FLAGS"] = "--test_flag_xyz=false"
-            _set_xla_flags({"test_flag_xyz": "true"})
+            set_xla_flags({"test_flag_xyz": "true"})
             # Should not add because key already present
             assert os.environ["XLA_FLAGS"].count("test_flag_xyz") == 1
         finally:
@@ -251,11 +282,11 @@ class TestXLAFlags:
                 os.environ.pop("XLA_FLAGS", None)
 
     def test_set_xla_flags_merges_with_existing(self):
-        """_set_xla_flags preserves existing flags while adding new ones."""
+        """set_xla_flags preserves existing flags while adding new ones."""
         old = os.environ.get("XLA_FLAGS", "")
         try:
             os.environ["XLA_FLAGS"] = "--existing_flag=1"
-            _set_xla_flags({"new_flag_qrs": "2"})
+            set_xla_flags({"new_flag_qrs": "2"})
             flags = os.environ["XLA_FLAGS"]
             assert "existing_flag=1" in flags
             assert "new_flag_qrs=2" in flags
@@ -288,14 +319,16 @@ class TestXLAFlags:
         emission of the `intra_op_parallelism_threads` XLA flag so
         a future refactor can't silently re-introduce the crash.
         """
-        import pathlib
-        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        from tests.legoesm_paths import legoesm_source_path
         for rel_path in (
-            "src/legoesm/runtime/backend.py",
-            "src/legoesm/parallel/device_config.py",
+            "runtime/backend.py",
+            "parallel/device_config.py",
         ):
-            src = (repo_root / rel_path).read_text()
+            src = legoesm_source_path(rel_path).read_text()
+            docstring_lines = _docstring_line_numbers(src)
             for lineno, line in enumerate(src.splitlines(), 1):
+                if lineno in docstring_lines:
+                    continue
                 code_part = line.split("#", 1)[0]
                 if "intra_op_parallelism_threads" in code_part:
                     raise AssertionError(
@@ -362,14 +395,16 @@ class TestXLAFlags:
         # call (i.e. not inside a `#` comment).  This catches
         # re-introduction via copy-paste while letting the explanatory
         # NOTE comments the fix left behind remain.
-        import pathlib
+        from tests.legoesm_paths import legoesm_source_path
         for rel_path in (
-            "src/legoesm/parallel/device_config.py",
-            "src/legoesm/runtime/backend.py",
+            "parallel/device_config.py",
+            "runtime/backend.py",
         ):
-            repo_root = pathlib.Path(__file__).resolve().parents[2]
-            src = (repo_root / rel_path).read_text()
+            src = legoesm_source_path(rel_path).read_text()
+            docstring_lines = _docstring_line_numbers(src)
             for lineno, line in enumerate(src.splitlines(), 1):
+                if lineno in docstring_lines:
+                    continue
                 # Strip Python line comment before inspecting for the
                 # forbidden pattern — NOTE comments mention the API by
                 # name, and that is fine.
@@ -657,5 +692,5 @@ class TestGPUVendorDetection:
 
     def test_xla_flags_nvidia_only(self):
         """NVIDIA XLA flags contain cuDNN; AMD flags do not."""
-        assert "xla_gpu_cudnn_gemm_fusion_level" in _NVIDIA_GPU_XLA_FLAGS
-        assert "xla_gpu_cudnn_gemm_fusion_level" not in _AMD_GPU_XLA_FLAGS
+        assert "xla_gpu_cudnn_gemm_fusion_level" in NVIDIA_GPU_XLA_FLAGS
+        assert "xla_gpu_cudnn_gemm_fusion_level" not in AMD_GPU_XLA_FLAGS

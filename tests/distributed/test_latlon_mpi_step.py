@@ -38,6 +38,7 @@ from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
     CGridLatLonPrimitiveEquationConfig,
     CGridLatLonPrimitiveEquationModel,
 )
+from legoesm.atmosphere.held_suarez import held_suarez_forcing_latlon
 from legoesm.grids.halo import set_halo_backend
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate
@@ -78,10 +79,17 @@ def serial_config():
 
 @pytest.fixture(scope="module")
 def global_serial_model(global_grid, sigma, serial_config):
-    """The reference serial model with the FULL global grid.  Lives
-    only on rank 0; other ranks don't construct it."""
-    if MPI.COMM_WORLD.Get_rank() != 0:
-        return None
+    """The reference serial model with the FULL global grid.
+
+    Constructed on EVERY rank: each rank computes the serial reference
+    itself (deterministically identical — same global state, no comm)
+    *before* ``make_latlon_mpi_step`` arms the MPI halo backend.  A
+    rank-0-only serial reference computed *after* arming deadlocks:
+    the serial ``_step_cgrid`` traces MPI sendrecv/allreduce ops
+    (``fix_mass`` → ``batch_global_area_sums``; operator pads → band
+    sendrecv) that no other rank matches.  That deadlock is exactly
+    how every historical np>1 run of this file timed out while rank 1
+    printed a trivial early-return "passed"."""
     return CGridLatLonPrimitiveEquationModel(
         global_grid, sigma, serial_config,
     )
@@ -175,11 +183,18 @@ def _make_local_model(global_grid, sigma, serial_config, layout):
 # ---------------------------------------------------------------------------
 
 
+# Tolerance calibration (2026-06-10, jobs 8456042/8456021): the serial
+# reference and the armed-MPI leg compile DIFFERENT XLA programs (halo
+# dispatch), so fusion/reduction reorder leaves a roundoff floor of
+# ~5e-11 abs on u after 3 steps at f64 even with all partition-cut bugs
+# fixed (ocean analog: eta 3.7e-9 after 12 steps).  rtol=1e-8/atol=1e-9
+# sits well above that floor and orders of magnitude below real cut
+# corruption (e-6 class, caught at these tolerances pre-fix).
 class TestMPIStepEquivalence:
 
     @pytest.fixture(autouse=True)
     def _activate_mpi_halo_backend(self):
-        """``_is_distributed()`` returns ``get_halo_backend() == "mpi"``.
+        """``is_distributed()`` returns ``get_halo_backend() == "mpi"``.
         The mass fixer + zero_mean_tendency need this to allreduce.
 
         We don't need a real cubed-sphere topology — the lat-lon path
@@ -254,26 +269,41 @@ class TestMPIStepEquivalence:
             n_ranks=MPI.COMM_WORLD.Get_size(),
             n_lat=global_grid.n_lat, n_lon=global_grid.n_lon,
         )
+        dt = 100.0
 
-        # Per-rank: build local model, scatter state, step, gather.
+        # --- Serial reference FIRST, on EVERY rank, LOCAL backend ---
+        # Must precede ``make_latlon_mpi_step`` (which arms the band-
+        # layout MPI halo backend as a global side effect): a serial
+        # ``_step_cgrid`` traced after arming embeds band sendrecvs +
+        # the ``fix_mass`` allreduce, which deadlocks when only rank 0
+        # runs it.  Under the local backend the graph is collective-
+        # free (``is_distributed()`` is False at trace time), so every
+        # rank computes the identical bit-exact serial result.
+        set_halo_backend("local")
+        serial_out, _ = global_serial_model._step_cgrid(
+            global_state, dt, target_mass=None, physics_fn=None,
+        )
+        # Materialize before arming MPI so no serial work interleaves
+        # with the band-step collectives below.
+        serial_out = jax.block_until_ready(serial_out)
+
+        # --- Per-rank: build local model, scatter, MPI step, gather ---
+        # No collective may run between the serial phase above and
+        # ``make_latlon_mpi_step`` (its ``global_sum_mpi`` is the first
+        # collective, reached by all ranks together): model build and
+        # scatter are pure local slicing.
         local_model = _make_local_model(
             global_grid, sigma, serial_config, layout,
         )
         local_state = scatter_state_latlon(global_state, layout)
         step_fn = make_latlon_mpi_step(local_model, layout, halo=2)
-        dt = 100.0
         local_out = step_fn(local_state, dt)
 
-        # Gather to rank 0.  Other ranks bail out of the comparison.
+        # Gather to rank 0.  Other ranks bail out of the comparison —
+        # everything below is comm-free.
         gathered = gather_state_latlon(local_out, layout)
         if MPI.COMM_WORLD.Get_rank() != 0:
             return
-
-        # Rank 0: serial reference.
-        assert global_serial_model is not None
-        serial_out = global_serial_model._step_cgrid(
-            global_state, dt, target_mass=None, physics_fn=None,
-        )
 
         # Compare.  ``v`` has shape (n_lat+1, n_lon, nlev) globally
         # but gather_state_latlon handles the duplicated-row trim,
@@ -282,7 +312,7 @@ class TestMPIStepEquivalence:
             np.testing.assert_allclose(
                 getattr(gathered, field),
                 getattr(serial_out, field),
-                rtol=1e-9, atol=1e-11,
+                rtol=1e-8, atol=1e-9,
                 err_msg=(
                     f"Multi-rank MPI step diverged from serial in "
                     f"``{field}`` (ranks={MPI.COMM_WORLD.Get_size()}, "
@@ -294,12 +324,109 @@ class TestMPIStepEquivalence:
             for name in serial_out.tracers:
                 np.testing.assert_allclose(
                     gathered.tracers[name], serial_out.tracers[name],
-                    rtol=1e-9, atol=1e-11,
+                    rtol=1e-8, atol=1e-9,
                     err_msg=(
                         f"Multi-rank MPI step diverged in tracer "
                         f"``{name}`` (ranks={MPI.COMM_WORLD.Get_size()})"
                     ),
                 )
+
+    # ------------------------------------------------------------------
+    # Physics pass-through (make_latlon_mpi_step physics_fn kwarg)
+    # ------------------------------------------------------------------
+    #
+    # ``held_suarez_forcing_latlon`` is the canonical column-local
+    # physics (Newtonian relaxation + Rayleigh friction): it reads only
+    # the rank-local band's lat / sigma, so MPI must reproduce serial to
+    # roundoff just like the dry case.  The ``None`` case is the
+    # regression guard for the signature change — an *explicitly
+    # passed* ``physics_fn=None`` must keep the historical
+    # dynamics-only behaviour bit-for-bit.
+    #
+    # Multi-step (3 steps) so band-cut information propagates across
+    # ranks between physics evaluations (one step only exercises a
+    # single halo round-trip).  The physics_fn is a module-level
+    # function, so its identity is stable and ``_step_cgrid`` (which
+    # holds it as a *static* jit argument) compiles exactly once per
+    # case.
+
+    @pytest.mark.parametrize("physics_name", ["none", "held_suarez"])
+    def test_step_with_physics_fn_matches_serial(
+        self, global_grid, sigma, serial_config,
+        global_serial_model, physics_name,
+    ):
+        """scatter → N×(MPI step with physics_fn) → gather ≡ serial.
+
+        Same wiring as ``test_step_matches_serial_after_gather`` but
+        driving the new ``make_latlon_mpi_step(..., physics_fn=...)``
+        pass-through (and its ``None`` default) against the serial
+        ``_step_cgrid`` reference with the *same* physics_fn.
+        """
+        physics_fn = (
+            held_suarez_forcing_latlon if physics_name == "held_suarez"
+            else None
+        )
+        n_steps = 3
+        nlev = sigma.n_levels
+        global_state = _make_global_state(
+            global_grid, nlev, with_tracers=False,
+        )
+        layout = make_latlon_band_layout(
+            rank=MPI.COMM_WORLD.Get_rank(),
+            n_ranks=MPI.COMM_WORLD.Get_size(),
+            n_lat=global_grid.n_lat, n_lon=global_grid.n_lon,
+        )
+        dt = 100.0
+
+        # --- Serial reference FIRST, on EVERY rank, LOCAL backend ---
+        # Same ordering contract as ``test_step_matches_serial_after_
+        # gather``: the serial reference (fed through the same
+        # ``_step_cgrid`` entry point the serial ``model.step(state,
+        # dt, physics_fn=...)`` delegate uses) must be traced and
+        # materialized under the local halo backend BEFORE
+        # ``make_latlon_mpi_step`` arms the band-layout MPI backend —
+        # otherwise the rank-0-only serial graph embeds band
+        # sendrecvs + the ``fix_mass`` allreduce and deadlocks at
+        # np>1.  Every rank computes it (deterministic, comm-free).
+        set_halo_backend("local")
+        serial_out = global_state
+        for _ in range(n_steps):
+            serial_out, _ = global_serial_model._step_cgrid(
+                serial_out, dt, target_mass=None, physics_fn=physics_fn,
+            )
+        serial_out = jax.block_until_ready(serial_out)
+
+        # --- Per-rank: build local model, scatter, MPI steps, gather ---
+        # Comm-free until ``make_latlon_mpi_step`` (whose
+        # ``global_sum_mpi`` is the first collective, reached by all
+        # ranks together).
+        local_model = _make_local_model(
+            global_grid, sigma, serial_config, layout,
+        )
+        local_state = scatter_state_latlon(global_state, layout)
+        step_fn = make_latlon_mpi_step(
+            local_model, layout, halo=2, physics_fn=physics_fn,
+        )
+        local_out = local_state
+        for _ in range(n_steps):
+            local_out = step_fn(local_out, dt)
+
+        gathered = gather_state_latlon(local_out, layout)
+        if MPI.COMM_WORLD.Get_rank() != 0:
+            return
+
+        for field in ("u", "v", "T", "p_s"):
+            np.testing.assert_allclose(
+                getattr(gathered, field),
+                getattr(serial_out, field),
+                rtol=1e-8, atol=1e-9,
+                err_msg=(
+                    f"Multi-rank MPI step with physics_fn="
+                    f"{physics_name} diverged from serial in "
+                    f"``{field}`` after {n_steps} steps "
+                    f"(ranks={MPI.COMM_WORLD.Get_size()})"
+                ),
+            )
 
     @pytest.mark.skip(
         reason=(
@@ -365,5 +492,5 @@ class TestMPIStepEquivalence:
             f"Mass drifted by {rel_drift:.3e} over one MPI step on "
             f"{MPI.COMM_WORLD.Get_size()} ranks.  Either the fixer "
             f"isn't seeing the global total area, or the allreduce "
-            f"in _batch_global_area_sums isn't firing."
+            f"in batch_global_area_sums isn't firing."
         )

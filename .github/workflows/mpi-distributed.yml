@@ -28,12 +28,22 @@ jobs:
           mpirun --version
 
       - name: Install Python Dependencies
+        # Deterministic tested MPI stack (jax 0.9.2 + mpi4jax 0.8.1.post2) —
+        # the envelope enforced by parallel/reductions.py
+        # _validate_mpi_runtime_versions. A bare ".[dev,mpi]" install resolves
+        # the latest jax (0.10+), which removed CustomCallV1 and breaks
+        # mpi4jax 0.8/0.9 at runtime; this job previously passed only by
+        # resolver luck. requirements_mpi.txt supplies pinned mpi4py/mpi4jax.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,mpi]"
+          pip install -e ".[dev]"
+          pip install -r requirements_mpi.txt
 
       - name: Run MPI Distributed Halo Tests (np=2,3,6)
         env:
+          # mpi4jax 0.8's own version self-check predates jax 0.9 and warns
+          # even inside legoESM's tested envelope; legoESM's runtime guard
+          # (parallel/reductions.py, NOT suppressed) is the authoritative check.
           MPI4JAX_NO_WARN_JAX_VERSION: "1"
         run: |
           for n in 2 3 6; do
@@ -50,4 +60,30 @@ jobs:
             echo "=== Plane pencil MPI test, np=${n} ==="
             mpirun --oversubscribe -np "${n}" \
               python -m pytest -q tests/distributed/test_plane_pencil_mpi.py
+          done
+
+      - name: Run Lat-Lon 2-D Pad (wall) MPI Tests (np=2,3,6)
+        # np=3 -> 1x3 drives the E/W periodic ring through proc_lon=3 in
+        # REVERSE (the phase-constant-tag VJP case); np=6 -> 2x3 drives the
+        # N/S reverse sendrecv AND the proc_lon=3 reverse ring together.
+        env:
+          MPI4JAX_NO_WARN_JAX_VERSION: "1"
+        run: |
+          for n in 2 3 6; do
+            echo "=== Lat-lon 2-D wall-pad MPI test, np=${n} ==="
+            mpirun --oversubscribe -np "${n}" \
+              python -m pytest -q tests/distributed/test_latlon_2d_pad_wall_mpi.py
+          done
+
+      - name: Run Lat-Lon transpose AD (lon_gather_full VJP) MPI Tests (np=2,3,6)
+        # Adjoint (dot-product identity) + grad-finiteness of the lat-pencil
+        # transpose custom VJP — the AD-safe gather for lon-split pole-fold /
+        # polar-filter.  proc_lon>=2 at every size gives a real lon ring.
+        env:
+          MPI4JAX_NO_WARN_JAX_VERSION: "1"
+        run: |
+          for n in 2 3 6; do
+            echo "=== Lat-lon transpose-AD MPI test, np=${n} ==="
+            mpirun --oversubscribe -np "${n}" \
+              python -m pytest -q tests/distributed/test_latlon_transpose_ad_mpi.py
           done

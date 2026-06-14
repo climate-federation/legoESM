@@ -131,7 +131,7 @@ def _build_test_state(n_lat=12, n_lon=24, partial_cells=False, seed=42):
         jnp.zeros((1, n_lon, 1), dtype=jnp.float64),
     ], axis=0)
     # Vertex mask matches the production convention from
-    # legoesm.ocean.dynamics.latlon_cgrid_operators._compute_vertex_mask:
+    # legoesm.ocean.dynamics.latlon_cgrid_operators.compute_vertex_mask:
     # interior vertices wet (all 4 cells wet → 1), pole rows = 0.
     vtx_mask_np = np.zeros((n_lat + 1, n_lon + 1), dtype=np.float64)
     vtx_mask_np[1:n_lat, :] = 1.0

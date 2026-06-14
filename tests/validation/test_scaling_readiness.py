@@ -86,6 +86,10 @@ class TestScalingReadiness:
             shflx_accum=jnp.zeros(s2),
             lhflx_accum=jnp.zeros(s2),
             T_land=jnp.zeros(s2),
+            q_i=jnp.zeros(s3), q_s=jnp.zeros(s3), q_g=jnp.zeros(s3),
+            N_c=jnp.zeros(s3), N_r=jnp.zeros(s3), N_i=jnp.zeros(s3),
+            tke=jnp.zeros((6 * 8 * 8, 10)), qke=jnp.zeros((6 * 8 * 8, 10)),
+            gwd_spectrum=jnp.zeros((6 * 8 * 8, 1, 1)),
         )
         leaves, treedef = jax.tree.flatten(carry)
         reconstructed = treedef.unflatten(leaves)
@@ -154,6 +158,10 @@ class TestScalingReadiness:
             shflx_accum=jnp.zeros(s2),
             lhflx_accum=jnp.zeros(s2),
             T_land=jnp.zeros(s2),
+            q_i=jnp.zeros(s3), q_s=jnp.zeros(s3), q_g=jnp.zeros(s3),
+            N_c=jnp.zeros(s3), N_r=jnp.zeros(s3), N_i=jnp.zeros(s3),
+            tke=jnp.zeros((6 * 4 * 4, 3)), qke=jnp.zeros((6 * 4 * 4, 3)),
+            gwd_spectrum=jnp.zeros((6 * 4 * 4, 1, 1)),
         )
         for field_name in SegmentCarry._fields:
             val = getattr(carry, field_name)

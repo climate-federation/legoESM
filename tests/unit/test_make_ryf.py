@@ -1,4 +1,4 @@
-"""Tests for ``scripts/make_ryf.py``.
+"""Tests for ``scripts/data/make_ryf.py``.
 
 The Stewart 2020 splice rule is non-trivial enough (leap-year logic,
 calendar slice arithmetic, multi-cadence harmonisation) that we
@@ -24,7 +24,7 @@ zarr = pytest.importorskip("zarr")
 pd = pytest.importorskip("pandas")
 
 # Load the script as a module by file path.
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "make_ryf.py"
+_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "data" / "make_ryf.py"
 _spec = importlib.util.spec_from_file_location("make_ryf", _SCRIPT)
 make_ryf_mod = importlib.util.module_from_spec(_spec)
 sys.modules["make_ryf"] = make_ryf_mod

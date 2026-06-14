@@ -9,9 +9,9 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.coupler.bulk_flux import compute_most_fluxes
+from legoesm.core.bulk_flux import compute_most_fluxes
 from legoesm.coupler.config import CouplerConfig
-from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.coupler import ocean_tile_response
 from legoesm.land.config import LandConfig
 from legoesm.land.state import LandState

@@ -4,15 +4,15 @@
 
 Two cluster-bound drivers + two acceptance-template reports:
 
-* ``scripts/ocean_long_runs/run_omip2.py`` -- 30-year forced ocean run
+* ``scripts/run/ocean_long_runs/run_omip2.py`` -- 30-year forced ocean run
   driven by JRA55-do forcing through the Large & Yeager 2009 bulk-flux
   module. Lat-lon C-grid @ 1 deg or MPAS @ 100 km. Per-year RPE / energy
   / tracer diagnostics + restart writer.
-* ``scripts/ocean_long_runs/run_bryan_thc.py`` -- 500-1000 yr Bryan
+* ``scripts/run/ocean_long_runs/run_bryan_thc.py`` -- 500-1000 yr Bryan
   1986/1987 THC spinup on an idealised hemispheric basin, CORE-II NYF
   forcing. Diagnostic cadence configurable (default every 10 model
   years).
-* ``scripts/ocean_long_runs/__init__.py`` -- empty package marker.
+* ``scripts/run/ocean_long_runs/__init__.py`` -- empty package marker.
 * ``docs/ocean_long_runs/results_omip2_skeleton.md`` -- acceptance
   template with the Tsujino 2020 multi-model bars (AMOC 15+/-3 Sv,
   ACC 130+/-15 Sv, SST bias <1.5 K) and an empty per-year results
@@ -27,14 +27,14 @@ Both drivers pass the ``--smoke`` path (one model day, synthetic
 forcing fallback):
 
 ```
-$ python scripts/ocean_long_runs/run_omip2.py --smoke --output ...
+$ python scripts/run/ocean_long_runs/run_omip2.py --smoke --output ...
 ==> Building global rest-state on latlon/36x72
    RPE_0 = -7.7476e+25 J  |  KE_0 = 0.000e+00  |  vol_0 = 2.764e+18
 ==> Year 1/1 (48 steps)
    RPE_flux = -3.683e-02 W/m^2  |  KE = 0.000e+00  |  vol_drift = 0.000e+00
 Wall time: 1.1s
 
-$ python scripts/ocean_long_runs/run_bryan_thc.py --smoke --output ...
+$ python scripts/run/ocean_long_runs/run_bryan_thc.py --smoke --output ...
 ==> Building Bryan hemispheric basin @ 24x24
    RPE_0 = -3.7683e+24  |  vol_0 = 1.855e+17
 ==> Year 1/1

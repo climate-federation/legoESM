@@ -117,6 +117,72 @@ When invoked, systematically work through the following swap dimensions. For eac
 - For each: smoke test → conservation test → differentiability test → vmap ensemble test
 - These combinations should stress the coupler's ability to wire together components with different state pytree shapes
 
+### 9. Structural / Decomposition Modularity (static audit — read-only)
+
+Runtime swap-modularity (dimensions 1–8) is necessary but **not sufficient**. If a solver's
+internal stages (PGF, Coriolis, vorticity flux, kinetic energy, advection, lateral/vertical
+mixing, bottom drag) are fused into one monolithic function, you cannot isolate, unit-test,
+equivariance-test, or swap a single stage — a **structural** modularity failure even when
+whole-component swaps pass. This dimension is a STATIC audit (Glob/Grep/Read only; no runtime
+execution). Verification-aligned: it directly supports the oracle-recipe strategy
+(`docs/ocean_fidelity/oracle_recipe_strategy.md`), where stage-level equivariance and
+block-granularity tests require addressable stages.
+
+Audit and report:
+- **Monolithic entry points**: tendency/step functions exceeding ~400 LOC that are NOT
+  decomposed into named pure substage helpers. Report worst offenders with LOC + count of
+  inline section comments. (`latlon_cgrid_ocean_baroclinic_tendencies` was 1299 LOC → now 256,
+  decomposed into 13 `_bc_*` substages with a bit-identical gate. Remaining known offenders:
+  `_step_impl` ≈ 572 LOC, `mpas_ocean_baroclinic_tendencies`, `spectral_ocean_tendencies` —
+  see the `LOC_ALLOW_LIST` in `tests/ocean/unit/test_clarity_guards.py`.)
+- **Docstring floor**: solver entry points below a docstring-coverage threshold (e.g. < 25%).
+- **Config sprawl**: config NamedTuples with > ~25 fields and no section grouping/comments
+  (e.g. `LatLonCGridOceanConfig` ≈ 45 fields).
+- **Two-source-of-truth params**: the same physical parameter defined in more than one config
+  (e.g. `A_h` in both the dynamics config and the nested physics config) — an ambiguity footgun.
+- **Deprecated-but-live config**: fields that raise-on-use yet remain in the public config
+  (e.g. physics-level bottom drag) — a migration footgun.
+- **Buried mode-switch booleans**: flags that change pipeline-wide semantics without prominent
+  placement/docstring (e.g. `implicit_vertical_mixing`).
+
+For each finding, state whether decomposing/grouping it would unblock a stage-level unit or
+equivariance test. Report under a "Structural Modularity / Clarity Debt" section. As always:
+report, never edit.
+
+### 10. Concept Duplication & Cross-Oracle Alignment (semantic audit — read-only)
+
+The deterministic CI guards catch *known* duplication: re-inlined shared blocks
+(`tests/ocean/unit/test_no_scheme_duplication.py`), oversized functions
+(`test_clarity_guards.py`), re-mirrored constants (`test_constants_audit.py`), and known name
+synonyms that try to spread (`test_concept_registry.py`, which ratchets the alias list in
+`src/legoesm/ocean/fidelity/concept_registry.py`). What no text/AST-pattern scan can reach is
+**semantic** equivalence — the same computation under a different name, or two helpers that
+differ only in parameters and should be one. That is this dimension (doctrine rule I in
+`docs/ocean_fidelity/oracle_recipe_strategy.md` §9; STATIC, Read/Grep/Glob only).
+
+Read the concept registry first, then audit `src/legoesm/ocean/{dynamics,physics}/**` and the
+oracle-side names in `src/legoesm/ocean/fidelity/**`. Detect and report:
+- **Synonym functions** — two functions computing the same thing under different names
+  (e.g. `apply_sponge` vs `restore_tracers`, `_compute_rho_anomaly` vs the canonical EOS loop).
+  Judge by parameter set + formula structure, not just name.
+- **Parameter-only / indexing-only duplication** — helpers that differ only in argument names,
+  axis/indexing, or default values and should collapse into one generic function. (Known
+  candidates from the 2026-05-29 survey, all `generalizable`: sponge-γ
+  `compute_sponge_gamma_latlon`/`_mpas`; the DM95 taper pair; the bottom-drag padding pattern;
+  the vertical-mixing vmap-stacking block across `constant`/`richardson`.) Distinguish these
+  from **genuinely-different numerics** (e.g. C-grid vs Voronoi isopycnal slopes — do NOT merge).
+- **Cross-oracle naming gaps** — an oracle concept (Veros/MOM6/MITgcm) not yet in the concept
+  registry, or a legoESM name that the registry should map to an oracle alias. Propose the
+  registry entry.
+- **Orphaned decompositions** — substages extracted from a monolith (e.g. the `_bc_*` family)
+  that are silently re-duplicated elsewhere instead of being reused.
+
+For each finding give: the canonical target, the duplicate sites (file:function), LOC saved by
+merging, whether merging unblocks a stage-level test, and a concrete generalisation suggestion.
+Findings should graduate into the deterministic layer — a new shared helper + a
+`test_no_scheme_duplication` entry, or a new `concept_registry` alias + `ALIAS_BASELINE`.
+Report under a "Concept Duplication / Cross-Oracle Alignment" section. Report, never edit.
+
 ## Execution Protocol
 
 1. **Discovery phase**: Read the codebase to find all available implementations for each swap dimension. Use `Glob` and `Grep` to search for class/function registries, factory functions, config enums, or naming conventions. Update the test matrix with what actually exists (not all components above may be implemented yet).
@@ -181,3 +247,5 @@ When invoked, systematically work through the following swap dimensions. For eac
 - **Be quantitative.** Report actual numbers (L2 norms, conservation drift, gradient magnitudes), not just pass/fail.
 - **Be honest about what doesn't exist yet.** The discovery phase will likely reveal that some components from the test matrix are not yet implemented. That's valuable information — report the gaps clearly.
 - **Test the coupler hard.** The coupler is where modularity lives or dies. Every swap changes the state pytree shape — the coupler must handle this gracefully.
+- **Structural modularity counts (dimension 9).** A stage you cannot isolate is a stage you cannot swap or verify. Flag monolithic solvers and sprawling/duplicated configs as modularity failures, not style nits — they block the stage-level verification the model needs.
+- **Hunt semantic duplication & synonyms (dimension 10).** Two blocks that do the same thing under different names, or differ only in parameters, are a generalization failure that the deterministic guards cannot see. Read the concept registry, then actively try to find same-thing-different-name functions and parameter-only duplicates — propose the merge / canonical name, don't just confirm declared helpers are called.

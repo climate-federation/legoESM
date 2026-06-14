@@ -14,7 +14,7 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.operators import global_integral, global_mean
 from legoesm.grids.cubed_sphere import create_cubed_sphere
-from legoesm.core.conservation import _global_area_sum, _total_area
+from legoesm.core.conservation import global_area_sum, _total_area
 
 
 N = 4  # Small cubed-sphere
@@ -76,19 +76,19 @@ class TestTotalArea:
 
 
 # ---------------------------------------------------------------------------
-# _global_area_sum (conservation module)
+# global_area_sum (conservation module)
 # ---------------------------------------------------------------------------
 
 class TestGlobalAreaSum:
     def test_area_sum_of_ones(self, grid):
         arr = jnp.ones((6, N, N), dtype=jnp.float64)
-        s = _global_area_sum(arr, grid)
+        s = global_area_sum(arr, grid)
         expected = float(jnp.sum(grid.area))
         np.testing.assert_allclose(float(s), expected, rtol=1e-6)
 
     def test_area_sum_of_zeros(self, grid):
         arr = jnp.zeros((6, N, N), dtype=jnp.float64)
-        s = _global_area_sum(arr, grid)
+        s = global_area_sum(arr, grid)
         np.testing.assert_allclose(float(s), 0.0, atol=1e-30)
 
 

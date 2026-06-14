@@ -5,7 +5,7 @@ Until 2026-04-28 the factory only handled
 ``surface_forcing.scheme == "prescribed"``; the global_overturning
 experiment configures ``scheme = "combined"`` (prescribed wind + SST
 restoring), and that case used to fall through to a zero-tendency
-no-op silently — see ``scripts/global_overturning/run_global_overturning_mpas_baseline.py``.
+no-op silently — see ``scripts/run/global_overturning/run_global_overturning_mpas_baseline.py``.
 
 These tests pin the four schemes the factory is now contracted to
 support (none, prescribed, restoring, combined) and assert that
@@ -125,6 +125,32 @@ class TestUnsupportedScheme:
         )
         with pytest.raises(NotImplementedError, match="bulk_formulas"):
             make_mpas_ocean_physics(cfg)
+
+    def test_convective_momentum_viscosity_rejected_on_mpas(self):
+        """MPAS convective adjustment is tracer-only: nonzero nu_conv/nu_bg
+        must raise rather than being silently dropped (the edge-normal
+        momentum would need a TRiSK cell->edge reconstruction)."""
+        cfg = OceanPhysicsConfig(
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(nu_conv=1.0),
+            ),
+        )
+        with pytest.raises(ValueError, match="unsupported on MPAS"):
+            make_mpas_ocean_physics(cfg)
+
+    def test_tracer_only_convection_accepted_on_mpas(self):
+        """nu_conv = nu_bg = 0 (default) is accepted — tracer-only mixing."""
+        cfg = OceanPhysicsConfig(
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(
+                    K_conv=1.0, nu_conv=0.0, nu_bg=0.0,
+                ),
+            ),
+        )
+        # Construction must not raise.
+        assert make_mpas_ocean_physics(cfg) is not None
 
 
 class TestExternalSchemeTwoWay:

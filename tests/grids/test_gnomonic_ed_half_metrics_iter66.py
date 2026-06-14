@@ -17,7 +17,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.cubed_sphere import (  # noqa: E402
     compute_padded_half_metrics_ed, _compute_exact_cell_areas_ed,
-    _gnomonic_ed_padded_centers, _compute_gnomonic_ed_lonlat,
+    gnomonic_ed_padded_centers, _compute_gnomonic_ed_lonlat,
 )
 
 
@@ -28,7 +28,7 @@ def test_padded_centers_consistent_with_grid_centers():
     definition.  (An earlier construct-at-cell-centre-θ approach differed ~½ cell.)"""
     n, halo = 24, 1
     ext = halo + 1
-    lonC, latC = (np.asarray(a) for a in _gnomonic_ed_padded_centers(n, halo))
+    lonC, latC = (np.asarray(a) for a in gnomonic_ed_padded_centers(n, halo))
     lonG, latG = (np.asarray(a) for a in _compute_gnomonic_ed_lonlat(n))
     sub_lon = lonC[:, ext:ext + n, ext:ext + n]
     sub_lat = latC[:, ext:ext + n, ext:ext + n]

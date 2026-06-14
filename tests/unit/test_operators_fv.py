@@ -6,8 +6,8 @@ import pytest
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.core.operators_fv import (
-    _ppm_edge_values,
-    _ppm_limit,
+    ppm_edge_values,
+    ppm_limit,
     _ppm_reconstruct_x,
     fv_flux_divergence,
     fv_scalar_advection,
@@ -26,7 +26,7 @@ class TestPPMReconstruction:
         """PPM of constant field should give exact edge values."""
         n = grid.n
         q = jnp.ones((6, n + 4, n)) * 7.0
-        q_hat = _ppm_edge_values(q)
+        q_hat = ppm_edge_values(q)
         assert jnp.allclose(q_hat, 7.0, atol=1e-10)
 
     def test_linear_field_exact(self, grid):
@@ -35,7 +35,7 @@ class TestPPMReconstruction:
         # Linear ramp along axis 1
         x = jnp.arange(n + 4, dtype=jnp.float32)
         q = jnp.broadcast_to(x[None, :, None], (6, n + 4, n))
-        q_hat = _ppm_edge_values(q)
+        q_hat = ppm_edge_values(q)
         # Interior edges: at positions 0.5, 1.5, ..., (n+2).5
         expected_inner = x[1:-2] + 0.5  # midpoints: (n+1 values)
         expected_lo = 0.5 * (x[0] + x[1])
@@ -67,7 +67,7 @@ class TestPPMLimiter:
         q_L = jnp.array([-0.5, -0.3, 0.5, 0.9, 1.1])
         q_R = jnp.array([0.3, 0.8, 1.2, 1.1, 1.0])
 
-        q_L_lim, q_R_lim = _ppm_limit(q_bar, q_L, q_R)
+        q_L_lim, q_R_lim = ppm_limit(q_bar, q_L, q_R)
 
         # At local extrema (cell 0: q=0 is minimum), should flatten
         # In general, limited values should not overshoot

@@ -38,13 +38,28 @@ Three things that make it different from a traditional ESM:
 
 ## 2. Install (5 commands)
 
+legoESM is a uv workspace of independently-installable members, so the install
+command depends on whether you have `uv` (see the README "Installing" section for
+the full why):
+
 ```bash
 git clone https://github.com/gentine/legoESM.git
 cd legoESM
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+
+# With uv (resolves the workspace natively):
+uv sync --extra dev
+
+# …or pip-only (no uv) — the helper resolves the inter-member dependency DAG:
+python scripts/experiment/install_federation.py --all --extras dev
 ```
+
+> A bare `pip install -e ".[dev]"` **fails** here (`Could not find a version that
+> satisfies the requirement legoesm-core~=0.1.0`): plain pip cannot resolve the
+> unpublished workspace members. Use `uv` or the helper above. To install just one
+> component standalone: `python scripts/experiment/install_federation.py atmosphere`
+> (or `ocean` / `land` / `ice`).
 
 Optional MPI extras (only if you want multi-node runs):
 
@@ -89,7 +104,7 @@ Kessler microphysics, and a simple mass-flux convection scheme. See
 ### c. A 1-year AMIP smoke test
 
 ```bash
-JAX_ENABLE_X64=1 .venv/bin/python scripts/run_amip.py \
+JAX_ENABLE_X64=1 .venv/bin/python scripts/run/run_amip.py \
     --grid-type cubed_sphere --resolution 16 --days 365
 ```
 
@@ -99,7 +114,7 @@ production-grade end-to-end run. Output lands under `output/`.
 ### d. (Optional) A coupled aquaplanet
 
 ```bash
-JAX_ENABLE_X64=1 .venv/bin/python scripts/run_coupled.py --preset slab_simple --days 365
+JAX_ENABLE_X64=1 .venv/bin/python scripts/run/run_coupled.py --preset slab_simple --days 365
 ```
 
 Fully coupled atmosphere + slab ocean + bucket land. Other presets:
@@ -158,17 +173,19 @@ A few principles to internalise:
 
 | You want to... | Use |
 |---|---|
-| Run a 3-D atmosphere | `ModelDriver` / `scripts/run_amip.py` |
-| Run a fully coupled simulation | `CoupledESMDriver` / `scripts/run_coupled.py` |
-| Run an OMIP ocean spin-up | `scripts/run_omip.py` |
-| Run a single column | `SingleColumnModel.create()` / `scripts/run_scm_test_matrix.py` |
-| Run a Williamson / DCMIP test | `scripts/run_atmosphere_test_matrix.py` |
-| Run the ocean test matrix | `scripts/run_ocean_test_matrix.py` |
+| Run a 3-D atmosphere | `ModelDriver` / `scripts/run/run_amip.py` |
+| Run a fully coupled simulation | `CoupledESMDriver` / `scripts/run/run_coupled.py` |
+| Run an OMIP ocean spin-up | `scripts/run/run_omip.py` |
+| Run a single column | `SingleColumnModel.create()` / `scripts/matrix/run_scm_test_matrix.py` |
+| Run a Williamson / DCMIP test | `scripts/matrix/run_atmosphere_test_matrix.py` |
+| Run the ocean test matrix | `scripts/matrix/run_ocean_test_matrix.py` |
 | Multi-device or MPI | `ParallelRuntime.create()` |
 | Differentiable training | `legoesm.training.training_driver` |
 
 All drivers are thin: read the relevant CLI script, then jump into
-`src/legoesm/driver/` to see what they call.
+the `driver/` package to see what they call. For how the grid, complexity,
+and physics bricks that these drivers assemble are chosen, see
+[docs/composability.md](composability.md).
 
 ---
 
@@ -211,18 +228,33 @@ After touching the dycore on cubed-sphere, always run the atmosphere
 test matrix in quick mode and **eyeball the v-wind snapshots**:
 
 ```bash
-JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py \
+JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py \
     --only sw --grid cubed_sphere --quick
 ```
 
 Passing pytest is *necessary but not sufficient* on the cubed-sphere
 — edge artifacts only reliably show up in field snapshots. See
-[docs/cubed_sphere_edge_artifacts.md](cubed_sphere_edge_artifacts.md).
+[docs/cubed_sphere_edge_artifacts.md](md_files/cubed_sphere_edge_artifacts.md).
 
-Ocean: `scripts/run_ocean_test_matrix.py` (current status: 57/57
+Ocean: `scripts/matrix/run_ocean_test_matrix.py` (current status: 57/57
 PASS).
 
-Sea ice: `scripts/run_sea_ice_test_matrix.py` (15 standard benchmarks).
+Fast static guardrails (constants/saturation/dispatch/contracts/federation
+tripwires — seconds, no GPU):
+
+```bash
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+    tests/test_no_hardcoded_constants.py tests/test_no_saturation_reimpl.py \
+    tests/test_dispatch_hardening.py tests/test_physics_contracts.py \
+    tests/test_import_boundaries.py tests/test_federation_plan.py -q
+```
+
+For the full picture — pytest tiers, the matrix framework, the guardrail harness,
+the `scripts/validate/` scientific validators, and the adversarial-review agents
+(Codex `/codex:adversarial-review`, `physics-validator`, `lego-modularity-tester`,
+…) — see [docs/TESTING.md](TESTING.md).
+
+Sea ice: `scripts/matrix/run_sea_ice_test_matrix.py` (15 standard benchmarks).
 
 ---
 
@@ -246,12 +278,13 @@ Sea ice: `scripts/run_sea_ice_test_matrix.py` (15 standard benchmarks).
 
 ## 9. Where to go next
 
+- [docs/composability.md](composability.md) — **how the model is assembled**: instantiating each axis (grids, regional/idealized extent, the SCM/LES/CRM/shallow-water/3-D complexity ladder), a high-level package tour, and the research → operational (AMIP/OMIP/CMIP) ladder.
 - [README.md](../README.md) — feature inventory and platform matrix.
 - [SPECIFICATION.md](specs/SPECIFICATION.md) — full technical specification.
 - [docs/cmip_readiness.md](cmip_readiness.md) — CMIP production checklist.
 - [docs/amip.md](amip.md) — AMIP workflow.
 - [docs/scm.md](scm.md) — single-column model.
-- [docs/ocean_experiments_reference.md](ocean_experiments_reference.md) — ocean testbeds.
+- [docs/ocean_experiments_reference.md](md_files/ocean_experiments_reference.md) — ocean testbeds.
 - [docs/REAL_HARDWARE_SCALING.md](REAL_HARDWARE_SCALING.md) — multi-GPU / MPI.
 - [docs/ml_physics_parameterization.md](ml_physics_parameterization.md) — joint ML / physics workflow.
 - [docs/dycore_validation_catalog.md](dycore_validation_catalog.md) — dycore validation inventory.

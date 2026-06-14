@@ -192,7 +192,7 @@ class TestZarrCheckpoint:
         T_before = np.asarray(driver.state.T.data)
         ps_before = np.asarray(driver.state.p_s.data)
 
-        from legoesm.io.restart import save_restart
+        from legoesm.driver.restart import save_restart
         save_restart(
             path=zarr_path,
             state=driver.state,
@@ -204,7 +204,7 @@ class TestZarrCheckpoint:
         )
 
         # Load and compare
-        from legoesm.io.restart import load_restart
+        from legoesm.driver.restart import load_restart
         result = load_restart(
             zarr_path, driver._atm.grid, driver._atm.sigma, strict=False,
         )

@@ -15,7 +15,7 @@ import side effect. iter-78 cleans this up — both consumers now
 Helpers:
     _run_rce(grid_type, discretization, resolution, days, output_dir,
              timeout_s=600)
-        Invoke ``scripts/run_rce.py`` with the iter-12-validated CLI.
+        Invoke ``scripts/run/run_rce.py`` with the iter-12-validated CLI.
 
     _parse_results(output_dir) -> dict | None
         Read ``results.txt`` and return its key:value fields.
@@ -43,12 +43,12 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RUN_RCE = REPO_ROOT / "scripts" / "run_rce.py"
+RUN_RCE = REPO_ROOT / "scripts" / "run" / "run_rce.py"
 
 
 def _run_rce(grid_type, discretization, resolution, days, output_dir,
              timeout_s=600):
-    """Invoke scripts/run_rce.py with the iter-12-validated CLI.
+    """Invoke scripts/run/run_rce.py with the iter-12-validated CLI.
 
     iter-44 Codex HIGH fix: hard-coded ``timeout=600`` was killing
     the C72 30-day nightly (iter-26 measured 2373 s wall) and the

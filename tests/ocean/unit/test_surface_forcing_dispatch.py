@@ -23,7 +23,8 @@ from legoesm.ocean.physics.surface_forcing.integration import (
 
 @pytest.mark.parametrize(
     "scheme",
-    ["none", "prescribed", "restoring", "combined", "bulk_formulas", "external"],
+    ["none", "prescribed", "restoring", "combined", "bulk_formulas", "external",
+     "flux_feedback"],
 )
 def test_factory_returns_callable_for_every_scheme(scheme):
     config = SurfaceForcingConfig(scheme=scheme)
@@ -63,7 +64,7 @@ def test_validate_bulk_scheme_rejects_typo():
     each ``if scheme in (...): MOST else: <constant>`` gate to the constant
     branch, silently running the wrong air-sea physics.  The guard now raises.
     """
-    from legoesm.coupler.bulk_flux import validate_bulk_scheme
+    from legoesm.core.bulk_flux import validate_bulk_scheme
 
     for ok in ("constant", "most", "coare3", "large_yeager"):
         validate_bulk_scheme(ok)  # must not raise

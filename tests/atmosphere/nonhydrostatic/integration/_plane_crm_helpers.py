@@ -29,7 +29,7 @@ from pathlib import Path
 def _read_log(output_dir):
     """Read ``log.txt`` rows as a list of dicts.
 
-    Driver format (``scripts/run_rce_mpi_long.py:722-734``):
+    Driver format (``scripts/run/run_rce_mpi_long.py:722-734``):
     * Header lines start with ``# RCE MPI LONG`` + ``# physics:``.
     * Schema line starts with ``# step,`` listing the CSV columns.
     * Subsequent lines are CSV data rows.
@@ -58,7 +58,7 @@ def _read_log(output_dir):
 def _parse_rad_call_count(stdout: str) -> int | None:
     """Extract ``rad_calls=N`` from the driver's final ``Done.`` line.
 
-    Driver format (``scripts/run_rce_mpi_long.py:914``):
+    Driver format (``scripts/run/run_rce_mpi_long.py:914``):
         ``f"rad_calls={rad_call_count}."`` — always integer + trailing
         period (the Done.-line punctuation).
 

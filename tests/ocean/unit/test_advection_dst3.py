@@ -21,8 +21,8 @@ class TestSwebyLimiter:
     """Properties of the Sweby (superbee) limiter."""
 
     def _limiter(self):
-        from legoesm.ocean.advection import _sweby_limiter
-        return _sweby_limiter
+        from legoesm.ocean.dynamics._flux_limiters import sweby_limiter
+        return sweby_limiter
 
     def test_zero_at_negative_r(self):
         psi = self._limiter()
@@ -332,7 +332,7 @@ class TestMultidimAdvection:
         """Total tracer (sum h*T*area) is conserved by multi-dim advection."""
         from legoesm.ocean.advection import multidim_tracer_advection
         from legoesm.ocean.dynamics.latlon_cgrid_operators import interp_cell_to_uface
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _interp_to_v_points
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import interp_to_v_points
 
         grid = self._make_grid(n_lat=10, n_lon=20)
         nlev = 5
@@ -342,7 +342,7 @@ class TestMultidimAdvection:
         tracer = jax.random.uniform(key, (n_lat, n_lon, nlev), minval=1.0, maxval=5.0)
         h_k = jnp.full((n_lat, n_lon, nlev), 100.0)
         h_u = interp_cell_to_uface(h_k)
-        h_v = _interp_to_v_points(h_k)
+        h_v = interp_to_v_points(h_k)
 
         # Periodic mass fluxes (face n_lon = face 0)
         k1, k2 = jax.random.split(key)
@@ -371,7 +371,7 @@ class TestMultidimAdvection:
         """Verify output shapes match input."""
         from legoesm.ocean.advection import multidim_tracer_advection
         from legoesm.ocean.dynamics.latlon_cgrid_operators import interp_cell_to_uface
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _interp_to_v_points
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import interp_to_v_points
 
         grid = self._make_grid(n_lat=8, n_lon=16)
         nlev = 4
@@ -380,7 +380,7 @@ class TestMultidimAdvection:
         tracer = jnp.ones((n_lat, n_lon, nlev))
         h_k = jnp.full((n_lat, n_lon, nlev), 50.0)
         h_u = interp_cell_to_uface(h_k)
-        h_v = _interp_to_v_points(h_k)
+        h_v = interp_to_v_points(h_k)
         mf_u = jnp.zeros((n_lat, n_lon + 1, nlev))
         mf_v = jnp.zeros((n_lat + 1, n_lon, nlev))
         w_half = jnp.zeros((n_lat, n_lon, nlev + 1))
@@ -395,7 +395,7 @@ class TestMultidimAdvection:
         """Zero flow gives zero tendency."""
         from legoesm.ocean.advection import multidim_tracer_advection
         from legoesm.ocean.dynamics.latlon_cgrid_operators import interp_cell_to_uface
-        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _interp_to_v_points
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import interp_to_v_points
 
         grid = self._make_grid(n_lat=8, n_lon=16)
         nlev = 4
@@ -405,7 +405,7 @@ class TestMultidimAdvection:
         tracer = jax.random.uniform(key, (n_lat, n_lon, nlev), minval=1.0, maxval=10.0)
         h_k = jnp.full((n_lat, n_lon, nlev), 100.0)
         h_u = interp_cell_to_uface(h_k)
-        h_v = _interp_to_v_points(h_k)
+        h_v = interp_to_v_points(h_k)
         mf_u = jnp.zeros((n_lat, n_lon + 1, nlev))
         mf_v = jnp.zeros((n_lat + 1, n_lon, nlev))
         w_half = jnp.zeros((n_lat, n_lon, nlev + 1))

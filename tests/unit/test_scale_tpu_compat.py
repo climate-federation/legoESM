@@ -53,6 +53,15 @@ class TestSegmentCarryPytree:
             shflx_accum=jnp.zeros(shape2d),
             lhflx_accum=jnp.zeros(shape2d),
             T_land=jnp.zeros(shape2d),
+            # Optional double-moment fields populated here so the no-Python-
+            # objects invariant is checked on the fully-populated carry.
+            q_i=jnp.zeros(shape), q_s=jnp.zeros(shape), q_g=jnp.zeros(shape),
+            N_c=jnp.zeros(shape), N_r=jnp.zeros(shape), N_i=jnp.zeros(shape),
+            # Optional stateful-physics carries (issue #413), likewise
+            # populated so the fully-populated carry is TPU-clean.
+            tke=jnp.zeros((6 * n * n, nlev)),
+            qke=jnp.zeros((6 * n * n, nlev)),
+            gwd_spectrum=jnp.zeros((6 * n * n, 1, 1)),
         )
 
     def test_is_namedtuple(self):

@@ -13,7 +13,7 @@ exercises the full atmospheric physics pipeline on a single
 Issue: [#277](https://github.com/gentine/legoESM/issues/277).
 
 Source: `src/legoesm/atmosphere/scm.py` (`SingleColumnModel`).
-Demo:   `scripts/run_scm_test_matrix.py rce` (per-case modules under `scripts/scm/`).
+Demo:   `scripts/matrix/run_scm_test_matrix.py rce` (per-case modules under `scripts/matrix/scm/`).
 
 ## Why an SCM?
 
@@ -115,6 +115,6 @@ new schemes don't regress the physics suite.
 - [docs/amip.md](amip.md) — full 3-D AMIP driver.
 - [docs/ml_physics_parameterization.md](ml_physics_parameterization.md)
   — joint ML/physics workflows.
-- `scripts/run_scm_test_matrix.py rce` — RCE demo and sanity test.
-- `scripts/run_scm_test_matrix.py {gabls1,ekman,wangara}` — stable, neutral, and convective BL benchmarks.
-- `scripts/run_scm_test_matrix.py oracle` — regenerate jax_scm reference NetCDFs (needs `.venv-jax-scm`).
+- `scripts/matrix/run_scm_test_matrix.py rce` — RCE demo and sanity test.
+- `scripts/matrix/run_scm_test_matrix.py {gabls1,ekman,wangara}` — stable, neutral, and convective BL benchmarks.
+- `scripts/matrix/run_scm_test_matrix.py oracle` — regenerate jax_scm reference NetCDFs (needs `.venv-jax-scm`).

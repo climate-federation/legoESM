@@ -27,7 +27,7 @@ def assert_gradient_ok(grad_array, name="", min_nonzero_frac=0.1):
 
 def make_atm_forcing(shape):
     """Minimal AtmToSurface forcing with realistic values."""
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     ones = jnp.ones(shape)
     return AtmToSurface(
         sw_down=200.0 * ones,
@@ -137,7 +137,7 @@ class TestMultiLayerLandGrad:
 
 class TestSnowBudgetGrad:
 
-    def test_grad_wrt_T_surface(self):
+    def test_grad_wrt_T_sfc(self):
         from legoesm.land.snow_budget import update_snow
 
         ncol = 32
@@ -145,15 +145,15 @@ class TestSnowBudgetGrad:
         snow_age = 1000.0 * jnp.ones(ncol)
         precip_snow = 1e-5 * jnp.ones(ncol)
 
-        def loss(T_surface):
+        def loss(T_sfc):
             snow_new, _, _ = update_snow(
-                snow, snow_age, T_surface, precip_snow, dt=3600.0,
+                snow, snow_age, T_sfc, precip_snow, dt=3600.0,
             )
             return jnp.sum(snow_new ** 2)
 
         T_sfc = 275.0 * jnp.ones(ncol)
         grad = jax.grad(loss)(T_sfc)
-        assert_gradient_ok(grad, "Snow budget w.r.t. T_surface")
+        assert_gradient_ok(grad, "Snow budget w.r.t. T_sfc")
 
 
 # ============================================================================
@@ -192,8 +192,7 @@ class TestCarbonGPPGrad:
 class TestStomataGrad:
 
     def test_jarvis_grad_wrt_T(self):
-        from legoesm.land.canopy.stomatal import jarvis_gs
-        from legoesm.land.carbon.config import StomataConfig
+        from legoesm.land.carbon.stomata import jarvis_gs, StomataConfig
 
         config = StomataConfig(enabled=True)
         ncol = 32

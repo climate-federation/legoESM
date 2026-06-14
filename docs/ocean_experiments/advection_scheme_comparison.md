@@ -106,16 +106,16 @@ FLAGS="--only eady_uniform --grid latlon_channel --resolution 100x50 \
        --days 200 --no-sponge --B-h 2.3e11 --C-smag 0"
 
 # Run each scheme
-JAX_ENABLE_X64=1 python3 scripts/run_ocean_test_matrix.py $FLAGS \
+JAX_ENABLE_X64=1 python3 scripts/matrix/run_ocean_test_matrix.py $FLAGS \
   --tracer-advection upwind --tag upwind_nosponge
 
-JAX_ENABLE_X64=1 python3 scripts/run_ocean_test_matrix.py $FLAGS \
+JAX_ENABLE_X64=1 python3 scripts/matrix/run_ocean_test_matrix.py $FLAGS \
   --tracer-advection tvd --tag tvd_nosponge
 
-JAX_ENABLE_X64=1 python3 scripts/run_ocean_test_matrix.py $FLAGS \
+JAX_ENABLE_X64=1 python3 scripts/matrix/run_ocean_test_matrix.py $FLAGS \
   --tracer-advection ppm_fct --tag ppm_fct_nosponge
 
-JAX_ENABLE_X64=1 python3 scripts/run_ocean_test_matrix.py $FLAGS \
+JAX_ENABLE_X64=1 python3 scripts/matrix/run_ocean_test_matrix.py $FLAGS \
   --tracer-advection som --tag som_nosponge
 ```
 
@@ -320,7 +320,7 @@ equivalent quantity over T classes to obtain an effective diapycnal
 diffusivity κ_eff. The volume-weighted Var(T) time series is a single
 scalar that captures the same physics.
 
-The post-processing script `scripts/plot_T_volumetric_census.py` computes
+The post-processing script `scripts/plot/plot_T_volumetric_census.py` computes
 this and three related metrics:
 
 - `<T>` drift — scheme conservation error (should be ~0)
@@ -471,7 +471,7 @@ close the comparison. That is listed in "Open issues" below.
 ### BCI development — the visualisations tell a different story
 
 Generating per-run SST / SST-anomaly / η / surface-speed panels
-(`scripts/replot_eady_bci.py` → `results/ocean/eady_uniform/bci_development/*_bci_snapshots.png`)
+(`scripts/plot/replot_eady_bci.py` → `results/ocean/eady_uniform/bci_development/*_bci_snapshots.png`)
 on a physical aspect ratio cropped to the domain reveals a real
 dynamical divergence between the grids that the scalar metrics hide:
 
@@ -677,7 +677,7 @@ specifically missing in the **weak-forcing** regime is only the
 **wall-trapped secondary instability**, not BCI growth itself. This
 narrows the wall-eddy-suppression follow-up significantly.
 
-Once the tvd run finishes, rerun `scripts/replot_eady_bci.py` on the
+Once the tvd run finishes, rerun `scripts/plot/replot_eady_bci.py` on the
 strong-forcing dirs (same script, no changes needed; may want to
 edit `TARGET_DAYS` to `[0, 30, 60, 100, 140, 180]` since strong
 forcing saturates earlier) to generate eddy-development figures
@@ -696,7 +696,7 @@ changes the dynamics.
 WENO stability tests and contaminating V_baro time-means. The implicit
 solver should give cleaner dynamics.
 
-**Tool**: new standalone script `scripts/run_eady_advection_comparison.py`
+**Tool**: new standalone script `scripts/run/run_eady_advection_comparison.py`
 with EKE, Var(T), and zonal spectra diagnostics.
 
 ### Setup
@@ -800,33 +800,33 @@ even at weak forcing.
   #    that survives 30 days, then check whether it is physically
   #    reasonable (dimensional analysis vs. eddy decay time):
   for BH in 5e10 1e11 2.3e11 5e11; do
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
       $COMMON --B-h $BH --C-smag 0.2
   done
 
   # 2. C_smag sensitivity at moderate B_h:
   for CSMAG in 0.1 0.2 0.3 0.4; do
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
       $COMMON --B-h 5e10 --C-smag $CSMAG
   done
 
   # 3. Divergence damping as an alternative knob — targets grid-scale
   #    compressible modes directly without smearing momentum:
   for DD in 0.01 0.05 0.1 0.2 0.5; do
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
       $COMMON --B-h 1e10 --C-smag 0.0 --barotropic-div-damp $DD
   done
 
   # 4. Timestep sensitivity (current dt=150s ≈ CFL 0.8 at u=1 m/s):
   for DT in 75 150; do
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
       $COMMON --B-h 1.44e10 --C-smag 0.2 --dt $DT
   done
 
   # 5. Weak-forcing fallback: scheme stress-test independent of strong
   #    forcing.  If 5e10 / 0.2 still blows under U=0.2, the regime is
   #    not the issue — the scheme/dissipation budget is.
-  JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+  JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
     $COMMON --B-h 1.44e10 --C-smag 0.2 --U-surface 0.2 --days 200
   ```
 
@@ -860,7 +860,7 @@ even at weak forcing.
   scientific-correctness gap for 20 km weak-forcing runs, but would
   be needed for MPAS equivalents of the lat-lon SOM recipe at
   higher resolutions.
-- **Fix applied in passing**: `scripts/plot_T_volumetric_census.py`
+- **Fix applied in passing**: `scripts/plot/plot_T_volumetric_census.py`
   previously hardcoded `(0, 360)` for MPAS mesh reconstruction.
   Now reads `(cfg.lon_west, cfg.lon_east)` from `EadyUniformConfig`
   so it works on the sub-360° periodic mesh.
@@ -879,7 +879,7 @@ even at weak forcing.
   previously used a regridded `(0, 360) × (−90, 90)` canvas and
   did not crop to the actual `source_lon_range`, so the 10°-wide
   domain appeared as a thin vertical sliver. Two fixes applied:
-  (i) `run_eady_uniform` in `scripts/ocean_test_matrix/experiments.py`
+  (i) `run_eady_uniform` in `scripts/matrix/ocean_test_matrix/experiments.py`
   now passes `domain_extent=(lon_west, lon_east, lat_south, lat_north)`
   to `_save_case_diagnostics`; (ii) `_save_snapshot_plots` in
   `diagnostic_io.py` now crops the regridded array to
@@ -891,7 +891,7 @@ even at weak forcing.
   thin strip. Existing runs can be regenerated via direct
   `_replot_case_snapshots(case_dir)` invocation; see
   `docs/ocean_experiments/NEXT_STEPS_advection_comparison.md`.
-  `scripts/replot_eady_bci.py` (native Voronoi, physical aspect,
+  `scripts/plot/replot_eady_bci.py` (native Voronoi, physical aspect,
   SST-anomaly row) is still the preferred figure for cross-grid
   comparisons because it uses the 20 km mesh natively rather than
   the ~1° regrid.

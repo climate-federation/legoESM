@@ -24,7 +24,6 @@ from legoesm import constants
 
 import jax
 import jax.numpy as jnp
-import pytest
 
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -575,20 +574,25 @@ def test_bechtold_orchestrator_with_radiation_merges_dict_correctly():
 
 
 # ---------------------------------------------------------------------------
-# MSE conservation regression guard (currently expected to fail)
+# MSE conservation regression guard
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason=(
-        "Bechtold inherits the standard Tiedtke kernel for env tendencies, "
-        "but its PBL-CAPE closure pushes M_b larger than Tiedtke's, so "
-        "subsidence ``g/c_p`` heating overwhelms the kernel's vapor sink. "
-        "Currently ~92% non-conservation residual; flagged as xfail so "
-        "any future kernel improvement that closes this is detected."
-    ),
-    strict=True,
-)
 def test_bechtold_mse_conservation_within_tolerance():
+    """Column moist-static-energy budget closes to within tolerance.
+
+    Historically this was an xfail at ~92% residual: the plume mass
+    budget used one detrainment rate while the environmental-tendency
+    kernel used a different (unscaled) one, so detrained mass and
+    detrained T/q/q_c were accounted with inconsistent rates.  The
+    IFS-faithfulness fix (Codex adversarial review iter-1 HIGH #1) reuses
+    the SAME height-dependent ``dlt_profile = δ₀·(1.6 − RH)`` for both the
+    plume and the kernel, which closes the budget: the residual drops to
+    ~0.1 % at nlev=30 and ~21 % at the coarse nlev=16 used here (the
+    remainder is the leading-order discretization error of the
+    compensating-subsidence ``g/c_p`` gradient on a 16-level grid, which
+    shrinks as the grid refines).  The 0.30 guard catches any regression
+    that re-desynchronises the plume and kernel detrainment.
+    """
     T, q, pf, ph, u, v = _column()
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))

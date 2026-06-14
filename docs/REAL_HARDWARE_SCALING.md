@@ -4,8 +4,8 @@ This runbook describes how to run real-hardware scaling tests for legoESM
 atmosphere and ocean components on CPUs/GPUs and MPI clusters.
 
 It is focused on commands that already exist in this repository:
-- `scripts/run_levante_gpu_scaling.py` (atmosphere scaling + MPI validation)
-- `scripts/run_ocean_test_matrix.py` (ocean runtime/regression matrix)
+- `scripts/bench/run_levante_gpu_scaling.py` (atmosphere scaling + MPI validation)
+- `scripts/matrix/run_ocean_test_matrix.py` (ocean runtime/regression matrix)
 - `tests/distributed/test_halo_mpi.py` and `tests/ocean/distributed/test_ocean_mpi_conservation.py` (MPI ocean/distributed checks)
 
 ## 0. What's new (2026-05)
@@ -16,7 +16,7 @@ It is focused on commands that already exist in this repository:
   Large multi-GPU runs benefit most.
 - **SPMD halo backend** (issue #275) is activated in the AMIP
   production profile for multi-device runs.
-- **OMIP centennial driver** (`scripts/run_omip.py`) supports
+- **OMIP centennial driver** (`scripts/run/run_omip.py`) supports
   tripolar (eORCA1), MPAS Voronoi (ico5 / ico6), lat-lon, and
   cubed-sphere grids with auto-restart and `jra55_3way` run sets.
 - **mpi4jax compatibility guardrails** in `legoesm.parallel.reductions`
@@ -59,7 +59,7 @@ mkdir -p "$OUTDIR"
 
 ## 3. Atmosphere Scaling (Multi-GPU + MPI)
 
-Use `scripts/run_levante_gpu_scaling.py` for atmosphere scaling benchmarks.
+Use `scripts/bench/run_levante_gpu_scaling.py` for atmosphere scaling benchmarks.
 This includes:
 - compile time
 - steady-state time per step
@@ -69,7 +69,7 @@ This includes:
 ### 3.1 Single-node multi-GPU (or multi-CPU) scaling
 
 ```bash
-JAX_PLATFORMS=gpu .venv/bin/python scripts/run_levante_gpu_scaling.py \
+JAX_PLATFORMS=gpu .venv/bin/python scripts/bench/run_levante_gpu_scaling.py \
   --grid cubed-sphere \
   --mode strong \
   --precision float32 \
@@ -82,7 +82,7 @@ JAX_PLATFORMS=gpu .venv/bin/python scripts/run_levante_gpu_scaling.py \
 CPU comparison:
 
 ```bash
-JAX_PLATFORMS=cpu .venv/bin/python scripts/run_levante_gpu_scaling.py \
+JAX_PLATFORMS=cpu .venv/bin/python scripts/bench/run_levante_gpu_scaling.py \
   --grid cubed-sphere \
   --mode strong \
   --precision float32 \
@@ -98,7 +98,7 @@ topology and set up MPI halo exchange.  Each rank keeps the full
 handles inter-rank communication during each step.
 
 ```bash
-mpirun -np 6 .venv/bin/python scripts/run_levante_gpu_scaling.py \
+mpirun -np 6 .venv/bin/python scripts/bench/run_levante_gpu_scaling.py \
   --grid cubed-sphere \
   --mode strong \
   --precision float32 \
@@ -111,7 +111,7 @@ For pure communication-scaling measurement (no global sync from
 conservation fixers):
 
 ```bash
-mpirun -np 6 .venv/bin/python scripts/run_levante_gpu_scaling.py \
+mpirun -np 6 .venv/bin/python scripts/bench/run_levante_gpu_scaling.py \
   --grid cubed-sphere \
   --mode strong \
   --precision float32 \
@@ -146,7 +146,7 @@ Use the workflow below to cover real ocean hardware behavior.
 ### 4.1 Ocean scaling matrix (single-process runtime/perf trend)
 
 ```bash
-.venv/bin/python scripts/run_ocean_test_matrix.py \
+.venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --output "$OUTDIR/ocean_matrix_cpu" \
   --std-resolutions 8,16 \
   --std-levels 10,20 \
@@ -163,7 +163,7 @@ Use the workflow below to cover real ocean hardware behavior.
 GPU backend variant:
 
 ```bash
-JAX_PLATFORMS=gpu .venv/bin/python scripts/run_ocean_test_matrix.py \
+JAX_PLATFORMS=gpu .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --output "$OUTDIR/ocean_matrix_gpu" \
   --std-resolutions 8,16 \
   --std-levels 10,20 \

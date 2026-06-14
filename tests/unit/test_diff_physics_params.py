@@ -51,7 +51,7 @@ from legoesm.atmosphere.physics.turbulence.louis import louis_turbulence
 from legoesm.atmosphere.physics.turbulence.config import (
     SmagorinskyConfig, LouisConfig,
 )
-from legoesm.coupler.bulk_flux import compute_most_fluxes
+from legoesm.core.bulk_flux import compute_most_fluxes
 from legoesm.thermo import saturation_mixing_ratio
 
 
@@ -129,7 +129,7 @@ class TestConvectionParams:
         T, q_v, p_full, p_half = _unstable_column()
 
         def loss(rh):
-            cfg = SBMConfig()._replace(RH_ref=rh)
+            cfg = SBMConfig()._replace(rh_ref=rh)
             out = sbm_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
             return jnp.sum(out.dT_dt ** 2)
 
@@ -150,7 +150,7 @@ class TestConvectionParams:
 
         def loss(cape_thr):
             cfg = SBMConfig()._replace(
-                CAPE_threshold=cape_thr,
+                cape_threshold=cape_thr,
                 # Pair with a sharpness that keeps |sharpness·(CAPE −
                 # threshold)| ≲ 5 across the column so the gating
                 # sigmoid is unsaturated.
@@ -171,7 +171,7 @@ class TestConvectionParams:
                 smooth_trigger_sharpness=s,
                 # Pair with a threshold near the column's CAPE so the
                 # sigmoid argument stays O(1).
-                CAPE_threshold=2000.0,
+                cape_threshold=2000.0,
             )
             out = sbm_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
             return jnp.sum(out.dT_dt ** 2)
@@ -201,44 +201,51 @@ class TestConvectionParams:
 
         assert_param_grad_ok(loss, threshold_probe, "DCA cape_threshold")
 
-    def _supersaturated_column(self, nlev=12, ncol=2):
-        """Column with q_v > q_sat in mid-troposphere so Kuo's internal
-        MC = column-integrated max(q_v − q_sat, 0) is strictly positive.
-        This unblocks the alpha_heat / tau_relax_s AD paths."""
+    def _convergent_column(self, nlev=20, ncol=2):
+        """Conditionally-unstable tropical column WITH a positive
+        large-scale moisture-convergence profile so the canonical Kuo
+        scheme fires (the faithful source is convergence, not
+        supersaturation).  Returns ``(T, q_v, p_full, p_half, ptenq)``."""
+        import numpy as _np
         p_s = 1.0e5
-        sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+        sigma_half = jnp.linspace(0.05, 1.0, nlev + 1)
         sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
         p_half = jnp.broadcast_to((sigma_half * p_s)[None, :], (ncol, nlev + 1))
         p_full = jnp.broadcast_to((sigma_full * p_s)[None, :], (ncol, nlev))
+        z = -8000.0 * jnp.log(jnp.clip(sigma_full, 1e-3, None))
         T = jnp.broadcast_to(
-            jnp.maximum(300.0 * jnp.clip(sigma_full, 0.01, None) ** 0.19, 200.0)[None, :],
-            (ncol, nlev),
+            jnp.maximum(300.0 - 6.5e-3 * z, 200.0)[None, :], (ncol, nlev),
         )
         q_sat = saturation_mixing_ratio(T, p_full)
-        # Force supersaturation in the lower half of the column so MC > 0.
-        RH = jnp.where(sigma_full[None, :] > 0.5, 1.1, 0.5)
-        q_v = RH * q_sat
-        return T, q_v, p_full, p_half
+        RH = 0.85 * jnp.clip((sigma_full - 0.15) / 0.85, 0.0, 1.0) + 0.1
+        q_v = jnp.broadcast_to((RH * q_sat[0])[None, :], (ncol, nlev))
+        p = sigma_full * p_s
+        ptenq = (3.0e-3 / 86400.0) * jnp.exp(-((p - 850e2) / 120e2) ** 2)
+        ptenq = jnp.broadcast_to(ptenq[None, :], (ncol, nlev))
+        return T, q_v, p_full, p_half, ptenq
 
-    def test_kuo_alpha_heat(self):
-        T, q_v, p_full, p_half = self._supersaturated_column()
+    def test_kuo_entrainment(self):
+        T, q_v, p_full, p_half, ptenq = self._convergent_column()
 
-        def loss(a):
-            cfg = KuoConfig()._replace(alpha_heat=a)
-            out = kuo_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
+        def loss(e):
+            cfg = KuoConfig()._replace(entrainment=e)
+            out = kuo_convection(T, q_v, p_full, p_half, 900.0, config=cfg,
+                                 moisture_convergence=ptenq)
             return jnp.sum(out.dT_dt ** 2)
 
-        assert_param_grad_ok(loss, KuoConfig().alpha_heat, "Kuo alpha_heat")
+        assert_param_grad_ok(loss, KuoConfig().entrainment, "Kuo entrainment")
 
-    def test_kuo_tau_relax_s(self):
-        T, q_v, p_full, p_half = self._supersaturated_column()
+    def test_kuo_anthes_rh_offset(self):
+        T, q_v, p_full, p_half, ptenq = self._convergent_column()
 
-        def loss(t):
-            cfg = KuoConfig()._replace(tau_relax_s=t)
-            out = kuo_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
+        def loss(o):
+            cfg = KuoConfig(partition="anthes")._replace(anthes_rh_offset=o)
+            out = kuo_convection(T, q_v, p_full, p_half, 900.0, config=cfg,
+                                 moisture_convergence=ptenq)
             return jnp.sum(out.dT_dt ** 2)
 
-        assert_param_grad_ok(loss, KuoConfig().tau_relax_s, "Kuo tau_relax_s")
+        assert_param_grad_ok(loss, KuoConfig().anthes_rh_offset,
+                             "Kuo anthes_rh_offset")
 
 
 # ===========================================================================
@@ -385,12 +392,15 @@ class TestMicrophysicsParams:
         )
 
         def loss(a):
-            # agg_coeff is the HEURISTIC ice→snow aggregation coefficient; the
-            # default ice_to_snow_scheme is now m2005_autoconv (SAM PRCI, which
-            # ignores agg_coeff), so select the heuristic path to exercise the
-            # parameter this test is about.
+            # agg_coeff is the HEURISTIC ice→snow aggregation coefficient.  The
+            # default morrison_flavor="mg" forces ice_to_snow_scheme="mg_ferrier"
+            # in resolve_morrison_flavor (ignoring agg_coeff) AND clobbers an
+            # explicit ice_to_snow_scheme.  Use the "sam" flavor (which leaves
+            # ice_to_snow_scheme untouched) + the heuristic path so agg_coeff is
+            # the live knob this test audits.
             cfg = MorrisonConfig()._replace(
-                agg_coeff=a, ice_to_snow_scheme="heuristic")
+                agg_coeff=a, morrison_flavor="sam",
+                ice_to_snow_scheme="heuristic")
             out = morrison_microphysics(
                 T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
             )

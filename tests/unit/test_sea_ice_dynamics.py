@@ -73,7 +73,7 @@ def _make_grid(n=8):
 
 def _make_forcing(shape=(6, 8, 8)):
     """Create minimal AtmToSurface forcing."""
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     return AtmToSurface(
         sw_down=jnp.full(shape, 100.0),
         lw_down=jnp.full(shape, 200.0),
@@ -400,6 +400,35 @@ class TestEVPSolver:
         assert jnp.all(jnp.isfinite(u_new))
         assert jnp.all(jnp.isfinite(v_new))
 
+    def test_h_ice_min_threads_into_evp_and_mevp(self):
+        """The configured ice-thickness floor reaches the dynamics mass floor:
+        thin ice with a larger h_ice_min is heavier (m = rho_ice*max(h, floor))
+        and so accelerates less under the same wind. Guards the codex finding
+        that EVP/mEVP previously ignored a custom SeaIceConfig.h_ice_min."""
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        z = jnp.zeros(shape)
+        # Ice thinner than both floors so max(h, floor) == floor governs the mass;
+        # both floors are well above h (heavy, numerically stable) and differ 10x.
+        thin = jnp.full(shape, 0.02)
+        kw = dict(
+            h_ice=thin, concentration=jnp.ones(shape),
+            wind_u=jnp.full(shape, 5.0), wind_v=z,
+            ocean_u=z, ocean_v=z, grid=grid, dt=600.0,
+            P_star=0.0, differentiable=False,
+        )
+        u_light, _, _, _, _ = evp_solver(z, z, z, z, z, N_evp=10, h_ice_min=0.1, **kw)
+        u_heavy, _, _, _, _ = evp_solver(z, z, z, z, z, N_evp=10, h_ice_min=1.0, **kw)
+        assert jnp.all(jnp.isfinite(u_light)) and jnp.all(jnp.isfinite(u_heavy))
+        # Heavier floor -> more mass -> strictly slower acquired velocity.
+        assert jnp.max(jnp.abs(u_heavy)) < jnp.max(jnp.abs(u_light))
+        # mEVP accepts and uses the same kwarg.
+        u_m_light, _, _, _, _ = mevp_solver(z, z, z, z, z, N_mevp=10, h_ice_min=0.1, **kw)
+        u_m_heavy, _, _, _, _ = mevp_solver(z, z, z, z, z, N_mevp=10, h_ice_min=1.0, **kw)
+        assert jnp.all(jnp.isfinite(u_m_heavy))
+        assert jnp.max(jnp.abs(u_m_heavy)) < jnp.max(jnp.abs(u_m_light))
+
     def test_high_strength_resists_motion(self):
         """With higher P_star, ice velocity should be smaller."""
         grid = _make_grid()
@@ -717,7 +746,7 @@ class TestStepSeaIceBackwardCompat:
         )
         assert isinstance(new_state, SeaIceState)
         assert jnp.all(jnp.isfinite(new_state.h_ice.data))
-        assert jnp.all(jnp.isfinite(response.T_surface))
+        assert jnp.all(jnp.isfinite(response.T_sfc))
 
     def test_slab_accepts_dynamic_state(self):
         """Slab mode should accept DynamicSeaIceState and convert."""
@@ -853,7 +882,7 @@ class TestMultiCategoryIntegration:
         assert new_state.h_ice.data.shape == h_mc.shape
         assert jnp.all(jnp.isfinite(new_state.h_ice.data))
         # Response should be 2D (aggregated)
-        assert response.T_surface.shape == shape
+        assert response.T_sfc.shape == shape
 
 
 # ==============================================================================
@@ -1645,7 +1674,7 @@ class TestMEVPMultiCategory:
         assert jnp.all(conc_sum >= 0.0)
         assert jnp.all(conc_sum <= 1.0 + 1e-10)
         # Response aggregated to 2D
-        assert response.T_surface.shape == shape
+        assert response.T_sfc.shape == shape
 
 
 class TestMEVPTransport:
@@ -1845,7 +1874,7 @@ class TestLegacyDynamicExchangeF11:
         )
 
     def _warm_forcing(self, shape=(6, 8, 8)):
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         # Dry air (q_lowest below saturation over melting ice ~3.8e-3) so the
         # latent flux is sublimation (mass loss), not deposition.  Under the
         # volume-based V=h*A update (#28) deposition adds ice and leaves a
@@ -1897,7 +1926,7 @@ class TestLegacyDynamicExchangeF11:
         assert jnp.all(jnp.isfinite(resp.freshwater_flux))
 
     def _cold_forcing(self, shape=(6, 8, 8)):
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         return AtmToSurface(
             sw_down=jnp.zeros(shape), lw_down=jnp.full(shape, 150.0),
             precip_total=jnp.zeros(shape), precip_snow=jnp.zeros(shape),
@@ -2700,7 +2729,7 @@ class TestAllOceanGridsCoupled:
     'coupled and functional with all ocean grid types'."""
 
     def _forcing(self, shape):
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         z = jnp.zeros(shape)
         f = lambda v: jnp.full(shape, v)
         return AtmToSurface(
@@ -2713,7 +2742,7 @@ class TestAllOceanGridsCoupled:
     def _run_grid(self, grid, shape, dynamics):
         from legoesm.ice.config import SeaIceConfig, BrineConfig
         from legoesm.ice.state import init_dynamic_ice_state
-        from legoesm.coupler.coupling_fields import TileResponse
+        from legoesm.core.coupling_fields import TileResponse
         from legoesm.coupler.config import TileConfig
         from legoesm.coupler.tile_fractions import (
             compute_tile_fractions, blend_tiles)
@@ -2769,7 +2798,7 @@ class TestAllOceanGridsCoupled:
         # ---- coupler blend delivers a paired exchange on this grid ----
         zt = jnp.zeros(shape)
         zero = TileResponse(
-            T_surface=zt, albedo=zt, emissivity=zt, z0=zt, q_surface=zt,
+            T_sfc=zt, albedo=zt, emissivity=zt, z0=zt, q_surface=zt,
             shflx=zt, lhflx=zt, tau_x=zt, tau_y=zt, lw_up=zt, u_ocean_sfc=zt,
             v_ocean_sfc=zt, co2_flux=zt, freshwater_flux=zt,
             ocean_heat_extraction=zt, ocean_stress_x=zt, ocean_stress_y=zt,

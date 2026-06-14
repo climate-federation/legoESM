@@ -1,6 +1,6 @@
 """Tests for the synthetic CMIP6 AMIP forcing deck.
 
-Validates that the files produced by ``scripts/generate_amip_forcing.py``
+Validates that the files produced by ``scripts/data/generate_amip_forcing.py``
 are loaded correctly by the corresponding production loaders in
 ``src/legoesm/forcing/external.py`` and ``src/legoesm/forcing/amip.py``,
 and that the values returned at canonical query points are physically
@@ -20,9 +20,10 @@ import pytest
 
 # Ensure scripts/ is importable
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO_ROOT))           # for `from scripts.data import ...`
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
-import generate_amip_forcing as gaf  # noqa: E402
+from scripts.data import generate_amip_forcing as gaf  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.forcing.external import (  # noqa: E402
@@ -387,7 +388,7 @@ class TestDeckChecker:
                            nlat=18)
 
     def test_missing_files_reported(self, tmp_path):
-        from run_amip_cmip6_deck import _check_forcing_files
+        from scripts.run.run_amip_cmip6_deck import _check_forcing_files
         files = _check_forcing_files(tmp_path, 1979, 1980)
         assert "_missing" in files
         # All six channels should be reported missing
@@ -397,7 +398,7 @@ class TestDeckChecker:
 
     def test_interannual_ozone_accepted(self, tmp_path):
         """Interannual ozone file alone is sufficient; clim is optional."""
-        from run_amip_cmip6_deck import _check_forcing_files
+        from scripts.run.run_amip_cmip6_deck import _check_forcing_files
         self._make_deck(tmp_path, with_interannual_o3=True,
                         with_clim_o3=False)
         files = _check_forcing_files(tmp_path, 1979, 1980)
@@ -409,7 +410,7 @@ class TestDeckChecker:
 
     def test_climatology_ozone_accepted(self, tmp_path):
         """Climatology ozone file alone is sufficient (legacy default)."""
-        from run_amip_cmip6_deck import _check_forcing_files
+        from scripts.run.run_amip_cmip6_deck import _check_forcing_files
         self._make_deck(tmp_path, with_interannual_o3=False,
                         with_clim_o3=True)
         files = _check_forcing_files(tmp_path, 1979, 1980)
@@ -419,7 +420,7 @@ class TestDeckChecker:
     def test_interannual_preferred_over_clim(self, tmp_path):
         """When both files exist, the interannual one wins (it's what
         real CMIP6 ozone is and exercises the non-cyclic loader)."""
-        from run_amip_cmip6_deck import _check_forcing_files
+        from scripts.run.run_amip_cmip6_deck import _check_forcing_files
         self._make_deck(tmp_path, with_interannual_o3=True,
                         with_clim_o3=True)
         files = _check_forcing_files(tmp_path, 1979, 1980)
@@ -674,15 +675,15 @@ class TestCMIPBandOrderRemap:
     def _rrtmgp_bands(self):
         import xarray as xr
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
-            _DEFAULT_SW_GAS,
+            DEFAULT_SW_GAS,
         )
-        ds = (xr.open_dataset(_DEFAULT_SW_GAS)
-              if not _DEFAULT_SW_GAS.endswith(".zarr")
-              else xr.open_zarr(_DEFAULT_SW_GAS))
+        ds = (xr.open_dataset(DEFAULT_SW_GAS)
+              if not DEFAULT_SW_GAS.endswith(".zarr")
+              else xr.open_zarr(DEFAULT_SW_GAS))
         wn = ds["bnd_limits_wavenumber"].values          # (14, 2) cm^-1
         gpt = ds["bnd_limits_gpt"].values.astype(int)    # (14, 2) 1-indexed
         ds.close()
-        return wn, gpt, _DEFAULT_SW_GAS
+        return wn, gpt, DEFAULT_SW_GAS
 
     def test_roll_aligns_every_band_by_wavelength(self):
         """Each CMIP band's flux must be re-ordered into the RRTMGP band
@@ -905,7 +906,7 @@ class TestCMIPBandOrderRemap:
         repo = Path(__file__).resolve().parents[2]
         if str(repo / "scripts") not in sys.path:
             sys.path.insert(0, str(repo / "scripts"))
-        import run_amip
+        from scripts.run import run_amip
         parser = run_amip.build_arg_parser()
         cfg_default = run_amip.build_config_from_args(parser.parse_args([]))
         assert cfg_default.solar_spectral_band_order == "auto"
@@ -920,7 +921,7 @@ class TestCMIPBandOrderRemap:
         rrtmg_sw to run_amip (issue #322)."""
         from pathlib import Path
         deck = (Path(__file__).resolve().parents[2]
-                / "scripts" / "run_amip_cmip6_deck.py").read_text()
+                / "scripts" / "run" / "run_amip_cmip6_deck.py").read_text()
         assert '"--solar-spectral-band-order", "rrtmg_sw"' in deck, (
             "CMIP6 deck must forward --solar-spectral-band-order rrtmg_sw "
             "for the MPI-M SSI_frac file"
@@ -1154,7 +1155,7 @@ class TestNoAerosolNoVolcanicFlags:
                                sy, ey, nlat=18)
 
     def test_check_files_skips_aerosol_when_disabled(self, tmp_path):
-        from run_amip_cmip6_deck import _check_forcing_files
+        from scripts.run.run_amip_cmip6_deck import _check_forcing_files
         self._make_partial_deck(tmp_path,
                                  include_aerosol=False,
                                  include_volcanic=False)
@@ -1175,7 +1176,7 @@ class TestNoAerosolNoVolcanicFlags:
         assert "volcanic" in files_required["_missing"]
 
     def test_check_files_skips_volcanic_only(self, tmp_path):
-        from run_amip_cmip6_deck import _check_forcing_files
+        from scripts.run.run_amip_cmip6_deck import _check_forcing_files
         self._make_partial_deck(tmp_path,
                                  include_aerosol=True,
                                  include_volcanic=False)
@@ -1191,13 +1192,17 @@ class TestNoAerosolNoVolcanicFlags:
         self._make_partial_deck(tmp_path,
                                  include_aerosol=True,
                                  include_volcanic=True)
-        deck_script = _REPO_ROOT / "scripts" / "run_amip_cmip6_deck.py"
+        deck_script = _REPO_ROOT / "scripts" / "run" / "run_amip_cmip6_deck.py"
         cmd = [
             sys.executable, str(deck_script),
             "--forcing-dir", str(tmp_path),
             "--start-year", "1979", "--end-year", "1980",
             "--grid-type", "cubed_sphere", "--discretization", "centered",
             "--radiation", "rrtmg", "--resolution", "8",
+            # Deck default IC is now era5 (needs --ic-path); this test
+            # exercises the aerosol/volcanic flag coupling, so use the
+            # cheap uniform IC to keep the dry-run self-contained.
+            "--ic", "default",
             "--days", "1", "--no-aerosol",  # volcanic *not* disabled
             "--dry-run",
         ]
@@ -1297,28 +1302,18 @@ class TestGHGOutOfRangeWarning:
         assert co2_2050 == co2_2021
 
 
-class TestSpectralPathWarning:
-    """Regression tests for the silent-drop warning for grid paths that
-    bypass the external CMIP6 forcing pipeline (P2 codex iter-3 + iter-4).
+class TestSpectralMpasForcingActive:
+    """Spectral (gaussian) and MPAS (voronoi) paths now run the unified
+    physics pipeline and CONSUME external CMIP6 forcing (PR #395), so the
+    deck no longer prints the old 'silent-drop' warning and the activity
+    report shows GHG/ozone/aerosol/volcanic as ACTIVE.  Only the solar
+    FILE (TSI + 14-band) remains inert on these paths (constant S_0).
 
-    Two paths are affected:
-    * ``ModelDriver._run_spectral`` (gaussian/spectral) hard-codes
-      gray radiation and constant solar.
-    * ``ModelDriver._run_mpas`` (voronoi/mpas) builds physics without
-      calling ``_precompute_external_forcing``; the external configs
-      never reach the radiation kernel.
-
-    When a user requests ``--radiation rrtmg`` on either path, the
-    deck driver must warn loudly that the external GHG/ozone/aerosol/
-    volcanic forcings are loaded but never consumed.
+    The deck default IC is --ic era5; these dry-run tests pass --ic
+    default so no ERA5 zarr is required.
     """
 
-    def test_warning_fires_on_gaussian_spectral_rrtmg(self, tmp_path):
-        """The deck driver --dry-run output must include the
-        silent-drop warning for the (gaussian, spectral, rrtmg) combo."""
-        import subprocess
-
-        # Build a tiny forcing deck so --dry-run can pass file checks.
+    def _make_deck(self, tmp_path):
         sy, ey = 1979, 1980
         gaf.make_sst_sic(tmp_path / f"sst_sic_amip_{sy}-{ey}.nc",
                           sy, ey, nlat=37, nlon=72)
@@ -1326,138 +1321,71 @@ class TestSpectralPathWarning:
         gaf.make_ozone_clim(tmp_path / "ozone_amip_clim.nc",
                              nlat=18, nlev=20)
         gaf.make_solar(tmp_path / f"solar_amip_{sy}-{ey}.nc", sy, ey)
-        gaf.make_aerosol_clim(tmp_path / "aerosol_amip_clim.nc",
-                                nlat=36)
+        gaf.make_aerosol_clim(tmp_path / "aerosol_amip_clim.nc", nlat=36)
         gaf.make_volcanic(tmp_path / f"volcanic_amip_{sy}-{ey}.nc",
-                           sy, ey, nlat=18)
+                          sy, ey, nlat=18)
+        return sy, ey
 
-        deck_script = _REPO_ROOT / "scripts" / "run_amip_cmip6_deck.py"
+    def _run(self, tmp_path, grid_type, disc, res):
+        import subprocess
+        sy, ey = self._make_deck(tmp_path)
+        deck_script = _REPO_ROOT / "scripts" / "run" / "run_amip_cmip6_deck.py"
         cmd = [
             sys.executable, str(deck_script),
             "--forcing-dir", str(tmp_path),
             "--start-year", str(sy), "--end-year", str(ey),
-            "--grid-type", "gaussian", "--discretization", "spectral",
-            "--radiation", "rrtmg", "--resolution", "21",
+            "--grid-type", grid_type, "--discretization", disc,
+            "--radiation", "rrtmg", "--resolution", str(res),
+            "--ic", "default",
             "--days", "1", "--dry-run",
         ]
         r = subprocess.run(cmd, capture_output=True, text=True)
-        assert r.returncode == 0, f"dry-run failed:\n{r.stderr}"
-        out = r.stdout
-        assert "WARNING" in out and "spectral" in out, (
-            f"Deck driver should warn that gaussian/spectral + rrtmg "
-            f"silently drops external forcings; got stdout:\n{out}"
-        )
-        # Forcing channels must be reported as inert, not ACTIVE.
-        # Match only the activity-report lines (start with '  ' and
-        # contain the channel name in label form); skip the command
-        # printout where flags like '--aerosol-forcing' would alias.
-        report_labels = (
-            "Greenhouse gases",
-            "Ozone (cyclic clim",
-            "Tropospheric aerosol",
-            "Volcanic stratospheric",
-        )
-        for label in report_labels:
-            line = next((ln for ln in out.splitlines()
-                          if label in ln), None)
+        assert r.returncode == 0, f"dry-run failed:\n{r.stderr}\n{r.stdout}"
+        return r.stdout
+
+    _RAD_LABELS = (
+        "Greenhouse gases",
+        "Ozone (cyclic clim",
+        "Tropospheric aerosol",
+        "Volcanic stratospheric",
+    )
+
+    def _assert_rad_active(self, out):
+        for label in self._RAD_LABELS:
+            line = next((ln for ln in out.splitlines() if label in ln), None)
             assert line is not None, f"Missing {label} report line"
-            assert "inert" in line.lower(), (
-                f"Forcing line {line!r} should be 'inert' under "
-                f"gaussian/spectral + rrtmg, not 'ACTIVE'."
-            )
+            assert "ACTIVE" in line, (
+                f"{label!r} should be ACTIVE (forcing now consumed): {line!r}")
 
-    def test_no_warning_on_cubed_sphere_rrtmg(self, tmp_path):
-        """No warning should fire for cubed_sphere + rrtmg."""
-        import subprocess
+    def test_gaussian_spectral_rrtmg_forcing_active(self, tmp_path):
+        out = self._run(tmp_path, "gaussian", "spectral", 21)
+        # No silent-drop warning; spectral-solar remains inert (constant S_0).
+        assert "does NOT consume external CMIP6 forcings" not in out
+        self._assert_rad_active(out)
+        solar = next((ln for ln in out.splitlines()
+                      if "Solar TSI" in ln), None)
+        assert solar is not None and "inert" in solar.lower(), (
+            f"spectral solar FILE should still be inert: {solar!r}")
 
-        sy, ey = 1979, 1980
-        gaf.make_sst_sic(tmp_path / f"sst_sic_amip_{sy}-{ey}.nc",
-                          sy, ey, nlat=37, nlon=72)
-        gaf.make_ghg_annual(tmp_path / f"ghg_amip_{sy}-{ey}.nc", sy, ey)
-        gaf.make_ozone_clim(tmp_path / "ozone_amip_clim.nc",
-                             nlat=18, nlev=20)
-        gaf.make_solar(tmp_path / f"solar_amip_{sy}-{ey}.nc", sy, ey)
-        gaf.make_aerosol_clim(tmp_path / "aerosol_amip_clim.nc",
-                                nlat=36)
-        gaf.make_volcanic(tmp_path / f"volcanic_amip_{sy}-{ey}.nc",
-                           sy, ey, nlat=18)
+    def test_cubed_sphere_rrtmg_forcing_active(self, tmp_path):
+        out = self._run(tmp_path, "cubed_sphere", "centered", 8)
+        assert "does NOT consume external CMIP6 forcings" not in out
+        self._assert_rad_active(out)
+        solar = next((ln for ln in out.splitlines()
+                      if "Solar TSI" in ln), None)
+        assert solar is not None and "ACTIVE" in solar, (
+            f"cubed_sphere solar should be ACTIVE: {solar!r}")
 
-        deck_script = _REPO_ROOT / "scripts" / "run_amip_cmip6_deck.py"
-        cmd = [
-            sys.executable, str(deck_script),
-            "--forcing-dir", str(tmp_path),
-            "--start-year", str(sy), "--end-year", str(ey),
-            "--grid-type", "cubed_sphere", "--discretization", "centered",
-            "--radiation", "rrtmg", "--resolution", "8",
-            "--days", "1", "--dry-run",
-        ]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        assert r.returncode == 0
-        assert "WARNING" not in r.stdout, (
-            f"No warning expected on cubed_sphere + rrtmg; got:\n"
-            f"{r.stdout}"
-        )
-        # Forcing channels must all show ACTIVE.
-        report_labels = (
-            "Greenhouse gases",
-            "Ozone (cyclic clim",
-            "Tropospheric aerosol",
-            "Volcanic stratospheric",
-        )
-        for label in report_labels:
-            line = next((ln for ln in r.stdout.splitlines()
-                          if label in ln), None)
-            assert line is not None
-            assert "ACTIVE" in line, f"Got: {line!r}"
+    def test_voronoi_mpas_rrtmg_forcing_active(self, tmp_path):
+        out = self._run(tmp_path, "voronoi", "mpas", 4)
+        assert "does NOT consume external CMIP6 forcings" not in out
+        self._assert_rad_active(out)
+        solar = next((ln for ln in out.splitlines()
+                      if "Solar TSI" in ln), None)
+        assert solar is not None and "inert" in solar.lower(), (
+            f"MPAS solar FILE should still be inert: {solar!r}")
 
-    def test_warning_fires_on_voronoi_mpas_rrtmg(self, tmp_path):
-        """voronoi/mpas + rrtmg also bypasses external forcings;
-        the deck driver must warn just like for gaussian/spectral."""
-        import subprocess
 
-        sy, ey = 1979, 1980
-        gaf.make_sst_sic(tmp_path / f"sst_sic_amip_{sy}-{ey}.nc",
-                          sy, ey, nlat=37, nlon=72)
-        gaf.make_ghg_annual(tmp_path / f"ghg_amip_{sy}-{ey}.nc", sy, ey)
-        gaf.make_ozone_clim(tmp_path / "ozone_amip_clim.nc",
-                             nlat=18, nlev=20)
-        gaf.make_solar(tmp_path / f"solar_amip_{sy}-{ey}.nc", sy, ey)
-        gaf.make_aerosol_clim(tmp_path / "aerosol_amip_clim.nc",
-                                nlat=36)
-        gaf.make_volcanic(tmp_path / f"volcanic_amip_{sy}-{ey}.nc",
-                           sy, ey, nlat=18)
-
-        deck_script = _REPO_ROOT / "scripts" / "run_amip_cmip6_deck.py"
-        cmd = [
-            sys.executable, str(deck_script),
-            "--forcing-dir", str(tmp_path),
-            "--start-year", str(sy), "--end-year", str(ey),
-            "--grid-type", "voronoi", "--discretization", "mpas",
-            "--radiation", "rrtmg", "--resolution", "4",
-            "--days", "1", "--dry-run",
-        ]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        assert r.returncode == 0, f"dry-run failed:\n{r.stderr}"
-        out = r.stdout
-        assert "WARNING" in out and ("voronoi" in out.lower()
-                                       or "mpas" in out.lower()), (
-            f"Deck driver should warn that voronoi/mpas + rrtmg "
-            f"silently drops external forcings; got stdout:\n{out}"
-        )
-        report_labels = (
-            "Greenhouse gases",
-            "Ozone (cyclic clim",
-            "Tropospheric aerosol",
-            "Volcanic stratospheric",
-        )
-        for label in report_labels:
-            line = next((ln for ln in out.splitlines()
-                          if label in ln), None)
-            assert line is not None
-            assert "inert" in line.lower(), (
-                f"Forcing line {line!r} should be 'inert' under "
-                f"voronoi/mpas + rrtmg, not 'ACTIVE'."
-            )
 
 
 class TestVolcanicNonCyclic:
@@ -1608,7 +1536,7 @@ class TestVolcanicNonCyclic:
 
 
 class TestValidator:
-    """Regression tests for ``scripts/validate_amip_run.py``.
+    """Regression tests for ``scripts/validate/validate_amip_run.py``.
 
     Two specific failure modes the loose validator can exhibit:
     1. ``Status: BLOWUP`` line in ``results.txt`` should be **fatal**
@@ -1663,7 +1591,7 @@ class TestValidator:
         """A ``Status: BLOWUP`` run with otherwise OK scalars must
         return non-zero from validate() with ``strict=False``."""
         sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-        from validate_amip_run import validate
+        from scripts.validate.validate_amip_run import validate
 
         run = tmp_path / "blowup_run"
         # Diagnostics inside bounds, but status says BLOWUP.
@@ -1677,7 +1605,7 @@ class TestValidator:
 
     def test_failed_status_fatal_even_without_strict(self, tmp_path):
         sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-        from validate_amip_run import validate
+        from scripts.validate.validate_amip_run import validate
 
         run = tmp_path / "failed_run"
         self._write_run(run, status="FAILED", residual_max=10.0,
@@ -1687,7 +1615,7 @@ class TestValidator:
 
     def test_completed_status_passes(self, tmp_path):
         sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-        from validate_amip_run import validate
+        from scripts.validate.validate_amip_run import validate
 
         run = tmp_path / "ok_run"
         self._write_run(run, status="COMPLETED", residual_max=10.0,
@@ -1704,7 +1632,7 @@ class TestValidator:
         elapsed simulated days.
         """
         sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-        from validate_amip_run import validate
+        from scripts.validate.validate_amip_run import validate
 
         run = tmp_path / "long_run"
         # 400 simulated days, 5-day diagnostic cadence → 80 samples.
@@ -1723,7 +1651,7 @@ class TestValidator:
         """A 1-day cold-start run with residual=400 W/m² must still
         pass — the cold-start tolerance is 500 W/m²."""
         sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-        from validate_amip_run import validate
+        from scripts.validate.validate_amip_run import validate
 
         run = tmp_path / "short_run"
         self._write_run(run, status="COMPLETED", residual_max=400.0,

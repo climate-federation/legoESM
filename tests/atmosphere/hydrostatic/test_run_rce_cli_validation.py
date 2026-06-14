@@ -1,4 +1,4 @@
-"""Regression test for the iter-71 ``scripts/run_rce.py`` CLI input
+"""Regression test for the iter-71 ``scripts/run/run_rce.py`` CLI input
 validation (mirrors iter-67/70 plane-CRM driver validation).
 
 iter-71 added guards rejecting bad numeric inputs with clean
@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DRIVER = REPO_ROOT / "scripts" / "run_rce.py"
+DRIVER = REPO_ROOT / "scripts" / "run" / "run_rce.py"
 
 
 @pytest.mark.parametrize("flag,value,expected_err", [

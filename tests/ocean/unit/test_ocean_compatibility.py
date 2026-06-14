@@ -117,13 +117,19 @@ class TestMetalCompatibility:
 
         # Verify the class has the routing infrastructure without
         # creating a grid (which requires x64 to be enabled).
+        # The Metal detection itself (get_backend / "metal" branch) lives in
+        # the shared parallel.metal.place_spectral_grid helper now — the
+        # constructor just unpacks its placement.
         init_source = inspect.getsource(SpectralOceanModel.__init__)
         assert "_use_cpu_for_spectral" in init_source
         assert "_cpu_device" in init_source
         assert "_default_device" in init_source
-        assert "get_backend" in init_source
-        # get_backend() returns lowercase; source uses "metal"
-        assert 'metal' in init_source.lower()
+        assert "place_spectral_grid" in init_source
+
+        from legoesm.parallel.metal import place_spectral_grid
+        helper_source = inspect.getsource(place_spectral_grid)
+        assert "get_backend" in helper_source
+        assert "metal" in helper_source.lower()
 
         step_source = inspect.getsource(SpectralOceanModel.step)
         assert "_use_cpu_for_spectral" in step_source
@@ -218,7 +224,7 @@ class TestMPIAwareness:
     """Verify ocean module uses MPI-aware patterns."""
 
     def test_conservation_uses_is_distributed(self):
-        """Conservation fixers should use _is_distributed pattern."""
+        """Conservation fixers should use is_distributed pattern."""
         import inspect
         from legoesm.ocean.conservation import _ocean_area_sum, ocean_global_sum
 
@@ -228,8 +234,8 @@ class TestMPIAwareness:
         )
 
         global_source = inspect.getsource(ocean_global_sum)
-        assert "_is_distributed" in global_source, (
-            "ocean_global_sum must check _is_distributed for MPI"
+        assert "is_distributed" in global_source, (
+            "ocean_global_sum must check is_distributed for MPI"
         )
         assert "global_sum_mpi" in global_source, (
             "ocean_global_sum must call global_sum_mpi for MPI allreduce"
@@ -290,7 +296,7 @@ class TestMPIAwareness:
         )
 
         global_source = inspect.getsource(_spectral_global_sum)
-        assert "_is_distributed" in global_source
+        assert "is_distributed" in global_source
         assert "global_sum_mpi" in global_source
 
         fixer_source = inspect.getsource(_spectral_conservation_fixer)

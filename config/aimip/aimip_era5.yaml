@@ -1,6 +1,6 @@
 # AIMIP shared base configuration.
 #
-# Loaded by ``scripts/run_aimip.py``.  Variant overlays under this
+# Loaded by ``scripts/run/run_aimip.py``.  Variant overlays under this
 # directory are merged on top of this base (dict-merge — overlay keys
 # replace base keys).  See ``config/aimip/variant_*.yaml`` and
 # ``config/aimip/aimip_suite.yaml``.
@@ -76,7 +76,7 @@ n_max: 63            # v10: T63 ≈ 1.9° (96x128 grid, ncol=12288).
                      # intermediate drops to ~5 GB and the run fits.
                      # T127 needs a dycore-level gradient checkpoint
                      # (separate refactor).
-nlev: 8              # full vertical resolution.
+n_levels: 8              # full vertical resolution.
 dt: 600.0            # 10-minute dycore timestep.  T63 dt=1200 produced
                      # NaN at step 0 (2026-05-20) -- likely hyperdiff
                      # coefficient is too weak for T63 wavenumbers.

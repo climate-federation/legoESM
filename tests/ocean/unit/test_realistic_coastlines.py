@@ -56,10 +56,22 @@ from legoesm.ocean.bathymetry import BathymetryConfig, init_ocean_bathymetry
 
 @pytest.fixture(autouse=True)
 def _enable_x64():
+    # Pin BOTH jax x64 AND the legoESM storage precision policy to fp64.
+    # Toggling jax_enable_x64 alone is insufficient: the model's
+    # cast_pytree storage policy still downcasts to float32, so the
+    # thickness-weighted tracer integral conserves only to ~3e-7
+    # (float32 epsilon) and the 1e-8 conservation assert fails spuriously
+    # (issue #396).  Under the fp64 policy the model conserves to ~1e-14.
+    from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
     orig = jax.config.jax_enable_x64
+    prev_policy = get_policy()
     jax.config.update("jax_enable_x64", True)
-    yield
-    jax.config.update("jax_enable_x64", orig)
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        yield
+    finally:
+        set_policy(prev_policy)
+        jax.config.update("jax_enable_x64", orig)
 
 
 @pytest.fixture
@@ -314,7 +326,7 @@ ETOPO_FILE = Path("data/bathymetry/etopo_1deg.nc")
 @pytest.mark.skipif(
     not ETOPO_FILE.exists(),
     reason="ETOPO data not cached; run "
-           "scripts/diagnose_realistic_geometry.py first to fetch.",
+           "scripts/tmp/diagnose_realistic_geometry.py first to fetch.",
 )
 class TestRealisticMaskConsistency:
     """Load the ETOPO 1° subset on a 72×144 (2.5°) grid and verify

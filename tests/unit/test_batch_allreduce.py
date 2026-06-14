@@ -18,10 +18,10 @@ import numpy as np
 import pytest
 
 from legoesm.parallel.reductions import (
-    _require_mpi_stack,
+    require_mpi_stack,
     _validate_mpi_runtime_versions,
     _parse_version_triplet,
-    _mpi4jax_array_result,
+    mpi4jax_array_result,
 )
 
 
@@ -233,10 +233,10 @@ class TestVersionValidation:
 # ===========================================================================
 
 class TestRequireMPIStack:
-    """Tests for _require_mpi_stack import checking."""
+    """Tests for require_mpi_stack import checking."""
 
     def test_require_mpi_stack_without_mpi(self):
-        """_require_mpi_stack raises ImportError when mpi4jax is missing."""
+        """require_mpi_stack raises ImportError when mpi4jax is missing."""
         # mpi4jax is almost certainly not installed in the test env
         try:
             import mpi4jax  # noqa: F401
@@ -245,7 +245,7 @@ class TestRequireMPIStack:
             pass
 
         with pytest.raises(ImportError, match="MPI reductions require"):
-            _require_mpi_stack()
+            require_mpi_stack()
 
 
 # ===========================================================================
@@ -253,21 +253,21 @@ class TestRequireMPIStack:
 # ===========================================================================
 
 class TestMPI4JAXArrayResult:
-    """Tests for _mpi4jax_array_result helper."""
+    """Tests for mpi4jax_array_result helper."""
 
     def test_unwrap_tuple(self):
         """Tuple result (old mpi4jax style) is unwrapped."""
         arr = jnp.array(5.0)
-        result = _mpi4jax_array_result((arr, "token"))
+        result = mpi4jax_array_result((arr, "token"))
         np.testing.assert_allclose(float(result), 5.0, atol=1e-14)
 
     def test_passthrough_array(self):
         """Non-tuple result (new mpi4jax style) passes through."""
         arr = jnp.array(5.0)
-        result = _mpi4jax_array_result(arr)
+        result = mpi4jax_array_result(arr)
         np.testing.assert_allclose(float(result), 5.0, atol=1e-14)
 
     def test_empty_tuple_raises(self):
         """Empty tuple raises RuntimeError."""
         with pytest.raises(RuntimeError, match="empty tuple"):
-            _mpi4jax_array_result(())
+            mpi4jax_array_result(())

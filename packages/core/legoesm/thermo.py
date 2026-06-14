@@ -1,0 +1,373 @@
+"""Lightweight saturation thermodynamics for legoESM.
+
+This module provides `saturation_mixing_ratio` and
+`saturation_mixing_ratio_ice` with *no* dependency on
+``atmosphere.physics`` so that ``land/``, ``ice/``, ``ocean/``, and
+``coupler/`` modules can import them without pulling in the full
+atmosphere physics package.
+
+All operations are pure JAX and compatible with jit, grad, vmap, scan.
+
+Conventions — water-vapor mass variables
+----------------------------------------
+This module returns the **mixing ratio** ``r_sat = ε e_sat / (p - e_sat)``
+(mass of water vapor per unit mass of *dry* air).  Throughout the
+``atmosphere/physics`` source tree the prognostic field is named
+``q_v`` and many docstrings call it "specific humidity".  In the
+typical atmospheric regime where ``e_sat ≪ p``, mixing ratio and
+specific humidity differ by ``q ≈ r / (1 + r)`` — about 1% for
+``r = 0.01``.  The codebase uses these interchangeably; physics that
+needs the distinction (vertical-flux conservation in saturated tropical
+columns, q_c bookkeeping) should read this caveat carefully and
+convert explicitly when the 1% drift matters.
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+
+from legoesm import constants
+
+
+def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
+    """Compute saturation vapor pressure using Tetens formula.
+
+    e_sat = 611.2 * exp(17.67 * T_c / (T_c + 243.5))
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+
+    Returns
+    -------
+    jax.Array
+        Saturation vapor pressure [Pa].
+    """
+    T_c = T - constants.T_freeze
+    return 611.2 * jnp.exp(17.67 * T_c / (T_c + 243.5))
+
+
+def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
+    """Saturation vapour pressure over liquid water, WMO Goff (1957) [Pa].
+
+    Exact port of NEMO/aerobulk ``sbc_phy.F90::e_sat_sclr`` (the curve NEMO's
+    bulk formulas use), kept alongside the Tetens default so the OMIP/CORE-II
+    faithful ocean forcing reproduces NEMO's saturation humidity bit-for-bit.
+    Differs from :func:`saturation_vapor_pressure` by ~0.1–0.3 % over the
+    ocean-temperature range.  The temperature is floored at 180 K exactly as
+    NEMO does (guards masked/garbage cells).
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+
+    Returns
+    -------
+    jax.Array
+        Saturation vapor pressure [Pa].
+    """
+    T_K = jnp.maximum(T, 180.0)
+    rt = constants.T_freeze / T_K
+    log10_T = jnp.log10(T_K / constants.T_freeze)
+    return 100.0 * 10.0 ** (
+        10.79574 * (1.0 - rt)
+        - 5.028 * log10_T
+        + 1.50475e-4 * (1.0 - 10.0 ** (-8.2969 * (T_K / constants.T_freeze - 1.0)))
+        + 0.42873e-3 * (10.0 ** (4.76955 * (1.0 - rt)) - 1.0)
+        + 0.78614
+    )
+
+
+# ---------------------------------------------------------------------------
+# Flatau et al. (1992) polynomial saturation vapor pressure
+# ---------------------------------------------------------------------------
+# CLUBB (and CAM, via ``saturation_formula = flatau``) closes its assumed-PDF
+# cloud scheme on the Flatau 8th-order polynomial fit to the SVP curve rather
+# than Tetens. These are the CANONICAL Flatau curves (added here, in the shared
+# thermo module, so the CLUBB port consumes saturation only from ``thermo`` per
+# the CLAUDE.md "no saturation re-impl" rule — the curves are NOT re-derived
+# inside the physics tree). Faithful to ``saturation.F90`` /
+# ``CLUBB-JAX/.../saturation.py`` (coefficients verbatim). Reference:
+# Flatau, P. J., Walko, R. L., & Cotton, W. R. (1992). Polynomial fits to
+# saturation vapor pressure. J. Appl. Meteorol., 31, 1507-1513, Tables 3-4.
+
+_FLATAU_MIN_T_C = -85.0       # liquid polynomial valid range floor [deg C]
+_FLATAU_ICE_MIN_T_C = -90.0   # ice polynomial valid range floor [deg C]
+
+# Flatau ice polynomial coefficients (Table 4), x100 as in saturation.F90.
+_FLATAU_ICE_A = (
+    100.0 * 6.09868993,
+    100.0 * 0.499320233,
+    100.0 * 0.184672631e-1,
+    100.0 * 0.402737184e-3,
+    100.0 * 0.565392987e-5,
+    100.0 * 0.521693933e-7,
+    100.0 * 0.307839583e-9,
+    100.0 * 0.105785160e-11,
+    100.0 * 0.161444444e-14,
+)
+
+
+def saturation_vapor_pressure_flatau(T: jax.Array) -> jax.Array:
+    """Flatau (1992) polynomial saturation vapor pressure over liquid water.
+
+    8th-order factored polynomial fit, valid roughly -85 to +50 deg C. This is
+    the SVP curve CLUBB/CAM use by default (``saturation_formula = flatau``).
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+
+    Returns
+    -------
+    jax.Array
+        Saturation vapor pressure over liquid [Pa].
+    """
+    T_c = jnp.clip(T - constants.T_freeze, _FLATAU_MIN_T_C, None)
+    T_sqd = T_c ** 2
+    return (
+        -3.21582393e-14
+        * (T_c - 646.5835252598777)
+        * (T_c + 90.72381630364440)
+        * (T_sqd + 111.0976961559954 * T_c + 6459.629194243118)
+        * (T_sqd + 152.3131930092453 * T_c + 6499.774954705265)
+        * (T_sqd + 174.4279584934021 * T_c + 7721.679732114084)
+    )
+
+
+def saturation_vapor_pressure_ice_flatau(T: jax.Array) -> jax.Array:
+    """Flatau (1992) polynomial saturation vapor pressure over ice.
+
+    8th-order Horner polynomial (Table 4), valid roughly -90 to 0 deg C.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+
+    Returns
+    -------
+    jax.Array
+        Saturation vapor pressure over ice [Pa].
+    """
+    T_c = jnp.clip(T - constants.T_freeze, _FLATAU_ICE_MIN_T_C, None)
+    a = _FLATAU_ICE_A
+    return (
+        a[0] + T_c * (a[1] + T_c * (a[2] + T_c * (
+            a[3] + T_c * (a[4] + T_c * (a[5] + T_c * (
+                a[6] + T_c * (a[7] + T_c * a[8])))))))
+    )
+
+
+def saturation_mixing_ratio(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Compute saturation mixing ratio using Tetens formula.
+
+    e_sat = 611.2 * exp(17.67 * T_c / (T_c + 243.5))   where T_c = T - 273.15
+    q_sat = epsilon * e_sat / (p - e_sat)
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    p : jax.Array
+        Pressure [Pa].
+
+    Returns
+    -------
+    jax.Array
+        Saturation mixing ratio [kg/kg].
+    """
+    e_sat = saturation_vapor_pressure(T)
+    # Smooth floor on denominator: preserves gradients near e_sat ≈ p
+    # instead of a hard clip that creates a zero-gradient plateau.
+    # softplus(x - 1) + 1 ≈ x for x >> 1, ≈ 1 for x << 1, smooth at x = 1.
+    denom = jax.nn.softplus(p - e_sat - 1.0) + 1.0
+    q_sat = constants.epsilon * e_sat / denom
+    # Smooth cap at 1.0 kg/kg: prevents singularity at low-pressure levels
+    # while allowing gradients to flow (unlike hard jnp.minimum).
+    # Uses LogSumExp smooth-min: 1 - softplus(β(1 - x))/β with β = 20.
+    return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat)) / 20.0
+
+
+def saturation_mixing_ratio_ice(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Compute saturation mixing ratio over ice (Clausius-Clapeyron).
+
+    e_sat_i = 611.2 * exp(L_s/R_v * (1/T_freeze - 1/T))
+    q_sat_i = epsilon * e_sat_i / (p - e_sat_i)
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    p : jax.Array
+        Pressure [Pa].
+
+    Returns
+    -------
+    jax.Array
+        Ice saturation mixing ratio [kg/kg].
+    """
+    e_sat_i = 611.2 * jnp.exp(
+        constants.L_s / constants.R_v * (1.0 / constants.T_freeze - 1.0 / T)
+    )
+    denom = jax.nn.softplus(p - e_sat_i - 1.0) + 1.0
+    q_sat_i = constants.epsilon * e_sat_i / denom
+    return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat_i)) / 20.0
+
+
+def saturation_mixing_ratio_blend(
+    T: jax.Array,
+    p: jax.Array,
+    T_blend_top: float | None = None,
+    T_blend_width: float = 20.0,
+) -> jax.Array:
+    """FV3_3D iter 720: saturation mixing ratio with liquid/ice blend.
+
+    Reusable helper matching FV3's ``compute_qs(..., es_over_liq_and_ice=
+    .true.)`` behaviour:
+
+        w_liq  = clip((T − (T_top − width)) / width, 0, 1)
+        q_sat  = w_liq · q_sat_liq + (1 − w_liq) · q_sat_ice
+
+    Defaults:
+        T_blend_top = ``constants.T_freeze``     (273.15 K)
+        T_blend_width = 20.0 K
+
+    Generalizes the inline blend in ``rh_calc_fv3 do_cmip=True``
+    (iter-715) for reuse by other diagnostics.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature (K).
+    p : jax.Array
+        Pressure (Pa).
+    T_blend_top : float, optional
+        Upper temperature above which q_sat = q_sat_liq exactly.
+        Default ``constants.T_freeze``.
+    T_blend_width : float, default 20.0 K.
+        Linear-blend width.
+
+    Returns
+    -------
+    q_sat : jax.Array
+        Blended saturation mixing ratio (kg/kg).
+    """
+    if T_blend_top is None:
+        T_blend_top = constants.T_freeze
+    T_blend_bot = T_blend_top - T_blend_width
+    qs_liq = saturation_mixing_ratio(T, p)
+    qs_ice = saturation_mixing_ratio_ice(T, p)
+    w_liq = jnp.clip(
+        (T - T_blend_bot) / (T_blend_top - T_blend_bot),
+        0.0, 1.0,
+    )
+    return w_liq * qs_liq + (1.0 - w_liq) * qs_ice
+
+
+def saturation_mixing_ratio_dT(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Analytic derivative d(q_sat)/dT consistent with ``saturation_mixing_ratio``.
+
+    Uses the same Tetens vapor-pressure formula as
+    ``saturation_vapor_pressure`` and the same hard ``p - e_sat`` floor as
+    historically used by closure schemes (CLUBB-style PDF widths).  The
+    smooth softplus floor used by ``saturation_mixing_ratio`` itself
+    is intentionally NOT applied here — for derivative use cases
+    (e.g. Gaussian PDF width scaling), the simpler ``max(p - e_sat, 1)``
+    floor is the standard convention.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    p : jax.Array
+        Pressure [Pa].
+
+    Returns
+    -------
+    jax.Array
+        d(q_sat)/dT [kg/kg/K].
+    """
+    e_sat = saturation_vapor_pressure(T)
+    T_c = T - constants.T_freeze
+    de_dT = e_sat * 17.67 * 243.5 / (T_c + 243.5) ** 2
+    p_eff = jnp.clip(p - e_sat, 1.0)
+    return constants.epsilon * de_dT * p / p_eff ** 2
+
+
+def saturation_specific_humidity(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Compute saturation specific humidity from saturation mixing ratio.
+
+    q = w_sat / (1 + w_sat)
+
+    where w_sat = epsilon * e_sat / (p - e_sat) is the saturation mixing
+    ratio.  Use this function when working with specific humidity fields
+    (q = m_v / (m_v + m_d)) rather than mixing ratio (w = m_v / m_d).
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    p : jax.Array
+        Pressure [Pa].
+
+    Returns
+    -------
+    jax.Array
+        Saturation specific humidity [kg/kg].
+    """
+    w_sat = saturation_mixing_ratio(T, p)
+    return w_sat / (1.0 + w_sat)
+
+
+def relative_humidity(
+    T: jax.Array,
+    p: jax.Array,
+    mixing_ratio: jax.Array,
+) -> jax.Array:
+    """Saturation ratio ``S = e / e_sat`` (WMO relative humidity, as a fraction).
+
+    Computes the water-vapor partial pressure from the vapor MIXING RATIO
+    ``r = m_v / m_d`` [kg/kg dry air] and divides by the saturation vapor
+    pressure::
+
+        e = p * r / (epsilon + r)
+        S = e / saturation_vapor_pressure(T)
+
+    This is the saturation ratio that diffusional droplet growth uses (its
+    ``(S - 1)`` supersaturation), and is distinct from the mixing-ratio ratio
+    ``r / r_sat`` — the two differ by ``O(r/epsilon, e_sat/p)`` (~1 %), which is
+    a large fractional error in the small ``S - 1`` activation signal.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    p : jax.Array
+        Pressure [Pa].
+    mixing_ratio : jax.Array
+        Water-vapor mixing ratio ``r = m_v/m_d`` [kg/kg].
+
+    Returns
+    -------
+    jax.Array
+        Saturation ratio ``S = e/e_sat`` [-] (1.0 at saturation).
+    """
+    e = p * mixing_ratio / (constants.epsilon + mixing_ratio)
+    return e / saturation_vapor_pressure(T)

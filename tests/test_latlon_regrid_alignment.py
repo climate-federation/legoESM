@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from scripts.run_atmosphere_test_matrix import (
+from scripts.matrix.run_atmosphere_test_matrix import (
     _regrid_latlon_to_181x360,
     _regrid_2d,
     _regrid_3d_level,
@@ -113,7 +113,7 @@ def test_source_no_roll_only_latlon_branch():
     roll-only path — that re-introduces the gross longitude translation."""
     src = (
         Path(__file__).resolve().parents[1]
-        / "scripts" / "run_atmosphere_test_matrix.py"
+        / "scripts" / "matrix" / "run_atmosphere_test_matrix.py"
     ).read_text()
     assert src.count("_regrid_latlon_to_181x360(") >= 3, (
         "both _regrid_2d and _regrid_3d_level lat-lon branches (and the helper) "

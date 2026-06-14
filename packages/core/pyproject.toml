@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "legoesm-core"
+version = "0.1.0"
+description = "legoESM core substrate: grids, operators, state, runtime, parallel, io, time integration, and component scaffolding (the shared base every Earth-system component depends on)."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "Pierre Gentine" }]
+keywords = ["earth-system-model", "jax", "differentiable", "weather", "climate"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+# The substrate's hard runtime deps.  It imports NOTHING above it (import-linter
+# contract "legoesm-core member imports nothing above it"), so it has no
+# inter-member dependency — this is the root of the federation DAG.
+dependencies = [
+    "jax>=0.4.35",
+    "jaxlib>=0.4.35",
+    "equinox>=0.11",
+    "numpy>=1.26",
+    "scipy>=1.10",
+    "xarray>=2024.0",
+    "zarr>=2.18",
+    "netCDF4>=1.6",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+mesh = ["pymetis>=1.2", "scipy>=1.10"]
+# Tested jax envelope for MPI is >=0.8,<0.10 (runtime-guarded in
+# parallel/reductions.py). No jax cap here — see root pyproject [mpi] comment;
+# pinned working combo lives in requirements_mpi.txt.
+mpi = ["mpi4py>=4.1,<5", "mpi4jax>=0.8,<0.9"]
+
+# Namespace package: NO legoesm/__init__.py, so this wheel ships
+# legoesm/{core,grids,runtime,parallel,io,timestepping,components} + the
+# substrate top-level modules (constants, thermo, registry, _version) as a
+# PEP-420 portion of the shared ``legoesm`` namespace.  Sibling members
+# (legoesm-atmosphere, ...) contribute their own subpackages to the same
+# namespace, so everything still imports as ``legoesm.<subpkg>``.
+[tool.hatch.build.targets.wheel]
+packages = ["legoesm"]

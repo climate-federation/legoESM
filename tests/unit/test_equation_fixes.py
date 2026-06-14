@@ -346,13 +346,13 @@ class TestIssue5_EDMFPrecipitation:
         bound for any physically reasonable column.
         """
         from legoesm.atmosphere.physics.convection.mass_flux import edmf_convection
-        from legoesm.atmosphere.physics.convection.config import EDMFConfig
+        from legoesm.atmosphere.physics.convection.config import ConvectiveEDMFConfig
 
         T, q_v, p_full, p_half = _make_unstable_columns()
         ncol = T.shape[0]
         a_u = jnp.full(ncol, 0.1)
 
-        config = EDMFConfig(cape_threshold=0.0)
+        config = ConvectiveEDMFConfig(cape_threshold=0.0)
         out, _ = edmf_convection(T, q_v, p_full, p_half, a_u, dt=300.0, config=config)
 
         max_rate = jnp.max(out.dq_c_conv_dt)
@@ -369,25 +369,29 @@ class TestIssue5_EDMFPrecipitation:
 
 class TestIssue6_KuoTriggerUnits:
 
-    def test_kuo_config_uses_me_threshold(self):
-        """KuoConfig should use 'me_threshold' (moisture excess, kg/m²)."""
+    def test_kuo_config_is_convergence_driven(self):
+        """The canonical Kuo config drops the obsolete supersaturation
+        trigger fields (``me_threshold``/``mc_threshold``/``alpha_heat``/
+        ``tau_relax_s``) and exposes the entraining-parcel + partition
+        controls instead.  The faithful source is the large-scale
+        moisture convergence, not column supersaturation."""
         from legoesm.atmosphere.physics.convection.config import KuoConfig
         cfg = KuoConfig()
-        assert hasattr(cfg, 'me_threshold'), "KuoConfig must have me_threshold"
-        assert not hasattr(cfg, 'mc_threshold'), \
-            "KuoConfig should not have mc_threshold (renamed to me_threshold)"
+        for obsolete in (
+            "me_threshold", "mc_threshold", "alpha_heat", "tau_relax_s",
+            "smooth_trigger_sharpness",
+        ):
+            assert not hasattr(cfg, obsolete), (
+                f"KuoConfig should no longer carry the supersaturation-era "
+                f"field {obsolete!r}"
+            )
+        assert hasattr(cfg, "entrainment")
+        assert cfg.partition == "kuo1965"
 
-    def test_kuo_trigger_responds_to_moisture_excess(self):
-        """Kuo activates only when column moisture excess exceeds threshold.
-
-        The default ``_make_unstable_columns`` profile is
-        conditionally unstable but undersaturated (``MC = 0``); under
-        the post-Option-C MC-gating Kuo correctly stays off there
-        (no spurious heating, no destroyed vapor, no created cloud
-        water in undersaturated columns). To test that the trigger
-        *does* fire when moisture excess is present, supersaturate
-        the lower half of the column here.
-        """
+    def test_kuo_quiescent_without_convergence(self):
+        """Canonical Kuo is QUIESCENT when no large-scale convergence is
+        supplied (a single column has no resolved ascent to converge) —
+        the physically-correct behavior, not a bug."""
         from legoesm.atmosphere.physics.convection.kuo import kuo_convection
         from legoesm.atmosphere.physics.convection.config import KuoConfig
         from legoesm.thermo import saturation_mixing_ratio
@@ -396,12 +400,29 @@ class TestIssue6_KuoTriggerUnits:
         q_sat = saturation_mixing_ratio(T, p_full)
         nlev = q_v.shape[-1]
         moist_mask = (jnp.arange(nlev) >= nlev // 2)
+        # Even a SUPERSATURATED column produces no Kuo tendency without a
+        # convergence source — supersaturation is NOT the Kuo source.
         q_v = jnp.where(moist_mask[None, :], 1.05 * q_sat, q_v)
-        config = KuoConfig(me_threshold=1e-5)
-        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0,
+                             config=KuoConfig(), moisture_convergence=None)
+        assert float(jnp.max(jnp.abs(out.dT_dt))) == 0.0
+        assert float(jnp.max(jnp.abs(out.dq_v_dt))) == 0.0
 
-        # With moist columns, convection should be triggered
-        assert jnp.any(out.convective_mask > 0.1), "Kuo should trigger for moist columns"
+    def test_kuo_fires_with_convergence(self):
+        """With a positive large-scale moisture-convergence source Kuo
+        fires (nonzero heating)."""
+        from legoesm.atmosphere.physics.convection.kuo import kuo_convection
+        from legoesm.atmosphere.physics.convection.config import KuoConfig
+
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        # Positive convergence in the lower/mid troposphere.
+        nlev = q_v.shape[-1]
+        ptenq = jnp.broadcast_to(
+            (2.0e-8 * (jnp.arange(nlev) >= nlev // 3))[None, :], q_v.shape,
+        ).astype(q_v.dtype)
+        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0,
+                             config=KuoConfig(), moisture_convergence=ptenq)
+        assert jnp.any(out.convective_mask > 0.1), "Kuo should fire for convergence"
         assert jnp.any(out.dT_dt != 0), "Kuo should produce nonzero heating"
 
 

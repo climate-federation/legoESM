@@ -3,7 +3,7 @@ upwind-flux SW core) — cc<->edge lift round-trip + stability + zonal symmetry.
 
 fv3_faithful: `barotropic_staggering="fv3edge"` routes the ocean barotropic through
 the TRUE FV3 edge-staggered SW core (`FV3EdgeShallowWaterModel`: upwind
-absolute-vorticity flux + `_d2a2c_vect`), the algorithmically-faithful counterpart
+absolute-vorticity flux + `d2a2c_vect`), the algorithmically-faithful counterpart
 to the default corner-staggered `fv3sw` (`CDGridShallowWaterModel`, centered).
 The only new machinery is the cc<->edge-midpoint vector lift
 (`_cc_to_edge_vector`/`_edge_to_cc_vector`); these tests fail if that lift loses
@@ -73,19 +73,17 @@ def test_fv3edge_barotropic_stable_and_resolves_artifact():
     A-grid artifact was ~40% non-zonal)."""
     import importlib.util, sys
     spec = importlib.util.spec_from_file_location(
-        "rom_t", "scripts/run_ocean_test_matrix.py")
+        "rom_t", "scripts/matrix/run_ocean_test_matrix.py")
     rom = importlib.util.module_from_spec(spec)
     sys.modules["rom_t"] = rom
     spec.loader.exec_module(rom)
     from legoesm.ocean.dynamics.ocean_model import OceanModel
-    from legoesm.core.operators_fc import build_fc_config
     from legoesm.grids.regridding import (
         get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon)
     tc = rom.TestCase(case="geostrophic_adjustment", grid_type="cubed_sphere",
                       resolution="C24", duration_days=10.0, quick_days=1.0)
-    grid, z, config, _, _, _, _ = rom._create_ocean_setup(tc, cube_use_fc=True)
-    m = OceanModel(grid, z, config._replace(barotropic_staggering="fv3edge"),
-                   fc_config=build_fc_config(dtype=jnp.float64))
+    grid, z, config, _, _, _, _ = rom._create_ocean_setup(tc)
+    m = OceanModel(grid, z, config._replace(barotropic_staggering="fv3edge"))
     st = rom._create_rest_state(tc, grid, z)
     st = rom._add_baroclinic_perturbation(st, "cubed_sphere", grid, z)
     for _ in range(int(0.5 * 86400 / 300.0)):

@@ -8,7 +8,7 @@ break any of the grid×discretization paths.
 Wall-time budget: 4 grids × ~10 s wall at 2 days = ~40 s total.
 
 For the FULL 30-day production validation see
-``scripts/run_rce_cross_grid.sh`` and CRM_implementation.md iter-12.
+``scripts/run/run_rce_cross_grid.sh`` and CRM_implementation.md iter-12.
 """
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def test_blowup_gate_fires_on_supersonic_winds(tmp_path):
     """Regression for the iter-13 BLOWUP threshold (max_v > 200 m/s).
 
     Drives a deliberately-unstable C48 run with the OLD broken
-    dt=300 default to verify scripts/run_rce.py now:
+    dt=300 default to verify scripts/run/run_rce.py now:
       (a) writes status: FAIL
       (b) exits with non-zero return code
 

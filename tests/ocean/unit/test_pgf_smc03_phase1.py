@@ -246,3 +246,88 @@ class TestADSmoothness:
 
         grad = jax.grad(loss)(rho)
         assert jnp.all(jnp.isfinite(grad))
+
+
+# ---------------------------------------------------------------------------
+# 6. 2nd-order backward bottom-cell slope (curved-EOS cube cold-start fix)
+# ---------------------------------------------------------------------------
+
+
+class TestBottomSlope2ndOrder:
+    """``bottom_slope_2nd_order`` replaces the O(Δz)-biased one-sided
+    bottom-cell slope with a 3-point 2nd-order backward derivative AT the
+    bottom centroid — exact for linear AND quadratic ρ(z), removing the
+    curvature bias that seeds the cubed-sphere rest-state PGF residual under
+    a pressure-dependent EOS, while staying bit-exact for linear ρ."""
+
+    def _col(self):
+        # 6 active cells + 1 inactive; non-uniform bottom spacing (partial).
+        z = jnp.array([50.0, 150.0, 250.0, 350.0, 450.0, 525.0, 600.0])
+        active = jnp.array([True] * 6 + [False])
+        return z, active
+
+    def test_default_off_bit_exact(self):
+        """The DEFAULT (flag off) path is BITWISE-identical to not passing the
+        kwarg at all — the new branch is never entered, so the proven lat-lon /
+        tripole / MPAS callers (which never pass it) are unchanged."""
+        z, active = self._col()
+        rho = jnp.asarray(1.0e-6 * np.asarray(z) ** 2 + 1027.0)  # curved
+        s_a = reconstruct_harmonic_slopes(rho, z, active)
+        s_b = reconstruct_harmonic_slopes(
+            rho, z, active, bottom_slope_2nd_order=False)
+        np.testing.assert_array_equal(np.array(s_a), np.array(s_b))
+
+    def test_linear_close_to_legacy(self):
+        """Linear ρ: the 2nd-order curvature term vanishes algebraically, so the
+        flag-on result equals the one-sided slope to round-off (NOT bitwise — it
+        is a different FP op sequence; the delta-form keeps the diff ~1e-13)."""
+        z, active = self._col()
+        rho = -2.0e-3 * z + 1027.0
+        s_legacy = reconstruct_harmonic_slopes(rho, z, active)
+        s_2nd = reconstruct_harmonic_slopes(
+            rho, z, active, bottom_slope_2nd_order=True)
+        np.testing.assert_allclose(
+            np.array(s_2nd), np.array(s_legacy), rtol=0, atol=1e-11)
+
+    def test_quadratic_bottom_slope_more_accurate(self):
+        """Curved (quadratic) ρ(z): the 2nd-order bottom slope matches the
+        analytic dρ/dz at the bottom centroid; the one-sided legacy slope is
+        biased away from it."""
+        z, active = self._col()
+        c = 1.0e-6
+        rho = c * z * z + 1027.0                 # dρ/dz = 2c·z (analytic)
+        z_bot = float(z[5])
+        analytic = 2.0 * c * z_bot
+        s_legacy = reconstruct_harmonic_slopes(rho, z, active)
+        s_2nd = reconstruct_harmonic_slopes(
+            rho, z, active, bottom_slope_2nd_order=True)
+        np.testing.assert_allclose(float(s_2nd[5]), analytic, rtol=1e-9)
+        err_2nd = abs(float(s_2nd[5]) - analytic)
+        err_legacy = abs(float(s_legacy[5]) - analytic)
+        assert err_legacy > 10.0 * err_2nd, (
+            f"legacy err {err_legacy:.3e} not >> 2nd-order err {err_2nd:.3e}"
+        )
+
+    def test_fallback_when_too_shallow(self):
+        """A column with only 2 active cells (no k−2) falls back to the
+        one-sided slope under the 2nd-order flag (no NaN, no change)."""
+        z = jnp.array([50.0, 150.0, 250.0])
+        active = jnp.array([True, True, False])
+        rho = jnp.array([1027.0, 1028.0, 1027.5])
+        s_legacy = reconstruct_harmonic_slopes(rho, z, active)
+        s_2nd = reconstruct_harmonic_slopes(
+            rho, z, active, bottom_slope_2nd_order=True)
+        np.testing.assert_array_equal(np.array(s_legacy), np.array(s_2nd))
+
+    def test_grad_finite_2nd_order(self):
+        """jax.grad through the 2nd-order bottom-slope path is finite."""
+        z, active = self._col()
+        rho = jnp.asarray(1.0e-6 * np.asarray(z) ** 2 + 1027.0)
+
+        def loss(rho_in):
+            sigma = reconstruct_harmonic_slopes(
+                rho_in, z, active, bottom_slope_2nd_order=True)
+            return jnp.sum(sigma ** 2)
+
+        grad = jax.grad(loss)(rho)
+        assert jnp.all(jnp.isfinite(grad))

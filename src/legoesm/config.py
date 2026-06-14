@@ -14,6 +14,7 @@ at the boundary (see ``_LEGACY_DISCRETIZATION`` below).
 from __future__ import annotations
 
 import copy
+import shlex
 import warnings
 
 import yaml
@@ -203,80 +204,111 @@ class Config:
             yaml.dump(self._data, f, default_flow_style=False, sort_keys=False)
 
     def to_experiment_config(self):
-        """Convert this YAML-based Config to an ExperimentConfig for ModelDriver.
+        """Translate this YAML-based Config into the canonical ExperimentConfig.
 
-        This is the **serialization boundary** between user-facing YAML and
-        the canonical ``ExperimentConfig`` NamedTuple consumed by the driver.
-        Legacy solver / discretization names are normalized here so that
-        downstream code only ever sees canonical names.
+        This is the **YAML boundary**: it maps user-facing YAML field names onto
+        canonical ``ExperimentConfig`` field names (applying legacy-name
+        normalization) and builds a canonical dict, then delegates the actual
+        ``dict -> NamedTuple`` reconstruction to the single canonical
+        deserializer :func:`legoesm.driver.config.experiment_config_from_dict`.
+
+        No second live schema is maintained here (D6: one serializer) — the only
+        responsibility of this method is the YAML key renames / unit conversions;
+        sub-config assembly and field defaulting belong to ``from_dict``.
         """
-        from legoesm.driver.config import (
-            ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
-        )
+        from legoesm.driver.config import experiment_config_from_dict
 
         d = self._data
-
-        grid = GridConfig(
-            grid_type=d.get("grid", {}).get("type", "cubed_sphere"),
-            resolution=d.get("grid", {}).get("resolution", 48),
-            nlev=d.get("grid", {}).get("n_levels", 40),
-            vertical_coord=d.get("grid", {}).get("vertical_coord", "hybrid"),
-            p_top_Pa=d.get("grid", {}).get("p_top_Pa", 200.0),
-            stretching=d.get("grid", {}).get("stretching", 2.0),
-        )
-
         atm = d.get("atmosphere", {})
-
-        # Normalize legacy names at the boundary
-        raw_dynamics = atm.get("dynamics", "hydrostatic")
-        raw_disc = atm.get("discretization", "cdgrid")
-        dynamics = _normalize_dynamics(raw_dynamics)
-        discretization = _normalize_discretization(raw_disc)
-
-        dycore = DycoreConfig(
-            model_type=dynamics,
-            discretization=discretization,
-            dt=float(atm.get("dt_seconds", 600)),
-            hyperdiff_scale=float(atm.get("hyperdiffusion_coeff", 1.0)),
-            conservation_fixer=d.get("conservation", {}).get("fix_mass", True),
-            fix_mass=d.get("conservation", {}).get("fix_mass", True),
-        )
-
+        grid = d.get("grid", {})
         time_cfg = d.get("time", {})
         output_cfg = d.get("output", {})
-        output = OutputConfig(
-            output_dir=output_cfg.get("path", ""),
-            diag_days=max(1, int(time_cfg.get("output_interval_hours", 6) / 24)),
-            checkpoint_days=int(output_cfg.get("checkpoint_days", 0)),
-            monthly_means=bool(output_cfg.get("monthly_means", False)),
-            cmip_output=bool(output_cfg.get("cmip_output", False)),
-            clear_sky_diag=bool(output_cfg.get("clear_sky_diag", False)),
-            checkpoint_format=output_cfg.get("checkpoint_format", "npz"),
-        )
-
-        # Integration time
-        duration_hours = time_cfg.get("duration_hours", 120)
-        days = int(duration_hours / 24)
-
-        # Build ExperimentConfig with available overrides
         forcing = d.get("forcing", {})
         radiation = d.get("radiation", {})
+        surface = d.get("surface", {})
+        hardware = d.get("hardware", {})
 
-        kwargs = dict(
-            grid=grid,
-            dycore=dycore,
-            output=output,
-            days=days,
-            start_day=float(time_cfg.get("start_day", 0.0)),
-            dataset=forcing.get("dataset", "analytical"),
-            forcing_path=forcing.get("path", ""),
-            radiation=radiation.get("scheme", atm.get("radiation", "gray")),
-            T_init=float(d.get("surface", {}).get("T_init", 300.0)),
-            RH_init=float(d.get("surface", {}).get("RH_init", 0.7)),
-            distributed=bool(d.get("hardware", {}).get("parallelism", {}).get("distributed", False)),
-        )
+        # conservation.fix_mass drives both the legacy ``conservation_fixer``
+        # flag and ``fix_mass`` on the canonical dycore config.
+        fix_mass = d.get("conservation", {}).get("fix_mass", True)
 
-        return ExperimentConfig(**kwargs)
+        canonical = {
+            "grid": {
+                "grid_type": grid.get("type", "cubed_sphere"),
+                "resolution": grid.get("resolution", 48),
+                "nlev": grid.get("n_levels", 40),         # n_levels -> nlev
+                "vertical_coord": grid.get("vertical_coord", "hybrid"),
+                "p_top_Pa": grid.get("p_top_Pa", 200.0),
+                "stretching": grid.get("stretching", 2.0),
+            },
+            "dycore": {
+                "model_type": _normalize_dynamics(atm.get("dynamics", "hydrostatic")),
+                "discretization": _normalize_discretization(
+                    atm.get("discretization", "cdgrid")
+                ),
+                "dt": float(atm.get("dt_seconds", 600)),  # dt_seconds -> dt
+                "hyperdiff_scale": float(atm.get("hyperdiffusion_coeff", 1.0)),
+                "conservation_fixer": fix_mass,
+                "fix_mass": fix_mass,
+            },
+            "output": {
+                "output_dir": output_cfg.get("path", ""),
+                "diag_days": max(1, int(time_cfg.get("output_interval_hours", 6) / 24)),
+                "checkpoint_days": int(output_cfg.get("checkpoint_days", 0)),
+                "monthly_means": bool(output_cfg.get("monthly_means", False)),
+                "cmip_output": bool(output_cfg.get("cmip_output", False)),
+                "clear_sky_diag": bool(output_cfg.get("clear_sky_diag", False)),
+                "checkpoint_format": output_cfg.get("checkpoint_format", "npz"),
+            },
+            "days": int(time_cfg.get("duration_hours", 120) / 24),
+            "start_day": float(time_cfg.get("start_day", 0.0)),
+            "seed": int(d.get("seed", 0)),  # master RNG seed (reproducibility)
+            "dataset": forcing.get("dataset", "analytical"),
+            "forcing_path": forcing.get("path", ""),
+            "radiation": radiation.get("scheme", atm.get("radiation", "gray")),
+            "T_init": float(surface.get("T_init", 300.0)),
+            "rh_init": float(surface.get("rh_init", surface.get("RH_init", 0.7))),
+            "distributed": bool(
+                hardware.get("parallelism", {}).get("distributed", False)
+            ),
+        }
+
+        return experiment_config_from_dict(canonical)
+
+    # ------------------------------------------------------------------
+    # Uniform experiment-adapter protocol (shared with
+    # ``legoesm.ocean.config.OceanExperimentConfig``; consumed by
+    # ``init_experiment`` / ``validate_templates`` via
+    # ``legoesm.experiment_registry``).
+    # ------------------------------------------------------------------
+    def get_meta(self) -> dict:
+        """Return the ``experiment:`` metadata block (or empty dict)."""
+        return self.get("experiment") or {}
+
+    def signature(self) -> str:
+        """Deterministic signature of the RESOLVED ExperimentConfig.
+
+        Used to detect overrides that don't change the run (a typo or a
+        non-runtime dot-path). If the config is unresolvable the exception text
+        is folded in so before/after still differ (a no-op is only flagged when
+        the resolved config is byte-identical).
+        """
+        try:
+            return repr(self.to_experiment_config())
+        except Exception as exc:  # noqa: BLE001
+            return f"<unresolvable: {type(exc).__name__}: {exc}>"
+
+    def validate_strict(self) -> None:
+        """Strict-validate through the canonical ``ExperimentConfig`` path."""
+        self.to_experiment_config().validate_strict()
+
+    def run_command(self, config_path: str = "config.yaml") -> str:
+        """Launcher command for the generated ``run.sh`` (atmosphere runner).
+
+        ``legoesm run`` is a cwd-independent installed CLI, so the run.sh can
+        ``cd`` into the bundle dir and pass the bundle-relative ``config.yaml``.
+        """
+        return f"legoesm run {shlex.quote(config_path)}"
 
     def __repr__(self) -> str:
         return f"Config({self._data})"

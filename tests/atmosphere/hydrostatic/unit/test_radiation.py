@@ -60,7 +60,7 @@ _skip_if_metal_broken = pytest.mark.skipif(
 # Helpers
 # ===========================================================================
 
-def _make_column_data(ncol=4, nlev=10, T_surface=300.0, T_top=200.0):
+def _make_column_data(ncol=4, nlev=10, T_sfc=300.0, T_top=200.0):
     """Create simple test column data with linear temperature profile."""
     # Pressure: linearly spaced interfaces from 100 Pa (top) to 1e5 Pa (surface)
     p_half = jnp.broadcast_to(
@@ -69,9 +69,9 @@ def _make_column_data(ncol=4, nlev=10, T_surface=300.0, T_top=200.0):
     )
     p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
 
-    # Temperature: linear from T_top to T_surface
+    # Temperature: linear from T_top to T_sfc
     T = jnp.broadcast_to(
-        jnp.linspace(T_top, T_surface, nlev)[None, :],
+        jnp.linspace(T_top, T_sfc, nlev)[None, :],
         (ncol, nlev),
     )
 
@@ -79,7 +79,7 @@ def _make_column_data(ncol=4, nlev=10, T_surface=300.0, T_top=200.0):
     lat = jnp.linspace(0.0, jnp.pi / 3.0, ncol)
 
     # Surface temperature
-    sfc_temperature = jnp.full(ncol, T_surface)
+    sfc_temperature = jnp.full(ncol, T_sfc)
 
     # Insolation from perpetual equinox
     insol = perpetual_equinox_insolation(lat, 1360.0)
@@ -1510,7 +1510,7 @@ class TestCloudFraction:
         ncol, nlev = 4, 20
         # Cold atmosphere
         T, p_full, p_half, T_sfc, lat, insol = _make_column_data(
-            ncol, nlev, T_surface=220.0, T_top=180.0,
+            ncol, nlev, T_sfc=220.0, T_top=180.0,
         )
         dp = p_half[:, 1:] - p_half[:, :-1]
 
@@ -1595,7 +1595,14 @@ class TestCloudFraction:
         assert lw_down_sfc_cloudy > lw_down_sfc_clear
 
     def test_integration_with_sundqvist_clouds(self):
-        """Integration bridge should work with Sundqvist cloud scheme."""
+        """Integration bridge should work with Sundqvist cloud scheme.
+
+        Uses a CONSISTENT gate (``include_clouds=True`` with the active cloud
+        scheme).  Previously this built ``RadiationConfig(scheme='rrtmgp',
+        cloud_scheme='sundqvist')`` with the default ``include_clouds=False``,
+        which ran SILENTLY clear-sky — the finiteness assertion passed without
+        ever exercising the cloud coupling.  ``make_radiation_physics`` now
+        rejects that inconsistent config, so the test pins the working path."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.held_suarez import held_suarez_init
@@ -1606,6 +1613,7 @@ class TestCloudFraction:
 
         config = RadiationConfig(
             scheme="rrtmgp",
+            rrtmgp=RRTMGPConfig(include_clouds=True),
             cloud_scheme="sundqvist",
         )
         physics_fn = make_radiation_physics(config, model_type="hydrostatic")
@@ -1613,6 +1621,14 @@ class TestCloudFraction:
 
         assert tendencies.dT_dt.data.shape == (6, 4, 4, 8)
         assert jnp.all(jnp.isfinite(tendencies.dT_dt.data))
+
+        # The inconsistent gate (clouds on, include_clouds off) must be
+        # rejected, not silently run clear-sky.
+        with pytest.raises(ValueError, match="Inconsistent cloud-radiation gate"):
+            make_radiation_physics(
+                RadiationConfig(scheme="rrtmgp", cloud_scheme="sundqvist"),
+                model_type="hydrostatic",
+            )
 
     def test_cloud_none_matches_clear_sky(self):
         """cloud_scheme='none' should give identical results to no cloud config."""

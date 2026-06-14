@@ -37,7 +37,7 @@ import xarray as xr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.canopy import CanopyConfig, CanopyLandParams
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.multilayer_land import (

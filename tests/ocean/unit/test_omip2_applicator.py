@@ -20,8 +20,13 @@ def _matrix_module():
         repo_root = Path(__file__).resolve().parents[3]
         scripts_dir = repo_root / "scripts"
         if str(scripts_dir) not in sys.path:
-            sys.path.insert(0, str(scripts_dir))
-        matrix_path = scripts_dir / "run_ocean_test_matrix.py"
+            sys.path.insert(0, str(scripts_dir / "matrix"))
+        # Phase-4 script reorg moved the runner into scripts/matrix/; the
+        # ocean_test_matrix package stayed at scripts/ (kept on sys.path above).
+        # Accept either location so the loader survives an in-flight reorg.
+        matrix_path = scripts_dir / "matrix" / "run_ocean_test_matrix.py"
+        if not matrix_path.exists():
+            matrix_path = scripts_dir / "run_ocean_test_matrix.py"
         spec = importlib.util.spec_from_file_location(
             "_rom_for_omip2_apply_tests", matrix_path,
         )
@@ -162,7 +167,7 @@ def _rest_state(grid_type, res, H_max=5500.0, nlev=10):
     repo_root = Path(__file__).resolve().parents[3]
     scripts_dir = repo_root / "scripts"
     if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
+        sys.path.insert(0, str(scripts_dir / "matrix"))
     from ocean_test_matrix.setup import _create_ocean_setup
     from ocean_test_matrix.testcase import TestCase
     matrix_mod = _matrix_module()
@@ -276,3 +281,384 @@ def test_applicator_on_cube_and_mpas(grid_type, res):
               if grid_type == "cubed_sphere"
               else np.asarray(state.T.data)[:, 0])
     assert (T_top != T0_top).any()
+
+
+def test_compute_omip2_surface_forcing_mpas():
+    """compute_omip2_surface_forcing MPAS branch (the LIVE branch the faithful
+    run loop uses): cell-centred (nCells,) finite tau/q_net, eastward stress for
+    an eastward wind.  Guards the new elif added for the MPAS NEMO comparison."""
+    from legoesm.ocean.coupler import compute_omip2_surface_forcing
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+    mesh = create_voronoi_mesh(2, lloyd_iterations=2)   # 162 cells, tiny
+    z = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    state = rest_state_mpas_ocean(mesh, z, H_max=4000.0)
+    forcing = _uniform_wind_forcing(u_east=8.0)
+    sf = compute_omip2_surface_forcing(
+        state, forcing=forcing, idx_t=0, grid=mesh, grid_type="mpas")
+    n = mesh.nCells
+    for name, f in (("tau_x", sf.tau_x), ("tau_y", sf.tau_y),
+                    ("q_net", sf.q_net), ("sw_down", sf.sw_down)):
+        arr = np.asarray(f)
+        assert arr.shape == (n,), f"{name} shape {arr.shape} != ({n},)"
+        assert np.all(np.isfinite(arr)), f"{name} non-finite"
+    # tau_x is a definite nonzero zonal stress for a zonal wind...
+    assert abs(float(np.mean(np.asarray(sf.tau_x)))) > 1e-3
+    # ...and it tracks the wind DIRECTION (convention-agnostic): reversing the
+    # wind reverses tau_x.
+    sf_rev = compute_omip2_surface_forcing(
+        state, forcing=_uniform_wind_forcing(u_east=-8.0), idx_t=0,
+        grid=mesh, grid_type="mpas")
+    assert (float(np.mean(np.asarray(sf.tau_x)))
+            * float(np.mean(np.asarray(sf_rev.tau_x)))) < 0.0
+
+
+def _emp_forcing(*, precip, q_air, u_east=6.0, nlat=18, nlon=36):
+    """OceanForcing isolating the freshwater budget: prescribed precip [kg/m2/s]
+    and air humidity ``q_air`` (drives evaporation via q_sfc - q_air), benign
+    radiation, steady wind to give a finite exchange coefficient."""
+    from legoesm.ocean.forcing.jra55_do import OceanForcing
+    lat = np.linspace(-89.0, 89.0, nlat)
+    lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
+
+    def fld(val):
+        return np.full((1, nlat, nlon), float(val))
+
+    return OceanForcing(
+        lon=lon, lat=lat, time_s=np.array([0.0]),
+        u10=fld(u_east), v10=fld(0.0),
+        T_air=fld(288.0), q_air=fld(q_air),
+        sw_down=fld(0.0), lw_down=fld(0.0),
+        precip=fld(precip), runoff=fld(0.0),
+    )
+
+
+def test_compute_omip2_freshwater_forcing_emp():
+    """``compute_omip2_freshwater_forcing`` builds a FreshwaterForcing with
+    P (prescribed precip), E (interactive NCAR bulk evaporation), and runoff,
+    for delivery via the in-core ``model.step(freshwater=...)`` channel.
+    Guards the OMIP-2 salt-budget closure (without P - E the ocean freshens
+    under runoff alone).
+
+    Checks: (1) precip field == sampled precip and evap == the evap returned
+    by the SAME NCAR bulk call (= -lh/L_vap(SST) by construction) to fp tol;
+    (2) net P - E freshens under heavy precip / saturated air, salinifies under
+    dry air (strong evap); (3) runoff_R enters the runoff channel; (4) emp=False
+    zeroes P and E; (5) ramp scales all components.
+    """
+    import jax.numpy as jnp
+    from legoesm.ocean.coupler import compute_omip2_freshwater_forcing
+    from legoesm.ocean.coupler.omip2_applicator import (
+        air_sea_fluxes, _sample_forcing_latlon,
+    )
+    from legoesm.ocean.freshwater import net_freshwater_flux
+    from legoesm import constants
+    state, grid, z, _ = _rest_state_latlon()
+
+    # (1) Exactness: precip + evap == the independently reconstructed bulk path.
+    precip0 = 5.0e-5
+    forcing = _emp_forcing(precip=precip0, q_air=0.010)
+    fw = compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon")
+    P = np.asarray(fw.precip)
+    E = np.asarray(fw.evap)
+    assert P.shape == np.asarray(state.T.data)[..., 0].shape
+    assert np.isfinite(P).all() and np.isfinite(E).all()
+
+    lat_deg = np.degrees(np.asarray(grid.lat))
+    lon_deg = np.degrees(np.asarray(grid.lon))
+    forc = _sample_forcing_latlon(forcing, 0, lat_deg, lon_deg)
+    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + constants.T_freeze
+    _, _, _, lh, evap_ref = air_sea_fluxes(
+        u10=jnp.asarray(forc["u10"]), v10=jnp.asarray(forc["v10"]),
+        T_air_K=jnp.asarray(forc["T_air"]), q_air=jnp.asarray(forc["q_air"]),
+        T_sfc_K=jnp.asarray(T_sfc_K))
+    assert np.allclose(P, np.asarray(forc["precip"]), rtol=1e-6, atol=1e-12)
+    assert np.allclose(E, np.asarray(evap_ref), rtol=1e-6, atol=1e-12)
+    # evap and lh are mutually consistent through L_vap at the POTENTIAL
+    # SST (NEMO BULK_FORMULA pTs = zsspt; ~0.1% below L_vap(SST_abs)).
+    from legoesm.ocean.bulk_flux_omip import (
+        exner_potential_temperature, latent_heat_vaporization_sst,
+    )
+    theta_sst = exner_potential_temperature(
+        jnp.asarray(T_sfc_K), jnp.asarray(float(constants.p_atm_std)))
+    L_vap = np.asarray(latent_heat_vaporization_sst(theta_sst))
+    assert np.allclose(np.asarray(evap_ref), -np.asarray(lh) / L_vap,
+                       rtol=1e-9, atol=1e-15)
+
+    # (2) net = P - E: heavy precip / saturated air -> freshening (>0); dry air
+    # / no precip -> strong evap -> salinifying (<0).
+    fw_wet = compute_omip2_freshwater_forcing(
+        state, forcing=_emp_forcing(precip=2.0e-4, q_air=0.020),
+        idx_t=0, grid=grid, grid_type="latlon")
+    assert float(np.mean(np.asarray(net_freshwater_flux(fw_wet)))) > 0.0
+    fw_dry = compute_omip2_freshwater_forcing(
+        state, forcing=_emp_forcing(precip=0.0, q_air=0.001),
+        idx_t=0, grid=grid, grid_type="latlon")
+    assert float(np.mean(np.asarray(net_freshwater_flux(fw_dry)))) < 0.0
+
+    # (3) runoff_R flows into the runoff channel (additive, + into ocean).
+    R = np.full(P.shape, 1.0e-5)
+    fw_r = compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon",
+        runoff_R=R)
+    assert np.allclose(np.asarray(fw_r.runoff), R, rtol=1e-10)
+
+    # (4) emp=False zeroes P and E but keeps runoff.
+    fw_noemp = compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon",
+        runoff_R=R, emp=False)
+    assert np.all(np.asarray(fw_noemp.precip) == 0.0)
+    assert np.all(np.asarray(fw_noemp.evap) == 0.0)
+    assert np.allclose(np.asarray(fw_noemp.runoff), R, rtol=1e-10)
+
+    # (5) ramp scales every component linearly.
+    fw_half = compute_omip2_freshwater_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon",
+        runoff_R=R, ramp=0.5)
+    assert np.allclose(np.asarray(fw_half.precip), 0.5 * P, rtol=1e-10)
+    assert np.allclose(np.asarray(fw_half.evap), 0.5 * E, rtol=1e-10)
+    assert np.allclose(np.asarray(fw_half.runoff), 0.5 * R, rtol=1e-10)
+
+
+@pytest.mark.parametrize("grid_type,res", [
+    ("cubed_sphere", "C24"),
+    ("mpas", "ico3"),
+])
+def test_compute_omip2_freshwater_forcing_grid_routing(grid_type, res):
+    """``compute_omip2_freshwater_forcing`` routes through ``_sample_omip2_forcing``
+    on the cube ((6,n,n)) and MPAS ((nCells,)) grids: shape matches the surface
+    field, fields are finite, and the net P - E sign tracks the forcing (dry air
+    -> net salinifying < 0; heavy precip -> net freshening > 0).  Guards the
+    grid-routing the run loop relies on (cube folds net onto sf.freshwater; MPAS
+    passes the FreshwaterForcing to step(freshwater=))."""
+    from legoesm.ocean.coupler import compute_omip2_freshwater_forcing
+    from legoesm.ocean.freshwater import net_freshwater_flux
+    state, grid, z, _ = _rest_state(grid_type, res)
+    surf_shape = (np.asarray(state.T.data)[..., 0].shape if grid_type == "cubed_sphere"
+                  else np.asarray(state.T.data)[:, 0].shape)
+
+    fw_dry = compute_omip2_freshwater_forcing(
+        state, forcing=_emp_forcing(precip=0.0, q_air=0.001),
+        idx_t=0, grid=grid, grid_type=grid_type)
+    fw_wet = compute_omip2_freshwater_forcing(
+        state, forcing=_emp_forcing(precip=2.0e-4, q_air=0.020),
+        idx_t=0, grid=grid, grid_type=grid_type)
+    for fw in (fw_dry, fw_wet):
+        assert np.asarray(fw.precip).shape == surf_shape
+        assert np.isfinite(np.asarray(net_freshwater_flux(fw))).all()
+    assert float(np.mean(np.asarray(net_freshwater_flux(fw_dry)))) < 0.0
+    assert float(np.mean(np.asarray(net_freshwater_flux(fw_wet)))) > 0.0
+
+
+def _sw_forcing(*, sw=250.0, nlat=18, nlon=36):
+    """OceanForcing with uniform downwelling shortwave (isolates the SW albedo)."""
+    from legoesm.ocean.forcing.jra55_do import OceanForcing
+    f = lambda v: np.full((1, nlat, nlon), float(v))
+    return OceanForcing(
+        lon=np.linspace(0.0, 360.0, nlon, endpoint=False),
+        lat=np.linspace(-89.0, 89.0, nlat), time_s=np.array([0.0]),
+        u10=f(4.0), v10=f(0.0), T_air=f(288.0), q_air=f(0.010),
+        sw_down=f(sw), lw_down=f(0.0), precip=f(0.0), runoff=f(0.0))
+
+
+def test_ice_albedo_reduces_sw_and_q_net():
+    """``ice_albedo`` (prescribed siconc) reduces the returned sw_down AND q_net by
+    the effective albedo a_ocean*(1-siconc)+a_ice*siconc, applied ONCE.  Checks the
+    None=identity default, the siconc=0 (open-ocean 1-a_ocean) and siconc=1
+    (1-a_ice) limits, the 0<=sw_net<=sw_down bound, and that more ice -> less SW."""
+    from legoesm.ocean.coupler import compute_omip2_surface_forcing
+    from legoesm import constants
+    state, grid, z, _ = _rest_state_latlon()
+    forcing = _sw_forcing(sw=250.0)
+    shp = np.asarray(state.T.data)[..., 0].shape
+
+    sf_none = compute_omip2_surface_forcing(
+        state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon")
+    sw_full = np.asarray(sf_none.sw_down)
+    q_full = np.asarray(sf_none.q_net)
+    assert (sw_full > 0).any()
+
+    def sf(sic):
+        return compute_omip2_surface_forcing(
+            state, forcing=forcing, idx_t=0, grid=grid, grid_type="latlon",
+            ice_albedo=np.full(shp, float(sic)))
+    a_oc = float(constants.alpha_ocean_broadband)
+    a_ice = float(constants.alpha_ice_broadband_cold)
+
+    sf0, sf1, sfh = sf(0.0), sf(1.0), sf(0.5)
+    # siconc=0 -> open-ocean albedo: sw_net = (1-a_ocean)*sw_full.
+    assert np.allclose(np.asarray(sf0.sw_down), (1.0 - a_oc) * sw_full, rtol=1e-9)
+    # siconc=1 -> sea-ice albedo: sw_net = (1-a_ice)*sw_full.
+    assert np.allclose(np.asarray(sf1.sw_down), (1.0 - a_ice) * sw_full, rtol=1e-9)
+    # siconc=0.5 -> linear blend.
+    assert np.allclose(np.asarray(sfh.sw_down),
+                       (1.0 - 0.5 * (a_oc + a_ice)) * sw_full, rtol=1e-9)
+    # q_net drops by exactly the SW reduction (other terms unchanged).
+    assert np.allclose(np.asarray(sf1.q_net) - q_full,
+                       (1.0 - a_ice) * sw_full - sw_full, rtol=1e-9, atol=1e-9)
+    # More ice -> strictly less absorbed SW; bound 0 <= sw_net <= sw_full.
+    assert float(np.asarray(sf1.sw_down).mean()) < float(np.asarray(sf0.sw_down).mean())
+    for s in (sf0, sf1, sfh):
+        sn = np.asarray(s.sw_down)
+        assert (sn >= -1e-9).all() and (sn <= sw_full + 1e-9).all()
+    # None default = NO albedo: the returned sw_down is the sampled SW unchanged
+    # (compare to the directly-sampled forcing, not a literal -- the conservative
+    # regrid produces edge-cell partial values, e.g. a 125 at the grid boundary).
+    from legoesm.ocean.coupler.omip2_applicator import _sample_omip2_forcing
+    forc = _sample_omip2_forcing(forcing, 0, grid, "latlon")
+    assert np.allclose(sw_full, np.asarray(forc["sw_down"]), rtol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Prescribed-ice thermodynamic boundary (--ice-thermo) — codex HIGH dual-pole
+# fix.  Pure helpers, testable without forcing/grid.
+# ---------------------------------------------------------------------------
+
+def test_ice_surface_heat_regimes():
+    from legoesm.ocean.coupler.omip2_applicator import _ice_surface_heat
+    from legoesm import constants
+    a_oc = float(constants.alpha_ocean_broadband)
+    sw = np.full((4,), 200.0)
+    qn = np.full((4,), -50.0)            # net non-SW (e.g. ocean losing heat)
+
+    # None -> legacy: no albedo, full non-SW.
+    swo, q = _ice_surface_heat(sw, qn, None)
+    assert np.allclose(swo, sw) and np.allclose(q, qn + sw)
+
+    # under_ice=False, sic given -> albedo-only surrogate (matches _sw_albedo_factor).
+    swo, q = _ice_surface_heat(sw, qn, np.full((4,), 1.0), under_ice=False)
+    a_ice = float(constants.alpha_ice_broadband_cold)
+    assert np.allclose(swo, sw * (1 - a_ice))
+    assert np.allclose(q, qn + sw * (1 - a_ice))     # full non-SW retained
+
+    # under_ice=True, sic=0 -> open water: same as albedo-only open water.
+    swo0, q0 = _ice_surface_heat(sw, qn, np.zeros((4,)), under_ice=True)
+    assert np.allclose(swo0, sw * (1 - a_oc))
+    assert np.allclose(q0, sw * (1 - a_oc) + qn)
+
+    # under_ice=True, sic=1 -> tiny SW + non-SW SUPPRESSED.
+    swo1, q1 = _ice_surface_heat(sw, qn, np.ones((4,)), under_ice=True,
+                                 tau_ice_sw=0.03)
+    assert np.allclose(swo1, sw * 0.03)
+    assert np.allclose(q1, sw * 0.03)                # (1-sic)*qn = 0
+    # Under-ice ocean gets MUCH less heat than the albedo-only surrogate would
+    # (0.35*sw + qn): this is the SH-warm-bias correction.
+    assert float(q1.mean()) < float((sw * (1 - a_ice) + qn).mean())
+
+
+def test_under_ice_freeze_relax_two_sided():
+    from legoesm.ocean.coupler.omip2_applicator import under_ice_freeze_relax
+    from legoesm import constants
+    Tf = float(constants.T_freeze_ocean) - float(constants.T_freeze)   # ~ -1.8 C
+    day = 86400.0
+
+    # sic=0 -> untouched.
+    T = np.array([3.0, -3.0, 10.0])
+    assert np.allclose(under_ice_freeze_relax(T, np.zeros(3), day), T)
+
+    # sic=1, warm cell -> COOLED toward freezing; cold (super-cooled) -> WARMED up.
+    T = np.array([3.0, -3.0])
+    out = under_ice_freeze_relax(T, np.ones(2), day, tau_ice_days=20.0)
+    assert out[0] < 3.0 and out[0] > Tf          # warm cell cooled toward Tf
+    assert out[1] > -3.0 and out[1] < Tf         # super-cooled cell warmed up to Tf
+    # Convergence: many days at sic=1 -> Tf.
+    Tc = np.array([5.0])
+    for _ in range(2000):
+        Tc = under_ice_freeze_relax(Tc, np.ones(1), day, tau_ice_days=20.0)
+    assert abs(float(Tc[0]) - Tf) < 1e-3
+    # dt >> tau -> clipped to full relaxation (no overshoot/instability).
+    big = under_ice_freeze_relax(np.array([5.0]), np.ones(1), 100 * day,
+                                 tau_ice_days=20.0)
+    assert abs(float(big[0]) - Tf) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# NEMO-form q_ns assembly (Kirchhoff LW, snow fusion, heat-content terms)
+# ---------------------------------------------------------------------------
+
+def _qns_forcing(*, lw_down=0.0, precip=0.0, snow=None, slp=None,
+                 q_air=0.010, T_air=288.0, nlat=18, nlon=36):
+    """OceanForcing for q_ns-assembly tests (zero SW; optional snow/slp)."""
+    from legoesm.ocean.forcing.jra55_do import OceanForcing
+    lat = np.linspace(-89.0, 89.0, nlat)
+    lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
+
+    def fld(val):
+        return np.full((1, nlat, nlon), float(val))
+
+    return OceanForcing(
+        lon=lon, lat=lat, time_s=np.array([0.0]),
+        u10=fld(6.0), v10=fld(0.0),
+        T_air=fld(T_air), q_air=fld(q_air),
+        sw_down=fld(0.0), lw_down=fld(lw_down),
+        precip=fld(precip), runoff=fld(0.0),
+        snow=None if snow is None else fld(snow),
+        slp=None if slp is None else fld(slp),
+    )
+
+
+def test_qnet_longwave_is_kirchhoff_form():
+    """Delta(q_net) / Delta(LW_down) == emissivity_seawater_lw (0.98), NOT 1.0:
+    the NEMO net-LW form weights ABSORPTION by the same eps as emission.
+    The old assembly absorbed 100% of LW_down (-> ~+11 W/m2 spurious warming)."""
+    from legoesm.ocean.coupler import compute_omip2_surface_forcing
+    from legoesm import constants
+    state, grid, z, _ = _rest_state_latlon()
+    sf_a = compute_omip2_surface_forcing(
+        state, forcing=_qns_forcing(lw_down=300.0), idx_t=0,
+        grid=grid, grid_type="latlon")
+    sf_b = compute_omip2_surface_forcing(
+        state, forcing=_qns_forcing(lw_down=400.0), idx_t=0,
+        grid=grid, grid_type="latlon")
+    dq = np.asarray(sf_b.q_net) - np.asarray(sf_a.q_net)
+    assert np.allclose(dq, constants.emissivity_seawater_lw * 100.0,
+                       rtol=1e-9, atol=1e-9)
+
+
+def test_qnet_snow_fusion_and_heat_content():
+    """Adding snow at fixed TOTAL precip changes q_net by exactly
+    s*(-L_fus + c_p_ice*min(thetaC,0) - c_p_seawater*thetaC): the fusion
+    sink plus swapping rain heat content for snow heat content (NEMO
+    blk_oce_2 form, heat-content terms at the POTENTIAL air temperature
+    and NEMO rLfus/rcpi values)."""
+    import jax.numpy as jnp
+    from legoesm.ocean.coupler import compute_omip2_surface_forcing
+    from legoesm.ocean.bulk_flux_omip import potential_air_temperature_10m
+    from legoesm import constants
+    state, grid, z, _ = _rest_state_latlon()
+    P, S = 2.0e-4, 1.0e-4
+    T_air = 275.0
+    sf_rain = compute_omip2_surface_forcing(
+        state, forcing=_qns_forcing(precip=P, snow=0.0, T_air=T_air),
+        idx_t=0, grid=grid, grid_type="latlon")
+    sf_snow = compute_omip2_surface_forcing(
+        state, forcing=_qns_forcing(precip=P, snow=S, T_air=T_air),
+        idx_t=0, grid=grid, grid_type="latlon")
+    theta_air, _ = potential_air_temperature_10m(
+        jnp.asarray(T_air), jnp.asarray(0.010))
+    theta_C = float(theta_air) - float(constants.T_freeze)
+    expected = S * (-float(constants.L_fus_nemo)
+                    + float(constants.c_p_ice_nemo) * min(theta_C, 0.0)
+                    - float(constants.c_p_seawater) * theta_C)
+    dq = np.asarray(sf_snow.q_net) - np.asarray(sf_rain.q_net)
+    assert np.allclose(dq, expected, rtol=1e-9, atol=1e-9)
+    # snow COOLS: the net effect must be negative at any realistic T_air
+    assert expected < 0.0
+
+
+def test_qnet_slp_channel_changes_density_and_qsat():
+    """Providing slp != standard atmosphere shifts the turbulent fluxes via
+    rho_air(slp) and ssq(slp) -- guards that the optional channel is actually
+    consumed (a dropped channel would leave q_net bit-identical)."""
+    from legoesm.ocean.coupler import compute_omip2_surface_forcing
+    state, grid, z, _ = _rest_state_latlon()
+    sf_std = compute_omip2_surface_forcing(
+        state, forcing=_qns_forcing(q_air=0.004), idx_t=0,
+        grid=grid, grid_type="latlon")
+    sf_low = compute_omip2_surface_forcing(
+        state, forcing=_qns_forcing(q_air=0.004, slp=96000.0), idx_t=0,
+        grid=grid, grid_type="latlon")
+    assert not np.allclose(np.asarray(sf_std.q_net),
+                           np.asarray(sf_low.q_net), rtol=0, atol=1e-12)

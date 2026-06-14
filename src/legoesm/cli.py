@@ -18,6 +18,9 @@ import logging
 import sys
 import time
 
+# Single-sourced version (importlib.metadata only — no JAX import at module scope).
+from legoesm._version import __version__
+
 logger = logging.getLogger("legoesm.cli")
 
 
@@ -58,6 +61,32 @@ def main():
         help="Shard across multiple devices (GPUs/TPUs) via face-parallel mesh",
     )
 
+    # --- reproduce command ---
+    repro_parser = subparsers.add_parser(
+        "reproduce",
+        help="Re-run from a run manifest and optionally bit-check the result",
+    )
+    repro_parser.add_argument(
+        "manifest",
+        help="Path to a run_manifest.json (or the directory containing it)",
+    )
+    repro_parser.add_argument(
+        "--check", action="store_true",
+        help="Assert the rerun's final state_digest matches the manifest's "
+             "(exit non-zero on mismatch)",
+    )
+    repro_parser.add_argument(
+        "--output", "-o", type=str, default=None,
+        help="Output directory for the rerun (default: a fresh temp dir)",
+    )
+
+    # --- wizard command ---
+    subparsers.add_parser(
+        "wizard",
+        help="Interactive wizard to configure and launch a run "
+             "(needs the 'wizard' extra: pip install 'legoesm[wizard]')",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -70,6 +99,31 @@ def main():
         cmd_test(args)
     elif args.command == "benchmark":
         cmd_benchmark(args)
+    elif args.command == "reproduce":
+        cmd_reproduce(args)
+    elif args.command == "wizard":
+        cmd_wizard(args)
+
+
+def cmd_wizard(args):
+    """Launch the interactive configuration wizard.
+
+    The wizard lives under ``scripts/experiment/`` (tooling, not installed
+    source), so it is imported by path here — mirroring the ``cmd_test`` /
+    ``init_experiment`` convention of inserting the repo dir onto ``sys.path``.
+    """
+    import pathlib
+    exp_dir = pathlib.Path(__file__).parent.parent.parent / "scripts" / "experiment"
+    if not exp_dir.is_dir():
+        logger.error(
+            "Cannot find scripts/experiment/ (run from a source checkout to use "
+            "the wizard)."
+        )
+        sys.exit(1)
+    if str(exp_dir) not in sys.path:
+        sys.path.insert(0, str(exp_dir))
+    import wizard
+    sys.exit(wizard.main())
 
 
 def cmd_run(args):
@@ -89,7 +143,7 @@ def cmd_run(args):
         from legoesm.runtime import bootstrap_from_yaml_config
         rc = bootstrap_from_yaml_config(config)
 
-        logger.info(f"legoESM v0.1.0 | Loaded config from {args.config}")
+        logger.info(f"legoESM v{__version__} | Loaded config from {args.config}")
         logger.info(f"  Model: {config.get('model.name')}")
         logger.info(f"  Grid: {config.get('grid.type')} C{config.get('grid.resolution')}")
         logger.info(f"  Duration: {config.get('time.duration_hours')} hours")
@@ -106,6 +160,10 @@ def cmd_run(args):
 
         logger.info("Initializing model driver...")
         driver = ModelDriver(experiment_config)
+        # The reproducibility run manifest (A1) is written inside driver.setup()
+        # — rank-0 guarded and using the driver's *resolved* config (after
+        # grid-type normalization and setup-time overrides), so it never races
+        # under MPI and always matches the config the run actually uses.
         driver.setup()
         logger.info("Running simulation...")
         status = driver.run()
@@ -123,6 +181,131 @@ def cmd_run(args):
             sys.exit(rc)
     except Exception as e:
         logger.error(f"Error running simulation: {e}", exc_info=True)
+        sys.exit(1)
+
+
+def cmd_reproduce(args):
+    """Re-run from a run manifest and optionally bit-check reproducibility."""
+    import tempfile
+    from pathlib import Path
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    try:
+        from legoesm.driver.config import experiment_config_from_dict
+        from legoesm.driver.restart import (
+            read_run_manifest,
+            recorded_state_digest,
+            validate_run_manifest,
+        )
+
+        manifest = read_run_manifest(args.manifest)
+        validate_run_manifest(manifest)
+
+        # The reproduce rerun is wired for the atmosphere driver (ModelDriver).
+        # An ocean manifest still validates (resolved_config reconstructs +
+        # config_hash matches, checked above); its bit-identical rerun goes
+        # through the ocean runner, not ModelDriver — say so plainly rather than
+        # crashing in experiment_config_from_dict on ocean fields (#376).
+        kind = manifest["config"].get("config_kind", "atmosphere")
+        if kind != "atmosphere":
+            logger.info(
+                f"legoESM v{__version__} | manifest {args.manifest} VALIDATED "
+                f"(config_kind={kind}; resolved_config reconstructs and "
+                f"config_hash matches)."
+            )
+            logger.warning(
+                "`legoesm reproduce` rerun supports the atmosphere driver only. "
+                f"Re-run this {kind} manifest with its runner — e.g. "
+                "`python scripts/run/run_omip_core2.py --config <config.yaml> "
+                "--output <dir>` — then compare result.state_digest against the "
+                "reference manifest."
+            )
+            # --check asks for a bit-identical rerun comparison. We did NOT rerun
+            # or compare digests, so we must NOT exit 0 — a green here would let
+            # CI treat an unperformed check as a passed check. Exit non-zero.
+            if args.check:
+                logger.error(
+                    f"reproduce --check is not supported for {kind} manifests "
+                    "(no driver rerun): the digest comparison was NOT performed. "
+                    "Rerun via the component runner and compare result.state_digest."
+                )
+                sys.exit(2)
+            return
+
+        config = experiment_config_from_dict(manifest["config"]["resolved_config"])
+
+        logger.info(f"legoESM v{__version__} | Reproducing run from {args.manifest}")
+        logger.info(
+            f"  Grid: {config.grid.grid_type} C{config.grid.resolution} | "
+            f"days={config.days} | seed={config.seed}"
+        )
+
+        # The rerun records ITS digest into ITS output dir's manifest.  It must
+        # not write into the reference run's directory, or it would overwrite the
+        # reference digest we are checking against.
+        # Resolve the manifest target FIRST (follows symlinks) so the reference
+        # directory is the real run dir, not a symlink's containing dir.
+        resolved_manifest = Path(args.manifest).resolve()
+        reference_dir = (
+            resolved_manifest if resolved_manifest.is_dir() else resolved_manifest.parent
+        )
+        out_dir = args.output or tempfile.mkdtemp(prefix="legoesm_reproduce_")
+        if Path(out_dir).resolve() == reference_dir:
+            logger.error(
+                f"--output {out_dir} is the reference run's directory; the rerun "
+                f"would overwrite the reference manifest. Use a fresh directory."
+            )
+            sys.exit(2)
+
+        from legoesm.driver.model_driver import ModelDriver
+        from legoesm.driver.run_status import status_to_exit_code
+
+        driver = ModelDriver(config, output_dir=out_dir)
+        driver.setup()
+        status = driver.run()
+        logger.info(f"  Rerun status: {status}")
+        rc = status_to_exit_code(status)
+        if rc != 0:
+            logger.error(
+                f"Rerun did not complete cleanly (status {status!r}); "
+                f"cannot check reproducibility."
+            )
+            sys.exit(rc)
+
+        if args.check:
+            # --check needs both digests; missing either is a hard failure.
+            reference = recorded_state_digest(manifest)
+            rerun_digest = recorded_state_digest(read_run_manifest(driver.output_dir))
+            if rerun_digest == reference:
+                logger.info(
+                    f"reproduce --check: MATCH — bit-identical "
+                    f"(state_digest {reference[:16]}...)"
+                )
+            else:
+                logger.error(
+                    "reproduce --check: MISMATCH — run is NOT bit-reproducible\n"
+                    f"  reference: {reference}\n"
+                    f"  rerun:     {rerun_digest}"
+                )
+                sys.exit(1)
+        else:
+            # Plain reproduce just needs a clean rerun; the digest is a bonus
+            # (best-effort recording, e.g. absent for some backends).
+            try:
+                rerun_digest = recorded_state_digest(read_run_manifest(driver.output_dir))
+                logger.info(f"  Reproduced; final state_digest={rerun_digest}")
+            except ValueError:
+                logger.info(
+                    "  Reproduced (no final state_digest was recorded for this run)."
+                )
+    except SystemExit:
+        raise
+    except Exception as e:
+        logger.error(f"Error during reproduce: {e}", exc_info=True)
         sys.exit(1)
 
 
@@ -157,7 +340,7 @@ def cmd_test(args):
     )
     from legoesm.core.conservation import compute_conservation_diagnostics
 
-    logger.info(f"legoESM v0.1.0 | Williamson Test Case {args.case}")
+    logger.info(f"legoESM v{__version__} | Williamson Test Case {args.case}")
     logger.info(f"  Resolution: C{args.resolution} (~{6.371229e3 / args.resolution:.0f} km)")
     logger.info(f"  Duration: {args.days} days")
     logger.info(f"  Time step: {args.dt} s")
@@ -362,12 +545,11 @@ def cmd_benchmark(args):
     rc = bootstrap(precision="fp32")
 
     import jax
-    import jax.numpy as jnp
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel
     from tests.test_cases.williamson import williamson_test2
 
-    logger.info(f"legoESM v0.1.0 | Benchmark")
+    logger.info(f"legoESM v{__version__} | Benchmark")
     logger.info(f"  Resolution: C{args.resolution}")
     logger.info(f"  Steps: {args.n_steps}")
     logger.info(f"  Backend: {rc.backend}")
