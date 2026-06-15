@@ -5057,6 +5057,12 @@ class ModelDriver:
             hs_newtonian_relax=self._hs_newtonian_relax,
             device_config=_seg_device_config,
             energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+            # Un-fused-radiation host path (ExperimentConfig.unfused_radiation,
+            # default OFF): the pipeline lets build_segment_fn expose
+            # run_norad_scan / run_rad so rrtmgp and the no-rad scan compile
+            # as two separate executables.  Passing it is harmless when the
+            # flag is off (the attributes are simply never invoked).
+            pipeline=self.physics,
         )
 
         logger.info(
@@ -5171,8 +5177,34 @@ class ModelDriver:
             # Execute compiled segment (vmap over ensemble if needed)
             if self._ensemble_size > 1:
                 carry = jax.vmap(run_segment, in_axes=(0, None, None))(carry, seg_steps, forcing)
+            elif (getattr(cfg, "unfused_radiation", False)
+                    and RAD_UPDATE_STEPS > 1
+                    and seg_steps % RAD_UPDATE_STEPS == 0
+                    and self._ensemble_size == 1
+                    and getattr(run_segment, "run_norad_scan", None) is not None
+                    and getattr(run_segment, "run_rad", None) is not None):
+                # Un-fused radiation (issue: ~3h XLA compile).  Lift the
+                # radiation-cycle loop from XLA to the HOST so rrtmgp and the
+                # no-rad dynamics+physics scan are TWO SEPARATE executables.
+                # Cadence: each outer cycle advances RAD_UPDATE_STEPS steps
+                # with the CURRENT held_*, THEN recomputes fresh held_*/T_land
+                # from the post-cycle state for the NEXT cycle.  Same absolute
+                # radiation update boundary as the fused subcycle (fresh
+                # radiation refreshed once per RAD_UPDATE_STEPS), but NOT
+                # step-for-step identical: the fused ``_run_subcycled`` applies
+                # the fresh radiation IN the last step of each cycle, whereas
+                # here every step of the cycle uses held radiation and the
+                # refresh lands at the cycle boundary.  This is the intended
+                # one-step phase shift (numerically equivalent to ~1e-6; same
+                # kernels, different compile boundary).
+                n_outer = seg_steps // RAD_UPDATE_STEPS
+                for _ic in range(n_outer):
+                    # advance RAD_UPDATE_STEPS no-rad steps w/ current held_*
+                    carry = run_segment.run_norad_scan(carry, forcing)
+                    # recompute fresh held_*/T_land from post-cycle state
+                    carry = run_segment.run_rad(carry, forcing)
             else:
-                carry = run_segment(carry, seg_steps, forcing)
+                carry = run_segment(carry, seg_steps, forcing)           # legacy fused path (byte-identical)
 
             if seg_idx == 0:
                 jax.block_until_ready(carry.u)
@@ -5385,6 +5417,7 @@ class ModelDriver:
                         hs_newtonian_relax=self._hs_newtonian_relax,
                         device_config=_seg_device_config,
                         energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
+                        pipeline=self.physics,
                     )
 
             # Checkpoint (a coupled run routes this through its own

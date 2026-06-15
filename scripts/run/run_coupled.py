@@ -67,6 +67,40 @@ def main():
     parser.add_argument("--radiation", default="gray",
                         choices=["gray", "rrtmg", "rrtmgp"],
                         help="Radiation scheme (default: gray)")
+    parser.add_argument(
+        "--rad-update-steps", type=int, default=1,
+        help="Call radiation every N physics steps (Issue #316: N>1 dispatches "
+             "the other steps to a no-radiation segment variant, cutting the "
+             "rrtmgp compiled-segment compile from O(hours) to O(minutes); "
+             "physically fine since radiation evolves slowly). Default 1.",
+    )
+    parser.add_argument(
+        "--unfused-radiation", action="store_true",
+        help="Run radiation as a SEPARATE host-level jit (not fused into the "
+             "lax.scan), so rrtmgp and the dynamics scan compile as two small "
+             "executables instead of one ~3h module. Requires --rad-update-steps>1. "
+             "Default off (byte-identical legacy fused path).",
+    )
+    # Atmosphere physics suite (defaults are the ExperimentConfig defaults:
+    # convection on, turbulence/GWD/clouds/microphysics off).  Enable the full
+    # suite for a realistic CMIP6 atmosphere.
+    parser.add_argument("--convection", default="sbm",
+                        choices=["sbm", "dca", "kuo", "mass_flux", "edmf", "none"],
+                        help="Convection scheme (default: sbm)")
+    parser.add_argument("--turbulence", default="none",
+                        choices=["smagorinsky", "louis", "tke", "holtslag_boville",
+                                 "mynn25", "clubb", "edmf", "none"],
+                        help="Boundary-layer turbulence scheme (default: none)")
+    parser.add_argument("--gravity-wave-drag", default="none",
+                        choices=["rayleigh", "lindzen", "mcfarlane", "hines",
+                                 "prognostic_spectral", "e3sm_cam", "ml_emulator",
+                                 "none"],
+                        help="Gravity-wave-drag scheme (default: none)")
+    parser.add_argument("--clouds", default="none",
+                        choices=["none", "sundqvist", "xu_randall", "resolved"],
+                        help="Cloud-fraction scheme (default: none)")
+    parser.add_argument("--microphysics", default="none",
+                        help="Microphysics scheme (default: none)")
     parser.add_argument("--diag-days", type=int, default=5,
                         help="Diagnostic interval [days] (default: 5)")
 
@@ -147,6 +181,13 @@ def main():
             cmip_resolution_deg=args.cmip_resolution_deg,
         ),
         radiation=args.radiation,
+        rad_update_steps=args.rad_update_steps,
+        unfused_radiation=args.unfused_radiation,
+        convection=args.convection,
+        turbulence=args.turbulence,
+        gravity_wave_drag=args.gravity_wave_drag,
+        cloud_scheme=args.clouds,
+        microphysics=args.microphysics,
         days=args.days,
         experiment=args.experiment,
         start_year=args.start_year,
