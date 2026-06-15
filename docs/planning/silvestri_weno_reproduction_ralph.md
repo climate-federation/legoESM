@@ -203,6 +203,25 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 12 — PHASE 3 COMPLETE + PHASE 4 §4 MATRIX REPRODUCED ✅ — 2026-06-15
+- **R3 (2D-turb driver) + R5 (comparison plotter) DONE + committed → PHASE 3 COMPLETE.**
+  `run_silvestri_turbulence_2d.py` (CFL time loop + isotropic spectra), `plot_silvestri_comparison.py`
+  (Figs 3-5 turb2d, 7-10 jet). Both smoke-tested.
+- **★ PHASE 4: §4 2D-turbulence matrix RUN + REPRODUCED (CPU, N=96, t=6, all 7 schemes).**
+  Quantitative match to the paper's §4 (KE retained / enstrophy retained at t=6):
+  W9V 0.967/0.424 · W9D 0.933/0.381 · DNS 0.943/0.789 · W5V 0.869/0.322 · W5D 0.700/0.237 ·
+  Leith1 0.574/0.246 · Leith2 0.144/0.048. **All 3 paper findings reproduced:** (1) WENO conserves
+  energy / Leith over-damps (W9V 97% vs Leith2 14%); (2) the HEADLINE {ζ;u}>{ζ;ζ} distinction —
+  W9V>W9D AND W5V>W5D (confirms the point→cellavg fix is active); (3) higher order keeps more energy.
+  Figures generated (fig3/4/5). Report written: `docs/ocean_experiments/silvestri_weno_reproduction.md`.
+- **COMPUTE CONSTRAINT:** no CUDA in this session (CPU fallback). The §4 single-resolution matrix is
+  cheap on CPU (done); the §4 DNS reference + 64→1024 sweep AND the §5 1000-day jet matrix
+  (15 runs) need GPU.
+- **NEXT (GPU-gated): PHASE 5 = §5 baroclinic-jet matrix** ({1/8,1/16,1/32°}×{UP3,W9V,W9D,SM2,QG2}×
+  1000d) once GPUs are available; + the §4 resolution sweep (64→1024) + DNS reference. **B5b
+  (full QG2 stretching) required before the QG2 §5 case.** PHASE 6 report: §4 section DONE; §5
+  section pending the matrix runs.
+
 ### Iteration 11 — PHASE 3: R1 2D-turbulence harness DONE (review caught it was INERT) — 2026-06-15
 - **R1 COMPLETE + adversarially reviewed + FIXED + committed** (`ocean/experiments/silvestri_turbulence_2d.py`).
   A standalone Cartesian doubly-periodic 2D NS vorticity solver driving the canonical WENO kernels
