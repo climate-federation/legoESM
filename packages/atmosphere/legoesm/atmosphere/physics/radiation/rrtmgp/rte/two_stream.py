@@ -131,13 +131,41 @@ def _replace_top_flux(f: Array) -> Array:
   Use quadratic polynomials to evaluate the flux at the top boundary making use
   of the points just below the top boundary.
 
+  The quadratic Lagrange stencil ``3*f[-2] - 3*f[-3] + f[-4]`` has
+  coefficient-sum 1, so a flat/linear near-TOA flux profile is reproduced
+  exactly.  But its gain on the near-TOA flux CURVATURE (second difference) is
+  unbounded and unsigned, so a drifted coupled state that develops a sharp
+  near-TOA reflectance/emission gradient (cloud) makes the raw extrapolation
+  OVERSHOOT — producing super-physical TOA shortwave (the ``[:, 0]`` face is
+  read straight into ``rsdt``/``rsut``) or driving the upwelling longwave below
+  zero (negative OLR).  This was BUG B: a 30-day rrtmgp coupled run inflated
+  ``rsdt`` ~2x and turned ``rlut`` negative at day ~15-20 (cells to 1121 W/m2 /
+  -52 W/m2), confirmed by replaying the dumped day-20 state through this
+  function (range-limit -> sw_down max 449, lw_up min +176; raw -> 1121 / -50).
+
+  Fix: RANGE-LIMIT the extrapolated top-halo face to the local range of the
+  three interior faces the stencil reads.  When the quadratic lands inside
+  ``[lo, hi]`` -- the low-curvature, near-flat near-TOA regime that radiative
+  flux profiles physically occupy (the flux asymptotes to a constant toward the
+  model top) -- this is a no-op (bit-identical to the historical behaviour on
+  the cases that were never pathological); only a strongly curved/drifted
+  profile whose quadratic overshoots the interior range is capped, at the
+  nearest interior flux.  Applied by the caller to the non-negative
+  ``flux_up``/``flux_down`` components only (so ``lo >= 0`` automatically); the
+  caller then RECOMPUTES ``flux_net = flux_up - flux_down`` at the top face --
+  this range-limit is nonlinear, so clipping ``flux_net`` independently would
+  break the ``net = up - down`` identity that the raw linear quadratic kept.
+
   Args:
     f: The array to fix the top boundary of.
 
   Returns:
     The array with the top boundary value fixed.
   """
-  top_bdy_f = 3 * f[:, :, -2] - 3 * f[:, :, -3] + f[:, :, -4]
+  quad = 3 * f[:, :, -2] - 3 * f[:, :, -3] + f[:, :, -4]
+  lo = jnp.minimum(jnp.minimum(f[:, :, -2], f[:, :, -3]), f[:, :, -4])
+  hi = jnp.maximum(jnp.maximum(f[:, :, -2], f[:, :, -3]), f[:, :, -4])
+  top_bdy_f = jnp.clip(quad, lo, hi)
   f = f.at[:, :, -1].set(top_bdy_f)
   return f
 
@@ -395,6 +423,18 @@ def solve_lw(
           'ssa': w_tot,
           'asymmetry_factor': precomputed_props['asymmetry_factor'],
       }
+    # Bound LW ssa / asymmetry to physical ranges before the two-stream solve
+    # (same BUG-B robustness fix as the shortwave path): with no LW aerosol
+    # forcing the cloud optics feed through unclamped, and an ssa>1 from a
+    # drifted-state cloud makes the LW two-stream emit a super-physical /
+    # negative TOA OLR (rlut<0).  No-op for valid (in-range) optics.
+    precomputed_props = {
+        **precomputed_props,
+        'ssa': jnp.clip(precomputed_props['ssa'], 0.0, 1.0),
+        'asymmetry_factor': jnp.clip(
+            precomputed_props['asymmetry_factor'], -1.0, 1.0,
+        ),
+    }
     if optimal_angle_fit is not None:
       band_idx = optics_lib.gas_optics_lw.g_point_to_bnd[igpt]
       lw_diffusive_factor = _compute_optimal_lw_secant(
@@ -460,10 +500,15 @@ def solve_lw(
       step_fn, optics_lib.n_gpt_lw, init_val, gpoint_batch_size,
   )
   # There are problematic values for the fluxes at the top boundary (the top
-  # halo), so fix using a quadratic polynomial to evaluate the flux at the top
-  # boundary.
-  for key in flux_keys:
-    fluxes[key] = _replace_top_flux(fluxes[key])
+  # halo), so range-limit the quadratic top-flux extrapolation (BUG B).  The
+  # raw quadratic is LINEAR in the flux so flux_net = flux_up - flux_down held
+  # at the top face automatically; the range-limit is nonlinear, so clip only
+  # the physical up/down components and RECOMPUTE flux_net = up - down at the
+  # top face to keep the TOA energy budget consistent.
+  fluxes['flux_up'] = _replace_top_flux(fluxes['flux_up'])
+  fluxes['flux_down'] = _replace_top_flux(fluxes['flux_down'])
+  fluxes['flux_net'] = fluxes['flux_net'].at[:, :, -1].set(
+      fluxes['flux_up'][:, :, -1] - fluxes['flux_down'][:, :, -1])
 
   return fluxes
 
@@ -599,6 +644,21 @@ def solve_sw(
           'ssa': w_tot,
           'asymmetry_factor': g_tot,
       }
+    # Bound the single-scattering albedo / asymmetry to their physical ranges
+    # before the two-stream solve.  The aerosol-mixing branch above already
+    # clips ssa∈[0,1] / g∈[-1,1], but with no aerosol forcing the cloud optics
+    # feed through UNCLAMPED — and on a drifted coupled state the cloud
+    # parameterisation can emit ssa>1 / |g|>1, which drives the Meador-Weaver
+    # reflectance/transmittance above 1 so the two-stream AMPLIFIES the flux
+    # (super-physical TOA SW down; BUG-B, 2026-06-15).  Physical optics are
+    # already in range ⇒ a no-op for valid inputs.
+    sw_optical_props = {
+        **sw_optical_props,
+        'ssa': jnp.clip(sw_optical_props['ssa'], 0.0, 1.0),
+        'asymmetry_factor': jnp.clip(
+            sw_optical_props['asymmetry_factor'], -1.0, 1.0,
+        ),
+    }
     optical_props_2stream = monochromatic_two_stream.sw_cell_properties(
         safe_zenith,
         sw_optical_props['optical_depth'],
@@ -667,10 +727,14 @@ def solve_sw(
         step_fn, optics_lib.n_gpt_sw, fluxes_0, gpoint_batch_size,
     )
     # There are problematic values for the fluxes at the top boundary (the top
-    # halo), so fix using a quadratic polynomial to evaluate the flux at the top
-    # boundary.
-    for key in flux_keys:
-      fluxes[key] = _replace_top_flux(fluxes[key])
+    # halo), so range-limit the quadratic top-flux extrapolation (BUG B).  Clip
+    # only the physical up/down components and RECOMPUTE flux_net = up - down at
+    # the top face (the nonlinear range-limit would otherwise break the
+    # flux_net = flux_up - flux_down identity the raw linear quadratic kept).
+    fluxes['flux_up'] = _replace_top_flux(fluxes['flux_up'])
+    fluxes['flux_down'] = _replace_top_flux(fluxes['flux_down'])
+    fluxes['flux_net'] = fluxes['flux_net'].at[:, :, -1].set(
+        fluxes['flux_up'][:, :, -1] - fluxes['flux_down'][:, :, -1])
 
     # Zero out nighttime columns.  ``is_day_col`` broadcasts from
     # shape ``()`` or ``(ncol, 1)`` against ``(ncol, 1, nlev+2)``.
