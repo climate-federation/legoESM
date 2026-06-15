@@ -47,10 +47,26 @@ One allreduce/V-cycle ⇒ break-even ≈ `2*(M_band - M_agglom) > M_agglom`. Our
 worse. Do it ONLY for many-rank runs where the even-alignment depth cap drives
 clear M-growth.
 
-## Missed lever
-- **CUDA-graph A/B for ATM icosahedral only** (env/bench, not model code): 0–15%
-  if atm MPAS shares the small-kernel dispatch pathology that CUDA graphs fixed
-  for MPAS-ocean fp32 (2.4–2.9×); skip for cubed-sphere (measured negative).
+## Missed lever — CUDA-graph ATM icosahedral: MEASURED, ~DEAD
+- **CUDA-graph A/B for ATM icosahedral only** (env/bench, not model code).
+  Codex audit 2026-06-15 named this as the ONE untried measurable step-kernel
+  lever. Measured:
+  - job 8488104 (A40, I6 np1): default-cmdbuf (FUSION,CUSTOM_CALL,COLLECTIVES)
+    vs +CUBLAS,CUDNN = **noise** — f32 11.07→11.03 ms/step, f64 20.50→20.42.
+    Adding CUBLAS/CUDNN command buffers does nothing.
+  - job 8490224 (in flight): the missing **OFF arm** (command buffers fully
+    DISABLED, `--xla_gpu_enable_command_buffer=`) vs default vs aggressive — the
+    definitive "is there ANY dispatch headroom" test. OFF==default ⇒ MPAS-atm
+    GPU step is bandwidth-bound, CUDA-graph lever DEAD on this HW, at-limit
+    confirmed. (Unlike MPAS-ocean fp32 where CUDA graphs gave 2.4–2.9×; cubed-
+    sphere measured negative earlier.)
+
+## Codex at-limit verdict (2026-06-15)
+Focused codex audit ("name a MEASURABLE Ginsburg lever NOT yet tried"): **mostly
+at practical limit.** Only one honest untried step-kernel A/B (CUDA-graph ATM,
+above — now being closed); the rest are workflow/I/O (root-only checkpoint = 0%
+step ms) or narrow A/B extensions (MPAS METIS at np32, expected 2–5%, "not a new
+lever"). Everything else = harvested, measured-dead, or PCIe/Gloo/TCP-blocked.
 
 ## HW-blocked — stop pursuing on Ginsburg
 - Cube np>6 (Gloo/TCP + PCIe anti-scale) — future-HW capability only.
