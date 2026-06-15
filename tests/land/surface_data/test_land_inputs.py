@@ -87,14 +87,18 @@ def test_glacier_columns_get_ice_surface():
     assert float(cp.ALB_VIS[0]) < 0.70
 
 
-def test_soil_hydraulics_percolumn_and_fallback():
+def test_soil_hydraulics_perlayer_and_fallback():
+    # _gsd() uses (ncol=2, nlayer=4); col0 has 40% sand / 20% clay at every
+    # layer, col1 is all-NaN (HWSD has no soil) and falls back per-cell.
     hy = build_soil_hydraulics(_gsd())
     assert hy.retention_curve == "clapp_hornberger"
-    assert hy.theta_sat.shape == (2, 1)
-    assert np.all(np.isfinite(np.asarray(hy.theta_sat)))     # NaN col fell back
-    # col0 from 40% sand; col1 fell back to sandy default -> higher K_sat, lower b
-    assert float(hy.K_sat[1, 0]) > float(hy.K_sat[0, 0])
-    assert float(hy.b_ch[1, 0]) < float(hy.b_ch[0, 0])
+    assert hy.theta_sat.shape == (2, 4)                       # per-(col, layer)
+    assert np.all(np.isfinite(np.asarray(hy.theta_sat)))     # NaN cells fell back
+    # col0 layers are all 40% sand; col1 all fell back to the sandy default ->
+    # higher K_sat, lower b_ch. Holds at every layer because the input is
+    # constant in depth.
+    assert np.all(np.asarray(hy.K_sat[1]) > np.asarray(hy.K_sat[0]))
+    assert np.all(np.asarray(hy.b_ch[1]) < np.asarray(hy.b_ch[0]))
 
 
 def test_slab_seb_provider_returns_land_surface_params():

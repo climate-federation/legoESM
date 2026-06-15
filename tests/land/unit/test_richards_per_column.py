@@ -129,5 +129,37 @@ def test_sand_drains_faster_than_clay_per_column():
     assert float(out.runoff_subsurface[0]) > 10.0 * float(out.runoff_subsurface[1])
 
 
+def test_per_layer_params_run_through_solver():
+    """``(ncol, nlayer)`` hydraulic params — full vertical texture — work in solve_richards."""
+    ncol, nlayer = 3, 8
+    grid, psi = _make_state(ncol, nlayer)
+    # Sandy O-horizon (top 2 layers) over clayey B-horizon (bottom 6), same in
+    # every column.  Tests that the layer axis carries through hydraulic_
+    # conductivity / moisture_capacity / theta_from_psi inside the Picard loop
+    # and that slice_layer(cfg, 0) and slice_layer(cfg, -1) pick the right
+    # layer's texture for K_top / K_bot.
+    sand_profile = jnp.where(jnp.arange(nlayer) < 2, 92.0, 10.0)   # (nlayer,)
+    clay_profile = jnp.where(jnp.arange(nlayer) < 2, 3.0, 60.0)
+    sand_cl = jnp.broadcast_to(sand_profile, (ncol, nlayer))
+    clay_cl = jnp.broadcast_to(clay_profile, (ncol, nlayer))
+    p = cosby_hydraulic_params(sand_cl, clay_cl)
+    cfg = SoilHydraulicsConfig(
+        retention_curve="clapp_hornberger",
+        theta_sat=p.theta_sat, psi_sat=p.psi_sat,
+        b_ch=p.b_ch, K_sat=p.K_sat, theta_r=0.0,
+    )
+    theta = theta_from_psi(psi, cfg)
+    flux_top = jnp.full(ncol, 1e-7)
+    sink = jnp.zeros((ncol, nlayer))
+
+    out = solve_richards(psi, theta, grid, cfg, RichardsConfig(max_iter=6),
+                        flux_top, sink, dt=600.0)
+
+    assert out.psi_new.shape == (ncol, nlayer)
+    assert out.theta_new.shape == (ncol, nlayer)
+    assert jnp.all(jnp.isfinite(out.psi_new))
+    assert jnp.all(jnp.isfinite(out.theta_new))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

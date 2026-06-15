@@ -6,9 +6,9 @@ multilayer-land + two-leaf-canopy model consumes for a global run:
   - :func:`build_canopy_params` -> :class:`CanopyLandParams` (LAI, canopy height,
     soil-colour background albedo, PFT photosynthesis/aerodynamic params, C4
     flag), one value per column from the **dominant PFT**;
-  - :func:`build_soil_hydraulics` -> a per-column :class:`SoilHydraulicsConfig`
-    (Cosby pedotransfer from column-mean sand/clay), with a fallback texture where
-    HWSD has no soil (sand seas / ice).
+  - :func:`build_soil_hydraulics` -> a per-(col, layer) :class:`SoilHydraulicsConfig`
+    (Cosby pedotransfer from the surfdata's depth-remapped sand/clay profile),
+    with a per-cell fallback texture where HWSD has no soil (sand seas / ice).
 
 The canopy PFT tables (:data:`PFT_VCMAX25_C3` etc.) are keyed by biome type
 (ENF/EBF/.../GRA/CRO) with three climate-zone columns ordered
@@ -212,24 +212,22 @@ def build_soil_hydraulics(
     fallback_clay_pct: float = _FALLBACK_CLAY_PCT,
     base: SoilHydraulicsConfig = SoilHydraulicsConfig(),
 ) -> SoilHydraulicsConfig:
-    """Per-column Clapp-Hornberger :class:`SoilHydraulicsConfig` (Cosby pedotransfer).
+    """Per-(col, layer) Clapp-Hornberger :class:`SoilHydraulicsConfig` (Cosby).
 
-    Texture is the column mean over soil layers; columns where HWSD has no soil
-    (all-NaN) fall back to ``fallback_*`` (a sandy default).  Hydraulic params are
-    returned as ``(ncol, 1)`` arrays that broadcast against the model's
-    ``(ncol, n_layer)`` soil state.
+    Runs the Cosby (1984) pedotransfer per (col, layer) using the surfdata
+    texture profile, which the loader already remapped to the model's
+    :class:`SoilGrid` via :func:`_remap_soil_layers`.  Hydraulic params come
+    back as ``(ncol, n_layer)`` arrays that align cell-for-cell with the
+    Richards solver's soil state — ``slice_layer`` picks the right layer for
+    single-layer call sites (``K_top`` / ``K_bot``).  Any (col, layer) where
+    HWSD has no soil (NaN) falls back to ``fallback_*`` (a sandy default) in
+    just that cell, so a column with partial coverage keeps its real layers.
     """
-    import warnings
-
-    sand = np.asarray(gsd.sand_frac) * 100.0                 # (ncol, nlayer) percent
+    sand = np.asarray(gsd.sand_frac) * 100.0                 # (ncol, n_layer) percent
     clay = np.asarray(gsd.clay_frac) * 100.0
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)     # all-NaN cols -> handled below
-        sand_col = np.nanmean(sand, axis=1)
-        clay_col = np.nanmean(clay, axis=1)
-    bad = ~np.isfinite(sand_col) | ~np.isfinite(clay_col)
-    sand_col = np.where(bad, fallback_sand_pct, sand_col)
-    clay_col = np.where(bad, fallback_clay_pct, clay_col)
+    bad = ~np.isfinite(sand) | ~np.isfinite(clay)
+    sand = np.where(bad, fallback_sand_pct, sand)
+    clay = np.where(bad, fallback_clay_pct, clay)
 
     # Keep params at the default float precision (float64 with x64) so the
     # multilayer state — initialised as ``0.5 * theta_sat`` — stays at the
@@ -238,14 +236,13 @@ def build_soil_hydraulics(
     # returns float32; downcasting params to float32 would make the carry
     # input float32 while the loop body upcasts to float64 via the float64
     # grid arrays, breaking ``lax.fori_loop`` dtype matching.
-    sand_col = sand_col.astype(np.float64)
-    clay_col = clay_col.astype(np.float64)
-    p = cosby_hydraulic_params(jnp.asarray(sand_col), jnp.asarray(clay_col))
-    col = lambda a: jnp.asarray(a)[:, None]                  # (ncol, 1)
+    sand = sand.astype(np.float64)
+    clay = clay.astype(np.float64)
+    p = cosby_hydraulic_params(jnp.asarray(sand), jnp.asarray(clay))  # (ncol, n_layer)
     return base._replace(
         retention_curve="clapp_hornberger",
-        theta_sat=col(p.theta_sat), psi_sat=col(p.psi_sat),
-        b_ch=col(p.b_ch), K_sat=col(p.K_sat), theta_r=0.0,
+        theta_sat=jnp.asarray(p.theta_sat), psi_sat=jnp.asarray(p.psi_sat),
+        b_ch=jnp.asarray(p.b_ch), K_sat=jnp.asarray(p.K_sat), theta_r=0.0,
     )
 
 
@@ -353,9 +350,9 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *, the
 
     The single entry a driver calls at simulation start.  Returns
     ``(land_config, land_params, gsd)``: for a multilayer config the returned
-    config also carries the per-column Cosby soil hydraulics derived from the
-    surfdata via :func:`build_soil_hydraulics` (params are ``(ncol, 1)`` arrays
-    that broadcast over the model's ``(ncol, n_layer)`` soil state).
+    config also carries the per-(col, layer) Cosby soil hydraulics derived from
+    the surfdata via :func:`build_soil_hydraulics` (params are ``(ncol, n_layer)``
+    arrays that align with the model's soil state cell-for-cell).
     ``theta_top`` (top-layer wetness for the soil-colour albedo) defaults to a
     nominal 0.2 when no state exists yet.
     """
