@@ -18,9 +18,12 @@ from legoesm import constants
 from legoesm.thermo import saturation_vapor_pressure
 from legoesm.atmosphere.dynamics import spectral_les_plane as sl
 from legoesm.atmosphere.dynamics.spectral_les_moist import (
+    LagrangianSDMSegmentDiagnostics,
     make_lagrangian_sdm_les_step,
+    make_lagrangian_sdm_step_segment,
     make_anelastic_reference,
     step_lagrangian_sdm_les,
+    update_lagrangian_sdm_segment_diagnostics,
 )
 from legoesm.atmosphere.physics.microphysics.sdm import (
     SDMConfig,
@@ -85,6 +88,20 @@ def _cell_sums(state, g, values):
     _, _, _, cell_id = particle_cell_indices(state, g)
     n_cells = g.cfg.ny * g.cfg.nx * g.cfg.nz
     return jnp.zeros((n_cells,), dtype=values.dtype).at[cell_id].add(values)
+
+
+def _assert_tree_allclose(actual, expected, *, rtol=1e-12, atol=1e-14):
+    actual_leaves = jax.tree.leaves(actual)
+    expected_leaves = jax.tree.leaves(expected)
+    assert len(actual_leaves) == len(expected_leaves)
+    for actual_leaf, expected_leaf in zip(actual_leaves, expected_leaves):
+        actual_np = np.asarray(actual_leaf)
+        expected_np = np.asarray(expected_leaf)
+        if actual_np.dtype.kind in "biu":
+            np.testing.assert_array_equal(actual_np, expected_np)
+        else:
+            np.testing.assert_allclose(
+                actual_np, expected_np, rtol=rtol, atol=atol)
 
 
 def test_advection_moves_with_resolved_flow_and_wraps_periodic():
@@ -613,6 +630,61 @@ def test_lagrangian_sdm_les_step_factory_jits_static_objects():
     assert bool(jnp.all(jnp.isfinite(les1.tracers)))
     assert bool(jnp.all(jnp.isfinite(sdm1.droplets.radius)))
     assert float(diag["n_active"]) == 8.0
+
+
+def test_lagrangian_sdm_segment_matches_python_step_loop():
+    g = _grid(nx=2, ny=2, nz=2, L=20.0, n_tracers=3)
+    ref = _ref(g, theta0=300.0, qv0=0.02)
+    cfg = SDMConfig(
+        include_curvature=False, include_solute=False,
+        condensation_integrator="euler", n_substeps_condensation=1,
+        terminal_velocity="rogers_yau", collision_kernel="golovin",
+        collision_mode="stochastic")
+    ny, nx, nz = g.cfg.ny, g.cfg.nx, g.cfg.nz
+    z = jnp.zeros((ny, nx, nz), dtype=jnp.float64)
+    theta = jnp.full((ny, nx, nz), 300.0, dtype=jnp.float64)
+    tracers = jnp.zeros((ny, nx, nz, 3), dtype=jnp.float64).at[..., 0].set(0.02)
+    les0 = sl.SpectralLESState(
+        u=z, v=z, w=jnp.zeros((ny, nx, nz + 1), dtype=jnp.float64),
+        rhs_u_prev=z, rhs_v_prev=z,
+        rhs_w_prev=jnp.zeros((ny, nx, nz + 1), dtype=jnp.float64),
+        theta=theta, rhs_theta_prev=jnp.zeros_like(theta),
+        tracers=tracers, rhs_tracers_prev=jnp.zeros_like(tracers))
+    sdm0 = initialize_lagrangian_sdm(
+        jax.random.PRNGKey(17), g, n_sd=32,
+        number_concentration=1.0e5, radius=1.0e-6, dtype=jnp.float64)
+
+    def step_raw(les, sdm, dt, first=False):
+        return step_lagrangian_sdm_les(
+            les, sdm, g, ref, dt, cfg, u_geo=(0.0, 0.0), f_cor=0.0,
+            first=first, do_condensation=True, do_coalescence=True)
+
+    step = jax.jit(step_raw, static_argnames=("first",))
+    run_segment = make_lagrangian_sdm_step_segment(step_raw, segment_steps=3)
+    dt = jnp.asarray(0.1, dtype=jnp.float64)
+
+    def zero_diag():
+        zero = jnp.asarray(0.0, dtype=jnp.float64)
+        return LagrangianSDMSegmentDiagnostics(zero, zero, zero, zero)
+
+    les_loop, sdm_loop, diag_loop = les0, sdm0, zero_diag()
+    for n in range(5):
+        les_loop, sdm_loop, us, diag = step(
+            les_loop, sdm_loop, dt, first=(n == 0))
+        diag_loop = update_lagrangian_sdm_segment_diagnostics(
+            diag_loop, us, diag)
+
+    les_seg, sdm_seg, us, diag = step(les0, sdm0, dt, first=True)
+    diag_seg = update_lagrangian_sdm_segment_diagnostics(
+        zero_diag(), us, diag)
+    les_seg, sdm_seg, diag_seg = run_segment(
+        les_seg, sdm_seg, dt, jnp.asarray(3, dtype=jnp.int32), diag_seg)
+    les_seg, sdm_seg, diag_seg = run_segment(
+        les_seg, sdm_seg, dt, jnp.asarray(1, dtype=jnp.int32), diag_seg)
+
+    _assert_tree_allclose(les_seg, les_loop)
+    _assert_tree_allclose(sdm_seg, sdm_loop)
+    _assert_tree_allclose(diag_seg, diag_loop)
 
 
 def test_run_bomex_lagrangian_sdm_driver_smoke(tmp_path):

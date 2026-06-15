@@ -49,10 +49,13 @@ import jax.numpy as jnp  # noqa: E402
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.dynamics import spectral_les_plane as sl  # noqa: E402
 from legoesm.atmosphere.dynamics.spectral_les_moist import (  # noqa: E402
+    LagrangianSDMSegmentDiagnostics,
     conserving_positive,
+    make_lagrangian_sdm_step_segment,
     make_lagrangian_sdm_les_step,
     make_anelastic_reference,
     make_les_microphysics_fn,
+    update_lagrangian_sdm_segment_diagnostics,
 )
 from legoesm.atmosphere.physics.microphysics.config import (  # noqa: E402
     MicrophysicsConfig,
@@ -91,6 +94,7 @@ _DEFAULT_LAGRANGIAN_AEROSOL_SPECTRUM = "lognormal"
 _DEFAULT_LAGRANGIAN_AEROSOL_GEOM_STD = 2.0
 _DEFAULT_LAGRANGIAN_DRY_RADIUS_MIN = 1.0e-8
 _DEFAULT_LAGRANGIAN_DRY_RADIUS_MAX = 5.0e-7
+_DEFAULT_LAGRANGIAN_SEGMENT_STEPS = 64
 
 
 def parse_args():
@@ -182,6 +186,12 @@ def parse_args():
                    help="dry aerosol material density [kg/m^3].")
     p.add_argument("--sdm-seed", type=int, default=0,
                    help="PRNG seed for initial particles and stochastic collisions.")
+    p.add_argument("--sdm-segment-steps", type=int,
+                   default=_DEFAULT_LAGRANGIAN_SEGMENT_STEPS,
+                   help="number of Lagrangian-SDM steps per compiled loop chunk; "
+                        "larger values reduce host synchronization frequency, "
+                        "while print/record events still occur at exact step "
+                        "boundaries.")
     p.add_argument("--n-tracers", type=int, default=9,
                    help="standard slot layout; 9 covers the double-moment "
                         "schemes (morrison/thompson/sb).")
@@ -439,6 +449,9 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
         sdm, g, ref.rho_c, sdm_cfg.r_rain, r_cloud=sdm_cfg.r_cloud,
         assignment=sdm_cfg.lagrangian_diagnostic_assignment)
     st = st._replace(tracers=set_diagnostic_liquid_tracers(st.tracers, q_c0, q_r0))
+    del solute_mass, initial_radius, q_c0, q_r0
+    if args.sdm_aerosol_spectrum == "lognormal":
+        del dry_radii
 
     forcing = make_forcing_fn(g, ref, forc, dtype)
     lag_step = make_lagrangian_sdm_les_step(
@@ -453,8 +466,7 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
     spf = jnp.where(zf > z_sp, 0.5 * (1.0 - jnp.cos(
         jnp.pi * (zf - z_sp) / (args.Lz - z_sp))), 0.0).astype(dtype)
 
-    @partial(jax.jit, static_argnames=("first",))
-    def step(state, sdm_state, dt, first=False):
+    def step_raw(state, sdm_state, dt, first=False):
         if args.micro_order == "pre":
             state = forcing(state, dt)
         state, sdm_state, us, diag = lag_step(
@@ -468,6 +480,8 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
         w = state.w - rf * state.w
         u, v, w = sl.project(u, v, w, dt=dt, g=g)
         return state._replace(u=u, v=v, w=w), sdm_state, us, diag
+
+    step = partial(jax.jit, static_argnames=("first",))(step_raw)
 
     T = args.hours * 3600.0
     n_steps = int(np.ceil(T / dt0 - 1.0e-12))
@@ -509,35 +523,88 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
     z0p = np.asarray(sdm.z)
     water0 = float(total_water_mass(sdm, st.tracers, g, ref.rho_c))
     dt = jnp.asarray(dt0, dtype)
+    run_segment = make_lagrangian_sdm_step_segment(
+        step_raw, segment_steps=args.sdm_segment_steps, donate_args=True)
     if rec:
         _save(0.0)
-    t = 0.0; i = 0
-    next_rec = T / args.record_frames if rec else np.inf
-    max_sdm_water_error = 0.0
+    t = 0.0
+    i = 0
+    rec_interval = T / args.record_frames if rec else np.inf
+    next_rec = rec_interval
+
+    def _ceil_step(t_seconds):
+        return int(np.ceil(t_seconds / dt0 - 1.0e-12))
+
+    next_rec_step = _ceil_step(next_rec) if rec else n_steps + 1
+    next_print_step = args.print_every
+    zero = jnp.asarray(0.0, dtype)
+    diag_acc = LagrangianSDMSegmentDiagnostics(
+        max_abs_total_water_error=zero,
+        total_water_error=zero,
+        n_active=zero,
+        u_star=zero,
+    )
+
+    def _print_progress():
+        mw = float(jnp.max(jnp.abs(st.w)))
+        if not np.isfinite(mw) or mw > 1e3:
+            print(f"[BLOWUP] step {i} max|w|={mw}")
+            return 1
+        d = moist_profiles(st, g, ref)
+        precip = float(jnp.mean(sdm.surface_precip))
+        print(f"{i:7d} {t/3600.0:5.2f}h max|w|={mw:5.2f} "
+              f"cc={d['cloud_cover']:.3f} LWP={d['lwp']:6.2f} g/m² "
+              f"qc_max={float(jnp.max(st.tracers[..., 1])):.2e} "
+              f"qr_max={float(jnp.max(st.tracers[..., 2])):.2e} "
+              f"Psurf={precip:.3e} kg/m² "
+              f"n_act={float(diag_acc.n_active):.0f} "
+              f"sdm_dwater={float(diag_acc.total_water_error):.2e} "
+              f"u*={float(diag_acc.u_star):.3f}", flush=True)
+        return 0
+
+    def _handle_events():
+        nonlocal next_rec, next_rec_step, next_print_step
+        if i == next_print_step:
+            rc = _print_progress()
+            if rc != 0:
+                return rc
+            next_print_step += args.print_every
+        while rec and i >= next_rec_step and frame < args.record_frames:
+            _save(t / 3600.0)
+            next_rec += rec_interval
+            next_rec_step = _ceil_step(next_rec)
+        if rec and frame >= args.record_frames:
+            next_rec_step = n_steps + 1
+        return 0
+
     t0_wall = time.time()
-    while t < T:
-        st, sdm, us, diag = step(st, sdm, dt, first=(i == 0))
-        max_sdm_water_error = max(
-            max_sdm_water_error, abs(float(diag["total_water_error"])))
-        t += dt0; i += 1
-        if i % args.print_every == 0:
-            mw = float(jnp.max(jnp.abs(st.w)))
-            if not np.isfinite(mw) or mw > 1e3:
-                print(f"[BLOWUP] step {i} max|w|={mw}"); return 1
-            d = moist_profiles(st, g, ref)
-            precip = float(jnp.mean(sdm.surface_precip))
-            print(f"{i:7d} {t/3600.0:5.2f}h max|w|={mw:5.2f} "
-                  f"cc={d['cloud_cover']:.3f} LWP={d['lwp']:6.2f} g/m² "
-                  f"qc_max={float(jnp.max(st.tracers[..., 1])):.2e} "
-                  f"qr_max={float(jnp.max(st.tracers[..., 2])):.2e} "
-                  f"Psurf={precip:.3e} kg/m² n_act={float(diag['n_active']):.0f} "
-                  f"sdm_dwater={float(diag['total_water_error']):.2e} "
-                  f"u*={float(us):.3f}", flush=True)
-        if rec and t >= next_rec and frame < args.record_frames:
-            _save(t / 3600.0); next_rec += T / args.record_frames
+    if n_steps > 0:
+        st, sdm, us, diag = step(st, sdm, dt, first=True)
+        diag_acc = update_lagrangian_sdm_segment_diagnostics(diag_acc, us, diag)
+        del us, diag
+        i = 1
+        t = i * dt0
+        rc = _handle_events()
+        if rc != 0:
+            return rc
+    while i < n_steps:
+        target_step = min(n_steps, next_print_step, next_rec_step)
+        steps_to_event = target_step - i
+        while steps_to_event > 0:
+            chunk_steps = min(args.sdm_segment_steps, steps_to_event)
+            st, sdm, diag_acc = run_segment(
+                st, sdm, dt, jnp.asarray(chunk_steps, jnp.int32), diag_acc)
+            jax.block_until_ready(diag_acc.total_water_error)
+            i += chunk_steps
+            t = i * dt0
+            steps_to_event = target_step - i
+        rc = _handle_events()
+        if rc != 0:
+            return rc
     wall = time.time() - t0_wall
     rate = i / wall if wall > 0.0 else np.inf
     print(f"[DONE-LAGRANGIAN-SDM] wall={wall:.0f}s  {rate:.1f} steps/s")
+    max_sdm_water_error = float(diag_acc.max_abs_total_water_error)
     if rec and frame < args.record_frames:
         _save(t / 3600.0)
     d = moist_profiles(st, g, ref)
@@ -586,6 +653,10 @@ def main():
         raise ValueError("--micro-substeps must be >= 1")
     if args.micro_relax_factor <= 0.0:
         raise ValueError("--micro-relax-factor must be > 0")
+    if args.print_every < 1:
+        raise ValueError("--print-every must be >= 1")
+    if args.sdm_segment_steps < 1:
+        raise ValueError("--sdm-segment-steps must be >= 1")
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
     g, st, ref, forc, th_prof = build(args, dtype)
