@@ -54,12 +54,13 @@ clear M-growth.
   - job 8488104 (A40, I6 np1): default-cmdbuf (FUSION,CUSTOM_CALL,COLLECTIVES)
     vs +CUBLAS,CUDNN = **noise** — f32 11.07→11.03 ms/step, f64 20.50→20.42.
     Adding CUBLAS/CUDNN command buffers does nothing.
-  - job 8490224 (in flight): the missing **OFF arm** (command buffers fully
-    DISABLED, `--xla_gpu_enable_command_buffer=`) vs default vs aggressive — the
-    definitive "is there ANY dispatch headroom" test. OFF==default ⇒ MPAS-atm
-    GPU step is bandwidth-bound, CUDA-graph lever DEAD on this HW, at-limit
-    confirmed. (Unlike MPAS-ocean fp32 where CUDA graphs gave 2.4–2.9×; cubed-
-    sphere measured negative earlier.)
+  - job 8490224 (RTX8000, I6 np1): the missing **OFF arm** (command buffers
+    fully DISABLED, `--xla_gpu_enable_command_buffer=`) vs default vs aggressive.
+    **f32 RESULT: OFF=11.25, default=11.24, aggressive=11.23 ms/step — ALL EQUAL
+    (noise).** Command buffers give ZERO benefit ⇒ zero dispatch headroom ⇒
+    MPAS-atm GPU step is bandwidth/compute-bound, CUDA-graph lever **DEAD** on
+    this HW, at-limit confirmed (f64 arms confirmatory). (Unlike MPAS-ocean fp32
+    where CUDA graphs gave 2.4–2.9×; cubed-sphere measured negative earlier.)
 
 ## Codex at-limit verdict (2026-06-15)
 Focused codex audit ("name a MEASURABLE Ginsburg lever NOT yet tried"): **mostly
