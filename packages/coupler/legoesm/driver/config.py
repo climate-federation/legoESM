@@ -208,6 +208,15 @@ class ExperimentConfig(NamedTuple):
     # Radiation
     radiation: str = "gray"
     rad_update_steps: int = 1
+    # Un-fuse radiation from the compiled-segment scan (issue: ~3h XLA
+    # compile).  Static Python gate (NOT trainable); default OFF keeps
+    # every existing run byte-identical.  When True AND
+    # ``rad_update_steps > 1`` the PRODUCTION ``_run_compiled`` path lifts
+    # the radiation-cycle loop from XLA to the host so rrtmgp and the
+    # dynamics+physics scan compile as TWO SEPARATE executables (a jit
+    # placed inside a ``lax.scan`` is inlined by XLA, not a distinct
+    # compile unit — only a host-level jit is its own executable).
+    unfused_radiation: bool = False
     diurnal_cycle: bool = False
     # RRTMGP column recurrence implementation:
     #   False = Python for-loop (fully unrolled XLA graph, GPU-friendly default)
@@ -749,6 +758,7 @@ class ExperimentConfig(NamedTuple):
             sic_scale=amip_cfg.sic_scale,
             radiation=amip_cfg.radiation,
             rad_update_steps=amip_cfg.rad_update_steps,
+            unfused_radiation=getattr(amip_cfg, 'unfused_radiation', False),
             diurnal_cycle=amip_cfg.diurnal_cycle,
             co2_ppmv=amip_cfg.co2_ppmv,
             ch4_ppbv=amip_cfg.ch4_ppbv,
