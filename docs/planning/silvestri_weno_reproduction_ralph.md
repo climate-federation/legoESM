@@ -203,6 +203,31 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 14 — B5b DONE: full QG2 baroclinic stretching (QG2 now FAITHFUL) ✅ — 2026-06-15
+- **B5b COMPLETE + adversarially reviewed + committed.** The QG-Leith stretching term that B5
+  deferred is now wired: ∇q₁ = ∇(ζ+f) + ∂_z(f/N²∇b) with the Bachman Bu/Ro min-bound. **QG2 is
+  now FAITHFUL** (no longer the barotropic approximation) — `SILVESTRI_JET_SCHEMES["QG2"]` sets
+  `qg_leith_stretching=True`, `scheme_label("QG2")="QG2"`. The §5 QG2 matrix case is faithful.
+- Implementation: factored VECTOR gradients (`_grad_vertex_vec_h`/`_grad_cell_vec_h`, no behavior
+  change); `_ddz_centre` (thickness-weighted vertical derivative); `qg_pv_stretching_vec`; extended
+  the operator (buoyancy/h_k/L_d args); threaded ρ'+h_k through `_bc_horizontal_viscosity`
+  (b=-g ρ'/ρ₀; g/ρ₀ cancels in f∇b/N² but sign sets N²>0). Gated by `config.qg_leith_stretching`
+  (default False = barotropic, byte-identical backward-compat).
+- **Adversarial review: NO BLOCKER.** Verified numerically: `_ddz_centre` sign +a exact on a
+  stretched grid; units match (∇q and stretch both 1/(m·s)); vector sum components consistent
+  (qx+sx,qy+sy); Bu=Δ²/L_d² not inverted; ν≥0 (no anti-diffusion); default path byte-identical;
+  AD finite. **One SHOULD-FIX applied:** the N²=1e-12 floor spiked the stretching ~1e5× in
+  statically-unstable columns → now ZEROED where N²≤1e-9 (physical floor; QG stretching undefined
+  there) via jnp.where. +test. Honest caveat (documented): L_d is a fixed config constant
+  (6.75km) + velocity_scale=1 for Ro — fine for the near-uniform-stratification Silvestri channel.
+- Tests: 16 QG-Leith (incl unstable-column, full live QG2 step) + 56 scheme/guardrail green.
+- **★ ALL CODE COMPLETE: B1-B5 + B5b, diagnostics, recipes, drivers, plotter — the full pipeline
+  is built, reviewed, faithful.** §4 fully reproduced. **Only GPU compute remains:** the §5
+  1000-day jet matrix (15 runs, now with a FAITHFUL QG2) + the §4 4096² DNS / finer sweep.
+- **NEXT:** stand ready for the §5 matrix on GPU. CPU-feasible: a short §5 sanity run (low-res,
+  ~30-60 d) to confirm the jet goes baroclinically unstable + the 5 schemes differ, as partial §5
+  validation before the full GPU matrix.
+
 ### Iteration 13 — PHASE 4 §4 EFFECTIVE-RESOLUTION SWEEP REPRODUCED ✅ — 2026-06-15
 - **§4 resolution sweep (N=64/128/256, 6 schemes) RUN on CPU → the paper's effective-resolution
   result REPRODUCED.** KE retained at t=6 vs N: **W9V converged (≈DNS 0.96) already at N=64** while
