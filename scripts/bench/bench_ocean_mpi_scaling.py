@@ -360,12 +360,20 @@ def _build_global_problem(
 
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z_coord = create_ocean_z_star(n_levels=nlev)
+    import os as _os
     config = LatLonCGridOceanConfig(
         barotropic_solver=baro_solver,
         barotropic_implicit_force_pcg=force_pcg,
         barotropic_implicit_pcg_variant=pcg_variant,
         barotropic_implicit_preconditioner=preconditioner,
         barotropic_implicit_pcg_fixed_iters=fixed_iters,
+        # SOTA-local split-explicit barotropic lever (explicit_substep only):
+        # LEGOESM_BARO_LOCAL_CLAMP=1 -> per-substep eta-floor clamp local,
+        # global redistribute once/step (cuts ~3*n_substeps subcycle allreduces
+        # to 3). Measures the multi-node strong-scaling gain vs the legacy
+        # per-substep-redistribute path.
+        barotropic_local_subcycle_clamp=(
+            _os.environ.get("LEGOESM_BARO_LOCAL_CLAMP", "0") == "1"),
     )
     # chebyshev degree: the config has no degree field (the factory reads
     # getattr(config, "barotropic_chebyshev_degree", 4)); the bench uses the
