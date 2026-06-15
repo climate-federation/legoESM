@@ -896,6 +896,94 @@ def make_tiled_fv3_hydrostatic_momentum_stage_2d(mesh, cdgrid, coord, n: int,
 
 
 # ---------------------------------------------------------------------------
+# P-3D-continuity COMPOSED stage: the surface-pressure tendency dp_s/dt (step 10b
+# of fv3_hydrostatic_tendencies).  Composes THREE local ops in ONE shard_map —
+# dgrid_to_cgrid (D->C, within-face projection) -> cgrid_divergence (C-grid
+# flux-form divergence; the staggered tile u_c/v_c carry the tile boundary faces,
+# Pace layout, so NO halo) -> column-integrated divergence (per-column cumsum) ->
+# dp_s/dt pointwise.  ALL LOCAL (NO in-stage halo, like the Bernoulli stage):
+# dgrid_to_cgrid reads only within-face adjacent corners, cgrid_divergence reads a
+# cell's own four bounding faces, the column sum is vertical (replicated per tile).
+# Sigma: dp_s/dt = -p_s*D_total/(1-sigma_top) (compute_sigma_dot_and_total).
+# Hybrid: dp_s/dt = -D_total_p/B_range (compute_mass_flux_hybrid).  The
+# per-stage zero_mean_tendency (a GLOBAL reduction) is NOT part of this stage —
+# it is applied downstream; the stage produces the pre-zero-mean tendency,
+# bit-identical to the global pre-zero-mean dp_s/dt.  ``coord`` closed over.
+# ---------------------------------------------------------------------------
+
+def make_tiled_dp_s_dt_stage_2d(mesh, cdgrid, coord, n: int, kt: int, nlev: int):
+    """Composed surface-pressure-tendency stage on a ``(6, kt, kt)`` mesh.
+    ``stage(u_d, v_d, p_s) -> dp_s_dt``: u_d/v_d corner D-winds 4D
+    ``(6,n+1,n+1,nlev)`` + p_s 2D cc ``(6,n,n)``, all FACE-REPLICATED; tile-sharded
+    ``dp_s_dt`` ``(6,n,n)`` out (exact cc partition — NO shared face).  Bit-identical
+    to the global ``cgrid_divergence(dgrid_to_cgrid(u_d,v_d))`` -> continuity
+    (all three ops cc/face-local).  ``coord`` sigma OR hybrid; the column-sum core
+    is dispatched on its type.  Excludes the downstream global zero_mean_tendency.
+    """
+    from legoesm.core.operators_cdgrid import cgrid_divergence_local
+    from legoesm.grids.vertical import (
+        compute_sigma_dot_and_total, compute_mass_flux_hybrid,
+        HybridSigmaPressureCoordinate)
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_dp_s_dt_stage_2d: n={n} != cdgrid.n={cdgrid.n}")
+    if getattr(coord, "n_levels", nlev) != nlev:
+        raise ValueError(
+            f"make_tiled_dp_s_dt_stage_2d: coord.n_levels={coord.n_levels} "
+            f"!= nlev={nlev}")
+    grid = cdgrid.base
+    nl = n // kt
+    _hybrid = isinstance(coord, HybridSigmaPressureCoordinate)
+    if not _hybrid:
+        _sigma_range = 1.0 - float(coord.sigma_half[0])   # static scalar
+
+    cosa_u = cdgrid.cosa_u                          # (6, n+1, n)
+    dy_edge_x = cdgrid.dy_edge_x                    # (6, n+1, n) — x-face length
+    dx_edge_y = cdgrid.dx_edge_y                    # (6, n, n+1) — y-face length
+    area = grid.area                               # (6, n, n)
+
+    fo = P("face", None, None)                     # 2D-face metric / cc 2D
+    fw = P("face", None, None, None)               # 4D winds
+    co = P("face", "tile_i", "tile_j")             # 2D cc output
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fo, fo, fo, fo, fo),  # u_d,v_d,p_s,cosa_u,dye,dxe,area
+             out_specs=co, check_vma=False)
+    def _body(u_d, v_d, p_s, cu, dye, dxe, ar):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        # D->C (local within-face) -> C-grid flux divergence (local; the
+        # staggered u_c/v_c carry the tile boundary faces, no halo).
+        u_c, v_c = dgrid_to_cgrid_tile_2d(u_d, v_d, cu, a_i, a_j, nl)
+        div_v = cgrid_divergence_local(
+            u_c, v_c, _s(dye, nl + 1, nl), _s(dxe, nl, nl + 1),
+            _s(ar, nl, nl))                          # (1, nl, nl, nlev)
+
+        p_s_t = _s(p_s, nl, nl)                      # (1, nl, nl)
+        if _hybrid:
+            _mf, D_total = compute_mass_flux_hybrid(div_v, p_s_t, coord)
+            dp_s_dt = -D_total[..., 0] / coord.B_range
+        else:
+            _sd, D_total = compute_sigma_dot_and_total(div_v, coord)
+            dp_s_dt = -p_s_t * D_total[..., 0] / _sigma_range
+        return dp_s_dt                               # (1, nl, nl)
+
+    def stage(u_d, v_d, p_s):
+        _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
+                      v_d=(v_d, (n + 1, n + 1, nlev)), p_s=(p_s, (n, n)))
+        return _body(u_d, v_d, p_s, cosa_u, dy_edge_x, dx_edge_y, area)
+
+    return stage
+
+
+# ---------------------------------------------------------------------------
 # P-ii: the two production 4-point box interps.
 #   interp_corner_to_center (corner -> cc): PURELY LOCAL (cc cell reads its 2x2
 #     corner block) — like dgrid_vorticity, no halo, exact cc partition.
