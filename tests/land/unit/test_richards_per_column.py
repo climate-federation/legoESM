@@ -1,0 +1,133 @@
+"""Shape-hardening tests for solve_richards under per-column hydraulic params.
+
+The surfdata loader populates ``SoilHydraulicsConfig`` with per-column
+``(ncol, 1)`` arrays for theta_sat/psi_sat/b_ch/K_sat (Cosby pedotransfer of
+texture).  Before the ``slice_layer`` hardening, ``hydraulic_conductivity(
+psi[:, 0], theta[:, 0], hydro_config)`` mixed an ``(ncol,)`` state with a
+``(ncol, 1)`` param and silently broadcast to ``(ncol, ncol)``, corrupting
+the infiltration capacity and the bottom-layer drainage flux.
+
+These tests pin three properties:
+  1. Solver runs with ``(ncol, 1)`` params and returns correctly-shaped output.
+  2. Uniform per-column params reproduce the scalar-config result (consistency).
+  3. Cosby params with column-varying texture (sand vs clay) produce the
+     physically expected drainage ordering (sand drains faster).
+"""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+import pytest
+
+from legoesm.land.pedotransfer import cosby_hydraulic_params
+from legoesm.land.richards import RichardsConfig, solve_richards
+from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+from legoesm.land.soil_hydraulics import (
+    SoilHydraulicsConfig, psi_from_theta, theta_from_psi,
+)
+
+
+def _make_state(ncol, nlayer, *, psi_val=-1.0):
+    grid = make_soil_grid(SoilGridConfig(n_layers=nlayer))
+    psi = jnp.full((ncol, nlayer), psi_val)
+    return grid, psi
+
+
+def test_shape_hardened_per_column_params():
+    """``(ncol, 1)`` params don't broadcast to ``(ncol, ncol)`` anywhere."""
+    ncol, nlayer = 5, 8
+    grid, psi = _make_state(ncol, nlayer)
+    # Per-column Cosby params from a per-column texture vector.
+    sand_col = jnp.array([90.0, 70.0, 50.0, 30.0, 10.0])
+    clay_col = jnp.array([5.0, 15.0, 25.0, 35.0, 45.0])
+    p = cosby_hydraulic_params(sand_col, clay_col)
+    cfg = SoilHydraulicsConfig(
+        retention_curve="clapp_hornberger",
+        theta_sat=p.theta_sat[:, None], psi_sat=p.psi_sat[:, None],
+        b_ch=p.b_ch[:, None], K_sat=p.K_sat[:, None], theta_r=0.0,
+    )
+    theta = theta_from_psi(psi, cfg)
+    flux_top = jnp.full(ncol, 1e-7)
+    sink = jnp.zeros((ncol, nlayer))
+
+    out = solve_richards(psi, theta, grid, cfg, RichardsConfig(max_iter=4),
+                        flux_top, sink, dt=600.0)
+
+    assert out.psi_new.shape == (ncol, nlayer)
+    assert out.theta_new.shape == (ncol, nlayer)
+    assert out.runoff_surface.shape == (ncol,)
+    assert out.runoff_subsurface.shape == (ncol,)
+    assert jnp.all(jnp.isfinite(out.psi_new))
+    assert jnp.all(jnp.isfinite(out.theta_new))
+
+
+def test_uniform_per_column_matches_scalar():
+    """Replicating a scalar param across columns must match the scalar result."""
+    ncol, nlayer = 4, 8
+    grid, psi = _make_state(ncol, nlayer)
+    flux_top = jnp.full(ncol, 1e-7)
+    sink = jnp.zeros((ncol, nlayer))
+
+    # Reference: scalar Cosby for one loam texture.
+    p = cosby_hydraulic_params(jnp.asarray(40.0), jnp.asarray(20.0))
+    cfg_scalar = SoilHydraulicsConfig(
+        retention_curve="clapp_hornberger",
+        theta_sat=float(p.theta_sat), psi_sat=float(p.psi_sat),
+        b_ch=float(p.b_ch), K_sat=float(p.K_sat), theta_r=0.0,
+    )
+
+    # Same Cosby, replicated across ncol with the (ncol,1) layout the loader uses.
+    col = lambda v: jnp.full((ncol, 1), float(v))
+    cfg_col = cfg_scalar._replace(
+        theta_sat=col(p.theta_sat), psi_sat=col(p.psi_sat),
+        b_ch=col(p.b_ch), K_sat=col(p.K_sat),
+    )
+
+    theta_s = theta_from_psi(psi, cfg_scalar)
+    theta_c = theta_from_psi(psi, cfg_col)
+
+    out_s = solve_richards(psi, theta_s, grid, cfg_scalar,
+                           RichardsConfig(max_iter=6), flux_top, sink, dt=600.0)
+    out_c = solve_richards(psi, theta_c, grid, cfg_col,
+                           RichardsConfig(max_iter=6), flux_top, sink, dt=600.0)
+
+    assert jnp.allclose(out_s.psi_new, out_c.psi_new, rtol=1e-10, atol=1e-12)
+    assert jnp.allclose(out_s.theta_new, out_c.theta_new, rtol=1e-10, atol=1e-12)
+    assert jnp.allclose(out_s.runoff_subsurface, out_c.runoff_subsurface,
+                        rtol=1e-10, atol=1e-15)
+
+
+def test_sand_drains_faster_than_clay_per_column():
+    """Per-column texture variation actually flows through the solver."""
+    ncol, nlayer = 2, 8
+    grid = make_soil_grid(SoilGridConfig(n_layers=nlayer))
+    flux_top = jnp.full(ncol, 1e-7)
+    sink = jnp.zeros((ncol, nlayer))
+
+    # Column 0 sandy (high K_sat), column 1 clayey (low K_sat).
+    sand_col = jnp.array([92.0, 10.0])
+    clay_col = jnp.array([3.0, 60.0])
+    p = cosby_hydraulic_params(sand_col, clay_col)
+    cfg = SoilHydraulicsConfig(
+        retention_curve="clapp_hornberger",
+        theta_sat=p.theta_sat[:, None], psi_sat=p.psi_sat[:, None],
+        b_ch=p.b_ch[:, None], K_sat=p.K_sat[:, None], theta_r=0.0,
+    )
+    # Initialise both columns at the SAME effective saturation Se=0.5 (i.e.
+    # theta = 0.5 * theta_sat), matching ``init_multilayer_land_state``'s
+    # default.  At equal Se the comparison is K_sat × Se^(2b+3); per Cosby
+    # sand has 18× larger K_sat AND smaller b, so sand drains far faster.
+    # (Comparing at equal psi instead would put clay at saturation — its
+    # psi_sat is more negative — and invert the ordering.)
+    theta = 0.5 * jnp.broadcast_to(cfg.theta_sat, (ncol, nlayer))
+    psi = psi_from_theta(theta, cfg)
+
+    out = solve_richards(psi, theta, grid, cfg,
+                         RichardsConfig(max_iter=8, bottom_bc="free_drainage"),
+                         flux_top, sink, dt=3600.0)
+
+    assert float(out.runoff_subsurface[0]) > 10.0 * float(out.runoff_subsurface[1])
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
