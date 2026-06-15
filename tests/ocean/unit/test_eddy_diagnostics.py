@@ -128,8 +128,9 @@ def test_vertical_eddy_buoyancy_flux():
     assert abs(float(jnp.mean(D.vertical_eddy_buoyancy_flux(w, b2)))) < 1e-6
 
 
-def test_zonal_power_spectrum_single_wave():
-    """A pure cos(m·x) eddy has all power in wavenumber bin m."""
+def test_zonal_power_spectrum_single_wave_and_parseval():
+    """A pure cos(m·x) eddy peaks at bin m, and the spectrum CONSERVES variance:
+    Σ_k P[k] == zonal variance of the field (½ for unit-amplitude cos)."""
     grid = _grid(n_lat=8, n_lon=64)
     m = 5
     lon_idx = np.arange(grid.n_lon)[None, :]
@@ -139,27 +140,32 @@ def test_zonal_power_spectrum_single_wave():
     k, P = D.zonal_power_spectrum(field, dx)
     P = np.asarray(P)
     assert int(np.argmax(P)) == m, (int(np.argmax(P)), m)
-    # Power concentrated: peak >> next-largest.
     P_sorted = np.sort(P)[::-1]
     assert P_sorted[0] > 100 * P_sorted[1]
+    # Parseval: Σ P == variance of cos(m x) = 1/2.
+    var = float(np.var(np.asarray(field)[0]))
+    assert np.isclose(float(P.sum()), var, rtol=1e-10), (float(P.sum()), var)
+    assert np.isclose(var, 0.5, atol=1e-12)
 
 
-def test_zonal_cospectrum_matches_covariance():
-    """Parseval: summed co-spectrum ≈ zonal covariance of a'b' averaged."""
+def test_zonal_cospectrum_conserves_covariance():
+    """Σ_k co[k] == zonal covariance of a',b' — asserted against the FUNCTION
+    output (not a NumPy tautology). Mixed wavenumbers + a phase offset so the
+    interior factor-of-2 actually matters."""
     grid = _grid(n_lat=4, n_lon=32)
-    lon_idx = np.arange(grid.n_lon)[None, :] * np.ones((grid.n_lat, 1))
-    a = jnp.asarray(np.cos(2 * np.pi * 3 * lon_idx / grid.n_lon))
-    b = jnp.asarray(np.cos(2 * np.pi * 3 * lon_idx / grid.n_lon) * 2.0)
-    dx = 2 * np.pi / grid.n_lon
-    _, co = D.zonal_cospectrum(a, b, dx)
-    # Σ co = mean over lat of (1/n_lon)Σ_k Re(â*b̂) = mean zonal covariance.
-    cov = float(jnp.mean(D.remove_zonal_mean(a) * D.remove_zonal_mean(b)))
-    # rfft one-sided: account for the doubling of interior modes.
     n = grid.n_lon
-    ah = np.fft.rfft(np.asarray(a)[0]); bh = np.fft.rfft(np.asarray(b)[0])
-    full = float(np.sum(np.real(np.conj(np.fft.fft(np.asarray(a)[0]))
-                                * np.fft.fft(np.asarray(b)[0]))) / n ** 2)
-    assert np.isclose(cov, full, atol=1e-9)
+    x = np.arange(n)[None, :] * np.ones((grid.n_lat, 1)) * (2 * np.pi / n)
+    a = jnp.asarray(np.cos(3 * x) + 0.5 * np.cos(7 * x))
+    b = jnp.asarray(2.0 * np.cos(3 * x + 0.4) - np.cos(7 * x))
+    dx = 2 * np.pi / n
+    _, co = D.zonal_cospectrum(a, b, dx)
+    cov = float(jnp.mean(D.remove_zonal_mean(a) * D.remove_zonal_mean(b)))
+    assert np.isclose(float(jnp.sum(co)), cov, rtol=1e-10), (float(jnp.sum(co)), cov)
+
+    # And the power spectrum likewise conserves the auto-covariance (variance).
+    _, Pa = D.zonal_power_spectrum(a, dx)
+    var_a = float(jnp.mean(D.remove_zonal_mean(a) ** 2))
+    assert np.isclose(float(jnp.sum(Pa)), var_a, rtol=1e-10)
 
 
 def test_zonal_mean_shape():

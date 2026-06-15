@@ -403,8 +403,13 @@ def relative_vorticity_cell_centre(u: jnp.ndarray, v: jnp.ndarray, grid) -> jnp.
                    + zeta_q[:-1, 1:, ...] + zeta_q[1:, 1:, ...])
 
 
-def _volume_weight(area: jnp.ndarray, h: jnp.ndarray | None, ndim: int) -> jnp.ndarray:
-    """Per-cell weight: area (2D) or area·h (3D)."""
+def _volume_weight(area: jnp.ndarray, h: jnp.ndarray | None, ndim: int,
+                   dtype=None) -> jnp.ndarray:
+    """Per-cell weight: area (2D) or area·h (3D). ``area`` is cast to ``dtype``
+    (the field dtype) first — grid.area is often float32, which would otherwise
+    cap every volume integral at ~1e-7 relative precision."""
+    if dtype is not None:
+        area = area.astype(dtype)
     if ndim == 2:
         return area
     a = area[..., jnp.newaxis]
@@ -414,12 +419,12 @@ def _volume_weight(area: jnp.ndarray, h: jnp.ndarray | None, ndim: int) -> jnp.n
 def domain_kinetic_energy(u_h, v_h, area, h=None) -> jnp.ndarray:
     """Volume-integrated kinetic energy ∫ ½(u²+v²) dV [m⁵/s² (3D) or m⁴/s² (2D)] (D2)."""
     ke = 0.5 * (u_h ** 2 + v_h ** 2)
-    return jnp.sum(ke * _volume_weight(area, h, u_h.ndim))
+    return jnp.sum(ke * _volume_weight(area, h, u_h.ndim, ke.dtype))
 
 
 def domain_enstrophy(zeta_h, area, h=None) -> jnp.ndarray:
     """Volume-integrated enstrophy ∫ ½ζ² dV (D2)."""
-    return jnp.sum(0.5 * zeta_h ** 2 * _volume_weight(area, h, zeta_h.ndim))
+    return jnp.sum(0.5 * zeta_h ** 2 * _volume_weight(area, h, zeta_h.ndim, zeta_h.dtype))
 
 
 def remove_zonal_mean(field: jnp.ndarray) -> jnp.ndarray:
@@ -431,7 +436,7 @@ def eddy_kinetic_energy(u_h, v_h, area, h=None) -> jnp.ndarray:
     """Volume-integrated EDDY kinetic energy ∫ ½(u'²+v'²) dV, u'=u−⟨u⟩_zonal (D3)."""
     up = remove_zonal_mean(u_h)
     vp = remove_zonal_mean(v_h)
-    return jnp.sum(0.5 * (up ** 2 + vp ** 2) * _volume_weight(area, h, u_h.ndim))
+    return jnp.sum(0.5 * (up ** 2 + vp ** 2) * _volume_weight(area, h, u_h.ndim, up.dtype))
 
 
 def eddy_available_potential_energy(b_h, N2, area, h=None) -> jnp.ndarray:
@@ -442,7 +447,7 @@ def eddy_available_potential_energy(b_h, N2, area, h=None) -> jnp.ndarray:
     """
     bp = remove_zonal_mean(b_h)
     ape = 0.5 * bp ** 2 / jnp.maximum(N2, 1e-30)
-    return jnp.sum(ape * _volume_weight(area, h, b_h.ndim))
+    return jnp.sum(ape * _volume_weight(area, h, b_h.ndim, ape.dtype))
 
 
 def vertical_eddy_buoyancy_flux(w_h, b_h) -> jnp.ndarray:
@@ -455,38 +460,57 @@ def vertical_eddy_buoyancy_flux(w_h, b_h) -> jnp.ndarray:
     return remove_zonal_mean(w_h) * remove_zonal_mean(b_h)
 
 
+def _rfft_interior_double(n_lon: int) -> int:
+    """Upper slice bound for the modes that need the one-sided-rfft factor of 2.
+
+    Doubling modes 1..(this−1) makes a one-sided rfft power/co-spectrum conserve
+    variance (Σ = variance): mode 0 (mean) and, for even n_lon, the Nyquist mode
+    are single; all interior modes are doubled."""
+    return n_lon // 2 if n_lon % 2 == 0 else n_lon // 2 + 1
+
+
 def zonal_power_spectrum(field_h, dx: float, detrend: bool = True) -> tuple:
     """1-D zonal (longitude) power spectrum of a cell-centre field (D5).
 
-    FFT along axis 1 (lon); power averaged over the remaining axes (lat, and
-    depth if 3D). Returns (wavenumbers [1/m], P[k]). Used for the paper's zonal
-    energy / enstrophy / w'b' spectra (Fig 9). With ``detrend`` the zonal mean
-    is removed first (eddy spectrum).
+    rfft along axis 1 (lon); power averaged over the remaining axes (lat, and
+    depth if 3D). Variance-CONSERVING (Parseval): ``Σ_k P[k] == zonal variance``
+    of the (detrended) field — the rfft is normalised by ``n_lon`` and interior
+    modes carry the one-sided factor of 2. Wavenumber ``k`` is the CYCLIC
+    wavenumber [1/m] (``rfftfreq``, no 2π), matching ``_isotropic_spectrum_2d``
+    in this module. Used for the paper's zonal energy / enstrophy / w'b' spectra
+    (Fig 9). With ``detrend`` the zonal mean is removed first (eddy spectrum).
+
+    NOTE: pass cell-centre fields. ``velocity_to_cell_centre`` low-passes by one
+    cell, slightly suppressing the grid-scale (Nyquist) tail; for a faithful
+    grid-scale comparison feed the native face field along lon where possible.
     """
     f = remove_zonal_mean(field_h) if detrend else field_h
     n_lon = f.shape[1]
-    fh = jnp.fft.rfft(f, axis=1)
-    # Average power over all axes except the (lon→k) axis.
+    fh = jnp.fft.rfft(f, axis=1) / n_lon
     other = tuple(i for i in range(f.ndim) if i != 1)
-    P = jnp.mean(jnp.abs(fh) ** 2, axis=other) / n_lon
-    k = jnp.fft.rfftfreq(n_lon, d=dx) * 2.0 * jnp.pi    # angular wavenumber [1/m]
+    P = jnp.mean(jnp.abs(fh) ** 2, axis=other)
+    P = P.at[1:_rfft_interior_double(n_lon)].multiply(2.0)
+    k = jnp.fft.rfftfreq(n_lon, d=dx)                  # cyclic wavenumber [1/m]
     return k, P
 
 
 def zonal_cospectrum(a_h, b_h, dx: float) -> tuple:
     """1-D zonal co-spectrum Re(â* b̂) of two cell-centre fields (D4/D5).
 
-    For the w'b' cospectrum pass w and b (zonal means removed internally).
-    Returns (wavenumbers [1/m], co-power[k]).
+    Variance-CONSERVING: ``Σ_k co[k] == zonal covariance`` of a' and b' (same
+    n_lon normalisation + interior factor-of-2 as ``zonal_power_spectrum``). For
+    the w'b' cospectrum pass w and b (zonal means removed internally; w must be
+    interpolated to the tracer cell-centre by the caller). Cyclic ``k`` [1/m].
     """
     ap = remove_zonal_mean(a_h)
     bp = remove_zonal_mean(b_h)
     n_lon = ap.shape[1]
-    ah = jnp.fft.rfft(ap, axis=1)
-    bh = jnp.fft.rfft(bp, axis=1)
+    ah = jnp.fft.rfft(ap, axis=1) / n_lon
+    bh = jnp.fft.rfft(bp, axis=1) / n_lon
     other = tuple(i for i in range(ap.ndim) if i != 1)
-    co = jnp.mean(jnp.real(jnp.conj(ah) * bh), axis=other) / n_lon
-    k = jnp.fft.rfftfreq(n_lon, d=dx) * 2.0 * jnp.pi
+    co = jnp.mean(jnp.real(jnp.conj(ah) * bh), axis=other)
+    co = co.at[1:_rfft_interior_double(n_lon)].multiply(2.0)
+    k = jnp.fft.rfftfreq(n_lon, d=dx)
     return k, co
 
 
