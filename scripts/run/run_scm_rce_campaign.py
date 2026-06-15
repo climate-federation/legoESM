@@ -58,6 +58,11 @@ from legoesm.atmosphere.scm import SingleColumnModel
 from legoesm.atmosphere.scm_forcing import SCMForcing
 from legoesm.core.field import Field
 from legoesm.grids.vertical import SigmaCoordinate
+from legoesm.training.scm_rce_metrics import (
+    score_profiles_jax,
+    weighted_rmse as weighted_rmse_jax,
+    weighted_std as weighted_std_jax,
+)
 
 try:
     from legoesm.training.param_collector import (
@@ -88,6 +93,8 @@ DEFAULT_RESULTS_DIR = Path("results/scm_rce_campaign")
 DEFAULT_REFERENCE_DIR = Path("results/rcemip1_n128_ocean")
 FIXED_SST_K = 300.0
 DEFAULT_DT_S = 600.0
+DEFAULT_SCM_MICROPHYSICS_SUBSTEPS = 30
+SCM_MICROPHYSICS_SUBSTEP_SCHEMES = ("morrison", "thompson")
 DEFAULT_DAYS = 50.0
 DEFAULT_LAST_REFERENCE_FILES = 5
 DEFAULT_ANALYSIS_DAYS = 5.0
@@ -222,13 +229,11 @@ def _to_jsonable(obj: Any) -> Any:
 
 
 def _weighted_std(profile: np.ndarray, weights: np.ndarray) -> float:
-    mean = float(np.sum(weights * profile))
-    var = float(np.sum(weights * (profile - mean) ** 2))
-    return math.sqrt(max(var, 0.0))
+    return float(weighted_std_jax(jnp.asarray(profile), jnp.asarray(weights)))
 
 
 def _weighted_rmse(diff: np.ndarray, weights: np.ndarray) -> float:
-    return math.sqrt(float(np.sum(weights * diff ** 2)))
+    return float(weighted_rmse_jax(jnp.asarray(diff), jnp.asarray(weights)))
 
 
 def _score_profiles(
@@ -237,15 +242,14 @@ def _score_profiles(
     qv_profile: np.ndarray,
     qcond_profile: np.ndarray,
 ) -> tuple[float, float, float, float]:
-    weights = ref.mass_weights
-    T_std = max(_weighted_std(ref.T_ref, weights), PROFILE_FLOOR)
-    qv_std = max(_weighted_std(ref.qv_ref, weights), PROFILE_FLOOR)
-    qcond_std = max(_weighted_std(ref.qcond_ref, weights), PROFILE_FLOOR)
-    T_rmse = _weighted_rmse((T_profile - ref.T_ref) / T_std, weights)
-    qv_rmse = _weighted_rmse((qv_profile - ref.qv_ref) / qv_std, weights)
-    cloud_rmse = _weighted_rmse((qcond_profile - ref.qcond_ref) / qcond_std, weights)
-    combined = math.sqrt((T_rmse**2 + qv_rmse**2 + cloud_rmse**2) / 3.0)
-    return T_rmse, qv_rmse, cloud_rmse, combined
+    T_rmse, qv_rmse, cloud_rmse, combined = score_profiles_jax(
+        ref,
+        jnp.asarray(T_profile),
+        jnp.asarray(qv_profile),
+        jnp.asarray(qcond_profile),
+        profile_floor=PROFILE_FLOOR,
+    )
+    return float(T_rmse), float(qv_rmse), float(cloud_rmse), float(combined)
 
 
 def _reference_files(reference_dir: Path, last_n: int) -> list[Path]:
@@ -401,10 +405,29 @@ def _config_scheme_dict(cfg: PhysicsConfig) -> dict[str, str]:
     }
 
 
-def _config_cache_key(cfg: PhysicsConfig, days: float, dt: float) -> str:
+def _effective_scm_microphysics_substeps(
+    microphysics_scheme: str,
+    requested_substeps: int,
+) -> int:
+    if microphysics_scheme in SCM_MICROPHYSICS_SUBSTEP_SCHEMES:
+        return requested_substeps
+    return 1
+
+
+def _config_cache_key(
+    cfg: PhysicsConfig,
+    days: float,
+    dt: float,
+    scm_microphysics_substeps: int,
+) -> str:
+    effective_substeps = _effective_scm_microphysics_substeps(
+        cfg.microphysics.scheme,
+        scm_microphysics_substeps,
+    )
     payload = {
         "days": days,
         "dt": dt,
+        "scm_microphysics_substeps": effective_substeps,
         "config": _to_jsonable(cfg),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -454,10 +477,15 @@ def run_scm_rce(
     equil_T_tol_K: float,
     equil_qv_tol: float,
     equil_qcond_tol: float,
+    scm_microphysics_substeps: int = DEFAULT_SCM_MICROPHYSICS_SUBSTEPS,
 ) -> RunDiagnostics:
     nsteps = max(1, int(round(days * SECONDS_PER_DAY / dt)))
     T0, qv0 = wing_initial_profiles(ref)
     forcing = SCMForcing(prescribe="T_s", T_s=lambda _t: FIXED_SST_K)
+    effective_microphysics_substeps = _effective_scm_microphysics_substeps(
+        cfg.microphysics.scheme,
+        scm_microphysics_substeps,
+    )
     scm = SingleColumnModel.create(
         physics_config=cfg,
         nlev=len(ref.z_m),
@@ -469,6 +497,7 @@ def run_scm_rce(
         time_integrator="forward_euler",
         forcing=forcing,
         dtype=jnp.float64,
+        microphysics_substeps=effective_microphysics_substeps,
     )
     scm.sigma_coord = make_sigma_coordinate_from_reference(ref)
     _preseed_column_tracers(scm, cfg.microphysics.scheme)
@@ -624,8 +653,9 @@ def run_cached(
     equil_T_tol_K: float,
     equil_qv_tol: float,
     equil_qcond_tol: float,
+    scm_microphysics_substeps: int = DEFAULT_SCM_MICROPHYSICS_SUBSTEPS,
 ) -> RunDiagnostics:
-    key = _config_cache_key(cfg, days, dt)
+    key = _config_cache_key(cfg, days, dt, scm_microphysics_substeps)
     if key not in cache:
         cache[key] = run_scm_rce(
             cfg,
@@ -633,6 +663,7 @@ def run_cached(
             label=label,
             days=days,
             dt=dt,
+            scm_microphysics_substeps=scm_microphysics_substeps,
             analysis_days=analysis_days,
             require_equilibrium=require_equilibrium,
             equil_T_tol_K=equil_T_tol_K,
@@ -840,6 +871,7 @@ def tune_category_winner(
     equil_T_tol_K: float,
     equil_qv_tol: float,
     equil_qcond_tol: float,
+    scm_microphysics_substeps: int = DEFAULT_SCM_MICROPHYSICS_SUBSTEPS,
 ) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics]:
     _component, scheme, subcfg = _active_subconfig(base_cfg, category)
     scheme_key = _scheme_key_for_subconfig(subcfg)
@@ -855,6 +887,7 @@ def tune_category_winner(
         equil_T_tol_K=equil_T_tol_K,
         equil_qv_tol=equil_qv_tol,
         equil_qcond_tol=equil_qcond_tol,
+        scm_microphysics_substeps=scm_microphysics_substeps,
     )
     if scheme_key is None or subcfg is None:
         return base_cfg, [], default_run
@@ -902,6 +935,7 @@ def tune_category_winner(
             equil_T_tol_K=equil_T_tol_K,
             equil_qv_tol=equil_qv_tol,
             equil_qcond_tol=equil_qcond_tol,
+            scm_microphysics_substeps=scm_microphysics_substeps,
         )
         if trial_run.status == "ok" and trial_run.score < best_run.score:
             best_cfg = trial_cfg
@@ -993,6 +1027,9 @@ def _write_summary(
         "through traced radiation forcing plus `PhysicsState.surface_T_sfc_override` "
         "for turbulence.",
         f"SCM fixed SST: {FIXED_SST_K:.1f} K; dt: {args.dt:.1f} s; "
+        "SCM microphysics substeps for "
+        f"{', '.join(SCM_MICROPHYSICS_SUBSTEP_SCHEMES)}: "
+        f"{args.scm_microphysics_substeps}; "
         f"days: {args.days:.3g}; analysis window: {args.analysis_days:.3g} d.",
         "",
         "Recommended defaults live in the atmosphere physics `*Config` "
@@ -1062,6 +1099,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--outdir", type=Path, default=DEFAULT_RESULTS_DIR)
     parser.add_argument("--days", type=float, default=DEFAULT_DAYS)
     parser.add_argument("--dt", type=float, default=DEFAULT_DT_S)
+    parser.add_argument(
+        "--scm-microphysics-substeps",
+        type=int,
+        default=DEFAULT_SCM_MICROPHYSICS_SUBSTEPS,
+        help=(
+            "Fixed SCM-only microphysics substeps per outer step. Default "
+            f"{DEFAULT_SCM_MICROPHYSICS_SUBSTEPS} gives a 20 s "
+            "microphysics step at --dt 600 for Morrison/Thompson, matching "
+            "the plane CRM coupling while leaving non-stiff schemes on the "
+            "original single-step SCM coupling."
+        ),
+    )
     parser.add_argument("--analysis-days", type=float, default=DEFAULT_ANALYSIS_DAYS)
     parser.add_argument("--last-reference-files", type=int, default=DEFAULT_LAST_REFERENCE_FILES)
     parser.add_argument(
@@ -1079,6 +1128,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--equil-qv-tol", type=float, default=EQUIL_QV_TOL)
     parser.add_argument("--equil-qcond-tol", type=float, default=EQUIL_QCOND_TOL)
     args = parser.parse_args(argv)
+    if args.scm_microphysics_substeps < 1:
+        raise SystemExit("--scm-microphysics-substeps must be a positive integer")
 
     if args.quick:
         args.days = min(args.days, QUICK_DAYS)
@@ -1105,6 +1156,7 @@ def main(argv: list[str] | None = None) -> int:
         equil_T_tol_K=args.equil_T_tol_K,
         equil_qv_tol=args.equil_qv_tol,
         equil_qcond_tol=args.equil_qcond_tol,
+        scm_microphysics_substeps=args.scm_microphysics_substeps,
     )
     print(f"[baseline] {baseline.status} score={baseline.score:.6g} {baseline.reason}")
 
@@ -1135,6 +1187,7 @@ def main(argv: list[str] | None = None) -> int:
                     equil_T_tol_K=args.equil_T_tol_K,
                     equil_qv_tol=args.equil_qv_tol,
                     equil_qcond_tol=args.equil_qcond_tol,
+                    scm_microphysics_substeps=args.scm_microphysics_substeps,
                 )
             )
             print(
@@ -1169,6 +1222,7 @@ def main(argv: list[str] | None = None) -> int:
         equil_T_tol_K=args.equil_T_tol_K,
         equil_qv_tol=args.equil_qv_tol,
         equil_qcond_tol=args.equil_qcond_tol,
+        scm_microphysics_substeps=args.scm_microphysics_substeps,
     )
     print(f"[best] {best.status} score={best.score:.6g} {best.reason}")
 
@@ -1192,6 +1246,7 @@ def main(argv: list[str] | None = None) -> int:
                 equil_T_tol_K=args.equil_T_tol_K,
                 equil_qv_tol=args.equil_qv_tol,
                 equil_qcond_tol=args.equil_qcond_tol,
+                scm_microphysics_substeps=args.scm_microphysics_substeps,
             )
             tuned_records.extend(records)
             tuned_best = tuned_run
