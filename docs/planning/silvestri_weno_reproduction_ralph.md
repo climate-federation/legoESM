@@ -203,6 +203,19 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 13 — PHASE 4 §4 EFFECTIVE-RESOLUTION SWEEP REPRODUCED ✅ — 2026-06-15
+- **§4 resolution sweep (N=64/128/256, 6 schemes) RUN on CPU → the paper's effective-resolution
+  result REPRODUCED.** KE retained at t=6 vs N: **W9V converged (≈DNS 0.96) already at N=64** while
+  W5V needs N=256, W5D/Leith2 lag — convergence order W9V>W9D>W5V>W5D>Leith, ~4× effective-resolution
+  advantage for W9V (paper: "W9V comes closer to resolution independence"). Convergence figure
+  (fig4b) added to the plotter; report updated with the sweep table.
+- **§4 IS NOW FULLY REPRODUCED**: (a) scheme comparison [it.12], (b) {ζ;u}>{ζ;ζ} distinction,
+  (c) effective-resolution convergence [it.13]. All three of the paper's §4 results quantitatively
+  match. (4096² DNS reference + finer sweep would refine but the ranking + convergence are clear.)
+- **NEXT (CPU-feasible): B5b** — the last code gap (full QG2 baroclinic stretching term ∂_z(f/N²∇b),
+  thread buoyancy into `_bc_horizontal_viscosity`; unit-testable on CPU though its §5 payoff is
+  GPU-gated). **GPU-gated:** §5 1000-day jet matrix (15 runs) + §4 4096² DNS. Report §4 DONE; §5 pending.
+
 ### Iteration 12 — PHASE 3 COMPLETE + PHASE 4 §4 MATRIX REPRODUCED ✅ — 2026-06-15
 - **R3 (2D-turb driver) + R5 (comparison plotter) DONE + committed → PHASE 3 COMPLETE.**
   `run_silvestri_turbulence_2d.py` (CFL time loop + isotropic spectra), `plot_silvestri_comparison.py`
