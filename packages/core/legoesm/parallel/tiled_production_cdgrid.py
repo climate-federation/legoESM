@@ -343,6 +343,70 @@ def make_tiled_compute_geopotential_stage_2d(mesh, sigma_coord, n: int, kt: int)
 
 
 # ---------------------------------------------------------------------------
+# P-3D-geo-hybrid: compute_geopotential_hybrid (Simmons-Burridge on the HYBRID
+# sigma-pressure coordinate — the PRODUCTION OMIP vertical coord).  Same
+# per-COLUMN structure as compute_geopotential (vertical cumsum, NO horizontal
+# stencil), but the ln_ratio/alpha are pressure-dependent (p_half from
+# pressure_from_hybrid), still per-column.  Vertical REPLICATED, cc partitions
+# exactly, NO halo.  ``coord`` (HybridSigmaPressureCoordinate, 1-D a/b vertical
+# arrays) is closed over (not a (6,...) face array, so no U4a broadcast).
+# ---------------------------------------------------------------------------
+
+def compute_geopotential_hybrid_tile_2d(T, p_s, phis, coord, a_i, a_j, nl: int):
+    """Per-tile ``compute_geopotential_hybrid`` (3D PE, hybrid coord).  Slices
+    the cc tile ``[a:a+nl]`` (no halo) and runs the per-column hybrid
+    integration; returns ``Phi`` ``(F, nl, nl, nlev)``.  Mirrors
+    :func:`compute_geopotential_tile_2d` (sigma); only the core + coord differ."""
+    from legoesm.grids.vertical import compute_geopotential_hybrid
+
+    if T.shape[1] != T.shape[2] or p_s.shape[1:3] != T.shape[1:3] \
+            or phis.shape[1:3] != T.shape[1:3]:
+        raise ValueError(
+            f"compute_geopotential_hybrid_tile_2d: T cc-square + p_s/phis "
+            f"matching horizontal; got T={T.shape[1:3]}, p_s={p_s.shape[1:3]}, "
+            f"phis={phis.shape[1:3]}")
+
+    def _s2(arr):
+        arr = jax.lax.dynamic_slice_in_dim(arr, a_i, nl, axis=1)
+        return jax.lax.dynamic_slice_in_dim(arr, a_j, nl, axis=2)
+
+    return compute_geopotential_hybrid(_s2(T), _s2(p_s), coord, _s2(phis))
+
+
+def make_tiled_compute_geopotential_hybrid_stage_2d(mesh, coord, n: int, kt: int):
+    """Sharded ``compute_geopotential_hybrid`` on a ``(6, kt, kt)`` mesh — the
+    hybrid-coord twin of :func:`make_tiled_compute_geopotential_stage_2d` (the
+    production OMIP vertical coord).  ``stage(T, p_s, phis) -> Phi``; ``T`` 4D
+    ``(6,n,n,nlev)`` + ``p_s``/``phis`` 2D cc face-replicated; tile-sharded
+    ``Phi`` out (exact cc partition, vertical replicated).  ``coord`` closed over."""
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    nl = n // kt
+    fo = P("face", None, None)                 # 2D cc (p_s, phis)
+    fw = P("face", None, None, None)           # 4D T
+    cz = P("face", "tile_i", "tile_j", None)   # 4D Phi out
+
+    @partial(shard_map, mesh=mesh, in_specs=(fw, fo, fo), out_specs=cz,
+             check_vma=False)
+    def _body(T, p_s, phis):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return compute_geopotential_hybrid_tile_2d(T, p_s, phis, coord,
+                                                   a_i, a_j, nl)
+
+    def stage(T, p_s, phis):
+        if T.shape[1:3] != (n, n) or p_s.shape[1:3] != (n, n) \
+                or phis.shape[1:3] != (n, n):
+            raise ValueError(
+                f"compute_geopotential_hybrid stage: T/p_s/phis must be cc "
+                f"(n,n)={(n, n)}; got T={T.shape[1:3]}, p_s={p_s.shape[1:3]}, "
+                f"phis={phis.shape[1:3]}")
+        return _body(T, p_s, phis)
+
+    return stage
+
+
+# ---------------------------------------------------------------------------
 # P-ii: the two production 4-point box interps.
 #   interp_corner_to_center (corner -> cc): PURELY LOCAL (cc cell reads its 2x2
 #     corner block) — like dgrid_vorticity, no halo, exact cc partition.

@@ -18,9 +18,14 @@ import numpy as np
 import pytest
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
-from legoesm.grids.vertical import create_sigma_coordinate, compute_geopotential
+from legoesm.grids.vertical import (
+    create_sigma_coordinate, compute_geopotential,
+    make_hybrid_levels, compute_geopotential_hybrid,
+)
 from legoesm.parallel.tiled_production_cdgrid import (
     compute_geopotential_tile_2d, make_tiled_compute_geopotential_stage_2d,
+    compute_geopotential_hybrid_tile_2d,
+    make_tiled_compute_geopotential_hybrid_stage_2d,
 )
 
 
@@ -76,3 +81,44 @@ def test_geopotential_shard_map_np24():
     np.testing.assert_allclose(
         Phi_t, Phi_g, rtol=0, atol=1e-9,
         err_msg="tiled geopotential np24 != global")
+
+
+# --- HYBRID coord (production OMIP vertical coord) — same per-column tiling ---
+def test_geopotential_hybrid_host_body_tiling():
+    kt, nl, nlev = 3, 6, 8
+    n = kt * nl
+    coord = make_hybrid_levels(nlev)
+    T, p_s, phis = _inputs(n, nlev, 91)
+    Phi_g = np.asarray(compute_geopotential_hybrid(T, p_s, coord, phis))
+
+    def get_tile(ti, tj):
+        return compute_geopotential_hybrid_tile_2d(
+            T, p_s, phis, coord, ti * nl, tj * nl, nl)
+
+    Phi_t = _reassemble_cc(get_tile, kt)
+    assert Phi_t.shape == (6, n, n, nlev)
+    np.testing.assert_allclose(
+        Phi_t, Phi_g, rtol=0, atol=1e-9,
+        err_msg="tiled hybrid geopotential host-body != global")
+
+
+def test_geopotential_hybrid_shard_map_np24():
+    kt, nl, nlev = 2, 6, 8
+    ndev = 6 * kt * kt
+    if len(jax.devices()) < ndev:
+        pytest.skip(f"needs --xla_force_host_platform_device_count={ndev}")
+    from jax.sharding import Mesh
+
+    n = kt * nl
+    coord = make_hybrid_levels(nlev)
+    T, p_s, phis = _inputs(n, nlev, 92)
+    Phi_g = np.asarray(compute_geopotential_hybrid(T, p_s, coord, phis))
+    dev = np.array(jax.devices()[:ndev]).reshape(6, kt, kt)
+    mesh = Mesh(dev, axis_names=("face", "tile_i", "tile_j"))
+    stage = make_tiled_compute_geopotential_hybrid_stage_2d(mesh, coord, n, kt)
+    Phi_s = np.asarray(stage(T, p_s, phis)).reshape(6, kt, nl, kt, nl, nlev)
+    Phi_t = _reassemble_cc(lambda ti, tj: Phi_s[:, ti, :, tj, :, :], kt)
+    assert Phi_t.shape == (6, n, n, nlev)
+    np.testing.assert_allclose(
+        Phi_t, Phi_g, rtol=0, atol=1e-9,
+        err_msg="tiled hybrid geopotential np24 != global")
