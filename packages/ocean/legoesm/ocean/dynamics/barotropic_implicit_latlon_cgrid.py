@@ -584,6 +584,135 @@ def _make_chebyshev_preconditioner(A_op, inv_diag, mask, degree: int):
     return M_inv
 
 
+# ---------------------------------------------------------------------------
+# Geometric multigrid preconditioner (anisotropic: zonal-line smoother)
+# ---------------------------------------------------------------------------
+# POC 8487762 (docs/scaling/scaling_levers_audit_2026-06-14.md): a geometric
+# V-cycle with a ZONAL-LINE smoother cuts the barotropic-PCG outer iteration
+# count M60 -> M2-4 on the polar-anisotropic lat-lon Helmholtz (textbook
+# O(log n)), where the pointwise-Jacobi smoother gives only ~3x.  The line
+# smoother handles the strong near-pole zonal coupling (dx -> 0) that the
+# coarse-grid correction alone cannot; together they smash the
+# reduction-latency wall (~120 -> ~8 global allreduces/step under MPI).  The
+# transfer pair is Galerkin-symmetric (R = 0.25 P^T) even with land masks, so
+# the V-cycle stays ~self-adjoint (CG-friendly).
+
+
+def _mg_prolong(xc: jnp.ndarray, mask_f: jnp.ndarray) -> jnp.ndarray:
+    """Coarse->fine injection prolongation (each fine child = its coarse
+    parent), masked to the fine wet domain.  P; its W=area-free adjoint is
+    :func:`_mg_restrict` up to the 0.25 factor."""
+    xf = jnp.repeat(jnp.repeat(xc, 2, axis=0), 2, axis=1)
+    return xf * mask_f
+
+
+def _mg_restrict(rf: jnp.ndarray, mask_f: jnp.ndarray,
+                 nlc: int, nloc: int) -> jnp.ndarray:
+    """Full-weighting fine->coarse restriction = 0.25 * P^T: sum the (wet)
+    fine 2x2 children.  Exactly 0.25*P^T (P injects + masks), so R and P form
+    a Galerkin-symmetric pair on the masked grid."""
+    rfm = rf * mask_f
+    blk = rfm.reshape(nlc, 2, nloc, 2)
+    return 0.25 * (blk[:, 0, :, 0] + blk[:, 1, :, 0]
+                   + blk[:, 0, :, 1] + blk[:, 1, :, 1])
+
+
+def _faces_from_cell_depth(H_cell, mask, n_lat, n_lon):
+    """(H_u, H_v, u_mask, v_mask) from a cell depth + mask via the production
+    min-rule (periodic lon, pole v-faces zeroed) — the same construction the
+    fidelity tests use, so each MG level is a faithful coarse Helmholtz."""
+    Hu_inner = jnp.minimum(jnp.roll(H_cell, 1, axis=1), H_cell)
+    H_u = jnp.concatenate([Hu_inner, Hu_inner[:, 0:1]], axis=1)
+    Hv_inner = jnp.minimum(H_cell[:-1], H_cell[1:])
+    H_v = jnp.concatenate(
+        [jnp.zeros((1, n_lon)), Hv_inner, jnp.zeros((1, n_lon))], axis=0)
+    wet = mask > 0.5
+    u_inner = (wet & jnp.roll(wet, 1, axis=1)).astype(H_cell.dtype)
+    u_mask = jnp.concatenate([u_inner, u_inner[:, 0:1]], axis=1)
+    v_inner = (wet[:-1] & wet[1:]).astype(H_cell.dtype)
+    v_mask = jnp.concatenate(
+        [jnp.zeros((1, n_lon)), v_inner, jnp.zeros((1, n_lon))], axis=0)
+    return H_u * u_mask, H_v * v_mask, u_mask, v_mask
+
+
+def _make_multigrid_preconditioner(
+    H_cell: jnp.ndarray,
+    coeff: jnp.ndarray,
+    grid: LatLonGrid,
+    mask: jnp.ndarray,
+    *,
+    pre: int = 2,
+    post: int = 2,
+    coarse_sweeps: int = 10,
+    omega: float = 0.8,
+    min_coarse_rows: int = 8,
+):
+    """Anisotropic geometric-multigrid V-cycle preconditioner (POC 8487762).
+
+    Builds a 2x-coarsening level hierarchy ONCE (host-side ``create_latlon_grid``
+    per level + cell-depth 2x2 restriction + the production min-rule faces);
+    each level carries its Helmholtz ``A_op`` and a ZONAL-LINE smoother
+    (:func:`_make_zonal_line_preconditioner`).  The returned ``M_inv`` runs one
+    recursive V-cycle (pre-smooth -> restrict residual -> recurse -> prolong
+    correction -> post-smooth; coarsest level = ``coarse_sweeps`` line sweeps).
+    No global reductions inside the V-cycle (smoothing is comm-free per row;
+    transfers are local/halo), so it slashes the OUTER PCG reduction count.
+
+    ``H_cell`` is the cell-centred water-column depth the faces derive from
+    (the hierarchy must coarsen the cell field, not the staggered faces).
+    """
+    from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
+
+    n_lat, n_lon = mask.shape
+    levels = []   # (A_op, mask, smoother, n_lat, n_lon)
+    Hc, m = H_cell, mask
+    g = grid
+    nl, nlo = n_lat, n_lon
+    while True:
+        H_u, H_v, u_mask, v_mask = _faces_from_cell_depth(Hc, m, nl, nlo)
+        A_op = _make_helmholtz(H_u, H_v, coeff, g, m, u_mask, v_mask)
+        smoother = _make_zonal_line_preconditioner(H_u, H_v, coeff, g, m)
+        levels.append((A_op, m, smoother, nl, nlo))
+        if nl // 2 < min_coarse_rows or nl % 2 or nlo % 2 or nlo // 2 < 3:
+            break
+        nlc, nloc = nl // 2, nlo // 2
+        # cell-depth 2x2 MEAN over wet children (_mg_restrict = 0.25*sum;
+        # = exact mean on all-wet blocks, the common interior; biased low on
+        # partial coastal blocks, acceptable for a PRECONDITIONER).
+        Hc = _mg_restrict(Hc, m, nlc, nloc)
+        # coarse cell wet if ANY fine child wet: 0.25*sum(m*4)=count_wet>0.5.
+        m = (_mg_restrict(m * 4.0, jnp.ones_like(m), nlc, nloc) > 0.5
+             ).astype(mask.dtype)
+        g = ensure_geometry(create_latlon_grid(n_lat=nlc, n_lon=nloc))
+        nl, nlo = nlc, nloc
+    n_levels = len(levels)
+
+    def _smooth(lvl, b, x, sweeps):
+        A_op, m_l, sm, _, _ = levels[lvl]
+        for _ in range(sweeps):
+            x = x + omega * sm(b - A_op(x))
+        return x * m_l
+
+    def _vcycle(lvl, b, x):
+        A_op, m_l, _sm, nl_l, nlo_l = levels[lvl]
+        if lvl == n_levels - 1:
+            return _smooth(lvl, b, x, coarse_sweeps)
+        x = _smooth(lvl, b, x, pre)
+        r = (b - A_op(x)) * m_l
+        nlc, nloc = nl_l // 2, nlo_l // 2
+        rc = _mg_restrict(r, m_l, nlc, nloc) * levels[lvl + 1][1]
+        ec = _vcycle(lvl + 1, rc, jnp.zeros_like(rc))
+        x = x + _mg_prolong(ec, m_l)
+        x = _smooth(lvl, b, x, post)
+        return x * m_l
+
+    def M_inv(r: jnp.ndarray) -> jnp.ndarray:
+        return _vcycle(0, r * mask.astype(r.dtype),
+                       jnp.zeros_like(r)).astype(r.dtype)
+
+    return M_inv
+
+
 def _select_preconditioner(
     name: str,
     inv_diag: jnp.ndarray,
@@ -594,6 +723,7 @@ def _select_preconditioner(
     mask: jnp.ndarray,
     A_op=None,
     cheby_degree: int = 4,
+    H_cell=None,
 ):
     """Dispatch the implicit-CN PCG preconditioner by config name.
 
@@ -605,6 +735,10 @@ def _select_preconditioner(
     "chebyshev" — degree-``cheby_degree`` Chebyshev polynomial of the
     Helmholtz matvec ``A_op`` (iteration-count cut with NO per-iteration
     reduction; see :func:`_make_chebyshev_preconditioner`).
+    "multigrid" — anisotropic geometric V-cycle with a zonal-line smoother
+    (cuts the outer M ~M60->M4, textbook O(log n); needs ``H_cell``, the
+    cell-centred water-column depth, to coarsen — see
+    :func:`_make_multigrid_preconditioner`).
     Unknown names refuse loudly (dispatch-hardening convention).
     """
     if name == "jacobi":
@@ -623,10 +757,16 @@ def _select_preconditioner(
         return _make_chebyshev_preconditioner(
             A_op, inv_diag, mask, int(cheby_degree),
         )
+    if name == "multigrid":
+        if H_cell is None:
+            raise ValueError(
+                "barotropic_implicit_latlon_cgrid: multigrid preconditioner "
+                "requires H_cell (the cell water-column depth; pass H_cell=...).")
+        return _make_multigrid_preconditioner(H_cell, coeff, grid, mask)
     raise ValueError(
         "barotropic_implicit_latlon_cgrid: unknown "
         f"barotropic_implicit_preconditioner {name!r}; expected "
-        "'jacobi', 'zonal_line', or 'chebyshev'."
+        "'jacobi', 'zonal_line', 'chebyshev', or 'multigrid'."
     )
 
 
@@ -984,12 +1124,17 @@ def barotropic_implicit_latlon_cgrid(
     # fixed-M PCG branch below; the single-rank stock-CG branch keeps
     # its internal Jacobi (the custom-VJP solver owns inv_diag for its
     # exact adjoint).
+    # Cell-centred water-column depth for the multigrid coarsening (the same
+    # sum(h_k) total H_u_old/H_v_old derive from via the min-rule); None-safe
+    # for the other preconditioners (they ignore H_cell).
+    _H_cell = jnp.maximum(jnp.sum(h_k_old, axis=-1), min_water_col) * mask
     M_inv = _select_preconditioner(
         str(getattr(config, "barotropic_implicit_preconditioner",
                     "jacobi")),
         inv_diag, H_u_old, H_v_old, coeff, grid, mask,
         A_op=A_op,
         cheby_degree=int(getattr(config, "barotropic_chebyshev_degree", 4)),
+        H_cell=_H_cell,
     )
 
     # Solve dispatch — MERGE COMPOSITION of the area-weighted-adjoint fix
