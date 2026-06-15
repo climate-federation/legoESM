@@ -684,7 +684,11 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
             scatter_state_voronoi,
             make_voronoi_mpi_step,
         )
-        layout = make_voronoi_partition_layout(mesh, rank, n_ranks)
+        # Partition method A/B (audit #3): LEGOESM_VORONOI_PARTITION =
+        # "geometric" (RCB, default) | "metis" (pymetis k-way edge-cut min).
+        _pmethod = os.environ.get("LEGOESM_VORONOI_PARTITION", "geometric")
+        layout = make_voronoi_partition_layout(mesh, rank, n_ranks,
+                                               method=_pmethod)
         state = scatter_state_voronoi(state, layout.partition)
         step_fn = make_voronoi_mpi_step(
             model, layout, sigma, config, physics_fn=physics_fn,
