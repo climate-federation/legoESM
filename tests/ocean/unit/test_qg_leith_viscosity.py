@@ -203,6 +203,24 @@ class TestB5bStretching:
         assert bool(jnp.all(jnp.isfinite(sx))) and bool(jnp.all(jnp.isfinite(sy)))
         assert float(jnp.max(jnp.abs(sy))) > 0.0          # meridional front → ∂ᵧ stretching
 
+    def test_unstable_column_no_spurious_spike(self):
+        """A statically UNSTABLE column (N²<0) → stretching set to 0 there, NOT a
+        huge floored f/N² spike (review SHOULD-FIX)."""
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import qg_pv_stretching_vec
+        grid = _grid()
+        nlev = 6
+        zc = -(np.arange(nlev) * 20.0 + 10.0)
+        lat = np.asarray(grid.lat)
+        front = np.tanh((lat - lat.mean()) / np.radians(5.0))[:, None, None]
+        # UNSTABLE base stratification (b DECREASES with height → N²<0).
+        b = (-4e-6 * zc)[None, None, :] + 5e-3 * front + 0.0 * np.exp(zc)[None, None, :]
+        b = jnp.asarray(np.broadcast_to(b, (grid.n_lat, grid.n_lon, nlev)).copy())
+        h = jnp.full((grid.n_lat, grid.n_lon, nlev), 20.0)
+        f_h = jnp.full((grid.n_lat, 1), float(2 * constants.Omega * np.sin(np.radians(-50.0))))
+        sx, sy = qg_pv_stretching_vec(b, h, f_h, grid)
+        # No blow-up: the stretching stays O(1e-9) (PV-gradient scale), not ~1e-2.
+        assert float(jnp.max(jnp.abs(sy))) < 1e-6, float(jnp.max(jnp.abs(sy)))
+
     def test_operator_with_stretching_differs_from_barotropic(self):
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             qg_leith_viscosity_tendency_cgrid,

@@ -2422,12 +2422,11 @@ def qg_leith_viscosity_tendency_cgrid(
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """BAROTROPIC QG-Leith eddy viscosity — an APPROXIMATION of the Silvestri
-    et al. 2024 "QG2" / Bachman et al. 2017 closure with the baroclinic
-    stretching term OMITTED (see LIMITATION below). A paper-comparison matrix
-    must label this "QG-Leith (barotropic)", NOT "QG2", until the stretching is
-    wired in (tracked as B5b). A HARMONIC (Laplacian) viscosity scaling with the
-    BAROTROPIC potential-vorticity gradient:
+    """QG-Leith eddy viscosity (Silvestri et al. 2024 "QG2" / Bachman et al.
+    2017). With ``buoyancy``+``h_k`` supplied it is the FULL QG2 (baroclinic
+    stretching + Bu/Ro bound, see below); without them it is the BAROTROPIC
+    approximation (∇Q = ∇(ζ+f), bounds inert — label "QG-Leith (barotropic)").
+    A HARMONIC (Laplacian) viscosity scaling with the potential-vorticity gradient:
 
         nu = (C·Δ/π)³ · sqrt(|∇Q|² + |∇δ|²)
 
@@ -2517,9 +2516,8 @@ def bound_qg_pv_gradient(grad_q, grad_q_stretch, Bu, Ro):
     Burger number Δ²/L_d², ``Ro`` = grid Rossby number V/(|f|Δ). The grid-Burger
     bound caps the gradient where the deformation radius is under-resolved; the
     grid-Rossby bound caps it where the flow is strongly ageostrophic; the
-    closure reverts to 2D Leith where QG does not hold. Provided + tested for a
-    future wiring that supplies the stretching term (omitted in the default
-    barotropic path of ``qg_leith_viscosity_tendency_cgrid``)."""
+    closure reverts to 2D Leith where QG does not hold. Used by the full-QG2
+    path of ``qg_leith_viscosity_tendency_cgrid`` when buoyancy is supplied."""
     gq2 = grad_q * (1.0 + 1.0 / jnp.maximum(Bu, 1e-30))
     gq3 = grad_q * (1.0 + 1.0 / jnp.maximum(Ro ** 2, 1e-30))
     return jnp.minimum(jnp.minimum(grad_q_stretch, gq2), gq3)
@@ -2542,20 +2540,25 @@ def _ddz_centre(X: jnp.ndarray, h: jnp.ndarray) -> jnp.ndarray:
 
 def qg_pv_stretching_vec(buoyancy: jnp.ndarray, h_k: jnp.ndarray,
                          f_h: jnp.ndarray, grid: "LatLonGrid",
-                         n2_floor: float = 1e-12) -> tuple:
+                         n2_min: float = 1e-9) -> tuple:
     """Baroclinic QGPV stretching vector ∂_z(f/N²·∇b) at cell centres (Bachman
     et al. 2017 / Silvestri Eq A3 ∇q₁ stretching term).
 
     ``buoyancy`` b and ``h_k`` (layer thicknesses) are (n_lat, n_lon, nlev) at
     cell centres; ``f_h`` is the Coriolis parameter (n_lat, n_lon) or (n_lat, 1).
-    Returns (sx, sy) each (n_lat, n_lon, nlev). N² = ∂b/∂z (floored positive).
+    Returns (sx, sy) each (n_lat, n_lon, nlev). N² = ∂b/∂z.
+
+    Where the column is statically UNSTABLE or near-neutral (N² ≤ n2_min), the
+    QG stretching is undefined; the contribution is set to ZERO there rather than
+    dividing by a tiny floor (which would inflate f/N²·∇b by orders of magnitude
+    and spuriously spike the viscosity). n2_min is a physical floor (~1e-9 s⁻²).
     """
     bx, by = _grad_cell_vec_h(buoyancy, grid)            # horizontal ∇b
-    N2 = jnp.maximum(_ddz_centre(buoyancy, h_k), n2_floor)
+    N2 = _ddz_centre(buoyancy, h_k)
     f = f_h[..., jnp.newaxis] if f_h.ndim == 2 else f_h
-    Vx = f / N2 * bx
-    Vy = f / N2 * by
-    return _ddz_centre(Vx, h_k), _ddz_centre(Vy, h_k)
+    # f/N² only where stably stratified; 0 elsewhere (no spurious floored spike).
+    inv = jnp.where(N2 > n2_min, f / jnp.where(N2 > n2_min, N2, 1.0), 0.0)
+    return _ddz_centre(inv * bx, h_k), _ddz_centre(inv * by, h_k)
 
 
 def neumann_fill_vertex(
