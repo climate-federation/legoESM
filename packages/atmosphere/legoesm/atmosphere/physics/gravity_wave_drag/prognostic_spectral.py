@@ -190,6 +190,8 @@ def prognostic_spectral_gwd(
 
     # Frictional heating
     dT_dt = -(u * du_dt + v * dv_dt) / constants.c_pd
+    if not config.thermal_tendency:
+        dT_dt = jnp.zeros_like(dT_dt)
 
     # Column dissipation (positive-definite: KE lost by the mean flow)
     eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)

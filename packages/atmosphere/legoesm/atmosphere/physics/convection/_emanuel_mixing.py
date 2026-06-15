@@ -115,6 +115,7 @@ _LCL_SIGMOID_WIDTH_PA = 200.0
 _DBO_ENTRAIN_COEFF = 2.0e-4
 _STRICT_INDEX_SHARPNESS = 20.0
 _EPMAX_DEFAULT = 0.999
+_TETENS_MIN_VALID_K = 180.0
 
 class EmanuelMixingOutput(NamedTuple):
     """Output of :func:`emanuel_mixing_tendencies` (surface-LAST).
@@ -193,7 +194,12 @@ def _oracle_qsat(T, p):
     gradient alive near ``es → p`` (mirrors ``saturation_mixing_ratio``).
     """
     eps = constants.epsilon
-    es = saturation_vapor_pressure(T)
+    # The Emanuel TLIFT Newton solve can generate very cold parcel guesses
+    # in inactive upper-column branches.  Tetens has a pole near 29.65 K;
+    # clipping to the standard atmospheric low-temperature floor keeps those
+    # inactive diagnostics finite without changing physical tropospheric levels.
+    T_safe = jnp.maximum(T, _TETENS_MIN_VALID_K)
+    es = saturation_vapor_pressure(T_safe)
     denom = jax.nn.softplus(p - es * (1.0 - eps) - 1.0) + 1.0
     return eps * es / denom
 

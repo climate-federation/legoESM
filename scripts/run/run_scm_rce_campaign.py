@@ -52,14 +52,41 @@ from legoesm.atmosphere.physics import (
     PhysicsConfig,
     RadiationConfig,
     TurbulenceConfig,
+    make_physics,
 )
-from legoesm.atmosphere.physics.microphysics.integration import min_tracer_slots
-from legoesm.atmosphere.scm import SingleColumnModel
-from legoesm.atmosphere.scm_forcing import SCMForcing
+from legoesm.atmosphere.physics._shared import (
+    compute_layer_dz as _compute_layer_dz,
+    compute_rho as _compute_rho,
+)
+from legoesm.atmosphere.physics.clouds.config import CloudConfig
+from legoesm.atmosphere.physics.microphysics.integration import (
+    get_microphysics_fn,
+    min_tracer_slots,
+)
+from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+from legoesm.atmosphere.physics.radiation.config import (
+    GrayRadiationConfig,
+    OzoneProfileConfig,
+    RRTMGPConfig,
+)
+from legoesm.atmosphere.physics.radiation.integration import sam_ocean_albedo
+from legoesm.atmosphere.scm import SingleColumnModel, apply_tendencies
+from legoesm.atmosphere.scm_forcing import SCMForcing, add_tendencies
 from legoesm.core.field import Field
+from legoesm.core.state import HydrostaticTendencies
 from legoesm.grids.vertical import SigmaCoordinate
 from legoesm.training.scm_rce_metrics import (
-    score_profiles_jax,
+    COLD_POINT_MAX_K,
+    COLD_POINT_MIN_K,
+    MADIAB_MAX_TOL_K,
+    MADIAB_MEAN_TOL_K,
+    PRECIP_NORMALIZATION_MM_DAY,
+    PRECIP_SCORE_WEIGHT,
+    TROP_MAX_Z_KM,
+    TROP_MIN_Z_KM,
+    moist_adiabat_diagnostics_jax,
+    realism_reasons_from_diagnostics,
+    score_profiles_precip_jax,
     weighted_rmse as weighted_rmse_jax,
     weighted_std as weighted_std_jax,
 )
@@ -94,15 +121,42 @@ DEFAULT_REFERENCE_DIR = Path("results/rcemip1_n128_ocean")
 FIXED_SST_K = 300.0
 DEFAULT_DT_S = 600.0
 DEFAULT_SCM_MICROPHYSICS_SUBSTEPS = 30
-SCM_MICROPHYSICS_SUBSTEP_SCHEMES = ("morrison", "thompson")
-DEFAULT_DAYS = 50.0
+SCM_MICROPHYSICS_SUBSTEP_SCHEMES = (
+    "kessler",
+    "sundqvist",
+    "seifert_beheng",
+    "morrison",
+    "thompson",
+    "p3",
+)
+DEFAULT_DAYS = 100.0
 DEFAULT_LAST_REFERENCE_FILES = 5
 DEFAULT_ANALYSIS_DAYS = 5.0
+DEFAULT_RRTMGP_UPDATE_INTERVAL_STEPS = 72
+DEFAULT_SCM_RCE_SURFACE_WIND_M_S = 5.0
+DEFAULT_SCM_RCE_CORIOLIS_S_INV = 2.5e-5
+DEFAULT_SCM_RCE_BL_TOP_M = 0.0
+DEFAULT_SCM_RCE_BL_LAPSE_K_M = 6.5e-3
+DEFAULT_SCM_RCE_BL_MIN_T_K = 285.0
+DEFAULT_SCM_CONVECTION_SUBSTEPS = 10
+SCM_CONVECTION_SUBSTEP_SCHEMES = (
+    "dca",
+    "zhang_mcfarlane",
+    "kain_fritsch",
+    "emanuel",
+    "tiedtke",
+    "bechtold",
+)
 QUICK_DAYS = 0.03
 QUICK_TUNE_EVALS = 2
+RCEMIP_S0_W_M2 = 551.58
+RCEMIP_COS_ZENITH = 0.7425
+CRM_PRECIP_RAW_TO_MM_DAY_THRESHOLD = 1.0e-3
+PRECIP_MAX_SANE_MM_DAY = 25.0
+SCM_PROGNOSTIC_SPECTRAL_GWD_THERMAL_TENDENCY = False
 PROFILE_FLOOR = 1.0e-12
 QV_NEGATIVE_TOL = -1.0e-8
-COND_NEGATIVE_TOL = -1.0e-8
+COND_NEGATIVE_TOL = -1.0e-7
 T_MIN_VALID_K = 150.0
 T_MAX_VALID_K = 330.0
 EQUIL_T_TOL_K = 1.0
@@ -112,8 +166,8 @@ DIMS_3D = ("face", "x", "y", "level")
 
 
 BASELINE_SCHEMES = {
-    "radiation": "gray",
-    "convection": "mass_flux",
+    "radiation": "rrtmgp",
+    "convection": "dca",
     "turbulence": "louis",
     "microphysics": "kessler",
     "gravity_wave_drag": "none",
@@ -164,6 +218,9 @@ class ReferenceProfiles:
     qcond_ref: np.ndarray
     files_used: list[str]
     sfc_cross_check: dict[str, float]
+    precip_ref_mm_day: float = float("nan")
+    precip_files_used: list[str] = field(default_factory=list)
+    precip_unit_note: str = ""
 
 
 @dataclass
@@ -175,10 +232,19 @@ class RunDiagnostics:
     T_rmse: float
     qv_rmse: float
     cloud_rmse: float
+    precip_rmse: float
     score: float
     drift_T_rmse_K: float
     drift_qv_rmse: float
     drift_qcond_rmse: float
+    precip_mm_day: float = float("nan")
+    precip_ref_mm_day: float = float("nan")
+    moist_adiabat_mean_abs_K: float = float("nan")
+    moist_adiabat_max_abs_K: float = float("nan")
+    moist_adiabat_bias_K: float = float("nan")
+    cold_point_T_K: float = float("nan")
+    cold_point_z_km: float = float("nan")
+    realism_status: str = "not_checked"
     T_profile: list[float] = field(default_factory=list)
     qv_profile: list[float] = field(default_factory=list)
     qcond_profile: list[float] = field(default_factory=list)
@@ -241,15 +307,25 @@ def _score_profiles(
     T_profile: np.ndarray,
     qv_profile: np.ndarray,
     qcond_profile: np.ndarray,
-) -> tuple[float, float, float, float]:
-    T_rmse, qv_rmse, cloud_rmse, combined = score_profiles_jax(
+    precip_mm_day: float,
+) -> tuple[float, float, float, float, float]:
+    T_rmse, qv_rmse, cloud_rmse, precip_rmse, combined = score_profiles_precip_jax(
         ref,
         jnp.asarray(T_profile),
         jnp.asarray(qv_profile),
         jnp.asarray(qcond_profile),
+        jnp.asarray(precip_mm_day, dtype=jnp.float64),
         profile_floor=PROFILE_FLOOR,
+        precip_weight=PRECIP_SCORE_WEIGHT,
+        precip_normalization_mm_day=PRECIP_NORMALIZATION_MM_DAY,
     )
-    return float(T_rmse), float(qv_rmse), float(cloud_rmse), float(combined)
+    return (
+        float(T_rmse),
+        float(qv_rmse),
+        float(cloud_rmse),
+        float(precip_rmse),
+        float(combined),
+    )
 
 
 def _reference_files(reference_dir: Path, last_n: int) -> list[Path]:
@@ -288,7 +364,54 @@ def _surface_cross_check(
     }
 
 
-def build_reference_profiles(reference_dir: Path, last_n: int) -> ReferenceProfiles:
+def _reference_surface_precip(
+    reference_dir: Path,
+    analysis_days: float,
+) -> tuple[float, list[str], str]:
+    files = sorted((reference_dir / "snapshots").glob("sfc_*.npz"))
+    if not files:
+        return float("nan"), [], "no surface snapshots found"
+
+    days: list[float] = []
+    for path in files:
+        with np.load(path) as ds:
+            days.append(float(np.asarray(ds["day"])) if "day" in ds.files else float("nan"))
+    finite_days = [d for d in days if math.isfinite(d)]
+    if finite_days:
+        end_day = max(finite_days)
+        start_day = end_day - max(float(analysis_days), 0.0)
+        selected = [
+            path for path, day in zip(files, days)
+            if math.isfinite(day) and day > start_day
+        ]
+    else:
+        selected = files[-max(1, min(len(files), DEFAULT_LAST_REFERENCE_FILES)):]
+    if not selected:
+        selected = [files[-1]]
+
+    means = []
+    for path in selected:
+        with np.load(path) as ds:
+            if "precip" not in ds.files:
+                continue
+            means.append(float(np.nanmean(np.asarray(ds["precip"], dtype=float))))
+    if not means:
+        return float("nan"), [str(p) for p in selected], "surface precip field absent"
+    raw_mean = float(np.mean(means))
+    if abs(raw_mean) < CRM_PRECIP_RAW_TO_MM_DAY_THRESHOLD:
+        precip = raw_mean * SECONDS_PER_DAY
+        note = "CRM precip interpreted as kg m^-2 s^-1 and converted to mm/day"
+    else:
+        precip = raw_mean
+        note = "CRM precip interpreted as already in mm/day"
+    return precip, [str(p) for p in selected], note
+
+
+def build_reference_profiles(
+    reference_dir: Path,
+    last_n: int,
+    precip_analysis_days: float = DEFAULT_ANALYSIS_DAYS,
+) -> ReferenceProfiles:
     files = _reference_files(reference_dir, last_n)
     T_acc = []
     qv_acc = []
@@ -332,6 +455,9 @@ def build_reference_profiles(reference_dir: Path, last_n: int) -> ReferenceProfi
     sfc_cross_check = _surface_cross_check(
         reference_dir, z_m, T_ref, qv_ref, qcond_ref,
     )
+    precip_ref, precip_files, precip_note = _reference_surface_precip(
+        reference_dir, precip_analysis_days,
+    )
     return ReferenceProfiles(
         z_m=z_m,
         sigma_half=sigma_half,
@@ -342,6 +468,9 @@ def build_reference_profiles(reference_dir: Path, last_n: int) -> ReferenceProfi
         qcond_ref=qcond_ref,
         files_used=[str(p) for p in files],
         sfc_cross_check=sfc_cross_check,
+        precip_ref_mm_day=precip_ref,
+        precip_files_used=precip_files,
+        precip_unit_note=precip_note,
     )
 
 
@@ -377,21 +506,72 @@ def wing_initial_profiles(ref: ReferenceProfiles) -> tuple[jax.Array, jax.Array]
 
 def make_physics_config(
     *,
+    radiation: str = BASELINE_SCHEMES["radiation"],
+    radiation_update_interval_steps: int = 1,
     turbulence: str = BASELINE_SCHEMES["turbulence"],
     microphysics: str = BASELINE_SCHEMES["microphysics"],
     gravity_wave_drag: str = BASELINE_SCHEMES["gravity_wave_drag"],
     convection: str = BASELINE_SCHEMES["convection"],
     base: PhysicsConfig | None = None,
+    prognostic_spectral_gwd_thermal_tendency: bool = (
+        SCM_PROGNOSTIC_SPECTRAL_GWD_THERMAL_TENDENCY
+    ),
 ) -> PhysicsConfig:
     cfg = base if base is not None else PhysicsConfig()
+    radiation_update_interval_steps = max(1, int(radiation_update_interval_steps))
+    if radiation == "gray":
+        radiation_cfg = RadiationConfig(
+            scheme="gray",
+            update_interval_steps=radiation_update_interval_steps,
+            gray=GrayRadiationConfig(
+                **{
+                    **cfg.radiation.gray._asdict(),
+                    "S_0": RCEMIP_S0_W_M2,
+                    "perpetual_equinox": True,
+                }
+            ),
+            diurnal_cycle=False,
+            rce_fixed_cos_zenith=RCEMIP_COS_ZENITH,
+        )
+    elif radiation == "rrtmgp":
+        radiation_cfg = RadiationConfig(
+            scheme="rrtmgp",
+            update_interval_steps=radiation_update_interval_steps,
+            diurnal_cycle=False,
+            rrtmgp=RRTMGPConfig(
+                S_0=RCEMIP_S0_W_M2,
+                co2_ppmv=355.0,
+                ch4_ppbv=1700.0,
+                n2o_ppbv=320.0,
+                sfc_albedo_direct=float(
+                    sam_ocean_albedo(RCEMIP_COS_ZENITH, FIXED_SST_K)
+                ),
+                sfc_albedo=0.07,
+                include_clouds=True,
+            ),
+            ozone=OzoneProfileConfig(source="mls"),
+            cloud_scheme="resolved",
+            cloud_config=CloudConfig(scheme="resolved", r_eff_liq=14.0e-6),
+            rce_fixed_cos_zenith=RCEMIP_COS_ZENITH,
+        )
+    else:
+        raise ValueError(
+            f"Unknown campaign radiation scheme: {radiation!r}; "
+            "choose from 'gray' or 'rrtmgp'."
+        )
+    gwd_cfg = cfg.gravity_wave_drag._replace(scheme=gravity_wave_drag)
+    if gravity_wave_drag == "prognostic_spectral":
+        gwd_cfg = gwd_cfg._replace(
+            prognostic_spectral=gwd_cfg.prognostic_spectral._replace(
+                thermal_tendency=prognostic_spectral_gwd_thermal_tendency,
+            )
+        )
     return cfg._replace(
-        radiation=RadiationConfig(scheme="gray", gray=cfg.radiation.gray._replace(
-            perpetual_equinox=True,
-        )),
+        radiation=radiation_cfg,
         convection=cfg.convection._replace(scheme=convection),
         turbulence=cfg.turbulence._replace(scheme=turbulence),
         microphysics=cfg.microphysics._replace(scheme=microphysics),
-        gravity_wave_drag=cfg.gravity_wave_drag._replace(scheme=gravity_wave_drag),
+        gravity_wave_drag=gwd_cfg,
     )
 
 
@@ -414,20 +594,53 @@ def _effective_scm_microphysics_substeps(
     return 1
 
 
+def _effective_scm_convection_substeps(
+    convection_scheme: str,
+    requested_substeps: int,
+) -> int:
+    if convection_scheme in SCM_CONVECTION_SUBSTEP_SCHEMES:
+        return requested_substeps
+    return 1
+
+
+def _without_convection_config(cfg: PhysicsConfig) -> PhysicsConfig:
+    return cfg._replace(convection=ConvectionConfig(scheme="none"))
+
+
+def _convection_only_config(cfg: PhysicsConfig) -> PhysicsConfig:
+    return PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=cfg.convection,
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+
+
 def _config_cache_key(
     cfg: PhysicsConfig,
     days: float,
     dt: float,
     scm_microphysics_substeps: int,
+    scm_convection_substeps: int,
+    surface_wind_m_s: float,
+    coriolis_s_inv: float,
 ) -> str:
-    effective_substeps = _effective_scm_microphysics_substeps(
+    effective_microphysics_substeps = _effective_scm_microphysics_substeps(
         cfg.microphysics.scheme,
         scm_microphysics_substeps,
+    )
+    effective_convection_substeps = _effective_scm_convection_substeps(
+        cfg.convection.scheme,
+        scm_convection_substeps,
     )
     payload = {
         "days": days,
         "dt": dt,
-        "scm_microphysics_substeps": effective_substeps,
+        "scm_microphysics_substeps": effective_microphysics_substeps,
+        "scm_convection_substeps": effective_convection_substeps,
+        "surface_wind_m_s": surface_wind_m_s,
+        "coriolis_s_inv": coriolis_s_inv,
         "config": _to_jsonable(cfg),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -465,6 +678,201 @@ def _qcond_from_tracers(tracers: dict[str, Field], microphysics_scheme: str) -> 
     return qcond
 
 
+def _column_tracer(
+    state,
+    name: str,
+    ncol: int,
+    nlev: int,
+    dtype,
+) -> jax.Array:
+    if state.tracers is not None and name in state.tracers:
+        raw = state.tracers[name]
+        data = raw.data if hasattr(raw, "data") else raw
+        return jnp.maximum(data.reshape(ncol, nlev), 0.0)
+    return jnp.zeros((ncol, nlev), dtype=dtype)
+
+
+def _make_microphysics_precip_diagnostic(cfg: PhysicsConfig, dt: float):
+    scheme_name, micro_fn, scheme_config = get_microphysics_fn(cfg.microphysics)
+    if micro_fn is None:
+        def zero_precip(state, grid, sigma_coord):
+            del grid, sigma_coord
+            return jnp.zeros((), dtype=state.T.data.dtype)
+
+        return zero_precip
+
+    def precip_mm_day(state, grid, sigma_coord):
+        del grid
+        T = state.T.data
+        p_s = state.p_s.data
+        nlev = sigma_coord.n_levels
+        shape_2d = p_s.shape
+        ncol = 1
+        for size in shape_2d:
+            ncol *= int(size)
+        dtype = T.dtype
+        T_col = T.reshape(ncol, nlev)
+        p_full_col = sigma_coord.pressure_at_full(p_s).reshape(ncol, nlev)
+        p_half_col = sigma_coord.pressure_at_half(p_s).reshape(ncol, nlev + 1)
+        q_v = _column_tracer(state, "q_v", ncol, nlev, dtype)
+        rho = _compute_rho(T_col, p_full_col, q_v)
+        dz = _compute_layer_dz(T_col, p_half_col, q_v)
+        hydrometeors = HydrometeorState(
+            q_c=_column_tracer(state, "q_c", ncol, nlev, dtype),
+            q_r=_column_tracer(state, "q_r", ncol, nlev, dtype),
+            q_i=_column_tracer(state, "q_i", ncol, nlev, dtype),
+            q_s=_column_tracer(state, "q_s", ncol, nlev, dtype),
+            q_g=_column_tracer(state, "q_g", ncol, nlev, dtype),
+            N_c=_column_tracer(state, "N_c", ncol, nlev, dtype),
+            N_r=_column_tracer(state, "N_r", ncol, nlev, dtype),
+            N_i=_column_tracer(state, "N_i", ncol, nlev, dtype),
+        )
+        micro_out = micro_fn(
+            T_col,
+            q_v,
+            hydrometeors,
+            p_full_col,
+            p_half_col,
+            rho,
+            dz,
+            dt,
+            scheme_config,
+        )
+        return jnp.maximum(micro_out.precipitation[0], 0.0) * SECONDS_PER_DAY
+
+    precip_mm_day.scheme_name = scheme_name
+    return precip_mm_day
+
+
+def _make_convective_precip_diagnostic(cfg: PhysicsConfig, dt: float):
+    if cfg.convection.scheme == "none":
+        def zero_precip(state, phys_state, grid, sigma_coord):
+            del phys_state, grid, sigma_coord
+            return jnp.zeros((), dtype=state.T.data.dtype)
+
+        return zero_precip
+    conv_physics_fn = make_physics(
+        PhysicsConfig(
+            radiation=RadiationConfig(scheme="none"),
+            convection=cfg.convection,
+            turbulence=TurbulenceConfig(scheme="none"),
+            microphysics=MicrophysicsConfig(scheme="none"),
+            gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+        ),
+        model_type="hydrostatic",
+        dt=dt,
+    )
+
+    def precip_mm_day(state, phys_state, grid, sigma_coord):
+        tend, _phys_out = conv_physics_fn(
+            state, grid, sigma_coord, phys_state=phys_state,
+        )
+        return _convective_precip_rate_from_tendency(state, tend, sigma_coord)
+
+    return precip_mm_day
+
+
+def _convective_precip_rate_from_tendency(
+    state,
+    tend: HydrostaticTendencies,
+    sigma_coord: SigmaCoordinate,
+) -> jax.Array:
+    if tend.tracer_tendencies is None or "q_c" not in tend.tracer_tendencies:
+        return jnp.zeros((), dtype=state.T.data.dtype)
+    dq_c_dt = jnp.maximum(tend.tracer_tendencies["q_c"].data[0, 0, 0], 0.0)
+    column_mass = sigma_coord.dsigma * state.p_s.data[0, 0, 0] / constants.g
+    return jnp.sum(dq_c_dt * column_mass) * SECONDS_PER_DAY
+
+
+def _zero_tendency_like_state(state) -> HydrostaticTendencies:
+    dv_dt = None
+    if state.v is not None:
+        dv_dt = Field(
+            data=jnp.zeros_like(state.v.data),
+            name="dv_dt_zero",
+            dims=state.v.dims,
+            units="m/s^2",
+        )
+    return HydrostaticTendencies(
+        du_dt=Field(
+            data=jnp.zeros_like(state.u.data),
+            name="du_dt_zero",
+            dims=state.u.dims,
+            units="m/s^2",
+        ),
+        dT_dt=Field(
+            data=jnp.zeros_like(state.T.data),
+            name="dT_dt_zero",
+            dims=state.T.dims,
+            units="K/s",
+        ),
+        dp_s_dt=Field(
+            data=jnp.zeros_like(state.p_s.data),
+            name="dp_s_dt_zero",
+            dims=state.p_s.dims,
+            units="Pa/s",
+        ),
+        dphis_dt=Field(
+            data=jnp.zeros_like(state.p_s.data),
+            name="dphis_dt_zero",
+            dims=state.p_s.dims,
+            units="m^2/s^3",
+        ),
+        dv_dt=dv_dt,
+        tracer_tendencies=None,
+    )
+
+
+def _zero_tendency_like(tend: HydrostaticTendencies) -> HydrostaticTendencies:
+    tracer_tendencies = None
+    if tend.tracer_tendencies is not None:
+        tracer_tendencies = {
+            name: field.replace(data=jnp.zeros_like(field.data))
+            for name, field in tend.tracer_tendencies.items()
+        }
+    return tend._replace(
+        du_dt=tend.du_dt.replace(data=jnp.zeros_like(tend.du_dt.data)),
+        dT_dt=tend.dT_dt.replace(data=jnp.zeros_like(tend.dT_dt.data)),
+        dp_s_dt=tend.dp_s_dt.replace(data=jnp.zeros_like(tend.dp_s_dt.data)),
+        dphis_dt=tend.dphis_dt.replace(data=jnp.zeros_like(tend.dphis_dt.data)),
+        dv_dt=(
+            None if tend.dv_dt is None
+            else tend.dv_dt.replace(data=jnp.zeros_like(tend.dv_dt.data))
+        ),
+        tracer_tendencies=tracer_tendencies,
+    )
+
+
+def _radiation_only_config(cfg: PhysicsConfig) -> PhysicsConfig:
+    return PhysicsConfig(
+        radiation=cfg.radiation,
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+
+
+def _without_radiation_config(cfg: PhysicsConfig) -> PhysicsConfig:
+    return cfg._replace(radiation=cfg.radiation._replace(scheme="none"))
+
+
+def _realism_diagnostics(ref: ReferenceProfiles, T_profile, qv_profile) -> dict[str, float]:
+    p_full = jnp.asarray(ref.sigma_full * WING_P_SFC, dtype=jnp.float64)
+    diag_jax = moist_adiabat_diagnostics_jax(
+        T_profile=jnp.asarray(T_profile, dtype=jnp.float64),
+        qv_profile=jnp.asarray(qv_profile, dtype=jnp.float64),
+        p_full=p_full,
+        sigma_full=jnp.asarray(ref.sigma_full, dtype=jnp.float64),
+        z_m=jnp.asarray(ref.z_m, dtype=jnp.float64),
+    )
+    return {
+        key: float(np.asarray(value)) if np.asarray(value).ndim == 0 else value
+        for key, value in diag_jax.items()
+        if key != "moist_adiabat"
+    }
+
+
 def run_scm_rce(
     cfg: PhysicsConfig,
     ref: ReferenceProfiles,
@@ -474,24 +882,54 @@ def run_scm_rce(
     dt: float,
     analysis_days: float,
     require_equilibrium: bool,
+    require_realism: bool,
     equil_T_tol_K: float,
     equil_qv_tol: float,
     equil_qcond_tol: float,
     scm_microphysics_substeps: int = DEFAULT_SCM_MICROPHYSICS_SUBSTEPS,
+    scm_convection_substeps: int = DEFAULT_SCM_CONVECTION_SUBSTEPS,
+    surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
+    coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
 ) -> RunDiagnostics:
     nsteps = max(1, int(round(days * SECONDS_PER_DAY / dt)))
     T0, qv0 = wing_initial_profiles(ref)
-    forcing = SCMForcing(prescribe="T_s", T_s=lambda _t: FIXED_SST_K)
+    wind_profile = jnp.full((len(ref.z_m),), surface_wind_m_s, dtype=jnp.float64)
+    zero_wind_profile = jnp.zeros((len(ref.z_m),), dtype=jnp.float64)
+    forcing = SCMForcing(
+        prescribe="T_s",
+        T_s=lambda _t: FIXED_SST_K,
+        f_c=coriolis_s_inv,
+        u_geo=lambda _t: wind_profile,
+        v_geo=lambda _t: zero_wind_profile,
+    )
+    radiation_interval = max(1, int(cfg.radiation.update_interval_steps))
+    use_cached_radiation = (
+        cfg.radiation.scheme != "none" and radiation_interval > 1
+    )
+    scm_cfg = _without_radiation_config(cfg) if use_cached_radiation else cfg
     effective_microphysics_substeps = _effective_scm_microphysics_substeps(
         cfg.microphysics.scheme,
         scm_microphysics_substeps,
     )
+    effective_convection_substeps = _effective_scm_convection_substeps(
+        cfg.convection.scheme,
+        scm_convection_substeps,
+    )
+    use_split_convection = (
+        cfg.convection.scheme != "none" and effective_convection_substeps > 1
+    )
     scm = SingleColumnModel.create(
-        physics_config=cfg,
+        physics_config=(
+            _without_convection_config(scm_cfg)
+            if use_split_convection
+            else scm_cfg
+        ),
         nlev=len(ref.z_m),
         dt=dt,
         T_profile=T0,
         q_v_profile=qv0,
+        u=surface_wind_m_s,
+        v=0.0,
         p_s=WING_P_SFC,
         latitude_deg=0.0,
         time_integrator="forward_euler",
@@ -501,19 +939,49 @@ def run_scm_rce(
     )
     scm.sigma_coord = make_sigma_coordinate_from_reference(ref)
     _preseed_column_tracers(scm, cfg.microphysics.scheme)
+    rad_physics_fn = None
+    if use_cached_radiation:
+        rad_physics_fn = make_physics(
+            _radiation_only_config(cfg),
+            model_type="hydrostatic",
+            dt=dt,
+        )
+    conv_physics_fn = None
+    if use_split_convection:
+        conv_physics_fn = make_physics(
+            _convection_only_config(cfg),
+            model_type="hydrostatic",
+            dt=dt / effective_convection_substeps,
+        )
 
     sst_col = jnp.asarray([FIXED_SST_K], dtype=jnp.float64)
     forcing_dict = {"T_sfc": sst_col}
-    step_fn = scm._step_fn
+    z_profile = jnp.asarray(ref.z_m, dtype=jnp.float64)
+    z_above_lowest = jnp.maximum(z_profile - z_profile[-1], 0.0)
+    bl_mask = z_above_lowest <= DEFAULT_SCM_RCE_BL_TOP_M
     physics_fn = scm.physics_fn
     grid = scm.grid
     sigma_coord = scm.sigma_coord
     dt_arr = jnp.asarray(dt, dtype=jnp.float64)
     microphysics_scheme = cfg.microphysics.scheme
+    precip_diagnostic = _make_microphysics_precip_diagnostic(cfg, dt)
+    convective_precip_diagnostic = _make_convective_precip_diagnostic(cfg, dt)
 
-    def fixed_sst_tendency(state, phys_state, _t):
+    def apply_surface_sst_anchor(state):
+        T_bl = jnp.asarray(FIXED_SST_K, dtype=state.T.data.dtype) - (
+            DEFAULT_SCM_RCE_BL_LAPSE_K_M
+            * z_above_lowest.astype(state.T.data.dtype)
+        )
+        T_bl = jnp.maximum(
+            T_bl, jnp.asarray(DEFAULT_SCM_RCE_BL_MIN_T_K, dtype=state.T.data.dtype),
+        )
+        mask = bl_mask.reshape(1, 1, 1, -1)
+        T_data = jnp.where(mask, T_bl.reshape(1, 1, 1, -1), state.T.data)
+        return state._replace(T=state.T.replace(data=T_data))
+
+    def _call_physics_with_fixed_sst(fn, state, phys_state):
         phys_state = phys_state._replace(surface_T_sfc_override=sst_col)
-        tend, phys_out = physics_fn(
+        tend, phys_out = fn(
             state,
             grid,
             sigma_coord,
@@ -526,35 +994,167 @@ def run_scm_rce(
             phys_out = phys_out._replace(surface_T_sfc_override=sst_col)
         return tend, phys_out
 
+    def fixed_sst_tendency(state, phys_state, _t):
+        return _call_physics_with_fixed_sst(physics_fn, state, phys_state)
+
+    def apply_convection_substeps(state, phys_state):
+        if not use_split_convection:
+            return state, phys_state, jnp.zeros((), dtype=state.T.data.dtype)
+        sub_dt = dt / effective_convection_substeps
+        sub_weight = jnp.asarray(1.0 / effective_convection_substeps, dtype=state.T.data.dtype)
+
+        def substep(carry, _i):
+            sub_state, sub_phys, precip_accum = carry
+            conv_tend, conv_phys = conv_physics_fn(
+                sub_state,
+                grid,
+                sigma_coord,
+                phys_state=sub_phys,
+            )
+            if conv_phys is None:
+                conv_phys = sub_phys
+            precip_rate = _convective_precip_rate_from_tendency(
+                sub_state, conv_tend, sigma_coord,
+            )
+            new_sub_state = apply_tendencies(sub_state, conv_tend, sub_dt)
+            return (
+                new_sub_state,
+                conv_phys,
+                precip_accum + sub_weight * precip_rate,
+            ), None
+
+        (new_state, new_phys, precip_rate), _ = lax.scan(
+            substep,
+            (state, phys_state, jnp.zeros((), dtype=state.T.data.dtype)),
+            jnp.arange(effective_convection_substeps, dtype=jnp.int32),
+        )
+        return new_state, new_phys, precip_rate
+
+    def apply_split_microphysics_step(state, tend):
+        if effective_microphysics_substeps <= 1:
+            return (
+                apply_tendencies(state, tend, dt),
+                precip_diagnostic(state, grid, sigma_coord),
+            )
+        sub_dt = dt / effective_microphysics_substeps
+        microphysics_fn = scm._microphysics_fn
+        sub_weight = jnp.asarray(
+            1.0 / effective_microphysics_substeps,
+            dtype=state.T.data.dtype,
+        )
+
+        def substep(sub_state, _i):
+            precip_rate = precip_diagnostic(sub_state, grid, sigma_coord)
+            micro_tend = microphysics_fn(sub_state, grid, sigma_coord)
+            new_sub_state = apply_tendencies(
+                sub_state, add_tendencies(tend, micro_tend), sub_dt,
+            )
+            return new_sub_state, sub_weight * precip_rate
+
+        new_state, precip_rates = lax.scan(
+            substep,
+            state,
+            jnp.arange(effective_microphysics_substeps, dtype=jnp.int32),
+        )
+        return new_state, jnp.sum(precip_rates)
+
     def body(carry, k):
         state, phys_state = carry
         t = k.astype(jnp.float64) * dt_arr
-        new_state, new_phys = step_fn(
-            state, phys_state, fixed_sst_tendency, dt, t,
+        base_tend, new_phys = fixed_sst_tendency(state, phys_state, t)
+        new_state, micro_precip = apply_split_microphysics_step(
+            state, base_tend,
         )
+        new_state, new_phys, convective_precip = apply_convection_substeps(
+            new_state, new_phys,
+        )
+        new_state = apply_surface_sst_anchor(new_state)
         qv = new_state.tracers["q_v"].data[0, 0, 0]
         qcond = _qcond_from_tracers(
             new_state.tracers, microphysics_scheme,
         )[0, 0, 0]
-        out = (new_state.T.data[0, 0, 0], qv, qcond)
+        precip = micro_precip + (
+            convective_precip
+            if use_split_convection
+            else convective_precip_diagnostic(
+                new_state, new_phys, grid, sigma_coord,
+            )
+        )
+        out = (new_state.T.data[0, 0, 0], qv, qcond, precip)
         return (new_state, new_phys), out
 
-    @jax.jit
-    def driver(state0, phys0):
-        (state_f, phys_f), history = lax.scan(
-            body, (state0, phys0), jnp.arange(nsteps),
+    def cached_radiation_body(carry, k):
+        state, phys_state, rad_cache = carry
+        t = k.astype(jnp.float64) * dt_arr
+        nonrad_tend, new_phys = fixed_sst_tendency(state, phys_state, t)
+
+        def refresh(_unused):
+            rad_tend, _rad_phys = _call_physics_with_fixed_sst(
+                rad_physics_fn, state, phys_state,
+            )
+            return rad_tend
+
+        rad_tend = lax.cond(
+            jnp.mod(k, radiation_interval) == 0,
+            refresh,
+            lambda _unused: rad_cache,
+            operand=None,
         )
-        return state_f, phys_f, history
+        new_state, micro_precip = apply_split_microphysics_step(
+            state, add_tendencies(nonrad_tend, rad_tend),
+        )
+        new_state, new_phys, convective_precip = apply_convection_substeps(
+            new_state, new_phys,
+        )
+        new_state = apply_surface_sst_anchor(new_state)
+        qv = new_state.tracers["q_v"].data[0, 0, 0]
+        qcond = _qcond_from_tracers(
+            new_state.tracers, microphysics_scheme,
+        )[0, 0, 0]
+        precip = micro_precip + (
+            convective_precip
+            if use_split_convection
+            else convective_precip_diagnostic(
+                new_state, new_phys, grid, sigma_coord,
+            )
+        )
+        out = (new_state.T.data[0, 0, 0], qv, qcond, precip)
+        return (new_state, new_phys, rad_tend), out
+
+    if use_cached_radiation:
+        rad_sample, _ = _call_physics_with_fixed_sst(
+            rad_physics_fn, scm.state, scm.phys_state,
+        )
+        rad_tend0 = _zero_tendency_like(rad_sample)
+
+        @jax.jit
+        def driver(state0, phys0):
+            (state_f, phys_f, _rad_f), history = lax.scan(
+                cached_radiation_body,
+                (state0, phys0, rad_tend0),
+                jnp.arange(nsteps),
+            )
+            return state_f, phys_f, history
+    else:
+        @jax.jit
+        def driver(state0, phys0):
+            (state_f, phys_f), history = lax.scan(
+                body, (state0, phys0), jnp.arange(nsteps),
+            )
+            return state_f, phys_f, history
 
     try:
         final_state, _final_phys, history = driver(scm.state, scm.phys_state)
         del final_state
-        T_hist, qv_hist, qcond_hist = (np.asarray(x, dtype=float) for x in history)
+        T_hist, qv_hist, qcond_hist, precip_hist = (
+            np.asarray(x, dtype=float) for x in history
+        )
         last_steps = max(1, int(round(analysis_days * SECONDS_PER_DAY / dt)))
         last_steps = min(last_steps, nsteps)
         T_profile = T_hist[-last_steps:].mean(axis=0)
         qv_profile = qv_hist[-last_steps:].mean(axis=0)
         qcond_profile = np.maximum(qcond_hist[-last_steps:].mean(axis=0), 0.0)
+        precip_mm_day = float(np.maximum(np.mean(precip_hist[-last_steps:]), 0.0))
 
         prev_end = nsteps - last_steps
         prev_start = max(0, prev_end - last_steps)
@@ -570,6 +1170,7 @@ def run_scm_rce(
         drift_T = _weighted_rmse(T_profile - T_prev, ref.mass_weights)
         drift_qv = _weighted_rmse(qv_profile - qv_prev, ref.mass_weights)
         drift_qcond = _weighted_rmse(qcond_profile - qcond_prev, ref.mass_weights)
+        realism = _realism_diagnostics(ref, T_profile, qv_profile)
         reasons = []
         status = "ok"
         finite = (
@@ -590,6 +1191,16 @@ def run_scm_rce(
             reasons.append(
                 f"negative condensate (min={float(np.min(qcond_hist[-last_steps:])):.3g})"
             )
+        if not math.isfinite(precip_mm_day) or precip_mm_day < 0.0:
+            reasons.append(f"invalid precipitation ({precip_mm_day:.3g} mm/day)")
+        if (
+            (require_equilibrium or require_realism)
+            and math.isfinite(precip_mm_day)
+            and precip_mm_day > PRECIP_MAX_SANE_MM_DAY
+        ):
+            reasons.append(
+                f"precipitation too large ({precip_mm_day:.3g} mm/day)"
+            )
         if require_equilibrium and (
             drift_T > equil_T_tol_K
             or drift_qv > equil_qv_tol
@@ -600,14 +1211,27 @@ def run_scm_rce(
                 f"(drift_T={drift_T:.3g} K, drift_qv={drift_qv:.3g}, "
                 f"drift_qcond={drift_qcond:.3g})"
             )
+        realism_reasons = []
+        if require_realism and finite:
+            realism_reasons = realism_reasons_from_diagnostics(
+                realism,
+                mean_tol_K=MADIAB_MEAN_TOL_K,
+                max_tol_K=MADIAB_MAX_TOL_K,
+                cold_point_min_K=COLD_POINT_MIN_K,
+                cold_point_max_K=COLD_POINT_MAX_K,
+                trop_min_z_km=TROP_MIN_Z_KM,
+                trop_max_z_km=TROP_MAX_Z_KM,
+            )
+            reasons.extend(realism_reasons)
+        if finite:
+            T_rmse, qv_rmse, cloud_rmse, precip_rmse, score = _score_profiles(
+                ref, T_profile, qv_profile, qcond_profile, precip_mm_day,
+            )
+        else:
+            score = float("inf")
+            T_rmse = qv_rmse = cloud_rmse = precip_rmse = float("inf")
         if reasons:
             status = "failed"
-            score = float("inf")
-            T_rmse = qv_rmse = cloud_rmse = float("inf")
-        else:
-            T_rmse, qv_rmse, cloud_rmse, score = _score_profiles(
-                ref, T_profile, qv_profile, qcond_profile,
-            )
         return RunDiagnostics(
             label=label,
             config=_config_scheme_dict(cfg),
@@ -616,10 +1240,22 @@ def run_scm_rce(
             T_rmse=float(T_rmse),
             qv_rmse=float(qv_rmse),
             cloud_rmse=float(cloud_rmse),
+            precip_rmse=float(precip_rmse),
             score=float(score),
             drift_T_rmse_K=float(drift_T),
             drift_qv_rmse=float(drift_qv),
             drift_qcond_rmse=float(drift_qcond),
+            precip_mm_day=precip_mm_day,
+            precip_ref_mm_day=float(ref.precip_ref_mm_day),
+            moist_adiabat_mean_abs_K=float(realism.get("mean_abs_K", float("nan"))),
+            moist_adiabat_max_abs_K=float(realism.get("max_abs_K", float("nan"))),
+            moist_adiabat_bias_K=float(realism.get("bias_K", float("nan"))),
+            cold_point_T_K=float(realism.get("cold_point_T_K", float("nan"))),
+            cold_point_z_km=float(realism.get("cold_point_z_km", float("nan"))),
+            realism_status=(
+                "not_checked" if not require_realism
+                else ("failed" if realism_reasons else "ok")
+            ),
             T_profile=T_profile.tolist(),
             qv_profile=qv_profile.tolist(),
             qcond_profile=qcond_profile.tolist(),
@@ -633,10 +1269,12 @@ def run_scm_rce(
             T_rmse=float("inf"),
             qv_rmse=float("inf"),
             cloud_rmse=float("inf"),
+            precip_rmse=float("inf"),
             score=float("inf"),
             drift_T_rmse_K=float("inf"),
             drift_qv_rmse=float("inf"),
             drift_qcond_rmse=float("inf"),
+            precip_ref_mm_day=float(ref.precip_ref_mm_day),
         )
 
 
@@ -650,12 +1288,24 @@ def run_cached(
     dt: float,
     analysis_days: float,
     require_equilibrium: bool,
+    require_realism: bool,
     equil_T_tol_K: float,
     equil_qv_tol: float,
     equil_qcond_tol: float,
     scm_microphysics_substeps: int = DEFAULT_SCM_MICROPHYSICS_SUBSTEPS,
+    scm_convection_substeps: int = DEFAULT_SCM_CONVECTION_SUBSTEPS,
+    surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
+    coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
 ) -> RunDiagnostics:
-    key = _config_cache_key(cfg, days, dt, scm_microphysics_substeps)
+    key = _config_cache_key(
+        cfg,
+        days,
+        dt,
+        scm_microphysics_substeps,
+        scm_convection_substeps,
+        surface_wind_m_s,
+        coriolis_s_inv,
+    )
     if key not in cache:
         cache[key] = run_scm_rce(
             cfg,
@@ -664,11 +1314,15 @@ def run_cached(
             days=days,
             dt=dt,
             scm_microphysics_substeps=scm_microphysics_substeps,
+            scm_convection_substeps=scm_convection_substeps,
             analysis_days=analysis_days,
             require_equilibrium=require_equilibrium,
+            require_realism=require_realism,
             equil_T_tol_K=equil_T_tol_K,
             equil_qv_tol=equil_qv_tol,
             equil_qcond_tol=equil_qcond_tol,
+            surface_wind_m_s=surface_wind_m_s,
+            coriolis_s_inv=coriolis_s_inv,
         )
     cached = cache[key]
     return RunDiagnostics(
@@ -706,9 +1360,13 @@ def _write_ranking_csv(path: Path, category: str, results: list[RunDiagnostics])
         writer = csv.DictWriter(
             f,
             fieldnames=[
-                "category", "scheme", "T_RMSE", "qv_RMSE", "cloud_RMSE",
-                "combined_score", "status", "reason", "drift_T_rmse_K",
+                "category", "scheme", "radiation", "T_RMSE", "qv_RMSE",
+                "cloud_RMSE", "precip_RMSE", "precip_mm_day",
+                "crm_precip_mm_day", "combined_score", "status",
+                "realism_status", "reason", "drift_T_rmse_K",
                 "drift_qv_rmse", "drift_qcond_rmse",
+                "moist_adiabat_mean_abs_K", "moist_adiabat_max_abs_K",
+                "cold_point_T_K", "cold_point_z_km",
             ],
         )
         writer.writeheader()
@@ -717,15 +1375,24 @@ def _write_ranking_csv(path: Path, category: str, results: list[RunDiagnostics])
                 {
                     "category": category,
                     "scheme": r.config[CATEGORY_CONFIG_FIELD[category]],
+                    "radiation": r.config["radiation"],
                     "T_RMSE": r.T_rmse,
                     "qv_RMSE": r.qv_rmse,
                     "cloud_RMSE": r.cloud_rmse,
+                    "precip_RMSE": r.precip_rmse,
+                    "precip_mm_day": r.precip_mm_day,
+                    "crm_precip_mm_day": r.precip_ref_mm_day,
                     "combined_score": r.score,
                     "status": r.status,
+                    "realism_status": r.realism_status,
                     "reason": r.reason,
                     "drift_T_rmse_K": r.drift_T_rmse_K,
                     "drift_qv_rmse": r.drift_qv_rmse,
                     "drift_qcond_rmse": r.drift_qcond_rmse,
+                    "moist_adiabat_mean_abs_K": r.moist_adiabat_mean_abs_K,
+                    "moist_adiabat_max_abs_K": r.moist_adiabat_max_abs_K,
+                    "cold_point_T_K": r.cold_point_T_K,
+                    "cold_point_z_km": r.cold_point_z_km,
                 }
             )
 
@@ -766,7 +1433,7 @@ def _plot_profiles(path: Path, ref: ReferenceProfiles, run: RunDiagnostics, titl
         print(f"[plot] skipped profile plot {path}: {exc}")
         return
     z_km = ref.z_m / M_PER_KM
-    fig, axes = plt.subplots(1, 3, figsize=(11.5, 5.2), sharey=True)
+    fig, axes = plt.subplots(1, 4, figsize=(14.5, 5.2), sharey=False)
     panels = [
         ("T", ref.T_ref, np.asarray(run.T_profile), "K"),
         ("qv", ref.qv_ref * MSE_KJ_TO_J, np.asarray(run.qv_profile) * MSE_KJ_TO_J, "g/kg"),
@@ -777,14 +1444,25 @@ def _plot_profiles(path: Path, ref: ReferenceProfiles, run: RunDiagnostics, titl
             "g/kg",
         ),
     ]
-    for ax, (name, ref_prof, scm_prof, units) in zip(axes, panels):
+    for ax, (name, ref_prof, scm_prof, units) in zip(axes[:3], panels):
         ax.plot(ref_prof, z_km, color="#1f4e79", lw=2.0, label="CRM")
         ax.plot(scm_prof, z_km, color="#d95f02", lw=2.0, label="SCM")
         ax.set_xlabel(f"{name} [{units}]")
+        ax.set_ylim(0.0, float(np.nanmax(z_km)))
         ax.grid(alpha=0.25)
     axes[0].set_ylabel("z [km]")
-    axes[0].invert_yaxis()
     axes[0].legend(loc="best")
+    precip_ax = axes[3]
+    precip_ax.bar(
+        [0, 1],
+        [ref.precip_ref_mm_day, run.precip_mm_day],
+        color=["#1f4e79", "#d95f02"],
+        width=0.6,
+    )
+    precip_ax.set_xticks([0, 1])
+    precip_ax.set_xticklabels(["CRM", "SCM"])
+    precip_ax.set_ylabel("surface precip [mm/day]")
+    precip_ax.grid(axis="y", alpha=0.25)
     fig.suptitle(title)
     fig.tight_layout()
     fig.savefig(path, dpi=170)
@@ -866,12 +1544,16 @@ def tune_category_winner(
     dt: float,
     analysis_days: float,
     require_equilibrium: bool,
+    require_realism: bool,
     tune_evals: int,
     seed: int,
     equil_T_tol_K: float,
     equil_qv_tol: float,
     equil_qcond_tol: float,
     scm_microphysics_substeps: int = DEFAULT_SCM_MICROPHYSICS_SUBSTEPS,
+    scm_convection_substeps: int = DEFAULT_SCM_CONVECTION_SUBSTEPS,
+    surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
+    coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
 ) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics]:
     _component, scheme, subcfg = _active_subconfig(base_cfg, category)
     scheme_key = _scheme_key_for_subconfig(subcfg)
@@ -884,10 +1566,14 @@ def tune_category_winner(
         dt=dt,
         analysis_days=analysis_days,
         require_equilibrium=require_equilibrium,
+        require_realism=require_realism,
         equil_T_tol_K=equil_T_tol_K,
         equil_qv_tol=equil_qv_tol,
         equil_qcond_tol=equil_qcond_tol,
         scm_microphysics_substeps=scm_microphysics_substeps,
+        scm_convection_substeps=scm_convection_substeps,
+        surface_wind_m_s=surface_wind_m_s,
+        coriolis_s_inv=coriolis_s_inv,
     )
     if scheme_key is None or subcfg is None:
         return base_cfg, [], default_run
@@ -932,10 +1618,14 @@ def tune_category_winner(
             dt=dt,
             analysis_days=analysis_days,
             require_equilibrium=require_equilibrium,
+            require_realism=require_realism,
             equil_T_tol_K=equil_T_tol_K,
             equil_qv_tol=equil_qv_tol,
             equil_qcond_tol=equil_qcond_tol,
             scm_microphysics_substeps=scm_microphysics_substeps,
+            scm_convection_substeps=scm_convection_substeps,
+            surface_wind_m_s=surface_wind_m_s,
+            coriolis_s_inv=coriolis_s_inv,
         )
         if trial_run.status == "ok" and trial_run.score < best_run.score:
             best_cfg = trial_cfg
@@ -1026,11 +1716,30 @@ def _write_summary(
         "and a JIT-compatible fixed-SST scan that feeds the same 300 K boundary "
         "through traced radiation forcing plus `PhysicsState.surface_T_sfc_override` "
         "for turbulence.",
-        f"SCM fixed SST: {FIXED_SST_K:.1f} K; dt: {args.dt:.1f} s; "
+        f"SCM fixed SST: {FIXED_SST_K:.1f} K; radiation: `{args.radiation}`; "
+        f"radiation refresh: every {args.radiation_update_interval_steps} "
+        f"steps; dt: {args.dt:.1f} s; background surface wind: "
+        f"{args.surface_wind_m_s:.2f} m/s with f={args.coriolis_s_inv:.2e} s^-1; "
+        "lowest-level air temperature is anchored to the fixed SST "
+        "after each SCM step while water vapor remains prognostic; "
         "SCM microphysics substeps for "
         f"{', '.join(SCM_MICROPHYSICS_SUBSTEP_SCHEMES)}: "
         f"{args.scm_microphysics_substeps}; "
+        "SCM convection substeps for "
+        f"{', '.join(SCM_CONVECTION_SUBSTEP_SCHEMES)}: "
+        f"{args.scm_convection_substeps}; "
         f"days: {args.days:.3g}; analysis window: {args.analysis_days:.3g} d.",
+        f"CRM equilibrium surface precipitation: {ref.precip_ref_mm_day:.3f} mm/day "
+        f"({ref.precip_unit_note}; {len(ref.precip_files_used)} surface files).",
+        "Combined score is the normalized T/qv/cloud profile RMSE plus a "
+        f"surface-precipitation term normalized by {PRECIP_NORMALIZATION_MM_DAY:g} "
+        f"mm/day with weight {PRECIP_SCORE_WEIGHT:g}.",
+        "Realism gate: finite bounded profiles, q_v and condensate non-negative, "
+        "small equilibrium drift, free-tropospheric temperature within "
+        f"{MADIAB_MEAN_TOL_K:g} K mean and {MADIAB_MAX_TOL_K:g} K max of the "
+        "surface-anchored moist pseudo-adiabat, and a cold point in "
+        f"[{COLD_POINT_MIN_K:g}, {COLD_POINT_MAX_K:g}] K at "
+        f"[{TROP_MIN_Z_KM:g}, {TROP_MAX_Z_KM:g}] km.",
         "",
         "Recommended defaults live in the atmosphere physics `*Config` "
         "NamedTuple defaults and the combined `PhysicsConfig`; this campaign "
@@ -1039,20 +1748,36 @@ def _write_summary(
         "",
         "## Rankings",
     ]
+    if args.radiation == "rrtmgp":
+        lines += [
+            "",
+            "> Caveat: the bundled CRM reference under "
+            "`results/rcemip1_n128_ocean` was generated with gray radiation. "
+            "These RRTMGP-SCM results are the physical SCM default and are "
+            "realism-gated, but the stratospheric profile comparison is not "
+            "strictly apples-to-apples until a matching RRTMGP CRM truth run "
+            "is generated.",
+            "",
+        ]
     for category, rows in rankings.items():
         heading = "convection (bonus)" if category == "convection" else category
         lines.append(f"### {heading}")
-        lines.append("| rank | scheme | score | T | qv | cloud | status | reason |")
-        lines.append("|---:|---|---:|---:|---:|---:|---|---|")
+        lines.append(
+            "| rank | scheme | score | T | qv | cloud | precip | SCM P | CRM P | "
+            "realism | status | reason |"
+        )
+        lines.append("|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|")
         for i, r in enumerate(rows, start=1):
             scheme = r.config[CATEGORY_CONFIG_FIELD[category]]
             score = "inf" if not math.isfinite(r.score) else f"{r.score:.6g}"
             T = "inf" if not math.isfinite(r.T_rmse) else f"{r.T_rmse:.6g}"
             qv = "inf" if not math.isfinite(r.qv_rmse) else f"{r.qv_rmse:.6g}"
             cloud = "inf" if not math.isfinite(r.cloud_rmse) else f"{r.cloud_rmse:.6g}"
+            precip = "inf" if not math.isfinite(r.precip_rmse) else f"{r.precip_rmse:.6g}"
             lines.append(
                 f"| {i} | {scheme} | {score} | {T} | {qv} | {cloud} | "
-                f"{r.status} | {r.reason.replace('|', '/')} |"
+                f"{precip} | {r.precip_mm_day:.3g} | {r.precip_ref_mm_day:.3g} | "
+                f"{r.realism_status} | {r.status} | {r.reason.replace('|', '/')} |"
             )
         lines.append("")
     lines += [
@@ -1106,12 +1831,63 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Fixed SCM-only microphysics substeps per outer step. Default "
             f"{DEFAULT_SCM_MICROPHYSICS_SUBSTEPS} gives a 20 s "
-            "microphysics step at --dt 600 for Morrison/Thompson, matching "
-            "the plane CRM coupling while leaving non-stiff schemes on the "
-            "original single-step SCM coupling."
+            "microphysics step at --dt 600 for active campaign microphysics "
+            "schemes and lets the campaign record actual pre-update "
+            "surface-precipitation rates."
+        ),
+    )
+    parser.add_argument(
+        "--scm-convection-substeps",
+        type=int,
+        default=DEFAULT_SCM_CONVECTION_SUBSTEPS,
+        help=(
+            "Fixed SCM-only convection substeps per outer step for "
+            f"{', '.join(SCM_CONVECTION_SUBSTEP_SCHEMES)}. Default "
+            f"{DEFAULT_SCM_CONVECTION_SUBSTEPS} gives a 60 s convective "
+            "adjustment step at --dt 600 without changing the plane/CRM path."
         ),
     )
     parser.add_argument("--analysis-days", type=float, default=DEFAULT_ANALYSIS_DAYS)
+    parser.add_argument(
+        "--surface-wind-m-s",
+        type=float,
+        default=DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
+        help=(
+            "SCM RCE background near-surface wind used to drive ocean "
+            "bulk evaporation. Default 5 m/s is a tropical trade-wind scale."
+        ),
+    )
+    parser.add_argument(
+        "--coriolis-s-inv",
+        type=float,
+        default=DEFAULT_SCM_RCE_CORIOLIS_S_INV,
+        help=(
+            "Weak geostrophic-relaxation Coriolis parameter used with "
+            "--surface-wind-m-s so surface drag does not spin the column "
+            "down to a zero-evaporation state."
+        ),
+    )
+    parser.add_argument(
+        "--radiation",
+        choices=["rrtmgp", "gray"],
+        default=BASELINE_SCHEMES["radiation"],
+        help=(
+            "SCM RCE radiation. Default rrtmgp uses the RCEMIP fixed-sun, "
+            "MLS-ozone setup; gray is kept for the existing gray-CRM comparison "
+            "and fast smoke runs."
+        ),
+    )
+    parser.add_argument(
+        "--radiation-update-interval-steps",
+        type=int,
+        default=None,
+        help=(
+            "SCM-only radiation refresh cadence. Default is "
+            f"{DEFAULT_RRTMGP_UPDATE_INTERVAL_STEPS} steps for RRTMGP "
+            "and 1 for gray. Cached radiation tendency is applied between "
+            "refreshes; plane/CRM coupling is unchanged."
+        ),
+    )
     parser.add_argument("--last-reference-files", type=int, default=DEFAULT_LAST_REFERENCE_FILES)
     parser.add_argument(
         "--categories",
@@ -1127,23 +1903,56 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--equil-T-tol-K", type=float, default=EQUIL_T_TOL_K)
     parser.add_argument("--equil-qv-tol", type=float, default=EQUIL_QV_TOL)
     parser.add_argument("--equil-qcond-tol", type=float, default=EQUIL_QCOND_TOL)
+    parser.add_argument(
+        "--prognostic-spectral-gwd-thermal-tendency",
+        action="store_true",
+        default=SCM_PROGNOSTIC_SPECTRAL_GWD_THERMAL_TENDENCY,
+        help=(
+            "Allow the unvalidated prognostic-spectral GWD KE-to-thermal "
+            "tendency in SCM RCE. Default false keeps the SCM comparison "
+            "momentum-only for this opt-in GWD scheme."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.scm_microphysics_substeps < 1:
         raise SystemExit("--scm-microphysics-substeps must be a positive integer")
-
+    if args.scm_convection_substeps < 1:
+        raise SystemExit("--scm-convection-substeps must be a positive integer")
+    if args.surface_wind_m_s < 0.0:
+        raise SystemExit("--surface-wind-m-s must be non-negative")
     if args.quick:
         args.days = min(args.days, QUICK_DAYS)
         args.analysis_days = min(args.analysis_days, args.days)
         args.tune_evals = min(args.tune_evals, QUICK_TUNE_EVALS)
+        args.radiation = "gray"
+    if args.radiation_update_interval_steps is None:
+        args.radiation_update_interval_steps = (
+            DEFAULT_RRTMGP_UPDATE_INTERVAL_STEPS
+            if args.radiation == "rrtmgp"
+            else 1
+        )
+    if args.radiation_update_interval_steps < 1:
+        raise SystemExit("--radiation-update-interval-steps must be positive")
     require_equilibrium = not args.quick
+    require_realism = not args.quick
     args.outdir.mkdir(parents=True, exist_ok=True)
 
-    ref = build_reference_profiles(args.reference_dir, args.last_reference_files)
+    ref = build_reference_profiles(
+        args.reference_dir,
+        args.last_reference_files,
+        precip_analysis_days=args.analysis_days,
+    )
     categories = _parse_categories(args.categories, args.include_convection)
     sweeps = _scheme_sweeps_for(args, categories)
     run_cache: dict[str, RunDiagnostics] = {}
 
-    baseline_cfg = make_physics_config()
+    baseline_cfg = make_physics_config(
+        radiation=args.radiation,
+        radiation_update_interval_steps=args.radiation_update_interval_steps,
+        prognostic_spectral_gwd_thermal_tendency=(
+            args.prognostic_spectral_gwd_thermal_tendency
+        ),
+    )
     baseline = run_cached(
         run_cache,
         baseline_cfg,
@@ -1153,10 +1962,14 @@ def main(argv: list[str] | None = None) -> int:
         dt=args.dt,
         analysis_days=args.analysis_days,
         require_equilibrium=require_equilibrium,
+        require_realism=require_realism,
         equil_T_tol_K=args.equil_T_tol_K,
         equil_qv_tol=args.equil_qv_tol,
         equil_qcond_tol=args.equil_qcond_tol,
         scm_microphysics_substeps=args.scm_microphysics_substeps,
+        scm_convection_substeps=args.scm_convection_substeps,
+        surface_wind_m_s=args.surface_wind_m_s,
+        coriolis_s_inv=args.coriolis_s_inv,
     )
     print(f"[baseline] {baseline.status} score={baseline.score:.6g} {baseline.reason}")
 
@@ -1168,10 +1981,15 @@ def main(argv: list[str] | None = None) -> int:
             scheme_kwargs = dict(BASELINE_SCHEMES)
             scheme_kwargs[category] = scheme
             cfg = make_physics_config(
+                radiation=args.radiation,
+                radiation_update_interval_steps=args.radiation_update_interval_steps,
                 turbulence=scheme_kwargs["turbulence"],
                 microphysics=scheme_kwargs["microphysics"],
                 gravity_wave_drag=scheme_kwargs["gravity_wave_drag"],
                 convection=scheme_kwargs["convection"],
+                prognostic_spectral_gwd_thermal_tendency=(
+                    args.prognostic_spectral_gwd_thermal_tendency
+                ),
             )
             print(f"[run] {category}={scheme}")
             rows.append(
@@ -1184,10 +2002,14 @@ def main(argv: list[str] | None = None) -> int:
                     dt=args.dt,
                     analysis_days=args.analysis_days,
                     require_equilibrium=require_equilibrium,
+                    require_realism=require_realism,
                     equil_T_tol_K=args.equil_T_tol_K,
                     equil_qv_tol=args.equil_qv_tol,
                     equil_qcond_tol=args.equil_qcond_tol,
                     scm_microphysics_substeps=args.scm_microphysics_substeps,
+                    scm_convection_substeps=args.scm_convection_substeps,
+                    surface_wind_m_s=args.surface_wind_m_s,
+                    coriolis_s_inv=args.coriolis_s_inv,
                 )
             )
             print(
@@ -1205,10 +2027,15 @@ def main(argv: list[str] | None = None) -> int:
     best_kwargs = dict(BASELINE_SCHEMES)
     best_kwargs.update(winners)
     best_cfg = make_physics_config(
+        radiation=args.radiation,
+        radiation_update_interval_steps=args.radiation_update_interval_steps,
         turbulence=best_kwargs["turbulence"],
         microphysics=best_kwargs["microphysics"],
         gravity_wave_drag=best_kwargs["gravity_wave_drag"],
         convection=best_kwargs["convection"],
+        prognostic_spectral_gwd_thermal_tendency=(
+            args.prognostic_spectral_gwd_thermal_tendency
+        ),
     )
     best = run_cached(
         run_cache,
@@ -1219,10 +2046,14 @@ def main(argv: list[str] | None = None) -> int:
         dt=args.dt,
         analysis_days=args.analysis_days,
         require_equilibrium=require_equilibrium,
+        require_realism=require_realism,
         equil_T_tol_K=args.equil_T_tol_K,
         equil_qv_tol=args.equil_qv_tol,
         equil_qcond_tol=args.equil_qcond_tol,
         scm_microphysics_substeps=args.scm_microphysics_substeps,
+        scm_convection_substeps=args.scm_convection_substeps,
+        surface_wind_m_s=args.surface_wind_m_s,
+        coriolis_s_inv=args.coriolis_s_inv,
     )
     print(f"[best] {best.status} score={best.score:.6g} {best.reason}")
 
@@ -1241,12 +2072,16 @@ def main(argv: list[str] | None = None) -> int:
                 dt=args.dt,
                 analysis_days=args.analysis_days,
                 require_equilibrium=require_equilibrium,
+                require_realism=require_realism,
                 tune_evals=args.tune_evals,
                 seed=args.tune_seed + len(tuned_records),
                 equil_T_tol_K=args.equil_T_tol_K,
                 equil_qv_tol=args.equil_qv_tol,
                 equil_qcond_tol=args.equil_qcond_tol,
                 scm_microphysics_substeps=args.scm_microphysics_substeps,
+                scm_convection_substeps=args.scm_convection_substeps,
+                surface_wind_m_s=args.surface_wind_m_s,
+                coriolis_s_inv=args.coriolis_s_inv,
             )
             tuned_records.extend(records)
             tuned_best = tuned_run

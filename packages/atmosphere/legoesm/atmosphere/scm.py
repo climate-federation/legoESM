@@ -222,6 +222,15 @@ def _apply_tendencies(
     )
 
 
+def apply_tendencies(
+    state: HydrostaticState,
+    tend: HydrostaticTendencies,
+    dt: float,
+) -> HydrostaticState:
+    """Apply SCM tendencies to a hydrostatic column state."""
+    return _apply_tendencies(state, tend, dt)
+
+
 def _validate_microphysics_substeps(microphysics_substeps: int) -> int:
     """Return a validated fixed microphysics substep count."""
     if (
@@ -261,16 +270,20 @@ def _microphysics_substepped_forward_euler(
     def step(state, phys_state, f, dt, t):
         nonmicro_tend, phys_out = f(state, phys_state, t)
         sub_dt = dt / n_substeps
+        grid = get_grid()
+        sigma_coord = get_sigma_coord()
 
-        def substep(sub_state, _i):
-            micro_tend = microphysics_fn(
-                sub_state, get_grid(), get_sigma_coord(),
-            )
-            tend = add_tendencies(nonmicro_tend, micro_tend)
-            return _apply_tendencies(sub_state, tend, sub_dt), None
+        def substep(carry, _i):
+            sub_state, base_tend = carry
+            micro_tend = microphysics_fn(sub_state, grid, sigma_coord)
+            tend = add_tendencies(base_tend, micro_tend)
+            sub_state = _apply_tendencies(sub_state, tend, sub_dt)
+            return (sub_state, base_tend), None
 
-        new_state, _ = jax.lax.scan(
-            substep, state, jnp.arange(n_substeps, dtype=jnp.int32),
+        (new_state, _), _ = jax.lax.scan(
+            substep,
+            (state, nonmicro_tend),
+            jnp.arange(n_substeps, dtype=jnp.int32),
         )
         return new_state, phys_out
 
