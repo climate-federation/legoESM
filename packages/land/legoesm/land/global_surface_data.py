@@ -447,9 +447,12 @@ def build_global_surface_data(
     else:
         # Irregular target (cubed-sphere / MPAS): NaN-aware KD-tree IDW to cell
         # centres (matches the model's point-based topography regrid, but won't
-        # bleed ocean NaN into coastal cells).
+        # bleed ocean NaN into coastal cells).  Cast to float64 to match the
+        # conservative path above — otherwise the surfdata floats stay float32
+        # (source NetCDF is float32) and cascade into the multilayer Richards
+        # solver's lax.fori_loop carry dtype.
         def _rg(field):
-            return regrid_scalar_nan_aware(jnp.asarray(field, dtype=jnp.float32), w)
+            return regrid_scalar_nan_aware(jnp.asarray(field, dtype=jnp.float64), w)
 
     # --- soil: regrid (ncol, n_src_layer) then remap to model layers ---
     dst_depth = np.asarray(soil_grid.z_node)

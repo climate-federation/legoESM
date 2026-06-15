@@ -229,15 +229,6 @@ def build_soil_hydraulics(
     sand = np.where(bad, fallback_sand_pct, sand)
     clay = np.where(bad, fallback_clay_pct, clay)
 
-    # Keep params at the default float precision (float64 with x64) so the
-    # multilayer state — initialised as ``0.5 * theta_sat`` — stays at the
-    # same precision as the Richards solver's grid arrays (``grid.dz``,
-    # ``dz_interface``) and forcing fluxes.  The cubed-sphere KD-tree regrid
-    # returns float32; downcasting params to float32 would make the carry
-    # input float32 while the loop body upcasts to float64 via the float64
-    # grid arrays, breaking ``lax.fori_loop`` dtype matching.
-    sand = sand.astype(np.float64)
-    clay = clay.astype(np.float64)
     p = cosby_hydraulic_params(jnp.asarray(sand), jnp.asarray(clay))  # (ncol, n_layer)
     return base._replace(
         retention_curve="clapp_hornberger",
