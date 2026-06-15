@@ -193,6 +193,27 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 2 — B1 DONE (WENO9 momentum wired) — 2026-06-15
+- **B1 COMPLETE + committed** (`feat(ocean): wire WENO9 vector-invariant momentum advection`).
+  `momentum_advection="weno9"` now selectable. Verified the existing weno5/7 path FIRST
+  (it already does `{ζ;u}` decoupled smoothness + D-term, as scoped). Extended:
+  - Z (vorticity) + D (divergence) → order 9; C (vertical) capped at 5 (paper Table 2,
+    "minimal impact" + vertical kernel only has 5/7); K unchanged.
+  - **NEW order-8 (7-point) `point_to_cellavg` conversion**, coeffs solved from cell-avg
+    Taylor moments + verified exact to degree 7. This was the real find: the code already
+    *intended* conv_order=8 for weno7 but `point_to_cellavg` silently capped it at 6 (the
+    `else` branch). Implementing it (a) fulfills that intent and (b) unblocks the **W9V-vs-W5V
+    effective-resolution distinction the paper's headline result depends on** — surfaced by a
+    failing accuracy-ordering test (WENO9 was no better than WENO5 with order-6 conversion).
+  - Tests: 123 WENO (core+momentum+tracer) + 61 dispatch/validate/recipe green; no weno5/7
+    regression. Added: order-8 conversion exactness, order-8>order-6 on smooth field, WENO9
+    vorticity shapes/constant/cell-to-face/resolved-accuracy, full ocean step weno9 finite.
+- **NEXT: codex adversarial review of B1** (numerics/AD change — mandate), then **B2** =
+  `weno_smoothness` config: `"split"` (`{ζ;u}`, W*V, current default) vs `"standard"`
+  (`{ζ;ζ}`, W*D). The existing path hardwires the split via `u_smooth`/`v_smooth`; W9D needs
+  the standard `{ζ;ζ}` branch (pass `psi=phi`, i.e. drop the velocity smoothness fields).
+- Note for B2: in Oceananigans this is `CrossAndSelfUpwinding` (V) vs `OnlySelfUpwinding` (D).
+
 ### Iteration 1 (setup) — 2026-06-15
 - Read the full paper (24 pp); extracted both experiment specs + all metrics + appendices
   (Leith, QG-Leith, OM4p25 closures; energy-conservation derivation).
