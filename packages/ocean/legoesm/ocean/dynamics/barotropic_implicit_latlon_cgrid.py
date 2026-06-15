@@ -300,14 +300,25 @@ def _helmholtz_coupling_pieces(
         dy_v_int = 0.5 * (dy_h[1:] + dy_h[:-1])          # (n_lat-1,)
         dy_v_face = jnp.pad(dy_v_int, (1, 1), mode='edge')  # (n_lat+1,)
 
-        lat = grid.lat
-        lat_v_int = 0.5 * (lat[:-1] + lat[1:])
-        lat_v = jnp.concatenate([
-            jnp.array([-jnp.pi / 2], dtype=lat.dtype),
-            lat_v_int,
-            jnp.array([jnp.pi / 2], dtype=lat.dtype),
-        ])
-        cos_lat_v = jnp.cos(lat_v)                      # (n_lat+1,)
+        # v-face zonal extent dx_v = R*cos(lat_v)*dlon at all n_lat+1 faces,
+        # computed BACKEND-AWARE exactly as divergence_cgrid (cell-pad-first):
+        # pad the CELL latitudes via pad_with_pole_bc_lat (at an interior MPI
+        # band cut the ghost row is the NEIGHBOUR rank's edge-cell latitude via
+        # AD-safe sendrecv) then midpoint, so a band-edge v-face carries its
+        # REAL latitude instead of the wall ±pi/2.  zero_polar_lat_ends zeros
+        # cos at the PHYSICAL poles only.  Serial: bit-identical to the old
+        # [-pi/2, .., pi/2] reconstruction at interior faces; the pole faces
+        # (cos->0) are multiplied by the walled H_v=0 in merid_sum, so this is
+        # bit-exact serially while fixing the BANDED zonal-line smoother, which
+        # otherwise set dx_v=0 at rank cuts and dropped its meridional diagonal
+        # there (codex MED, job 8487913), eroding the M-cut at scale.
+        from legoesm.grids.halo_latlon import (
+            pad_with_pole_bc_lat, zero_polar_lat_ends,
+        )
+        lat_pad = pad_with_pole_bc_lat(
+            grid.lat, halo=1, south_value=0.0, north_value=0.0)
+        lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])      # (n_lat+1,)
+        cos_lat_v = zero_polar_lat_ends(jnp.cos(lat_v))
         dx_v = R * cos_lat_v * dlon                      # (n_lat+1,)
 
         zonal_E = H_u_E * dy_u[:, None] / dx_u[:, None] * inv_area
@@ -724,16 +735,20 @@ def _coarse_band_hierarchy(layout, *, min_coarse_rows: int = 8):
       follow-up).
 
     Returns ``[L0, L1, ...]``, ``len >= 1`` (L0 always present).  ``len == 1``
-    => no admissible coarsening (caller falls back to a single-level smoother).
-    For EQUAL bands (``n_lat_global % n_ranks == 0``) every rank derives the
-    SAME depth from the global dims, so the V-cycle runs in lock-step with no
-    runtime depth reduction (the banded factory enforces equal bands)."""
+    => no admissible coarsening, so the banded factory builds a single-level
+    (zonal-line-smoother-only) preconditioner from L0 alone.  For EQUAL bands
+    (``n_lat_global % n_ranks == 0``) every rank derives the SAME depth from the
+    global dims, so the V-cycle runs in lock-step with no runtime depth
+    reduction (the banded factory enforces equal bands)."""
     levels = [layout]
     cur = layout
     # Coarsen while the GLOBAL coarsest would still have >= min_coarse_rows rows.
     while cur.n_lat_global >= 2 * min_coarse_rows:
         nxt = _coarse_band_layout(cur)
-        if nxt is None:
+        # Stop on the even-alignment limit (None) OR a degenerate coarse
+        # longitude: the periodic-tridiagonal zonal-line smoother needs
+        # n_lon >= 3 (mirrors the serial hierarchy's nlo//2 < 3 stop).
+        if nxt is None or nxt.n_lon_global < 3:
             break
         levels.append(nxt)
         cur = nxt
@@ -929,15 +944,16 @@ def _make_multigrid_preconditioner_banded(
         if lvl == 0:
             g = grid
         else:
-            # Global coarse grid sliced to THIS band, THEN ensure_geometry —
-            # the production order (slice the LatLonGrid which carries lat_v,
-            # then convert to LatLonCGridGeometry; ensure_geometry drops lat_v,
-            # so slicing must precede it).  Gives the band's coarse
-            # latitudes/metrics (uniform-grid approximation, as serial).
+            # Global coarse grid sliced to THIS band, THEN ensure_geometry (the
+            # production order; slice_latlon_grid_to_band needs the LatLonGrid's
+            # lat_v, which ensure_geometry drops, and is regular-grid-safe —
+            # unlike slice_cgrid_geometry_to_band, which assumes a tripolar
+            # fold).  Uniform dlat => the band-edge metrics are consistent
+            # across ranks.
             g = ensure_geometry(slice_latlon_grid_to_band(
                 create_latlon_grid(
                     n_lat=blay.n_lat_global, n_lon=blay.n_lon_global),
-                blay))
+                blay, skip_total_area_reduce=True))
         H_u, H_v, u_mask, v_mask = _faces_from_cell_depth_banded(Hc, m, blay)
         A_op = _make_helmholtz(H_u, H_v, coeff, g, m, u_mask, v_mask)
         smoother = _make_zonal_line_preconditioner(H_u, H_v, coeff, g, m)
@@ -964,6 +980,7 @@ def _select_preconditioner(
     A_op=None,
     cheby_degree: int = 4,
     H_cell=None,
+    layout=None,
 ):
     """Dispatch the implicit-CN PCG preconditioner by config name.
 
@@ -977,8 +994,11 @@ def _select_preconditioner(
     reduction; see :func:`_make_chebyshev_preconditioner`).
     "multigrid" — anisotropic geometric V-cycle with a zonal-line smoother
     (cuts the outer M ~M60->M4, textbook O(log n); needs ``H_cell``, the
-    cell-centred water-column depth, to coarsen — see
-    :func:`_make_multigrid_preconditioner`).
+    cell-centred water-column depth, to coarsen).  Auto-selects the SINGLE-RANK
+    :func:`_make_multigrid_preconditioner` serially and the BANDED
+    :func:`_make_multigrid_preconditioner_banded` under MPI (``layout`` = the
+    :class:`LatLonBandLayout`); the banded V-cycle keeps the M-cut WITHOUT the
+    per-iteration global allreduce — the multinode reduction-latency win.
     Unknown names refuse loudly (dispatch-hardening convention).
     """
     if name == "jacobi":
@@ -1002,6 +1022,18 @@ def _select_preconditioner(
             raise ValueError(
                 "barotropic_implicit_latlon_cgrid: multigrid preconditioner "
                 "requires H_cell (the cell water-column depth; pass H_cell=...).")
+        from legoesm.core.operators import is_distributed
+        if is_distributed():
+            # Band MPI: the halo-aware banded V-cycle (no global reduction).
+            from legoesm.parallel.latlon_mpi import LatLonBandLayout
+            if not isinstance(layout, LatLonBandLayout):
+                raise ValueError(
+                    "barotropic_implicit_latlon_cgrid: 'multigrid' under MPI "
+                    "needs the LatLonBandLayout (pass layout=get_mpi_topology()); "
+                    "the rank-local serial V-cycle is not halo-aware.  Use "
+                    "'zonal_line' if no band layout is available.")
+            return _make_multigrid_preconditioner_banded(
+                H_cell, coeff, grid, mask, layout)
         return _make_multigrid_preconditioner(H_cell, coeff, grid, mask)
     raise ValueError(
         "barotropic_implicit_latlon_cgrid: unknown "
@@ -1368,6 +1400,14 @@ def barotropic_implicit_latlon_cgrid(
     # sum(h_k) total H_u_old/H_v_old derive from via the min-rule); None-safe
     # for the other preconditioners (they ignore H_cell).
     _H_cell = jnp.maximum(jnp.sum(h_k_old, axis=-1), min_water_col) * mask
+    # Band layout for the distributed 'multigrid' path (None serially / for the
+    # other preconditioners, which ignore it).  get_mpi_topology() returns the
+    # active LatLonBandLayout under band MPI.
+    from legoesm.core.operators import is_distributed as _is_dist_pc
+    _pc_layout = None
+    if _is_dist_pc():
+        from legoesm.grids.halo import get_mpi_topology as _get_topo
+        _pc_layout = _get_topo()
     M_inv = _select_preconditioner(
         str(getattr(config, "barotropic_implicit_preconditioner",
                     "jacobi")),
@@ -1375,6 +1415,7 @@ def barotropic_implicit_latlon_cgrid(
         A_op=A_op,
         cheby_degree=int(getattr(config, "barotropic_chebyshev_degree", 4)),
         H_cell=_H_cell,
+        layout=_pc_layout,
     )
 
     # Solve dispatch — MERGE COMPOSITION of the area-weighted-adjoint fix

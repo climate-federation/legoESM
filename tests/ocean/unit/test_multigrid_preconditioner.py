@@ -134,6 +134,34 @@ def test_multigrid_dispatch_wiring():
                                mask, A_op=A_op, H_cell=None)
 
 
+def test_multigrid_dispatch_banded_under_mpi(monkeypatch):
+    """_select_preconditioner('multigrid', layout=...) auto-routes to the BANDED
+    factory when is_distributed(); a missing band layout fails loud (the serial
+    rank-local V-cycle is not halo-aware)."""
+    import legoesm.core.operators as _ops
+    from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
+        _select_preconditioner,
+    )
+    grid, coeff, mask, H_cell, A_op, inv_diag = _setup()
+    H_u, H_v, _, _ = _faces_from_cell_depth(H_cell, mask, N_LAT, N_LON)
+    monkeypatch.setattr(_ops, "is_distributed", lambda: True)
+    # With an (equal, n_ranks=1) band layout -> banded V-cycle M_inv.  Under the
+    # local halo backend pad_halo_latlon pole-folds, so this builds serially.
+    layout = make_latlon_band_layout(0, 1, N_LAT, N_LON)
+    M_inv = _select_preconditioner(
+        "multigrid", inv_diag, H_u, H_v, coeff, grid, mask,
+        A_op=A_op, H_cell=H_cell, layout=layout)
+    r = jnp.asarray(np.random.default_rng(4).standard_normal((N_LAT, N_LON))) * mask
+    out = M_inv(r)
+    assert out.shape == r.shape and np.all(np.isfinite(np.asarray(out)))
+    assert float(jnp.max(jnp.abs(out))) > 0.0
+    # Missing band layout under MPI -> fail loud (no silent serial fallback).
+    with pytest.raises(ValueError, match="needs the LatLonBandLayout"):
+        _select_preconditioner(
+            "multigrid", inv_diag, H_u, H_v, coeff, grid, mask,
+            A_op=A_op, H_cell=H_cell, layout=None)
+
+
 def test_multigrid_refuses_distributed(monkeypatch):
     """SCOPE guard (codex 38fec66b HIGH #2): the rank-local 2x2 transfers are
     not halo-aware, so 'multigrid' must FAIL LOUD under band MPI / SPMD rather

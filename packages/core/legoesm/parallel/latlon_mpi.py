@@ -2089,7 +2089,8 @@ def strip_halos(state, layout: LatLonBandLayout, halo: int = 1):
     )
 
 
-def slice_latlon_grid_to_band(grid, layout: LatLonBandLayout):
+def slice_latlon_grid_to_band(grid, layout: LatLonBandLayout,
+                              *, skip_total_area_reduce: bool = False):
     """Slice a global ``LatLonGrid`` to this rank's lat band.
 
     All latitude-dependent metric arrays (1-D: ``lat``, ``cos_lat``,
@@ -2128,14 +2129,21 @@ def slice_latlon_grid_to_band(grid, layout: LatLonBandLayout):
     LatLonGrid
         Rank-local grid with global ``total_area`` (allreduced).
     """
-    from legoesm.parallel.reductions import global_sum_mpi
     s, e = layout.lat_start, layout.lat_end
     band_area = grid.area[s:e, :]
-    band_total = jnp.sum(band_area)
-    # Allreduce → global sphere area.  Under the local backend
-    # this is a no-op (returns the local value unchanged), so the
-    # function also works correctly at single-rank.
-    global_total = global_sum_mpi(band_total)
+    if skip_total_area_reduce:
+        # The caller passed a FULL grid replicated on every rank (e.g. the MG
+        # coarse-grid construction): the global total is just the local sum of
+        # ALL rows, with NO MPI collective — so the banded-MG preconditioner
+        # build stays reduction-free (codex MED, the whole point of banded MG).
+        global_total = jnp.sum(grid.area)
+    else:
+        from legoesm.parallel.reductions import global_sum_mpi
+        band_total = jnp.sum(band_area)
+        # Allreduce → global sphere area.  Under the local backend
+        # this is a no-op (returns the local value unchanged), so the
+        # function also works correctly at single-rank.
+        global_total = global_sum_mpi(band_total)
     return grid._replace(
         n_lat=layout.n_lat_local,
         lat=grid.lat[s:e],
