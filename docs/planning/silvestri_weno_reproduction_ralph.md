@@ -203,6 +203,35 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 7 — PHASE 2 DONE (diagnostics D1-D6) — 2026-06-15
+- **PHASE 2 COMPLETE + adversarially reviewed + committed.** Added D1-D6 to the canonical
+  `ocean/diagnostics.py` (D7 deformation radius + 2D isotropic spectra already existed):
+  D1 `relative_vorticity_cell_centre`, D2 `domain_kinetic_energy`/`domain_enstrophy`,
+  D3 `remove_zonal_mean`+`eddy_kinetic_energy`+`eddy_available_potential_energy`+
+  `velocity_to_cell_centre`, D4 `vertical_eddy_buoyancy_flux`+`zonal_cospectrum`,
+  D5 `zonal_power_spectrum`, D6 `zonal_mean`. 11 unit tests vs analytic refs.
+- **Adversarial review caught a REAL bug (SHOULD-FIX, fixed):** the zonal power/co-spectra —
+  the paper's Fig-9 comparison metrics — did NOT conserve variance (Σ P = n_lon·variance; the
+  one-sided rfft under-counted interior modes 2×), AND my cospectrum test was a tautology that
+  never asserted against the function output. Fixed: normalize by n_lon + interior factor-of-2
+  → Σ P == variance, Σ co == covariance (verified rtol 1e-10); cyclic wavenumber to match the
+  existing 2D-spectrum convention; cast float32 area to field dtype; rewrote the tests to assert
+  Parseval + a real covariance check. Other review NITs (centre-average low-pass bias, w'b'
+  co-location, scalar N²) documented.
+- **PROCESS NOTE for future iterations:** the skeptical-subagent review is EARNING ITS KEEP —
+  it caught a genuine metric-conservation bug the unit tests missed (the test was self-
+  referential). Keep running it after each phase, and make tests assert against the FUNCTION
+  output, not a re-derivation.
+- **NEXT: PHASE 3 — recipes + drivers (R1-R5).** R1 2D-turbulence experiment (Ishiko spectral IC,
+  doubly-periodic non-rotating single-layer) + R2 Silvestri baroclinic-jet experiment (exact §5
+  config: −60→−40°, 20° periodic, 1km/50lev, N²=4e-6, Δb=5e-3, τ=50d zonal-mean restoring of b
+  AND u/v, 1000d, 1/8-1/32°) + R3/R4 drivers (emit VERDICT + save metric arrays) + R5 comparison
+  plotter. Read `eady_uniform.py` (build_eady_uniform_setup) + `run_eady_rebuilt.py` FIRST —
+  the baroclinic jet is an adaptation of the Eady recipe; the 2D-turb is new. Recall the
+  approach decision in TEST CASE A: run the ocean model in a single-layer non-rotating
+  doubly-periodic config so its momentum operator reduces to 2D NS, exercising the canonical
+  WENO blocks (not a parallel solver).
+
 ### Iteration 6 — B5 DONE (QG-Leith barotropic = QG2-approx); PHASE 1 BUILDING BLOCKS COMPLETE — 2026-06-15
 - **B5 COMPLETE + adversarially reviewed + committed** (`feat(ocean): QG-Leith harmonic viscosity`).
   `lateral_friction_scheme="qg_leith"`: HARMONIC ν=(C·Δ/π)³·√(|∇(ζ+f)|²+|∇δ|²), C=`qg_leith_coeff`
