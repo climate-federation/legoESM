@@ -59,33 +59,64 @@ def _wavenumbers(N: int, L: float = 2.0 * np.pi):
     return kx, ky, k2, k2_inv
 
 
+def _energy_spectrum(k, k_p, a_s):
+    return 0.5 * a_s * (1.0 / k_p) * (k / k_p) ** 7 * np.exp(-3.5 * (k / k_p) ** 2)
+
+
+def target_enstrophy(k_p: float = 12.0, a_s: float = 16.0 / 3.0) -> float:
+    """Continuum enstrophy density ½⟨ζ²⟩ = ∫₀^∞ k²E(k)dk for the Ishiko spectrum
+    (resolution-INDEPENDENT; ≈8.77 for the paper values). The eddy-turnover time
+    is T_e = (∫k²E dk)^{−½} ≈ 0.33."""
+    kk = np.linspace(1e-6, 12.0 * k_p, 40000)
+    return float(np.trapezoid(kk ** 2 * _energy_spectrum(kk, k_p, a_s), kk))
+
+
 def ishiko_initial_vorticity(N: int, *, k_p: float = 12.0, a_s: float = 16.0 / 3.0,
                              seed: int = 0) -> np.ndarray:
-    """Ishiko (2009) narrow-band initial vorticity field ζ(x,y) (real, N×N)."""
+    """Ishiko (2009) narrow-band initial vorticity field ζ(x,y) (real, N×N),
+    Eqs 48-50, RENORMALISED to the continuum enstrophy ½⟨ζ²⟩=∫k²E dk so the field
+    is physical and resolution-INDEPENDENT (T_e≈0.33). Two correctness points:
+
+      * Random phases are taken from a REAL white-noise FFT so ζ̂ is Hermitian
+        ⇒ ifft2 is exactly real (independent random phases + np.real would DISCARD
+        ~half the energy and break the prescribed phases).
+      * The realised field is rescaled to the target enstrophy — the raw Ishiko
+        coefficient ζ̂=[k/π E]^½ fed to numpy.ifft2 carries no FFT/shell-density
+        normalisation, so the discrete amplitude is otherwise meaningless (N-dependent).
+    """
     kx, ky, k2, _ = _wavenumbers(N)
     k = np.sqrt(k2)
     with np.errstate(divide="ignore", invalid="ignore"):
-        E = 0.5 * a_s * (1.0 / k_p) * (k / k_p) ** 7 * np.exp(-3.5 * (k / k_p) ** 2)
+        E = _energy_spectrum(k, k_p, a_s)
     E = np.where(k > 0, E, 0.0)
-    amp = np.sqrt(np.maximum(k / np.pi * E, 0.0))      # |ζ̂|
+    amp = np.sqrt(np.maximum(k / np.pi * E, 0.0))      # |ζ̂| shell-energy = E(k)
+    # Hermitian-consistent random phases (from a real field's FFT).
     rng = np.random.default_rng(seed)
-    phase = rng.uniform(0.0, 2.0 * np.pi, size=(N, N))
-    zeta_hat = amp * np.exp(1j * phase)
-    zeta = np.real(np.fft.ifft2(zeta_hat))
-    # Re-symmetrise so the field is exactly real & zero-mean.
+    phase = np.angle(np.fft.fft2(rng.standard_normal((N, N))))
+    zeta = np.real(np.fft.ifft2(amp * np.exp(1j * phase)))
     zeta = zeta - zeta.mean()
+    cur = 0.5 * np.mean(zeta ** 2)
+    if cur > 0.0:
+        zeta = zeta * np.sqrt(target_enstrophy(k_p, a_s) / cur)
     return zeta
 
 
 def velocity_from_vorticity(zeta: jnp.ndarray, kx, ky, k2_inv):
-    """Divergence-free velocity (u,v) at cell centres from vorticity (spectral).
-    ψ̂=ζ̂/k², u=−∂ψ/∂y, v=∂ψ/∂x."""
-    zhat = jnp.fft.fft2(zeta)
-    # ζ = ∂ₓv − ∂ᵧu = ∇²ψ ⇒ ψ̂ = −ζ̂/k² (the minus is essential: ψ̂=+ζ̂/k²
-    # inverts the velocity so curl(u,v) returns −ζ and reverses the advection).
-    psi_hat = -zhat * k2_inv
-    u = jnp.real(jnp.fft.ifft2(-1j * ky * psi_hat))
-    v = jnp.real(jnp.fft.ifft2(1j * kx * psi_hat))
+    """Discretely-divergence-free velocity (u,v) at cell centres from vorticity.
+
+    Solves the streamfunction SPECTRALLY (ζ=∇²ψ ⇒ ψ̂=−ζ̂/k²; the minus is
+    essential — ψ̂=+ζ̂/k² inverts the velocity so curl returns −ζ and reverses
+    advection), then takes 2Δx-CENTERED finite differences u=−∂ᵧψ, v=∂ₓψ. The
+    FD velocity is EXACTLY divergence-free under the flux operator's centered
+    divergence (mixed FD differences commute), so the flux-form advection of a
+    constant ζ is exactly zero — a spectral i·k velocity has ~10% discrete-FV
+    divergence and would spuriously source vorticity.
+    """
+    psi = jnp.real(jnp.fft.ifft2(-jnp.fft.fft2(zeta) * k2_inv))
+    N = zeta.shape[0]
+    dx = 2.0 * np.pi / N
+    u = -(jnp.roll(psi, -1, axis=1) - jnp.roll(psi, 1, axis=1)) / (2.0 * dx)
+    v = (jnp.roll(psi, -1, axis=0) - jnp.roll(psi, 1, axis=0)) / (2.0 * dx)
     return u, v
 
 
@@ -95,7 +126,15 @@ def _weno_face_recon(field, psi, vel_face, axis, order):
 
     Face j sits between cells j-1 and j. Returns the face values (same shape).
     """
+    from legoesm.core.weno import point_to_cellavg_periodic
     hw = {5: 3, 7: 4, 9: 5}[order]
+    # WENO assumes CELL-AVERAGE inputs; convert the point-valued grid fields
+    # first (order 6 for W5/W7, order 8 for W9) — without this the reconstruction
+    # is capped to O(dx³) and W9V degenerates to W5V (the very effective-resolution
+    # distinction §4 measures). Matches the canonical advection paths.
+    conv = {5: 6, 7: 8, 9: 8}[order]
+    field = point_to_cellavg_periodic(field, axis=axis, order=conv)
+    psi = point_to_cellavg_periodic(psi, axis=axis, order=conv)
     phi_st = [jnp.roll(field, hw - s, axis=axis) for s in range(2 * hw)]
     psi_st = [jnp.roll(psi, hw - s, axis=axis) for s in range(2 * hw)]
     f_plus, f_minus = weno_reconstruct_split(phi_st, psi_st, order=order)
