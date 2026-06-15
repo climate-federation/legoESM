@@ -366,3 +366,134 @@ def mixed_layer_depth(
     column_wet = jnp.any(wet > 0.5, axis=-1)
     mld = jnp.where(column_wet, mld, jnp.nan)
     return mld
+
+
+# ============================================================================
+# Eddy / turbulence diagnostics (Silvestri et al. 2024 reproduction)
+#   D1 relative vorticity at cell centres   D2 KE / enstrophy integrals
+#   D3 eddy decomposition + EKE / TKE / eddy-APE   D4 w'b' eddy buoyancy flux
+#   D5 zonal (1D) power spectra   D6 zonal-mean field
+# All operate on cell-centre fields shaped (n_lat, n_lon[, nlev]); the zonal
+# (longitude) axis is axis 1.  ``area`` is grid.area (n_lat, n_lon) [m²]; for
+# 3D fields pass ``h`` (layer thickness, n_lat, n_lon, nlev) [m] for the volume
+# weight, else the area weight is used per level.
+# ============================================================================
+
+
+def velocity_to_cell_centre(u: jnp.ndarray, v: jnp.ndarray) -> tuple:
+    """Interpolate C-grid face velocities to cell centres.
+
+    u (n_lat, n_lon+1, ...) at u-faces, v (n_lat+1, n_lon, ...) at v-faces →
+    (u_h, v_h) both (n_lat, n_lon, ...) at cell centres.
+    """
+    u_h = 0.5 * (u[:, :-1, ...] + u[:, 1:, ...])
+    v_h = 0.5 * (v[:-1, :, ...] + v[1:, :, ...])
+    return u_h, v_h
+
+
+def relative_vorticity_cell_centre(u: jnp.ndarray, v: jnp.ndarray, grid) -> jnp.ndarray:
+    """Relative vorticity ζ = ∂ₓv − ∂ᵧu at cell centres [1/s] (D1).
+
+    Computes ζ at vertices (``curl_vertex_cgrid``) then 4-point-averages the
+    four surrounding vertices to each cell centre. Shape (n_lat, n_lon, ...).
+    """
+    from legoesm.grids.operators_latlon_cgrid import curl_vertex_cgrid
+    zeta_q = curl_vertex_cgrid(u, v, grid)             # (n_lat+1, n_lon+1, ...)
+    return 0.25 * (zeta_q[:-1, :-1, ...] + zeta_q[1:, :-1, ...]
+                   + zeta_q[:-1, 1:, ...] + zeta_q[1:, 1:, ...])
+
+
+def _volume_weight(area: jnp.ndarray, h: jnp.ndarray | None, ndim: int) -> jnp.ndarray:
+    """Per-cell weight: area (2D) or area·h (3D)."""
+    if ndim == 2:
+        return area
+    a = area[..., jnp.newaxis]
+    return a if h is None else a * h
+
+
+def domain_kinetic_energy(u_h, v_h, area, h=None) -> jnp.ndarray:
+    """Volume-integrated kinetic energy ∫ ½(u²+v²) dV [m⁵/s² (3D) or m⁴/s² (2D)] (D2)."""
+    ke = 0.5 * (u_h ** 2 + v_h ** 2)
+    return jnp.sum(ke * _volume_weight(area, h, u_h.ndim))
+
+
+def domain_enstrophy(zeta_h, area, h=None) -> jnp.ndarray:
+    """Volume-integrated enstrophy ∫ ½ζ² dV (D2)."""
+    return jnp.sum(0.5 * zeta_h ** 2 * _volume_weight(area, h, zeta_h.ndim))
+
+
+def remove_zonal_mean(field: jnp.ndarray) -> jnp.ndarray:
+    """Eddy part x' = x − ⟨x⟩_zonal (mean over the longitude axis, axis 1) (D3)."""
+    return field - jnp.mean(field, axis=1, keepdims=True)
+
+
+def eddy_kinetic_energy(u_h, v_h, area, h=None) -> jnp.ndarray:
+    """Volume-integrated EDDY kinetic energy ∫ ½(u'²+v'²) dV, u'=u−⟨u⟩_zonal (D3)."""
+    up = remove_zonal_mean(u_h)
+    vp = remove_zonal_mean(v_h)
+    return jnp.sum(0.5 * (up ** 2 + vp ** 2) * _volume_weight(area, h, u_h.ndim))
+
+
+def eddy_available_potential_energy(b_h, N2, area, h=None) -> jnp.ndarray:
+    """Volume-integrated EDDY available potential energy ∫ ½ b'²/N² dV (D3).
+
+    b_h : buoyancy at cell centres [m/s²]; N2 : buoyancy frequency squared [1/s²]
+    (scalar or field). b' = b − ⟨b⟩_zonal. APE density = ½ b'²/N² (Vallis 2017).
+    """
+    bp = remove_zonal_mean(b_h)
+    ape = 0.5 * bp ** 2 / jnp.maximum(N2, 1e-30)
+    return jnp.sum(ape * _volume_weight(area, h, b_h.ndim))
+
+
+def vertical_eddy_buoyancy_flux(w_h, b_h) -> jnp.ndarray:
+    """Eddy vertical buoyancy flux w'b' at cell centres [m²/s³] (D4).
+
+    w_h, b_h at cell centres; primes are deviations from the zonal mean.
+    Returns the field w'b' (not yet integrated); caller may zonally average or
+    take its zonal cospectrum.
+    """
+    return remove_zonal_mean(w_h) * remove_zonal_mean(b_h)
+
+
+def zonal_power_spectrum(field_h, dx: float, detrend: bool = True) -> tuple:
+    """1-D zonal (longitude) power spectrum of a cell-centre field (D5).
+
+    FFT along axis 1 (lon); power averaged over the remaining axes (lat, and
+    depth if 3D). Returns (wavenumbers [1/m], P[k]). Used for the paper's zonal
+    energy / enstrophy / w'b' spectra (Fig 9). With ``detrend`` the zonal mean
+    is removed first (eddy spectrum).
+    """
+    f = remove_zonal_mean(field_h) if detrend else field_h
+    n_lon = f.shape[1]
+    fh = jnp.fft.rfft(f, axis=1)
+    # Average power over all axes except the (lon→k) axis.
+    other = tuple(i for i in range(f.ndim) if i != 1)
+    P = jnp.mean(jnp.abs(fh) ** 2, axis=other) / n_lon
+    k = jnp.fft.rfftfreq(n_lon, d=dx) * 2.0 * jnp.pi    # angular wavenumber [1/m]
+    return k, P
+
+
+def zonal_cospectrum(a_h, b_h, dx: float) -> tuple:
+    """1-D zonal co-spectrum Re(â* b̂) of two cell-centre fields (D4/D5).
+
+    For the w'b' cospectrum pass w and b (zonal means removed internally).
+    Returns (wavenumbers [1/m], co-power[k]).
+    """
+    ap = remove_zonal_mean(a_h)
+    bp = remove_zonal_mean(b_h)
+    n_lon = ap.shape[1]
+    ah = jnp.fft.rfft(ap, axis=1)
+    bh = jnp.fft.rfft(bp, axis=1)
+    other = tuple(i for i in range(ap.ndim) if i != 1)
+    co = jnp.mean(jnp.real(jnp.conj(ah) * bh), axis=other) / n_lon
+    k = jnp.fft.rfftfreq(n_lon, d=dx) * 2.0 * jnp.pi
+    return k, co
+
+
+def zonal_mean(field: jnp.ndarray) -> jnp.ndarray:
+    """Zonal (longitude, axis 1) mean of a cell-centre field (D6).
+
+    Returns shape (n_lat, [nlev]) — e.g. the time-and-zonally-averaged buoyancy
+    section used for the paper's "effective resolution" comparison (Fig 10).
+    """
+    return jnp.mean(field, axis=1)
