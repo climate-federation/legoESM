@@ -120,6 +120,10 @@ VALID_MOMENTUM_ADVECTION = frozenset(
 # vorticity-flux Z and divergence-flux D use this order; vertical C is capped
 # at WENO5 for order 9 (paper Table 2: C is WENO5 in W9V, "minimal impact").
 VALID_WENO_MOMENTUM = frozenset({"weno5", "weno7", "weno9"})
+# WENO smoothness-measure family (Silvestri et al. 2024): "split" = W*V
+# (velocity / full-divergence smoothness, Eqs 43+45), "standard" = W*D
+# (self-smoothness, Eqs 37+44). See config.weno_smoothness.
+VALID_WENO_SMOOTHNESS = frozenset({"split", "standard"})
 # Reconstruction schemes for the advected velocity in the flux-form path
 # (config.momentum_flux_scheme; only used when momentum_advection="flux_form").
 VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered"})
@@ -593,6 +597,7 @@ def _weno_zeta_at_u(
     v_at_u: jnp.ndarray,
     order: int = 5,
     u_smooth: jnp.ndarray | None = None,
+    smoothness: str = "split",
 ) -> jnp.ndarray:
     """WENO reconstruction of a vertex field to u-faces (meridional).
 
@@ -642,6 +647,14 @@ def _weno_zeta_at_u(
 
     phi_stencil = [phi_ext[1 + j: n_lat + 1 + j, :, :]
                    for j in range(2 * hw)]
+
+    if smoothness == "standard":
+        # W*D: self-smoothness {ζ;ζ} (Silvestri Eq 37). Reconstruct phi using
+        # its OWN smoothness — standard WENO-Z, more dissipative than {ζ;u}.
+        phi_plus, phi_minus = weno_reconstruct_split(
+            phi_stencil, phi_stencil, order=order)
+        return weno_upwind(phi_plus, phi_minus, v_at_u)
+
     psi_v_stencil = [v_ext[1 + j: n_lat + 1 + j, :, :]
                      for j in range(2 * hw)]
 
@@ -678,6 +691,7 @@ def _weno_zeta_at_v(
     u_at_v: jnp.ndarray,
     order: int = 5,
     v_smooth: jnp.ndarray | None = None,
+    smoothness: str = "split",
 ) -> jnp.ndarray:
     """WENO reconstruction of a vertex field to v-faces (zonal).
 
@@ -724,6 +738,13 @@ def _weno_zeta_at_v(
 
     phi_stencil = [jnp.roll(phi_core_avg, hw - 1 - j, axis=1)
                    for j in range(2 * hw)]
+
+    if smoothness == "standard":
+        # W*D: self-smoothness {ζ;ζ} (Silvestri Eq 37).
+        phi_plus, phi_minus = weno_reconstruct_split(
+            phi_stencil, phi_stencil, order=order)
+        return weno_upwind(phi_plus, phi_minus, u_at_v)
+
     psi_u_stencil = [jnp.roll(u_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
@@ -1434,6 +1455,7 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
 
 def _bc_pv_flux(
     du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
+    weno_smoothness="split",
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
@@ -1601,9 +1623,11 @@ def _bc_pv_flux(
         vtx_mask = compute_vertex_mask(mask, grid=grid)
         q_filled = _neumann_fill_vertex(q, vtx_mask)
         q_at_u = _weno_zeta_at_u(
-            q_filled, v, v_at_u, order=_weno_order, u_smooth=u)
+            q_filled, v, v_at_u, order=_weno_order, u_smooth=u,
+            smoothness=weno_smoothness)
         q_at_v = _weno_zeta_at_v(
-            q_filled, u, u_at_v, order=_weno_order, v_smooth=v)
+            q_filled, u, u_at_v, order=_weno_order, v_smooth=v,
+            smoothness=weno_smoothness)
         diag_vortcor_u = q_at_u * Fv_at_u
         diag_vortcor_v = -(q_at_v * Fu_at_v)
     else:
@@ -1651,13 +1675,24 @@ def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom
         # Fill land cells before WENO stencils (Neumann extrapolation).
         dU_di_filled = neumann_fill_cgrid(dU_di_cell, mask, grid=grid)
         dV_dj_filled = neumann_fill_cgrid(dV_dj_cell, mask, grid=grid)
+        # Smoothness measure for the matching-direction WENO reconstruction:
+        #   "split"    (W*V) → {δU; D}: smoothness from the FULL divergence
+        #              D = δU + δV (Silvestri Eq 45). The paper notes this
+        #              "has a large impact on the solution".
+        #   "standard" (W*D) → {δU; δU}: self-smoothness (Eq 44).
+        if config.weno_smoothness == "split":
+            D_full_filled = neumann_fill_cgrid(
+                dU_di_cell + dV_dj_cell, mask, grid=grid)
+            psi_u, psi_v = D_full_filled, D_full_filled
+        else:
+            psi_u, psi_v = dU_di_filled, dV_dj_filled
         # Matching direction (WENO upwind), cross direction (centered).
         # D-flux WENO order follows the momentum order Z (Silvestri Table 2:
         # W9V has D=WENO9, paired with the order-9 vorticity flux).
-        D_at_u = (_weno_cell_to_uface(dU_di_filled, dU_di_filled, u, order=_weno_order)
+        D_at_u = (_weno_cell_to_uface(dU_di_filled, psi_u, u, order=_weno_order)
                   + centered_cell_to_uface(dV_dj_cell))
         D_at_v = (_centered_cell_to_vface(dU_di_cell)
-                  + _weno_cell_to_vface(dV_dj_filled, dV_dj_filled, v, order=_weno_order))
+                  + _weno_cell_to_vface(dV_dj_filled, psi_v, v, order=_weno_order))
         diag_Dterm_u = -(D_at_u * u * u_mask_3d)
         diag_Dterm_v = -(D_at_v * v * v_mask_3d)
         du_dt = du_dt + diag_Dterm_u
@@ -2927,6 +2962,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     else:
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = _bc_pv_flux(
             du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
+            config.weno_smoothness,
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).

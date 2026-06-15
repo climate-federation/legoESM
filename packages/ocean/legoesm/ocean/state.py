@@ -897,6 +897,17 @@ class LatLonCGridOceanConfig(NamedTuple):
                               # Implemented with proper split: matching-direction divergence
                               # is WENO-upwinded, cross-direction stays centered (Appendix C).
                               # Set False to disable the divergent-mode dissipation.
+    # WENO vector-invariant smoothness measure (Silvestri et al. 2024). Selects
+    # the "V" vs "D" scheme family for momentum_advection in {weno5,weno7,weno9}:
+    #   "split"    (default, = W*V, Oceananigans CrossAndSelfUpwinding): vorticity
+    #              uses VELOCITY smoothness {ζ;u} (Eq 43) and divergence uses the
+    #              FULL-divergence smoothness {δU; D} (Eq 45). Lower implicit
+    #              dissipation / higher effective resolution (the paper's W9V).
+    #   "standard" (= W*D, OnlySelfUpwinding): vorticity uses self-smoothness
+    #              {ζ;ζ} (Eq 37) and divergence uses self-smoothness {δU; δU}
+    #              (Eq 44). The paper notes the divergence choice "has a large
+    #              impact on the solution" (W9D is markedly more dissipative).
+    weno_smoothness: str = "split"
     # Barotropic solver selection (see docs/issues/barotropic_mode_noise.md).
     # ``"explicit_substep"`` (default) → existing forward-backward substep
     # loop with cosine/box time filter.

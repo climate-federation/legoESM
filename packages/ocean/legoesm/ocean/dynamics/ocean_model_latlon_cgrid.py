@@ -905,12 +905,19 @@ class LatLonCGridOceanModel:
             VALID_LATERAL_VISCOSITY_OPERATOR,
             VALID_CORIOLIS_SCHEME,
             VALID_AB2_SCOPE,
+            VALID_WENO_SMOOTHNESS,
         )
         if config.momentum_advection not in VALID_MOMENTUM_ADVECTION:
             raise ValueError(
                 f"momentum_advection must be one of "
                 f"{sorted(VALID_MOMENTUM_ADVECTION)}, "
                 f"got {config.momentum_advection!r}",
+            )
+        if config.weno_smoothness not in VALID_WENO_SMOOTHNESS:
+            raise ValueError(
+                f"weno_smoothness must be one of "
+                f"{sorted(VALID_WENO_SMOOTHNESS)}, "
+                f"got {config.weno_smoothness!r}",
             )
         if config.momentum_flux_scheme not in VALID_MOMENTUM_FLUX_SCHEME:
             raise ValueError(
