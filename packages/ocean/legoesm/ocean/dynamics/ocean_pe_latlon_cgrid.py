@@ -126,7 +126,7 @@ VALID_WENO_MOMENTUM = frozenset({"weno5", "weno7", "weno9"})
 VALID_WENO_SMOOTHNESS = frozenset({"split", "standard"})
 # Reconstruction schemes for the advected velocity in the flux-form path
 # (config.momentum_flux_scheme; only used when momentum_advection="flux_form").
-VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered"})
+VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered", "upwind3"})
 # Stage-8 VERTICAL momentum-advection scheme (config.vertical_momentum_scheme),
 # independent of the HORIZONTAL momentum_advection dispatch above:
 #   "upwind_perturbation" (default, bit-identical) — 1st-order interface
@@ -2689,6 +2689,26 @@ def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
     return du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v
 
 
+def _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport):
+    """3rd-order upwind-biased face reconstruction (NEMO/ROMS UP3, kappa=1/3).
+
+    For a face straddled by cells (``adv_pos``, ``adv_neg``) with the next
+    cells outward (``far_pos`` beyond ``adv_pos``, ``far_neg`` beyond
+    ``adv_neg``), returns the upwind-biased face value selected by the sign of
+    ``transport``:
+
+        transport > 0:  (-far_pos + 5·adv_pos + 2·adv_neg) / 6
+        transport < 0:  ( 2·adv_pos + 5·adv_neg - far_neg) / 6
+
+    Reconstructs constants and linears exactly; the upstream bias supplies a
+    3rd-derivative (biharmonic-like) implicit dissipation. Silvestri et al.
+    2024 "UP3" = Oceananigans ``UpwindBiased(order=3)``.
+    """
+    pos = (-far_pos + 5.0 * adv_pos + 2.0 * adv_neg) / 6.0
+    neg = (2.0 * adv_pos + 5.0 * adv_neg - far_neg) / 6.0
+    return jnp.where(transport > 0.0, pos, neg)
+
+
 def _bc_horizontal_momentum_advection_flux_form(
     du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
 ):
@@ -2713,8 +2733,23 @@ def _bc_horizontal_momentum_advection_flux_form(
             "grids (the vertex-metric handling needs the 2D dx_v/dy_u fields). "
             "Use 'vector_invariant' on tripolar, or extend this substage."
         )
-    scheme = getattr(config, "momentum_flux_scheme", "upwind")
-    u.shape[1] - 1
+    scheme = config.momentum_flux_scheme
+
+    def _recon(adv_pos, adv_neg, transport, far_pos=None, far_neg=None):
+        """Reconstruct the advected velocity at a face.
+
+        ``adv_pos``/``adv_neg`` are the two cells straddling the face (upstream
+        side for transport>0 is ``adv_pos``). ``far_pos``/``far_neg`` are the
+        next cells outward (only used by "upwind3"): ``far_pos`` is beyond
+        ``adv_pos`` on the +flow upstream side, ``far_neg`` beyond ``adv_neg``.
+        """
+        if scheme == "centered":
+            return 0.5 * (adv_pos + adv_neg)
+        if scheme == "upwind3":
+            # 3rd-order upwind-biased (NEMO/ROMS UP3); see _up3_reconstruct.
+            return _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport)
+        # 1st-order upwind (default).
+        return jnp.where(transport > 0.0, adv_pos, adv_neg)
 
     # --- FV metrics (mirror divergence_cgrid) ---
     dy_u = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]            # (n_lat,1,1)
@@ -2736,7 +2771,10 @@ def _bc_horizontal_momentum_advection_flux_form(
     # ============ u-momentum at u-points (n_lat, n_lon+1) ============
     # x-flux at cell centres: transport_x_centre * u_advected_centre.
     Qx_c = 0.5 * (Q_u[:, :-1, :] + Q_u[:, 1:, :])                 # (n_lat,n_lon,nlev)
-    u_c = _upwind(u[:, :-1, :], u[:, 1:, :], Qx_c)               # west when Qx>0
+    # u advected to cell centre; periodic-lon 4-pt stencil for upwind3.
+    u_c = _recon(u[:, :-1, :], u[:, 1:, :], Qx_c,
+                 far_pos=jnp.roll(u[:, :-1, :], 1, axis=1),
+                 far_neg=jnp.roll(u[:, 1:, :], -1, axis=1))       # west when Qx>0
     Fx_uu = Qx_c * u_c                                           # (n_lat,n_lon,nlev)
     # divergence to u-points (periodic in lon): flux[centre J] - flux[centre J-1].
     _dx = Fx_uu - jnp.roll(Fx_uu, 1, axis=1)
@@ -2749,7 +2787,14 @@ def _bc_horizontal_momentum_advection_flux_form(
     # u to lat-faces (vertices): interior avg of adjacent u rows; poles unused (Qy=0 there).
     u_south = u[:-1, :, :]
     u_north = u[1:, :, :]
-    u_vtx_int = _upwind(u_south, u_north, Qy_vtx[1:-1, :, :])    # (n_lat-1,n_lon+1,nlev)
+    # Edge-padded (Neumann) 4-pt meridional stencil for upwind3. Boundary
+    # vertices where the stencil is incomplete are damped by Qy→0 at the poles.
+    u_pad = jnp.concatenate([u[:1, :, :], u, u[-1:, :, :]], axis=0)  # (n_lat+2,...)
+    n_lat_u = u.shape[0]
+    u_vtx_int = _recon(
+        u_south, u_north, Qy_vtx[1:-1, :, :],
+        far_pos=u_pad[0:n_lat_u - 1, :, :],
+        far_neg=u_pad[3:n_lat_u + 2, :, :])                     # (n_lat-1,n_lon+1,nlev)
     zero_row = jnp.zeros_like(u[:1, :, :])
     u_vtx = jnp.concatenate([zero_row, u_vtx_int, zero_row], axis=0)  # (n_lat+1,n_lon+1,nlev)
     Fy_vu = Qy_vtx * u_vtx                                       # (n_lat+1,n_lon+1,nlev)
@@ -2764,7 +2809,11 @@ def _bc_horizontal_momentum_advection_flux_form(
     # ============ v-momentum at v-points (n_lat+1, n_lon) ============
     # y-flux at cell centres: transport_y_centre * v_advected_centre.
     Qy_c = 0.5 * (Q_v[:-1, :, :] + Q_v[1:, :, :])               # (n_lat,n_lon,nlev)
-    v_c = _upwind(v[:-1, :, :], v[1:, :, :], Qy_c)              # south when Qy>0
+    v_pad = jnp.concatenate([v[:1, :, :], v, v[-1:, :, :]], axis=0)  # (n_lat+3,...)
+    n_v = v.shape[0]                                            # n_lat+1
+    v_c = _recon(v[:-1, :, :], v[1:, :, :], Qy_c,
+                 far_pos=v_pad[0:n_v - 1, :, :],
+                 far_neg=v_pad[3:n_v + 2, :, :])                # south when Qy>0
     Fy_vv = Qy_c * v_c                                          # (n_lat,n_lon,nlev)
     # divergence to v-points (interior lat-faces; poles are walls -> 0).
     net_merid_v_int = Fy_vv[1:, :, :] - Fy_vv[:-1, :, :]       # (n_lat-1,n_lon,nlev)
@@ -2781,7 +2830,9 @@ def _bc_horizontal_momentum_advection_flux_form(
     Qx_vtx = jnp.concatenate([zero_vtx, Qx_vtx_int, zero_vtx], axis=0)  # (n_lat+1,n_lon,nlev) at lon-faces
     # v to lon-faces (vertices), periodic: west/east centres are v[:, j-1], v[:, j].
     v_west = jnp.roll(v, 1, axis=1)
-    v_vtx = _upwind(v_west, v, Qx_vtx)                         # (n_lat+1,n_lon,nlev) west when Qx>0
+    v_vtx = _recon(v_west, v, Qx_vtx,
+                   far_pos=jnp.roll(v, 2, axis=1),
+                   far_neg=jnp.roll(v, -1, axis=1))            # (n_lat+1,n_lon,nlev) west when Qx>0
     Fx_uv = Qx_vtx * v_vtx                                     # at lon-faces 0..n_lon-1
     # v-cell (centre j) E face = vertex j+1, W face = vertex j (periodic).
     net_zonal_v = jnp.roll(Fx_uv, -1, axis=1) - Fx_uv          # (n_lat+1,n_lon,nlev)
