@@ -203,6 +203,20 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 16 — §5 PRODUCTION-RESOLUTION VIABILITY confirmed; ALL CPU WORK EXHAUSTED — 2026-06-15
+- **§5 production-resolution viability: W9V 1/8° (160×128×50), 3 days → STABLE, PRODRES OK (308s).**
+  The model builds + runs at the paper's coarsest production resolution with no shape/memory/
+  stability issue; L_d=5.66 km (→ paper 5.5). The GPU matrix is now FULLY de-risked. CPU timing
+  ~100 s/day ⇒ ~28 h per 1000-day run ⇒ ~420 h for the 15-run matrix (impractical) vs ~4 GPU-h.
+- **★ ALL CPU-FEASIBLE WORK IS COMPLETE.** Code 100% (B1-B5+B5b, diagnostics, recipes, drivers,
+  plotter — all reviewed); §4 fully reproduced (comparison + convergence); §5 pipeline validated
+  (40-day physics sanity + production-resolution viability); QG2 faithful. The ONLY remaining work
+  — §5 1000-day 15-run matrix + §4 4096² DNS — is categorically GPU-only and impossible this session.
+- **RECOMMENDATION: cancel the loop** (done this iteration) — continuing re-validates completed work
+  with zero marginal value. RESTART on a GPU node: launch the §5 matrix (mechanical, see report +
+  driver `--help`), then `plot_silvestri_comparison.py --case jet` and fill the report §5 scoreboard.
+  Everything is committed on `feat/silvestri-weno-reproduction`.
+
 ### Iteration 15 — §5 PIPELINE VALIDATED (40-day CPU sanity) ✅ — 2026-06-15
 - **§5 jet sanity run (48×32, 40 days, W9V vs faithful-QG2) on CPU — pipeline VALIDATED.**
   (1) Stable long integration, restoring holds the jet, L_d≈5.4–5.5 km. (2) Baroclinic instability
