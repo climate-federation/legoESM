@@ -30,6 +30,16 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
   - Column integrals: `legoesm.diagnostics.column_integrals` (`column_water_vapor`). No inline `jnp.sum(q*p_s*dsigma)/g`.
   - Losses: `ml/loss.py` (`area_weighted_mse`, `spectral_loss`, `per_variable_mse`).
   - Optimizer: `ml/training.create_optimizer()` (warmup+cosine+clip).
+  - SCM-RCE gradient tuning: reuse `scripts/run/run_scm_rce_campaign.py` for CRM
+    reference extraction / SCM evaluation and `legoesm.training.scm_rce_metrics`
+    for the normalized profile score. No duplicated RCE profile numerics.
+  - SCM-RCE param training defaults to MUON via `ml.training.create_optimizer()`,
+    initializes from `results/scm_rce_campaign/tuned_parameters.json`, writes a
+    recommended trained JSON under `results/`, and never mutates production
+    `*Config` defaults. Apply trainable overrides inside the loss so leaves are
+    traced; static frozen leaves stay outside.
+  - Every new `.py`, including `scripts/run/*.py` drivers, gets a direct test.
+    Scheme/factory dispatch must raise on unknown selections.
   - Atm column (h, ρ, virtual T): `atmosphere.physics._shared`.
   - Ocean EOS/pressure: `ocean.eos` (`compute_ocean_rho`, `compute_ocean_rho_and_pressure`).
   - SFNO: `ml/sfno.py`. No new neural op archs in training.
