@@ -10,18 +10,21 @@ Hardware: Ginsburg — CPU-MPI nodes (≤16 ranks/node policy, Gloo/TCP, no IB) 
 2× RTX8000 (PCIe, no NVLink).
 
 ## Highest ROI next
-1. **MPAS batched-halo repair** (ocean+atm) — `packages/core/legoesm/parallel/halo_exchange_voronoi.py:384`
-   `pack_batched_sends`/`unpack_batched_recvs`. Recover the known 18× opt-in
-   regression (435.9 vs 24.07 ms, I5 np8) then aim +10–30% CPU-MPI at high rank.
-   The largest remaining non-HW wall outside the shipped lat-lon MG. The shared
-   MPAS/Voronoi path still pays per-field/per-neighbour pack/scatter overhead;
-   attacks message COUNT without needing IB.
-2. **MPAS/Voronoi indirect-gather fusion** (ocean+atm GPU) —
-   `primitive_eq_mpas.py:186`, `ocean_pe_mpas.py:360`, `voronoi.py:938`
-   (`cellsOnEdge`/`edgesOnCell`/`edgesOnEdge`). +10–30% on RTX8000 icosahedral;
-   throughput is gather-bound (uncoalesced indirect addressing → many small
-   kernels), so fewer/fused gathers (or a Pallas kernel) is the next per-device
-   gain, not more scan wrapping.
+1. **MPAS batched-halo repair** (ocean+atm) — **DONE 2026-06-15.** The "18×
+   regression" was I5/f32-stale; current code is FASTER batched at every size
+   (I4/I5 f32 -12%/-5% job 8488057; I6 f64 np8/np16 -4.6%/-3.5% job 8488023).
+   Flipped `_USE_BATCHED_HALO` default 0→1 (batched now production default,
+   legacy opt-OUT). Gate 8488077 OK + codex-clean. ~4-12% on every MPAS/voronoi
+   run.
+2. **MPAS/Voronoi indirect-gather fusion** (ocean+atm GPU) — **MEASURED DEAD on
+   this HW 2026-06-15** (job 8488104). The go/no-go was a command-buffer A/B at
+   np1 (isolates per-device kernels): aggressive `FUSION,CUSTOM_CALL,CUBLAS,
+   CUDNN,COLLECTIVES` == default `FUSION,CUSTOM_CALL,COLLECTIVES` to noise (f32
+   11.03 vs 11.07 ms/step) ⇒ atm-ico is NOT dispatch-bound (already
+   well-fused; 96.5 Mcells/s ≈ per-device limit). Fusing the gathers (Pallas/
+   restructure) would not cut a dispatch wall that isn't there; the gathers are
+   bandwidth-bound, where fewer kernels don't reduce traffic. Skip on Ginsburg
+   (would need a much faster GPU to expose dispatch headroom).
 
 ## Ranked remaining
 3. METIS/default partition audit for MPAS — `voronoi_partition.py:204`,
