@@ -88,3 +88,45 @@ def test_momentum_only_bit_identical_du_dv():
         "dT_dt identical -> momentum_only did not actually skip tracer "
         "diffusion (vacuous flag)")
     assert float(np.max(np.abs(dT_f))) > 0.0, "full dT_dt is all-zero (test setup)"
+
+
+def test_precomputed_geom_density_bit_identical():
+    """#25: passing the frozen (J, h_k, rho_prime, p_prime_filled) bundle as
+    precomputed_geom_density yields BIT-IDENTICAL full tendencies (du/dv AND
+    dT/dS) vs recomputing it inline — proves compute_frozen_geom_density's
+    eta_safe derivation matches the in-fn one and the reuse is exact (the EOS +
+    pressure recompute is skipped in the RK3 momentum sub-stages)."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        compute_frozen_geom_density,
+    )
+    model, state = _model_and_state()
+    bundle = compute_frozen_geom_density(state, model.grid, model.z_coord,
+                                         model.config)
+    base = model.tendencies(state, surface_forcing=None, dt=_DT)
+    reuse = model.tendencies(state, surface_forcing=None, dt=_DT,
+                             precomputed_geom_density=bundle)
+    for fld in ("du_dt", "dv_dt", "dT_dt", "dS_dt"):
+        a = np.asarray(getattr(base, fld).data)
+        b = np.asarray(getattr(reuse, fld).data)
+        assert np.array_equal(a, b), (
+            f"{fld} not bit-identical with precomputed_geom_density: "
+            f"max|diff|={np.max(np.abs(a - b)):.3e} -> the helper derivation "
+            f"drifted from the in-fn stages 1-3")
+
+
+def test_momentum_only_plus_precomputed_du_dv_identical():
+    """The actual _mom_pert path: momentum_only=True AND precomputed_geom_
+    density together still give bit-identical du/dv vs the full recompute."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        compute_frozen_geom_density,
+    )
+    model, state = _model_and_state()
+    bundle = compute_frozen_geom_density(state, model.grid, model.z_coord,
+                                         model.config)
+    full = model.tendencies(state, surface_forcing=None, dt=_DT)
+    mp = model.tendencies(state, surface_forcing=None, dt=_DT,
+                          momentum_only=True, precomputed_geom_density=bundle)
+    assert np.array_equal(np.asarray(full.du_dt.data),
+                          np.asarray(mp.du_dt.data)), "du_dt differs (_mom_pert path)"
+    assert np.array_equal(np.asarray(full.dv_dt.data),
+                          np.asarray(mp.dv_dt.data)), "dv_dt differs (_mom_pert path)"

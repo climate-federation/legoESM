@@ -52,6 +52,7 @@ from legoesm.ocean.state import (
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
+    compute_frozen_geom_density,
     interp_to_v_points,
     interp_to_v_points_multi,
     centered_cell_to_uface,
@@ -1344,13 +1345,20 @@ class LatLonCGridOceanModel:
         return fdt_max
 
     def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None,
-                   sponge=None, dt=300.0, momentum_only=False):
+                   sponge=None, dt=300.0, momentum_only=False,
+                   precomputed_geom_density=None):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
         tendency for the RK3 momentum sub-stages, which discard dT_dt/dS_dt
         — bit-identical du_dt/dv_dt, fewer halos/compute (see
         ``latlon_cgrid_ocean_baroclinic_tendencies``).
+
+        ``precomputed_geom_density`` (a ``(J, h_k, rho_prime,
+        p_prime_filled)`` tuple from :func:`compute_frozen_geom_density`)
+        skips the EOS + baroclinic-pressure recompute (stages 1-3, frozen
+        across RK3 momentum sub-stages) — bit-identical, ~the dominant
+        per-substage cost (#25).
         """
         return latlon_cgrid_ocean_baroclinic_tendencies(
             state, self.grid, self.z_coord, self.config,
@@ -1361,6 +1369,7 @@ class LatLonCGridOceanModel:
             surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
             vertex_mask=self._vertex_mask,
             momentum_only=momentum_only,
+            precomputed_geom_density=precomputed_geom_density,
         )
 
     def tendencies_with_diagnostics(
@@ -1438,7 +1447,17 @@ class LatLonCGridOceanModel:
         mask_3d = state.land_mask.data[..., jnp.newaxis]
 
         # 1. Baroclinic tendencies (non-Coriolis)
-        tend = self.tendencies(state, surface_forcing, sponge=sponge, dt=dt)
+        # The geometry + density (EOS) + baroclinic pressure anomaly depend
+        # ONLY on eta/T/S, which are FROZEN across this step's stage-1 tendency
+        # AND the RK3 momentum sub-stages -> compute the bundle ONCE and reuse
+        # it everywhere (#25), so _bc_geometry_and_density (the EOS +
+        # pressure-anomaly recompute) runs 1x/step instead of 3x under RK3.
+        # Bit-identical (compute_frozen_geom_density mirrors the in-fn stages
+        # 1-3 derivation on the same frozen state; pinned by the parity gate).
+        _geom_density = compute_frozen_geom_density(
+            state, self.grid, self.z_coord, self.config)
+        tend = self.tendencies(state, surface_forcing, sponge=sponge, dt=dt,
+                               precomputed_geom_density=_geom_density)
 
         # AB2 "advective" scope (Veros-faithful): the DISSIPATIVE tendencies are
         # WITHHELD from tend.{du,dv,dT,dS}_dt and exposed on tend.{...}_diss so
@@ -1578,6 +1597,9 @@ class LatLonCGridOceanModel:
         if getattr(self.config, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
             v0 = state.v.data
+            # _geom_density (frozen EOS/pressure/geometry) computed once above
+            # for the stage-1 tendency; reused here for every RK3 momentum
+            # sub-stage (#25) so _bc_geometry_and_density is not recomputed.
 
             def _mom_pert(u_in, v_in):
                 st = state._replace(
@@ -1588,8 +1610,10 @@ class LatLonCGridOceanModel:
                 # sub-stages, so the tracer-diffusion tendency is recomputed
                 # identically and discarded here (only du/dv are used). Skip it
                 # -> bit-identical momentum, fewer halos/compute per sub-stage.
+                # precomputed_geom_density: reuse the frozen EOS/pressure (#25).
                 td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt,
-                                     momentum_only=True)
+                                     momentum_only=True,
+                                     precomputed_geom_density=_geom_density)
                 _du = td.du_dt.data
                 _dv = td.dv_dt.data
                 _Fu = jnp.sum(_du * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data

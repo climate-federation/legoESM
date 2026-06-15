@@ -1099,6 +1099,33 @@ def _bc_geometry_and_density(
     return J, h_k, rho_prime, p_prime_filled
 
 
+def compute_frozen_geom_density(state, grid, z_coord, config):
+    """``(J, h_k, rho_prime, p_prime_filled)`` from a state's eta/T/S.
+
+    The eta_safe derivation (mirrors :func:`latlon_cgrid_ocean_baroclinic_
+    tendencies` stages 1-3 verbatim) + :func:`_bc_geometry_and_density`.  These
+    outputs depend ONLY on eta, T, S (and static geometry), so they are
+    INVARIANT across the RK3 momentum sub-stages (which freeze eta/T/S and vary
+    only u/v) — compute once and pass as ``precomputed_geom_density`` to skip
+    the EOS + pressure-anomaly recompute in each ``_mom_pert`` call (#25).
+    Bit-identical to the inline path by construction (same derivation + same
+    pure ``_bc_geometry_and_density``); pinned by the parity gate."""
+    import jax.numpy as _jnp
+    T = state.T.data
+    S = state.S.data
+    eta = state.eta.data
+    H_bathy = state.H_bathy.data
+    mask = state.land_mask.data
+    g_val = config.g
+    rho_0 = config.rho_0
+    min_water_col = _jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
+    eta_floor = min_water_col - H_bathy
+    eta_safe = _jnp.maximum(eta, eta_floor) * mask
+    return _bc_geometry_and_density(
+        eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
+    )
+
+
 def _bc_vertical_and_depthmean_velocity(
     h_k, u, v, u_mask_3d, v_mask_3d, grid, z_coord, u_mask, v_mask,
 ):
@@ -2786,6 +2813,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     surface_tracer_forcing_fn=None,
     vertex_mask=None,
     momentum_only: bool = False,
+    precomputed_geom_density=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -2856,9 +2884,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
     # --- Stages 1-3: geometry (J, h_k) + density (rho_prime) + baroclinic
     # pressure anomaly (p_prime_filled). ---
-    J, h_k, rho_prime, p_prime_filled = _bc_geometry_and_density(
-        eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
-    )
+    # These depend only on eta/T/S (frozen across RK3 momentum sub-stages), so
+    # _mom_pert passes them precomputed to skip the EOS + pressure-anomaly
+    # recompute (#25).  Bit-identical: same pure _bc_geometry_and_density on the
+    # same frozen inputs (compute_frozen_geom_density mirrors the eta_safe
+    # derivation above).
+    if precomputed_geom_density is not None:
+        J, h_k, rho_prime, p_prime_filled = precomputed_geom_density
+    else:
+        J, h_k, rho_prime, p_prime_filled = _bc_geometry_and_density(
+            eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
+        )
 
     # --- Stages 4-4b: vertical velocity (w), face thicknesses (h_u, h_v),
     # per-layer flux divergence, and perturbation velocities. ---
