@@ -107,3 +107,47 @@ def test_unwrapped_body_inside_outer_shardmap_matches_wrapped(mesh):
             np.asarray(sw.data), np.asarray(sb.data),
             err_msg="unwrapped body != wrapped exchange")
     assert out_body.shape == (6, KT * out_blk, KT * out_blk)
+
+
+def test_ndim4_body_matches_ndim3_per_level(mesh):
+    """The 4D in-stage SCALAR halo (ndim=4) — used by the tiled
+    ``fv3_hydrostatic_tendencies`` MOMENTUM stage to exchange the cc
+    intermediates {zeta, B, 1/T, ln_ps, hf} — must equal the proven ndim=3
+    horizontal halo applied INDEPENDENTLY per vertical level (the halo is
+    purely horizontal, so it broadcasts over the trailing nlev axis).  This
+    pins the never-before-exercised ndim=4 ``make_tiled_pad_body`` (incl. the
+    offset cross-face Lagrange interp broadcast over the trailing axis) BEFORE
+    the momentum capstone relies on it.  C=3 (>1) catches a trailing-axis bug a
+    C=1 lane would hide; the momentum stage uses BOTH C=nlev and C=1 (ln_ps)."""
+    C = 3
+    rng = np.random.default_rng(3)
+    ref4 = jnp.asarray(rng.standard_normal((6, N, N, C)))
+    offs = jnp.asarray(compute_halo_interp_offsets(N))
+    sh4 = NamedSharding(mesh, P("face", "tile_i", "tile_j", None))
+    sh3 = NamedSharding(mesh, P("face", "tile_i", "tile_j"))
+    ref4_sh = jax.device_put(ref4, sh4)
+
+    body4 = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
+    body3 = make_tiled_pad_body(mesh, ndim=3, halo=1, with_offsets=True)
+    out_blk = NL + 2
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(P("face", "tile_i", "tile_j", None), P()),
+             out_specs=P("face", "tile_i", "tile_j", None), check_vma=False)
+    def _stage4(local_shard, o):
+        return body4(local_shard[0], o)[None]
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(P("face", "tile_i", "tile_j"), P()),
+             out_specs=P("face", "tile_i", "tile_j"), check_vma=False)
+    def _stage3(local_shard, o):
+        return body3(local_shard[0], o)[None]
+
+    out4 = _stage4(ref4_sh, offs)              # (6, KT*out_blk, KT*out_blk, C)
+    assert out4.shape == (6, KT * out_blk, KT * out_blk, C)
+    for k in range(C):
+        ref3_sh = jax.device_put(ref4[..., k], sh3)
+        out3 = _stage3(ref3_sh, offs)
+        np.testing.assert_array_equal(
+            np.asarray(out4)[..., k], np.asarray(out3),
+            err_msg=f"ndim=4 halo level {k} != ndim=3 halo of that level")

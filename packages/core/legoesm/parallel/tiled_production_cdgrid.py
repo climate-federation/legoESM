@@ -20,6 +20,7 @@ from __future__ import annotations
 from functools import partial
 
 import jax
+import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 try:  # JAX >= 0.8 top-level export
@@ -698,6 +699,198 @@ def make_tiled_bernoulli_stage_2d(mesh, coord, n: int, kt: int):
                 f"v_d={v_d.shape[1:3]}, T={T.shape[1:3]}, p_s={p_s.shape[1:3]}, "
                 f"phis={phis.shape[1:3]}")
         return _body(u_d, v_d, T, p_s, phis)
+
+    return stage
+
+
+# ---------------------------------------------------------------------------
+# P-3D-momentum COMPOSED stage: the full ``fv3_hydrostatic_tendencies`` D-grid
+# MOMENTUM path (du_d_dt, dv_d_dt) — the 3D analogue of the SW momentum
+# capstone, and the genuine 3D >6-device unlock.  Replicates
+# ``primitive_eq_cdgrid.py:307-479`` base case (div_damp=0, hyperdiff=0,
+# corner_div_damp=0, KE-heat off, non-duogrid, use_fv3_a2b_zeta_corner=False):
+#   dgrid_to_center_vector -> Phi -> B=KE+Phi ; dgrid_vorticity(u_d,v_d) -> zeta
+#   -> [PACKED SCALAR in-stage halo {zeta, B, inv_T, ln_ps(, hf)}]
+#   -> interp_center_to_corner(zeta)+f_corner ; arakawa_lamb_gradient(B)
+#   -> PGF: arakawa_lamb_gradient(ln_ps_hi) + T_corner=1/interp(inv_T) [+ hf]
+#   -> du_d_dt = zeta_corner*v_d - dB_dx - pg_corr_x  (dv symmetric).
+# UNLIKE the SW momentum, the 3D-PE momentum lives at the D-grid CORNERS
+# ``(n+1, n+1)`` (u_d/v_d ARE corner winds) and needs NO vector halo — only the
+# cc-field SCALAR halos (the in-stage analogue of the production's
+# ``packed_pad_halo_4d`` stage pack).  All intermediates (B, zeta, inv_T, ln_ps,
+# hf) have NO global pre-pad, so they are halo-exchanged WITHIN the shard_map via
+# the unwrapped ``make_tiled_pad_body`` (ndim=4 — the 4D in-stage scalar halo,
+# whose bit-identity to ``pad_halo_4d`` is pinned by test_tiled_pad_body's ndim=4
+# lane).  The PGF higher-precision cast (``_pg_dt``) is replicated verbatim so the
+# stage is faithful at any dtype; in the x64 gate it is a no-op.
+# ---------------------------------------------------------------------------
+
+def make_tiled_fv3_hydrostatic_momentum_stage_2d(mesh, cdgrid, coord, n: int,
+                                                 kt: int, nlev: int):
+    """Build the sharded tiled ``fv3_hydrostatic_tendencies`` D-grid MOMENTUM
+    stage on a ``(6, kt, kt)`` mesh (axes ``("face","tile_i","tile_j")``).
+
+    Returns ``stage(u_d, v_d, T, p_s, phis) -> (du_d_dt, dv_d_dt)`` where the
+    state inputs are FACE-SHARDED, TILE-REPLICATED (``P("face",None,None,...)``):
+    ``u_d``/``v_d`` D-grid CORNER winds ``(6, n+1, n+1, nlev)``, ``T``
+    ``(6, n, n, nlev)`` cc, ``p_s``/``phis`` ``(6, n, n)`` cc.  Both outputs are
+    corner-staggered tiles ``P("face","tile_i","tile_j",None)``; gathered
+    ``(6, kt*(nl+1), kt*(nl+1), nlev)`` reassemble lower-owns-shared (drop the
+    duplicated shared corner face) to ``(6, n+1, n+1, nlev)``.
+
+    Base cut (matches ``primitive_eq_cdgrid.py`` defaults): orthogonal-rotation
+    (non-duogrid) only; div_damp=0, hyperdiff=0, corner_div_damp=0, KE-heat off,
+    ``use_fv3_a2b_zeta_corner=False``.  All static metrics pass as face-sharded
+    shard_map inputs (NEVER closed over a full ``(6,...)`` array — that
+    broadcasts the output back to face extent 6, the codex U4a HIGH).  ``coord``
+    (sigma OR hybrid; 1-D vertical arrays) is closed over and the geopotential /
+    hybrid-factor cores are dispatched on its type.  No new numerics.
+    """
+    from legoesm import constants
+    from legoesm.core.operators_cdgrid import (
+        dgrid_to_center_vector, dgrid_vorticity_core, arakawa_lamb_gradient_core,
+        interp_center_to_corner)
+    from legoesm.core.precision import resolve_dtype
+    from legoesm.grids.vertical import (
+        compute_geopotential, compute_geopotential_hybrid,
+        HybridSigmaPressureCoordinate, pressure_from_hybrid)
+    from legoesm.parallel.cubesphere_exchange import make_tiled_pad_body
+
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    if getattr(cdgrid, "n", n) != n:
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_momentum_stage_2d: n={n} != "
+            f"cdgrid.n={cdgrid.n}")
+    grid = cdgrid.base
+    if grid.duogrid is not None:
+        raise ValueError(
+            "make_tiled_fv3_hydrostatic_momentum_stage_2d: base cut supports "
+            "the orthogonal-rotation (non-duogrid) cube only; the in-stage "
+            "scalar halo does not yet carry the duogrid kinked->extended remap.")
+    # codex MED: guard the CLOSED-OVER vertical coord against nlev.  A wrong
+    # singleton-level coord (n_levels=1) would broadcast SILENTLY through
+    # _geo(...)/pressure_from_hybrid(...)/coord.B_full*... and produce plausible
+    # but wrong tendencies (the state shape guard below only checks the 4D
+    # trailing nlev of u_d/v_d/T, not the coord's vertical extent).
+    if getattr(coord, "n_levels", nlev) != nlev:
+        raise ValueError(
+            f"make_tiled_fv3_hydrostatic_momentum_stage_2d: coord.n_levels="
+            f"{coord.n_levels} != nlev={nlev}")
+    nl = n // kt
+    R_d = constants.R_d
+    _hybrid = isinstance(coord, HybridSigmaPressureCoordinate)
+    _geo = compute_geopotential_hybrid if _hybrid else compute_geopotential
+
+    # Static metrics (face-sharded, tile-replicated -> sliced per tile).
+    cosa_corner = cdgrid.cosa_corner               # (6, n+1, n+1)
+    dx_edge_y, dy_edge_x = cdgrid.dx_edge_y, cdgrid.dy_edge_x  # (6,n,n+1)/(6,n+1,n)
+    area = grid.area                               # (6, n, n)
+    gc00, gc01 = cdgrid.grad_c00, cdgrid.grad_c01  # (6, n+1, n+1)
+    gc10, gc11 = cdgrid.grad_c10, cdgrid.grad_c11
+    f_corner = cdgrid.f_corner                     # (6, n+1, n+1)
+    offsets = grid.halo_interp_offsets             # (6, 4, n) — non-duogrid
+
+    # Unwrapped in-stage SCALAR halo body (ndim=4: global field rank 4, the
+    # per-device tile is 3-D (nl, nl, C)).  Built once; called per cc-field.
+    scalar_body = make_tiled_pad_body(mesh, ndim=4, halo=1, with_offsets=True)
+
+    fo = P("face", None, None)                     # 2D-face metric / cc 2D
+    fw = P("face", None, None, None)               # 4D state (u_d, v_d, T)
+    cz = P("face", "tile_i", "tile_j", None)       # 4D corner outputs
+
+    @partial(shard_map, mesh=mesh,
+             in_specs=(fw, fw, fw, fo, fo)          # u_d, v_d, T, p_s, phis
+                       + (fo,) * 4                  # cosa_corner, dxe, dye, area
+                       + (fo,) * 4                  # gc00..gc11
+                       + (fo,)                      # f_corner
+                       + (P(),),                    # offsets (replicated)
+             out_specs=(cz, cz), check_vma=False)
+    def _body(u_d, v_d, T, p_s, phis,
+              cosa_c, dxe, dye, ar,
+              c00, c01, c10, c11, fco, offs):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s(arr, si, sj):
+            """Tile slice of a face-shard at (a_i, a_j) -> (1, si, sj[, C])."""
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, si, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, sj, axis=2)
+
+        # ---- (1/3/5) Bernoulli B = KE + Phi (cc-local, NO halo) ----
+        u_d_t = _s(u_d, nl + 1, nl + 1)        # (1, nl+1, nl+1, nlev) corner
+        v_d_t = _s(v_d, nl + 1, nl + 1)
+        T_t = _s(T, nl, nl)                    # (1, nl, nl, nlev) cc
+        p_s_t = _s(p_s, nl, nl)                # (1, nl, nl) cc
+        phis_t = _s(phis, nl, nl)
+        u_cell, v_cell = dgrid_to_center_vector(u_d_t, v_d_t)   # (1, nl, nl, nlev)
+        Phi = _geo(T_t, p_s_t, coord, phis_t)
+        B = 0.5 * (u_cell ** 2 + v_cell ** 2) + Phi            # (1, nl, nl, nlev)
+
+        # ---- (6) relative vorticity (cc-local from corner winds, NO halo) ----
+        zeta = dgrid_vorticity_core(
+            u_d_t, v_d_t, _s(cosa_c, nl + 1, nl + 1),
+            _s(dxe, nl, nl + 1), _s(dye, nl + 1, nl),
+            _s(ar, nl, nl))                    # (1, nl, nl, nlev)
+
+        # ---- cc-field SCALAR fields packed by the production stage halo ----
+        inv_T = 1.0 / T_t                      # (1, nl, nl, nlev)
+        ln_ps = jnp.log(p_s_t)                 # (1, nl, nl)
+        # PGF higher precision (primitive_eq_cdgrid.py:452-453): cast BEFORE the
+        # halo so the padded ln_ps matches the single-device reference's
+        # pad_halo_auto(ln_ps_hi).  No-op when ln_ps is already _pg_dt (x64).
+        _pg_dt = jnp.result_type(
+            ln_ps.dtype, resolve_dtype("atm_pressure_gradient", "compute"))
+        ln_ps_3d = ln_ps.astype(_pg_dt)[..., None]             # (1, nl, nl, 1)
+
+        # ---- in-stage SCALAR halos (ndim=4 pad body; per cc-field) ----
+        # Each is bit-identical to the global op's internal pad_halo_auto (the
+        # single-device reference path); coalescing them into one collective is
+        # a perf-only optimisation that does NOT change the padded values.
+        B_pad = scalar_body(B[0], offs)[None]                  # (1, nl+2, nl+2, nlev)
+        zeta_pad = scalar_body(zeta[0], offs)[None]
+        invT_pad = scalar_body(inv_T[0], offs)[None]
+        lnps_pad = scalar_body(ln_ps_3d[0], offs)[None]        # (1, nl+2, nl+2, 1)
+
+        # ---- (6) zeta_corner = interp(zeta) + f_corner ----
+        zeta_corner = (interp_center_to_corner(zeta_pad, cdgrid, padded=zeta_pad)
+                       + _s(fco, nl + 1, nl + 1)[..., None])   # (1, nl+1, nl+1, nlev)
+
+        # ---- (7) Bernoulli gradient at D-grid corners (Arakawa-Lamb) ----
+        gc = (_s(c00, nl + 1, nl + 1), _s(c01, nl + 1, nl + 1),
+              _s(c10, nl + 1, nl + 1), _s(c11, nl + 1, nl + 1))
+        dB_dx, dB_dy_perp = arakawa_lamb_gradient_core(B_pad, *gc)
+
+        # ---- (8) pressure-gradient correction at D-grid corners ----
+        dln_dx_hi, dln_dy_perp_hi = arakawa_lamb_gradient_core(lnps_pad, *gc)
+        T_corner = 1.0 / interp_center_to_corner(invT_pad, cdgrid, padded=invT_pad)
+        T_corner_hi = T_corner.astype(_pg_dt)
+        # dln_*_hi already carries the trailing axis (lnps_pad is (...,1)), so the
+        # production's `dln_dx_hi[..., None]` is implicit here.
+        pg_corr_x = (R_d * T_corner_hi * dln_dx_hi).astype(u_d_t.dtype)
+        pg_corr_y_perp = (R_d * T_corner_hi * dln_dy_perp_hi).astype(v_d_t.dtype)
+        if _hybrid:
+            # grad_eta(ln p) = (B_full*p_s/p) * grad(ln p_s) — hybrid coord.
+            p_full = pressure_from_hybrid(coord, p_s_t)        # (1, nl, nl, nlev)
+            hf = coord.B_full * p_s_t[..., None] / p_full      # (1, nl, nl, nlev)
+            hf_pad = scalar_body(hf[0], offs)[None]
+            hf_corner = interp_center_to_corner(hf_pad, cdgrid, padded=hf_pad)
+            pg_corr_x = pg_corr_x * hf_corner
+            pg_corr_y_perp = pg_corr_y_perp * hf_corner
+
+        # ---- (9) D-grid momentum tendencies (corner-located, pointwise) ----
+        du_d_dt = zeta_corner * v_d_t - dB_dx - pg_corr_x      # (1, nl+1, nl+1, nlev)
+        dv_d_dt = -zeta_corner * u_d_t - dB_dy_perp - pg_corr_y_perp
+        return du_d_dt, dv_d_dt
+
+    def stage(u_d, v_d, T, p_s, phis):
+        # 4D state carries the trailing nlev (checked); p_s/phis are 2D cc.
+        _check_shapes(n, u_d=(u_d, (n + 1, n + 1, nlev)),
+                      v_d=(v_d, (n + 1, n + 1, nlev)), T=(T, (n, n, nlev)),
+                      p_s=(p_s, (n, n)), phis=(phis, (n, n)))
+        return _body(u_d, v_d, T, p_s, phis,
+                     cosa_corner, dx_edge_y, dy_edge_x, area,
+                     gc00, gc01, gc10, gc11, f_corner, offsets)
 
     return stage
 
