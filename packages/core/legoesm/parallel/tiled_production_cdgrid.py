@@ -407,6 +407,67 @@ def make_tiled_compute_geopotential_hybrid_stage_2d(mesh, coord, n: int, kt: int
 
 
 # ---------------------------------------------------------------------------
+# P-3D-massflux-hybrid: compute_mass_flux_hybrid (vertical mass flux at
+# half-levels on the HYBRID coord).  Takes the already-3D horizontal divergence
+# ``div_3d`` (F,n,n,nlev) + ``p_s`` (F,n,n); every op is along the LEVEL axis
+# (``dp_from_hybrid`` is per-column, cumsum over levels, frac_B from
+# ``coord.B_half``) — NO horizontal stencil, so it tiles EXACTLY like
+# geopotential.  TWO cc-local outputs: ``mass_flux`` (F,nl,nl,nlev+1) +
+# ``D_total_p`` (F,nl,nl,1), vertical REPLICATED.  ``coord`` closed over.
+# ---------------------------------------------------------------------------
+
+def compute_mass_flux_hybrid_tile_2d(div_3d, p_s, coord, a_i, a_j, nl: int):
+    """Per-tile ``compute_mass_flux_hybrid`` (3D PE, hybrid coord).  Slices the
+    cc tile ``[a:a+nl]`` (no halo; cc partitions exactly) and runs the
+    per-column vertical mass-flux integration; returns ``(mass_flux
+    (F,nl,nl,nlev+1), D_total_p (F,nl,nl,1))``.  Mirrors
+    :func:`compute_geopotential_hybrid_tile_2d`; only the core differs."""
+    from legoesm.grids.vertical import compute_mass_flux_hybrid
+
+    if div_3d.shape[1] != div_3d.shape[2] or p_s.shape[1:3] != div_3d.shape[1:3]:
+        raise ValueError(
+            f"compute_mass_flux_hybrid_tile_2d: div_3d cc-square + p_s matching "
+            f"horizontal; got div_3d={div_3d.shape[1:3]}, p_s={p_s.shape[1:3]}")
+
+    def _s2(arr):
+        arr = jax.lax.dynamic_slice_in_dim(arr, a_i, nl, axis=1)
+        return jax.lax.dynamic_slice_in_dim(arr, a_j, nl, axis=2)
+
+    return compute_mass_flux_hybrid(_s2(div_3d), _s2(p_s), coord)
+
+
+def make_tiled_compute_mass_flux_hybrid_stage_2d(mesh, coord, n: int, kt: int):
+    """Sharded ``compute_mass_flux_hybrid`` on a ``(6, kt, kt)`` mesh.
+    ``stage(div_3d, p_s) -> (mass_flux, D_total_p)``; ``div_3d`` 4D
+    ``(6,n,n,nlev)`` + ``p_s`` 2D cc FACE-REPLICATED; both outputs tile-sharded
+    (exact cc partition, vertical replicated).  ``coord`` closed over."""
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    nl = n // kt
+    fo = P("face", None, None)                 # 2D cc (p_s)
+    fw = P("face", None, None, None)           # 4D div_3d
+    cz = P("face", "tile_i", "tile_j", None)   # 4D out (mass_flux + D_total_p)
+
+    @partial(shard_map, mesh=mesh, in_specs=(fw, fo), out_specs=(cz, cz),
+             check_vma=False)
+    def _body(div_3d, p_s):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return compute_mass_flux_hybrid_tile_2d(div_3d, p_s, coord,
+                                                a_i, a_j, nl)
+
+    def stage(div_3d, p_s):
+        if div_3d.shape[1:3] != (n, n) or p_s.shape[1:3] != (n, n):
+            raise ValueError(
+                f"compute_mass_flux_hybrid stage: div_3d/p_s must be cc "
+                f"(n,n)={(n, n)}; got div_3d={div_3d.shape[1:3]}, "
+                f"p_s={p_s.shape[1:3]}")
+        return _body(div_3d, p_s)
+
+    return stage
+
+
+# ---------------------------------------------------------------------------
 # P-ii: the two production 4-point box interps.
 #   interp_corner_to_center (corner -> cc): PURELY LOCAL (cc cell reads its 2x2
 #     corner block) — like dgrid_vorticity, no halo, exact cc partition.
