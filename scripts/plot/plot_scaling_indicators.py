@@ -49,6 +49,9 @@ PANELS = [
      "higher = more fv3_hydrostatic ops sub-face-tiled", None),
     ("Ocean RK3 momentum overhead (ms)", "rk3_overhead_ms",
      "lower better (per-step compute; reuse frozen EOS/pressure)", None),
+    ("Ocean barotropic reductions/step", "baro_reductions_per_step",
+     "lower better (jacobi120-unconverged vs banded-MG24; weak Amdahl term)",
+     None),
 ]
 
 
