@@ -1389,5 +1389,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # sole lateral friction. Coefficients live in ``omp25`` (OMp25Config).
     lateral_friction_scheme: str = "none"
     omp25: object = None   # OMp25Config or None (defaults to OMp25Config() when scheme="om4p25")
-    qg_leith_coeff: float = 2.0   # QG-Leith coefficient C (Silvestri QG2: C=2); used when
-    #   lateral_friction_scheme="qg_leith". HARMONIC ν=(C·Δ/π)³·√(|∇(ζ+f)|²+|∇δ|²).
+    qg_leith_coeff: float = 2.0   # BAROTROPIC QG-Leith coefficient C (paper QG2 uses C=2);
+    #   used when lateral_friction_scheme="qg_leith". HARMONIC ν=(C·Δ/π)³·√(|∇(ζ+f)|²+|∇δ|²).
+    #   NOTE: this omits the baroclinic stretching term ∂_z(f/N²∇b) — it APPROXIMATES the
+    #   paper's QG2; a comparison matrix must label it "QG-Leith (barotropic)" not "QG2" (B5b).

@@ -2429,9 +2429,12 @@ def qg_leith_viscosity_tendency_cgrid(
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """QG-Leith eddy viscosity (Bachman et al. 2017; Silvestri et al. 2024
-    "QG2") — a HARMONIC (Laplacian) viscosity scaling with the potential-
-    vorticity gradient:
+    """BAROTROPIC QG-Leith eddy viscosity — an APPROXIMATION of the Silvestri
+    et al. 2024 "QG2" / Bachman et al. 2017 closure with the baroclinic
+    stretching term OMITTED (see LIMITATION below). A paper-comparison matrix
+    must label this "QG-Leith (barotropic)", NOT "QG2", until the stretching is
+    wired in (tracked as B5b). A HARMONIC (Laplacian) viscosity scaling with the
+    BAROTROPIC potential-vorticity gradient:
 
         nu = (C·Δ/π)³ · sqrt(|∇Q|² + |∇δ|²)
 

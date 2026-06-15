@@ -142,6 +142,19 @@ class TestBoundQGPVGradient:
         out = float(bound_qg_pv_gradient(grad_q, grad_q_stretch, Bu, Ro))
         assert abs(out - 1.0) < 1e-6, out       # min ≈ 1 (no bound)
 
+    def test_array_elementwise(self):
+        """The bound is elementwise over fields (the wired form takes 2D/3D
+        gradient + Bu/Ro arrays)."""
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import bound_qg_pv_gradient
+        grad_q = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+        stretch = jnp.array([[10.0, 2.0], [3.0, 100.0]])   # large at [0,0] and [1,1]
+        Bu = jnp.array([[1.0, 1e6], [1e6, 1.0]])
+        Ro = jnp.array([[1.0, 1e6], [1e6, 1.0]])
+        out = np.asarray(bound_qg_pv_gradient(grad_q, stretch, Bu, Ro))
+        # [0,0]: min(10, 1·2, 1·2)=2 ; [0,1]: min(2,2,2)=2 ; [1,0]: min(3,3,3)=3 ;
+        # [1,1]: min(100, 4·2, 4·2)=8.
+        assert np.allclose(out, [[2.0, 2.0], [3.0, 8.0]]), out
+
 
 def test_config_dispatch_and_full_step():
     """lateral_friction_scheme='qg_leith' builds, validates, full step finite."""

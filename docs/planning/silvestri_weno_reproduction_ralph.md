@@ -116,6 +116,16 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 - [ ] **B5. QG-Leith viscosity (QG2)**: NEW operator `ν=(CΔ/π)³√(∂Q²+∂δ²)`, ∂Q² bounded by the
   three q-gradient terms (Eq A2–A3), reverts to 2D Leith where QG breaks; C=2. As a scheme + `*Config`.
   Unit test + physics contract. (Ref: `.../qg_leith_viscosity.jl`.)
+- [ ] **B5b. FULL QG2 stretching term (REQUIRED before labeling the matrix case "QG2")**: thread
+  buoyancy/N² (`rho_prime`+`h_k` ARE available in the enclosing tendency fn, just not passed to
+  `_bc_horizontal_viscosity`) into the QG-Leith path; compute the baroclinic PV stretching
+  `∂_z(f/N²∇b)` (vector), form `∇q₁=∇q+stretch`, and activate `bound_qg_pv_gradient`
+  (`min(|∇q₁|,|∇q₂|,|∇q₃|)`, Bu=Δ²/L_d², Ro=V/(|f|Δ)). The helper is built + tested; only the
+  buoyancy wiring + the vector stretching computation remain. Until B5b lands, the QG2 matrix case
+  MUST be labeled **"QG-Leith (barotropic)"**, not "QG2" (B5 review SHOULD-FIX). Adversarial-review
+  finding: the stretching is omitted exactly where it matters most (the baroclinic jet), and at
+  coarse res the β-floor dominates → the barotropic form behaves as a smooth meridional background
+  viscosity. So B5b is needed for a faithful QG2 comparison.
 - [ ] **B6. WENO-K KE gradient (refinement, optional)**: `ke_gradient_scheme="weno"` for full W9V
   faithfulness. Low priority (paper: minimal impact).
 - [ ] **B7. WENO9 tracer (optional)**: expose `weno9_to_u/v_points` + vertical. Paper uses WENO7
@@ -192,6 +202,34 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 ---
 
 ## PROGRESS LOG (append every iteration — newest on top)
+
+### Iteration 6 — B5 DONE (QG-Leith barotropic = QG2-approx); PHASE 1 BUILDING BLOCKS COMPLETE — 2026-06-15
+- **B5 COMPLETE + adversarially reviewed + committed** (`feat(ocean): QG-Leith harmonic viscosity`).
+  `lateral_friction_scheme="qg_leith"`: HARMONIC ν=(C·Δ/π)³·√(|∇(ζ+f)|²+|∇δ|²), C=`qg_leith_coeff`
+  (QG2: 2.0), applied via the energy-stable stress operator. Faithfully distinct from the existing
+  biharmonic `C_leith`: harmonic, ABSOLUTE vorticity ∇(ζ+f), /π³ normalization. `bound_qg_pv_gradient`
+  helper (Bu/Ro min-bound) built + tested, ready for B5b.
+- **Adversarial review: NO correctness blockers** — energy dissipation (dE/dt<0, 6 seeds), broadcast
+  of f_v onto (n_lat+1,n_lon+1,nlev) correct, units m²/s, sign correct (added, harmonic), validation +
+  double-friction guard + AD all verified, `constants.Omega` (not a literal). **One SHOULD-FIX
+  (faithfulness LABELING, applied):** what ships is BAROTROPIC QG-Leith (stretching omitted) — labeling
+  it "QG2" in a matrix would misattribute. Strengthened the docstring/config to say "barotropic /
+  approximation of QG2"; recorded **B5b** (thread buoyancy → full QG2 stretching) as REQUIRED before
+  the QG2 matrix run. NIT (boundary-vertex lat) declined: my `lat_v` exactly matches the established
+  repo convention (operators lines 1172/1236). NIT (array bound test) applied.
+- Tests: 10 (new leaf-module) — rest-zero, energy-dissipation, absolute-vorticity β-floor (ratio~2 =
+  linear, distinct from relative-only Leith), AD, bound-helper scalar+array min, full-step QG2 dispatch,
+  double-friction reject. 79 guardrail/recipe green.
+- **★ PHASE 1 (scheme building blocks) COMPLETE: W9V ✅ W9D ✅ UP3 ✅ SM2 ✅ QG2(barotropic) ✅.**
+  All 5 paper schemes are selectable, each adversarially reviewed (codex unavailable → skeptical
+  subagent each time; all clean or with applied fixes). Caveats tracked: B5b (full QG2 stretching),
+  B6 (WENO-K refinement, optional), point-to-cellavg order-8 cap shared with weno7.
+- **NEXT: PHASE 2 — diagnostics (D1-D7).** D7 (deformation radius) EXISTS
+  (`ocean/diagnostics.py::first_baroclinic_deformation_radius`). Build/verify: D1 relative vorticity,
+  D2 KE/enstrophy integrals, D3 eddy decomposition + EKE/TKE/eddy-APE, D4 w'b' cospectrum, D5 zonal
+  energy/enstrophy spectra (reuse `run_eady_rebuilt.py::_zonal_spectrum` + `ocean/diagnostics.py`
+  isotropic spectra), D6 zonal-mean buoyancy. Each with a unit test. Read the existing
+  `ocean/diagnostics.py` FIRST (isotropic_energy/enstrophy_spectrum already exist).
 
 ### Iteration 5 — B4 DONE (OM4p25 Smagorinsky = SM2) — 2026-06-15
 - **B4 COMPLETE + adversarially reviewed + committed** (`feat(ocean): OM4p25 lateral-friction
