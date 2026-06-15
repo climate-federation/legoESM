@@ -64,6 +64,20 @@ Parent effort: PR #475, `docs/ocean_experiments/silvestri_weno_reproduction.md`,
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 3 — D2: the Eady backstop A_h=1000+C_smag=0.1 STABILIZES §5 + keeps eddies — 2026-06-15
+- **D2 (48×32×50, CPU):** weno9 + **A_h=1000 + C_smag=0.1** → **STABLE to 55 days, max|u|→0.2**
+  (eddies developing — NOT the over-damped 0.05 of A_h=5e4). Compare: un-damped weno9 blows day 39;
+  A_h=5e4 stable-but-dead. So A_h=1000+C_smag=0.1 is the sweet spot (the SAME Eady min-dissipation
+  recipe), and it's the path to §5 results: run the WENO schemes with this backstop.
+- **FAITHFULNESS COST (record honestly):** the paper's W9V has NO explicit closure (relies on the
+  WENO implicit dissipation). legoESM's weno9 needs the A_h+C_smag backstop → "stabilized WENO", not
+  purely faithful. This IS the legoESM finding (its WENO under-dissipates vs Oceananigans) — a real,
+  documentable result, not a reproduction failure to hide.
+- **NEXT: confirm the backstop at 160×128 (GPU)** where un-damped blows at day 11 (the 48×32 was a
+  late/borderline blowup at day 39; 160×128 is the real test). Then wire the backstop into the §5
+  config/recipe (a `stabilize` option) + run the matrix. Also check SM2/QG2 (do they need a backstop
+  too, or is their closure enough at the right strength?). Both GPUs were externally busy during D1/D2.
+
 ### Iteration 2 — D1 ANSWERED: setup is SOUND, blowup = insufficient dissipation — 2026-06-15
 - **D1 DONE (CPU, 48×32×50 — both GPUs externally busy).** Two probes at the same grid:
   - UN-DAMPED faithful weno9 (A_h=0, C_smag=0): **BLEW UP day 39** (max|u| 0.06→0.6 over 30d, then
