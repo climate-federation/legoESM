@@ -926,17 +926,18 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_LATERAL_FRICTION_SCHEME)}, "
                 f"got {config.lateral_friction_scheme!r}",
             )
-        # OM4p25 is the SOLE lateral friction (Silvestri SM2) — it is ADDITIVE to
-        # the A_h/B_h/C_smag/C_leith blocks, so combining them double-applies
-        # friction. Fail loudly rather than silently over-damp.
-        if config.lateral_friction_scheme == "om4p25" and any(
+        # OM4p25 / QG-Leith are the SOLE lateral friction (Silvestri SM2 / QG2) —
+        # each is ADDITIVE to the A_h/B_h/C_smag/C_leith blocks, so combining them
+        # double-applies friction. Fail loudly rather than silently over-damp.
+        if config.lateral_friction_scheme in ("om4p25", "qg_leith") and any(
             getattr(config, k, 0.0) > 0.0
             for k in ("A_h", "B_h", "C_smag", "C_smag_lap", "C_leith")
         ):
             raise ValueError(
-                "lateral_friction_scheme='om4p25' is the sole lateral friction "
-                "but A_h/B_h/C_smag/C_smag_lap/C_leith is nonzero — these add on "
-                "top and double-apply friction. Zero them in the OM4p25 (SM2) recipe.",
+                f"lateral_friction_scheme={config.lateral_friction_scheme!r} is the "
+                "sole lateral friction but A_h/B_h/C_smag/C_smag_lap/C_leith is "
+                "nonzero — these add on top and double-apply friction. Zero them in "
+                "the OM4p25 (SM2) / QG-Leith (QG2) recipe.",
             )
         if config.momentum_flux_scheme not in VALID_MOMENTUM_FLUX_SCHEME:
             raise ValueError(

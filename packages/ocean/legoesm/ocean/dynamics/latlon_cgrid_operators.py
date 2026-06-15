@@ -2419,6 +2419,99 @@ def leith_biharmonic_tendency_cgrid(
     return tend_u, tend_v
 
 
+def qg_leith_viscosity_tendency_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: "LatLonGrid",
+    *,
+    C_qgleith: float = 2.0,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """QG-Leith eddy viscosity (Bachman et al. 2017; Silvestri et al. 2024
+    "QG2") — a HARMONIC (Laplacian) viscosity scaling with the potential-
+    vorticity gradient:
+
+        nu = (C·Δ/π)³ · sqrt(|∇Q|² + |∇δ|²)
+
+    with Q = ζ + f the absolute (barotropic) potential vorticity (ζ = relative
+    vorticity at vertices, f = planetary vorticity), δ = ∇·u the horizontal
+    divergence, Δ = sqrt(cell area), and C the dimensionless coefficient
+    (paper QG2: C=2). Applied through the energy-stable stress-tensor operator
+    ``viscous_tendency_cgrid`` (exact strain adjoint → guaranteed dissipation).
+
+    This is the paper's QG counterpart to the 2D Leith closure (Appendix A1/A2,
+    ν=(CΔ/π)³|∇q|): it differs from legoESM's existing ``C_leith`` operator in
+    three faithful ways — (1) HARMONIC not biharmonic, (2) ABSOLUTE-vorticity
+    PV gradient ∇(ζ+f) not relative ∇ζ, (3) the /π³ paper normalisation.
+
+    LIMITATION (documented): Bachman's full QGPV gradient adds a baroclinic
+    STRETCHING term ∂_z(f/N²·∇b) (Eq A3 ∇q₁), bounded by grid-Burger /
+    grid-Rossby factors (∇q₂=∇q(1+1/Bu), ∇q₃=∇q(1+1/Ro²)) via a min(). That
+    term needs the buoyancy/N² field, which the lateral-viscosity stage does
+    not currently receive, so it is OMITTED here (∇Q = ∇(ζ+f), the barotropic
+    PV gradient; the Bu/Ro bounds are inactive without it). The bound helper
+    ``bound_qg_pv_gradient`` is provided + unit-tested for a future wiring that
+    threads buoyancy in. Returns (tend_u, tend_v) to be ADDED to du/dt.
+    """
+    is_3d = u.ndim == 3
+    _um = u_mask[..., jnp.newaxis] if (u_mask is not None and is_3d) else u_mask
+    _vm = v_mask[..., jnp.newaxis] if (v_mask is not None and is_3d) else v_mask
+    u_eff = u if _um is None else u * _um
+    v_eff = v if _vm is None else v * _vm
+
+    # Absolute vorticity Q = ζ + f at vertices.
+    zeta_q = curl_vertex_cgrid(u_eff, v_eff, grid)              # (n_lat+1,n_lon+1,...)
+    lat = grid.lat
+    lat_v = jnp.concatenate([lat[:1], 0.5 * (lat[:-1] + lat[1:]), lat[-1:]])
+    f_v = 2.0 * constants.Omega * jnp.sin(lat_v)               # (n_lat+1,)
+    f_v = f_v[:, jnp.newaxis] if zeta_q.ndim == 2 else f_v[:, jnp.newaxis, jnp.newaxis]
+    absvort_q = zeta_q + f_v
+
+    grad_Q = _grad_zeta_mag_h(absvort_q, grid)                  # |∇(ζ+f)|_h
+    div_h = divergence_cgrid(u_eff, v_eff, grid, u_mask=u_mask, v_mask=v_mask)
+    grad_div = _grad_div_mag_h(div_h, grid)                     # |∇δ|_h
+    norm = jnp.sqrt(grad_Q ** 2 + grad_div ** 2 + 1e-30)
+
+    Delta = jnp.sqrt(grid.area)
+    if is_3d:
+        Delta = Delta[..., jnp.newaxis]
+    nu_h = (C_qgleith * Delta / jnp.pi) ** 3 * norm            # [m²/s] at h-points
+    if mask is not None:
+        m = mask[..., jnp.newaxis] if is_3d else mask
+        nu_h = nu_h * m
+
+    # q-point viscosity: 4-point average of nu_h to vertices (energy-stable for
+    # any nu_q >= 0; direct-at-q is a refinement).
+    nu_roll = jnp.roll(nu_h, 1, axis=1)
+    nu_q_int = 0.25 * (nu_h[:-1] + nu_h[1:] + nu_roll[:-1] + nu_roll[1:])
+    nu_q = pad_ns_scalar(nu_q_int, grid)
+    nu_q = jnp.concatenate([nu_q, nu_q[:, 0:1]], axis=1)
+    nu_q = jnp.maximum(nu_q, 0.0)
+
+    return viscous_tendency_cgrid(
+        u, v, grid, nu_h, nu_q, mask=mask, u_mask=u_mask, v_mask=v_mask)
+
+
+def bound_qg_pv_gradient(grad_q, grad_q_stretch, Bu, Ro):
+    """Bachman et al. (2017) QG-Leith PV-gradient bound (Silvestri Eq A2-A3):
+
+        |∇Q| = min( |∇q + stretch|, |∇q|·(1+1/Bu), |∇q|·(1+1/Ro²) )
+
+    where ``grad_q`` = |∇(ζ+f)|, ``grad_q_stretch`` = |∇q + ∂_z(f/N²∇b)| (the
+    full QGPV gradient magnitude incl. baroclinic stretching), ``Bu`` = grid
+    Burger number Δ²/L_d², ``Ro`` = grid Rossby number V/(|f|Δ). The grid-Burger
+    bound caps the gradient where the deformation radius is under-resolved; the
+    grid-Rossby bound caps it where the flow is strongly ageostrophic; the
+    closure reverts to 2D Leith where QG does not hold. Provided + tested for a
+    future wiring that supplies the stretching term (omitted in the default
+    barotropic path of ``qg_leith_viscosity_tendency_cgrid``)."""
+    gq2 = grad_q * (1.0 + 1.0 / jnp.maximum(Bu, 1e-30))
+    gq3 = grad_q * (1.0 + 1.0 / jnp.maximum(Ro ** 2, 1e-30))
+    return jnp.minimum(jnp.minimum(grad_q_stretch, gq2), gq3)
+
+
 def neumann_fill_vertex(
     f: jnp.ndarray,
     vtx_mask: jnp.ndarray,
