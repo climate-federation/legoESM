@@ -18,6 +18,9 @@ from legoesm.grids.halo import pad_halo_4d
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
 
+# Default explicit-diffusion CFL safety factor (numerics).
+_CFL_SAFETY_DEFAULT = 0.45
+
 def laplacian_viscosity_3d(
     field_3d: jnp.ndarray,
     grid: CubedSphereGrid,
@@ -72,7 +75,7 @@ def vertical_diffusion(
     jacobian: jnp.ndarray,
     coeff: float,
     dt: float | None = None,
-    cfl_safety: float = 0.45,
+    cfl_safety: float = _CFL_SAFETY_DEFAULT,
 ) -> jnp.ndarray:
     """Compute d/dz(coeff * d(field)/dz) using 2nd-order centered differences.
 
@@ -152,7 +155,7 @@ def vertical_diffusion_variable_K(
     jacobian: jnp.ndarray,
     K_half: jnp.ndarray,
     dt: float | None = None,
-    cfl_safety: float = 0.45,
+    cfl_safety: float = _CFL_SAFETY_DEFAULT,
 ) -> jnp.ndarray:
     """Compute d/dz(K(z) * d(field)/dz) with spatially varying diffusivity.
 

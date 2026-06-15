@@ -61,6 +61,10 @@ _REGISTRY: dict[str, tuple[str, str]] = {
     # Ocean-only experiments use the ocean boundary.
     "ocean": ("legoesm.ocean.config", "OceanExperimentConfig"),
     "ocean_only": ("legoesm.ocean.config", "OceanExperimentConfig"),
+    # Standalone idealized sea-ice experiments (#388): setup-only adapter
+    # routing to run_sea_ice_test_matrix.py.
+    "sea_ice": ("legoesm.ice.experiment_config", "SeaIceExperimentConfig"),
+    "sea_ice_only": ("legoesm.ice.experiment_config", "SeaIceExperimentConfig"),
 }
 
 # Modes that the ``validate_templates`` atmosphere-specific complexity check

@@ -282,7 +282,7 @@ def tiedtke_convection(
         plume.T_u, plume.q_u, plume.q_c_u, M_u_for_kernel,
         z, rho, delta_0_eff[:, None], M_u_max=config.M_b_max,
     )
-    rho_safe = jnp.clip(rho, 0.01, None)
+    rho_safe = jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
     # Reuse the same stratospheric gate the kernel applies so this
     # custom q_c path does not detrain condensate above the tropopause.
     p_gate_qc = stratosphere_mass_flux_gate(p_full)

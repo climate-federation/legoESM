@@ -502,9 +502,14 @@ def mpas_ocean_baroclinic_tendencies(
               * pv_flux_enstrophy_conserving_3d(
                   u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
               ))
-    else:
+    elif config.pv_scheme == "enstrophy":
         pv_flux = pv_flux_enstrophy_conserving_3d(
             u_3d, h_k, q_relative, mesh, h_edge_3d=h_e_3d,
+        )
+    else:
+        raise ValueError(
+            f"Unknown pv_scheme {config.pv_scheme!r}; "
+            "expected one of: 'energy', 'enstrophy', 'mixed'."
         )
 
     # Horizontal viscosity on TOTAL velocity (not perturbation).

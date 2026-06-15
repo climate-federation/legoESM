@@ -37,6 +37,13 @@ import equinox as eqx
 from legoesm import constants
 from legoesm.core.physics_output import PhysicsOutput
 from legoesm.core.grid_adapters import ColumnAdapter
+# Neural-physics feature-normalization scales + default architecture (structural).
+_NORM_T_K = 300.0
+_NORM_WIND_M_S = 30.0
+_NORM_SOLAR_W_M2 = 1400.0
+_DEFAULT_HIDDEN_DIM = 256
+_DEFAULT_RESIDUAL_SCALE = 0.01
+
 
 
 _OPTIONAL_3D_OUTPUT_FIELDS = (
@@ -54,9 +61,9 @@ _PHYSICS_OUTPUT_FIELDS = set(getattr(PhysicsOutput, "_fields", ()))
 
 def parse_step_unified_tail(args):
     """Support both legacy and conv_prog-extended step_unified signatures."""
-    if len(args) == 19:
+    if len(args) == 19:  # coeff-ok: positional-arg count dispatch
         return None, args
-    if len(args) == 20:
+    if len(args) == 20:  # coeff-ok: positional-arg count dispatch
         return args[0], args[1:]
     raise TypeError(
         "step_unified expected 19 positional tail arguments "
@@ -145,11 +152,11 @@ class NeuralPhysics(eqx.Module):
     def __init__(
         self,
         nlev: int,
-        hidden_dim: int = 256,
+        hidden_dim: int = _DEFAULT_HIDDEN_DIM,
         n_layers: int = 4,
         *,
         key: jax.Array,
-        residual_scale: float = 0.01,
+        residual_scale: float = _DEFAULT_RESIDUAL_SCALE,
     ):
         self.nlev = nlev
         self.n_input = nlev * 4 + 2   # T, u, v, q_v per level + p_s + solar
@@ -203,12 +210,12 @@ def pack_column_features(
     """
     # Normalize to O(1) for stable training
     return jnp.concatenate([
-        T / 300.0,
-        u / 30.0,
-        v / 30.0,
+        T / _NORM_T_K,
+        u / _NORM_WIND_M_S,
+        v / _NORM_WIND_M_S,
         q_v * 1e3,
         jnp.atleast_1d(p_s / constants.p_ref),
-        jnp.atleast_1d(solar / 1400.0),
+        jnp.atleast_1d(solar / _NORM_SOLAR_W_M2)
     ])
 
 

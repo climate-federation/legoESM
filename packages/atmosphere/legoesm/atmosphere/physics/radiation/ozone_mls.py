@@ -70,6 +70,6 @@ def mls_ozone_vmr(p_full: jnp.ndarray) -> jnp.ndarray:
     ``p_full``. AD-finite everywhere (log of clamped-positive pressure;
     interp is piecewise-linear).
     """
-    log_p = jnp.log(jnp.clip(p_full, 1.0e-2) / 100.0)   # Pa -> hPa -> log
+    log_p = jnp.log(jnp.clip(p_full, 1.0e-2) / 100.0)   # coeff-ok: pressure floor [Pa]; /100=Pa->hPa
     log_o3 = jnp.interp(log_p, _LOGP_ASC, _LOGO3_ASC)
     return jnp.exp(log_o3)

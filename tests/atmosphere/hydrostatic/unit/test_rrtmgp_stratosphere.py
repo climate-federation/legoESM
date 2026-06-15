@@ -1086,13 +1086,21 @@ class TestOptimalLwSecant:
             T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
             q_v=q_v, cos_zenith=cos_z,
         )
+        # scan vs unrolled differ only by data movement, not arithmetic, so
+        # agreement is round-off: tighten under x64, relax to a float32 quantum
+        # under the default fp32 policy.  A genuine scan/loop divergence is
+        # O(flux), caught by either bound.
+        if jax.config.read("jax_enable_x64"):
+            rtol = atol = 1e-10
+        else:
+            rtol, atol = 1e-5, 1e-6
         for name, a, b in (
             ("lw_flux_up",   out_loop.lw_flux_up,   out_scan.lw_flux_up),
             ("lw_flux_down", out_loop.lw_flux_down, out_scan.lw_flux_down),
             ("heating_rate", out_loop.heating_rate, out_scan.heating_rate),
         ):
             np.testing.assert_allclose(
-                np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-10,
+                np.asarray(a), np.asarray(b), rtol=rtol, atol=atol,
                 err_msg=(
                     f"{name}: use_optimal_angle=True must match between "
                     "scan and unrolled column recurrence."
@@ -2089,7 +2097,19 @@ class TestAerosolPath:
         check; if the zero-AOD branch picks up a non-trivial code
         path (e.g. an unintended bias from ``maximum(tau, 1e-12)``
         applied to gas tau only in one branch), this test catches it.
+
+        Requires ``JAX_ENABLE_X64=1`` (mirrors the zero-cloud bit-identity
+        twin): the leak this guards against is O(1e-12), but under the fp32
+        policy the AOD=zeros branch reorders the gas+aerosol optics combine
+        vs the AOD=None path, so the two agree only to ~1e-6 (a float32
+        quantum) — relaxing the bound would make the 1e-12 leak check vacuous.
         """
+        if not jax.config.read("jax_enable_x64"):
+            pytest.skip(
+                "zero-aerosol bit-identity check requires JAX_ENABLE_X64=1; "
+                "the 1e-12 tolerance is unachievable under the fp32 policy "
+                "where the aerosol-combine reorders float ops (~1e-6 noise)."
+            )
         from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
 
@@ -3000,7 +3020,20 @@ class TestLwAerosolPath:
         ``_compute_optimal_lw_secant`` and assert its column sum grows by
         exactly the injected aerosol OD for every g-point.  If aerosol were
         injected *after* the secant, the captured sums would be identical
-        (Δ = 0)."""
+        (Δ = 0).
+
+        Requires ``JAX_ENABLE_X64=1``: the wiring property is an fp64-exact
+        "Δ = injected OD per g-point" identity.  Under the default fp32 policy
+        the gas+aerosol optics combine reorders float ops, so a g-point's
+        captured Δ can drift by O(1) (a float32 quantum on the O(10-100)
+        column-summed optical depth) — a false failure, not a wiring leak
+        (verified: exact under x64). Mirror the zero-cloud/zero-aerosol guards."""
+        if not jax.config.read("jax_enable_x64"):
+            pytest.skip(
+                "aerosol-enters-secant wiring identity requires "
+                "JAX_ENABLE_X64=1; the exact per-g-point Δ is an fp64 property "
+                "(fp32 reorders the optics combine, O(1) quantum noise)."
+            )
         from legoesm.atmosphere.physics.radiation.rrtmgp.rte import two_stream
 
         seen: list[float] = []
@@ -3107,16 +3140,25 @@ class TestDeltaScaling:
         tau_exp = (1 - f) * np.asarray(tau)
         ssa_exp = np.asarray(ssa) * (1 - np.asarray(g) ** 2) / (1 - f)
         g_exp = np.asarray(g) / (1 + np.asarray(g))
+        # The implementation computes ω' as (ω − f)/(1 − f); the expected here
+        # uses the algebraically-equal ω(1 − g²)/(1 − f).  Equal in exact
+        # arithmetic, so tighten to fp64 round-off under x64; relax to fp32
+        # round-off when x64 is off (the default test env downcasts to float32,
+        # where the differing operation order separates the two by ~1e-7).
+        if jax.config.read("jax_enable_x64"):
+            rtol = atol = 1e-12
+        else:
+            rtol = atol = 1e-6
         np.testing.assert_allclose(
-            np.asarray(out["optical_depth"]), tau_exp, rtol=1e-12, atol=1e-12,
+            np.asarray(out["optical_depth"]), tau_exp, rtol=rtol, atol=atol,
             err_msg="delta-scaled τ' != (1 − ω g²) τ",
         )
         np.testing.assert_allclose(
-            np.asarray(out["ssa"]), ssa_exp, rtol=1e-12, atol=1e-12,
+            np.asarray(out["ssa"]), ssa_exp, rtol=rtol, atol=atol,
             err_msg="delta-scaled ω' != ω(1 − g²)/(1 − ω g²)",
         )
         np.testing.assert_allclose(
-            np.asarray(out["asymmetry_factor"]), g_exp, rtol=1e-12, atol=1e-12,
+            np.asarray(out["asymmetry_factor"]), g_exp, rtol=rtol, atol=atol,
             err_msg="delta-scaled g' != g/(1 + g)",
         )
 

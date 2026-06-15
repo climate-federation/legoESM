@@ -19,6 +19,9 @@ import jax.numpy as jnp
 
 from legoesm import constants
 
+# Degree-day-style snow melt rate default [m w.e./s/K] (scheme default).
+_SNOW_MELT_RATE_DEFAULT = 5.0e-6
+
 
 def update_snow(
     snow: jnp.ndarray,
@@ -28,7 +31,7 @@ def update_snow(
     dt: float,
     *,
     Q_net: jnp.ndarray | None = None,
-    snow_melt_rate: float = 5.0e-6,
+    snow_melt_rate: float = _SNOW_MELT_RATE_DEFAULT,
     T_snow_melt: float = constants.T_freeze,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Update snow depth and age, returning the melt amount.

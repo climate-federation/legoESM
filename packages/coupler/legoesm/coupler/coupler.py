@@ -106,7 +106,7 @@ def _validate_coupler_config(config: CouplerConfig) -> None:
         raise ValueError(f"Cd_ocean must be >= 0, got {config.Cd_ocean!r}")
     if config.Ch_ocean < 0.0:
         raise ValueError(f"Ch_ocean must be >= 0, got {config.Ch_ocean!r}")
-    if config.blend_sharpness != 20.0:
+    if config.blend_sharpness != CouplerConfig._field_defaults["blend_sharpness"]:
         warnings.warn(
             "CouplerConfig.blend_sharpness is currently unused in blend_tiles().",
             RuntimeWarning,
@@ -116,11 +116,11 @@ def _validate_coupler_config(config: CouplerConfig) -> None:
 
 def init_surface_state(
     shape: tuple[int, ...],
-    T_soil_init: float = 280.0,
-    W_bucket_init: float = 75.0,
-    T_epi_init: float = 285.0,
-    T_hypo_init: float = 278.0,
-    T_ice_init: float = 260.0,
+    T_soil_init: float = 280.0,  # coeff-ok: initial condition [K]
+    W_bucket_init: float = 75.0,  # coeff-ok: initial condition [kg/m^2]
+    T_epi_init: float = 285.0,  # coeff-ok: initial condition [K]
+    T_hypo_init: float = 278.0,  # coeff-ok: initial condition [K]
+    T_ice_init: float = 260.0,  # coeff-ok: initial condition [K]
     land_config: LandConfig | None = None,
 ) -> SurfaceState:
     """Initialize all surface tile states.

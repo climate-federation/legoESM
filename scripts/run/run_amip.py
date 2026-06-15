@@ -370,6 +370,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Moisture conservation
     parser.add_argument("--fix-moisture", action="store_true", default=False)
+    # Issue #323: opt-in moist-static-energy-conserving q_v floor.  Removes
+    # the latent heat of the clipped vapour sink so the per-step max(q_v, 0)
+    # floor stops injecting spurious condensation heat under organised
+    # convection (the kessler+sbm wind blow-up).  Default off => unchanged.
+    parser.add_argument("--energy-consistent-moisture-clip",
+                        action="store_true", default=False)
 
     # CMIP
     parser.add_argument("--experiment", type=str, default="")
@@ -515,6 +521,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         turbulence=args.turbulence,
         gravity_wave_drag=args.gravity_wave_drag,
         fix_moisture=args.fix_moisture,
+        energy_consistent_moisture_clip=args.energy_consistent_moisture_clip,
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
         topo_edge_blend=args.topo_edge_blend,

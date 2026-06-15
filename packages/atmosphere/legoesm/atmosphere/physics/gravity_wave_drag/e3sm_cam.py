@@ -52,6 +52,10 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     E3SMCAMConfig,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+# Default critical-Froude tuning + orographic tendency cap (scheme defaults).
+_DCA_DEFAULT = 0.1
+_TNDMAX_ORO_PER_DAY = 500.0
+
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +265,7 @@ def _interface_proj(ubm: jax.Array, mag_sfc: jax.Array) -> jax.Array:
 # ---------------------------------------------------------------------------
 
 def _front_fav(pgwv: int, dc: float, c0: float, taubgnd: float, dtype,
-               dca: float = 0.1):
+               dca: float = _DCA_DEFAULT):
     """Average Gaussian over each phase-speed bin (E3SM gw_front_init).
 
     ``dca`` is the sub-bin c-grid spacing [m/s] for the quadrature
@@ -303,7 +307,7 @@ def gw_cm_src(
     frontgfc: float,
     kbot: int,
     kfront: int,
-    dca: float = 0.1,
+    dca: float = _DCA_DEFAULT,
 ):
     """Frontal source (E3SM gw_cm_src).
 
@@ -561,7 +565,7 @@ def gw_beres_src(
     n_in = jnp.maximum(jnp.sum(in_range, axis=1), 1)       # = mini-maxi+1
     q0 = jnp.max(jnp.where(in_range, netdt, -jnp.inf), axis=1)
     q0 = jnp.where(found, q0, 0.0)
-    maxq0 = q0 * 24.0 * 3600.0                             # K/day diagnostic
+    maxq0 = q0 * 24.0 * 3600.0  # coeff-ok: hours/day x s/hr -> K/day diagnostic
     q0 = q0 * beres.cf                                     # convert to source amp
 
     # Cell speed CS (integer, ground-relative shift).
@@ -737,7 +741,7 @@ def gw_drag_prof(
     kwv = cfg.kwv
     # E3SM: tndmax = 400/86400 for spectral (multi-source), 500/86400 when
     # orographic_only (gw_common.F90:156).  (codex iter-1 finding #4)
-    tndmax_per_day = 500.0 if orographic_only else cfg.tndmax_per_day
+    tndmax_per_day = _TNDMAX_ORO_PER_DAY if orographic_only else cfg.tndmax_per_day
     tndmax = tndmax_per_day / 86400.0
     # Newtonian cooling: a height profile (E3SM alpha(k)) when supplied, else
     # a single uniform value at every interface.  alpha_arr is (ncol, nlev+1).

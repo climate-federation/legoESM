@@ -46,18 +46,20 @@ def _fields(state, grid, hc, qv_slot=0):
     qv = tr[..., qv_slot]
     w_half = np.asarray(state.w.data)
     w = 0.5 * (w_half[..., :-1] + w_half[..., 1:])         # full-level w
+    u = np.asarray(state.u.data); v = np.asarray(state.v.data)  # horizontal wind
     mse = np.asarray(moist_static_energy_3d_plane(state, hc)) / 1.0e3   # kJ/kg
     T = np.asarray(temperature_3d_plane(state, hc))
     cwv = np.asarray(column_water_vapor_plane(state, hc))               # kg/m²
     precip_rate = np.asarray(
         precipitation_rate_proxy_plane(state, hc)) * 86400.0           # mm/day
     z = np.asarray(hc.z_full)
-    return dict(cond=cond, qcloud=qcloud, qv=qv, w=w, mse=mse, T=T,
+    return dict(cond=cond, qcloud=qcloud, qv=qv, w=w, u=u, v=v, mse=mse, T=T,
                 cwv=cwv, precip=precip_rate, z=z)
 
 
 def save_surface_levels(out_dir, step, t_s, state, grid, hc,
-                        heights_m=_DEFAULT_HEIGHTS_M, qv_slot=0):
+                        heights_m=_DEFAULT_HEIGHTS_M, qv_slot=0,
+                        surface_fields=None):
     """Cheap, frequent dump: surface fields (precip, CWV, column-max |w|, sub-grid
     near-surface qv) + horizontal cross-sections at four heights of condensate, w,
     qv, MSE. One npz per call under ``<out>/snapshots/``."""
@@ -66,20 +68,30 @@ def save_surface_levels(out_dir, step, t_s, state, grid, hc,
     f = _fields(state, grid, hc, qv_slot)
     hidx, hz = _level_indices(f["z"], heights_m)
     cond, w, qv, mse = f["cond"], f["w"], f["qv"], f["mse"]
-    nx = cond.shape[1]
+    u, v, T = f["u"], f["v"], f["T"]
+    k_sfc = int(np.argmin(f["z"]))
     day = t_s / 86400.0
-    np.savez(
-        out_dir / f"sfc_{step:08d}.npz",
+    payload = dict(
         day=day, t_s=t_s, dx=grid.dx, Lx=grid.nx * grid.dx, Ly=grid.ny * grid.dx,
         heights=hz,
         precip=f["precip"], cwv=f["cwv"],
         wcolmax=np.max(np.abs(w), axis=2),
-        qv_sfc=qv[:, :, int(np.argmin(f["z"]))],
+        qv_sfc=qv[:, :, k_sfc],
+        # horizontal wind (speed = hypot(u,v)) — TC tangential circulation — and
+        # temperature cross-sections, at the surface + the requested heights.
+        u_sfc=u[:, :, k_sfc], v_sfc=v[:, :, k_sfc],
+        u_levels=np.stack([u[:, :, k] for k in hidx]),
+        v_levels=np.stack([v[:, :, k] for k in hidx]),
+        T_levels=np.stack([T[:, :, k] for k in hidx]),
         cond_levels=np.stack([cond[:, :, k] for k in hidx]),
         w_levels=np.stack([w[:, :, k] for k in hidx]),
         qv_levels=np.stack([qv[:, :, k] for k in hidx]),
         mse_levels=np.stack([mse[:, :, k] for k in hidx]),
     )
+    if surface_fields:
+        for name, value in surface_fields.items():
+            payload[name] = np.asarray(value)
+    np.savez(out_dir / f"sfc_{step:08d}.npz", **payload)
 
 
 def save_3d(out_dir, step, t_s, state, grid, hc, qv_slot=0):

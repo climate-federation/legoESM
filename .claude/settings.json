@@ -14,7 +14,7 @@
   },
   "enabledPlugins": {
     "codex@openai-codex": true,
-    "ralph-loop@claude-plugins-official": true
+    "ralph-loop@claude-plugins-official": false
   },
   "hooks": {
     "PreToolUse": [

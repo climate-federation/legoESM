@@ -114,6 +114,14 @@ from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 _EPS = float(jnp.finfo(jnp.float32).eps)
 
 
+# Fixed TKE mixing constants + Bryan-Lewis background-diffusivity depth profile.
+_GALPERIN_RI_COEFF = 6.6
+_BG_DIFF_A = 0.8
+_BG_DIFF_B = 1.05
+_BG_DIFF_DEPTH_M = 2500.0
+_BG_DIFF_WIDTH_M = 222.2
+_BG_DIFF_SCALE = 1.0e-4
+
 class TKEOutput(NamedTuple):
     """Output of :func:`tke_vertical_mixing`."""
     K_M: jnp.ndarray       # (..., nlev-1) momentum eddy viscosity at interfaces
@@ -919,7 +927,7 @@ def _prandtl_number(
         return jnp.full_like(kappaM, cfg.Prandtl_tke0)
     if cfg.prandtl_mode == "richardson":
         Ri = N2 / jnp.maximum(shear_sq, 1e-12)
-        return jnp.maximum(1.0, jnp.minimum(10.0, 6.6 * Ri))
+        return jnp.maximum(1.0, jnp.minimum(10.0, _GALPERIN_RI_COEFF * Ri))
     raise ValueError(
         f"Unknown prandtl_mode={cfg.prandtl_mode!r}; expected 'unit', "
         f"'constant' or 'richardson'."
@@ -943,8 +951,8 @@ def _bryan_lewis_kappaH_floor(z_interface: jnp.ndarray) -> jnp.ndarray:
     # -z = depth (positive); Veros's argument is (-zw - 2500)/222.2 with
     # zw the (negative) interface height -> here z_interface plays zw.
     depth = -z_interface
-    return (0.8 + 1.05 / jnp.pi
-            * jnp.arctan((depth - 2500.0) / 222.2)) * 1.0e-4
+    return (_BG_DIFF_A + _BG_DIFF_B / jnp.pi
+            * jnp.arctan((depth - _BG_DIFF_DEPTH_M) / _BG_DIFF_WIDTH_M)) * _BG_DIFF_SCALE
 
 
 def compute_K_from_tke(
@@ -1382,7 +1390,7 @@ def compute_surface_buoyancy_P_diss_v(
     eos_fn,
     rho_0: float,
     g: float = constants.g,
-    eos_salinity_floor: float = 1.0e-3,
+    eos_salinity_floor: float = 1.0e-3,  # coeff-ok: EOS salinity floor [PSU]
 ) -> jnp.ndarray:
     r"""Surface buoyancy-flux ``P_diss_v`` slot (Veros thermodynamics.py:304-317,
     386-388).

@@ -58,6 +58,9 @@ from legoesm.core.column_stepping import (
 )
 from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
 from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+from legoesm.atmosphere.physics.microphysics.integration import (
+    make_microphysics_physics,
+)
 from legoesm.atmosphere.physics.physics_state import (
     PhysicsState,
     init_physics_state,
@@ -75,6 +78,7 @@ from legoesm.atmosphere.scm_forcing import (
 
 _DIMS_3D = ("face", "x", "y", "level")
 _DIMS_2D = ("face", "x", "y")
+DEFAULT_MICROPHYSICS_SUBSTEPS = 1
 
 
 class SCMGrid(NamedTuple):
@@ -175,8 +179,9 @@ def _apply_tendencies(
       what lets microphysics/convection introduce ``q_c``, ``q_r``,
       ``q_i``, etc. without the SCM silently dropping them.
     - No positivity clipping is applied here. Schemes that need positive
-      mixing ratios must enforce that themselves (most do). Clipping at
-      the integrator level hides instability and breaks AD smoothness.
+      mixing ratios must enforce that themselves (most do). SCM-only
+      microphysics substepping, when enabled, reduces the explicit step
+      seen by the scheme instead of clipping this generic state update.
     """
     new_u = state.u.replace(data=state.u.data + dt * tend.du_dt.data)
     new_T = state.T.replace(data=state.T.data + dt * tend.dT_dt.data)
@@ -215,6 +220,61 @@ def _apply_tendencies(
         u=new_u, T=new_T, p_s=new_p_s, phis=state.phis,
         v=new_v, tracers=new_tracers,
     )
+
+
+def _validate_microphysics_substeps(microphysics_substeps: int) -> int:
+    """Return a validated fixed microphysics substep count."""
+    if (
+        isinstance(microphysics_substeps, bool)
+        or int(microphysics_substeps) != microphysics_substeps
+    ):
+        raise ValueError(
+            "microphysics_substeps must be a positive integer; "
+            f"got {microphysics_substeps!r}."
+        )
+    microphysics_substeps = int(microphysics_substeps)
+    if microphysics_substeps < 1:
+        raise ValueError(
+            "microphysics_substeps must be a positive integer; "
+            f"got {microphysics_substeps}."
+        )
+    return microphysics_substeps
+
+
+def _microphysics_substepped_forward_euler(
+    *,
+    microphysics_fn: Callable,
+    get_grid: Callable[[], SCMGrid],
+    get_sigma_coord: Callable[[], SigmaCoordinate],
+    microphysics_substeps: int,
+) -> Callable:
+    """Build an SCM-only forward-Euler wrapper with microphysics substeps.
+
+    The supplied outer tendency ``f`` is expected to exclude microphysics.
+    It is evaluated once per SCM step, preserving the existing coupling for
+    radiation/convection/turbulence/GWD and their ``PhysicsState`` updates.
+    The microphysics tendency is re-evaluated on each fixed substep with a
+    factory built at ``dt / microphysics_substeps``.
+    """
+    n_substeps = _validate_microphysics_substeps(microphysics_substeps)
+
+    def step(state, phys_state, f, dt, t):
+        nonmicro_tend, phys_out = f(state, phys_state, t)
+        sub_dt = dt / n_substeps
+
+        def substep(sub_state, _i):
+            micro_tend = microphysics_fn(
+                sub_state, get_grid(), get_sigma_coord(),
+            )
+            tend = add_tendencies(nonmicro_tend, micro_tend)
+            return _apply_tendencies(sub_state, tend, sub_dt), None
+
+        new_state, _ = jax.lax.scan(
+            substep, state, jnp.arange(n_substeps, dtype=jnp.int32),
+        )
+        return new_state, phys_out
+
+    return step
 
 
 def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = None):
@@ -390,6 +450,8 @@ class SingleColumnModel:
         forcing: SCMForcing | None = None,
         t0_seconds: float = 0.0,
         physics_config: PhysicsConfig | None = None,
+        microphysics_substeps: int = DEFAULT_MICROPHYSICS_SUBSTEPS,
+        microphysics_fn: Callable | None = None,
         _built_by_create: bool = False,
     ):
         # Private marker set ONLY by :meth:`create`.  Direct callers
@@ -403,6 +465,26 @@ class SingleColumnModel:
                 f"Unknown time_integrator: {time_integrator!r}. "
                 f"Available: {sorted(TIME_INTEGRATORS)}."
             )
+        microphysics_substeps = _validate_microphysics_substeps(
+            microphysics_substeps,
+        )
+        if microphysics_substeps > 1:
+            if not getattr(self, "_built_by_create", False):
+                raise ValueError(
+                    "microphysics_substeps > 1 requires construction via "
+                    "SingleColumnModel.create(), which builds the split "
+                    "non-microphysics and microphysics tendency functions."
+                )
+            if microphysics_fn is None:
+                raise ValueError(
+                    "microphysics_substeps > 1 requires a microphysics_fn "
+                    "built at dt / microphysics_substeps."
+                )
+            if time_integrator != "forward_euler":
+                raise ValueError(
+                    "microphysics_substeps > 1 is currently supported only "
+                    "with time_integrator='forward_euler'."
+                )
         step_fn_obj = TIME_INTEGRATORS[time_integrator]
         if forcing is not None:
             validate_forcing(forcing)
@@ -467,9 +549,19 @@ class SingleColumnModel:
         self.sigma_coord = sigma_coord
         self.dt = float(dt)
         self.time_integrator = time_integrator
+        self.microphysics_substeps = microphysics_substeps
+        self._microphysics_fn = microphysics_fn
         self.forcing = forcing if forcing is not None else default_forcing()
         self.t_seconds = float(t0_seconds)
-        self._step_fn = step_fn_obj
+        if microphysics_substeps > 1:
+            self._step_fn = _microphysics_substepped_forward_euler(
+                microphysics_fn=microphysics_fn,
+                get_grid=lambda: self.grid,
+                get_sigma_coord=lambda: self.sigma_coord,
+                microphysics_substeps=microphysics_substeps,
+            )
+        else:
+            self._step_fn = step_fn_obj
         # AB2 stores the previous-step tendency to combine with the
         # current step's tendency as ``1.5·tend_n − 0.5·tend_{n-1}``
         # (second-order linear multistep).  Per-instance so multiple
@@ -650,6 +742,7 @@ class SingleColumnModel:
         time_integrator: str = "forward_euler",
         forcing: SCMForcing | None = None,
         t0_seconds: float = 0.0,
+        microphysics_substeps: int = DEFAULT_MICROPHYSICS_SUBSTEPS,
     ) -> "SingleColumnModel":
         """Build a single-column model with sensible defaults.
 
@@ -692,8 +785,27 @@ class SingleColumnModel:
         t0_seconds
             Initial simulation time (seconds since model start) seen by
             forcing callables.  Defaults to ``0.0``.
+        microphysics_substeps
+            Fixed SCM-only substep count for active microphysics.  The
+            default ``1`` reproduces the original single explicit
+            microphysics update.  Values greater than one split the
+            combined physics into a once-per-step non-microphysics
+            tendency plus re-evaluated microphysics tendencies over
+            ``dt / microphysics_substeps``.  This is available for
+            ``time_integrator="forward_euler"`` and does not affect the
+            plane/CRM path.
         """
+        microphysics_substeps = _validate_microphysics_substeps(
+            microphysics_substeps,
+        )
+        if physics_config.microphysics.scheme == "none":
+            microphysics_substeps = DEFAULT_MICROPHYSICS_SUBSTEPS
         cls._validate_integrator_compatibility(physics_config, time_integrator)
+        if microphysics_substeps > 1 and time_integrator != "forward_euler":
+            raise ValueError(
+                "microphysics_substeps > 1 is currently supported only with "
+                "time_integrator='forward_euler'."
+            )
         cls._validate_prescribed_fluxes_no_double_count(
             physics_config, forcing,
         )
@@ -717,6 +829,8 @@ class SingleColumnModel:
         # auto-materialisation path in _apply_tendencies.
         if state.tracers is not None and physics_config.microphysics.scheme != "none":
             extra_keys = ("q_c", "q_r", "q_i", "q_s")
+            if microphysics_substeps > 1:
+                extra_keys = extra_keys + ("q_g",)
             new_tracers = dict(state.tracers)
             for k in extra_keys:
                 if k not in new_tracers:
@@ -725,7 +839,26 @@ class SingleColumnModel:
                         data=zeros, name=k, dims=_DIMS_3D, units="kg/kg",
                     )
             state = state._replace(tracers=new_tracers)
-        physics_fn = make_physics(physics_config, model_type="hydrostatic", dt=dt)
+        microphysics_fn = None
+        if (
+            microphysics_substeps > 1
+            and physics_config.microphysics.scheme != "none"
+        ):
+            nonmicro_config = physics_config._replace(
+                microphysics=physics_config.microphysics._replace(scheme="none"),
+            )
+            physics_fn = make_physics(
+                nonmicro_config, model_type="hydrostatic", dt=dt,
+            )
+            microphysics_fn = make_microphysics_physics(
+                physics_config.microphysics,
+                model_type="hydrostatic",
+                dt=dt / microphysics_substeps,
+            )
+        else:
+            physics_fn = make_physics(
+                physics_config, model_type="hydrostatic", dt=dt,
+            )
         phys_state = init_physics_state(
             ncol=1, nlev=nlev, physics_config=physics_config,
             dtype=dtype, prng_seed=prng_seed,
@@ -736,6 +869,8 @@ class SingleColumnModel:
             time_integrator=time_integrator,
             forcing=forcing, t0_seconds=t0_seconds,
             physics_config=physics_config,
+            microphysics_substeps=microphysics_substeps,
+            microphysics_fn=microphysics_fn,
             _built_by_create=True,
         )
 

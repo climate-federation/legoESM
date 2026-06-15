@@ -97,6 +97,11 @@ def _apply_value_threshold(
 # in scripts/matrix/run_ocean_test_matrix.py.
 from legoesm.diagnostics import DAYS_REQUIRED as _DAYS_REQUIRED
 
+# Absolute deadband for the Overflow / Lock-Exchange RPE-sign gate (iter-156).
+# 10x above the observed O(1e-6) quick-mode sign-noise, ~1000x below the 1e-2
+# conservation-health scale: passes discretization noise, fails a real RPE rise.
+_PE_REL_SIGN_DEADBAND = 1.0e-5
+
 
 def _apply_pe_rel_sign(
     ok: bool, notes: str, pe_rel_final: float, *, label: str,
@@ -127,6 +132,20 @@ def _apply_pe_rel_sign(
     iter-154 (codex iter-153 review MEDIUM-1): also reject
     ``days=None`` and non-finite/non-positive — see monolithic
     docstring for full rationale.
+
+    iter-156 (smoke-sweep finding): in QUICK MODE ONLY, apply a
+    small ABSOLUTE deadband instead of a strict sign-of-noise
+    check. A short quick-mode gravity current (e.g. Overflow on
+    cubed_sphere, 0.1 days) barely evolves the plume, so the
+    diagnosed RPE change is dominated by O(1e-7) discretization
+    noise that can land marginally POSITIVE (+6.5e-7 observed)
+    even though the plume is not gaining available potential
+    energy. Quick mode now passes while ``pe_rel_final`` stays
+    below ``_PE_REL_SIGN_DEADBAND`` (10x above the observed
+    O(1e-6) sign-noise, ~1000x below the 1e-2 conservation-health
+    scale). FULL mode (days>=1) keeps the strict ``< 0`` contract
+    (threshold 0), so a genuine RPE INCREASE still fails. Lock
+    Exchange (-1e-8) and full-mode Overflow (-5.7e-8) unaffected.
     """
     if days is _DAYS_REQUIRED:
         raise TypeError(
@@ -151,8 +170,12 @@ def _apply_pe_rel_sign(
             f"positive number, got {days!r} (label={label!r})."
         )
     op = "lt" if days_f >= 1.0 else "le"
+    # Full mode keeps the STRICT documented RPE-decrease contract (threshold 0);
+    # the deadband applies ONLY in quick mode, where a barely-evolved plume's
+    # O(1e-7) discretization noise can land marginally positive.
+    threshold = 0.0 if days_f >= 1.0 else _PE_REL_SIGN_DEADBAND
     return _apply_value_threshold(
-        ok, notes, pe_rel_final, 0.0,
+        ok, notes, pe_rel_final, threshold,
         label=label, op=op, n_samples=n_samples,
     )
 

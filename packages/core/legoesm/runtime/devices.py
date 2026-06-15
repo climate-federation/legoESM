@@ -40,6 +40,7 @@ def setup_devices(
     n_devices: int | str = "auto",
     backend: str | None = None,
     distributed: bool = False,
+    distributed_mode: str = "mpi",
     grid_type: str = "cubed_sphere",
     allow_level_fallback: bool = False,
     grid_n: int | None = None,
@@ -68,6 +69,39 @@ def setup_devices(
     from legoesm.parallel import mesh as _mesh
 
     if distributed:
+        if distributed_mode == "spmd":
+            # Multi-controller SPMD (jax.distributed federated by
+            # ``bootstrap`` step 0): build the mesh over the GLOBAL
+            # device set — ``jax.devices()``, NOT ``jax.local_devices``
+            # (THE multi-controller fix; a local mesh would give each
+            # process a private 1-device program reporting n_ranks=N).
+            # The returned DeviceConfig keeps ``is_distributed=False``
+            # so the driver routes the SPMD shard path (shard_state +
+            # SPMD halo backend), never the mpi4jax replicated path.
+            if grid_type != "cubed_sphere":
+                raise ValueError(
+                    "setup_devices: distributed_mode='spmd' supports "
+                    f"only grid_type='cubed_sphere' (got {grid_type!r})"
+                )
+            import jax
+
+            gdev = jax.devices()
+            # Explicit n_devices must agree with the federated global
+            # device set (codex review MAJOR): silently building over
+            # all global devices would change the meaning of a user's
+            # n_devices=1/2 request.  "auto" = the global set.
+            if n_devices != "auto" and int(n_devices) != len(gdev):
+                raise ValueError(
+                    f"setup_devices: distributed_mode='spmd' builds the "
+                    f"mesh over the GLOBAL federated device set "
+                    f"({len(gdev)} devices across "
+                    f"{jax.process_count()} processes); explicit "
+                    f"n_devices={n_devices} conflicts.  Use "
+                    f"n_devices='auto' or match the global count."
+                )
+            return _mesh.create_device_mesh(
+                n_devices=len(gdev), devices=gdev,
+            )
         if grid_type == "latlon":
             # Lat-lon band MPI: build a LatLonBandLayout and activate
             # set_halo_backend("mpi", layout).  See

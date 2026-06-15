@@ -6,6 +6,18 @@ grid.  It is the lat-lon C-grid counterpart of the cubed-sphere
 ``compressible_euler_cdgrid`` and the Gaussian-grid spectral
 ``spectral_nh`` non-hydrostatic dycores.
 
+.. note::
+   NOT YET WIRED INTO THE SOLVER SELECTION LAYER.  This dycore is
+   implemented and unit-tested in isolation but is intentionally absent
+   from ``dynamics/__init__.py`` (``_LAZY_IMPORTS`` / ``_SOLVER_TO_CLASS`` /
+   ``AVAILABLE_SOLVERS`` / ``_AXIS_TO_SOLVER``) and from
+   ``driver/component_factory._DRIVER_SUPPORTED`` — there is no
+   ``("nonhydrostatic", "latlon_cgrid")`` selection path, so it cannot be
+   chosen through the model factory or driver.  It is a peer dycore pending
+   end-to-end driver integration + dycore-progression validation (or
+   relocation to ``_future/``).  Do not document it as a selectable solver
+   until that wiring + validation lands.
+
 Design
 ------
 Staggering follows the same Arakawa C-grid convention as the

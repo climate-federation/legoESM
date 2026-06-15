@@ -222,6 +222,22 @@ class TestComputeSegmentLength:
     def test_all_zero_returns_one(self):
         assert compute_segment_length(0, 0, 0) == 1
 
+    def test_no_host_cadence_uses_fallback(self):
+        # diag + checkpoint disabled (e.g. spmd milestone-1): without a
+        # fallback the segment collapses to 1 and EVERY step pays a host
+        # boundary — the production-SPMD anti-scaling (job 8471423; the
+        # driver passes one model day of steps).
+        assert compute_segment_length(0, 0, 0, fallback_interval=144) == 144
+
+    def test_fallback_ignored_when_cadence_exists(self):
+        assert compute_segment_length(10, 0, 0, fallback_interval=144) == 10
+
+    def test_fallback_zero_or_negative_keeps_one(self):
+        # DT > 86400 makes the driver's int(days*86400/DT) collapse to 0
+        # — must stay the legacy 1-step segment, never 0.
+        assert compute_segment_length(0, 0, 0, fallback_interval=0) == 1
+        assert compute_segment_length(0, 0, 0, fallback_interval=-5) == 1
+
     def test_rad_update_excluded_from_gcd(self):
         # rad_update_steps=4 should NOT constrain segment length;
         # only diag_interval=10 matters here (checkpoint=0 disabled).
@@ -427,6 +443,111 @@ class TestBuildSegmentFn:
 
         assert result.T.shape == shape_3d
         assert result.step_index == 1
+
+    def test_energy_consistent_moisture_clip_wiring(self):
+        """Issue #323: the opt-in energy-consistent q_v floor compiles and
+        runs in the REAL compiled segment, keeps q_v >= 0 and stays finite,
+        and is BITWISE-IDENTICAL to the legacy path when off (default ==
+        explicit False) — the bit-identity guarantee for the gate."""
+        shape_3d = (N_FACES, N, N, NLEV)
+        shape_2d = (N_FACES, N, N)
+
+        def _fresh_carry():
+            # fresh each call: run_segment donates its input buffers
+            return pack_carry(
+                _make_hydrostatic_state(),
+                q_v=jnp.ones(shape_3d) * 0.01,
+                q_c=jnp.zeros(shape_3d),
+                q_r=jnp.zeros(shape_3d),
+                held_dT_rad=jnp.zeros(shape_3d),
+                held_sw_net_sfc=jnp.zeros(shape_2d),
+                held_lw_net_sfc=jnp.zeros(shape_2d),
+                held_sw_up_toa=jnp.zeros(shape_2d),
+                held_lw_up_toa=jnp.zeros(shape_2d),
+                held_sw_down_toa=jnp.zeros(shape_2d),
+                step_index=0,
+            )
+
+        # flag ON: compiles, runs, finite, non-negative q_v
+        args_on = _make_segment_fn_args()
+        args_on["energy_consistent_moisture_clip"] = True
+        res_on = build_segment_fn(**args_on)(_fresh_carry(), 3, _FORCING)
+        jax.block_until_ready(res_on.q_v)
+        assert np.all(np.isfinite(np.asarray(res_on.q_v)))
+        assert np.all(np.isfinite(np.asarray(res_on.T)))
+        assert np.all(np.asarray(res_on.q_v) >= 0.0)
+
+        # default (flag absent) vs explicit False: bitwise identical
+        r_default = build_segment_fn(**_make_segment_fn_args())(
+            _fresh_carry(), 3, _FORCING)
+        args_off = _make_segment_fn_args()
+        args_off["energy_consistent_moisture_clip"] = False
+        r_off = build_segment_fn(**args_off)(_fresh_carry(), 3, _FORCING)
+        np.testing.assert_array_equal(
+            np.asarray(r_default.T), np.asarray(r_off.T))
+        np.testing.assert_array_equal(
+            np.asarray(r_default.q_v), np.asarray(r_off.q_v))
+
+    def test_energy_consistent_moisture_clip_fires_in_segment(self):
+        """Issue #323: when the vapour sink drives q_v < 0 inside the REAL
+        compiled segment, the energy-consistent floor (flag ON) cools T by
+        exactly ``(L_v/c_pd)*deficit`` relative to the legacy floor (flag
+        OFF), while both floor q_v to zero.  This exercises the correction
+        firing in the segment, not just the helper in isolation."""
+        shape_3d = (N_FACES, N, N, NLEV)
+        shape_2d = (N_FACES, N, N)
+        q_v0 = 0.01
+
+        def _fresh_carry():
+            return pack_carry(
+                _make_hydrostatic_state(),
+                q_v=jnp.ones(shape_3d) * q_v0,
+                q_c=jnp.zeros(shape_3d),
+                q_r=jnp.zeros(shape_3d),
+                held_dT_rad=jnp.zeros(shape_3d),
+                held_sw_net_sfc=jnp.zeros(shape_2d),
+                held_lw_net_sfc=jnp.zeros(shape_2d),
+                held_sw_up_toa=jnp.zeros(shape_2d),
+                held_lw_up_toa=jnp.zeros(shape_2d),
+                held_sw_down_toa=jnp.zeros(shape_2d),
+                step_index=0,
+            )
+
+        def _drying_step(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+                         sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+                         solar_weights, s_0, o3_vmr, aerosol_od,
+                         held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                         **kwargs):
+            base, held_new, T_land = _mock_step_unified(
+                need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+                sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+                solar_weights, s_0, o3_vmr, aerosol_od,
+                held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa, **kwargs)
+            # Sink twice the available vapour => q_v + dt*dq_v = -q_v < 0
+            # (clip fires), with condensation warming matching the FULL sink.
+            dq_v = -2.0 * q_v / dt
+            dT = -(constants.L_v / constants.c_pd) * dq_v
+            return base._replace(dq_v_dt=dq_v, dT_dt=dT), held_new, T_land
+
+        base_args = _make_segment_fn_args()
+        base_args["step_unified"] = _drying_step
+        r_on = build_segment_fn(
+            **{**base_args, "energy_consistent_moisture_clip": True}
+        )(_fresh_carry(), 1, _FORCING)
+        r_off = build_segment_fn(
+            **{**base_args, "energy_consistent_moisture_clip": False}
+        )(_fresh_carry(), 1, _FORCING)
+        jax.block_until_ready(r_on.T)
+
+        # both floor q_v to zero (q_v_raw = -q_v0 < 0)
+        np.testing.assert_allclose(np.asarray(r_on.q_v), 0.0, atol=1e-6)
+        np.testing.assert_allclose(np.asarray(r_off.q_v), 0.0, atol=1e-6)
+        # flag ON is cooler by (L_v/c_pd) * deficit, deficit = q_v0
+        expected = (constants.L_v / constants.c_pd) * q_v0
+        dT_diff = np.asarray(r_off.T) - np.asarray(r_on.T)
+        np.testing.assert_allclose(dT_diff, expected, rtol=2e-3)
 
     def test_multi_step_runs(self):
         """Running 5 steps increments step_index by 5."""

@@ -119,7 +119,7 @@ def prognostic_spectral_gwd(
         c_phase_t[:, None, :, :]     # (ncol, 1, n_wn, nlev)
         - U_proj[:, :, None, :]       # (ncol, n_az, 1, nlev)
     )
-    intrinsic_abs = jnp.clip(jnp.abs(intrinsic), 0.1, None)
+    intrinsic_abs = jnp.clip(jnp.abs(intrinsic), 0.1, None)  # coeff-ok: intrinsic-freq floor
 
     wavelength = 2.0 * jnp.pi / jnp.clip(k_grid, 1e-10, None)  # (n_wn,)
     N_4d = N_full[:, None, None, :]  # (ncol, 1, 1, nlev)

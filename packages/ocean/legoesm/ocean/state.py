@@ -974,8 +974,36 @@ class LatLonCGridOceanConfig(NamedTuple):
     #                     np32 weak growth was allreduce-latency-bound).
     # Equivalent in exact arithmetic; differs at round-off (solver-
     # tolerance lane, not bit-exact).  Validated at solver dispatch
-    # (unknown ⇒ ValueError).
+    # (unknown ⇒ ValueError).  OPT-IN, NOT a default (regime-dependent,
+    # measured): single_reduce wins ONLY when the barotropic reductions
+    # dominate the step — small per-rank tiles / high rank counts /
+    # multi-node (LL12 rows/rank: +3-7% np2/4, job 8470723).  At a
+    # PRODUCTION tile (rows/rank=48, job 8475875) the barotropic solve
+    # is ~6-7% of the step (vmix dominates), so the variant is
+    # within-noise neutral — NOT worth flipping the default and risking
+    # the bit-repro lane.  Set it per deck when reduction-latency-bound.
     barotropic_implicit_pcg_variant: str = "standard"
+    # Preconditioner for the implicit-CN Helmholtz PCG (validated at the
+    # solver entry; unknown ⇒ ValueError):
+    #   "jacobi"     — inverse diagonal (legacy default).
+    #   "zonal_line" — exact periodic-tridiagonal solves per latitude
+    #                  row (cyclic Thomas).  COMMUNICATION-FREE under
+    #                  band MPI (each rank owns full longitude rows) and
+    #                  inverts exactly the pole-tightened zonal
+    #                  couplings that dominate the lat-lon condition
+    #                  number — the EVP-block-preconditioner principle
+    #                  (CESM POP, GMD 9:4209: fewer latency-bound
+    #                  iterations for cheap local FLOPs).  W-self-adjoint
+    #                  by construction (single_reduce-compatible).
+    # OPT-IN, regime-dependent (measured, same caveat as the variant
+    # above): zonal_line + M=20 is +20-26% at small/reduction-bound
+    # tiles (LL12 ≤8/node, job 8475325) but ~neutral at a production
+    # tile (rows/rank=48, job 8475875) where the barotropic solve is
+    # only ~6-7% of the step AND the cyclic-Thomas's sequential
+    # per-iteration FLOPs offset the M=60→20 iteration cut when
+    # compute-bound.  Use it on reduction-latency-bound decks; the
+    # default stays "jacobi".
+    barotropic_implicit_preconditioner: str = "jacobi"
     # Rigid-lid streamfunction solver knobs (only used when
     # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
     # surface entirely: the depth-integrated flow is non-divergent and carried
@@ -1396,3 +1424,23 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Default False = BAROTROPIC ∇(ζ+f) (label "QG-Leith (barotropic)" in a comparison matrix).
     qg_leith_stretching: bool = False
     qg_leith_deformation_radius_m: float = 6.75e3   # L_d for the grid-Burger bound [m].
+    # --- Veros u_centered dzw slot for the implicit vertical-diffusion solves ---
+    # Selects the GRADIENT divisor (the center-to-center spacing) used by the
+    # backward-Euler tracer (T/S) and momentum-friction vertical-diffusion solves:
+    #   False (DEFAULT, BIT-IDENTICAL) — the midpoint reconstruction
+    #     ``build_dz_half(dz_cell) = 0.5(dz_k + dz_{k+1})``.
+    #   True (VEROS-FAITHFUL) — the coordinate's center-to-center spacing
+    #     ``z_coord.dz_half_ref · J`` (Jacobian-scaled like every other
+    #     thickness), i.e. Veros's ``dzw`` (thermodynamics.py:267
+    #     ``delta = dt·kappaH/dzw``; same divisor for friction).  On a u_centered
+    #     z-coordinate (the Veros-faithful ACC recipe) dz_half_ref alternates
+    #     around the midpoint value exactly as Veros's dzw does (face ratios up to
+    #     2.0 at the top face, ±10% below), so at IDENTICAL diffusivity the
+    #     discrete flux differs per level.  This is the missed twin of the B3 slot
+    #     fixes (N²/TKE/GM were moved to dz_half_ref·J; the implicit solves were
+    #     not).  On a midpoint z-star coordinate dz_half_ref == build_dz_half(dz_ref)
+    #     so the flag is a NO-OP there.  The CONTROL volume (dz_cell / dz_u / dz_v)
+    #     is unchanged — only the gradient slot moves.  Requires
+    #     ``implicit_vertical_mixing=True`` (rejected otherwise at config
+    #     validation).  Default False ⇒ BIT-IDENTICAL for every existing config.
+    implicit_vmix_dzw_slot: bool = False

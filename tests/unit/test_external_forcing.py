@@ -437,7 +437,7 @@ class TestExternalForcingConfig:
         assert ghg["co2_ppmv"] == 348.0
 
         tsi = get_tsi_at_time(cfg.solar, day=0.0)
-        assert tsi == 1360.0
+        assert tsi == constants.S_0  # SolarConfig.S_0 default (constants.S_0)
 
         assert get_ozone_at_time(cfg.ozone, day=0.0) is None
         assert get_aerosol_at_time(cfg.aerosol, day=0.0) is None

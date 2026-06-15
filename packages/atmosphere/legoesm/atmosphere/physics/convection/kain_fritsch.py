@@ -60,6 +60,10 @@ from legoesm.atmosphere.physics.convection._plume import (
 __all__ = ("kain_fritsch_convection",)
 
 
+# Kain-Fritsch updraft-radius ramp smoothing widths (fixed).
+_KF_SHARPNESS_M = 200.0
+_KF_RAMP_WIDTH = 0.05
+
 def _interpolate_at_smooth_level(
     profile: jax.Array,
     k_smooth: jax.Array,
@@ -86,7 +90,7 @@ def _interp_profile_at_height(
     z: jax.Array,
     z_target: jax.Array,
     *,
-    sharpness_m: float = 200.0,
+    sharpness_m: float = _KF_SHARPNESS_M,
 ) -> jax.Array:
     """Smooth interpolation of ``profile`` at a target height ``z_target``.
 
@@ -212,7 +216,7 @@ def _faithful_rad(
     so RAD is differentiable at both corners (codex review-1 #5).
     """
     x = wkl / config.rad_wkl_ref
-    width = 0.05  # smoothing width in units of the [0,1] ramp
+    width = _KF_RAMP_WIDTH  # smoothing width in units of the [0,1] ramp
     # smooth clamp to [0,1]: softplus rising edge minus softplus at x=1.
     lo = jax.nn.softplus(x / width) * width
     frac = lo - jax.nn.softplus((lo - 1.0) / width) * width
@@ -242,45 +246,6 @@ def _faithful_entrainment_profile(
     """
     rad = _faithful_rad(wkl, config)  # (ncol,)
     return rho * constants.g * config.entrain_const / rad[:, None]
-
-
-def _precip_efficiency(
-    z_lcl: jax.Array,
-    config: KainFritschConfig,
-) -> jax.Array:
-    """Cloud-base-height precipitation efficiency PEFCBH (Kain 2004;
-    oracle lines 1616-1627).
-
-    ``CBH`` is the cloud-base height in kft; ``RCBH`` a 5th-order
-    polynomial; ``PEFCBH = 1/(1+RCBH)`` clamped to ``pef_max``.  In the
-    oracle the final PEF is the mean of this and a wind-shear term; the
-    SCM/idealised bridge has no resolved shear, so we use PEFCBH alone
-    (the no-shear limit gives PEF=1.591 -> clamped to pef_max=0.9, so the
-    shear term contributes only its clamp).  Returns a value in
-    ``[pef_min, pef_max]``.
-    """
-    cbh = (z_lcl) * 3.281e-3  # m -> kft
-    rcbh_poly = 0.96729352 + cbh * (
-        -0.70034167 + cbh * (
-            0.162179896 + cbh * (
-                -1.2569798e-2 + cbh * (4.2772e-4 - cbh * 5.44e-6)
-            )
-        )
-    )
-    # Smooth low-CBH branch: oracle uses RCBH=0.02 for CBH<3 kft.
-    low = jax.nn.sigmoid((3.0 - cbh) * 5.0)
-    rcbh = low * 0.02 + (1.0 - low) * rcbh_poly
-    # Smooth non-negativity on RCBH and a smooth clamp of PEFCBH to
-    # [pef_min, pef_max] (codex review-2 #4: replace the hard jnp.maximum /
-    # jnp.clip so the PEFF -> cloud-water-retention path is smooth-everywhere
-    # like the RAD ramp).  ``softplus(s*x)/s`` is the smooth positive part;
-    # the double-softplus clamps to the interval without a kink.
-    s = 50.0
-    rcbh = jax.nn.softplus(s * rcbh) / s
-    pefcbh = 1.0 / (1.0 + rcbh)
-    # smooth clamp to [pef_min, pef_max]
-    above_min = config.pef_min + jax.nn.softplus(s * (pefcbh - config.pef_min)) / s
-    return config.pef_max - jax.nn.softplus(s * (config.pef_max - above_min)) / s
 
 
 def kain_fritsch_convection(
@@ -588,20 +553,21 @@ def kain_fritsch_convection(
         z, rho, kernel_delta, M_u_max=config.M_b_max,
     )
 
-    # -- Precipitation efficiency (Kain 2004 PEFCBH) -----------------------
-    # The fraction PEFF of the detrained condensate that precipitates; the
-    # remainder (1-PEFF) is retained as suspended convective cloud water.
-    # The oracle splits the column condensate into rain (PEFF) vs detrained
-    # cloud/ice (1-PEFF).  Our convection emits ``dq_c_conv_dt`` to the
-    # microphysics chain (which itself converts cloud water to rain), so to
-    # avoid DOUBLE-counting precipitation we apply PEFF only as a *retention*
-    # scaling: convection hands the suspended fraction ``(1-PEFF)`` of its
-    # condensate to microphysics as cloud water, consistent with the column
-    # water budget (codex review-1 #12: PEFF was computed but never used).
-    if config.apply_precip_efficiency and config.faithful_trigger:
-        peff = _precip_efficiency(z_lcl_for_trigger, config)  # (ncol,)
-        cloud_retention = (1.0 - peff)[:, None]
-        dq_c_conv_dt_raw = dq_c_conv_dt_raw * cloud_retention
+    # -- Precipitation efficiency ------------------------------------------
+    # Under the ConvectionOutput contract convection emits ONLY a cloud-water
+    # source (``dq_c_conv_dt``); microphysics owns ALL precipitation via its
+    # autoconversion / sedimentation / evaporation chain (see
+    # ``convection/output.py``).  A scheme-level precip-efficiency *retention*
+    # scaling here is therefore inadmissible: scaling ``dq_c`` down by
+    # ``(1-PEFF)`` while leaving the vapor drying ``dq_v`` intact sheds the
+    # precipitating PEFF fraction with NO output channel to receive it,
+    # silently leaking column total water (~22 mm/day-equiv on a deep tropical
+    # column — validator atm-convection codex review-2 #1).  The FULL detrained
+    # condensate is handed to microphysics, which applies precipitation
+    # efficiency through autoconversion — exactly as the sister bulk-plume
+    # schemes (ZM / Bechtold / Emanuel) do, none of which apply a retention
+    # scaling.  This closes KF's column-water budget to the same
+    # subsidence-transport residual as those schemes.
 
     # Apply the deep+shallow weight as a per-column scalar.
     dT_dt = dT_dt_raw * branch_weight[:, None]

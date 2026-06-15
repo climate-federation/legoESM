@@ -619,19 +619,366 @@ class TestHeldSuarezParams:
 
 
 # ===========================================================================
-# 11f  Land / sea ice / RRTMGP — coverage notes
+# 11f  Land model parameters (slab + bucket hydrology)
+# ===========================================================================
+
+def _land_forcing(ncol, **overrides):
+    from legoesm.core.coupling_fields import AtmToSurface
+    ones = jnp.ones(ncol)
+    base = dict(
+        sw_down=200.0 * ones, lw_down=300.0 * ones,
+        precip_total=1e-5 * ones, precip_snow=0.0 * ones,
+        T_lowest=280.0 * ones, q_lowest=5e-3 * ones,
+        u_lowest=5.0 * ones, v_lowest=2.0 * ones,
+        p_lowest=1e5 * ones, p_surface=1.013e5 * ones,
+        rho_lowest=1.2 * ones, cos_zenith=0.7 * ones,
+        co2_ppmv=400.0 * ones, has_radiation=1.0 * ones,
+        has_precipitation=1.0 * ones,
+    )
+    base.update(overrides)
+    return AtmToSurface(**base)
+
+
+def _land_state(ncol, **overrides):
+    from legoesm.core.field import Field
+    from legoesm.land.state import LandState
+    ones = jnp.ones(ncol)
+    base = dict(
+        T_soil=Field(280.0 * ones, name="T_soil"),
+        W_bucket=Field(50.0 * ones, name="W_bucket"),
+        snow_depth=Field(jnp.zeros(ncol), name="snow_depth"),
+        snow_age=Field(jnp.zeros(ncol), name="snow_age"),
+    )
+    base.update(overrides)
+    return LandState(**base)
+
+
+class TestLandParams:
+    """Each tunable float field in ``LandConfig`` (heat capacity, slab
+    depth, albedo, emissivity, bucket capacity, roughness) must be
+    reachable by ``jax.grad`` through ``step_land``."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.land.slab_land import step_land
+        from legoesm.land.config import LandConfig
+        self.step_land = step_land
+        self.LandConfig = LandConfig
+        self.ncol = 16
+        self.state = _land_state(self.ncol)
+        self.forcing = _land_forcing(self.ncol)
+        self.dt = 60.0
+
+    def _loss_factory(self, name, base_cfg_kwargs=None, state=None,
+                      forcing=None, dt=None, field="T_soil"):
+        base_cfg_kwargs = base_cfg_kwargs or {}
+        state = state if state is not None else self.state
+        forcing = forcing if forcing is not None else self.forcing
+        dt = dt if dt is not None else self.dt
+
+        def loss(p):
+            cfg = self.LandConfig(**base_cfg_kwargs)._replace(**{name: p})
+            out, _, _ = self.step_land(state, forcing, cfg, U_min=1.0, dt=dt)
+            return jnp.sum(getattr(out, field).data ** 2)
+
+        return loss
+
+    def test_C_soil(self):
+        assert_param_grad_ok(self._loss_factory("C_soil"), 2.0e6, "Land C_soil")
+
+    def test_d_soil(self):
+        assert_param_grad_ok(self._loss_factory("d_soil"), 1.0, "Land d_soil")
+
+    def test_albedo_land(self):
+        assert_param_grad_ok(
+            self._loss_factory("albedo_land"), 0.2, "Land albedo_land",
+        )
+
+    def test_emissivity_land(self):
+        assert_param_grad_ok(
+            self._loss_factory("emissivity_land"), 0.96, "Land emissivity_land",
+        )
+
+    def test_W_max(self):
+        # W_max routes through the soil-water bucket; the loss must read
+        # W_bucket (not T_soil) for the closure to be live.
+        assert_param_grad_ok(
+            self._loss_factory("W_max", field="W_bucket"), 150.0, "Land W_max",
+        )
+
+    def test_z0_land_under_most(self):
+        # Roughness length only enters the surface fluxes under the MOST
+        # bulk scheme (the "constant" scheme uses fixed Cd/Ch and ignores
+        # z0).  Probe under bulk_scheme="most" so the parameter is live.
+        assert_param_grad_ok(
+            self._loss_factory("z0_land", base_cfg_kwargs={"bulk_scheme": "most"}),
+            0.05, "Land z0_land (MOST)",
+        )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "KNOWN BUG (land, out of scope for the convection-fix PR): "
+            "LandConfig.snow_melt_rate is an advertised tunable_tier-2 param "
+            "but is DEAD in the slab model — step_land always calls "
+            "update_snow with a non-None Q_net, taking the energy-limited melt "
+            "branch which never reads snow_melt_rate (only the legacy "
+            "degree-day else-branch does), so jax.grad of the slab snow budget "
+            "w.r.t. it is exactly 0. strict-xfail: flips red the moment the "
+            "fix (drop it from the slab __param_spec__, or blend the "
+            "degree-day rate into the energy-limited melt) lands."
+        ),
+    )
+    def test_snow_melt_rate_unreachable_in_slab(self):
+        # BUG: ``LandConfig.snow_melt_rate`` is declared a tunable_tier-2
+        # (extended) trainable parameter in land/config.py::__param_spec__,
+        # but ``step_land`` ALWAYS calls update_snow(..., Q_net=Q_net) with
+        # a non-None Q_net (slab_land.py:194).  update_snow then takes the
+        # ENERGY-LIMITED melt branch (snow_budget.py:83-85) and NEVER reads
+        # ``snow_melt_rate`` — that field is only used in the legacy
+        # degree-day ``else`` branch (snow_budget.py:88) reachable solely
+        # when Q_net is None.  Consequently jax.grad cannot reach this
+        # advertised tunable through the slab model: a parameter-estimation
+        # user calibrating snow_melt_rate would silently get a zero
+        # gradient.  Fix: either drop snow_melt_rate from the slab
+        # __param_spec__ (it is dead in the energy-limited path), or make
+        # update_snow blend the degree-day rate into the energy-limited
+        # melt.  Asserting it IS reachable here so the test fails loudly
+        # while the parameter remains dead code.
+        from legoesm.core.field import Field
+        snow_state = _land_state(
+            self.ncol,
+            snow_depth=Field(20.0 * jnp.ones(self.ncol), name="snow_depth"),
+        )
+        warm_forcing = _land_forcing(
+            self.ncol, T_lowest=290.0 * jnp.ones(self.ncol),
+            sw_down=400.0 * jnp.ones(self.ncol),
+        )
+        loss = self._loss_factory(
+            "snow_melt_rate", state=snow_state, forcing=warm_forcing,
+            dt=600.0, field="snow_depth",
+        )
+        assert_param_grad_ok(loss, 5.0e-6, "Land snow_melt_rate")
+
+
+# ===========================================================================
+# 11g  Sea ice parameters (thermodynamic slab + rheology)
+# ===========================================================================
+
+def _ice_forcing(shape, **overrides):
+    from legoesm.core.coupling_fields import AtmToSurface
+    ones = jnp.ones(shape)
+    base = dict(
+        sw_down=100.0 * ones, lw_down=250.0 * ones,
+        precip_total=0.0 * ones, precip_snow=0.0 * ones,
+        T_lowest=260.0 * ones, q_lowest=1e-3 * ones,
+        u_lowest=5.0 * ones, v_lowest=2.0 * ones,
+        p_lowest=1e5 * ones, p_surface=1.013e5 * ones,
+        rho_lowest=1.4 * ones, cos_zenith=0.5 * ones,
+        co2_ppmv=400.0 * ones, has_radiation=1.0 * ones,
+        has_precipitation=1.0 * ones,
+    )
+    base.update(overrides)
+    return AtmToSurface(**base)
+
+
+class TestSeaIceParams:
+    """Thermodynamic ``SeaIceConfig`` float fields (conductivity, albedo,
+    emissivity, ocean heat-transfer coefficient) must be reachable by
+    ``jax.grad`` through ``step_sea_ice`` in slab mode."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.core.field import Field
+        from legoesm.ice.sea_ice import step_sea_ice
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.ice.state import SeaIceState
+        self.step_fn = step_sea_ice
+        self.SeaIceConfig = SeaIceConfig
+        n = 4
+        shape = (6, n, n)
+        self.shape = shape
+        self.state = SeaIceState(
+            h_ice=Field(1.0 * jnp.ones(shape), name="h_ice"),
+            T_ice=Field(265.0 * jnp.ones(shape), name="T_ice"),
+            concentration=Field(0.8 * jnp.ones(shape), name="concentration"),
+        )
+        self.forcing = _ice_forcing(shape)
+        self.ocean_u = jnp.zeros(shape)
+        self.ocean_v = jnp.zeros(shape)
+        self.dt = 3600.0
+
+    def _loss(self, name, p, ocean_sst, field="T_ice"):
+        cfg = self.SeaIceConfig(dynamics="none")._replace(**{name: p})
+        out, _ = self.step_fn(
+            self.state, self.forcing, ocean_sst,
+            self.ocean_u, self.ocean_v, cfg, U_min=1.0, dt=self.dt,
+        )
+        return jnp.sum(getattr(out, field).data ** 2)
+
+    def test_k_ice(self):
+        sst = 271.35 * jnp.ones(self.shape)
+        assert_param_grad_ok(
+            lambda p: self._loss("k_ice", p, sst), 2.0, "SeaIce k_ice",
+        )
+
+    def test_albedo_ice(self):
+        sst = 271.35 * jnp.ones(self.shape)
+        assert_param_grad_ok(
+            lambda p: self._loss("albedo_ice", p, sst), 0.65, "SeaIce albedo_ice",
+        )
+
+    def test_emissivity_ice(self):
+        sst = 271.35 * jnp.ones(self.shape)
+        assert_param_grad_ok(
+            lambda p: self._loss("emissivity_ice", p, sst),
+            0.97, "SeaIce emissivity_ice",
+        )
+
+    def test_ocean_heat_transfer_coeff(self):
+        # The ocean→ice basal heat flux F_w = k_oc · (SST − T_freeze) is
+        # only non-zero when the ocean is ABOVE freezing (active basal
+        # melt).  At SST = T_freeze_ocean the flux — and therefore the
+        # k_oc gradient — is identically zero, which is physically
+        # correct, not a bug.  Probe with a warm ocean (SST > freezing)
+        # so the basal-melt path is live and the gradient flows into
+        # h_ice.
+        sst = 274.0 * jnp.ones(self.shape)
+        assert_param_grad_ok(
+            lambda p: self._loss(
+                "ocean_heat_transfer_coeff", p, sst, field="h_ice",
+            ),
+            20.0, "SeaIce ocean_heat_transfer_coeff",
+        )
+
+
+class TestSeaIceRheologyParams:
+    """Hibler (1979) ice-strength parameters must be reachable by
+    ``jax.grad`` through the standalone ``ice_strength`` kernel."""
+
+    def _inputs(self):
+        h = jnp.array([1.0, 2.0, 0.5, 1.5])
+        A = jnp.array([0.8, 0.9, 0.6, 0.75])
+        return h, A
+
+    def test_P_star(self):
+        from legoesm.ice.rheology import ice_strength
+        h, A = self._inputs()
+        assert_param_grad_ok(
+            lambda p: jnp.sum(ice_strength(h, A, P_star=p) ** 2),
+            2.75e4, "SeaIce P_star",
+        )
+
+    def test_C_strength(self):
+        from legoesm.ice.rheology import ice_strength
+        h, A = self._inputs()
+        assert_param_grad_ok(
+            lambda c: jnp.sum(ice_strength(h, A, C_strength=c) ** 2),
+            20.0, "SeaIce C_strength",
+        )
+
+
+# ===========================================================================
+# 11i  Ocean physics parameters (vertical mixing + bottom drag)
+# ===========================================================================
+
+def _ocean_column(n=4, nlev=4):
+    """Stably-stratified ocean column on a small cubed-sphere grid with
+    sheared currents so the Richardson-mixing diffusivities are active.
+
+    Returns ``(u, v, T, S, rho, z_coord, jacobian)``.
+    """
+    from legoesm.ocean.vertical import create_z_star_from_thicknesses
+    from legoesm.ocean.eos import linear_eos
+    z_coord = create_z_star_from_thicknesses([10.0, 20.0, 40.0, 80.0][:nlev])
+    shape = (6, n, n, nlev)
+    u = 0.1 * jax.random.normal(jax.random.PRNGKey(0), shape)
+    v = 0.05 * jax.random.normal(jax.random.PRNGKey(1), shape)
+    # Stable stratification: warm/light on top, cold/dense below.
+    T_prof = jnp.linspace(18.0, 4.0, nlev)
+    T = jnp.broadcast_to(T_prof, shape)
+    S = jnp.full(shape, 35.0)
+    jacobian = jnp.ones((6, n, n))
+    rho = linear_eos(T, S, jnp.zeros(shape))
+    return u, v, T, S, rho, z_coord, jacobian
+
+
+class TestOceanPhysicsParams:
+    """Pacanowski-Philander Richardson-mixing tunables (``K_0``,
+    ``alpha``, ``K_bg``, ``A_bg``) and the quadratic bottom-drag
+    coefficient ``C_d`` must be reachable by ``jax.grad``."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.ocean.physics.vertical_mixing.richardson import (
+            richardson_vertical_mixing,
+        )
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            RichardsonVerticalMixingConfig,
+        )
+        from legoesm.ocean.physics.bottom_drag.quadratic import (
+            quadratic_bottom_drag,
+        )
+        from legoesm.ocean.physics.bottom_drag.config import QuadraticDragConfig
+        self.rmix = richardson_vertical_mixing
+        self.RmixCfg = RichardsonVerticalMixingConfig
+        self.drag = quadratic_bottom_drag
+        self.DragCfg = QuadraticDragConfig
+        self.u, self.v, self.T, self.S, self.rho, self.zc, self.jac = (
+            _ocean_column()
+        )
+
+    def _rmix_loss(self, name, p, field="dT_dt"):
+        cfg = self.RmixCfg()._replace(**{name: p})
+        out = self.rmix(
+            self.u, self.v, self.T, self.S, self.rho, self.zc, self.jac,
+            cfg, dt=3600.0,
+        )
+        return jnp.sum(getattr(out, field) ** 2)
+
+    def test_richardson_K_0(self):
+        assert_param_grad_ok(
+            lambda p: self._rmix_loss("K_0", p), 5e-3, "Ocean Richardson K_0",
+        )
+
+    def test_richardson_alpha(self):
+        assert_param_grad_ok(
+            lambda p: self._rmix_loss("alpha", p), 5.0,
+            "Ocean Richardson alpha",
+        )
+
+    def test_richardson_K_bg(self):
+        assert_param_grad_ok(
+            lambda p: self._rmix_loss("K_bg", p), 1e-5,
+            "Ocean Richardson K_bg",
+        )
+
+    def test_richardson_A_bg(self):
+        # Background viscosity enters the momentum diffusivity, so probe
+        # via the velocity tendency.
+        assert_param_grad_ok(
+            lambda p: self._rmix_loss("A_bg", p, field="du_dt"), 1e-4,
+            "Ocean Richardson A_bg",
+        )
+
+    def test_bottom_drag_C_d(self):
+        def loss(c):
+            cfg = self.DragCfg()._replace(C_d=c)
+            out = self.drag(self.u, self.v, self.zc, self.jac, cfg)
+            return jnp.sum(out.du_dt ** 2)
+
+        assert_param_grad_ok(loss, 2.5e-3, "Ocean bottom-drag C_d")
+
+
+# ===========================================================================
+# 11j  RRTMGP — coverage note
 # ===========================================================================
 #
-# Land slab (``LandConfig``) and sea ice (``SeaIceConfig``) parameters
-# are tested indirectly by ``test_diff_land.py`` and
-# ``test_diff_sea_ice.py`` — those files build full state objects +
-# atmospheric forcing and exercise gradient flow through every config
-# field accessed by ``step_land`` / ``step_sea_ice``.  Replicating that
-# scaffold here for one-parameter-at-a-time coverage would duplicate a
-# lot of state-construction boilerplate; the existing per-component
-# files already prove that the relevant fields are reachable.
-#
 # RRTMGP gas-absorption coefficients are table-based and not
-# differentiable through the lookup; surface emissivity / aerosol
-# scaling are differentiable but live in the radiation driver layer,
-# tested via ``test_diff_atmosphere_physics.py``.
+# differentiable through the lookup (integer band indexing + clamped
+# interpolation table reads).  Surface emissivity / aerosol-optical-depth
+# scaling are differentiable but live in the radiation driver layer and
+# are exercised by ``test_diff_atmosphere_physics.py`` (gray radiation
+# emissivity / optical-depth coefficients are covered there).  No new
+# RRTMGP parameter is independently AD-reachable at the kernel level, so
+# none is asserted here.

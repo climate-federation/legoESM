@@ -9,8 +9,8 @@ can be independently enabled/disabled via its ``scheme`` field (set to
 Gravity wave drag is included as a first-class component on equal
 footing with the other parameterizations; the supported schemes are
 ``"rayleigh"``, ``"lindzen"``, ``"mcfarlane"``, ``"hines"``,
-``"prognostic_spectral"``, ``"ml_emulator"``, and ``"none"`` (see
-``GravityWaveDragConfig``).
+``"prognostic_spectral"``, ``"e3sm_cam"``, ``"ml_emulator"``, and
+``"none"`` (see ``GravityWaveDragConfig``).
 
 The combined function accepts an optional ``phys_state`` (``PhysicsState``)
 argument.  When provided, prognostic physics variables (TKE, convective
@@ -88,18 +88,23 @@ class PhysicsConfig(NamedTuple):
     Fields
     ------
     radiation : RadiationConfig
-        Radiation configuration (schemes: "gray", "rrtmgp").
+        Radiation configuration (schemes: "gray", "rrtmgp", "none").
     convection : ConvectionConfig
-        Convection configuration (schemes: "sbm", "dca", "none").
+        Convection configuration (schemes: "sbm", "dca", "kuo",
+        "mass_flux", "edmf", "zhang_mcfarlane", "kain_fritsch",
+        "emanuel", "tiedtke", "bechtold", "none").
     turbulence : TurbulenceConfig
         Turbulence configuration (schemes: "smagorinsky", "louis",
-        "tke", "clubb_lite", "none").
+        "tke", "mynn25", "clubb_lite", "clubb", "holtslag_boville",
+        "ysu", "edmf", "none").
     microphysics : MicrophysicsConfig
         Microphysics configuration (schemes: "kessler", "sundqvist",
-        "seifert_beheng", "morrison", "thompson", "ml_emulator", "none").
+        "seifert_beheng", "morrison", "thompson", "p3", "sdm",
+        "fast_sbm", "ml_emulator", "none").
     gravity_wave_drag : GravityWaveDragConfig
         Gravity wave drag configuration (schemes: "rayleigh", "lindzen",
-        "mcfarlane", "hines", "prognostic_spectral", "ml_emulator", "none").
+        "mcfarlane", "hines", "prognostic_spectral", "e3sm_cam",
+        "ml_emulator", "none").
     """
     radiation: RadiationConfig = RadiationConfig()
     convection: ConvectionConfig = ConvectionConfig()
@@ -111,8 +116,10 @@ class PhysicsConfig(NamedTuple):
 def make_physics(
     config: PhysicsConfig,
     model_type: str = "hydrostatic",
-    dt: float = 300.0,
+    dt: float = 300.0,  # coeff-ok: default physics timestep [s]
     column_mesh=None,
+    sfc_albedo_override=None,
+    sfc_emissivity_override=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -148,12 +155,27 @@ def make_physics(
         ``PhysicsState`` carry can refuse loudly instead of silently
         reseeding every step (issue #405/#413).
     """
+    # Build-time surface overrides (e.g. AIMIP's trained spatial sfc_albedo /
+    # sfc_emissivity) are routed to the radiation solve as per-call overrides so
+    # a trained value never touches RRTMGPConfig.sfc_* (RRTMGP's solver-cache
+    # key). Only the spectral_pe combined path threads them today; reject loudly
+    # elsewhere rather than silently dropping a trained surface field.
+    if (sfc_albedo_override is not None or sfc_emissivity_override is not None) \
+            and model_type != "spectral_pe":
+        raise ValueError(
+            "sfc_albedo_override / sfc_emissivity_override are only wired for "
+            f"model_type='spectral_pe', got {model_type!r}."
+        )
     if model_type == "hydrostatic":
         fn = _make_hydrostatic_combined(config, dt, column_mesh=column_mesh)
     elif model_type == "nonhydrostatic":
         fn = _make_nonhydrostatic_combined(config, dt)
     elif model_type == "spectral_pe":
-        fn = _make_spectral_pe_combined(config, dt)
+        fn = _make_spectral_pe_combined(
+            config, dt,
+            sfc_albedo_override=sfc_albedo_override,
+            sfc_emissivity_override=sfc_emissivity_override,
+        )
     elif model_type == "mpas":
         fn = _make_mpas_combined(config, dt, column_mesh=column_mesh)
     else:
@@ -532,10 +554,17 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
 # Spectral PE
 # ======================================================================
 
-def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
+def _make_spectral_pe_combined(
+    config: PhysicsConfig, dt: float,
+    sfc_albedo_override=None, sfc_emissivity_override=None,
+) -> Callable:
     tagged_fns = []
     if config.radiation.scheme != "none":
-        tagged_fns.append((make_radiation_physics(config.radiation, "spectral_pe"), False, None))
+        tagged_fns.append((make_radiation_physics(
+            config.radiation, "spectral_pe",
+            sfc_albedo_override=sfc_albedo_override,
+            sfc_emissivity_override=sfc_emissivity_override,
+        ), False, None))
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, "spectral_pe", dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":

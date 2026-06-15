@@ -462,10 +462,16 @@ def _build_cubed_sphere_spmd(resolution, nlev, dt, dtype, physics_level,
         )
     gdev = jax.devices()
     n_global = len(gdev)
-    if 6 % n_global != 0:
+    _ok = (6 % n_global == 0) if n_global <= 6 else (
+        n_global % 6 == 0
+        and (round((n_global // 6) ** 0.5)) ** 2 == n_global // 6
+    )
+    if not _ok:
         raise ValueError(
-            f"--cs-spmd needs a global device count dividing 6, got "
-            f"{n_global} (launch with srun -n 1|2|3|6)."
+            f"--cs-spmd needs a device count dividing 6 or 6*kt^2 "
+            f"(sub-face tiling), got {n_global} (srun -n "
+            f"1|2|3|6|24|54|...).  np=24 parity receipt: 4.4e-10 "
+            f"@5 steps, job 8465445."
         )
 
     cfg_mesh = create_device_mesh(n_devices=n_global, devices=gdev)

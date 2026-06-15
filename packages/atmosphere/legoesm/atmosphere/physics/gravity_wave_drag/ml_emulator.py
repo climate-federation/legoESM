@@ -16,6 +16,9 @@ import equinox as eqx
 from legoesm import constants
 from legoesm.atmosphere.physics.gravity_wave_drag.config import GWDMLEmulatorConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
+# Raw-NN-output scaling to physical tendency magnitude (emulator default).
+_GWD_OUTPUT_SCALE = 0.01
+
 
 
 class GWDEmulator(eqx.Module):
@@ -87,9 +90,9 @@ def ml_gwd(
 
     # Residual scaling: untrained model should produce near-zero
     if config.use_residual:
-        du_dt = du_dt * 0.01
-        dv_dt = dv_dt * 0.01
-        dT_dt = dT_dt * 0.01
+        du_dt = du_dt * _GWD_OUTPUT_SCALE
+        dv_dt = dv_dt * _GWD_OUTPUT_SCALE
+        dT_dt = dT_dt * _GWD_OUTPUT_SCALE
 
     # Column dissipation: KE → heat conversion rate.  Use the same
     # ``-(u·du + v·dv)`` form as Lindzen / McFarlane / Hines so the

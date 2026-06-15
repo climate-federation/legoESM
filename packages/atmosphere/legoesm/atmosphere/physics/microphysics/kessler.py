@@ -33,6 +33,10 @@ from legoesm.atmosphere.physics.microphysics.output import (
 )
 
 
+# Kessler accretion exponent + density floor (fixed).
+_KESSLER_ACCR_EXP = 0.875
+_RHO_FLOOR = 0.1
+
 def kessler_microphysics(
     T: jax.Array,
     q_v: jax.Array,
@@ -107,7 +111,7 @@ def kessler_microphysics(
 
     # 3. Accretion: cloud collected by rain.  Fractional powers of q_r
     # have unbounded derivative at q_r=0 — safe_pow handles the AD guard.
-    accretion = config.accretion_coeff * q_c * safe_pow(q_r, 0.875)
+    accretion = config.accretion_coeff * q_c * safe_pow(q_r, _KESSLER_ACCR_EXP)
 
     # 4. Evaporation of rain (q_r^0.525) via the shared donor-limited
     # helper — bounds ``evap·dt ≤ q_r`` so one explicit step can't
@@ -149,7 +153,7 @@ def kessler_microphysics(
     # 5. Rain sedimentation
     rho_sfc = rho[:, -1:]
     V_t = config.rain_fall_speed * jnp.sqrt(
-        rho_sfc / jnp.clip(rho, 0.1)
+        rho_sfc / jnp.clip(rho, _RHO_FLOOR)
     )
     # Joint q_r donor cap: pass evaporation as ``extra_sink`` so the
     # sedimentation flux limiter accounts for the rain evaporation that
@@ -182,7 +186,6 @@ def kessler_microphysics(
     # the unused-tendency placeholders to f64 under x64 mode.
     _dtype = T.dtype
     z = jnp.zeros((ncol, nlev), dtype=_dtype)
-    jnp.zeros((ncol,), dtype=_dtype)
     return MicrophysicsOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,

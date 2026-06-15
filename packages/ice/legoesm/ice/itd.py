@@ -40,6 +40,10 @@ import jax.numpy as jnp
 
 from legoesm import constants
 
+# Lipscomb (2001) piecewise-linear g(h) slope coefficient: the first-moment term
+# of the linear thickness reconstruction is 12*eta/H^3 (fixed published).
+_LIPSCOMB_G1_COEFF = 12.0
+
 
 # ==============================================================================
 # Category bounds
@@ -465,7 +469,7 @@ def _lipscomb_column_kernel(
     eta = jnp.clip(eta_raw, -H / 6.0, H / 6.0)
     h_bar_eff = centers_disp + eta
     G0 = jnp.where(has_ice, a_new / H, 0.0)
-    G1 = jnp.where(has_ice, 12.0 * eta * a_new / (H ** 3), 0.0)
+    G1 = jnp.where(has_ice, _LIPSCOMB_G1_COEFF * eta * a_new / (H ** 3), 0.0)
 
     # Overlap of displaced bin k (source) with FIXED bin j (target).
     lo_j = lo[:, None]

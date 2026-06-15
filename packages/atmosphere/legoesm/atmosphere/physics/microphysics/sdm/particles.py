@@ -7,7 +7,8 @@ structure-of-arrays: each attribute is a length-``n_sd`` array, so the whole
 
 Mirrors ERF ``ERF_SuperDropletPCDefinitions.H`` (radius, multiplicity, species
 masses). This revision carries the attributes needed by diffusional growth;
-velocity/cell-index attributes are added with collision/sedimentation.
+Lagrangian drivers keep positions in their own state wrapper so the legacy
+particle pytree arity stays unchanged.
 
 Conventions
 -----------

@@ -36,6 +36,189 @@ if TYPE_CHECKING:  # avoid a config <-> clubb import cycle at runtime
     from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
 
 
+# Machine-readable tunable/fixed split for the turbulence scheme configs.
+# Per-param keys: units, bounds (lo, hi), tunable_tier (0 fixed / 1 core /
+# 2 extended / 3 aggressive), transform, category, reference, shape.
+# Physical units are explicit (NEVER "1" on a dimensional quantity): mixing
+# lengths and roughness in m, diffusion-rate coefficients in 1/m, the
+# countergradient excess in K/m. Dimensionless stability-function and
+# closure coefficients, Prandtl/Richardson numbers, exchange coefficients,
+# and area fractions carry units "1". Tier-1 picks are the 1-3 primary knobs
+# per scheme (critical Richardson number, asymptotic mixing length,
+# Smagorinsky C_s, entrainment efficiency, TKE->Km coefficient, neutral
+# exchange coefficients); secondary closure coefficients are tier 2.
+__param_spec__ = {
+    "CLUBBLiteConfig": {
+        "scheme_key": "atm.turb.CLUBBLiteConfig",
+        "excluded": {
+            # C1/C4/C5 are the full-CLUBB pressure-covariance coefficients;
+            # this reduced "lite" surrogate dropped the higher-moment block
+            # that consumed them (see clubb_lite.py iter-172 note), so they
+            # are NOT read by the body — excluded as dead in this scheme.
+            "C1": "unused in CLUBB-lite: higher-moment closure block removed",
+            "C4": "unused in CLUBB-lite: higher-moment closure block removed",
+            "C5": "unused in CLUBB-lite: higher-moment closure block removed",
+            "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "var_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+        },
+        "params": {
+            # C_eps is the LIVE wp2-dissipation coefficient (diss = C_eps·sqrt(wp2)/l,
+            # clubb_lite.py:238) — the same TKE-dissipation knob as TKEConfig.Ce.
+            "C_eps": {"units": "1", "bounds": (0.06, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Mellor & Yamada (1982) TKE dissipation coefficient (wp2 budget)", "shape": None},
+            "C_K": {"units": "1", "bounds": (0.1, 1.2), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "CLUBB-lite eddy-diffusivity coefficient (Km = C_K·l·sqrt(wp2))", "shape": None},
+            "Pr_t": {"units": "1", "bounds": (0.3, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
+            "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
+        },
+    },
+    "HoltslagBovilleConfig": {
+        "scheme_key": "atm.turb.HoltslagBovilleConfig",
+        "excluded": {
+            "arg_floor": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "cgs_gate_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "kvf_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "pbl_crossing_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "sfc_blend_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "stable_blend_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "unstable_blend_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "ustar_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+        },
+        "params": {
+            "Ri_crit": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_richardson", "reference": "Holtslag & Boville (1993) bulk-Ri PBL-height criterion (ricr)", "shape": None},
+            "betam": {"units": "1", "bounds": (5.0, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "monin_obukhov", "reference": "Holtslag & Boville (1993) MO momentum gradient constant (betam)", "shape": None},
+            "betah": {"units": "1", "bounds": (5.0, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "monin_obukhov", "reference": "Holtslag & Boville (1993) MO heat gradient constant (betah)", "shape": None},
+            "betas": {"units": "1", "bounds": (2.0, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "monin_obukhov", "reference": "Holtslag & Boville (1993) MO stable gradient constant (betas)", "shape": None},
+            "cloud_pbl_floor_m": {"units": "m", "bounds": (10.0, 150.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pbl_height", "reference": "Holtslag & Boville (1993) marine-stratus lowest-layer PBL floor", "shape": None},
+            "fak": {"units": "1", "bounds": (3.0, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "countergradient", "reference": "Holtslag & Boville (1993) surface T/q excess constant (fak)", "shape": None},
+            "fakn": {"units": "1", "bounds": (3.0, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "countergradient", "reference": "Holtslag & Boville (1993) countergradient / Pr constant (fakn)", "shape": None},
+            "free_ri_stable_c1": {"units": "1", "bounds": (4.0, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Holtslag & Boville (1993) free-atm stable f(Ri) coeff c1", "shape": None},
+            "free_ri_stable_c2": {"units": "1", "bounds": (3.0, 24.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Holtslag & Boville (1993) free-atm stable f(Ri) coeff c2", "shape": None},
+            "free_ri_unstable_coeff": {"units": "1", "bounds": (6.0, 54.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Holtslag & Boville (1993) free-atm unstable f(Ri) coeff", "shape": None},
+            "ml_free": {"units": "m", "bounds": (10.0, 100.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing_length", "reference": "Holtslag & Boville (1993) free-atmosphere mixing length (ml2)", "shape": None},
+            "pblh_mech_coeff": {"units": "s", "bounds": (200.0, 2100.0), "tunable_tier": 2, "transform": "sigmoid", "category": "pbl_height", "reference": "Holtslag & Boville (1993) minimum-mechanical-mixing depth h>=c·u*", "shape": None},
+            "pblh_ustar_fac": {"units": "1", "bounds": (30.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "pbl_height", "reference": "Holtslag & Boville (1993) bulk-Ri mechanical term fac·u*^2", "shape": None},
+            "pblmaxp": {"units": "Pa", "bounds": (10000.0, 120000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "pbl_height", "reference": "Holtslag & Boville (1993) maximum PBL depth in pressure (pblmaxp)", "shape": None},
+            "sffrac": {"units": "1", "bounds": (0.03, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "pbl_height", "reference": "Holtslag & Boville (1993) surface-layer fraction of PBL (sffrac)", "shape": None},
+            "unstable_kbfs_threshold": {"units": "m^2/s^3", "bounds": (1e-08, 1e-05), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Holtslag-Boville scheme default: unstable-branch buoyancy-flux bias", "shape": None},
+        },
+    },
+    "LouisConfig": {
+        "scheme_key": "atm.turb.LouisConfig",
+        "excluded": {
+            "blend_ri_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+        },
+        "params": {
+            "Ri_crit": {"units": "1", "bounds": (0.1, 0.75), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_richardson", "reference": "Louis (1979) bulk-Ri PBL-height criterion", "shape": None},
+            "b_heat_ratio": {"units": "1", "bounds": (0.5, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis, Tiedtke & Geleyn (1982) heat/momentum b-ratio (b_h/b_m)", "shape": None},
+            "b_louis": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1979) stability-function coefficient b", "shape": None},
+            "c_louis": {"units": "1", "bounds": (5.0, 49.8), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1979) unstable-branch coefficient c (Holtslag & De Bruin 1988)", "shape": None},
+            "d_louis": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1979) stable-branch sqrt coefficient d", "shape": None},
+            "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
+        },
+    },
+    "MYNN25Config": {
+        "scheme_key": "atm.turb.MYNN25Config",
+        "excluded": {
+            "C4": "default 0 = disabled/off (enable via config, not training)",
+            "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+        },
+        "params": {
+            "A1": {"units": "1", "bounds": (0.6, 2.4), "tunable_tier": 1, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN stability-function constant A1", "shape": None},
+            "A2": {"units": "1", "bounds": (0.3, 1.4), "tunable_tier": 1, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN stability-function constant A2", "shape": None},
+            "B1": {"units": "1", "bounds": (12.0, 48.0), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Nakanishi & Niino (2009) MYNN master-length / dissipation constant B1", "shape": None},
+            "B2": {"units": "1", "bounds": (7.5, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Nakanishi & Niino (2009) MYNN dissipation-length constant B2", "shape": None},
+            "C1": {"units": "1", "bounds": (0.05, 0.4), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN pressure-covariance constant C1", "shape": None},
+            "C2": {"units": "1", "bounds": (0.25, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN pressure-covariance constant C2", "shape": None},
+            "C3": {"units": "1", "bounds": (0.12, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN pressure-covariance constant C3", "shape": None},
+            "C5": {"units": "1", "bounds": (0.066, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN pressure-covariance constant C5", "shape": None},
+            "gamma1": {"units": "1", "bounds": (0.1, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Nakanishi & Niino (2009) MYNN critical-flux-Ri numerator gamma1", "shape": None},
+        },
+    },
+    "SmagorinskyConfig": {
+        "scheme_key": "atm.turb.SmagorinskyConfig",
+        "excluded": {
+        },
+        "params": {
+            "C_s": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "Smagorinsky (1963) constant (atmospheric ~0.1-0.25)", "shape": None},
+            "Pr_t": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
+            "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
+        },
+    },
+    "SurfaceLayerConfig": {
+        "scheme_key": "atm.turb.SurfaceLayerConfig",
+        "excluded": {
+        },
+        "params": {
+            "Cd_neutral": {"units": "1", "bounds": (5e-04, 5e-03), "tunable_tier": 1, "transform": "sigmoid", "category": "surface_exchange", "reference": "bulk-aerodynamic neutral drag coefficient (Large & Yeager 2004 range)", "shape": None},
+            "Ch_neutral": {"units": "1", "bounds": (5e-04, 5e-03), "tunable_tier": 1, "transform": "sigmoid", "category": "surface_exchange", "reference": "bulk-aerodynamic neutral heat-transfer coefficient (Large & Yeager 2004 range)", "shape": None},
+            "z0": {"units": "m", "bounds": (1e-05, 1e-03), "tunable_tier": 2, "transform": "sigmoid", "category": "surface_exchange", "reference": "surface-layer aerodynamic roughness length", "shape": None},  # 2-decade range (default 1e-4); wider spans lose float32 sigmoid precision near the floor
+            "z_ref": {"units": "m", "bounds": (2.0, 30.0), "tunable_tier": 0, "transform": "none", "category": "numerics", "reference": "MOST reference (anemometer) height convention (10 m)", "shape": None},
+        },
+    },
+    "TKEConfig": {
+        "scheme_key": "atm.turb.TKEConfig",
+        "excluded": {
+            "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+        },
+        "params": {
+            "Ce": {"units": "1", "bounds": (0.06, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Mellor & Yamada (1982) TKE dissipation coefficient", "shape": None},
+            "Ck": {"units": "1", "bounds": (0.03, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "Mellor & Yamada (1982) TKE->Km coefficient (Km = Ck·l·sqrt(TKE))", "shape": None},
+            "Pr_t": {"units": "1", "bounds": (0.3, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
+            "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
+        },
+    },
+    "TurbulentEDMFConfig": {
+        "scheme_key": "atm.turb.TurbulentEDMFConfig",
+        "excluded": {
+            # The simplified-EDMF updraft scan implements lateral entrainment
+            # only (edmf.py:215); there is no detrainment term, so
+            # detrainment_rate is not read by the body — a dead (zero-gradient)
+            # knob until detrainment is implemented. Excluded, not tunable.
+            "detrainment_rate": "unused in simplified EDMF: no detrainment term in the updraft scan",
+            "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "updraft_deactivation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+        },
+        "params": {
+            "Ce": {"units": "1", "bounds": (0.06, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "tke_closure", "reference": "Mellor & Yamada (1982) TKE dissipation coefficient (ED part)", "shape": None},
+            "Ck": {"units": "1", "bounds": (0.03, 0.3), "tunable_tier": 1, "transform": "sigmoid", "category": "diffusivity", "reference": "Mellor & Yamada (1982) TKE->Km coefficient (ED part)", "shape": None},
+            "Pr_t": {"units": "1", "bounds": (0.3, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
+            "a_updraft": {"units": "1", "bounds": (0.01, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) updraft area fraction", "shape": None},
+            "entrainment_rate": {"units": "1/m", "bounds": (1e-04, 1e-02), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Siebesma et al. (2007) lateral entrainment rate", "shape": None},
+            # parcel_dT is the LIVE initial plume potential-temperature excess
+            # (theta_u_init = theta + parcel_dT, edmf.py:177) — a buoyancy
+            # calibration knob, not numerics.
+            "parcel_dT": {"units": "K", "bounds": (0.1, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) EDMF initial updraft thermal excess", "shape": None},
+            "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
+            # w_updraft_min is LIVE: it floors the initial updraft velocity
+            # (edmf.py:173) and sets the velocity scale of the deactivation
+            # gate (edmf.py:240). A physical minimum updraft velocity [m/s];
+            # tier-3 because it is gate-coupled and primarily a robustness floor.
+            "w_updraft_min": {"units": "m/s", "bounds": (0.01, 1.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) EDMF minimum updraft velocity", "shape": None},
+        },
+    },
+    "YSUConfig": {
+        "scheme_key": "atm.turb.YSUConfig",
+        "excluded": {
+            "blend_pbl_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "blend_ri_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "pbl_smooth_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "sfc_excess_zfrac": "measurement convention: surface-layer z/h (top of the surface layer) at which w_s is evaluated for the θ_T excess parcel, not a tuned closure",
+        },
+        "params": {
+            "Pr_t": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
+            "Ri_crit": {"units": "1", "bounds": (0.1, 0.75), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_richardson", "reference": "Hong et al. (2006) YSU critical Richardson number", "shape": None},
+            "countergrad_coeff": {"units": "1", "bounds": (2.0, 19.5), "tunable_tier": 1, "transform": "sigmoid", "category": "countergradient", "reference": "Troen & Mahrt (1986); Hong et al. (2006) YSU nonlocal countergradient coeff b", "shape": None},
+            "entrainment_coeff": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Hong et al. (2006) YSU PBL-top entrainment coefficient", "shape": None},
+            "entrainment_width_frac": {"units": "1", "bounds": (0.05, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Hong et al. (2006) YSU Gaussian entrainment width fraction of h_pbl", "shape": None},
+            "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length (free-atm local-Ri K)", "shape": None},
+            "louis_b": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1982) stability-function coefficient b (YSU free-atm local Ri)", "shape": None},
+            "louis_c": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1982) unstable-branch coefficient c (YSU free-atm local Ri)", "shape": None},
+            "louis_d": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1982) stable-branch sqrt coefficient d (YSU free-atm local Ri)", "shape": None},
+            "ws_conv_coeff": {"units": "1", "bounds": (1.0, 16.0), "tunable_tier": 2, "transform": "sigmoid", "category": "velocity_scale", "reference": "Hong et al. (2006) / Troen & Mahrt (1986) mixed-layer velocity-scale convective coefficient (WRF YSU ~8); default approximate, calibrate vs a convective-BL run", "shape": None},
+        },
+    },
+}
+
+
 class SurfaceLayerConfig(NamedTuple):
     """Configuration for bulk aerodynamic surface fluxes.
 
@@ -409,6 +592,19 @@ class YSUConfig(NamedTuple):
         ``γ_c = b·(w'θ')_0 / (w_*·h)`` (Troen & Mahrt 1986; Hong et
         al. 2006).  Drives YSU's defining nonlocal upward heat
         transport in the convective BL (default 6.5).
+    ws_conv_coeff : float
+        Convective coefficient ``c`` in the Hong et al. (2006) mixed-layer
+        velocity scale ``w_s = (u*³ + c·κ·w*³·z/h)^{1/3}`` that sets the
+        K-profile magnitude.  Without it the profile uses bare ``u*`` and
+        the convective mixed layer is under-mixed (default 8.0, WRF-YSU
+        ballpark; approximate — calibrate against a convective-BL run).
+    sfc_excess_zfrac : float
+        Surface-layer height fraction ``z/h`` (default 0.1) at which the
+        mixed-layer velocity scale ``w_s`` is evaluated for the unstable
+        surface-excess parcel temperature ``θ_T = b·(w'θ')_0/w_s`` in the
+        bulk-Richardson PBL-height diagnosis (Troen & Mahrt 1986; Hong et al.
+        2006).  A measurement-convention level (the top of the surface layer),
+        not a tuned closure.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -424,6 +620,8 @@ class YSUConfig(NamedTuple):
     blend_ri_sharpness: float = 100.0
     blend_pbl_sharpness: float = 10.0  # sigmoid sharpness for K-profile->local PBL blend
     countergrad_coeff: float = 6.5
+    ws_conv_coeff: float = 8.0  # convective coeff in w_s = (u*³ + c·κ·w*³·z/h)^{1/3}
+    sfc_excess_zfrac: float = 0.1  # surface-layer z/h for the θ_T excess parcel
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -513,7 +711,11 @@ class TurbulenceConfig(NamedTuple):
     edmf : TurbulentEDMFConfig
         Configuration for EDMF scheme.
     update_interval_steps : int
-        Recompute turbulence every N time steps (1 = every step).
+        NOT YET IMPLEMENTED in the production physics pipeline — turbulence
+        is recomputed EVERY step regardless of this value.  Only the SCM
+        enforces it (rejecting values != 1 for stateful/non-autonomous
+        integrators, see ``scm.py``).  Retained as a forward-looking config
+        knob; setting it != 1 in a production driver is a silent no-op.
     """
     scheme: str = "smagorinsky"
     smagorinsky: SmagorinskyConfig = SmagorinskyConfig()
@@ -525,4 +727,6 @@ class TurbulenceConfig(NamedTuple):
     ysu: YSUConfig = YSUConfig()
     edmf: TurbulentEDMFConfig = TurbulentEDMFConfig()
     clubb: CLUBBConfig | None = None
+    # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
+    # turbulence runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1

@@ -92,6 +92,10 @@ _R_SQ_FLOOR = _R_FLOOR * _R_FLOOR
 _M_H2O_KG = constants.M_H2O * 1.0e-3
 
 
+# Kinetic-theory mean-speed (8kT/pi) + 3/2 curvature coefficient.
+_KINETIC_8 = 8.0
+_CURVATURE_32 = 1.5
+
 def drsq_dt(
     r_sq: jax.Array,
     S: jax.Array,
@@ -134,7 +138,7 @@ def drsq_dt(
     R = jnp.sqrt(r_sq)
 
     # Fukuta-Walter transitional correction to the diffusivity (Knudsen).
-    lambda_v = 2.0 * D / jnp.sqrt(8.0 * T * Rv / jnp.pi)
+    lambda_v = 2.0 * D / jnp.sqrt(_KINETIC_8 * T * Rv / jnp.pi)
     Kn = lambda_v / R
     d_cf = (1.0 + Kn) / (1.0 + 2.0 * Kn * (1.0 + Kn))
 
@@ -205,7 +209,7 @@ def drsq_dt_jac(
     r_sq = jnp.maximum(r_sq, _R_SQ_FLOOR)
     R = jnp.sqrt(r_sq)
 
-    lambda_v = 2.0 * D / jnp.sqrt(8.0 * T * Rv / jnp.pi)
+    lambda_v = 2.0 * D / jnp.sqrt(_KINETIC_8 * T * Rv / jnp.pi)
     Kn = lambda_v / R
     d_cf = (1.0 + Kn) / (1.0 + 2.0 * Kn * (1.0 + Kn))
     F_k = (L / (Rv * T) - 1.0) * (L * rho_l) / (K * T)
@@ -224,7 +228,7 @@ def drsq_dt_jac(
     if include_solute:
         b = (3.0 / (4.0 * jnp.pi)) * (_M_H2O_KG / rho_l)
         gamma = 2.0 * b * N_s / denom
-        out = out - 1.5 * gamma * R_inv5
+        out = out - _CURVATURE_32 * gamma * R_inv5
     return out
 
 

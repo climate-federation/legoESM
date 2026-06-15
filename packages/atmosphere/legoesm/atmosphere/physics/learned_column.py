@@ -36,13 +36,17 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
 from legoesm.grids.gaussian import GaussianGrid, sh_analysis_3d
 from legoesm.atmosphere.physics.neural_physics import NeuralPhysics, pack_column_features
 from legoesm.atmosphere.physics._shared import zero_like_tracers
+# Default neural-column architecture width + residual output scale (structural).
+_DEFAULT_HIDDEN_DIM = 256
+_DEFAULT_RESIDUAL_SCALE = 0.01
+
 
 
 def build_column_physics(
     nlev: int,
-    hidden_dim: int = 256,
+    hidden_dim: int = _DEFAULT_HIDDEN_DIM,
     n_layers: int = 4,
-    residual_scale: float = 0.01,
+    residual_scale: float = _DEFAULT_RESIDUAL_SCALE,
     *,
     key: jax.Array,
 ) -> NeuralPhysics:

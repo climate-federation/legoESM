@@ -275,6 +275,9 @@ class MPASOceanConfig(NamedTuple):
                             # 'centered' slope_scheme is implemented on MPAS;
                             # 'triads' raises NotImplementedError (Phase 5
                             # of docs/ocean_experiments/gm_redi_mpas_plan.md).
+    mle: object = None     # MLEConfig — None disables Fox-Kemper mixed-layer-eddy
+                           # restratification.  Voronoi bolus port of NEMO nn_mle=1
+                           # (docs/ocean_experiments/mle_mpas_port_plan.md).
     implicit_vertical_mixing: bool = True  # When True, vertical viscosity
                                            # (A_v on velocity) and vertical
                                            # diffusivity (K_v on tracers) are

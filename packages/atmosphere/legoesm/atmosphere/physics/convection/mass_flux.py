@@ -70,6 +70,10 @@ from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 # =============================================================================
 
 
+# --- pspec autoblock
+_P_MIN_CONVECTION_PA = 10_000.0
+_P_GATE_SHARPNESS_PA = 1_500.0
+
 def compute_column_geometry(
     T: jax.Array,
     p_full: jax.Array,
@@ -169,8 +173,8 @@ def _compute_subsidence_gradients(
 
 def stratosphere_mass_flux_gate(
     p_full: jax.Array,
-    p_min_convection: float = 10_000.0,
-    p_gate_sharpness: float = 1_500.0,
+    p_min_convection: float = _P_MIN_CONVECTION_PA,
+    p_gate_sharpness: float = _P_GATE_SHARPNESS_PA,
 ) -> jax.Array:
     """Smooth sigmoid factor in [0, 1] that vanishes above the
     tropopause (low ``p``) and equals one in the troposphere.
@@ -209,8 +213,8 @@ def apply_mass_flux_kernel(
     rho: jax.Array,
     delta_0: float,
     M_u_max: float,
-    p_min_convection: float = 10_000.0,
-    p_gate_sharpness: float = 1_500.0,
+    p_min_convection: float = _P_MIN_CONVECTION_PA,
+    p_gate_sharpness: float = _P_GATE_SHARPNESS_PA,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
     """Mass-flux core kernel: compensating subsidence + detrainment.
 
@@ -247,7 +251,7 @@ def apply_mass_flux_kernel(
     Unit check: (1/m) * (kg/m²/s) * (kg/kg) / (kg/m³) = 1/s × kg/kg.
     """
     dT_dz, dq_dz = _compute_subsidence_gradients(T, q_v, z)
-    rho_safe = jnp.clip(rho, 0.01, None)
+    rho_safe = jnp.clip(rho, 0.01, None)  # coeff-ok: density floor
 
     # Per-level mass-flux cap.  The plume integrator can yield ``M_u``
     # that grows with height when ``epsilon > delta`` (entraining

@@ -85,6 +85,7 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     eke_3d_horizontal_transport,
     eke_3d_vertical_diffusion,
     gm_redi_tracer_tendency_latlon,
+    gm_redi_density_and_jacobian,
     harmonic_lateral_kediss_eke_source,
     compute_isoneutral_K33_latlon,
 )
@@ -692,6 +693,20 @@ class LatLonCGridOceanModel:
         # Static rigid-lid data (islands, basis, depths), built eagerly from the
         # first concrete state (host-side flood-fill).  None until built.
         self.rigid_lid_data = None
+        # Build-once vertex mask (land-mask-derived, constant per run).
+        # Computing it per step paid an N-S halo exchange inside the
+        # traced tendencies (x2 sites) because state.land_mask is a
+        # step-input tracer even though its VALUE never changes (halo
+        # census job 8474554).  Filled eagerly by step()'s Python body
+        # on the first call; threaded into the tendencies as a closure
+        # constant.  Callers that trace _step_impl directly without ever
+        # calling step() keep the in-graph fallback (correct, no win).
+        # STALENESS CONTRACT: like the geometry itself, this assumes the
+        # land mask is fixed after construction (replace_land_mask is a
+        # construction-stage tool; a mid-run mask swap requires a new
+        # model instance).
+        self._vertex_mask = None
+        self._vertex_mask_src = None
 
         # Surface-forcing IMPLICIT routing (Veros placement): when enabled, the
         # combined physics is built with surface_forcing.scheme="none" so the
@@ -724,6 +739,64 @@ class LatLonCGridOceanModel:
             )
         else:
             self._physics_fn = None
+
+    def _ensure_vertex_mask(self, state) -> None:
+        """Fill (or refresh) the vertex-mask cache from CONCRETE state.
+
+        No-op on traced state (a jitted caller wrapping ``step`` traces
+        this Python body once with tracers — the in-graph fallback then
+        applies).  The cache is KEYED on the source land mask (codex
+        review MAJOR: an unkeyed cache silently served state A's mask to
+        state B on model reuse): identity fast-path, then a host value
+        compare — a different mask REFRESHES the cache.
+        """
+        import jax as _jax
+
+        m = state.land_mask.data
+        if isinstance(m, _jax.core.Tracer):
+            return
+        if self._vertex_mask is not None:
+            src = self._vertex_mask_src
+            if m is src:
+                return
+            import numpy as _np
+            if (src is not None and m.shape == src.shape
+                    and bool(_np.array_equal(_np.asarray(m),
+                                             _np.asarray(src)))):
+                self._vertex_mask_src = m   # adopt new identity, same value
+                return
+            # A DIFFERENT mask cannot be served by refreshing this
+            # attribute: the already-compiled ``_step_jitted`` baked the
+            # old mask as a closure CONSTANT (``self`` is a static
+            # argument — the jit cache would silently reuse the stale
+            # executable; codex round-2).  Enforce the per-instance
+            # contract mechanically instead of documenting it.
+            raise ValueError(
+                "LatLonCGridOceanModel: the land mask changed after the "
+                "first step on this model instance.  The vertex-mask "
+                "cache (and the compiled step that captured it) are "
+                "built once per model — construct a NEW model for a "
+                "different mask (replace_land_mask is a construction-"
+                "stage tool)."
+            )
+        from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask
+
+        self._vertex_mask = compute_vertex_mask(m, grid=self.grid)
+        self._vertex_mask_src = m
+
+    def prime_step_caches(self, state) -> None:
+        """Eagerly fill build-once step caches from CONCRETE state.
+
+        Public hook for drivers that integrate via ``_step_impl``
+        directly inside an outer ``lax.scan``/``jax.jit`` (the public
+        ``step`` shim does this automatically): call ONCE with the
+        concrete initial state BEFORE building/tracing the scan, so the
+        traced body captures the land-mask-derived vertex mask as a
+        constant instead of re-deriving it (with its N-S halo exchange)
+        every step.  Safe to call multiple times and with traced state
+        (no-op).
+        """
+        self._ensure_vertex_mask(state)
 
     def _ensure_rigid_lid_data(self, state):
         """Build + cache the static rigid-lid data from a CONCRETE state.
@@ -1004,6 +1077,11 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {config.barotropic_solver!r}")
+        _valid_time_filters = {"box", "cosine"}
+        if config.barotropic_time_filter not in _valid_time_filters:
+            raise ValueError(
+                f"barotropic_time_filter must be one of {_valid_time_filters}, "
+                f"got {config.barotropic_time_filter!r}")
         # Distributed fixed-iteration PCG knobs (implicit_cn under MPI).
         if config.barotropic_implicit_pcg_fixed_iters < 1:
             raise ValueError(
@@ -1101,6 +1179,22 @@ class LatLonCGridOceanModel:
                 "Set implicit_vertical_mixing=True, or "
                 "sponge_forcing_implicit=False to keep the explicit "
                 "stage-10c sponge placement.")
+
+        # Veros u_centered dzw slot for the implicit vertical-diffusion solves
+        # lives INSIDE the backward-Euler tracer/friction solve (it picks the
+        # gradient divisor there); with explicit vertical mixing there is no
+        # implicit solve to host it — reject rather than silently ignoring the
+        # flag (dispatch discipline).
+        if (getattr(config, "implicit_vmix_dzw_slot", False)
+                and not config.implicit_vertical_mixing):
+            raise ValueError(
+                "implicit_vmix_dzw_slot=True requires "
+                "implicit_vertical_mixing=True: the Veros dzw gradient slot is "
+                "the divisor of the backward-Euler tracer/momentum-friction "
+                "vertical-diffusion solve (thermodynamics.py:267 "
+                "delta = dt·kappaH/dzw). With explicit vertical mixing there is "
+                "no implicit solve to host it. Set implicit_vertical_mixing=True, "
+                "or implicit_vmix_dzw_slot=False to keep the midpoint slot.")
 
         # Additive momentum vertical-friction placement (Veros solve_stream.py)
         # is defined relative to the AB2 outer integrator (the increment is
@@ -1307,6 +1401,7 @@ class LatLonCGridOceanModel:
             sponge=sponge,
             dt=dt,
             surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
+            vertex_mask=self._vertex_mask,
         )
 
     def tendencies_with_diagnostics(
@@ -1342,6 +1437,7 @@ class LatLonCGridOceanModel:
             dt=dt,
             diagnose_momentum=True,
             surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
+            vertex_mask=self._vertex_mask,
         )
 
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
@@ -1489,6 +1585,7 @@ class LatLonCGridOceanModel:
                 mask=state.land_mask.data,
                 u_mask=state.u_mask.data,
                 v_mask=state.v_mask.data,
+                vertex_mask=self._vertex_mask,
             )
             # cos^4(lat) scaling: lat-lon grid spacing shrinks as
             # cos(lat) near the poles, so a constant ν₄ would violate
@@ -2008,6 +2105,22 @@ class LatLonCGridOceanModel:
                 # Redi tracer diffusivity from the same prognostic kappa as GM.
                 if eke_cfg.isopycnal_diffusion:
                     kappa_redi_override = kappa_gm_override
+            # Hoist the shared in-situ density (2-iteration EOS coupling) +
+            # z* Jacobian: when implicit_K33 the tracer tendency AND the K_33
+            # diagonal both need EXACTLY these from the same
+            # (T_mid,S_mid,eta,H_bathy), so compute once and thread into both
+            # (scaling review lever #3).  None when not implicit_K33 ⇒ the
+            # tracer tendency computes them inline, bit-identical to before.
+            _gm_dens_jac = None
+            if gm_cfg.implicit_K33:
+                _gm_dens_jac = gm_redi_density_and_jacobian(
+                    T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                    self.grid, self.z_coord,
+                    eos=self.config.eos, eos_linear=self.config.eos_linear,
+                    mask=state.land_mask.data,
+                    rho_0=self.config.constants.rho_0,
+                    g=self.config.constants.g,
+                )
             dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
                 T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
                 self.grid, self.z_coord, gm_cfg,
@@ -2018,6 +2131,7 @@ class LatLonCGridOceanModel:
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                 kappa_gm_override=kappa_gm_override,
                 kappa_redi_override=kappa_redi_override,
+                density_jacobian=_gm_dens_jac,
             )
             if gm_cfg.implicit_K33:
                 # Veros-faithful: K_33 (the vertical isoneutral diagonal ∝ S²) was
@@ -2032,6 +2146,7 @@ class LatLonCGridOceanModel:
                     mask=state.land_mask.data,
                     rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                     kappa_redi_override=kappa_redi_override,
+                    density_jacobian=_gm_dens_jac,
                 )
             if _ab2_advective:
                 # AB2 "advective" scope: GM/Redi is a DISSIPATIVE (isoneutral +
@@ -3036,7 +3151,17 @@ class LatLonCGridOceanModel:
             state.eta.data, state.H_bathy.data, self.z_coord,
         )
         dz_cell = self.z_coord.dz_ref * J_cell[..., jnp.newaxis]
-        dz_half_cell = build_dz_half(dz_cell)
+        # Gradient (center-to-center) divisor of the implicit solve.  Default is
+        # the midpoint reconstruction 0.5(dz_k+dz_{k+1}); the Veros-faithful slot
+        # (config.implicit_vmix_dzw_slot, #428) uses the coordinate's
+        # center-to-center spacing dz_half_ref·J = Veros's dzw, which differs from
+        # the midpoint on a u_centered z-coordinate.  NO-OP on a midpoint z-star.
+        _dzw_slot = bool(getattr(self.config, "implicit_vmix_dzw_slot", False))
+        if _dzw_slot:
+            dz_half_cell = (self.z_coord.dz_half_ref
+                            * J_cell[..., jnp.newaxis]).astype(dz_cell.dtype)
+        else:
+            dz_half_cell = build_dz_half(dz_cell)
 
         mask_3d = state.land_mask.data[..., jnp.newaxis]
 
@@ -3120,8 +3245,18 @@ class LatLonCGridOceanModel:
                     self.z_coord.is_active, self.grid)
                 A_v_u = A_v_u * _act_u3.astype(A_v_u.dtype)[..., 1:]
                 A_v_v = A_v_v * _act_v3.astype(A_v_v.dtype)[..., 1:]
-            dz_half_u = build_dz_half(dz_u)
-            dz_half_v = build_dz_half(dz_v)
+            if _dzw_slot:
+                # Veros dzw at u/v-faces (#428): dz_half_ref·J interpolated to the
+                # faces with the SAME interp that built the control volumes
+                # dz_u/dz_v (J is level-independent, so dz_u = dz_ref·J_u and the
+                # gradient slot dz_half_ref·J_u stays consistent with it).
+                J_u = interp_cell_to_uface(J_cell[..., jnp.newaxis])
+                J_v = interp_to_v_points(J_cell[..., jnp.newaxis], self.grid)
+                dz_half_u = (self.z_coord.dz_half_ref * J_u).astype(dz_u.dtype)
+                dz_half_v = (self.z_coord.dz_half_ref * J_v).astype(dz_v.dtype)
+            else:
+                dz_half_u = build_dz_half(dz_u)
+                dz_half_v = build_dz_half(dz_v)
             u_mask_3d = state.u_mask.data[..., jnp.newaxis]
             v_mask_3d = state.v_mask.data[..., jnp.newaxis]
 
@@ -3309,15 +3444,20 @@ class LatLonCGridOceanModel:
             return state_out, tke_new
         return state_out
 
-    @partial(jax.jit, static_argnums=(0,))
     def step(self, state: LatLonCGridOceanState, dt: float,
              freshwater=None, surface_forcing=None,
              sponge=None) -> LatLonCGridOceanState:
         """Advance one time step using split-explicit stepping.
 
-        JIT-compiled wrapper around ``_step_impl``.  For use inside an
-        outer JIT context (e.g. ``lax.scan``), call ``_step_impl``
-        directly to avoid nested JIT boundaries.
+        Eager Python shim over the JIT-compiled ``_step_jitted``: fills
+        the build-once vertex-mask cache from CONCRETE state BEFORE the
+        body traces (an in-jit fill is impossible — the state is a
+        tracer there), so the tendencies capture the mask as a closure
+        constant instead of re-deriving it (with its N-S halo exchange)
+        every step (census job 8474554).  For use inside an outer JIT
+        context (e.g. ``lax.scan``), call ``_step_impl`` directly to
+        avoid nested JIT boundaries (the in-graph vertex-mask fallback
+        then applies — correct, just without the constant-fold win).
 
         Parameters
         ----------
@@ -3333,6 +3473,16 @@ class LatLonCGridOceanModel:
         -------
         LatLonCGridOceanState
         """
+        self._ensure_vertex_mask(state)
+        return self._step_jitted(
+            state, dt, freshwater, surface_forcing, sponge)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_jitted(self, state: LatLonCGridOceanState, dt: float,
+                     freshwater=None, surface_forcing=None,
+                     sponge=None) -> LatLonCGridOceanState:
+        """JIT body of :meth:`step` (split out so the vertex-mask cache
+        fill runs eagerly — see the ``step`` docstring)."""
         _oi = getattr(self.config, "outer_integrator", "forward_euler")
         if _oi not in ("forward_euler", "ab2"):
             raise ValueError(
@@ -4058,6 +4208,9 @@ class LatLonCGridOceanModel:
         than the Euler fallback of 1.0.  At typical CFL values
         (≤ 0.3) this is stable.
         """
+        # Prime build-once caches from the CONCRETE input state before
+        # the scan traces step() with tracers (codex round-2 MINOR).
+        self.prime_step_caches(state)
         # Pre-initialize AB2 carry fields so the pytree structure
         # is stable across scan iterations (None → Field transition
         # would crash jax.lax.scan).

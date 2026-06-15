@@ -84,7 +84,7 @@ def compute_surface_fluxes(
     Ch = config.Ch_neutral
 
     # Wind speed with minimum to avoid division by zero
-    wind_speed = jnp.sqrt(u ** 2 + v ** 2 + 1e-4)
+    wind_speed = jnp.sqrt(u ** 2 + v ** 2 + 1e-4)  # coeff-ok: wind-speed floor [m^2/s^2]
 
     # Friction velocity
     ustar = jnp.sqrt(Cd) * wind_speed

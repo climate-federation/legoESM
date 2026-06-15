@@ -50,6 +50,23 @@ import jax.numpy as jnp
 from legoesm import constants
 
 
+__param_spec__ = {
+    "IceShelfConfig": {
+        "scheme_key": "ocean.ice_shelf",
+        "excluded": {
+            "freeze_a": "material: linear freezing-point salinity coeff (fixed)",
+            "freeze_b": "material: linear freezing-point offset (fixed)",
+            "freeze_c": "material: linear freezing-point depth coeff (fixed)",
+        },
+        "params": {
+            "gamma_S": {"units": "1", "bounds": (1.6665e-07, 1.515e-06), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "three-equation ice-shelf melt (Gade/Holland-Jenkins)", "shape": None},
+            "gamma_T": {"units": "1", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "three-equation ice-shelf melt (Gade/Holland-Jenkins)", "shape": None},
+            "melt_factor_linear": {"units": "1", "bounds": (6.6e-08, 6e-07), "tunable_tier": 2, "transform": "sigmoid", "category": "closure", "reference": "three-equation ice-shelf melt (Gade/Holland-Jenkins)", "shape": None},
+        },
+    },
+}
+
+
 class IceShelfConfig(NamedTuple):
     """Configuration for the ice-shelf cavity FW source.
 

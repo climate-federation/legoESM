@@ -107,14 +107,17 @@ def lindzen_gwd(
     tau_0 = rho_sfc * N_sfc * config.k_wave * h_topo_sq * U_ll
     tau_0 = jnp.clip(tau_0, 0.0, None)
 
-    # Saturation stress per level: tau_sat = rho * U^3 * k / N
+    # Saturation stress per level: tau_sat = rho * k * (u - c)^3 / (2 N)
+    # (Lindzen 1981; identical to the faithful E3SM path in e3sm_cam.py,
+    # which uses ``effkwv*rhoi*ubmc**3/(2*ni)``).  The factor of 1/2 was
+    # previously missing here, making the saturation stress ~2x too large.
     # Wave breaks where carried stress exceeds local saturation.
     # AD-safe divide by ``N`` (issue #249): ``N_full`` can hit the
     # ``1e-8`` clip floor in nearly neutral layers, where the prior
     # ``clip + divide`` form left ``-rho*U^3*k / N**2`` cotangents that
     # blow up under reverse-mode AD.
-    U_proj_abs = jnp.clip(jnp.abs(U_proj), 0.1, None)
-    tau_sat = rho * U_proj_abs ** 3 * config.k_wave * safe_divide(
+    U_proj_abs = jnp.clip(jnp.abs(U_proj), 0.1, None)  # coeff-ok: projected-wind floor [m/s]
+    tau_sat = 0.5 * rho * U_proj_abs ** 3 * config.k_wave * safe_divide(
         jnp.ones_like(N_full), N_full, eps=1e-6,
     )
     tau_sat = jnp.clip(tau_sat, 1e-10, None)

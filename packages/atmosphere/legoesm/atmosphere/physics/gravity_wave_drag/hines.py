@@ -115,7 +115,7 @@ def hines_gwd(
     rho_ratio_step = jnp.ones_like(rho)
     rho_ratio_step = rho_ratio_step.at[:, :-1].set(
         jnp.sqrt(jnp.clip(
-            rho[:, 1:] / jnp.clip(rho[:, :-1], 0.01, None), 1.0, None,
+            rho[:, 1:] / jnp.clip(rho[:, :-1], 0.01, None), 1.0, None,  # coeff-ok: density-ratio floor
         ))
     )
 
@@ -157,7 +157,11 @@ def hines_gwd(
         drag = (sigma_grown ** 2 - sigma_new ** 2) * rho[:, k]
         drag = jnp.clip(drag, 0.0, config.Fmax)
 
-        return sigma_new, drag
+        # Pin the carry back to the launch-wind precision: under x64 the
+        # Python-float ``config.*`` constants promote ``sigma_new`` to f64, but
+        # the scan carry init (sigma_gw_init) is ``u.dtype`` (f32) — lax.scan
+        # requires carry in/out dtypes to match, so cast the carry output.
+        return sigma_new.astype(sigma_gw.dtype), drag
 
     # Pin the carry dtype so the scan body stays at the input precision
     # (defaulting allows x64 to silently promote the launch wind to f64).

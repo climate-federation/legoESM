@@ -7,6 +7,8 @@ Lin 2004; Mouallem, Harris & Chen 2023.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -563,6 +565,832 @@ def _apply_fortran_d2a2c_corner_overrides(utmp_pad, vtmp_pad, n):
     return utmp_pad, vtmp_pad
 
 
+def d2a2c_d_to_a(u_d, v_d, cdgrid):
+    """D-grid → A-grid covariant step of d2a2c (Steps 1+2), verbatim.
+
+    utmp/vtmp = covariant cell-centre winds (2nd-order base, 4th-order
+    interior npt-band) then a halo=2 vector exchange.  Returns
+    ``(utmp_pad, vtmp_pad)`` each ``(6, n+4, n+4)``.  P4 phase-1b
+    approach C runs this in the GLOBAL GSPMD view (cheap) and feeds the
+    padded result into the tiled A→C; the per-tile block is a
+    ``tiled_padded_block`` (h2) slice — no staggered D-wind halo needed.
+    """
+    n = cdgrid.n
+    npt = min(4, n // 2)
+    utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
+    vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
+    if n > 2 * npt and npt > 0:
+        u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
+              + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
+        utmp = utmp.at[:, :, npt:n - npt].set(u4[:, :, npt - 1:n - npt - 1])
+        v4 = (_A2 * (v_d[:, :-3, :] + v_d[:, 3:, :])
+              + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
+        vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
+    grid = cdgrid.base
+    return pad_halo_vector(
+        utmp, vtmp,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+        interp_offsets=grid.halo_interp_offsets_h2,
+        halo=2,
+    )
+
+
+def d2a2c_uc_4th_local(utmp_pad):
+    """A→C x-dir 4th-order interior stencil on the h2-padded covariant
+    utmp — leading-axis-agnostic.  Returns the full (·, n+1, n) 4th-order
+    uc (n = utmp_pad.shape[1]-4).  The global d2a2c overlays this onto
+    its 2nd-order base in the [npt+1:n-npt] face-interior band; under
+    tiling, an INTERIOR tile is entirely 4th-order, so its uc IS this
+    core on the tile's padded utmp (P4 phase-1b approach C).  No
+    face-edge specials (C1/C2/C3, edge_interpolate4) — those stay in
+    d2a2c_vect for face-boundary cells.
+    """
+    h = 2
+    n = utmp_pad.shape[1] - 2 * h
+    return (_A2 * (utmp_pad[:, h - 2:n + h - 1, h:-h]
+                   + utmp_pad[:, h + 1:n + h + 2, h:-h])
+            + _A1 * (utmp_pad[:, h - 1:n + h, h:-h]
+                     + utmp_pad[:, h:n + h + 1, h:-h]))
+
+
+def d2a2c_uc_c123_local(utmp_pad, at_high):
+    """One-sided C1/C2/C3 uc value at the FACE-edge cell i=1 (W) or
+    i=n-1 (E) — the d2a2c_vect edge special (sw_core.F90:3586/3594),
+    leading-axis-agnostic on the h2-padded utmp (n = shape[1]-4).
+
+    ``at_high=False`` -> i=1: C1*utmp_pad[h+2] + C2*utmp_pad[h+1] +
+    C3*utmp_pad[h].  ``at_high=True`` -> i=n-1: C1*utmp_pad[n+h-3] +
+    C2*utmp_pad[n+h-2] + C3*utmp_pad[n+h-1].  Returns the (·, n) row of
+    uc.  Pure utmp_pad stencil — no halo; an edge tile overlays this on
+    its uc at the local i=1 / i=nl-1 face when the tile touches the
+    W/E face edge (P4 phase-1b edge specials, first piece).
+    """
+    h = 2
+    n = utmp_pad.shape[1] - 2 * h
+    if at_high:
+        return (_C1 * utmp_pad[:, n + h - 3, h:-h]
+                + _C2 * utmp_pad[:, n + h - 2, h:-h]
+                + _C3 * utmp_pad[:, n + h - 1, h:-h])
+    return (_C1 * utmp_pad[:, h + 2, h:-h]
+            + _C2 * utmp_pad[:, h + 1, h:-h]
+            + _C3 * utmp_pad[:, h, h:-h])
+
+
+def d2a2c_uc_edge_interp_local(ua_pad, dx_pad, se_pad, sw_pad, at_high):
+    """edge_interpolate4 + upwind sin_sg uc value at the FACE boundary
+    i=0 (W) / i=n (E) — the d2a2c_vect edge special
+    (sw_core.F90:3587/3589-3592), leading-axis-agnostic.
+
+    Exact mirror of d2a2c_vect lines 779-794 for one ``i_bdy``:
+      ua_pad : (·, n+4, n+4) tile contravariant ua (h2-padded both axes)
+      dx_pad : (·, n+4, n)   tile dx, rows h2-padded / cols unpadded
+      se_pad : (·, n+2, n+2) tile sin_sg E-component (cross-face h1 pad)
+      sw_pad : (·, n+2, n+2) tile sin_sg W-component
+    ``n = ua_pad.shape[1]-4``.  Returns the (·, n) uc boundary row
+    ``uc_bdy = where(ut_bdy>0, ut_bdy*sin_left, ut_bdy*sin_right)``.
+    The outer upwind sine cell is CROSS-FACE (se/sw must be globally
+    padded then tile-sliced — P4 phase-1b approach C; codex
+    sin_sg-halo verdict).
+    """
+    h = 2
+    n = ua_pad.shape[1] - 2 * h
+    i_bdy = n if at_high else 0
+    i_p = i_bdy + h
+    ua4 = jnp.stack([ua_pad[:, i_p - 1, h:-h], ua_pad[:, i_p, h:-h],
+                     ua_pad[:, i_p + 1, h:-h], ua_pad[:, i_p + 2, h:-h]],
+                    axis=-1)
+    dxa4 = jnp.stack([dx_pad[:, i_p - 1, :], dx_pad[:, i_p, :],
+                      dx_pad[:, i_p + 1, :], dx_pad[:, i_p + 2, :]],
+                     axis=-1)
+    ut_bdy = _edge_interpolate4(ua4, dxa4)
+    sin_left = se_pad[:, i_bdy, 1:-1]
+    sin_right = sw_pad[:, i_bdy + 1, 1:-1]
+    return jnp.where(ut_bdy > 0, ut_bdy * sin_left, ut_bdy * sin_right)
+
+
+def d2a2c_vc_4th_local(vtmp_pad):
+    """A→C y-dir 4th-order interior stencil — symmetric to
+    :func:`d2a2c_uc_4th_local`.  Returns (·, n, n+1)
+    (n = vtmp_pad.shape[2]-4)."""
+    h = 2
+    n = vtmp_pad.shape[2] - 2 * h
+    return (_A2 * (vtmp_pad[:, h:-h, h - 2:n + h - 1]
+                   + vtmp_pad[:, h:-h, h + 1:n + h + 2])
+            + _A1 * (vtmp_pad[:, h:-h, h - 1:n + h]
+                     + vtmp_pad[:, h:-h, h:n + h + 1]))
+
+
+def d2a2c_ut_vt_local(uc, vc, u_d, v_d, cosa_u, rsin_u, cosa_v, rsin_v):
+    """A→C contravariant transport winds ut/vt — pure pointwise CORE.
+
+    ``ut = (uc - v_d*cosa_u)*rsin_u`` (and symmetric ``vt``).  No halo —
+    a tile computes its own staggered ut ``(nl+1, nl)`` / vt
+    ``(nl, nl+1)`` from its uc/vc + LOCAL v_d/u_d + sliced metrics (P4
+    phase-1b approach C; codex: ut/vt need only the local staggered
+    D-winds, no staggered halo).  The production d2a2c_vect applies
+    this base then overlays face-boundary + adjacent-strip overrides
+    (edge specials) — those stay in d2a2c_vect for boundary cells.
+    """
+    ut = (uc - v_d * cosa_u) * rsin_u
+    vt = (vc - u_d * cosa_v) * rsin_v
+    return ut, vt
+
+
+def d2a2c_vc_c123_local(vtmp_pad, at_high):
+    """One-sided C1/C2/C3 vc value at the FACE-edge cell j=1 (S) or
+    j=n-1 (N) — the j-axis transpose of :func:`d2a2c_uc_c123_local`
+    (sw_core.F90 vc C1/C2/C3).  n = vtmp_pad.shape[2]-4.  Returns the
+    (·, n) vc column."""
+    h = 2
+    n = vtmp_pad.shape[2] - 2 * h
+    if at_high:
+        return (_C1 * vtmp_pad[:, h:-h, n + h - 3]
+                + _C2 * vtmp_pad[:, h:-h, n + h - 2]
+                + _C3 * vtmp_pad[:, h:-h, n + h - 1])
+    return (_C1 * vtmp_pad[:, h:-h, h + 2]
+            + _C2 * vtmp_pad[:, h:-h, h + 1]
+            + _C3 * vtmp_pad[:, h:-h, h])
+
+
+def d2a2c_vc_edge_interp_local(va_pad, dy_pad, sn_pad, ss_pad, at_high):
+    """edge_interpolate4 + upwind sin_sg vc value at the FACE boundary
+    j=0 (S) / j=n (N) — the j-axis transpose of
+    :func:`d2a2c_uc_edge_interp_local` (sw_core.F90 vc face boundary).
+
+      va_pad : (·, n+4, n+4) tile contravariant va
+      dy_pad : (·, n, n+4)   tile dy, cols h2-padded / rows unpadded
+      sn_pad : (·, n+2, n+2) tile sin_sg N-component (cross-face h1 pad)
+      ss_pad : (·, n+2, n+2) tile sin_sg S-component
+    Returns the (·, n) vc boundary column.  Outer upwind sine is
+    cross-face (sn/ss globally padded then tile-sliced — approach C).
+    """
+    h = 2
+    n = va_pad.shape[2] - 2 * h
+    j_bdy = n if at_high else 0
+    j_p = j_bdy + h
+    va4 = jnp.stack([va_pad[:, h:-h, j_p - 1], va_pad[:, h:-h, j_p],
+                     va_pad[:, h:-h, j_p + 1], va_pad[:, h:-h, j_p + 2]],
+                    axis=-1)
+    dya4 = jnp.stack([dy_pad[:, :, j_p - 1], dy_pad[:, :, j_p],
+                      dy_pad[:, :, j_p + 1], dy_pad[:, :, j_p + 2]],
+                     axis=-1)
+    vt_bdy = _edge_interpolate4(va4, dya4)
+    sin_below = sn_pad[:, 1:-1, j_bdy]
+    sin_above = ss_pad[:, 1:-1, j_bdy + 1]
+    return jnp.where(vt_bdy > 0, vt_bdy * sin_below, vt_bdy * sin_above)
+
+
+def d2a2c_ua_va_local(utmp, vtmp, cos_sg5, rsin2):
+    """A-grid contravariant winds from covariant utmp/vtmp — pointwise.
+
+    ``ua = (utmp - vtmp*cos_sg5)*rsin2`` (symmetric ``va``).  No halo,
+    so a tile computes its own ``(nl, nl)`` ua/va from sliced interior
+    utmp/vtmp + cos_sg5/rsin2 — the global d2a2c pads utmp/vtmp then
+    trims, which is pointwise-identical to operating on the interior
+    (P4 phase-1b approach C, first A→C output).
+    """
+    ua = (utmp - vtmp * cos_sg5) * rsin2
+    va = (vtmp - utmp * cos_sg5) * rsin2
+    return ua, va
+
+
+def _d2a2c_uc_iinterior(utmp_pad_face, a, b, nl, n, npt):
+    """uc (1, nl+1, nl) for an i-INTERIOR tile column: 2nd-order base + a
+    clamped 4th-order overlay on the global band [npt+1, n-npt) (no W/E
+    specials), asymmetric -1 i-window so ``d2a2c_uc_4th_local(w)`` row r ==
+    production uc[a+r] with no shift.  Shared by d2a2c_interior_local, the
+    S/N edge tiles and the j-edge sides of a corner tile (P4 phase-1b)."""
+    h = 2
+    w = utmp_pad_face[None, a - 1:a + nl + 3, b:b + nl + 4]
+    uc = 0.5 * (w[:, 2:nl + 3, h:-h] + w[:, 3:nl + 4, h:-h])     # 2nd base
+    uc4 = d2a2c_uc_4th_local(w)
+    k_lo = max(0, (npt + 1) - a)
+    k_hi = min(nl + 1, (n - npt) - a)
+    if n > 2 * npt + 2 and k_lo < k_hi:
+        uc = uc.at[:, k_lo:k_hi, :].set(uc4[:, k_lo:k_hi, :])
+    return uc
+
+
+def _d2a2c_vc_jinterior(vtmp_pad_face, a, b, nl, n, npt):
+    """vc (1, nl, nl+1) for a j-INTERIOR tile column — the j-axis transpose
+    of :func:`_d2a2c_uc_iinterior` (asymmetric -1 j-window, no S/N specials).
+    Shared by d2a2c_interior_local, the W/E edge tiles and the i-edge sides
+    of a corner tile."""
+    h = 2
+    wv = vtmp_pad_face[None, a:a + nl + 4, b - 1:b + nl + 3]
+    vc = 0.5 * (wv[:, h:-h, 2:nl + 3] + wv[:, h:-h, 3:nl + 4])   # 2nd base
+    vc4 = d2a2c_vc_4th_local(wv)
+    j_lo = max(0, (npt + 1) - b)
+    j_hi = min(nl + 1, (n - npt) - b)
+    if n > 2 * npt + 2 and j_lo < j_hi:
+        vc = vc.at[:, :, j_lo:j_hi].set(vc4[:, :, j_lo:j_hi])
+    return vc
+
+
+def _d2a2c_uc_iedge(utmp_pad_face, a, b, nl, n, npt,
+                    ua_pad_face, dx_pad_face, se_pad_face, sw_pad_face,
+                    at_high):
+    """uc (1, nl+1, nl) for an i-EDGE tile column (W: at_high=False, a=0;
+    E: at_high=True, a=n-nl) — the shared FV3 A→C x-direction edge stencil
+    (2nd base + clamped 4th overlay + C1/C2/C3 + edge_interpolate4+upwind).
+    Used by d2a2c_edge_w/e_local and by both i-edge corners.  Returns
+    ``(uc, (i_spec, sin_left, sin_right))`` where the tuple is the
+    boundary-face (i=0 / i=n) ut-override data (P4 phase-1b)."""
+    h = 2
+    if at_high:   # E: asymmetric -1 window, no overlay shift; specials hi
+        w = utmp_pad_face[None, a - 1:a + nl + 3, b:b + nl + 4]
+        uc = 0.5 * (w[:, 2:nl + 3, h:-h] + w[:, 3:nl + 4, h:-h])
+        uc4 = d2a2c_uc_4th_local(w)
+        k_lo = max(0, (npt + 1) - a)
+        k_hi = min(nl + 1, (n - npt) - a)
+        if n > 2 * npt + 2 and k_lo < k_hi:
+            uc = uc.at[:, k_lo:k_hi, :].set(uc4[:, k_lo:k_hi, :])
+        ws = utmp_pad_face[None, a:a + nl + 4, b:b + nl + 4]
+        uc = uc.at[:, nl - 1, :].set(d2a2c_uc_c123_local(ws, True))
+        ua_e = ua_pad_face[None, a:a + nl + 4, b:b + nl + 4]
+        dx_e = dx_pad_face[None, a:a + nl + 4, b:b + nl]
+        se_e = se_pad_face[None, a:a + nl + 2, b:b + nl + 2]
+        sw_e = sw_pad_face[None, a:a + nl + 2, b:b + nl + 2]
+        i_spec = nl
+        sin_left, sin_right = se_e[:, nl, 1:-1], sw_e[:, nl + 1, 1:-1]
+    else:         # W: symmetric window + 1 overlay shift; specials lo
+        w = utmp_pad_face[None, 0:nl + 4, b:b + nl + 4]
+        uc = 0.5 * (w[:, h - 1:nl + h, h:-h] + w[:, h:nl + h + 1, h:-h])
+        uc4 = (_A2 * (w[:, 0:nl + 1, h:-h] + w[:, 3:nl + 4, h:-h])
+               + _A1 * (w[:, 1:nl + 2, h:-h] + w[:, 2:nl + 3, h:-h]))
+        i_lo = npt + 1
+        k_hi = min(n - npt, nl + 1)
+        if n > 2 * npt + 2 and i_lo < k_hi:
+            uc = uc.at[:, i_lo:k_hi, :].set(uc4[:, i_lo - 1:k_hi - 1, :])
+        uc = uc.at[:, 1, :].set(d2a2c_uc_c123_local(w, False))
+        ua_e = ua_pad_face[None, 0:nl + 4, b:b + nl + 4]
+        dx_e = dx_pad_face[None, 0:nl + 4, b:b + nl]
+        se_e = se_pad_face[None, 0:nl + 2, b:b + nl + 2]
+        sw_e = sw_pad_face[None, 0:nl + 2, b:b + nl + 2]
+        i_spec = 0
+        sin_left, sin_right = se_e[:, 0, 1:-1], sw_e[:, 1, 1:-1]
+    uc = uc.at[:, i_spec, :].set(
+        d2a2c_uc_edge_interp_local(ua_e, dx_e, se_e, sw_e, at_high))
+    return uc, (i_spec, sin_left, sin_right)
+
+
+def _d2a2c_vc_jedge(vtmp_pad_face, a, b, nl, n, npt,
+                    va_pad_face, dy_pad_face, sn_pad_face, ss_pad_face,
+                    at_high):
+    """vc (1, nl, nl+1) for a j-EDGE tile column (S: at_high=False, b=0;
+    N: at_high=True, b=n-nl) — the j-axis transpose of
+    :func:`_d2a2c_uc_iedge`.  Returns ``(vc, (j_spec, sin_below,
+    sin_above))`` (the j=0 / j=n vt-override data)."""
+    h = 2
+    if at_high:   # N: asymmetric -1 window, no shift; specials hi
+        wv = vtmp_pad_face[None, a:a + nl + 4, b - 1:b + nl + 3]
+        vc = 0.5 * (wv[:, h:-h, 2:nl + 3] + wv[:, h:-h, 3:nl + 4])
+        vc4 = d2a2c_vc_4th_local(wv)
+        m_lo = max(0, (npt + 1) - b)
+        m_hi = min(nl + 1, (n - npt) - b)
+        if n > 2 * npt + 2 and m_lo < m_hi:
+            vc = vc.at[:, :, m_lo:m_hi].set(vc4[:, :, m_lo:m_hi])
+        wsv = vtmp_pad_face[None, a:a + nl + 4, b:b + nl + 4]
+        vc = vc.at[:, :, nl - 1].set(d2a2c_vc_c123_local(wsv, True))
+        va_e = va_pad_face[None, a:a + nl + 4, b:b + nl + 4]
+        dy_e = dy_pad_face[None, a:a + nl, b:b + nl + 4]
+        sn_e = sn_pad_face[None, a:a + nl + 2, b:b + nl + 2]
+        ss_e = ss_pad_face[None, a:a + nl + 2, b:b + nl + 2]
+        j_spec = nl
+        sin_below, sin_above = sn_e[:, 1:-1, nl], ss_e[:, 1:-1, nl + 1]
+    else:         # S: symmetric window + 1 shift; specials lo
+        wv = vtmp_pad_face[None, a:a + nl + 4, 0:nl + 4]
+        vc = 0.5 * (wv[:, h:-h, h - 1:nl + h] + wv[:, h:-h, h:nl + h + 1])
+        vc4 = (_A2 * (wv[:, h:-h, 0:nl + 1] + wv[:, h:-h, 3:nl + 4])
+               + _A1 * (wv[:, h:-h, 1:nl + 2] + wv[:, h:-h, 2:nl + 3]))
+        j_lo = npt + 1
+        m_hi = min(n - npt, nl + 1)
+        if n > 2 * npt + 2 and j_lo < m_hi:
+            vc = vc.at[:, :, j_lo:m_hi].set(vc4[:, :, j_lo - 1:m_hi - 1])
+        vc = vc.at[:, :, 1].set(d2a2c_vc_c123_local(wv, False))
+        va_e = va_pad_face[None, a:a + nl + 4, 0:nl + 4]
+        dy_e = dy_pad_face[None, a:a + nl, 0:nl + 4]
+        sn_e = sn_pad_face[None, a:a + nl + 2, 0:nl + 2]
+        ss_e = ss_pad_face[None, a:a + nl + 2, 0:nl + 2]
+        j_spec = 0
+        sin_below, sin_above = sn_e[:, 1:-1, 0], ss_e[:, 1:-1, 1]
+    vc = vc.at[:, :, j_spec].set(
+        d2a2c_vc_edge_interp_local(va_e, dy_e, sn_e, ss_e, at_high))
+    return vc, (j_spec, sin_below, sin_above)
+
+
+def d2a2c_interior_local(utmp_pad_face, vtmp_pad_face, ti, tj, nl,
+                         u_d, v_d, cos_sg5, rsin2,
+                         cosa_u, rsin_u, cosa_v, rsin_v):
+    """Full A→C d2a2c for an INTERIOR tile (0<ti<kt-1, 0<tj<kt-1) —
+    composes the approach-C pieces with the CORRECT per-output windows.
+
+    ``utmp_pad_face`` / ``vtmp_pad_face`` are this face's FULL h2-padded
+    covariant winds ``(n+4, n+4)`` (from d2a2c_d_to_a); the tile's
+    windows are sliced HERE so the index logic lives in one place.  The
+    other args are the tile's already-sliced staggered/cell metrics +
+    local D-winds.
+
+    Per-output windows (h=2; tile cells span global ``[ti*nl, (ti+1)*nl)``):
+      * ua/va — interior utmp/vtmp ``(nl, nl)`` at padded
+        ``[ti*nl+h : ti*nl+h+nl]`` (symmetric);
+      * uc — production ``uc[I] = A2*(utmp_pad[I-1]+utmp_pad[I+2]) +
+        A1*(utmp_pad[I]+utmp_pad[I+1])`` for u-faces ``I in
+        [ti*nl, ti*nl+nl]``, which needs ``utmp_pad`` rows
+        ``[ti*nl-1 : ti*nl+nl+3]`` — ASYMMETRIC -1 on the staggered i
+        axis (the prior symmetric window gave ``uc_4th[ti*nl+j] =
+        uc_prod[ti*nl+j+1]``, off by one); cols symmetric
+        ``[tj*nl : tj*nl+nl+4]`` (d2a2c_uc_4th_local trims ``[h:-h]``);
+      * vc — symmetric rows ``[ti*nl : ti*nl+nl+4]``, asymmetric -1
+        cols ``[tj*nl-1 : tj*nl+nl+3]`` (the j-staggered analogue);
+      * ut/vt — pointwise from uc/vc + the local D-winds/metrics.
+
+    Valid for INTERIOR tiles (``ti*nl-1 >= 0``; no face-boundary cells, so
+    no C1/C2/C3 or edge_interpolate4 specials).  uc/vc carry the 2nd-order
+    base + a clamped 4th-order overlay on the global band ``[npt+1, n-npt)``;
+    for the realistic ``nl >= npt+1`` the band covers the whole tile (pure
+    4th), but the base/clamp also makes small tiles whose faces fall outside
+    the band bit-identical to global d2a2c_vect (which uses 2nd base there).
+    Returns ``(ua, va, uc, vc, ut, vt)`` (leading singleton axis kept).
+    """
+    h = 2
+    n = utmp_pad_face.shape[0] - 2 * h
+    npt = min(4, n // 2)
+    a, b = ti * nl, tj * nl
+    ua, va = d2a2c_ua_va_local(
+        utmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl],
+        vtmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl], cos_sg5, rsin2)
+    uc = _d2a2c_uc_iinterior(utmp_pad_face, a, b, nl, n, npt)
+    vc = _d2a2c_vc_jinterior(vtmp_pad_face, a, b, nl, n, npt)
+    ut, vt = d2a2c_ut_vt_local(
+        uc, vc, u_d, v_d, cosa_u, rsin_u, cosa_v, rsin_v)
+    return ua, va, uc, vc, ut, vt
+
+
+def d2a2c_edge_w_local(utmp_pad_face, vtmp_pad_face, tj, nl, n,
+                       u_d, v_d, cos_sg5, rsin2,
+                       cosa_u, rsin_u, cosa_v, rsin_v,
+                       ua_pad_face, dx_pad_face, se_pad_face, sw_pad_face):
+    """A→C d2a2c for a W-EDGE, j-interior tile (ti=0, 0<tj<kt-1) —
+    everything EXCEPT the adjacent-strip vt[0] (which reads a neighbour
+    ut j-halo, a stage-level coupling).
+
+    Mirrors production d2a2c_vect restricted to the tile (a=ti*nl=0):
+    uc = 2nd-order base + 4th-order overlay where the global face is in
+    [npt+1:n-npt] + C1/C2/C3 at i=1 + edge_interpolate4 at i=0; vc =
+    pure 4th-order (tj interior, no S/N); ut = base + the i=0 face
+    boundary override (uc/sin_upwind); vt = pointwise base.  Outputs
+    (ua, va, uc, vc, ut, vt); vt[:, 0, :] is the base (NOT the
+    adjacent-strip) and is excluded from the parity gate.  P4 phase-1b.
+    """
+    h = 2
+    npt = min(4, n // 2)
+    b = tj * nl
+    ua, va = d2a2c_ua_va_local(
+        utmp_pad_face[None, h:h + nl, b + h:b + h + nl],
+        vtmp_pad_face[None, h:h + nl, b + h:b + h + nl], cos_sg5, rsin2)
+    uc, (i_spec, sin_left, sin_right) = _d2a2c_uc_iedge(
+        utmp_pad_face, 0, b, nl, n, npt,
+        ua_pad_face, dx_pad_face, se_pad_face, sw_pad_face, False)
+    vc = _d2a2c_vc_jinterior(vtmp_pad_face, 0, b, nl, n, npt)
+    # ut: base + the i=0 face-boundary override (uc/sin_upwind).
+    ut = (uc - v_d * cosa_u) * rsin_u
+    sin_up = jnp.where(uc[:, i_spec, :] > 0, sin_left, sin_right)
+    ut = ut.at[:, i_spec, :].set(uc[:, i_spec, :] / jnp.maximum(sin_up, _EPS))
+    # vt: pointwise base (vt[:,0,:] is base, NOT the adjacent strip).
+    vt = (vc - u_d * cosa_v) * rsin_v
+    return ua, va, uc, vc, ut, vt
+
+
+def d2a2c_edge_e_local(utmp_pad_face, vtmp_pad_face, tj, nl, n,
+                       u_d, v_d, cos_sg5, rsin2,
+                       cosa_u, rsin_u, cosa_v, rsin_v,
+                       ua_pad_face, dx_pad_face, se_pad_face, sw_pad_face):
+    """A→C d2a2c for an E-EDGE, j-interior tile (ti=kt-1, 0<tj<kt-1) —
+    everything EXCEPT the adjacent-strip vt[nl-1] (which reads a neighbour
+    ut j-halo, a stage-level coupling).
+
+    Mirror of :func:`d2a2c_edge_w_local` on the high-i face (a=ti*nl=n-nl):
+    uc = 2nd-order base + 4th-order overlay on the global band [npt+1:n-npt)
+    (for the E tile only its LOW faces) + C1/C2/C3 at i=n-1 +
+    edge_interpolate4 at i=n; vc = pure 4th-order (tj interior, no S/N);
+    ut = base + the i=n face boundary override (uc/sin_upwind); vt =
+    pointwise base.  Outputs (ua, va, uc, vc, ut, vt); vt[:, nl-1, :] is the
+    base (NOT the adjacent-strip) and is excluded from the parity gate.
+
+    Unlike the W tile (symmetric window + a +1 overlay shift), the E tile's
+    low faces are 4th-order interior cuts that need the ASYMMETRIC -1
+    i-window ``w = utmp_pad[a-1:a+nl+3]`` — with it, ``d2a2c_uc_4th_local(w)``
+    row r equals production ``uc[a+r]`` directly (no shift).  P4 phase-1b.
+    """
+    h = 2
+    npt = min(4, n // 2)
+    a, b = n - nl, tj * nl
+    ua, va = d2a2c_ua_va_local(
+        utmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl],
+        vtmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl], cos_sg5, rsin2)
+    uc, (i_spec, sin_left, sin_right) = _d2a2c_uc_iedge(
+        utmp_pad_face, a, b, nl, n, npt,
+        ua_pad_face, dx_pad_face, se_pad_face, sw_pad_face, True)
+    vc = _d2a2c_vc_jinterior(vtmp_pad_face, a, b, nl, n, npt)
+    # ut: base + the i=n face-boundary override (uc/sin_upwind).
+    ut = (uc - v_d * cosa_u) * rsin_u
+    sin_up = jnp.where(uc[:, i_spec, :] > 0, sin_left, sin_right)
+    ut = ut.at[:, i_spec, :].set(uc[:, i_spec, :] / jnp.maximum(sin_up, _EPS))
+    # vt: pointwise base (vt[:,nl-1,:] is base, NOT the adjacent strip).
+    vt = (vc - u_d * cosa_v) * rsin_v
+    return ua, va, uc, vc, ut, vt
+
+
+def d2a2c_edge_s_local(utmp_pad_face, vtmp_pad_face, ti, nl, n,
+                       u_d, v_d, cos_sg5, rsin2,
+                       cosa_u, rsin_u, cosa_v, rsin_v,
+                       va_pad_face, dy_pad_face, sn_pad_face, ss_pad_face):
+    """A→C d2a2c for a S-EDGE, i-interior tile (tj=0, 0<ti<kt-1) — the
+    j-axis transpose of :func:`d2a2c_edge_w_local` (b=tj*nl=0):
+
+    vc = 2nd-order base + 4th-order overlay on the global j-band [npt+1:n-npt)
+    + C1/C2/C3 at j=1 + edge_interpolate4 at j=0; uc = 2nd base + clamped 4th
+    overlay (ti interior, no W/E specials); vt = base + the j=0 face boundary
+    override (vc/sin_upwind); ut = pointwise base.  Outputs
+    (ua, va, uc, vc, ut, vt); ut[:, :, 0] is the base (NOT the South
+    adjacent-strip, which reads a neighbour vt i-halo at stage level) and is
+    excluded from the parity gate.  P4 phase-1b.
+    """
+    h = 2
+    npt = min(4, n // 2)
+    a = ti * nl
+    ua, va = d2a2c_ua_va_local(
+        utmp_pad_face[None, a + h:a + h + nl, h:h + nl],
+        vtmp_pad_face[None, a + h:a + h + nl, h:h + nl], cos_sg5, rsin2)
+    uc = _d2a2c_uc_iinterior(utmp_pad_face, a, 0, nl, n, npt)
+    vc, (j_spec, sin_below, sin_above) = _d2a2c_vc_jedge(
+        vtmp_pad_face, a, 0, nl, n, npt,
+        va_pad_face, dy_pad_face, sn_pad_face, ss_pad_face, False)
+    # vt: base + the j=0 face-boundary override (vc/sin_upwind).
+    vt = (vc - u_d * cosa_v) * rsin_v
+    sin_up = jnp.where(vc[:, :, j_spec] > 0, sin_below, sin_above)
+    vt = vt.at[:, :, j_spec].set(vc[:, :, j_spec] / jnp.maximum(sin_up, _EPS))
+    # ut: pointwise base (ut[:,:,0] is base, NOT the South adjacent strip).
+    ut = (uc - v_d * cosa_u) * rsin_u
+    return ua, va, uc, vc, ut, vt
+
+
+def d2a2c_edge_n_local(utmp_pad_face, vtmp_pad_face, ti, nl, n,
+                       u_d, v_d, cos_sg5, rsin2,
+                       cosa_u, rsin_u, cosa_v, rsin_v,
+                       va_pad_face, dy_pad_face, sn_pad_face, ss_pad_face):
+    """A→C d2a2c for a N-EDGE, i-interior tile (tj=kt-1, 0<ti<kt-1) — the
+    j-axis transpose of :func:`d2a2c_edge_e_local` (b=tj*nl=n-nl):
+
+    vc = 2nd base + clamped 4th overlay on the tile's LOW j-faces +
+    C1/C2/C3 at j=n-1 + edge_interpolate4 at j=n; uc = 2nd base + clamped 4th
+    overlay (ti interior); vt = base + the j=n face boundary override; ut =
+    pointwise base.  Outputs (ua, va, uc, vc, ut, vt); ut[:, :, nl-1] is the
+    base (NOT the North adjacent-strip) and is excluded from the parity gate.
+    Like the E tile, the low j-faces are 4th-order interior cuts needing the
+    asymmetric -1 j-window (no overlay shift).  P4 phase-1b.
+    """
+    h = 2
+    npt = min(4, n // 2)
+    a, b = ti * nl, n - nl
+    ua, va = d2a2c_ua_va_local(
+        utmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl],
+        vtmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl], cos_sg5, rsin2)
+    uc = _d2a2c_uc_iinterior(utmp_pad_face, a, b, nl, n, npt)
+    vc, (j_spec, sin_below, sin_above) = _d2a2c_vc_jedge(
+        vtmp_pad_face, a, b, nl, n, npt,
+        va_pad_face, dy_pad_face, sn_pad_face, ss_pad_face, True)
+    # vt: base + the j=n face-boundary override (vc/sin_upwind).
+    vt = (vc - u_d * cosa_v) * rsin_v
+    sin_up = jnp.where(vc[:, :, j_spec] > 0, sin_below, sin_above)
+    vt = vt.at[:, :, j_spec].set(vc[:, :, j_spec] / jnp.maximum(sin_up, _EPS))
+    # ut: pointwise base (ut[:,:,nl-1] is base, NOT the North adjacent strip).
+    ut = (uc - v_d * cosa_u) * rsin_u
+    return ua, va, uc, vc, ut, vt
+
+
+def d2a2c_corner_local(utmp_pad_face, vtmp_pad_face, ti, tj, nl, n,
+                       u_d, v_d, cos_sg5, rsin2,
+                       cosa_u, rsin_u, cosa_v, rsin_v,
+                       ua_pad_face, dx_pad_face, se_pad_face, sw_pad_face,
+                       va_pad_face, dy_pad_face, sn_pad_face, ss_pad_face):
+    """A→C d2a2c for a CORNER tile (ti,tj each in {0,kt-1}) — the union of an
+    i-edge (W/E) uc column and a j-edge (S/N) vc column.  For kt=2 EVERY tile
+    is a corner (6*kt²=24 devices), so this is the np=24 sub-face unlock.
+
+    uc = the i-edge stencil (W if ti=0 else E); vc = the j-edge stencil (S if
+    tj=0 else N); ut = base + the i-face boundary override; vt = base + the
+    j-face boundary override.  BOTH adjacent strips are deferred (each reads a
+    neighbour transport-wind halo at stage level): the vt i-strip (row i=0 /
+    i=n-1) and the ut j-strip (col j=0 / j=n-1) are left as the pointwise base
+    and excluded from the parity gate.  The i-face/j-face boundary overrides
+    do NOT overlap either strip (i_spec,j_spec in {0,n}; strips at {0,n-1} for
+    i/j in [2,n-2]).  P4 phase-1b.
+    """
+    h = 2
+    npt = min(4, n // 2)
+    a, b = ti * nl, tj * nl
+    at_high_i = (a == n - nl)   # ti == kt-1 -> E side
+    at_high_j = (b == n - nl)   # tj == kt-1 -> N side
+    ua, va = d2a2c_ua_va_local(
+        utmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl],
+        vtmp_pad_face[None, a + h:a + h + nl, b + h:b + h + nl], cos_sg5, rsin2)
+    uc, (i_spec, sin_left, sin_right) = _d2a2c_uc_iedge(
+        utmp_pad_face, a, b, nl, n, npt,
+        ua_pad_face, dx_pad_face, se_pad_face, sw_pad_face, at_high_i)
+    vc, (j_spec, sin_below, sin_above) = _d2a2c_vc_jedge(
+        vtmp_pad_face, a, b, nl, n, npt,
+        va_pad_face, dy_pad_face, sn_pad_face, ss_pad_face, at_high_j)
+    # ut: base + i-face override (the vt i-strip is deferred -> base).
+    ut = (uc - v_d * cosa_u) * rsin_u
+    sin_ui = jnp.where(uc[:, i_spec, :] > 0, sin_left, sin_right)
+    ut = ut.at[:, i_spec, :].set(uc[:, i_spec, :] / jnp.maximum(sin_ui, _EPS))
+    # vt: base + j-face override (the ut j-strip is deferred -> base).
+    vt = (vc - u_d * cosa_v) * rsin_v
+    sin_vj = jnp.where(vc[:, :, j_spec] > 0, sin_below, sin_above)
+    vt = vt.at[:, :, j_spec].set(vc[:, :, j_spec] / jnp.maximum(sin_vj, _EPS))
+    return ua, va, uc, vc, ut, vt
+
+
+def d2a2c_uc_tile_unified(u_block, ua_block, dx_block, se_block, sw_block,
+                          a, n, npt, is_lo_i, is_hi_i):
+    """uc for ONE tile in the GSPMD/shard_map form — fixed-shape masks + a
+    ``jnp.where`` on the boundary flags instead of per-tile static slices, so
+    a SINGLE traced function serves every tile under a (6,kt,kt) mesh.
+
+    ``u_block`` is the WIDE padded covariant-u block ``(1, nl+5, nl+4)`` with
+    ``u_block[:, p, :] = utmp_pad[a-1+p, b:b+nl+4]`` (the one extra low cell
+    feeds the no-shift 4th overlay for E/N/interior tiles; for a low-edge
+    tile, a=0, that cell is garbage but its faces 0/1 are overwritten by the
+    edge specials).  The symmetric block is ``u_block[:, 1:, :]``.
+    ``ua_block``/``dx_block``/``se_block``/``sw_block`` are the standard
+    symmetric tile blocks (``[a:a+nl+4]`` etc.) the edge_interpolate4 reads.
+    ``a``, ``is_lo_i``, ``is_hi_i`` may be traced (``lax.axis_index`` under
+    shard_map).  Returns ``(1, nl+1, nl)`` uc, equal to the specific
+    W/E/interior kernel's uc for the matching tile (P4 phase-1b)."""
+    h = 2
+    nl = u_block.shape[1] - 5
+    usym = u_block[:, 1:, :]            # (1, nl+4, nl+4) == [a:a+nl+4]
+    # 2nd-order base.
+    uc = 0.5 * (usym[:, h - 1:nl + h, h:-h] + usym[:, h:nl + h + 1, h:-h])
+    # 4th overlay (no shift) from the wide block; uc4[k] == production uc[a+k].
+    uc4 = (_A2 * (u_block[:, 0:nl + 1, h:-h] + u_block[:, 3:nl + 4, h:-h])
+           + _A1 * (u_block[:, 1:nl + 2, h:-h] + u_block[:, 2:nl + 3, h:-h]))
+    faces = a + jnp.arange(nl + 1)
+    in_band = ((faces >= npt + 1) & (faces < n - npt)
+               & (n > 2 * npt + 2))[None, :, None]
+    uc = jnp.where(in_band, uc4, uc)
+    # C1/C2/C3 one-sided value: at local i=1 when this is the low-i edge
+    # (global i=1), at local i=nl-1 when the high-i edge (global i=n-1).
+    c123_lo = d2a2c_uc_c123_local(usym, False)[:, None, :]
+    c123_hi = d2a2c_uc_c123_local(usym, True)[:, None, :]
+    kk = jnp.arange(nl + 1)[None, :, None]
+    uc = jnp.where(is_lo_i & (kk == 1), c123_lo, uc)
+    uc = jnp.where(is_hi_i & (kk == nl - 1), c123_hi, uc)
+    # edge_interpolate4 + upwind: at local i=0 (low edge) / i=nl (high edge).
+    ei_lo = d2a2c_uc_edge_interp_local(
+        ua_block, dx_block, se_block, sw_block, False)[:, None, :]
+    ei_hi = d2a2c_uc_edge_interp_local(
+        ua_block, dx_block, se_block, sw_block, True)[:, None, :]
+    uc = jnp.where(is_lo_i & (kk == 0), ei_lo, uc)
+    uc = jnp.where(is_hi_i & (kk == nl), ei_hi, uc)
+    return uc
+
+
+def d2a2c_vc_tile_unified(v_block, va_block, dy_block, sn_block, ss_block,
+                          b, n, npt, is_lo_j, is_hi_j):
+    """vc for ONE tile in the GSPMD/shard_map form — the j-axis transpose of
+    :func:`d2a2c_uc_tile_unified`.  ``v_block`` is the WIDE low-j-padded
+    covariant-v block ``(1, nl+4, nl+5)`` with ``v_block[:, :, q] =
+    vtmp_pad[..., b-1+q]`` (the extra low-j cell feeds the no-shift 4th
+    overlay; for a low-j-edge tile, b=0, it is garbage but overwritten by the
+    j=0/1 specials).  ``vsym = v_block[:, :, 1:]`` is the symmetric
+    ``[b:b+nl+4]`` block.  ``b``/``is_lo_j``/``is_hi_j`` may be traced.
+    Returns ``(1, nl, nl+1)`` vc, equal to the specific S/N/interior kernel's
+    vc for the matching tile (P4 phase-1b)."""
+    h = 2
+    nl = v_block.shape[2] - 5
+    vsym = v_block[:, :, 1:]            # (1, nl+4, nl+4) == [b:b+nl+4]
+    vc = 0.5 * (vsym[:, h:-h, h - 1:nl + h] + vsym[:, h:-h, h:nl + h + 1])
+    vc4 = (_A2 * (v_block[:, h:-h, 0:nl + 1] + v_block[:, h:-h, 3:nl + 4])
+           + _A1 * (v_block[:, h:-h, 1:nl + 2] + v_block[:, h:-h, 2:nl + 3]))
+    faces = b + jnp.arange(nl + 1)
+    in_band = ((faces >= npt + 1) & (faces < n - npt)
+               & (n > 2 * npt + 2))[None, None, :]
+    vc = jnp.where(in_band, vc4, vc)
+    c123_lo = d2a2c_vc_c123_local(vsym, False)[:, :, None]
+    c123_hi = d2a2c_vc_c123_local(vsym, True)[:, :, None]
+    mm = jnp.arange(nl + 1)[None, None, :]
+    vc = jnp.where(is_lo_j & (mm == 1), c123_lo, vc)
+    vc = jnp.where(is_hi_j & (mm == nl - 1), c123_hi, vc)
+    ei_lo = d2a2c_vc_edge_interp_local(
+        va_block, dy_block, sn_block, ss_block, False)[:, :, None]
+    ei_hi = d2a2c_vc_edge_interp_local(
+        va_block, dy_block, sn_block, ss_block, True)[:, :, None]
+    vc = jnp.where(is_lo_j & (mm == 0), ei_lo, vc)
+    vc = jnp.where(is_hi_j & (mm == nl), ei_hi, vc)
+    return vc
+
+
+def d2a2c_tile_unified(u_block, v_block, ua_block, dx_block, se_block, sw_block,
+                       va_block, dy_block, sn_block, ss_block,
+                       u_d, v_d, cos_sg5, rsin2, cosa_u, rsin_u, cosa_v, rsin_v,
+                       a, b, n, npt, is_lo_i, is_hi_i, is_lo_j, is_hi_j):
+    """Full per-tile A→C d2a2c in the GSPMD/shard_map form — the SINGLE traced
+    body the (6,kt,kt) shard_map runs on every device.  Composes
+    :func:`d2a2c_ua_va_local` + the flag-driven :func:`d2a2c_uc_tile_unified`
+    / :func:`d2a2c_vc_tile_unified` + flag-driven ut/vt face overrides.  The
+    two adjacent strips (vt at i=0/n-1, ut at j=0/n-1) are DEFERRED — the
+    stage applies them via the same-face-neighbour ppermute / global
+    post-gather — so this matches the specific per-tile kernels EXACTLY except
+    at the deferred strip cells.  ``u_block``/``v_block`` are the wide
+    low-padded covariant blocks; the symmetric blocks are ``u_block[:,1:,:]``
+    / ``v_block[:,:,1:]``.  Position/flags may be traced.  P4 phase-1b."""
+    h = 2
+    nl = u_block.shape[1] - 5
+    usym = u_block[:, 1:, :]
+    vsym = v_block[:, :, 1:]
+    ua, va = d2a2c_ua_va_local(
+        usym[:, h:h + nl, h:h + nl], vsym[:, h:h + nl, h:h + nl],
+        cos_sg5, rsin2)
+    uc = d2a2c_uc_tile_unified(u_block, ua_block, dx_block, se_block, sw_block,
+                               a, n, npt, is_lo_i, is_hi_i)
+    vc = d2a2c_vc_tile_unified(v_block, va_block, dy_block, sn_block, ss_block,
+                               b, n, npt, is_lo_j, is_hi_j)
+    kk = jnp.arange(nl + 1)[None, :, None]
+    mm = jnp.arange(nl + 1)[None, None, :]
+    # ut: base + the i-face boundary override (uc/sin_upwind), flag-gated.
+    ut = (uc - v_d * cosa_u) * rsin_u
+    sin_lo = jnp.where(uc[:, 0, :] > 0,
+                       se_block[:, 0, 1:-1], sw_block[:, 1, 1:-1])
+    ut_lo = (uc[:, 0, :] / jnp.maximum(sin_lo, _EPS))[:, None, :]
+    ut = jnp.where(is_lo_i & (kk == 0), ut_lo, ut)
+    sin_hi = jnp.where(uc[:, nl, :] > 0,
+                       se_block[:, nl, 1:-1], sw_block[:, nl + 1, 1:-1])
+    ut_hi = (uc[:, nl, :] / jnp.maximum(sin_hi, _EPS))[:, None, :]
+    ut = jnp.where(is_hi_i & (kk == nl), ut_hi, ut)
+    # vt: base + the j-face boundary override, flag-gated.
+    vt = (vc - u_d * cosa_v) * rsin_v
+    sin_lo_j = jnp.where(vc[:, :, 0] > 0,
+                         sn_block[:, 1:-1, 0], ss_block[:, 1:-1, 1])
+    vt_lo = (vc[:, :, 0] / jnp.maximum(sin_lo_j, _EPS))[:, :, None]
+    vt = jnp.where(is_lo_j & (mm == 0), vt_lo, vt)
+    sin_hi_j = jnp.where(vc[:, :, nl] > 0,
+                         sn_block[:, 1:-1, nl], ss_block[:, 1:-1, nl + 1])
+    vt_hi = (vc[:, :, nl] / jnp.maximum(sin_hi_j, _EPS))[:, :, None]
+    vt = jnp.where(is_hi_j & (mm == nl), vt_hi, vt)
+    return ua, va, uc, vc, ut, vt
+
+
+class _D2A2CFields(NamedTuple):
+    """Global padded fields the A→C d2a2c step consumes (output of
+    :func:`d2a2c_global_fields`)."""
+    utmp_pad: jnp.ndarray      # (6, n+4, n+4) D→A covariant u
+    vtmp_pad: jnp.ndarray      # (6, n+4, n+4) D→A covariant v
+    cos_sg5: jnp.ndarray       # (6, n, n) cell-centre cos_sg
+    rsin2: jnp.ndarray         # (6, n, n) cell-centre rsin2
+    ua_pad: jnp.ndarray        # (6, n+4, n+4) A-grid contravariant u
+    va_pad: jnp.ndarray        # (6, n+4, n+4) A-grid contravariant v
+    dxc_pad_x: jnp.ndarray     # (6, n+4, n) dx, h2-padded on i
+    dyc_pad_y: jnp.ndarray     # (6, n, n+4) dy, h2-padded on j
+    se_pad_x: jnp.ndarray      # (6, n+2, n+2) sin_sg E, h1 halo
+    sw_pad_x: jnp.ndarray      # (6, n+2, n+2) sin_sg W, h1 halo
+    sn_pad_y: jnp.ndarray      # (6, n+2, n+2) sin_sg N, h1 halo
+    ss_pad_y: jnp.ndarray      # (6, n+2, n+2) sin_sg S, h1 halo
+
+
+def d2a2c_global_fields(u_d, v_d, cdgrid):
+    """Compute the global padded fields the A→C step (and the tiled stage)
+    consume: D→A covariant winds (:func:`d2a2c_d_to_a`), the A-grid
+    contravariant ua/va, the staggered dx/dy, and the halo-padded sin_sg
+    edge components.  Single source for both d2a2c_vect and the tiled
+    per-tile kernels (P4 phase-1b approach C — the tiled stage runs the cheap
+    D→A globally then shards these into the per-tile A→C)."""
+    grid = cdgrid.base
+    h = 2
+    utmp_pad, vtmp_pad = d2a2c_d_to_a(u_d, v_d, cdgrid)
+    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
+    rsin2 = cdgrid.rsin2_cell
+    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
+    va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
+    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
+    dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
+    offsets = grid.halo_interp_offsets
+    se_pad_x = pad_halo(cdgrid.sin_sg[:, :, :, 2], interp_offsets=offsets)
+    sw_pad_x = pad_halo(cdgrid.sin_sg[:, :, :, 0], interp_offsets=offsets)
+    sn_pad_y = pad_halo(cdgrid.sin_sg[:, :, :, 3], interp_offsets=offsets)
+    ss_pad_y = pad_halo(cdgrid.sin_sg[:, :, :, 1], interp_offsets=offsets)
+    return _D2A2CFields(utmp_pad, vtmp_pad, cos_sg5, rsin2, ua_pad, va_pad,
+                        dxc_pad_x, dyc_pad_y, se_pad_x, sw_pad_x,
+                        sn_pad_y, ss_pad_y)
+
+
+def d2a2c_adjacent_strips(uc, vc, ut, vt, cosa_u, cosa_v, n):
+    """Non-duogrid adjacent-strip recompute of the transport winds at the
+    face edges (FV3 sw_core.F90:670-722): vt at i=0/n-1 and ut at j=0/n-1,
+    each over the [2,n-2] interior strip, blending the cross-component
+    transport wind from the two adjacent cells.  Shared by d2a2c_vect and the
+    tiled stage's global post-gather pass.  vt strips run first; the ut strips
+    read the updated vt but only at i-cells [1,n-2] (the West/East vt strips
+    touch i-cell 0/n-1 only — no overlap, FV3 ordering preserved).  Returns
+    (ut, vt).  P4 phase-1b.
+    """
+    if n >= 4:
+        j_lo, j_hi = 2, n - 1  # j_face range [2, n-2]
+        ut_w = (ut[:, 0, j_lo - 1:j_hi - 1] + ut[:, 1, j_lo - 1:j_hi - 1]
+                + ut[:, 0, j_lo:j_hi] + ut[:, 1, j_lo:j_hi])
+        vt = vt.at[:, 0, j_lo:j_hi].set(
+            vc[:, 0, j_lo:j_hi] - 0.25 * cosa_v[:, 0, j_lo:j_hi] * ut_w)
+        ut_e = (ut[:, n - 1, j_lo - 1:j_hi - 1] + ut[:, n, j_lo - 1:j_hi - 1]
+                + ut[:, n - 1, j_lo:j_hi] + ut[:, n, j_lo:j_hi])
+        vt = vt.at[:, n - 1, j_lo:j_hi].set(
+            vc[:, n - 1, j_lo:j_hi] - 0.25 * cosa_v[:, n - 1, j_lo:j_hi] * ut_e)
+        i_lo, i_hi = 2, n - 1  # i_face range [2, n-2]
+        vt_s = (vt[:, i_lo - 1:i_hi - 1, 0] + vt[:, i_lo:i_hi, 0]
+                + vt[:, i_lo - 1:i_hi - 1, 1] + vt[:, i_lo:i_hi, 1])
+        ut = ut.at[:, i_lo:i_hi, 0].set(
+            uc[:, i_lo:i_hi, 0] - 0.25 * cosa_u[:, i_lo:i_hi, 0] * vt_s)
+        vt_n = (vt[:, i_lo - 1:i_hi - 1, n - 1] + vt[:, i_lo:i_hi, n - 1]
+                + vt[:, i_lo - 1:i_hi - 1, n] + vt[:, i_lo:i_hi, n])
+        ut = ut.at[:, i_lo:i_hi, n - 1].set(
+            uc[:, i_lo:i_hi, n - 1] - 0.25 * cosa_u[:, i_lo:i_hi, n - 1] * vt_n)
+    return ut, vt
+
+
+def d2a2c_tile_strips(uc, vc, ut, vt, ut_lo, ut_hi, vt_lo, vt_hi,
+                      cosa_u, cosa_v, a, b, n, nl,
+                      is_lo_i, is_hi_i, is_lo_j, is_hi_j):
+    """Per-tile form of :func:`d2a2c_adjacent_strips` (the tiled stage's
+    step 2a — removes the global post-gather strip pass).
+
+    Inputs are one tile's kernel outputs (``uc``/``ut`` ``(1, nl+1, nl)``,
+    ``vc``/``vt`` ``(1, nl, nl+1)``) plus the four 1-cell same-face
+    neighbour halos (each ``(1, nl+1)``):
+
+    - ``ut_lo``/``ut_hi``: neighbour ut CELL columns ``b-1`` / ``b+nl``
+      (tile ``tile_j∓1``'s local column ``nl-1`` / ``0``),
+    - ``vt_lo``/``vt_hi``: neighbour vt CELL rows ``a-1`` / ``a+nl``
+      (tile ``tile_i∓1``'s local row ``nl-1`` / ``0``).
+
+    The strip masks (global range ``[2, n-2]``) provably exclude every
+    position whose halo would be the wrapped/garbage value at a face
+    boundary, so the stage can feed periodic-``ppermute`` halos
+    unconditionally.  Writes cover the FULL local staggered range
+    (including the duplicated shared faces), so neighbouring tiles'
+    duplicated copies remain bit-identical — same global cells, same
+    fp ops — and downstream consumers never depend on tile ownership.
+    Production-order equivalence: the in-mask vt-strip reads
+    (post-face-override ut at cell cols ``[1, n-2]``) and ut-strip reads
+    (vt at cell rows ``[1, n-2]``) are disjoint from all strip writes
+    (i/j cells ``{0, n-1}``), so applying both from the PRE-strip fields
+    matches :func:`d2a2c_adjacent_strips` exactly.  ``a``/``b`` and the
+    side flags may be traced (shard_map ``axis_index``).  Returns
+    ``(ut, vt)``.  P4 phase-1b.
+    """
+    # Extended cell-axis views: [lo halo | local | hi halo].
+    ut_ext = jnp.concatenate(
+        [ut_lo[:, :, None], ut, ut_hi[:, :, None]], axis=2)  # (1,nl+1,nl+2)
+    vt_ext = jnp.concatenate(
+        [vt_lo[:, None, :], vt, vt_hi[:, None, :]], axis=1)  # (1,nl+2,nl+1)
+    mm = jnp.arange(nl + 1)[None, :]
+    j_in = (b + mm >= 2) & (b + mm <= n - 2)   # vt-strip staggered cols
+    i_in = (a + mm >= 2) & (a + mm <= n - 2)   # ut-strip staggered rows
+
+    # vt strips first (FV3 order; reads PRE-strip ut).
+    # West (cell row 0 of an is_lo_i tile): vt[0, j] = vc[0, j]
+    #   - 0.25*cosa_v[0, j]*(ut[0:2, j-1] + ut[0:2, j]).
+    sum_w = (ut_ext[:, 0, :-1] + ut_ext[:, 1, :-1]
+             + ut_ext[:, 0, 1:] + ut_ext[:, 1, 1:])
+    val_w = vc[:, 0, :] - 0.25 * cosa_v[:, 0, :] * sum_w
+    vt = vt.at[:, 0, :].set(jnp.where(is_lo_i & j_in, val_w, vt[:, 0, :]))
+    # East (cell row nl-1 == global n-1 of an is_hi_i tile).
+    sum_e = (ut_ext[:, nl - 1, :-1] + ut_ext[:, nl, :-1]
+             + ut_ext[:, nl - 1, 1:] + ut_ext[:, nl, 1:])
+    val_e = vc[:, nl - 1, :] - 0.25 * cosa_v[:, nl - 1, :] * sum_e
+    vt = vt.at[:, nl - 1, :].set(
+        jnp.where(is_hi_i & j_in, val_e, vt[:, nl - 1, :]))
+
+    # ut strips (read vt at interior cell rows only — disjoint from the
+    # vt-strip writes above, so vt_ext built from the PRE-strip vt is
+    # production-exact at every in-mask position).
+    # South (cell col 0 of an is_lo_j tile).
+    sum_s = (vt_ext[:, :-1, 0] + vt_ext[:, 1:, 0]
+             + vt_ext[:, :-1, 1] + vt_ext[:, 1:, 1])
+    val_s = uc[:, :, 0] - 0.25 * cosa_u[:, :, 0] * sum_s
+    ut = ut.at[:, :, 0].set(jnp.where(is_lo_j & i_in, val_s, ut[:, :, 0]))
+    # North (cell col nl-1 == global n-1 of an is_hi_j tile).
+    sum_n = (vt_ext[:, :-1, nl - 1] + vt_ext[:, 1:, nl - 1]
+             + vt_ext[:, :-1, nl] + vt_ext[:, 1:, nl])
+    val_n = uc[:, :, nl - 1] - 0.25 * cosa_u[:, :, nl - 1] * sum_n
+    ut = ut.at[:, :, nl - 1].set(
+        jnp.where(is_hi_j & i_in, val_n, ut[:, :, nl - 1]))
+    return ut, vt
+
+
 def d2a2c_vect(u_d, v_d, cdgrid):
     """FV3 D-grid → A-grid → C-grid (covariant). FV3 sw_core.F90 d2a2c_vect.
 
@@ -588,42 +1416,21 @@ def d2a2c_vect(u_d, v_d, cdgrid):
     # _d2a2c_vect_duogrid is unaffected — Fortran also skips these via
     # dg%is_initialized.)
 
-    # Step 1: D-grid → covariant cell centres
-    utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
-    vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
-
-    # 4th-order interior (npt cells from each edge; needs n > 2*npt)
-    if n > 2 * npt and npt > 0:
-        u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
-              + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
-        utmp = utmp.at[:, :, npt:n - npt].set(u4[:, :, npt - 1:n - npt - 1])
-        v4 = (_A2 * (v_d[:, :-3, :] + v_d[:, 3:, :])
-              + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
-        vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
-
-    # Step 2: Halo-exchange covariant utmp/vtmp (halo=2 for edge_interpolate4, FV3:3587)
-    grid = cdgrid.base
+    # Steps 1+2: D→A covariant utmp/vtmp + halo=2 vector exchange.
+    # Extracted to d2a2c_d_to_a (P4 phase-1b approach C): the tiled
+    # stage runs THIS step in the global view (cheap averages + one
+    # vector halo) and shards utmp_pad/vtmp_pad into the per-tile A→C.
     h = 2
-    utmp_pad, vtmp_pad = pad_halo_vector(
-        utmp, vtmp,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        interp_offsets=grid.halo_interp_offsets_h2,
-        halo=h,
-    )  # each (6, n+4, n+4)
+    # Steps 1-3 global fields (D→A covariant winds + halo, A-grid
+    # contravariant ua/va, staggered dx/dy, halo-padded sin_sg) — the single
+    # source shared with the tiled per-tile stage (d2a2c_global_fields).
+    F = d2a2c_global_fields(u_d, v_d, cdgrid)
+    utmp_pad, vtmp_pad = F.utmp_pad, F.vtmp_pad  # each (6, n+4, n+4)
 
     # iter-938: Fortran cube-corner sign-flip overrides (sw_core.F90:3527-3545, 3620-3639) available
     # as _apply_fortran_d2a2c_corner_overrides but output-dead without edge_interpolate4 j-slice extension.
 
-    # Step 3: Contravariant at cell centres
-    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
-    rsin2 = cdgrid.rsin2_cell
-    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
-    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
-
-    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
-    va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
-
+    ua_pad, va_pad = F.ua_pad, F.va_pad
     ua = ua_pad[:, h:-h, h:-h]  # (6, n, n)
     va = va_pad[:, h:-h, h:-h]
 
@@ -632,10 +1439,7 @@ def d2a2c_vect(u_d, v_d, cdgrid):
                 + utmp_pad[:, h:n+h+1, h:-h])  # (6, n+1, n)
 
     if n > 2 * npt + 2:
-        uc_4th = (_A2 * (utmp_pad[:, h-2:n+h-1, h:-h]
-                         + utmp_pad[:, h+1:n+h+2, h:-h])
-                  + _A1 * (utmp_pad[:, h-1:n+h, h:-h]
-                           + utmp_pad[:, h:n+h+1, h:-h]))
+        uc_4th = d2a2c_uc_4th_local(utmp_pad)  # (6, n+1, n)
         i_lo = npt + 1
         i_hi = n - npt
         uc = uc.at[:, i_lo:i_hi, :].set(uc_4th[:, i_lo - 1:i_hi - 1, :])
@@ -651,12 +1455,8 @@ def d2a2c_vect(u_d, v_d, cdgrid):
 
     # Face boundary (i=0, i=n): edge_interpolate4 on ua (FV3:3587,3603); halo=2 straddles boundary.
     # Upwind sin_sg from halo cell: ut>0 → sin_sg(i-1,j,3); ut<=0 → sin_sg(i,j,1)
-    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
-    sin_east = cdgrid.sin_sg[:, :, :, 2]   # E-edge
-    sin_west = cdgrid.sin_sg[:, :, :, 0]   # W-edge
-    offsets = grid.halo_interp_offsets
-    se_pad_x = pad_halo(sin_east, interp_offsets=offsets)  # (6, n+2, n+2)
-    sw_pad_x = pad_halo(sin_west, interp_offsets=offsets)
+    dxc_pad_x = F.dxc_pad_x
+    se_pad_x, sw_pad_x = F.se_pad_x, F.sw_pad_x  # (6, n+2, n+2)
     for i_bdy in ([0, n] if n >= 2 else []):
         i_p = i_bdy + h  # padded offset: cell i → padded index i+h
         # ua_pad stencil: 4 cells centred on u-face i_bdy
@@ -689,10 +1489,7 @@ def d2a2c_vect(u_d, v_d, cdgrid):
     vc = 0.5 * (vtmp_pad[:, h:-h, h-1:n+h] + vtmp_pad[:, h:-h, h:n+h+1])  # (6, n, n+1)
 
     if n > 2 * npt + 2:
-        vc_4th = (_A2 * (vtmp_pad[:, h:-h, h-2:n+h-1]
-                         + vtmp_pad[:, h:-h, h+1:n+h+2])
-                  + _A1 * (vtmp_pad[:, h:-h, h-1:n+h]
-                           + vtmp_pad[:, h:-h, h:n+h+1]))
+        vc_4th = d2a2c_vc_4th_local(vtmp_pad)  # (6, n, n+1)
         j_lo = npt + 1
         j_hi = n - npt
         vc = vc.at[:, :, j_lo:j_hi].set(vc_4th[:, :, j_lo - 1:j_hi - 1])
@@ -707,11 +1504,8 @@ def d2a2c_vect(u_d, v_d, cdgrid):
             + _C3 * vtmp_pad[:, h:-h, n + h - 1])
 
     # Face boundary y-dir: edge_interpolate4 on va (symmetric to x-dir)
-    dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
-    sin_north = cdgrid.sin_sg[:, :, :, 3]  # N-edge
-    sin_south = cdgrid.sin_sg[:, :, :, 1]  # S-edge
-    sn_pad_y = pad_halo(sin_north, interp_offsets=offsets)
-    ss_pad_y = pad_halo(sin_south, interp_offsets=offsets)
+    dyc_pad_y = F.dyc_pad_y
+    sn_pad_y, ss_pad_y = F.sn_pad_y, F.ss_pad_y
     for j_bdy in ([0, n] if n >= 2 else []):
         j_p = j_bdy + h
         va4 = jnp.stack([va_pad[:, h:-h, j_p - 1], va_pad[:, h:-h, j_p],
@@ -738,43 +1532,10 @@ def d2a2c_vect(u_d, v_d, cdgrid):
         vt = vt.at[:, :, j_bdy].set(
             vc[:, :, j_bdy] / jnp.maximum(sin_upwind, _EPS))
 
-    # Non-duogrid adjacent-strip vt recomputation at i=0/n-1 (FV3 sw_core.F90:670-691).
-    # j_face ∈ [2, n-2] (Fortran max(3,js), min(npy-2,je+1)).
-    if n >= 4:
-        j_lo, j_hi = 2, n - 1  # j_face range [j_lo, j_hi) → [2, n-2]
-        # West: Fortran vt(1, j) → Python vt[:, 0, j_lo:j_hi]
-        ut_w = (ut[:, 0, j_lo - 1:j_hi - 1] + ut[:, 1, j_lo - 1:j_hi - 1]
-                + ut[:, 0, j_lo:j_hi] + ut[:, 1, j_lo:j_hi])
-        vt_w_new = (vc[:, 0, j_lo:j_hi]
-                    - 0.25 * cdgrid.cosa_v[:, 0, j_lo:j_hi] * ut_w)
-        vt = vt.at[:, 0, j_lo:j_hi].set(vt_w_new)
-        # East: Fortran vt(npx-1, j) → Python vt[:, n-1, j_lo:j_hi]
-        ut_e = (ut[:, n - 1, j_lo - 1:j_hi - 1]
-                + ut[:, n, j_lo - 1:j_hi - 1]
-                + ut[:, n - 1, j_lo:j_hi]
-                + ut[:, n, j_lo:j_hi])
-        vt_e_new = (vc[:, n - 1, j_lo:j_hi]
-                    - 0.25 * cdgrid.cosa_v[:, n - 1, j_lo:j_hi] * ut_e)
-        vt = vt.at[:, n - 1, j_lo:j_hi].set(vt_e_new)
-
-    # Non-duogrid adjacent-strip ut recomputation at j=0/n-1 (FV3:701-707, 716-722).
-    # West/east blocks write vt[i_cell=0,n-1]; south/north read vt at i_cell∈[1,n-3] (no overlap).
-    if n >= 4:
-        i_lo, i_hi = 2, n - 1
-        # South: Fortran ut(i, 1) → Python ut[:, i_lo:i_hi, 0]
-        vt_s = (vt[:, i_lo - 1:i_hi - 1, 0] + vt[:, i_lo:i_hi, 0]
-                + vt[:, i_lo - 1:i_hi - 1, 1] + vt[:, i_lo:i_hi, 1])
-        ut_s_new = (uc[:, i_lo:i_hi, 0]
-                    - 0.25 * cdgrid.cosa_u[:, i_lo:i_hi, 0] * vt_s)
-        ut = ut.at[:, i_lo:i_hi, 0].set(ut_s_new)
-        # North: Fortran ut(i, npy-1) → Python ut[:, i_lo:i_hi, n-1]
-        vt_n = (vt[:, i_lo - 1:i_hi - 1, n - 1]
-                + vt[:, i_lo:i_hi, n - 1]
-                + vt[:, i_lo - 1:i_hi - 1, n]
-                + vt[:, i_lo:i_hi, n])
-        ut_n_new = (uc[:, i_lo:i_hi, n - 1]
-                    - 0.25 * cdgrid.cosa_u[:, i_lo:i_hi, n - 1] * vt_n)
-        ut = ut.at[:, i_lo:i_hi, n - 1].set(ut_n_new)
+    # Non-duogrid adjacent-strip recompute of ut/vt at the face edges
+    # (FV3 sw_core.F90:670-722) — extracted so the tiled stage reuses it.
+    ut, vt = d2a2c_adjacent_strips(
+        uc, vc, ut, vt, cdgrid.cosa_u, cdgrid.cosa_v, n)
 
     return ua, va, uc, vc, ut, vt
 
@@ -1514,13 +2275,21 @@ def _p_grad_c(h_star, h_s, cdgrid, dt2, g):
     return dp_x, dp_y
 
 
-def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
-                       apply_d_sw3_boundary_fix: bool = False,
-                       boundary_fix_dx_field=None):
+def ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
+                      apply_d_sw3_boundary_fix: bool = False,
+                      boundary_fix_dx_field=None, rd_prepadded: bool = False):
     """PPM hord=9 staggered-field transport (FV3 ytp_v/xtp_u, sw_core.F90:2897-3353, 2540-2894 jord=9).
 
     Used for B-grid KE transport in d_sw3. N cells → N+1 interface fluxes.
     external_halo (iter-945): when > 0, field already has cross-face halo on sweep axis.
+
+    rd_prepadded (cube tiled np>6 stage, task #3 U1): when True, ``rdelta``
+    is ALREADY the depth-1 edge-padded array of shape ``(6, N+2, M)`` along
+    the sweep axis (so the internal ``jnp.pad(rd, ((0,0),(1,1),(0,0)),
+    'edge')`` is SKIPPED).  A sub-face TILE supplies its own ``rd_pad`` with
+    a REAL depth-1 neighbour-tile halo at interior cuts (the global edge-pad
+    is wrong there — the upwind CFL cell lives in the neighbour tile).
+    Default False is BIT-IDENTICAL to the prior behaviour.
     """
     # Transpose so sweep axis is axis 1 for uniform indexing
     if axis == 1:
@@ -1533,6 +2302,15 @@ def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
         rd = jnp.swapaxes(rdelta, 1, 2)   # (6, N, M)
 
     nn = v.shape[1] - 2 * external_halo  # interior cells along sweep axis
+
+    # Fail loudly on a mis-sized prepadded rdelta (codex U1 MEDIUM): the
+    # flux slices rd_pad[:, :nn+1] / [:, 1:nn+2], so a too-LONG rd would be
+    # silently truncated.  Shapes are static at trace time → cheap check.
+    if rd_prepadded and rd.shape[1] != nn + 2:
+        raise ValueError(
+            f"ppm_transport_1d: rd_prepadded expects rdelta depth-1 "
+            f"padded to length nn+2={nn + 2} on the sweep axis, got "
+            f"{rd.shape[1]}.")
 
     # Bring field to total halo h3=4 (external preserved; rest mode='edge')
     h3 = 4
@@ -1755,7 +2533,10 @@ def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
         br = br.at[:, k_nm2, :].set(br_nm2_new)
 
     # Flux evaluation (FV3 sw_core.F90:3339-3349). cfl = c*rdy_upwind
-    rd_pad = jnp.pad(rd, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    # rd_prepadded (task #3 U1): a sub-face tile supplies rd ALREADY depth-1
+    # edge-padded (real neighbour-tile halo at interior cuts); skip the pad.
+    rd_pad = rd if rd_prepadded else jnp.pad(
+        rd, [(0, 0), (1, 1), (0, 0)], mode='edge')
     rdy_pos = rd_pad[:, :nn+1, :]
     rdy_neg = rd_pad[:, 1:nn+2, :]
 
@@ -1781,6 +2562,27 @@ def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
     return flux
 
 
+def bgrid_corner_courant_local(uc_pad, vc_pad, cosa, rsina, dt5):
+    """B-grid contravariant corner Courant numbers ``(vb, ub)`` — the
+    pointwise Step 1/3 of :func:`_bgrid_ke_transport`, factored so a sub-face
+    tile can compute its corner-block ``(vb, ub)`` from its slice of the
+    GLOBALLY cross-face-halo'd ``uc_pad``/``vc_pad`` + corner metrics
+    (approach-C cube tiling, task #3 — mirrors ``d2a2c_ua_va_local``: the
+    cross-face halo runs in the global view, this core is pure pointwise).
+
+    Shape-generic (global or per-tile):
+      ``uc_pad`` ``(.., A, B+1)`` j-padded uc; ``vc_pad`` ``(.., A+1, B)``
+      i-padded vc; ``cosa``/``rsina`` corner metrics ``(.., A, B)``; returns
+      ``vb, ub`` ``(.., A, B)``.  The two adjacent-sums collapse the padded
+      axis: ``vc_sum`` over i, ``uc_sum`` over j.
+    """
+    vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]
+    uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]
+    vb = dt5 * (vc_sum - uc_sum * cosa) * rsina
+    ub = dt5 * (uc_sum - vc_sum * cosa) * rsina
+    return vb, ub
+
+
 def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     """FV3 d_sw3: B-grid KE at corners via 1D PPM transport with contravariant Courant numbers.
 
@@ -1803,10 +2605,12 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     else:
         vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
         uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]  # (6, n+1, n+1)
-    uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]  # (6, n+1, n+1)
-
-    vb = dt5 * (vc_sum - uc_sum * cosa) * rsina  # (6, n+1, n+1)
+    # Corner Courant (vb, ub) — pointwise, factored to bgrid_corner_courant_local
+    # so the sub-face tiled stage reuses the EXACT core (task #3 cube tiling).
+    # Both are pure functions of (uc_sum, vc_sum, cosa, rsina); computing ub
+    # here (before the ytp_v sweep) instead of at the old Step-3 site is
+    # bit-identical — no data dependency on the sweep.
+    vb, ub = bgrid_corner_courant_local(uc_pad, vc_pad, cosa, rsina, dt5)  # (6,n+1,n+1)
 
     # iter-945: cross-face halo for (u_d, v_d) PPM sweep via _pad_halo_dgrid_for_ppm
     # (FV3 mpp_update_domains DGRID_NE analogue). iter-950 NEGATIVE: h_dg=3 regresses v_ll_Linf.
@@ -1821,15 +2625,15 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
 
     # Step 2: PPM ytp_v hord=9 (FV3:1315). iter-967 NEGATIVE: d_sw3 boundary fix conflicts with iter-945 halo.
     rdy = 1.0 / jnp.maximum(cdgrid.dy_edge_x, _EPS)  # (6, n+1, n)
-    transported_y = _ppm_transport_1d(
+    transported_y = ppm_transport_1d(
         v_d_jhalo, vb, rdy, axis=2, external_halo=h_dg)
 
     # --- Step 3: B-grid contravariant u-velocity (Courant number) ---
-    ub = dt5 * (uc_sum - vc_sum * cosa) * rsina  # (6, n+1, n+1)
+    # ub computed above with vb via bgrid_corner_courant_local (bit-identical).
 
     # --- Step 4: transport u_d in x-direction using ub (PPM hord=9) ---
     rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, _EPS)  # (6, n, n+1)
-    transported_x = _ppm_transport_1d(
+    transported_x = ppm_transport_1d(
         u_d_ihalo, ub, rdx, axis=1, external_halo=h_dg)
 
     # Step 5: BGRID_NE component sync (FV3 dyn_core.F90:968-1019). Fortran fires inside if(duogrid) block.

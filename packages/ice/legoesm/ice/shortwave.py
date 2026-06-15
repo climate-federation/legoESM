@@ -36,6 +36,21 @@ from legoesm import constants
 # finite (zero, via the max) gradient at h_ice == 0.
 _H_SQRT_FLOOR = 1e-12  # m
 
+# --- albedo-scheme default coefficients (Maykut & Untersteiner 1971; delta-
+# Eddington Briegleb & Light 2007) ---------------------------------------------
+# Published scheme constants for the internal band-albedo construction. The
+# user-facing tunable broadband albedo is SeaIceConfig.albedo_ice (spec tier 1);
+# these internal coefficients are fixed scheme defaults.
+_ALBEDO_COLD_BARE_DEFAULT = 0.7   # cold bare-ice broadband albedo (MU 1971)
+_ALBEDO_MELT_BARE_DEFAULT = 0.5   # melting bare-ice broadband albedo (MU 1971)
+_H_SNOW_SAT_M = 0.05              # snow depth saturating the snow-albedo ramp [m]
+_H_POND_SAT_M = 0.3               # pond depth saturating the pond-albedo ramp [m]
+_H_RAMP_M = 0.5                   # thickness saturating the thin-ice albedo ramp [m]
+_H_BARE_SAT_M = 0.5               # bare-ice thickness ramp saturation [m]
+_F_VIS = 0.52                     # visible-band fraction of incident SW (Briegleb-Light)
+_H_SNOW_MASK_M = 0.02             # snow depth fully masking bare-ice albedo [m]
+_T_MELT_WIDTH_K = 1.0            # smooth melt-transition half-width [K]
+
 
 # ==============================================================================
 # Result container
@@ -63,11 +78,11 @@ def maykut_untersteiner_albedo(
     T_sfc: jnp.ndarray,
     h_ice: jnp.ndarray,
     *,
-    albedo_cold_bare: float = 0.7,
-    albedo_melt_bare: float = 0.5,
-    h_ramp: float = 0.5,
+    albedo_cold_bare: float = _ALBEDO_COLD_BARE_DEFAULT,
+    albedo_melt_bare: float = _ALBEDO_MELT_BARE_DEFAULT,
+    h_ramp: float = _H_RAMP_M,
     T_melt: float = constants.T_freeze,
-    T_width: float = 1.0,
+    T_width: float = _T_MELT_WIDTH_K,
 ) -> jnp.ndarray:
     """Temperature- and thickness-dependent broadband ice albedo.
 
@@ -116,7 +131,7 @@ def _band_albedo_snow(
     alpha_melt_vis: float,
     alpha_cold_nir: float,
     alpha_melt_nir: float,
-    h_snow_sat: float = 0.05,
+    h_snow_sat: float = _H_SNOW_SAT_M,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Snow-surface albedo per band, with a thin-snow ramp."""
     ramp = jnp.clip(h_snow / jnp.maximum(h_snow_sat, 1e-6), 0.0, 1.0)
@@ -133,7 +148,7 @@ def _band_albedo_bare_ice(
     alpha_melt_vis: float,
     alpha_cold_nir: float,
     alpha_melt_nir: float,
-    h_sat: float = 0.5,
+    h_sat: float = _H_BARE_SAT_M,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Bare-ice two-band albedo with thickness ramp."""
     ramp = jnp.clip(
@@ -151,7 +166,7 @@ def _band_albedo_pond(
     *,
     alpha_max_vis: float,
     alpha_max_nir: float,
-    h_pond_sat: float = 0.3,
+    h_pond_sat: float = _H_POND_SAT_M,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Melt-pond two-band albedo (saturates with depth)."""
     ramp = jnp.clip(h_pond / jnp.maximum(h_pond_sat, 1e-6), 0.0, 1.0)
@@ -165,12 +180,12 @@ def delta_eddington_albedo(
     pond_area: jnp.ndarray,
     pond_depth: jnp.ndarray,
     *,
-    f_vis: float = 0.52,
+    f_vis: float = _F_VIS,
     T_melt: float = constants.T_freeze,
-    T_width: float = 1.0,
+    T_width: float = _T_MELT_WIDTH_K,
     i0_vis: float = constants.i0_vis,
     i0_nir: float = constants.i0_nir,
-    h_snow_mask: float = 0.02,
+    h_snow_mask: float = _H_SNOW_MASK_M,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Two-band albedo following the Briegleb-Light surrogate.
 

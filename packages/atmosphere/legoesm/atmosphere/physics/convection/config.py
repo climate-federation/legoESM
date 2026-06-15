@@ -31,6 +31,268 @@ from __future__ import annotations
 from typing import NamedTuple
 
 
+__param_spec__ = {
+    "AhmedNeelinDCAConfig": {
+        "scheme_key": "atm.conv.AhmedNeelinDCAConfig",
+        "excluded": {
+            "precip_heaviside_sharpness": "numerics: softplus sharpness smoothing the eq-8 Heaviside",
+        },
+        "params": {
+            "a_mm_per_hr": {"units": "mm/h/(m/s^2)", "bounds": (0.2, 1.8), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Ahmed, Adames & Neelin (2020) Table 1", "shape": None},
+            "b_c": {"units": "m/s^2", "bounds": (-0.045, -0.005), "tunable_tier": 1, "transform": "sigmoid", "category": "trigger", "reference": "Ahmed, Adames & Neelin (2020) Table 1", "shape": None},
+            "layer_edge_width_pa": {"units": "Pa", "bounds": (500.0, 7500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Ahmed, Adames & Neelin (2020) scheme default", "shape": None},
+            "layer_min_depth_pa": {"units": "Pa", "bounds": (1650.0, 15000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Ahmed, Adames & Neelin (2020) scheme default", "shape": None},
+            "p_bl_top_pa": {"units": "Pa", "bounds": (75000.0, 92000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_base", "reference": "Ahmed, Adames & Neelin (2020) Table 1", "shape": None},
+            "p_lft_top_pa": {"units": "Pa", "bounds": (40000.0, 60000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_base", "reference": "Ahmed, Adames & Neelin (2020) Table 1", "shape": None},
+            "tau_adjust_s": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Ahmed, Adames & Neelin (2020) eq 42", "shape": None},
+            "w_b": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Ahmed, Adames & Neelin (2020) Table 1", "shape": None},
+            "w_l": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Ahmed, Adames & Neelin (2020) Table 1", "shape": None},
+        },
+    },
+    "BechtoldConfig": {
+        "scheme_key": "atm.conv.BechtoldConfig",
+        "excluded": {
+            "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger gate",
+            "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
+            "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
+            "epsilon_deep": "entrainment: IFS base rate scaled by the height-dependent (1.3-RH) factor in-scheme, not a constant tunable",
+            "epsilon_midlevel": "entrainment: IFS mid-level base rate scaled in-scheme",
+            "epsilon_shallow": "entrainment: IFS shallow base rate scaled in-scheme",
+            "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
+            "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy/RH soft triggers",
+        },
+        "params": {
+            "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2008) stability cap", "shape": None},
+            "cape_pbl_depth": {"units": "m", "bounds": (200.0, 1500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008)", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Bechtold et al. (2008)", "shape": None},
+            "cloud_depth_deep": {"units": "m", "bounds": (1500.0, 5000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
+            "cloud_depth_shallow_max": {"units": "m", "bounds": (800.0, 2500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
+            "cmt_c_d": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
+            "cmt_c_u": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
+            "delta_deep": {"units": "1/m", "bounds": (2.475e-05, 0.000225), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Bechtold et al. (2008) IFS Cy49r1", "shape": None},
+            "delta_midlevel": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Tiedtke (1989) mid-level", "shape": None},
+            "delta_shallow": {"units": "1/m", "bounds": (2.475e-05, 0.000225), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Bechtold et al. (2008) IFS Cy49r1", "shape": None},
+            "downdraft_alpha": {"units": "1", "bounds": (0.0, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) downdraft", "shape": None},
+            "downdraft_evap_efficiency": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) downdraft", "shape": None},
+            "mc_normalize_scale": {"units": "kg/m^2/s", "bounds": (0.005, 0.2), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Bechtold et al. (2008) Fig. 2", "shape": None},
+            "parcel_dq": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Bechtold et al. (2008) scheme default", "shape": None},
+            "stochastic_amplitude": {"units": "1", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Bechtold et al. (2014) AR1 perturbation", "shape": None},
+            "stochastic_decorrelation": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Bechtold et al. (2014) AR1 perturbation", "shape": None},
+            "tau_M_u_relax": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) profile relaxation", "shape": None},
+            "tau_bl": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Bechtold et al. (2008) PBL closure", "shape": None},
+        },
+    },
+    "ConvectiveEDMFConfig": {
+        "scheme_key": "atm.conv.ConvectiveEDMFConfig",
+        "excluded": {
+            "epsilon_0": "entrainment: bulk-plume base rate held fixed in the EDMF mass-flux core",
+            "w_u_min": "numerics: minimum updraft velocity floor",
+        },
+        "params": {
+            "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "EDMF mass-flux stability cap", "shape": None},
+            "a_u_init": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "EDMF scheme default", "shape": None},
+            "cape_activation_scale": {"units": "J/kg", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "EDMF scheme default", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "EDMF scheme default", "shape": None},
+            "delta_0": {"units": "1/m", "bounds": (0.00066, 0.006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "EDMF scheme default", "shape": None},
+            "tau_a": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "EDMF scheme default", "shape": None},
+        },
+    },
+    "DCAConfig": {
+        "scheme_key": "atm.conv.DCAConfig",
+        "excluded": {
+            "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
+            "instability_blend_sharpness": "numerics: sigmoid sharpness on the per-pair superadiabatic blend",
+            "mixing_fraction": "numerics: per-iteration adjustment fraction (default 1.0 at domain boundary, not sigmoid-tunable)",
+        },
+        "params": {
+            "cape_threshold": {"units": "J/kg", "bounds": (33.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "trigger", "reference": "Manabe et al. (1965) moist adjustment", "shape": None},
+        },
+    },
+    "EmanuelConfig": {
+        "scheme_key": "atm.conv.EmanuelConfig",
+        "excluded": {
+            "beta_downdraft": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
+            "cbmf_positive_sharpness": "numerics: softplus sharpness on the relaxed CBMF positive-part",
+            "coeffr": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "coeffs": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "cu_momentum": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "denom_floor": "numerics: SIJ denominator magnitude floor (oracle ABS(DENOM)<0.01)",
+            "epsilon_0": "entrainment: near-undilute bulk-plume rate held fixed (mixing handled by the ensemble)",
+            "level_window_sharpness": "numerics: sigmoid sharpness on the ICB/INB cloud-layer windows",
+            "precip_efficiency_lcl": "default 0 = disabled/off (enable via config, not training)",
+            "precip_efficiency_water": "precipitation_efficiency: default 1.0 at domain boundary (not sigmoid-tunable, fix via config)",
+            "precip_threshold_qc": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "sat_branch_sharpness": "numerics: sigmoid sharpness on the saturated-mixture re-solve switch",
+            "sigd": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "sigs": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+            "sij_gate_sharpness": "numerics: sigmoid sharpness on the 0<SIJ<0.9 entrainment band gate",
+            "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy-sort weighting",
+            "strict_index_sharpness": "numerics: sigmoid sharpness on the strict integer-index inequalities",
+            "sub_cloud_relaxation": "declared but never read by emanuel_convection/_emanuel_mixing; phantom trainable — exposing it would offer a no-op gradient",
+        },
+        "params": {
+            "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) stability cap", "shape": None},
+            "alpha_closure": {"units": "1", "bounds": (0.05, 0.6), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c ALPHA", "shape": None},
+            "c_l_emanuel": {"units": "J/kg/K", "bounds": (2000.0, 4500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c CL", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991)", "shape": None},
+            "cbmf_carry_max": {"units": "kg/m^2/s", "bounds": (0.099, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "mass_flux", "reference": "Emanuel (1991) anti-runaway guard", "shape": None},
+            "cloud_base_index_width": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Emanuel (1991) cloud-base selector width", "shape": None},
+            "cu_coefficient": {"units": "1", "bounds": (0.231, 2.1), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) alpha entrainment scale", "shape": None},
+            "damp_coefficient": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Emanuel (1991) CONVECT v4.3c DAMP", "shape": None},
+            "delta_0": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Emanuel (1991) bulk plume", "shape": None},
+            "downdraft_efficiency": {"units": "1", "bounds": (0.0, 0.6), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Emanuel (1991) downdraft re-evaporation", "shape": None},
+            "dtmax": {"units": "K", "bounds": (0.297, 2.7), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991) CONVECT v4.3c DTMAX", "shape": None},
+            "elcrit": {"units": "kg/kg", "bounds": (0.000363, 0.0033), "tunable_tier": 1, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c ELCRIT", "shape": None},
+            "entp": {"units": "1", "bounds": (0.495, 4.5), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Emanuel (1991) CONVECT v4.3c ENTP", "shape": None},
+            "mse_min_search_offset": {"units": "Pa", "bounds": (16500.0, 150000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Emanuel (1991) source-level search offset", "shape": None},
+            "parcel_perturb_T": {"units": "K", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991) sub-cloud perturbation", "shape": None},
+            "parcel_perturb_q": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Emanuel (1991) sub-cloud perturbation", "shape": None},
+            "precip_efficiency_max": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c EPMAX", "shape": None},
+            "sij_upper_gate": {"units": "1", "bounds": (0.297, 2.7), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Emanuel (1991) CONVECT v4.3c SIJ upper bound", "shape": None},
+            "tlcrit": {"units": "degC", "bounds": (-165.0, -18.15), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "Emanuel (1991) CONVECT v4.3c TLCRIT", "shape": None},
+        },
+    },
+    "KainFritschConfig": {
+        "scheme_key": "atm.conv.KainFritschConfig",
+        "excluded": {
+            "cape_or_sharpness": "numerics: sigmoid sharpness on the CAPE-OR fallback trigger",
+            "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
+            "cape_threshold": "default 0 = disabled/off (KF gates on the trigger function, not CAPE)",
+            "cloud_depth_min": "trigger: fixed shallow/deep cloud-depth split (not sigmoid-tunable, fix via config)",
+            "cloud_depth_sharpness": "numerics: sigmoid sharpness on the deep/shallow blend",
+            "dtlcl_pos_sharpness": "numerics: sharpness of the outer positive-part on the DTLCL base",
+            "epsilon_0": "entrainment: legacy constant rate, superseded by the faithful radius-based profile",
+            "trigger_sharpness": "numerics: sigmoid sharpness on the trigger threshold",
+            "wkl_floor": "numerics: cube-root base floor keeping the DTLCL gradient finite at WKL->0",
+            "wkl_softplus_sharpness": "numerics: softplus sharpness inside the DTLCL surrogate",
+        },
+        "params": {
+            "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Kain & Fritsch (1990) stability cap", "shape": None},
+            "cape_consumption_time": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Kain (2004) CAPE-removal timescale", "shape": None},
+            "cape_or_threshold": {"units": "J/kg", "bounds": (660.0, 6000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kain & Fritsch (1990) CAPE-OR fallback", "shape": None},
+            "cape_or_w_ref": {"units": "m/s", "bounds": (0.0066, 0.06), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kain & Fritsch (1990) CAPE-OR fallback", "shape": None},
+            "cape_removal_fraction": {"units": "1", "bounds": (0.297, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Kain (2004) FABE residual-CAPE fraction", "shape": None},
+            "delta_0": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Kain & Fritsch (1990) bulk plume", "shape": None},
+            "dtlcl_coeff": {"units": "K", "bounds": (1.5312, 13.92), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Kain (2004) Eq. 1 DTLCL coefficient", "shape": None},
+            "dtlcl_dx_scale": {"units": "1", "bounds": (0.33, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kain (2004) grid-length scaling", "shape": None},
+            "dtlcl_exponent": {"units": "1", "bounds": (0.1089, 0.99), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kain (2004) Eq. 1 DTLCL exponent", "shape": None},
+            "entrain_const": {"units": "1", "bounds": (0.0099, 0.09), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Kain (2004) Eq. 5-6 radius entrainment", "shape": None},
+            "parcel_perturb_T": {"units": "K", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Kain & Fritsch (1990) sub-cloud perturbation", "shape": None},
+            "parcel_perturb_q": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kain & Fritsch (1990) sub-cloud perturbation", "shape": None},
+            "rad_max_m": {"units": "m", "bounds": (660.0, 6000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Kain (2004) updraft-radius upper bound", "shape": None},
+            "rad_min_m": {"units": "m", "bounds": (330.0, 3000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "Kain (2004) updraft-radius lower bound", "shape": None},
+            "rad_wkl_ref": {"units": "m/s", "bounds": (0.033, 0.3), "tunable_tier": 3, "transform": "sigmoid", "category": "entrainment", "reference": "Kain (2004) updraft-radius WKL ramp", "shape": None},
+            "timec_max_s": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Kain (2004) TIMEC clamp upper bound", "shape": None},
+            "timec_min_s": {"units": "s", "bounds": (594.0, 5400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Kain (2004) TIMEC clamp lower bound", "shape": None},
+            "usl_depth_pa": {"units": "Pa", "bounds": (1650.0, 15000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_base", "reference": "Kain (2004) DPMIN updraft-source-layer depth", "shape": None},
+            "w_thresh_offset": {"units": "K", "bounds": (0.0, 6.0), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kain & Fritsch (1990) legacy linear trigger", "shape": None},
+            "w_thresh_scale": {"units": "K/(m/s)", "bounds": (0.33, 3.0), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kain & Fritsch (1990) legacy linear trigger", "shape": None},
+            "wklcl_ref": {"units": "m/s", "bounds": (0.0066, 0.06), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kain (2004) Eq. 2 LCL-height velocity threshold", "shape": None},
+            "wklcl_zref": {"units": "m", "bounds": (660.0, 6000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kain (2004) Eq. 2 LCL-height reference", "shape": None},
+        },
+    },
+    "KuoConfig": {
+        "scheme_key": "atm.conv.KuoConfig",
+        "excluded": {
+            "icond_sharpness": "numerics: sigmoid sharpness on the smooth icond activation gates",
+            "ptenq_sign_floor": "numerics: division-by-zero guard in the scale-free ptenq sign",
+            "qv_min": "numerics: in-cloud vapor / LCL-detection floor",
+            "zint_floor": "numerics: safety floor on the |zint| normalisation denominator",
+        },
+        "params": {
+            "anthes_rh_offset": {"units": "1", "bounds": (0.0, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "cape_closure", "reference": "Kuo-Anthes (1977) moistening split offset", "shape": None},
+            "buoyancy_scale_K": {"units": "K", "bounds": (0.033, 0.3), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kuo (1974) buoyancy-gate normalisation", "shape": None},
+            "entrainment": {"units": "1/m", "bounds": (1.65e-05, 0.00015), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Kuo (1974) Mahfouf reference Eps", "shape": None},
+            "supersat_scale": {"units": "kg/kg", "bounds": (3.3e-06, 3e-05), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Kuo (1974) condensation-gate normalisation", "shape": None},
+        },
+    },
+    "MassFluxConfig": {
+        "scheme_key": "atm.conv.MassFluxConfig",
+        "excluded": {
+            "M_c_init": "default 0 = disabled/off (initial base mass flux, enable via config, not training)",
+            "epsilon_0": "entrainment: bulk-plume base rate held fixed in the prognostic mass-flux core",
+        },
+        "params": {
+            "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Arakawa & Wu (2013) stability cap", "shape": None},
+            "M_scale": {"units": "kg/m^2/s", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Arakawa & Wu (2013) equilibrium mass-flux scale", "shape": None},
+            "cape_activation_scale": {"units": "J/kg", "bounds": (3.3, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Arakawa & Wu (2013) scheme default", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Arakawa & Wu (2013) scheme default", "shape": None},
+            "delta_0": {"units": "1/m", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Arakawa & Wu (2013) bulk plume", "shape": None},
+            "tau_adj": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Arakawa & Wu (2013) mass-flux relaxation", "shape": None},
+        },
+    },
+    "SBMConfig": {
+        "scheme_key": "atm.conv.SBMConfig",
+        "excluded": {
+            "cloud_mask_sharpness": "numerics: sigmoid sharpness on the cloud-layer (T_moist - T) mask",
+            "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the smooth CAPE trigger",
+        },
+        "params": {
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Frierson (2007)", "shape": None},
+            "rh_ref": {"units": "1", "bounds": (0.4, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Frierson (2007) reference RH", "shape": None, "legacy_name": "sbm_RH_ref"},
+            "tau_c": {"units": "s", "bounds": (1800.0, 21600.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Frierson (2007) relaxation timescale", "shape": None, "legacy_name": "sbm_tau_c"},
+        },
+    },
+    "TiedtkeConfig": {
+        "scheme_key": "atm.conv.TiedtkeConfig",
+        "excluded": {
+            "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
+            "depth_split_sharpness": "numerics: sigmoid sharpness on the deep/shallow depth blend",
+            "downdraft_RH_min": "trigger: column-mean RH threshold below which the downdraft fires (not sigmoid-tunable, fix via config)",
+            "epsilon_deep": "entrainment: deep-branch base rate held fixed in-scheme",
+            "epsilon_midlevel": "entrainment: mid-level base rate held fixed in-scheme",
+            "epsilon_shallow": "entrainment: shallow-branch base rate held fixed in-scheme",
+            "moisture_convergence_sharpness": "numerics: sigmoid sharpness on the MC-proxy threshold",
+            "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
+            "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the buoyancy/RH soft triggers",
+        },
+        "params": {
+            "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Tiedtke (1989) stability cap", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Tiedtke (1989)", "shape": None},
+            "cloud_depth_deep": {"units": "m", "bounds": (1500.0, 5000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
+            "cloud_depth_shallow_max": {"units": "m", "bounds": (800.0, 2500.0), "tunable_tier": 2, "transform": "sigmoid", "category": "updraft", "reference": "Tiedtke (1989) depth split", "shape": None},
+            "cmt_c_d": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
+            "cmt_c_u": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
+            "delta_deep": {"units": "1/m", "bounds": (3.3e-05, 0.0003), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Tiedtke (1989) deep branch", "shape": None},
+            "delta_midlevel": {"units": "1/m", "bounds": (6.6e-05, 0.0006), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Tiedtke (1989) mid-level branch", "shape": None},
+            "delta_shallow": {"units": "1/m", "bounds": (9.9e-05, 0.0009), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Tiedtke (1989) shallow branch", "shape": None},
+            "downdraft_alpha": {"units": "1", "bounds": (0.0, 0.9), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) downdraft", "shape": None},
+            "downdraft_evap_efficiency": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "downdraft", "reference": "Tiedtke (1989) downdraft", "shape": None},
+            "mc_proxy_RH_crit": {"units": "1", "bounds": (0.3, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Tiedtke (1989) moisture-convergence proxy", "shape": None},
+            "midlevel_M_b_fraction": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Tiedtke (1989) mid-level mass-flux fraction", "shape": None},
+            "moisture_convergence_threshold": {"units": "kg/kg/s", "bounds": (3.3e-09, 3e-08), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Tiedtke (1989) MC-proxy threshold", "shape": None},
+            "parcel_dq": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Tiedtke (1989) sub-cloud perturbation", "shape": None},
+            "tau_MC_proxy": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) MC-proxy timescale", "shape": None},
+            "tau_M_u_relax": {"units": "s", "bounds": (600.0, 5400.0), "tunable_tier": 2, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Tiedtke (1989) profile relaxation", "shape": None},
+            "tau_shallow_M_b": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cape_closure", "reference": "Tiedtke (1989) shallow cloud-base mass-flux timescale", "shape": None},
+        },
+    },
+    "ZhangMcFarlaneConfig": {
+        "scheme_key": "atm.conv.ZhangMcFarlaneConfig",
+        "excluded": {
+            "cape_sharpness": "numerics: sigmoid sharpness on the CAPE trigger",
+            "epsilon_0": "entrainment: bulk-plume base rate held fixed (dilute CAPE uses dmpdz)",
+            "parcel_dT": "trigger: fixed sub-cloud parcel temperature perturbation",
+            "parcel_tpert": "default 0 = disabled/off (optional PBL temperature perturbation)",
+            "tp_fac": "default 0 = disabled/off (PBL-perturbation multiplier)",
+        },
+        "params": {
+            "M_b_max": {"units": "kg/m^2/s", "bounds": (0.02, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Zhang & McFarlane (1995) stability cap", "shape": None},
+            "cape_threshold": {"units": "J/kg", "bounds": (23.1, 210.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Zhang & McFarlane (1995)", "shape": None},
+            "cmt_c_d": {"units": "1", "bounds": (0.0, 1.65), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
+            "cmt_c_u": {"units": "1", "bounds": (0.0, 1.65), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
+            "delta_0": {"units": "1/m", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "Zhang & McFarlane (1995) bulk plume", "shape": None},
+            "dmpdz": {"units": "1/m", "bounds": (-0.003, -0.00033), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Zhang & McFarlane (1995) dilute-parcel entrainment (Raymond-Blyth 1992)", "shape": None},
+            "parcel_dq": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Zhang & McFarlane (1995) sub-cloud perturbation", "shape": None},
+            "pbl_top_pa": {"units": "Pa", "bounds": (50000.0, 90000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "cloud_base", "reference": "Zhang & McFarlane (1995) launch-level search bound", "shape": None},
+            "tau_cape": {"units": "s", "bounds": (1188.0, 10800.0), "tunable_tier": 1, "transform": "sigmoid", "category": "relaxation_timescale", "reference": "Zhang & McFarlane (1995) CAPE relaxation", "shape": None},
+            "tiedke_add": {"units": "K", "bounds": (0.0, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "Zhang & McFarlane (1995) cloud-level buoyancy offset", "shape": None},
+        },
+    },
+}
+
+
 class SBMConfig(NamedTuple):
     """Configuration for Simplified Betts-Miller convection.
 
@@ -579,12 +841,12 @@ class KainFritschConfig(NamedTuple):
     # bulk one-pass closure removes CAPE over TIMEC so this is the nominal
     # fraction removed per call, used only for diagnostics/documentation).
     cape_removal_fraction: float = 0.90
-    # Precipitation efficiency as a function of cloud-base height (Kain 2004
-    # / KF eta PEFCBH polynomial), used to split detrained condensate into
-    # rain vs retained cloud water.  Clamped to [pef_min, pef_max].
-    apply_precip_efficiency: bool = True
-    pef_min: float = 0.2
-    pef_max: float = 0.9
+    # NOTE: a cloud-base-height precipitation-efficiency retention scaling was
+    # removed (validator codex review-2 #1): under the ConvectionOutput
+    # contract microphysics owns precipitation, so scaling the cloud-water
+    # source down here leaked column water with no output channel to receive
+    # the precipitating fraction.  The full detrained condensate is now handed
+    # to microphysics, which applies precip efficiency via autoconversion.
 
 
 class EmanuelConfig(NamedTuple):
@@ -1056,7 +1318,11 @@ class ConvectionConfig(NamedTuple):
     sbm, dca, kuo, mass_flux, edmf, zhang_mcfarlane :
         Per-scheme configuration NamedTuples.
     update_interval_steps : int
-        Recompute convection every N time steps (1 = every step).
+        NOT YET IMPLEMENTED in the production physics pipeline — convection
+        is recomputed EVERY step regardless of this value.  Only the SCM
+        enforces it (rejecting values != 1 for stateful/non-autonomous
+        integrators, see ``scm.py``).  Retained as a forward-looking config
+        knob; setting it != 1 in a production driver is a silent no-op.
     """
     scheme: str = "sbm"
     sbm: SBMConfig = SBMConfig()
@@ -1069,4 +1335,6 @@ class ConvectionConfig(NamedTuple):
     emanuel: EmanuelConfig = EmanuelConfig()
     tiedtke: TiedtkeConfig = TiedtkeConfig()
     bechtold: BechtoldConfig = BechtoldConfig()
+    # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
+    # convection runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1

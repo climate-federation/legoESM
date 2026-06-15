@@ -208,10 +208,12 @@ def sundqvist_microphysics(
     # prior step under a prognostic scheme like Kessler, or from a
     # warm-start) is treated as already-falling rain and drained to the
     # surface in one step.  The drained mass is added to the surface
-    # precipitation flux so the column water budget closes:
-    #     int (dq_v + dq_c + dq_r) dp/g  =  -precipitation
+    # precipitation flux so the column water budget closes (with the
+    # ``rho*dz`` mass weighting used consistently by the tendencies and the
+    # autoconversion precip — NOT ``dp/g``):
+    #     int (dq_v + dq_c + dq_r) rho dz  =  -precipitation
     # In a steady state with q_r = 0 input, ``dq_r_dt = 0`` and the
-    # column budget reduces to ``int (dq_v + dq_c) dp/g = -precipitation``.
+    # column budget reduces to ``int (dq_v + dq_c) rho dz = -precipitation``.
     dq_v_dt = -rates.condensation + rates.evaporation
     dq_c_dt = rates.condensation - rates.autoconversion
     dt_safe = jnp.maximum(dt, 1e-10)
@@ -221,8 +223,17 @@ def sundqvist_microphysics(
     # diagnostic so total column water exits the column at the correct
     # rate.  ``rates.precipitation`` is the autoconversion-driven surface
     # flux; ``q_r_drain_flux`` is the column-integrated drain.
-    dp = p_half[:, 1:] - p_half[:, :-1]
-    q_r_drain_flux = jnp.sum(q_r_in * dp, axis=1) / (constants.g * dt_safe)
+    #
+    # The drain MUST use the SAME ``rho*dz`` mass weighting as the
+    # tracer tendencies (``dq_r_dt`` removes ``q_r_in`` per unit air,
+    # column-integrated as ``int dq_r * rho * dz``) and as the
+    # autoconversion-driven precipitation (``rates.precipitation`` comes
+    # from ``P_flux_layer = P_auto * rho * dz``).  An earlier form used
+    # ``int q_r * dp / (g * dt)`` (the ``dp/g`` hydrostatic mass), which
+    # closes the column water budget only when ``dp/g == rho*dz``
+    # (hydrostatic balance) and leaks on a non-hydrostatically-consistent
+    # profile — a latent mass-weighting inconsistency within one scheme.
+    q_r_drain_flux = jnp.sum(q_r_in * rho * dz, axis=1) / dt_safe
     precipitation = rates.precipitation + q_r_drain_flux
 
     # Pin dtype to the input precision so we never silently promote

@@ -1,0 +1,25 @@
+# legoESM experiment template — dense-water overflow down a slope.
+#
+# Names the procedural `overflow` experiment via the `setup:` selector
+# (#388 Ask#2): dense water descends a tanh bathymetric slope (DOME-like),
+# stressing the pressure-gradient force over sloping terrain. RPE is the
+# spurious-mixing diagnostic. Routed to run_ocean_test_matrix.py.
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: idealized
+  maturity: structurally_validated
+  description: >
+    Dense-water overflow down a tanh slope (DOME-like): tests the partial-cell
+    pressure-gradient force and tracer advection over variable bathymetry.
+    RPE growth diagnoses spurious diapycnal mixing.
+  data: []
+  conservation_gates: [rpe, volume]
+model:
+  name: "ocean-overflow"
+  type: ocean_only
+setup:
+  name: overflow
+  grid: latlon
+output:
+  path: output/ocean/overflow/

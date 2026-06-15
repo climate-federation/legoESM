@@ -62,6 +62,14 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 
 
+# Briegleb (1992) clear-sky ocean-albedo formula constants + ice fallback (fixed).
+_OCEAN_ALB_A = 0.026
+_OCEAN_ALB_B = 0.065
+_OCEAN_ALB_MU_EXP = 1.7
+_OCEAN_ALB_POLY = 0.15
+_OCEAN_ALB_ROOT1 = 0.1
+_ICE_ALBEDO_FALLBACK = 0.75
+
 def _apply_T_sfc_override(T_sfc, override):
     """Apply a per-column ``T_sfc`` override over an arbitrary-shape T_sfc.
 
@@ -126,7 +134,7 @@ def _make_time_state():
     Returns ``(_time, set_time)`` where *_time* is the mutable dict and
     *set_time* is a function that updates it in-place.
     """
-    _time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}
+    _time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}  # coeff-ok: idealized time (spring equinox, noon)
 
     def set_time(day_of_year: float, seconds_of_day: float):
         _time["day_of_year"] = day_of_year
@@ -152,8 +160,8 @@ def _compute_insolation(
     lat: jnp.ndarray,
     config: RadiationConfig,
     lon: jnp.ndarray | None = None,
-    day_of_year: float = 80.0,
-    seconds_of_day: float = 43200.0,
+    day_of_year: float = 80.0,  # coeff-ok: idealized default (spring equinox)
+    seconds_of_day: float = 43200.0,  # coeff-ok: idealized default (local noon)
 ) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None]:
     """Compute TOA insolation and (optionally) cosine zenith angle.
 
@@ -197,8 +205,8 @@ def _compute_insolation(
 
 def sam_ocean_albedo(
     cos_zenith: jnp.ndarray | float,
-    T_sfc: jnp.ndarray | float = 300.0,
-    sea_ice_T: float = 271.0,
+    T_sfc: jnp.ndarray | float = 300.0,  # coeff-ok: idealized default surface T [K]
+    sea_ice_T: float = 271.0,  # coeff-ok: sea-ice albedo threshold T [K]
 ) -> jnp.ndarray:
     """SAM RAD_RRTM surface albedo over ocean (Briegleb 1986 direct beam).
 
@@ -222,10 +230,10 @@ def sam_ocean_albedo(
     """
     mu = jnp.clip(cos_zenith, 0.0, 1.0)
     a_ocean = (
-        0.026 / (mu ** 1.7 + 0.065)
-        + 0.15 * (mu - 0.1) * (mu - 0.5) * (mu - 1.0)
+        _OCEAN_ALB_A / (mu ** _OCEAN_ALB_MU_EXP + _OCEAN_ALB_B)
+        + _OCEAN_ALB_POLY * (mu - _OCEAN_ALB_ROOT1) * (mu - 0.5) * (mu - 1.0)
     )
-    a = jnp.where(jnp.asarray(T_sfc) > sea_ice_T, a_ocean, 0.75)
+    a = jnp.where(jnp.asarray(T_sfc) > sea_ice_T, a_ocean, _ICE_ALBEDO_FALLBACK)
     return jnp.where(jnp.asarray(cos_zenith) > 0.0, a, 0.0)
 
 
@@ -480,6 +488,7 @@ def _call_radiation_backend(
     ml_ozone_coefs=None,
     o3_vmr_override: jnp.ndarray | None = None,
     aerosol_od: jnp.ndarray | None = None,
+    aerosol_lw_od: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
@@ -512,6 +521,13 @@ def _call_radiation_backend(
         forcing pipeline (Kinne climatology + volcanic), passed to the
         RRTMGP solver as ``aerosol_optical_depth``.  Ignored by gray
         radiation.
+    aerosol_lw_od : jnp.ndarray or None
+        Per-layer LONGWAVE aerosol absorption optical depth (ncol, nlev)
+        from the external forcing pipeline (volcanic stratospheric,
+        gap #9), passed to the RRTMGP solver as
+        ``aerosol_absorption_optical_depth_lw``.  ``None`` (default) is a
+        no-op in the solver — byte-identical to no volcanic LW aerosol.
+        Ignored by gray radiation.
     solar_spectral_fraction : jnp.ndarray or None
         Per-g-point solar weights for spectral solar-cycle forcing,
         passed through to ``solve_columns``.
@@ -609,6 +625,7 @@ def _call_radiation_backend(
         o3_vmr=o3_vmr,
         ghg_vmr_override=ghg_vmr_override,
         aerosol_optical_depth=aerosol_od,
+        aerosol_absorption_optical_depth_lw=aerosol_lw_od,
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
@@ -676,6 +693,8 @@ def make_radiation_physics(
     radiation_config: RadiationConfig,
     model_type: str = "hydrostatic",
     column_mesh=None,
+    sfc_albedo_override: jnp.ndarray | float | None = None,
+    sfc_emissivity_override: jnp.ndarray | float | None = None,
 ) -> Callable:
     """Create a physics function for radiation matching a model's signature.
 
@@ -705,6 +724,22 @@ def make_radiation_physics(
     # dycore radiation factory (incl. combined.py / AIMIP spectral_pe) passes
     # through.  See ``_validate_cloud_gate`` for why this is required.
     _validate_cloud_gate(radiation_config)
+
+    # ``sfc_albedo_override`` / ``sfc_emissivity_override`` are build-time
+    # surface fields (e.g. AIMIP's trained spatial ``(ncol,)`` arrays) routed to
+    # the radiation solve as PER-CALL overrides via ``_resolve_surface_field`` —
+    # so a trained/traced value reaches the heating WITHOUT being written into
+    # ``RRTMGPConfig.sfc_*`` (which RRTMGP folds into its Python solver-cache key
+    # and would then key by tracer identity). Only the spectral_pe builder
+    # consumes them today; reject them loudly elsewhere rather than silently
+    # dropping a trained surface field.
+    if (sfc_albedo_override is not None or sfc_emissivity_override is not None) \
+            and model_type != "spectral_pe":
+        raise ValueError(
+            "sfc_albedo_override / sfc_emissivity_override are only wired for "
+            f"model_type='spectral_pe', got {model_type!r}. Extend the relevant "
+            "_make_*_radiation builder before passing surface overrides there."
+        )
 
     # Load heavy/static RRTMGP optics once outside model JIT traces.
     rrtmgp_solver = None
@@ -744,8 +779,12 @@ def make_radiation_physics(
         return _make_mpas_nh_radiation(radiation_config, rrtmgp_solver,
                                        ml_ozone_coefs=ml_ozone_coefs)
     elif model_type == "spectral_pe":
-        return _make_spectral_pe_radiation(radiation_config, rrtmgp_solver,
-                                            ml_ozone_coefs=ml_ozone_coefs)
+        return _make_spectral_pe_radiation(
+            radiation_config, rrtmgp_solver,
+            ml_ozone_coefs=ml_ozone_coefs,
+            sfc_albedo_override=sfc_albedo_override,
+            sfc_emissivity_override=sfc_emissivity_override,
+        )
     elif model_type == "mpas":
         return _make_mpas_radiation(radiation_config, rrtmgp_solver,
                                      ml_ozone_coefs=ml_ozone_coefs,
@@ -825,6 +864,9 @@ def _make_hydrostatic_radiation(
         #   ghg_vmr     : dict[str, scalar] transient GHG VMRs
         _o3_ext = forcing.get("o3_vmr") if forcing is not None else None
         _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
+        _aer_lw_ext = (
+            forcing.get("aerosol_lw_od") if forcing is not None else None
+        )
         _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
 
         # Calendar time: prefer per-step TRACED forcing values (the MPAS
@@ -904,6 +946,8 @@ def _make_hydrostatic_radiation(
                 _o3_ext = shard_columns(_o3_ext, column_mesh)
             if _aer_ext is not None:
                 _aer_ext = shard_columns(_aer_ext, column_mesh)
+            if _aer_lw_ext is not None:
+                _aer_lw_ext = shard_columns(_aer_lw_ext, column_mesh)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
@@ -925,6 +969,7 @@ def _make_hydrostatic_radiation(
             ml_ozone_coefs=ml_ozone_coefs,
             o3_vmr_override=_o3_ext,
             aerosol_od=_aer_ext,
+            aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
         )
 
@@ -1499,6 +1544,8 @@ def _make_spectral_pe_radiation(
     radiation_config: RadiationConfig,
     rrtmgp_solver=None,
     ml_ozone_coefs=None,
+    sfc_albedo_override: jnp.ndarray | float | None = None,
+    sfc_emissivity_override: jnp.ndarray | float | None = None,
 ) -> Callable:
     """Create radiation physics_fn for SpectralPEModel.
 
@@ -1563,7 +1610,23 @@ def _make_spectral_pe_radiation(
         # (ncol, nlev) columns, ghg_vmr is a dict of traced scalars.
         _o3_ext = forcing.get("o3_vmr") if forcing is not None else None
         _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
+        _aer_lw_ext = (
+            forcing.get("aerosol_lw_od") if forcing is not None else None
+        )
         _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
+
+        # Surface albedo / emissivity overrides: a per-step TRACED
+        # ``forcing["sfc_albedo"]`` wins over the static build-time override
+        # (``sfc_albedo_override`` closed over from ``make_radiation_physics`` —
+        # e.g. AIMIP's trained spatial field). Routing them here (NOT into
+        # ``RRTMGPConfig.sfc_*``) keeps the trained value off RRTMGP's Python
+        # solver-cache key. Same precedence pattern as T_sfc / o3 / aerosol.
+        _alb_ovr = forcing.get("sfc_albedo") if forcing is not None else None
+        if _alb_ovr is None:
+            _alb_ovr = sfc_albedo_override
+        _emis_ovr = forcing.get("sfc_emissivity") if forcing is not None else None
+        if _emis_ovr is None:
+            _emis_ovr = sfc_emissivity_override
 
         # Effective time-of-day for the diurnal cycle.  ``_time`` holds
         # the *initial* day_of_year + seconds_of_day captured at module
@@ -1628,6 +1691,17 @@ def _make_spectral_pe_radiation(
         )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
+
+        # Flatten any 2-D (n_lat, n_lon) surface override to (ncol,); scalars
+        # and (ncol,) arrays pass through (the radiation backend / RRTMGP's
+        # _resolve_surface_field broadcasts over the column axis).
+        def _to_col(x):
+            if x is not None and hasattr(x, "ndim") and x.ndim >= 2:
+                return x.reshape(ncol)
+            return x
+        _alb_col = _to_col(_alb_ovr)
+        _emis_col = _to_col(_emis_ovr)
+
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
             T=T_col,
@@ -1638,6 +1712,8 @@ def _make_spectral_pe_radiation(
             q_v=q_v_col,
             insolation=insol_col,
             cos_sza=cos_sza_col,
+            sfc_albedo_override=_alb_col,
+            sfc_emissivity_override=_emis_col,
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
             n_cloud=n_cloud_col,
@@ -1648,6 +1724,7 @@ def _make_spectral_pe_radiation(
             ml_ozone_coefs=ml_ozone_coefs,
             o3_vmr_override=_o3_ext,
             aerosol_od=_aer_ext,
+            aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
         )
 
