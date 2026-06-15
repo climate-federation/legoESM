@@ -1067,6 +1067,10 @@ def laplacian_smag_cfl_cap(grid, dt: float, safety: float):
     the SAME cyclic wrap the q-point Laplacian uses), so the seam is continuous:
     ``cap_q[:, -1] == cap_q[:, 0]`` (no edge-replication discontinuity).
     """
+    # The ocean model converts EVERY grid to LatLonCGridGeometry at construction
+    # (ensure_geometry), so lat_T/area_T are always present; the regular vs
+    # tripole distinction is the scalar dlon (>0 for a regular lat-lon grid, the
+    # 0.0 sentinel for a tripole/curvilinear grid).
     lat2d = getattr(grid, "lat_T", None)
     if lat2d is None:
         lat2d = grid.lat2d
@@ -1075,6 +1079,29 @@ def laplacian_smag_cfl_cap(grid, dt: float, safety: float):
         area_h = grid.area
     cos2 = jnp.maximum(jnp.cos(lat2d) ** 2, 0.04)            # poleward floor
     cap_h = safety * area_h * cos2 / dt                      # (n_lat, n_lon)
+    _dlon = float(getattr(grid, "dlon", 0.0) or 0.0)
+    if _dlon > 0.0:
+        # POLAR-ROW CFL CORRECTION (regular lat-lon only; dlon>0). The tuned
+        # ``area*cos^2/dt`` ceiling is deliberately ~20% above the rectangular CFL
+        # to feed the marginally-resolved WBC, but the cos^2 floor (0.04, ~78.5 deg)
+        # stops it shrinking with cos(lat) while ``dx = R*dlon*cos(lat)`` keeps
+        # shrinking, so at the SINGULAR pole it runs ~9x ABOVE the true explicit-
+        # Laplacian-diffusion bound: at lat 89.75 (½ deg, dx~243 m) the ceiling
+        # gives ``A*dt/dx^2 ~ 1.14 > 0.5`` -> the Smagorinsky viscosity self-CFL-
+        # violates and amplifies the cold-start cold blowup at lat 89.75 lev59
+        # (codex root-cause; opdiscrim: removing Smag SLOWS it, removing vert-adv
+        # does not). Tighten to the strict rectangular 2-D bound
+        # ``safety/(dt*(1/dx^2+1/dy^2))`` ONLY poleward of |lat|>89.5 deg (a no-op
+        # equatorward of it), so the mid-latitude WBC keeps the larger tuned
+        # ceiling (the strict bound STARVES the WBC -- eORCA025 blew at day 0.25,
+        # job 8126978). The tripole carries the dlon=0 sentinel, so it is excluded
+        # (no singular pole -- it uses the north fold).
+        _cosl = jnp.maximum(jnp.cos(lat2d), 1.0e-12)
+        _dx = grid.radius * _dlon * _cosl                   # zonal cell width [m]
+        _dy = grid.radius * float(grid.dlat)                 # meridional cell [m]
+        cap_strict = safety / (dt * (_dx ** -2 + _dy ** -2))
+        _polar = jnp.abs(lat2d) > jnp.deg2rad(89.5)          # singular-pole rows
+        cap_h = jnp.where(_polar, jnp.minimum(cap_h, cap_strict), cap_h)
     # Vertex ceiling: pad to (n_lat+1, n_lon+1) -- edge in lat, periodic in lon.
     cap_q = jnp.pad(cap_h, ((0, 1), (0, 0)), mode="edge")    # (n_lat+1, n_lon)
     cap_q = jnp.concatenate([cap_q, cap_q[:, :1]], axis=1)   # (n_lat+1, n_lon+1)
