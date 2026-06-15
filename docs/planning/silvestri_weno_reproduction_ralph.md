@@ -203,6 +203,35 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 8 — PHASE 3 START: scheme presets done + recipe scoping — 2026-06-15
+- **Scheme-preset helper DONE + committed** (`ocean/experiments/silvestri_schemes.py`): the
+  canonical mapping of the 5 §5 schemes (UP3/W9V/W9D/SM2/QG2) → `LatLonCGridOceanConfig` overrides,
+  composing the Phase-1 blocks. `apply_silvestri_scheme(cfg, name)` (raises on unknown);
+  `scheme_label()` qualifies QG2 → "QG-Leith (barotropic)". 14 tests: ALL 5 schemes construct,
+  pass every fail-loud validation (incl. double-friction guard), and run a finite step from the
+  Eady IC — confirming the Phase-1 blocks compose into selectable schemes. (Config-dispatch
+  module, fully test-covered → no separate numerics review warranted.)
+- **Phase-3 scoping (for the recipe builds):**
+  - **Baroclinic jet (R2)** is the tractable next recipe: reuse `build_eady_uniform_setup`'s
+    grid/z-coord/recipe pattern (`eady_uniform.py:512`). BUT the paper §5 differs from the Eady
+    config — full-channel buoyancy FRONT (Eqs 52-53, not the localized Gaussian jet), N²=4e-6,
+    Δb=5e-3, 1km/50lev, −60→−40°. KEY new mechanism: **zonal-mean restoring** (τ=50d of ⟨b⟩_x
+    AND ⟨u,v⟩_x to the INITIAL zonal-mean profiles — restores the MEAN without damping eddies,
+    Soufflet 2016). `apply_sponge_tracer_relaxation` (ocean_tendency_common.py:278) does POINTWISE
+    `+γ(ref−q)` — NOT what we want (pointwise toward the eddy-free IC would damp eddies). Need a
+    NEW `apply_zonal_mean_restoring(state, ref_zonal, gamma, dt)` that relaxes only the zonal-mean
+    component. Apply it in the DRIVER (like run_eady_rebuilt applies its sponge), not baked in.
+  - **2D turbulence (R1)** needs a **doubly-periodic grid** — only `periodic_x` exists
+    (`grids/latlon.py:318`), NO `periodic_y`. Options: (a) add `periodic_y` to the regional grid
+    builder (f-plane, walls→periodic at N/S), or (b) run on a tall channel and window the interior.
+    (a) is cleaner/faithful. Plus the Ishiko spectral IC (Eqs 48-50) + non-rotating (f=0) +
+    single layer. Defer until after R2.
+- **NEXT: R2 = build_silvestri_baroclinic_jet_setup** — config + buoyancy-front IC (Eqs 52-53) +
+  thermal-wind balance + the `apply_zonal_mean_restoring` helper + restoring targets in the recipe;
+  use `apply_silvestri_scheme` for the scheme. Test: front shape, thermal-wind balance, restoring
+  relaxes the mean but not a synthetic eddy, finite step. Then R4 driver (1000d scan, VERDICT +
+  saved metric arrays), then R1 (2D turb + doubly-periodic grid), R3 driver, R5 plotter.
+
 ### Iteration 7 — PHASE 2 DONE (diagnostics D1-D6) — 2026-06-15
 - **PHASE 2 COMPLETE + adversarially reviewed + committed.** Added D1-D6 to the canonical
   `ocean/diagnostics.py` (D7 deformation radius + 2D isotropic spectra already existed):
