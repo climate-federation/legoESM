@@ -220,11 +220,25 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
   Z=7/D=5 inconsistency — the B1 commit message wrongly called it "unchanged (D=5/7)". No weno7
   momentum golden/regression baseline exists (only tracer-weno7 + kernel tests, all green), so
   the change is safe. Recorded here since the commit msg is misleading.
-- **NEXT: B2** =
-  `weno_smoothness` config: `"split"` (`{ζ;u}`, W*V, current default) vs `"standard"`
-  (`{ζ;ζ}`, W*D). The existing path hardwires the split via `u_smooth`/`v_smooth`; W9D needs
-  the standard `{ζ;ζ}` branch (pass `psi=phi`, i.e. drop the velocity smoothness fields).
-- Note for B2: in Oceananigans this is `CrossAndSelfUpwinding` (V) vs `OnlySelfUpwinding` (D).
+- **NEXT: B2 = `weno_smoothness` config `"split"` (W*V) vs `"standard"` (W*D).** IMPORTANT
+  finding while reading the code — the smoothness choice affects BOTH the vorticity AND the
+  divergence flux, and the current default is a MIX (not a pure paper scheme):
+  - **Vorticity Z:** split → `{ζ;u}` (Eq 43, velocity smoothness — CURRENT default, correct for V);
+    standard → `{ζ;ζ}` (Eq 37, self-smoothness). `_weno_zeta_at_u/v` currently always passes
+    `u_smooth`/`v_smooth` (split). For W9D, reconstruct with `psi=phi` (self). NOTE: the
+    `u_smooth=None` fallback is `{ζ;v}` (still velocity!), NOT `{ζ;ζ}` — standard needs psi=phi.
+  - **Divergence D:** the paper distinguishes `{D}` (Eq 44, W9D: `{δ_iU; δ_iU}` self) from
+    `{D;D}` (Eq 45, W9V: `{δ_iU; D}` smoothness = the FULL divergence `D=δ_iU+δ_jV`). Paper:
+    "This difference has a large impact on the solution." The current `_bc_dterm` passes
+    `_weno_cell_to_uface(dU_di_filled, dU_di_filled, ...)` = `{δU; δU}` = the **W9D `{D}`**.
+    So the CURRENT divergence is the D-variant even though the CURRENT vorticity is the V-variant
+    → the shipped default is a hybrid {ζ;u}+{D}, neither pure W9V nor pure W9D.
+  - **B2 work:** add `config.weno_smoothness ∈ {"split","standard"}` (default "split"); thread into
+    `_weno_zeta_at_u/v` (split→velocity psi, standard→phi psi) AND `_bc_dterm` (split→pass full
+    divergence `D=dU_di+dV_dj` as psi for the matching reconstruction `{δU; D}`; standard→`{δU; δU}`).
+    `{u}_k` (vertical) and `{δu²}` (K) are self-smoothness in both per Eqs 37/41 — leave as-is.
+    Unit-test that split≠standard for both Z and D, and that W9V (split) vs W9D (standard) build.
+  - In Oceananigans: `CrossAndSelfUpwinding` (V) vs `OnlySelfUpwinding` (D).
 
 ### Iteration 1 (setup) — 2026-06-15
 - Read the full paper (24 pp); extracted both experiment specs + all metrics + appendices
