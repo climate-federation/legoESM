@@ -70,7 +70,21 @@ Figures: `fig4_turb2d_timeseries.png` (KE/enstrophy(t)), `fig4b_turb2d_convergen
 (effective-resolution convergence), `fig5_turb2d_spectra.png` (isotropic spectra @ t=3.6),
 `fig3_turb2d_vorticity.png` (vorticity fields). (Runtime artifacts, gitignored.)
 
-## §5 — baroclinic jet — PIPELINE BUILT; production runs UNSTABLE (open problem)
+## §5 — baroclinic jet — STABILIZED for WENO schemes (backstop); matrix GPU-gated
+
+**UPDATE — root cause diagnosed + fixed for the WENO schemes.** A heavily-damped config integrates
+the jet stably (48×32×50, 55 d) where un-damped weno9 blows (day 39) → **the SETUP is sound; the
+blowup is INSUFFICIENT DISSIPATION** (legoESM's WENO vector-invariant under-dissipates the C-grid
+grid-scale mode vs Oceananigans'). The Eady min-dissipation backstop **A_h=1000 + C_smag=0.1 +
+smag_cfl_safety=0.5** stabilizes weno9 while KEEPING eddies — confirmed STABLE at 1/8° (160×128×50,
+18 d, max|u| flat ~0.06, vs un-damped blowing at day 11). Wired as `--stabilize` (driver) /
+`stabilize=True` (recipe), applied ONLY to the no-closure WENO/upwind schemes (W9V/W9D/UP3). **NOT
+paper-faithful** (the paper's WENO needs no closure) — a documented legoESM cost. SM2/QG2's own
+closures are still insufficient at 1/8° (matrix: blow d24/d15) — follow-up (stronger coeffs, a
+guard-relaxed backstop, or the finer 1/16°). Matrix launch (GPU): `run_silvestri_baroclinic_jet.py
+--scheme {W9V,W9D,UP3} --resolution 160x128 --days 1000 --stabilize`. (Original blowup analysis below.)
+
+### Original blowup analysis
 The §5 recipe (front Eqs 52-53 + thermal wind + τ=50d zonal-mean restoring, uniform 20m/50lev,
 L_d≈5.7km), the per-scheme driver (1000-day scan + Fig-7/8/9/10 metrics), and the plotter are
 built. QG2 uses the FAITHFUL full QG-Leith (B5b stretching), no longer the barotropic approximation.

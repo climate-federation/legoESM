@@ -64,6 +64,24 @@ Parent effort: PR #475, `docs/ocean_experiments/silvestri_weno_reproduction.md`,
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 5 — stabilization SOLVED for WENO schemes; SM2/QG2 + matrix are GPU-gated — 2026-06-15
+- **CORE OBJECTIVE SOLVED for the no-closure schemes.** Bare vector_invariant (no closure, no WENO)
+  also blows (48×32×50 day 34) — consistent: legoESM's eddy-resolving momentum under-dissipates,
+  period. The `--stabilize` backstop (A_h=1000+C_smag=0.1) fixes the WENO/upwind schemes (W9V/W9D/UP3),
+  CONFIRMED stable at 1/8° (160×128). **These 3 schemes are matrix-ready.**
+- **SM2/QG2 follow-up (smaller):** their explicit closures (OM4p25/QG-Leith at nominal coeffs) are
+  insufficient at 1/8° (matrix: SM2 d24, QG2 d15). The `--stabilize` backstop can't apply (double-
+  friction guard). To matrix them: either (a) add a `lateral_friction_allow_backstop` flag that
+  relaxes the guard so a small A_h rides alongside the closure (a numerics change → review), or
+  (b) stronger OM4p25/QG-Leith coefficients, or (c) run them at 1/16° (less dissipation needed). Can't
+  validate any of these without GPU at ≥160 res.
+- **MATRIX = GPU-GATED.** Both V100S have been externally busy across this entire loop (D1-D5). The
+  W9V/W9D/UP3 + --stabilize 1/8° row is ready to launch the moment a GPU frees:
+  `run_silvestri_baroclinic_jet.py --scheme {W9V,W9D,UP3} --resolution 160x128 --days 1000 --stabilize`.
+- **STATUS: the §5 stabilization (the hard diagnostic+fix) is DONE.** What remains — running the matrix
+  + SM2/QG2 tuning — is GPU compute, impossible while both GPUs are externally occupied. Pausing the
+  loop (like the parent reproduction loop) until GPU is free; everything is committed on PR #475.
+
 ### Iteration 4 — D2 CONFIRMED at 160×128 (1/8°); --stabilize wired — 2026-06-15
 - **160×128×50 + A_h=1000 + C_smag=0.1 (weno9): STABLE to 18 days** (max|u| flat ~0.06 through
   days 5/10/15/18), where un-damped weno9 BLEW at day 11. The backstop decisively fixes §5 at the
