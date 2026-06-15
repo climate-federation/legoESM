@@ -136,6 +136,11 @@ class EmanuelMixingOutput(NamedTuple):
     m_profile : jax.Array, shape (ncol, nlev)
         Per-level updraught mixing mass flux M(i) [kg/m^2/s],
         surface-FIRST, for diagnostics.
+    convective_layer_mask : jax.Array, shape (ncol, nlev)
+        Smooth pressure-mass mask for the Emanuel conservation pass,
+        surface-LAST.  It is one from the source layer through ``INB`` and
+        zero above cloud top, matching CONVECT's ``DO I=1,INB`` enthalpy
+        correction loop.
     """
 
     dT_dt: jax.Array
@@ -143,6 +148,7 @@ class EmanuelMixingOutput(NamedTuple):
     dq_c_conv_dt: jax.Array
     ment: jax.Array
     m_profile: jax.Array
+    convective_layer_mask: jax.Array
 
 
 def _safe_ratio(num, den, floor):
@@ -858,6 +864,9 @@ def emanuel_mixing_tendencies(
     ft = ft * active_col
     fq = fq * active_col
     dqc = dqc * active_col
+    ents_mask = jax.nn.sigmoid(
+        level_window_sharpness * (inb_frac - levels)
+    ) * active_col
 
     # ---- Reverse back to surface-LAST and return -----------------------
     return EmanuelMixingOutput(
@@ -866,4 +875,5 @@ def emanuel_mixing_tendencies(
         dq_c_conv_dt=dqc[:, ::-1],
         ment=MENT,            # surface-first (i,j) for diagnostics
         m_profile=m_i,        # surface-first
+        convective_layer_mask=ents_mask[:, ::-1],
     )
