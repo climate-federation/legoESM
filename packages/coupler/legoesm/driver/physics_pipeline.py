@@ -10,9 +10,12 @@ native grid layout and ``(ncol, nlev)`` column format is handled by a
 """
 from __future__ import annotations
 
+import logging
 
 import jax
 import jax.numpy as jnp
+
+logger = logging.getLogger(__name__)
 
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
@@ -1812,6 +1815,36 @@ def build_physics_pipeline(grid, sigma, config):
 
     # Resolve microphysics via registry
     micro_fn, micro_config = _resolve_microphysics(config)
+
+    # Water-budget closure guard (root cause of the coarse-CMIP6 pr=0 +
+    # corrupted-TOA-flux bug, 2026-06-15).  Convection no longer surfaces its
+    # own precipitation: it detrains condensate into the cloud-water bucket
+    # (``dq_c_conv_dt``) and surface precip is owned by
+    # ``micro_out.precipitation`` (see ``physics_step_no_rad``).  With
+    # ``microphysics='none'`` that convective condensate has NO sink, so:
+    #   (a) surface precipitation is identically zero (CMOR ``pr`` = 0), and
+    #   (b) ``q_c`` accumulates without bound — and if a cloud scheme is
+    #       active, the unbounded ``q_c`` drives the cloud optics to
+    #       optically-thick/garbage values, corrupting the radiation
+    #       (TOA SW/LW fluxes diverged: rsut->470, rlut->8 W/m^2).
+    # Idealized dry/moist-adjustment tests legitimately run convection with no
+    # microphysics, so this is a loud WARNING (not a hard error); a realistic
+    # coupled run must enable a microphysics scheme (e.g. 'kessler') to close
+    # the water budget.
+    if config.convection != "none" and config.microphysics == "none":
+        _extra = (
+            " AND cloud_scheme=%r is active, so the unbounded cloud water "
+            "will also corrupt the cloud-radiation optics" % config.cloud_scheme
+            if getattr(config, "cloud_scheme", "none") != "none" else ""
+        )
+        logger.warning(
+            "convection=%r with microphysics='none': convective condensate "
+            "detrains into q_c with no precipitation sink, so surface "
+            "precipitation is identically ZERO and cloud water accumulates "
+            "unbounded (water trap)%s. Enable a microphysics scheme "
+            "(e.g. --microphysics kessler) to close the water budget.",
+            config.convection, _extra,
+        )
 
     # Resolve turbulence
     turb_fn, turb_config = _resolve_turbulence(config)
