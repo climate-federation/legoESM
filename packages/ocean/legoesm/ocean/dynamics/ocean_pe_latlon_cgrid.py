@@ -2785,6 +2785,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     diagnose_momentum: bool = False,
     surface_tracer_forcing_fn=None,
     vertex_mask=None,
+    momentum_only: bool = False,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -2992,7 +2993,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     )
 
     # --- Stage 9: tracer diffusion tendencies (dT_dt, dS_dt). ---
-    dT_dt, dS_dt = _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord)
+    if momentum_only:
+        # RK3 momentum sub-stages freeze T/S, so this tracer-diffusion
+        # tendency is recomputed identically and DISCARDED by the caller
+        # (_mom_pert reads only du_dt/dv_dt).  Skip it => bit-identical
+        # momentum (the momentum stages never read dT_dt/dS_dt), saving the
+        # laplacian/biharmonic + vertical-diffusion compute AND its lat-halos
+        # per RK sub-stage (codex halo-hunt #3).  The physics/forcing/sponge
+        # blocks below still run (they also produce momentum tendencies); their
+        # tracer additions land on this zero and are discarded by the caller.
+        dT_dt = jnp.zeros_like(T)
+        dS_dt = jnp.zeros_like(S)
+    else:
+        dT_dt, dS_dt = _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord)
     # AB2 "advective" scope: snapshot the LATERAL tracer-diffusion tendency
     # (computed from the pre-step tracer T^n/S^n, exactly Veros's
     # ``tr[tau]``-evaluated ``hor_diffusion``) BEFORE surface forcing / sponge /

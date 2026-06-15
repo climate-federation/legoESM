@@ -1344,8 +1344,14 @@ class LatLonCGridOceanModel:
         return fdt_max
 
     def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None,
-                   sponge=None, dt=300.0):
-        """Compute baroclinic tendencies."""
+                   sponge=None, dt=300.0, momentum_only=False):
+        """Compute baroclinic tendencies.
+
+        ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
+        tendency for the RK3 momentum sub-stages, which discard dT_dt/dS_dt
+        — bit-identical du_dt/dv_dt, fewer halos/compute (see
+        ``latlon_cgrid_ocean_baroclinic_tendencies``).
+        """
         return latlon_cgrid_ocean_baroclinic_tendencies(
             state, self.grid, self.z_coord, self.config,
             physics_fn=self._physics_fn,
@@ -1354,6 +1360,7 @@ class LatLonCGridOceanModel:
             dt=dt,
             surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
             vertex_mask=self._vertex_mask,
+            momentum_only=momentum_only,
         )
 
     def tendencies_with_diagnostics(
@@ -1577,7 +1584,12 @@ class LatLonCGridOceanModel:
                     u=state.u.replace(data=u_in * u_mask_3d),
                     v=state.v.replace(data=v_in * v_mask_3d),
                 )
-                td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt)
+                # momentum_only: T/S/eta are frozen across the RK3 momentum
+                # sub-stages, so the tracer-diffusion tendency is recomputed
+                # identically and discarded here (only du/dv are used). Skip it
+                # -> bit-identical momentum, fewer halos/compute per sub-stage.
+                td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt,
+                                     momentum_only=True)
                 _du = td.du_dt.data
                 _dv = td.dv_dt.data
                 _Fu = jnp.sum(_du * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
