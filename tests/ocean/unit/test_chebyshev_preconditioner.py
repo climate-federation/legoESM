@@ -90,6 +90,22 @@ def _build(degree):
     return grid, A_op, inv_diag, mask, M_inv
 
 
+def test_chebyshev_preserves_input_dtype():
+    """M_inv must return the INPUT dtype.  The spectral-window scalars
+    (lmax/d/c) are computed in f64 (from inv_diag under x64); if alpha/beta
+    derived from them are f64, ``x = x + alpha*p`` UPCASTS an f32 carry to f64
+    and the distributed fixed-M PCG fori_loop carry-dtype check fails on the
+    full ocean's f32 barotropic carry (job 8489358).  Regression: f32 in -> f32
+    out (and f64 in -> f64 out, unchanged)."""
+    grid, A_op, inv_diag, mask, M_inv = _build(4)
+    rng = np.random.default_rng(7)
+    for dt in (jnp.float32, jnp.float64):
+        r = jnp.asarray(rng.standard_normal(mask.shape)).astype(dt) * mask.astype(dt)
+        out = M_inv(r)
+        assert out.dtype == dt, f"chebyshev M_inv upcast {dt} -> {out.dtype}"
+        assert np.all(np.isfinite(np.asarray(out)))
+
+
 def test_chebyshev_W_self_adjoint():
     """``M_inv`` is self-adjoint in the area-weighted inner product (the
     single_reduce / Chronopoulos–Gear requirement).  Checked over several

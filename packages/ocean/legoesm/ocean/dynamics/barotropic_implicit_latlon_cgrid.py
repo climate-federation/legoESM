@@ -567,25 +567,33 @@ def _make_chebyshev_preconditioner(A_op, inv_diag, mask, degree: int):
 
     def M_inv(r: jnp.ndarray) -> jnp.ndarray:
         dt = r.dtype
+        # Cast the spectral-window scalars to the carry dtype: lmax/d/c are
+        # computed in f64 (from inv_diag under x64), so alpha/beta derived from
+        # them are f64 — and ``x = x + alpha*p`` would UPCAST an f32 PCG carry
+        # to f64, tripping the fori_loop carry-dtype check in the full ocean
+        # (f32 barotropic carry; job 8489358).  d_/c_ keep all coeffs in dt, so
+        # M_inv preserves the input dtype.  f64 lanes are unchanged (d_==d).
+        d_ = jnp.asarray(d, dt)
+        c_ = jnp.asarray(c, dt)
         b = (r * mask).astype(dt)
         x = jnp.zeros_like(b)
         resid = b               # b - A·0
         p = jnp.zeros_like(b)
-        alpha = (1.0 / d)
+        alpha = (1.0 / d_)
         # Chebyshev iteration (Templates / Barrett et al.): a fixed-degree
         # polynomial acceleration of Richardson on A; one A_op matvec per
         # step, zero reductions.
         for i in range(degree):
             if i == 0:
                 p = resid
-                alpha = 1.0 / d
+                alpha = 1.0 / d_
             elif i == 1:
-                beta = 0.5 * (c * alpha) ** 2
-                alpha = 1.0 / (d - beta / alpha)
+                beta = 0.5 * (c_ * alpha) ** 2
+                alpha = 1.0 / (d_ - beta / alpha)
                 p = resid + beta * p
             else:
-                beta = (c * alpha / 2.0) ** 2
-                alpha = 1.0 / (d - beta / alpha)
+                beta = (c_ * alpha / 2.0) ** 2
+                alpha = 1.0 / (d_ - beta / alpha)
                 p = resid + beta * p
             ap = A_op(p).astype(dt)
             x = x + alpha * p
