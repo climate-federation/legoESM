@@ -203,6 +203,30 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 10 — PHASE 3: R4 baroclinic-jet driver DONE (replaced a stale parallel driver) — 2026-06-15
+- **R4 COMPLETE + smoke-tested + committed** (`scripts/run/run_silvestri_baroclinic_jet.py`).
+  IMPORTANT: a STALE pre-recipe driver already existed at that path (Jun-9, unreferenced) that
+  INLINED the grid/IC/thermal-wind/sponge with old scheme names (centered/leith/weno5) — a parallel
+  system. REWROTE it to delegate to the canonical recipe (`build_silvestri_baroclinic_jet_setup`)
+  + `apply_silvestri_scheme` + `restore_state` + the Phase-2 diagnostics. One (scheme,res) per
+  invocation (matrix-friendly: pin a GPU, re-launch on kill).
+- Integrates 1000 d (lax.scan day-blocks) applying the τ=50d zonal-mean restoring each step;
+  reports Fig-7/8/9/10 metrics: TKE/EKE/eddy-APE series, zonal eddy-energy + enstrophy spectra
+  (Parseval-correct), zonal-mean buoyancy, surface-vorticity snapshot (Fig 7), L_d (Eq-54 estimate),
+  gridscale_frac, saturation. Parseable VERDICT + npz for the plotter.
+- Smoke-verified end-to-end (16×16/2d: STABLE, L_d=5.37km ≈ paper 5.5, metrics finite). Test (2
+  schemes) runs the driver + checks all metric arrays saved. (Driver delegates to already-reviewed
+  components + smoke-tested → no separate heavy review for the script.)
+- **DEFERRED:** w'b' cospectrum (Fig 9 right) — needs the diagnosed vertical velocity w (not in the
+  prognostic state; w is in a tendencies/diagnostics struct). Add by diagnosing w via continuity in
+  the driver, or exposing it. Tracked.
+- **NEXT: R1 = 2D decaying-turbulence recipe + driver (R3).** Needs the doubly-periodic grid
+  (`periodic_y`, NOT present — add to the regional grid builder, f-plane) + the Ishiko spectral IC
+  (Eqs 48-50, vorticity from E(k)=½ a_s k_p⁻¹(k/k_p)⁷exp[−7/2(k/k_p)²], a_s=16/3, k_p=12, random
+  phases) + non-rotating single-layer config. 2D-turb schemes (Table 1): DNS/Leith1/Leith2/W5D/W9D/
+  W5V/W9V — vorticity-flux variants (add a 2D preset dict to silvestri_schemes.py). Then R5 plotter.
+  **B5b still required before the QG2 jet-matrix run.**
+
 ### Iteration 9 — PHASE 3: R2 baroclinic-jet recipe DONE — 2026-06-15
 - **R2 COMPLETE + adversarially reviewed + committed** (`ocean/experiments/silvestri_baroclinic_jet.py`).
   Paper §5 setup: `SilvestriJetConfig` (−60→−40°, 20° periodic, 1km/50lev, N²=4e-6, Δb=5e-3,
