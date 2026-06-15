@@ -64,6 +64,22 @@ Parent effort: PR #475, `docs/ocean_experiments/silvestri_weno_reproduction.md`,
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 4 — D2 CONFIRMED at 160×128 (1/8°); --stabilize wired — 2026-06-15
+- **160×128×50 + A_h=1000 + C_smag=0.1 (weno9): STABLE to 18 days** (max|u| flat ~0.06 through
+  days 5/10/15/18), where un-damped weno9 BLEW at day 11. The backstop decisively fixes §5 at the
+  paper's coarsest production resolution. (max|u|~0.06 = eddies still developing slowly; 1/8°
+  under-resolves L_d so growth is slow, but it's STABLE — the point.)
+- **Wired `--stabilize`** into `build_silvestri_baroclinic_jet_setup(stabilize=True)` + the driver:
+  applies the backstop ONLY to the no-closure WENO/flux schemes (lateral_friction_scheme="none");
+  SM2/QG2 untouched (their closure + backstop would trip the double-friction guard). Tested + committed.
+- **OPEN: SM2/QG2** — in the 1/8° matrix they ALSO blew (SM2 day 24, QG2 day 15) WITH their closures.
+  Their closure alone is insufficient at 1/8°. The `--stabilize` backstop can't apply (guard). NEXT:
+  test SM2/QG2 un-damped at 48×32×50 (do they blow at coarse res?); if so, options: stronger closure
+  coeff (OM4p25/QG-Leith) — not faithful; or relax the guard to allow a SMALL A_h with their closure
+  for the stabilize case. Then run the matrix (W9V/W9D/UP3 with --stabilize; SM2/QG2 once stabilized).
+- **NEXT: matrix on GPU when free** (both externally busy through D1-D4): the W9V/W9D/UP3 + --stabilize
+  1/8° row is ready to launch. Then 1/16° (float32 for the OOM). Then Figs 8/9/10 + scoreboard.
+
 ### Iteration 3 — D2: the Eady backstop A_h=1000+C_smag=0.1 STABILIZES §5 + keeps eddies — 2026-06-15
 - **D2 (48×32×50, CPU):** weno9 + **A_h=1000 + C_smag=0.1** → **STABLE to 55 days, max|u|→0.2**
   (eddies developing — NOT the over-damped 0.05 of A_h=5e4). Compare: un-damped weno9 blows day 39;
