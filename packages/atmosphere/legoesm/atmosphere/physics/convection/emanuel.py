@@ -51,7 +51,6 @@ from legoesm.atmosphere.physics.convection.mass_flux import (
 )
 from legoesm.atmosphere.physics.convection._triggers import (
     cape_trigger,
-    smooth_positive_part,
 )
 from legoesm.atmosphere.physics.convection._plume import (
     compute_lcl,
@@ -220,7 +219,6 @@ def emanuel_convection(
     # the unperturbed base keeps the closure internally consistent with the
     # oracle (the perturbed LCL above is reserved for the plume).
     lcl_unpert = compute_lcl(T_base, q_base, p_base, p_full)
-    k_lcl_closure = lcl_unpert.k_lcl_smooth
 
     # -- Prognostic cloud-base mass-flux closure (Emanuel DTMA, FAITHFUL) --
     # FIDELITY (oracle convect43c.f lines 549-573).  Emanuel does NOT use a
@@ -279,22 +277,27 @@ def emanuel_convection(
     Tv_env = virtual_temperature(T, q_v)
     buoy_excess_sub = Tv_parcel_sub - Tv_env                    # (ncol, nlev) [K]
 
-    # ``TVPPLCL − TVAPLCL``: dry-adiabatic parcel buoyancy excess AT the
-    # LCL — the term that crosses zero near the oracle's firing threshold
-    # (lapse ≈ 7.5 K/km for a 300 K / 18 g/kg surface).  Read it with a
-    # narrow Gaussian level-selector centred on ``k_lcl_smooth``.
-    cb_weight = jax.nn.softmax(
-        -((nlev_idx[None, :] - k_lcl_closure[:, None]) ** 2)
-        / (2.0 * config.cloud_base_index_width ** 2),
-        axis=-1,
-    )                                                          # ∑=1 per col
-    be_lcl = jnp.sum(cb_weight * buoy_excess_sub, axis=-1)      # (ncol,) [K]
+    # ``TVPPLCL - TVAPLCL``: dry-adiabatic parcel buoyancy excess AT the
+    # LCL.  CONVECT v4.3c evaluates this at ``PLCL`` (lines 549-552), not
+    # with a level-space average.  The old Gaussian selector averaged in
+    # the first level above cloud base on coarse RCE grids; when PLCL sat
+    # at the surface it produced a spurious ~2 K negative DTMA and shut
+    # off convection despite large free-tropospheric CAPE.
+    q_lcl = jnp.minimum(
+        q_base,
+        saturation_mixing_ratio(lcl_unpert.T_lcl, lcl_unpert.p_lcl),
+    )
+    Tv_parcel_lcl = virtual_temperature(lcl_unpert.T_lcl, q_lcl)
+    Tv_env_lcl = jax.vmap(
+        lambda p_lcl_i, p_i, tv_i: jnp.interp(p_lcl_i, p_i, tv_i),
+    )(lcl_unpert.p_lcl, p_full, Tv_env)
+    be_lcl = Tv_parcel_lcl - Tv_env_lcl                         # (ncol,) [K]
 
-    # ``DTPBL``: mass-weighted mean sub-cloud buoyancy excess (levels
-    # at/below the LCL, surface-last index ≥ k_lcl_closure).
+    # ``DTPBL``: mass-weighted mean sub-cloud buoyancy excess over the
+    # pressure-bounded layer below PLCL.
     below_lcl = jax.nn.sigmoid(
-        2.0 * (nlev_idx[None, :] - (k_lcl_closure[:, None] - 0.5))
-    )                                                          # ~1 at/below LCL
+        config.lcl_pressure_sharpness * (p_full - lcl_unpert.p_lcl[:, None])
+    )                                                          # ~1 below PLCL
     sub_mass = jnp.sum(below_lcl * dp, axis=-1)
     dtpbl = jnp.sum(below_lcl * buoy_excess_sub * dp, axis=-1) / jnp.maximum(
         sub_mass, 1.0
@@ -308,7 +311,10 @@ def emanuel_convection(
     # Prognostic relaxation (oracle line 565-567).  ``DAMPS = DAMP·dt/300``.
     damps = config.damp_coefficient * dt / 300.0  # coeff-ok: reference timestep [s]
     cbmf_new = (1.0 - damps) * cbmf_old + _CBMF_RELAX * config.alpha_closure * dtma
-    cbmf_new = smooth_positive_part(cbmf_new, config.cbmf_positive_sharpness)
+    # CONVECT v4.3c line 567 uses an exact ``MAX(CBMF,0.0)``.  A softplus
+    # surrogate leaves a nonzero ln(2)/sharpness mass-flux floor; in RCE
+    # that floor drove persistent heating even after CAPE was exhausted.
+    cbmf_new = jnp.maximum(cbmf_new, 0.0)
     # See ZhangMcFarlaneConfig.M_b_max.
     M_b = jnp.clip(cbmf_new, 0.0, config.M_b_max)
 
@@ -440,10 +446,12 @@ def emanuel_convection(
 
     dq_c_conv_dt = jnp.maximum(dq_c_conv_dt, 0.0)
 
-    # -- Exact column total-water and enthalpy conservation --------------
-    # FIDELITY (oracle convect43c.f).  Emanuel's tendencies (a) conserve
-    # column water and (b) force exact column enthalpy conservation in a
-    # final pass (oracle lines 969-984).  Our scheme uses the shared
+    # -- Exact water and layer enthalpy conservation ---------------------
+    # FIDELITY (oracle convect43c.f).  Emanuel's tendencies force exact
+    # vapor-side enthalpy conservation over levels 1..INB in a final pass
+    # (oracle lines 969-984).  The genuine mixer also has an explicit
+    # precipitating condensate path (EP·CLW); only the legacy surrogate
+    # needs column-total-water bookkeeping.  Our scheme uses the shared
     # Tiedtke/Siebesma mass-flux kernel whose detrained condensate source
     # ``δ·M·q_c_u/ρ`` is NOT drawn from a matching column vapor sink, so
     # the raw tendencies break BOTH invariants:
@@ -455,22 +463,24 @@ def emanuel_convection(
     # condenses vapor into cloud water ``dq_c_conv_dt`` (handed to the
     # ``q_c`` tracer → microphysics owns precip/evaporation), and the
     # latent heat of that condensation is *released as convective heating*.
-    # Two invariants must therefore hold:
+    # The legacy surrogate therefore needs two invariants:
     #
     #   (1) Total water: ``∫(dq_v + dq_c)dp = 0`` — every kg of vapor the
-    #       convection removes reappears as cloud water in the column
-    #       (nothing precipitates in-scheme).
-    #   (2) Moist enthalpy of the VAPOR reservoir: ``c_p·∫FT + L_v·∫FQ_v =
-    #       0`` — i.e. the column heating equals the latent heat released
-    #       condensing the vapor that became cloud, ``c_p·∫FT = L_v·∫FQ_c``.
+    #       legacy convection removes reappears as cloud water in the column.
+    #       In the genuine path, negative net water is retained as the
+    #       reference precipitating sink instead of being added back to cloud.
+    #   (2) Moist enthalpy of the VAPOR reservoir over levels 1..INB:
+    #       ``c_p·∫FT + L_v·∫FQ_v = 0`` — i.e. heating in the convective
+    #       layer equals the latent heat released condensing the vapor that
+    #       became cloud, ``c_p·∫FT = L_v·∫FQ_c``.
     #       Crucially the detrained-condensate term ``FQ_c`` is EXCLUDED
     #       from this MSE invariant: that condensate is liquid water whose
     #       latent heat has *already been released into FT*, so including
     #       it (as an earlier version did) zeroed the convective heating
     #       entirely and the free troposphere then cooled radiatively with
     #       no convective offset — a ~40 K-too-cold RCE.  The oracle's ENTS
-    #       pass conserves exactly this vapor-side enthalpy (its FQ is
-    #       vapor only; the condensate left the column as PRECIP).
+    #       pass conserves exactly this layer-limited vapor-side enthalpy
+    #       (its FQ is vapor only; the condensate left the column as PRECIP).
     #
     # Both corrections are uniform/activity-weighted shifts built from sums
     # and divides by positive column masses — AD-safe (finite subgradients)
@@ -484,15 +494,13 @@ def emanuel_convection(
     L_v = constants.L_v
     c_pd = constants.c_pd
 
-    # (1) Total-water conservation: ``∫(dq_v + dq_c)dp = 0``.  The kernel
-    # creates net water (``net_water > 0``); remove it from the condensate
-    # channel by *rescaling* ``dq_c`` by a uniform per-column factor, so
-    # the subtraction is distributed exactly where condensate exists and
-    # can never drive ``dq_c`` negative (a previous activity-weighted
-    # subtraction with a ``max(.,0)`` floor leaked up to ~33 % of the
-    # column water flux on marginally-convecting columns).  We subtract
-    # from ``dq_c`` (not ``dq_v``) so the vapor sink — which sets the
-    # convective heating in step (2) — is left intact.
+    # (1) Legacy total-water conservation / genuine positive-water cleanup.
+    # If the kernel creates net water (``net_water > 0``), remove it from
+    # the condensate channel by *rescaling* ``dq_c`` by a uniform per-column
+    # factor, so the subtraction is distributed exactly where condensate
+    # exists and can never drive ``dq_c`` negative.  Negative net water is
+    # only added back in the legacy surrogate; in the genuine mixer it is
+    # the reference precipitating condensate sink.
     #
     #   ∫dq_c_new = ∫dq_c − net_water·g   ⇒   scale = 1 − net_water·g/∫dq_c
     #
@@ -509,19 +517,21 @@ def emanuel_convection(
     #  * ``net_water > 0`` — the kernel created spurious condensate; remove
     #    it by scaling ``dq_c`` DOWN (the legacy surrogate case).
     #  * ``net_water < 0`` — convection removed MORE vapor than it produced
-    #    as in-cloud condensate (the genuine Emanuel updraught: most of the
-    #    lifted water condenses and would *precipitate* in the oracle).  In
-    #    this model the latent heat of that condensation is already in
-    #    ``dT_dt`` (vapor-side enthalpy pass below), and the condensed water
-    #    is handed to the ``q_c`` tracer for microphysics to precipitate —
-    #    so we ADD the deficit ``|net_water|`` to ``dq_c`` distributed where
-    #    vapor is actually being removed (``dq_v_dt < 0``), making
-    #    ``∫(dq_v + dq_c) dp = 0`` EXACTLY (total column water conserved).
+    #    as retained in-cloud condensate.  In the genuine Emanuel mixer this
+    #    is the reference precipitation path: EP·CLW feeds the oracle's
+    #    precipitation/downdraft budget and must NOT be reinserted as cloud
+    #    water, or the RCE column accumulates radiatively active anvils.  The
+    #    legacy mass-flux-kernel surrogate lacks that precipitation split, so
+    #    it still gets the old bookkeeping add-back for compatibility.
     #
     # Both branches are smooth/AD-safe: the down-scale is a clipped ratio,
     # the up-add distributes ``|net_water|`` by the (non-negative) drying
     # weight ``max(-dq_v, 0)`` normalised over the column.
-    deficit = jnp.maximum(-net_water, 0.0)                # >0 when water left
+    deficit = jnp.where(
+        config.use_genuine_mixing,
+        0.0,
+        jnp.maximum(-net_water, 0.0),
+    )                                                     # legacy add-back only
     drying = jnp.maximum(-dq_v_dt, 0.0)                   # where vapor removed
     drying_col = jnp.sum(drying * dp, axis=-1) / constants.g
     add_weight = drying / jnp.maximum(drying_col[:, None], 1e-30)  # ∫w dp/g = 1
@@ -533,12 +543,27 @@ def emanuel_convection(
     )
     dq_c_conv_dt = dq_c_conv_dt * qc_scale[:, None] + dq_c_add
 
-    # (2) Vapor-side enthalpy conservation (oracle ENTS pass).  Conserve
-    # ``c_p·FT + L_v·FQ_v`` (vapor only) so the convective heating equals
-    # the latent heat of condensation ``L_v·∫FQ_c``.
-    mse_tend = c_pd * dT_dt + L_v * dq_v_dt              # (ncol, nlev) [W/kg]
-    ents = jnp.sum(mse_tend * dp, axis=-1) / jnp.maximum(col_mass, 1.0)
-    dT_dt = dT_dt - (ents / c_pd)[:, None]
+    # (2) Vapor-side enthalpy conservation (oracle ENTS pass).  CONVECT
+    # applies this correction ONLY over levels 1..INB (surface through the
+    # diagnosed convection top), with the denominator PH(1)-PH(INB+1).
+    # Applying a uniform full-column shift cools the quiescent stratosphere
+    # every convective step and drove the SCM cold point to ~133 K.  The
+    # genuine mixing path returns the smooth 1..INB mask; the legacy
+    # surrogate falls back to the active mass-flux profile.
+    cpn = constants.c_pd * (1.0 - q_v) + constants.c_pv * q_v
+    lv_eff = constants.L_v - (config.c_l_emanuel - constants.c_pv) * (
+        T - constants.T_freeze
+    )
+    if config.use_genuine_mixing:
+        ents_mask = mixing.convective_layer_mask
+    else:
+        ents_mask = jnp.where(jnp.abs(dq_v_dt) + dq_c_conv_dt > 0.0, 1.0, 0.0)
+    layer_mass = jnp.sum(ents_mask * dp, axis=-1)
+    mse_tend = cpn * dT_dt + lv_eff * dq_v_dt             # (ncol, nlev) [W/kg]
+    ents = jnp.sum(ents_mask * mse_tend * dp, axis=-1) / jnp.maximum(
+        layer_mass, 1.0,
+    )
+    dT_dt = dT_dt - ents_mask * (ents[:, None] / cpn)
 
     out = ConvectionOutput(
         dT_dt=dT_dt,

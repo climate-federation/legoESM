@@ -34,7 +34,8 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_dT
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
@@ -63,6 +64,15 @@ __all__ = ("kain_fritsch_convection",)
 # Kain-Fritsch updraft-radius ramp smoothing widths (fixed).
 _KF_SHARPNESS_M = 200.0
 _KF_RAMP_WIDTH = 0.05
+_KF_MIN_ENTRAIN_MULTIPLIER = 0.5
+_KF_DETRAIN_BOOST = 1.5
+_KF_PROF5_SQRT2P = 2.506628
+_KF_PROF5_A1 = 0.4361836
+_KF_PROF5_A2 = -0.1201676
+_KF_PROF5_A3 = 0.9372980
+_KF_PROF5_P = 0.33267
+_KF_PROF5_SIGMA = 0.166666667
+_KF_PROF5_FE = 0.202765151
 
 def _interpolate_at_smooth_level(
     profile: jax.Array,
@@ -92,20 +102,25 @@ def _interp_profile_at_height(
     *,
     sharpness_m: float = _KF_SHARPNESS_M,
 ) -> jax.Array:
-    """Smooth interpolation of ``profile`` at a target height ``z_target``.
+    """Linearly interpolate ``profile`` at target height ``z_target``.
 
-    Differentiable Gaussian-in-height weighting (width ``sharpness_m`` [m])
-    so the result is C^1 in ``z_target``.  ``profile``, ``z`` shape
-    ``(ncol, nlev)``; ``z_target`` shape ``(ncol,)``; returns ``(ncol,)``.
-    Used to read the environmental temperature at the dry-adiabatic LCL
-    height (oracle reads TENV at ZLCL via linear z-interpolation; the
-    Gaussian kernel is the smooth surrogate).
+    KF-Eta reads the environmental LCL state by linear interpolation in
+    height (``DLP=(ZLCL-Z0(K))/(Z0(KLCL)-Z0(K))``; module_cu_kfeta.F
+    lines 958-965).  A previous Gaussian surrogate over-weighted the
+    nearest full level on the coarse RCE grid; for an LCL just above the
+    lowest level it returned the surface temperature, spuriously making
+    ``TLCL-TENV`` negative and starving the trigger.  ``jnp.interp`` is
+    piecewise differentiable and matches the reference forward value.
+
+    ``sharpness_m`` is retained for API/back-compat and intentionally
+    unused.
     """
-    w = jax.nn.softmax(
-        -((z - z_target[:, None]) / sharpness_m) ** 2,
-        axis=-1,
-    )
-    return jnp.sum(w * profile, axis=-1)
+    del sharpness_m
+    return jax.vmap(
+        lambda zt, z_col, profile_col: jnp.interp(
+            zt, z_col[::-1], profile_col[::-1],
+        )
+    )(z_target, z, profile)
 
 
 def _usl_mass_weighted(
@@ -248,6 +263,149 @@ def _faithful_entrainment_profile(
     return rho * constants.g * config.entrain_const / rad[:, None]
 
 
+def _kf_prof5(eq: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Kain-Fritsch ``PROF5`` Gaussian mixing integrals.
+
+    This is the differentiable vector form of WRF ``module_cu_kfeta.F``
+    ``SUBROUTINE PROF5``: given the critical environmental mixing fraction
+    ``EQFRC`` it returns the fractional entrainment and detrainment
+    multipliers ``(EE, UD)`` for the layer.
+    """
+    eq = jnp.clip(eq, 0.0, 1.0)
+    y = 6.0 * eq - 3.0
+    ey = jnp.exp(-0.5 * y * y)
+    e45 = jnp.exp(jnp.asarray(-4.5, dtype=eq.dtype))
+    t2 = 1.0 / (1.0 + _KF_PROF5_P * jnp.abs(y))
+    t1 = jnp.asarray(0.500498, dtype=eq.dtype)
+    c1 = _KF_PROF5_A1 * t1 + _KF_PROF5_A2 * t1 * t1 + _KF_PROF5_A3 * t1 * t1 * t1
+    c2 = _KF_PROF5_A1 * t2 + _KF_PROF5_A2 * t2 * t2 + _KF_PROF5_A3 * t2 * t2 * t2
+    sigma = jnp.asarray(_KF_PROF5_SIGMA, dtype=eq.dtype)
+    ee_pos = (
+        sigma * (0.5 * (_KF_PROF5_SQRT2P - e45 * c1 - ey * c2) + sigma * (e45 - ey))
+        - e45 * eq * eq / 2.0
+    )
+    ud_pos = (
+        sigma * (0.5 * (ey * c2 - e45 * c1) + sigma * (e45 - ey))
+        - e45 * (0.5 + eq * eq / 2.0 - eq)
+    )
+    ee_neg = (
+        sigma * (0.5 * (ey * c2 - e45 * c1) + sigma * (e45 - ey))
+        - e45 * eq * eq / 2.0
+    )
+    ud_neg = (
+        sigma * (0.5 * (_KF_PROF5_SQRT2P - e45 * c1 - ey * c2) + sigma * (e45 - ey))
+        - e45 * (0.5 + eq * eq / 2.0 - eq)
+    )
+    ee = jnp.where(y >= 0.0, ee_pos, ee_neg) / _KF_PROF5_FE
+    ud = jnp.where(y >= 0.0, ud_pos, ud_neg) / _KF_PROF5_FE
+    return jnp.clip(ee, 0.0, 1.0), jnp.clip(ud, 0.0, 1.0)
+
+
+def _kf_mixed_virtual_temperature(
+    T_env: jax.Array,
+    q_env: jax.Array,
+    T_u: jax.Array,
+    q_u: jax.Array,
+    q_c_u: jax.Array,
+    p_full: jax.Array,
+    env_fraction: float,
+) -> jax.Array:
+    """Virtual temperature of an updraft/environment mixture.
+
+    KF-Eta evaluates the mixed parcel through ``tpmix2``.  This smooth
+    surrogate mixes temperature, vapor, and condensate, then performs one
+    donor-limited saturation-adjustment Newton step so evaporative cooling
+    of entrained dry air controls the critical fraction.
+    """
+    f = jnp.asarray(env_fraction, dtype=T_env.dtype)
+    T0 = f * T_env + (1.0 - f) * T_u
+    q0 = f * q_env + (1.0 - f) * q_u
+    qc0 = (1.0 - f) * jnp.maximum(q_c_u, 0.0)
+    qsat = saturation_mixing_ratio(T0, p_full)
+    dqs_dT = saturation_mixing_ratio_dT(T0, p_full)
+    L_over_cp = constants.L_v / constants.c_pd
+    delta_q = jnp.clip(
+        (q0 - qsat) / (1.0 + L_over_cp * dqs_dT),
+        -qc0,
+        q0,
+    )
+    Tm = T0 + L_over_cp * delta_q
+    qm = q0 - delta_q
+    qcm = qc0 + delta_q
+    return virtual_temperature(Tm, qm) * (1.0 - qcm)
+
+
+def _kf_buoyancy_sort_rates(
+    T_env: jax.Array,
+    q_env: jax.Array,
+    p_full: jax.Array,
+    plume,
+    eps_base: jax.Array,
+    z: jax.Array,
+    k_lnb_smooth: jax.Array,
+    config: KainFritschConfig,
+) -> tuple[jax.Array, jax.Array]:
+    """Separate KF entrainment and detrainment profiles.
+
+    Kain (2004) keeps ``REI = VMFLCL*DP*0.03/RAD`` as the environmental
+    inflow scale, but updraft detrainment is diagnosed from the critical
+    mixed fraction and ``PROF5``.  This replaces the previous
+    ``detrainment = entrainment`` shortcut, which deposited too much mass
+    in the lower/middle troposphere and left no deep heating.
+    """
+    tv_env = virtual_temperature(T_env, q_env)
+    tv_u = virtual_temperature(plume.T_u, plume.q_u) * (
+        1.0 - jnp.maximum(plume.q_c_u, 0.0)
+    )
+    tv95 = _kf_mixed_virtual_temperature(
+        T_env, q_env, plume.T_u, plume.q_u, plume.q_c_u, p_full, 0.95,
+    )
+    tv10 = _kf_mixed_virtual_temperature(
+        T_env, q_env, plume.T_u, plume.q_u, plume.q_c_u, p_full, 0.10,
+    )
+
+    colder = tv_u <= tv_env
+    very_buoyant = tv95 > tv_env
+    eq = (tv_env - tv_u) * 0.10 / jnp.maximum(tv10 - tv_u, 1.0e-6)
+    eq = jnp.clip(eq, 0.0, 1.0)
+    ee_prof, ud_prof = _kf_prof5(eq)
+    ee2 = jnp.where(colder, _KF_MIN_ENTRAIN_MULTIPLIER, jnp.where(very_buoyant, 1.0, ee_prof))
+    ud2 = jnp.where(colder, 1.0, jnp.where(very_buoyant, 0.0, ud_prof))
+    ee2 = jnp.maximum(ee2, _KF_MIN_ENTRAIN_MULTIPLIER)
+    ud2 = _KF_DETRAIN_BOOST * ud2
+
+    # Oracle UER/UDR use 0.5*(previous + current) multipliers.  Apply that
+    # average in surface-first order, initialising cloud-base values with
+    # EE1=1, UD1=0 (WRF KF-Eta lines 1118-1119).
+    ee_sf = ee2[:, ::-1]
+    ud_sf = ud2[:, ::-1]
+    ee_prev = jnp.concatenate([jnp.ones_like(ee_sf[:, :1]), ee_sf[:, :-1]], axis=-1)
+    ud_prev = jnp.concatenate([jnp.zeros_like(ud_sf[:, :1]), ud_sf[:, :-1]], axis=-1)
+    ee_mult = (0.5 * (ee_prev + ee_sf))[:, ::-1]
+    ud_mult = (0.5 * (ud_prev + ud_sf))[:, ::-1]
+
+    eps_profile = eps_base * ee_mult
+    dlt_profile = eps_base * ud_mult
+
+    nlev = T_env.shape[-1]
+    levels = jnp.arange(nlev, dtype=T_env.dtype)
+    # Smooth ``UDR(LTOP)=remaining UMF`` surrogate centred on the LNB.
+    top_weight = jax.nn.softmax(
+        -((levels[None, :] - k_lnb_smooth[:, None])
+          / jnp.maximum(config.cloud_top_detrainment_width_levels, 1.0e-6)) ** 2,
+        axis=-1,
+    )
+    dz_layer = jnp.maximum(
+        jnp.concatenate([z[:, :-1] - z[:, 1:], z[:, -2:-1] - z[:, -1:]], axis=-1),
+        1.0,
+    )
+    top_rate = -jnp.log(
+        jnp.maximum(1.0 - config.cloud_top_detrainment_fraction, 1.0e-6)
+    ) / dz_layer
+    dlt_profile = dlt_profile + top_weight * top_rate
+    return eps_profile, dlt_profile
+
+
 def kain_fritsch_convection(
     T: jax.Array,
     q_v: jax.Array,
@@ -385,14 +543,33 @@ def kain_fritsch_convection(
         gdry = -constants.g / constants.c_pd  # K/m, negative
         z_lcl_dry = z_usl + (lcl.T_lcl - T_usl) / gdry
         z_lcl_for_trigger = z_lcl_dry
-        # Read env T and grid-scale w at the dry-adiabatic LCL height.
+        # Read env T/q and grid-scale w at the dry-adiabatic LCL height.
         T_env_at_lcl = _interp_profile_at_height(T, z, z_lcl_dry)
+        q_env_at_lcl = _interp_profile_at_height(q_v, z, z_lcl_dry)
         w_grid_at_lcl = _interp_profile_at_height(w_grid, z, z_lcl_dry)
         # Fritsch-Chappell w-dependent DTLCL (Kain 2004 Eq. 1-2).  Fire when
         # the perturbed parcel temperature at the LCL exceeds the
         # environmental temperature there: TLCL + DTLCL(w) >= TENV.
         dtlcl, wkl = _faithful_dtlcl(w_grid_at_lcl, z_lcl_for_trigger, config)
-        T_lcl_perturbed = lcl.T_lcl + dtlcl
+        # KF-Eta trigger=3 adds a relative-humidity perturbation DTRH
+        # (module_cu_kfeta.F lines 996-1017, U00=0.75).  Use the same
+        # piecewise reference formula, with qsat/dT from thermo instead of
+        # lookup-table coefficients.
+        qsat_lcl_env = saturation_mixing_ratio(T_env_at_lcl, lcl.p_lcl)
+        rh_lcl = q_env_at_lcl / jnp.maximum(qsat_lcl_env, 1.0e-12)
+        dqssdt = saturation_mixing_ratio_dT(lcl.T_lcl, lcl.p_lcl)
+        dtrh_scale = q_usl / jnp.maximum(dqssdt, 1.0e-12)
+        dtrh = jnp.where(
+            (rh_lcl >= config.rh_trigger_u00) & (rh_lcl <= config.rh_trigger_rhmax),
+            config.rh_trigger_slope * (rh_lcl - config.rh_trigger_u00) * dtrh_scale,
+            jnp.where(
+                rh_lcl > config.rh_trigger_rhmax,
+                (1.0 / jnp.maximum(rh_lcl, 1.0e-12) - 1.0) * dtrh_scale,
+                0.0,
+            ),
+        )
+        dtrh = jnp.where(config.enable_rh_trigger_perturb, dtrh, 0.0)
+        T_lcl_perturbed = lcl.T_lcl + dtlcl + dtrh
     else:
         # Legacy: smooth-interpolate environment T and w at the level index.
         T_env_at_lcl = _interpolate_at_smooth_level(T, k_lcl_smooth)
@@ -503,14 +680,21 @@ def kain_fritsch_convection(
     # (bulk single-plume; the oracle's PROF5 buoyancy-sorted per-level
     # detrainment is the acknowledged structural simplification).
     if config.faithful_entrainment:
-        eps_profile = _faithful_entrainment_profile(wkl, rho, config)
-        dlt_profile = eps_profile
+        eps_base = _faithful_entrainment_profile(wkl, rho, config)
+        predictor_plume = entraining_detraining_plume(
+            T, q_v, p_full, p_half, z,
+            T_parcel, q_parcel, k_lcl_smooth,
+            eps_base, _KF_MIN_ENTRAIN_MULTIPLIER * eps_base, M_b,
+            buoyancy_death_memory=config.buoyancy_death_memory,
+        )
+        eps_profile, dlt_profile = _kf_buoyancy_sort_rates(
+            T, q_v, p_full, predictor_plume, eps_base, z, k_lnb_smooth, config,
+        )
         # Environment-detrainment mixing rate fed to the shared kernel must
-        # be the SAME RAD-based rate the plume uses, not the legacy constant
-        # ``config.delta_0`` (codex review-1 #6: plume budget and env
-        # tendencies were using inconsistent detrainment coefficients).  The
-        # kernel multiplies ``delta_0 * M * (X_u - X)`` per level, so a
-        # per-level ``(ncol, nlev)`` array broadcasts correctly.
+        # be the same KF buoyancy-sort ``UDR`` profile the plume uses.  The
+        # previous shortcut ``dlt_profile = eps_profile`` violated Kain
+        # (2004) Eq. 4 / PROF5: buoyant layers should entrain with little
+        # detrainment, then detrain strongly near cloud top.
         kernel_delta = dlt_profile
     else:
         eps_profile = jnp.full_like(T, config.epsilon_0)
@@ -552,22 +736,20 @@ def kain_fritsch_convection(
         plume.T_u, plume.q_u, plume.q_c_u, plume.M_u,
         z, rho, kernel_delta, M_u_max=config.M_b_max,
     )
+    # KF CONDLOAD fallout keeps only the non-precipitating part of fresh
+    # updraft condensate in the cloud field.  The shared kernel's q_c source
+    # is built from total plume condensate, so retain the documented 40%
+    # fresh-condensate fraction (module_cu_kfeta.F lines 2900-2923) and let
+    # the remaining vapor sink represent convective precipitation fallout.
+    dq_c_conv_dt_raw = (
+        config.condload_fresh_retention_fraction * dq_c_conv_dt_raw
+    )
 
-    # -- Precipitation efficiency ------------------------------------------
-    # Under the ConvectionOutput contract convection emits ONLY a cloud-water
-    # source (``dq_c_conv_dt``); microphysics owns ALL precipitation via its
-    # autoconversion / sedimentation / evaporation chain (see
-    # ``convection/output.py``).  A scheme-level precip-efficiency *retention*
-    # scaling here is therefore inadmissible: scaling ``dq_c`` down by
-    # ``(1-PEFF)`` while leaving the vapor drying ``dq_v`` intact sheds the
-    # precipitating PEFF fraction with NO output channel to receive it,
-    # silently leaking column total water (~22 mm/day-equiv on a deep tropical
-    # column — validator atm-convection codex review-2 #1).  The FULL detrained
-    # condensate is handed to microphysics, which applies precipitation
-    # efficiency through autoconversion — exactly as the sister bulk-plume
-    # schemes (ZM / Bechtold / Emanuel) do, none of which apply a retention
-    # scaling.  This closes KF's column-water budget to the same
-    # subsidence-transport residual as those schemes.
+    # Under the ConvectionOutput contract KF can emit retained cloud water
+    # but has no direct precipitation diagnostic.  The CONDLOAD split above
+    # therefore keeps only the reference retained fresh condensate in
+    # ``dq_c_conv_dt``; the remaining vapor sink is the precipitating fallout
+    # path represented in KF-Eta by PPTLIQ/PPTICE.
 
     # Apply the deep+shallow weight as a per-column scalar.
     dT_dt = dT_dt_raw * branch_weight[:, None]
