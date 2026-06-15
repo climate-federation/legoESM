@@ -203,6 +203,28 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 17 — GPU AVAILABLE → §5 1/8° matrix BLOWS UP; PR #475 OPENED — 2026-06-15
+- **GPU was available all along** — my "no CUDA" was self-imposed (`CUDA_VISIBLE_DEVICES=""` to avoid
+  GPU 0's external job). jaxlib IS CUDA-enabled (~8.5 s/day at 1/8° on V100S, ~12× CPU). Ran the
+  5-scheme 1/8° (160×128×50, 1000d, dt=900) matrix across both GPUs.
+- **★ §5 1/8° MATRIX BLOWS UP: all 5 schemes go unstable at instability onset** — W9V day 11, QG2
+  day 15, SM2 day 24 (max|u|→nan). dt=450 does NOT fix W9V (still day 11); even explicit-closure
+  SM2/QG2 blow. NOT a simple CFL/dissipation fix. SAME eddy-resolving instability as the Eady rebuild
+  (L_d~5.7km resolved by only ~2.5 cells at 14km → grid-scale pileup → blowup). **CORRECTED the
+  earlier premature "production viability confirmed" claim** (the 3-day probe never reached day 11).
+- **§5 is NOT reproduced** — open problem: needs baseline A_h+C_smag for the no-closure WENO schemes
+  at 1/8° (like the Eady min-dissipation A_h=1000+C_smag=0.1 fix) AND/OR the finer 1/16°/1/32° grids
+  where L_d is properly resolved (the paper's MAIN comparison; 14 km is the paper's "under-resolved"
+  case). The recipe/driver/metrics/plotter are correct; the blocker is stabilization, not code.
+- **PR #475 OPENED** (climate-federation/legoESM): one PR = Eady rebuild + Silvestri (per user). §4
+  reproduced; §5 honestly flagged as open. 31 files, +4958/-767. NOTE: codex review unavailable in
+  build env → skeptical-subagent reviews used; the real `/codex:adversarial-review` should run before merge.
+- **NEXT (§5 debug):** (a) try the Eady min-dissipation combination on the WENO §5 schemes
+  (A_h≈1000+C_smag≈0.1 — but that's NOT paper-faithful for the no-closure schemes, so it's a
+  stability backstop, not the comparison); (b) run the finer 1/16° (7km) where L_d is resolved —
+  the paper's actual main resolution — and see if it's stable there (the right place to reproduce §5);
+  (c) diagnose the day-11 blowup mechanism (barotropic-baroclinic coupling? the 50-level front?).
+
 ### Iteration 16 — §5 PRODUCTION-RESOLUTION VIABILITY confirmed; ALL CPU WORK EXHAUSTED — 2026-06-15
 - **§5 production-resolution viability: W9V 1/8° (160×128×50), 3 days → STABLE, PRODRES OK (308s).**
   The model builds + runs at the paper's coarsest production resolution with no shape/memory/
