@@ -208,7 +208,19 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
   - Tests: 123 WENO (core+momentum+tracer) + 61 dispatch/validate/recipe green; no weno5/7
     regression. Added: order-8 conversion exactness, order-8>order-6 on smooth field, WENO9
     vorticity shapes/constant/cell-to-face/resolved-accuracy, full ocean step weno9 finite.
-- **NEXT: codex adversarial review of B1** (numerics/AD change — mandate), then **B2** =
+- **ADVERSARIAL REVIEW of B1 DONE** (codex CLI not installed in this env → independent
+  skeptical-subagent review instead; note for future iterations: `which codex` = not found,
+  so the literal `/codex:adversarial-review` + codex-driven physics-validator can't run here;
+  use a skeptical-reviewer subagent). Verdict: **no BLOCKERs**. Independently re-derived the
+  order-8 coeffs (sympy-exact; convergence rate 7.94→7.98), confirmed order threading
+  (Z=9,D=9,C=5 cap correct), dispatch coverage complete (no missed `("weno5","weno7")` site),
+  AD/JIT staticness OK, ghost-cell ranges in-bounds on small grids. **One clarification:**
+  weno7's D-term changes **5→7** with B1 (was hardcoded 5 for both weno5/weno7; now follows the
+  momentum order). This is CORRECT + paper-faithful (W7V pairs D=7 with Z=7) and FIXES a prior
+  Z=7/D=5 inconsistency — the B1 commit message wrongly called it "unchanged (D=5/7)". No weno7
+  momentum golden/regression baseline exists (only tracer-weno7 + kernel tests, all green), so
+  the change is safe. Recorded here since the commit msg is misleading.
+- **NEXT: B2** =
   `weno_smoothness` config: `"split"` (`{ζ;u}`, W*V, current default) vs `"standard"`
   (`{ζ;ζ}`, W*D). The existing path hardwires the split via `u_smooth`/`v_smooth`; W9D needs
   the standard `{ζ;ζ}` branch (pass `psi=phi`, i.e. drop the velocity smoothness fields).
