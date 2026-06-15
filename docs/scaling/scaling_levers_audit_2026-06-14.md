@@ -129,3 +129,32 @@ geometric-MG) gives ≤3× M-cut, none cheap enough to win on Gloo/TCP/PCIe.
 Production 2-GPU is near-ideal (ocean 0.92-0.95, atm 0.82). Further gains
 require NVLink/IB hardware or a research-grade anisotropic-MG solver with
 payoff only on the non-production tail.
+
+## MULTIGRID REOPENED — anisotropic (zonal-line) smoother WORKS (2026-06-15, job 8487762)
+
+The 2026-06-14 multigrid POC was ruled out with a POINTWISE-JACOBI smoother
+(3x M-cut only) — the textbook failure of naive geometric MG on the
+polar-anisotropic lat-lon Helmholtz (dx->0 near poles => strong ZONAL
+coupling jacobi can't smooth). Swapping in a ZONAL-LINE smoother (the existing
+_make_zonal_line_preconditioner = exact periodic-tridiagonal solve per lat row
+= implicit zonal solve) as the MG relaxation FIXES it:
+
+  rel-residual at M (96x192, 4-level V-cycle, coeff 5e7):
+    jacobi-smoother MG : M16=2.74e-3  M60=3.83e-7  (reaches jacobi-M60 acc ~M18)
+    zonal-line-MG      : M2=7.4e-4  M4=8.7e-7  M6=1.0e-9  M12=5e-17 (mach-prec)
+
+=> zonal-line-smoothed MG reaches jacobi-M60 production accuracy at **M2-4**
+(vs M60) = **15-30x fewer PCG iterations => 120->~8 global reductions/step**,
+the textbook O(log n) multigrid convergence. The MG V-cycle has NO global
+reductions (smoothing + restrict/prolong are local/halo); the outer PCG keeps
+2 reductions/iter, so M_outer~4 => ~8 reductions/step. Even accounting for the
+extra V-cycle halos (~80/step) vs jacobi-M60 (60 halos + 120 reductions),
+on the latency-bound multinode regime (halo~=reduction) this is ~2x fewer
+messages => the genuine barotropic weak-scaling lever, now DE-RISKED.
+
+POC: scripts/tmp/_poc_multigrid_barotropic.py --smoother zonal_line.
+PRODUCTION BUILD (substantial, justified): geometric restriction/prolongation
+(mask + pole-fold aware, halo-aware under band-MPI) + the V-cycle as a PCG
+preconditioner option, AD-safe + conservation-gated. The line smoother +
+Helmholtz operator already exist; the MG transfer operators + V-cycle wrapper
+are the new code.

@@ -65,7 +65,15 @@ def _build_level(n_lat, n_lon, H_cell, coeff):
     v_mask = jnp.ones((n_lat + 1, n_lon))
     A_op = _make_helmholtz(H_u, H_v, coeff, grid, mask, u_mask, v_mask)
     inv_diag = _helmholtz_inv_diag(H_u, H_v, coeff, grid, mask)
-    return A_op, inv_diag, grid, mask, H_u, H_v
+    # Zonal-LINE preconditioner (exact periodic-tridiagonal solve per lat row =
+    # implicit ZONAL solve) — the anisotropy-aware smoother: near the poles
+    # dx<<dy so the Helmholtz couples strongly in lon, which pointwise jacobi
+    # can't smooth but a zonal line solve handles directly.
+    from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
+        _make_zonal_line_preconditioner,
+    )
+    zl_minv = _make_zonal_line_preconditioner(H_u, H_v, coeff, grid, mask)
+    return A_op, inv_diag, grid, mask, H_u, H_v, zl_minv
 
 
 def _restrict(rf, nlc, nloc):
@@ -85,6 +93,16 @@ def _wjacobi(A_op, inv_diag, b, x, omega, sweeps):
     return x
 
 
+def _line_smooth(A_op, zl_minv, b, x, omega, sweeps):
+    """Zonal-LINE-preconditioned Richardson smoother: x <- x + w*M_zl(b - A x).
+    M_zl exactly inverts the zonal tridiagonal per row -> smooths the strong
+    zonal coupling that defeats pointwise jacobi on the anisotropic polar grid.
+    """
+    for _ in range(sweeps):
+        x = x + omega * zl_minv(b - A_op(x))
+    return x
+
+
 def main() -> int:
     import argparse
     ap = argparse.ArgumentParser()
@@ -95,6 +113,8 @@ def main() -> int:
     ap.add_argument("--pre", type=int, default=2)
     ap.add_argument("--post", type=int, default=2)
     ap.add_argument("--coarse-sweeps", type=int, default=10)
+    ap.add_argument("--smoother", choices=("jacobi", "zonal_line"),
+                    default="jacobi")
     ap.add_argument("--m-list", default="2,4,6,8,12,16,24,40,60")
     args = ap.parse_args()
 
@@ -106,12 +126,12 @@ def main() -> int:
     # Build the RECURSIVE level hierarchy by 2x coarsening until the grid is
     # small (>=8 rows). Each level re-discretizes the Helmholtz on the
     # coarsened grid with 2x2-averaged depth (geometric multigrid).
-    levels = []   # (A_op, inv_diag_f64, mask, n_lat, n_lon)
+    levels = []   # (A_op, inv_diag_f64, mask, n_lat, n_lon, zl_minv)
     H = H_fine
     nl, nlo = nlf, nlof
     while True:
-        A_op, inv_diag, g, mask, _, _ = _build_level(nl, nlo, H, coeff)
-        levels.append((A_op, inv_diag.astype(jnp.float64), mask, nl, nlo))
+        A_op, inv_diag, g, mask, _, _, zl_minv = _build_level(nl, nlo, H, coeff)
+        levels.append((A_op, inv_diag.astype(jnp.float64), mask, nl, nlo, zl_minv))
         if nl // 2 < 8 or nl % 2 or nlo % 2:
             break
         H = _restrict(H, nl // 2, nlo // 2)
@@ -119,18 +139,24 @@ def main() -> int:
     n_levels = len(levels)
     Af, invf_d, maskf = levels[0][0], levels[0][1], levels[0][2]
     gf = ensure_geometry(create_latlon_grid(n_lat=nlf, n_lon=nlof))
+    _use_line = args.smoother == "zonal_line"
+
+    def _smooth(A_op, inv_d, zl_minv, b, x, sweeps):
+        if _use_line:
+            return _line_smooth(A_op, zl_minv, b, x, args.omega, sweeps)
+        return _wjacobi(A_op, inv_d, b, x, args.omega, sweeps)
 
     def v_cycle(lvl, b, x):
-        A_op, inv_d, mask, nl, nlo = levels[lvl]
+        A_op, inv_d, mask, nl, nlo, zl_minv = levels[lvl]
         if lvl == n_levels - 1:                       # coarsest: solve hard
-            return _wjacobi(A_op, inv_d, b, x, args.omega, args.coarse_sweeps)
-        x = _wjacobi(A_op, inv_d, b, x, args.omega, args.pre)        # pre
+            return _smooth(A_op, inv_d, zl_minv, b, x, args.coarse_sweeps)
+        x = _smooth(A_op, inv_d, zl_minv, b, x, args.pre)            # pre
         r = (b - A_op(x)) * mask                                     # residual
         nlc, nloc = nl // 2, nlo // 2
         rc = _restrict(r, nlc, nloc) * levels[lvl + 1][2]           # restrict
         ec = v_cycle(lvl + 1, rc, jnp.zeros_like(rc))               # recurse
         x = x + _prolong(ec) * mask                                  # correct
-        x = _wjacobi(A_op, inv_d, b, x, args.omega, args.post)       # post
+        x = _smooth(A_op, inv_d, zl_minv, b, x, args.post)           # post
         return x * mask
 
     def mg_vcycle(b):
@@ -148,7 +174,8 @@ def main() -> int:
     grid_chain = " -> ".join(f"{L[3]}x{L[4]}" for L in levels)
     print(f"[mgpoc] {n_levels}-level V-cycle: {grid_chain} | coeff={args.coeff:g} "
           f"omega={args.omega} pre/post={args.pre}/{args.post} "
-          f"coarse_sweeps={args.coarse_sweeps}", flush=True)
+          f"coarse_sweeps={args.coarse_sweeps} SMOOTHER={args.smoother}",
+          flush=True)
 
     def resid_of(M_inv, M):
         _, diag = solve_helmholtz_implicit(
