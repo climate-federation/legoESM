@@ -87,8 +87,15 @@ built. QG2 uses the FAITHFUL full QG-Leith (B5b stretching), no longer the barot
   grid-scale energy (expected — the paper's effective-resolution point); a clean eddy field needs
   the paper's 7-km grid.
 
-The full matrix — {1/8°,1/16°,1/32°} × {UP3,W9V,W9D,SM2,QG2} × 1000 days (15 runs) — needs GPU
-(no CUDA in the build session); CPU is impractical at 1000 days × instability-resolving resolution.
+**Production-resolution viability (1/8° = 160×128×50, W9V, 3 days):** the model builds + runs
+STABLE at the paper's coarsest production resolution — no shape/memory/stability issue; L_d=5.66 km
+(converging to the paper's 5.5). This fully de-risks the GPU matrix. CPU timing: ~100 s/day → a
+1000-day run ≈ 28 CPU-hours, so the 15-run matrix ≈ 420 CPU-hours (impractical) vs ~4 GPU-hours.
+
+The full matrix — {1/8°,1/16°,1/32°} × {UP3,W9V,W9D,SM2,QG2} × 1000 days (15 runs) — is therefore
+GPU-gated (no CUDA in the build session). Launch is mechanical:
+`run_silvestri_baroclinic_jet.py --scheme S --resolution RxC --days 1000 --dt 900`, one job per
+pinned GPU; then `plot_silvestri_comparison.py --case jet` + fill the §5 scoreboard below.
 
 ## Caveats / remaining work
 - **B5b DONE:** QG2 now uses the full QG-Leith with the baroclinic stretching ∂_z(f/N²∇b) + the
