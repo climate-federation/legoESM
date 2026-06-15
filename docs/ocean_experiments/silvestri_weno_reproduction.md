@@ -70,7 +70,7 @@ Figures: `fig4_turb2d_timeseries.png` (KE/enstrophy(t)), `fig4b_turb2d_convergen
 (effective-resolution convergence), `fig5_turb2d_spectra.png` (isotropic spectra @ t=3.6),
 `fig3_turb2d_vorticity.png` (vorticity fields). (Runtime artifacts, gitignored.)
 
-## §5 — baroclinic jet — PIPELINE VALIDATED (CPU sanity), full matrix PENDING (GPU)
+## §5 — baroclinic jet — PIPELINE BUILT; production runs UNSTABLE (open problem)
 The §5 recipe (front Eqs 52-53 + thermal wind + τ=50d zonal-mean restoring, uniform 20m/50lev,
 L_d≈5.7km), the per-scheme driver (1000-day scan + Fig-7/8/9/10 metrics), and the plotter are
 built. QG2 uses the FAITHFUL full QG-Leith (B5b stretching), no longer the barotropic approximation.
@@ -87,15 +87,25 @@ built. QG2 uses the FAITHFUL full QG-Leith (B5b stretching), no longer the barot
   grid-scale energy (expected — the paper's effective-resolution point); a clean eddy field needs
   the paper's 7-km grid.
 
-**Production-resolution viability (1/8° = 160×128×50, W9V, 3 days):** the model builds + runs
-STABLE at the paper's coarsest production resolution — no shape/memory/stability issue; L_d=5.66 km
-(converging to the paper's 5.5). This fully de-risks the GPU matrix. CPU timing: ~100 s/day → a
-1000-day run ≈ 28 CPU-hours, so the 15-run matrix ≈ 420 CPU-hours (impractical) vs ~4 GPU-hours.
+**Production-resolution status (1/8° = 160×128×50) — UNSTABLE, OPEN PROBLEM.** On GPU (V100S, ~8.5
+s/day) all 5 schemes were run to 1000 days but **blow up early during instability onset**: W9V day
+11, QG2 day 15, SM2 day 24 (max|u|→nan). Halving dt to 450 s did NOT help (W9V still blows at day
+11), and even the explicit-closure schemes (SM2/QG2) blow up — so it is not a simple CFL fix nor a
+pure lack-of-dissipation issue. (An earlier 3-day probe wrongly read as "viable" — it never reached
+the day-11 failure; corrected here.)
+- This is the SAME eddy-resolving instability the Eady rebuild hit at 120×120: at 1/8° the
+  deformation radius (~5.7 km) is resolved by only ~2.5 cells, so the marginally-resolved baroclinic
+  instability piles grid-scale energy until it blows. The Eady fix was a tuned A_h≈1000 + C_smag≈0.1
+  *combination*; the §5 recipe currently runs the WENO schemes with NO explicit closure (paper-
+  faithful) and the dispersive schemes with only their closure.
+- **Open work to get §5 producing results:** diagnose the day-11 blowup (likely needs (a) baseline
+  A_h+C_smag for the no-closure WENO schemes at 1/8°, and/or (b) the finer 1/16°/1/32° grids where
+  L_d is properly resolved — which is where the paper's MAIN comparison lives; 14 km is the paper's
+  "under-resolved" case). The pipeline (recipe+driver+metrics+plotter) is built and correct; the
+  blocker is the eddy-resolving stabilization, not the code.
 
-The full matrix — {1/8°,1/16°,1/32°} × {UP3,W9V,W9D,SM2,QG2} × 1000 days (15 runs) — is therefore
-GPU-gated (no CUDA in the build session). Launch is mechanical:
-`run_silvestri_baroclinic_jet.py --scheme S --resolution RxC --days 1000 --dt 900`, one job per
-pinned GPU; then `plot_silvestri_comparison.py --case jet` + fill the §5 scoreboard below.
+Launch once stabilized: `run_silvestri_baroclinic_jet.py --scheme S --resolution RxC --days 1000`,
+one job per pinned GPU; then `plot_silvestri_comparison.py --case jet` + fill the §5 scoreboard.
 
 ## Caveats / remaining work
 - **B5b DONE:** QG2 now uses the full QG-Leith with the baroclinic stretching ∂_z(f/N²∇b) + the
