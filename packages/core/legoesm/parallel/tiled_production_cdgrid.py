@@ -639,6 +639,70 @@ def make_tiled_vertical_pe_stage_2d(mesh, coord, n: int, kt: int):
 
 
 # ---------------------------------------------------------------------------
+# P-3D-bernoulli COMPOSED stage: the Bernoulli function B = KE + Phi (step 5 of
+# fv3_hydrostatic_tendencies).  Composes TWO cc-local ops (dgrid_to_center_vector
+# D->cc box-avg + compute_geopotential[_hybrid] per-column integration) in ONE
+# shard_map — sliced once, both ops cc-local (NO halo), so the result is exactly
+# the global B sliced.  Returns (B, u_cc, v_cc); u_cc/v_cc are reused downstream
+# (KE-heat d_con + the cc-wind corner interp).  ``coord`` (sigma OR hybrid)
+# closed over; geopotential core dispatched on its type.  No new numerics.
+# ---------------------------------------------------------------------------
+
+def make_tiled_bernoulli_stage_2d(mesh, coord, n: int, kt: int):
+    """Composed Bernoulli stage on a ``(6, kt, kt)`` mesh.
+    ``stage(u_d, v_d, T, p_s, phis) -> (B, u_cc, v_cc)``: u_d/v_d corner D-winds
+    4D ``(6,n+1,n+1,nlev)`` + T 4D ``(6,n,n,nlev)`` + p_s/phis 2D cc, all
+    FACE-REPLICATED; tile-sharded outputs (exact cc partition, vertical
+    replicated).  B = 0.5*(u_cc^2+v_cc^2) + Phi, bit-identical to the global
+    composition (both ops cc-local).  ``coord`` sigma or hybrid."""
+    from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+    from legoesm.grids.vertical import (
+        compute_geopotential, compute_geopotential_hybrid,
+        HybridSigmaPressureCoordinate,
+    )
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    nl = n // kt
+    _hybrid = isinstance(coord, HybridSigmaPressureCoordinate)
+    _geo = compute_geopotential_hybrid if _hybrid else compute_geopotential
+    fo = P("face", None, None)                 # 2D cc (p_s, phis)
+    fw = P("face", None, None, None)           # 4D (u_d, v_d, T)
+    cz = P("face", "tile_i", "tile_j", None)   # 4D outs
+
+    @partial(shard_map, mesh=mesh, in_specs=(fw, fw, fw, fo, fo),
+             out_specs=(cz, cz, cz), check_vma=False)
+    def _body(u_d, v_d, T, p_s, phis):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _sc(arr):  # (nl+1, nl+1) corner block for D-winds
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, nl + 1, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, nl + 1, axis=2)
+
+        def _s2(arr):  # (nl, nl) cc block
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, nl, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, nl, axis=2)
+
+        u_cc, v_cc = dgrid_to_center_vector(_sc(u_d), _sc(v_d))
+        Phi = _geo(_s2(T), _s2(p_s), coord, _s2(phis))
+        B = 0.5 * (u_cc ** 2 + v_cc ** 2) + Phi
+        return B, u_cc, v_cc
+
+    def stage(u_d, v_d, T, p_s, phis):
+        if u_d.shape[1:3] != (n + 1, n + 1) or v_d.shape[1:3] != (n + 1, n + 1) \
+                or T.shape[1:3] != (n, n) or p_s.shape[1:3] != (n, n) \
+                or phis.shape[1:3] != (n, n):
+            raise ValueError(
+                f"bernoulli stage: u_d/v_d corner (n+1,n+1)={(n + 1, n + 1)}, "
+                f"T/p_s/phis cc (n,n)={(n, n)}; got u_d={u_d.shape[1:3]}, "
+                f"v_d={v_d.shape[1:3]}, T={T.shape[1:3]}, p_s={p_s.shape[1:3]}, "
+                f"phis={phis.shape[1:3]}")
+        return _body(u_d, v_d, T, p_s, phis)
+
+    return stage
+
+
+# ---------------------------------------------------------------------------
 # P-ii: the two production 4-point box interps.
 #   interp_corner_to_center (corner -> cc): PURELY LOCAL (cc cell reads its 2x2
 #     corner block) — like dgrid_vorticity, no halo, exact cc partition.
