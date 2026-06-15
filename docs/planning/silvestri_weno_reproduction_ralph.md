@@ -203,6 +203,30 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 9 — PHASE 3: R2 baroclinic-jet recipe DONE — 2026-06-15
+- **R2 COMPLETE + adversarially reviewed + committed** (`ocean/experiments/silvestri_baroclinic_jet.py`).
+  Paper §5 setup: `SilvestriJetConfig` (−60→−40°, 20° periodic, 1km/50lev, N²=4e-6, Δb=5e-3,
+  τ=50d); `silvestri_front_B` (Eqs 52-53 front, 1 south→0 north); IC = T from the buoyancy front
+  via linear EOS + thermal-wind u (zero at bottom face) + white noise; `apply_zonal_mean_restoring`
+  /`restore_state` (relax ⟨T,S,u,v⟩_x to the initial profile, eddies untouched — Soufflet 2016);
+  `build_silvestri_baroclinic_jet_setup(scheme=...)` (corrected dycore stack + `apply_silvestri_scheme`).
+  Returns `SilvestriJetRecipe` (+ restoring targets). L_d≈5.7km (paper 5.5).
+- **Adversarial review: no blockers.** The 3 most-likely bugs (EOS sign inversion → static
+  instability, thermal-wind sign, restoring-u double-count) ALL verified ABSENT numerically (min
+  ∂b/∂z=+3.3e-6>0 stable, front correctly oriented warmer-south, thermal wind matches the validated
+  `eady_instability` convention). Applied: **uniform 20m vertical grid** (SHOULD-FIX — was stretched
+  z-star; paper fixes dz=20m; `dz_surface==dz_deep`), **u wrap-column zonal mean** (NIT — average
+  over distinct cols [:-1]), docstring NITs. The other SHOULD-FIX (restoring not wired into a driver)
+  IS R4 — the helper is intentionally driver-applied.
+- Tests (10): front shape/monotonic/center; IC front+thermal-wind+finite; uniform dz=20m; L_d order;
+  restoring relaxes mean by exactly γdt·offset while leaving a synthetic eddy bit-unchanged; all 5
+  schemes build+step+restore finite.
+- **NEXT: R4 driver** `scripts/run/run_silvestri_baroclinic_jet.py` — build recipe for a
+  (scheme, resolution), lax.scan the 1000-day integration applying `restore_state` each step,
+  compute the Phase-2 metrics (EKE/TKE/eddy-APE time series, zonal spectra, zonal-mean b, L_d),
+  emit a parseable VERDICT, save metric arrays for the plotter. Then R1 (2D turb + periodic_y grid)
+  + R3 driver + R5 plotter. **B5b still required before the QG2 matrix run** (full QG2 stretching).
+
 ### Iteration 8 — PHASE 3 START: scheme presets done + recipe scoping — 2026-06-15
 - **Scheme-preset helper DONE + committed** (`ocean/experiments/silvestri_schemes.py`): the
   canonical mapping of the 5 §5 schemes (UP3/W9V/W9D/SM2/QG2) → `LatLonCGridOceanConfig` overrides,
