@@ -203,6 +203,45 @@ class TestCoupledCheckpointValidation(unittest.TestCase):
             self.assertEqual(tuple(driver._ocean_state.T_sfc.data.shape), cur)
 
 
+class TestUnfusedRadiation(unittest.TestCase):
+    """Un-fused-radiation host loop (production compile-time fix): radiation runs
+    as separate host jits instead of fused in the scan.  Must run + stay stable
+    and match the fused path to radiation-cadence tolerance; OFF is a no-op.
+    Gray radiation exercises the same host-loop structure as rrtmgp, cheaply."""
+
+    def _run(self, unfused, rad_update_steps=2, days=2):
+        from legoesm.driver.config import (
+            ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
+        )
+        from legoesm.driver.coupled_config import PRESETS
+        from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+        atm = ExperimentConfig(
+            grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
+            dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+            output=OutputConfig(diag_days=days),
+            radiation="gray", days=days,
+            rad_update_steps=rad_update_steps,
+            unfused_radiation=unfused,
+        )
+        driver = CoupledESMDriver(atm, PRESETS["aquaplanet"]())
+        driver.setup()
+        status = driver.run()
+        return driver, status
+
+    def test_unfused_runs_and_matches_fused(self):
+        drv_u, st_u = self._run(unfused=True)
+        self.assertEqual(st_u, "COMPLETED")
+        self.assertTrue(jnp.all(jnp.isfinite(drv_u.state.T.data)))
+        # Fused reference (same config, flag OFF -> legacy path).
+        drv_f, st_f = self._run(unfused=False)
+        self.assertEqual(st_f, "COMPLETED")
+        # The host loop applies radiation with a one-step (sub-cadence) phase
+        # shift vs the fused subcycle, so close-but-not-bit-identical.
+        t_u = float(jnp.mean(drv_u.state.T.data))
+        t_f = float(jnp.mean(drv_f.state.T.data))
+        self.assertAlmostEqual(t_u, t_f, delta=2.0)  # K, generous for the phase shift
+
+
 class TestWallclockExhausted(unittest.TestCase):
     """Wallclock-budget checkpoint-and-exit predicate (#6)."""
 

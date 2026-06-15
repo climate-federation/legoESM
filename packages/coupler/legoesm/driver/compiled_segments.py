@@ -550,6 +550,7 @@ def build_segment_fn(
     step_unified_no_rad=None,
     device_config=None,
     energy_consistent_moisture_clip: bool = False,
+    pipeline=None,
 ):
     """Build a compiled segment function.
 
@@ -654,6 +655,17 @@ def build_segment_fn(
         organised convection; the existing floor truncates the sink but
         keeps the full latent heating).  Default ``False`` =>
         bit-identical to the legacy path.
+    pipeline : PhysicsPipeline or None, optional
+        The physics pipeline.  Only consumed by the optional "un-fused
+        radiation" host path (``ExperimentConfig.unfused_radiation`` —
+        PRODUCTION ``_run_compiled`` only): it lets the returned object
+        expose ``run_norad_scan`` (a host-callable jit of a pure no-rad
+        ``rad_update_steps``-length scan) and ``run_rad`` (a
+        host-callable jit of ``pipeline.compute_radiation_core``) so
+        rrtmgp and the dynamics+physics scan compile as TWO SEPARATE
+        XLA executables instead of one inlined ~3h graph.  ``None``
+        (default) leaves both attributes ``None`` and changes nothing —
+        the legacy fused ``run_segment`` path is byte-identical.
 
     Returns
     -------
@@ -1130,6 +1142,147 @@ def build_segment_fn(
         final_carry, _ = jax.lax.scan(_step_fn, carry, None, length=n_steps)
         return final_carry
 
+    # ------------------------------------------------------------------
+    # Un-fused radiation host kernels (ExperimentConfig.unfused_radiation;
+    # PRODUCTION ``_run_compiled`` ONLY).  A ``jax.jit`` placed INSIDE a
+    # ``lax.scan`` body is INLINED by XLA into ONE giant executable — so
+    # even the cond-free ``_run_subcycled`` above still inlines the rrtmgp
+    # branch and pays the ~3h XLA compile.  Lifting the radiation-cycle
+    # loop to the HOST (Python) makes the no-rad dynamics+physics scan and
+    # the rrtmgp radiation compile as TWO SEPARATE executables.  These two
+    # functions are the host-callable halves; the driver alternates them
+    # (``run_norad_scan`` × ``run_rad``) once per radiation cycle.  Both
+    # are gated OFF by default: built only when ``step_unified_no_rad`` and
+    # ``pipeline`` are supplied AND ``rad_update_steps > 1``.
+    # ------------------------------------------------------------------
+    _unfused_available = (
+        step_unified_no_rad is not None
+        and pipeline is not None
+        and rad_update_steps > 1
+    )
+
+    def _run_norad_scan(carry: SegmentCarry,
+                        forcing: SegmentForcing) -> SegmentCarry:
+        """Advance exactly ``rad_update_steps`` no-rad steps as ONE scan.
+
+        Pure dynamics+physics with HELD radiation (``step_unified_no_rad``
+        — no fresh rrtmgp call), so this HLO contains NO rrtmgp.  Identical
+        per-step body to ``_run_subcycled``'s ``body_no_rad``; only the
+        compile boundary differs (host-level, not inlined in an outer
+        scan).
+        """
+        body_no_rad = _make_single_step(forcing, step_fn=step_unified_no_rad)
+        if gradient_checkpoint:
+            body_no_rad = jax.checkpoint(body_no_rad, prevent_cse=False)
+        final_carry, _ = jax.lax.scan(
+            body_no_rad, carry, None, length=rad_update_steps,
+        )
+        return final_carry
+
+    def _run_rad(carry: SegmentCarry,
+                 forcing: SegmentForcing) -> SegmentCarry:
+        """Recompute FRESH held radiation + T_land from the carry state.
+
+        Radiation ONLY (no dynamics/physics), so this HLO is rrtmgp-only.
+        Calls the SAME ``pipeline.compute_radiation_core`` the fused
+        ``_rad_branch`` calls (physics_pipeline.py), threading ``forcing``
+        identically (so ``sfc_albedo_override`` / ``sfc_T_override`` /
+        column-shard handling is byte-identical), and writes the 6 held
+        flux fields + ``T_land`` back at owned indices.  Every other carry
+        field passes through unchanged — the post-cycle dynamics+physics
+        state is untouched here.
+
+        Owned-face extract/write-back MIRROR ``_make_single_step``
+        (compiled_segments.py): on the MPI replicated-dynamics path
+        physics/radiation operate on owned columns only and write back at
+        ``owned_face_ids``; on the single-rank path the whole grid is
+        owned.
+        """
+        # Reconstruct GHG VMR dict from the forcing array + static keys,
+        # exactly as ``_make_single_step`` does (keys captured in closure;
+        # values dynamic).
+        _ghg_vmr_override = ghg_array_to_dict(forcing.ghg_vmr, _ghg_keys)
+
+        if owned_face_ids is not None:
+            _ofi = owned_face_ids
+            _T_land_in = (carry.T_land[_ofi]
+                          if carry.T_land is not None else None)
+
+            def _own(fld):
+                return None if fld is None else fld[_ofi]
+
+            (dT_dt_rad, sw_net_sfc, lw_net_sfc,
+             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new_local) = \
+                pipeline.compute_radiation_core(
+                    carry.T[_ofi], carry.p_s[_ofi], carry.q_v[_ofi],
+                    forcing.sst, forcing.sic, lat, lon,
+                    forcing.day_of_year, forcing.seconds_of_day,
+                    forcing.solar_weights, forcing.s_0,
+                    forcing.o3_vmr, forcing.aerosol_od,
+                    aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                    tau_equator=_tau_equator, tau_pole=_tau_pole,
+                    albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+                    ghg_vmr_override=_ghg_vmr_override,
+                    q_c=_own(carry.q_c), q_i=_own(carry.q_i),
+                    N_c=_own(carry.N_c), N_i=_own(carry.N_i),
+                    cloud_scheme=pipeline._cloud_scheme,
+                    u=carry.u[_ofi], v=carry.v[_ofi], dt=_dt,
+                    T_land=_T_land_in,
+                    sfc_albedo_override=forcing.sfc_albedo_override,
+                    sfc_T_override=forcing.sfc_T_override,
+                )
+            held_new = (
+                carry.held_dT_rad.at[_ofi].set(dT_dt_rad),
+                carry.held_sw_net_sfc.at[_ofi].set(sw_net_sfc),
+                carry.held_lw_net_sfc.at[_ofi].set(lw_net_sfc),
+                carry.held_sw_up_toa.at[_ofi].set(sw_up_toa),
+                carry.held_lw_up_toa.at[_ofi].set(lw_up_toa),
+                carry.held_sw_down_toa.at[_ofi].set(sw_down_toa),
+            )
+            T_land_new = (
+                carry.T_land.at[_ofi].set(T_land_new_local)
+                if carry.T_land is not None else None
+            )
+        else:
+            (dT_dt_rad, sw_net_sfc, lw_net_sfc,
+             sw_up_toa, lw_up_toa, sw_down_toa, T_land_new) = \
+                pipeline.compute_radiation_core(
+                    carry.T, carry.p_s, carry.q_v,
+                    forcing.sst, forcing.sic, lat, lon,
+                    forcing.day_of_year, forcing.seconds_of_day,
+                    forcing.solar_weights, forcing.s_0,
+                    forcing.o3_vmr, forcing.aerosol_od,
+                    aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                    tau_equator=_tau_equator, tau_pole=_tau_pole,
+                    albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+                    ghg_vmr_override=_ghg_vmr_override,
+                    q_c=carry.q_c, q_i=carry.q_i,
+                    N_c=carry.N_c, N_i=carry.N_i,
+                    cloud_scheme=pipeline._cloud_scheme,
+                    u=carry.u, v=carry.v, dt=_dt,
+                    T_land=carry.T_land,
+                    sfc_albedo_override=forcing.sfc_albedo_override,
+                    sfc_T_override=forcing.sfc_T_override,
+                )
+            held_new = (
+                dT_dt_rad, sw_net_sfc, lw_net_sfc,
+                sw_up_toa, lw_up_toa, sw_down_toa,
+            )
+
+        # Write ONLY the 6 held fields + T_land back (matched to the
+        # carry's storage dtype, like the fused write-back); every other
+        # field is the unchanged post-cycle state.
+        return carry._replace(
+            held_dT_rad=_match_dtype(held_new[0], carry.held_dT_rad),
+            held_sw_net_sfc=_match_dtype(held_new[1], carry.held_sw_net_sfc),
+            held_lw_net_sfc=_match_dtype(held_new[2], carry.held_lw_net_sfc),
+            held_sw_up_toa=_match_dtype(held_new[3], carry.held_sw_up_toa),
+            held_lw_up_toa=_match_dtype(held_new[4], carry.held_lw_up_toa),
+            held_sw_down_toa=_match_dtype(held_new[5], carry.held_sw_down_toa),
+            T_land=(None if carry.T_land is None
+                    else _match_dtype(T_land_new, carry.T_land)),
+        )
+
     @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
     def _run_subcycled_jit(carry: SegmentCarry, n_steps: int,
                            forcing: SegmentForcing) -> SegmentCarry:
@@ -1139,6 +1292,21 @@ def build_segment_fn(
     def _run_single_jit(carry: SegmentCarry, n_steps: int,
                         forcing: SegmentForcing) -> SegmentCarry:
         return _run_single(carry, n_steps, forcing)
+
+    # Non-sharded production jits for the un-fused host kernels.  No static
+    # ``n_steps`` arg (the scan length is the closure-captured
+    # ``rad_update_steps``), donate the carry like the fused kernels.  Only
+    # built when ``_unfused_available`` (else the attributes stay None).
+    if _unfused_available:
+        @partial(jax.jit, donate_argnums=(0,))
+        def _run_norad_scan_jit(carry: SegmentCarry,
+                                forcing: SegmentForcing) -> SegmentCarry:
+            return _run_norad_scan(carry, forcing)
+
+        @partial(jax.jit, donate_argnums=(0,))
+        def _run_rad_jit(carry: SegmentCarry,
+                         forcing: SegmentForcing) -> SegmentCarry:
+            return _run_rad(carry, forcing)
 
     def _use_subcycle(carry: SegmentCarry, n_steps: int) -> bool:
         """Decide whether the subcycled scan path is valid for this call.
@@ -1403,8 +1571,23 @@ def build_segment_fn(
         )
         fn = _sharded_jit_cache.get(key)
         if fn is None:
-            target = _run_subcycled if kind == "subcycled" else _run_single
-            jit_kwargs: dict = dict(static_argnums=(1,))
+            # The "norad_scan" / "rad" host kinds (un-fused radiation) take
+            # ``(carry, forcing)`` with NO static ``n_steps`` arg, so they
+            # skip ``static_argnums``; the legacy "single" / "subcycled"
+            # scan kinds take ``(carry, n_steps_static, forcing)``.  Either
+            # way the DYNAMIC args are exactly ``(carry, forcing)``, so the
+            # 2-tuple in/out shardings below bind identically.
+            _targets = {
+                "subcycled": _run_subcycled,
+                "single": _run_single,
+                "norad_scan": _run_norad_scan,
+                "rad": _run_rad,
+            }
+            target = _targets[kind]
+            _has_static_nsteps = kind in ("single", "subcycled")
+            jit_kwargs: dict = (
+                dict(static_argnums=(1,)) if _has_static_nsteps else {}
+            )
             if pin:
                 # NOTE: with ``static_argnums`` JAX matches
                 # ``in_shardings`` against the tree of DYNAMIC args
@@ -1412,7 +1595,9 @@ def build_segment_fn(
                 # uses ``tree_without_statics``) — hence a 2-tuple for
                 # the ``(carry, n_steps_static, forcing)`` signature.
                 # A 3-tuple with a placeholder for ``n_steps`` raises
-                # "wrong length ... for an args tuple of length 2".
+                # "wrong length ... for an args tuple of length 2".  The
+                # ``(carry, forcing)`` host kinds already have exactly
+                # those two dynamic args, so the SAME 2-tuple applies.
                 # Every array leaf carries a concrete ``NamedSharding``
                 # (its committed layout if on this mesh, else replicated
                 # ``P()``); structural ``None`` marks only the non-array
@@ -1420,7 +1605,9 @@ def build_segment_fn(
                 # ``create_output_shardings`` produced, so the
                 # in_shardings tree binds 1:1 to the argument leaves.
                 # ``out_shardings`` == the carry's input layout because
-                # the scan body preserves carry shape (no resize/repack).
+                # the scan/rad body preserves carry shape (no resize/
+                # repack — ``run_rad`` writes the held fields + T_land
+                # in place at owned indices).
                 jit_kwargs["in_shardings"] = (
                     _sharding_tree(carry), _sharding_tree(forcing),
                 )
@@ -1499,11 +1686,47 @@ def build_segment_fn(
             )
         return _run_single(carry, n_steps, forcing)
 
+    # Host-callable un-fused-radiation entry points (PRODUCTION
+    # ``_run_compiled`` only; default OFF).  Each is its OWN compiled
+    # executable: ``run_norad_scan`` is a pure no-rad dynamics+physics
+    # scan (no rrtmgp in its HLO); ``run_rad`` is rrtmgp-only.  They route
+    # through the SAME ``_get_sharded_jit`` machinery as the fused kernels
+    # so SPMD in/out shardings match the upstream-sharded carry (reading
+    # ``.sharding`` off the committed carry/forcing — never re-derived).
+    # Attached only when ``_unfused_available`` so the legacy path (and
+    # any caller that does not supply ``pipeline`` / ``step_unified_no_rad``
+    # / ``rad_update_steps>1``) sees ``None`` and the byte-identical fused
+    # ``run_segment`` is used instead.
+    _run_norad_scan_public = None
+    _run_rad_public = None
+    if _unfused_available:
+        def _run_norad_scan_public(carry: SegmentCarry,           # noqa: F811
+                                   forcing: SegmentForcing) -> SegmentCarry:
+            """Advance ``rad_update_steps`` no-rad steps (compiled, host)."""
+            if _sharding_active:
+                return _get_sharded_jit("norad_scan", True, carry, forcing)(
+                    carry, forcing,
+                )
+            return _run_norad_scan_jit(carry, forcing)
+
+        def _run_rad_public(carry: SegmentCarry,                  # noqa: F811
+                            forcing: SegmentForcing) -> SegmentCarry:
+            """Recompute fresh held radiation + T_land (compiled, host)."""
+            if _sharding_active:
+                return _get_sharded_jit("rad", True, carry, forcing)(
+                    carry, forcing,
+                )
+            return _run_rad_jit(carry, forcing)
+
     # Attach both variants; default is the JIT version for inference.
     # The sharded-wrapper cache is exposed for tests/introspection
     # (e.g. asserting "no wrapper rebuild per segment").
     run_segment_jit.raw = run_segment
     run_segment_jit._sharded_jit_cache = _sharded_jit_cache
+    # Un-fused-radiation host kernels (None unless built); the driver only
+    # uses them when ``ExperimentConfig.unfused_radiation`` is set.
+    run_segment_jit.run_norad_scan = _run_norad_scan_public
+    run_segment_jit.run_rad = _run_rad_public
     return run_segment_jit
 
 
