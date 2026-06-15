@@ -53,6 +53,7 @@ from legoesm.ocean.state import (
     LatLonCGridOceanTendencies,
     MomentumTendencyDiagnostics,
     LatLonCGridOceanConfig,
+    OMp25Config,
     SurfaceTracerForcing,
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
@@ -82,6 +83,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     pad_ns_zero,
     fold_is_local,
     smagorinsky_biharmonic_tendency_cgrid,
+    om4p25_lateral_friction_tendency_cgrid,
     smagorinsky_viscosity_cgrid,
     smagorinsky_viscosity_q_cgrid,
     strain_rate_cgrid,
@@ -147,6 +149,10 @@ VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
 # FLUX-DIVERGENCE harmonic friction ∇·(A_h∇u). Validated at config construction;
 # unknown -> ValueError (dispatch discipline).
 VALID_LATERAL_VISCOSITY_OPERATOR = frozenset({"vector_laplacian", "flux_divergence"})
+# Lateral-friction CLOSURE selector (config.lateral_friction_scheme): "none"
+# (the A_h/B_h/C_smag/C_leith knobs apply) or "om4p25" (Silvestri 2024 SM2 —
+# GFDL OM4p25 Laplacian+biharmonic max(Smag,static) closure).
+VALID_LATERAL_FRICTION_SCHEME = frozenset({"none", "om4p25"})
 # Coriolis time-stepping placement (config.coriolis_scheme):
 #   "matsuno_split" (default, bit-identical) — Coriolis is a sequential
 #     forward-backward (Matsuno) rotation sub-step on the FE-advanced state and
@@ -2201,6 +2207,23 @@ def _bc_horizontal_viscosity(
         diag_Cl_leith_u, diag_Cl_leith_v = _apply_slope_foot(diag_Cl_leith_u, diag_Cl_leith_v)
         du_dt = du_dt + diag_Cl_leith_u
         dv_dt = dv_dt + diag_Cl_leith_v
+
+    # --- 10a'. OM4p25 lateral-friction closure (Silvestri 2024 "SM2"). ---
+    # A self-contained Laplacian+biharmonic max(Smag,static) closure; when
+    # selected it is the SOLE lateral friction (the recipe zeros A_h/B_h/
+    # C_smag/C_leith). Returns the combined tendency (already Laplacian +
+    # (−biharmonic)); accumulated into the Smagorinsky diagnostic bucket.
+    if config.lateral_friction_scheme == "om4p25":
+        _om = config.omp25 if config.omp25 is not None else OMp25Config()
+        om_u, om_v = om4p25_lateral_friction_tendency_cgrid(
+            u, v, grid, C2=_om.C2, Cu2=_om.Cu2, C4=_om.C4, Cu4=_om.Cu4,
+            deformation_radius=_om.deformation_radius_m,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        om_u, om_v = _apply_slope_foot(om_u, om_v)
+        du_dt = du_dt + om_u
+        dv_dt = dv_dt + om_v
+        diag_Cs_smag_u = diag_Cs_smag_u + om_u
+        diag_Cs_smag_v = diag_Cs_smag_v + om_v
 
     # --- 10b. Meridional-only Laplacian viscosity ---
     # Scalar d²/dy² applied directly at faces, targeting the 2Δy mode

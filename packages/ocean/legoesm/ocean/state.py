@@ -664,6 +664,20 @@ class MomentumTendencyDiagnostics(NamedTuple):
     total_v: Field
 
 
+class OMp25Config(NamedTuple):
+    """OM4p25 lateral-friction closure coefficients (GFDL OM4.0, Adcroft et al.
+    2019; Silvestri et al. 2024 "SM2"). Laplacian + biharmonic, each the max of
+    a Smagorinsky term and a static grid-scale term, with the Laplacian tapered
+    by the deformation-radius factor F = 1/(1+0.25·(L_d/Δ)⁴). Defaults are the
+    published OM4p25 values."""
+    C2: float = 0.15      # Laplacian Smagorinsky coefficient
+    Cu2: float = 0.01     # Laplacian static-viscosity coefficient
+    C4: float = 0.06      # biharmonic Smagorinsky coefficient
+    Cu4: float = 0.01     # biharmonic static-viscosity coefficient
+    deformation_radius_m: float = 6.75e3  # L_d for the F taper [m]; ~uniform for
+    #   the idealised baroclinic jet. Spatially-varying L_d (from N²) is a refinement.
+
+
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
@@ -1368,3 +1382,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     # validation).  Default False ⇒ the explicit stage-10c placement ⇒
     # BIT-IDENTICAL.
     sponge_forcing_implicit: bool = False
+    # Lateral-friction CLOSURE selector (independent of the A_h/B_h/C_smag/C_leith
+    # knobs above). "none" (default) → those knobs apply as usual. "om4p25" → the
+    # GFDL OM4p25 Laplacian+biharmonic max(Smag,static) closure (Silvestri "SM2");
+    # set the A_h/B_h/C_smag/C_leith knobs to 0 in that recipe so OM4p25 is the
+    # sole lateral friction. Coefficients live in ``omp25`` (OMp25Config).
+    lateral_friction_scheme: str = "none"
+    omp25: object = None   # OMp25Config or None (defaults to OMp25Config() when scheme="om4p25")

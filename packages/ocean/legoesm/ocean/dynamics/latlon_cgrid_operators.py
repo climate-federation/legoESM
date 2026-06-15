@@ -1987,6 +1987,88 @@ def smagorinsky_biharmonic_tendency_cgrid(
     return tend_u, tend_v
 
 
+def om4p25_lateral_friction_tendency_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid,
+    *,
+    C2: float = 0.15,
+    Cu2: float = 0.01,
+    C4: float = 0.06,
+    Cu4: float = 0.01,
+    deformation_radius: jnp.ndarray | float = 6.75e3,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """OM4p25 lateral-friction closure (GFDL OM4.0, Adcroft et al. 2019) — the
+    Silvestri et al. 2024 "SM2" comparison case. A Laplacian + biharmonic
+    combination where each viscosity is the MAX of a flow-adaptive Smagorinsky
+    term and a static grid-scale term (paper Appendix A, Eqs A5-A8):
+
+        nu2 = max(C2·Δ²·|D|, Cu2·Δ)·F          (Laplacian   [m²/s])
+        nu4 = max(C4·Δ⁴·|D|, Cu4·Δ³)            (biharmonic  [m⁴/s])
+        F   = 1 / (1 + 0.25·(L_d/Δ)⁴)            (deformation-radius taper)
+
+    with |D| = sqrt(D_T² + D_S²) the strain-rate magnitude (D_T = ∂ₓu−∂ᵧv,
+    D_S = ∂ₓv+∂ᵧu), Δ = sqrt(cell area), and L_d the first-baroclinic
+    deformation radius. F reduces the LAPLACIAN where the deformation radius is
+    well resolved (large L_d/Δ); it does not taper the biharmonic.
+
+    Both viscosities are applied through the energy-stable stress-tensor
+    operator (``viscous_tendency_cgrid``, the exact discrete adjoint of the
+    strain rate), so dissipation is guaranteed for the non-negative spatially-
+    varying coefficients. The biharmonic uses the two-pass form
+    ``L_c(L_1(u))`` whose effective coefficient is ``c·Δ²``; to realise
+    ``nu4`` the second-pass coefficient is ``c4 = nu4/Δ² = max(C4·Δ²·|D|, Cu4·Δ)``.
+
+    Coefficient defaults are the OM4p25 values: C2=0.15, Cu2=0.01, C4=0.06,
+    Cu4=0.01. ``deformation_radius`` is a scalar (or h-point field) in metres;
+    for the idealised baroclinic jet it is ~uniform (~6.75 km). A spatially-
+    varying L_d from the local N² is a faithfulness refinement.
+
+    Returns ``(tend_u, tend_v)`` already combining Laplacian (added) and
+    biharmonic (subtracted); the caller ADDS these to du/dt.
+    """
+    # Δ²·|D| at h- and q-points via the Smagorinsky helpers with unit
+    # coefficient (smagorinsky_viscosity_cgrid returns (C·Δ)²·|D| = Δ²·|D| at C=1).
+    S_h = smagorinsky_viscosity_cgrid(
+        u, v, grid, 1.0, mask=mask, u_mask=u_mask, v_mask=v_mask)   # Δ_h²·|D|_h
+    D_T, D_S = strain_rate_cgrid(
+        u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    S_q = smagorinsky_viscosity_q_cgrid(D_T, D_S, grid, 1.0, mask=mask)  # Δ_q²·|D|_q
+
+    Delta_h = jnp.sqrt(grid.area)
+    if S_h.ndim == 3:
+        Delta_h = Delta_h[..., jnp.newaxis]
+    Delta_q = jnp.sqrt(vertex_area_1d(grid))
+    bcast = (slice(None),) + (jnp.newaxis,) * (S_q.ndim - 1)
+    Delta_q = Delta_q[bcast]
+
+    def _taper(Delta):
+        # F = 1/(1 + 0.25·(L_d/Δ)⁴): small where L_d >> Δ (resolved eddies).
+        Rh = deformation_radius / jnp.maximum(Delta, 1.0e-12)
+        return 1.0 / (1.0 + 0.25 * Rh ** 4)
+
+    nu2_h = jnp.maximum(C2 * S_h, Cu2 * Delta_h) * _taper(Delta_h)
+    nu2_q = jnp.maximum(C2 * S_q, Cu2 * Delta_q) * _taper(Delta_q)
+    c4_h = jnp.maximum(C4 * S_h, Cu4 * Delta_h)
+    c4_q = jnp.maximum(C4 * S_q, Cu4 * Delta_q)
+
+    # Laplacian (added directly — energy-dissipative for nu2 >= 0).
+    lap_u, lap_v = viscous_tendency_cgrid(
+        u, v, grid, nu2_h, nu2_q, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    # Biharmonic two-pass (subtracted): u_star = unit-coeff stress-divergence,
+    # then c4-weighted stress-divergence → effective nu4·∇⁴u.
+    u_star, v_star = viscous_tendency_cgrid(
+        u, v, grid, 1.0, 1.0, mask=mask, u_mask=u_mask, v_mask=v_mask,
+        normalize=False)
+    bih_u, bih_v = viscous_tendency_cgrid(
+        u_star, v_star, grid, c4_h, c4_q,
+        mask=mask, u_mask=u_mask, v_mask=v_mask)
+    return lap_u - bih_u, lap_v - bih_v
+
+
 # =============================================================================
 # Leith viscosity (Leith 1996; Fox-Kemper & Menemenlis 2008)
 # =============================================================================
