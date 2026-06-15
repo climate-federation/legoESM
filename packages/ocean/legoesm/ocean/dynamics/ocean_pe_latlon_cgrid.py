@@ -2496,8 +2496,15 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             tau_n_T = -jnp.asarray(_sf_tau_y, dtype=u.dtype)
             tau_e_u_face = interp_cell_to_uface(tau_e_T)       # (n_lat, n_lon+1)
             tau_n_u_face = interp_cell_to_uface(tau_n_T)
-            tau_e_v_face = interp_to_v_points(tau_e_T, grid=grid)  # (n_lat+1, n_lon)
-            tau_n_v_face = interp_to_v_points(tau_n_T, grid=grid)
+            # Coalesce the THREE v-face interps (tau_e, tau_n, dz_0) into ONE
+            # fused lat-halo exchange: -2 sendrecv pairs/step under band MPI
+            # (codex halo-hunt #1, audit lever O4).  dz_0_T is computed here
+            # (was below) so all three ride one pad_with_pole_bc_lat_multi;
+            # interp_to_v_points_multi is value-identical to the per-field
+            # calls.  The u-face interps stay separate (lon-local, no halo).
+            dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u.dtype) * J
+            tau_e_v_face, tau_n_v_face, dz_0_v = interp_to_v_points_multi(
+                (tau_e_T, tau_n_T, dz_0_T), grid=grid)   # each (n_lat+1, n_lon)
 
             cos_a_u = getattr(grid, "cos_alpha_u", None)
             sin_a_u = getattr(grid, "sin_alpha_u", None)
@@ -2516,9 +2523,7 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             else:
                 tau_j_v = tau_n_v_face
 
-            dz_0_T = jnp.asarray(z_coord.dz_ref[0], dtype=u.dtype) * J
-            dz_0_u = interp_cell_to_uface(dz_0_T)
-            dz_0_v = interp_to_v_points(dz_0_T, grid=grid)
+            dz_0_u = interp_cell_to_uface(dz_0_T)   # dz_0_T + dz_0_v fused above
             rho_0_dt = jnp.asarray(rho_0, dtype=u.dtype)
             inv_rho_dz_u = 1.0 / (rho_0_dt * jnp.maximum(dz_0_u, 1e-10))
             inv_rho_dz_v = 1.0 / (rho_0_dt * jnp.maximum(dz_0_v, 1e-10))
