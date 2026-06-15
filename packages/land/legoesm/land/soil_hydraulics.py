@@ -572,3 +572,32 @@ def moisture_capacity(psi: jnp.ndarray, theta: jnp.ndarray,
 def interblock_K(K_above: jnp.ndarray, K_below: jnp.ndarray) -> jnp.ndarray:
     """Geometric mean of hydraulic conductivity between adjacent layers."""
     return jnp.sqrt(jnp.clip(K_above, 1e-20, None) * jnp.clip(K_below, 1e-20, None))
+
+
+# ==========================================================================
+# Per-column / per-layer parameter support
+# ==========================================================================
+
+def slice_layer(config: SoilHydraulicsConfig, k: int) -> SoilHydraulicsConfig:
+    """Return ``config`` with every per-(col,layer) field reduced to a single
+    layer ``k`` (so a ``(ncol, nlayer)`` or ``(ncol, 1)`` param becomes
+    ``(ncol,)``).  Scalars and 1-D fields are passed through unchanged.
+
+    Use this when a Richards step computes a quantity at a *single* layer
+    (e.g. top-layer ``K_top`` for the infiltration capacity, bottom-layer
+    ``K_bot`` for free-drainage runoff) and the soil state at that layer is
+    ``(ncol,)``: mixing ``(ncol,)`` with a ``(ncol, 1)`` param would otherwise
+    broadcast to ``(ncol, ncol)`` and silently corrupt the result.
+    """
+    def pick(v):
+        # Strings (e.g. retention_curve) and Python scalars: passthrough.
+        if not hasattr(v, "ndim"):
+            return v
+        # 0-D / 1-D arrays already align with (ncol,).
+        if v.ndim < 2:
+            return v
+        # 2-D (ncol, n_layer_or_1): pick layer k.  Length-1 layer axis acts
+        # as a broadcast and the index folds to 0 automatically.
+        idx = k if v.shape[-1] > 1 else 0
+        return v[..., idx]
+    return type(config)(*(pick(getattr(config, f)) for f in config._fields))

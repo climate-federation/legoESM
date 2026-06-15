@@ -231,6 +231,15 @@ def build_soil_hydraulics(
     sand_col = np.where(bad, fallback_sand_pct, sand_col)
     clay_col = np.where(bad, fallback_clay_pct, clay_col)
 
+    # Keep params at the default float precision (float64 with x64) so the
+    # multilayer state — initialised as ``0.5 * theta_sat`` — stays at the
+    # same precision as the Richards solver's grid arrays (``grid.dz``,
+    # ``dz_interface``) and forcing fluxes.  The cubed-sphere KD-tree regrid
+    # returns float32; downcasting params to float32 would make the carry
+    # input float32 while the loop body upcasts to float64 via the float64
+    # grid arrays, breaking ``lax.fori_loop`` dtype matching.
+    sand_col = sand_col.astype(np.float64)
+    clay_col = clay_col.astype(np.float64)
     p = cosby_hydraulic_params(jnp.asarray(sand_col), jnp.asarray(clay_col))
     col = lambda a: jnp.asarray(a)[:, None]                  # (ncol, 1)
     return base._replace(
@@ -344,14 +353,13 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *, the
 
     The single entry a driver calls at simulation start.  Returns
     ``(land_config, land_params, gsd)``: for a multilayer config the returned
-    config also carries the Cosby soil hydraulics derived from the surfdata
-    (global-mean texture for now; see solve_richards shape-hardening TODO).
+    config also carries the per-column Cosby soil hydraulics derived from the
+    surfdata via :func:`build_soil_hydraulics` (params are ``(ncol, 1)`` arrays
+    that broadcast over the model's ``(ncol, n_layer)`` soil state).
     ``theta_top`` (top-layer wetness for the soil-colour albedo) defaults to a
     nominal 0.2 when no state exists yet.
     """
-    import warnings
     from legoesm.land.config import MultiLayerLandConfig
-    from legoesm.land.pedotransfer import soil_hydraulics_config_from_texture
     from legoesm.land.global_surface_data import get_surfdata_preset, load_global_surface_data
 
     cfg_sd = get_surfdata_preset("legoesm_surfdata")._replace(surf_path=surfdata_path)
@@ -361,12 +369,8 @@ def init_land_surface_data(surfdata_path, grid, land_config, day_of_year, *, the
         theta_top = jnp.full(ncol, _THETA_TOP_DEFAULT)
 
     if isinstance(land_config, MultiLayerLandConfig):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            mean_sand = float(np.nanmean(np.asarray(gsd.sand_frac) * 100.0))
-            mean_clay = float(np.nanmean(np.asarray(gsd.clay_frac) * 100.0))
         land_config = land_config._replace(
-            hydraulics=soil_hydraulics_config_from_texture(mean_sand, mean_clay))
+            hydraulics=build_soil_hydraulics(gsd, base=land_config.hydraulics))
 
     land_params = surface_data_to_land_params(
         gsd, land_config.surface_scheme, day_of_year, theta_top)
