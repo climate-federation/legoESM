@@ -193,6 +193,31 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 4 — B3 DONE (UP3 flux-form momentum) — 2026-06-15
+- **B3 COMPLETE + adversarially reviewed + committed** (`feat(ocean): UP3 3rd-order
+  upwind-biased flux-form momentum advection`). `momentum_flux_scheme="upwind3"` (paper UP3 =
+  Oceananigans `UpwindBiased(order=3)`, NEMO/ROMS κ=1/3). New module-level `_up3_reconstruct`
+  (4-pt upwind-biased face value), wired into all 4 flux terms of the flux-form path:
+  zonal-u/zonal-v (periodic-lon rolls) + meridional-u/meridional-v (edge-padded Neumann,
+  damped by Qy→0 at poles). Flux telescoping preserved → momentum conserved.
+- **Adversarial review (skeptical subagent): no blockers.** Numerically verified the highest-
+  risk part — the edge-padded meridional stencils — element-by-element for small n_lat (no
+  off-by-one), UP3 cubic-convergence ratio-8 (3rd order), conservation residual 1.9e-18 (holds
+  even with a corrupted wrap column), AD/JIT static + finite grads. Applied the one NIT: made
+  zonal-u `far_neg` wrap-robust (build from the distinct core via roll, not the wrap-inclusive
+  u[:,1:]) to match the routine's existing wrap-robust style.
+- Tests: 12 flux-form (UP3 conservation u+v, uniform-flow-zero, UP3≠upwind; `_up3_reconstruct`
+  constant/linear-exact + upwind-bias) + 61 dispatch/eady green.
+- **Recipe-scheme coverage so far:** W9V (B1+B2 split), W9D (B2 standard), UP3 (B3). Remaining
+  comparison schemes: SM2 (B4 = OM4p25 Smagorinsky preset), QG2 (B5 = QG-Leith).
+- **NEXT: B4 = OM4p25 Smagorinsky lateral-friction preset (SM2).** The pieces likely exist
+  (A_h/B_h/C_smag/C_smag_lap operators) — assemble the exact OM4p25 combo: ν₂=max(C₂Δ²|D|,Cu₂Δ)·F,
+  ν₄=max(C₄Δ⁴|D|,Cu₄Δ³), F=1/(1+0.25·Rh⁴) with Rh=L_d/Δ, |D|=√(Ds²+Dt²), Ds=∂ₓu−∂ᵧv,
+  Dt=∂ₓv+∂ᵧu, C₂=.15 Cu₂=.01 C₄=.06 Cu₄=.01. As a config preset/NamedTuple, NOT magic numbers.
+  Read the existing smagorinsky_laplacian/biharmonic operators in latlon_cgrid_operators.py +
+  the `lateral_viscosity_operator` dispatch FIRST. Ref:
+  BaroclinicAdjustment.jl/src/Parameterizations/omp25_lateral_friction.jl.
+
 ### Iteration 3 — B2 DONE (weno_smoothness split/standard) — 2026-06-15
 - **B2 COMPLETE + adversarially reviewed + committed** (`feat(ocean): weno_smoothness split
   (W*V) vs standard (W*D)`). `config.weno_smoothness ∈ {"split","standard"}` now selects the

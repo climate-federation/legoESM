@@ -2771,10 +2771,13 @@ def _bc_horizontal_momentum_advection_flux_form(
     # ============ u-momentum at u-points (n_lat, n_lon+1) ============
     # x-flux at cell centres: transport_x_centre * u_advected_centre.
     Qx_c = 0.5 * (Q_u[:, :-1, :] + Q_u[:, 1:, :])                 # (n_lat,n_lon,nlev)
-    # u advected to cell centre; periodic-lon 4-pt stencil for upwind3.
+    # u advected to cell centre; periodic-lon 4-pt stencil for upwind3. Build
+    # the far cells from the DISTINCT core u[:, :-1] (faces 0..n_lon-1) via
+    # rolls so the reconstruction does not depend on the periodic wrap column
+    # u[:, n_lon] (matches the wrap-robust style of the v-momentum x-part).
     u_c = _recon(u[:, :-1, :], u[:, 1:, :], Qx_c,
-                 far_pos=jnp.roll(u[:, :-1, :], 1, axis=1),
-                 far_neg=jnp.roll(u[:, 1:, :], -1, axis=1))       # west when Qx>0
+                 far_pos=jnp.roll(u[:, :-1, :], 1, axis=1),       # face c-1
+                 far_neg=jnp.roll(u[:, :-1, :], -2, axis=1))      # face c+2; west when Qx>0
     Fx_uu = Qx_c * u_c                                           # (n_lat,n_lon,nlev)
     # divergence to u-points (periodic in lon): flux[centre J] - flux[centre J-1].
     _dx = Fx_uu - jnp.roll(Fx_uu, 1, axis=1)
