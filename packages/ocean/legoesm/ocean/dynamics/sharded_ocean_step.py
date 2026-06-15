@@ -50,6 +50,48 @@ def _lat_spec(x):
     return P("lat", *((None,) * (nd - 1)))
 
 
+def build_band_grids(grid, n_devices: int):
+    """Build the ``n_devices`` UNIFORM lat-band geometries for the SPMD step,
+    reusing the tested MPI band slicers (no bespoke re-derivation).
+
+    Requires ``grid.n_lat % n_devices == 0`` so every band has the same leading
+    shape — a ``shard_map`` body is ONE program, so the per-band grids must be
+    structurally identical (only the values + the north band's active fold
+    differ). ``make_latlon_band_layout`` would otherwise hand the first
+    ``n_lat % n_devices`` ranks one extra row.
+
+    Returns a list of ``n_devices`` band-local ``LatLonCGridGeometry`` (rank 0 =
+    south band ... rank ``n_devices-1`` = north band). The slicer keeps
+    ``total_area`` GLOBAL on every band (area-weighted-mean denominator), slices
+    v/q rows ``[s:e+1]`` (the shared staggered boundary face), and localizes the
+    bipolar fold — active only on the north band, ``fold_j=cap_j=-1`` sentinel on
+    interior bands so ``fold_is_local()`` is False there and the pad_ns_*
+    operators fall through to the SPMD band halo. See omip-multinode-spmd-scope.
+
+    ``latlon_mpi`` defers ``from mpi4py import MPI`` to function scope, so these
+    pure slicers import without requiring mpi4py.
+    """
+    from legoesm.parallel.latlon_mpi import (
+        make_latlon_band_layout,
+        slice_cgrid_geometry_to_band,
+    )
+    n_lat = int(grid.n_lat)
+    if n_devices < 1:
+        raise ValueError(f"n_devices must be >= 1, got {n_devices}")
+    if n_lat % n_devices != 0:
+        raise ValueError(
+            f"SPMD lat-band requires n_lat ({n_lat}) divisible by n_devices "
+            f"({n_devices}) so every band is uniform (one shard_map program). "
+            f"Pick n_devices among the divisors of {n_lat}.")
+    fold = getattr(grid, "fold", None)
+    return [
+        slice_cgrid_geometry_to_band(
+            grid,
+            make_latlon_band_layout(r, n_devices, n_lat, int(grid.n_lon), fold))
+        for r in range(n_devices)
+    ]
+
+
 def make_sharded_ocean_step(model, mesh):
     """Return ``step(state, dt) -> state`` running ``model.step`` lat-band-SPMD.
 
