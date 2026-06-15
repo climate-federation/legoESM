@@ -71,7 +71,11 @@ from legoesm.atmosphere.physics.radiation.config import (
 )
 from legoesm.atmosphere.physics.radiation.integration import sam_ocean_albedo
 from legoesm.atmosphere.scm import SingleColumnModel, apply_tendencies
-from legoesm.atmosphere.scm_forcing import SCMForcing, add_tendencies
+from legoesm.atmosphere.scm_forcing import (
+    SCMForcing,
+    add_tendencies,
+    compute_forcing_tendencies,
+)
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticTendencies
 from legoesm.grids.vertical import SigmaCoordinate
@@ -139,6 +143,9 @@ DEFAULT_SCM_RCE_BL_TOP_M = 0.0
 DEFAULT_SCM_RCE_BL_LAPSE_K_M = 6.5e-3
 DEFAULT_SCM_RCE_BL_MIN_T_K = 285.0
 DEFAULT_SCM_CONVECTION_SUBSTEPS = 10
+CRM_CLEAR_SKY_COND_THRESHOLD = 1.0e-6
+SCM_RCE_LARGE_SCALE_FORCING_CHOICES = ("none", "crm_clear_sky_subsidence")
+DEFAULT_SCM_RCE_LARGE_SCALE_FORCING = "none"
 SCM_CONVECTION_SUBSTEP_SCHEMES = (
     "dca",
     "zhang_mcfarlane",
@@ -221,6 +228,8 @@ class ReferenceProfiles:
     precip_ref_mm_day: float = float("nan")
     precip_files_used: list[str] = field(default_factory=list)
     precip_unit_note: str = ""
+    crm_clear_sky_subsidence_m_s: np.ndarray | None = None
+    crm_cloud_fraction: np.ndarray | None = None
 
 
 @dataclass
@@ -407,6 +416,48 @@ def _reference_surface_precip(
     return precip, [str(p) for p in selected], note
 
 
+def _reference_crm_clear_sky_subsidence(
+    files: list[Path],
+    *,
+    condensate_threshold: float = CRM_CLEAR_SKY_COND_THRESHOLD,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Diagnose CRM-resolved environmental descent from reference volumes.
+
+    RCEMIP/RCE does not prescribe large-scale subsidence; the plane CRM
+    resolves convective updrafts and their compensating clear-sky descent.
+    For an SCM comparability experiment we can approximate that missing
+    resolved circulation by the *area-weighted* clear-sky vertical velocity,
+    ``<w 1_clear>``, using the same RCEMIP cloud mask threshold as the cloud
+    fraction diagnostic.  Positive-upward values are clipped to zero because
+    this optional forcing represents subsidence only, not gravity-wave ascent.
+    The model top and surface full levels are closed explicitly.
+
+    This is intentionally not the conditional mean ``<w | clear>``; applying
+    that to a single mean column would overstate the per-domain descent by
+    the clear-sky area fraction.
+    """
+    w_profiles: list[np.ndarray] = []
+    cf_profiles: list[np.ndarray] = []
+    for path in files:
+        with np.load(path) as ds:
+            if "w" not in ds.files or "cond" not in ds.files:
+                continue
+            w = np.asarray(ds["w"], dtype=float)
+            cond = np.maximum(np.asarray(ds["cond"], dtype=float), 0.0)
+        clear = cond < condensate_threshold
+        w_profiles.append(np.where(clear, w, 0.0).mean(axis=(0, 1)))
+        cf_profiles.append((~clear).mean(axis=(0, 1)))
+    if not w_profiles:
+        return None, None
+    w_sub = np.minimum(np.mean(np.stack(w_profiles), axis=0), 0.0)
+    if w_sub.size:
+        w_sub = w_sub.copy()
+        w_sub[0] = 0.0
+        w_sub[-1] = 0.0
+    cloud_fraction = np.mean(np.stack(cf_profiles), axis=0)
+    return w_sub, cloud_fraction
+
+
 def build_reference_profiles(
     reference_dir: Path,
     last_n: int,
@@ -458,6 +509,9 @@ def build_reference_profiles(
     precip_ref, precip_files, precip_note = _reference_surface_precip(
         reference_dir, precip_analysis_days,
     )
+    crm_subsidence, crm_cloud_fraction = _reference_crm_clear_sky_subsidence(
+        files,
+    )
     return ReferenceProfiles(
         z_m=z_m,
         sigma_half=sigma_half,
@@ -471,6 +525,8 @@ def build_reference_profiles(
         precip_ref_mm_day=precip_ref,
         precip_files_used=precip_files,
         precip_unit_note=precip_note,
+        crm_clear_sky_subsidence_m_s=crm_subsidence,
+        crm_cloud_fraction=crm_cloud_fraction,
     )
 
 
@@ -625,6 +681,7 @@ def _config_cache_key(
     scm_convection_substeps: int,
     surface_wind_m_s: float,
     coriolis_s_inv: float,
+    large_scale_forcing: str,
 ) -> str:
     effective_microphysics_substeps = _effective_scm_microphysics_substeps(
         cfg.microphysics.scheme,
@@ -641,10 +698,49 @@ def _config_cache_key(
         "scm_convection_substeps": effective_convection_substeps,
         "surface_wind_m_s": surface_wind_m_s,
         "coriolis_s_inv": coriolis_s_inv,
+        "large_scale_forcing": large_scale_forcing,
         "config": _to_jsonable(cfg),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(raw).hexdigest()
+
+
+def _make_scm_rce_forcing(
+    ref: ReferenceProfiles,
+    *,
+    surface_wind_m_s: float,
+    coriolis_s_inv: float,
+    large_scale_forcing: str,
+) -> SCMForcing:
+    if large_scale_forcing not in SCM_RCE_LARGE_SCALE_FORCING_CHOICES:
+        raise ValueError(
+            f"Unknown SCM RCE large-scale forcing {large_scale_forcing!r}; "
+            f"choose from {SCM_RCE_LARGE_SCALE_FORCING_CHOICES}."
+        )
+    wind_profile = jnp.full((len(ref.z_m),), surface_wind_m_s, dtype=jnp.float64)
+    zero_wind_profile = jnp.zeros((len(ref.z_m),), dtype=jnp.float64)
+    subsidence_w = None
+    if large_scale_forcing == "crm_clear_sky_subsidence":
+        if ref.crm_clear_sky_subsidence_m_s is None:
+            raise ValueError(
+                "large_scale_forcing='crm_clear_sky_subsidence' requires "
+                "reference volumes containing `w` and `cond`."
+            )
+        w_sub = jnp.asarray(ref.crm_clear_sky_subsidence_m_s, dtype=jnp.float64)
+        if w_sub.shape != (len(ref.z_m),):
+            raise ValueError(
+                "CRM clear-sky subsidence profile shape "
+                f"{tuple(w_sub.shape)} does not match nlev={len(ref.z_m)}."
+            )
+        subsidence_w = lambda _t, w=w_sub: w
+    return SCMForcing(
+        prescribe="T_s",
+        T_s=lambda _t: FIXED_SST_K,
+        f_c=coriolis_s_inv,
+        u_geo=lambda _t: wind_profile,
+        v_geo=lambda _t: zero_wind_profile,
+        subsidence_w=subsidence_w,
+    )
 
 
 def _preseed_column_tracers(scm: SingleColumnModel, microphysics_scheme: str) -> None:
@@ -890,17 +986,15 @@ def run_scm_rce(
     scm_convection_substeps: int = DEFAULT_SCM_CONVECTION_SUBSTEPS,
     surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
     coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
+    large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
 ) -> RunDiagnostics:
     nsteps = max(1, int(round(days * SECONDS_PER_DAY / dt)))
     T0, qv0 = wing_initial_profiles(ref)
-    wind_profile = jnp.full((len(ref.z_m),), surface_wind_m_s, dtype=jnp.float64)
-    zero_wind_profile = jnp.zeros((len(ref.z_m),), dtype=jnp.float64)
-    forcing = SCMForcing(
-        prescribe="T_s",
-        T_s=lambda _t: FIXED_SST_K,
-        f_c=coriolis_s_inv,
-        u_geo=lambda _t: wind_profile,
-        v_geo=lambda _t: zero_wind_profile,
+    forcing = _make_scm_rce_forcing(
+        ref,
+        surface_wind_m_s=surface_wind_m_s,
+        coriolis_s_inv=coriolis_s_inv,
+        large_scale_forcing=large_scale_forcing,
     )
     radiation_interval = max(1, int(cfg.radiation.update_interval_steps))
     use_cached_radiation = (
@@ -994,8 +1088,14 @@ def run_scm_rce(
             phys_out = phys_out._replace(surface_T_sfc_override=sst_col)
         return tend, phys_out
 
-    def fixed_sst_tendency(state, phys_state, _t):
-        return _call_physics_with_fixed_sst(physics_fn, state, phys_state)
+    def fixed_sst_tendency(state, phys_state, t):
+        tend, phys_out = _call_physics_with_fixed_sst(
+            physics_fn, state, phys_state,
+        )
+        forcing_tend = compute_forcing_tendencies(
+            state, sigma_coord, forcing, t,
+        )
+        return add_tendencies(tend, forcing_tend), phys_out
 
     def apply_convection_substeps(state, phys_state):
         if not use_split_convection:
@@ -1073,13 +1173,17 @@ def run_scm_rce(
         qcond = _qcond_from_tracers(
             new_state.tracers, microphysics_scheme,
         )[0, 0, 0]
-        precip = micro_precip + (
-            convective_precip
-            if use_split_convection
-            else convective_precip_diagnostic(
+        if use_split_convection:
+            convective_precip_for_score = (
+                convective_precip
+                if microphysics_scheme == "none"
+                else jnp.zeros((), dtype=new_state.T.data.dtype)
+            )
+        else:
+            convective_precip_for_score = convective_precip_diagnostic(
                 new_state, new_phys, grid, sigma_coord,
             )
-        )
+        precip = micro_precip + convective_precip_for_score
         out = (new_state.T.data[0, 0, 0], qv, qcond, precip)
         return (new_state, new_phys), out
 
@@ -1111,13 +1215,17 @@ def run_scm_rce(
         qcond = _qcond_from_tracers(
             new_state.tracers, microphysics_scheme,
         )[0, 0, 0]
-        precip = micro_precip + (
-            convective_precip
-            if use_split_convection
-            else convective_precip_diagnostic(
+        if use_split_convection:
+            convective_precip_for_score = (
+                convective_precip
+                if microphysics_scheme == "none"
+                else jnp.zeros((), dtype=new_state.T.data.dtype)
+            )
+        else:
+            convective_precip_for_score = convective_precip_diagnostic(
                 new_state, new_phys, grid, sigma_coord,
             )
-        )
+        precip = micro_precip + convective_precip_for_score
         out = (new_state.T.data[0, 0, 0], qv, qcond, precip)
         return (new_state, new_phys, rad_tend), out
 
@@ -1296,6 +1404,7 @@ def run_cached(
     scm_convection_substeps: int = DEFAULT_SCM_CONVECTION_SUBSTEPS,
     surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
     coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
+    large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
 ) -> RunDiagnostics:
     key = _config_cache_key(
         cfg,
@@ -1305,6 +1414,7 @@ def run_cached(
         scm_convection_substeps,
         surface_wind_m_s,
         coriolis_s_inv,
+        large_scale_forcing,
     )
     if key not in cache:
         cache[key] = run_scm_rce(
@@ -1323,6 +1433,7 @@ def run_cached(
             equil_qcond_tol=equil_qcond_tol,
             surface_wind_m_s=surface_wind_m_s,
             coriolis_s_inv=coriolis_s_inv,
+            large_scale_forcing=large_scale_forcing,
         )
     cached = cache[key]
     return RunDiagnostics(
@@ -1395,6 +1506,36 @@ def _write_ranking_csv(path: Path, category: str, results: list[RunDiagnostics])
                     "cold_point_z_km": r.cold_point_z_km,
                 }
             )
+
+
+def _write_profile_csv(path: Path, ref: ReferenceProfiles, results: list[RunDiagnostics]) -> None:
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "scheme", "z_km", "sigma", "T_K", "qv_kg_kg",
+                "qcond_kg_kg", "T_crm_K", "qv_crm_kg_kg", "qcond_crm_kg_kg",
+            ],
+        )
+        writer.writeheader()
+        for r in results:
+            if not r.T_profile or not r.qv_profile or not r.qcond_profile:
+                continue
+            scheme = r.config["convection"]
+            for k, z_m in enumerate(ref.z_m):
+                writer.writerow(
+                    {
+                        "scheme": scheme,
+                        "z_km": float(z_m) / 1000.0,
+                        "sigma": float(ref.sigma_full[k]),
+                        "T_K": r.T_profile[k],
+                        "qv_kg_kg": r.qv_profile[k],
+                        "qcond_kg_kg": r.qcond_profile[k],
+                        "T_crm_K": float(ref.T_ref[k]),
+                        "qv_crm_kg_kg": float(ref.qv_ref[k]),
+                        "qcond_crm_kg_kg": float(ref.qcond_ref[k]),
+                    }
+                )
 
 
 def _plot_ranking(path: Path, category: str, results: list[RunDiagnostics]) -> None:
@@ -1554,6 +1695,7 @@ def tune_category_winner(
     scm_convection_substeps: int = DEFAULT_SCM_CONVECTION_SUBSTEPS,
     surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
     coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
+    large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
 ) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics]:
     _component, scheme, subcfg = _active_subconfig(base_cfg, category)
     scheme_key = _scheme_key_for_subconfig(subcfg)
@@ -1574,6 +1716,7 @@ def tune_category_winner(
         scm_convection_substeps=scm_convection_substeps,
         surface_wind_m_s=surface_wind_m_s,
         coriolis_s_inv=coriolis_s_inv,
+        large_scale_forcing=large_scale_forcing,
     )
     if scheme_key is None or subcfg is None:
         return base_cfg, [], default_run
@@ -1626,6 +1769,7 @@ def tune_category_winner(
             scm_convection_substeps=scm_convection_substeps,
             surface_wind_m_s=surface_wind_m_s,
             coriolis_s_inv=coriolis_s_inv,
+            large_scale_forcing=large_scale_forcing,
         )
         if trial_run.status == "ok" and trial_run.score < best_run.score:
             best_cfg = trial_cfg
@@ -1720,6 +1864,7 @@ def _write_summary(
         f"radiation refresh: every {args.radiation_update_interval_steps} "
         f"steps; dt: {args.dt:.1f} s; background surface wind: "
         f"{args.surface_wind_m_s:.2f} m/s with f={args.coriolis_s_inv:.2e} s^-1; "
+        f"large-scale forcing: `{args.large_scale_forcing}`; "
         "lowest-level air temperature is anchored to the fixed SST "
         "after each SCM step while water vapor remains prognostic; "
         "SCM microphysics substeps for "
@@ -1740,6 +1885,16 @@ def _write_summary(
         "surface-anchored moist pseudo-adiabat, and a cold point in "
         f"[{COLD_POINT_MIN_K:g}, {COLD_POINT_MAX_K:g}] K at "
         f"[{TROP_MIN_Z_KM:g}, {TROP_MAX_Z_KM:g}] km.",
+        "",
+        "Large-scale forcing note: the plane CRM RCE itself imposes no external "
+        "subsidence. When `large_scale_forcing='crm_clear_sky_subsidence'`, the "
+        "SCM campaign approximates the CRM-resolved convective circulation by "
+        "applying the area-weighted clear-sky descent `<w 1_clear>` diagnosed "
+        f"from the CRM volumes with condensate threshold "
+        f"{CRM_CLEAR_SKY_COND_THRESHOLD:g} kg/kg. The profile is positive-upward, "
+        "clipped to subsidence only, and closed at the model top and surface. "
+        "This is an SCM comparability forcing, not a change to the CRM/plane "
+        "path; use `--large-scale-forcing none` for a free-running SCM.",
         "",
         "Recommended defaults live in the atmosphere physics `*Config` "
         "NamedTuple defaults and the combined `PhysicsConfig`; this campaign "
@@ -1868,6 +2023,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--large-scale-forcing",
+        choices=SCM_RCE_LARGE_SCALE_FORCING_CHOICES,
+        default=DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
+        help=(
+            "Optional SCM-only large-scale forcing. "
+            "'crm_clear_sky_subsidence' diagnoses the area-weighted clear-sky "
+            "descent from the same CRM reference volumes and applies it through "
+            "SCMForcing.subsidence_w; 'none' leaves the free-running SCM "
+            "without large-scale vertical advection. The low-level SCM default "
+            "remains no subsidence."
+        ),
+    )
+    parser.add_argument(
         "--radiation",
         choices=["rrtmgp", "gray"],
         default=BASELINE_SCHEMES["radiation"],
@@ -1970,6 +2138,7 @@ def main(argv: list[str] | None = None) -> int:
         scm_convection_substeps=args.scm_convection_substeps,
         surface_wind_m_s=args.surface_wind_m_s,
         coriolis_s_inv=args.coriolis_s_inv,
+        large_scale_forcing=args.large_scale_forcing,
     )
     print(f"[baseline] {baseline.status} score={baseline.score:.6g} {baseline.reason}")
 
@@ -2010,6 +2179,7 @@ def main(argv: list[str] | None = None) -> int:
                     scm_convection_substeps=args.scm_convection_substeps,
                     surface_wind_m_s=args.surface_wind_m_s,
                     coriolis_s_inv=args.coriolis_s_inv,
+                    large_scale_forcing=args.large_scale_forcing,
                 )
             )
             print(
@@ -2022,6 +2192,7 @@ def main(argv: list[str] | None = None) -> int:
         winner = ok_rows[0] if ok_rows else rows[0]
         winners[category] = winner.config[CATEGORY_CONFIG_FIELD[category]]
         _write_ranking_csv(args.outdir / f"ranking_{category}.csv", category, rows)
+        _write_profile_csv(args.outdir / f"profiles_{category}.csv", ref, rows)
         _plot_ranking(args.outdir / f"ranking_{category}.png", category, rows)
 
     best_kwargs = dict(BASELINE_SCHEMES)
@@ -2054,6 +2225,7 @@ def main(argv: list[str] | None = None) -> int:
         scm_convection_substeps=args.scm_convection_substeps,
         surface_wind_m_s=args.surface_wind_m_s,
         coriolis_s_inv=args.coriolis_s_inv,
+        large_scale_forcing=args.large_scale_forcing,
     )
     print(f"[best] {best.status} score={best.score:.6g} {best.reason}")
 
@@ -2082,6 +2254,7 @@ def main(argv: list[str] | None = None) -> int:
                 scm_convection_substeps=args.scm_convection_substeps,
                 surface_wind_m_s=args.surface_wind_m_s,
                 coriolis_s_inv=args.coriolis_s_inv,
+                large_scale_forcing=args.large_scale_forcing,
             )
             tuned_records.extend(records)
             tuned_best = tuned_run
