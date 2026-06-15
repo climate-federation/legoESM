@@ -522,10 +522,13 @@ def point_to_cellavg_periodic(f, axis, order=6):
         Point values at cell centers.
     axis : int
         Axis along which to apply the conversion (periodic).
-    order : {4, 6}
+    order : {4, 6, 8}
         Accuracy order of the conversion.
         4: 3-point stencil (sufficient for WENO3)
-        6: 5-point stencil (sufficient for WENO5/7)
+        6: 5-point stencil (sufficient for WENO5)
+        8: 7-point stencil (sufficient for WENO7/9 — needed so the W9V
+           reconstruction is not bottlenecked to 6th order; Silvestri et al.
+           2024 W9V-vs-W5V effective-resolution distinction depends on it)
 
     Returns
     -------
@@ -539,7 +542,7 @@ def point_to_cellavg_periodic(f, axis, order=6):
         # 3-point: f_avg = (11/12)*f + (1/24)*(f_{-1} + f_{+1})
         # Matches moments p=0,2; 4th-order accurate.
         return (11.0 / 12.0) * f + (1.0 / 24.0) * (fm1 + fp1)
-    else:
+    elif order <= 6:
         # 5-point: f_avg = (863/960)*f + (77/1440)*(f_{±1}) - (17/5760)*(f_{±2})
         # Matches moments p=0,2,4; 6th-order accurate.
         fm2 = jnp.roll(f, 2, axis=axis)
@@ -547,6 +550,19 @@ def point_to_cellavg_periodic(f, axis, order=6):
         return ((863.0 / 960.0) * f
                 + (77.0 / 1440.0) * (fm1 + fp1)
                 - (17.0 / 5760.0) * (fm2 + fp2))
+    else:
+        # 7-point: matches even moments p=0,2,4,6; 8th-order accurate.
+        # Symmetric coeffs solved from the cell-average Taylor moments and
+        # verified exact for polynomials up to degree 7:
+        #   c0=215641/241920, c1=6361/107520, c2=-281/53760, c3=367/967680.
+        fm2 = jnp.roll(f, 2, axis=axis)
+        fp2 = jnp.roll(f, -2, axis=axis)
+        fm3 = jnp.roll(f, 3, axis=axis)
+        fp3 = jnp.roll(f, -3, axis=axis)
+        return ((215641.0 / 241920.0) * f
+                + (6361.0 / 107520.0) * (fm1 + fp1)
+                - (281.0 / 53760.0) * (fm2 + fp2)
+                + (367.0 / 967680.0) * (fm3 + fp3))
 
 
 def point_to_cellavg_bounded(f, axis, order=6):
@@ -562,7 +578,7 @@ def point_to_cellavg_bounded(f, axis, order=6):
         Point values at cell centers.
     axis : int
         Axis along which to apply the conversion (bounded).
-    order : {4, 6}
+    order : {4, 6, 8}
         Accuracy order of the conversion in the interior.
 
     Returns
@@ -571,7 +587,7 @@ def point_to_cellavg_bounded(f, axis, order=6):
         Cell-average values (same shape as f).
     """
     n = f.shape[axis]
-    pad_width = {4: 1, 6: 2}.get(order, 2)
+    pad_width = {4: 1, 6: 2, 8: 3}.get(order, 3)
 
     def _pad_neumann(arr, width):
         slc_lo = [slice(None)] * arr.ndim

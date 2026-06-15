@@ -1990,6 +1990,88 @@ def smagorinsky_biharmonic_tendency_cgrid(
     return tend_u, tend_v
 
 
+def om4p25_lateral_friction_tendency_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid,
+    *,
+    C2: float = 0.15,
+    Cu2: float = 0.01,
+    C4: float = 0.06,
+    Cu4: float = 0.01,
+    deformation_radius: jnp.ndarray | float = 6.75e3,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """OM4p25 lateral-friction closure (GFDL OM4.0, Adcroft et al. 2019) — the
+    Silvestri et al. 2024 "SM2" comparison case. A Laplacian + biharmonic
+    combination where each viscosity is the MAX of a flow-adaptive Smagorinsky
+    term and a static grid-scale term (paper Appendix A, Eqs A5-A8):
+
+        nu2 = max(C2·Δ²·|D|, Cu2·Δ)·F          (Laplacian   [m²/s])
+        nu4 = max(C4·Δ⁴·|D|, Cu4·Δ³)            (biharmonic  [m⁴/s])
+        F   = 1 / (1 + 0.25·(L_d/Δ)⁴)            (deformation-radius taper)
+
+    with |D| = sqrt(D_T² + D_S²) the strain-rate magnitude (D_T = ∂ₓu−∂ᵧv,
+    D_S = ∂ₓv+∂ᵧu), Δ = sqrt(cell area), and L_d the first-baroclinic
+    deformation radius. F reduces the LAPLACIAN where the deformation radius is
+    well resolved (large L_d/Δ); it does not taper the biharmonic.
+
+    Both viscosities are applied through the energy-stable stress-tensor
+    operator (``viscous_tendency_cgrid``, the exact discrete adjoint of the
+    strain rate), so dissipation is guaranteed for the non-negative spatially-
+    varying coefficients. The biharmonic uses the two-pass form
+    ``L_c(L_1(u))`` whose effective coefficient is ``c·Δ²``; to realise
+    ``nu4`` the second-pass coefficient is ``c4 = nu4/Δ² = max(C4·Δ²·|D|, Cu4·Δ)``.
+
+    Coefficient defaults are the OM4p25 values: C2=0.15, Cu2=0.01, C4=0.06,
+    Cu4=0.01. ``deformation_radius`` is a scalar (or h-point field) in metres;
+    for the idealised baroclinic jet it is ~uniform (~6.75 km). A spatially-
+    varying L_d from the local N² is a faithfulness refinement.
+
+    Returns ``(tend_u, tend_v)`` already combining Laplacian (added) and
+    biharmonic (subtracted); the caller ADDS these to du/dt.
+    """
+    # Δ²·|D| at h- and q-points via the Smagorinsky helpers with unit
+    # coefficient (smagorinsky_viscosity_cgrid returns (C·Δ)²·|D| = Δ²·|D| at C=1).
+    S_h = smagorinsky_viscosity_cgrid(
+        u, v, grid, 1.0, mask=mask, u_mask=u_mask, v_mask=v_mask)   # Δ_h²·|D|_h
+    D_T, D_S = strain_rate_cgrid(
+        u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    S_q = smagorinsky_viscosity_q_cgrid(D_T, D_S, grid, 1.0, mask=mask)  # Δ_q²·|D|_q
+
+    Delta_h = jnp.sqrt(grid.area)
+    if S_h.ndim == 3:
+        Delta_h = Delta_h[..., jnp.newaxis]
+    Delta_q = jnp.sqrt(vertex_area_1d(grid))
+    bcast = (slice(None),) + (jnp.newaxis,) * (S_q.ndim - 1)
+    Delta_q = Delta_q[bcast]
+
+    def _taper(Delta):
+        # F = 1/(1 + 0.25·(L_d/Δ)⁴): small where L_d >> Δ (resolved eddies).
+        Rh = deformation_radius / jnp.maximum(Delta, 1.0e-12)
+        return 1.0 / (1.0 + 0.25 * Rh ** 4)
+
+    nu2_h = jnp.maximum(C2 * S_h, Cu2 * Delta_h) * _taper(Delta_h)
+    nu2_q = jnp.maximum(C2 * S_q, Cu2 * Delta_q) * _taper(Delta_q)
+    c4_h = jnp.maximum(C4 * S_h, Cu4 * Delta_h)
+    c4_q = jnp.maximum(C4 * S_q, Cu4 * Delta_q)
+
+    # Laplacian (added directly — energy-dissipative for nu2 >= 0).
+    lap_u, lap_v = viscous_tendency_cgrid(
+        u, v, grid, nu2_h, nu2_q, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    # Biharmonic two-pass (subtracted): u_star = unit-coeff stress-divergence,
+    # then c4-weighted stress-divergence → effective nu4·∇⁴u.
+    u_star, v_star = viscous_tendency_cgrid(
+        u, v, grid, 1.0, 1.0, mask=mask, u_mask=u_mask, v_mask=v_mask,
+        normalize=False)
+    bih_u, bih_v = viscous_tendency_cgrid(
+        u_star, v_star, grid, c4_h, c4_q,
+        mask=mask, u_mask=u_mask, v_mask=v_mask)
+    return lap_u - bih_u, lap_v - bih_v
+
+
 # =============================================================================
 # Leith viscosity (Leith 1996; Fox-Kemper & Menemenlis 2008)
 # =============================================================================
@@ -2012,57 +2094,40 @@ def smagorinsky_biharmonic_tendency_cgrid(
 # ``leith_biharmonic_tendency_cgrid`` below gives the Leith-biharmonic
 # operator ∇²(A_L ∇²u) with effective coefficient (C_L)³ Δ⁵ |∇ζ|.
 
-def _grad_zeta_mag_h(zeta_q: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
-    """|∇ζ| at cell centres from ζ at vertices.
+def _grad_vertex_vec_h(zeta_q: jnp.ndarray, grid: "LatLonGrid") -> tuple:
+    """∇ of a VERTEX field, as the (∂ₓ, ∂ᵧ) vector at cell centres [1/(m·s)].
 
-    Parameters
-    ----------
-    zeta_q : (n_lat+1, n_lon+1, ...) relative vorticity at vertices.
-    grid : LatLonGrid.
-
-    Returns
-    -------
-    grad_mag : (n_lat, n_lon, ...) with units 1/(m·s).
+    ``zeta_q`` : (n_lat+1, n_lon+1, ...) at vertices → (gx, gy) each
+    (n_lat, n_lon, ...) at cell centres.
     """
     R = grid.radius
     dlon = grid.dlon
     cos_lat = grid.cos_lat
-
     if zeta_q.ndim == 3:
         cos_lat_b = cos_lat[:, jnp.newaxis, jnp.newaxis]
         dy_h_b = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]
     else:
         cos_lat_b = cos_lat[:, jnp.newaxis]
         dy_h_b = (grid.dy * 0.5)[:, jnp.newaxis]
-
-    # Cell-centre spacings.  cos_lat evaluated at cell-centre latitudes.
-    dx_h = R * cos_lat_b * dlon                           # (n_lat,1[,1])
-    dy_h = dy_h_b                                         # (n_lat,1[,1])
-
-    # ∂ζ/∂x at (i,j): average of north/south vertex-pair zonal differences.
+    dx_h = R * cos_lat_b * dlon
     dz_dx = 0.5 * ((zeta_q[:-1, 1:] - zeta_q[:-1, :-1])
                    + (zeta_q[1:, 1:] - zeta_q[1:, :-1])) / dx_h
-    # ∂ζ/∂y at (i,j): average of west/east vertex-pair meridional differences.
     dz_dy = 0.5 * ((zeta_q[1:, :-1] - zeta_q[:-1, :-1])
-                   + (zeta_q[1:, 1:] - zeta_q[:-1, 1:])) / dy_h
+                   + (zeta_q[1:, 1:] - zeta_q[:-1, 1:])) / dy_h_b
+    return dz_dx, dz_dy
 
-    return jnp.sqrt(dz_dx ** 2 + dz_dy ** 2 + 1e-30)
+
+def _grad_zeta_mag_h(zeta_q: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
+    """|∇ζ| at cell centres from ζ at vertices (magnitude of ``_grad_vertex_vec_h``)."""
+    gx, gy = _grad_vertex_vec_h(zeta_q, grid)
+    return jnp.sqrt(gx ** 2 + gy ** 2 + 1e-30)
 
 
-def _grad_div_mag_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
-    """|∇δ| at cell centres from δ at cell centres (periodic in lon).
+def _grad_cell_vec_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> tuple:
+    """∇ of a CELL-CENTRE field, as the (∂ₓ, ∂ᵧ) vector at cell centres.
 
-    Uses centred differences with periodic wrap in longitude and one-sided
-    reflection at the poles (so the magnitude remains non-negative).
-
-    Parameters
-    ----------
-    div_h : (n_lat, n_lon, ...) horizontal divergence at cell centres.
-    grid : LatLonGrid.
-
-    Returns
-    -------
-    grad_mag : (n_lat, n_lon, ...) with units 1/(m·s).
+    Centred differences with periodic wrap in longitude and one-sided diffs at
+    the pole rows. ``div_h`` : (n_lat, n_lon, ...) → (gx, gy) same shape.
     """
     R = grid.radius
     dlon = grid.dlon
@@ -2100,7 +2165,13 @@ def _grad_div_mag_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
     dd_dy_north = (div_h[-1:] - div_h[-2:-1]) / dy_v_north
     dd_dy = jnp.concatenate([dd_dy_south, dd_dy_interior, dd_dy_north], axis=0)
 
-    return jnp.sqrt(dd_dx ** 2 + dd_dy ** 2 + 1e-30)
+    return dd_dx, dd_dy
+
+
+def _grad_div_mag_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
+    """|∇δ| at cell centres (magnitude of ``_grad_cell_vec_h``)."""
+    gx, gy = _grad_cell_vec_h(div_h, grid)
+    return jnp.sqrt(gx ** 2 + gy ** 2 + 1e-30)
 
 
 def leith_viscosity_cgrid(
@@ -2338,6 +2409,159 @@ def leith_biharmonic_tendency_cgrid(
         normalize=True)
 
     return tend_u, tend_v
+
+
+def qg_leith_viscosity_tendency_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: "LatLonGrid",
+    *,
+    C_qgleith: float = 2.0,
+    buoyancy: jnp.ndarray | None = None,
+    h_k: jnp.ndarray | None = None,
+    deformation_radius: jnp.ndarray | float | None = None,
+    velocity_scale: float = 1.0,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """QG-Leith eddy viscosity (Silvestri et al. 2024 "QG2" / Bachman et al.
+    2017). With ``buoyancy``+``h_k`` supplied it is the FULL QG2 (baroclinic
+    stretching + Bu/Ro bound, see below); without them it is the BAROTROPIC
+    approximation (∇Q = ∇(ζ+f), bounds inert — label "QG-Leith (barotropic)").
+    A HARMONIC (Laplacian) viscosity scaling with the potential-vorticity gradient:
+
+        nu = (C·Δ/π)³ · sqrt(|∇Q|² + |∇δ|²)
+
+    with Q = ζ + f the absolute (barotropic) potential vorticity (ζ = relative
+    vorticity at vertices, f = planetary vorticity), δ = ∇·u the horizontal
+    divergence, Δ = sqrt(cell area), and C the dimensionless coefficient
+    (paper QG2: C=2). Applied through the energy-stable stress-tensor operator
+    ``viscous_tendency_cgrid`` (exact strain adjoint → guaranteed dissipation).
+
+    This is the paper's QG counterpart to the 2D Leith closure (Appendix A1/A2,
+    ν=(CΔ/π)³|∇q|): it differs from legoESM's existing ``C_leith`` operator in
+    three faithful ways — (1) HARMONIC not biharmonic, (2) ABSOLUTE-vorticity
+    PV gradient ∇(ζ+f) not relative ∇ζ, (3) the /π³ paper normalisation.
+
+    FULL QG2 (B5b): when ``buoyancy`` (b at cell centres) + ``h_k`` (layer
+    thicknesses) are supplied (3D), the baroclinic stretching term is added —
+    ∇q₁ = ∇(ζ+f) + ∂_z(f/N²·∇b) (Eq A3) — and the Bachman grid-Burger /
+    grid-Rossby min-bound is applied: |∇Q| = min(|∇q₁|, |∇q|(1+1/Bu),
+    |∇q|(1+1/Ro²)) with Bu=Δ²/L_d², Ro=V/(|f|Δ). Without buoyancy the operator
+    falls back to the BAROTROPIC ∇(ζ+f) (the bounds are inert — see
+    ``bound_qg_pv_gradient``); that path must be labeled "QG-Leith (barotropic)".
+    Returns (tend_u, tend_v) to be ADDED to du/dt.
+    """
+    is_3d = u.ndim == 3
+    _um = u_mask[..., jnp.newaxis] if (u_mask is not None and is_3d) else u_mask
+    _vm = v_mask[..., jnp.newaxis] if (v_mask is not None and is_3d) else v_mask
+    u_eff = u if _um is None else u * _um
+    v_eff = v if _vm is None else v * _vm
+
+    # Absolute vorticity Q = ζ + f at vertices.
+    zeta_q = curl_vertex_cgrid(u_eff, v_eff, grid)              # (n_lat+1,n_lon+1,...)
+    lat = grid.lat
+    lat_v = jnp.concatenate([lat[:1], 0.5 * (lat[:-1] + lat[1:]), lat[-1:]])
+    f_v = 2.0 * constants.Omega * jnp.sin(lat_v)               # (n_lat+1,)
+    f_v = f_v[:, jnp.newaxis] if zeta_q.ndim == 2 else f_v[:, jnp.newaxis, jnp.newaxis]
+    absvort_q = zeta_q + f_v
+
+    qx, qy = _grad_vertex_vec_h(absvort_q, grid)               # vector ∇(ζ+f)
+    grad_Q = jnp.sqrt(qx ** 2 + qy ** 2 + 1e-30)               # |∇(ζ+f)|_h
+    div_h = divergence_cgrid(u_eff, v_eff, grid, u_mask=u_mask, v_mask=v_mask)
+    grad_div = _grad_div_mag_h(div_h, grid)                     # |∇δ|_h
+
+    # FULL QG2 (B5b): add the baroclinic stretching ∇q₁ = ∇(ζ+f) + ∂_z(f/N²∇b)
+    # and apply the Bachman grid-Burger / grid-Rossby min-bound. Active only when
+    # the buoyancy field is supplied (else the barotropic ∇(ζ+f) is used and the
+    # bounds are inert — see `bound_qg_pv_gradient`).
+    if buoyancy is not None and h_k is not None and is_3d:
+        f_h = (2.0 * constants.Omega * jnp.sin(grid.lat))[:, jnp.newaxis, jnp.newaxis]
+        sx, sy = qg_pv_stretching_vec(buoyancy, h_k, f_h, grid)
+        grad_q1 = jnp.sqrt((qx + sx) ** 2 + (qy + sy) ** 2 + 1e-30)
+        Delta_bu = jnp.sqrt(grid.area)[..., jnp.newaxis]
+        Ld = (deformation_radius if deformation_radius is not None else 6.75e3)
+        Bu = (Delta_bu / jnp.maximum(jnp.asarray(Ld), 1e-30)) ** 2     # Δ²/L_d²
+        f_abs = jnp.maximum(jnp.abs(f_h), 1e-12)
+        Ro = velocity_scale / (f_abs * Delta_bu)
+        grad_Q = bound_qg_pv_gradient(grad_Q, grad_q1, Bu, Ro)
+
+    norm = jnp.sqrt(grad_Q ** 2 + grad_div ** 2 + 1e-30)
+
+    Delta = jnp.sqrt(grid.area)
+    if is_3d:
+        Delta = Delta[..., jnp.newaxis]
+    nu_h = (C_qgleith * Delta / jnp.pi) ** 3 * norm            # [m²/s] at h-points
+    if mask is not None:
+        m = mask[..., jnp.newaxis] if is_3d else mask
+        nu_h = nu_h * m
+
+    # q-point viscosity: 4-point average of nu_h to vertices (energy-stable for
+    # any nu_q >= 0; direct-at-q is a refinement).
+    nu_roll = jnp.roll(nu_h, 1, axis=1)
+    nu_q_int = 0.25 * (nu_h[:-1] + nu_h[1:] + nu_roll[:-1] + nu_roll[1:])
+    nu_q = pad_ns_scalar(nu_q_int, grid)
+    nu_q = jnp.concatenate([nu_q, nu_q[:, 0:1]], axis=1)
+    nu_q = jnp.maximum(nu_q, 0.0)
+
+    return viscous_tendency_cgrid(
+        u, v, grid, nu_h, nu_q, mask=mask, u_mask=u_mask, v_mask=v_mask)
+
+
+def bound_qg_pv_gradient(grad_q, grad_q_stretch, Bu, Ro):
+    """Bachman et al. (2017) QG-Leith PV-gradient bound (Silvestri Eq A2-A3):
+
+        |∇Q| = min( |∇q + stretch|, |∇q|·(1+1/Bu), |∇q|·(1+1/Ro²) )
+
+    where ``grad_q`` = |∇(ζ+f)|, ``grad_q_stretch`` = |∇q + ∂_z(f/N²∇b)| (the
+    full QGPV gradient magnitude incl. baroclinic stretching), ``Bu`` = grid
+    Burger number Δ²/L_d², ``Ro`` = grid Rossby number V/(|f|Δ). The grid-Burger
+    bound caps the gradient where the deformation radius is under-resolved; the
+    grid-Rossby bound caps it where the flow is strongly ageostrophic; the
+    closure reverts to 2D Leith where QG does not hold. Used by the full-QG2
+    path of ``qg_leith_viscosity_tendency_cgrid`` when buoyancy is supplied."""
+    gq2 = grad_q * (1.0 + 1.0 / jnp.maximum(Bu, 1e-30))
+    gq3 = grad_q * (1.0 + 1.0 / jnp.maximum(Ro ** 2, 1e-30))
+    return jnp.minimum(jnp.minimum(grad_q_stretch, gq2), gq3)
+
+
+def _ddz_centre(X: jnp.ndarray, h: jnp.ndarray) -> jnp.ndarray:
+    """∂X/∂z at cell centres (z increases UPWARD; level index increases DOWNWARD),
+    centred in the interior + one-sided at the surface/bottom. ``X``, ``h`` are
+    (..., nlev). The vertical centre-to-centre distance uses the layer thicknesses.
+    """
+    # Interior k=1..nlev-2: distance centre[k-1]→centre[k+1] = ½h[k-1]+h[k]+½h[k+1].
+    dz_int = 0.5 * h[..., :-2] + h[..., 1:-1] + 0.5 * h[..., 2:]
+    ddz_int = (X[..., :-2] - X[..., 2:]) / jnp.maximum(dz_int, 1e-12)
+    dz_top = jnp.maximum(0.5 * (h[..., 0] + h[..., 1]), 1e-12)
+    ddz_top = ((X[..., 0] - X[..., 1]) / dz_top)[..., jnp.newaxis]
+    dz_bot = jnp.maximum(0.5 * (h[..., -2] + h[..., -1]), 1e-12)
+    ddz_bot = ((X[..., -2] - X[..., -1]) / dz_bot)[..., jnp.newaxis]
+    return jnp.concatenate([ddz_top, ddz_int, ddz_bot], axis=-1)
+
+
+def qg_pv_stretching_vec(buoyancy: jnp.ndarray, h_k: jnp.ndarray,
+                         f_h: jnp.ndarray, grid: "LatLonGrid",
+                         n2_min: float = 1e-9) -> tuple:
+    """Baroclinic QGPV stretching vector ∂_z(f/N²·∇b) at cell centres (Bachman
+    et al. 2017 / Silvestri Eq A3 ∇q₁ stretching term).
+
+    ``buoyancy`` b and ``h_k`` (layer thicknesses) are (n_lat, n_lon, nlev) at
+    cell centres; ``f_h`` is the Coriolis parameter (n_lat, n_lon) or (n_lat, 1).
+    Returns (sx, sy) each (n_lat, n_lon, nlev). N² = ∂b/∂z.
+
+    Where the column is statically UNSTABLE or near-neutral (N² ≤ n2_min), the
+    QG stretching is undefined; the contribution is set to ZERO there rather than
+    dividing by a tiny floor (which would inflate f/N²·∇b by orders of magnitude
+    and spuriously spike the viscosity). n2_min is a physical floor (~1e-9 s⁻²).
+    """
+    bx, by = _grad_cell_vec_h(buoyancy, grid)            # horizontal ∇b
+    N2 = _ddz_centre(buoyancy, h_k)
+    f = f_h[..., jnp.newaxis] if f_h.ndim == 2 else f_h
+    # f/N² only where stably stratified; 0 elsewhere (no spurious floored spike).
+    inv = jnp.where(N2 > n2_min, f / jnp.where(N2 > n2_min, N2, 1.0), 0.0)
+    return _ddz_centre(inv * bx, h_k), _ddz_centre(inv * by, h_k)
 
 
 def neumann_fill_vertex(

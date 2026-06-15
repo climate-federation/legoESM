@@ -53,6 +53,7 @@ from legoesm.ocean.state import (
     LatLonCGridOceanTendencies,
     MomentumTendencyDiagnostics,
     LatLonCGridOceanConfig,
+    OMp25Config,
     SurfaceTracerForcing,
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
@@ -82,6 +83,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     pad_ns_zero,
     fold_is_local,
     smagorinsky_biharmonic_tendency_cgrid,
+    om4p25_lateral_friction_tendency_cgrid,
+    qg_leith_viscosity_tendency_cgrid,
     smagorinsky_viscosity_cgrid,
     smagorinsky_viscosity_q_cgrid,
     strain_rate_cgrid,
@@ -114,11 +117,19 @@ from legoesm.ocean.vertical import (
 # dispatch literals (dispatch discipline: validated at config construction;
 # unknown -> ValueError, never a silent fallthrough to vector-invariant).
 VALID_MOMENTUM_ADVECTION = frozenset(
-    {"vector_invariant", "weno5", "weno7", "flux_form"}
+    {"vector_invariant", "weno5", "weno7", "weno9", "flux_form"}
 )
+# WENO vector-invariant momentum-advection literals (Silvestri et al. 2024).
+# vorticity-flux Z and divergence-flux D use this order; vertical C is capped
+# at WENO5 for order 9 (paper Table 2: C is WENO5 in W9V, "minimal impact").
+VALID_WENO_MOMENTUM = frozenset({"weno5", "weno7", "weno9"})
+# WENO smoothness-measure family (Silvestri et al. 2024): "split" = W*V
+# (velocity / full-divergence smoothness, Eqs 43+45), "standard" = W*D
+# (self-smoothness, Eqs 37+44). See config.weno_smoothness.
+VALID_WENO_SMOOTHNESS = frozenset({"split", "standard"})
 # Reconstruction schemes for the advected velocity in the flux-form path
 # (config.momentum_flux_scheme; only used when momentum_advection="flux_form").
-VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered"})
+VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered", "upwind3"})
 # Stage-8 VERTICAL momentum-advection scheme (config.vertical_momentum_scheme),
 # independent of the HORIZONTAL momentum_advection dispatch above:
 #   "upwind_perturbation" (default, bit-identical) — 1st-order interface
@@ -139,6 +150,10 @@ VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
 # FLUX-DIVERGENCE harmonic friction ∇·(A_h∇u). Validated at config construction;
 # unknown -> ValueError (dispatch discipline).
 VALID_LATERAL_VISCOSITY_OPERATOR = frozenset({"vector_laplacian", "flux_divergence"})
+# Lateral-friction CLOSURE selector (config.lateral_friction_scheme): "none"
+# (the A_h/B_h/C_smag/C_leith knobs apply) or "om4p25" (Silvestri 2024 SM2 —
+# GFDL OM4p25 Laplacian+biharmonic max(Smag,static) closure).
+VALID_LATERAL_FRICTION_SCHEME = frozenset({"none", "om4p25", "qg_leith"})
 # Coriolis time-stepping placement (config.coriolis_scheme):
 #   "matsuno_split" (default, bit-identical) — Coriolis is a sequential
 #     forward-backward (Matsuno) rotation sub-step on the FE-advanced state and
@@ -602,6 +617,7 @@ def _weno_zeta_at_u(
     v_at_u: jnp.ndarray,
     order: int = 5,
     u_smooth: jnp.ndarray | None = None,
+    smoothness: str = "split",
 ) -> jnp.ndarray:
     """WENO reconstruction of a vertex field to u-faces (meridional).
 
@@ -617,7 +633,7 @@ def _weno_zeta_at_u(
     phi : (n_lat+1, n_lon+1, nlev) field at vertices to reconstruct.
     v_smooth : (n_lat+1, n_lon, nlev) at v-faces (⟨v⟩_i smoothness).
     v_at_u : (n_lat, n_lon+1, nlev) at u-faces (upwinding velocity).
-    order : {5, 7}
+    order : {5, 7, 9}
     u_smooth : (n_lat, n_lon+1, nlev) or None
         u at u-faces for the ⟨u⟩_j smoothness path.
 
@@ -625,7 +641,7 @@ def _weno_zeta_at_u(
     -------
     phi_at_u : (n_lat, n_lon+1, nlev)
     """
-    hw = {5: 3, 7: 4}[order]
+    hw = {5: 3, 7: 4, 9: 5}[order]
     n_lat = phi.shape[0] - 1  # n_lat+1 vertices → n_lat u-faces
     nlev = phi.shape[2]
 
@@ -638,7 +654,7 @@ def _weno_zeta_at_u(
     # Convert point values to cell averages along the meridional
     # reconstruction axis before WENO.
     from legoesm.core.weno import point_to_cellavg_bounded
-    conv_order = {5: 6, 7: 8}[order]
+    conv_order = {5: 6, 7: 8, 9: 8}[order]
     phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
     v_at_vtx_avg = point_to_cellavg_bounded(v_at_vtx, axis=0, order=conv_order)
 
@@ -651,6 +667,16 @@ def _weno_zeta_at_u(
 
     phi_stencil = [phi_ext[1 + j: n_lat + 1 + j, :, :]
                    for j in range(2 * hw)]
+
+    if smoothness == "standard":
+        # W*D: self-smoothness {ζ;ζ} (Silvestri Eq 37). Reconstruct phi using
+        # its OWN smoothness — standard WENO-Z, more dissipative than {ζ;u}.
+        # NOTE: u_smooth/v_smooth are INERT in this branch (the velocity
+        # smoothness fields are only used by the "split" path).
+        phi_plus, phi_minus = weno_reconstruct_split(
+            phi_stencil, phi_stencil, order=order)
+        return weno_upwind(phi_plus, phi_minus, v_at_u)
+
     psi_v_stencil = [v_ext[1 + j: n_lat + 1 + j, :, :]
                      for j in range(2 * hw)]
 
@@ -687,6 +713,7 @@ def _weno_zeta_at_v(
     u_at_v: jnp.ndarray,
     order: int = 5,
     v_smooth: jnp.ndarray | None = None,
+    smoothness: str = "split",
 ) -> jnp.ndarray:
     """WENO reconstruction of a vertex field to v-faces (zonal).
 
@@ -702,7 +729,7 @@ def _weno_zeta_at_v(
     phi : (n_lat+1, n_lon+1, nlev) field at vertices to reconstruct.
     u_smooth : (n_lat, n_lon+1, nlev) at u-faces (⟨u⟩_j smoothness).
     u_at_v : (n_lat+1, n_lon, nlev) at v-faces (upwinding velocity).
-    order : {5, 7}
+    order : {5, 7, 9}
     v_smooth : (n_lat+1, n_lon, nlev) or None
         v at v-faces for the ⟨v⟩_i smoothness path.
 
@@ -710,7 +737,7 @@ def _weno_zeta_at_v(
     -------
     phi_at_v : (n_lat+1, n_lon, nlev)
     """
-    hw = {5: 3, 7: 4}[order]
+    hw = {5: 3, 7: 4, 9: 5}[order]
     n_lon = phi.shape[1] - 1
     nlev = phi.shape[2]
 
@@ -723,7 +750,7 @@ def _weno_zeta_at_v(
 
     # Convert point values to cell averages along zonal axis (periodic).
     from legoesm.core.weno import point_to_cellavg_periodic
-    conv_order = {5: 6, 7: 8}[order]
+    conv_order = {5: 6, 7: 8, 9: 8}[order]
 
     phi_core = phi[:, :n_lon, :]
     u_core = u_at_vtx[:, :n_lon, :]
@@ -733,6 +760,14 @@ def _weno_zeta_at_v(
 
     phi_stencil = [jnp.roll(phi_core_avg, hw - 1 - j, axis=1)
                    for j in range(2 * hw)]
+
+    if smoothness == "standard":
+        # W*D: self-smoothness {ζ;ζ} (Silvestri Eq 37). u_smooth/v_smooth
+        # are INERT here (only the "split" path uses velocity smoothness).
+        phi_plus, phi_minus = weno_reconstruct_split(
+            phi_stencil, phi_stencil, order=order)
+        return weno_upwind(phi_plus, phi_minus, u_at_v)
+
     psi_u_stencil = [jnp.roll(u_core_avg, hw - 1 - j, axis=1)
                      for j in range(2 * hw)]
 
@@ -905,18 +940,18 @@ def _weno_cell_to_uface(
     phi : (n_lat, n_lon, nlev)  field at cell centers to reconstruct.
     psi : (n_lat, n_lon, nlev)  field at cell centers for smoothness.
     u_upwind : (n_lat, n_lon+1, nlev)  velocity at u-faces (upwind sign).
-    order : {5, 7}
+    order : {5, 7, 9}
 
     Returns
     -------
     phi_at_u : (n_lat, n_lon+1, nlev)
     """
-    hw = {5: 3, 7: 4}[order]
+    hw = {5: 3, 7: 4, 9: 5}[order]
     n_lon = phi.shape[1]
 
     # Convert point values to cell averages before WENO reconstruction.
     from legoesm.core.weno import point_to_cellavg_periodic
-    conv_order = {5: 6, 7: 8}[order]
+    conv_order = {5: 6, 7: 8, 9: 8}[order]
     phi_avg = point_to_cellavg_periodic(phi, axis=1, order=conv_order)
     psi_avg = point_to_cellavg_periodic(psi, axis=1, order=conv_order)
 
@@ -960,20 +995,20 @@ def _weno_cell_to_vface(
     phi : (n_lat, n_lon, nlev)  field at cell centers to reconstruct.
     psi : (n_lat, n_lon, nlev)  field at cell centers for smoothness.
     v_upwind : (n_lat+1, n_lon, nlev)  velocity at v-faces (upwind sign).
-    order : {5, 7}
+    order : {5, 7, 9}
 
     Returns
     -------
     phi_at_v : (n_lat+1, n_lon, nlev)
     """
-    hw = {5: 3, 7: 4}[order]
+    hw = {5: 3, 7: 4, 9: 5}[order]
     n_lat = phi.shape[0]
     nlev = phi.shape[2]
     n_lon = phi.shape[1]
 
     # Convert point values to cell averages before WENO reconstruction.
     from legoesm.core.weno import point_to_cellavg_bounded
-    conv_order = {5: 6, 7: 8}[order]
+    conv_order = {5: 6, 7: 8, 9: 8}[order]
     phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
     psi_avg = point_to_cellavg_bounded(psi, axis=0, order=conv_order)
 
@@ -1168,7 +1203,7 @@ def _bc_ke_and_pressure_gradients(
     # in smooth regions, matching paper's design intent.
     _mom_adv = config.momentum_advection
     n_lat_g, n_lon_g, nlev_g = p_prime_filled.shape
-    if _mom_adv in ("weno5", "weno7"):
+    if _mom_adv in ("weno5", "weno7", "weno9"):
         # u² at faces and cell-centered fields needed by Eq. 33.
         u_sq_face = u ** 2                                  # (n_lat, n_lon+1, nlev)
         v_sq_face = v ** 2                                  # (n_lat+1, n_lon, nlev)
@@ -1443,11 +1478,12 @@ def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
 
 def _bc_pv_flux(
     du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
+    weno_smoothness="split",
     vertex_mask=None,
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
-    weno5/weno7). Pure verbatim extraction (Q8). Threads the momentum
+    weno5/weno7/weno9). Pure verbatim extraction (Q8). Threads the momentum
     accumulators; returns ``(du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v)``."""
     # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
@@ -1604,17 +1640,19 @@ def _bc_pv_flux(
     # real ETOPO under live-T integration.  Same Neumann fill of q at
     # land-adjacent vertices as WENO5 (for the centred-q part of the
     # triad).
-    if _mom_adv in ("weno5", "weno7"):
-        _weno_order = {"weno5": 5, "weno7": 7}[_mom_adv]
+    if _mom_adv in ("weno5", "weno7", "weno9"):
+        _weno_order = {"weno5": 5, "weno7": 7, "weno9": 9}[_mom_adv]
         # Fill PV at land-adjacent vertices so WENO stencils see smooth
         # Neumann extrapolation instead of masked-zero discontinuities.
         vtx_mask = (vertex_mask if vertex_mask is not None
                     else compute_vertex_mask(mask, grid=grid))
         q_filled = _neumann_fill_vertex(q, vtx_mask)
         q_at_u = _weno_zeta_at_u(
-            q_filled, v, v_at_u, order=_weno_order, u_smooth=u)
+            q_filled, v, v_at_u, order=_weno_order, u_smooth=u,
+            smoothness=weno_smoothness)
         q_at_v = _weno_zeta_at_v(
-            q_filled, u, u_at_v, order=_weno_order, v_smooth=v)
+            q_filled, u, u_at_v, order=_weno_order, v_smooth=v,
+            smoothness=weno_smoothness)
         diag_vortcor_u = q_at_u * Fv_at_u
         diag_vortcor_v = -(q_at_v * Fu_at_v)
     else:
@@ -1633,7 +1671,8 @@ def _bc_pv_flux(
     return du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v
 
 
-def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv):
+def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv,
+              _weno_order=5):
     """Stage 7c: WENO divergence (D-term) momentum dissipation (Silvestri et al.
     2024 Eqs. 31-32). Active only for weno5/weno7 momentum advection with
     config.weno_d_term; otherwise the diagnostics are zero. Pure verbatim
@@ -1656,17 +1695,30 @@ def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom
     #
     # Gated by config.weno_d_term so the effect can be isolated; default
     # True (paper-faithful) once the split is in place.
-    if _mom_adv in ("weno5", "weno7") and config.weno_d_term:
+    if _mom_adv in ("weno5", "weno7", "weno9") and config.weno_d_term:
         dU_di_cell, dV_dj_cell = _split_velocity_divergence(
             u * u_mask_3d, v * v_mask_3d, grid)
         # Fill land cells before WENO stencils (Neumann extrapolation).
         dU_di_filled = neumann_fill_cgrid(dU_di_cell, mask, grid=grid)
         dV_dj_filled = neumann_fill_cgrid(dV_dj_cell, mask, grid=grid)
+        # Smoothness measure for the matching-direction WENO reconstruction:
+        #   "split"    (W*V) → {δU; D}: smoothness from the FULL divergence
+        #              D = δU + δV (Silvestri Eq 45). The paper notes this
+        #              "has a large impact on the solution".
+        #   "standard" (W*D) → {δU; δU}: self-smoothness (Eq 44).
+        if config.weno_smoothness == "split":
+            D_full_filled = neumann_fill_cgrid(
+                dU_di_cell + dV_dj_cell, mask, grid=grid)
+            psi_u, psi_v = D_full_filled, D_full_filled
+        else:
+            psi_u, psi_v = dU_di_filled, dV_dj_filled
         # Matching direction (WENO upwind), cross direction (centered).
-        D_at_u = (_weno_cell_to_uface(dU_di_filled, dU_di_filled, u, order=5)
+        # D-flux WENO order follows the momentum order Z (Silvestri Table 2:
+        # W9V has D=WENO9, paired with the order-9 vorticity flux).
+        D_at_u = (_weno_cell_to_uface(dU_di_filled, psi_u, u, order=_weno_order)
                   + centered_cell_to_uface(dV_dj_cell))
         D_at_v = (_centered_cell_to_vface(dU_di_cell)
-                  + _weno_cell_to_vface(dV_dj_filled, dV_dj_filled, v, order=5))
+                  + _weno_cell_to_vface(dV_dj_filled, psi_v, v, order=_weno_order))
         diag_Dterm_u = -(D_at_u * u * u_mask_3d)
         diag_Dterm_v = -(D_at_v * v * v_mask_3d)
         du_dt = du_dt + diag_Dterm_u
@@ -1759,15 +1811,20 @@ def _bc_vertical_momentum_advection(
         h_v_old = h_v
         w_u = interp_cell_to_uface(w)
         w_v = interp_to_v_points(w, grid=grid)
-        if _mom_adv in ("weno5", "weno7"):
+        if _mom_adv in ("weno5", "weno7", "weno9"):
             # WENO vertical momentum advection removes the implicit
             # viscosity (~|w|*dz/2) that first-order upwind provides.
             # Requires compensating vertical viscosity (KPP / Richardson-
             # A_v, #204).
+            # The vertical (conservative-advection C) WENO order is capped at
+            # 5 for momentum order 9: Silvestri Table 2 keeps C at WENO5 in
+            # W9V ("order has minimal impact"), and the vertical tracer kernel
+            # is only defined for orders 5 and 7.
+            _vert_order = _weno_order if _weno_order <= 7 else 5
             diag_vertadv_u = _flux_form_vertical_momentum_advection_weno(
-                u_prime, w_u, h_u_old, order=_weno_order)
+                u_prime, w_u, h_u_old, order=_vert_order)
             diag_vertadv_v = _flux_form_vertical_momentum_advection_weno(
-                v_prime, w_v, h_v_old, order=_weno_order)
+                v_prime, w_v, h_v_old, order=_vert_order)
         else:
             # Non-WENO explicit vertical momentum advection.  Pass u/v
             # face-activity masks so the vertical momentum flux is exactly
@@ -1822,6 +1879,7 @@ def _bc_vertical_momentum_advection(
 
 def _bc_horizontal_viscosity(
     du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
+    rho_prime=None, h_k=None,
     vertex_mask=None,
 ):
     """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
@@ -2172,6 +2230,46 @@ def _bc_horizontal_viscosity(
         diag_Cl_leith_u, diag_Cl_leith_v = _apply_slope_foot(diag_Cl_leith_u, diag_Cl_leith_v)
         du_dt = du_dt + diag_Cl_leith_u
         dv_dt = dv_dt + diag_Cl_leith_v
+
+    # --- 10a'. OM4p25 lateral-friction closure (Silvestri 2024 "SM2"). ---
+    # A self-contained Laplacian+biharmonic max(Smag,static) closure; when
+    # selected it is the SOLE lateral friction (the recipe zeros A_h/B_h/
+    # C_smag/C_leith). Returns the combined tendency (already Laplacian +
+    # (−biharmonic)); accumulated into the Smagorinsky diagnostic bucket.
+    if config.lateral_friction_scheme == "om4p25":
+        _om = config.omp25 if config.omp25 is not None else OMp25Config()
+        om_u, om_v = om4p25_lateral_friction_tendency_cgrid(
+            u, v, grid, C2=_om.C2, Cu2=_om.Cu2, C4=_om.C4, Cu4=_om.Cu4,
+            deformation_radius=_om.deformation_radius_m,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        om_u, om_v = _apply_slope_foot(om_u, om_v)
+        du_dt = du_dt + om_u
+        dv_dt = dv_dt + om_v
+        diag_Cs_smag_u = diag_Cs_smag_u + om_u
+        diag_Cs_smag_v = diag_Cs_smag_v + om_v
+
+    # --- 10a''. QG-Leith harmonic viscosity (Silvestri 2024 "QG2"). ---
+    # Sole lateral friction when selected (recipe zeros A_h/B_h/C_smag/C_leith);
+    # accumulated into the Leith diagnostic bucket.
+    if config.lateral_friction_scheme == "qg_leith":
+        # Full QG2 (B5b): pass the buoyancy (from the density anomaly) + layer
+        # thicknesses so the operator adds the baroclinic stretching term. Gated
+        # by config.qg_leith_stretching (default barotropic, backward-compatible).
+        _b = None
+        if getattr(config, "qg_leith_stretching", False) and rho_prime is not None:
+            # Buoyancy b = -g·ρ'/ρ₀ (the g/ρ₀ factor cancels in f·∇b/N², but the
+            # SIGN sets N²=∂b/∂z > 0 for a stable column, which the N² floor needs).
+            _b = -(config.g / config.rho_0) * rho_prime
+        qgl_u, qgl_v = qg_leith_viscosity_tendency_cgrid(
+            u, v, grid, C_qgleith=config.qg_leith_coeff,
+            buoyancy=_b, h_k=(h_k if _b is not None else None),
+            deformation_radius=config.qg_leith_deformation_radius_m,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        qgl_u, qgl_v = _apply_slope_foot(qgl_u, qgl_v)
+        du_dt = du_dt + qgl_u
+        dv_dt = dv_dt + qgl_v
+        diag_Cl_leith_u = diag_Cl_leith_u + qgl_u
+        diag_Cl_leith_v = diag_Cl_leith_v + qgl_v
 
     # --- 10b. Meridional-only Laplacian viscosity ---
     # Scalar d²/dy² applied directly at faces, targeting the 2Δy mode
@@ -2660,6 +2758,26 @@ def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
     return du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v
 
 
+def _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport):
+    """3rd-order upwind-biased face reconstruction (NEMO/ROMS UP3, kappa=1/3).
+
+    For a face straddled by cells (``adv_pos``, ``adv_neg``) with the next
+    cells outward (``far_pos`` beyond ``adv_pos``, ``far_neg`` beyond
+    ``adv_neg``), returns the upwind-biased face value selected by the sign of
+    ``transport``:
+
+        transport > 0:  (-far_pos + 5·adv_pos + 2·adv_neg) / 6
+        transport < 0:  ( 2·adv_pos + 5·adv_neg - far_neg) / 6
+
+    Reconstructs constants and linears exactly; the upstream bias supplies a
+    3rd-derivative (biharmonic-like) implicit dissipation. Silvestri et al.
+    2024 "UP3" = Oceananigans ``UpwindBiased(order=3)``.
+    """
+    pos = (-far_pos + 5.0 * adv_pos + 2.0 * adv_neg) / 6.0
+    neg = (2.0 * adv_pos + 5.0 * adv_neg - far_neg) / 6.0
+    return jnp.where(transport > 0.0, pos, neg)
+
+
 def _bc_horizontal_momentum_advection_flux_form(
     du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
 ):
@@ -2684,8 +2802,23 @@ def _bc_horizontal_momentum_advection_flux_form(
             "grids (the vertex-metric handling needs the 2D dx_v/dy_u fields). "
             "Use 'vector_invariant' on tripolar, or extend this substage."
         )
-    scheme = getattr(config, "momentum_flux_scheme", "upwind")
-    u.shape[1] - 1
+    scheme = config.momentum_flux_scheme
+
+    def _recon(adv_pos, adv_neg, transport, far_pos=None, far_neg=None):
+        """Reconstruct the advected velocity at a face.
+
+        ``adv_pos``/``adv_neg`` are the two cells straddling the face (upstream
+        side for transport>0 is ``adv_pos``). ``far_pos``/``far_neg`` are the
+        next cells outward (only used by "upwind3"): ``far_pos`` is beyond
+        ``adv_pos`` on the +flow upstream side, ``far_neg`` beyond ``adv_neg``.
+        """
+        if scheme == "centered":
+            return 0.5 * (adv_pos + adv_neg)
+        if scheme == "upwind3":
+            # 3rd-order upwind-biased (NEMO/ROMS UP3); see _up3_reconstruct.
+            return _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, transport)
+        # 1st-order upwind (default).
+        return jnp.where(transport > 0.0, adv_pos, adv_neg)
 
     # --- FV metrics (mirror divergence_cgrid) ---
     dy_u = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]            # (n_lat,1,1)
@@ -2707,7 +2840,13 @@ def _bc_horizontal_momentum_advection_flux_form(
     # ============ u-momentum at u-points (n_lat, n_lon+1) ============
     # x-flux at cell centres: transport_x_centre * u_advected_centre.
     Qx_c = 0.5 * (Q_u[:, :-1, :] + Q_u[:, 1:, :])                 # (n_lat,n_lon,nlev)
-    u_c = _upwind(u[:, :-1, :], u[:, 1:, :], Qx_c)               # west when Qx>0
+    # u advected to cell centre; periodic-lon 4-pt stencil for upwind3. Build
+    # the far cells from the DISTINCT core u[:, :-1] (faces 0..n_lon-1) via
+    # rolls so the reconstruction does not depend on the periodic wrap column
+    # u[:, n_lon] (matches the wrap-robust style of the v-momentum x-part).
+    u_c = _recon(u[:, :-1, :], u[:, 1:, :], Qx_c,
+                 far_pos=jnp.roll(u[:, :-1, :], 1, axis=1),       # face c-1
+                 far_neg=jnp.roll(u[:, :-1, :], -2, axis=1))      # face c+2; west when Qx>0
     Fx_uu = Qx_c * u_c                                           # (n_lat,n_lon,nlev)
     # divergence to u-points (periodic in lon): flux[centre J] - flux[centre J-1].
     _dx = Fx_uu - jnp.roll(Fx_uu, 1, axis=1)
@@ -2720,7 +2859,14 @@ def _bc_horizontal_momentum_advection_flux_form(
     # u to lat-faces (vertices): interior avg of adjacent u rows; poles unused (Qy=0 there).
     u_south = u[:-1, :, :]
     u_north = u[1:, :, :]
-    u_vtx_int = _upwind(u_south, u_north, Qy_vtx[1:-1, :, :])    # (n_lat-1,n_lon+1,nlev)
+    # Edge-padded (Neumann) 4-pt meridional stencil for upwind3. Boundary
+    # vertices where the stencil is incomplete are damped by Qy→0 at the poles.
+    u_pad = jnp.concatenate([u[:1, :, :], u, u[-1:, :, :]], axis=0)  # (n_lat+2,...)
+    n_lat_u = u.shape[0]
+    u_vtx_int = _recon(
+        u_south, u_north, Qy_vtx[1:-1, :, :],
+        far_pos=u_pad[0:n_lat_u - 1, :, :],
+        far_neg=u_pad[3:n_lat_u + 2, :, :])                     # (n_lat-1,n_lon+1,nlev)
     zero_row = jnp.zeros_like(u[:1, :, :])
     u_vtx = jnp.concatenate([zero_row, u_vtx_int, zero_row], axis=0)  # (n_lat+1,n_lon+1,nlev)
     Fy_vu = Qy_vtx * u_vtx                                       # (n_lat+1,n_lon+1,nlev)
@@ -2735,7 +2881,11 @@ def _bc_horizontal_momentum_advection_flux_form(
     # ============ v-momentum at v-points (n_lat+1, n_lon) ============
     # y-flux at cell centres: transport_y_centre * v_advected_centre.
     Qy_c = 0.5 * (Q_v[:-1, :, :] + Q_v[1:, :, :])               # (n_lat,n_lon,nlev)
-    v_c = _upwind(v[:-1, :, :], v[1:, :, :], Qy_c)              # south when Qy>0
+    v_pad = jnp.concatenate([v[:1, :, :], v, v[-1:, :, :]], axis=0)  # (n_lat+3,...)
+    n_v = v.shape[0]                                            # n_lat+1
+    v_c = _recon(v[:-1, :, :], v[1:, :, :], Qy_c,
+                 far_pos=v_pad[0:n_v - 1, :, :],
+                 far_neg=v_pad[3:n_v + 2, :, :])                # south when Qy>0
     Fy_vv = Qy_c * v_c                                          # (n_lat,n_lon,nlev)
     # divergence to v-points (interior lat-faces; poles are walls -> 0).
     net_merid_v_int = Fy_vv[1:, :, :] - Fy_vv[:-1, :, :]       # (n_lat-1,n_lon,nlev)
@@ -2752,7 +2902,9 @@ def _bc_horizontal_momentum_advection_flux_form(
     Qx_vtx = jnp.concatenate([zero_vtx, Qx_vtx_int, zero_vtx], axis=0)  # (n_lat+1,n_lon,nlev) at lon-faces
     # v to lon-faces (vertices), periodic: west/east centres are v[:, j-1], v[:, j].
     v_west = jnp.roll(v, 1, axis=1)
-    v_vtx = _upwind(v_west, v, Qx_vtx)                         # (n_lat+1,n_lon,nlev) west when Qx>0
+    v_vtx = _recon(v_west, v, Qx_vtx,
+                   far_pos=jnp.roll(v, 2, axis=1),
+                   far_neg=jnp.roll(v, -1, axis=1))            # (n_lat+1,n_lon,nlev) west when Qx>0
     Fx_uv = Qx_vtx * v_vtx                                     # at lon-faces 0..n_lon-1
     # v-cell (centre j) E face = vertex j+1, W face = vertex j (periodic).
     net_zonal_v = jnp.roll(Fx_uv, -1, axis=1) - Fx_uv          # (n_lat+1,n_lon,nlev)
@@ -2876,7 +3028,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # WENO order, used only inside the WENO branches of the vertical-advection
     # stage (None otherwise -> never dereferenced). The PV-flux stage computes
     # its own copy internally.
-    _weno_order = {"weno5": 5, "weno7": 7}.get(_mom_adv)
+    _weno_order = {"weno5": 5, "weno7": 7, "weno9": 9}.get(_mom_adv)
     dKE_dx, dp_dx, dKE_dy, dp_dy = _bc_ke_and_pressure_gradients(
         u, v, p_prime_filled, rho_prime, grid, config, z_coord,
         eta_safe, H_bathy, g_val, mask,
@@ -2937,6 +3089,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     else:
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = _bc_pv_flux(
             du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
+            config.weno_smoothness,
             vertex_mask=vertex_mask,
         )
 
@@ -2974,6 +3127,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # --- Stage 7c: WENO divergence (D-term) dissipation. ---
     du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v = _bc_dterm(
         du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv,
+        _weno_order if _weno_order is not None else 5,
     )
 
     # --- Stage 8: vertical momentum advection. ---
@@ -3015,6 +3169,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
      diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
      diag_Cl_leith_v, kdiss_h_cell) = _bc_horizontal_viscosity(
         du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
+        rho_prime=rho_prime, h_k=h_k,
         vertex_mask=vertex_mask,
     )
 
