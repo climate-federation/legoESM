@@ -1,0 +1,207 @@
+# Ralph-loop task: reproduce Silvestri et al. 2024 (WENO vector-invariant momentum advection)
+
+## OBJECTIVE
+Reproduce **Silvestri, Wagner, Campin, Constantinou, Hill, Souza, Ferrari (2024)**, *"A New
+WENO-Based Momentum Advection Scheme for Simulations of Ocean Mesoscale Turbulence,"* JAMES
+16(7), e2023MS004130 (PDF: `docs/references/Silvestri_etal_2024_WENO_vector_invariant_Oceananigans.pdf`)
+inside legoESM, to the **FULL paper matrix** (user directive 2026-06-15):
+
+1. **Build experiment setups that EXACTLY match theirs**, with the **same metrics** — both test
+   cases: (A) 2D decaying homogeneous turbulence, (B) baroclinic jet in a periodic channel.
+2. **Build a model recipe that matches theirs** — the W9V scheme (9th-order WENO vector-invariant
+   with `{ζ;u}` decoupled smoothness + divergence flux).
+3. **Systematically compare the available + appropriate legoESM recipes** against each other and
+   against the paper's results, the way the paper does (Tables 1–3, Figs 3–10).
+4. Reference code: clone/fetch from GitHub **as needed**
+   (`github.com/simone-silvestri/BaroclinicAdjustment.jl`, `github.com/CliMA/Oceananigans.jl`).
+
+This is a large multi-session effort. Compute is NOT a constraint (user accepts re-launching
+GPU runs). Work the PHASES below in order; **commit each phase**; append to the PROGRESS LOG
+every iteration. Use the **iterate-with-codex** review loop after each major code change
+(CLAUDE.md mandate).
+
+---
+
+## MAJOR FINDING (scoped 2026-06-15) — the W9V recipe is ~80% already built
+The lat-lon C-grid ocean dycore ALREADY implements the paper's core scheme (likely Pierre's
+NEMO-track work). Verify before rebuilding; EXTEND, don't duplicate.
+- `momentum_advection="weno5"`/`"weno7"` = **WENO-Z vector-invariant** with the paper's
+  **decoupled `{ζ;u}` smoothness** (Eq. 43): `_weno_zeta_at_u/v` in
+  `packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:586-721`, calling
+  `weno_reconstruct_split(phi,psi,order)` in `packages/core/legoesm/core/weno.py:419-476`.
+- **Divergence-flux D-term** (Eqs. 31–32, Appendix-C asymmetric WENO/centered split):
+  `_bc_dterm`, `ocean_pe_latlon_cgrid.py:1620-1658`, gated by `config.weno_d_term` (default True).
+- **WENO9 kernels exist** (`weno.py:389` `weno9_z`) but are NOT wired into momentum →
+  the flagship **W9V is a wiring job**, not a from-scratch build.
+- Viscosities present: `A_h`, `B_h`, `C_smag` (biharmonic), `C_smag_lap` (Laplacian), `C_leith`.
+  **MISSING: QG-Leith, OM4p25-exact Smagorinsky preset, UP3 flux-form upwind momentum.**
+- Tracer WENO5/7 present (`advection.py`); 7th-order = paper's tracer choice. WENO9 tracer not exposed.
+- KE-gradient: `centered` / `hollingsworth` (NOT WENO). Paper W9V uses WENO5 K (states order of
+  K has "minimal impact") → Hollingsworth is an acceptable approximation; WENO-K is a refinement.
+
+### Scheme → legoESM config mapping (the 7 repo cases; paper's main 5 in **bold**)
+| Paper | Repo case | momentum_advection | smoothness | closure | legoESM build |
+|---|---|---|---|---|---|
+| **W9V** | weno9pV | WENO order9 (vort+div+vert) | `{ζ;u}` (CrossAndSelf) | none | wire weno9 + `weno_smoothness="split"` |
+| **W9D** | weno9pAllD | WENO order9 | `{ζ;ζ}` (OnlySelf) | none | wire weno9 + `weno_smoothness="standard"` |
+| **UP3** | upwind | UpwindBiased order3 flux-form | — | none | NEW UP3 flux-form momentum option |
+| **SM2** | omp25 | VectorInvariant EnergyConserving | — | OM4p25 Smag | NEW preset: max(static,smag) Lap+bihar, F=1/(1+0.25 Rh⁴), C₂=.15 Cu₂=.01 C₄=.06 Cu₄=.01 |
+| **QG2** | qgleith | VectorInvariant EnergyConserving | — | QG-Leith C=2 | NEW QG-Leith operator: ν=(CΔ/π)³√(∂Q²+∂δ²) |
+| extra | bileith | EnergyConserving | — | Biharmonic Leith C=2 | use existing `C_leith` |
+| extra | ebs | EnergyConserving | — | energy backscatter | use existing backscatter if present, else skip |
+
+"EnergyConserving vorticity" base = our `momentum_advection="vector_invariant"` (AL81 energy-
+enstrophy-conserving PV flux) — paper says "2nd-order energy-conserving rotational form". OK as base.
+
+---
+
+## TEST CASE A — 2D decaying homogeneous turbulence (paper §4)
+**Physics:** 2D incompressible Navier–Stokes, NON-rotating (f=0), non-dimensional,
+`Re = 3.3e4`, doubly-periodic box `2π × 2π`. RK3 + pressure projection (FFT).
+Eq (46): ∂ₜu + ζ k×u = −∇(p+K) + (1/Re)∇²u.
+**IC** (Ishiko 2009 narrow-band spectrum, Eqs 48–50): `E(k)=½ a_s k_p⁻¹ (k/k_p)⁷ exp[−7/2 (k/k_p)²]`,
+`a_s=16/3`, `k_p=12`. Vorticity in Fourier space `ζ̂=[k/π·E(k)]^½ e^{iφ}` (random phases, real field);
+`û=i k_y/k² ζ̂`, `v̂=−i k_x/k² ζ̂`.
+**Run:** `t=6` nondim (~18 eddy turnovers; `T_e=(∫k²E dk)^½≈0.33`). Snapshots at `t=3.6` (11 turnovers).
+**Grids:** DNS benchmark `4096²` (2nd-order energy-conserving, Eq 17). Coarse: `64², 128², 256², 1024²`.
+**Schemes (Table 1):** DNS, Leith1 (C=1), Leith2 (C=2), W5D `{ζ;ζ}`, W9D `{ζ;ζ}`, W5V `{ζ;u}`, W9V `{ζ;u}`.
+**Metrics (Figs 3–5):** vorticity field at t=3.6; integrated KE(t) & enstrophy(t); KE spectrum &
+enstrophy spectrum at t=3.6 (isotropic). Win = WENO converges to DNS at coarser res; `{ζ;u}`>`{ζ;ζ}`;
+W9V captures DNS energy spectrum down to 64².
+
+**legoESM realization (avoid a parallel system — use canonical blocks):** run the ocean C-grid
+model in a **single-layer, non-rotating (f=0), flat-bottom, doubly-periodic** config so the
+momentum operator reduces to 2D NS, with explicit Laplacian `A_h=1/Re` (non-dim) for DNS/Leith
+and the model's WENO momentum for W*. The free surface at small dt enforces ≈non-divergence
+(projection analog). If free-surface/barotropic coupling contaminates the pure-2D comparison,
+isolate the canonical **vorticity-flux kernel** (`_weno_zeta_at_u/v`) via a thin 2D test harness
+(lives in the fidelity/test harness, NOT the model — CLAUDE.md oracle-fidelity rule). Decide
+empirically; document the choice.
+
+---
+
+## TEST CASE B — baroclinic jet (paper §5; BaroclinicAdjustment.jl confirms)
+**Domain:** periodic channel, spherical sector **60°S–40°S** (φ₀=−50°, Δφ=20°), **20° wide in lon**
+(−10→10), **1 km deep**, **Nz=50** (dz=20 m), halo (7,7,7).
+**Stratification/front:** `N²=4e-6 s⁻²`; `b=N²z + Δb·B(x)`, `Δb=5e-3 m/s²` (≈2.5°C);
+`B = 0 if γ<0; [γ−sinγcosγ]/π if 0≤γ≤π; 1 if γ>π`, `γ=(π/2)−2π(φ−φ₀)/Δφ` (Eqs 52–53).
+Thermal-wind-balanced U (vanishes at z=−H), + weak white noise.
+**BCs:** no-flux, free-slip walls. Background `ν=1e-4 m²/s`, `κ=1e-5 m²/s` (vertical).
+**Restoring:** linearly restore **zonal-mean buoyancy AND velocity** to initial profiles,
+**τ=50 days** (sets the transport, doesn't suppress eddies). (Soufflet 2016 style.)
+**Time stepping:** AB2 (QuasiAdamsBashforth2, Δt=5 min) [or RK3 Δt=15 min];
+SplitExplicitFreeSurface (cfl=0.7). **stop_time = 1000 days**; statistically steady ~day 250.
+**Resolutions:** 1/8°, 1/16°, 1/32° → max meridional Δ ≈ 14, 7, 3.5 km (`Ny=20/res`). Tracer = WENO7 (all cases).
+**L_d:** initial 5.5 km → equilibrium ~6.75 km (`L_d=(1/(π|f|))∫₀^{−H}(∂_z b)^½ dz`, Eq 54).
+**Schemes:** the 5 (UP3, W9V, W9D, SM2, QG2) × 3 resolutions = **15 runs of 1000 days**. (+ bileith/ebs optional.)
+**Metrics (Figs 7–10):** surface vorticity (day ~220–230); 10-day-running TKE / EKE / eddy-APE(t);
+zonal **energy / enstrophy / w′b′ cospectra** (top 200 m, days 250–1000, vs L_d line); zonal-mean
+buoyancy (days 250–1000) = "effective resolution". Win = W9V most energetic (lowest implicit
+dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km), no grid-scale ringing.
+
+---
+
+## BUILDING BLOCKS (code) — checklist
+- [ ] **B1. Wire WENO9 momentum**: `_weno_zeta_at_u/v` add `order=9` (hw={5:3,7:4,9:5}); dispatch
+  `_weno_order={"weno5":5,"weno7":7,"weno9":9}`; config `momentum_advection="weno9"`; D-term + vertical
+  inherit order. Unit test the order-9 reconstruction.
+- [ ] **B2. `weno_smoothness` config** = `"split"` (`{ζ;u}`, =W*V, default) vs `"standard"` (`{ζ;ζ}`, =W*D).
+  Thread into `_weno_zeta_at_u/v`. Unit test both branches differ.
+- [ ] **B3. UP3 flux-form momentum**: 3rd-order upwind-biased flux-form momentum advection option
+  (`momentum_advection="upwind3"`). Reuse DST3/upwind kernels if present; else add. Unit test.
+- [ ] **B4. OM4p25 Smagorinsky preset (SM2)**: assemble from A_h/B_h/C_smag/C_smag_lap the exact
+  `ν₂=max(C₂Δ²|D|,Cu₂Δ)·F`, `ν₄=max(C₄Δ⁴|D|,Cu₄Δ³)`, `F=1/(1+0.25 Rh⁴)` (Rh=L_d/Δ),
+  `|D|=√(Ds²+Dt²)`, Ds=∂ₓu−∂ᵧv, Dt=∂ₓv+∂ᵧu, C₂=.15 Cu₂=.01 C₄=.06 Cu₄=.01. As a `*Config`/preset,
+  NOT magic numbers. Unit test. (Ref: `BaroclinicAdjustment.jl/src/Parameterizations/omp25_lateral_friction.jl`.)
+- [ ] **B5. QG-Leith viscosity (QG2)**: NEW operator `ν=(CΔ/π)³√(∂Q²+∂δ²)`, ∂Q² bounded by the
+  three q-gradient terms (Eq A2–A3), reverts to 2D Leith where QG breaks; C=2. As a scheme + `*Config`.
+  Unit test + physics contract. (Ref: `.../qg_leith_viscosity.jl`.)
+- [ ] **B6. WENO-K KE gradient (refinement, optional)**: `ke_gradient_scheme="weno"` for full W9V
+  faithfulness. Low priority (paper: minimal impact).
+- [ ] **B7. WENO9 tracer (optional)**: expose `weno9_to_u/v_points` + vertical. Paper uses WENO7
+  tracer for ALL cases, so weno7 (exists) suffices; weno9 tracer not required.
+
+## DIAGNOSTICS — checklist (reuse existing where noted)
+- [ ] **D1. Relative vorticity** field diagnostic (C-grid curl `curl_vertex_cgrid` exists; wrap).
+- [ ] **D2. KE(t) & enstrophy(t)** integrals (2D + 3D).
+- [ ] **D3. Eddy decomposition** util `x' = x − ⟨x⟩_zonal`; **EKE, TKE, eddy-APE** time series
+  (eddy-APE = ½ g² ⟨b'²⟩/(N²ρ₀²) or ½⟨b'²⟩/N² form — pick + document).
+- [ ] **D4. w′b′** vertical eddy buoyancy flux + its zonal cospectrum.
+- [ ] **D5. Zonal energy / enstrophy spectra** (reuse `run_eady_rebuilt.py::_zonal_spectrum` pattern +
+  `ocean/diagnostics.py::isotropic_energy_spectrum/isotropic_enstrophy_spectrum`).
+- [ ] **D6. Zonal-mean buoyancy** (days 250–1000 average).
+- [ ] **D7. Deformation radius** L_d — `ocean/diagnostics.py::first_baroclinic_deformation_radius` EXISTS.
+
+## RECIPES / EXPERIMENTS — checklist
+- [ ] **R1. 2D turbulence experiment** `ocean/experiments/decaying_turbulence_2d.py`: config + Ishiko
+  spectral IC + doubly-periodic non-rotating single-layer grid. `*Recipe` NamedTuple + `build_*` fn. Test.
+- [ ] **R2. Silvestri baroclinic-jet experiment** — adapt `eady_uniform.py` OR new
+  `ocean/experiments/baroclinic_jet_silvestri.py` with the EXACT §5 config (front Eqs 52–53,
+  τ=50d zonal-mean restoring of b AND u/v, 1000 d, 1/8–1/32°). `*Recipe` + `build_*` selecting the
+  5 scheme presets. Test.
+- [ ] **R3. Driver A** `scripts/run/run_silvestri_2d_turbulence.py`: runs a scheme×res, emits
+  parseable VERDICT + metrics (KE/enstrophy/spectra), saves arrays for plots.
+- [ ] **R4. Driver B** `scripts/run/run_silvestri_baroclinic_jet.py`: runs a scheme×res 1000 d,
+  emits VERDICT (EKE_sat, L_d, gridscale_frac, ringing flag) + saves time series + spectra + zonal-mean b.
+- [ ] **R5. Comparison/plot** `scripts/plot/plot_silvestri_comparison.py`: reproduces Figs 4–5 (2D)
+  and 8–10 (jet) analogues from saved arrays.
+
+---
+
+## PHASES (loop roadmap — do in order, commit each)
+- **Phase 1 — building blocks B1–B5** (+ B6/B7 if cheap): the scheme code. Codex review. Unit tests green.
+- **Phase 2 — diagnostics D1–D7**: with unit tests.
+- **Phase 3 — recipes/experiments R1–R2 + drivers R3–R4**: forward steps finite, scan-carry stable, tests.
+- **Phase 4 — 2D turbulence matrix**: run DNS(4096²) + {64,128,256,1024}² × {Leith1,Leith2,W5D,W9D,W5V,W9V}.
+  Collect KE(t)/enstrophy(t)/spectra. Reproduce Figs 4–5. Verdict: does W9V converge fastest, `{ζ;u}`>`{ζ;ζ}`?
+- **Phase 5 — baroclinic-jet matrix**: run {1/8,1/16,1/32°} × {UP3,W9V,W9D,SM2,QG2} × 1000 d.
+  Collect TKE/EKE/eddy-APE + spectra + zonal-mean b + L_d. Reproduce Figs 7–10. Verdict: W9V most
+  energetic / highest effective resolution?
+- **Phase 6 — synthesis**: comparison report `docs/ocean_experiments/silvestri_weno_reproduction.md`
+  (scoreboard vs paper, where legoESM matches/diverges, effective-resolution table). Final commit.
+
+## SUCCESS CRITERIA
+1. The 5 paper schemes are SELECTABLE legoESM recipes (config knobs / presets), each unit-tested.
+2. Both experiments reproduce the paper's QUALITATIVE result: (A) WENO noise-free vs Leith grid-noise;
+   W9V converges to DNS at coarsest res; `{ζ;u}`>`{ζ;ζ}`. (B) W9V most energetic, ≈half-resolution
+   convergence, no ringing; dispersive (SM2/QG2) show ringing at 3.5/7 km.
+3. Metrics MATCH the paper's metrics (same definitions: integrated KE/enstrophy, isotropic spectra,
+   EKE/TKE/eddy-APE, w′b′ cospectrum, zonal-mean b, L_d).
+4. Each numerical-code change passes the iterate-with-codex adversarial review (CLAUDE.md mandate)
+   + the guardrail harness (contracts/ratchets) where touched.
+5. Report documents every match AND divergence honestly (truth tiers outrank oracle-matching).
+
+## REFERENCE CODE (fetch from GitHub as needed)
+- `github.com/simone-silvestri/BaroclinicAdjustment.jl`:
+  `src/baroclinic_adjustment.jl` (setup), `run_and_visualize/run_and_postprocess.jl` (the 7 TestCases),
+  `src/Parameterizations/{omp25_lateral_friction,qg_leith_viscosity,biharmonic_leith_viscosity,
+  leith_laplacian_viscosity,energy_backscatter}.jl`, `src/Diagnostics/{spectra,integrated_diagnostics,
+  diagnostic_fields}.jl`, `run_and_visualize/{deformation_radius,energy_plots,spectra_plot,buoyancy_contour}.jl`.
+- `github.com/CliMA/Oceananigans.jl` (≥v0.84.0): `src/Advection/vector_invariant_*.jl`,
+  `src/Advection/weno_*.jl` (WENOVectorInvariant, CrossAndSelfUpwinding vs OnlySelfUpwinding = V vs D).
+- Use `api.github.com/repos/<repo>/git/trees/main?recursive=1` to list, `raw.githubusercontent.com/...` to fetch.
+
+## ENV CAVEATS
+- Shell is **csh**; venv python `.venv/bin/python`; science runs need `JAX_ENABLE_X64=1`.
+- 2× V100S; **pin GPUs** with `CUDA_VISIBLE_DEVICES`; GPU runs intermittently SIGTERM/SIGURG-killed
+  (exit 143/144) — re-run killed configs, prefer harness-tracked background tasks, poll log files.
+- Branch: `feat/silvestri-weno-reproduction` (off the Eady rebuild). Stage explicit pathspecs, never `git add -A`.
+- File layout: experiments→`ocean/experiments/`, drivers→`scripts/run/`, plots→`scripts/plot/`,
+  diagnostics→`ocean/diagnostics.py`, tests mirror under `tests/ocean/`. No files at repo root.
+
+---
+
+## PROGRESS LOG (append every iteration — newest on top)
+
+### Iteration 1 (setup) — 2026-06-15
+- Read the full paper (24 pp); extracted both experiment specs + all metrics + appendices
+  (Leith, QG-Leith, OM4p25 closures; energy-conservation derivation).
+- Scoped the repo (2 Explore agents): **W9V ~80% built** — WENO5/7 vector-invariant with `{ζ;u}`
+  smoothness + D-term ALREADY exist; weno9 kernels exist unwired; QG-Leith/UP3/OM4p25-preset missing;
+  2D-turbulence experiment + several diagnostics missing. Mapping table above.
+- Fetched reference specs from BaroclinicAdjustment.jl (the 7 TestCases, exact §5 config, OM4p25 +
+  QG-Leith formulas). PDF saved to `docs/references/`.
+- Wrote this spec. Branch `feat/silvestri-weno-reproduction` created off the Eady rebuild.
+- **NEXT: Phase 1 / B1 — wire WENO9 momentum** (`_weno_zeta_at_u/v` order=9 + dispatch + config),
+  with a unit test, then B2 (`weno_smoothness` split vs standard) which W9D needs. Verify the
+  existing weno5/7 path first (read `ocean_pe_latlon_cgrid.py:586-721,1599-1658`) before extending.
