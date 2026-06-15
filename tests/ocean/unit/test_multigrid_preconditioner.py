@@ -137,3 +137,20 @@ def test_multigrid_refuses_distributed(monkeypatch):
     monkeypatch.setattr(_ops, "is_distributed", lambda: True)
     with pytest.raises(ValueError, match="not yet halo-aware under band MPI"):
         _make_multigrid_preconditioner(H_cell, coeff, grid, mask)
+
+
+def test_multigrid_refuses_spmd_backend():
+    """route-B guard gap: lat-lon SPMD arms the 'spmd' halo backend with
+    is_distributed()==False (single process) — the 2x2 restriction still
+    straddles shards, so 'multigrid' must refuse on the spmd backend too."""
+    from legoesm.grids.halo import (
+        get_halo_backend, set_halo_backend,
+    )
+    grid, coeff, mask, H_cell, _, _ = _setup()
+    prev = get_halo_backend()
+    set_halo_backend("spmd")
+    try:
+        with pytest.raises(ValueError, match="band MPI / lat-lon SPMD"):
+            _make_multigrid_preconditioner(H_cell, coeff, grid, mask)
+    finally:
+        set_halo_backend(prev)

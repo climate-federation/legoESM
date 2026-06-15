@@ -676,11 +676,16 @@ def _make_multigrid_preconditioner(
     """
     from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
     from legoesm.core.operators import is_distributed
+    from legoesm.grids.halo import get_halo_backend
 
-    if is_distributed():
+    # Refuse on BOTH distributed paths: route-A MPI (is_distributed) AND
+    # route-B single-process lat-lon SPMD (halo backend == "spmd",
+    # is_distributed()==False) — both shard latitude, so the rank/shard-local
+    # 2x2 restriction straddles band cuts and builds a wrong coarse problem.
+    if is_distributed() or get_halo_backend() == "spmd":
         raise ValueError(
             "multigrid preconditioner: the geometric MG transfers are not yet "
-            "halo-aware under band MPI / lat-lon SPMD (a rank-local 2x2 "
+            "halo-aware under band MPI / lat-lon SPMD (a rank/shard-local 2x2 "
             "restriction straddles band cuts), so the coarse problem and the "
             "M-cut are invalid distributed.  Use 'zonal_line' (comm-free) or "
             "'chebyshev' under MPI; 'multigrid' is single-rank only for now.")
