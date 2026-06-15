@@ -52,6 +52,9 @@ PANELS = [
     ("Ocean barotropic reductions/step", "baro_reductions_per_step",
      "lower better (jacobi120-unconverged vs banded-MG24; weak Amdahl term)",
      None),
+    ("Voronoi/MPAS halo+partition speedup", "voronoi_lever_speedup",
+     "higher better (batched-halo default + METIS opt-in; vs RCB/legacy)",
+     None),
 ]
 
 

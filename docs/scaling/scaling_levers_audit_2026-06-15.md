@@ -27,8 +27,16 @@ Hardware: Ginsburg — CPU-MPI nodes (≤16 ranks/node policy, Gloo/TCP, no IB) 
    (would need a much faster GPU to expose dispatch headroom).
 
 ## Ranked remaining
-3. METIS/default partition audit for MPAS — `voronoi_partition.py:204`,
-   `voronoi_mpi.py:120`; +5–20% CPU-MPI if RCB cut/imbalance is bad (cheap A/B).
+3. METIS/default partition audit for MPAS — **MEASURED 2026-06-15 (job 8488136),
+   small opt-in win at scale.** icosahedral I6 f64 RCB-vs-METIS: np8 neutral
+   (66.68 vs 67.32 ms/step, noise), np16 **METIS +1.9%** (59.93 vs 58.82) — the
+   edge-cut-min win GROWS with rank (boundary/interior ratio), so >np16 likely
+   approaches the +5-20% range. RCB is already well-balanced on the near-uniform
+   icosahedral mesh, so the low-rank win is ~0; the gain is high-rank only. Kept
+   OPT-IN (`method="metis"` / `LEGOESM_VORONOI_PARTITION=metis`); NOT flipped to
+   default — pymetis is not in the shared/production venv (installed in the
+   campaign's `legoesm-mpi` venv only), and a ~2% gain doesn't justify a hard
+   dep. Recommend metis for large multi-node MPAS runs where pymetis is present.
 4. Root-only/gathered checkpoint + diagnostics writers — `scripts/run/run_omip.py`
    / matrix I/O; big wall-clock only at high output cadence, ~0 step-kernel gain.
 5. Tripole wiring (lat-lon C-grid) — capability (eORCA scaling), not speedup.
