@@ -158,7 +158,6 @@ def bechtold_convection(
     )  # (ncol, nlev, 4)
     _pbl_sums = jnp.sum(_pbl_sum_stack, axis=-2)  # (ncol, 4)
     pbl_norm_val = _pbl_sums[..., 0].clip(1e-6, None)
-    pbl_norm_val[..., None]  # (ncol, 1) — preserve keepdims shape
     T_pbl = _pbl_sums[..., 1] / pbl_norm_val
     q_pbl = _pbl_sums[..., 2] / pbl_norm_val
     # Mass-weighted PBL pressure for the LCL launch level when the
@@ -357,10 +356,37 @@ def bechtold_convection(
     # Codex finding).
     dt_over_tau = dt / jnp.maximum(config.tau_M_u_relax, 1e-30)
     M_u_new = (conv_prog_profile + dt_over_tau * plume.M_u) / (1.0 + dt_over_tau)
-    # Cap M_u_new at config.M_b_max so every downstream use (kernel
-    # tendencies, dq_c_conv_raw, downdraft trigger, CMT, carry update)
-    # sees the same bounded value.
-    M_u_new = jnp.clip(M_u_new, 0.0, config.M_b_max)
+    # Launch-aware mass-flux cap (root-cause fix for the stable-column
+    # spurious-heating runaway — validator codex review round-2).  Bechtold's
+    # IFS entrainment ``ε`` far exceeds its detrainment ``δ``, so the plume
+    # ``M_u = M_b·exp(∫(ε−δ)dz)`` exponentiates by many orders of magnitude.  On
+    # a stable / zero-CAPE column the CAPE trigger makes the launch mass flux
+    # ``M_b`` ~ ``cape_weight·… ≈ 0``, BUT the exponential growth then drives
+    # ``M_u`` straight into a *constant* ``M_b_max`` clip — ERASING the
+    # launch-time ``cape_weight`` gate and spuriously heating a quiescent column
+    # by ~3900 W/m².  Capping ``M_u_new`` by a launch-aware bound that scales
+    # with the CAPE trigger preserves the launch gate through the downstream
+    # transport: a genuinely-convecting column (``cape_weight → 1``) keeps the
+    # full legacy ``M_b_max`` bound (BYTE-IDENTICAL when ``cape_weight == 1``, so
+    # the closed column-MSE budget on a convecting column is untouched), while a
+    # zero-CAPE column is capped far below ``M_b_max`` and stays quiescent.
+    #
+    # The trigger ``cape_weight = smooth_step(CAPE − threshold, sharpness)`` does
+    # NOT decay all the way to 0 for a strongly sub-threshold column — it floors
+    # at ~9e-4 on the validator stable-dry column — and a 9e-4·M_b_max ≈ 4.6e-5
+    # kg/m²/s residual mass flux still drives ~4.6 W/m² of spurious heating
+    # (above the <1 W/m² quiescence bar) because the dead plume's ``(T_u − T)``
+    # is large.  Squaring the trigger (``cape_weight²·M_b_max``) collapses that
+    # soft floor (9e-4 → 8e-7) so the sub-threshold column genuinely quiesces
+    # (stable-dry heating 3929 → ~4e-3 W/m²) while leaving a fully-triggered
+    # column (``cape_weight = 1 ⇒ 1² = 1``) on the exact legacy ``M_b_max`` cap.
+    # ``cape_weight ∈ [0, 1]`` and the square are smooth, so the cap *bound* is
+    # differentiable; the surrounding ``jnp.clip`` keeps the SAME piecewise AD
+    # behaviour as the legacy constant cap (zero gradient through a clipped
+    # value, full gradient through the active bound).  ``cape_weight²·M_b_max ≤
+    # M_b_max`` keeps the literature peak as the hard upper bound.
+    M_u_cap = (cape_weight ** 2)[:, None] * config.M_b_max
+    M_u_new = jnp.clip(M_u_new, 0.0, M_u_cap)
 
     # -- Environmental tendencies (using relaxed M_u) ---------------------
     # The detrainment rate that feeds the *environmental* tendencies

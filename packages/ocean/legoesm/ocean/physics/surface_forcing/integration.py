@@ -28,6 +28,49 @@ from legoesm.ocean.physics.tendencies import (
 )
 
 
+def _check_restoring_protocol_compat(cfg) -> None:
+    """Static (construction-time) guard: reject RestoringConfig modes that the
+    physics_fn protocol cannot serve.
+
+    The ``physics_fn`` protocol signature is
+    ``(state, grid, z_coord, surface_forcing=None)`` — there is NO ``dt`` and no
+    ``sw_down``/``rho_0``/``c_p``/``dz_0`` threading.  The factory paths
+    (``_make_restoring`` / ``_make_combined``) therefore call the leaf
+    ``restoring_surface_forcing(T, S, grid, cfg)`` with none of those kwargs, and
+    the leaf raises (deep inside the traced step) when:
+
+    - ``cfg.implicit=True``      → needs ``dt`` (analytical implicit-Euler), or
+    - ``cfg.subtract_qsr=True``  → needs ``sw_down``/``rho_0``/``c_p``/``dz_0``
+      (NEMO/DINO eq-8 non-solar split).
+
+    Catching it here — on the STATIC Python config value, before any
+    tracing/JIT — turns an unreachable runtime failure into a clear, early
+    error.  ``implicit=False`` + ``subtract_qsr=False`` (the defaults) pass
+    untouched.
+    """
+    bad = []
+    if getattr(cfg, "implicit", False):
+        bad.append("implicit=True (needs `dt` for analytical implicit-Euler)")
+    if getattr(cfg, "subtract_qsr", False):
+        bad.append(
+            "subtract_qsr=True (needs `sw_down`/`rho_0`/`c_p`/`dz_0` for the "
+            "eq-8 non-solar split)"
+        )
+    if bad:
+        raise ValueError(
+            "RestoringConfig "
+            + " and ".join(bad)
+            + " is not supported through make_surface_forcing_physics: the "
+            "physics_fn protocol (state, grid, z_coord, surface_forcing=None) "
+            "does not thread `dt`/`sw_down`/`rho_0`/`c_p`/`dz_0` to the "
+            "restoring leaf, so these modes are unreachable here and would "
+            "raise deep inside the traced step. Leave implicit=False and "
+            "subtract_qsr=False, or drive these modes through a dedicated "
+            "experiment harness that calls restoring_surface_forcing(...) "
+            "directly with the required arguments."
+        )
+
+
 def make_surface_forcing_physics(
     config: SurfaceForcingConfig,
 ) -> Callable:
@@ -48,8 +91,10 @@ def make_surface_forcing_physics(
     elif scheme == "prescribed":
         return _make_prescribed(config)
     elif scheme == "restoring":
+        _check_restoring_protocol_compat(config.restoring)
         return _make_restoring(config)
     elif scheme == "combined":
+        _check_restoring_protocol_compat(config.restoring)
         return _make_combined(config)
     elif scheme == "bulk_formulas":
         return _make_bulk_formulas(config)

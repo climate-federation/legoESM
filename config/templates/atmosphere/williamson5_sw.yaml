@@ -1,0 +1,24 @@
+# legoESM experiment template — Williamson #5 shallow-water (flow over mountain).
+#
+# Names the `williamson5` idealized atmosphere matrix case via the `setup:`
+# selector (#388). Routes (exact match) to:
+#   run_atmosphere_test_matrix.py --test =williamson5 --grid cubed_sphere
+experiment:
+  tier: tier1
+  complexity: shallow_water
+  extent: global
+  maturity: structurally_validated
+  description: >
+    Williamson test 5: zonal flow over an isolated mountain — the standard
+    shallow-water dycore benchmark for topographic Rossby-wave generation and
+    conservation on the sphere.
+  data: []
+  conservation_gates: [mass, energy]
+model:
+  name: "atmosphere-williamson5"
+  type: atmosphere_only
+setup:
+  name: williamson5
+  grid: cubed_sphere
+output:
+  path: output/atmosphere/williamson5/

@@ -19,14 +19,24 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.forcing.time_utils import day_to_calendar
+from legoesm.forcing.time_utils import daily_forcing_bucket, day_to_calendar
 
-from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic
+from legoesm.core.conservation import (
+    compute_global_moisture, fix_moisture_hydrostatic,
+    energy_consistent_moisture_floor,
+)
 from legoesm.core.tracers import (
-    TracerRegistry, make_moisture_registry, make_full_moisture_registry, init_tracers,
+    TracerRegistry,
+    init_tracers,
+    make_full_moisture_registry,
+    make_moisture_registry,
 )
 from legoesm.driver.config import ExperimentConfig
-from legoesm.driver.physics_pipeline import build_physics_pipeline
+from legoesm.driver.physics_pipeline import (
+    build_physics_pipeline,
+    required_microphysics_tracer_slots,
+    validate_microphysics_tracer_slots,
+)
 from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.driver.restart import save_restart, load_restart
 
@@ -115,14 +125,17 @@ class ModelDriver:
         self.physics = None
         self.state = None
         self.tracers: dict[str, jax.Array] = {}
-        # Use full moisture registry for mixed-phase/two-moment microphysics
-        # (q_v,q_c,q_r,q_i,q_s,q_g,N_c,N_r,N_i). P3 reuses q_s→q_rim and
-        # q_g→B_rim but still needs the 9-slot layout.
-        _ice_schemes = {"morrison", "thompson", "seifert_beheng", "p3"}
-        if config.microphysics in _ice_schemes:
+        warm_registry = make_moisture_registry()
+        required_slots = required_microphysics_tracer_slots(config.microphysics)
+        if required_slots > warm_registry.n_tracers:
             self.tracer_registry: TracerRegistry = make_full_moisture_registry()
         else:
-            self.tracer_registry: TracerRegistry = make_moisture_registry()
+            self.tracer_registry: TracerRegistry = warm_registry
+        validate_microphysics_tracer_slots(
+            config.microphysics,
+            self.tracer_registry.n_tracers,
+            context="ModelDriver tracer registry",
+        )
         self.get_sst_sic = None
         # Optional per-segment surface-property feedback hook.  A coupled
         # driver sets this to a callable ``day -> (sfc_albedo, sfc_T)`` (each
@@ -141,6 +154,13 @@ class ModelDriver:
         self._ensemble_size = 1
         self._device_config = None
         self._carry_aux: dict = {}  # held radiation + carry metadata for checkpoint
+        # (step, day) exactly as the last load_checkpoint returned them —
+        # lets the run loops distinguish the production restart convention
+        # (callers pass the CHECKPOINT day straight back into run()) from
+        # a caller-supplied EPOCH day (the legacy contract).  See the
+        # START_DAY normalization in _prepare_run_context / _run_spectral
+        # (FIX_RESTART_TIME).
+        self._loaded_checkpoint_step_day: tuple | None = None
 
         # MPI distributed state (populated by _setup_parallel)
         self._mpi_rank: int | None = None
@@ -299,6 +319,25 @@ class ModelDriver:
             return
         for key in [k for k in self._carry_aux if k.startswith("dmtr_")]:
             _tracers[key[len("dmtr_"):]] = self._carry_aux.pop(key)
+
+    def _validate_microphysics_tracer_state(
+        self,
+        *,
+        context: str = "ModelDriver tracer state",
+    ) -> int:
+        """Validate that the live tracer dict can hold scheme tendencies."""
+        tracers = getattr(self, "tracers", None)
+        have_slots = 0
+        if isinstance(tracers, dict):
+            for name in self.tracer_registry.names:
+                if tracers.get(name) is None:
+                    break
+                have_slots += 1
+        return validate_microphysics_tracer_slots(
+            self.config.microphysics,
+            have_slots,
+            context=context,
+        )
 
     def setup(self) -> None:
         """Initialize grid, dycore, physics, forcing, and state."""
@@ -812,6 +851,9 @@ class ModelDriver:
 
         # Initialize all tracers via registry
         self.tracers = init_tracers(self.tracer_registry, shape_3d)
+        self._validate_microphysics_tracer_state(
+            context="ModelDriver initialized tracer state",
+        )
 
         # Moisture initialization (spectral and MPAS use dry physics)
         if hasattr(self.state, 'p_s') and hasattr(self.state.p_s, 'data'):
@@ -2538,6 +2580,39 @@ class ModelDriver:
             logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
             return
 
+        # Spectral path (FIX_RESTART_TIME iteration 4): the spectral PE
+        # state is five complex coefficient Fields (vor/div/T/lnps/phis
+        # ``_hat``) + an optional grid-space tracers dict — the shared
+        # ``save_restart`` assumes the cube/lat-lon layout (reads
+        # ``state.v.data``, infers resolution from the T-shape) and
+        # cannot serialise it.  Write the coefficient arrays directly
+        # (npz handles complex128 natively) under the absolute-day
+        # filename the restart chain globs (MPAS convention).  The
+        # spectral loop refuses stateful physics and holds no
+        # held-radiation carry, so this payload is complete for
+        # bit-exact continuation.  Single-process only (spectral
+        # transforms are global; the path is never MPI-sharded).
+        if self.config.dycore.discretization == "spectral":
+            ckpt_path = (self._output_dir
+                         / f"checkpoint_day_{int(round(day)):04d}.npz")
+            s = self.state
+            _save = dict(
+                vor_hat=np.asarray(s.vor_hat.data),
+                div_hat=np.asarray(s.div_hat.data),
+                T_hat=np.asarray(s.T_hat.data),
+                lnps_hat=np.asarray(s.lnps_hat.data),
+                phis_hat=np.asarray(s.phis_hat.data),
+                step=np.asarray(int(step)), day=np.asarray(float(day)),
+                spectral_layout=np.asarray(1),
+            )
+            if s.tracers is not None:
+                _save["tracer_names"] = np.asarray(sorted(s.tracers.keys()))
+                for _k in s.tracers:
+                    _save[f"trc_{_k}"] = np.asarray(s.tracers[_k].data)
+            np.savez(ckpt_path, **_save)
+            logger.info(f"  Checkpoint: {ckpt_path.name} (spectral)")
+            return
+
         # Distributed path
         if (self._device_config is not None
                 and self._device_config.is_distributed):
@@ -2948,6 +3023,65 @@ class ModelDriver:
             logger.info(f"  Loaded MPAS checkpoint: step={step}, day={day:.2f}"
                         + ("" if "tracer_names" not in d
                            else f", tracers={[str(n) for n in d['tracer_names']]}"))
+            self._loaded_checkpoint_step_day = (step, day)
+            return step, day
+
+        # Spectral path (FIX_RESTART_TIME iteration 4): mirror of the
+        # spectral branch in ``save_checkpoint``.  Reconstruct the
+        # ``SpectralHydrostaticState`` (five complex coefficient Fields
+        # + optional grid-space tracers) with Field metadata taken from
+        # the current state; the generic ``load_restart`` reads
+        # grid-layout fields and cannot deserialise it.
+        if self.config.dycore.discretization == "spectral":
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"spectral checkpoint not found (or is a directory): "
+                    f"{path}"
+                )
+            import jax.numpy as jnp
+            from legoesm.core.field import Field
+            d = np.load(path)
+            if "spectral_layout" not in d:
+                raise ValueError(
+                    f"{path} is not a spectral checkpoint (missing the "
+                    "spectral_layout marker) — it cannot restore a "
+                    "discretization='spectral' run."
+                )
+            s = self.state
+            new_fields = {}
+            for _name in ("vor_hat", "div_hat", "T_hat", "lnps_hat",
+                          "phis_hat"):
+                _cur = getattr(s, _name)
+                _arr = d[_name]
+                if _arr.shape != _cur.data.shape:
+                    raise ValueError(
+                        f"spectral checkpoint {_name} shape {_arr.shape} "
+                        f"!= configured state {_cur.data.shape} "
+                        f"(resolution/nlev mismatch): {path}"
+                    )
+                new_fields[_name] = _cur.replace(data=jnp.asarray(_arr))
+            tracers = None
+            if "tracer_names" in d:
+                if s.tracers is None:
+                    raise ValueError(
+                        f"spectral checkpoint {path} carries tracers "
+                        f"{[str(n) for n in d['tracer_names']]} but the "
+                        "configured run has none — refusing to silently "
+                        "drop water."
+                    )
+                tracers = {}
+                for _k in (str(n) for n in d["tracer_names"]):
+                    _cur_t = s.tracers[_k]
+                    tracers[_k] = _cur_t.replace(
+                        data=jnp.asarray(d[f"trc_{_k}"]))
+            elif s.tracers is not None:
+                tracers = s.tracers
+            self.state = s._replace(tracers=tracers, **new_fields)
+            step = int(d["step"])
+            day = float(d["day"])
+            logger.info(
+                f"  Loaded spectral checkpoint: step={step}, day={day:.2f}")
+            self._loaded_checkpoint_step_day = (step, day)
             return step, day
 
         # Distributed path: directory with per-rank .npz files
@@ -3001,6 +3135,7 @@ class ModelDriver:
                     f"  Loaded distributed restart: step={step}, day={day}, "
                     f"rank={topology.rank}"
                 )
+                self._loaded_checkpoint_step_day = (step, day)
                 return step, day
 
         # Lat-lon band MPI: rank 0 loads the global ``.npz`` against
@@ -3120,6 +3255,7 @@ class ModelDriver:
                     "per-rank distributed checkpoint format or run "
                     "single-process for stateful-physics lat-lon MPI runs."
                 )
+            self._loaded_checkpoint_step_day = (step, day)
             return step, day
 
         # Single-process path
@@ -3140,6 +3276,7 @@ class ModelDriver:
         if metadata:
             logger.info(f"  Loaded restart: step={step}, day={day}, "
                        f"digest={metadata.state_digest[:16]}...")
+        self._loaded_checkpoint_step_day = (step, day)
         return step, day
 
     def _maybe_wallclock_exit(self, ckpt_fn, step: int, day: float) -> None:
@@ -3778,19 +3915,39 @@ class ModelDriver:
             )
 
         _forcing_daily: dict = {}
-        from legoesm.forcing.time_utils import day_to_calendar
+        from legoesm.forcing.time_utils import (
+            daily_forcing_bucket,
+            day_to_calendar,
+        )
         for step in range(n_steps_total):
             if _sst_forcing or _ext_forcing:
                 _force_day = START_DAY + step * DT / 86400.0
-                _fd_int = int(_force_day)
+                # floor, not int() — see daily_forcing_bucket (negative
+                # fractional days land in the wrong bucket under
+                # truncation; day_to_calendar already handles negative
+                # days via modulo).
+                _fd_int = daily_forcing_bucket(_force_day)
                 if _fd_int != _last_force_day:
+                    # Sample the daily fields at the CANONICAL day boundary
+                    # (``float(_fd_int)``), NOT at the first step that
+                    # enters the day: a restart link's first step lands
+                    # mid-day, so sampling at ``_force_day`` gave a chained
+                    # run slightly different seasonal SST/ozone than the
+                    # straight run and broke bit-exact restart continuation
+                    # (FIX_RESTART_TIME; found by the restart validation
+                    # harness — T diverged ~1e-8 over 2 steps).  Runs
+                    # starting at integer days (all production configs) are
+                    # bit-identical to before.
+                    _force_day_canonical = float(_fd_int)
                     _forcing_daily = {}
                     if _sst_forcing:
-                        _forcing_daily["T_sfc"] = _compute_T_sfc(_force_day)
+                        _forcing_daily["T_sfc"] = _compute_T_sfc(
+                            _force_day_canonical)
                     if _ext_forcing:
                         _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
                         _o3, _aer, _ghg = self._precompute_external_forcing(
-                            _force_day, _ext_p_s, jnp.asarray(_ext_lat),
+                            _force_day_canonical, _ext_p_s,
+                            jnp.asarray(_ext_lat),
                         )
                         _forcing_daily["o3_vmr"] = _o3
                         _forcing_daily["aerosol_od"] = _aer
@@ -4037,7 +4194,37 @@ class ModelDriver:
         N_DAYS = cfg.days
         n_steps_total = int(N_DAYS * 86400.0 / DT)
         DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        # ``checkpoint_days`` → step cadence (FIX_RESTART_TIME iteration
+        # 4: the spectral loop historically wrote NO checkpoints, so a
+        # --spectral AMIP run silently ignored --checkpoint-days and
+        # --restart-from was impossible).  The cadence is on ABSOLUTE
+        # steps — this loop runs ``range(start_step, n_steps_total)`` —
+        # so straight and resumed runs checkpoint at identical steps by
+        # construction.  0 ⇒ no checkpointing (historical behavior).
+        CHECKPOINT_INTERVAL = (
+            int(cfg.output.checkpoint_days * 86400.0 / DT)
+            if cfg.output.checkpoint_days > 0 else 0
+        )
         START_DAY = start_day if start_day is not None else cfg.start_day
+        # Restart-time normalization (FIX_RESTART_TIME, ported from
+        # fix/persist-physics where it is production-validated): these
+        # loops index time as ``START_DAY + ABSOLUTE_step * DT/86400``,
+        # so START_DAY must be the EPOCH day (day at step 0).  Every
+        # production caller (run_amip --restart-from, the coupled
+        # drivers) passes the CHECKPOINT day from load_checkpoint — which
+        # double-counted the already-elapsed time and ran every restarted
+        # link with forcing shifted forward by the checkpoint day
+        # (seasonally wrong SST / calendar; the restarted segment saw
+        # day_of_year 4 instead of 3 in the validation harness).
+        # Normalize ONLY when the caller passes back EXACTLY what this
+        # driver's load_checkpoint returned (the recorded hint) — a
+        # caller passing its own (e.g. epoch) start_day keeps the legacy
+        # epoch semantics verbatim.  The MPAS loop keeps its own
+        # local-step + checkpoint-day contract.
+        if (start_day is not None and start_step > 0
+                and self._loaded_checkpoint_step_day
+                == (start_step, start_day)):
+            START_DAY = start_day - start_step * DT / 86400.0
         a = self.grid.radius
 
         # Rayleigh friction profile
@@ -4295,12 +4482,16 @@ class ModelDriver:
                     sic_step = jnp.broadcast_to(sic_step[:, None], shape_2d)
                 _T_sfc_step = blend_surface_temperature(
                     sst_step, sic_step, T_ice).reshape(-1)
-                _fd_int = int(self._current_day)
+                _fd_int = daily_forcing_bucket(self._current_day)
                 if _ext_forcing and _fd_int != _last_ext_day:
                     _f_now = spectral_pe_to_grid(
                         self.state, self.grid, self.sigma)
+                    # Sample at the CANONICAL day boundary, not the first
+                    # step entering the day — a restart link's first step
+                    # lands mid-day (same bug class as the MPAS loop; see
+                    # daily_forcing_bucket / FIX_RESTART_TIME).
                     _o3, _aer, _ghg = self._precompute_external_forcing(
-                        self._current_day, _f_now['p_s'], _lat_2d_loop,
+                        float(_fd_int), _f_now['p_s'], _lat_2d_loop,
                     )
                     _ext_daily = {"o3_vmr": _o3, "aerosol_od": _aer}
                     # Volcanic LONGWAVE aerosol (gap #9): only when active
@@ -4383,6 +4574,42 @@ class ModelDriver:
                     run_status = f"BLOWUP at day {elapsed_day:.1f}"
                     logger.error(run_status)
                     break
+
+            # Periodic checkpoint (FIX_RESTART_TIME iteration 4) —
+            # cadence on ABSOLUTE steps, independent of the diagnostic
+            # interval.  Guard finiteness FIRST (MPAS pattern): the
+            # checkpoint cadence need not align with the diagnostic
+            # cadence, so a NaN can occur between diagnostic steps —
+            # never persist a blown-up state (it would poison every
+            # subsequent chain link).
+            if (CHECKPOINT_INTERVAL > 0
+                    and (step + 1) % CHECKPOINT_INTERVAL == 0):
+                _s = self.state
+
+                def _all_finite_c(arr):
+                    # Complex coefficients: finite iff BOTH parts are.
+                    return (jnp.all(jnp.isfinite(arr.real))
+                            & jnp.all(jnp.isfinite(arr.imag)))
+
+                _finite = (_all_finite_c(_s.vor_hat.data)
+                           & _all_finite_c(_s.div_hat.data)
+                           & _all_finite_c(_s.T_hat.data)
+                           & _all_finite_c(_s.lnps_hat.data))
+                if not bool(_finite):
+                    run_status = (
+                        f"BLOWUP at day {self._current_day - START_DAY:.1f}")
+                    logger.error(
+                        f"{run_status} (caught at checkpoint; not written)")
+                    break
+                self.save_checkpoint(step + 1, self._current_day)
+
+        # Final checkpoint so the next chain link resumes from the exact
+        # end state — skipped on blow-up and when the last step already
+        # hit the periodic cadence (identical file).
+        if (CHECKPOINT_INTERVAL > 0 and run_status == "COMPLETED"
+                and n_steps_total % CHECKPOINT_INTERVAL != 0):
+            _final_day = START_DAY + n_steps_total * DT / 86400.0
+            self.save_checkpoint(n_steps_total, _final_day)
 
         elapsed = time.time() - t_start
         logger.info(f"Spectral run {run_status} in {elapsed:.1f}s")
@@ -4548,6 +4775,25 @@ class ModelDriver:
         DT = cfg.dycore.dt
         N_DAYS = cfg.days
         START_DAY = start_day if start_day is not None else cfg.start_day
+        # Restart-time normalization (FIX_RESTART_TIME, ported from
+        # fix/persist-physics where it is production-validated): these
+        # loops index time as ``START_DAY + ABSOLUTE_step * DT/86400``,
+        # so START_DAY must be the EPOCH day (day at step 0).  Every
+        # production caller (run_amip --restart-from, the coupled
+        # drivers) passes the CHECKPOINT day from load_checkpoint — which
+        # double-counted the already-elapsed time and ran every restarted
+        # link with forcing shifted forward by the checkpoint day
+        # (seasonally wrong SST / calendar; the restarted segment saw
+        # day_of_year 4 instead of 3 in the validation harness).
+        # Normalize ONLY when the caller passes back EXACTLY what this
+        # driver's load_checkpoint returned (the recorded hint) — a
+        # caller passing its own (e.g. epoch) start_day keeps the legacy
+        # epoch semantics verbatim.  The MPAS loop keeps its own
+        # local-step + checkpoint-day contract.
+        if (start_day is not None and start_step > 0
+                and self._loaded_checkpoint_step_day
+                == (start_step, start_day)):
+            START_DAY = start_day - start_step * DT / 86400.0
         RAD_UPDATE_STEPS = cfg.rad_update_steps
 
         n_steps_total = int(N_DAYS * 86400 / DT)
@@ -5021,6 +5267,7 @@ class ModelDriver:
             owned_face_ids=self._owned_face_ids,
             hs_newtonian_relax=self._hs_newtonian_relax,
             device_config=_seg_device_config,
+            energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
             # Un-fused-radiation host path (ExperimentConfig.unfused_radiation,
             # default OFF): the pipeline lets build_segment_fn expose
             # run_norad_scan / run_rad so rrtmgp and the no-rad scan compile
@@ -5070,9 +5317,16 @@ class ModelDriver:
             # constant GHG with no climatological ozone/aerosol); for runs with
             # transient or climatological forcing it (correctly) now follows the
             # calendar.  Matches the per-step path (_run_mpas / _run_spectral,
-            # ~line 5447) which already re-samples every radiation step.  seg 0
-            # keeps the START_DAY precompute unchanged.
-            if seg_idx > 0:
+            # ~line 5447) which already re-samples every radiation step.
+            #
+            # ``start_step > 0`` ALSO refreshes segment 0 of a RESUMED run
+            # (FIX_RESTART_TIME codex finding): the prepare-context values were
+            # sampled at the epoch START_DAY, but the straight run refreshed this
+            # (absolute) segment at its end day — without the refresh a restarted
+            # AMIP/CMIP run's first segment uses epoch-day ozone/aerosol/GHG/solar
+            # and diverges from the uninterrupted run.  Fresh runs (start_step ==
+            # 0) keep the START_DAY precompute for segment 0 unchanged.
+            if seg_idx > 0 or start_step > 0:
                 solar_now = get_solar_forcing_at_time(self._solar_config, day)
                 current_s_0 = float(solar_now["tsi"])
                 if self._use_solar_spectral:
@@ -5380,6 +5634,7 @@ class ModelDriver:
                         owned_face_ids=self._owned_face_ids,
                         hs_newtonian_relax=self._hs_newtonian_relax,
                         device_config=_seg_device_config,
+                        energy_consistent_moisture_clip=cfg.energy_consistent_moisture_clip,
                         pipeline=self.physics,
                     )
 
@@ -5514,6 +5769,42 @@ class ModelDriver:
         day_of_year, seconds_of_day = day_to_calendar(day)
         sst, sic = self.get_sst_sic(day)
 
+        # Warmup radiation cadence (FIX_RESTART_TIME iteration-2 codex
+        # finding, high): the warmup executes step ``start_step``, so a
+        # RESUMED run must use the SAME need_rad predicate as the main
+        # loop — the straight run's step ``start_step`` was held-only
+        # unless (start_step+1) hit the radiation cadence, and an
+        # unconditional radiation solve here both overwrites the
+        # checkpoint-restored held tendencies and samples forcing at the
+        # wrong time.  Fresh starts (start_step == 0) and resumes
+        # without restored held tendencies keep the historical
+        # always-radiate warmup (zero-initialized held fields would be
+        # worse than a recompute).
+        warmup_need_rad = (
+            start_step == 0
+            or RAD_UPDATE_STEPS <= 1
+            or (start_step + 1) % RAD_UPDATE_STEPS == 0
+            or "held_dT_rad" not in self._carry_aux
+        )
+        if warmup_need_rad and start_step > 0:
+            # Mirror the straight run's refresh at the top of this
+            # step's body: solar + external forcing sampled at
+            # day(start_step+1), not the prepare-context epoch values.
+            solar_now = get_solar_forcing_at_time(self._solar_config, day)
+            current_s_0 = float(solar_now["tsi"])
+            if self._use_solar_spectral:
+                solar_weights = jnp.asarray(
+                    solar_now["solar_fraction_by_gpt"])
+            _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
+            o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
+                day, _phys_p_s, _phys_lat,
+            )
+        _warmup_step_fn = (
+            step_unified
+            if warmup_need_rad or step_unified_no_rad is None
+            else step_unified_no_rad
+        )
+
         self.state = self.model.step_with_physics(self.state, DT)
 
         # Double-moment hydrometeor inputs (None unless the registry carries
@@ -5521,8 +5812,8 @@ class ModelDriver:
         _dm_step_in = self._double_moment_step_inputs()
         phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
-            step_unified(
-                jnp.bool_(True),
+            _warmup_step_fn(
+                jnp.bool_(warmup_need_rad),
                 self.state.T.data, self.state.p_s.data,
                 self.q_v, self.q_c, self.q_r, conv_prog,
                 self.state.u.data, self.state.v.data,
@@ -5569,7 +5860,14 @@ class ModelDriver:
         if self._hs_newtonian_relax is not None:
             new_T = new_T + DT * self._hs_newtonian_relax(
                 self.state.T.data, self.state.p_s.data, self._grid_lat)
-        self.q_v = jnp.maximum(self.q_v + DT * phys_out.dq_v_dt, 0.0)
+        # Issue #323: keep the q_v floor moist-static-energy neutral when the
+        # opt-in flag is set (mirror the compiled-segment path so the flag is
+        # not a silent no-op in the per-step driver).
+        _qv_raw = self.q_v + DT * phys_out.dq_v_dt
+        if self.config.energy_consistent_moisture_clip:
+            self.q_v, new_T = energy_consistent_moisture_floor(_qv_raw, new_T)
+        else:
+            self.q_v = jnp.maximum(_qv_raw, 0.0)
         self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
         self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
         self._apply_double_moment_tendencies(phys_out, DT)
@@ -5694,7 +5992,12 @@ class ModelDriver:
                 new_T = new_T + DT * self._hs_newtonian_relax(
                     self.state.T.data, self.state.p_s.data, self._grid_lat)
 
-            self.q_v = jnp.maximum(self.q_v + DT * phys_out.dq_v_dt, 0.0)
+            # Issue #323: energy-consistent q_v floor (see warmup path).
+            _qv_raw = self.q_v + DT * phys_out.dq_v_dt
+            if self.config.energy_consistent_moisture_clip:
+                self.q_v, new_T = energy_consistent_moisture_floor(_qv_raw, new_T)
+            else:
+                self.q_v = jnp.maximum(_qv_raw, 0.0)
             self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
             self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
 

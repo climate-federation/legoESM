@@ -281,6 +281,11 @@ class ExperimentConfig(NamedTuple):
 
     # Conservation
     fix_moisture: bool = False
+    # Issue #323: make the per-step ``max(q_v, 0)`` floor on the physics
+    # tracer update moist-static-energy-conserving (remove the latent heat
+    # of the clipped vapour sink).  Opt-in for the kessler+sbm wind blow-up;
+    # default off => bit-identical.
+    energy_consistent_moisture_clip: bool = False
 
     # Topography
     topography: str = "flat"
@@ -561,6 +566,14 @@ class ExperimentConfig(NamedTuple):
                 f"gravity_wave_drag must be one of {_valid_gwd}, "
                 f"got {self.gravity_wave_drag!r}"
             )
+        # Checkpoint serialization format (mirror the io/restart writer set so a
+        # typo fails here instead of silently writing the wrong format).
+        _valid_checkpoint_format = ("npz", "zarr")
+        if self.output.checkpoint_format not in _valid_checkpoint_format:
+            errors.append(
+                f"checkpoint_format must be one of {_valid_checkpoint_format}, "
+                f"got {self.output.checkpoint_format!r}"
+            )
         # Reject unsupported coupled/ESM modes with actionable errors.
         if self.carbon_cycle != "none":
             errors.append(
@@ -786,6 +799,8 @@ class ExperimentConfig(NamedTuple):
             turbulence=getattr(amip_cfg, 'turbulence', 'none'),
             gravity_wave_drag=getattr(amip_cfg, 'gravity_wave_drag', 'none'),
             fix_moisture=getattr(amip_cfg, 'fix_moisture', False),
+            energy_consistent_moisture_clip=getattr(
+                amip_cfg, 'energy_consistent_moisture_clip', False),
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
@@ -890,6 +905,7 @@ class ExperimentConfig(NamedTuple):
             turbulence=self.turbulence,
             gravity_wave_drag=self.gravity_wave_drag,
             fix_moisture=self.fix_moisture,
+            energy_consistent_moisture_clip=self.energy_consistent_moisture_clip,
             topography=self.topography,
             topo_smoothing=self.topo_smoothing,
             topo_edge_blend=self.topo_edge_blend,

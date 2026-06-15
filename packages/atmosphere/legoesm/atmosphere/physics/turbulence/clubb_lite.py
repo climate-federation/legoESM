@@ -4,28 +4,33 @@ Carries five prognostic second-order moments and diagnoses cloud fraction
 from a Gaussian PDF of the saturation deficit, following the approach of
 Golaz et al. (2002) and Larson & Golaz (2005).
 
-Prognostic moments
-------------------
-1. wp2   = w'^2            vertical velocity variance (TKE-like)
-2. thlp2 = theta_l'^2      liquid water potential temperature variance
-3. rtp2  = r_t'^2          total water mixing ratio variance
-4. wpthlp = w'theta_l'     vertical heat flux
-5. wprtp  = w'r_t'         vertical moisture flux
+Prognostic moment (single)
+--------------------------
+Only ``wp2`` is carried as a prognostic moment.  An earlier version also
+carried thlp2, rtp2, wpthlp, wprtp and an assumed-PDF cloud fraction, but
+those higher moments and the cloud-fraction block were dead (never returned
+through ``TurbulenceOutput``) and were removed (iter-172); cloud fraction is
+handled downstream by the Sundqvist / Xu-Randall cloud scheme.
 
-Budgets (all at full levels, semi-implicit dissipation):
+  wp2 = w'^2   vertical-velocity variance, integrated here as a TKE-like
+               magnitude (see the faithfulness note on the budget below).
 
-  d(wp2)/dt   = 2*Km*S^2 + 2*(g/theta_v)*w'theta_v' - C1*wp2/tau + diff(wp2)
-  d(thlp2)/dt = -2*wpthlp*(d_theta_l/dz) - C5*thlp2/tau + diff(thlp2)
-  d(rtp2)/dt  = -2*wprtp*(d_r_t/dz)      - C5*rtp2/tau  + diff(rtp2)
-  d(wpthlp)/dt = -wp2*(d_theta_l/dz) + (g/theta_v)*thlp2 - C4*wpthlp/tau + diff
-  d(wprtp)/dt  = -wp2*(d_r_t/dz)     + (g/theta_v)*rtp2  - C4*wprtp/tau  + diff
+Budget (full levels, semi-implicit dissipation) — AS ACTUALLY INTEGRATED:
+
+  d(wp2)/dt = Km*S^2 - Kh*N^2 - C_eps*sqrt(wp2)/l + diff(wp2)
+
+NOTE on faithfulness: the canonical CLUBB w'^2 *variance* budget carries a
+factor of 2 on the production terms, a buoyancy production
+``2*(g/theta_v)*w'theta_v'`` and a ``C1*wp2/tau`` dissipation.  This lite
+version instead integrates a TKE-scaled magnitude: shear production
+``Km*S^2`` (no factor 2), a down-gradient buoyancy surrogate ``-Kh*N^2``
+(in place of ``2*(g/theta_v)*w'theta_v'``), and a ``C_eps*sqrt(wp2)/l``
+dissipation.  ``wp2`` is therefore a TKE-like scale used only to set the
+mixing time scale and the down-gradient diffusivities, NOT a strict second
+moment.  (The ``CLUBBLiteConfig`` C1/C4/C5 fields are legacy and unused by
+this reduced budget.)
 
 where tau = l / sqrt(wp2) is the turbulence time scale.
-
-Cloud fraction diagnosis:
-  s = r_t - r_sat(T, p)       saturation deficit
-  sigma_s = sqrt(rtp2)        width of total water PDF
-  cf = 0.5 * erfc(-s / (sqrt(2) * sigma_s))
 
 Eddy diffusivities:
   Km = C_K * l * sqrt(wp2)
@@ -40,13 +45,14 @@ and where it diverges from the real CLUBB, is stated precisely so callers do
 not mistake it for a faithful CLUBB:
 
 WHAT IT KEEPS (qualitatively CLUBB-like):
-  * Five prognostic second moments (wp2, thlp2, rtp2, wpthlp, wprtp) with
-    production - dissipation - diffusion budgets (the CLUBB moment set,
-    minus wp3).
-  * An assumed-PDF cloud-fraction diagnosis from the saturation deficit
-    (single Gaussian here vs CLUBB's double-Gaussian).
+  * One prognostic second-order moment, ``wp2`` (w'^2), with a
+    production - dissipation - diffusion budget (integrated TKE-like; see the
+    budget note above), used to set the turbulence mixing time scale.
   * Down-gradient eddy diffusivities ``Km = C_K*l*sqrt(wp2)``, ``Kh =
     Km/Pr_t``.
+  (The earlier thlp2/rtp2/wpthlp/wprtp moments and the single-Gaussian PDF
+  cloud-fraction diagnosis were dead code and were removed; cloud fraction
+  comes from the downstream Sundqvist / Xu-Randall scheme.)
 
 WHAT IT OMITS / SIMPLIFIES (the fidelity gap vs full CLUBB):
   1. PDF shape: CLUBB uses an Analytic Double Gaussian (ADG1) joint PDF of

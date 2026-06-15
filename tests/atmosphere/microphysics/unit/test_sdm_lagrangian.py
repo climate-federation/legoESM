@@ -15,11 +15,15 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
+from legoesm.thermo import saturation_vapor_pressure
 from legoesm.atmosphere.dynamics import spectral_les_plane as sl
 from legoesm.atmosphere.dynamics.spectral_les_moist import (
+    LagrangianSDMSegmentDiagnostics,
     make_lagrangian_sdm_les_step,
+    make_lagrangian_sdm_step_segment,
     make_anelastic_reference,
     step_lagrangian_sdm_les,
+    update_lagrangian_sdm_segment_diagnostics,
 )
 from legoesm.atmosphere.physics.microphysics.sdm import (
     SDMConfig,
@@ -32,6 +36,7 @@ from legoesm.atmosphere.physics.microphysics.sdm import (
     make_lagrangian_sdm_state,
     particle_cell_indices,
     represented_water_mass,
+    sample_lognormal_radius,
     total_water_mass,
 )
 
@@ -83,6 +88,20 @@ def _cell_sums(state, g, values):
     _, _, _, cell_id = particle_cell_indices(state, g)
     n_cells = g.cfg.ny * g.cfg.nx * g.cfg.nz
     return jnp.zeros((n_cells,), dtype=values.dtype).at[cell_id].add(values)
+
+
+def _assert_tree_allclose(actual, expected, *, rtol=1e-12, atol=1e-14):
+    actual_leaves = jax.tree.leaves(actual)
+    expected_leaves = jax.tree.leaves(expected)
+    assert len(actual_leaves) == len(expected_leaves)
+    for actual_leaf, expected_leaf in zip(actual_leaves, expected_leaves):
+        actual_np = np.asarray(actual_leaf)
+        expected_np = np.asarray(expected_leaf)
+        if actual_np.dtype.kind in "biu":
+            np.testing.assert_array_equal(actual_np, expected_np)
+        else:
+            np.testing.assert_allclose(
+                actual_np, expected_np, rtol=rtol, atol=atol)
 
 
 def test_advection_moves_with_resolved_flow_and_wraps_periodic():
@@ -270,6 +289,231 @@ def test_particle_binning_diagnoses_cloud_and_rain_slots():
     assert float(qr[0, 0, 0]) == pytest.approx(1.0e6 * _PREF * (1.0e-4)**3 / V)
 
 
+def test_lagrangian_diagnostic_excludes_haze_from_cloud_smear_metric():
+    g = _grid(nx=8, ny=8, nz=4, L=8.0)
+    cfg = SDMConfig()
+    xs, ys, zs = np.meshgrid(
+        (np.arange(g.cfg.nx) + 0.5) * g.dx,
+        (np.arange(g.cfg.ny) + 0.5) * g.dy,
+        np.asarray(g.z_c),
+        indexing="xy",
+    )
+    xyz_haze = (xs.ravel(), ys.ravel(), zs.ravel())
+    xyz = (
+        np.concatenate([xyz_haze[0], [0.5]]),
+        np.concatenate([xyz_haze[1], [0.5]]),
+        np.concatenate([xyz_haze[2], [float(g.z_c[0])]]),
+    )
+    n_haze = xyz_haze[0].size
+    state = _lag_state_slots(
+        g,
+        np.concatenate([np.full(n_haze, 1.0e-6), [3.0e-6]]),
+        np.ones(n_haze + 1) * 1.0e8,
+        np.ones(n_haze + 1),
+        xyz,
+    )
+
+    qc_legacy, _ = diagnose_liquid_mixing_ratios(
+        state, g, rho=1.0, r_rain=cfg.r_rain, r_cloud=0.0)
+    qc_fixed, _ = diagnose_liquid_mixing_ratios(
+        state, g, rho=1.0, r_rain=cfg.r_rain, r_cloud=cfg.r_cloud)
+
+    def intermediate_fraction(qc):
+        peak = jnp.max(qc)
+        return jnp.mean(((qc > 0.01 * peak) & (qc < 0.5 * peak)).astype(jnp.float64))
+
+    assert float(intermediate_fraction(qc_legacy)) > 0.95
+    assert float(intermediate_fraction(qc_fixed)) < 0.05
+    assert float(jnp.count_nonzero(qc_fixed)) == 1.0
+    cell_air = g.dx * g.dy * g.dz
+    assert float(jnp.sum(qc_fixed)) == pytest.approx(
+        1.0e8 * _PREF * (3.0e-6)**3 / cell_air, rel=1e-12)
+
+
+def test_cell_stratified_initializer_gives_per_cell_floor_and_exact_number():
+    g = _grid(nx=4, ny=2, nz=2, L=8.0)
+    n_per_cell = 8
+    n_cells = g.cfg.ny * g.cfg.nx * g.cfg.nz
+    number_profile = jnp.array([1.0e6, 2.0e6], dtype=jnp.float64)
+    radius_profile = jnp.array([1.0e-6, 2.0e-6], dtype=jnp.float64)
+
+    state = initialize_lagrangian_sdm(
+        jax.random.PRNGKey(23),
+        g,
+        n_sd=n_per_cell * n_cells,
+        number_concentration=number_profile,
+        radius=radius_profile,
+        dtype=jnp.float64,
+        spatial_sampling="cell_stratified",
+    )
+
+    ix, iy, iz, _ = particle_cell_indices(state, g)
+    counts = _cell_sums(state, g, state.droplets.active)
+    represented_number = _cell_sums(
+        state, g, state.droplets.active * state.droplets.multiplicity)
+    expected_number = np.broadcast_to(
+        np.asarray(number_profile)[None, None, :] * g.dx * g.dy * g.dz,
+        (g.cfg.ny, g.cfg.nx, g.cfg.nz),
+    ).reshape(-1)
+
+    np.testing.assert_array_equal(np.asarray(counts), np.full(n_cells, n_per_cell))
+    np.testing.assert_allclose(
+        np.asarray(represented_number), expected_number, rtol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(state.droplets.radius), np.asarray(radius_profile)[np.asarray(iz)])
+    assert int(jnp.min(ix)) >= 0 and int(jnp.max(ix)) < g.cfg.nx
+    assert int(jnp.min(iy)) >= 0 and int(jnp.max(iy)) < g.cfg.ny
+
+
+def test_cell_stratified_initializer_accepts_per_particle_aerosol_spectrum():
+    g = _grid(nx=4, ny=2, nz=2, L=8.0)
+    n_per_cell = 4
+    n_cells = g.cfg.ny * g.cfg.nx * g.cfg.nz
+    n_sd = n_per_cell * n_cells
+    radius = jnp.linspace(2.0e-8, 2.0e-7, n_sd, dtype=jnp.float64)
+    solute = jnp.linspace(1.0e-20, 1.0e-18, n_sd, dtype=jnp.float64)
+
+    state = initialize_lagrangian_sdm(
+        jax.random.PRNGKey(24),
+        g,
+        n_sd=n_sd,
+        number_concentration=1.0e6,
+        radius=radius,
+        solute_mass=solute,
+        dtype=jnp.float64,
+        spatial_sampling="cell_stratified",
+    )
+
+    counts = _cell_sums(state, g, state.droplets.active)
+    represented_number = _cell_sums(
+        state, g, state.droplets.active * state.droplets.multiplicity)
+    expected_number = np.full(n_cells, 1.0e6 * g.dx * g.dy * g.dz)
+
+    np.testing.assert_array_equal(np.asarray(counts), np.full(n_cells, n_per_cell))
+    np.testing.assert_allclose(np.asarray(state.droplets.radius), np.asarray(radius))
+    np.testing.assert_allclose(
+        np.asarray(state.droplets.solute_mass), np.asarray(solute))
+    np.testing.assert_allclose(
+        np.asarray(represented_number), expected_number, rtol=1e-12)
+
+
+def test_cic_diagnostic_conserves_and_spreads_single_particle():
+    g = _grid(nx=2, ny=2, nz=2, L=2.0)
+    state = _lag_state(
+        g,
+        [1.0e-5],
+        xi=1.0e6,
+        xyz=(np.array([1.0]), np.array([1.0]), np.array([1.0])),
+    )
+
+    qc_nearest, _ = diagnose_liquid_mixing_ratios(
+        state, g, rho=1.0, r_rain=4.0e-5, assignment="nearest")
+    qc_cic, _ = diagnose_liquid_mixing_ratios(
+        state, g, rho=1.0, r_rain=4.0e-5, assignment="cic")
+
+    represented = 1.0e6 * _PREF * (1.0e-5) ** 3
+    cell_air = g.dx * g.dy * g.dz
+    assert float(jnp.sum(qc_nearest) * cell_air) == pytest.approx(
+        represented, rel=1e-12)
+    assert float(jnp.sum(qc_cic) * cell_air) == pytest.approx(
+        represented, rel=1e-12)
+    assert int(jnp.count_nonzero(qc_nearest)) == 1
+    assert int(jnp.count_nonzero(qc_cic)) == 8
+    assert float(jnp.max(qc_cic)) == pytest.approx(
+        float(jnp.max(qc_nearest)) / 8.0, rel=1e-12)
+
+
+def test_supersaturated_lagrangian_sdm_aerosol_forms_cloud_and_conserves_water():
+    g = _grid(nx=2, ny=2, nz=2, L=200.0, n_tracers=3)
+    ref = _ref(g, theta0=290.0, qv0=0.0)
+    n_sd = 64 * g.cfg.nx * g.cfg.ny * g.cfg.nz
+    r_dry = sample_lognormal_radius(
+        jax.random.PRNGKey(5), n_sd, 5.0e-8, 2.0,
+        r_min=1.0e-8, r_max=5.0e-7, dtype=jnp.float64)
+    solute_mass = 4.0 / 3.0 * jnp.pi * 1770.0 * r_dry**3
+    sdm = initialize_lagrangian_sdm(
+        jax.random.PRNGKey(6),
+        g,
+        n_sd=n_sd,
+        number_concentration=1.0e8,
+        radius=r_dry,
+        solute_mass=solute_mass,
+        dtype=jnp.float64,
+        spatial_sampling="cell_stratified",
+    )
+
+    T0 = jnp.full((g.cfg.nz,), 290.0, dtype=jnp.float64)
+    e = 1.02 * saturation_vapor_pressure(T0)
+    qv = constants.epsilon * e / (ref.p_c - e)
+    theta = jnp.broadcast_to((T0 / ref.exner_c)[None, None, :],
+                             (g.cfg.ny, g.cfg.nx, g.cfg.nz))
+    tracers = jnp.zeros((g.cfg.ny, g.cfg.nx, g.cfg.nz, 3), dtype=jnp.float64)
+    tracers = tracers.at[..., 0].set(qv[None, None, :])
+    cfg = SDMConfig(condensation_integrator="be",
+                    lagrangian_diagnostic_assignment="cic")
+    water0 = total_water_mass(sdm, tracers, g, ref.rho_c)
+
+    for _ in range(20):
+        sdm, theta, tracers, _ = condensation_coupling_step(
+            sdm, theta, tracers, g, ref.exner_c, ref.p_c, ref.rho_c,
+            2.0, cfg)
+
+    qc, qr = diagnose_liquid_mixing_ratios(
+        sdm, g, ref.rho_c, cfg.r_rain, cfg.r_cloud,
+        assignment=cfg.lagrangian_diagnostic_assignment)
+    water1 = total_water_mass(sdm, tracers, g, ref.rho_c)
+    lwp = jnp.mean(jnp.sum(qc * ref.rho_c[None, None, :], axis=-1) * g.dz)
+    cloud_cover = jnp.mean(jnp.any(qc > 1.0e-5, axis=-1))
+
+    assert float(water1) == pytest.approx(float(water0), rel=1e-12, abs=1e-8)
+    assert float(lwp * 1.0e3) == pytest.approx(20.0, rel=0.25)
+    assert float(cloud_cover) == pytest.approx(1.0)
+    assert float(jnp.max(qr)) == pytest.approx(0.0)
+    assert float(jnp.mean(sdm.droplets.radius >= cfg.r_cloud)) > 0.95
+
+
+def test_stratified_cic_cloud_patch_is_compact_and_not_speckled():
+    g = _grid(nx=6, ny=6, nz=3, L=6.0)
+    source_cells = [(ix, iy, 1) for iy in (2, 3) for ix in (2, 3)]
+    offsets_xy = (0.125, 0.375, 0.625, 0.875)
+    offsets_z = (0.25, 0.75)
+    xyz = [[], [], []]
+    for ix, iy, iz in source_cells:
+        for ox in offsets_xy:
+            for oy in offsets_xy:
+                for oz in offsets_z:
+                    xyz[0].append((ix + ox) * g.dx)
+                    xyz[1].append((iy + oy) * g.dy)
+                    xyz[2].append((iz + oz) * g.dz)
+    n_sd = len(xyz[0])
+    state = _lag_state_slots(
+        g,
+        np.full(n_sd, 1.0e-5),
+        np.ones(n_sd) * 1.0e6,
+        np.ones(n_sd),
+        tuple(np.asarray(a) for a in xyz),
+    )
+
+    counts = np.asarray(_cell_sums(state, g, state.droplets.active)).reshape(
+        g.cfg.ny, g.cfg.nx, g.cfg.nz)
+    qc, _ = diagnose_liquid_mixing_ratios(
+        state, g, rho=1.0, r_rain=4.0e-5, assignment="cic")
+    qc_np = np.asarray(qc)
+    peak = float(qc_np.max())
+    nonzero_fraction = float(np.count_nonzero(qc_np) / qc_np.size)
+    intermediate_fraction = float(np.mean((qc_np > 0.01 * peak) & (qc_np < 0.5 * peak)))
+    source_mask = np.zeros_like(counts, dtype=bool)
+    for ix, iy, iz in source_cells:
+        source_mask[iy, ix, iz] = True
+
+    np.testing.assert_array_equal(counts[source_mask], np.full(len(source_cells), 32))
+    assert int(np.count_nonzero(counts[~source_mask])) == 0
+    assert 0.2 < nonzero_fraction < 0.6
+    assert intermediate_fraction > 0.1
+    assert float(jnp.sum(qc) * g.dx * g.dy * g.dz) == pytest.approx(
+        float(jnp.sum(represented_water_mass(state.droplets))), rel=1e-12)
+
+
 def test_tiny_spectral_les_lagrangian_sdm_smoke_conserves_water():
     g = _grid(nx=4, ny=4, nz=4, L=200.0, n_tracers=3)
     ref = _ref(g, theta0=300.0, qv0=0.02)
@@ -386,6 +630,61 @@ def test_lagrangian_sdm_les_step_factory_jits_static_objects():
     assert bool(jnp.all(jnp.isfinite(les1.tracers)))
     assert bool(jnp.all(jnp.isfinite(sdm1.droplets.radius)))
     assert float(diag["n_active"]) == 8.0
+
+
+def test_lagrangian_sdm_segment_matches_python_step_loop():
+    g = _grid(nx=2, ny=2, nz=2, L=20.0, n_tracers=3)
+    ref = _ref(g, theta0=300.0, qv0=0.02)
+    cfg = SDMConfig(
+        include_curvature=False, include_solute=False,
+        condensation_integrator="euler", n_substeps_condensation=1,
+        terminal_velocity="rogers_yau", collision_kernel="golovin",
+        collision_mode="stochastic")
+    ny, nx, nz = g.cfg.ny, g.cfg.nx, g.cfg.nz
+    z = jnp.zeros((ny, nx, nz), dtype=jnp.float64)
+    theta = jnp.full((ny, nx, nz), 300.0, dtype=jnp.float64)
+    tracers = jnp.zeros((ny, nx, nz, 3), dtype=jnp.float64).at[..., 0].set(0.02)
+    les0 = sl.SpectralLESState(
+        u=z, v=z, w=jnp.zeros((ny, nx, nz + 1), dtype=jnp.float64),
+        rhs_u_prev=z, rhs_v_prev=z,
+        rhs_w_prev=jnp.zeros((ny, nx, nz + 1), dtype=jnp.float64),
+        theta=theta, rhs_theta_prev=jnp.zeros_like(theta),
+        tracers=tracers, rhs_tracers_prev=jnp.zeros_like(tracers))
+    sdm0 = initialize_lagrangian_sdm(
+        jax.random.PRNGKey(17), g, n_sd=32,
+        number_concentration=1.0e5, radius=1.0e-6, dtype=jnp.float64)
+
+    def step_raw(les, sdm, dt, first=False):
+        return step_lagrangian_sdm_les(
+            les, sdm, g, ref, dt, cfg, u_geo=(0.0, 0.0), f_cor=0.0,
+            first=first, do_condensation=True, do_coalescence=True)
+
+    step = jax.jit(step_raw, static_argnames=("first",))
+    run_segment = make_lagrangian_sdm_step_segment(step_raw, segment_steps=3)
+    dt = jnp.asarray(0.1, dtype=jnp.float64)
+
+    def zero_diag():
+        zero = jnp.asarray(0.0, dtype=jnp.float64)
+        return LagrangianSDMSegmentDiagnostics(zero, zero, zero, zero)
+
+    les_loop, sdm_loop, diag_loop = les0, sdm0, zero_diag()
+    for n in range(5):
+        les_loop, sdm_loop, us, diag = step(
+            les_loop, sdm_loop, dt, first=(n == 0))
+        diag_loop = update_lagrangian_sdm_segment_diagnostics(
+            diag_loop, us, diag)
+
+    les_seg, sdm_seg, us, diag = step(les0, sdm0, dt, first=True)
+    diag_seg = update_lagrangian_sdm_segment_diagnostics(
+        zero_diag(), us, diag)
+    les_seg, sdm_seg, diag_seg = run_segment(
+        les_seg, sdm_seg, dt, jnp.asarray(3, dtype=jnp.int32), diag_seg)
+    les_seg, sdm_seg, diag_seg = run_segment(
+        les_seg, sdm_seg, dt, jnp.asarray(1, dtype=jnp.int32), diag_seg)
+
+    _assert_tree_allclose(les_seg, les_loop)
+    _assert_tree_allclose(sdm_seg, sdm_loop)
+    _assert_tree_allclose(diag_seg, diag_loop)
 
 
 def test_run_bomex_lagrangian_sdm_driver_smoke(tmp_path):

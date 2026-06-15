@@ -73,14 +73,17 @@ class SoilThermalConfig(NamedTuple):
     """Configuration for soil thermal properties.
 
     All heat capacities are **volumetric** (J/m³/K), not specific
-    (J/kg/K).  ``C_water_vol = 4.18e6`` derives from
-    ``constants.rho_water · constants.c_pw = 1000 · 4180 ≈ 4.18e6``.
+    (J/kg/K).  ``C_water_vol`` derives from
+    ``constants.rho_water · constants.c_pw = 1000 · 4218 ≈ 4.218e6``
+    (referencing the canonical constants rather than a hardcoded
+    literal — the prior 4.18e6 default used a stale c_pw=4180 and was
+    ~0.9 % low relative to ``constants.c_pw``).
     Storing volumetric values directly avoids per-cell multiplication
     by density inside the heat-capacity mixing formula.
     """
     # --- material heat capacities / conductivities -------------------------
     C_soil: float = 2.0e6         # mineral soil heat capacity [J/m3/K]
-    C_water_vol: float = 4.18e6       # water heat capacity [J/m3/K] (= rho_water · c_pw)
+    C_water_vol: float = constants.rho_water * constants.c_pw  # water heat capacity [J/m3/K]
     C_air: float = 1.25e3         # air heat capacity [J/m3/K]
     k_solid: float = 2.0          # mineral soil thermal conductivity [W/m/K]
     k_water: float = 0.57         # water thermal conductivity [W/m/K]
@@ -165,6 +168,7 @@ def solve_soil_thermal(
     thermal_config: SoilThermalConfig,
     G_surface: jnp.ndarray,
     dt: float,
+    surface_conductance: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Solve soil heat diffusion for one time step (backward Euler).
 
@@ -185,6 +189,16 @@ def solve_soil_thermal(
         Positive = into soil.
     dt : float
         Time step [s].
+    surface_conductance : jnp.ndarray, optional
+        Surface energy-balance conductance ``lambda = -dG_surface/dT_sfc``
+        [W/m2/K, >= 0], shape (ncol,).  When supplied, the top boundary is
+        treated SEMI-IMPLICITLY: the linearised T_sfc-dependence of the
+        surface energy balance (sigma T^4 radiation + bulk SH/LH transfer) is
+        folded into the implicit solve, so a large ``dt`` with a thin top layer
+        under a stiff (high-roughness / high-insolation) surface stays stable
+        instead of overshooting and diverging.  ``None`` (default) reduces
+        EXACTLY to the explicit Neumann ground-heat-flux BC (bit-identical for
+        every existing caller).
 
     Returns
     -------
@@ -225,6 +239,16 @@ def solve_soil_thermal(
 
     # Top BC: ground heat flux
     rhs = rhs.at[:, 0].add(G_surface)
+
+    # Semi-implicit (linearised) surface BC.  The surface flux into the top
+    # layer is G(T_sfc_new) ~= G_surface + dG/dT_sfc * (T_new0 - T_old0)
+    # = G_surface - lambda*(T_new0 - T_old0) with lambda = -dG/dT_sfc >= 0.
+    # Moving the implicit -lambda*T_new0 term to the LHS adds lambda to the top
+    # diagonal and lambda*T_old0 to the top RHS.  lambda=0 (surface_conductance
+    # is None) leaves the explicit Neumann flux above untouched.
+    if surface_conductance is not None:
+        diag = diag.at[:, 0].add(surface_conductance)
+        rhs = rhs.at[:, 0].add(surface_conductance * T_soil[:, 0])
 
     # Bottom BC: geothermal heat flux (Neumann, positive into soil)
     rhs = rhs.at[:, -1].add(thermal_config.Q_geothermal)

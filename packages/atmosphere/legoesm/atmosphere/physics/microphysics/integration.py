@@ -318,6 +318,27 @@ def _make_hydrostatic_microphysics(
                          name="dq_g_dt_micro", dims=dims_3d, units="kg/kg/s"),
         }
 
+        # Double-moment number-concentration tendencies.  Emitted only for the
+        # prognostic number tracers the dycore actually carries (mirrors the
+        # _get_tracer input side); single-moment runs carry none, so the keys
+        # are absent.  Previously dropped here, so morrison/seifert_beheng/
+        # thompson number concentrations were never advected on the hydrostatic
+        # dycore even though the backend computes their tendencies (the
+        # nonhydrostatic/plane/MPAS/spectral adapters all propagate them).
+        # Units follow MicrophysicsOutput: N_c/N_r are per-VOLUME [1/(m^3 s)]
+        # (Seifert-Beheng), N_i is per-MASS [1/(kg s)] (Morrison/Thompson).
+        _num_tends = {
+            "N_c": (micro_out.dN_c_dt, "1/(m^3 s)"),
+            "N_r": (micro_out.dN_r_dt, "1/(m^3 s)"),
+            "N_i": (micro_out.dN_i_dt, "1/(kg s)"),
+        }
+        for _nname, (_ntend, _nunits) in _num_tends.items():
+            if state.tracers is not None and _nname in state.tracers:
+                tracer_tends[_nname] = Field(
+                    data=_ntend.reshape(shape_3d),
+                    name=f"d{_nname}_dt_micro", dims=dims_3d, units=_nunits,
+                )
+
         return HydrostaticTendencies(
             du_dt=Field(
                 data=jnp.zeros(u_shape, dtype=_state_dtype),

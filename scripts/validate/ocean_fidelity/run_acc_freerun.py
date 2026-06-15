@@ -56,10 +56,20 @@ def _bulk_stats(state, z_coord, grid):
     h = _layer_thickness_np(state, z_coord)               # (n_lat, n_lon, nlev)
     lat = np.degrees(np.asarray(grid.lat))
 
-    # ACC (Drake) transport from the barotropic streamfunction [Sv].
+    # ACC transport from the barotropic streamfunction [Sv]. Veros reports the
+    # FULL-DOMAIN ψ range (max−min over the whole field) — the same convention
+    # the sibling global free-run diagnostics use (``psi_range_sv``). The earlier
+    # Drake-band restriction under-reads by ~70 Sv on the IDENTICAL flow (it read
+    # 186.7 where the gauge-free full-domain ψ matches Veros at 258.3 vs 255.7 Sv,
+    # 1.010×; see #431), so report the full-domain range as the primary,
+    # Veros-comparable number and keep the band-limited Drake figure separately
+    # labelled.
     psi = np.asarray(barotropic_streamfunction(u, h, mask, grid))   # (n_lat, n_lon) [Sv]
+    acc_T = float(psi.max() - psi.min())
     band = (lat >= _ACC_DRAKE_LAT_S) & (lat <= _ACC_DRAKE_LAT_N)
-    acc_T = float(psi[band, :].max() - psi[band, :].min()) if band.any() else float("nan")
+    acc_T_drake_band = (
+        float(psi[band, :].max() - psi[band, :].min()) if band.any() else float("nan")
+    )
 
     # Total kinetic energy [J] via the shared energy budget.
     eb = compute_energy_budget(state, z_coord, grid_type="latlon", grid=grid)
@@ -77,6 +87,7 @@ def _bulk_stats(state, z_coord, grid):
 
     return {
         "ACC_transport_Sv": acc_T,
+        "ACC_transport_drake_band_Sv": acc_T_drake_band,
         "total_KE_J": KE,
         "vol_mean_T_C": vol_mean_T,
         "T_min_C": float(Tw.min()) if Tw.size else float("nan"),

@@ -40,6 +40,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from jax import lax
 
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
@@ -127,6 +128,15 @@ class SpectralRefState(NamedTuple):
     p_f: jax.Array        # (nz+1,) pressure at faces [Pa]
     exner_c: jax.Array    # (nz,)   Exner Π = (p/p_ref)^κ
     rho_c: jax.Array      # (nz,)   density [kg/m³]
+
+
+class LagrangianSDMSegmentDiagnostics(NamedTuple):
+    """Scalar diagnostics accumulated by a compiled Lagrangian-SDM segment."""
+
+    max_abs_total_water_error: jax.Array
+    total_water_error: jax.Array
+    n_active: jax.Array
+    u_star: jax.Array
 
 
 def make_anelastic_reference(z_c, z_f, p_sfc, theta_prof, qv_prof=None,
@@ -343,3 +353,78 @@ def make_lagrangian_sdm_les_step(
         )
 
     return step
+
+
+def update_lagrangian_sdm_segment_diagnostics(
+    diagnostics: LagrangianSDMSegmentDiagnostics,
+    u_star,
+    step_diagnostics: dict,
+) -> LagrangianSDMSegmentDiagnostics:
+    """Fold one step's scalar SDM diagnostics into a segment accumulator."""
+
+    err = step_diagnostics["total_water_error"]
+    return LagrangianSDMSegmentDiagnostics(
+        max_abs_total_water_error=jnp.maximum(
+            diagnostics.max_abs_total_water_error, jnp.abs(err)),
+        total_water_error=err,
+        n_active=step_diagnostics["n_active"],
+        u_star=u_star,
+    )
+
+
+def make_lagrangian_sdm_step_segment(
+    step_fn,
+    *,
+    segment_steps: int,
+    donate_args: bool = False,
+):
+    """Return a jitted bounded-memory runner for Lagrangian SDM step chunks.
+
+    ``step_fn`` must have the same call signature as
+    :func:`make_lagrangian_sdm_les_step`'s return value and is always called with
+    ``first=False``. Callers should run the AB2/RK startup step separately when
+    needed. ``steps_to_run`` is a traced scalar, so one compiled executable is
+    reused for full chunks and short tail chunks without rebuilding closures or
+    changing static arguments. ``segment_steps`` is the caller-side chunk size
+    used by drivers to cap synchronization intervals; the compiled loop itself
+    runs exactly ``steps_to_run`` iterations.
+
+    Prefer passing a raw (non-jitted) step body. If ``step_fn`` is itself a
+    separately jitted function, XLA may have to materialize its full diagnostic
+    output tuple before this wrapper drops the large arrays. With a raw body, the
+    segment returns only the final state and scalar diagnostics; large per-step
+    arrays in the one-step diagnostics stay internal to the compiled body and are
+    not transferred to Python.
+
+    This is a forward driver helper. Reverse-mode sensitivities should continue
+    to use the non-donating one-step deterministic path; the dynamic loop trip
+    count here is chosen to avoid production-driver retracing and memory growth.
+    """
+
+    segment_steps = int(segment_steps)
+    if segment_steps < 1:
+        raise ValueError(f"segment_steps must be >= 1, got {segment_steps}")
+
+    def run_segment(state, sdm_state, dt, steps_to_run, diagnostics):
+        steps_to_run = jnp.asarray(steps_to_run, dtype=jnp.int32)
+
+        def body(_k, carry):
+            state_i, sdm_i, diag_i = carry
+            state_i, sdm_i, u_star, step_diag = step_fn(
+                state_i, sdm_i, dt, first=False)
+            diag_i = update_lagrangian_sdm_segment_diagnostics(
+                diag_i, u_star, step_diag)
+            return state_i, sdm_i, diag_i
+
+        state, sdm_state, diagnostics = lax.fori_loop(
+            0,
+            steps_to_run,
+            body,
+            (state, sdm_state, diagnostics),
+        )
+        return state, sdm_state, diagnostics
+
+    donate_argnums = (0, 1) if donate_args else ()
+    compiled = jax.jit(run_segment, donate_argnums=donate_argnums)
+    compiled.raw = run_segment
+    return compiled

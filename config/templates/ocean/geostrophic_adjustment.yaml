@@ -1,0 +1,23 @@
+# legoESM experiment template — geostrophic adjustment.
+#
+# Names the procedural `geostrophic_adjustment` experiment via `setup:` (#388 Ask#2).
+experiment:
+  tier: tier1
+  complexity: primitive_equation
+  extent: idealized
+  maturity: structurally_validated
+  description: >
+    Geostrophic adjustment: an initially-unbalanced meridional temperature
+    front (thermal-wind imbalance, started from rest) radiates inertia-gravity
+    waves and settles to geostrophic balance over the Rossby radius — a
+    Coriolis / pressure-gradient balance benchmark.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "ocean-geostrophic-adjustment"
+  type: ocean_only
+setup:
+  name: geostrophic_adjustment
+  grid: latlon
+output:
+  path: output/ocean/geostrophic_adjustment/

@@ -559,6 +559,7 @@ def build_global_1deg_model_config() -> LatLonCGridOceanConfig:
         dt_mom_ratio=DT_MOM_RATIO,                  # 1 — STOCK sync stepping
         momentum_friction_additive=True,
         coriolis_scheme="explicit_ab2",             # |f|·dt_mom ≈ 0.26 @79.5°
+        implicit_vmix_dzw_slot=True,                 # Veros dzw implicit slot (#428)
         physics=build_global_1deg_physics_config(),
     )
 

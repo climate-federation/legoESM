@@ -1,0 +1,25 @@
+# legoESM experiment template — Eady baroclinic instability (uniform N²).
+#
+# Names the procedural `eady_uniform` experiment via the `setup:` selector
+# (#388 Ask#2): uniform stratification + linear vertical shear seeded with a
+# zonal-wavenumber perturbation that grows at the Eady rate. Channel grids
+# only. Routed (exact match) to run_ocean_test_matrix.py --only =eady_uniform.
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: channel
+  maturity: structurally_validated
+  description: >
+    Eady baroclinic instability (uniform N², linear shear): the fastest-growing
+    mode grows at the analytic Eady rate — a quantitative baroclinic-instability
+    benchmark in a reentrant channel.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "ocean-eady-uniform"
+  type: ocean_only
+setup:
+  name: eady_uniform
+  grid: latlon_channel
+output:
+  path: output/ocean/eady_uniform/

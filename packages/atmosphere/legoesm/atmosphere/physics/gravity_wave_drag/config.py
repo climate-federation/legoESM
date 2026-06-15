@@ -120,11 +120,11 @@ __param_spec__ = {
         "excluded": {
             "U_mag_floor": "wind-magnitude floor for the direction projection; a divide-by-zero safety floor, not a closure",
             "doppler_sharpness": "sigmoid sharpness of the smooth saturation gate; a differentiability/smoothing width, not a closure",
+            "rms_gw_speed": "declared but never read by hines_gwd (launch amplitude uses total_rms_wind); phantom trainable — exposing it would offer a no-op gradient",
         },
         "params": {
             # --- launch source spectrum (Hines 1997) ---
             "total_rms_wind": {"units": "m/s", "bounds": (0.5, 10.0), "tunable_tier": 1, "transform": "sigmoid", "category": "source_spectrum", "reference": "Hines (1997) launch rms wind", "shape": None},
-            "rms_gw_speed": {"units": "m/s", "bounds": (0.25, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "Hines (1997) rms gravity-wave speed", "shape": None},
             # --- saturation / momentum-flux cap ---
             "Fmax": {"units": "Pa", "bounds": (0.01, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "saturation", "reference": "Hines (1997) saturation momentum-flux cap", "shape": None},
             # --- tendency limiters ---
@@ -138,13 +138,13 @@ __param_spec__ = {
             "Fr_sharpness": "sigmoid sharpness of the Froude-number breaking transition; a differentiability/smoothing width, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "crit_level_floor": "wind magnitude at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
+            "N_ref": "declared but never read by lindzen_gwd (N is computed from the local theta gradient); phantom trainable — exposing it would offer a no-op gradient",
         },
         "params": {
             # --- orographic launch amplitude ---
             "h_topo": {"units": "m", "bounds": (50.0, 2000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "orographic", "reference": "Lindzen (1981) subgrid topographic height", "shape": None},
             # --- saturation / wave breaking ---
             "critical_Fr": {"units": "1", "bounds": (0.5, 2.0), "tunable_tier": 1, "transform": "sigmoid", "category": "saturation", "reference": "Lindzen (1981) critical Froude number", "shape": None},
-            "N_ref": {"units": "1/s", "bounds": (0.005, 0.03), "tunable_tier": 3, "transform": "sigmoid", "category": "saturation", "reference": "Lindzen (1981) reference Brunt-Vaisala frequency", "shape": None},
             # --- tendency limiters ---
             "tndmax_per_day": {"units": "m/s/day", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common tendency ceiling (orographic)", "shape": None},
             "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common umcfac no-reversal limiter", "shape": None},
@@ -420,6 +420,11 @@ class PrognosticSpectralConfig(NamedTuple):
         Sigmoid sharpness for breaking transition (default 10.0).
     tau_decay : float
         Relaxation timescale for prognostic spectrum [s] (default 86400).
+    thermal_tendency : bool
+        If True, return the diagnosed kinetic-energy-to-thermal tendency.
+        Set False for SCM realism sweeps where prognostic-spectral momentum
+        deposition is exercised but its currently unvalidated energetics must
+        not cool/heat the thermodynamic column.
     """
     n_azimuths: int = 4
     n_wavenumbers: int = 20
@@ -429,6 +434,7 @@ class PrognosticSpectralConfig(NamedTuple):
     breaking_threshold: float = 1.0
     breaking_sharpness: float = 10.0
     tau_decay: float = 86400.0
+    thermal_tendency: bool = True
 
 
 class E3SMOrographicConfig(NamedTuple):

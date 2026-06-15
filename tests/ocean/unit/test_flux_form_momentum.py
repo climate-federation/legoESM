@@ -133,6 +133,74 @@ def test_F5_momentum_conservation_upwind():
     assert abs(rv) < 1e-12, f"v-momentum not conserved (upwind): {rv:.2e}"
 
 
+def test_F5_momentum_conservation_upwind3():
+    """UP3 (3rd-order upwind-biased flux-form, Silvestri UP3 baseline) conserves
+    too — telescoping is independent of the 4-point reconstruction."""
+    ru, rv = _conservation_residual("upwind3")
+    assert abs(ru) < 1e-12, f"u-momentum not conserved (upwind3): {ru:.2e}"
+    assert abs(rv) < 1e-12, f"v-momentum not conserved (upwind3): {rv:.2e}"
+
+
+def test_F4_uniform_flow_zero_tendency_upwind3():
+    """Uniform u=const, v=0 -> UP3 advection of a constant is zero (UP3
+    reconstructs constants exactly)."""
+    u = np.full((_NLAT, _NLON + 1, _NLEV), 0.7)
+    v = np.zeros((_NLAT + 1, _NLON, _NLEV))
+    args = _setup(u, v, scheme="upwind3")
+    du, dv, hu, hv = _call(*args)
+    assert float(jnp.max(jnp.abs(hu))) < 1e-12, float(jnp.max(jnp.abs(hu)))
+    assert float(jnp.max(jnp.abs(hv))) < 1e-12, float(jnp.max(jnp.abs(hv)))
+
+
+def test_F8_upwind3_differs_from_upwind():
+    """UP3 yields a different tendency than 1st-order upwind on a structured
+    field (the higher-order reconstruction changes the advected face values)."""
+    rng = np.random.default_rng(7)
+    u = 0.3 * rng.standard_normal((_NLAT, _NLON + 1, _NLEV))
+    v = 0.3 * rng.standard_normal((_NLAT + 1, _NLON, _NLEV))
+    v[:2] = 0.0
+    v[-2:] = 0.0
+    _, _, hu1, _ = _call(*_setup(u, v, scheme="upwind"))
+    _, _, hu3, _ = _call(*_setup(u, v, scheme="upwind3"))
+    # Difference is the same order as the (weak-flow, coarse-grid) tendency
+    # itself → a genuine scheme difference, not round-off.
+    assert float(jnp.max(jnp.abs(hu3 - hu1))) > 1e-9, "UP3 == 1st-order upwind?"
+
+
+class TestUP3Reconstruction:
+    """Unit tests for the UP3 face reconstruction _up3_reconstruct (NEMO κ=1/3)."""
+
+    def test_constant_exact(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _up3_reconstruct
+        c = 3.7
+        for tr in (1.0, -1.0):
+            r = _up3_reconstruct(jnp.array(c), jnp.array(c), jnp.array(c),
+                                 jnp.array(c), jnp.array(tr))
+            assert float(jnp.abs(r - c)) < 1e-14
+
+    def test_linear_field_exact(self):
+        """UP3 reconstructs a linear field exactly at the face (x=0.5 between
+        the two straddling cells at x=0 and x=1)."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _up3_reconstruct
+        # cells at x = -1, 0, 1, 2 ; face at x = 0.5. f(x) = 2x + 1.
+        f = lambda x: 2.0 * x + 1.0
+        far_pos, adv_pos, adv_neg, far_neg = (jnp.array(f(x)) for x in (-1, 0, 1, 2))
+        for tr in (1.0, -1.0):
+            r = _up3_reconstruct(far_pos, adv_pos, adv_neg, far_neg, jnp.array(tr))
+            assert float(jnp.abs(r - f(0.5))) < 1e-13, (tr, float(r))
+
+    def test_upwind_bias_direction(self):
+        """For transport>0 the stencil leans on the upstream (far_pos) cell; for
+        transport<0 it leans on far_neg — the two branches differ on a non-linear
+        (curved) field."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _up3_reconstruct
+        f = lambda x: x ** 3          # odd curvature → upwind branches differ
+        fp, ap, an, fn = (jnp.array(float(f(x))) for x in (-1, 0, 1, 2))
+        r_pos = _up3_reconstruct(fp, ap, an, fn, jnp.array(1.0))
+        r_neg = _up3_reconstruct(fp, ap, an, fn, jnp.array(-1.0))
+        assert float(jnp.abs(r_pos - r_neg)) > 1e-6
+
+
 def test_F6_differentiable():
     """jax.grad of a scalar loss through the flux-form path is finite + nonzero."""
     rng = np.random.default_rng(5)

@@ -42,6 +42,7 @@ from legoesm.atmosphere.physics.turbulence.tke import tke_turbulence
 from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_lite_turbulence
 from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
     holtslag_boville_turbulence,
+    diffuse_theta_with_countergradient,
 )
 from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
 from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence

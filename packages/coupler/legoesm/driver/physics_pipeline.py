@@ -1629,6 +1629,43 @@ def _noop_convection(T, q_v, p_full, p_half, dt, config):
 _PIPELINE_UNSUPPORTED_MICROPHYSICS = frozenset()
 
 
+def required_microphysics_tracer_slots(
+    scheme_name: str,
+    scheme_config=None,
+) -> int:
+    """Return the canonical minimum global tracer slots for a scheme."""
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        min_tracer_slots,
+    )
+
+    try:
+        return int(min_tracer_slots(scheme_name, scheme_config))
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown microphysics scheme {scheme_name!r}; cannot determine "
+            "required tracer slots."
+        ) from exc
+
+
+def validate_microphysics_tracer_slots(
+    scheme_name: str,
+    have_slots: int,
+    *,
+    context: str,
+    scheme_config=None,
+) -> int:
+    """Fail loudly if a global tracer state cannot hold scheme tendencies."""
+    need_slots = required_microphysics_tracer_slots(scheme_name, scheme_config)
+    if have_slots < need_slots:
+        raise ValueError(
+            f"{context} has too few tracer slots for microphysics scheme "
+            f"{scheme_name!r}: have={have_slots}, need={need_slots}. "
+            "Slot layout is [0]=q_v, [1]=q_c, [2]=q_r, [3]=q_i, "
+            "[4]=q_s, [5]=q_g, [6]=N_c, [7]=N_r, [8]=N_i."
+        )
+    return need_slots
+
+
 def _resolve_microphysics(config):
     """Resolve microphysics kernel and config from ExperimentConfig.
 
@@ -1656,6 +1693,7 @@ def _resolve_microphysics(config):
     micro_fn = resolve_kernel(MICROPHYSICS_REGISTRY, scheme)
     mc = MicrophysicsConfig(scheme=scheme)
     micro_config = getattr(mc, scheme)
+    required_microphysics_tracer_slots(scheme, micro_config)
 
     # Aerosol-CCN coupling (Andreae 2009 AOD->CCN): only meaningful for
     # schemes whose warm rain consumes a droplet number through

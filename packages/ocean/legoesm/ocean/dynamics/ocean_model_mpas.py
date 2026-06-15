@@ -160,6 +160,12 @@ class MPASOceanModel:
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {self.config.barotropic_solver!r}"
             )
+        _valid_time_filters = ("box", "cosine")
+        if self.config.barotropic_time_filter not in _valid_time_filters:
+            raise ValueError(
+                f"barotropic_time_filter must be one of {_valid_time_filters}, "
+                f"got {self.config.barotropic_time_filter!r}"
+            )
         # Reserved distributed-PCG knobs (single-rank stock CG today; see
         # barotropic_implicit_mpas.py Step-4 TODO).  Validate so the
         # schema stays consistent with the lat-lon path.

@@ -72,7 +72,7 @@ from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 
 # --- pspec autoblock
 _P_MIN_CONVECTION_PA = 10_000.0
-_P_GATE_SHARPNESS_PA = 1_500.0
+_P_GATE_SHARPNESS_PA = 500.0
 
 def compute_column_geometry(
     T: jax.Array,
@@ -184,12 +184,11 @@ def stratosphere_mass_flux_gate(
     where the small mass per unit area (Δp/g) would amplify modest
     heating into unphysical spikes (>400 K observed in 1-year RCE).
 
-    Defaults: cutoff at 100 hPa (canonical tropical tropopause) with
-    a 15-hPa transition width.  This gives factor ≈ 0.013 at the
-    model top (35 hPa), 0.034 at 50 hPa, 0.5 at 100 hPa, 0.91 at
-    130 hPa, and ≈ 1.0 below 200 hPa — i.e. the gate is *actually
-    closed* (not merely attenuated) in the deep stratosphere while
-    leaving the upper troposphere unaffected.  ``p_gate_sharpness``
+    Defaults: cutoff at 100 hPa with a 5-hPa transition width.  This
+    gives factor ≈ 4.5e-5 at 50 hPa, 2.5e-3 at 70 hPa, 0.5 at 100 hPa,
+    0.998 at 130 hPa, and ≈ 1.0 below 200 hPa — i.e. the gate is
+    closed in the stratosphere while leaving the upper troposphere
+    unaffected.  ``p_gate_sharpness``
     must be << ``p_min_convection`` for the sigmoid to saturate
     within the integration range; sharpness ≥ p_min only attenuates.
 

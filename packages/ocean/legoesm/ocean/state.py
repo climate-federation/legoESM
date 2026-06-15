@@ -664,6 +664,20 @@ class MomentumTendencyDiagnostics(NamedTuple):
     total_v: Field
 
 
+class OMp25Config(NamedTuple):
+    """OM4p25 lateral-friction closure coefficients (GFDL OM4.0, Adcroft et al.
+    2019; Silvestri et al. 2024 "SM2"). Laplacian + biharmonic, each the max of
+    a Smagorinsky term and a static grid-scale term, with the Laplacian tapered
+    by the deformation-radius factor F = 1/(1+0.25·(L_d/Δ)⁴). Defaults are the
+    published OM4p25 values."""
+    C2: float = 0.15      # Laplacian Smagorinsky coefficient
+    Cu2: float = 0.01     # Laplacian static-viscosity coefficient
+    C4: float = 0.06      # biharmonic Smagorinsky coefficient
+    Cu4: float = 0.01     # biharmonic static-viscosity coefficient
+    deformation_radius_m: float = 6.75e3  # L_d for the F taper [m]; ~uniform for
+    #   the idealised baroclinic jet. Spatially-varying L_d (from N²) is a refinement.
+
+
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
@@ -881,7 +895,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     slope_foot_alpha: float = 0.0       # 0 = disabled; production: 3.0
     slope_foot_threshold: float = 0.1   # MOM6 default
     slope_foot_n_levels: int = 5        # bottom 5 levels
-    momentum_advection: str = "vector_invariant"  # "vector_invariant", "weno5", or "weno7"
+    momentum_advection: str = "vector_invariant"  # "vector_invariant", "weno5", "weno7", "weno9", "flux_form"
     # Kinetic-energy gradient scheme for the vector-invariant form.
     # ``"centered"`` (default; legacy bit-exact): legoESM's existing
     # ``KE = 0.5·((⟨u⟩ᵢ)² + (⟨v⟩ⱼ)²)`` form. The standard centered
@@ -897,6 +911,17 @@ class LatLonCGridOceanConfig(NamedTuple):
                               # Implemented with proper split: matching-direction divergence
                               # is WENO-upwinded, cross-direction stays centered (Appendix C).
                               # Set False to disable the divergent-mode dissipation.
+    # WENO vector-invariant smoothness measure (Silvestri et al. 2024). Selects
+    # the "V" vs "D" scheme family for momentum_advection in {weno5,weno7,weno9}:
+    #   "split"    (default, = W*V, Oceananigans CrossAndSelfUpwinding): vorticity
+    #              uses VELOCITY smoothness {ζ;u} (Eq 43) and divergence uses the
+    #              FULL-divergence smoothness {δU; D} (Eq 45). Lower implicit
+    #              dissipation / higher effective resolution (the paper's W9V).
+    #   "standard" (= W*D, OnlySelfUpwinding): vorticity uses self-smoothness
+    #              {ζ;ζ} (Eq 37) and divergence uses self-smoothness {δU; δU}
+    #              (Eq 44). The paper notes the divergence choice "has a large
+    #              impact on the solution" (W9D is markedly more dissipative).
+    weno_smoothness: str = "split"
     # Barotropic solver selection (see docs/issues/barotropic_mode_noise.md).
     # ``"explicit_substep"`` (default) → existing forward-backward substep
     # loop with cosine/box time filter.
@@ -1385,3 +1410,37 @@ class LatLonCGridOceanConfig(NamedTuple):
     # validation).  Default False ⇒ the explicit stage-10c placement ⇒
     # BIT-IDENTICAL.
     sponge_forcing_implicit: bool = False
+    # Lateral-friction CLOSURE selector (independent of the A_h/B_h/C_smag/C_leith
+    # knobs above). "none" (default) → those knobs apply as usual. "om4p25" → the
+    # GFDL OM4p25 Laplacian+biharmonic max(Smag,static) closure (Silvestri "SM2");
+    # set the A_h/B_h/C_smag/C_leith knobs to 0 in that recipe so OM4p25 is the
+    # sole lateral friction. Coefficients live in ``omp25`` (OMp25Config).
+    lateral_friction_scheme: str = "none"
+    omp25: object = None   # OMp25Config or None (defaults to OMp25Config() when scheme="om4p25")
+    qg_leith_coeff: float = 2.0   # QG-Leith coefficient C (paper QG2 uses C=2); used when
+    #   lateral_friction_scheme="qg_leith". HARMONIC ν=(C·Δ/π)³·√(|∇Q|²+|∇δ|²).
+    # FULL QG2 (B5b): when True the baroclinic stretching term ∂_z(f/N²∇b) is added to the PV
+    # gradient (∇q₁) with the Bachman grid-Burger/grid-Rossby min-bound — the faithful paper QG2.
+    # Default False = BAROTROPIC ∇(ζ+f) (label "QG-Leith (barotropic)" in a comparison matrix).
+    qg_leith_stretching: bool = False
+    qg_leith_deformation_radius_m: float = 6.75e3   # L_d for the grid-Burger bound [m].
+    # --- Veros u_centered dzw slot for the implicit vertical-diffusion solves ---
+    # Selects the GRADIENT divisor (the center-to-center spacing) used by the
+    # backward-Euler tracer (T/S) and momentum-friction vertical-diffusion solves:
+    #   False (DEFAULT, BIT-IDENTICAL) — the midpoint reconstruction
+    #     ``build_dz_half(dz_cell) = 0.5(dz_k + dz_{k+1})``.
+    #   True (VEROS-FAITHFUL) — the coordinate's center-to-center spacing
+    #     ``z_coord.dz_half_ref · J`` (Jacobian-scaled like every other
+    #     thickness), i.e. Veros's ``dzw`` (thermodynamics.py:267
+    #     ``delta = dt·kappaH/dzw``; same divisor for friction).  On a u_centered
+    #     z-coordinate (the Veros-faithful ACC recipe) dz_half_ref alternates
+    #     around the midpoint value exactly as Veros's dzw does (face ratios up to
+    #     2.0 at the top face, ±10% below), so at IDENTICAL diffusivity the
+    #     discrete flux differs per level.  This is the missed twin of the B3 slot
+    #     fixes (N²/TKE/GM were moved to dz_half_ref·J; the implicit solves were
+    #     not).  On a midpoint z-star coordinate dz_half_ref == build_dz_half(dz_ref)
+    #     so the flag is a NO-OP there.  The CONTROL volume (dz_cell / dz_u / dz_v)
+    #     is unchanged — only the gradient slot moves.  Requires
+    #     ``implicit_vertical_mixing=True`` (rejected otherwise at config
+    #     validation).  Default False ⇒ BIT-IDENTICAL for every existing config.
+    implicit_vmix_dzw_slot: bool = False

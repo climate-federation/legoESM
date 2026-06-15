@@ -12,6 +12,7 @@ import pytest
 
 from legoesm import experiment_registry as reg
 from legoesm.config import Config
+from legoesm.ice.experiment_config import SeaIceExperimentConfig
 from legoesm.ocean.config import OceanExperimentConfig
 
 
@@ -41,6 +42,8 @@ def test_get_adapter_resolves_classes():
     assert reg.get_adapter("atmosphere_only") is Config
     assert reg.get_adapter("ocean") is OceanExperimentConfig
     assert reg.get_adapter("ocean_only") is OceanExperimentConfig
+    assert reg.get_adapter("sea_ice") is SeaIceExperimentConfig
+    assert reg.get_adapter("sea_ice_only") is SeaIceExperimentConfig
 
 
 def test_get_adapter_unknown_raises():

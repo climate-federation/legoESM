@@ -33,6 +33,67 @@ def _parse_resolution(tc):
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
+# ---------------------------------------------------------------------------
+# Cube ocean cold-start stabilization (shared by BOTH matrix drivers)
+# ---------------------------------------------------------------------------
+# The cd-grid Arakawa-Lamb corner stencil's face-edge PGF amplification under
+# horizontal density gradients is the documented cube cold-start gate
+# (lock_exchange, phillips_two_layer, overflow, geostrophic_adjustment,
+# stommel_gyre_tracer).  The DOMINANT stabilizer is the barotropic substep
+# count: overflow blows up to NaN at 30 substeps but is stable at 60 — a
+# panel-edge barotropic gravity-wave CFL limit (raising A_h/K_h alone or the
+# conservation fixer alone does NOT rescue it; measured 2026-06-14).  Raised
+# A_h/K_h additionally damp the slow panel-edge tracer overshoot for the
+# matrix smoke.  ``cube_light_diffusion`` keeps lateral diffusion light for
+# wave tests (barotropic_wave / inertia_gravity_wave carry no density gradient;
+# K_h=5e6 would decay a 0.1 m wave to 0.04 m).  The a_grid barotropic is
+# forbidden by the never-A-grid / FV3-faithfulness directive — use fv3sw
+# (vector-invariant absolute-vorticity flux + RK3 + div-damp/hyperdiff).
+#
+# This block is the single source of truth: ``run_ocean_test_matrix.py``'s
+# local cube ``_create_ocean_setup`` imports ``cube_matrix_ocean_config_kwargs``
+# so the monolithic and modular drivers cannot drift apart again.
+_CUBE_MATRIX_N_BAROTROPIC_SUBSTEPS = 60
+_CUBE_MATRIX_BAROTROPIC_DIFFUSION_ALPHA = 0.3
+_CUBE_MATRIX_A_H = 5.0e5    # [m^2/s] raised horizontal viscosity
+_CUBE_MATRIX_K_H = 5.0e6    # [m^2/s] raised horizontal tracer diffusivity
+
+
+def cube_matrix_ocean_config_kwargs(*, physics, A_h=None, A_v=None, K_h=None,
+                                    bottom_drag_r=None,
+                                    cube_light_diffusion=False):
+    """Build the cube ``OceanConfig`` kwargs for the test matrix.
+
+    Heavy mode (default): 60 barotropic substeps, raised A_h/K_h, conservation
+    fixer on.  ``cube_light_diffusion=True``: same substeps/fixer but lateral
+    diffusion only when explicitly requested (wave tests).  An explicit ``K_h``
+    overrides the raised default (e.g. a GM-handled experiment passing K_h=0).
+    """
+    kw = dict(
+        n_barotropic_substeps=_CUBE_MATRIX_N_BAROTROPIC_SUBSTEPS,
+        barotropic_diffusion_alpha=_CUBE_MATRIX_BAROTROPIC_DIFFUSION_ALPHA,
+        use_conservation_fixer=True,
+        physics=physics,
+        barotropic_staggering="fv3sw",
+    )
+    if cube_light_diffusion:
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if K_h is not None:
+            kw["K_h"] = K_h
+    elif A_h is None:
+        kw["A_h"] = _CUBE_MATRIX_A_H
+        kw["K_h"] = K_h if K_h is not None else _CUBE_MATRIX_K_H
+    else:
+        kw["A_h"] = max(A_h, _CUBE_MATRIX_A_H)
+        kw["K_h"] = K_h if K_h is not None else _CUBE_MATRIX_K_H
+    if A_v is not None:
+        kw["A_v"] = A_v
+    if bottom_drag_r is not None:
+        kw["bottom_drag_r"] = bottom_drag_r
+    return kw
+
+
 def _create_ocean_setup(tc, nlev: int | None = None,
                         H_max: float | None = None, physics=None,
                         A_h: float | None = None,
@@ -57,7 +118,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
                         C_leith_modified: bool | None = None,
                         momentum_advection: str | None = None,
                         weno_d_term: bool | None = None,
-                        barotropic_solver: str | None = None):
+                        barotropic_solver: str | None = None,
+                        cube_light_diffusion: bool = False):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -99,14 +161,15 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         # monolithic paths agree (no silent drop, no spurious SKIP).
         n = params["n"]
         grid = create_cubed_sphere(n)
-        kw = dict(n_barotropic_substeps=30, physics=physics,
-                  barotropic_staggering="fv3sw")
-        if A_h is not None:
-            kw["A_h"] = A_h
-        if A_v is not None:
-            kw["A_v"] = A_v
-        if bottom_drag_r is not None:
-            kw["bottom_drag_r"] = bottom_drag_r
+        # Cube cold-start stabilization (barotropic substeps=60 etc.) lives in
+        # the shared ``cube_matrix_ocean_config_kwargs`` so this modular driver
+        # and the monolithic ``run_ocean_test_matrix.py`` cannot diverge: the
+        # previous inline ``n_barotropic_substeps=30`` here blew overflow up to
+        # NaN in ~6 steps while the monolithic ran stably at 60.
+        kw = cube_matrix_ocean_config_kwargs(
+            physics=physics, A_h=A_h, A_v=A_v, K_h=K_h,
+            bottom_drag_r=bottom_drag_r,
+            cube_light_diffusion=cube_light_diffusion)
         cfg = OceanConfig(**kw)
         model = OceanModel(grid, z_coord, cfg)
         coord_kind = "cube"

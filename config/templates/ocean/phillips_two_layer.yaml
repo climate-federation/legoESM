@@ -1,0 +1,22 @@
+# legoESM experiment template — Phillips two-layer baroclinic instability.
+#
+# Names the procedural `phillips_two_layer` experiment via `setup:` (#388 Ask#2).
+experiment:
+  tier: tier2
+  complexity: primitive_equation
+  extent: idealized
+  maturity: structurally_validated
+  description: >
+    Phillips two-layer baroclinic instability: a vertically-sheared two-layer
+    flow grows the fastest baroclinic mode — a classic mesoscale-instability
+    benchmark.
+  data: []
+  conservation_gates: [volume]
+model:
+  name: "ocean-phillips-two-layer"
+  type: ocean_only
+setup:
+  name: phillips_two_layer
+  grid: latlon
+output:
+  path: output/ocean/phillips_two_layer/

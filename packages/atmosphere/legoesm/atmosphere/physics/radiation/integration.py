@@ -693,6 +693,8 @@ def make_radiation_physics(
     radiation_config: RadiationConfig,
     model_type: str = "hydrostatic",
     column_mesh=None,
+    sfc_albedo_override: jnp.ndarray | float | None = None,
+    sfc_emissivity_override: jnp.ndarray | float | None = None,
 ) -> Callable:
     """Create a physics function for radiation matching a model's signature.
 
@@ -722,6 +724,22 @@ def make_radiation_physics(
     # dycore radiation factory (incl. combined.py / AIMIP spectral_pe) passes
     # through.  See ``_validate_cloud_gate`` for why this is required.
     _validate_cloud_gate(radiation_config)
+
+    # ``sfc_albedo_override`` / ``sfc_emissivity_override`` are build-time
+    # surface fields (e.g. AIMIP's trained spatial ``(ncol,)`` arrays) routed to
+    # the radiation solve as PER-CALL overrides via ``_resolve_surface_field`` —
+    # so a trained/traced value reaches the heating WITHOUT being written into
+    # ``RRTMGPConfig.sfc_*`` (which RRTMGP folds into its Python solver-cache key
+    # and would then key by tracer identity). Only the spectral_pe builder
+    # consumes them today; reject them loudly elsewhere rather than silently
+    # dropping a trained surface field.
+    if (sfc_albedo_override is not None or sfc_emissivity_override is not None) \
+            and model_type != "spectral_pe":
+        raise ValueError(
+            "sfc_albedo_override / sfc_emissivity_override are only wired for "
+            f"model_type='spectral_pe', got {model_type!r}. Extend the relevant "
+            "_make_*_radiation builder before passing surface overrides there."
+        )
 
     # Load heavy/static RRTMGP optics once outside model JIT traces.
     rrtmgp_solver = None
@@ -761,8 +779,12 @@ def make_radiation_physics(
         return _make_mpas_nh_radiation(radiation_config, rrtmgp_solver,
                                        ml_ozone_coefs=ml_ozone_coefs)
     elif model_type == "spectral_pe":
-        return _make_spectral_pe_radiation(radiation_config, rrtmgp_solver,
-                                            ml_ozone_coefs=ml_ozone_coefs)
+        return _make_spectral_pe_radiation(
+            radiation_config, rrtmgp_solver,
+            ml_ozone_coefs=ml_ozone_coefs,
+            sfc_albedo_override=sfc_albedo_override,
+            sfc_emissivity_override=sfc_emissivity_override,
+        )
     elif model_type == "mpas":
         return _make_mpas_radiation(radiation_config, rrtmgp_solver,
                                      ml_ozone_coefs=ml_ozone_coefs,
@@ -1522,6 +1544,8 @@ def _make_spectral_pe_radiation(
     radiation_config: RadiationConfig,
     rrtmgp_solver=None,
     ml_ozone_coefs=None,
+    sfc_albedo_override: jnp.ndarray | float | None = None,
+    sfc_emissivity_override: jnp.ndarray | float | None = None,
 ) -> Callable:
     """Create radiation physics_fn for SpectralPEModel.
 
@@ -1591,6 +1615,19 @@ def _make_spectral_pe_radiation(
         )
         _ghg_ext = forcing.get("ghg_vmr") if forcing is not None else None
 
+        # Surface albedo / emissivity overrides: a per-step TRACED
+        # ``forcing["sfc_albedo"]`` wins over the static build-time override
+        # (``sfc_albedo_override`` closed over from ``make_radiation_physics`` —
+        # e.g. AIMIP's trained spatial field). Routing them here (NOT into
+        # ``RRTMGPConfig.sfc_*``) keeps the trained value off RRTMGP's Python
+        # solver-cache key. Same precedence pattern as T_sfc / o3 / aerosol.
+        _alb_ovr = forcing.get("sfc_albedo") if forcing is not None else None
+        if _alb_ovr is None:
+            _alb_ovr = sfc_albedo_override
+        _emis_ovr = forcing.get("sfc_emissivity") if forcing is not None else None
+        if _emis_ovr is None:
+            _emis_ovr = sfc_emissivity_override
+
         # Effective time-of-day for the diurnal cycle.  ``_time`` holds
         # the *initial* day_of_year + seconds_of_day captured at module
         # import (or set via ``set_time`` between epochs); the scan
@@ -1654,6 +1691,17 @@ def _make_spectral_pe_radiation(
         )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
+
+        # Flatten any 2-D (n_lat, n_lon) surface override to (ncol,); scalars
+        # and (ncol,) arrays pass through (the radiation backend / RRTMGP's
+        # _resolve_surface_field broadcasts over the column axis).
+        def _to_col(x):
+            if x is not None and hasattr(x, "ndim") and x.ndim >= 2:
+                return x.reshape(ncol)
+            return x
+        _alb_col = _to_col(_alb_ovr)
+        _emis_col = _to_col(_emis_ovr)
+
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
             T=T_col,
@@ -1664,6 +1712,8 @@ def _make_spectral_pe_radiation(
             q_v=q_v_col,
             insolation=insol_col,
             cos_sza=cos_sza_col,
+            sfc_albedo_override=_alb_col,
+            sfc_emissivity_override=_emis_col,
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
             n_cloud=n_cloud_col,

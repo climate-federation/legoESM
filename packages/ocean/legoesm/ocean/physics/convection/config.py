@@ -27,7 +27,7 @@ __param_spec__ = {
             "w_plume_min": "numerics: floor/cap",
         },
         "params": {
-            "T_excess": {"units": "1", "bounds": (0.0165, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "convection", "reference": "convective plume", "shape": None},
+            "T_excess": {"units": "K", "bounds": (0.0165, 0.15), "tunable_tier": 2, "transform": "sigmoid", "category": "convection", "reference": "convective plume", "shape": None},
             "alpha_plume": {"units": "1", "bounds": (0.033, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "convection", "reference": "convective plume", "shape": None},
             "epsilon": {"units": "1", "bounds": (0.00033, 0.003), "tunable_tier": 2, "transform": "sigmoid", "category": "convection", "reference": "convective plume", "shape": None},
         },
@@ -96,7 +96,9 @@ class PlumeConfig(NamedTuple):
     # ``_min`` suffix, this is the actual plume speed for the
     # unresolved-plume detrainment closure (see plume.py:75-88).
     w_plume_min: float = 0.01
-    T_excess: float = 0.05      # Initial plume temperature excess [K]
+    T_excess: float = 0.05      # Plume cold (destabilizing) excess magnitude [K];
+                                # the source parcel is set to T_surface - T_excess
+                                # so it is denser and sinks (down-plume)
     # Sharpness of the smooth active-mask transition on ``delta_rho``.
     # Larger values approach a hard switch; ``1e4`` corresponds to a
     # transition width of ~1e-4 kg/m^3 in density anomaly.  Configurable
