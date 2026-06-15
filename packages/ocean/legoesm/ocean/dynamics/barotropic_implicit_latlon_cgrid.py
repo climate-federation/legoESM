@@ -635,6 +635,111 @@ def _faces_from_cell_depth(H_cell, mask, n_lat, n_lon):
     return H_u * u_mask, H_v * v_mask, u_mask, v_mask
 
 
+def _faces_from_cell_depth_banded(H_cell, mask, layout):
+    """Band-aware ``(H_u, H_v, u_mask, v_mask)`` for the distributed MG.
+
+    Same production min-rule as :func:`_faces_from_cell_depth`, but the
+    band-EDGE v-faces use the NEIGHBOUR band's edge row (a 1-row lat halo via
+    the backend-dispatched :func:`pad_halo_latlon` — MPI sendrecv / SPMD
+    ppermute / local pole-fold) instead of being zeroed, so the meridional
+    Helmholtz coupling spans a rank cut.  A v-face is zeroed (wall BC) ONLY at a
+    TRUE pole — the south edge when ``layout.south_rank is None`` and the north
+    edge when ``layout.north_rank is None``.
+
+    The ``min``-rule is symmetric, so two neighbouring ranks compute the SAME
+    value on their shared face (each uses the other's haloed row) — the
+    operator is consistent across the cut.  On a global single band
+    (``south_rank == north_rank == None``) this reduces EXACTLY to
+    :func:`_faces_from_cell_depth` (both edges zeroed; interior identical),
+    the property the serial-equivalence test pins.
+
+    u-faces are periodic in longitude and need no lat halo (purely local)."""
+    from legoesm.grids.halo_latlon import pad_halo_latlon
+    n_lat_local, n_lon = H_cell.shape
+    # 1-row lat halo (strip the lon halo pad_halo_latlon also adds).
+    Hc_h = pad_halo_latlon(H_cell, halo=1)[:, 1:-1]   # (n_lat_local+2, n_lon)
+    m_h = pad_halo_latlon(mask, halo=1)[:, 1:-1]
+    # u-faces: periodic lon, local (identical to the serial helper).
+    Hu_inner = jnp.minimum(jnp.roll(H_cell, 1, axis=1), H_cell)
+    H_u = jnp.concatenate([Hu_inner, Hu_inner[:, 0:1]], axis=1)
+    wet = mask > 0.5
+    u_inner = (wet & jnp.roll(wet, 1, axis=1)).astype(H_cell.dtype)
+    u_mask = jnp.concatenate([u_inner, u_inner[:, 0:1]], axis=1)
+    # v-faces: min-rule over the HALOED column → (n_lat_local+1, n_lon).  Face k
+    # (k=0..n_lat_local) lies between haloed rows k and k+1.
+    H_v = jnp.minimum(Hc_h[:-1], Hc_h[1:])
+    wet_h = m_h > 0.5
+    v_mask = (wet_h[:-1] & wet_h[1:]).astype(H_cell.dtype)
+    # Wall BC at TRUE poles only (no neighbour band there).
+    if layout.south_rank is None:
+        H_v = H_v.at[0].set(0.0)
+        v_mask = v_mask.at[0].set(0.0)
+    if layout.north_rank is None:
+        H_v = H_v.at[-1].set(0.0)
+        v_mask = v_mask.at[-1].set(0.0)
+    return H_u * u_mask, H_v * v_mask, u_mask, v_mask
+
+
+def _coarse_band_layout(layout):
+    """2x-coarsened ``LatLonBandLayout`` for the banded multigrid, or ``None``
+    if the band is not EVEN-ALIGNED (``lat_start``/``n_lat_local``/global dims
+    odd).
+
+    Even-aligned bands are the simplifying requirement for distributed MG: each
+    coarse cell's two fine lat rows lie WITHIN one band, so the 2x2 restriction
+    stays band-LOCAL (no cross-rank halo / offset).  An odd band would straddle
+    a cut -> return ``None`` so the caller falls back / refuses rather than
+    build a wrong coarse problem.  Rank topology (rank/n_ranks/neighbours) is
+    preserved; ``fold`` is dropped (MG refuses tripolar upstream)."""
+    if (layout.lat_start % 2 or layout.n_lat_local % 2
+            or layout.n_lat_global % 2 or layout.n_lon_global % 2):
+        return None
+    return layout._replace(
+        n_lat_global=layout.n_lat_global // 2,
+        n_lon_global=layout.n_lon_global // 2,
+        n_lat_local=layout.n_lat_local // 2,
+        lat_start=layout.lat_start // 2,
+        lat_end=layout.lat_end // 2,
+        fold=None,
+    )
+
+
+def _coarse_band_hierarchy(layout, *, min_coarse_rows: int = 8):
+    """Fine->coarsest list of EVEN-ALIGNED band layouts for the banded V-cycle.
+
+    Starts at ``layout`` (L0) and 2x-coarsens (:func:`_coarse_band_layout`)
+    while the GLOBAL row count stays ``>= 2*min_coarse_rows`` AND every rank's
+    band stays even-aligned.  Two stopping criteria:
+
+    * GLOBAL size — coarsen until the global coarsest has ``< 2*min_coarse_rows``
+      rows (so the coarsest GLOBAL problem is ``[min, 2*min)`` rows, cheap for
+      the smoother-as-solver).  Using the GLOBAL (not local) count makes the
+      depth match the serial hierarchy at ``n_ranks==1`` and keeps the V-cycle
+      deep enough to clear the smooth modes regardless of rank count.
+    * EVEN-ALIGNMENT — :func:`_coarse_band_layout` returns ``None`` once a band
+      would become odd (the 2x2 restriction would straddle a rank cut).  With P
+      ranks the band hits an odd size after ``log2(n_lat/P)`` levels, so MANY
+      ranks cap the depth below what the global-size rule wants (the known
+      1-D-decomposition MG limit; coarsest-grid AGGLOMERATION is the documented
+      follow-up).
+
+    Returns ``[L0, L1, ...]``, ``len >= 1`` (L0 always present).  ``len == 1``
+    => no admissible coarsening (caller falls back to a single-level smoother).
+    For EQUAL bands (``n_lat_global % n_ranks == 0``) every rank derives the
+    SAME depth from the global dims, so the V-cycle runs in lock-step with no
+    runtime depth reduction (the banded factory enforces equal bands)."""
+    levels = [layout]
+    cur = layout
+    # Coarsen while the GLOBAL coarsest would still have >= min_coarse_rows rows.
+    while cur.n_lat_global >= 2 * min_coarse_rows:
+        nxt = _coarse_band_layout(cur)
+        if nxt is None:
+            break
+        levels.append(nxt)
+        cur = nxt
+    return levels
+
+
 def _make_multigrid_preconditioner(
     H_cell: jnp.ndarray,
     coeff: jnp.ndarray,
@@ -718,6 +823,23 @@ def _make_multigrid_preconditioner(
              ).astype(mask.dtype)
         g = ensure_geometry(create_latlon_grid(n_lat=nlc, n_lon=nloc))
         nl, nlo = nlc, nloc
+    return _run_vcycle_preconditioner(
+        levels, mask, pre=pre, post=post, coarse_sweeps=coarse_sweeps,
+        omega=omega)
+
+
+def _run_vcycle_preconditioner(levels, mask, *, pre, post, coarse_sweeps,
+                               omega):
+    """Shared V-cycle engine for the SERIAL and BANDED MG factories.
+
+    ``levels`` is the fine->coarsest list of ``(A_op, mask, smoother,
+    n_lat_local, n_lon_local)`` tuples each factory builds (serial: global
+    rebuilt grids; banded: per-band sliced grids + halo-aware faces).  The
+    recursion is IDENTICAL for both because the 2x2 transfers are LOCAL on an
+    even-aligned band (each coarse cell's two fine lat rows are owned by the
+    same rank), and every ``A_op`` halo-exchanges internally
+    (:func:`gradient_y_cgrid`).  The V-cycle therefore has NO global reduction
+    — only neighbour halos — which is the whole reduction-latency win."""
     n_levels = len(levels)
 
     def _smooth(lvl, b, x, sweeps):
@@ -744,6 +866,91 @@ def _make_multigrid_preconditioner(
                        jnp.zeros_like(r)).astype(r.dtype)
 
     return M_inv
+
+
+def _make_multigrid_preconditioner_banded(
+    H_cell: jnp.ndarray,
+    coeff: jnp.ndarray,
+    grid: LatLonGrid,
+    mask: jnp.ndarray,
+    layout,
+    *,
+    pre: int = 2,
+    post: int = 2,
+    coarse_sweeps: int = 10,
+    omega: float = 0.8,
+    min_coarse_rows: int = 8,
+):
+    """BANDED distributed anisotropic geometric-MG V-cycle (task #26).
+
+    The halo-aware sibling of :func:`_make_multigrid_preconditioner`: builds the
+    SAME level hierarchy on each rank's LATITUDE BAND so the V-cycle slashes the
+    barotropic-PCG outer count (M~60->4) WITHOUT the per-iteration global
+    allreduce — the multinode weak-scaling reduction-latency wall.
+
+    Per level: a 2x-coarsened band layout (:func:`_coarse_band_hierarchy`); the
+    coarse geometry is the GLOBAL coarse ``create_latlon_grid`` SLICED to the
+    band (:func:`slice_latlon_grid_to_band`); band-aware faces
+    (:func:`_faces_from_cell_depth_banded`, edge v-faces span the rank cut, only
+    true poles walled); the production Helmholtz ``A_op`` (halo-exchanges
+    internally) + a comm-free zonal-line smoother.  The 2x2 cell-depth/mask
+    restriction is band-LOCAL (the even-aligned requirement).
+
+    LOCK-STEP: requires EQUAL even bands (``n_lat_global % n_ranks == 0`` and
+    each band even-aligned) so every rank derives the SAME depth from global
+    dims — no runtime depth reduction.  Refuses (caller falls back to the
+    comm-free 'zonal_line') when the decomposition is unequal/odd or tripolar.
+    A geometry mismatch (uniform coarse grid vs Mercator) only slows
+    convergence — the outer PCG's exact ``A_op``/residual keep the answer
+    correct — so it is allowed (degraded, not wrong), as in the serial case.
+    """
+    from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
+    from legoesm.parallel.latlon_mpi import slice_latlon_grid_to_band
+
+    if is_tripolar(grid):
+        raise ValueError(
+            "multigrid_banded: coarse-grid construction does not handle the "
+            "tripolar north-fold; use 'zonal_line' or 'chebyshev'.")
+    n_ranks = layout.n_ranks
+    if n_ranks > 1 and layout.n_lat_global % n_ranks != 0:
+        # Unequal bands => ranks would coarsen to different depths (some bands
+        # odd) and the V-cycle would deadlock on mismatched halo schedules.
+        raise ValueError(
+            "multigrid_banded: requires EQUAL bands for lock-step coarsening "
+            f"(n_lat_global={layout.n_lat_global} % n_ranks={n_ranks} != 0); "
+            "use 'zonal_line' (comm-free) under this decomposition.")
+
+    band_layouts = _coarse_band_hierarchy(layout, min_coarse_rows=min_coarse_rows)
+    n_levels = len(band_layouts)
+
+    levels = []   # (A_op, mask, smoother, n_lat_local, n_lon_local)
+    Hc, m = H_cell, mask
+    for lvl, blay in enumerate(band_layouts):
+        if lvl == 0:
+            g = grid
+        else:
+            # Global coarse grid sliced to THIS band, THEN ensure_geometry —
+            # the production order (slice the LatLonGrid which carries lat_v,
+            # then convert to LatLonCGridGeometry; ensure_geometry drops lat_v,
+            # so slicing must precede it).  Gives the band's coarse
+            # latitudes/metrics (uniform-grid approximation, as serial).
+            g = ensure_geometry(slice_latlon_grid_to_band(
+                create_latlon_grid(
+                    n_lat=blay.n_lat_global, n_lon=blay.n_lon_global),
+                blay))
+        H_u, H_v, u_mask, v_mask = _faces_from_cell_depth_banded(Hc, m, blay)
+        A_op = _make_helmholtz(H_u, H_v, coeff, g, m, u_mask, v_mask)
+        smoother = _make_zonal_line_preconditioner(H_u, H_v, coeff, g, m)
+        levels.append((A_op, m, smoother, blay.n_lat_local, blay.n_lon_global))
+        if lvl + 1 < n_levels:
+            nlc, nloc = blay.n_lat_local // 2, blay.n_lon_global // 2
+            Hc = _mg_restrict(Hc, m, nlc, nloc)        # band-local 2x2 mean
+            m = (_mg_restrict(m * 4.0, jnp.ones_like(m), nlc, nloc) > 0.5
+                 ).astype(mask.dtype)
+
+    return _run_vcycle_preconditioner(
+        levels, mask, pre=pre, post=post, coarse_sweeps=coarse_sweeps,
+        omega=omega)
 
 
 def _select_preconditioner(
