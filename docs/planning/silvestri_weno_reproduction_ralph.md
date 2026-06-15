@@ -193,6 +193,33 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 5 — B4 DONE (OM4p25 Smagorinsky = SM2) — 2026-06-15
+- **B4 COMPLETE + adversarially reviewed + committed** (`feat(ocean): OM4p25 lateral-friction
+  closure (Silvestri SM2)`). `lateral_friction_scheme="om4p25"` selects the GFDL OM4p25
+  Laplacian+biharmonic max(Smag,static) closure (paper Appendix A8): ν₂=max(C₂Δ²|D|,Cu₂Δ)·F,
+  ν₄=max(C₄Δ⁴|D|,Cu₄Δ³), F=1/(1+0.25(L_d/Δ)⁴), coeffs in `OMp25Config` (C₂=.15 Cu₂=.01 C₄=.06
+  Cu₄=.01). Assembled from existing energy-stable machinery — `smagorinsky_viscosity_cgrid`/`_q`
+  at C=1 give Δ²|D|; both ν applied via `viscous_tendency_cgrid` (Laplacian direct, biharmonic
+  two-pass with c₄=ν₄/Δ²). L_d from config (≈uniform for the idealised jet; N²-local L_d = refinement).
+- **Adversarial review: no blockers.** The HIGHEST-RISK item — the biharmonic Δ² two-pass
+  bookkeeping — was numerically VERIFIED: OM4p25 biharmonic-only == `smagorinsky_biharmonic_
+  tendency_cgrid(C_smag=√C4)` at ratio 1.0000000 (diff 9e-13). Energy dissipation dE/dt<0
+  confirmed for full/Laplacian/biharmonic; F-taper algebra exact (Bu⁻²=(L_d/Δ)⁴); AD finite.
+  Applied the one NIT as a **fail-loud guard**: OM4p25 + nonzero A_h/B_h/C_smag/C_smag_lap/C_leith
+  now raises at construction (it's additive → would double-apply friction; the SM2 recipe must
+  zero them). +test.
+- Tests: 9 (new leaf-module) — rest-zero, energy-dissipation, F-taper, static-floor, AD,
+  full-step SM2 dispatch, invalid-scheme + double-friction rejected. 80 guardrail/recipe green.
+- **Recipe-scheme coverage:** W9V ✅ W9D ✅ UP3 ✅ SM2 ✅ — 4 of 5. Only **QG2 (B5 = QG-Leith)** left.
+- **NEXT: B5 = QG-Leith viscosity (QG2).** A genuinely new operator: ν=(CΔ/π)³·√(∂Q²+∂δ²),
+  C=2, with ∂Q² bounded by the three q-gradient terms (paper Eq A2-A3: ∇q₁=∇q+∂_z(f/N²∇b),
+  ∇q₂=∇q(1+1/Bu), ∇q₃=∇q(1+1/Ro²), ∇q=∇(ζ+f)), reverts to 2D Leith where QG breaks down.
+  The existing `C_leith` biharmonic Leith is the closest prior art — read
+  `leith_biharmonic_tendency_cgrid` + `_grad_zeta_mag_h` in latlon_cgrid_operators.py first;
+  QG-Leith is LAPLACIAN (not biharmonic) and uses POTENTIAL vorticity gradient (needs N²/buoyancy
+  → like OM4p25's L_d, may need a config/stratification input). Ref:
+  BaroclinicAdjustment.jl/src/Parameterizations/qg_leith_viscosity.jl. After B5: Phase 2 (diagnostics).
+
 ### Iteration 4 — B3 DONE (UP3 flux-form momentum) — 2026-06-15
 - **B3 COMPLETE + adversarially reviewed + committed** (`feat(ocean): UP3 3rd-order
   upwind-biased flux-form momentum advection`). `momentum_flux_scheme="upwind3"` (paper UP3 =

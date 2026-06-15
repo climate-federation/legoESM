@@ -171,3 +171,15 @@ def test_invalid_lateral_friction_scheme_rejected():
     bad = r.model_config._replace(lateral_friction_scheme="bogus")
     with pytest.raises(ValueError, match="lateral_friction_scheme"):
         LatLonCGridOceanModel(r.grid, r.z_coord, bad)
+
+
+def test_om4p25_with_nonzero_other_friction_rejected():
+    """OM4p25 + a nonzero A_h/C_smag double-applies friction → must fail loudly
+    (it is the sole lateral friction; the recipe must zero the other knobs)."""
+    from legoesm.ocean.experiments.eady_uniform import build_eady_uniform_setup
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    r = build_eady_uniform_setup(n_lat=12, n_lon=12,
+                                 momentum_advection="vector_invariant")
+    bad = r.model_config._replace(lateral_friction_scheme="om4p25", A_h=1.0e4)
+    with pytest.raises(ValueError, match="sole lateral friction"):
+        LatLonCGridOceanModel(r.grid, r.z_coord, bad)
