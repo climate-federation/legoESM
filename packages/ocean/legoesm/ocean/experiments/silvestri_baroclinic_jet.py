@@ -101,7 +101,8 @@ class SilvestriRestoring(NamedTuple):
 
 
 def apply_zonal_mean_restoring(field: jnp.ndarray, ref_zm: jnp.ndarray,
-                               gamma: float, dt: float) -> jnp.ndarray:
+                               gamma: float, dt: float,
+                               wrap: bool = False) -> jnp.ndarray:
     """Relax the ZONAL-MEAN component of ``field`` toward ``ref_zm`` (the initial
     zonal-mean profile), leaving the eddy (zero-zonal-mean) part untouched.
 
@@ -109,8 +110,14 @@ def apply_zonal_mean_restoring(field: jnp.ndarray, ref_zm: jnp.ndarray,
     the correction is constant in x, the eddy part is unchanged — this restores
     the mean jet/transport without damping the mesoscale (Soufflet et al. 2016).
     Explicit (γ·dt ≪ 1 for τ=50 d, dt~minutes).
+
+    ``wrap=True`` for the u-field, whose last column (n_lon) is the periodic
+    duplicate of column 0: the zonal mean is taken over the DISTINCT columns
+    ``[:-1]`` (else col 0 is double-weighted), but the correction still applies
+    to all columns so the wrap stays consistent.
     """
-    zm = jnp.mean(field, axis=1, keepdims=True)              # (n_lat, 1[, nlev])
+    f_for_mean = field[:, :-1, ...] if wrap else field
+    zm = jnp.mean(f_for_mean, axis=1, keepdims=True)         # (n_lat, 1[, nlev])
     # ref_zm is (n_lat[, nlev]); add the lon axis to broadcast.
     ref_b = ref_zm[:, None, ...]
     return field - gamma * dt * (zm - ref_b)
@@ -125,7 +132,7 @@ def restore_state(state, restoring: SilvestriRestoring, dt: float):
         S=state.S.replace(data=apply_zonal_mean_restoring(
             state.S.data, restoring.S_ref_zm, g, dt)),
         u=state.u.replace(data=apply_zonal_mean_restoring(
-            state.u.data, restoring.u_ref_zm, g, dt)),
+            state.u.data, restoring.u_ref_zm, g, dt, wrap=True)),
         v=state.v.replace(data=apply_zonal_mean_restoring(
             state.v.data, restoring.v_ref_zm, g, dt)),
     )
@@ -173,11 +180,14 @@ def _build_initial_state(grid, z_coord, config: SilvestriJetConfig):
     f_lat = 2.0 * constants.Omega * np.sin(lat_rad)         # (n_lat,)
     f_safe = np.where(np.abs(f_lat) < 1e-12, np.sign(f_lat + 1e-30) * 1e-12, f_lat)
     H = config.H_max
+    # u depth-linear, zero at the bottom FACE z=−H (z_full is cell-centred, so
+    # the deepest cell carries a small residual u — vanishing is at the face).
     u = np.zeros((n_lat, n_lon + 1, nlev), dtype=np.float64)
     for k in range(nlev):
-        u_col = -(1.0 / f_safe) * dbdy * (z_full[k] + H)     # (n_lat,) [m/s], 0 at z=-H
+        u_col = -(1.0 / f_safe) * dbdy * (z_full[k] + H)     # (n_lat,) [m/s]
         u[:, :, k] = u_col[:, None]
-    # Mask u at faces adjacent to the N/S walls (u-faces are interior in lon).
+    # Zero u on the N/S wall rows (the lon-roll combines the two lon-adjacent
+    # cell masks; for N/S walls the zeroing comes from the zero wall ROWS).
     u_face_mask = np.minimum(mask, np.roll(mask, 1, axis=1))
     u_face_mask = np.concatenate([u_face_mask, u_face_mask[:, :1]], axis=1)
     u = u * u_face_mask[:, :, None]
@@ -211,7 +221,11 @@ def build_silvestri_baroclinic_jet_setup(
     grid, wall_mask = create_regional_latlon_grid(
         n_lat, n_lon, config.lat_south, config.lat_north,
         lon_west=config.lon_west, lon_east=config.lon_east, periodic_x=True)
-    z_coord = create_ocean_z_star(n_levels=nlev, H_max=config.H_max)
+    # Uniform vertical spacing dz = H_max/nlev (paper §5: fixed dz=20 m at 50
+    # levels over 1 km). dz_surface == dz_deep makes create_ocean_z_star uniform.
+    _dz = config.H_max / nlev
+    z_coord = create_ocean_z_star(n_levels=nlev, H_max=config.H_max,
+                                  dz_surface=_dz, dz_deep=_dz)
 
     base_config = LatLonCGridOceanConfig(
         barotropic_solver="implicit_cn",
@@ -235,7 +249,9 @@ def build_silvestri_baroclinic_jet_setup(
         gamma=config.restoring_gamma,
         T_ref_zm=jnp.mean(initial_state.T.data, axis=1),
         S_ref_zm=jnp.mean(initial_state.S.data, axis=1),
-        u_ref_zm=jnp.mean(initial_state.u.data, axis=1),
+        # u has a periodic wrap column (n_lon) duplicating col 0 — average over
+        # the distinct columns [:-1] (consistent with apply_..._restoring wrap=True).
+        u_ref_zm=jnp.mean(initial_state.u.data[:, :-1], axis=1),
         v_ref_zm=jnp.mean(initial_state.v.data, axis=1),
     )
     return SilvestriJetRecipe(

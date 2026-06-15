@@ -59,6 +59,14 @@ def test_initial_state_front_and_thermal_wind():
     assert np.all(np.isfinite(T)) and np.all(np.isfinite(u))
 
 
+def test_uniform_vertical_grid():
+    """Paper §5 uses fixed dz=20 m (50 levels over 1 km) — the builder makes the
+    vertical spacing uniform."""
+    r = SJ.build_silvestri_baroclinic_jet_setup(n_lat=20, n_lon=16, nlev=50)
+    dz = np.asarray(r.z_coord.dz_ref)
+    assert np.allclose(dz, 20.0, atol=1e-9), (dz.min(), dz.max())
+
+
 def test_deformation_radius_order():
     """L_d = N·H/(π|f|) ≈ 5–7 km for the paper config (initial ~5.5 km)."""
     cfg = SJ.SilvestriJetConfig()
