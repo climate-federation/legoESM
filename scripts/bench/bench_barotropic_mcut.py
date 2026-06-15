@@ -64,6 +64,12 @@ def main():
                    default=[2, 4, 6, 8, 12, 20, 40, 60])
     p.add_argument("--target", type=float, default=1e-6)
     p.add_argument("--out", default="docs/scaling/barotropic_mcut.csv")
+    # Wall-time mode (multi-node): time jacobi-M vs multigrid-M solves so the
+    # reduction-latency win shows in ms/solve (Gloo allreduce dominates at scale).
+    p.add_argument("--time-solves", type=int, default=0,
+                   help="if >0, time N jitted solves per preconditioner")
+    p.add_argument("--jacobi-m", type=int, default=60)
+    p.add_argument("--mg-m", type=int, default=12)
     args = p.parse_args()
 
     comm = MPI.COMM_WORLD
@@ -118,6 +124,36 @@ def main():
             if rank == 0:
                 print(f"  {name:10s} M={M:3d}  rel_residual={r:.3e}  "
                       f"reductions/step={2 * M}")
+
+    # Wall-time: jitted solve ms for jacobi-M vs multigrid-M (the production
+    # path).  At MULTI-NODE the Gloo allreduce latency dominates, so the MG's
+    # 2*mg_m reductions/step beats jacobi's 2*jacobi_m and the speedup GROWS
+    # with node count — the reduction-latency-wall lever's payoff at scale.
+    if args.time_solves > 0:
+        import time as _time
+
+        def _timed(M_inv, M):
+            f = jax.jit(lambda b: solve_helmholtz_implicit(
+                A_op, b, M_inv, x0, distributed=True, fixed_iters=M,
+                residual_tol=1e-30, stock_cg_tol=1e-12, stock_cg_maxiter=200,
+                pcg_variant="standard", dot_weight=w)[0])
+            f(rhs_l).block_until_ready()          # compile + warmup
+            comm.Barrier()
+            t0 = _time.perf_counter()
+            for _ in range(args.time_solves):
+                f(rhs_l).block_until_ready()
+            comm.Barrier()
+            return (_time.perf_counter() - t0) / args.time_solves * 1000.0
+
+        t_jac = _timed(precs["jacobi"], args.jacobi_m)
+        t_mg = _timed(precs["multigrid"], args.mg_m)
+        if rank == 0:
+            print(f"\n=== WALL-TIME np{n_ranks} ({n_lat}x{n_lon}) ===")
+            print(f"  jacobi    M={args.jacobi_m}: {t_jac:.3f} ms/solve "
+                  f"({2 * args.jacobi_m} reductions/step)")
+            print(f"  multigrid M={args.mg_m}: {t_mg:.3f} ms/solve "
+                  f"({2 * args.mg_m} reductions/step)")
+            print(f"  MG wall-time speedup: {t_jac / t_mg:.2f}x")
 
     if rank == 0:
         def m_to_target(name):
