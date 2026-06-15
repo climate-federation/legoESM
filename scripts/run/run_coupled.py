@@ -123,7 +123,17 @@ def main():
     parser.add_argument("--diag-days", type=int, default=5,
                         help="Diagnostic interval [days] (default: 5)")
 
-    # Ocean
+    # Ocean.  The coupled driver runs a thermodynamic SLAB ocean (no 3D
+    # dynamics — that lives in the standalone OceanModel and is not yet wired
+    # into the coupler).  DEFAULT = two_layer: a mixed layer + deep layer with
+    # bulk vertical mixing and deep-layer restoring (a cold deep reservoir that
+    # damps SST drift), the most ocean physics the coupled slab supports today.
+    parser.add_argument("--ocean", default="two_layer",
+                        choices=["fixed", "slab", "two_layer"],
+                        help="Coupled slab-ocean mode (default: two_layer — "
+                             "mixed+deep layers with vertical mixing and deep "
+                             "restoring; 'slab' = single mixed layer; 'fixed' = "
+                             "prescribed SST)")
     parser.add_argument("--ocean-h-mix", type=float, default=50.0,
                         help="Slab ocean mixed-layer depth [m]")
 
@@ -176,6 +186,7 @@ def main():
         args.microphysics = "none"
         args.unfused_radiation = False
         args.rad_update_steps = 1
+        args.ocean = "slab"          # cheap single-layer slab for idealized runs
 
     # Unfused radiation only engages when rad_update_steps > 1 (the host-loop
     # dispatch in _run_compiled requires it).  Make the no-op EXPLICIT rather
@@ -196,12 +207,22 @@ def main():
     logger.info(f"  Days:       {args.days}")
     logger.info(f"  Radiation:  {args.radiation}"
                 + (" (unfused)" if args.unfused_radiation else ""))
+    _full_suite = (
+        args.radiation == "rrtmgp" and args.convection != "none"
+        and args.turbulence != "none" and args.gravity_wave_drag != "none"
+        and args.clouds != "none" and args.microphysics != "none"
+    )
+    _suite_tag = (
+        "  [full CMIP6 suite]" if _full_suite
+        else "  [MINIMAL]" if args.minimal_physics else "  [custom]"
+    )
     logger.info(
         "  Physics:    conv=%s turb=%s gwd=%s clouds=%s micro=%s%s"
         % (args.convection, args.turbulence, args.gravity_wave_drag,
-           args.clouds, args.microphysics,
-           "  [MINIMAL]" if args.minimal_physics else "  [full CMIP6 suite]")
+           args.clouds, args.microphysics, _suite_tag)
     )
+    logger.info(f"  Ocean:      slab/{args.ocean}"
+                + ("  (deep restoring)" if args.ocean == "two_layer" else ""))
     logger.info(f"  Experiment: {args.experiment or '(idealized/constant)'}"
                 f"  start_year={args.start_year}")
     logger.info(f"  CMIP out:   {args.cmip_output}"
@@ -244,12 +265,26 @@ def main():
         n_devices=args.n_devices if args.n_devices is not None else "auto",
     )
 
-    # Build coupled config from preset with overrides
+    # Build coupled config from preset with overrides.  The ocean_config is
+    # ALWAYS overridden from --ocean so the coupled default is the two_layer
+    # slab (the presets all set a single-layer mode="slab"); two_layer enables
+    # deep-layer restoring (a cold reservoir that damps SST drift) — the most
+    # ocean physics the coupled slab supports.  Every preset holds a
+    # SimpleOceanConfig, so replacing it is type-safe.
     overrides = {}
-    if args.ocean_h_mix != 50.0:
+    if args.ocean == "two_layer":
         overrides["ocean_config"] = SimpleOceanConfig(
-            mode="slab", h_mix=args.ocean_h_mix,
+            mode="two_layer", h_mix=args.ocean_h_mix, restore_deep=True,
         )
+    else:
+        overrides["ocean_config"] = SimpleOceanConfig(
+            mode=args.ocean, h_mix=args.ocean_h_mix,
+        )
+    # Keep the decorative ocean_mode log label in sync with ocean_config.mode
+    # (mirrors _OCEAN_MODE_LABEL in coupled_config.py: fixed/slab -> "slab").
+    overrides["ocean_mode"] = (
+        "two_layer" if args.ocean == "two_layer" else "slab"
+    )
     if args.co2_init != 415.0:
         overrides["co2_ppmv_init"] = args.co2_init
 
