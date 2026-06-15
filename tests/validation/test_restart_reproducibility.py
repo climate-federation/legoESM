@@ -101,7 +101,14 @@ class TestRestartReproducibility:
         dir_b2 = str(tmp_path / "restart_leg2")
 
         # --- Driver A: straight 2-day run ---
-        cfg_a = _make_config(days=2, output_dir=dir_a)
+        # checkpoint_days=1 on ALL THREE runs (FIX_RESTART_TIME): the
+        # compiled loop samples per-SEGMENT forcing at the segment-end
+        # day, and compute_segment_length gives 1-step segments when
+        # diag=checkpoint=0 but 144-step segments when checkpoint_days=1
+        # — mismatched cadences sample different forcing days BY
+        # CONSTRUCTION, independent of restart correctness.  A uniform
+        # cadence isolates the actual restart-time property.
+        cfg_a = _make_config(days=2, output_dir=dir_a, checkpoint_days=1)
         driver_a = ModelDriver(cfg_a)
         driver_a.setup()
         status_a = driver_a.run(compiled=True)
@@ -123,14 +130,19 @@ class TestRestartReproducibility:
         # days=2 so that n_steps_total covers the full 2-day span;
         # start_step from the checkpoint makes the driver resume from
         # step 144 and run the remaining 144 steps (day 1 to day 2).
-        cfg_b2 = _make_config(days=2, output_dir=dir_b2)
+        cfg_b2 = _make_config(days=2, output_dir=dir_b2, checkpoint_days=1)
         driver_b2 = ModelDriver(cfg_b2)
         driver_b2.setup()
         step, day = driver_b2.load_checkpoint(ckpt_path)
-        # Pass start_day=0.0 (original epoch), not day=1.0 (current day).
-        # The step counter handles the offset within the time loop; start_day
-        # is the epoch reference for computing calendar day from step index.
-        status_b2 = driver_b2.run(start_step=step, start_day=0.0, compiled=True)
+        # Pass the CHECKPOINT day exactly as load_checkpoint returns it —
+        # the production convention (run_amip --restart-from, coupled
+        # drivers).  The driver normalizes it back to the epoch
+        # internally (FIX_RESTART_TIME: the previous behaviour
+        # double-counted elapsed time — restarted forcing ran a day
+        # ahead — and this test had to work around it by passing
+        # start_day=0.0).
+        status_b2 = driver_b2.run(start_step=step, start_day=day,
+                                  compiled=True)
         assert status_b2 == "COMPLETED", f"Leg 2 failed: {status_b2}"
 
         # --- Compare final states ---
