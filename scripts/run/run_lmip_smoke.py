@@ -143,9 +143,16 @@ def main() -> None:
     ap.add_argument("--resolution", type=int, default=48,
                     help="grid size N (run_amip convention): latlon -> N x 2N; "
                          "cubed_sphere -> CN; gaussian -> TN truncation (e.g. 106)")
-    ap.add_argument("--doy", type=float, default=196.0, help="day-of-year (LAI + solar)")
-    ap.add_argument("--hour", type=float, default=12.0, help="UTC hour")
+    ap.add_argument("--doy", type=float, default=196.0,
+                    help="starting day-of-year (LAI + solar)")
+    ap.add_argument("--hour", type=float, default=12.0, help="starting UTC hour")
     ap.add_argument("--dt", type=float, default=1800.0)
+    ap.add_argument("--n-steps", type=int, default=1,
+                    help="number of land steps to take (>1 enables the time loop with "
+                         "per-step LAI interpolation from gsd.lai_monthly and per-step "
+                         "atmospheric forcing — solar geometry, seasonal/diurnal T)")
+    ap.add_argument("--output-every", type=int, default=1,
+                    help="save a time-series snapshot every N steps (n-steps>1)")
     ap.add_argument("--output", default="lmip_global")
     ap.add_argument("--land-mask-file", default="",
                     help="land-sea mask NetCDF (CMIP6 sftlf / ERA5 lsm), as ModelDriver "
@@ -203,13 +210,71 @@ def main() -> None:
     # land params with the actual top-layer wetness (accurate soil-colour albedo),
     # then reconcile with the authoritative land mask: any cell the mask calls land
     # but the surfdata doesn't cover falls back to bare soil (finite everywhere).
-    land_params = surface_data_to_land_params(gsd, config.surface_scheme, args.doy, theta_top)
-    land_params = fill_land_param_gaps(land_params, gsd)
+    def _build_land_params_for_doy(doy_t, theta_top_t):
+        lp = surface_data_to_land_params(gsd, config.surface_scheme, float(doy_t), theta_top_t)
+        return fill_land_param_gaps(lp, gsd)
 
-    print("stepping one timestep ...")
-    step = jax.jit(lambda s, f: step_fn(
-        s, f, config, U_MIN, args.dt, lat=lat_rad, land_params=land_params, doy=args.doy))
-    new_state, resp, _ = step(state, forcing)
+    land_params = _build_land_params_for_doy(args.doy, theta_top)
+
+    # JIT once with (state, forcing, land_params, doy) as TRACED args so the
+    # cache stays warm across all time-loop iterations.  ``config`` / ``lat_rad``
+    # / ``args.dt`` are static closures (don't change across steps).  ``doy`` is
+    # passed as a jnp array — a Python float would be treated as a static input
+    # and retrace every step.
+    @jax.jit
+    def step_jit(state, forcing, land_params, doy):
+        return step_fn(state, forcing, config, U_MIN, args.dt,
+                       lat=lat_rad, land_params=land_params, doy=doy)
+
+    # ----- time loop: per step recompute forcing + LAI/albedo via the host-side
+    # surface_data_to_land_params (the JAX-native per-step updater is a follow-up;
+    # the host roundtrip is OK for smoke).  doy advances by dt; hour cycles mod 24.
+    diagnostics: dict[str, list] = {
+        "time_doy": [], "T_sfc": [], "shflx": [], "lhflx": [], "LAI": [], "albedo": [],
+    }
+    if args.land_mode == "multilayer":
+        diagnostics["theta_top"] = []
+        diagnostics["T_soil_top"] = []
+        diagnostics["snow_depth"] = []
+
+    dom_static = dominant_pft_index(gsd)              # static across steps
+    ncol_idx = np.arange(ncol)
+    doy_t, hour_t = float(args.doy), float(args.hour)
+    dt_days = args.dt / 86400.0
+    dt_hours = args.dt / 3600.0
+
+    print(f"stepping {args.n_steps} timestep(s) (dt={args.dt:.0f}s, "
+          f"doy_start={doy_t:.2f}) ...")
+    for step_i in range(args.n_steps):
+        forcing_t = make_global_forcing(lat_rad, lon_rad, doy_t, hour_t)
+        if args.land_mode == "multilayer":
+            theta_top_t = state.theta_soil[:, 0]
+        else:
+            theta_top_t = jnp.full(ncol, 0.2)
+        land_params_t = _build_land_params_for_doy(doy_t, theta_top_t)
+
+        state, resp, _ = step_jit(state, forcing_t, land_params_t, jnp.asarray(doy_t))
+
+        if step_i % args.output_every == 0 or step_i == args.n_steps - 1:
+            lai_t = np.asarray(
+                interp_monthly(gsd.lai_monthly, jnp.asarray(doy_t))
+            )[ncol_idx, dom_static]
+            diagnostics["time_doy"].append(doy_t)
+            diagnostics["T_sfc"].append(np.asarray(resp.T_sfc))
+            diagnostics["shflx"].append(np.asarray(resp.shflx))
+            diagnostics["lhflx"].append(np.asarray(resp.lhflx))
+            diagnostics["LAI"].append(lai_t)
+            diagnostics["albedo"].append(np.asarray(resp.albedo))
+            if args.land_mode == "multilayer":
+                diagnostics["theta_top"].append(np.asarray(state.theta_soil[:, 0]))
+                diagnostics["T_soil_top"].append(np.asarray(state.T_soil[:, 0]))
+                diagnostics["snow_depth"].append(np.asarray(state.snow_depth))
+
+        doy_t += dt_days
+        hour_t = (hour_t + dt_hours) % 24.0
+
+    # Final-step alias used by the legacy single-snapshot map output below.
+    new_state, land_params, forcing = state, land_params_t, forcing_t
 
     # --- authoritative land-sea mask (matches ModelDriver), per column ---
     # With a mask file (sftlf / ERA5 lsm) it is the authority, exactly as
@@ -278,6 +343,23 @@ def main() -> None:
         nc = out_dir / "lmip_global_step.nc"
         ds.to_netcdf(nc)
         print(f"wrote {nc}")
+
+        if args.n_steps > 1:
+            ts_vars = {k: (("time", "ncol"), np.stack(v, axis=0))
+                       for k, v in diagnostics.items() if k != "time_doy"}
+            ts_ds = xr.Dataset(
+                ts_vars,
+                coords={"time": (("time",), np.asarray(diagnostics["time_doy"])),
+                        "lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)},
+                attrs={"n_steps": args.n_steps, "dt": args.dt,
+                       "doy_start": args.doy, "doy_end": float(doy_t),
+                       "output_every": args.output_every,
+                       "grid_type": args.grid_type, "land_mode": args.land_mode,
+                       "surface_scheme": args.surface_scheme},
+            )
+            ts_nc = out_dir / "land_spinup.nc"
+            ts_ds.to_netcdf(ts_nc)
+            print(f"wrote {ts_nc} ({len(diagnostics['time_doy'])} snapshots)")
     except Exception as e:  # noqa: BLE001
         print(f"(netcdf write skipped: {e})")
 
