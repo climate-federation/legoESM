@@ -68,8 +68,12 @@ def test_unknown_scheme_raises():
         apply_silvestri_scheme(base, "BOGUS")
 
 
-def test_scheme_label_qualifies_qg2():
-    assert scheme_label("QG2") == "QG-Leith (barotropic)"     # honest about the approximation
+def test_qg2_uses_full_stretching():
+    """QG2 is now the FULL QG-Leith with the baroclinic stretching term (B5b)."""
+    base = _recipe().model_config
+    qg2 = apply_silvestri_scheme(base, "QG2")
+    assert qg2.qg_leith_stretching is True
+    assert scheme_label("QG2") == "QG2"      # faithful — no longer "barotropic"
     assert scheme_label("W9V") == "W9V"
 
 

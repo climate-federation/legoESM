@@ -2091,57 +2091,40 @@ def om4p25_lateral_friction_tendency_cgrid(
 # ``leith_biharmonic_tendency_cgrid`` below gives the Leith-biharmonic
 # operator ∇²(A_L ∇²u) with effective coefficient (C_L)³ Δ⁵ |∇ζ|.
 
-def _grad_zeta_mag_h(zeta_q: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
-    """|∇ζ| at cell centres from ζ at vertices.
+def _grad_vertex_vec_h(zeta_q: jnp.ndarray, grid: "LatLonGrid") -> tuple:
+    """∇ of a VERTEX field, as the (∂ₓ, ∂ᵧ) vector at cell centres [1/(m·s)].
 
-    Parameters
-    ----------
-    zeta_q : (n_lat+1, n_lon+1, ...) relative vorticity at vertices.
-    grid : LatLonGrid.
-
-    Returns
-    -------
-    grad_mag : (n_lat, n_lon, ...) with units 1/(m·s).
+    ``zeta_q`` : (n_lat+1, n_lon+1, ...) at vertices → (gx, gy) each
+    (n_lat, n_lon, ...) at cell centres.
     """
     R = grid.radius
     dlon = grid.dlon
     cos_lat = grid.cos_lat
-
     if zeta_q.ndim == 3:
         cos_lat_b = cos_lat[:, jnp.newaxis, jnp.newaxis]
         dy_h_b = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]
     else:
         cos_lat_b = cos_lat[:, jnp.newaxis]
         dy_h_b = (grid.dy * 0.5)[:, jnp.newaxis]
-
-    # Cell-centre spacings.  cos_lat evaluated at cell-centre latitudes.
-    dx_h = R * cos_lat_b * dlon                           # (n_lat,1[,1])
-    dy_h = dy_h_b                                         # (n_lat,1[,1])
-
-    # ∂ζ/∂x at (i,j): average of north/south vertex-pair zonal differences.
+    dx_h = R * cos_lat_b * dlon
     dz_dx = 0.5 * ((zeta_q[:-1, 1:] - zeta_q[:-1, :-1])
                    + (zeta_q[1:, 1:] - zeta_q[1:, :-1])) / dx_h
-    # ∂ζ/∂y at (i,j): average of west/east vertex-pair meridional differences.
     dz_dy = 0.5 * ((zeta_q[1:, :-1] - zeta_q[:-1, :-1])
-                   + (zeta_q[1:, 1:] - zeta_q[:-1, 1:])) / dy_h
+                   + (zeta_q[1:, 1:] - zeta_q[:-1, 1:])) / dy_h_b
+    return dz_dx, dz_dy
 
-    return jnp.sqrt(dz_dx ** 2 + dz_dy ** 2 + 1e-30)
+
+def _grad_zeta_mag_h(zeta_q: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
+    """|∇ζ| at cell centres from ζ at vertices (magnitude of ``_grad_vertex_vec_h``)."""
+    gx, gy = _grad_vertex_vec_h(zeta_q, grid)
+    return jnp.sqrt(gx ** 2 + gy ** 2 + 1e-30)
 
 
-def _grad_div_mag_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
-    """|∇δ| at cell centres from δ at cell centres (periodic in lon).
+def _grad_cell_vec_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> tuple:
+    """∇ of a CELL-CENTRE field, as the (∂ₓ, ∂ᵧ) vector at cell centres.
 
-    Uses centred differences with periodic wrap in longitude and one-sided
-    reflection at the poles (so the magnitude remains non-negative).
-
-    Parameters
-    ----------
-    div_h : (n_lat, n_lon, ...) horizontal divergence at cell centres.
-    grid : LatLonGrid.
-
-    Returns
-    -------
-    grad_mag : (n_lat, n_lon, ...) with units 1/(m·s).
+    Centred differences with periodic wrap in longitude and one-sided diffs at
+    the pole rows. ``div_h`` : (n_lat, n_lon, ...) → (gx, gy) same shape.
     """
     R = grid.radius
     dlon = grid.dlon
@@ -2179,7 +2162,13 @@ def _grad_div_mag_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
     dd_dy_north = (div_h[-1:] - div_h[-2:-1]) / dy_v_north
     dd_dy = jnp.concatenate([dd_dy_south, dd_dy_interior, dd_dy_north], axis=0)
 
-    return jnp.sqrt(dd_dx ** 2 + dd_dy ** 2 + 1e-30)
+    return dd_dx, dd_dy
+
+
+def _grad_div_mag_h(div_h: jnp.ndarray, grid: "LatLonGrid") -> jnp.ndarray:
+    """|∇δ| at cell centres (magnitude of ``_grad_cell_vec_h``)."""
+    gx, gy = _grad_cell_vec_h(div_h, grid)
+    return jnp.sqrt(gx ** 2 + gy ** 2 + 1e-30)
 
 
 def leith_viscosity_cgrid(
@@ -2425,6 +2414,10 @@ def qg_leith_viscosity_tendency_cgrid(
     grid: "LatLonGrid",
     *,
     C_qgleith: float = 2.0,
+    buoyancy: jnp.ndarray | None = None,
+    h_k: jnp.ndarray | None = None,
+    deformation_radius: jnp.ndarray | float | None = None,
+    velocity_scale: float = 1.0,
     mask: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
@@ -2449,14 +2442,14 @@ def qg_leith_viscosity_tendency_cgrid(
     three faithful ways — (1) HARMONIC not biharmonic, (2) ABSOLUTE-vorticity
     PV gradient ∇(ζ+f) not relative ∇ζ, (3) the /π³ paper normalisation.
 
-    LIMITATION (documented): Bachman's full QGPV gradient adds a baroclinic
-    STRETCHING term ∂_z(f/N²·∇b) (Eq A3 ∇q₁), bounded by grid-Burger /
-    grid-Rossby factors (∇q₂=∇q(1+1/Bu), ∇q₃=∇q(1+1/Ro²)) via a min(). That
-    term needs the buoyancy/N² field, which the lateral-viscosity stage does
-    not currently receive, so it is OMITTED here (∇Q = ∇(ζ+f), the barotropic
-    PV gradient; the Bu/Ro bounds are inactive without it). The bound helper
-    ``bound_qg_pv_gradient`` is provided + unit-tested for a future wiring that
-    threads buoyancy in. Returns (tend_u, tend_v) to be ADDED to du/dt.
+    FULL QG2 (B5b): when ``buoyancy`` (b at cell centres) + ``h_k`` (layer
+    thicknesses) are supplied (3D), the baroclinic stretching term is added —
+    ∇q₁ = ∇(ζ+f) + ∂_z(f/N²·∇b) (Eq A3) — and the Bachman grid-Burger /
+    grid-Rossby min-bound is applied: |∇Q| = min(|∇q₁|, |∇q|(1+1/Bu),
+    |∇q|(1+1/Ro²)) with Bu=Δ²/L_d², Ro=V/(|f|Δ). Without buoyancy the operator
+    falls back to the BAROTROPIC ∇(ζ+f) (the bounds are inert — see
+    ``bound_qg_pv_gradient``); that path must be labeled "QG-Leith (barotropic)".
+    Returns (tend_u, tend_v) to be ADDED to du/dt.
     """
     is_3d = u.ndim == 3
     _um = u_mask[..., jnp.newaxis] if (u_mask is not None and is_3d) else u_mask
@@ -2472,9 +2465,26 @@ def qg_leith_viscosity_tendency_cgrid(
     f_v = f_v[:, jnp.newaxis] if zeta_q.ndim == 2 else f_v[:, jnp.newaxis, jnp.newaxis]
     absvort_q = zeta_q + f_v
 
-    grad_Q = _grad_zeta_mag_h(absvort_q, grid)                  # |∇(ζ+f)|_h
+    qx, qy = _grad_vertex_vec_h(absvort_q, grid)               # vector ∇(ζ+f)
+    grad_Q = jnp.sqrt(qx ** 2 + qy ** 2 + 1e-30)               # |∇(ζ+f)|_h
     div_h = divergence_cgrid(u_eff, v_eff, grid, u_mask=u_mask, v_mask=v_mask)
     grad_div = _grad_div_mag_h(div_h, grid)                     # |∇δ|_h
+
+    # FULL QG2 (B5b): add the baroclinic stretching ∇q₁ = ∇(ζ+f) + ∂_z(f/N²∇b)
+    # and apply the Bachman grid-Burger / grid-Rossby min-bound. Active only when
+    # the buoyancy field is supplied (else the barotropic ∇(ζ+f) is used and the
+    # bounds are inert — see `bound_qg_pv_gradient`).
+    if buoyancy is not None and h_k is not None and is_3d:
+        f_h = (2.0 * constants.Omega * jnp.sin(grid.lat))[:, jnp.newaxis, jnp.newaxis]
+        sx, sy = qg_pv_stretching_vec(buoyancy, h_k, f_h, grid)
+        grad_q1 = jnp.sqrt((qx + sx) ** 2 + (qy + sy) ** 2 + 1e-30)
+        Delta_bu = jnp.sqrt(grid.area)[..., jnp.newaxis]
+        Ld = (deformation_radius if deformation_radius is not None else 6.75e3)
+        Bu = (Delta_bu / jnp.maximum(jnp.asarray(Ld), 1e-30)) ** 2     # Δ²/L_d²
+        f_abs = jnp.maximum(jnp.abs(f_h), 1e-12)
+        Ro = velocity_scale / (f_abs * Delta_bu)
+        grad_Q = bound_qg_pv_gradient(grad_Q, grad_q1, Bu, Ro)
+
     norm = jnp.sqrt(grad_Q ** 2 + grad_div ** 2 + 1e-30)
 
     Delta = jnp.sqrt(grid.area)
@@ -2513,6 +2523,39 @@ def bound_qg_pv_gradient(grad_q, grad_q_stretch, Bu, Ro):
     gq2 = grad_q * (1.0 + 1.0 / jnp.maximum(Bu, 1e-30))
     gq3 = grad_q * (1.0 + 1.0 / jnp.maximum(Ro ** 2, 1e-30))
     return jnp.minimum(jnp.minimum(grad_q_stretch, gq2), gq3)
+
+
+def _ddz_centre(X: jnp.ndarray, h: jnp.ndarray) -> jnp.ndarray:
+    """∂X/∂z at cell centres (z increases UPWARD; level index increases DOWNWARD),
+    centred in the interior + one-sided at the surface/bottom. ``X``, ``h`` are
+    (..., nlev). The vertical centre-to-centre distance uses the layer thicknesses.
+    """
+    # Interior k=1..nlev-2: distance centre[k-1]→centre[k+1] = ½h[k-1]+h[k]+½h[k+1].
+    dz_int = 0.5 * h[..., :-2] + h[..., 1:-1] + 0.5 * h[..., 2:]
+    ddz_int = (X[..., :-2] - X[..., 2:]) / jnp.maximum(dz_int, 1e-12)
+    dz_top = jnp.maximum(0.5 * (h[..., 0] + h[..., 1]), 1e-12)
+    ddz_top = ((X[..., 0] - X[..., 1]) / dz_top)[..., jnp.newaxis]
+    dz_bot = jnp.maximum(0.5 * (h[..., -2] + h[..., -1]), 1e-12)
+    ddz_bot = ((X[..., -2] - X[..., -1]) / dz_bot)[..., jnp.newaxis]
+    return jnp.concatenate([ddz_top, ddz_int, ddz_bot], axis=-1)
+
+
+def qg_pv_stretching_vec(buoyancy: jnp.ndarray, h_k: jnp.ndarray,
+                         f_h: jnp.ndarray, grid: "LatLonGrid",
+                         n2_floor: float = 1e-12) -> tuple:
+    """Baroclinic QGPV stretching vector ∂_z(f/N²·∇b) at cell centres (Bachman
+    et al. 2017 / Silvestri Eq A3 ∇q₁ stretching term).
+
+    ``buoyancy`` b and ``h_k`` (layer thicknesses) are (n_lat, n_lon, nlev) at
+    cell centres; ``f_h`` is the Coriolis parameter (n_lat, n_lon) or (n_lat, 1).
+    Returns (sx, sy) each (n_lat, n_lon, nlev). N² = ∂b/∂z (floored positive).
+    """
+    bx, by = _grad_cell_vec_h(buoyancy, grid)            # horizontal ∇b
+    N2 = jnp.maximum(_ddz_centre(buoyancy, h_k), n2_floor)
+    f = f_h[..., jnp.newaxis] if f_h.ndim == 2 else f_h
+    Vx = f / N2 * bx
+    Vy = f / N2 * by
+    return _ddz_centre(Vx, h_k), _ddz_centre(Vy, h_k)
 
 
 def neumann_fill_vertex(

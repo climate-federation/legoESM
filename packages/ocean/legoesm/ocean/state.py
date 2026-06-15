@@ -1389,7 +1389,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     # sole lateral friction. Coefficients live in ``omp25`` (OMp25Config).
     lateral_friction_scheme: str = "none"
     omp25: object = None   # OMp25Config or None (defaults to OMp25Config() when scheme="om4p25")
-    qg_leith_coeff: float = 2.0   # BAROTROPIC QG-Leith coefficient C (paper QG2 uses C=2);
-    #   used when lateral_friction_scheme="qg_leith". HARMONIC ν=(C·Δ/π)³·√(|∇(ζ+f)|²+|∇δ|²).
-    #   NOTE: this omits the baroclinic stretching term ∂_z(f/N²∇b) — it APPROXIMATES the
-    #   paper's QG2; a comparison matrix must label it "QG-Leith (barotropic)" not "QG2" (B5b).
+    qg_leith_coeff: float = 2.0   # QG-Leith coefficient C (paper QG2 uses C=2); used when
+    #   lateral_friction_scheme="qg_leith". HARMONIC ν=(C·Δ/π)³·√(|∇Q|²+|∇δ|²).
+    # FULL QG2 (B5b): when True the baroclinic stretching term ∂_z(f/N²∇b) is added to the PV
+    # gradient (∇q₁) with the Bachman grid-Burger/grid-Rossby min-bound — the faithful paper QG2.
+    # Default False = BAROTROPIC ∇(ζ+f) (label "QG-Leith (barotropic)" in a comparison matrix).
+    qg_leith_stretching: bool = False
+    qg_leith_deformation_radius_m: float = 6.75e3   # L_d for the grid-Burger bound [m].

@@ -1863,6 +1863,7 @@ def _bc_vertical_momentum_advection(
 
 def _bc_horizontal_viscosity(
     du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
+    rho_prime=None, h_k=None,
 ):
     """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
     Smagorinsky + Leith, with cos(lat) / equatorial / polar-cap scaling and the
@@ -2230,8 +2231,18 @@ def _bc_horizontal_viscosity(
     # Sole lateral friction when selected (recipe zeros A_h/B_h/C_smag/C_leith);
     # accumulated into the Leith diagnostic bucket.
     if config.lateral_friction_scheme == "qg_leith":
+        # Full QG2 (B5b): pass the buoyancy (from the density anomaly) + layer
+        # thicknesses so the operator adds the baroclinic stretching term. Gated
+        # by config.qg_leith_stretching (default barotropic, backward-compatible).
+        _b = None
+        if getattr(config, "qg_leith_stretching", False) and rho_prime is not None:
+            # Buoyancy b = -g·ρ'/ρ₀ (the g/ρ₀ factor cancels in f·∇b/N², but the
+            # SIGN sets N²=∂b/∂z > 0 for a stable column, which the N² floor needs).
+            _b = -(config.g / config.rho_0) * rho_prime
         qgl_u, qgl_v = qg_leith_viscosity_tendency_cgrid(
             u, v, grid, C_qgleith=config.qg_leith_coeff,
+            buoyancy=_b, h_k=(h_k if _b is not None else None),
+            deformation_radius=config.qg_leith_deformation_radius_m,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         qgl_u, qgl_v = _apply_slope_foot(qgl_u, qgl_v)
         du_dt = du_dt + qgl_u
@@ -3135,6 +3146,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
      diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
      diag_Cl_leith_v, kdiss_h_cell) = _bc_horizontal_viscosity(
         du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
+        rho_prime=rho_prime, h_k=h_k,
     )
 
     # --- Bottom drag. ---

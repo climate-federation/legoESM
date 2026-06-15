@@ -15,7 +15,7 @@ Faithfulness note: each diffusive scheme (UP3/W9*) carries its OWN implicit
 dissipation and runs with NO explicit closure (A_h=B_h=C_smag=C_leith=0); the
 dispersive schemes (SM2/QG2) use a 2nd-order energy-conserving vorticity flux
 (``vector_invariant``) STABILISED by the explicit OM4p25 / QG-Leith closure.
-QG2 here is the BAROTROPIC QG-Leith approximation (stretching omitted; see B5b).
+QG2 uses the FULL QG-Leith with the baroclinic stretching term (B5b) — faithful.
 """
 
 from __future__ import annotations
@@ -42,10 +42,11 @@ SILVESTRI_JET_SCHEMES: dict[str, dict] = {
     # SM2: energy-conserving vorticity flux + OM4p25 Smagorinsky lateral friction.
     "SM2": dict(momentum_advection="vector_invariant",
                 lateral_friction_scheme="om4p25", **_NO_EXPLICIT_VISC),
-    # QG2: energy-conserving vorticity flux + (barotropic) QG-Leith, C=2.
+    # QG2: energy-conserving vorticity flux + FULL QG-Leith (C=2) with the
+    # baroclinic stretching term (B5b) — the faithful paper QG2.
     "QG2": dict(momentum_advection="vector_invariant",
                 lateral_friction_scheme="qg_leith", qg_leith_coeff=2.0,
-                **_NO_EXPLICIT_VISC),
+                qg_leith_stretching=True, **_NO_EXPLICIT_VISC),
 }
 
 # The paper's 5 main baroclinic-jet comparison schemes (Fig 7-10).
@@ -66,7 +67,7 @@ def apply_silvestri_scheme(config, scheme: str):
 
 
 def scheme_label(scheme: str) -> str:
-    """Human/plot label for a scheme, honestly qualifying the QG2 approximation."""
+    """Human/plot label for a scheme."""
     if scheme not in SILVESTRI_JET_SCHEMES:
         raise ValueError(f"unknown scheme {scheme!r}")
-    return {"QG2": "QG-Leith (barotropic)"}.get(scheme, scheme)
+    return scheme

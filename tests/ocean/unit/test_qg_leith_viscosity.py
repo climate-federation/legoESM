@@ -156,6 +156,74 @@ class TestBoundQGPVGradient:
         assert np.allclose(out, [[2.0, 2.0], [3.0, 8.0]]), out
 
 
+class TestB5bStretching:
+    """B5b: the full QG2 baroclinic stretching term ∂_z(f/N²∇b) and its bound."""
+
+    def test_ddz_centre_linear_and_constant(self):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import _ddz_centre
+        nlev = 8
+        h = jnp.full((3, 4, nlev), 20.0)                 # uniform 20 m
+        # z (up) at centres: z_k = -(20*k + 10). A field linear in z: X = 2*z + 5.
+        zc = -(20.0 * jnp.arange(nlev) + 10.0)
+        X = 2.0 * zc[None, None, :] + 5.0 + jnp.zeros((3, 4, nlev))
+        dXdz = _ddz_centre(X, h)
+        assert jnp.allclose(dXdz, 2.0, atol=1e-9)         # ∂X/∂z = 2 everywhere
+        # Constant field → zero derivative.
+        assert jnp.allclose(_ddz_centre(jnp.full((3, 4, nlev), 7.0), h), 0.0, atol=1e-12)
+
+    def test_stretching_zero_for_barotropic_buoyancy(self):
+        """b depending only on z (no horizontal structure) ⇒ ∇b=0 ⇒ stretching=0."""
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import qg_pv_stretching_vec
+        grid = _grid()
+        nlev = 6
+        zc = -(jnp.arange(nlev) * 20.0 + 10.0)
+        b = (4e-6 * zc)[None, None, :] * jnp.ones((grid.n_lat, grid.n_lon, nlev))
+        h = jnp.full((grid.n_lat, grid.n_lon, nlev), 20.0)
+        f_h = (2 * constants.Omega * jnp.sin(jnp.asarray(np.radians(-50.0))))
+        f_h = jnp.full((grid.n_lat, 1), float(f_h))
+        sx, sy = qg_pv_stretching_vec(b, h, f_h, grid)
+        assert float(jnp.max(jnp.abs(sx))) < 1e-15
+        assert float(jnp.max(jnp.abs(sy))) < 1e-15
+
+    def test_stretching_nonzero_for_a_front(self):
+        """A horizontal buoyancy front (b varies in lat) gives a nonzero, finite
+        stretching vector."""
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import qg_pv_stretching_vec
+        grid = _grid()
+        nlev = 6
+        zc = -(np.arange(nlev) * 20.0 + 10.0)
+        lat = np.asarray(grid.lat)
+        # b = N² z + front(lat) · taper(z) — surface-intensified meridional front.
+        front = np.tanh((lat - lat.mean()) / np.radians(5.0))[:, None, None]
+        b = (4e-6 * zc)[None, None, :] + 5e-3 * front * np.exp(zc / 500.0)[None, None, :]
+        b = jnp.asarray(np.broadcast_to(b, (grid.n_lat, grid.n_lon, nlev)).copy())
+        h = jnp.full((grid.n_lat, grid.n_lon, nlev), 20.0)
+        f_h = jnp.full((grid.n_lat, 1), float(2 * constants.Omega * np.sin(np.radians(-50.0))))
+        sx, sy = qg_pv_stretching_vec(b, h, f_h, grid)
+        assert bool(jnp.all(jnp.isfinite(sx))) and bool(jnp.all(jnp.isfinite(sy)))
+        assert float(jnp.max(jnp.abs(sy))) > 0.0          # meridional front → ∂ᵧ stretching
+
+    def test_operator_with_stretching_differs_from_barotropic(self):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            qg_leith_viscosity_tendency_cgrid,
+        )
+        grid = _grid()
+        nlev = 6
+        u, v = _fields(grid, nlev=nlev, seed=3)
+        zc = -(np.arange(nlev) * 20.0 + 10.0)
+        lat = np.asarray(grid.lat)
+        front = np.tanh((lat - lat.mean()) / np.radians(5.0))[:, None, None]
+        b = jnp.asarray(np.broadcast_to(
+            (4e-6 * zc)[None, None, :] + 5e-3 * front * np.exp(zc / 500.0)[None, None, :],
+            (grid.n_lat, grid.n_lon, nlev)).copy())
+        h = jnp.full((grid.n_lat, grid.n_lon, nlev), 20.0)
+        bt_u, _ = qg_leith_viscosity_tendency_cgrid(u, v, grid)
+        st_u, _ = qg_leith_viscosity_tendency_cgrid(
+            u, v, grid, buoyancy=b, h_k=h, deformation_radius=6.75e3)
+        assert bool(jnp.all(jnp.isfinite(st_u)))
+        assert not jnp.allclose(bt_u, st_u, atol=1e-14)   # stretching changes ν
+
+
 def test_config_dispatch_and_full_step():
     """lateral_friction_scheme='qg_leith' builds, validates, full step finite."""
     from legoesm.core.field import Field
@@ -177,6 +245,33 @@ def test_config_dispatch_and_full_step():
                    u_incr_prev=_z(s.u), v_incr_prev=_z(s.v))
     nxt = model.step(s, 300.0)
     assert bool(jnp.all(jnp.isfinite(nxt.u.data)))
+
+
+def test_full_qg2_stretching_step_finite():
+    """B5b live path: lateral_friction_scheme='qg_leith' + qg_leith_stretching=True
+    threads buoyancy (from ρ') + thicknesses into the viscosity stage; a full
+    model step stays finite (the faithful QG2)."""
+    from legoesm.core.field import Field
+    from legoesm.ocean.experiments.eady_uniform import build_eady_uniform_setup
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+
+    r = build_eady_uniform_setup(n_lat=16, n_lon=16,
+                                 momentum_advection="vector_invariant", nlev=8)
+    cfg = r.model_config._replace(
+        lateral_friction_scheme="qg_leith", qg_leith_coeff=2.0,
+        qg_leith_stretching=True, qg_leith_deformation_radius_m=6.75e3,
+        A_h=0.0, B_h=0.0, C_smag=0.0, C_leith=0.0)
+    model = LatLonCGridOceanModel(r.grid, r.z_coord, cfg)
+    s = r.initial_state
+
+    def _z(d):
+        return Field(data=jnp.zeros_like(d.data), name=d.name + "_incr_prev",
+                     dims=d.dims, units=d.units)
+    s = s._replace(T_incr_prev=_z(s.T), S_incr_prev=_z(s.S),
+                   u_incr_prev=_z(s.u), v_incr_prev=_z(s.v))
+    nxt = model.step(s, 300.0)
+    assert bool(jnp.all(jnp.isfinite(nxt.u.data)))
+    assert bool(jnp.all(jnp.isfinite(nxt.T.data)))
 
 
 def test_qg_leith_with_nonzero_other_friction_rejected():
