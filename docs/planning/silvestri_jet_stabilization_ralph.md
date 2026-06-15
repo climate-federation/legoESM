@@ -64,6 +64,22 @@ Parent effort: PR #475, `docs/ocean_experiments/silvestri_weno_reproduction.md`,
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 2 — D1 ANSWERED: setup is SOUND, blowup = insufficient dissipation — 2026-06-15
+- **D1 DONE (CPU, 48×32×50 — both GPUs externally busy).** Two probes at the same grid:
+  - UN-DAMPED faithful weno9 (A_h=0, C_smag=0): **BLEW UP day 39** (max|u| 0.06→0.6 over 30d, then
+    0.6→1.4→nan days 30-39 — the eddy field reaching grid scale).
+  - HEAVILY DAMPED (vector_invariant + A_h=5e4 + C_smag=0.2): **STABLE to 55 days** (max|u| flat ~0.05).
+- **→ THE SETUP IS SOUND** (IC/thermal-wind/barotropic/PGF/restoring all integrate stably under
+  damping). The blowup is **INSUFFICIENT DISSIPATION** for the eddy-resolving schemes — same as the
+  Eady rebuild. (A_h=5e4 is way over-damped: eddies dead. The fix is the MINIMUM dissipation.)
+- **Also isolated the nlev confound:** 48×32 blows at nlev=50 (day 39) but the earlier nlev=12 sanity
+  was stable-to-40d — nlev=50 is a secondary aggravator; horizontal resolution is the primary driver
+  (48→day39, 160→day11: finer-fails-faster = grid-scale mode).
+- **NEXT: D2 — minimum dissipation.** Test the Eady backstop A_h≈1000 + C_smag≈0.1 (+ smag_cfl_safety
+  =0.5) on weno9 at 48×32×50 — is it STABLE *and* does it keep eddies (max|u|~O(1), not 0.05)? Then at
+  160×128 on a free GPU. Then per-scheme. Then check SM2/QG2 (their closure + maybe a smaller backstop).
+  Honestly record the faithfulness cost (the paper's WENO has NO closure; legoESM's needs a backstop).
+
 ### Iteration 1 (setup) — 2026-06-15
 - Spec written from the §5-blowup diagnosis (PR #475). The momentum-scheme code + recipe + driver are
   DONE and §4 is reproduced; this loop is purely the §5 eddy-resolving STABILIZATION.
