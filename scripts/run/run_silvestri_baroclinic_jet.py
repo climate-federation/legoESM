@@ -84,7 +84,7 @@ def _deformation_radius_km(state, cfg, T_ref, g_alphaT):
     return float(N_bar * cfg.H_max / (np.pi * f0) / 1000.0)
 
 
-def run(scheme, resolution, days, dt, out, nlev, tag=""):
+def run(scheme, resolution, days, dt, out, nlev, tag="", stabilize=False):
     import os
     import jax
     import jax.numpy as jnp
@@ -106,7 +106,8 @@ def run(scheme, resolution, days, dt, out, nlev, tag=""):
     try:
         cfg_j = SilvestriJetConfig()
         recipe = build_silvestri_baroclinic_jet_setup(
-            n_lat=n_lat, n_lon=n_lon, scheme=scheme, nlev=nlev, config=cfg_j)
+            n_lat=n_lat, n_lon=n_lon, scheme=scheme, nlev=nlev, config=cfg_j,
+            stabilize=stabilize)
         grid, z, cfg, state, restoring = (
             recipe.grid, recipe.z_coord, recipe.model_config,
             recipe.initial_state, recipe.restoring)
@@ -207,11 +208,16 @@ def main() -> int:
     ap.add_argument("--nlev", type=int, default=50)
     ap.add_argument("--out", default="results/silvestri_jet")
     ap.add_argument("--tag", default="")
+    ap.add_argument("--stabilize", action="store_true",
+                    help="Apply the eddy-resolving dissipation backstop (A_h=1000+"
+                         "C_smag=0.1) to the no-closure WENO schemes — needed at "
+                         "eddy-resolving res in legoESM; NOT paper-faithful (the "
+                         "paper's WENO has no closure).")
     args = ap.parse_args()
     import jax
     jax.config.update("jax_enable_x64", True)
     run(args.scheme, args.resolution, args.days, args.dt, args.out, args.nlev,
-        tag=args.tag)
+        tag=args.tag, stabilize=args.stabilize)
     return 0
 
 

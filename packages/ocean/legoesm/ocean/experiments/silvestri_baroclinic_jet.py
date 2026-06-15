@@ -205,7 +205,8 @@ def _build_initial_state(grid, z_coord, config: SilvestriJetConfig):
 
 def build_silvestri_baroclinic_jet_setup(
         *, n_lat: int, n_lon: int, scheme: str = "W9V", nlev: int = 50,
-        config: SilvestriJetConfig = None) -> SilvestriJetRecipe:
+        config: SilvestriJetConfig = None,
+        stabilize: bool = False) -> SilvestriJetRecipe:
     """Assemble the paper §5 baroclinic-jet model for a given momentum ``scheme``
     (UP3/W9V/W9D/SM2/QG2). ``n_lat`` ≈ 20/resolution (1/8°→160, 1/16°→320,
     1/32°→640 over the 20° band)."""
@@ -241,6 +242,18 @@ def build_silvestri_baroclinic_jet_setup(
         gm_redi=None,
     )
     model_config = apply_silvestri_scheme(base_config, scheme)
+
+    # Eddy-resolving stabilization backstop (B5-stab finding): legoESM's WENO
+    # vector-invariant under-dissipates the C-grid grid-scale mode vs Oceananigans
+    # and blows up at eddy-resolving resolution WITHOUT an explicit closure. The
+    # Eady min-dissipation combination A_h=1000 + C_smag=0.1 + smag_cfl_safety=0.5
+    # stabilizes it while keeping the eddies. Applied ONLY to the no-closure WENO/
+    # flux schemes (lateral_friction_scheme=="none"); SM2/QG2 keep their own
+    # closure (adding A_h/C_smag would trip the double-friction guard). NOT
+    # paper-faithful (the paper's WENO has no closure) — a documented legoESM cost.
+    if stabilize and model_config.lateral_friction_scheme == "none":
+        model_config = model_config._replace(
+            A_h=1000.0, C_smag=0.1, smag_cfl_safety=0.5)
 
     initial_state, wall_mask = _build_initial_state(grid, z_coord, config)
 
