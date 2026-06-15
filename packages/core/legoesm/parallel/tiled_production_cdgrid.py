@@ -583,6 +583,62 @@ def make_tiled_compute_omega_hybrid_stage_2d(mesh, coord, n: int, kt: int):
 
 
 # ---------------------------------------------------------------------------
+# P-3D-vertical-transport COMPOSED stage: the three cc-local vertical ops
+# (compute_mass_flux_hybrid -> vertical_advection_hybrid (of a field) +
+# compute_omega_hybrid) fused into ONE shard_map body — the cc tile is sliced
+# ONCE and the ops chain locally, with NO inter-op gather/reshard between them
+# (all per-column, no halo).  This is the ASSEMBLY direction (vs three separate
+# tiled stages with a gather between each).  No new numerics — calls the raw
+# vertical.py ops on the sliced tile.  ``coord`` closed over.
+# ---------------------------------------------------------------------------
+
+def make_tiled_vertical_pe_stage_2d(mesh, coord, n: int, kt: int):
+    """Composed vertical 3D-PE transport stage on a ``(6, kt, kt)`` mesh.
+    ``stage(div_3d, field, p_s, dp_s_dt) -> (mass_flux, tend, omega, D_total_p)``:
+    div_3d/field 4D ``(6,n,n,nlev)`` + p_s/dp_s_dt 2D cc FACE-REPLICATED; all
+    outputs tile-sharded (exact cc partition, vertical replicated).  The cc tile
+    is sliced ONCE then mass_flux -> vertical_advection -> omega chain locally —
+    bit-identical to running each global op then slicing (all per-column)."""
+    from legoesm.grids.vertical import (
+        compute_mass_flux_hybrid, vertical_advection_hybrid, compute_omega_hybrid,
+    )
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    nl = n // kt
+    fo = P("face", None, None)                 # 2D cc (p_s, dp_s_dt)
+    fw = P("face", None, None, None)           # 4D div_3d, field
+    cz = P("face", "tile_i", "tile_j", None)   # 4D outs
+
+    @partial(shard_map, mesh=mesh, in_specs=(fw, fw, fo, fo),
+             out_specs=(cz, cz, cz, cz), check_vma=False)
+    def _body(div_3d, field, p_s, dp_s_dt):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+
+        def _s2(arr):
+            arr = jax.lax.dynamic_slice_in_dim(arr, a_i, nl, axis=1)
+            return jax.lax.dynamic_slice_in_dim(arr, a_j, nl, axis=2)
+
+        div_t, field_t, ps_t, dps_t = _s2(div_3d), _s2(field), _s2(p_s), _s2(dp_s_dt)
+        mass_flux, d_total_p = compute_mass_flux_hybrid(div_t, ps_t, coord)
+        tend = vertical_advection_hybrid(field_t, mass_flux, ps_t, coord)
+        omega = compute_omega_hybrid(mass_flux, ps_t, dps_t, coord)
+        return mass_flux, tend, omega, d_total_p
+
+    def stage(div_3d, field, p_s, dp_s_dt):
+        if div_3d.shape[1:3] != (n, n) or field.shape[1:3] != (n, n) \
+                or p_s.shape[1:3] != (n, n) or dp_s_dt.shape[1:3] != (n, n):
+            raise ValueError(
+                f"vertical_pe stage: div_3d/field/p_s/dp_s_dt must be cc "
+                f"(n,n)={(n, n)}; got div_3d={div_3d.shape[1:3]}, "
+                f"field={field.shape[1:3]}, p_s={p_s.shape[1:3]}, "
+                f"dp_s_dt={dp_s_dt.shape[1:3]}")
+        return _body(div_3d, field, p_s, dp_s_dt)
+
+    return stage
+
+
+# ---------------------------------------------------------------------------
 # P-ii: the two production 4-point box interps.
 #   interp_corner_to_center (corner -> cc): PURELY LOCAL (cc cell reads its 2x2
 #     corner block) — like dgrid_vorticity, no halo, exact cc partition.
