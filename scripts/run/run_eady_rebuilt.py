@@ -35,6 +35,29 @@ def _eke(state) -> float:
     return float(np.mean(0.5 * (u - u_zm) ** 2))
 
 
+def _zonal_spectrum(state):
+    """Zonal (lon) wavenumber EKE spectrum of the eddy u, averaged over lat+depth.
+
+    Returns (P[k], gridscale_frac). ``gridscale_frac`` = fraction of spectral
+    energy in the top quartile of wavenumbers (the dissipation/grid-scale range):
+    a clean eddy-resolving run rolls off there (small frac); an under-dissipated
+    run piles grid-scale energy up (large frac). This is the effective-resolution /
+    over-vs-under-dissipation proxy the min-dissipation search optimizes.
+    """
+    u = np.nan_to_num(np.asarray(state.u.data), nan=0.0)   # (lat, lon+1, lev)
+    u = u[:, :-1, :]                                        # drop the wrap face -> (lat,lon,lev)
+    u_eddy = u - u.mean(axis=1, keepdims=True)              # remove zonal mean
+    n_lon = u_eddy.shape[1]
+    uh = np.fft.rfft(u_eddy, axis=1)                        # zonal FFT
+    P = np.mean(np.abs(uh) ** 2, axis=(0, 2)) / n_lon       # P[k], avg lat+depth
+    P[0] = 0.0                                              # drop the mean
+    total = P.sum()
+    if total <= 0:
+        return P, 0.0
+    k_hi = len(P) - max(1, len(P) // 4)                     # top quartile of k
+    return P, float(P[k_hi:].sum() / total)
+
+
 def run(resolution: str, days: float, dt: float, out: str, no_sponge: bool = False,
         c_smag=None, c_leith=0.0, c_smag_lap=0.0, b_h=0.0, a_h=0.0, tag="",
         u_surface=None, smag_cfl_safety=0.0, momentum_advection="weno5",
@@ -166,9 +189,36 @@ def run(resolution: str, days: float, dt: float, out: str, no_sponge: bool = Fal
         else:
             print(f"\n   {verdict}. Not enough linear-phase points to fit growth "
                   f"(EKE range {e0:.2e}..{emax:.2e}).")
+
+        # --- Saturation + effective-resolution diagnostics (the min-dissipation
+        # search optimizes these) ---
+        # Saturated iff EKE is stationary over the last third: std/mean < 0.25 AND
+        # not still climbing (last-third mean within 2x of the global max).
+        sat = False
+        eke_sat = float("nan")
+        if not blew and len(ekes) >= 9:
+            tail = ekes[-max(3, len(ekes) // 3):]
+            eke_sat = float(tail.mean())
+            cv = float(tail.std() / tail.mean()) if tail.mean() > 0 else 9.9
+            sat = (cv < 0.25) and (eke_sat > 0.3 * emax)
+        gs_frac = float("nan")
+        if not blew:
+            _, gs_frac = _zonal_spectrum(state)
+        umax_final = umax_series[-1]
+        print(f"   SATURATION: saturated={sat} EKE_sat={eke_sat:.3e} "
+              f"max|u|_final={umax_final:.3f} | gridscale_frac={gs_frac:.4f} "
+              f"(low=clean/high-eff-res, high=under-damped grid pileup)")
+        # Single parseable line for the ralph min-dissipation loop:
+        diss = f"A_h={a_h:g},B_h={b_h:g},C_smag={cfg.C_smag:g},C_leith={c_leith:g},cap={smag_cfl_safety:g}"
+        print(f"VERDICT res={n_lat}x{n_lon} U={cfg_e.U_surface} dt={dt:.0f} sponge={not no_sponge} "
+              f"mom={cfg.momentum_advection} | stable={not blew} saturated={sat} "
+              f"max_u={umax_final:.3f} EKE_sat={eke_sat:.3e} gridscale_frac={gs_frac:.4f} "
+              f"| dissipation[{diss}]", flush=True)
+
         np.savez_compressed(f"{out}/eady_rebuilt_{n_lat}x{n_lon}{tag}.npz",
                             t=ts, eke=ekes, umax=np.array(umax_series),
-                            sigma_eady=sigma, blew=blew)
+                            sigma_eady=sigma, blew=blew, gridscale_frac=gs_frac,
+                            saturated=sat, eke_sat=eke_sat)
         return verdict
     finally:
         set_policy(_prev)

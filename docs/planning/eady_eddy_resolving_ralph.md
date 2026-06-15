@@ -1,6 +1,45 @@
 # Ralph-loop task: unlock eddy-RESOLVING ocean sims via the Eady test
 
-## Goal
+## OBJECTIVE v2 (current — min-dissipation, long/saturated, high effective resolution)
+Find the **MINIMUM-dissipation** config that runs a **LONG, STABLE, statistically-STABILIZED
+(saturated)** eddy-resolving Eady simulation — so the *effective resolution* is as high as
+possible (least dissipation = sharpest resolved eddies, energy extends to high wavenumber).
+This is an OPTIMIZATION: minimize dissipation **subject to** {stable to saturation AND
+statistically stabilized AND no grid-scale energy pileup}.
+
+- **Track: WENO5 flux-form ONLY.** The NEMO-like track (vector_invariant+hollingsworth)
+  is grid-scale-unstable even at 60 and blows up at 120 even with A_h — it needs an
+  **energy-enstrophy-conserving (EEN) vorticity flux** ported to the lat-lon C-grid (a CODE
+  addition, not a config knob; NEMO `nn_dynvor=een`). Out of scope for the dissipation search;
+  note it as the prerequisite for a NEMO dycore.
+- **Driver reports a parseable `VERDICT ... stable= saturated= max_u= EKE_sat= gridscale_frac=
+  ... dissipation[...]` line** + a `SATURATION` line. `gridscale_frac` = energy fraction in the
+  top quartile of zonal wavenumbers (the effective-resolution / over-vs-under-dissipation
+  proxy): too LOW dissipation → high frac (grid pileup, → blowup); too HIGH → spectrum rolls
+  off early (low effective resolution); the SWEET SPOT is the minimum dissipation with
+  `gridscale_frac` small AND saturated-stable.
+- **Search procedure:** for each candidate (resolution, dissipation form+strength, dt), run
+  LONG enough to saturate (weak U=0.2 τ≈20d → ~100–150 d; strong U=0.8 τ≈5d → ~50–80 d; strong
+  saturates faster = cheaper iteration). Record the VERDICT. Then SWEEP dissipation DOWN to the
+  edge of stability and pick the minimum stable+saturated value. Compare dissipation FORMS
+  (Laplacian A_h vs biharmonic B_h vs Smagorinsky C_smag vs Leith C_leith): biharmonic/Leith
+  are more scale-selective (higher effective resolution per unit stability) — prefer them.
+- **Validate** the winning min-dissipation config's saturated EKE/spectrum against the
+  dt-matched Veros control at the same resolution (Veros 60 + weak-120 dt450 both run clean;
+  Veros weak-60 saturation is running for the matched comparison).
+- **Then push resolution finer** (toward ~10 km, the design point; try ISOTROPIC grids —
+  120×120 is 2:1 anisotropic) and re-minimize dissipation; report the effective resolution
+  achieved per grid.
+- **ENV CAVEAT (critical):** GPU runs are intermittently SIGTERM/SIGURG-killed (exit 143/144)
+  in this session — some complete, some die early. RE-RUN killed configs (don't trust a single
+  failed run); prefer shorter triage runs; both V100S GPUs are currently free (the external
+  28 GB job cleared). Foreground short runs are most reliable.
+- **Done:** a documented MINIMUM-dissipation recipe that runs a long stable saturated
+  eddy-resolving (≥120×120) Eady sim with small gridscale_frac + Veros-validated saturated
+  stats; commit it (dissipation as the config knob) + update the test. Report the
+  effective-resolution / dissipation tradeoff curve.
+
+## Goal (v1 — superseded by v2 above; kept for context)
 Get the idealized **Eady baroclinic-instability** experiment running **cleanly and
 stably at eddy-RESOLVING resolution** (≥120×120 ≈ 17 km, ideally ~10 km / ~200×100,
 where the 107 km deformation radius is resolved by ≳10 cells), so legoESM gains a
@@ -124,7 +163,106 @@ u-spectrum. (4) NEMO track: find/port an enstrophy-conserving (EEN) vorticity fl
 **ENV CAVEAT:** GPU0 has a 28 GB external production job (use GPU1 only); `run_in_background`
 + nohup tasks intermittently die with exit 144 — run experiments FOREGROUND with `timeout`.
 
+## LEADING RECIPE (iter 8) — min-dissipation eddy-resolving @120×120
+**`A_h=1000 + C_smag=0.1` (Laplacian + biharmonic Smag), weak U=0.2, dt=600, sponge on:**
+stable=True, **gridscale_frac=0.0001** (extremely clean spectrum), EKE 8.7e-4 (~15× the
+pure-A_h=1500 baseline 5.8e-5), still growing at 80d. The COMBINATION (moderate Laplacian to
+catch the ~4–5Δx mode + biharmonic for scale-selectivity) beats both pure forms (pure A_h
+over-damps, pure C_smag blows up). gridscale_frac far below any noise threshold → ROOM to
+reduce dissipation further (→ higher effective resolution). RUNNING: 150d saturation of this
+config + a lower-dissipation push (A_h=600+C_smag=0.08).
+
+## MIN-DISSIPATION EDGE (iter 9-11) — 120×120 weak dt600
+| config | stable | gridscale_frac | EKE (80d, growing) |
+|---|---|---|---|
+| A_h=1000+C_smag=0.1 | ✅ | 0.0001 | 8.7e-4 |
+| A_h=800+C_smag=0.15 | ✅ | 0.0001 | 8.2e-4 |
+| A_h=800+C_smag=0.1  | ✅ (running) | — | 1.7e-4 @40d, climbing |
+| A_h=600+C_smag=0.08 | ✗ BLEW UP | — | — |
+**Minimum stable combination ≈ A_h≈800 + C_smag≈0.1.** Recommend **A_h=1000+C_smag=0.1** as
+the robust default (just above the edge), A_h=800 as the aggressive minimum. The 150-day
+saturation run of A_h=1000+C_smag=0.1 is confirming `saturated=True` (the gating "long
+saturated" check). Once it does → commit this combination as the eddy-resolving dissipation
+default + update test + cancel loop.
+
+### v2 Iteration 12 (weak saturation slow → strong for explicit saturated demo)
+- **A_h=1000+C_smag=0.1 WEAK 150d**: stable=True, clean (gridscale_frac 0.0001), EKE 4.5e-3
+  (strong, ~half the 60×60 ref 9.4e-3) — but `saturated=False`, STILL CLIMBING. Weak (τ=20d)
+  needs ~250+ d to statistically stationarize; eddies are developed+clean, just not stationary
+  in 150d. A_h=800+C_smag=0.1 @80d: EKE 1.4e-3, clean (gridscale_frac 0.0002), stable.
+- → For an EXPLICIT `saturated=True` demo, use STRONG (U=0.8, τ=5d, saturates ~50d) with the
+  combination (strong eddies more vigorous → A_h=2000+C_smag=0.15 / A_h=3000+C_smag=0.2).
+  Strong-120 blew up earlier ONLY because the dissipation form was wrong; the combination
+  should stabilize it. Running both, 60d.
+**TODO:** if strong-combo saturates stable+clean → that's the explicit saturated eddy-resolving
+demo; commit the recipe (combination dissipation, both regimes documented) + test; cancel loop.
+
 ## RESULTS (loop appends here)
+
+### v2 Iteration 1 (min-dissipation search begins)
+- Driver upgraded: parseable `VERDICT` line + `SATURATION` + `gridscale_frac` (zonal-spectrum
+  top-quartile energy fraction = effective-resolution / over-vs-under-dissipation proxy).
+  Validated: 60×60 A_h=1500 → stable, gridscale_frac=0.0003 (clean).
+- ENV: GPU0's 28 GB external job came BACK — use GPU1 only; GPU0 runs OOM.
+- Launched (strong U=0.8, 120×120, 60 d → saturate): A_h=5e3 (GPU0, may OOM) vs Leith C_leith=2.0
+  (GPU1). Testing which dissipation FORM saturates stably with the smallest gridscale_frac
+  (scale-selective Leith should beat broad Laplacian for effective resolution). Strong forcing
+  = faster saturation = cheaper iteration; confirm the winner at weak later.
+**TODO:** read both VERDICTs; pick the form that is stable+saturated with lowest
+gridscale_frac; then SWEEP its strength DOWN to the stability edge (min dissipation); re-run
+GPU0-OOM'd configs on GPU1.
+
+### v2 Iteration 2 (pivot to weak + isotropic-grid test)
+- iter1 results: **Leith=2 strong-120 BLEW UP**; A_h=5e3 strong-120 OOM'd (GPU0). **Strong-120
+  is too aggressive** (even Veros diverged at strong-120) — switch to **WEAK (U=0.2, the
+  physical target)** + **dt=600** (CFL-safe with Laplacian, 2× faster, key in this flaky env).
+- **MECHANISM (important): launcher Bash commands exit 144 but the `&`-backgrounded python
+  CHILD SURVIVES.** So: launch with `&`, ignore the 144, POLL the log file in later iterations.
+  Watchers (run_in_background) also die — don't rely on them; read logs directly. Runs ~15–20
+  min each, GPU1 only (GPU0 has the external job) → loop is slow, ~1 run/iteration.
+- Launched the **ISOTROPIC-GRID test** (the deferred structural lead): `120x60` = 120 lat ×
+  60 lon = ~17 km SQUARE (vs 120×120's 2:1 anisotropy 8×17 km), weak, A_h=1500, dt=600, 80 d.
+  KEY: if isotropic is CLEAN (low gridscale_frac, no spike) where anisotropic 120×120 wasn't,
+  the 2:1 anisotropy was seeding the mode → use isotropic grids for eddy-resolving.
+**TODO:** poll run_iso17_Ah1500.log for the VERDICT; if isotropic is clean → minimize A_h on
+isotropic grids + push finer (120×240 ~8 km isotropic). If still spiky → the mode isn't the
+anisotropy; reconsider (WENO-momentum spectrum, dt, tracer noise).
+
+### v2 Iterations 3-4 (BREAKTHROUGH in framing + the dissipation-form answer)
+- **`gridscale_frac` is the right metric; max|u| spikes are boundary cells, NOT blowup.** At
+  A_h=1500 dt=600 80d: aniso 120×120 SATURATED clean (EKE 5.8e-5, **gridscale_frac 0.0017**),
+  iso 120×60 stable clean (7.7e-5, 0.0020). So I had a CLEAN stable saturated eddy-resolving
+  run all along — just judged it "blown up" by max|u|. **Anisotropy is NOT the issue** (iso≈aniso).
+- **But A_h Laplacian OVER-DAMPS:** EKE 5.8e-5 at 120×120 is ~150× weaker than the 60×60
+  C_smag=0.2 reference (9.4e-3). And A_h=500 BLEW UP → the Laplacian stability edge
+  (500<A_h<1500) is already over-damped. **Pure Laplacian is the WRONG form** for high
+  effective resolution.
+- **→ The answer is SCALE-SELECTIVE dissipation (biharmonic Smagorinsky C_smag), which gives
+  strong eddies (high EKE = high eff-res) AND stability.** The 60×60 success used C_smag=0.2.
+  Testing 120×120 C_smag=0.2 (no A_h) dt=600 80d now — expect high EKE + low gridscale_frac =
+  the min-dissipation eddy-resolving answer.
+**TODO:** read C_smag=0.2 @120; if EKE high (~mℯ-3) + gridscale_frac low + saturated → THAT'S
+the recipe; then sweep C_smag DOWN (0.15,0.1) to the min stable+clean = max eff-res; validate
+vs Veros; push to 120×240; commit. (Use gridscale_frac + EKE-level + stable, NOT max|u|.)
+
+### v2 Iterations 5-6 (pure forms both fail at 120 → combination; scale-separation limit)
+**120×120 weak dt600 80d dissipation map so far:**
+- A_h=1500 (Laplacian): STABLE+SATURATED, clean (gridscale_frac 0.0017), but OVER-DAMPED (EKE 5.8e-5).
+- A_h=500: BLEW UP. A_h=1000-1500 = the Laplacian stability edge (already over-damped).
+- C_smag=0.2 AND 0.1 (biharmonic Smag, no A_h, cap=0.5): BOTH BLEW UP.
+**So at 120 NEITHER pure form gives stable+strong-eddies.** Root cause: the grid-scale mode
+(~4–5Δx ≈ 35–70 km) is too CLOSE to the 130 km eddy scale (only ~2-3× apart) → Laplacian (∝L²)
+can't separate them (A_h that kills 50 km also damps 130 km on the growth timescale), and
+biharmonic alone can't stabilize the mode under CFL. **120 (dx 8–17 km, Ld 107 km) is
+marginally-resolving, not strongly eddy-resolving** — the eddies are barely resolved so they're
+weak + need heavy stabilization. TRUE high-eff-res needs FINER grids (more scale separation).
+- Testing COMBINATIONS: A_h=800+C_smag=0.15 and A_h=1000+C_smag=0.1 (moderate Laplacian for the
+  mode + biharmonic for scale-selectivity, less total damping than A_h=1500).
+**KEY STRATEGIC TODO:** if combos don't beat A_h=1500's EKE meaningfully, the real lever is
+RESOLUTION (push to 120×240 ~8 km / 200×200, where scale separation lets scale-selective
+biharmonic keep eddies strong). The min-dissipation-vs-effective-resolution tradeoff at a FIXED
+marginal grid (120) is fundamentally limited; report this honestly + show the EKE(dissipation)
+curve, then demonstrate the finer-grid path.
 
 ### Iteration 1
 **CLEAN so far: 60×60 (eddy-permitting), WENO5 track, both regimes.**

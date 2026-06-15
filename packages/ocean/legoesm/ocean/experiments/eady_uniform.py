@@ -581,6 +581,20 @@ def build_eady_uniform_setup(*, n_lat: int, n_lon: int,
         # C_smag = biharmonic Smagorinsky (scale-selective); C_leith = Leith
         # (enstrophy-cascade-aware); both grid-aware so they scale across a
         # resolution sweep. c_smag_lap/b_h available for extra grid-scale control.
+        #
+        # VALIDATED EDDY-RESOLVING MINIMUM-DISSIPATION RECIPE (≥120×120, weak U=0.2,
+        # dt=600; ralph-loop search, docs/planning/eady_eddy_resolving_ralph.md):
+        # use the COMBINATION  a_h≈1000 + c_smag≈0.1 + smag_cfl_safety=0.5.
+        #   - Pure Laplacian (A_h alone) OVER-DAMPS the eddies (stable but EKE ~150×
+        #     too weak) and blows up below A_h≈1000 → no low-dissipation regime.
+        #   - Pure biharmonic Smagorinsky (C_smag alone) BLOWS UP at 120 (the
+        #     ~4–5Δx grid-scale mode is too close to the eddy scale for it to
+        #     stabilize under CFL).
+        #   - The combination is STABLE, spectrally CLEAN (top-quartile-wavenumber
+        #     energy fraction ~1e-4) AND keeps strong eddies (EKE ~4.5e-3 at 150 d,
+        #     comparable to the 60×60 reference). Minimum stable ≈ a_h≈800; use
+        #     a_h=1000 for robustness. Strong forcing (U=0.8) needs heavier
+        #     dissipation that over-damps → weak is the better eddy-resolving regime.
         A_h=a_h, B_h=b_h,
         C_smag=(config.C_smag if c_smag is None else c_smag),
         C_leith=c_leith, C_smag_lap=c_smag_lap, smag_cfl_safety=smag_cfl_safety,

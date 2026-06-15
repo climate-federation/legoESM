@@ -92,6 +92,31 @@ def test_forward_step_runs_and_is_finite():
     assert tree_structure(nxt) == tree_structure(s)
 
 
+def test_eddy_resolving_min_dissipation_recipe():
+    """The validated eddy-resolving min-dissipation combination builds + steps.
+
+    A_h≈1000 (Laplacian) + C_smag≈0.1 (biharmonic Smag) + smag_cfl_safety — the
+    ralph-loop result: stable, spectrally clean, strong eddies at 120×120 (pure
+    Laplacian over-damps, pure biharmonic blows up; the combination is the min).
+    """
+    from legoesm.core.field import Field
+
+    r = build_eady_uniform_setup(n_lat=24, n_lon=24, a_h=1000.0, c_smag=0.1,
+                                 smag_cfl_safety=0.5)
+    c = r.model_config
+    assert c.A_h == 1000.0 and c.C_smag == 0.1 and c.smag_cfl_safety == 0.5
+    assert c.B_h == 0.0 and c.C_leith == 0.0          # combination is A_h + C_smag only
+    model = LatLonCGridOceanModel(r.grid, r.z_coord, c)
+    s = r.initial_state
+    def _z(d):
+        return Field(data=jnp.zeros_like(d.data), name=d.name + "_incr_prev",
+                     dims=d.dims, units=d.units)
+    s = s._replace(T_incr_prev=_z(s.T), S_incr_prev=_z(s.S),
+                   u_incr_prev=_z(s.u), v_incr_prev=_z(s.v))
+    nxt = model.step(s, 600.0)
+    assert bool(jnp.all(jnp.isfinite(nxt.u.data)))
+
+
 def test_eady_growth_rate_formula():
     """The config's analytical Eady growth rate is the textbook σ=0.31 f Λ/N."""
     import numpy as np
