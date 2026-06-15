@@ -137,22 +137,23 @@ def _campaign_style_min_qcond(scheme: str, microphysics_substeps: int) -> float:
     return float(driver(scm.state, scm.phys_state))
 
 
-@pytest.mark.parametrize(
-    ("scheme", "single_step_floor"),
-    (("morrison", -1.0e-6), ("thompson", -1.0e-5)),
-)
-def test_scm_substeps_prevent_campaign_negative_condensate(
-    scheme: str,
-    single_step_floor: float,
-) -> None:
-    single_step_min = _campaign_style_min_qcond(scheme, microphysics_substeps=1)
-    substepped_min = _campaign_style_min_qcond(
-        scheme,
-        microphysics_substeps=_SUBSTEPS,
-    )
+def test_scm_substeps_prevent_campaign_negative_condensate() -> None:
+    # morrison has NO scheme-level positivity guard for its stiff ice/sedimentation
+    # removal, so a single forward-Euler microphysics step at dt=600 s overshoots
+    # negative — the SCM substep coupling is what keeps it non-negative.
+    morrison_single = _campaign_style_min_qcond("morrison", microphysics_substeps=1)
+    morrison_subbed = _campaign_style_min_qcond("morrison", microphysics_substeps=_SUBSTEPS)
+    assert morrison_single < -1.0e-6   # non-vacuous: single-step DOES go negative
+    assert morrison_subbed >= _TINY_NEGATIVE
 
-    assert single_step_min < single_step_floor
-    assert substepped_min >= _TINY_NEGATIVE
+    # thompson gained a scheme-level sublimation/sedimentation flux-limiter fix
+    # (#477) that keeps condensate non-negative even at a single dt=600 s step;
+    # the SCM substep is then redundant-but-harmless defense. Assert both paths
+    # stay non-negative (documents the #477 + substep alignment).
+    thompson_single = _campaign_style_min_qcond("thompson", microphysics_substeps=1)
+    thompson_subbed = _campaign_style_min_qcond("thompson", microphysics_substeps=_SUBSTEPS)
+    assert thompson_single >= _TINY_NEGATIVE
+    assert thompson_subbed >= _TINY_NEGATIVE
 
 
 def _substep_water_residual(scheme: str) -> tuple[float, float]:
