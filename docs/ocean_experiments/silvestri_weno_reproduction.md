@@ -93,16 +93,24 @@ s/day) all 5 schemes were run to 1000 days but **blow up early during instabilit
 11), and even the explicit-closure schemes (SM2/QG2) blow up — so it is not a simple CFL fix nor a
 pure lack-of-dissipation issue. (An earlier 3-day probe wrongly read as "viable" — it never reached
 the day-11 failure; corrected here.)
-- This is the SAME eddy-resolving instability the Eady rebuild hit at 120×120: at 1/8° the
-  deformation radius (~5.7 km) is resolved by only ~2.5 cells, so the marginally-resolved baroclinic
-  instability piles grid-scale energy until it blows. The Eady fix was a tuned A_h≈1000 + C_smag≈0.1
-  *combination*; the §5 recipe currently runs the WENO schemes with NO explicit closure (paper-
-  faithful) and the dispersive schemes with only their closure.
-- **Open work to get §5 producing results:** diagnose the day-11 blowup (likely needs (a) baseline
-  A_h+C_smag for the no-closure WENO schemes at 1/8°, and/or (b) the finer 1/16°/1/32° grids where
-  L_d is properly resolved — which is where the paper's MAIN comparison lives; 14 km is the paper's
-  "under-resolved" case). The pipeline (recipe+driver+metrics+plotter) is built and correct; the
-  blocker is the eddy-resolving stabilization, not the code.
+- **1/16° (320×256×50) blows up EVEN FASTER — day 4 vs 1/8° day 11.** Finer-grid-blows-faster is
+  the signature of a GRID-SCALE NUMERICAL INSTABILITY, **not** under-resolution (under-resolution
+  would improve with finer grids). The WENO schemes have NO explicit dissipation (paper-faithful),
+  and legoESM's WENO vector-invariant evidently does not supply enough IMPLICIT dissipation to
+  control the C-grid grid-scale mode at eddy-resolving resolution — the SAME conclusion the Eady
+  rebuild reached (it needed a tuned A_h≈1000 + C_smag≈0.1 backstop). (Also: fp64 320×256×50 ≈ 24 GB
+  → near the V100S 32 GB limit; 1/16°/1/32° likely need float32 or memory-managed blocks.)
+- **Open work to get §5 producing results** (the real reproduction blocker — a numerics problem,
+  not the pipeline): the WENO vector-invariant momentum needs enough implicit dissipation to control
+  the C-grid grid-scale mode without an explicit closure (as Oceananigans' WENOVectorInvariant does).
+  Options: (a) confirm-the-diagnosis — add the Eady min-dissipation backstop (A_h≈1000+C_smag≈0.1) to
+  the WENO §5 schemes; if it stabilizes, it pins the cause to insufficient implicit dissipation (but
+  it's then NOT a faithful no-closure W9V). (b) Investigate legoESM's weno9 implicit-dissipation gap
+  vs Oceananigans (the D-term divergence damping, the KE-gradient form, the barotropic-baroclinic
+  coupling, the smc03 PGF on the tilted front). (c) The dispersive schemes (SM2/QG2) blow too despite
+  their closure → also check the setup (thermal-wind IC projection onto a grid mode? the AB2 outer +
+  implicit-CN barotropic at fine res?). This is the same hard problem the Eady eddy-resolving work
+  worked through; see `docs/planning/eady_eddy_resolving_ralph.md`.
 
 Launch once stabilized: `run_silvestri_baroclinic_jet.py --scheme S --resolution RxC --days 1000`,
 one job per pinned GPU; then `plot_silvestri_comparison.py --case jet` + fill the §5 scoreboard.
