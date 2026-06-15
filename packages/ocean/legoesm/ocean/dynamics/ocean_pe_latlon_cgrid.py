@@ -114,8 +114,12 @@ from legoesm.ocean.vertical import (
 # dispatch literals (dispatch discipline: validated at config construction;
 # unknown -> ValueError, never a silent fallthrough to vector-invariant).
 VALID_MOMENTUM_ADVECTION = frozenset(
-    {"vector_invariant", "weno5", "weno7", "flux_form"}
+    {"vector_invariant", "weno5", "weno7", "weno9", "flux_form"}
 )
+# WENO vector-invariant momentum-advection literals (Silvestri et al. 2024).
+# vorticity-flux Z and divergence-flux D use this order; vertical C is capped
+# at WENO5 for order 9 (paper Table 2: C is WENO5 in W9V, "minimal impact").
+VALID_WENO_MOMENTUM = frozenset({"weno5", "weno7", "weno9"})
 # Reconstruction schemes for the advected velocity in the flux-form path
 # (config.momentum_flux_scheme; only used when momentum_advection="flux_form").
 VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered"})
@@ -604,7 +608,7 @@ def _weno_zeta_at_u(
     phi : (n_lat+1, n_lon+1, nlev) field at vertices to reconstruct.
     v_smooth : (n_lat+1, n_lon, nlev) at v-faces (⟨v⟩_i smoothness).
     v_at_u : (n_lat, n_lon+1, nlev) at u-faces (upwinding velocity).
-    order : {5, 7}
+    order : {5, 7, 9}
     u_smooth : (n_lat, n_lon+1, nlev) or None
         u at u-faces for the ⟨u⟩_j smoothness path.
 
@@ -612,7 +616,7 @@ def _weno_zeta_at_u(
     -------
     phi_at_u : (n_lat, n_lon+1, nlev)
     """
-    hw = {5: 3, 7: 4}[order]
+    hw = {5: 3, 7: 4, 9: 5}[order]
     n_lat = phi.shape[0] - 1  # n_lat+1 vertices → n_lat u-faces
     nlev = phi.shape[2]
 
@@ -625,7 +629,7 @@ def _weno_zeta_at_u(
     # Convert point values to cell averages along the meridional
     # reconstruction axis before WENO.
     from legoesm.core.weno import point_to_cellavg_bounded
-    conv_order = {5: 6, 7: 8}[order]
+    conv_order = {5: 6, 7: 8, 9: 8}[order]
     phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
     v_at_vtx_avg = point_to_cellavg_bounded(v_at_vtx, axis=0, order=conv_order)
 
@@ -689,7 +693,7 @@ def _weno_zeta_at_v(
     phi : (n_lat+1, n_lon+1, nlev) field at vertices to reconstruct.
     u_smooth : (n_lat, n_lon+1, nlev) at u-faces (⟨u⟩_j smoothness).
     u_at_v : (n_lat+1, n_lon, nlev) at v-faces (upwinding velocity).
-    order : {5, 7}
+    order : {5, 7, 9}
     v_smooth : (n_lat+1, n_lon, nlev) or None
         v at v-faces for the ⟨v⟩_i smoothness path.
 
@@ -697,7 +701,7 @@ def _weno_zeta_at_v(
     -------
     phi_at_v : (n_lat+1, n_lon, nlev)
     """
-    hw = {5: 3, 7: 4}[order]
+    hw = {5: 3, 7: 4, 9: 5}[order]
     n_lon = phi.shape[1] - 1
     nlev = phi.shape[2]
 
@@ -710,7 +714,7 @@ def _weno_zeta_at_v(
 
     # Convert point values to cell averages along zonal axis (periodic).
     from legoesm.core.weno import point_to_cellavg_periodic
-    conv_order = {5: 6, 7: 8}[order]
+    conv_order = {5: 6, 7: 8, 9: 8}[order]
 
     phi_core = phi[:, :n_lon, :]
     u_core = u_at_vtx[:, :n_lon, :]
@@ -892,18 +896,18 @@ def _weno_cell_to_uface(
     phi : (n_lat, n_lon, nlev)  field at cell centers to reconstruct.
     psi : (n_lat, n_lon, nlev)  field at cell centers for smoothness.
     u_upwind : (n_lat, n_lon+1, nlev)  velocity at u-faces (upwind sign).
-    order : {5, 7}
+    order : {5, 7, 9}
 
     Returns
     -------
     phi_at_u : (n_lat, n_lon+1, nlev)
     """
-    hw = {5: 3, 7: 4}[order]
+    hw = {5: 3, 7: 4, 9: 5}[order]
     n_lon = phi.shape[1]
 
     # Convert point values to cell averages before WENO reconstruction.
     from legoesm.core.weno import point_to_cellavg_periodic
-    conv_order = {5: 6, 7: 8}[order]
+    conv_order = {5: 6, 7: 8, 9: 8}[order]
     phi_avg = point_to_cellavg_periodic(phi, axis=1, order=conv_order)
     psi_avg = point_to_cellavg_periodic(psi, axis=1, order=conv_order)
 
@@ -947,20 +951,20 @@ def _weno_cell_to_vface(
     phi : (n_lat, n_lon, nlev)  field at cell centers to reconstruct.
     psi : (n_lat, n_lon, nlev)  field at cell centers for smoothness.
     v_upwind : (n_lat+1, n_lon, nlev)  velocity at v-faces (upwind sign).
-    order : {5, 7}
+    order : {5, 7, 9}
 
     Returns
     -------
     phi_at_v : (n_lat+1, n_lon, nlev)
     """
-    hw = {5: 3, 7: 4}[order]
+    hw = {5: 3, 7: 4, 9: 5}[order]
     n_lat = phi.shape[0]
     nlev = phi.shape[2]
     n_lon = phi.shape[1]
 
     # Convert point values to cell averages before WENO reconstruction.
     from legoesm.core.weno import point_to_cellavg_bounded
-    conv_order = {5: 6, 7: 8}[order]
+    conv_order = {5: 6, 7: 8, 9: 8}[order]
     phi_avg = point_to_cellavg_bounded(phi, axis=0, order=conv_order)
     psi_avg = point_to_cellavg_bounded(psi, axis=0, order=conv_order)
 
@@ -1155,7 +1159,7 @@ def _bc_ke_and_pressure_gradients(
     # in smooth regions, matching paper's design intent.
     _mom_adv = config.momentum_advection
     n_lat_g, n_lon_g, nlev_g = p_prime_filled.shape
-    if _mom_adv in ("weno5", "weno7"):
+    if _mom_adv in ("weno5", "weno7", "weno9"):
         # u² at faces and cell-centered fields needed by Eq. 33.
         u_sq_face = u ** 2                                  # (n_lat, n_lon+1, nlev)
         v_sq_face = v ** 2                                  # (n_lat+1, n_lon, nlev)
@@ -1590,8 +1594,8 @@ def _bc_pv_flux(
     # real ETOPO under live-T integration.  Same Neumann fill of q at
     # land-adjacent vertices as WENO5 (for the centred-q part of the
     # triad).
-    if _mom_adv in ("weno5", "weno7"):
-        _weno_order = {"weno5": 5, "weno7": 7}[_mom_adv]
+    if _mom_adv in ("weno5", "weno7", "weno9"):
+        _weno_order = {"weno5": 5, "weno7": 7, "weno9": 9}[_mom_adv]
         # Fill PV at land-adjacent vertices so WENO stencils see smooth
         # Neumann extrapolation instead of masked-zero discontinuities.
         vtx_mask = compute_vertex_mask(mask, grid=grid)
@@ -1617,7 +1621,8 @@ def _bc_pv_flux(
     return du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v
 
 
-def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv):
+def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv,
+              _weno_order=5):
     """Stage 7c: WENO divergence (D-term) momentum dissipation (Silvestri et al.
     2024 Eqs. 31-32). Active only for weno5/weno7 momentum advection with
     config.weno_d_term; otherwise the diagnostics are zero. Pure verbatim
@@ -1640,17 +1645,19 @@ def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom
     #
     # Gated by config.weno_d_term so the effect can be isolated; default
     # True (paper-faithful) once the split is in place.
-    if _mom_adv in ("weno5", "weno7") and config.weno_d_term:
+    if _mom_adv in ("weno5", "weno7", "weno9") and config.weno_d_term:
         dU_di_cell, dV_dj_cell = _split_velocity_divergence(
             u * u_mask_3d, v * v_mask_3d, grid)
         # Fill land cells before WENO stencils (Neumann extrapolation).
         dU_di_filled = neumann_fill_cgrid(dU_di_cell, mask, grid=grid)
         dV_dj_filled = neumann_fill_cgrid(dV_dj_cell, mask, grid=grid)
         # Matching direction (WENO upwind), cross direction (centered).
-        D_at_u = (_weno_cell_to_uface(dU_di_filled, dU_di_filled, u, order=5)
+        # D-flux WENO order follows the momentum order Z (Silvestri Table 2:
+        # W9V has D=WENO9, paired with the order-9 vorticity flux).
+        D_at_u = (_weno_cell_to_uface(dU_di_filled, dU_di_filled, u, order=_weno_order)
                   + centered_cell_to_uface(dV_dj_cell))
         D_at_v = (_centered_cell_to_vface(dU_di_cell)
-                  + _weno_cell_to_vface(dV_dj_filled, dV_dj_filled, v, order=5))
+                  + _weno_cell_to_vface(dV_dj_filled, dV_dj_filled, v, order=_weno_order))
         diag_Dterm_u = -(D_at_u * u * u_mask_3d)
         diag_Dterm_v = -(D_at_v * v * v_mask_3d)
         du_dt = du_dt + diag_Dterm_u
@@ -1743,15 +1750,20 @@ def _bc_vertical_momentum_advection(
         h_v_old = h_v
         w_u = interp_cell_to_uface(w)
         w_v = interp_to_v_points(w, grid=grid)
-        if _mom_adv in ("weno5", "weno7"):
+        if _mom_adv in ("weno5", "weno7", "weno9"):
             # WENO vertical momentum advection removes the implicit
             # viscosity (~|w|*dz/2) that first-order upwind provides.
             # Requires compensating vertical viscosity (KPP / Richardson-
             # A_v, #204).
+            # The vertical (conservative-advection C) WENO order is capped at
+            # 5 for momentum order 9: Silvestri Table 2 keeps C at WENO5 in
+            # W9V ("order has minimal impact"), and the vertical tracer kernel
+            # is only defined for orders 5 and 7.
+            _vert_order = _weno_order if _weno_order <= 7 else 5
             diag_vertadv_u = _flux_form_vertical_momentum_advection_weno(
-                u_prime, w_u, h_u_old, order=_weno_order)
+                u_prime, w_u, h_u_old, order=_vert_order)
             diag_vertadv_v = _flux_form_vertical_momentum_advection_weno(
-                v_prime, w_v, h_v_old, order=_weno_order)
+                v_prime, w_v, h_v_old, order=_vert_order)
         else:
             # Non-WENO explicit vertical momentum advection.  Pass u/v
             # face-activity masks so the vertical momentum flux is exactly
@@ -2854,7 +2866,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # WENO order, used only inside the WENO branches of the vertical-advection
     # stage (None otherwise -> never dereferenced). The PV-flux stage computes
     # its own copy internally.
-    _weno_order = {"weno5": 5, "weno7": 7}.get(_mom_adv)
+    _weno_order = {"weno5": 5, "weno7": 7, "weno9": 9}.get(_mom_adv)
     dKE_dx, dp_dx, dKE_dy, dp_dy = _bc_ke_and_pressure_gradients(
         u, v, p_prime_filled, rho_prime, grid, config, z_coord,
         eta_safe, H_bathy, g_val, mask,
@@ -2951,6 +2963,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # --- Stage 7c: WENO divergence (D-term) dissipation. ---
     du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v = _bc_dterm(
         du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv,
+        _weno_order if _weno_order is not None else 5,
     )
 
     # --- Stage 8: vertical momentum advection. ---

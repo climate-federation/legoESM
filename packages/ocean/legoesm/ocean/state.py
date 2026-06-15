@@ -881,7 +881,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     slope_foot_alpha: float = 0.0       # 0 = disabled; production: 3.0
     slope_foot_threshold: float = 0.1   # MOM6 default
     slope_foot_n_levels: int = 5        # bottom 5 levels
-    momentum_advection: str = "vector_invariant"  # "vector_invariant", "weno5", or "weno7"
+    momentum_advection: str = "vector_invariant"  # "vector_invariant", "weno5", "weno7", "weno9", "flux_form"
     # Kinetic-energy gradient scheme for the vector-invariant form.
     # ``"centered"`` (default; legacy bit-exact): legoESM's existing
     # ``KE = 0.5·((⟨u⟩ᵢ)² + (⟨v⟩ⱼ)²)`` form. The standard centered

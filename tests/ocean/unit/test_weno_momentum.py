@@ -238,6 +238,80 @@ class TestWENO7VorticityFlux:
         assert jnp.allclose(r_v, zeta_val, atol=1e-13)
 
 
+class TestWENO9VorticityFlux:
+    """WENO9 vorticity reconstruction (Silvestri W9V) — shapes, constant +
+    linear-field exactness, and the cell-to-face D-flux path at order 9."""
+
+    def test_zeta_at_u_shape(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _weno_zeta_at_u
+        n_lat, n_lon, nlev = 14, 24, 5
+        zeta = jnp.ones((n_lat + 1, n_lon + 1, nlev))
+        v_prime = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.1
+        v_at_u = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.1
+        result = _weno_zeta_at_u(zeta, v_prime, v_at_u, order=9, u_smooth=v_at_u)
+        assert result.shape == (n_lat, n_lon + 1, nlev)
+
+    def test_zeta_at_v_shape(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _weno_zeta_at_v
+        n_lat, n_lon, nlev = 14, 24, 5
+        zeta = jnp.ones((n_lat + 1, n_lon + 1, nlev))
+        u_prime = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.1
+        u_at_v = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.1
+        result = _weno_zeta_at_v(zeta, u_prime, u_at_v, order=9, v_smooth=u_at_v)
+        assert result.shape == (n_lat + 1, n_lon, nlev)
+
+    def test_constant_field_both(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _weno_zeta_at_u, _weno_zeta_at_v,
+        )
+        n_lat, n_lon, nlev = 14, 24, 3
+        zeta_val = 3.0e-4
+        zeta = jnp.full((n_lat + 1, n_lon + 1, nlev), zeta_val)
+        v_prime = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.1
+        v_at_u = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.1
+        u_prime = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.1
+        u_at_v = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.1
+        r_u = _weno_zeta_at_u(zeta, v_prime, v_at_u, order=9)
+        r_v = _weno_zeta_at_v(zeta, u_prime, u_at_v, order=9)
+        assert jnp.allclose(r_u, zeta_val, atol=1e-13)
+        assert jnp.allclose(r_v, zeta_val, atol=1e-13)
+
+    def test_zonal_smooth_field_higher_order_more_accurate(self):
+        """On a WELL-RESOLVED smooth periodic field, WENO9 (with the order-8
+        point-to-cellavg conversion) is at least as accurate as WENO5 at the
+        v-face — the effective-resolution property W9V relies on. Needs enough
+        points per wavelength that the 10-point WENO9 stencil stays local
+        (a coarse grid spreads the stencil over a large phase span and the
+        nonlinear WENO weighting loses the ordering)."""
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _weno_zeta_at_v
+        n_lat, n_lon, nlev = 4, 96, 1
+        lon = jnp.arange(n_lon + 1)[None, :, None] * (2 * jnp.pi / n_lon)
+        zeta = jnp.sin(lon) * jnp.ones((n_lat + 1, n_lon + 1, nlev))
+        u_prime = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.3
+        u_at_v = jnp.ones((n_lat + 1, n_lon, nlev)) * 0.3
+        r9 = _weno_zeta_at_v(zeta, u_prime, u_at_v, order=9)
+        r5 = _weno_zeta_at_v(zeta, u_prime, u_at_v, order=5)
+        assert bool(jnp.all(jnp.isfinite(r9)))
+        # WENO reconstructs the CELL AVERAGE to the v-face; compare to the
+        # analytic cell-average of sin over the lon-cell straddling the face.
+        h = 2 * jnp.pi / n_lon
+        face_lon = (jnp.arange(n_lon)[None, :, None] + 0.5) * h
+        exact_avg = (jnp.sin(face_lon) * (jnp.sin(h / 2) / (h / 2))) \
+            * jnp.ones((n_lat + 1, n_lon, nlev))
+        err9 = float(jnp.max(jnp.abs(r9 - exact_avg)))
+        err5 = float(jnp.max(jnp.abs(r5 - exact_avg)))
+        assert err9 <= err5 + 1e-12, f"WENO9 err {err9} worse than WENO5 {err5}"
+
+    def test_cell_to_uface_order9(self):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _weno_cell_to_uface
+        n_lat, n_lon, nlev = 6, 24, 2
+        D = jnp.full((n_lat, n_lon, nlev), 2.0e-6)
+        u = jnp.ones((n_lat, n_lon + 1, nlev)) * 0.2
+        result = _weno_cell_to_uface(D, D, u, order=9)
+        assert result.shape == (n_lat, n_lon + 1, nlev)
+        assert jnp.allclose(result, 2.0e-6, atol=1e-15)
+
+
 # =====================================================================
 # WENO vertical momentum advection
 # =====================================================================
@@ -321,11 +395,42 @@ class TestWENOVerticalMomentum:
 class TestMomentumAdvectionConfig:
     """Verify that momentum_advection options are accepted."""
 
-    @pytest.mark.parametrize("mode", ["vector_invariant", "weno5", "weno7"])
+    @pytest.mark.parametrize("mode", ["vector_invariant", "weno5", "weno7", "weno9"])
     def test_config_field_accepted(self, mode):
         from legoesm.ocean.state import LatLonCGridOceanConfig
         cfg = LatLonCGridOceanConfig(momentum_advection=mode)
         assert cfg.momentum_advection == mode
+
+    def test_weno9_full_step_finite(self):
+        """Full ocean step with momentum_advection='weno9' (Silvestri W9V):
+        the whole wiring — order-9 vorticity Z + order-9 divergence D + the
+        capped order-5 vertical C — runs and stays finite (scan-carry stable)."""
+        from legoesm.core.field import Field
+        from legoesm.core.precision import set_policy, get_policy, PrecisionPolicy
+        from legoesm.ocean.experiments.eady_uniform import build_eady_uniform_setup
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        prev = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            r = build_eady_uniform_setup(
+                n_lat=16, n_lon=16, momentum_advection="weno9")
+            assert r.model_config.momentum_advection == "weno9"
+            model = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config)
+            s = r.initial_state
+
+            def _z(d):
+                return Field(data=jnp.zeros_like(d.data), name=d.name + "_incr_prev",
+                             dims=d.dims, units=d.units)
+            s = s._replace(T_incr_prev=_z(s.T), S_incr_prev=_z(s.S),
+                           u_incr_prev=_z(s.u), v_incr_prev=_z(s.v))
+            nxt = model.step(s, 300.0)
+            assert bool(jnp.all(jnp.isfinite(nxt.u.data)))
+            assert bool(jnp.all(jnp.isfinite(nxt.v.data)))
+            assert bool(jnp.all(jnp.isfinite(nxt.T.data)))
+        finally:
+            set_policy(prev)
 
 
 # =====================================================================
