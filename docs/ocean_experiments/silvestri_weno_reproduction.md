@@ -70,17 +70,31 @@ Figures: `fig4_turb2d_timeseries.png` (KE/enstrophy(t)), `fig4b_turb2d_convergen
 (effective-resolution convergence), `fig5_turb2d_spectra.png` (isotropic spectra @ t=3.6),
 `fig3_turb2d_vorticity.png` (vorticity fields). (Runtime artifacts, gitignored.)
 
-## §5 — baroclinic jet — PIPELINE READY, matrix PENDING (GPU)
+## §5 — baroclinic jet — PIPELINE VALIDATED (CPU sanity), full matrix PENDING (GPU)
 The §5 recipe (front Eqs 52-53 + thermal wind + τ=50d zonal-mean restoring, uniform 20m/50lev,
 L_d≈5.7km), the per-scheme driver (1000-day scan + Fig-7/8/9/10 metrics), and the plotter are
-built + smoke-tested (16×16/2d stable, L_d correct). The full matrix — {1/8°,1/16°,1/32°} ×
-{UP3,W9V,W9D,SM2,QG2} × 1000 days (15 runs) — needs GPU (no CUDA in the build session); CPU is
-impractical at 1000 days × production resolution.
+built. QG2 uses the FAITHFUL full QG-Leith (B5b stretching), no longer the barotropic approximation.
+
+**CPU sanity validation (48×32, 40 days, W9V vs faithful QG2):**
+- The pipeline integrates stably over a long run; the restoring holds the mean jet; L_d≈5.4–5.5 km.
+- Baroclinic instability DEVELOPS (EKE grows from the white-noise seed in both schemes).
+- The schemes are qualitatively distinguishable as the paper predicts: **W9V** (no explicit closure)
+  is far more energetic (EKE→1.1e14, max|u|→3.9) and grid-scale-noisier (gridscale_frac 0.083);
+  **QG2** is more damped (EKE→1.8e11, max|u|→0.46, gridscale_frac 0.026) — the explicit QG-Leith
+  viscosity controlling the grid scale.
+- **The faithful-QG2 B5b stretching path is stable over 40 days** (not just the 1-step smoke test).
+- Caveat: at 48×32 the deformation radius (~5.4 km) is under-resolved ~7×, so WENO accumulates
+  grid-scale energy (expected — the paper's effective-resolution point); a clean eddy field needs
+  the paper's 7-km grid.
+
+The full matrix — {1/8°,1/16°,1/32°} × {UP3,W9V,W9D,SM2,QG2} × 1000 days (15 runs) — needs GPU
+(no CUDA in the build session); CPU is impractical at 1000 days × instability-resolving resolution.
 
 ## Caveats / remaining work
-- **B5b (before the QG2 §5 matrix case):** the QG-Leith is the BAROTROPIC approximation — the
-  baroclinic stretching term ∂_z(f/N²∇b) is omitted (needs buoyancy threaded into the viscosity
-  stage). Until then the §5 QG2 case must be labeled "QG-Leith (barotropic)", not "QG2".
+- **B5b DONE:** QG2 now uses the full QG-Leith with the baroclinic stretching ∂_z(f/N²∇b) + the
+  Bachman Bu/Ro bound — faithful. (Caveats: L_d is a fixed config constant 6.75 km, velocity_scale=1
+  for Ro — fine for the near-uniform-stratification Silvestri channel; the stretching is zeroed in
+  statically-unstable columns.)
 - **w′b′ cospectrum (Fig 9 right):** deferred — needs the diagnosed vertical velocity (not in
   the prognostic state).
 - **§4 DNS reference + resolution sweep (64→1024, 4096 DNS):** run on GPU for the full
