@@ -2051,7 +2051,8 @@ def build_parser() -> argparse.ArgumentParser:
              "per solve) — the multi-node weak-scaling lever.",
     )
     p.add_argument(
-        "--preconditioner", choices=["jacobi", "zonal_line", "chebyshev"],
+        "--preconditioner",
+        choices=["jacobi", "zonal_line", "chebyshev", "multigrid"],
         default="jacobi",
         help="Implicit-CN PCG preconditioner: 'jacobi' (legacy), "
              "'zonal_line' (exact periodic-tridiagonal row solves; "
