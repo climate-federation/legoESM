@@ -56,6 +56,7 @@ __param_spec__ = {
             "U_a": "forcing: prescribed wind speed [m/s]",
             "q_a": "forcing: prescribed air humidity [kg/kg]",
             "z_ref": "convention: reference height [m]",
+            "min_wet_cell_thickness_m": "numerics: floor/cap",
         },
         "params": {
             "C_D": {"units": "1", "bounds": (0.000495, 0.0045), "tunable_tier": 2, "transform": "sigmoid", "category": "surface", "reference": "bulk-formula surface forcing", "shape": None},
@@ -239,6 +240,11 @@ class BulkFormulaConfig(NamedTuple):
     # Saturation humidity reduction over saline ocean water: q_s = factor *
     # q_sat(SST) (Large & Yeager 2004; OMIP/CORE prescribe ~0.98).
     q_sat_salinity_factor: float = 0.98
+    # Minimum top-cell thickness [m] discriminating ocean vs land columns
+    # (same convention as PrescribedForcingConfig / FluxFeedbackConfig): land
+    # columns (jacobian=0 -> dz_0=0) get zero surface tendency instead of the
+    # huge 1/max(dz_0,1e-10) value that would contaminate neighbour faces.
+    min_wet_cell_thickness_m: float = 1.0e-3
 
 
 class SurfaceForcingConfig(NamedTuple):

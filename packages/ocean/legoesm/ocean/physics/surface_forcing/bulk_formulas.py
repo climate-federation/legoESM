@@ -100,10 +100,18 @@ def bulk_formula_surface_forcing(
     # Net heat flux (positive into ocean)
     Q_net = cfg.SW_down - Q_lw_up + cfg.LW_down - Q_sh - Q_lh
 
-    # Convert to top-layer tendencies
+    # Convert to top-layer tendencies.  Mask land columns (jacobian = 0):
+    # without it ``1/max(dz_0, 1e-10)`` yields ~1e7-scale heat/momentum
+    # tendencies on dry cells that contaminate neighbouring ocean faces when
+    # interpolated.  Mirrors the ``is_ocean`` guard in ``prescribed.py`` /
+    # ``external.py`` (codex review, finding #5).
     dz_0 = z_coord.dz_ref[0] * jacobian
-    inv_rho_dz = 1.0 / (rho_0_ref * jnp.maximum(dz_0, 1e-10))
-    inv_rho_csw_dz = 1.0 / (rho_0_ref * c_sw * jnp.maximum(dz_0, 1e-10))
+    is_ocean = dz_0 > cfg.min_wet_cell_thickness_m
+    dz_safe = jnp.maximum(dz_0, 1e-10)
+    inv_rho_dz = jnp.where(is_ocean, 1.0 / (rho_0_ref * dz_safe), 0.0)
+    inv_rho_csw_dz = jnp.where(
+        is_ocean, 1.0 / (rho_0_ref * c_sw * dz_safe), 0.0,
+    )
 
     # Pad with zero on trailing axis instead of alloc-zeros +
     # scatter — single Pad HLO op per field.  Same pattern as the

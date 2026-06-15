@@ -219,6 +219,14 @@ def compute_most_fluxes(
     ustar : array
         Friction velocity [m/s].
     """
+    # Dispatch hardening (CLAUDE.md): ``scheme`` is a static Python string
+    # resolved at trace time. Validate it at function entry so a typo'd name
+    # (e.g. ``"coar3"``) fails LOUDLY instead of silently falling through the
+    # ``else`` branch below to the constant-roughness MOST path and running the
+    # wrong air-sea physics. ``coare3``/``large_yeager`` take dedicated
+    # branches; ``constant``/``most`` are the (valid) fixed-roughness else path.
+    validate_bulk_scheme(scheme)
+
     # Resolve scalar reference heights. ``z_ref`` is the wind/momentum
     # height (always = z_u in the formulas below); z_t, z_q default to
     # z_ref so that single-height callers (lake, idealized adapter,
