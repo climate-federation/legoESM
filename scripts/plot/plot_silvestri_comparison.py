@@ -92,7 +92,32 @@ def plot_turb2d(indir, outdir):
     fig.suptitle("Fig 3: vorticity @ t=3.6")
     fig.tight_layout(); fig.savefig(f"{outdir}/fig3_turb2d_vorticity.png", dpi=130)
     plt.close(fig)
-    print(f"wrote turb2d figures (fig3/4/5) to {outdir} ({n} runs)")
+
+    # Fig 4b: effective-resolution convergence (KE/enstrophy retained vs N per
+    # scheme) — the paper's claim that W9V converges at the coarsest grid.
+    by_scheme = {}
+    for d in runs.values():
+        s = str(d["scheme"])
+        by_scheme.setdefault(s, {})[int(d["N"])] = (
+            float(d["ke"][-1] / d["ke"][0]), float(d["enstrophy"][-1] / d["enstrophy"][0]))
+    if any(len(v) >= 2 for v in by_scheme.values()):
+        order = ["DNS", "W9V", "W9D", "W5V", "W5D", "Leith1", "Leith2"]
+        fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+        for s in [o for o in order if o in by_scheme]:
+            Ns = sorted(by_scheme[s])
+            ax[0].plot(Ns, [by_scheme[s][n][0] for n in Ns], "-o", label=s,
+                       lw=2 if s in ("W9V", "DNS") else 1)
+            ax[1].plot(Ns, [by_scheme[s][n][1] for n in Ns], "-o", label=s,
+                       lw=2 if s in ("W9V", "DNS") else 1)
+        ax[0].set(xlabel="N", ylabel="KE retained @ t=6", xscale="log",
+                  title="Fig 4b: effective-resolution KE convergence")
+        ax[1].set(xlabel="N", ylabel="enstrophy retained @ t=6", xscale="log",
+                  title="Fig 4b: enstrophy vs resolution")
+        for a in ax:
+            a.legend(fontsize=8); a.grid(alpha=0.3, which="both")
+        fig.tight_layout(); fig.savefig(f"{outdir}/fig4b_turb2d_convergence.png", dpi=130)
+        plt.close(fig)
+    print(f"wrote turb2d figures (fig3/4/4b/5) to {outdir} ({n} runs)")
 
 
 def plot_jet(indir, outdir):

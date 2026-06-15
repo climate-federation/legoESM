@@ -48,8 +48,27 @@ Re=3.3e4, t=6 (~18 eddy turnovers, T_e≈0.33). Run at N=96 (CPU; the paper's 40
    WENO selectively dissipates ENSTROPHY (ens 0.32-0.42 vs DNS 0.79) while preserving energy —
    "dissipates enstrophy, but not energy, at small scales" (paper §4).
 
-Figures: `fig4_turb2d_timeseries.png` (KE/enstrophy(t)), `fig5_turb2d_spectra.png` (isotropic
-spectra @ t=3.6), `fig3_turb2d_vorticity.png` (vorticity fields). (Runtime artifacts, gitignored.)
+### §4 effective-resolution convergence — REPRODUCED ✅ (resolution sweep N=64/128/256)
+KE retained at t=6 vs resolution (the paper's "effective resolution" Fig-4 claim):
+
+| Scheme | N=64 | N=128 | N=256 |
+|---|---|---|---|
+| DNS (ref) | 0.898 | 0.963 | 0.957 |
+| **W9V** | **0.975** | 0.963 | 0.956 |
+| W9D | 0.867 | 0.950 | 0.954 |
+| W5V | 0.790 | 0.908 | 0.941 |
+| W5D | 0.544 | 0.775 | 0.879 |
+| Leith2 (C=2) | 0.054 | 0.282 | 0.670 |
+
+**W9V is converged (≈DNS, KE≈0.96) already at N=64**, while W5V needs N=256 and W5D/Leith2 still
+lag — a ~4× effective-resolution advantage for W9V, and the convergence ordering W9V > W9D >
+W5V > W5D > Leith is exactly the paper's §4 result ("the W9V approach comes closer to achieving
+the LES goal of resolution independence"). The absolute KE also converges with N (DNS 1.28→1.96,
+W9V 1.39→1.96 — W9V tracks DNS at every grid).
+
+Figures: `fig4_turb2d_timeseries.png` (KE/enstrophy(t)), `fig4b_turb2d_convergence.png`
+(effective-resolution convergence), `fig5_turb2d_spectra.png` (isotropic spectra @ t=3.6),
+`fig3_turb2d_vorticity.png` (vorticity fields). (Runtime artifacts, gitignored.)
 
 ## §5 — baroclinic jet — PIPELINE READY, matrix PENDING (GPU)
 The §5 recipe (front Eqs 52-53 + thermal wind + τ=50d zonal-mean restoring, uniform 20m/50lev,
