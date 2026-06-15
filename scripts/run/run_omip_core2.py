@@ -1852,6 +1852,113 @@ def _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir):
         print(f"[transports] AMOC@26N diag skipped: {type(e).__name__}: {e}")
 
 
+def _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir):
+    """Barotropic streamfunction (gyres) + AMOC overturning streamfunction
+    (Atlantic, lat-depth) + global MOC, at run-end for ALL simulations. Reuses
+    the tested ``diagnostics_streamfunction.{barotropic_streamfunction,
+    moc_streamfunction}`` (lat-lon C-grid: latlon/tripole). Saves a .npz of the
+    fields and PNG maps. Pure NumPy at run-end; never crashes the run.
+
+    MPAS (VoronoiMesh) has no structured lat-lon streamfunction operator here;
+    its AMOC@26N scalar is reported by ``_amoc26n_diag`` -- the field maps are
+    skipped (noted) until an unstructured-grid streamfunction is wired."""
+    if app_grid_type == "mpas" or getattr(state, "v", None) is None:
+        print("[transports] BSF/AMOC field maps skipped (no structured C-grid "
+              "v-faces on this grid); AMOC@26N scalar is in transports.txt.")
+        return
+    try:
+        from legoesm.ocean.vertical import compute_layer_thickness
+        from legoesm.ocean.diagnostics_streamfunction import (
+            barotropic_streamfunction, moc_streamfunction,
+        )
+        u = np.asarray(state.u.data)
+        v = np.asarray(state.v.data)
+        eta = np.asarray(state.eta.data)
+        Hb = np.asarray(state.H_bathy.data)
+        mask = np.asarray(state.land_mask.data)
+        h = np.asarray(compute_layer_thickness(state.eta.data,
+                                               state.H_bathy.data, z_coord))
+        # Barotropic streamfunction (gyres), [Sv], (n_lat, n_lon).
+        bsf = np.asarray(barotropic_streamfunction(u, h, mask, grid))
+        # AMOC = Atlantic-masked overturning; also the GLOBAL MOC. moc returns
+        # (n_lat+1, nlev) [Sv] on v-faces. Atlantic band -75..15 E matches
+        # compute_amoc_from_state. Use the 2-D T-grid longitude (tripole fold),
+        # not the legacy 1-D first-row grid.lon (codex review).
+        _lon = getattr(grid, "lon_T", None)
+        if _lon is None:
+            _lon = getattr(grid, "lon2d", None)
+        if _lon is None:
+            _lon = grid.lon
+        lon2d = np.rad2deg(np.asarray(_lon))
+        _lonw = (((lon2d + 180.0) % 360.0) - 180.0)
+        lon_band = (_lonw >= -75.0) & (_lonw <= 15.0)
+        if lon_band.ndim == 1:
+            lon_band = np.broadcast_to(lon_band, mask.shape)
+        atl_mask = mask * lon_band.astype(mask.dtype)
+        amoc = np.asarray(moc_streamfunction(v, h, eta, Hb, atl_mask, grid))
+        gmoc = np.asarray(moc_streamfunction(v, h, eta, Hb, mask, grid))
+        lat2d = np.rad2deg(np.asarray(grid.lat))
+        # v-FACE latitudes (n_lat+1) for the MOC fields, not the T-row centres
+        # (codex review). From grid.lat_v if present, else T-row midpoints +
+        # extrapolated end faces.
+        _latv = getattr(grid, "lat_v", None)
+        if _latv is not None:
+            _lv2 = np.rad2deg(np.asarray(_latv))
+            lat_v = _lv2.mean(axis=-1) if _lv2.ndim > 1 else _lv2
+        else:
+            rc = lat2d.mean(axis=-1) if lat2d.ndim > 1 else lat2d   # (n_lat,)
+            mid = 0.5 * (rc[:-1] + rc[1:])
+            lat_v = np.concatenate([[2 * rc[0] - mid[0]], mid,
+                                    [2 * rc[-1] - mid[-1]]])         # (n_lat+1,)
+        lat_v = np.asarray(lat_v)[:amoc.shape[0]]
+        z_cen = (np.abs(np.asarray(z_coord.z_full_ref))
+                 if getattr(z_coord, "z_full_ref", None) is not None
+                 else np.arange(amoc.shape[1], dtype=float))
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            Path(out_dir) / "bsf_amoc.npz", bsf=bsf, amoc=amoc, gmoc=gmoc,
+            lat_v=lat_v, z_center=z_cen,
+            lat_T=lat2d, lon_T=lon2d, land_mask=mask)
+
+        def _sx(a, f):  # finite-safe extremum (avoid all-NaN RuntimeWarning)
+            return float(f(a)) if np.isfinite(a).any() else float("nan")
+        # NADW cell = positive max; AABW = negative min. Print signed extrema.
+        print(f"[transports] BSF [{_sx(bsf, np.nanmin):.1f},"
+              f"{_sx(bsf, np.nanmax):.1f}] Sv; AMOC psi "
+              f"[{_sx(amoc, np.nanmin):.1f},{_sx(amoc, np.nanmax):.1f}] Sv "
+              f"(NADW=max); global-MOC [{_sx(gmoc, np.nanmin):.1f},"
+              f"{_sx(gmoc, np.nanmax):.1f}] Sv -> bsf_amoc.npz")
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            # AMOC lat-depth section (x = v-face latitude, y = depth).
+            fig, ax = plt.subplots(1, 2, figsize=(13, 4.5))
+            lv = np.linspace(-30, 30, 31)
+            c0 = ax[0].contourf(lat_v, -z_cen[:amoc.shape[1]],
+                                amoc[:lat_v.size].T, levels=lv,
+                                cmap="RdBu_r", extend="both")
+            ax[0].set_title("AMOC overturning [Sv] (Atlantic)")
+            ax[0].set_xlabel("latitude"); ax[0].set_ylabel("depth [m]")
+            plt.colorbar(c0, ax=ax[0])
+            # BSF map.
+            bsf_p = bsf[:, :lon2d.shape[-1]] if bsf.shape[-1] != lon2d.shape[-1] \
+                else bsf
+            c1 = ax[1].pcolormesh(np.where(mask > 0.5, bsf_p, np.nan),
+                                  cmap="RdBu_r", vmin=-60, vmax=60)
+            ax[1].set_title("Barotropic streamfunction [Sv]")
+            ax[1].set_xlabel("i"); ax[1].set_ylabel("j")
+            plt.colorbar(c1, ax=ax[1])
+            fig.tight_layout()
+            fig.savefig(Path(out_dir) / "bsf_amoc.png", dpi=110)
+            plt.close(fig)
+            print(f"[transports] saved {Path(out_dir) / 'bsf_amoc.png'}")
+        except Exception as pe:
+            print(f"[transports] BSF/AMOC plot skipped: {type(pe).__name__}: {pe}")
+    except Exception as e:
+        print(f"[transports] BSF/AMOC diag skipped: {type(e).__name__}: {e}")
+
+
 def _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir):
     """ACC@Drake [Sv] from the LIVE state (h reconstructed in-run).  Reuses the
     tested compute_acc_from_state{,_mpas}: lat-lon/tripole via barotropic_stream
@@ -3231,6 +3338,7 @@ def main() -> int:
         _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
         _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
         _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
+        _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir)
         _mht_diag(state, grid, z_coord, app_grid_type, out_dir)
         _record_final_state_digest(manifest_path, state)
         _csv.close()
@@ -3517,6 +3625,7 @@ def main() -> int:
     _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir)
+    _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir)
     _mht_diag(state, grid, z_coord, app_grid_type, out_dir)
     _record_final_state_digest(manifest_path, state)
     _csv.close()
