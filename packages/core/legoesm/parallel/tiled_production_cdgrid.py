@@ -468,6 +468,121 @@ def make_tiled_compute_mass_flux_hybrid_stage_2d(mesh, coord, n: int, kt: int):
 
 
 # ---------------------------------------------------------------------------
+# P-3D-vadv/omega-hybrid: vertical_advection_hybrid + compute_omega_hybrid.
+# Both are per-COLUMN vertical ops (level-axis avg of the half-level mass_flux,
+# diff/upwind over levels, pressure_from_hybrid per column) — NO horizontal
+# stencil — so they tile EXACTLY like geopotential/mass_flux.  Single cc-local
+# output each (..., nlev), vertical REPLICATED.  ``coord`` closed over.  These
+# are on the REAL 3D-PE hydrostatic / tracer-transport path (vertical advection
+# of T/tracers/momentum + pressure-velocity diagnostic).
+# ---------------------------------------------------------------------------
+
+def vertical_advection_hybrid_tile_2d(field, mass_flux, p_s, coord, a_i, a_j, nl: int):
+    """Per-tile ``vertical_advection_hybrid`` (3D PE, hybrid coord).  ``field``
+    ``(F,n,n,nlev)``, ``mass_flux`` ``(F,n,n,nlev+1)``, ``p_s`` ``(F,n,n)``
+    FACE-REPLICATED.  Slices the cc tile ``[a:a+nl]`` (no halo) and runs the
+    per-column upwind vertical advection; returns ``(F,nl,nl,nlev)``."""
+    from legoesm.grids.vertical import vertical_advection_hybrid
+
+    if field.shape[1] != field.shape[2] or mass_flux.shape[1:3] != field.shape[1:3] \
+            or p_s.shape[1:3] != field.shape[1:3]:
+        raise ValueError(
+            f"vertical_advection_hybrid_tile_2d: field cc-square + mass_flux/p_s "
+            f"matching horizontal; got field={field.shape[1:3]}, "
+            f"mass_flux={mass_flux.shape[1:3]}, p_s={p_s.shape[1:3]}")
+
+    def _s2(arr):
+        arr = jax.lax.dynamic_slice_in_dim(arr, a_i, nl, axis=1)
+        return jax.lax.dynamic_slice_in_dim(arr, a_j, nl, axis=2)
+
+    return vertical_advection_hybrid(_s2(field), _s2(mass_flux), _s2(p_s), coord)
+
+
+def make_tiled_vertical_advection_hybrid_stage_2d(mesh, coord, n: int, kt: int):
+    """Sharded ``vertical_advection_hybrid`` on a ``(6, kt, kt)`` mesh.
+    ``stage(field, mass_flux, p_s) -> tend``; tile-sharded out (exact cc
+    partition, vertical replicated).  ``coord`` closed over."""
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    nl = n // kt
+    fo = P("face", None, None)                 # 2D cc (p_s)
+    fw = P("face", None, None, None)           # 4D field / mass_flux
+    cz = P("face", "tile_i", "tile_j", None)   # 4D tend out
+
+    @partial(shard_map, mesh=mesh, in_specs=(fw, fw, fo), out_specs=cz,
+             check_vma=False)
+    def _body(field, mass_flux, p_s):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return vertical_advection_hybrid_tile_2d(field, mass_flux, p_s, coord,
+                                                 a_i, a_j, nl)
+
+    def stage(field, mass_flux, p_s):
+        if field.shape[1:3] != (n, n) or mass_flux.shape[1:3] != (n, n) \
+                or p_s.shape[1:3] != (n, n):
+            raise ValueError(
+                f"vertical_advection_hybrid stage: field/mass_flux/p_s must be "
+                f"cc (n,n)={(n, n)}; got field={field.shape[1:3]}, "
+                f"mass_flux={mass_flux.shape[1:3]}, p_s={p_s.shape[1:3]}")
+        return _body(field, mass_flux, p_s)
+
+    return stage
+
+
+def compute_omega_hybrid_tile_2d(mass_flux, p_s, dp_s_dt, coord, a_i, a_j, nl: int):
+    """Per-tile ``compute_omega_hybrid`` (3D PE, hybrid coord).  ``mass_flux``
+    ``(F,n,n,nlev+1)``, ``p_s``/``dp_s_dt`` ``(F,n,n)`` FACE-REPLICATED.  Slices
+    the cc tile ``[a:a+nl]`` (no halo) and runs the per-column omega diagnostic
+    (``B_full*dp_s/dt + F_full``); returns ``(F,nl,nl,nlev)``."""
+    from legoesm.grids.vertical import compute_omega_hybrid
+
+    if mass_flux.shape[1] != mass_flux.shape[2] \
+            or p_s.shape[1:3] != mass_flux.shape[1:3] \
+            or dp_s_dt.shape[1:3] != mass_flux.shape[1:3]:
+        raise ValueError(
+            f"compute_omega_hybrid_tile_2d: mass_flux cc-square + p_s/dp_s_dt "
+            f"matching horizontal; got mass_flux={mass_flux.shape[1:3]}, "
+            f"p_s={p_s.shape[1:3]}, dp_s_dt={dp_s_dt.shape[1:3]}")
+
+    def _s2(arr):
+        arr = jax.lax.dynamic_slice_in_dim(arr, a_i, nl, axis=1)
+        return jax.lax.dynamic_slice_in_dim(arr, a_j, nl, axis=2)
+
+    return compute_omega_hybrid(_s2(mass_flux), _s2(p_s), _s2(dp_s_dt), coord)
+
+
+def make_tiled_compute_omega_hybrid_stage_2d(mesh, coord, n: int, kt: int):
+    """Sharded ``compute_omega_hybrid`` on a ``(6, kt, kt)`` mesh.
+    ``stage(mass_flux, p_s, dp_s_dt) -> omega``; tile-sharded out (exact cc
+    partition, vertical replicated).  ``coord`` closed over."""
+    if n % kt:
+        raise ValueError(f"n={n} not divisible by kt={kt}")
+    nl = n // kt
+    fo = P("face", None, None)                 # 2D cc (p_s, dp_s_dt)
+    fw = P("face", None, None, None)           # 4D mass_flux
+    cz = P("face", "tile_i", "tile_j", None)   # 4D omega out
+
+    @partial(shard_map, mesh=mesh, in_specs=(fw, fo, fo), out_specs=cz,
+             check_vma=False)
+    def _body(mass_flux, p_s, dp_s_dt):
+        a_i = jax.lax.axis_index("tile_i") * nl
+        a_j = jax.lax.axis_index("tile_j") * nl
+        return compute_omega_hybrid_tile_2d(mass_flux, p_s, dp_s_dt, coord,
+                                            a_i, a_j, nl)
+
+    def stage(mass_flux, p_s, dp_s_dt):
+        if mass_flux.shape[1:3] != (n, n) or p_s.shape[1:3] != (n, n) \
+                or dp_s_dt.shape[1:3] != (n, n):
+            raise ValueError(
+                f"compute_omega_hybrid stage: mass_flux/p_s/dp_s_dt must be cc "
+                f"(n,n)={(n, n)}; got mass_flux={mass_flux.shape[1:3]}, "
+                f"p_s={p_s.shape[1:3]}, dp_s_dt={dp_s_dt.shape[1:3]}")
+        return _body(mass_flux, p_s, dp_s_dt)
+
+    return stage
+
+
+# ---------------------------------------------------------------------------
 # P-ii: the two production 4-point box interps.
 #   interp_corner_to_center (corner -> cc): PURELY LOCAL (cc cell reads its 2x2
 #     corner block) — like dgrid_vorticity, no halo, exact cc partition.
