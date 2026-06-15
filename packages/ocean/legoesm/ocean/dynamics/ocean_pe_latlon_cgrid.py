@@ -651,6 +651,8 @@ def _weno_zeta_at_u(
     if smoothness == "standard":
         # W*D: self-smoothness {ζ;ζ} (Silvestri Eq 37). Reconstruct phi using
         # its OWN smoothness — standard WENO-Z, more dissipative than {ζ;u}.
+        # NOTE: u_smooth/v_smooth are INERT in this branch (the velocity
+        # smoothness fields are only used by the "split" path).
         phi_plus, phi_minus = weno_reconstruct_split(
             phi_stencil, phi_stencil, order=order)
         return weno_upwind(phi_plus, phi_minus, v_at_u)
@@ -740,7 +742,8 @@ def _weno_zeta_at_v(
                    for j in range(2 * hw)]
 
     if smoothness == "standard":
-        # W*D: self-smoothness {ζ;ζ} (Silvestri Eq 37).
+        # W*D: self-smoothness {ζ;ζ} (Silvestri Eq 37). u_smooth/v_smooth
+        # are INERT here (only the "split" path uses velocity smoothness).
         phi_plus, phi_minus = weno_reconstruct_split(
             phi_stencil, phi_stencil, order=order)
         return weno_upwind(phi_plus, phi_minus, u_at_v)

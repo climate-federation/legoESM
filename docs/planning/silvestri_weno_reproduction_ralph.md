@@ -193,6 +193,37 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 3 — B2 DONE (weno_smoothness split/standard) — 2026-06-15
+- **B2 COMPLETE + adversarially reviewed + committed** (`feat(ocean): weno_smoothness split
+  (W*V) vs standard (W*D)`). `config.weno_smoothness ∈ {"split","standard"}` now selects the
+  V vs D scheme family for BOTH the vorticity flux AND the divergence flux:
+  - split (W*V, default): vorticity `{ζ;u}` (Eq 43) + divergence `{δU;D}` (Eq 45, full-divergence
+    smoothness); standard (W*D): `{ζ;ζ}` (Eq 37) + `{δU;δU}` (Eq 44).
+  - `_weno_zeta_at_u/v` standard branch = `weno_reconstruct_split(phi, phi)` (review confirmed
+    bit-exact to the plain weno{5,7,9}_z kernel). `_bc_dterm` split passes full divergence
+    D=δU+δV as the matching-direction smoothness psi. Validated at construction.
+- **DEFAULT BEHAVIOR CHANGE (intended, faithful):** the prior default was a HYBRID — `{ζ;u}`
+  vorticity (V) but `{δU;δU}` divergence (D). New default "split" = consistent W*V
+  (`{ζ;u}`+`{δU;D}`), the paper's recommended scheme ("the divergence choice has a large impact").
+  Review confirmed: NO committed recipe/golden/fidelity test selects WENO momentum (the only
+  fidelity recipe uses flux_form), so no validated result is silently altered.
+- **Adversarial review (skeptical subagent — codex still unavailable): CLEAN, no blockers.**
+  Verified: standard==plain-WENO (Δ=0 all orders), split divergence = Eq 45, cross-direction
+  stays centered (Appendix C holds), threading complete (K + vertical C correctly left as
+  self-smoothness per Eqs 33/41), validation raises on unknown, AD/JIT static. One NIT applied
+  (commented that u_smooth/v_smooth are inert in the standard branch).
+- Tests: 7 new smoothness tests (split≠standard on sharp ζ for Z and D; constant-exact both;
+  config accept/reject; full-step W9V≠W9D with injected sharp feature — and verified bit-identical
+  on the SMOOTH Eady IC, which is correct: WENO reconstructs linear fields identically regardless
+  of smoothness). 106 weno+dispatch + 25 eady/no-dup green.
+- **NEXT: B3 = UP3 flux-form 3rd-order upwind momentum.** Scoping: `momentum_advection="flux_form"`
+  exists (`_bc_horizontal_momentum_advection_flux_form`) with `momentum_flux_scheme` ∈
+  {"upwind","centered"} — but "upwind" is 1st-order. Need a 3rd-order upwind-biased flux-form
+  option (NEMO/ROMS UP3, Madec 2022 / Shchepetkin-McWilliams). Check whether the existing
+  flux-form path's reconstruction order is configurable or if a `momentum_flux_scheme="upwind3"`
+  (DST3-style) reconstruction must be added. Read `_bc_horizontal_momentum_advection_flux_form`
+  first. (Paper UP3 = `UpwindBiased(order=3)`.)
+
 ### Iteration 2 — B1 DONE (WENO9 momentum wired) — 2026-06-15
 - **B1 COMPLETE + committed** (`feat(ocean): wire WENO9 vector-invariant momentum advection`).
   `momentum_advection="weno9"` now selectable. Verified the existing weno5/7 path FIRST
