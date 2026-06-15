@@ -47,6 +47,8 @@ PANELS = [
      "higher = >6-device unlock (sub-face tiling)", None),
     ("Cube 3D-PE dycore ops np24-tiled", "ops3d_np24",
      "higher = more fv3_hydrostatic ops sub-face-tiled", None),
+    ("Ocean RK3 momentum overhead (ms)", "rk3_overhead_ms",
+     "lower better (per-step compute; reuse frozen EOS/pressure)", None),
 ]
 
 
