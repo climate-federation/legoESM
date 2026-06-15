@@ -29,14 +29,16 @@ Usage
         partitions, local_fields, entity="cell")
 
 .. note::
-   **The batched path is OPT-IN pending a performance fix.**  Model
-   steps default to the per-entity exchanges; ``batched_halo_exchange``
-   is selected only via ``LEGOESM_VORONOI_BATCHED_HALO=1``
-   (``voronoi_mpi._USE_BATCHED_HALO``).  Despite posting fewer
-   messages it is an ~18x CPU runtime regression at I5 np=8 f32
-   (435.9 vs 24.1 ms/step; job 8457273, 2026-06-10) — suspected
-   pack/scatter full-array copies per field per exchange.  TODO:
-   profile pack/exchange/unpack before re-defaulting.
+   **The batched path is now the DEFAULT** (opt-OUT via
+   ``LEGOESM_VORONOI_BATCHED_HALO=0``; ``voronoi_mpi._USE_BATCHED_HALO``).
+   The historical ~18x CPU regression (435.9 vs 24.1 ms/step, I5 np8 f32,
+   job 8457273, 2026-06-10 — per-field/per-neighbour scatter copies) was
+   FIXED by the one-scatter pack/unpack (one whole-field scatter; see
+   :func:`unpack_batched_recvs`).  Re-measured 2026-06-15: batched is
+   FASTER than legacy at every benchmarked size — I4/I5 f32 np8 -12%/-5%
+   (job 8488057), I6 f64 np8/np16 -4.6%/-3.5% (job 8488023).  Pack/unpack
+   is pure gather/reshape/concat/split/scatter, so both paths are
+   bit-identical (the legacy path is kept as the parity reference + fallback).
 """
 
 from __future__ import annotations
@@ -481,12 +483,17 @@ def batched_halo_exchange(edge_fields, cell_fields,
     (vs one per neighbor per entity exchange), via the AD-safe
     ``custom_vjp`` sendrecv wrapper — fully reverse-mode differentiable.
     Pack/unpack are linear gather/scatter, so results are bit-identical
-    to the per-entity exchanges and the collective schedule is uniform:
-    every rank walks its sorted union-neighbor list with matching
-    (tag, size) pairs.
+    to the per-entity exchanges for the production same-compute-dtype
+    state (T, p_s, and tracers share the compute dtype; the legacy path's
+    ``concatenate``/``stack`` of a hypothetical MIXED-dtype T/p_s could
+    type-promote where the batched dtype-grouping would not — not a
+    production config).  The collective schedule is uniform: every rank
+    walks its sorted union-neighbor list with matching (tag, size) pairs.
 
-    OPT-IN in production (``LEGOESM_VORONOI_BATCHED_HALO=1``) pending
-    the 18x CPU runtime-regression fix — see the module docstring.
+    DEFAULT in production (opt-OUT via ``LEGOESM_VORONOI_BATCHED_HALO=0``);
+    the historical 18x CPU regression was fixed by the one-scatter
+    pack/unpack and re-measured faster at all sizes — see the module
+    docstring.
 
     Parameters
     ----------
