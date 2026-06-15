@@ -203,6 +203,30 @@ dissipation), converges ~half the resolution of others (W9V@7km ≈ others@3.5km
 
 ## PROGRESS LOG (append every iteration — newest on top)
 
+### Iteration 11 — PHASE 3: R1 2D-turbulence harness DONE (review caught it was INERT) — 2026-06-15
+- **R1 COMPLETE + adversarially reviewed + FIXED + committed** (`ocean/experiments/silvestri_turbulence_2d.py`).
+  A standalone Cartesian doubly-periodic 2D NS vorticity solver driving the canonical WENO kernels
+  (`weno_reconstruct_split`) for the §4 comparison — §4 is a Cartesian box (different geometry from
+  the lat-lon channel), so per the plan the scheme is tested in a harness, not the model.
+  SSP-RK3, spectral Poisson, Ishiko IC, `SILVESTRI_TURB2D_SCHEMES` (DNS/Leith1/Leith2/W5D/W9D/W5V/W9V).
+- **Adversarial review caught a BLOCKER + 2 SHOULD-FIX — the harness as first committed was INERT.**
+  (a) BLOCKER: the Ishiko IC was ~9 orders too weak + resolution-dependent (no FFT/shell
+  normalization) and `np.real()` halved its energy → the flow sat in linear viscous decay, the
+  WENO-vs-Leith-vs-DNS comparison NULL. (b) spectral i·k velocity had ~10% discrete-FV divergence →
+  constant-ζ spuriously sourced. (c) no point→cellavg → W9V capped to W5V. ALL FIXED: Hermitian
+  phases + renormalize to continuum enstrophy (8.77, T_e 0.33, resolution-independent); centered-FD
+  velocity from spectral ψ (FV-div-free); point_to_cellavg before WENO. Post-fix the review's own
+  numerical checks confirm the paper's §4 behavior (WENO/DNS conserve energy, Leith over-damps,
+  WENO dissipates enstrophy) — now reflected in the tests.
+- **PROCESS: the review caught a defect my unit tests entirely missed** (they checked the spectrum
+  PEAK, not amplitude/variance). Lesson reinforced: test the PHYSICAL invariant (here: resolution-
+  independent enstrophy + T_e), not just a shape proxy. 14 tests green.
+- **NEXT: R3 (2D-turb driver) + R5 (comparison plotter).** R3: run a scheme on N∈{64,128,256,1024}
+  + DNS at 1024 (4096 is the paper's but expensive — note the cap), to t=6 (~18 turnovers), save
+  KE(t)/enstrophy(t) + isotropic spectra at t=3.6 (reuse `ocean/diagnostics.py` isotropic spectra).
+  R5: Figs 4-5 (2D) + 8-10 (jet) from the saved npz. Then PHASE 4-5 (the run matrices) + PHASE 6
+  (report). **B5b still required before the QG2 jet-matrix case.**
+
 ### Iteration 10 — PHASE 3: R4 baroclinic-jet driver DONE (replaced a stale parallel driver) — 2026-06-15
 - **R4 COMPLETE + smoke-tested + committed** (`scripts/run/run_silvestri_baroclinic_jet.py`).
   IMPORTANT: a STALE pre-recipe driver already existed at that path (Jun-9, unreferenced) that
