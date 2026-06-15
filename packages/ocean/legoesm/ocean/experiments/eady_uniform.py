@@ -26,7 +26,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, NamedTuple, Tuple
 
 from legoesm import constants
 from legoesm.constants import g, Omega
@@ -479,6 +479,124 @@ def create_forcings(grid_type: str, grid, config: EadyUniformConfig = None):
         bottom_drag=BottomDragConfig(scheme="none"),
         convection=OceanConvectionConfig(scheme="none"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Corrected eddy-resolving recipe (Phase-G parts) — the AUDITED rebuild
+# ---------------------------------------------------------------------------
+
+class EadyUniformRecipe(NamedTuple):
+    """All the pieces needed to run the Eady-uniform experiment — the canonical
+    recipe shape (mirrors :class:`ocean.fidelity.veros_acc_recipe.ACCRecipe`):
+
+    - ``model_config``: LatLonCGridOceanConfig with the corrected eddy-resolving
+      dycore stack.
+    - ``physics_config``: OceanPhysicsConfig (vertical mixing OFF — adiabatic BCI).
+    - ``grid``: regional lat-lon C-grid channel (periodic-x, solid N/S walls).
+    - ``z_coord``: z-star vertical coordinate.
+    - ``wall_mask``: N/S wall mask from the channel grid (the Eady analogue of
+      ACCRecipe.land_mask).
+    - ``initial_state``: thermal-wind-balanced state with the seeded perturbation.
+
+    Built by :func:`build_eady_uniform_setup`; the ``EadyUniformConfig`` is the
+    recipe SPEC (pure config selecting blocks + physical params).
+    """
+    model_config: "object"          # LatLonCGridOceanConfig
+    physics_config: "object"        # OceanPhysicsConfig
+    grid: "object"                  # LatLonGrid
+    z_coord: "object"               # OceanZStarCoordinate
+    wall_mask: "object"             # jnp.ndarray
+    initial_state: "object"         # LatLonCGridOceanState
+
+
+def build_eady_uniform_setup(*, n_lat: int, n_lon: int,
+                             config: "EadyUniformConfig" = None, nlev: int = 20,
+                             c_smag: float = None, c_leith: float = 0.0,
+                             c_smag_lap: float = 0.0, b_h: float = 0.0,
+                             smag_cfl_safety: float = 0.0, a_h: float = 0.0,
+                             momentum_advection: str = "weno5",
+                             ke_gradient_scheme: str = "centered",
+                             tracer_advection: str = "weno5",
+                             barotropic_solver: str = "implicit_cn"):
+    """Assemble the Eady-uniform model with the CURRENT best-practice dycore
+    stack for an eddy-resolving baroclinic-instability run.
+
+    The legacy matrix path (``run_eady_uniform`` → ``_create_ocean_setup``) wires
+    an April-2026 baseline: explicit-substep free-surface barotropic, forward-Euler
+    outer + Euler tracers, vector-invariant momentum with the Hollingsworth-prone
+    *centered* KE gradient, TVD tracers, a fixed (non-grid-scaling) biharmonic, the
+    adcroft PGF, and a force-enabled KPP layer — none of the Phase-G improvements.
+    Several of those are active eddy-resolving instability sources, so a failure
+    there indicts the config, not the dycore.
+
+    This builder selects the corrected canonical blocks (each ↔ the audit finding
+    it fixes):
+
+      * ``barotropic_solver="implicit_cn"``  — Crank-Nicolson Helmholtz, no 2Δt
+        substep aliasing (vs explicit_substep barotropic grid-noise).
+      * ``tracer_advection="weno5"`` + ``momentum_advection="weno5"`` — sharp,
+        low-diffusion eddies; FLUX-form momentum sidesteps the Hollingsworth–
+        Källberg instability of vector-invariant + centered KE gradient.
+      * ``tracer_time_integrator="rk3"`` + ``outer_integrator="ab2"`` — accurate
+        advection of the eddy field (vs forward-Euler smearing).
+      * ``pgf_scheme="smc03"`` — Shchepetkin-McWilliams density-Jacobian PGF, low
+        error on the tilted isopycnals that ARE the Eady problem (vs adcroft).
+      * ``A_h=0, B_h=0, C_smag`` — scale-aware biharmonic Smagorinsky ONLY; drops
+        the fixed ``B_h`` that does not scale with Δx across a resolution sweep.
+      * vertical mixing OFF (``create_forcings`` → ``scheme="none"``); KPP is wrong
+        physics for an adiabatic BCI. GM/Redi OFF (eddies are resolved).
+      * linear EOS (analytic Eady), bottom drag, spherical metrics — unchanged.
+
+    Returns an :class:`EadyUniformRecipe` (model_config, physics_config, grid,
+    z_coord, wall_mask, initial_state) — the canonical recipe shape.
+    """
+    from legoesm.grids.latlon import create_regional_latlon_grid
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.eos import LinearEOSConfig
+
+    if config is None:
+        config = EadyUniformConfig()
+
+    grid, wall_mask = create_regional_latlon_grid(
+        n_lat, n_lon, config.lat_south, config.lat_north,
+        lon_west=config.lon_west, lon_east=config.lon_east, periodic_x=True)
+    z_coord = create_ocean_z_star(n_levels=nlev, H_max=config.H_max)
+    physics = create_forcings("latlon_channel", grid, config)   # vertical mix none → KPP OFF
+
+    model_config = LatLonCGridOceanConfig(
+        physics=physics,
+        # --- corrected eddy-resolving numerics (track-selectable) ---
+        # WENO5 track: momentum_advection="weno5" (flux-form, no KE gradient).
+        # NEMO-like track: momentum_advection="vector_invariant" +
+        #   ke_gradient_scheme="hollingsworth" (NEMO nn_dynkeg=1).
+        barotropic_solver=barotropic_solver,
+        tracer_advection=tracer_advection,
+        momentum_advection=momentum_advection,
+        ke_gradient_scheme=ke_gradient_scheme,
+        tracer_time_integrator="rk3",
+        outer_integrator="ab2",
+        pgf_scheme="smc03",
+        # --- scale-aware dissipation (tunable for eddy-resolving) ---
+        # C_smag = biharmonic Smagorinsky (scale-selective); C_leith = Leith
+        # (enstrophy-cascade-aware); both grid-aware so they scale across a
+        # resolution sweep. c_smag_lap/b_h available for extra grid-scale control.
+        A_h=a_h, B_h=b_h,
+        C_smag=(config.C_smag if c_smag is None else c_smag),
+        C_leith=c_leith, C_smag_lap=c_smag_lap, smag_cfl_safety=smag_cfl_safety,
+        A_v=config.A_v, K_v=config.K_v,
+        bottom_drag_r=config.bottom_drag_coeff,
+        # --- analytic Eady EOS; mesoscale parameterization OFF ---
+        eos="linear",
+        eos_linear=LinearEOSConfig(
+            alpha_T=config.alpha_T, rho_ref=config.rho_0,
+            T_ref=config.T_ref_C, S_ref=config.S_uniform),
+        gm_redi=None,
+    )
+    initial_state = create_initial_conditions("latlon_channel", grid, z_coord, config)
+    return EadyUniformRecipe(
+        model_config=model_config, physics_config=physics, grid=grid,
+        z_coord=z_coord, wall_mask=wall_mask, initial_state=initial_state)
 
 
 # ---------------------------------------------------------------------------
